@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
+  archiveToastStep,
   artifactLooksBlank,
   deleteEligibility,
   deleteOutcome,
@@ -85,6 +86,31 @@ test('归档集合差分只报新增,首帧基线不提示', () => {
   assert.deepEqual(diffArchived(undefined, ['x', 'y']), [])
   assert.deepEqual(diffArchived(['x'], ['x', 'y', 'z']), ['y', 'z'])
   assert.deepEqual(diffArchived(['x', 'y'], ['x']), [])
+})
+
+test('Toast 差分:pending 空态与基线首装不提示,ready 后新增才提示', () => {
+  let previous
+  let step = archiveToastStep(previous, { phase: 'pending', archivedSessionIds: [] })
+  previous = step.state
+  assert.deepEqual(step.added, [])
+  // 基线安装:存量 29 个不算新增(模型 pending 期发射,notify 时序不定,两种相位都守卫)
+  step = archiveToastStep(previous, { phase: 'pending', archivedSessionIds: ['a', 'b'] })
+  previous = step.state
+  assert.deepEqual(step.added, [])
+  step = archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b'] })
+  previous = step.state
+  assert.deepEqual(step.added, [])
+  // ready 建立后:增量帧触发提示
+  step = archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b', 'c'] })
+  assert.deepEqual(step.added, ['c'])
+})
+
+test('Toast 差分:订阅即 ready(无 pending 帧)时首帧守卫仍生效', () => {
+  let previous
+  const step = archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a'] })
+  previous = step.state
+  assert.deepEqual(step.added, [])
+  assert.deepEqual(archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b'] }).added, ['b'])
 })
 
 test('非归档会话拒绝删除', () => {

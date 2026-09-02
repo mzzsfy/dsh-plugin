@@ -46,6 +46,20 @@ export function diffArchived(previousIds, nextIds) {
   return nextIds.filter((id) => !previous.has(id))
 }
 
+/**
+ * Toast 差分步进:连续两个 ready 快照才计新增。
+ * 模型订阅即时发射 pending 空态,基线(存量归档)成为第二帧;基线是重连权威而非
+ * 归档事件,任一单帧都无法与事件区分,故以「上一帧也是 ready」为差分启用条件,
+ * 启动与重连首装不误报,重连基线携带的离期新增仍会提示。
+ * client.js 有一份镜像实现(单文件自包含无法跨文件 require),修改需两处同步。
+ */
+export function archiveToastStep(previous, snapshot) {
+  const ready = Boolean(snapshot && snapshot.phase === 'ready')
+  const ids = (snapshot && snapshot.archivedSessionIds) || []
+  const added = previous !== undefined && previous.ready && ready ? diffArchived(previous.ids, ids) : []
+  return { state: { ready, ids }, added }
+}
+
 /** 删除资格:仅已归档会话,其余拒绝(竞态防护的 client 前置与 host 权威共用判定)。 */
 export function deleteEligibility({ archivedIds, sessionId }) {
   return archivedIds.includes(sessionId)
