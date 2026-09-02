@@ -738,11 +738,17 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 音效描述:试听回执指明实际播放对象,映射失效回落内置时可见
+      function describeSound(sound) {
+        return sound.kind === 'custom' ? '上传音效 ' + sound.id : '内置 ' + (TONE_LABELS[sound.name] || sound.name)
+      }
+
       // 分类试听:播放该分类当前实际生效的音效(自定义 / 内置 / 失效回落),与通知真实发声同语义
       function previewCategory(category) {
         const sound = resolveSound(category, mapping, uploadedIds)
         playAudible(sound).then((result) => {
           if (!result.ok) patch(CATEGORY_LABELS[category] + ' 试听未播放:' + result.reason, 'error')
+          else patch('已试听 ' + CATEGORY_LABELS[category] + ':' + describeSound(sound))
         })
       }
 
@@ -802,10 +808,12 @@ window.__ModuleLoader__.load({
           h('div', { className: 'tn-row' },
             h('button', {
               className: 'tn-btn',
+              // 测试声音读当前映射:播放任务完成分类实际生效的音效,而非固定参考音
               onClick: () => {
-                previewBuiltin(DEFAULT_TONES.completed).then((result) => {
+                const sound = resolveSound('completed', mapping, uploadedIds)
+                playAudible(sound).then((result) => {
                   patch(result.ok
-                    ? '测试声音已触发,若未听到请检查系统音量与输出设备'
+                    ? '测试声音已触发:' + describeSound(sound) + ',若未听到请检查系统音量与输出设备'
                     : '测试声音未播放:' + result.reason, result.ok ? 'ok' : 'error')
                 })
               },
