@@ -607,8 +607,12 @@ function RowEditor(props) {
         const roots = new Map()
         let piAiModelIds = new Set()
         let piAiRoutes = new Set()
-        let injectEverSucceeded = false
+        // 破坏闩锁:锚点破坏一经判定即置位,面板在模型页常驻,
+        // 直到行内注入成功才解除——不随编辑器收起而丢失入口
+        let anchorsLatched = false
         let scanPending = false
+        // 轮次序号:describe 异步返回时已可能是过期快照,过期轮次不得改状态
+        let reconcileSeq = 0
 
         function docInfo() {
           const outlet = document.querySelector('[data-slot="settings.section"]')
@@ -692,15 +696,22 @@ function RowEditor(props) {
           if (panel !== null && !panel.container.isConnected) disposePanel()
           const info = docInfo()
           if (info === null || !info.titleMatched) { hidePanel(); return }
-          // S5:全部行均已挂载时零 RPC 早退,消灭注入容器自身触发的自激励扫描
+          // S5:全部行均已挂载时零 RPC 早退,消灭注入容器自身触发的自激励扫描;
+          // 全挂载即注入健康,必须复位闩锁并移除回退面板,否则恢复永远无法解除闩锁
           if (info.idInputs.length > 0 && info.idInputs.every((input) => {
             const entry = entryOf(input)
             return entry !== null && entry.querySelector(':scope > .mce-inline-root') !== null
-          })) return
+          })) {
+            anchorsLatched = false
+            disposePanel()
+            return
+          }
           ensureStyle()
+          const seq = ++reconcileSeq
           void (async () => {
             try {
               const value = unwrapResult(await settings.describe())
+              if (seq !== reconcileSeq) return
               const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
               if (ns === undefined) return
               const providers = ns.value && typeof ns.value === 'object' ? ns.value.providers : {}
@@ -714,17 +725,16 @@ function RowEditor(props) {
                 if (mountRow(settings, idInput)) mounted += 1
               }
               if (mounted > 0) {
-                injectEverSucceeded = true
+                anchorsLatched = false
                 disposePanel()
               } else if (anchorsBroken({
                 titleMatched: info.titleMatched,
                 hasEditor: info.hasEditor,
                 modelIdInputCount: info.idInputs.length,
               })) {
-                ensurePanel()
-              } else {
-                hidePanel()
+                anchorsLatched = true
               }
+              if (anchorsLatched) ensurePanel(); else hidePanel()
             } catch { /* describe 失败:保持现状,下次 mutation 重试 */ }
           })()
         }
