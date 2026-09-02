@@ -372,6 +372,7 @@ function CapabilityCard(props) {
   useEffect(() => { void load() }, [])
 
   function selectRoute(nextRoute) {
+    const prevRoute = state.route
     stashDrafts(bucketsRef.current, state.route, state.drafts)
     patch({ route: nextRoute, phase: 'ready' })
     void (async () => {
@@ -387,6 +388,8 @@ function CapabilityCard(props) {
         const drafts = restoreDrafts(bucketsRef.current, nextRoute) || draftsFromModels(models)
         patch({ models, drafts, traces: detectCompetitorTraces(models) })
       } catch (error) {
+        // describe 失败:回滚路由,models/drafts 仍是旧路由数据,避免旧草稿对新基线静默写回
+        patch({ route: prevRoute })
         setNotice({ kind: 'error', text: '读取 ' + nextRoute + ' 失败:' + (error && error.message ? error.message : String(error)) })
       }
     })()
@@ -703,7 +706,7 @@ function RowEditor(props) {
             return entry !== null && entry.querySelector(':scope > .mce-inline-root') !== null
           })) {
             anchorsLatched = false
-            disposePanel()
+            hidePanel()
             return
           }
           ensureStyle()
@@ -726,13 +729,15 @@ function RowEditor(props) {
               }
               if (mounted > 0) {
                 anchorsLatched = false
-                disposePanel()
+                hidePanel()
               } else if (anchorsBroken({
                 titleMatched: info.titleMatched,
                 hasEditor: info.hasEditor,
                 modelIdInputCount: info.idInputs.length,
               })) {
                 anchorsLatched = true
+              } else {
+                anchorsLatched = false
               }
               if (anchorsLatched) ensurePanel(); else hidePanel()
             } catch { /* describe 失败:保持现状,下次 mutation 重试 */ }
