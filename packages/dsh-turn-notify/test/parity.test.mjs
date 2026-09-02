@@ -60,9 +60,11 @@ defineClaimScenarios('[core.mjs decideClaim] ', coreDecideClaim)
 defineClaimScenarios('[client.js decideClaim] ', clientDecideClaim)
 
 function defineSoundScenarios(prefix, resolve) {
-  test(prefix + '音效解析对照:自定义命中 / 失效与未配置回落', () => {
-    const mapping = { completed: 'snd-9', error: 'gone' }
+  test(prefix + '音效解析对照:自定义命中 / 内置音名命中 / 失效与未配置回落', () => {
+    const mapping = { completed: 'snd-9', error: 'gone', interrupted: 'bell' }
     assert.deepEqual(resolve({ category: 'completed', mapping, uploadedIds: ['snd-9'] }), { kind: 'custom', id: 'snd-9' })
+    // 映射值为内置音名时必须播放该内置音,而非回落分类默认
+    assert.deepEqual(resolve({ category: 'interrupted', mapping, uploadedIds: [] }), { kind: 'builtin', name: 'bell' })
     assert.deepEqual(resolve({ category: 'completed', mapping, uploadedIds: [] }), { kind: 'builtin', name: 'up-arpeggio' })
     const fallback = resolve({ category: 'error', mapping, uploadedIds: ['snd-9'] })
     assert.equal(fallback.kind, 'builtin')
