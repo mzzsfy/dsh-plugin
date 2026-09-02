@@ -47,13 +47,14 @@ window.__ModuleLoader__.load({
       tick: { type: 'square', notes: [[1567.98, 0.04], [1567.98, 0.04]] },
       'down-slide': { type: 'sawtooth', notes: [[392, 0.15], [311.13, 0.15], [233.08, 0.3]] },
     }
+    /* LOGIC-BEGIN */
+    // 纯逻辑段:与 src/core.mjs 保持行为一致,由 parity 测试保证。
+    // localStorage 不可用时认领退化为"本窗口直接发声",状态记录在 storageState。
+
     const TONE_LABELS = {
       'up-arpeggio': '上行琶音', bell: '铃铛', duo: '清脆双音', 'alarm-square': '警报方波',
       'low-hum': '低鸣', 'double-ping': '双音提示', tick: '嘀嗒', 'down-slide': '低音下滑',
     }
-    /* LOGIC-BEGIN */
-    // 纯逻辑段:与 src/core.mjs 保持行为一致,由 parity 测试保证。
-    // localStorage 不可用时认领退化为"本窗口直接发声",状态记录在 storageState。
 
     const DEFAULT_TONES = {
       completed: 'up-arpeggio', error: 'alarm-square', interrupted: 'alarm-square',
@@ -171,10 +172,13 @@ window.__ModuleLoader__.load({
 
     function markDone(id) { localSet(KEY_DONE + id, '1') }
 
-    // 分类音效解析:映射命中已上传 id 用自定义,否则回落内置默认
+    // 分类音效解析:映射命中已上传 id 用自定义,指向内置音名用该内置,否则回落内置默认
     function resolveSound(category, mapping, uploadedIds) {
       const wanted = (mapping || {})[category]
-      if (typeof wanted === 'string' && wanted.length > 0 && uploadedIds.indexOf(wanted) >= 0) return { kind: 'custom', id: wanted }
+      if (typeof wanted === 'string' && wanted.length > 0) {
+        if (uploadedIds.indexOf(wanted) >= 0) return { kind: 'custom', id: wanted }
+        if (Object.prototype.hasOwnProperty.call(TONE_LABELS, wanted)) return { kind: 'builtin', name: wanted }
+      }
       return { kind: 'builtin', name: DEFAULT_TONES[category] }
     }
 
