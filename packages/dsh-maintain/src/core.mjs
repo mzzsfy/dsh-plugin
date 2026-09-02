@@ -93,28 +93,10 @@ export function buildUpgradeCommand({ template, tag }) {
   return text.split(TAG_PLACEHOLDER).join(tag)
 }
 
-// 升级与重启动作的同源校验:来源(Origin 优先,退 Referer)的 host 必须与请求 Host 一致。
-// 插件 exact 路由不在宿主 web 鉴权 fence 内,此校验是动作类路由的唯一跨站防线。
-export function assertSameOrigin({ origin, referer, host }) {
-  const requestHost = typeof host === 'string' ? host.trim().toLowerCase() : ''
-  if (requestHost.length === 0) throw new Error('请求缺少 Host,拒绝执行')
-  const source = typeof origin === 'string' && origin.trim().length > 0 ? origin.trim() : referer
-  if (typeof source !== 'string' || source.trim().length === 0) {
-    throw new Error('请求缺少 Origin 与 Referer,拒绝执行')
-  }
-  let parsed
-  try {
-    parsed = new URL(source)
-  } catch {
-    throw new Error('请求来源头无法解析,拒绝执行')
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('请求来源协议无效,拒绝执行')
-  }
-  if (parsed.host.toLowerCase() !== requestHost) {
-    throw new Error('请求来源与 Host 不一致,拒绝执行')
-  }
-  return true
+// 重启后是否整页刷新:经历失联后恢复,或宿主实例标识(pid)变化(停机时长小于重启轮询间隔的快速重启零失联),两者都是宿主已重启的可靠信号。
+export function shouldReloadAfterRestart({ lost, pidBefore, pidAfter }) {
+  if (lost) return true
+  return typeof pidBefore === 'number' && typeof pidAfter === 'number' && pidBefore !== pidAfter
 }
 
 // 拉取 dist-tags 轻量端点;fetchImpl 注入便于单测,错误一律抛出由调用方决定保留上次结果。

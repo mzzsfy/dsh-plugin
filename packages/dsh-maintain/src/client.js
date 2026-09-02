@@ -10,7 +10,7 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useRef } = React
 
 const CSS = [
-  '.dm-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; }',
+  '.dm-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; --dm-warn:#d97706; }',
   '.dm-head { display:flex; align-items:center; gap:8px; }',
   '.dm-head__title { font-weight:600; font-size:14px; }',
   '.dm-head__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
@@ -28,7 +28,7 @@ const CSS = [
   '.dm-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
   '.dm-error { color:var(--dsw-alias-state-error-primary, #d43a3a); font-size:12px; }',
   '.dm-ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
-  '.dm-warn { color:#d97706; }',
+  '.dm-warn { color:var(--dm-warn); }',
   '.dm-badge { font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
   '  color:var(--dsw-alias-label-secondary); }',
   '.dm-badge--new { color:var(--dsw-alias-state-error-primary, #d43a3a); border-color:var(--dsw-alias-state-error-primary, #d43a3a); }',
@@ -38,6 +38,7 @@ const CSS = [
   '.dm-link { color:var(--dsw-alias-label-secondary); font-size:12px; }',
   '.dm-notice { font-size:12px; padding:6px 10px; border-radius:6px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
   '.dm-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
+  '.dm-notice--warn { color:var(--dm-warn); border-color:var(--dm-warn); }',
   '.dm-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
   '.dm-pre { margin:0; font-family:ui-monospace, Consolas, monospace; font-size:11px; line-height:1.6; white-space:pre-wrap;',
   '  word-break:break-all; color:var(--dsw-alias-label-secondary); max-height:120px; overflow:auto; }',
@@ -49,6 +50,8 @@ const CHANNEL_URL = '/api/maintain/channel'
 const UPGRADE_URL = '/api/maintain/upgrade'
 const RESTART_URL = '/api/maintain/restart'
 const POLL_WHILE_UPGRADING_MS = 2 * 1000
+const RESTART_POLL_MS = 1 * 1000
+const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
 
 const VERDICT_OUTDATED = 'outdated'
@@ -115,12 +118,12 @@ function VersionCard(props) {
       h('span', { className: 'dm-spacer' }),
       h('button', {
         className: 'dm-btn',
-        disabled: props.busy.refresh,
+        disabled: props.busy.refresh || props.restarting,
         onClick: props.onRefresh,
       }, props.busy.refresh ? '检查中…' : '刷新'),
       h('button', {
         className: 'dm-btn',
-        disabled: props.busy.upgrade || (status.upgrade && status.upgrade.running),
+        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running),
         onClick: props.onUpgrade,
       }, props.upgradeArmed ? '确认升级' : '升级'),
     ),
@@ -131,7 +134,7 @@ function VersionCard(props) {
             className: 'dm-select',
             value: tagNames.indexOf(status.channel) >= 0 ? status.channel : tagNames[0],
             onChange: (e) => props.onChannel(e.target.value),
-            disabled: props.busy.channel,
+            disabled: props.busy.channel || props.restarting,
           }, tagNames.map((name) => h('option', { key: name, value: name }, name + (tags[name] ? '  (' + tags[name] + ')' : ''))))
         : h('span', { className: 'dm-meta' }, status.channel + '(通道表未就绪)'),
       checked ? h('span', { className: 'dm-meta' }, '上次检查 ' + checked) : null,
@@ -165,6 +168,7 @@ function UpgradeCard(props) {
           h('span', { className: 'dm-spacer' }),
           last.ok ? h('button', {
             className: 'dm-btn',
+            disabled: props.restarting,
             onClick: props.onRestart,
           }, props.restartArmed ? '确认重启' : '重启宿主') : null,
         )
@@ -183,14 +187,14 @@ function OpsCard(props) {
     h('div', { className: 'dm-row' },
       h('button', {
         className: 'dm-btn dm-btn--danger',
-        disabled: !status.canRestart,
+        disabled: !status.canRestart || props.restarting,
         onClick: props.onRestart,
       }, props.armed ? '确认重启' : '重启宿主'),
       !status.canRestart ? h('span', { className: 'dm-meta' }, '当前启动方式不支持就地重启') : null,
     ),
     h('div', { className: 'dm-meta' },
       '重启依赖进程管理器(pm2 / systemd / nssm / Docker 等)自动拉起;手动终端启动的进程不会自动恢复。',
-      '重启完成后请手动刷新页面。运行中的 agent 将被中断,会话已持久化,重开后可 resume。'),
+      '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。运行中的 agent 将被中断,会话已持久化,重开后可 resume。'),
   )
 }
 
@@ -200,7 +204,11 @@ function MaintainApp() {
   const [busy, setBusy] = useState({})
   const [upgradeArmed, setUpgradeArmed] = useState(false)
   const [restartArmed, setRestartArmed] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const timerRef = useRef(null)
+  const restartLostRef = useRef(false)
+  const restartPidRef = useRef(null)
+  const restartPendingRef = useRef(false)
 
   function markBusy(key, value) {
     setBusy((prev) => Object.assign({}, prev, { [key]: value }))
@@ -214,9 +222,9 @@ function MaintainApp() {
 
   useEffect(() => { void load() }, [])
 
-  // 升级进行中每 2 秒轮询;结束后停止。
+  // 升级进行中每 2 秒轮询;结束后停止;重启态暂停(退出窗口的失败不得污染错误提示)。
   useEffect(() => {
-    const running = status !== null && status.upgrade !== null && status.upgrade.running === true
+    const running = !restarting && status !== null && status.upgrade !== null && status.upgrade.running === true
     if (running && timerRef.current === null) {
       timerRef.current = setInterval(() => { void load() }, POLL_WHILE_UPGRADING_MS)
     }
@@ -230,7 +238,33 @@ function MaintainApp() {
         timerRef.current = null
       }
     }
-  }, [status])
+  }, [status, restarting])
+
+  // 重启判定与 core.mjs shouldReloadAfterRestart 同源:client 半区无法 import ESM,修改需两处同步。
+  function shouldReloadAfterRestart(params) {
+    if (params.lost) return true
+    return typeof params.pidBefore === 'number' && typeof params.pidAfter === 'number' && params.pidBefore !== params.pidAfter
+  }
+
+  // 重启确认后轮询状态:退出窗口的请求失败是预期中间态,静默记入 ref 不展示错误;
+  // 失联后恢复或宿主 pid 变化(快速重启零失联)即宿主已重启,整页刷新以加载新版本。
+  useEffect(() => {
+    if (!restarting) {
+      restartLostRef.current = false
+      restartPidRef.current = null
+      return
+    }
+    const timer = setInterval(() => {
+      api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) })
+        .then((next) => {
+          if (shouldReloadAfterRestart({ lost: restartLostRef.current, pidBefore: restartPidRef.current, pidAfter: next ? next.pid : null })) {
+            window.location.reload()
+          }
+        })
+        .catch(() => { restartLostRef.current = true })
+    }, RESTART_POLL_MS)
+    return () => clearInterval(timer)
+  }, [restarting])
 
   function onRefresh() {
     markBusy('refresh', true)
@@ -266,6 +300,7 @@ function MaintainApp() {
   }
 
   function onRestart() {
+    if (restartPendingRef.current) return
     if (!restartArmed) {
       setRestartArmed(true)
       setUpgradeArmed(false)
@@ -273,8 +308,24 @@ function MaintainApp() {
     }
     setRestartArmed(false)
     setError(null)
-    post(RESTART_URL)
-      .catch((restartError) => setError('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError))))
+    restartLostRef.current = false
+    restartPidRef.current = status && typeof status.pid === 'number' ? status.pid : null
+    // 先取实时 status 修正 pid 基线(页面可能经历过一次未经面板感知的宿主重启),失败退回已有快照
+    restartPendingRef.current = true
+    api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) })
+      .then((fresh) => {
+        if (fresh && typeof fresh.pid === 'number') restartPidRef.current = fresh.pid
+      })
+      .catch(() => {})
+      .then(() => {
+        setRestarting(true)
+        return post(RESTART_URL)
+      })
+      .catch((restartError) => {
+        setRestarting(false)
+        setError('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)))
+      })
+      .then(() => { restartPendingRef.current = false })
   }
 
   if (status === null) {
@@ -290,19 +341,22 @@ function MaintainApp() {
       h('span', { className: 'dm-head__title' }, '版本与运维'),
       h('span', { className: 'dm-head__hint' }, '追踪 npm 新版本,一键升级,安全重启'),
     ),
+    restarting ? h('div', { className: 'dm-notice dm-notice--warn' },
+      '重启指令已发送,宿主正在退出;恢复后本页自动刷新,请勿关闭页面。') : null,
     error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null,
     h(VersionCard, {
       status,
       busy,
       upgradeArmed,
       restartArmed,
+      restarting,
       onRefresh,
       onChannel,
       onUpgrade,
       onRestart,
     }),
-    h(UpgradeCard, { status, restartArmed, onRestart }),
-    h(OpsCard, { status, armed: restartArmed, onRestart }),
+    h(UpgradeCard, { status, restartArmed, restarting, onRestart }),
+    h(OpsCard, { status, armed: restartArmed, restarting, onRestart }),
   )
 }
 

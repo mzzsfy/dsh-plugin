@@ -2,8 +2,8 @@
 // 自建而非用宿主 ctx.subprocess:需以假命令真实进程做单测,且行为完全本地可控。
 // 命令模板是含参数的完整 shell 命令串,两端都必须 shell 化执行:Windows 经 cmd.exe
 // (.cmd shim,CVE-2024-27980 加固后 spawn 无 shell 会拒绝 .cmd),POSIX 经 /bin/sh -c
-// (shell:false 会把整串当可执行文件路径,必 ENOENT)。同源校验是动作路由的防线,
-// shell 化不扩大攻击面。
+// (shell:false 会把整串当可执行文件路径,必 ENOENT)。访问控制完全由外层鉴权
+// 插件(dsh-web-startup-auth)负责,shell 化不扩大攻击面。
 
 import { spawn } from 'node:child_process'
 
