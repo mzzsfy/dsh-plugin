@@ -1,0 +1,16 @@
+﻿.*/
+/build/
+dist/
+node_modules/
+/docs/ref
+
+*.http
+.DS_Store
+*.log
+
+# rs 运行时缓存
+.rs-tui/
+
+.worktrees/
+.evo/
+/docs
