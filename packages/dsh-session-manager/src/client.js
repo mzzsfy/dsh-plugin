@@ -11,43 +11,51 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useSyncExternalStore } = React
 
-// 主题令牌走官方 alias 变量并带兜底;中性色用 currentColor 调和,双主题自适应
+// 视觉方案:归档台账——全部取宿主 alias 令牌(双主题自适应,不造色),数据列
+// 用宿主代码字体(会话即文件的档案词汇),签名元素为托盘内的归档轨
 const CSS = [
-  '.sm-panel { display:flex; flex-direction:column; gap:10px; color:inherit; font-size:13px; }',
+  '.sm-panel { display:flex; flex-direction:column; gap:8px; min-width:0; color:var(--dsw-alias-label-primary); font:var(--dsw-font-s-14); }',
   '.sm-head { display:flex; align-items:baseline; gap:8px; }',
-  '.sm-head__title { font-weight:600; font-size:14px; letter-spacing:.01em; }',
-  '.sm-head__count { color:var(--dsw-alias-label-secondary, #8a8f98); font-size:12px; font-variant-numeric:tabular-nums; }',
-  '.sm-head__hint { color:var(--dsw-alias-label-secondary, #8a8f98); font-size:12px; }',
-  '.sm-list { display:flex; flex-direction:column; }',
-  '.sm-row { display:grid; grid-template-columns:minmax(0, 1fr) auto auto auto; align-items:center; gap:12px;',
-  '  padding:7px 10px; border-radius:8px; border-left:2px solid transparent; }',
-  '.sm-row:hover { background:color-mix(in srgb, currentColor 6%, transparent); }',
-  '.sm-row--armed { border-left-color:var(--dsw-alias-state-error-primary, #d43a3a);',
-  '  background:color-mix(in srgb, var(--dsw-alias-state-error-primary, #d43a3a) 8%, transparent); }',
-  '.sm-row--busy { opacity:.5; pointer-events:none; }',
-  '.sm-row__title { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
-  '.sm-row__time, .sm-row__size { color:var(--dsw-alias-label-secondary, #8a8f98); font-size:12px; font-variant-numeric:tabular-nums; }',
-  '.sm-row__error { grid-column:1 / -1; color:var(--dsw-alias-state-error-primary, #d43a3a); font-size:12px; }',
-  '.sm-row__actions { display:flex; gap:4px; justify-content:flex-end; }',
-  '.sm-btn { border:0; background:transparent; color:inherit; cursor:pointer; padding:3px 8px;',
-  '  border-radius:6px; font-size:12px; font-family:inherit; }',
-  '.sm-btn:hover { background:color-mix(in srgb, currentColor 10%, transparent); }',
-  '.sm-btn:disabled { opacity:.45; cursor:default; background:transparent; }',
-  '.sm-btn--danger { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
-  '.sm-btn--confirm { border:1px solid var(--dsw-alias-state-error-primary, #d43a3a); font-weight:600; }',
-  '.sm-empty { padding:18px 10px; text-align:center; color:var(--dsw-alias-label-secondary, #8a8f98); }',
-  '.sm-empty__hint { font-size:12px; margin-top:4px; opacity:.8; }',
-  '.sm-notice { font-size:12px; padding:5px 9px; border-radius:6px; }',
-  '.sm-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a);',
-  '  background:color-mix(in srgb, var(--dsw-alias-state-error-primary, #d43a3a) 8%, transparent); }',
-  '.sm-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55);',
-  '  background:color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a9e55) 8%, transparent); }',
+  '.sm-head__title { font:var(--dsw-font-m-18); }',
+  '.sm-head__count { font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption); font-variant-numeric:tabular-nums; }',
+  '.sm-head__hint { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); }',
+  '.sm-tray { position:relative; background:var(--dsw-alias-bg-module-platform); border-radius:10px; padding:4px 0; }',
+  '.sm-tray::before { content:""; position:absolute; left:15px; top:12px; bottom:12px; width:1px; background:var(--dsw-alias-border-l3); }',
+  '.sm-row { position:relative; display:grid; grid-template-columns:88px minmax(0, 1fr) auto; align-items:center; gap:8px;',
+  '  padding:7px 10px 7px 28px; border-radius:8px; }',
+  '.sm-row::before { content:""; position:absolute; left:13px; top:50%; width:5px; height:5px; margin:-2.5px 0 0;',
+  '  border-radius:50%; background:var(--dsw-alias-border-l4); }',
+  '.sm-row:hover, .sm-row:focus-within { background:var(--dsw-alias-interactive-bg-hover); }',
+  '.sm-row:hover::before, .sm-row:focus-within::before { background:var(--dsw-alias-state-business-primary); }',
+  '.sm-row--armed { background:var(--dsw-alias-interactive-bg-hover-danger); }',
+  '.sm-row--armed::before { background:var(--dsw-alias-state-error-primary); }',
+  '.sm-row--busy { opacity:.45; pointer-events:none; }',
+  '.sm-row__time, .sm-row__size { font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-tertiary); font-variant-numeric:tabular-nums; }',
+  '.sm-row__size { color:var(--dsw-alias-state-error-primary); }',
+  '.sm-row__title { font:var(--dsw-font-s-strong-14); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+  '.sm-row__error { grid-column:2 / -1; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-state-error-primary); }',
+  '.sm-row__actions { display:flex; gap:2px; justify-content:flex-end; opacity:0; transition:opacity 0.12s ease; }',
+  '.sm-row:hover .sm-row__actions, .sm-row:focus-within .sm-row__actions, .sm-row--armed .sm-row__actions { opacity:1; }',
+  '.sm-btn { border:0; background:transparent; cursor:pointer; padding:2px 8px; border-radius:6px;',
+  '  font:var(--dsw-font-xxs-strong-12); color:var(--dsw-alias-label-tertiary); }',
+  '.sm-btn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
+  '.sm-btn--restore:hover { color:var(--dsw-alias-state-business-primary); }',
+  '.sm-btn--danger:hover { color:var(--dsw-alias-state-error-primary); }',
+  '.sm-btn--confirm { color:var(--dsw-alias-state-error-primary); border:1px solid var(--dsw-alias-state-error-primary); }',
+  '.sm-btn--confirm:hover { background:var(--dsw-alias-interactive-bg-hover-danger); }',
+  '.sm-btn:disabled { opacity:.45; cursor:default; background:transparent; color:var(--dsw-alias-label-tertiary); }',
+  '.sm-btn--confirm:disabled { color:var(--dsw-alias-state-error-primary); }',
+  '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
+  '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
+  '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
+  '.sm-notice { font:var(--dsw-font-xxs-12); padding:4px 8px; border-radius:6px; }',
+  '.sm-notice--error { color:var(--dsw-alias-state-error-primary); background:var(--dsw-alias-interactive-bg-hover-danger); }',
+  '.sm-notice--ok { color:var(--dsw-alias-state-success-primary); background:var(--dsw-alias-state-success-tertiary); }',
   '.sm-toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); z-index:60;',
-  '  background:var(--dsw-alias-toast-bg, rgba(22,24,28,0.94)); color:#f0f1f3; font-size:13px;',
-  '  padding:8px 16px; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.3);',
-  '  animation:sm-toast-in 0.18s ease-out; }',
+  '  background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted); font:var(--dsw-font-xs-13);',
+  '  padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2); animation:sm-toast-in 0.18s ease-out; }',
   '@keyframes sm-toast-in { from { transform:translate(-50%, 8px); opacity:0; } to { transform:translate(-50%, 0); opacity:1; } }',
-  '@media (prefers-reduced-motion: reduce) { .sm-toast { animation:none; } }',
+  '@media (prefers-reduced-motion: reduce) { .sm-toast { animation:none; } .sm-row__actions { transition:none; } }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -77,7 +85,10 @@ function fmtTime(ms) {
   if (t !== t || !t) return '—'
   const d = new Date(t)
   const pad = (n) => (n < 10 ? '0' : '') + n
-  return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+  const date = d.getFullYear() === new Date().getFullYear()
+    ? pad(d.getMonth() + 1) + '/' + pad(d.getDate())
+    : d.getFullYear() + '/' + pad(d.getMonth() + 1) + '/' + pad(d.getDate())
+  return date + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
 }
 
 function fmtSize(bytes) {
@@ -134,16 +145,16 @@ function ArchiveRow(props) {
         h('button', { key: 'cancel', className: 'sm-btn', disabled: busy, onClick: props.onDisarm }, '取消'),
       ]
     : [
-        h('button', { key: 'unarchive', className: 'sm-btn', disabled: busy, onClick: props.onUnarchive }, '恢复'),
+        h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onUnarchive }, '恢复'),
         h('button', { key: 'delete', className: 'sm-btn sm-btn--danger', disabled: busy, onClick: props.onDelete }, '删除'),
       ]
   return h('div', {
     className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
-    title: row.title,
   },
-    h('span', { className: 'sm-row__title' }, row.title),
-    h('span', { className: 'sm-row__time' }, fmtTime(row.updatedAt)),
-    confirm && !confirm.error ? h('span', { className: 'sm-row__size' }, fmtSize(confirm.sizeBytes)) : null,
+    armed && confirm && !confirm.error
+      ? h('span', { key: 'meta', className: 'sm-row__size' }, fmtSize(confirm.sizeBytes))
+      : h('span', { key: 'meta', className: 'sm-row__time', title: new Date(row.updatedAt).toLocaleString() }, fmtTime(row.updatedAt)),
+    h('span', { className: 'sm-row__title', title: row.title }, row.title),
     h('div', { className: 'sm-row__actions' }, actions),
     confirm && confirm.error ? h('span', { className: 'sm-row__error' }, confirm.error) : null,
   )
@@ -191,25 +202,26 @@ function SessionManagerApp(props) {
       h('span', { className: 'sm-head__title' }, '会话归档'),
       rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
     ),
-    h('div', { className: 'sm-head__hint' }, '删除进入系统回收站,可还原;恢复把会话放回工作区列表。'),
+    h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原。'),
     notice !== null ? h('div', { className: 'sm-notice sm-notice--' + notice.kind }, notice.text) : null,
-    rows.length === 0
-      ? h('div', { className: 'sm-empty' },
-          h('div', null, '没有已归档的会话'),
-          h('div', { className: 'sm-empty__hint' }, '会话归档后会集中显示在这里'))
-      : h('div', { className: 'sm-list' }, rows.map((row) => h(ArchiveRow, {
-          key: row.id,
-          row,
-          armed: armedId === row.id,
-          busy: busyId === row.id,
-          confirm: confirms[row.id],
-          onUnarchive: () => {
-            void run(row.id, () => api(UNARCHIVE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
-          },
-          onDelete: () => onDelete(row),
-          onConfirm: () => onDelete(row),
-          onDisarm: () => { setArmedId(null); setConfirms({}) },
-        }))),
+    h('div', { className: 'sm-tray' },
+      rows.length === 0
+        ? h('div', { className: 'sm-empty' },
+            h('div', null, '还没有归档的会话'),
+            h('div', { className: 'sm-empty__hint' }, '会话归档后集中显示在这里'))
+        : rows.map((row) => h(ArchiveRow, {
+            key: row.id,
+            row,
+            armed: armedId === row.id,
+            busy: busyId === row.id,
+            confirm: confirms[row.id],
+            onUnarchive: () => {
+              void run(row.id, () => api(UNARCHIVE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
+            },
+            onDelete: () => onDelete(row),
+            onConfirm: () => onDelete(row),
+            onDisarm: () => { setArmedId(null); setConfirms({}) },
+          }))),
   )
 }
 
