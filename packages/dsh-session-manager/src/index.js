@@ -1,8 +1,9 @@
 // dsh-session-manager Host 半区:自动归档评估 + 取消归档 + 删除(回收站)。
-// 评估由 session/created 事件触发;取消归档经 workspace 域 global 直写
-// archivedSessionIds(官方无 unarchive 表面,域写入经 domain/changed 触发
-// workspace.follow 的 archived 帧);删除按失败矩阵执行 locate → trash → detach。
-// 面板数据不在此处:client 侧以 session.list 行与归档集合做交集。
+// 评估由 session/created 事件触发;取消归档与删除后的归档清理经 workspace 域
+// global 直写 archivedSessionIds 并同步注册表进程内快照(官方无 unarchive 表面,
+// 域写入经 domain/changed 触发 workspace.follow 的 archived 帧);删除按失败矩阵
+// 执行 locate → trash → detach → 归档清理。面板数据不在此处:client 侧以
+// session.list 行与归档集合做交集。
 
 import { open, stat } from 'node:fs/promises'
 
@@ -37,6 +38,7 @@ const MESSAGES = {
   running: '运行中的会话不可删除',
   trashFailed: '移入回收站失败',
   partial: '已移入回收站,但移除列表记录失败',
+  archiveCleanup: '已移入回收站,但移除归档记录失败',
 }
 
 const SETTINGS_SCHEMA = z.object({
@@ -129,6 +131,9 @@ export function apply(ctx, config) {
         const running = isSessionRunning({ agents: ctx.get('agents'), sessionId: header.id })
         const located = ctx.get('sessionPersistence') && ctx.get('sessionPersistence').locate(header)
         const activityAt = located && await safeMtime(located.path)
+        // 产物不可读视为已删除,不参与归档:否则删除后的会话(重连前仍在持久层
+        // 列表中)会因超期被重新归档,面板行复活且无法再删
+        if (located && activityAt === 0) continue
         const blank = live ? live.seq === 0 : Boolean(located && await artifactIsBlank(located.path))
         candidates.push({
           id: String(header.id),
@@ -148,16 +153,27 @@ export function apply(ctx, config) {
     })
   })
 
-  // 取消归档:直写 workspace 域 global,无官方 API 可用(已知取舍见 README)。
-  // 先读整份 state 再展开写回,读取与写入之间其他写者可能落盘,存在丢更新竞态;
-  // 官方无读改写原子原语,依赖下次 session/created 评估与归档写回兜底收敛。
-  async function unarchive(sessionId) {
+  // 取消归档:直写 workspace 域 global,无官方 API 可用。注册表把域 global 快照到
+  // 进程内 state 且只在自身写路径同步,直写后必须把快照一并改掉:否则注册表后续
+  // 全量写回(含自动归档)与 workspace.list 重连基线都会复活该 id,官方归档的幂等
+  // 判定也会因旧快照静默跳过。合并 durable 与快照再移除,可自愈历史失同步与清理
+  // 半失败(经取消归档重试即补全),代价是快照中的陈旧 id 会随任一次清理重新落盘,
+  // 可经再次取消归档清除。inject 保证注册表就绪,快照缺失即上游形态变更,loud fail;
+  // 域 global 仅支持整体写回,读改写窗口若与注册表两阶段变更交错,理论上可回退其
+  // pendingMutation/workspaceIds 中间态,下次启动 validateStoredState 将 loud fail,
+  // 窗口极窄且域 API 无原子原语可用,属已知取舍(详见 README)。
+  async function removeArchivedId(sessionId) {
     const domain = ctx.storageDomain.get(WORKSPACE_DOMAIN_NAME)
     if (domain === undefined) throw new Error('workspace 域未打开')
-    const state = domain.global.get()
-    const next = state.archivedSessionIds.filter((id) => String(id) !== sessionId)
-    if (next.length === state.archivedSessionIds.length) return
-    await domain.global.set({ ...state, archivedSessionIds: next })
+    const durable = domain.global.get()
+    const cached = ctx.workspaceRegistry.state
+    if (cached === undefined) throw new Error('workspace 注册表快照不可用')
+    const merged = new Set(durable.archivedSessionIds.map(String))
+    for (const id of cached.archivedSessionIds) merged.add(String(id))
+    if (!merged.delete(String(sessionId))) return
+    const next = { ...durable, archivedSessionIds: [...merged] }
+    await domain.global.set(next)
+    ctx.workspaceRegistry.state = next
   }
 
   const routes = [
@@ -166,7 +182,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectNonPost(req, res)) return
         try {
-          await unarchive(await requireSessionId(req))
+          await removeArchivedId(await requireSessionId(req))
           sendJson(res, 200, { ok: true })
         } catch (error) {
           sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
@@ -242,6 +258,14 @@ export function apply(ctx, config) {
           const detachError = await detachSession(ctx, sessionId)
           if (detachError !== undefined) {
             sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.partial })
+            return
+          }
+          // 归档集合同步清理:残留 id 会让面板行持续可见;detach 失败时不清理,
+          // 保留归档资格供重试
+          try {
+            await removeArchivedId(sessionId)
+          } catch {
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.archiveCleanup })
             return
           }
           sendJson(res, 200, { ok: true })

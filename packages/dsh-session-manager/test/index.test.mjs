@@ -5,6 +5,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtemp, writeFile, utimes } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 // 仅 peer 依赖缺失允许整文件跳过;其余加载失败(src 自身损坏)直接失败,禁止静默 skip
 const indexModule = await import('../src/index.js').catch((error) => {
@@ -18,8 +21,18 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 
-function makeRegistry(archivedIds) {
-  return { archivedSessionIds: archivedIds, list: () => [] }
+function makeRegistry(initialIds) {
+  // 真实注册表契约:archivedSessionIds 是进程内快照的 getter,官方读路径全部经快照
+  const registry = {
+    state: { initialized: true, workspaceIds: [], archivedSessionIds: initialIds },
+    list: () => [],
+    archiveCalls: [],
+    archiveSession: async (id) => { registry.archiveCalls.push(String(id)) },
+  }
+  Object.defineProperty(registry, 'archivedSessionIds', {
+    get: () => registry.state.archivedSessionIds,
+  })
+  return registry
 }
 
 // workspace 域句柄:null 表示域未打开(get 返回 undefined)
@@ -38,8 +51,9 @@ function makeDomain(initialIds) {
   return domain
 }
 
-function makeCtx({ archivedIds, headers, agents, domain }) {
+function makeCtx({ archivedIds, headers, agents, domain, sessionPersistence }) {
   const routes = []
+  const eventHandlers = {}
   const services = {
     webServer: { register: (route) => routes.push(route) },
     workspaceRegistry: makeRegistry(archivedIds),
@@ -49,8 +63,8 @@ function makeCtx({ archivedIds, headers, agents, domain }) {
   const base = {
     effect: (fn) => fn(),
     inject: (_deps, fn) => fn({ settings: { register: () => ({ resolved: undefined }) } }),
-    get: (name) => ({ agents }[name]),
-    on: () => {},
+    get: (name) => ({ agents, sessionPersistence }[name]),
+    on: (event, handler) => { eventHandlers[event] = handler },
     logger: undefined,
   }
   const ctx = new Proxy(base, {
@@ -66,8 +80,19 @@ function makeCtx({ archivedIds, headers, agents, domain }) {
   apply(ctx, undefined)
   return {
     handlers: new Map(routes.map((route) => [route.path, route.handler])),
+    eventHandlers,
     domain,
+    registry: services.workspaceRegistry,
   }
+}
+
+async function waitFor(predicate) {
+  const deadline = Date.now() + 2000
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.ok(predicate(), 'waitFor 超时')
 }
 
 function request(sessionId) {
@@ -97,13 +122,16 @@ test('inject 声明覆盖路由层触及的全部宿主服务(cordis 未声明�
 
 test('取消归档路由:从域集合移除目标 id 并写回', skipMissingDeps, async () => {
   const domain = makeDomain(['s1', 's2'])
-  const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
+  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
   const res = response()
   await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { ok: true })
   assert.deepEqual(domain.state.archivedSessionIds, ['s2'])
   assert.equal(domain.writes, 1)
+  // 复活守卫:注册表进程内快照必须同步移除,否则官方全量写回与 list 基线会恢复该 id
+  assert.deepEqual(registry.state.archivedSessionIds, ['s2'])
+  assert.deepEqual(registry.archivedSessionIds, ['s2'])
 })
 
 test('取消归档路由:workspace 域未打开时拒绝', skipMissingDeps, async () => {
@@ -116,13 +144,26 @@ test('取消归档路由:workspace 域未打开时拒绝', skipMissingDeps, asyn
 
 test('取消归档路由:未归档 id 幂等跳过,不产生写回', skipMissingDeps, async () => {
   const domain = makeDomain(['s1'])
-  const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
+  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
   const res = response()
   await handlers.get('/api/session-manager/unarchive')(request('s9'), res)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { ok: true })
   assert.deepEqual(domain.state.archivedSessionIds, ['s1'])
   assert.equal(domain.writes, 0)
+  assert.deepEqual(registry.state.archivedSessionIds, ['s1'])
+})
+
+test('取消归档路由:快照领先域时补全清理(重试路径)', skipMissingDeps, async () => {
+  const domain = makeDomain([])
+  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
+  const res = response()
+  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body, { ok: true })
+  assert.deepEqual(domain.state.archivedSessionIds, [])
+  assert.equal(domain.writes, 1)
+  assert.deepEqual(registry.state.archivedSessionIds, [])
 })
 
 test('info 路由:会话不存在拒绝', skipMissingDeps, async () => {
@@ -175,4 +216,31 @@ test('删除路由:未归档会话在守卫前即拒绝', skipMissingDeps, async
   await handlers.get('/api/session-manager/delete')(request('s1'), res)
   assert.equal(res.status, 400)
   assert.equal(res.body.error, '仅已归档会话可删除')
+})
+
+test('自动归档评估:产物不可读的会话不参与归档(防删除后复活)', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-eval-'))
+  const alivePath = path.join(dir, 'alive.jsonl')
+  await writeFile(alivePath, '{"header":1}\n{"event":0}\n')
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const stale = Date.now() - 30 * DAY_MS
+  await utimes(alivePath, stale / 1000, stale / 1000)
+  const cwd = 'C:\\x'
+  const headers = [
+    { id: 's1', cwd, createdAt: stale },
+    { id: 's2', cwd, createdAt: stale },
+  ]
+  const sessionPersistence = {
+    locate: (header) => header.id === 's1' ? { path: alivePath } : { path: path.join(dir, 'gone.jsonl') },
+  }
+  const { eventHandlers, registry } = makeCtx({
+    archivedIds: [],
+    headers,
+    agents: new Map(),
+    sessionPersistence,
+  })
+  eventHandlers['session/created']({ header: { id: 'trigger', cwd } })
+  await waitFor(() => registry.archiveCalls.length > 0)
+  // s2 产物缺失必须被守卫跳过:否则已删除会话会被重新归档而在面板复活
+  assert.deepEqual(registry.archiveCalls, ['s1'])
 })

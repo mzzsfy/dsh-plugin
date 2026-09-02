@@ -2,6 +2,8 @@
 // 归档快照来自官方 workspace.follow 客户端模型(ctx.get('workspaces')),会话行来自
 // ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),Toast 由 archived
 // 增量帧的集合差分驱动。浏览器半区经 webServer 路由('/api/session-manager/*')访问 Host。
+// 打包为单文件自包含格式,无法跨文件 require;与 src/core.mjs 镜像的纯函数
+// (projectArchiveRows / archiveToastStep)修改需两处同步。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
@@ -9,30 +11,43 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useSyncExternalStore } = React
 
+// 主题令牌走官方 alias 变量并带兜底;中性色用 currentColor 调和,双主题自适应
 const CSS = [
-  '.sm-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; }',
-  '.sm-head { display:flex; align-items:center; gap:8px; }',
-  '.sm-head__title { font-weight:600; font-size:14px; }',
-  '.sm-head__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.sm-btn { cursor:pointer; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); background:transparent;',
-  '  color:inherit; border-radius:6px; padding:3px 10px; font-size:12px; }',
-  '.sm-btn:hover { opacity:0.8; }',
-  '.sm-btn:disabled { opacity:0.45; cursor:default; }',
-  '.sm-btn--danger { color:var(--dsw-alias-state-error-primary, #d43a3a); border-color:var(--dsw-alias-state-error-primary, #d43a3a); }',
-  '.sm-row { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px;',
-  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); flex-wrap:wrap; }',
-  '.sm-row__title { font-weight:600; }',
-  '.sm-row__time { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.sm-row__size { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.sm-spacer { flex:1; }',
-  '.sm-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.sm-notice { font-size:12px; padding:4px 8px; border-radius:6px;',
-  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
-  '.sm-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
-  '.sm-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
+  '.sm-panel { display:flex; flex-direction:column; gap:10px; color:inherit; font-size:13px; }',
+  '.sm-head { display:flex; align-items:baseline; gap:8px; }',
+  '.sm-head__title { font-weight:600; font-size:14px; letter-spacing:.01em; }',
+  '.sm-head__count { color:var(--dsw-alias-label-secondary, #8a8f98); font-size:12px; font-variant-numeric:tabular-nums; }',
+  '.sm-head__hint { color:var(--dsw-alias-label-secondary, #8a8f98); font-size:12px; }',
+  '.sm-list { display:flex; flex-direction:column; }',
+  '.sm-row { display:grid; grid-template-columns:minmax(0, 1fr) auto auto auto; align-items:center; gap:12px;',
+  '  padding:7px 10px; border-radius:8px; border-left:2px solid transparent; }',
+  '.sm-row:hover { background:color-mix(in srgb, currentColor 6%, transparent); }',
+  '.sm-row--armed { border-left-color:var(--dsw-alias-state-error-primary, #d43a3a);',
+  '  background:color-mix(in srgb, var(--dsw-alias-state-error-primary, #d43a3a) 8%, transparent); }',
+  '.sm-row--busy { opacity:.5; pointer-events:none; }',
+  '.sm-row__title { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+  '.sm-row__time, .sm-row__size { color:var(--dsw-alias-label-secondary, #8a8f98); font-size:12px; font-variant-numeric:tabular-nums; }',
+  '.sm-row__error { grid-column:1 / -1; color:var(--dsw-alias-state-error-primary, #d43a3a); font-size:12px; }',
+  '.sm-row__actions { display:flex; gap:4px; justify-content:flex-end; }',
+  '.sm-btn { border:0; background:transparent; color:inherit; cursor:pointer; padding:3px 8px;',
+  '  border-radius:6px; font-size:12px; font-family:inherit; }',
+  '.sm-btn:hover { background:color-mix(in srgb, currentColor 10%, transparent); }',
+  '.sm-btn:disabled { opacity:.45; cursor:default; background:transparent; }',
+  '.sm-btn--danger { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
+  '.sm-btn--confirm { border:1px solid var(--dsw-alias-state-error-primary, #d43a3a); font-weight:600; }',
+  '.sm-empty { padding:18px 10px; text-align:center; color:var(--dsw-alias-label-secondary, #8a8f98); }',
+  '.sm-empty__hint { font-size:12px; margin-top:4px; opacity:.8; }',
+  '.sm-notice { font-size:12px; padding:5px 9px; border-radius:6px; }',
+  '.sm-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a);',
+  '  background:color-mix(in srgb, var(--dsw-alias-state-error-primary, #d43a3a) 8%, transparent); }',
+  '.sm-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55);',
+  '  background:color-mix(in srgb, var(--dsw-alias-state-success-primary, #1a9e55) 8%, transparent); }',
   '.sm-toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); z-index:60;',
   '  background:var(--dsw-alias-toast-bg, rgba(22,24,28,0.94)); color:#f0f1f3; font-size:13px;',
-  '  padding:8px 16px; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.3); }',
+  '  padding:8px 16px; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,0.3);',
+  '  animation:sm-toast-in 0.18s ease-out; }',
+  '@keyframes sm-toast-in { from { transform:translate(-50%, 8px); opacity:0; } to { transform:translate(-50%, 0); opacity:1; } }',
+  '@media (prefers-reduced-motion: reduce) { .sm-toast { animation:none; } }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -81,7 +96,7 @@ function useSnapshot(source) {
   )
 }
 
-// 已归档会话面板行:官方会话行 ∩ 归档集合,按更新时间倒序
+// 已归档会话面板行:官方会话行 ∩ 归档集合,按更新时间倒序(镜像 core.mjs projectArchiveRows)
 function projectRows(listState, archivedIds) {
   const archived = new Set(archivedIds)
   const byId = (listState && listState.byId) || {}
@@ -91,34 +106,55 @@ function projectRows(listState, archivedIds) {
     .sort((left, right) => right.updatedAt - left.updatedAt)
 }
 
+// Toast 差分守卫:连续两个 ready 快照才计新增(镜像 core.mjs archiveToastStep)。
+// 模型订阅即时发射 pending 空态,基线(存量归档)成为第二帧;基线是重连权威而非
+// 归档事件,启动与重连首装不误报。
+function archiveToastStep(previous, snapshot) {
+  const ready = Boolean(snapshot && snapshot.phase === 'ready')
+  const ids = (snapshot && snapshot.archivedSessionIds) || []
+  const added = previous !== undefined && previous.ready && ready
+    ? ids.filter((id) => !previous.ids.includes(id))
+    : []
+  return { state: { ready, ids }, added }
+}
+
 function ArchiveRow(props) {
   const row = props.row
   const armed = props.armed
   const busy = props.busy
   const confirm = props.confirm
-  return h('div', { className: 'sm-row' },
+  const actions = armed
+    ? [
+        h('button', {
+          key: 'confirm',
+          className: 'sm-btn sm-btn--confirm',
+          disabled: busy || !confirm || Boolean(confirm.error),
+          onClick: props.onConfirm,
+        }, '移入回收站'),
+        h('button', { key: 'cancel', className: 'sm-btn', disabled: busy, onClick: props.onDisarm }, '取消'),
+      ]
+    : [
+        h('button', { key: 'unarchive', className: 'sm-btn', disabled: busy, onClick: props.onUnarchive }, '恢复'),
+        h('button', { key: 'delete', className: 'sm-btn sm-btn--danger', disabled: busy, onClick: props.onDelete }, '删除'),
+      ]
+  return h('div', {
+    className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
+    title: row.title,
+  },
     h('span', { className: 'sm-row__title' }, row.title),
     h('span', { className: 'sm-row__time' }, fmtTime(row.updatedAt)),
-    confirm ? h('span', { className: 'sm-row__size' }, fmtSize(confirm.sizeBytes)) : null,
-    confirm && confirm.error ? h('span', { className: 'sm-meta' }, confirm.error) : null,
-    h('span', { className: 'sm-spacer' }),
-    h('button', { className: 'sm-btn', disabled: busy, onClick: props.onUnarchive }, '取消归档'),
-    h('button', {
-      className: 'sm-btn sm-btn--danger',
-      disabled: busy,
-      onClick: props.onDelete,
-    }, armed ? '确认删除(移入回收站)' : '删除'),
+    confirm && !confirm.error ? h('span', { className: 'sm-row__size' }, fmtSize(confirm.sizeBytes)) : null,
+    h('div', { className: 'sm-row__actions' }, actions),
+    confirm && confirm.error ? h('span', { className: 'sm-row__error' }, confirm.error) : null,
   )
 }
 
 function SessionManagerApp(props) {
-  const actions = props.actions
+  const rows = props.rows
   const [notice, setNotice] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [armedId, setArmedId] = useState(null)
   const [confirms, setConfirms] = useState({})
-
-  const rows = projectRows(props.listState, props.archivedIds)
 
   function run(sessionId, action) {
     setBusyId(sessionId)
@@ -151,30 +187,36 @@ function SessionManagerApp(props) {
   }
 
   return h('div', { className: 'sm-panel' },
-    h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'sm-head' },
-      h('span', { className: 'sm-head__title' }, '归档会话'),
-      h('span', { className: 'sm-head__hint' }, '删除仅对已归档会话生效,内容移入系统回收站,可还原'),
+      h('span', { className: 'sm-head__title' }, '会话归档'),
+      rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
     ),
+    h('div', { className: 'sm-head__hint' }, '删除进入系统回收站,可还原;恢复把会话放回工作区列表。'),
     notice !== null ? h('div', { className: 'sm-notice sm-notice--' + notice.kind }, notice.text) : null,
-    rows.length === 0 ? h('span', { className: 'sm-meta' }, '暂无已归档会话') : null,
-    rows.map((row) => h(ArchiveRow, {
-      key: row.id,
-      row,
-      armed: armedId === row.id,
-      busy: busyId === row.id,
-      confirm: confirms[row.id],
-      onUnarchive: () => {
-        void run(row.id, () => api(UNARCHIVE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
-      },
-      onDelete: () => onDelete(row),
-    })),
+    rows.length === 0
+      ? h('div', { className: 'sm-empty' },
+          h('div', null, '没有已归档的会话'),
+          h('div', { className: 'sm-empty__hint' }, '会话归档后会集中显示在这里'))
+      : h('div', { className: 'sm-list' }, rows.map((row) => h(ArchiveRow, {
+          key: row.id,
+          row,
+          armed: armedId === row.id,
+          busy: busyId === row.id,
+          confirm: confirms[row.id],
+          onUnarchive: () => {
+            void run(row.id, () => api(UNARCHIVE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
+          },
+          onDelete: () => onDelete(row),
+          onConfirm: () => onDelete(row),
+          onDisarm: () => { setArmedId(null); setConfirms({}) },
+        }))),
   )
 }
 
-// 归档 Toast:archived 增量帧带来的新增条数;key 保证重复提示可重放
+// 归档 Toast:archived 增量帧带来的新增条数;seq 单调递增保证同文案重复提示
+// 也会重渲染(计时器重置 + 入场动画重放)
 function ArchiveToast(props) {
-  const text = props.toastText
+  const text = props.toast.text
   if (text === null || text === undefined) return null
   return h('div', { className: 'sm-toast', role: 'alert' }, text)
 }
@@ -185,27 +227,35 @@ function ArchiveToast(props) {
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
 
-        // 归档快照差分:新增条数驱动 Toast;基线首帧(无前值)不提示
-        let previousArchived
-        let toastText = null
+        // 样式挂载在宿主文档级:Toast 渲染于 shell.overlay 槽位,设置页未打开时
+        // 面板不存在,样式若随面板注入则 Toast 裸样式渲染
+        ctx.effect(() => {
+          const style = document.createElement('style')
+          style.textContent = CSS
+          document.head.appendChild(style)
+          return () => style.remove()
+        }, 'session-manager styles')
+
+        // 归档快照差分:新增条数驱动 Toast;快照以 {seq, text} 存放,seq 变化即重渲染
+        let previous
+        let toastSeq = 0
+        let toast = { seq: toastSeq, text: null }
         const toastListeners = new Set()
         const emitToast = (text) => {
-          toastText = text
+          toast = { seq: ++toastSeq, text }
           for (const listener of toastListeners) listener()
         }
         const toastSource = {
-          getSnapshot: () => toastText,
+          getSnapshot: () => toast,
           subscribe: (listener) => {
             toastListeners.add(listener)
             return () => toastListeners.delete(listener)
           },
         }
         const unsubscribe = workspaces.list.subscribe(() => {
-          const snapshot = workspaces.list.getSnapshot()
-          const nextIds = (snapshot && snapshot.archivedSessionIds) || []
-          const added = diffIds(previousArchived, nextIds)
-          previousArchived = nextIds
-          if (added.length > 0) emitToast('有 ' + added.length + ' 个会话已归档')
+          const step = archiveToastStep(previous, workspaces.list.getSnapshot())
+          previous = step.state
+          if (step.added.length > 0) emitToast('有 ' + step.added.length + ' 个会话已归档')
         })
 
         ctx.slots.inject('settings.section', () =>
@@ -225,27 +275,20 @@ function ArchiveToast(props) {
           const listState = useSnapshot(sessionSvc.list)
           const workspaceState = useSnapshot(workspaceSvc.list)
           return React.createElement(SessionManagerApp, {
-            listState,
-            archivedIds: (workspaceState && workspaceState.archivedSessionIds) || [],
+            rows: projectRows(listState, (workspaceState && workspaceState.archivedSessionIds) || []),
           })
         }
 
         function OverlayToast({ source }) {
-          const text = useSyncExternalStore(source.subscribe, source.getSnapshot)
+          const current = useSyncExternalStore(source.subscribe, source.getSnapshot)
           useEffect(() => {
-            if (text === null || text === undefined) return
+            if (current.text === null || current.text === undefined) return
             const timer = setTimeout(() => emitToast(null), TOAST_HOLD_MS)
             return () => clearTimeout(timer)
-          }, [text])
-          return React.createElement(ArchiveToast, { toastText: text })
+          }, [current.seq])
+          return React.createElement(ArchiveToast, { key: current.seq, toast: current })
         }
       },
-    }
-
-    function diffIds(previousIds, nextIds) {
-      if (previousIds === undefined) return []
-      const previous = new Set(previousIds)
-      return nextIds.filter((id) => !previous.has(id))
     }
   },
 })
