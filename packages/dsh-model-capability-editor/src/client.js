@@ -408,12 +408,15 @@ function CapabilityCard(props) {
 }
 
     return {
-      inject: ['slots', 'remote', 'remote.settings'],
+      inject: ['slots'],
       apply(ctx) {
+        // remote.settings 是宿主懒加载服务,boot 期不可用,inject 会使 entry 永久
+        // pending;卡片渲染时才经 props 取用,缺失由 load() 的降级分支处理。
+        const settings = ctx.remote && ctx.remote.settings
         ctx.slots.inject('settings.models.footer', () =>
           ctx.slots.register(
             { name: 'settings.models.footer', id: 'model-capability-editor', order: FOOTER_ORDER },
-            () => React.createElement(CapabilityCard, { settings: ctx.remote.settings }),
+            () => React.createElement(CapabilityCard, { settings }),
           ))
       },
     }
