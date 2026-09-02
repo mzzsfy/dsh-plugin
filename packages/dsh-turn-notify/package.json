@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-turn-notify",
-  "description": "DeepSeek Harness 设置页插件:回合完成通知——host 单源决策,声音(Web Audio 合成)/系统弹窗/webhook 三通道,多窗口 localStorage 认领仅一份发声",
-  "version": "0.1.0",
+  "description": "回合完成通知:声音、系统弹窗、webhook 三通道,六类事件独立开关,多窗口只响一次",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

@@ -1,6 +1,6 @@
 {
   "name": "@mzzsfy/dsh-llm-pi-gateway",
-  "description": "DeepSeek Harness pi-ai 透传网关 adapter:全协议会话标记(anthropic metadata.user_id / openai 系 prompt_cache_key)+ compat 全控 + metadata 模板透传 + 静态 headers,为 newapi 等网关做会话粘性路由",
+  "description": "NewAPI 等 LLM 网关接入:跨协议会话粘性标记,提升网关侧 prompt 缓存命中,compat 全开放",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",

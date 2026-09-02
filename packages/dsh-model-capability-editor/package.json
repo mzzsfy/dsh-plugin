@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-model-capability-editor",
-  "description": "DeepSeek Harness 模型能力编辑插件:在设置 → 模型页官方 footer 插槽编辑 llm-pi-ai 管理的第三方模型 reasoningEfforts(思考档位与线上拼写)与 input 多模态声明,经官方 settings RPC 整组写回,冲突重读后字段级重放一次",
-  "version": "0.1.0",
+  "description": "在设置页编辑第三方模型的思考档位与图片输入声明,解决手写配置易错与档位拼写不可控",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

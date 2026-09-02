@@ -54,7 +54,7 @@ const SETTINGS_SCHEMA = z.object({
     input: z.number().description('输入单价 / 百万 token'),
     output: z.number().description('输出单价 / 百万 token'),
     cacheRead: z.number().description('缓存命中单价 / 百万 token'),
-    currency: z.union([z.literal('CNY'), z.literal('USD')]).default('USD').description('单价原生币种'),
+    currency: z.union([z.const('CNY'), z.const('USD')]).default('USD').description('单价原生币种'),
   })).default([]).description('自定义模型单价表,命中优先于目录价'),
 })
 
