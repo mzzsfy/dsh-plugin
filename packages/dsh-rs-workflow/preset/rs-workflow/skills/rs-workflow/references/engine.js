@@ -35,8 +35,11 @@ const BUDGET_MIN = 1
 const BUDGET_MAX = 10
 function clampBudget(name) {
   const raw = BUDGETS_SRC[name]
-  if (raw === undefined || raw === null || raw === '') return BUDGET_DEFAULTS[name]
-  const n = Math.floor(Number(raw))
+  if (raw === undefined || raw === null) return BUDGET_DEFAULTS[name]
+  // 空串与纯空白同为无信号输入, 一并回落缺省
+  const text = String(raw).trim()
+  if (text === '') return BUDGET_DEFAULTS[name]
+  const n = Math.floor(Number(text))
   if (!isFinite(n)) return BUDGET_DEFAULTS[name]
   // 数值一律钳入 [1,10](与 lib 侧 zod .min(1) 口径一致), 0<x<1 与负值同样钳到下界
   return Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, n))
@@ -1154,7 +1157,8 @@ function tailScopeText(fromId) {
 async function escalateTask(node, reasons) {
   if (escalating) {
     node.status = 'pending'
-    node.reviewNote = '(并发失败, 待重规划后重试) ' + node.reviewNote
+    // 覆盖式标记: 并发升级在途可能多次命中, 拼接会让备注无界增长
+    node.reviewNote = '(并发失败, 待重规划后重试)'
     return
   }
   escalating = true

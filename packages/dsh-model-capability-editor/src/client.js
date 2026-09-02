@@ -427,17 +427,14 @@ function CapabilityCard(props) {
 
   if (state.phase === 'loading') {
     return h('div', { className: 'mce-card' },
-      h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
       h('span', { className: 'mce-label' }, '正在读取模型声明…'))
   }
   if (state.phase === 'readonly') {
     return h('div', { className: 'mce-card' },
-      h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
       h('div', { className: 'mce-head' }, h('span', { className: 'mce-head__title' }, '模型能力')),
       h('div', { className: 'mce-notice mce-notice--error' }, state.reason))
   }
   return h('div', { className: 'mce-card' },
-    h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'mce-head' },
       h('span', { className: 'mce-head__title' }, '模型能力'),
       h('span', { className: 'mce-head__hint' }, '编辑 llm-pi-ai 管理的模型声明,覆盖范围仅限 llm-pi-ai'),
@@ -674,8 +671,10 @@ function RowEditor(props) {
         }
         function ensurePanel() {
           if (panel !== null) { panel.container.style.display = ''; return }
-          const dialog = document.querySelector('[role="dialog"]')
-          if (dialog === null) return
+          // 只挂设置对话框: 同页可能并存多个对话框, 按设置区块特征挑容器, 无匹配则不挂
+          const dialog = [...document.querySelectorAll('[role="dialog"]')]
+            .find((node) => node.querySelector('[data-slot="settings.section"]') !== null)
+          if (dialog === undefined) return
           ensureStyle()
           const container = document.createElement('div')
           container.className = 'mce-fallback-root'
@@ -740,7 +739,11 @@ function RowEditor(props) {
                 anchorsLatched = false
               }
               if (anchorsLatched) ensurePanel(); else hidePanel()
-            } catch { /* describe 失败:保持现状,下次 mutation 重试 */ }
+            } catch {
+              // describe 失败: 保持现状, 下次 mutation 重试; 闩锁已置位说明锚点破坏已判定,
+              // 回退入口必须先出现, 数据加载失败由面板内部呈现
+              if (anchorsLatched) ensurePanel()
+            }
           })()
         }
 

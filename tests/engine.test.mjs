@@ -1244,6 +1244,38 @@ test('预算钳制上界: Given reviewRejectBeforeEscalate=11 When clamp 到 10 
   assert.ok(byLabel(calls, 'planner:重规划#1').length === 1, '第 10 次拒绝应恰好触发一次升级')
 })
 
+test('预算钳制空白口径: Given 阈值传纯空白串 When 与空串同回落缺省 Then 首次拒绝不升级', async () => {
+  const { result, calls, logs } = await runEngine({
+    request: '单点小改',
+    budgets: { reviewRejectBeforeEscalate: '   ' },
+  }, [
+    plan({ templateId: 'lite' }),
+    exec(),
+    review('REJECTED', { reasons: ['实现有误'] }),
+    exec(),
+    review('APPROVED'),
+  ])
+  assert.equal(result.ok, true)
+  assert.ok(logs.some(function (m) { return m.indexOf('驳回(1/2)') >= 0 }), '空白串应回落缺省阈值 2, 首次拒绝只记账不升级')
+  assert.equal(byLabel(calls, 'planner:重规划#1').length, 0, '首次拒绝不应触发升级')
+})
+
+test('预算钳制数值串: Given 阈值传带空白的有效数 When 按数值解析 Then 首次拒绝即达阈值升级', async () => {
+  const { result, calls } = await runEngine({
+    request: '单点小改',
+    budgets: { reviewRejectBeforeEscalate: ' 1 ' },
+  }, [
+    plan({ templateId: 'lite' }),
+    exec(),
+    review('REJECTED', { reasons: ['实现有误'] }),
+    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    exec(),
+    review('APPROVED'),
+  ])
+  assert.equal(result.ok, true)
+  assert.ok(byLabel(calls, 'planner:重规划#1').length === 1, '带空白的有效数应按数值 1 解析, 首次拒绝即升级')
+})
+
 test('合并记账: Given 默认阈值 2 下失败一次+被拒一次 When 记账合计达阈值 Then 升级重规划', async () => {
   const { result, calls } = await runEngine({ request: '单点小改' }, [
     plan({ templateId: 'lite' }),
