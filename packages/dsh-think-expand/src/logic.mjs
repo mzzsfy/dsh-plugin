@@ -14,8 +14,9 @@ export function hashText(text) {
 // 已见文本 Map 容量上限,超出按插入序裁剪最旧条目(手动/已读标记增长有界)。
 export const SEEN_MAP_CAP = 10 * 20
 
+// 前缀匹配:空串 seen 会命中任意行,视为无匹配。
 function prefixOf(seen, text) {
-  return text.length >= seen.length && text.startsWith(seen)
+  return seen.length > 0 && text.length >= seen.length && text.startsWith(seen)
 }
 
 // 标记匹配按"已见文本前缀",保证流式追加后标记不丢失。
@@ -53,6 +54,27 @@ function findRow(registry, rows, seen) {
   return rows.findIndex((row) => row.headable && prefixOf(seen, row.bodyText))
 }
 
+// 打开会话/刷新:展开最后一条可识别思考行,其余保持收起。
+// 仅依据内建字段(data-state / aria-expanded)判定,不依赖正文挂载;
+// 存在运行行(流式接管)或其他展开行(用户手动意图)时不干预。
+export function planFinal(rows) {
+  const actions = []
+  if (rows.some((row) => row.headable && row.state === STATE_RUNNING)) return { actions }
+  let last = -1
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].headable) {
+      last = index
+      break
+    }
+  }
+  if (last < 0) return { actions }
+  for (let index = 0; index < rows.length; index += 1) {
+    if (index !== last && rows[index].headable && rows[index].expanded) return { actions }
+  }
+  if (!rows[last].expanded) actions.push({ index: last, kind: 'expand' })
+  return { actions }
+}
+
 // 行结构:{ headable, state, bodyText, expanded }。headable=false 表示识别失败,永不干预。
 // 返回 { actions: [{ index, kind: 'expand' | 'collapse' }] },registry 原位更新。
 export function plan(registry, rows) {
@@ -60,8 +82,9 @@ export function plan(registry, rows) {
 
   // 手动行识别:已展开但无插件标记且非当前行 → 手动集合,此后永不干预;
   // 手动意图出现即收起当前插件行(至多一条展开)。
+  // 仅判定 ok 行:running 行的展开/归属由流式路径管理。
   for (const row of rows) {
-    if (!row.headable || !row.expanded) continue
+    if (!row.headable || !row.expanded || row.state !== STATE_OK) continue
     if (findSeenKey(registry.marks, row.bodyText) !== null) continue
     if (isCurrent(registry, row.bodyText)) continue
     if (findSeenKey(registry.manual, row.bodyText) === null) {
@@ -111,9 +134,12 @@ export function plan(registry, rows) {
   }
 
   if (!target.expanded) actions.push({ index: targetIndex, kind: 'expand' })
-  const seen = target.bodyText
-  registry.current = { hash: hashText(seen), seen }
-  putSeen(registry.marks, seen)
+  // 正文未挂载时仅展开不登记,空串 seen 会污染全部前缀匹配;正文挂载后下轮补登记
+  if (target.bodyText !== '') {
+    const seen = target.bodyText
+    registry.current = { hash: hashText(seen), seen }
+    putSeen(registry.marks, seen)
+  }
   return { actions }
 }
 
