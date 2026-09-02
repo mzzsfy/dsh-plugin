@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-turn-notify",
   "description": "回合完成通知:声音、系统弹窗、webhook 三通道,六类事件独立开关,多窗口只响一次",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
