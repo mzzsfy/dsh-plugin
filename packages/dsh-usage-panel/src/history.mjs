@@ -105,7 +105,7 @@ export function readingToSnapshots(reading) {
 }
 
 // 月窗口聚合:从账号余额序列取当月日历月的点重建月序列(v2 新增序列,host 按快照产出)。
-// 月界取宿主本地时区月初零点,与仓库 usage-stats 本地时口径一致。
+// 月界取宿主本地时区月初零点。
 export function buildMonthSequence(store, accountId, now) {
   const balance = store[accountId + ':balance']
   if (!balance) return

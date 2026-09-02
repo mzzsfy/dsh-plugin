@@ -1,9 +1,19 @@
-# The llm-pi-gateway bundle patch: mounts the host-plane pi-ai passthrough
-# gateway plugin into the profile root. Applied by
-# `dsh plugin add @mzzsfy/dsh-llm-pi-gateway`. The plugin registers one
-# LlmAdapter serving every route declared under the `llm-pi-gateway` settings
-# namespace; routes are dormant (zero routes) until that section supplies
-# provider profiles. Route names must not collide with dsh-llm-pi-ai routes.
+# The llm-pi-gateway bundle patch: zero-perception takeover of the official
+# pi-ai passthrough. The official dsh-llm-pi-ai row is disabled and this
+# plugin takes over BOTH settings namespaces: the official `llm-pi-ai`
+# section is consumed through the official package's own Config schema, so
+# existing provider profiles keep their route names (agent-default-model,
+# quota panels and sessions continue unchanged) and gain session-affinity
+# marking; the `llm-pi-gateway` section stays available for standalone or
+# enhanced routes. Uninstalling this bundle removes the patch, the official
+# row re-enables, and the official plugin serves the same profiles again.
+# Escape hatch: a later patch layer (profile cordis.patch.yml or --patch
+# overlay) can re-enable the official row, in which case this plugin logs a
+# takeover failure and serves only its own section (same-name routes would
+# collide, so the official plugin keeps those it declares).
+
+- id: llm-pi-ai
+  disabled: true
 
 - insert:
     - id: llm-pi-gateway

@@ -59,3 +59,11 @@ npm test
 ## License
 
 MIT
+
+## 开发安装(不经 npm 发布直接装仓库副本)
+
+```sh
+dsh plugin --profile web add file:./packages/dsh-model-capability-editor
+```
+
+`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。

@@ -25,7 +25,6 @@ const REGISTRY = 'https://registry.npmjs.org'
 const BUMP_KINDS = ['patch', 'minor', 'major']
 const PACKAGES = [
   'dsh-usage-panel',
-  'dsh-usage-stats',
   'dsh-maintain',
   'dsh-rs-workflow',
   'dsh-think-expand',
@@ -33,6 +32,7 @@ const PACKAGES = [
   'dsh-session-manager',
   'dsh-llm-pi-gateway',
   'dsh-model-capability-editor',
+  'dsh-settings-nav-icons',
 ]
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')

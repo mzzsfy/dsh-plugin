@@ -1,7 +1,7 @@
 {
-  "name": "@mzzsfy/dsh-usage-stats",
-  "description": "全会话 token 用量与费用统计:仪表盘(趋势/热力图/明细/CSV 导出)、输入区费用条、自定义模型价格,数据全部本地",
-  "version": "0.2.1",
+  "name": "@mzzsfy/dsh-settings-nav-icons",
+  "description": "设置弹窗导航分区图标替换:按分区显示文本把回退齿轮换成专属图形,DOM 观察实现,卸载即恢复",
+  "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -22,17 +22,8 @@
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
-  },
   "engines": {
-    "node": ">=22"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-settings": ">=0.1.1-rc.2",
-    "@deepseek-ai/schemastery": ">=3.18.0",
-    "react": "^18.2.0"
+    "node": ">=20"
   },
   "files": [
     "src",

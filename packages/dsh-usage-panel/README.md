@@ -71,3 +71,11 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 
 - spark / feebar 视图组件的前端渲染逻辑以内联方式维护,未做 host/client 双端 parity 测试,属已知技术债务
 - 早期版本允许无 `id` 的账号(落盘时按索引一次性补齐);当前前端保存时总携带 `id`,不再做旧数据特判
+
+## 开发安装(不经 npm 发布直接装仓库副本)
+
+```sh
+dsh plugin --profile web add file:./packages/dsh-usage-panel
+```
+
+`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。

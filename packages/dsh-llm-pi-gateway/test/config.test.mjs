@@ -1,9 +1,13 @@
 // 路由配置 BDD:compat 全控校验(字段名单 + 空值拒绝)/ 模型级覆盖 / 模型解析 /
-// 凭据缺失拒绝 / 会话标记默认开启与逐路由关闭。
+// 凭据链(官方同构,无凭据服务时回落启动环境)/ 会话标记默认开启与逐路由关闭。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveRoute, modelOf, mergeCompat, validateCompat, resolveApiKey } from '../src/config.mjs'
+import { resolveRoute, modelOf, mergeCompat, validateCompat } from '../src/config.mjs'
+import { createCredentialResolver } from '../src/credentials.mjs'
+
+const NO_SERVICES = { get: () => undefined }
+const resolveApiKey = createCredentialResolver(NO_SERVICES)
 
 const BASE_PROFILE = {
   api: 'anthropic-messages',
@@ -73,13 +77,28 @@ test('models 缺失或重复 id 拒绝', () => {
   })), 'INVALID_CONFIG')
 })
 
-test('凭据缺失 MISSING_CREDENTIAL,存在时解析,未配置时 undefined', () => {
-  const route = resolveRoute('p', { ...BASE_PROFILE, apiKeyEnv: 'DEFINITELY_UNSET_ENV_4711' })
-  assert.equal(codeOf(() => resolveApiKey(route)), 'MISSING_CREDENTIAL')
-  process.env.DEFINITELY_UNSET_ENV_4711 = 'sk-test'
-  assert.equal(resolveApiKey(route), 'sk-test')
+test('凭据链:未配置 undefined,配置而缺失 MISSING_CREDENTIAL,命中返回修剪后密钥', async () => {
+  assert.equal(await resolveApiKey('p', undefined), undefined)
+  const missing = resolveApiKey('p', 'DEFINITELY_UNSET_ENV_4711')
+  await assert.rejects(missing, (error) => error.code === 'MISSING_CREDENTIAL')
+  process.env.DEFINITELY_UNSET_ENV_4711 = '  sk-test  '
+  assert.equal(await resolveApiKey('p', 'DEFINITELY_UNSET_ENV_4711'), 'sk-test')
   delete process.env.DEFINITELY_UNSET_ENV_4711
-  assert.equal(resolveApiKey(resolveRoute('p', BASE_PROFILE)), undefined)
+})
+
+test('凭据链:空白密钥与不可入头字符拒绝(INVALID_CREDENTIAL)', async () => {
+  process.env.CRED_TEST_BLANK_1 = '   '
+  await assert.rejects(
+    resolveApiKey('p', 'CRED_TEST_BLANK_1'),
+    (error) => error.code === 'INVALID_CREDENTIAL',
+  )
+  delete process.env.CRED_TEST_BLANK_1
+  process.env.CRED_TEST_NEWLINE_1 = 'sk-\ntest'
+  await assert.rejects(
+    resolveApiKey('p', 'CRED_TEST_NEWLINE_1'),
+    (error) => error.code === 'INVALID_CREDENTIAL',
+  )
+  delete process.env.CRED_TEST_NEWLINE_1
 })
 
 test('sessionMarker.enabled false 关闭路由标记', () => {

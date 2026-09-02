@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path'
 import {
   decideClaim as coreDecideClaim,
   resolveSound as coreResolveSound,
+  chooseChannels as coreChooseChannels,
   CLAIM_LOCK_TTL_MS,
 } from '../src/core.mjs'
 
@@ -24,7 +25,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS };',
+      + '; return { decideClaim, resolveSound, chooseChannels, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
   )
   return factory()
 }
@@ -69,6 +70,36 @@ function defineSoundScenarios(prefix, resolve) {
 
 defineSoundScenarios('[core.mjs resolveSound] ', coreResolveSound)
 defineSoundScenarios('[client.js resolveSound] ', clientResolveSound)
+
+// 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
+function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled }) {
+  const backing = new Map()
+  if (focusQuiet === false) backing.set(client.KEY_DND, '0')
+  if (systemEnabled === false) backing.set(client.KEY_SYSTEM, '0')
+  if (toastEnabled === false) backing.set(client.KEY_TOAST, '0')
+  globalThis.window = { localStorage: { getItem: (key) => (backing.has(key) ? backing.get(key) : null) } }
+  try {
+    return client.chooseChannels(hasFocus, permission)
+  } finally {
+    delete globalThis.window
+  }
+}
+
+function defineChannelScenarios(prefix, channels) {
+  test(prefix + '四通道矩阵对照:聚焦静默 / 双开关 / 授权与降级', () => {
+    const base = { hasFocus: false, permission: 'granted' }
+    assert.deepEqual(channels(base), { toast: true, sound: true, system: true, blink: false })
+    assert.deepEqual(channels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false })
+    assert.deepEqual(channels({ ...base, hasFocus: true, focusQuiet: false }).sound, true)
+    assert.deepEqual(channels({ ...base, toastEnabled: false }).toast, false)
+    assert.deepEqual(channels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false })
+    assert.deepEqual(channels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
+    assert.deepEqual(channels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
+  })
+}
+
+defineChannelScenarios('[core.mjs chooseChannels] ', coreChooseChannels)
+defineChannelScenarios('[client.js chooseChannels] ', clientChooseChannels)
 
 test('[client.js] localStorage 抛错:认领退化为直接发声且提示位可用', () => {
   const throwing = {
