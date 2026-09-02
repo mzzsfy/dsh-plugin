@@ -25,6 +25,13 @@ window.__ModuleLoader__.load({
     }
     const CATEGORIES = Object.keys(CATEGORY_LABELS)
 
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → bell);
+    // 该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '消息通知': 'bell' }
+    if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+    else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+    else window.__navicIconQueue = [NAV_ICON]
+
     // 内置合成音音色表:波形 + 音符序列(频率 Hz / 时长),零音频文件。
     const TONES = {
       'up-arpeggio': { type: 'sine', notes: [[523.25, 0.12], [659.25, 0.12], [783.99, 0.2]] },
@@ -57,6 +64,10 @@ window.__ModuleLoader__.load({
     const KEY_DND = 'turn-notify:dnd'
     const KEY_VOLUME = 'turn-notify:volume'
     const KEY_DEGRADE_HINT = 'turn-notify:degrade-hint'
+    const KEY_TOAST = 'turn-notify:toast'
+    const KEY_SYSTEM = 'turn-notify:system'
+    // 轮询单例令牌:HMR/插件重载重建模块闭包时防轮询线程累积
+    const KEY_POLL_TOKEN = 'turn-notify:polling'
 
     const storageState = { broken: false }
 
@@ -152,13 +163,20 @@ window.__ModuleLoader__.load({
       if (typeof wanted === 'string' && wanted.length > 0 && uploadedIds.indexOf(wanted) >= 0) return { kind: 'custom', id: wanted }
       return { kind: 'builtin', name: DEFAULT_TONES[category] }
     }
-    /* LOGIC-END */
 
-    function choosePresentation(hasFocus, permission) {
-      // 聚焦静默可关(免打扰规则),关闭后聚焦窗口照常发声弹窗
-      if (hasFocus && localGet(KEY_DND) !== '0') return 'toast'
-      return permission === 'granted' ? 'full' : 'fallback'
+    // 发声通道判定:与 core.mjs chooseChannels 行为一致,通道开关来自 localStorage,
+    // 放入 LOGIC 段由 parity 测试保证双实现不漂移
+    function chooseChannels(hasFocus, permission) {
+      const quiet = hasFocus && localGet(KEY_DND) !== '0'
+      const systemEnabled = localGet(KEY_SYSTEM) !== '0'
+      return {
+        toast: localGet(KEY_TOAST) !== '0',
+        sound: !quiet,
+        system: !quiet && systemEnabled && permission === 'granted',
+        blink: !quiet && systemEnabled && permission !== 'granted',
+      }
     }
+    /* LOGIC-END */
 
     // ---- 声音:Web Audio,autoplay 解锁依赖首次用户交互,解锁前静默 ----
 
@@ -302,13 +320,13 @@ window.__ModuleLoader__.load({
       for (const unit of units) {
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
-        const mode = choosePresentation(document.hasFocus(), notificationPermission())
+        const channels = chooseChannels(document.hasFocus(), notificationPermission())
         const sound = resolveSound(unit.category, soundMapping, uploadedIds)
-        showToast(unit)
-        if (mode === 'toast') continue
+        if (channels.toast) showToast(unit)
+        if (!channels.sound) continue
         playSound(sound).catch(() => {})
-        if (mode === 'full') notifySystem(unit)
-        else if (localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
+        if (channels.system) notifySystem(unit)
+        else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
       }
     }
 
@@ -321,13 +339,27 @@ window.__ModuleLoader__.load({
     }
 
     function start() {
-      if (running) return
+      // window 级令牌:HMR 重建模块闭包后 running 归零,仅靠它无法防重复轮询
+      if (running || window[KEY_POLL_TOKEN]) return
       running = true
+      window[KEY_POLL_TOKEN] = true
       refreshSounds()
-      setInterval(() => { void poll() }, POLL_MS)
+      // 定时器不阻止进程退出(浏览器无感,测试进程可自然收尾)
+      const timer = setInterval(() => { void poll() }, POLL_MS)
+      if (typeof timer.unref === 'function') timer.unref()
     }
 
     // ---- 设置面板 ----
+
+    const PERMISSION_LABELS = { granted: '已授权', denied: '已拒绝', default: '未授权' }
+
+    // 面板表单占位:GET config 返回前展示;webhookUrl 凭据不出主机,面板只见是否已配置
+    const DEFAULT_CONFIG = {
+      webhookConfigured: false,
+      minTurnDurationMs: 5 * 1000,
+      rootsOnly: true,
+      enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
+    }
 
     const CSS = [
       '.tn-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; }',
@@ -346,6 +378,7 @@ window.__ModuleLoader__.load({
       '.tn-error { color:var(--dsw-alias-state-error-primary, #d43a3a); font-size:12px; }',
       '.tn-select, .tn-input { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
       '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; }',
+      '.tn-fill { flex:1; min-width:200px; }',
       '.tn-notice { font-size:12px; padding:4px 8px; border-radius:6px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
     ].join('\n')
 
@@ -365,10 +398,17 @@ window.__ModuleLoader__.load({
       const [sounds, setSounds] = useState([])
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState(false)
+      const [config, setConfig] = useState(DEFAULT_CONFIG)
+      const [configLoaded, setConfigLoaded] = useState(false)
+      const [urlDraft, setUrlDraft] = useState('')
+      const [permission, setPermission] = useState(notificationPermission())
 
       useEffect(() => {
         start()
         api('/api/turn-notify/sounds').then((res) => setSounds(res.sounds || [])).catch(() => {})
+        api('/api/turn-notify/config')
+          .then((res) => { setConfig({ ...DEFAULT_CONFIG, ...res }); setConfigLoaded(true) })
+          .catch(() => {})
       }, [])
 
       const patch = (text, kind) => setNotice({ text, kind: kind || 'ok' })
@@ -415,26 +455,90 @@ window.__ModuleLoader__.load({
         }
       }
 
-      function testNotification() {
-        const permission = notificationPermission()
-        if (permission === 'default') {
-          Notification.requestPermission().then((next) => {
-            patch(next === 'granted' ? '弹窗授权成功' : '弹窗被拒,失焦时将以 toast + 标题闪烁降级', next === 'granted' ? 'ok' : 'error')
+      async function saveConfig() {
+        if (!configLoaded) {
+          patch('配置尚未加载,不能保存(刷新页面重试)', 'error')
+          return
+        }
+        setBusy(true)
+        setNotice(null)
+        try {
+          const raw = typeof config.minTurnDurationMs === 'string'
+            ? config.minTurnDurationMs.trim()
+            : String(config.minTurnDurationMs)
+          if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
+          const trimmedUrl = urlDraft.trim()
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly }
+          // 只写语义:输入留空即保持现有 webhook 不变
+          if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
+          const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
+          setConfig({ ...DEFAULT_CONFIG, ...res })
+          setUrlDraft('')
+          patch('配置已保存,立即生效')
+        } catch (error) {
+          patch('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
+        } finally { setBusy(false) }
+      }
+
+      async function clearWebhook() {
+        setBusy(true)
+        setNotice(null)
+        try {
+          const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ webhookUrl: '' }) })
+          setConfig({ ...DEFAULT_CONFIG, ...res })
+          setUrlDraft('')
+          patch('webhook 已清除')
+        } catch (error) {
+          patch('清除失败:' + (error && error.message ? error.message : String(error)), 'error')
+        } finally { setBusy(false) }
+      }
+
+      async function toggleCategory(category, checked) {
+        try {
+          const res = await api('/api/turn-notify/config', {
+            method: 'POST',
+            body: JSON.stringify({ enabled: { [category]: checked } }),
           })
+          setConfig({ ...DEFAULT_CONFIG, ...res })
+        } catch (error) {
+          patch('开关失败:' + (error && error.message ? error.message : String(error)), 'error')
+        }
+      }
+
+      async function requestPermission() {
+        try {
+          const next = await Notification.requestPermission()
+          setPermission(next)
+          patch(next === 'granted' ? '弹窗授权成功,失焦时将走系统弹窗' : '弹窗被拒,可在浏览器地址栏权限或系统设置中恢复', next === 'granted' ? 'ok' : 'error')
+        } catch (error) {
+          patch('授权失败:' + (error && error.message ? error.message : String(error)), 'error')
+        }
+      }
+
+      function testNotification() {
+        const current = notificationPermission()
+        if (current === 'default') {
+          void requestPermission()
           return
         }
-        if (permission === 'granted') {
+        if (current === 'granted') {
           notifySystem({ id: 'ui-test', text: '[dsh] 测试系统弹窗', category: 'completed' })
-          patch('测试弹窗已发送')
+          // 聚焦窗口下系统可能抑制弹窗,页内提示作为保底可见反馈
+          showToast({ id: 'ui-test', text: '[dsh] 测试通知(页内提示)' })
+          patch(document.hasFocus() ? '测试弹窗已发送;窗口聚焦时系统可能不展示,以页内提示为准' : '测试弹窗已发送')
           return
         }
-        patch('Notification 不可用(HTTP 非回环),已自动降级', 'error')
+        patch('Notification 不可用或已被拒(HTTP 非回环或曾拒绝),已自动降级', 'error')
       }
 
       async function testWebhook() {
+        if (urlDraft.trim().length > 0) {
+          patch('表单中的新 webhook URL 尚未保存,本次测试的是已保存配置;请先保存再测试', 'error')
+          return
+        }
         try {
-          await api('/api/turn-notify/test-webhook', { method: 'POST' })
-          patch('测试 webhook 已代发,请查收端点')
+          const result = await api('/api/turn-notify/test-webhook', { method: 'POST' })
+          patch(result.ok ? 'webhook 已送达(' + result.detail + ')' : 'webhook 发送失败:' + result.detail, result.ok ? 'ok' : 'error')
         } catch (error) {
           patch('发送失败:' + (error && error.message ? error.message : String(error)), 'error')
         }
@@ -448,20 +552,83 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'tn-panel' },
         h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'tn-head' },
-          h('span', { className: 'tn-head__title' }, '回合通知'),
-          h('span', { className: 'tn-head__hint' }, 'webhook / 分类开关在 settings.yaml;此处管理音效与测试'),
+          h('span', { className: 'tn-head__title' }, '消息通知'),
+          h('span', { className: 'tn-head__hint' }, 'webhook 与分类开关在此配置,存 host 热生效;此处同时管理音效与测试'),
         ),
         notice !== null ? h('div', { className: 'tn-notice' + (notice.kind === 'error' ? ' tn-error' : '') }, notice.text) : null,
+        h('div', { className: 'tn-card' },
+          h('span', { className: 'tn-card__title' }, '通知配置(标签页全关时仅 webhook 送达)'),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, 'webhook'),
+            h('input', {
+              className: 'tn-input tn-fill', type: 'text',
+              placeholder: config.webhookConfigured ? '已配置(输入新 URL 替换,留空保持不变)' : 'Slack-compatible URL,留空禁用',
+              value: urlDraft,
+              onChange: (e) => setUrlDraft(e.target.value),
+            }),
+            config.webhookConfigured
+              ? h('button', { className: 'tn-btn', disabled: busy, onClick: () => void clearWebhook() }, '清除')
+              : null,
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, '碎轮过滤'),
+            h('input', {
+              className: 'tn-input', type: 'number', min: 0, step: 500,
+              value: config.minTurnDurationMs,
+              onChange: (e) => setConfig({ ...config, minTurnDurationMs: e.target.value }),
+            }),
+            h('span', { className: 'tn-meta' }, '毫秒(仅 turn/end 类)'),
+            h('label', { className: 'tn-meta' },
+              h('input', {
+                type: 'checkbox', checked: config.rootsOnly,
+                onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
+              }),
+              ' 子代理会话不通知'),
+            h('span', { className: 'tn-spacer' }),
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void saveConfig() }, '保存'),
+          ),
+          h('div', { className: 'tn-row' },
+            CATEGORIES.map((category) => h('label', { className: 'tn-meta', key: category },
+              h('input', {
+                type: 'checkbox', checked: config.enabled[category],
+                onChange: (e) => void toggleCategory(category, e.target.checked),
+              }),
+              ' ' + CATEGORY_LABELS[category],
+            ))),
+        ),
         h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, '测试'),
           h('div', { className: 'tn-row' },
             h('button', { className: 'tn-btn', onClick: () => previewBuiltin(DEFAULT_TONES.completed) }, '测试声音'),
             h('button', { className: 'tn-btn', onClick: testNotification }, '测试弹窗'),
-            h('button', { className: 'tn-btn', onClick: testWebhook }, '测试 webhook'),
+            h('button', { className: 'tn-btn', onClick: () => void testWebhook() }, '测试 webhook'),
           ),
         ),
         h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, '本机偏好(存浏览器)'),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, '系统弹窗'),
+            h('label', { className: 'tn-meta' },
+              h('input', {
+                type: 'checkbox', defaultChecked: localGet(KEY_SYSTEM) !== '0',
+                onChange: (e) => localSet(KEY_SYSTEM, e.target.checked ? '1' : '0'),
+              }),
+              ' 开启'),
+            h('span', { className: 'tn-meta' }, '权限: '
+              + (typeof Notification === 'undefined' ? '不可用(非安全上下文)' : PERMISSION_LABELS[permission] || permission)),
+            typeof Notification !== 'undefined' && permission === 'default'
+              ? h('button', { className: 'tn-btn', onClick: () => void requestPermission() }, '授权')
+              : null,
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, '页内提示'),
+            h('label', { className: 'tn-meta' },
+              h('input', {
+                type: 'checkbox', defaultChecked: localGet(KEY_TOAST) !== '0',
+                onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
+              }),
+              ' 开启'),
+          ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-meta' }, '音量'),
             h('input', {
@@ -516,9 +683,11 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        // 激活即轮询:通知链路不依赖设置面板是否打开过
+        start()
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'turn-notify', order: 41, label: '回合通知' },
+            { name: 'settings.section', id: 'turn-notify', order: 41, label: '消息通知' },
             () => React.createElement(TurnNotifyApp),
           ))
       },

@@ -26,7 +26,7 @@ class BrokenStorage {
 }
 
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象(含 __test 钩子)。
-function loadClient({ storage, payload, onToast }) {
+function loadClient({ storage, payload, onToast, onFetch }) {
   const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const modules = []
   const windowStub = {
@@ -41,6 +41,10 @@ function loadClient({ storage, payload, onToast }) {
     body: { appendChild: () => { onToast() } },
   }
   const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {} }
+  const fetchStub = async (path) => {
+    if (onFetch) onFetch(path)
+    return { json: async () => payload }
+  }
   const factory = new Function(
     'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification',
     source + '\n;return null',
@@ -50,7 +54,7 @@ function loadClient({ storage, payload, onToast }) {
     () => reactStub,
     documentStub,
     class { observe() {} disconnect() {} },
-    async () => ({ json: async () => payload }),
+    fetchStub,
     undefined,
   )
   assert.equal(modules.length, 1, 'client.js 模块未被捕获')
@@ -103,4 +107,32 @@ test('announcedIds 去重窗口按 TTL 过期清理', async () => {
   // 窗口过期后可再次发声,且过期条目被清理
   assert.equal(announcedOnce('a', 1000 + ANNOUNCED_TTL_MS + 1), true)
   assert.equal(announcedIds.size, 1)
+})
+
+test('激活即启动轮询:apply 注册设置分区且 start 已执行', async () => {
+  const fetched = []
+  const mod = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: [], soundMapping: {} },
+    onToast: () => {},
+    onFetch: (path) => { fetched.push(path) },
+  })
+  const injected = []
+  mod.apply({ slots: { inject: (name, fn) => { injected.push([name, fn]) } } })
+  assert.equal(injected.length, 1)
+  assert.equal(injected[0][0], 'settings.section')
+  // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
+  await new Promise((resolve) => { setTimeout(resolve, 0) })
+  assert.ok(fetched.indexOf('/api/turn-notify/sounds') >= 0)
+})
+
+test('页内提示通道独立开关:关闭后投影事件不再弹页内提示', async () => {
+  let toasts = 0
+  const storage = new FakeStorage({ 'turn-notify:toast': '0' })
+  const mod = loadClient({ storage, payload: { units, soundMapping: {} }, onToast: () => { toasts += 1 } })
+  const { poll } = mod.__test
+  await poll()
+  assert.equal(toasts, 0)
+  // 完成标记已写:事件被认领消费,仅通道被关
+  assert.notEqual(storage.getItem('turn-notify:done:u1'), null)
 })

@@ -7,7 +7,10 @@ DeepSeek Harness 设置页插件:回合完成通知——host 单源决策,声�
 ## 功能
 
 - 回合事件分类:host 观察 `session/event`(`turn/end` 六状态与 `ask_user_question` tool/call)与 `approval/request` waterfall(observe-only,`next()` 立即放行),按六分类开关(完成 / 出错 / 被中断 / 等待审批 / AI 提问 / 达到上限)产生通知单元。
-- webhook:host 直发(标签页全关也送达),Slack-compatible `{text}` + 结构化字段,超时 10 秒不重试,失败吞错。
+- webhook:host 直发(标签页全关也送达),Slack-compatible `{text}` + 结构化字段,超时 10 秒不重试;设置面板内配置 URL,测试按钮返回真实投递结果。
+- 设置面板:webhook URL(凭据只写,不回显)、六分类开关、碎轮过滤、子代理豁免均在面板配置(host settings 持久化,热生效);音效管理与授权入口同面板;client 激活即轮询,不依赖面板打开。
+- 发声通道:页内提示与系统弹窗各自独立开关(本机偏好);聚焦静默仅压声音与系统弹窗;系统弹窗须浏览器授权,想弹未授权时降级标题闪烁。
+- 写路由安全:config / mapping / upload / test-webhook / sound 删除均带同源守卫(Origin 与 Host 不符即 403),JSON 写入另校验 content-type,阻断跨站 drive-by 改写;webhookUrl schema 标记 secret,任何接口不回传原文。已知边界:同源守卫不防 DNS rebinding(Origin 与 Host 相等即放行),该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决而非逐插件补丁。
 - 多窗口去重:投影(内存环形 20 条,60 秒过期)供各窗口约 2 秒轮询;localStorage 写后读回认领锁(30 秒过期接管,完成标记防迟到窗口重复发声)。
 - 发声形态:聚焦窗口仅页内 toast(可关);失焦 + Notification 授权走声音 + 系统弹窗;HTTP 非回环(非 secure context)诚实降级 toast + 标题闪烁。
 - 声音:Web Audio 程序合成 8 种内置音(零音频文件、零系统依赖),支持上传自定义音效(host 存储 `~/.dsh/dsh-turn-notify/sounds/`,扩展名 + decodeAudioData 双重校验,hash 重命名,单文件 2MB / 总量 10MB)。
@@ -25,7 +28,9 @@ dsh plugin --profile web add @mzzsfy/dsh-turn-notify
 dsh plugin --profile web add file:./packages/dsh-turn-notify
 ```
 
-## 设置(settings.yaml,热加载)
+## 设置(settings.yaml 与面板等价,热加载)
+
+面板(设置 > 消息通知 > 通知配置)与 settings.yaml 读写同一命名空间;webhookUrl 属凭据,面板只写不回显,yaml 直改仍可。yaml 形态:
 
 ```yaml
 turn-notify:
@@ -49,7 +54,7 @@ turn-notify:
 
 - 标签页全关时仅 webhook 送达(声音与弹窗的浏览器前提)。
 - 跨浏览器 profile 各自发声(localStorage 认领锁可见范围即 profile)。
-- 系统弹窗在 HTTP 非回环下永久降级,HTTPS 化后自动恢复。
+- 系统弹窗在 HTTP 非回环下永久降级,HTTPS 化后自动恢复;Windows 下还受系统通知设置与专注助手约束,弹窗授权入口与权限状态见面板。
 - 轮询认领引入约 2 秒发声延迟。
 
 ## 开发
