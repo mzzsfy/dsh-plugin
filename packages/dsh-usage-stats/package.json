@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-usage-stats",
-  "description": "DeepSeek Harness 会话费用统计插件:监听 llm/stream 累计 token 用量,按 models.dev 单价估算费用,提供今日/本月/累计、近 14 天趋势与今日会话明细,输入区显示本会话费用徽章",
-  "version": "0.2.0",
+  "description": "全会话 token 用量与费用统计:仪表盘(趋势/热力图/明细/CSV 导出)、输入区费用条、自定义模型价格,数据全部本地",
+  "version": "0.2.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

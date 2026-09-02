@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-think-expand",
-  "description": "DeepSeek Harness 纯前端插件:流式思考自动展开最新一条,新思考出现收起上一条,用户手动操作优先,历史会话不干预,设置页开关即时生效",
-  "version": "0.1.0",
+  "description": "流式回复时自动展开 AI 思考过程,始终显示最新一条;手动操作优先,装卸无残留",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

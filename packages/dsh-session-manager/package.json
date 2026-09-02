@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-session-manager",
-  "description": "DeepSeek Harness 设置页插件:会话生命周期三合一——新会话创建时按阈值自动归档旧会话(follow 增量帧 Toast 提示)、归档面板(取消归档/删除)、删除经两段式确认移入系统回收站",
-  "version": "0.1.0",
+  "description": "会话自动归档与管理:超期自动归档、归档面板、删除进系统回收站可恢复",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

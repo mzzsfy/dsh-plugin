@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-usage-panel",
-  "description": "DeepSeek Harness 设置页插件:手动配置多平台 LLM 账号(DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点),手动查询余额与额度,进度条 + 悬停明细展示",
-  "version": "0.2.0",
+  "description": "多平台 LLM 账号余额与额度面板:支持 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi 及自定义端点,自动定期查询,趋势图与历史快照",
+  "version": "0.2.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
