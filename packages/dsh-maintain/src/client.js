@@ -66,8 +66,11 @@ const RESTART_URL = '/api/maintain/restart'
 const POLL_WHILE_UPGRADING_MS = 2 * 1000
 // 与 host 侧轮询 tick(TICK_MS)同源:间隔设置的生效粒度受固定 tick 调度限制
 const POLL_MIN_TICK_SECONDS = 60
-// 与 host 侧默认命令模板(DEFAULT_UPGRADE_TEMPLATE)同源:等于默认值时输入框留空以 placeholder 展示
+// 与 host 侧默认值同源(DEFAULT_POLL_INTERVAL_SEC / DEFAULT_REGISTRY_BASE / DEFAULT_UPGRADE_TEMPLATE):
+// 等于默认值时输入框留空以 placeholder 展示,清空保存即恢复默认
 const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g @deepseek-ai/dsh@{tag}'
+const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
+const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
@@ -202,19 +205,21 @@ function SettingsCard(props) {
     h('div', { className: 'dm-card__title' }, '设置'),
     h(EditRow, {
       label: '轮询间隔',
-      value: status.pollIntervalSec,
+      value: status.pollIntervalSec === DEFAULT_POLL_INTERVAL_SEC ? '' : status.pollIntervalSec,
+      placeholder: DEFAULT_POLL_INTERVAL_SEC,
       busy: props.busy.pollInterval,
       restarting: props.restarting,
       onSave: props.onPollInterval,
-      hint: '秒;0 表示仅手动检查;最小生效粒度 ' + POLL_MIN_TICK_SECONDS + ' 秒',
+      hint: '默认以灰字提示,清空保存即恢复默认;0 表示仅手动检查;最小生效粒度 ' + POLL_MIN_TICK_SECONDS + ' 秒',
     }),
     h(EditRow, {
       label: '镜像地址',
-      value: status.registryBase,
+      value: status.registryBase === DEFAULT_REGISTRY_BASE ? '' : status.registryBase,
+      placeholder: DEFAULT_REGISTRY_BASE,
       busy: props.busy.registryBase,
       restarting: props.restarting,
       onSave: props.onRegistryBase,
-      hint: '官方源不可达时改为镜像',
+      hint: '默认以灰字提示,清空保存即恢复默认;官方源不可达时改为镜像',
     }),
   )
 }
@@ -377,8 +382,9 @@ function MaintainApp() {
 
   function onPollInterval(raw) {
     const text = typeof raw === 'string' ? raw.trim() : ''
+    // 空输入即恢复默认:输入框留空时以 placeholder 展示默认间隔
     if (text.length === 0) {
-      setError('轮询间隔不能为空')
+      submitEdit(POLL_INTERVAL_URL, { seconds: DEFAULT_POLL_INTERVAL_SEC }, 'pollInterval', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
       return
     }
     const seconds = Number(text)
@@ -396,6 +402,11 @@ function MaintainApp() {
 
   function onRegistryBase(raw) {
     const base = typeof raw === 'string' ? raw.trim() : ''
+    // 空输入即恢复默认:输入框留空时以 placeholder 展示官方源
+    if (base.length === 0) {
+      submitEdit(REGISTRY_BASE_URL, { base: DEFAULT_REGISTRY_BASE }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+      return
+    }
     if (!isValidRegistryBase(base)) {
       setError('registry 基地址必须以 http:// 或 https:// 开头')
       return
