@@ -1,0 +1,43 @@
+{
+  "name": "@mzzsfy/dsh-session-manager",
+  "description": "DeepSeek Harness 设置页插件:会话生命周期三合一——新会话创建时按阈值自动归档旧会话(follow 增量帧 Toast 提示)、归档面板(取消归档/删除)、删除经两段式确认移入系统回收站",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.1014.top:83/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": ">=0.1.1-rc.2",
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "react": "^18.2.0"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}
