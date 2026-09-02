@@ -25,7 +25,6 @@ const REGISTRY = 'https://registry.npmjs.org'
 const BUMP_KINDS = ['patch', 'minor', 'major']
 const PACKAGES = [
   'dsh-usage-panel',
-  'dsh-usage-stats',
   'dsh-maintain',
   'dsh-rs-workflow',
   'dsh-think-expand',
