@@ -99,10 +99,15 @@ export function shouldReloadAfterRestart({ lost, pidBefore, pidAfter }) {
   return typeof pidBefore === 'number' && typeof pidAfter === 'number' && pidBefore !== pidAfter
 }
 
+// registry 基地址必须是 http(s) 地址(scheme 大小写不敏感,RFC 3986);保存侧与请求侧共用同一判定。
+export function isValidRegistryBase(base) {
+  return typeof base === 'string' && /^https?:\/\//i.test(base.trim())
+}
+
 // 拉取 dist-tags 轻量端点;fetchImpl 注入便于单测,错误一律抛出由调用方决定保留上次结果。
 export async function fetchDistTags({ registryBase, fetchImpl = fetch, timeoutMs }) {
-  const base = (typeof registryBase === 'string' ? registryBase : '').trim().replace(/\/+$/, '')
-  if (!/^https?:\/\//.test(base)) throw new Error('registry 基地址无效: ' + registryBase)
+  if (!isValidRegistryBase(registryBase)) throw new Error('registry 基地址无效: ' + registryBase)
+  const base = registryBase.trim().replace(/\/+$/, '')
   const response = await fetchImpl(base + DIST_TAGS_PATH, {
     headers: { accept: 'application/json' },
     signal: AbortSignal.timeout(timeoutMs),

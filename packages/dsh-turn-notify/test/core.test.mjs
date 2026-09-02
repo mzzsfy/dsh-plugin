@@ -9,14 +9,22 @@ import {
   CATEGORY_ASK,
   mapEventToCategory,
   isSubagent,
+  isSubagentWakeTurn,
   shouldNotify,
+  SUBAGENT_WAKE_WINDOW_MS,
   buildUnit,
   buildWebhookPayload,
   createProjection,
   decideClaim,
   chooseChannels,
+  USER_IDLE_AWAY_MS,
   resolveSound,
   pruneMapping,
+  renameMapping,
+  validateSoundName,
+  SOUND_NAME_MAX_CHARS,
+  parseVolume,
+  DEFAULT_VOLUME,
   validateMappingId,
   validateConfigPatch,
   resolvedConfig,
@@ -106,6 +114,38 @@ test('分类开关关闭即不通知', () => {
   }), false)
 })
 
+test('子代理回执静默:唤醒回合 completed 不通知,其余分类与开关关闭不受影响', () => {
+  const now = 1_000_000
+  const windowMs = SUBAGENT_WAKE_WINDOW_MS
+  const settings = baseSettings()
+  // 唤醒判定:父会话回合开始时刻落在子代理结束后窗口内,恰等边界含
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now - windowMs, turnStartMs: now }), true)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now, turnStartMs: now }), true)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now - windowMs - 1, turnStartMs: now }), false)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now + 1, turnStartMs: now }), false)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: null, turnStartMs: now }), false)
+  // 唤醒回合 completed + 开关开 → 抑制
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, wakeTurn: true,
+  }), false)
+  // 开关关 → 通知
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings: baseSettings({ suppressSubagentWake: false }), header: {}, wakeTurn: true,
+  }), true)
+  // 非唤醒回合 → 正常通知(不误伤)
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, wakeTurn: false,
+  }), true)
+  // 唤醒回合但异常分类 → 仍通知
+  assert.equal(shouldNotify({
+    category: CATEGORY_ERROR, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, wakeTurn: true,
+  }), true)
+})
+
 test('投影环形容量与过期清理', () => {
   const capacity = 20
   const ttlMs = 60 * 1000
@@ -151,6 +191,23 @@ test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
+test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦静默', () => {
+  const base = { hasFocus: true, permission: 'granted' }
+  const idle = USER_IDLE_AWAY_MS
+  // 空闲满阈值:离开,聚焦静默不再适用,全通道
+  assert.deepEqual(chooseChannels({ ...base, idleMs: idle }), { toast: true, sound: true, system: true, blink: false })
+  // 恰等边界含
+  assert.equal(chooseChannels({ ...base, idleMs: idle - 1 }).sound, false)
+  // 活跃(刚行动):聚焦静默维持
+  assert.equal(chooseChannels({ ...base, idleMs: 0 }).sound, false)
+  // 空闲但未聚焦:行为不变
+  assert.equal(chooseChannels({ hasFocus: false, permission: 'granted', idleMs: idle }).sound, true)
+  // 未提供空闲时长:行为与旧版一致
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: false, system: false, blink: false })
+  // 空闲时聚焦静默关闭依旧生效
+  assert.equal(chooseChannels({ ...base, idleMs: 0, focusQuiet: false }).sound, true)
+})
+
 test('webhook payload 字段映射', () => {
   const unit = buildUnit({
     id: 'n1', category: CATEGORY_DONE, status: 'completed',
@@ -184,6 +241,44 @@ test('删除被引用音效后映射回落', () => {
   const mapping = pruneMapping({ [CATEGORY_DONE]: 'a', [CATEGORY_ERROR]: 'b' }, 'a')
   assert.equal(mapping[CATEGORY_DONE], undefined)
   assert.equal(mapping[CATEGORY_ERROR], 'b')
+})
+
+test('重命名映射:引用随新名迁移,无关分类保留', () => {
+  const mapping = renameMapping({ [CATEGORY_DONE]: 'old', [CATEGORY_ERROR]: 'other', [CATEGORY_ASK]: 'old' }, 'old', 'new')
+  assert.equal(mapping[CATEGORY_DONE], 'new')
+  assert.equal(mapping[CATEGORY_ERROR], 'other')
+  assert.equal(mapping[CATEGORY_ASK], 'new')
+})
+
+test('音量解析:未设置回默认,显式零保留,非法回落默认', () => {
+  assert.equal(parseVolume(null), DEFAULT_VOLUME)
+  assert.equal(parseVolume(undefined), DEFAULT_VOLUME)
+  assert.equal(parseVolume('0'), 0)
+  assert.equal(parseVolume('0.5'), 0.5)
+  assert.equal(parseVolume('1'), 1)
+  assert.equal(parseVolume('abc'), DEFAULT_VOLUME)
+  assert.equal(parseVolume('2'), DEFAULT_VOLUME)
+  assert.equal(parseVolume('-1'), DEFAULT_VOLUME)
+})
+
+test('音效名校验:合法名通过并归一化,非法名拒绝', () => {
+  assert.deepEqual(validateSoundName('  提示音甲 '), { ok: true, name: '提示音甲' })
+  assert.equal(validateSoundName('bell').ok, false)
+  assert.equal(validateSoundName('').ok, false)
+  assert.equal(validateSoundName('   ').ok, false)
+  assert.equal(validateSoundName('a/b').ok, false)
+  assert.equal(validateSoundName('a\\b').ok, false)
+  assert.equal(validateSoundName('a.b').ok, false)
+  assert.equal(validateSoundName('a:b').ok, false)
+  assert.equal(validateSoundName('a*b').ok, false)
+  assert.equal(validateSoundName('a?b').ok, false)
+  assert.equal(validateSoundName('a"b').ok, false)
+  assert.equal(validateSoundName('a<b').ok, false)
+  assert.equal(validateSoundName('a>b').ok, false)
+  assert.equal(validateSoundName('a|b').ok, false)
+  assert.equal(validateSoundName('a\u0000b').ok, false)
+  assert.equal(validateSoundName('长'.repeat(SOUND_NAME_MAX_CHARS + 1)).ok, false)
+  assert.equal(validateSoundName('长'.repeat(SOUND_NAME_MAX_CHARS)).ok, true)
 })
 
 test('上传校验:扩展名 / 单文件上限 / 总量上限', () => {
@@ -262,6 +357,7 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
     webhookUrl: ' https://hook.example ',
     minTurnDurationMs: 1500,
     rootsOnly: false,
+    suppressSubagentWake: false,
     enabled: { completed: false, error: true },
   })
   assert.equal(full.ok, true)
@@ -269,10 +365,12 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
     webhookUrl: 'https://hook.example',
     minTurnDurationMs: 1500,
     rootsOnly: false,
+    suppressSubagentWake: false,
     enabled: { completed: false, error: true },
   })
   assert.deepEqual(validateConfigPatch({ webhookUrl: '' }), { ok: true, patch: { webhookUrl: '' } })
   assert.deepEqual(validateConfigPatch({ rootsOnly: true }), { ok: true, patch: { rootsOnly: true } })
+  assert.deepEqual(validateConfigPatch({ suppressSubagentWake: true }), { ok: true, patch: { suppressSubagentWake: true } })
   assert.deepEqual(validateConfigPatch({}), { ok: true, patch: {} })
 })
 
@@ -287,6 +385,7 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
   assert.equal(validateConfigPatch({ minTurnDurationMs: 1.5 }).ok, false)
   assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
   assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
+  assert.equal(validateConfigPatch({ suppressSubagentWake: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
@@ -299,6 +398,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       webhookUrl: 'https://hook.example',
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
+      suppressSubagentWake: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
     },
@@ -307,10 +407,12 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     webhookUrl: '',
     minTurnDurationMs: MIN_TURN_MS,
     rootsOnly: true,
+    suppressSubagentWake: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
+  assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
 })
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
@@ -319,6 +421,7 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
     {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
+      suppressSubagentWake: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       webhookConfigured: true,

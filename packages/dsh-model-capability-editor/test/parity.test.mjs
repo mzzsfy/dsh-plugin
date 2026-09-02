@@ -22,13 +22,28 @@ function clientLogic() {
     section
       + '; return { EFFORT_LEVELS, OFF_LEVEL, COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts,'
       + ' inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces,'
-      + ' stashDrafts, restoreDrafts };',
+      + ' stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId };',
   )
   return factory()
 }
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId } = L
+
+  test(prefix + '目标模型解析:活动 ID 在基线用活动 ID,否则回落原 ID', () => {
+    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto-v2')
+    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto'])), 'auto')
+    assert.equal(resolveTargetId('', 'auto', new Set(['auto'])), 'auto')
+  })
+
+  test(prefix + '标题标记与锚点破坏判定', () => {
+    assert.equal(isModelsTitle('模型'), true)
+    assert.equal(isModelsTitle('Models'), true)
+    assert.equal(isModelsTitle('模型能力'), false)
+    assert.equal(anchorsBroken({ titleMatched: true, hasEditor: true, modelIdInputCount: 0 }), true)
+    assert.equal(anchorsBroken({ titleMatched: true, hasEditor: true, modelIdInputCount: 1 }), false)
+    assert.equal(anchorsBroken({ titleMatched: false, hasEditor: true, modelIdInputCount: 0 }), false)
+  })
 
   test(prefix + '四态映射:未声明 / false / 对象含 null / 对象含拼写', () => {
     // 未声明 → 无勾选
@@ -107,4 +122,18 @@ defineScenarios('[client.js] ', clientLogic())
 
 test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
+})
+
+// wire 适配段双副本守卫:client.js 中 LOGIC 段外的 unwrapWire/makeSettingsFace
+// 与 logic.mjs 导出必须逐字符一致(单文件格式无法 require,靠此测试防漂移)。
+test('client.js wire 适配段与 logic.mjs 同源', () => {
+  const sectionOf = (source, label) => {
+    const begin = source.indexOf('// 宿主 wire 信封')
+    const end = source.indexOf('async function describeNs')
+    assert.ok(begin >= 0 && end > begin, label + ' 缺少 wire 适配段')
+    return source.slice(begin, end).replace(/^export function/gm, 'function').trim()
+  }
+  const client = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  const logic = readFileSync(join(PKG_ROOT, 'src', 'logic.mjs'), 'utf8')
+  assert.equal(sectionOf(client, 'client.js'), sectionOf(logic, 'logic.mjs'))
 })

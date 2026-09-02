@@ -52,6 +52,16 @@ export const BUILTIN_TONES = {
 
 export const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
 
+// 未显式设置音量时的默认值。
+export const DEFAULT_VOLUME = 0.6
+
+// 音量解析:未设置或非法回落默认,显式零(静音)保留。
+export function parseVolume(raw) {
+  if (raw === null || raw === undefined) return DEFAULT_VOLUME
+  const value = Number(raw)
+  return value >= 0 && value <= 1 ? value : DEFAULT_VOLUME
+}
+
 export const PROJECTION_CAPACITY = 20
 export const PROJECTION_TTL_MS = 60 * 1000
 export const CLAIM_LOCK_TTL_MS = 30 * 1000
@@ -88,13 +98,24 @@ export function isSubagent(header) {
   return source.origin === 'subagent' || (source.delegationDepth ?? 0) > 0
 }
 
+// 子代理结束到父会话被唤醒的投递裕量;超过视为与子代理无关的新回合。
+export const SUBAGENT_WAKE_WINDOW_MS = 30 * 1000
+
+// 唤醒回合判定:父会话回合开始前窗口内,有其子代理会话结束(childDoneAt 为时间戳,null 表示无记录)。
+export function isSubagentWakeTurn({ childDoneAt, turnStartMs, windowMs = SUBAGENT_WAKE_WINDOW_MS }) {
+  if (typeof childDoneAt !== 'number') return false
+  const elapsed = turnStartMs - childDoneAt
+  return elapsed >= 0 && elapsed <= windowMs
+}
+
 const DURATION_FILTERED_KINDS = [TURN_END_KIND]
 
-// 通知总决策:分类开关 + 子代理豁免 + 碎轮过滤(仅 turn/end 类)。
-export function shouldNotify({ category, kind, durationMs, settings, header }) {
+// 通知总决策:分类开关 + 子代理豁免 + 唤醒回执静默 + 碎轮过滤(仅 turn/end 类)。
+export function shouldNotify({ category, kind, durationMs, settings, header, wakeTurn }) {
   if (category === null) return false
   if ((settings.enabled || {})[category] === false) return false
   if (settings.rootsOnly !== false && isSubagent(header)) return false
+  if (wakeTurn === true && category === CATEGORY_DONE && settings.suppressSubagentWake !== false) return false
   if (DURATION_FILTERED_KINDS.indexOf(kind) >= 0 && durationMs !== null && durationMs < settings.minTurnDurationMs) return false
   return true
 }
@@ -161,10 +182,15 @@ export function decideClaim({ stored, done, now, windowId, lockTtlMs = CLAIM_LOC
   return lock.wid === windowId ? 'claim' : 'skip'
 }
 
+// 用户行动空闲满此时长视为离开:聚焦静默不再适用,通知全通道齐发。
+export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
+
 // 发声通道判定:页内提示与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, systemEnabled = true }) {
-  const quiet = hasFocus && focusQuiet
+// idleMs 为距上次用户行动的时长,满阈值视为离开,等效未聚焦。
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS }) {
+  const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
+  const quiet = hasFocus && focusQuiet && !idleAway
   return {
     toast: toastEnabled,
     sound: !quiet,
@@ -190,6 +216,32 @@ export function pruneMapping(mapping, removedId) {
     if (mapping[key] !== removedId) next[key] = mapping[key]
   }
   return next
+}
+
+// 重命名音效后同步迁移映射中的引用。
+export function renameMapping(mapping, fromId, toId) {
+  const next = {}
+  for (const key of Object.keys(mapping || {})) {
+    next[key] = mapping[key] === fromId ? toId : mapping[key]
+  }
+  return next
+}
+
+// 音效名长度上限:供文件名与列表展示,超长截断提示不佳,直接拒绝。
+export const SOUND_NAME_MAX_CHARS = 64
+
+// 音效文件名黑名单:分隔符防路径穿越,点防 listSounds 以首点分割 id/ext 错位,
+// 控制字符与 Windows 非法字符防落盘失败。
+const SOUND_NAME_FORBIDDEN = /[\\/:*?"<>|.\u0000-\u001f]/
+
+// 音效名校验:trim 归一化随结果返回;与内置音色重名会污染映射 id 命名空间,一并拒绝。
+export function validateSoundName(rawName) {
+  const name = String(rawName ?? '').trim()
+  if (name.length === 0) return { ok: false, reason: '名称不能为空' }
+  if (name.length > SOUND_NAME_MAX_CHARS) return { ok: false, reason: '名称超过长度上限' }
+  if (SOUND_NAME_FORBIDDEN.test(name)) return { ok: false, reason: '名称含非法字符' }
+  if (Object.prototype.hasOwnProperty.call(BUILTIN_TONES, name)) return { ok: false, reason: '名称与内置音色冲突' }
+  return { ok: true, name }
 }
 
 export function uploadExt(filename) {
@@ -301,7 +353,7 @@ const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 // 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'enabled']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -329,6 +381,10 @@ export function validateConfigPatch(patch) {
     if (typeof patch.rootsOnly !== 'boolean') return { ok: false, reason: 'rootsOnly 须为布尔' }
     next.rootsOnly = patch.rootsOnly
   }
+  if ('suppressSubagentWake' in patch) {
+    if (typeof patch.suppressSubagentWake !== 'boolean') return { ok: false, reason: 'suppressSubagentWake 须为布尔' }
+    next.suppressSubagentWake = patch.suppressSubagentWake
+  }
   if ('enabled' in patch) {
     const enabled = patch.enabled
     if (enabled === null || typeof enabled !== 'object' || Array.isArray(enabled)) return { ok: false, reason: 'enabled 须为对象' }
@@ -352,6 +408,7 @@ export function resolvedConfig(settings) {
     webhookUrl: typeof source.webhookUrl === 'string' ? source.webhookUrl : '',
     minTurnDurationMs: duration,
     rootsOnly: source.rootsOnly !== false,
+    suppressSubagentWake: source.suppressSubagentWake !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping: { ...soundMapping },
   }
@@ -363,6 +420,7 @@ export function publicConfig(settings) {
   return {
     minTurnDurationMs: resolved.minTurnDurationMs,
     rootsOnly: resolved.rootsOnly,
+    suppressSubagentWake: resolved.suppressSubagentWake,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     webhookConfigured: resolved.webhookUrl.trim().length > 0,

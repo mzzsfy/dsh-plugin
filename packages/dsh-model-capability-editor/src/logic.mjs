@@ -4,7 +4,7 @@
 
 export const NS = 'llm-pi-ai'
 export const CONFLICT_CODE = 'settings-conflict'
-export const EFFORT_LEVELS = ['off', 'low', 'medium', 'high']
+export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 export const OFF_LEVEL = 'off'
 export const MODALITIES = ['text', 'image']
 export const INPUT_UNSET = 'unset'
@@ -110,6 +110,24 @@ export function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
+// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+export function resolveTargetId(liveId, originalId, baselineIds) {
+  const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
+  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+}
+
+// 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
+export function isModelsTitle(title) {
+  return title === '模型' || title === 'Models'
+}
+
+// 锚点破坏判定:模型页已打开且官方编辑器已展开,却找不到任何「模型 ID」输入,
+// 说明官方 DOM 结构已变,行内注入失效,应回退独立菜单。
+export function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
+  return titleMatched === true && hasEditor === true && modelIdInputCount === 0
+}
+
 function unwrapResult(result) {
   if (result !== null && typeof result === 'object' && result.ok === true) return result.value
   const error = new Error(result && result.error && result.error.message
@@ -117,6 +135,31 @@ function unwrapResult(result) {
     : 'settings RPC 调用失败')
   error.code = result && result.error ? result.error.code : undefined
   throw error
+}
+
+// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
+export function unwrapWire(response) {
+  const result = response !== null && typeof response === 'object' ? response.result : undefined
+  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+  return {
+    ok: false,
+    error: result !== null && typeof result === 'object' && result.error !== undefined
+      ? result.error
+      : { code: undefined, message: 'settings RPC 调用失败' },
+  }
+}
+
+// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+export function makeSettingsFace(wire) {
+  if (wire === null || typeof wire !== 'object' ||
+      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
+  return {
+    describe: async () => unwrapWire(await wire.describe({})),
+    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
+      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
+    )),
+  }
 }
 
 async function describeNs(settings) {

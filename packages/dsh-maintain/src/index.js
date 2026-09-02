@@ -10,6 +10,7 @@ import {
   TAG_PLACEHOLDER,
   buildUpgradeCommand,
   fetchDistTags,
+  isValidRegistryBase,
   judgeVersion,
   resolveHostVersion,
 } from './core.mjs'
@@ -138,6 +139,9 @@ export function apply(ctx) {
       pid: process.pid,
       currentVersion: snapshot.currentVersion,
       channel: config.channel,
+      upgradeTemplate: config.upgradeCommandTemplate,
+      pollIntervalSec: config.pollIntervalSec,
+      registryBase: config.registryBase,
       tags: snapshot.tags,
       channelLatest: judged.channelLatest,
       verdict: judged.verdict,
@@ -222,6 +226,81 @@ export function apply(ctx) {
             return
           }
           await settings.update(NAMESPACE, { channel })
+          await runCheck()
+          scheduleNext()
+          sendJson(res, 200, currentStatus())
+        } catch (error) {
+          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      path: '/api/maintain/upgrade-template',
+      handler: async (req, res) => {
+        if (!rejectNonPost(req, res)) return
+        try {
+          const body = JSON.parse(await readBody(req))
+          const template = body && typeof body.template === 'string' ? body.template.trim() : ''
+          if (template.length === 0) {
+            sendJson(res, 400, { error: '升级命令不能为空' })
+            return
+          }
+          const settings = ctx.get('settings')
+          if (!settings) {
+            sendJson(res, 500, { error: 'settings 服务不可用' })
+            return
+          }
+          await settings.update(NAMESPACE, { upgradeCommandTemplate: template })
+          sendJson(res, 200, currentStatus())
+        } catch (error) {
+          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      path: '/api/maintain/poll-interval',
+      handler: async (req, res) => {
+        if (!rejectNonPost(req, res)) return
+        try {
+          const body = JSON.parse(await readBody(req))
+          // 严格类型:字符串/ null 等经 Number() 宽转后可能变 0,静默翻转轮询开关
+          const seconds = body && typeof body.seconds === 'number' ? body.seconds : NaN
+          if (!Number.isFinite(seconds) || seconds < 0) {
+            sendJson(res, 400, { error: '轮询间隔必须是不小于 0 的秒数' })
+            return
+          }
+          const settings = ctx.get('settings')
+          if (!settings) {
+            sendJson(res, 500, { error: 'settings 服务不可用' })
+            return
+          }
+          await settings.update(NAMESPACE, { pollIntervalSec: seconds })
+          scheduleNext()
+          sendJson(res, 200, currentStatus())
+        } catch (error) {
+          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+        }
+      },
+    },
+    {
+      path: '/api/maintain/registry-base',
+      handler: async (req, res) => {
+        if (!rejectNonPost(req, res)) return
+        try {
+          const body = JSON.parse(await readBody(req))
+          const base = body && typeof body.base === 'string' ? body.base.trim() : ''
+          if (!isValidRegistryBase(base)) {
+            sendJson(res, 400, { error: 'registry 基地址必须以 http:// 或 https:// 开头' })
+            return
+          }
+          const settings = ctx.get('settings')
+          if (!settings) {
+            sendJson(res, 500, { error: 'settings 服务不可用' })
+            return
+          }
+          await settings.update(NAMESPACE, { registryBase: base })
+          // 排空旧源的在途检查:runCheck 以 checkInFlight 去重,不排空会把旧源结果当作新源检查返回
+          if (checkInFlight) await checkInFlight
           await runCheck()
           scheduleNext()
           sendJson(res, 200, currentStatus())

@@ -42,6 +42,10 @@ const CSS = [
   '.dm-badge--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); border-color:var(--dsw-alias-state-success-primary, #1a9e55); }',
   '.dm-select { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
   '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; }',
+  '.dm-input { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
+  '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:ui-monospace, Consolas, monospace; flex:1; min-width:160px; }',
+  '.dm-input:focus { outline:none; border-color:var(--dsw-alias-label-secondary, rgba(128,128,128,0.6)); }',
+  '.dm-input:disabled { opacity:0.45; }',
   '.dm-link { color:var(--dsw-alias-label-secondary); font-size:12px; }',
   '.dm-notice { font-size:12px; padding:6px 10px; border-radius:6px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
   '.dm-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
@@ -54,9 +58,19 @@ const CSS = [
 const STATUS_URL = '/api/maintain/status'
 const REFRESH_URL = '/api/maintain/refresh'
 const CHANNEL_URL = '/api/maintain/channel'
+const TEMPLATE_URL = '/api/maintain/upgrade-template'
+const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
+const REGISTRY_BASE_URL = '/api/maintain/registry-base'
 const UPGRADE_URL = '/api/maintain/upgrade'
 const RESTART_URL = '/api/maintain/restart'
 const POLL_WHILE_UPGRADING_MS = 2 * 1000
+// 与 host 侧轮询 tick(TICK_MS)同源:间隔设置的生效粒度受固定 tick 调度限制
+const POLL_MIN_TICK_SECONDS = 60
+// 与 host 侧默认值同源(DEFAULT_POLL_INTERVAL_SEC / DEFAULT_REGISTRY_BASE / DEFAULT_UPGRADE_TEMPLATE):
+// 等于默认值时输入框留空以 placeholder 展示,清空保存即恢复默认
+const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g @deepseek-ai/dsh@{tag}'
+const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
+const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
@@ -111,7 +125,31 @@ function VerdictBadge(props) {
   return h('span', { className: 'dm-badge' }, '未知:' + (status.reason || '等待检查'))
 }
 
-// 版本区:当前版本、通道切换、通道最新版、结论、检查时间与错误、刷新与升级。
+// 可编辑设置行:label + 文本框 + 保存按钮;value 为服务端当前值,key 变化即外部更新时重置输入。
+function EditRow(props) {
+  const inputRef = useRef(null)
+  const read = () => (inputRef.current ? inputRef.current.value : '')
+  return h('div', { className: 'dm-row' },
+    h('span', { className: 'dm-row__label' }, props.label),
+    h('input', {
+      className: 'dm-input',
+      ref: inputRef,
+      key: props.value == null ? '' : props.value,
+      defaultValue: props.value == null ? '' : props.value,
+      placeholder: props.placeholder || '',
+      disabled: props.busy || props.restarting,
+      onKeyDown: (e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) props.onSave(read()) },
+    }),
+    h('button', {
+      className: 'dm-btn',
+      disabled: props.busy || props.restarting,
+      onClick: () => props.onSave(read()),
+    }, props.busy ? '保存中…' : '保存'),
+    props.hint ? h('span', { className: 'dm-meta' }, props.hint) : null,
+  )
+}
+
+// 版本区:当前版本、通道切换、通道最新版、结论、检查时间与错误、刷新与升级、升级命令编辑。
 function VersionCard(props) {
   const status = props.status
   const tags = status.tags || {}
@@ -146,11 +184,43 @@ function VersionCard(props) {
         : h('span', { className: 'dm-meta' }, status.channel + '(通道表未就绪)'),
       checked ? h('span', { className: 'dm-meta' }, '上次检查 ' + checked) : null,
       status.checkError ? h('span', { className: 'dm-error' }, status.checkError) : null,
-    ),
-    h('div', { className: 'dm-row' },
       h('a', { className: 'dm-link', href: NPM_VERSIONS_URL, target: '_blank', rel: 'noreferrer' }, 'npm 版本页'),
-      h('span', { className: 'dm-meta' }, '升级执行自定义命令,完成后需重启生效'),
     ),
+    h(EditRow, {
+      label: '升级命令',
+      value: status.upgradeTemplate === DEFAULT_UPGRADE_TEMPLATE ? '' : status.upgradeTemplate,
+      placeholder: DEFAULT_UPGRADE_TEMPLATE,
+      busy: props.busy.template,
+      restarting: props.restarting,
+      onSave: props.onTemplateSave,
+      hint: '默认以灰字提示,清空保存即恢复默认;{tag} 执行时替换为追踪通道;升级完成后需重启生效',
+    }),
+  )
+}
+
+// 设置区:轮询间隔与 registry 基地址,保存即时生效。
+function SettingsCard(props) {
+  const status = props.status
+  return h('div', { className: 'dm-card' },
+    h('div', { className: 'dm-card__title' }, '设置'),
+    h(EditRow, {
+      label: '轮询间隔',
+      value: status.pollIntervalSec === DEFAULT_POLL_INTERVAL_SEC ? '' : status.pollIntervalSec,
+      placeholder: DEFAULT_POLL_INTERVAL_SEC,
+      busy: props.busy.pollInterval,
+      restarting: props.restarting,
+      onSave: props.onPollInterval,
+      hint: '默认以灰字提示,清空保存即恢复默认;0 表示仅手动检查;最小生效粒度 ' + POLL_MIN_TICK_SECONDS + ' 秒',
+    }),
+    h(EditRow, {
+      label: '镜像地址',
+      value: status.registryBase === DEFAULT_REGISTRY_BASE ? '' : status.registryBase,
+      placeholder: DEFAULT_REGISTRY_BASE,
+      busy: props.busy.registryBase,
+      restarting: props.restarting,
+      onSave: props.onRegistryBase,
+      hint: '默认以灰字提示,清空保存即恢复默认;官方源不可达时改为镜像',
+    }),
   )
 }
 
@@ -292,6 +362,58 @@ function MaintainApp() {
       .then(() => markBusy('channel', false))
   }
 
+  // 设置编辑公共提交链:校验通过后 POST 持久化,成功以响应快照刷新,失败回读兜底
+  function submitEdit(url, body, busyKey, onSaveError) {
+    markBusy(busyKey, true)
+    post(url, body)
+      .then((next) => { setStatus(next); setError(null) })
+      .catch((saveError) => {
+        setError(onSaveError(saveError))
+        return load()
+      })
+      .then(() => markBusy(busyKey, false))
+  }
+
+  function onTemplateSave(template) {
+    const text = typeof template === 'string' ? template.trim() : ''
+    // 空输入即恢复默认:输入框留空时以 placeholder 展示默认命令,保存空 = 回到默认模板
+    submitEdit(TEMPLATE_URL, { template: text.length > 0 ? text : DEFAULT_UPGRADE_TEMPLATE }, 'template', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+  }
+
+  function onPollInterval(raw) {
+    const text = typeof raw === 'string' ? raw.trim() : ''
+    // 空输入即恢复默认:输入框留空时以 placeholder 展示默认间隔
+    if (text.length === 0) {
+      submitEdit(POLL_INTERVAL_URL, { seconds: DEFAULT_POLL_INTERVAL_SEC }, 'pollInterval', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+      return
+    }
+    const seconds = Number(text)
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      setError('轮询间隔必须是不小于 0 的秒数')
+      return
+    }
+    submitEdit(POLL_INTERVAL_URL, { seconds }, 'pollInterval', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+  }
+
+  // 与 host 的 isValidRegistryBase 同源:client 半区无法 import ESM,修改需两处同步。
+  function isValidRegistryBase(value) {
+    return typeof value === 'string' && /^https?:\/\//i.test(value.trim())
+  }
+
+  function onRegistryBase(raw) {
+    const base = typeof raw === 'string' ? raw.trim() : ''
+    // 空输入即恢复默认:输入框留空时以 placeholder 展示官方源
+    if (base.length === 0) {
+      submitEdit(REGISTRY_BASE_URL, { base: DEFAULT_REGISTRY_BASE }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+      return
+    }
+    if (!isValidRegistryBase(base)) {
+      setError('registry 基地址必须以 http:// 或 https:// 开头')
+      return
+    }
+    submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+  }
+
   function onUpgrade() {
     if (!upgradeArmed) {
       setUpgradeArmed(true)
@@ -359,8 +481,16 @@ function MaintainApp() {
       restarting,
       onRefresh,
       onChannel,
+      onTemplateSave,
       onUpgrade,
       onRestart,
+    }),
+    h(SettingsCard, {
+      status,
+      busy,
+      restarting,
+      onPollInterval,
+      onRegistryBase,
     }),
     h(UpgradeCard, { status, restartArmed, restarting, onRestart }),
     h(OpsCard, { status, armed: restartArmed, restarting, onRestart }),

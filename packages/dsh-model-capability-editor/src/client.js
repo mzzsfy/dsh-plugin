@@ -1,7 +1,8 @@
-// 模型能力编辑 Client 半区:settings.models.footer 官方插槽卡片。
+// 模型能力编辑 Client 半区:settings.section 独立设置页卡片。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 由 DSH client runtime 的模块表解析。
-// 纯客户端零 host 端:读写经 ctx.remote.settings 的 describe/mutate RPC。
+// 纯客户端零 host 端:读写经 connection.api.settings 的 describe/mutate wire RPC,
+// 信封由 makeSettingsFace 适配为插件内部 RPC 面。
 // 判定逻辑与 src/logic.mjs 为同一份(单文件自包含格式无法跨文件 require),
 // 修改须两处同步。
 
@@ -13,7 +14,7 @@ window.__ModuleLoader__.load({
 
 const NS = 'llm-pi-ai'
 const CONFLICT_CODE = 'settings-conflict'
-const FOOTER_ORDER = 100
+const RECONCILE_DEBOUNCE_MS = 150
 
 const CSS = [
   '.mce-card { display:flex; flex-direction:column; gap:10px; color:inherit; font-size:13px;',
@@ -26,6 +27,7 @@ const CSS = [
   '  background:transparent; color:inherit; border-radius:6px; padding:3px 10px; font-size:12px; }',
   '.mce-btn:hover { opacity:0.8; }',
   '.mce-btn:disabled { opacity:0.45; cursor:default; }',
+  '.mce-btn--primary { background:var(--dsw-alias-bg-brand-primary, #4d6bfe); border-color:transparent; color:#fff; }',
   '.mce-select { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
   '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; }',
   '.mce-text { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
@@ -41,6 +43,22 @@ const CSS = [
   '.mce-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
   '.mce-notice--warn { color:#d97706; }',
   '.mce-spacer { flex:1; }',
+  '.mce-inline { margin-top:6px; padding:8px 10px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.25));',
+  '  border-radius:8px; display:flex; flex-direction:column; gap:8px; color:inherit; font-size:12px;',
+  '  background:var(--dsw-alias-bg-secondary, rgba(128,128,128,0.06)); }',
+  '.mce-inline__title { font-weight:600; font-size:12px; color:var(--dsw-alias-label-secondary); }',
+  '.mce-inline__grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:6px 16px; }',
+  '.mce-inline__field { display:flex; align-items:center; gap:6px; min-width:0; }',
+  '.mce-inline__field > label { display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }',
+  '.mce-inline__field input[type=text] { flex:1; min-width:0; width:auto; }',
+  '.mce-inline select { flex:1; min-width:0; }',
+  '.mce-inline__foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+  '.mce-fallback-btn { position:fixed; right:16px; top:50%; transform:translateY(-50%); z-index:60;',
+  '  box-shadow:0 2px 8px rgba(0,0,0,0.18); }',
+  '.mce-fallback-card { position:fixed; right:16px; top:12px; bottom:12px; width:420px; max-width:calc(100vw - 32px);',
+  '  overflow:auto; z-index:55; background:var(--dsw-alias-bg-primary, #fff);',
+  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); border-radius:12px;',
+  '  box-shadow:0 4px 24px rgba(0,0,0,0.18); }',
 ].join('\n')
 
 function h(type, props) {
@@ -51,7 +69,7 @@ function h(type, props) {
 /* LOGIC-BEGIN */
 // 纯逻辑段:与 src/logic.mjs 保持同一份判定逻辑,由 parity 测试保证。
 
-const EFFORT_LEVELS = ['off', 'low', 'medium', 'high']
+const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const OFF_LEVEL = 'off'
 const INPUT_UNSET = 'unset'
 const INPUT_TEXT = 'text'
@@ -148,6 +166,24 @@ function restoreDrafts(buckets, route) {
   const drafts = buckets.get(route)
   return drafts === undefined ? null : drafts
 }
+
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
+// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+function resolveTargetId(liveId, originalId, baselineIds) {
+  const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
+  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+}
+
+// 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
+function isModelsTitle(title) {
+  return title === '模型' || title === 'Models'
+}
+
+// 锚点破坏判定:模型页已打开且官方编辑器已展开,却找不到任何「模型 ID」输入,
+// 说明官方 DOM 结构已变,行内注入失效,应回退独立菜单。
+function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
+  return titleMatched === true && hasEditor === true && modelIdInputCount === 0
+}
 /* LOGIC-END */
 
 function unwrapResult(result) {
@@ -157,6 +193,31 @@ function unwrapResult(result) {
     : 'settings RPC 调用失败')
   error.code = result && result.error ? result.error.code : undefined
   throw error
+}
+
+// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
+function unwrapWire(response) {
+  const result = response !== null && typeof response === 'object' ? response.result : undefined
+  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+  return {
+    ok: false,
+    error: result !== null && typeof result === 'object' && result.error !== undefined
+      ? result.error
+      : { code: undefined, message: 'settings RPC 调用失败' },
+  }
+}
+
+// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+function makeSettingsFace(wire) {
+  if (wire === null || typeof wire !== 'object' ||
+      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
+  return {
+    describe: async () => unwrapWire(await wire.describe({})),
+    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
+      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
+    )),
+  }
 }
 
 async function describeNs(settings) {
@@ -279,7 +340,7 @@ function CapabilityCard(props) {
     try {
       const settings = props.settings
       if (!settings || typeof settings.describe !== 'function') {
-        patch({ phase: 'readonly', reason: 'remote.settings 槽缺失,无法读写模型声明' })
+        patch({ phase: 'readonly', reason: 'connection.api.settings wire 面缺失,无法读写模型声明' })
         return
       }
       const value = unwrapResult(await settings.describe())
@@ -311,6 +372,7 @@ function CapabilityCard(props) {
   useEffect(() => { void load() }, [])
 
   function selectRoute(nextRoute) {
+    const prevRoute = state.route
     stashDrafts(bucketsRef.current, state.route, state.drafts)
     patch({ route: nextRoute, phase: 'ready' })
     void (async () => {
@@ -326,6 +388,8 @@ function CapabilityCard(props) {
         const drafts = restoreDrafts(bucketsRef.current, nextRoute) || draftsFromModels(models)
         patch({ models, drafts, traces: detectCompetitorTraces(models) })
       } catch (error) {
+        // describe 失败:回滚路由,models/drafts 仍是旧路由数据,避免旧草稿对新基线静默写回
+        patch({ route: prevRoute })
         setNotice({ kind: 'error', text: '读取 ' + nextRoute + ' 失败:' + (error && error.message ? error.message : String(error)) })
       }
     })()
@@ -363,17 +427,14 @@ function CapabilityCard(props) {
 
   if (state.phase === 'loading') {
     return h('div', { className: 'mce-card' },
-      h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
       h('span', { className: 'mce-label' }, '正在读取模型声明…'))
   }
   if (state.phase === 'readonly') {
     return h('div', { className: 'mce-card' },
-      h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
       h('div', { className: 'mce-head' }, h('span', { className: 'mce-head__title' }, '模型能力')),
       h('div', { className: 'mce-notice mce-notice--error' }, state.reason))
   }
   return h('div', { className: 'mce-card' },
-    h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'mce-head' },
       h('span', { className: 'mce-head__title' }, '模型能力'),
       h('span', { className: 'mce-head__hint' }, '编辑 llm-pi-ai 管理的模型声明,覆盖范围仅限 llm-pi-ai'),
@@ -407,17 +468,307 @@ function CapabilityCard(props) {
   )
 }
 
+// 回退浮动入口:行内注入锚点破坏时,模型页右侧提供完整编辑卡
+function FallbackPanel(props) {
+  const [open, setOpen] = useState(false)
+  return h('div', null,
+    h('button', { className: 'mce-btn mce-fallback-btn', onClick: () => setOpen(!open) },
+      open ? '收起模型能力' : '模型能力'),
+    open ? h('div', { className: 'mce-fallback-card' },
+      React.createElement(CapabilityCard, { settings: props.settings }),
+    ) : null,
+  )
+}
+
+// 行内编辑块:单个模型的档位与模态编辑,挂在官方模型行的展开区内。
+// 复用整组合并保存流,草稿只含本模型一条,其余模型原样保留。
+function RowEditor(props) {
+  const settings = props.settings
+  const route = props.route
+  const modelId = props.modelId
+  const aliveRef = React.useRef(true)
+  const [state, setState] = useState({ phase: 'loading', draft: null, notice: null })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => () => { aliveRef.current = false }, [])
+
+  function patch(part) { setState((prev) => ({ ...prev, ...part })) }
+
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const value = unwrapResult(await settings.describe())
+        const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
+        if (!alive) return
+        if (ns === undefined) { patch({ phase: 'hidden' }); return }
+        const model = modelsOf(ns.value, route).find((entry) => entry.id === modelId)
+        if (model === undefined) { patch({ phase: 'hidden' }); return }
+        patch({ phase: 'ready', draft: draftsFromModels([model]).get(modelId) })
+      } catch (error) {
+        if (alive) patch({ phase: 'error', notice: error && error.message ? error.message : String(error) })
+      }
+    })()
+    return () => { alive = false }
+  }, [])
+
+  async function apply() {
+    setSaving(true)
+    patch({ notice: null })
+    try {
+      // S3:官方行内 ID 输入是活动状态,改名已落盘则以新 ID 为目标,否则回落原 ID
+      const el = props.idInputEl
+      const liveId = el && el.isConnected ? el.value : modelId
+      const first = unwrapResult(await settings.describe())
+      const nsFirst = (first.namespaces || []).find((entry) => entry.ns === NS)
+      const baselineIds = new Set(nsFirst !== undefined ? modelsOf(nsFirst.value, route).map((entry) => entry.id) : [])
+      const targetId = resolveTargetId(liveId, modelId, baselineIds)
+      await saveModels(settings, route, new Map([[targetId, state.draft]]))
+      // S4:保存后重读重建草稿,基线新鲜,保留他方词汇表外档位
+      const second = unwrapResult(await settings.describe())
+      const nsSecond = (second.namespaces || []).find((entry) => entry.ns === NS)
+      const latest = nsSecond !== undefined
+        ? modelsOf(nsSecond.value, route).find((entry) => entry.id === targetId)
+        : undefined
+      if (aliveRef.current) {
+        patch({
+          notice: { kind: 'ok', text: '已保存' },
+          draft: latest !== undefined ? draftsFromModels([latest]).get(targetId) : state.draft,
+        })
+      }
+    } catch (error) {
+      if (aliveRef.current) patch({ notice: { kind: 'error', text: error && error.message ? error.message : String(error) } })
+    } finally {
+      if (aliveRef.current) setSaving(false)
+    }
+  }
+
+  if (state.phase === 'loading') {
+    return h('div', { className: 'mce-inline' }, h('span', { className: 'mce-label' }, '正在读取模型声明…'))
+  }
+  if (state.phase === 'error') {
+    return h('div', { className: 'mce-inline' }, h('span', { className: 'mce-notice mce-notice--error' }, state.notice))
+  }
+  if (state.phase === 'hidden') return null
+  const draft = state.draft
+  const editDraft = (part) => patch({ draft: { ...draft, ...part } })
+  return h('div', { className: 'mce-inline' },
+    h('div', { className: 'mce-inline__title' }, '模型能力(思考档位 / 输入模态)'),
+    h('div', { className: 'mce-inline__grid' },
+      EFFORT_LEVELS.map((level) => h('div', { className: 'mce-inline__field', key: level },
+        h('label', null,
+          h('input', {
+            type: 'checkbox',
+            disabled: saving,
+            checked: draft.checked[level] === true,
+            onChange: () => editDraft({ checked: { ...draft.checked, [level]: draft.checked[level] !== true } }),
+          }),
+          level,
+        ),
+        h('input', {
+          type: 'text',
+          className: 'mce-text',
+          disabled: saving || draft.checked[level] !== true,
+          value: draft.spellings[level] || '',
+          placeholder: level === OFF_LEVEL ? '留空=不发送' : level,
+          title: '发往网关的线上值',
+          onChange: (event) => editDraft({ spellings: { ...draft.spellings, [level]: event.target.value } }),
+        }),
+      )),
+    ),
+    h('div', { className: 'mce-inline__field' },
+      h('span', { className: 'mce-label' }, '输入模态:'),
+      h('select', {
+        className: 'mce-select',
+        disabled: saving,
+        value: draft.inputMode,
+        onChange: (event) => editDraft({ inputMode: event.target.value }),
+      }, INPUT_MODES.map((mode) => h('option', { key: mode, value: mode }, INPUT_MODE_LABELS[mode]))),
+    ),
+    h('div', { className: 'mce-inline__foot' },
+      h('button', { className: 'mce-btn mce-btn--primary', disabled: saving, onClick: apply }, saving ? '保存中…' : '应用'),
+      state.notice !== null
+        ? h('span', { className: 'mce-notice mce-notice--' + state.notice.kind }, state.notice.text)
+        : null,
+    ),
+  )
+}
+
     return {
-      inject: ['slots'],
+      inject: ['connection'],
       apply(ctx) {
-        // remote.settings 是宿主懒加载服务,boot 期不可用,inject 会使 entry 永久
-        // pending;cordis 对未 inject 服务的属性访问直接抛错,因此卡片渲染回调
-        // 内才经 ctx.remote 惰性取用,缺失由 load() 的降级分支处理。
-        ctx.slots.inject('settings.models.footer', () =>
-          ctx.slots.register(
-            { name: 'settings.models.footer', id: 'model-capability-editor', order: FOOTER_ORDER },
-            () => React.createElement(CapabilityCard, { settings: ctx.remote.settings }),
-          ))
+        // connection 为 boot 期即时服务,apply 内即可取 wire 面;面缺失由
+        // CapabilityCard load() 的降级分支呈现只读原因,不在渲染回调抛错。
+        const settings = makeSettingsFace(ctx.connection.api.settings)
+
+        // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑块
+        // 挂进已展开的模型行;官方结构变化导致锚点全失时,在模型页右侧注入
+        // 浮动入口承载完整编辑卡,不再注册独立设置分区。
+        const reactDom = require('react-dom')
+        const roots = new Map()
+        let piAiModelIds = new Set()
+        let piAiRoutes = new Set()
+        // 破坏闩锁:锚点破坏一经判定即置位,面板在模型页常驻,
+        // 直到行内注入成功才解除——不随编辑器收起而丢失入口
+        let anchorsLatched = false
+        let scanPending = false
+        // 轮次序号:describe 异步返回时已可能是过期快照,过期轮次不得改状态
+        let reconcileSeq = 0
+
+        function docInfo() {
+          const outlet = document.querySelector('[data-slot="settings.section"]')
+          if (outlet === null) return null
+          const heading = outlet.querySelector('h2')
+          const title = heading !== null ? heading.textContent : null
+          const titleMatched = isModelsTitle(title)
+          const details = outlet.querySelector('details')
+          const idInputs = titleMatched
+            ? [...outlet.querySelectorAll('input[aria-label^="模型 ID"], input[aria-label^="Model ID"]')]
+            : []
+          return { outlet, titleMatched, hasEditor: details !== null, idInputs }
+        }
+
+        function entryOf(idInput) {
+          const modelRow = idInput.closest('div')
+          return modelRow !== null ? modelRow.parentElement : null
+        }
+
+        function mountRow(face, idInput) {
+          const entry = entryOf(idInput)
+          if (entry === null || entry.querySelector(':scope > .mce-inline-root') !== null) return false
+          const details = idInput.closest('details')
+          const editor = details !== null ? details.parentElement : null
+          if (editor === null) return false
+          const route = editor.firstElementChild !== null ? editor.firstElementChild.textContent : null
+          const modelId = idInput.value
+          if (route === null || modelId.length === 0) return false
+          if (!piAiRoutes.has(route) || !piAiModelIds.has(modelId)) return false
+          const container = document.createElement('div')
+          container.className = 'mce-inline-root'
+          entry.appendChild(container)
+          const root = reactDom.createRoot(container)
+          root.render(React.createElement(RowEditor, { settings: face, route, modelId, idInputEl: idInput }))
+          roots.set(container, root)
+          return true
+        }
+
+        // 样式表只注入一份,挂 document.head;官方行内的挂载容器保持中性无样式
+        function ensureStyle() {
+          if (document.getElementById('mce-style') !== null) return
+          const style = document.createElement('style')
+          style.id = 'mce-style'
+          style.textContent = CSS
+          document.head.appendChild(style)
+        }
+
+        // 回退浮动入口:锚点破坏时挂在设置对话框内,含显隐开关与完整编辑卡
+        let panel = null
+        function disposePanel() {
+          if (panel === null) return
+          const { container, root } = panel
+          panel = null
+          root.unmount()
+          container.remove()
+        }
+        function ensurePanel() {
+          if (panel !== null) { panel.container.style.display = ''; return }
+          // 只挂设置对话框: 同页可能并存多个对话框, 按设置区块特征挑容器, 无匹配则不挂
+          const dialog = [...document.querySelectorAll('[role="dialog"]')]
+            .find((node) => node.querySelector('[data-slot="settings.section"]') !== null)
+          if (dialog === undefined) return
+          ensureStyle()
+          const container = document.createElement('div')
+          container.className = 'mce-fallback-root'
+          dialog.appendChild(container)
+          const root = reactDom.createRoot(container)
+          root.render(React.createElement(FallbackPanel, { settings }))
+          panel = { container, root }
+        }
+        function hidePanel() {
+          if (panel !== null) panel.container.style.display = 'none'
+        }
+
+        function reconcile() {
+          // 已脱离文档的挂载点:官方页卸载或重建了行,释放对应 root
+          for (const [container, root] of roots) {
+            if (!container.isConnected) {
+              roots.delete(container)
+              root.unmount()
+            }
+          }
+          if (panel !== null && !panel.container.isConnected) disposePanel()
+          const info = docInfo()
+          if (info === null || !info.titleMatched) { hidePanel(); return }
+          // S5:全部行均已挂载时零 RPC 早退,消灭注入容器自身触发的自激励扫描;
+          // 全挂载即注入健康,必须复位闩锁并移除回退面板,否则恢复永远无法解除闩锁
+          if (info.idInputs.length > 0 && info.idInputs.every((input) => {
+            const entry = entryOf(input)
+            return entry !== null && entry.querySelector(':scope > .mce-inline-root') !== null
+          })) {
+            anchorsLatched = false
+            hidePanel()
+            return
+          }
+          ensureStyle()
+          const seq = ++reconcileSeq
+          void (async () => {
+            try {
+              const value = unwrapResult(await settings.describe())
+              if (seq !== reconcileSeq) return
+              const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
+              if (ns === undefined) return
+              const providers = ns.value && typeof ns.value === 'object' ? ns.value.providers : {}
+              piAiRoutes = new Set(Object.keys(providers && typeof providers === 'object' ? providers : {}))
+              piAiModelIds = new Set()
+              for (const route of piAiRoutes) {
+                for (const model of modelsOf(ns.value, route)) piAiModelIds.add(model.id)
+              }
+              let mounted = 0
+              for (const idInput of info.idInputs) {
+                if (mountRow(settings, idInput)) mounted += 1
+              }
+              if (mounted > 0) {
+                anchorsLatched = false
+                hidePanel()
+              } else if (anchorsBroken({
+                titleMatched: info.titleMatched,
+                hasEditor: info.hasEditor,
+                modelIdInputCount: info.idInputs.length,
+              })) {
+                anchorsLatched = true
+              } else {
+                anchorsLatched = false
+              }
+              if (anchorsLatched) ensurePanel(); else hidePanel()
+            } catch {
+              // describe 失败: 保持现状, 下次 mutation 重试; 闩锁已置位说明锚点破坏已判定,
+              // 回退入口必须先出现, 数据加载失败由面板内部呈现
+              if (anchorsLatched) ensurePanel()
+            }
+          })()
+        }
+
+        function scheduleScan() {
+          if (scanPending) return
+          scanPending = true
+          setTimeout(() => {
+            scanPending = false
+            // 以 outlet 存在为门,不假设设置页形态(对话框/抽屉/路由页都覆盖)
+            if (document.querySelector('[data-slot="settings.section"]') !== null) reconcile()
+          }, RECONCILE_DEBOUNCE_MS)
+        }
+
+        ctx.effect(() => {
+          const observer = new MutationObserver(scheduleScan)
+          observer.observe(document.body, { childList: true, subtree: true })
+          return () => {
+            observer.disconnect()
+            for (const [container, root] of roots) {
+              root.unmount()
+              roots.delete(container)
+            }
+            disposePanel()
+          }
+        }, 'model-capability-editor: models-page injector')
       },
     }
   },

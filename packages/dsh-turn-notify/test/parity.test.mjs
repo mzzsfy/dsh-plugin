@@ -11,7 +11,10 @@ import {
   decideClaim as coreDecideClaim,
   resolveSound as coreResolveSound,
   chooseChannels as coreChooseChannels,
+  parseVolume as coreParseVolume,
+  DEFAULT_VOLUME,
   CLAIM_LOCK_TTL_MS,
+  USER_IDLE_AWAY_MS,
 } from '../src/core.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -25,7 +28,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, chooseChannels, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
+      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
   )
   return factory()
 }
@@ -58,9 +61,11 @@ defineClaimScenarios('[core.mjs decideClaim] ', coreDecideClaim)
 defineClaimScenarios('[client.js decideClaim] ', clientDecideClaim)
 
 function defineSoundScenarios(prefix, resolve) {
-  test(prefix + '音效解析对照:自定义命中 / 失效与未配置回落', () => {
-    const mapping = { completed: 'snd-9', error: 'gone' }
+  test(prefix + '音效解析对照:自定义命中 / 内置音名命中 / 失效与未配置回落', () => {
+    const mapping = { completed: 'snd-9', error: 'gone', interrupted: 'bell' }
     assert.deepEqual(resolve({ category: 'completed', mapping, uploadedIds: ['snd-9'] }), { kind: 'custom', id: 'snd-9' })
+    // 映射值为内置音名时必须播放该内置音,而非回落分类默认
+    assert.deepEqual(resolve({ category: 'interrupted', mapping, uploadedIds: [] }), { kind: 'builtin', name: 'bell' })
     assert.deepEqual(resolve({ category: 'completed', mapping, uploadedIds: [] }), { kind: 'builtin', name: 'up-arpeggio' })
     const fallback = resolve({ category: 'error', mapping, uploadedIds: ['snd-9'] })
     assert.equal(fallback.kind, 'builtin')
@@ -72,14 +77,15 @@ defineSoundScenarios('[core.mjs resolveSound] ', coreResolveSound)
 defineSoundScenarios('[client.js resolveSound] ', clientResolveSound)
 
 // 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
-function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled }) {
+function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled, idleMs, idleThresholdMs }) {
   const backing = new Map()
   if (focusQuiet === false) backing.set(client.KEY_DND, '0')
   if (systemEnabled === false) backing.set(client.KEY_SYSTEM, '0')
   if (toastEnabled === false) backing.set(client.KEY_TOAST, '0')
   globalThis.window = { localStorage: { getItem: (key) => (backing.has(key) ? backing.get(key) : null) } }
   try {
-    return client.chooseChannels(hasFocus, permission)
+    if (idleThresholdMs !== undefined) assert.equal(client.IDLE_AWAY_MS, idleThresholdMs)
+    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined)
   } finally {
     delete globalThis.window
   }
@@ -96,10 +102,33 @@ function defineChannelScenarios(prefix, channels) {
     assert.deepEqual(channels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
     assert.deepEqual(channels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
   })
+  test(prefix + '用户空闲对照:满阈值离开全通道,活跃聚焦静默', () => {
+    const base = { hasFocus: true, permission: 'granted', idleThresholdMs: USER_IDLE_AWAY_MS }
+    assert.deepEqual(channels({ ...base, idleMs: USER_IDLE_AWAY_MS }), { toast: true, sound: true, system: true, blink: false })
+    assert.equal(channels({ ...base, idleMs: USER_IDLE_AWAY_MS - 1 }).sound, false)
+    assert.equal(channels({ ...base, idleMs: 0 }).sound, false)
+    assert.deepEqual(channels(base), { toast: true, sound: false, system: false, blink: false })
+  })
 }
 
 defineChannelScenarios('[core.mjs chooseChannels] ', coreChooseChannels)
 defineChannelScenarios('[client.js chooseChannels] ', clientChooseChannels)
+
+function defineVolumeScenarios(prefix, parse) {
+  test(prefix + '音量解析对照:未设置回默认 / 显式零保留 / 非法回落', () => {
+    assert.equal(parse(null), DEFAULT_VOLUME)
+    assert.equal(parse(undefined), DEFAULT_VOLUME)
+    assert.equal(parse('0'), 0)
+    assert.equal(parse('0.5'), 0.5)
+    assert.equal(parse('1'), 1)
+    assert.equal(parse('-1'), DEFAULT_VOLUME)
+    assert.equal(parse('abc'), DEFAULT_VOLUME)
+    assert.equal(parse('3'), DEFAULT_VOLUME)
+  })
+}
+
+defineVolumeScenarios('[core.mjs parseVolume] ', coreParseVolume)
+defineVolumeScenarios('[client.js parseVolume] ', client.parseVolume)
 
 test('[client.js] localStorage 抛错:认领退化为直接发声且提示位可用', () => {
   const throwing = {
