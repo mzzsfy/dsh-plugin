@@ -1,0 +1,21 @@
+# The rs-workflow bundle patch: registers the host-plane rows of the rs-workflow
+# all-in-one plugin into the profile root. Applied by
+# `dsh plugin add @mzzsfy/dsh-rs-workflow`:
+#   - rs-workflow / role settings: mounts the GUI settings form under the
+#     `rs-workflow` namespace in the settings page.
+#   - rs-workflow-preset-sync / role preset-sync: syncs the bundled preset
+#     (preset.yml + agent.cordis.yml + skills) into the user preset root on
+#     every boot, so the picker entry "若水工作流" ships with the plugin and
+#     follows plugin upgrades.
+# The tool-plane row (rs_workflow_config model tool) lives in the released
+# preset composition, not here: model-facing tools belong to the preset plane.
+
+- insert:
+    - id: rs-workflow
+      name: '@mzzsfy/dsh-rs-workflow'
+      config:
+        role: settings
+    - id: rs-workflow-preset-sync
+      name: '@mzzsfy/dsh-rs-workflow'
+      config:
+        role: preset-sync
