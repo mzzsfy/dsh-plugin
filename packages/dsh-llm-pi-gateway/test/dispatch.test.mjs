@@ -130,10 +130,10 @@ test('未拥有路由 NO_ADAPTER,未知模型 UNKNOWN_MODEL,凭据缺失 MISSING
   await assert.rejects(collect(gated.stream(request())), (error) => error.code === 'MISSING_CREDENTIAL')
 })
 
-test('模型条目 maxTokens / reasoning 进入 pi-ai Model,缺省用默认', async () => {
+test('模型条目 maxTokens / reasoningEfforts 进入 pi-ai Model,缺省对齐官方(32768/false)', async () => {
   const captured = []
   const routes = makeRoutes(baseProfile({
-    models: [{ id: 'auto', contextWindow: 200000, maxTokens: 16384, reasoning: false }],
+    models: [{ id: 'auto', contextWindow: 200000, maxTokens: 16384, reasoningEfforts: false }],
   }))
   const adapter = createGatewayAdapter(routes, async () => fakeProtocol(captured))
   await collect(adapter.stream(request()))
@@ -142,8 +142,8 @@ test('模型条目 maxTokens / reasoning 进入 pi-ai Model,缺省用默认', as
   const capturedDefault = []
   const defaults = createGatewayAdapter(makeRoutes(baseProfile()), async () => fakeProtocol(capturedDefault))
   await collect(defaults.stream(request()))
-  assert.equal(capturedDefault[0].model.maxTokens, 8192)
-  assert.equal(capturedDefault[0].model.reasoning, true)
+  assert.equal(capturedDefault[0].model.maxTokens, 32768)
+  assert.equal(capturedDefault[0].model.reasoning, false)
 })
 
 test('sessionId 缺失或空拒绝 INVALID_REQUEST', async () => {
