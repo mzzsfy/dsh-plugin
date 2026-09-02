@@ -14,7 +14,6 @@ window.__ModuleLoader__.load({
 
 const NS = 'llm-pi-ai'
 const CONFLICT_CODE = 'settings-conflict'
-const SECTION_ORDER = 12
 const RECONCILE_DEBOUNCE_MS = 150
 
 const CSS = [
@@ -54,6 +53,12 @@ const CSS = [
   '.mce-inline__field input[type=text] { flex:1; min-width:0; width:auto; }',
   '.mce-inline select { flex:1; min-width:0; }',
   '.mce-inline__foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+  '.mce-fallback-btn { position:fixed; right:16px; top:50%; transform:translateY(-50%); z-index:60;',
+  '  box-shadow:0 2px 8px rgba(0,0,0,0.18); }',
+  '.mce-fallback-card { position:fixed; right:16px; top:12px; bottom:12px; width:420px; max-width:calc(100vw - 32px);',
+  '  overflow:auto; z-index:55; background:var(--dsw-alias-bg-primary, #fff);',
+  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); border-radius:12px;',
+  '  box-shadow:0 4px 24px rgba(0,0,0,0.18); }',
 ].join('\n')
 
 function h(type, props) {
@@ -463,6 +468,18 @@ function CapabilityCard(props) {
   )
 }
 
+// 回退浮动入口:行内注入锚点破坏时,模型页右侧提供完整编辑卡
+function FallbackPanel(props) {
+  const [open, setOpen] = useState(false)
+  return h('div', null,
+    h('button', { className: 'mce-btn mce-fallback-btn', onClick: () => setOpen(!open) },
+      open ? '收起模型能力' : '模型能力'),
+    open ? h('div', { className: 'mce-fallback-card' },
+      React.createElement(CapabilityCard, { settings: props.settings }),
+    ) : null,
+  )
+}
+
 // 行内编辑块:单个模型的档位与模态编辑,挂在官方模型行的展开区内。
 // 复用整组合并保存流,草稿只含本模型一条,其余模型原样保留。
 function RowEditor(props) {
@@ -577,33 +594,15 @@ function RowEditor(props) {
 }
 
     return {
-      inject: ['slots', 'connection'],
+      inject: ['connection'],
       apply(ctx) {
         // connection 为 boot 期即时服务,apply 内即可取 wire 面;面缺失由
         // CapabilityCard load() 的降级分支呈现只读原因,不在渲染回调抛错。
         const settings = makeSettingsFace(ctx.connection.api.settings)
 
-        // 回退独立菜单:先注册保证随时可用;行内注入首次成功后退场,
-        // 锚点破坏(anchorsBroken)时重新注册。
-        let fallbackOff = null
-        function ensureFallback() {
-          if (fallbackOff !== null) return
-          fallbackOff = ctx.slots.register(
-            // order 紧随内置模型页,主题相邻
-            { name: 'settings.section', id: 'model-capability-editor', order: SECTION_ORDER, label: '模型能力' },
-            () => React.createElement(CapabilityCard, { settings }),
-          )
-        }
-        function retireFallback() {
-          if (fallbackOff === null) return
-          const off = fallbackOff
-          off()
-          fallbackOff = null
-        }
-        ensureFallback()
-
         // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑块
-        // 挂进已展开的模型行;官方结构变化导致锚点全失时退回独立菜单。
+        // 挂进已展开的模型行;官方结构变化导致锚点全失时,在模型页右侧注入
+        // 浮动入口承载完整编辑卡,不再注册独立设置分区。
         const reactDom = require('react-dom')
         const roots = new Map()
         let piAiModelIds = new Set()
@@ -657,6 +656,31 @@ function RowEditor(props) {
           document.head.appendChild(style)
         }
 
+        // 回退浮动入口:锚点破坏时挂在设置对话框内,含显隐开关与完整编辑卡
+        let panel = null
+        function disposePanel() {
+          if (panel === null) return
+          const { container, root } = panel
+          panel = null
+          root.unmount()
+          container.remove()
+        }
+        function ensurePanel() {
+          if (panel !== null) { panel.container.style.display = ''; return }
+          const dialog = document.querySelector('[role="dialog"]')
+          if (dialog === null) return
+          ensureStyle()
+          const container = document.createElement('div')
+          container.className = 'mce-fallback-root'
+          dialog.appendChild(container)
+          const root = reactDom.createRoot(container)
+          root.render(React.createElement(FallbackPanel, { settings }))
+          panel = { container, root }
+        }
+        function hidePanel() {
+          if (panel !== null) panel.container.style.display = 'none'
+        }
+
         function reconcile() {
           // 已脱离文档的挂载点:官方页卸载或重建了行,释放对应 root
           for (const [container, root] of roots) {
@@ -665,8 +689,9 @@ function RowEditor(props) {
               root.unmount()
             }
           }
+          if (panel !== null && !panel.container.isConnected) disposePanel()
           const info = docInfo()
-          if (info === null || !info.titleMatched) return
+          if (info === null || !info.titleMatched) { hidePanel(); return }
           // S5:全部行均已挂载时零 RPC 早退,消灭注入容器自身触发的自激励扫描
           if (info.idInputs.length > 0 && info.idInputs.every((input) => {
             const entry = entryOf(input)
@@ -690,13 +715,15 @@ function RowEditor(props) {
               }
               if (mounted > 0) {
                 injectEverSucceeded = true
-                retireFallback()
+                disposePanel()
               } else if (anchorsBroken({
                 titleMatched: info.titleMatched,
                 hasEditor: info.hasEditor,
                 modelIdInputCount: info.idInputs.length,
               })) {
-                ensureFallback()
+                ensurePanel()
+              } else {
+                hidePanel()
               }
             } catch { /* describe 失败:保持现状,下次 mutation 重试 */ }
           })()
@@ -721,6 +748,7 @@ function RowEditor(props) {
               root.unmount()
               roots.delete(container)
             }
+            disposePanel()
           }
         }, 'model-capability-editor: models-page injector')
       },
