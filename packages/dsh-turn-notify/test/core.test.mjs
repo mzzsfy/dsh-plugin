@@ -20,6 +20,8 @@ import {
   renameMapping,
   validateSoundName,
   SOUND_NAME_MAX_CHARS,
+  parseVolume,
+  DEFAULT_VOLUME,
   validateMappingId,
   validateConfigPatch,
   resolvedConfig,
@@ -194,6 +196,17 @@ test('重命名映射:引用随新名迁移,无关分类保留', () => {
   assert.equal(mapping[CATEGORY_DONE], 'new')
   assert.equal(mapping[CATEGORY_ERROR], 'other')
   assert.equal(mapping[CATEGORY_ASK], 'new')
+})
+
+test('音量解析:未设置回默认,显式零保留,非法回落默认', () => {
+  assert.equal(parseVolume(null), DEFAULT_VOLUME)
+  assert.equal(parseVolume(undefined), DEFAULT_VOLUME)
+  assert.equal(parseVolume('0'), 0)
+  assert.equal(parseVolume('0.5'), 0.5)
+  assert.equal(parseVolume('1'), 1)
+  assert.equal(parseVolume('abc'), DEFAULT_VOLUME)
+  assert.equal(parseVolume('2'), DEFAULT_VOLUME)
+  assert.equal(parseVolume('-1'), DEFAULT_VOLUME)
 })
 
 test('音效名校验:合法名通过并归一化,非法名拒绝', () => {

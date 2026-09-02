@@ -62,6 +62,16 @@ window.__ModuleLoader__.load({
 
     const CLAIM_LOCK_TTL_MS = 30 * 1000
 
+    // 未显式设置音量时的默认值。
+    const DEFAULT_VOLUME = 0.6
+
+    // 音量解析:未设置或非法回落默认,显式零(静音)保留。
+    function parseVolume(raw) {
+      if (raw === null || raw === undefined) return DEFAULT_VOLUME
+      const value = Number(raw)
+      return value >= 0 && value <= 1 ? value : DEFAULT_VOLUME
+    }
+
     const KEY_WID = 'turn-notify:wid'
     const KEY_LOCK = 'turn-notify:lock:'
     const KEY_DONE = 'turn-notify:done:'
@@ -189,16 +199,14 @@ window.__ModuleLoader__.load({
 
     function ensureAudioCtx() {
       if (audioCtx === null) audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+      // resume 仅触发不等待(通知链路 fire-and-forget);手动播放由 ensureRunnableCtx 等待并给可见反馈
       if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {})
       return audioCtx
     }
     // 首次交互解锁:解锁前静默不视为故障
     window.addEventListener('pointerdown', () => { ensureAudioCtx() }, { once: true })
 
-    function volume() {
-      const stored = Number(localGet(KEY_VOLUME))
-      return stored >= 0 && stored <= 1 ? stored : 0.6
-    }
+    function volume() { return parseVolume(localGet(KEY_VOLUME)) }
 
     function playTone(ctx2, spec) {
       const master = ctx2.createGain()
@@ -240,22 +248,83 @@ window.__ModuleLoader__.load({
       let buffer = decodedCache.get(sound.id)
       if (buffer === undefined) {
         const response = await fetch('/api/turn-notify/sound?id=' + encodeURIComponent(sound.id))
-        if (!response.ok) return
+        if (!response.ok) throw new Error('读取音效失败: HTTP ' + response.status)
         buffer = await ctx2.decodeAudioData(await response.arrayBuffer())
         decodedCache.set(sound.id, buffer)
       }
       playBuffer(ctx2, buffer)
     }
 
-    // 待确认音效试听:直接解码内存 buffer,不经服务器
-    function previewPending(raw) {
+    // resume 等待上限:部分环境挂起态的 resume 永不 resolve,超时后按不可播报告
+    const AUDIO_RESUME_WAIT_MS = 300
+
+    // 手动播放前置检查:等待浏览器放行,音量为零或通道仍挂起时给出可见原因
+    async function ensureRunnableCtx() {
       const ctx2 = ensureAudioCtx()
-      ctx2.decodeAudioData(raw.slice(0))
-        .then((buffer) => { playBuffer(ctx2, buffer) })
-        .catch(() => {})
+      if (ctx2.state === 'suspended') {
+        try {
+          await Promise.race([
+            ctx2.resume(),
+            new Promise((resolve) => { setTimeout(resolve, AUDIO_RESUME_WAIT_MS) }),
+          ])
+        } catch { }
+      }
+      return ctx2
     }
 
-    function previewBuiltin(name) { playTone(ensureAudioCtx(), TONES[name]) }
+    function playbackBlockReason(ctx2) {
+      if (ctx2.state !== 'running') return '浏览器未放行音频播放,请重试或检查浏览器自动播放设置'
+      if (volume() === 0) return '当前音量为 0,请在本机偏好中调高'
+      return null
+    }
+
+    // 手动播放前置:等待浏览器放行;任何异常转为可见的受阻原因,调用方无需兜 catch
+    async function playableCtx() {
+      try {
+        const ctx2 = await ensureRunnableCtx()
+        return { blocked: playbackBlockReason(ctx2), ctx2 }
+      } catch (error) {
+        return { blocked: error && error.message ? error.message : String(error) }
+      }
+    }
+
+    // 手动播放统一出口:失败原因可见,不再无声无息
+    async function playAudible(sound) {
+      const pre = await playableCtx()
+      if (pre.blocked) return { ok: false, reason: pre.blocked }
+      try {
+        await playSound(sound)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, reason: error && error.message ? error.message : String(error) }
+      }
+    }
+
+    // 待确认音效试听:直接解码内存 buffer,不经服务器;失败带原因返回
+    async function previewPending(raw) {
+      const pre = await playableCtx()
+      if (pre.blocked) return { ok: false, reason: pre.blocked }
+      try {
+        const buffer = await pre.ctx2.decodeAudioData(raw.slice(0))
+        playBuffer(pre.ctx2, buffer)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, reason: '音频解码失败: ' + (error && error.message ? error.message : String(error)) }
+      }
+    }
+
+    async function previewBuiltin(name) {
+      const pre = await playableCtx()
+      if (pre.blocked) return { ok: false, reason: pre.blocked }
+      const spec = TONES[name]
+      if (!spec) return { ok: false, reason: '未知内置音: ' + name }
+      try {
+        playTone(pre.ctx2, spec)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, reason: error && error.message ? error.message : String(error) }
+      }
+    }
 
     // ---- toast 与标题闪烁 ----
 
@@ -723,7 +792,16 @@ window.__ModuleLoader__.load({
         h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, '测试'),
           h('div', { className: 'tn-row' },
-            h('button', { className: 'tn-btn', onClick: () => previewBuiltin(DEFAULT_TONES.completed) }, '测试声音'),
+            h('button', {
+              className: 'tn-btn',
+              onClick: () => {
+                previewBuiltin(DEFAULT_TONES.completed).then((result) => {
+                  patch(result.ok
+                    ? '测试声音已触发,若未听到请检查系统音量与输出设备'
+                    : '测试声音未播放:' + result.reason, result.ok ? 'ok' : 'error')
+                })
+              },
+            }, '测试声音'),
             h('button', { className: 'tn-btn', onClick: testPageNotification }, '测试页内通知'),
             h('button', { className: 'tn-btn', onClick: testSystemNotification }, '测试系统通知'),
             h('button', { className: 'tn-btn', onClick: () => void testWebhook() }, '测试 webhook'),
@@ -788,7 +866,14 @@ window.__ModuleLoader__.load({
           ),
           pendingUploads.map((item, index) => h('div', { className: 'tn-row', key: index },
             h('span', { className: 'tn-meta' }, '待保存: ' + item.name),
-            h('button', { className: 'tn-btn', onClick: () => previewPending(item.raw) }, '试听'),
+            h('button', {
+              className: 'tn-btn',
+              onClick: () => {
+                previewPending(item.raw).then((result) => {
+                  if (!result.ok) patch('试听未播放:' + result.reason, 'error')
+                })
+              },
+            }, '试听'),
             h('button', { className: 'tn-btn', disabled: busy, onClick: () => void savePending(item) }, '保存'),
             h('button', {
               className: 'tn-btn', disabled: busy,
@@ -814,7 +899,11 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'tn-meta' }, sound.id + '.' + sound.ext),
                 h('button', {
                   className: 'tn-btn',
-                  onClick: () => { playSound({ kind: 'custom', id: sound.id }).catch(() => {}) },
+                  onClick: () => {
+                    playAudible({ kind: 'custom', id: sound.id }).then((result) => {
+                      if (!result.ok) patch('试听未播放:' + result.reason, 'error')
+                    })
+                  },
                 }, '试听'),
                 h('button', { className: 'tn-btn', disabled: busy, onClick: () => startRename(sound) }, '重命名'),
                 h('button', { className: 'tn-btn', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),

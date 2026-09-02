@@ -11,6 +11,8 @@ import {
   decideClaim as coreDecideClaim,
   resolveSound as coreResolveSound,
   chooseChannels as coreChooseChannels,
+  parseVolume as coreParseVolume,
+  DEFAULT_VOLUME,
   CLAIM_LOCK_TTL_MS,
 } from '../src/core.mjs'
 
@@ -25,7 +27,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, chooseChannels, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
+      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
   )
   return factory()
 }
@@ -100,6 +102,22 @@ function defineChannelScenarios(prefix, channels) {
 
 defineChannelScenarios('[core.mjs chooseChannels] ', coreChooseChannels)
 defineChannelScenarios('[client.js chooseChannels] ', clientChooseChannels)
+
+function defineVolumeScenarios(prefix, parse) {
+  test(prefix + '音量解析对照:未设置回默认 / 显式零保留 / 非法回落', () => {
+    assert.equal(parse(null), DEFAULT_VOLUME)
+    assert.equal(parse(undefined), DEFAULT_VOLUME)
+    assert.equal(parse('0'), 0)
+    assert.equal(parse('0.5'), 0.5)
+    assert.equal(parse('1'), 1)
+    assert.equal(parse('-1'), DEFAULT_VOLUME)
+    assert.equal(parse('abc'), DEFAULT_VOLUME)
+    assert.equal(parse('3'), DEFAULT_VOLUME)
+  })
+}
+
+defineVolumeScenarios('[core.mjs parseVolume] ', coreParseVolume)
+defineVolumeScenarios('[client.js parseVolume] ', client.parseVolume)
 
 test('[client.js] localStorage 抛错:认领退化为直接发声且提示位可用', () => {
   const throwing = {
