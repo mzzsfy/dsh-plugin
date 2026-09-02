@@ -1,0 +1,10 @@
+# The llm-pi-gateway bundle patch: mounts the host-plane pi-ai passthrough
+# gateway plugin into the profile root. Applied by
+# `dsh plugin add @mzzsfy/dsh-llm-pi-gateway`. The plugin registers one
+# LlmAdapter serving every route declared under the `llm-pi-gateway` settings
+# namespace; routes are dormant (zero routes) until that section supplies
+# provider profiles. Route names must not collide with dsh-llm-pi-ai routes.
+
+- insert:
+    - id: llm-pi-gateway
+      name: '@mzzsfy/dsh-llm-pi-gateway'
