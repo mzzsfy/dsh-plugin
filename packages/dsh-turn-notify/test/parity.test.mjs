@@ -14,6 +14,7 @@ import {
   parseVolume as coreParseVolume,
   DEFAULT_VOLUME,
   CLAIM_LOCK_TTL_MS,
+  USER_IDLE_AWAY_MS,
 } from '../src/core.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -27,7 +28,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
+      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
   )
   return factory()
 }
@@ -76,14 +77,15 @@ defineSoundScenarios('[core.mjs resolveSound] ', coreResolveSound)
 defineSoundScenarios('[client.js resolveSound] ', clientResolveSound)
 
 // 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
-function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled }) {
+function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled, idleMs, idleThresholdMs }) {
   const backing = new Map()
   if (focusQuiet === false) backing.set(client.KEY_DND, '0')
   if (systemEnabled === false) backing.set(client.KEY_SYSTEM, '0')
   if (toastEnabled === false) backing.set(client.KEY_TOAST, '0')
   globalThis.window = { localStorage: { getItem: (key) => (backing.has(key) ? backing.get(key) : null) } }
   try {
-    return client.chooseChannels(hasFocus, permission)
+    if (idleThresholdMs !== undefined) assert.equal(client.IDLE_AWAY_MS, idleThresholdMs)
+    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined)
   } finally {
     delete globalThis.window
   }
@@ -99,6 +101,13 @@ function defineChannelScenarios(prefix, channels) {
     assert.deepEqual(channels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false })
     assert.deepEqual(channels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
     assert.deepEqual(channels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
+  })
+  test(prefix + '用户空闲对照:满阈值离开全通道,活跃聚焦静默', () => {
+    const base = { hasFocus: true, permission: 'granted', idleThresholdMs: USER_IDLE_AWAY_MS }
+    assert.deepEqual(channels({ ...base, idleMs: USER_IDLE_AWAY_MS }), { toast: true, sound: true, system: true, blink: false })
+    assert.equal(channels({ ...base, idleMs: USER_IDLE_AWAY_MS - 1 }).sound, false)
+    assert.equal(channels({ ...base, idleMs: 0 }).sound, false)
+    assert.deepEqual(channels(base), { toast: true, sound: false, system: false, blink: false })
   })
 }
 

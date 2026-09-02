@@ -17,6 +17,7 @@ import {
   createProjection,
   decideClaim,
   chooseChannels,
+  USER_IDLE_AWAY_MS,
   resolveSound,
   pruneMapping,
   renameMapping,
@@ -188,6 +189,23 @@ test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied' }).blink, true)
   // 关闭系统弹窗后未授权不再闪
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
+})
+
+test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦静默', () => {
+  const base = { hasFocus: true, permission: 'granted' }
+  const idle = USER_IDLE_AWAY_MS
+  // 空闲满阈值:离开,聚焦静默不再适用,全通道
+  assert.deepEqual(chooseChannels({ ...base, idleMs: idle }), { toast: true, sound: true, system: true, blink: false })
+  // 恰等边界含
+  assert.equal(chooseChannels({ ...base, idleMs: idle - 1 }).sound, false)
+  // 活跃(刚行动):聚焦静默维持
+  assert.equal(chooseChannels({ ...base, idleMs: 0 }).sound, false)
+  // 空闲但未聚焦:行为不变
+  assert.equal(chooseChannels({ hasFocus: false, permission: 'granted', idleMs: idle }).sound, true)
+  // 未提供空闲时长:行为与旧版一致
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: false, system: false, blink: false })
+  // 空闲时聚焦静默关闭依旧生效
+  assert.equal(chooseChannels({ ...base, idleMs: 0, focusQuiet: false }).sound, true)
 })
 
 test('webhook payload 字段映射', () => {

@@ -184,8 +184,11 @@ window.__ModuleLoader__.load({
 
     // 发声通道判定:与 core.mjs chooseChannels 行为一致,通道开关来自 localStorage,
     // 放入 LOGIC 段由 parity 测试保证双实现不漂移
-    function chooseChannels(hasFocus, permission) {
-      const quiet = hasFocus && localGet(KEY_DND) !== '0'
+    const IDLE_AWAY_MS = 5 * 60 * 1000
+
+    function chooseChannels(hasFocus, permission, idleMs) {
+      const idleAway = typeof idleMs === 'number' && idleMs >= IDLE_AWAY_MS
+      const quiet = hasFocus && localGet(KEY_DND) !== '0' && !idleAway
       const systemEnabled = localGet(KEY_SYSTEM) !== '0'
       return {
         toast: localGet(KEY_TOAST) !== '0',
@@ -209,6 +212,17 @@ window.__ModuleLoader__.load({
     }
     // 首次交互解锁:解锁前静默不视为故障
     window.addEventListener('pointerdown', () => { ensureAudioCtx() }, { once: true })
+
+    // 用户行动时刻:空闲满阈值视为离开,聚焦静默不再适用;
+    // handler 挂 window 共享并按标记幂等注册,防模块重载后监听累积
+    if (!window.__tnActionHandler) {
+      window.__tnLastActionAt = Date.now()
+      window.__tnActionHandler = () => { window.__tnLastActionAt = Date.now() }
+      for (const type of ['pointerdown', 'keydown', 'mousemove', 'wheel']) {
+        window.addEventListener(type, window.__tnActionHandler)
+      }
+    }
+    const lastActionAt = () => window.__tnLastActionAt ?? Date.now()
 
     function volume() { return parseVolume(localGet(KEY_VOLUME)) }
 
@@ -416,7 +430,7 @@ window.__ModuleLoader__.load({
       for (const unit of units) {
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
-        const channels = chooseChannels(document.hasFocus(), notificationPermission())
+        const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt())
         const sound = resolveSound(unit.category, soundMapping, uploadedIds)
         if (channels.toast) showToast(unit)
         if (!channels.sound) continue
