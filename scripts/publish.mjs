@@ -136,17 +136,20 @@ function onlineVersion(name) {
   fail(`查询 ${name} 线上版本失败(非 E404,可能是网络问题),中止以避免误判:\n${r.stderr}`)
 }
 
-/** 发布后回读确认;registry 传播延迟会短暂 404,故多次重试 */
+/** 发布后回读确认;新包首发的 registry CDN 传播可延迟数十秒到数分钟,长尾重试 */
 function verifyPublished(name, version) {
   for (let attempt = 1; attempt <= READBACK_ATTEMPTS; attempt += 1) {
     const r = runNpm(['view', name, 'version', '--registry', REGISTRY])
     if (r.status === 0 && r.stdout.trim() === version) return true
     if (attempt < READBACK_ATTEMPTS) {
       const code = (r.stderr || '').match(/npm error code (\S+)/)?.[1] || (r.stderr ? '错误' : '无输出')
-      console.log(`  回读第 ${attempt} 次未确认(线上报 ${r.stdout.trim() || code}),${READBACK_DELAY_MS / 1000}s 后重试`)
-      sleepMs(READBACK_DELAY_MS)
+      const delay = READBACK_DELAY_MS * attempt
+      console.log(`  回读第 ${attempt} 次未确认(线上报 ${r.stdout.trim() || code}),${delay / 1000}s 后重试`)
+      sleepMs(delay)
     }
   }
+  console.error('WARN  回读窗口内未确认(npm publish 输出 "+ 包@版本" 即发布成功);CDN 传播可能仍在进行')
+  console.error('WARN  脚本继续后续包;收尾用重跑自愈核对本包状态与补 tag')
   return false
 }
 
@@ -232,7 +235,11 @@ function publishOne(dirName, opts) {
   const pub = runNpm(['run', 'npmPublish'], pkgDir, { interactive: true })
   if (pub.status !== 0) fail('发布失败(交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
-  if (!verifyPublished(name, version)) fail(`发布后回读未确认 ${name}@${version}(共 ${READBACK_ATTEMPTS} 次),请检查上方日志;重跑本脚本可自愈补 tag`)
+  if (!verifyPublished(name, version)) {
+    console.error(`FAIL  ${name}@${version} 回读未确认:发布输出若为 "+ ${name}@${version}" 则包已发出,只是 CDN 未传播;重跑本脚本会在传播后自愈补 tag`)
+    exitCode = 1
+    return
+  }
   console.log(`OK    ${name}@${version} 已上线`)
   ensureTag(name, version, opts)
 }
