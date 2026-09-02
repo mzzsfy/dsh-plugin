@@ -34,9 +34,12 @@ const BUDGET_DEFAULTS = { reviewRejectBeforeEscalate: 2, planRejectBeforeBlocked
 const BUDGET_MIN = 1
 const BUDGET_MAX = 10
 function clampBudget(name) {
-  const n = Math.floor(Number(BUDGETS_SRC[name]))
-  if (!(n >= BUDGET_MIN)) return BUDGET_DEFAULTS[name]
-  return Math.min(BUDGET_MAX, n)
+  const raw = BUDGETS_SRC[name]
+  if (raw === undefined || raw === null || raw === '') return BUDGET_DEFAULTS[name]
+  const n = Math.floor(Number(raw))
+  if (!isFinite(n)) return BUDGET_DEFAULTS[name]
+  // 数值一律钳入 [1,10](与 lib 侧 zod .min(1) 口径一致), 0<x<1 与负值同样钳到下界
+  return Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, n))
 }
 const BUDGET = {
   reviewRejectBeforeEscalate: clampBudget('reviewRejectBeforeEscalate'),
@@ -195,6 +198,7 @@ async function callAgent(holder, candidates, spec) {
   const start = (holder.i || 0) % list.length
   for (let k = 0; k < list.length; k++) {
     const idx = (start + k) % list.length
+    holder.lastTried = list[idx]
     const r = await agent(spec.prompt, { label: spec.label, schema: spec.schema, ...(list[idx]) })
     if (r) {
       holder.i = (idx + 1) % list.length
@@ -206,10 +210,9 @@ async function callAgent(holder, candidates, spec) {
   return null
 }
 
-// 失败语境的上一候选身份([上次失败模型] 段取值)
-function failedModelOf(candidates, cursor) {
-  const len = (candidates && candidates.length) || 1
-  const b = (candidates && candidates.length) ? candidates[(cursor.i - 1 + len) % len] : null
+// 失败语境的真实最后尝试候选身份([上次失败模型] 段取值)
+function failedModelOf(holder) {
+  const b = holder.lastTried
   const id = b ? [b.provider, b.model].filter(Boolean).join('/') : ''
   return id || '(会话默认模型)'
 }
@@ -433,7 +436,7 @@ function reviewNode(id, description, deps, subject, slot, kind) {
   return addNode({
     id: id, type: 'review', description: description, deps: (deps || []).slice(), status: 'pending',
     output: '', kind: kind, subject: subject || '', slot: slot || '',
-    rejectCount: 0, fixNote: '', fixPending: false, reviewerFault: false,
+    rejectCount: 0, fixNote: '', fixPending: false, reviewerFault: false, hold: false,
     verdict: '', reviewEvidence: '', warn: false, dead: false, cursor: { i: 0 },
   })
 }
@@ -839,7 +842,7 @@ async function execTask(node) {
     r = await callAgent(node.cursor, candidates, { prompt: buildExecutorPrompt(node, REPORT_NUDGE_NOTE), label: 'executor:' + node.id + ':报告追问', schema: EXEC_SCHEMA })
   }
   if (!r) {
-    node.failedModel = failedModelOf(candidates, node.cursor)
+    node.failedModel = failedModelOf(node.cursor)
     node.failCount++
     node.output = 'executor 子代理调用失败'
     return
@@ -847,13 +850,13 @@ async function execTask(node) {
   node.changedFiles = Array.isArray(r.changedFiles) ? r.changedFiles.filter(function (x) { return typeof x === 'string' }) : []
   node.output = String(r.summary || '')
   if (r.status !== 'completed') {
-    node.failedModel = failedModelOf(candidates, node.cursor)
+    node.failedModel = failedModelOf(node.cursor)
     node.failCount++
     node.output = '任务自报失败: ' + node.output
     return
   }
   if (!node.output.trim()) {
-    node.failedModel = failedModelOf(candidates, node.cursor)
+    node.failedModel = failedModelOf(node.cursor)
     node.failCount++
     node.output = '报告摘要空白(补救追问预算耗尽)'
   }
@@ -897,6 +900,7 @@ function hasEvidence(r) {
 // ── 审批执行与拒绝路由(契约 B7/B8) ──────────────────────────────────────────
 async function runReview(node) {
   node.fixPending = false
+  node.hold = false
   node.status = 'active'
   const prompt = buildReviewPrompt(node)
   const candidates = slotOpts(node.slot)
@@ -1284,12 +1288,9 @@ async function escalateSubplan(pNode, reasons) {
 
 // 交付类(fr/xr)达阈值: 返工重规划, 追加返工任务链, 审批重挂其后
 async function rework(reviewNodes, reasons) {
-  if (reviewNodes.some(function (n) { return n.fixPending })) {
-    reviewNodes.forEach(function (n) { n.status = 'pending' })
-    return
-  }
-  if (escalating) {
-    reviewNodes.forEach(function (n) { n.status = 'pending' })
+  // 返工在途/已挂待审: 保持等待(hold)不复位就绪, 消除无修复动作的空复审
+  if (reviewNodes.some(function (n) { return n.fixPending }) || escalating) {
+    reviewNodes.forEach(function (n) { n.hold = true })
     return
   }
   const label = reviewNodes.map(function (n) { return n.id }).join('/')
@@ -1331,6 +1332,7 @@ async function rework(reviewNodes, reasons) {
       n.fixPending = true
       n.fixNote = reasons.join('; ')
       n.status = 'pending'
+      n.hold = false
       n.deps = nt.map(function (t) { return t.id })
     })
     log('追加返工任务 [' + nt.map(function (t) { return t.id }).join(', ') + '], 审批重挂到返工之后')
@@ -1352,7 +1354,7 @@ while (!blocked) {
   if (loops > loopBudget()) { blocked = { nodeId: '-', reason: '调度循环超出预算(' + loopBudget() + ' 轮)', detail: '可能存在无法收敛的审批循环' }; break }
   const doneMap = {}
   for (const n of nodes) if (!n.dead && n.status === 'done') doneMap[n.id] = true
-  const ready = nodes.filter(function (n) { return !n.dead && n.status === 'pending' && n.deps.every(function (d) { return doneMap[d] }) })
+  const ready = nodes.filter(function (n) { return !n.dead && n.status === 'pending' && !n.hold && n.deps.every(function (d) { return doneMap[d] }) })
   if (!ready.length) {
     const stuck = nodes.filter(function (n) { return !n.dead && n.status === 'pending' })
     if (stuck.length) blocked = { nodeId: '-', reason: '存在无法就绪的节点(依赖失败或缺失)', detail: stuck.map(function (n) { return n.id }).join(', ') }
