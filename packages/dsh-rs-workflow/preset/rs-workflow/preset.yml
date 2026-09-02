@@ -1,0 +1,5 @@
+name: 若水工作流
+description: >-
+  rs-tui 多模型协作工作流迁移版：planner/executor/reviewer 三角色子代理分工，
+  难度分诊四模板（lite / plan-final / step-review / multi-plan），
+  审批循环、升级重规划与工作位模型降级链；非平凡编码需求自动走工作流编排。

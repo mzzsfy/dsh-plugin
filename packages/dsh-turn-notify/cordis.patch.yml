@@ -1,0 +1,8 @@
+# The turn-notify bundle patch: inserts the turn notification plugin into the
+# profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-turn-notify`;
+# the row id addresses this plugin's host half, whose `session/event` observer
+# feeds the projection polled by the browser half via `/api/turn-notify/*`.
+
+- insert:
+    - id: turn-notify
+      name: '@mzzsfy/dsh-turn-notify'

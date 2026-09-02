@@ -1,0 +1,8 @@
+# The maintain bundle patch: inserts the version-monitor + upgrade + restart
+# plugin into the profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-maintain`;
+# the row id addresses this plugin's host half, whose `/api/maintain/*`
+# routes serve the browser half rendered in the settings page.
+
+- insert:
+    - id: maintain
+      name: '@mzzsfy/dsh-maintain'
