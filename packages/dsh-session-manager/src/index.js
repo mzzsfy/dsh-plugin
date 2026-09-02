@@ -23,7 +23,7 @@ import { trashPath } from './trash.mjs'
 
 export const name = 'dsh-session-manager'
 
-export const inject = ['webServer']
+export const inject = ['webServer', 'workspaceRegistry', 'sessionQuery', 'storageDomain']
 
 const NAMESPACE = settingsNamespace('session-manager')
 const WORKSPACE_DOMAIN_NAME = 'workspace'
