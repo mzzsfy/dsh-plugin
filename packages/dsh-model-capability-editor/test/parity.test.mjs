@@ -108,3 +108,17 @@ defineScenarios('[client.js] ', clientLogic())
 test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
 })
+
+// wire 适配段双副本守卫:client.js 中 LOGIC 段外的 unwrapWire/makeSettingsFace
+// 与 logic.mjs 导出必须逐字符一致(单文件格式无法 require,靠此测试防漂移)。
+test('client.js wire 适配段与 logic.mjs 同源', () => {
+  const sectionOf = (source, label) => {
+    const begin = source.indexOf('// 宿主 wire 信封')
+    const end = source.indexOf('async function describeNs')
+    assert.ok(begin >= 0 && end > begin, label + ' 缺少 wire 适配段')
+    return source.slice(begin, end).replace(/^export function/gm, 'function').trim()
+  }
+  const client = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  const logic = readFileSync(join(PKG_ROOT, 'src', 'logic.mjs'), 'utf8')
+  assert.equal(sectionOf(client, 'client.js'), sectionOf(logic, 'logic.mjs'))
+})

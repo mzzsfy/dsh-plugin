@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-model-capability-editor
 
-DeepSeek Harness 模型能力编辑插件:在设置 → 模型页底部(官方 `settings.models.footer` 插槽)渲染"模型能力"卡片,编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(思考档位与线上拼写)与 `input` 多模态声明,经官方 settings RPC 整组写回 settings.yaml。
+DeepSeek Harness 模型能力编辑插件:在设置页渲染独立"模型能力"分区(`settings.section` 插槽,紧随内置模型页),编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(思考档位与线上拼写)与 `input` 多模态声明,经官方 settings RPC 整组写回 settings.yaml。
 
 ## 解决什么问题
 
@@ -23,7 +23,7 @@ DeepSeek Harness 模型能力编辑插件:在设置 → 模型页底部(官方 `
 - input 三态:未声明(删除字段)/ 仅文本(`["text"]`)/ 文本+图像(`["text", "image"]`)。
 - 保存 = mutate set `providers.<route>.models` 整个数组:以 describe 读到的数组为基线,未编辑条目原样保留,settings 未声明的(自动发现的)模型不被删除。
 - 修订冲突:重读 describe 取新 revision,按字段级 diff 仅重放本次修改(仅用户改过的模型条目的 `reasoningEfforts` / `input` 两字段,其余字段保留最新文档值),重试一次;再冲突报错终止并保留用户输入,绝不静默覆盖。
-- `remote.settings` 槽缺失 / describe 失败 / `writable === false`:卡片显示具体原因并只读,绝不静默。
+- `settings` wire 面缺失 / describe 失败 / `writable === false`:卡片显示具体原因并只读,绝不静默。
 
 ## 安装
 
@@ -31,7 +31,7 @@ DeepSeek Harness 模型能力编辑插件:在设置 → 模型页底部(官方 `
 dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 ```
 
-重启 dsh 后,设置 → 模型页底部出现"模型能力"卡片。
+重启 dsh 后,设置页左侧导航出现"模型能力"分区。
 
 ## 前置:移除 dsh-better-reasoning-effort
 
@@ -54,7 +54,7 @@ dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 npm test
 ```
 
-纯逻辑层单测(node --test,无外部依赖):档位四态判定表与拼写回填、input 三态、整组写回基线合并、冲突字段级重放与一次重试判定、竞品痕迹检测。
+纯逻辑层单测(node --test,无外部依赖):档位四态判定表与拼写回填、input 三态、整组写回基线合并、冲突字段级重放与一次重试判定、竞品痕迹检测、wire 信封适配(含 transport 抛错透传)与端到端冲突重放、client.js 与 logic.mjs 的 wire 适配段同源守卫。
 
 ## License
 
