@@ -1,0 +1,8 @@
+# The usage-stats bundle patch: inserts the session billing statistics plugin
+# into the profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-usage-stats`;
+# the row id addresses this plugin's host half, whose `/api/usage-stats/*`
+# routes serve the browser half (settings dashboard + composer dock badge).
+
+- insert:
+    - id: usage-stats
+      name: '@mzzsfy/dsh-usage-stats'

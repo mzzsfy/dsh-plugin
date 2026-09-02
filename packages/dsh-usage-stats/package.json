@@ -1,0 +1,43 @@
+{
+  "name": "@mzzsfy/dsh-usage-stats",
+  "description": "DeepSeek Harness 会话费用统计插件:监听 llm/stream 累计 token 用量,按 models.dev 单价估算费用,提供今日/本月/累计、近 14 天趋势与今日会话明细,输入区显示本会话费用徽章",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.1014.top:83/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": ">=0.1.1-rc.2",
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "react": "^18.2.0"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}
