@@ -454,6 +454,7 @@ window.__ModuleLoader__.load({
       webhookConfigured: false,
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
+      suppressSubagentWake: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
     }
 
@@ -640,7 +641,7 @@ window.__ModuleLoader__.load({
             : String(config.minTurnDurationMs)
           if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
           const trimmedUrl = urlDraft.trim()
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly }
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
           // 只写语义:输入留空即保持现有 webhook 不变
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
@@ -794,7 +795,12 @@ window.__ModuleLoader__.load({
                 type: 'checkbox', checked: config.rootsOnly,
                 onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
               }),
-              ' 子代理会话不通知'),
+              ' 子代理会话不通知',
+              h('input', {
+                type: 'checkbox', checked: config.suppressSubagentWake,
+                onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
+              }),
+              ' 子代理回执静默'),
             h('span', { className: 'tn-spacer' }),
             h('button', { className: 'tn-btn', disabled: busy, onClick: () => void saveConfig() }, '保存'),
           ),

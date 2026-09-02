@@ -14,7 +14,7 @@ DeepSeek Harness 设置页插件:回合完成通知——host 单源决策,声�
 - 多窗口去重:投影(内存环形 20 条,60 秒过期)供各窗口约 2 秒轮询;localStorage 写后读回认领锁(30 秒过期接管,完成标记防迟到窗口重复发声)。
 - 发声形态:聚焦窗口仅页内 toast(可关);失焦 + Notification 授权走声音 + 系统弹窗;HTTP 非回环(非 secure context)诚实降级 toast + 标题闪烁。
 - 声音:Web Audio 程序合成 8 种内置音(零音频文件、零系统依赖),支持上传自定义音效(host 存储 `~/.dsh/dsh-turn-notify/sounds/`,扩展名 + decodeAudioData 双重校验,单文件 2MB / 总量 10MB);可多选文件,待保存列表逐个试听、逐个保存,不保存不落盘;已上传音效支持重命名(文件即 id,分类映射引用自动迁移,重名 / 内置音色名 / 非法字符拒绝)。
-- 过滤:`minTurnDurationMs`(默认 5 秒)仅作用于 turn/end 类;`rootsOnly` 子代理会话默认豁免。
+- 过滤:`minTurnDurationMs`(默认 5 秒)仅作用于 turn/end 类;`rootsOnly` 子代理会话默认豁免;`suppressSubagentWake` 子代理完成唤醒的父会话回合默认静默(仅 completed 类)。
 
 ## 安装
 
@@ -37,6 +37,7 @@ turn-notify:
   webhookUrl: ''                  # Slack-compatible webhook 目标,留空禁用
   minTurnDurationMs: 5000         # 回合最短时长过滤,毫秒
   rootsOnly: true                 # 子代理会话不通知
+  suppressSubagentWake: true      # 子代理完成唤醒的父会话回合不通知(仅 completed)
   enabled:                        # 六分类独立开关
     completed: true
     error: true

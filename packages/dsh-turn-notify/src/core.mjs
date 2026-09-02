@@ -98,13 +98,24 @@ export function isSubagent(header) {
   return source.origin === 'subagent' || (source.delegationDepth ?? 0) > 0
 }
 
+// 子代理结束到父会话被唤醒的投递裕量;超过视为与子代理无关的新回合。
+export const SUBAGENT_WAKE_WINDOW_MS = 30 * 1000
+
+// 唤醒回合判定:父会话回合开始前窗口内,有其子代理会话结束(childDoneAt 为时间戳,null 表示无记录)。
+export function isSubagentWakeTurn({ childDoneAt, turnStartMs, windowMs = SUBAGENT_WAKE_WINDOW_MS }) {
+  if (typeof childDoneAt !== 'number') return false
+  const elapsed = turnStartMs - childDoneAt
+  return elapsed >= 0 && elapsed <= windowMs
+}
+
 const DURATION_FILTERED_KINDS = [TURN_END_KIND]
 
-// 通知总决策:分类开关 + 子代理豁免 + 碎轮过滤(仅 turn/end 类)。
-export function shouldNotify({ category, kind, durationMs, settings, header }) {
+// 通知总决策:分类开关 + 子代理豁免 + 唤醒回执静默 + 碎轮过滤(仅 turn/end 类)。
+export function shouldNotify({ category, kind, durationMs, settings, header, wakeTurn }) {
   if (category === null) return false
   if ((settings.enabled || {})[category] === false) return false
   if (settings.rootsOnly !== false && isSubagent(header)) return false
+  if (wakeTurn === true && category === CATEGORY_DONE && settings.suppressSubagentWake !== false) return false
   if (DURATION_FILTERED_KINDS.indexOf(kind) >= 0 && durationMs !== null && durationMs < settings.minTurnDurationMs) return false
   return true
 }
@@ -337,7 +348,7 @@ const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 // 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'enabled']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -365,6 +376,10 @@ export function validateConfigPatch(patch) {
     if (typeof patch.rootsOnly !== 'boolean') return { ok: false, reason: 'rootsOnly 须为布尔' }
     next.rootsOnly = patch.rootsOnly
   }
+  if ('suppressSubagentWake' in patch) {
+    if (typeof patch.suppressSubagentWake !== 'boolean') return { ok: false, reason: 'suppressSubagentWake 须为布尔' }
+    next.suppressSubagentWake = patch.suppressSubagentWake
+  }
   if ('enabled' in patch) {
     const enabled = patch.enabled
     if (enabled === null || typeof enabled !== 'object' || Array.isArray(enabled)) return { ok: false, reason: 'enabled 须为对象' }
@@ -388,6 +403,7 @@ export function resolvedConfig(settings) {
     webhookUrl: typeof source.webhookUrl === 'string' ? source.webhookUrl : '',
     minTurnDurationMs: duration,
     rootsOnly: source.rootsOnly !== false,
+    suppressSubagentWake: source.suppressSubagentWake !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping: { ...soundMapping },
   }
@@ -399,6 +415,7 @@ export function publicConfig(settings) {
   return {
     minTurnDurationMs: resolved.minTurnDurationMs,
     rootsOnly: resolved.rootsOnly,
+    suppressSubagentWake: resolved.suppressSubagentWake,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     webhookConfigured: resolved.webhookUrl.trim().length > 0,
