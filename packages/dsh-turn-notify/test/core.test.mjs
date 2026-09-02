@@ -9,7 +9,9 @@ import {
   CATEGORY_ASK,
   mapEventToCategory,
   isSubagent,
+  isSubagentWakeTurn,
   shouldNotify,
+  SUBAGENT_WAKE_WINDOW_MS,
   buildUnit,
   buildWebhookPayload,
   createProjection,
@@ -109,6 +111,38 @@ test('分类开关关闭即不通知', () => {
     category: CATEGORY_ERROR, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
     settings: { ...settings, enabled: { ...full.enabled, [CATEGORY_ERROR]: false } }, header: {},
   }), false)
+})
+
+test('子代理回执静默:唤醒回合 completed 不通知,其余分类与开关关闭不受影响', () => {
+  const now = 1_000_000
+  const windowMs = SUBAGENT_WAKE_WINDOW_MS
+  const settings = baseSettings()
+  // 唤醒判定:父会话回合开始时刻落在子代理结束后窗口内,恰等边界含
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now - windowMs, turnStartMs: now }), true)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now, turnStartMs: now }), true)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now - windowMs - 1, turnStartMs: now }), false)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: now + 1, turnStartMs: now }), false)
+  assert.equal(isSubagentWakeTurn({ childDoneAt: null, turnStartMs: now }), false)
+  // 唤醒回合 completed + 开关开 → 抑制
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, wakeTurn: true,
+  }), false)
+  // 开关关 → 通知
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings: baseSettings({ suppressSubagentWake: false }), header: {}, wakeTurn: true,
+  }), true)
+  // 非唤醒回合 → 正常通知(不误伤)
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, wakeTurn: false,
+  }), true)
+  // 唤醒回合但异常分类 → 仍通知
+  assert.equal(shouldNotify({
+    category: CATEGORY_ERROR, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, wakeTurn: true,
+  }), true)
 })
 
 test('投影环形容量与过期清理', () => {
@@ -305,6 +339,7 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
     webhookUrl: ' https://hook.example ',
     minTurnDurationMs: 1500,
     rootsOnly: false,
+    suppressSubagentWake: false,
     enabled: { completed: false, error: true },
   })
   assert.equal(full.ok, true)
@@ -312,10 +347,12 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
     webhookUrl: 'https://hook.example',
     minTurnDurationMs: 1500,
     rootsOnly: false,
+    suppressSubagentWake: false,
     enabled: { completed: false, error: true },
   })
   assert.deepEqual(validateConfigPatch({ webhookUrl: '' }), { ok: true, patch: { webhookUrl: '' } })
   assert.deepEqual(validateConfigPatch({ rootsOnly: true }), { ok: true, patch: { rootsOnly: true } })
+  assert.deepEqual(validateConfigPatch({ suppressSubagentWake: true }), { ok: true, patch: { suppressSubagentWake: true } })
   assert.deepEqual(validateConfigPatch({}), { ok: true, patch: {} })
 })
 
@@ -330,6 +367,7 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
   assert.equal(validateConfigPatch({ minTurnDurationMs: 1.5 }).ok, false)
   assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
   assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
+  assert.equal(validateConfigPatch({ suppressSubagentWake: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
@@ -342,6 +380,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       webhookUrl: 'https://hook.example',
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
+      suppressSubagentWake: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
     },
@@ -350,10 +389,12 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     webhookUrl: '',
     minTurnDurationMs: MIN_TURN_MS,
     rootsOnly: true,
+    suppressSubagentWake: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
+  assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
 })
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
@@ -362,6 +403,7 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
     {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
+      suppressSubagentWake: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       webhookConfigured: true,

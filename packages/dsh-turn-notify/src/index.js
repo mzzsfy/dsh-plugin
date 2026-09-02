@@ -18,6 +18,8 @@ import {
   collectSessionEvents,
   createApprovalTap,
   createProjection,
+  isSubagent,
+  isSubagentWakeTurn,
   mapEventToCategory,
   pruneMapping,
   readRawBody,
@@ -51,6 +53,7 @@ const SETTINGS_SCHEMA = z.object({
   webhookUrl: z.string().role('secret').default('').description('webhook 目标 URL(Slack-compatible {text}),留空禁用'),
   minTurnDurationMs: z.number().default(MIN_TURN_DURATION_MS).description('回合最短时长过滤,毫秒,仅作用于 turn/end 类'),
   rootsOnly: z.boolean().default(true).description('子代理会话不通知'),
+  suppressSubagentWake: z.boolean().default(true).description('子代理完成唤醒的回合不通知'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六分类独立开关'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每分类音效映射,空为内置默认,非空为上传音效 id'),
 })
@@ -58,7 +61,7 @@ const SETTINGS_SCHEMA = z.object({
 const readSettings = (ctx) => {
   const settings = ctx.get('settings')
   const value = settings ? settings.get(NAMESPACE) : undefined
-  const fallback = { webhookUrl: '', minTurnDurationMs: MIN_TURN_DURATION_MS, rootsOnly: true, enabled: {}, soundMapping: {} }
+  const fallback = { webhookUrl: '', minTurnDurationMs: MIN_TURN_DURATION_MS, rootsOnly: true, suppressSubagentWake: true, enabled: {}, soundMapping: {} }
   return value ? { ...fallback, ...value } : fallback
 }
 
@@ -98,6 +101,10 @@ export function apply(ctx) {
   const projection = createProjection({})
   // 打开回合的起始时间,按会话 id 记录,回合结束即清
   const openTurns = new Map()
+  // 子代理会话结束时刻,按父会话 id 记录,用于识别子代理回执唤醒的回合
+  const childDoneAt = new Map()
+  // 被子代理回执唤醒的回合,回合结束即清
+  const wakeTurns = new Set()
   // 事件读序:标题提取需要事件流,按会话累积 user/message 文本;标题封账后不再累积
   const sessionEvents = new Map()
   const titledSessions = new Set()
@@ -116,7 +123,7 @@ export function apply(ctx) {
     const sessionId = String(session.id ?? '')
     const events = sessionEvents.get(sessionId) || []
     const durationMs = openTurns.get(sessionId) ?? null
-    if (!shouldNotify({ category, kind, durationMs, settings, header })) return
+    if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn: wakeTurns.has(sessionId) })) return
     seq += 1
     const unit = buildUnit({
       id: 'n-' + Date.now().toString(36) + '-' + String(seq) + '-' + String(category),
@@ -139,10 +146,25 @@ export function apply(ctx) {
       return
     }
     if (event.type === 'turn/start') {
+      // 子代理结束后窗口内父会话开新回合 = 回执唤醒回合;标记即消费,仅首个回合生效。
+      // 依赖运行时契约:子代理 turn/end 先于父会话唤醒 turn/start 到达。
+      const done = childDoneAt.get(sessionId)
+      if (done !== undefined) {
+        childDoneAt.delete(sessionId)
+        if (isSubagentWakeTurn({ childDoneAt: done, turnStartMs: Date.now() })) wakeTurns.add(sessionId)
+      }
       openTurns.set(sessionId, Date.now())
       return
     }
-    if (event.type === TURN_END_KIND) openTurns.delete(sessionId)
+    if (event.type === TURN_END_KIND) {
+      // 子代理会话收尾:记录到父会话名下,供其唤醒回合判定
+      const header = session.header || {}
+      if (isSubagent(header) && header.parentSession) childDoneAt.set(String(header.parentSession), Date.now())
+      openTurns.delete(sessionId)
+      wakeTurns.delete(sessionId)
+      // 父会话收尾即不再有唤醒判定意义
+      childDoneAt.delete(sessionId)
+    }
     if (event.type === TOOL_CALL_KIND && event.data && event.data.name !== ASK_TOOL_NAME) return
     const category = mapEventToCategory(event.type, event.data)
     if (category === null) return
