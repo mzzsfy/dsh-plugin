@@ -346,12 +346,14 @@ export function validateConfigPatch(patch) {
 export function resolvedConfig(settings) {
   const source = settings || {}
   const enabled = (typeof source.enabled === 'object' && source.enabled !== null) ? source.enabled : {}
+  const soundMapping = (typeof source.soundMapping === 'object' && source.soundMapping !== null) ? source.soundMapping : {}
   const duration = Number.isFinite(source.minTurnDurationMs) ? Math.max(0, Math.floor(source.minTurnDurationMs)) : MIN_TURN_DURATION_MS
   return {
     webhookUrl: typeof source.webhookUrl === 'string' ? source.webhookUrl : '',
     minTurnDurationMs: duration,
     rootsOnly: source.rootsOnly !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
+    soundMapping: { ...soundMapping },
   }
 }
 
@@ -362,6 +364,7 @@ export function publicConfig(settings) {
     minTurnDurationMs: resolved.minTurnDurationMs,
     rootsOnly: resolved.rootsOnly,
     enabled: resolved.enabled,
+    soundMapping: resolved.soundMapping,
     webhookConfigured: resolved.webhookUrl.trim().length > 0,
   }
 }

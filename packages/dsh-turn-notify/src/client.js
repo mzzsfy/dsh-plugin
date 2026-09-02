@@ -14,6 +14,8 @@ window.__ModuleLoader__.load({
     const BLINK_MS = 1 * 1000
     // 系统通知测试延迟:浏览器对聚焦窗口抑制系统弹窗,倒计时供用户切出窗口
     const SYSTEM_TEST_DELAY_MS = 5 * 1000
+    // 显示回执等待上限:超时未回执按环境层拦截给出诊断
+    const SYSTEM_SHOW_TIMEOUT_MS = 3 * 1000
     const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
     const MIME_BY_EXT = { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' }
 
@@ -277,10 +279,17 @@ window.__ModuleLoader__.load({
 
     const notificationPermission = () => (typeof Notification === 'undefined' ? 'denied' : Notification.permission)
 
-    function notifySystem(unit) {
+    // onOutcome 仅供测试路径取显示回执(onshow/onerror),真实路径吞错降级已在链路内
+    function notifySystem(unit, onOutcome) {
       try {
-        new Notification(unit.text, { tag: unit.id })
-      } catch { /* 弹窗失败降级 toast,已在链路内 */ }
+        const notification = new Notification(unit.text, { tag: unit.id })
+        if (typeof onOutcome === 'function') {
+          notification.onshow = () => { onOutcome(true) }
+          notification.onerror = () => { onOutcome(false) }
+        }
+      } catch {
+        if (typeof onOutcome === 'function') onOutcome(false)
+      }
     }
 
     // ---- 投影轮询与认领 ----
@@ -404,33 +413,59 @@ window.__ModuleLoader__.load({
       const [configLoaded, setConfigLoaded] = useState(false)
       const [urlDraft, setUrlDraft] = useState('')
       const [permission, setPermission] = useState(notificationPermission())
+      // 分类映射的受控 state:直接由写响应回填,不再依赖轮询变量驱动渲染
+      const [mapping, setMappingState] = useState({})
+      // 待确认上传:文件选中且解码校验通过后挂起,用户确认才落盘
+      const [pendingUpload, setPendingUpload] = useState(null)
 
       useEffect(() => {
         start()
         api('/api/turn-notify/sounds').then((res) => setSounds(res.sounds || [])).catch(() => {})
         api('/api/turn-notify/config')
-          .then((res) => { setConfig({ ...DEFAULT_CONFIG, ...res }); setConfigLoaded(true) })
+          .then((res) => {
+            setConfig({ ...DEFAULT_CONFIG, ...res })
+            setMappingState(res.soundMapping || {})
+            setConfigLoaded(true)
+          })
           .catch(() => {})
       }, [])
 
       const patch = (text, kind) => setNotice({ text, kind: kind || 'ok' })
 
-      async function upload(file) {
+      async function onPickFile(file) {
+        if (!file) return
         setBusy(true)
         setNotice(null)
         try {
-          // 入库前双重校验的浏览器半区:decodeAudioData 解码失败即拒绝
+          // 入库前双重校验的浏览器半区:decodeAudioData 解码失败即拒绝;
+          // 解码吃副本,原始 buffer 留给确认后的上传
           const raw = await file.arrayBuffer()
           await ensureAudioCtx().decodeAudioData(raw.slice(0))
           const ext = (/\.([^.]+)$/.exec(file.name) || [])[1]?.toLowerCase() || ''
           if (AUDIO_EXTS.indexOf(ext) < 0) throw new Error('仅支持 ' + AUDIO_EXTS.join(' / '))
-          await api('/api/turn-notify/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: raw })
+          setPendingUpload({ name: file.name, raw })
+          patch('解码校验通过,请确认后保存')
+        } catch (error) {
+          patch('上传被拒绝:' + (error && error.message ? error.message : String(error)), 'error')
+        } finally { setBusy(false) }
+      }
+
+      async function confirmUpload() {
+        if (pendingUpload === null) return
+        setBusy(true)
+        setNotice(null)
+        try {
+          await api('/api/turn-notify/upload?name=' + encodeURIComponent(pendingUpload.name), {
+            method: 'POST',
+            body: pendingUpload.raw,
+          })
           const res = await api('/api/turn-notify/sounds')
           setSounds(res.sounds || [])
           await refreshSounds()
-          patch('已上传')
+          setPendingUpload(null)
+          patch('已保存')
         } catch (error) {
-          patch('上传被拒绝:' + (error && error.message ? error.message : String(error)), 'error')
+          patch('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
         } finally { setBusy(false) }
       }
 
@@ -450,7 +485,8 @@ window.__ModuleLoader__.load({
 
       async function setMapping(category, id) {
         try {
-          await api('/api/turn-notify/mapping', { method: 'POST', body: JSON.stringify({ category, id }) })
+          const res = await api('/api/turn-notify/mapping', { method: 'POST', body: JSON.stringify({ category, id }) })
+          setMappingState(res.soundMapping || {})
           patch(CATEGORY_LABELS[category] + ' 音效已更新')
         } catch (error) {
           patch('映射失败:' + (error && error.message ? error.message : String(error)), 'error')
@@ -475,6 +511,7 @@ window.__ModuleLoader__.load({
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
+          if (res.soundMapping) setMappingState(res.soundMapping)
           setUrlDraft('')
           patch('配置已保存,立即生效')
         } catch (error) {
@@ -488,6 +525,7 @@ window.__ModuleLoader__.load({
         try {
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ webhookUrl: '' }) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
+          if (res.soundMapping) setMappingState(res.soundMapping)
           setUrlDraft('')
           patch('webhook 已清除')
         } catch (error) {
@@ -502,6 +540,7 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({ enabled: { [category]: checked } }),
           })
           setConfig({ ...DEFAULT_CONFIG, ...res })
+          if (res.soundMapping) setMappingState(res.soundMapping)
         } catch (error) {
           patch('开关失败:' + (error && error.message ? error.message : String(error)), 'error')
         }
@@ -524,7 +563,8 @@ window.__ModuleLoader__.load({
       }
 
       // 系统通知通道单独测试:浏览器对聚焦窗口抑制系统弹窗,延迟发送模拟真实场景
-      // (真实链路里系统通知只在用户切出窗口后触发),到点按窗口状态如实报告
+      // (真实链路里系统通知只在用户切出窗口后触发);依据浏览器显示回执与
+      // 超时兜底给出诊断,环境层拦截(系统通知设置/专注助手)在此显性化
       function testSystemNotification() {
         const current = notificationPermission()
         if (current === 'default') {
@@ -537,12 +577,21 @@ window.__ModuleLoader__.load({
         }
         patch('请在 ' + Math.round(SYSTEM_TEST_DELAY_MS / 1000) + ' 秒内切出本窗口,随后到达的才是系统通知')
         setTimeout(() => {
-          notifySystem({ id: 'ui-test', text: '[dsh] 测试系统通知', category: 'completed' })
-          if (document.hasFocus()) {
+          const focused = document.hasFocus()
+          let reported = false
+          notifySystem({ id: 'ui-test', text: '[dsh] 测试系统通知', category: 'completed' }, (shown) => {
+            reported = true
+            if (focused) return
+            patch(shown ? '系统通知已显示,浏览器确认送达' : '系统通知显示失败(浏览器报告错误)', shown ? 'ok' : 'error')
+          })
+          if (focused) {
             patch('已发送,但窗口仍聚焦,浏览器会抑制弹窗;请切出窗口后重新测试', 'error')
-          } else {
-            patch('系统通知已送达,请查看屏幕右下角 / Windows 通知中心')
+            return
           }
+          setTimeout(() => {
+            if (reported) return
+            patch('未收到浏览器显示回执:请检查 Windows 设置 > 通知 中浏览器的通知权限,以及专注助手 / 勿扰是否拦截', 'error')
+          }, SYSTEM_SHOW_TIMEOUT_MS)
         }, SYSTEM_TEST_DELAY_MS)
       }
 
@@ -559,7 +608,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const mapping = soundMapping
       const soundOptions = [h('option', { key: '', value: '' }, '内置默认')].concat(
         Object.keys(TONE_LABELS).map((name) => h('option', { key: name, value: name }, '内置 · ' + TONE_LABELS[name])),
       ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + sound.id)))
@@ -670,9 +718,18 @@ window.__ModuleLoader__.load({
           h('div', { className: 'tn-row' },
             h('input', {
               type: 'file', accept: AUDIO_EXTS.map((ext) => '.' + ext).join(','), disabled: busy,
-              onChange: (e) => { const file = e.target.files && e.target.files[0]; if (file) void upload(file) },
+              onChange: (e) => {
+                const file = e.target.files && e.target.files[0]
+                e.target.value = ''
+                void onPickFile(file)
+              },
             }),
           ),
+          pendingUpload !== null ? h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, '待保存: ' + pendingUpload.name),
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void confirmUpload() }, '确认保存'),
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => setPendingUpload(null) }, '取消'),
+          ) : null,
           sounds.length === 0 ? h('span', { className: 'tn-meta' }, '暂无上传音效') :
             sounds.map((sound) => h('div', { className: 'tn-row', key: sound.id },
               h('span', { className: 'tn-meta' }, sound.id + '.' + sound.ext),
