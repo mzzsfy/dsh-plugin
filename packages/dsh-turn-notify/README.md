@@ -44,7 +44,7 @@ turn-notify:
     approval: true
     ask: true
     max-tokens: true
-  soundMapping:                   # 每分类音效映射,空为内置默认,值为内置音名或上传音效 id
+  soundMapping:                   # 每分类音效映射,空为内置默认,值为内置音名或上传音效 id;面板内每行可试听当前生效音效
     completed: ''
 ```
 

@@ -738,6 +738,14 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 分类试听:播放该分类当前实际生效的音效(自定义 / 内置 / 失效回落),与通知真实发声同语义
+      function previewCategory(category) {
+        const sound = resolveSound(category, mapping, uploadedIds)
+        playAudible(sound).then((result) => {
+          if (!result.ok) patch(CATEGORY_LABELS[category] + ' 试听未播放:' + result.reason, 'error')
+        })
+      }
+
       const soundOptions = [h('option', { key: '', value: '' }, '内置默认')].concat(
         Object.keys(TONE_LABELS).map((name) => h('option', { key: name, value: name }, '内置 · ' + TONE_LABELS[name])),
       ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + sound.id)))
@@ -914,9 +922,10 @@ window.__ModuleLoader__.load({
           CATEGORIES.map((category) => h('div', { className: 'tn-row', key: category },
             h('span', { className: 'tn-meta' }, CATEGORY_LABELS[category]),
             h('select', {
-              className: 'tn-select', value: mapping[category] || '',
+              className: 'tn-select tn-fill', value: mapping[category] || '',
               onChange: (e) => void setMapping(category, e.target.value),
             }, soundOptions),
+            h('button', { className: 'tn-btn', onClick: () => previewCategory(category) }, '试听'),
           )),
         ),
       )
