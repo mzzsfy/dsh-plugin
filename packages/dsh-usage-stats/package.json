@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-usage-stats",
   "description": "全会话 token 用量与费用统计:仪表盘(趋势/热力图/明细/CSV 导出)、输入区费用条、自定义模型价格,数据全部本地",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {

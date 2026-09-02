@@ -26,8 +26,8 @@ window.__ModuleLoader__.load({
     const SETTING_ON = 'on'
     const SETTING_OFF = 'off'
     const SLOT_ID = 'think-expand'
-    // turn-notify 设置段占 41,本插件让位排后
-    const SLOT_ORDER = 41 + 1
+    // "插件"分区 tab:可配置占 0,插件清单占 10,本插件排后
+    const SLOT_ORDER = 10 + 1
     const SLOT_LABEL = '思考自动展开'
 
     /* LOGIC-BEGIN */
@@ -270,7 +270,7 @@ window.__ModuleLoader__.load({
       for (const action of teardown(registry, rows).actions) applyAction(described, action)
     }
 
-    // ---- 设置页面板:settings.section 槽位,仅一个开关 ----
+    // ---- 设置面板:"插件"分区 settings.plugins.tab 槽位,仅一个开关 ----
 
     function SettingsApp() {
       const [enabled, setEnabled] = useState(readEnabled())
@@ -294,9 +294,9 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        ctx.slots.inject('settings.section', () =>
+        ctx.slots.inject('settings.plugins.tab', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: SLOT_ID, order: SLOT_ORDER, label: SLOT_LABEL },
+            { name: 'settings.plugins.tab', id: SLOT_ID, order: SLOT_ORDER, label: SLOT_LABEL },
             () => React.createElement(SettingsApp),
           ))
       },
