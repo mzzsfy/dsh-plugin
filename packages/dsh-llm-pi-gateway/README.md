@@ -73,3 +73,11 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 ```sh
 npm test        # node --test test/*.test.mjs,纯逻辑层无外部依赖
 ```
+
+## 开发安装(不经 npm 发布直接装仓库副本)
+
+```sh
+dsh plugin --profile web add file:./packages/dsh-llm-pi-gateway
+```
+
+`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。

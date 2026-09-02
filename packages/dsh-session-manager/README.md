@@ -32,3 +32,11 @@ npm test
 ```
 
 纯逻辑层(评估状态机 / 删除资格与失败矩阵 / 面板投影 / 归档差分 / 空白判定 / 回收站命令构造)以 `node --test` 覆盖,无外部依赖。路由层测试依赖 peer 包可解析,仓库根未安装依赖时自动 skip,`npm install` 后激活。Windows 真实回收站执行测试仅在本平台执行,其余平台自动 skip。
+
+## 开发安装(不经 npm 发布直接装仓库副本)
+
+```sh
+dsh plugin --profile web add file:./packages/dsh-session-manager
+```
+
+`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。
