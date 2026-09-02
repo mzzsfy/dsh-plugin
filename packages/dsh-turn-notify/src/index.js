@@ -3,7 +3,7 @@
 // 音效持久化在 ~/.dsh/dsh-turn-notify/sounds/,投影不落盘。
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -21,6 +21,7 @@ import {
   mapEventToCategory,
   pruneMapping,
   readRawBody,
+  renameMapping,
   sendWebhook,
   sessionTitle,
   shouldNotify,
@@ -28,6 +29,7 @@ import {
   UPLOAD_FILE_MAX_BYTES,
   validateConfigPatch,
   validateMappingId,
+  validateSoundName,
   validateUpload,
   publicConfig,
 } from './core.mjs'
@@ -100,6 +102,13 @@ export function apply(ctx) {
   const sessionEvents = new Map()
   const titledSessions = new Set()
   let seq = 0
+  // 音效文件写互斥:rename 的重名检查与落盘非原子,串行化防并发重命名静默覆盖
+  let soundWriteQueue = Promise.resolve()
+  const serializedSoundWrite = (fn) => {
+    const next = soundWriteQueue.then(fn, fn)
+    soundWriteQueue = next.then(() => {}, () => {})
+    return next
+  }
 
   function notifyUnit({ category, kind, reasonKind, session }) {
     const settings = readSettings(ctx)
@@ -248,27 +257,72 @@ export function apply(ctx) {
           }
           return
         }
+        // 重命名:文件即 id,改名同步迁移映射引用;同名幂等,重名与非法名拒绝。
+        if (req.method === 'PUT') {
+          if (rejectCrossOrigin(req, res) || rejectNonJson(req, res)) return
+          try {
+            const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES)).toString('utf8'))
+            const id = body && typeof body.id === 'string' ? body.id : ''
+            // 互斥段覆盖重名检查到落盘,防并发窗口内同名互相覆盖
+            await serializedSoundWrite(async () => {
+              const sounds = await listSounds()
+              const sound = sounds.find((item) => item.id === id)
+              if (!sound) {
+                sendJson(res, 404, { error: '音效不存在' })
+                return
+              }
+              const verdict = validateSoundName(body && typeof body.name === 'string' ? body.name : '')
+              if (!verdict.ok) {
+                sendJson(res, 400, { error: verdict.reason })
+                return
+              }
+              // 同名 no-op:Windows 上 rename 到自身会失败,幂等语义要求提前放行
+              if (verdict.name === id) {
+                sendJson(res, 200, { ok: true, id, soundMapping: readSettings(ctx).soundMapping })
+                return
+              }
+              if (sounds.some((item) => item.id === verdict.name)) {
+                sendJson(res, 400, { error: '名称已被占用' })
+                return
+              }
+              await rename(join(SOUNDS_DIR, id + '.' + sound.ext), join(SOUNDS_DIR, verdict.name + '.' + sound.ext))
+              const settings = ctx.get('settings')
+              let mapping = readSettings(ctx).soundMapping
+              if (settings) {
+                mapping = renameMapping(mapping, id, verdict.name)
+                await settings.update(NAMESPACE, { soundMapping: mapping })
+              }
+              sendJson(res, 200, { ok: true, id: verdict.name, soundMapping: mapping })
+            })
+          } catch (error) {
+            sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          }
+          return
+        }
         if (req.method !== 'DELETE') {
           sendJson(res, 405, { error: 'method not allowed' })
           return
         }
         if (rejectCrossOrigin(req, res)) return
         try {
-          const sounds = await listSounds()
-          const sound = sounds.find((item) => item.id === id)
-          if (!sound) {
-            sendJson(res, 404, { error: '音效不存在' })
-            return
-          }
-          await unlink(join(SOUNDS_DIR, id + '.' + sound.ext))
-          // 被引用即回落:清掉映射引用,resolveSound 兜底回内置默认
-          const settings = ctx.get('settings')
-          if (settings) {
-            const current = readSettings(ctx)
-            const mapping = pruneMapping(current.soundMapping, id)
-            await settings.update(NAMESPACE, { soundMapping: mapping })
-          }
-          sendJson(res, 200, { ok: true })
+          // 与 PUT 同互斥:防删除的映射读改写与重命名迁移交叉,旧读写回会清掉迁移结果
+          await serializedSoundWrite(async () => {
+            const sounds = await listSounds()
+            const sound = sounds.find((item) => item.id === id)
+            if (!sound) {
+              sendJson(res, 404, { error: '音效不存在' })
+              return
+            }
+            await unlink(join(SOUNDS_DIR, id + '.' + sound.ext))
+            // 被引用即回落:清掉映射引用,resolveSound 兜底回内置默认
+            const settings = ctx.get('settings')
+            if (settings) {
+              const current = readSettings(ctx)
+              const mapping = pruneMapping(current.soundMapping, id)
+              await settings.update(NAMESPACE, { soundMapping: mapping })
+            }
+            sendJson(res, 200, { ok: true })
+          })
         } catch (error) {
           sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
         }
