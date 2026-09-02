@@ -11,6 +11,13 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useSyncExternalStore } = React
 
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → archive);
+    // 该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '会话归档': 'archive' }
+    if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+    else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+    else window.__navicIconQueue = [NAV_ICON]
+
 // 视觉方案:归档台账——全部取宿主 alias 令牌(双主题自适应,不造色),数据列
 // 用宿主代码字体(会话即文件的档案词汇),签名元素为托盘内的归档轨
 const CSS = [

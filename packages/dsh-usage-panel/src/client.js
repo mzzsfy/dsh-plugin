@@ -9,6 +9,13 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect } = React
 
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → plan);
+    // 该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '账号余额': 'plan', '账号plan': 'plan' }
+    if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+    else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+    else window.__navicIconQueue = [NAV_ICON]
+
 const CSS = [
   '.up-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; }',
   '.up-trend { position:absolute; top:calc(100% + 8px); left:0; visibility:hidden; opacity:0;',
@@ -756,10 +763,10 @@ function UsagePanelApp() {
   return h('div', { className: 'up-panel' },
     h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'up-head' },
-      h('span', { className: 'up-head__title' }, '用量与余额'),
+      h('span', { className: 'up-head__title' }, '账号详情'),
       h('span', { className: 'up-spacer' }),
+      h('label', { className: 'up-field__label' }, '轮询间隔(秒)'),
       h('span', { className: 'up-field' },
-        h('label', { className: 'up-field__label' }, '轮询间隔(秒)'),
         h('input', {
           type: 'number', min: 1, style: { width: '80px' },
           value: pollIntervalSec === null ? '' : pollIntervalSec,
@@ -793,7 +800,7 @@ function UsagePanelApp() {
       apply(ctx) {
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'usage-panel', order: 40, label: '用量面板' },
+            { name: 'settings.section', id: 'usage-panel', order: 40, label: '账号余额' },
             () => React.createElement(UsagePanelApp),
           ))
       },
