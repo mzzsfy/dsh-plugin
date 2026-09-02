@@ -951,7 +951,7 @@ test('交接摘要: fail 语境注入 [上次失败模型] 与 [强制续跑]', 
   ])
   assert.equal(result.ok, true)
   const retryPrompt = byLabel(calls, 'executor:t1')[2].prompt
-  assert.ok(retryPrompt.indexOf('[上次失败模型] ea/ma') >= 0)
+  assert.ok(retryPrompt.indexOf('[上次失败模型] eb/mb') >= 0, '全候选耗尽应取真实最后尝试候选 eb/mb')
   assert.ok(retryPrompt.indexOf('[强制续跑]') >= 0)
 })
 

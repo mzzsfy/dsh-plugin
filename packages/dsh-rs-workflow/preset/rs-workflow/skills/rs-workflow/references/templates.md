@@ -47,6 +47,7 @@ multi-plan    pr(大纲审) → s1: p1 → r-* → sr1              (子计划�
 | emptyOutputRetryLimit | 3（budgets 可配，clamp [1,10]） | 审批缺验证证据时的重问上限，超限视为拒绝 |
 | reportNudgeLimit | 3（budgets 可配，clamp [1,10]） | executor 返回 completed 但交接摘要（summary）空白时的补救追问上限 |
 | ESCALATION_LIMIT | 2（固定） | 升级重规划累计 2 次 → blocked 终态 |
+| FAIL_RETRY_FUSE | reviewRejectBeforeEscalate + 2（固定） | 任务原地重试保险丝，仅防合并记账判定被异常绕过后的死循环，非业务阈值 |
 | 调度预算 | 8 + (当前节点数 × (1 + reviewRejectBeforeEscalate) + 全程累计升级次数 × maxTasks × 3) × 3/轮 | 按当前图规模（节点项随任务拒绝阈值放大）与全程累计升级次数（不随审批通过清零）现算，大图与振荡兜底；每次升级增额 = maxTasks × 9 轮 |
 
 budgets 四字段经 `args.budgets` 传入，GUI/slots.json5 配置，缺省 2/2/3/3。
