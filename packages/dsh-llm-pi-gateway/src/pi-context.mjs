@@ -1,7 +1,10 @@
-// harness 历史到 pi-ai Context 的转换(文本路径,移植自 dsh-llm-pi-ai context/replay)。
-// v1 不支持图片输入:任何 image 块即 UNSUPPORTED_CONTENT;finish 块产出官方同构
-// replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
+// harness 历史到 pi-ai Context 的转换(移植自 dsh-llm-pi-ai context/replay)。
+// 文本路径与图片路径与官方逐项对表:图片管线复用 dsh-llm 公共导出
+// (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText),
+// 图片仅 user 角色可表示,读出经 attachments 服务转 base64 块。
+// finish 块产出官方同构 replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
 
+import { contentHasImage, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
 import { GatewayError } from './errors.mjs'
 
 const TIMESTAMP_ZERO = 0
@@ -25,17 +28,6 @@ function toolResultText(blocks) {
       ? block.text
       : block.type === 'tool-result' ? toolResultText(block.content) : ''))
     .join('')
-}
-
-function rejectImages(messages) {
-  for (const message of messages) {
-    if (message.content.some((block) => block.type === 'image')) {
-      throw new GatewayError(
-        `llm-pi-gateway 无法在 ${message.role} 历史消息中表示图片输入`,
-        'UNSUPPORTED_CONTENT',
-      )
-    }
-  }
 }
 
 /** 解析 tool-call 参数 JSON,模型畸形输出以 {} 容忍。 */
@@ -224,11 +216,16 @@ function piContext(options, messages) {
 
 /**
  * 文本 harness 历史转 pi-ai Context;tool result 名从前置 assistant tool-call 恢复。
+ * 遇图片即拒(官方文本路径同语义:图片输入需要 attachments 服务)。
  * @param {object} options harness 请求
  * @param {(reason: string) => void} [onDegrade] replay 降级回调
  */
 export function toPiContext(options, onDegrade) {
-  rejectImages(options.messages)
+  for (const message of options.messages) {
+    if (contentHasImage(message.content)) {
+      throw new GatewayError('pi-ai image conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+    }
+  }
   const toolNames = new Map()
   const messages = []
   for (const message of options.messages) {
@@ -262,3 +259,128 @@ export function toPiContext(options, onDegrade) {
   }
   return piContext(options, messages)
 }
+
+/** 图片仅 user 角色可表示(官方 assertSupportedImageRoles 同语义)。 */
+function assertSupportedImageRoles(messages) {
+  for (const message of messages) {
+    if (message.role !== 'user' && contentHasImage(message.content)) {
+      throw new GatewayError(
+        `pi-ai cannot represent an image in an in-history ${message.role} message`,
+        'UNSUPPORTED_CONTENT',
+      )
+    }
+  }
+}
+
+/** 递归展开 user 内容块;全文本归并为字符串(官方 userContent 同构)。 */
+async function userContent(blocks, requestImages) {
+  const content = []
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      if (block.text.length > 0) content.push({ type: 'text', text: block.text })
+    } else if (block.type === 'image') {
+      const version = requestImages.get(block.attachment.attachmentId)
+      content.push({ type: 'text', text: requestImageHandleText(version) })
+      content.push({
+        type: 'image',
+        data: Buffer.from(version.data).toString('base64'),
+        mimeType: version.mediaType,
+      })
+    } else if (block.type === 'tool-result') {
+      const nested = await userContent(block.content, requestImages)
+      if (typeof nested === 'string') {
+        if (nested.length > 0) content.push({ type: 'text', text: nested })
+      } else {
+        content.push(...nested)
+      }
+    }
+  }
+  if (content.every((block) => block.type === 'text')) return content.map((block) => block.text).join('')
+  return content
+}
+
+function collectImageRefs(blocks, refs) {
+  for (const block of blocks) {
+    if (block.type === 'image') refs.set(block.attachment.attachmentId, block.attachment)
+    else if (block.type === 'tool-result') collectImageRefs(block.content, refs)
+  }
+}
+
+/** 按首次出现顺序读出全部请求图片(官方 prepareRequestImages 同构)。 */
+async function prepareRequestImages(messages, attachments, policy, signal) {
+  const refs = new Map()
+  for (const message of messages) collectImageRefs(message.content, refs)
+  const orderedRefs = [...refs.values()]
+  const prepared = await Promise.all(orderedRefs.map((ref) => attachments.readImageRequest(ref, policy, signal)))
+  const versions = new Map()
+  for (const [index, ref] of orderedRefs.entries()) versions.set(ref.attachmentId, prepared[index])
+  return versions
+}
+
+/**
+ * 图片路径 harness 历史转 pi-ai Context(官方 toPiContextWithImages 同构):
+ * 两段 offload——声明字节先验预算,读出后按实际字节精确重排;图片转 base64 块。
+ * @param {object} options harness 请求
+ * @param {object} attachments attachments 服务(readImageRequest)
+ * @param {(reason: string) => void} [onDegrade] replay 降级回调
+ * @param {number} [maxRequestImageBytes] 路由级请求图片字节预算
+ * @param {{maxPixels: number, maxBytes: number}} requestImagePolicy 单图读出预算
+ */
+export async function toPiContextWithImages(options, attachments, onDegrade, maxRequestImageBytes, requestImagePolicy = {
+  maxPixels: DEFAULT_IMAGE_PIXEL_BUDGET,
+  maxBytes: DEFAULT_IMAGE_MAX_BYTES,
+}) {
+  assertSupportedImageRoles(options.messages)
+  const requestMessages = offloadRequestImagesWithPolicy(options.messages, {
+    representation: 'base64',
+    ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
+    byteQuantum: 1,
+    byteLength: (ref) => Math.min(ref.bytes, requestImagePolicy.maxBytes),
+  })
+  const requestImages = await prepareRequestImages(requestMessages, attachments, requestImagePolicy, options.signal)
+  const exactMessages = offloadRequestImagesWithPolicy(requestMessages, {
+    representation: 'base64',
+    ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
+    byteQuantum: 1,
+    byteLength: (ref) => requestImages.get(ref.attachmentId).bytes,
+  })
+  const toolNames = new Map()
+  const messages = []
+  for (const message of exactMessages) {
+    if (message.role === 'system') {
+      messages.push({ role: 'user', content: flattenText(message), timestamp: TIMESTAMP_ZERO })
+      continue
+    }
+    if (message.role === 'assistant') {
+      const assistant = toPiAssistant(message, onDegrade)
+      for (const block of assistant.content) {
+        if (block.type === 'toolCall') toolNames.set(block.id, block.name)
+      }
+      messages.push(assistant)
+      continue
+    }
+    const content = await userContent(message.content.filter((block) => block.type !== 'tool-result'), requestImages)
+    const results = message.content.filter((block) => block.type === 'tool-result')
+    if (content.length > 0 || results.length === 0) {
+      messages.push({ role: 'user', content, timestamp: TIMESTAMP_ZERO })
+    }
+    for (const result of results) {
+      const resultContent = await userContent(result.content, requestImages)
+      messages.push({
+        role: 'toolResult',
+        toolCallId: result.toolCallId,
+        toolName: toolNames.get(result.toolCallId) ?? 'unknown',
+        content: typeof resultContent === 'string'
+          ? [{ type: 'text', text: resultContent || NO_OUTPUT_TEXT }]
+          : resultContent,
+        isError: result.isError ?? false,
+        timestamp: TIMESTAMP_ZERO,
+      })
+    }
+  }
+  return piContext(options, messages)
+}
+
+// 单图读出预算缺省,与官方 DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET / DEFAULT_REQUEST_IMAGE_MAX_BYTES 一致
+const DEFAULT_IMAGE_PIXEL_BUDGET = 4 * 1024 * 1024
+const DEFAULT_IMAGE_MAX_BYTES = 1024 * 1024
