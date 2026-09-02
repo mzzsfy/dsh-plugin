@@ -14,13 +14,19 @@ window.__ModuleLoader__.load({
     const SELECTOR_SCROLL = '[data-conversation-scroll]'
     const SELECTOR_ROW = '[data-variant="think"]'
     const SELECTOR_HEAD = '[data-disclosure-row]'
-    const SELECTOR_BODY = '.thinkBody'
+    // body 类名经 CSS Modules 哈希带前缀(如 QWLzlG_thinkBody),按子串匹配
+    const SELECTOR_BODY = '[class*="thinkBody"]'
     const ATTR_STATE = 'data-state'
     const ATTR_EXPANDED = 'aria-expanded'
 
     // ---- 配置常量 ----
 
-    const OBSERVER_OPTIONS = { childList: true, subtree: true }
+    const OBSERVER_OPTIONS = {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: [ATTR_EXPANDED, ATTR_STATE],
+    }
     const DEBOUNCE_MS = 50
     const STORAGE_KEY = 'dsh-think-expand:settings'
     const SETTING_ON = 'on'
@@ -61,8 +67,9 @@ window.__ModuleLoader__.load({
     const STATE_RUNNING = 'running'
     const STATE_OK = 'ok'
 
+    // 前缀匹配:空串 seen 会命中任意行,视为无匹配。
     function prefixOf(seen, text) {
-      return text.length >= seen.length && text.startsWith(seen)
+      return seen.length > 0 && text.length >= seen.length && text.startsWith(seen)
     }
 
     function findSeenKey(map, text) {
@@ -89,13 +96,37 @@ window.__ModuleLoader__.load({
       return rows.findIndex((row) => row.headable && prefixOf(seen, row.bodyText))
     }
 
+    // 打开会话/刷新:展开最后一条可识别思考行,其余保持收起。
+    // 仅依据内建字段(data-state / aria-expanded)判定,不依赖正文挂载;
+    // 存在运行行(流式接管)或其他展开行(用户手动意图)时不干预。
+    function planFinal(rows) {
+      const actions = []
+      if (rows.some((row) => row.headable && row.state === STATE_RUNNING)) return { actions }
+      let last = -1
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        if (rows[index].headable) {
+          last = index
+          break
+        }
+      }
+      if (last < 0) return { actions }
+      for (let index = 0; index < rows.length; index += 1) {
+        if (index !== last && rows[index].headable && rows[index].expanded) return { actions }
+      }
+      if (!rows[last].expanded) actions.push({ index: last, kind: 'expand' })
+      return { actions }
+    }
+
     // 行结构:{ headable, state, bodyText, expanded }。headable=false 表示识别失败,永不干预。
     // 返回 { actions: [{ index, kind: 'expand' | 'collapse' }] },registry 原位更新。
     function plan(registry, rows) {
       const actions = []
 
+      // 手动行识别:已展开但无插件标记且非当前行 → 手动集合,此后永不干预;
+      // 手动意图出现即收起当前插件行(至多一条展开)。
+      // 仅判定 ok 行:running 行的展开/归属由流式路径管理。
       for (const row of rows) {
-        if (!row.headable || !row.expanded) continue
+        if (!row.headable || !row.expanded || row.state !== STATE_OK) continue
         if (findSeenKey(registry.marks, row.bodyText) !== null) continue
         if (isCurrent(registry, row.bodyText)) continue
         if (findSeenKey(registry.manual, row.bodyText) === null) {
@@ -142,9 +173,12 @@ window.__ModuleLoader__.load({
       }
 
       if (!target.expanded) actions.push({ index: targetIndex, kind: 'expand' })
-      const seen = target.bodyText
-      registry.current = { hash: hashText(seen), seen }
-      putSeen(registry.marks, seen)
+      // 正文未挂载时仅展开不登记,空串 seen 会污染全部前缀匹配;正文挂载后下轮补登记
+      if (target.bodyText !== '') {
+        const seen = target.bodyText
+        registry.current = { hash: hashText(seen), seen }
+        putSeen(registry.marks, seen)
+      }
       return { actions }
     }
 
@@ -182,10 +216,16 @@ window.__ModuleLoader__.load({
 
     // ---- DOM 控制器:识别行、执行展开/收起、MutationObserver 接线 ----
 
-    const registry = createRegistry()
-    let observer = null
+    let registry = createRegistry()
+    let containerObserver = null
+    let bodySentinel = null
     let observedContainer = null
     let debounceTimer = null
+    // 容器就绪/重建后待执行的一次性"展开最后一条";
+    // finalExpandedEl/finalPendingRegister 追踪已展开行,落定后登记进 registry
+    let pendingFinal = false
+    let finalExpandedEl = null
+    let finalPendingRegister = false
 
     function describeRow(el) {
       const head = el.querySelector(SELECTOR_HEAD)
@@ -201,53 +241,103 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 执行动作并返回被点击的行元素(未触发点击返回 null)
     function applyAction(described, action) {
       const row = described[action.index]
-      if (!row || !row.headable) return
+      if (!row || !row.headable) return null
       const head = row.el.querySelector(SELECTOR_HEAD)
-      if (head === null) return
-      if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) head.click()
+      if (head === null) return null
+      if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) {
+        head.click()
+        return row.el
+      }
+      return null
     }
 
     function scan() {
       const container = document.querySelector(SELECTOR_SCROLL)
-      if (container === null) return
+      if (container === null) return 0
       const described = Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
       const rows = described.map(({ headable, state, bodyText, expanded }) =>
         ({ headable, state, bodyText, expanded }))
       for (const action of plan(registry, rows).actions) applyAction(described, action)
+      return described.length
+    }
+
+    // 展开动作落定后登记当前行,使 plan() 识别为插件展开而非手动意图;
+    // 行已收起(用户抢先)则放弃登记
+    function registerFinal() {
+      if (!finalPendingRegister) return
+      finalPendingRegister = false
+      if (finalExpandedEl === null || !finalExpandedEl.isConnected) return
+      const described = describeRow(finalExpandedEl)
+      if (!described.expanded) return
+      if (described.bodyText === '') {
+        finalPendingRegister = true
+        return
+      }
+      registry.current = { hash: hashText(described.bodyText), seen: described.bodyText }
+      putSeen(registry.marks, described.bodyText)
+    }
+
+    // 容器就绪/重建后执行一次:展开最后一条;
+    // 行集为空或全部识别失败(渲染/水合瞬态)则保持挂起,等待后续变更重试
+    function tryPlanFinal() {
+      const container = document.querySelector(SELECTOR_SCROLL)
+      if (container === null) return
+      const described = Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
+      if (!described.some((row) => row.headable)) return
+      pendingFinal = false
+      const rows = described.map(({ headable, state, bodyText, expanded }) =>
+        ({ headable, state, bodyText, expanded }))
+      for (const action of planFinal(rows).actions) {
+        const clicked = applyAction(described, action)
+        if (clicked !== null) {
+          finalExpandedEl = clicked
+          finalPendingRegister = true
+        }
+      }
     }
 
     function scheduleScan() {
       if (debounceTimer !== null) clearTimeout(debounceTimer)
       debounceTimer = setTimeout(() => {
         debounceTimer = null
-        const container = document.querySelector(SELECTOR_SCROLL)
-        if (container === null) return
-        // 容器被重建:旧观察器挂在 detached 节点上,disconnect 后重挂当前容器
-        if (needsReattach(observedContainer, container)) attach(container)
-        scan()
+        registerFinal()
+        if (scan() === 0) pendingFinal = true
+        else if (pendingFinal) tryPlanFinal()
       }, DEBOUNCE_MS)
     }
 
-    // 从 body 等待观察切换为容器子树观察,并记录已观察节点。
-    function attach(container) {
-      if (observer !== null) observer.disconnect()
-      observer = new MutationObserver(scheduleScan)
-      observer.observe(container, OBSERVER_OPTIONS)
-      observedContainer = container
-      scan()
+    // 容器身份变化(会话切换节点替换)由 body 哨兵捕获:容器自身被移除不在
+    // 容器观察器的子树范围内,哨兵是唯一能发现替换的入口
+    function ensureAttached() {
+      const container = document.querySelector(SELECTOR_SCROLL)
+      if (container === null) return
+      if (needsReattach(observedContainer, container)) attach(container)
     }
 
-    // 容器就绪前挂 body 观察等待;就绪后切换为容器子树观察。
+    // 从 body 等待观察切换为容器子树观察,并记录已观察节点。
+    // 会话切换不继承标记,registry 重建
+    function attach(container) {
+      if (containerObserver !== null) containerObserver.disconnect()
+      containerObserver = new MutationObserver(scheduleScan)
+      containerObserver.observe(container, OBSERVER_OPTIONS)
+      observedContainer = container
+      registry = createRegistry()
+      finalExpandedEl = null
+      finalPendingRegister = false
+      pendingFinal = true
+      scan()
+      if (pendingFinal) tryPlanFinal()
+    }
+
+    // body 哨兵常驻,监视容器出现与身份变化;发现容器即挂载子树观察。
     function start() {
-      if (observer !== null) return
-      observer = new MutationObserver(() => {
-        const container = document.querySelector(SELECTOR_SCROLL)
-        if (container === null) return
-        attach(container)
-      })
-      observer.observe(document.body, OBSERVER_OPTIONS)
+      if (bodySentinel !== null) return
+      bodySentinel = new MutationObserver(ensureAttached)
+      bodySentinel.observe(document.body, OBSERVER_OPTIONS)
+      ensureAttached()
     }
 
     // 开关关闭:断开观察,收起全部由本插件展开的行,清空标记。
@@ -256,10 +346,14 @@ window.__ModuleLoader__.load({
         clearTimeout(debounceTimer)
         debounceTimer = null
       }
-      if (observer !== null) {
-        observer.disconnect()
-        observer = null
+      if (containerObserver !== null) {
+        containerObserver.disconnect()
+        containerObserver = null
         observedContainer = null
+      }
+      if (bodySentinel !== null) {
+        bodySentinel.disconnect()
+        bodySentinel = null
       }
       const container = document.querySelector(SELECTOR_SCROLL)
       const described = container === null
@@ -268,6 +362,9 @@ window.__ModuleLoader__.load({
       const rows = described.map(({ headable, state, bodyText, expanded }) =>
         ({ headable, state, bodyText, expanded }))
       for (const action of teardown(registry, rows).actions) applyAction(described, action)
+      pendingFinal = false
+      finalExpandedEl = null
+      finalPendingRegister = false
     }
 
     // ---- 设置面板:"插件"分区 settings.plugins.tab 槽位,仅一个开关 ----

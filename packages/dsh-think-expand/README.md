@@ -11,7 +11,9 @@ DeepSeek Harness 纯前端插件:流式输出思考时自动展开最新一条�
 | 用户手动展开任意行 | 插件收起自己展开的行,此后不再干预该手动行 |
 | 用户手动收起插件展开的行 | 视为已读,本轮不再展开,直到下一条新思考行 |
 | 流式结束(`running` → `ok`) | 保留最后一条展开状态 |
-| 历史会话 | 行均为 `ok`,不自动展开 |
+| 打开会话 / 刷新页面 / 切换会话 | 最后一条思考行自动展开,其余保持收起 |
+| 自动展开后用户手动收起 | 不再重展开,直到下次打开或切换会话 |
+| 用户手动展开较旧行 | 手动意图优先,插件不展开最后一条 |
 | 设置页开关关闭 | 断开监听,收起全部由插件展开的行,清空标记 |
 | 卸载插件 | 无持久副作用,重载页面即恢复官方默认行为 |
 
@@ -19,10 +21,10 @@ DeepSeek Harness 纯前端插件:流式输出思考时自动展开最新一条�
 
 ## 实现要点
 
-- Think 行识别:官方 ReasoningRow 根节点字面量属性 `[data-variant="think"]` + `data-state`,折叠头 `[data-disclosure-row]`,滚动容器 `[data-conversation-scroll]`;识别失败即不干预。
+- Think 行识别:官方 ReasoningRow 根节点字面量属性 `[data-variant="think"]` + `data-state`,折叠头 `[data-disclosure-row]`,滚动容器 `[data-conversation-scroll]`;正文容器按 `thinkBody` 类名子串匹配(CSS Modules 哈希带前缀);识别失败即不干预。
 - 展开/收起模拟点击折叠头(按 `aria-expanded` 判定),与官方组件状态机一致,不直改 DOM 内部状态,不写任何 DOM 属性。
-- 行标识 = 展开时 `.thinkBody` 正文哈希,标记载体为模块级 Map,流式追加按已见文本前缀匹配;随页面生命周期存活,不持久化。
-- 设置开关存 localStorage(键 `dsh-think-expand:settings`,默认开),面板挂设置页 `settings.section` 槽位。
+- 行标识 = 展开时正文哈希,标记载体为模块级 Map,流式追加按已见文本前缀匹配;随页面生命周期存活,不持久化。body 哨兵观察器常驻 document.body 监视容器身份变化(会话切换),非流式期间仅容器子树变更触发扫描。
+- 设置开关存 localStorage(键 `dsh-think-expand:settings`,默认开),面板挂设置"插件"分区 `settings.plugins.tab` 槽位。
 - 纯逻辑层(行分类、展开决策、标记存活性)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套 BDD 场景对两份实现做 parity 验证。
 
 ## 安装
@@ -31,7 +33,7 @@ DeepSeek Harness 纯前端插件:流式输出思考时自动展开最新一条�
 dsh plugin --profile web add @mzzsfy/dsh-think-expand
 ```
 
-重启 dsh 后设置页出现"思考自动展开"开关(默认开),流式会话即生效。
+重启 dsh 后设置 → "插件"分区出现"思考自动展开"标签页(默认开),流式会话即生效。
 
 ## 升级 / 卸载
 
@@ -50,7 +52,7 @@ pnpm --dir packages/dsh-think-expand test
 node --test packages/dsh-think-expand/test/*.test.mjs
 ```
 
-覆盖:哈希确定性、八条 BDD 行为场景、批量 running 降级、识别失败降级、开关清理、双实现 parity、client.js 语法检查。
+覆盖:哈希确定性、上表全部行为场景、批量 running 降级、识别失败降级、空正文降级、开关清理、双实现 parity、client.js 语法检查。
 
 ## License
 

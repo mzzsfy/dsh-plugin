@@ -19,7 +19,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { STATE_RUNNING, STATE_OK, hashText, createRegistry, plan, teardown, capMap, needsReattach, SEEN_MAP_CAP };',
+      + '; return { STATE_RUNNING, STATE_OK, hashText, createRegistry, plan, planFinal, teardown, capMap, needsReattach, SEEN_MAP_CAP };',
   )
   return factory()
 }
@@ -34,7 +34,7 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, teardown, hashText, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
+  const { createRegistry, plan, planFinal, teardown, hashText, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
 
   test(prefix + '哈希确定性', () => {
     assert.equal(hashText('思考正文'), hashText('思考正文'))
@@ -46,6 +46,30 @@ function defineScenarios(prefix, L) {
     const result = plan(reg, [row(OK, '旧的'), row(RUNNING, '新思考')])
     assert.equal(expandOf(result, 1), 1)
     assert.equal(reg.current.hash, hashText('新思考'))
+  })
+
+  test(prefix + '正文未挂载时仅展开不登记,挂载后补登记', () => {
+    const reg = createRegistry()
+    const first = plan(reg, [row(RUNNING, '')])
+    assert.equal(expandOf(first, 0), 1)
+    assert.equal(reg.current, null)
+    assert.equal(reg.marks.size, 0)
+    const second = plan(reg, [row(RUNNING, '正文', true)])
+    assert.equal(second.actions.length, 0)
+    assert.equal(reg.current.hash, hashText('正文'))
+    const done = plan(reg, [row(OK, '正文', true)])
+    assert.equal(done.actions.length, 0)
+    const next = plan(reg, [row(OK, '正文', true), row(RUNNING, '下一条')])
+    assert.equal(collapseOf(next, 0), 1)
+    assert.equal(expandOf(next, 1), 1)
+  })
+
+  test(prefix + '空正文行不误判手动与已读', () => {
+    const reg = createRegistry()
+    plan(reg, [row(RUNNING, '')])
+    const result = plan(reg, [row(RUNNING, '')])
+    assert.equal(reg.manual.size, 0)
+    assert.equal(reg.read.size, 0)
   })
 
   test(prefix + '新思考出现收起上一条', () => {
@@ -99,10 +123,65 @@ function defineScenarios(prefix, L) {
     assert.equal(result.actions.length, 0)
   })
 
-  test(prefix + '历史会话不展开', () => {
+  test(prefix + '历史会话常规扫描不干预', () => {
     const reg = createRegistry()
     const result = plan(reg, [row(OK, 'A'), row(OK, 'B')])
     assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '登记行被识别为插件展开,流式接管时收起', () => {
+    // 模拟控制层 planFinal 展开后的登记形态(marks + current)
+    const reg = createRegistry()
+    reg.marks.set(hashText('A'), 'A')
+    reg.current = { hash: hashText('A'), seen: 'A' }
+    const result = plan(reg, [row(OK, 'A', true), row(RUNNING, 'B')])
+    assert.equal(collapseOf(result, 0), 1)
+    assert.equal(expandOf(result, 1), 1)
+  })
+
+  test(prefix + '登记行未登记 current 时不会被误判手动', () => {
+    const reg = createRegistry()
+    reg.marks.set(hashText('A'), 'A')
+    const result = plan(reg, [row(OK, 'A', true), row(OK, 'B')])
+    assert.equal(result.actions.filter((a) => a.index === 0).length, 0)
+    assert.equal(reg.manual.size, 0)
+  })
+
+  test(prefix + '打开会话展开最后一条', () => {
+    const result = planFinal([row(OK, 'A'), row(OK, 'B')])
+    assert.equal(expandOf(result, 1), 1)
+    assert.equal(expandOf(result, 0), 0)
+  })
+
+  test(prefix + '打开会话已展开则无动作', () => {
+    const result = planFinal([row(OK, 'A'), row(OK, 'B', true)])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '打开会话遇手动展开行不干预', () => {
+    const result = planFinal([row(OK, 'A', true), row(OK, 'B')])
+    assert.equal(result.actions.length, 0)
+    assert.equal(expandOf(result, 1), 0)
+  })
+
+  test(prefix + '打开会话存在运行行时让位流式', () => {
+    const result = planFinal([row(OK, 'A'), row(RUNNING, 'B')])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '最后一条识别失败时展开最后可识别行', () => {
+    const result = planFinal([row(OK, 'A'), row(OK, 'X', false, false)])
+    assert.equal(expandOf(result, 0), 1)
+  })
+
+  test(prefix + '行集为空不干预', () => {
+    const result = planFinal([])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '正文未挂载照常展开', () => {
+    const result = planFinal([row(OK, ''), row(OK, '')])
+    assert.equal(expandOf(result, 1), 1)
   })
 
   test(prefix + '批量 running 降级不干预', () => {
