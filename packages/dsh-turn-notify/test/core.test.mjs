@@ -17,6 +17,9 @@ import {
   chooseChannels,
   resolveSound,
   pruneMapping,
+  renameMapping,
+  validateSoundName,
+  SOUND_NAME_MAX_CHARS,
   validateMappingId,
   validateConfigPatch,
   resolvedConfig,
@@ -184,6 +187,33 @@ test('删除被引用音效后映射回落', () => {
   const mapping = pruneMapping({ [CATEGORY_DONE]: 'a', [CATEGORY_ERROR]: 'b' }, 'a')
   assert.equal(mapping[CATEGORY_DONE], undefined)
   assert.equal(mapping[CATEGORY_ERROR], 'b')
+})
+
+test('重命名映射:引用随新名迁移,无关分类保留', () => {
+  const mapping = renameMapping({ [CATEGORY_DONE]: 'old', [CATEGORY_ERROR]: 'other', [CATEGORY_ASK]: 'old' }, 'old', 'new')
+  assert.equal(mapping[CATEGORY_DONE], 'new')
+  assert.equal(mapping[CATEGORY_ERROR], 'other')
+  assert.equal(mapping[CATEGORY_ASK], 'new')
+})
+
+test('音效名校验:合法名通过并归一化,非法名拒绝', () => {
+  assert.deepEqual(validateSoundName('  提示音甲 '), { ok: true, name: '提示音甲' })
+  assert.equal(validateSoundName('bell').ok, false)
+  assert.equal(validateSoundName('').ok, false)
+  assert.equal(validateSoundName('   ').ok, false)
+  assert.equal(validateSoundName('a/b').ok, false)
+  assert.equal(validateSoundName('a\\b').ok, false)
+  assert.equal(validateSoundName('a.b').ok, false)
+  assert.equal(validateSoundName('a:b').ok, false)
+  assert.equal(validateSoundName('a*b').ok, false)
+  assert.equal(validateSoundName('a?b').ok, false)
+  assert.equal(validateSoundName('a"b').ok, false)
+  assert.equal(validateSoundName('a<b').ok, false)
+  assert.equal(validateSoundName('a>b').ok, false)
+  assert.equal(validateSoundName('a|b').ok, false)
+  assert.equal(validateSoundName('a\u0000b').ok, false)
+  assert.equal(validateSoundName('长'.repeat(SOUND_NAME_MAX_CHARS + 1)).ok, false)
+  assert.equal(validateSoundName('长'.repeat(SOUND_NAME_MAX_CHARS)).ok, true)
 })
 
 test('上传校验:扩展名 / 单文件上限 / 总量上限', () => {

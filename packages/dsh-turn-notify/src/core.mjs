@@ -192,6 +192,32 @@ export function pruneMapping(mapping, removedId) {
   return next
 }
 
+// 重命名音效后同步迁移映射中的引用。
+export function renameMapping(mapping, fromId, toId) {
+  const next = {}
+  for (const key of Object.keys(mapping || {})) {
+    next[key] = mapping[key] === fromId ? toId : mapping[key]
+  }
+  return next
+}
+
+// 音效名长度上限:供文件名与列表展示,超长截断提示不佳,直接拒绝。
+export const SOUND_NAME_MAX_CHARS = 64
+
+// 音效文件名黑名单:分隔符防路径穿越,点防 listSounds 以首点分割 id/ext 错位,
+// 控制字符与 Windows 非法字符防落盘失败。
+const SOUND_NAME_FORBIDDEN = /[\\/:*?"<>|.\u0000-\u001f]/
+
+// 音效名校验:trim 归一化随结果返回;与内置音色重名会污染映射 id 命名空间,一并拒绝。
+export function validateSoundName(rawName) {
+  const name = String(rawName ?? '').trim()
+  if (name.length === 0) return { ok: false, reason: '名称不能为空' }
+  if (name.length > SOUND_NAME_MAX_CHARS) return { ok: false, reason: '名称超过长度上限' }
+  if (SOUND_NAME_FORBIDDEN.test(name)) return { ok: false, reason: '名称含非法字符' }
+  if (Object.prototype.hasOwnProperty.call(BUILTIN_TONES, name)) return { ok: false, reason: '名称与内置音色冲突' }
+  return { ok: true, name }
+}
+
 export function uploadExt(filename) {
   const match = /\.([^.]+)$/.exec(String(filename || ''))
   return match ? match[1].toLowerCase() : ''

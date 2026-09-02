@@ -475,26 +475,25 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function confirmUploads() {
-        if (pendingUploads.length === 0) return
+      async function savePending(item) {
         setBusy(true)
         setNotice(null)
         try {
-          // 顺序提交保证错误可归因;文件 id 为内容哈希,重试对已落盘项幂等
-          for (const item of pendingUploads) {
-            await api('/api/turn-notify/upload?name=' + encodeURIComponent(item.name), {
-              method: 'POST',
-              body: item.raw,
-            })
-          }
+          await api('/api/turn-notify/upload?name=' + encodeURIComponent(item.name), {
+            method: 'POST',
+            body: item.raw,
+          })
+          setPendingUploads(pendingUploads.filter((pending) => pending !== item))
+          patch('已保存 ' + item.name)
+        } catch (error) {
+          patch('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
+        } finally { setBusy(false) }
+        // 落盘成功的回执不因列表刷新失败而翻转为失败;列表暂旧由后续操作收敛
+        try {
           const res = await api('/api/turn-notify/sounds')
           setSounds(res.sounds || [])
           await refreshSounds()
-          setPendingUploads([])
-          patch('已保存 ' + pendingUploads.length + ' 个音效')
-        } catch (error) {
-          patch('保存失败:' + (error && error.message ? error.message : String(error)) + ';未落盘项仍在待确认列表,可重试', 'error')
-        } finally { setBusy(false) }
+        } catch { }
       }
 
       async function removeSound(sound) {
@@ -509,6 +508,40 @@ window.__ModuleLoader__.load({
         } catch (error) {
           patch('删除失败:' + (error && error.message ? error.message : String(error)), 'error')
         } finally { setBusy(false) }
+      }
+
+      // 重命名编辑态:同一时刻至多一行处于编辑;提交成功后缓存按旧 id 失效
+      const [renamingId, setRenamingId] = useState(null)
+      const [renameDraft, setRenameDraft] = useState('')
+
+      function startRename(sound) {
+        setRenamingId(sound.id)
+        setRenameDraft(sound.id)
+      }
+
+      function cancelRename() {
+        setRenamingId(null)
+        setRenameDraft('')
+      }
+
+      async function renameSound(sound) {
+        setBusy(true)
+        setNotice(null)
+        try {
+          const res = await api('/api/turn-notify/sound', { method: 'PUT', body: JSON.stringify({ id: sound.id, name: renameDraft }) })
+          decodedCache.delete(sound.id)
+          if (res.soundMapping) setMappingState(res.soundMapping)
+          patch('已重命名为 ' + res.id)
+          cancelRename()
+        } catch (error) {
+          patch('重命名失败:' + (error && error.message ? error.message : String(error)), 'error')
+        } finally { setBusy(false) }
+        // 改名成功的回执不因列表刷新失败而翻转为失败;列表暂旧由后续操作收敛
+        try {
+          const soundsRes = await api('/api/turn-notify/sounds')
+          setSounds(soundsRes.sounds || [])
+          await refreshSounds()
+        } catch { }
       }
 
       async function setMapping(category, id) {
@@ -753,28 +786,39 @@ window.__ModuleLoader__.load({
               },
             }),
           ),
-          pendingUploads.map((item, index) => h('div', { className: 'tn-row', key: item.name + '-' + index },
+          pendingUploads.map((item, index) => h('div', { className: 'tn-row', key: index },
             h('span', { className: 'tn-meta' }, '待保存: ' + item.name),
             h('button', { className: 'tn-btn', onClick: () => previewPending(item.raw) }, '试听'),
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void savePending(item) }, '保存'),
             h('button', {
               className: 'tn-btn', disabled: busy,
-              onClick: () => setPendingUploads(pendingUploads.filter((_, i) => i !== index)),
+              onClick: () => setPendingUploads(pendingUploads.filter((pending) => pending !== item)),
             }, '移除'),
           )),
-          pendingUploads.length > 0 ? h('div', { className: 'tn-row' },
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void confirmUploads() },
-              '确认保存全部(' + pendingUploads.length + ')'),
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => setPendingUploads([]) }, '全部取消'),
-          ) : null,
           sounds.length === 0 ? h('span', { className: 'tn-meta' }, '暂无上传音效') :
-            sounds.map((sound) => h('div', { className: 'tn-row', key: sound.id },
-              h('span', { className: 'tn-meta' }, sound.id + '.' + sound.ext),
-              h('button', {
-                className: 'tn-btn',
-                onClick: () => { playSound({ kind: 'custom', id: sound.id }).catch(() => {}) },
-              }, '试听'),
-              h('button', { className: 'tn-btn', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),
-            )),
+            sounds.map((sound) => renamingId === sound.id
+              ? h('div', { className: 'tn-row', key: sound.id },
+                h('input', {
+                  className: 'tn-input tn-fill', type: 'text', autoFocus: true,
+                  value: renameDraft,
+                  onChange: (e) => setRenameDraft(e.target.value),
+                  // Enter 提交:IME 组词确认(229)不算提交,busy 期间忽略防并发提交
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter' && !busy && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void renameSound(sound)
+                  },
+                }),
+                h('button', { className: 'tn-btn', disabled: busy, onClick: () => void renameSound(sound) }, '确认'),
+                h('button', { className: 'tn-btn', disabled: busy, onClick: cancelRename }, '取消'),
+              )
+              : h('div', { className: 'tn-row', key: sound.id },
+                h('span', { className: 'tn-meta' }, sound.id + '.' + sound.ext),
+                h('button', {
+                  className: 'tn-btn',
+                  onClick: () => { playSound({ kind: 'custom', id: sound.id }).catch(() => {}) },
+                }, '试听'),
+                h('button', { className: 'tn-btn', disabled: busy, onClick: () => startRename(sound) }, '重命名'),
+                h('button', { className: 'tn-btn', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),
+              )),
         ),
         h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, '分类音效映射'),
