@@ -24,18 +24,16 @@ import {fileURLToPath} from 'node:url'
 const REGISTRY = 'https://registry.npmjs.org'
 const BUMP_KINDS = ['patch', 'minor', 'major']
 const PACKAGES = [
-  'dsh-rs-workflow',
   'dsh-usage-panel',
   'dsh-usage-stats',
   'dsh-maintain',
+  'dsh-rs-workflow',
   'dsh-think-expand',
   'dsh-turn-notify',
   'dsh-session-manager',
   'dsh-llm-pi-gateway',
   'dsh-model-capability-editor',
 ]
-const READBACK_ATTEMPTS = 3
-const READBACK_DELAY_MS = 2 * 1000
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const npmCmd = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm')
@@ -136,23 +134,6 @@ function onlineVersion(name) {
   fail(`查询 ${name} 线上版本失败(非 E404,可能是网络问题),中止以避免误判:\n${r.stderr}`)
 }
 
-/** 发布后回读确认;新包首发的 registry CDN 传播可延迟数十秒到数分钟,长尾重试 */
-function verifyPublished(name, version) {
-  for (let attempt = 1; attempt <= READBACK_ATTEMPTS; attempt += 1) {
-    const r = runNpm(['view', name, 'version', '--registry', REGISTRY])
-    if (r.status === 0 && r.stdout.trim() === version) return true
-    if (attempt < READBACK_ATTEMPTS) {
-      const code = (r.stderr || '').match(/npm error code (\S+)/)?.[1] || (r.stderr ? '错误' : '无输出')
-      const delay = READBACK_DELAY_MS * attempt
-      console.log(`  回读第 ${attempt} 次未确认(线上报 ${r.stdout.trim() || code}),${delay / 1000}s 后重试`)
-      sleepMs(delay)
-    }
-  }
-  console.error('WARN  回读窗口内未确认(npm publish 输出 "+ 包@版本" 即发布成功);CDN 传播可能仍在进行')
-  console.error('WARN  脚本继续后续包;收尾用重跑自愈核对本包状态与补 tag')
-  return false
-}
-
 /** 打版本 tag;已存在则跳过,失败置非零退出码 */
 /** 打版本 tag;npm 包名中的 scope 斜杠替换为连字符;已存在则跳过,失败置非零退出码 */
 function ensureTag(pkgName, version, opts) {
@@ -231,16 +212,15 @@ function publishOne(dirName, opts) {
     console.log('SKIP  测试(包未定义 test script)')
   }
 
-  // 发布步骤交互式执行:2FA 账号在终端按回车打开浏览器认证后自动继续
+  // 发布步骤交互式执行:2FA 账号在终端按回车打开浏览器认证后自动继续。
+  // 成败判据 = npm publish 退出码("+ 包@版本"输出由 npm 自身保证);registry CDN
+  // 传播延迟不影响成败,回读 view 仅作信息展示,不做闸门。
   const pub = runNpm(['run', 'npmPublish'], pkgDir, { interactive: true })
-  if (pub.status !== 0) fail('发布失败(交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
+  if (pub.status !== 0) fail('发布失败(npm publish 非零退出,交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
-  if (!verifyPublished(name, version)) {
-    console.error(`FAIL  ${name}@${version} 回读未确认:发布输出若为 "+ ${name}@${version}" 则包已发出,只是 CDN 未传播;重跑本脚本会在传播后自愈补 tag`)
-    exitCode = 1
-    return
-  }
-  console.log(`OK    ${name}@${version} 已上线`)
+  const readback = runNpm(['view', name, 'version', '--registry', REGISTRY])
+  if (readback.status === 0 && readback.stdout.trim() === version) console.log(`OK    ${name}@${version} 已上线`)
+  else console.log(`OK    ${name}@${version} 发布成功(CDN 传播中,registry 稍后可见)`)
   ensureTag(name, version, opts)
 }
 
