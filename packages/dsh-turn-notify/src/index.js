@@ -117,13 +117,13 @@ export function apply(ctx) {
     return next
   }
 
-  function notifyUnit({ category, kind, reasonKind, session }) {
+  // durationMs 与 wakeTurn 由调用方在清理状态前读取后传入,防先删后读
+  function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false }) {
     const settings = readSettings(ctx)
     const header = session.header || {}
     const sessionId = String(session.id ?? '')
     const events = sessionEvents.get(sessionId) || []
-    const durationMs = openTurns.get(sessionId) ?? null
-    if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn: wakeTurns.has(sessionId) })) return
+    if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn })) return
     seq += 1
     const unit = buildUnit({
       id: 'n-' + Date.now().toString(36) + '-' + String(seq) + '-' + String(category),
@@ -141,6 +141,8 @@ export function apply(ctx) {
   // 权威事件流:turn/start 记时,turn/end 与 ask_user_question tool/call 命中分类
   ctx.on('session/event', (session, event) => {
     const sessionId = String(session.id ?? '')
+    // turn/end 清理状态前捕获的决策输入,仅回分类通知消费
+    let endedTurn = null
     if (event.type === 'user/message') {
       collectSessionEvents(sessionEvents, titledSessions, sessionId, event)
       return
@@ -157,6 +159,8 @@ export function apply(ctx) {
       return
     }
     if (event.type === TURN_END_KIND) {
+      // 先读后清:通知决策需要回合时长与唤醒标记
+      endedTurn = { durationMs: openTurns.get(sessionId) ?? null, wakeTurn: wakeTurns.has(sessionId) }
       // 子代理会话收尾:记录到父会话名下,供其唤醒回合判定
       const header = session.header || {}
       if (isSubagent(header) && header.parentSession) childDoneAt.set(String(header.parentSession), Date.now())
@@ -171,7 +175,7 @@ export function apply(ctx) {
     const reasonKind = event.type === TURN_END_KIND && event.data.reason ? event.data.reason.kind : null
     // tool/call 的提问事件与 turn/end 分类共用入口;提问通知不受碎轮过滤
     const kind = category === CATEGORY_ASK ? TOOL_CALL_KIND : TURN_END_KIND
-    notifyUnit({ category, kind, reasonKind, session })
+    notifyUnit({ category, kind, reasonKind, session, ...(endedTurn ?? {}) })
   })
 
   // 审批 waterfall 观察者:next() 同步放行,通知异步投递
