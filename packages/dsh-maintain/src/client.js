@@ -66,6 +66,8 @@ const RESTART_URL = '/api/maintain/restart'
 const POLL_WHILE_UPGRADING_MS = 2 * 1000
 // 与 host 侧轮询 tick(TICK_MS)同源:间隔设置的生效粒度受固定 tick 调度限制
 const POLL_MIN_TICK_SECONDS = 60
+// 与 host 侧默认命令模板(DEFAULT_UPGRADE_TEMPLATE)同源:等于默认值时输入框留空以 placeholder 展示
+const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g @deepseek-ai/dsh@{tag}'
 const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
@@ -131,6 +133,7 @@ function EditRow(props) {
       ref: inputRef,
       key: props.value == null ? '' : props.value,
       defaultValue: props.value == null ? '' : props.value,
+      placeholder: props.placeholder || '',
       disabled: props.busy || props.restarting,
       onKeyDown: (e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) props.onSave(read()) },
     }),
@@ -182,11 +185,12 @@ function VersionCard(props) {
     ),
     h(EditRow, {
       label: '升级命令',
-      value: status.upgradeTemplate,
+      value: status.upgradeTemplate === DEFAULT_UPGRADE_TEMPLATE ? '' : status.upgradeTemplate,
+      placeholder: DEFAULT_UPGRADE_TEMPLATE,
       busy: props.busy.template,
       restarting: props.restarting,
       onSave: props.onTemplateSave,
-      hint: '{tag} 执行时替换为追踪通道;升级完成后需重启生效',
+      hint: '默认以灰字提示,清空保存即恢复默认;{tag} 执行时替换为追踪通道;升级完成后需重启生效',
     }),
   )
 }
@@ -367,11 +371,8 @@ function MaintainApp() {
 
   function onTemplateSave(template) {
     const text = typeof template === 'string' ? template.trim() : ''
-    if (text.length === 0) {
-      setError('升级命令不能为空')
-      return
-    }
-    submitEdit(TEMPLATE_URL, { template: text }, 'template', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+    // 空输入即恢复默认:输入框留空时以 placeholder 展示默认命令,保存空 = 回到默认模板
+    submitEdit(TEMPLATE_URL, { template: text.length > 0 ? text : DEFAULT_UPGRADE_TEMPLATE }, 'template', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
   function onPollInterval(raw) {
