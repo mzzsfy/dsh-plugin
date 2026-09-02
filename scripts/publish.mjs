@@ -16,14 +16,24 @@
  *   - 发布后回读 registry 做多次确认,通过后打本地 tag(npm 名斜杠替换为连字符,如 @mzzsfy-dsh-usage-panel-v0.1.0),推送由维护者执行
  */
 
-import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import {spawnSync} from 'node:child_process'
+import {readFileSync} from 'node:fs'
+import {dirname, join, resolve} from 'node:path'
+import {fileURLToPath} from 'node:url'
 
 const REGISTRY = 'https://registry.npmjs.org'
 const BUMP_KINDS = ['patch', 'minor', 'major']
-const PACKAGES = ['dsh-rs-workflow', 'dsh-usage-panel', 'dsh-usage-stats', 'dsh-maintain', 'dsh-think-expand', 'dsh-turn-notify', 'dsh-session-manager', 'dsh-llm-pi-gateway', 'dsh-model-capability-editor']
+const PACKAGES = [
+  'dsh-rs-workflow',
+  'dsh-usage-panel',
+  'dsh-usage-stats',
+  'dsh-maintain',
+  'dsh-think-expand',
+  'dsh-turn-notify',
+  'dsh-session-manager',
+  'dsh-llm-pi-gateway',
+  'dsh-model-capability-editor',
+]
 const READBACK_ATTEMPTS = 3
 const READBACK_DELAY_MS = 2 * 1000
 
@@ -45,11 +55,18 @@ function sleepMs(ms) {
  * 执行 npm 命令。Windows 下 npm 是 .cmd 脚本,Node 对其强制要求 shell
  * (无 shell 直接 EINVAL),故走 shell 字符串形式;参数全部来自内部白名单
  * (包名白名单/版本正则校验/registry 常量),无外部输入拼接。返回 { status, stdout, stderr }。
+ * opts.interactive = true 时 stdio 继承当前终端(npm 账号开 2FA 时,发布的
+ * EOTP/WebAuthn 流程需要 TTY:按回车打开浏览器认证后自动继续),此时无捕获输出。
  */
-function runNpm(args, cwd) {
+function runNpm(args, cwd, opts = {}) {
   const display = ['npm', ...args].join(' ')
   console.log(`  $ ${display}`)
-  const r = spawnSync([npmCmd(), ...args].join(' '), { cwd, encoding: 'utf8', shell: true })
+  const r = spawnSync([npmCmd(), ...args].join(' '), {
+    cwd,
+    encoding: 'utf8',
+    shell: true,
+    stdio: opts.interactive ? 'inherit' : 'pipe',
+  })
   if (r.error) fail(`命令启动失败: ${display}(${r.error.message})`)
   return r
 }
@@ -211,8 +228,9 @@ function publishOne(dirName, opts) {
     console.log('SKIP  测试(包未定义 test script)')
   }
 
-  const pub = runNpm(['run', 'npmPublish'], pkgDir)
-  if (pub.status !== 0) fail(`发布失败:\n${pub.stderr}`)
+  // 发布步骤交互式执行:2FA 账号在终端按回车打开浏览器认证后自动继续
+  const pub = runNpm(['run', 'npmPublish'], pkgDir, { interactive: true })
+  if (pub.status !== 0) fail('发布失败(交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
   if (!verifyPublished(name, version)) fail(`发布后回读未确认 ${name}@${version}(共 ${READBACK_ATTEMPTS} 次),请检查上方日志;重跑本脚本可自愈补 tag`)
   console.log(`OK    ${name}@${version} 已上线`)
