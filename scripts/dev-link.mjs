@@ -25,7 +25,6 @@ const profileRoot = join(process.env.USERPROFILE, '.dsh', 'profiles', 'web')
 const PACKAGES = [
   'dsh-rs-workflow',
   'dsh-usage-panel',
-  'dsh-usage-stats',
   'dsh-maintain',
   'dsh-think-expand',
   'dsh-turn-notify',
