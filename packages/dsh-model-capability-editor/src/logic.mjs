@@ -110,6 +110,13 @@ export function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
+// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+export function resolveTargetId(liveId, originalId, baselineIds) {
+  const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
+  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+}
+
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
 export function isModelsTitle(title) {
   return title === '模型' || title === 'Models'

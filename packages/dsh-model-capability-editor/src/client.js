@@ -162,6 +162,13 @@ function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
+// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+function resolveTargetId(liveId, originalId, baselineIds) {
+  const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
+  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+}
+
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
 function isModelsTitle(title) {
   return title === '模型' || title === 'Models'
@@ -491,8 +498,26 @@ function RowEditor(props) {
     setSaving(true)
     patch({ notice: null })
     try {
-      await saveModels(settings, route, new Map([[modelId, state.draft]]))
-      if (aliveRef.current) patch({ notice: { kind: 'ok', text: '已保存' } })
+      // S3:官方行内 ID 输入是活动状态,改名已落盘则以新 ID 为目标,否则回落原 ID
+      const el = props.idInputEl
+      const liveId = el && el.isConnected ? el.value : modelId
+      const first = unwrapResult(await settings.describe())
+      const nsFirst = (first.namespaces || []).find((entry) => entry.ns === NS)
+      const baselineIds = new Set(nsFirst !== undefined ? modelsOf(nsFirst.value, route).map((entry) => entry.id) : [])
+      const targetId = resolveTargetId(liveId, modelId, baselineIds)
+      await saveModels(settings, route, new Map([[targetId, state.draft]]))
+      // S4:保存后重读重建草稿,基线新鲜,保留他方词汇表外档位
+      const second = unwrapResult(await settings.describe())
+      const nsSecond = (second.namespaces || []).find((entry) => entry.ns === NS)
+      const latest = nsSecond !== undefined
+        ? modelsOf(nsSecond.value, route).find((entry) => entry.id === targetId)
+        : undefined
+      if (aliveRef.current) {
+        patch({
+          notice: { kind: 'ok', text: '已保存' },
+          draft: latest !== undefined ? draftsFromModels([latest]).get(targetId) : state.draft,
+        })
+      }
     } catch (error) {
       if (aliveRef.current) patch({ notice: { kind: 'error', text: error && error.message ? error.message : String(error) } })
     } finally {
@@ -599,9 +624,13 @@ function RowEditor(props) {
           return { outlet, titleMatched, hasEditor: details !== null, idInputs }
         }
 
-        function mountRow(face, idInput) {
+        function entryOf(idInput) {
           const modelRow = idInput.closest('div')
-          const entry = modelRow !== null ? modelRow.parentElement : null
+          return modelRow !== null ? modelRow.parentElement : null
+        }
+
+        function mountRow(face, idInput) {
+          const entry = entryOf(idInput)
           if (entry === null || entry.querySelector(':scope > .mce-inline-root') !== null) return false
           const details = idInput.closest('details')
           const editor = details !== null ? details.parentElement : null
@@ -614,7 +643,7 @@ function RowEditor(props) {
           container.className = 'mce-inline-root'
           entry.appendChild(container)
           const root = reactDom.createRoot(container)
-          root.render(React.createElement(RowEditor, { settings: face, route, modelId }))
+          root.render(React.createElement(RowEditor, { settings: face, route, modelId, idInputEl: idInput }))
           roots.set(container, root)
           return true
         }
@@ -638,6 +667,11 @@ function RowEditor(props) {
           }
           const info = docInfo()
           if (info === null || !info.titleMatched) return
+          // S5:全部行均已挂载时零 RPC 早退,消灭注入容器自身触发的自激励扫描
+          if (info.idInputs.length > 0 && info.idInputs.every((input) => {
+            const entry = entryOf(input)
+            return entry !== null && entry.querySelector(':scope > .mce-inline-root') !== null
+          })) return
           ensureStyle()
           void (async () => {
             try {

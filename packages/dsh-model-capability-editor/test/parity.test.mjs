@@ -22,13 +22,19 @@ function clientLogic() {
     section
       + '; return { EFFORT_LEVELS, OFF_LEVEL, COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts,'
       + ' inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces,'
-      + ' stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken };',
+      + ' stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId };',
   )
   return factory()
 }
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId } = L
+
+  test(prefix + '目标模型解析:活动 ID 在基线用活动 ID,否则回落原 ID', () => {
+    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto-v2')
+    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto'])), 'auto')
+    assert.equal(resolveTargetId('', 'auto', new Set(['auto'])), 'auto')
+  })
 
   test(prefix + '标题标记与锚点破坏判定', () => {
     assert.equal(isModelsTitle('模型'), true)
