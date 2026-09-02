@@ -436,7 +436,7 @@ function reviewNode(id, description, deps, subject, slot, kind) {
   return addNode({
     id: id, type: 'review', description: description, deps: (deps || []).slice(), status: 'pending',
     output: '', kind: kind, subject: subject || '', slot: slot || '',
-    rejectCount: 0, fixNote: '', fixPending: false, reviewerFault: false, hold: false,
+    rejectCount: 0, fixNote: '', reviewerFault: false,
     verdict: '', reviewEvidence: '', warn: false, dead: false, cursor: { i: 0 },
   })
 }
@@ -899,8 +899,6 @@ function hasEvidence(r) {
 
 // ── 审批执行与拒绝路由(契约 B7/B8) ──────────────────────────────────────────
 async function runReview(node) {
-  node.fixPending = false
-  node.hold = false
   node.status = 'active'
   const prompt = buildReviewPrompt(node)
   const candidates = slotOpts(node.slot)
@@ -1288,11 +1286,6 @@ async function escalateSubplan(pNode, reasons) {
 
 // 交付类(fr/xr)达阈值: 返工重规划, 追加返工任务链, 审批重挂其后
 async function rework(reviewNodes, reasons) {
-  // 返工在途/已挂待审: 保持等待(hold)不复位就绪, 消除无修复动作的空复审
-  if (reviewNodes.some(function (n) { return n.fixPending }) || escalating) {
-    reviewNodes.forEach(function (n) { n.hold = true })
-    return
-  }
   const label = reviewNodes.map(function (n) { return n.id }).join('/')
   if (escalations >= ESCALATION_LIMIT) {
     blocked = { nodeId: label, reason: '终审/交叉终审被拒且升级重规划次数已达上限', detail: reasons.join('; ') }
@@ -1329,10 +1322,8 @@ async function rework(reviewNodes, reasons) {
     nt.forEach(function (t, i) { t.after = i > 0 ? [nt[i - 1].id] : [] })
     nt.forEach(function (t) { taskNode(t.id, t.description, t.after, 'PLAN', { acceptance: t.acceptance, plannedFiles: t.files, enterReason: 'escalate' }) })
     reviewNodes.forEach(function (n) {
-      n.fixPending = true
       n.fixNote = reasons.join('; ')
       n.status = 'pending'
-      n.hold = false
       n.deps = nt.map(function (t) { return t.id })
     })
     log('追加返工任务 [' + nt.map(function (t) { return t.id }).join(', ') + '], 审批重挂到返工之后')
@@ -1354,7 +1345,7 @@ while (!blocked) {
   if (loops > loopBudget()) { blocked = { nodeId: '-', reason: '调度循环超出预算(' + loopBudget() + ' 轮)', detail: '可能存在无法收敛的审批循环' }; break }
   const doneMap = {}
   for (const n of nodes) if (!n.dead && n.status === 'done') doneMap[n.id] = true
-  const ready = nodes.filter(function (n) { return !n.dead && n.status === 'pending' && !n.hold && n.deps.every(function (d) { return doneMap[d] }) })
+  const ready = nodes.filter(function (n) { return !n.dead && n.status === 'pending' && n.deps.every(function (d) { return doneMap[d] }) })
   if (!ready.length) {
     const stuck = nodes.filter(function (n) { return !n.dead && n.status === 'pending' })
     if (stuck.length) blocked = { nodeId: '-', reason: '存在无法就绪的节点(依赖失败或缺失)', detail: stuck.map(function (n) { return n.id }).join(', ') }
