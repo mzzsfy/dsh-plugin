@@ -2,9 +2,13 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { effortsToDrafts, draftsToEfforts, OFF_LEVEL } from '../src/logic.mjs'
+import { effortsToDrafts, draftsToEfforts, OFF_LEVEL, EFFORT_LEVELS } from '../src/logic.mjs'
 
 const NO_CHECKS = { checked: {}, spellings: {} }
+
+test('标准档位共 7 档,与宿主 pi-ai THINKING_LEVELS 升序一致', () => {
+  assert.deepEqual(EFFORT_LEVELS, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+})
 
 const checks = (list, spellings = {}) => ({
   checked: Object.fromEntries(list.map((level) => [level, true])),
@@ -45,10 +49,10 @@ test('非 off 档拼写填值 → 写拼写', () => {
 })
 
 test('对象形态保留基线中词汇表外的档位', () => {
-  const baseline = { minimal: 'min', off: null }
+  const baseline = { custom: 'thinking-64k', off: null }
   assert.deepEqual(
     draftsToEfforts(checks(['off', 'high'], { high: 'hi' }), baseline),
-    { minimal: 'min', off: null, high: 'hi' },
+    { custom: 'thinking-64k', off: null, high: 'hi' },
   )
 })
 

@@ -1,6 +1,8 @@
 # @mzzsfy/dsh-model-capability-editor
 
-DeepSeek Harness 模型能力编辑插件:在设置页渲染独立"模型能力"分区(`settings.section` 插槽,紧随内置模型页),编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(思考档位与线上拼写)与 `input` 多模态声明,经官方 settings RPC 整组写回 settings.yaml。
+DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(7 个标准思考档位与每档线上值)与 `input` 多模态声明,经官方 settings RPC 整组写回 settings.yaml。
+
+默认注入官方「模型」页:打开 provider 编辑卡并展开「自定义设置」后,每个模型行下方出现"模型能力"编辑块,行内直接编辑。官方 DOM 结构变化导致锚点失效时,自动回退为设置页独立"模型能力"分区(`settings.section` 插槽);注入恢复可用后独立分区自动退场。
 
 ## 解决什么问题
 
@@ -10,8 +12,8 @@ DeepSeek Harness 模型能力编辑插件:在设置页渲染独立"模型能力"
 
 ## 功能
 
-- provider 选择(来源为 describe 返回的 `providers` 键),列出各模型行。
-- 推理档位四档(off / low / medium / high)复选框 + 每档线上拼写输入,判定表:
+- provider 选择(来源为 describe 返回的 `providers` 键),列出各模型行(独立分区形态)。
+- 推理档位七档(off / minimal / low / medium / high / xhigh / max,与宿主 pi-ai `THINKING_LEVELS` 一致)复选框 + 每档线上值输入,判定表:
 
   | 勾选状态 | 写回行为 |
   |---|---|
@@ -24,6 +26,7 @@ DeepSeek Harness 模型能力编辑插件:在设置页渲染独立"模型能力"
 - 保存 = mutate set `providers.<route>.models` 整个数组:以 describe 读到的数组为基线,未编辑条目原样保留,settings 未声明的(自动发现的)模型不被删除。
 - 修订冲突:重读 describe 取新 revision,按字段级 diff 仅重放本次修改(仅用户改过的模型条目的 `reasoningEfforts` / `input` 两字段,其余字段保留最新文档值),重试一次;再冲突报错终止并保留用户输入,绝不静默覆盖。
 - `settings` wire 面缺失 / describe 失败 / `writable === false`:卡片显示具体原因并只读,绝不静默。
+- 行内注入块:每模型档位与模态编辑,应用 = 单模型草稿并入整组保存流,语义与独立分区一致。
 
 ## 安装
 
@@ -31,7 +34,7 @@ DeepSeek Harness 模型能力编辑插件:在设置页渲染独立"模型能力"
 dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 ```
 
-重启 dsh 后,设置页左侧导航出现"模型能力"分区。
+重启 dsh 后,打开官方「模型」页任意 provider 的编辑卡,展开「自定义设置」,模型行内即出现"模型能力"编辑块;若官方结构变化导致注入失效,设置页左侧导航自动出现"模型能力"独立分区作为回退。
 
 ## 前置:移除 dsh-better-reasoning-effort
 

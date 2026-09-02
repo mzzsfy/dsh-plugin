@@ -4,7 +4,7 @@
 
 export const NS = 'llm-pi-ai'
 export const CONFLICT_CODE = 'settings-conflict'
-export const EFFORT_LEVELS = ['off', 'low', 'medium', 'high']
+export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 export const OFF_LEVEL = 'off'
 export const MODALITIES = ['text', 'image']
 export const INPUT_UNSET = 'unset'
@@ -108,6 +108,17 @@ export function stashDrafts(buckets, route, drafts) {
 export function restoreDrafts(buckets, route) {
   const drafts = buckets.get(route)
   return drafts === undefined ? null : drafts
+}
+
+// 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
+export function isModelsTitle(title) {
+  return title === '模型' || title === 'Models'
+}
+
+// 锚点破坏判定:模型页已打开且官方编辑器已展开,却找不到任何「模型 ID」输入,
+// 说明官方 DOM 结构已变,行内注入失效,应回退独立菜单。
+export function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
+  return titleMatched === true && hasEditor === true && modelIdInputCount === 0
 }
 
 function unwrapResult(result) {

@@ -22,13 +22,22 @@ function clientLogic() {
     section
       + '; return { EFFORT_LEVELS, OFF_LEVEL, COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts,'
       + ' inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces,'
-      + ' stashDrafts, restoreDrafts };',
+      + ' stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken };',
   )
   return factory()
 }
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken } = L
+
+  test(prefix + '标题标记与锚点破坏判定', () => {
+    assert.equal(isModelsTitle('模型'), true)
+    assert.equal(isModelsTitle('Models'), true)
+    assert.equal(isModelsTitle('模型能力'), false)
+    assert.equal(anchorsBroken({ titleMatched: true, hasEditor: true, modelIdInputCount: 0 }), true)
+    assert.equal(anchorsBroken({ titleMatched: true, hasEditor: true, modelIdInputCount: 1 }), false)
+    assert.equal(anchorsBroken({ titleMatched: false, hasEditor: true, modelIdInputCount: 0 }), false)
+  })
 
   test(prefix + '四态映射:未声明 / false / 对象含 null / 对象含拼写', () => {
     // 未声明 → 无勾选
