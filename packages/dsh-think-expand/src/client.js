@@ -4,7 +4,7 @@
 // 纯逻辑段在 LOGIC 标记之间,与 src/logic.mjs 保持同源,由 parity 测试保证。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-think-expand',
+  id: '@mzzsfy/dsh-think-expand',
   factory(require) {
     const React = require('react')
     const { useState, useCallback } = React

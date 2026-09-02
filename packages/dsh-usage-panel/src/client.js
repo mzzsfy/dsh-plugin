@@ -4,7 +4,7 @@
 // 浏览器半区通过 webServer 路由('/api/usage-panel/*')访问 Host,样式随组件内联渲染。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-usage-panel',
+  id: '@mzzsfy/dsh-usage-panel',
   factory(require) {
     const React = require('react')
     const { useState, useEffect } = React

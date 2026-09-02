@@ -6,7 +6,7 @@
 // 修改须两处同步。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-model-capability-editor',
+  id: '@mzzsfy/dsh-model-capability-editor',
   factory(require) {
     const React = require('react')
     const { useState, useEffect } = React

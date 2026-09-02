@@ -3,7 +3,7 @@
 // 仪表盘形态:client-modules 无插件可注册的全屏路由,按设计文档回退全屏覆盖层(shell.overlay)。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-usage-stats',
+  id: '@mzzsfy/dsh-usage-stats',
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useMemo } = React

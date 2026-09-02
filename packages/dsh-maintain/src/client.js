@@ -4,7 +4,7 @@
 // 浏览器半区经 webServer 路由('/api/maintain/*')访问 Host,样式随组件内联渲染。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-maintain',
+  id: '@mzzsfy/dsh-maintain',
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useRef } = React
