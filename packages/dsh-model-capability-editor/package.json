@@ -1,0 +1,41 @@
+{
+  "name": "@mzzsfy/dsh-model-capability-editor",
+  "description": "DeepSeek Harness 模型能力编辑插件:在设置 → 模型页官方 footer 插槽编辑 llm-pi-ai 管理的第三方模型 reasoningEfforts(思考档位与线上拼写)与 input 多模态声明,经官方 settings RPC 整组写回,冲突重读后字段级重放一次",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.1014.top:83/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

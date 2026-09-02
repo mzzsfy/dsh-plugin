@@ -1,0 +1,172 @@
+// 模型能力编辑纯逻辑层:档位四态映射、input 三态、整组写回合并、冲突字段级重放、
+// 竞品痕迹检测、保存流(冲突重读重放一次)。src/client.js 为单文件自包含格式
+// (factory 仅解析 react),与本文件保持同一份判定逻辑,修改须两处同步。
+
+export const NS = 'llm-pi-ai'
+export const CONFLICT_CODE = 'settings-conflict'
+export const EFFORT_LEVELS = ['off', 'low', 'medium', 'high']
+export const OFF_LEVEL = 'off'
+export const MODALITIES = ['text', 'image']
+export const INPUT_UNSET = 'unset'
+export const INPUT_TEXT = 'text'
+export const INPUT_TEXT_IMAGE = 'text-image'
+// 竞品 dsh-better-reasoning-effort 的 host autofill 写入痕迹:模型条目上的
+// 词汇表外标记字段,出现即说明竞品仍在运行,双写者并存。
+export const COMPETITOR_MARKERS = ['reasoningEffortsUnset', 'inputUnset']
+
+// reasoningEfforts 写回值 → 编辑器勾选/拼写草稿。false 仅勾 off;对象按键勾选,
+// null 拼写为空;未声明无任何勾选。
+export function effortsToDrafts(value) {
+  const checked = {}
+  const spellings = {}
+  if (value === false) {
+    checked[OFF_LEVEL] = true
+  } else if (value !== null && typeof value === 'object') {
+    for (const level of Object.keys(value)) {
+      checked[level] = true
+      spellings[level] = value[level] === null ? '' : String(value[level])
+    }
+  }
+  return { checked, spellings }
+}
+
+// 勾选/拼写草稿 → reasoningEfforts 写回值(undefined 表示删除字段)。
+// 词汇表外的基线档位在对象形态下原样保留。
+export function draftsToEfforts(drafts, baselineValue) {
+  const checkedLevels = EFFORT_LEVELS.filter((level) => drafts.checked[level] === true)
+  if (checkedLevels.length === 0) return undefined
+  if (checkedLevels.length === 1 && checkedLevels[0] === OFF_LEVEL &&
+      String(drafts.spellings[OFF_LEVEL] || '').trim().length === 0) return false
+  const result = {}
+  for (const level of Object.keys(baselineValue && typeof baselineValue === 'object' ? baselineValue : {})) {
+    if (EFFORT_LEVELS.indexOf(level) < 0) result[level] = baselineValue[level]
+  }
+  for (const level of checkedLevels) {
+    const spelling = String(drafts.spellings[level] || '').trim()
+    if (level === OFF_LEVEL) {
+      result[OFF_LEVEL] = spelling.length > 0 ? spelling : null
+    } else {
+      result[level] = spelling.length > 0 ? spelling : level
+    }
+  }
+  return result
+}
+
+// input 数组 → 三态。未声明与空数组(schema 视为未回答)同为未声明。
+export function inputToMode(value) {
+  if (!Array.isArray(value) || value.length === 0) return INPUT_UNSET
+  return value.indexOf('image') >= 0 ? INPUT_TEXT_IMAGE : INPUT_TEXT
+}
+
+// 三态 → input 写回值(undefined 表示删除字段)。
+export function modeToInput(mode) {
+  if (mode === INPUT_TEXT) return ['text']
+  if (mode === INPUT_TEXT_IMAGE) return ['text', 'image']
+  return undefined
+}
+
+// 单模型应用草稿:仅写 reasoningEfforts 与 input 两字段,其余字段保留最新条目值。
+export function applyDraft(model, draft) {
+  const result = { ...model }
+  const efforts = draftsToEfforts(draft, draft.baselineEfforts)
+  if (efforts === undefined) delete result.reasoningEfforts
+  else result.reasoningEfforts = efforts
+  const input = modeToInput(draft.inputMode)
+  if (input === undefined) delete result.input
+  else result.input = input
+  return result
+}
+
+// 整组写回:以 describe 读到的模型数组为基线,仅重写有草稿的条目,未编辑条目原样保留。
+export function mergeBaselineModels(baselineModels, draftsById) {
+  return baselineModels.map((model) => {
+    const draft = draftsById.get(model.id)
+    return draft === undefined ? model : applyDraft(model, draft)
+  })
+}
+
+// 冲突重放:在最新数组上仅重放本次用户修改的模型条目的两个字段,
+// 非本次修改的条目保留最新文档值,本次未声明的模型不被删除。
+export function replayDrafts(latestModels, draftsById) {
+  return mergeBaselineModels(latestModels, draftsById)
+}
+
+// 竞品写入痕迹检测:返回带词汇表外标记字段的模型 id 列表。
+export function detectCompetitorTraces(models) {
+  return (Array.isArray(models) ? models : [])
+    .filter((model) => model !== null && typeof model === 'object' &&
+      COMPETITOR_MARKERS.some((marker) => marker in model))
+    .map((model) => String(model.id))
+}
+
+// 未保存草稿按 provider 路由分桶:切换路由不丢弃,切回恢复;路由 null(无可用路由)不存。
+export function stashDrafts(buckets, route, drafts) {
+  if (route !== null) buckets.set(route, drafts)
+  return buckets
+}
+
+export function restoreDrafts(buckets, route) {
+  const drafts = buckets.get(route)
+  return drafts === undefined ? null : drafts
+}
+
+function unwrapResult(result) {
+  if (result !== null && typeof result === 'object' && result.ok === true) return result.value
+  const error = new Error(result && result.error && result.error.message
+    ? result.error.message
+    : 'settings RPC 调用失败')
+  error.code = result && result.error ? result.error.code : undefined
+  throw error
+}
+
+async function describeNs(settings) {
+  const value = unwrapResult(await settings.describe())
+  const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
+  if (ns === undefined) throw new Error('settings 中不存在 ' + NS + ' 命名空间')
+  return { writable: value.writable === true, revision: ns.revision, value: ns.value }
+}
+
+function modelsOf(nsValue, route) {
+  const providers = nsValue && typeof nsValue === 'object' ? nsValue.providers : {}
+  const provider = providers && typeof providers === 'object' ? providers[route] : undefined
+  return provider && typeof provider === 'object' && Array.isArray(provider.models) ? provider.models : []
+}
+
+async function writeModels(settings, route, models, revision) {
+  return unwrapResult(await settings.mutate(NS, [
+    { op: 'set', path: ['providers', route, 'models'], value: models },
+  ], revision))
+}
+
+// 保存流:describe 取基线与 revision → mutate 整组写回;冲突则重读并按字段级
+// diff 重放一次,再冲突报错终止,绝不静默覆盖。返回已写回的模型数组。
+export async function saveModels(settings, route, draftsById) {
+  const first = await describeNs(settings)
+  if (!first.writable) {
+    const error = new Error('settings 只读,无法保存')
+    error.code = 'settings-readonly'
+    throw error
+  }
+  const attempt = (baseline, revision) =>
+    writeModels(settings, route, mergeBaselineModels(baseline, draftsById), revision)
+  let baseline = modelsOf(first.value, route)
+  let revision = first.revision
+  try {
+    await attempt(baseline, revision)
+  } catch (error) {
+    if (error.code !== CONFLICT_CODE) throw error
+    const second = await describeNs(settings)
+    if (!second.writable) throw error
+    baseline = modelsOf(second.value, route)
+    revision = second.revision
+    try {
+      await attempt(baseline, revision)
+    } catch (retryError) {
+      if (retryError.code === CONFLICT_CODE) {
+        throw new Error('保存冲突:重试一次后仍与其他写者冲突,已保留本次修改,未覆盖他人改动')
+      }
+      throw retryError
+    }
+  }
+  return mergeBaselineModels(baseline, draftsById)
+}
