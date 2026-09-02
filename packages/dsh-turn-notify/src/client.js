@@ -4,7 +4,7 @@
 // 认领锁/完成标记走 localStorage(非 secure context 也可用的唯一跨窗口原语)。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-turn-notify',
+  id: '@mzzsfy/dsh-turn-notify',
   factory(require) {
     const React = require('react')
     const { useState, useEffect } = React

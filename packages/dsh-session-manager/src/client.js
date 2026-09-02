@@ -4,7 +4,7 @@
 // 增量帧的集合差分驱动。浏览器半区经 webServer 路由('/api/session-manager/*')访问 Host。
 
 window.__ModuleLoader__.load({
-  id: 'dsh-session-manager',
+  id: '@mzzsfy/dsh-session-manager',
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useSyncExternalStore } = React

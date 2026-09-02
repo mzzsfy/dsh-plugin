@@ -226,7 +226,7 @@ async function queryAccount(config, account) {
 }
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
-export const inject = ['webServer']
+export const inject = ['webServer', 'timer']
 
 export function apply(ctx) {
   let config = null
