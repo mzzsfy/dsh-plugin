@@ -294,12 +294,13 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
 
 test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () => {
   assert.deepEqual(
-    resolvedConfig({ webhookUrl: 'https://hook.example', enabled: { completed: false } }),
+    resolvedConfig({ webhookUrl: 'https://hook.example', enabled: { completed: false }, soundMapping: { completed: 'snd-1' } }),
     {
       webhookUrl: 'https://hook.example',
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
+      soundMapping: { completed: 'snd-1' },
     },
   )
   assert.deepEqual(resolvedConfig({}), {
@@ -307,17 +308,19 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     minTurnDurationMs: MIN_TURN_MS,
     rootsOnly: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
+    soundMapping: {},
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
 })
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
   assert.deepEqual(
-    publicConfig({ webhookUrl: 'https://hook.example/service/xxx', enabled: { completed: false } }),
+    publicConfig({ webhookUrl: 'https://hook.example/service/xxx', enabled: { completed: false }, soundMapping: { completed: 'snd-1' } }),
     {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
+      soundMapping: { completed: 'snd-1' },
       webhookConfigured: true,
     },
   )
