@@ -1,23 +1,23 @@
 {
-  // ═══ rs-workflow 工作位绑定（沿用 rs-tui config.json5 的 slot 降级语义）═══
+  // ═══ rs-workflow 工作位绑定（对齐 rs-tui config.json5 的 slot 语义）═══
   //
   // 主代理在每次启动工作流时读取本文件，解析后原样传给编排引擎。
-  // 降级链：细分位 → 基础位 → 会话默认模型（全部未配置时的行为）。
+  // 降级链：细分位 → 同域基础位 → 会话默认模型（全部未配置时的行为）。
   //
   // 注意：本文件现在是后备配置——主代理优先用 rs_workflow_config 工具读
   // GUI 设置页 rs-workflow 段的配置（随改随生效）；仅当工具不可用
   // （source=fallback）时才读本文件。
   //
-  // 值格式（任选其一）：
+  // 值格式三态（与 GUI 设置 schema 一致，任选其一；候选语义与 rs-tui rotation 等价）：
   //   "provider/model"                    字符串简写，如 "anthropic/claude-opus-4"
-  //   { provider: "...", model: "..." }   对象形式，provider 与 model 可只给一个
-  //   ["a/m1", "b/m2"]                    候选数组：依次故障转移；被拒重做/重问
-  //                                       从下一候选换模型（节点级轮换）
+  //   ["a/m1", "b/m2"]                    候选数组 = rotation：依次轮换，被拒重做/
+  //                                       重问从下一候选换模型（节点级游标）
+  //   { rotation: ["a/m1", "b/m2"] }      rs-tui 原始格式，与候选数组等价
   //   ""                                  该位未配置，走降级链
   //
   // 角色×模型适配指引：
-  //   planner-triage 用快而便宜的模型；executor 用编码强的模型；
-  //   reviewer-final 用最强推理的模型；reviewer-plan 中等推理即可。
+  //   planner-triage 用快而便宜的模型；executor 域用编码强的模型；
+  //   reviewer-final / reviewer-cross 用最强推理的模型；reviewer-plan 中等推理即可。
   //   红线：reviewer 弱于 executor = 审批形同虚设。
   //
   // 修改本文件即时生效，无需重启会话。
@@ -25,16 +25,28 @@
   // 配错了对应角色的子代理会调用失败（引擎会重试并降级，但浪费轮次）。
 
   slots: {
-    // ── 基础位（3）──────────────────────────────
-    planner: "",   // 规划 / 分诊 / 重规划 / 返工
-    executor: "",  // 任务执行
-    reviewer: "",  // 审批（逐步审 / 子计划审 / 计划审 pr 兜底 / 交叉终审 B 位）
+    // ── 基础位（3）：同域细分位的兜底 ──────────────
+    planner: "",   // 规划域兜底（分诊 / 总规划 / 子计划 / 重规划）
+    executor: "",  // 执行域兜底（首执行 / 被拒重做 / 失败重试 / 升级后执行）
+    reviewer: "",  // 审批域兜底（计划审 / 任务审 / 子计划审 / 终审 / 交叉终审）
 
-    // ── 细分位（需要时取消注释并填写）────────────
-    // "planner-triage": "",    // 工作流启动时的分诊 + 拆解（建议快而便宜的模型）
-    // "planner-escalate": "",  // 升级重规划 / 返工 / 计划重规划（缺省降级 planner）
-    // "reviewer-final": "",    // 终审 / 交叉终审 A 位（建议最强推理的模型）
-    // "reviewer-plan": "",     // 计划审批 pr 节点（中等推理即可，缺省降级 reviewer）
-    // "executor-retry": "",    // 被驳回后的返工执行（可配数组实现换模型重做）
+    // ── planner 细分位：未配置降级 planner ────────
+    "planner-triage": "",   // 首次分诊：分析需求选模板拆任务
+    "planner-command": "",  // 总规划：计划重写与大纲修订（计划审批驳回后）
+    "planner-subplan": "",  // 子计划细化：子计划内任务拆解
+    "planner-escalate": "", // 升级重规划：连续拒绝超阈后的尾段重拆
+
+    // ── reviewer 细分位：未配置降级 reviewer ──────
+    "reviewer-plan": "",     // 计划审批：审批计划文本与大纲
+    "reviewer-task": "",     // 任务审批：审批单个任务执行结果
+    "reviewer-subplan": "",  // 子计划交付审批：审批整个子计划交付
+    "reviewer-final": "",    // 单终审：末尾终审全部交付（建议最强推理）
+    "reviewer-cross": "",    // 交叉终审：多视角交叉终审链（建议最强推理）
+
+    // ── executor 细分位：未配置降级 executor ──────
+    "executor-task": "",     // 任务首次执行
+    "executor-enhance": "",  // 被拒重做：携带 REJECTED 理由修改重交
+    "executor-retry": "",    // 失败重试：自报失败/无产出后的重试
+    "executor-escalate": "", // 升级后执行：升级重规划产出的新任务
   },
 }

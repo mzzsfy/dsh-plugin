@@ -6,7 +6,7 @@
 
 | 行角色 | 所在平面 | 位置 | 作用 |
 |---|---|---|---|
-| `settings` | host | 包内 bundle patch（cordis.patch.yml） | 注册 settings 命名空间 `rs-workflow` → GUI 设置页出现表单（八个工作位模型绑定、默认模板、任务上限），持久化于 `~/.dsh/settings.yaml` |
+| `settings` | host | 包内 bundle patch（cordis.patch.yml） | 注册 settings 命名空间 `rs-workflow` → GUI 设置页出现表单（3 基础+13 细分工作位、默认模板、任务上限、预算（对齐 rs-tui 原始配置语义）），持久化于 `~/.dsh/settings.yaml` |
 | `preset-sync` | host | 同上 | 每次 dsh 启动把包内 `preset/rs-workflow` 幂等同步到用户预设根 → 模式选择器出现"若水工作流"，升级包后重启即更新 |
 | `tool` | agent | 释放出的 preset 组合（agent.cordis.yml） | 注册模型工具 `rs_workflow_config` → 主代理启动工作流编排前读取当前配置；skills/rs-workflow 协议技能（SKILL.md + engine.js 编排引擎 + slots.json5 后备配置）随 preset 一起分发 |
 
