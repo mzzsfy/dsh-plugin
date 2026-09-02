@@ -119,6 +119,31 @@ function unwrapResult(result) {
   throw error
 }
 
+// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
+export function unwrapWire(response) {
+  const result = response !== null && typeof response === 'object' ? response.result : undefined
+  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+  return {
+    ok: false,
+    error: result !== null && typeof result === 'object' && result.error !== undefined
+      ? result.error
+      : { code: undefined, message: 'settings RPC 调用失败' },
+  }
+}
+
+// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+export function makeSettingsFace(wire) {
+  if (wire === null || typeof wire !== 'object' ||
+      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
+  return {
+    describe: async () => unwrapWire(await wire.describe({})),
+    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
+      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
+    )),
+  }
+}
+
 async function describeNs(settings) {
   const value = unwrapResult(await settings.describe())
   const ns = (value.namespaces || []).find((entry) => entry.ns === NS)

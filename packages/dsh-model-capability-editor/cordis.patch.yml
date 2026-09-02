@@ -3,7 +3,7 @@
 # The row's only job is to pull the package into the profile so the client
 # module system materializes its `dsh.client` manifest entry; the host half
 # is a no-op plugin, and all behavior lives in src/client.js, which mounts
-# the capability card on the official settings.models.footer slot.
+# the capability card as its own settings.section entry.
 
 - insert:
     - id: model-capability-editor

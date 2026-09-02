@@ -1,7 +1,8 @@
-// 模型能力编辑 Client 半区:settings.models.footer 官方插槽卡片。
+// 模型能力编辑 Client 半区:settings.section 独立设置页卡片。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 由 DSH client runtime 的模块表解析。
-// 纯客户端零 host 端:读写经 ctx.remote.settings 的 describe/mutate RPC。
+// 纯客户端零 host 端:读写经 connection.api.settings 的 describe/mutate wire RPC,
+// 信封由 makeSettingsFace 适配为插件内部 RPC 面。
 // 判定逻辑与 src/logic.mjs 为同一份(单文件自包含格式无法跨文件 require),
 // 修改须两处同步。
 
@@ -13,7 +14,7 @@ window.__ModuleLoader__.load({
 
 const NS = 'llm-pi-ai'
 const CONFLICT_CODE = 'settings-conflict'
-const FOOTER_ORDER = 100
+const SECTION_ORDER = 12
 
 const CSS = [
   '.mce-card { display:flex; flex-direction:column; gap:10px; color:inherit; font-size:13px;',
@@ -159,6 +160,31 @@ function unwrapResult(result) {
   throw error
 }
 
+// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
+function unwrapWire(response) {
+  const result = response !== null && typeof response === 'object' ? response.result : undefined
+  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+  return {
+    ok: false,
+    error: result !== null && typeof result === 'object' && result.error !== undefined
+      ? result.error
+      : { code: undefined, message: 'settings RPC 调用失败' },
+  }
+}
+
+// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+function makeSettingsFace(wire) {
+  if (wire === null || typeof wire !== 'object' ||
+      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
+  return {
+    describe: async () => unwrapWire(await wire.describe({})),
+    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
+      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
+    )),
+  }
+}
+
 async function describeNs(settings) {
   const value = unwrapResult(await settings.describe())
   const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
@@ -279,7 +305,7 @@ function CapabilityCard(props) {
     try {
       const settings = props.settings
       if (!settings || typeof settings.describe !== 'function') {
-        patch({ phase: 'readonly', reason: 'remote.settings 槽缺失,无法读写模型声明' })
+        patch({ phase: 'readonly', reason: 'connection.api.settings wire 面缺失,无法读写模型声明' })
         return
       }
       const value = unwrapResult(await settings.describe())
@@ -408,15 +434,16 @@ function CapabilityCard(props) {
 }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'connection'],
       apply(ctx) {
-        // remote.settings 是宿主懒加载服务,boot 期不可用,inject 会使 entry 永久
-        // pending;cordis 对未 inject 服务的属性访问直接抛错,因此卡片渲染回调
-        // 内才经 ctx.remote 惰性取用,缺失由 load() 的降级分支处理。
-        ctx.slots.inject('settings.models.footer', () =>
+        // connection 为 boot 期即时服务,apply 内即可取 wire 面;面缺失由
+        // CapabilityCard load() 的降级分支呈现只读原因,不在渲染回调抛错。
+        const settings = makeSettingsFace(ctx.connection.api.settings)
+        ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.models.footer', id: 'model-capability-editor', order: FOOTER_ORDER },
-            () => React.createElement(CapabilityCard, { settings: ctx.remote.settings }),
+            // order 紧随内置模型页,主题相邻
+            { name: 'settings.section', id: 'model-capability-editor', order: SECTION_ORDER, label: '模型能力' },
+            () => React.createElement(CapabilityCard, { settings }),
           ))
       },
     }
