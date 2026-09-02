@@ -2,7 +2,8 @@
  * dsh-rs-workflow — 若水工作流 (rs-workflow) 一体化插件。
  *
  * 一个包，三种行角色（由组合行的 config.role 决定，加载前经 Config 校验）：
- *   - "settings"：注册 settings 命名空间 "rs-workflow"，GUI 设置页出现配置表单。
+ *   - "settings"：注册 settings 命名空间 "rs-workflow"，GUI 设置页出现配置表单
+ *     （3 基础工作位 + 13 细分工作位 + 工作流默认项 + 预算，语义对齐 rs-tui 原始配置）。
  *     放在 profile 的 cordis.patch.yml（host 平面，常驻；裸包名从 profile
  *     node_modules 解析）。
  *   - "preset-sync"：把包内 preset/rs-workflow（preset.yml + agent.cordis.yml +
@@ -31,26 +32,55 @@ const NAMESPACE = settingsNamespace("rs-workflow");
 
 const TEMPLATES = ["auto", "lite", "plan-final", "step-review", "multi-plan"];
 
-/** 工作位（slot）子 schema；string = 单绑定，array = 候选数组（依次故障转移）。工厂函数保证 Config 与 SETTINGS_SCHEMA 各持独立实例。 */
-function buildSlots() {
-	const slot = (description) => z.union([z.string(), z.array(z.string())]).default("").description(description);
+// 预算字段与默认值对齐 rs-tui budgets(config.ts:290-299),clamp 边界同 node-tree BUDGET_MIN/MAX
+const BUDGET_DEFAULTS = {
+	reviewRejectBeforeEscalate: 2,
+	planRejectBeforeBlocked: 2,
+	emptyOutputRetryLimit: 3,
+	reportNudgeLimit: 3,
+};
+const BUDGET_MIN = 1;
+const BUDGET_MAX = 10;
+
+/** 预算数值子 schema;clamp 在引擎侧执行,schema 只声明合法域。 */
+function buildBudgets() {
+	const budget = (def, description) => z.number().default(def).min(BUDGET_MIN).max(BUDGET_MAX).description(description);
 	return z.object({
-		planner: slot("planner 基础位（规划/分诊/重规划）。格式 provider/model 或候选数组，留空 = 会话默认模型"),
-		executor: slot("executor 基础位（任务执行）；数组 = 依次故障转移，被拒重做换模型"),
-		reviewer: slot("reviewer 基础位（逐步审/子计划审/交叉终审 B 位）；数组 = 候选故障转移"),
-		"planner-triage": slot("细分位：工作流启动时的分诊+拆解；缺省降级 planner"),
-		"planner-escalate": slot("细分位：升级重规划/返工/计划重规划；缺省降级 planner"),
-		"reviewer-final": slot("细分位：终审/交叉终审 A 位；缺省降级 reviewer，建议配更强的模型"),
-		"reviewer-plan": slot("细分位：计划审批 pr 节点；缺省降级 reviewer，中等推理即可"),
-		"executor-retry": slot("细分位：被驳回后的返工执行；缺省降级 executor"),
+		reviewRejectBeforeEscalate: budget(BUDGET_DEFAULTS.reviewRejectBeforeEscalate, "任务连续被拒/失败达此值触发升级重规划(含自报失败与调用失败)"),
+		planRejectBeforeBlocked: budget(BUDGET_DEFAULTS.planRejectBeforeBlocked, "计划/子计划连续被拒达此值触发升级重规划"),
+		emptyOutputRetryLimit: budget(BUDGET_DEFAULTS.emptyOutputRetryLimit, "审批缺验证证据时重问上限,超限视为拒绝"),
+		reportNudgeLimit: budget(BUDGET_DEFAULTS.reportNudgeLimit, "执行完成但未给出交接摘要时追问上限"),
 	});
 }
 
-/** 工作流默认项子 schema。 */
+/** 工作位（slot）子 schema；细分位场景文案对齐 rs-tui SLOT_SCENES。string/array/{rotation} 三态：array 与 rotation 数组等价（候选依次轮换，被拒重做/重问换模型）。工厂函数保证 Config 与 SETTINGS_SCHEMA 各持独立实例。 */
+function buildSlots() {
+	const slot = (description) => z.union([z.string(), z.array(z.string()), z.object({ rotation: z.array(z.string()) })]).default("").description(description);
+	return z.object({
+		planner: slot("planner 基础位（规划域兜底）。格式 provider/model、候选数组或 {rotation:[...]}，留空 = 会话默认模型"),
+		executor: slot("executor 基础位（执行域兜底）；候选依次轮换，被拒重做/重试换模型"),
+		reviewer: slot("reviewer 基础位（审批域兜底）；候选依次轮换"),
+		"planner-triage": slot("细分位：首次分诊，分析需求选模板拆任务；缺省降级 planner"),
+		"planner-command": slot("细分位：总规划，计划重写与大纲修订；缺省降级 planner"),
+		"planner-subplan": slot("细分位：子计划细化，子计划内任务拆解；缺省降级 planner"),
+		"planner-escalate": slot("细分位：升级重规划，连续拒绝超阈后的尾段重拆；缺省降级 planner"),
+		"reviewer-plan": slot("细分位：计划审批，审批计划文本与大纲；缺省降级 reviewer"),
+		"reviewer-task": slot("细分位：任务审批，审批单个任务执行结果；缺省降级 reviewer"),
+		"reviewer-subplan": slot("细分位：子计划交付审批，审批整个子计划交付；缺省降级 reviewer"),
+		"reviewer-final": slot("细分位：单终审，末尾终审全部交付；缺省降级 reviewer，建议配更强的模型"),
+		"reviewer-cross": slot("细分位：交叉终审，多视角交叉终审链；缺省降级 reviewer，建议配更强的模型"),
+		"executor-task": slot("细分位：任务首次执行；缺省降级 executor"),
+		"executor-enhance": slot("细分位：被拒重做，携带 REJECTED 理由修改重交；缺省降级 executor"),
+		"executor-retry": slot("细分位：失败重试，自报失败/无产出后的重试；缺省降级 executor"),
+		"executor-escalate": slot("细分位：升级后执行，升级重规划产出的新任务；缺省降级 executor"),
+	});
+}
+
+/** 工作流默认项子 schema。maxTasks 为 DSH 原生任务预算（rs-tui 无数量上限），约束全部任务实例化。 */
 function buildWorkflow() {
 	return z.object({
-		defaultTemplate: z.union(TEMPLATES).default("auto").description("默认模板：auto = 由 planner 按难度分诊；其余 = 锁定该模板"),
-		maxTasks: z.number().default(8).description("单轮任务拆解数上限"),
+		defaultTemplate: z.union(TEMPLATES).default("auto").description("默认模板：auto = planner 分诊自动选型（无信号时兜底 multi-plan）；其余 = 无信号时兜底该模板，planner 声明与分诊矩阵仍优先生效"),
+		maxTasks: z.number().default(8).description("单轮任务拆解数上限（含子计划运行时任务的全局预算）"),
 	});
 }
 
@@ -58,6 +88,7 @@ function buildWorkflow() {
 const SETTINGS_SCHEMA = z.object({
 	slots: buildSlots(),
 	workflow: buildWorkflow(),
+	budgets: buildBudgets(),
 });
 
 /** 组合行 config schema（在 settings 之上多一个行角色字段）。 */
@@ -65,11 +96,12 @@ const Config = z.object({
 	role: z.union(["settings", "preset-sync", "tool"]).required().description("行角色：settings = 注册 GUI 设置命名空间（host 层常驻）；preset-sync = 同步释放 agent preset 到用户预设根（host 层常驻）；tool = 注册 rs_workflow_config 模型工具（预设层）"),
 	slots: buildSlots(),
 	workflow: buildWorkflow(),
+	budgets: buildBudgets(),
 });
 
 /** 从（已解析的）行 config 里摘出 settings base 层。 */
 function baseOf(config) {
-	return { slots: config.slots, workflow: config.workflow };
+	return { slots: config.slots, workflow: config.workflow, budgets: config.budgets };
 }
 
 function apply(ctx, config) {
@@ -97,7 +129,7 @@ function apply(ctx, config) {
 	}
 	ctx.tools.register(defineTool({
 		name: "rs_workflow_config",
-		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots) 与工作流默认项 (workflow)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 非 auto 且用户未点名模板时作为 lockedTemplate；workflow.maxTasks 作为 args.limits.maxTasks。",
+		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 由分诊矩阵自动选型）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
 		parameters: {},
 		output: {
 			schema: {
@@ -108,16 +140,18 @@ function apply(ctx, config) {
 						type: "object",
 						required: true,
 						additionalProperties: true,
-						properties: {
-							planner: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							executor: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							reviewer: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							"planner-triage": { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							"planner-escalate": { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							"reviewer-final": { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							"reviewer-plan": { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-							"executor-retry": { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
-						},
+						properties: Object.fromEntries([
+							"planner", "executor", "reviewer",
+							"planner-triage", "planner-command", "planner-subplan", "planner-escalate",
+							"reviewer-plan", "reviewer-task", "reviewer-subplan", "reviewer-final", "reviewer-cross",
+							"executor-task", "executor-enhance", "executor-retry", "executor-escalate",
+						].map((k) => [k, {
+							oneOf: [
+								{ type: "string" },
+								{ type: "array", items: { type: "string" } },
+								{ type: "object", additionalProperties: false, properties: { rotation: { type: "array", items: { type: "string" } } } },
+							],
+						}])),
 					},
 					workflow: {
 						type: "object",
@@ -128,12 +162,23 @@ function apply(ctx, config) {
 							maxTasks: { type: "number" },
 						},
 					},
+					budgets: {
+						type: "object",
+						required: true,
+						additionalProperties: false,
+						properties: {
+							reviewRejectBeforeEscalate: { type: "number" },
+							planRejectBeforeBlocked: { type: "number" },
+							emptyOutputRetryLimit: { type: "number" },
+							reportNudgeLimit: { type: "number" },
+						},
+					},
 					source: { type: "string", required: true, enum: ["settings", "fallback"] },
 				},
 			},
 			render: (_args, value) => [{
 				type: "text",
-				text: JSON.stringify({ slots: value.slots, workflow: value.workflow }, null, 2)
+				text: JSON.stringify({ slots: value.slots, workflow: value.workflow, budgets: value.budgets }, null, 2)
 					+ (value.source === "fallback" ? "\n(设置服务不可用：返回的是组合默认值，GUI 修改不在此生效)" : ""),
 			}],
 		},
@@ -141,9 +186,9 @@ function apply(ctx, config) {
 			const settings = ctx.get("settings");
 			const value = settings ? settings.get(NAMESPACE) : undefined;
 			if (value) {
-				return Promise.resolve({ slots: value.slots, workflow: value.workflow, source: "settings" });
+				return Promise.resolve({ slots: value.slots, workflow: value.workflow, budgets: value.budgets, source: "settings" });
 			}
-			return Promise.resolve({ slots: cfg.slots, workflow: cfg.workflow, source: "fallback" });
+			return Promise.resolve({ slots: cfg.slots, workflow: cfg.workflow, budgets: cfg.budgets, source: "fallback" });
 		},
 		presentCall: () => ({ card: "generic", title: "读取若水工作流配置", kind: "other", rawInput: {} }),
 	}));
