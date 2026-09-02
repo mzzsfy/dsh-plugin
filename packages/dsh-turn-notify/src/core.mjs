@@ -161,10 +161,16 @@ export function decideClaim({ stored, done, now, windowId, lockTtlMs = CLAIM_LOC
   return lock.wid === windowId ? 'claim' : 'skip'
 }
 
-// 发声形态:聚焦页内轻提示;Notification 可用走全量;否则降级 toast + 标题闪烁。
-export function choosePresentation({ hasFocus, notificationPermission }) {
-  if (hasFocus) return 'toast'
-  return notificationPermission === 'granted' ? 'full' : 'fallback'
+// 发声通道判定:页内提示与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
+// 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, systemEnabled = true }) {
+  const quiet = hasFocus && focusQuiet
+  return {
+    toast: toastEnabled,
+    sound: !quiet,
+    system: !quiet && systemEnabled && permission === 'granted',
+    blink: !quiet && systemEnabled && permission !== 'granted',
+  }
 }
 
 // 分类音效解析:映射指向已上传音效则用自定义;指向内置音名则用该内置;否则(未配置/已失效)回落内置默认。
@@ -271,17 +277,91 @@ export function createApprovalTap(notify, schedule) {
   }
 }
 
-// webhook 直发:未配置跳过;任何失败吞错(fire-and-forget,不重试)。
+// webhook 直发:未配置跳过;任何失败不抛出(fire-and-forget,不重试)。
+// 返回真实投递结果供测试按钮呈现,真实通知路径以 void 忽略。
 export async function sendWebhook({ url, payload, fetchImpl = fetch }) {
-  if (typeof url !== 'string' || url.trim().length === 0) return
+  if (typeof url !== 'string' || url.trim().length === 0) return { ok: false, detail: '未配置 webhook' }
   try {
-    await fetchImpl(url.trim(), {
+    const response = await fetchImpl(url.trim(), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
     })
-  } catch {
-    // webhook 不可达不打扰主循环,失败即弃
+    return { ok: response.ok, detail: 'HTTP ' + response.status }
+  } catch (error) {
+    // webhook 不可达不打扰主循环,失败即弃,错误信息仅供测试路径呈现
+    return { ok: false, detail: error && error.message ? error.message : String(error) }
+  }
+}
+
+const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
+
+// 配置补丁校验:顶层键白名单,webhookUrl 空串(禁用)或 http(s) URL,
+// 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
+export function validateConfigPatch(patch) {
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'enabled']
+  for (const key of Object.keys(patch)) {
+    if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
+  }
+  const next = {}
+  if ('webhookUrl' in patch) {
+    const url = patch.webhookUrl
+    if (typeof url !== 'string') return { ok: false, reason: 'webhookUrl 须为字符串' }
+    const trimmed = url.trim()
+    if (trimmed.length > 0) {
+      try {
+        const parsed = new URL(trimmed)
+        if (CONFIG_WEBHOOK_SCHEMES.indexOf(parsed.protocol) < 0) return { ok: false, reason: 'webhookUrl 仅支持 http(s)' }
+      } catch {
+        return { ok: false, reason: 'webhookUrl 不是合法 URL' }
+      }
+    }
+    next.webhookUrl = trimmed
+  }
+  if ('minTurnDurationMs' in patch) {
+    const ms = patch.minTurnDurationMs
+    if (typeof ms !== 'number' || !Number.isInteger(ms) || ms < 0) return { ok: false, reason: 'minTurnDurationMs 须为非负整数' }
+    next.minTurnDurationMs = ms
+  }
+  if ('rootsOnly' in patch) {
+    if (typeof patch.rootsOnly !== 'boolean') return { ok: false, reason: 'rootsOnly 须为布尔' }
+    next.rootsOnly = patch.rootsOnly
+  }
+  if ('enabled' in patch) {
+    const enabled = patch.enabled
+    if (enabled === null || typeof enabled !== 'object' || Array.isArray(enabled)) return { ok: false, reason: 'enabled 须为对象' }
+    for (const key of Object.keys(enabled)) {
+      if (CATEGORIES.indexOf(key) < 0) return { ok: false, reason: '未知分类: ' + key }
+      if (typeof enabled[key] !== 'boolean') return { ok: false, reason: '分类开关须为布尔: ' + key }
+    }
+    next.enabled = { ...enabled }
+  }
+  return { ok: true, patch: next }
+}
+
+// 面板读取的解析形态:enabled 缺省键按开补全,字段类型异常回退默认值;
+// 时长统一取整到非负整数,与写路径校验宽松度一致(yaml 手写小数不产生读存差)。
+export function resolvedConfig(settings) {
+  const source = settings || {}
+  const enabled = (typeof source.enabled === 'object' && source.enabled !== null) ? source.enabled : {}
+  const duration = Number.isFinite(source.minTurnDurationMs) ? Math.max(0, Math.floor(source.minTurnDurationMs)) : MIN_TURN_DURATION_MS
+  return {
+    webhookUrl: typeof source.webhookUrl === 'string' ? source.webhookUrl : '',
+    minTurnDurationMs: duration,
+    rootsOnly: source.rootsOnly !== false,
+    enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
+  }
+}
+
+// 面板可见配置:webhookUrl 属凭据不出主机,仅回是否已配置。
+export function publicConfig(settings) {
+  const resolved = resolvedConfig(settings)
+  return {
+    minTurnDurationMs: resolved.minTurnDurationMs,
+    rootsOnly: resolved.rootsOnly,
+    enabled: resolved.enabled,
+    webhookConfigured: resolved.webhookUrl.trim().length > 0,
   }
 }

@@ -14,10 +14,13 @@ import {
   buildWebhookPayload,
   createProjection,
   decideClaim,
-  choosePresentation,
+  chooseChannels,
   resolveSound,
   pruneMapping,
   validateMappingId,
+  validateConfigPatch,
+  resolvedConfig,
+  publicConfig,
   validateUpload,
   collectSessionEvents,
   readRawBody,
@@ -130,11 +133,22 @@ test('认领状态机:无锁认领 / 他锁跳过 / 过期接管 / 完成标记�
   assert.equal(decideClaim({ stored: 'not-json', done: null, now: t0, windowId: 'w1', lockTtlMs }), 'takeover')
 })
 
-test('发声形态判定:聚焦仅 toast / 授权失焦全量 / 未授权降级', () => {
-  assert.equal(choosePresentation({ hasFocus: true, notificationPermission: 'granted' }), 'toast')
-  assert.equal(choosePresentation({ hasFocus: false, notificationPermission: 'granted' }), 'full')
-  assert.equal(choosePresentation({ hasFocus: false, notificationPermission: 'denied' }), 'fallback')
-  assert.equal(choosePresentation({ hasFocus: false, notificationPermission: 'default' }), 'fallback')
+test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系统弹窗独立开关', () => {
+  const base = { hasFocus: false, permission: 'granted' }
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: true, system: true, blink: false })
+  // 聚焦静默:仅页内提示
+  assert.deepEqual(chooseChannels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false })
+  // 聚焦静默可关:聚焦窗口照常发声
+  assert.deepEqual(chooseChannels({ ...base, hasFocus: true, focusQuiet: false }).sound, true)
+  // 页内提示独立关闭
+  assert.deepEqual(chooseChannels({ ...base, toastEnabled: false }).toast, false)
+  // 系统弹窗独立关闭:不弹不闪
+  assert.deepEqual(chooseChannels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false })
+  // 想弹未授权:降级闪烁
+  assert.deepEqual(chooseChannels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
+  assert.deepEqual(chooseChannels({ ...base, permission: 'denied' }).blink, true)
+  // 关闭系统弹窗后未授权不再闪
+  assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
 test('webhook payload 字段映射', () => {
@@ -216,6 +230,100 @@ test('webhook 发送吞错不抛出', async () => {
   assert.equal(calls.length, 1)
   const ok = async () => ({ ok: true })
   await assert.doesNotReject(() => sendWebhook({ url: '', payload: { text: 'x' }, fetchImpl: ok }))
+})
+
+test('webhook 发送返回真实投递结果', async () => {
+  const delivered = async () => ({ ok: true, status: 200 })
+  assert.deepEqual(
+    await sendWebhook({ url: ' https://hook.example ', payload: { text: 'x' }, fetchImpl: delivered }),
+    { ok: true, detail: 'HTTP 200' },
+  )
+  const rejected = async () => ({ ok: false, status: 500 })
+  assert.deepEqual(
+    await sendWebhook({ url: 'https://hook.example', payload: { text: 'x' }, fetchImpl: rejected }),
+    { ok: false, detail: 'HTTP 500' },
+  )
+  const failing = async () => { throw new Error('unreachable') }
+  assert.deepEqual(
+    await sendWebhook({ url: 'https://hook.example', payload: { text: 'x' }, fetchImpl: failing }),
+    { ok: false, detail: 'unreachable' },
+  )
+  let called = 0
+  const probe = async () => { called += 1; return { ok: true, status: 200 } }
+  assert.deepEqual(
+    await sendWebhook({ url: '   ', payload: { text: 'x' }, fetchImpl: probe }),
+    { ok: false, detail: '未配置 webhook' },
+  )
+  assert.equal(called, 0)
+})
+
+test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () => {
+  const full = validateConfigPatch({
+    webhookUrl: ' https://hook.example ',
+    minTurnDurationMs: 1500,
+    rootsOnly: false,
+    enabled: { completed: false, error: true },
+  })
+  assert.equal(full.ok, true)
+  assert.deepEqual(full.patch, {
+    webhookUrl: 'https://hook.example',
+    minTurnDurationMs: 1500,
+    rootsOnly: false,
+    enabled: { completed: false, error: true },
+  })
+  assert.deepEqual(validateConfigPatch({ webhookUrl: '' }), { ok: true, patch: { webhookUrl: '' } })
+  assert.deepEqual(validateConfigPatch({ rootsOnly: true }), { ok: true, patch: { rootsOnly: true } })
+  assert.deepEqual(validateConfigPatch({}), { ok: true, patch: {} })
+})
+
+test('配置补丁校验:非法输入逐类拒绝', () => {
+  assert.equal(validateConfigPatch(null).ok, false)
+  assert.equal(validateConfigPatch('x').ok, false)
+  assert.equal(validateConfigPatch({ other: 1 }).ok, false)
+  assert.equal(validateConfigPatch({ webhookUrl: 123 }).ok, false)
+  assert.equal(validateConfigPatch({ webhookUrl: 'ftp://hook.example' }).ok, false)
+  assert.equal(validateConfigPatch({ webhookUrl: 'not a url' }).ok, false)
+  assert.equal(validateConfigPatch({ minTurnDurationMs: -1 }).ok, false)
+  assert.equal(validateConfigPatch({ minTurnDurationMs: 1.5 }).ok, false)
+  assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
+  assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
+  assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
+  assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
+  assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
+})
+
+test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () => {
+  assert.deepEqual(
+    resolvedConfig({ webhookUrl: 'https://hook.example', enabled: { completed: false } }),
+    {
+      webhookUrl: 'https://hook.example',
+      minTurnDurationMs: MIN_TURN_MS,
+      rootsOnly: true,
+      enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
+    },
+  )
+  assert.deepEqual(resolvedConfig({}), {
+    webhookUrl: '',
+    minTurnDurationMs: MIN_TURN_MS,
+    rootsOnly: true,
+    enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
+  })
+  assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
+})
+
+test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
+  assert.deepEqual(
+    publicConfig({ webhookUrl: 'https://hook.example/service/xxx', enabled: { completed: false } }),
+    {
+      minTurnDurationMs: MIN_TURN_MS,
+      rootsOnly: true,
+      enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
+      webhookConfigured: true,
+    },
+  )
+  assert.equal(publicConfig({}).webhookConfigured, false)
+  assert.equal(publicConfig({ webhookUrl: '   ' }).webhookConfigured, false)
+  assert.equal('webhookUrl' in publicConfig({ webhookUrl: 'https://hook.example' }), false)
 })
 
 test('会话事件有界累积:标题提取后封账,内存不再增长', () => {
