@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-maintain",
-  "description": "DeepSeek Harness 设置页插件:版本与进程运维一体化——追踪 npm dist-tag 新版本、一键执行自定义升级命令、同源校验的安全重启(appExit 优雅退出,5 秒兜底)",
-  "version": "0.1.0",
+  "description": "DSH 自身的版本管理:追踪 npm dist-tag 新版本、一键升级、安全重启",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
