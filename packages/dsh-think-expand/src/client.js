@@ -368,47 +368,81 @@ window.__ModuleLoader__.load({
       finalPendingRegister = false
     }
 
-    // ---- 设置面板:"插件"分区 settings.plugin.item 卡片,仅一个开关 ----
+    // ---- 设置面板:"插件配置"卡片,形态复刻官方 PluginCard(默认收起,头部展开) ----
 
-    const CARD_STYLE_ID = 'dsh-think-expand-card'
+    const CARD_PREFIX = 'te-card'
+    const CHEVRON_PATH = 'M3.5 5.75 7 9.25l3.5-3.5'
 
     function ensureCardStyle() {
-      if (document.getElementById(CARD_STYLE_ID) !== null) return
+      if (document.getElementById('dsh-think-expand-card') !== null) return
       const tag = document.createElement('style')
-      tag.id = CARD_STYLE_ID
-      tag.textContent = '.' + CARD_STYLE_ID + '{max-width:760px;border:1px solid var(--dsw-alias-border-l1);'
-        + 'border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}'
-        + ' .' + CARD_STYLE_ID + '__title{font-size:14px;font-weight:600;margin:0}'
-        + ' .' + CARD_STYLE_ID + '__desc{color:var(--dsw-alias-label-tertiary);font-size:13px;margin:0}'
-        + ' .' + CARD_STYLE_ID + '__row{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}'
-        + ' .' + CARD_STYLE_ID + '__row input:disabled{cursor:not-allowed}'
+      tag.id = 'dsh-think-expand-card'
+      tag.textContent = '.' + CARD_PREFIX + '{border:1px solid var(--dsw-alias-border-l2);'
+        + 'background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}'
+        + ' .' + CARD_PREFIX + ':hover{border-color:var(--dsw-alias-label-dimmed)}'
+        + ' .' + CARD_PREFIX + '-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}'
+        + ' .' + CARD_PREFIX + '__header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;'
+        + 'cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}'
+        + ' .' + CARD_PREFIX + '__header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}'
+        + ' .' + CARD_PREFIX + '__head-text{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}'
+        + ' .' + CARD_PREFIX + '__name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}'
+        + ' .' + CARD_PREFIX + '__desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}'
+        + ' .' + CARD_PREFIX + '__chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}'
+        + ' .' + CARD_PREFIX + '__chevron-open{transform:rotate(180deg)}'
+        + ' .' + CARD_PREFIX + '__body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:12px 0 8px}'
+        + ' .' + CARD_PREFIX + '__row{display:flex;align-items:center;gap:8px;font-size:13px;line-height:1.5}'
+        + ' .' + CARD_PREFIX + '__row input:disabled{cursor:not-allowed}'
       document.head.appendChild(tag)
+    }
+
+    function ChevronIcon({ open }) {
+      return React.createElement('svg', {
+        className: CARD_PREFIX + '__chevron' + (open ? ' ' + CARD_PREFIX + '__chevron-open' : ''),
+        width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none',
+        'aria-hidden': true,
+      }, React.createElement('path', {
+        d: CHEVRON_PATH, stroke: 'currentColor', strokeWidth: 1.5,
+        strokeLinecap: 'round', strokeLinejoin: 'round',
+      }))
     }
 
     function ThinkExpandCard({ scope }) {
       const [snapshot, setSnapshot] = useState(() => scope.getSnapshot())
       const subscribe = useCallback(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope])
       React.useEffect(subscribe, [subscribe])
+      const [open, setOpen] = useState(false)
       const enabled = scopeEnabled(scope)
       const writable = snapshot !== null && snapshot.writable
       const onToggle = useCallback((event) => {
-        void scope.set('enabled', event.target.checked)
+        void scope.set('enabled', event.target.checked).catch(() => {})
       }, [scope])
       ensureCardStyle()
+      const title = '思考自动展开'
       return React.createElement(
-        'div',
-        { className: CARD_STYLE_ID },
-        React.createElement('p', { className: CARD_STYLE_ID + '__title' }, '思考自动展开'),
-        React.createElement('p', { className: CARD_STYLE_ID + '__desc' },
-          '流式回复时自动展开最新一条思考行;打开会话与切换会话时同样展开最后一条,手动操作优先。'),
-        React.createElement('label', { className: CARD_STYLE_ID + '__row' },
-          React.createElement('input', {
-            type: 'checkbox',
-            checked: enabled === true,
-            disabled: !writable || enabled === null,
-            onChange: onToggle,
-          }),
-          enabled === null ? '设置读取中…' : '启用'),
+        'li',
+        { className: CARD_PREFIX + (open ? ' ' + CARD_PREFIX + '-open' : '') },
+        React.createElement('button', {
+          type: 'button',
+          className: CARD_PREFIX + '__header',
+          'aria-expanded': open,
+          'aria-label': (open ? '收起设置' : '展开设置') + ':' + title,
+          onClick: () => setOpen(!open),
+        },
+        React.createElement('span', { className: CARD_PREFIX + '__head-text' },
+          React.createElement('span', { className: CARD_PREFIX + '__name' }, title),
+          React.createElement('span', { className: CARD_PREFIX + '__desc' },
+            '流式回复时自动展开最新一条思考行,手动操作优先')),
+        React.createElement(ChevronIcon, { open })),
+        open ? React.createElement('div', { className: CARD_PREFIX + '__body' },
+          React.createElement('label', { className: CARD_PREFIX + '__row' },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: enabled === true,
+              disabled: !writable || enabled === null,
+              onChange: onToggle,
+            }),
+            enabled === null ? '设置读取中…' : '流式思考自动展开最新一条'),
+        ) : null,
       )
     }
 
