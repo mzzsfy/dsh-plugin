@@ -40,7 +40,7 @@ const MESSAGES = {
 }
 
 const SETTINGS_SCHEMA = z.object({
-  autoArchiveDays: z.number().int().nonnegative().default(DEFAULT_AUTO_ARCHIVE_DAYS)
+  autoArchiveDays: z.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_DAYS)
     .description('自动归档阈值天数,0 表示关闭;新会话创建时评估'),
 })
 

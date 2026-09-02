@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
   "description": "若水工作流 (rs-workflow) 一体化插件：GUI 配置（settings 表单 + rs_workflow_config 模型工具）+ agent preset 自释放安装（workflow 协议技能、编排引擎与组合随插件同步）",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
