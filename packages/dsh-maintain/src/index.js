@@ -9,7 +9,6 @@ import {
   TARGET_PACKAGE,
   TAG_PLACEHOLDER,
   buildUpgradeCommand,
-  assertSameOrigin,
   fetchDistTags,
   judgeVersion,
   resolveHostVersion,
@@ -136,6 +135,7 @@ export function apply(ctx) {
     const judged = judgeVersion({ currentVersion: snapshot.currentVersion, tags: snapshot.tags, channel: config.channel })
     return {
       packageName: TARGET_PACKAGE,
+      pid: process.pid,
       currentVersion: snapshot.currentVersion,
       channel: config.channel,
       tags: snapshot.tags,
@@ -179,16 +179,6 @@ export function apply(ctx) {
     if (req.method === 'POST') return true
     sendJson(res, 405, { error: 'method not allowed' })
     return false
-  }
-
-  const guardSameOrigin = (req, res) => {
-    try {
-      assertSameOrigin({ origin: req.headers.origin, referer: req.headers.referer, host: req.headers.host })
-      return true
-    } catch (error) {
-      sendJson(res, 403, { error: error && error.message ? error.message : String(error) })
-      return false
-    }
   }
 
   const routes = [
@@ -244,7 +234,6 @@ export function apply(ctx) {
       path: '/api/maintain/upgrade',
       handler: async (req, res) => {
         if (!rejectNonPost(req, res)) return
-        if (!guardSameOrigin(req, res)) return
         if (upgrade.running) {
           sendJson(res, 409, { error: '升级进行中' })
           return
@@ -262,7 +251,6 @@ export function apply(ctx) {
       path: '/api/maintain/restart',
       handler: async (req, res) => {
         if (!rejectNonPost(req, res)) return
-        if (!guardSameOrigin(req, res)) return
         if (typeof exit !== 'function') {
           sendJson(res, 500, { error: '启动器未提供 appExit,无法重启' })
           return

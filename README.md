@@ -20,7 +20,7 @@ dsh-plugin/
 | --- | --- | --- |
 | @mzzsfy/dsh-usage-panel | DSH 静态插件(settings 槽位 + web 路由) | 多平台 LLM 账号余额与额度面板:配置 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点,v2 定期自动查询(分频 + 指数退避防风控)、余额/额度趋势图(自绘 SVG)、快照分档留存、非 localhost 直接访问 |
 | @mzzsfy/dsh-rs-workflow | DSH 插件(一个包三种行角色:settings + preset-sync + tool) | 若水工作流一体化:settings 行注册 rs-workflow 设置页表单,preset-sync 行把 agent preset(模式组合 + 协议技能 + 编排引擎)自释放到用户预设根,tool 行注册 rs_workflow_config 模型工具 |
-| @mzzsfy/dsh-maintain | DSH 静态插件(settings 槽位 + web 路由) | 版本与进程运维一体化:npm dist-tag 追踪监测新版本,一键执行自定义升级命令(`{tag}` 占位符),同源校验的安全重启(appExit 优雅退出,5 秒兜底) |
+| @mzzsfy/dsh-maintain | DSH 静态插件(settings 槽位 + web 路由) | 版本与进程运维一体化:npm dist-tag 追踪监测新版本,一键执行自定义升级命令(`{tag}` 占位符),安全重启(appExit 优雅退出,5 秒兜底,重启后页面自动检测宿主恢复并刷新) |
 | @mzzsfy/dsh-think-expand | DSH 纯前端插件(client 模块 + settings 槽位) | 流式思考自动展开最新一条:新思考出现收起上一条,手动意图优先,历史会话不干预,关开关即移除全部副作用 |
 | @mzzsfy/dsh-turn-notify | DSH 双端插件(host 观察投影 + client 发声) | 回合完成通知三通道:合成音效/系统弹窗/webhook;同浏览器 profile 多窗口仅一份发声(localStorage 认领);六状态分类开关,非回环 HTTP 降级 toast + 标题闪烁 |
 | @mzzsfy/dsh-session-manager | DSH 双端插件(host 自动归档 + client 面板) | 会话管理三合一:超期会话自动归档(阈值可配,幂等评估)、归档面板(取消归档/两段式删除)、删除移入系统回收站可恢复,归档推送 Toast 提示 |

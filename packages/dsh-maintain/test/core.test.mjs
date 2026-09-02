@@ -6,7 +6,7 @@ import {
   gtSemver,
   judgeVersion,
   buildUpgradeCommand,
-  assertSameOrigin,
+  shouldReloadAfterRestart,
   VERDICT_OUTDATED,
   VERDICT_UP_TO_DATE,
   VERDICT_UNKNOWN,
@@ -114,30 +114,17 @@ test('场景:升级命令模板为空拒绝执行', () => {
   assert.throws(() => buildUpgradeCommand({ template: null, tag: 'latest' }), /模板/)
 })
 
-test('场景:同源请求触发重启允许', () => {
-  assert.equal(assertSameOrigin({ origin: 'http://192.168.1.10:3080', referer: null, host: '192.168.1.10:3080' }), true)
-  assert.equal(assertSameOrigin({ origin: null, referer: 'http://192.168.1.10:3080/settings', host: '192.168.1.10:3080' }), true)
+test('场景:重启失联后恢复触发刷新', () => {
+  assert.equal(shouldReloadAfterRestart({ lost: true, pidBefore: 100, pidAfter: 100 }), true)
+  assert.equal(shouldReloadAfterRestart({ lost: true, pidBefore: null, pidAfter: null }), true)
 })
 
-test('场景:跨站请求被拒绝', () => {
-  assert.throws(
-    () => assertSameOrigin({ origin: 'http://evil.example:8080', referer: null, host: '192.168.1.10:3080' }),
-    /不一致/,
-  )
-  assert.throws(
-    () => assertSameOrigin({ origin: null, referer: 'http://evil.example/settings', host: '192.168.1.10:3080' }),
-    /不一致/,
-  )
+test('场景:快速重启零失联凭 pid 变化触发刷新', () => {
+  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: 100, pidAfter: 200 }), true)
 })
 
-test('场景:缺少来源头被拒绝', () => {
-  assert.throws(() => assertSameOrigin({ origin: null, referer: null, host: '127.0.0.1:3080' }), /缺少/)
-})
-
-test('场景:请求 Host 缺失拒绝', () => {
-  assert.throws(() => assertSameOrigin({ origin: 'http://127.0.0.1:3080', referer: null, host: '' }), /Host/)
-})
-
-test('场景:大小写不敏感比对', () => {
-  assert.equal(assertSameOrigin({ origin: 'http://MY-PC.local:3080', referer: null, host: 'my-pc.local:3080' }), true)
+test('场景:未失联且 pid 未变不刷新', () => {
+  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: 100, pidAfter: 100 }), false)
+  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: null, pidAfter: 200 }), false)
+  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: 100, pidAfter: undefined }), false)
 })
