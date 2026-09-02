@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
     const POLL_MS = 2 * 1000
     const TOAST_MS = 6 * 1000
     const BLINK_MS = 1 * 1000
+    // 系统通知测试延迟:浏览器对聚焦窗口抑制系统弹窗,倒计时供用户切出窗口
+    const SYSTEM_TEST_DELAY_MS = 5 * 1000
     const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
     const MIME_BY_EXT = { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' }
 
@@ -521,19 +523,27 @@ window.__ModuleLoader__.load({
         patch('页内通知已发送')
       }
 
-      // 系统通知通道单独测试:仅走浏览器通知;未授权先请求,聚焦窗口系统可能抑制弹窗
+      // 系统通知通道单独测试:浏览器对聚焦窗口抑制系统弹窗,延迟发送模拟真实场景
+      // (真实链路里系统通知只在用户切出窗口后触发),到点按窗口状态如实报告
       function testSystemNotification() {
         const current = notificationPermission()
         if (current === 'default') {
           void requestPermission()
           return
         }
-        if (current === 'granted') {
-          notifySystem({ id: 'ui-test', text: '[dsh] 测试系统通知', category: 'completed' })
-          patch(document.hasFocus() ? '系统通知已发送;窗口聚焦时系统可能不展示' : '系统通知已发送')
+        if (current !== 'granted') {
+          patch('Notification 不可用或已被拒(HTTP 非回环或曾拒绝),已自动降级', 'error')
           return
         }
-        patch('Notification 不可用或已被拒(HTTP 非回环或曾拒绝),已自动降级', 'error')
+        patch('请在 ' + Math.round(SYSTEM_TEST_DELAY_MS / 1000) + ' 秒内切出本窗口,随后到达的才是系统通知')
+        setTimeout(() => {
+          notifySystem({ id: 'ui-test', text: '[dsh] 测试系统通知', category: 'completed' })
+          if (document.hasFocus()) {
+            patch('已发送,但窗口仍聚焦,浏览器会抑制弹窗;请切出窗口后重新测试', 'error')
+          } else {
+            patch('系统通知已送达,请查看屏幕右下角 / Windows 通知中心')
+          }
+        }, SYSTEM_TEST_DELAY_MS)
       }
 
       async function testWebhook() {
