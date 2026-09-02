@@ -220,6 +220,16 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function playBuffer(ctx2, buffer) {
+      const source = ctx2.createBufferSource()
+      const master = ctx2.createGain()
+      master.gain.value = volume()
+      source.buffer = buffer
+      source.connect(master)
+      master.connect(ctx2.destination)
+      source.start()
+    }
+
     async function playSound(sound) {
       if (sound.kind === 'builtin') {
         const spec = TONES[sound.name]
@@ -234,13 +244,15 @@ window.__ModuleLoader__.load({
         buffer = await ctx2.decodeAudioData(await response.arrayBuffer())
         decodedCache.set(sound.id, buffer)
       }
-      const source = ctx2.createBufferSource()
-      const master = ctx2.createGain()
-      master.gain.value = volume()
-      source.buffer = buffer
-      source.connect(master)
-      master.connect(ctx2.destination)
-      source.start()
+      playBuffer(ctx2, buffer)
+    }
+
+    // 待确认音效试听:直接解码内存 buffer,不经服务器
+    function previewPending(raw) {
+      const ctx2 = ensureAudioCtx()
+      ctx2.decodeAudioData(raw.slice(0))
+        .then((buffer) => { playBuffer(ctx2, buffer) })
+        .catch(() => {})
     }
 
     function previewBuiltin(name) { playTone(ensureAudioCtx(), TONES[name]) }
@@ -415,8 +427,8 @@ window.__ModuleLoader__.load({
       const [permission, setPermission] = useState(notificationPermission())
       // 分类映射的受控 state:直接由写响应回填,不再依赖轮询变量驱动渲染
       const [mapping, setMappingState] = useState({})
-      // 待确认上传:文件选中且解码校验通过后挂起,用户确认才落盘
-      const [pendingUpload, setPendingUpload] = useState(null)
+      // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
+      const [pendingUploads, setPendingUploads] = useState([])
 
       useEffect(() => {
         start()
@@ -432,40 +444,56 @@ window.__ModuleLoader__.load({
 
       const patch = (text, kind) => setNotice({ text, kind: kind || 'ok' })
 
-      async function onPickFile(file) {
-        if (!file) return
+      async function onPickFiles(files) {
+        if (files.length === 0) return
         setBusy(true)
         setNotice(null)
+        const accepted = []
+        let rejected = 0
+        let rejectReason = ''
         try {
-          // 入库前双重校验的浏览器半区:decodeAudioData 解码失败即拒绝;
-          // 解码吃副本,原始 buffer 留给确认后的上传
-          const raw = await file.arrayBuffer()
-          await ensureAudioCtx().decodeAudioData(raw.slice(0))
-          const ext = (/\.([^.]+)$/.exec(file.name) || [])[1]?.toLowerCase() || ''
-          if (AUDIO_EXTS.indexOf(ext) < 0) throw new Error('仅支持 ' + AUDIO_EXTS.join(' / '))
-          setPendingUpload({ name: file.name, raw })
-          patch('解码校验通过,请确认后保存')
-        } catch (error) {
-          patch('上传被拒绝:' + (error && error.message ? error.message : String(error)), 'error')
+          for (const file of files) {
+            try {
+              const ext = (/\.([^.]+)$/.exec(file.name) || [])[1]?.toLowerCase() || ''
+              if (AUDIO_EXTS.indexOf(ext) < 0) throw new Error('仅支持 ' + AUDIO_EXTS.join(' / '))
+              const raw = await file.arrayBuffer()
+              // 入库前双重校验的浏览器半区:解码失败即拒绝;
+              // 解码吃副本,原始 buffer 留给确认后的上传与试听
+              await ensureAudioCtx().decodeAudioData(raw.slice(0))
+              accepted.push({ name: file.name, raw })
+            } catch (error) {
+              rejected += 1
+              rejectReason = error && error.message ? error.message : String(error)
+            }
+          }
         } finally { setBusy(false) }
+        if (accepted.length > 0) setPendingUploads(pendingUploads.concat(accepted))
+        if (rejected > 0) {
+          patch(accepted.length + ' 个通过校验待确认,' + rejected + ' 个被拒(' + rejectReason + ')', accepted.length > 0 ? 'ok' : 'error')
+        } else {
+          patch(accepted.length + ' 个通过校验,试听后确认保存')
+        }
       }
 
-      async function confirmUpload() {
-        if (pendingUpload === null) return
+      async function confirmUploads() {
+        if (pendingUploads.length === 0) return
         setBusy(true)
         setNotice(null)
         try {
-          await api('/api/turn-notify/upload?name=' + encodeURIComponent(pendingUpload.name), {
-            method: 'POST',
-            body: pendingUpload.raw,
-          })
+          // 顺序提交保证错误可归因;文件 id 为内容哈希,重试对已落盘项幂等
+          for (const item of pendingUploads) {
+            await api('/api/turn-notify/upload?name=' + encodeURIComponent(item.name), {
+              method: 'POST',
+              body: item.raw,
+            })
+          }
           const res = await api('/api/turn-notify/sounds')
           setSounds(res.sounds || [])
           await refreshSounds()
-          setPendingUpload(null)
-          patch('已保存')
+          setPendingUploads([])
+          patch('已保存 ' + pendingUploads.length + ' 个音效')
         } catch (error) {
-          patch('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
+          patch('保存失败:' + (error && error.message ? error.message : String(error)) + ';未落盘项仍在待确认列表,可重试', 'error')
         } finally { setBusy(false) }
       }
 
@@ -714,21 +742,29 @@ window.__ModuleLoader__.load({
           ),
         ),
         h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, '音效管理(wav / mp3 / ogg,单文件上限 2MB)'),
+          h('span', { className: 'tn-card__title' }, '音效管理(wav / mp3 / ogg,可多选,单文件上限 2MB)'),
           h('div', { className: 'tn-row' },
             h('input', {
-              type: 'file', accept: AUDIO_EXTS.map((ext) => '.' + ext).join(','), disabled: busy,
+              type: 'file', multiple: true, accept: AUDIO_EXTS.map((ext) => '.' + ext).join(','), disabled: busy,
               onChange: (e) => {
-                const file = e.target.files && e.target.files[0]
+                const files = e.target.files ? Array.from(e.target.files) : []
                 e.target.value = ''
-                void onPickFile(file)
+                void onPickFiles(files)
               },
             }),
           ),
-          pendingUpload !== null ? h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '待保存: ' + pendingUpload.name),
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void confirmUpload() }, '确认保存'),
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => setPendingUpload(null) }, '取消'),
+          pendingUploads.map((item, index) => h('div', { className: 'tn-row', key: item.name + '-' + index },
+            h('span', { className: 'tn-meta' }, '待保存: ' + item.name),
+            h('button', { className: 'tn-btn', onClick: () => previewPending(item.raw) }, '试听'),
+            h('button', {
+              className: 'tn-btn', disabled: busy,
+              onClick: () => setPendingUploads(pendingUploads.filter((_, i) => i !== index)),
+            }, '移除'),
+          )),
+          pendingUploads.length > 0 ? h('div', { className: 'tn-row' },
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void confirmUploads() },
+              '确认保存全部(' + pendingUploads.length + ')'),
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => setPendingUploads([]) }, '全部取消'),
           ) : null,
           sounds.length === 0 ? h('span', { className: 'tn-meta' }, '暂无上传音效') :
             sounds.map((sound) => h('div', { className: 'tn-row', key: sound.id },
