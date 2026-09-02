@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-think-expand
 
-DeepSeek Harness 纯前端插件:流式输出思考时自动展开最新一条思考行,免去每次手点。
+DeepSeek Harness 插件:流式输出思考时自动展开最新一条思考行,免去每次手点。
 
 ## 行为
 
@@ -24,7 +24,7 @@ DeepSeek Harness 纯前端插件:流式输出思考时自动展开最新一条�
 - Think 行识别:官方 ReasoningRow 根节点字面量属性 `[data-variant="think"]` + `data-state`,折叠头 `[data-disclosure-row]`,滚动容器 `[data-conversation-scroll]`;正文容器按 `thinkBody` 类名子串匹配(CSS Modules 哈希带前缀);识别失败即不干预。
 - 展开/收起模拟点击折叠头(按 `aria-expanded` 判定),与官方组件状态机一致,不直改 DOM 内部状态,不写任何 DOM 属性。
 - 行标识 = 展开时正文哈希,标记载体为模块级 Map,流式追加按已见文本前缀匹配;随页面生命周期存活,不持久化。body 哨兵观察器常驻 document.body 监视容器身份变化(会话切换),非流式期间仅容器子树变更触发扫描。
-- 设置开关存 localStorage(键 `dsh-think-expand:settings`,默认开),面板挂设置"插件"分区 `settings.plugins.tab` 槽位。
+- 开关值权威存储在 Host settings(命名空间 `think-expand`,字段 `enabled`,默认开),Host 半区 `src/index.js` 仅注册 settings schema;设置页卡片挂"插件"分区"插件配置"列表(`settings.plugin.item`,key 为命名空间),经 `settingsScope` 读写;旧 localStorage 键(若存在)首启自动迁移。
 - 纯逻辑层(行分类、展开决策、标记存活性)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套 BDD 场景对两份实现做 parity 验证。
 
 ## 安装
@@ -33,7 +33,7 @@ DeepSeek Harness 纯前端插件:流式输出思考时自动展开最新一条�
 dsh plugin --profile web add @mzzsfy/dsh-think-expand
 ```
 
-重启 dsh 后设置 → "插件"分区出现"思考自动展开"标签页(默认开),流式会话即生效。
+重启 dsh 后设置 → "插件"分区 → "插件配置"列表出现"思考自动展开"卡片(默认开),流式会话即生效。
 
 ## 升级 / 卸载
 
@@ -42,7 +42,7 @@ dsh plugin --profile web add @mzzsfy/dsh-think-expand      # 升级到最新发�
 dsh plugin --profile web remove @mzzsfy/dsh-think-expand   # 卸载
 ```
 
-插件无 Host 端状态、无持久化副作用,卸载后重载页面即恢复官方默认行为。
+插件 Host 半区仅注册 settings schema,无其他 Host 端状态;卸载后重载页面即恢复官方默认行为,settings 文档中的开关字段残留不影响任何行为。
 
 ## 测试
 

@@ -1,8 +1,8 @@
-# The think-expand bundle patch: inserts the pure-frontend plugin row into the
-# profile root. Applied by `dsh plugin add @mzzsfy/dsh-think-expand`; the row
-# exists so the client module system discovers this package's dsh.client
-# declaration and serves src/client.js to the page. The host half (src/index.js)
-# is an intentional no-op: no host-plane routes, state or RPC.
+# The think-expand bundle patch: inserts the plugin row into the profile root.
+# Applied by `dsh plugin add @mzzsfy/dsh-think-expand`; the row lets cordis load
+# the host half (src/index.js, settings namespace registration) and the client
+# module system discover this package's dsh.client declaration and serve
+# src/client.js to the page.
 
 - insert:
     - id: think-expand

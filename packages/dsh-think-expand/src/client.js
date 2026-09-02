@@ -28,13 +28,11 @@ window.__ModuleLoader__.load({
       attributeFilter: [ATTR_EXPANDED, ATTR_STATE],
     }
     const DEBOUNCE_MS = 50
-    const STORAGE_KEY = 'dsh-think-expand:settings'
-    const SETTING_ON = 'on'
+    // 与 Host 半区 settings.register 的命名空间一致
+    const SETTINGS_NS = 'think-expand'
+    // localStorage 迁移:旧版本开关存这里,首次读到即迁入 Host settings
+    const LEGACY_STORAGE_KEY = 'dsh-think-expand:settings'
     const SETTING_OFF = 'off'
-    const SLOT_ID = 'think-expand'
-    // "插件"分区 tab:可配置占 0,插件清单占 10,本插件排后
-    const SLOT_ORDER = 10 + 1
-    const SLOT_LABEL = '思考自动展开'
 
     /* LOGIC-BEGIN */
     // 纯逻辑层:与 src/logic.mjs 同源实现,禁止只改其一。
@@ -196,22 +194,25 @@ window.__ModuleLoader__.load({
     }
     /* LOGIC-END */
 
-    // ---- 设置开关:单个 localStorage 键,默认开 ----
+    // ---- 设置开关:权威值在 Host settings(think-expand.enabled),默认开 ----
 
-    function readEnabled() {
+    // 旧版本开关存 localStorage,非 off(含无键)按开迁移;迁移读后即清旧键
+    function readLegacyEnabled() {
       try {
-        return window.localStorage.getItem(STORAGE_KEY) !== SETTING_OFF
+        const raw = window.localStorage.getItem(LEGACY_STORAGE_KEY)
+        if (raw === null) return null
+        window.localStorage.removeItem(LEGACY_STORAGE_KEY)
+        return raw !== SETTING_OFF
       } catch {
-        return true
+        return null
       }
     }
 
-    function writeEnabled(enabled) {
-      try {
-        window.localStorage.setItem(STORAGE_KEY, enabled ? SETTING_ON : SETTING_OFF)
-      } catch {
-        // 存储不可用时开关仍然生效于当前页面生命周期
-      }
+    function scopeEnabled(scope) {
+      const snapshot = scope.getSnapshot()
+      if (snapshot === null || snapshot.value === undefined || snapshot.value === null) return null
+      const enabled = snapshot.value.enabled
+      return typeof enabled === 'boolean' ? enabled : true
     }
 
     // ---- DOM 控制器:识别行、执行展开/收起、MutationObserver 接线 ----
@@ -367,34 +368,90 @@ window.__ModuleLoader__.load({
       finalPendingRegister = false
     }
 
-    // ---- 设置面板:"插件"分区 settings.plugins.tab 槽位,仅一个开关 ----
+    // ---- 设置面板:"插件"分区 settings.plugin.item 卡片,仅一个开关 ----
 
-    function SettingsApp() {
-      const [enabled, setEnabled] = useState(readEnabled())
+    const CARD_STYLE_ID = 'dsh-think-expand-card'
+
+    function ensureCardStyle() {
+      if (document.getElementById(CARD_STYLE_ID) !== null) return
+      const tag = document.createElement('style')
+      tag.id = CARD_STYLE_ID
+      tag.textContent = '.' + CARD_STYLE_ID + '{max-width:760px;border:1px solid var(--dsw-alias-border-l1);'
+        + 'border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}'
+        + ' .' + CARD_STYLE_ID + '__title{font-size:14px;font-weight:600;margin:0}'
+        + ' .' + CARD_STYLE_ID + '__desc{color:var(--dsw-alias-label-tertiary);font-size:13px;margin:0}'
+        + ' .' + CARD_STYLE_ID + '__row{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}'
+        + ' .' + CARD_STYLE_ID + '__row input:disabled{cursor:not-allowed}'
+      document.head.appendChild(tag)
+    }
+
+    function ThinkExpandCard({ scope }) {
+      const [snapshot, setSnapshot] = useState(() => scope.getSnapshot())
+      const subscribe = useCallback(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope])
+      React.useEffect(subscribe, [subscribe])
+      const enabled = scopeEnabled(scope)
+      const writable = snapshot !== null && snapshot.writable
       const onToggle = useCallback((event) => {
-        const next = event.target.checked
-        writeEnabled(next)
-        setEnabled(next)
-        if (next) start()
-        else stop()
-      }, [])
+        void scope.set('enabled', event.target.checked)
+      }, [scope])
+      ensureCardStyle()
       return React.createElement(
-        'label',
-        { style: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' } },
-        React.createElement('input', { type: 'checkbox', checked: enabled, onChange: onToggle }),
-        '流式思考自动展开最新一条',
+        'div',
+        { className: CARD_STYLE_ID },
+        React.createElement('p', { className: CARD_STYLE_ID + '__title' }, '思考自动展开'),
+        React.createElement('p', { className: CARD_STYLE_ID + '__desc' },
+          '流式回复时自动展开最新一条思考行;打开会话与切换会话时同样展开最后一条,手动操作优先。'),
+        React.createElement('label', { className: CARD_STYLE_ID + '__row' },
+          React.createElement('input', {
+            type: 'checkbox',
+            checked: enabled === true,
+            disabled: !writable || enabled === null,
+            onChange: onToggle,
+          }),
+          enabled === null ? '设置读取中…' : '启用'),
       )
     }
 
-    start()
+    // 开关状态驱动启停:开关变化即动态启停,页面加载后按 Host 值冷启动。
+    function applyEnabled(enabled) {
+      if (enabled) start()
+      else stop()
+    }
+
+    // 初次启动:等 scope ready 后迁移旧 localStorage 值,再按 Host 值启停;
+    // 远程只读部署(memory 模式)scope 永不 ready,按默认开运行
+    function bootstrap(scope) {
+      let migrated = false
+      const sync = () => {
+        const snapshot = scope.getSnapshot()
+        if (snapshot === null) return
+        if (snapshot.status === 'unavailable') {
+          applyEnabled(true)
+          return
+        }
+        if (snapshot.status !== 'ready') return
+        if (!migrated) {
+          migrated = true
+          const legacy = readLegacyEnabled()
+          if (legacy !== null && scopeEnabled(scope) !== legacy) {
+            scope.set('enabled', legacy).catch(() => {})
+          }
+        }
+        applyEnabled(scopeEnabled(scope) !== false)
+      }
+      scope.subscribe(sync)
+      sync()
+    }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'settingsScope'],
       apply(ctx) {
-        ctx.slots.inject('settings.plugins.tab', () =>
+        const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS })
+        bootstrap(scope)
+        ctx.slots.inject('settings.plugin.item', () =>
           ctx.slots.register(
-            { name: 'settings.plugins.tab', id: SLOT_ID, order: SLOT_ORDER, label: SLOT_LABEL },
-            () => React.createElement(SettingsApp),
+            { name: 'settings.plugin.item', key: SETTINGS_NS },
+            () => React.createElement(ThinkExpandCard, { scope }),
           ))
       },
     }
