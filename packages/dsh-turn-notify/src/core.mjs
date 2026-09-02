@@ -52,6 +52,16 @@ export const BUILTIN_TONES = {
 
 export const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
 
+// 未显式设置音量时的默认值。
+export const DEFAULT_VOLUME = 0.6
+
+// 音量解析:未设置或非法回落默认,显式零(静音)保留。
+export function parseVolume(raw) {
+  if (raw === null || raw === undefined) return DEFAULT_VOLUME
+  const value = Number(raw)
+  return value >= 0 && value <= 1 ? value : DEFAULT_VOLUME
+}
+
 export const PROJECTION_CAPACITY = 20
 export const PROJECTION_TTL_MS = 60 * 1000
 export const CLAIM_LOCK_TTL_MS = 30 * 1000
