@@ -1,0 +1,8 @@
+# The usage-panel bundle patch: inserts the balance panel plugin into the
+# profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-usage-panel`;
+# the row id addresses this plugin's host half, whose `/api/usage-panel/*`
+# routes serve the browser half rendered in the settings page.
+
+- insert:
+    - id: usage-panel
+      name: '@mzzsfy/dsh-usage-panel'
