@@ -515,17 +515,22 @@ window.__ModuleLoader__.load({
         }
       }
 
-      function testNotification() {
+      // 页内通知通道单独测试:仅弹页内提示,不涉及声音与系统通知
+      function testPageNotification() {
+        showToast({ id: 'ui-test', text: '[dsh] 页内通知测试' })
+        patch('页内通知已发送')
+      }
+
+      // 系统通知通道单独测试:仅走浏览器通知;未授权先请求,聚焦窗口系统可能抑制弹窗
+      function testSystemNotification() {
         const current = notificationPermission()
         if (current === 'default') {
           void requestPermission()
           return
         }
         if (current === 'granted') {
-          notifySystem({ id: 'ui-test', text: '[dsh] 测试系统弹窗', category: 'completed' })
-          // 聚焦窗口下系统可能抑制弹窗,页内提示作为保底可见反馈
-          showToast({ id: 'ui-test', text: '[dsh] 测试通知(页内提示)' })
-          patch(document.hasFocus() ? '测试弹窗已发送;窗口聚焦时系统可能不展示,以页内提示为准' : '测试弹窗已发送')
+          notifySystem({ id: 'ui-test', text: '[dsh] 测试系统通知', category: 'completed' })
+          patch(document.hasFocus() ? '系统通知已发送;窗口聚焦时系统可能不展示' : '系统通知已发送')
           return
         }
         patch('Notification 不可用或已被拒(HTTP 非回环或曾拒绝),已自动降级', 'error')
@@ -600,7 +605,8 @@ window.__ModuleLoader__.load({
           h('span', { className: 'tn-card__title' }, '测试'),
           h('div', { className: 'tn-row' },
             h('button', { className: 'tn-btn', onClick: () => previewBuiltin(DEFAULT_TONES.completed) }, '测试声音'),
-            h('button', { className: 'tn-btn', onClick: testNotification }, '测试弹窗'),
+            h('button', { className: 'tn-btn', onClick: testPageNotification }, '测试页内通知'),
+            h('button', { className: 'tn-btn', onClick: testSystemNotification }, '测试系统通知'),
             h('button', { className: 'tn-btn', onClick: () => void testWebhook() }, '测试 webhook'),
           ),
         ),
