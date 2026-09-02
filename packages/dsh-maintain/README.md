@@ -8,7 +8,8 @@ DeepSeek Harness 设置页插件:版本与进程运维一体化——监测 npm 
 
 - 版本监测:host 启动即检查一次,按轮询间隔重复检查(内存快照,不持久化);当前版本与追踪通道最新版对比,落后即提示。
 - 追踪通道:在 npm dist-tags 间切换(latest / next / alpha 等,选项由检查结果动态生成),切换后按新通道判定。
-- 一键升级:两段式确认后按自定义命令模板执行,`{tag}` 执行时替换为追踪通道;升级期间串行化,超时 10 分钟强杀;成功后自动重新检查并提示重启生效。
+- 一键升级:两段式确认后按自定义命令模板执行,`{tag}` 执行时替换为追踪通道;命令可在设置面板直接查看与编辑,升级期间串行化,超时 10 分钟强杀;成功后自动重新检查并提示重启生效。
+- 面板设置编辑:升级命令、轮询间隔、镜像地址均可在面板直接编辑保存,与 settings.yaml 等效(轮询间隔保存即重排,镜像地址保存即重查);空命令与非 http(s) 地址会被拒绝。
 - 安全重启:两段式确认后 host 优雅退出(`appExit`,5 秒兜底强制);确认后面板立即提示重启进行中,自动探测宿主恢复并刷新页面。动作路由不做来源判断,访问控制必须由外层鉴权插件(如 dsh-web-startup-auth)统一负责,未部署鉴权插件时动作路由匿名可达。
 
 ## 安装
@@ -32,10 +33,12 @@ dsh plugin --profile web add file:./packages/dsh-maintain
 ```yaml
 maintain:
   channel: latest                                # 追踪通道,选项以检查返回的 dist-tags 为准
-  pollIntervalSec: 21600                         # 轮询间隔秒,仅正数启用周期检查
-  upgradeCommandTemplate: npm install -g @deepseek-ai/dsh@{tag}   # 可整体自改为任意命令
+  pollIntervalSec: 21600                         # 轮询间隔秒,仅正数启用周期检查,0/负数禁用
+  upgradeCommandTemplate: npm install -g @deepseek-ai/dsh@{tag}   # 可整体自改为任意命令,亦可在设置面板编辑
   registryBase: https://registry.npmjs.org       # 官方源不可达时可改为镜像地址
 ```
+
+升级命令、轮询间隔、镜像地址三项亦可在设置面板"版本与运维"页直接编辑保存(等效 settings.yaml,热生效)。
 
 ## 重启须知
 

@@ -6,6 +6,7 @@ import {
   gtSemver,
   judgeVersion,
   buildUpgradeCommand,
+  isValidRegistryBase,
   shouldReloadAfterRestart,
   VERDICT_OUTDATED,
   VERDICT_UP_TO_DATE,
@@ -112,6 +113,22 @@ test('场景:升级命令占位符多次出现全部替换', () => {
 test('场景:升级命令模板为空拒绝执行', () => {
   assert.throws(() => buildUpgradeCommand({ template: '   ', tag: 'latest' }), /模板/)
   assert.throws(() => buildUpgradeCommand({ template: null, tag: 'latest' }), /模板/)
+})
+
+test('场景:registry 基地址合法判定', () => {
+  assert.equal(isValidRegistryBase('https://registry.npmmirror.com'), true)
+  assert.equal(isValidRegistryBase('http://127.0.0.1:4873'), true)
+  assert.equal(isValidRegistryBase('  https://example.com  '), true)
+  assert.equal(isValidRegistryBase('HTTPS://example.com'), true)
+})
+
+test('场景:registry 基地址非法判定', () => {
+  assert.equal(isValidRegistryBase('registry.npmmirror.com'), false)
+  assert.equal(isValidRegistryBase('ftp://example.com'), false)
+  assert.equal(isValidRegistryBase(''), false)
+  assert.equal(isValidRegistryBase('   '), false)
+  assert.equal(isValidRegistryBase(null), false)
+  assert.equal(isValidRegistryBase(undefined), false)
 })
 
 test('场景:重启失联后恢复触发刷新', () => {
