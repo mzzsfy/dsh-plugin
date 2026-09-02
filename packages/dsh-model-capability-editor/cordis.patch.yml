@@ -1,0 +1,10 @@
+# The model-capability-editor bundle patch: inserts the plugin row into the
+# profile root. Applied by `dsh plugin add @mzzsfy/dsh-model-capability-editor`.
+# The row's only job is to pull the package into the profile so the client
+# module system materializes its `dsh.client` manifest entry; the host half
+# is a no-op plugin, and all behavior lives in src/client.js, which mounts
+# the capability card on the official settings.models.footer slot.
+
+- insert:
+    - id: model-capability-editor
+      name: '@mzzsfy/dsh-model-capability-editor'
