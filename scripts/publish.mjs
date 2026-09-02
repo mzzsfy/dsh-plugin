@@ -32,6 +32,7 @@ const PACKAGES = [
   'dsh-session-manager',
   'dsh-llm-pi-gateway',
   'dsh-model-capability-editor',
+  'dsh-settings-nav-icons',
 ]
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')

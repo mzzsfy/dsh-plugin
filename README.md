@@ -26,6 +26,7 @@ dsh-plugin/
 | @mzzsfy/dsh-session-manager | DSH 双端插件(host 自动归档 + client 面板) | 会话管理三合一:超期会话自动归档(阈值可配,幂等评估)、归档面板(取消归档/两段式删除)、删除移入系统回收站可恢复,归档推送 Toast 提示 |
 | @mzzsfy/dsh-llm-pi-gateway | DSH host 端插件(pi-ai 透传 adapter) | 网关路由专用 adapter:全协议会话标记默认开启(anthropic metadata.user_id / openai prompt_cache_key,sha256 派生不暴露内部 id)、compat 全控、metadata 模板透传、静态 headers 兜底;无 GUI,settings.yaml 配置 |
 | @mzzsfy/dsh-model-capability-editor | DSH 纯前端插件(settings.models.footer 卡片) | 模型能力编辑器:编辑 reasoningEfforts 档位(false/删除/off:null/线上拼写)与 input 多模态声明,describe 读取 + 整组写回(未编辑条目保留),冲突字段级重放绝不静默覆盖 |
+| @mzzsfy/dsh-settings-nav-icons | DSH 纯前端插件(DOM 观察) | 设置导航分区图标替换:按分区显示文本把回退齿轮换成专属图形(通用/外观/IM/统计/两市场/账号/通知/运维/MCP/归档/认证/侧边卡),语言切换重贴,卸载即恢复官方齿轮 |
 
 ## 开发与测试
 

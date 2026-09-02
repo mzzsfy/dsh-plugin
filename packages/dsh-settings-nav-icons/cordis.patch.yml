@@ -1,0 +1,10 @@
+# The settings-nav-icons bundle patch: inserts the pure-frontend plugin row
+# into the profile root. Applied by `dsh plugin add @mzzsfy/dsh-settings-nav-icons`.
+# The row's only job is to pull the package into the profile so the client
+# module system materializes its `dsh.client` manifest entry; the host half
+# is an intentional no-op, and all behavior lives in src/client.js, which
+# swaps fallback gear icons in the settings dialog nav per section label.
+
+- insert:
+    - id: settings-nav-icons
+      name: '@mzzsfy/dsh-settings-nav-icons'
