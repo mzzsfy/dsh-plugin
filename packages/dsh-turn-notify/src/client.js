@@ -660,7 +660,8 @@ window.__ModuleLoader__.load({
             : String(config.minTurnDurationMs)
           if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
           const trimmedUrl = urlDraft.trim()
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, imTargets: config.imTargets }
+          // imTargets 由勾选单独即时保存,不随此入口提交
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
           // 只写语义:输入留空即保持现有 webhook 不变
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
@@ -774,7 +775,7 @@ window.__ModuleLoader__.load({
         try {
           const res = await api('/api/turn-notify/im-targets?botId=' + encodeURIComponent(botId))
           setImCatalog({ botId, targets: res.targets || [] })
-          patch('已加载 ' + (res.targets || []).length + ' 个目标,勾选后需保存')
+          patch('已加载 ' + (res.targets || []).length + ' 个目标,勾选即保存')
         } catch (error) {
           patch('加载失败:' + (error && error.message ? error.message : String(error)), 'error')
         } finally { setBusy(false) }
@@ -783,15 +784,31 @@ window.__ModuleLoader__.load({
       // botId/targetId 字符集均不含 '/',拼接键无歧义;与 host 侧写入校验共用 dsh-im ID 规格
       const imTargetKey = (item) => item.botId + '/' + item.targetId
 
+      // 勾选即存:与分类开关同模式,列表整体替换,连续操作以最新一次请求为准
+      let imPersistSeq = 0
+      async function persistImTargets(next) {
+        const seq = ++imPersistSeq
+        setConfig({ ...config, imTargets: next })
+        try {
+          const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ imTargets: next }) })
+          if (seq === imPersistSeq) {
+            setConfig({ ...DEFAULT_CONFIG, ...res })
+            if (res.soundMapping) setMappingState(res.soundMapping)
+          }
+        } catch (error) {
+          patch('IM 目标保存失败:' + (error && error.message ? error.message : String(error)), 'error')
+        }
+      }
+
       // 勾选幂等:同一 botId+targetId 只保留一份,取消勾选即移除
       function toggleImTarget(botId, target, checked) {
         const wanted = { botId, targetId: target.targetId }
         const rest = config.imTargets.filter((item) => imTargetKey(item) !== imTargetKey(wanted))
-        setConfig({ ...config, imTargets: checked ? rest.concat([wanted]) : rest })
+        void persistImTargets(checked ? rest.concat([wanted]) : rest)
       }
 
       function removeImTarget(item) {
-        setConfig({ ...config, imTargets: config.imTargets.filter((existing) => imTargetKey(existing) !== imTargetKey(item)) })
+        void persistImTargets(config.imTargets.filter((existing) => imTargetKey(existing) !== imTargetKey(item)))
       }
 
       async function testIm() {
@@ -883,6 +900,7 @@ window.__ModuleLoader__.load({
         ),
         config.imAvailable ? h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
+          h('div', { className: 'tn-meta' }, '勾选目标即自动保存,任务完成等待审批等通知将同步推送 IM'),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-meta' }, 'Bot ID'),
             h('input', {
