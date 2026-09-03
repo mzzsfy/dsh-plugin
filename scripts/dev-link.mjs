@@ -4,7 +4,7 @@
  *
  * 用法:
  *   node scripts/dev-link.mjs <包名|all> [--unlink] [--allow-fresh]
- *     包名 = packages/ 下目录名
+ *     包名 = packages/ 下目录名;单包模式只归一/挂载/校验该包,清单内其他包不受影响
  *     --allow-fresh  pnpm install 放行 minimumReleaseAge 宽限期策略(仅限自家刚发布的包)
  *
  * 统一规则(唯一的合法形态,禁止第三种状态):
@@ -191,15 +191,21 @@ for (const name of names) {
 
 let latests = {}
 if (!unlink) {
-  const normalized = normalizeDeps(packages)
+  // 单包模式只归一指定包,不被清单内其他未发布包(线上查询 404)阻断;all 仍全量归一
+  const scope = target === 'all' ? packages : names
+  const normalized = normalizeDeps(scope)
   latests = normalized.latests
   if (normalized.changed) {
     if (!pnpmInstall(allowFresh)) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
       process.exitCode = 1
     }
-    // pnpm 重建过整个 node_modules:全部包重挂,不限于本次指定的包
-    for (const dir of packages) mountJunction(dir)
+    // pnpm 重建过整个 node_modules:凡有依赖声明的包全部重挂,保住既有链接;
+    // 无依赖声明的包(如未发布新品)不产生 phantom junction
+    const declared = readProfileManifest().dependencies || {}
+    for (const dir of packages) {
+      if (declared[SCOPE + dir] !== undefined) mountJunction(dir)
+    }
   }
 }
 
@@ -217,5 +223,5 @@ if (unlink) {
   for (const name of names) mountJunction(name)
 }
 
-verifyAll(packages, latests, unlink)
+verifyAll(names, latests, unlink)
 console.log('\n提醒: profile 内执行过 pnpm install / dsh plugin add 后,链接会被覆盖,需重跑本脚本。')
