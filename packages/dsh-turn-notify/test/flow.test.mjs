@@ -26,7 +26,7 @@ class BrokenStorage {
 }
 
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象(含 __test 钩子)。
-function loadClient({ storage, payload, onToast, onFetch }) {
+function loadClient({ storage, payload, onFetch }) {
   const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const modules = []
   const windowStub = {
@@ -38,9 +38,11 @@ function loadClient({ storage, payload, onToast, onFetch }) {
     hasFocus: () => true,
     title: 'dsh',
     createElement: () => ({ style: {}, remove() {} }),
-    body: { appendChild: () => { onToast() } },
+    body: { appendChild: () => {} },
+    head: { appendChild: () => {} },
   }
-  const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {} }
+  const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {}, useSyncExternalStore: () => [] }
+  const requireStub = (name) => (name === 'react-dom' ? { createPortal: () => null } : reactStub)
   const fetchStub = async (path) => {
     if (onFetch) onFetch(path)
     return { json: async () => payload }
@@ -51,7 +53,7 @@ function loadClient({ storage, payload, onToast, onFetch }) {
   )
   factory(
     windowStub,
-    () => reactStub,
+    requireStub,
     documentStub,
     class { observe() {} disconnect() {} },
     fetchStub,
@@ -68,31 +70,29 @@ const units = [
 ]
 
 test('broken localStorage:清理段不抛,降级发声恰好一次,第二轮不再发声', async () => {
-  let toasts = 0
-  const mod = loadClient({ storage: new BrokenStorage(), payload: { units, soundMapping: {} }, onToast: () => { toasts += 1 } })
-  const { poll, storageState } = mod.__test
+  const mod = loadClient({ storage: new BrokenStorage(), payload: { units, soundMapping: {} } })
+  const { poll, storageState, toastStack } = mod.__test
   await poll()
   assert.equal(storageState.broken, true)
   // 两事件各发声一次,清理段未抛出控制流到达 claimEvent
-  assert.equal(toasts, units.length)
+  assert.equal(toastStack().length, units.length)
   await poll()
   // 投影窗口内第二轮 poll 同事件不再发声
-  assert.equal(toasts, units.length)
+  assert.equal(toastStack().length, units.length)
 })
 
 test('正常 localStorage:唯一发声,完成标记写入,残留锁被清理', async () => {
-  let toasts = 0
   const storage = new FakeStorage({ 'turn-notify:lock:stale': '{"wid":"w9","at":1}' })
-  const mod = loadClient({ storage, payload: { units, soundMapping: {} }, onToast: () => { toasts += 1 } })
-  const { poll } = mod.__test
+  const mod = loadClient({ storage, payload: { units, soundMapping: {} } })
+  const { poll, toastStack } = mod.__test
   await poll()
-  assert.equal(toasts, units.length)
+  assert.equal(toastStack().length, units.length)
   assert.equal(storage.getItem('turn-notify:lock:stale'), null)
   assert.notEqual(storage.getItem('turn-notify:done:u1'), null)
   assert.notEqual(storage.getItem('turn-notify:done:u2'), null)
   await poll()
   // 完成标记生效,第二轮不重复发声
-  assert.equal(toasts, units.length)
+  assert.equal(toastStack().length, units.length)
 })
 
 test('announcedIds 去重窗口按 TTL 过期清理', async () => {
@@ -109,30 +109,33 @@ test('announcedIds 去重窗口按 TTL 过期清理', async () => {
   assert.equal(announcedIds.size, 1)
 })
 
-test('激活即启动轮询:apply 注册设置分区且 start 已执行', async () => {
+test('激活即启动轮询:apply 注册设置分区与通知栈且 start 已执行', async () => {
   const fetched = []
   const mod = loadClient({
     storage: new FakeStorage(),
     payload: { units: [], soundMapping: {} },
-    onToast: () => {},
     onFetch: (path) => { fetched.push(path) },
   })
   const injected = []
-  mod.apply({ slots: { inject: (name, fn) => { injected.push([name, fn]) } } })
-  assert.equal(injected.length, 1)
-  assert.equal(injected[0][0], 'settings.section')
+  const effects = []
+  mod.apply({
+    slots: { inject: (name, fn) => { injected.push([name, fn]) } },
+    effect: (fn) => { effects.push(fn()) },
+  })
+  assert.equal(effects.length, 1, '文档级样式未挂载')
+  assert.equal(injected.length, 2)
+  assert.deepEqual(injected.map(([name]) => name), ['settings.section', 'shell.overlay'])
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
   await new Promise((resolve) => { setTimeout(resolve, 0) })
   assert.ok(fetched.indexOf('/api/turn-notify/sounds') >= 0)
 })
 
 test('页内提示通道独立开关:关闭后投影事件不再弹页内提示', async () => {
-  let toasts = 0
   const storage = new FakeStorage({ 'turn-notify:toast': '0' })
-  const mod = loadClient({ storage, payload: { units, soundMapping: {} }, onToast: () => { toasts += 1 } })
-  const { poll } = mod.__test
+  const mod = loadClient({ storage, payload: { units, soundMapping: {} } })
+  const { poll, toastStack } = mod.__test
   await poll()
-  assert.equal(toasts, 0)
+  assert.equal(toastStack().length, 0)
   // 完成标记已写:事件被认领消费,仅通道被关
   assert.notEqual(storage.getItem('turn-notify:done:u1'), null)
 })
