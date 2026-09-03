@@ -58,7 +58,7 @@ const CSS = [
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
-  '.sm-toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); z-index:60;',
+  '.sm-toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); z-index:1100;',
   '  background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted); font:var(--dsw-font-xs-13);',
   '  padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2); animation:sm-toast-in 0.18s ease-out;',
   '  display:flex; align-items:center; gap:10px; }',
@@ -317,19 +317,48 @@ function SessionManagerApp(props) {
   )
 }
 
-// 操作反馈 Toast 文案形态:{seq, text, kind: 'ok'|'error', sticky};seq 变化即重渲染
-let actionToast = { seq: 0, text: null, kind: 'ok', sticky: false }
-const actionListeners = new Set()
-const emitActionToast = (text, kind) => {
-  actionToast = { seq: actionToast.seq + 1, text, kind, sticky: kind === 'error' }
-  for (const listener of actionListeners) listener()
+// 操作反馈 Toast:命令式直挂 document.body —— shell.overlay 槽在应用 frame 的低层级
+// 叠层上下文内,设置全屏层(z=1000)会盖住槽内任何 z 值;body 直挂不受限。
+// 错误常驻待点「知道了」,成功 TOAST_HOLD_MS 自动消失
+const ACTION_TOAST_HOLD_MS = 4 * 1000
+let actionToastEl = null
+let actionToastTimer = null
+
+function dismissActionToast() {
+  if (actionToastTimer !== null) {
+    clearTimeout(actionToastTimer)
+    actionToastTimer = null
+  }
+  if (actionToastEl !== null) {
+    actionToastEl.remove()
+    actionToastEl = null
+  }
 }
-const actionToastSource = {
-  getSnapshot: () => actionToast,
-  subscribe: (listener) => {
-    actionListeners.add(listener)
-    return () => actionListeners.delete(listener)
-  },
+
+function emitActionToast(text, kind) {
+  const sticky = kind === 'error'
+  if (actionToastEl === null) {
+    actionToastEl = document.createElement('div')
+    actionToastEl.setAttribute('role', 'alert')
+    actionToastEl.addEventListener('click', (event) => {
+      if (event.target.dataset.smAction === 'dismiss') dismissActionToast()
+    })
+    document.body.appendChild(actionToastEl)
+  }
+  actionToastEl.className = 'sm-toast sm-toast--action-' + kind
+  actionToastEl.textContent = ''
+  const label = document.createElement('span')
+  label.textContent = text
+  actionToastEl.appendChild(label)
+  if (sticky) {
+    const close = document.createElement('button')
+    close.className = 'sm-toast__close'
+    close.dataset.smAction = 'dismiss'
+    close.textContent = '知道了'
+    actionToastEl.appendChild(close)
+  }
+  if (actionToastTimer !== null) clearTimeout(actionToastTimer)
+  actionToastTimer = sticky ? null : setTimeout(dismissActionToast, ACTION_TOAST_HOLD_MS)
 }
 
 // 归档 Toast:archived 增量帧带来的新增条数;seq 单调递增保证同文案重复提示
@@ -338,18 +367,6 @@ function ArchiveToast(props) {
   const text = props.toast.text
   if (text === null || text === undefined) return null
   return h('div', { className: 'sm-toast', role: 'alert' }, text)
-}
-
-// 操作反馈 Toast:悬浮置顶居中,滚动/任意视口下必达;错误常驻待手动关闭
-function ActionToast(props) {
-  const current = props.toast
-  if (current.text === null || current.text === undefined) return null
-  return h('div', { className: 'sm-toast sm-toast--action-' + current.kind, role: 'alert' },
-    h('span', null, current.text),
-    current.sticky
-      ? h('button', { className: 'sm-toast__close', onClick: props.onDismiss }, '知道了')
-      : null,
-  )
 }
 
     return {
@@ -399,11 +416,6 @@ function ActionToast(props) {
             { name: 'shell.overlay', id: 'session-manager-toast' },
             () => React.createElement(OverlayToast, { source: toastSource }),
           ))
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
-            { name: 'shell.overlay', id: 'session-manager-action-toast' },
-            () => React.createElement(OverlayActionToast, { source: actionToastSource }),
-          ))
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')
 
@@ -424,21 +436,6 @@ function ActionToast(props) {
             return () => clearTimeout(timer)
           }, [current.seq])
           return React.createElement(ArchiveToast, { key: current.seq, toast: current })
-        }
-
-        function OverlayActionToast({ source }) {
-          const current = useSyncExternalStore(source.subscribe, source.getSnapshot)
-          useEffect(() => {
-            // 错误常驻待确认;成功提示与归档 Toast 同节奏自动消失
-            if (current.text === null || current.text === undefined || current.sticky) return
-            const timer = setTimeout(() => emitActionToast(null, 'ok'), TOAST_HOLD_MS)
-            return () => clearTimeout(timer)
-          }, [current.seq])
-          return React.createElement(ActionToast, {
-            key: current.seq,
-            toast: current,
-            onDismiss: () => emitActionToast(null, 'ok'),
-          })
         }
       },
     }
