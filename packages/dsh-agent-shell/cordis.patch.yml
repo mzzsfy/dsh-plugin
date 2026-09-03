@@ -1,0 +1,8 @@
+# The agent-shell bundle patch: inserts the host half into the profile root as
+# one entry. Applied by `dsh plugin add @mzzsfy/dsh-agent-shell`; the row owns
+# the mcp-ssh server subprocess, the bridged mcp__agent-shell__* tools, and the
+# /agent-shell routes polled by the browser half.
+
+- insert:
+    - id: agent-shell
+      name: '@mzzsfy/dsh-agent-shell'
