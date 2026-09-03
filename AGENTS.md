@@ -7,7 +7,7 @@
 - 插件一律位于 `packages/<包名>/`,npm 名为 `@mzzsfy/<包名>`,包清单 = `packages/` 下带 package.json 的目录,自动发现,不手工维护清单
 - 版本语义:feat → minor,fix/style → patch;本地 manifest 版本只允许 大于等于 线上(发布脚本强制)
 - `package-lock.json` 永不入库(.gitignore 已忽略);仓库无根 package.json,各包独立
-
+- 新建修改包后需要同步更新所有文档
 ## profile 链接(开发态,唯一合法形态)
 
 profile 位于 `~/.dsh/profiles/web`。合法状态只有一种,禁止第三种:
