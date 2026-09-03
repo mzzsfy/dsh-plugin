@@ -27,6 +27,8 @@ dsh-plugin/
 | @mzzsfy/dsh-llm-pi-gateway | newapi 等 LLM 网关的会话粘性路由,提升网关侧 prompt 缓存命中;装上即零感知接管官方 pi-ai 路由,卸载即还原 | 请求体按协议写入会话标记(anthropic metadata.user_id / openai prompt_cache_key,sha256 派生不暴露内部 id),compat 全控、metadata 模板透传、静态 headers 兜底;bundle patch 以官方 schema 接管路由 | DSH host 端插件(pi-ai 透传 adapter) |
 | @mzzsfy/dsh-model-capability-editor | 模型能力编辑器:可视化编辑各模型的思考档位与图片输入(多模态)声明 | 读取官方 describe 拿当前声明,表单编辑后整组写回 settings.yaml(未编辑条目保留,冲突字段级重放不静默覆盖);官方模型行内直接挂编辑块,锚点破坏时浮动入口兜底 | DSH 纯前端插件(settings.models.footer 卡片) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,卸载即恢复官方齿轮 | 观察设置导航 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
+| @mzzsfy/mcp-ssh | agent-shell MCP server:本地与 SSH 命令执行、命令黑白名单护栏、交互会话人机协同(用户可代输密码/确认),标准 MCP stdio,Claude Code / OpenCode / Codex / DSH 通用 | 本机走平台 shell、SSH 走系统 ssh/scp 二进制(config/known_hosts 主机发现,@password 注释经 askpass 注入);危险命令挂起等人工批准;start/read/send/kill 会话模型让 AI 与用户共享 stdin/stdout;内置 control HTTP 供面板观察(默认关) | 独立 MCP server(npm bin)+ Claude Code plugin 包装(.claude-plugin + .mcp.json + skills) |
+| @mzzsfy/dsh-agent-shell | DSH agent 命令执行面板:自动拉起 @mzzsfy/mcp-ssh 桥接为 mcp__agent-shell__* 九个工具,执行流实时可见,被拦命令人工批准,密码/确认用户可直接接管输入 | host 端 spawn MCP server 子进程(意外退出自动重启)并桥接工具,webServer 路由代理事件流;装了 dsh-better-sidebar 自动注册 Agent Shell 标签页,没装回退 /agent-shell 简陋页(功能一致) | DSH 双端插件(host spawn+桥接+路由,client 标签页) |
 
 ## 安装与更新:缩短 pnpm 宽限期
 
