@@ -41,6 +41,9 @@ const CSS = [
   '.sm-row__size { color:var(--dsw-alias-state-error-primary); }',
   '.sm-row__title { font:var(--dsw-font-s-strong-14); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
   '.sm-row__error { grid-column:2 / -1; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-state-error-primary); }',
+  '.sm-row__path { grid-column:2 / -1; font:12px/16px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption);',
+  '  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+  '.sm-deleted { display:flex; flex-direction:column; gap:8px; min-width:0; }',
   '.sm-row__actions { display:flex; gap:2px; justify-content:flex-end; opacity:0; transition:opacity 0.12s ease; }',
   '.sm-row:hover .sm-row__actions, .sm-row:focus-within .sm-row__actions, .sm-row--armed .sm-row__actions { opacity:1; }',
   '.sm-btn { border:0; background:transparent; cursor:pointer; padding:2px 8px; border-radius:6px;',
@@ -68,6 +71,9 @@ const CSS = [
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
 const DELETE_URL = '/api/session-manager/delete'
 const INFO_URL = '/api/session-manager/info'
+const DELETED_URL = '/api/session-manager/deleted'
+const REMOUNT_URL = '/api/session-manager/remount'
+const FORGET_URL = '/api/session-manager/forget'
 
 // Toast 持续时长,设计文档定值
 const TOAST_HOLD_MS = 4 * 1000
@@ -124,6 +130,19 @@ function projectRows(listState, archivedIds) {
     .sort((left, right) => right.updatedAt - left.updatedAt)
 }
 
+// 已删除面板行:标题回退会话 id,按删除时间倒序(镜像 core.mjs projectDeletedRows)
+function projectDeletedRows(deleted, listState) {
+  const byId = (listState && listState.byId) || {}
+  return [...(deleted || [])]
+    .sort((left, right) => right.deletedAt - left.deletedAt)
+    .map((item) => ({
+      sessionId: item.sessionId,
+      path: item.path,
+      deletedAt: item.deletedAt,
+      title: (byId[item.sessionId] && byId[item.sessionId].displayTitle) || item.sessionId,
+    }))
+}
+
 // Toast 差分守卫:连续两个 ready 快照才计新增(镜像 core.mjs archiveToastStep)。
 // 模型订阅即时发射 pending 空态,基线(存量归档)成为第二帧;基线是重连权威而非
 // 归档事件,启动与重连首装不误报。
@@ -167,20 +186,66 @@ function ArchiveRow(props) {
   )
 }
 
+function DeletedRow(props) {
+  const row = props.row
+  const busy = props.busy
+  return h('div', { className: 'sm-row' + (busy ? ' sm-row--busy' : '') },
+    h('span', { key: 'meta', className: 'sm-row__time', title: new Date(row.deletedAt).toLocaleString() }, fmtTime(row.deletedAt)),
+    h('span', { className: 'sm-row__title', title: row.title }, row.title),
+    h('div', { className: 'sm-row__actions' },
+      h('button', { key: 'remount', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onRemount }, '重新挂载'),
+      h('button', { key: 'forget', className: 'sm-btn', disabled: busy, onClick: props.onForget }, '移除记录'),
+    ),
+    h('span', { className: 'sm-row__path', title: row.path }, '原位置 ' + row.path),
+  )
+}
+
+// 已删除分区:仅非空渲染;还原指引在分区头部,行内提供重挂载与移除记录
+function DeletedSection(props) {
+  const rows = props.rows
+  if (rows.length === 0) return null
+  return h('div', { className: 'sm-deleted' },
+    h('div', { className: 'sm-head' },
+      h('span', { className: 'sm-head__title' }, '已删除'),
+      h('span', { className: 'sm-head__count' }, rows.length + ' 条'),
+    ),
+    h('div', { className: 'sm-head__hint' },
+      '到系统回收站将会话文件夹还原到原位置,再点「重新挂载」找回;清空回收站后无法找回。'),
+    h('div', { className: 'sm-tray' },
+      rows.map((row) => h(DeletedRow, {
+        key: row.sessionId,
+        row,
+        busy: props.busyId === row.sessionId,
+        onRemount: () => props.onRemount(row),
+        onForget: () => props.onForget(row),
+      }))),
+  )
+}
+
 function SessionManagerApp(props) {
   const rows = props.rows
+  const listState = props.listState
   const [notice, setNotice] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [armedId, setArmedId] = useState(null)
   const [confirms, setConfirms] = useState({})
+  const [deleted, setDeleted] = useState([])
 
-  function run(sessionId, action) {
+  function refreshDeleted() {
+    api(DELETED_URL)
+      .then((payload) => setDeleted((payload && payload.deleted) || []))
+      .catch(() => setDeleted([]))
+  }
+
+  useEffect(() => { refreshDeleted() }, [])
+
+  function run(sessionId, action, successText) {
     setBusyId(sessionId)
     return action()
       .then((result) => {
         if (result && result.partial) setNotice({ kind: 'ok', text: result.message })
         else if (result && result.message) setNotice({ kind: 'ok', text: result.message })
-        else setNotice({ kind: 'ok', text: '操作完成' })
+        else setNotice({ kind: 'ok', text: successText || '操作完成' })
         setArmedId(null)
         setConfirms({})
       })
@@ -201,7 +266,20 @@ function SessionManagerApp(props) {
       }
       return
     }
-    void run(row.id, () => api(DELETE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
+    void run(row.id, () => api(DELETE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }),
+      '已移入系统回收站;还原后可在「已删除」区重新挂载')
+      .then(refreshDeleted)
+  }
+
+  function onRemount(row) {
+    void run(row.sessionId, () => api(REMOUNT_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.sessionId }) }),
+      '已重新挂载,会话回到工作区列表')
+      .then(refreshDeleted)
+  }
+
+  function onForget(row) {
+    void run(row.sessionId, () => api(FORGET_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.sessionId }) }))
+      .then(refreshDeleted)
   }
 
   return h('div', { className: 'sm-panel' },
@@ -209,7 +287,7 @@ function SessionManagerApp(props) {
       h('span', { className: 'sm-head__title' }, '会话归档'),
       rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
     ),
-    h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原。'),
+    h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原后重新挂载。'),
     notice !== null ? h('div', { className: 'sm-notice sm-notice--' + notice.kind }, notice.text) : null,
     h('div', { className: 'sm-tray' },
       rows.length === 0
@@ -229,6 +307,12 @@ function SessionManagerApp(props) {
             onConfirm: () => onDelete(row),
             onDisarm: () => { setArmedId(null); setConfirms({}) },
           }))),
+    h(DeletedSection, {
+      rows: projectDeletedRows(deleted, listState),
+      busyId,
+      onRemount,
+      onForget,
+    }),
   )
 }
 
@@ -295,6 +379,7 @@ function ArchiveToast(props) {
           const workspaceState = useSnapshot(workspaceSvc.list)
           return React.createElement(SessionManagerApp, {
             rows: projectRows(listState, (workspaceState && workspaceState.archivedSessionIds) || []),
+            listState,
           })
         }
 

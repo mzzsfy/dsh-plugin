@@ -13,7 +13,10 @@ import {
   deleteOutcome,
   diffArchived,
   isSessionRunning,
+  mergeDeletedEntry,
   projectArchiveRows,
+  projectDeletedRows,
+  removeDeletedEntry,
   selectArchiveCandidates,
   updatedAtOf,
 } from '../src/core.mjs'
@@ -140,4 +143,48 @@ test('空白产物判定:JSONL 单行(仅 header)为空白', () => {
   assert.equal(artifactLooksBlank('', false), true)
   assert.equal(artifactLooksBlank('{"header":1}\n{"event":0}\n', false), false)
   assert.equal(artifactLooksBlank('{"header":1}\n{"event":0', true), false)
+})
+
+test('已删除面板投影:标题回退会话 id,按删除时间倒序', () => {
+  const deleted = [
+    { sessionId: 'a', path: 'C:\\w\\a', deletedAt: 100 },
+    { sessionId: 'b', path: 'C:\\w\\b', deletedAt: 300 },
+    { sessionId: 'c', path: 'C:\\w\\c', deletedAt: 200 },
+  ]
+  const rows = projectDeletedRows(deleted, { a: { displayTitle: '会话 A' } })
+  assert.deepEqual(rows, [
+    { sessionId: 'b', path: 'C:\\w\\b', deletedAt: 300, title: 'b' },
+    { sessionId: 'c', path: 'C:\\w\\c', deletedAt: 200, title: 'c' },
+    { sessionId: 'a', path: 'C:\\w\\a', deletedAt: 100, title: '会话 A' },
+  ])
+})
+
+test('已删除面板投影:空台账投影为空', () => {
+  assert.deepEqual(projectDeletedRows([], {}), [])
+})
+
+test('台账合并:同 id 替换置顶,新 id 插入头部,入参不变', () => {
+  const existing = [{ sessionId: 'a', path: 'p1', deletedAt: 1 }]
+  assert.deepEqual(
+    mergeDeletedEntry(existing, { sessionId: 'a', path: 'p2', deletedAt: 2 }),
+    [{ sessionId: 'a', path: 'p2', deletedAt: 2 }],
+  )
+  assert.deepEqual(
+    mergeDeletedEntry(existing, { sessionId: 'b', path: 'p3', deletedAt: 3 }),
+    [{ sessionId: 'b', path: 'p3', deletedAt: 3 }, { sessionId: 'a', path: 'p1', deletedAt: 1 }],
+  )
+  assert.deepEqual(existing, [{ sessionId: 'a', path: 'p1', deletedAt: 1 }])
+})
+
+test('台账移除:命中删除并报变化,未命中幂等不报变化', () => {
+  const existing = [
+    { sessionId: 'a', path: 'p1', deletedAt: 1 },
+    { sessionId: 'b', path: 'p2', deletedAt: 2 },
+  ]
+  const hit = removeDeletedEntry(existing, 'a')
+  assert.deepEqual(hit.deleted, [{ sessionId: 'b', path: 'p2', deletedAt: 2 }])
+  assert.equal(hit.removed, true)
+  const miss = removeDeletedEntry(existing, 'z')
+  assert.deepEqual(miss.deleted, existing)
+  assert.equal(miss.removed, false)
 })
