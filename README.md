@@ -16,17 +16,17 @@ dsh-plugin/
 
 ## 插件一览
 
-| 名称 | 类型 | 用途 |
-| --- | --- | --- |
-| @mzzsfy/dsh-usage-panel | DSH 静态插件(settings 槽位 + web 路由) | 多平台 LLM 账号余额与额度面板:配置 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点,v2 定期自动查询(分频 + 指数退避防风控)、余额/额度趋势图(自绘 SVG)、快照分档留存、非 localhost 直接访问 |
-| @mzzsfy/dsh-rs-workflow | DSH 插件(一个包三种行角色:settings + preset-sync + tool) | 若水工作流一体化:settings 行注册 rs-workflow 设置页表单,preset-sync 行把 agent preset(模式组合 + 协议技能 + 编排引擎)自释放到用户预设根,tool 行注册 rs_workflow_config 模型工具 |
-| @mzzsfy/dsh-maintain | DSH 静态插件(settings 槽位 + web 路由) | 版本与进程运维一体化:npm dist-tag 追踪监测新版本,一键执行自定义升级命令(`{tag}` 占位符),安全重启(appExit 优雅退出,5 秒兜底,重启后页面自动检测宿主恢复并刷新) |
-| @mzzsfy/dsh-think-expand | DSH 纯前端插件(client 模块 + settings 槽位) | 流式思考自动展开最新一条:新思考出现收起上一条,手动意图优先,历史会话不干预,关开关即移除全部副作用 |
-| @mzzsfy/dsh-turn-notify | DSH 双端插件(host 观察投影 + client 发声) | 回合完成通知三通道:合成音效/系统弹窗/webhook;同浏览器 profile 多窗口仅一份发声(localStorage 认领);六状态分类开关,非回环 HTTP 降级 toast + 标题闪烁 |
-| @mzzsfy/dsh-session-manager | DSH 双端插件(host 自动归档 + client 面板) | 会话管理三合一:超期会话自动归档(阈值可配,幂等评估)、归档面板(取消归档/两段式删除)、删除移入系统回收站可恢复,归档推送 Toast 提示 |
-| @mzzsfy/dsh-llm-pi-gateway | DSH host 端插件(pi-ai 透传 adapter) | 网关路由专用 adapter:全协议会话标记默认开启(anthropic metadata.user_id / openai prompt_cache_key,sha256 派生不暴露内部 id)、compat 全控、metadata 模板透传、静态 headers 兜底;无 GUI,settings.yaml 配置 |
-| @mzzsfy/dsh-model-capability-editor | DSH 纯前端插件(settings.models.footer 卡片) | 模型能力编辑器:编辑 reasoningEfforts 档位(false/删除/off:null/线上拼写)与 input 多模态声明,describe 读取 + 整组写回(未编辑条目保留),冲突字段级重放绝不静默覆盖 |
-| @mzzsfy/dsh-settings-nav-icons | DSH 纯前端插件(DOM 观察) | 设置导航分区图标替换:按分区显示文本把回退齿轮换成专属图形(通用/外观/IM/统计/两市场/账号/通知/运维/MCP/归档/认证/侧边卡),语言切换重贴,卸载即恢复官方齿轮 |
+| 名称 | 功能 | 简单原理 | 类型 |
+| --- | --- | --- | --- |
+| @mzzsfy/dsh-usage-panel | 多平台 LLM 账号余额与额度面板:配置 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点,定期自动查询并画趋势图,非 localhost 直接访问 | 定时调用各平台查询接口并存快照(分频 + 指数退避防风控),面板用自绘 SVG 画余额/额度趋势,快照分档留存 | DSH 静态插件(settings 槽位 + web 路由) |
+| @mzzsfy/dsh-rs-workflow | 若水工作流一体化:安装即得 rs-workflow agent 模式(协议技能 + 编排引擎 + 模式组合),带工作流设置表单与配置工具 | 一个包三种行角色:settings 行注册设置页表单,preset-sync 行把 agent 预设自释放到用户预设根,tool 行注册 rs_workflow_config 模型工具 | DSH 插件(settings + preset-sync + tool 三行角色) |
+| @mzzsfy/dsh-maintain | 版本与运维一体化:自动发现新版本、一键升级、安全重启,重启后页面自动恢复 | 监测 npm dist-tag 发现新版本;升级即执行自定义命令(`{tag}` 占位符);重启走优雅退出(5 秒兜底),页面轮询检测宿主恢复后自动刷新 | DSH 静态插件(settings 槽位 + web 路由) |
+| @mzzsfy/dsh-think-expand | 流式思考自动展开:始终显示最新一条思考,手动操作优先,历史会话不干预,卸载无残留 | 纯前端观察流式渲染,新思考出现即收起上一条;关闭开关即移除全部副作用 | DSH 纯前端插件(client 模块 + settings 槽位) |
+| @mzzsfy/dsh-turn-notify | 回合完成通知:合成音效 / 系统弹窗 / webhook 三通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;同浏览器多窗口按 localStorage 认领保证唯一发声;非回环 HTTP 访问降级 toast + 标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
+| @mzzsfy/dsh-session-manager | 会话管理三合一:超期会话自动归档(阈值可配)、归档面板(取消归档 / 两段式删除 / 回收站还原)、归档推送提示 | host 定期扫描会话目录,按阈值幂等归档;删除移入系统回收站可恢复,面板维护已删台账并支持一键重新挂载 | DSH 双端插件(host 自动归档 + client 面板) |
+| @mzzsfy/dsh-llm-pi-gateway | newapi 等 LLM 网关的会话粘性路由,提升网关侧 prompt 缓存命中;装上即零感知接管官方 pi-ai 路由,卸载即还原 | 请求体按协议写入会话标记(anthropic metadata.user_id / openai prompt_cache_key,sha256 派生不暴露内部 id),compat 全控、metadata 模板透传、静态 headers 兜底;bundle patch 以官方 schema 接管路由 | DSH host 端插件(pi-ai 透传 adapter) |
+| @mzzsfy/dsh-model-capability-editor | 模型能力编辑器:可视化编辑各模型的思考档位与图片输入(多模态)声明 | 读取官方 describe 拿当前声明,表单编辑后整组写回 settings.yaml(未编辑条目保留,冲突字段级重放不静默覆盖);官方模型行内直接挂编辑块,锚点破坏时浮动入口兜底 | DSH 纯前端插件(settings.models.footer 卡片) |
+| @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,卸载即恢复官方齿轮 | 观察设置导航 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
 
 ## 安装与更新:缩短 pnpm 宽限期
 
