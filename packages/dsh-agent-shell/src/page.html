@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Shell</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.5 ui-monospace, Consolas, monospace; background: #11151c; color: #d7dde6; }
+  header { display: flex; gap: 12px; align-items: center; padding: 10px 14px; background: #171c26; border-bottom: 1px solid #232a36; position: sticky; top: 0; }
+  header h1 { font-size: 14px; margin: 0; }
+  header .state { margin-left: auto; font-size: 12px; color: #7d8899; }
+  main { display: grid; grid-template-columns: 1fr 340px; gap: 10px; padding: 10px 14px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: #151a23; border: 1px solid #232a36; border-radius: 8px; padding: 10px; min-width: 0; }
+  section h2 { font-size: 12px; margin: 0 0 8px; color: #8fa1b8; text-transform: uppercase; letter-spacing: .08em; }
+  .row { display: flex; gap: 6px; margin-bottom: 8px; }
+  input[type=text] { flex: 1; background: #0e1219; border: 1px solid #2a3342; color: #d7dde6; border-radius: 6px; padding: 6px 8px; font: inherit; min-width: 0; }
+  button { background: #233046; color: #cfe1ff; border: 1px solid #34445f; border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  button:hover { background: #2c3d59; }
+  button.danger { background: #4a1f24; border-color: #6e2e35; color: #ffb3ba; }
+  button.ok { background: #1d3a26; border-color: #2c5a3a; color: #b8f0c9; }
+  .feed { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow: auto; }
+  .ev { border: 1px solid #232a36; border-radius: 6px; padding: 6px 8px; background: #10141c; }
+  .ev .meta { color: #7d8899; font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .ev .cmd { color: #e8eef7; white-space: pre-wrap; word-break: break-all; }
+  .ev .out { white-space: pre-wrap; word-break: break-all; color: #9fb0c5; max-height: 200px; overflow: auto; background: #0b0f16; border-radius: 4px; padding: 4px 6px; margin-top: 4px; }
+  .tag { border-radius: 4px; padding: 0 6px; font-size: 11px; }
+  .tag.running { background: #3d3417; color: #ffd479; }
+  .tag.done { background: #1d3a26; color: #b8f0c9; }
+  .tag.fail { background: #4a1f24; color: #ffb3ba; }
+  .tag.approval-pending { background: #3d3417; color: #ffd479; }
+  .badge { font-size: 11px; color: #7d8899; }
+  textarea { width: 100%; background: #0e1219; border: 1px solid #2a3342; color: #d7dde6; border-radius: 6px; padding: 6px 8px; font: inherit; min-height: 90px; }
+  .muted { color: #7d8899; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Shell</h1>
+  <span class="muted">agent 与你共用这个执行通道;密码/确认可直接在会话里输入</span>
+  <span class="state" id="state">连接中…</span>
+</header>
+<main>
+  <section>
+    <h2>执行流</h2>
+    <div class="row">
+      <input type="text" id="cmd" placeholder="手动执行命令(走同一套黑白名单与审批)…">
+      <button id="run">执行</button>
+    </div>
+    <div class="feed" id="feed"></div>
+  </section>
+  <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+    <section id="approvalBox" class="hidden">
+      <h2>待审批</h2>
+      <div id="approvals"></div>
+    </section>
+    <section>
+      <h2>交互会话</h2>
+      <div id="sessions"></div>
+    </section>
+    <section>
+      <h2>黑白名单</h2>
+      <div class="row"><span class="muted">模式</span><input type="text" id="cfgMode" style="flex:0 1 120px"><span class="muted">审批</span><input type="text" id="cfgApproval" style="flex:0 1 120px"></div>
+      <textarea id="cfgBlack" placeholder="黑名单正则,每行一条"></textarea>
+      <div style="height:6px"></div>
+      <textarea id="cfgWhite" placeholder="白名单正则,每行一条"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="saveCfg">保存配置</button>
+        <span class="muted" id="cfgBroken"></span>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+'use strict'
+const $ = (id) => document.getElementById(id)
+let since = 0
+const eventsById = new Map()
+
+async function api(path, options) {
+  const response = await fetch('/agent-shell/api/' + path, options)
+  return response.json()
+}
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag)
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (key === 'class') node.className = value
+    else if (key.startsWith('on')) node.addEventListener(key.slice(2), value)
+    else if (value !== null && value !== undefined) node.setAttribute(key, value)
+  }
+  for (const child of children) {
+    if (child === null || child === undefined) continue
+    node.append(child.nodeType ? child : document.createTextNode(child))
+  }
+  return node
+}
+
+function hostLabel(event) {
+  return event.host ? 'ssh:' + event.host : 'local'
+}
+
+function outText(event) {
+  const parts = []
+  if (event.stdout) parts.push(event.stdout)
+  if (event.stderr) parts.push(event.stderr)
+  if (event.text) parts.push('[输入] ' + event.text)
+  return parts.join('\n────────\n').slice(-8000)
+}
+
+function renderEvent(event) {
+  const stateTag = event.state === 'running' ? 'running' : event.kind === 'approval' ? 'approval-' + event.state : (event.exitCode === 0 ? 'done' : 'fail')
+  const box = el('div', { class: 'ev' },
+    el('div', { class: 'meta' },
+      el('span', { class: 'tag ' + stateTag }, event.kind === 'approval' ? '审批:' + event.state : event.state === 'running' ? '运行中' : event.state === 'input' ? '输入' : 'exit ' + (event.exitCode ?? '—')),
+      el('span', {}, hostLabel(event)),
+      el('span', { class: 'badge' }, event.source || ''),
+      event.durationMs !== undefined ? el('span', { class: 'badge' }, Math.round(event.durationMs / 100) / 10 + 's') : null,
+      event.timedOut ? el('span', { class: 'tag fail' }, '超时') : null,
+    ),
+    el('div', { class: 'cmd' }, event.command || ''),
+    outText(event) ? el('div', { class: 'out' }, outText(event)) : null,
+  )
+  return box
+}
+
+function render() {
+  const list = [...eventsById.values()].sort((a, b) => a.seq - b.seq)
+  const feed = $('feed')
+  feed.replaceChildren(...list.filter((event) => event.kind !== 'approval').map(renderEvent))
+  feed.scrollTop = feed.scrollHeight
+
+  const pending = list.filter((event) => event.kind === 'approval' && event.state === 'pending')
+  $('approvalBox').classList.toggle('hidden', pending.length === 0)
+  $('approvals').replaceChildren(...pending.map((event) => el('div', { class: 'ev' },
+    el('div', { class: 'meta' }, el('span', { class: 'tag approval-pending' }, '待审批'), el('span', {}, hostLabel(event)), el('span', { class: 'badge' }, event.reason || '')),
+    el('div', { class: 'cmd' }, event.command),
+    el('div', { class: 'row', style: 'margin-top:6px' },
+      el('button', { class: 'ok', onclick: () => decide(event.id, true) }, '批准'),
+      el('button', { class: 'danger', onclick: () => decide(event.id, false) }, '拒绝'),
+    ),
+  )))
+}
+
+async function decide(id, approve) {
+  await api('approval/' + encodeURIComponent(id), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approve }) })
+}
+
+async function pollEvents() {
+  try {
+    const data = await api('events?since=' + since)
+    for (const event of data.events || []) {
+      since = Math.max(since, event.seq)
+      if (event.kind === 'approval' && event.state !== 'pending') {
+        // 审批终结态:删除旧 pending 展示
+        eventsById.delete('ap:' + event.id)
+      }
+      eventsById.set(event.kind === 'approval' ? 'ap:' + event.id : 'ev:' + event.id + ':' + event.state + ':' + (event.text || ''), event)
+    }
+    // 简化:直接全量重画,数据量小
+    render()
+    $('state').textContent = '已连接'
+  } catch {
+    $('state').textContent = '服务未就绪'
+  }
+}
+
+async function pollSessions() {
+  try {
+    const data = await api('sessions')
+    const boxes = (data.sessions || []).map((session) => el('div', { class: 'ev' },
+      el('div', { class: 'meta' },
+        el('span', { class: 'tag ' + (session.running ? 'running' : 'done') }, session.running ? '运行中' : 'exit ' + (session.exitCode ?? '—')),
+        el('span', { class: 'badge' }, session.id),
+      ),
+      el('div', { class: 'cmd' }, session.command),
+      el('div', { class: 'row', style: 'margin-top:6px' },
+        el('input', { type: 'text', placeholder: '输入内容(密码/确认),回车发送', onkeydown: (e) => { if (e.key === 'Enter') sendInput(session.id, e.target) } }),
+        el('button', { onclick: (e) => sendInput(session.id, e.target.previousElementSibling) }, '发送'),
+        el('button', { class: 'danger', onclick: () => api('kill', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: session.id }) }) }, '终止'),
+      ),
+    ))
+    $('sessions').replaceChildren(...(boxes.length ? boxes : [el('div', { class: 'muted' }, '暂无会话;agent 用 start 工具创建')]))
+  } catch {}
+}
+
+async function sendInput(id, input) {
+  const text = input.value
+  if (!text) return
+  input.value = ''
+  await api('session/' + encodeURIComponent(id) + '/input', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) })
+}
+
+async function loadConfig() {
+  try {
+    const config = await api('config')
+    $('cfgMode').value = config.mode || 'blacklist'
+    $('cfgApproval').value = config.approvalMode || 'ui'
+    $('cfgBlack').value = (config.blacklist || []).join('\n')
+    $('cfgWhite').value = (config.whitelist || []).join('\n')
+    $('cfgBroken').textContent = (config.broken || []).length ? '无效正则 ' + config.broken.length + ' 条已忽略' : ''
+  } catch {}
+}
+
+$('run').addEventListener('click', async () => {
+  const command = $('cmd').value.trim()
+  if (!command) return
+  $('cmd').value = ''
+  try {
+    const result = await api('run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command }) })
+    eventsById.set('ev:' + result.id + ':done:', { seq: Date.now(), id: result.id, kind: 'exec', state: 'done', command, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, source: 'ui', durationMs: result.durationMs, host: result.host })
+    render()
+  } catch (error) {
+    alert(String(error))
+  }
+})
+$('cmd').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('run').click() })
+$('saveCfg').addEventListener('click', async () => {
+  const lines = (value) => value.split('\n').map((item) => item.trim()).filter(Boolean)
+  await api('config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: $('cfgMode').value.trim(), approvalMode: $('cfgApproval').value.trim(), blacklist: lines($('cfgBlack').value), whitelist: lines($('cfgWhite').value) }) })
+  await loadConfig()
+})
+
+setInterval(pollEvents, 1500)
+setInterval(pollSessions, 3000)
+pollEvents()
+pollSessions()
+loadConfig()
+</script>
+</body>
+</html>
