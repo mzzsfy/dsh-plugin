@@ -19,8 +19,12 @@ profile 位于 `~/.dsh/profiles/web`。合法状态只有一种,禁止第三种:
 
 ```
 node scripts/dev-link.mjs all          # 归一依赖行(查 npm 线上 latest,自动清 link:/file: 残留)+ 挂 junction
+node scripts/dev-link.mjs <包名>       # 单包模式:仅归一/挂载/校验该包,清单内其他包不动
 node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ```
+
+- 单包模式用于两点:只想调试某一个包;或清单内存在未发布包(线上查询 404)卡住 `all` 时的绕行路径。`all` 仍是日常默认,单包后其余包的终态不随之校验
+- 依赖行变化触发 `pnpm install` 重建 node_modules 时,脚本会重挂所有**有依赖声明**的包,保住既有链接;无声明的包(如未发布新品)不产生 junction
 
 禁止手工编辑 profile 的 package.json;禁止 `pnpm add file:...` / `pnpm add link:...`;禁止在 profile 里直接 mklink。
 
