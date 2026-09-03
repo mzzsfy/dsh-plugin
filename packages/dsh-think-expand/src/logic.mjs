@@ -148,17 +148,3 @@ export function plan(registry, rows) {
 export function needsReattach(observed, current) {
   return observed === null || observed !== current
 }
-
-// 开关关闭:收起全部由本插件展开的行,清空全部标记。
-export function teardown(registry, rows) {
-  const actions = []
-  if (registry.current !== null) {
-    const index = findRow(registry, rows, registry.current.seen)
-    if (index >= 0 && rows[index].expanded) actions.push({ index, kind: 'collapse' })
-  }
-  registry.marks.clear()
-  registry.manual.clear()
-  registry.read.clear()
-  registry.current = null
-  return { actions }
-}
