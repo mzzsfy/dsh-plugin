@@ -17,26 +17,24 @@
  */
 
 import {spawnSync} from 'node:child_process'
-import {readFileSync} from 'node:fs'
+import {readFileSync, readdirSync, existsSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 const REGISTRY = 'https://registry.npmjs.org'
 const BUMP_KINDS = ['patch', 'minor', 'major']
-const PACKAGES = [
-  'dsh-usage-panel',
-  'dsh-maintain',
-  'dsh-rs-workflow',
-  'dsh-think-expand',
-  'dsh-turn-notify',
-  'dsh-session-manager',
-  'dsh-llm-pi-gateway',
-  'dsh-model-capability-editor',
-  'dsh-settings-nav-icons',
-]
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const npmCmd = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm')
+
+/** 包清单以 packages/ 目录为准自动发现,与 dev-link.mjs 同构,不再手工维护名单 */
+function discoverPackages() {
+  return readdirSync(join(repoRoot, 'packages'), {withFileTypes: true})
+    .filter((e) => e.isDirectory() && existsSync(join(repoRoot, 'packages', e.name, 'package.json')))
+    .map((e) => e.name)
+}
+
+const PACKAGES = discoverPackages()
 
 let exitCode = 0
 
