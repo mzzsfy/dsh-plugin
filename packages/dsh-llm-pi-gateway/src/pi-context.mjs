@@ -5,6 +5,7 @@
 // finish 块产出官方同构 replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
 
 import { contentHasImage, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
+import { DEFAULT_IMAGE_MAX_BYTES, DEFAULT_IMAGE_PIXEL_BUDGET } from './config.mjs'
 import { GatewayError } from './errors.mjs'
 
 const TIMESTAMP_ZERO = 0
@@ -168,7 +169,9 @@ export function toPiAssistant(message, onDegrade) {
   }
 }
 
-/** 成功响应投影为版本化 replay 信封,块序与流序一致。 */
+/** 成功响应投影为版本化 replay 信封,块序与流序一致。
+ *  未知块类型产出空洞槽位(官方 map 无 default 同语义):持久化序列化为 null,
+ *  读侧形状校验拒整信封,降级 provider 中性历史,而非误标类型造成错位。 */
 export function toPiReplayState(message) {
   return {
     response: {
@@ -192,10 +195,13 @@ export function toPiReplayState(message) {
           ...(block.redacted !== undefined ? { redacted: block.redacted } : {}),
         }
       }
-      return {
-        type: 'tool-call',
-        ...(block.thoughtSignature !== undefined ? { thoughtSignature: block.thoughtSignature } : {}),
+      if (block.type === 'toolCall') {
+        return {
+          type: 'tool-call',
+          ...(block.thoughtSignature !== undefined ? { thoughtSignature: block.thoughtSignature } : {}),
+        }
       }
+      return undefined
     }),
   }
 }
@@ -380,7 +386,3 @@ export async function toPiContextWithImages(options, attachments, onDegrade, max
   }
   return piContext(options, messages)
 }
-
-// 单图读出预算缺省,与官方 DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET / DEFAULT_REQUEST_IMAGE_MAX_BYTES 一致
-const DEFAULT_IMAGE_PIXEL_BUDGET = 4 * 1024 * 1024
-const DEFAULT_IMAGE_MAX_BYTES = 1024 * 1024

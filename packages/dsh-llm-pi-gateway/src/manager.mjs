@@ -3,8 +3,7 @@
 // 寻址;解析失败原样抛出,由接线方捕获保旧。纯逻辑,注册动作经依赖注入。
 
 import { deepEqualJson } from '@deepseek-ai/dsh-settings'
-
-export const SETTINGS_NS = 'llm-pi-gateway'
+import { SETTINGS_NS } from './config.mjs'
 
 /** 注册捕获事实:排序消除纯重排误判(官方 registrationFacts 同构)。 */
 export function registrationFacts(routes) {

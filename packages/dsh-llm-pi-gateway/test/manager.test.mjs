@@ -11,7 +11,7 @@ function routesOf(profiles) {
 }
 
 function harness() {
-  const calls = { adapter: [], adapterReplaces: [], directory: [], directoryReplaces: [], errors: [] }
+  const calls = { adapter: [], adapterReplaces: [], directory: [], directoryReplaces: [] }
   const registry = { adapter: null, directory: null }
   const manager = createRouteManager({
     routes: () => routesOf(harness.current),
@@ -24,7 +24,6 @@ function harness() {
       calls.directory.push(entries)
       return { replace: (next) => calls.directoryReplaces.push(next) }
     },
-    onError: (scope, error) => calls.errors.push({ scope, message: error.message }),
   })
   return { manager, calls, registry }
 }
