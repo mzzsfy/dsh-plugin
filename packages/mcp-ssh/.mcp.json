@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-shell": {
+      "command": "npx",
+      "args": ["-y", "@mzzsfy/mcp-ssh"],
+      "env": {
+        "AGENT_SHELL_CONTROL": "0"
+      }
+    }
+  }
+}
