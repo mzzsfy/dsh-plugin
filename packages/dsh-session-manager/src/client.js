@@ -58,12 +58,15 @@ const CSS = [
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
-  '.sm-notice { font:var(--dsw-font-xxs-12); padding:4px 8px; border-radius:6px; }',
-  '.sm-notice--error { color:var(--dsw-alias-state-error-primary); background:var(--dsw-alias-interactive-bg-hover-danger); }',
-  '.sm-notice--ok { color:var(--dsw-alias-state-success-primary); background:var(--dsw-alias-state-success-tertiary); }',
   '.sm-toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); z-index:60;',
   '  background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted); font:var(--dsw-font-xs-13);',
-  '  padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2); animation:sm-toast-in 0.18s ease-out; }',
+  '  padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2); animation:sm-toast-in 0.18s ease-out;',
+  '  display:flex; align-items:center; gap:10px; }',
+  '.sm-toast--action-ok { background:var(--dsw-alias-state-success-primary); color:var(--dsw-alias-label-primary-inverted); }',
+  '.sm-toast--action-error { background:var(--dsw-alias-state-error-primary); color:#fff; }',
+  '.sm-toast__close { border:0; background:transparent; cursor:pointer; color:inherit;',
+  '  font:var(--dsw-font-xs-strong-13); padding:0 2px; opacity:.8; }',
+  '.sm-toast__close:hover { opacity:1; }',
   '@keyframes sm-toast-in { from { transform:translate(-50%, 8px); opacity:0; } to { transform:translate(-50%, 0); opacity:1; } }',
   '@media (prefers-reduced-motion: reduce) { .sm-toast { animation:none; } .sm-row__actions { transition:none; } }',
 ].join('\n')
@@ -225,7 +228,6 @@ function DeletedSection(props) {
 function SessionManagerApp(props) {
   const rows = props.rows
   const listState = props.listState
-  const [notice, setNotice] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [armedId, setArmedId] = useState(null)
   const [confirms, setConfirms] = useState({})
@@ -243,13 +245,13 @@ function SessionManagerApp(props) {
     setBusyId(sessionId)
     return action()
       .then((result) => {
-        if (result && result.partial) setNotice({ kind: 'ok', text: result.message })
-        else if (result && result.message) setNotice({ kind: 'ok', text: result.message })
-        else setNotice({ kind: 'ok', text: successText || '操作完成' })
+        if (result && result.partial) emitActionToast(result.message, 'ok')
+        else if (result && result.message) emitActionToast(result.message, 'ok')
+        else emitActionToast(successText || '操作完成', 'ok')
         setArmedId(null)
         setConfirms({})
       })
-      .catch((error) => setNotice({ kind: 'error', text: error && error.message ? error.message : String(error) }))
+      .catch((error) => emitActionToast(error && error.message ? error.message : String(error), 'error'))
       .then(() => setBusyId(null))
   }
 
@@ -288,7 +290,6 @@ function SessionManagerApp(props) {
       rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
     ),
     h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原后重新挂载。'),
-    notice !== null ? h('div', { className: 'sm-notice sm-notice--' + notice.kind }, notice.text) : null,
     h('div', { className: 'sm-tray' },
       rows.length === 0
         ? h('div', { className: 'sm-empty' },
@@ -316,12 +317,39 @@ function SessionManagerApp(props) {
   )
 }
 
+// 操作反馈 Toast 文案形态:{seq, text, kind: 'ok'|'error', sticky};seq 变化即重渲染
+let actionToast = { seq: 0, text: null, kind: 'ok', sticky: false }
+const actionListeners = new Set()
+const emitActionToast = (text, kind) => {
+  actionToast = { seq: actionToast.seq + 1, text, kind, sticky: kind === 'error' }
+  for (const listener of actionListeners) listener()
+}
+const actionToastSource = {
+  getSnapshot: () => actionToast,
+  subscribe: (listener) => {
+    actionListeners.add(listener)
+    return () => actionListeners.delete(listener)
+  },
+}
+
 // 归档 Toast:archived 增量帧带来的新增条数;seq 单调递增保证同文案重复提示
 // 也会重渲染(计时器重置 + 入场动画重放)
 function ArchiveToast(props) {
   const text = props.toast.text
   if (text === null || text === undefined) return null
   return h('div', { className: 'sm-toast', role: 'alert' }, text)
+}
+
+// 操作反馈 Toast:悬浮置顶居中,滚动/任意视口下必达;错误常驻待手动关闭
+function ActionToast(props) {
+  const current = props.toast
+  if (current.text === null || current.text === undefined) return null
+  return h('div', { className: 'sm-toast sm-toast--action-' + current.kind, role: 'alert' },
+    h('span', null, current.text),
+    current.sticky
+      ? h('button', { className: 'sm-toast__close', onClick: props.onDismiss }, '知道了')
+      : null,
+  )
 }
 
     return {
@@ -371,6 +399,11 @@ function ArchiveToast(props) {
             { name: 'shell.overlay', id: 'session-manager-toast' },
             () => React.createElement(OverlayToast, { source: toastSource }),
           ))
+        ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.register(
+            { name: 'shell.overlay', id: 'session-manager-action-toast' },
+            () => React.createElement(OverlayActionToast, { source: actionToastSource }),
+          ))
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')
 
@@ -391,6 +424,21 @@ function ArchiveToast(props) {
             return () => clearTimeout(timer)
           }, [current.seq])
           return React.createElement(ArchiveToast, { key: current.seq, toast: current })
+        }
+
+        function OverlayActionToast({ source }) {
+          const current = useSyncExternalStore(source.subscribe, source.getSnapshot)
+          useEffect(() => {
+            // 错误常驻待确认;成功提示与归档 Toast 同节奏自动消失
+            if (current.text === null || current.text === undefined || current.sticky) return
+            const timer = setTimeout(() => emitActionToast(null, 'ok'), TOAST_HOLD_MS)
+            return () => clearTimeout(timer)
+          }, [current.seq])
+          return React.createElement(ActionToast, {
+            key: current.seq,
+            toast: current,
+            onDismiss: () => emitActionToast(null, 'ok'),
+          })
         }
       },
     }
