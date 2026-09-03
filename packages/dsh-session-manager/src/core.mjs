@@ -90,3 +90,27 @@ export function artifactLooksBlank(headText, hasMore) {
   }
   return !hasMore && breaks < 2
 }
+
+/** 台账合并:同 id 替换,新条目置顶;返回新数组,不改入参。client.js 有镜像,修改需两处同步。 */
+export function mergeDeletedEntry(deleted, entry) {
+  return [entry, ...deleted.filter((item) => item.sessionId !== entry.sessionId)]
+}
+
+/** 台账移除:幂等;removed 标记是否发生变化,调用方据此决定是否写回。 */
+export function removeDeletedEntry(deleted, sessionId) {
+  const next = deleted.filter((item) => item.sessionId !== sessionId)
+  return { deleted: next, removed: next.length !== deleted.length }
+}
+
+/** 已删除面板行:标题取会话行展示标题,缺失回退会话 id,按删除时间倒序。client.js 有镜像,修改需两处同步。 */
+export function projectDeletedRows(deleted, sessionsById) {
+  const byId = sessionsById || {}
+  return [...deleted]
+    .sort((left, right) => right.deletedAt - left.deletedAt)
+    .map((item) => ({
+      sessionId: item.sessionId,
+      path: item.path,
+      deletedAt: item.deletedAt,
+      title: (byId[item.sessionId] && byId[item.sessionId].displayTitle) || item.sessionId,
+    }))
+}
