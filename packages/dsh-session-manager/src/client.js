@@ -178,7 +178,7 @@ function ArchiveRow(props) {
     className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
   },
     armed && confirm && !confirm.error
-      ? h('span', { key: 'meta', className: 'sm-row__size' }, fmtSize(confirm.sizeBytes))
+      ? h('span', { key: 'meta', className: 'sm-row__size' }, confirm.missing ? '产物已丢失' : fmtSize(confirm.sizeBytes))
       : h('span', { key: 'meta', className: 'sm-row__time', title: new Date(row.updatedAt).toLocaleString() }, fmtTime(row.updatedAt)),
     h('span', { className: 'sm-row__title', title: row.title }, row.title),
     h('div', { className: 'sm-row__actions' }, actions),
@@ -256,11 +256,11 @@ function SessionManagerApp(props) {
   function onDelete(row) {
     if (armedId !== row.id) {
       setArmedId(row.id)
-      // 两段式确认:首段拉取标题 / 时间 / 体积
+      // 两段式确认:首段拉取标题 / 时间 / 体积;产物已缺失(missing)仍可确认,删除仅清理列表
       if (confirms[row.id] === undefined) {
         api(INFO_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) })
           .then((info) => setConfirms((prev) => ({ ...prev, [row.id]: info.supported
-            ? { sizeBytes: info.sizeBytes }
+            ? { sizeBytes: info.sizeBytes, missing: Boolean(info.missing) }
             : { error: '当前存储后端不支持按会话删除' } })))
           .catch((error) => setConfirms((prev) => ({ ...prev, [row.id]: { error: String(error.message || error) } })))
       }
