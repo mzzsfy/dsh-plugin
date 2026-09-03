@@ -10,6 +10,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useSyncExternalStore } = React
+    const { createPortal } = require('react-dom')
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → archive);
     // 该插件未就绪时入队,由其启动时排空
@@ -317,48 +318,19 @@ function SessionManagerApp(props) {
   )
 }
 
-// 操作反馈 Toast:命令式直挂 document.body —— shell.overlay 槽在应用 frame 的低层级
-// 叠层上下文内,设置全屏层(z=1000)会盖住槽内任何 z 值;body 直挂不受限。
-// 错误常驻待点「知道了」,成功 TOAST_HOLD_MS 自动消失
-const ACTION_TOAST_HOLD_MS = 4 * 1000
-let actionToastEl = null
-let actionToastTimer = null
-
-function dismissActionToast() {
-  if (actionToastTimer !== null) {
-    clearTimeout(actionToastTimer)
-    actionToastTimer = null
-  }
-  if (actionToastEl !== null) {
-    actionToastEl.remove()
-    actionToastEl = null
-  }
+// 操作反馈 Toast:{seq, text, kind: 'ok'|'error', sticky};seq 变化即重渲染(计时器重置 + 入场动画重放)
+let actionToast = { seq: 0, text: null, kind: 'ok', sticky: false }
+const actionListeners = new Set()
+const emitActionToast = (text, kind) => {
+  actionToast = { seq: actionToast.seq + 1, text, kind, sticky: kind === 'error' }
+  for (const listener of actionListeners) listener()
 }
-
-function emitActionToast(text, kind) {
-  const sticky = kind === 'error'
-  if (actionToastEl === null) {
-    actionToastEl = document.createElement('div')
-    actionToastEl.setAttribute('role', 'alert')
-    actionToastEl.addEventListener('click', (event) => {
-      if (event.target.dataset.smAction === 'dismiss') dismissActionToast()
-    })
-    document.body.appendChild(actionToastEl)
-  }
-  actionToastEl.className = 'sm-toast sm-toast--action-' + kind
-  actionToastEl.textContent = ''
-  const label = document.createElement('span')
-  label.textContent = text
-  actionToastEl.appendChild(label)
-  if (sticky) {
-    const close = document.createElement('button')
-    close.className = 'sm-toast__close'
-    close.dataset.smAction = 'dismiss'
-    close.textContent = '知道了'
-    actionToastEl.appendChild(close)
-  }
-  if (actionToastTimer !== null) clearTimeout(actionToastTimer)
-  actionToastTimer = sticky ? null : setTimeout(dismissActionToast, ACTION_TOAST_HOLD_MS)
+const actionToastSource = {
+  getSnapshot: () => actionToast,
+  subscribe: (listener) => {
+    actionListeners.add(listener)
+    return () => actionListeners.delete(listener)
+  },
 }
 
 // 归档 Toast:archived 增量帧带来的新增条数;seq 单调递增保证同文案重复提示
@@ -367,6 +339,18 @@ function ArchiveToast(props) {
   const text = props.toast.text
   if (text === null || text === undefined) return null
   return h('div', { className: 'sm-toast', role: 'alert' }, text)
+}
+
+// 操作反馈 Toast:错误常驻待点「知道了」,成功自动消失
+function ActionToast(props) {
+  const current = props.toast
+  if (current.text === null || current.text === undefined) return null
+  return h('div', { className: 'sm-toast sm-toast--action-' + current.kind, role: 'alert' },
+    h('span', null, current.text),
+    current.sticky
+      ? h('button', { className: 'sm-toast__close', onClick: props.onDismiss }, '知道了')
+      : null,
+  )
 }
 
     return {
@@ -416,6 +400,13 @@ function ArchiveToast(props) {
             { name: 'shell.overlay', id: 'session-manager-toast' },
             () => React.createElement(OverlayToast, { source: toastSource }),
           ))
+        // 操作 Toast 经 portal 直挂 body:shell.overlay 槽处于应用 frame 的低层级叠层
+        // 上下文,设置全屏层(z=1000)会盖住槽内任何 z 值;portal 脱离该子树不受限
+        ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.register(
+            { name: 'shell.overlay', id: 'session-manager-action-toast' },
+            () => React.createElement(OverlayActionToast, { source: actionToastSource }),
+          ))
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')
 
@@ -436,6 +427,24 @@ function ArchiveToast(props) {
             return () => clearTimeout(timer)
           }, [current.seq])
           return React.createElement(ArchiveToast, { key: current.seq, toast: current })
+        }
+
+        function OverlayActionToast({ source }) {
+          const current = useSyncExternalStore(source.subscribe, source.getSnapshot)
+          useEffect(() => {
+            // 错误常驻待确认;成功提示与归档 Toast 同节奏自动消失
+            if (current.text === null || current.text === undefined || current.sticky) return
+            const timer = setTimeout(() => emitActionToast(null, 'ok'), TOAST_HOLD_MS)
+            return () => clearTimeout(timer)
+          }, [current.seq])
+          return createPortal(
+            React.createElement(ActionToast, {
+              key: current.seq,
+              toast: current,
+              onDismiss: () => emitActionToast(null, 'ok'),
+            }),
+            document.body,
+          )
         }
       },
     }
