@@ -27,7 +27,7 @@ dsh-plugin/
 | @mzzsfy/dsh-llm-pi-gateway | newapi 等 LLM 网关的会话粘性路由,提升网关侧 prompt 缓存命中;装上即零感知接管官方 pi-ai 路由,卸载即还原 | 请求体按协议写入会话标记(anthropic metadata.user_id / openai prompt_cache_key,sha256 派生不暴露内部 id),compat 全控、metadata 模板透传、静态 headers 兜底;bundle patch 以官方 schema 接管路由 | DSH host 端插件(pi-ai 透传 adapter) |
 | @mzzsfy/dsh-model-capability-editor | 模型能力编辑器:可视化编辑各模型的思考档位与图片输入(多模态)声明 | 读取官方 describe 拿当前声明,表单编辑后整组写回 settings.yaml(未编辑条目保留,冲突字段级重放不静默覆盖);官方模型行内直接挂编辑块,锚点破坏时浮动入口兜底 | DSH 纯前端插件(settings.models.footer 卡片) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,卸载即恢复官方齿轮 | 观察设置导航 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
-| @mzzsfy/mcp-ssh | agent-shell MCP server:本地与 SSH 命令执行、命令黑白名单护栏、交互会话人机协同(用户可代输密码/确认),标准 MCP stdio,Claude Code / OpenCode / Codex / DSH 通用 | 本机走平台 shell、SSH 走系统 ssh/scp 二进制(config/known_hosts 主机发现,@password 注释经 askpass 注入);危险命令挂起等人工批准;start/read/send/kill 会话模型让 AI 与用户共享 stdin/stdout;内置 control HTTP 供面板观察(默认关) | 独立 MCP server(npm bin)+ Claude Code plugin 包装(.claude-plugin + .mcp.json + skills) |
+| @mzzsfy/mcp-ssh | agent-shell MCP server:本地与 SSH 命令执行、命令黑白名单护栏、交互会话人机协同(用户可代输密码/确认),标准 MCP stdio,Claude Code / OpenCode / Codex / DSH 通用 | 本机走平台 shell、SSH 走系统 ssh/scp 二进制(config/known_hosts 主机发现,@password 注释经 askpass 注入);危险命令挂起等人工批准;start/read/send/kill 会话模型让 AI 与用户共享 stdin/stdout;内置 control HTTP 供面板观察(默认关) | 独立 MCP server(npm bin)+ Claude Code plugin 包装(.claude-plugin + .mcp.json + skills);无 dsh 元数据,非 profile 层插件,作为普通依赖由 dsh-agent-shell 按名解析拉起 |
 | @mzzsfy/dsh-agent-shell | DSH agent 命令执行面板:自动拉起 @mzzsfy/mcp-ssh 桥接为 mcp__agent-shell__* 九个工具,执行流实时可见,被拦命令人工批准,密码/确认用户可直接接管输入 | host 端 spawn MCP server 子进程(意外退出自动重启)并桥接工具,webServer 路由代理事件流;装了 dsh-better-sidebar 自动注册 Agent Shell 标签页,没装回退 /agent-shell 简陋页(功能一致) | DSH 双端插件(host spawn+桥接+路由,client 标签页) |
 
 ## 安装与更新:缩短 pnpm 宽限期
@@ -47,6 +47,18 @@ pnpm config set --global minimumReleaseAge 360
 - 仓库级测试:根目录执行 `node --test tests/engine.test.mjs`(rs-workflow engine.js 编排脚本验收)
 - 包内测试:dsh-usage-panel 与 dsh-maintain 目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test,只有下面的冒烟脚本
 - @mzzsfy/dsh-rs-workflow 冒烟:`node .\scripts\test-workflow-plugin.mjs`(默认测已安装副本,传入包目录路径可测任意构建;仓库内副本解析不了 peer 依赖,需先安装再测)
+
+## 开发态链接(dev-link)
+
+```sh
+node scripts/dev-link.mjs all          # 归一 profile 依赖行(^线上最新)+ 挂工作副本 junction
+node scripts/dev-link.mjs <包名>       # 单包模式
+node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
+```
+
+- 开发态合法形态唯一:依赖行 = semver,工作副本挂载 = junction;pnpm 对 file: 是整目录拷贝,禁止 file:/link: 依赖行
+- link 时在 home 补丁层(~/.dsh/cordis.patch.yml)维护 hmr 覆盖行:仓库 packages 保存即热重载(host 半区约 1 秒,client 半区刷新页面),卸链时移除
+- **普通依赖豁免**:@mzzsfy/mcp-ssh 无 dsh 元数据,不是 profile 层插件,由 dsh-agent-shell 按名解析拉起——dev-link 不归一其依赖行、不挂 junction、不校验版本(pnpm 安装版为准,半成品工作副本会拖垮拉起方);豁免清单在 dev-link.mjs 的 PLAIN_DEPS
 
 dsh-usage-panel 的无 IO 纯逻辑层(`src/parsers.mjs`)由其 npm test 覆盖。包元数据:dsh-usage-panel peerDependencies 为 `react ^18.2.0`;@mzzsfy/dsh-rs-workflow 为 `@deepseek-ai/dsh-settings`(^0.1.1-rc.2)、`@deepseek-ai/dsh-tools`(^0.1.1-rc.2)与 `@deepseek-ai/schemastery`(^3.18.1);@mzzsfy/dsh-maintain 为 `@deepseek-ai/dsh-settings`(>=0.1.1-rc.2)、`@deepseek-ai/schemastery`(>=3.18.0)与 `react`(^18.2.0)。peer 均由 pnpm 标准安装的虚拟层链入解析。
 
