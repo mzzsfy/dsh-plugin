@@ -528,7 +528,7 @@ window.__ModuleLoader__.load({
       '.tn-btn:hover { background:var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2, transparent)); }',
       '.tn-btn:disabled { opacity:0.45; cursor:default; }',
       '.tn-btn--primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary);',
-      '  color:var(--dsw-alias-brand-text, #fff); font-weight:600; }',
+      '  color:var(--dsw-alias-bg-base, #fff); font-weight:600; }',
       '.tn-btn--primary:hover { background:var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary)); }',
       '.tn-btn--ghost { background:transparent; border-color:transparent; color:var(--dsw-alias-label-secondary); }',
       '.tn-btn--ghost:hover { color:var(--dsw-alias-state-error-primary, #d43a3a);',
@@ -554,7 +554,7 @@ window.__ModuleLoader__.load({
       '  transition:all 0.15s; }',
       '.tn-pill:hover { border-color:var(--dsw-alias-brand-primary); }',
       '.tn-pill--on { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary);',
-      '  color:var(--dsw-alias-brand-text, #fff); font-weight:600; }',
+      '  color:var(--dsw-alias-bg-base, #fff); font-weight:600; }',
       // bot 标签:名称与取消注册组合为一个 chip
       '.tn-chip { display:inline-flex; align-items:center; gap:2px; border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
       '  border-radius:999px; overflow:hidden; font-size:12px; }',
