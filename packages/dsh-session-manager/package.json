@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-session-manager",
   "description": "会话自动归档与管理:超期自动归档、归档面板、删除进系统回收站、还原后一键重挂载",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "main": "src/index.js",
   "exports": {

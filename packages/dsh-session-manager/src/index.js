@@ -7,6 +7,7 @@
 // 行与归档集合做交集。
 
 import { open, realpath, stat } from 'node:fs/promises'
+import { dirname } from 'node:path'
 
 import schemastery from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -53,7 +54,8 @@ const LEDGER_SPEC = defineDomain({
 
 const BLANK_PROBE_CHUNK_BYTES = 64 * 1024
 
-const MESSAGES = {
+// 路由响应文案;导出供测试断言与实现同步
+export const MESSAGES = {
   unsupportedBackend: '当前存储后端不支持按会话删除',
   notArchived: '仅已归档会话可删除',
   unknownSession: '会话不存在',
@@ -63,6 +65,9 @@ const MESSAGES = {
   archiveCleanup: '已移入回收站,但移除归档记录失败',
   ledgerFailed: '已移入回收站,但重挂载记录失败',
   notRestored: '会话产物不在持久层,请先到系统回收站还原后重试',
+  ghostCleanup: '产物已不存在,已完成列表清理',
+  ghostDetach: '产物已不存在,但移除列表记录失败',
+  ghostArchiveSuffix: ',且移除归档记录失败',
   noWorkspace: '未找到会话所属工作区,无法重新挂载',
   ledgerCleanup: '已重新挂载,但清除台账记录失败;可在「已删除」区移除记录收尾',
   ledgerSuffix: ',且重挂载记录失败',
@@ -231,6 +236,20 @@ export function apply(ctx, config) {
     if (removed) await ledger.global.set({ ...current, deleted })
   }
 
+  // 幽灵残留清理:产物已缺失的会话仅解除列表可见性(detach + 归档清理),
+  // 无回收与台账动作;失败点聚合成后缀,重试即补全
+  async function cleanupDeletedSession(sessionId) {
+    let suffix = ''
+    const detachError = await detachSession(ctx, sessionId)
+    if (detachError !== undefined) suffix = MESSAGES.ghostDetach
+    try {
+      await removeArchivedId(sessionId)
+    } catch {
+      suffix += MESSAGES.ghostArchiveSuffix
+    }
+    return suffix
+  }
+
   const routes = [
     {
       path: '/api/session-manager/unarchive',
@@ -261,7 +280,17 @@ export function apply(ctx, config) {
             sendJson(res, 200, { supported: false })
             return
           }
-          const info = await stat(location.path)
+          let info
+          try {
+            info = await stat(location.path)
+          } catch (error) {
+            // live 记录可指向已删除会话,产物缺失是常规状态而非故障
+            if (error && error.code === 'ENOENT') {
+              sendJson(res, 200, { supported: true, sizeBytes: 0, missing: true })
+              return
+            }
+            throw error
+          }
           sendJson(res, 200, { supported: true, sizeBytes: info.size })
         } catch (error) {
           sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
@@ -274,15 +303,6 @@ export function apply(ctx, config) {
         if (!rejectMethod(req, res, 'POST')) return
         try {
           const sessionId = await requireSessionId(req)
-          // host 端到端权威:归档资格与 locate 在执行前各校验一次
-          const eligibility = deleteEligibility({
-            archivedIds: ctx.workspaceRegistry.archivedSessionIds.map(String),
-            sessionId,
-          })
-          if (!eligibility.ok) {
-            sendJson(res, 400, { error: MESSAGES.notArchived })
-            return
-          }
           const header = await findHeader(ctx, sessionId)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
@@ -299,9 +319,39 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.unsupportedBackend })
             return
           }
+          // locate 返回会话目录下的日志文件;回收对象是目录整体,残留空目录会让
+          // 已删除会话在面板以空壳复活
+          const artifactDir = dirname(location.path)
+          // live 记录可指向已删除会话:产物缺失时无回收动作,仅完成列表清理;
+          // 幽灵多已不在归档集合,资格检查放宽为容忍未归档
+          let artifactMissing = false
+          try {
+            await stat(location.path)
+          } catch (error) {
+            if (error && error.code !== 'ENOENT') throw error
+            artifactMissing = true
+          }
+          if (artifactMissing) {
+            const cleanupError = await cleanupDeletedSession(sessionId)
+            if (cleanupError !== '') {
+              sendJson(res, 200, { ok: true, partial: true, message: cleanupError })
+              return
+            }
+            sendJson(res, 200, { ok: true, message: MESSAGES.ghostCleanup })
+            return
+          }
+          // host 端到端权威:归档资格在执行前校验
+          const eligibility = deleteEligibility({
+            archivedIds: ctx.workspaceRegistry.archivedSessionIds.map(String),
+            sessionId,
+          })
+          if (!eligibility.ok) {
+            sendJson(res, 400, { error: MESSAGES.notArchived })
+            return
+          }
           let trashError
           try {
-            await executor.trashPath(location.path)
+            await executor.trashPath(artifactDir)
           } catch (error) {
             trashError = error
           }
@@ -314,7 +364,7 @@ export function apply(ctx, config) {
           // 台账失败只降级重挂载便利,不回滚删除
           let ledgerError
           try {
-            await recordDeletedEntry(sessionId, location.path)
+            await recordDeletedEntry(sessionId, artifactDir)
           } catch (error) {
             ledgerError = error
           }
