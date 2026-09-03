@@ -40,6 +40,10 @@ dsh plugin add @mzzsfy/dsh-agent-shell
 }
 ```
 
+## 依赖缺失降级
+
+本插件依赖 `@mzzsfy/mcp-ssh`(npm dependencies 自动安装)。若因网络中断、pnpm 宽限期跳装等原因缺失,插件**不报错**:标签页/页面顶部显示"缺少依赖 @mzzsfy/mcp-ssh"横幅与安装命令,后台每 30 秒重探测,依赖装好后自动恢复,无需重启 DSH。
+
 ## 与 DSH 自带 shell 工具的关系
 
 DSH 内置 bash/终端是沙箱会话;本插件走独立 MCP 通道,定位是**与用户协同的任意命令执行 + SSH**。两者可并存;不希望 agent 使用本工具时在 DSH 工具开关里禁用对应条目即可。

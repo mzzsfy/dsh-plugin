@@ -6,16 +6,19 @@ import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readFileSync } from 'node:fs'
 import { readFile, mkdir } from 'node:fs/promises'
 import { createMcpClient } from './mcp-client.mjs'
 import { createRoutes } from './routes.mjs'
+import { resolveServerEntry } from './dependency.mjs'
 
 export const name = 'dsh-agent-shell'
 export const inject = ['tools', 'webServer']
 
 const SERVER_NAME = 'agent-shell'
 const TOOL_PREFIX = `mcp__${SERVER_NAME}__`
+const DEPENDENCY_NAME = '@mzzsfy/mcp-ssh'
+// 依赖缺失后的重探测间隔:依赖装好后无需重启 dsh 即自愈
+const DEPENDENCY_RETRY_MS = 30 * 1000
 const HOME_DIR = join(homedir(), '.dsh', 'dsh-agent-shell')
 const STATE_PATH = join(HOME_DIR, 'server.json')
 const START_TIMEOUT_MS = 30 * 1000
@@ -25,13 +28,6 @@ const TOOL_OUTPUT_SCHEMA = {
   type: 'object',
   properties: { text: { type: 'string' }, isError: { type: 'boolean' } },
   required: ['text'],
-}
-
-// server 入口 = 包内 bin(bin/mcp-ssh.mjs 调用 main());server.mjs 只导出不自动执行
-function serverEntryPath() {
-  const pkgUrl = fileURLToPath(import.meta.resolve('@mzzsfy/mcp-ssh/package.json'))
-  const pkg = JSON.parse(readFileSync(pkgUrl, 'utf8'))
-  return join(dirname(pkgUrl), pkg.bin['mcp-ssh'])
 }
 
 function readBody(req, limit = 1024 * 1024) {
@@ -95,6 +91,8 @@ export function apply(ctx) {
     stopping: false,
     registered: [],
     lastError: '',
+    status: 'starting',
+    missing: '',
   }
 
   async function controlFetch(pathname, { method = 'GET', body, timeoutMs = 60 * 1000 } = {}) {
@@ -144,7 +142,14 @@ export function apply(ctx) {
   }
 
   async function startServer() {
-    const entry = serverEntryPath()
+    const entry = resolveServerEntry(DEPENDENCY_NAME)
+    if (entry === null) {
+      state.status = 'dependency-missing'
+      state.missing = DEPENDENCY_NAME
+      throw new Error(`依赖 ${DEPENDENCY_NAME} 未安装`)
+    }
+    state.status = 'starting'
+    state.missing = ''
     const child = spawn(process.execPath, [entry], {
       env: {
         ...process.env,
@@ -199,9 +204,17 @@ export function apply(ctx) {
         await startServer()
         state.restarts = 0
         state.lastError = ''
+        state.status = 'ready'
         await state.client.whenClosed()
+        state.status = 'server-exited'
       } catch (error) {
         state.lastError = String(error?.message || error)
+        if (state.status === 'dependency-missing') {
+          // 降级态:固定间隔重探测,不进重启计数,依赖装好后自愈
+          console.warn(`[agent-shell] ${state.lastError},${Math.round(DEPENDENCY_RETRY_MS / 1000)}s 后重探测`)
+          await sleepUnlessStopping(DEPENDENCY_RETRY_MS)
+          continue
+        }
         console.error(`[agent-shell] server 启动失败: ${state.lastError}`)
       }
       disposeBridge()
@@ -211,8 +224,25 @@ export function apply(ctx) {
         console.error(`[agent-shell] 连续重启超过 ${RESTART_MAX} 次,停止重启(${state.lastError})`)
         break
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000 * state.restarts))
+      await sleepUnlessStopping(1000 * state.restarts)
     }
+  }
+
+  // 可中断 sleep:stopping 置位立即返回,避免 stop 时还挂着等间隔
+  function sleepUnlessStopping(ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(wake, ms)
+      function wake() {
+        clearInterval(poll)
+        resolve()
+      }
+      const poll = setInterval(() => {
+        if (state.stopping) {
+          clearTimeout(timer)
+          wake()
+        }
+      }, 500)
+    })
   }
 
   const pageHtml = readFile(join(dirname(fileURLToPath(import.meta.url)), 'page.html'), 'utf8')
