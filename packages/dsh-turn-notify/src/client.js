@@ -764,8 +764,8 @@ window.__ModuleLoader__.load({
       }
 
       // IM 目标加载:目录来自 dsh-im 已保存目标;失败(离线/ID 复制错误)如实展示错误码
-      async function loadImTargets() {
-        const botId = imBotIdDraft.trim()
+      async function loadImTargets(botIdOverride) {
+        const botId = (typeof botIdOverride === 'string' ? botIdOverride : imBotIdDraft).trim()
         if (botId.length === 0) {
           patch('请先粘贴 Bot ID(设置页 IM机器人 卡片右上角齿轮)', 'error')
           return
@@ -784,9 +784,15 @@ window.__ModuleLoader__.load({
       // botId/targetId 字符集均不含 '/',拼接键无歧义;与 host 侧写入校验共用 dsh-im ID 规格
       const imTargetKey = (item) => item.botId + '/' + item.targetId
 
+      // 已绑 bot:按首次绑定顺序去重,渲染 chips(点名称加载目录,× 取消注册)
+      const imBoundBots = []
+      for (const item of config.imTargets) {
+        if (!imBoundBots.includes(item.botId)) imBoundBots.push(item.botId)
+      }
+
       // 勾选即存:与分类开关同模式,列表整体替换,连续操作以最新一次请求为准
       let imPersistSeq = 0
-      async function persistImTargets(next) {
+      async function persistImTargets(next, okMessage) {
         const seq = ++imPersistSeq
         setConfig({ ...config, imTargets: next })
         try {
@@ -794,6 +800,7 @@ window.__ModuleLoader__.load({
           if (seq === imPersistSeq) {
             setConfig({ ...DEFAULT_CONFIG, ...res })
             if (res.soundMapping) setMappingState(res.soundMapping)
+            if (okMessage !== undefined) patch(okMessage)
           }
         } catch (error) {
           patch('IM 目标保存失败:' + (error && error.message ? error.message : String(error)), 'error')
@@ -809,6 +816,14 @@ window.__ModuleLoader__.load({
 
       function removeImTarget(item) {
         void persistImTargets(config.imTargets.filter((existing) => imTargetKey(existing) !== imTargetKey(item)))
+      }
+
+      // 取消注册:移除该 bot 全部目标;bot 在 dsh-im 已删除时借此清理残留绑定
+      function unregisterImBot(botId) {
+        void persistImTargets(
+          config.imTargets.filter((item) => item.botId !== botId),
+          '已取消注册 ' + botId,
+        )
       }
 
       async function testIm() {
@@ -900,7 +915,7 @@ window.__ModuleLoader__.load({
         ),
         config.imAvailable ? h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
-          h('div', { className: 'tn-meta' }, '勾选目标即自动保存,任务完成等待审批等通知将同步推送 IM'),
+          h('div', { className: 'tn-meta' }, '勾选目标即自动保存;支持绑定多个 bot,点 bot 名加载其目录,× 取消注册'),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-meta' }, 'Bot ID'),
             h('input', {
@@ -911,6 +926,19 @@ window.__ModuleLoader__.load({
             }),
             h('button', { className: 'tn-btn', disabled: busy, onClick: () => void loadImTargets() }, '加载目标'),
           ),
+          imBoundBots.length > 0 ? h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, '已绑 bot'),
+            imBoundBots.map((botId) => h('span', { className: 'tn-meta', key: botId },
+              h('button', {
+                className: 'tn-btn', disabled: busy,
+                onClick: () => { setImBotIdDraft(botId); void loadImTargets(botId) },
+              }, botId),
+              h('button', {
+                className: 'tn-btn', disabled: busy, title: '取消注册(移除该 bot 全部目标)',
+                onClick: () => unregisterImBot(botId),
+              }, '×'),
+            )),
+          ) : null,
           imCatalog !== null
             ? imCatalog.targets.length === 0
               ? h('div', { className: 'tn-meta' }, '该 bot 尚无已保存投递目标,先在 dsh-im 设置页新建并测试')
