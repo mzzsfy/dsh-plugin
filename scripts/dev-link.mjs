@@ -18,7 +18,8 @@
  *
  * 原理与约束:
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
- *     realpath,天然读到仓库工作副本 —— 改代码重启 dsh 即生效,无需发版。
+ *     realpath,天然读到仓库工作副本;同时本脚本在 home 补丁层维护 hmr 覆盖行,
+ *     watch 仓库 packages —— host 半区保存即热重载,client 半区刷新页面即生效。
  *   - pnpm install / dsh plugin add 会重建 node_modules:两者之后必须重跑本脚本。
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
@@ -31,8 +32,28 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const profileRoot = join(process.env.USERPROFILE, '.dsh', 'profiles', 'web')
 const profileManifest = join(profileRoot, 'package.json')
 const workspaceYaml = join(profileRoot, 'pnpm-workspace.yaml')
+const homePatch = join(process.env.USERPROFILE, '.dsh', 'cordis.patch.yml')
 const SCOPE = '@mzzsfy/'
 const REGISTRY = 'https://registry.npmjs.org'
+
+// dev 热更新:hmr 行由本脚本在 home 补丁层维护(市场只写 profile 层,互不冲突)。
+// root 指向仓库 packages;junction 挂载下 Node 按 realpath 解析模块,变更即命中。
+// 测试/文档/依赖目录不参与重载,防编辑风暴。
+const HOT_MARK_BEGIN = '# >>> dsh-plugin dev-hmr(本块由 scripts/dev-link.mjs 维护,勿手工编辑)'
+const HOT_MARK_END = '# <<< dsh-plugin dev-hmr'
+const hotRow = (repoRoot) => `${HOT_MARK_BEGIN}
+- id: hmr
+  disabled: false
+  config:
+    root:
+      - ${repoRoot.replace(/\\/g, '/')}/packages
+    ignored:
+      - '**/node_modules/**'
+      - '**/test/**'
+      - '**/*.test.mjs'
+      - '**/*.md'
+      - '**/.*'
+${HOT_MARK_END}`
 
 const npmCmd = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm')
 
@@ -91,6 +112,34 @@ function syncReleaseAgeExclude(packages, latests) {
   writeFileSync(workspaceYaml, next)
   console.log('FIX  minimumReleaseAgeExclude 已重写为各包线上最新版')
   return true
+}
+
+/**
+ * 维护 home 补丁层的 dev 热更新块:链接时写入 hmr 覆盖行(web bundle 默认禁用共享
+ * HMR,此处按 id 重新声明并给 root),卸链时整块移除。按标记块幂等替换。
+ */
+function syncDevHmr(enable) {
+  const block = hotRow(repoRoot)
+  const raw = existsSync(homePatch) ? readFileSync(homePatch, 'utf8').replace(/^\uFEFF/, '') : ''
+  const pattern = new RegExp(`${HOT_MARK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${HOT_MARK_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n?`)
+  const stripped = raw.replace(pattern, '')
+  if (!enable) {
+    if (stripped === raw) {
+      console.log('OK   dev 热更新块不存在,无需移除')
+      return
+    }
+    writeFileSync(homePatch, stripped)
+    console.log('OK   已从 home 补丁层移除 dev 热更新块')
+    return
+  }
+  if (raw.includes(block)) {
+    console.log('OK   dev 热更新块已是最新,无需更新')
+    return
+  }
+  const base = stripped.replace(/\s*$/, '')
+  const next = base === '' ? `${block}\n` : `${base}\n\n${block}\n`
+  writeFileSync(homePatch, next)
+  console.log('FIX  已在 home 补丁层写入 dev 热更新块(hmr root -> 仓库 packages)')
 }
 
 /** 归一依赖行:非 semver(历史 link:/file: 残留)或落后线上的一律改为 ^线上最新;返回 变更与否 + 各包线上 latest */
@@ -248,6 +297,7 @@ if (!unlink) {
 }
 
 if (unlink) {
+  syncDevHmr(false)
   for (const name of names) {
     if (!existsSync(junctionPath(name))) {
       console.log(`SKIP ${name}: 未挂链接`)
@@ -258,6 +308,7 @@ if (unlink) {
     console.log(`${run.status === 0 ? 'OK  ' : 'FAIL'} ${name}: 已卸链接并恢复 registry 版本`)
   }
 } else {
+  syncDevHmr(true)
   for (const name of names) mountJunction(name)
 }
 
