@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
- * 开发链接(唯一入口):归一 profile 依赖行 + 挂 junction,两步保证状态统一。
+ * 开发链接(唯一入口):归一 profile 依赖行 + 挂 junction + 终态校验,三步保证状态统一。
  *
  * 用法:
- *   node scripts/dev-link.mjs <包名|all>            归一依赖行并挂链接(包名 = packages/ 下目录名)
- *   node scripts/dev-link.mjs <包名|all> --unlink   卸链接,恢复 registry 安装版
+ *   node scripts/dev-link.mjs <包名|all> [--unlink] [--allow-fresh]
+ *     包名 = packages/ 下目录名
+ *     --allow-fresh  pnpm install 放行 minimumReleaseAge 宽限期策略(仅限自家刚发布的包)
  *
  * 统一规则(唯一的合法形态,禁止第三种状态):
  *   - profile 依赖行一律 semver(^线上最新版),link:/file:/本地路径一律被本脚本归一清除
  *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径
  *   - 依赖行版本以 npm 线上 latest 为准,本地 manifest 未发布的版本不影响依赖行
+ *   - 终态校验不过即退出码 1:依赖行必须等于 ^线上最新,挂载必须是指向仓库的 junction,
+ *     pnpm install 必须成功 —— 不存在"看起来 link 了"的中间态
  *
  * 原理与约束:
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
@@ -18,7 +21,7 @@
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
 import {spawnSync} from 'node:child_process'
-import {existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
@@ -37,6 +40,11 @@ function discoverPackages() {
     .map((e) => e.name)
 }
 
+/** 读 profile 清单;剥掉 PowerShell 写入可能带的 UTF-8 BOM */
+function readProfileManifest() {
+  return JSON.parse(readFileSync(profileManifest, 'utf8').replace(/^\uFEFF/, ''))
+}
+
 /** npm 线上 latest;查询失败直接中止,防止网络故障被当成版本回退 */
 function onlineLatest(name) {
   const r = spawnSync([npmCmd(), 'view', name, 'version', '--registry', REGISTRY].join(' '), {
@@ -44,26 +52,22 @@ function onlineLatest(name) {
     shell: true,
   })
   if (r.status !== 0) {
-    console.error(`FAIL ${name}: 线上版本查询失败,中止归一:\n${r.stderr}`)
+    console.error(`FAIL ${name}: 线上版本查询失败,中止:\n${r.stderr}`)
     process.exit(1)
   }
   return r.stdout.trim()
 }
 
-/** 读 profile 清单;剥掉 PowerShell 写入可能带的 UTF-8 BOM */
-function readProfileManifest() {
-  const raw = readFileSync(profileManifest, 'utf8').replace(/^\uFEFF/, '')
-  return JSON.parse(raw)
-}
-
-/** 归一依赖行:非 semver(历史 link:/file: 残留)或落后线上的一律改为 ^线上最新;返回是否有变更 */
+/** 归一依赖行:非 semver(历史 link:/file: 残留)或落后线上的一律改为 ^线上最新;返回 变更与否 + 各包线上 latest */
 function normalizeDeps(packages) {
   const manifest = readProfileManifest()
   manifest.dependencies = manifest.dependencies || {}
   let changed = false
+  const latests = {}
   for (const dir of packages) {
     const key = SCOPE + dir
-    const want = `^${onlineLatest(key)}`
+    latests[dir] = onlineLatest(key)
+    const want = `^${latests[dir]}`
     const current = manifest.dependencies[key]
     if (current === want) {
       console.log(`OK   ${key}: ${want}`)
@@ -74,23 +78,108 @@ function normalizeDeps(packages) {
     changed = true
   }
   if (changed) writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
-  return changed
+  return {changed, latests}
 }
 
-function pnpmInstall(reason) {
-  console.log(`$ pnpm install(profile 内,${reason})`)
-  const r = spawnSync('pnpm', ['install'], {cwd: profileRoot, encoding: 'utf8', shell: true})
-  if (r.status !== 0) console.error(`FAIL pnpm install 非零退出(依赖行已写入,可单独重跑后重挂链接):\n${r.stderr}`)
+function pnpmInstall(allowFresh) {
+  const args = allowFresh ? ['install', '--config.minimum-release-age=0'] : ['install']
+  console.log(`$ pnpm ${args.join(' ')}(profile 内)`)
+  const r = spawnSync('pnpm', args, {cwd: profileRoot, encoding: 'utf8', shell: true})
+  if (r.status !== 0) console.error(`FAIL pnpm install 非零退出:\n${r.stderr || '(无输出;被 minimumReleaseAge 拦截时可加 --allow-fresh)'}`)
   return r.status === 0
+}
+
+function junctionPath(name) {
+  return join(profileRoot, 'node_modules', SCOPE, name)
+}
+
+/** 挂/重挂单个 junction;返回是否成功 */
+function mountJunction(name) {
+  const sourcePath = join(repoRoot, 'packages', name)
+  if (!existsSync(sourcePath)) {
+    console.error(`FAIL ${name}: 仓库目录缺失 ${sourcePath}`)
+    return false
+  }
+  const linkPath = junctionPath(name)
+  mkdirSync(dirname(linkPath), {recursive: true})
+  if (existsSync(linkPath)) rmSync(linkPath, {recursive: true, force: true})
+  const run = spawnSync('cmd', ['/c', 'mklink', '/J', linkPath, sourcePath], {encoding: 'utf8'})
+  if (run.status !== 0) {
+    console.error(`FAIL ${name}: mklink 失败\n${run.stderr}`)
+    return false
+  }
+  console.log(`OK   ${name}: ${linkPath} -> ${sourcePath}`)
+  return true
+}
+
+/** 读物理路径的 junction 指向;非链接返回 null */
+function readJunctionTarget(linkPath) {
+  try {
+    return readlinkSync(linkPath)
+  } catch {
+    return null
+  }
+}
+
+/** 终态校验:依赖行、挂载指向、(卸链时的)安装版本逐项比对,任一不符即整体失败 */
+function verifyAll(packages, latests, unlink) {
+  const manifest = readProfileManifest()
+  const failures = []
+  for (const dir of packages) {
+    const key = SCOPE + dir
+    const latest = latests[dir] ?? onlineLatest(key)
+    const want = `^${latest}`
+    const dep = manifest.dependencies[key]
+    if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
+
+    const phys = junctionPath(dir)
+    if (unlink) {
+      if (readJunctionTarget(phys) !== null) {
+        failures.push(`${key}: 卸链后 node_modules 仍是链接`)
+        continue
+      }
+      const manifestPath = join(phys, 'package.json')
+      if (!existsSync(manifestPath)) {
+        failures.push(`${key}: node_modules 未安装`)
+        continue
+      }
+      const installed = JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, '')).version
+      if (installed !== latest) failures.push(`${key}: 安装版本 ${installed} 应为线上 ${latest}`)
+      continue
+    }
+    const target = existsSync(phys) ? readJunctionTarget(phys) : null
+    if (target === null) {
+      failures.push(`${key}: node_modules 不是 junction(实体目录或缺失),工作副本不生效`)
+      continue
+    }
+    const expected = resolve(join(repoRoot, 'packages', dir)).toLowerCase()
+    if (resolve(target).toLowerCase() !== expected) {
+      failures.push(`${key}: junction 指向 ${target} 应为 ${expected}`)
+    }
+  }
+  if (failures.length) {
+    console.error(`\n校验失败 ${failures.length} 项,终态不统一:`)
+    for (const f of failures) console.error(`  - ${f}`)
+    process.exitCode = 1
+    return false
+  }
+  console.log(`\n校验通过:${packages.length} 个包依赖行 = ^线上最新,挂载/安装状态与声明一致`)
+  return true
 }
 
 const args = process.argv.slice(2)
 const unlink = args.includes('--unlink')
+const allowFresh = args.includes('--allow-fresh')
 const target = args.find((a) => !a.startsWith('--'))
 if (!target) {
-  console.error('用法: node scripts/dev-link.mjs <包名|all> [--unlink]')
+  console.error('用法: node scripts/dev-link.mjs <包名|all> [--unlink] [--allow-fresh]')
   process.exit(1)
 }
+if (!existsSync(profileManifest)) {
+  console.error(`profile 不存在: ${profileRoot}`)
+  process.exit(1)
+}
+
 const packages = discoverPackages()
 const names = target === 'all' ? packages : [target]
 for (const name of names) {
@@ -100,50 +189,33 @@ for (const name of names) {
   }
 }
 
-if (!existsSync(profileManifest)) {
-  console.error(`profile 不存在: ${profileRoot}`)
-  process.exit(1)
+let latests = {}
+if (!unlink) {
+  const normalized = normalizeDeps(packages)
+  latests = normalized.latests
+  if (normalized.changed) {
+    if (!pnpmInstall(allowFresh)) {
+      console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
+      process.exitCode = 1
+    }
+    // pnpm 重建过整个 node_modules:全部包重挂,不限于本次指定的包
+    for (const dir of packages) mountJunction(dir)
+  }
 }
 
-let depsChanged = false
-if (!unlink) depsChanged = normalizeDeps(names)
-
-for (const name of names) {
-  const linkPath = join(profileRoot, 'node_modules', SCOPE, name)
-  const sourcePath = join(repoRoot, 'packages', name)
-  if (!existsSync(sourcePath)) {
-    console.error(`FAIL ${name}: 仓库目录缺失 ${sourcePath}`)
-    continue
-  }
-  if (unlink) {
-    if (!existsSync(linkPath)) {
+if (unlink) {
+  for (const name of names) {
+    if (!existsSync(junctionPath(name))) {
       console.log(`SKIP ${name}: 未挂链接`)
       continue
     }
-    rmSync(linkPath, {recursive: true, force: true})
+    rmSync(junctionPath(name), {recursive: true, force: true})
     const run = spawnSync('pnpm', ['install'], {cwd: profileRoot, encoding: 'utf8', shell: true})
     console.log(`${run.status === 0 ? 'OK  ' : 'FAIL'} ${name}: 已卸链接并恢复 registry 版本`)
-    continue
   }
-  mkdirSync(dirname(linkPath), {recursive: true})
-  if (existsSync(linkPath)) rmSync(linkPath, {recursive: true, force: true})
-  const run = spawnSync('cmd', ['/c', 'mklink', '/J', linkPath, sourcePath], {encoding: 'utf8'})
-  if (run.status !== 0) {
-    console.error(`FAIL ${name}: mklink 失败\n${run.stderr}`)
-    continue
-  }
-  console.log(`OK   ${name}: ${linkPath} -> ${sourcePath}`)
+} else {
+  for (const name of names) mountJunction(name)
 }
 
-// 依赖行被改写时:先重装清掉 link:/file: 时代的实体拷贝与过期安装,再把链接重挂一遍
-if (depsChanged) {
-  pnpmInstall('依赖行已归一,清残留')
-  for (const name of names) {
-    const linkPath = join(profileRoot, 'node_modules', SCOPE, name)
-    if (!existsSync(linkPath)) continue
-    rmSync(linkPath, {recursive: true, force: true})
-    spawnSync('cmd', ['/c', 'mklink', '/J', linkPath, join(repoRoot, 'packages', name)], {encoding: 'utf8'})
-  }
-  console.log('OK   已按归一后的依赖行重装并重挂链接')
-}
+verifyAll(packages, latests, unlink)
 console.log('\n提醒: profile 内执行过 pnpm install / dsh plugin add 后,链接会被覆盖,需重跑本脚本。')
