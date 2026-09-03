@@ -463,13 +463,15 @@ window.__ModuleLoader__.load({
 
     const PERMISSION_LABELS = { granted: '已授权', denied: '已拒绝', default: '未授权' }
 
-    // 面板表单占位:GET config 返回前展示;webhookUrl 凭据不出主机,面板只见是否已配置
+    // 面板表单占位:GET config 返回前展示;webhookUrl 凭据不出主机,面板只见是否已配置;
+    // imAvailable 缺省为假,加载响应后 dsh-im 在场才渲染 IM 投递卡
     const DEFAULT_CONFIG = {
       webhookConfigured: false,
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
       suppressSubagentWake: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
+      imTargets: [],
     }
 
     const CSS = [
@@ -513,6 +515,9 @@ window.__ModuleLoader__.load({
       const [configLoaded, setConfigLoaded] = useState(false)
       const [urlDraft, setUrlDraft] = useState('')
       const [permission, setPermission] = useState(notificationPermission())
+      // IM 投递:botId 草稿与当前加载到的目标目录(目录只在勾选时消费,不直接决定已选)
+      const [imBotIdDraft, setImBotIdDraft] = useState('')
+      const [imCatalog, setImCatalog] = useState(null)
       // 分类映射的受控 state:直接由写响应回填,不再依赖轮询变量驱动渲染
       const [mapping, setMappingState] = useState({})
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
@@ -655,7 +660,7 @@ window.__ModuleLoader__.load({
             : String(config.minTurnDurationMs)
           if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
           const trimmedUrl = urlDraft.trim()
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, imTargets: config.imTargets }
           // 只写语义:输入留空即保持现有 webhook 不变
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
@@ -757,6 +762,55 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // IM 目标加载:目录来自 dsh-im 已保存目标;失败(离线/ID 复制错误)如实展示错误码
+      async function loadImTargets() {
+        const botId = imBotIdDraft.trim()
+        if (botId.length === 0) {
+          patch('请先粘贴 Bot ID(设置页 IM机器人 卡片右上角齿轮)', 'error')
+          return
+        }
+        setBusy(true)
+        setNotice(null)
+        try {
+          const res = await api('/api/turn-notify/im-targets?botId=' + encodeURIComponent(botId))
+          setImCatalog({ botId, targets: res.targets || [] })
+          patch('已加载 ' + (res.targets || []).length + ' 个目标,勾选后需保存')
+        } catch (error) {
+          patch('加载失败:' + (error && error.message ? error.message : String(error)), 'error')
+        } finally { setBusy(false) }
+      }
+
+      // botId/targetId 字符集均不含 '/',拼接键无歧义;与 host 侧写入校验共用 dsh-im ID 规格
+      const imTargetKey = (item) => item.botId + '/' + item.targetId
+
+      // 勾选幂等:同一 botId+targetId 只保留一份,取消勾选即移除
+      function toggleImTarget(botId, target, checked) {
+        const wanted = { botId, targetId: target.targetId }
+        const rest = config.imTargets.filter((item) => imTargetKey(item) !== imTargetKey(wanted))
+        setConfig({ ...config, imTargets: checked ? rest.concat([wanted]) : rest })
+      }
+
+      function removeImTarget(item) {
+        setConfig({ ...config, imTargets: config.imTargets.filter((existing) => imTargetKey(existing) !== imTargetKey(item)) })
+      }
+
+      async function testIm() {
+        try {
+          const result = await api('/api/turn-notify/test-im', { method: 'POST' })
+          if (!result.results) {
+            patch('IM 测试失败:' + result.detail, 'error')
+            return
+          }
+          const failed = result.results.filter((item) => !item.ok)
+          patch(failed.length === 0
+            ? 'IM 通知已全部送达(' + result.results.length + ' 个目标)'
+            : '部分失败:' + failed.map((item) => item.botId + '/' + item.targetId + ' ' + item.detail).join('; '),
+          failed.length === 0 ? 'ok' : 'error')
+        } catch (error) {
+          patch('发送失败:' + (error && error.message ? error.message : String(error)), 'error')
+        }
+      }
+
       // 音效描述:试听回执指明实际播放对象,映射失效回落内置时可见
       function describeSound(sound) {
         return sound.kind === 'custom' ? '上传音效 ' + sound.id : '内置 ' + (TONE_LABELS[sound.name] || sound.name)
@@ -827,6 +881,42 @@ window.__ModuleLoader__.load({
               ' ' + CATEGORY_LABELS[category],
             ))),
         ),
+        config.imAvailable ? h('div', { className: 'tn-card' },
+          h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, 'Bot ID'),
+            h('input', {
+              className: 'tn-input tn-fill', type: 'text',
+              placeholder: '从设置页 IM机器人 卡片复制 Bot ID',
+              value: imBotIdDraft,
+              onChange: (e) => setImBotIdDraft(e.target.value),
+            }),
+            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void loadImTargets() }, '加载目标'),
+          ),
+          imCatalog !== null
+            ? imCatalog.targets.length === 0
+              ? h('div', { className: 'tn-meta' }, '该 bot 尚无已保存投递目标,先在 dsh-im 设置页新建并测试')
+              : imCatalog.targets.map((target) => {
+                const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
+                return h('label', { className: 'tn-meta', key: target.targetId },
+                  h('input', {
+                    type: 'checkbox', checked,
+                    onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
+                  }),
+                  ' ' + target.targetId + (target.name ? '(' + target.name + ')' : '') + ' · ' + (target.kind || ''),
+                )
+              })
+            : null,
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-meta' }, '已选目标'),
+            config.imTargets.length === 0
+              ? h('span', { className: 'tn-meta' }, '无')
+              : config.imTargets.map((item) => h('span', { className: 'tn-meta', key: imTargetKey(item) },
+                  item.botId + '/' + item.targetId + ' ',
+                  h('button', { className: 'tn-btn', disabled: busy, onClick: () => removeImTarget(item) }, '删除'),
+                )),
+          ),
+        ) : null,
         h('div', { className: 'tn-card' },
           h('span', { className: 'tn-card__title' }, '测试'),
           h('div', { className: 'tn-row' },
@@ -845,6 +935,7 @@ window.__ModuleLoader__.load({
             h('button', { className: 'tn-btn', onClick: testPageNotification }, '测试页内通知'),
             h('button', { className: 'tn-btn', onClick: testSystemNotification }, '测试系统通知'),
             h('button', { className: 'tn-btn', onClick: () => void testWebhook() }, '测试 webhook'),
+            config.imAvailable ? h('button', { className: 'tn-btn', disabled: busy, onClick: () => void testIm() }, '测试 IM 通知') : null,
           ),
         ),
         h('div', { className: 'tn-card' },

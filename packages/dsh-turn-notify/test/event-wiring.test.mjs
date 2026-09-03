@@ -43,18 +43,40 @@ function makeSettings() {
   }
 }
 
-function makeCtx() {
+function makeCtx(extraServices) {
   const routes = new Map()
   const handlers = new Map()
   const settingsService = makeSettings()
   const ctx = {
     on(event, fn) { handlers.set(event, fn) },
-    get(key) { return key === 'settings' ? settingsService : undefined },
+    get(key) {
+      if (key === 'settings') return settingsService
+      return extraServices ? extraServices[key] : undefined
+    },
     inject(deps, fn) { fn({ settings: settingsService }) },
     effect(thunk) { thunk() },
     webServer: { register(route) { routes.set(route.path, route.handler) } },
   }
   return { ctx, routes, handlers }
+}
+
+const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve))
+
+function makeImDshIm(sends, failTargetId) {
+  return {
+    send: async (botId, targetId, text) => {
+      sends.push({ botId, targetId, text })
+      if (targetId === failTargetId) throw Object.assign(new Error('offline'), { code: 'bot-not-connected' })
+      return { sent: true }
+    },
+    listTargets: async () => [],
+  }
+}
+
+async function configureImTargets(routes, targets) {
+  const res = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { imTargets: targets }, JSON_HEADERS), res)
+  assert.equal(res.status, 200)
 }
 
 const MAIN = { id: 'M', header: { delegationDepth: 0 } }
@@ -141,4 +163,61 @@ test('Given 父会话已暂停收尾 When 子代理随后完成并唤醒父会�
   onEvent(MAIN, turnEnd('completed'))
   const units = await projectionUnits(routes)
   assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given dshIm 在场且已配多目标 When 回合完成 Then 逐目标投递 unit.text', async () => {
+  const sends = []
+  const { ctx, routes, handlers } = makeCtx({ dshIm: makeImDshIm(sends) })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  await configureImTargets(routes, [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 'group' }])
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  await flushMicrotasks()
+  assert.equal(sends.length, 2)
+  assert.deepEqual(sends.map((call) => call.targetId).sort(), ['group', 'owner'])
+  assert.ok(sends.every((call) => call.botId === 'wx_a' || call.botId === 'wx_b'))
+  assert.ok(sends.every((call) => String(call.text).startsWith('[dsh]')), 'IM 文本应与通知单元一致')
+})
+
+test('Given send 拒绝 When 回合完成 Then 无未处理拒绝且投影照常', async () => {
+  const rejections = []
+  const onUnhandled = (reason) => rejections.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const sends = []
+    const { ctx, routes, handlers } = makeCtx({ dshIm: makeImDshIm(sends, 'bad') })
+    apply(ctx)
+    await disableDurationFilter(routes)
+    await configureImTargets(routes, [{ botId: 'wx_a', targetId: 'bad' }])
+    const onEvent = handlers.get('session/event')
+    onEvent(MAIN, { type: 'turn/start' })
+    onEvent(MAIN, turnEnd('completed'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+    assert.equal(rejections.length, 0)
+    const units = await projectionUnits(routes)
+    assert.equal(units.length, 1)
+  } finally { process.off('unhandledRejection', onUnhandled) }
+})
+
+test('Given dshIm 缺席或未配目标 When 回合完成 Then 不投递且流程无感', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.length, 1)
+  const sends = []
+  const second = makeCtx({ dshIm: makeImDshIm(sends) })
+  apply(second.ctx)
+  await disableDurationFilter(second.routes)
+  const onEvent2 = second.handlers.get('session/event')
+  onEvent2(MAIN, { type: 'turn/start' })
+  onEvent2(MAIN, turnEnd('completed'))
+  await flushMicrotasks()
+  assert.equal(sends.length, 0)
 })
