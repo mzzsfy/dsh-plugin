@@ -1,14 +1,10 @@
 // 思考自动展开 Client 半区:纯前端 DOM 插件,流式思考自动展开最新一条。
-// 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
-// factory(require) 中 require('react') 由 DSH client runtime 的模块表解析。
+// 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory})。
 // 纯逻辑段在 LOGIC 标记之间,与 src/logic.mjs 保持同源,由 parity 测试保证。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-think-expand',
   factory(require) {
-    const React = require('react')
-    const { useState, useCallback } = React
-
     // ---- 官方 DOM 字面量标识(快照源码核实,不随 CSS Modules 哈希化) ----
 
     const SELECTOR_SCROLL = '[data-conversation-scroll]'
@@ -28,11 +24,6 @@ window.__ModuleLoader__.load({
       attributeFilter: [ATTR_EXPANDED, ATTR_STATE],
     }
     const DEBOUNCE_MS = 50
-    // 与 Host 半区 settings.register 的命名空间一致
-    const SETTINGS_NS = 'think-expand'
-    // localStorage 迁移:旧版本开关存这里,首次读到即迁入 Host settings
-    const LEGACY_STORAGE_KEY = 'dsh-think-expand:settings'
-    const SETTING_OFF = 'off'
 
     /* LOGIC-BEGIN */
     // 纯逻辑层:与 src/logic.mjs 同源实现,禁止只改其一。
@@ -179,41 +170,7 @@ window.__ModuleLoader__.load({
       }
       return { actions }
     }
-
-    function teardown(registry, rows) {
-      const actions = []
-      if (registry.current !== null) {
-        const index = findRow(registry, rows, registry.current.seen)
-        if (index >= 0 && rows[index].expanded) actions.push({ index, kind: 'collapse' })
-      }
-      registry.marks.clear()
-      registry.manual.clear()
-      registry.read.clear()
-      registry.current = null
-      return { actions }
-    }
     /* LOGIC-END */
-
-    // ---- 设置开关:权威值在 Host settings(think-expand.enabled),默认开 ----
-
-    // 旧版本开关存 localStorage,非 off(含无键)按开迁移;迁移读后即清旧键
-    function readLegacyEnabled() {
-      try {
-        const raw = window.localStorage.getItem(LEGACY_STORAGE_KEY)
-        if (raw === null) return null
-        window.localStorage.removeItem(LEGACY_STORAGE_KEY)
-        return raw !== SETTING_OFF
-      } catch {
-        return null
-      }
-    }
-
-    function scopeEnabled(scope) {
-      const snapshot = scope.getSnapshot()
-      if (snapshot === null || snapshot.value === undefined || snapshot.value === null) return null
-      const enabled = snapshot.value.enabled
-      return typeof enabled === 'boolean' ? enabled : true
-    }
 
     // ---- DOM 控制器:识别行、执行展开/收起、MutationObserver 接线 ----
 
@@ -341,152 +298,9 @@ window.__ModuleLoader__.load({
       ensureAttached()
     }
 
-    // 开关关闭:断开观察,收起全部由本插件展开的行,清空标记。
-    function stop() {
-      if (debounceTimer !== null) {
-        clearTimeout(debounceTimer)
-        debounceTimer = null
-      }
-      if (containerObserver !== null) {
-        containerObserver.disconnect()
-        containerObserver = null
-        observedContainer = null
-      }
-      if (bodySentinel !== null) {
-        bodySentinel.disconnect()
-        bodySentinel = null
-      }
-      const container = document.querySelector(SELECTOR_SCROLL)
-      const described = container === null
-        ? []
-        : Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
-      const rows = described.map(({ headable, state, bodyText, expanded }) =>
-        ({ headable, state, bodyText, expanded }))
-      for (const action of teardown(registry, rows).actions) applyAction(described, action)
-      pendingFinal = false
-      finalExpandedEl = null
-      finalPendingRegister = false
-    }
-
-    // ---- 设置面板:"插件配置"卡片,形态复刻官方 PluginCard(默认收起,头部展开) ----
-
-    const CARD_PREFIX = 'te-card'
-    const CHEVRON_PATH = 'M3.5 5.75 7 9.25l3.5-3.5'
-
-    function ensureCardStyle() {
-      if (document.getElementById('dsh-think-expand-card') !== null) return
-      const tag = document.createElement('style')
-      tag.id = 'dsh-think-expand-card'
-      tag.textContent = '.' + CARD_PREFIX + '{border:1px solid var(--dsw-alias-border-l2);'
-        + 'background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}'
-        + ' .' + CARD_PREFIX + ':hover{border-color:var(--dsw-alias-label-dimmed)}'
-        + ' .' + CARD_PREFIX + '-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}'
-        + ' .' + CARD_PREFIX + '__header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;'
-        + 'cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}'
-        + ' .' + CARD_PREFIX + '__header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}'
-        + ' .' + CARD_PREFIX + '__head-text{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}'
-        + ' .' + CARD_PREFIX + '__name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}'
-        + ' .' + CARD_PREFIX + '__desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}'
-        + ' .' + CARD_PREFIX + '__chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}'
-        + ' .' + CARD_PREFIX + '__chevron-open{transform:rotate(180deg)}'
-        + ' .' + CARD_PREFIX + '__body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:12px 0 8px}'
-        + ' .' + CARD_PREFIX + '__row{display:flex;align-items:center;gap:8px;font-size:13px;line-height:1.5}'
-        + ' .' + CARD_PREFIX + '__row input:disabled{cursor:not-allowed}'
-      document.head.appendChild(tag)
-    }
-
-    function ChevronIcon({ open }) {
-      return React.createElement('svg', {
-        className: CARD_PREFIX + '__chevron' + (open ? ' ' + CARD_PREFIX + '__chevron-open' : ''),
-        width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none',
-        'aria-hidden': true,
-      }, React.createElement('path', {
-        d: CHEVRON_PATH, stroke: 'currentColor', strokeWidth: 1.5,
-        strokeLinecap: 'round', strokeLinejoin: 'round',
-      }))
-    }
-
-    function ThinkExpandCard({ scope }) {
-      const [snapshot, setSnapshot] = useState(() => scope.getSnapshot())
-      const subscribe = useCallback(() => scope.subscribe(() => setSnapshot(scope.getSnapshot())), [scope])
-      React.useEffect(subscribe, [subscribe])
-      const [open, setOpen] = useState(false)
-      const enabled = scopeEnabled(scope)
-      const writable = snapshot !== null && snapshot.writable
-      const onToggle = useCallback((event) => {
-        void scope.set('enabled', event.target.checked).catch(() => {})
-      }, [scope])
-      ensureCardStyle()
-      const title = '思考自动展开'
-      return React.createElement(
-        'li',
-        { className: CARD_PREFIX + (open ? ' ' + CARD_PREFIX + '-open' : '') },
-        React.createElement('button', {
-          type: 'button',
-          className: CARD_PREFIX + '__header',
-          'aria-expanded': open,
-          'aria-label': (open ? '收起设置' : '展开设置') + ':' + title,
-          onClick: () => setOpen(!open),
-        },
-        React.createElement('span', { className: CARD_PREFIX + '__head-text' },
-          React.createElement('span', { className: CARD_PREFIX + '__name' }, title),
-          React.createElement('span', { className: CARD_PREFIX + '__desc' },
-            '流式回复时自动展开最新一条思考行,手动操作优先')),
-        React.createElement(ChevronIcon, { open })),
-        open ? React.createElement('div', { className: CARD_PREFIX + '__body' },
-          React.createElement('label', { className: CARD_PREFIX + '__row' },
-            React.createElement('input', {
-              type: 'checkbox',
-              checked: enabled === true,
-              disabled: !writable || enabled === null,
-              onChange: onToggle,
-            }),
-            enabled === null ? '设置读取中…' : '流式思考自动展开最新一条'),
-        ) : null,
-      )
-    }
-
-    // 开关状态驱动启停:开关变化即动态启停,页面加载后按 Host 值冷启动。
-    function applyEnabled(enabled) {
-      if (enabled) start()
-      else stop()
-    }
-
-    // 初次启动:等 scope ready 后迁移旧 localStorage 值,再按 Host 值启停;
-    // 远程只读部署(memory 模式)scope 永不 ready,按默认开运行
-    function bootstrap(scope) {
-      let migrated = false
-      const sync = () => {
-        const snapshot = scope.getSnapshot()
-        if (snapshot === null) return
-        if (snapshot.status === 'unavailable') {
-          applyEnabled(true)
-          return
-        }
-        if (snapshot.status !== 'ready') return
-        if (!migrated) {
-          migrated = true
-          const legacy = readLegacyEnabled()
-          if (legacy !== null && scopeEnabled(scope) !== legacy) {
-            scope.set('enabled', legacy).catch(() => {})
-          }
-        }
-        applyEnabled(scopeEnabled(scope) !== false)
-      }
-      scope.subscribe(sync)
-      sync()
-    }
-
     return {
-      inject: ['slots', 'settingsScope'],
-      apply(ctx) {
-        const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS })
-        bootstrap(scope)
-        ctx.slots.inject('settings.plugin.item', () =>
-          ctx.slots.register(
-            { name: 'settings.plugin.item', key: SETTINGS_NS },
-            () => React.createElement(ThinkExpandCard, { scope }),
-          ))
+      apply() {
+        start()
       },
     }
   },
