@@ -25,7 +25,6 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 
 - 单包模式用于两点:只想调试某一个包;或清单内存在未发布包(线上查询 404)卡住 `all` 时的绕行路径。`all` 仍是日常默认,单包后其余包的终态不随之校验
 - 依赖行变化触发 `pnpm install` 重建 node_modules 时,脚本会重挂所有**有依赖声明**的包,保住既有链接;无声明的包(如未发布新品)不产生 junction
-- **普通依赖豁免(PLAIN_DEPS)**:`@mzzsfy/mcp-ssh` 是标准 MCP stdio server,无 dsh 元数据、不进 profile bundle 层,由 dsh-agent-shell 按名解析拉起。dev-link 对它不归一依赖行、不挂 junction、不校验版本——pnpm 安装版为准(半成品工作副本会拖垮拉起方);`node scripts/dev-link.mjs mcp-ssh` 直接报错。要调试 mcp-ssh 本体,在包目录内 `npm test` / `node bin/mcp-ssh.mjs`。新增同类普通依赖时加进 dev-link.mjs 的 `PLAIN_DEPS`
 
 禁止手工编辑 profile 的 package.json;禁止 `pnpm add file:...` / `pnpm add link:...`;禁止在 profile 里直接 mklink。
 
