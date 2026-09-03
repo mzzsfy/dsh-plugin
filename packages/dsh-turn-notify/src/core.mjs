@@ -71,6 +71,15 @@ export const UPLOAD_FILE_MAX_BYTES = 2 * 1024 * 1024
 export const UPLOAD_TOTAL_MAX_BYTES = 10 * 1024 * 1024
 export const TITLE_MAX_CHARS = 60
 
+// IM 投递目标上限:settings 体积与面板列表的防护栏
+const IM_TARGETS_MAX = 16
+
+// ID 规格与 dsh-im delivery-service 的 BOT_ID/TARGET_ID 一致,写侧拦截防落库后投递静默失败
+const IM_BOT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+const IM_TARGET_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/
+
+export const isValidImBotId = (value) => typeof value === 'string' && IM_BOT_ID_PATTERN.test(value)
+
 const TURN_END_KIND = 'turn/end'
 
 // turn/end reason.kind 到通知分类的映射;未知 kind(插件可扩展)返回 null。
@@ -349,11 +358,21 @@ export async function sendWebhook({ url, payload, fetchImpl = fetch }) {
 
 const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 
+// imTargets 读侧归一化:非数组回空,剔除形态非法项,仅保留两字段
+export function normalizeImTargets(raw) {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((item) => item !== null && typeof item === 'object' && !Array.isArray(item)
+      && typeof item.botId === 'string' && item.botId.length > 0
+      && typeof item.targetId === 'string' && item.targetId.length > 0)
+    .map(({ botId, targetId }) => ({ botId, targetId }))
+}
+
 // 配置补丁校验:顶层键白名单,webhookUrl 空串(禁用)或 http(s) URL,
 // 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -371,6 +390,27 @@ export function validateConfigPatch(patch) {
       }
     }
     next.webhookUrl = trimmed
+  }
+  if ('imTargets' in patch) {
+    const list = patch.imTargets
+    if (!Array.isArray(list)) return { ok: false, reason: 'imTargets 须为数组' }
+    if (list.length > IM_TARGETS_MAX) return { ok: false, reason: 'imTargets 超过上限' }
+    const seen = new Set()
+    const targets = []
+    for (const item of list) {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) return { ok: false, reason: 'imTargets 项须为对象' }
+      const keys = Object.keys(item)
+      if (keys.length !== 2 || !keys.includes('botId') || !keys.includes('targetId')) return { ok: false, reason: 'imTargets 项仅含 botId 与 targetId' }
+      const botId = typeof item.botId === 'string' ? item.botId.trim() : ''
+      const targetId = typeof item.targetId === 'string' ? item.targetId.trim() : ''
+      if (!IM_BOT_ID_PATTERN.test(botId)) return { ok: false, reason: 'botId 格式非法' }
+      if (!IM_TARGET_ID_PATTERN.test(targetId)) return { ok: false, reason: 'targetId 格式非法' }
+      const key = botId + '/' + targetId
+      if (seen.has(key)) return { ok: false, reason: 'imTargets 存在重复项' }
+      seen.add(key)
+      targets.push({ botId, targetId })
+    }
+    next.imTargets = targets
   }
   if ('minTurnDurationMs' in patch) {
     const ms = patch.minTurnDurationMs
@@ -411,6 +451,7 @@ export function resolvedConfig(settings) {
     suppressSubagentWake: source.suppressSubagentWake !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping: { ...soundMapping },
+    imTargets: normalizeImTargets(source.imTargets),
   }
 }
 
@@ -423,6 +464,7 @@ export function publicConfig(settings) {
     suppressSubagentWake: resolved.suppressSubagentWake,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
+    imTargets: resolved.imTargets,
     webhookConfigured: resolved.webhookUrl.trim().length > 0,
   }
 }

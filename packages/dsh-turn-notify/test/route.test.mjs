@@ -61,12 +61,15 @@ function makeSettings() {
   }
 }
 
-function makeCtx() {
+function makeCtx(extraServices) {
   const routes = new Map()
   const settingsService = makeSettings()
   const ctx = {
     on() {},
-    get(key) { return key === 'settings' ? settingsService : undefined },
+    get(key) {
+      if (key === 'settings') return settingsService
+      return extraServices ? extraServices[key] : undefined
+    },
     inject(deps, fn) { fn({ settings: settingsService }) },
     effect(thunk) { thunk() },
     webServer: { register(route) { routes.set(route.path, route.handler) } },
@@ -154,6 +157,142 @@ test('config 路由 405:PUT 被拒', async () => {
   const res = makeRes()
   await routes.get('/api/turn-notify/config')(makeReq('PUT', {}, JSON_HEADERS), res)
   assert.equal(res.status, 405)
+})
+
+function makeImReq(url) {
+  const req = makeReq('GET')
+  req.url = url
+  return req
+}
+
+test('config GET 返回 imAvailable 缺省 false 与 imTargets 空缺省', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('GET'), res)
+  assert.equal(res.body.imAvailable, false)
+  assert.deepEqual(res.body.imTargets, [])
+})
+
+test('config POST 持久化 imTargets 且 dshIm 在场时 imAvailable 为 true', async () => {
+  const dshIm = { send: async () => ({ sent: true }), listTargets: async () => [] }
+  const { ctx, routes } = makeCtx({ dshIm })
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  const res = makeRes()
+  await handler(makeReq('POST', { imTargets: [{ botId: 'wx_a', targetId: 'owner' }] }, JSON_HEADERS), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.imTargets, [{ botId: 'wx_a', targetId: 'owner' }])
+  assert.equal(res.body.imAvailable, true)
+  const readback = makeRes()
+  await handler(makeReq('GET'), readback)
+  assert.deepEqual(readback.body.imTargets, [{ botId: 'wx_a', targetId: 'owner' }])
+})
+
+test('config POST 非法 imTargets 400', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { imTargets: [{ botId: 'wx_a' }] }, JSON_HEADERS), res)
+  assert.equal(res.status, 400)
+})
+
+test('im-targets 代理成功时仅投影 targetId/name/kind,剔除 route', async () => {
+  const dshIm = {
+    send: async () => ({ sent: true }),
+    listTargets: async (botId) => {
+      assert.equal(botId, 'wx_a')
+      return [{ targetId: 'owner', name: '本人', kind: 'user', route: { toUserId: 'native-id' } }]
+    },
+  }
+  const { ctx, routes } = makeCtx({ dshIm })
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/im-targets')(makeImReq('/api/turn-notify/im-targets?botId=wx_a'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.targets, [{ targetId: 'owner', name: '本人', kind: 'user' }])
+})
+
+test('im-targets 错误映射:botId 缺失 400,unknown-bot 404,bot-not-connected 503,其余 502,缺席 503', async () => {
+  const code = { value: 'unknown-bot' }
+  const dshIm = {
+    send: async () => ({ sent: true }),
+    listTargets: async () => { throw Object.assign(new Error('x'), { code: code.value }) },
+  }
+  const { ctx, routes } = makeCtx({ dshIm })
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/im-targets')
+  const missing = makeRes()
+  await handler(makeImReq('/api/turn-notify/im-targets'), missing)
+  assert.equal(missing.status, 400)
+  const unknown = makeRes()
+  await handler(makeImReq('/api/turn-notify/im-targets?botId=wx_nobody'), unknown)
+  assert.equal(unknown.status, 404)
+  code.value = 'bot-not-connected'
+  const offline = makeRes()
+  await handler(makeImReq('/api/turn-notify/im-targets?botId=wx_a'), offline)
+  assert.equal(offline.status, 503)
+  code.value = 'delivery-failed'
+  const other = makeRes()
+  await handler(makeImReq('/api/turn-notify/im-targets?botId=wx_a'), other)
+  assert.equal(other.status, 502)
+  const bare = makeCtx()
+  apply(bare.ctx)
+  const absent = makeRes()
+  await bare.routes.get('/api/turn-notify/im-targets')(makeImReq('/api/turn-notify/im-targets?botId=wx_a'), absent)
+  assert.equal(absent.status, 503)
+})
+
+test('test-im 缺席与未配置目标时如实返回', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/test-im')(makeReq('POST'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body, { ok: false, detail: 'dsh-im 未安装' })
+  const withIm = makeCtx({ dshIm: { send: async () => ({ sent: true }), listTargets: async () => [] } })
+  apply(withIm.ctx)
+  const empty = makeRes()
+  await withIm.routes.get('/api/turn-notify/test-im')(makeReq('POST'), empty)
+  assert.deepEqual(empty.body, { ok: false, detail: '未配置投递目标' })
+})
+
+test('test-im 跨源 403', async () => {
+  const dshIm = { send: async () => ({ sent: true }), listTargets: async () => [] }
+  const { ctx, routes } = makeCtx({ dshIm })
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/test-im')(makeReq('POST', undefined, { origin: 'https://evil.example' }), res)
+  assert.equal(res.status, 403)
+})
+
+test('test-im 逐目标返回真实结果,混合成败', async () => {
+  const sends = []
+  const dshIm = {
+    send: async (botId, targetId, text) => {
+      sends.push({ botId, targetId, text })
+      if (targetId === 'bad') throw Object.assign(new Error('x'), { code: 'bot-not-connected' })
+      return { sent: true }
+    },
+    listTargets: async () => [],
+  }
+  const { ctx, routes } = makeCtx({ dshIm })
+  apply(ctx)
+  await routes.get('/api/turn-notify/config')(
+    makeReq('POST', { imTargets: [{ botId: 'wx_a', targetId: 'ok1' }, { botId: 'wx_a', targetId: 'bad' }] }, JSON_HEADERS), makeRes())
+  const res = makeRes()
+  await routes.get('/api/turn-notify/test-im')(makeReq('POST'), res)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.ok, false)
+  assert.equal(res.body.results.length, 2)
+  const bad = res.body.results.find((item) => item.targetId === 'bad')
+  const good = res.body.results.find((item) => item.targetId === 'ok1')
+  assert.equal(bad.ok, false)
+  assert.equal(bad.detail, 'bot-not-connected')
+  assert.equal(good.ok, true)
+  assert.equal(good.detail, 'sent')
+  assert.equal(sends.length, 2)
+  assert.ok(sends.every((call) => String(call.text).startsWith('[dsh]')), 'IM 文本应与通知单元一致')
 })
 
 test('全部写路由守卫:upload 与 sound 删除跨源 403,mapping 非 JSON 400', async () => {
