@@ -28,6 +28,16 @@ dsh-plugin/
 | @mzzsfy/dsh-model-capability-editor | DSH 纯前端插件(settings.models.footer 卡片) | 模型能力编辑器:编辑 reasoningEfforts 档位(false/删除/off:null/线上拼写)与 input 多模态声明,describe 读取 + 整组写回(未编辑条目保留),冲突字段级重放绝不静默覆盖 |
 | @mzzsfy/dsh-settings-nav-icons | DSH 纯前端插件(DOM 观察) | 设置导航分区图标替换:按分区显示文本把回退齿轮换成专属图形(通用/外观/IM/统计/两市场/账号/通知/运维/MCP/归档/认证/侧边卡),语言切换重贴,卸载即恢复官方齿轮 |
 
+## 安装与更新:缩短 pnpm 宽限期
+
+pnpm 的 `minimumReleaseAge` 是新包发布后的安装宽限期(防供应链投毒)——刚发版的插件会因此装不上或装到旧版。建议永久改为 6 小时:
+
+```sh
+pnpm config set --global minimumReleaseAge 360
+```
+
+单位为分钟(6h = 6*60 = 360),写入全局 pnpm 配置,对所有项目生效。刚发版想立刻安装,可单次绕过:`pnpm install --config.minimum-release-age=0`。
+
 ## 开发与测试
 
 要求 Node >= 22(dsh-usage-panel 的 engines 字段)。
