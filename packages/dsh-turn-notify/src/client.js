@@ -7,10 +7,13 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-turn-notify',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect } = React
+    const { useState, useEffect, useSyncExternalStore } = React
+    const { createPortal } = require('react-dom')
 
     const POLL_MS = 2 * 1000
     const TOAST_MS = 6 * 1000
+    // 页内通知栈上限:突发事件截断最旧条目
+    const TOAST_MAX = 4
     const BLINK_MS = 1 * 1000
     // 系统通知测试延迟:浏览器对聚焦窗口抑制系统弹窗,倒计时供用户切出窗口
     const SYSTEM_TEST_DELAY_MS = 5 * 1000
@@ -375,16 +378,29 @@ window.__ModuleLoader__.load({
 
     // ---- toast 与标题闪烁 ----
 
+    // 页内通知走宿主原生形态:store + useSyncExternalStore + portal 直挂 body,
+    // 与 session-manager 的 Toast 同构;裸 DOM 注入已废弃
+    let toastSeq = 0
+    let toastStack = []
+    const toastListeners = new Set()
+    const emitToastStack = () => { for (const listener of toastListeners) listener() }
+
     function showToast(unit) {
-      const node = document.createElement('div')
-      node.textContent = unit.text
-      Object.assign(node.style, {
-        position: 'fixed', right: '16px', bottom: '16px', zIndex: 9999,
-        background: 'rgba(22,24,28,0.94)', color: '#f0f1f3', fontSize: '13px',
-        padding: '10px 14px', borderRadius: '10px', boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-      })
-      document.body.appendChild(node)
-      setTimeout(() => { node.remove() }, TOAST_MS)
+      const id = ++toastSeq
+      toastStack = toastStack.concat([{ id, text: unit.text }]).slice(-TOAST_MAX)
+      emitToastStack()
+      setTimeout(() => {
+        toastStack = toastStack.filter((item) => item.id !== id)
+        emitToastStack()
+      }, TOAST_MS)
+    }
+
+    const toastSource = {
+      getSnapshot: () => toastStack,
+      subscribe: (listener) => {
+        toastListeners.add(listener)
+        return () => toastListeners.delete(listener)
+      },
     }
 
     let blinkTimer = null
@@ -575,6 +591,14 @@ window.__ModuleLoader__.load({
       '.tn-list__tag { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:11px; }',
       '.tn-divider { border:none; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); margin:2px 0; }',
       'input[type="range"].tn-range { accent-color:var(--dsw-alias-brand-primary); flex:1; min-width:120px; }',
+      // 页内通知:与 session-manager Toast 同一宿主令牌语言,置于框架顶部居中
+      '.tn-toast-stack { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:1100;',
+      '  display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }',
+      '.tn-toast { background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted);',
+      '  font:var(--dsw-font-xs-13); padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2);',
+      '  animation:tn-toast-in 0.18s ease-out; max-width:520px; }',
+      '@keyframes tn-toast-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }',
+      '@media (prefers-reduced-motion: reduce) { .tn-toast { animation:none; } }',
     ].join('\n')
 
     function h(type, props) {
@@ -935,7 +959,6 @@ window.__ModuleLoader__.load({
       ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + sound.id)))
 
       return h('div', { className: 'tn-panel' },
-        h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'tn-head' },
           h('span', { className: 'tn-head__title' }, '消息通知'),
           h('span', { className: 'tn-head__hint' }, '配置存 host 热生效;标签页全关时仅 webhook 与 IM 送达'),
@@ -1218,6 +1241,13 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        // 样式挂载宿主文档级:通知栈在面板未打开时也要有完整样式
+        ctx.effect(() => {
+          const style = document.createElement('style')
+          style.textContent = CSS
+          document.head.appendChild(style)
+          return () => style.remove()
+        }, 'turn-notify styles')
         // 激活即轮询:通知链路不依赖设置面板是否打开过
         start()
         ctx.slots.inject('settings.section', () =>
@@ -1225,9 +1255,25 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'turn-notify', order: 41, label: '消息通知' },
             () => React.createElement(TurnNotifyApp),
           ))
+        ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.register(
+            { name: 'shell.overlay', id: 'turn-notify-toast' },
+            () => React.createElement(OverlayToastStack),
+          ))
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方
-      __test: { poll, pollOnce, storageState, announcedIds },
+      __test: { poll, pollOnce, storageState, announcedIds, toastStack: () => toastStack },
+    }
+
+    // 通知栈:portal 直挂 body 脱离应用 frame 叠层,否则被设置全屏层(z=1000)遮盖
+    function OverlayToastStack() {
+      const stack = useSyncExternalStore(toastSource.subscribe, toastSource.getSnapshot)
+      if (stack.length === 0) return null
+      return createPortal(
+        h('div', { className: 'tn-toast-stack' },
+          stack.map((item) => h('div', { className: 'tn-toast', key: item.id, role: 'alert' }, item.text))),
+        document.body,
+      )
     }
   },
 })
