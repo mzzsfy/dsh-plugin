@@ -61,32 +61,23 @@ function onlineLatest(name) {
   return r.stdout.trim()
 }
 
-/** npm 线上全部版本;未发布的包返回 null(查询 404,豁免无从谈起) */
-function onlineVersions(name) {
-  const r = spawnSync([npmCmd(), 'view', name, 'versions', '--json', '--registry', REGISTRY].join(' '), {
-    encoding: 'utf8',
-    shell: true,
-  })
-  if (r.status !== 0) return null
-  return JSON.parse(r.stdout)
-}
-
 /**
- * 重写 pnpm-workspace.yaml 的 minimumReleaseAgeExclude 为 @mzzsfy 各包的全部线上版本并集。
- * pnpm 该配置只认精确版本并集(^ ~ * 均拒绝),逐版本枚举是唯一的"全版本豁免"表达;
- * 每次运行全量重写,新发版本自动纳入,清单永不过期。返回是否有变更。
+ * 重写 pnpm-workspace.yaml 的 minimumReleaseAgeExclude 为 @mzzsfy 各包的线上最新版精确豁免。
+ * 豁免的意义是"刚发布的版本不被宽限期卡住":历史版本早已过宽限期,无需豁免;
+ * pnpm 该配置只认精确版本并集(^ ~ * 均拒绝),故每包一行精确 latest。
+ * 每次运行全量重写,新发版本重跑即替换,清单永不过期。返回是否有变更。
  */
-function syncReleaseAgeExclude(packages) {
+function syncReleaseAgeExclude(packages, latests) {
   if (!existsSync(workspaceYaml)) return false
   const lines = []
   for (const dir of packages) {
     const key = SCOPE + dir
-    const versions = onlineVersions(key)
-    if (versions === null || versions.length === 0) {
+    const latest = latests[dir] ?? onlineLatest(key)
+    if (latest === null) {
       console.log(`SKIP ${key}: 线上无版本,不进豁免清单`)
       continue
     }
-    lines.push(`  - "${key}@${versions.join(' || ')}"`)
+    lines.push(`  - "${key}@${latest}"`)
   }
   const section = `minimumReleaseAgeExclude:\n${lines.join('\n')}\n`
   const raw = readFileSync(workspaceYaml, 'utf8').replace(/^\uFEFF/, '')
@@ -98,7 +89,7 @@ function syncReleaseAgeExclude(packages) {
     return false
   }
   writeFileSync(workspaceYaml, next)
-  console.log('FIX  minimumReleaseAgeExclude 已按线上全版本重写')
+  console.log('FIX  minimumReleaseAgeExclude 已重写为各包线上最新版')
   return true
 }
 
@@ -239,9 +230,9 @@ if (!unlink) {
   const scope = target === 'all' ? packages : names
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
-  // 豁免清单全量重写(所有包,不受单包模式限制),保证新发版本自动纳入;
-  // 先于 pnpm install 执行,否则刚发布的版本仍会被宽限期拦截
-  const excludeChanged = syncReleaseAgeExclude(packages)
+  // 豁免清单是全 profile 级策略,仅在 all 模式全量重写(只豁免各包线上最新版——
+  // 历史版本早已过宽限期);先于 pnpm install 执行,否则刚发布的版本仍会被拦截
+  const excludeChanged = target === 'all' ? syncReleaseAgeExclude(packages, normalized.latests) : false
   if (normalized.changed || excludeChanged) {
     if (!pnpmInstall(allowFresh)) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
