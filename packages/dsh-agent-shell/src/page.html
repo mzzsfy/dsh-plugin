@@ -44,6 +44,13 @@
   <span class="state" id="state">连接中…</span>
 </header>
 <main>
+  <section id="depBox" class="hidden" style="grid-column:1/-1;border-color:#8a6d3b;background:rgba(255,212,121,.08)">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span style="color:#ffd479" id="depText"></span>
+      <code id="depCmd" style="background:#0b0f16;border:1px solid #2a3342;border-radius:4px;padding:2px 8px"></code>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('depCmd').textContent)">复制命令</button>
+    </div>
+  </section>
   <section>
     <h2>执行流</h2>
     <div class="row">
@@ -163,9 +170,19 @@ async function pollEvents() {
     // 简化:直接全量重画,数据量小
     render()
     $('state').textContent = '已连接'
+    const state = await api('state').catch(() => null)
+    renderDependency(state)
   } catch {
     $('state').textContent = '服务未就绪'
   }
+}
+
+function renderDependency(state) {
+  const missing = state && state.status === 'dependency-missing' && state.missing
+  $('depBox').classList.toggle('hidden', !missing)
+  if (!missing) return
+  $('depText').textContent = '缺少依赖 ' + missing + ',工具不可用。安装后约半分钟内自动恢复:'
+  $('depCmd').textContent = 'dsh plugin add ' + missing + ' --profile web'
 }
 
 async function pollSessions() {

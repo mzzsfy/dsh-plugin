@@ -25,7 +25,13 @@ export function createRoutes({ sendJson, readBody, rejectCrossOrigin, pageHtml, 
       }
       if (path === '/agent-shell/api/state') {
         const ready = serverState.control !== null && serverState.control !== undefined && serverState.client !== null
-        sendJson(res, 200, { ready, lastError: serverState.lastError, tools: serverState.registered.length })
+        sendJson(res, 200, {
+          ready,
+          status: serverState.status,
+          missing: serverState.missing,
+          lastError: serverState.lastError,
+          tools: serverState.registered.length,
+        })
         return
       }
       if (method === 'GET' && path === '/agent-shell/api/events') {

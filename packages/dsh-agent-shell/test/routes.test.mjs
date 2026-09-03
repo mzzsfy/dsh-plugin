@@ -94,6 +94,24 @@ test('GET /agent-shell 返回页面', async () => {
   }
 })
 
+test('GET /api/state 透出 status 与 missing(dependency-missing 场景)', async () => {
+  const control = await startFakeControl()
+  try {
+    const { route, state } = makeDeps({ control })
+    state.status = 'dependency-missing'
+    state.missing = '@mzzsfy/mcp-ssh'
+    state.client = null
+    state.control = null
+    const response = await dispatch(route, 'GET', '/agent-shell/api/state')
+    const payload = JSON.parse(response.body)
+    assert.equal(payload.status, 'dependency-missing')
+    assert.equal(payload.missing, '@mzzsfy/mcp-ssh')
+    assert.equal(payload.ready, false)
+  } finally {
+    await control.close()
+  }
+})
+
 test('GET /api/events 代理到 control 且带 token', async () => {
   const control = await startFakeControl()
   try {

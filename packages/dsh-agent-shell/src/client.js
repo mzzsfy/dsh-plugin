@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
       const [events, setEvents] = useState([])
       const [sessions, setSessions] = useState([])
       const [ready, setReady] = useState(false)
+      const [serverState, setServerState] = useState({ status: 'starting', missing: '', lastError: '' })
       const sinceRef = useRef(0)
       const eventMap = useRef(new Map())
 
@@ -38,6 +39,7 @@ window.__ModuleLoader__.load({
             setEvents([...eventMap.current.values()].sort((a, b) => a.seq - b.seq))
             const state = await fetch('/agent-shell/api/state').then((r) => r.json())
             setReady(state.ready === true)
+            setServerState({ status: state.status || '', missing: state.missing || '', lastError: state.lastError || '' })
           } catch {
             setReady(false)
             delay = POLL_IDLE_MS
@@ -90,7 +92,7 @@ window.__ModuleLoader__.load({
         })
       }, [])
 
-      return { events, sessions, ready, decide, sendInput, killSession }
+      return { events, sessions, ready, serverState, decide, sendInput, killSession }
     }
 
     // ── 视图 ──────────────────────────────────────────────────────────
@@ -150,10 +152,11 @@ window.__ModuleLoader__.load({
     function AgentShellTab({ visible }) {
       const visibleRef = useRef(visible)
       visibleRef.current = visible
-      const { events, sessions, ready, decide, sendInput, killSession } = useAgentShell(visibleRef)
+      const { events, sessions, ready, serverState, decide, sendInput, killSession } = useAgentShell(visibleRef)
       const [command, setCommand] = useState('')
       const approvals = events.filter((event) => event.kind === 'approval' && event.state === 'pending')
       const execs = events.filter((event) => event.kind !== 'approval')
+      const dependencyMissing = serverState.status === 'dependency-missing' && serverState.missing
 
       const run = async () => {
         if (!command.trim()) return
@@ -167,6 +170,13 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', padding: 8, gap: 8, boxSizing: 'border-box' } },
+        dependencyMissing ? h('div', { style: { border: '1px solid #8a6d3b', background: 'rgba(255,212,121,.12)', borderRadius: 6, padding: '8px 10px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+          h('span', { style: { color: '#ffd479' } }, '缺少依赖 ' + serverState.missing + ',工具不可用。安装后约半分钟内自动恢复:'),
+          h('code', { style: { ...MONO, fontSize: 11 } }, 'dsh plugin add ' + serverState.missing + ' --profile web'),
+          h('button', {
+            onClick: () => { try { navigator.clipboard.writeText('dsh plugin add ' + serverState.missing + ' --profile web') } catch {} },
+          }, '复制命令'),
+        ) : null,
         h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
           h('input', {
             value: command,
