@@ -11,6 +11,8 @@
  *   - profile 依赖行一律 semver(^线上最新版),link:/file:/本地路径一律被本脚本归一清除
  *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径
  *   - 依赖行版本以 npm 线上 latest 为准,本地 manifest 未发布的版本不影响依赖行
+ *   - pnpm-workspace.yaml 的 minimumReleaseAgeExclude 由本脚本全量重写为各包线上版本并集
+ *     (pnpm 只认精确版本并集,^ ~ * 均拒绝),新发版本重跑即纳入,清单永不过期
  *   - 终态校验不过即退出码 1:依赖行必须等于 ^线上最新,挂载必须是指向仓库的 junction,
  *     pnpm install 必须成功 —— 不存在"看起来 link 了"的中间态
  *
@@ -28,6 +30,7 @@ import {fileURLToPath} from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const profileRoot = join(process.env.USERPROFILE, '.dsh', 'profiles', 'web')
 const profileManifest = join(profileRoot, 'package.json')
+const workspaceYaml = join(profileRoot, 'pnpm-workspace.yaml')
 const SCOPE = '@mzzsfy/'
 const REGISTRY = 'https://registry.npmjs.org'
 
@@ -56,6 +59,47 @@ function onlineLatest(name) {
     process.exit(1)
   }
   return r.stdout.trim()
+}
+
+/** npm 线上全部版本;未发布的包返回 null(查询 404,豁免无从谈起) */
+function onlineVersions(name) {
+  const r = spawnSync([npmCmd(), 'view', name, 'versions', '--json', '--registry', REGISTRY].join(' '), {
+    encoding: 'utf8',
+    shell: true,
+  })
+  if (r.status !== 0) return null
+  return JSON.parse(r.stdout)
+}
+
+/**
+ * 重写 pnpm-workspace.yaml 的 minimumReleaseAgeExclude 为 @mzzsfy 各包的全部线上版本并集。
+ * pnpm 该配置只认精确版本并集(^ ~ * 均拒绝),逐版本枚举是唯一的"全版本豁免"表达;
+ * 每次运行全量重写,新发版本自动纳入,清单永不过期。返回是否有变更。
+ */
+function syncReleaseAgeExclude(packages) {
+  if (!existsSync(workspaceYaml)) return false
+  const lines = []
+  for (const dir of packages) {
+    const key = SCOPE + dir
+    const versions = onlineVersions(key)
+    if (versions === null || versions.length === 0) {
+      console.log(`SKIP ${key}: 线上无版本,不进豁免清单`)
+      continue
+    }
+    lines.push(`  - "${key}@${versions.join(' || ')}"`)
+  }
+  const section = `minimumReleaseAgeExclude:\n${lines.join('\n')}\n`
+  const raw = readFileSync(workspaceYaml, 'utf8').replace(/^\uFEFF/, '')
+  const next = /\nminimumReleaseAgeExclude:/.test(raw)
+    ? raw.replace(/\nminimumReleaseAgeExclude:[\s\S]*?(?=\n\w+:|$)/, `\n${section}`)
+    : raw.replace(/\s*$/, `\n${section}`)
+  if (next === raw) {
+    console.log('OK   minimumReleaseAgeExclude 已是最新,无需更新')
+    return false
+  }
+  writeFileSync(workspaceYaml, next)
+  console.log('FIX  minimumReleaseAgeExclude 已按线上全版本重写')
+  return true
 }
 
 /** 归一依赖行:非 semver(历史 link:/file: 残留)或落后线上的一律改为 ^线上最新;返回 变更与否 + 各包线上 latest */
@@ -195,7 +239,10 @@ if (!unlink) {
   const scope = target === 'all' ? packages : names
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
-  if (normalized.changed) {
+  // 豁免清单全量重写(所有包,不受单包模式限制),保证新发版本自动纳入;
+  // 先于 pnpm install 执行,否则刚发布的版本仍会被宽限期拦截
+  const excludeChanged = syncReleaseAgeExclude(packages)
+  if (normalized.changed || excludeChanged) {
     if (!pnpmInstall(allowFresh)) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
       process.exitCode = 1
