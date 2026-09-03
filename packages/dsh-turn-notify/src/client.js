@@ -197,6 +197,35 @@ window.__ModuleLoader__.load({
         blink: !quiet && systemEnabled && permission !== 'granted',
       }
     }
+
+    // IM 投递目标列表操作:与 core.mjs 同源,parity 测试保证双实现不漂移
+    // botId/targetId 字符集均不含 '/',拼接键无歧义;与 host 侧写入校验共用 dsh-im ID 规格
+    const imTargetKey = (item) => item.botId + '/' + item.targetId
+
+    // 勾选幂等:同一 botId+targetId 只保留一份;勾选追加到尾部,取消即移除
+    function toggleImTargetList(list, botId, targetId, checked) {
+      const wanted = { botId, targetId }
+      const rest = list.filter((item) => imTargetKey(item) !== imTargetKey(wanted))
+      return checked ? rest.concat([wanted]) : rest
+    }
+
+    function removeImTargetFromList(list, botId, targetId) {
+      return list.filter((item) => imTargetKey(item) !== botId + '/' + targetId)
+    }
+
+    // 取消注册:移除该 bot 全部目标
+    function unregisterImBotList(list, botId) {
+      return list.filter((item) => item.botId !== botId)
+    }
+
+    // 已绑 bot:按首次绑定顺序去重
+    function imBoundBotIds(list) {
+      const botIds = []
+      for (const item of list) {
+        if (!botIds.includes(item.botId)) botIds.push(item.botId)
+      }
+      return botIds
+    }
     /* LOGIC-END */
 
     // ---- 声音:Web Audio,autoplay 解锁依赖首次用户交互,解锁前静默 ----
@@ -475,24 +504,77 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = [
-      '.tn-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; }',
-      '.tn-head { display:flex; align-items:center; gap:8px; }',
-      '.tn-head__title { font-weight:600; font-size:14px; }',
-      '.tn-head__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-      '.tn-btn { cursor:pointer; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); background:transparent;',
-      '  color:inherit; border-radius:6px; padding:3px 10px; font-size:12px; }',
-      '.tn-btn:hover { opacity:0.8; }',
-      '.tn-card { border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); border-radius:10px; padding:10px 12px;',
-      '  display:flex; flex-direction:column; gap:6px; }',
-      '.tn-card__title { font-weight:600; font-size:12px; color:var(--dsw-alias-label-secondary); }',
-      '.tn-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+      // 令牌全部取宿主 --dsw-* 体系,明暗模式由宿主切换自动生效
+      '.tn-panel { display:flex; flex-direction:column; gap:14px; color:inherit; font-size:13px; }',
+      '.tn-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }',
+      '.tn-head__title { font-weight:650; font-size:15px; letter-spacing:0.2px; }',
+      '.tn-head__hint { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:12px; }',
+      '.tn-card { border:1px solid var(--dsw-alias-border-l1, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
+      '  border-radius:12px; padding:14px 16px; background:var(--dsw-alias-bg-layer-1, transparent);',
+      '  display:flex; flex-direction:column; gap:10px; }',
+      '.tn-card__head { display:flex; flex-direction:column; gap:2px; margin-bottom:2px; }',
+      '.tn-card__title { font-weight:600; font-size:13px; color:var(--dsw-alias-label-primary); }',
+      '.tn-card__sub { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:12px; }',
+      '.tn-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }',
+      '.tn-row--label { align-items:flex-start; }',
       '.tn-spacer { flex:1; }',
       '.tn-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-      '.tn-error { color:var(--dsw-alias-state-error-primary, #d43a3a); font-size:12px; }',
-      '.tn-select, .tn-input { background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
-      '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; }',
+      '.tn-label { color:var(--dsw-alias-label-secondary); font-size:12px; min-width:64px; text-align:right; }',
+      '.tn-label--top { padding-top:6px; }',
+      '.tn-error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
+      '.tn-btn { cursor:pointer; border:1px solid var(--dsw-alias-border-l2, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
+      '  background:var(--dsw-alias-bg-layer-2, transparent); color:var(--dsw-alias-label-primary, inherit);',
+      '  border-radius:8px; padding:4px 12px; font-size:12px; transition:background 0.15s, border-color 0.15s; }',
+      '.tn-btn:hover { background:var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2, transparent)); }',
+      '.tn-btn:disabled { opacity:0.45; cursor:default; }',
+      '.tn-btn--primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary);',
+      '  color:var(--dsw-alias-brand-text, #fff); font-weight:600; }',
+      '.tn-btn--primary:hover { background:var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary)); }',
+      '.tn-btn--ghost { background:transparent; border-color:transparent; color:var(--dsw-alias-label-secondary); }',
+      '.tn-btn--ghost:hover { color:var(--dsw-alias-state-error-primary, #d43a3a);',
+      '  background:var(--dsw-alias-interactive-bg-hover, transparent); }',
+      '.tn-btn--danger:hover { border-color:var(--dsw-alias-state-error-primary, #d43a3a);',
+      '  color:var(--dsw-alias-state-error-primary, #d43a3a); }',
+      '.tn-select, .tn-input { background:var(--dsw-specific-input-major, var(--dsw-alias-bg-layer-2, transparent)); color:var(--dsw-alias-label-primary, inherit);',
+      '  border:1px solid var(--dsw-alias-border-l1, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
+      '  border-radius:8px; padding:5px 9px; font-size:12px; font-family:inherit; transition:border-color 0.15s; }',
+      '.tn-select:focus, .tn-input:focus { outline:none; border-color:var(--dsw-alias-brand-primary); }',
       '.tn-fill { flex:1; min-width:200px; }',
-      '.tn-notice { font-size:12px; padding:4px 8px; border-radius:6px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
+      '.tn-notice { font-size:12px; padding:7px 12px; border-radius:8px; display:flex; align-items:center; gap:8px;',
+      '  border:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35));',
+      '  background:var(--dsw-alias-bg-layer-2, transparent); color:var(--dsw-alias-label-primary); }',
+      '.tn-notice::before { content:\'\'; width:3px; align-self:stretch; border-radius:2px;',
+      '  background:var(--dsw-alias-state-success-primary, currentColor); }',
+      '.tn-notice--error::before { background:var(--dsw-alias-state-error-primary, currentColor); }',
+      // pill 开关组:分类与布尔偏好同一控件语言,选中态 brand 底色
+      '.tn-pills { display:flex; gap:6px; flex-wrap:wrap; }',
+      '.tn-pill { cursor:pointer; border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
+      '  border-radius:999px; padding:3px 12px; font-size:12px; user-select:none;',
+      '  background:var(--dsw-alias-bg-layer-2, transparent); color:var(--dsw-alias-label-secondary);',
+      '  transition:all 0.15s; }',
+      '.tn-pill:hover { border-color:var(--dsw-alias-brand-primary); }',
+      '.tn-pill--on { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary);',
+      '  color:var(--dsw-alias-brand-text, #fff); font-weight:600; }',
+      // bot 标签:名称与取消注册组合为一个 chip
+      '.tn-chip { display:inline-flex; align-items:center; gap:2px; border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
+      '  border-radius:999px; overflow:hidden; font-size:12px; }',
+      '.tn-chip__name { cursor:pointer; border:none; background:transparent; color:var(--dsw-alias-label-primary, inherit);',
+      '  padding:3px 10px; font-size:12px; }',
+      '.tn-chip__name:hover { background:var(--dsw-alias-interactive-bg-hover, transparent); }',
+      '.tn-chip__name--active { color:var(--dsw-alias-brand-primary); font-weight:600; }',
+      '.tn-chip__x { cursor:pointer; border:none; background:transparent; color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));',
+      '  padding:3px 8px; font-size:13px; line-height:1; border-left:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); }',
+      '.tn-chip__x:hover { color:var(--dsw-alias-state-error-primary, #d43a3a); background:var(--dsw-alias-interactive-bg-hover, transparent); }',
+      // 目标列表:按行呈现,勾选/名称/移除右对齐
+      '.tn-list { display:flex; flex-direction:column; }',
+      '.tn-list__item { display:flex; align-items:center; gap:10px; padding:6px 2px; font-size:12px;',
+      '  border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); }',
+      '.tn-list__item:first-child { border-top:none; }',
+      '.tn-list__grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
+      '  color:var(--dsw-alias-label-primary, inherit); }',
+      '.tn-list__tag { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:11px; }',
+      '.tn-divider { border:none; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); margin:2px 0; }',
+      'input[type="range"].tn-range { accent-color:var(--dsw-alias-brand-primary); flex:1; min-width:120px; }',
     ].join('\n')
 
     function h(type, props) {
@@ -781,14 +863,8 @@ window.__ModuleLoader__.load({
         } finally { setBusy(false) }
       }
 
-      // botId/targetId 字符集均不含 '/',拼接键无歧义;与 host 侧写入校验共用 dsh-im ID 规格
-      const imTargetKey = (item) => item.botId + '/' + item.targetId
-
-      // 已绑 bot:按首次绑定顺序去重,渲染 chips(点名称加载目录,× 取消注册)
-      const imBoundBots = []
-      for (const item of config.imTargets) {
-        if (!imBoundBots.includes(item.botId)) imBoundBots.push(item.botId)
-      }
+      // 已绑 bot chips 由 imBoundBotIds 去重(见 LOGIC 段同源函数)
+      const imBoundBots = imBoundBotIds(config.imTargets)
 
       // 勾选即存:与分类开关同模式,列表整体替换,连续操作以最新一次请求为准
       let imPersistSeq = 0
@@ -807,21 +883,18 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 勾选幂等:同一 botId+targetId 只保留一份,取消勾选即移除
       function toggleImTarget(botId, target, checked) {
-        const wanted = { botId, targetId: target.targetId }
-        const rest = config.imTargets.filter((item) => imTargetKey(item) !== imTargetKey(wanted))
-        void persistImTargets(checked ? rest.concat([wanted]) : rest)
+        void persistImTargets(toggleImTargetList(config.imTargets, botId, target.targetId, checked))
       }
 
       function removeImTarget(item) {
-        void persistImTargets(config.imTargets.filter((existing) => imTargetKey(existing) !== imTargetKey(item)))
+        void persistImTargets(removeImTargetFromList(config.imTargets, item.botId, item.targetId))
       }
 
       // 取消注册:移除该 bot 全部目标;bot 在 dsh-im 已删除时借此清理残留绑定
       function unregisterImBot(botId) {
         void persistImTargets(
-          config.imTargets.filter((item) => item.botId !== botId),
+          unregisterImBotList(config.imTargets, botId),
           '已取消注册 ' + botId,
         )
       }
@@ -865,13 +938,18 @@ window.__ModuleLoader__.load({
         h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'tn-head' },
           h('span', { className: 'tn-head__title' }, '消息通知'),
-          h('span', { className: 'tn-head__hint' }, 'webhook 与分类开关在此配置,存 host 热生效;此处同时管理音效与测试'),
+          h('span', { className: 'tn-head__hint' }, '配置存 host 热生效;标签页全关时仅 webhook 与 IM 送达'),
         ),
-        notice !== null ? h('div', { className: 'tn-notice' + (notice.kind === 'error' ? ' tn-error' : '') }, notice.text) : null,
+        notice !== null
+          ? h('div', { className: 'tn-notice' + (notice.kind === 'error' ? ' tn-notice--error' : '') }, notice.text)
+          : null,
         h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, '通知配置(标签页全关时仅 webhook 送达)'),
+          h('div', { className: 'tn-card__head' },
+            h('span', { className: 'tn-card__title' }, '通知配置'),
+            h('span', { className: 'tn-card__sub' }, '回合事件触发条件与送达通道,数值改动需保存'),
+          ),
           h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, 'webhook'),
+            h('span', { className: 'tn-label' }, 'webhook'),
             h('input', {
               className: 'tn-input tn-fill', type: 'text',
               placeholder: config.webhookConfigured ? '已配置(输入新 URL 替换,留空保持不变)' : 'Slack-compatible URL,留空禁用',
@@ -879,45 +957,53 @@ window.__ModuleLoader__.load({
               onChange: (e) => setUrlDraft(e.target.value),
             }),
             config.webhookConfigured
-              ? h('button', { className: 'tn-btn', disabled: busy, onClick: () => void clearWebhook() }, '清除')
+              ? h('button', { className: 'tn-btn tn-btn--danger', disabled: busy, onClick: () => void clearWebhook() }, '清除')
               : null,
           ),
           h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '碎轮过滤'),
+            h('span', { className: 'tn-label' }, '碎轮过滤'),
             h('input', {
-              className: 'tn-input', type: 'number', min: 0, step: 500,
+              className: 'tn-input', type: 'number', min: 0, step: 500, style: { width: '90px' },
               value: config.minTurnDurationMs,
               onChange: (e) => setConfig({ ...config, minTurnDurationMs: e.target.value }),
             }),
-            h('span', { className: 'tn-meta' }, '毫秒(仅 turn/end 类)'),
+            h('span', { className: 'tn-meta' }, '毫秒,短于此值的 turn/end 回合不通知'),
+            h('span', { className: 'tn-spacer' }),
+            h('button', { className: 'tn-btn tn-btn--primary', disabled: busy, onClick: () => void saveConfig() }, '保存'),
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }, '豁免'),
             h('label', { className: 'tn-meta' },
               h('input', {
                 type: 'checkbox', checked: config.rootsOnly,
                 onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
               }),
-              ' 子代理会话不通知',
+              ' 子代理会话不通知'),
+            h('label', { className: 'tn-meta' },
               h('input', {
                 type: 'checkbox', checked: config.suppressSubagentWake,
                 onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
               }),
               ' 子代理回执静默'),
-            h('span', { className: 'tn-spacer' }),
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void saveConfig() }, '保存'),
           ),
           h('div', { className: 'tn-row' },
-            CATEGORIES.map((category) => h('label', { className: 'tn-meta', key: category },
-              h('input', {
-                type: 'checkbox', checked: config.enabled[category],
-                onChange: (e) => void toggleCategory(category, e.target.checked),
-              }),
-              ' ' + CATEGORY_LABELS[category],
-            ))),
+            h('span', { className: 'tn-label tn-label--top' }, '事件分类'),
+            h('div', { className: 'tn-pills' },
+              CATEGORIES.map((category) => h('span', {
+                className: 'tn-pill' + (config.enabled[category] ? ' tn-pill--on' : ''),
+                key: category,
+                onClick: () => void toggleCategory(category, !config.enabled[category]),
+              }, CATEGORY_LABELS[category])),
+            ),
+          ),
         ),
         config.imAvailable ? h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
-          h('div', { className: 'tn-meta' }, '勾选目标即自动保存;支持绑定多个 bot,点 bot 名加载其目录,× 取消注册'),
+          h('div', { className: 'tn-card__head' },
+            h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
+            h('span', { className: 'tn-card__sub' }, '勾选目标即自动保存;支持绑定多个 bot,点 bot 名加载其目录,× 取消注册'),
+          ),
           h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, 'Bot ID'),
+            h('span', { className: 'tn-label' }, 'Bot ID'),
             h('input', {
               className: 'tn-input tn-fill', type: 'text',
               placeholder: '从设置页 IM机器人 卡片复制 Bot ID',
@@ -927,44 +1013,58 @@ window.__ModuleLoader__.load({
             h('button', { className: 'tn-btn', disabled: busy, onClick: () => void loadImTargets() }, '加载目标'),
           ),
           imBoundBots.length > 0 ? h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '已绑 bot'),
-            imBoundBots.map((botId) => h('span', { className: 'tn-meta', key: botId },
-              h('button', {
-                className: 'tn-btn', disabled: busy,
-                onClick: () => { setImBotIdDraft(botId); void loadImTargets(botId) },
-              }, botId),
-              h('button', {
-                className: 'tn-btn', disabled: busy, title: '取消注册(移除该 bot 全部目标)',
-                onClick: () => unregisterImBot(botId),
-              }, '×'),
-            )),
+            h('span', { className: 'tn-label' }, '已绑 bot'),
+            h('div', { className: 'tn-row' },
+              imBoundBots.map((botId) => h('span', { className: 'tn-chip', key: botId },
+                h('button', {
+                  className: 'tn-chip__name'
+                    + (imCatalog !== null && imCatalog.botId === botId ? ' tn-chip__name--active' : ''),
+                  disabled: busy,
+                  onClick: () => { setImBotIdDraft(botId); void loadImTargets(botId) },
+                }, botId),
+                h('button', {
+                  className: 'tn-chip__x', disabled: busy, title: '取消注册(移除该 bot 全部目标)',
+                  onClick: () => unregisterImBot(botId),
+                }, '×'),
+              )),
+            ),
           ) : null,
           imCatalog !== null
             ? imCatalog.targets.length === 0
               ? h('div', { className: 'tn-meta' }, '该 bot 尚无已保存投递目标,先在 dsh-im 设置页新建并测试')
-              : imCatalog.targets.map((target) => {
-                const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
-                return h('label', { className: 'tn-meta', key: target.targetId },
-                  h('input', {
-                    type: 'checkbox', checked,
-                    onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
+              : h('div', { className: 'tn-list' },
+                  imCatalog.targets.map((target) => {
+                    const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
+                    return h('label', { className: 'tn-list__item', key: target.targetId },
+                      h('input', {
+                        type: 'checkbox', checked,
+                        onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
+                      }),
+                      h('span', { className: 'tn-list__grow' },
+                        target.targetId + (target.name ? ' (' + target.name + ')' : '')),
+                      h('span', { className: 'tn-list__tag' }, target.kind || ''),
+                    )
                   }),
-                  ' ' + target.targetId + (target.name ? '(' + target.name + ')' : '') + ' · ' + (target.kind || ''),
                 )
-              })
             : null,
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '已选目标'),
-            config.imTargets.length === 0
-              ? h('span', { className: 'tn-meta' }, '无')
-              : config.imTargets.map((item) => h('span', { className: 'tn-meta', key: imTargetKey(item) },
-                  item.botId + '/' + item.targetId + ' ',
-                  h('button', { className: 'tn-btn', disabled: busy, onClick: () => removeImTarget(item) }, '删除'),
+          config.imTargets.length > 0 ? h('hr', { className: 'tn-divider' }) : null,
+          config.imTargets.length === 0
+            ? h('div', { className: 'tn-meta' }, '尚未绑定投递目标,通知不会推送 IM')
+            : h('div', { className: 'tn-list' },
+                config.imTargets.map((item) => h('div', { className: 'tn-list__item', key: imTargetKey(item) },
+                  h('span', { className: 'tn-list__grow' }, item.targetId),
+                  h('span', { className: 'tn-list__tag' }, item.botId),
+                  h('button', {
+                    className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: () => removeImTarget(item),
+                  }, '移除'),
                 )),
-          ),
+              ),
         ) : null,
         h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, '测试'),
+          h('div', { className: 'tn-card__head' },
+            h('span', { className: 'tn-card__title' }, '测试'),
+            h('span', { className: 'tn-card__sub' }, '各通道逐一点火,回执即真实结果'),
+          ),
           h('div', { className: 'tn-row' },
             h('button', {
               className: 'tn-btn',
@@ -985,23 +1085,26 @@ window.__ModuleLoader__.load({
           ),
         ),
         h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, '本机偏好(存浏览器)'),
+          h('div', { className: 'tn-card__head' },
+            h('span', { className: 'tn-card__title' }, '本机偏好'),
+            h('span', { className: 'tn-card__sub' }, '仅存当前浏览器,不影响其他窗口'),
+          ),
           h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '系统弹窗'),
+            h('span', { className: 'tn-label' }, '系统弹窗'),
             h('label', { className: 'tn-meta' },
               h('input', {
                 type: 'checkbox', defaultChecked: localGet(KEY_SYSTEM) !== '0',
                 onChange: (e) => localSet(KEY_SYSTEM, e.target.checked ? '1' : '0'),
               }),
               ' 开启'),
-            h('span', { className: 'tn-meta' }, '权限: '
-              + (typeof Notification === 'undefined' ? '不可用(非安全上下文)' : PERMISSION_LABELS[permission] || permission)),
+            h('span', { className: 'tn-meta' }, '权限:'
+              + (typeof Notification === 'undefined' ? '不可用(非安全上下文)' : (PERMISSION_LABELS[permission] || permission))),
             typeof Notification !== 'undefined' && permission === 'default'
               ? h('button', { className: 'tn-btn', onClick: () => void requestPermission() }, '授权')
               : null,
           ),
           h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '页内提示'),
+            h('span', { className: 'tn-label' }, '页内提示'),
             h('label', { className: 'tn-meta' },
               h('input', {
                 type: 'checkbox', defaultChecked: localGet(KEY_TOAST) !== '0',
@@ -1010,11 +1113,14 @@ window.__ModuleLoader__.load({
               ' 开启'),
           ),
           h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-meta' }, '音量'),
+            h('span', { className: 'tn-label' }, '音量'),
             h('input', {
-              type: 'range', min: 0, max: 1, step: 0.05, defaultValue: volume(),
+              className: 'tn-range', type: 'range', min: 0, max: 1, step: 0.05, defaultValue: volume(),
               onChange: (e) => localSet(KEY_VOLUME, e.target.value),
             }),
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }, '行为'),
             h('label', { className: 'tn-meta' },
               h('input', {
                 type: 'checkbox', defaultChecked: localGet(KEY_DND) !== '0',
@@ -1030,7 +1136,10 @@ window.__ModuleLoader__.load({
           ),
         ),
         h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, '音效管理(wav / mp3 / ogg,可多选,单文件上限 2MB)'),
+          h('div', { className: 'tn-card__head' },
+            h('span', { className: 'tn-card__title' }, '音效管理'),
+            h('span', { className: 'tn-card__sub' }, 'wav / mp3 / ogg,可多选,单文件上限 2MB'),
+          ),
           h('div', { className: 'tn-row' },
             h('input', {
               type: 'file', multiple: true, accept: AUDIO_EXTS.map((ext) => '.' + ext).join(','), disabled: busy,
@@ -1041,8 +1150,9 @@ window.__ModuleLoader__.load({
               },
             }),
           ),
-          pendingUploads.map((item, index) => h('div', { className: 'tn-row', key: index },
-            h('span', { className: 'tn-meta' }, '待保存: ' + item.name),
+          pendingUploads.map((item, index) => h('div', { className: 'tn-list__item', key: 'pending-' + index },
+            h('span', { className: 'tn-list__grow' }, item.name),
+            h('span', { className: 'tn-list__tag' }, '待保存'),
             h('button', {
               className: 'tn-btn',
               onClick: () => {
@@ -1053,43 +1163,48 @@ window.__ModuleLoader__.load({
             }, '试听'),
             h('button', { className: 'tn-btn', disabled: busy, onClick: () => void savePending(item) }, '保存'),
             h('button', {
-              className: 'tn-btn', disabled: busy,
+              className: 'tn-btn tn-btn--ghost', disabled: busy,
               onClick: () => setPendingUploads(pendingUploads.filter((pending) => pending !== item)),
             }, '移除'),
           )),
           sounds.length === 0 ? h('span', { className: 'tn-meta' }, '暂无上传音效') :
-            sounds.map((sound) => renamingId === sound.id
-              ? h('div', { className: 'tn-row', key: sound.id },
-                h('input', {
-                  className: 'tn-input tn-fill', type: 'text', autoFocus: true,
-                  value: renameDraft,
-                  onChange: (e) => setRenameDraft(e.target.value),
-                  // Enter 提交:IME 组词确认(229)不算提交,busy 期间忽略防并发提交
-                  onKeyDown: (e) => {
-                    if (e.key === 'Enter' && !busy && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void renameSound(sound)
-                  },
-                }),
-                h('button', { className: 'tn-btn', disabled: busy, onClick: () => void renameSound(sound) }, '确认'),
-                h('button', { className: 'tn-btn', disabled: busy, onClick: cancelRename }, '取消'),
-              )
-              : h('div', { className: 'tn-row', key: sound.id },
-                h('span', { className: 'tn-meta' }, sound.id + '.' + sound.ext),
-                h('button', {
-                  className: 'tn-btn',
-                  onClick: () => {
-                    playAudible({ kind: 'custom', id: sound.id }).then((result) => {
-                      if (!result.ok) patch('试听未播放:' + result.reason, 'error')
-                    })
-                  },
-                }, '试听'),
-                h('button', { className: 'tn-btn', disabled: busy, onClick: () => startRename(sound) }, '重命名'),
-                h('button', { className: 'tn-btn', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),
-              )),
+            h('div', { className: 'tn-list' },
+              sounds.map((sound) => renamingId === sound.id
+                ? h('div', { className: 'tn-list__item', key: sound.id },
+                  h('input', {
+                    className: 'tn-input tn-fill', type: 'text', autoFocus: true,
+                    value: renameDraft,
+                    onChange: (e) => setRenameDraft(e.target.value),
+                    // Enter 提交:IME 组词确认(229)不算提交,busy 期间忽略防并发提交
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter' && !busy && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void renameSound(sound)
+                    },
+                  }),
+                  h('button', { className: 'tn-btn', disabled: busy, onClick: () => void renameSound(sound) }, '确认'),
+                  h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: cancelRename }, '取消'),
+                )
+                : h('div', { className: 'tn-list__item', key: sound.id },
+                  h('span', { className: 'tn-list__grow' }, sound.id + '.' + sound.ext),
+                  h('button', {
+                    className: 'tn-btn',
+                    onClick: () => {
+                      playAudible({ kind: 'custom', id: sound.id }).then((result) => {
+                        if (!result.ok) patch('试听未播放:' + result.reason, 'error')
+                      })
+                    },
+                  }, '试听'),
+                  h('button', { className: 'tn-btn', disabled: busy, onClick: () => startRename(sound) }, '重命名'),
+                  h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),
+                )),
+            ),
         ),
         h('div', { className: 'tn-card' },
-          h('span', { className: 'tn-card__title' }, '分类音效映射'),
+          h('div', { className: 'tn-card__head' },
+            h('span', { className: 'tn-card__title' }, '分类音效映射'),
+            h('span', { className: 'tn-card__sub' }, '每类事件可指定上传音效或内置音,失效自动回落内置默认'),
+          ),
           CATEGORIES.map((category) => h('div', { className: 'tn-row', key: category },
-            h('span', { className: 'tn-meta' }, CATEGORY_LABELS[category]),
+            h('span', { className: 'tn-label' }, CATEGORY_LABELS[category]),
             h('select', {
               className: 'tn-select tn-fill', value: mapping[category] || '',
               onChange: (e) => void setMapping(category, e.target.value),

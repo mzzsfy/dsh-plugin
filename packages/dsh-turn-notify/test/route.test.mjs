@@ -64,6 +64,8 @@ function makeSettings() {
 function makeCtx(extraServices) {
   const routes = new Map()
   const settingsService = makeSettings()
+  const seed = extraServices ? extraServices.settingsStore : undefined
+  if (seed !== undefined) settingsService.update('turn-notify', seed)
   const ctx = {
     on() {},
     get(key) {
@@ -195,6 +197,27 @@ test('config POST 非法 imTargets 400', async () => {
   const res = makeRes()
   await routes.get('/api/turn-notify/config')(makeReq('POST', { imTargets: [{ botId: 'wx_a' }] }, JSON_HEADERS), res)
   assert.equal(res.status, 400)
+})
+
+test('config POST 仅 imTargets 的部分补丁:不触碰其他配置项,响应含完整面板状态', async () => {
+  // 勾选即存契约:面板勾选/取消注册只 POST {imTargets},不得清掉已存的 webhook 与分类开关
+  const dshIm = { send: async () => ({ sent: true }), listTargets: async () => [] }
+  const { ctx, routes } = makeCtx({ dshIm, settingsStore: { webhookUrl: 'https://hooks.example.com/x', enabled: { completed: false } } })
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  const res = makeRes()
+  await handler(makeReq('POST', { imTargets: [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 'owner' }] }, JSON_HEADERS), res)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.webhookConfigured, true)
+  assert.equal(res.body.enabled.completed, false)
+  assert.deepEqual(res.body.imTargets, [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 'owner' }])
+  // 取消注册:整列表替换为空,其余配置仍原样
+  const clear = makeRes()
+  await handler(makeReq('POST', { imTargets: [] }, JSON_HEADERS), clear)
+  assert.equal(clear.status, 200)
+  assert.deepEqual(clear.body.imTargets, [])
+  assert.equal(clear.body.webhookConfigured, true)
+  assert.equal(clear.body.enabled.completed, false)
 })
 
 test('im-targets 代理成功时仅投影 targetId/name/kind,剔除 route', async () => {

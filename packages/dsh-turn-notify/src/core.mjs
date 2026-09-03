@@ -368,6 +368,36 @@ export function normalizeImTargets(raw) {
     .map(({ botId, targetId }) => ({ botId, targetId }))
 }
 
+// ---- IM 目标列表操作(client LOGIC 段镜像,parity 测试保证不漂移) ----
+
+// botId/targetId 字符集均不含 '/',拼接键无歧义
+export const imTargetKeyOf = (item) => item.botId + '/' + item.targetId
+
+// 勾选幂等:同一 botId+targetId 只保留一份;勾选追加到尾部,取消即移除
+export function toggleImTargetList(list, botId, targetId, checked) {
+  const wanted = { botId, targetId }
+  const rest = list.filter((item) => imTargetKeyOf(item) !== imTargetKeyOf(wanted))
+  return checked ? rest.concat([wanted]) : rest
+}
+
+export function removeImTargetFromList(list, botId, targetId) {
+  return list.filter((item) => imTargetKeyOf(item) !== botId + '/' + targetId)
+}
+
+// 取消注册:移除该 bot 全部目标
+export function unregisterImBotList(list, botId) {
+  return list.filter((item) => item.botId !== botId)
+}
+
+// 已绑 bot:按首次绑定顺序去重
+export function imBoundBotIds(list) {
+  const botIds = []
+  for (const item of list) {
+    if (!botIds.includes(item.botId)) botIds.push(item.botId)
+  }
+  return botIds
+}
+
 // 配置补丁校验:顶层键白名单,webhookUrl 空串(禁用)或 http(s) URL,
 // 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
 export function validateConfigPatch(patch) {
