@@ -12,6 +12,11 @@ import {
   resolveSound as coreResolveSound,
   chooseChannels as coreChooseChannels,
   parseVolume as coreParseVolume,
+  imTargetKeyOf as coreImTargetKeyOf,
+  toggleImTargetList as coreToggleImTargetList,
+  removeImTargetFromList as coreRemoveImTargetFromList,
+  unregisterImBotList as coreUnregisterImBotList,
+  imBoundBotIds as coreImBoundBotIds,
   DEFAULT_VOLUME,
   CLAIM_LOCK_TTL_MS,
   USER_IDLE_AWAY_MS,
@@ -28,7 +33,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM };',
+      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds };',
   )
   return factory()
 }
@@ -129,6 +134,53 @@ function defineVolumeScenarios(prefix, parse) {
 
 defineVolumeScenarios('[core.mjs parseVolume] ', coreParseVolume)
 defineVolumeScenarios('[client.js parseVolume] ', client.parseVolume)
+
+// IM 投递目标列表操作对照:client 版 key 为 imTargetKey,其余签名一致。
+const A = { botId: 'wx_aaa', targetId: 'tgt_1' }
+const B = { botId: 'wx_aaa', targetId: 'tgt_2' }
+const C = { botId: 'wx_bbb', targetId: 'tgt_1' }
+
+function clientToggle(list, botId, targetId, checked) {
+  return client.toggleImTargetList(list, botId, targetId, checked)
+}
+
+function defineImTargetScenarios(prefix, keyOf, toggle, removeItem, unregister, boundBots) {
+  test(prefix + '键拼接与勾选幂等对照', () => {
+    assert.equal(keyOf(A), 'wx_aaa/tgt_1')
+    const once = toggle([], 'wx_aaa', 'tgt_1', true)
+    assert.deepEqual(once, [A])
+    assert.deepEqual(toggle(once, 'wx_aaa', 'tgt_1', true), [A])
+    assert.deepEqual(toggle(once, 'wx_bbb', 'tgt_1', true), [A, C])
+  })
+  test(prefix + '取消勾选/移除/取消注册对照', () => {
+    const list = [A, B, C]
+    assert.deepEqual(toggle(list, 'wx_aaa', 'tgt_2', false), [A, C])
+    assert.deepEqual(removeItem(list, 'wx_aaa', 'tgt_2'), [A, C])
+    assert.deepEqual(unregister(list, 'wx_aaa'), [C])
+    assert.deepEqual(unregister(list, 'wx_nnn'), list)
+  })
+  test(prefix + '已绑 bot 去重保序对照', () => {
+    assert.deepEqual(boundBots([A, B, C]), ['wx_aaa', 'wx_bbb'])
+    assert.deepEqual(boundBots([]), [])
+  })
+}
+
+defineImTargetScenarios(
+  '[core.mjs imTargets] ',
+  coreImTargetKeyOf,
+  coreToggleImTargetList,
+  coreRemoveImTargetFromList,
+  coreUnregisterImBotList,
+  coreImBoundBotIds,
+)
+defineImTargetScenarios(
+  '[client.js imTargets] ',
+  client.imTargetKey,
+  clientToggle,
+  client.removeImTargetFromList,
+  client.unregisterImBotList,
+  client.imBoundBotIds,
+)
 
 test('[client.js] localStorage 抛错:认领退化为直接发声且提示位可用', () => {
   const throwing = {
