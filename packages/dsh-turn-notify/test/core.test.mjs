@@ -42,6 +42,57 @@ import { EventEmitter } from 'node:events'
 
 const MIN_TURN_MS = 5 * 1000
 
+test('validateConfigPatch 拒绝非法 imTargets:非数组/超上限/重复/字符集与字段形态', () => {
+  const idMax = 'x'.repeat(128)
+  const cases = [
+    { imTargets: 'nope' },
+    { imTargets: [{ botId: 'wx_a', targetId: 't', extra: 1 }] },
+    { imTargets: [{ botId: 'wx a', targetId: 't' }] },
+    { imTargets: [{ botId: 'wx_a', targetId: 't;' }] },
+    { imTargets: [{ botId: 'wx_a' + 'x'.repeat(128), targetId: 't' }] },
+    { imTargets: [{ botId: 'wx_a', targetId: idMax + 'x' }] },
+    { imTargets: [{ botId: 123, targetId: 't' }] },
+    { imTargets: [{ botId: 'wx_a', targetId: 't' }, { botId: 'wx_a', targetId: 't' }] },
+    { imTargets: Array.from({ length: 17 }, (_, i) => ({ botId: 'wx_' + i, targetId: 't' })) },
+    { imTargets: [['wx_a', 't']] },
+    { imTargets: [{ botId: '   ', targetId: 't' }] },
+  ]
+  for (const patch of cases) {
+    const verdict = validateConfigPatch(patch)
+    assert.equal(verdict.ok, false, '应拒绝: ' + JSON.stringify(patch))
+  }
+  // 边界值合法:128 字符 ID、恰好 16 项目标、targetId 全部合法字符
+  assert.equal(validateConfigPatch({ imTargets: [{ botId: idMax, targetId: 'x'.repeat(123) + '._:@-' }] }).ok, true)
+  assert.equal(validateConfigPatch({ imTargets: Array.from({ length: 16 }, (_, i) => ({ botId: 'wx_' + i, targetId: 't' })) }).ok, true)
+})
+
+test('resolvedConfig 缺省与脏数据归一化 imTargets', () => {
+  assert.deepEqual(resolvedConfig({}).imTargets, [])
+  assert.deepEqual(resolvedConfig({ imTargets: 'junk' }).imTargets, [])
+  assert.deepEqual(resolvedConfig({ imTargets: [{ botId: 'a', targetId: 'b', extra: 1 }, null, { botId: 2, targetId: 'x' }, { botId: 'c', targetId: 'd' }] }).imTargets,
+    [{ botId: 'a', targetId: 'b' }, { botId: 'c', targetId: 'd' }])
+})
+
+test('publicConfig 回显 imTargets', () => {
+  const config = publicConfig({ imTargets: [{ botId: 'wx_a', targetId: 'owner' }] })
+  assert.deepEqual(config.imTargets, [{ botId: 'wx_a', targetId: 'owner' }])
+  assert.deepEqual(publicConfig({}).imTargets, [])
+})
+
+test('validateConfigPatch 接受合法 imTargets 并归一化 trim 且保持顺序', () => {
+  const verdict = validateConfigPatch({
+    imTargets: [
+      { botId: ' wx_abc ', targetId: 'owner' },
+      { botId: 'wx_def', targetId: 'tgt_1234' },
+    ],
+  })
+  assert.equal(verdict.ok, true)
+  assert.deepEqual(verdict.patch.imTargets, [
+    { botId: 'wx_abc', targetId: 'owner' },
+    { botId: 'wx_def', targetId: 'tgt_1234' },
+  ])
+})
+
 function baseSettings(overrides) {
   return {
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
@@ -401,6 +452,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       suppressSubagentWake: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
+      imTargets: [],
     },
   )
   assert.deepEqual(resolvedConfig({}), {
@@ -410,6 +462,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     suppressSubagentWake: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
+    imTargets: [],
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
@@ -424,6 +477,7 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
       suppressSubagentWake: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
+      imTargets: [],
       webhookConfigured: true,
     },
   )

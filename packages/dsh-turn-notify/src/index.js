@@ -20,7 +20,9 @@ import {
   createProjection,
   isSubagent,
   isSubagentWakeTurn,
+  isValidImBotId,
   mapEventToCategory,
+  normalizeImTargets,
   pruneMapping,
   readRawBody,
   renameMapping,
@@ -33,6 +35,7 @@ import {
   validateMappingId,
   validateSoundName,
   validateUpload,
+  WEBHOOK_TIMEOUT_MS,
   publicConfig,
 } from './core.mjs'
 
@@ -43,6 +46,9 @@ export const inject = ['webServer']
 const NAMESPACE = settingsNamespace('turn-notify')
 const SOUNDS_DIR = join(homedir(), '.dsh', 'dsh-turn-notify', 'sounds')
 const REQUEST_BODY_MAX_BYTES = 64 * 1024
+
+// dsh-im 投递错误码到 HTTP 状态的映射,未收录错误按网关失败处理
+const IM_ERROR_STATUS = { 'bad-request': 400, 'unknown-bot': 404, 'bot-not-connected': 503 }
 
 const TURN_END_KIND = 'turn/end'
 const TOOL_CALL_KIND = 'tool/call'
@@ -56,12 +62,13 @@ const SETTINGS_SCHEMA = z.object({
   suppressSubagentWake: z.boolean().default(true).description('子代理完成唤醒的回合不通知'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六分类独立开关'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每分类音效映射,空为内置默认,非空为上传音效 id'),
+  imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 投递目标列表'),
 })
 
 const readSettings = (ctx) => {
   const settings = ctx.get('settings')
   const value = settings ? settings.get(NAMESPACE) : undefined
-  const fallback = { webhookUrl: '', minTurnDurationMs: MIN_TURN_DURATION_MS, rootsOnly: true, suppressSubagentWake: true, enabled: {}, soundMapping: {} }
+  const fallback = { webhookUrl: '', minTurnDurationMs: MIN_TURN_DURATION_MS, rootsOnly: true, suppressSubagentWake: true, enabled: {}, soundMapping: {}, imTargets: [] }
   return value ? { ...fallback, ...value } : fallback
 }
 
@@ -136,6 +143,17 @@ export function apply(ctx) {
     })
     projection.push(unit)
     void sendWebhook({ url: settings.webhookUrl, payload: buildWebhookPayload(unit) })
+    deliverIm(unit)
+  }
+
+  // IM 投递:多目标逐发,fire-and-forget 不重试,失败即弃,与 webhook 同语义;
+  // dshIm 经运行期可选读取,未装 dsh-im 的 profile 本插件照常工作
+  function deliverIm(unit) {
+    const dshIm = ctx.get('dshIm')
+    if (dshIm === undefined) return
+    for (const { botId, targetId } of normalizeImTargets(readSettings(ctx).imTargets)) {
+      void Promise.resolve(dshIm.send(botId, targetId, unit.text)).catch(() => {})
+    }
   }
 
   // 权威事件流:turn/start 记时,turn/end 与 ask_user_question tool/call 命中分类
@@ -400,7 +418,8 @@ export function apply(ctx) {
       path: '/api/turn-notify/config',
       handler: async (req, res) => {
         if (req.method === 'GET') {
-          sendJson(res, 200, publicConfig(readSettings(ctx)))
+          // imAvailable 不进 core 纯函数,config 响应处合流;实时判定,无装载时序假设
+          sendJson(res, 200, { ...publicConfig(readSettings(ctx)), imAvailable: ctx.get('dshIm') !== undefined })
           return
         }
         if (req.method !== 'POST') {
@@ -420,7 +439,7 @@ export function apply(ctx) {
             return
           }
           await settings.update(NAMESPACE, verdict.patch)
-          sendJson(res, 200, publicConfig(readSettings(ctx)))
+          sendJson(res, 200, { ...publicConfig(readSettings(ctx)), imAvailable: ctx.get('dshIm') !== undefined })
         } catch (error) {
           sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
         }
@@ -453,4 +472,78 @@ export function apply(ctx) {
         sendJson(res, 200, result)
       },
     }), 'turn-notify test-webhook route')
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/turn-notify/im-targets',
+      handler: async (req, res) => {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        const dshIm = ctx.get('dshIm')
+        if (dshIm === undefined) {
+          sendJson(res, 503, { error: 'dsh-im 未安装' })
+          return
+        }
+        const botId = new URL(req.url, 'http://localhost').searchParams.get('botId') || ''
+        if (!isValidImBotId(botId)) {
+          sendJson(res, 400, { error: 'botId 缺失或非法' })
+          return
+        }
+        try {
+          const targets = await dshIm.listTargets(botId)
+          // route 为平台原生路由 ID,选择目标无需知道,不出主机
+          sendJson(res, 200, { targets: targets.map(({ targetId, name, kind }) => ({ targetId, name, kind })) })
+        } catch (error) {
+          const code = error && error.code ? error.code : 'delivery-failed'
+          sendJson(res, IM_ERROR_STATUS[code] ?? 502, { error: code })
+        }
+      },
+    }), 'turn-notify im-targets route')
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/turn-notify/test-im',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        if (rejectCrossOrigin(req, res)) return
+        const dshIm = ctx.get('dshIm')
+        if (dshIm === undefined) {
+          sendJson(res, 200, { ok: false, detail: 'dsh-im 未安装' })
+          return
+        }
+        const targets = normalizeImTargets(readSettings(ctx).imTargets)
+        if (targets.length === 0) {
+          sendJson(res, 200, { ok: false, detail: '未配置投递目标' })
+          return
+        }
+        seq += 1
+        const unit = buildUnit({
+          id: 'test-' + Date.now().toString(36) + '-' + String(seq),
+          category: CATEGORY_APPROVAL,
+          status: CATEGORY_ASK,
+          sessionTitle: '测试事件',
+          workspace: '',
+          durationMs: null,
+          ts: Date.now(),
+        })
+        // 逐目标结算,真实结果随响应返回,与 test-webhook 的不谎报原则一致;
+        // 投递超时与 webhook 同值,防平台挂起拖死请求
+        const results = await Promise.all(targets.map(async ({ botId, targetId }) => {
+          try {
+            await dshIm.send(botId, targetId, unit.text, { signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS) })
+            return { botId, targetId, ok: true, detail: 'sent' }
+          } catch (error) {
+            return { botId, targetId, ok: false, detail: error && error.code ? error.code : 'delivery-failed' }
+          }
+        }))
+        sendJson(res, 200, { ok: results.every((item) => item.ok), results })
+      },
+    }), 'turn-notify test-im route')
 }

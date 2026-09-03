@@ -19,7 +19,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { STATE_RUNNING, STATE_OK, hashText, createRegistry, plan, planFinal, teardown, capMap, needsReattach, SEEN_MAP_CAP };',
+      + '; return { STATE_RUNNING, STATE_OK, hashText, createRegistry, plan, planFinal, capMap, needsReattach, SEEN_MAP_CAP };',
   )
   return factory()
 }
@@ -34,7 +34,7 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, planFinal, teardown, hashText, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
+  const { createRegistry, plan, planFinal, hashText, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
 
   test(prefix + '哈希确定性', () => {
     assert.equal(hashText('思考正文'), hashText('思考正文'))
@@ -195,19 +195,6 @@ function defineScenarios(prefix, L) {
     const result = plan(reg, [row(RUNNING, 'A', false, false)])
     assert.equal(result.actions.length, 0)
     assert.equal(reg.current, null)
-  })
-
-  test(prefix + '开关关闭收起插件展开行并清空标记', () => {
-    const reg = createRegistry()
-    plan(reg, [row(RUNNING, 'A')])
-    const result = teardown(reg, [row(OK, 'A', true)])
-    assert.equal(collapseOf(result, 0), 1)
-    assert.equal(reg.current, null)
-    assert.equal(reg.marks.size, 0)
-    assert.equal(reg.manual.size, 0)
-    assert.equal(reg.read.size, 0)
-    const after = plan(reg, [row(RUNNING, 'B')])
-    assert.equal(expandOf(after, 0), 1)
   })
 
   test(prefix + '状态字面量与官方一致', () => {
