@@ -28,7 +28,12 @@ async function readBounded(response, url) {
   }
   if (response.body === null || response.body === undefined) return ''
   const reader = response.body.getReader?.()
-  if (reader === undefined) return await response.text()
+  if (reader === undefined) {
+    // 注入实现无流式读取器时的兜底:整读后仍按累计上限拒收
+    const text = await response.body.text()
+    if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) throw oversized(url)
+    return text
+  }
   const chunks = []
   let total = 0
   try {

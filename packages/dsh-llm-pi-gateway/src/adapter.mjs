@@ -6,7 +6,7 @@
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import { ReasoningEffortId, contentHasImage } from '@deepseek-ai/dsh-llm'
 import { GatewayError } from './errors.mjs'
-import { modelOf } from './config.mjs'
+import { modelOf, PROTOCOL_MODULES } from './config.mjs'
 import { deriveMarker, markerOnPayload } from './marker.mjs'
 import { renderTemplate } from './template.mjs'
 import { toPiContext, toPiContextWithImages } from './pi-context.mjs'
@@ -57,10 +57,11 @@ function reasoningInfo(model, defaultLevel) {
  * @param {(provider: string, ref?: string) => Promise<string|undefined>} [resolveCredential]
  *   凭据解析器,默认走官方链(无凭据服务时回落启动环境)。
  * @param {() => object|undefined} [resolveAttachments] attachments 服务读取器
+ * @param {(reason: string) => void} [onDegrade] replay 降级诊断回调
  */
-export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined) {
+export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade) {
   const routesOf = () => (typeof routes === 'function' ? routes() : routes)
-  const load = loadProtocol ?? ((api) => import(`@earendil-works/pi-ai/api/${api}`))
+  const load = loadProtocol ?? ((api) => import(PROTOCOL_MODULES[api]))
 
   function routeOf(provider) {
     const route = routesOf().get(provider)
@@ -106,14 +107,15 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
   async function* stream(options) {
     const route = routeOf(options.provider)
     const entry = modelOf(route, options.model)
-    const piModel = toPiModel(route, entry)
-    const reasoning = resolveReasoningLevel(piModel, options.reasoningEffort ?? route.reasoning)
-    const enabledReasoning = reasoning === 'off' ? undefined : reasoning
-    const apiKey = await resolveCredential(options.provider, route.apiKeyEnv)
+    // 纯入参校验先于凭据解析:坏请求不消耗凭据链副作用
     if (typeof options.sessionId !== 'string' || options.sessionId.length === 0) {
       throw new GatewayError('sessionId 必须为非空字符串', 'INVALID_REQUEST')
     }
     const sessionId = options.sessionId
+    const piModel = toPiModel(route, entry)
+    const reasoning = resolveReasoningLevel(piModel, options.reasoningEffort ?? route.reasoning)
+    const enabledReasoning = reasoning === 'off' ? undefined : reasoning
+    const apiKey = await resolveCredential(options.provider, route.apiKeyEnv)
     const marker = deriveMarker(sessionId, route.sessionMarker.prefix)
     // 模板先渲染;pi-ai 原生只转发 metadata.user_id,其余模板键由 onPayload 合入请求体
     const renderedTemplate = renderTemplate(route.metadata ?? {}, { sessionId, marker })
@@ -126,8 +128,8 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
       throw new GatewayError('pi-ai image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
     const context = attachments === undefined
-      ? toPiContext(options)
-      : await toPiContextWithImages(options, attachments, undefined, route.maxRequestImageBytes, {
+      ? toPiContext(options, onDegrade)
+      : await toPiContextWithImages(options, attachments, onDegrade, route.maxRequestImageBytes, {
         maxPixels: route.requestImagePixelBudget,
         maxBytes: route.requestImageMaxBytes,
       })
@@ -152,6 +154,7 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
         prefix: route.sessionMarker.prefix,
         enabled: route.sessionMarker.enabled,
         template: renderedTemplate,
+        marker,
       }),
     })
     yield* toStreamChunks(events, piModel.contextWindow, options.signal)

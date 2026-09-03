@@ -86,6 +86,22 @@ test('凭据链:未配置 undefined,配置而缺失 MISSING_CREDENTIAL,命中返
   delete process.env.DEFINITELY_UNSET_ENV_4711
 })
 
+test('凭据链:服务命中优先于启动环境;服务缺失回落环境', async () => {
+  const withService = createCredentialResolver({
+    get: (name) => (name === 'credentials'
+      ? { resolve: async () => ({ value: '  sk-from-service  ' }) }
+      : undefined),
+  })
+  process.env.CRED_TEST_SERVICE_1 = 'sk-from-env'
+  assert.equal(await withService('p', 'CRED_TEST_SERVICE_1'), 'sk-from-service')
+  delete process.env.CRED_TEST_SERVICE_1
+
+  const withoutService = createCredentialResolver({ get: () => undefined })
+  process.env.CRED_TEST_FALLBACK_1 = 'sk-env-only'
+  assert.equal(await withoutService('p', 'CRED_TEST_FALLBACK_1'), 'sk-env-only')
+  delete process.env.CRED_TEST_FALLBACK_1
+})
+
 test('凭据链:空白密钥与不可入头字符拒绝(INVALID_CREDENTIAL)', async () => {
   process.env.CRED_TEST_BLANK_1 = '   '
   await assert.rejects(
@@ -107,6 +123,24 @@ test('sessionMarker.enabled false 关闭路由标记', () => {
     sessionMarker: { enabled: false },
   })
   assert.equal(route.sessionMarker.enabled, false)
+})
+
+test('sessionMarker 关闭时 metadata 模板引用 {marker} 拒绝(语义自洽)', () => {
+  assert.equal(codeOf(() => resolveRoute('p', {
+    ...BASE_PROFILE,
+    sessionMarker: { enabled: false },
+    metadata: { user_id: '{marker}' },
+  })), 'INVALID_CONFIG')
+  assert.equal(codeOf(() => resolveRoute('p', {
+    ...BASE_PROFILE,
+    sessionMarker: { enabled: false },
+    metadata: { nested: { deep: ['{marker}'] } },
+  })), 'INVALID_CONFIG')
+  assert.equal(codeOf(() => resolveRoute('p', {
+    ...BASE_PROFILE,
+    sessionMarker: { enabled: false },
+    metadata: { user_id: '{sessionId}' },
+  })), undefined)
 })
 
 test('metadata 模板原样保存在路由上', () => {

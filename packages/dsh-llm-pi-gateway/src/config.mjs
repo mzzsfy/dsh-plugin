@@ -5,7 +5,10 @@
 
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { GatewayError } from './errors.mjs'
-import { SETTINGS_NS } from './manager.mjs'
+import { templateUsesMarker } from './template.mjs'
+
+// 本包 settings 命名空间:与官方节命名空间同居一处,manager 反向引用
+export const SETTINGS_NS = 'llm-pi-gateway'
 
 // 接管来源节命名空间:官方节由本包(官方 schema)消费,零感知替换官方插件
 export const OFFICIAL_SETTINGS_NS = 'llm-pi-ai'
@@ -93,7 +96,7 @@ const MODALITIES = ['text', 'image']
 
 // pi-ai 思考档位全集(官方 dsh-llm-pi-ai 同款常量,pi-ai 未导出);
 // xhigh/max 与基础档位的默认支持性不对称,正是钉 null 语义存在的理由。
-const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 const TRANSPORTS = ['sse', 'websocket', 'websocket-cached', 'auto']
 
@@ -262,6 +265,13 @@ export function resolveRoute(provider, profile) {
     && (typeof profile.metadata !== 'object' || profile.metadata === null || Array.isArray(profile.metadata))) {
     throw new GatewayError(`${where}: metadata 必须是对象`, 'INVALID_CONFIG')
   }
+  // 标记注入关闭时模板不得再引用 {marker}:否则关闭声明与派生标识注入并存,语义自相矛盾
+  if (!sessionMarker.enabled && templateUsesMarker(profile.metadata)) {
+    throw new GatewayError(
+      `${where}: sessionMarker.enabled 为 false 时 metadata 模板不得使用 {marker} 占位符`,
+      'INVALID_CONFIG',
+    )
+  }
   if (profile.headers !== undefined
     && (typeof profile.headers !== 'object' || profile.headers === null || Array.isArray(profile.headers))) {
     throw new GatewayError(`${where}: headers 必须是对象`, 'INVALID_CONFIG')
@@ -303,9 +313,9 @@ const DEFAULT_MAX_TOKENS = 32768
 const DEFAULT_INPUT = ['text']
 
 // 路由级图片预算缺省,与官方一致
-const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
-const DEFAULT_IMAGE_PIXEL_BUDGET = 4 * 1024 * 1024
-const DEFAULT_IMAGE_MAX_BYTES = 1024 * 1024
+export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+export const DEFAULT_IMAGE_PIXEL_BUDGET = 4 * 1024 * 1024
+export const DEFAULT_IMAGE_MAX_BYTES = 1024 * 1024
 
 function validateInput(input, label) {
   if (!Array.isArray(input) || input.length === 0) {
