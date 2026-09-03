@@ -221,3 +221,63 @@ test('Given dshIm 缺席或未配目标 When 回合完成 Then 不投递且流�
   await flushMicrotasks()
   assert.equal(sends.length, 0)
 })
+
+test('Given 默认碎轮过滤未关闭 When 同毫秒回合完成 Then 碎轮被滤而提问通知放行', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  const onEvent = handlers.get('session/event')
+  // 同毫秒完成的回合:时长不足被滤
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  // 提问通知不受碎轮过滤
+  onEvent(MAIN, { type: 'tool/call', data: { name: 'ask_user_question' } })
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+  assert.equal(units.filter((unit) => unit.category === 'ask').length, 1)
+})
+
+test('Given 非提问的 tool/call When 事件到达 Then 不产生通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'tool/call', data: { name: 'read_file' } })
+  const units = await projectionUnits(routes)
+  assert.equal(units.length, 0)
+})
+
+test('Given approval/request 观察者 When 触发 Then 投影审批单元且 next 同步放行', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  const tap = handlers.get('approval/request')
+  assert.equal(typeof tap, 'function')
+  const returned = tap({}, () => 'next-value')
+  assert.equal(returned, 'next-value')
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'approval').length, 1)
+})
+
+test('Given 已配置 webhook When 真实回合完成 Then fetch 收到 payload 形态', async () => {
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) })
+    return { ok: true, status: 200 }
+  }
+  try {
+    const { ctx, routes, handlers } = makeCtx()
+    apply(ctx)
+    await disableDurationFilter(routes)
+    const config = makeRes()
+    await routes.get('/api/turn-notify/config')(makeReq('POST', { webhookUrl: 'https://hook.example' }, JSON_HEADERS), config)
+    assert.equal(config.status, 200)
+    const onEvent = handlers.get('session/event')
+    onEvent(MAIN, { type: 'turn/start' })
+    onEvent(MAIN, turnEnd('completed'))
+    await flushMicrotasks()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, 'https://hook.example')
+    assert.equal(calls[0].body.category, 'completed')
+    assert.ok(String(calls[0].body.event).startsWith('n-'), 'event 应为通知 id')
+    assert.ok(String(calls[0].body.text).startsWith('[dsh]'), 'webhook text 应与通知单元一致')
+  } finally { globalThis.fetch = original }
+})

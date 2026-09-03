@@ -19,18 +19,6 @@ window.__ModuleLoader__.load({
     const SYSTEM_TEST_DELAY_MS = 5 * 1000
     // 显示回执等待上限:超时未回执按环境层拦截给出诊断
     const SYSTEM_SHOW_TIMEOUT_MS = 3 * 1000
-    const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
-    const MIME_BY_EXT = { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' }
-
-    const CATEGORY_LABELS = {
-      completed: '任务完成',
-      error: '任务出错',
-      interrupted: '被中断',
-      approval: '等待审批',
-      ask: 'AI 提问',
-      'max-tokens': '达到上限',
-    }
-    const CATEGORIES = Object.keys(CATEGORY_LABELS)
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → bell);
     // 该插件未就绪时入队,由其启动时排空
@@ -53,6 +41,20 @@ window.__ModuleLoader__.load({
     /* LOGIC-BEGIN */
     // 纯逻辑段:与 src/core.mjs 保持行为一致,由 parity 测试保证。
     // localStorage 不可用时认领退化为"本窗口直接发声",状态记录在 storageState。
+
+    // 数据镜像常量:与 core.mjs 的 AUDIO_EXTS/MIME_BY_EXT/CATEGORY_LABELS 同源,parity 锁定
+    const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
+    const MIME_BY_EXT = { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' }
+
+    const CATEGORY_LABELS = {
+      completed: '任务完成',
+      error: '任务出错',
+      interrupted: '被中断',
+      approval: '等待审批',
+      ask: 'AI 提问',
+      'max-tokens': '达到上限',
+    }
+    const CATEGORIES = Object.keys(CATEGORY_LABELS)
 
     const TONE_LABELS = {
       'up-arpeggio': '上行琶音', bell: '铃铛', duo: '清脆双音', 'alarm-square': '警报方波',
@@ -89,11 +91,11 @@ window.__ModuleLoader__.load({
 
     const storageState = { broken: false }
 
-    // 诚实降级:降级路径至少提示一次,后续静默
-    let degradeAnnounced = false
-    function announceDegrade(reason) {
-      if (degradeAnnounced) return
-      degradeAnnounced = true
+    // 诚实降级:轮询与存储两类降级各自提示一次;轮询恢复后复位,存储不可用不自动复位
+    const degradeAnnounced = { poll: false, storage: false }
+    function announceDegrade(kind, reason) {
+      if (degradeAnnounced[kind]) return
+      degradeAnnounced[kind] = true
       console.warn('[dsh-turn-notify] 通知降级,本窗口直接发声: ' + reason)
     }
 
@@ -142,12 +144,14 @@ window.__ModuleLoader__.load({
     }
 
     // 认领读阶段决策:done 终态 / 他锁跳过 / 过期接管 / 自锁或无锁认领
+    // undefined 判定与 core.mjs decideClaim 同形:镜像语义含 undefined 域,parity 锁定
     function decideClaim(stored, done, now, wid) {
-      if (done !== null) return 'done'
+      if (done !== null && done !== undefined) return 'done'
+      if (stored === null || stored === undefined) return 'claim'
       let lock = null
-      try { lock = stored === null ? null : JSON.parse(stored) } catch { lock = null }
+      try { lock = JSON.parse(stored) } catch { lock = null }
       if (lock === null || typeof lock !== 'object' || typeof lock.at !== 'number' || typeof lock.wid !== 'string') {
-        return stored === null ? 'claim' : 'takeover'
+        return 'takeover'
       }
       if (now - lock.at >= CLAIM_LOCK_TTL_MS) return 'takeover'
       return lock.wid === wid ? 'claim' : 'skip'
@@ -163,13 +167,15 @@ window.__ModuleLoader__.load({
       // 投影窗口内同一事件只发一次
       if (storageState.broken) {
         if (!announcedOnce(id, now)) return false
-        announceDegrade('localStorage 不可用')
+        announceDegrade('storage', 'localStorage 不可用')
         return true
       }
       const verdict = decideClaim(stored, done, now, wid)
       if (verdict === 'done' || verdict === 'skip') return false
       localSet(KEY_LOCK + id, JSON.stringify({ wid, at: now }))
-      const confirmed = JSON.parse(localGet(KEY_LOCK + id))
+      // 读回值解析防护:他窗写坏该键时按放弃处理,不中断整轮投影
+      let confirmed = null
+      try { confirmed = JSON.parse(localGet(KEY_LOCK + id)) } catch { confirmed = null }
       return confirmed !== null && confirmed.wid === wid
     }
 
@@ -445,9 +451,9 @@ window.__ModuleLoader__.load({
     async function poll() {
       try {
         await pollOnce()
-        degradeAnnounced = false
+        degradeAnnounced.poll = false
       } catch (error) {
-        announceDegrade(error && error.message ? error.message : String(error))
+        announceDegrade('poll', error && error.message ? error.message : String(error))
       }
     }
 

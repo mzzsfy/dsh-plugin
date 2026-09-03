@@ -19,8 +19,6 @@ import {
   chooseChannels,
   USER_IDLE_AWAY_MS,
   resolveSound,
-  pruneMapping,
-  renameMapping,
   validateSoundName,
   SOUND_NAME_MAX_CHARS,
   parseVolume,
@@ -31,12 +29,19 @@ import {
   publicConfig,
   validateUpload,
   collectSessionEvents,
+  storedSessionTitle,
+  SESSION_EVENTS_MAX,
+  pruneTimestamps,
+  TITLE_MAX_CHARS,
   readRawBody,
   sessionTitle,
   createApprovalTap,
   sendWebhook,
   TONE_BELL,
   TONE_UP_ARPEGGIO,
+  TONE_DOUBLE_PING,
+  MIME_BY_EXT,
+  mimeOf,
 } from '../src/core.mjs'
 import { EventEmitter } from 'node:events'
 
@@ -139,7 +144,7 @@ test('rootsOnly 按子代理会话过滤', () => {
   }), true)
 })
 
-test('碎轮过滤仅作用于 turn/end 类', () => {
+test('碎轮过滤仅作用于 turn/end 类,时长恰等边界放行', () => {
   const settings = baseSettings()
   const top = {}
   assert.equal(shouldNotify({
@@ -148,6 +153,10 @@ test('碎轮过滤仅作用于 turn/end 类', () => {
   assert.equal(shouldNotify({
     category: CATEGORY_ERROR, kind: 'turn/end', durationMs: MIN_TURN_MS - 1, settings, header: top,
   }), false)
+  // 恰等阈值不属碎轮
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS, settings, header: top,
+  }), true)
   assert.equal(shouldNotify({
     category: CATEGORY_APPROVAL, kind: 'approval/request', durationMs: null, settings, header: top,
   }), true)
@@ -266,7 +275,7 @@ test('webhook payload 字段映射', () => {
   })
   const payload = buildWebhookPayload(unit)
   assert.deepEqual(payload, {
-    text: payload.text,
+    text: '[dsh] 任务完成: 修复登录',
     event: 'n1',
     category: CATEGORY_DONE,
     status: 'completed',
@@ -275,7 +284,6 @@ test('webhook payload 字段映射', () => {
     durationMs: 12 * 1000,
     ts: 1234,
   })
-  assert.ok(payload.text.includes('修复登录'))
 })
 
 test('音效映射:自定义命中用自定义,内置备选与失效回落', () => {
@@ -283,22 +291,8 @@ test('音效映射:自定义命中用自定义,内置备选与失效回落', () 
   assert.deepEqual(resolveSound({ category: CATEGORY_ERROR, mapping, uploadedIds: ['snd-9'] }), { kind: 'custom', id: 'snd-9' })
   assert.deepEqual(resolveSound({ category: CATEGORY_DONE, mapping, uploadedIds: [] }), { kind: 'builtin', name: TONE_BELL })
   const fallback = resolveSound({ category: CATEGORY_ASK, mapping, uploadedIds: [] })
-  assert.equal(fallback.kind, 'builtin')
-  assert.notEqual(fallback.name, 'gone')
+  assert.deepEqual(fallback, { kind: 'builtin', name: TONE_DOUBLE_PING })
   assert.deepEqual(resolveSound({ category: CATEGORY_DONE, mapping: {}, uploadedIds: [] }), { kind: 'builtin', name: TONE_UP_ARPEGGIO })
-})
-
-test('删除被引用音效后映射回落', () => {
-  const mapping = pruneMapping({ [CATEGORY_DONE]: 'a', [CATEGORY_ERROR]: 'b' }, 'a')
-  assert.equal(mapping[CATEGORY_DONE], undefined)
-  assert.equal(mapping[CATEGORY_ERROR], 'b')
-})
-
-test('重命名映射:引用随新名迁移,无关分类保留', () => {
-  const mapping = renameMapping({ [CATEGORY_DONE]: 'old', [CATEGORY_ERROR]: 'other', [CATEGORY_ASK]: 'old' }, 'old', 'new')
-  assert.equal(mapping[CATEGORY_DONE], 'new')
-  assert.equal(mapping[CATEGORY_ERROR], 'other')
-  assert.equal(mapping[CATEGORY_ASK], 'new')
 })
 
 test('音量解析:未设置回默认,显式零保留,非法回落默认', () => {
@@ -332,13 +326,16 @@ test('音效名校验:合法名通过并归一化,非法名拒绝', () => {
   assert.equal(validateSoundName('长'.repeat(SOUND_NAME_MAX_CHARS)).ok, true)
 })
 
-test('上传校验:扩展名 / 单文件上限 / 总量上限', () => {
+test('上传校验:扩展名 / 单文件上限 / 总量上限 / 零与负体拒绝 / 总量恰等放行', () => {
   const fileMax = 2 * 1024 * 1024
   const totalMax = 10 * 1024 * 1024
   assert.equal(validateUpload({ filename: 'a.MP3', size: fileMax, totalBytes: 0 }).ok, true)
   assert.equal(validateUpload({ filename: 'a.txt', size: 1, totalBytes: 0 }).ok, false)
   assert.equal(validateUpload({ filename: 'a.mp3', size: fileMax + 1, totalBytes: 0 }).ok, false)
   assert.equal(validateUpload({ filename: 'a.mp3', size: 1, totalBytes: totalMax }).ok, false)
+  assert.equal(validateUpload({ filename: 'a.mp3', size: 0, totalBytes: 0 }).ok, false)
+  assert.equal(validateUpload({ filename: 'a.mp3', size: -1, totalBytes: 0 }).ok, false)
+  assert.equal(validateUpload({ filename: 'a.mp3', size: fileMax, totalBytes: totalMax - fileMax }).ok, true)
 })
 
 test('标题提取:首个用户文本并截断', () => {
@@ -351,7 +348,7 @@ test('标题提取:首个用户文本并截断', () => {
     { type: 'user/message', data: { content: [{ type: 'text', text: long }] } },
   ]
   assert.equal(sessionTitle(events), '帮我修复登录页面的崩溃问题')
-  assert.equal(sessionTitle(eventsLong).length, 60)
+  assert.equal(sessionTitle(eventsLong).length, TITLE_MAX_CHARS)
   assert.equal(sessionTitle([]), null)
 })
 
@@ -401,6 +398,23 @@ test('webhook 发送返回真实投递结果', async () => {
     { ok: false, detail: '未配置 webhook' },
   )
   assert.equal(called, 0)
+})
+
+test('webhook 非 Error 抛出物以字符串形式回填 detail', async () => {
+  const throwingString = async () => { throw 'boom' }
+  assert.deepEqual(
+    await sendWebhook({ url: 'https://hook.example', payload: { text: 'x' }, fetchImpl: throwingString }),
+    { ok: false, detail: 'boom' },
+  )
+})
+
+test('MIME 映射:扩展名一比一对应,未知扩展回退通用类型', () => {
+  assert.deepEqual(MIME_BY_EXT, { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' })
+  assert.equal(mimeOf('wav'), 'audio/wav')
+  assert.equal(mimeOf('mp3'), 'audio/mpeg')
+  assert.equal(mimeOf('ogg'), 'audio/ogg')
+  assert.equal(mimeOf('txt'), 'application/octet-stream')
+  assert.equal(mimeOf(''), 'application/octet-stream')
 })
 
 test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () => {
@@ -486,25 +500,63 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
   assert.equal('webhookUrl' in publicConfig({ webhookUrl: 'https://hook.example' }), false)
 })
 
-test('会话事件有界累积:标题提取后封账,内存不再增长', () => {
+test('会话事件有界累积:标题提取后封账为字符串,内存不再增长', () => {
   const store = new Map()
   const titled = new Set()
   const sessionId = 's1'
   const userEvent = (text) => ({ type: 'user/message', data: { content: [{ type: 'text', text }] } })
   collectSessionEvents(store, titled, sessionId, userEvent('第一句'))
   assert.equal(titled.has(sessionId), true)
-  const sizeAfterTitle = store.get(sessionId).length
+  // 封账后 store 中以标题字符串替代事件数组
+  assert.equal(store.get(sessionId), '第一句')
+  assert.equal(storedSessionTitle(store, sessionId), '第一句')
   for (let index = 0; index < 100; index += 1) {
     collectSessionEvents(store, titled, sessionId, userEvent('追加 ' + index))
   }
-  assert.equal(store.get(sessionId).length, sizeAfterTitle)
+  assert.equal(store.get(sessionId), '第一句')
   // 非用户消息事件不入库
   collectSessionEvents(store, titled, sessionId, { type: 'turn/start', data: {} })
-  assert.equal(store.get(sessionId).length, sizeAfterTitle)
-  // 未提取到标题的会话继续累积
+  assert.equal(store.get(sessionId), '第一句')
+  // 未提取到标题的会话继续累积,超上限截尾
   collectSessionEvents(store, titled, 's2', { type: 'user/message', data: { content: [{ type: 'text', text: ' ' }] } })
+  for (let index = 0; index < SESSION_EVENTS_MAX + 3; index += 1) {
+    collectSessionEvents(store, titled, 's2', { type: 'user/message', data: { content: [{ type: 'image' }] } })
+  }
+  const untitled = store.get('s2')
+  assert.equal(Array.isArray(untitled), true)
+  assert.equal(untitled.length, SESSION_EVENTS_MAX)
+  assert.equal(titled.has('s2'), false)
+  assert.equal(storedSessionTitle(store, 's2'), null)
+  // 截尾后出现文本:标题提取照常生效并封账
   collectSessionEvents(store, titled, 's2', userEvent('正式内容'))
-  assert.equal(store.get('s2').length, 2)
+  assert.equal(titled.has('s2'), true)
+  assert.equal(store.get('s2'), '正式内容')
+})
+
+test('会话标题读取:未封账数组内含文本时提取,空缺返回 null', () => {
+  const store = new Map()
+  assert.equal(storedSessionTitle(store, 'none'), null)
+  store.set('arr', [{ type: 'user/message', data: { content: [{ type: 'text', text: '数组内标题' }] } }])
+  assert.equal(storedSessionTitle(store, 'arr'), '数组内标题')
+  store.set('bad', 42)
+  assert.equal(storedSessionTitle(store, 'bad'), null)
+})
+
+test('会话标题按码点截断:增补平面字符不产生孤立代理项', () => {
+  const prefix = 'x'.repeat(TITLE_MAX_CHARS - 1)
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: prefix + '😀😀😀' }] } }]
+  const title = sessionTitle(events)
+  assert.equal(Array.from(title).length, TITLE_MAX_CHARS)
+  for (const unit of title) assert.equal((unit.codePointAt(0) & 0xf800) !== 0xd800, true)
+})
+
+test('时间戳惰性回收:超龄条目删除,新鲜与恰等边界保留', () => {
+  const map = new Map([['old', 1000], ['fresh', 2000], ['edge', 2000]])
+  pruneTimestamps(map, 2000 + SUBAGENT_WAKE_WINDOW_MS, SUBAGENT_WAKE_WINDOW_MS)
+  assert.equal(map.has('old'), false)
+  assert.equal(map.has('fresh'), true)
+  // 恰等阈值不算超龄
+  assert.equal(map.has('edge'), true)
 })
 
 test('映射路由 id 校验:空串放行,仅收已上传 id 与内置音名', () => {
@@ -533,6 +585,14 @@ test('readRawBody 连接中断 close 兜底 reject', async () => {
   const pending = readRawBody(req, 1024)
   req.emit('close')
   await assert.rejects(() => pending, /中断/)
+})
+
+test('readRawBody error 事件兜底 reject', async () => {
+  const req = new EventEmitter()
+  req.destroy = () => {}
+  const pending = readRawBody(req, 1024)
+  req.emit('error', new Error('socket reset'))
+  await assert.rejects(() => pending, /socket reset/)
 })
 
 test('readRawBody 正常聚合', async () => {
