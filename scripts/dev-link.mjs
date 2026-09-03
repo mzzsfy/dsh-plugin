@@ -35,6 +35,11 @@ const workspaceYaml = join(profileRoot, 'pnpm-workspace.yaml')
 const homePatch = join(process.env.USERPROFILE, '.dsh', 'cordis.patch.yml')
 const SCOPE = '@mzzsfy/'
 const REGISTRY = 'https://registry.npmjs.org'
+// 普通依赖豁免:未声明 dsh 元数据、不进 profile bundle 层的包(如 @mzzsfy/mcp-ssh,
+// 由 dsh-agent-shell 按名解析拉起的 MCP stdio server)。它们不走工作副本 junction
+// (pnpm 安装版为准,半成品工作副本会拖垮拉起方),依赖行也交给使用方的依赖声明,
+// dev-link 不归一、不挂载、不校验版本。
+const PLAIN_DEPS = ['mcp-ssh']
 
 // dev 热更新:hmr 行由本脚本在 home 补丁层维护(市场只写 profile 层,互不冲突)。
 // root 指向仓库 packages;junction 挂载下 Node 按 realpath 解析模块,变更即命中。
@@ -206,11 +211,24 @@ function readJunctionTarget(linkPath) {
 }
 
 /** 终态校验:依赖行、挂载指向、(卸链时的)安装版本逐项比对,任一不符即整体失败 */
-function verifyAll(packages, latests, unlink) {
+function verifyAll(packages, latests, unlink, scope) {
   const manifest = readProfileManifest()
   const failures = []
   for (const dir of packages) {
     const key = SCOPE + dir
+    // 普通依赖豁免:不随单包/全量模式区分,始终检查"已安装且不是 junction",
+    // 版本由使用方(agent-shell)的依赖声明决定
+    if (PLAIN_DEPS.includes(dir)) {
+      const phys = junctionPath(dir)
+      if (readJunctionTarget(phys) !== null) {
+        failures.push(`${key}: 普通依赖不应挂 junction(工作副本会拖垮拉起方),应恢复 pnpm 安装版`)
+      } else if (!existsSync(join(phys, 'package.json'))) {
+        failures.push(`${key}: 普通依赖未安装`)
+      }
+      continue
+    }
+    // 单包模式只校验指定包,其余包终态不随之校验
+    if (!scope.includes(dir)) continue
     const latest = latests[dir] ?? onlineLatest(key)
     const want = `^${latest}`
     const dep = manifest.dependencies[key]
@@ -265,10 +283,16 @@ if (!existsSync(profileManifest)) {
 }
 
 const packages = discoverPackages()
-const names = target === 'all' ? packages : [target]
+// 普通依赖豁免:不归一、不挂载、不校验,`all` 的语义即"全部插件",普通依赖不在其列
+const linkable = packages.filter((name) => !PLAIN_DEPS.includes(name))
+const names = target === 'all' ? linkable : [target]
+if (!unlink && target !== 'all' && PLAIN_DEPS.includes(target)) {
+  console.error(`${SCOPE + target} 是普通依赖(无 dsh 元数据,非 profile 层插件),不参与 link;调试本体在包目录内直接跑`)
+  process.exit(1)
+}
 for (const name of names) {
   if (!packages.includes(name)) {
-    console.error(`未知包名: ${name}(可选: ${packages.join(', ')})`)
+    console.error(`未知包名: ${name}(可选: ${packages.join(', ')};普通依赖 ${PLAIN_DEPS.map((d) => SCOPE + d).join(', ')} 不参与 link)`)
     process.exit(1)
   }
 }
@@ -276,21 +300,26 @@ for (const name of names) {
 let latests = {}
 if (!unlink) {
   // 单包模式只归一指定包,不被清单内其他未发布包(线上查询 404)阻断;all 仍全量归一
-  const scope = target === 'all' ? packages : names
+  const scope = target === 'all' ? linkable : names
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
   // 豁免清单是全 profile 级策略,仅在 all 模式全量重写(只豁免各包线上最新版——
-  // 历史版本早已过宽限期);先于 pnpm install 执行,否则刚发布的版本仍会被拦截
-  const excludeChanged = target === 'all' ? syncReleaseAgeExclude(packages, normalized.latests) : false
+  // 历史版本早已过宽限期);普通依赖虽不挂载,照样从 registry 安装,同需豁免
+  if (target === 'all') {
+    for (const dir of packages) {
+      if (PLAIN_DEPS.includes(dir)) latests[dir] = onlineLatest(SCOPE + dir)
+    }
+  }
+  const excludeChanged = target === 'all' ? syncReleaseAgeExclude(packages, latests) : false
   if (normalized.changed || excludeChanged) {
     if (!pnpmInstall(allowFresh)) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
       process.exitCode = 1
     }
-    // pnpm 重建过整个 node_modules:凡有依赖声明的包全部重挂,保住既有链接;
-    // 无依赖声明的包(如未发布新品)不产生 phantom junction
+    // pnpm 重建过整个 node_modules:凡有依赖声明的插件包全部重挂,保住既有链接;
+    // 无依赖声明的包(如未发布新品)与普通依赖豁免包不产生 junction
     const declared = readProfileManifest().dependencies || {}
-    for (const dir of packages) {
+    for (const dir of linkable) {
       if (declared[SCOPE + dir] !== undefined) mountJunction(dir)
     }
   }
@@ -309,8 +338,19 @@ if (unlink) {
   }
 } else {
   syncDevHmr(true)
+  // 普通依赖若在豁免前被挂过 junction,拆掉并恢复 registry 安装版
+  let plainCleaned = false
+  for (const name of PLAIN_DEPS) {
+    const phys = junctionPath(name)
+    if (existsSync(phys) && readJunctionTarget(phys) !== null) {
+      rmSync(phys, {recursive: true, force: true})
+      plainCleaned = true
+      console.log(`FIX  ${SCOPE + name}: 已拆除豁免包的 junction`)
+    }
+  }
+  if (plainCleaned) pnpmInstall(allowFresh)
   for (const name of names) mountJunction(name)
 }
 
-verifyAll(names, latests, unlink)
+verifyAll(packages, latests, unlink, names)
 console.log('\n提醒: profile 内执行过 pnpm install / dsh plugin add 后,链接会被覆盖,需重跑本脚本。')
