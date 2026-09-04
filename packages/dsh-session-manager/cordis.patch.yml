@@ -1,8 +1,6 @@
-# The session-manager bundle patch: inserts the auto-archive + archive panel +
-# recycle-bin delete plugin into the profile root as one entry. Applied by
-# `dsh plugin add @mzzsfy/dsh-session-manager`; the row id addresses this
-# plugin's host half, whose `/api/session-manager/*` routes serve the browser
-# half rendered in the settings page.
+# session-manager 打包补丁:将自动归档 + 归档面板 + 回收站删除插件以单条目
+# 注入 profile 根。由 `dsh plugin add @mzzsfy/dsh-session-manager` 应用;
+# 行 id 指向本插件宿主半区,其 /api/session-manager/* 路由服务设置页中的浏览器半区。
 
 - insert:
     - id: session-manager

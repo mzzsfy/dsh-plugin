@@ -3,7 +3,6 @@
 
 export const DAY_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_AUTO_ARCHIVE_DAYS = 7
-export const TOAST_HOLD_MS = 4 * 1000
 
 export const DELETE_CODES = {
   UNSUPPORTED: 'unsupported',
@@ -30,12 +29,12 @@ export function selectArchiveCandidates({ records, nowMs, thresholdDays }) {
     .map((item) => item.id)
 }
 
-/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序。 */
+/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id(与 client 镜像同规)。 */
 export function projectArchiveRows({ rows, archivedIds }) {
   const archived = new Set(archivedIds)
   return rows
     .filter((row) => archived.has(row.id))
-    .map((row) => ({ id: row.id, title: row.title, updatedAt: row.updatedAt }))
+    .map((row) => ({ id: row.id, title: row.title || row.id, updatedAt: row.updatedAt }))
     .sort((left, right) => right.updatedAt - left.updatedAt)
 }
 

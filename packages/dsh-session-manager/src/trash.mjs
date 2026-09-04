@@ -7,21 +7,26 @@ import { promisify } from 'node:util'
 const TRASH_TIMEOUT_MS = 60 * 1000
 const execFilep = promisify(execFile)
 
-// 路径经 argv 传入 scriptblock param,避免拼接进脚本文本;
-// 按目标为目录或文件分派 DeleteDirectory / DeleteFile;
-// UIOption 枚举为 API 必需重载参数,在 -NonInteractive 宿主下无对话框,
-// 失败经 catch 置非零退出码直达失败矩阵(powershell.exe 对终止错误默认退出 0)。
+/** 回收站目标的传递变量名;宿主半区与脚本共用,改一侧须同步 */
+export const TRASH_ENV_NAME = 'DSH_TRASH_PATH'
+
+// Windows 路径经环境变量传入:-Command 会把 argv 以空格重拼接为命令文本再解析,
+// 路径走 argv 会在空格处断裂且存在被解析为脚本语句的注入面;环境变量不经
+// PowerShell 文本解析,任意路径形态安全。按目标为目录或文件分派
+// DeleteDirectory / DeleteFile;UIOption 枚举为 API 必需重载参数,在 -NonInteractive
+// 宿主下无对话框,失败经 catch 置非零退出码直达失败矩阵(powershell.exe 对终止错误默认退出 0)。
 const WIN_SCRIPT =
-  '& {param($p) Add-Type -AssemblyName Microsoft.VisualBasic; try { '
+  '$ErrorActionPreference=\'Stop\'; Add-Type -AssemblyName Microsoft.VisualBasic; try { '
+  + '$p=$env:' + TRASH_ENV_NAME + '; '
   + 'if ((Get-Item -LiteralPath $p).PSIsContainer) { '
   + "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($p, 'OnlyErrorDialogs', 'SendToRecycleBin') } "
   + "else { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p, 'OnlyErrorDialogs', 'SendToRecycleBin') } "
-  + "exit 0 } catch { $_ | Out-String | Write-Error; exit 1 }}"
+  + 'exit 0 } catch { $_ | Out-String | Write-Error; exit 1 }'
 
-/** 按平台产出回收站命令;路径始终走最后一个参数,不进命令文本。 */
+/** 按平台产出回收站命令;win32 路径经 env 传递,其余平台走 argv 末位。 */
 export function trashCommandFor(platform, path) {
   if (platform === 'win32') {
-    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WIN_SCRIPT, path] }
+    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', WIN_SCRIPT], env: { [TRASH_ENV_NAME]: path } }
   }
   if (platform === 'darwin') {
     return {
@@ -39,5 +44,6 @@ export function trashCommandFor(platform, path) {
 export async function trashPath(path, options = {}) {
   const { platform = process.platform, run = execFilep, timeoutMs = TRASH_TIMEOUT_MS } = options
   const command = trashCommandFor(platform, path)
-  await run(command.file, command.args, { timeout: timeoutMs })
+  const env = command.env ? { ...process.env, ...command.env } : undefined
+  await run(command.file, command.args, { timeout: timeoutMs, env })
 }

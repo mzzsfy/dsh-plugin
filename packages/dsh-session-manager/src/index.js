@@ -10,11 +10,11 @@ import { open, realpath, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import schemastery from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { z } from 'zod'
 import { defineDomain } from '@deepseek-ai/dsh-storage-domain'
 
 import {
+  DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_CODES,
   artifactLooksBlank,
@@ -30,9 +30,9 @@ import { trashPath } from './trash.mjs'
 
 export const name = 'dsh-session-manager'
 
-export const inject = ['webServer', 'workspaceRegistry', 'sessionQuery', 'storageDomain']
+export const inject = ['webServer', 'workspaceRegistry', 'sessionQuery', 'storageDomain', 'agents', 'sessions', 'sessionPersistence']
 
-const NAMESPACE = settingsNamespace('session-manager')
+const NAMESPACE = 'session-manager'
 const WORKSPACE_DOMAIN_NAME = 'workspace'
 
 // 已删除台账域:global 单列表,条目为回收站还原后重挂载所需的最小信息
@@ -53,6 +53,10 @@ const LEDGER_SPEC = defineDomain({
 })
 
 const BLANK_PROBE_CHUNK_BYTES = 64 * 1024
+// 台账条目上限:超过即裁掉最旧条目(数组头部为新,尾部最旧),防无界增长写放大
+const LEDGER_MAX_ENTRIES = 200
+// 自动归档评估整体超时:宿主服务挂起时不因门闩未复位而永久停摆
+const EVALUATION_TIMEOUT_MS = 30 * 1000
 
 // 路由响应文案;导出供测试断言与实现同步
 export const MESSAGES = {
@@ -71,6 +75,9 @@ export const MESSAGES = {
   noWorkspace: '未找到会话所属工作区,无法重新挂载',
   ledgerCleanup: '已重新挂载,但清除台账记录失败;可在「已删除」区移除记录收尾',
   ledgerSuffix: ',且重挂载记录失败',
+  inFlight: '该会话正在删除中,请稍后重试',
+  badJsonBody: '请求体不是合法 JSON',
+  systemError: '操作失败(系统级错误,详见服务端日志)',
 }
 
 // trash 执行器出口:进程级唯一 OS 副作用注入点,测试经此桩替
@@ -84,6 +91,17 @@ const SETTINGS_SCHEMA = schemastery.object({
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
+}
+
+// 错误响应出口:业务错误(Error 无错误码)原样透传消息;系统级错误(带 fs 错误码,
+// message 内嵌绝对路径)收敛为固定文案,原始错误仅进服务端日志
+function respondError(ctx, res, error) {
+  const isSystem = Boolean(error && typeof error.code === 'string' && error.code !== '')
+  if (isSystem && ctx.logger) ctx.logger.warn('session-manager 系统级错误: ' + String(error && error.stack || error))
+  const message = isSystem
+    ? MESSAGES.systemError
+    : (error && error.message ? error.message : String(error))
+  sendJson(res, 400, { error: message })
 }
 
 function readSettings(ctx) {
@@ -113,8 +131,14 @@ function readBody(req) {
 }
 
 async function requireSessionId(req) {
-  const body = JSON.parse(await readBody(req))
-  const sessionId = body && typeof body.sessionId === 'string' ? body.sessionId : ''
+  // 协议错误与业务错误分通道:JSON 解析失败给固定中文文案,不透出引擎 SyntaxError
+  let body
+  try {
+    body = JSON.parse(await readBody(req))
+  } catch {
+    throw new Error(MESSAGES.badJsonBody)
+  }
+  const sessionId = body && typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
   if (sessionId.length === 0) throw new Error('sessionId 不能为空')
   return sessionId
 }
@@ -125,14 +149,14 @@ async function artifactIsBlank(path) {
   try {
     handle = await open(path, 'r')
     const { buffer, bytesRead } = await handle.read(
-      Buffer.alloc(BLANK_PROBE_CHUNK_BYTES), 0, BLANK_PROBE_CHUNK_BYTES, 0)
+      Buffer.allocUnsafe(BLANK_PROBE_CHUNK_BYTES), 0, BLANK_PROBE_CHUNK_BYTES, 0)
     const headText = buffer.toString('utf8', 0, bytesRead)
     return artifactLooksBlank(headText, bytesRead === BLANK_PROBE_CHUNK_BYTES)
   } catch {
     // 产物不可读(已被移走等)时按非空白处理,宁可漏归档不可误归档
     return false
   } finally {
-    if (handle !== undefined) await handle.close()
+    if (handle !== undefined) await handle.close().catch(() => {})
   }
 }
 
@@ -145,6 +169,8 @@ function rejectMethod(req, res, method) {
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
   let evaluating = false
+  // 删除路由同 id 并发去重(进程内)
+  const inFlightDeletes = new Set()
 
   // 台账域:应用装载即打开,路由内 await;打开失败由路由响应,此处仅防未处理拒绝
   const ledgerReady = ctx.storageDomain.open(LEDGER_SPEC)
@@ -153,29 +179,38 @@ export function apply(ctx, config) {
     void ledgerReady.then((domain) => domain.close()).catch(() => {})
   }, 'session-manager ledger domain')
 
-  // 自动归档评估:session/created 触发,按创建会话的工作区限定候选集
+  // 自动归档评估:session/created 触发,按创建会话的工作区限定候选集。
+  // 两级筛选:先用 createdAt 纯内存预筛(mtime 只会增大 updatedAt,createdAt 未超期
+  // 必不超期),仅对预筛存活者做产物 stat/blank 探测,活跃会话零 IO
   ctx.on('session/created', (session) => {
     const days = readSettings(ctx)
     if (days === 0 || evaluating) return
     evaluating = true
-    void (async () => {
+    let timeoutGuard
+    const work = (async () => {
       const cwd = session.header && session.header.cwd
       if (cwd === undefined) return
       const registry = ctx.workspaceRegistry
       const archived = new Set(registry.archivedSessionIds.map(String))
+      const sessionsService = ctx.get('sessions')
+      const agents = ctx.get('agents')
+      const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
       const nowMs = Date.now()
+      const cutoff = nowMs - days * DAY_MS
       const candidates = []
       for (const recordItem of records) {
         const header = recordItem.header
         if (header.cwd !== cwd) continue
-        const live = ctx.get('sessions') && ctx.get('sessions').get(header.id)
-        const running = isSessionRunning({ agents: ctx.get('agents'), sessionId: header.id })
-        const located = ctx.get('sessionPersistence') && ctx.get('sessionPersistence').locate(header)
+        // 预筛:createdAt 未超期必不超期(见上),跳过产物 IO
+        if (header.createdAt >= cutoff) continue
+        const live = sessionsService && sessionsService.get(header.id)
+        const running = isSessionRunning({ agents, sessionId: header.id })
+        const located = persistence && persistence.locate(header)
         const activityAt = located && await safeMtime(located.path)
         // 产物不可读视为已删除,不参与归档:否则删除后的会话(重连前仍在持久层
         // 列表中)会因超期被重新归档,面板行复活且无法再删
-        if (located && activityAt === 0) continue
+        if (located && activityAt === null) continue
         const blank = live ? live.seq === 0 : Boolean(located && await artifactIsBlank(located.path))
         candidates.push({
           id: String(header.id),
@@ -186,12 +221,24 @@ export function apply(ctx, config) {
         })
       }
       for (const id of selectArchiveCandidates({ records: candidates, nowMs, thresholdDays: days })) {
-        await registry.archiveSession(id)
+        try {
+          await registry.archiveSession(id)
+        } catch (error) {
+          // 单个归档失败不中断整轮,剩余候选继续;失败者由下一次触发重试
+          ctx.logger && ctx.logger.warn('session-manager 归档 ' + id + ' 失败: ' + String(error))
+        }
       }
-    })().catch((error) => {
+    })()
+    // 门闩挂起兜底:宿主服务永不返回时超时复位,保证后续评估不被永久跳过
+    const timeout = new Promise((_, reject) => {
+      timeoutGuard = setTimeout(() => reject(new Error('自动归档评估超时')), EVALUATION_TIMEOUT_MS)
+    })
+    void Promise.race([work, timeout]).catch((error) => {
       ctx.logger && ctx.logger.warn('session-manager 自动归档评估失败: ' + String(error))
     }).finally(() => {
+      clearTimeout(timeoutGuard)
       evaluating = false
+      void work.catch(() => {})
     })
   })
 
@@ -218,22 +265,42 @@ export function apply(ctx, config) {
     ctx.workspaceRegistry.state = next
   }
 
-  // 台账记账:trash 成功即记录,路径为回收站「原位置」还原所需
+  // 台账记账:trash 成功即记录,路径为回收站「原位置」还原所需。
+  // ledgerChain 串行化所有读改写:get→set 交错时后写者会用旧快照整体覆盖,丢条目
+  let ledgerChain = Promise.resolve()
+  function withLedgerLock(job) {
+    const run = ledgerChain.then(job, job)
+    ledgerChain = run.catch(() => {})
+    return run
+  }
+
   async function recordDeletedEntry(sessionId, path) {
-    const ledger = await ledgerReady
-    const current = ledger.global.get()
-    await ledger.global.set({
-      ...current,
-      deleted: mergeDeletedEntry(current.deleted, { sessionId, path, deletedAt: Date.now() }),
+    return withLedgerLock(async () => {
+      const ledger = await ledgerReady
+      const current = ledger.global.get()
+      const merged = mergeDeletedEntry(current.deleted, { sessionId, path, deletedAt: Date.now() })
+      await ledger.global.set({ ...current, deleted: merged.slice(0, LEDGER_MAX_ENTRIES) })
     })
   }
 
   // 台账移除:幂等,未命中不产生写回
   async function removeLedgerEntry(sessionId) {
-    const ledger = await ledgerReady
-    const current = ledger.global.get()
-    const { deleted, removed } = removeDeletedEntry(current.deleted, sessionId)
-    if (removed) await ledger.global.set({ ...current, deleted })
+    return withLedgerLock(async () => {
+      const ledger = await ledgerReady
+      const current = ledger.global.get()
+      const { deleted, removed } = removeDeletedEntry(current.deleted, sessionId)
+      if (removed) await ledger.global.set({ ...current, deleted })
+    })
+  }
+
+  // 台账命中查询:同 id 曾删除过(重删场景的幽灵资格依据);域不可用时按未命中
+  async function ledgerHasEntry(sessionId) {
+    try {
+      const ledger = await ledgerReady
+      return ledger.global.get().deleted.some((item) => item.sessionId === sessionId)
+    } catch {
+      return false
+    }
   }
 
   // 幽灵残留清理:产物已缺失的会话仅解除列表可见性(detach + 归档清理),
@@ -259,7 +326,7 @@ export function apply(ctx, config) {
           await removeArchivedId(await requireSessionId(req))
           sendJson(res, 200, { ok: true })
         } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          respondError(ctx, res, error)
         }
       },
     },
@@ -293,7 +360,7 @@ export function apply(ctx, config) {
           }
           sendJson(res, 200, { supported: true, sizeBytes: info.size })
         } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          respondError(ctx, res, error)
         }
       },
     },
@@ -301,8 +368,18 @@ export function apply(ctx, config) {
       path: '/api/session-manager/delete',
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
+        const sessionId = await requireSessionId(req).catch((error) => {
+          respondError(ctx, res, error)
+          return undefined
+        })
+        if (sessionId === undefined) return
+        // 同 id 去重:并发第二次删除会走幽灵清理,语义混乱且响应文案不一致
+        if (inFlightDeletes.has(sessionId)) {
+          sendJson(res, 400, { error: MESSAGES.inFlight })
+          return
+        }
+        inFlightDeletes.add(sessionId)
         try {
-          const sessionId = await requireSessionId(req)
           const header = await findHeader(ctx, sessionId)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
@@ -320,18 +397,24 @@ export function apply(ctx, config) {
             return
           }
           // locate 返回会话目录下的日志文件;回收对象是目录整体,残留空目录会让
-          // 已删除会话在面板以空壳复活
+          // 已删除会话在面板以空壳复活。缺失判定按目录级:日志缺失但目录在(半删除
+          // 残留)仍走完整回收,目录消失才是幽灵
           const artifactDir = dirname(location.path)
-          // live 记录可指向已删除会话:产物缺失时无回收动作,仅完成列表清理;
-          // 幽灵多已不在归档集合,资格检查放宽为容忍未归档
           let artifactMissing = false
           try {
-            await stat(location.path)
+            await stat(artifactDir)
           } catch (error) {
             if (error && error.code !== 'ENOENT') throw error
             artifactMissing = true
           }
           if (artifactMissing) {
+            // 幽灵资格:已归档或台账有记录(同 id 重删的残留清理)才放行;
+            // 两者皆无的 ENOENT 可能是新建会话尚未落盘,剥离活会话属于破坏性误删
+            const archivedNow = ctx.workspaceRegistry.archivedSessionIds.map(String).includes(sessionId)
+            if (!archivedNow && !(await ledgerHasEntry(sessionId))) {
+              sendJson(res, 400, { error: MESSAGES.notArchived })
+              return
+            }
             const cleanupError = await cleanupDeletedSession(sessionId)
             if (cleanupError !== '') {
               sendJson(res, 200, { ok: true, partial: true, message: cleanupError })
@@ -347,6 +430,11 @@ export function apply(ctx, config) {
           })
           if (!eligibility.ok) {
             sendJson(res, 400, { error: MESSAGES.notArchived })
+            return
+          }
+          // TOCTOU 复检:守卫通过到执行间存在多个 await 间隙,会话可能已恢复运行
+          if (isSessionRunning({ agents: ctx.get('agents'), sessionId })) {
+            sendJson(res, 400, { error: MESSAGES.running })
             return
           }
           let trashError
@@ -388,7 +476,9 @@ export function apply(ctx, config) {
           }
           sendJson(res, 200, { ok: true })
         } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          respondError(ctx, res, error)
+        } finally {
+          inFlightDeletes.delete(sessionId)
         }
       },
     },
@@ -400,7 +490,7 @@ export function apply(ctx, config) {
           const ledger = await ledgerReady
           sendJson(res, 200, { deleted: ledger.global.get().deleted })
         } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          respondError(ctx, res, error)
         }
       },
     },
@@ -432,7 +522,7 @@ export function apply(ctx, config) {
           }
           sendJson(res, 200, { ok: true })
         } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          respondError(ctx, res, error)
         }
       },
     },
@@ -444,7 +534,7 @@ export function apply(ctx, config) {
           await removeLedgerEntry(await requireSessionId(req))
           sendJson(res, 200, { ok: true })
         } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          respondError(ctx, res, error)
         }
       },
     },
@@ -460,12 +550,12 @@ export function apply(ctx, config) {
   })
 }
 
-// 产物缺失时按无活跃处理,不阻断整轮评估
+// 产物缺失时按无活跃处理(null),不阻断整轮评估;null 与真实 mtime=0 不混淆
 async function safeMtime(path) {
   try {
     return (await stat(path)).mtimeMs
   } catch {
-    return 0
+    return null
   }
 }
 
@@ -475,7 +565,8 @@ async function findHeader(ctx, sessionId) {
   return found ? found.header : undefined
 }
 
-// detach 幂等:遍历全部工作区逐个移除,不因首个工作区操作失败提前终止
+// detach 幂等:遍历全部工作区逐个移除,不因首个工作区操作失败提前终止;
+// 返回首个失败供响应,全部失败进服务端日志(部分失败范围可观测)
 async function detachSession(ctx, sessionId) {
   const errors = []
   for (const workspace of ctx.workspaceRegistry.list()) {
@@ -486,6 +577,9 @@ async function detachSession(ctx, sessionId) {
       errors.push(error)
     }
   }
+  if (errors.length > 1 && ctx.logger) {
+    ctx.logger.warn('session-manager detach 多工作区失败(' + sessionId + '): ' + errors.map(String).join('; '))
+  }
   return errors[0]
 }
 
@@ -495,7 +589,8 @@ function samePath(left, right) {
   return process.platform === 'win32' && String(left).toLowerCase() === String(right).toLowerCase()
 }
 
-// 按会话 cwd 找归属工作区:cwd 不可解析(目录已移除)时退回原值比对,
+// 按会话 cwd 找归属工作区:两侧都 realpath 后比对(工作区路径本身也可能含
+// 符号链接/大小写漂移),任一侧不可解析时按原值兜底,
 // 最终归属校验仍由官方 attachSession 完成
 async function findWorkspaceByCwd(ctx, cwd) {
   if (cwd === undefined) return undefined
@@ -506,7 +601,13 @@ async function findWorkspaceByCwd(ctx, cwd) {
     // 目录不存在时按原值比对
   }
   for (const workspace of ctx.workspaceRegistry.list()) {
-    if (samePath(workspace.path, resolved)) return workspace
+    let workspacePath = workspace.path
+    try {
+      workspacePath = await realpath(workspacePath)
+    } catch {
+      // 按原值比对
+    }
+    if (samePath(workspacePath, resolved)) return workspace
   }
   return undefined
 }
