@@ -478,6 +478,8 @@ function MaintainApp() {
     ),
     restarting ? h('div', { className: 'dm-notice dm-notice--warn' },
       '重启指令已发送,宿主正在退出;恢复后本页自动刷新,请勿关闭页面。') : null,
+    status !== null && status.pollRunning === false ? h('div', { className: 'dm-notice dm-notice--warn' },
+      '自动轮询未运行(宿主定时服务不可用);可手动点「检查更新」,其余能力不受影响。') : null,
     error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null,
     h(VersionCard, {
       status,
