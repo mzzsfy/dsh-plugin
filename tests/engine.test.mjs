@@ -1396,3 +1396,43 @@ test('守护: engine.js 体量受控(防"全文搬运"形态无感膨胀)', asyn
   const LIMIT_BYTES = 200 * 1024
   assert.ok(Buffer.byteLength(ENGINE_SRC, 'utf8') < LIMIT_BYTES, 'engine.js 超过 ' + LIMIT_BYTES + ' 字节上限, 评估是否拆分或压缩提示词')
 })
+
+test('rework 上限: Given 终审反复被拒 When 返工达 ESCALATION_LIMIT Then 语义化 blocked 而非循环预算爆掉', async () => {
+  const reworkRound = (taskLabel) => [
+    { tasks: [{ id: 'rw-' + taskLabel, description: '返工 ' + taskLabel }] },
+    exec(),
+    review('REJECTED', { reasons: ['质量仍不达标 ' + taskLabel] }),
+  ]
+  const script = [
+    plan({ templateId: 'lite' }),
+    exec(),
+    review('REJECTED', { reasons: ['质量不达标'] }),
+    ...reworkRound(1), ...reworkRound(2), ...reworkRound(3),
+  ]
+  const { result } = await runEngine({ request: '始终不合格的需求', budgets: { reviewRejectBeforeEscalate: 1 } }, script)
+  assert.equal(result.ok, false)
+  assert.ok(result.blocked.reason.indexOf('上限') >= 0, '应在 ESCALATION_LIMIT 处语义化收敛: ' + result.blocked.reason)
+  assert.equal(result.escalations, 2)
+})
+
+test('重编号映射: after 引用被重编号的声明 id 时同步改写, 依赖不静默丢失', async () => {
+  const { result, calls } = await runEngine({ request: '单点小改' }, [
+    plan({
+      templateId: 'plan-final', complexity: 'medium',
+      tasks: [
+        { id: 'fr', description: '撞预留 id 的任务', after: [] },
+        { id: 't-1', description: '依赖前一任务', after: ['fr'] },
+      ],
+    }),
+    review('APPROVED'),
+    exec({ summary: '第一个任务的产出内容' }),
+    exec({ summary: '第二个任务的产出内容' }),
+    review('APPROVED'),
+  ])
+  assert.equal(result.ok, true)
+  const ids = result.tasks.map(function (t) { return t.id })
+  assert.deepEqual(ids, ['t-1', 't-2'])
+  // remap 生效: t-2 的执行提示词带 [前序任务产出](依赖保留); 丢失时 after 被清空成并行, 无此段
+  const t2Prompt = byLabel(calls, 'executor:t-2')[0].prompt
+  assert.ok(t2Prompt.indexOf('第一个任务的产出内容') >= 0, 't-2 应保留对重编号后 t-1 的依赖')
+})

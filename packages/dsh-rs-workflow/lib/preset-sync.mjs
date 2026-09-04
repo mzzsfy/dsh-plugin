@@ -97,6 +97,8 @@ export function syncPreset() {
     if (marker.root !== PKG_ROOT) {
       writeFileSync(join(dest, MARKER_NAME), JSON.stringify({ ...marker, root: PKG_ROOT }, null, 2) + '\n')
     }
+    // 快路径兜底恢复: rewrite 换入与恢复之间硬崩溃会让定制滞留 home 备份, 逐轮幂等收敛
+    restoreUserSlots(dest)
     return 'unchanged'
   }
   return rewrite(dest, true)
@@ -134,27 +136,46 @@ function rewrite(dest, existed) {
   return existed ? 'updated' : 'created'
 }
 
-/** 用户改过的 slots.json5 在重写前备份、重写后恢复;未改动则不动 */
+/** 用户改过的 slots.json5 在重写前备份;已回退到模板内容时清除旧备份,防陈旧定制复活 */
 function backupUserSlots(dest) {
   const userSlots = join(dest, SLOTS_REL)
   const template = join(PRESET_SRC, SLOTS_REL)
+  const backupPath = join(dshHome(), USER_SLOTS_BACKUP)
   if (!existsSync(userSlots)) return
-  let customized = true
+  let userText
   try {
-    customized = readFileSync(userSlots, 'utf8') !== readFileSync(template, 'utf8')
+    userText = readFileSync(userSlots, 'utf8')
   } catch {
-    customized = true
+    return
   }
-  if (customized) {
-    writeFileSync(join(dshHome(), USER_SLOTS_BACKUP), readFileSync(userSlots, 'utf8'))
+  let templateText = ''
+  try {
+    templateText = readFileSync(template, 'utf8')
+  } catch { /* 模板不可读视同定制, 保留现有备份 */ }
+  if (userText === templateText && templateText !== '') {
+    rmSync(backupPath, { force: true })
+    return
   }
+  writeFileSync(backupPath, userText)
 }
 
+/** 仅当 dest slots 尚是模板内容时写回定制(覆盖模板);dest 已有更新的定制则不动作 */
 function restoreUserSlots(dest) {
   const backupPath = join(dshHome(), USER_SLOTS_BACKUP)
   if (!existsSync(backupPath)) return
   const userSlots = join(dest, SLOTS_REL)
-  if (existsSync(userSlots) && readFileSync(userSlots, 'utf8') !== readFileSync(backupPath, 'utf8')) {
+  if (!existsSync(userSlots)) return
+  let userText
+  try {
+    userText = readFileSync(userSlots, 'utf8')
+  } catch {
+    return
+  }
+  let templateText = ''
+  try {
+    templateText = readFileSync(join(PRESET_SRC, SLOTS_REL), 'utf8')
+  } catch { /* 模板不可读时无法判定, 不动作 */ }
+  if (templateText !== '' && userText === templateText) {
     writeFileSync(userSlots, readFileSync(backupPath, 'utf8'))
   }
 }

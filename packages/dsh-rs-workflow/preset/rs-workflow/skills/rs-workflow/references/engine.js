@@ -358,14 +358,18 @@ function normalizeTasks(raw, idPrefix, seedSeen, cap) {
   const seen = {}
   if (seedSeen) for (const k in seedSeen) seen[k] = true
   const picked = []
+  // 撞名/预留重编号的映射: planner 在 after 里引用声明 id, 需同步改到新 id
+  const idRemap = {}
   const list = Array.isArray(raw) ? raw : []
   for (const t of list) {
     if (!t || typeof t.description !== 'string' || !t.description.trim()) continue
     let id = (typeof t.id === 'string' && t.id.trim()) ? t.id.trim() : ''
     // 预留 id 一并重编号, 防任务节点与蓝图固定 review 节点同 id 错位
     if (!id || seen[id] || RESERVED_ID_TEST.test(id)) {
+      const declared = id
       let k = 0
       do { k++; id = idPrefix + k } while (seen[id])
+      if (declared) idRemap[declared] = id
     }
     seen[id] = true
     picked.push({
@@ -385,7 +389,8 @@ function normalizeTasks(raw, idPrefix, seedSeen, cap) {
   for (const t of out) ids[t.id] = true
   out.forEach(function (t, i) {
     if (!t.after) t.after = i > 0 ? [out[i - 1].id] : []
-    t.after = t.after.filter(function (x) { return ids[x] && x !== t.id })
+    // 先同步重编号映射, 再按白名单过滤(引用不存在 id 静默丢弃)
+    t.after = t.after.map(function (x) { return idRemap[x] || x }).filter(function (x) { return ids[x] && x !== t.id })
   })
   const resolved = {}
   let changed = true
@@ -580,7 +585,9 @@ function handoff(currentDesc, opts) {
   if (total > 0) {
     let idx = -1
     for (let i = 0; i < total; i++) if (tasks[i].status !== 'done') { idx = i; break }
-    sections.push('[进度] ' + (idx < 0 ? total : idx + 1) + '/' + total)
+    // 口径标注: [已完成子任务] 含续跑种子, 不标注会让两段数字看起来自相矛盾
+    const note = PREFIX_IDS.length > 0 ? '(不含 ' + PREFIX_IDS.length + ' 条续跑已完成记录)' : ''
+    sections.push('[进度] ' + (idx < 0 ? total : idx + 1) + '/' + total + note)
   }
   sections.push('[已完成子任务]\n' + (completedLines() || NONE))
   sections.push('[当前子任务]\n' + currentDesc)
@@ -1325,6 +1332,10 @@ async function rework(reviewNodes, reasons) {
   // 与其余三个升级入口一致的重入保护: 在途升级时待重试, 不叠加升级账
   if (escalating) {
     reviewNodes.forEach(function (n) { n.status = 'pending'; n.reviewNote = '(并发失败, 待重规划后重试)' })
+    return
+  }
+  if (escalations >= ESCALATION_LIMIT) {
+    blocked = { nodeId: label, reason: '终审/交叉终审被拒且升级重规划次数已达上限', detail: reasons.join('; ') }
     return
   }
   escalating = true

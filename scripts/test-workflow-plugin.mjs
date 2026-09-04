@@ -124,11 +124,25 @@ try {
     // 源漂移触发的 rewrite 路径中,用户定制 slots.json5 应被备份到 home 并在重写后恢复;
     // 上一次 rewrite 已消化 drift,再追加一处源变化制造新的 rewrite 触发
     const userSlotsPath = resolve(dest, "skills/rs-workflow/slots.json5");
+    const homeBackupPath = resolve(simHome, "rs-workflow.slots.user.json5");
     writeFileSync(userSlotsPath, readFileSync(userSlotsPath, "utf8").replace('planner: ""', 'planner: "u/m"'));
     writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift2 -->");
     mod.apply({}, { role: "preset-sync" });
     check("preset-sync：用户定制 slots 重写后恢复", readFileSync(userSlotsPath, "utf8").includes('planner: "u/m"'));
-    check("preset-sync：定制备份落盘", existsSync(resolve(simHome, "rs-workflow.slots.user.json5")));
+    check("preset-sync：定制备份落盘", existsSync(homeBackupPath));
+
+    // 用户回退定制:重写路径判定"未定制"时须清除旧备份,防陈旧定制被后续重写复活
+    writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift3 -->");
+    writeFileSync(userSlotsPath, readFileSync(userSlotsPath, "utf8").replace('planner: "u/m"', 'planner: ""'));
+    mod.apply({}, { role: "preset-sync" });
+    check("preset-sync：回退定制后备份被清除", !existsSync(homeBackupPath));
+
+    // 回退后再定制:新一轮 rewrite 备份/恢复链路应重新建立
+    writeFileSync(userSlotsPath, readFileSync(userSlotsPath, "utf8").replace('planner: ""', 'planner: "u/m2"'));
+    writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift4 -->");
+    mod.apply({}, { role: "preset-sync" });
+    check("preset-sync：二轮定制恢复", readFileSync(userSlotsPath, "utf8").includes('planner: "u/m2"'));
+    check("preset-sync：二轮备份重建", existsSync(homeBackupPath));
   } finally {
     writeFileSync(srcTemplates, srcOriginal);
     mod.apply({}, { role: "preset-sync" });
