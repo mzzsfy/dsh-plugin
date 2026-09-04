@@ -62,6 +62,8 @@ const EVALUATION_TIMEOUT_MS = 30 * 1000
 const HOUR_MS = 60 * 60 * 1000
 // 周期评估固定短 tick:tick 内做到期判断,间隔设置变更自下一周期生效
 const PERIODIC_TICK_MS = 60 * 1000
+// 台账单次读改写超时:宿主存储域挂起时锁内 job 超时放行,防互斥链死锁与 inFlight 泄漏
+const LEDGER_OP_TIMEOUT_MS = 10 * 1000
 
 // 路由响应文案;导出供测试断言与实现同步
 export const MESSAGES = {
@@ -83,6 +85,7 @@ export const MESSAGES = {
   inFlight: '该会话正在删除中,请稍后重试',
   badJsonBody: '请求体不是合法 JSON',
   systemError: '操作失败(系统级错误,详见服务端日志)',
+  runningDuringTrash: '警告:回收期间会话恢复运行,产物已移入回收站;建议检查会话状态',
 }
 
 // trash 执行器出口:进程级唯一 OS 副作用注入点,测试经此桩替
@@ -224,14 +227,17 @@ export function apply(ctx, config) {
         const live = sessionsService && sessionsService.get(header.id)
         const running = isSessionRunning({ agents, sessionId: header.id })
         const located = persistence && persistence.locate(header)
-        const activityAt = located && await safeMtime(located.path)
+        // locate 缺失(第三方后端不支持定位)与产物不可读同规跳过:仅凭 createdAt
+        // 判活跃会绕过 mtime 保护,与 delete 的 unsupportedBackend 拒绝口径对齐
+        if (!located) continue
+        const activityAt = await safeMtime(located.path)
         // 产物不可读视为已删除,不参与归档:否则删除后的会话(重连前仍在持久层
         // 列表中)会因超期被重新归档,面板行复活且无法再删
-        if (located && activityAt === null) continue
+        if (activityAt === null) continue
         // stat 后即可判活跃度:未超期不必做空白探测
         const updatedAt = updatedAtOf(header, activityAt)
         if (updatedAt >= cutoff) continue
-        const blank = live ? live.seq === 0 : Boolean(located && await artifactIsBlank(located.path))
+        const blank = live ? live.seq === 0 : Boolean(await artifactIsBlank(located.path))
         candidates.push({
           id: String(header.id),
           archived: false,
@@ -293,10 +299,18 @@ export function apply(ctx, config) {
   }
 
   // 台账记账:trash 成功即记录,路径为回收站「原位置」还原所需。
-  // ledgerChain 串行化所有读改写:get→set 交错时后写者会用旧快照整体覆盖,丢条目
+  // ledgerChain 串行化所有读改写:get→set 交错时后写者会用旧快照整体覆盖,丢条目。
+  // 逐 job 超时兜底:宿主存储域挂起时超时放行,防链条死锁与 inFlightDeletes 泄漏;
+  // 超时的写操作后台落盘仍安全(合并/移除均为幂等语义)
   let ledgerChain = Promise.resolve()
   function withLedgerLock(job) {
-    const run = ledgerChain.then(job, job)
+    const runJob = () => Promise.race([
+      job(),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('台账操作超时(' + LEDGER_OP_TIMEOUT_MS / 1000 + 's)')),
+        LEDGER_OP_TIMEOUT_MS)),
+    ])
+    const run = ledgerChain.then(runJob, runJob)
     ledgerChain = run.catch(() => {})
     return run
   }
@@ -475,6 +489,12 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(outcome.error) })
             return
           }
+          // 执行期翻转检测:OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行。
+          // 产物已移走,中断只会更糟,照常完成收尾,但把不变量破坏变为可观测事件
+          if (isSessionRunning({ agents: ctx.get('agents'), sessionId })) {
+            ctx.logger && ctx.logger.warn('session-manager 删除执行期间会话恢复运行: ' + sessionId)
+          }
+          const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
           // 台账在 trash 成功后立即记录:产物已进回收站,后续任何半失败都不影响还原资格;
           // 台账失败只降级重挂载便利,不回滚删除
           let ledgerError
@@ -484,9 +504,11 @@ export function apply(ctx, config) {
             ledgerError = error
           }
           const ledgerFailedSuffix = ledgerError !== undefined ? MESSAGES.ledgerSuffix : ''
+          // 执行期翻转向用户显式告警;各 partial 分支聚合该警告
+          const trashWindowSuffix = runningDuringTrash ? ';' + MESSAGES.runningDuringTrash : ''
           const detachError = await detachSession(ctx, sessionId)
           if (detachError !== undefined) {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.partial + ledgerFailedSuffix })
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.partial + ledgerFailedSuffix + trashWindowSuffix })
             return
           }
           // 归档集合同步清理:残留 id 会让面板行持续可见;detach 失败时不清理,
@@ -494,14 +516,16 @@ export function apply(ctx, config) {
           try {
             await removeArchivedId(sessionId)
           } catch {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.archiveCleanup + ledgerFailedSuffix })
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.archiveCleanup + ledgerFailedSuffix + trashWindowSuffix })
             return
           }
           if (ledgerError !== undefined) {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.ledgerFailed })
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.ledgerFailed + trashWindowSuffix })
             return
           }
-          sendJson(res, 200, { ok: true })
+          sendJson(res, 200, runningDuringTrash
+            ? { ok: true, message: MESSAGES.runningDuringTrash }
+            : { ok: true })
         } catch (error) {
           respondError(ctx, res, error)
         } finally {
@@ -589,34 +613,40 @@ export function apply(ctx, config) {
         periodic.running = false
       }
     }
-    // 固定短 tick + 到期判断:间隔设置变更自下一周期生效
+    // 固定短 tick + 到期判断:间隔设置变更自下一周期生效,缩短经 earliest 钳制前移
     let nextDueAt = null
+    let lastArmedAt = 0
     const scheduleNext = () => {
       const { intervalHours } = readSettings(ctx)
-      nextDueAt = intervalHours > 0 ? Date.now() + intervalHours * HOUR_MS : null
+      lastArmedAt = Date.now()
+      nextDueAt = intervalHours > 0 ? lastArmedAt + intervalHours * HOUR_MS : null
     }
     try {
       const dispose = timerCtx.interval(() => {
         const { intervalHours } = readSettings(ctx)
-        // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡
+        // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡;
+        // 缩短间隔时以 lastArmedAt 锚定前移,最长等新间隔而非等满旧周期
         if (intervalHours === 0) {
           nextDueAt = null
           return
         }
+        const earliest = lastArmedAt > 0 ? lastArmedAt + intervalHours * HOUR_MS : Infinity
+        if (nextDueAt !== null && nextDueAt > earliest) nextDueAt = earliest
         if (nextDueAt === null || Date.now() >= nextDueAt) {
           // 门闩占用(他源评估在途)时保持到期态,60s 后下个 tick 重试;
           // 仅评估真正启动才重排周期,被丢弃的到期轮不会静默失效一个周期
           if (evaluateArchives()) scheduleNext()
         }
       }, PERIODIC_TICK_MS)
-      ctx.effect(() => {
-        dispose
-        periodic.running = false
-      }, 'session-manager auto archive interval')
-      scheduleNext()
+      // disposer 挂本 inject fiber:timer 服务移除/重启时复位降级状态并清理 interval
       periodic.running = true
+      return () => {
+        dispose()
+        periodic.running = false
+      }
     } catch (error) {
       periodic.reason = '宿主定时服务调用失败: ' + String(error && error.message || error)
+      return undefined
     }
   })
 
