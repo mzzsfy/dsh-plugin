@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-usage-panel(用量面板)
 
-DeepSeek Harness 静态插件:在「设置 → 用量面板」手动配置多组 LLM 平台账号(API 地址 + Key),定期自动查询并展示每个账号的余额、额度与历史趋势。无自动发现;配置持久化在本机 `~/.dsh/dsh-usage-panel/accounts.json`,查询快照留存于同目录 `history.json`。
+DeepSeek Harness 双端插件:在「设置 → 用量面板」手动配置多组(上限 20 个)LLM 平台账号(API 地址 + Key),定期自动查询并展示每个账号的余额、额度与历史趋势。无自动发现;配置持久化在本机 `~/.dsh/dsh-usage-panel/accounts.json`,查询快照留存于同目录 `history.json`。
 
 ## 安装
 
@@ -43,7 +43,8 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 - 定期查询:设置面板可调「轮询间隔(秒)」,默认 600,仅正数有效;短窗口账号每轮查询,长窗口 / 余额账号分频到约每小时一次
 - 失败退避:单账号失败按指数退避(基期 = 查询周期,×2 封顶 8 倍),成功即恢复;面板打开触发的自动查询同样受退避约束,手动刷新不受限
 - 历史快照:按序列分档落盘 `history.json`(5 小时滚动 → 10 分钟粒度留 7 天;7 天 / 月 / 余额 → 小时粒度留 30 天),档内去重,超期修剪,硬点数上限兜底
-- 趋势视图:悬浮账号卡片弹出 sparkline(自绘 SVG),短 / 长窗口独立成图,绝对值 / 差值双视角;「详情」对话框可切近 7 天 / 30 天 / 全部范围,含区间摘要与明细表
+- 趋势视图:悬浮账号卡片弹出 sparkline(自绘 SVG),短 / 长窗口独立成图,绝对值 / 差值双视角;「详情」对话框可切时间范围(长窗口 / 月 / 余额:近 7 天 / 30 天 / 全部;5 小时短窗口仅近 7 天 / 全部),含区间摘要与明细表
+- 历史文件解析失败时自动备份为 `history.json.bak` 并暂停写入(防空数据覆盖);`history.json` 被移除或恢复为可解析内容后自动恢复写入,`.bak` 是损坏前的最后数据,删除前请确认不再需要
 - 月窗口序列 `月` 由 host 侧按当月余额快照聚合产出
 
 ## custom 提取规则
@@ -57,9 +58,11 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 
 数值提取为严格模式:空串/null/布尔/千分位字符串均视为提取失败,不会伪造成 0。
 
+custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(JSON)与请求体(非 GET 可选),并提供 NewApi 示例一键填入。
+
 ## 架构与依赖
 
-- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings);需要 DSH 提供 `webServer` 服务,`settings` 服务(轮询间隔持久化)
+- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings);需要 DSH 提供 `webServer` 服务、`timer` 服务(定期轮询)与 `settings` 服务(轮询间隔持久化)
 - Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18
 - 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/spark.mjs`):无 IO 数据变换,`npm test` 覆盖解析、退避分频、快照留存与 SVG 点位
 

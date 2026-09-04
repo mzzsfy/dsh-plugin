@@ -16,7 +16,7 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 
 配置语义、请求装配、错误分类、生态声明口逐项对表官方 `dsh-llm-pi-ai@0.1.1-rc.2`,官方公共导出能复用的一律复用(仅 resolveModelReasoning 因官方未导出而平行实现):
 
-- **profile 字段对齐**:官方 schema 全集可原样复制(`displayName` / `reasoning` / `reasoningEfforts` / `thinkingBudgets` / `cacheRetention` / `transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `retryPolicy` / `defaultContextWindow` / `defaultMaxTokens` / `defaultInput` / 模型级 `reasoningEfforts`);`reasoningEfforts` → `thinkingLevelMap`(未声明档位钉 null、off 无值缺席)与官方逐行同构。无模型目录,`modelOverrides` 明确拒绝(官方对无目录路由同语义)。
+- **profile 字段对齐**:官方 schema 全集可原样复制(`displayName` / `reasoning` / `thinkingBudgets` / `cacheRetention` / `transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `retryPolicy` / `defaultContextWindow` / `defaultMaxTokens` / `defaultInput` / 模型级 `reasoningEfforts`);`reasoningEfforts` → `thinkingLevelMap`(未声明档位钉 null、off 无值缺席)与官方逐行同构。无模型目录,`modelOverrides` 明确拒绝(官方对无目录路由同语义)。
 - **reasoning 声明与校验**:`resolveModel` 经 pi-ai `getSupportedThinkingLevels` 声明可选档位与 `defaultEffort`;请求路径 `options.reasoningEffort ?? profile.reasoning` 校验,不支持即 `UNSUPPORTED_REASONING_EFFORT`,`off` = 省略 reasoning 参数;描述路径宽松(不可描述省略,不藏路由)。
 - **请求选项对齐**:`maxRetries: 0` 恒传(重试归 runtime retry policy,不与 pi-ai SDK 内部重试叠加),`transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `thinkingBudgets` 透传。
 - **凭据链**:`credentials.resolve` 引用优先 → 启动环境兜底 → 官方 `assertUsableApiKey` 校验;缺失 `MISSING_CREDENTIAL`。
@@ -25,6 +25,36 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 - **热更新**:改配置即生效(官方 `installSettingsSection` 模式)——写入时校验拒绝坏配置,路由集/重试策略/显示名变化原地 `replace`,解析失败保旧路由;无路由时休眠,不注册 adapter。
 - **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系协议可"拉取模型",anthropic 等明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册)。
 - **pi-ai 同栈**:依赖范围与官方一致(^0.82.1),协议行为与官方路由同一版本保证。
+
+## 错误码
+
+错误经 `GatewayError` 以 code/failure 形态暴露给 harness,按产生路径分组:
+
+| 分组 | 码 | 说明 |
+| --- | --- | --- |
+| 配置期 | `INVALID_CONFIG` | settings 写入或路由解析时配置不符合 schema/约束被拒绝 |
+| 请求期 | `UNKNOWN_MODEL` | 请求 model 未命中路由 models 表 |
+| 请求期 | `INVALID_REQUEST` | 请求参数非法(如 sessionId 缺失或上游返回 400/413) |
+| 请求期 | `UNSUPPORTED_CONTENT` | 内容形态不支持(非 user 图片、模型无 image 能力、结构化 assistant 图片回放等) |
+| 请求期 | `UNSUPPORTED_REASONING_EFFORT` | 请求的 reasoning 档位不被目标模型支持 |
+| 请求期 | `MISSING_CREDENTIAL` | apiKeyEnv 引用的凭据在引用链与环境内均不存在 |
+| 请求期 | `NO_ADAPTER` | adapter 收到非本包路由的 provider 请求(接管失效或路由表错配) |
+| 上游响应分类 | `AUTH` | 上游返回 401/403,凭据无效或无权限 |
+| 上游响应分类 | `QUOTA_EXCEEDED` | 上游判定配额耗尽 |
+| 上游响应分类 | `RATE_LIMIT` | 上游返回 429 或限流错误 |
+| 上游响应分类 | `SERVER` | 上游返回 5xx 服务端错误 |
+| 上游响应分类 | `TIMEOUT` | 请求超时 |
+| 上游响应分类 | `TRANSPORT` | 传输层中断(流提前结束、连接不可用等) |
+| 上游响应分类 | `CONTEXT_WINDOW_EXCEEDED` | 双通道(pi-ai usage 判定器 + dsh-llm 文本判定器)判定超出上下文窗口 |
+| 上游响应分类 | `EMPTY_RESPONSE` | 上游返回空响应 |
+| 上游响应分类 | `PI_AI_ERROR` | 其余 pi-ai 内部错误兜底分类 |
+| 历史回放 | `INVALID_REPLAY_STATE` | 持久化 replay 信封格式或版本不可回放 |
+| 流边界 | `STREAM_CLOSED` | pi-ai 事件流在 done/error 前即关闭 |
+| 流边界 | `ABORTED` | 调用方取消使流式请求按 aborted 终态送达 |
+| 模型发现 | `DISCOVERY_FAILED` | 模型列表拉取失败(不可达、超限、非 JSON、无 data 数组等) |
+| 模型发现 | `DISCOVERY_UNSUPPORTED` | 协议在本 build 内无模型列表能力,回退手录 |
+| 模型发现 | `INVALID_CREDENTIAL` | 发现请求凭据被上游拒绝 |
+| 模型发现 | `ABORTED` | 发现请求被调用方中止 |
 
 ## 功能
 
@@ -102,6 +132,7 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 
 - 事件流适配与 pi-ai 数据结构耦合,pi-ai 协议 payload 形状大改时标记器判别需跟随;未知形状不注入保证不误伤。
 - 无流空闲超时看门狗;pi-ai 依赖范围与官方 dsh-llm-pi-ai 保持一致(^0.82.1),官方升级范围时本包需跟随。
+- sessionMarker.enabled=false 不拦截 metadata 模板的静态 user_id 键透传(该键来自模板而非标记器,不含会话派生标识)。
 - 上游错误以文本分类(pi-ai 把捕获错误展平为 message 字符串),quota/超窗判定用官方同款判定器,其余分支与官方同序同构。
 - 本包未复用 dsh-llm 类(插件依赖以副本安装,class 身份不通;错误以 own `code` / `failure` 数据属性被 harness 错误边界识别),官方公共导出仅消费纯函数与 schema 对象。
 - `reasoningEfforts` → `thinkingLevelMap` 解析为平行实现(官方未导出该函数),以对表测试锚定语义。

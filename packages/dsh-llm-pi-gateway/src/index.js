@@ -1,5 +1,5 @@
 // llm-pi-gateway Host 半区:注册 settings 命名空间 llm-pi-gateway,按其路由表
-// 经 ctx.llm 注册网关 adapter。配置只在启动解析一次,修改需重启生效。
+// 经 ctx.llm 注册网关 adapter。配置经 settings onChange 热更新,解析失败保旧。
 
 import z from '@deepseek-ai/schemastery'
 import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'

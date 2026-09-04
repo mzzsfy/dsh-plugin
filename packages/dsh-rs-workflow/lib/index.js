@@ -129,7 +129,7 @@ function apply(ctx, config) {
 	}
 	ctx.tools.register(defineTool({
 		name: "rs_workflow_config",
-		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 由分诊矩阵自动选型）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
+		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 无信号时兜底 multi-plan，其余值 = 无信号时兜底该值；planner 声明与分诊矩阵始终优先）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
 		parameters: {},
 		output: {
 			schema: {
