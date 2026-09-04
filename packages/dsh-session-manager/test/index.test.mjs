@@ -531,6 +531,37 @@ test('自动归档评估:产物不可读的会话不参与归档(防删除后复
   assert.deepEqual(registry.archiveCalls, ['s1'])
 })
 
+test('自动归档评估:locate 缺失(第三方后端)的会话不参与归档', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-eval-nolocate-'))
+  try {
+    const alivePath = path.join(dir, 'alive.jsonl')
+    await writeFile(alivePath, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(alivePath, stale / 1000, stale / 1000)
+    const cwd = 'C:\\x'
+    const headers = [
+      { id: 's1', cwd, createdAt: stale },
+      { id: 's2', cwd, createdAt: stale },
+    ]
+    const { eventHandlers, registry } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      // s2 locate 返回 undefined(抽象后端契约允许):仅凭 createdAt 判活跃会绕过
+      // mtime 保护,与 delete 的 unsupportedBackend 拒绝对齐
+      sessionPersistence: {
+        locate: (header) => header.id === 's1' ? { path: alivePath } : undefined,
+      },
+    })
+    eventHandlers['session/created']({ header: { id: 'trigger', cwd } })
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['s1'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('启动评估:settings 就绪后全量归档超期会话,不限于单工作区', skipMissingDeps, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'sm-startup-'))
   try {
@@ -697,6 +728,53 @@ test('周期评估:间隔设置运行时变更经 tick 对账(0 重启用 / 关�
     mock.timers.tick(TICK_MS)
     await waitFor(() => registry.archiveCalls.includes('s3'))
     assert.deepEqual(registry.archiveCalls, ['s1', 's2', 's3'])
+  } finally {
+    mock.timers.reset()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('周期评估:缩短间隔经 earliest 钳制前移,不等满旧周期', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-shorten-'))
+  const TICK_MS = 60 * 1000
+  const HOUR_MS = 60 * 60 * 1000
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  try {
+    const readable = { a: true, b: false }
+    const artifacts = {}
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    for (const id of ['a', 'b']) {
+      const artifact = path.join(dir, id + '.jsonl')
+      await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+      await utimes(artifact, stale / 1000, stale / 1000)
+      artifacts[id] = artifact
+    }
+    const settingsValue = { autoArchiveIntervalHours: 24 }
+    const { activateSettings, registry } = makeCtx({
+      archivedIds: [],
+      headers: [
+        { id: 'a', cwd: 'C:\\x', createdAt: stale },
+        { id: 'b', cwd: 'C:\\x', createdAt: stale },
+      ],
+      agents: new Map(),
+      settingsValue,
+      sessionPersistence: {
+        locate: (header) => readable[header.id] ? { path: artifacts[header.id] } : { path: path.join(dir, 'gone-' + header.id) },
+      },
+    })
+    activateSettings()
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['a'])
+    const afterStartup = registry.archiveCalls.length
+    // T+24h 到期轮(a 已归档无产出);紧接缩短为 1h:earliest 钳制应把 due 前移到
+    // 缩短时刻 + 1h,而非等满旧周期 T+48h;b 在缩短后变可读,由前移后的轮归档
+    mock.timers.tick(DAY_MS)
+    settingsValue.autoArchiveIntervalHours = 1
+    readable.b = true
+    mock.timers.tick(DAY_MS + TICK_MS)
+    await waitFor(() => registry.archiveCalls.length > afterStartup)
+    assert.deepEqual(registry.archiveCalls, ['a', 'b'])
   } finally {
     mock.timers.reset()
     await rm(dir, { recursive: true, force: true })
