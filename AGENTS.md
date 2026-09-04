@@ -30,12 +30,12 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 
 **重新挂载时机:** profile 内跑过 `pnpm install` 或 `dsh plugin add` 之后,junction 被实体目录覆盖,必须重跑 `node scripts/dev-link.mjs all`。
 
-**已知策略:** profile 的 pnpm 配了 `minimumReleaseAge`(新发布包有安装宽限期)。刚发版后 install 可能被拦,等宽限期过再装,或单次 `pnpm install --config.minimum-release-age=0`(仅限自家刚发的包,知根知底)。
+**已知策略:** profile 的 pnpm 配了 `minimumReleaseAge`(新发布包有安装宽限期)。刚发版后 install 可能被拦,等宽限期过再装,或单次 `node scripts/dev-link.mjs all --allow-fresh`(仅限自家刚发的包,知根知底)。
 
 ## 日常开发循环
 
 1. 改代码在仓库 `packages/<包>/` 内进行,直接改工作副本
-2. 测试:`node --test "test/*.test.mjs"`(在包目录内);rs-workflow 引擎测试在仓库根 `node --test tests/engine.test.mjs`
+2. 测试:`node --test "test/*.test.mjs"`(在包目录内);rs-workflow 引擎测试在仓库根 `node --test tests/engine.test.mjs`;rs-workflow 插件冒烟在仓库根 `node scripts/test-workflow-plugin.mjs`(默认测 profile 安装副本,传包目录可测任意构建)
 3. 验证效果:确保 dev-link 已挂。**host 半区改动自动热重载**(dev-link 在 home 补丁层 `~/.dsh/cordis.patch.yml` 维护 hmr 覆盖行,watch 仓库 packages,保存后约 1 秒重载对应插件;测试/文档/依赖目录不触发);**client 半区改动刷新页面即生效**(client bundle 从磁盘按请求现读)。改完代码不要求重启 dsh,也不要建议用户重启
 4. 提交:语义化中文提交信息,一事一提交,禁止把无关改动混入
 
@@ -45,9 +45,9 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 node scripts/publish.mjs <包名|all> [--bump patch|minor|major] [--skip-test] [--dry-run]
 ```
 
-- 发布需交互 TTY(npm 2FA),用弹出 shell 执行,不用于后台/管道
+- npm 2FA 认证需交互终端(publish.mjs 本身不检测 TTY,非 TTY 下会在 npm 认证阶段卡住),用弹出 shell 执行,不用于后台/管道;--dry-run 无此要求
 - 本地版本 == 线上:无 --bump 时自动 SKIP;本地 < 线上:拒绝(防回退)
-- 发布成功后脚本自动打 tag(`@mzzsfy-<包>-v<版本>`,轻量 tag),推送 main 与 tag 由维护者执行
+- 发布成功后脚本自动打 tag(`@mzzsfy-<包>-v<版本>`,轻量 tag;本地==线上 SKIP 时亦会补打本地缺失的 tag),推送 main 与 tag 由维护者执行
 - 发版后记得重跑 `node scripts/dev-link.mjs all`,让 profile 依赖行追上线上新版本
 
 ## 双实现同源

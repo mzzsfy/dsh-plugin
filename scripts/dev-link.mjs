@@ -50,6 +50,7 @@ const hotRow = (repoRoot) => `${HOT_MARK_BEGIN}
     ignored:
       - '**/node_modules/**'
       - '**/test/**'
+      - '**/tests/**'
       - '**/*.test.mjs'
       - '**/*.md'
       - '**/.*'
