@@ -157,12 +157,12 @@ test('multi-plan 主路径: pr 大纲审后两子计划单元链与串行交叉�
   assert.ok(xr1Ok >= 0 && xr2Call > xr1Ok, 'xr2 必须晚于 xr1 通过')
 })
 
-test('blocked 路径: 任务连败两次且重规划无产出', async () => {
+test('blocked 路径: 任务连败两次且重规划重试后仍无产出', async () => {
   const { result } = await runEngine({ request: '注定失败的需求' }, [
     plan({ templateId: 'lite' }),
     exec({ status: 'failed', summary: '依赖缺失' }),
     exec({ status: 'failed', summary: '依赖缺失' }),
-    null,
+    null, null,
   ])
   assert.equal(result.ok, false)
   assert.equal(result.escalations, 1)
@@ -202,7 +202,7 @@ test('审批者失效: 终审层面不可用走返工, 无产出则 blocked 而�
     review('APPROVED'),
     exec(), exec(),
     null, null,
-    null,
+    null, null,
   ])
   assert.equal(result.ok, false)
   assert.equal(result.escalations, 1)
@@ -347,7 +347,7 @@ test('审批证据: Given emptyOutputRetryLimit=1 When 重问后仍空证据 The
     exec(), exec(),
     review('APPROVED', { evidence: '' }),
     review('APPROVED', { evidence: '   ' }),
-    null,
+    null, null,
   ])
   assert.equal(result.ok, false)
   assert.equal(result.escalations, 1)
@@ -765,14 +765,14 @@ test('故障转移: 细分位缺省降级基础位数组并轮换', async () => 
   assert.equal(frCalls[1].opts.provider, 'rb')
 })
 
-test('故障转移: 全候选耗尽视为该次调用失败, 走既有失败路径', async () => {
+test('故障转移: 全候选耗尽视为该次调用失败, 重试后仍失败走既有失败路径', async () => {
   const { result, calls } = await runEngine({
     request: '注定失败的需求',
     slots: { executor: ['ea/ma'] },
   }, [
     plan({ templateId: 'lite' }),
     null, null,
-    null,
+    null, null,
   ])
   assert.equal(result.ok, false)
   assert.equal(result.blocked.reason, '重规划无产出')
@@ -1289,4 +1289,110 @@ test('合并记账: Given 默认阈值 2 下失败一次+被拒一次 When 记�
   assert.equal(result.ok, true)
   assert.ok(byLabel(calls, 'planner:重规划#1').length === 1, '失败 1 次+被拒 1 次应合计达阈值 2 触发升级')
   assert.ok(result.tasks.some(function (t) { return t.id === 'e1' && t.status === 'done' }))
+})
+
+// ── S-addenda: R3 收紧面(预留 id/上下文注记/任务上限/对象绑定/parity/体量守护) ──
+
+test('预留 id: Given planner 声明 id 撞蓝图预留(fr/r-fr) When 规范化 Then 强制重编号不与 review 节点错位', async () => {
+  const { result, calls } = await runEngine({ request: '单点小改' }, [
+    plan({
+      templateId: 'plan-final', complexity: 'medium',
+      tasks: [
+        { id: 'fr', description: '撞终审预留 id', after: [] },
+        { id: 'r-fr', description: '撞任务审前缀预留', after: [] },
+      ],
+    }),
+    review('APPROVED'),
+    exec(), exec(),
+    review('APPROVED'), review('APPROVED'), review('APPROVED'),
+  ])
+  assert.equal(result.ok, true)
+  const ids = result.tasks.map(function (t) { return t.id })
+  assert.deepEqual(ids, ['t-1', 't-2'], '撞预留 id 应重编号为 t-N')
+  // fr 终审只出现一次且审批的是整体交付, 不存在同 id 双节点歧义
+  assert.equal(byLabel(calls, 'reviewer:fr').length, 1)
+})
+
+test('contextNotes: Given 非空上下文注记 When 编排 Then 注入分诊与执行提示词; 空白串等价缺省', async () => {
+  const withNotes = await runEngine({ request: '单点小改', contextNotes: '仓库使用 pnpm 且禁用 npm install' }, [
+    plan({ templateId: 'lite' }), exec(), review('APPROVED'),
+  ])
+  const triagePrompt = byLabel(withNotes.calls, 'planner:分诊')[0].prompt
+  assert.ok(triagePrompt.indexOf('pnpm 且禁用 npm install') >= 0, '分诊提示词应含上下文注记')
+  const execPrompt = byLabel(withNotes.calls, 'executor:t1')[0].prompt
+  assert.ok(execPrompt.indexOf('pnpm 且禁用 npm install') >= 0, '执行提示词应含上下文注记')
+  const withoutNotes = await runEngine({ request: '单点小改', contextNotes: '   ' }, [
+    plan({ templateId: 'lite' }), exec(), review('APPROVED'),
+  ])
+  const bareTriage = byLabel(withoutNotes.calls, 'planner:分诊')[0].prompt
+  assert.equal(bareTriage.indexOf('仓库上下文'), -1, '空白注记不应注入上下文段')
+})
+
+test('maxTasks 钳制: Given limits.maxTasks=2 与 3 个声明任务 Then 只实例化 2 个; 非法值回落缺省', async () => {
+  const capped = await runEngine({
+    request: '多点小改', limits: { maxTasks: 2 },
+  }, [
+    plan({
+      templateId: 'lite',
+      tasks: [
+        { id: 't1', description: '任务一', after: [] },
+        { id: 't2', description: '任务二', after: [] },
+        { id: 't3', description: '任务三', after: [] },
+      ],
+    }),
+    review('APPROVED'), exec(), exec(),
+    review('APPROVED'),
+  ])
+  assert.equal(capped.result.ok, true)
+  assert.deepEqual(capped.result.tasks.map(function (t) { return t.id }), ['t1', 't2'])
+  const fallback = await runEngine({ request: '单点小改', limits: { maxTasks: 0 } }, [
+    plan({ templateId: 'lite' }), exec(), review('APPROVED'),
+  ])
+  assert.equal(fallback.result.ok, true, 'maxTasks=0 应回落缺省而非零任务死锁')
+  assert.equal(fallback.result.tasks.length, 1)
+})
+
+test('对象形态绑定: Given slot 为 {provider,model} 对象 When 解析 Then 正确透出调用参数', async () => {
+  const { result, calls } = await runEngine({
+    request: '单点小改',
+    slots: { executor: { provider: 'ea', model: 'ma' } },
+  }, [plan({ templateId: 'lite' }), exec(), review('APPROVED')])
+  assert.equal(result.ok, true)
+  const execCall = byLabel(calls, 'executor:t1')[0]
+  assert.equal(execCall.opts.provider, 'ea')
+  assert.equal(execCall.opts.model, 'ma')
+})
+
+test('parity: 引擎 budget 常量与 lib schema 边界/缺省一致; maxTasks 缺省一致且 schema 拒绝越界', async () => {
+  const lib = await import('../packages/dsh-rs-workflow/lib/index.js')
+  const parse = (re) => {
+    const m = ENGINE_SRC.match(re)
+    assert.ok(m, 'engine.js 缺少常量定义: ' + re)
+    return m
+  }
+  const engineDefaults = parse(/const BUDGET_DEFAULTS = \{ reviewRejectBeforeEscalate: (\d+), planRejectBeforeBlocked: (\d+), emptyOutputRetryLimit: (\d+), reportNudgeLimit: (\d+) \}/)
+  assert.deepEqual(
+    [Number(engineDefaults[1]), Number(engineDefaults[2]), Number(engineDefaults[3]), Number(engineDefaults[4])],
+    [lib.BUDGET_DEFAULTS.reviewRejectBeforeEscalate, lib.BUDGET_DEFAULTS.planRejectBeforeBlocked, lib.BUDGET_DEFAULTS.emptyOutputRetryLimit, lib.BUDGET_DEFAULTS.reportNudgeLimit],
+  )
+  assert.equal(parse(/const BUDGET_MIN = (\d+)/)[1], String(lib.BUDGET_MIN))
+  assert.equal(parse(/const BUDGET_MAX = (\d+)/)[1], String(lib.BUDGET_MAX))
+  assert.equal(parse(/const MAX_TASKS_DEFAULT = (\d+)/)[1], String(lib.MAX_TASKS_DEFAULT))
+  assert.equal(parse(/Math\.min\(Math\.floor\(Number\(LIMITS\.maxTasks\) \|\| 0\), (\d+)\)/)[1], String(lib.MAX_TASKS_MAX))
+  // lib schema 行为对拍: 缺省值与边界拒绝
+  const workflow = lib.SETTINGS_SCHEMA.dict.workflow
+  const resolved = workflow({ defaultTemplate: 'auto', maxTasks: undefined })
+  assert.equal(resolved.maxTasks, lib.MAX_TASKS_DEFAULT)
+  assert.throws(() => workflow({ defaultTemplate: 'auto', maxTasks: 0 }))
+  assert.throws(() => workflow({ defaultTemplate: 'auto', maxTasks: lib.MAX_TASKS_MAX + 1 }))
+  const budgets = lib.SETTINGS_SCHEMA.dict.budgets
+  const resolvedBudgets = budgets({})
+  assert.deepEqual(resolvedBudgets, { ...lib.BUDGET_DEFAULTS })
+  assert.throws(() => budgets({ reviewRejectBeforeEscalate: lib.BUDGET_MIN - 1 }))
+  assert.throws(() => budgets({ reviewRejectBeforeEscalate: lib.BUDGET_MAX + 1 }))
+})
+
+test('守护: engine.js 体量受控(防"全文搬运"形态无感膨胀)', async () => {
+  const LIMIT_BYTES = 200 * 1024
+  assert.ok(Buffer.byteLength(ENGINE_SRC, 'utf8') < LIMIT_BYTES, 'engine.js 超过 ' + LIMIT_BYTES + ' 字节上限, 评估是否拆分或压缩提示词')
 })

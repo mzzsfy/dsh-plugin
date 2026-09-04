@@ -27,7 +27,9 @@ const LIMITS = (A.limits && typeof A.limits === 'object' && !Array.isArray(A.lim
 const BUDGETS_SRC = (A.budgets && typeof A.budgets === 'object' && !Array.isArray(A.budgets)) ? A.budgets : {}
 // 无信号兜底模板: 'auto'/非法/缺省 → multi-plan(原始 selectTemplate fallback 口径)
 const DEFAULT_TEMPLATE = TEMPLATES.indexOf(A.defaultTemplate) >= 0 ? A.defaultTemplate : 'multi-plan'
-const MAX_TASKS = LIMITS.maxTasks > 0 ? Math.floor(LIMITS.maxTasks) : 8
+// 任务上限: <=0/非数值回落缺省(自保口径与 lib schema .min(1) 一致, 非法值此处兜底)
+const MAX_TASKS_DEFAULT = 8
+const MAX_TASKS = LIMITS.maxTasks > 0 ? Math.min(Math.floor(Number(LIMITS.maxTasks) || 0), 64) || MAX_TASKS_DEFAULT : MAX_TASKS_DEFAULT
 
 // ── budgets 四阈值: 引擎侧 clamp [1,10](workflow schema 不支持数值边界) ─────
 const BUDGET_DEFAULTS = { reviewRejectBeforeEscalate: 2, planRejectBeforeBlocked: 2, emptyOutputRetryLimit: 3, reportNudgeLimit: 3 }
@@ -74,6 +76,9 @@ const PLAN_REVIEW_NODE = 'pr'
 const PREFIX_ID_MARK = 'x'
 const ALL_DONE = '无,全部完成'
 const NONE = '无'
+// 蓝图预留 id 模式: pr(计划审)/fr(终审)/srN(子计划审)/xrN(交叉终审)/r-*(任务审前缀)。
+// planner 声明撞名会与运行期 review 节点同 id 错位, normalizeTasks 统一强制重编号
+const RESERVED_ID_TEST = /^(pr|fr|sr\d+|xr\d+|r-.+)$/
 
 // task 节点进入语境 → executor 槽位(原始 TASK_SLOT_BY_REASON 映射)
 const TASK_SLOT_BY_REASON = {
@@ -213,6 +218,18 @@ async function callAgent(holder, candidates, spec) {
   return null
 }
 
+// 重规划统一重试口径: callAgent 内部只做候选故障转移, 这里再给整轮一次重试,
+// 瞬时失败/空产出两次皆空才交由调用方 blocked(与分诊 TRIAGE_ATTEMPTS 口径对齐)
+const REPLAN_ATTEMPTS = 2
+async function callReplanAgent(holder, candidates, spec) {
+  for (let attempt = 1; attempt <= REPLAN_ATTEMPTS; attempt++) {
+    const r = await callAgent(holder, candidates, spec)
+    if (r) return r
+    if (attempt < REPLAN_ATTEMPTS) log(spec.label + ' 无产出, 重试 ' + attempt + '/' + (REPLAN_ATTEMPTS - 1))
+  }
+  return null
+}
+
 // 失败语境的真实最后尝试候选身份([上次失败模型] 段取值)
 function failedModelOf(holder) {
   const b = holder.lastTried
@@ -345,7 +362,8 @@ function normalizeTasks(raw, idPrefix, seedSeen, cap) {
   for (const t of list) {
     if (!t || typeof t.description !== 'string' || !t.description.trim()) continue
     let id = (typeof t.id === 'string' && t.id.trim()) ? t.id.trim() : ''
-    if (!id || seen[id]) {
+    // 预留 id 一并重编号, 防任务节点与蓝图固定 review 节点同 id 错位
+    if (!id || seen[id] || RESERVED_ID_TEST.test(id)) {
       let k = 0
       do { k++; id = idPrefix + k } while (seen[id])
     }
@@ -475,13 +493,21 @@ function lastDoneTask() {
   const done = doneTasks()
   return done.length ? done[done.length - 1] : null
 }
+// changedFiles 收口上限: 条数与单条长度双重封顶, 防异常 executor 输出经 union
+// 注入后续全部 reviewer/终审提示词(与 compress 截断纪律同口径)
+const CHANGED_FILES_MAX = 200
+const CHANGED_FILE_CHARS = 300
 function unionChangedFiles() {
   const out = []
   for (const n of nodes) {
     if (n.dead || n.type === 'review') continue
     for (const f of (n.changedFiles || [])) if (out.indexOf(f) < 0) out.push(f)
   }
-  return out
+  const capped = out.slice(0, CHANGED_FILES_MAX).map(function (f) { return String(f).slice(0, CHANGED_FILE_CHARS) })
+  if (capped.length < out.length || capped.some(function (f, i) { return f.length !== String(out[i]).length })) {
+    log('[rs-workflow] changedFiles 超上限, 已截断: ' + out.length + ' 条 → ' + capped.length + ' 条')
+  }
+  return capped
 }
 function planTextFor(node) {
   if (node.planSource === 'PLAN') return PLAN_TEXT
@@ -547,7 +573,9 @@ function doneSummaryText() { return completedLines() }
 function handoff(currentDesc, opts) {
   const o = opts || {}
   const sections = ['[原始需求] ' + compress(REQ, REQUEST_CHARS)]
-  const tasks = liveTasks()
+  // 进度只统计真实任务: prefix 种子已完成, 计入分母会稀释进度感知
+  // (种子进度已由 prefixHandoff 的断点续跑段表达)
+  const tasks = liveTasks().filter(function (n) { return !n.seed })
   const total = tasks.length
   if (total > 0) {
     let idx = -1
@@ -651,6 +679,7 @@ function buildExecutorPrompt(node, nudge) {
   }))
   const planText = planTextFor(node)
   if (templateId !== 'lite' && planText.trim()) sections.push('[执行计划]\n' + compress(planText, PLAN_EXCERPT_CHARS))
+  if (CONTEXT_NOTES) sections.push('[仓库上下文(主代理勘察所得)]\n' + CONTEXT_NOTES)
   const depLines = []
   for (const d of node.deps) {
     const dn = subjOf(d)
@@ -969,6 +998,8 @@ async function routeRejection(node, r) {
   // 未达阈值: 原位重做路由
   if (node.kind === 'plan') return replanPlan(node, reasons, false)
   if (node.kind === 'subplan') {
+    // subject 已被尾段替换置 dead 时 holder 为 null: 走 rework 兜底, 不静默吞掉拒绝
+    if (!holder) return rework([node], reasons)
     node.fixNote = reasons.join('; ')
     return runPlanNode(holder, reasons)
   }
@@ -1100,7 +1131,7 @@ async function replanPlan(node, reasons, atThreshold) {
       PLAN_FIELD_REQUIREMENT,
       '请重新产出' + (isMulti ? '实施计划与子计划大纲' : '实施计划与任务段') + ', 按 schema 返回。可重排任务依赖: after 列出前置 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callAgent(node.cursor, slotOpts(atThreshold ? 'planner-escalate' : 'planner-command'), { prompt: prompt, label: 'planner:计划重规划#' + replanSeq, schema: PLAN_REPLAN_SCHEMA })
+    const r = await callReplanAgent(node.cursor, slotOpts(atThreshold ? 'planner-escalate' : 'planner-command'), { prompt: prompt, label: 'planner:计划重规划#' + replanSeq, schema: PLAN_REPLAN_SCHEMA })
     const cap = Math.max(remainingTaskBudget(), 1)
     const planText = r ? String(r.plan || '') : ''
     if (isMulti) {
@@ -1187,7 +1218,7 @@ async function escalateTask(node, reasons) {
       '',
       '请重新评估剩余工作, 按 schema 返回新任务。可重排任务依赖: after 列出前置任务 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callAgent(node.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:重规划#' + escalations, schema: REPLAN_SCHEMA })
+    const r = await callReplanAgent(node.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:重规划#' + escalations, schema: REPLAN_SCHEMA })
     const nt = r && Array.isArray(r.tasks) ? normalizeTasks(r.tasks, 'e' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
     if (!nt.length) {
       blocked = { nodeId: node.id, reason: '重规划无产出', detail: reasons.join('; ') }
@@ -1276,7 +1307,7 @@ async function escalateSubplan(pNode, reasons) {
       '',
       '请重新评估该子计划的剩余工作, 按 schema 返回新任务。可重排任务依赖: after 列出前置任务 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callAgent(pNode.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:子计划重规划#' + escalations, schema: REPLAN_SCHEMA })
+    const r = await callReplanAgent(pNode.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:子计划重规划#' + escalations, schema: REPLAN_SCHEMA })
     const nt = r && Array.isArray(r.tasks) ? normalizeTasks(r.tasks, 'e' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
     if (!nt.length) {
       blocked = { nodeId: pNode.id, reason: '子计划重规划无产出', detail: reasons.join('; ') }
@@ -1291,8 +1322,9 @@ async function escalateSubplan(pNode, reasons) {
 // 交付类(fr/xr)达阈值: 返工重规划, 追加返工任务链, 审批重挂其后
 async function rework(reviewNodes, reasons) {
   const label = reviewNodes.map(function (n) { return n.id }).join('/')
-  if (escalations >= ESCALATION_LIMIT) {
-    blocked = { nodeId: label, reason: '终审/交叉终审被拒且升级重规划次数已达上限', detail: reasons.join('; ') }
+  // 与其余三个升级入口一致的重入保护: 在途升级时待重试, 不叠加升级账
+  if (escalating) {
+    reviewNodes.forEach(function (n) { n.status = 'pending'; n.reviewNote = '(并发失败, 待重规划后重试)' })
     return
   }
   escalating = true
@@ -1317,7 +1349,7 @@ async function rework(reviewNodes, reasons) {
       '',
       '请重新评估, 按 schema 返回返工任务。可重排任务依赖: after 列出前置任务 id, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callAgent(reviewNodes[0].cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:返工#' + escalations, schema: REPLAN_SCHEMA })
+    const r = await callReplanAgent(reviewNodes[0].cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:返工#' + escalations, schema: REPLAN_SCHEMA })
     const nt = r && Array.isArray(r.tasks) ? normalizeTasks(r.tasks, 'f' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
     if (!nt.length) {
       blocked = { nodeId: label, reason: '返工重规划无产出', detail: reasons.join('; ') }

@@ -11,7 +11,7 @@
  *     无法自动删除,残留 preset 因 tool 行 import 失败在选择器显示 broken;
  *     手动清理命令见包 README。
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +22,19 @@ const USER_PRESET_DIR = '.agent-presets'
 const PRESET_ID = 'rs-workflow'
 const MARKER_NAME = '.dsh-rs-workflow-source.json'
 const PACKAGE_NAME = '@mzzsfy/dsh-rs-workflow'
+// slots.json5 是文档引导的用户后备编辑点:rewrite 前若其内容异于包内模板,
+// 备份到 home 根的该文件名,重写后恢复,升级不再静默吞掉手工定制
+const SLOTS_REL = join('skills', 'rs-workflow', 'slots.json5')
+const USER_SLOTS_BACKUP = 'rs-workflow.slots.user.json5'
+// 完整性清单:任一缺失即视为残缺,走重写自愈(与 PRESET_SRC 产物对齐)
+const MANAGED_FILES = [
+  'preset.yml',
+  'agent.cordis.yml',
+  join('skills', 'rs-workflow', 'SKILL.md'),
+  SLOTS_REL,
+  join('skills', 'rs-workflow', 'references', 'engine.js'),
+  join('skills', 'rs-workflow', 'references', 'templates.md'),
+]
 
 /** dsh home:CLI 配置层可显式指定,插件环境只见 $DSH_HOME;空串视同未设 */
 function dshHome() {
@@ -29,12 +42,28 @@ function dshHome() {
   return fromEnv && fromEnv.trim().length > 0 ? resolve(fromEnv) : join(homedir(), '.dsh')
 }
 
-function presetDest() {
+/** 释放目标绝对路径(诊断用:home 错位时可直接从日志/测试定位) */
+export function presetDest() {
   return join(dshHome(), USER_PRESET_DIR, PRESET_ID)
 }
 
-function version() {
-  return JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
+const PKG_VERSION = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
+
+/** 源目录内容指纹:文件名集合 + 逐文件 size 与 mtime 的聚合。粒度足够感知
+ *  同版本内容改动与产物残缺,不引入 hash 依赖 */
+function sourceFingerprint() {
+  const parts = []
+  const walk = (dir, rel) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      const relPath = rel ? `${rel}/${name}` : name
+      const st = statSync(full)
+      if (st.isDirectory()) walk(full, relPath)
+      else parts.push(`${relPath}:${st.size}:${st.mtimeMs}`)
+    }
+  }
+  walk(PRESET_SRC, '')
+  return parts.sort().join('|')
 }
 
 /** 读 marker;缺失或损坏返回 null(损坏与缺失同义:无法证明归属) */
@@ -48,38 +77,89 @@ function readMarker(dest) {
   }
 }
 
+/** 完整性校验:受管文件任一缺失即残缺 */
+function isComplete(dest) {
+  return MANAGED_FILES.every((rel) => existsSync(join(dest, rel)))
+}
+
 /** 同步释放;返回 'created' | 'updated' | 'unchanged' | 'skipped-foreign' */
 export function syncPreset() {
   if (!existsSync(PRESET_SRC)) throw new Error(`包内 preset 缺失: ${PRESET_SRC}`)
   const dest = presetDest()
+  // staging 残留清理与快慢路径无关:硬崩溃后仅 rewrite 清理会让残留长期滞留
+  cleanStaleStaging(dirname(dest))
   if (!existsSync(dest)) return rewrite(dest, false)
   const marker = readMarker(dest)
   if (marker === null || marker.package !== PACKAGE_NAME) return 'skipped-foreign'
-  if (marker.root === PKG_ROOT && marker.version === version()) {
-    // 快路径完整性校验:核心文件缺失视为残缺,走重写自愈
-    if (existsSync(join(dest, 'agent.cordis.yml')) && existsSync(join(dest, 'skills', 'rs-workflow', 'references', 'engine.js'))) return 'unchanged'
+  // 内容指纹一致即视为最新:双副本 root 交替不再触发整目录重写,
+  // 仅 marker.root 归属不同时原地改写 marker 一个文件
+  if (marker.fingerprint === sourceFingerprint() && isComplete(dest)) {
+    if (marker.root !== PKG_ROOT) {
+      writeFileSync(join(dest, MARKER_NAME), JSON.stringify({ ...marker, root: PKG_ROOT }, null, 2) + '\n')
+    }
+    return 'unchanged'
   }
   return rewrite(dest, true)
 }
 
-/** 已确认归属本包后的重写;同卷临时目录拷贝 + rename 原子换入(系统 tmpdir 可能跨盘,EXDEV 会毁掉已 rm 的旧目录)。
- *  已知行为:同一包从多个安装位置(仓库副本/store 副本)各自 apply 时 marker.root 不同,会每次启动重写一次,归属判定不受影响。 */
+/** 已确认归属本包后的重写。换入式原子替换:旧目录先 rename 到备份名,新目录
+ *  rename 入位成功后才删备份;rename 失败时把备份还原,任意时刻 dest 要么完整
+ *  存在要么不存在(后者由下次启动 created 自愈),不再出现"目录在 marker 丢"。 */
 function rewrite(dest, existed) {
   mkdirSync(dirname(dest), { recursive: true })
-  cleanStaleStaging(dirname(dest))
   const staging = mkdtempSync(join(dirname(dest), '.rs-workflow-staging-'))
+  const backup = join(dirname(dest), `.rs-workflow-old-${Date.now()}`)
   try {
     cpSync(PRESET_SRC, join(staging, 'out'), { recursive: true })
-    writeFileSync(join(staging, 'out', MARKER_NAME), JSON.stringify({ package: PACKAGE_NAME, version: version(), root: PKG_ROOT }, null, 2) + '\n')
-    rmSync(dest, { recursive: true, force: true })
-    renameSync(join(staging, 'out'), dest)
+    writeFileSync(join(staging, 'out', MARKER_NAME), JSON.stringify({
+      package: PACKAGE_NAME,
+      version: PKG_VERSION,
+      root: PKG_ROOT,
+      fingerprint: sourceFingerprint(),
+    }, null, 2) + '\n')
+    backupUserSlots(dest)
+    const hasDest = existsSync(dest)
+    if (hasDest) renameSync(dest, backup)
+    try {
+      renameSync(join(staging, 'out'), dest)
+    } catch (error) {
+      if (hasDest) renameSync(backup, dest)
+      throw error
+    }
+    restoreUserSlots(dest)
   } finally {
     rmSync(staging, { recursive: true, force: true })
+    rmSync(backup, { recursive: true, force: true })
   }
   return existed ? 'updated' : 'created'
 }
 
-/** 清理硬崩溃残留的 staging 目录(前缀为本包独占,直接删安全);避免预设扫描把它们当 broken preset 展示 */
+/** 用户改过的 slots.json5 在重写前备份、重写后恢复;未改动则不动 */
+function backupUserSlots(dest) {
+  const userSlots = join(dest, SLOTS_REL)
+  const template = join(PRESET_SRC, SLOTS_REL)
+  if (!existsSync(userSlots)) return
+  let customized = true
+  try {
+    customized = readFileSync(userSlots, 'utf8') !== readFileSync(template, 'utf8')
+  } catch {
+    customized = true
+  }
+  if (customized) {
+    writeFileSync(join(dshHome(), USER_SLOTS_BACKUP), readFileSync(userSlots, 'utf8'))
+  }
+}
+
+function restoreUserSlots(dest) {
+  const backupPath = join(dshHome(), USER_SLOTS_BACKUP)
+  if (!existsSync(backupPath)) return
+  const userSlots = join(dest, SLOTS_REL)
+  if (existsSync(userSlots) && readFileSync(userSlots, 'utf8') !== readFileSync(backupPath, 'utf8')) {
+    writeFileSync(userSlots, readFileSync(backupPath, 'utf8'))
+  }
+}
+
+/** 清理硬崩溃残留的 staging/备份目录(前缀为本包独占,直接删安全);避免预设扫描把它们当 broken preset 展示 */
 function cleanStaleStaging(parentDir) {
   let entries = []
   try {
@@ -88,7 +168,9 @@ function cleanStaleStaging(parentDir) {
     return
   }
   for (const name of entries) {
-    if (name.startsWith('.rs-workflow-staging-')) rmSync(join(parentDir, name), { recursive: true, force: true })
+    if (name.startsWith('.rs-workflow-staging-') || name.startsWith('.rs-workflow-old-')) {
+      rmSync(join(parentDir, name), { recursive: true, force: true })
+    }
   }
 }
 
@@ -98,5 +180,6 @@ export function removePreset() {
   const marker = readMarker(dest)
   if (marker === null || marker.package !== PACKAGE_NAME) return false
   rmSync(dest, { recursive: true, force: true })
+  cleanStaleStaging(dirname(dest))
   return true
 }
