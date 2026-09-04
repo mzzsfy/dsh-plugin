@@ -369,7 +369,8 @@ function normalizeTasks(raw, idPrefix, seedSeen, cap) {
       const declared = id
       let k = 0
       do { k++; id = idPrefix + k } while (seen[id])
-      if (declared) idRemap[declared] = id
+      // 首写优先: 重复声明同一 id 时, after 引用指到首个重编号任务而非被后者覆盖
+      if (declared && idRemap[declared] === undefined) idRemap[declared] = id
     }
     seen[id] = true
     picked.push({
