@@ -14,6 +14,8 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 
 ## 官方兼容
 
+需要 dsh 本体 0.1.2 及以上:激活时动态探测 dsh-llm 的 `resolveImageAttachmentAccess` / `offloadedImageText`(0.1.2 引入),缺失即打日志禁用插件,不注册 adapter 与 settings 节,不影响宿主启动与其他插件。
+
 配置语义、请求装配、错误分类、生态声明口逐项对表官方 `dsh-llm-pi-ai@0.1.2-rc.1`,官方公共导出能复用的一律复用(仅 resolveModelReasoning 因官方未导出而平行实现):
 
 - **profile 字段对齐**:官方 schema 全集可原样复制(`displayName` / `reasoning` / `thinkingBudgets` / `cacheRetention` / `transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `retryPolicy` / `defaultContextWindow` / `defaultMaxTokens` / `defaultInput` / 模型级 `reasoningEfforts`);`reasoningEfforts` → `thinkingLevelMap`(未声明档位钉 null、off 无值缺席)与官方逐行同构。无模型目录,`modelOverrides` 明确拒绝(官方对无目录路由同语义)。

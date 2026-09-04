@@ -4,7 +4,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { offloadedImageText } from '@deepseek-ai/dsh-llm'
 import { toPiContext, toPiContextWithImages } from '../src/pi-context.mjs'
+
+const IMAGES_BASE = { offloadedText: offloadedImageText }
 
 function attachmentService(versions) {
   const asked = []
@@ -40,6 +43,7 @@ test('user 消息图片转为 pi-ai image 块(附 handle 文本),纯文本归并
       resolveImageAccess: () => undefined,
       maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
       requestImagePolicy: DEFAULTS.policy,
+      ...IMAGES_BASE,
     },
   )
   const message = context.messages[0]
@@ -75,6 +79,7 @@ test('多图与嵌套 tool-result 图片全部展开', async () => {
       resolveImageAccess: () => undefined,
       maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
       requestImagePolicy: DEFAULTS.policy,
+      ...IMAGES_BASE,
     },
   )
   const imageBlocks = context.messages
@@ -99,6 +104,7 @@ test('超预算图片被裁为占位文本:access 缺失提示重附,access 存�
     resolveImageAccess,
     maxRequestImageBytes: 1,
     requestImagePolicy: { maxPixels: 1, maxBytes: 1 },
+    ...IMAGES_BASE,
   })
   const withoutAccess = await toPiContextWithImages({ messages }, base(() => undefined))
   assert.match(String(withoutAccess.messages[0].content), omitted)
@@ -121,6 +127,7 @@ test('非 user 角色历史图片拒绝 UNSUPPORTED_CONTENT', async () => {
         resolveImageAccess: () => undefined,
         maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
         requestImagePolicy: DEFAULTS.policy,
+        ...IMAGES_BASE,
       },
     ),
     (error) => error.code === 'UNSUPPORTED_CONTENT',
@@ -136,6 +143,7 @@ test('纯文本请求走图片路径也不读 attachments', async () => {
       resolveImageAccess: () => undefined,
       maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
       requestImagePolicy: DEFAULTS.policy,
+      ...IMAGES_BASE,
     },
   )
   assert.equal(context.messages[0].content, 'hi')
@@ -183,7 +191,7 @@ async function collect(iterable) {
 
 function makeAdapter(profile, captured, resolveAttachments) {
   const routes = new Map([['new-api', resolveRoute('new-api', profile)]])
-  return createGatewayAdapter(routes, async () => fakeProtocol(captured), undefined, resolveAttachments, undefined, () => undefined)
+  return createGatewayAdapter(routes, async () => fakeProtocol(captured), undefined, resolveAttachments, undefined, () => undefined, offloadedImageText)
 }
 
 const IMAGE_PROFILE = {
@@ -205,6 +213,27 @@ test('模型声明 image 输入且有 attachments 服务:请求走图片路径',
   const content = captured[0].context.messages[0].content
   assert.ok(Array.isArray(content))
   assert.equal(content[2].type, 'image')
+})
+
+test('adapter 图片路径超预算裁剪:占位文本经注入的 offloadedText 进入协议 context', async () => {
+  // 预算压到单图字节以下触发 placeholder,锁定 createGatewayAdapter 第 7 参接线:
+  // 删掉该参数,占位闭包在请求路径上抛 TypeError,本用例即红
+  const captured = []
+  const attachments = attachmentService(new Map())
+  const adapter = makeAdapter(
+    { ...IMAGE_PROFILE, maxRequestImageBytes: 1, requestImageMaxBytes: 1, requestImagePixelBudget: 1 },
+    captured,
+    () => attachments,
+  )
+  const bigImage = {
+    role: 'user',
+    content: [
+      { type: 'text', text: '图:' },
+      { type: 'image', attachment: { attachmentId: 'att-big', name: '大图.png', mediaType: 'image/png', width: 8, height: 8, bytes: 999 } },
+    ],
+  }
+  await collect(adapter.stream({ provider: 'new-api', model: 'auto', sessionId: 's', messages: [bigImage] }))
+  assert.match(String(captured[0].context.messages[0].content), /image omitted to fit request image limits/)
 })
 
 test('模型未声明 image 输入:UNSUPPORTED_CONTENT,不触 attachments', async () => {
