@@ -22,13 +22,12 @@
  */
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { presetDest, syncPreset } from "./preset-sync.mjs";
 
 const name = "rs-workflow";
 const inject = ["tools"];
 
-const NAMESPACE = settingsNamespace("rs-workflow");
+const NAMESPACE = "rs-workflow";
 
 const TEMPLATES = ["auto", "lite", "plan-final", "step-review", "multi-plan"];
 

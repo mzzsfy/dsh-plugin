@@ -2,8 +2,7 @@
 // 经 ctx.llm 注册网关 adapter。配置经 settings onChange 热更新,解析失败保旧。
 
 import z from '@deepseek-ai/schemastery'
-import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { RetryPolicySchema, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
 import { Config as OfficialConfig } from '@deepseek-ai/dsh-llm-pi-ai'
 import { mergeProviderSections, resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
 import { createGatewayAdapter } from './adapter.mjs'
@@ -13,8 +12,8 @@ import { discoverModels } from './discovery.mjs'
 
 export const name = 'llm-pi-gateway'
 
-const NS = settingsNamespace(SETTINGS_NS)
-const OFFICIAL_NS = settingsNamespace(OFFICIAL_SETTINGS_NS)
+const NS = SETTINGS_NS
+const OFFICIAL_NS = OFFICIAL_SETTINGS_NS
 
 export const inject = ['llm', 'settings']
 
@@ -85,7 +84,7 @@ export function apply(ctx, config) {
   const resolveCredential = createCredentialResolver(ctx)
   const adapter = createGatewayAdapter(profiles, undefined, resolveCredential, () => ctx.get('attachments'), (reason) => {
     ctx.logger.warn('llm-pi-gateway: replay 降级为 provider 中性历史: ' + reason)
-  })
+  }, (attachments, ref) => resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref))
   const manager = createRouteManager({
     routes: profiles,
     adapter,
@@ -111,7 +110,7 @@ export function apply(ctx, config) {
   // schema 注册。若注册冲突(patch 失效、官方仍在),降级为只服务本包节。
   // validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles 快照记忆。
   try {
-    installSettingsSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
+    ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
       validate: (section) => resolveRoutes(section.providers, readGateway()?.providers),
       setSource: (source) => {
         readOfficial = source
@@ -122,7 +121,7 @@ export function apply(ctx, config) {
     ctx.logger.error('llm-pi-gateway: 官方 llm-pi-ai 节接管失败(官方插件仍在?),降级为只服务 llm-pi-gateway 节')
     ctx.logger.error(error)
   }
-  installSettingsSection(ctx, NS, Config, config, {
+  ctx.settings.installSection(ctx, NS, Config, config, {
     validate: (section) => resolveRoutes(readOfficial()?.providers, section.providers),
     setSource: (source) => {
       readGateway = source

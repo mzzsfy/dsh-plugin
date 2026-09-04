@@ -1,10 +1,10 @@
 // harness 历史到 pi-ai Context 的转换(移植自 dsh-llm-pi-ai context/replay)。
 // 文本路径与图片路径与官方逐项对表:图片管线复用 dsh-llm 公共导出
-// (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText),
+// (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText / offloadedImageText),
 // 图片仅 user 角色可表示,读出经 attachments 服务转 base64 块。
 // finish 块产出官方同构 replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
 
-import { contentHasImage, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, offloadedImageText, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
 import { DEFAULT_IMAGE_MAX_BYTES, DEFAULT_IMAGE_PIXEL_BUDGET } from './config.mjs'
 import { GatewayError } from './errors.mjs'
 
@@ -279,21 +279,21 @@ function assertSupportedImageRoles(messages) {
 }
 
 /** 递归展开 user 内容块;全文本归并为字符串(官方 userContent 同构)。 */
-async function userContent(blocks, requestImages) {
+async function userContent(blocks, requestImages, resolveImageAccess) {
   const content = []
   for (const block of blocks) {
     if (block.type === 'text') {
       if (block.text.length > 0) content.push({ type: 'text', text: block.text })
     } else if (block.type === 'image') {
       const version = requestImages.get(block.attachment.attachmentId)
-      content.push({ type: 'text', text: requestImageHandleText(version) })
+      content.push({ type: 'text', text: requestImageHandleText(block.attachment, version, resolveImageAccess(block.attachment)) })
       content.push({
         type: 'image',
         data: Buffer.from(version.data).toString('base64'),
         mimeType: version.mediaType,
       })
     } else if (block.type === 'tool-result') {
-      const nested = await userContent(block.content, requestImages)
+      const nested = await userContent(block.content, requestImages, resolveImageAccess)
       if (typeof nested === 'string') {
         if (nested.length > 0) content.push({ type: 'text', text: nested })
       } else {
@@ -325,23 +325,25 @@ async function prepareRequestImages(messages, attachments, policy, signal) {
 
 /**
  * 图片路径 harness 历史转 pi-ai Context(官方 toPiContextWithImages 同构):
- * 两段 offload——声明字节先验预算,读出后按实际字节精确重排;图片转 base64 块。
+ * 两段 offload——声明字节先验预算,读出后按实际字节精确重排;图片转 base64 块;
+ * 被预算裁掉的图片替换为占位文本,恢复路径经 resolveImageAccess 解析。
  * @param {object} options harness 请求
- * @param {object} attachments attachments 服务(readImageRequest)
+ * @param {object} images 图片路径参数集:{attachments, resolveImageAccess, maxRequestImageBytes, requestImagePolicy}
  * @param {(reason: string) => void} [onDegrade] replay 降级回调
- * @param {number} [maxRequestImageBytes] 路由级请求图片字节预算
- * @param {{maxPixels: number, maxBytes: number}} requestImagePolicy 单图读出预算
  */
-export async function toPiContextWithImages(options, attachments, onDegrade, maxRequestImageBytes, requestImagePolicy = {
-  maxPixels: DEFAULT_IMAGE_PIXEL_BUDGET,
-  maxBytes: DEFAULT_IMAGE_MAX_BYTES,
-}) {
+export async function toPiContextWithImages(options, images, onDegrade) {
+  const { attachments, resolveImageAccess, maxRequestImageBytes } = images
+  const requestImagePolicy = images.requestImagePolicy ?? {
+    maxPixels: DEFAULT_IMAGE_PIXEL_BUDGET,
+    maxBytes: DEFAULT_IMAGE_MAX_BYTES,
+  }
   assertSupportedImageRoles(options.messages)
   const requestMessages = offloadRequestImagesWithPolicy(options.messages, {
     representation: 'base64',
     ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
     byteQuantum: 1,
     byteLength: (ref) => Math.min(ref.bytes, requestImagePolicy.maxBytes),
+    placeholder: (ref) => offloadedImageText(ref, resolveImageAccess(ref)),
   })
   const requestImages = await prepareRequestImages(requestMessages, attachments, requestImagePolicy, options.signal)
   const exactMessages = offloadRequestImagesWithPolicy(requestMessages, {
@@ -349,6 +351,7 @@ export async function toPiContextWithImages(options, attachments, onDegrade, max
     ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
     byteQuantum: 1,
     byteLength: (ref) => requestImages.get(ref.attachmentId).bytes,
+    placeholder: (ref) => offloadedImageText(ref, resolveImageAccess(ref)),
   })
   const toolNames = new Map()
   const messages = []
@@ -365,13 +368,13 @@ export async function toPiContextWithImages(options, attachments, onDegrade, max
       messages.push(assistant)
       continue
     }
-    const content = await userContent(message.content.filter((block) => block.type !== 'tool-result'), requestImages)
+    const content = await userContent(message.content.filter((block) => block.type !== 'tool-result'), requestImages, resolveImageAccess)
     const results = message.content.filter((block) => block.type === 'tool-result')
     if (content.length > 0 || results.length === 0) {
       messages.push({ role: 'user', content, timestamp: TIMESTAMP_ZERO })
     }
     for (const result of results) {
-      const resultContent = await userContent(result.content, requestImages)
+      const resultContent = await userContent(result.content, requestImages, resolveImageAccess)
       messages.push({
         role: 'toolResult',
         toolCallId: result.toolCallId,

@@ -222,7 +222,12 @@ test('toPiContextWithImages:user 图片经 attachments 读出;assistant 图片�
         { type: 'image', attachment: { attachmentId: 'att-1', bytes: 3 } },
       ],
     }],
-  }, attachments, undefined, 20 * 1024 * 1024, { maxPixels: 4 * 1024 * 1024, maxBytes: 1024 * 1024 })
+  }, {
+    attachments,
+    resolveImageAccess: () => undefined,
+    maxRequestImageBytes: 20 * 1024 * 1024,
+    requestImagePolicy: { maxPixels: 4 * 1024 * 1024, maxBytes: 1024 * 1024 },
+  })
   const content = context.messages[0].content
   assert.equal(content[0].type, 'text')
   assert.equal(content[0].text, 'look')
@@ -233,7 +238,12 @@ test('toPiContextWithImages:user 图片经 attachments 读出;assistant 图片�
   await assert.rejects(
     () => toPiContextWithImages({
       messages: [{ role: 'assistant', content: [{ type: 'image', attachment: { attachmentId: 'att-1', bytes: 3 } }] }],
-    }, attachments, undefined, 20 * 1024 * 1024, { maxPixels: 4 * 1024 * 1024, maxBytes: 1024 * 1024 }),
+    }, {
+      attachments,
+      resolveImageAccess: () => undefined,
+      maxRequestImageBytes: 20 * 1024 * 1024,
+      requestImagePolicy: { maxPixels: 4 * 1024 * 1024, maxBytes: 1024 * 1024 },
+    }),
     (error) => error.code === 'UNSUPPORTED_CONTENT',
   )
 })

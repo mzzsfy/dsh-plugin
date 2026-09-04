@@ -3,7 +3,6 @@
 // 设置持久化走 settings 命名空间 maintain,检查结果仅存内存,不落盘。
 
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 
 import {
   TARGET_PACKAGE,
@@ -21,7 +20,7 @@ export const name = 'dsh-maintain'
 
 export const inject = ['webServer', 'timer']
 
-const NAMESPACE = settingsNamespace('maintain')
+const NAMESPACE = 'maintain'
 
 const CHECK_TIMEOUT_MS = 20 * 1000
 const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000

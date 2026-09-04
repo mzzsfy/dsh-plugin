@@ -35,17 +35,20 @@ test('user 消息图片转为 pi-ai image 块(附 handle 文本),纯文本归并
   const attachments = attachmentService(new Map())
   const context = await toPiContextWithImages(
     { messages: [imageMessage()] },
-    attachments,
-    undefined,
-    DEFAULTS.maxRequestImageBytes,
-    DEFAULTS.policy,
+    {
+      attachments,
+      resolveImageAccess: () => undefined,
+      maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
+      requestImagePolicy: DEFAULTS.policy,
+    },
   )
   const message = context.messages[0]
   assert.equal(message.role, 'user')
   assert.ok(Array.isArray(message.content))
   assert.equal(message.content[0].type, 'text')
   assert.equal(message.content[0].text, '看这张图')
-  assert.match(message.content[1].text, /Image att-1; request image 4x4px/)
+  // 新 API 文本细节:官方 requestImageHandleText 由 "request image" 改为 "request preview"
+  assert.match(message.content[1].text, /Image att-1; request preview 4x4px/)
   assert.equal(message.content[2].type, 'image')
   assert.equal(message.content[2].mimeType, 'image/png')
   assert.equal(message.content[2].data, Buffer.from([1, 2, 3]).toString('base64'))
@@ -67,10 +70,12 @@ test('多图与嵌套 tool-result 图片全部展开', async () => {
         },
       ],
     },
-    attachments,
-    undefined,
-    DEFAULTS.maxRequestImageBytes,
-    DEFAULTS.policy,
+    {
+      attachments,
+      resolveImageAccess: () => undefined,
+      maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
+      requestImagePolicy: DEFAULTS.policy,
+    },
   )
   const imageBlocks = context.messages
     .flatMap((message) => Array.isArray(message.content) ? message.content : [])
@@ -79,14 +84,44 @@ test('多图与嵌套 tool-result 图片全部展开', async () => {
   assert.equal(attachments.asked.length, 2)
 })
 
+test('超预算图片被裁为占位文本:access 缺失提示重附,access 存在给出恢复路径', async () => {
+  // 裁剪发生在 offload 阶段:预算压到单图字节以下即触发 placeholder 替换
+  const messages = [{
+    role: 'user',
+    content: [
+      { type: 'text', text: '图:' },
+      { type: 'image', attachment: { attachmentId: 'att-big', name: '大图.png', mediaType: 'image/png', width: 8, height: 8, bytes: 999 } },
+    ],
+  }]
+  const omitted = /image omitted to fit request image limits/
+  const base = (resolveImageAccess) => ({
+    attachments: attachmentService(new Map()),
+    resolveImageAccess,
+    maxRequestImageBytes: 1,
+    requestImagePolicy: { maxPixels: 1, maxBytes: 1 },
+  })
+  const withoutAccess = await toPiContextWithImages({ messages }, base(() => undefined))
+  assert.match(String(withoutAccess.messages[0].content), omitted)
+  assert.match(String(withoutAccess.messages[0].content), /No local normalized image path is available/)
+  const withAccess = await toPiContextWithImages(
+    { messages },
+    base(() => ({ readonlyPath: '/ro/big.png' })),
+  )
+  assert.match(String(withAccess.messages[0].content), omitted)
+  assert.match(String(withAccess.messages[0].content), /\/ro\/big\.png/)
+  assert.doesNotMatch(String(withAccess.messages[0].content), /No local normalized image path is available/)
+})
+
 test('非 user 角色历史图片拒绝 UNSUPPORTED_CONTENT', async () => {
   await assert.rejects(
     toPiContextWithImages(
       { messages: [{ role: 'assistant', content: [{ type: 'image', attachment: { attachmentId: 'att-x' } }] }] },
-      attachmentService(new Map()),
-      undefined,
-      DEFAULTS.maxRequestImageBytes,
-      DEFAULTS.policy,
+      {
+        attachments: attachmentService(new Map()),
+        resolveImageAccess: () => undefined,
+        maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
+        requestImagePolicy: DEFAULTS.policy,
+      },
     ),
     (error) => error.code === 'UNSUPPORTED_CONTENT',
   )
@@ -96,10 +131,12 @@ test('纯文本请求走图片路径也不读 attachments', async () => {
   const attachments = attachmentService(new Map())
   const context = await toPiContextWithImages(
     { messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] },
-    attachments,
-    undefined,
-    DEFAULTS.maxRequestImageBytes,
-    DEFAULTS.policy,
+    {
+      attachments,
+      resolveImageAccess: () => undefined,
+      maxRequestImageBytes: DEFAULTS.maxRequestImageBytes,
+      requestImagePolicy: DEFAULTS.policy,
+    },
   )
   assert.equal(context.messages[0].content, 'hi')
   assert.equal(attachments.asked.length, 0)
@@ -146,7 +183,7 @@ async function collect(iterable) {
 
 function makeAdapter(profile, captured, resolveAttachments) {
   const routes = new Map([['new-api', resolveRoute('new-api', profile)]])
-  return createGatewayAdapter(routes, async () => fakeProtocol(captured), undefined, resolveAttachments)
+  return createGatewayAdapter(routes, async () => fakeProtocol(captured), undefined, resolveAttachments, undefined, () => undefined)
 }
 
 const IMAGE_PROFILE = {

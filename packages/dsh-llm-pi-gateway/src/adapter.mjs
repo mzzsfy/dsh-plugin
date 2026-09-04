@@ -58,8 +58,9 @@ function reasoningInfo(model, defaultLevel) {
  *   凭据解析器,默认走官方链(无凭据服务时回落启动环境)。
  * @param {() => object|undefined} [resolveAttachments] attachments 服务读取器
  * @param {(reason: string) => void} [onDegrade] replay 降级诊断回调
+ * @param {(attachments: object, ref: object) => object|undefined} [resolveImageAccess] 图片恢复路径解析:attachments 与引用解析为工具执行世界访问,无映射即 undefined
  */
-export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade) {
+export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade, resolveImageAccess) {
   const routesOf = () => (typeof routes === 'function' ? routes() : routes)
   const load = loadProtocol ?? ((api) => import(PROTOCOL_MODULES[api]))
 
@@ -129,10 +130,15 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
     }
     const context = attachments === undefined
       ? toPiContext(options, onDegrade)
-      : await toPiContextWithImages(options, attachments, onDegrade, route.maxRequestImageBytes, {
-        maxPixels: route.requestImagePixelBudget,
-        maxBytes: route.requestImageMaxBytes,
-      })
+      : await toPiContextWithImages(options, {
+        attachments,
+        resolveImageAccess: (ref) => resolveImageAccess?.(attachments, ref),
+        maxRequestImageBytes: route.maxRequestImageBytes,
+        requestImagePolicy: {
+          maxPixels: route.requestImagePixelBudget,
+          maxBytes: route.requestImageMaxBytes,
+        },
+      }, onDegrade)
     const protocol = await load(route.api)
     const events = protocol.streamSimple(piModel, context, {
       ...(apiKey === undefined ? {} : { apiKey }),

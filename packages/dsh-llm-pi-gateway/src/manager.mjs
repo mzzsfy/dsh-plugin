@@ -2,8 +2,24 @@
 // retryPolicy)经深比较决定是否原地 replace;目录条目为配置面提供 settings
 // 寻址;解析失败原样抛出,由接线方捕获保旧。纯逻辑,注册动作经依赖注入。
 
-import { deepEqualJson } from '@deepseek-ai/dsh-settings'
 import { SETTINGS_NS } from './config.mjs'
+
+/** 深比较 JSON 可序列化数据:数组按元素序、普通对象按键集合,NaN、undefined 与缺失键一律视为不等。 */
+function deepEqualJson(left, right) {
+  if (left === right) return true
+  if (typeof left !== typeof right) return false
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((item, index) => deepEqualJson(item, right[index]))
+  }
+  if (left === null || typeof left !== 'object') return false
+  if (Object.getPrototypeOf(left) !== Object.prototype || Object.getPrototypeOf(right) !== Object.prototype) return false
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && deepEqualJson(left[key], right[key]))
+}
 
 /** 注册捕获事实:排序消除纯重排误判(官方 registrationFacts 同构)。 */
 export function registrationFacts(routes) {
