@@ -65,6 +65,11 @@ test('阈值为零关闭功能', () => {
   assert.deepEqual(picked, [])
 })
 
+test('阈值负值与非有限值防御性关闭', () => {
+  assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: -1 }), [])
+  assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: Number.NaN }), [])
+})
+
 test('updatedAt 取创建时间与最近活跃的较大者', () => {
   assert.equal(updatedAtOf({ createdAt: 100 }, 50), 100)
   assert.equal(updatedAtOf({ createdAt: 100 }, 500), 500)
@@ -83,6 +88,11 @@ test('归档面板投影:交集过滤且按更新时间倒序', () => {
     { id: 'b', title: 'B', updatedAt: 200 },
     { id: 'c', title: 'C', updatedAt: 100 },
   ])
+})
+
+test('归档面板投影:标题缺失回退会话 id(与 client 镜像同规)', () => {
+  const projected = projectArchiveRows({ rows: [{ id: 'a', title: '', updatedAt: 5 }], archivedIds: ['a'] })
+  assert.deepEqual(projected, [{ id: 'a', title: 'a', updatedAt: 5 }])
 })
 
 test('归档集合差分只报新增,首帧基线不提示', () => {
@@ -116,6 +126,22 @@ test('Toast 差分:订阅即 ready(无 pending 帧)时首帧守卫仍生效', ()
   assert.deepEqual(archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b'] }).added, ['b'])
 })
 
+test('Toast 差分:ready→pending→ready 重连序列不误报存量', () => {
+  let previous
+  let step = archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a'] })
+  previous = step.state
+  // 断连:pending 帧中断 ready 链
+  step = archiveToastStep(previous, { phase: 'pending', archivedSessionIds: ['a', 'b'] })
+  previous = step.state
+  assert.deepEqual(step.added, [])
+  // 重连基线首装:不提示存量(离期新增的提示语义见 core 注释)
+  step = archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b'] })
+  previous = step.state
+  assert.deepEqual(step.added, [])
+  // 重连建立后:增量照常提示
+  assert.deepEqual(archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b', 'c'] }).added, ['c'])
+})
+
 test('非归档会话拒绝删除', () => {
   assert.equal(deleteEligibility({ archivedIds: ['a'], sessionId: 'a' }).ok, true)
   const denied = deleteEligibility({ archivedIds: ['a'], sessionId: 'b' })
@@ -143,6 +169,14 @@ test('空白产物判定:JSONL 单行(仅 header)为空白', () => {
   assert.equal(artifactLooksBlank('', false), true)
   assert.equal(artifactLooksBlank('{"header":1}\n{"event":0}\n', false), false)
   assert.equal(artifactLooksBlank('{"header":1}\n{"event":0', true), false)
+})
+
+test('空白产物判定:整块边界与 CRLF 行尾', () => {
+  // 恰满整块且换行不足两行:hasMore=true 判非空白(保守方向,防漏读)
+  assert.equal(artifactLooksBlank('{"header":1}\n', true), false)
+  // CRLF 行尾:\r 不计数,单行 CRLF header 仍为空白
+  assert.equal(artifactLooksBlank('{"header":1}\r\n', false), true)
+  assert.equal(artifactLooksBlank('{"header":1}\r\n{"event":0}\r\n', false), false)
 })
 
 test('已删除面板投影:标题回退会话 id,按删除时间倒序', () => {
