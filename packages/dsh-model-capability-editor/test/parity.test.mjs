@@ -20,19 +20,36 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { EFFORT_LEVELS, OFF_LEVEL, COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts,'
-      + ' inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces,'
-      + ' stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId };',
+      + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE,'
+      + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
+      + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
+      + ' anchorsBroken, resolveTargetId, unwrapResult, unwrapWire, makeSettingsFace, describeNs, modelsOf,'
+      + ' writeModels, saveModels, draftsFromModels };',
   )
   return factory()
 }
 
+// 常量对拍:两副本共享常量各自字面量,漂移即失败(UI 渲染与写回判定直接消费这些值)
+test('parity: 共享常量双副本一致', () => {
+  const C = clientLogic()
+  assert.deepEqual(C.EFFORT_LEVELS, logic.EFFORT_LEVELS)
+  assert.equal(C.OFF_LEVEL, logic.OFF_LEVEL)
+  assert.deepEqual(C.COMPETITOR_MARKERS, logic.COMPETITOR_MARKERS)
+  assert.equal(C.NS, logic.NS)
+  assert.equal(C.CONFLICT_CODE, logic.CONFLICT_CODE)
+  assert.equal(C.INPUT_UNSET, logic.INPUT_UNSET)
+  assert.equal(C.INPUT_TEXT, logic.INPUT_TEXT)
+  assert.equal(C.INPUT_TEXT_IMAGE, logic.INPUT_TEXT_IMAGE)
+})
+
 function defineScenarios(prefix, L) {
   const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId } = L
 
-  test(prefix + '目标模型解析:活动 ID 在基线用活动 ID,否则回落原 ID', () => {
-    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto-v2')
+  test(prefix + '目标模型解析:改名落盘(原 id 消失)采信新 ID;撞名兄弟 id 回落原 ID', () => {
+    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto-v2'])), 'auto-v2', '原 id 已从基线消失 = 改名已落盘')
+    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto', '原 id 仍在基线 = 撞名,回落')
     assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto'])), 'auto')
+    assert.equal(resolveTargetId('auto', 'auto', new Set(['auto'])), 'auto', '未改名零风险路径')
     assert.equal(resolveTargetId('', 'auto', new Set(['auto'])), 'auto')
   })
 
@@ -82,11 +99,10 @@ function defineScenarios(prefix, L) {
     assert.equal(modeToInput('unset'), undefined)
   })
 
-  test(prefix + '合并:有草稿条目重写两字段,其余原样保留', () => {
+  test(prefix + '合并:有草稿条目重写两字段,其余原样保留;孤儿草稿可观测', () => {
     const draft = {
       checked: { high: true },
       spellings: { high: '' },
-      baselineEfforts: undefined,
       inputMode: 'text',
     }
     const baseline = [
@@ -94,18 +110,38 @@ function defineScenarios(prefix, L) {
       { id: 'm2', name: '模型二' },
     ]
     const drafts = new Map([['m1', draft]])
-    const merged = mergeBaselineModels(baseline, drafts)
+    const { models: merged, droppedDraftIds } = mergeBaselineModels(baseline, drafts)
     // m1:reasoningEfforts 按 off 档位外勾选重写,input 收窄为 text
     assert.deepEqual(merged[0].reasoningEfforts, { high: 'high' })
     assert.deepEqual(merged[0].input, ['text'])
     assert.equal(merged[0].name, '模型一')
     // m2 无草稿原样保留
     assert.deepEqual(merged[1], baseline[1])
+    assert.deepEqual(droppedDraftIds, [])
+    // 草稿 id 不在基线:不落盘且可观测,不静默
+    const orphan = mergeBaselineModels(baseline, new Map([['ghost', draft]]))
+    assert.deepEqual(orphan.droppedDraftIds, ['ghost'])
+    assert.deepEqual(orphan.models.map((model) => model.id), ['m1', 'm2'])
+  })
+
+  test(prefix + '基线不可表达形态(字符串/数组)跳过档位重写', () => {
+    const { isExpressibleEfforts } = L
+    const draft = { checked: { low: true }, spellings: {}, inputMode: 'unset' }
+    assert.equal(isExpressibleEfforts('high'), false)
+    assert.equal(isExpressibleEfforts(['low']), false)
+    assert.equal(isExpressibleEfforts(undefined), true, '未声明必须可表达:添加档位是核心场景')
+    assert.equal(isExpressibleEfforts(false), true)
+    assert.equal(isExpressibleEfforts(null), true)
+    assert.equal(isExpressibleEfforts({}), true)
+    const weird = [{ id: 'x', reasoningEfforts: 'high', input: ['text'] }]
+    const { models } = mergeBaselineModels(weird, new Map([['x', draft]]))
+    assert.equal(models[0].reasoningEfforts, 'high')
+    assert.equal('input' in models[0], false)
   })
 
   test(prefix + '草稿分桶:切换不丢弃,切回恢复,null 路由不存', () => {
     const buckets = new Map()
-    const draftsA = new Map([['m1', { checked: { off: true }, spellings: {}, baselineEfforts: false, inputMode: 'text' }]])
+    const draftsA = new Map([['m1', { checked: { off: true }, spellings: {}, inputMode: 'text' }]])
     const draftsB = new Map()
     stashDrafts(buckets, 'provider-a', draftsA)
     stashDrafts(buckets, 'provider-b', draftsB)
@@ -124,14 +160,16 @@ test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
 })
 
-// wire 适配段双副本守卫:client.js 中 LOGIC 段外的 unwrapWire/makeSettingsFace
-// 与 logic.mjs 导出必须逐字符一致(单文件格式无法 require,靠此测试防漂移)。
-test('client.js wire 适配段与 logic.mjs 同源', () => {
+// 保存流双副本守卫:client.js 的 unwrapWire/makeSettingsFace/describeNs/modelsOf/
+// writeModels/saveModels 全段与 logic.mjs 对应函数必须逐字符一致(单文件格式无法
+// require,靠此测试防漂移;终点为 saveModels 结束后的草稿构建段起点)。
+test('client.js wire 适配与保存流段与 logic.mjs 同源', () => {
   const sectionOf = (source, label) => {
     const begin = source.indexOf('// 宿主 wire 信封')
-    const end = source.indexOf('async function describeNs')
-    assert.ok(begin >= 0 && end > begin, label + ' 缺少 wire 适配段')
-    return source.slice(begin, end).replace(/^export function/gm, 'function').trim()
+    assert.ok(begin >= 0, label + ' 缺少守卫段起点')
+    // 终点:client 侧 saveModels 之后是草稿构建段(有锚);logic 侧 saveModels 即文件尾(无锚)
+    const end = source.indexOf('// 基线模型')
+    return (end > begin ? source.slice(begin, end) : source.slice(begin)).replace(/^export /gm, '').trim()
   }
   const client = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const logic = readFileSync(join(PKG_ROOT, 'src', 'logic.mjs'), 'utf8')

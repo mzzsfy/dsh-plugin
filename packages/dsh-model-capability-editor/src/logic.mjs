@@ -65,12 +65,24 @@ export function modeToInput(mode) {
   return undefined
 }
 
+// reasoningEfforts 基线的可表达形态:未声明(undefined)/ false / null / 纯对象。
+// 未声明必须可表达:给无档位模型添加档位声明是本插件核心场景。其余(字符串、
+// 数组等非本插件写入的异型形态)不参与档位重写,编辑时跳过该字段防误删。
+export function isExpressibleEfforts(value) {
+  return value === undefined || value === false || value === null
+    || (typeof value === 'object' && !Array.isArray(value))
+}
+
 // 单模型应用草稿:仅写 reasoningEfforts 与 input 两字段,其余字段保留最新条目值。
+// 词汇表外档位透传基线取"写回时点的最新条目值"而非草稿快照,冲突重放路径下
+// 他方并发新增的外档位不丢;基线为不可表达形态(字符串/数组)时跳过该字段防误删。
 export function applyDraft(model, draft) {
   const result = { ...model }
-  const efforts = draftsToEfforts(draft, draft.baselineEfforts)
-  if (efforts === undefined) delete result.reasoningEfforts
-  else result.reasoningEfforts = efforts
+  if (isExpressibleEfforts(model.reasoningEfforts)) {
+    const efforts = draftsToEfforts(draft, model.reasoningEfforts)
+    if (efforts === undefined) delete result.reasoningEfforts
+    else result.reasoningEfforts = efforts
+  }
   const input = modeToInput(draft.inputMode)
   if (input === undefined) delete result.input
   else result.input = input
@@ -78,17 +90,17 @@ export function applyDraft(model, draft) {
 }
 
 // 整组写回:以 describe 读到的模型数组为基线,仅重写有草稿的条目,未编辑条目原样保留。
+// 返回合并结果与未命中基线的草稿 id(他方删除该模型后草稿无处可写),调用方负责告警。
 export function mergeBaselineModels(baselineModels, draftsById) {
-  return baselineModels.map((model) => {
+  const droppedDraftIds = []
+  const models = baselineModels.map((model) => {
     const draft = draftsById.get(model.id)
     return draft === undefined ? model : applyDraft(model, draft)
   })
-}
-
-// 冲突重放:在最新数组上仅重放本次用户修改的模型条目的两个字段,
-// 非本次修改的条目保留最新文档值,本次未声明的模型不被删除。
-export function replayDrafts(latestModels, draftsById) {
-  return mergeBaselineModels(latestModels, draftsById)
+  for (const id of draftsById.keys()) {
+    if (!baselineModels.some((model) => model.id === id)) droppedDraftIds.push(id)
+  }
+  return { models, droppedDraftIds }
 }
 
 // 竞品写入痕迹检测:返回带词汇表外标记字段的模型 id 列表。
@@ -110,11 +122,12 @@ export function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
-// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
-// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘,
+// 原 id 已从基线消失),以新 id 为准;原 id 仍在基线视为撞名,回落原 id。
 export function resolveTargetId(liveId, originalId, baselineIds) {
   const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
-  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+  const renamed = typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) && !ids.has(originalId)
+  return renamed ? liveId : originalId
 }
 
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
@@ -181,8 +194,8 @@ async function writeModels(settings, route, models, revision) {
   ], revision))
 }
 
-// 保存流:describe 取基线与 revision → mutate 整组写回;冲突则重读并按字段级
-// diff 重放一次,再冲突报错终止,绝不静默覆盖。返回已写回的模型数组。
+// 保存流:冲突重读重放一次,再冲突报错终止,绝不静默覆盖。
+// 返回已写回的模型数组与未命中基线的草稿 id(模型已被他方删除,编辑未落盘)。
 export async function saveModels(settings, route, draftsById) {
   const first = await describeNs(settings)
   if (!first.writable) {
@@ -191,7 +204,7 @@ export async function saveModels(settings, route, draftsById) {
     throw error
   }
   const attempt = (baseline, revision) =>
-    writeModels(settings, route, mergeBaselineModels(baseline, draftsById), revision)
+    writeModels(settings, route, mergeBaselineModels(baseline, draftsById).models, revision)
   let baseline = modelsOf(first.value, route)
   let revision = first.revision
   try {
