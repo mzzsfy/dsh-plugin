@@ -1,0 +1,24 @@
+# The auto-trust-all bundle patch, two operations in order:
+# 1. Override the official webserver row's config: the host default flips from
+#    loopback to all-interfaces, so a bare `dsh web` equals
+#    `dsh web --host 0.0.0.0`; an explicit `--host` still wins because the
+#    expression reads the webStartup service. The config object REPLACES the
+#    row's config wholesale (patch semantics are not a deep merge), so every
+#    official key is mirrored here; sync this list when upstream changes it.
+#    The name field guards against id collision: a mismatching row is skipped
+#    with a loader warning instead of being clobbered.
+# 2. Insert this plugin as one entry; its host half wraps webServer routes and
+#    registers every arriving Host header into webRuntime.trustedHosts.
+
+- id: webserver
+  name: '@deepseek-ai/dsh-host-webserver'
+  config:
+    host: !!js ctx.webStartup.host ?? '0.0.0.0'
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+
+- insert:
+    - id: auto-trust-all
+      name: '@mzzsfy/dsh-auto-trust-all'

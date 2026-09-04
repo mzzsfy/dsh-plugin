@@ -3,7 +3,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { offloadedImageText } from '@deepseek-ai/dsh-llm'
 import { toPiAssistant, toPiReplayState, toPiContext, toPiContextWithImages } from '../src/pi-context.mjs'
+
+const IMAGES_BASE = { offloadedText: offloadedImageText }
 
 function harnessAssistant(overrides = {}) {
   return {
@@ -227,6 +230,7 @@ test('toPiContextWithImages:user 图片经 attachments 读出;assistant 图片�
     resolveImageAccess: () => undefined,
     maxRequestImageBytes: 20 * 1024 * 1024,
     requestImagePolicy: { maxPixels: 4 * 1024 * 1024, maxBytes: 1024 * 1024 },
+    ...IMAGES_BASE,
   })
   const content = context.messages[0].content
   assert.equal(content[0].type, 'text')
@@ -243,6 +247,7 @@ test('toPiContextWithImages:user 图片经 attachments 读出;assistant 图片�
       resolveImageAccess: () => undefined,
       maxRequestImageBytes: 20 * 1024 * 1024,
       requestImagePolicy: { maxPixels: 4 * 1024 * 1024, maxBytes: 1024 * 1024 },
+      ...IMAGES_BASE,
     }),
     (error) => error.code === 'UNSUPPORTED_CONTENT',
   )

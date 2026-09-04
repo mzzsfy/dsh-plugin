@@ -60,7 +60,9 @@ client.js 与 core 之间存在镜像逻辑的(如 turn-notify 的 chooseChannel
 
 规约(违反即复现同款事故):
 
-1. **服务优先,禁止静态 import 版本脆弱的模块级导出**:宿主能力一律通过服务注入使用——`export const inject = [...]` 或 `ctx.inject(['settings'], (sctx) => ...)`,然后调服务方法(settings 服务:`register(ns, schema, {base})` / `get(ns)` / `update(ns, patch)` / `installSection(ctx, ns, schema, entry, hooks)`;ns 直接传合法字符串,格式校验内置于方法)。确需模块级 API(如 dsh-settings 的 `SettingsConflictError` 这类稳定导出)时,只 import 官方文档级稳定符号;不确定稳定与否就用动态 `import()` + 特性检测 + 降级告警(范例:dsh-free-search 的 installSection 双兼容写法)
+**兼容性是第一要务**:插件缺依赖(宿主服务或导出缺失)时必须干净禁用——打日志说明原因并不注册任何服务/UI,禁止 boot pending 挂死、加载崩溃或运行时抛错。禁用是唯一合法的降级形态,禁止为旧版本宿主维护双路径功能。
+
+1. **服务优先,禁止静态 import 版本脆弱的模块级导出**:宿主能力一律通过服务注入使用——`export const inject = [...]` 或 `ctx.inject(['settings'], (sctx) => ...)`,然后调服务方法(settings 服务:`register(ns, schema, {base})` / `get(ns)` / `update(ns, patch)` / `installSection(ctx, ns, schema, entry, hooks)`;ns 直接传合法字符串,格式校验内置于方法)。确需模块级 API(如 dsh-settings 的 `SettingsConflictError` 这类稳定导出)时,只 import 官方文档级稳定符号;不确定稳定与否就用动态 `import()` + 特性检测 + 降级告警(范例:dsh-free-search 的 installSection 双兼容写法)。同理,**静态 inject 只声明跨版本存在的基座服务**:版本脆弱服务(如 dsh 0.1.2 引入的 `remote.settings`)移出 inject,在 apply 内以可选链探测,缺失即禁用(范例:dsh-model-capability-editor、dsh-llm-pi-gateway 的宿主探测)
 2. **peerDependencies 声明实际使用的 API 最低引入版本**,不照抄其他包的旧模板
 3. **dsh 本体升级后必跑回归**:仓库根 `node scripts/smoke-load.mjs`(全包逐个加载,命名导出缺失当场暴露)+ 各包 `node --test "test/*.test.mjs"`;镜像官方语义的包(如 llm-pi-gateway 之于 dsh-llm-pi-ai)以官方新源码为规范逐项对表
 4. 镜像官方语义的代码,注释保留"官方同构"定位;官方源码位于 dsh 本体安装目录 `node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>/lib/`

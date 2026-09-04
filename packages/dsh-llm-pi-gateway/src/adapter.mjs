@@ -59,8 +59,9 @@ function reasoningInfo(model, defaultLevel) {
  * @param {() => object|undefined} [resolveAttachments] attachments 服务读取器
  * @param {(reason: string) => void} [onDegrade] replay 降级诊断回调
  * @param {(attachments: object, ref: object) => object|undefined} [resolveImageAccess] 图片恢复路径解析:attachments 与引用解析为工具执行世界访问,无映射即 undefined
+ * @param {(ref: object, access: object|undefined) => string} offloadedText 被预算裁掉的图片占位文本(dsh-llm offloadedImageText,0.1.2 起提供,宿主探测后必传;图片路径硬依赖)
  */
-export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade, resolveImageAccess) {
+export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade, resolveImageAccess, offloadedText) {
   const routesOf = () => (typeof routes === 'function' ? routes() : routes)
   const load = loadProtocol ?? ((api) => import(PROTOCOL_MODULES[api]))
 
@@ -134,6 +135,7 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
         attachments,
         resolveImageAccess: (ref) => resolveImageAccess?.(attachments, ref),
         maxRequestImageBytes: route.maxRequestImageBytes,
+        offloadedText,
         requestImagePolicy: {
           maxPixels: route.requestImagePixelBudget,
           maxBytes: route.requestImageMaxBytes,

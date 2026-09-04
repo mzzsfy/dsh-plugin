@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-think-expand",
   "description": "流式回复时自动展开 AI 思考过程,始终显示最新一条;安装即生效,手动操作优先,装卸无残留",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

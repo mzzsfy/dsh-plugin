@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-settings-nav-icons",
   "description": "设置弹窗导航分区图标替换:按分区显示文本把回退齿轮换成专属图形,DOM 观察实现,卸载即恢复",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {

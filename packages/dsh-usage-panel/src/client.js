@@ -645,6 +645,7 @@ function UsagePanelApp() {
   const [armed, setArmed] = useState(null)
   const [sequences, setSequences] = useState({})
   const [pollIntervalSec, setPollIntervalSec] = useState(null)
+  const [pollArmed, setPollArmed] = useState(null)
 
   useEffect(() => {
     let alive = true
@@ -668,7 +669,11 @@ function UsagePanelApp() {
       .then((res) => { if (alive) setSequences(res && res.sequences ? res.sequences : {}) })
       .catch(() => {})
     api('/api/usage-panel/settings')
-      .then((res) => { if (alive) setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : null) })
+      .then((res) => {
+        if (!alive) return
+        setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : null)
+        setPollArmed(res ? Boolean(res.pollArmed) : null)
+      })
       .catch(() => {})
     return () => { alive = false }
   }, [])
@@ -778,6 +783,8 @@ function UsagePanelApp() {
       h('button', { className: 'up-btn', onClick: () => setEditing({ isNew: true, id: null }) }, '添加账号'),
     ),
     notice !== null ? h('div', { className: 'up-notice up-notice--' + notice.kind }, notice.text) : null,
+    pollArmed === false ? h('div', { className: 'up-notice up-notice--error' },
+      '自动轮询未运行(宿主定时服务不可用);手动查询不受影响。') : null,
     editing !== null
       ? h(AccountForm, {
           key: editing.id || 'new',

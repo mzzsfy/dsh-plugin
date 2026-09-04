@@ -25,11 +25,11 @@ globalThis.fetch = async () => ({
   },
 })
 
-function makeCtx({ appExit, settingsStore } = {}) {
+function makeCtx({ appExit, settingsStore, timerAvailable = true } = {}) {
   const routes = new Map()
   let tick = null
   const store = settingsStore ?? {}
-  const calls = { exits: [], registered: [] }
+  const calls = { exits: [], registered: [], disposers: [] }
   const ctx = {
     calls,
     get(name) {
@@ -37,14 +37,23 @@ function makeCtx({ appExit, settingsStore } = {}) {
       if (name === 'settings') return settingsService
       return undefined
     },
-    interval(fn) {
-      tick = fn
-    },
+    // effect 桩:执行装配函数并捕获其返回的 disposer,供测试模拟 fiber 停用
     effect(fn) {
-      fn()
+      const disposer = fn()
+      if (typeof disposer === 'function') calls.disposers.push(disposer)
     },
     inject(deps, fn) {
-      fn({ settings: settingsService })
+      // timer 服务桩:模拟宿主 timer 激活后的 interval(返回 disposer 同官方契约);
+      // timerAvailable=false 模拟服务缺失
+      fn({
+        settings: settingsService,
+        interval: timerAvailable
+          ? (intervalFn) => {
+              tick = intervalFn
+              return () => { if (tick === intervalFn) tick = null }
+            }
+          : undefined,
+      })
     },
     webServer: {
       register(route) {
@@ -54,6 +63,9 @@ function makeCtx({ appExit, settingsStore } = {}) {
     },
     fireTick() {
       if (tick) tick()
+    },
+    disposeEffects() {
+      for (const disposer of calls.disposers) disposer()
     },
   }
   const settingsService = {
@@ -141,6 +153,37 @@ test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
   assert.deepEqual(res.payload.tags, MOCK_TAGS, '启动检查后 dist-tags 必须就绪')
   assert.equal(res.payload.checkError, null)
   assert.ok(res.payload.checkedAt !== null)
+  assert.equal(res.payload.pollRunning, true, 'timer 服务激活时自动轮询应武装')
+})
+
+test('timer 服务缺失:自动轮询降级,面板状态照常响应', async () => {
+  const { ctx, routes } = makeCtx({ timerAvailable: false })
+  apply(ctx)
+  const res = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.pollRunning, false)
+  // 手动检查通道不受影响:refresh 仍可拉取 dist-tags
+  const refreshed = await call(routes, '/api/maintain/refresh', makeReq({ body: {} }))
+  assert.equal(refreshed.status, 200)
+  assert.ok(refreshed.payload.checkedAt !== null)
+})
+
+test('interval dispose 回归:fiber 停用后轮询 tick 失效(防双 interval 回归)', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  assert.equal(ctx.calls.disposers.length > 0, true, 'interval dispose 必须经 ctx.effect 挂回插件 fiber')
+  // 等启动检查落定,排除其 checkedAt 变化对断言的干扰
+  let baseline = null
+  for (let waited = 0; waited < 5000; waited += 25) {
+    const poll = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
+    if (poll.payload.checkedAt !== null) { baseline = poll.payload.checkedAt; break }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.ok(baseline !== null, '启动检查 5 秒内未完成')
+  ctx.disposeEffects()
+  ctx.fireTick()
+  const res = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
+  assert.equal(res.payload.checkedAt, baseline, 'dispose 后 fireTick 不得触发新一轮检查')
 })
 
 test('方法守卫:全部路由错误方法一律 405', async () => {

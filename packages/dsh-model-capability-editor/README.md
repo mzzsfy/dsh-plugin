@@ -36,6 +36,10 @@ dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 
 重启 dsh 后,打开官方「模型」页任意 provider 的编辑卡,展开「自定义设置」,模型行内即出现"模型能力"编辑块;若官方结构变化导致注入失效,模型页右侧自动出现"模型能力"浮动入口作为回退。
 
+## 前置:dsh 本体版本
+
+需要 dsh 本体 0.1.2 及以上(读写经 `remote.settings` 服务面,该面由 0.1.2 引入的 host 侧 `dsh-api-settings-controller` 提供)。更旧的本体上无此服务,插件激活时自检发现缺失即整体禁用(浏览器控制台告警提示版本要求),不影响 web 启动与其他插件;请先升级 dsh,或改用插件 0.1.2(旧 settings 面,已停止维护)。
+
 ## 前置:移除 dsh-better-reasoning-effort
 
 本插件与竞品 `dsh-better-reasoning-effort` 互斥,安装本插件前必须先移除竞品:

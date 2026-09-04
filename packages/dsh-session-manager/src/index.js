@@ -1,6 +1,7 @@
 // dsh-session-manager Host 半区:自动归档评估 + 取消归档 + 删除(回收站) + 已删除台账与重挂载。
-// 评估由 session/created 事件触发;取消归档与删除后的归档清理经 workspace 域
-// global 直写 archivedSessionIds 并同步注册表进程内快照(官方无 unarchive 表面,
+// 评估三触发源共用同一门闩:新会话创建(session/created,按工作区限定)、settings 就绪后的
+// 启动补扫(全量)、每日周期轮(全量,经宿主 timer 软依赖);取消归档与删除后的归档清理经
+// workspace 域 global 直写 archivedSessionIds 并同步注册表进程内快照(官方无 unarchive 表面,
 // 域写入经 domain/changed 触发 workspace.follow 的 archived 帧);删除按失败矩阵
 // 执行 locate → trash → detach → 归档清理,台账记录删除产物路径供回收站还原后
 // 一键重挂载(官方 attachSession)。面板数据不在此处:client 侧以 session.list
@@ -16,6 +17,7 @@ import { defineDomain } from '@deepseek-ai/dsh-storage-domain'
 import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
+  DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
   DELETE_CODES,
   artifactLooksBlank,
   deleteEligibility,
@@ -57,6 +59,11 @@ const BLANK_PROBE_CHUNK_BYTES = 64 * 1024
 const LEDGER_MAX_ENTRIES = 200
 // 自动归档评估整体超时:宿主服务挂起时不因门闩未复位而永久停摆
 const EVALUATION_TIMEOUT_MS = 30 * 1000
+const HOUR_MS = 60 * 60 * 1000
+// 周期评估固定短 tick:tick 内做到期判断,间隔设置变更自下一周期生效
+const PERIODIC_TICK_MS = 60 * 1000
+// 台账单次读改写超时:宿主存储域挂起时锁内 job 超时放行,防互斥链死锁与 inFlight 泄漏
+const LEDGER_OP_TIMEOUT_MS = 10 * 1000
 
 // 路由响应文案;导出供测试断言与实现同步
 export const MESSAGES = {
@@ -78,6 +85,7 @@ export const MESSAGES = {
   inFlight: '该会话正在删除中,请稍后重试',
   badJsonBody: '请求体不是合法 JSON',
   systemError: '操作失败(系统级错误,详见服务端日志)',
+  runningDuringTrash: '警告:回收期间会话恢复运行,产物已移入回收站;建议检查会话状态',
 }
 
 // trash 执行器出口:进程级唯一 OS 副作用注入点,测试经此桩替
@@ -85,7 +93,9 @@ export const executor = { trashPath }
 
 const SETTINGS_SCHEMA = schemastery.object({
   autoArchiveDays: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_DAYS)
-    .description('自动归档阈值天数,0 表示关闭;新会话创建时评估'),
+    .description('自动归档阈值天数,0 表示关闭;新会话创建、启动与周期评估时生效'),
+  autoArchiveIntervalHours: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS)
+    .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
 })
 
 function sendJson(res, status, payload) {
@@ -108,7 +118,11 @@ function readSettings(ctx) {
   const settings = ctx.get('settings')
   const value = settings ? settings.get(NAMESPACE) : undefined
   const days = Number(value && value.autoArchiveDays)
-  return Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS
+  const hours = Number(value && value.autoArchiveIntervalHours)
+  return {
+    days: Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS,
+    intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
+  }
 }
 
 function readBody(req) {
@@ -179,17 +193,21 @@ export function apply(ctx, config) {
     void ledgerReady.then((domain) => domain.close()).catch(() => {})
   }, 'session-manager ledger domain')
 
-  // 自动归档评估:session/created 触发,按创建会话的工作区限定候选集。
-  // 两级筛选:先用 createdAt 纯内存预筛(mtime 只会增大 updatedAt,createdAt 未超期
-  // 必不超期),仅对预筛存活者做产物 stat/blank 探测,活跃会话零 IO
-  ctx.on('session/created', (session) => {
-    const days = readSettings(ctx)
-    if (days === 0 || evaluating) return
+  // 周期评估状态:running 供设置页降级提示;timer 为软依赖,服务缺失不阻塞插件装载
+  const periodic = { running: false, reason: '' }
+
+  // 自动归档评估:筛出待归档会话并逐个走官方 archiveSession。cwd 缺省时全量评估
+  // (启动补扫 / 周期轮),传入 cwd 时仅评估该工作区(新建会话触发)。
+  // 门闩与超时守卫对全部触发源生效。两级筛选:先用 createdAt 纯内存预筛(mtime 只会
+  // 增大 updatedAt,createdAt 未超期必不超期),仅对预筛存活者做产物 stat/blank 探测,
+  // 活跃会话零 IO。返回是否真正启动:被门闩/关闭挡下的调用方(周期 tick)保持到期态
+  // 由下个 tick 重试,不得据此重排周期
+  function evaluateArchives(cwd) {
+    const { days } = readSettings(ctx)
+    if (days === 0 || evaluating) return false
     evaluating = true
     let timeoutGuard
     const work = (async () => {
-      const cwd = session.header && session.header.cwd
-      if (cwd === undefined) return
       const registry = ctx.workspaceRegistry
       const archived = new Set(registry.archivedSessionIds.map(String))
       const sessionsService = ctx.get('sessions')
@@ -201,23 +219,31 @@ export function apply(ctx, config) {
       const candidates = []
       for (const recordItem of records) {
         const header = recordItem.header
-        if (header.cwd !== cwd) continue
+        if (cwd !== undefined && header.cwd !== cwd) continue
         // 预筛:createdAt 未超期必不超期(见上),跳过产物 IO
         if (header.createdAt >= cutoff) continue
+        // 已归档记录永不是候选,集合随历史增长,提前跳过省产物 IO
+        if (archived.has(String(header.id))) continue
         const live = sessionsService && sessionsService.get(header.id)
         const running = isSessionRunning({ agents, sessionId: header.id })
         const located = persistence && persistence.locate(header)
-        const activityAt = located && await safeMtime(located.path)
+        // locate 缺失(第三方后端不支持定位)与产物不可读同规跳过:仅凭 createdAt
+        // 判活跃会绕过 mtime 保护,与 delete 的 unsupportedBackend 拒绝口径对齐
+        if (!located) continue
+        const activityAt = await safeMtime(located.path)
         // 产物不可读视为已删除,不参与归档:否则删除后的会话(重连前仍在持久层
         // 列表中)会因超期被重新归档,面板行复活且无法再删
-        if (located && activityAt === null) continue
-        const blank = live ? live.seq === 0 : Boolean(located && await artifactIsBlank(located.path))
+        if (activityAt === null) continue
+        // stat 后即可判活跃度:未超期不必做空白探测
+        const updatedAt = updatedAtOf(header, activityAt)
+        if (updatedAt >= cutoff) continue
+        const blank = live ? live.seq === 0 : Boolean(await artifactIsBlank(located.path))
         candidates.push({
           id: String(header.id),
-          archived: archived.has(String(header.id)),
+          archived: false,
           running,
           blank,
-          updatedAt: updatedAtOf(header, activityAt),
+          updatedAt,
         })
       }
       for (const id of selectArchiveCandidates({ records: candidates, nowMs, thresholdDays: days })) {
@@ -240,6 +266,13 @@ export function apply(ctx, config) {
       evaluating = false
       void work.catch(() => {})
     })
+    return true
+  }
+
+  ctx.on('session/created', (session) => {
+    const cwd = session.header && session.header.cwd
+    if (cwd === undefined) return
+    evaluateArchives(cwd)
   })
 
   // 取消归档:直写 workspace 域 global,无官方 API 可用。注册表把域 global 快照到
@@ -266,10 +299,18 @@ export function apply(ctx, config) {
   }
 
   // 台账记账:trash 成功即记录,路径为回收站「原位置」还原所需。
-  // ledgerChain 串行化所有读改写:get→set 交错时后写者会用旧快照整体覆盖,丢条目
+  // ledgerChain 串行化所有读改写:get→set 交错时后写者会用旧快照整体覆盖,丢条目。
+  // 逐 job 超时兜底:宿主存储域挂起时超时放行,防链条死锁与 inFlightDeletes 泄漏;
+  // 超时的写操作后台落盘仍安全(合并/移除均为幂等语义)
   let ledgerChain = Promise.resolve()
   function withLedgerLock(job) {
-    const run = ledgerChain.then(job, job)
+    const runJob = () => Promise.race([
+      job(),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('台账操作超时(' + LEDGER_OP_TIMEOUT_MS / 1000 + 's)')),
+        LEDGER_OP_TIMEOUT_MS)),
+    ])
+    const run = ledgerChain.then(runJob, runJob)
     ledgerChain = run.catch(() => {})
     return run
   }
@@ -448,6 +489,12 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(outcome.error) })
             return
           }
+          // 执行期翻转检测:OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行。
+          // 产物已移走,中断只会更糟,照常完成收尾,但把不变量破坏变为可观测事件
+          if (isSessionRunning({ agents: ctx.get('agents'), sessionId })) {
+            ctx.logger && ctx.logger.warn('session-manager 删除执行期间会话恢复运行: ' + sessionId)
+          }
+          const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
           // 台账在 trash 成功后立即记录:产物已进回收站,后续任何半失败都不影响还原资格;
           // 台账失败只降级重挂载便利,不回滚删除
           let ledgerError
@@ -457,9 +504,11 @@ export function apply(ctx, config) {
             ledgerError = error
           }
           const ledgerFailedSuffix = ledgerError !== undefined ? MESSAGES.ledgerSuffix : ''
+          // 执行期翻转向用户显式告警;各 partial 分支聚合该警告
+          const trashWindowSuffix = runningDuringTrash ? ';' + MESSAGES.runningDuringTrash : ''
           const detachError = await detachSession(ctx, sessionId)
           if (detachError !== undefined) {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.partial + ledgerFailedSuffix })
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.partial + ledgerFailedSuffix + trashWindowSuffix })
             return
           }
           // 归档集合同步清理:残留 id 会让面板行持续可见;detach 失败时不清理,
@@ -467,19 +516,28 @@ export function apply(ctx, config) {
           try {
             await removeArchivedId(sessionId)
           } catch {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.archiveCleanup + ledgerFailedSuffix })
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.archiveCleanup + ledgerFailedSuffix + trashWindowSuffix })
             return
           }
           if (ledgerError !== undefined) {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.ledgerFailed })
+            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.ledgerFailed + trashWindowSuffix })
             return
           }
-          sendJson(res, 200, { ok: true })
+          sendJson(res, 200, runningDuringTrash
+            ? { ok: true, message: MESSAGES.runningDuringTrash }
+            : { ok: true })
         } catch (error) {
           respondError(ctx, res, error)
         } finally {
           inFlightDeletes.delete(sessionId)
         }
+      },
+    },
+    {
+      path: '/api/session-manager/status',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'GET')) return
+        sendJson(res, 200, { periodic: { ...periodic } })
       },
     },
     {
@@ -545,8 +603,57 @@ export function apply(ctx, config) {
       'dsh-session-manager ' + route.path)
   }
 
+  // 周期评估软依赖 timer:顶层注册(不嵌套在 settings 回调内,settings 服务重启会
+  // 重跑其回调并新建 fiber,嵌套会使周期轮随重启累积复制)。服务未激活则回调不执行,
+  // 插件其余能力不受影响,设置页提示降级
+  ctx.inject(['timer'], (timerCtx) => {
+    if (typeof timerCtx.interval !== 'function') {
+      periodic.reason = '宿主定时服务不可用'
+      return () => {
+        periodic.running = false
+      }
+    }
+    // 固定短 tick + 到期判断:间隔设置变更自下一周期生效,缩短经 earliest 钳制前移
+    let nextDueAt = null
+    let lastArmedAt = 0
+    const scheduleNext = () => {
+      const { intervalHours } = readSettings(ctx)
+      lastArmedAt = Date.now()
+      nextDueAt = intervalHours > 0 ? lastArmedAt + intervalHours * HOUR_MS : null
+    }
+    try {
+      const dispose = timerCtx.interval(() => {
+        const { intervalHours } = readSettings(ctx)
+        // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡;
+        // 缩短间隔时以 lastArmedAt 锚定前移,最长等新间隔而非等满旧周期
+        if (intervalHours === 0) {
+          nextDueAt = null
+          return
+        }
+        const earliest = lastArmedAt > 0 ? lastArmedAt + intervalHours * HOUR_MS : Infinity
+        if (nextDueAt !== null && nextDueAt > earliest) nextDueAt = earliest
+        if (nextDueAt === null || Date.now() >= nextDueAt) {
+          // 门闩占用(他源评估在途)时保持到期态,60s 后下个 tick 重试;
+          // 仅评估真正启动才重排周期,被丢弃的到期轮不会静默失效一个周期
+          if (evaluateArchives()) scheduleNext()
+        }
+      }, PERIODIC_TICK_MS)
+      // disposer 挂本 inject fiber:timer 服务移除/重启时复位降级状态并清理 interval
+      periodic.running = true
+      return () => {
+        dispose()
+        periodic.running = false
+      }
+    } catch (error) {
+      periodic.reason = '宿主定时服务调用失败: ' + String(error && error.message || error)
+      return undefined
+    }
+  })
+
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
+    // 启动补扫不依赖定时服务:settings 就绪即评估一轮,清掉停机期间积压的超期会话
+    evaluateArchives()
   })
 }
 

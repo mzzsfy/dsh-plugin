@@ -2,7 +2,7 @@
 // 经 ctx.llm 注册网关 adapter。配置经 settings onChange 热更新,解析失败保旧。
 
 import z from '@deepseek-ai/schemastery'
-import { RetryPolicySchema, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
+import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import { Config as OfficialConfig } from '@deepseek-ai/dsh-llm-pi-ai'
 import { mergeProviderSections, resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
 import { createGatewayAdapter } from './adapter.mjs'
@@ -14,6 +14,9 @@ export const name = 'llm-pi-gateway'
 
 const NS = SETTINGS_NS
 const OFFICIAL_NS = OFFICIAL_SETTINGS_NS
+
+// 宿主必备导出:均为 dsh 0.1.2 引入,激活时逐项探测,缺失即禁用
+const HOST_REQUIRED_EXPORTS = ['resolveImageAttachmentAccess', 'offloadedImageText']
 
 export const inject = ['llm', 'settings']
 
@@ -61,8 +64,22 @@ export const Config = z.object({
   providers: z.dict(providerEntry).default({}),
 })
 
+/** 探测宿主 dsh-llm 缺失的必备导出,齐全返回空表。 */
+export function missingHostExports(dshLlm) {
+  return HOST_REQUIRED_EXPORTS.filter((name) => dshLlm[name] === undefined)
+}
+
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
-export function apply(ctx, config) {
+export async function apply(ctx, config) {
+  // 宿主兼容探测:HOST_REQUIRED_EXPORTS 为 dsh 0.1.2 引入的 dsh-llm 导出,
+  // 静态 import 命名导出缺失即加载崩溃,故动态探测;
+  // 旧本体缺失时禁用插件,不注册 adapter 与 settings 节,boot 保持干净。
+  const dshLlm = await import('@deepseek-ai/dsh-llm')
+  const missing = missingHostExports(dshLlm)
+  if (missing.length > 0) {
+    ctx.logger.warn(`llm-pi-gateway: 宿主缺少 ${missing.join(', ')}(需要 dsh 本体 0.1.2+),插件禁用`)
+    return undefined
+  }
   // 两节来源:官方节(官方 schema 消费,零感知接管)+ 本包节(独立/增强)。
   // 合并路由表按原始快照恒等记忆;任一节解析即抛,记忆保持旧值,
   // 调用方捕获后沿用上一份好配置(官方同款)。
@@ -84,7 +101,7 @@ export function apply(ctx, config) {
   const resolveCredential = createCredentialResolver(ctx)
   const adapter = createGatewayAdapter(profiles, undefined, resolveCredential, () => ctx.get('attachments'), (reason) => {
     ctx.logger.warn('llm-pi-gateway: replay 降级为 provider 中性历史: ' + reason)
-  }, (attachments, ref) => resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref))
+  }, (attachments, ref) => dshLlm.resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref), dshLlm.offloadedImageText)
   const manager = createRouteManager({
     routes: profiles,
     adapter,

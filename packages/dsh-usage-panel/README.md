@@ -40,7 +40,7 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 
 ## 定期查询与趋势(v2)
 
-- 定期查询:设置面板可调「轮询间隔(秒)」,默认 600,仅正数有效;短窗口账号每轮查询,长窗口 / 余额账号分频到约每小时一次
+- 定期查询:设置面板可调「轮询间隔(秒)」,默认 600,仅正数有效;短窗口账号每轮查询,长窗口 / 余额账号分频到约每小时一次。定时轮询为软依赖:宿主 timer 服务不可用时仅停用自动轮询,面板显示降级提示,手动查询与全部配置能力不受影响
 - 失败退避:单账号失败按指数退避(基期 = 查询周期,×2 封顶 8 倍),成功即恢复;面板打开触发的自动查询同样受退避约束,手动刷新不受限
 - 历史快照:按序列分档落盘 `history.json`(5 小时滚动 → 10 分钟粒度留 7 天;7 天 / 月 / 余额 → 小时粒度留 30 天),档内去重,超期修剪,硬点数上限兜底
 - 趋势视图:悬浮账号卡片弹出 sparkline(自绘 SVG),短 / 长窗口独立成图,绝对值 / 差值双视角;「详情」对话框可切时间范围(长窗口 / 月 / 余额:近 7 天 / 30 天 / 全部;5 小时短窗口仅近 7 天 / 全部),含区间摘要与明细表
@@ -62,7 +62,7 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 
 ## 架构与依赖
 
-- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings);需要 DSH 提供 `webServer` 服务、`timer` 服务(定期轮询)与 `settings` 服务(轮询间隔持久化)
+- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings);需要 DSH 提供 `webServer` 服务与 `settings` 服务(轮询间隔持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
 - Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18
 - 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/spark.mjs`):无 IO 数据变换,`npm test` 覆盖解析、退避分频、快照留存与 SVG 点位
 

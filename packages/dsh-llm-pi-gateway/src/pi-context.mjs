@@ -1,10 +1,11 @@
 // harness 历史到 pi-ai Context 的转换(移植自 dsh-llm-pi-ai context/replay)。
 // 文本路径与图片路径与官方逐项对表:图片管线复用 dsh-llm 公共导出
-// (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText / offloadedImageText),
+// (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText),
+// offloadedImageText 为 0.1.2 新增导出,经 images.offloadedText 注入以兼容旧宿主,
 // 图片仅 user 角色可表示,读出经 attachments 服务转 base64 块。
 // finish 块产出官方同构 replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
 
-import { contentHasImage, offloadedImageText, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
 import { DEFAULT_IMAGE_MAX_BYTES, DEFAULT_IMAGE_PIXEL_BUDGET } from './config.mjs'
 import { GatewayError } from './errors.mjs'
 
@@ -328,11 +329,11 @@ async function prepareRequestImages(messages, attachments, policy, signal) {
  * 两段 offload——声明字节先验预算,读出后按实际字节精确重排;图片转 base64 块;
  * 被预算裁掉的图片替换为占位文本,恢复路径经 resolveImageAccess 解析。
  * @param {object} options harness 请求
- * @param {object} images 图片路径参数集:{attachments, resolveImageAccess, maxRequestImageBytes, requestImagePolicy}
+ * @param {object} images 图片路径参数集:{attachments, resolveImageAccess, maxRequestImageBytes, requestImagePolicy, offloadedText(必填,缺失且图片被裁即抛)}
  * @param {(reason: string) => void} [onDegrade] replay 降级回调
  */
 export async function toPiContextWithImages(options, images, onDegrade) {
-  const { attachments, resolveImageAccess, maxRequestImageBytes } = images
+  const { attachments, resolveImageAccess, maxRequestImageBytes, offloadedText } = images
   const requestImagePolicy = images.requestImagePolicy ?? {
     maxPixels: DEFAULT_IMAGE_PIXEL_BUDGET,
     maxBytes: DEFAULT_IMAGE_MAX_BYTES,
@@ -343,7 +344,7 @@ export async function toPiContextWithImages(options, images, onDegrade) {
     ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
     byteQuantum: 1,
     byteLength: (ref) => Math.min(ref.bytes, requestImagePolicy.maxBytes),
-    placeholder: (ref) => offloadedImageText(ref, resolveImageAccess(ref)),
+    placeholder: (ref) => offloadedText(ref, resolveImageAccess(ref)),
   })
   const requestImages = await prepareRequestImages(requestMessages, attachments, requestImagePolicy, options.signal)
   const exactMessages = offloadRequestImagesWithPolicy(requestMessages, {
@@ -351,7 +352,7 @@ export async function toPiContextWithImages(options, images, onDegrade) {
     ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
     byteQuantum: 1,
     byteLength: (ref) => requestImages.get(ref.attachmentId).bytes,
-    placeholder: (ref) => offloadedImageText(ref, resolveImageAccess(ref)),
+    placeholder: (ref) => offloadedText(ref, resolveImageAccess(ref)),
   })
   const toolNames = new Map()
   const messages = []

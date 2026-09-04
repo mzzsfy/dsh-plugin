@@ -225,7 +225,8 @@ async function queryAccount(config, account) {
 }
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
-export const inject = ['webServer', 'timer']
+// timer 为软依赖:不进 inject 声明,服务缺失时仅停用自动轮询,面板手动查询不受影响
+export const inject = ['webServer']
 
 export function apply(ctx) {
   let config = null
@@ -423,7 +424,7 @@ export function apply(ctx) {
         handler: async (req, res) => {
           try {
             if (req.method === 'GET') {
-              sendJson(res, 200, { pollIntervalSec: readPollIntervalSec() })
+              sendJson(res, 200, { pollIntervalSec: readPollIntervalSec(), pollArmed })
               return
             }
             if (req.method !== 'POST') {
@@ -445,35 +446,46 @@ export function apply(ctx) {
   )
 
   // 定期轮询:固定短 tick,串行查询到期账号;退避期间跳过且不消耗分频轮次。
-  let pollRunning = false
-  ctx.interval(() => {
-    if (pollRunning) return
-    const current = config
-    if (!current) return
-    const intervalSec = readPollIntervalSec()
-    const nowSec = Math.floor(Date.now() / 1000)
-    const divisor = longWindowDivisor(intervalSec)
-    const due = current.accounts.filter((account) => {
-      const state = pollEntry(account.id, intervalSec)
-      if (state.backoff.isBlocked(nowSec)) return false
-      return shouldQueryThisRound({ round: state.round + 1, hasShortWindow: hasShortWindow(account), divisor })
-    })
-    if (due.length === 0) return
-    pollRunning = true
-    ensureHistory()
-      .then(async () => {
-        for (const account of due) {
-          pollEntry(account.id, intervalSec).round += 1
-          // 单账号失败不中止本轮其余账号(broken 等持久态下尤为关键)
-          await runQuery(account).catch(() => {})
-        }
-        await persistConfig()
+  // timer 软依赖经嵌套 inject 等待:服务激活才武装轮询,缺失则自动轮询停用,
+  // 面板手动查询不受影响,也不因等待服务而阻塞插件装载。
+  // pollArmed(武装,外露)与 pollInFlight(单轮在途互斥)分离:在途是瞬态,
+  // 误作可用性暴露会让健康环境常驻误报降级。dispose 显式挂回插件 fiber,
+  // timer 服务重启导致嵌套 fiber 重跑时不产生双 interval
+  let pollInFlight = false
+  let pollArmed = false
+  ctx.inject(['timer'], (timerCtx) => {
+    if (typeof timerCtx.interval !== 'function') return
+    const dispose = timerCtx.interval(() => {
+      if (pollInFlight) return
+      const current = config
+      if (!current) return
+      const intervalSec = readPollIntervalSec()
+      const nowSec = Math.floor(Date.now() / 1000)
+      const divisor = longWindowDivisor(intervalSec)
+      const due = current.accounts.filter((account) => {
+        const state = pollEntry(account.id, intervalSec)
+        if (state.backoff.isBlocked(nowSec)) return false
+        return shouldQueryThisRound({ round: state.round + 1, hasShortWindow: hasShortWindow(account), divisor })
       })
-      .catch(() => {})
-      .then(() => {
-        pollRunning = false
-      })
-  }, TICK_SEC * 1000)
+      if (due.length === 0) return
+      pollInFlight = true
+      ensureHistory()
+        .then(async () => {
+          for (const account of due) {
+            pollEntry(account.id, intervalSec).round += 1
+            // 单账号失败不中止本轮其余账号(broken 等持久态下尤为关键)
+            await runQuery(account).catch(() => {})
+          }
+          await persistConfig()
+        })
+        .catch(() => {})
+        .then(() => {
+          pollInFlight = false
+        })
+    }, TICK_SEC * 1000)
+    ctx.effect(() => dispose, 'usage-panel poll interval')
+    pollArmed = true
+  })
 
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA)

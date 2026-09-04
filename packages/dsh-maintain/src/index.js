@@ -18,7 +18,9 @@ import { runUpgrade } from './upgrade.mjs'
 
 export const name = 'dsh-maintain'
 
-export const inject = ['webServer', 'timer']
+// timer 为软依赖:不进 inject 声明,服务缺失时仅停用自动轮询(状态接口提示),
+// 插件其余能力(状态面板 / 手动检查 / 升级)不受影响,也不因等待服务而阻塞装载
+export const inject = ['webServer']
 
 const NAMESPACE = 'maintain'
 
@@ -165,11 +167,19 @@ export function apply(ctx) {
     nextDueAt = intervalSec > 0 ? Date.now() + intervalSec * 1000 : null
   }
 
-  // 固定短 tick + 到期判断:间隔设置变更即时生效;ctx.interval 绑定 fiber,停用自动清理
-  ctx.interval(() => {
-    if (checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
-    runCheck().then(scheduleNext, scheduleNext)
-  }, TICK_MS)
+  // 固定短 tick + 到期判断:间隔设置变更即时生效。timer 软依赖经嵌套 inject 等待:
+  // 服务激活才武装轮询,缺失则回调不执行,面板以 pollRunning 提示降级。
+  // dispose 显式挂回插件 fiber:timer 服务重启导致嵌套 fiber 重跑时不产生双 interval
+  let pollRunning = false
+  ctx.inject(['timer'], (timerCtx) => {
+    if (typeof timerCtx.interval !== 'function') return
+    const dispose = timerCtx.interval(() => {
+      if (checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
+      runCheck().then(scheduleNext, scheduleNext)
+    }, TICK_MS)
+    ctx.effect(() => dispose, 'dsh-maintain poll interval')
+    pollRunning = true
+  })
 
   function currentStatus() {
     const config = readSettings(ctx)
@@ -177,6 +187,7 @@ export function apply(ctx) {
     return {
       packageName: TARGET_PACKAGE,
       pid: process.pid,
+      pollRunning,
       currentVersion: snapshot.currentVersion,
       channel: config.channel,
       upgradeTemplate: config.upgradeCommandTemplate,
