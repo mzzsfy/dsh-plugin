@@ -93,15 +93,26 @@ function defineScenarios(prefix, L) {
   test(prefix + 'label 变化时重贴(语言切换)', () => {
     const cell = makeCell('General', { marked: true, ours: true })
     assert.equal(decide(cell), null, 'General 已按 General 替换')
-    // 现役 svg 已是本插件产物但记账 label 与显示文本不符:允许换图(语言切换场景)
+    // 现役 svg 已是本插件产物但记账 label 与显示文本不符:按新 label 重贴(语言切换场景)
     cell.dataset.navic = '通用设置'
     const d = decide(cell)
-    assert.ok(d === null || d.label === 'General', 'label 与记账不符时只允许换成本分区的图')
+    assert.ok(d, 'label 与记账不符时必须按新 label 重贴')
+    assert.equal(d.label, 'General')
+    assert.equal(d.html, ICONS['General'])
   })
 
-  test(prefix + '无 svg 或 svg 已是本插件产物返回 null', () => {
+  test(prefix + '语言切换后新 label 无映射且非齿轮:保留现役图标', () => {
+    // 记账为中文 label,现役 svg 是插件所贴(非官方齿轮),新 label 无声明/内置映射,不干预
+    const cell = makeCell('某无规则分区', { marked: true, ours: true, gear: false })
+    cell.dataset.navic = '认证'
+    assert.equal(decide(cell), null, '无映射时不重贴,保留现役语义图形')
+  })
+
+  test(prefix + '无 svg 返回 null;ours 无记账按当前 label 重贴(声明变更场景)', () => {
     assert.equal(decide(makeCell('MCP 服务', { noSvg: true })), null)
-    assert.equal(decide(makeCell('MCP 服务', { ours: true })), null)
+    const d = decide(makeCell('MCP 服务', { ours: true }))
+    assert.ok(d, '记账被清(声明变更强制重贴)后应按当前 label 重贴')
+    assert.equal(d.label, 'MCP 服务')
   })
 
   test(prefix + 'applyDecision 注入新 svg、移除旧 svg、记账 label', () => {
