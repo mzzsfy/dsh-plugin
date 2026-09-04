@@ -13,32 +13,31 @@ const draft = {
 
 const nsValue = (models) => ({ providers: { 'new-api': { models } } })
 
-// mock settings RPC:describe 返回 {ok, value},mutate 可注入失败序列。
+// mock settings 面:适配层已解包,describe 返回描述值,mutate 直接返回 namespace view 或抛错。
 function mockSettings({ revisions, failFirst, latestModels }) {
   let describeCount = 0
   let mutateCount = 0
   const calls = { describe: 0, mutate: 0, revisions: [], values: [] }
+  const describe = async () => {
+    calls.describe += 1
+    const revision = revisions[Math.min(describeCount, revisions.length - 1)]
+    describeCount += 1
+    return { writable: true, namespaces: [{ ns: 'llm-pi-ai', revision, value: nsValue(latestModels) }] }
+  }
+  const baseMutate = async (_ns, ops, expectedRevision) => {
+    calls.mutate += 1
+    calls.revisions.push(expectedRevision)
+    calls.values.push(ops[0].value)
+    if (mutateCount === 0 && failFirst) {
+      mutateCount += 1
+      return { ns: 'llm-pi-ai', revision: 0 }
+    }
+    return { ns: 'llm-pi-ai', revision: expectedRevision + 1 }
+  }
   return {
     calls,
-    async describe() {
-      calls.describe += 1
-      const revision = revisions[Math.min(describeCount, revisions.length - 1)]
-      describeCount += 1
-      return {
-        ok: true,
-        value: { writable: true, namespaces: [{ ns: 'llm-pi-ai', revision, value: nsValue(latestModels) }] },
-      }
-    },
-    async mutate(_ns, ops, expectedRevision) {
-      calls.mutate += 1
-      calls.revisions.push(expectedRevision)
-      calls.values.push(ops[0].value)
-      if (mutateCount === 0 && failFirst) {
-        mutateCount += 1
-        return { ok: false, error: { code: CONFLICT_CODE, message: 'stale' } }
-      }
-      return { ok: true, value: {} }
-    },
+    describe,
+    mutate: baseMutate,
   }
 }
 
@@ -57,7 +56,22 @@ test('冲突一次:重读新 revision,重放仅含本次修改的字段', async 
     { id: 'auto', maxTokens: 4096 },
     { id: 'plain', name: 'renamed-by-other' },
   ]
-  const settings = mockSettings({ revisions: [1, 2], failFirst: true, latestModels })
+  const settings = mockSettings({ revisions: [1, 2], failFirst: false, latestModels })
+  // 冲突注入:首次 mutate 抛 conflict,重放成功;注入层自行计数,与旧 mock 的 baseMutate 计数对齐
+  let conflictThrown = false
+  const realMutate = settings.mutate
+  settings.mutate = async (...args) => {
+    if (!conflictThrown) {
+      conflictThrown = true
+      settings.calls.mutate += 1
+      settings.calls.revisions.push(args[2])
+      settings.calls.values.push(args[1][0].value)
+      const error = new Error('stale')
+      error.code = CONFLICT_CODE
+      throw error
+    }
+    return realMutate(...args)
+  }
   const result = await saveModels(settings, 'new-api', new Map([['auto', draft]]))
   assert.equal(settings.calls.describe, 2)
   assert.equal(settings.calls.mutate, 2)
@@ -78,11 +92,13 @@ test('孤儿草稿:目标模型在保存前被他方删除,mutate 成功但 drop
 })
 
 test('重放后再冲突:报错终止,不改写文档', async () => {
-  const settings = mockSettings({ revisions: [1], failFirst: true, latestModels: [{ id: 'auto' }] })
+  const settings = mockSettings({ revisions: [1], failFirst: false, latestModels: [{ id: 'auto' }] })
   // mutate 恒冲突
   settings.mutate = async () => {
     settings.calls.mutate += 1
-    return { ok: false, error: { code: CONFLICT_CODE, message: 'stale' } }
+    const error = new Error('stale')
+    error.code = CONFLICT_CODE
+    throw error
   }
   await assert.rejects(
     () => saveModels(settings, 'new-api', new Map([['auto', draft]])),
@@ -94,8 +110,8 @@ test('重放后再冲突:报错终止,不改写文档', async () => {
 test('writable=false:只读报错,不发起 mutate', async () => {
   const settings = mockSettings({ revisions: [1], failFirst: false, latestModels: [] })
   settings.describe = async () => ({
-    ok: true,
-    value: { writable: false, namespaces: [{ ns: 'llm-pi-ai', revision: 1, value: nsValue([]) }] },
+    writable: false,
+    namespaces: [{ ns: 'llm-pi-ai', revision: 1, value: nsValue([]) }],
   })
   await assert.rejects(() => saveModels(settings, 'new-api', new Map()), /只读/)
   assert.equal(settings.calls.mutate, 0)
@@ -105,7 +121,9 @@ test('非冲突错误直接上抛,不重试', async () => {
   const settings = mockSettings({ revisions: [1], failFirst: false, latestModels: [] })
   settings.mutate = async () => {
     settings.calls.mutate += 1
-    return { ok: false, error: { code: 'settings-rejected', message: 'bad op' } }
+    const error = new Error('bad op')
+    error.code = 'settings-rejected'
+    throw error
   }
   await assert.rejects(
     () => saveModels(settings, 'new-api', new Map([['auto', draft]])),

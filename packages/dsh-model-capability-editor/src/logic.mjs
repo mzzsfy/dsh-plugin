@@ -168,33 +168,19 @@ function unwrapResult(result) {
   throw error
 }
 
-// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
-export function unwrapWire(response) {
-  const result = response !== null && typeof response === 'object' ? response.result : undefined
-  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+// dsh 0.1.2 remote.settings 服务 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// remote 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+export function makeSettingsFace(remote) {
+  if (remote === null || typeof remote !== 'object' ||
+      typeof remote.describe !== 'function' || typeof remote.mutate !== 'function') return null
   return {
-    ok: false,
-    error: result !== null && typeof result === 'object' && result.error !== undefined
-      ? result.error
-      : { code: undefined, message: 'settings RPC 调用失败' },
-  }
-}
-
-// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
-// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
-export function makeSettingsFace(wire) {
-  if (wire === null || typeof wire !== 'object' ||
-      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
-  return {
-    describe: async () => unwrapWire(await wire.describe({})),
-    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
-      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
-    )),
+    describe: async () => unwrapResult(await remote.describe()),
+    mutate: async (ns, ops, expectedRevision) => unwrapResult(await remote.mutate(ns, ops, expectedRevision)),
   }
 }
 
 async function describeNs(settings) {
-  const value = unwrapResult(await settings.describe())
+  const value = await settings.describe()
   const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
   if (ns === undefined) throw new Error('settings 中不存在 ' + NS + ' 命名空间')
   return { writable: value.writable === true, revision: ns.revision, value: ns.value }
@@ -207,9 +193,9 @@ function modelsOf(nsValue, route) {
 }
 
 async function writeModels(settings, route, models, revision) {
-  return unwrapResult(await settings.mutate(NS, [
+  return settings.mutate(NS, [
     { op: 'set', path: ['providers', route, 'models'], value: models },
-  ], revision))
+  ], revision)
 }
 
 // 保存流:冲突重读重放一次,再冲突报错终止,绝不静默覆盖。
