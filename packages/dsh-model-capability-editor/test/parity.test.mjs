@@ -23,7 +23,7 @@ function clientLogic() {
       + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE,'
       + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
-      + ' anchorsBroken, resolveTargetId, unwrapResult, unwrapWire, makeSettingsFace, describeNs, modelsOf,'
+      + ' anchorsBroken, resolveTargetId, unwrapResult, makeSettingsFace, describeNs, modelsOf,'
       + ' writeModels, saveModels, draftsFromModels };',
   )
   return factory()
@@ -171,12 +171,12 @@ test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
 })
 
-// 保存流双副本守卫:client.js 的 unwrapWire/makeSettingsFace/describeNs/modelsOf/
+// 保存流双副本守卫:client.js 的 makeSettingsFace/describeNs/modelsOf/
 // writeModels/saveModels/draftsFromModels 全段与 logic.mjs 必须逐字符一致(单文件
 // 格式无法 require,靠此测试防漂移;client 终点 LOGIC-END,logic 侧到文件尾)。
 test('client.js wire 适配与保存流段与 logic.mjs 同源', () => {
   const sectionOf = (source, label) => {
-    const begin = source.indexOf('// 宿主 wire 信封')
+    const begin = source.indexOf('// dsh 0.1.2 remote.settings')
     assert.ok(begin >= 0, label + ' 缺少守卫段起点')
     // 终点:client 侧守卫段以 LOGIC-END 收束;logic 侧守卫段即文件尾
     const end = source.indexOf('/* LOGIC-END */')

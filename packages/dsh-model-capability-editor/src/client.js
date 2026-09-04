@@ -1,7 +1,7 @@
 // 模型能力编辑 Client 半区:settings.section 独立设置页卡片。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 由 DSH client runtime 的模块表解析。
-// 纯客户端零 host 端:读写经 connection.api.settings 的 describe/mutate wire RPC,
+// 纯客户端零 host 端:读写经 remote.settings 服务的 describe/mutate RPC,
 // 信封由 makeSettingsFace 适配为插件内部 RPC 面。
 // 判定逻辑与 src/logic.mjs 为同一份(单文件自包含格式无法跨文件 require),
 // 修改须两处同步。
@@ -229,33 +229,19 @@ function unwrapResult(result) {
   throw error
 }
 
-// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
-function unwrapWire(response) {
-  const result = response !== null && typeof response === 'object' ? response.result : undefined
-  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+// dsh 0.1.2 remote.settings 服务 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// remote 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+function makeSettingsFace(remote) {
+  if (remote === null || typeof remote !== 'object' ||
+      typeof remote.describe !== 'function' || typeof remote.mutate !== 'function') return null
   return {
-    ok: false,
-    error: result !== null && typeof result === 'object' && result.error !== undefined
-      ? result.error
-      : { code: undefined, message: 'settings RPC 调用失败' },
-  }
-}
-
-// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
-// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
-function makeSettingsFace(wire) {
-  if (wire === null || typeof wire !== 'object' ||
-      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
-  return {
-    describe: async () => unwrapWire(await wire.describe({})),
-    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
-      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
-    )),
+    describe: async () => unwrapResult(await remote.describe()),
+    mutate: async (ns, ops, expectedRevision) => unwrapResult(await remote.mutate(ns, ops, expectedRevision)),
   }
 }
 
 async function describeNs(settings) {
-  const value = unwrapResult(await settings.describe())
+  const value = await settings.describe()
   const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
   if (ns === undefined) throw new Error('settings 中不存在 ' + NS + ' 命名空间')
   return { writable: value.writable === true, revision: ns.revision, value: ns.value }
@@ -268,9 +254,9 @@ function modelsOf(nsValue, route) {
 }
 
 async function writeModels(settings, route, models, revision) {
-  return unwrapResult(await settings.mutate(NS, [
+  return settings.mutate(NS, [
     { op: 'set', path: ['providers', route, 'models'], value: models },
-  ], revision))
+  ], revision)
 }
 
 // 保存流:冲突重读重放一次,再冲突报错终止,绝不静默覆盖。
@@ -392,7 +378,7 @@ function CapabilityCard(props) {
     try {
       const settings = props.settings
       if (!settings || typeof settings.describe !== 'function') {
-        patch({ phase: 'readonly', reason: 'connection.api.settings wire 面缺失,无法读写模型声明' })
+        patch({ phase: 'readonly', reason: 'remote.settings 服务面缺失,无法读写模型声明' })
         return
       }
       const value = unwrapResult(await settings.describe())
@@ -676,11 +662,11 @@ function RowEditor(props) {
 }
 
     return {
-      inject: ['connection'],
+      inject: ['remote', 'remote.settings'],
       apply(ctx) {
-        // connection 为 boot 期即时服务,apply 内即可取 wire 面;面缺失由
+        // remote.settings 为 boot 期即时服务,apply 内即可取 RPC 面;面缺失由
         // CapabilityCard load() 的降级分支呈现只读原因,不在渲染回调抛错。
-        const settings = makeSettingsFace(ctx.connection.api.settings)
+        const settings = makeSettingsFace(ctx.remote.settings)
 
         // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑块
         // 挂进已展开的模型行;官方结构变化导致锚点全失时,在模型页右侧注入
