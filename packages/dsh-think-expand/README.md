@@ -22,7 +22,7 @@ DeepSeek Harness 插件:流式输出思考时自动展开最新一条思考行,�
 
 - Think 行识别:官方 ReasoningRow 根节点字面量属性 `[data-variant="think"]` + `data-state`,折叠头 `[data-disclosure-row]`,滚动容器 `[data-conversation-scroll]`;正文容器按 `thinkBody` 类名子串匹配(CSS Modules 哈希带前缀);识别失败即不干预。
 - 展开/收起模拟点击折叠头(按 `aria-expanded` 判定),与官方组件状态机一致,不直改 DOM 内部状态,不写任何 DOM 属性。
-- 行标识 = 展开时正文哈希,标记载体为模块级 Map,流式追加按已见文本前缀匹配;随页面生命周期存活,不持久化。body 哨兵观察器常驻 document.body 监视容器身份变化(会话切换),非流式期间仅容器子树变更触发扫描。
+- 行标识 = 展开时正文哈希,标记载体为模块级 Map,流式追加按已见文本前缀匹配;client 端插件展开过的行另以元素 WeakSet 记账(会话切换重置),供决策层区分手动展开,不写 DOM 属性;全部标记随页面生命周期存活,不持久化。body 哨兵观察器常驻 document.body 监视容器身份变化(会话切换),非流式期间仅容器子树变更触发扫描。
 - 纯逻辑层(行分类、展开决策、标记存活性)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套 BDD 场景对两份实现做 parity 验证。
 - Host 半区 `src/index.js` 为空壳,profile 行仅用于让 client 模块系统发现本包的 dsh.client 声明。
 
