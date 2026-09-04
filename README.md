@@ -27,6 +27,7 @@ dsh-plugin/
 | @mzzsfy/dsh-llm-pi-gateway | newapi 等 LLM 网关的会话粘性路由,提升网关侧 prompt 缓存命中;装上即零感知接管官方 pi-ai 路由,卸载即还原 | 请求体按协议写入会话标记(anthropic metadata.user_id / openai prompt_cache_key,sha256 派生不暴露内部 id),compat 全控、metadata 模板透传、静态 headers 兜底;bundle patch 以官方 schema 接管路由 | DSH host 端插件(pi-ai 透传 adapter) |
 | @mzzsfy/dsh-model-capability-editor | 模型能力编辑器:可视化编辑各模型的思考档位与图片输入(多模态)声明 | 读取官方 describe 拿当前声明,表单编辑后整组写回 settings.yaml(未编辑条目保留,冲突字段级重放不静默覆盖);官方模型行内直接挂编辑块,锚点破坏时浮动入口兜底 | DSH 纯前端插件(模型页行内注入 + 浮动回退) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,重载页面即恢复官方齿轮 | 观察设置导航 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
+| @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host 并把 web 默认绑定翻转为 0.0.0.0:泛域名等无法枚举的入口免改启动命令,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由(回溯 + 遮蔽注册方法)把 Host 头实时注册进 webRuntime.trustedHosts,闸门每请求实时读数组;容量 maxHosts 默认 100 按注册先后 FIFO 淘汰,行级 config 配置无 GUI;启动横幅与注册/淘汰 console 直出;webRuntime 走服务事件延迟激活,卸载经 disposer 断开注册 | DSH host 端插件(bundle patch 覆盖 + 路由包装) |
 
 ## 安装与更新:缩短 pnpm 宽限期
 
@@ -43,7 +44,7 @@ pnpm config set --global minimumReleaseAge 360
 要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20,dsh-rs-workflow 未声明 engines)。
 
 - 仓库级测试:根目录执行 `node --test tests/engine.test.mjs`(rs-workflow engine.js 编排脚本验收)
-- 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 8 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test,只有下面的冒烟脚本
+- 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 9 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test,只有下面的冒烟脚本
 - @mzzsfy/dsh-rs-workflow 冒烟:`node .\scripts\test-workflow-plugin.mjs`(默认测已安装副本,传入包目录路径可测任意构建;仓库内副本解析不了 peer 依赖,需先安装再测)
 
 ## 开发态链接(dev-link)
