@@ -732,6 +732,69 @@ test('定时服务缺失:周期评估降级,状态接口提示且不影响启动
   }
 })
 
+test('周期评估:到期 tick 恰逢门闩占用时保持到期态,下个 tick 重试而非推后一个周期', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-gate-tick-'))
+  const TICK_MS = 60 * 1000
+  const DAY_MS = 24 * 60 * 60 * 1000
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  try {
+    const readable = { a: true, b: false, c: false }
+    const artifacts = {}
+    const stale = Date.now() - 30 * DAY_MS
+    for (const id of ['a', 'b', 'c']) {
+      const artifact = path.join(dir, id + '.jsonl')
+      await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+      await utimes(artifact, stale / 1000, stale / 1000)
+      artifacts[id] = artifact
+    }
+    const headers = [
+      { id: 'a', cwd: 'C:\\x', createdAt: stale },
+      { id: 'b', cwd: 'C:\\x', createdAt: stale },
+      { id: 'c', cwd: 'C:\\x', createdAt: stale },
+    ]
+    const { activateSettings, eventHandlers, registry } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      sessionPersistence: {
+        locate: (header) => readable[header.id] ? { path: artifacts[header.id] } : { path: path.join(dir, 'gone-' + header.id) },
+      },
+    })
+    activateSettings()
+    // 启动补扫:a 归档(桩回写 archived),b/c 不可读留候选
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['a'])
+    // 挂起归档执行器,再触发一轮评估:门闩被占
+    let releaseArchive
+    const held = new Promise((resolve) => { releaseArchive = resolve })
+    const originalArchive = registry.archiveSession
+    let archiveArrived = false
+    registry.archiveSession = async (id) => {
+      archiveArrived = true
+      await held
+      await originalArchive(id)
+    }
+    readable.b = true
+    eventHandlers['session/created']({ header: headers[1] })
+    await waitFor(() => archiveArrived)
+    assert.deepEqual(registry.archiveCalls, ['a'], '挂起的 b 尚未计入归档调用')
+    // 到期 tick 恰逢门闩占用:被丢弃,不得把周期推后 24h(保持到期态)
+    mock.timers.tick(DAY_MS)
+    // 释放挂起评估并让出事件循环,确保门闩复位(evaluating=false)落定
+    releaseArchive()
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // c 变可读,60s 后的下个 tick 即应重试并归档 c(若周期被推后 24h 此步超时)
+    readable.c = true
+    mock.timers.tick(TICK_MS)
+    await waitFor(() => registry.archiveCalls.includes('c'))
+    assert.deepEqual(registry.archiveCalls, ['a', 'b', 'c'])
+  } finally {
+    mock.timers.reset()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 // 执行器桩替:trash 为进程级唯一 OS 副作用出口,经 executor 注册表注入(README 已知测试缺口的基建扩展)
 async function withTrashStub(stub, run) {
   const original = indexModule.executor.trashPath
