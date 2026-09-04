@@ -78,6 +78,7 @@ const INFO_URL = '/api/session-manager/info'
 const DELETED_URL = '/api/session-manager/deleted'
 const REMOUNT_URL = '/api/session-manager/remount'
 const FORGET_URL = '/api/session-manager/forget'
+const STATUS_URL = '/api/session-manager/status'
 
 // Toast 持续时长,设计文档定值
 const TOAST_HOLD_MS = 4 * 1000
@@ -233,6 +234,7 @@ function SessionManagerApp(props) {
   const [armedId, setArmedId] = useState(null)
   const [confirms, setConfirms] = useState({})
   const [deleted, setDeleted] = useState([])
+  const [periodic, setPeriodic] = useState(null)
 
   function refreshDeleted() {
     api(DELETED_URL)
@@ -244,6 +246,13 @@ function SessionManagerApp(props) {
   }
 
   useEffect(() => { refreshDeleted() }, [])
+
+  // 周期评估状态仅用于降级提示,加载失败按无提示处理
+  useEffect(() => {
+    api(STATUS_URL)
+      .then((payload) => setPeriodic(payload && payload.periodic))
+      .catch(() => {})
+  }, [])
 
   function run(sessionId, action, successText) {
     setBusyId(sessionId)
@@ -294,6 +303,10 @@ function SessionManagerApp(props) {
       rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
     ),
     h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原后重新挂载。'),
+    periodic && periodic.running === false
+      ? h('div', { className: 'sm-head__hint' },
+          '周期评估未运行(' + (periodic.reason || '宿主定时服务不可用') + ');自动归档仍在新会话创建与启动时生效。')
+      : null,
     h('div', { className: 'sm-tray' },
       rows.length === 0
         ? h('div', { className: 'sm-empty' },

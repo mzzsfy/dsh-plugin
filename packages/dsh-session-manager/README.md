@@ -4,7 +4,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 
 ## 功能
 
-- 自动归档:host 半区监听 `session/created`,对该会话所属工作区评估——超过 N 天未活动、非运行中、非空白的会话逐个走官方 `workspace.archiveSession` 通道。幂等:已归档会话不参与评估。阈值 `autoArchiveDays` 默认 7,`0` 关闭,经 settings 命名空间 `session-manager` 注册(schema 拒绝负数与非整数)。
+- 自动归档:host 半区对超期会话走官方 `workspace.archiveSession` 通道,三个触发源共用同一评估与门闩:新会话创建(`session/created`,按该会话所属工作区限定)、settings 就绪后的启动补扫(全量,清掉停机期间积压)、每日周期轮(全量,经宿主 timer 服务固定短 tick + 到期判断)。幂等:已归档会话不参与评估。阈值 `autoArchiveDays` 默认 7,`0` 关闭;周期间隔 `autoArchiveIntervalHours` 默认 24,`0` 关闭周期轮,变更经周期 tick 对账(关闭即时暂停、重启用最迟下个 tick 生效、缩短自下一周期生效)。经 settings 命名空间 `session-manager` 注册(schema 拒绝负数与非整数)。timer 为软依赖:宿主定时服务不可用时仅周期轮停用,面板顶部提示,插件其余能力不受影响。
 - 归档面板:设置页「会话归档」分区,数据为 client 侧 `session.list` 行 ∩ `workspaces.follow` 归档快照的交集,按更新时间倒序;行内支持取消归档与删除。
 - 归档 Toast:host 归档动作经 `workspace.follow` 的 `archived` 增量帧到达 client,集合差分得到新增条数 N,在 `shell.overlay` 槽位显示「有 N 个会话已归档」,持续 4 秒。
 - 删除:仅对已归档会话生效(运行中守卫先于执行,运行中的会话不可删除),两段式确认(展示标题 / 日志体积,产物已缺失时以「产物已丢失」替代体积,悬停可查更新时间)后按 locate → trash → 台账 → detach → 归档清理单序执行。会话产物目录整体移入系统回收站(Windows PowerShell VisualBasic / macOS Finder / Linux gio),可还原,不做直接删除降级。trash 成功即写入已删除台账(独立 storage domain `session_manager`),记录会话 id 与产物原位置。产物已缺失的会话(如本进程内已删除过、或回收站还原前的重试)不要求归档资格:跳过回收与台账,仅解除列表关联,提示「产物已不存在,已完成列表清理」。
@@ -53,7 +53,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 - 已删除台账:独立 storage domain `session_manager`(global 单列表),非 workspace 域、非审计层——存在意义仅为重挂载定位产物原位置。trash 成功即记录(位于 detach 前),台账失败仅降级重挂载便利,不回滚删除;同 id 再次删除替换旧条目。台账不随产物还原自动清除,以「重新挂载」或「移除记录」收尾;清空回收站后的残留条目无恢复价值,应手动移除。
 - 评估的活跃时间:JSONL 后端以产物 mtime 作为最近活跃代理,updatedAt = max(createdAt, mtime);非 JSONL 后端退化为 createdAt。空白判定:live 会话 seq=0,冷会话以 JSONL 产物「仅 header 一行」判定,locate 不可用的后端按非空白处理。
 - 无批量操作、无内容搜索、无会话详情预览。
-- 自动归档评估门闩:评估进行中新触发的 session/created 直接丢弃,不做排队;漏掉的会话由下一次 session/created 评估兜底,极端情况(长期无新会话创建)下积压会话可能延迟归档。产物不可读(mtime 探测失败)的会话视为已删除,不参与归档,防止删除后的会话被重新归档复活。
+- 自动归档评估门闩:评估进行中其他触发源(含周期轮与 session/created)的新触发直接丢弃,不做排队;漏掉的会话由下一次触发兜底,启动补扫与每日周期轮保证了积压会话最迟一个周期内归档。产物不可读(mtime 探测失败)的会话视为已删除,不参与归档,防止删除后的会话被重新归档复活。timer 软依赖:宿主定时服务缺失或调用失败时周期轮停用,设置页显示降级提示(session/created 触发与启动补扫不受影响);timer 服务晚于插件激活时周期轮自动补武装。
 - 归档 Toast 提示以「连续两个 ready 快照」为差分启用条件:基线首装(启动与重连)不提示存量,重连基线携带的离期新增仍会提示。client.js 为单文件自包含格式,守卫逻辑与 core.mjs 各存一份镜像,修改需两处同步(projectRows / archiveToastStep / projectDeletedRows 同规)。
 - 重挂载的并发窗口:attachSession 后、台账清除前进程中断,残留条目重挂载时因官方 attachSession 幂等(已在 sessionIds 中则跳过校验直写)无副作用,再次点按或「移除记录」即可收尾。台账域打开失败时已删除 / 重挂载 / forget 以 400 拒绝;删除路由走 partial 降级(其余步骤照常,提示「已移入回收站,但重挂载记录失败」),不做无台账中断——产物进回收站后中断删除只会造成状态不一致。
 - 测试基建:trash 为进程级唯一 OS 副作用出口,经 `executor.trashPath` 注册表注入,删除全流程(trash 成败 / 台账成败 / 归档清理)已有路由层覆盖。
@@ -64,7 +64,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 npm test
 ```
 
-纯逻辑层(评估状态机 / 删除资格与失败矩阵 / 面板投影 / 归档差分 / 空白判定 / 回收站命令构造)以 `node --test` 覆盖,无外部依赖。路由层测试依赖 peer 包可解析,仓库根未安装依赖时自动 skip,`npm install` 后激活。Windows 真实回收站执行测试仅在本平台执行,其余平台自动 skip。
+纯逻辑层(评估状态机 / 删除资格与失败矩阵 / 面板投影 / 归档差分 / 空白判定 / 回收站命令构造)以 `node --test` 覆盖,无外部依赖。路由层测试依赖 peer 包可解析,仓库根未安装依赖时自动 skip,`npm install` 后激活。Windows 真实回收站执行测试仅在本平台执行,其余平台自动 skip。周期评估测试经 `mock.timers` 接管 `setInterval` 与 `Date`(显式传 `now`:接管后虚拟时钟从 epoch 起算,夹具时间戳会全成「未来」),timer 服务以 makeCtx 桩模拟激活与缺失两种形态。
 
 ## 开发安装(不经 npm 发布直接装仓库副本)
 

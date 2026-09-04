@@ -2,7 +2,7 @@
 // 服务属性访问一律抛 cannot get property ... without inject,与 cordis reflect 行为
 // 一致,防止 inject 声明缺失回归。peer 依赖未安装的仓库环境(禁止 install)下整文件跳过。
 
-import test from 'node:test'
+import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, writeFile, utimes, mkdir, rm } from 'node:fs/promises'
@@ -25,12 +25,17 @@ const MESSAGES = indexModule.MESSAGES
 const LEDGER_FIXTURE_PATH = 'C:\\store\\s1'
 
 function makeRegistry(initialIds) {
-  // 真实注册表契约:archivedSessionIds 是进程内快照的 getter,官方读路径全部经快照
+  // 真实注册表契约:archivedSessionIds 是进程内快照的 getter,官方读路径全部经快照;
+  // archiveSession 归档即入集合(官方幂等判定依据),桩保持同语义
   const registry = {
     state: { initialized: true, workspaceIds: [], archivedSessionIds: initialIds },
     list: () => [],
     archiveCalls: [],
-    archiveSession: async (id) => { registry.archiveCalls.push(String(id)) },
+    archiveSession: async (id) => {
+      const sid = String(id)
+      registry.archiveCalls.push(sid)
+      registry.state.archivedSessionIds = [...registry.state.archivedSessionIds, sid]
+    },
   }
   Object.defineProperty(registry, 'archivedSessionIds', {
     get: () => registry.state.archivedSessionIds,
@@ -98,11 +103,24 @@ function makeCtx({
   ledger,
   openRejected,
   workspaces,
+  settingsValue,
+  timerAvailable,
 }) {
   const routes = []
   const eventHandlers = {}
+  const pendingInjects = []
   const ledgerDomain = ledger === undefined ? makeLedgerDomain([]) : ledger
   const workspaceList = workspaces || []
+  const settingsService = {
+    get: () => settingsValue,
+    register: () => ({ resolved: undefined }),
+  }
+  // timer 服务桩:模拟宿主 timer 激活后的 interval;unref 保证测试进程可自然退出
+  const intervalStub = (fn, ms) => {
+    const timer = setInterval(fn, ms)
+    timer.unref()
+    return () => clearInterval(timer)
+  }
   const services = {
     webServer: { register: (route) => routes.push(route) },
     workspaceRegistry: Object.assign(makeRegistry(archivedIds), { list: () => workspaceList }),
@@ -114,8 +132,8 @@ function makeCtx({
   }
   const base = {
     effect: (fn) => fn(),
-    inject: (_deps, fn) => fn({ settings: { register: () => ({ resolved: undefined }) } }),
-    get: (name) => ({ agents, sessionPersistence }[name]),
+    inject: (_deps, fn) => { pendingInjects.push(fn) },
+    get: (name) => ({ agents, sessionPersistence, settings: settingsService }[name]),
     on: (event, handler) => { eventHandlers[event] = handler },
     logger: undefined,
   }
@@ -136,12 +154,18 @@ function makeCtx({
     domain,
     ledger: ledgerDomain,
     registry: services.workspaceRegistry,
+    // 模拟宿主 settings 与 timer 服务激活:触发 inject 回调(注册 + 启动补扫 + 周期武装)
+    activateSettings: () => {
+      const injected = { settings: settingsService, interval: timerAvailable === false ? undefined : intervalStub }
+      while (pendingInjects.length > 0) pendingInjects.shift()(injected)
+    },
   }
 }
 
 async function waitFor(predicate) {
-  const deadline = Date.now() + 2000
-  while (Date.now() < deadline) {
+  // performance.now 不受 mock.timers 的 Date 接管影响,周期评估测试中仍可真实计时
+  const deadline = performance.now() + 2000
+  while (performance.now() < deadline) {
     if (predicate()) return
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
@@ -206,14 +230,15 @@ test('自动归档评估门闩:评估进行中的新触发被丢弃不排队', s
       sessionPersistence: { locate: (header) => ({ path: alivePath }) },
     })
     eventHandlers['session/created']({ header: { id: 'trigger', cwd } })
-    await waitFor(() => registry.archiveCalls.length > 0)
-    // 同步连发两触发:第一个进门并置门闩,第二个(评估在途)被丢弃
+    // 首轮启动后立即补新候选并连发两触发:首轮候选列表已捕获(s1),门闩正常时
+    // trigger2/3 被丢弃,s2 永不评估;门闩失效则 s2 被归档,断言可见
+    headers.push({ id: 's2', cwd, createdAt: stale })
     eventHandlers['session/created']({ header: { id: 'trigger2', cwd } })
     eventHandlers['session/created']({ header: { id: 'trigger3', cwd } })
-    await waitFor(() => registry.archiveCalls.length >= 2)
-    // 给在途评估留完成窗口后断言:被丢弃的触发不会产生第三轮归档
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    assert.equal(registry.archiveCalls.length, 2)
+    await waitFor(() => registry.archiveCalls.length > 0)
+    // 给在途与迟到轮留完成窗口后断言:仅首轮产出,s2 未被任何一轮归档
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    assert.deepEqual(registry.archiveCalls, ['s1'], '门闩应丢弃在途触发,新候选 s2 不被评估')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -504,6 +529,207 @@ test('自动归档评估:产物不可读的会话不参与归档(防删除后复
   await waitFor(() => registry.archiveCalls.length > 0)
   // s2 产物缺失必须被守卫跳过:否则已删除会话会被重新归档而在面板复活
   assert.deepEqual(registry.archiveCalls, ['s1'])
+})
+
+test('启动评估:settings 就绪后全量归档超期会话,不限于单工作区', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-startup-'))
+  try {
+    const artifactA = path.join(dir, 'a.jsonl')
+    const artifactB = path.join(dir, 'b.jsonl')
+    await writeFile(artifactA, '{"header":1}\n{"event":0}\n')
+    await writeFile(artifactB, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(artifactA, stale / 1000, stale / 1000)
+    await utimes(artifactB, stale / 1000, stale / 1000)
+    const headers = [
+      { id: 'a', cwd: 'C:\\x', createdAt: stale },
+      { id: 'b', cwd: 'C:\\y', createdAt: stale },
+    ]
+    const { activateSettings, registry, handlers } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      sessionPersistence: {
+        locate: (header) => ({ path: header.id === 'a' ? artifactA : artifactB }),
+      },
+    })
+    activateSettings()
+    await waitFor(() => registry.archiveCalls.length >= 2)
+    assert.deepEqual([...registry.archiveCalls].sort(), ['a', 'b'])
+    const status = response()
+    await handlers.get('/api/session-manager/status')(request('x', 'GET'), status)
+    assert.equal(status.status, 200)
+    assert.equal(status.body.periodic.running, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('启动评估:autoArchiveDays=0 时不评估', skipMissingDeps, async () => {
+  const { activateSettings, registry } = makeCtx({
+    archivedIds: [],
+    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+    agents: new Map(),
+    settingsValue: { autoArchiveDays: 0 },
+  })
+  activateSettings()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.deepEqual(registry.archiveCalls, [])
+})
+
+test('周期评估:每日定时补扫首轮不可评估的会话', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-period-'))
+  // 夹具 mtime 用真实时钟落盘,之后接管 Date 与 setInterval:到期判断(nextDueAt)
+  // 与定时器触发共用同一虚拟时钟,tick 推进 24h 即触发周期轮
+  const artifactA = path.join(dir, 'a.jsonl')
+  const artifactB = path.join(dir, 'b.jsonl')
+  await writeFile(artifactA, '{"header":1}\n{"event":0}\n')
+  await writeFile(artifactB, '{"header":1}\n{"event":0}\n')
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const realNow = Date.now()
+  const stale = realNow - 30 * DAY_MS
+  await utimes(artifactA, stale / 1000, stale / 1000)
+  await utimes(artifactB, stale / 1000, stale / 1000)
+  // 显式传 now:mock.timers 接管 Date 后从 epoch 0 起算,不传则夹具时间戳全成「未来」
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: realNow })
+  try {
+    // 首轮 b 产物不可读(守卫跳过),周期轮起可读:b 只能经周期评估归档
+    let bReadable = false
+    const { activateSettings, registry } = makeCtx({
+      archivedIds: [],
+      headers: [
+        { id: 'a', cwd: 'C:\\x', createdAt: stale },
+        { id: 'b', cwd: 'C:\\x', createdAt: stale },
+      ],
+      agents: new Map(),
+      sessionPersistence: {
+        locate: (header) => (header.id === 'b' && !bReadable)
+          ? { path: path.join(dir, 'gone.jsonl') }
+          : { path: header.id === 'a' ? artifactA : artifactB },
+      },
+    })
+    activateSettings()
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['a'])
+    bReadable = true
+    mock.timers.tick(DAY_MS)
+    await waitFor(() => registry.archiveCalls.includes('b'))
+    // 桩回写 archivedSessionIds(真实注册表契约):已归档 a 不被周期轮重复选中
+    assert.deepEqual(registry.archiveCalls, ['a', 'b'])
+  } finally {
+    mock.timers.reset()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('周期评估:autoArchiveDays=0 时不评估', skipMissingDeps, async () => {
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  try {
+    const { activateSettings, registry } = makeCtx({
+      archivedIds: [],
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      settingsValue: { autoArchiveDays: 0 },
+    })
+    activateSettings()
+    mock.timers.tick(24 * 60 * 60 * 1000)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(registry.archiveCalls, [])
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('周期评估:间隔设置运行时变更经 tick 对账(0 重启用 / 关闭即时暂停)', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-rearm-'))
+  // settings 桩返回同一对象引用:测试中改字段即模拟用户运行时改设置
+  const settingsValue = { autoArchiveIntervalHours: 0 }
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  try {
+    const artifacts = {}
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const TICK_MS = 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    const readable = { s1: true, s2: false, s3: false }
+    for (const id of ['s1', 's2', 's3']) {
+      const artifact = path.join(dir, id + '.jsonl')
+      await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+      await utimes(artifact, stale / 1000, stale / 1000)
+      artifacts[id] = artifact
+    }
+    const headers = [
+      { id: 's1', cwd: 'C:\\x', createdAt: stale },
+      { id: 's2', cwd: 'C:\\x', createdAt: stale },
+      { id: 's3', cwd: 'C:\\x', createdAt: stale },
+    ]
+    const { activateSettings, registry } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      settingsValue,
+      sessionPersistence: {
+        locate: (header) => ({ path: readable[header.id] ? artifacts[header.id] : path.join(dir, 'gone-' + header.id) }),
+      },
+    })
+    activateSettings()
+    // 启动补扫只看 autoArchiveDays(默认 7),intervalHours=0 不影响首轮
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['s1'])
+    // intervalHours=0 期间周期轮保持关闭:到期也不评估
+    readable.s2 = true
+    mock.timers.tick(DAY_MS)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(registry.archiveCalls, ['s1'], '关闭状态下到期不得评估')
+    // 0 重启用:缺失 due 经 tick 对账补排,最迟下个 tick 恢复周期轮
+    settingsValue.autoArchiveIntervalHours = 24
+    mock.timers.tick(TICK_MS)
+    await waitFor(() => registry.archiveCalls.includes('s2'))
+    assert.deepEqual(registry.archiveCalls, ['s1', 's2'])
+    // 再次关闭:即时暂停,s3 不被评估
+    readable.s3 = true
+    settingsValue.autoArchiveIntervalHours = 0
+    mock.timers.tick(DAY_MS)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(registry.archiveCalls, ['s1', 's2'], '再次关闭后到期不得评估')
+    // 第三次重启用:对账恢复,归档 s3
+    settingsValue.autoArchiveIntervalHours = 24
+    mock.timers.tick(TICK_MS)
+    await waitFor(() => registry.archiveCalls.includes('s3'))
+    assert.deepEqual(registry.archiveCalls, ['s1', 's2', 's3'])
+  } finally {
+    mock.timers.reset()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('定时服务缺失:周期评估降级,状态接口提示且不影响启动补扫', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-degrade-'))
+  try {
+    const artifact = path.join(dir, 'a.jsonl')
+    await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(artifact, stale / 1000, stale / 1000)
+    const { activateSettings, handlers, registry } = makeCtx({
+      archivedIds: [],
+      headers: [{ id: 'a', cwd: 'C:\\x', createdAt: stale }],
+      agents: new Map(),
+      sessionPersistence: { locate: () => ({ path: artifact }) },
+      timerAvailable: false,
+    })
+    activateSettings()
+    // 启动补扫照常工作:软依赖缺失只影响周期轮
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['a'])
+    const status = response()
+    await handlers.get('/api/session-manager/status')(request('x', 'GET'), status)
+    assert.equal(status.status, 200)
+    assert.equal(status.body.periodic.running, false)
+    assert.notEqual(status.body.periodic.reason, '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 // 执行器桩替:trash 为进程级唯一 OS 副作用出口,经 executor 注册表注入(README 已知测试缺口的基建扩展)

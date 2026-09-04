@@ -16,6 +16,7 @@ import { defineDomain } from '@deepseek-ai/dsh-storage-domain'
 import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
+  DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
   DELETE_CODES,
   artifactLooksBlank,
   deleteEligibility,
@@ -57,6 +58,9 @@ const BLANK_PROBE_CHUNK_BYTES = 64 * 1024
 const LEDGER_MAX_ENTRIES = 200
 // 自动归档评估整体超时:宿主服务挂起时不因门闩未复位而永久停摆
 const EVALUATION_TIMEOUT_MS = 30 * 1000
+const HOUR_MS = 60 * 60 * 1000
+// 周期评估固定短 tick:tick 内做到期判断,间隔设置变更自下一周期生效
+const PERIODIC_TICK_MS = 60 * 1000
 
 // 路由响应文案;导出供测试断言与实现同步
 export const MESSAGES = {
@@ -85,7 +89,9 @@ export const executor = { trashPath }
 
 const SETTINGS_SCHEMA = schemastery.object({
   autoArchiveDays: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_DAYS)
-    .description('自动归档阈值天数,0 表示关闭;新会话创建时评估'),
+    .description('自动归档阈值天数,0 表示关闭;新会话创建、启动与周期评估时生效'),
+  autoArchiveIntervalHours: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS)
+    .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
 })
 
 function sendJson(res, status, payload) {
@@ -108,7 +114,11 @@ function readSettings(ctx) {
   const settings = ctx.get('settings')
   const value = settings ? settings.get(NAMESPACE) : undefined
   const days = Number(value && value.autoArchiveDays)
-  return Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS
+  const hours = Number(value && value.autoArchiveIntervalHours)
+  return {
+    days: Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS,
+    intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
+  }
 }
 
 function readBody(req) {
@@ -179,17 +189,20 @@ export function apply(ctx, config) {
     void ledgerReady.then((domain) => domain.close()).catch(() => {})
   }, 'session-manager ledger domain')
 
-  // 自动归档评估:session/created 触发,按创建会话的工作区限定候选集。
-  // 两级筛选:先用 createdAt 纯内存预筛(mtime 只会增大 updatedAt,createdAt 未超期
-  // 必不超期),仅对预筛存活者做产物 stat/blank 探测,活跃会话零 IO
-  ctx.on('session/created', (session) => {
-    const days = readSettings(ctx)
+  // 周期评估状态:running 供设置页降级提示;timer 为软依赖,服务缺失不阻塞插件装载
+  const periodic = { running: false, reason: '' }
+
+  // 自动归档评估:筛出待归档会话并逐个走官方 archiveSession。cwd 缺省时全量评估
+  // (启动补扫 / 周期轮),传入 cwd 时仅评估该工作区(新建会话触发)。
+  // 门闩与超时守卫对全部触发源生效。两级筛选:先用 createdAt 纯内存预筛(mtime 只会
+  // 增大 updatedAt,createdAt 未超期必不超期),仅对预筛存活者做产物 stat/blank 探测,
+  // 活跃会话零 IO
+  function evaluateArchives(cwd) {
+    const { days } = readSettings(ctx)
     if (days === 0 || evaluating) return
     evaluating = true
     let timeoutGuard
     const work = (async () => {
-      const cwd = session.header && session.header.cwd
-      if (cwd === undefined) return
       const registry = ctx.workspaceRegistry
       const archived = new Set(registry.archivedSessionIds.map(String))
       const sessionsService = ctx.get('sessions')
@@ -201,7 +214,7 @@ export function apply(ctx, config) {
       const candidates = []
       for (const recordItem of records) {
         const header = recordItem.header
-        if (header.cwd !== cwd) continue
+        if (cwd !== undefined && header.cwd !== cwd) continue
         // 预筛:createdAt 未超期必不超期(见上),跳过产物 IO
         if (header.createdAt >= cutoff) continue
         const live = sessionsService && sessionsService.get(header.id)
@@ -240,6 +253,12 @@ export function apply(ctx, config) {
       evaluating = false
       void work.catch(() => {})
     })
+  }
+
+  ctx.on('session/created', (session) => {
+    const cwd = session.header && session.header.cwd
+    if (cwd === undefined) return
+    evaluateArchives(cwd)
   })
 
   // 取消归档:直写 workspace 域 global,无官方 API 可用。注册表把域 global 快照到
@@ -483,6 +502,13 @@ export function apply(ctx, config) {
       },
     },
     {
+      path: '/api/session-manager/status',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'GET')) return
+        sendJson(res, 200, { periodic: { ...periodic } })
+      },
+    },
+    {
       path: '/api/session-manager/deleted',
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'GET')) return
@@ -547,6 +573,40 @@ export function apply(ctx, config) {
 
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
+    // 启动补扫不依赖定时服务:settings 就绪即评估一轮,清掉停机期间积压的超期会话
+    evaluateArchives()
+    // 周期评估软依赖 timer:服务未激活则回调不执行,插件其余能力不受影响,设置页提示降级
+    ctx.inject(['timer'], (timerCtx) => {
+      if (typeof timerCtx.interval !== 'function') {
+        periodic.reason = '宿主定时服务不可用'
+        return
+      }
+      // 固定短 tick + 到期判断:间隔设置变更自下一周期生效
+      let nextDueAt = null
+      const scheduleNext = () => {
+        const { intervalHours } = readSettings(ctx)
+        nextDueAt = intervalHours > 0 ? Date.now() + intervalHours * HOUR_MS : null
+      }
+      try {
+        const dispose = timerCtx.interval(() => {
+          const { intervalHours } = readSettings(ctx)
+          // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡
+          if (intervalHours === 0) {
+            nextDueAt = null
+            return
+          }
+          if (nextDueAt === null || Date.now() >= nextDueAt) {
+            evaluateArchives()
+            scheduleNext()
+          }
+        }, PERIODIC_TICK_MS)
+        ctx.effect(() => dispose, 'session-manager auto archive interval')
+        scheduleNext()
+        periodic.running = true
+      } catch (error) {
+        periodic.reason = '宿主定时服务调用失败: ' + String(error && error.message || error)
+      }
+    })
   })
 }
 

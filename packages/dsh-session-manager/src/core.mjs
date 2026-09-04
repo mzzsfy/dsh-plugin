@@ -3,6 +3,7 @@
 
 export const DAY_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_AUTO_ARCHIVE_DAYS = 7
+export const DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS = 24
 
 export const DELETE_CODES = {
   UNSUPPORTED: 'unsupported',
