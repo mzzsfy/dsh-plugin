@@ -24,7 +24,8 @@ function clientLogic() {
   return factory()
 }
 
-const row = (state, bodyText, expanded = false, headable = true) => ({ headable, state, bodyText, expanded })
+const row = (state, bodyText, expanded = false, headable = true, plugged = false) =>
+  ({ headable, state, bodyText, expanded, plugged })
 const RUNNING = 'running'
 const OK = 'ok'
 
@@ -54,12 +55,12 @@ function defineScenarios(prefix, L) {
     assert.equal(expandOf(first, 0), 1)
     assert.equal(reg.current, null)
     assert.equal(reg.marks.size, 0)
-    const second = plan(reg, [row(RUNNING, '正文', true)])
+    const second = plan(reg, [row(RUNNING, '正文', true, true, true)])
     assert.equal(second.actions.length, 0)
     assert.equal(reg.current.hash, hashText('正文'))
-    const done = plan(reg, [row(OK, '正文', true)])
+    const done = plan(reg, [row(OK, '正文', true, true, true)])
     assert.equal(done.actions.length, 0)
-    const next = plan(reg, [row(OK, '正文', true), row(RUNNING, '下一条')])
+    const next = plan(reg, [row(OK, '正文', true, true, true), row(RUNNING, '下一条')])
     assert.equal(collapseOf(next, 0), 1)
     assert.equal(expandOf(next, 1), 1)
   })
@@ -67,7 +68,7 @@ function defineScenarios(prefix, L) {
   test(prefix + '空正文行不误判手动与已读', () => {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, '')])
-    const result = plan(reg, [row(RUNNING, '')])
+    const result = plan(reg, [row(RUNNING, '', true, true, true)])
     assert.equal(reg.manual.size, 0)
     assert.equal(reg.read.size, 0)
   })
@@ -75,7 +76,7 @@ function defineScenarios(prefix, L) {
   test(prefix + '新思考出现收起上一条', () => {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, 'A')])
-    const result = plan(reg, [row(OK, 'A', true), row(RUNNING, 'B')])
+    const result = plan(reg, [row(OK, 'A', true, true, true), row(RUNNING, 'B')])
     assert.equal(collapseOf(result, 0), 1)
     assert.equal(expandOf(result, 1), 1)
   })
@@ -83,7 +84,7 @@ function defineScenarios(prefix, L) {
   test(prefix + '流式追加不重复展开同一行', () => {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, 'A')])
-    const result = plan(reg, [row(RUNNING, 'A 追加了正文', true)])
+    const result = plan(reg, [row(RUNNING, 'A 追加了正文', true, true, true)])
     assert.equal(result.actions.length, 0)
     // 标记保留展开时的已见文本,后续快照按前缀匹配识别为同一行
     assert.ok(reg.current.seen.length > 0 && 'A 追加了正文'.startsWith(reg.current.seen))
@@ -108,18 +109,18 @@ function defineScenarios(prefix, L) {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, 'A')])
     // 手动收起当前行(流式仍在追加,前缀匹配命中已读标记)
-    plan(reg, [row(RUNNING, 'A 收起前正文')])
-    const again = plan(reg, [row(RUNNING, 'A 收起前正文 继续追加')])
+    plan(reg, [row(RUNNING, 'A 收起前正文', false, true, true)])
+    const again = plan(reg, [row(RUNNING, 'A 收起前正文 继续追加', false, true, true)])
     assert.equal(again.actions.length, 0)
     // 下一条新思考行出现即恢复自动展开
-    const next = plan(reg, [row(OK, 'A 收起前正文 继续追加'), row(RUNNING, 'B')])
+    const next = plan(reg, [row(OK, 'A 收起前正文 继续追加', false, true, true), row(RUNNING, 'B')])
     assert.equal(expandOf(next, 1), 1)
   })
 
   test(prefix + '流式结束保留展开', () => {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, 'A')])
-    const result = plan(reg, [row(OK, 'A', true)])
+    const result = plan(reg, [row(OK, 'A', true, true, true)])
     assert.equal(result.actions.length, 0)
   })
 
@@ -130,11 +131,11 @@ function defineScenarios(prefix, L) {
   })
 
   test(prefix + '登记行被识别为插件展开,流式接管时收起', () => {
-    // 模拟控制层 planFinal 展开后的登记形态(marks + current)
+    // 模拟控制层 planFinal 展开后的登记形态(marks + current + plugged 标记)
     const reg = createRegistry()
     reg.marks.set(hashText('A'), 'A')
     reg.current = { hash: hashText('A'), seen: 'A' }
-    const result = plan(reg, [row(OK, 'A', true), row(RUNNING, 'B')])
+    const result = plan(reg, [row(OK, 'A', true, true, true), row(RUNNING, 'B')])
     assert.equal(collapseOf(result, 0), 1)
     assert.equal(expandOf(result, 1), 1)
   })
@@ -142,9 +143,34 @@ function defineScenarios(prefix, L) {
   test(prefix + '登记行未登记 current 时不会被误判手动', () => {
     const reg = createRegistry()
     reg.marks.set(hashText('A'), 'A')
-    const result = plan(reg, [row(OK, 'A', true), row(OK, 'B')])
+    const result = plan(reg, [row(OK, 'A', true, true, true), row(OK, 'B')])
     assert.equal(result.actions.filter((a) => a.index === 0).length, 0)
     assert.equal(reg.manual.size, 0)
+  })
+
+  test(prefix + 'running 行用户手动展开被识别,后续不干预', () => {
+    const reg = createRegistry()
+    // 用户在插件处理前手动展开 running 行:已展开、无 plugged 标记、非当前行
+    const result = plan(reg, [row(RUNNING, '流式正文', true)])
+    assert.equal(result.actions.length, 0)
+    assert.equal(reg.manual.size, 1)
+    // 该行转 ok、新行出现后不被收起
+    const next = plan(reg, [row(OK, '流式正文', true), row(RUNNING, 'C')])
+    assert.equal(expandOf(next, 1), 1)
+    assert.equal(collapseOf(next, 0), 0)
+  })
+
+  test(prefix + '插件展开未登记的行不误判手动', () => {
+    const reg = createRegistry()
+    // 插件展开动作已打 plugged 标,正文挂载前 current 尚未登记
+    const result = plan(reg, [row(RUNNING, '正文', true, true, true)])
+    assert.equal(result.actions.length, 0)
+    assert.equal(reg.manual.size, 0)
+    assert.equal(reg.current.hash, hashText('正文'))
+    // 新行出现时照常接管收起
+    const next = plan(reg, [row(OK, '正文', true, true, true), row(RUNNING, 'B')])
+    assert.equal(collapseOf(next, 0), 1)
+    assert.equal(expandOf(next, 1), 1)
   })
 
   test(prefix + '打开会话展开最后一条', () => {

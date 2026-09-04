@@ -75,16 +75,18 @@ export function planFinal(rows) {
   return { actions }
 }
 
-// 行结构:{ headable, state, bodyText, expanded }。headable=false 表示识别失败,永不干预。
+// 行结构:{ headable, state, bodyText, expanded, plugged }。headable=false 表示识别失败,永不干预;
+// plugged 为插件动作的内存标记(控制层执行展开时记入 WeakSet,不写 DOM 属性),用于区分手动展开。
 // 返回 { actions: [{ index, kind: 'expand' | 'collapse' }] },registry 原位更新。
 export function plan(registry, rows) {
   const actions = []
 
-  // 手动行识别:已展开但无插件标记且非当前行 → 手动集合,此后永不干预;
+  // 手动行识别:已展开但无插件动作标记且非当前行 → 手动集合,此后永不干预;
   // 手动意图出现即收起当前插件行(至多一条展开)。
-  // 仅判定 ok 行:running 行的展开/归属由流式路径管理。
+  // running 行同样识别:插件展开带 plugged 标记,无标记的展开即用户手动意图;
+  // 正文未挂载时不识别,空串 seen 会污染全部前缀匹配。
   for (const row of rows) {
-    if (!row.headable || !row.expanded || row.state !== STATE_OK) continue
+    if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
     if (findSeenKey(registry.marks, row.bodyText) !== null) continue
     if (isCurrent(registry, row.bodyText)) continue
     if (findSeenKey(registry.manual, row.bodyText) === null) {

@@ -106,16 +106,18 @@ window.__ModuleLoader__.load({
       return { actions }
     }
 
-    // 行结构:{ headable, state, bodyText, expanded }。headable=false 表示识别失败,永不干预。
+    // 行结构:{ headable, state, bodyText, expanded, plugged }。headable=false 表示识别失败,永不干预;
+    // plugged 为插件动作的内存标记(控制层执行展开时记入 WeakSet,不写 DOM 属性),用于区分手动展开。
     // 返回 { actions: [{ index, kind: 'expand' | 'collapse' }] },registry 原位更新。
     function plan(registry, rows) {
       const actions = []
 
-      // 手动行识别:已展开但无插件标记且非当前行 → 手动集合,此后永不干预;
+      // 手动行识别:已展开但无插件动作标记且非当前行 → 手动集合,此后永不干预;
       // 手动意图出现即收起当前插件行(至多一条展开)。
-      // 仅判定 ok 行:running 行的展开/归属由流式路径管理。
+      // running 行同样识别:插件展开带 plugged 标记,无标记的展开即用户手动意图;
+      // 正文未挂载时不识别,空串 seen 会污染全部前缀匹配。
       for (const row of rows) {
-        if (!row.headable || !row.expanded || row.state !== STATE_OK) continue
+        if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
         if (findSeenKey(registry.marks, row.bodyText) !== null) continue
         if (isCurrent(registry, row.bodyText)) continue
         if (findSeenKey(registry.manual, row.bodyText) === null) {
@@ -179,6 +181,10 @@ window.__ModuleLoader__.load({
     let bodySentinel = null
     let observedContainer = null
     let debounceTimer = null
+    // 插件动作标记:展开过的行元素记入 WeakSet,用于 plan() 区分手动展开;
+    // 只存内存不写 DOM 属性,元素移除自动回收。React 复用元素节点时陈旧标记
+    // 可能压制该位置新行的手动识别,概率极低,为已知局限。
+    let pluginExpandedEls = new WeakSet()
     // 容器就绪/重建后待执行的一次性"展开最后一条";
     // finalExpandedEl/finalPendingRegister 追踪已展开行,落定后登记进 registry
     let pendingFinal = false
@@ -196,6 +202,7 @@ window.__ModuleLoader__.load({
         state,
         bodyText: body !== null ? body.textContent || '' : '',
         expanded: head !== null && head.getAttribute(ATTR_EXPANDED) === 'true',
+        plugged: pluginExpandedEls.has(el),
       }
     }
 
@@ -206,6 +213,7 @@ window.__ModuleLoader__.load({
       const head = row.el.querySelector(SELECTOR_HEAD)
       if (head === null) return null
       if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) {
+        if (action.kind === 'expand') pluginExpandedEls.add(row.el)
         head.click()
         return row.el
       }
@@ -216,8 +224,8 @@ window.__ModuleLoader__.load({
       const container = document.querySelector(SELECTOR_SCROLL)
       if (container === null) return 0
       const described = Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
-      const rows = described.map(({ headable, state, bodyText, expanded }) =>
-        ({ headable, state, bodyText, expanded }))
+      const rows = described.map(({ headable, state, bodyText, expanded, plugged }) =>
+        ({ headable, state, bodyText, expanded, plugged }))
       for (const action of plan(registry, rows).actions) applyAction(described, action)
       return described.length
     }
@@ -246,8 +254,8 @@ window.__ModuleLoader__.load({
       const described = Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
       if (!described.some((row) => row.headable)) return
       pendingFinal = false
-      const rows = described.map(({ headable, state, bodyText, expanded }) =>
-        ({ headable, state, bodyText, expanded }))
+      const rows = described.map(({ headable, state, bodyText, expanded, plugged }) =>
+        ({ headable, state, bodyText, expanded, plugged }))
       for (const action of planFinal(rows).actions) {
         const clicked = applyAction(described, action)
         if (clicked !== null) {
@@ -283,6 +291,7 @@ window.__ModuleLoader__.load({
       containerObserver.observe(container, OBSERVER_OPTIONS)
       observedContainer = container
       registry = createRegistry()
+      pluginExpandedEls = new WeakSet()
       finalExpandedEl = null
       finalPendingRegister = false
       pendingFinal = true
