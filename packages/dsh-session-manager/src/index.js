@@ -1,6 +1,7 @@
 // dsh-session-manager Host 半区:自动归档评估 + 取消归档 + 删除(回收站) + 已删除台账与重挂载。
-// 评估由 session/created 事件触发;取消归档与删除后的归档清理经 workspace 域
-// global 直写 archivedSessionIds 并同步注册表进程内快照(官方无 unarchive 表面,
+// 评估三触发源共用同一门闩:新会话创建(session/created,按工作区限定)、settings 就绪后的
+// 启动补扫(全量)、每日周期轮(全量,经宿主 timer 软依赖);取消归档与删除后的归档清理经
+// workspace 域 global 直写 archivedSessionIds 并同步注册表进程内快照(官方无 unarchive 表面,
 // 域写入经 domain/changed 触发 workspace.follow 的 archived 帧);删除按失败矩阵
 // 执行 locate → trash → detach → 归档清理,台账记录删除产物路径供回收站还原后
 // 一键重挂载(官方 attachSession)。面板数据不在此处:client 侧以 session.list
@@ -196,10 +197,11 @@ export function apply(ctx, config) {
   // (启动补扫 / 周期轮),传入 cwd 时仅评估该工作区(新建会话触发)。
   // 门闩与超时守卫对全部触发源生效。两级筛选:先用 createdAt 纯内存预筛(mtime 只会
   // 增大 updatedAt,createdAt 未超期必不超期),仅对预筛存活者做产物 stat/blank 探测,
-  // 活跃会话零 IO
+  // 活跃会话零 IO。返回是否真正启动:被门闩/关闭挡下的调用方(周期 tick)保持到期态
+  // 由下个 tick 重试,不得据此重排周期
   function evaluateArchives(cwd) {
     const { days } = readSettings(ctx)
-    if (days === 0 || evaluating) return
+    if (days === 0 || evaluating) return false
     evaluating = true
     let timeoutGuard
     const work = (async () => {
@@ -217,6 +219,8 @@ export function apply(ctx, config) {
         if (cwd !== undefined && header.cwd !== cwd) continue
         // 预筛:createdAt 未超期必不超期(见上),跳过产物 IO
         if (header.createdAt >= cutoff) continue
+        // 已归档记录永不是候选,集合随历史增长,提前跳过省产物 IO
+        if (archived.has(String(header.id))) continue
         const live = sessionsService && sessionsService.get(header.id)
         const running = isSessionRunning({ agents, sessionId: header.id })
         const located = persistence && persistence.locate(header)
@@ -224,13 +228,16 @@ export function apply(ctx, config) {
         // 产物不可读视为已删除,不参与归档:否则删除后的会话(重连前仍在持久层
         // 列表中)会因超期被重新归档,面板行复活且无法再删
         if (located && activityAt === null) continue
+        // stat 后即可判活跃度:未超期不必做空白探测
+        const updatedAt = updatedAtOf(header, activityAt)
+        if (updatedAt >= cutoff) continue
         const blank = live ? live.seq === 0 : Boolean(located && await artifactIsBlank(located.path))
         candidates.push({
           id: String(header.id),
-          archived: archived.has(String(header.id)),
+          archived: false,
           running,
           blank,
-          updatedAt: updatedAtOf(header, activityAt),
+          updatedAt,
         })
       }
       for (const id of selectArchiveCandidates({ records: candidates, nowMs, thresholdDays: days })) {
@@ -253,6 +260,7 @@ export function apply(ctx, config) {
       evaluating = false
       void work.catch(() => {})
     })
+    return true
   }
 
   ctx.on('session/created', (session) => {
@@ -571,42 +579,51 @@ export function apply(ctx, config) {
       'dsh-session-manager ' + route.path)
   }
 
+  // 周期评估软依赖 timer:顶层注册(不嵌套在 settings 回调内,settings 服务重启会
+  // 重跑其回调并新建 fiber,嵌套会使周期轮随重启累积复制)。服务未激活则回调不执行,
+  // 插件其余能力不受影响,设置页提示降级
+  ctx.inject(['timer'], (timerCtx) => {
+    if (typeof timerCtx.interval !== 'function') {
+      periodic.reason = '宿主定时服务不可用'
+      return () => {
+        periodic.running = false
+      }
+    }
+    // 固定短 tick + 到期判断:间隔设置变更自下一周期生效
+    let nextDueAt = null
+    const scheduleNext = () => {
+      const { intervalHours } = readSettings(ctx)
+      nextDueAt = intervalHours > 0 ? Date.now() + intervalHours * HOUR_MS : null
+    }
+    try {
+      const dispose = timerCtx.interval(() => {
+        const { intervalHours } = readSettings(ctx)
+        // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡
+        if (intervalHours === 0) {
+          nextDueAt = null
+          return
+        }
+        if (nextDueAt === null || Date.now() >= nextDueAt) {
+          // 门闩占用(他源评估在途)时保持到期态,60s 后下个 tick 重试;
+          // 仅评估真正启动才重排周期,被丢弃的到期轮不会静默失效一个周期
+          if (evaluateArchives()) scheduleNext()
+        }
+      }, PERIODIC_TICK_MS)
+      ctx.effect(() => {
+        dispose
+        periodic.running = false
+      }, 'session-manager auto archive interval')
+      scheduleNext()
+      periodic.running = true
+    } catch (error) {
+      periodic.reason = '宿主定时服务调用失败: ' + String(error && error.message || error)
+    }
+  })
+
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
     // 启动补扫不依赖定时服务:settings 就绪即评估一轮,清掉停机期间积压的超期会话
     evaluateArchives()
-    // 周期评估软依赖 timer:服务未激活则回调不执行,插件其余能力不受影响,设置页提示降级
-    ctx.inject(['timer'], (timerCtx) => {
-      if (typeof timerCtx.interval !== 'function') {
-        periodic.reason = '宿主定时服务不可用'
-        return
-      }
-      // 固定短 tick + 到期判断:间隔设置变更自下一周期生效
-      let nextDueAt = null
-      const scheduleNext = () => {
-        const { intervalHours } = readSettings(ctx)
-        nextDueAt = intervalHours > 0 ? Date.now() + intervalHours * HOUR_MS : null
-      }
-      try {
-        const dispose = timerCtx.interval(() => {
-          const { intervalHours } = readSettings(ctx)
-          // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡
-          if (intervalHours === 0) {
-            nextDueAt = null
-            return
-          }
-          if (nextDueAt === null || Date.now() >= nextDueAt) {
-            evaluateArchives()
-            scheduleNext()
-          }
-        }, PERIODIC_TICK_MS)
-        ctx.effect(() => dispose, 'session-manager auto archive interval')
-        scheduleNext()
-        periodic.running = true
-      } catch (error) {
-        periodic.reason = '宿主定时服务调用失败: ' + String(error && error.message || error)
-      }
-    })
   })
 }
 
