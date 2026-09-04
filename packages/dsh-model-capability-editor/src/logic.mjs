@@ -15,7 +15,8 @@ export const INPUT_TEXT_IMAGE = 'text-image'
 export const COMPETITOR_MARKERS = ['reasoningEffortsUnset', 'inputUnset']
 
 // reasoningEfforts 写回值 → 编辑器勾选/拼写草稿。false 仅勾 off;对象按键勾选,
-// null 拼写为空;未声明无任何勾选。
+// null 拼写为空;未声明无任何勾选。只收词汇表内档位:词汇表外键不在 UI 呈现
+// 也不可编辑,进种子会让"未触及"判定误判为已编辑。
 export function effortsToDrafts(value) {
   const checked = {}
   const spellings = {}
@@ -23,6 +24,7 @@ export function effortsToDrafts(value) {
     checked[OFF_LEVEL] = true
   } else if (value !== null && typeof value === 'object') {
     for (const level of Object.keys(value)) {
+      if (EFFORT_LEVELS.indexOf(level) < 0) continue
       checked[level] = true
       spellings[level] = value[level] === null ? '' : String(value[level])
     }
@@ -73,32 +75,48 @@ export function isExpressibleEfforts(value) {
     || (typeof value === 'object' && !Array.isArray(value))
 }
 
+// 勾选/拼写两表逐键相等(键集合一致且值全等)
+function draftMapsEqual(a, b) {
+  const ak = Object.keys(a || {})
+  const bk = Object.keys(b || {})
+  if (ak.length !== bk.length) return false
+  return ak.every((key) => (a || {})[key] === (b || {})[key])
+}
+
 // 单模型应用草稿:仅写 reasoningEfforts 与 input 两字段,其余字段保留最新条目值。
+// 未触及判定:草稿与当前基线的投影逐键一致即视为用户未编辑该字段,跳过重写,
+// 私有模态(input 含网关私有值)与词汇表外档位在整组保存时真正原样保留。
 // 词汇表外档位透传基线取"写回时点的最新条目值"而非草稿快照,冲突重放路径下
 // 他方并发新增的外档位不丢;基线为不可表达形态(字符串/数组)时跳过该字段防误删。
 export function applyDraft(model, draft) {
   const result = { ...model }
-  if (isExpressibleEfforts(model.reasoningEfforts)) {
+  const seeded = effortsToDrafts(model.reasoningEfforts)
+  const effortsUntouched = draftMapsEqual(seeded.checked, draft.checked) &&
+    draftMapsEqual(seeded.spellings, draft.spellings)
+  if (!effortsUntouched && isExpressibleEfforts(model.reasoningEfforts)) {
     const efforts = draftsToEfforts(draft, model.reasoningEfforts)
     if (efforts === undefined) delete result.reasoningEfforts
     else result.reasoningEfforts = efforts
   }
-  const input = modeToInput(draft.inputMode)
-  if (input === undefined) delete result.input
-  else result.input = input
+  if (draft.inputMode !== inputToMode(model.input)) {
+    const input = modeToInput(draft.inputMode)
+    if (input === undefined) delete result.input
+    else result.input = input
+  }
   return result
 }
 
 // 整组写回:以 describe 读到的模型数组为基线,仅重写有草稿的条目,未编辑条目原样保留。
 // 返回合并结果与未命中基线的草稿 id(他方删除该模型后草稿无处可写),调用方负责告警。
+// 键一律 String 归一:DOM 输入与 UI 状态恒为字符串,基线 id 形态不定。
 export function mergeBaselineModels(baselineModels, draftsById) {
   const droppedDraftIds = []
   const models = baselineModels.map((model) => {
-    const draft = draftsById.get(model.id)
+    const draft = draftsById.get(String(model.id))
     return draft === undefined ? model : applyDraft(model, draft)
   })
   for (const id of draftsById.keys()) {
-    if (!baselineModels.some((model) => model.id === id)) droppedDraftIds.push(id)
+    if (!baselineModels.some((model) => String(model.id) === String(id))) droppedDraftIds.push(id)
   }
   return { models, droppedDraftIds }
 }
@@ -225,4 +243,19 @@ export async function saveModels(settings, route, draftsById) {
     }
   }
   return mergeBaselineModels(baseline, draftsById)
+}
+
+// 基线模型 → 可编辑草稿 Map(初值 = 当前声明)。键一律 String:基线 id 形态不定,
+// 而 UI 与 DOM 侧的模型标识恒为字符串。
+export function draftsFromModels(models) {
+  const drafts = new Map()
+  for (const model of Array.isArray(models) ? models : []) {
+    const efforts = effortsToDrafts(model.reasoningEfforts)
+    drafts.set(String(model.id), {
+      checked: efforts.checked,
+      spellings: efforts.spellings,
+      inputMode: inputToMode(model.input),
+    })
+  }
+  return drafts
 }
