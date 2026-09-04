@@ -97,8 +97,6 @@ export function syncPreset() {
     if (marker.root !== PKG_ROOT) {
       writeFileSync(join(dest, MARKER_NAME), JSON.stringify({ ...marker, root: PKG_ROOT }, null, 2) + '\n')
     }
-    // 快路径兜底恢复: rewrite 换入与恢复之间硬崩溃会让定制滞留 home 备份, 逐轮幂等收敛
-    restoreUserSlots(dest)
     return 'unchanged'
   }
   return rewrite(dest, true)
@@ -120,6 +118,7 @@ function rewrite(dest, existed) {
       fingerprint: sourceFingerprint(),
     }, null, 2) + '\n')
     backupUserSlots(dest)
+    restoreUserSlots(join(staging, 'out'))
     const hasDest = existsSync(dest)
     if (hasDest) renameSync(dest, backup)
     try {
@@ -128,7 +127,6 @@ function rewrite(dest, existed) {
       if (hasDest) renameSync(backup, dest)
       throw error
     }
-    restoreUserSlots(dest)
   } finally {
     rmSync(staging, { recursive: true, force: true })
     rmSync(backup, { recursive: true, force: true })
@@ -159,11 +157,12 @@ function backupUserSlots(dest) {
   writeFileSync(backupPath, userText)
 }
 
-/** 仅当 dest slots 尚是模板内容时写回定制(覆盖模板);dest 已有更新的定制则不动作 */
-function restoreUserSlots(dest) {
+/** 待换入目录的 slots 若为模板内容且 home 有备份,写入用户定制;
+ *  恢复随换入原子完成,dest 不再出现"模板+待恢复"中间态(崩溃窗口与复活窗口同消) */
+function restoreUserSlots(stagingOut) {
   const backupPath = join(dshHome(), USER_SLOTS_BACKUP)
   if (!existsSync(backupPath)) return
-  const userSlots = join(dest, SLOTS_REL)
+  const userSlots = join(stagingOut, SLOTS_REL)
   if (!existsSync(userSlots)) return
   let userText
   try {
