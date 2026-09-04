@@ -40,7 +40,7 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 - 键:分区显示文本(设置导航)或插件名(dsh-market 卡片)。
 - 值:内置 glyph 名(`tune/theme/bot/market/cube/mcp/shield/cards/plan/bell/wrench/archive/spark/layers/tag/grid/git/search/term/chart/code/doc/db/flow/globe/lock/image/zap`)或完整 16×16 `<svg>` 字符串。
 - 声明变更会清除同名记账并立即重贴,支持热更新;非法值(未知 glyph 名/非字符串)被忽略,走默认管线。
-- 污染面收敛在 `window.__navicIcons` 单一命名空间,插件卸载时移除 API、入队未消费的声明随之失效。
+- 污染面收敛在 `window.__navicIcons` 单一命名空间,插件卸载时移除 API;已排定的替换仍会完成一次,重载页面后全部还原为官方图标。
 
 本仓库自有插件的分区图标即全部走此机制:usage-panel(账号余额/账号plan → plan)、turn-notify(消息通知 → bell)、maintain(版本与运维 → wrench)、session-manager(会话归档 → archive)。
 
@@ -73,7 +73,7 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 dsh plugin --profile web add @mzzsfy/dsh-settings-nav-icons
 ```
 
-开发安装(仓库工作副本以 NTFS junction 挂进 profile,改代码重启 dsh 即生效,无需发版):
+开发安装(仓库工作副本以 NTFS junction 挂进 profile,改代码刷新页面即生效,无需发版):
 
 ```sh
 node scripts/dev-link.mjs dsh-settings-nav-icons
