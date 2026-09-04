@@ -662,10 +662,15 @@ function RowEditor(props) {
 }
 
     return {
-      inject: ['remote', 'remote.settings'],
+      inject: ['remote'],
       apply(ctx) {
-        // remote.settings 为 boot 期即时服务,apply 内即可取 RPC 面;面缺失由
-        // CapabilityCard load() 的降级分支呈现只读原因,不在渲染回调抛错。
+        // remote.settings 为 dsh 0.1.2 引入的服务面;inject 只保留跨版本存在
+        // 的 remote 基座,服务面缺失(旧本体)时在此禁用插件,boot 不再 pending。
+        // 服务存在但面缺失的运行期降级仍由 CapabilityCard load() 分支呈现只读原因。
+        if (ctx.remote?.settings === undefined) {
+          console.warn('[model-capability-editor] 缺少 remote.settings 服务面(需要 dsh 0.1.2+),插件禁用')
+          return undefined
+        }
         const settings = makeSettingsFace(ctx.remote.settings)
 
         // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑块
