@@ -29,9 +29,39 @@ test('编辑条目仅写两字段,其余字段保留;词汇表外档位按最新
   assert.deepEqual(models[0].input, ['text', 'image'])
 })
 
-test('草稿三态为未声明时删除 input 字段', () => {
-  const { models } = mergeBaselineModels(baseline, new Map([['auto', draft({ inputMode: 'unset' })]]))
+test('显式把已声明 input 收窄为未声明时删除 input 字段', () => {
+  // 基线已声明 ['text'],草稿显式改为未声明 → 投影不一致 → 执行删除
+  const declared = [{ id: 'auto', name: 'Auto', reasoningEfforts: { off: null }, input: ['text'] }]
+  const { models } = mergeBaselineModels(declared, new Map([['auto', draft({ inputMode: 'unset' })]]))
   assert.equal('input' in models[0], false)
+})
+
+test('未触及字段真正原样保留:私有模态与词汇表外档位不被整组保存抹除', () => {
+  // 网关私有模态 audio 与他方写入的外档位 custom:草稿与基线投影一致 = 用户未编辑
+  const exotic = [{ id: 'm', input: ['text', 'audio'], reasoningEfforts: { custom: 'x' } }]
+  const seeded = { checked: {}, spellings: {}, inputMode: 'text' }
+  const { models } = mergeBaselineModels(exotic, new Map([['m', seeded]]))
+  assert.deepEqual(models[0].input, ['text', 'audio'], '未触及 input 不得被三态投影改写')
+  assert.deepEqual(models[0].reasoningEfforts, { custom: 'x' }, '未触及档位不得整字段删除')
+})
+
+test('用户显式改动后投影语义照常生效', () => {
+  const exotic = [{ id: 'm', input: ['text', 'audio'], reasoningEfforts: { custom: 'x' } }]
+  const edited = { checked: { high: true }, spellings: { high: '' }, inputMode: 'text' }
+  const { models } = mergeBaselineModels(exotic, new Map([['m', edited]]))
+  // 档位被触及:外档位 custom 透传保留 + 新增 high
+  assert.deepEqual(models[0].reasoningEfforts, { custom: 'x', high: 'high' })
+  // inputMode('text')与基线投影('text')一致 = 未触及 input,私有模态保留
+  assert.deepEqual(models[0].input, ['text', 'audio'])
+})
+
+test('非字符串 id 键归一:数字 id 命中草稿且不产生假孤儿', () => {
+  const numeric = [{ id: 1, reasoningEfforts: { off: null }, input: [] }]
+  const numDraft = { checked: { high: true }, spellings: { high: 'u' }, inputMode: 'unset' }
+  const { models, droppedDraftIds } = mergeBaselineModels(numeric, new Map([['1', numDraft]]))
+  assert.deepEqual(models[0].reasoningEfforts, { high: 'u' })
+  assert.deepEqual(droppedDraftIds, [], 'String 归一后 1 与 1 视为同一条目')
+  assert.deepEqual(models[0].input, [], 'inputMode 与空数组投影一致,未触及保留')
 })
 
 test('未编辑的模型条目数量与顺序不变', () => {

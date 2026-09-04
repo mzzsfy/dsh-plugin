@@ -139,6 +139,17 @@ function defineScenarios(prefix, L) {
     assert.equal('input' in models[0], false)
   })
 
+  test(prefix + 'draftsFromModels: 种子投影与 id 键 String 归一', () => {
+    const { draftsFromModels } = L
+    const drafts = draftsFromModels([
+      { id: 1, reasoningEfforts: { off: null }, input: ['text'] },
+      { id: 'b', input: ['text', 'image'] },
+    ])
+    assert.deepEqual(drafts.get('1'), { checked: { off: true }, spellings: { off: '' }, inputMode: 'text' })
+    assert.deepEqual(drafts.get('b'), { checked: {}, spellings: {}, inputMode: 'text-image' })
+    assert.equal(drafts.get(1), undefined, '键一律字符串,与 DOM/UI 侧标识对齐')
+  })
+
   test(prefix + '草稿分桶:切换不丢弃,切回恢复,null 路由不存', () => {
     const buckets = new Map()
     const draftsA = new Map([['m1', { checked: { off: true }, spellings: {}, inputMode: 'text' }]])
@@ -161,14 +172,14 @@ test('client.js 语法可被 node 解析', () => {
 })
 
 // 保存流双副本守卫:client.js 的 unwrapWire/makeSettingsFace/describeNs/modelsOf/
-// writeModels/saveModels 全段与 logic.mjs 对应函数必须逐字符一致(单文件格式无法
-// require,靠此测试防漂移;终点为 saveModels 结束后的草稿构建段起点)。
+// writeModels/saveModels/draftsFromModels 全段与 logic.mjs 必须逐字符一致(单文件
+// 格式无法 require,靠此测试防漂移;client 终点 LOGIC-END,logic 侧到文件尾)。
 test('client.js wire 适配与保存流段与 logic.mjs 同源', () => {
   const sectionOf = (source, label) => {
     const begin = source.indexOf('// 宿主 wire 信封')
     assert.ok(begin >= 0, label + ' 缺少守卫段起点')
-    // 终点:client 侧 saveModels 之后是草稿构建段(有锚);logic 侧 saveModels 即文件尾(无锚)
-    const end = source.indexOf('// 基线模型')
+    // 终点:client 侧守卫段以 LOGIC-END 收束;logic 侧守卫段即文件尾
+    const end = source.indexOf('/* LOGIC-END */')
     return (end > begin ? source.slice(begin, end) : source.slice(begin)).replace(/^export /gm, '').trim()
   }
   const client = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
