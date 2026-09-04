@@ -8,7 +8,6 @@ import { makeSettingsFace, unwrapWire, saveModels, CONFLICT_CODE, INPUT_TEXT_IMA
 const draft = {
   checked: { high: true },
   spellings: { high: 'ultra' },
-  baselineEfforts: undefined,
   inputMode: INPUT_TEXT_IMAGE,
 }
 
@@ -113,5 +112,5 @@ test('端到端:保存流经适配层,冲突一次重放成功', async () => {
   }
   const result = await saveModels(makeSettingsFace(wire), 'new-api', new Map([['auto', draft]]))
   assert.equal(mutateCount, 2)
-  assert.deepEqual(result[0].reasoningEfforts, { high: 'ultra' })
+  assert.deepEqual(result.models[0].reasoningEfforts, { high: 'ultra' })
 })

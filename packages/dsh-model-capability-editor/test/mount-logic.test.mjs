@@ -29,8 +29,12 @@ test('未破坏:官方编辑器尚未打开(无 details 折叠区)', () => {
   assert.equal(anchorsBroken({ titleMatched: true, hasEditor: false, modelIdInputCount: 0 }), false)
 })
 
-test('目标解析:官方行内活动 ID 已在基线 → 以活动 ID 为准(用户已保存改名)', () => {
-  assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto-v2')
+test('目标解析:改名已落盘(原 id 从基线消失)→ 以活动 ID 为准', () => {
+  assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto-v2'])), 'auto-v2')
+})
+
+test('目标解析:原 id 仍在基线(疑似撞名兄弟 id)→ 回落原 ID,防写错模型', () => {
+  assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto')
 })
 
 test('目标解析:活动 ID 不在基线(改名未落盘)→ 回落原 ID,写回必然命中', () => {

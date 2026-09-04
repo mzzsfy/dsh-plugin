@@ -8,7 +8,6 @@ import { saveModels, CONFLICT_CODE, INPUT_TEXT_IMAGE } from '../src/logic.mjs'
 const draft = {
   checked: { high: true },
   spellings: { high: 'ultra' },
-  baselineEfforts: undefined,
   inputMode: INPUT_TEXT_IMAGE,
 }
 
@@ -49,7 +48,7 @@ test('无冲突:一次 describe + 一次 mutate,整组写回', async () => {
   assert.equal(settings.calls.describe, 1)
   assert.equal(settings.calls.mutate, 1)
   assert.equal(settings.calls.revisions[0], 7)
-  assert.deepEqual(result[0].reasoningEfforts, { high: 'ultra' })
+  assert.deepEqual(result.models[0].reasoningEfforts, { high: 'ultra' })
 })
 
 test('冲突一次:重读新 revision,重放仅含本次修改的字段', async () => {
@@ -66,7 +65,16 @@ test('冲突一次:重读新 revision,重放仅含本次修改的字段', async 
   const written = settings.calls.values[1]
   assert.deepEqual(written[0], { id: 'auto', maxTokens: 4096, reasoningEfforts: { high: 'ultra' }, input: ['text', 'image'] })
   assert.deepEqual(written[1], { id: 'plain', name: 'renamed-by-other' })
-  assert.deepEqual(result[0].reasoningEfforts, { high: 'ultra' })
+  assert.deepEqual(result.models[0].reasoningEfforts, { high: 'ultra' })
+})
+
+test('孤儿草稿:目标模型在保存前被他方删除,mutate 成功但 droppedDraftIds 报告未落盘', async () => {
+  // 保存流内部 describe 时 auto 已消失,只剩 plain
+  const settings = mockSettings({ revisions: [7], failFirst: false, latestModels: [{ id: 'plain' }] })
+  const result = await saveModels(settings, 'new-api', new Map([['auto', draft]]))
+  assert.equal(settings.calls.mutate, 1)
+  assert.deepEqual(result.droppedDraftIds, ['auto'])
+  assert.deepEqual(result.models.map((model) => model.id), ['plain'])
 })
 
 test('重放后再冲突:报错终止,不改写文档', async () => {

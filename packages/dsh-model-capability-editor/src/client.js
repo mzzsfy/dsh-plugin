@@ -12,9 +12,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect } = React
 
-const NS = 'llm-pi-ai'
-const CONFLICT_CODE = 'settings-conflict'
-const RECONCILE_DEBOUNCE_MS = 150
+    const RECONCILE_DEBOUNCE_MS = 150
 
 const CSS = [
   '.mce-card { display:flex; flex-direction:column; gap:10px; color:inherit; font-size:13px;',
@@ -68,7 +66,10 @@ function h(type, props) {
 
 /* LOGIC-BEGIN */
 // 纯逻辑段:与 src/logic.mjs 保持同一份判定逻辑,由 parity 测试保证。
+// 边界规则:凡不引用 React/h/document 的函数与常量一律置于本段内。
 
+const NS = 'llm-pi-ai'
+const CONFLICT_CODE = 'settings-conflict'
 const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const OFF_LEVEL = 'off'
 const INPUT_UNSET = 'unset'
@@ -128,24 +129,39 @@ function modeToInput(mode) {
   return undefined
 }
 
-// 单模型应用草稿:仅写两字段,其余字段保留最新条目值
+// reasoningEfforts 基线可表达形态:未声明/false/null/纯对象;异型形态跳过重写防误删
+function isExpressibleEfforts(value) {
+  return value === undefined || value === false || value === null
+    || (typeof value === 'object' && !Array.isArray(value))
+}
+
+// 单模型应用草稿:仅写两字段,其余字段保留最新条目值。
+// 词汇表外档位透传基线取"写回时点的最新条目值";基线为不可表达形态时跳过该字段防误删。
 function applyDraft(model, draft) {
   const result = { ...model }
-  const efforts = draftsToEfforts(draft, draft.baselineEfforts)
-  if (efforts === undefined) delete result.reasoningEfforts
-  else result.reasoningEfforts = efforts
+  if (isExpressibleEfforts(model.reasoningEfforts)) {
+    const efforts = draftsToEfforts(draft, model.reasoningEfforts)
+    if (efforts === undefined) delete result.reasoningEfforts
+    else result.reasoningEfforts = efforts
+  }
   const input = modeToInput(draft.inputMode)
   if (input === undefined) delete result.input
   else result.input = input
   return result
 }
 
-// 整组写回:以 describe 读到的数组为基线,仅重写有草稿的条目,未声明模型不删除
+// 整组写回:以 describe 读到的数组为基线,仅重写有草稿的条目,未声明模型不删除。
+// 返回合并结果与未命中基线的草稿 id(模型已被他方删除,编辑未落盘)。
 function mergeBaselineModels(baselineModels, draftsById) {
-  return baselineModels.map((model) => {
+  const droppedDraftIds = []
+  const models = baselineModels.map((model) => {
     const draft = draftsById.get(model.id)
     return draft === undefined ? model : applyDraft(model, draft)
   })
+  for (const id of draftsById.keys()) {
+    if (!baselineModels.some((model) => model.id === id)) droppedDraftIds.push(id)
+  }
+  return { models, droppedDraftIds }
 }
 
 // 竞品写入痕迹:词汇表外标记字段
@@ -167,11 +183,12 @@ function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
-// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
-// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘,
+// 原 id 已从基线消失),以新 id 为准;原 id 仍在基线视为撞名,回落原 id。
 function resolveTargetId(liveId, originalId, baselineIds) {
   const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
-  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+  const renamed = typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) && !ids.has(originalId)
+  return renamed ? liveId : originalId
 }
 
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
@@ -184,7 +201,6 @@ function isModelsTitle(title) {
 function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
   return titleMatched === true && hasEditor === true && modelIdInputCount === 0
 }
-/* LOGIC-END */
 
 function unwrapResult(result) {
   if (result !== null && typeof result === 'object' && result.ok === true) return result.value
@@ -233,13 +249,23 @@ function modelsOf(nsValue, route) {
   return provider && typeof provider === 'object' && Array.isArray(provider.models) ? provider.models : []
 }
 
-// 保存流:冲突重读重放一次,再冲突报错终止,绝不静默覆盖
+async function writeModels(settings, route, models, revision) {
+  return unwrapResult(await settings.mutate(NS, [
+    { op: 'set', path: ['providers', route, 'models'], value: models },
+  ], revision))
+}
+
+// 保存流:冲突重读重放一次,再冲突报错终止,绝不静默覆盖。
+// 返回已写回的模型数组与未命中基线的草稿 id(模型已被他方删除,编辑未落盘)。
 async function saveModels(settings, route, draftsById) {
   const first = await describeNs(settings)
-  if (!first.writable) throw new Error('settings 只读,无法保存')
-  const attempt = async (baseline, revision) => unwrapResult(await settings.mutate(NS, [
-    { op: 'set', path: ['providers', route, 'models'], value: mergeBaselineModels(baseline, draftsById) },
-  ], revision))
+  if (!first.writable) {
+    const error = new Error('settings 只读,无法保存')
+    error.code = 'settings-readonly'
+    throw error
+  }
+  const attempt = (baseline, revision) =>
+    writeModels(settings, route, mergeBaselineModels(baseline, draftsById).models, revision)
   let baseline = modelsOf(first.value, route)
   let revision = first.revision
   try {
@@ -266,15 +292,16 @@ async function saveModels(settings, route, draftsById) {
 function draftsFromModels(models) {
   const drafts = new Map()
   for (const model of models) {
+    const efforts = effortsToDrafts(model.reasoningEfforts)
     drafts.set(model.id, {
-      checked: effortsToDrafts(model.reasoningEfforts).checked,
-      spellings: effortsToDrafts(model.reasoningEfforts).spellings,
-      baselineEfforts: model.reasoningEfforts,
+      checked: efforts.checked,
+      spellings: efforts.spellings,
       inputMode: inputToMode(model.input),
     })
   }
   return drafts
 }
+/* LOGIC-END */
 
 function LevelEditor(props) {
   const model = props.model
@@ -333,6 +360,10 @@ function CapabilityCard(props) {
   // 未保存草稿按路由分桶,切换路由不丢弃,切回恢复
   const bucketsRef = React.useRef(null)
   if (bucketsRef.current === null) bucketsRef.current = new Map()
+  // 路由切换代际:selectRoute 在途时 describe 返回的过期轮次不得改状态,
+  // 保存按钮在切换窗口禁用,防旧路由草稿经 saveModels 写入新路由
+  const [switching, setSwitching] = useState(false)
+  const routeSeqRef = React.useRef(0)
 
   function patch(part) { setState((prev) => ({ ...prev, ...part })) }
 
@@ -374,10 +405,13 @@ function CapabilityCard(props) {
   function selectRoute(nextRoute) {
     const prevRoute = state.route
     stashDrafts(bucketsRef.current, state.route, state.drafts)
+    const seq = ++routeSeqRef.current
+    setSwitching(true)
     patch({ route: nextRoute, phase: 'ready' })
     void (async () => {
       try {
         const value = unwrapResult(await props.settings.describe())
+        if (seq !== routeSeqRef.current) return
         const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
         if (ns === undefined) {
           setNotice({ kind: 'error', text: 'settings 中不存在 ' + NS + ' 命名空间,请刷新页面' })
@@ -389,8 +423,10 @@ function CapabilityCard(props) {
         patch({ models, drafts, traces: detectCompetitorTraces(models) })
       } catch (error) {
         // describe 失败:回滚路由,models/drafts 仍是旧路由数据,避免旧草稿对新基线静默写回
-        patch({ route: prevRoute })
+        if (seq === routeSeqRef.current) patch({ route: prevRoute })
         setNotice({ kind: 'error', text: '读取 ' + nextRoute + ' 失败:' + (error && error.message ? error.message : String(error)) })
+      } finally {
+        if (seq === routeSeqRef.current) setSwitching(false)
       }
     })()
   }
@@ -405,19 +441,27 @@ function CapabilityCard(props) {
     setSaving(true)
     setNotice(null)
     try {
-      await saveModels(props.settings, state.route, state.drafts)
-      setNotice({ kind: 'ok', text: '已保存并写回 settings.yaml' })
-      const value = unwrapResult(await props.settings.describe())
-      const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
-      if (ns === undefined) {
-        // 保存后命名空间被他方移除:明确告知刷新,不再裸抛
-        patch({ phase: 'readonly', reason: '保存后 ' + NS + ' 命名空间已消失,可能被其他写者移除,请刷新页面' })
-        return
+      const { models: written, droppedDraftIds } = await saveModels(props.settings, state.route, state.drafts)
+      // 孤儿草稿:草稿对应模型已被他方删除,编辑未落盘,必须告警而非报成功
+      setNotice(droppedDraftIds.length > 0
+        ? { kind: 'warn', text: '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入' }
+        : { kind: 'ok', text: '已保存并写回 settings.yaml' })
+      try {
+        const value = unwrapResult(await props.settings.describe())
+        const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
+        if (ns === undefined) {
+          // 保存后命名空间被他方移除:明确告知刷新,不再裸抛
+          patch({ phase: 'readonly', reason: '保存后 ' + NS + ' 命名空间已消失,可能被其他写者移除,请刷新页面' })
+          return
+        }
+        const latest = modelsOf(ns.value, state.route)
+        const drafts = draftsFromModels(latest)
+        stashDrafts(bucketsRef.current, state.route, drafts)
+        patch({ models: latest, drafts, traces: detectCompetitorTraces(latest) })
+      } catch (refreshError) {
+        // 保存已成功,收尾刷新失败只降级提示,不覆盖保存通知
+        setNotice({ kind: 'warn', text: '已保存,但刷新视图失败:' + (refreshError && refreshError.message ? refreshError.message : String(refreshError)) })
       }
-      const models = modelsOf(ns.value, state.route)
-      const drafts = draftsFromModels(models)
-      stashDrafts(bucketsRef.current, state.route, drafts)
-      patch({ models, drafts, traces: detectCompetitorTraces(models) })
     } catch (error) {
       setNotice({ kind: 'error', text: (error && error.message ? error.message : String(error)) })
     } finally {
@@ -442,6 +486,8 @@ function CapabilityCard(props) {
       h('select', {
         className: 'mce-select',
         value: state.route || '',
+        // 切换/保存在途均禁路由切换:保存收尾以闭包路由重读,中途切路由会渲染串线
+        disabled: switching || saving,
         onChange: (event) => selectRoute(event.target.value),
       }, state.providers.map((route) => h('option', { key: route, value: route }, route))),
     ),
@@ -462,7 +508,7 @@ function CapabilityCard(props) {
       : null,
     notice !== null ? h('div', { className: 'mce-notice mce-notice--' + notice.kind }, notice.text) : null,
     h('div', { className: 'mce-row' },
-      h('button', { className: 'mce-btn', disabled: saving || state.route === null, onClick: save }, saving ? '保存中…' : '保存'),
+      h('button', { className: 'mce-btn', disabled: saving || switching || state.route === null, onClick: save }, saving ? '保存中…' : '保存'),
       h('span', { className: 'mce-label' }, '保存 = 整组写回当前 provider 的 models 数组,未编辑的模型原样保留。'),
     ),
   )
@@ -486,10 +532,14 @@ function RowEditor(props) {
   const settings = props.settings
   const route = props.route
   const modelId = props.modelId
-  const aliveRef = React.useRef(true)
+  const aliveRef = React.useRef(false)
   const [state, setState] = useState({ phase: 'loading', draft: null, notice: null })
   const [saving, setSaving] = useState(false)
-  useEffect(() => () => { aliveRef.current = false }, [])
+  // 存活标记标准写法:setup 置 true、cleanup 置 false,StrictMode 双挂载后仍为 true
+  useEffect(() => {
+    aliveRef.current = true
+    return () => { aliveRef.current = false }
+  }, [])
 
   function patch(part) { setState((prev) => ({ ...prev, ...part })) }
 
@@ -522,7 +572,7 @@ function RowEditor(props) {
       const nsFirst = (first.namespaces || []).find((entry) => entry.ns === NS)
       const baselineIds = new Set(nsFirst !== undefined ? modelsOf(nsFirst.value, route).map((entry) => entry.id) : [])
       const targetId = resolveTargetId(liveId, modelId, baselineIds)
-      await saveModels(settings, route, new Map([[targetId, state.draft]]))
+      const { models: written, droppedDraftIds } = await saveModels(settings, route, new Map([[targetId, state.draft]]))
       // S4:保存后重读重建草稿,基线新鲜,保留他方词汇表外档位
       const second = unwrapResult(await settings.describe())
       const nsSecond = (second.namespaces || []).find((entry) => entry.ns === NS)
@@ -530,9 +580,15 @@ function RowEditor(props) {
         ? modelsOf(nsSecond.value, route).find((entry) => entry.id === targetId)
         : undefined
       if (aliveRef.current) {
+        // 孤儿草稿(模型被他方删除)时 written 不含目标条目,兜底保留当前草稿防渲染崩溃
+        const freshDraft = (latest !== undefined ? draftsFromModels([latest]).get(targetId) : undefined)
+          || draftsFromModels(written).get(targetId)
+          || state.draft
         patch({
-          notice: { kind: 'ok', text: '已保存' },
-          draft: latest !== undefined ? draftsFromModels([latest]).get(targetId) : state.draft,
+          notice: { kind: droppedDraftIds.length > 0 ? 'warn' : 'ok', text: droppedDraftIds.length > 0
+            ? '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
+            : '已保存' },
+          draft: freshDraft,
         })
       }
     } catch (error) {
@@ -613,6 +669,10 @@ function RowEditor(props) {
         let scanPending = false
         // 轮次序号:describe 异步返回时已可能是过期快照,过期轮次不得改状态
         let reconcileSeq = 0
+        // 插件存活代际:effect 清理后置位,排期中的扫描与在途 describe 续体
+        // 不得再创建 React root(防清理后死注入与 root 泄漏)
+        let disposed = false
+        let scanTimer = null
 
         function docInfo() {
           const outlet = document.querySelector('[data-slot="settings.section"]')
@@ -688,6 +748,7 @@ function RowEditor(props) {
         }
 
         function reconcile() {
+          if (disposed) return
           // 已脱离文档的挂载点:官方页卸载或重建了行,释放对应 root
           for (const [container, root] of roots) {
             if (!container.isConnected) {
@@ -713,7 +774,7 @@ function RowEditor(props) {
           void (async () => {
             try {
               const value = unwrapResult(await settings.describe())
-              if (seq !== reconcileSeq) return
+              if (disposed || seq !== reconcileSeq) return
               const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
               if (ns === undefined) return
               const providers = ns.value && typeof ns.value === 'object' ? ns.value.providers : {}
@@ -742,15 +803,15 @@ function RowEditor(props) {
             } catch {
               // describe 失败: 保持现状, 下次 mutation 重试; 闩锁已置位说明锚点破坏已判定,
               // 回退入口必须先出现, 数据加载失败由面板内部呈现
-              if (anchorsLatched) ensurePanel()
+              if (!disposed && anchorsLatched) ensurePanel()
             }
           })()
         }
 
         function scheduleScan() {
-          if (scanPending) return
+          if (scanPending || disposed) return
           scanPending = true
-          setTimeout(() => {
+          scanTimer = setTimeout(() => {
             scanPending = false
             // 以 outlet 存在为门,不假设设置页形态(对话框/抽屉/路由页都覆盖)
             if (document.querySelector('[data-slot="settings.section"]') !== null) reconcile()
@@ -761,12 +822,17 @@ function RowEditor(props) {
           const observer = new MutationObserver(scheduleScan)
           observer.observe(document.body, { childList: true, subtree: true })
           return () => {
+            disposed = true
+            if (scanTimer !== null) clearTimeout(scanTimer)
             observer.disconnect()
             for (const [container, root] of roots) {
               root.unmount()
               roots.delete(container)
             }
             disposePanel()
+            // 样式与插件生命周期绑定,卸载即移除,防止跨生命周期残留
+            const style = document.getElementById('mce-style')
+            if (style !== null) style.remove()
           }
         }, 'model-capability-editor: models-page injector')
       },
