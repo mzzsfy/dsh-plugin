@@ -87,9 +87,23 @@ export function judgeVersion({ currentVersion, tags, channel }) {
 }
 
 // 模板占位符执行时替换;模板允许不含占位符(用户整体自改命令),空模板拒绝。
+// tag 经白名单校验:tag 名来自远端 registry 数据,拼入 shell 命令前单点拦截
+// shell 元字符,封死"远端数据回流成命令"通路。
+// 形态对齐 npm dist-tag 规则:仅 ASCII 字母数字-._,首尾为字母数字,长度上限 214。
+const CHANNEL_NAME_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-_.]*[0-9A-Za-z]$|^[0-9A-Za-z]$/
+const CHANNEL_NAME_MAX_LENGTH = 214
+
+export function isValidChannelName(channel) {
+  return typeof channel === 'string'
+    && channel.length > 0
+    && channel.length <= CHANNEL_NAME_MAX_LENGTH
+    && CHANNEL_NAME_PATTERN.test(channel)
+}
+
 export function buildUpgradeCommand({ template, tag }) {
   const text = typeof template === 'string' ? template.trim() : ''
   if (text.length === 0) throw new Error('升级命令模板为空,拒绝执行')
+  if (!isValidChannelName(tag)) throw new Error('通道名含非法字符,拒绝执行: ' + tag)
   return text.split(TAG_PLACEHOLDER).join(tag)
 }
 
@@ -104,16 +118,50 @@ export function isValidRegistryBase(base) {
   return typeof base === 'string' && /^https?:\/\//i.test(base.trim())
 }
 
+// dist-tags 响应体上限:正常响应远小于此;流式累计读取,超限即断
+const DIST_TAGS_MAX_BYTES = 64 * 1024
+
 // 拉取 dist-tags 轻量端点;fetchImpl 注入便于单测,错误一律抛出由调用方决定保留上次结果。
+// redirect 拒绝跟随:镜像 302 跳内网/他源属配置外行为,直接失败交调用方展示。
 export async function fetchDistTags({ registryBase, fetchImpl = fetch, timeoutMs }) {
   if (!isValidRegistryBase(registryBase)) throw new Error('registry 基地址无效: ' + registryBase)
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('timeoutMs 必须为正数')
   const base = registryBase.trim().replace(/\/+$/, '')
   const response = await fetchImpl(base + DIST_TAGS_PATH, {
     headers: { accept: 'application/json' },
+    redirect: 'error',
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!response.ok) throw new Error('registry HTTP ' + response.status)
-  const body = await response.json()
+  // 流式累计限量:恶意/异常源的超大响应体在传输中途即被断开,不整量入内存
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > DIST_TAGS_MAX_BYTES) throw new Error('dist-tags 响应超过上限')
+      chunks.push(value)
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  // json() 对 BOM 有容忍;text 路径显式剥除保持等价
+  const text = new TextDecoder().decode(merged).replace(/^\uFEFF/, '')
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    throw new Error('dist-tags 响应不是合法 JSON')
+  }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('dist-tags 响应格式无效')
   const tags = {}
   for (const entry of Object.entries(body)) {
