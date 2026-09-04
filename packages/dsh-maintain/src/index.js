@@ -10,6 +10,7 @@ import {
   TAG_PLACEHOLDER,
   buildUpgradeCommand,
   fetchDistTags,
+  isValidChannelName,
   isValidRegistryBase,
   judgeVersion,
   resolveHostVersion,
@@ -24,12 +25,14 @@ const NAMESPACE = settingsNamespace('maintain')
 
 const CHECK_TIMEOUT_MS = 20 * 1000
 const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
-const TICK_MS = 60 * 1000
+// 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
+export const TICK_MS = 60 * 1000
 
 const DEFAULT_CHANNEL = 'latest'
-const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
-const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g ' + TARGET_PACKAGE + '@' + TAG_PLACEHOLDER
-const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
+// 默认值导出仅供 parity 测试作 host 侧锚点;行为入口全部经 readSettings 回落
+export const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
+export const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g ' + TARGET_PACKAGE + '@' + TAG_PLACEHOLDER
+export const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 
 // 注册即声明 GUI 设置表单,schema 默认值即生效默认值(rs-workflow-config 先例)。
 const SETTINGS_SCHEMA = z.object({
@@ -44,6 +47,39 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
+// 同源守卫:浏览器写请求恒带 Origin,与 Host 不符即拒;无 Origin 的非浏览器客户端放行。
+// 升级/重启是破坏性端点,与外层鉴权插件互补,阻断跨站简单请求 drive-by 触发。
+// host 比较大小写归一:URL.host 恒小写,请求 Host 头保原始大小写。
+function rejectCrossOrigin(req, res) {
+  const origin = req.headers ? req.headers.origin : undefined
+  if (!origin) return false
+  const host = String((req.headers && req.headers.host) || '')
+  let sameOrigin = false
+  try {
+    // host 为空即不同源:缺失 Host 头与 file:// Origin 的空 host 不得双空判同源
+    sameOrigin = host.length > 0 && new URL(origin).host === host.toLowerCase()
+  } catch {
+    sameOrigin = false
+  }
+  if (sameOrigin) return false
+  sendJson(res, 403, { error: '跨源请求被拒绝' })
+  return true
+}
+
+// 路由样板收敛:方法守卫与跨源守卫统一在此,业务异常统一归一 400,handler 只留业务体
+const route = (method, guards, handler) => async (req, res) => {
+  if (req.method !== method) {
+    sendJson(res, 405, { error: 'method not allowed' })
+    return
+  }
+  if (guards.crossOrigin && rejectCrossOrigin(req, res)) return
+  try {
+    await handler(req, res)
+  } catch (error) {
+    sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+  }
+}
+
 function readBody(req) {
   const BODY_MAX_BYTES = 64 * 1024
   return new Promise((resolve, reject) => {
@@ -52,6 +88,8 @@ function readBody(req) {
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > BODY_MAX_BYTES) {
+        // 超限即断连:后续 destroy 触发的 error 由已 settle 的 Promise 吸收,属预期;
+        // 客户端收到连接重置即视为超限,不再尝试写结构化错误
         reject(new Error('请求体超过上限'))
         req.destroy()
         return
@@ -68,7 +106,10 @@ function readSettings(ctx) {
   const value = settings ? settings.get(NAMESPACE) : undefined
   return {
     channel: value && typeof value.channel === 'string' && value.channel.trim().length > 0 ? value.channel.trim() : DEFAULT_CHANNEL,
-    pollIntervalSec: value && Number.isFinite(Number(value.pollIntervalSec)) ? Number(value.pollIntervalSec) : DEFAULT_POLL_INTERVAL_SEC,
+    pollIntervalSec:
+      value && typeof value.pollIntervalSec === 'number' && Number.isFinite(value.pollIntervalSec)
+        ? value.pollIntervalSec
+        : DEFAULT_POLL_INTERVAL_SEC,
     upgradeCommandTemplate:
       value && typeof value.upgradeCommandTemplate === 'string' && value.upgradeCommandTemplate.trim().length > 0
         ? value.upgradeCommandTemplate
@@ -155,12 +196,8 @@ export function apply(ctx) {
 
   function triggerUpgrade() {
     const config = readSettings(ctx)
-    let command
-    try {
-      command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
-    } catch (error) {
-      return Promise.reject(error)
-    }
+    // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
+    const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
     const last = { command, startedAt: Date.now(), ok: false, finishedAt: null, timedOut: false, code: null, stdoutTail: '', stderrTail: '', error: null }
     // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
     upgrade = { running: true, last }
@@ -179,157 +216,132 @@ export function apply(ctx) {
       .then(scheduleNext, scheduleNext)
   }
 
-  const rejectNonPost = (req, res) => {
-    if (req.method === 'POST') return true
-    sendJson(res, 405, { error: 'method not allowed' })
-    return false
-  }
+  const WRITE = { crossOrigin: true }
 
   const routes = [
     {
       path: '/api/maintain/status',
-      handler: async (req, res) => {
-        if (req.method !== 'GET') {
-          sendJson(res, 405, { error: 'method not allowed' })
-          return
-        }
+      handler: route('GET', {}, async (req, res) => {
         sendJson(res, 200, currentStatus())
-      },
+      }),
     },
     {
       path: '/api/maintain/refresh',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
+      handler: route('POST', WRITE, async (req, res) => {
         await runCheck()
         scheduleNext()
         sendJson(res, 200, currentStatus())
-      },
+      }),
     },
     {
       path: '/api/maintain/channel',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
-        try {
-          const body = JSON.parse(await readBody(req))
-          const channel = body && typeof body.channel === 'string' ? body.channel.trim() : ''
-          if (channel.length === 0) {
-            sendJson(res, 400, { error: 'channel 不能为空' })
-            return
-          }
-          if (snapshot.tags !== null && !Object.prototype.hasOwnProperty.call(snapshot.tags, channel)) {
-            sendJson(res, 400, { error: '通道 ' + channel + ' 不在当前 dist-tags 中' })
-            return
-          }
-          const settings = ctx.get('settings')
-          if (!settings) {
-            sendJson(res, 500, { error: 'settings 服务不可用' })
-            return
-          }
-          await settings.update(NAMESPACE, { channel })
-          await runCheck()
-          scheduleNext()
-          sendJson(res, 200, currentStatus())
-        } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+      handler: route('POST', WRITE, async (req, res) => {
+        const body = JSON.parse(await readBody(req))
+        const channel = body && typeof body.channel === 'string' ? body.channel.trim() : ''
+        if (channel.length === 0) {
+          sendJson(res, 400, { error: 'channel 不能为空' })
+          return
         }
-      },
+        if (!isValidChannelName(channel)) {
+          sendJson(res, 400, { error: '通道名含非法字符,仅允许字母/数字/-/./_ : ' + channel })
+          return
+        }
+        // tags 未就绪时白名单兜底校验,远端可控的 tag 名不落盘
+        if (snapshot.tags !== null && !Object.prototype.hasOwnProperty.call(snapshot.tags, channel)) {
+          sendJson(res, 400, { error: '通道 ' + channel + ' 不在当前 dist-tags 中' })
+          return
+        }
+        const settings = ctx.get('settings')
+        if (!settings) {
+          sendJson(res, 500, { error: 'settings 服务不可用' })
+          return
+        }
+        await settings.update(NAMESPACE, { channel })
+        await runCheck()
+        scheduleNext()
+        sendJson(res, 200, currentStatus())
+      }),
     },
     {
       path: '/api/maintain/upgrade-template',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
-        try {
-          const body = JSON.parse(await readBody(req))
-          const template = body && typeof body.template === 'string' ? body.template.trim() : ''
-          if (template.length === 0) {
-            sendJson(res, 400, { error: '升级命令不能为空' })
-            return
-          }
-          const settings = ctx.get('settings')
-          if (!settings) {
-            sendJson(res, 500, { error: 'settings 服务不可用' })
-            return
-          }
-          await settings.update(NAMESPACE, { upgradeCommandTemplate: template })
-          sendJson(res, 200, currentStatus())
-        } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+      handler: route('POST', WRITE, async (req, res) => {
+        const body = JSON.parse(await readBody(req))
+        const template = body && typeof body.template === 'string' ? body.template.trim() : ''
+        if (template.length === 0) {
+          sendJson(res, 400, { error: '升级命令不能为空' })
+          return
         }
-      },
+        const settings = ctx.get('settings')
+        if (!settings) {
+          sendJson(res, 500, { error: 'settings 服务不可用' })
+          return
+        }
+        await settings.update(NAMESPACE, { upgradeCommandTemplate: template })
+        sendJson(res, 200, currentStatus())
+      }),
     },
     {
       path: '/api/maintain/poll-interval',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
-        try {
-          const body = JSON.parse(await readBody(req))
-          // 严格类型:字符串/ null 等经 Number() 宽转后可能变 0,静默翻转轮询开关
-          const seconds = body && typeof body.seconds === 'number' ? body.seconds : NaN
-          if (!Number.isFinite(seconds) || seconds < 0) {
-            sendJson(res, 400, { error: '轮询间隔必须是不小于 0 的秒数' })
-            return
-          }
-          const settings = ctx.get('settings')
-          if (!settings) {
-            sendJson(res, 500, { error: 'settings 服务不可用' })
-            return
-          }
-          await settings.update(NAMESPACE, { pollIntervalSec: seconds })
-          scheduleNext()
-          sendJson(res, 200, currentStatus())
-        } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+      handler: route('POST', WRITE, async (req, res) => {
+        const body = JSON.parse(await readBody(req))
+        // 严格类型:字符串/ null 等经 Number() 宽转后可能变 0,静默翻转轮询开关
+        const seconds = body && typeof body.seconds === 'number' ? body.seconds : NaN
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          sendJson(res, 400, { error: '轮询间隔必须是不小于 0 的秒数' })
+          return
         }
-      },
+        const settings = ctx.get('settings')
+        if (!settings) {
+          sendJson(res, 500, { error: 'settings 服务不可用' })
+          return
+        }
+        await settings.update(NAMESPACE, { pollIntervalSec: seconds })
+        scheduleNext()
+        sendJson(res, 200, currentStatus())
+      }),
     },
     {
       path: '/api/maintain/registry-base',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
-        try {
-          const body = JSON.parse(await readBody(req))
-          const base = body && typeof body.base === 'string' ? body.base.trim() : ''
-          if (!isValidRegistryBase(base)) {
-            sendJson(res, 400, { error: 'registry 基地址必须以 http:// 或 https:// 开头' })
-            return
-          }
-          const settings = ctx.get('settings')
-          if (!settings) {
-            sendJson(res, 500, { error: 'settings 服务不可用' })
-            return
-          }
-          await settings.update(NAMESPACE, { registryBase: base })
-          // 排空旧源的在途检查:runCheck 以 checkInFlight 去重,不排空会把旧源结果当作新源检查返回
-          if (checkInFlight) await checkInFlight
-          await runCheck()
-          scheduleNext()
-          sendJson(res, 200, currentStatus())
-        } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+      handler: route('POST', WRITE, async (req, res) => {
+        const body = JSON.parse(await readBody(req))
+        const base = body && typeof body.base === 'string' ? body.base.trim() : ''
+        if (!isValidRegistryBase(base)) {
+          sendJson(res, 400, { error: 'registry 基地址必须以 http:// 或 https:// 开头' })
+          return
         }
-      },
+        const settings = ctx.get('settings')
+        if (!settings) {
+          sendJson(res, 500, { error: 'settings 服务不可用' })
+          return
+        }
+        await settings.update(NAMESPACE, { registryBase: base })
+        // 排空旧源的在途检查:runCheck 以 checkInFlight 去重,不排空会把旧源结果当作新源检查返回
+        if (checkInFlight) await checkInFlight
+        await runCheck()
+        scheduleNext()
+        sendJson(res, 200, currentStatus())
+      }),
     },
     {
       path: '/api/maintain/upgrade',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
+      handler: route('POST', WRITE, async (req, res) => {
         if (upgrade.running) {
           sendJson(res, 409, { error: '升级进行中' })
           return
         }
-        try {
-          triggerUpgrade()
-        } catch (error) {
-          sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
-          return
-        }
+        triggerUpgrade()
         sendJson(res, 200, currentStatus())
-      },
+      }),
     },
     {
       path: '/api/maintain/restart',
-      handler: async (req, res) => {
-        if (!rejectNonPost(req, res)) return
+      handler: route('POST', WRITE, async (req, res) => {
+        // 与升级门闩互斥:升级子进程经 detached+unref 存活于宿主死后,
+        // 重启后新宿主门闩归零会放行第二次升级,双 npm install 并发写全局目录
+        if (upgrade.running) {
+          sendJson(res, 409, { error: '升级进行中,禁止重启;等待升级完成后重试' })
+          return
+        }
         if (typeof exit !== 'function') {
           sendJson(res, 500, { error: '启动器未提供 appExit,无法重启' })
           return
@@ -337,7 +349,7 @@ export function apply(ctx) {
         sendJson(res, 200, { ok: true, restarting: true })
         // 响应先冲刷再请求退出;托管环境由进程管理器拉起,dispose 挂起时 5 秒兜底强制
         setImmediate(() => exit(0))
-      },
+      }),
     },
   ]
 

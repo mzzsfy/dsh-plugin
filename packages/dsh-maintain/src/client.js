@@ -75,6 +75,8 @@ const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
 
+// 判定常量与 host 侧 core.mjs 保持一致:client 半区无法 import ESM,
+// test/parity.test.mjs 按 const 名正则提取对拍,修改任一侧必须同步。
 const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
 const VERDICT_UNKNOWN = 'unknown'
@@ -318,10 +320,12 @@ function MaintainApp() {
   }, [status, restarting])
 
   // 重启判定与 core.mjs shouldReloadAfterRestart 同源:client 半区无法 import ESM,修改需两处同步。
+  // LOGIC-BEGIN shouldReloadAfterRestart
   function shouldReloadAfterRestart(params) {
     if (params.lost) return true
     return typeof params.pidBefore === 'number' && typeof params.pidAfter === 'number' && params.pidBefore !== params.pidAfter
   }
+  // LOGIC-END shouldReloadAfterRestart
 
   // 重启确认后轮询状态:退出窗口的请求失败是预期中间态,静默记入 ref 不展示错误;
   // 失联后恢复或宿主 pid 变化(快速重启零失联)即宿主已重启,整页刷新以加载新版本。
@@ -396,9 +400,11 @@ function MaintainApp() {
   }
 
   // 与 host 的 isValidRegistryBase 同源:client 半区无法 import ESM,修改需两处同步。
+  // LOGIC-BEGIN isValidRegistryBase
   function isValidRegistryBase(value) {
     return typeof value === 'string' && /^https?:\/\//i.test(value.trim())
   }
+  // LOGIC-END isValidRegistryBase
 
   function onRegistryBase(raw) {
     const base = typeof raw === 'string' ? raw.trim() : ''
