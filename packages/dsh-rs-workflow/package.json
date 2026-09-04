@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
   "description": "若水工作流一体化:安装即得 rs-workflow agent 模式(协议技能、编排引擎、模式组合),含设置表单与工作流配置工具",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
