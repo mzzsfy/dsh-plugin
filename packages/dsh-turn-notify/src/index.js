@@ -7,7 +7,6 @@ import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import {
   CATEGORIES,
   CATEGORY_ASK,
@@ -46,7 +45,7 @@ export const name = 'dsh-turn-notify'
 
 export const inject = ['webServer']
 
-const NAMESPACE = settingsNamespace('turn-notify')
+const NAMESPACE = 'turn-notify'
 const SOUNDS_DIR = join(homedir(), '.dsh', 'dsh-turn-notify', 'sounds')
 const REQUEST_BODY_MAX_BYTES = 64 * 1024
 
