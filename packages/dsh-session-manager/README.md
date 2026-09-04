@@ -7,7 +7,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 - 自动归档:host 半区监听 `session/created`,对该会话所属工作区评估——超过 N 天未活动、非运行中、非空白的会话逐个走官方 `workspace.archiveSession` 通道。幂等:已归档会话不参与评估。阈值 `autoArchiveDays` 默认 7,`0` 关闭,经 settings 命名空间 `session-manager` 注册(schema 拒绝负数与非整数)。
 - 归档面板:设置页「会话归档」分区,数据为 client 侧 `session.list` 行 ∩ `workspaces.follow` 归档快照的交集,按更新时间倒序;行内支持取消归档与删除。
 - 归档 Toast:host 归档动作经 `workspace.follow` 的 `archived` 增量帧到达 client,集合差分得到新增条数 N,在 `shell.overlay` 槽位显示「有 N 个会话已归档」,持续 4 秒。
-- 删除:仅对已归档会话生效,两段式确认(展示标题 / 更新时间 / 日志体积,产物已缺失时以「产物已丢失」替代体积)后按 locate → trash → 台账 → detach → 归档清理单序执行。会话产物目录整体移入系统回收站(Windows PowerShell VisualBasic / macOS Finder / Linux gio),可还原,不做直接删除降级。trash 成功即写入已删除台账(独立 storage domain `session_manager`),记录会话 id 与产物原位置。产物已缺失的会话(如本进程内已删除过、或回收站还原前的重试)不要求归档资格:跳过回收与台账,仅解除列表关联,提示「产物已不存在,已完成列表清理」。
+- 删除:仅对已归档会话生效(运行中守卫先于执行,运行中的会话不可删除),两段式确认(展示标题 / 日志体积,产物已缺失时以「产物已丢失」替代体积,悬停可查更新时间)后按 locate → trash → 台账 → detach → 归档清理单序执行。会话产物目录整体移入系统回收站(Windows PowerShell VisualBasic / macOS Finder / Linux gio),可还原,不做直接删除降级。trash 成功即写入已删除台账(独立 storage domain `session_manager`),记录会话 id 与产物原位置。产物已缺失的会话(如本进程内已删除过、或回收站还原前的重试)不要求归档资格:跳过回收与台账,仅解除列表关联,提示「产物已不存在,已完成列表清理」。
 - 已删除分区与重挂载:面板「已删除」区列出台账条目(标题 / 原位置 / 删除时间)。用户在系统回收站将会话文件夹还原到原位置后点「重新挂载」,经官方 `workspace.attachSession` 挂回工作区列表并清除台账;「移除记录」幂等清除单条。还原动作本身始终由用户在系统回收站完成,插件不驱动系统回收站。
 
 ## 回收站还原与重新挂载

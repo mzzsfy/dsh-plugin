@@ -2,8 +2,8 @@
 # profile root. Applied by `dsh plugin add @mzzsfy/dsh-model-capability-editor`.
 # The row's only job is to pull the package into the profile so the client
 # module system materializes its `dsh.client` manifest entry; the host half
-# is a no-op plugin, and all behavior lives in src/client.js, which mounts
-# the capability card as its own settings.section entry.
+# is a no-op plugin, and all behavior lives in src/client.js, which injects inline editors into the official models page and falls back
+# to a floating panel when anchors break.
 
 - insert:
     - id: model-capability-editor

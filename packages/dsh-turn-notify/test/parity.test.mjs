@@ -20,6 +20,12 @@ import {
   DEFAULT_VOLUME,
   CLAIM_LOCK_TTL_MS,
   USER_IDLE_AWAY_MS,
+  CATEGORIES as coreCategories,
+  CATEGORY_LABELS as coreCategoryLabels,
+  DEFAULT_TONES as coreDefaultTones,
+  BUILTIN_TONES as coreBuiltinTones,
+  AUDIO_EXTS as coreAudioExts,
+  MIME_BY_EXT as coreMimeByExt,
 } from '../src/core.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -33,12 +39,28 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds };',
+      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
   )
   return factory()
 }
 
 const client = clientLogic()
+
+// 数据镜像常量对照:client 与 core 任一侧漂移即失败,防改文案或增删分类时静默失同步
+test('[parity 数据镜像] 分类清单与标签对照', () => {
+  assert.deepEqual(client.CATEGORIES, coreCategories)
+  assert.deepEqual(client.CATEGORY_LABELS, coreCategoryLabels)
+})
+
+test('[parity 数据镜像] 默认音效与内置音名标签对照', () => {
+  assert.deepEqual(client.DEFAULT_TONES, coreDefaultTones)
+  assert.deepEqual(client.TONE_LABELS, coreBuiltinTones)
+})
+
+test('[parity 数据镜像] 音频扩展名与 MIME 映射对照', () => {
+  assert.deepEqual(client.AUDIO_EXTS, coreAudioExts)
+  assert.deepEqual(client.MIME_BY_EXT, coreMimeByExt)
+})
 
 // client 段为位置参数签名,core 为对象签名,此处适配后逐场景对照。
 function clientDecideClaim({ stored, done, now, windowId, lockTtlMs }) {
@@ -59,6 +81,10 @@ function defineClaimScenarios(prefix, decide) {
     assert.equal(decide({ stored: JSON.stringify({ wid: 'w2', at: t0 }), done: null, now: t0 + CLAIM_LOCK_TTL_MS + 1, windowId: 'w1', lockTtlMs: CLAIM_LOCK_TTL_MS }), 'takeover')
     assert.equal(decide({ stored: null, done: '1', now: t0, windowId: 'w1', lockTtlMs: CLAIM_LOCK_TTL_MS }), 'done')
     assert.equal(decide({ stored: 'not-json', done: null, now: t0, windowId: 'w1', lockTtlMs: CLAIM_LOCK_TTL_MS }), 'takeover')
+    // undefined 域双实现同形:视为无记录而非终态
+    assert.equal(decide({ stored: null, done: undefined, now: t0, windowId: 'w1', lockTtlMs: CLAIM_LOCK_TTL_MS }), 'claim')
+    assert.equal(decide({ stored: undefined, done: null, now: t0, windowId: 'w1', lockTtlMs: CLAIM_LOCK_TTL_MS }), 'claim')
+    assert.equal(decide({ stored: 'not-json', done: undefined, now: t0, windowId: 'w1', lockTtlMs: CLAIM_LOCK_TTL_MS }), 'takeover')
   })
 }
 

@@ -15,7 +15,8 @@ export const INPUT_TEXT_IMAGE = 'text-image'
 export const COMPETITOR_MARKERS = ['reasoningEffortsUnset', 'inputUnset']
 
 // reasoningEfforts 写回值 → 编辑器勾选/拼写草稿。false 仅勾 off;对象按键勾选,
-// null 拼写为空;未声明无任何勾选。
+// null 拼写为空;未声明无任何勾选。只收词汇表内档位:词汇表外键不在 UI 呈现
+// 也不可编辑,进种子会让"未触及"判定误判为已编辑。
 export function effortsToDrafts(value) {
   const checked = {}
   const spellings = {}
@@ -23,6 +24,7 @@ export function effortsToDrafts(value) {
     checked[OFF_LEVEL] = true
   } else if (value !== null && typeof value === 'object') {
     for (const level of Object.keys(value)) {
+      if (EFFORT_LEVELS.indexOf(level) < 0) continue
       checked[level] = true
       spellings[level] = value[level] === null ? '' : String(value[level])
     }
@@ -65,30 +67,58 @@ export function modeToInput(mode) {
   return undefined
 }
 
+// reasoningEfforts 基线的可表达形态:未声明(undefined)/ false / null / 纯对象。
+// 未声明必须可表达:给无档位模型添加档位声明是本插件核心场景。其余(字符串、
+// 数组等非本插件写入的异型形态)不参与档位重写,编辑时跳过该字段防误删。
+export function isExpressibleEfforts(value) {
+  return value === undefined || value === false || value === null
+    || (typeof value === 'object' && !Array.isArray(value))
+}
+
+// 勾选/拼写两表逐键相等(键集合一致且值全等)
+function draftMapsEqual(a, b) {
+  const ak = Object.keys(a || {})
+  const bk = Object.keys(b || {})
+  if (ak.length !== bk.length) return false
+  return ak.every((key) => (a || {})[key] === (b || {})[key])
+}
+
 // 单模型应用草稿:仅写 reasoningEfforts 与 input 两字段,其余字段保留最新条目值。
+// 未触及判定:草稿与当前基线的投影逐键一致即视为用户未编辑该字段,跳过重写,
+// 私有模态(input 含网关私有值)与词汇表外档位在整组保存时真正原样保留。
+// 词汇表外档位透传基线取"写回时点的最新条目值"而非草稿快照,冲突重放路径下
+// 他方并发新增的外档位不丢;基线为不可表达形态(字符串/数组)时跳过该字段防误删。
 export function applyDraft(model, draft) {
   const result = { ...model }
-  const efforts = draftsToEfforts(draft, draft.baselineEfforts)
-  if (efforts === undefined) delete result.reasoningEfforts
-  else result.reasoningEfforts = efforts
-  const input = modeToInput(draft.inputMode)
-  if (input === undefined) delete result.input
-  else result.input = input
+  const seeded = effortsToDrafts(model.reasoningEfforts)
+  const effortsUntouched = draftMapsEqual(seeded.checked, draft.checked) &&
+    draftMapsEqual(seeded.spellings, draft.spellings)
+  if (!effortsUntouched && isExpressibleEfforts(model.reasoningEfforts)) {
+    const efforts = draftsToEfforts(draft, model.reasoningEfforts)
+    if (efforts === undefined) delete result.reasoningEfforts
+    else result.reasoningEfforts = efforts
+  }
+  if (draft.inputMode !== inputToMode(model.input)) {
+    const input = modeToInput(draft.inputMode)
+    if (input === undefined) delete result.input
+    else result.input = input
+  }
   return result
 }
 
 // 整组写回:以 describe 读到的模型数组为基线,仅重写有草稿的条目,未编辑条目原样保留。
+// 返回合并结果与未命中基线的草稿 id(他方删除该模型后草稿无处可写),调用方负责告警。
+// 键一律 String 归一:DOM 输入与 UI 状态恒为字符串,基线 id 形态不定。
 export function mergeBaselineModels(baselineModels, draftsById) {
-  return baselineModels.map((model) => {
-    const draft = draftsById.get(model.id)
+  const droppedDraftIds = []
+  const models = baselineModels.map((model) => {
+    const draft = draftsById.get(String(model.id))
     return draft === undefined ? model : applyDraft(model, draft)
   })
-}
-
-// 冲突重放:在最新数组上仅重放本次用户修改的模型条目的两个字段,
-// 非本次修改的条目保留最新文档值,本次未声明的模型不被删除。
-export function replayDrafts(latestModels, draftsById) {
-  return mergeBaselineModels(latestModels, draftsById)
+  for (const id of draftsById.keys()) {
+    if (!baselineModels.some((model) => String(model.id) === String(id))) droppedDraftIds.push(id)
+  }
+  return { models, droppedDraftIds }
 }
 
 // 竞品写入痕迹检测:返回带词汇表外标记字段的模型 id 列表。
@@ -110,11 +140,12 @@ export function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
-// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘),
-// 以新 id 为准;否则回落原 id,保证写回必然命中基线条目。
+// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘,
+// 原 id 已从基线消失),以新 id 为准;原 id 仍在基线视为撞名,回落原 id。
 export function resolveTargetId(liveId, originalId, baselineIds) {
   const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
-  return typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) ? liveId : originalId
+  const renamed = typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) && !ids.has(originalId)
+  return renamed ? liveId : originalId
 }
 
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
@@ -137,33 +168,19 @@ function unwrapResult(result) {
   throw error
 }
 
-// 宿主 wire 信封 → 插件内部 RPC 信封:{result:{ok,value|error}} 归一为 {ok,value|error}。
-export function unwrapWire(response) {
-  const result = response !== null && typeof response === 'object' ? response.result : undefined
-  if (result !== null && typeof result === 'object' && result.ok === true) return { ok: true, value: result.value }
+// dsh 0.1.2 remote.settings 服务 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// remote 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+export function makeSettingsFace(remote) {
+  if (remote === null || typeof remote !== 'object' ||
+      typeof remote.describe !== 'function' || typeof remote.mutate !== 'function') return null
   return {
-    ok: false,
-    error: result !== null && typeof result === 'object' && result.error !== undefined
-      ? result.error
-      : { code: undefined, message: 'settings RPC 调用失败' },
-  }
-}
-
-// 宿主 connection.api.settings wire 面 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
-// wire 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
-export function makeSettingsFace(wire) {
-  if (wire === null || typeof wire !== 'object' ||
-      typeof wire.describe !== 'function' || typeof wire.mutate !== 'function') return null
-  return {
-    describe: async () => unwrapWire(await wire.describe({})),
-    mutate: async (ns, ops, expectedRevision) => unwrapWire(await wire.mutate(
-      { ns, ops, ...(expectedRevision === undefined ? {} : { expectedRevision }) },
-    )),
+    describe: async () => unwrapResult(await remote.describe()),
+    mutate: async (ns, ops, expectedRevision) => unwrapResult(await remote.mutate(ns, ops, expectedRevision)),
   }
 }
 
 async function describeNs(settings) {
-  const value = unwrapResult(await settings.describe())
+  const value = await settings.describe()
   const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
   if (ns === undefined) throw new Error('settings 中不存在 ' + NS + ' 命名空间')
   return { writable: value.writable === true, revision: ns.revision, value: ns.value }
@@ -176,13 +193,13 @@ function modelsOf(nsValue, route) {
 }
 
 async function writeModels(settings, route, models, revision) {
-  return unwrapResult(await settings.mutate(NS, [
+  return settings.mutate(NS, [
     { op: 'set', path: ['providers', route, 'models'], value: models },
-  ], revision))
+  ], revision)
 }
 
-// 保存流:describe 取基线与 revision → mutate 整组写回;冲突则重读并按字段级
-// diff 重放一次,再冲突报错终止,绝不静默覆盖。返回已写回的模型数组。
+// 保存流:冲突重读重放一次,再冲突报错终止,绝不静默覆盖。
+// 返回已写回的模型数组与未命中基线的草稿 id(模型已被他方删除,编辑未落盘)。
 export async function saveModels(settings, route, draftsById) {
   const first = await describeNs(settings)
   if (!first.writable) {
@@ -191,7 +208,7 @@ export async function saveModels(settings, route, draftsById) {
     throw error
   }
   const attempt = (baseline, revision) =>
-    writeModels(settings, route, mergeBaselineModels(baseline, draftsById), revision)
+    writeModels(settings, route, mergeBaselineModels(baseline, draftsById).models, revision)
   let baseline = modelsOf(first.value, route)
   let revision = first.revision
   try {
@@ -212,4 +229,19 @@ export async function saveModels(settings, route, draftsById) {
     }
   }
   return mergeBaselineModels(baseline, draftsById)
+}
+
+// 基线模型 → 可编辑草稿 Map(初值 = 当前声明)。键一律 String:基线 id 形态不定,
+// 而 UI 与 DOM 侧的模型标识恒为字符串。
+export function draftsFromModels(models) {
+  const drafts = new Map()
+  for (const model of Array.isArray(models) ? models : []) {
+    const efforts = effortsToDrafts(model.reasoningEfforts)
+    drafts.set(String(model.id), {
+      checked: efforts.checked,
+      spellings: efforts.spellings,
+      inputMode: inputToMode(model.input),
+    })
+  }
+  return drafts
 }

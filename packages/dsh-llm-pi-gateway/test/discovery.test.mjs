@@ -123,3 +123,95 @@ test('draft 无键时用存量凭据探测', async () => {
   assert.equal(asked, true)
   assert.equal(fetchOk.captured.init.headers.authorization, 'Bearer sk-stored')
 })
+
+function streamingResponse(chunks, { headers = {} } = {}) {
+  const encoder = new TextEncoder()
+  const queue = chunks.map((chunk) => encoder.encode(chunk))
+  return {
+    ok: true,
+    status: 200,
+    headers: new Map(Object.entries(headers)),
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (queue.length === 0) return { done: true }
+            return { done: false, value: queue.shift() }
+          },
+          async cancel() {
+            streamingResponse.cancelled = true
+          },
+        }
+      },
+    },
+  }
+}
+
+test('流式累计超限拒收且取消 reader', async () => {
+  streamingResponse.cancelled = false
+  const chunk = 'x'.repeat(1024 * 1024)
+  assert.equal(await codeOf(discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    async () => streamingResponse([chunk, chunk, chunk, chunk, chunk]),
+  )), 'DISCOVERY_FAILED')
+  assert.equal(streamingResponse.cancelled, true)
+})
+
+test('body 为 null 返回空串落 JSON 解析失败;无 reader 兜底限量读', async () => {
+  assert.equal(await codeOf(discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    async () => ({ ok: true, status: 200, headers: new Map(), body: null }),
+  )), 'DISCOVERY_FAILED')
+  assert.equal(await codeOf(discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      body: { async text() { return 'x'.repeat(5 * 1024 * 1024) } },
+    }),
+  )), 'DISCOVERY_FAILED')
+  const listed = await discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    async () => ({
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      body: { async text() { return JSON.stringify({ data: [{ id: 'm1' }] }) } },
+    }),
+  )
+  assert.deepEqual(listed, [{ id: 'm1' }])
+})
+
+test('探测请求被中断且 signal 已取消时归 ABORTED', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const error = await discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example', signal: controller.signal },
+    async () => undefined,
+    async () => {
+      throw new Error('The operation was aborted')
+    },
+  ).then(
+    () => undefined,
+    (thrown) => thrown,
+  )
+  assert.equal(error.code, 'ABORTED')
+})
+
+test('空白探测键与不可入头字符键报 INVALID_CREDENTIAL', async () => {
+  assert.equal(await codeOf(discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example', apiKey: '   ' },
+    async () => undefined,
+    fetchOk({ data: [] }),
+  )), 'INVALID_CREDENTIAL')
+  assert.equal(await codeOf(discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example', apiKey: 'sk-\nline' },
+    async () => undefined,
+    fetchOk({ data: [] }),
+  )), 'INVALID_CREDENTIAL')
+})

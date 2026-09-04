@@ -12,7 +12,7 @@ DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方�
 
 ## 功能
 
-- provider 选择(来源为 describe 返回的 `providers` 键),列出各模型行(独立分区形态)。
+- provider 选择(来源为 describe 返回的 `providers` 键),列出各模型行(独立编辑卡形态,当前仅作为锚点破坏时的浮动回退面板呈现)。
 - 推理档位七档(off / minimal / low / medium / high / xhigh / max,与宿主 pi-ai `THINKING_LEVELS` 一致)复选框 + 每档线上值输入,判定表:
 
   | 勾选状态 | 写回行为 |

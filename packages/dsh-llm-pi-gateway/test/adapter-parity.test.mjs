@@ -161,6 +161,65 @@ test('requestHeaders:attribution 恒在,用户撞名头大小写不敏感剥除'
   assert.equal('User-Agent' in headers, false)
 })
 
+test('requestHeaders:undefined 与空头入参仅返回 attribution;attribution 全集在', () => {
+  const attributionKeys = Object.keys(requestHeaders(undefined))
+  assert.ok(attributionKeys.length > 0)
+  assert.deepEqual(Object.keys(requestHeaders({})).sort(), [...attributionKeys].sort())
+  for (const key of attributionKeys) {
+    const merged = requestHeaders({ [key]: 'blocked', [key.toUpperCase()]: 'blocked' })
+    assert.notEqual(merged[key], 'blocked')
+  }
+})
+
+test('stream:sessionId 缺失或空串拒绝(INVALID_REQUEST),且先于凭据解析', async () => {
+  const adapter = makeAdapter(baseProfile())
+  await assert.rejects(
+    collect(adapter.stream(request({ sessionId: '' }))),
+    (error) => error.code === 'INVALID_REQUEST',
+  )
+  await assert.rejects(
+    collect(adapter.stream(request({ sessionId: undefined }))),
+    (error) => error.code === 'INVALID_REQUEST',
+  )
+  // 顺序钉:凭据缺失路由上坏 sessionId 仍报 INVALID_REQUEST 而非 MISSING_CREDENTIAL
+  const credentialed = makeAdapter(baseProfile({ apiKeyEnv: 'DEFINITELY_UNSET_ENV_PI_GATEWAY' }))
+  await assert.rejects(
+    collect(credentialed.stream(request({ sessionId: '' }))),
+    (error) => error.code === 'INVALID_REQUEST',
+  )
+})
+
+test('stream:onDegrade 接线,历史 replay 损坏时回调携带原因', async () => {
+  const captured = []
+  const degradations = []
+  const routes = new Map([['new-api', resolveRoute('new-api', baseProfile())]])
+  const adapter = createGatewayAdapter(
+    routes,
+    async () => fakeProtocol(captured),
+    undefined,
+    undefined,
+    (reason) => degradations.push(reason),
+  )
+  const message = request()
+  message.messages = [
+    {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'earlier' }],
+      source: {
+        kind: 'model',
+        api: 'anthropic-messages',
+        provider: 'gw',
+        model: 'm1',
+        replayState: { response: { kind: 'wrong', version: 2 } },
+      },
+    },
+    ...message.messages,
+  ]
+  await collect(adapter.stream(message))
+  assert.equal(degradations.length, 1)
+  assert.match(degradations[0], /invalid pi-ai replay state/)
+})
+
 test('模型缺省容量用路由 defaultContextWindow / defaultMaxTokens / defaultInput', async () => {
   const captured = []
   const profile = {

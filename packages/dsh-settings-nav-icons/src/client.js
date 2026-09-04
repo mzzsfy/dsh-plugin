@@ -231,13 +231,15 @@ window.__ModuleLoader__.load({
     // 单元格替换判定:先看记账与现役图标;label 有声明或内置映射直接换,
     // 未映射时仅当现役图标是默认齿轮,才按 themedIcon(声明→关键词→哈希)兜底,
     // 官方自带图形(模型/插件/Agent 预设/使用统计)一律不动。
+    // 现役图标是本插件所贴且记账 label 未变时跳过;label 变化(如语言切换)则按新 label 重贴。
     function decide(cell) {
       const labelNode = cell.querySelector(SELECTOR_LABEL)
       if (labelNode === null) return null
       const label = labelNode.textContent || ''
       if (cell.dataset.navic === label && cell.querySelector('svg[' + ATTR_MARK + ']')) return null
       const old = cell.querySelector(SELECTOR_ICON)
-      if (old === null || old.dataset.navic === '1') return null
+      if (old === null) return null
+      if (old.dataset.navic === '1' && cell.dataset.navic === label) return null
       let html = resolveIcon(DECLARED_ICONS[label])
       if (html === undefined) html = ICONS[label]
       if (html === undefined) {

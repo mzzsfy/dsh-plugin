@@ -54,14 +54,15 @@ const INJECT_BY_PROTOCOL = {
  * 判别兜底;未知形状原样返回。恒定返回新对象,不改动入参。
  * @param {object} payload 协议请求体
  * @param {string} sessionId 原始会话 id
- * @param {{api?: string, prefix?: string, template?: object}} [options]
+ * @param {{api?: string, prefix?: string, template?: object, marker?: string}} [options]
+ *   marker 可传调用方已派生的标记,免于重复哈希
  */
-export function injectSessionMarker(payload, sessionId, { api, prefix, template } = {}) {
-  const marker = deriveMarker(sessionId, prefix)
+export function injectSessionMarker(payload, sessionId, { api, prefix, template, marker } = {}) {
+  const resolved = marker ?? deriveMarker(sessionId, prefix)
   const inject = INJECT_BY_PROTOCOL[api]
-  if (inject !== undefined) return inject(payload, marker, template)
-  if (isAnthropicPayload(payload)) return injectAnthropic(payload, marker, template)
-  if (isOpenAIPayload(payload)) return injectOpenAI(payload, marker)
+  if (inject !== undefined) return inject(payload, resolved, template)
+  if (isAnthropicPayload(payload)) return injectAnthropic(payload, resolved, template)
+  if (isOpenAIPayload(payload)) return injectOpenAI(payload, resolved)
   return payload
 }
 
@@ -69,9 +70,11 @@ export function injectSessionMarker(payload, sessionId, { api, prefix, template 
  * 构造挂到 pi-ai StreamOptions.onPayload 的标记回调;
  * enabled 为 false 时返回 undefined,由调用方不挂回调。
  * @param {string} sessionId 原始会话 id
- * @param {{api: string, prefix?: string, enabled?: boolean, template?: object}} routeOptions
+ * @param {{api: string, prefix?: string, enabled?: boolean, template?: object, marker?: string}} routeOptions
+ *   marker 可传调用方已派生的标记,免于重复哈希
  */
-export function markerOnPayload(sessionId, { api, prefix, enabled = true, template = {} } = {}) {
+export function markerOnPayload(sessionId, { api, prefix, enabled = true, template = {}, marker } = {}) {
   if (!enabled) return undefined
-  return (payload) => injectSessionMarker(payload, sessionId, { api, prefix, template })
+  const resolved = marker ?? deriveMarker(sessionId, prefix)
+  return (payload) => injectSessionMarker(payload, sessionId, { api, prefix, template, marker: resolved })
 }

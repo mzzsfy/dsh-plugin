@@ -6,6 +6,7 @@ import {
   gtSemver,
   judgeVersion,
   buildUpgradeCommand,
+  isValidChannelName,
   isValidRegistryBase,
   shouldReloadAfterRestart,
   VERDICT_OUTDATED,
@@ -113,6 +114,25 @@ test('场景:升级命令占位符多次出现全部替换', () => {
 test('场景:升级命令模板为空拒绝执行', () => {
   assert.throws(() => buildUpgradeCommand({ template: '   ', tag: 'latest' }), /模板/)
   assert.throws(() => buildUpgradeCommand({ template: null, tag: 'latest' }), /模板/)
+})
+
+test('场景:tag 含 shell 元字符拒绝执行(远端数据回流成命令的拦截点)', () => {
+  for (const tag of ['latest; rm -rf /', 'x && calc', 'a|b', '$(whoami)', '`id`', 'a b', '']) {
+    assert.throws(() => buildUpgradeCommand({ template: 'npm install -g pkg@{tag}', tag }), /非法字符/, tag)
+  }
+  for (const tag of ['latest', 'next', 'beta-1.2', 'canary_ignored', 'v1.0.0-rc.1']) {
+    assert.doesNotThrow(() => buildUpgradeCommand({ template: 'npm install -g pkg@{tag}', tag }), tag)
+  }
+})
+
+test('场景:tag 白名单形态对齐 npm dist-tag 规则(首尾字母数字,上限 214)', () => {
+  assert.equal(isValidChannelName('..'), false)
+  assert.equal(isValidChannelName('.a'), false)
+  assert.equal(isValidChannelName('a.'), false)
+  assert.equal(isValidChannelName('-a'), false)
+  assert.equal(isValidChannelName('a'), true)
+  assert.equal(isValidChannelName('a' + 'b'.repeat(213)), true, '恰 214 字符放行')
+  assert.equal(isValidChannelName('a' + 'b'.repeat(214)), false, '超 214 拒绝')
 })
 
 test('场景:registry 基地址合法判定', () => {

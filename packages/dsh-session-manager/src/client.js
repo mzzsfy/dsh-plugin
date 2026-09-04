@@ -149,12 +149,12 @@ function projectDeletedRows(deleted, listState) {
 
 // Toast 差分守卫:连续两个 ready 快照才计新增(镜像 core.mjs archiveToastStep)。
 // 模型订阅即时发射 pending 空态,基线(存量归档)成为第二帧;基线是重连权威而非
-// 归档事件,启动与重连首装不误报。
+// 归档事件,启动与重连首装不误报。差分用 Set,与 core.diffArchived 同构
 function archiveToastStep(previous, snapshot) {
   const ready = Boolean(snapshot && snapshot.phase === 'ready')
   const ids = (snapshot && snapshot.archivedSessionIds) || []
   const added = previous !== undefined && previous.ready && ready
-    ? ids.filter((id) => !previous.ids.includes(id))
+    ? ids.filter((id) => !new Set(previous.ids).has(id))
     : []
   return { state: { ready, ids }, added }
 }
@@ -237,7 +237,10 @@ function SessionManagerApp(props) {
   function refreshDeleted() {
     api(DELETED_URL)
       .then((payload) => setDeleted((payload && payload.deleted) || []))
-      .catch(() => setDeleted([]))
+      .catch((error) => {
+        // 加载失败保留旧数据:清空会让用户误读为台账已清空(数据丢失假象)
+        console.warn('[session-manager] 已删除列表加载失败', error)
+      })
   }
 
   useEffect(() => { refreshDeleted() }, [])

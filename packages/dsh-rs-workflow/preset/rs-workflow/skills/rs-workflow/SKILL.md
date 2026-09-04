@@ -80,7 +80,7 @@ description: 若水多模型协作工作流。非平凡编码需求（多步骤/
 
 配好后引擎按节点语境自动选位：任务首执行=`executor-task`、被拒重做=`executor-enhance`、失败重试=`executor-retry`、升级新任务=`executor-escalate`、计划审=`reviewer-plan`、任务审=`reviewer-task`、子计划审=`reviewer-subplan`、终审=`reviewer-final`、交叉终审=`reviewer-cross`、分诊=`planner-triage`、计划重写=`planner-command`、子计划细化=`planner-subplan`、升级重规划=`planner-escalate`。
 
-值格式三态：`"provider/model"` 字符串、候选数组 `["a/m1", "b/m2"]` 或 `{ rotation: ["a/m1", "b/m2"] }`（与 GUI 设置 schema 一致）：单候选/rotation 内失效时依次故障转移，被拒重做与审批重问从下一候选换模型（节点级游标轮换）。必须是当前部署模型路由里真实存在的目标。适配红线：reviewer 弱于 executor = 审批形同虚设。配置来源优先级：GUI 设置页 rs-workflow 段（`rs_workflow_config` 工具读取，即时生效）> 本技能目录 `slots.json5`（后备）> 会话默认模型。
+值格式：`"provider/model"` 字符串、候选数组 `["a/m1", "b/m2"]`、`{ rotation: ["a/m1", "b/m2"] }`（前三态与 GUI 设置 schema 一致）或 `{ provider, model }` 对象（引擎兼容形态，GUI 配置路径不可产出）：单候选/rotation 内失效时依次故障转移，被拒重做与审批重问从下一候选换模型（节点级游标轮换）。必须是当前部署模型路由里真实存在的目标。适配红线：reviewer 弱于 executor = 审批形同虚设。配置来源优先级：GUI 设置页 rs-workflow 段（`rs_workflow_config` 工具读取，即时生效）> 本技能目录 `slots.json5`（后备）> 会话默认模型。
 
 ## 6. 模板与阈值（细节见 references/templates.md）
 

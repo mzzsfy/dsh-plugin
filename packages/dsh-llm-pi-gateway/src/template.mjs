@@ -5,6 +5,20 @@ const PLACEHOLDER_SESSION_ID = '{sessionId}'
 const PLACEHOLDER_MARKER = '{marker}'
 
 /**
+ * 判定模板树中是否引用了 {marker} 占位符;配置期校验用,
+ * 与渲染语义同步(字符串包含即算引用)。
+ * @param {unknown} value 模板值
+ */
+export function templateUsesMarker(value) {
+  if (typeof value === 'string') return value.includes(PLACEHOLDER_MARKER)
+  if (Array.isArray(value)) return value.some((item) => templateUsesMarker(item))
+  if (typeof value === 'object' && value !== null) {
+    return Object.values(value).some((item) => templateUsesMarker(item))
+  }
+  return false
+}
+
+/**
  * 渲染一个模板值:字符串替换占位符,对象/数组递归,其他类型原样。
  * @param {unknown} value 模板值
  * @param {{sessionId: string, marker: string}} vars 占位符取值

@@ -1,5 +1,6 @@
 // 纯逻辑层:分类映射 / 过滤决策 / 投影 / 认领状态机 / webhook 组装 / 音效映射 / 上传校验。
-// 无外部依赖,host 与 client 均可复用;时间与随机经参数注入。
+// 无 npm 依赖,host 与 client 均可复用;readRawBody 与 sendWebhook 为 host 专属 I/O 辅助,
+// 依赖经参数注入保持可测。时间与随机经参数注入。
 
 export const CATEGORY_DONE = 'completed'
 export const CATEGORY_ERROR = 'error'
@@ -51,6 +52,11 @@ export const BUILTIN_TONES = {
 }
 
 export const AUDIO_EXTS = ['wav', 'mp3', 'ogg']
+
+// 扩展名到 MIME 的一比一映射:host 响应头使用,client 侧为镜像,由 parity 测试锁定
+export const MIME_BY_EXT = { wav: 'audio/wav', ogg: 'audio/ogg', mp3: 'audio/mpeg' }
+
+export const mimeOf = (ext) => MIME_BY_EXT[ext] ?? 'application/octet-stream'
 
 // 未显式设置音量时的默认值。
 export const DEFAULT_VOLUME = 0.6
@@ -218,24 +224,6 @@ export function resolveSound({ category, mapping, uploadedIds }) {
   return { kind: 'builtin', name: DEFAULT_TONES[category] }
 }
 
-// 删除音效后清除映射中的引用,残留键回落由 resolveSound 兜底。
-export function pruneMapping(mapping, removedId) {
-  const next = {}
-  for (const key of Object.keys(mapping || {})) {
-    if (mapping[key] !== removedId) next[key] = mapping[key]
-  }
-  return next
-}
-
-// 重命名音效后同步迁移映射中的引用。
-export function renameMapping(mapping, fromId, toId) {
-  const next = {}
-  for (const key of Object.keys(mapping || {})) {
-    next[key] = mapping[key] === fromId ? toId : mapping[key]
-  }
-  return next
-}
-
 // 音效名长度上限:供文件名与列表展示,超长截断提示不佳,直接拒绝。
 export const SOUND_NAME_MAX_CHARS = 64
 
@@ -267,28 +255,58 @@ export function validateUpload({ filename, size, totalBytes }) {
   return { ok: true, ext }
 }
 
-// 从会话事件流提取首个用户文本作为标题,超长截断;无用户文本返回 null。
-export function sessionTitle(events) {  for (const event of events) {
+// 回合起始记录滞留上限:会话异常终止不发 turn/end 时按超时回收
+export const OPEN_TURN_STALE_MS = 60 * 60 * 1000
+
+// 未封账会话的事件保留上限:标题只依赖首个文本块,超限截尾防无文本消息无限累积
+export const SESSION_EVENTS_MAX = 8
+
+// 惰性过期:删除时间戳早于 maxAgeMs 的条目,防异常时序下按会话容器无界滞留。
+export function pruneTimestamps(map, now, maxAgeMs) {
+  for (const [key, at] of map) {
+    if (now - at > maxAgeMs) map.delete(key)
+  }
+}
+
+// 从会话事件流提取首个用户文本作为标题,超长按码点截断防切断代理对;无用户文本返回 null。
+export function sessionTitle(events) {
+  for (const event of events) {
     if (event.type !== 'user/message') continue
     const blocks = event.data && Array.isArray(event.data.content) ? event.data.content : []
     for (const block of blocks) {
       if (block && typeof block.text === 'string' && block.text.trim().length > 0) {
         const text = block.text.trim()
-        return text.length <= TITLE_MAX_CHARS ? text : text.slice(0, TITLE_MAX_CHARS)
+        if (text.length <= TITLE_MAX_CHARS) return text
+        // 先按码元粗截再按码点收尾,避免对超长文本全量分配码点数组
+        const head = text.slice(0, TITLE_MAX_CHARS + 1)
+        return Array.from(head).slice(0, TITLE_MAX_CHARS).join('')
       }
     }
   }
   return null
 }
 
-// 会话事件有界累积:仅 user/message 入库;标题一旦可提取即封账,
-// 该会话后续事件不再累积,store 与 titled 原位更新。
+// 会话事件有界累积:仅 user/message 入库;标题一旦可提取即封账,封账后 store 中
+// 以标题字符串替代事件数组,未封账会话超上限截尾,store 与 titled 原位更新。
 export function collectSessionEvents(store, titled, sessionId, event) {
   if (event.type !== 'user/message') return
   if (titled.has(sessionId)) return
-  const events = (store.get(sessionId) || []).concat([event])
-  store.set(sessionId, events)
-  if (sessionTitle(events) !== null) titled.add(sessionId)
+  const events = store.get(sessionId)
+  const merged = (Array.isArray(events) ? events : []).concat([event]).slice(-SESSION_EVENTS_MAX)
+  const title = sessionTitle(merged)
+  if (title === null) store.set(sessionId, merged)
+  else {
+    titled.add(sessionId)
+    store.set(sessionId, title)
+  }
+}
+
+// 会话标题读取:封账会话为字符串,未封账为事件数组,空缺为 null。
+export function storedSessionTitle(store, sessionId) {
+  const value = store.get(sessionId)
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return sessionTitle(value)
+  return null
 }
 
 // 映射路由音效 id 校验:空串(清除映射)放行,其余须为已上传 id 或内置音名。
@@ -469,10 +487,17 @@ export function validateConfigPatch(patch) {
 
 // 面板读取的解析形态:enabled 缺省键按开补全,字段类型异常回退默认值;
 // 时长统一取整到非负整数,与写路径校验宽松度一致(yaml 手写小数不产生读存差)。
+// soundMapping 仅保留非空字符串值:settings.update 深合并无法物理删除嵌套键,
+// 清除信号经 schema 归一落为 null 或空串,此处过滤使逻辑删除对下游透明。
 export function resolvedConfig(settings) {
   const source = settings || {}
   const enabled = (typeof source.enabled === 'object' && source.enabled !== null) ? source.enabled : {}
-  const soundMapping = (typeof source.soundMapping === 'object' && source.soundMapping !== null) ? source.soundMapping : {}
+  const rawMapping = (typeof source.soundMapping === 'object' && source.soundMapping !== null) ? source.soundMapping : {}
+  const soundMapping = {}
+  for (const key of Object.keys(rawMapping)) {
+    const value = rawMapping[key]
+    if (typeof value === 'string' && value.length > 0) soundMapping[key] = value
+  }
   const duration = Number.isFinite(source.minTurnDurationMs) ? Math.max(0, Math.floor(source.minTurnDurationMs)) : MIN_TURN_DURATION_MS
   return {
     webhookUrl: typeof source.webhookUrl === 'string' ? source.webhookUrl : '',
@@ -480,7 +505,7 @@ export function resolvedConfig(settings) {
     rootsOnly: source.rootsOnly !== false,
     suppressSubagentWake: source.suppressSubagentWake !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
-    soundMapping: { ...soundMapping },
+    soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
   }
 }

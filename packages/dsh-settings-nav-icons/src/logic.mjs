@@ -218,13 +218,15 @@ export const DECLARED_ICONS = {}
 // 单元格替换判定:先看记账与现役图标;label 有声明或内置映射直接换,
 // 未映射时仅当现役图标是默认齿轮,才按 themedIcon(声明→关键词→哈希)兜底,
 // 官方自带图形(模型/插件/Agent 预设/使用统计)一律不动。
+// 现役图标是本插件所贴且记账 label 未变时跳过;label 变化(如语言切换)则按新 label 重贴。
 export function decide(cell, query = (cell, sel) => cell.querySelector(sel)) {
   const labelNode = query(cell, '.VOzbGW_navLabel')
   if (labelNode === null) return null
   const label = labelNode.textContent || ''
   if (cell.dataset.navic === label && query(cell, 'svg[' + ATTR_MARK + ']')) return null
   const old = query(cell, 'svg')
-  if (old === null || old.dataset.navic === '1') return null
+  if (old === null) return null
+  if (old.dataset.navic === '1' && cell.dataset.navic === label) return null
   let html = resolveIcon(DECLARED_ICONS[label])
   if (html === undefined) html = ICONS[label]
   if (html === undefined) {

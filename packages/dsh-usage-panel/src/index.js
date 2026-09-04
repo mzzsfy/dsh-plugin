@@ -4,7 +4,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import {
   parseDeepSeek,
@@ -28,7 +27,7 @@ const HISTORY_FILE = join(DATA_DIR, 'history.json')
 const TICK_SEC = 30
 const SHORT_SUFFIX = '5h'
 
-const NAMESPACE = settingsNamespace('usage-panel')
+const NAMESPACE = 'usage-panel'
 
 const SETTINGS_SCHEMA = z.object({
   pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('定期查询间隔秒数,仅正数有效'),

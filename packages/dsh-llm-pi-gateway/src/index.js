@@ -1,25 +1,21 @@
 // llm-pi-gateway Host 半区:注册 settings 命名空间 llm-pi-gateway,按其路由表
-// 经 ctx.llm 注册网关 adapter。配置只在启动解析一次,修改需重启生效。
+// 经 ctx.llm 注册网关 adapter。配置经 settings onChange 热更新,解析失败保旧。
 
 import z from '@deepseek-ai/schemastery'
-import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { RetryPolicySchema, resolveImageAttachmentAccess } from '@deepseek-ai/dsh-llm'
 import { Config as OfficialConfig } from '@deepseek-ai/dsh-llm-pi-ai'
-import { mergeProviderSections, resolveRoutes, OFFICIAL_SETTINGS_NS } from './config.mjs'
+import { mergeProviderSections, resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
 import { createGatewayAdapter } from './adapter.mjs'
 import { createCredentialResolver } from './credentials.mjs'
-import { createRouteManager, SETTINGS_NS } from './manager.mjs'
+import { createRouteManager } from './manager.mjs'
 import { discoverModels } from './discovery.mjs'
 
 export const name = 'llm-pi-gateway'
 
-const NS = settingsNamespace(SETTINGS_NS)
-const OFFICIAL_NS = settingsNamespace(OFFICIAL_SETTINGS_NS)
+const NS = SETTINGS_NS
+const OFFICIAL_NS = OFFICIAL_SETTINGS_NS
 
 export const inject = ['llm', 'settings']
-
-// pi-ai 思考档位全集(官方 dsh-llm-pi-ai 同款常量)
-const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 const reasoningEfforts = z.dict(z.union([z.string(), z.const(null)]), z.union(THINKING_LEVELS))
 
@@ -84,18 +80,18 @@ export function apply(ctx, config) {
     memoized = next
     return next
   }
-  const adapter = createGatewayAdapter(profiles, undefined, createCredentialResolver(ctx), () => ctx.get('attachments'))
+  // 凭据解析器无状态,单例闭包复用(adapter 注册与模型发现共用)
+  const resolveCredential = createCredentialResolver(ctx)
+  const adapter = createGatewayAdapter(profiles, undefined, resolveCredential, () => ctx.get('attachments'), (reason) => {
+    ctx.logger.warn('llm-pi-gateway: replay 降级为 provider 中性历史: ' + reason)
+  }, (attachments, ref) => resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref))
   const manager = createRouteManager({
     routes: profiles,
     adapter,
     registerAdapter: (providers, registered) => ctx.llm.registerAdapter(providers, registered),
     registerDirectory: (entries) => ctx.llm.registerConfigurableProviders(entries),
   })
-  ctx.llm.registerModelDiscovery(NS, (request) => discoverModels(request, async () => {
-    const route = profiles().get(request.provider)
-    if (route === undefined || route.apiKeyEnv === undefined) return undefined
-    return createCredentialResolver(ctx)(request.provider, route.apiKeyEnv)
-  }))
+  ctx.llm.registerModelDiscovery(NS, (request) => discoverModels(request, () => resolveCredential(request.provider, profiles().get(request.provider)?.apiKeyEnv)))
   const onSectionChange = () => {
     try {
       manager.ensureRegistration()
@@ -112,8 +108,10 @@ export function apply(ctx, config) {
   }
   // 官方节接管:官方插件被本包 patch 禁用后,其 settings 节由本包以官方
   // schema 注册。若注册冲突(patch 失效、官方仍在),降级为只服务本包节。
+  // validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles 快照记忆。
   try {
-    installSettingsSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
+    ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
+      validate: (section) => resolveRoutes(section.providers, readGateway()?.providers),
       setSource: (source) => {
         readOfficial = source
       },
@@ -123,7 +121,7 @@ export function apply(ctx, config) {
     ctx.logger.error('llm-pi-gateway: 官方 llm-pi-ai 节接管失败(官方插件仍在?),降级为只服务 llm-pi-gateway 节')
     ctx.logger.error(error)
   }
-  installSettingsSection(ctx, NS, Config, config, {
+  ctx.settings.installSection(ctx, NS, Config, config, {
     validate: (section) => resolveRoutes(readOfficial()?.providers, section.providers),
     setSource: (source) => {
       readGateway = source

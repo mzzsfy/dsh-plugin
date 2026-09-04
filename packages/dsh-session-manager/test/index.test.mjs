@@ -170,8 +170,183 @@ function response() {
 const HEADER = { id: 's1', cwd: 'C:\\x', createdAt: 0 }
 
 test('inject 声明覆盖路由层触及的全部宿主服务(cordis 未声明即抛 cannot get property)', skipMissingDeps, () => {
-  for (const service of ['webServer', 'workspaceRegistry', 'sessionQuery', 'storageDomain']) {
+  for (const service of ['webServer', 'workspaceRegistry', 'sessionQuery', 'storageDomain', 'agents', 'sessions', 'sessionPersistence']) {
     assert.ok(declaredInject.includes(service), `inject 缺少 "${service}"`)
+  }
+})
+
+test('请求体非法 JSON:协议错误与业务错误分通道,不透出引擎 SyntaxError', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [], agents: new Map() })
+  const req = new EventEmitter()
+  req.method = 'POST'
+  process.nextTick(() => {
+    req.emit('data', Buffer.from('{not json'))
+    req.emit('end')
+  })
+  const res = response()
+  await handlers.get('/api/session-manager/unarchive')(req, res)
+  assert.equal(res.status, 400)
+  assert.equal(res.body.error, '请求体不是合法 JSON')
+})
+
+test('自动归档评估门闩:评估进行中的新触发被丢弃不排队', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-gate-'))
+  try {
+    const alivePath = path.join(dir, 'alive.jsonl')
+    await writeFile(alivePath, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(alivePath, stale / 1000, stale / 1000)
+    const cwd = 'C:\\x'
+    const headers = [{ id: 's1', cwd, createdAt: stale }]
+    const { eventHandlers, registry } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      sessionPersistence: { locate: (header) => ({ path: alivePath }) },
+    })
+    eventHandlers['session/created']({ header: { id: 'trigger', cwd } })
+    await waitFor(() => registry.archiveCalls.length > 0)
+    // 同步连发两触发:第一个进门并置门闩,第二个(评估在途)被丢弃
+    eventHandlers['session/created']({ header: { id: 'trigger2', cwd } })
+    eventHandlers['session/created']({ header: { id: 'trigger3', cwd } })
+    await waitFor(() => registry.archiveCalls.length >= 2)
+    // 给在途评估留完成窗口后断言:被丢弃的触发不会产生第三轮归档
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(registry.archiveCalls.length, 2)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('并发删除:台账串行化不丢条目', skipMissingDeps, async () => {
+  const artifactA = await makeLocatedArtifact('a')
+  const artifactB = await makeLocatedArtifact('b')
+  try {
+    const headers = [
+      { id: 'a', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'b', cwd: 'C:\\x', createdAt: 0 },
+    ]
+    const workspace = makeWorkspace('C:\\x', ['a', 'b'])
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['a', 'b'],
+      headers,
+      agents: new Map([['a', { status: 'idle' }], ['b', { status: 'idle' }]]),
+      domain: makeDomain(['a', 'b']),
+      sessionPersistence: { locate: (header) => header.id === 'a' ? { path: artifactA.locatedPath } : { path: artifactB.locatedPath } },
+      workspaces: [workspace],
+    })
+    const resA = response()
+    const resB = response()
+    await Promise.all([
+      withTrashStub(async () => {}, async () => {
+        await handlers.get('/api/session-manager/delete')(request('a'), resA)
+      }),
+      withTrashStub(async () => {}, async () => {
+        await handlers.get('/api/session-manager/delete')(request('b'), resB)
+      }),
+    ])
+    assert.equal(resA.status, 200)
+    assert.equal(resB.status, 200)
+    // 串行化后两条台账都在;丢失更新会让后写者只剩自己的条目
+    assert.deepEqual(ledger.state.deleted.map((item) => item.sessionId).sort(), ['a', 'b'])
+  } finally {
+    await artifactA.cleanup()
+    await artifactB.cleanup()
+  }
+})
+
+test('同 id 并发删除:第二个请求收到 in-flight 提示', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    let releaseTrash
+    const trashGate = new Promise((resolve) => { releaseTrash = resolve })
+    const workspace = makeWorkspace('C:\\x', ['s1'])
+    const { handlers } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents: IDLE_S1,
+      domain: makeDomain(['s1']),
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+      workspaces: [workspace],
+    })
+    const first = response()
+    const firstDone = withTrashStub(async () => { await trashGate }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), first)
+    })
+    // 等 trash 进入挂起后再发第二发
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const second = response()
+    await handlers.get('/api/session-manager/delete')(request('s1'), second)
+    assert.equal(second.status, 400)
+    assert.equal(second.body.error, '该会话正在删除中,请稍后重试')
+    releaseTrash()
+    await firstDone
+  } finally {
+    await artifact.cleanup()
+  }
+})
+
+test('多工作区 detach:首个失败不终止后续,全部失败进日志', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    const broken = makeWorkspace('C:\\one', ['s1'], { detachError: new Error('one boom') })
+    const healthy = makeWorkspace('C:\\two', ['s1'])
+    const { handlers } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents: IDLE_S1,
+      domain: makeDomain(['s1']),
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+      workspaces: [broken, healthy],
+    })
+    const res = response()
+    await withTrashStub(async () => {}, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.partial, true)
+    assert.equal(res.body.message, '已移入回收站,但移除列表记录失败')
+    // 健康工作区仍被解除关联
+    assert.deepEqual(healthy.sessionIds, [])
+  } finally {
+    await artifact.cleanup()
+  }
+})
+
+test('取消归档:域领先快照时反向合并清理', skipMissingDeps, async () => {
+  const domain = makeDomain(['s1'])
+  const { handlers, registry } = makeCtx({ archivedIds: [], headers: [HEADER], agents: new Map(), domain })
+  const res = response()
+  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body, { ok: true })
+  // durable 有而快照无:合并后仍完成移除,防漏清理
+  assert.deepEqual(domain.state.archivedSessionIds, [])
+  assert.equal(domain.writes, 1)
+  assert.deepEqual(registry.state.archivedSessionIds, [])
+})
+
+test('台账 deletedAt 为删除时刻的数值(面板排序依据)', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    const before = Date.now()
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents: IDLE_S1,
+      domain: makeDomain(['s1']),
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+    })
+    const res = response()
+    await withTrashStub(async () => {}, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    })
+    assert.equal(res.status, 200)
+    const deletedAt = ledger.state.deleted[0].deletedAt
+    assert.ok(typeof deletedAt === 'number' && deletedAt >= before && deletedAt <= Date.now() + 1000)
+  } finally {
+    await artifact.cleanup()
   }
 })
 
@@ -345,9 +520,9 @@ async function withTrashStub(stub, run) {
 const IDLE_S1 = new Map([['s1', { status: 'idle' }]])
 
 // locate 契约实证:返回会话目录下的日志文件;stat 为真实 fs,产物以临时文件承载
-async function makeLocatedArtifact() {
+async function makeLocatedArtifact(sessionId = 's1') {
   const root = await mkdtemp(path.join(tmpdir(), 'sm-del-'))
-  const locatedDir = path.join(root, 's1')
+  const locatedDir = path.join(root, sessionId)
   const locatedPath = path.join(locatedDir, 'session.jsonl.zstd')
   await mkdir(locatedDir, { recursive: true })
   await writeFile(locatedPath, 'log-bytes')
@@ -414,16 +589,18 @@ test('删除成功:同 id 残留台账被替换,无重复条目', skipMissingDep
   }
 })
 
-test('删除:产物已缺失时跳过 trash 与台账,完成列表清理', skipMissingDeps, async () => {
+test('删除:产物已缺失时跳过 trash 与台账,完成列表清理(同 id 重删场景)', skipMissingDeps, async () => {
   const domain = makeDomain([])
   const workspace = makeWorkspace('C:\\x', ['s1'])
   const { handlers, ledger } = makeCtx({
-    // 幽灵会话已不在归档集合:残留清理不要求归档资格
+    // 幽灵会话已不在归档集合:残留清理不要求归档资格,但要求台账有记录
+    // (首删已记录,重删走幽灵收尾)
     archivedIds: [],
     headers: [HEADER],
     agents: IDLE_S1,
     domain,
     sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
+    ledger: makeLedgerDomain([{ sessionId: 's1', path: 'C:\\gone\\s1', deletedAt: 1 }]),
     workspaces: [workspace],
   })
   const trashed = []
@@ -434,11 +611,30 @@ test('删除:产物已缺失时跳过 trash 与台账,完成列表清理', skipM
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { ok: true, message: MESSAGES.ghostCleanup })
   assert.deepEqual(trashed, [])
-  assert.deepEqual(ledger.state.deleted, [])
   assert.equal(ledger.writes, 0)
   // 残留清理仍解除工作区关联与归档集合(幂等)
   assert.deepEqual(workspace.sessionIds, [])
   assert.deepEqual(domain.state.archivedSessionIds, [])
+})
+
+test('删除:产物缺失且无归档记录无台账时拒绝(防新建会话未落盘被剥离)', skipMissingDeps, async () => {
+  const workspace = makeWorkspace('C:\\x', ['s1'])
+  const { handlers } = makeCtx({
+    archivedIds: [],
+    headers: [HEADER],
+    agents: IDLE_S1,
+    domain: makeDomain([]),
+    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
+    workspaces: [workspace],
+  })
+  const res = response()
+  await withTrashStub(async () => {}, async () => {
+    await handlers.get('/api/session-manager/delete')(request('s1'), res)
+  })
+  assert.equal(res.status, 400)
+  assert.equal(res.body.error, MESSAGES.notArchived)
+  // 拒绝路径不动工作区关联
+  assert.deepEqual(workspace.sessionIds, ['s1'])
 })
 
 test('删除:产物已缺失时运行中守卫仍然生效', skipMissingDeps, async () => {
@@ -465,6 +661,7 @@ test('删除:产物已缺失且清理半失败时聚合失败点', skipMissingDe
     agents: IDLE_S1,
     domain: null,
     sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
+    ledger: makeLedgerDomain([{ sessionId: 's1', path: 'C:\\gone\\s1', deletedAt: 1 }]),
     workspaces: [workspace],
   })
   const res = response()

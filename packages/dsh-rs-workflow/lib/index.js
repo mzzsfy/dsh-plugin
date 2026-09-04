@@ -22,13 +22,12 @@
  */
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
-import { syncPreset } from "./preset-sync.mjs";
+import { presetDest, syncPreset } from "./preset-sync.mjs";
 
 const name = "rs-workflow";
 const inject = ["tools"];
 
-const NAMESPACE = settingsNamespace("rs-workflow");
+const NAMESPACE = "rs-workflow";
 
 const TEMPLATES = ["auto", "lite", "plan-final", "step-review", "multi-plan"];
 
@@ -76,11 +75,15 @@ function buildSlots() {
 	});
 }
 
-/** 工作流默认项子 schema。maxTasks 为 DSH 原生任务预算（rs-tui 无数量上限），约束全部任务实例化。 */
+/** 工作流默认项子 schema。maxTasks 为 DSH 原生任务预算（rs-tui 无数量上限），约束全部任务实例化；
+ *  引擎侧对 <=0/非数值另有自保回落(见 engine.js),此处 schema 声明合法域挡住非法值。 */
+const MAX_TASKS_DEFAULT = 8;
+const MAX_TASKS_MIN = 1;
+const MAX_TASKS_MAX = 64;
 function buildWorkflow() {
 	return z.object({
 		defaultTemplate: z.union(TEMPLATES).default("auto").description("默认模板：auto = planner 分诊自动选型（无信号时兜底 multi-plan）；其余 = 无信号时兜底该模板，planner 声明与分诊矩阵仍优先生效"),
-		maxTasks: z.number().default(8).description("单轮任务拆解数上限（含子计划运行时任务的全局预算）"),
+		maxTasks: z.number().default(MAX_TASKS_DEFAULT).min(MAX_TASKS_MIN).max(MAX_TASKS_MAX).description("单轮任务拆解数上限（含子计划运行时任务的全局预算）"),
 	});
 }
 
@@ -112,12 +115,12 @@ function apply(ctx, config) {
 			if (outcome === "skipped-foreign") {
 				ctx.logger?.warn?.("rs-workflow preset 目录无有效来源标记或归属他人,已保留不覆盖;确认后手动删除,下次启动即由本包接管");
 			} else if (outcome === "created") {
-				ctx.logger?.info?.("rs-workflow preset 已首次释放到用户预设根");
+				ctx.logger?.info?.(`rs-workflow preset 已首次释放到 ${presetDest()}`);
 			} else if (outcome === "updated") {
-				ctx.logger?.info?.("rs-workflow preset 已同步更新");
+				ctx.logger?.info?.(`rs-workflow preset 已同步更新: ${presetDest()}`);
 			}
 		} catch (error) {
-			ctx.logger?.warn?.(`rs-workflow preset 同步失败(不影响本插件其余角色): ${error?.message ?? error}`);
+			ctx.logger?.warn?.(`rs-workflow preset 同步失败(不影响本插件其余角色): ${error?.code ? `[${error.code}] ` : ""}${error?.message ?? error}; 目标: ${presetDest()}`);
 		}
 		return;
 	}
@@ -129,7 +132,7 @@ function apply(ctx, config) {
 	}
 	ctx.tools.register(defineTool({
 		name: "rs_workflow_config",
-		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 由分诊矩阵自动选型）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
+		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 无信号时兜底 multi-plan，其余值 = 无信号时兜底该值；planner 声明与分诊矩阵始终优先）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
 		parameters: {},
 		output: {
 			schema: {
@@ -184,7 +187,13 @@ function apply(ctx, config) {
 		},
 		execute() {
 			const settings = ctx.get("settings");
-			const value = settings ? settings.get(NAMESPACE) : undefined;
+			let value;
+			try {
+				value = settings ? settings.get(NAMESPACE) : undefined;
+			} catch (error) {
+				// settings 服务在但读取失败(命名空间被移除/配置损坏)时走组合默认值,工具永不硬失败
+				ctx.logger?.warn?.(`rs-workflow settings 读取失败,回退组合默认值: ${error?.message ?? error}`);
+			}
 			if (value) {
 				return Promise.resolve({ slots: value.slots, workflow: value.workflow, budgets: value.budgets, source: "settings" });
 			}
@@ -194,4 +203,4 @@ function apply(ctx, config) {
 	}));
 }
 
-export { Config, NAMESPACE, SETTINGS_SCHEMA, apply, inject, name };
+export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, apply, inject, name };

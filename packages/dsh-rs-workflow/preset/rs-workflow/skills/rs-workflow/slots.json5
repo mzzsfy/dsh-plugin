@@ -8,12 +8,13 @@
   // GUI 设置页 rs-workflow 段的配置（随改随生效）；仅当工具不可用
   // （source=fallback）时才读本文件。
   //
-  // 值格式三态（与 GUI 设置 schema 一致，任选其一；候选语义与 rs-tui rotation 等价）：
-  //   "provider/model"                    字符串简写，如 "anthropic/claude-opus-4"
-  //   ["a/m1", "b/m2"]                    候选数组 = rotation：依次轮换，被拒重做/
-  //                                       重问从下一候选换模型（节点级游标）
-  //   { rotation: ["a/m1", "b/m2"] }      rs-tui 原始格式，与候选数组等价
-  //   ""                                  该位未配置，走降级链
+  // 值格式(任选其一;候选语义与 rs-tui rotation 等价;前三态与 GUI 设置 schema 一致):
+  //   "provider/model"                    字符串简写,如 "anthropic/claude-opus-4"
+  //   ["a/m1", "b/m2"]                    候选数组 = rotation:依次轮换,被拒重做/
+  //                                       重问从下一候选换模型(节点级游标)
+  //   { rotation: ["a/m1", "b/m2"] }      rs-tui 原始格式,与候选数组等价
+  //   { provider: "a", model: "m1" }      引擎兼容形态(GUI 配置路径不可产出)
+  //   ""                                  该位未配置,走降级链
   //
   // 角色×模型适配指引：
   //   planner-triage 用快而便宜的模型；executor 域用编码强的模型；
