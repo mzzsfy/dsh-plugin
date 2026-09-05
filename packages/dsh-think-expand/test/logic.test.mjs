@@ -1,4 +1,5 @@
-// BDD 场景测试:同一套场景同时验证 src/logic.mjs 与 src/client.js 内嵌逻辑段(parity)。
+// BDD 场景测试:同一套场景同时验证 src/logic.mjs 与 src/client.js 内嵌逻辑段(parity,
+// 含逐函数源码文本对比防双写漂移)。new Function 体前置 "use strict" 对齐 ESM 语义。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -18,14 +19,15 @@ function clientLogic() {
   assert.ok(begin >= 0 && end > begin, 'client.js 缺少逻辑标记段')
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
-    section
-      + '; return { STATE_RUNNING, STATE_OK, hashText, createRegistry, plan, planFinal, capMap, needsReattach, SEEN_MAP_CAP };',
+    '"use strict";'
+      + section
+      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, needsReattach, SEEN_MAP_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow };',
   )
   return factory()
 }
 
-const row = (state, bodyText, expanded = false, headable = true, plugged = false) =>
-  ({ headable, state, bodyText, expanded, plugged })
+const row = (state, bodyText, expanded = false, headable = true, plugged = false, uid = undefined) =>
+  ({ uid, headable, state, bodyText, expanded, plugged })
 const RUNNING = 'running'
 const OK = 'ok'
 
@@ -35,18 +37,14 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, planFinal, hashText, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
-
-  test(prefix + '哈希确定性', () => {
-    assert.equal(hashText('思考正文'), hashText('思考正文'))
-    assert.notEqual(hashText('a'), hashText('b'))
-  })
+  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
 
   test(prefix + '流式思考自动展开', () => {
     const reg = createRegistry()
     const result = plan(reg, [row(OK, '旧的'), row(RUNNING, '新思考')])
     assert.equal(expandOf(result, 1), 1)
-    assert.equal(reg.current.hash, hashText('新思考'))
+    assert.equal(reg.current.seen, '新思考')
+    assert.equal(reg.current.uid, undefined)
   })
 
   test(prefix + '正文未挂载时仅展开不登记,挂载后补登记', () => {
@@ -57,7 +55,7 @@ function defineScenarios(prefix, L) {
     assert.equal(reg.marks.size, 0)
     const second = plan(reg, [row(RUNNING, '正文', true, true, true)])
     assert.equal(second.actions.length, 0)
-    assert.equal(reg.current.hash, hashText('正文'))
+    assert.equal(reg.current.seen, '正文')
     const done = plan(reg, [row(OK, '正文', true, true, true)])
     assert.equal(done.actions.length, 0)
     const next = plan(reg, [row(OK, '正文', true, true, true), row(RUNNING, '下一条')])
@@ -131,10 +129,9 @@ function defineScenarios(prefix, L) {
   })
 
   test(prefix + '登记行被识别为插件展开,流式接管时收起', () => {
-    // 模拟控制层 planFinal 展开后的登记形态(marks + current + plugged 标记)
+    // 模拟控制层 planFinal 展开后的登记形态(registerCurrent 播种)
     const reg = createRegistry()
-    reg.marks.set(hashText('A'), 'A')
-    reg.current = { hash: hashText('A'), seen: 'A' }
+    registerCurrent(reg, undefined, 'A')
     const result = plan(reg, [row(OK, 'A', true, true, true), row(RUNNING, 'B')])
     assert.equal(collapseOf(result, 0), 1)
     assert.equal(expandOf(result, 1), 1)
@@ -142,7 +139,8 @@ function defineScenarios(prefix, L) {
 
   test(prefix + '登记行未登记 current 时不会被误判手动', () => {
     const reg = createRegistry()
-    reg.marks.set(hashText('A'), 'A')
+    registerCurrent(reg, undefined, 'A')
+    reg.current = null
     const result = plan(reg, [row(OK, 'A', true, true, true), row(OK, 'B')])
     assert.equal(result.actions.filter((a) => a.index === 0).length, 0)
     assert.equal(reg.manual.size, 0)
@@ -166,11 +164,50 @@ function defineScenarios(prefix, L) {
     const result = plan(reg, [row(RUNNING, '正文', true, true, true)])
     assert.equal(result.actions.length, 0)
     assert.equal(reg.manual.size, 0)
-    assert.equal(reg.current.hash, hashText('正文'))
+    assert.equal(reg.current.seen, '正文')
     // 新行出现时照常接管收起
     const next = plan(reg, [row(OK, '正文', true, true, true), row(RUNNING, 'B')])
     assert.equal(collapseOf(next, 0), 1)
     assert.equal(expandOf(next, 1), 1)
+  })
+
+  test(prefix + 'uid 命中:同开头历史行不劫持 current 定位', () => {
+    const reg = createRegistry()
+    // 插件展开流式行 uid=7,登记早期快照「好的，让我」
+    plan(reg, [row(OK, '好的，让我历史行完整内容', true, true, true, 3), row(RUNNING, '好的，让我', false, true, false, 7)])
+    assert.equal(reg.current.uid, 7)
+    // 新行 uid=9 出现:current(uid=7)定位必须命中自身而非同开头的历史行 uid=3
+    const result = plan(reg, [
+      row(OK, '好的，让我历史行完整内容', true, true, true, 3),
+      row(OK, '好的，让我', true, true, true, 7),
+      row(RUNNING, '新的思考', false, true, false, 9),
+    ])
+    assert.equal(collapseOf(result, 1), 1, '收起的是 uid=7 而非同开头的历史行 uid=3')
+    assert.equal(collapseOf(result, 0), 0)
+    assert.equal(expandOf(result, 2), 1)
+  })
+
+  test(prefix + 'uid 已读标记不拦同开头新行', () => {
+    const reg = createRegistry()
+    // 插件展开 uid=3 后用户收起 → 已读
+    plan(reg, [row(RUNNING, '好的，让我', false, true, false, 3)])
+    plan(reg, [row(RUNNING, '好的，让我', false, true, true, 3)])
+    assert.equal(reg.read.size, 1)
+    // 新回合行 uid=9 同开头:不因旧标记被拦
+    const next = plan(reg, [row(RUNNING, '好的，让我重新分析', false, true, false, 9)])
+    assert.equal(expandOf(next, 0), 1)
+  })
+
+  test(prefix + 'suppressManual 首扫不把既存展开行登记为手动', () => {
+    const reg = createRegistry()
+    // 容器重挂后首扫:已展开无 plugged 行视为中性
+    const result = plan(reg, [row(OK, '既存展开行', true)], { suppressManual: true })
+    assert.equal(result.actions.length, 0)
+    assert.equal(reg.manual.size, 0)
+    // 常规扫描才识别手动意图:登记 manual 后无 running 无 current,不产生干预动作
+    const normal = plan(reg, [row(OK, '既存展开行', true)])
+    assert.equal(reg.manual.size, 1)
+    assert.equal(normal.actions.length, 0)
   })
 
   test(prefix + '打开会话展开最后一条', () => {
@@ -263,4 +300,50 @@ defineScenarios('[client.js] ', clientLogic())
 
 test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
+})
+
+test('client.js 逻辑段导出与 logic.mjs 完全一致(漏登记即失败)', () => {
+  const client = clientLogic()
+  const clientKeys = Object.keys(client).sort()
+  for (const key of Object.keys(logic).sort()) {
+    assert.ok(clientKeys.includes(key), '逻辑段漏登记导出: ' + key)
+  }
+})
+
+// logic.mjs 内部函数不经 ESM 导出,经源码剥 export 求值取同一批函数体做对比
+function logicInternals() {
+  const source = readFileSync(join(PKG_ROOT, 'src', 'logic.mjs'), 'utf8')
+  const stripped = source.replace(/^export /gm, '')
+  const factory = new Function(
+    '"use strict";'
+      + stripped
+      + '; return { prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow };',
+  )
+  return factory()
+}
+
+test('LOGIC 段与 logic.mjs 逐函数源码一致(归一化注释与空白,含内部助手)', () => {
+  const client = clientLogic()
+  const internals = logicInternals()
+  const normalize = (source) => source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/\s+/g, '')
+  for (const name of ['plan', 'planFinal', 'createRegistry', 'capMap', 'needsReattach', 'registerCurrent']) {
+    assert.equal(
+      normalize(client[name].toString()),
+      normalize(logic[name].toString()),
+      'LOGIC 段与 logic.mjs 漂移: ' + name,
+    )
+  }
+  for (const name of ['prefixOf', 'matchMark', 'findSeenKey', 'isCurrent', 'putSeen', 'findRow']) {
+    assert.equal(
+      normalize(client[name].toString()),
+      normalize(internals[name].toString()),
+      'LOGIC 段内部助手与 logic.mjs 漂移: ' + name,
+    )
+  }
+  for (const name of ['STATE_RUNNING', 'STATE_OK', 'SEEN_MAP_CAP']) {
+    assert.equal(client[name], logic[name], '常量漂移: ' + name)
+  }
 })
