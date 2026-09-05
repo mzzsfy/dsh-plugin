@@ -232,18 +232,20 @@ export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
 // idleMs 为距上次用户行动的时长,满阈值视为离开,等效未聚焦。
 // pageSound 为页内提示音:页内提示弹出且通知声音未播时补一声(聚焦场景的听觉提醒),
-// 不受聚焦静默压制,但受页内开关、分类静音与通知声音互斥约束(同一通知至多一声)。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false }) {
+// 不受聚焦静默压制,受页内总开关、页内分类配置(pageSoundCategories,独立于提示音分类)
+// 与通知声音互斥约束(同一通知至多一声)。
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false, pageSoundCategories = null }) {
   const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
   const quiet = hasFocus && focusQuiet && !idleAway
   const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
+  const pageCategoryMuted = pageSoundCategories != null && category != null && pageSoundCategories[category] === false
   const sound = !quiet && soundEnabled && !categoryMuted
   return {
     toast: toastEnabled,
     sound,
     system: !quiet && systemEnabled && permission === 'granted',
     blink: !quiet && systemEnabled && permission !== 'granted',
-    pageSound: pageSoundEnabled && toastEnabled && !categoryMuted && !sound,
+    pageSound: pageSoundEnabled && toastEnabled && !pageCategoryMuted && !sound,
   }
 }
 

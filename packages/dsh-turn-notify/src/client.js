@@ -103,6 +103,7 @@ window.__ModuleLoader__.load({
     const KEY_PAGE_SOUND = 'turn-notify:page-sound'
     // 分类提示音配置:JSON 对象,缺省键=出声,显式 false=该分类静音
     const KEY_SOUND_CATEGORIES = 'turn-notify:sound-categories'
+    const KEY_PAGE_SOUND_CATEGORIES = 'turn-notify:page-sound-categories'
     // 映射双作用域:本地映射与开关均存本机浏览器,音效库保持 host 共享
     const KEY_MAPPING = 'turn-notify:mapping'
     const KEY_MAPPING_LOCAL = 'turn-notify:mapping-local'
@@ -171,6 +172,16 @@ window.__ModuleLoader__.load({
     function readSoundCategories() {
       try {
         const parsed = JSON.parse(localGet(KEY_SOUND_CATEGORIES))
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    // 页内提示音分类读取:与 readSoundCategories 同构,独立存储互不影响
+    function readPageSoundCategories() {
+      try {
+        const parsed = JSON.parse(localGet(KEY_PAGE_SOUND_CATEGORIES))
         return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
       } catch {
         return {}
@@ -265,14 +276,16 @@ window.__ModuleLoader__.load({
       const systemEnabled = localGet(KEY_SYSTEM) !== '0'
       const soundEnabled = localGet(KEY_SOUND) !== '0'
       const toastEnabled = localGet(KEY_TOAST) !== '0'
+      const pageSoundCategories = readPageSoundCategories()
       const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
+      const pageCategoryMuted = pageSoundCategories != null && category != null && pageSoundCategories[category] === false
       const sound = !quiet && soundEnabled && !categoryMuted
       return {
         toast: toastEnabled,
         sound,
         system: !quiet && systemEnabled && permission === 'granted',
         blink: !quiet && systemEnabled && permission !== 'granted',
-        pageSound: localGet(KEY_PAGE_SOUND) === '1' && toastEnabled && !categoryMuted && !sound,
+        pageSound: localGet(KEY_PAGE_SOUND) === '1' && toastEnabled && !pageCategoryMuted && !sound,
       }
     }
 
@@ -928,6 +941,7 @@ window.__ModuleLoader__.load({
       const [localMapping, setLocalMappingState] = useState(() => readLocalMapping())
       // 分类提示音镜像:pill 点击即写 localStorage,发声链路直读不依赖本 state
       const [soundCategories, setSoundCategoriesState] = useState(() => readSoundCategories())
+      const [pageSoundCategories, setPageSoundCategoriesState] = useState(() => readPageSoundCategories())
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
       // 面板分区:tab 切换仅显隐,不触碰任何已装载状态
@@ -1062,6 +1076,15 @@ window.__ModuleLoader__.load({
         localSet(KEY_SOUND_CATEGORIES, JSON.stringify(next))
       }
 
+      // 页内提示音分类切换:与提示音分类同构,独立存储互不影响
+      function togglePageSoundCategory(category) {
+        const next = { ...pageSoundCategories }
+        if (next[category] === false) delete next[category]
+        else next[category] = false
+        setPageSoundCategoriesState(next)
+        localSet(KEY_PAGE_SOUND_CATEGORIES, JSON.stringify(next))
+      }
+
       async function setMapping(category, id) {
         // 本地模式:空串为显式内置默认,同样保留为键值
         if (localMode) {
@@ -1142,7 +1165,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 页内通知通道单独测试:仅弹页内提示,不涉及声音与系统通知
       // 页内通知通道单独测试:弹页内提示,不涉及系统通知;页内提示音开关开启时随卡片补一声
       function testPageNotification() {
         if (!toast) {
@@ -1408,7 +1430,7 @@ window.__ModuleLoader__.load({
                   onClick: () => toggleSoundCategory(category),
                 }, CATEGORY_LABELS[category])),
               ),
-            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示卡片与会话高亮不受影响;被静音分类的系统弹窗、标题闪烁与页内提示音随之静默。'),
+            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示卡片与会话高亮不受影响;被静音分类的系统弹窗与标题闪烁随之静默;页内提示音有独立的分类开关,不随此处变化。'),
             field('系统弹窗', [
               h('label', { className: 'tn-meta tn-switch', title: '窗口失焦时弹系统级通知,聚焦时静默(见聚焦静默);未授权且声音开启时降级为标题闪烁' },
                 ...switchToggle({
@@ -1429,13 +1451,23 @@ window.__ModuleLoader__.load({
                   onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
                 }),
                 ' 开启'),
-              h('label', { className: 'tn-meta tn-switch', title: '页内提示弹出且未播放通知声音时补一声提示(聚焦时通知声音静默,靠它保留听觉提醒);受分类静音约束,音量与本页音量滑块共用' },
+              h('label', { className: 'tn-meta tn-switch', title: '页内提示音总开关:页内提示弹出且未播放通知声音时补一声提示(聚焦时通知声音静默,靠它保留听觉提醒);与通知声音互斥,同一通知至多一声,音量与本页音量滑块共用' },
                 ...switchToggle({
                   defaultChecked: localGet(KEY_PAGE_SOUND) === '1',
                   onChange: (e) => localSet(KEY_PAGE_SOUND, e.target.checked ? '1' : '0'),
                 }),
                 ' 有声'),
-            ], '开启后通知在页面角落弹卡片;有声开关让聚焦窗口也有听觉提醒'),
+              h('div', { className: 'tn-pills' },
+                CATEGORIES.map((category) => h('span', {
+                  className: 'tn-pill' + (pageSoundCategories[category] !== false ? ' tn-pill--on' : ''),
+                  key: category,
+                  title: pageSoundCategories[category] !== false
+                    ? CATEGORY_LABELS[category] + ':当前补位出声,点击静音'
+                    : CATEGORY_LABELS[category] + ':当前静音,点击恢复',
+                  onClick: () => togglePageSoundCategory(category),
+                }, CATEGORY_LABELS[category])),
+              ),
+            ], '页内提示音独立配置:点分类单独控制该类事件是否补位出声(亮=出声,暗=静音);总开关(有声)关闭时全部分类静默,pills 仅保留偏好记忆;音色沿用音效页的分类映射,与提示音的分类静音互不影响。'),
             field('音量', h('input', {
               className: 'tn-range', type: 'range', min: 0, max: 1, step: 0.05,
               title: '通知声音与页内提示音共用,按 5% 步进调节,本机记忆',
@@ -1638,7 +1670,7 @@ window.__ModuleLoader__.load({
                   })
                 },
               }, '测试声音'),
-              h('button', { className: 'tn-btn', title: '弹出一条页内卡片;页内提示音已开启时随卡片补一声', onClick: testPageNotification }, '测试页内通知'),
+              h('button', { className: 'tn-btn', title: '弹出一条页内卡片;页内提示音已开启时随卡片补一声(点火测试,不经分类静音约束)', onClick: testPageNotification }, '测试页内通知'),
               h('button', { className: 'tn-btn', title: '弹一条系统通知验证授权与送达;未授权会先引导授权', onClick: testSystemNotification }, '测试系统通知'),
               h('button', { className: 'tn-btn', title: '向已配置的 webhook 发送真实测试事件,回执显示投递结果;未配置时提示失败', onClick: () => void testWebhook() }, '测试 webhook'),
               config.imAvailable ? h('button', { className: 'tn-btn', disabled: busy, title: '向全部已配置目标发送真实测试事件,逐目标显示结果', onClick: () => void testIm() }, '测试 IM 通知') : null,

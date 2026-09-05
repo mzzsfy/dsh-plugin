@@ -320,7 +320,7 @@ test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
-test('页内提示音:聚焦补位发声,失焦让位通知声音,分类静音与页内开关约束', () => {
+test('页内提示音:聚焦补位发声,失焦让位通知声音,页内分类独立配置', () => {
   const base = { hasFocus: false, permission: 'granted', pageSoundEnabled: true }
   // 聚焦静默压制通知声音,页内提示音补位:核心场景
   assert.equal(chooseChannels({ ...base, hasFocus: true }).pageSound, true)
@@ -330,8 +330,14 @@ test('页内提示音:聚焦补位发声,失焦让位通知声音,分类静音�
   assert.equal(chooseChannels({ ...base, soundEnabled: false }).pageSound, true)
   // 页内提示关闭:无卡片即无声
   assert.equal(chooseChannels({ ...base, hasFocus: true, toastEnabled: false }).pageSound, false)
-  // 分类显式静音:页内提示音一并静默
-  assert.equal(chooseChannels({ ...base, hasFocus: true, soundCategories: { ask: false }, category: 'ask' }).pageSound, false)
+  // 页内分类显式静音:该分类不补位
+  assert.equal(chooseChannels({ ...base, hasFocus: true, pageSoundCategories: { ask: false }, category: 'ask' }).pageSound, false)
+  // 页内分类静音只压本分类:其他分类照常
+  assert.equal(chooseChannels({ ...base, hasFocus: true, pageSoundCategories: { ask: false }, category: 'completed' }).pageSound, true)
+  // 提示音分类静音不连带页内提示音:两套分类配置独立
+  assert.equal(chooseChannels({ ...base, hasFocus: true, soundCategories: { ask: false }, category: 'ask' }).pageSound, true)
+  // 未提供页内分类:全放行(null 与 undefined 等价)
+  assert.equal(chooseChannels({ ...base, hasFocus: true, pageSoundCategories: { ask: false } }).pageSound, true)
   // 开关缺省关闭:行为与旧版一致
   assert.equal(chooseChannels({ hasFocus: true, permission: 'granted' }).pageSound, false)
 })
