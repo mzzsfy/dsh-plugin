@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-turn-notify",
   "description": "消息通知:六类回合事件送达声音、系统弹窗、页内提示、webhook 与 IM;内置八种合成音色,自定义音效,按事件分类指定;多窗口只响一次",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {

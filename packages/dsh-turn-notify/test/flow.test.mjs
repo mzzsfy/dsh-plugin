@@ -25,8 +25,8 @@ class BrokenStorage {
   removeItem() { throw new Error('blocked') }
 }
 
-// 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象与页内通知捕获表。
-function loadClient({ storage, payload, onFetch }) {
+// 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象、页内通知捕获表与 window 桩。
+function loadClient({ storage, payload, onFetch, fetchImpl }) {
   const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const modules = []
   const shown = []
@@ -50,9 +50,9 @@ function loadClient({ storage, payload, onFetch }) {
     }
     return reactStub
   }
-  const fetchStub = async (path) => {
+  const defaultFetch = async (path) => {
     if (onFetch) onFetch(path)
-    return { json: async () => payload }
+    return { ok: true, json: async () => payload }
   }
   const factory = new Function(
     'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification',
@@ -63,12 +63,12 @@ function loadClient({ storage, payload, onFetch }) {
     requireStub,
     documentStub,
     class { observe() {} disconnect() {} },
-    fetchStub,
+    fetchImpl || defaultFetch,
     undefined,
   )
   assert.equal(modules.length, 1, 'client.js 模块未被捕获')
   // load({id, factory}) 结构:再调 factory(require) 得到真正的模块对象
-  return { mod: modules[0].factory(requireStub), shown }
+  return { mod: modules[0].factory(requireStub), shown, window: windowStub }
 }
 
 const units = [
@@ -77,7 +77,7 @@ const units = [
 ]
 
 test('broken localStorage:清理段不抛,降级发声恰好一次,第二轮不再发声', async () => {
-  const { mod, shown } = loadClient({ storage: new BrokenStorage(), payload: { units, soundMapping: {} } })
+  const { mod, shown } = loadClient({ storage: new BrokenStorage(), payload: { units, soundMapping: {}, version: 1 } })
   const { poll, storageState } = mod.__test
   await poll()
   assert.equal(storageState.broken, true)
@@ -90,7 +90,7 @@ test('broken localStorage:清理段不抛,降级发声恰好一次,第二轮不�
 
 test('正常 localStorage:唯一发声,完成标记写入,残留锁被清理', async () => {
   const storage = new FakeStorage({ 'turn-notify:lock:stale': '{"wid":"w9","at":1}' })
-  const { mod, shown } = loadClient({ storage, payload: { units, soundMapping: {} } })
+  const { mod, shown } = loadClient({ storage, payload: { units, soundMapping: {}, version: 1 } })
   const { poll } = mod.__test
   await poll()
   assert.equal(shown.length, units.length)
@@ -103,7 +103,7 @@ test('正常 localStorage:唯一发声,完成标记写入,残留锁被清理', a
 })
 
 test('页内通知经公共组件:文案与展示期随事件传入', async () => {
-  const { mod, shown } = loadClient({ storage: new FakeStorage(), payload: { units, soundMapping: {} } })
+  const { mod, shown } = loadClient({ storage: new FakeStorage(), payload: { units, soundMapping: {}, version: 1 } })
   await mod.__test.poll()
   assert.deepEqual(shown.map((call) => call.text), units.map((unit) => unit.text))
   assert.ok(shown.every((call) => call.opts && call.opts.holdMs === 6 * 1000))
@@ -127,7 +127,7 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
   const fetched = []
   const { mod } = loadClient({
     storage: new FakeStorage(),
-    payload: { units: [], soundMapping: {} },
+    payload: { units: [], soundMapping: {}, version: 1 },
     onFetch: (path) => { fetched.push(path) },
   })
   const injected = []
@@ -145,7 +145,7 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
 
 test('页内提示通道独立开关:关闭后投影事件不再弹页内提示', async () => {
   const storage = new FakeStorage({ 'turn-notify:toast': '0' })
-  const { mod, shown } = loadClient({ storage, payload: { units, soundMapping: {} } })
+  const { mod, shown } = loadClient({ storage, payload: { units, soundMapping: {}, version: 1 } })
   const { poll } = mod.__test
   await poll()
   assert.equal(shown.length, 0)
@@ -155,7 +155,7 @@ test('页内提示通道独立开关:关闭后投影事件不再弹页内提示'
 
 test('分类通知开关串行提交:连点按序入队,host 终值为最后一次点击', async () => {
   const calls = []
-  const { mod } = loadClient({ storage: new FakeStorage(), payload: { units: [], soundMapping: {} } })
+  const { mod } = loadClient({ storage: new FakeStorage(), payload: { units: [], soundMapping: {}, version: 1 } })
   const apiImpl = async (path, init) => {
     if (init.method === 'POST') {
       const checked = JSON.parse(init.body).enabled
@@ -192,7 +192,7 @@ test('分类通知开关提交失败:报错并以权威配置纠偏', async () =
     gets.push(path)
     return { enabled: { completed: true } }
   }
-  const { mod } = loadClient({ storage: new FakeStorage(), payload: { units: [], soundMapping: {} } })
+  const { mod } = loadClient({ storage: new FakeStorage(), payload: { units: [], soundMapping: {}, version: 1 } })
   await mod.__test.submitCategoryToggle('completed', true, {
     apiImpl,
     onConfig: (res) => configs.push(res),
@@ -202,4 +202,72 @@ test('分类通知开关提交失败:报错并以权威配置纠偏', async () =
   assert.ok(errors[0].indexOf('boom') >= 0)
   assert.deepEqual(gets, ['/api/turn-notify/config'])
   assert.deepEqual(configs, [{ enabled: { completed: true } }])
+})
+
+function activate(mod) {
+  mod.apply({
+    slots: { inject: () => {} },
+    effect: (fn) => { fn() },
+  })
+}
+
+test('长轮询代际中止:abort 后循环退出不再发起新请求', async () => {
+  let calls = 0
+  const { mod, window: windowStub } = loadClient({
+    storage: new FakeStorage(),
+    // 桩模拟真实 fetch 的中止语义:代际 signal 触发即 reject,释放循环;仅计投影请求
+    fetchImpl: (path, init) => new Promise((resolve, reject) => {
+      if (path.indexOf('/sounds') >= 0) {
+        resolve({ ok: true, json: async () => ({ sounds: [] }) })
+        return
+      }
+      calls += 1
+      init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+    }),
+  })
+  activate(mod)
+  await new Promise((resolve) => { setTimeout(resolve, 0) })
+  assert.equal(calls, 1, '首拉已发出并挂起')
+  windowStub['turn-notify:polling'].abort()
+  await new Promise((resolve) => { setTimeout(resolve, 10) })
+  assert.equal(calls, 1, '中止后不应再发起新请求')
+})
+
+test('长轮询失败:降级通告一次,退避期内不重试不通告第二次', async () => {
+  const warns = []
+  const original = console.warn
+  console.warn = (message) => { warns.push(message) }
+  let calls = 0
+  try {
+    const { mod } = loadClient({
+      storage: new FakeStorage(),
+      fetchImpl: async (path) => {
+        if (path.indexOf('/sounds') >= 0) return { ok: true, json: async () => ({ sounds: [] }) }
+        calls += 1
+        throw new Error('down')
+      },
+    })
+    activate(mod)
+    // 退避起点远大于此等待窗:窗内恰好一次失败与一次通告
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+  } finally { console.warn = original }
+  assert.equal(calls, 1)
+  assert.equal(warns.length, 1)
+  assert.ok(warns[0].indexOf('通知降级') >= 0)
+})
+
+test('长轮询游标推进:带 version 响应推进 cursor,后续请求携带游标', async () => {
+  const paths = []
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    fetchImpl: async (path) => {
+      paths.push(path)
+      return { ok: true, json: async () => ({ units: [], soundMapping: {}, version: 7 }) }
+    },
+  })
+  const { poll } = mod.__test
+  assert.equal(await poll(), true, '带 version 响应视为成功')
+  assert.equal(await poll(new AbortController().signal), true)
+  assert.ok(paths[0].indexOf('?cursor=') < 0, '首拉无游标')
+  assert.ok(paths[1].indexOf('?cursor=7') >= 0, '游标随响应推进')
 })

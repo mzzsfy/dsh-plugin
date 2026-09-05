@@ -165,15 +165,41 @@ export function buildWebhookPayload(unit) {
 }
 
 // 通知投影:环形容量 + 读取时过期清理;now 注入便于测试。
+// version 单调递增支撑长轮询:push 与 bump 各递增一次并唤醒全部等待者,
+// wait 在无更新版本时挂起至唤醒或超时,超时与 dispose 均以当前版本收尾不报错。
 export function createProjection({ capacity = PROJECTION_CAPACITY, ttlMs = PROJECTION_TTL_MS, now = Date.now }) {
   const ring = []
+  let version = 0
+  const waiters = new Set()
+  const settle = (waiter) => {
+    clearTimeout(waiter.timer)
+    waiters.delete(waiter)
+    waiter.resolve(version)
+  }
+  const wakeAll = () => { for (const waiter of [...waiters]) settle(waiter) }
   return {
     push(unit) {
       const current = now()
       while (ring.length > 0 && current - ring[0].ts > ttlMs) ring.shift()
       ring.push(unit)
       while (ring.length > capacity) ring.shift()
+      version += 1
+      wakeAll()
     },
+    bump() {
+      version += 1
+      wakeAll()
+    },
+    version: () => version,
+    wait(cursor, timeoutMs) {
+      if (version > cursor) return Promise.resolve(version)
+      return new Promise((resolve) => {
+        const waiter = { resolve, timer: null }
+        waiter.timer = setTimeout(() => settle(waiter), timeoutMs)
+        waiters.add(waiter)
+      })
+    },
+    dispose: wakeAll,
     list() {
       const current = now()
       while (ring.length > 0 && current - ring[0].ts > ttlMs) ring.shift()

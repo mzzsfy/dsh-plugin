@@ -248,6 +248,49 @@ test('投影环形容量与过期清理', () => {
   assert.equal(listed.length, 0)
 })
 
+test('投影版本:push 与 bump 各递增,version 读取当前值', () => {
+  const projection = createProjection({})
+  assert.equal(projection.version(), 0)
+  projection.push({ id: 'e1', category: CATEGORY_DONE, ts: 1 })
+  assert.equal(projection.version(), 1)
+  projection.bump()
+  assert.equal(projection.version(), 2)
+})
+
+test('投影等待:已有新版本立即返回,落后 cursor 挂起至 push 唤醒', async () => {
+  const projection = createProjection({})
+  projection.push({ id: 'e1', category: CATEGORY_DONE, ts: 1 })
+  // cursor 已落后:立即返回当前版本,不挂起
+  assert.equal(await projection.wait(0, 60 * 1000), 1)
+  // cursor 追平:挂起,push 后唤醒并返回新版本
+  const pending = projection.wait(1, 60 * 1000)
+  let settled = false
+  void pending.then(() => { settled = true })
+  await new Promise((resolve) => { setTimeout(resolve, 10) })
+  assert.equal(settled, false, '未 push 前不应唤醒')
+  projection.push({ id: 'e2', category: CATEGORY_DONE, ts: 2 })
+  assert.equal(await pending, 2)
+})
+
+test('投影等待:超时以当前版本收尾,bump 同样唤醒等待者', async () => {
+  const timeoutMs = 10
+  const projection = createProjection({})
+  const timedOut = projection.wait(0, timeoutMs)
+  assert.equal(await timedOut, 0)
+  const pending = projection.wait(0, 60 * 1000)
+  projection.bump()
+  assert.equal(await pending, 1)
+})
+
+test('投影停用:dispose 唤醒全部等待者并清空定时器', async () => {
+  const projection = createProjection({})
+  const first = projection.wait(0, 60 * 1000)
+  const second = projection.wait(0, 60 * 1000)
+  projection.dispose()
+  assert.equal(await first, 0)
+  assert.equal(await second, 0)
+})
+
 test('认领状态机:无锁认领 / 他锁跳过 / 过期接管 / 完成标记终态', () => {
   const lockTtlMs = 30 * 1000
   const t0 = 1000

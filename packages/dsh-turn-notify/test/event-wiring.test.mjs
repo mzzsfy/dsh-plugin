@@ -476,3 +476,68 @@ test('Given 已配置 webhook When 真实回合完成 Then fetch 收到 payload 
     assert.ok(String(calls[0].body.text).startsWith('[dsh]'), 'webhook text 应与通知单元一致')
   } finally { globalThis.fetch = original }
 })
+
+function projectionRequest(query) {
+  const res = makeRes()
+  const req = makeReq('GET')
+  req.url = '/api/turn-notify/projection' + query
+  return { req, res }
+}
+
+test('Given 无 cursor 的首拉请求 When 投影为空 Then 立即返回空投影与当前版本', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const { req, res } = projectionRequest('')
+  await routes.get('/api/turn-notify/projection')(req, res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.units, [])
+  assert.equal(res.body.version, 0)
+})
+
+test('Given cursor 追平当前版本 When 新事件 push Then 挂起被唤醒并返回新投影', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  // config POST 成功即 bump,当前版本为 1;cursor 追平后请求挂起
+  const { req, res } = projectionRequest('?cursor=1')
+  const pending = routes.get('/api/turn-notify/projection')(req, res)
+  await flushMicrotasks()
+  assert.equal(res.body, null, '未唤醒前不应响应')
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  await pending
+  assert.equal(res.status, 200)
+  assert.equal(res.body.version, 2, 'push 应递增版本并唤醒等待者')
+  assert.equal(res.body.units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given cursor 落后当前版本 When 请求到达 Then 立即返回无需挂起', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const { req, res } = projectionRequest('?cursor=0')
+  await routes.get('/api/turn-notify/projection')(req, res)
+  assert.equal(res.status, 200)
+  assert.equal(res.body.units.length, 1)
+  assert.ok(res.body.version > 0)
+})
+
+test('Given 配置 POST 成功 When 长轮询挂起 Then bump 唤醒返回新版本', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const { req, res } = projectionRequest('?cursor=0')
+  const pending = routes.get('/api/turn-notify/projection')(req, res)
+  await flushMicrotasks()
+  assert.equal(res.body, null, '未唤醒前不应响应')
+  const config = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { sessionHighlight: false }, JSON_HEADERS), config)
+  assert.equal(config.status, 200)
+  await pending
+  assert.equal(res.status, 200)
+  assert.ok(res.body.version > 0, '配置变更应唤醒挂起连接')
+  assert.equal(res.body.sessionHighlight, false)
+})
