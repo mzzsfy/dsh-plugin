@@ -67,7 +67,7 @@ client.js 与 core 之间存在镜像逻辑的(如 turn-notify 的 chooseChannel
 跨插件共享的 client 能力(如 `dsh-toast` 的浮出通知)按**普通 npm 依赖**形态发布,禁止做成 dsh 插件(不声明 `dsh.bundle.patch`、不自带 cordis.patch.yml、无需 plugin add):
 
 - 消费插件在 `dependencies` 声明该包(pnpm 随装),在 `dsh.client.external` 声明 `'@mzzsfy/<包>/client'`,factory 内直接 `require` 使用;禁止 window 全局注册器 + 队列模式——纯依赖包不经宿主条目装载,其模块永不物化,window API 无人物化挂载
-- 依赖包的 client 进入客户端模块表靠**消费插件代挂**:消费插件 cordis.patch.yml 的 insert 列表追加该包宿主占位条目,**id 必须带消费插件前缀**(如 `session-manager-dsh-toast`),`name` 指向依赖包 npm 名(name 才是 cordis 加载与模块表的包解析键);依赖包保留最小空 host 入口(`name` + 空 `inject`/`apply`)供 cordis 装载
+- 依赖包的 client 进入客户端模块表靠**消费插件代挂**:消费插件 cordis.patch.yml 的 insert 列表追加该包宿主占位条目,**id 必须带消费插件前缀**(如 `session-manager-dsh-toast`),`name` 指向依赖包 npm 名(name 才是 cordis 加载与模块表的包解析键);依赖包宿主入口形态 = **仅 `export function apply() {}`**(对齐 `dsh-think-expand`;name+inject+apply 三件套命名空间形态经 dsh-web-app 装载链被判 invalid plugin 拖垮整树,禁止使用)
 - **占位条目全仓唯一**:同一依赖包的占位只允许一个 insert——client-modules 按 npm 名做多源检查,两个占位条目若装载基不同(如市场托管 .dsh-market 与 profile 根 junction)即判 fatal 拖垮整树组合。其余消费方一律**可选消费**:factory 内 try/catch 动态 require,模块表缺失即禁用该通道,禁止再代挂占位(参考 `dsh-turn-notify`)
 - client.js 仍以 `__ModuleLoader__.load({id, factory})` 自注册格式发布,factory 返回**库导出**(非 `{inject, apply}`);渲染容器惰性自举、按 id 幂等自愈(HMR 新代首挂清旧代残留),不依赖宿主生命周期
 - 参考实现:`dsh-toast`(README 含接入三步);react / react-dom/client 由宿主平台种子表提供

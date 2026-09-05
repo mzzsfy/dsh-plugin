@@ -19,14 +19,13 @@ DSH 全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻�
 }
 ```
 
-2. `cordis.patch.yml`(insert 列表追加一条,使本包 client 进入模块表;id 必须带消费插件前缀,多个消费插件共存时树内 id 不冲突,name 才是包解析键):
+2. `cordis.patch.yml`(insert 列表追加一条,使本包 client 进入模块表;id 必须带消费插件前缀,name 才是包解析键)。**占位条目全仓唯一**:全仓只允许一个插件代挂本包占位(当前为 session-manager)——client-modules 按 npm 名做多源检查,两个占位条目装载基不同即 fatal 拖垮整树;其余消费插件**不代挂占位**,改为可选消费:
 
-```yml
-- insert:
-    - id: <本插件 id>
-      name: '@mzzsfy/<本包名>'
-    - id: <本插件 id>-dsh-toast
-      name: '@mzzsfy/dsh-toast'
+```js
+// 模块表缺失(权威消费方未安装)时干净降级,不代挂占位
+let toast = null
+try { toast = require('@mzzsfy/dsh-toast/client').show } catch {}
+// 调用点:toast?.(...)
 ```
 
 3. client.js 的 factory 内:
