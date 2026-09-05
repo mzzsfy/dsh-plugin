@@ -10,7 +10,7 @@ DeepSeek Harness 设置页插件:回合完成通知——host 单源决策,声�
 - webhook:host 直发(标签页全关也送达),Slack-compatible `{text}` + 结构化字段,超时 10 秒不重试;设置面板内配置 URL,测试按钮返回真实投递结果。
 - IM 投递:安装 [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 后自动启用,面板可从其已保存投递目标中多选(支持微信等九渠道),勾选即自动保存;支持绑定多个 bot,已绑 bot 以标签展示,点标签直接加载该 bot 目录,× 一键取消注册(移除该 bot 全部目标);触发逻辑与 webhook 完全一致(同文本、同分类开关、fire-and-forget 不重试);目标的新建与平台测试仍在 dsh-im 设置页完成,此处仅选择;测试按钮逐目标返回真实结果。
 - 设置面板:webhook URL(凭据只写,不回显)、六分类开关、碎轮过滤、子代理豁免均在面板配置(host settings 持久化,热生效);音效管理与授权入口同面板;client 激活即轮询,不依赖面板打开。
-- 发声通道:页内提示与系统弹窗各自独立开关(本机偏好);聚焦静默仅压声音与系统弹窗;用户行动空闲满 5 分钟视为离开,聚焦也全通道齐发;系统弹窗须浏览器授权,想弹未授权时降级标题闪烁。
+- 发声通道:提示音、页内提示与系统弹窗各自独立开关(本机偏好);提示音可按六分类单独静音(点分类标签切换,缺省出声),适合仅对提问等关键事件出声强调;聚焦静默仅压声音与系统弹窗;用户行动空闲满 5 分钟视为离开,聚焦也全通道齐发;系统弹窗须浏览器授权,想弹未授权时降级标题闪烁。
 - 写路由安全:config / mapping / upload / test-webhook / test-im / sound 改名与删除均带同源守卫(Origin 与 Host 不符即 403),JSON 写入另校验 content-type,阻断跨站 drive-by 改写;webhookUrl schema 标记 secret,任何接口不回传原文。已知边界:同源守卫不防 DNS rebinding(Origin 与 Host 相等即放行),该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决而非逐插件补丁。
 - 多窗口去重:投影(内存环形 20 条,60 秒过期)供各窗口约 2 秒轮询;localStorage 写后读回认领锁(30 秒过期接管,完成标记防迟到窗口重复发声)。
 - 发声形态:聚焦窗口仅页内 toast(可关);失焦 + Notification 授权走声音 + 系统弹窗;HTTP 非回环(非 secure context)诚实降级 toast + 标题闪烁。

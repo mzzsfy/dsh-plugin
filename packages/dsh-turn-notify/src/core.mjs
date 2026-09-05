@@ -200,15 +200,17 @@ export function decideClaim({ stored, done, now, windowId, lockTtlMs = CLAIM_LOC
 // 用户行动空闲满此时长视为离开:聚焦静默不再适用,通知全通道齐发。
 export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 
-// 发声通道判定:页内提示与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
+// 发声通道判定:页内提示、提示音与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
+// 提示音另受分类配置约束:soundCategories 中该分类显式 false 即静音,缺省键与空分类放行。
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
 // idleMs 为距上次用户行动的时长,满阈值视为离开,等效未聚焦。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS }) {
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS }) {
   const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
   const quiet = hasFocus && focusQuiet && !idleAway
+  const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
   return {
     toast: toastEnabled,
-    sound: !quiet,
+    sound: !quiet && soundEnabled && !categoryMuted,
     system: !quiet && systemEnabled && permission === 'granted',
     blink: !quiet && systemEnabled && permission !== 'granted',
   }

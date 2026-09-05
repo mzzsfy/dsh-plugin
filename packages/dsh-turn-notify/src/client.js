@@ -85,7 +85,10 @@ window.__ModuleLoader__.load({
     const KEY_VOLUME = 'turn-notify:volume'
     const KEY_DEGRADE_HINT = 'turn-notify:degrade-hint'
     const KEY_TOAST = 'turn-notify:toast'
+    const KEY_SOUND = 'turn-notify:sound'
     const KEY_SYSTEM = 'turn-notify:system'
+    // 分类提示音配置:JSON 对象,缺省键=出声,显式 false=该分类静音
+    const KEY_SOUND_CATEGORIES = 'turn-notify:sound-categories'
     // 映射双作用域:本地映射与开关均存本机浏览器,音效库保持 host 共享
     const KEY_MAPPING = 'turn-notify:mapping'
     const KEY_MAPPING_LOCAL = 'turn-notify:mapping-local'
@@ -149,6 +152,16 @@ window.__ModuleLoader__.load({
 
     // 本地作用域开关:仅显式开启生效,缺省为全局
     const localMappingEnabled = () => localGet(KEY_MAPPING_LOCAL) === '1'
+
+    // 分类提示音读取:JSON 解析失败或形态非对象回空对象(全分类出声)
+    function readSoundCategories() {
+      try {
+        const parsed = JSON.parse(localGet(KEY_SOUND_CATEGORIES))
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
 
     function windowId() {
       let wid = localGet(KEY_WID)
@@ -232,13 +245,15 @@ window.__ModuleLoader__.load({
     // 放入 LOGIC 段由 parity 测试保证双实现不漂移
     const IDLE_AWAY_MS = 5 * 60 * 1000
 
-    function chooseChannels(hasFocus, permission, idleMs) {
+    function chooseChannels(hasFocus, permission, idleMs, soundCategories, category) {
       const idleAway = typeof idleMs === 'number' && idleMs >= IDLE_AWAY_MS
       const quiet = hasFocus && localGet(KEY_DND) !== '0' && !idleAway
       const systemEnabled = localGet(KEY_SYSTEM) !== '0'
+      const soundEnabled = localGet(KEY_SOUND) !== '0'
+      const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
       return {
         toast: localGet(KEY_TOAST) !== '0',
-        sound: !quiet,
+        sound: !quiet && soundEnabled && !categoryMuted,
         system: !quiet && systemEnabled && permission === 'granted',
         blink: !quiet && systemEnabled && permission !== 'granted',
       }
@@ -521,7 +536,7 @@ window.__ModuleLoader__.load({
       for (const unit of units) {
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
-        const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt())
+        const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category)
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast) showToast(unit)
         if (!channels.sound) continue
@@ -689,6 +704,8 @@ window.__ModuleLoader__.load({
       // 本地作用域镜像:开关与映射改动即写 localStorage,仅作用域为当前域名
       const [localMode, setLocalMode] = useState(() => localMappingEnabled())
       const [localMapping, setLocalMappingState] = useState(() => readLocalMapping())
+      // 分类提示音镜像:pill 点击即写 localStorage,发声链路直读不依赖本 state
+      const [soundCategories, setSoundCategoriesState] = useState(() => readSoundCategories())
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
 
@@ -809,6 +826,15 @@ window.__ModuleLoader__.load({
       function toggleLocalMapping(checked) {
         setLocalMode(checked)
         localSet(KEY_MAPPING_LOCAL, checked ? '1' : '0')
+      }
+
+      // 分类提示音切换:显式 false=静音,删除键=恢复出声;发声链路每次直读 localStorage
+      function toggleSoundCategory(category) {
+        const next = { ...soundCategories }
+        if (next[category] === false) delete next[category]
+        else next[category] = false
+        setSoundCategoriesState(next)
+        localSet(KEY_SOUND_CATEGORIES, JSON.stringify(next))
       }
 
       async function setMapping(category, id) {
@@ -1195,6 +1221,30 @@ window.__ModuleLoader__.load({
           h('div', { className: 'tn-card__head' },
             h('span', { className: 'tn-card__title' }, '本机偏好'),
             h('span', { className: 'tn-card__sub' }, '仅存当前浏览器,不影响其他窗口'),
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }, '提示音'),
+            h('label', { className: 'tn-meta' },
+              h('input', {
+                type: 'checkbox', defaultChecked: localGet(KEY_SOUND) !== '0',
+                onChange: (e) => localSet(KEY_SOUND, e.target.checked ? '1' : '0'),
+              }),
+              ' 开启'),
+            h('div', { className: 'tn-pills' },
+              CATEGORIES.map((category) => h('span', {
+                className: 'tn-pill' + (soundCategories[category] !== false ? ' tn-pill--on' : ''),
+                key: category,
+                title: soundCategories[category] !== false
+                  ? CATEGORY_LABELS[category] + ':当前出声,点击静音'
+                  : CATEGORY_LABELS[category] + ':当前静音,点击恢复出声',
+                onClick: () => toggleSoundCategory(category),
+              }, CATEGORY_LABELS[category])),
+            ),
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }),
+            h('span', { className: 'tn-meta' },
+              '点分类标签单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示与系统弹窗不受影响。'),
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '系统弹窗'),

@@ -41,7 +41,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
+      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SOUND, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
   )
   return factory()
 }
@@ -144,22 +144,23 @@ defineDeadScenarios('[core.mjs deadCustomIds] ', coreDeadCustomIds)
 defineDeadScenarios('[client.js deadCustomIds] ', client.deadCustomIds)
 
 // 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
-function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled, idleMs, idleThresholdMs }) {
+function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, soundEnabled, soundCategories, category, systemEnabled, idleMs, idleThresholdMs }) {
   const backing = new Map()
   if (focusQuiet === false) backing.set(client.KEY_DND, '0')
   if (systemEnabled === false) backing.set(client.KEY_SYSTEM, '0')
   if (toastEnabled === false) backing.set(client.KEY_TOAST, '0')
+  if (soundEnabled === false) backing.set(client.KEY_SOUND, '0')
   globalThis.window = { localStorage: { getItem: (key) => (backing.has(key) ? backing.get(key) : null) } }
   try {
     if (idleThresholdMs !== undefined) assert.equal(client.IDLE_AWAY_MS, idleThresholdMs)
-    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined)
+    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined, soundCategories ?? null, category ?? null)
   } finally {
     delete globalThis.window
   }
 }
 
 function defineChannelScenarios(prefix, channels) {
-  test(prefix + '四通道矩阵对照:聚焦静默 / 双开关 / 授权与降级', () => {
+  test(prefix + '四通道矩阵对照:聚焦静默 / 双开关 / 授权与降级 / 提示音分类静音', () => {
     const base = { hasFocus: false, permission: 'granted' }
     assert.deepEqual(channels(base), { toast: true, sound: true, system: true, blink: false })
     assert.deepEqual(channels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false })
@@ -168,6 +169,11 @@ function defineChannelScenarios(prefix, channels) {
     assert.deepEqual(channels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false })
     assert.deepEqual(channels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
     assert.deepEqual(channels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
+    assert.deepEqual(channels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false })
+    assert.equal(channels({ ...base, soundCategories: { ask: false }, category: 'ask' }).sound, false)
+    assert.equal(channels({ ...base, soundCategories: { ask: false }, category: 'completed' }).sound, true)
+    assert.equal(channels({ ...base, soundCategories: { ask: false } }).sound, true)
+    assert.equal(channels({ ...base, soundCategories: { ask: false }, category: null }).sound, true)
   })
   test(prefix + '用户空闲对照:满阈值离开全通道,活跃聚焦静默', () => {
     const base = { hasFocus: true, permission: 'granted', idleThresholdMs: USER_IDLE_AWAY_MS }

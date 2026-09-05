@@ -253,6 +253,20 @@ test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
+test('提示音开关:总开关与分类配置独立静音,缺省键与空分类放行', () => {
+  const base = { hasFocus: false, permission: 'granted' }
+  // 提示音总开关独立关闭:页内提示与系统弹窗不受影响
+  assert.deepEqual(chooseChannels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false })
+  // 分类显式 false:该分类静音
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: 'ask' }).sound, false)
+  // 同配置其他分类照常出声
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: 'completed' }).sound, true)
+  // 未提供分类:全放行(与既有调用形态兼容)
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false } }).sound, true)
+  // 分类空缺:null 与 undefined 等价放行
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: null }).sound, true)
+})
+
 test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦静默', () => {
   const base = { hasFocus: true, permission: 'granted' }
   const idle = USER_IDLE_AWAY_MS
