@@ -171,6 +171,9 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
   return {
     providerInfo: (provider) => ({ id: provider, name: routeOf(provider).displayName ?? provider }),
     providerRetryPolicy: (provider) => routeOf(provider).retryPolicy,
+    // 官方 LlmAdapter 基类默认同构:声明无 provider 侧图片请求定价,token 计量回退中性估算;
+    // 0.1.2 起宿主计量路径直接调用本方法,缺失即 TypeError,必须显式提供
+    imageRequestPricing: () => undefined,
     listModels: (provider) => {
       const route = routeOf(provider)
       return Promise.resolve([...route.models.values()].map((entry) => ({

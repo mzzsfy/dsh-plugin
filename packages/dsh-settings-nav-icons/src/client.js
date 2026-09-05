@@ -19,9 +19,8 @@ window.__ModuleLoader__.load({
     // SVG 字面量构造:16×16 stroke 轮廓,与官方 IconOutline16 视觉节奏一致。
     const STROKE_ATTRS = 'fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"'
 
-    function svgOf(inner, cls) {
-      const iconCls = cls === undefined ? 'VOzbGW_navIcon' : cls
-      return '<svg ' + ATTR_MARK + '="1" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="' + iconCls + '" aria-hidden="true">' + inner + '</svg>'
+    function svgOf(inner) {
+      return '<svg ' + ATTR_MARK + '="1" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="VOzbGW_navIcon" aria-hidden="true">' + inner + '</svg>'
     }
 
     function pathOf(d) {
@@ -134,12 +133,20 @@ window.__ModuleLoader__.load({
       db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
     }
 
-    // 声明值解析:svg 字符串原样采用,glyph 名称查表,非法值返回 undefined。
+    // 声明值解析与安全门:svg 字符串须完整开标签且不带事件属性/外联/内嵌载体,
+    // 超长拒绝;glyph 名称查表(原型链成员经 typeof 收口不可能混入);非法值返回 undefined。
+    const SVG_MAX_CHARS = 4 * 1024
     function resolveIcon(value) {
       if (typeof value !== 'string') return undefined
       const trimmed = value.trim()
-      if (trimmed.startsWith('<svg')) return trimmed
-      return GLYPHS[trimmed]
+      if (
+        trimmed.length <= SVG_MAX_CHARS
+        && /^<svg[\s>]/.test(trimmed)
+        && !/\son[a-z]+\s*=/i.test(trimmed)
+        && !/<foreignObject/i.test(trimmed)
+        && !/javascript:/i.test(trimmed)
+      ) return trimmed
+      return typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
     }
 
     // 名称关键词 → 主题图标;整词边界匹配,短词(im/db/ai)不误伤子串。
@@ -179,6 +186,7 @@ window.__ModuleLoader__.load({
     }
 
     // 市场卡片头像槽决策:img(作者头像)整体换插件图标;div(字母色块)清空后内嵌。
+    // 记账值 = 插件名,换名重贴由该比较驱动。
     function decideAvatar(av, name) {
       if (name === '' || av.dataset.navic === name) return null
       return { name, html: themedIcon(name), old: av }
@@ -186,8 +194,13 @@ window.__ModuleLoader__.load({
 
     function applyAvatar(av, decision) {
       if (av.tagName === 'IMG') {
+        // IMG 不移除(React 持引用,移除后 reconcile 复活会双图):隐藏并记账,
+        // 注入图标跟随其后;换名重贴时先移除上次注入的图标防重复
+        av.hidden = true
+        av.dataset.navic = decision.name
+        const stale = av.nextElementSibling
+        if (stale !== null && stale.dataset.navic === '1') stale.remove()
         av.insertAdjacentHTML('afterend', decision.html)
-        av.remove()
         return
       }
       av.textContent = ''
@@ -225,25 +238,27 @@ window.__ModuleLoader__.load({
 
     // 外部声明注册表:其他插件经 window.__navicIcons.register({label: icon}) 声明,
     // 键为分区 label 或插件名,值为 16×16 svg 字符串或内置 glyph 名。声明优先于
-    // 内置映射与关键词推导。污染面收敛在 window.__navicIcons 单一命名空间。
-    const DECLARED_ICONS = {}
+    // 内置映射与关键词推导。无原型隔离时 label 恰为 constructor/toString 等会查到
+    // 继承成员;污染面收敛在 window.__navicIcons 单一命名空间。
+    const DECLARED_ICONS = Object.create(null)
 
     // 单元格替换判定:先看记账与现役图标;label 有声明或内置映射直接换,
-    // 未映射时仅当现役图标是默认齿轮,才按 themedIcon(声明→关键词→哈希)兜底,
-    // 官方自带图形(模型/插件/Agent 预设/使用统计)一律不动。
-    // 现役图标是本插件所贴且记账 label 未变时跳过;label 变化(如语言切换)则按新 label 重贴。
+    // 未映射时官方原生图形(非齿轮且非本插件所贴)一律不动,齿轮与本插件所贴
+    // 按 themedIcon(声明→关键词→哈希)兜底。
+    // 幂等判定与注入内容解耦:记账 label 匹配且现役图标非官方齿轮即视为已处理,
+    // 外部声明内容是否自带标记不影响短路;label 变化(如语言切换)则按新 label 重贴。
     function decide(cell) {
       const labelNode = cell.querySelector(SELECTOR_LABEL)
       if (labelNode === null) return null
-      const label = labelNode.textContent || ''
-      if (cell.dataset.navic === label && cell.querySelector('svg[' + ATTR_MARK + ']')) return null
+      const label = (labelNode.textContent || '').trim()
+      if (label === '') return null
       const old = cell.querySelector(SELECTOR_ICON)
       if (old === null) return null
-      if (old.dataset.navic === '1' && cell.dataset.navic === label) return null
+      if (cell.dataset.navic === label && !isGear(old)) return null
       let html = resolveIcon(DECLARED_ICONS[label])
       if (html === undefined) html = ICONS[label]
       if (html === undefined) {
-        if (!isGear(old)) return null
+        if (!isGear(old) && old.dataset.navic !== '1') return null
         html = themedIcon(label)
       }
       return { label, html, old }
@@ -264,45 +279,80 @@ window.__ModuleLoader__.load({
     const SELECTOR_NM = 'a[class*="_nm"]'
 
     let pending = false
+    let rafId = 0
     let observer = null
 
     function replacePass() {
       pending = false
       const cells = document.querySelectorAll(SELECTOR_CELL)
       for (const cell of cells) {
-        const decision = decide(cell)
-        if (decision !== null) applyDecision(cell, decision)
+        try {
+          const decision = decide(cell)
+          if (decision !== null) applyDecision(cell, decision)
+        } catch (error) {
+          // 单项异常不中断当轮剩余处理(宿主 DOM 形态漂移是常态风险),告警后继续
+          console.warn('[nav-icons] 单元格处理失败', error)
+        }
       }
       for (const av of document.querySelectorAll(SELECTOR_AV)) {
-        if (av.dataset.navic !== undefined) continue
-        const row1 = av.closest(SELECTOR_ROW1)
-        if (row1 === null) continue
-        const nm = row1.querySelector(SELECTOR_NM)
-        if (nm === null) continue
-        const name = (nm.textContent || '').trim()
-        const decision = decideAvatar(av, name)
-        if (decision !== null) applyAvatar(av, decision)
+        try {
+          const row1 = av.closest(SELECTOR_ROW1)
+          if (row1 === null) continue
+          const nm = row1.querySelector(SELECTOR_NM)
+          if (nm === null) continue
+          const name = (nm.textContent || '').trim()
+          const decision = decideAvatar(av, name)
+          if (decision !== null) applyAvatar(av, decision)
+        } catch (error) {
+          console.warn('[nav-icons] 头像槽处理失败', error)
+        }
       }
     }
 
     function schedule() {
       if (pending) return
       pending = true
-      requestAnimationFrame(replacePass)
+      rafId = requestAnimationFrame(replacePass)
     }
 
-    // 声明入口:合并进注册表,清除已按同名 label 记账的元素强制重贴,
-    // 再立即跑一遍替换。时序无关:本插件未就绪时调用方入队等待。
-    function registerIcons(entries) {
-      if (entries === null || typeof entries !== 'object') return
-      for (const key of Object.keys(entries)) {
-        if (typeof entries[key] !== 'string') continue
-        DECLARED_ICONS[key] = entries[key]
+    // 声明持久层:client 半区热重载会重跑 factory 而生产者不重发,声明外置 window
+    // 纯数据,新实例启动时恢复;页面刷新随 window 释放
+    const DECLARATIONS_STORE = '__navicIconDeclarations'
+    function restoreDeclarations() {
+      const saved = window[DECLARATIONS_STORE]
+      if (saved !== null && typeof saved === 'object' && !Array.isArray(saved)) {
+        for (const key of Object.keys(saved)) DECLARED_ICONS[key] = saved[key]
       }
-      for (const el of document.querySelectorAll('[' + ATTR_MARK + ']')) {
-        if (el.dataset.navic !== undefined && DECLARED_ICONS[el.dataset.navic] !== undefined) {
-          delete el.dataset.navic
+    }
+    function persistDeclarations() {
+      window[DECLARATIONS_STORE] = Object.assign({}, DECLARED_ICONS)
+    }
+
+    // 声明入口:值经 resolveIcon 归一化(非法值撤销声明走默认管线,与 README 承诺一致),
+    // 同值幂等短路;仅值发生变更的键清记账重贴,无关分区不抖动。
+    // 时序无关:本插件未就绪时调用方入队等待。
+    function registerIcons(entries) {
+      if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) return
+      const touched = []
+      for (const key of Object.keys(entries)) {
+        if (key === '__proto__') continue
+        const resolved = resolveIcon(entries[key])
+        if (resolved === undefined) {
+          if (DECLARED_ICONS[key] !== undefined) {
+            delete DECLARED_ICONS[key]
+            touched.push(key)
+          }
+          continue
         }
+        if (DECLARED_ICONS[key] === resolved) continue
+        DECLARED_ICONS[key] = resolved
+        touched.push(key)
+      }
+      if (touched.length === 0) return
+      persistDeclarations()
+      // 只清受影响 label/插件名的记账: 无关分区不重贴(svg 的纯标记 '1' 不命中声明键)
+      for (const el of document.querySelectorAll('[' + ATTR_MARK + ']')) {
+        if (touched.indexOf(el.dataset.navic) >= 0) delete el.dataset.navic
       }
       schedule()
     }
@@ -318,8 +368,9 @@ window.__ModuleLoader__.load({
     }
 
     function start() {
+      restoreDeclarations()
       observer = new MutationObserver(schedule)
-      observer.observe(document.body, { childList: true, subtree: true })
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
       drainQueue()
       replacePass()
     }
@@ -329,6 +380,14 @@ window.__ModuleLoader__.load({
         observer.disconnect()
         observer = null
       }
+      if (rafId !== 0) {
+        cancelAnimationFrame(rafId)
+        rafId = 0
+      }
+      pending = false
+      // 队列恢复数组形态: 卸载后生产者按 README 惯用法入队等待下一实例,
+      // 而不是驱动已停止实例改写 DOM
+      window.__navicIconQueue = []
     }
 
     return {

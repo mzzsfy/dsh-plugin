@@ -26,6 +26,9 @@ const NAMESPACE = 'maintain'
 
 const CHECK_TIMEOUT_MS = 20 * 1000
 const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
+// 响应冲刷完成到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
+// 导出仅供测试计算延迟窗口等待时长
+export const RESTART_DELAY_MS = 2 * 1000
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
 
@@ -43,9 +46,9 @@ const SETTINGS_SCHEMA = z.object({
   registryBase: z.string().default(DEFAULT_REGISTRY_BASE).description('npm registry 基地址,官方源不可达时改为镜像地址'),
 })
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, onFlushed) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(payload))
+  res.end(JSON.stringify(payload), onFlushed)
 }
 
 // 同源守卫:浏览器写请求恒带 Origin,与 Host 不符即拒;无 Origin 的非浏览器客户端放行。
@@ -141,6 +144,7 @@ export function apply(ctx) {
   let upgrade = { running: false, last: null }
   let checkInFlight = null
   let nextDueAt = null
+  let restartScheduled = false
 
   function runCheck() {
     if (checkInFlight) return checkInFlight
@@ -356,9 +360,15 @@ export function apply(ctx) {
           sendJson(res, 500, { error: '启动器未提供 appExit,无法重启' })
           return
         }
-        sendJson(res, 200, { ok: true, restarting: true })
-        // 响应先冲刷再请求退出;托管环境由进程管理器拉起,dispose 挂起时 5 秒兜底强制
-        setImmediate(() => exit(0))
+        if (restartScheduled) {
+          sendJson(res, 200, { ok: true, restarting: true })
+          return
+        }
+        restartScheduled = true
+        // 响应冲刷完成即回执送达,延迟退出让浏览器先进入重启等待态;托管环境由进程管理器拉起,dispose 挂起时 5 秒兜底强制
+        sendJson(res, 200, { ok: true, restarting: true }, () => {
+          setTimeout(() => exit(0), RESTART_DELAY_MS)
+        })
       }),
     },
   ]

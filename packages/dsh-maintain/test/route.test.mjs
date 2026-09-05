@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply } from '../src/index.js'
+import { apply, RESTART_DELAY_MS } from '../src/index.js'
 
 // 全局 fetch 拦截:core.fetchDistTags 默认绑定全局 fetch,测试期返回与 dist-tags.test
 // 同形的流式响应(tags 就绪),防止启动检查/refresh 触发真实网络请求
@@ -101,8 +101,9 @@ function makeRes() {
   res.writeHead = (status) => {
     res.status = status
   }
-  res.end = (text) => {
+  res.end = (text, onFlushed) => {
     res.payload = text ? JSON.parse(text) : null
+    if (typeof onFlushed === 'function') onFlushed()
   }
   return res
 }
@@ -299,7 +300,7 @@ test('upgrade:真实挂起命令触达门闩,二次 409', async () => {
   await new Promise((resolve) => setTimeout(resolve, 3000))
 })
 
-test('restart:缺失 appExit 500;在位时先 200 再退出', async () => {
+test('restart:缺失 appExit 500;响应立即返回,冲刷完成后延迟退出', async () => {
   const withoutExit = makeCtx()
   apply(withoutExit.ctx)
   const denied = await post(withoutExit.routes, '/api/maintain/restart')
@@ -311,8 +312,23 @@ test('restart:缺失 appExit 500;在位时先 200 再退出', async () => {
   const ok = await post(routes, '/api/maintain/restart')
   assert.equal(ok.status, 200)
   assert.equal(ok.payload.restarting, true)
-  await new Promise((resolve) => setImmediate(resolve))
+  // 响应交付瞬间宿主必须仍在:exit 只能在冲刷回调触发的延迟之后执行
+  assert.deepEqual(exits, [], '响应返回时 exit 不得已触发')
+  await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS + 100))
   assert.deepEqual(exits, [0])
+})
+
+test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async () => {
+  const exits = []
+  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  apply(ctx)
+  const first = await post(routes, '/api/maintain/restart')
+  assert.equal(first.status, 200)
+  const second = await post(routes, '/api/maintain/restart')
+  assert.equal(second.status, 200)
+  assert.equal(second.payload.restarting, true)
+  await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS + 100))
+  assert.deepEqual(exits, [0], '重复请求不得叠加调度 exit')
 })
 
 test('readBody 超限:路由归一 400', async () => {
