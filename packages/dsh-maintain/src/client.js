@@ -92,27 +92,12 @@ async function api(url, options) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const error = new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
-    error.status = response.status
-    throw error
-  }
+  if (!response.ok) throw new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
   return payload
 }
 
 function post(url, body) {
   return api(url, { method: 'POST', body: body === undefined ? '{}' : JSON.stringify(body) })
-}
-
-// 宿主不可达判定:重启等待语境下,传输层失败(TypeError/中止)与网关 5xx 等价——
-// 宿主退出窗口经反向代理/系统代理访问时,宿主死亡表现为网关 502/503/504 应答而非连接错误;
-// 409/401/403/500 是宿主存活时的应用层应答,不在此列
-const GATEWAY_UNAVAILABLE_STATUSES = [502, 503, 504]
-function isHostUnreachable(error) {
-  if (error instanceof TypeError) return true
-  if (error === null || error === undefined) return false
-  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true
-  return error.status !== undefined && GATEWAY_UNAVAILABLE_STATUSES.includes(error.status)
 }
 
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
@@ -572,16 +557,10 @@ function MaintainApp() {
         setRestarting(true)
         return post(RESTART_URL)
       })
-      .catch((restartError) => {
-        // 宿主不可达(传输层失败/网关 5xx)是宿主退出窗口的预期中间态,置失联并入等待态轮询;
-        // 业务错误(409/401/500 等)宿主仍在,展示原文,不得进入等待态(等待态会把失联误判为已重启)
-        if (isHostUnreachable(restartError)) {
-          restartLostRef.current = true
-          setRestarting(true)
-          return
-        }
-        setRestarting(false)
-        setError('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)))
+      .catch(() => {
+        // 等待期内一切非成功应答(连接错误/网关 5xx/业务错误)都不构成宿主状态证据,
+        // 一律视为失联继续等待,由恢复探测或总时长超时收尾,不逐一区分错误类别
+        restartLostRef.current = true
       })
       .then(() => { restartPendingRef.current = false })
   }
