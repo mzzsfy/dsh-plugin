@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-usage-panel(用量面板)
 
-DeepSeek Harness 双端插件:在「设置 → 用量面板」手动配置多组(上限 20 个)LLM 平台账号(API 地址 + Key),定期自动查询并展示每个账号的余额、额度与历史趋势。无自动发现;配置持久化在本机 `~/.dsh/dsh-usage-panel/accounts.json`,查询快照留存于同目录 `history.json`。
+DeepSeek Harness 双端插件:在「设置 → 账号余额」手动配置多组(上限 20 个)LLM 平台账号(API 地址 + Key),定期自动查询并展示每个账号的余额、额度与历史趋势;刷新评估越过逻辑点(用量阈值穿越 / 余额阈值穿越 / 额度窗口重置)时,经 webhook、dsh-im、页内 toast 三通道推送通知。无自动发现;配置持久化在本机 `~/.dsh/dsh-usage-panel/accounts.json`,查询快照留存于同目录 `history.json`。
 
 ## 安装
 
@@ -47,6 +47,54 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 - 历史文件解析失败时自动备份为 `history.json.bak` 并暂停写入(防空数据覆盖);`history.json` 被移除或恢复为可解析内容后自动恢复写入,`.bak` 是损坏前的最后数据,删除前请确认不再需要
 - 月窗口序列 `月` 由 host 侧按当月余额快照聚合产出
 
+## 通知(v3)
+
+刷新(自动轮询与手动查询)本身不是通知类型,而是评估时机:每次查询成功后评估读数,**越过逻辑点才触发一个事件**,通知关闭时评估短路零成本。
+
+### 通知类型与沿触发
+
+| 类型 | 触发逻辑点 | 防抖 |
+| --- | --- | --- |
+| 用量阈值 | 窗口利用率上穿阈值(全局默认 90%,账号可覆盖) | 沿触发:触发一次即解除武装,窗口重置后恢复 |
+| 余额阈值 | 可用余额下穿阈值(数值即启用,留空不评估;口径 remaining 优先、缺失回落 total,币种随读数) | 沿触发:充值回升到阈值上方后恢复武装 |
+| 窗口重置 | 额度窗口 `resetsAt` 轮转(5小时/7天等) | 每窗口生命周期一次,内容为上一窗口峰值利用率 |
+
+沿触发状态与窗口峰值基线随账号持久化在 `accounts.json`,宿主重启不重发。
+
+### 规则模型
+
+- 全局规则(host settings `usage-panel` 命名空间的 `notify` 键,面板与 settings.yaml 等价,热生效):
+
+```yaml
+usage-panel:
+  pollIntervalSec: 600
+  notify:
+    enabled: false                # 总开关,默认关闭
+    quotaThresholdPct: 90         # 用量窗口阈值百分比,(0,100]
+    balanceThreshold: null        # 余额阈值,null 为不启用
+    resetNotice: true             # 窗口重置时通知上一窗口峰值
+    toast: true                   # 页内 toast 通道
+    webhookUrl: ''                # 凭据,留空禁用;面板只写不回显
+    imTargets: []                 # dsh-im 投递目标 [{botId, targetId}]
+```
+
+- 账号覆盖:账号表单「通知规则覆盖」折叠区,仅 `quotaThresholdPct` / `balanceThreshold` / `resetNotice` 三字段,**字段级合并**,留空继承全局;通道配置全局统一。
+
+### 通知通道
+
+- webhook:host 直发(Slack-compatible `{text}` + 结构化字段),超时 10 秒不重试,fire-and-forget;面板「保存并测试」返回真实投递结果
+- dsh-im:安装 [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 后自动启用,面板可手动添加目标或从其已保存投递目标中点选,「测试 IM」逐目标返回真实结果;目标管理仍在 dsh-im 设置页
+- 页内 toast:host 内存投影(环形 20 条 / 60 秒过期),浏览器半区约 5 秒轮询并经公共依赖 `@mzzsfy/dsh-toast` 展示;localStorage 单元级认领锁保证多窗口只弹一次。**toast 依赖由 session-manager 插件代挂**,未安装 session-manager 时此通道静默不可用,其余通道不受影响
+
+### 通知接口
+
+- `GET /api/usage-panel/notifications`:通知投影(轮询用)
+- `GET|POST /api/usage-panel/notify-config`:全局通知规则;`webhookUrl` 属凭据任何响应不回传原文,仅 `webhookConfigured` 标志
+- `POST /api/usage-panel/test-webhook` / `POST /api/usage-panel/test-im`:测试投递,返回真实结果
+- `GET /api/usage-panel/im-targets?botId=`:列出 dsh-im 该 bot 已保存投递目标
+
+写路由(notify-config POST / test-webhook / test-im)带同源守卫(Origin 与 Host 不符 403)与 JSON content-type 校验(text/plain 等简单请求 400),阻断跨站 drive-by 改写通知配置或借测试通道外发;已知边界同 turn-notify:同源守卫不防 DNS rebinding,该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决。
+
 ## custom 提取规则
 
 `extract` 是 JSON 对象,`remaining` 必填;取值支持四种形式:
@@ -62,9 +110,9 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 
 ## 架构与依赖
 
-- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings);需要 DSH 提供 `webServer` 服务与 `settings` 服务(轮询间隔持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
-- Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;操作反馈(保存 / 查询结果)经统一浮出通知 `@mzzsfy/dsh-toast` 展示,依赖缺失时降级 `console.warn`
-- 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/spark.mjs`):无 IO 数据变换,`npm test` 覆盖解析、退避分频、快照留存与 SVG 点位
+- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings / notifications / notify-config / test-webhook / test-im / im-targets);需要 DSH 提供 `webServer` 服务与 `settings` 服务(轮询间隔与通知规则持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
+- Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;`@mzzsfy/dsh-toast` 可选消费(动态 require,模块表缺失即页内通道停用,操作反馈降级 `console.warn`)
+- 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/spark.mjs` / `src/notify.mjs`):无 IO 数据变换,`npm test` 覆盖解析、退避分频、快照留存、SVG 点位与规则合并 / 沿触发评估 / 投影认领 / 配置校验
 
 ## 安全提示
 
