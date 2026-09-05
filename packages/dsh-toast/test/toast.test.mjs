@@ -128,3 +128,72 @@ test('subscribe:入栈与移除均通知订阅者', () => {
   mod.__test.show('不再通知')
   assert.equal(calls, 2)
 })
+
+test('holdMs 边界:非有限正值一律回落默认', () => {
+  const mod = loadModule()
+  assert.equal(mod.__test.resolveHoldMs({ holdMs: 0 }), 4 * 1000)
+  assert.equal(mod.__test.resolveHoldMs({ holdMs: '500' }), 4 * 1000)
+  assert.equal(mod.__test.resolveHoldMs({ holdMs: Number.NaN }), 4 * 1000)
+  // Infinity 经浏览器 WebIDL 钳为约 24.8 天近乎永久驻留,与展示期意图相反,必须回落
+  assert.equal(mod.__test.resolveHoldMs({ holdMs: Number.POSITIVE_INFINITY }), 4 * 1000)
+  assert.equal(mod.__test.resolveHoldMs({ holdMs: 2 ** 31 }), 4 * 1000, '超 setTimeout 钳位上界回落')
+})
+
+test('默认展示期:独立字面量断言 4 秒', () => {
+  const mod = loadModule()
+  mod.__test.show('默认')
+  mock.timers.tick(4 * 1000 - 1)
+  assert.equal(mod.__test.getItems().length, 1, '展示期内未消失')
+  mock.timers.tick(1)
+  assert.equal(mod.__test.getItems().length, 0, '展示期满消失')
+})
+
+test('kind: error 合法直通', () => {
+  const mod = loadModule()
+  mod.__test.show('错误', { kind: 'error' })
+  assert.equal(mod.__test.getItems()[0].kind, 'error')
+})
+
+test('纯空白 text 拒绝,非空白正常入栈', () => {
+  const mod = loadModule()
+  assert.equal(mod.__test.show('   '), null)
+  assert.equal(mod.__test.show('\t\n'), null)
+  assert.equal(mod.__test.getItems().length, 0)
+  const id = mod.__test.show(' 带前后空格的内容 ')
+  assert.notEqual(id, null, '含非空白字符的文本照常入栈')
+})
+
+test('sticky 被裁剪:栈满后新条目仍挤掉最旧 sticky', () => {
+  const mod = loadModule()
+  for (let index = 1; index <= 4; index += 1) mod.__test.show('常驻' + index, { sticky: true })
+  mod.__test.show('新条目')
+  const items = mod.__test.getItems()
+  assert.equal(items.length, 4)
+  assert.equal(items[0].text, '常驻2', '最旧 sticky 被裁剪')
+  assert.equal(items[items.length - 1].text, '新条目')
+})
+
+test('被裁条目计时同步撤销:条目引用上的 timer 句柄清空', () => {
+  const mod = loadModule()
+  mod.__test.show('将被裁剪')
+  // getItems 为浅拷贝,entry 对象同引用,可直接断言 timer 字段
+  const dropped = mod.__test.getItems()[0]
+  assert.notEqual(dropped.timer, undefined, '入栈即挂计时')
+  for (let index = 1; index <= 4; index += 1) mod.__test.show('常驻' + index, { sticky: true })
+  assert.equal(dropped.timer, undefined, '裁剪路径撤销计时')
+  const snapshot = mod.__test.source.getSnapshot()
+  mock.timers.tick(4 * 1000)
+  assert.equal(mod.__test.source.getSnapshot(), snapshot, '无滞留计时副作用')
+})
+
+test('dismiss 撤销自动消失计时:句柄清空,移除后再推进无滞留副作用', () => {
+  const mod = loadModule()
+  const id = mod.__test.show('手动移除')
+  const entry = mod.__test.getItems()[0]
+  assert.notEqual(entry.timer, undefined, '入栈即挂计时')
+  mod.__test.dismiss(id)
+  assert.equal(entry.timer, undefined, 'dismiss 路径撤销计时')
+  mock.timers.tick(4 * 1000)
+  assert.equal(mod.__test.getItems().length, 0)
+  assert.equal(mod.__test.source.getSnapshot().length, 0)
+})

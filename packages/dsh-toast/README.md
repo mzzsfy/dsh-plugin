@@ -40,23 +40,25 @@ toast('回合完成', { holdMs: 6 * 1000 })            // 自定义展示期
 
 ## API
 
-- `show(text, opts)` → `id`:入栈一条通知。`opts.kind` 为 `'info' | 'ok' | 'error'`(非法归 `info`,默认深色 / 成功绿 / 错误红);`opts.sticky` 真值常驻不自动消失,渲染「知道了」按钮;`opts.holdMs` 正数自定义展示期(默认 4 秒)。`text` 非字符串或为空时忽略并返回 `null`
-- `dismiss(id)`:移除指定条目,幂等
+- `show(text, opts)` → `id`:入栈一条通知。`opts.kind` 为 `'info' | 'ok' | 'error'`(非法归 `info`,默认深色 / 成功绿 / 错误红);`opts.sticky` 真值常驻不自动消失,渲染「知道了」按钮;`opts.holdMs` 有限正值自定义展示期(默认 4 秒,非有限值或超出 setTimeout 钳位上界回落默认)。`text` 非字符串或纯空白时忽略并返回 `null`
+- `dismiss(id)`:移除指定条目并撤销其自动消失计时,幂等
 - `mount()`:显式挂载渲染容器(一般无需调用,首次 `show` 惰性自举)
+- `__test`:非公开 API,仅供本包测试驱动 store 消费,无兼容承诺,消费方禁用
 
 ## 行为规格(BDD)
 
 - Given 库已加载,When `show(text)`,Then 通知顶部居中显示,默认 4 秒后自动消失
-- Given 栈内已有 4 条,When 再入栈一条,Then 最旧条目立即移除(含 sticky,新通知优先)
+- Given 栈内已有 4 条,When 再入栈一条,Then 最旧条目立即移除(含 sticky,新通知优先),被裁条目的自动消失计时同步撤销
 - Given `show(text, {sticky: true})`,Then 通知常驻,点「知道了」或 `dismiss(id)` 后消失
 - Given `kind: 'error'`,Then 红色变体渲染
 - Given 首次 `show`,Then 渲染容器与样式惰性挂载(容器直挂 body,不受设置页全屏层 z-index 遮挡)
-- Given HMR 重载产生同 id 旧容器,When 新代首次挂载,Then 旧容器移除、新容器就位
+- Given HMR 重载产生同 id 旧容器,When 新代首次挂载,Then 旧容器移除、新容器就位;旧代闭包再调 `show`/`mount` 时发现在位容器属更新代际即退避,不拆新代容器
+- Given 容器在场而样式节点被外部移除,When 再次 `show`,Then 样式补挂(容器与样式同级自愈)
 - Given 用户系统开启减弱动态效果,Then 入场动画禁用
 
 ## 实现说明
 
-- 位置顶部居中:不遮挡聊天输入区;容器直挂 body,层级高于设置全屏层
-- 样式全部取宿主 `--dsw-alias-*` 令牌(错误变体文字色除外),双主题自适应;样式挂宿主文档级、幂等且内容变化原位替换
-- store 位于模块闭包单例;渲染容器惰性自举、幂等、自愈(旧 root 卸载后重建),不依赖宿主生命周期
+- 位置顶部居中:不遮挡聊天输入区;容器直挂 body,层级高于设置全屏层(z-index 1100 为对宿主层级的显式假设,宿主层级调整时回归核对)
+- 样式全部取宿主 `--dsw-*` 令牌且带就近 fallback(宿主升级更名令牌时降级为可用默认形态,不静默失效);样式挂宿主文档级、幂等且内容变化原位替换,容器在场时随每次挂载自愈
+- store 位于模块闭包单例;渲染容器惰性自举、幂等、自愈(旧 root 卸载后重建),容器带代际标记防 HMR 两代互拆;不依赖宿主生命周期
 - react / react-dom/client 由宿主平台模块表提供,peerDependencies 声明 react 与 react-dom
