@@ -20,7 +20,11 @@ window.__ModuleLoader__.load({
       // 模块表无 toast → 页内通知通道置空,调用点统一走 toast 判空
     }
 
-    const POLL_MS = 2 * 1000
+    // 长轮询请求超时上限,须大于服务端挂起上限,保证客户端总在服务端放弃后才断开
+    const REQUEST_TIMEOUT_MS = 30 * 1000
+    // 失败重连退避:指数增长至上限,防网络中断期间打爆服务端
+    const RETRY_MIN_MS = 2 * 1000
+    const RETRY_MAX_MS = 30 * 1000
     // 页内通知展示期,经公共依赖 holdMs 传入
     const TOAST_MS = 6 * 1000
     const BLINK_MS = 1 * 1000
@@ -486,25 +490,32 @@ window.__ModuleLoader__.load({
     let soundMapping = {}
     let uploadedIds = []
     let running = false
+    // 已见投影版本:空即未首拉;长轮询续传游标,响应后随 payload 推进
+    let projectionCursor = null
 
     // 生效映射:开关开时本地覆盖全局,关时本地整体休眠(结果即全局)
     const effectiveMapping = () => mergeMapping(soundMapping, localMappingEnabled() ? readLocalMapping() : {})
 
-    async function poll() {
-      try {
-        await pollOnce()
-        degradeAnnounced.poll = false
-      } catch (error) {
-        announceDegrade('poll', error && error.message ? error.message : String(error))
-      }
-    }
-
-    async function pollOnce() {
+    async function pollOnce(signal) {
       let payload
       try {
-        const response = await fetch('/api/turn-notify/projection')
+        // cursor 为空即首拉,服务端立即返回全量;之后携带版本挂起等待增量。
+        // 组合代际中止与请求超时:服务端挂起上限低于此超时,超时即故障进入退避
+        const query = projectionCursor === null ? '' : '?cursor=' + projectionCursor
+        const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        const requestSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
+        const response = await fetch('/api/turn-notify/projection' + query, { signal: requestSignal })
+        if (!response.ok) {
+          void response.body?.cancel()
+          return false
+        }
         payload = await response.json()
-      } catch { return }
+      } catch {
+        return false
+      }
+      // 版本缺失即异常响应:按失败退避,防游标停滞退化成紧密首拉循环
+      if (typeof payload.version !== 'number') return false
+      projectionCursor = payload.version
       soundMapping = payload.soundMapping || {}
       sessionHighlightEnabled = payload.sessionHighlight !== false
       if (!sessionHighlightEnabled && sessionHighlights.size > 0) {
@@ -541,6 +552,58 @@ window.__ModuleLoader__.load({
         else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
       }
       applySessionHighlights()
+      return true
+    }
+
+    // 单次拉取:测试入口与循环体共用;失败返回假,由调用方决定退避;
+    // 代际中止(HMR 换代)不算降级,不通告
+    async function poll(signal) {
+      const ok = await pollOnce(signal)
+      if (ok) degradeAnnounced.poll = false
+      else if (signal === undefined || !signal.aborted) announceDegrade('poll', '投影拉取失败')
+      return ok
+    }
+
+    function sleep(ms, signal) {
+      return new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve()
+          return
+        }
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, ms)
+        if (typeof timer.unref === 'function') timer.unref()
+        const onAbort = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+    }
+
+    // 长轮询主循环:成功即立即重连(空闲期由服务端挂起兜底),失败指数退避;
+    // 处理段异常同样按失败消化,循环不静默死亡
+    async function runLoop(signal) {
+      let backoffMs = RETRY_MIN_MS
+      while (!signal.aborted) {
+        let ok = false
+        try {
+          ok = await poll(signal)
+        } catch (error) {
+          if (!signal.aborted) announceDegrade('poll', error && error.message ? error.message : String(error))
+        }
+        if (signal.aborted) break
+        if (ok) {
+          backoffMs = RETRY_MIN_MS
+          // 让出一拍:防测试 stub 立即响应时循环退化成紧密空转
+          await sleep(0, signal)
+        } else {
+          await sleep(backoffMs, signal)
+          backoffMs = Math.min(backoffMs * 2, RETRY_MAX_MS)
+        }
+      }
     }
 
     async function refreshSounds() {
@@ -646,18 +709,18 @@ window.__ModuleLoader__.load({
     }
 
     function start() {
-      // 代际令牌自愈:HMR 重建模块闭包后 running 归零,首启清旧代 interval 再启新代;
-      // 旧版遗留布尔令牌传入 clearInterval 为无害空操作,顺带清偿旧形态
+      // 代际令牌自愈:HMR 重建模块闭包后 running 归零,首启 abort 旧代长轮询,
+      // 旧连接断开、旧循环退出;遗留的非 AbortController 令牌(旧版 interval 形态)
+      // 无法中止,由页面刷新自然清偿
       if (running) return
       running = true
-      if (window[KEY_POLL_TOKEN] !== undefined) clearInterval(window[KEY_POLL_TOKEN])
+      if (window[KEY_POLL_TOKEN] instanceof AbortController) window[KEY_POLL_TOKEN].abort()
+      const controller = new AbortController()
+      window[KEY_POLL_TOKEN] = controller
       ensureHighlightListener()
       ensureHighlightObserver()
       refreshSounds()
-      // 定时器不阻止进程退出(浏览器无感,测试进程可自然收尾)
-      const timer = setInterval(() => { void poll() }, POLL_MS)
-      if (typeof timer.unref === 'function') timer.unref()
-      window[KEY_POLL_TOKEN] = timer
+      void runLoop(controller.signal)
     }
 
     // 分类通知开关串行提交链:请求按点击顺序入队,host 终值恒为最后一次点击;
