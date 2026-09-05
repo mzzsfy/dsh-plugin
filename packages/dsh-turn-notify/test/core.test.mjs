@@ -304,26 +304,42 @@ test('认领状态机:无锁认领 / 他锁跳过 / 过期接管 / 完成标记�
 
 test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系统弹窗独立开关', () => {
   const base = { hasFocus: false, permission: 'granted' }
-  assert.deepEqual(chooseChannels(base), { toast: true, sound: true, system: true, blink: false })
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: true, system: true, blink: false, pageSound: false })
   // 聚焦静默:仅页内提示
-  assert.deepEqual(chooseChannels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false, pageSound: false })
   // 聚焦静默可关:聚焦窗口照常发声
   assert.deepEqual(chooseChannels({ ...base, hasFocus: true, focusQuiet: false }).sound, true)
   // 页内提示独立关闭
   assert.deepEqual(chooseChannels({ ...base, toastEnabled: false }).toast, false)
   // 系统弹窗独立关闭:不弹不闪
-  assert.deepEqual(chooseChannels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false, pageSound: false })
   // 想弹未授权:降级闪烁
-  assert.deepEqual(chooseChannels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
+  assert.deepEqual(chooseChannels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true, pageSound: false })
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied' }).blink, true)
   // 关闭系统弹窗后未授权不再闪
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
+test('页内提示音:聚焦补位发声,失焦让位通知声音,分类静音与页内开关约束', () => {
+  const base = { hasFocus: false, permission: 'granted', pageSoundEnabled: true }
+  // 聚焦静默压制通知声音,页内提示音补位:核心场景
+  assert.equal(chooseChannels({ ...base, hasFocus: true }).pageSound, true)
+  // 失焦时通知声音已播,页内提示音让位,同一通知至多一声
+  assert.equal(chooseChannels(base).pageSound, false)
+  // 通知声音总开关关闭:失焦时页内提示音顶上
+  assert.equal(chooseChannels({ ...base, soundEnabled: false }).pageSound, true)
+  // 页内提示关闭:无卡片即无声
+  assert.equal(chooseChannels({ ...base, hasFocus: true, toastEnabled: false }).pageSound, false)
+  // 分类显式静音:页内提示音一并静默
+  assert.equal(chooseChannels({ ...base, hasFocus: true, soundCategories: { ask: false }, category: 'ask' }).pageSound, false)
+  // 开关缺省关闭:行为与旧版一致
+  assert.equal(chooseChannels({ hasFocus: true, permission: 'granted' }).pageSound, false)
+})
+
 test('提示音开关:总开关与分类配置独立静音,缺省键与空分类放行', () => {
   const base = { hasFocus: false, permission: 'granted' }
   // 提示音总开关独立关闭:页内提示与系统弹窗不受影响
-  assert.deepEqual(chooseChannels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false, pageSound: false })
   // 分类显式 false:该分类静音
   assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: 'ask' }).sound, false)
   // 同配置其他分类照常出声
@@ -338,7 +354,7 @@ test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦
   const base = { hasFocus: true, permission: 'granted' }
   const idle = USER_IDLE_AWAY_MS
   // 空闲满阈值:离开,聚焦静默不再适用,全通道
-  assert.deepEqual(chooseChannels({ ...base, idleMs: idle }), { toast: true, sound: true, system: true, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, idleMs: idle }), { toast: true, sound: true, system: true, blink: false, pageSound: false })
   // 恰等边界含
   assert.equal(chooseChannels({ ...base, idleMs: idle - 1 }).sound, false)
   // 活跃(刚行动):聚焦静默维持
@@ -346,7 +362,7 @@ test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦
   // 空闲但未聚焦:行为不变
   assert.equal(chooseChannels({ hasFocus: false, permission: 'granted', idleMs: idle }).sound, true)
   // 未提供空闲时长:行为与旧版一致
-  assert.deepEqual(chooseChannels(base), { toast: true, sound: false, system: false, blink: false })
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: false, system: false, blink: false, pageSound: false })
   // 空闲时聚焦静默关闭依旧生效
   assert.equal(chooseChannels({ ...base, idleMs: 0, focusQuiet: false }).sound, true)
 })
