@@ -607,24 +607,26 @@ window.__ModuleLoader__.load({
     }
 
     // 宿主重渲染会重建行节点抹掉高亮类,观察器在同一帧内补齐;
-    // applySessionHighlights 幂等(类齐不写 DOM),观察器链自然收敛
+    // applySessionHighlights 幂等(类齐不写 DOM),观察器链自然收敛;
+    // 令牌承载 observer:HMR 重建闭包后先断开旧代再挂新代,旧闭包不滞留
     const KEY_HL_OBSERVER = 'turn-notify:hl-observer'
     function ensureHighlightObserver() {
-      if (window[KEY_HL_OBSERVER]) return
       if (typeof document === 'undefined' || typeof document.body === 'undefined' || typeof MutationObserver === 'undefined') return
-      window[KEY_HL_OBSERVER] = true
-      new MutationObserver(() => {
+      if (window[KEY_HL_OBSERVER] !== undefined && typeof window[KEY_HL_OBSERVER].disconnect === 'function') window[KEY_HL_OBSERVER].disconnect()
+      const observer = new MutationObserver(() => {
         if (sessionHighlightEnabled && sessionHighlights.size > 0) applySessionHighlights()
-      }).observe(document.body, { childList: true, subtree: true })
+      })
+      observer.observe(document.body, { childList: true, subtree: true })
+      window[KEY_HL_OBSERVER] = observer
     }
 
-    // 点击清除走捕获委托;window 令牌防 HMR 重建闭包后监听器累积
+    // 点击清除走捕获委托;令牌承载 listener:HMR 重建闭包后先摘旧代再挂新代,
+    // 旧闭包不滞留(否则点击清除永远操作旧代高亮状态)
     const KEY_HL_LISTENER = 'turn-notify:hl-listener'
     function ensureHighlightListener() {
-      if (window[KEY_HL_LISTENER]) return
       if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
-      window[KEY_HL_LISTENER] = true
-      document.addEventListener('click', (event) => {
+      if (typeof window[KEY_HL_LISTENER] === 'function') document.removeEventListener('click', window[KEY_HL_LISTENER], true)
+      const listener = (event) => {
         const target = event.target && event.target.closest ? event.target.closest('.' + SESSION_HL_CLASS) : null
         if (!target) return
         let cleared = false
@@ -638,20 +640,24 @@ window.__ModuleLoader__.load({
           clearSessionHighlightClasses()
           applySessionHighlights()
         }
-      }, true)
+      }
+      window[KEY_HL_LISTENER] = listener
+      document.addEventListener('click', listener, true)
     }
 
     function start() {
-      // window 级令牌:HMR 重建模块闭包后 running 归零,仅靠它无法防重复轮询
-      if (running || window[KEY_POLL_TOKEN]) return
+      // 代际令牌自愈:HMR 重建模块闭包后 running 归零,首启清旧代 interval 再启新代;
+      // 旧版遗留布尔令牌传入 clearInterval 为无害空操作,顺带清偿旧形态
+      if (running) return
       running = true
-      window[KEY_POLL_TOKEN] = true
+      if (window[KEY_POLL_TOKEN] !== undefined) clearInterval(window[KEY_POLL_TOKEN])
       ensureHighlightListener()
       ensureHighlightObserver()
       refreshSounds()
       // 定时器不阻止进程退出(浏览器无感,测试进程可自然收尾)
       const timer = setInterval(() => { void poll() }, POLL_MS)
       if (typeof timer.unref === 'function') timer.unref()
+      window[KEY_POLL_TOKEN] = timer
     }
 
     // 分类通知开关串行提交链:请求按点击顺序入队,host 终值恒为最后一次点击;
