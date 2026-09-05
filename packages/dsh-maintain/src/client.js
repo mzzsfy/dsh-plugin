@@ -63,7 +63,9 @@ const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
 const REGISTRY_BASE_URL = '/api/maintain/registry-base'
 const UPGRADE_URL = '/api/maintain/upgrade'
 const RESTART_URL = '/api/maintain/restart'
-const POLL_WHILE_UPGRADING_MS = 2 * 1000
+const UPGRADE_POLL_MS = 2 * 1000
+// 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
+const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
 // 与 host 侧轮询 tick(TICK_MS)同源:间隔设置的生效粒度受固定 tick 调度限制
 const POLL_MIN_TICK_SECONDS = 60
 // 与 host 侧默认值同源(DEFAULT_POLL_INTERVAL_SEC / DEFAULT_REGISTRY_BASE / DEFAULT_UPGRADE_TEMPLATE):
@@ -95,6 +97,78 @@ async function api(url, options) {
 
 function post(url, body) {
   return api(url, { method: 'POST', body: body === undefined ? '{}' : JSON.stringify(body) })
+}
+
+// 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
+// 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询
+const upgradeWatch = { timer: null, listeners: new Set() }
+
+function broadcastUpgradeStatus(status) {
+  for (const listener of upgradeWatch.listeners) listener(status)
+}
+
+function stopUpgradeWatch() {
+  if (upgradeWatch.timer !== null) {
+    clearInterval(upgradeWatch.timer)
+    upgradeWatch.timer = null
+  }
+}
+
+function subscribeUpgradeStatus(listener) {
+  upgradeWatch.listeners.add(listener)
+  return () => upgradeWatch.listeners.delete(listener)
+}
+
+function ensureUpgradeWatch() {
+  if (upgradeWatch.timer !== null) return
+  showUpgradeFloat(null)
+  upgradeWatch.timer = setInterval(() => {
+    api(STATUS_URL)
+      .then((next) => {
+        broadcastUpgradeStatus(next)
+        const running = next !== null && next.upgrade !== null && next.upgrade.running === true
+        if (!running) {
+          stopUpgradeWatch()
+          showUpgradeFloat(next.upgrade !== null && next.upgrade.last !== null ? next.upgrade.last : {})
+        }
+      })
+      .catch(() => {})
+  }, UPGRADE_POLL_MS)
+}
+
+function showUpgradeFloat(last) {
+  removeUpgradeFloat()
+  const style = document.createElement('style')
+  style.textContent = [
+    '#' + UPGRADE_FLOAT_ID + ' { position:fixed; right:20px; bottom:20px; z-index:9999; display:flex; align-items:center; gap:10px;',
+    '  max-width:340px; padding:10px 14px; border-radius:10px; border:1px solid rgba(128,128,128,0.35);',
+    '  background:var(--dsw-alias-bg-layer-3, #fff); box-shadow:0 4px 16px rgba(0,0,0,0.15); font-size:13px; }',
+    '#' + UPGRADE_FLOAT_ID + '__close { cursor:pointer; border:0; background:transparent; color:inherit; font-size:14px; padding:0 2px; opacity:0.6; }',
+    '#' + UPGRADE_FLOAT_ID + '__close:hover { opacity:1; }',
+  ].join('\n')
+  const text = document.createElement('span')
+  const close = document.createElement('button')
+  close.id = UPGRADE_FLOAT_ID + '__close'
+  close.textContent = '×'
+  close.addEventListener('click', removeUpgradeFloat)
+  const box = document.createElement('div')
+  box.id = UPGRADE_FLOAT_ID
+  box.appendChild(style)
+  box.appendChild(text)
+  box.appendChild(close)
+  if (last === null) {
+    text.textContent = '升级进行中,可离开本页,完成后此处提示'
+  } else if (last.ok) {
+    text.textContent = '升级完成,重启宿主后生效(版本与运维页可重启)'
+  } else {
+    text.textContent = '升级失败:' + (last.stderrTail || last.error || '详情见版本与运维页')
+  }
+  document.body.appendChild(box)
+}
+
+function removeUpgradeFloat() {
+  const box = document.getElementById(UPGRADE_FLOAT_ID)
+  if (box !== null) box.remove()
 }
 
 function fmtTime(ms) {
@@ -286,7 +360,6 @@ function MaintainApp() {
   const [upgradeArmed, setUpgradeArmed] = useState(false)
   const [restartArmed, setRestartArmed] = useState(false)
   const [restarting, setRestarting] = useState(false)
-  const timerRef = useRef(null)
   const restartLostRef = useRef(false)
   const restartPidRef = useRef(null)
   const restartPendingRef = useRef(false)
@@ -297,29 +370,20 @@ function MaintainApp() {
 
   function load() {
     return api(STATUS_URL)
-      .then((next) => { setStatus(next); setError(null) })
-      .catch((loadError) => setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError))))
+      .then((next) => { setStatus(next); setError(null); return next })
+      .catch((loadError) => { setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError))); return null })
   }
 
-  useEffect(() => { void load() }, [])
-
-  // 升级进行中每 2 秒轮询;结束后停止;重启态暂停(退出窗口的失败不得污染错误提示)。
+  // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察
   useEffect(() => {
-    const running = !restarting && status !== null && status.upgrade !== null && status.upgrade.running === true
-    if (running && timerRef.current === null) {
-      timerRef.current = setInterval(() => { void load() }, POLL_WHILE_UPGRADING_MS)
-    }
-    if (!running && timerRef.current !== null) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-    return () => {
-      if (timerRef.current !== null) {
-        clearInterval(timerRef.current)
-        timerRef.current = null
-      }
-    }
-  }, [status, restarting])
+    const unsubscribe = subscribeUpgradeStatus((next) => {
+      if (next !== null) setStatus(next)
+    })
+    void load().then((next) => {
+      if (next !== null && next.upgrade !== null && next.upgrade.running === true) ensureUpgradeWatch()
+    })
+    return unsubscribe
+  }, [])
 
   // 重启判定与 core.mjs shouldReloadAfterRestart 同源:client 半区无法 import ESM,修改需两处同步。
   // LOGIC-BEGIN shouldReloadAfterRestart
@@ -439,7 +503,11 @@ function MaintainApp() {
     setUpgradeArmed(false)
     markBusy('upgrade', true)
     post(UPGRADE_URL)
-      .then((next) => { setStatus(next); setError(null) })
+      .then((next) => {
+        setStatus(next); setError(null)
+        // 升级转后台执行:观察器接管状态跟踪与完成提示,页面可离开
+        ensureUpgradeWatch()
+      })
       .catch((upgradeError) => setError('升级触发失败:' + (upgradeError && upgradeError.message ? upgradeError.message : String(upgradeError))))
       .then(() => markBusy('upgrade', false))
   }
@@ -453,6 +521,9 @@ function MaintainApp() {
     }
     setRestartArmed(false)
     setError(null)
+    // 宿主重启后内存快照归零,升级观察与浮条随重启作废
+    stopUpgradeWatch()
+    removeUpgradeFloat()
     restartLostRef.current = false
     restartPidRef.current = status && typeof status.pid === 'number' ? status.pid : null
     // 先取实时 status 修正 pid 基线(页面可能经历过一次未经面板感知的宿主重启),失败退回已有快照

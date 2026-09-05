@@ -1,10 +1,10 @@
 // 网关 adapter:按路由构造 pi-ai Model 与 StreamOptions 并调协议模块 streamSimple。
 // 请求选项装配与官方 dsh-llm-pi-ai 逐项对表(effort 校验链 / profileOptions /
 // attribution 头 / 凭据链),差异仅为本包的标记器与 metadata 模板注入。
-// 纯对象满足 LlmAdapter 协议;路由表经 getter 读取,支持热更新原地换表。
+// 纯对象挂 LlmAdapter 原型满足协议(继承基类默认方法);路由表经 getter 读取,支持热更新原地换表。
 
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai'
-import { ReasoningEffortId, contentHasImage } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ReasoningEffortId, contentHasImage } from '@deepseek-ai/dsh-llm'
 import { GatewayError } from './errors.mjs'
 import { modelOf, PROTOCOL_MODULES } from './config.mjs'
 import { deriveMarker, markerOnPayload } from './marker.mjs'
@@ -168,12 +168,12 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
     yield* toStreamChunks(events, piModel.contextWindow, options.signal)
   }
 
-  return {
-    providerInfo: (provider) => ({ id: provider, name: routeOf(provider).displayName ?? provider }),
-    providerRetryPolicy: (provider) => routeOf(provider).retryPolicy,
-    // 官方 LlmAdapter 基类默认同构:声明无 provider 侧图片请求定价,token 计量回退中性估算;
-    // 0.1.2 起宿主计量路径直接调用本方法,缺失即 TypeError,必须显式提供
-    imageRequestPricing: () => undefined,
+  return (
+    // 官方 PiAiAdapter 同构:挂 LlmAdapter 原型继承基类默认方法(如 imageRequestPricing),
+    // 宿主接口演进新增默认实现时自动跟随,避免纯对象协议缺口
+    Object.assign(Object.create(LlmAdapter.prototype), {
+      providerInfo: (provider) => ({ id: provider, name: routeOf(provider).displayName ?? provider }),
+      providerRetryPolicy: (provider) => routeOf(provider).retryPolicy,
     listModels: (provider) => {
       const route = routeOf(provider)
       return Promise.resolve([...route.models.values()].map((entry) => ({
@@ -192,9 +192,9 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
       })
     },
     stream,
-  }
+    })
+  )
 }
-
 function zeroCost() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
 }
