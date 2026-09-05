@@ -45,6 +45,7 @@ function makeCtx({ settingsValue = {}, dshIm = undefined } = {}) {
     webServer: {
       register(route) {
         routes.set(route.path, route.handler)
+        return () => routes.delete(route.path)
       },
     },
   }
@@ -327,4 +328,77 @@ test('im-targets: dsh-im 缺失 503, botId 非法 400, 在场时字段裁剪返�
   // Then route 字段不出主机
   assert.equal(good.status, 200)
   assert.deepEqual(good.payload.targets, [{ targetId: 'owner', name: '机主', kind: 'wechat' }])
+})
+
+function notifyRequest(query) {
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => { res.payload = text ? JSON.parse(text) : null }
+  const req = makeReq('GET')
+  req.url = '/api/usage-panel/notifications' + query
+  return { req, res }
+}
+
+// 查询一次产生越阈事件:复用 kimi 桩形态,事件入投影即递增版本。
+// 每次独立账号 id:账号保存对缺省 last/notifyState 回填旧值,复用 id 会继承
+// 已解除武装的沿触发状态导致不再越阈
+let longpollSeq = 0
+async function produceNotifyEvent(routes) {
+  longpollSeq += 1
+  const original = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, text: async () => JSON.stringify(KIMI_BODY) })
+  try {
+    await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
+      accounts: [{ id: 'acct-lp-' + longpollSeq, name: '账号长轮询' + longpollSeq, type: 'kimi', apiKey: 'sk-test' }],
+    }))
+    await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-lp-' + longpollSeq }))
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
+test('长轮询: 无 cursor 首拉立即返回空投影与当前版本', async () => {
+  // Given 通知启用且投影为空
+  const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
+  apply(ctx)
+  // When 无 cursor 首拉
+  const { req, res } = notifyRequest('')
+  await routes.get('/api/usage-panel/notifications')(req, res)
+  // Then 立即返回且携带版本号
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.payload.units, [])
+  assert.equal(res.payload.version, 0)
+})
+
+test('长轮询: cursor 追平当前版本时挂起, 事件 push 后唤醒并返回新版本', async () => {
+  // Given 通知启用
+  const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
+  apply(ctx)
+  // When 以追平版本 0 发起长轮询
+  const { req, res } = notifyRequest('?cursor=0')
+  const pending = routes.get('/api/usage-panel/notifications')(req, res)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  // Then 未唤醒前不响应
+  assert.equal(res.payload, null, '未唤醒前不应响应')
+  // When 查询产生越阈事件入投影
+  await produceNotifyEvent(routes)
+  await pending
+  // Then 唤醒返回新版本与事件
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.version, 2, 'push 两条事件应各递增一次版本并唤醒等待者')
+  assert.equal(res.payload.units.length, 2)
+})
+
+test('长轮询: cursor 落后当前版本时立即返回不挂起', async () => {
+  // Given 投影已有事件(版本已前进)
+  const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
+  apply(ctx)
+  await produceNotifyEvent(routes)
+  // When 以落后 cursor 请求
+  const { req, res } = notifyRequest('?cursor=0')
+  await routes.get('/api/usage-panel/notifications')(req, res)
+  // Then 立即返回全量
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.units.length, 2)
+  assert.ok(res.payload.version > 0)
 })

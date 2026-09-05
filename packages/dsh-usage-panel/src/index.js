@@ -39,6 +39,8 @@ import {
 const FETCH_TIMEOUT_MS = 20 * 1000
 const BODY_MAX_BYTES = 256 * 1024
 const MAX_ACCOUNTS = 20
+// 通知长轮询服务端挂起上限,与 turn-notify 同值;客户端超时须大于此值
+const LONG_POLL_WAIT_MS = 25 * 1000
 // 数据目录支持 env 注入(测试隔离);缺省落 ~/.dsh/dsh-usage-panel
 const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR || join(homedir(), '.dsh', 'dsh-usage-panel')
 const DATA_FILE = join(DATA_DIR, 'accounts.json')
@@ -577,21 +579,32 @@ export function apply(ctx) {
   // dsh-im 投递错误码到 HTTP 状态的映射,未收录错误按网关失败处理
   const IM_ERROR_STATUS = { 'bad-request': 400, 'unknown-bot': 404, 'bot-not-connected': 503 }
 
-  ctx.effect(
-    () =>
-      ctx.webServer.register({
-        kind: 'exact',
-        path: '/api/usage-panel/notifications',
-        handler: async (req, res) => {
-          if (req.method !== 'GET') {
-            sendJson(res, 405, { error: 'method not allowed' })
-            return
-          }
-          sendJson(res, 200, { units: projection.list(), imAvailable: ctx.get('dshIm') !== undefined })
-        },
-      }),
-    'usage-panel notifications route',
-  )
+  ctx.effect(() => {
+    const disposeRoute = ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/usage-panel/notifications',
+      handler: async (req, res) => {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        // 长轮询:cursor 缺省=首拉立即返回;仅版本恰等时挂起至事件 push / 超时;
+        // cursor 超前(宿主重启版本回退)立即返回全量,客户端以响应 version 重置游标自愈
+        const url = new URL(req.url, 'http://localhost')
+        const rawCursor = Number(url.searchParams.get('cursor'))
+        const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
+        if (url.searchParams.has('cursor') && projection.version() === cursor) {
+          await projection.wait(cursor, LONG_POLL_WAIT_MS)
+        }
+        sendJson(res, 200, { units: projection.list(), version: projection.version() })
+      },
+    })
+    return () => {
+      disposeRoute()
+      // 唤醒全部挂起长轮询,以当前版本收尾,防卸载后连接悬挂
+      projection.dispose()
+    }
+  }, 'usage-panel notifications route')
 
   ctx.effect(
     () =>

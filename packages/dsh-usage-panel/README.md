@@ -84,11 +84,11 @@ usage-panel:
 
 - webhook:host 直发(Slack-compatible `{text}` + 结构化字段),超时 10 秒不重试,fire-and-forget;面板「保存并测试」返回真实投递结果
 - dsh-im:安装 [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 后自动启用,面板粘贴 Bot ID 加载其已保存投递目标目录,勾选即自动保存;支持绑定多个 bot,已绑 bot 以标签展示,点标签加载该 bot 目录,× 一键取消注册(移除该 bot 全部目标);触发逻辑与 webhook 完全一致(fire-and-forget 不重试);目标的新建与平台测试仍在 dsh-im 设置页完成,此处仅选择;「测试 IM」逐目标返回真实结果
-- 页内 toast:host 内存投影(环形 20 条 / 60 秒过期),浏览器半区约 5 秒轮询并经公共依赖 `@mzzsfy/dsh-toast` 展示;localStorage 单元级认领锁保证多窗口只弹一次。**toast 依赖由 session-manager 插件代挂**,未安装 session-manager 时此通道静默不可用,其余通道不受影响
+- 页内 toast:host 内存投影(环形 20 条 / 60 秒过期,version 单调递增),浏览器半区长轮询挂起等待增量并经公共依赖 `@mzzsfy/dsh-toast` 展示(语义与 turn-notify 同构);localStorage 单元级认领锁保证多窗口只弹一次。**toast 依赖由 session-manager 插件代挂**,未安装 session-manager 时此通道静默不可用,其余通道不受影响
 
 ### 通知接口
 
-- `GET /api/usage-panel/notifications`:通知投影(轮询用)
+- `GET /api/usage-panel/notifications`:通知投影长轮询;`cursor` 缺省=首拉立即返回全量,`cursor` 等于当前版本时挂起至事件或超时,落后或超前(宿主重启版本回退)立即返回全量,客户端以响应 version 重置游标自愈;响应 `{units, version}`
 - `GET|POST /api/usage-panel/notify-config`:全局通知规则;`webhookUrl` 属凭据任何响应不回传原文,仅 `webhookConfigured` 标志
 - `POST /api/usage-panel/test-webhook` / `POST /api/usage-panel/test-im`:测试投递,返回真实结果
 - `GET /api/usage-panel/im-targets?botId=`:列出 dsh-im 该 bot 已保存投递目标
