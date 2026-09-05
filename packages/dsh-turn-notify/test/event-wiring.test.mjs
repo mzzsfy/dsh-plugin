@@ -83,6 +83,13 @@ const MAIN = { id: 'M', header: { delegationDepth: 0 } }
 const CHILD = { id: 'S', header: { origin: 'subagent', parentSession: 'M', delegationDepth: 1 } }
 
 function turnEnd(kind) { return { type: 'turn/end', data: { reason: { kind } } } }
+function toolCall(name) { return { type: 'tool/call', data: { name } } }
+
+// 后台委托场景:主回合内调用 subagent 工具,子代理随后开跑
+function backgroundDelegationStart(onEvent) {
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, { type: 'turn/start' })
+}
 
 // 关闭碎轮过滤:同毫秒回合不被时长过滤,聚焦事件接线本身
 async function disableDurationFilter(routes) {
@@ -163,6 +170,194 @@ test('Given 父会话已暂停收尾 When 子代理随后完成并唤醒父会�
   onEvent(MAIN, turnEnd('completed'))
   const units = await projectionUnits(routes)
   assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given 后台子代理运行中 When 主会话回合以 completed 结束 Then 无完成通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+})
+
+test('Given subagent 已调用但子代理 turn/start 未到 When 主会话回合完成 Then 无完成通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+})
+
+test('Given 前台子代理已在本回合内收尾 When 主会话回合完成 Then 正常通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, { type: 'turn/start' })
+  onEvent(CHILD, turnEnd('completed'))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given 混合委托前台已收尾后台仍挂起 When 主会话回合完成 Then 无完成通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  // 前台委托:子代理在本回合内收尾
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, { type: 'turn/start' })
+  onEvent(CHILD, turnEnd('completed'))
+  // 随后再发起后台委托,子代理 turn/start 晚于主回合结束(启动竞态)
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+})
+
+test('Given 两个前台子代理均在本回合内收尾 When 主会话回合完成 Then 正常通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  const CHILD2 = { id: 'S2', header: { origin: 'subagent', parentSession: 'M', delegationDepth: 1 } }
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, { type: 'turn/start' })
+  onEvent(CHILD, turnEnd('completed'))
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD2, { type: 'turn/start' })
+  onEvent(CHILD2, turnEnd('completed'))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given 后台子代理运行中 When 主会话回合以 error 结束 Then 异常分类仍通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('error'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'error').length, 1)
+})
+
+test('Given 后台子代理运行中 When 开关关闭且主会话回合完成 Then 通知恢复', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const config = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { suppressSubagentWake: false }, JSON_HEADERS), config)
+  assert.equal(config.status, 200)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given 子代理完成后主会话开启全新回合 When 该回合完成 Then 正常通知不误伤', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  // 后台委托回合:静默
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('completed'))
+  // 子代理收尾触发既有 childDoneAt 记录,随后被新回合消费为唤醒静默;
+  // 再下一个回合与子代理无关,须恢复通知
+  onEvent(CHILD, turnEnd('completed'))
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
+test('Given 等待回合已静默 When 子代理收尾后唤醒回合完成 Then 两条均不通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('completed'))
+  onEvent(CHILD, turnEnd('completed'))
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+})
+
+test('Given 上一回合后台子代理跨回合存活 When 新回合无委托并以 completed 结束 Then 无完成通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  // 回合1:后台委托后挂起,子代理未收尾
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('completed'))
+  // 回合2:无任何委托,陈旧子代理仍存活
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+})
+
+test('Given 上一回合后台子代理在新回合内收尾 When 新回合委托的子代理未启动并以 completed 结束 Then 无完成通知', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  // 回合1:后台委托后挂起
+  onEvent(MAIN, { type: 'turn/start' })
+  backgroundDelegationStart(onEvent)
+  onEvent(MAIN, turnEnd('completed'))
+  // 回合2:再次委托(子代理 turn/start 迟到),陈旧子代理在本回合内收尾
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, turnEnd('completed'))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
+})
+
+test('Given 子代理注册晚于父回合结束 When 其在新回合委托期间收尾 Then 该收尾不豁免本回合委托', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  // 回合1:委托后父回合先结束,子代理 turn/start 迟到(注册时父回合已无开启记录)
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(MAIN, turnEnd('completed'))
+  onEvent(CHILD, { type: 'turn/start' })
+  // 回合2:再次委托(子代理未启动),迟到的子代理在本回合内收尾
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, toolCall('subagent'))
+  onEvent(CHILD, turnEnd('completed'))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 0)
 })
 
 test('Given dshIm 在场且已配多目标 When 回合完成 Then 逐目标投递 unit.text', async () => {
