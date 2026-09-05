@@ -6,6 +6,7 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./src/client.js",
     "./logic": "./src/logic.mjs",
     "./package.json": "./package.json"
   },
