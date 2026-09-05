@@ -475,6 +475,7 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
   assert.deepEqual(validateConfigPatch({ webhookUrl: '' }), { ok: true, patch: { webhookUrl: '' } })
   assert.deepEqual(validateConfigPatch({ rootsOnly: true }), { ok: true, patch: { rootsOnly: true } })
   assert.deepEqual(validateConfigPatch({ suppressSubagentWake: true }), { ok: true, patch: { suppressSubagentWake: true } })
+  assert.deepEqual(validateConfigPatch({ sessionHighlight: false }), { ok: true, patch: { sessionHighlight: false } })
   assert.deepEqual(validateConfigPatch({}), { ok: true, patch: {} })
 })
 
@@ -490,6 +491,7 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
   assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
   assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ suppressSubagentWake: 'yes' }).ok, false)
+  assert.equal(validateConfigPatch({ sessionHighlight: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
@@ -503,6 +505,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       suppressSubagentWake: true,
+      sessionHighlight: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
@@ -513,12 +516,14 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     minTurnDurationMs: MIN_TURN_MS,
     rootsOnly: true,
     suppressSubagentWake: true,
+    sessionHighlight: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
     imTargets: [],
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
+  assert.equal(resolvedConfig({ sessionHighlight: false }).sessionHighlight, false)
 })
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
@@ -528,6 +533,7 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       suppressSubagentWake: true,
+      sessionHighlight: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],

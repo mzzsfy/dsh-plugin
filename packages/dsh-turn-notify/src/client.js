@@ -2,18 +2,21 @@
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 由 DSH client runtime 模块表解析。
 // 认领锁/完成标记走 localStorage(非 secure context 也可用的唯一跨窗口原语)。
+// 页内通知通道经公共依赖 @mzzsfy/dsh-toast 展示,本包不自带通知 UI。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-turn-notify',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useSyncExternalStore } = React
-    const { createPortal } = require('react-dom')
+    const { useState, useEffect } = React
+
+    // 通知出口:公共依赖 @mzzsfy/dsh-toast(external require,宿主占位条目由
+    // 本插件 cordis.patch.yml 代挂)
+    const { show: toast } = require('@mzzsfy/dsh-toast/client')
 
     const POLL_MS = 2 * 1000
+    // 页内通知展示期,经公共依赖 holdMs 传入
     const TOAST_MS = 6 * 1000
-    // 页内通知栈上限:突发事件截断最旧条目
-    const TOAST_MAX = 4
     const BLINK_MS = 1 * 1000
     // 系统通知测试延迟:浏览器对聚焦窗口抑制系统弹窗,倒计时供用户切出窗口
     const SYSTEM_TEST_DELAY_MS = 5 * 1000
@@ -434,32 +437,10 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // ---- toast 与标题闪烁 ----
+    // ---- 页内通知与标题闪烁 ----
 
-    // 页内通知走宿主原生形态:store + useSyncExternalStore + portal 直挂 body,
-    // 与 session-manager 的 Toast 同构;裸 DOM 注入已废弃
-    let toastSeq = 0
-    let toastStack = []
-    const toastListeners = new Set()
-    const emitToastStack = () => { for (const listener of toastListeners) listener() }
-
-    function showToast(unit) {
-      const id = ++toastSeq
-      toastStack = toastStack.concat([{ id, text: unit.text }]).slice(-TOAST_MAX)
-      emitToastStack()
-      setTimeout(() => {
-        toastStack = toastStack.filter((item) => item.id !== id)
-        emitToastStack()
-      }, TOAST_MS)
-    }
-
-    const toastSource = {
-      getSnapshot: () => toastStack,
-      subscribe: (listener) => {
-        toastListeners.add(listener)
-        return () => toastListeners.delete(listener)
-      },
-    }
+    // 页内通知经公共依赖 @mzzsfy/dsh-toast 展示(栈式多条并存),
+    // 本包只保留标题闪烁通道
 
     let blinkTimer = null
     const baseTitle = () => document.title.replace(/^⏳ /, '')
@@ -519,6 +500,11 @@ window.__ModuleLoader__.load({
         payload = await response.json()
       } catch { return }
       soundMapping = payload.soundMapping || {}
+      sessionHighlightEnabled = payload.sessionHighlight !== false
+      if (!sessionHighlightEnabled && sessionHighlights.size > 0) {
+        sessionHighlights.clear()
+        clearSessionHighlightClasses()
+      }
       const units = payload.units || []
       const liveIds = new Set(units.map((unit) => unit.id))
       // 投影中已过期的本地残留清理,防旧锁与完成标记滞留;
@@ -538,12 +524,17 @@ window.__ModuleLoader__.load({
         markDone(unit.id)
         const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category)
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
-        if (channels.toast) showToast(unit)
+        if (channels.toast || channels.sound || channels.system || channels.blink) {
+          if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
+          if (unit.sessionTitle) sessionHighlights.set(unit.sessionTitle, unit.category)
+        }
+        if (channels.toast) toast(unit.text, { holdMs: TOAST_MS })
         if (!channels.sound) continue
         playSound(sound).catch(() => {})
         if (channels.system) notifySystem(unit)
         else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
       }
+      applySessionHighlights()
     }
 
     async function refreshSounds() {
@@ -554,11 +545,103 @@ window.__ModuleLoader__.load({
       } catch { uploadedIds = [] }
     }
 
+    // ---- 会话行高亮:通知投递即脉冲闪烁侧边栏对应会话,点击该行清除 ----
+
+    const SESSION_HL_CLASS = 'tn-sess-hl'
+    // 集合上限:用户始终不点击时防无界增长,超限淘汰最旧(插入序即迭代序)
+    const SESSION_HL_MAX = 20
+    const sessionHighlights = new Map()
+    let sessionHighlightEnabled = false
+
+    // 会话行探测:先定位“类名含 _list 段且子树含多个标题”的最内层列表容器,
+    // 再沿标题文本匹配路径下钻,取子树恰含单个标题的最深节点为行级;
+    // 正面锚定列表容器,页首面包屑等同名文本天然排除;本体改版探测不到即静默失效,不报错
+    const TITLE_LEAF_SELECTOR = '[class*="_title"]'
+    const SESSION_LIST_SUFFIX = '_list'
+    function findSessionRow(title) {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return null
+      let list = null
+      let listCount = 0
+      for (const el of document.querySelectorAll('[class*="' + SESSION_LIST_SUFFIX + '"]')) {
+        if (typeof el.className !== 'string' || !el.className.split(' ').some((name) => name.indexOf(SESSION_LIST_SUFFIX) >= 0)) continue
+        const count = el.querySelectorAll(TITLE_LEAF_SELECTOR).length
+        if (count > 1 && (list === null || count < listCount)) { list = el; listCount = count }
+      }
+      if (list === null) return null
+      let node = list
+      let row = null
+      while (true) {
+        const kids = [...node.children].filter((kid) => kid.textContent.indexOf(title) >= 0)
+        if (kids.length === 0) break
+        node = kids[0]
+        if (node.querySelectorAll(TITLE_LEAF_SELECTOR).length === 1) row = node
+      }
+      return row
+    }
+
+    // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环
+    function applySessionHighlights() {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
+      if (!sessionHighlightEnabled) return
+      for (const [title, category] of sessionHighlights) {
+        const row = findSessionRow(title)
+        if (!row || row.classList.contains(SESSION_HL_CLASS)) continue
+        const colorClass = CATEGORIES.indexOf(category) >= 0 ? SESSION_HL_CLASS + '--' + category : SESSION_HL_CLASS + '--ask'
+        row.classList.add(SESSION_HL_CLASS, colorClass)
+      }
+    }
+
+    // 开关关闭或点击清除后的类清理:移除本插件前缀的全部类
+    function clearSessionHighlightClasses() {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
+      const marked = document.querySelectorAll('.' + SESSION_HL_CLASS)
+      for (let index = 0; index < marked.length; index += 1) {
+        marked[index].className = marked[index].className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
+      }
+    }
+
+    // 宿主重渲染会重建行节点抹掉高亮类,观察器在同一帧内补齐;
+    // applySessionHighlights 幂等(类齐不写 DOM),观察器链自然收敛
+    const KEY_HL_OBSERVER = 'turn-notify:hl-observer'
+    function ensureHighlightObserver() {
+      if (window[KEY_HL_OBSERVER]) return
+      if (typeof document === 'undefined' || typeof document.body === 'undefined' || typeof MutationObserver === 'undefined') return
+      window[KEY_HL_OBSERVER] = true
+      new MutationObserver(() => {
+        if (sessionHighlightEnabled && sessionHighlights.size > 0) applySessionHighlights()
+      }).observe(document.body, { childList: true, subtree: true })
+    }
+
+    // 点击清除走捕获委托;window 令牌防 HMR 重建闭包后监听器累积
+    const KEY_HL_LISTENER = 'turn-notify:hl-listener'
+    function ensureHighlightListener() {
+      if (window[KEY_HL_LISTENER]) return
+      if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
+      window[KEY_HL_LISTENER] = true
+      document.addEventListener('click', (event) => {
+        const target = event.target && event.target.closest ? event.target.closest('.' + SESSION_HL_CLASS) : null
+        if (!target) return
+        let cleared = false
+        for (const title of [...sessionHighlights.keys()]) {
+          if (target.textContent.indexOf(title) >= 0) {
+            sessionHighlights.delete(title)
+            cleared = true
+          }
+        }
+        if (cleared) {
+          clearSessionHighlightClasses()
+          applySessionHighlights()
+        }
+      }, true)
+    }
+
     function start() {
       // window 级令牌:HMR 重建模块闭包后 running 归零,仅靠它无法防重复轮询
       if (running || window[KEY_POLL_TOKEN]) return
       running = true
       window[KEY_POLL_TOKEN] = true
+      ensureHighlightListener()
+      ensureHighlightObserver()
       refreshSounds()
       // 定时器不阻止进程退出(浏览器无感,测试进程可自然收尾)
       const timer = setInterval(() => { void poll() }, POLL_MS)
@@ -597,6 +680,7 @@ window.__ModuleLoader__.load({
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
       suppressSubagentWake: true,
+      sessionHighlight: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
       imTargets: [],
     }
@@ -663,9 +747,9 @@ window.__ModuleLoader__.load({
       '.tn-chip__x { cursor:pointer; border:none; background:transparent; color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));',
       '  padding:3px 8px; font-size:13px; line-height:1; border-left:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); }',
       '.tn-chip__x:hover { color:var(--dsw-alias-state-error-primary, #d43a3a); background:var(--dsw-alias-interactive-bg-hover, transparent); }',
-      // 滑块开关:隐藏原生 checkbox,选中态 track 与滑块位移用过渡呈现
+      // 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现
       '.tn-switch { display:inline-flex; align-items:center; cursor:pointer; }',
-      '.tn-switch input { position:absolute; opacity:0; width:0; height:0; }',
+      '.tn-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
       '.tn-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
       '  background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.35));',
       '  border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
@@ -674,9 +758,9 @@ window.__ModuleLoader__.load({
       '  background:var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6));',
       '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
       '.tn-switch:hover .tn-switch__track { border-color:var(--dsw-alias-brand-primary); }',
-      '.tn-switch input:checked + .tn-switch__track { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }',
-      '.tn-switch input:checked + .tn-switch__track .tn-switch__thumb { left:17px; background:var(--dsw-alias-bg-base, #fff); }',
-      '.tn-switch input:focus-visible + .tn-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
+      '.tn-switch input[type="checkbox"]:checked + .tn-switch__track { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }',
+      '.tn-switch input[type="checkbox"]:checked + .tn-switch__track .tn-switch__thumb { left:17px; background:var(--dsw-alias-bg-base, #fff); }',
+      '.tn-switch input[type="checkbox"]:focus-visible + .tn-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
       // 目标列表:按行呈现,勾选/名称/移除右对齐
       '.tn-list { display:flex; flex-direction:column; }',
       '.tn-list__item { display:flex; align-items:center; gap:10px; padding:6px 2px; font-size:12px;',
@@ -687,19 +771,34 @@ window.__ModuleLoader__.load({
       '.tn-list__tag { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:11px; }',
       '.tn-divider { border:none; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); margin:2px 0; }',
       'input[type="range"].tn-range { accent-color:var(--dsw-alias-brand-primary); flex:1; min-width:120px; }',
-      // 页内通知:与 session-manager Toast 同一宿主令牌语言,置于框架顶部居中
-      '.tn-toast-stack { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:1100;',
-      '  display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }',
-      '.tn-toast { background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted);',
-      '  font:var(--dsw-font-xs-13); padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2);',
-      '  animation:tn-toast-in 0.18s ease-out; max-width:520px; }',
-      '@keyframes tn-toast-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }',
-      '@media (prefers-reduced-motion: reduce) { .tn-toast { animation:none; } }',
+      // 会话行高亮:背景在透明与“背景色与分类色各半混合”间脉冲;分类色用 dsw 语义变量,缺省回退具名色
+      '.tn-sess-hl--completed { --tn-sess-color:var(--dsw-alias-state-success-primary, #34a853); }',
+      '.tn-sess-hl--error { --tn-sess-color:var(--dsw-alias-state-error-primary, #d43a3a); }',
+      '.tn-sess-hl--interrupted { --tn-sess-color:#e08c2e; }',
+      '.tn-sess-hl--approval { --tn-sess-color:#c9a227; }',
+      '.tn-sess-hl--ask { --tn-sess-color:var(--dsw-alias-brand-primary, #4c8dff); }',
+      '.tn-sess-hl--max-tokens { --tn-sess-color:#9a6fe0; }',
+      '.tn-sess-hl { animation:tn-sess-pulse 1.6s ease-in-out infinite; border-radius:8px; }',
+      '@keyframes tn-sess-pulse {',
+      '  0%,100% { background-color:transparent; }',
+      '  50% { background-color:color-mix(in srgb, var(--tn-sess-color, #4c8dff) 50%, var(--dsw-alias-bg-base, #202020) 50%); }',
+      '}',
+      '@media (prefers-reduced-motion: reduce) {',
+      '  .tn-sess-hl { animation:none; background-color:color-mix(in srgb, var(--tn-sess-color, #4c8dff) 50%, var(--dsw-alias-bg-base, #202020) 50%); }',
+      '}',
     ].join('\n')
 
     function h(type, props) {
       const children = Array.prototype.slice.call(arguments, 2)
       return React.createElement.apply(React, [type, props || null].concat(children))
+    }
+
+    // 开关的 checkbox + 轨道对,checkbox 语义保留仅视觉隐藏
+    function switchToggle(props) {
+      return [
+        h('input', { type: 'checkbox', ...props }),
+        h('span', { className: 'tn-switch__track' }, h('span', { className: 'tn-switch__thumb' })),
+      ]
     }
 
     async function api(path, options) {
@@ -890,7 +989,7 @@ window.__ModuleLoader__.load({
           if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
           const trimmedUrl = urlDraft.trim()
           // imTargets 由勾选单独即时保存,不随此入口提交
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, sessionHighlight: config.sessionHighlight !== false }
           // 只写语义:输入留空即保持现有 webhook 不变
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
@@ -942,7 +1041,7 @@ window.__ModuleLoader__.load({
 
       // 页内通知通道单独测试:仅弹页内提示,不涉及声音与系统通知
       function testPageNotification() {
-        showToast({ id: 'ui-test', text: '[dsh] 页内通知测试' })
+        toast('[dsh] 页内通知测试', { holdMs: TOAST_MS })
         patch('页内通知已发送')
       }
 
@@ -1127,18 +1226,24 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '豁免'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', checked: config.rootsOnly,
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                checked: config.rootsOnly,
                 onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
               }),
               ' 子代理会话不通知'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', checked: config.suppressSubagentWake,
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                checked: config.suppressSubagentWake,
                 onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
               }),
               ' 子代理回执静默'),
+            h('label', { className: 'tn-meta tn-switch', title: '通知触发时脉冲闪烁侧边栏对应会话行,点击该会话后停止' },
+              ...switchToggle({
+                checked: config.sessionHighlight !== false,
+                onChange: (e) => setConfig({ ...config, sessionHighlight: e.target.checked }),
+              }),
+              ' 通知高亮会话行'),
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label tn-label--top' }, '事件分类'),
@@ -1189,9 +1294,9 @@ window.__ModuleLoader__.load({
               : h('div', { className: 'tn-list' },
                   imCatalog.targets.map((target) => {
                     const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
-                    return h('label', { className: 'tn-list__item', key: target.targetId },
-                      h('input', {
-                        type: 'checkbox', checked,
+                    return h('label', { className: 'tn-list__item tn-switch', key: target.targetId },
+                      ...switchToggle({
+                        checked,
                         onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
                       }),
                       h('span', { className: 'tn-list__grow' },
@@ -1245,9 +1350,9 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '提示音'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_SOUND) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_SOUND) !== '0',
                 onChange: (e) => localSet(KEY_SOUND, e.target.checked ? '1' : '0'),
               }),
               ' 开启'),
@@ -1269,9 +1374,9 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '系统弹窗'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_SYSTEM) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_SYSTEM) !== '0',
                 onChange: (e) => localSet(KEY_SYSTEM, e.target.checked ? '1' : '0'),
               }),
               ' 开启'),
@@ -1283,9 +1388,9 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '页内提示'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_TOAST) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_TOAST) !== '0',
                 onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
               }),
               ' 开启'),
@@ -1299,15 +1404,15 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '行为'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_DND) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_DND) !== '0',
                 onChange: (e) => localSet(KEY_DND, e.target.checked ? '1' : '0'),
               }),
               ' 聚焦静默'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
                 onChange: (e) => localSet(KEY_DEGRADE_HINT, e.target.checked ? '1' : '0'),
               }),
               ' 降级时标题闪烁'),
@@ -1384,12 +1489,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '作用域'),
             h('label', { className: 'tn-switch', title: '开启后音效映射仅对本浏览器(域名)生效' },
-              h('input', {
-                type: 'checkbox', checked: localMode,
+              ...switchToggle({
+                checked: localMode,
                 onChange: (e) => toggleLocalMapping(e.target.checked),
-              }),
-              h('span', { className: 'tn-switch__track' }, h('span', { className: 'tn-switch__thumb' })),
-            ),
+              })),
             h('span', { className: 'tn-meta' }, localMode ? '当前域名独立' : '全部域名共用'),
           ),
           h('div', { className: 'tn-row' },
@@ -1433,25 +1536,10 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'turn-notify', order: 41, label: '消息通知' },
             () => React.createElement(TurnNotifyApp),
           ))
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
-            { name: 'shell.overlay', id: 'turn-notify-toast' },
-            () => React.createElement(OverlayToastStack),
-          ))
       },
-      // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方
-      __test: { poll, pollOnce, storageState, announcedIds, toastStack: () => toastStack, submitCategoryToggle },
-    }
-
-    // 通知栈:portal 直挂 body 脱离应用 frame 叠层,否则被设置全屏层(z=1000)遮盖
-    function OverlayToastStack() {
-      const stack = useSyncExternalStore(toastSource.subscribe, toastSource.getSnapshot)
-      if (stack.length === 0) return null
-      return createPortal(
-        h('div', { className: 'tn-toast-stack' },
-          stack.map((item) => h('div', { className: 'tn-toast', key: item.id, role: 'alert' }, item.text))),
-        document.body,
-      )
+      // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
+      // 页内通知的展示结果经 require 桩捕获,不在本包断言
+      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle },
     }
   },
 })
