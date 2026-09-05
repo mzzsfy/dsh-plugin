@@ -1379,6 +1379,15 @@ test('parity: 引擎 budget 常量与 lib schema 边界/缺省一致; maxTasks �
   assert.equal(parse(/const BUDGET_MAX = (\d+)/)[1], String(lib.BUDGET_MAX))
   assert.equal(parse(/const MAX_TASKS_DEFAULT = (\d+)/)[1], String(lib.MAX_TASKS_DEFAULT))
   assert.equal(parse(/Math\.min\(Math\.floor\(Number\(LIMITS\.maxTasks\) \|\| 0\), (\d+)\)/)[1], String(lib.MAX_TASKS_MAX))
+  // 模板集双侧对拍:engine 四值 = lib 五值去 'auto'(auto 仅在 lib schema 与工具输出枚举出现,
+  // engine 侧对非法/缺省值兜底 multi-plan,见 TEMPLATES.indexOf 兜底表达式)
+  const engineTemplates = parse(/const TEMPLATES = \[([^\]]+)\]/)[1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
+  assert.deepEqual(engineTemplates, lib.TEMPLATES.filter((t) => t !== 'auto'))
+  // 升级上限与 SKILL.md 文案双侧钉住(固定不可配,改值须同步三处)
+  const escalation = parse(/const ESCALATION_LIMIT = (\d+)/)[1]
+  assert.equal(escalation, '2')
+  const skillSrc = readFileSync(ENGINE_PATH.replace(/references[\\/]engine\.js$/, join('SKILL.md')), 'utf8')
+  assert.ok(skillSrc.includes('`ESCALATION_LIMIT`=**' + escalation), 'SKILL.md 升级上限文案与 engine 常量失同步')
   // lib schema 行为对拍: 缺省值与边界拒绝
   const workflow = lib.SETTINGS_SCHEMA.dict.workflow
   const resolved = workflow({ defaultTemplate: 'auto', maxTasks: undefined })

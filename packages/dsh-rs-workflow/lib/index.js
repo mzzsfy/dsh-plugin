@@ -22,14 +22,22 @@
  */
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { presetDest, syncPreset } from "./preset-sync.mjs";
+import { presetDest, removePreset, syncPreset } from "./preset-sync.mjs";
 
 const name = "rs-workflow";
-const inject = ["tools"];
 
 const NAMESPACE = "rs-workflow";
 
 const TEMPLATES = ["auto", "lite", "plan-final", "step-review", "multi-plan"];
+
+// tool 输出 schema 的工作位键集,与 buildSlots 互为镜像(非派生):
+// tests/workflow-parity.test.mjs 对拍钉住,增删工作位须双侧同步
+const SLOT_KEYS = [
+	"planner", "executor", "reviewer",
+	"planner-triage", "planner-command", "planner-subplan", "planner-escalate",
+	"reviewer-plan", "reviewer-task", "reviewer-subplan", "reviewer-final", "reviewer-cross",
+	"executor-task", "executor-enhance", "executor-retry", "executor-escalate",
+];
 
 // 预算字段与默认值对齐 rs-tui budgets(config.ts:290-299),clamp 边界同 node-tree BUDGET_MIN/MAX
 const BUDGET_DEFAULTS = {
@@ -130,7 +138,11 @@ function apply(ctx, config) {
 		});
 		return;
 	}
-	ctx.tools.register(defineTool({
+	// tools 以嵌套 inject 声明:服务缺失时仅 tool 角色保持未激活(干净禁用),
+	// settings/preset-sync 角色不再被模块级 inject 连坐(非 dsh-base 组合下旧形态
+	// 会因启动审计整树 fatal)
+	ctx.inject(["tools"], (tctx) => {
+		tctx.tools.register(defineTool({
 		name: "rs_workflow_config",
 		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 无信号时兜底 multi-plan，其余值 = 无信号时兜底该值；planner 声明与分诊矩阵始终优先）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
 		parameters: {},
@@ -143,12 +155,7 @@ function apply(ctx, config) {
 						type: "object",
 						required: true,
 						additionalProperties: true,
-						properties: Object.fromEntries([
-							"planner", "executor", "reviewer",
-							"planner-triage", "planner-command", "planner-subplan", "planner-escalate",
-							"reviewer-plan", "reviewer-task", "reviewer-subplan", "reviewer-final", "reviewer-cross",
-							"executor-task", "executor-enhance", "executor-retry", "executor-escalate",
-						].map((k) => [k, {
+						properties: Object.fromEntries(SLOT_KEYS.map((k) => [k, {
 							oneOf: [
 								{ type: "string" },
 								{ type: "array", items: { type: "string" } },
@@ -186,7 +193,7 @@ function apply(ctx, config) {
 			}],
 		},
 		execute() {
-			const settings = ctx.get("settings");
+			const settings = tctx.get("settings");
 			let value;
 			try {
 				value = settings ? settings.get(NAMESPACE) : undefined;
@@ -201,6 +208,7 @@ function apply(ctx, config) {
 		},
 		presentCall: () => ({ card: "generic", title: "读取若水工作流配置", kind: "other", rawInput: {} }),
 	}));
+	});
 }
 
-export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, apply, inject, name };
+export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, TEMPLATES, apply, name, presetDest, removePreset, syncPreset };

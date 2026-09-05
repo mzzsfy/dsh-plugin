@@ -176,8 +176,13 @@ const resolvedValue = {
   workflow: { defaultTemplate: "auto", maxTasks: 8 },
 };
 const toolCtx = {
-  tools: { register(t) { registered = t; } },
-  get(name) { return name === "settings" ? { get: () => resolvedValue } : undefined; },
+  inject(deps, cb) {
+    check("tool 角色 inject 依赖", JSON.stringify(deps) === JSON.stringify(["tools"]));
+    cb({
+      tools: { register(t) { registered = t; } },
+      get(name) { return name === "settings" ? { get: () => resolvedValue } : undefined; },
+    });
+  },
 };
 mod.apply(toolCtx, { role: "tool" });
 check("工具已注册", registered?.name === "rs_workflow_config");
@@ -187,12 +192,20 @@ check("execute：settings 路径", viaSettings.source === "settings" && viaSetti
 check("output.render（settings）", JSON.stringify(registered.output.render({}, viaSettings)).includes("planner"));
 
 // settings.get 抛异常: 工具必须走 fallback 而非硬失败(R3 收紧)
-const throwingCtx = { tools: { register(t) { registered = t; } }, logger: { warn() {} }, get() { return { get() { throw new Error("ns broken"); } }; } };
+const throwingCtx = {
+  inject(deps, cb) {
+    cb({ tools: { register(t) { registered = t; } }, logger: { warn() {} }, get() { return { get() { throw new Error("ns broken"); } }; } });
+  },
+};
 mod.apply(throwingCtx, { role: "tool" });
 const viaThrow = await registered.execute({});
 check("execute：settings 抛异常走 fallback", viaThrow.source === "fallback" && viaThrow.workflow.defaultTemplate === "auto");
 
-const fallbackCtx = { tools: { register(t) { registered = t; } }, get: () => undefined };
+const fallbackCtx = {
+  inject(deps, cb) {
+    cb({ tools: { register(t) { registered = t; } }, get: () => undefined });
+  },
+};
 mod.apply(fallbackCtx, { role: "tool" });
 const viaFallback = await registered.execute({});
 check("execute：fallback 路径", viaFallback.source === "fallback" && viaFallback.workflow.defaultTemplate === "auto");
