@@ -11,7 +11,7 @@ window.__ModuleLoader__.load({
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → plan);
     // 该插件未就绪时入队,由其启动时排空
-    const NAV_ICON = { '账号余额': 'plan', '账号plan': 'plan' }
+    const NAV_ICON = { '账号余额': 'plan' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
