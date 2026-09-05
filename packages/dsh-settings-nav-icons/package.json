@@ -1,12 +1,12 @@
 {
   "name": "@mzzsfy/dsh-settings-nav-icons",
-  "description": "设置弹窗导航分区图标替换:按分区显示文本把回退齿轮换成专属图形,DOM 观察实现,卸载即恢复",
+  "description": "设置弹窗导航分区图标替换:按分区显示文本把回退齿轮换成专属图形,DOM 观察实现,卸载后重载页面恢复官方图标",
   "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./client": "./src/client.js",
+    "./logic": "./src/logic.mjs",
     "./package.json": "./package.json"
   },
   "dsh": {
