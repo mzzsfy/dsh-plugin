@@ -13,9 +13,10 @@ DeepSeek Harness 设置页插件:回合完成通知——host 单源决策,声�
 - 发声通道:提示音、页内提示与系统弹窗各自独立开关(本机偏好);提示音可按六分类单独静音(点分类标签切换,缺省出声),适合仅对提问等关键事件出声强调;聚焦静默仅压声音与系统弹窗;用户行动空闲满 5 分钟视为离开,聚焦也全通道齐发;系统弹窗须浏览器授权,想弹未授权时降级标题闪烁。
 - 写路由安全:config / mapping / upload / test-webhook / test-im / sound 改名与删除均带同源守卫(Origin 与 Host 不符即 403),JSON 写入另校验 content-type,阻断跨站 drive-by 改写;webhookUrl schema 标记 secret,任何接口不回传原文。已知边界:同源守卫不防 DNS rebinding(Origin 与 Host 相等即放行),该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决而非逐插件补丁。
 - 多窗口去重:投影(内存环形 20 条,60 秒过期)供各窗口约 2 秒轮询;localStorage 写后读回认领锁(30 秒过期接管,完成标记防迟到窗口重复发声)。
-- 发声形态:聚焦窗口仅页内 toast(可关);失焦 + Notification 授权走声音 + 系统弹窗;HTTP 非回环(非 secure context)诚实降级 toast + 标题闪烁。
+- 发声形态:聚焦窗口仅页内提示(可关,经公共通知依赖 `@mzzsfy/dsh-toast` 栈式展示,展示期 6 秒);失焦 + Notification 授权走声音 + 系统弹窗;HTTP 非回环(非 secure context)诚实降级页内提示 + 标题闪烁。dsh-toast 为普通 npm 依赖随本插件安装,其宿主占位条目由本插件 cordis.patch.yml 代挂。
 - 声音:Web Audio 程序合成 8 种内置音(零音频文件、零系统依赖),支持上传自定义音效(host 存储 `~/.dsh/dsh-turn-notify/sounds/`,扩展名 + decodeAudioData 双重校验,单文件 2MB / 总量 10MB);可多选文件,待保存列表逐个试听、逐个保存,不保存不落盘;已上传音效支持重命名(文件名恒为内容哈希 id,重命名仅改展示名并存于音效库索引,分类映射引用不受影响,重传同一文件按同 id 自动恢复既有映射;非法字符 / 内置音色名 / 超过 64 字符拒绝);映射指向的音效文件丢失时面板下拉显示失效项,分类试听回落内置默认并给出归因提示,通知发声静默回落内置默认;通知会话标题取首个用户文本,超 60 字符按码点截断。
 - 过滤:`minTurnDurationMs`(默认 5 秒)仅作用于 turn/end 类;`rootsOnly` 子代理会话默认豁免;`suppressSubagentWake` 子代理完成唤醒的父会话回合默认静默(仅 completed 类)。
+- 会话行高亮:通知实际投递(任一通道激活)时,侧边栏会话列表中对应会话行以背景脉冲闪烁强调(背景色与该分类代表色各半混合,完成绿 / 出错红 / 提问蓝等);点击该会话行即停止,点击前每轮轮询自动恢复(抗列表重渲染);全局开关 `sessionHighlight` 默认开启,面板通知配置卡可关。行定位按会话标题文本与语义类名后缀探测,不依赖构建哈希类名,探测不到即静默无高亮。
 
 ## 安装
 
@@ -39,6 +40,7 @@ turn-notify:
   minTurnDurationMs: 5000         # 回合最短时长过滤,毫秒
   rootsOnly: true                 # 子代理会话不通知
   suppressSubagentWake: true      # 子代理完成唤醒的父会话回合不通知(仅 completed)
+  sessionHighlight: true          # 通知触发时高亮侧边栏会话行(脉冲闪烁,点击会话即停)
   enabled:                        # 六分类独立开关
     completed: true
     error: true

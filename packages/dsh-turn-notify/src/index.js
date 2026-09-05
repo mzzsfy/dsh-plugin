@@ -65,6 +65,7 @@ const SETTINGS_SCHEMA = z.object({
   suppressSubagentWake: z.boolean().default(true).description('子代理完成唤醒的回合不通知'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六分类独立开关'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每分类音效映射,空为内置默认,非空为上传音效 id'),
+  sessionHighlight: z.boolean().default(true).description('通知触发时高亮侧边栏会话行'),
   imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 投递目标列表'),
 })
 
@@ -301,7 +302,8 @@ export function apply(ctx) {
       kind: 'exact',
       path: '/api/turn-notify/projection',
       handler: route('GET', {}, async (req, res) => {
-        sendJson(res, 200, { units: projection.list(), soundMapping: readSettings(ctx).soundMapping })
+        const settings = readSettings(ctx)
+        sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, sessionHighlight: settings.sessionHighlight })
       }),
     }), 'turn-notify projection route')
 
