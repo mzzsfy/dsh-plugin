@@ -92,6 +92,8 @@ const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 // 重启等待总时长:超时说明宿主未被进程管理器拉起或退出失败,退出等待态转人工处理
 const RESTART_TIMEOUT_MS = 30 * 1000
+// 页面就绪探测目标:与整页刷新后浏览器实际请求的主文档同资源
+const INDEX_URL = '/'
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
 
 // 判定常量与 host 侧 core.mjs 保持一致:client 半区无法 import ESM,
@@ -427,30 +429,61 @@ function MaintainApp() {
   }
   // LOGIC-END shouldReloadAfterRestart
 
-  // 重启确认后轮询状态:退出窗口的请求失败是预期中间态,静默记入 ref 不展示错误;
-  // 失联后恢复或宿主 pid 变化(快速重启零失联)即宿主已重启,整页刷新以加载新版本;
-  // 总时长超限说明宿主未被拉起或退出失败,退出等待态转人工处理
+  // LOGIC-BEGIN pageReady
+  function pageReady(pageFetch) {
+    return pageFetch.then(
+      (response) => Boolean(response && response.ok)
+        && /^text\/html\b/i.test(String(response.headers.get('content-type') || '')),
+      () => false,
+    )
+  }
+  // LOGIC-END pageReady
+
+  // LOGIC-BEGIN restartTick
+  // 重启等待的单拍决策:超时收尾;status 失败记失联;宿主重启判定通过后还须主文档可加载才刷新——
+  // status 可达只证明 API 路由已注册,宿主页面服务的 fallback 注册晚于插件路由,
+  // 该窗口期内整页刷新会拿到宿主裸 404
+  async function restartTick({ now, deadlineAt, lost, pidBefore, statusFetch, pageFetch }) {
+    if (now >= deadlineAt) return { action: 'timeout', lost }
+    let next
+    try {
+      next = await statusFetch()
+    } catch {
+      return { action: 'wait', lost: true }
+    }
+    if (!shouldReloadAfterRestart({ lost, pidBefore, pidAfter: next ? next.pid : null })) {
+      return { action: 'wait', lost }
+    }
+    const ready = await pageReady(pageFetch())
+    return { action: ready ? 'reload' : 'wait', lost }
+  }
+  // LOGIC-END restartTick
+
+  // 重启确认后轮询拍决策(restartTick):等待态细节见 restartTick 段内注释,超时转人工处理
   useEffect(() => {
     if (!restarting) {
       restartLostRef.current = false
       restartPidRef.current = null
       return
     }
-    const deadline = Date.now() + RESTART_TIMEOUT_MS
+    const deadlineAt = Date.now() + RESTART_TIMEOUT_MS
     const timer = setInterval(() => {
-      if (Date.now() >= deadline) {
-        clearInterval(timer)
-        setRestarting(false)
-        setError('重启未在 ' + RESTART_TIMEOUT_MS / 1000 + ' 秒内完成,宿主可能未被拉起,请检查进程管理器后手动刷新')
-        return
-      }
-      api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) })
-        .then((next) => {
-          if (shouldReloadAfterRestart({ lost: restartLostRef.current, pidBefore: restartPidRef.current, pidAfter: next ? next.pid : null })) {
-            window.location.reload()
-          }
-        })
-        .catch(() => { restartLostRef.current = true })
+      restartTick({
+        now: Date.now(),
+        deadlineAt,
+        lost: restartLostRef.current,
+        pidBefore: restartPidRef.current,
+        statusFetch: () => api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) }),
+        pageFetch: () => fetch(INDEX_URL, { cache: 'no-store', signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) }),
+      }).then((tick) => {
+        restartLostRef.current = tick.lost
+        if (tick.action === 'reload') window.location.reload()
+        if (tick.action === 'timeout') {
+          clearInterval(timer)
+          setRestarting(false)
+          setError('重启未在 ' + RESTART_TIMEOUT_MS / 1000 + ' 秒内完成,宿主可能未被拉起,请检查进程管理器后手动刷新')
+        }
+      }, () => {})
     }, RESTART_POLL_MS)
     return () => clearInterval(timer)
   }, [restarting])
