@@ -697,22 +697,38 @@ window.__ModuleLoader__.load({
       '.tn-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }',
       '.tn-head__title { font-weight:650; font-size:15px; letter-spacing:0.2px; }',
       '.tn-head__hint { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:12px; }',
+      // tab 栏:segmented 胶囊组,激活态 brand 底,面板一屏只呈现一类配置
+      '.tn-tabs { display:flex; gap:2px; padding:3px; border-radius:10px;',
+      '  background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.12)); }',
+      '.tn-tab { flex:1; min-width:0; border:none; background:transparent; cursor:pointer;',
+      '  padding:6px 8px; border-radius:8px; font-size:12.5px; font-family:inherit; text-align:center;',
+      '  color:var(--dsw-alias-label-secondary, inherit); transition:background 0.15s, color 0.15s; }',
+      '.tn-tab:hover { color:var(--dsw-alias-label-primary);',
+      '  background:var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,0.15)); }',
+      '.tn-tab--on, .tn-tab--on:hover { background:var(--dsw-alias-brand-primary);',
+      '  color:var(--dsw-alias-bg-base, #fff); font-weight:600; }',
+      '.tn-tab:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
+      '.tn-tabpanel { display:flex; flex-direction:column; gap:14px; }',
       '.tn-card { border:1px solid var(--dsw-alias-border-l1, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
       '  border-radius:12px; padding:14px 16px; background:var(--dsw-alias-bg-layer-1, transparent);',
-      '  display:flex; flex-direction:column; gap:10px; }',
-      '.tn-card__head { display:flex; flex-direction:column; gap:2px; margin-bottom:2px; }',
+      '  display:flex; flex-direction:column; gap:12px; }',
+      '.tn-card__head { display:flex; flex-direction:column; gap:2px; }',
       '.tn-card__title { font-weight:600; font-size:13px; color:var(--dsw-alias-label-primary); }',
       '.tn-card__sub { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:12px; }',
-      '.tn-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }',
-      '.tn-row--label { align-items:flex-start; }',
-      '.tn-spacer { flex:1; }',
+      // 表单行:左标签右控件的 grid,说明文字折行到控件列下方,行结构不随内容换行漂移
+      '.tn-field { display:grid; grid-template-columns:76px minmax(0, 1fr); gap:8px 12px; align-items:center; }',
+      '.tn-field__label { color:var(--dsw-alias-label-secondary); font-size:12px; }',
+      '.tn-field__control { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }',
+      '.tn-field__hint { grid-column:2; color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));',
+      '  font-size:11.5px; line-height:1.5; }',
+      // 卡片底部动作区:主操作右对齐
+      '.tn-actions { display:flex; justify-content:flex-end; gap:8px;',
+      '  border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); padding-top:10px; }',
       '.tn-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-      '.tn-label { color:var(--dsw-alias-label-secondary); font-size:12px; min-width:64px; text-align:right; }',
-      '.tn-label--top { padding-top:6px; }',
       '.tn-error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
       '.tn-btn { cursor:pointer; border:1px solid var(--dsw-alias-border-l2, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
       '  background:var(--dsw-alias-bg-layer-2, transparent); color:var(--dsw-alias-label-primary, inherit);',
-      '  border-radius:8px; padding:4px 12px; font-size:12px; transition:background 0.15s, border-color 0.15s; }',
+      '  border-radius:8px; padding:5px 14px; font-size:12px; font-family:inherit; transition:background 0.15s, border-color 0.15s, color 0.15s; }',
       '.tn-btn:hover { background:var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2, transparent)); }',
       '.tn-btn:disabled { opacity:0.45; cursor:default; }',
       '.tn-btn--primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary);',
@@ -728,13 +744,9 @@ window.__ModuleLoader__.load({
       '  border-radius:8px; padding:5px 9px; font-size:12px; font-family:inherit; transition:border-color 0.15s; }',
       '.tn-select:focus, .tn-input:focus { outline:none; border-color:var(--dsw-alias-brand-primary); }',
       '.tn-fill { flex:1; min-width:200px; }',
-      '.tn-notice { font-size:12px; padding:7px 12px; border-radius:8px; display:flex; align-items:center; gap:8px;',
-      '  border:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35));',
-      '  background:var(--dsw-alias-bg-layer-2, transparent); color:var(--dsw-alias-label-primary); }',
-      '.tn-notice::before { content:\'\'; width:3px; align-self:stretch; border-radius:2px;',
-      '  background:var(--dsw-alias-state-success-primary, currentColor); }',
-      '.tn-notice--error::before { background:var(--dsw-alias-state-error-primary, currentColor); }',
-      // pill 开关组:分类与布尔偏好同一控件语言,选中态 brand 底色
+      // 测试卡按钮组:横排可换行
+      '.tn-btngroup { display:flex; gap:8px; flex-wrap:wrap; }',
+      // pill 开关组:成组分类的快捷切换,选中态 brand 底色
       '.tn-pills { display:flex; gap:6px; flex-wrap:wrap; }',
       '.tn-pill { cursor:pointer; border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
       '  border-radius:999px; padding:3px 12px; font-size:12px; user-select:none;',
@@ -807,6 +819,15 @@ window.__ModuleLoader__.load({
       ]
     }
 
+    // 表单行:左标签右控件的固定两列,说明文字折行到控件列下方
+    function field(label, control, hint) {
+      return h('div', { className: 'tn-field' },
+        h('span', { className: 'tn-field__label' }, label),
+        h('div', { className: 'tn-field__control' }, control),
+        hint !== undefined ? h('div', { className: 'tn-field__hint' }, hint) : null,
+      )
+    }
+
     async function api(path, options) {
       const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options })
       const payload = await response.json().catch(() => ({}))
@@ -816,7 +837,6 @@ window.__ModuleLoader__.load({
 
     function TurnNotifyApp() {
       const [sounds, setSounds] = useState([])
-      const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState(false)
       const [config, setConfig] = useState(DEFAULT_CONFIG)
       const [configLoaded, setConfigLoaded] = useState(false)
@@ -834,6 +854,8 @@ window.__ModuleLoader__.load({
       const [soundCategories, setSoundCategoriesState] = useState(() => readSoundCategories())
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
+      // 面板分区:tab 切换仅显隐,不触碰任何已装载状态
+      const [tab, setTab] = useState('通知')
 
       useEffect(() => {
         start()
@@ -847,12 +869,15 @@ window.__ModuleLoader__.load({
           .catch(() => {})
       }, [])
 
-      const patch = (text, kind) => setNotice({ text, kind: kind || 'ok' })
+      // 操作反馈出口:统一浮出通知,成功 ok / 失败 error;toast 模块缺失降级 console
+      const patch = (text, kind) => {
+        if (toast) toast(text, { kind: kind === 'error' ? 'error' : 'ok' })
+        else console.warn('[dsh-turn-notify] ' + text)
+      }
 
       async function onPickFiles(files) {
         if (files.length === 0) return
         setBusy(true)
-        setNotice(null)
         const accepted = []
         let rejected = 0
         let rejectReason = ''
@@ -882,7 +907,6 @@ window.__ModuleLoader__.load({
 
       async function savePending(item) {
         setBusy(true)
-        setNotice(null)
         try {
           await api('/api/turn-notify/upload?name=' + encodeURIComponent(item.name), {
             method: 'POST',
@@ -931,7 +955,6 @@ window.__ModuleLoader__.load({
 
       async function renameSound(sound) {
         setBusy(true)
-        setNotice(null)
         try {
           const res = await api('/api/turn-notify/sound', { method: 'PUT', body: JSON.stringify({ id: sound.id, name: renameDraft }) })
           decodedCache.delete(sound.id)
@@ -987,7 +1010,6 @@ window.__ModuleLoader__.load({
           return
         }
         setBusy(true)
-        setNotice(null)
         try {
           const raw = typeof config.minTurnDurationMs === 'string'
             ? config.minTurnDurationMs.trim()
@@ -1010,7 +1032,6 @@ window.__ModuleLoader__.load({
 
       async function clearWebhook() {
         setBusy(true)
-        setNotice(null)
         try {
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ webhookUrl: '' }) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
@@ -1109,7 +1130,6 @@ window.__ModuleLoader__.load({
           return
         }
         setBusy(true)
-        setNotice(null)
         try {
           const res = await api('/api/turn-notify/im-targets?botId=' + encodeURIComponent(botId))
           setImCatalog({ botId, targets: res.targets || [] })
@@ -1198,92 +1218,255 @@ window.__ModuleLoader__.load({
       ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + (sound.name || sound.id))))
         .concat(deadIds.map((id) => h('option', { key: id, value: id }, '失效 · ' + id)))
 
+      // 分区定义:IM 卡随 dsh-im 在场与否出现;activeTab 兜底防 imAvailable 回落时落空
+      const tabs = [
+        { id: '通知', label: '通知' },
+        { id: '偏好', label: '偏好' },
+        { id: '音效', label: '音效' },
+        ...(config.imAvailable ? [{ id: 'IM', label: 'IM' }] : []),
+        { id: '测试', label: '测试' },
+      ]
+      const activeTab = tabs.some((item) => item.id === tab) ? tab : tabs[0].id
+
       return h('div', { className: 'tn-panel' },
         h('div', { className: 'tn-head' },
           h('span', { className: 'tn-head__title' }, '消息通知'),
           h('span', { className: 'tn-head__hint' }, '配置存 host 热生效;标签页全关时仅 webhook 与 IM 送达'),
         ),
-        notice !== null
-          ? h('div', { className: 'tn-notice' + (notice.kind === 'error' ? ' tn-notice--error' : '') }, notice.text)
-          : null,
-        h('div', { className: 'tn-card' },
-          h('div', { className: 'tn-card__head' },
-            h('span', { className: 'tn-card__title' }, '通知配置'),
-            h('span', { className: 'tn-card__sub' }, '回合事件触发条件与送达通道,数值改动需保存'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, 'webhook'),
-            h('input', {
-              className: 'tn-input tn-fill', type: 'text',
-              placeholder: config.webhookConfigured ? '已配置(输入新 URL 替换,留空保持不变)' : 'Slack-compatible URL,留空禁用',
-              value: urlDraft,
-              onChange: (e) => setUrlDraft(e.target.value),
-            }),
-            config.webhookConfigured
-              ? h('button', { className: 'tn-btn tn-btn--danger', disabled: busy, onClick: () => void clearWebhook() }, '清除')
-              : null,
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '碎轮过滤'),
-            h('input', {
-              className: 'tn-input', type: 'number', min: 0, step: 500, style: { width: '90px' },
-              value: config.minTurnDurationMs,
-              onChange: (e) => setConfig({ ...config, minTurnDurationMs: e.target.value }),
-            }),
-            h('span', { className: 'tn-meta' }, '毫秒,短于此值的 turn/end 回合不通知'),
-            h('span', { className: 'tn-spacer' }),
-            h('button', { className: 'tn-btn tn-btn--primary', disabled: busy, onClick: () => void saveConfig() }, '保存'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '豁免'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                checked: config.rootsOnly,
-                onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
+        h('div', { className: 'tn-tabs', role: 'tablist' },
+          tabs.map((item) => h('button', {
+            key: item.id,
+            type: 'button',
+            role: 'tab',
+            'aria-selected': activeTab === item.id,
+            className: 'tn-tab' + (activeTab === item.id ? ' tn-tab--on' : ''),
+            onClick: () => setTab(item.id),
+          }, item.label)),
+        ),
+        h('div', { className: 'tn-tabpanel', role: 'tabpanel' },
+          activeTab === '通知' ? h('div', { className: 'tn-card' },
+            h('div', { className: 'tn-card__head' },
+              h('span', { className: 'tn-card__title' }, '通知配置'),
+              h('span', { className: 'tn-card__sub' }, '回合事件触发条件,数值改动需保存'),
+            ),
+            field('webhook', [
+              h('input', {
+                className: 'tn-input tn-fill', type: 'text',
+                placeholder: config.webhookConfigured ? '已配置(输入新 URL 替换,留空保持不变)' : 'Slack-compatible URL,留空禁用',
+                value: urlDraft,
+                onChange: (e) => setUrlDraft(e.target.value),
               }),
-              ' 子代理会话不通知'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                checked: config.suppressSubagentWake,
-                onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
+              config.webhookConfigured
+                ? h('button', { className: 'tn-btn tn-btn--danger', disabled: busy, onClick: () => void clearWebhook() }, '清除')
+                : null,
+            ], 'URL 只写不回显'),
+            field('碎轮过滤', [
+              h('input', {
+                className: 'tn-input', type: 'number', min: 0, step: 500, style: { width: '90px' },
+                value: config.minTurnDurationMs,
+                onChange: (e) => setConfig({ ...config, minTurnDurationMs: e.target.value }),
               }),
-              ' 子代理回执静默'),
-            h('label', { className: 'tn-meta tn-switch', title: '通知触发时脉冲闪烁侧边栏对应会话行,点击该会话后停止' },
-              ...switchToggle({
-                checked: config.sessionHighlight !== false,
-                onChange: (e) => setConfig({ ...config, sessionHighlight: e.target.checked }),
-              }),
-              ' 通知高亮会话行'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label tn-label--top' }, '事件分类'),
-            h('div', { className: 'tn-pills' },
+              h('span', { className: 'tn-meta' }, '毫秒,短于此值的 turn/end 回合不通知'),
+            ]),
+            field('豁免', [
+              h('label', { className: 'tn-meta tn-switch' },
+                ...switchToggle({
+                  checked: config.rootsOnly,
+                  onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
+                }),
+                ' 子代理会话不通知'),
+              h('label', { className: 'tn-meta tn-switch' },
+                ...switchToggle({
+                  checked: config.suppressSubagentWake,
+                  onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
+                }),
+                ' 子代理回执静默'),
+            ]),
+            field('事件分类', h('div', { className: 'tn-pills' },
               CATEGORIES.map((category) => h('span', {
                 className: 'tn-pill' + (config.enabled[category] ? ' tn-pill--on' : ''),
                 key: category,
                 onClick: () => void toggleCategory(category, !config.enabled[category]),
               }, CATEGORY_LABELS[category])),
+            ), '亮=触发通知,暗=不触发,点击即存即时生效'),
+            field('会话高亮', h('label', { className: 'tn-meta tn-switch', title: '通知触发时脉冲闪烁侧边栏对应会话行,点击该会话后停止' },
+              ...switchToggle({
+                checked: config.sessionHighlight !== false,
+                onChange: (e) => setConfig({ ...config, sessionHighlight: e.target.checked }),
+              }),
+              ' 通知高亮会话行')),
+            h('div', { className: 'tn-actions' },
+              h('button', { className: 'tn-btn tn-btn--primary', disabled: busy, onClick: () => void saveConfig() }, '保存'),
             ),
-          ),
-        ),
-        config.imAvailable ? h('div', { className: 'tn-card' },
-          h('div', { className: 'tn-card__head' },
-            h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
-            h('span', { className: 'tn-card__sub' }, '勾选目标即自动保存;支持绑定多个 bot,点 bot 名加载其目录,× 取消注册'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, 'Bot ID'),
-            h('input', {
-              className: 'tn-input tn-fill', type: 'text',
-              placeholder: '从设置页 IM机器人 卡片复制 Bot ID',
-              value: imBotIdDraft,
-              onChange: (e) => setImBotIdDraft(e.target.value),
-            }),
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void loadImTargets() }, '加载目标'),
-          ),
-          imBoundBots.length > 0 ? h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '已绑 bot'),
-            h('div', { className: 'tn-row' },
+          ) : null,
+          activeTab === '偏好' ? h('div', { className: 'tn-card' },
+            h('div', { className: 'tn-card__head' },
+              h('span', { className: 'tn-card__title' }, '本机偏好'),
+              h('span', { className: 'tn-card__sub' }, '仅存当前浏览器,不影响其他窗口'),
+            ),
+            field('提示音', [
+              h('label', { className: 'tn-meta tn-switch' },
+                ...switchToggle({
+                  defaultChecked: localGet(KEY_SOUND) !== '0',
+                  onChange: (e) => localSet(KEY_SOUND, e.target.checked ? '1' : '0'),
+                }),
+                ' 开启'),
+              h('div', { className: 'tn-pills' },
+                CATEGORIES.map((category) => h('span', {
+                  className: 'tn-pill' + (soundCategories[category] !== false ? ' tn-pill--on' : ''),
+                  key: category,
+                  title: soundCategories[category] !== false
+                    ? CATEGORY_LABELS[category] + ':当前出声,点击静音'
+                    : CATEGORY_LABELS[category] + ':当前静音,点击恢复出声',
+                  onClick: () => toggleSoundCategory(category),
+                }, CATEGORY_LABELS[category])),
+              ),
+            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示与系统弹窗不受影响。'),
+            field('系统弹窗', [
+              h('label', { className: 'tn-meta tn-switch' },
+                ...switchToggle({
+                  defaultChecked: localGet(KEY_SYSTEM) !== '0',
+                  onChange: (e) => localSet(KEY_SYSTEM, e.target.checked ? '1' : '0'),
+                }),
+                ' 开启'),
+              h('span', { className: 'tn-meta' }, '权限:'
+                + (typeof Notification === 'undefined' ? '不可用(非安全上下文)' : (PERMISSION_LABELS[permission] || permission))),
+              typeof Notification !== 'undefined' && permission === 'default'
+                ? h('button', { className: 'tn-btn', onClick: () => void requestPermission() }, '授权')
+                : null,
+            ]),
+            field('页内提示', h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_TOAST) !== '0',
+                onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
+              }),
+              ' 开启')),
+            field('音量', h('input', {
+              className: 'tn-range', type: 'range', min: 0, max: 1, step: 0.05, defaultValue: volume(),
+              onChange: (e) => localSet(KEY_VOLUME, e.target.value),
+            })),
+            field('行为', [
+              h('label', { className: 'tn-meta tn-switch' },
+                ...switchToggle({
+                  defaultChecked: localGet(KEY_DND) !== '0',
+                  onChange: (e) => localSet(KEY_DND, e.target.checked ? '1' : '0'),
+                }),
+                ' 聚焦静默'),
+              h('label', { className: 'tn-meta tn-switch' },
+                ...switchToggle({
+                  defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
+                  onChange: (e) => localSet(KEY_DEGRADE_HINT, e.target.checked ? '1' : '0'),
+                }),
+                ' 降级时标题闪烁'),
+            ]),
+          ) : null,
+          activeTab === '音效' ? [
+            h('div', { className: 'tn-card' },
+              h('div', { className: 'tn-card__head' },
+                h('span', { className: 'tn-card__title' }, '音效管理'),
+                h('span', { className: 'tn-card__sub' }, 'wav / mp3 / ogg,可多选,单文件上限 2MB'),
+              ),
+              field('上传音效', h('input', {
+                type: 'file', multiple: true, accept: AUDIO_EXTS.map((ext) => '.' + ext).join(','), disabled: busy,
+                onChange: (e) => {
+                  const files = e.target.files ? Array.from(e.target.files) : []
+                  e.target.value = ''
+                  void onPickFiles(files)
+                },
+              })),
+              pendingUploads.map((item, index) => h('div', { className: 'tn-list__item', key: 'pending-' + index },
+                h('span', { className: 'tn-list__grow' }, item.name),
+                h('span', { className: 'tn-list__tag' }, '待保存'),
+                h('button', {
+                  className: 'tn-btn',
+                  onClick: () => {
+                    previewPending(item.raw).then((result) => {
+                      if (!result.ok) patch('试听未播放:' + result.reason, 'error')
+                    })
+                  },
+                }, '试听'),
+                h('button', { className: 'tn-btn', disabled: busy, onClick: () => void savePending(item) }, '保存'),
+                h('button', {
+                  className: 'tn-btn tn-btn--ghost', disabled: busy,
+                  onClick: () => setPendingUploads(pendingUploads.filter((pending) => pending !== item)),
+                }, '移除'),
+              )),
+              sounds.length === 0 ? h('span', { className: 'tn-meta' }, '暂无上传音效') :
+                h('div', { className: 'tn-list' },
+                  sounds.map((sound) => renamingId === sound.id
+                    ? h('div', { className: 'tn-list__item', key: sound.id },
+                      h('input', {
+                        className: 'tn-input tn-fill', type: 'text', autoFocus: true,
+                        value: renameDraft,
+                        onChange: (e) => setRenameDraft(e.target.value),
+                        // Enter 提交:IME 组词确认(229)不算提交,busy 期间忽略防并发提交
+                        onKeyDown: (e) => {
+                          if (e.key === 'Enter' && !busy && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void renameSound(sound)
+                        },
+                      }),
+                      h('button', { className: 'tn-btn', disabled: busy, onClick: () => void renameSound(sound) }, '确认'),
+                      h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: cancelRename }, '取消'),
+                    )
+                    : h('div', { className: 'tn-list__item', key: sound.id },
+                      h('span', { className: 'tn-list__grow' }, (sound.name || sound.id) + '.' + sound.ext),
+                      h('button', {
+                        className: 'tn-btn',
+                        onClick: () => {
+                          playAudible({ kind: 'custom', id: sound.id }).then((result) => {
+                            if (!result.ok) patch('试听未播放:' + result.reason, 'error')
+                          })
+                        },
+                      }, '试听'),
+                      h('button', { className: 'tn-btn', disabled: busy, onClick: () => startRename(sound) }, '重命名'),
+                      h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),
+                    )),
+                ),
+            ),
+            h('div', { className: 'tn-card' },
+              h('div', { className: 'tn-card__head' },
+                h('span', { className: 'tn-card__title' }, '分类音效映射'),
+                h('span', { className: 'tn-card__sub' }, '每类事件可指定上传音效或内置音,失效自动回落内置默认'),
+              ),
+              field('作用域', [
+                h('label', { className: 'tn-switch', title: '开启后音效映射仅对本浏览器(域名)生效' },
+                  ...switchToggle({
+                    checked: localMode,
+                    onChange: (e) => toggleLocalMapping(e.target.checked),
+                  })),
+                h('span', { className: 'tn-meta' }, localMode ? '当前域名独立' : '全部域名共用'),
+              ], '开启:映射改动只保存在本浏览器(按访问域名隔离),本地优先于全局,公司/家里的配置互不影响。关闭:全域名共用 host 全局配置(settings.yaml)。'),
+              !localMode && Object.keys(localMapping).length > 0
+                ? h('div', { className: 'tn-field' },
+                  h('span', { className: 'tn-field__label' }),
+                  h('div', { className: 'tn-field__control' },
+                    h('span', { className: 'tn-meta' },
+                      '已保存 ' + Object.keys(localMapping).length + ' 项本地映射,当前休眠,重新开启即恢复生效。'),
+                  ))
+                : null,
+              CATEGORIES.map((category) => field(CATEGORY_LABELS[category], [
+                h('select', {
+                  className: 'tn-select tn-fill', value: effective[category] || '',
+                  onChange: (e) => void setMapping(category, e.target.value),
+                }, soundOptions),
+                h('button', { className: 'tn-btn', onClick: () => previewCategory(category) }, '试听'),
+              ])),
+            ),
+          ] : null,
+          activeTab === 'IM' ? h('div', { className: 'tn-card' },
+            h('div', { className: 'tn-card__head' },
+              h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
+              h('span', { className: 'tn-card__sub' }, '勾选目标即自动保存;支持绑定多个 bot,点 bot 名加载其目录,× 取消注册'),
+            ),
+            field('Bot ID', [
+              h('input', {
+                className: 'tn-input tn-fill', type: 'text',
+                placeholder: '从设置页 IM机器人 卡片复制 Bot ID',
+                value: imBotIdDraft,
+                onChange: (e) => setImBotIdDraft(e.target.value),
+              }),
+              h('button', { className: 'tn-btn', disabled: busy, onClick: () => void loadImTargets() }, '加载目标'),
+            ]),
+            imBoundBots.length > 0 ? field('已绑 bot',
               imBoundBots.map((botId) => h('span', { className: 'tn-chip', key: botId },
                 h('button', {
                   className: 'tn-chip__name'
@@ -1296,235 +1479,62 @@ window.__ModuleLoader__.load({
                   onClick: () => unregisterImBot(botId),
                 }, '×'),
               )),
+            ) : null,
+            imCatalog !== null
+              ? imCatalog.targets.length === 0
+                ? h('div', { className: 'tn-meta' }, '该 bot 尚无已保存投递目标,先在 dsh-im 设置页新建并测试')
+                : h('div', { className: 'tn-list' },
+                    imCatalog.targets.map((target) => {
+                      const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
+                      return h('label', { className: 'tn-list__item tn-switch', key: target.targetId },
+                        ...switchToggle({
+                          checked,
+                          onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
+                        }),
+                        h('span', { className: 'tn-list__grow' },
+                          target.targetId + (target.name ? ' (' + target.name + ')' : '')),
+                        h('span', { className: 'tn-list__tag' }, target.kind || ''),
+                      )
+                    }),
+                  )
+              : null,
+            config.imTargets.length > 0 ? h('hr', { className: 'tn-divider' }) : null,
+            config.imTargets.length === 0
+              ? h('div', { className: 'tn-meta' }, '尚未绑定投递目标,通知不会推送 IM')
+              : h('div', { className: 'tn-list' },
+                  config.imTargets.map((item) => h('div', { className: 'tn-list__item', key: imTargetKey(item) },
+                    h('span', { className: 'tn-list__grow' }, item.targetId),
+                    h('span', { className: 'tn-list__tag' }, item.botId),
+                    h('button', {
+                      className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: () => removeImTarget(item),
+                    }, '移除'),
+                  )),
+                ),
+          ) : null,
+          activeTab === '测试' ? h('div', { className: 'tn-card' },
+            h('div', { className: 'tn-card__head' },
+              h('span', { className: 'tn-card__title' }, '测试'),
+              h('span', { className: 'tn-card__sub' }, '各通道逐一点火,回执即真实结果'),
+            ),
+            h('div', { className: 'tn-btngroup' },
+              h('button', {
+                className: 'tn-btn',
+                // 测试声音读当前生效映射:播放任务完成分类实际生效的音效,而非固定参考音
+                onClick: () => {
+                  const sound = resolveSound('completed', effective, soundIds)
+                  playAudible(sound).then((result) => {
+                    patch(result.ok
+                      ? '测试声音已触发:' + describeSound(sound) + ',若未听到请检查系统音量与输出设备'
+                      : '测试声音未播放:' + result.reason, result.ok ? 'ok' : 'error')
+                  })
+                },
+              }, '测试声音'),
+              h('button', { className: 'tn-btn', onClick: testPageNotification }, '测试页内通知'),
+              h('button', { className: 'tn-btn', onClick: testSystemNotification }, '测试系统通知'),
+              h('button', { className: 'tn-btn', onClick: () => void testWebhook() }, '测试 webhook'),
+              config.imAvailable ? h('button', { className: 'tn-btn', disabled: busy, onClick: () => void testIm() }, '测试 IM 通知') : null,
             ),
           ) : null,
-          imCatalog !== null
-            ? imCatalog.targets.length === 0
-              ? h('div', { className: 'tn-meta' }, '该 bot 尚无已保存投递目标,先在 dsh-im 设置页新建并测试')
-              : h('div', { className: 'tn-list' },
-                  imCatalog.targets.map((target) => {
-                    const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
-                    return h('label', { className: 'tn-list__item tn-switch', key: target.targetId },
-                      ...switchToggle({
-                        checked,
-                        onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
-                      }),
-                      h('span', { className: 'tn-list__grow' },
-                        target.targetId + (target.name ? ' (' + target.name + ')' : '')),
-                      h('span', { className: 'tn-list__tag' }, target.kind || ''),
-                    )
-                  }),
-                )
-            : null,
-          config.imTargets.length > 0 ? h('hr', { className: 'tn-divider' }) : null,
-          config.imTargets.length === 0
-            ? h('div', { className: 'tn-meta' }, '尚未绑定投递目标,通知不会推送 IM')
-            : h('div', { className: 'tn-list' },
-                config.imTargets.map((item) => h('div', { className: 'tn-list__item', key: imTargetKey(item) },
-                  h('span', { className: 'tn-list__grow' }, item.targetId),
-                  h('span', { className: 'tn-list__tag' }, item.botId),
-                  h('button', {
-                    className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: () => removeImTarget(item),
-                  }, '移除'),
-                )),
-              ),
-        ) : null,
-        h('div', { className: 'tn-card' },
-          h('div', { className: 'tn-card__head' },
-            h('span', { className: 'tn-card__title' }, '测试'),
-            h('span', { className: 'tn-card__sub' }, '各通道逐一点火,回执即真实结果'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('button', {
-              className: 'tn-btn',
-              // 测试声音读当前生效映射:播放任务完成分类实际生效的音效,而非固定参考音
-              onClick: () => {
-                const sound = resolveSound('completed', effective, soundIds)
-                playAudible(sound).then((result) => {
-                  patch(result.ok
-                    ? '测试声音已触发:' + describeSound(sound) + ',若未听到请检查系统音量与输出设备'
-                    : '测试声音未播放:' + result.reason, result.ok ? 'ok' : 'error')
-                })
-              },
-            }, '测试声音'),
-            h('button', { className: 'tn-btn', onClick: testPageNotification }, '测试页内通知'),
-            h('button', { className: 'tn-btn', onClick: testSystemNotification }, '测试系统通知'),
-            h('button', { className: 'tn-btn', onClick: () => void testWebhook() }, '测试 webhook'),
-            config.imAvailable ? h('button', { className: 'tn-btn', disabled: busy, onClick: () => void testIm() }, '测试 IM 通知') : null,
-          ),
-        ),
-        h('div', { className: 'tn-card' },
-          h('div', { className: 'tn-card__head' },
-            h('span', { className: 'tn-card__title' }, '本机偏好'),
-            h('span', { className: 'tn-card__sub' }, '仅存当前浏览器,不影响其他窗口'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '提示音'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                defaultChecked: localGet(KEY_SOUND) !== '0',
-                onChange: (e) => localSet(KEY_SOUND, e.target.checked ? '1' : '0'),
-              }),
-              ' 开启'),
-            h('div', { className: 'tn-pills' },
-              CATEGORIES.map((category) => h('span', {
-                className: 'tn-pill' + (soundCategories[category] !== false ? ' tn-pill--on' : ''),
-                key: category,
-                title: soundCategories[category] !== false
-                  ? CATEGORY_LABELS[category] + ':当前出声,点击静音'
-                  : CATEGORY_LABELS[category] + ':当前静音,点击恢复出声',
-                onClick: () => toggleSoundCategory(category),
-              }, CATEGORY_LABELS[category])),
-            ),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }),
-            h('span', { className: 'tn-meta' },
-              '点分类标签单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示与系统弹窗不受影响。'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '系统弹窗'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                defaultChecked: localGet(KEY_SYSTEM) !== '0',
-                onChange: (e) => localSet(KEY_SYSTEM, e.target.checked ? '1' : '0'),
-              }),
-              ' 开启'),
-            h('span', { className: 'tn-meta' }, '权限:'
-              + (typeof Notification === 'undefined' ? '不可用(非安全上下文)' : (PERMISSION_LABELS[permission] || permission))),
-            typeof Notification !== 'undefined' && permission === 'default'
-              ? h('button', { className: 'tn-btn', onClick: () => void requestPermission() }, '授权')
-              : null,
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '页内提示'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                defaultChecked: localGet(KEY_TOAST) !== '0',
-                onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
-              }),
-              ' 开启'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '音量'),
-            h('input', {
-              className: 'tn-range', type: 'range', min: 0, max: 1, step: 0.05, defaultValue: volume(),
-              onChange: (e) => localSet(KEY_VOLUME, e.target.value),
-            }),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '行为'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                defaultChecked: localGet(KEY_DND) !== '0',
-                onChange: (e) => localSet(KEY_DND, e.target.checked ? '1' : '0'),
-              }),
-              ' 聚焦静默'),
-            h('label', { className: 'tn-meta tn-switch' },
-              ...switchToggle({
-                defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
-                onChange: (e) => localSet(KEY_DEGRADE_HINT, e.target.checked ? '1' : '0'),
-              }),
-              ' 降级时标题闪烁'),
-          ),
-        ),
-        h('div', { className: 'tn-card' },
-          h('div', { className: 'tn-card__head' },
-            h('span', { className: 'tn-card__title' }, '音效管理'),
-            h('span', { className: 'tn-card__sub' }, 'wav / mp3 / ogg,可多选,单文件上限 2MB'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('input', {
-              type: 'file', multiple: true, accept: AUDIO_EXTS.map((ext) => '.' + ext).join(','), disabled: busy,
-              onChange: (e) => {
-                const files = e.target.files ? Array.from(e.target.files) : []
-                e.target.value = ''
-                void onPickFiles(files)
-              },
-            }),
-          ),
-          pendingUploads.map((item, index) => h('div', { className: 'tn-list__item', key: 'pending-' + index },
-            h('span', { className: 'tn-list__grow' }, item.name),
-            h('span', { className: 'tn-list__tag' }, '待保存'),
-            h('button', {
-              className: 'tn-btn',
-              onClick: () => {
-                previewPending(item.raw).then((result) => {
-                  if (!result.ok) patch('试听未播放:' + result.reason, 'error')
-                })
-              },
-            }, '试听'),
-            h('button', { className: 'tn-btn', disabled: busy, onClick: () => void savePending(item) }, '保存'),
-            h('button', {
-              className: 'tn-btn tn-btn--ghost', disabled: busy,
-              onClick: () => setPendingUploads(pendingUploads.filter((pending) => pending !== item)),
-            }, '移除'),
-          )),
-          sounds.length === 0 ? h('span', { className: 'tn-meta' }, '暂无上传音效') :
-            h('div', { className: 'tn-list' },
-              sounds.map((sound) => renamingId === sound.id
-                ? h('div', { className: 'tn-list__item', key: sound.id },
-                  h('input', {
-                    className: 'tn-input tn-fill', type: 'text', autoFocus: true,
-                    value: renameDraft,
-                    onChange: (e) => setRenameDraft(e.target.value),
-                    // Enter 提交:IME 组词确认(229)不算提交,busy 期间忽略防并发提交
-                    onKeyDown: (e) => {
-                      if (e.key === 'Enter' && !busy && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) void renameSound(sound)
-                    },
-                  }),
-                  h('button', { className: 'tn-btn', disabled: busy, onClick: () => void renameSound(sound) }, '确认'),
-                  h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: cancelRename }, '取消'),
-                )
-                : h('div', { className: 'tn-list__item', key: sound.id },
-                  h('span', { className: 'tn-list__grow' }, (sound.name || sound.id) + '.' + sound.ext),
-                  h('button', {
-                    className: 'tn-btn',
-                    onClick: () => {
-                      playAudible({ kind: 'custom', id: sound.id }).then((result) => {
-                        if (!result.ok) patch('试听未播放:' + result.reason, 'error')
-                      })
-                    },
-                  }, '试听'),
-                  h('button', { className: 'tn-btn', disabled: busy, onClick: () => startRename(sound) }, '重命名'),
-                  h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: () => void removeSound(sound) }, '删除'),
-                )),
-            ),
-        ),
-        h('div', { className: 'tn-card' },
-          h('div', { className: 'tn-card__head' },
-            h('span', { className: 'tn-card__title' }, '分类音效映射'),
-            h('span', { className: 'tn-card__sub' }, '每类事件可指定上传音效或内置音,失效自动回落内置默认'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }, '作用域'),
-            h('label', { className: 'tn-switch', title: '开启后音效映射仅对本浏览器(域名)生效' },
-              ...switchToggle({
-                checked: localMode,
-                onChange: (e) => toggleLocalMapping(e.target.checked),
-              })),
-            h('span', { className: 'tn-meta' }, localMode ? '当前域名独立' : '全部域名共用'),
-          ),
-          h('div', { className: 'tn-row' },
-            h('span', { className: 'tn-label' }),
-            h('span', { className: 'tn-meta' },
-              '开启:映射改动只保存在本浏览器(按访问域名隔离),本地优先于全局,公司/家里的配置互不影响。关闭:全域名共用 host 全局配置(settings.yaml)。'),
-          ),
-          !localMode && Object.keys(localMapping).length > 0
-            ? h('div', { className: 'tn-row' },
-              h('span', { className: 'tn-label' }),
-              h('span', { className: 'tn-meta' },
-                '已保存 ' + Object.keys(localMapping).length + ' 项本地映射,当前休眠,重新开启即恢复生效。'),
-            )
-            : null,
-          CATEGORIES.map((category) => h('div', { className: 'tn-row', key: category },
-            h('span', { className: 'tn-label' }, CATEGORY_LABELS[category]),
-            h('select', {
-              className: 'tn-select tn-fill', value: effective[category] || '',
-              onChange: (e) => void setMapping(category, e.target.value),
-            }, soundOptions),
-            h('button', { className: 'tn-btn', onClick: () => previewCategory(category) }, '试听'),
-          )),
         ),
       )
     }
