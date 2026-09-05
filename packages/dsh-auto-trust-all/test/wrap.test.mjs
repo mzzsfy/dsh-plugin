@@ -35,22 +35,28 @@ class MockWebServer {
   }
 }
 
-// 构造最小插件上下文:webServer 静态注入,webRuntime 经 ctx.get 可选探测
-// (与真实 cordis 语义一致),holder.current 支持测试中延迟就绪或换代;
-// ctx.on 收集事件监听器供模拟触发;console 输出经 t.mock 捕获,测试结束自动还原
-function createCtx({ trustedHosts = [], host = '0.0.0.0', webRuntimeReady = true } = {}) {
+// 构造最小插件上下文:webServer 静态注入,webRuntime/connection 经 ctx.get 可选探测
+// (与真实 cordis 语义一致,strict get 对未提供服务返回 undefined),
+// holder.current 支持测试中延迟就绪或换代;ctx.on 收集事件监听器供模拟触发;
+// console 输出经 t.mock 捕获,测试结束自动还原
+function createCtx({ trustedHosts = [], host = '0.0.0.0', webRuntimeReady = true, connectionReady = true } = {}) {
   const webServer = new MockWebServer(host)
   const holder = { current: webRuntimeReady ? { trustedHosts } : undefined }
+  const fenceHosts = []
   const listeners = []
   const ctx = {
     webServer,
-    get: (name) => (name === 'webRuntime' ? holder.current : undefined),
+    get: (name) => {
+      if (name === 'webRuntime') return holder.current
+      if (name === 'connection') return connectionReady ? { trustedHosts: fenceHosts } : undefined
+      return undefined
+    },
     on: (name, listener) => {
       listeners.push([name, listener])
       return () => {}
     },
   }
-  return { ctx, webServer, holder, trustedHosts, listeners }
+  return { ctx, webServer, holder, trustedHosts, fenceHosts, listeners }
 }
 
 const mockConsole = (t) => {
@@ -106,13 +112,32 @@ test('场景3 提取形态: Given 带端口或大小写或 IPv6 括号的 Host �
 
   const route = webServer.exact.get('/api/x')
   await route.handler({ headers: { host: 'Probe.Jze100.com:8443' } }, {})
-  await route.handler({ headers: { host: '[::1]:3080' } }, {})
+  await route.handler({ headers: { host: '[2001:db8::1]:3080' } }, {})
 
-  // WHATWG hostname 对 IPv6 保留方括号,与闸门 parseAuthority 的比较形态一致
-  assert.deepEqual(trustedHosts, ['probe.jze100.com', '[::1]'])
+  // WHATWG hostname 对 IPv6 保留方括号,与闸门 parseAuthority 的比较形态一致;
+  // loopback([::1] 等)不登记,见场景3b
+  assert.deepEqual(trustedHosts, ['probe.jze100.com', '[2001:db8::1]'])
 })
 
-test('场景4 FIFO 容量: Given 达到 maxHosts When 新 Host 到达 Then 淘汰最早注册者且总量恒定', async (t) => {
+test('场景3b loopback 跳过: Given loopback 形态的 Host 头 When 请求到达 Then 不登记,*.localhost 照常登记(官方闸门仅恒放行精确 loopback)', async (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'localhost:3080' } }, {})
+  await route.handler({ headers: { host: '127.0.0.1' } }, {})
+  await route.handler({ headers: { host: '[::1]:3080' } }, {})
+  assert.deepEqual(trustedHosts, [])
+  assert.equal(output.filter(([, message]) => message.includes('registered host')).length, 0)
+
+  // 官方 isLoopbackHostname 无 *.localhost 分支,该形态需登记才可达
+  await route.handler({ headers: { host: 'sub.localhost' } }, {})
+  assert.deepEqual(trustedHosts, ['sub.localhost'])
+})
+
+test('场景4 LRU 容量: Given 达到 maxHosts When 新 Host 到达 Then 淘汰最久未访问者且总量恒定', async (t) => {
   mockConsole(t)
   const { ctx, webServer, trustedHosts } = createCtx()
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
@@ -126,7 +151,7 @@ test('场景4 FIFO 容量: Given 达到 maxHosts When 新 Host 到达 Then 淘�
   assert.deepEqual(trustedHosts, ['second.test', 'third.test'])
 })
 
-test('场景13 官方条目保护: Given 官方初始条目在场 When FIFO 淘汰 Then 只淘汰本插件注册的条目', async (t) => {
+test('场景13 官方条目保护: Given 官方初始条目在场 When 容量淘汰 Then 只淘汰本插件注册的条目', async (t) => {
   mockConsole(t)
   const { ctx, webServer, trustedHosts } = createCtx({ trustedHosts: ['192.168.1.5'] })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
@@ -284,7 +309,7 @@ test('场景11b 启动横幅空清单: Given 无既有条目 Then 输出"无"占
   assert.ok(output.some(([, message]) => message.includes('既有信任 0 项: 无')))
 })
 
-test('场景14 数组重建: Given webRuntime 提供新数组 When 已注册域名再次到达 Then 重新登记进新数组且队列随代重置', async (t) => {
+test('场景14 数组重建: Given webRuntime 提供新数组 When 已注册域名再次到达 Then 重新登记进新数组且记账随代重置', async (t) => {
   mockConsole(t)
   const { ctx, webServer, holder, trustedHosts } = createCtx()
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
@@ -300,19 +325,21 @@ test('场景14 数组重建: Given webRuntime 提供新数组 When 已注册域�
   await route.handler({ headers: { host: 'first.test' } }, {})
   assert.deepEqual(rebuilt, ['10.0.0.2', 'first.test'])
 
-  // 新一代容量 1 已满:second.test 到达淘汰 first.test,证明队列已随代重置
+  // 新一代容量 1 已满:second.test 到达淘汰 first.test,证明归属记账已随代重置
   await route.handler({ headers: { host: 'second.test' } }, {})
   assert.deepEqual(rebuilt, ['10.0.0.2', 'second.test'])
 })
 
-test('场景15 容量下界: Given maxHosts 小于 1 Then schema 校验拒绝,缺省解出默认 100', () => {
+test('场景15 容量边界: Given maxHosts 越界 Then schema 校验拒绝,下界 1 上界 4096,缺省解出默认 100', () => {
   assert.ok(Config['~standard'].validate({ maxHosts: 0 }).issues)
   assert.ok(Config['~standard'].validate({ maxHosts: -1 }).issues)
   assert.ok(Config['~standard'].validate({ maxHosts: 1.5 }).issues)
+  assert.ok(Config['~standard'].validate({ maxHosts: 4097 }).issues)
+  assert.ok(!Config['~standard'].validate({ maxHosts: 4096 }).issues)
   assert.equal(Config['~standard'].validate({}).value.maxHosts, 100)
 })
 
-test('场景16 淘汰重访: Given 条目被 FIFO 淘汰 When 该域名再次到达 Then 重新注册(不被去重记忆拉黑)', async (t) => {
+test('场景16 淘汰重访: Given 条目被 LRU 淘汰 When 该域名再次到达 Then 重新注册(不被去重记忆拉黑)', async (t) => {
   mockConsole(t)
   const { ctx, webServer, trustedHosts } = createCtx()
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
@@ -337,26 +364,27 @@ test('场景17 换代移交: Given 行级 config 变更触发重跑 apply When �
   const wrappedOnce = route.handler
   await route.handler({ headers: { host: 'first.test' } }, {})
 
-  // 模拟行级 config 变更:先卸载(carrier 置空)再重跑 apply,handler 带标记跳过
-  // 重包装,但共享载体被新代覆盖,旧包装经载体用新容量注册
+  // 模拟行级 config 变更:旧代卸载撤销其注册条目(first.test 被移除),随后
+  // 重跑 apply,handler 带标记跳过重包装,但共享载体被新代覆盖,旧包装经载体用新容量注册
   dispose1()
-  assert.equal(webServer.autoTrustAllRegister('x'), undefined)
+  assert.deepEqual(trustedHosts, [])
+  assert.equal(typeof webServer.autoTrustAllRegister, 'function')
   apply(ctx, { maxHosts: 2 })
   assert.equal(route.handler, wrappedOnce)
 
   await route.handler({ headers: { host: 'second.test' } }, {})
   await route.handler({ headers: { host: 'third.test' } }, {})
-  // 新代只记自身条目:second/third 共 2 条未超容量,first 属上代遗留视同官方条目
-  assert.deepEqual(trustedHosts, ['first.test', 'second.test', 'third.test'])
+  // 新代只记自身条目:second/third 共 2 条未超容量,first 已随旧代撤销
+  assert.deepEqual(trustedHosts, ['second.test', 'third.test'])
 
   await route.handler({ headers: { host: 'fourth.test' } }, {})
-  // 新代容量 2 生效:fourth 淘汰新代最早的 second,遗留条目不参与记账
-  assert.deepEqual(trustedHosts, ['first.test', 'third.test', 'fourth.test'])
+  // 新代容量 2 生效:fourth 淘汰新代最久未访问的 second
+  assert.deepEqual(trustedHosts, ['third.test', 'fourth.test'])
 })
 
 test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 挂事件监听且服务就绪事件到达 Then 自动完成激活', async (t) => {
   const output = mockConsole(t)
-  const { ctx, webServer, holder, trustedHosts, listeners } = createCtx({ webRuntimeReady: false })
+  const { ctx, webServer, holder, trustedHosts, fenceHosts, listeners } = createCtx({ webRuntimeReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
   const handlerBefore = webServer.exact.get('/api/x').handler
 
@@ -379,22 +407,27 @@ test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 挂事件
   await webServer.exact.get('/api/x').handler({ headers: { host: 'late.jze100.com' } }, {})
   assert.deepEqual(holder.current.trustedHosts, ['late.jze100.com'])
   dispose()
-  assert.equal(webServer.autoTrustAllRegister('x'), undefined)
+  // 卸载撤销本代放行:两侧数组的 late 条目均被移除,后续请求经空载体纯透传不再注册
+  assert.deepEqual(holder.current.trustedHosts, [])
+  assert.deepEqual(fenceHosts, [])
 })
 
-test('场景20 卸载断开: Given 已激活 When 卸载 Then 载体置空,后续请求纯透传不再注册', async (t) => {
+test('场景20 卸载撤销: Given 已激活 When 卸载 Then 载体断开且本代注册条目从两侧数组移除,后续请求纯透传', async (t) => {
   mockConsole(t)
-  const { ctx, webServer, trustedHosts } = createCtx()
+  const { ctx, webServer, trustedHosts, fenceHosts } = createCtx()
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
   const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
 
   const route = webServer.exact.get('/api/x')
   await route.handler({ headers: { host: 'before.test' } }, {})
   assert.deepEqual(trustedHosts, ['before.test'])
+  assert.deepEqual(fenceHosts, ['before.test'])
 
   dispose()
+  assert.deepEqual(trustedHosts, [])
+  assert.deepEqual(fenceHosts, [])
   await route.handler({ headers: { host: 'after.test' } }, {})
-  assert.deepEqual(trustedHosts, ['before.test'])
+  assert.deepEqual(trustedHosts, [])
 })
 
 test('场景21 激活幂等: Given 事件路径激活后服务再次发事件 When 重复触发 Then 不重复激活(横幅与载体不换代)', (t) => {
@@ -411,4 +444,234 @@ test('场景21 激活幂等: Given 事件路径激活后服务再次发事件 Wh
 
   assert.equal(webServer.autoTrustAllRegister, carrier)
   assert.equal(output.filter(([, message]) => message.includes('动态信任已启用')).length, 1)
+})
+
+test('场景22 fence 双写: Given connection 服务在场 When 注册发生 Then fence 同步写入且去重不重复', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts, fenceHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'probe.jze100.com' } }, {})
+  await route.handler({ headers: { host: 'probe.jze100.com' } }, {})
+  await route.handler({ headers: {} }, {})
+
+  assert.deepEqual(trustedHosts, ['probe.jze100.com'])
+  assert.deepEqual(fenceHosts, ['probe.jze100.com'])
+})
+
+test('场景23 fence 淘汰同步: Given 容量淘汰发生 When webRuntime 侧移除条目 Then fence 侧同步移除', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts, fenceHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: 1 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  await route.handler({ headers: { host: 'second.test' } }, {})
+
+  assert.deepEqual(trustedHosts, ['second.test'])
+  assert.deepEqual(fenceHosts, ['second.test'])
+})
+
+test('场景24 fence 缺失降级: Given connection 服务缺失 When 注册发生 Then 仅 webRuntime 侧生效且不抛错', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx({ connectionReady: false })
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'probe.jze100.com' } }, {})
+
+  assert.deepEqual(trustedHosts, ['probe.jze100.com'])
+})
+
+test('场景25 LRU 续期: Given 容量已满 When 最早注册者被再次访问 Then 新条目淘汰的是最久未访问者', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: 2 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  await route.handler({ headers: { host: 'second.test' } }, {})
+  // first 被再次访问完成续期:最久未访问者变为 second
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  await route.handler({ headers: { host: 'third.test' } }, {})
+
+  assert.deepEqual(trustedHosts, ['first.test', 'third.test'])
+})
+
+test('场景26 官方条目命中: Given 请求 Host 等于官方既有条目 When 注册发生 Then 不入记账不被淘汰不重复输出', async (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx({ trustedHosts: ['lan.test'] })
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: 1 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'lan.test' } }, {})
+  assert.deepEqual(trustedHosts, ['lan.test'])
+  assert.equal(output.filter(([, message]) => message.includes('registered host')).length, 0)
+
+  await route.handler({ headers: { host: 'a.test' } }, {})
+  assert.deepEqual(trustedHosts, ['lan.test', 'a.test'])
+  await route.handler({ headers: { host: 'b.test' } }, {})
+  assert.deepEqual(trustedHosts, ['lan.test', 'b.test'])
+
+  await route.handler({ headers: { host: 'lan.test' } }, {})
+  assert.deepEqual(trustedHosts, ['lan.test', 'b.test'])
+})
+
+test('场景27 注册失败限频: Given 载体抛错 When 请求到达 Then 原 handler 照常执行且告警恰一次,恢复后复位再告警', async (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  const calls = []
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async (req) => { calls.push(req) } })
+  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  webServer.autoTrustAllRegister = () => { throw new Error('boom') }
+  await route.handler({ headers: { host: 'a.test' } }, {})
+  await route.handler({ headers: { host: 'a.test' } }, {})
+  assert.equal(calls.length, 2)
+  assert.deepEqual(trustedHosts, [])
+  const warnBoom = output.filter(([, message]) => message.includes('注册调用失败'))
+  assert.equal(warnBoom.length, 1)
+  assert.ok(warnBoom[0][1].includes('boom'))
+
+  // 一次成功即复位:再次失败恢复告警
+  const seen = []
+  webServer.autoTrustAllRegister = (req) => { seen.push(req) }
+  await route.handler({ headers: { host: 'a.test' } }, {})
+  assert.equal(seen.length, 1)
+  webServer.autoTrustAllRegister = () => { throw new Error('boom2') }
+  await route.handler({ headers: { host: 'a.test' } }, {})
+  assert.equal(output.filter(([, message]) => message.includes('注册调用失败')).length, 2)
+})
+
+test('场景28 卸载身份防覆盖: Given 新代 apply 先于旧代 dispose When 旧代卸载 Then 新代载体不受影响,新代卸载才断开', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose1 = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+  const dispose2 = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  dispose1()
+  // 旧代 dispose 不能置空新代载体:注册照常
+  await route.handler({ headers: { host: 'gen2.test' } }, {})
+  assert.deepEqual(trustedHosts, ['gen2.test'])
+
+  dispose2()
+  await route.handler({ headers: { host: 'late.test' } }, {})
+  assert.deepEqual(trustedHosts, [])
+})
+
+test('场景29 路由表形态守卫: Given 路由表非 Map 形态 When 激活 Then 告警后干净停用,不抛错不包装', (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const handlerBefore = webServer.exact.get('/api/x').handler
+  webServer.exact = undefined
+
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  assert.ok(output.some(([, message]) => message.includes('路由表形态不符')))
+  assert.equal(webServer.autoTrustAllRegister, undefined)
+  assert.equal(typeof webServer.register, 'function')
+  dispose()
+})
+
+test('场景30 其他服务名不激活: Given internal/service 携带其他服务名 When 事件到达 Then 不激活,webRuntime 事件才激活', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, holder, listeners } = createCtx({ webRuntimeReady: false })
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const handlerBefore = webServer.exact.get('/api/x').handler
+  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const [, listener] = listeners[0]
+  // webRuntime 先就绪:此时能拦住激活的只剩服务名过滤,断言不依赖就绪守卫
+  holder.current = { trustedHosts: [] }
+  listener('settings')
+  assert.equal(webServer.autoTrustAllRegister, undefined)
+  assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
+
+  listener('webRuntime')
+  assert.notEqual(webServer.exact.get('/api/x').handler, handlerBefore)
+  assert.equal(typeof webServer.autoTrustAllRegister, 'function')
+})
+
+test('场景31 未就绪即卸载: Given 未激活时卸载 When webRuntime 就绪事件迟到 Then 不再激活', async (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, holder, listeners } = createCtx({ webRuntimeReady: false })
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const handlerBefore = webServer.exact.get('/api/x').handler
+
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+  dispose()
+
+  holder.current = { trustedHosts: [] }
+  const [, listener] = listeners[0]
+  listener('webRuntime')
+  assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
+  assert.equal(webServer.autoTrustAllRegister, undefined)
+  assert.equal(output.filter(([, message]) => message.includes('动态信任已启用')).length, 0)
+})
+
+test('场景32 外部移除防御: Given 归属条目被第三方从信任数组移除 When 容量淘汰触发 Then 不抛错且注册照常', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: 1 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  trustedHosts.splice(trustedHosts.indexOf('first.test'), 1)
+  await route.handler({ headers: { host: 'second.test' } }, {})
+
+  assert.deepEqual(trustedHosts, ['second.test'])
+})
+
+test('场景33 淘汰日志: Given 容量淘汰发生 Then 输出 evicted 审计行(前缀与域名全等)', async (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: 1 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  await route.handler({ headers: { host: 'second.test' } }, {})
+
+  assert.deepEqual(trustedHosts, ['second.test'])
+  assert.ok(output.some(([, message]) => message === 'auto-trust-all: evicted host first.test'))
+})
+
+test('场景34 重叠代撤销守卫: Given 新代 apply 先于旧代 dispose 且窗口流量命中 When 旧代卸载 Then 条目不误删,新代记账连续', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts, fenceHosts } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose1 = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'x.test' } }, {})
+  assert.deepEqual(trustedHosts, ['x.test'])
+
+  // 新一代接管载体后,窗口流量把 x.test 记入新代(视同官方条目)
+  const dispose2 = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+  await route.handler({ headers: { host: 'x.test' } }, {})
+  assert.deepEqual(trustedHosts, ['x.test'])
+  assert.deepEqual(fenceHosts, ['x.test'])
+
+  // 旧代 dispose 载体身份不符:跳过撤销,条目留存由新代吸收
+  dispose1()
+  assert.deepEqual(trustedHosts, ['x.test'])
+  assert.deepEqual(fenceHosts, ['x.test'])
+  await route.handler({ headers: { host: 'x.test' } }, {})
+  assert.deepEqual(trustedHosts, ['x.test'])
+
+  // 新代卸载只撤销自身 owned 条目:x.test 已被新代视同官方遗留,留存至重启
+  dispose2()
+  assert.deepEqual(trustedHosts, ['x.test'])
+  assert.deepEqual(fenceHosts, ['x.test'])
 })

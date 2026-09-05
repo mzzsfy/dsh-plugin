@@ -18,7 +18,8 @@ test('场景10 patch 形态: Given bundle patch Then webserver 行 name 防御�
 })
 
 test('场景10 镜像契约: config 整体替换要求官方行全部键在场', () => {
-  // 与官方 dsh-web-app bundle 的 webserver config 逐键镜像,官方增删键时此处失败
+  // 本地镜像形态快照:与文件头声明一致,官方增删键不会在此失败,
+  // dsh 升级后须用 `dsh web --dump-default-config` 对照官方 webserver 行人工核对
   assert.match(patchText, /port: !!js ctx\.webStartup\.port \?\? 3080/)
   assert.match(patchText, /compression: gzip/)
   assert.match(patchText, /compressionLevel: 1/)
