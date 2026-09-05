@@ -73,6 +73,8 @@ const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
 const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
+// 重启等待总时长:超时说明宿主未被进程管理器拉起或退出失败,退出等待态转人工处理
+const RESTART_TIMEOUT_MS = 30 * 1000
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
 
 // 判定常量与 host 侧 core.mjs 保持一致:client 半区无法 import ESM,
@@ -328,14 +330,22 @@ function MaintainApp() {
   // LOGIC-END shouldReloadAfterRestart
 
   // 重启确认后轮询状态:退出窗口的请求失败是预期中间态,静默记入 ref 不展示错误;
-  // 失联后恢复或宿主 pid 变化(快速重启零失联)即宿主已重启,整页刷新以加载新版本。
+  // 失联后恢复或宿主 pid 变化(快速重启零失联)即宿主已重启,整页刷新以加载新版本;
+  // 总时长超限说明宿主未被拉起或退出失败,退出等待态转人工处理
   useEffect(() => {
     if (!restarting) {
       restartLostRef.current = false
       restartPidRef.current = null
       return
     }
+    const deadline = Date.now() + RESTART_TIMEOUT_MS
     const timer = setInterval(() => {
+      if (Date.now() >= deadline) {
+        clearInterval(timer)
+        setRestarting(false)
+        setError('重启未在 ' + RESTART_TIMEOUT_MS / 1000 + ' 秒内完成,宿主可能未被拉起,请检查进程管理器后手动刷新')
+        return
+      }
       api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) })
         .then((next) => {
           if (shouldReloadAfterRestart({ lost: restartLostRef.current, pidBefore: restartPidRef.current, pidAfter: next ? next.pid : null })) {
@@ -456,9 +466,11 @@ function MaintainApp() {
         setRestarting(true)
         return post(RESTART_URL)
       })
-      .catch((restartError) => {
-        setRestarting(false)
-        setError('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)))
+      .catch(() => {
+        // 请求失败大概率是宿主退出窗口的连接切断,视为失联并入等待态轮询,
+        // 由恢复探测判定成败,不在此误报"重启失败"
+        restartLostRef.current = true
+        setRestarting(true)
       })
       .then(() => { restartPendingRef.current = false })
   }

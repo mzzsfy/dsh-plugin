@@ -5,9 +5,8 @@
 export const STROKE_ATTRS = 'fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"'
 export const ATTR_MARK = 'data-navic'
 
-export function svgOf(inner, cls) {
-  const iconCls = cls === undefined ? 'VOzbGW_navIcon' : cls
-  return '<svg ' + ATTR_MARK + '="1" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="' + iconCls + '" aria-hidden="true">' + inner + '</svg>'
+export function svgOf(inner) {
+  return '<svg ' + ATTR_MARK + '="1" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="VOzbGW_navIcon" aria-hidden="true">' + inner + '</svg>'
 }
 
 export function pathOf(d) {
@@ -122,12 +121,20 @@ export const GLYPHS = {
   db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
 }
 
-// 声明值解析:svg 字符串原样采用,glyph 名称查表,非法值返回 undefined。
+// 声明值解析与安全门:svg 字符串须完整开标签且不带事件属性/外联/内嵌载体,
+// 超长拒绝;glyph 名称查表(原型链成员经 typeof 收口不可能混入);非法值返回 undefined。
+export const SVG_MAX_CHARS = 4 * 1024
 export function resolveIcon(value) {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
-  if (trimmed.startsWith('<svg')) return trimmed
-  return GLYPHS[trimmed]
+  if (
+    trimmed.length <= SVG_MAX_CHARS
+    && /^<svg[\s>]/.test(trimmed)
+    && !/\son[a-z]+\s*=/i.test(trimmed)
+    && !/<foreignObject/i.test(trimmed)
+    && !/javascript:/i.test(trimmed)
+  ) return trimmed
+  return typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
 }
 
 // 官方默认齿轮首段路径前缀,用于识别"未装饰"单元格。
@@ -181,6 +188,7 @@ export function themedIcon(name) {
 }
 
 // 市场卡片头像槽决策:img(作者头像)整体换插件图标;div(字母色块)清空后内嵌。
+// 记账值 = 插件名,换名重贴由该比较驱动。
 export function decideAvatar(av, name) {
   if (name === '' || av.dataset.navic === name) return null
   return { name, html: themedIcon(name), old: av }
@@ -188,8 +196,13 @@ export function decideAvatar(av, name) {
 
 export function applyAvatar(av, decision) {
   if (av.tagName === 'IMG') {
+    // IMG 不移除(React 持引用,移除后 reconcile 复活会双图):隐藏并记账,
+    // 注入图标跟随其后;换名重贴时先移除上次注入的图标防重复
+    av.hidden = true
+    av.dataset.navic = decision.name
+    const stale = av.nextElementSibling
+    if (stale !== null && stale.dataset.navic === '1') stale.remove()
     av.insertAdjacentHTML('afterend', decision.html)
-    av.remove()
     return
   }
   av.textContent = ''
@@ -212,25 +225,27 @@ export const ICONS = {
 
 // 外部声明注册表:其他插件经 window.__navicIcons.register({label: icon}) 声明,
 // 键为分区 label 或插件名,值为 16×16 svg 字符串或内置 glyph 名。声明优先于
-// 内置映射与关键词推导。污染面收敛在 window.__navicIcons 单一命名空间。
-export const DECLARED_ICONS = {}
+// 内置映射与关键词推导。无原型隔离时 label 恰为 constructor/toString 等会查到
+// 继承成员;污染面收敛在 window.__navicIcons 单一命名空间。
+export const DECLARED_ICONS = Object.create(null)
 
 // 单元格替换判定:先看记账与现役图标;label 有声明或内置映射直接换,
-// 未映射时仅当现役图标是默认齿轮,才按 themedIcon(声明→关键词→哈希)兜底,
-// 官方自带图形(模型/插件/Agent 预设/使用统计)一律不动。
-// 现役图标是本插件所贴且记账 label 未变时跳过;label 变化(如语言切换)则按新 label 重贴。
-export function decide(cell, query = (cell, sel) => cell.querySelector(sel)) {
-  const labelNode = query(cell, '.VOzbGW_navLabel')
+// 未映射时官方原生图形(非齿轮且非本插件所贴)一律不动,齿轮与本插件所贴
+// 按 themedIcon(声明→关键词→哈希)兜底。
+// 幂等判定与注入内容解耦:记账 label 匹配且现役图标非官方齿轮即视为已处理,
+// 外部声明内容是否自带标记不影响短路;label 变化(如语言切换)则按新 label 重贴。
+export function decide(cell) {
+  const labelNode = cell.querySelector('.VOzbGW_navLabel')
   if (labelNode === null) return null
-  const label = labelNode.textContent || ''
-  if (cell.dataset.navic === label && query(cell, 'svg[' + ATTR_MARK + ']')) return null
-  const old = query(cell, 'svg')
+  const label = (labelNode.textContent || '').trim()
+  if (label === '') return null
+  const old = cell.querySelector('svg')
   if (old === null) return null
-  if (old.dataset.navic === '1' && cell.dataset.navic === label) return null
+  if (cell.dataset.navic === label && !isGear(old)) return null
   let html = resolveIcon(DECLARED_ICONS[label])
   if (html === undefined) html = ICONS[label]
   if (html === undefined) {
-    if (!isGear(old)) return null
+    if (!isGear(old) && old.dataset.navic !== '1') return null
     html = themedIcon(label)
   }
   return { label, html, old }

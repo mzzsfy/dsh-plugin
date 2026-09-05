@@ -167,6 +167,11 @@ test('providerInfo / listModels / resolveModel', async () => {
   assert.equal(resolved.context.contextWindow, 128000)
 })
 
+test('imageRequestPricing 声明无 provider 侧定价(官方基类默认同构,缺失即宿主计量 TypeError)', () => {
+  const adapter = createGatewayAdapter(makeRoutes(baseProfile()), async () => fakeProtocol([]))
+  assert.equal(adapter.imageRequestPricing('new-api', 'auto'), undefined)
+})
+
 function baseProfile(overrides = {}) {
   return {
     api: 'anthropic-messages',
