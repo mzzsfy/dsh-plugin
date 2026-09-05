@@ -139,3 +139,54 @@ test('页内提示通道独立开关:关闭后投影事件不再弹页内提示'
   // 完成标记已写:事件被认领消费,仅通道被关
   assert.notEqual(storage.getItem('turn-notify:done:u1'), null)
 })
+
+test('分类通知开关串行提交:连点按序入队,host 终值为最后一次点击', async () => {
+  const calls = []
+  const mod = loadClient({ storage: new FakeStorage(), payload: { units: [], soundMapping: {} } })
+  const apiImpl = async (path, init) => {
+    if (init.method === 'POST') {
+      const checked = JSON.parse(init.body).enabled
+      await new Promise((resolve) => { setTimeout(resolve, calls.length === 0 ? 30 : 0) })
+      // 首个请求最慢:host 到达序即串行化证明,无队列时后发请求将先到
+      calls.push(checked)
+      return {}
+    }
+    return {}
+  }
+  const noop = () => {}
+  mod.__test.submitCategoryToggle('completed', false, { apiImpl, onConfig: noop, onError: noop })
+  mod.__test.submitCategoryToggle('completed', true, { apiImpl, onConfig: noop, onError: noop })
+  mod.__test.submitCategoryToggle('completed', false, { apiImpl, onConfig: noop, onError: noop })
+  await mod.__test.submitCategoryToggle('completed', true, { apiImpl, onConfig: noop, onError: noop })
+  assert.deepEqual(calls, [
+    { completed: false },
+    { completed: true },
+    { completed: false },
+    { completed: true },
+  ])
+})
+
+test('分类通知开关提交失败:报错并以权威配置纠偏', async () => {
+  let failing = true
+  const gets = []
+  const errors = []
+  const configs = []
+  const apiImpl = async (path, init) => {
+    if (init && init.method === 'POST') {
+      if (failing) throw new Error('boom')
+      return {}
+    }
+    gets.push(path)
+    return { enabled: { completed: true } }
+  }
+  const mod = loadClient({ storage: new FakeStorage(), payload: { units: [], soundMapping: {} } })
+  await mod.__test.submitCategoryToggle('completed', true, {
+    apiImpl,
+    onConfig: (res) => configs.push(res),
+    onError: (text) => errors.push(text),
+  })
+  assert.equal(errors.length, 1)
+  assert.ok(errors[0].indexOf('boom') >= 0)
+  assert.deepEqual(gets, ['/api/turn-notify/config'])
+  assert.deepEqual(configs, [{ enabled: { completed: true } }])
+})

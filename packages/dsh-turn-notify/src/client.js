@@ -565,6 +565,27 @@ window.__ModuleLoader__.load({
       if (typeof timer.unref === 'function') timer.unref()
     }
 
+    // 分类通知开关串行提交链:请求按点击顺序入队,host 终值恒为最后一次点击;
+    // 乐观回填由调用方先行(连点取反基点恒新),失败时拉取权威配置纠偏收敛 UI 与 host
+    let categoryToggleChain = Promise.resolve()
+    function submitCategoryToggle(category, checked, { apiImpl, onConfig, onError }) {
+      const run = categoryToggleChain.catch(() => {}).then(async () => {
+        try {
+          onConfig(await apiImpl('/api/turn-notify/config', {
+            method: 'POST',
+            body: JSON.stringify({ enabled: { [category]: checked } }),
+          }))
+        } catch (error) {
+          onError('开关失败:' + (error && error.message ? error.message : String(error)))
+          try {
+            onConfig(await apiImpl('/api/turn-notify/config'))
+          } catch { /* 权威配置拉取失败则保持乐观值,由后续操作收敛 */ }
+        }
+      })
+      categoryToggleChain = run
+      return run
+    }
+
     // ---- 设置面板 ----
 
     const PERMISSION_LABELS = { granted: '已授权', denied: '已拒绝', default: '未授权' }
@@ -896,17 +917,17 @@ window.__ModuleLoader__.load({
         } finally { setBusy(false) }
       }
 
-      async function toggleCategory(category, checked) {
-        try {
-          const res = await api('/api/turn-notify/config', {
-            method: 'POST',
-            body: JSON.stringify({ enabled: { [category]: checked } }),
-          })
-          setConfig({ ...DEFAULT_CONFIG, ...res })
-          if (res.soundMapping) setMappingState(res.soundMapping)
-        } catch (error) {
-          patch('开关失败:' + (error && error.message ? error.message : String(error)), 'error')
-        }
+      // 分类通知开关:乐观回填为连点提供正确取反基点,提交交由模块级串行链收敛
+      function toggleCategory(category, checked) {
+        setConfig((prev) => ({ ...prev, enabled: { ...prev.enabled, [category]: checked } }))
+        submitCategoryToggle(category, checked, {
+          apiImpl: api,
+          onConfig: (res) => {
+            setConfig({ ...DEFAULT_CONFIG, ...res })
+            if (res.soundMapping) setMappingState(res.soundMapping)
+          },
+          onError: (text) => patch(text, 'error'),
+        })
       }
 
       async function requestPermission() {
@@ -1419,7 +1440,7 @@ window.__ModuleLoader__.load({
           ))
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方
-      __test: { poll, pollOnce, storageState, announcedIds, toastStack: () => toastStack },
+      __test: { poll, pollOnce, storageState, announcedIds, toastStack: () => toastStack, submitCategoryToggle },
     }
 
     // 通知栈:portal 直挂 body 脱离应用 frame 叠层,否则被设置全屏层(z=1000)遮盖
