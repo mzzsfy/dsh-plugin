@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-llm-pi-gateway",
   "description": "NewAPI 等 LLM 网关接入:跨协议会话粘性标记,提升网关侧 prompt 缓存命中,compat 全开放",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
