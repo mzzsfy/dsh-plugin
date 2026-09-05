@@ -63,7 +63,7 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 ## 架构与依赖
 
 - Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings);需要 DSH 提供 `webServer` 服务与 `settings` 服务(轮询间隔持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
-- Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18
+- Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;操作反馈(保存 / 查询结果)经统一浮出通知 `@mzzsfy/dsh-toast` 展示,依赖缺失时降级 `console.warn`
 - 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/spark.mjs`):无 IO 数据变换,`npm test` 覆盖解析、退避分频、快照留存与 SVG 点位
 
 ## 安全提示
