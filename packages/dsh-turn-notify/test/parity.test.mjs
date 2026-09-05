@@ -10,6 +10,8 @@ import { dirname, join } from 'node:path'
 import {
   decideClaim as coreDecideClaim,
   resolveSound as coreResolveSound,
+  mergeMapping as coreMergeMapping,
+  deadCustomIds as coreDeadCustomIds,
   chooseChannels as coreChooseChannels,
   parseVolume as coreParseVolume,
   imTargetKeyOf as coreImTargetKeyOf,
@@ -39,7 +41,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
+      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SYSTEM, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
   )
   return factory()
 }
@@ -106,6 +108,40 @@ function defineSoundScenarios(prefix, resolve) {
 
 defineSoundScenarios('[core.mjs resolveSound] ', coreResolveSound)
 defineSoundScenarios('[client.js resolveSound] ', clientResolveSound)
+
+// 双作用域映射合并对照:覆盖语义、缺键回落、空串覆盖与空入参容错。
+function defineMergeScenarios(prefix, merge) {
+  test(prefix + '映射合并:本地覆盖 / 缺键回落 / 空串覆盖 / 空入参容错', () => {
+    assert.deepEqual(merge({ completed: 'a', error: 'b' }, { completed: 'c' }), { completed: 'c', error: 'b' })
+    assert.deepEqual(merge({ completed: 'a' }, {}), { completed: 'a' })
+    assert.deepEqual(merge({ completed: 'a' }, { completed: '' }), { completed: '' })
+    assert.deepEqual(merge(null, { completed: 'a' }), { completed: 'a' })
+    assert.deepEqual(merge({ completed: 'a' }, null), { completed: 'a' })
+    assert.deepEqual(merge(undefined, undefined), {})
+    const base = { completed: 'a' }
+    assert.deepEqual(merge(base, { completed: 'b' }), { completed: 'b' })
+    assert.deepEqual(base, { completed: 'a' })
+  })
+}
+
+defineMergeScenarios('[core.mjs mergeMapping] ', coreMergeMapping)
+defineMergeScenarios('[client.js mergeMapping] ', client.mergeMapping)
+
+// 死链识别对照:非内置音名且非已上传 id 即死链,去重按首次出现,空值与非字符串跳过。
+function defineDeadScenarios(prefix, dead) {
+  test(prefix + '死链识别:死链收集 / 内置与已上传豁免 / 去重保序 / 空值与非字符串跳过 / 列表容错', () => {
+    const mapping = { completed: 'gone-2', error: 'bell', interrupted: 'gone-1', approval: '', ask: 'gone-2', 'max-tokens': 'snd-1' }
+    assert.deepEqual(dead(mapping, ['snd-1']), ['gone-2', 'gone-1'])
+    assert.deepEqual(dead({ completed: 'bell' }, []), [])
+    assert.deepEqual(dead({}, ['snd-1']), [])
+    assert.deepEqual(dead(null, []), [])
+    assert.deepEqual(dead({ completed: 7, error: null, ask: { id: 'x' } }, ['snd-1']), [])
+    assert.deepEqual(dead({ completed: 'gone-1' }, null), ['gone-1'])
+  })
+}
+
+defineDeadScenarios('[core.mjs deadCustomIds] ', coreDeadCustomIds)
+defineDeadScenarios('[client.js deadCustomIds] ', client.deadCustomIds)
 
 // 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
 function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, systemEnabled, idleMs, idleThresholdMs }) {
