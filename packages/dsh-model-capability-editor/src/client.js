@@ -36,6 +36,21 @@ const CSS = [
   '.mce-model__head { font-weight:600; }',
   '.mce-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }',
   '.mce-check { display:inline-flex; align-items:center; gap:3px; font-size:12px; }',
+  // 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现
+  '.mce-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
+  '.mce-switch { display:inline-flex; align-items:center; cursor:pointer; }',
+  '.mce-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box; flex:none;',
+  '  background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.35));',
+  '  border:1px solid var(--dsw-alias-border-l2, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
+  '  transition:background 0.15s, border-color 0.15s; }',
+  '.mce-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+  '  background:var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6));',
+  '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
+  '.mce-switch:not(:has(input[type="checkbox"]:disabled)):hover .mce-switch__track { border-color:var(--dsw-alias-brand-primary, #4d6bfe); }',
+  '.mce-switch input[type="checkbox"]:checked + .mce-switch__track { background:var(--dsw-alias-brand-primary, #4d6bfe); border-color:var(--dsw-alias-brand-primary, #4d6bfe); }',
+  '.mce-switch input[type="checkbox"]:checked + .mce-switch__track .mce-switch__thumb { left:17px; background:var(--dsw-alias-bg-base, #fff); }',
+  '.mce-switch input[type="checkbox"]:focus-visible + .mce-switch__track { outline:2px solid var(--dsw-alias-brand-primary, #4d6bfe); outline-offset:1px; }',
+  '.mce-switch input[type="checkbox"]:disabled + .mce-switch__track { opacity:0.45; cursor:default; }',
   '.mce-label { color:var(--dsw-alias-label-secondary); font-size:12px; }',
   '.mce-notice { font-size:12px; padding:4px 8px; border-radius:6px;',
   '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
@@ -64,6 +79,14 @@ const CSS = [
 function h(type, props) {
   const children = Array.prototype.slice.call(arguments, 2)
   return React.createElement.apply(React, [type, props || null].concat(children))
+}
+
+// 开关的 checkbox + 轨道对,checkbox 语义保留仅视觉隐藏
+function switchToggle(props) {
+  return [
+    h('input', { type: 'checkbox', ...props }),
+    h('span', { className: 'mce-switch__track' }, h('span', { className: 'mce-switch__thumb' })),
+  ]
 }
 
 /* LOGIC-BEGIN */
@@ -322,8 +345,8 @@ function LevelEditor(props) {
     props.onChange({ ...draft, spellings: { ...draft.spellings, [level]: value } })
   }
   return h('div', { className: 'mce-row' },
-    EFFORT_LEVELS.map((level) => h('label', { className: 'mce-check', key: level },
-      h('input', { type: 'checkbox', disabled, checked: draft.checked[level] === true, onChange: () => toggle(level) }),
+    EFFORT_LEVELS.map((level) => h('label', { className: 'mce-check mce-switch', key: level },
+      ...switchToggle({ disabled, checked: draft.checked[level] === true, onChange: () => toggle(level) }),
       level,
       h('input', {
         className: 'mce-text',
@@ -623,9 +646,8 @@ function RowEditor(props) {
     h('div', { className: 'mce-inline__title' }, '模型能力(思考档位 / 输入模态)'),
     h('div', { className: 'mce-inline__grid' },
       EFFORT_LEVELS.map((level) => h('div', { className: 'mce-inline__field', key: level },
-        h('label', null,
-          h('input', {
-            type: 'checkbox',
+        h('label', { className: 'mce-switch' },
+          ...switchToggle({
             disabled: saving,
             checked: draft.checked[level] === true,
             onChange: () => editDraft({ checked: { ...draft.checked, [level]: draft.checked[level] !== true } }),

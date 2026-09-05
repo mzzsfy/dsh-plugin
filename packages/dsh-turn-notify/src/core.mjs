@@ -200,15 +200,17 @@ export function decideClaim({ stored, done, now, windowId, lockTtlMs = CLAIM_LOC
 // 用户行动空闲满此时长视为离开:聚焦静默不再适用,通知全通道齐发。
 export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 
-// 发声通道判定:页内提示与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
+// 发声通道判定:页内提示、提示音与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
+// 提示音另受分类配置约束:soundCategories 中该分类显式 false 即静音,缺省键与空分类放行。
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
 // idleMs 为距上次用户行动的时长,满阈值视为离开,等效未聚焦。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS }) {
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS }) {
   const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
   const quiet = hasFocus && focusQuiet && !idleAway
+  const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
   return {
     toast: toastEnabled,
-    sound: !quiet,
+    sound: !quiet && soundEnabled && !categoryMuted,
     system: !quiet && systemEnabled && permission === 'granted',
     blink: !quiet && systemEnabled && permission !== 'granted',
   }
@@ -224,14 +226,37 @@ export function resolveSound({ category, mapping, uploadedIds }) {
   return { kind: 'builtin', name: DEFAULT_TONES[category] }
 }
 
-// 音效名长度上限:供文件名与列表展示,超长截断提示不佳,直接拒绝。
+// 映射双作用域合并:全局为底,本地键覆盖(空串=显式内置默认,同样覆盖);
+// 两参均容错空值,返回新对象不改入参。
+export function mergeMapping(globalMapping, localMapping) {
+  const merged = {}
+  for (const key of Object.keys(globalMapping || {})) merged[key] = globalMapping[key]
+  for (const key of Object.keys(localMapping || {})) merged[key] = localMapping[key]
+  return merged
+}
+
+// 死链识别:映射值既非内置音名也非已上传 id 即失效引用,去重并按首次出现排序,
+// 供面板呈现死链与发声回退归因。
+export function deadCustomIds(mapping, uploadedIds) {
+  const uploaded = uploadedIds || []
+  const dead = []
+  for (const value of Object.values(mapping || {})) {
+    if (typeof value !== 'string' || value.length === 0) continue
+    if (Object.prototype.hasOwnProperty.call(BUILTIN_TONES, value)) continue
+    if (uploaded.indexOf(value) >= 0) continue
+    if (dead.indexOf(value) < 0) dead.push(value)
+  }
+  return dead
+}
+
+// 音效展示名长度上限:超长截断提示不佳,直接拒绝。
 export const SOUND_NAME_MAX_CHARS = 64
 
-// 音效文件名黑名单:分隔符防路径穿越,点防 listSounds 以首点分割 id/ext 错位,
-// 控制字符与 Windows 非法字符防落盘失败。
+// 展示名黑名单:分隔符与点防注入索引键或文件名形态,控制字符与 Windows 非法字符防后续落盘复用失败。
 const SOUND_NAME_FORBIDDEN = /[\\/:*?"<>|.\u0000-\u001f]/
 
-// 音效名校验:trim 归一化随结果返回;与内置音色重名会污染映射 id 命名空间,一并拒绝。
+// 展示名校验:trim 归一化随结果返回;名称仅存展示名索引,不进文件名;
+// 与内置音色重名会污染映射 id 命名空间,一并拒绝。
 export function validateSoundName(rawName) {
   const name = String(rawName ?? '').trim()
   if (name.length === 0) return { ok: false, reason: '名称不能为空' }
@@ -420,7 +445,7 @@ export function imBoundBotIds(list) {
 // 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'sessionHighlight']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -473,6 +498,10 @@ export function validateConfigPatch(patch) {
     if (typeof patch.suppressSubagentWake !== 'boolean') return { ok: false, reason: 'suppressSubagentWake 须为布尔' }
     next.suppressSubagentWake = patch.suppressSubagentWake
   }
+  if ('sessionHighlight' in patch) {
+    if (typeof patch.sessionHighlight !== 'boolean') return { ok: false, reason: 'sessionHighlight 须为布尔' }
+    next.sessionHighlight = patch.sessionHighlight
+  }
   if ('enabled' in patch) {
     const enabled = patch.enabled
     if (enabled === null || typeof enabled !== 'object' || Array.isArray(enabled)) return { ok: false, reason: 'enabled 须为对象' }
@@ -504,6 +533,7 @@ export function resolvedConfig(settings) {
     minTurnDurationMs: duration,
     rootsOnly: source.rootsOnly !== false,
     suppressSubagentWake: source.suppressSubagentWake !== false,
+    sessionHighlight: source.sessionHighlight !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
@@ -517,6 +547,7 @@ export function publicConfig(settings) {
     minTurnDurationMs: resolved.minTurnDurationMs,
     rootsOnly: resolved.rootsOnly,
     suppressSubagentWake: resolved.suppressSubagentWake,
+    sessionHighlight: resolved.sessionHighlight,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,

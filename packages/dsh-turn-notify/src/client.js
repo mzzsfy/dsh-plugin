@@ -2,18 +2,27 @@
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 由 DSH client runtime 模块表解析。
 // 认领锁/完成标记走 localStorage(非 secure context 也可用的唯一跨窗口原语)。
+// 页内通知通道经公共依赖 @mzzsfy/dsh-toast 展示,本包不自带通知 UI。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-turn-notify',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useSyncExternalStore } = React
-    const { createPortal } = require('react-dom')
+    const { useState, useEffect } = React
+
+    // 通知出口:公共依赖 @mzzsfy/dsh-toast,可选消费——共享依赖包的模块表注入
+    // 全仓收敛到唯一权威消费方(session-manager),本插件不再代挂占位条目;
+    // 权威方未安装时模块表缺失,干净禁用 toast 通道(其余通道不受影响)
+    let toast = null
+    try {
+      toast = require('@mzzsfy/dsh-toast/client').show
+    } catch {
+      // 模块表无 toast → 页内通知通道置空,调用点统一走 toast 判空
+    }
 
     const POLL_MS = 2 * 1000
+    // 页内通知展示期,经公共依赖 holdMs 传入
     const TOAST_MS = 6 * 1000
-    // 页内通知栈上限:突发事件截断最旧条目
-    const TOAST_MAX = 4
     const BLINK_MS = 1 * 1000
     // 系统通知测试延迟:浏览器对聚焦窗口抑制系统弹窗,倒计时供用户切出窗口
     const SYSTEM_TEST_DELAY_MS = 5 * 1000
@@ -85,7 +94,13 @@ window.__ModuleLoader__.load({
     const KEY_VOLUME = 'turn-notify:volume'
     const KEY_DEGRADE_HINT = 'turn-notify:degrade-hint'
     const KEY_TOAST = 'turn-notify:toast'
+    const KEY_SOUND = 'turn-notify:sound'
     const KEY_SYSTEM = 'turn-notify:system'
+    // 分类提示音配置:JSON 对象,缺省键=出声,显式 false=该分类静音
+    const KEY_SOUND_CATEGORIES = 'turn-notify:sound-categories'
+    // 映射双作用域:本地映射与开关均存本机浏览器,音效库保持 host 共享
+    const KEY_MAPPING = 'turn-notify:mapping'
+    const KEY_MAPPING_LOCAL = 'turn-notify:mapping-local'
     // 轮询单例令牌:HMR/插件重载重建模块闭包时防轮询线程累积
     const KEY_POLL_TOKEN = 'turn-notify:polling'
 
@@ -131,6 +146,29 @@ window.__ModuleLoader__.load({
         window.localStorage.removeItem(key)
       } catch {
         storageState.broken = true
+      }
+    }
+
+    // 本地映射读取:JSON 解析失败或形态非对象回空对象
+    function readLocalMapping() {
+      try {
+        const parsed = JSON.parse(localGet(KEY_MAPPING))
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    // 本地作用域开关:仅显式开启生效,缺省为全局
+    const localMappingEnabled = () => localGet(KEY_MAPPING_LOCAL) === '1'
+
+    // 分类提示音读取:JSON 解析失败或形态非对象回空对象(全分类出声)
+    function readSoundCategories() {
+      try {
+        const parsed = JSON.parse(localGet(KEY_SOUND_CATEGORIES))
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
       }
     }
 
@@ -191,17 +229,40 @@ window.__ModuleLoader__.load({
       return { kind: 'builtin', name: DEFAULT_TONES[category] }
     }
 
+    // 映射双作用域合并:与 core.mjs mergeMapping 行为一致,parity 测试锁定
+    function mergeMapping(globalMapping, localMapping) {
+      const merged = {}
+      for (const key of Object.keys(globalMapping || {})) merged[key] = globalMapping[key]
+      for (const key of Object.keys(localMapping || {})) merged[key] = localMapping[key]
+      return merged
+    }
+
+    // 死链识别:与 core.mjs deadCustomIds 行为一致,parity 测试锁定
+    function deadCustomIds(mapping, uploadedIds) {
+      const uploaded = uploadedIds || []
+      const dead = []
+      for (const value of Object.values(mapping || {})) {
+        if (typeof value !== 'string' || value.length === 0) continue
+        if (Object.prototype.hasOwnProperty.call(TONE_LABELS, value)) continue
+        if (uploaded.indexOf(value) >= 0) continue
+        if (dead.indexOf(value) < 0) dead.push(value)
+      }
+      return dead
+    }
+
     // 发声通道判定:与 core.mjs chooseChannels 行为一致,通道开关来自 localStorage,
     // 放入 LOGIC 段由 parity 测试保证双实现不漂移
     const IDLE_AWAY_MS = 5 * 60 * 1000
 
-    function chooseChannels(hasFocus, permission, idleMs) {
+    function chooseChannels(hasFocus, permission, idleMs, soundCategories, category) {
       const idleAway = typeof idleMs === 'number' && idleMs >= IDLE_AWAY_MS
       const quiet = hasFocus && localGet(KEY_DND) !== '0' && !idleAway
       const systemEnabled = localGet(KEY_SYSTEM) !== '0'
+      const soundEnabled = localGet(KEY_SOUND) !== '0'
+      const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
       return {
         toast: localGet(KEY_TOAST) !== '0',
-        sound: !quiet,
+        sound: !quiet && soundEnabled && !categoryMuted,
         system: !quiet && systemEnabled && permission === 'granted',
         blink: !quiet && systemEnabled && permission !== 'granted',
       }
@@ -382,32 +443,10 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // ---- toast 与标题闪烁 ----
+    // ---- 页内通知与标题闪烁 ----
 
-    // 页内通知走宿主原生形态:store + useSyncExternalStore + portal 直挂 body,
-    // 与 session-manager 的 Toast 同构;裸 DOM 注入已废弃
-    let toastSeq = 0
-    let toastStack = []
-    const toastListeners = new Set()
-    const emitToastStack = () => { for (const listener of toastListeners) listener() }
-
-    function showToast(unit) {
-      const id = ++toastSeq
-      toastStack = toastStack.concat([{ id, text: unit.text }]).slice(-TOAST_MAX)
-      emitToastStack()
-      setTimeout(() => {
-        toastStack = toastStack.filter((item) => item.id !== id)
-        emitToastStack()
-      }, TOAST_MS)
-    }
-
-    const toastSource = {
-      getSnapshot: () => toastStack,
-      subscribe: (listener) => {
-        toastListeners.add(listener)
-        return () => toastListeners.delete(listener)
-      },
-    }
+    // 页内通知经公共依赖 @mzzsfy/dsh-toast 展示(栈式多条并存),
+    // 本包只保留标题闪烁通道
 
     let blinkTimer = null
     const baseTitle = () => document.title.replace(/^⏳ /, '')
@@ -448,6 +487,9 @@ window.__ModuleLoader__.load({
     let uploadedIds = []
     let running = false
 
+    // 生效映射:开关开时本地覆盖全局,关时本地整体休眠(结果即全局)
+    const effectiveMapping = () => mergeMapping(soundMapping, localMappingEnabled() ? readLocalMapping() : {})
+
     async function poll() {
       try {
         await pollOnce()
@@ -464,6 +506,11 @@ window.__ModuleLoader__.load({
         payload = await response.json()
       } catch { return }
       soundMapping = payload.soundMapping || {}
+      sessionHighlightEnabled = payload.sessionHighlight !== false
+      if (!sessionHighlightEnabled && sessionHighlights.size > 0) {
+        sessionHighlights.clear()
+        clearSessionHighlightClasses()
+      }
       const units = payload.units || []
       const liveIds = new Set(units.map((unit) => unit.id))
       // 投影中已过期的本地残留清理,防旧锁与完成标记滞留;
@@ -481,14 +528,19 @@ window.__ModuleLoader__.load({
       for (const unit of units) {
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
-        const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt())
-        const sound = resolveSound(unit.category, soundMapping, uploadedIds)
-        if (channels.toast) showToast(unit)
+        const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category)
+        const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
+        if (channels.toast || channels.sound || channels.system || channels.blink) {
+          if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
+          if (unit.sessionTitle) sessionHighlights.set(unit.sessionTitle, unit.category)
+        }
+        if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
         if (!channels.sound) continue
         playSound(sound).catch(() => {})
         if (channels.system) notifySystem(unit)
         else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
       }
+      applySessionHighlights()
     }
 
     async function refreshSounds() {
@@ -499,15 +551,128 @@ window.__ModuleLoader__.load({
       } catch { uploadedIds = [] }
     }
 
+    // ---- 会话行高亮:通知投递即脉冲闪烁侧边栏对应会话,点击该行清除 ----
+
+    const SESSION_HL_CLASS = 'tn-sess-hl'
+    // 集合上限:用户始终不点击时防无界增长,超限淘汰最旧(插入序即迭代序)
+    const SESSION_HL_MAX = 20
+    const sessionHighlights = new Map()
+    let sessionHighlightEnabled = false
+
+    // 会话行探测:先定位“类名含 _list 段且子树含多个标题”的最内层列表容器,
+    // 再沿标题文本匹配路径下钻,取子树恰含单个标题的最深节点为行级;
+    // 正面锚定列表容器,页首面包屑等同名文本天然排除;本体改版探测不到即静默失效,不报错
+    const TITLE_LEAF_SELECTOR = '[class*="_title"]'
+    const SESSION_LIST_SUFFIX = '_list'
+    function findSessionRow(title) {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return null
+      let list = null
+      let listCount = 0
+      for (const el of document.querySelectorAll('[class*="' + SESSION_LIST_SUFFIX + '"]')) {
+        if (typeof el.className !== 'string' || !el.className.split(' ').some((name) => name.indexOf(SESSION_LIST_SUFFIX) >= 0)) continue
+        const count = el.querySelectorAll(TITLE_LEAF_SELECTOR).length
+        if (count > 1 && (list === null || count < listCount)) { list = el; listCount = count }
+      }
+      if (list === null) return null
+      let node = list
+      let row = null
+      while (true) {
+        const kids = [...node.children].filter((kid) => kid.textContent.indexOf(title) >= 0)
+        if (kids.length === 0) break
+        node = kids[0]
+        if (node.querySelectorAll(TITLE_LEAF_SELECTOR).length === 1) row = node
+      }
+      return row
+    }
+
+    // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环
+    function applySessionHighlights() {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
+      if (!sessionHighlightEnabled) return
+      for (const [title, category] of sessionHighlights) {
+        const row = findSessionRow(title)
+        if (!row || row.classList.contains(SESSION_HL_CLASS)) continue
+        const colorClass = CATEGORIES.indexOf(category) >= 0 ? SESSION_HL_CLASS + '--' + category : SESSION_HL_CLASS + '--ask'
+        row.classList.add(SESSION_HL_CLASS, colorClass)
+      }
+    }
+
+    // 开关关闭或点击清除后的类清理:移除本插件前缀的全部类
+    function clearSessionHighlightClasses() {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
+      const marked = document.querySelectorAll('.' + SESSION_HL_CLASS)
+      for (let index = 0; index < marked.length; index += 1) {
+        marked[index].className = marked[index].className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
+      }
+    }
+
+    // 宿主重渲染会重建行节点抹掉高亮类,观察器在同一帧内补齐;
+    // applySessionHighlights 幂等(类齐不写 DOM),观察器链自然收敛
+    const KEY_HL_OBSERVER = 'turn-notify:hl-observer'
+    function ensureHighlightObserver() {
+      if (window[KEY_HL_OBSERVER]) return
+      if (typeof document === 'undefined' || typeof document.body === 'undefined' || typeof MutationObserver === 'undefined') return
+      window[KEY_HL_OBSERVER] = true
+      new MutationObserver(() => {
+        if (sessionHighlightEnabled && sessionHighlights.size > 0) applySessionHighlights()
+      }).observe(document.body, { childList: true, subtree: true })
+    }
+
+    // 点击清除走捕获委托;window 令牌防 HMR 重建闭包后监听器累积
+    const KEY_HL_LISTENER = 'turn-notify:hl-listener'
+    function ensureHighlightListener() {
+      if (window[KEY_HL_LISTENER]) return
+      if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
+      window[KEY_HL_LISTENER] = true
+      document.addEventListener('click', (event) => {
+        const target = event.target && event.target.closest ? event.target.closest('.' + SESSION_HL_CLASS) : null
+        if (!target) return
+        let cleared = false
+        for (const title of [...sessionHighlights.keys()]) {
+          if (target.textContent.indexOf(title) >= 0) {
+            sessionHighlights.delete(title)
+            cleared = true
+          }
+        }
+        if (cleared) {
+          clearSessionHighlightClasses()
+          applySessionHighlights()
+        }
+      }, true)
+    }
+
     function start() {
       // window 级令牌:HMR 重建模块闭包后 running 归零,仅靠它无法防重复轮询
       if (running || window[KEY_POLL_TOKEN]) return
       running = true
       window[KEY_POLL_TOKEN] = true
+      ensureHighlightListener()
+      ensureHighlightObserver()
       refreshSounds()
       // 定时器不阻止进程退出(浏览器无感,测试进程可自然收尾)
       const timer = setInterval(() => { void poll() }, POLL_MS)
       if (typeof timer.unref === 'function') timer.unref()
+    }
+
+    // 分类通知开关串行提交链:请求按点击顺序入队,host 终值恒为最后一次点击;
+    // 乐观回填由调用方先行(连点取反基点恒新),失败时拉取权威配置纠偏收敛 UI 与 host
+    let categoryToggleChain = Promise.resolve()
+    function submitCategoryToggle(category, checked, { apiImpl, onConfig, onError }) {
+      const run = categoryToggleChain.catch(() => {}).then(async () => {
+        try {
+          onConfig(await apiImpl('/api/turn-notify/config', {
+            method: 'POST',
+            body: JSON.stringify({ enabled: { [category]: checked } }),
+          }))
+        } catch (error) {
+          onError('开关失败:' + (error && error.message ? error.message : String(error)))
+          try {
+            onConfig(await apiImpl('/api/turn-notify/config'))
+          } catch { /* 权威配置拉取失败则保持乐观值,由后续操作收敛 */ }
+        }
+      })
+      categoryToggleChain = run
+      return run
     }
 
     // ---- 设置面板 ----
@@ -521,6 +686,7 @@ window.__ModuleLoader__.load({
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
       suppressSubagentWake: true,
+      sessionHighlight: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
       imTargets: [],
     }
@@ -587,6 +753,20 @@ window.__ModuleLoader__.load({
       '.tn-chip__x { cursor:pointer; border:none; background:transparent; color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));',
       '  padding:3px 8px; font-size:13px; line-height:1; border-left:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); }',
       '.tn-chip__x:hover { color:var(--dsw-alias-state-error-primary, #d43a3a); background:var(--dsw-alias-interactive-bg-hover, transparent); }',
+      // 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现
+      '.tn-switch { display:inline-flex; align-items:center; cursor:pointer; }',
+      '.tn-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
+      '.tn-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
+      '  background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.35));',
+      '  border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
+      '  transition:background 0.15s, border-color 0.15s; }',
+      '.tn-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+      '  background:var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6));',
+      '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
+      '.tn-switch:hover .tn-switch__track { border-color:var(--dsw-alias-brand-primary); }',
+      '.tn-switch input[type="checkbox"]:checked + .tn-switch__track { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }',
+      '.tn-switch input[type="checkbox"]:checked + .tn-switch__track .tn-switch__thumb { left:17px; background:var(--dsw-alias-bg-base, #fff); }',
+      '.tn-switch input[type="checkbox"]:focus-visible + .tn-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
       // 目标列表:按行呈现,勾选/名称/移除右对齐
       '.tn-list { display:flex; flex-direction:column; }',
       '.tn-list__item { display:flex; align-items:center; gap:10px; padding:6px 2px; font-size:12px;',
@@ -597,19 +777,34 @@ window.__ModuleLoader__.load({
       '.tn-list__tag { color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary)); font-size:11px; }',
       '.tn-divider { border:none; border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); margin:2px 0; }',
       'input[type="range"].tn-range { accent-color:var(--dsw-alias-brand-primary); flex:1; min-width:120px; }',
-      // 页内通知:与 session-manager Toast 同一宿主令牌语言,置于框架顶部居中
-      '.tn-toast-stack { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:1100;',
-      '  display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }',
-      '.tn-toast { background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted);',
-      '  font:var(--dsw-font-xs-13); padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2);',
-      '  animation:tn-toast-in 0.18s ease-out; max-width:520px; }',
-      '@keyframes tn-toast-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }',
-      '@media (prefers-reduced-motion: reduce) { .tn-toast { animation:none; } }',
+      // 会话行高亮:背景在透明与“背景色与分类色各半混合”间脉冲;分类色用 dsw 语义变量,缺省回退具名色
+      '.tn-sess-hl--completed { --tn-sess-color:var(--dsw-alias-state-success-primary, #34a853); }',
+      '.tn-sess-hl--error { --tn-sess-color:var(--dsw-alias-state-error-primary, #d43a3a); }',
+      '.tn-sess-hl--interrupted { --tn-sess-color:#e08c2e; }',
+      '.tn-sess-hl--approval { --tn-sess-color:#c9a227; }',
+      '.tn-sess-hl--ask { --tn-sess-color:var(--dsw-alias-brand-primary, #4c8dff); }',
+      '.tn-sess-hl--max-tokens { --tn-sess-color:#9a6fe0; }',
+      '.tn-sess-hl { animation:tn-sess-pulse 1.6s ease-in-out infinite; border-radius:8px; }',
+      '@keyframes tn-sess-pulse {',
+      '  0%,100% { background-color:transparent; }',
+      '  50% { background-color:color-mix(in srgb, var(--tn-sess-color, #4c8dff) 50%, var(--dsw-alias-bg-base, #202020) 50%); }',
+      '}',
+      '@media (prefers-reduced-motion: reduce) {',
+      '  .tn-sess-hl { animation:none; background-color:color-mix(in srgb, var(--tn-sess-color, #4c8dff) 50%, var(--dsw-alias-bg-base, #202020) 50%); }',
+      '}',
     ].join('\n')
 
     function h(type, props) {
       const children = Array.prototype.slice.call(arguments, 2)
       return React.createElement.apply(React, [type, props || null].concat(children))
+    }
+
+    // 开关的 checkbox + 轨道对,checkbox 语义保留仅视觉隐藏
+    function switchToggle(props) {
+      return [
+        h('input', { type: 'checkbox', ...props }),
+        h('span', { className: 'tn-switch__track' }, h('span', { className: 'tn-switch__thumb' })),
+      ]
     }
 
     async function api(path, options) {
@@ -630,8 +825,13 @@ window.__ModuleLoader__.load({
       // IM 投递:botId 草稿与当前加载到的目标目录(目录只在勾选时消费,不直接决定已选)
       const [imBotIdDraft, setImBotIdDraft] = useState('')
       const [imCatalog, setImCatalog] = useState(null)
-      // 分类映射的受控 state:直接由写响应回填,不再依赖轮询变量驱动渲染
+      // 分类映射的全局镜像:直接由全局配置/映射响应回填,不再依赖轮询变量驱动渲染
       const [mapping, setMappingState] = useState({})
+      // 本地作用域镜像:开关与映射改动即写 localStorage,仅作用域为当前域名
+      const [localMode, setLocalMode] = useState(() => localMappingEnabled())
+      const [localMapping, setLocalMappingState] = useState(() => readLocalMapping())
+      // 分类提示音镜像:pill 点击即写 localStorage,发声链路直读不依赖本 state
+      const [soundCategories, setSoundCategoriesState] = useState(() => readSoundCategories())
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
 
@@ -721,7 +921,7 @@ window.__ModuleLoader__.load({
 
       function startRename(sound) {
         setRenamingId(sound.id)
-        setRenameDraft(sound.id)
+        setRenameDraft(sound.name || sound.id)
       }
 
       function cancelRename() {
@@ -735,8 +935,7 @@ window.__ModuleLoader__.load({
         try {
           const res = await api('/api/turn-notify/sound', { method: 'PUT', body: JSON.stringify({ id: sound.id, name: renameDraft }) })
           decodedCache.delete(sound.id)
-          if (res.soundMapping) setMappingState(res.soundMapping)
-          patch('已重命名为 ' + res.id)
+          patch('已重命名为 ' + res.name)
           cancelRename()
         } catch (error) {
           patch('重命名失败:' + (error && error.message ? error.message : String(error)), 'error')
@@ -749,7 +948,30 @@ window.__ModuleLoader__.load({
         } catch { }
       }
 
+      // 作用域切换:开=映射改动只写本机 localStorage,读合并;关=读写全走全局,本地数据保留但休眠
+      function toggleLocalMapping(checked) {
+        setLocalMode(checked)
+        localSet(KEY_MAPPING_LOCAL, checked ? '1' : '0')
+      }
+
+      // 分类提示音切换:显式 false=静音,删除键=恢复出声;发声链路每次直读 localStorage
+      function toggleSoundCategory(category) {
+        const next = { ...soundCategories }
+        if (next[category] === false) delete next[category]
+        else next[category] = false
+        setSoundCategoriesState(next)
+        localSet(KEY_SOUND_CATEGORIES, JSON.stringify(next))
+      }
+
       async function setMapping(category, id) {
+        // 本地模式:空串为显式内置默认,同样保留为键值
+        if (localMode) {
+          const next = { ...localMapping, [category]: id }
+          setLocalMappingState(next)
+          localSet(KEY_MAPPING, JSON.stringify(next))
+          patch(CATEGORY_LABELS[category] + ' 音效已更新(仅存本机浏览器)')
+          return
+        }
         try {
           const res = await api('/api/turn-notify/mapping', { method: 'POST', body: JSON.stringify({ category, id }) })
           setMappingState(res.soundMapping || {})
@@ -773,7 +995,7 @@ window.__ModuleLoader__.load({
           if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
           const trimmedUrl = urlDraft.trim()
           // imTargets 由勾选单独即时保存,不随此入口提交
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, sessionHighlight: config.sessionHighlight !== false }
           // 只写语义:输入留空即保持现有 webhook 不变
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
@@ -800,17 +1022,17 @@ window.__ModuleLoader__.load({
         } finally { setBusy(false) }
       }
 
-      async function toggleCategory(category, checked) {
-        try {
-          const res = await api('/api/turn-notify/config', {
-            method: 'POST',
-            body: JSON.stringify({ enabled: { [category]: checked } }),
-          })
-          setConfig({ ...DEFAULT_CONFIG, ...res })
-          if (res.soundMapping) setMappingState(res.soundMapping)
-        } catch (error) {
-          patch('开关失败:' + (error && error.message ? error.message : String(error)), 'error')
-        }
+      // 分类通知开关:乐观回填为连点提供正确取反基点,提交交由模块级串行链收敛
+      function toggleCategory(category, checked) {
+        setConfig((prev) => ({ ...prev, enabled: { ...prev.enabled, [category]: checked } }))
+        submitCategoryToggle(category, checked, {
+          apiImpl: api,
+          onConfig: (res) => {
+            setConfig({ ...DEFAULT_CONFIG, ...res })
+            if (res.soundMapping) setMappingState(res.soundMapping)
+          },
+          onError: (text) => patch(text, 'error'),
+        })
       }
 
       async function requestPermission() {
@@ -825,7 +1047,11 @@ window.__ModuleLoader__.load({
 
       // 页内通知通道单独测试:仅弹页内提示,不涉及声音与系统通知
       function testPageNotification() {
-        showToast({ id: 'ui-test', text: '[dsh] 页内通知测试' })
+        if (!toast) {
+          patch('toast 库未装载(权威消费方未安装),页内通知通道不可用', 'error')
+          return
+        }
+        toast('[dsh] 页内通知测试', { holdMs: TOAST_MS })
         patch('页内通知已发送')
       }
 
@@ -951,18 +1177,26 @@ window.__ModuleLoader__.load({
         return sound.kind === 'custom' ? '上传音效 ' + sound.id : '内置 ' + (TONE_LABELS[sound.name] || sound.name)
       }
 
-      // 分类试听:播放该分类当前实际生效的音效(自定义 / 内置 / 失效回落),与通知真实发声同语义
+      // 生效映射与死链:合并全局镜像与本地镜像(开关关时本地休眠不参与)
+      const soundIds = sounds.map((sound) => sound.id)
+      const effective = mergeMapping(mapping, localMode ? localMapping : {})
+      const deadIds = deadCustomIds(effective, soundIds)
+
+      // 分类试听:播放该分类当前实际生效的音效(自定义 / 内置 / 失效回落),与通知真实发声同语义;
+      // 命中死链时回执归因,引导重传或改选
       function previewCategory(category) {
-        const sound = resolveSound(category, mapping, uploadedIds)
+        const sound = resolveSound(category, effective, soundIds)
         playAudible(sound).then((result) => {
           if (!result.ok) patch(CATEGORY_LABELS[category] + ' 试听未播放:' + result.reason, 'error')
+          else if (deadIds.indexOf(effective[category]) >= 0) patch('映射 ' + effective[category] + ' 已失效,已播放内置默认,请重新上传音效或改选映射', 'error')
           else patch('已试听 ' + CATEGORY_LABELS[category] + ':' + describeSound(sound))
         })
       }
 
       const soundOptions = [h('option', { key: '', value: '' }, '内置默认')].concat(
         Object.keys(TONE_LABELS).map((name) => h('option', { key: name, value: name }, '内置 · ' + TONE_LABELS[name])),
-      ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + sound.id)))
+      ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + (sound.name || sound.id))))
+        .concat(deadIds.map((id) => h('option', { key: id, value: id }, '失效 · ' + id)))
 
       return h('div', { className: 'tn-panel' },
         h('div', { className: 'tn-head' },
@@ -1002,18 +1236,24 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '豁免'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', checked: config.rootsOnly,
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                checked: config.rootsOnly,
                 onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
               }),
               ' 子代理会话不通知'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', checked: config.suppressSubagentWake,
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                checked: config.suppressSubagentWake,
                 onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
               }),
               ' 子代理回执静默'),
+            h('label', { className: 'tn-meta tn-switch', title: '通知触发时脉冲闪烁侧边栏对应会话行,点击该会话后停止' },
+              ...switchToggle({
+                checked: config.sessionHighlight !== false,
+                onChange: (e) => setConfig({ ...config, sessionHighlight: e.target.checked }),
+              }),
+              ' 通知高亮会话行'),
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label tn-label--top' }, '事件分类'),
@@ -1064,9 +1304,9 @@ window.__ModuleLoader__.load({
               : h('div', { className: 'tn-list' },
                   imCatalog.targets.map((target) => {
                     const checked = config.imTargets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
-                    return h('label', { className: 'tn-list__item', key: target.targetId },
-                      h('input', {
-                        type: 'checkbox', checked,
+                    return h('label', { className: 'tn-list__item tn-switch', key: target.targetId },
+                      ...switchToggle({
+                        checked,
                         onChange: (e) => toggleImTarget(imCatalog.botId, target, e.target.checked),
                       }),
                       h('span', { className: 'tn-list__grow' },
@@ -1097,9 +1337,9 @@ window.__ModuleLoader__.load({
           h('div', { className: 'tn-row' },
             h('button', {
               className: 'tn-btn',
-              // 测试声音读当前映射:播放任务完成分类实际生效的音效,而非固定参考音
+              // 测试声音读当前生效映射:播放任务完成分类实际生效的音效,而非固定参考音
               onClick: () => {
-                const sound = resolveSound('completed', mapping, uploadedIds)
+                const sound = resolveSound('completed', effective, soundIds)
                 playAudible(sound).then((result) => {
                   patch(result.ok
                     ? '测试声音已触发:' + describeSound(sound) + ',若未听到请检查系统音量与输出设备'
@@ -1119,10 +1359,34 @@ window.__ModuleLoader__.load({
             h('span', { className: 'tn-card__sub' }, '仅存当前浏览器,不影响其他窗口'),
           ),
           h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }, '提示音'),
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_SOUND) !== '0',
+                onChange: (e) => localSet(KEY_SOUND, e.target.checked ? '1' : '0'),
+              }),
+              ' 开启'),
+            h('div', { className: 'tn-pills' },
+              CATEGORIES.map((category) => h('span', {
+                className: 'tn-pill' + (soundCategories[category] !== false ? ' tn-pill--on' : ''),
+                key: category,
+                title: soundCategories[category] !== false
+                  ? CATEGORY_LABELS[category] + ':当前出声,点击静音'
+                  : CATEGORY_LABELS[category] + ':当前静音,点击恢复出声',
+                onClick: () => toggleSoundCategory(category),
+              }, CATEGORY_LABELS[category])),
+            ),
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }),
+            h('span', { className: 'tn-meta' },
+              '点分类标签单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示与系统弹窗不受影响。'),
+          ),
+          h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '系统弹窗'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_SYSTEM) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_SYSTEM) !== '0',
                 onChange: (e) => localSet(KEY_SYSTEM, e.target.checked ? '1' : '0'),
               }),
               ' 开启'),
@@ -1134,9 +1398,9 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '页内提示'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_TOAST) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_TOAST) !== '0',
                 onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
               }),
               ' 开启'),
@@ -1150,15 +1414,15 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '行为'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_DND) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_DND) !== '0',
                 onChange: (e) => localSet(KEY_DND, e.target.checked ? '1' : '0'),
               }),
               ' 聚焦静默'),
-            h('label', { className: 'tn-meta' },
-              h('input', {
-                type: 'checkbox', defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
+            h('label', { className: 'tn-meta tn-switch' },
+              ...switchToggle({
+                defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
                 onChange: (e) => localSet(KEY_DEGRADE_HINT, e.target.checked ? '1' : '0'),
               }),
               ' 降级时标题闪烁'),
@@ -1213,7 +1477,7 @@ window.__ModuleLoader__.load({
                   h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: cancelRename }, '取消'),
                 )
                 : h('div', { className: 'tn-list__item', key: sound.id },
-                  h('span', { className: 'tn-list__grow' }, sound.id + '.' + sound.ext),
+                  h('span', { className: 'tn-list__grow' }, (sound.name || sound.id) + '.' + sound.ext),
                   h('button', {
                     className: 'tn-btn',
                     onClick: () => {
@@ -1232,10 +1496,31 @@ window.__ModuleLoader__.load({
             h('span', { className: 'tn-card__title' }, '分类音效映射'),
             h('span', { className: 'tn-card__sub' }, '每类事件可指定上传音效或内置音,失效自动回落内置默认'),
           ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }, '作用域'),
+            h('label', { className: 'tn-switch', title: '开启后音效映射仅对本浏览器(域名)生效' },
+              ...switchToggle({
+                checked: localMode,
+                onChange: (e) => toggleLocalMapping(e.target.checked),
+              })),
+            h('span', { className: 'tn-meta' }, localMode ? '当前域名独立' : '全部域名共用'),
+          ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }),
+            h('span', { className: 'tn-meta' },
+              '开启:映射改动只保存在本浏览器(按访问域名隔离),本地优先于全局,公司/家里的配置互不影响。关闭:全域名共用 host 全局配置(settings.yaml)。'),
+          ),
+          !localMode && Object.keys(localMapping).length > 0
+            ? h('div', { className: 'tn-row' },
+              h('span', { className: 'tn-label' }),
+              h('span', { className: 'tn-meta' },
+                '已保存 ' + Object.keys(localMapping).length + ' 项本地映射,当前休眠,重新开启即恢复生效。'),
+            )
+            : null,
           CATEGORIES.map((category) => h('div', { className: 'tn-row', key: category },
             h('span', { className: 'tn-label' }, CATEGORY_LABELS[category]),
             h('select', {
-              className: 'tn-select tn-fill', value: mapping[category] || '',
+              className: 'tn-select tn-fill', value: effective[category] || '',
               onChange: (e) => void setMapping(category, e.target.value),
             }, soundOptions),
             h('button', { className: 'tn-btn', onClick: () => previewCategory(category) }, '试听'),
@@ -1261,25 +1546,10 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'turn-notify', order: 41, label: '消息通知' },
             () => React.createElement(TurnNotifyApp),
           ))
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
-            { name: 'shell.overlay', id: 'turn-notify-toast' },
-            () => React.createElement(OverlayToastStack),
-          ))
       },
-      // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方
-      __test: { poll, pollOnce, storageState, announcedIds, toastStack: () => toastStack },
-    }
-
-    // 通知栈:portal 直挂 body 脱离应用 frame 叠层,否则被设置全屏层(z=1000)遮盖
-    function OverlayToastStack() {
-      const stack = useSyncExternalStore(toastSource.subscribe, toastSource.getSnapshot)
-      if (stack.length === 0) return null
-      return createPortal(
-        h('div', { className: 'tn-toast-stack' },
-          stack.map((item) => h('div', { className: 'tn-toast', key: item.id, role: 'alert' }, item.text))),
-        document.body,
-      )
+      // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
+      // 页内通知的展示结果经 require 桩捕获,不在本包断言
+      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle },
     }
   },
 })

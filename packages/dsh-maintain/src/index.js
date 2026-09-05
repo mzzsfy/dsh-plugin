@@ -26,6 +26,9 @@ const NAMESPACE = 'maintain'
 
 const CHECK_TIMEOUT_MS = 20 * 1000
 const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
+// 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
+// 导出仅供测试计算延迟窗口等待时长
+export const RESTART_DELAY_MS = 2 * 1000
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
 
@@ -141,6 +144,7 @@ export function apply(ctx) {
   let upgrade = { running: false, last: null }
   let checkInFlight = null
   let nextDueAt = null
+  let restartScheduled = false
 
   function runCheck() {
     if (checkInFlight) return checkInFlight
@@ -356,9 +360,15 @@ export function apply(ctx) {
           sendJson(res, 500, { error: '启动器未提供 appExit,无法重启' })
           return
         }
+        if (restartScheduled) {
+          sendJson(res, 200, { ok: true, restarting: true })
+          return
+        }
+        restartScheduled = true
         sendJson(res, 200, { ok: true, restarting: true })
-        // 响应先冲刷再请求退出;托管环境由进程管理器拉起,dispose 挂起时 5 秒兜底强制
-        setImmediate(() => exit(0))
+        // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
+        // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
+        setTimeout(() => exit(0), RESTART_DELAY_MS)
       }),
     },
   ]

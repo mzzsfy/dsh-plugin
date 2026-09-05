@@ -19,6 +19,8 @@ import {
   chooseChannels,
   USER_IDLE_AWAY_MS,
   resolveSound,
+  mergeMapping,
+  deadCustomIds,
   validateSoundName,
   SOUND_NAME_MAX_CHARS,
   parseVolume,
@@ -251,6 +253,20 @@ test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
+test('提示音开关:总开关与分类配置独立静音,缺省键与空分类放行', () => {
+  const base = { hasFocus: false, permission: 'granted' }
+  // 提示音总开关独立关闭:页内提示与系统弹窗不受影响
+  assert.deepEqual(chooseChannels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false })
+  // 分类显式 false:该分类静音
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: 'ask' }).sound, false)
+  // 同配置其他分类照常出声
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: 'completed' }).sound, true)
+  // 未提供分类:全放行(与既有调用形态兼容)
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false } }).sound, true)
+  // 分类空缺:null 与 undefined 等价放行
+  assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: null }).sound, true)
+})
+
 test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦静默', () => {
   const base = { hasFocus: true, permission: 'granted' }
   const idle = USER_IDLE_AWAY_MS
@@ -293,6 +309,29 @@ test('音效映射:自定义命中用自定义,内置备选与失效回落', () 
   const fallback = resolveSound({ category: CATEGORY_ASK, mapping, uploadedIds: [] })
   assert.deepEqual(fallback, { kind: 'builtin', name: TONE_DOUBLE_PING })
   assert.deepEqual(resolveSound({ category: CATEGORY_DONE, mapping: {}, uploadedIds: [] }), { kind: 'builtin', name: TONE_UP_ARPEGGIO })
+})
+
+test('映射合并:本地覆盖全局,缺键回落,空串为显式内置默认,入参容错', () => {
+  assert.deepEqual(mergeMapping({ completed: 'a', error: 'b' }, { completed: 'c' }), { completed: 'c', error: 'b' })
+  assert.deepEqual(mergeMapping({ completed: 'a' }, {}), { completed: 'a' })
+  assert.deepEqual(mergeMapping({ completed: 'a' }, { completed: '' }), { completed: '' })
+  assert.deepEqual(mergeMapping(null, { completed: 'a' }), { completed: 'a' })
+  assert.deepEqual(mergeMapping({ completed: 'a' }, null), { completed: 'a' })
+  assert.deepEqual(mergeMapping(undefined, undefined), {})
+  const globalMapping = { completed: 'a' }
+  assert.deepEqual(mergeMapping(globalMapping, { completed: 'b' }), { completed: 'b' })
+  assert.deepEqual(globalMapping, { completed: 'a' })
+})
+
+test('死链识别:非内置非上传即死链,去重按首次出现排序,空值与非字符串跳过,列表空缺容错', () => {
+  const mapping = { completed: 'gone-2', error: TONE_BELL, interrupted: 'gone-1', approval: '', ask: 'gone-2', 'max-tokens': 'snd-1' }
+  assert.deepEqual(deadCustomIds(mapping, ['snd-1']), ['gone-2', 'gone-1'])
+  assert.deepEqual(deadCustomIds({ completed: TONE_BELL }, []), [])
+  assert.deepEqual(deadCustomIds({ completed: 'snd-1' }, ['snd-1']), [])
+  assert.deepEqual(deadCustomIds({}, ['snd-1']), [])
+  assert.deepEqual(deadCustomIds(null, []), [])
+  assert.deepEqual(deadCustomIds({ completed: 7, error: null, ask: { id: 'x' } }, ['snd-1']), [])
+  assert.deepEqual(deadCustomIds({ completed: 'gone-1' }, null), ['gone-1'])
 })
 
 test('音量解析:未设置回默认,显式零保留,非法回落默认', () => {
@@ -436,6 +475,7 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
   assert.deepEqual(validateConfigPatch({ webhookUrl: '' }), { ok: true, patch: { webhookUrl: '' } })
   assert.deepEqual(validateConfigPatch({ rootsOnly: true }), { ok: true, patch: { rootsOnly: true } })
   assert.deepEqual(validateConfigPatch({ suppressSubagentWake: true }), { ok: true, patch: { suppressSubagentWake: true } })
+  assert.deepEqual(validateConfigPatch({ sessionHighlight: false }), { ok: true, patch: { sessionHighlight: false } })
   assert.deepEqual(validateConfigPatch({}), { ok: true, patch: {} })
 })
 
@@ -451,6 +491,7 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
   assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
   assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ suppressSubagentWake: 'yes' }).ok, false)
+  assert.equal(validateConfigPatch({ sessionHighlight: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
@@ -464,6 +505,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       suppressSubagentWake: true,
+      sessionHighlight: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
@@ -474,12 +516,14 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     minTurnDurationMs: MIN_TURN_MS,
     rootsOnly: true,
     suppressSubagentWake: true,
+    sessionHighlight: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
     imTargets: [],
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
+  assert.equal(resolvedConfig({ sessionHighlight: false }).sessionHighlight, false)
 })
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
@@ -489,6 +533,7 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       suppressSubagentWake: true,
+      sessionHighlight: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],

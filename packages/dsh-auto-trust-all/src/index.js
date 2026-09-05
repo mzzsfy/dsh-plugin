@@ -50,6 +50,16 @@ export function apply(ctx, config) {
     const queue = []
     let seenFor = null
 
+    // client-connection 的 fence 读 connection 服务的 trustedHosts 实例字段,
+    // 该数组来自配置校验时的克隆,与 webRuntime.trustedHosts 不同引用;动态域名
+    // 只写 webRuntime 时 /api 闸门不可见,故注册与去重命中时都同步写入
+    const syncFence = (hostname) => {
+      if (hostname === undefined) return
+      const fenceHosts = ctx.get('connection')?.trustedHosts
+      if (!Array.isArray(fenceHosts) || fenceHosts.includes(hostname)) return
+      fenceHosts.push(hostname)
+    }
+
     const registerHost = (req) => {
       const hosts = ctx.get('webRuntime')?.trustedHosts
       if (!Array.isArray(hosts)) return
@@ -59,10 +69,14 @@ export function apply(ctx, config) {
         queue.length = 0
       }
       const hostname = hostnameOf(req && req.headers)
-      if (hostname === undefined || seen.has(hostname)) return
+      if (hostname === undefined || seen.has(hostname)) {
+        syncFence(hostname)
+        return
+      }
       // 数组查重:激活前已存在的条目(官方初始条目)只记入去重集合,不入淘汰队列
       if (hosts.includes(hostname)) {
         seen.add(hostname)
+        syncFence(hostname)
         return
       }
       while (queue.length >= maxHosts) {
@@ -77,6 +91,7 @@ export function apply(ctx, config) {
       seen.add(hostname)
       queue.push(hostname)
       hosts.push(hostname)
+      syncFence(hostname)
       console.log('auto-trust-all: registered host ' + hostname)
     }
 
