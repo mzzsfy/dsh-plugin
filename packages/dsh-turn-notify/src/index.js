@@ -49,6 +49,8 @@ export const inject = ['webServer']
 const NAMESPACE = 'turn-notify'
 const SOUNDS_DIR = join(homedir(), '.dsh', 'dsh-turn-notify', 'sounds')
 const REQUEST_BODY_MAX_BYTES = 64 * 1024
+// 长轮询挂起上限:低于客户端请求超时,保证客户端总在服务端放弃后才超时
+const LONG_POLL_WAIT_MS = 25 * 1000
 
 // dsh-im 投递错误码到 HTTP 状态的映射,未收录错误按网关失败处理
 const IM_ERROR_STATUS = { 'bad-request': 400, 'unknown-bot': 404, 'bot-not-connected': 503 }
@@ -355,15 +357,25 @@ export function apply(ctx) {
       })
   }
 
-  ctx.effect(() =>
+  // 长轮询:cursor 缺省=首拉立即返回;仅版本恰等时挂起至事件 push / 配置变更 bump / 超时;
+  // cursor 超前(宿主重启版本回退)立即返回全量,客户端以响应 version 重置游标自愈。
+  ctx.effect(() => {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/projection',
       handler: route('GET', {}, async (req, res) => {
+        const query = new URL(req.url, 'http://localhost').searchParams
+        const rawCursor = Number(query.get('cursor'))
+        const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
+        if (query.has('cursor') && projection.version() === cursor) {
+          await projection.wait(cursor, LONG_POLL_WAIT_MS)
+        }
         const settings = readSettings(ctx)
-        sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, sessionHighlight: settings.sessionHighlight })
+        sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, sessionHighlight: settings.sessionHighlight, version: projection.version() })
       }),
-    }), 'turn-notify projection route')
+    })
+    return () => projection.dispose()
+  }, 'turn-notify projection route')
 
   ctx.effect(() =>
     ctx.webServer.register({
@@ -493,7 +505,10 @@ export function apply(ctx) {
         for (const key of Object.keys(current.soundMapping)) {
           if (current.soundMapping[key] === id) patch[key] = null
         }
-        if (Object.keys(patch).length > 0) await settings.update(NAMESPACE, { soundMapping: patch })
+        if (Object.keys(patch).length > 0) {
+          await settings.update(NAMESPACE, { soundMapping: patch })
+          projection.bump()
+        }
       }
       sendJson(res, 200, { ok: true })
     })
@@ -524,6 +539,7 @@ export function apply(ctx) {
             return
           }
           await settings.update(NAMESPACE, { soundMapping: { [category]: id.length === 0 ? null : id } })
+          projection.bump()
           sendJson(res, 200, { ok: true, soundMapping: readSettings(ctx).soundMapping })
         })
       }),
@@ -557,6 +573,7 @@ export function apply(ctx) {
             return
           }
           await settings.update(NAMESPACE, verdict.patch)
+          projection.bump()
           sendJson(res, 200, { ...publicConfig(readSettings(ctx)), imAvailable: imReady() })
         } catch (error) {
           sendError(res, error)
