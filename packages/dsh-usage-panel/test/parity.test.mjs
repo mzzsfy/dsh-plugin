@@ -7,7 +7,12 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-import { decideClaim as coreDecideClaim, CLAIM_LOCK_TTL_MS } from '../src/notify.mjs'
+import { decideClaim as coreDecideClaim, CLAIM_LOCK_TTL_MS,
+  imTargetKey as coreImTargetKey,
+  toggleImTargetList as coreToggleImTargetList,
+  removeImTargetFromList as coreRemoveImTargetFromList,
+  unregisterImBotList as coreUnregisterImBotList,
+  imBoundBotIds as coreImBoundBotIds } from '../src/notify.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -20,7 +25,8 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, claimEvent, markDone, windowId, localGet, localSet, localDel, CLAIM_LOCK_TTL_MS };',
+      + '; return { decideClaim, claimEvent, markDone, windowId, localGet, localSet, localDel, CLAIM_LOCK_TTL_MS,'
+      + ' imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds };',
   )
   return factory()
 }
@@ -48,6 +54,40 @@ defineClaimScenarios('[notify.mjs decideClaim] ', coreDecideClaim)
 
 test('[client.js decideClaim] 锁 TTL 与 core 不漂移', () => {
   assert.equal(client.CLAIM_LOCK_TTL_MS, CLAIM_LOCK_TTL_MS)
+})
+
+// IM 目标列表操作双实现对照:任意操作序列后两侧终态一致即同形。
+test('IM 目标列表操作双实现对照', () => {
+  const scenarios = [
+    { list: [], botId: 'wx_a', targetId: 'owner', checked: true },
+    { list: [{ botId: 'wx_a', targetId: 'owner' }], botId: 'wx_a', targetId: 'owner', checked: true },
+    { list: [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 't1' }], botId: 'wx_a', targetId: 'owner', checked: false },
+    { list: [{ botId: 'wx_a', targetId: 't1' }, { botId: 'wx_a', targetId: 't2' }], botId: 'wx_a', targetId: 't1', checked: true },
+  ]
+  for (const s of scenarios) {
+    assert.deepEqual(
+      client.toggleImTargetList(s.list, s.botId, s.targetId, s.checked),
+      coreToggleImTargetList(s.list, s.botId, s.targetId, s.checked),
+    )
+    assert.deepEqual(
+      client.removeImTargetFromList(s.list, s.botId, s.targetId),
+      coreRemoveImTargetFromList(s.list, s.botId, s.targetId),
+    )
+    assert.deepEqual(client.unregisterImBotList(s.list, s.botId), coreUnregisterImBotList(s.list, s.botId))
+    assert.deepEqual(client.imBoundBotIds(s.list), coreImBoundBotIds(s.list))
+    assert.deepEqual(
+      s.list.map(client.imTargetKey),
+      s.list.map(coreImTargetKey),
+    )
+  }
+  // 勾选幂等:同一目标重复勾选只保留一份,追加到尾部
+  const once = client.toggleImTargetList([], 'wx_a', 't1', true)
+  assert.deepEqual(client.toggleImTargetList(once, 'wx_a', 't1', true), [{ botId: 'wx_a', targetId: 't1' }])
+  // 已绑 bot 按首次绑定顺序去重
+  assert.deepEqual(
+    client.imBoundBotIds([{ botId: 'b', targetId: 'x' }, { botId: 'a', targetId: 'y' }, { botId: 'b', targetId: 'z' }]),
+    ['b', 'a'],
+  )
 })
 
 defineClaimScenarios('[client.js decideClaim] ', (args) => client.decideClaim(args.stored, args.done, args.now, args.windowId))

@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-usage-panel',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect } = React
+    const { useState, useEffect, useRef } = React
 
     // 面板反馈出口:公共依赖 @mzzsfy/dsh-toast,可选消费——占位条目由
     // session-manager 唯一代挂,权威方未安装时降级 console,不挂死不报错
@@ -64,21 +64,41 @@ window.__ModuleLoader__.load({
       return (confirmed !== null && confirmed.wid === windowId) || storageBroken
     }
     const markDone = (id) => localSet(KEY_DONE + id, '1')
+
+    // IM 目标列表操作:与 src/notify.mjs 同形,parity 测试锁定不漂移。
+    // botId/targetId 字符集均不含 '/',拼接键无歧义;与 dsh-im delivery-service 共用 ID 规格。
+    const imTargetKey = (item) => item.botId + '/' + item.targetId
+    function toggleImTargetList(list, botId, targetId, checked) {
+      const wanted = { botId, targetId }
+      const rest = list.filter((item) => imTargetKey(item) !== imTargetKey(wanted))
+      return checked ? rest.concat([wanted]) : rest
+    }
+    function removeImTargetFromList(list, botId, targetId) {
+      return list.filter((item) => imTargetKey(item) !== botId + '/' + targetId)
+    }
+    function unregisterImBotList(list, botId) {
+      return list.filter((item) => item.botId !== botId)
+    }
+    function imBoundBotIds(list) {
+      const botIds = []
+      for (const item of list) {
+        if (!botIds.includes(item.botId)) botIds.push(item.botId)
+      }
+      return botIds
+    }
     /* LOGIC-END */
 
     // 页内通知轮询:client 激活即轮询,不依赖面板打开;toast 库缺失(权威代挂方
     // session-manager 未安装)整段跳过;批内逐条认领防多窗口重复弹;
-    // 模块令牌防重入(HMR/闭包重建时旧 interval 叠加)。
+    // 代际令牌自愈:HMR/闭包重建首挂清旧代 interval 再启新代,旧代不滞留不叠加
     const NOTIFY_POLL_MS = 5 * 1000
     const NOTIFY_TOAST_MS = 6 * 1000
     const KEY_POLL_TOKEN = 'usage-panel:notify-poll'
     if (toast) {
-      if (window[KEY_POLL_TOKEN] === true) {
-        console.warn('[dsh-usage-panel] 通知轮询已存在,跳过重复启动')
-      } else {
-        window[KEY_POLL_TOKEN] = true
-        setInterval(() => {
-          api('/api/usage-panel/notifications')
+      // 句柄存在即清:旧版遗留布尔令牌传入 clearInterval 为无害空操作,顺带清偿旧形态
+      if (window[KEY_POLL_TOKEN] !== undefined) clearInterval(window[KEY_POLL_TOKEN])
+      window[KEY_POLL_TOKEN] = setInterval(() => {
+        api('/api/usage-panel/notifications')
             .then((payload) => {
               const units = payload && Array.isArray(payload.units) ? payload.units : []
               const liveIds = new Set(units.map((unit) => unit.id))
@@ -101,8 +121,7 @@ window.__ModuleLoader__.load({
               }
             })
             .catch(() => {})
-        }, NOTIFY_POLL_MS)
-      }
+      }, NOTIFY_POLL_MS)
     }
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → plan);
@@ -113,87 +132,160 @@ window.__ModuleLoader__.load({
     else window.__navicIconQueue = [NAV_ICON]
 
 const CSS = [
-  '.up-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; }',
+  // 设计令牌:状态色语义固定,面层色走宿主变量保暗亮自适应
+  '.up-panel { --up-warn:#d97706; --up-surface:var(--dsw-alias-surface-primary, #1b1d21);',
+  '  --up-border:var(--dsw-alias-separator-primary, rgba(128,128,128,0.28));',
+  '  --up-muted:var(--dsw-alias-label-secondary, rgba(160,166,178,0.9));',
+  '  --up-ok:var(--dsw-alias-state-success-primary, #1a9e55);',
+  '  --up-err:var(--dsw-alias-state-error-primary, #d43a3a);',
+  '  --up-focus:var(--dsw-alias-state-focus-primary, #4c8dff);',
+  '  display:flex; flex-direction:column; gap:14px; color:inherit; font-size:13px; }',
+  // ---- 顶栏 ----
+  '.up-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+  '.up-head__title { font-weight:600; font-size:15px; letter-spacing:0.2px; }',
+  '.up-head__hint { color:var(--up-muted); font-size:12px; }',
+  '.up-spacer { flex:1; }',
+  // ---- 按钮体系:实底主按钮 / ghost 次按钮 / 危险红调 ----
+  '.up-btn { cursor:pointer; border:1px solid var(--up-border); background:transparent;',
+  '  color:inherit; border-radius:8px; padding:5px 12px; font-size:12px; font-family:inherit;',
+  '  transition:background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, transform 0.15s ease; }',
+  '.up-btn:hover { border-color:var(--up-focus); background:rgba(128,148,180,0.12); }',
+  '.up-btn:active { transform:translateY(1px); }',
+  '.up-btn:disabled { opacity:0.45; cursor:default; transform:none; }',
+  '.up-btn:focus-visible { outline:2px solid var(--up-focus); outline-offset:2px; }',
+  '.up-btn--primary { background:var(--up-focus); border-color:var(--up-focus); color:#fff; font-weight:600; }',
+  '.up-btn--primary:hover { background:var(--up-focus); opacity:0.88; }',
+  '.up-btn--danger { color:var(--up-err); border-color:color-mix(in srgb, var(--up-err) 45%, transparent); }',
+  '.up-btn--danger:hover { border-color:var(--up-err); background:color-mix(in srgb, var(--up-err) 12%, transparent); }',
+  // ---- 账号卡:透明底随宿主主题,边框定界,hover 极淡提层 ----
+  '.up-card { border:1px solid var(--up-border); border-radius:12px; padding:14px 16px;',
+  '  display:flex; flex-direction:column; gap:10px;',
+  '  transition:border-color 0.15s ease, background 0.15s ease; }',
+  '.up-card:hover { border-color:color-mix(in srgb, var(--up-focus) 40%, var(--up-border));',
+  '  background:rgba(128,148,180,0.06); }',
+  '.up-card__row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+  '.up-card__name { font-weight:600; font-size:15px; }',
+  // 平台徽章:按平台固定色相着色的胶囊 pill;缺省灰底(档位徽章与低调平台共用)
+  '.up-badge { font-size:10px; font-weight:500; padding:1px 7px; border-radius:999px;',
+  '  line-height:1.5; border:1px solid transparent; color:#fff;',
+  '  background:var(--up-badge-color, rgba(128,128,128,0.55)); }',
+  '.up-badge[data-type="deepseek"] { --up-badge-color:#4d6bfe; }',
+  '.up-badge[data-type="openrouter"] { --up-badge-color:#57565b; }',
+  '.up-badge[data-type="kimi"] { --up-badge-color:#0d9488; }',
+  '.up-badge[data-type="minimax"] { --up-badge-color:#ea580c; }',
+  '.up-badge[data-type="newapi"] { --up-badge-color:#8b5cf6; }',
+  // ---- 读数行:标签 + 渐变进度条 + 等宽数字 ----
+  '.up-reading { display:flex; flex-direction:column; gap:6px; }',
+  '.up-row { display:flex; align-items:center; gap:10px; position:relative; }',
+  '.up-row__label { width:52px; flex:none; font-size:12px; color:var(--up-muted); white-space:nowrap; }',
+  '.up-bar { flex:1; min-width:120px; max-width:320px; height:8px; border-radius:999px; overflow:hidden; flex:none;',
+  '  background:var(--up-border); }',
+  '.up-bar__fill { display:block; height:100%; border-radius:999px;',
+  '  background:linear-gradient(90deg, var(--up-ok), color-mix(in srgb, var(--up-ok) 72%, #3ddc84));',
+  '  transition:width 0.4s ease; }',
+  '.up-bar__fill--warn { background:linear-gradient(90deg, var(--up-warn), #f0a13e); }',
+  '.up-bar__fill--crit { background:linear-gradient(90deg, var(--up-err), #f0574f); }',
+  '.up-pct { font-variant-numeric:tabular-nums; font-weight:600; font-size:13px; min-width:44px; text-align:right; }',
+  // ---- 数字与状态色 ----
+  '.up-meta { color:var(--up-muted); font-size:12px; line-height:1.6; }',
+  '.up-error { color:var(--up-err); font-size:12px; }',
+  '.up-ok { color:var(--up-ok); }',
+  '.up-warn { color:var(--up-warn); }',
+  '.up-num { font-variant-numeric:tabular-nums; }',
+  '.up-amount { font-variant-numeric:tabular-nums; font-weight:600; font-size:14px; }',
+  '.up-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:5px; vertical-align:middle;',
+  '  background:var(--up-ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--up-ok) 18%, transparent); }',
+  '.up-dot--off { background:var(--up-err); box-shadow:0 0 0 3px color-mix(in srgb, var(--up-err) 18%, transparent); }',
+  // ---- 悬浮提示(读数明细) ----
+  '.up-tip { position:absolute; top:calc(100% + 8px); left:0; visibility:hidden; opacity:0;',
+  '  transition:opacity 0.15s ease; background:rgba(22,24,28,0.94); color:#f0f1f3;',
+  '  font-size:11px; line-height:1.7; padding:7px 11px; border-radius:9px; white-space:nowrap; text-align:left;',
+  '  z-index:40; pointer-events:none; box-shadow:0 6px 20px rgba(0,0,0,0.35); }',
+  '.up-row:hover .up-tip { visibility:visible; opacity:1; }',
+  // ---- 趋势弹层:毛玻璃 ----
   '.up-trend { position:absolute; top:calc(100% + 8px); left:0; visibility:hidden; opacity:0;',
-  '  transition:opacity 0.12s ease; background:rgba(22,24,28,0.96); color:#f0f1f3;',
-  '  font-size:11px; line-height:1.6; padding:8px 10px; border-radius:8px; z-index:41;',
-  '  box-shadow:0 4px 16px rgba(0,0,0,0.3); }',
-  '.up-trend__title { font-weight:600; margin-bottom:4px; }',
+  '  transition:opacity 0.15s ease; background:rgba(24,26,31,0.86); color:#f0f1f3;',
+  '  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);',
+  '  border:1px solid rgba(255,255,255,0.12);',
+  '  font-size:11px; line-height:1.6; padding:10px 12px; border-radius:12px; z-index:41;',
+  '  box-shadow:0 10px 36px rgba(0,0,0,0.45); }',
+  '.up-trend__title { font-weight:600; margin-bottom:4px; font-size:12px; }',
   '.up-trend__chart { margin:2px 0 6px; }',
   '.up-trend__chart text { fill:currentColor; font-size:9px; }',
   '.up-trend__point:hover circle { r:4; }',
-  '.up-dialog-mask { position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60;',
-  '  display:flex; align-items:center; justify-content:center; }',
-  '.up-dialog { background:var(--dsw-alias-surface-primary, #1b1d21); color:inherit; border-radius:10px;',
-  '  padding:14px 16px; max-width:640px; width:90%; max-height:80vh; overflow:auto;',
-  '  display:flex; flex-direction:column; gap:8px; box-shadow:0 8px 32px rgba(0,0,0,0.4); }',
-  '.up-dialog table { border-collapse:collapse; width:100%; font-size:12px; }',
-  '.up-dialog th, .up-dialog td { text-align:left; padding:2px 8px;',
-  '  border-bottom:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.25)); }',
-  '.up-head { display:flex; align-items:center; gap:8px; }',
-  '.up-head__title { font-weight:600; font-size:14px; }',
-  '.up-head__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.up-btn { cursor:pointer; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); background:transparent;',
-  '  color:inherit; border-radius:6px; padding:3px 10px; font-size:12px; }',
-  '.up-btn:hover { opacity:0.8; }',
-  '.up-btn:disabled { opacity:0.45; cursor:default; }',
-  '.up-card { border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); border-radius:10px; padding:10px 12px;',
-  '  display:flex; flex-direction:column; gap:6px; }',
-  '.up-card__row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
-  '.up-reading { display:flex; flex-direction:column; gap:4px; }',
-  '.up-row { display:flex; align-items:center; gap:8px; position:relative; }',
-  '.up-row__label { width:60px; flex:none; font-size:12px; color:var(--dsw-alias-label-secondary); white-space:nowrap; }',
-  '.up-bar { width:140px; height:6px; border-radius:999px; overflow:hidden; flex:none;',
-  '  background:var(--dsw-alias-separator-primary, rgba(128,128,128,0.25)); }',
-  '.up-bar__fill { display:block; height:100%; border-radius:999px;',
-  '  background:var(--dsw-alias-state-success-primary, #1a9e55); }',
-  '.up-bar__fill--warn { background:#d97706; }',
-  '.up-bar__fill--crit { background:var(--dsw-alias-state-error-primary, #d43a3a); }',
-  '.up-tip { position:absolute; top:calc(100% + 8px); left:0; visibility:hidden; opacity:0;',
-  '  transition:opacity 0.12s ease; background:rgba(22,24,28,0.94); color:#f0f1f3;',
-  '  font-size:11px; line-height:1.7; padding:6px 10px; border-radius:8px; white-space:nowrap; text-align:left;',
-  '  z-index:40; pointer-events:none; box-shadow:0 4px 16px rgba(0,0,0,0.3); }',
-  '.up-row:hover .up-tip { visibility:visible; opacity:1; }',
-  '.up-card__name { font-weight:600; }',
-  '.up-badge { font-size:11px; padding:1px 6px; border-radius:999px;',
-  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); color:var(--dsw-alias-label-secondary); }',
-  '.up-spacer { flex:1; }',
-  '.up-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.up-error { color:var(--dsw-alias-state-error-primary, #d43a3a); font-size:12px; }',
-  '.up-ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
-  '.up-warn { color:#d97706; }',
-  '.up-num { font-variant-numeric:tabular-nums; }',
-  '.up-form { border:1px dashed var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); border-radius:10px; padding:12px;',
-  '  display:flex; flex-direction:column; gap:8px; }',
-  '.up-field { display:flex; flex-direction:column; gap:3px; }',
-  '.up-field__label { font-size:12px; color:var(--dsw-alias-label-secondary); }',
-  '.up-field input, .up-field select, .up-field textarea {',
-  '  background:transparent; color:inherit; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35));',
-  '  border-radius:6px; padding:4px 8px; font-size:13px; font-family:inherit; box-sizing:border-box; width:100%; }',
-  '.up-field textarea { font-family:ui-monospace, Consolas, monospace; font-size:12px; min-height:52px; resize:vertical; }',
-  '.up-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }',
-  '.up-notice { font-size:12px; padding:4px 8px; border-radius:6px;',
-  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
-  '.up-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
-  '.up-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:4px; vertical-align:middle;',
-  '  background:var(--dsw-alias-state-success-primary, #1a9e55); }',
-  '.up-dot--off { background:var(--dsw-alias-state-error-primary, #d43a3a); }',
   '.up-card:hover .up-trend { visibility:visible; opacity:1; }',
-  '.up-card { cursor:default; }',
+  '.up-card:hover { cursor:default; }',
+  // ---- 对话框:毛玻璃遮罩 + 提升卡片 ----
+  '.up-dialog-mask { position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:60;',
+  '  backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);',
+  '  display:flex; align-items:center; justify-content:center; }',
+  '.up-dialog { background:var(--up-surface); color:inherit; border:1px solid var(--up-border); border-radius:14px;',
+  '  padding:18px 20px; max-width:680px; width:90%; max-height:80vh; overflow:auto;',
+  '  display:flex; flex-direction:column; gap:10px; box-shadow:0 16px 48px rgba(0,0,0,0.5); }',
+  '.up-dialog table { border-collapse:collapse; width:100%; font-size:12px; }',
+  '.up-dialog th, .up-dialog td { text-align:left; padding:4px 10px;',
+  '  border-bottom:1px solid var(--up-border); }',
+  '.up-dialog th { color:var(--up-muted); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }',
+  // ---- 表单:透明底与宿主融合 ----
+  '.up-form { border:1px solid var(--up-border); border-radius:12px; padding:16px;',
+  '  display:flex; flex-direction:column; gap:10px; }',
+  '.up-form--nested { border-style:dashed; }',
+  '.up-field { display:flex; flex-direction:column; gap:4px; }',
+  '.up-field__label { font-size:12px; color:var(--up-muted); }',
+  '.up-field input, .up-field select, .up-field textarea {',
+  '  background:transparent; color:inherit; border:1px solid var(--up-border);',
+  '  border-radius:8px; padding:6px 10px; font-size:13px; font-family:inherit; box-sizing:border-box; width:100%;',
+  '  transition:border-color 0.15s ease, box-shadow 0.15s ease; }',
+  '.up-field input:hover, .up-field select:hover, .up-field textarea:hover { border-color:color-mix(in srgb, var(--up-focus) 45%, var(--up-border)); }',
+  '.up-field input:focus-visible, .up-field select:focus-visible, .up-field textarea:focus-visible {',
+  '  outline:none; border-color:var(--up-focus); box-shadow:0 0 0 3px color-mix(in srgb, var(--up-focus) 22%, transparent); }',
+  '.up-field textarea { font-family:ui-monospace, Consolas, monospace; font-size:12px; min-height:52px; resize:vertical; }',
+  '.up-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }',
+  // ---- 通知与提示 ----
+  '.up-notice { font-size:12px; padding:7px 11px; border-radius:9px;',
+  '  border:1px solid var(--up-border); background:color-mix(in srgb, var(--up-err) 8%, transparent); }',
+  '.up-notice--error { color:var(--up-err); border-color:color-mix(in srgb, var(--up-err) 35%, transparent); }',
+  // ---- 折叠卡:details/summary 原生折叠,摘要行常显状态 ----
+  '.up-fold > summary { list-style:none; cursor:pointer; display:flex; align-items:center; gap:8px;',
+  '  border-radius:8px; transition:opacity 0.15s ease; }',
+  '.up-fold > summary::-webkit-details-marker { display:none; }',
+  '.up-fold > summary:hover { opacity:0.8; }',
+  '.up-fold > summary::after { content:""; width:6px; height:6px; flex:none; margin-left:auto; opacity:0.5;',
+  '  border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor;',
+  '  transform:rotate(-45deg); transition:transform 0.15s ease; }',
+  '.up-fold[open] > summary::after { transform:rotate(45deg); }',
+  '.up-fold:not([open]) { padding:10px 16px; }',
+  // ---- 分区标题(通知卡内分组) ----
+  '.up-section { display:flex; flex-direction:column; gap:8px; }',
+  '.up-section__title { font-size:11px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase;',
+  '  color:var(--up-muted); padding-bottom:4px; border-bottom:1px solid var(--up-border); }',
+  // ---- IM 目标列表行 ----
+  '.up-list { display:flex; flex-direction:column; }',
+  '.up-list__item { display:flex; align-items:center; gap:10px; padding:6px 2px; border-bottom:1px solid var(--up-border); }',
+  '.up-list__item:last-child { border-bottom:none; }',
+  '.up-list__grow { flex:1; font-size:12px; }',
+  '.up-list__tag { font-size:11px; color:var(--up-muted); }',
+  // ---- chips:已绑 bot 管理 ----
+  '.up-chip { display:inline-flex; align-items:center; gap:2px; font-size:11px; padding:2px 4px 2px 9px; border-radius:999px;',
+  '  border:1px solid var(--up-border); background:color-mix(in srgb, var(--up-focus) 7%, transparent); }',
+  '.up-chip__name { cursor:pointer; border:none; background:transparent; color:inherit; padding:1px 2px; font-size:11px; font-family:inherit; }',
+  '.up-chip__name--active { color:var(--up-focus); font-weight:600; }',
+  '.up-chip__name:focus-visible { outline:2px solid var(--up-focus); outline-offset:1px; border-radius:4px; }',
+  '.up-chip__x { cursor:pointer; border:none; background:transparent; color:var(--up-muted); padding:0 5px; font-size:12px; border-radius:50%; line-height:1.4; }',
+  '.up-chip__x:hover { color:var(--up-err); }',
+  '.up-chip__x:focus-visible { outline:2px solid var(--up-focus); outline-offset:1px; }',
+  // ---- 布尔开关:规约形态(track 胶囊 + thumb 圆点,状态锚定 input) ----
   '.up-switch { display:inline-flex; align-items:center; gap:6px; cursor:pointer; position:relative; }',
   '.up-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
   '.up-switch__track { width:30px; height:16px; border-radius:999px; flex:none; position:relative;',
-  '  background:var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); transition:background 0.15s ease; }',
+  '  background:var(--up-border); transition:background 0.15s ease; }',
   '.up-switch__thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%;',
   '  background:#fff; transition:left 0.15s ease; }',
-  '.up-switch input[type="checkbox"]:checked + .up-switch__track { background:var(--dsw-alias-state-success-primary, #1a9e55); }',
+  '.up-switch input[type="checkbox"]:checked + .up-switch__track { background:var(--up-ok); }',
   '.up-switch input[type="checkbox"]:checked + .up-switch__track .up-switch__thumb { left:16px; }',
-  '.up-switch input[type="checkbox"]:focus-visible + .up-switch__track { outline:2px solid var(--dsw-alias-state-focus-primary, #4c8dff); outline-offset:2px; }',
+  '.up-switch input[type="checkbox"]:focus-visible + .up-switch__track { outline:2px solid var(--up-focus); outline-offset:2px; }',
   '.up-switch input[type="checkbox"]:disabled + .up-switch__track { opacity:0.45; }',
   '.up-switch:hover { opacity:0.85; }',
-  '.up-chip { display:inline-flex; align-items:center; gap:4px; font-size:11px; padding:1px 8px; border-radius:999px;',
-  '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
-  '.up-chip button { cursor:pointer; border:none; background:transparent; color:inherit; padding:0 2px; font-size:11px; }',
 ].join('\n')
 
 const TYPE_LABELS = {
@@ -355,8 +447,8 @@ function BalanceReading(props) {
       usedPct !== null
         ? h('span', { className: 'up-bar' },
             h('span', { className: 'up-bar__fill' + fillClass(usedPct), style: { width: barWidth(usedPct) } }))
-        : h('span', { className: 'up-num' }, main),
-      usedPct !== null ? h('span', { className: 'up-num ' + pctClass(usedPct) }, fmtPct(usedPct)) : null,
+        : h('span', { className: 'up-amount' }, main),
+      usedPct !== null ? h('span', { className: 'up-pct ' + pctClass(usedPct) }, fmtPct(usedPct)) : null,
       h(TipLines, { lines: [main].concat(tipLines) }),
     )
   })
@@ -384,7 +476,7 @@ function QuotaReading(props) {
       h('span', { className: 'up-row__label' }, win.label),
       h('span', { className: 'up-bar' },
         h('span', { className: 'up-bar__fill' + fillClass(win.utilization), style: { width: barWidth(win.utilization) } })),
-      h('span', { className: 'up-num ' + pctClass(win.utilization) }, fmtPct(win.utilization)),
+      h('span', { className: 'up-pct ' + pctClass(win.utilization) }, fmtPct(win.utilization)),
       h(TipLines, { lines: tipLines }),
     )
   })
@@ -419,12 +511,15 @@ function AccountCard(props) {
   return h('div', { className: 'up-card' },
     h('div', { className: 'up-card__row' },
       h('span', { className: 'up-card__name' }, account.name),
-      h('span', { className: 'up-badge' }, TYPE_LABELS[account.type] || account.type),
-      level ? h('span', { className: 'up-badge' }, level) : null,
+      h('span', { className: 'up-badge', 'data-type': account.type }, TYPE_LABELS[account.type] || account.type),
+      level ? h('span', { className: 'up-badge', 'data-type': 'custom' }, level) : null,
       h('span', { className: 'up-spacer' }),
       h('button', { className: 'up-btn', disabled: busy, onClick: props.onRefresh }, busy ? '查询中…' : '刷新'),
       h('button', { className: 'up-btn', disabled: busy, onClick: props.onEdit }, '编辑'),
-      h('button', { className: 'up-btn', disabled: busy, onClick: props.onDelete }, armed ? '确认删除' : '删除'),
+      h('button', {
+        className: 'up-btn' + (armed ? ' up-btn--danger' : ''),
+        disabled: busy, onClick: props.onDelete,
+      }, armed ? '确认删除' : '删除'),
     ),
     h('div', { className: 'up-card__row' }, h(ReadingView, { last: account.last })),
     h(TrendPopover, { accountName: account.name, sequences: props.sequences || {} }),
@@ -540,7 +635,7 @@ function AccountForm(props) {
     ),
     !isCustom ? h('div', { className: 'up-grid' },
       h('div', { className: 'up-field' },
-        h('label', { className: 'up-field__label' }, 'API 基础地址(留空用官方默认)'),
+        h('label', { className: 'up-field__label', title: '留空使用平台官方默认地址' }, 'API 基础地址'),
         h('input', {
           value: draft.baseUrl,
           onChange: (e) => patch({ baseUrl: e.target.value }),
@@ -548,7 +643,7 @@ function AccountForm(props) {
         }),
       ),
       h('div', { className: 'up-field' },
-        h('label', { className: 'up-field__label' }, 'API Key'),
+        h('label', { className: 'up-field__label', title: '仅存于本机配置,用于查询余额;已保存时留空保持不变' }, 'API Key'),
         h('input', {
           value: draft.apiKey,
           onChange: (e) => patch({ apiKey: e.target.value }),
@@ -557,7 +652,7 @@ function AccountForm(props) {
       ),
     ) : null,
     isCustom ? h('div', { className: 'up-field' },
-      h('label', { className: 'up-field__label' }, '完整请求 URL'),
+      h('label', { className: 'up-field__label', title: '自定义余额端点的完整地址' }, '请求 URL'),
       h('input', { value: draft.url, onChange: (e) => patch({ url: e.target.value }), placeholder: 'https://example.com/api/balance' }),
     ) : null,
     isCustom ? h('div', { className: 'up-grid' },
@@ -567,12 +662,12 @@ function AccountForm(props) {
           HTTP_METHODS.map((method) => h('option', { key: method, value: method }, method))),
       ),
       h('div', { className: 'up-field' },
-        h('label', { className: 'up-field__label' }, '请求体(非 GET 可选)'),
+        h('label', { className: 'up-field__label', title: '非 GET 请求的请求体,GET 留空' }, '请求体'),
         h('input', { value: draft.bodyText, onChange: (e) => patch({ bodyText: e.target.value }) }),
       ),
     ) : null,
     isCustom ? h('div', { className: 'up-field' },
-      h('label', { className: 'up-field__label' }, '请求头(JSON,Key 直填)'),
+      h('label', { className: 'up-field__label', title: 'JSON 对象;鉴权头(如 Authorization)直接填真实 Key' }, '请求头'),
       h('textarea', {
         value: draft.headersText,
         onChange: (e) => patch({ headersText: e.target.value }),
@@ -580,7 +675,10 @@ function AccountForm(props) {
       }),
     ) : null,
     isCustom ? h('div', { className: 'up-field' },
-      h('label', { className: 'up-field__label' }, '提取规则(JSON:remaining 必填,支持点路径 / add / subtract / divide)'),
+      h('label', {
+        className: 'up-field__label',
+        title: 'JSON 对象;remaining 必填,取值支持点路径与 add/subtract/divide 运算',
+      }, '提取规则'),
       h('textarea', {
         value: draft.extractText,
         onChange: (e) => patch({ extractText: e.target.value }),
@@ -588,6 +686,7 @@ function AccountForm(props) {
       }),
       h('button', {
         className: 'up-btn',
+        title: '一键填入 NewApi 站点的典型余额接口配置,按实际站点修改',
         onClick: () => patch({
           url: draft.url.length > 0 ? draft.url : 'https://你的站点/api/usage/token',
           method: 'GET',
@@ -596,11 +695,11 @@ function AccountForm(props) {
         }),
       }, '填入 NewApi 示例'),
     ) : null,
-    h('details', { className: 'up-form' },
-      h('summary', { className: 'up-field__label', style: { cursor: 'pointer' } }, '通知规则覆盖(留空继承全局)'),
+    h('details', { className: 'up-form up-form--nested' },
+      h('summary', { className: 'up-field__label', style: { cursor: 'pointer' }, title: '留空的字段继承全局通知配置' }, '通知规则覆盖'),
       h('div', { className: 'up-grid' },
         h('div', { className: 'up-field' },
-          h('label', { className: 'up-field__label' }, '用量阈值(%)(留空继承全局)'),
+          h('label', { className: 'up-field__label', title: '该账号窗口用量达到此百分比时通知;留空继承全局' }, '用量阈值(%)'),
           h('input', {
             type: 'number', min: 1, max: 100,
             value: draft.notifyQuota,
@@ -608,7 +707,7 @@ function AccountForm(props) {
             placeholder: '留空继承全局',
           })),
         h('div', { className: 'up-field' },
-          h('label', { className: 'up-field__label' }, '余额阈值(留空继承全局)'),
+          h('label', { className: 'up-field__label', title: '该账号可用余额低于此值时通知;留空继承全局' }, '余额阈值'),
           h('input', {
             type: 'number', min: 0,
             value: draft.notifyBalance,
@@ -617,14 +716,14 @@ function AccountForm(props) {
           })),
       ),
       h('div', { className: 'up-field' },
-        h('label', { className: 'up-field__label' }, '窗口重置通知'),
+        h('label', { className: 'up-field__label', title: '覆盖全局的窗口重置通知开关' }, '窗口重置通知'),
         h('select', { value: draft.notifyReset, onChange: (e) => patch({ notifyReset: e.target.value }) },
           NOTIFY_TRISTATE.map((item) => h('option', { key: item.value, value: item.value }, item.label))),
       ),
     ),
     error !== null ? h('div', { className: 'up-notice up-notice--error' }, error) : null,
     h('div', { className: 'up-card__row' },
-      h('button', { className: 'up-btn', onClick: submit }, draft.isNew ? '添加' : '保存'),
+      h('button', { className: 'up-btn up-btn--primary', onClick: submit }, draft.isNew ? '添加' : '保存'),
       h('button', { className: 'up-btn', onClick: props.onCancel }, '取消'),
     ),
   )
@@ -792,17 +891,22 @@ function TrendPopover(props) {
   )
 }
 
-// 布尔开关:原生 checkbox 保可访问性,视觉为 track 胶囊 + thumb 圆点(规约形态)
+// 布尔开关:原生 checkbox 保可访问性,视觉为 track 胶囊 + thumb 圆点(规约形态);
+// className/children 供列表行形态(如 IM 目录勾选行)扩展,title 为悬浮详解,checkbox 本体不外泄
 function Switch(props) {
-  return h('label', { className: 'up-switch' },
-    h('input', {
-      type: 'checkbox',
-      checked: props.checked === true,
-      disabled: props.disabled === true,
-      onChange: (e) => props.onChange(e.target.checked),
-    }),
-    h('span', { className: 'up-switch__track' }, h('span', { className: 'up-switch__thumb' })),
-    props.label ? h('span', { className: 'up-field__label' }, props.label) : null,
+  return h('label', {
+    className: 'up-switch' + (props.className ? ' ' + props.className : ''),
+    title: props.title,
+  },
+  h('input', {
+    type: 'checkbox',
+    checked: props.checked === true,
+    disabled: props.disabled === true,
+    onChange: (e) => props.onChange(e.target.checked),
+  }),
+  h('span', { className: 'up-switch__track' }, h('span', { className: 'up-switch__thumb' })),
+  props.label ? h('span', { className: 'up-field__label' }, props.label) : null,
+  props.children || null,
   )
 }
 
@@ -819,9 +923,9 @@ function NotifyConfigCard() {
   const [webhookUrl, setWebhookUrl] = useState('')
   const [quotaPct, setQuotaPct] = useState('')
   const [balanceThreshold, setBalanceThreshold] = useState('')
-  const [imBotId, setImBotId] = useState('')
-  const [imTargetId, setImTargetId] = useState('')
-  const [imCandidates, setImCandidates] = useState(null)
+  const [imBotIdDraft, setImBotIdDraft] = useState('')
+  const [imCatalog, setImCatalog] = useState(null)
+  const [imBusy, setImBusy] = useState(false)
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -868,28 +972,65 @@ function NotifyConfigCard() {
   function testIm() {
     api('/api/usage-panel/test-im', { method: 'POST', body: '{}' })
       .then((res) => {
-        const lines = res && Array.isArray(res.results) ? res.results.map((item) => item.botId + '/' + item.targetId + ' ' + (item.ok ? '成功' : '失败(' + item.detail + ')')) : [res && res.detail ? res.detail : '无响应']
-        notify('IM 测试:' + lines.join(';'), res && res.ok ? 'ok' : 'error')
+        if (!res || !Array.isArray(res.results)) {
+          notify('IM 测试失败:' + (res && res.detail ? res.detail : '无响应'), 'error')
+          return
+        }
+        const failed = res.results.filter((item) => !item.ok)
+        notify(failed.length === 0
+          ? 'IM 通知已全部送达(' + res.results.length + ' 个目标)'
+          : '部分失败:' + failed.map((item) => item.botId + '/' + item.targetId + ' ' + item.detail).join('; '),
+        failed.length === 0 ? 'ok' : 'error')
       })
       .catch((err) => notify('测试失败:' + (err && err.message ? err.message : String(err)), 'error'))
   }
-  function addImTarget(botId, targetId) {
-    if (!botId || !targetId) {
-      notify('botId 与 targetId 均不能为空', 'error')
+
+  // IM 目录加载:目录来自 dsh-im 已保存目标;失败(离线/ID 复制错误)如实展示错误码
+  async function loadImTargets(botIdOverride) {
+    const botId = (typeof botIdOverride === 'string' ? botIdOverride : imBotIdDraft).trim()
+    if (botId.length === 0) {
+      notify('请先粘贴 Bot ID(dsh-im 设置页 IM机器人 卡片)', 'error')
       return
     }
-    const targets = (config && Array.isArray(config.imTargets) ? config.imTargets : [])
-      .filter((item) => item.botId !== botId || item.targetId !== targetId)
-      .concat([{ botId, targetId }])
-    patch({ imTargets: targets })
+    setImBusy(true)
+    try {
+      const res = await api('/api/usage-panel/im-targets?botId=' + encodeURIComponent(botId))
+      const loaded = Array.isArray(res && res.targets) ? res.targets : []
+      setImCatalog({ botId, targets: loaded })
+      notify('已加载 ' + loaded.length + ' 个目标,勾选即保存', 'ok')
+    } catch (err) {
+      notify('加载失败:' + (err && err.message ? err.message : String(err)), 'error')
+    } finally { setImBusy(false) }
   }
-  function removeImTarget(botId, targetId) {
-    patch({ imTargets: (config && Array.isArray(config.imTargets) ? config.imTargets : []).filter((item) => item.botId !== botId || item.targetId !== targetId) })
+
+  // 勾选即存:整体替换 imTargets,序列号防连续操作竞态,只 POST {imTargets} 不触碰其他配置;
+  // 序列号驻 useRef 跨渲染保持,失败回填权威配置收敛 UI 与服务端(过期回填按序列号丢弃)
+  const imPersistSeq = useRef(0)
+  function persistImTargets(next, okMessage) {
+    const seq = ++imPersistSeq.current
+    setConfig((prev) => ({ ...prev, imTargets: next }))
+    api('/api/usage-panel/notify-config', { method: 'POST', body: JSON.stringify({ imTargets: next }) })
+      .then((res) => {
+        if (seq !== imPersistSeq.current) return
+        if (res && res.notify) setConfig(res.notify)
+        if (okMessage !== undefined) notify(okMessage, 'ok')
+      })
+      .catch((err) => {
+        notify('IM 目标保存失败:' + (err && err.message ? err.message : String(err)), 'error')
+        api('/api/usage-panel/notify-config')
+          .then((res) => { if (seq === imPersistSeq.current && res && res.notify) setConfig(res.notify) })
+          .catch(() => {})
+      })
   }
-  function loadCandidates() {
-    api('/api/usage-panel/im-targets?botId=' + encodeURIComponent(imBotId.trim()))
-      .then((res) => setImCandidates(Array.isArray(res && res.targets) ? res.targets : []))
-      .catch((err) => { setImCandidates([]); notify('加载投递目标失败:' + (err && err.message ? err.message : String(err)), 'error') })
+  function toggleImTarget(botId, target, checked) {
+    persistImTargets(toggleImTargetList(config.imTargets || [], botId, target.targetId, checked))
+  }
+  function removeImTarget(item) {
+    persistImTargets(removeImTargetFromList(config.imTargets || [], item.botId, item.targetId))
+  }
+  // 取消注册:移除该 bot 全部目标;bot 在 dsh-im 已删除时借此清理残留绑定
+  function unregisterImBot(botId) {
+    persistImTargets(unregisterImBotList(config.imTargets || [], botId), '已取消注册 ' + botId)
   }
 
   if (config === null) {
@@ -897,84 +1038,156 @@ function NotifyConfigCard() {
       h('div', { className: 'up-card__row' }, h('span', { className: 'up-head__title' }, '通知规则'), h('span', { className: 'up-meta' }, '加载中…')))
   }
   const targets = Array.isArray(config.imTargets) ? config.imTargets : []
-  return h('div', { className: 'up-card' },
-    h('div', { className: 'up-card__row' },
+  const boundBots = imBoundBotIds(targets)
+  // 通知配置一次即久,默认折叠:summary 摘要行常显状态,展开才是完整配置
+  return h('details', { className: 'up-card up-fold' },
+    h('summary', { className: 'up-fold__summary' },
       h('span', { className: 'up-head__title' }, '通知规则'),
-      h(Switch, { checked: config.enabled === true, label: '启用通知(越过阈值或窗口重置时推送)', onChange: (checked) => patch({ enabled: checked }) }),
-    ),
-    config.enabled !== true ? h('span', { className: 'up-meta' }, '通知关闭时刷新仅更新读数,不产生任何推送。') : null,
-    h('div', { className: 'up-card__row' },
-      h('span', { className: 'up-field__label' }, '用量阈值(%)'),
-      h('span', { className: 'up-field' },
-        h('input', {
-          type: 'number', min: 1, max: 100, style: { width: '70px' },
-          value: quotaPct !== '' ? quotaPct : '',
-          onChange: (e) => setQuotaPct(e.target.value),
-          placeholder: config.quotaThresholdPct === undefined ? '' : String(config.quotaThresholdPct),
-        })),
-      h('span', { className: 'up-field__label' }, '余额阈值(空=不启用)'),
-      h('span', { className: 'up-field' },
-        h('input', {
-          type: 'number', min: 0, style: { width: '90px' },
-          value: balanceThreshold !== '' ? balanceThreshold : '',
-          onChange: (e) => setBalanceThreshold(e.target.value),
-          placeholder: '如 20',
-        })),
-      h('button', { className: 'up-btn', onClick: saveThresholds }, '保存阈值'),
-      config.balanceThreshold === null || config.balanceThreshold === undefined
-        ? null
-        : h('button', { className: 'up-btn', onClick: () => patch({ balanceThreshold: null }) }, '清除余额阈值'),
-      h(Switch, { checked: config.resetNotice !== false, label: '窗口重置时通知上一窗口峰值', onChange: (checked) => patch({ resetNotice: checked }) }),
+      h('span', { className: 'up-dot' + (config.enabled === true ? '' : ' up-dot--off') }),
+      h('span', { className: 'up-meta' }, config.enabled === true ? '已启用' : '已关闭'),
+      targets.length > 0 ? h('span', { className: 'up-meta' }, targets.length + ' 个 IM 目标') : null,
+      config.webhookConfigured === true ? h('span', { className: 'up-meta' }, 'webhook 已配置') : null,
     ),
     h('div', { className: 'up-card__row' },
-      h(Switch, { checked: config.toast !== false, label: '页内 toast(toast 库未装载时此通道不可用)', onChange: (checked) => patch({ toast: checked }) }),
-      h('span', { className: 'up-spacer' }),
-      h('span', { className: 'up-field__label' }, 'webhook URL'),
-      h('span', { className: 'up-field' },
-        h('input', {
-          type: 'password', style: { width: '260px' },
-          value: webhookUrl,
-          onChange: (e) => setWebhookUrl(e.target.value),
-          placeholder: config.webhookConfigured === true ? '已配置,留空保持不变' : 'https://hooks.example.com/…',
-        })),
-      h('button', {
-        className: 'up-btn',
-        onClick: () => {
-          if (webhookUrl.trim().length === 0) {
-            if (config.webhookConfigured !== true) { notify('请先填写 webhook URL', 'error'); return }
-            testWebhook()
-            return
-          }
-          const part = { webhookUrl: webhookUrl.trim() }
-          api('/api/usage-panel/notify-config', { method: 'POST', body: JSON.stringify(part) })
-            .then((res) => { apply(res); setWebhookUrl(''); testWebhook() })
-            .catch(fail)
-        },
-      }, webhookUrl.trim().length > 0 ? '保存并测试' : '测试'),
+      h(Switch, {
+        checked: config.enabled === true,
+        label: '启用通知',
+        title: '越过用量/余额阈值或窗口重置时推送;关闭后刷新仅更新读数,不产生任何推送',
+        onChange: (checked) => patch({ enabled: checked }),
+      }),
     ),
-    h('div', { className: 'up-card__row' },
-      h('span', { className: 'up-spacer' }),
-      h('span', { className: 'up-field__label' }, 'dsh-im 投递目标'),
+    // 阈值分区
+    h('div', { className: 'up-section' },
+      h('span', { className: 'up-section__title' }, '阈值'),
+      h('div', { className: 'up-card__row' },
+        h('span', { className: 'up-field__label', title: '任一窗口用量达到该百分比时通知' }, '用量阈值(%)'),
+        h('span', { className: 'up-field' },
+          h('input', {
+            type: 'number', min: 1, max: 100, style: { width: '70px' },
+            value: quotaPct !== '' ? quotaPct : '',
+            onChange: (e) => setQuotaPct(e.target.value),
+            placeholder: config.quotaThresholdPct === undefined ? '' : String(config.quotaThresholdPct),
+          })),
+        h('span', { className: 'up-field__label', title: '可用余额低于该值时通知;留空不启用' }, '余额阈值'),
+        h('span', { className: 'up-field' },
+          h('input', {
+            type: 'number', min: 0, style: { width: '90px' },
+            value: balanceThreshold !== '' ? balanceThreshold : '',
+            onChange: (e) => setBalanceThreshold(e.target.value),
+            placeholder: '如 20',
+          })),
+        h('button', { className: 'up-btn up-btn--primary', onClick: saveThresholds }, '保存阈值'),
+        config.balanceThreshold === null || config.balanceThreshold === undefined
+          ? null
+          : h('button', { className: 'up-btn up-btn--danger', onClick: () => patch({ balanceThreshold: null }) }, '清除余额阈值'),
+      ),
+      h(Switch, {
+        checked: config.resetNotice !== false,
+        label: '窗口重置通知',
+        title: '用量窗口轮转时,通知上一窗口的峰值用量',
+        onChange: (checked) => patch({ resetNotice: checked }),
+      }),
+    ),
+    // 通道分区
+    h('div', { className: 'up-section' },
+      h('span', { className: 'up-section__title' }, '推送通道'),
+      h(Switch, {
+        checked: config.toast !== false,
+        label: '页内 toast',
+        title: '浏览器页内弹窗提醒;toast 库未装载时此通道不可用',
+        onChange: (checked) => patch({ toast: checked }),
+      }),
+      h('div', { className: 'up-card__row' },
+        h('span', { className: 'up-field__label', title: 'host 直发的 Slack 兼容 JSON 通知;填新地址保存后自动发送测试' }, 'Webhook'),
+        config.webhookConfigured === true ? h('span', { className: 'up-dot', title: '已配置' }) : null,
+        h('span', { className: 'up-field' },
+          h('input', {
+            type: 'password', style: { width: '260px' },
+            value: webhookUrl,
+            onChange: (e) => setWebhookUrl(e.target.value),
+            placeholder: config.webhookConfigured === true ? '已配置,留空保持不变' : 'https://hooks.example.com/…',
+          })),
+        h('button', {
+          className: 'up-btn',
+          onClick: () => {
+            if (webhookUrl.trim().length === 0) {
+              if (config.webhookConfigured !== true) { notify('请先填写 webhook URL', 'error'); return }
+              testWebhook()
+              return
+            }
+            const part = { webhookUrl: webhookUrl.trim() }
+            api('/api/usage-panel/notify-config', { method: 'POST', body: JSON.stringify(part) })
+              .then((res) => { apply(res); setWebhookUrl(''); testWebhook() })
+              .catch(fail)
+          },
+        }, webhookUrl.trim().length > 0 ? '保存并测试' : '测试'),
+      ),
+      // IM 通道:目标来自 dsh-im 已保存目录,勾选即自动保存;新建与平台测试在 dsh-im 设置页完成
       imAvailable ? null : h('span', { className: 'up-meta' }, 'dsh-im 未安装,IM 通道不可用'),
+      imAvailable ? h('div', { className: 'up-section' },
+        h('div', { className: 'up-card__row' },
+          h('span', { className: 'up-field__label', title: '经 dsh-im 推送到微信等渠道;目标在其设置页创建,此处勾选绑定' }, 'IM 投递'),
+          h('span', { className: 'up-spacer' }),
+          h('button', { className: 'up-btn', disabled: imBusy || targets.length === 0, onClick: testIm }, '测试 IM'),
+        ),
+        h('div', { className: 'up-card__row' },
+          h('span', { className: 'up-field' },
+            h('input', {
+              value: imBotIdDraft,
+              onChange: (e) => setImBotIdDraft(e.target.value),
+              placeholder: '粘贴 Bot ID',
+              title: '从 dsh-im 设置页「IM机器人」卡片复制 Bot ID,加载其已保存的投递目标目录',
+              style: { width: '240px' },
+            })),
+          h('button', { className: 'up-btn', disabled: imBusy, title: '拉取该 bot 在 dsh-im 已保存的投递目标,勾选即保存', onClick: () => void loadImTargets() }, '加载目标'),
+        ),
+        boundBots.length > 0 ? h('div', { className: 'up-card__row' },
+          h('span', { className: 'up-field__label' }, '已绑 bot'),
+          boundBots.map((botId) => h('span', { className: 'up-chip', key: botId },
+            h('button', {
+              className: 'up-chip__name'
+                + (imCatalog !== null && imCatalog.botId === botId ? ' up-chip__name--active' : ''),
+              disabled: imBusy,
+              onClick: () => { setImBotIdDraft(botId); void loadImTargets(botId) },
+            }, botId),
+            h('button', {
+              className: 'up-chip__x', disabled: imBusy, title: '取消注册(移除该 bot 全部目标)',
+              onClick: () => unregisterImBot(botId),
+            }, '×'),
+          )),
+        ) : null,
+        imCatalog !== null
+          ? imCatalog.targets.length === 0
+            ? h('span', { className: 'up-meta' }, '该 bot 尚无已保存投递目标,先在 dsh-im 设置页新建并测试')
+            : h('div', { className: 'up-list' },
+                imCatalog.targets.map((target) => {
+                  const checked = targets.some((item) => item.botId === imCatalog.botId && item.targetId === target.targetId)
+                  return h(Switch, {
+                    key: target.targetId,
+                    className: 'up-list__item',
+                    checked,
+                    onChange: (next) => toggleImTarget(imCatalog.botId, target, next),
+                  },
+                  h('span', { className: 'up-list__grow' },
+                    target.targetId + (target.name ? ' (' + target.name + ')' : '')),
+                  h('span', { className: 'up-list__tag' }, target.kind || ''),
+                  )
+                }),
+              )
+          : null,
+        targets.length === 0
+          ? h('span', { className: 'up-meta' }, '尚未绑定投递目标,通知不会推送 IM')
+          : h('div', { className: 'up-list' },
+              targets.map((item) => h('div', { className: 'up-list__item', key: imTargetKey(item) },
+                h('span', { className: 'up-list__grow' }, item.targetId),
+                h('span', { className: 'up-list__tag' }, item.botId),
+                h('button', {
+                  className: 'up-btn', disabled: imBusy, onClick: () => removeImTarget(item),
+                }, '移除'),
+              )),
+            ),
+      ) : null,
     ),
-    imAvailable ? h('div', { className: 'up-card__row' },
-      h('span', { className: 'up-field' }, h('input', { value: imBotId, onChange: (e) => setImBotId(e.target.value), placeholder: 'botId(如 wx_xxx)', style: { width: '150px' } })),
-      h('span', { className: 'up-field' }, h('input', { value: imTargetId, onChange: (e) => setImTargetId(e.target.value), placeholder: 'targetId(如 owner)', style: { width: '130px' } })),
-      h('button', { className: 'up-btn', disabled: imBotId.trim().length === 0, onClick: loadCandidates }, '加载目标'),
-      h('button', { className: 'up-btn', onClick: () => addImTarget(imBotId.trim(), imTargetId.trim()) }, '添加'),
-      h('button', { className: 'up-btn', onClick: testIm }, '测试 IM'),
-      targets.map((item) => h('span', { className: 'up-chip', key: item.botId + '/' + item.targetId },
-        item.botId + '/' + item.targetId,
-        h('button', { onClick: () => removeImTarget(item.botId, item.targetId), title: '移除' }, '×'),
-      )),
-    ) : null,
-    imAvailable && imCandidates !== null ? h('div', { className: 'up-card__row' },
-      imCandidates.length === 0 ? h('span', { className: 'up-meta' }, '该 bot 无已保存投递目标') :
-        imCandidates.map((item) => h('button', {
-          className: 'up-btn', key: item.targetId,
-          onClick: () => addImTarget(imBotId.trim(), item.targetId),
-        }, '+ ' + (item.name || item.targetId) + '(' + item.kind + ')')),
-    ) : null,
     error !== null ? h('div', { className: 'up-notice up-notice--error' }, error) : null,
   )
 }
@@ -1112,7 +1325,7 @@ function UsagePanelApp() {
     h('div', { className: 'up-head' },
       h('span', { className: 'up-head__title' }, '账号详情'),
       h('span', { className: 'up-spacer' }),
-      h('label', { className: 'up-field__label' }, '轮询间隔(秒)'),
+      h('label', { className: 'up-field__label', title: '自动刷新全部账号读数的间隔秒数;过短可能触发平台限流' }, '轮询间隔(秒)'),
       h('span', { className: 'up-field' },
         h('input', {
           type: 'number', min: 1, style: { width: '80px' },
@@ -1121,8 +1334,8 @@ function UsagePanelApp() {
         }),
       ),
       h('button', { className: 'up-btn', disabled: pollIntervalSec === null, onClick: () => savePollInterval(pollIntervalSec) }, '保存间隔'),
-      h('button', { className: 'up-btn', disabled: anyBusy || accounts.length === 0, onClick: refreshAll }, '全部刷新'),
-      h('button', { className: 'up-btn', onClick: () => setEditing({ isNew: true, id: null }) }, '添加账号'),
+      h('button', { className: 'up-btn', title: '手动查询全部账号并更新读数', disabled: anyBusy || accounts.length === 0, onClick: refreshAll }, '全部刷新'),
+      h('button', { className: 'up-btn up-btn--primary', onClick: () => setEditing({ isNew: true, id: null }) }, '添加账号'),
     ),
     pollArmed === false ? h('div', { className: 'up-notice up-notice--error' },
       '自动轮询未运行(宿主定时服务不可用);手动查询不受影响。') : null,
