@@ -8,13 +8,17 @@
  *     --allow-fresh  pnpm install 放行 minimumReleaseAge 宽限期策略(仅限自家刚发布的包)
  *
  * 统一规则(唯一的合法形态,禁止第三种状态):
- *   - profile 依赖行一律 semver(^线上最新版),link:/file:/本地路径一律被本脚本归一清除
- *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径
+ *   - 已发布包:profile 依赖行一律 semver(^线上最新版),link:/file:/本地路径一律被本脚本归一清除
+ *   - 未发布包(线上 404):依赖行 = file 协议直指仓库工作副本,不强制发布;junction 照挂,
+ *     线上出版本后重跑本脚本自动归一 ^latest
+ *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径(未发布包的
+ *     file 行除外——它同时承担 pnpm 依赖解析)
  *   - 依赖行版本以 npm 线上 latest 为准,本地 manifest 未发布的版本不影响依赖行
  *   - pnpm-workspace.yaml 的 minimumReleaseAgeExclude 由本脚本全量重写为各包线上版本并集
  *     (pnpm 只认精确版本并集,^ ~ * 均拒绝),新发版本重跑即纳入,清单永不过期
- *   - 终态校验不过即退出码 1:依赖行必须等于 ^线上最新,挂载必须是指向仓库的 junction,
- *     pnpm install 必须成功 —— 不存在"看起来 link 了"的中间态
+ *   - 终态校验不过即退出码 1:已发布包依赖行必须等于 ^线上最新,未发布包必须等于
+ *     file 仓库路径,挂载必须是指向仓库的 junction,pnpm install 必须成功 ——
+ *     不存在"看起来 link 了"的中间态
  *
  * 原理与约束:
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
@@ -70,17 +74,23 @@ function readProfileManifest() {
   return JSON.parse(readFileSync(profileManifest, 'utf8').replace(/^\uFEFF/, ''))
 }
 
-/** npm 线上 latest;查询失败直接中止,防止网络故障被当成版本回退 */
+/** npm 线上 latest;网络故障等非 404 失败直接中止,防止被当成版本回退;404(未发布)返回 null */
 function onlineLatest(name) {
   const r = spawnSync([npmCmd(), 'view', name, 'version', '--registry', REGISTRY].join(' '), {
     encoding: 'utf8',
     shell: true,
   })
   if (r.status !== 0) {
+    if (/\bE404\b|404 Not Found/.test(r.stderr)) return null
     console.error(`FAIL ${name}: 线上版本查询失败,中止:\n${r.stderr}`)
     process.exit(1)
   }
   return r.stdout.trim()
+}
+
+/** 未发布包的依赖行:file 协议直指仓库工作副本,junction 照挂,发布后重跑自动归一 ^latest */
+function fileSpec(dir) {
+  return `file:${join(repoRoot, 'packages', dir).replace(/\\/g, '/')}`
 }
 
 /**
@@ -94,7 +104,7 @@ function syncReleaseAgeExclude(packages, latests) {
   const lines = []
   for (const dir of packages) {
     const key = SCOPE + dir
-    const latest = latests[dir] ?? onlineLatest(key)
+    const latest = latests[dir] !== undefined ? latests[dir] : onlineLatest(key)
     if (latest === null) {
       console.log(`SKIP ${key}: 线上无版本,不进豁免清单`)
       continue
@@ -152,7 +162,8 @@ function normalizeDeps(packages) {
   for (const dir of packages) {
     const key = SCOPE + dir
     latests[dir] = onlineLatest(key)
-    const want = `^${latests[dir]}`
+    // 未发布包(线上 404)不强制发布:依赖行走 file 协议,junction 照挂,发布后重跑自动归一 ^latest
+    const want = latests[dir] === null ? fileSpec(dir) : `^${latests[dir]}`
     const current = manifest.dependencies[key]
     if (current === want) {
       console.log(`OK   ${key}: ${want}`)
@@ -214,8 +225,8 @@ function verifyAll(packages, latests, unlink, scope) {
     const key = SCOPE + dir
     // 单包模式只校验指定包,其余包终态不随之校验
     if (!scope.includes(dir)) continue
-    const latest = latests[dir] ?? onlineLatest(key)
-    const want = `^${latest}`
+    const latest = latests[dir] !== undefined ? latests[dir] : onlineLatest(key)
+    const want = latest === null ? fileSpec(dir) : `^${latest}`
     const dep = manifest.dependencies[key]
     if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
 
