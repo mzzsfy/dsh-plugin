@@ -142,6 +142,11 @@ window.__ModuleLoader__.load({
       show,
       dismiss,
       mount,
+      // 浏览器 cordis loader 经裸名 id 装载本包的宿主占位条目(树内 insert,name
+      // = 包名,模块表 stripClientSuffix 后裸名与 /client 共享同一记录),要求本
+      // 导出呈插件形态;缺 apply 即判 invalid plugin 拖垮整树。装载体为空:容器
+      // 惰性自举在首次 show 时发生,无需生命周期介入
+      apply() {},
       __test: { show, dismiss, source, normalizeKind, resolveHoldMs, getItems: () => items },
     }
   },
