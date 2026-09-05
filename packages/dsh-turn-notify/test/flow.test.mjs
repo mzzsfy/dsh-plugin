@@ -44,7 +44,6 @@ function loadClient({ storage, payload, onFetch }) {
   }
   const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {}, useSyncExternalStore: () => [] }
   const requireStub = (name) => {
-    if (name === 'react-dom') return { createPortal: () => null }
     // 页内通知通道出口:公共依赖 @mzzsfy/dsh-toast 的捕获桩
     if (name === '@mzzsfy/dsh-toast/client') {
       return { show: (text, opts) => { shown.push({ text, opts }); return shown.length } }

@@ -5,10 +5,11 @@
 # The dsh-toast row mounts the shared notification dependency's placeholder
 # (that package declares no patch of its own and ships as a plain dependency;
 # this row brings its client half into the client module table for the
-# external require).
+# external require). The placeholder id is prefixed with this plugin's id so
+# multiple consumer plugins can coexist; `name` is the module-table key.
 
 - insert:
     - id: turn-notify
       name: '@mzzsfy/dsh-turn-notify'
-    - id: dsh-toast
+    - id: turn-notify-dsh-toast
       name: '@mzzsfy/dsh-toast'
