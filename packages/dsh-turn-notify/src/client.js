@@ -1014,7 +1014,7 @@ window.__ModuleLoader__.load({
           const raw = typeof config.minTurnDurationMs === 'string'
             ? config.minTurnDurationMs.trim()
             : String(config.minTurnDurationMs)
-          if (raw.length === 0) throw new Error('碎轮过滤毫秒数不能为空')
+          if (raw.length === 0) throw new Error('最短回合时长不能为空')
           const trimmedUrl = urlDraft.trim()
           // imTargets 由勾选单独即时保存,不随此入口提交
           const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, sessionHighlight: config.sessionHighlight !== false }
@@ -1086,7 +1086,7 @@ window.__ModuleLoader__.load({
           return
         }
         if (current !== 'granted') {
-          patch('Notification 不可用或已被拒(HTTP 非回环或曾拒绝),已自动降级', 'error')
+          patch('Notification 不可用或未授权(HTTP 非回环地址或曾被拒绝),已改为标题闪烁', 'error')
           return
         }
         patch('请在 ' + Math.round(SYSTEM_TEST_DELAY_MS / 1000) + ' 秒内切出本窗口,随后到达的才是系统通知')
@@ -1231,7 +1231,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'tn-panel' },
         h('div', { className: 'tn-head' },
           h('span', { className: 'tn-head__title' }, '消息通知'),
-          h('span', { className: 'tn-head__hint' }, '配置存 host 热生效;标签页全关时仅 webhook 与 IM 送达'),
+          h('span', { className: 'tn-head__hint' }, '保存即生效;标签页全关时仅 webhook 与 IM 送达'),
         ),
         h('div', { className: 'tn-tabs', role: 'tablist' },
           tabs.map((item) => h('button', {
@@ -1247,7 +1247,7 @@ window.__ModuleLoader__.load({
           activeTab === '通知' ? h('div', { className: 'tn-card' },
             h('div', { className: 'tn-card__head' },
               h('span', { className: 'tn-card__title' }, '通知配置'),
-              h('span', { className: 'tn-card__sub' }, '回合事件触发条件,数值改动需保存'),
+              h('span', { className: 'tn-card__sub' }, '六类事件的触发与过滤;开关即时生效,数值改动需点保存'),
             ),
             field('webhook', [
               h('input', {
@@ -1260,15 +1260,15 @@ window.__ModuleLoader__.load({
                 ? h('button', { className: 'tn-btn tn-btn--danger', disabled: busy, onClick: () => void clearWebhook() }, '清除')
                 : null,
             ], 'URL 只写不回显'),
-            field('碎轮过滤', [
+            field('最短回合时长', [
               h('input', {
                 className: 'tn-input', type: 'number', min: 0, step: 500, style: { width: '90px' },
                 value: config.minTurnDurationMs,
                 onChange: (e) => setConfig({ ...config, minTurnDurationMs: e.target.value }),
               }),
-              h('span', { className: 'tn-meta' }, '毫秒,短于此值的 turn/end 回合不通知'),
+              h('span', { className: 'tn-meta' }, '毫秒,回合结束类通知短于此时长不送达;提问与审批请求即时送达'),
             ]),
-            field('豁免', [
+            field('子代理过滤', [
               h('label', { className: 'tn-meta tn-switch' },
                 ...switchToggle({
                   checked: config.rootsOnly,
@@ -1280,7 +1280,7 @@ window.__ModuleLoader__.load({
                   checked: config.suppressSubagentWake,
                   onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
                 }),
-                ' 子代理回执静默'),
+                ' 后台委托未收尾或收尾唤醒的回合不通知(仅完成类)'),
             ]),
             field('事件分类', h('div', { className: 'tn-pills' },
               CATEGORIES.map((category) => h('span', {
@@ -1302,7 +1302,7 @@ window.__ModuleLoader__.load({
           activeTab === '偏好' ? h('div', { className: 'tn-card' },
             h('div', { className: 'tn-card__head' },
               h('span', { className: 'tn-card__title' }, '本机偏好'),
-              h('span', { className: 'tn-card__sub' }, '仅存当前浏览器,不影响其他窗口'),
+              h('span', { className: 'tn-card__sub' }, '仅存当前浏览器(同浏览器各窗口共用),不影响其他浏览器与设备'),
             ),
             field('提示音', [
               h('label', { className: 'tn-meta tn-switch' },
@@ -1321,7 +1321,7 @@ window.__ModuleLoader__.load({
                   onClick: () => toggleSoundCategory(category),
                 }, CATEGORY_LABELS[category])),
               ),
-            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示与系统弹窗不受影响。'),
+            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示与会话高亮不受影响;被静音分类的系统弹窗与标题闪烁随之静默。'),
             field('系统弹窗', [
               h('label', { className: 'tn-meta tn-switch' },
                 ...switchToggle({
@@ -1357,7 +1357,7 @@ window.__ModuleLoader__.load({
                   defaultChecked: localGet(KEY_DEGRADE_HINT) !== '0',
                   onChange: (e) => localSet(KEY_DEGRADE_HINT, e.target.checked ? '1' : '0'),
                 }),
-                ' 降级时标题闪烁'),
+                ' 弹窗不可用时以标题闪烁替代'),
             ]),
           ) : null,
           activeTab === '音效' ? [

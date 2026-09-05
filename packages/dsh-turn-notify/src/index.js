@@ -72,14 +72,14 @@ const hasActiveChild = (map, parentSessionId) => {
 
 // 注册即声明 GUI 设置表单,schema 默认值即生效默认值;webhookUrl 属凭据标 secret。
 const SETTINGS_SCHEMA = z.object({
-  webhookUrl: z.string().role('secret').default('').description('webhook 目标 URL(Slack-compatible {text}),留空禁用'),
-  minTurnDurationMs: z.number().default(MIN_TURN_DURATION_MS).description('回合最短时长过滤,毫秒,仅作用于 turn/end 类'),
+  webhookUrl: z.string().role('secret').default('').description('webhook 推送目标 URL,留空禁用'),
+  minTurnDurationMs: z.number().default(MIN_TURN_DURATION_MS).description('最短回合时长(毫秒),回合结束类通知短于此不送达;AI 提问与审批请求即时送达'),
   rootsOnly: z.boolean().default(true).description('子代理会话不通知'),
-  suppressSubagentWake: z.boolean().default(true).description('子代理完成唤醒或主代理等待子代理的回合不通知'),
-  enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六分类独立开关'),
-  soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每分类音效映射,空为内置默认,非空为上传音效 id'),
-  sessionHighlight: z.boolean().default(true).description('通知触发时高亮侧边栏会话行'),
-  imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 投递目标列表'),
+  suppressSubagentWake: z.boolean().default(true).description('子代理相关回合不通知(仅任务完成类):后台委托未收尾的回合与收尾唤醒的回合'),
+  enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
+  soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
+  sessionHighlight: z.boolean().default(true).description('通知送达时高亮侧边栏对应会话行'),
+  imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 推送目标列表,空数组禁用 IM 通道'),
 })
 
 // 读侧归一交由 core 的 resolvedConfig:字段类型异常回退默认值,与写路径校验宽松度一致
