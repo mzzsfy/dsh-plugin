@@ -627,6 +627,20 @@ window.__ModuleLoader__.load({
       '.tn-chip__x { cursor:pointer; border:none; background:transparent; color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));',
       '  padding:3px 8px; font-size:13px; line-height:1; border-left:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.35)); }',
       '.tn-chip__x:hover { color:var(--dsw-alias-state-error-primary, #d43a3a); background:var(--dsw-alias-interactive-bg-hover, transparent); }',
+      // 滑块开关:隐藏原生 checkbox,选中态 track 与滑块位移用过渡呈现
+      '.tn-switch { display:inline-flex; align-items:center; cursor:pointer; }',
+      '.tn-switch input { position:absolute; opacity:0; width:0; height:0; }',
+      '.tn-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
+      '  background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.35));',
+      '  border:1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35));',
+      '  transition:background 0.15s, border-color 0.15s; }',
+      '.tn-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+      '  background:var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6));',
+      '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
+      '.tn-switch:hover .tn-switch__track { border-color:var(--dsw-alias-brand-primary); }',
+      '.tn-switch input:checked + .tn-switch__track { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }',
+      '.tn-switch input:checked + .tn-switch__track .tn-switch__thumb { left:17px; background:var(--dsw-alias-bg-base, #fff); }',
+      '.tn-switch input:focus-visible + .tn-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
       // 目标列表:按行呈现,勾选/名称/移除右对齐
       '.tn-list { display:flex; flex-direction:column; }',
       '.tn-list__item { display:flex; align-items:center; gap:10px; padding:6px 2px; font-size:12px;',
@@ -1298,16 +1312,27 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'tn-row' },
             h('span', { className: 'tn-label' }, '作用域'),
-            h('label', { className: 'tn-meta' },
+            h('label', { className: 'tn-switch', title: '开启后音效映射仅对本浏览器(域名)生效' },
               h('input', {
                 type: 'checkbox', checked: localMode,
                 onChange: (e) => toggleLocalMapping(e.target.checked),
               }),
-              ' 当前域名独立配置'),
-            localMode
-              ? h('span', { className: 'tn-meta' }, '映射改动仅存本机浏览器,不影响全局配置')
-              : (Object.keys(localMapping).length > 0 ? h('span', { className: 'tn-meta' }, '存在本地覆盖,当前休眠') : null),
+              h('span', { className: 'tn-switch__track' }, h('span', { className: 'tn-switch__thumb' })),
+            ),
+            h('span', { className: 'tn-meta' }, localMode ? '当前域名独立' : '全部域名共用'),
           ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }),
+            h('span', { className: 'tn-meta' },
+              '开启:映射改动只保存在本浏览器(按访问域名隔离),本地优先于全局,公司/家里的配置互不影响。关闭:全域名共用 host 全局配置(settings.yaml)。'),
+          ),
+          !localMode && Object.keys(localMapping).length > 0
+            ? h('div', { className: 'tn-row' },
+              h('span', { className: 'tn-label' }),
+              h('span', { className: 'tn-meta' },
+                '已保存 ' + Object.keys(localMapping).length + ' 项本地映射,当前休眠,重新开启即恢复生效。'),
+            )
+            : null,
           CATEGORIES.map((category) => h('div', { className: 'tn-row', key: category },
             h('span', { className: 'tn-label' }, CATEGORY_LABELS[category]),
             h('select', {
