@@ -176,6 +176,37 @@ export function normalizeImTargets(raw) {
     .map(({ botId, targetId }) => ({ botId, targetId }))
 }
 
+// 目标列表操作:与 client.js LOGIC 段同形,parity 测试锁定不漂移。
+// botId/targetId 字符集均不含 '/',拼接键无歧义;与 dsh-im delivery-service 共用 ID 规格。
+export function imTargetKey(item) {
+  return item.botId + '/' + item.targetId
+}
+
+// 勾选幂等:同一 botId+targetId 只保留一份;勾选追加到尾部,取消即移除。
+export function toggleImTargetList(list, botId, targetId, checked) {
+  const wanted = { botId, targetId }
+  const rest = list.filter((item) => imTargetKey(item) !== imTargetKey(wanted))
+  return checked ? rest.concat([wanted]) : rest
+}
+
+export function removeImTargetFromList(list, botId, targetId) {
+  return list.filter((item) => imTargetKey(item) !== botId + '/' + targetId)
+}
+
+// 取消注册:移除该 bot 全部目标。
+export function unregisterImBotList(list, botId) {
+  return list.filter((item) => item.botId !== botId)
+}
+
+// 已绑 bot:按首次绑定顺序去重。
+export function imBoundBotIds(list) {
+  const botIds = []
+  for (const item of list) {
+    if (!botIds.includes(item.botId)) botIds.push(item.botId)
+  }
+  return botIds
+}
+
 const WEBHOOK_SCHEMES = ['https:', 'http:']
 
 function isValidWebhookUrl(value) {
