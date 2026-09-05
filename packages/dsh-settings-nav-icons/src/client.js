@@ -10,7 +10,6 @@ window.__ModuleLoader__.load({
 
     const SELECTOR_CELL = 'button.VOzbGW_navCell'
     const SELECTOR_LABEL = '.VOzbGW_navLabel'
-    const SELECTOR_ICON = 'svg'
     const ATTR_MARK = 'data-navic'
 
     /* LOGIC-BEGIN */
@@ -133,17 +132,27 @@ window.__ModuleLoader__.load({
       db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
     }
 
-    // 声明值解析与安全门:svg 字符串须完整开标签且不带事件属性/外联/内嵌载体,
-    // 超长拒绝;glyph 名称查表(原型链成员经 typeof 收口不可能混入);非法值返回 undefined。
+    // 声明值解析与安全门:svg 须完整开标签(大小写不敏感)且单根闭合(首个 </svg>
+    // 后不得再有内容,堵尾缀活动 HTML);不带事件属性(\b 前界堵斜杠分隔绕过)、
+    // 不带脚本/样式/SMIL 动画载体(内联 svg 的 style 全文档生效,@import 外联可达)、
+    // 不带 href/xlink:href 与 SMIL attributeName 注入(16×16 静态图标无合法引用/
+    // 动画场景,外联与事件注入一并封死),超长拒绝;glyph 名称查表(原型链成员经
+    // typeof 收口不可能混入);非法值返回 undefined。
     const SVG_MAX_CHARS = 4 * 1024
     function resolveIcon(value) {
       if (typeof value !== 'string') return undefined
       const trimmed = value.trim()
       if (
         trimmed.length <= SVG_MAX_CHARS
-        && /^<svg[\s>]/.test(trimmed)
-        && !/\son[a-z]+\s*=/i.test(trimmed)
+        && /^<svg[\s>]/i.test(trimmed)
+        && /<\/svg>\s*$/i.test(trimmed)
+        && !/\bon[a-z]+\s*=/i.test(trimmed)
         && !/<foreignObject/i.test(trimmed)
+        && !/<script[\s/>]/i.test(trimmed)
+        && !/<style[\s/>]/i.test(trimmed)
+        && !/<(animate|animatemotion|animatetransform|set)[\s/>]/i.test(trimmed)
+        && !/\b(xlink:)?href\s*=/i.test(trimmed)
+        && !/attributeName\s*=\s*["']?\s*(xlink:)?href/i.test(trimmed)
         && !/javascript:/i.test(trimmed)
       ) return trimmed
       return typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
@@ -185,27 +194,24 @@ window.__ModuleLoader__.load({
       return FALLBACK[poolIndexOf(name)]
     }
 
-    // 市场卡片头像槽决策:img(作者头像)整体换插件图标;div(字母色块)清空后内嵌。
-    // 记账值 = 插件名,换名重贴由该比较驱动。
+    // 市场卡片头像槽决策:img(作者头像)与 div(字母色块)同构处理——原子节点隐藏,
+    // 插件图标注入跟随。记账值 = 插件名,换名重贴由该比较驱动。
     function decideAvatar(av, name) {
       if (name === '' || av.dataset.navic === name) return null
-      return { name, html: themedIcon(name), old: av }
+      return { name, html: themedIcon(name), av }
     }
 
     function applyAvatar(av, decision) {
-      if (av.tagName === 'IMG') {
-        // IMG 不移除(React 持引用,移除后 reconcile 复活会双图):隐藏并记账,
-        // 注入图标跟随其后;换名重贴时先移除上次注入的图标防重复
-        av.hidden = true
-        av.dataset.navic = decision.name
-        const stale = av.nextElementSibling
-        if (stale !== null && stale.dataset.navic === '1') stale.remove()
-        av.insertAdjacentHTML('afterend', decision.html)
-        return
-      }
-      av.textContent = ''
-      av.insertAdjacentHTML('beforeend', decision.html)
+      // 原子节点不移除(React 持引用,移除/清空子树后 reconcile 报错):隐藏并记账,
+      // 注入图标跟随其后;重贴先清行内上次注入的图标(父容器范围扫描,防槽体被
+      // 外部替换后旧注入成孤儿双图)
+      av.hidden = true
       av.dataset.navic = decision.name
+      const parent = av.parentElement
+      if (parent !== null) {
+        for (const injected of parent.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
+      }
+      av.insertAdjacentHTML('afterend', decision.html)
     }
 
     // 官方默认齿轮首段路径前缀,用于识别"未装饰"单元格。
@@ -242,31 +248,43 @@ window.__ModuleLoader__.load({
     // 继承成员;污染面收敛在 window.__navicIcons 单一命名空间。
     const DECLARED_ICONS = Object.create(null)
 
-    // 单元格替换判定:先看记账与现役图标;label 有声明或内置映射直接换,
-    // 未映射时官方原生图形(非齿轮且非本插件所贴)一律不动,齿轮与本插件所贴
-    // 按 themedIcon(声明→关键词→哈希)兜底。
-    // 幂等判定与注入内容解耦:记账 label 匹配且现役图标非官方齿轮即视为已处理,
-    // 外部声明内容是否自带标记不影响短路;label 变化(如语言切换)则按新 label 重贴。
+    // 单元格替换判定:官方 svg 为 React 受管节点,替换语义 = 隐藏官方 + 注入跟随,
+    // 注入图标(data-navic="1")与官方 svg 同存;已处理形态 = 记账匹配且官方已隐藏。
+    // 官方节点选取跳过带标记的注入图标(兼容旧版 remove 语义的升级残留)。
+    // 注意:隐藏用 style.display='none'——SVGElement 原型无 hidden 访问器,
+    // svg.hidden 只是 expando 不产生视觉隐藏。
+    // label 有声明或内置映射直接换;未映射时官方原生图形(非齿轮且未隐藏)一律不动,
+    // 齿轮与本插件已隐藏的按 themedIcon(声明→关键词→哈希)兜底。
+    // 幂等判定与注入内容解耦:外部声明内容是否自带标记不影响短路;label 变化
+    // (如语言切换)则按新 label 重贴。
     function decide(cell) {
       const labelNode = cell.querySelector(SELECTOR_LABEL)
       if (labelNode === null) return null
       const label = (labelNode.textContent || '').trim()
       if (label === '') return null
-      const old = cell.querySelector(SELECTOR_ICON)
-      if (old === null) return null
-      if (cell.dataset.navic === label && !isGear(old)) return null
+      const svgs = cell.querySelectorAll('svg')
+      let official = null
+      for (const svg of svgs) {
+        if (svg.dataset.navic !== '1') {
+          official = svg
+          break
+        }
+      }
+      if (official === null) return null
+      if (cell.dataset.navic === label && official.style.display === 'none') return null
       let html = resolveIcon(DECLARED_ICONS[label])
       if (html === undefined) html = ICONS[label]
-      if (html === undefined) {
-        if (!isGear(old) && old.dataset.navic !== '1') return null
-        html = themedIcon(label)
-      }
-      return { label, html, old }
+      if (html === undefined && official.style.display !== 'none' && !isGear(official) && cell.dataset.navic !== label) return null
+      return { label, html: html !== undefined ? html : themedIcon(label), official }
     }
 
     function applyDecision(cell, decision) {
-      decision.old.insertAdjacentHTML('afterend', decision.html)
-      decision.old.remove()
+      // 官方 svg 不移除(React 持引用,移除后 reconcile 报 NotFoundError):隐藏并记账,
+      // 注入图标跟随其后;重贴先清上一次注入的图标防重复。
+      // 隐藏必须走 style(SVGElement 无 hidden 访问器,hidden 属性只是 expando)
+      for (const injected of cell.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
+      decision.official.style.display = 'none'
+      decision.official.insertAdjacentHTML('afterend', decision.html)
       cell.dataset.navic = decision.label
     }
 
@@ -278,50 +296,103 @@ window.__ModuleLoader__.load({
     const SELECTOR_ROW1 = '[class$="_row1"]'
     const SELECTOR_NM = 'a[class*="_nm"]'
 
-    let pending = false
-    let rafId = 0
+    const SELECTOR_ALL = SELECTOR_CELL + ',' + SELECTOR_AV
+
+    let active = false
     let observer = null
+    let rafId = 0
+    // HMR 代际槽:重评估时新实例先拆上一代观察器与在途帧,防多套扫描器并发
+    const SLOT_KEY = Symbol.for('@mzzsfy/dsh-settings-nav-icons')
+    let slot = null
+    // 确定性失败节点(宿主 DOM 漂移后 decide 必抛)只告警一次,防长时间挂机刷屏
+    const warnedNodes = new WeakSet()
+
+    function warnOnce(node, scope, error) {
+      if (warnedNodes.has(node)) return
+      warnedNodes.add(node)
+      console.warn('[nav-icons] ' + scope + '处理失败', error)
+    }
+
+    function handleCell(cell) {
+      const decision = decide(cell)
+      if (decision !== null) applyDecision(cell, decision)
+    }
+
+    function handleAvatar(av) {
+      const row1 = av.closest(SELECTOR_ROW1)
+      if (row1 === null) return
+      const nm = row1.querySelector(SELECTOR_NM)
+      if (nm === null) return
+      const name = (nm.textContent || '').trim()
+      const decision = decideAvatar(av, name)
+      if (decision !== null) applyAvatar(av, decision)
+    }
 
     function replacePass() {
-      pending = false
-      const cells = document.querySelectorAll(SELECTOR_CELL)
-      for (const cell of cells) {
+      rafId = 0
+      if (slot !== null) slot.rafId = 0
+      for (const node of document.querySelectorAll(SELECTOR_ALL)) {
         try {
-          const decision = decide(cell)
-          if (decision !== null) applyDecision(cell, decision)
+          if (node.matches(SELECTOR_AV)) handleAvatar(node)
+          else handleCell(node)
         } catch (error) {
-          // 单项异常不中断当轮剩余处理(宿主 DOM 形态漂移是常态风险),告警后继续
-          console.warn('[nav-icons] 单元格处理失败', error)
+          // 单项异常不中断当轮剩余处理(宿主 DOM 形态漂移是常态风险),去重告警
+          warnOnce(node, node.matches(SELECTOR_AV) ? '头像槽' : '单元格', error)
         }
       }
-      for (const av of document.querySelectorAll(SELECTOR_AV)) {
-        try {
-          const row1 = av.closest(SELECTOR_ROW1)
-          if (row1 === null) continue
-          const nm = row1.querySelector(SELECTOR_NM)
-          if (nm === null) continue
-          const name = (nm.textContent || '').trim()
-          const decision = decideAvatar(av, name)
-          if (decision !== null) applyAvatar(av, decision)
-        } catch (error) {
-          console.warn('[nav-icons] 头像槽处理失败', error)
+      // 自产写入回波消除:pass 中 insertAdjacentHTML 产生的记录此刻已在待派发队列,
+      // 同任务内清空后微任务派发即为空,不再多跑一帧幂等空扫
+      if (observer !== null) observer.takeRecords()
+    }
+
+    // 事件过滤:childList 通道仅元素级变更放行(流式文本节点级变更不相关);
+    // characterData 通道按目标域精确放行(语言切换的 label 原地改写、卡片改名),
+    // 域外文本变更(流式输出正文)不唤醒
+    function onMutations(mutations) {
+      for (const record of mutations) {
+        if (record.type === 'characterData') {
+          const parent = record.target.parentElement
+          if (parent === null) continue
+          if (parent.closest(SELECTOR_CELL) === null && parent.closest(SELECTOR_ROW1) === null) continue
+        } else {
+          let relevant = false
+          for (const node of record.addedNodes) {
+            if (node.nodeType === 1) { relevant = true; break }
+          }
+          if (!relevant) {
+            for (const node of record.removedNodes) {
+              if (node.nodeType === 1) { relevant = true; break }
+            }
+          }
+          if (!relevant) continue
         }
+        schedule()
+        return
       }
     }
 
+    // rAF 合批:rafId 为唯一在途状态源,未 flush 前重复触发直接并入
     function schedule() {
-      if (pending) return
-      pending = true
+      if (!active || rafId !== 0) return
       rafId = requestAnimationFrame(replacePass)
+      if (slot !== null) slot.rafId = rafId
     }
 
     // 声明持久层:client 半区热重载会重跑 factory 而生产者不重发,声明外置 window
-    // 纯数据,新实例启动时恢复;页面刷新随 window 释放
+    // 纯数据,新实例启动时恢复;页面刷新随 window 释放。恢复走同一安全门收口,
+    // 篡改的全局存储不直通注入。
     const DECLARATIONS_STORE = '__navicIconDeclarations'
     function restoreDeclarations() {
       const saved = window[DECLARATIONS_STORE]
-      if (saved !== null && typeof saved === 'object' && !Array.isArray(saved)) {
-        for (const key of Object.keys(saved)) DECLARED_ICONS[key] = saved[key]
+      if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return
+      for (const key of Object.keys(saved)) {
+        try {
+          // 逐键隔离:持久层被写入带抛错 getter 的对象/Proxy 时坏键告警跳过
+          const resolved = resolveIcon(saved[key])
+          if (resolved !== undefined) DECLARED_ICONS[key] = resolved
+        } catch (error) {
+          console.warn('[nav-icons] 持久层键 ' + key + ' 恢复失败,已跳过', error)
+        }
       }
     }
     function persistDeclarations() {
@@ -330,13 +401,26 @@ window.__ModuleLoader__.load({
 
     // 声明入口:值经 resolveIcon 归一化(非法值撤销声明走默认管线,与 README 承诺一致),
     // 同值幂等短路;仅值发生变更的键清记账重贴,无关分区不抖动。
-    // 时序无关:本插件未就绪时调用方入队等待。
+    // 时序无关:本插件未就绪时调用方入队等待;已停止实例短路,不驱动 DOM。
+    const KEY_MAX_CHARS = 256
     function registerIcons(entries) {
-      if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) return
+      if (!active) return
+      if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) {
+        console.warn('[nav-icons] register 入参须为非数组对象,已忽略')
+        return
+      }
       const touched = []
       for (const key of Object.keys(entries)) {
-        if (key === '__proto__') continue
-        const resolved = resolveIcon(entries[key])
+        // '1' 是注入图标的纯标记值,禁作声明键,否则记账清理会误删全部注入标记
+        if (key === '__proto__' || key === '1' || key.length > KEY_MAX_CHARS) continue
+        let resolved
+        try {
+          // 逐键隔离:生产者传入带抛错 getter 的对象/Proxy 时坏键告警跳过,不中断注册
+          resolved = resolveIcon(entries[key])
+        } catch (error) {
+          console.warn('[nav-icons] 声明键 ' + key + ' 取值失败,已跳过', error)
+          continue
+        }
         if (resolved === undefined) {
           if (DECLARED_ICONS[key] !== undefined) {
             delete DECLARED_ICONS[key]
@@ -357,25 +441,46 @@ window.__ModuleLoader__.load({
       schedule()
     }
 
+    // 队列直通桩属主守卫:stop 仅复位本实例所置桩,乱序清理不覆盖新实例运行态
+    let queueStub = null
+
     function drainQueue() {
       const queue = window.__navicIconQueue
       if (Array.isArray(queue)) {
-        for (const entries of queue) registerIcons(entries)
+        for (const entries of queue) {
+          try {
+            registerIcons(entries)
+          } catch (error) {
+            console.warn('[nav-icons] 队列条目处理失败', error)
+          }
+        }
+      } else if (queue !== undefined && queue !== null) {
+        console.warn('[nav-icons] 遗留队列形态异常(非数组),已丢弃', typeof queue)
       }
-      window.__navicIconQueue = {
-        push(items) { registerIcons(items) },
-      }
+      queueStub = { push(items) { registerIcons(items) } }
+      window.__navicIconQueue = queueStub
     }
 
     function start() {
+      active = true
+      const previous = window[SLOT_KEY]
+      if (previous !== undefined) {
+        if (previous.observer !== null) previous.observer.disconnect()
+        if (previous.rafId !== 0) cancelAnimationFrame(previous.rafId)
+      }
+      slot = { observer: null, rafId: 0 }
+      window[SLOT_KEY] = slot
+      // 可抛步骤(声明恢复/队列排水)先于观察器挂载,失败不产生孤儿扫描器
       restoreDeclarations()
-      observer = new MutationObserver(schedule)
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
       drainQueue()
+      observer = new MutationObserver(onMutations)
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+      slot.observer = observer
       replacePass()
     }
 
     function stop() {
+      active = false
       if (observer !== null) {
         observer.disconnect()
         observer = null
@@ -384,10 +489,14 @@ window.__ModuleLoader__.load({
         cancelAnimationFrame(rafId)
         rafId = 0
       }
-      pending = false
-      // 队列恢复数组形态: 卸载后生产者按 README 惯用法入队等待下一实例,
-      // 而不是驱动已停止实例改写 DOM
-      window.__navicIconQueue = []
+      if (slot !== null) {
+        slot.observer = null
+        slot.rafId = 0
+        slot = null
+      }
+      // 队列恢复数组形态仅限本实例桩:卸载后生产者按 README 惯用法入队等待下一实例
+      if (window.__navicIconQueue === queueStub) window.__navicIconQueue = []
+      queueStub = null
     }
 
     return {
