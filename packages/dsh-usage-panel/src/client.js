@@ -9,6 +9,20 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect } = React
 
+    // 面板反馈出口:公共依赖 @mzzsfy/dsh-toast,可选消费——占位条目由
+    // session-manager 唯一代挂,权威方未安装时降级 console,不挂死不报错
+    let toast = null
+    try {
+      toast = require('@mzzsfy/dsh-toast/client').show
+    } catch {
+      // 模块表无 toast → 反馈降级 console.warn
+    }
+
+    const notify = (text, kind) => {
+      if (toast) toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
+      else console.warn('[dsh-usage-panel] ' + text)
+    }
+
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → plan);
     // 该插件未就绪时入队,由其启动时排空
     const NAV_ICON = { '账号余额': 'plan' }
@@ -641,6 +655,7 @@ function UsagePanelApp() {
   const [accounts, setAccounts] = useState(null)
   const [editing, setEditing] = useState(null)
   const [busy, setBusy] = useState({})
+  // 加载失败占位:与「读取失败/加载中」占位文案联动;操作反馈不经此状态
   const [notice, setNotice] = useState(null)
   const [armed, setArmed] = useState(null)
   const [sequences, setSequences] = useState({})
@@ -663,7 +678,7 @@ function UsagePanelApp() {
         return null
       })
       .catch((error) => {
-        if (alive) setNotice({ kind: 'error', text: '读取配置失败:' + (error && error.message ? error.message : String(error)) })
+        if (alive) setNotice('读取配置失败:' + (error && error.message ? error.message : String(error)))
       })
     api('/api/usage-panel/history')
       .then((res) => { if (alive) setSequences(res && res.sequences ? res.sequences : {}) })
@@ -682,10 +697,10 @@ function UsagePanelApp() {
     api('/api/usage-panel/settings', { method: 'POST', body: JSON.stringify({ pollIntervalSec: value }) })
       .then((res) => {
         setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : value)
-        setNotice({ kind: 'ok', text: '轮询间隔已保存' })
+        notify('轮询间隔已保存', 'ok')
       })
       .catch((error) => {
-        setNotice({ kind: 'error', text: '保存失败:' + (error && error.message ? error.message : String(error)) })
+        notify('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
       })
   }
 
@@ -699,7 +714,6 @@ function UsagePanelApp() {
 
   function refreshOne(id) {
     markBusy(id, true)
-    setNotice(null)
     return api('/api/usage-panel/query', { method: 'POST', body: JSON.stringify({ id }) })
       .then((res) => {
         if (res && res.account) replaceAccount(res.account)
@@ -707,7 +721,7 @@ function UsagePanelApp() {
       })
       .then((res) => { setSequences(res && res.sequences ? res.sequences : {}) })
       .catch((error) => {
-        setNotice({ kind: 'error', text: '查询失败:' + (error && error.message ? error.message : String(error)) })
+        notify('查询失败:' + (error && error.message ? error.message : String(error)), 'error')
       })
       .then(() => markBusy(id, false))
   }
@@ -722,10 +736,10 @@ function UsagePanelApp() {
       .then((res) => {
         setAccounts(res && res.accounts ? res.accounts : nextAccounts)
         setEditing(null)
-        setNotice({ kind: 'ok', text: '配置已保存' })
+        notify('配置已保存', 'ok')
       })
       .catch((error) => {
-        setNotice({ kind: 'error', text: '保存失败:' + (error && error.message ? error.message : String(error)) })
+        notify('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
       })
   }
 
@@ -742,7 +756,7 @@ function UsagePanelApp() {
     return h('div', { className: 'up-panel' },
       h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
       h('span', { className: 'up-meta' }, notice !== null ? '读取失败' : '加载中…'),
-      notice !== null ? h('div', { className: 'up-notice up-notice--' + notice.kind }, notice.text) : null)
+      notice !== null ? h('div', { className: 'up-notice up-notice--error' }, notice) : null)
   }
 
   const cards = accounts.map((account) => {
@@ -782,7 +796,6 @@ function UsagePanelApp() {
       h('button', { className: 'up-btn', disabled: anyBusy || accounts.length === 0, onClick: refreshAll }, '全部刷新'),
       h('button', { className: 'up-btn', onClick: () => setEditing({ isNew: true, id: null }) }, '添加账号'),
     ),
-    notice !== null ? h('div', { className: 'up-notice up-notice--' + notice.kind }, notice.text) : null,
     pollArmed === false ? h('div', { className: 'up-notice up-notice--error' },
       '自动轮询未运行(宿主定时服务不可用);手动查询不受影响。') : null,
     editing !== null
