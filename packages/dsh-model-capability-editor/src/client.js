@@ -12,6 +12,20 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect } = React
 
+    // 面板反馈出口:公共依赖 @mzzsfy/dsh-toast,可选消费——占位条目由
+    // session-manager 唯一代挂,权威方未安装时降级 console,不挂死不报错
+    let toast = null
+    try {
+      toast = require('@mzzsfy/dsh-toast/client').show
+    } catch {
+      // 模块表无 toast → 反馈降级 console.warn
+    }
+
+    const notify = (text, kind) => {
+      if (toast) toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
+      else console.warn('[dsh-model-capability-editor] ' + text)
+    }
+
     const RECONCILE_DEBOUNCE_MS = 150
     // 插件实例代际:宿主热重载/禁用重建时区分新旧实例,样式清理只认自有属主
     let instanceSeq = 0
@@ -55,7 +69,6 @@ const CSS = [
   '.mce-notice { font-size:12px; padding:4px 8px; border-radius:6px;',
   '  border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
   '.mce-notice--error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
-  '.mce-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
   '.mce-notice--warn { color:#d97706; }',
   '.mce-spacer { flex:1; }',
   '.mce-inline { margin-top:6px; padding:8px 10px; border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.25));',
@@ -383,7 +396,6 @@ function ModelRow(props) {
 
 function CapabilityCard(props) {
   const [state, setState] = useState({ phase: 'loading', reason: null, providers: null, route: null, models: null, drafts: null, traces: null })
-  const [notice, setNotice] = useState(null)
   const [saving, setSaving] = useState(false)
   // 未保存草稿按路由分桶,切换路由不丢弃,切回恢复
   const bucketsRef = React.useRef(null)
@@ -447,7 +459,7 @@ function CapabilityCard(props) {
         if (seq !== routeSeqRef.current) return
         const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
         if (ns === undefined) {
-          setNotice({ kind: 'error', text: 'settings 中不存在 ' + NS + ' 命名空间,请刷新页面' })
+          notify('settings 中不存在 ' + NS + ' 命名空间,请刷新页面', 'error')
           return
         }
         const models = modelsOf(ns.value, nextRoute)
@@ -458,7 +470,7 @@ function CapabilityCard(props) {
       } catch (error) {
         // describe 失败:回滚路由,models/drafts 仍是旧路由数据,避免旧草稿对新基线静默写回
         if (seq === routeSeqRef.current) patch({ route: prevRoute })
-        setNotice({ kind: 'error', text: '读取 ' + nextRoute + ' 失败:' + (error && error.message ? error.message : String(error)) })
+        notify('读取 ' + nextRoute + ' 失败:' + (error && error.message ? error.message : String(error)), 'error')
       } finally {
         if (seq === routeSeqRef.current) setSwitching(false)
       }
@@ -473,13 +485,12 @@ function CapabilityCard(props) {
 
   async function save() {
     setSaving(true)
-    setNotice(null)
     try {
       const { models: written, droppedDraftIds } = await saveModels(props.settings, state.route, state.drafts)
       // 孤儿草稿:草稿对应模型已被他方删除,编辑未落盘,必须告警而非报成功
-      setNotice(droppedDraftIds.length > 0
-        ? { kind: 'warn', text: '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入' }
-        : { kind: 'ok', text: '已保存并写回 settings.yaml' })
+      notify(droppedDraftIds.length > 0
+        ? '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
+        : '已保存并写回 settings.yaml', droppedDraftIds.length > 0 ? 'error' : 'ok')
       try {
         const value = unwrapResult(await props.settings.describe())
         const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
@@ -495,10 +506,10 @@ function CapabilityCard(props) {
         patch({ models: latest, drafts, traces: detectCompetitorTraces(latest) })
       } catch (refreshError) {
         // 保存已成功,收尾刷新失败只降级提示,不覆盖保存通知
-        setNotice({ kind: 'warn', text: '已保存,但刷新视图失败:' + (refreshError && refreshError.message ? refreshError.message : String(refreshError)) })
+        notify('已保存,但刷新视图失败:' + (refreshError && refreshError.message ? refreshError.message : String(refreshError)), 'error')
       }
     } catch (error) {
-      setNotice({ kind: 'error', text: (error && error.message ? error.message : String(error)) })
+      notify(error && error.message ? error.message : String(error), 'error')
     } finally {
       setSaving(false)
     }
@@ -541,7 +552,6 @@ function CapabilityCard(props) {
     state.models.length === 0
       ? h('div', { className: 'mce-label' }, '该 provider 暂无模型条目。')
       : null,
-    notice !== null ? h('div', { className: 'mce-notice mce-notice--' + notice.kind }, notice.text) : null,
     h('div', { className: 'mce-row' },
       h('button', { className: 'mce-btn', disabled: saving || switching || state.route === null, onClick: save }, saving ? '保存中…' : '保存'),
       h('span', { className: 'mce-label' }, '保存 = 整组写回当前 provider 的 models 数组,未编辑的模型原样保留。'),
@@ -598,7 +608,6 @@ function RowEditor(props) {
 
   async function apply() {
     setSaving(true)
-    patch({ notice: null })
     try {
       // S3:官方行内 ID 输入是活动状态,改名已落盘则以新 ID 为目标,否则回落原 ID
       const el = props.idInputEl
@@ -619,15 +628,14 @@ function RowEditor(props) {
         const freshDraft = (latest !== undefined ? draftsFromModels([latest]).get(String(targetId)) : undefined)
           || draftsFromModels(written).get(String(targetId))
           || state.draft
-        patch({
-          notice: { kind: droppedDraftIds.length > 0 ? 'warn' : 'ok', text: droppedDraftIds.length > 0
-            ? '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
-            : '已保存' },
-          draft: freshDraft,
-        })
+        patch({ draft: freshDraft })
+        // 孤儿草稿:草稿对应模型已被他方删除,编辑未落盘,必须告警而非报成功
+        notify(droppedDraftIds.length > 0
+          ? '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
+          : '已保存', droppedDraftIds.length > 0 ? 'error' : 'ok')
       }
     } catch (error) {
-      if (aliveRef.current) patch({ notice: { kind: 'error', text: error && error.message ? error.message : String(error) } })
+      if (aliveRef.current) notify(error && error.message ? error.message : String(error), 'error')
     } finally {
       if (aliveRef.current) setSaving(false)
     }
@@ -676,9 +684,6 @@ function RowEditor(props) {
     ),
     h('div', { className: 'mce-inline__foot' },
       h('button', { className: 'mce-btn mce-btn--primary', disabled: saving, onClick: apply }, saving ? '保存中…' : '应用'),
-      state.notice !== null
-        ? h('span', { className: 'mce-notice mce-notice--' + state.notice.kind }, state.notice.text)
-        : null,
     ),
   )
 }
