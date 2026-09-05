@@ -66,6 +66,7 @@ const RESTART_URL = '/api/maintain/restart'
 const UPGRADE_POLL_MS = 2 * 1000
 // 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
 const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
+const UPGRADE_FLOAT_STYLE_ID = UPGRADE_FLOAT_ID + '__style'
 // 与 host 侧轮询 tick(TICK_MS)同源:间隔设置的生效粒度受固定 tick 调度限制
 const POLL_MIN_TICK_SECONDS = 60
 // 与 host 侧默认值同源(DEFAULT_POLL_INTERVAL_SEC / DEFAULT_REGISTRY_BASE / DEFAULT_UPGRADE_TEMPLATE):
@@ -99,9 +100,18 @@ function post(url, body) {
   return api(url, { method: 'POST', body: body === undefined ? '{}' : JSON.stringify(body) })
 }
 
+// 网络层失败判定:fetch 连接失败抛 TypeError,请求被中止/超时抛 name 为 AbortError/TimeoutError 的异常;
+// HTTP 业务错误(4xx/5xx)是携带服务端信息的普通 Error,不在此列
+function isNetworkFailure(error) {
+  if (error instanceof TypeError) return true
+  return error !== null && error !== undefined && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
-// 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询
-const upgradeWatch = { timer: null, listeners: new Set() }
+// 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询;
+// 总时长上限与宿主升级命令超时同语义:超限说明宿主或进程管理器异常,浮条转状态未知
+const UPGRADE_WATCH_MAX_MS = 10 * 60 * 1000
+const upgradeWatch = { timer: null, startedAt: 0, listeners: new Set() }
 
 function broadcastUpgradeStatus(status) {
   for (const listener of upgradeWatch.listeners) listener(status)
@@ -121,24 +131,32 @@ function subscribeUpgradeStatus(listener) {
 
 function ensureUpgradeWatch() {
   if (upgradeWatch.timer !== null) return
+  upgradeWatch.startedAt = Date.now()
   showUpgradeFloat(null)
   upgradeWatch.timer = setInterval(() => {
+    if (Date.now() - upgradeWatch.startedAt >= UPGRADE_WATCH_MAX_MS) {
+      stopUpgradeWatch()
+      showUpgradeFloat('unknown')
+      return
+    }
     api(STATUS_URL)
       .then((next) => {
         broadcastUpgradeStatus(next)
-        const running = next !== null && next.upgrade !== null && next.upgrade.running === true
-        if (!running) {
+        const upgrade = next ? next.upgrade : null
+        if (!upgrade || upgrade.running !== true) {
           stopUpgradeWatch()
-          showUpgradeFloat(next.upgrade !== null && next.upgrade.last !== null ? next.upgrade.last : {})
+          // 快照归零(last 为空)不做失败渲染,保持进行中文案,由重启流程接管
+          if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
         }
       })
       .catch(() => {})
   }, UPGRADE_POLL_MS)
 }
 
-function showUpgradeFloat(last) {
-  removeUpgradeFloat()
+function ensureUpgradeFloatStyle() {
+  if (document.getElementById(UPGRADE_FLOAT_STYLE_ID) !== null) return
   const style = document.createElement('style')
+  style.id = UPGRADE_FLOAT_STYLE_ID
   style.textContent = [
     '#' + UPGRADE_FLOAT_ID + ' { position:fixed; right:20px; bottom:20px; z-index:9999; display:flex; align-items:center; gap:10px;',
     '  max-width:340px; padding:10px 14px; border-radius:10px; border:1px solid rgba(128,128,128,0.35);',
@@ -146,6 +164,13 @@ function showUpgradeFloat(last) {
     '#' + UPGRADE_FLOAT_ID + '__close { cursor:pointer; border:0; background:transparent; color:inherit; font-size:14px; padding:0 2px; opacity:0.6; }',
     '#' + UPGRADE_FLOAT_ID + '__close:hover { opacity:1; }',
   ].join('\n')
+  document.head.appendChild(style)
+}
+
+// state:null=进行中;对象=升级结果(last,ok 区分成败);'unknown'=观察超限状态未知
+function showUpgradeFloat(state) {
+  ensureUpgradeFloatStyle()
+  removeUpgradeFloat()
   const text = document.createElement('span')
   const close = document.createElement('button')
   close.id = UPGRADE_FLOAT_ID + '__close'
@@ -153,15 +178,17 @@ function showUpgradeFloat(last) {
   close.addEventListener('click', removeUpgradeFloat)
   const box = document.createElement('div')
   box.id = UPGRADE_FLOAT_ID
-  box.appendChild(style)
   box.appendChild(text)
   box.appendChild(close)
-  if (last === null) {
+  if (state === null) {
     text.textContent = '升级进行中,可离开本页,完成后此处提示'
-  } else if (last.ok) {
+  } else if (state === 'unknown') {
+    text.textContent = '升级状态长时间未更新,请刷新页面查看'
+  } else if (state.ok) {
     text.textContent = '升级完成,重启宿主后生效(版本与运维页可重启)'
   } else {
-    text.textContent = '升级失败:' + (last.stderrTail || last.error || '详情见版本与运维页')
+    // 浮条只做通知,stderr 摘要在版本与运维页完整展示
+    text.textContent = '升级失败:' + (state.error || '详情见版本与运维页')
   }
   document.body.appendChild(box)
 }
@@ -537,11 +564,16 @@ function MaintainApp() {
         setRestarting(true)
         return post(RESTART_URL)
       })
-      .catch(() => {
-        // 请求失败大概率是宿主退出窗口的连接切断,视为失联并入等待态轮询,
-        // 由恢复探测判定成败,不在此误报"重启失败"
-        restartLostRef.current = true
-        setRestarting(true)
+      .catch((restartError) => {
+        // 网络层失败(TypeError/中止)是宿主退出窗口切断连接的预期中间态,置失联并入等待态轮询;
+        // 业务错误(409/401/500 等)宿主仍在,展示原文,不得进入等待态(等待态会把失联误判为已重启)
+        if (isNetworkFailure(restartError)) {
+          restartLostRef.current = true
+          setRestarting(true)
+          return
+        }
+        setRestarting(false)
+        setError('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)))
       })
       .then(() => { restartPendingRef.current = false })
   }

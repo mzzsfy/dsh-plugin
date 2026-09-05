@@ -101,9 +101,8 @@ function makeRes() {
   res.writeHead = (status) => {
     res.status = status
   }
-  res.end = (text, onFlushed) => {
+  res.end = (text) => {
     res.payload = text ? JSON.parse(text) : null
-    if (typeof onFlushed === 'function') onFlushed()
   }
   return res
 }
@@ -300,25 +299,27 @@ test('upgrade:真实挂起命令触达门闩,二次 409', async () => {
   await new Promise((resolve) => setTimeout(resolve, 3000))
 })
 
-test('restart:缺失 appExit 500;响应立即返回,冲刷完成后延迟退出', async () => {
+test('restart:缺失 appExit 500;响应立即返回,延迟退出', async (t) => {
   const withoutExit = makeCtx()
   apply(withoutExit.ctx)
   const denied = await post(withoutExit.routes, '/api/maintain/restart')
   assert.equal(denied.status, 500)
 
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
   apply(ctx)
   const ok = await post(routes, '/api/maintain/restart')
   assert.equal(ok.status, 200)
   assert.equal(ok.payload.restarting, true)
-  // 响应交付瞬间宿主必须仍在:exit 只能在冲刷回调触发的延迟之后执行
+  // 响应交付瞬间宿主必须仍在:exit 只能在延迟窗口之后执行
   assert.deepEqual(exits, [], '响应返回时 exit 不得已触发')
-  await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS + 100))
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
   assert.deepEqual(exits, [0])
 })
 
-test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async () => {
+test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
   apply(ctx)
@@ -327,7 +328,7 @@ test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async () 
   const second = await post(routes, '/api/maintain/restart')
   assert.equal(second.status, 200)
   assert.equal(second.payload.restarting, true)
-  await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS + 100))
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
   assert.deepEqual(exits, [0], '重复请求不得叠加调度 exit')
 })
 

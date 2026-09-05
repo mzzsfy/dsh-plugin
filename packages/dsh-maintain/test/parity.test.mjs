@@ -107,3 +107,11 @@ test('parity: 默认轮询间隔与镜像地址 client 与 host 实现一致', (
 test('parity: client 轮询粒度提示与 host TICK_MS 换算一致', () => {
   assert.equal(extractNumberConst('POLL_MIN_TICK_SECONDS'), TICK_MS / 1000)
 })
+
+// 窗口关系对拍:重启等待总时长必须大于宿主退出延迟,否则宿主还在延迟退出窗口内客户端已报超时
+import { RESTART_DELAY_MS } from '../src/index.js'
+
+test('parity: 重启等待总时长大于宿主退出延迟', () => {
+  const restartTimeoutMs = extractNumberConst('RESTART_TIMEOUT_MS')
+  assert.ok(restartTimeoutMs > RESTART_DELAY_MS, 'RESTART_TIMEOUT_MS 必须大于 RESTART_DELAY_MS')
+})
