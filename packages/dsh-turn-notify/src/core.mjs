@@ -125,12 +125,13 @@ export function isSubagentWakeTurn({ childDoneAt, turnStartMs, windowMs = SUBAGE
 
 const DURATION_FILTERED_KINDS = [TURN_END_KIND]
 
-// 通知总决策:分类开关 + 子代理豁免 + 唤醒回执静默 + 碎轮过滤(仅 turn/end 类)。
-export function shouldNotify({ category, kind, durationMs, settings, header, wakeTurn }) {
+// 通知总决策:分类开关 + 子代理豁免 + 子代理相关静默(唤醒回执 / 等待委托,仅 completed)
+// + 碎轮过滤(仅 turn/end 类)。
+export function shouldNotify({ category, kind, durationMs, settings, header, wakeTurn, awaitingChildren }) {
   if (category === null) return false
   if ((settings.enabled || {})[category] === false) return false
   if (settings.rootsOnly !== false && isSubagent(header)) return false
-  if (wakeTurn === true && category === CATEGORY_DONE && settings.suppressSubagentWake !== false) return false
+  if ((wakeTurn === true || awaitingChildren === true) && category === CATEGORY_DONE && settings.suppressSubagentWake !== false) return false
   if (DURATION_FILTERED_KINDS.indexOf(kind) >= 0 && durationMs !== null && durationMs < settings.minTurnDurationMs) return false
   return true
 }

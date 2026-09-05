@@ -56,13 +56,26 @@ const IM_ERROR_STATUS = { 'bad-request': 400, 'unknown-bot': 404, 'bot-not-conne
 const TURN_END_KIND = 'turn/end'
 const TOOL_CALL_KIND = 'tool/call'
 const ASK_TOOL_NAME = 'ask_user_question'
+const SUBAGENT_TOOL_NAME = 'subagent'
+
+// 活动子代理回合回收:子会话异常终止不发 turn/end 时按超时释放,防父会话永久静默;
+// 代价是运行超过回收时限的超长子代理会失去等待静默保护
+const ACTIVE_CHILD_STALE_MS = OPEN_TURN_STALE_MS
+
+// 活动子代理注册表遍历判定:是否存在挂在指定父会话名下的未收尾子代理回合
+const hasActiveChild = (map, parentSessionId) => {
+  for (const entry of map.values()) {
+    if (entry.parent === parentSessionId) return true
+  }
+  return false
+}
 
 // 注册即声明 GUI 设置表单,schema 默认值即生效默认值;webhookUrl 属凭据标 secret。
 const SETTINGS_SCHEMA = z.object({
   webhookUrl: z.string().role('secret').default('').description('webhook 目标 URL(Slack-compatible {text}),留空禁用'),
   minTurnDurationMs: z.number().default(MIN_TURN_DURATION_MS).description('回合最短时长过滤,毫秒,仅作用于 turn/end 类'),
   rootsOnly: z.boolean().default(true).description('子代理会话不通知'),
-  suppressSubagentWake: z.boolean().default(true).description('子代理完成唤醒的回合不通知'),
+  suppressSubagentWake: z.boolean().default(true).description('子代理完成唤醒或主代理等待子代理的回合不通知'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六分类独立开关'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每分类音效映射,空为内置默认,非空为上传音效 id'),
   sessionHighlight: z.boolean().default(true).description('通知触发时高亮侧边栏会话行'),
@@ -156,12 +169,21 @@ const writeSoundIndex = (index) => writeFile(soundIndexPath, JSON.stringify(inde
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx) {
   const projection = createProjection({})
-  // 打开回合的起始时间,按会话 id 记录,回合结束即清
+  // 打开回合:按会话 id 记回合序号与起始时间,回合结束即清;序号严格递增,
+  // 供子代理注册归属判定,同毫秒内多回合不受时钟精度歧义影响
   const openTurns = new Map()
+  let turnSeq = 0
   // 子代理会话结束时刻,按父会话 id 记录,用于识别子代理回执唤醒的回合
   const childDoneAt = new Map()
   // 被子代理回执唤醒的回合,回合结束即清
   const wakeTurns = new Set()
+  // 活动子代理回合:子会话开跑注册、收尾注销,按子会话 id 记父会话与注册时父回合序号
+  const childActive = new Map()
+  // 回合级委托计数:本回合内 subagent 工具调用次数,回合结束即清
+  const turnDelegation = new Map()
+  // 回合级子代理收尾计数:本回合注册的子代理在父回合开启期间收尾(前台委托完成),回合结束即清;
+  // 计数对比豁免混合委托回合(前台已完成不抵扣未收尾的后台委托)
+  const turnChildSettled = new Map()
   // 事件读序:标题提取需要事件流,按会话累积 user/message 文本;标题封账后不再累积
   const sessionEvents = new Map()
   const titledSessions = new Set()
@@ -191,12 +213,12 @@ export function apply(ctx) {
     })
   }
 
-  // durationMs 与 wakeTurn 由调用方在清理状态前读取后传入,防先删后读
-  function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false }) {
+  // durationMs 与 wakeTurn / awaitingChildren 由调用方在清理状态前读取后传入,防先删后读
+  function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false, awaitingChildren = false }) {
     const settings = readSettings(ctx)
     const header = session.header || {}
     const sessionId = String(session.id ?? '')
-    if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn })) return
+    if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn, awaitingChildren })) return
     seq += 1
     const unit = buildUnit({
       id: 'n-' + Date.now().toString(36) + '-' + String(seq) + '-' + String(category),
@@ -227,11 +249,18 @@ export function apply(ctx) {
   ctx.on('session/event', (session, event) => {
     const sessionId = String(session.id ?? '')
     const now = Date.now()
-    // 异常时序残留的惰性回收:超唤醒窗口的子代理回执与超上限的回合起始顺带清扫;
+    const header = session.header || {}
+    const parentSession = typeof header.parentSession === 'string' ? header.parentSession : null
+    // 异常时序残留的惰性回收:超唤醒窗口的子代理回执、超上限的回合起始与活动子代理顺带清扫;
     // 本回合的 start 先捕获,防 prune 误删当前超长回合的起始记录
     const currentTurnStart = openTurns.get(sessionId)
     pruneTimestamps(childDoneAt, now, SUBAGENT_WAKE_WINDOW_MS)
-    pruneTimestamps(openTurns, now, OPEN_TURN_STALE_MS)
+    for (const [turnId, turn] of openTurns) {
+      if (now - turn.at > OPEN_TURN_STALE_MS) openTurns.delete(turnId)
+    }
+    for (const [childId, entry] of childActive) {
+      if (now - entry.at > ACTIVE_CHILD_STALE_MS) childActive.delete(childId)
+    }
     // turn/end 清理状态前捕获的决策输入,仅回分类通知消费
     let endedTurn = null
     if (event.type === 'user/message') {
@@ -239,6 +268,9 @@ export function apply(ctx) {
       return
     }
     if (event.type === 'turn/start') {
+      // 回合级标记重置:上一回合的委托与收尾残留不跨回合
+      turnDelegation.delete(sessionId)
+      turnChildSettled.delete(sessionId)
       // 子代理结束后窗口内父会话开新回合 = 回执唤醒回合;标记即消费,仅首个回合生效。
       // 依赖运行时契约:子代理 turn/end 先于父会话唤醒 turn/start 到达。
       const done = childDoneAt.get(sessionId)
@@ -246,22 +278,48 @@ export function apply(ctx) {
         childDoneAt.delete(sessionId)
         if (isSubagentWakeTurn({ childDoneAt: done, turnStartMs: now })) wakeTurns.add(sessionId)
       }
-      openTurns.set(sessionId, now)
+      // 子代理会话开跑:注册到父会话名下并记注册时父回合序号,供其收尾的归属判定;
+      // 父回合已结束(后台委托挂起)则序号为空,收尾不归属任何开启回合
+      if (isSubagent(header) && parentSession !== null) {
+        childActive.set(sessionId, { parent: parentSession, at: now, turnSeq: openTurns.get(parentSession)?.seq })
+      }
+      openTurns.set(sessionId, { seq: ++turnSeq, at: now })
       return
     }
     if (event.type === TURN_END_KIND) {
+      // 等待子代理判定:有未收尾子代理,或委托计数超出本回合内收尾计数
+      // (覆盖子代理 turn/start 晚于主回合结束的启动竞态与启动失败),仅压 completed 分类
+      const awaitingChildren = hasActiveChild(childActive, sessionId)
+        || (turnDelegation.get(sessionId) ?? 0) > (turnChildSettled.get(sessionId) ?? 0)
       // 先读后清:通知决策需要回合时长(相对 start 的差值)与唤醒标记;
       // 无 start 记录(如观察器中途装载)时长置 null,碎轮过滤跳过
-      endedTurn = { durationMs: currentTurnStart === undefined ? null : now - currentTurnStart, wakeTurn: wakeTurns.has(sessionId) }
-      // 子代理会话收尾:记录到父会话名下,供其唤醒回合判定
-      const header = session.header || {}
-      if (isSubagent(header) && header.parentSession) childDoneAt.set(String(header.parentSession), now)
+      endedTurn = {
+        durationMs: currentTurnStart === undefined ? null : now - currentTurnStart.at,
+        wakeTurn: wakeTurns.has(sessionId),
+        awaitingChildren,
+      }
+      turnDelegation.delete(sessionId)
+      turnChildSettled.delete(sessionId)
+      // 子代理会话收尾:记录到父会话名下,供其唤醒回合判定;注销活动注册;
+      // 注册序号等于父回合当前序号(本回合发起的委托)才计入回合收尾,
+      // 跨回合陈旧子代理的收尾不抵扣本回合未收尾的委托
+      if (isSubagent(header) && parentSession !== null) {
+        childDoneAt.set(parentSession, now)
+        const registeredTurnSeq = childActive.get(sessionId)?.turnSeq
+        childActive.delete(sessionId)
+        if (registeredTurnSeq !== undefined && openTurns.get(parentSession)?.seq === registeredTurnSeq) {
+          turnChildSettled.set(parentSession, (turnChildSettled.get(parentSession) ?? 0) + 1)
+        }
+      }
       openTurns.delete(sessionId)
       wakeTurns.delete(sessionId)
       // 父会话收尾即不再有唤醒判定意义
       childDoneAt.delete(sessionId)
     }
-    if (event.type === TOOL_CALL_KIND && event.data && event.data.name !== ASK_TOOL_NAME) return
+    if (event.type === TOOL_CALL_KIND) {
+      if (event.data && event.data.name === SUBAGENT_TOOL_NAME) turnDelegation.set(sessionId, (turnDelegation.get(sessionId) ?? 0) + 1)
+      if (!event.data || event.data.name !== ASK_TOOL_NAME) return
+    }
     const category = mapEventToCategory(event.type, event.data)
     if (category === null) return
     const reasonKind = event.type === TURN_END_KIND && event.data.reason ? event.data.reason.kind : null
