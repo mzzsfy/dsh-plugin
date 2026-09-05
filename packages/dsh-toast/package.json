@@ -1,0 +1,38 @@
+{
+  "name": "@mzzsfy/dsh-toast",
+  "description": "全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻确认两种生命周期;普通 npm 依赖(非 dsh 插件),由消费插件的 cordis.patch.yml 代挂宿主占位条目",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.1014.top:83/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "files": [
+    "src",
+    "test",
+    "README.md"
+  ]
+}
