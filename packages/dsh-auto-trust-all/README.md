@@ -6,7 +6,7 @@ DeepSeek Harness web 入口插件:动态信任所有实际到达的 Host,并将 
 
 ## 功能
 
-- **动态信任**:包装 webServer 全部路由(exact / prefix / upgrade / fallback,含激活前已注册与后续新注册),请求到达即提取 Host 头(与官方信任闸门同构的 WHATWG 解析:小写、去端口、IPv6 保留方括号),去重后注册进 `webRuntime.trustedHosts`,闸门每请求实时读数组,无需重启。泛域名(`*.example.com`)等无法枚举的入口不再需要改启动命令。
+- **动态信任**:包装 webServer 全部路由(exact / prefix / upgrade / fallback,含激活前已注册与后续新注册),请求到达即提取 Host 头(与官方信任闸门同构的 WHATWG 解析:小写、去端口、IPv6 保留方括号),去重后**双写** `webRuntime.trustedHosts` 与 `connection` 服务实例的 `trustedHosts` 快照数组(官方闸门读后者;两数组是装配期克隆的不同对象,缺一则动态域名对 `/api` 闸门不可见),闸门每请求实时读数组,无需重启。泛域名(`*.example.com`)等无法枚举的入口不再需要改启动命令。
 - **FIFO 容量**:注册域名容量 `maxHosts` 默认 100,超出按注册先后淘汰最早者;官方初始条目(部署派生的局域网 IP 等)不参与淘汰。内存总量恒定有界。容量按激活代记账:插件重载前注册的条目留存于信任清单但不参与新一代记账,重启即归零。
 - **console 输出**:启动时输出一行状态横幅(绑定、容量、既有信任条目);此后每次注册输出 `auto-trust-all: registered host <域名>`、每次淘汰输出 `auto-trust-all: evicted host <域名>`,直接 grep dsh console 即可做入口审计。
 - **默认绑定翻转**:bundle patch 覆盖官方 webserver 行的 host 默认值为 `0.0.0.0`;显式 `--host 127.0.0.1` 仍生效(表达式读 webStartup 服务,只翻默认值)。
@@ -47,7 +47,7 @@ patch 覆盖官方 webserver 行的 config 是整体替换语义,本包已完整
 
 ## 与其他插件的关系
 
-- **dsh-web-startup-auth**:完全共存。本插件不提供任何 cordis 服务,零服务冲突;两者都会遮蔽 webServer 注册方法包装路由,委托链在任意激活顺序下保持正确(会话检查与 Host 注册同时生效)。未认证请求至多完成 Host 登记(纯观察),首个拦截点始终是会话闸门。
+- **dsh-web-startup-auth**:完全共存。本插件不提供任何 cordis 服务,零服务冲突;两者都会遮蔽 webServer 注册方法包装路由,委托链在任意激活顺序下保持正确(会话检查与 Host 注册同时生效)。未认证请求至多完成 Host 登记(纯观察),首个拦截点始终是会话闸门。配合语义:startup-auth 的账号会话(`dsh_sid`,30 天)+ 官方 cookie 铸币跳(会话通过但缺官方 cookie 的 GET 由它代签并 303 回跳)替代了 `?token=` 的 per-process 分发——重启 dsh 后浏览器免输 token;本插件则让泛域名新入口免改启动命令即可达。
 - **dream-skin 等同构自守卫插件**:同样实时读 `webRuntime.trustedHosts`,本插件的注册对它们同步生效。
 
 ## 安全边界
