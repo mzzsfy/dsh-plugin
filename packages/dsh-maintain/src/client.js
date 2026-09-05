@@ -9,6 +9,20 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useRef } = React
 
+    // 面板反馈出口:公共依赖 @mzzsfy/dsh-toast,可选消费——占位条目由
+    // session-manager 唯一代挂,权威方未安装时降级 console,不挂死不报错
+    let toast = null
+    try {
+      toast = require('@mzzsfy/dsh-toast/client').show
+    } catch {
+      // 模块表无 toast → 反馈降级 console.warn
+    }
+
+    const notify = (text, kind) => {
+      if (toast) toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
+      else console.warn('[dsh-maintain] ' + text)
+    }
+
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → wrench);
     // 该插件未就绪时入队,由其启动时排空
     const NAV_ICON = { '版本与运维': 'wrench' }
@@ -445,7 +459,7 @@ function MaintainApp() {
     markBusy('refresh', true)
     post(REFRESH_URL)
       .then((next) => { setStatus(next); setError(null) })
-      .catch((refreshError) => setError('检查失败:' + (refreshError && refreshError.message ? refreshError.message : String(refreshError))))
+      .catch((refreshError) => notify('检查失败:' + (refreshError && refreshError.message ? refreshError.message : String(refreshError)), 'error'))
       .then(() => markBusy('refresh', false))
   }
 
@@ -454,7 +468,7 @@ function MaintainApp() {
     post(CHANNEL_URL, { channel })
       .then((next) => { setStatus(next); setError(null) })
       .catch((channelError) => {
-        setError('切换失败:' + (channelError && channelError.message ? channelError.message : String(channelError)))
+        notify('切换失败:' + (channelError && channelError.message ? channelError.message : String(channelError)), 'error')
         return load()
       })
       .then(() => markBusy('channel', false))
@@ -466,7 +480,7 @@ function MaintainApp() {
     post(url, body)
       .then((next) => { setStatus(next); setError(null) })
       .catch((saveError) => {
-        setError(onSaveError(saveError))
+        notify(onSaveError(saveError), 'error')
         return load()
       })
       .then(() => markBusy(busyKey, false))
@@ -487,7 +501,7 @@ function MaintainApp() {
     }
     const seconds = Number(text)
     if (!Number.isFinite(seconds) || seconds < 0) {
-      setError('轮询间隔必须是不小于 0 的秒数')
+      notify('轮询间隔必须是不小于 0 的秒数', 'error')
       return
     }
     submitEdit(POLL_INTERVAL_URL, { seconds }, 'pollInterval', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
@@ -508,7 +522,7 @@ function MaintainApp() {
       return
     }
     if (!isValidRegistryBase(base)) {
-      setError('registry 基地址必须以 http:// 或 https:// 开头')
+      notify('registry 基地址必须以 http:// 或 https:// 开头', 'error')
       return
     }
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
@@ -528,7 +542,7 @@ function MaintainApp() {
         // 升级转后台执行:观察器接管状态跟踪与完成提示,页面可离开
         ensureUpgradeWatch()
       })
-      .catch((upgradeError) => setError('升级触发失败:' + (upgradeError && upgradeError.message ? upgradeError.message : String(upgradeError))))
+      .catch((upgradeError) => notify('升级触发失败:' + (upgradeError && upgradeError.message ? upgradeError.message : String(upgradeError)), 'error'))
       .then(() => markBusy('upgrade', false))
   }
 

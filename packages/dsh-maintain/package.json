@@ -14,7 +14,10 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-toast/client"
+      ]
     }
   },
   "scripts": {
@@ -28,6 +31,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@mzzsfy/dsh-toast": "^0.1.0"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
