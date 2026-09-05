@@ -6,7 +6,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 
 - 自动归档:host 半区对超期会话走官方 `workspace.archiveSession` 通道,三个触发源共用同一评估与门闩:新会话创建(`session/created`,按该会话所属工作区限定)、settings 就绪后的启动补扫(全量,清掉停机期间积压)、每日周期轮(全量,经宿主 timer 服务固定短 tick + 到期判断)。幂等:已归档会话不参与评估。阈值 `autoArchiveDays` 默认 7,`0` 关闭;周期间隔 `autoArchiveIntervalHours` 默认 24,`0` 关闭周期轮,变更经周期 tick 对账(关闭即时暂停、重启用最迟下个 tick 生效、缩短经锚定钳制前移,最长等新间隔而非等满旧周期)。评估筛选:createdAt 纯内存预筛 + 已归档跳过 + stat 后活跃度判定,locate 缺失(第三方后端)与产物不可读的会话一律跳过,宁可漏归档不可误归档。经 settings 命名空间 `session-manager` 注册(schema 拒绝负数与非整数)。timer 为软依赖:宿主定时服务不可用时仅周期轮停用,面板顶部提示,插件其余能力不受影响。
 - 归档面板:设置页「会话归档」分区,数据为 client 侧 `session.list` 行 ∩ `workspaces.follow` 归档快照的交集,按更新时间倒序;行内支持取消归档与删除。
-- 归档 Toast:host 归档动作经 `workspace.follow` 的 `archived` 增量帧到达 client,集合差分得到新增条数 N,在 `shell.overlay` 槽位显示「有 N 个会话已归档」,持续 4 秒。
+- 归档与操作通知:host 归档动作经 `workspace.follow` 的 `archived` 增量帧到达 client,集合差分得到新增条数 N,经公共通知依赖 `@mzzsfy/dsh-toast` 顶部居中显示「有 N 个会话已归档」;面板操作(恢复 / 删除 / 重新挂载等)的成功与失败反馈同样经该依赖展示,失败提示常驻待确认。dsh-toast 为普通 npm 依赖随本插件安装,其宿主占位条目由本插件 cordis.patch.yml 代挂。
 - 删除:仅对已归档会话生效(运行中守卫先于执行,执行前 TOCTOU 复检,运行中的会话不可删除;OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行——此时回收已完成,响应附警告并落服务端日志),两段式确认(展示标题 / 日志体积,产物已缺失时以「产物已丢失」替代体积)后按 locate → trash → 台账 → detach → 归档清理单序执行;同 id 并发删除仅首个生效,其余以「正在删除中」拒绝。会话产物目录整体移入系统回收站(Windows PowerShell VisualBasic / macOS Finder / Linux gio;Windows 路径经环境变量传入 PowerShell,含空格或特殊字符的路径安全),可还原,不做直接删除降级。trash 成功即写入已删除台账(独立 storage domain `session_manager`,读改写经进程内互斥链串行化且单次操作带超时兜底,条目上限 200 裁最旧),记录会话 id 与产物原位置。产物**目录**已缺失的会话,仅当已归档或台账有记录(同 id 重删的残留收尾)时跳过回收与台账、仅解除列表关联,提示「产物已不存在,已完成列表清理」;两者皆无的缺失可能是新建会话尚未落盘,直接拒绝以防剥离活会话。
 - 已删除分区与重挂载:面板「已删除」区列出台账条目(标题 / 原位置 / 删除时间)。用户在系统回收站将会话文件夹还原到原位置后点「重新挂载」,经官方 `workspace.attachSession` 挂回工作区列表并清除台账;「移除记录」幂等清除单条。还原动作本身始终由用户在系统回收站完成,插件不驱动系统回收站。
 
@@ -57,7 +57,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 - 评估的活跃时间:JSONL 后端以产物 mtime 作为最近活跃代理,updatedAt = max(createdAt, mtime);非 JSONL 后端退化为 createdAt。评估两级筛选:先用 createdAt 纯内存预筛(mtime 只会增大 updatedAt,createdAt 未超期必不超期),仅对预筛存活者做产物 stat / blank 探测,活跃会话零 IO。空白判定:live 会话 seq=0,冷会话以 JSONL 产物「仅 header 一行」判定,locate 不可用的后端按非空白处理。评估整体带超时兜底(宿主服务挂起时门闩必然复位,不会永久停摆);单会话归档失败仅告警不中断整轮。
 - 无批量操作、无内容搜索、无会话详情预览。
 - 自动归档评估门闩:评估进行中其他触发源(含周期轮与 session/created)的新触发直接丢弃,不做排队;漏掉的会话由下一次触发兜底,启动补扫与每日周期轮保证了积压会话最迟一个周期内归档。产物不可读(mtime 探测失败)的会话视为已删除,不参与归档,防止删除后的会话被重新归档复活。timer 软依赖:宿主定时服务缺失或调用失败时周期轮停用,设置页显示降级提示(session/created 触发与启动补扫不受影响);timer 服务晚于插件激活时周期轮自动补武装。
-- 归档 Toast 提示以「连续两个 ready 快照」为差分启用条件:基线首装(启动与重连)不提示存量,重连基线携带的离期新增仍会提示。client.js 为单文件自包含格式,守卫逻辑与 core.mjs 各存一份镜像,修改需两处同步(projectRows / archiveToastStep / projectDeletedRows 同规);test/parity.test.mjs 对三组镜像做行为级对照并锁定 client 侧确认态文案与 host MESSAGES 同值。client 已删除列表加载失败时保留旧数据并 console.warn,不渲染成「无记录」。路由错误响应:业务错误原样透传中文文案,系统级错误(带 fs 错误码,message 内嵌绝对路径)收敛为固定文案并落服务端日志。
+- 归档提示以「连续两个 ready 快照」为差分启用条件:基线首装(启动与重连)不提示存量,重连基线携带的离期新增仍会提示。通知展示经公共依赖 `@mzzsfy/dsh-toast`(external require),本包不再自带通知 UI。client.js 为单文件自包含格式,守卫逻辑与 core.mjs 各存一份镜像,修改需两处同步(projectRows / archiveToastStep / projectDeletedRows 同规);test/parity.test.mjs 对三组镜像做行为级对照并锁定 client 侧确认态文案与 host MESSAGES 同值。client 已删除列表加载失败时保留旧数据并 console.warn,不渲染成「无记录」。路由错误响应:业务错误原样透传中文文案,系统级错误(带 fs 错误码,message 内嵌绝对路径)收敛为固定文案并落服务端日志。
 - 重挂载的并发窗口:attachSession 后、台账清除前进程中断,残留条目重挂载时因官方 attachSession 幂等(已在 sessionIds 中则跳过校验直写)无副作用,再次点按或「移除记录」即可收尾。台账域打开失败时已删除 / 重挂载 / forget 以 400 拒绝;删除路由走 partial 降级(其余步骤照常,提示「已移入回收站,但重挂载记录失败」),不做无台账中断——产物进回收站后中断删除只会造成状态不一致。
 - 测试基建:trash 为进程级唯一 OS 副作用出口,经 `executor.trashPath` 注册表注入,删除全流程(trash 成败 / 台账成败 / 归档清理)已有路由层覆盖。
 

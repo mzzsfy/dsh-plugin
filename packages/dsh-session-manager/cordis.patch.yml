@@ -1,7 +1,12 @@
 # session-manager 打包补丁:将自动归档 + 归档面板 + 回收站删除插件以单条目
 # 注入 profile 根。由 `dsh plugin add @mzzsfy/dsh-session-manager` 应用;
 # 行 id 指向本插件宿主半区,其 /api/session-manager/* 路由服务设置页中的浏览器半区。
+# dsh-toast 行代挂公共通知依赖的宿主占位(该包无自带 patch,作为普通依赖随本
+# 插件装载,其 client 由此进入客户端模块表供 external require);条目 id 带本
+# 插件前缀避免多消费插件同时安装时树内 id 冲突,name 才是模块表的包解析键。
 
 - insert:
     - id: session-manager
       name: '@mzzsfy/dsh-session-manager'
+    - id: session-manager-dsh-toast
+      name: '@mzzsfy/dsh-toast'

@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-session-manager",
   "description": "会话自动归档与管理:超期自动归档、归档面板、删除进系统回收站、还原后一键重挂载",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -14,7 +14,10 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-toast/client"
+      ]
     }
   },
   "scripts": {
@@ -28,6 +31,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@mzzsfy/dsh-toast": "^0.1.0"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",

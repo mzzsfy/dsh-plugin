@@ -1,16 +1,16 @@
-// dsh-session-manager Client 半区:settings.section 归档面板 + shell.overlay 归档 Toast。
+// dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知。
 // 归档快照来自官方 workspace.follow 客户端模型(ctx.get('workspaces')),会话行来自
-// ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),Toast 由 archived
-// 增量帧的集合差分驱动。浏览器半区经 webServer 路由('/api/session-manager/*')访问 Host。
-// 打包为单文件自包含格式,无法跨文件 require;与 src/core.mjs 镜像的纯函数
-// (projectArchiveRows / archiveToastStep)修改需两处同步。
+// ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),通知由 archived
+// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。浏览器半区经 webServer
+// 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
+// require;与 src/core.mjs 镜像的纯函数(projectArchiveRows / archiveToastStep)
+// 修改需两处同步。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useSyncExternalStore } = React
-    const { createPortal } = require('react-dom')
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → archive);
     // 该插件未就绪时入队,由其启动时排空
@@ -18,6 +18,10 @@ window.__ModuleLoader__.load({
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
+
+    // 通知出口:公共依赖 @mzzsfy/dsh-toast(external require,宿主占位条目由
+    // 本插件 cordis.patch.yml 代挂)
+    const { show: toast } = require('@mzzsfy/dsh-toast/client')
 
 // 视觉方案:归档台账——全部取宿主 alias 令牌(双主题自适应,不造色),数据列
 // 用宿主代码字体(会话即文件的档案词汇),签名元素为托盘内的归档轨
@@ -59,17 +63,7 @@ const CSS = [
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
-  '.sm-toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%); z-index:1100;',
-  '  background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-label-primary-inverted); font:var(--dsw-font-xs-13);',
-  '  padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2); animation:sm-toast-in 0.18s ease-out;',
-  '  display:flex; align-items:center; gap:10px; }',
-  '.sm-toast--action-ok { background:var(--dsw-alias-state-success-primary); color:var(--dsw-alias-label-primary-inverted); }',
-  '.sm-toast--action-error { background:var(--dsw-alias-state-error-primary); color:#fff; }',
-  '.sm-toast__close { border:0; background:transparent; cursor:pointer; color:inherit;',
-  '  font:var(--dsw-font-xs-strong-13); padding:0 2px; opacity:.8; }',
-  '.sm-toast__close:hover { opacity:1; }',
-  '@keyframes sm-toast-in { from { transform:translate(-50%, 8px); opacity:0; } to { transform:translate(-50%, 0); opacity:1; } }',
-  '@media (prefers-reduced-motion: reduce) { .sm-toast { animation:none; } .sm-row__actions { transition:none; } }',
+  '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -79,9 +73,6 @@ const DELETED_URL = '/api/session-manager/deleted'
 const REMOUNT_URL = '/api/session-manager/remount'
 const FORGET_URL = '/api/session-manager/forget'
 const STATUS_URL = '/api/session-manager/status'
-
-// Toast 持续时长,设计文档定值
-const TOAST_HOLD_MS = 4 * 1000
 
 async function api(url, options) {
   const response = await fetch(url, {
@@ -258,13 +249,13 @@ function SessionManagerApp(props) {
     setBusyId(sessionId)
     return action()
       .then((result) => {
-        if (result && result.partial) emitActionToast(result.message, 'ok')
-        else if (result && result.message) emitActionToast(result.message, 'ok')
-        else emitActionToast(successText || '操作完成', 'ok')
+        if (result && result.partial) toast(result.message, { kind: 'ok' })
+        else if (result && result.message) toast(result.message, { kind: 'ok' })
+        else toast(successText || '操作完成', { kind: 'ok' })
         setArmedId(null)
         setConfirms({})
       })
-      .catch((error) => emitActionToast(error && error.message ? error.message : String(error), 'error'))
+      .catch((error) => toast(error && error.message ? error.message : String(error), { kind: 'error', sticky: true }))
       .then(() => setBusyId(null))
   }
 
@@ -334,49 +325,14 @@ function SessionManagerApp(props) {
   )
 }
 
-// 操作反馈 Toast:{seq, text, kind: 'ok'|'error', sticky};seq 变化即重渲染(计时器重置 + 入场动画重放)
-let actionToast = { seq: 0, text: null, kind: 'ok', sticky: false }
-const actionListeners = new Set()
-const emitActionToast = (text, kind) => {
-  actionToast = { seq: actionToast.seq + 1, text, kind, sticky: kind === 'error' }
-  for (const listener of actionListeners) listener()
-}
-const actionToastSource = {
-  getSnapshot: () => actionToast,
-  subscribe: (listener) => {
-    actionListeners.add(listener)
-    return () => actionListeners.delete(listener)
-  },
-}
-
-// 归档 Toast:archived 增量帧带来的新增条数;seq 单调递增保证同文案重复提示
-// 也会重渲染(计时器重置 + 入场动画重放)
-function ArchiveToast(props) {
-  const text = props.toast.text
-  if (text === null || text === undefined) return null
-  return h('div', { className: 'sm-toast', role: 'alert' }, text)
-}
-
-// 操作反馈 Toast:错误常驻待点「知道了」,成功自动消失
-function ActionToast(props) {
-  const current = props.toast
-  if (current.text === null || current.text === undefined) return null
-  return h('div', { className: 'sm-toast sm-toast--action-' + current.kind, role: 'alert' },
-    h('span', null, current.text),
-    current.sticky
-      ? h('button', { className: 'sm-toast__close', onClick: props.onDismiss }, '知道了')
-      : null,
-  )
-}
-
     return {
       inject: ['slots', 'sessions', 'workspaces'],
       apply(ctx) {
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
 
-        // 样式挂载在宿主文档级:Toast 渲染于 shell.overlay 槽位,设置页未打开时
-        // 面板不存在,样式若随面板注入则 Toast 裸样式渲染
+        // 样式挂载在宿主文档级:设置页未打开时面板不存在,
+        // 样式若随面板注入则面板裸样式渲染
         ctx.effect(() => {
           const style = document.createElement('style')
           style.textContent = CSS
@@ -384,44 +340,18 @@ function ActionToast(props) {
           return () => style.remove()
         }, 'session-manager styles')
 
-        // 归档快照差分:新增条数驱动 Toast;快照以 {seq, text} 存放,seq 变化即重渲染
+        // 归档快照差分:新增条数驱动通知
         let previous
-        let toastSeq = 0
-        let toast = { seq: toastSeq, text: null }
-        const toastListeners = new Set()
-        const emitToast = (text) => {
-          toast = { seq: ++toastSeq, text }
-          for (const listener of toastListeners) listener()
-        }
-        const toastSource = {
-          getSnapshot: () => toast,
-          subscribe: (listener) => {
-            toastListeners.add(listener)
-            return () => toastListeners.delete(listener)
-          },
-        }
         const unsubscribe = workspaces.list.subscribe(() => {
           const step = archiveToastStep(previous, workspaces.list.getSnapshot())
           previous = step.state
-          if (step.added.length > 0) emitToast('有 ' + step.added.length + ' 个会话已归档')
+          if (step.added.length > 0) toast('有 ' + step.added.length + ' 个会话已归档')
         })
 
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'session-manager', order: 46, label: '会话归档' },
             () => React.createElement(SessionManagerPanel, { sessions, workspaces }),
-          ))
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
-            { name: 'shell.overlay', id: 'session-manager-toast' },
-            () => React.createElement(OverlayToast, { source: toastSource }),
-          ))
-        // 操作 Toast 经 portal 直挂 body:shell.overlay 槽处于应用 frame 的低层级叠层
-        // 上下文,设置全屏层(z=1000)会盖住槽内任何 z 值;portal 脱离该子树不受限
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
-            { name: 'shell.overlay', id: 'session-manager-action-toast' },
-            () => React.createElement(OverlayActionToast, { source: actionToastSource }),
           ))
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')
@@ -433,34 +363,6 @@ function ActionToast(props) {
             rows: projectRows(listState, (workspaceState && workspaceState.archivedSessionIds) || []),
             listState,
           })
-        }
-
-        function OverlayToast({ source }) {
-          const current = useSyncExternalStore(source.subscribe, source.getSnapshot)
-          useEffect(() => {
-            if (current.text === null || current.text === undefined) return
-            const timer = setTimeout(() => emitToast(null), TOAST_HOLD_MS)
-            return () => clearTimeout(timer)
-          }, [current.seq])
-          return React.createElement(ArchiveToast, { key: current.seq, toast: current })
-        }
-
-        function OverlayActionToast({ source }) {
-          const current = useSyncExternalStore(source.subscribe, source.getSnapshot)
-          useEffect(() => {
-            // 错误常驻待确认;成功提示与归档 Toast 同节奏自动消失
-            if (current.text === null || current.text === undefined || current.sticky) return
-            const timer = setTimeout(() => emitActionToast(null, 'ok'), TOAST_HOLD_MS)
-            return () => clearTimeout(timer)
-          }, [current.seq])
-          return createPortal(
-            React.createElement(ActionToast, {
-              key: current.seq,
-              toast: current,
-              onDismiss: () => emitActionToast(null, 'ok'),
-            }),
-            document.body,
-          )
         }
       },
     }
