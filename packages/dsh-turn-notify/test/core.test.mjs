@@ -208,6 +208,30 @@ test('子代理回执静默:唤醒回合 completed 不通知,其余分类与开�
   }), true)
 })
 
+test('等待子代理静默:主回合挂起等委托时 completed 不通知,其余分类与开关关闭不受影响', () => {
+  const settings = baseSettings()
+  // 等待子代理 + completed + 开关开 → 抑制
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, awaitingChildren: true,
+  }), false)
+  // 开关关 → 通知
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings: baseSettings({ suppressSubagentWake: false }), header: {}, awaitingChildren: true,
+  }), true)
+  // 无等待 → 正常通知(不误伤)
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, awaitingChildren: false,
+  }), true)
+  // 等待中但异常分类 → 仍通知
+  assert.equal(shouldNotify({
+    category: CATEGORY_ERROR, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,
+    settings, header: {}, awaitingChildren: true,
+  }), true)
+})
+
 test('投影环形容量与过期清理', () => {
   const capacity = 20
   const ttlMs = 60 * 1000
