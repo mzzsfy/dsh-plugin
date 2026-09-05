@@ -25,7 +25,7 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 - **attribution 头**:每请求携带官方 `user-agent`;用户撞名头大小写不敏感剥除。
 - **错误分类对齐**:quota 判定(`QUOTA_EXCEEDED`)、超窗双通道(pi-ai usage 判定器 + dsh-llm 文本判定器 → `CONTEXT_WINDOW_EXCEEDED`)。
 - **热更新**:改配置即生效(settings 服务 `installSection` 模式)——写入时校验拒绝坏配置,路由集/重试策略/显示名变化原地 `replace`,解析失败保旧路由;无路由时休眠,不注册 adapter。
-- **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系协议可"拉取模型",anthropic 等明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册)+ `imageRequestPricing`(声明无 provider 侧图片定价,官方基类默认同构;0.1.2 起宿主计量路径直接调用,缺失即 TypeError)。
+- **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系协议可"拉取模型",anthropic 等明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册);adapter 挂 `LlmAdapter` 原型继承基类默认方法(含 `imageRequestPricing`,声明无 provider 侧图片定价,计量回退中性估算),宿主接口演进新增默认实现时自动跟随。
 - **pi-ai 同栈**:依赖范围与官方一致(^0.82.1),协议行为与官方路由同一版本保证。
 
 ## 错误码
