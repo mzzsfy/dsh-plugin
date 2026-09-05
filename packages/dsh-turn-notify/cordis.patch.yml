@@ -2,14 +2,12 @@
 # profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-turn-notify`;
 # the row id addresses this plugin's host half, whose `session/event` observer
 # feeds the projection polled by the browser half via `/api/turn-notify/*`.
-# The dsh-toast row mounts the shared notification dependency's placeholder
-# (that package declares no patch of its own and ships as a plain dependency;
-# this row brings its client half into the client module table for the
-# external require). The placeholder id is prefixed with this plugin's id so
-# multiple consumer plugins can coexist; `name` is the module-table key.
+# No dsh-toast placeholder row here: the shared dependency's module-table mount
+# has a single authoritative consumer (session-manager). This plugin consumes
+# the toast client optionally (dynamic require with graceful channel disable),
+# since two placeholder rows for the same package name compose two module
+# sources when their loader base URLs differ, which is fatal at boot.
 
 - insert:
     - id: turn-notify
       name: '@mzzsfy/dsh-turn-notify'
-    - id: turn-notify-dsh-toast
-      name: '@mzzsfy/dsh-toast'

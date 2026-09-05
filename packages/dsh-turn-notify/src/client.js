@@ -10,9 +10,15 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect } = React
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-toast(external require,宿主占位条目由
-    // 本插件 cordis.patch.yml 代挂)
-    const { show: toast } = require('@mzzsfy/dsh-toast/client')
+    // 通知出口:公共依赖 @mzzsfy/dsh-toast,可选消费——共享依赖包的模块表注入
+    // 全仓收敛到唯一权威消费方(session-manager),本插件不再代挂占位条目;
+    // 权威方未安装时模块表缺失,干净禁用 toast 通道(其余通道不受影响)
+    let toast = null
+    try {
+      toast = require('@mzzsfy/dsh-toast/client').show
+    } catch {
+      // 模块表无 toast → 页内通知通道置空,调用点统一走 toast 判空
+    }
 
     const POLL_MS = 2 * 1000
     // 页内通知展示期,经公共依赖 holdMs 传入
@@ -528,7 +534,7 @@ window.__ModuleLoader__.load({
           if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
           if (unit.sessionTitle) sessionHighlights.set(unit.sessionTitle, unit.category)
         }
-        if (channels.toast) toast(unit.text, { holdMs: TOAST_MS })
+        if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
         if (!channels.sound) continue
         playSound(sound).catch(() => {})
         if (channels.system) notifySystem(unit)
@@ -1041,6 +1047,10 @@ window.__ModuleLoader__.load({
 
       // 页内通知通道单独测试:仅弹页内提示,不涉及声音与系统通知
       function testPageNotification() {
+        if (!toast) {
+          patch('toast 库未装载(权威消费方未安装),页内通知通道不可用', 'error')
+          return
+        }
         toast('[dsh] 页内通知测试', { holdMs: TOAST_MS })
         patch('页内通知已发送')
       }
