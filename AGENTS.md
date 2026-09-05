@@ -12,8 +12,9 @@
 
 profile 位于 `~/.dsh/profiles/web`。合法状态只有一种,禁止第三种:
 
-1. **依赖行 = semver**:profile 的 package.json 中所有 `@mzzsfy/*` 依赖行必须是 `^线上最新版`,禁止 `link:` / `file:` / 本地路径(历史残留已清,勿再引入;pnpm 对 file: 是整目录拷贝,永远吃不到工作副本)
-2. **工作副本挂载 = junction**:`node_modules/@mzzsfy/<包>` 是指向仓库 `packages/<包>` 的 junction
+1. **已发布包依赖行 = semver**:线上已有版本的包,profile 的 package.json 中依赖行必须是 `^线上最新版`,禁止 `link:` / 本地路径
+2. **未发布包依赖行 = file 协议**:线上 404 的包,依赖行由 dev-link 自动写为 `file:<仓库>/packages/<包>`(不强制先发布;junction 照挂,线上出版本后重跑 dev-link 自动归一 ^latest)
+3. **工作副本挂载 = junction**:`node_modules/@mzzsfy/<包>` 是指向仓库 `packages/<包>` 的 junction
 
 **操作唯一入口:**
 
@@ -60,6 +61,16 @@ client.js 与 core 之间存在镜像逻辑的(如 turn-notify 的 chooseChannel
 - 实现模式:原生 checkbox 保留(`input[type="checkbox"]`,保可访问性与表单语义)但视觉隐藏,相邻兄弟节点 `track`(圆角胶囊 `<span>`)+ 其子节点 `thumb`(圆点 `<span>`)用 CSS 过渡呈现选中态;结构为 `label.<前缀>-switch > input[type="checkbox"] + .<前缀>-switch__track > .<前缀>-switch__thumb`,label 内允许其余子节点(文字标签、同 label 的文本 input)
 - 各包样式类名必须带包前缀(前缀取包名缩写,须在 packages/ 全清单内唯一,如 `tn-switch` / `mce-switch`),因插件 style 均为全局注入;开关的 `:checked` / `:focus-visible` / `:disabled` 状态选择器必须以 `input[type="checkbox"]` 锚定,防止组合进含其他 input 的 label 时误伤;`:hover` 例外地锚定 label(视觉隐藏的 input 无法成为指针目标)
 - 参考实现:`dsh-model-capability-editor` 的 `.mce-switch`(状态最全,含 disabled);`dsh-turn-notify` 的 `.tn-switch` 为同款。新包仿制并复制对应 switch-guard 守卫测试,不抽共享 UI 包
+
+## 公共 client 依赖包规约
+
+跨插件共享的 client 能力(如 `dsh-toast` 的浮出通知)按**普通 npm 依赖**形态发布,禁止做成 dsh 插件(不声明 `dsh.bundle.patch`、不自带 cordis.patch.yml、无需 plugin add):
+
+- 消费插件在 `dependencies` 声明该包(pnpm 随装),在 `dsh.client.external` 声明 `'@mzzsfy/<包>/client'`,factory 内直接 `require` 使用;禁止 window 全局注册器 + 队列模式——纯依赖包不经宿主条目装载,其模块永不物化,window API 无人物化挂载
+- 依赖包的 client 进入客户端模块表靠**消费插件代挂**:消费插件 cordis.patch.yml 的 insert 列表追加该包宿主占位条目,**id 必须带消费插件前缀**(如 `turn-notify-dsh-toast`,树内 id 唯一,多消费插件共存不冲突),`name` 指向依赖包 npm 名(name 才是 cordis 加载与模块表的包解析键);依赖包保留最小空 host 入口(`name` + 空 `inject`/`apply`)供 cordis 装载
+- client.js 仍以 `__ModuleLoader__.load({id, factory})` 自注册格式发布,factory 返回**库导出**(非 `{inject, apply}`);渲染容器惰性自举、按 id 幂等自愈(HMR 新代首挂清旧代残留),不依赖宿主生命周期
+- 参考实现:`dsh-toast`(README 含接入三步);react / react-dom/client 由宿主平台种子表提供
+
 
 ## DSH 本体 API 对齐
 
