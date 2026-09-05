@@ -92,7 +92,11 @@ async function api(url, options) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
+  if (!response.ok) {
+    const error = new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
+    error.status = response.status
+    throw error
+  }
   return payload
 }
 
@@ -100,11 +104,15 @@ function post(url, body) {
   return api(url, { method: 'POST', body: body === undefined ? '{}' : JSON.stringify(body) })
 }
 
-// 网络层失败判定:fetch 连接失败抛 TypeError,请求被中止/超时抛 name 为 AbortError/TimeoutError 的异常;
-// HTTP 业务错误(4xx/5xx)是携带服务端信息的普通 Error,不在此列
-function isNetworkFailure(error) {
+// 宿主不可达判定:重启等待语境下,传输层失败(TypeError/中止)与网关 5xx 等价——
+// 宿主退出窗口经反向代理/系统代理访问时,宿主死亡表现为网关 502/503/504 应答而非连接错误;
+// 409/401/403/500 是宿主存活时的应用层应答,不在此列
+const GATEWAY_UNAVAILABLE_STATUSES = [502, 503, 504]
+function isHostUnreachable(error) {
   if (error instanceof TypeError) return true
-  return error !== null && error !== undefined && (error.name === 'AbortError' || error.name === 'TimeoutError')
+  if (error === null || error === undefined) return false
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true
+  return error.status !== undefined && GATEWAY_UNAVAILABLE_STATUSES.includes(error.status)
 }
 
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
@@ -565,9 +573,9 @@ function MaintainApp() {
         return post(RESTART_URL)
       })
       .catch((restartError) => {
-        // 网络层失败(TypeError/中止)是宿主退出窗口切断连接的预期中间态,置失联并入等待态轮询;
+        // 宿主不可达(传输层失败/网关 5xx)是宿主退出窗口的预期中间态,置失联并入等待态轮询;
         // 业务错误(409/401/500 等)宿主仍在,展示原文,不得进入等待态(等待态会把失联误判为已重启)
-        if (isNetworkFailure(restartError)) {
+        if (isHostUnreachable(restartError)) {
           restartLostRef.current = true
           setRestarting(true)
           return
