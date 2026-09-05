@@ -101,7 +101,7 @@ async function listNames() {
   return readdir(soundsDir)
 }
 
-test('sounds 列表:id/ext 按首点切分,非音效文件过滤', async () => {
+test('sounds 列表:id/ext 按首点切分,非音效文件过滤,无索引记录展示名为空', async () => {
   await resetSounds()
   await seedSound('a.wav')
   await seedSound('c.ogg')
@@ -113,9 +113,26 @@ test('sounds 列表:id/ext 按首点切分,非音效文件过滤', async () => {
   assert.equal(res.status, 200)
   assert.deepEqual(
     res.body.sounds.sort((x, y) => x.id.localeCompare(y.id)),
-    [{ id: 'a', ext: 'wav' }, { id: 'c', ext: 'ogg' }],
+    [{ id: 'a', ext: 'wav', name: null }, { id: 'c', ext: 'ogg', name: null }],
   )
   assert.equal(res.body.builtin, true)
+})
+
+test('sounds 列表:展示名随索引附加,索引文件不入列,索引损坏降级为无名', async () => {
+  await resetSounds()
+  await seedSound('a.wav')
+  await writeFile(join(soundsDir, 'index.json'), JSON.stringify({ a: '别名甲', ghost: '孤儿名' }))
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/sounds')(makeReq('GET'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.sounds, [{ id: 'a', ext: 'wav', name: '别名甲' }])
+  await writeFile(join(soundsDir, 'index.json'), '{broken')
+  const degraded = makeRes()
+  await routes.get('/api/turn-notify/sounds')(makeReq('GET'), degraded)
+  assert.equal(degraded.status, 200)
+  assert.deepEqual(degraded.body.sounds, [{ id: 'a', ext: 'wav', name: null }])
 })
 
 test('sounds 列表 405 与错误兜底', async () => {

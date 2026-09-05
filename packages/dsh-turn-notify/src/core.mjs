@@ -224,14 +224,37 @@ export function resolveSound({ category, mapping, uploadedIds }) {
   return { kind: 'builtin', name: DEFAULT_TONES[category] }
 }
 
-// 音效名长度上限:供文件名与列表展示,超长截断提示不佳,直接拒绝。
+// 映射双作用域合并:全局为底,本地键覆盖(空串=显式内置默认,同样覆盖);
+// 两参均容错空值,返回新对象不改入参。
+export function mergeMapping(globalMapping, localMapping) {
+  const merged = {}
+  for (const key of Object.keys(globalMapping || {})) merged[key] = globalMapping[key]
+  for (const key of Object.keys(localMapping || {})) merged[key] = localMapping[key]
+  return merged
+}
+
+// 死链识别:映射值既非内置音名也非已上传 id 即失效引用,去重并按首次出现排序,
+// 供面板呈现死链与发声回退归因。
+export function deadCustomIds(mapping, uploadedIds) {
+  const uploaded = uploadedIds || []
+  const dead = []
+  for (const value of Object.values(mapping || {})) {
+    if (typeof value !== 'string' || value.length === 0) continue
+    if (Object.prototype.hasOwnProperty.call(BUILTIN_TONES, value)) continue
+    if (uploaded.indexOf(value) >= 0) continue
+    if (dead.indexOf(value) < 0) dead.push(value)
+  }
+  return dead
+}
+
+// 音效展示名长度上限:超长截断提示不佳,直接拒绝。
 export const SOUND_NAME_MAX_CHARS = 64
 
-// 音效文件名黑名单:分隔符防路径穿越,点防 listSounds 以首点分割 id/ext 错位,
-// 控制字符与 Windows 非法字符防落盘失败。
+// 展示名黑名单:分隔符与点防注入索引键或文件名形态,控制字符与 Windows 非法字符防后续落盘复用失败。
 const SOUND_NAME_FORBIDDEN = /[\\/:*?"<>|.\u0000-\u001f]/
 
-// 音效名校验:trim 归一化随结果返回;与内置音色重名会污染映射 id 命名空间,一并拒绝。
+// 展示名校验:trim 归一化随结果返回;名称仅存展示名索引,不进文件名;
+// 与内置音色重名会污染映射 id 命名空间,一并拒绝。
 export function validateSoundName(rawName) {
   const name = String(rawName ?? '').trim()
   if (name.length === 0) return { ok: false, reason: '名称不能为空' }

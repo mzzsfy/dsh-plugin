@@ -1,9 +1,10 @@
-// 音效重命名路由测试:USERPROFILE 重定向到临时目录后动态装载 host 路由,
-// 隔离真实 ~/.dsh 音效库;覆盖重命名主路径 / 幂等 / 冲突 / 非法名 / 404 / 写守卫。
+// 音效重命名路由测试(展示名语义):USERPROFILE 重定向到临时目录后动态装载 host 路由,
+// 隔离真实 ~/.dsh 音效库;覆盖展示名落索引 / 文件名不变 / 映射引用不动 / 幂等 /
+// 非法名 / 404 / 并发收敛 / 删除清索引 / 守卫。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, writeFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SOUND_NAME_MAX_CHARS } from '../src/core.mjs'
@@ -22,8 +23,14 @@ function makeRes() {
   return {
     status: null,
     body: null,
-    writeHead(status) { this.status = status },
-    end(body) { this.body = JSON.parse(body) },
+    raw: null,
+    headers: null,
+    writeHead(status, headers) { this.status = status; this.headers = headers },
+    end(body) {
+      if (Buffer.isBuffer(body)) this.raw = body
+      else if (body !== undefined && (this.headers ? String(this.headers['content-type']) : '').includes('json')) this.body = JSON.parse(body)
+      else this.raw = body
+    },
   }
 }
 
@@ -93,7 +100,15 @@ async function listNames() {
   return readdir(soundsDir)
 }
 
-test('重命名主路径:文件改名,映射引用迁移,响应带回新映射', async () => {
+async function readIndex() {
+  try {
+    return JSON.parse(await readFile(join(soundsDir, 'index.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+test('重命名主路径:文件名不变,展示名落索引,映射引用不动,原 id 仍可读取', async () => {
   await resetSounds()
   await seedSound('snd-abc', 'wav')
   const { ctx, routes, settingsService } = makeCtx()
@@ -102,37 +117,35 @@ test('重命名主路径:文件改名,映射引用迁移,响应带回新映射',
   const res = makeRes()
   await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'snd-abc', name: ' 提示音甲 ' }, JSON_HEADERS), res)
   assert.equal(res.status, 200)
-  assert.deepEqual(res.body, { ok: true, id: '提示音甲', soundMapping: { completed: '提示音甲', error: 'snd-other' } })
-  const names = await listNames()
-  assert.deepEqual(names, ['提示音甲.wav'])
+  assert.deepEqual(res.body, { ok: true, id: 'snd-abc', name: '提示音甲' })
+  assert.deepEqual((await listNames()).sort(), ['index.json', 'snd-abc.wav'])
+  assert.deepEqual(await readIndex(), { 'snd-abc': '提示音甲' })
   const stored = settingsService.get('turn-notify')
-  assert.equal(stored.soundMapping.completed, '提示音甲')
+  assert.equal(stored.soundMapping.completed, 'snd-abc')
+  assert.equal(stored.soundMapping.error, 'snd-other')
+  const got = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('GET', undefined, undefined, '/api/turn-notify/sound?id=snd-abc'), got)
+  assert.equal(got.status, 200)
+  assert.deepEqual(got.raw, Buffer.from([1, 2, 3]))
 })
 
-test('重命名为当前名:幂等成功,文件不动', async () => {
+test('重命名为当前展示名:幂等成功,索引与文件不动', async () => {
   await resetSounds()
   await seedSound('snd-keep', 'mp3')
   const { ctx, routes } = makeCtx()
   apply(ctx)
-  const res = makeRes()
-  await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'snd-keep', name: 'snd-keep' }, JSON_HEADERS), res)
-  assert.equal(res.status, 200)
-  assert.deepEqual(await listNames(), ['snd-keep.mp3'])
+  const first = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'snd-keep', name: '名称甲' }, JSON_HEADERS), first)
+  assert.equal(first.status, 200)
+  const again = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'snd-keep', name: ' 名称甲 ' }, JSON_HEADERS), again)
+  assert.equal(again.status, 200)
+  assert.deepEqual(again.body, { ok: true, id: 'snd-keep', name: '名称甲' })
+  assert.deepEqual(await readIndex(), { 'snd-keep': '名称甲' })
+  assert.deepEqual((await listNames()).sort(), ['index.json', 'snd-keep.mp3'])
 })
 
-test('重命名到已存在名称:400 拒绝,两文件均不动', async () => {
-  await resetSounds()
-  await seedSound('snd-one', 'wav')
-  await seedSound('snd-two', 'wav')
-  const { ctx, routes } = makeCtx()
-  apply(ctx)
-  const res = makeRes()
-  await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'snd-one', name: 'snd-two' }, JSON_HEADERS), res)
-  assert.equal(res.status, 400)
-  assert.deepEqual((await listNames()).sort(), ['snd-one.wav', 'snd-two.wav'])
-})
-
-test('重命名为非法名:400 拒绝,文件不动', async () => {
+test('重命名为非法名:400 拒绝,索引与文件不动', async () => {
   await resetSounds()
   await seedSound('snd-x', 'ogg')
   const { ctx, routes } = makeCtx()
@@ -143,6 +156,7 @@ test('重命名为非法名:400 拒绝,文件不动', async () => {
     assert.equal(res.status, 400, '非法名应 400: ' + name)
   }
   assert.deepEqual(await listNames(), ['snd-x.ogg'])
+  assert.deepEqual(await readIndex(), {})
 })
 
 test('重命名不存在的音效:404', async () => {
@@ -154,18 +168,49 @@ test('重命名不存在的音效:404', async () => {
   assert.equal(res.status, 404)
 })
 
-test('并发重命名同名:互斥串行,仅一成功且文件唯一', async () => {
+test('并发展示名重命名:互斥串行,双双成功,文件不变且索引收敛于单值', async () => {
   await resetSounds()
   await seedSound('snd-dup', 'wav')
   const { ctx, routes } = makeCtx()
   apply(ctx)
   const handler = routes.get('/api/turn-notify/sound')
-  const results = await Promise.all([0, 1].map(() => {
+  const results = await Promise.all(['并发名一', '并发名二'].map((name) => {
     const res = makeRes()
-    return handler(makeReq('PUT', { id: 'snd-dup', name: '并发名' }, JSON_HEADERS), res).then(() => res.status)
+    return handler(makeReq('PUT', { id: 'snd-dup', name }, JSON_HEADERS), res).then(() => res.status)
   }))
-  assert.deepEqual(results.sort(), [200, 404])
-  assert.deepEqual(await listNames(), ['并发名.wav'])
+  assert.deepEqual(results, [200, 200])
+  assert.deepEqual((await listNames()).sort(), ['index.json', 'snd-dup.wav'])
+  const index = await readIndex()
+  assert.deepEqual(Object.keys(index), ['snd-dup'])
+  assert.ok(index['snd-dup'] === '并发名一' || index['snd-dup'] === '并发名二')
+})
+
+test('删除清理展示名索引:条目随文件移除,映射引用同步清理', async () => {
+  await resetSounds()
+  await seedSound('gone', 'wav')
+  const { ctx, routes, settingsService } = makeCtx()
+  apply(ctx)
+  const renamed = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('PUT', { id: 'gone', name: '旧名' }, JSON_HEADERS), renamed)
+  assert.equal(renamed.status, 200)
+  await settingsService.update('turn-notify', { soundMapping: { completed: 'gone' } })
+  const res = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('DELETE', undefined, undefined, '/api/turn-notify/sound?id=gone'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(await listNames(), ['index.json'])
+  assert.deepEqual(await readIndex(), {})
+  const stored = settingsService.get('turn-notify')
+  assert.equal(stored.soundMapping.completed, null)
+})
+
+test('删除不存在的音效:404,不产生索引文件', async () => {
+  await resetSounds()
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const res = makeRes()
+  await routes.get('/api/turn-notify/sound')(makeReq('DELETE', undefined, undefined, '/api/turn-notify/sound?id=missing'), res)
+  assert.equal(res.status, 404)
+  assert.deepEqual(await listNames(), [])
 })
 
 test('重命名路由守卫:跨源 403,非 JSON 400,畸形体 400,不支持的方法 405', async () => {

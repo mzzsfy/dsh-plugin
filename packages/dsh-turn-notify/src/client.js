@@ -86,6 +86,9 @@ window.__ModuleLoader__.load({
     const KEY_DEGRADE_HINT = 'turn-notify:degrade-hint'
     const KEY_TOAST = 'turn-notify:toast'
     const KEY_SYSTEM = 'turn-notify:system'
+    // 映射双作用域:本地映射与开关均存本机浏览器,音效库保持 host 共享
+    const KEY_MAPPING = 'turn-notify:mapping'
+    const KEY_MAPPING_LOCAL = 'turn-notify:mapping-local'
     // 轮询单例令牌:HMR/插件重载重建模块闭包时防轮询线程累积
     const KEY_POLL_TOKEN = 'turn-notify:polling'
 
@@ -133,6 +136,19 @@ window.__ModuleLoader__.load({
         storageState.broken = true
       }
     }
+
+    // 本地映射读取:JSON 解析失败或形态非对象回空对象
+    function readLocalMapping() {
+      try {
+        const parsed = JSON.parse(localGet(KEY_MAPPING))
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    // 本地作用域开关:仅显式开启生效,缺省为全局
+    const localMappingEnabled = () => localGet(KEY_MAPPING_LOCAL) === '1'
 
     function windowId() {
       let wid = localGet(KEY_WID)
@@ -189,6 +205,27 @@ window.__ModuleLoader__.load({
         if (Object.prototype.hasOwnProperty.call(TONE_LABELS, wanted)) return { kind: 'builtin', name: wanted }
       }
       return { kind: 'builtin', name: DEFAULT_TONES[category] }
+    }
+
+    // 映射双作用域合并:与 core.mjs mergeMapping 行为一致,parity 测试锁定
+    function mergeMapping(globalMapping, localMapping) {
+      const merged = {}
+      for (const key of Object.keys(globalMapping || {})) merged[key] = globalMapping[key]
+      for (const key of Object.keys(localMapping || {})) merged[key] = localMapping[key]
+      return merged
+    }
+
+    // 死链识别:与 core.mjs deadCustomIds 行为一致,parity 测试锁定
+    function deadCustomIds(mapping, uploadedIds) {
+      const uploaded = uploadedIds || []
+      const dead = []
+      for (const value of Object.values(mapping || {})) {
+        if (typeof value !== 'string' || value.length === 0) continue
+        if (Object.prototype.hasOwnProperty.call(TONE_LABELS, value)) continue
+        if (uploaded.indexOf(value) >= 0) continue
+        if (dead.indexOf(value) < 0) dead.push(value)
+      }
+      return dead
     }
 
     // 发声通道判定:与 core.mjs chooseChannels 行为一致,通道开关来自 localStorage,
@@ -448,6 +485,9 @@ window.__ModuleLoader__.load({
     let uploadedIds = []
     let running = false
 
+    // 生效映射:开关开时本地覆盖全局,关时本地整体休眠(结果即全局)
+    const effectiveMapping = () => mergeMapping(soundMapping, localMappingEnabled() ? readLocalMapping() : {})
+
     async function poll() {
       try {
         await pollOnce()
@@ -482,7 +522,7 @@ window.__ModuleLoader__.load({
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
         const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt())
-        const sound = resolveSound(unit.category, soundMapping, uploadedIds)
+        const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast) showToast(unit)
         if (!channels.sound) continue
         playSound(sound).catch(() => {})
@@ -630,8 +670,11 @@ window.__ModuleLoader__.load({
       // IM 投递:botId 草稿与当前加载到的目标目录(目录只在勾选时消费,不直接决定已选)
       const [imBotIdDraft, setImBotIdDraft] = useState('')
       const [imCatalog, setImCatalog] = useState(null)
-      // 分类映射的受控 state:直接由写响应回填,不再依赖轮询变量驱动渲染
+      // 分类映射的全局镜像:直接由全局配置/映射响应回填,不再依赖轮询变量驱动渲染
       const [mapping, setMappingState] = useState({})
+      // 本地作用域镜像:开关与映射改动即写 localStorage,仅作用域为当前域名
+      const [localMode, setLocalMode] = useState(() => localMappingEnabled())
+      const [localMapping, setLocalMappingState] = useState(() => readLocalMapping())
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
 
@@ -721,7 +764,7 @@ window.__ModuleLoader__.load({
 
       function startRename(sound) {
         setRenamingId(sound.id)
-        setRenameDraft(sound.id)
+        setRenameDraft(sound.name || sound.id)
       }
 
       function cancelRename() {
@@ -735,8 +778,7 @@ window.__ModuleLoader__.load({
         try {
           const res = await api('/api/turn-notify/sound', { method: 'PUT', body: JSON.stringify({ id: sound.id, name: renameDraft }) })
           decodedCache.delete(sound.id)
-          if (res.soundMapping) setMappingState(res.soundMapping)
-          patch('已重命名为 ' + res.id)
+          patch('已重命名为 ' + res.name)
           cancelRename()
         } catch (error) {
           patch('重命名失败:' + (error && error.message ? error.message : String(error)), 'error')
@@ -749,7 +791,21 @@ window.__ModuleLoader__.load({
         } catch { }
       }
 
+      // 作用域切换:开=映射改动只写本机 localStorage,读合并;关=读写全走全局,本地数据保留但休眠
+      function toggleLocalMapping(checked) {
+        setLocalMode(checked)
+        localSet(KEY_MAPPING_LOCAL, checked ? '1' : '0')
+      }
+
       async function setMapping(category, id) {
+        // 本地模式:空串为显式内置默认,同样保留为键值
+        if (localMode) {
+          const next = { ...localMapping, [category]: id }
+          setLocalMappingState(next)
+          localSet(KEY_MAPPING, JSON.stringify(next))
+          patch(CATEGORY_LABELS[category] + ' 音效已更新(仅存本机浏览器)')
+          return
+        }
         try {
           const res = await api('/api/turn-notify/mapping', { method: 'POST', body: JSON.stringify({ category, id }) })
           setMappingState(res.soundMapping || {})
@@ -951,18 +1007,26 @@ window.__ModuleLoader__.load({
         return sound.kind === 'custom' ? '上传音效 ' + sound.id : '内置 ' + (TONE_LABELS[sound.name] || sound.name)
       }
 
-      // 分类试听:播放该分类当前实际生效的音效(自定义 / 内置 / 失效回落),与通知真实发声同语义
+      // 生效映射与死链:合并全局镜像与本地镜像(开关关时本地休眠不参与)
+      const soundIds = sounds.map((sound) => sound.id)
+      const effective = mergeMapping(mapping, localMode ? localMapping : {})
+      const deadIds = deadCustomIds(effective, soundIds)
+
+      // 分类试听:播放该分类当前实际生效的音效(自定义 / 内置 / 失效回落),与通知真实发声同语义;
+      // 命中死链时回执归因,引导重传或改选
       function previewCategory(category) {
-        const sound = resolveSound(category, mapping, uploadedIds)
+        const sound = resolveSound(category, effective, soundIds)
         playAudible(sound).then((result) => {
           if (!result.ok) patch(CATEGORY_LABELS[category] + ' 试听未播放:' + result.reason, 'error')
+          else if (deadIds.indexOf(effective[category]) >= 0) patch('映射 ' + effective[category] + ' 已失效,已播放内置默认,请重新上传音效或改选映射', 'error')
           else patch('已试听 ' + CATEGORY_LABELS[category] + ':' + describeSound(sound))
         })
       }
 
       const soundOptions = [h('option', { key: '', value: '' }, '内置默认')].concat(
         Object.keys(TONE_LABELS).map((name) => h('option', { key: name, value: name }, '内置 · ' + TONE_LABELS[name])),
-      ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + sound.id)))
+      ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + (sound.name || sound.id))))
+        .concat(deadIds.map((id) => h('option', { key: id, value: id }, '失效 · ' + id)))
 
       return h('div', { className: 'tn-panel' },
         h('div', { className: 'tn-head' },
@@ -1097,9 +1161,9 @@ window.__ModuleLoader__.load({
           h('div', { className: 'tn-row' },
             h('button', {
               className: 'tn-btn',
-              // 测试声音读当前映射:播放任务完成分类实际生效的音效,而非固定参考音
+              // 测试声音读当前生效映射:播放任务完成分类实际生效的音效,而非固定参考音
               onClick: () => {
-                const sound = resolveSound('completed', mapping, uploadedIds)
+                const sound = resolveSound('completed', effective, soundIds)
                 playAudible(sound).then((result) => {
                   patch(result.ok
                     ? '测试声音已触发:' + describeSound(sound) + ',若未听到请检查系统音量与输出设备'
@@ -1213,7 +1277,7 @@ window.__ModuleLoader__.load({
                   h('button', { className: 'tn-btn tn-btn--ghost', disabled: busy, onClick: cancelRename }, '取消'),
                 )
                 : h('div', { className: 'tn-list__item', key: sound.id },
-                  h('span', { className: 'tn-list__grow' }, sound.id + '.' + sound.ext),
+                  h('span', { className: 'tn-list__grow' }, (sound.name || sound.id) + '.' + sound.ext),
                   h('button', {
                     className: 'tn-btn',
                     onClick: () => {
@@ -1232,10 +1296,22 @@ window.__ModuleLoader__.load({
             h('span', { className: 'tn-card__title' }, '分类音效映射'),
             h('span', { className: 'tn-card__sub' }, '每类事件可指定上传音效或内置音,失效自动回落内置默认'),
           ),
+          h('div', { className: 'tn-row' },
+            h('span', { className: 'tn-label' }, '作用域'),
+            h('label', { className: 'tn-meta' },
+              h('input', {
+                type: 'checkbox', checked: localMode,
+                onChange: (e) => toggleLocalMapping(e.target.checked),
+              }),
+              ' 当前域名独立配置'),
+            localMode
+              ? h('span', { className: 'tn-meta' }, '映射改动仅存本机浏览器,不影响全局配置')
+              : (Object.keys(localMapping).length > 0 ? h('span', { className: 'tn-meta' }, '存在本地覆盖,当前休眠') : null),
+          ),
           CATEGORIES.map((category) => h('div', { className: 'tn-row', key: category },
             h('span', { className: 'tn-label' }, CATEGORY_LABELS[category]),
             h('select', {
-              className: 'tn-select tn-fill', value: mapping[category] || '',
+              className: 'tn-select tn-fill', value: effective[category] || '',
               onChange: (e) => void setMapping(category, e.target.value),
             }, soundOptions),
             h('button', { className: 'tn-btn', onClick: () => previewCategory(category) }, '试听'),

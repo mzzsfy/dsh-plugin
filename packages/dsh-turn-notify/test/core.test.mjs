@@ -19,6 +19,8 @@ import {
   chooseChannels,
   USER_IDLE_AWAY_MS,
   resolveSound,
+  mergeMapping,
+  deadCustomIds,
   validateSoundName,
   SOUND_NAME_MAX_CHARS,
   parseVolume,
@@ -293,6 +295,29 @@ test('音效映射:自定义命中用自定义,内置备选与失效回落', () 
   const fallback = resolveSound({ category: CATEGORY_ASK, mapping, uploadedIds: [] })
   assert.deepEqual(fallback, { kind: 'builtin', name: TONE_DOUBLE_PING })
   assert.deepEqual(resolveSound({ category: CATEGORY_DONE, mapping: {}, uploadedIds: [] }), { kind: 'builtin', name: TONE_UP_ARPEGGIO })
+})
+
+test('映射合并:本地覆盖全局,缺键回落,空串为显式内置默认,入参容错', () => {
+  assert.deepEqual(mergeMapping({ completed: 'a', error: 'b' }, { completed: 'c' }), { completed: 'c', error: 'b' })
+  assert.deepEqual(mergeMapping({ completed: 'a' }, {}), { completed: 'a' })
+  assert.deepEqual(mergeMapping({ completed: 'a' }, { completed: '' }), { completed: '' })
+  assert.deepEqual(mergeMapping(null, { completed: 'a' }), { completed: 'a' })
+  assert.deepEqual(mergeMapping({ completed: 'a' }, null), { completed: 'a' })
+  assert.deepEqual(mergeMapping(undefined, undefined), {})
+  const globalMapping = { completed: 'a' }
+  assert.deepEqual(mergeMapping(globalMapping, { completed: 'b' }), { completed: 'b' })
+  assert.deepEqual(globalMapping, { completed: 'a' })
+})
+
+test('死链识别:非内置非上传即死链,去重按首次出现排序,空值与非字符串跳过,列表空缺容错', () => {
+  const mapping = { completed: 'gone-2', error: TONE_BELL, interrupted: 'gone-1', approval: '', ask: 'gone-2', 'max-tokens': 'snd-1' }
+  assert.deepEqual(deadCustomIds(mapping, ['snd-1']), ['gone-2', 'gone-1'])
+  assert.deepEqual(deadCustomIds({ completed: TONE_BELL }, []), [])
+  assert.deepEqual(deadCustomIds({ completed: 'snd-1' }, ['snd-1']), [])
+  assert.deepEqual(deadCustomIds({}, ['snd-1']), [])
+  assert.deepEqual(deadCustomIds(null, []), [])
+  assert.deepEqual(deadCustomIds({ completed: 7, error: null, ask: { id: 'x' } }, ['snd-1']), [])
+  assert.deepEqual(deadCustomIds({ completed: 'gone-1' }, null), ['gone-1'])
 })
 
 test('音量解析:未设置回默认,显式零保留,非法回落默认', () => {

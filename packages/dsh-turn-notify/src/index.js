@@ -3,11 +3,12 @@
 // 音效持久化在 ~/.dsh/dsh-turn-notify/sounds/,投影不落盘。
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import {
+  AUDIO_EXTS,
   CATEGORIES,
   CATEGORY_ASK,
   CATEGORY_APPROVAL,
@@ -129,6 +130,28 @@ function rejectNonJson(req, res) {
 const soundId = (content) => 'snd-' + createHash('sha256').update(content).digest('hex').slice(0, 16)
 const soundPath = (id, ext) => join(SOUNDS_DIR, id + '.' + ext)
 
+// 展示名索引:文件名恒为内容哈希 id,重命名只改展示名,索引与音效同目录同生命周期
+const SOUND_INDEX_NAME = 'index.json'
+const soundIndexPath = join(SOUNDS_DIR, SOUND_INDEX_NAME)
+
+// 索引读取:缺失或损坏一律回空对象(丢名不丢音),仅保留非空字符串值的键
+async function readSoundIndex() {
+  try {
+    const parsed = JSON.parse(await readFile(soundIndexPath, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const index = {}
+    for (const key of Object.keys(parsed)) {
+      if (typeof parsed[key] === 'string' && parsed[key].length > 0) index[key] = parsed[key]
+    }
+    return index
+  } catch {
+    return {}
+  }
+}
+
+// 索引写入:id 到展示名的一比一对象,调用方保证处于互斥段
+const writeSoundIndex = (index) => writeFile(soundIndexPath, JSON.stringify(index))
+
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx) {
   const projection = createProjection({})
@@ -142,7 +165,7 @@ export function apply(ctx) {
   const sessionEvents = new Map()
   const titledSessions = new Set()
   let seq = 0
-  // 音效文件写互斥:rename 的重名检查与落盘非原子,串行化防并发重命名静默覆盖
+  // 音效库写互斥:展示名索引读改写与落盘非原子,串行化防并发交错
   let soundWriteQueue = Promise.resolve()
   const serializedSoundWrite = (fn) => {
     const next = soundWriteQueue.then(fn, fn)
@@ -262,11 +285,14 @@ export function apply(ctx) {
   const listSounds = async () => {
     await mkdir(SOUNDS_DIR, { recursive: true })
     const names = await readdir(SOUNDS_DIR)
+    const index = await readSoundIndex()
     return names
-      .filter((name) => uploadExt(name) !== '')
+      // 扩展名白名单:索引文件与任何非音频杂项一律不入列
+      .filter((name) => AUDIO_EXTS.indexOf(uploadExt(name)) >= 0)
       .map((name) => {
         const dot = name.indexOf('.')
-        return { id: name.slice(0, dot), ext: name.slice(dot + 1) }
+        const id = name.slice(0, dot)
+        return { id, ext: name.slice(dot + 1), name: index[id] ?? null }
       })
   }
 
@@ -351,15 +377,14 @@ export function apply(ctx) {
       res.end(content)
       return
     }
-    // 重命名:文件即 id,改名同步迁移映射引用;同名幂等,重名与非法名拒绝。
+    // 重命名:文件名恒为内容哈希 id,改名只写展示名索引,映射引用的 id 不随之变化
     if (req.method === 'PUT') {
       if (rejectCrossOrigin(req, res) || rejectNonJson(req, res)) return
       const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES)).toString('utf8'))
       const renameId = body && typeof body.id === 'string' ? body.id : ''
-      // 互斥段覆盖重名检查到落盘,防并发窗口内同名互相覆盖
+      // 互斥段覆盖索引读到写回,防并发重命名互相覆盖
       await serializedSoundWrite(async () => {
-        const sounds = await listSounds()
-        const sound = sounds.find((item) => item.id === renameId)
+        const sound = (await listSounds()).find((item) => item.id === renameId)
         if (!sound) {
           sendJson(res, 404, { error: '音效不存在' })
           return
@@ -369,28 +394,15 @@ export function apply(ctx) {
           sendJson(res, 400, { error: verdict.reason })
           return
         }
-        // 同名 no-op:Windows 上 rename 到自身会失败,幂等语义要求提前放行
-        if (verdict.name === renameId) {
-          sendJson(res, 200, { ok: true, id: renameId, soundMapping: readSettings(ctx).soundMapping })
+        // 索引当前值已等于目标名:幂等提前返回
+        if (sound.name === verdict.name) {
+          sendJson(res, 200, { ok: true, id: renameId, name: verdict.name })
           return
         }
-        if (sounds.some((item) => item.id === verdict.name)) {
-          sendJson(res, 400, { error: '名称已被占用' })
-          return
-        }
-        await rename(join(SOUNDS_DIR, renameId + '.' + sound.ext), join(SOUNDS_DIR, verdict.name + '.' + sound.ext))
-        const settings = ctx.get('settings')
-        let mapping = readSettings(ctx).soundMapping
-        if (settings) {
-          // 映射键为分类、值为音效 id:重命名改值,深合并同键覆盖,patch 仅含变化的分类
-          const patch = {}
-          for (const key of Object.keys(mapping)) {
-            if (mapping[key] === renameId) patch[key] = verdict.name
-          }
-          if (Object.keys(patch).length > 0) await settings.update(NAMESPACE, { soundMapping: patch })
-          mapping = readSettings(ctx).soundMapping
-        }
-        sendJson(res, 200, { ok: true, id: verdict.name, soundMapping: mapping })
+        const index = await readSoundIndex()
+        index[renameId] = verdict.name
+        await writeSoundIndex(index)
+        sendJson(res, 200, { ok: true, id: renameId, name: verdict.name })
       })
       return
     }
@@ -399,15 +411,20 @@ export function apply(ctx) {
       return
     }
     if (rejectCrossOrigin(req, res)) return
-    // 与 PUT 同互斥:防删除的映射读改写与重命名迁移交叉,旧读写回会清掉迁移结果
+    // 与 PUT 同互斥:文件删除与索引条目清理同段完成,防并发读改写交错
     await serializedSoundWrite(async () => {
-      const sounds = await listSounds()
-      const sound = sounds.find((item) => item.id === id)
+      const sound = (await listSounds()).find((item) => item.id === id)
       if (!sound) {
         sendJson(res, 404, { error: '音效不存在' })
         return
       }
       await unlink(join(SOUNDS_DIR, id + '.' + sound.ext))
+      // 展示名条目随文件一并清理,防索引滞留死条目
+      const index = await readSoundIndex()
+      if (Object.prototype.hasOwnProperty.call(index, id)) {
+        delete index[id]
+        await writeSoundIndex(index)
+      }
       // 被引用即回落:深合并语义下引用置 null 清除,resolveSound 兜底回内置默认
       const settings = ctx.get('settings')
       if (settings) {

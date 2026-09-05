@@ -14,7 +14,7 @@ DeepSeek Harness 设置页插件:回合完成通知——host 单源决策,声�
 - 写路由安全:config / mapping / upload / test-webhook / test-im / sound 改名与删除均带同源守卫(Origin 与 Host 不符即 403),JSON 写入另校验 content-type,阻断跨站 drive-by 改写;webhookUrl schema 标记 secret,任何接口不回传原文。已知边界:同源守卫不防 DNS rebinding(Origin 与 Host 相等即放行),该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决而非逐插件补丁。
 - 多窗口去重:投影(内存环形 20 条,60 秒过期)供各窗口约 2 秒轮询;localStorage 写后读回认领锁(30 秒过期接管,完成标记防迟到窗口重复发声)。
 - 发声形态:聚焦窗口仅页内 toast(可关);失焦 + Notification 授权走声音 + 系统弹窗;HTTP 非回环(非 secure context)诚实降级 toast + 标题闪烁。
-- 声音:Web Audio 程序合成 8 种内置音(零音频文件、零系统依赖),支持上传自定义音效(host 存储 `~/.dsh/dsh-turn-notify/sounds/`,扩展名 + decodeAudioData 双重校验,单文件 2MB / 总量 10MB);可多选文件,待保存列表逐个试听、逐个保存,不保存不落盘;已上传音效支持重命名(文件即 id,分类映射引用自动迁移,重名 / 内置音色名 / 非法字符 / 名称超 64 字符拒绝);通知会话标题取首个用户文本,超 60 字符按码点截断。
+- 声音:Web Audio 程序合成 8 种内置音(零音频文件、零系统依赖),支持上传自定义音效(host 存储 `~/.dsh/dsh-turn-notify/sounds/`,扩展名 + decodeAudioData 双重校验,单文件 2MB / 总量 10MB);可多选文件,待保存列表逐个试听、逐个保存,不保存不落盘;已上传音效支持重命名(文件名恒为内容哈希 id,重命名仅改展示名并存于音效库索引,分类映射引用不受影响,重传同一文件按同 id 自动恢复既有映射;非法字符 / 内置音色名 / 超过 64 字符拒绝);映射指向的音效文件丢失时面板下拉显示失效项,分类试听回落内置默认并给出归因提示,通知发声静默回落内置默认;通知会话标题取首个用户文本,超 60 字符按码点截断。
 - 过滤:`minTurnDurationMs`(默认 5 秒)仅作用于 turn/end 类;`rootsOnly` 子代理会话默认豁免;`suppressSubagentWake` 子代理完成唤醒的父会话回合默认静默(仅 completed 类)。
 
 ## 安装
@@ -46,7 +46,7 @@ turn-notify:
     approval: true
     ask: true
     max-tokens: true
-  soundMapping:                   # 每分类音效映射,空为内置默认,值为内置音名或上传音效 id;面板内每行可试听当前生效音效
+  soundMapping:                   # 每分类音效映射(全局作用域),空为内置默认,值为内置音名或上传音效 id;面板内每行可试听当前生效音效
     completed: ''
   imTargets:                      # dsh-im 投递目标,空数组禁用;botId/targetId 从 dsh-im 设置页复制
     - botId: wx_xxx
@@ -54,6 +54,15 @@ turn-notify:
 ```
 
 音量、聚焦静默、降级标题闪烁等本机偏好在设置面板内保存于浏览器 localStorage。
+
+### 音效映射双作用域
+
+分类音效映射默认读写全局 settings.yaml;面板「分类音效映射」卡顶部可开启**当前域名独立配置**:
+
+- 开启:映射改动只写本机浏览器 localStorage(`turn-notify:mapping`),发声时读取合并结果,本地键覆盖全局键(空值为显式内置默认,同样覆盖);
+- 关闭:读写全走全局,本地数据保留但休眠(面板提示「存在本地覆盖,当前休眠」);
+- 开关状态本身存 localStorage(`turn-notify:mapping-local`),天然按域名隔离;
+- 双作用域仅作用于声音映射,其他配置不受影响;音效文件库始终 host 全局共享。
 
 ## 已知取舍
 
