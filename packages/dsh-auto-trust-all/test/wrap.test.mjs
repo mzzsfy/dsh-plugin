@@ -382,7 +382,10 @@ test('场景17 换代移交: Given 行级 config 变更触发重跑 apply When �
   assert.deepEqual(trustedHosts, ['third.test', 'fourth.test'])
 })
 
-test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 挂事件监听且服务就绪事件到达 Then 自动完成激活', async (t) => {
+const NOTICE_DELAY = 15 * 1000
+
+test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 服务就绪事件在提示阈值内到达 Then 自动完成激活且不打印等待行', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const output = mockConsole(t)
   const { ctx, webServer, holder, trustedHosts, fenceHosts, listeners } = createCtx({ webRuntimeReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
@@ -390,13 +393,13 @@ test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 挂事件
 
   const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
 
-  // 未就绪路径:不包装、不挂载体,挂 internal/service 监听并输出等待行
+  // 未就绪路径:不包装、不挂载体,挂 internal/service 监听;等待行延后,不立即输出
   assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
   assert.equal(webServer.autoTrustAllRegister, undefined)
   assert.deepEqual(listeners.map(([name]) => name), ['internal/service'])
-  assert.ok(output.some(([, message]) => message.includes('webRuntime 未就绪')))
+  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
 
-  // 模拟 web-app fiber 激活完成:runtime 就绪并发出服务事件
+  // 模拟 web-app fiber 激活完成(阈值内):runtime 就绪并发出服务事件
   holder.current = { trustedHosts: [] }
   const [, listener] = listeners[0]
   listener('webRuntime')
@@ -404,12 +407,36 @@ test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 挂事件
   assert.equal(typeof webServer.autoTrustAllRegister, 'function')
   assert.ok(output.some(([, message]) => message.includes('动态信任已启用')))
 
+  // 阈值走完:激活已发生,等待行不再补打
+  t.mock.timers.tick(NOTICE_DELAY)
+  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
+
   await webServer.exact.get('/api/x').handler({ headers: { host: 'late.jze100.com' } }, {})
   assert.deepEqual(holder.current.trustedHosts, ['late.jze100.com'])
   dispose()
   // 卸载撤销本代放行:两侧数组的 late 条目均被移除,后续请求经空载体纯透传不再注册
   assert.deepEqual(holder.current.trustedHosts, [])
   assert.deepEqual(fenceHosts, [])
+})
+
+test('场景19 等待超时提示: Given webRuntime 持续未就绪 When 超过提示阈值 Then 打印等待行一次,此前不打印', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const output = mockConsole(t)
+  const { ctx, webServer } = createCtx({ webRuntimeReady: false })
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  // 阈值内静默等待
+  t.mock.timers.tick(NOTICE_DELAY - 1)
+  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
+  // 阈值到:仍未就绪才输出等待行,且只此一次
+  t.mock.timers.tick(1)
+  const waiting = output.filter(([, message]) => message.includes('webRuntime 未就绪'))
+  assert.equal(waiting.length, 1)
+  t.mock.timers.tick(NOTICE_DELAY)
+  assert.equal(output.filter(([, message]) => message.includes('webRuntime 未就绪')).length, 1)
+  dispose()
 })
 
 test('场景20 卸载撤销: Given 已激活 When 卸载 Then 载体断开且本代注册条目从两侧数组移除,后续请求纯透传', async (t) => {
@@ -602,7 +629,8 @@ test('场景30 其他服务名不激活: Given internal/service 携带其他服�
   assert.equal(typeof webServer.autoTrustAllRegister, 'function')
 })
 
-test('场景31 未就绪即卸载: Given 未激活时卸载 When webRuntime 就绪事件迟到 Then 不再激活', async (t) => {
+test('场景31 未就绪即卸载: Given 未激活时卸载 When 等待阈值走完且 webRuntime 就绪事件迟到 Then 等待行不补打且不再激活', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const output = mockConsole(t)
   const { ctx, webServer, holder, listeners } = createCtx({ webRuntimeReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
@@ -610,6 +638,10 @@ test('场景31 未就绪即卸载: Given 未激活时卸载 When webRuntime 就�
 
   const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
   dispose()
+
+  // 卸载清除等待定时器:阈值走完不补打等待行
+  t.mock.timers.tick(NOTICE_DELAY)
+  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
 
   holder.current = { trustedHosts: [] }
   const [, listener] = listeners[0]

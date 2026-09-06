@@ -14,6 +14,10 @@ export const name = 'dsh-auto-trust-all'
 // 事件延迟激活,真缺失时保持静默订阅,不产生 pending
 export const inject = ['webServer']
 
+// 等待提示阈值:webRuntime 与本插件同波激活,正常冷启动数秒内就绪,立即打印
+// 等待行属启动噪音;等待超过该时长仍未就绪才输出
+const READY_NOTICE_DELAY = 15 * 1000
+
 // 注册域名容量:约束本插件注册的条目(最久未访问者先淘汰),下界 1 防零容量
 // 死循环,上界防热路径线性扫描被超大配置放大;官方初始条目(局域网 IP 等)
 // 由部署派生,不在淘汰范围
@@ -28,6 +32,7 @@ export function apply(ctx, config) {
   const ready = () => Array.isArray(ctx.get('webRuntime')?.trustedHosts)
   let activated = false
   let registerWarned = false
+  let noticeTimer = null
 
   // 归属记账(应用作用域,dispose 据此清理):owned 仅记本插件注册的条目,
   // Map 迭代序即访问序,delete+set 完成 O(1) 续期;pre 记激活前既有的官方
@@ -139,6 +144,8 @@ export function apply(ctx, config) {
     if (activated) return
     const initialHosts = ctx.get('webRuntime')?.trustedHosts
     if (!Array.isArray(initialHosts)) return
+    // 就绪即撤销等待提示,形态守卫停用分支同样不再提示
+    clearTimeout(noticeTimer)
     // 宿主面形态探测:路由表缺 Map 形态或注册方法缺失时干净禁用,不抛错不半装
     if (
       ![webServer.exact, webServer.prefixes, webServer.upgrades].every((table) => table instanceof Map) ||
@@ -216,8 +223,11 @@ export function apply(ctx, config) {
     activate()
   } else {
     // 冷启动时序:webRuntime 提供方与本插件在同一波激活中,其 fiber 完成激活
-    // (转 state 2)时会对自有服务发 internal/service,彼时 strict get 可解析
-    console.log('auto-trust-all: webRuntime 未就绪,待其激活后自动启用')
+    // (转 state 2)时会对自有服务发 internal/service,彼时 strict get 可解析;
+    // 等待行延后到 READY_NOTICE_DELAY 仍未就绪时输出,激活或卸载即撤销
+    noticeTimer = setTimeout(() => {
+      console.log('auto-trust-all: webRuntime 未就绪,待其激活后自动启用')
+    }, READY_NOTICE_DELAY)
     ctx.on('internal/service', (name) => {
       if (name === 'webRuntime') activate()
     })
@@ -228,6 +238,7 @@ export function apply(ctx, config) {
   // 归属表内条目从两侧数组移除,信任放行随插件移除停止;未激活时表为空,幂等
   return () => {
     activated = true
+    clearTimeout(noticeTimer)
     if (webServer.autoTrustAllRegister === registerHost) {
       webServer.autoTrustAllRegister = () => {}
       for (const hostname of owned.keys()) {

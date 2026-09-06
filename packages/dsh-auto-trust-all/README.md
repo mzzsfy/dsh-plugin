@@ -11,7 +11,7 @@ DeepSeek Harness web 入口插件:动态信任所有实际到达的 Host,并将 
 - **console 输出**:启动时输出一行状态横幅(绑定、容量、既有信任条目);此后每次注册输出 `auto-trust-all: registered host <域名>`、每次淘汰输出 `auto-trust-all: evicted host <域名>`,直接 grep dsh console 即可做入口审计。
 - **默认绑定翻转**:bundle patch 覆盖官方 webserver 行的 host 默认值为 `0.0.0.0`;显式 `--host 127.0.0.1` 仍生效(表达式读 webStartup 服务,只翻默认值)。
 - **认证层不动**:只影响官方 Host/Origin 信任闸门(官方文档明言"绝不建立身份"的可达性闸门);原生浏览器 cookie 认证与 dsh-web-startup-auth 会话闸门原样保留,安全增量趋近于零。
-- **干净降级**:冷启动时 `webRuntime` 尚未就绪属预期,插件挂服务激活事件自动延迟启用;官方 web 面形态变化(路由表缺 Map 形态或注册方法缺失)时告警后停用,不产生启动 pending、不影响 dsh 启动与其余功能;`connection` 服务缺失时 fence 双写静默降级(仅 `webRuntime` 侧生效,不影响注册主路径)。
+- **干净降级**:冷启动时 `webRuntime` 尚未就绪属预期,插件挂服务激活事件自动延迟启用;等待提示延后——超过 15 秒仍未就绪才输出 `webRuntime 未就绪` 等待行,正常启动不产生该行;官方 web 面形态变化(路由表缺 Map 形态或注册方法缺失)时告警后停用,不产生启动 pending、不影响 dsh 启动与其余功能;`connection` 服务缺失时 fence 双写静默降级(仅 `webRuntime` 侧生效,不影响注册主路径)。
 - **卸载即撤销**:卸载时置空共享载体(带身份校验:新代已接管则跳过撤销与置空,防旧代误删新一代记账中的条目)并从两个数组移除本代注册的全部条目,信任放行随插件移除停止。
 
 ## 配置(无 GUI)
