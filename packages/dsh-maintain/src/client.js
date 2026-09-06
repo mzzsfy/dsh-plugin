@@ -92,6 +92,10 @@ const RESTART_POLL_MS = 1 * 1000
 const RESTART_POLL_TIMEOUT_MS = 5 * 1000
 // 重启等待总时长:超时说明宿主未被进程管理器拉起或退出失败,退出等待态转人工处理
 const RESTART_TIMEOUT_MS = 30 * 1000
+// 主文档连续就绪拍数门槛:单次 200 可能落在 fallback 刚注册的瞬间,连续多次确认启动链稳定
+const RESTART_READY_REQUIRED = 2
+// 刷新放行后的最后缓冲:给宿主启动链一段无请求干扰的稳定期再整页刷新
+const RESTART_SETTLE_DELAY_MS = 1 * 1000
 // 页面就绪探测目标:与整页刷新后浏览器实际请求的主文档同资源
 const INDEX_URL = '/'
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
@@ -458,7 +462,8 @@ function MaintainApp() {
   const [upgradeArmed, setUpgradeArmed] = useState(false)
   const [restartArmed, setRestartArmed] = useState(false)
   const [restarting, setRestarting] = useState(false)
-  // 重启探测的上一拍快照 {lost,pid,bootAt}:null=未在等待态
+  // 重启探测的跨拍状态快照 {lost,pid,bootAt,readyStreak}:lost 与 readyStreak 随拍更新,
+  // pid/bootAt 保持确认时刻基线不可被拍结果覆盖,否则重启判定恒 false;null=未在等待态
   const restartPrevRef = useRef(null)
   const restartPendingRef = useRef(false)
 
@@ -507,21 +512,23 @@ function MaintainApp() {
   // LOGIC-BEGIN restartTick
   // 重启等待的单拍决策:超时收尾;status 失败记失联;宿主重启判定通过后还须主文档可加载才刷新——
   // status 可达只证明 API 路由已注册,宿主页面服务的 fallback 注册晚于插件路由,
-  // 该窗口期内整页刷新会拿到宿主裸 404
-  async function restartTick({ now, deadlineAt, prev, statusFetch, pageFetch }) {
-    if (now >= deadlineAt) return { action: 'timeout', lost: prev.lost }
+  // 该窗口期内整页刷新会拿到宿主裸 404;就绪须连续多拍确认(readyStreak 跨拍由调用方持有,
+  // 任何失联/未确认/未就绪拍都清零),达标返回 reload,刷新动作由调用方延迟执行
+  async function restartTick({ now, deadlineAt, prev, readyStreak, statusFetch, pageFetch }) {
+    if (now >= deadlineAt) return { action: 'timeout', lost: prev.lost, readyStreak }
     let next
     try {
       next = await statusFetch()
     } catch {
-      return { action: 'wait', lost: true }
+      return { action: 'wait', lost: true, readyStreak: 0 }
     }
     const snapshot = { lost: false, pid: next ? next.pid : null, bootAt: next ? next.bootAt : null }
     if (!shouldReloadAfterRestart(prev, snapshot)) {
-      return { action: 'wait', lost: prev.lost }
+      return { action: 'wait', lost: prev.lost, readyStreak: 0 }
     }
     const ready = await pageReady(pageFetch())
-    return { action: ready ? 'reload' : 'wait', lost: prev.lost }
+    const streak = ready ? readyStreak + 1 : 0
+    return { action: streak >= RESTART_READY_REQUIRED ? 'reload' : 'wait', lost: prev.lost, readyStreak: streak }
   }
   // LOGIC-END restartTick
 
@@ -547,8 +554,12 @@ function MaintainApp() {
           pageFetch: () => fetch(INDEX_URL, { cache: 'no-store', signal: probeSignal() }),
         })
         if (controller.signal.aborted) return
-        restartPrevRef.current = { ...prev, lost: tick.lost }
+        // 基线不可变契约:仅回写 lost 与 readyStreak,pid/bootAt 保持确认时刻值(见 ref 注释)
+        restartPrevRef.current = { ...prev, lost: tick.lost, readyStreak: tick.readyStreak }
         if (tick.action === 'reload') {
+          // 刷新放行后的最后缓冲:中止即作废本次刷新(等待态已退出,页面归用户控制)
+          await restartSleep(RESTART_SETTLE_DELAY_MS, controller)
+          if (controller.signal.aborted) return
           window.location.reload()
           return
         }
@@ -674,6 +685,7 @@ function MaintainApp() {
       lost: false,
       pid: status && typeof status.pid === 'number' ? status.pid : null,
       bootAt: status && typeof status.bootAt === 'number' ? status.bootAt : null,
+      readyStreak: 0,
     }
     // 先取实时 status 修正基线(页面可能经历过一次未经面板感知的宿主重启),失败退回已有快照
     restartPendingRef.current = true
@@ -684,6 +696,7 @@ function MaintainApp() {
             lost: false,
             pid: typeof fresh.pid === 'number' ? fresh.pid : restartPrevRef.current.pid,
             bootAt: typeof fresh.bootAt === 'number' ? fresh.bootAt : restartPrevRef.current.bootAt,
+            readyStreak: 0,
           }
         }
       })
