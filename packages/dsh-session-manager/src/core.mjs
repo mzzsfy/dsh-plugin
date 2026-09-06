@@ -127,13 +127,12 @@ export function projectDeletedRows(deleted, sessionsById) {
 
 // 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)。
 // 范围从窄到宽排列,client ←/→ 切换即在此数组上移动索引。
-// 批大小为"单次请求最多解压的会话数"(最近优先),首屏小档秒出,滚动逐档加深,末档即扫描上限
+// 对齐 = 后台解压范围内会话产物与持久缓存合并;两次对齐最小间隔防持续解压
 export const HISTORY_SESSION_SCAN_LIMIT = 20
 export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
-export const HISTORY_CACHE_TTL_MS = 5 * 60 * 1000
 export const HISTORY_SCOPES = ['session', 'workspace', 'global']
-export const HISTORY_BATCH_LIMITS = [3, 10, HISTORY_SESSION_SCAN_LIMIT]
+export const HISTORY_ALIGN_THROTTLE_MS = 30 * 1000
 
 /**
  * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,
@@ -157,7 +156,8 @@ export function extractUserInputs(events) {
   return entries
 }
 
-/** 历史输入聚合:精确文本去重保留最新时间,时间倒序,截 limit 条,单条截 maxChars 字符。 */
+/** 历史输入聚合:精确文本去重保留最新时间,时间倒序,截 limit 条,单条截 maxChars 字符。
+ * 条目可携带 sid(来源会话)用于 session 范围过滤,聚合时原样保留。 */
 export function aggregateInputs(entries, { limit, maxChars }) {
   const latestByText = new Map()
   for (const entry of entries || []) {
@@ -167,5 +167,9 @@ export function aggregateInputs(entries, { limit, maxChars }) {
   return [...latestByText.values()]
     .sort((left, right) => right.at - left.at)
     .slice(0, limit)
-    .map((entry) => ({ text: entry.text.slice(0, maxChars), at: entry.at }))
+    .map((entry) => ({
+      text: entry.text.slice(0, maxChars),
+      at: entry.at,
+      ...(entry.sid !== undefined ? { sid: entry.sid } : {}),
+    }))
 }
