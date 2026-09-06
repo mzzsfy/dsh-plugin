@@ -5,7 +5,7 @@
 import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, writeFile, utimes, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, utimes, mkdir, rm, readFile } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -1608,6 +1608,68 @@ test('历史输入路由:再次请求读缓存不再解压产物(对齐节流内
     assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
     assert.equal(second.body.aligned, true)
     assert.equal(readCounts.get('s1'), readsAfterAlign, '读路径不得解压产物')
+  })
+})
+
+test('历史输入路由:会话产物变化触发聚焦对齐,重拉后看到新输入(实时追加)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-focus-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-v1')
+    try {
+      const shared = {
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+      }
+      const first = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('旧输入', 100)] } })
+      await requestUntilAligned(first.handlers, '?sessionId=s1&scope=session')
+      // 产物增长(会话有新输入):指纹失效,会话范围应 aligned=false 并触发聚焦对齐
+      await writeFile(artifactPath, 'log-v1-much-longer-appended')
+      const second = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('旧输入', 100), userMessageEvent('新输入XYZ', 200)] } })
+      const staleRes = await requestUntil(second.handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned === false)
+      assert.deepEqual(staleRes.body.inputs.map((item) => item.text), ['旧输入'])
+      // 聚焦对齐完成后重拉:新输入可见
+      const freshRes = await requestUntil(second.handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '新输入XYZ'))
+      assert.deepEqual(freshRes.body.inputs.map((item) => item.text), ['新输入XYZ', '旧输入'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:聚焦对齐只更新目标会话,不抹其他会话的持久 extracts', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-prune-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-v1')
+    try {
+      await ensureCacheDir(process.env.DSH_HISTORY_CACHE_DIR)
+      await writeWorkspaceCache(process.env.DSH_HISTORY_CACHE_DIR, 'C:\\x', {
+        entries: [{ text: '更早的输入', at: 100, sid: 's1' }],
+        extracts: { s2: { mtimeMs: 1, size: 2, entries: [{ text: '邻居会话输入', at: 50 }] } },
+      })
+      const { handlers } = makeCtx({
+        archivedIds: [],
+        headers: [
+          { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+          { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+        ],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('更早的输入', 100), userMessageEvent('聚焦新输入', 200)] },
+      })
+      await requestUntil(handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '聚焦新输入'))
+      const cached = JSON.parse(await readFile(path.join(process.env.DSH_HISTORY_CACHE_DIR, 'x-5358b306.json'), 'utf8'))
+      assert.ok(cached.extracts.s2, '邻居会话 extracts 不得被聚焦对齐抹掉')
+      assert.ok(cached.extracts.s1, '目标会话 extracts 已更新')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 
