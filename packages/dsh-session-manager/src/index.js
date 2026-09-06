@@ -368,8 +368,9 @@ export function apply(ctx, config) {
     || join(homedir(), '.dsh', 'historyPrompt')
   const alignThrottle = new Map()
   const runtimeExtracts = new Map()
+  const headerCache = new Map()
   let alignQueue = Promise.resolve()
-  ctx.effect(() => () => { alignThrottle.clear(); runtimeExtracts.clear() }, 'session-manager history align state')
+  ctx.effect(() => () => { alignThrottle.clear(); runtimeExtracts.clear(); headerCache.clear() }, 'session-manager history align state')
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms))
@@ -541,7 +542,7 @@ export function apply(ctx, config) {
         if (!rejectMethod(req, res, 'POST')) return
         try {
           const sessionId = await requireSessionId(req)
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
@@ -585,7 +586,7 @@ export function apply(ctx, config) {
         }
         inFlightDeletes.add(sessionId)
         try {
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
@@ -712,7 +713,7 @@ export function apply(ctx, config) {
           if (sessionId === '') throw new Error('sessionId 不能为空')
           const scopeRaw = url.searchParams.get('scope') || 'session'
           const scope = HISTORY_SCOPES.includes(scopeRaw) ? scopeRaw : 'session'
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
@@ -747,7 +748,7 @@ export function apply(ctx, config) {
         try {
           const sessionId = await requireSessionId(req)
           // 产物还原的判定即持久层能重新读到 header:未还原时在此拒绝
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.notRestored })
             return
@@ -854,10 +855,23 @@ async function safeMtime(path) {
   }
 }
 
-async function findHeader(ctx, sessionId) {
-  const records = await ctx.sessionQuery.listSessions()
-  const found = records.find((recordItem) => String(recordItem.header.id) === sessionId)
-  return found ? found.header : undefined
+// header 查找缓存:inputs 路由每次请求都要查 header,listSessions 为全量扫描
+// (单次数百 ms,与后台对齐并发时成倍放大),而 sessionId→header 基本不变——
+// 扫一次进缓存,TTL 界定新鲜度,容量上限防无界增长;只缓存命中,
+// 未命中不缓存(新会话创建竞态下次扫描即命中,负缓存会误伤)
+const HEADER_CACHE_TTL_MS = 10 * 60 * 1000
+const HEADER_CACHE_MAX = 500
+
+function findHeader(ctx, sessionId, cache) {
+  const hit = cache.get(sessionId)
+  if (hit && Date.now() - hit.at < HEADER_CACHE_TTL_MS) return Promise.resolve(hit.header)
+  return ctx.sessionQuery.listSessions().then((records) => {
+    const found = records.find((recordItem) => String(recordItem.header.id) === sessionId)
+    if (!found) return undefined
+    if (cache.size >= HEADER_CACHE_MAX) cache.delete(cache.keys().next().value)
+    cache.set(sessionId, { header: found.header, at: Date.now() })
+    return found.header
+  })
 }
 
 // detach 幂等:遍历全部工作区逐个移除,不因首个工作区操作失败提前终止;
