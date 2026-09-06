@@ -226,7 +226,7 @@ export function apply(ctx) {
       id: 'n-' + Date.now().toString(36) + '-' + String(seq) + '-' + String(category),
       category,
       status: reasonKind ?? category,
-      sessionTitle: storedSessionTitle(sessionEvents, sessionId),
+      sessionTitle: sessionDisplayTitle(session, sessionId),
       workspace: typeof header.cwd === 'string' ? header.cwd : '',
       durationMs,
       ts: Date.now(),
@@ -234,6 +234,19 @@ export function apply(ctx) {
     projection.push(unit)
     void sendWebhook({ url: settings.webhookUrl, payload: buildWebhookPayload(unit) })
     deliverIm(unit, settings)
+  }
+
+  // 会话显示标题:优先 session-title 服务(与侧边栏行标题同一投影,客户端文本匹配高亮
+  // 才成立),服务缺失或会话无事件日志时回落首条消息文本
+  function sessionDisplayTitle(session, sessionId) {
+    const service = ctx.get('sessionTitle')
+    if (service !== undefined) {
+      try {
+        const snapshot = service.get(session)
+        if (snapshot !== undefined && snapshot !== null && typeof snapshot.title === 'string' && snapshot.title.length > 0) return snapshot.title
+      } catch { /* 伪会话(如审批 waterfall)无事件日志,走回落 */ }
+    }
+    return storedSessionTitle(sessionEvents, sessionId)
   }
 
   // IM 投递:多目标逐发,fire-and-forget 不重试,失败即弃,与 webhook 同语义;

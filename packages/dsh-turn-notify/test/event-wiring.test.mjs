@@ -451,6 +451,48 @@ test('Given approval/request 观察者 When 触发 Then 投影审批单元且 ne
   assert.equal(units.filter((unit) => unit.category === 'approval').length, 1)
 })
 
+// ---- 会话显示标题:与侧边栏行标题同源(session-title 投影),文本匹配高亮才成立 ----
+
+const userMessage = (text) => ({ type: 'user/message', data: { content: [{ type: 'text', text }] } })
+
+test('Given sessionTitle 服务在位 When 通知投递 Then 单元标题为会话标题而非首条消息', async () => {
+  const { ctx, routes, handlers } = makeCtx({
+    sessionTitle: { get: () => ({ title: '会话真标题' }) },
+  })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, userMessage('首条消息文本'))
+  onEvent(MAIN, toolCall('ask_user_question'))
+  const units = await projectionUnits(routes)
+  const ask = units.find((unit) => unit.category === 'ask')
+  assert.equal(ask.session, '会话真标题')
+})
+
+test('Given sessionTitle 服务缺失 When 通知投递 Then 回落首条消息文本', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, userMessage('首条消息文本'))
+  onEvent(MAIN, toolCall('ask_user_question'))
+  const units = await projectionUnits(routes)
+  const ask = units.find((unit) => unit.category === 'ask')
+  assert.equal(ask.session, '首条消息文本')
+})
+
+test('Given 会话无事件日志可读 When 通知投递 Then 不抛并回落可用标题', async () => {
+  const { ctx, routes, handlers } = makeCtx({
+    sessionTitle: { get: () => { throw new Error('no event log') } },
+  })
+  apply(ctx)
+  const tap = handlers.get('approval/request')
+  tap({}, () => 'next')
+  const units = await projectionUnits(routes)
+  const approval = units.find((unit) => unit.category === 'approval')
+  assert.equal(approval.session, null)
+})
+
 test('Given 已配置 webhook When 真实回合完成 Then fetch 收到 payload 形态', async () => {
   const calls = []
   const original = globalThis.fetch

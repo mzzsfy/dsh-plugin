@@ -104,6 +104,8 @@ window.__ModuleLoader__.load({
     // 分类提示音配置:JSON 对象,缺省键=出声,显式 false=该分类静音
     const KEY_SOUND_CATEGORIES = 'turn-notify:sound-categories'
     const KEY_PAGE_SOUND_CATEGORIES = 'turn-notify:page-sound-categories'
+    // 页内提示音场景映射:本机存储,缺省键沿用通知映射,UI 空值即删键
+    const KEY_PAGE_MAPPING = 'turn-notify:page-mapping'
     // 映射双作用域:本地映射与开关均存本机浏览器,音效库保持 host 共享
     const KEY_MAPPING = 'turn-notify:mapping'
     const KEY_MAPPING_LOCAL = 'turn-notify:mapping-local'
@@ -168,25 +170,28 @@ window.__ModuleLoader__.load({
     // 本地作用域开关:仅显式开启生效,缺省为全局
     const localMappingEnabled = () => localGet(KEY_MAPPING_LOCAL) === '1'
 
-    // 分类提示音读取:JSON 解析失败或形态非对象回空对象(全分类出声)
-    function readSoundCategories() {
+    // JSON 对象存储读取:解析失败或形态非对象回空对象,空串值视为未配置剔除
+    function readJsonObject(key) {
       try {
-        const parsed = JSON.parse(localGet(KEY_SOUND_CATEGORIES))
-        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+        const parsed = JSON.parse(localGet(key))
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+        for (const key2 of Object.keys(parsed)) {
+          if (parsed[key2] === '') delete parsed[key2]
+        }
+        return parsed
       } catch {
         return {}
       }
     }
 
+    // 分类提示音读取:显式 false=该分类静音,缺省键=出声
+    const readSoundCategories = () => readJsonObject(KEY_SOUND_CATEGORIES)
+
     // 页内提示音分类读取:与 readSoundCategories 同构,独立存储互不影响
-    function readPageSoundCategories() {
-      try {
-        const parsed = JSON.parse(localGet(KEY_PAGE_SOUND_CATEGORIES))
-        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-      } catch {
-        return {}
-      }
-    }
+    const readPageSoundCategories = () => readJsonObject(KEY_PAGE_SOUND_CATEGORIES)
+
+    // 页内提示音场景映射读取:缺省键沿用通知映射,UI 空值即删键,空串残留视同未配置
+    const readPageMapping = () => readJsonObject(KEY_PAGE_MAPPING)
 
     function windowId() {
       let wid = localGet(KEY_WID)
@@ -564,8 +569,11 @@ window.__ModuleLoader__.load({
         }
         if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
-        // toast 库缺失时卡片不存在,补位音随之禁用(声明与可用分离,可用性在调用点合流)
-        if (channels.pageSound && toast) playSound(sound).catch(() => {})
+        // toast 库缺失时卡片不存在,补位音随之禁用(声明与可用分离,可用性在调用点合流);
+        // 页内音色按页内场景映射解析:通知生效映射为底,页内显式配置覆盖
+        if (channels.pageSound && toast) {
+          playSound(resolveSound(unit.category, mergeMapping(effectiveMapping(), readPageMapping()), uploadedIds)).catch(() => {})
+        }
         if (!channels.sound) continue
         playSound(sound).catch(() => {})
         if (channels.system) notifySystem(unit)
@@ -942,6 +950,8 @@ window.__ModuleLoader__.load({
       // 分类提示音镜像:pill 点击即写 localStorage,发声链路直读不依赖本 state
       const [soundCategories, setSoundCategoriesState] = useState(() => readSoundCategories())
       const [pageSoundCategories, setPageSoundCategoriesState] = useState(() => readPageSoundCategories())
+      // 页内提示音场景映射镜像:select 变更即写 localStorage,仅存本机
+      const [pageMapping, setPageMappingState] = useState(() => readPageMapping())
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
       // 面板分区:tab 切换仅显隐,不触碰任何已装载状态
@@ -1085,6 +1095,15 @@ window.__ModuleLoader__.load({
         localSet(KEY_PAGE_SOUND_CATEGORIES, JSON.stringify(next))
       }
 
+      // 页内提示音场景映射:空值删除键(沿用通知映射),非空(含内置音名/上传 id)覆盖
+      function setPageMappingCategory(category, id) {
+        const next = { ...pageMapping }
+        if (id.length === 0) delete next[category]
+        else next[category] = id
+        setPageMappingState(next)
+        localSet(KEY_PAGE_MAPPING, JSON.stringify(next))
+      }
+
       async function setMapping(category, id) {
         // 本地模式:空串为显式内置默认,同样保留为键值
         if (localMode) {
@@ -1172,9 +1191,9 @@ window.__ModuleLoader__.load({
           return
         }
         toast('[dsh] 页内通知测试', { holdMs: TOAST_MS })
-        // 复用页内提示音开关,点火即播;播放结果回执可见
+        // 复用页内提示音开关,点火即播,音色按页内场景映射解析;播放结果回执可见
         if (localGet(KEY_PAGE_SOUND) === '1') {
-          const sound = resolveSound('completed', effective, soundIds)
+          const sound = resolveSound('completed', effectivePageMapping, soundIds)
           playAudible(sound).then((result) => {
             if (!result.ok) patch('页内提示音未播放:' + result.reason, 'error')
           })
@@ -1319,10 +1338,31 @@ window.__ModuleLoader__.load({
         })
       }
 
-      const soundOptions = [h('option', { key: '', value: '' }, '内置默认')].concat(
-        Object.keys(TONE_LABELS).map((name) => h('option', { key: name, value: name }, '内置 · ' + TONE_LABELS[name])),
-      ).concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + (sound.name || sound.id))))
+      // 页内场景映射:通知生效映射为底、页内显式配置覆盖,与聚焦补位音真实发声同语义;
+      // 死链按合并视图计算:页内自身死链(删音效不清理本机键)与继承的通知死链都需呈现
+      const effectivePageMapping = mergeMapping(effective, pageMapping)
+      const pageDeadIds = deadCustomIds(effectivePageMapping, soundIds)
+
+      function previewPageCategory(category) {
+        const sound = resolveSound(category, effectivePageMapping, soundIds)
+        playAudible(sound).then((result) => {
+          if (!result.ok) patch(CATEGORY_LABELS[category] + ' 试听未播放:' + result.reason, 'error')
+          else if (pageDeadIds.indexOf(effectivePageMapping[category]) >= 0) patch('映射 ' + effectivePageMapping[category] + ' 已失效,已播放内置默认,请重新上传音效或改选映射', 'error')
+          else patch('已试听页内 ' + CATEGORY_LABELS[category] + ':' + describeSound(sound))
+        })
+      }
+
+      // 两个场景映射的选项尾段同集,差异仅在首项(通知=内置默认,页内=沿用通知音效)与死链呈现
+      const toneOptionTail = Object.keys(TONE_LABELS).map((name) => h('option', { key: name, value: name }, '内置 · ' + TONE_LABELS[name]))
+        .concat(sounds.map((sound) => h('option', { key: sound.id, value: sound.id }, '上传 · ' + (sound.name || sound.id))))
         .concat(deadIds.map((id) => h('option', { key: id, value: id }, '失效 · ' + id)))
+
+      const soundOptions = [h('option', { key: '', value: '' }, '内置默认')].concat(toneOptionTail)
+
+      // 页内场景选项:首项为沿用通知音效,滤除通知死链防与页内死链尾段重复,呈现以页内合并视图为准
+      const pageSoundOptions = [h('option', { key: '', value: '' }, '沿用通知音效')].concat(
+        toneOptionTail.filter((option) => deadIds.indexOf(option.props.value) < 0),
+      ).concat(pageDeadIds.map((id) => h('option', { key: id, value: id }, '失效 · ' + id)))
 
       // 分区定义:IM 卡随 dsh-im 在场与否出现;activeTab 兜底防 imAvailable 回落时落空
       const tabs = [
@@ -1430,7 +1470,7 @@ window.__ModuleLoader__.load({
                   onClick: () => toggleSoundCategory(category),
                 }, CATEGORY_LABELS[category])),
               ),
-            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示卡片与会话高亮不受影响;被静音分类的系统弹窗与标题闪烁随之静默;页内提示音有独立的分类开关,不随此处变化。'),
+            ], '点分类单独控制该类事件是否出声:亮=出声,暗=静音;总开关关闭时全部静音。页内提示卡片与会话高亮不受影响;被静音分类的系统弹窗与标题闪烁随之静默;页内提示音有独立的开关、分类与音色映射,不随此处变化。'),
             field('系统弹窗', [
               h('label', { className: 'tn-meta tn-switch', title: '窗口失焦时弹系统级通知,聚焦时静默(见聚焦静默);未授权且声音开启时降级为标题闪烁' },
                 ...switchToggle({
@@ -1451,12 +1491,14 @@ window.__ModuleLoader__.load({
                   onChange: (e) => localSet(KEY_TOAST, e.target.checked ? '1' : '0'),
                 }),
                 ' 开启'),
+            ], '页面角落浮出卡片提示;聚焦时通知声音静默,提示音的听觉提醒由页内提示音场景独立承担。'),
+            field('页内提示音', [
               h('label', { className: 'tn-meta tn-switch', title: '页内提示音总开关:页内提示弹出且未播放通知声音时补一声提示(聚焦时通知声音静默,靠它保留听觉提醒);与通知声音互斥,同一通知至多一声,音量与本页音量滑块共用' },
                 ...switchToggle({
                   defaultChecked: localGet(KEY_PAGE_SOUND) === '1',
                   onChange: (e) => localSet(KEY_PAGE_SOUND, e.target.checked ? '1' : '0'),
                 }),
-                ' 有声'),
+                ' 开启'),
               h('div', { className: 'tn-pills' },
                 CATEGORIES.map((category) => h('span', {
                   className: 'tn-pill' + (pageSoundCategories[category] !== false ? ' tn-pill--on' : ''),
@@ -1467,7 +1509,7 @@ window.__ModuleLoader__.load({
                   onClick: () => togglePageSoundCategory(category),
                 }, CATEGORY_LABELS[category])),
               ),
-            ], '页内提示音独立配置:点分类单独控制该类事件是否补位出声(亮=出声,暗=静音);总开关(有声)关闭时全部分类静默,pills 仅保留偏好记忆;音色沿用音效页的分类映射,与提示音的分类静音互不影响。'),
+            ], '聚焦场景的独立声音:总开关与分类静音在此,音色在音效页的页内提示音映射卡单独指定(未配置的分类沿用通知音效);失焦场景的通知声音不受本行影响。'),
             field('音量', h('input', {
               className: 'tn-range', type: 'range', min: 0, max: 1, step: 0.05,
               title: '通知声音与页内提示音共用,按 5% 步进调节,本机记忆',
@@ -1584,6 +1626,20 @@ window.__ModuleLoader__.load({
                   onChange: (e) => void setMapping(category, e.target.value),
                 }, soundOptions),
                 h('button', { className: 'tn-btn', title: '播放该分类当前生效的音效;映射失效时回落内置默认', onClick: () => previewCategory(category) }, '试听'),
+              ])),
+            ),
+            h('div', { className: 'tn-card' },
+              h('div', { className: 'tn-card__head' },
+                h('span', { className: 'tn-card__title' }, '页内提示音映射'),
+                h('span', { className: 'tn-card__sub' }, '聚焦补位音场景,独立于上方通知音效;仅存本机浏览器,未配置的分类沿用通知音效'),
+              ),
+              CATEGORIES.map((category) => field(CATEGORY_LABELS[category], [
+                h('select', {
+                  className: 'tn-select tn-fill', value: pageMapping[category] || '',
+                  title: '聚焦时页内提示音播放的音效,选择即保存;空为沿用通知音效',
+                  onChange: (e) => setPageMappingCategory(category, e.target.value),
+                }, pageSoundOptions),
+                h('button', { className: 'tn-btn', title: '按页内场景解析播放该分类音效(页内配置覆盖,缺省沿用通知映射)', onClick: () => previewPageCategory(category) }, '试听'),
               ])),
             ),
           ] : null,
