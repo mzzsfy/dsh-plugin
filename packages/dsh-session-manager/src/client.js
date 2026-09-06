@@ -355,31 +355,46 @@ function HistoryDock({ session, inputActions }) {
   const [cursor, setCursor] = useState(-1)
   const [loadError, setLoadError] = useState(false)
   const rootRef = React.useRef(null)
+  // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
+  // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
+  const viewRef = React.useRef({ open: false, items: null, cursor: -1 })
+  const sessionRef = React.useRef(session)
+  const inputActionsRef = React.useRef(inputActions)
+  sessionRef.current = session
+  inputActionsRef.current = inputActions
+
+  function syncView(patch) {
+    viewRef.current = { ...viewRef.current, ...patch }
+  }
 
   // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组。
   // 不传 refresh:host TTL 缓存内直接返回(全量扫描秒级,每次强刷会让每次唤起都卡死);
   // 缓存过期后由 host 自动重扫
   function fetchInputs() {
-    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(session.sessionId))
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId))
       .then((payload) => (payload && Array.isArray(payload.inputs)) ? payload.inputs : [])
   }
 
   function fill(text) {
-    inputActions.setDraft(text)
+    inputActionsRef.current.setDraft(text)
+    syncView({ open: false })
     setOpen(false)
   }
 
   function openPopup() {
+    syncView({ open: true, items: null, cursor: -1 })
     setOpen(true)
     setCursor(-1)
     setLoadError(false)
     setItems(null)
     fetchInputs()
       .then((fetched) => {
+        syncView({ items: fetched, cursor: -1 })
         setItems(fetched)
         setCursor(-1)
       })
       .catch((error) => {
+        syncView({ items: [] })
         setLoadError(true)
         setItems([])
         toast(error && error.message ? error.message : String(error), { kind: 'error' })
@@ -388,10 +403,10 @@ function HistoryDock({ session, inputActions }) {
 
   // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动
   useEffect(() => {
-    if (inputActions === undefined || typeof inputActions.setDraft !== 'function') return undefined
     function onKeyDown(event) {
+      const view = viewRef.current
       if (event.isComposing) return
-      if (!open) {
+      if (!view.open) {
         if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === 'ArrowUp') {
           event.preventDefault()
           event.stopPropagation()
@@ -402,28 +417,29 @@ function HistoryDock({ session, inputActions }) {
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
         event.stopPropagation()
-        setCursor((previous) => {
-          if (items === null || items.length === 0) return previous
-          const delta = event.key === 'ArrowUp' ? -1 : 1
-          return Math.min(Math.max(previous + delta, 0), items.length - 1)
-        })
+        if (view.items === null || view.items.length === 0) return
+        const delta = event.key === 'ArrowUp' ? -1 : 1
+        const next = Math.min(Math.max(view.cursor + delta, 0), view.items.length - 1)
+        syncView({ cursor: next })
+        setCursor(next)
         return
       }
       if (event.key === 'Enter') {
         event.preventDefault()
         event.stopPropagation()
-        if (items !== null && cursor >= 0 && cursor < items.length) fill(items[cursor].text)
+        if (view.items !== null && view.cursor >= 0 && view.cursor < view.items.length) fill(view.items[view.cursor].text)
         return
       }
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
+        syncView({ open: false })
         setOpen(false)
       }
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [open, items, cursor])
+  }, [])
 
   // 浮层外点击关闭
   useEffect(() => {
