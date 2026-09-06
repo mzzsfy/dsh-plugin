@@ -125,11 +125,27 @@ export function projectDeletedRows(deleted, sessionsById) {
     }))
 }
 
-// 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)
+// 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)。
+// 范围从窄到宽排列,client ←/→ 切换即在此数组上移动索引。
+// 对齐 = 后台解压范围内会话产物与持久缓存合并;两次对齐最小间隔防持续解压。
+// 解压是同步 CPU 操作会阻塞主循环:启动零解压(历史直接读磁盘缓存),
+// 全量对齐延迟 STARTUP_DELAY 再跑、只回溯最近 STARTUP_SCAN 个会话、
+// 跳过超 MAX_ARTIFACT 的巨产物(单次 readSession 内部不可让出,巨产物一解卡死主循环);
+// 对齐中连续解压占用超 SLICE 即让出 YIELD。
+// 运行中会话(当前会话)提取结果只保留内存不落盘——产物持续变化,落盘指纹立即失效
 export const HISTORY_SESSION_SCAN_LIMIT = 20
 export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
-export const HISTORY_CACHE_TTL_MS = 5 * 60 * 1000
+export const HISTORY_SCOPES = ['session', 'workspace', 'global']
+export const HISTORY_ALIGN_THROTTLE_MS = 30 * 1000
+export const HISTORY_STARTUP_DELAY_MS = 30 * 1000
+export const HISTORY_STARTUP_SCAN_LIMIT = 100
+export const HISTORY_ALIGN_SLICE_MS = 200
+export const HISTORY_ALIGN_YIELD_MS = 100
+export const HISTORY_ALIGN_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+// 会话范围路由触发焦点对齐后就地等待的时限:首条数据可见预算(3s)内
+// 留出解压+读盘份额,超时改走轮询流式补齐
+export const HISTORY_FOCUS_WAIT_MS = 2 * 1000
 
 /**
  * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,
@@ -153,7 +169,8 @@ export function extractUserInputs(events) {
   return entries
 }
 
-/** 历史输入聚合:精确文本去重保留最新时间,时间倒序,截 limit 条,单条截 maxChars 字符。 */
+/** 历史输入聚合:精确文本去重保留最新时间,时间倒序,截 limit 条,单条截 maxChars 字符。
+ * 条目可携带 sid(来源会话)用于 session 范围过滤,聚合时原样保留。 */
 export function aggregateInputs(entries, { limit, maxChars }) {
   const latestByText = new Map()
   for (const entry of entries || []) {
@@ -163,5 +180,9 @@ export function aggregateInputs(entries, { limit, maxChars }) {
   return [...latestByText.values()]
     .sort((left, right) => right.at - left.at)
     .slice(0, limit)
-    .map((entry) => ({ text: entry.text.slice(0, maxChars), at: entry.at }))
+    .map((entry) => ({
+      text: entry.text.slice(0, maxChars),
+      at: entry.at,
+      ...(entry.sid !== undefined ? { sid: entry.sid } : {}),
+    }))
 }

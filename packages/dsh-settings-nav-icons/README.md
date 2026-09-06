@@ -8,6 +8,7 @@ DeepSeek Harness 纯前端插件:设置弹窗左侧导航与 dsh-market 插件�
 |---|---|
 | 分区当前是官方齿轮 | 改写官方 svg 内部内容为专属图形(声明 → 内置映射 → 关键词 → 哈希) |
 | 分区当前非齿轮(官方原生图标 / 第三方插件供给的图标) | 不干预,映射或声明命中也不例外 |
+| 左侧导航分区溢出(弹窗高度不足) | 列表区域滚动,标题固定;官方无滚动机制,溢出被弹窗裁剪致底部分区不可达 |
 | 市场卡片头像槽(有名称锚) | 按插件名取图替换作者头像/字母色块 |
 | 语言切换导致 label 变化 | 已改写的分区按新 label 重新取图改写 |
 | 面板关闭后重新打开 / 会话切换 | 新渲染的齿轮自动再改写 |
@@ -64,11 +65,12 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 
 ## 实现要点
 
+- 导航滚动补偿:官方 navList 高度随内容撑开,弹窗(overflow hidden)裁掉溢出且无滚动途径,分区一多底部不可达。插件启动时向 head 注入一条样式规则(navList `flex:1 1 0 + min-height:0 + overflow-y:auto + scrollbar-width:thin`),样式表形态对弹窗关闭重开等任意 React 重渲染持续生效;卸载即移除,零残留。类名锚定与图标改写同策略(`VOzbGW_` 哈希前缀字面量)。
 - 实现边界:`settings.*` 子槽位的声明权与渲染权均被原版 `dsh-client-ui-settings-general` 条目占用——`renderSlot` 只授予声明了 `children` 的条目(dsh-client-ui-renderer),而 Slot 声明全局唯一、重复声明即 `already declared`,因此任何插件都无法在保留设置页内容的前提下接管 Shell 重绘导航。DOM 观察是唯一不依赖官方契约变更的路径(dream-skin 与 dsh-better-sidebar 各自内置了同原理的一次性 hack)。
 - 匹配锚点:分区显示文本而非分区 id——id 不进 DOM,文本是唯一稳定可见锚点;CSS Modules 哈希类名(`VOzbGW_*`)取字面量。label 一律 trim 后匹配,空白 label 直接跳过。
 - 内容改写制:决策只对官方齿轮(齿轮路径前缀 `M14.0861` 识别)生效,`applyDecision` 写官方 svg 的 `innerHTML` 并把记账(`data-navic` = label)落在官方 svg 自身;不新建节点、不改属性、不驱动 style。React 安全性依据:官方 nav 图标是静态子树,重渲染前后 element 引用相等即 bailout,改写内容稳定存活(0.1.x 的 NotFoundError 仅源于 remove 节点本身);升级残留的旧注入节点(`data-navic="1"`)在改写前清除。改写后的 svg 非齿轮且带记账,与"未处理的官方原生非齿轮 svg"靠记账区分——因此声明变更不删记账,由 `registerIcons` 对命中键的 nav svg 以 `resolveForLabel` 全链(声明 → 内置映射 → 关键词 → 哈希)就地重写内容,头像槽(非 svg 节点)仍走清账重贴。
 - 市场卡片头像槽记账为插件名,IMG/DIV 同构处理:原节点隐藏、注入图标跟随(不触碰 React 受管子树),换名重贴按父容器范围清理旧注入、不误删外来兄弟。
-- 生命周期:单个 `MutationObserver` 常驻 `document.body`(`childList` + `subtree` + `characterData`;childList 通道仅元素级变更放行,characterData 通道按目标域精确放行——label 与市场卡片名所在行内的文本改写才唤醒,流式正文等域外文本变更不唤醒),变更去抖到 `requestAnimationFrame` 扫描,单元格与头像槽合并为单次全文档遍历,扫描结束 `takeRecords` 消除自产写入回波;`ctx.effect` 持有,卸载即断开并取消已排定帧,已停止实例的注册入口短路、不驱动 DOM。观察器句柄挂 window 代际槽(HMR 重评估先拆上一代观察器与在途帧),帧句柄与槽同步(跨代取消真实可达)。常驻全文档观察是已知性能取舍:装饰性插件的目标域(设置弹窗/市场卡片)无稳定根锚点,两级观察的回归风险大于收益。
+- 生命周期:单个 `MutationObserver` 常驻 `document.body`(`childList` + `subtree` + `characterData`;childList 通道仅元素级变更放行,characterData 通道按目标域精确放行——label 与市场卡片名所在行内的文本改写才唤醒,流式正文等域外文本变更不唤醒),变更去抖到 `requestAnimationFrame` 扫描,单元格与头像槽合并为单次全文档遍历,扫描结束 `takeRecords` 消除自产写入回波;`ctx.effect` 持有,卸载即断开并取消已排定帧,已停止实例的注册入口短路、不驱动 DOM。观察器句柄、在途帧与滚动样式元素挂 window 代际槽(HMR 重评估先拆上一代三者,滚动样式对旧版槽缺字段宽松判空),帧句柄与槽同步(跨代取消真实可达)。常驻全文档观察是已知性能取舍:装饰性插件的目标域(设置弹窗/市场卡片)无稳定根锚点,两级观察的回归风险大于收益。
 - 纯逻辑层(映射表 + 改写决策)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套场景对两份实现做 parity 验证(全表 deepEqual + 决策函数逐函数源码对比),另有编排层契约测试(注册校验/队列三态与时序/生命周期/头像槽编排/异常隔离)与四生产者样板契约测试。
 
 ## 安装
@@ -104,7 +106,7 @@ pnpm --dir packages/dsh-settings-nav-icons test
 node --test packages/dsh-settings-nav-icons/test/*.test.mjs
 ```
 
-覆盖:上表全部行为场景(齿轮强补 / 非齿轮不动 / svg 记账幂等与 label 重写 / trim 与空 label / 无 svg 降级 / 内容改写与不建节点 / 0.1.x 残留清理 / 声明安全门 / 撤销回退取图链 / 关键词边界 / 头像槽 img+div)、映射表契约、双实现全量同源 parity、client.js 注册 id 守卫、编排层契约(注册校验 / 就地重写 / 队列三态 / 生命周期 / 异常隔离 / 持久层恢复)、四生产者样板契约。
+覆盖:上表全部行为场景(齿轮强补 / 非齿轮不动 / svg 记账幂等与 label 重写 / trim 与空 label / 无 svg 降级 / 内容改写与不建节点 / 0.1.x 残留清理 / 声明安全门 / 撤销回退取图链 / 关键词边界 / 头像槽 img+div / 导航滚动样式注入与卸载)、映射表契约、双实现全量同源 parity、client.js 注册 id 守卫、编排层契约(注册校验 / 就地重写 / 队列三态 / 生命周期 / 异常隔离 / 持久层恢复)、四生产者样板契约。
 
 ## License
 

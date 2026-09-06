@@ -67,24 +67,40 @@ const CSS = [
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
   '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
-  // 历史输入:零高度锚点容器 + 向上弹出浮层(Alt+↑ 唤起)
+  // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,
+  // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
+  // 色值取自宿主实测(白底卡片/墨色文字/蓝色强调):dsw alias 变量在宿主为空,不可依赖
   '.sm-hist { position:relative; height:0; }',
-  '.sm-hist__pop { position:absolute; right:12px; bottom:8px; z-index:30; width:min(560px, 90%);',
-  '  max-height:320px; display:flex; flex-direction:column; overflow:hidden;',
-  '  background:var(--dsw-alias-bg-module-platform); border:1px solid var(--dsw-alias-border-l3); border-radius:10px;',
-  '  box-shadow:0 8px 24px rgba(0,0,0,.18); }',
-  '.sm-hist__hint { padding:8px 12px 4px; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); flex:none; }',
-  '.sm-hist__list { overflow-y:auto; padding:4px; }',
-  '.sm-hist__row { display:flex; align-items:baseline; gap:8px; width:100%; border:0; background:transparent;',
-  '  cursor:pointer; text-align:left; padding:6px 10px; border-radius:6px; min-width:0; }',
-  '.sm-hist__row:hover { background:var(--dsw-alias-interactive-bg-hover); }',
-  '.sm-hist__row--on, .sm-hist__row--on:hover { background:var(--dsw-alias-interactive-bg-selected); }',
-  '.sm-hist__row:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-2px; }',
-  '.sm-hist__text { flex:1; min-width:0; font:var(--dsw-font-s-14); color:var(--dsw-alias-label-primary);',
-  '  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
-  '.sm-hist__time { font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption);',
+  '.sm-hist__pop { position:absolute; left:0; right:0; bottom:10px; z-index:50;',
+  '  max-height:min(420px, 46vh); display:flex; flex-direction:column; overflow:hidden;',
+  '  color-scheme:light dark; color:light-dark(#0f1115, #e8eaed);',
+  '  background:light-dark(#fff, #1e1f22); border-radius:14px;',
+  '  box-shadow:0 0 0 0.5px light-dark(rgba(15,17,21,.18), rgba(255,255,255,.14)), 0 4px 16px rgba(0,0,0,.08), 0 16px 48px rgba(0,0,0,.16); }',
+  '.sm-hist__hint { display:flex; align-items:center; gap:10px; padding:9px 14px; flex:none;',
+  '  border-bottom:1px solid light-dark(rgba(15,17,21,.08), rgba(255,255,255,.1));',
+  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55)); }',
+  '.sm-hist__scope { padding:2px 10px; border-radius:999px; flex:none;',
+  '  background:#1677ff; color:#fff; font-weight:600; }',
+  '.sm-hist__list { overflow-y:auto; padding:6px; }',
+  '.sm-hist__row { position:relative; display:flex; align-items:center; gap:10px; width:100%; border:0;',
+  '  background:transparent; cursor:pointer; text-align:left; padding:8px 12px 8px 14px;',
+  '  border-radius:8px; min-width:0; }',
+  '.sm-hist__row:hover { background:light-dark(rgba(15,17,21,.05), rgba(255,255,255,.07)); }',
+  '.sm-hist__row--on, .sm-hist__row--on:hover { background:light-dark(rgba(22,119,255,.1), rgba(22,119,255,.22)); }',
+  '.sm-hist__row--on::before { content:""; position:absolute; left:0; top:6px; bottom:6px; width:3px;',
+  '  border-radius:2px; background:#1677ff; }',
+  '.sm-hist__row--on .sm-hist__text { color:#1677ff; font-weight:600; }',
+  '.sm-hist__row:focus-visible { outline:2px solid #1677ff; outline-offset:-2px; }',
+  '.sm-hist__text { flex:1; min-width:0; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
+  '  color:inherit; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+  '.sm-hist__time { font:12px/18px var(--ds-font-family-code, monospace);',
+  '  color:light-dark(rgba(15,17,21,.4), rgba(232,234,237,.4));',
   '  font-variant-numeric:tabular-nums; flex:none; }',
-  '.sm-hist__empty { padding:20px 12px; text-align:center; font:var(--dsw-font-s-14); color:var(--dsw-alias-label-caption); }',
+  '.sm-hist__empty { padding:24px 14px; text-align:center; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
+  '  color:light-dark(rgba(15,17,21,.5), rgba(232,234,237,.5)); }',
+  '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
+  '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55));',
+  '  background:light-dark(rgba(15,17,21,.04), rgba(255,255,255,.06)); }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -347,49 +363,120 @@ function SessionManagerApp(props) {
 }
 
 // 历史输入浮层:Alt+↑ 快捷键唤起,平时零占位;浮层内点选或键盘(↑/↓ 选择、
-// Enter 填入、Esc 关闭)回填历史,填入走宿主公共契约 inputActions.setDraft,
-// 不直改编辑器 DOM。数据由 host 按当前会话所属工作区聚合,每次唤起即强刷
+// ←/→ 切范围、Enter 填入、Esc 关闭)回填历史,填入走宿主公共契约
+// inputActions.setDraft,不直改编辑器 DOM。数据由 host 工作区持久缓存
+// (~/.dsh/historyPrompt)直接返回,后台对齐保持新鲜
+// 历史输入范围:索引即 ←/→ 切换顺序(← 向窄,→ 向宽),与 core.mjs HISTORY_SCOPES 同序同值
+const HISTORY_SCOPES = ['session', 'workspace', 'global']
+const HISTORY_SCOPE_LABELS = ['当前会话', '本工作区', '全部工作区']
+// 对齐未就绪时的静默重拉间隔与上限(对齐通常秒级完成,上限防死循环)
+const HISTORY_REPULL_MS = 3 * 1000
+
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
   const [cursor, setCursor] = useState(-1)
+  const [scopeIndex, setScopeIndex] = useState(0)
+  const [aligning, setAligning] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const rootRef = React.useRef(null)
+  // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
+  // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
+  const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, aligning: false })
+  const sessionRef = React.useRef(session)
+  const inputActionsRef = React.useRef(inputActions)
+  sessionRef.current = session
+  inputActionsRef.current = inputActions
 
-  // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组
-  function fetchInputs() {
-    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(session.sessionId) + '&refresh=1')
-      .then((payload) => (payload && Array.isArray(payload.inputs)) ? payload.inputs : [])
+  function syncView(patch) {
+    viewRef.current = { ...viewRef.current, ...patch }
   }
 
-  function fill(text) {
-    inputActions.setDraft(text)
-    setOpen(false)
+  // host 响应信封 { inputs, aligned };解包并防御形态漂移,消费侧恒为数组。
+  // aligned=false 表示工作区缓存尚未建立(首次),host 已在后台对齐
+  function fetchInputs(scope) {
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId) + '&scope=' + scope)
+      .then((payload) => ({
+        inputs: (payload && Array.isArray(payload.inputs)) ? payload.inputs : [],
+        aligned: Boolean(payload && payload.aligned),
+      }))
   }
 
-  function openPopup() {
-    setOpen(true)
+  // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围。
+  // items 深度不变的重复响应不重置光标(轮询期间保持用户选位)
+  function applyResult(scopeIdx, result) {
+    if (viewRef.current.scopeIndex !== scopeIdx) return
+    const prev = viewRef.current.items
+    if (prev !== null && JSON.stringify(prev) === JSON.stringify(result.inputs)) {
+      syncView({ aligning: !result.aligned })
+      setAligning(!result.aligned)
+      return
+    }
+    syncView({ items: result.inputs, cursor: -1, aligning: !result.aligned })
+    setItems(result.inputs)
     setCursor(-1)
-    setLoadError(false)
-    setItems(null)
-    fetchInputs()
-      .then((fetched) => {
-        setItems(fetched)
-        setCursor(-1)
+    setAligning(!result.aligned)
+  }
+
+  // 浮层打开期间固定节奏轮询当前范围:host 侧对齐/焦点对齐是异步的,
+  // 数据可能晚于首次响应到达,一次性重拉预算耗尽后迟到的数据将永不出现
+  // (实机验证实测:API 已就绪而浮层停在旧列表)。轮询开销为毫秒级缓存读
+  function requestScope(scopeIdx) {
+    const scope = HISTORY_SCOPES[scopeIdx]
+    fetchInputs(scope)
+      .then((result) => {
+        applyResult(scopeIdx, result)
+        if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) {
+          setTimeout(() => {
+            if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
+          }, HISTORY_REPULL_MS)
+        }
       })
       .catch((error) => {
+        if (viewRef.current.scopeIndex !== scopeIdx) return
+        syncView({ items: [] })
         setLoadError(true)
         setItems([])
         toast(error && error.message ? error.message : String(error), { kind: 'error' })
       })
   }
 
+  function fill(text) {
+    inputActionsRef.current.setDraft(text)
+    syncView({ open: false })
+    setOpen(false)
+  }
+
+  function openPopup() {
+    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0, aligning: false })
+    setOpen(true)
+    setScopeIndex(0)
+    setCursor(-1)
+    setAligning(false)
+    setLoadError(false)
+    setItems(null)
+    requestScope(0)
+  }
+
+  // 切换范围:向宽(→)/向窄(←),边界停住;缓存直接返回(毫秒级),后台保持对齐
+  function switchScope(delta) {
+    const next = viewRef.current.scopeIndex + delta
+    if (next < 0 || next >= HISTORY_SCOPE_LABELS.length) return
+    syncView({ scopeIndex: next, items: null, cursor: -1, aligning: false })
+    setScopeIndex(next)
+    setCursor(-1)
+    setAligning(false)
+    setLoadError(false)
+    setItems(null)
+    requestScope(next)
+  }
+
   // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动
   useEffect(() => {
-    if (inputActions === undefined || typeof inputActions.setDraft !== 'function') return undefined
     function onKeyDown(event) {
+      const view = viewRef.current
       if (event.isComposing) return
-      if (!open) {
+      if (!view.open) {
         if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === 'ArrowUp') {
           event.preventDefault()
           event.stopPropagation()
@@ -400,34 +487,53 @@ function HistoryDock({ session, inputActions }) {
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
         event.stopPropagation()
-        setCursor((previous) => {
-          if (items === null || items.length === 0) return previous
-          const delta = event.key === 'ArrowUp' ? -1 : 1
-          return Math.min(Math.max(previous + delta, 0), items.length - 1)
-        })
+        if (view.items === null || view.items.length === 0) return
+        const delta = event.key === 'ArrowUp' ? -1 : 1
+        const next = Math.min(Math.max(view.cursor + delta, 0), view.items.length - 1)
+        syncView({ cursor: next })
+        setCursor(next)
+        return
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        event.stopPropagation()
+        switchScope(event.key === 'ArrowLeft' ? -1 : 1)
         return
       }
       if (event.key === 'Enter') {
+        // 未选中条目时放行:用户可能只是在草稿里按 Enter 发消息,吞掉即是「假死锁定」
+        if (!(view.items !== null && view.cursor >= 0 && view.cursor < view.items.length)) return
         event.preventDefault()
         event.stopPropagation()
-        if (items !== null && cursor >= 0 && cursor < items.length) fill(items[cursor].text)
+        fill(view.items[view.cursor].text)
         return
       }
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
+        syncView({ open: false })
         setOpen(false)
       }
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [open, items, cursor])
+  }, [])
 
-  // 浮层外点击关闭
+  // 选中行滚入可视区:键盘移动后高亮行保持在视野内
+  useEffect(() => {
+    if (!open || cursor < 0) return
+    const row = rootRef.current && rootRef.current.querySelector('.sm-hist__row--on')
+    if (row) row.scrollIntoView({ block: 'nearest' })
+  }, [open, cursor, items])
+
+  // 浮层外点击关闭(双写:漏写 viewRef 会让键盘层误判浮层仍开,吞掉输入框方向键)
   useEffect(() => {
     if (!open) return undefined
     function onPointerDown(event) {
-      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false)
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        syncView({ open: false })
+        setOpen(false)
+      }
     }
     document.addEventListener('mousedown', onPointerDown, true)
     return () => document.removeEventListener('mousedown', onPointerDown, true)
@@ -435,22 +541,25 @@ function HistoryDock({ session, inputActions }) {
 
   // 零高度锚点:平时不占任何界面空间,仅浮层打开时渲染
   if (session === undefined || inputActions === undefined) return null
+  const rowButton = (item, index) => h('button', {
+    key: index + ':' + item.at,
+    className: 'sm-hist__row' + (index === cursor ? ' sm-hist__row--on' : ''),
+    onClick: () => fill(item.text),
+  },
+    h('span', { className: 'sm-hist__text', title: item.text }, item.text),
+    h('span', { className: 'sm-hist__time' }, fmtTime(item.at)),
+  )
   return h('div', { className: 'sm-hist', ref: rootRef },
     open && h('div', { className: 'sm-hist__pop' },
-      h('div', { className: 'sm-hist__hint' }, '当前工作区历史输入;↑/↓ 选择,Enter 填入,Esc 关闭'),
+      h('div', { className: 'sm-hist__hint' },
+        h('span', { className: 'sm-hist__scope' }, HISTORY_SCOPE_LABELS[scopeIndex]),
+        h('span', null, '↑/↓ 选择 · ←/→ 切换范围 · Enter 填入 · Esc 关闭')),
+      aligning && h('div', { className: 'sm-hist__banner' }, '首次对齐历史中,可能需要稍等'),
       items === null
-        ? h('div', { className: 'sm-hist__empty' }, '加载中…')
+        ? h('div', { className: 'sm-hist__empty' }, '正在读取历史输入…')
         : items.length === 0
-          ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '当前工作区还没有历史输入')
-          : h('div', { className: 'sm-hist__list' },
-              items.map((item, index) => h('button', {
-                key: index + ':' + item.at,
-                className: 'sm-hist__row' + (index === cursor ? ' sm-hist__row--on' : ''),
-                onClick: () => fill(item.text),
-              },
-                h('span', { className: 'sm-hist__text', title: item.text }, item.text),
-                h('span', { className: 'sm-hist__time' }, fmtTime(item.at)),
-              ))),
+          ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '该范围内还没有历史输入')
+          : h('div', { className: 'sm-hist__list' }, items.map(rowButton)),
     ),
   )
 }

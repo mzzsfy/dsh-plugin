@@ -196,3 +196,12 @@ test('apiError: 携带 status 与 payload.error,解析失败回退 HTTP 码', ()
   assert.equal(withoutBody.status, 500)
   assert.equal(withoutBody.message, 'HTTP 500')
 })
+
+test('restartTick 调用点实参完整性:轮询 effect 必须传 readyStreak=prev.readyStreak', () => {
+  // 回归:f58f47b 给 restartTick 加 readyStreak 参数时调用点漏传,ready=true 分支
+  // undefined+1=NaN,NaN>=门槛恒 false,宿主恢复后页面永不自动刷新。
+  // 单测显式传参掩盖了该缺陷,此处对拍 effect 内真实调用点的实参表。
+  const callSite = clientSource().match(/await restartTick\(\{([\s\S]*?)\}\)/)
+  assert.ok(callSite, 'client.js 找不到 effect 内 restartTick 调用点')
+  assert.match(callSite[1], /readyStreak:\s*prev\.readyStreak/, 'restartTick 调用点缺少 readyStreak: prev.readyStreak 实参')
+})

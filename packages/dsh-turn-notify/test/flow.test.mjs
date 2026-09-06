@@ -57,12 +57,16 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   }
   const defaultFetch = async (path) => {
     if (onFetch) onFetch(path)
+    // 首拉返回空投影:真实客户端启动即冷启动对齐,既有"正常消费"语义从第二次轮询起成立
+    calls += 1
+    if (calls === 1) return { ok: true, json: async () => ({ units: [], soundMapping: {}, version: 0 }) }
     return { ok: true, json: async () => payload }
   }
   const factory = new Function(
     'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification',
     source + '\n;return null',
   )
+  let calls = 0
   factory(
     windowStub,
     requireStub,
@@ -85,9 +89,11 @@ test('broken localStorage:清理段不抛,降级发声恰好一次,第二轮不�
   const { mod, shown } = loadClient({ storage: new BrokenStorage(), payload: { units, soundMapping: {}, version: 1 } })
   const { poll, storageState } = mod.__test
   await poll()
+  await poll()
   assert.equal(storageState.broken, true)
   // 两事件各发声一次,清理段未抛出控制流到达 claimEvent
   assert.equal(shown.length, units.length)
+  await poll()
   await poll()
   // 投影窗口内第二轮 poll 同事件不再发声
   assert.equal(shown.length, units.length)
@@ -98,10 +104,12 @@ test('正常 localStorage:唯一发声,完成标记写入,残留锁被清理', a
   const { mod, shown } = loadClient({ storage, payload: { units, soundMapping: {}, version: 1 } })
   const { poll } = mod.__test
   await poll()
+  await poll()
   assert.equal(shown.length, units.length)
   assert.equal(storage.getItem('turn-notify:lock:stale'), null)
   assert.notEqual(storage.getItem('turn-notify:done:u1'), null)
   assert.notEqual(storage.getItem('turn-notify:done:u2'), null)
+  await poll()
   await poll()
   // 完成标记生效,第二轮不重复发声
   assert.equal(shown.length, units.length)
@@ -110,8 +118,53 @@ test('正常 localStorage:唯一发声,完成标记写入,残留锁被清理', a
 test('页内通知经公共组件:文案与展示期随事件传入', async () => {
   const { mod, shown } = loadClient({ storage: new FakeStorage(), payload: { units, soundMapping: {}, version: 1 } })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.deepEqual(shown.map((call) => call.text), units.map((unit) => unit.text))
   assert.ok(shown.every((call) => call.opts && call.opts.holdMs === 6 * 1000))
+})
+
+test('Given 冷启动首拉带存量通知 When poll Then 静默对齐不呈现且完成标记写入', async () => {
+  const storage = new FakeStorage()
+  const { mod, shown } = loadClient({
+    storage,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units, soundMapping: {}, version: 1 }) }),
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(shown.length, 0, '冷启动对齐不应轰炸呈现')
+  assert.notEqual(storage.getItem('turn-notify:done:u1'), null, '静默对齐仍需写完成标记防其他窗口回放')
+})
+
+test('Given 冷启动存量含审批与提问 When poll Then 照常呈现待办', async () => {
+  const todoUnits = [
+    { id: 'u-ap', category: 'approval', text: '[dsh] 等待审批: t1' },
+    { id: 'u-ask', category: 'ask', text: '[dsh] AI 提问: t2' },
+  ]
+  const { mod, shown } = loadClient({
+    storage: new FakeStorage(),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: todoUnits, soundMapping: {}, version: 1 }) }),
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.deepEqual(shown.map((call) => call.text), todoUnits.map((unit) => unit.text), '等待用户动作的通知不因冷启动静默')
+})
+
+test('Given 冷启动已对齐 When 新通知到达 Then 正常呈现', async () => {
+  let version = 1
+  let payloadUnits = units
+  const storage = new FakeStorage()
+  const { mod, shown } = loadClient({
+    storage,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: payloadUnits, soundMapping: {}, version }) }),
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(shown.length, 0)
+  version = 2
+  payloadUnits = [...units, { id: 'u3', category: 'completed', text: '[dsh] 任务完成: t3' }]
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.deepEqual(shown.map((call) => call.text), ['[dsh] 任务完成: t3'])
 })
 
 // ---- 会话行高亮:认领后按投影 session 字段在侧边栏定位行并挂类 ----
@@ -174,6 +227,7 @@ test('Given 通知带 session 标题 When 认领 Then 会话行挂上高亮类',
     document: { title: '会话乙 — DeepSeek Harness', ...dom },
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.ok(dom.rows[0].classList.set.has('tn-sess-hl'), '会话行未挂高亮类')
   assert.ok(dom.rows[0].classList.set.has('tn-sess-hl--completed'), '高亮类缺少分类色')
 })
@@ -189,6 +243,7 @@ test('Given 通知的是当前查看的会话 When 认领 Then 不挂高亮', as
     document: { title: '会话甲 — DeepSeek Harness', ...dom },
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '当前查看的会话不应闪烁')
 })
 
@@ -202,6 +257,7 @@ test('Given 当前会话判定不受标题闪烁前缀干扰 When 认领 Then �
     payload: { units: hlUnits, soundMapping: {}, version: 1 },
     document: { title: '⏳ 会话甲 — DeepSeek Harness', ...dom },
   })
+  await mod.__test.poll()
   await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '闪烁前缀不应破坏当前会话判定')
 })
@@ -217,6 +273,7 @@ test('Given 失焦且通知的是本标签页会话 When 认领 Then 挂高亮',
     document: { title: '会话甲 — DeepSeek Harness', hasFocus: () => false, ...dom },
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true, '失焦期间的本会话通知应闪烁提醒')
 })
 
@@ -231,6 +288,7 @@ test('Given 失焦期间挂上的当前会话高亮 When 页面重新可见 Then
     payload: { units: hlUnits, soundMapping: {}, version: 1 },
     document: { title: '会话甲 — DeepSeek Harness', hasFocus: () => false, ...dom },
   })
+  await mod.__test.poll()
   await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true)
   assert.equal(dom.rows[1].classList.set.has('tn-sess-hl'), true)
@@ -257,6 +315,7 @@ test('Given 失焦挂上的当前会话高亮 When 窗口重获焦点 Then 提�
     document: { title: '会话甲 — DeepSeek Harness', hasFocus: () => false, ...dom },
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true)
   mod.__test.start()
   const focusHandlers = (winStub.listeners.focus || []).slice()
@@ -278,6 +337,7 @@ test('Given 行处于运行状态 When 通知认领 Then 不挂高亮', async ()
     document: dom,
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '运行中的会话不应闪烁')
 })
 
@@ -292,9 +352,11 @@ test('Given 已挂高亮 When 行进入运行状态 Then 清除闪烁', async ()
     document: dom,
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true)
   // 会话又开跑:状态点文案回到行内
   dom.rows[0].textContent = '进行中会话甲 5分钟'
+  await mod.__test.poll()
   await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '会话运行后应停止闪烁')
 })
@@ -309,6 +371,7 @@ test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路�
     payload: { units: bareUnits, soundMapping: {}, version: 1 },
     document: dom,
   })
+  await mod.__test.poll()
   await mod.__test.poll()
   assert.equal(shown.length, 1)
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false)
@@ -330,6 +393,7 @@ test('Given 短标题先于长前缀行匹配 When 挂类 Then 短标题精确�
     document: dom,
   })
   await mod.__test.poll()
+  await mod.__test.poll()
   assert.ok(dom.rows[0].classList.set.has('tn-sess-hl--completed'), '长标题行未挂类')
   assert.ok(dom.rows[1].classList.set.has('tn-sess-hl--ask'), '短标题行未挂到自身行')
   assert.equal(dom.rows[1].classList.set.has('tn-sess-hl--completed'), false, '长标题类误挂到短标题行')
@@ -350,6 +414,7 @@ test('Given 两行各自高亮 When 点击其中一行 Then 仅该行清除且�
     payload: { units: hlUnits, soundMapping: {}, version: 1 },
     document: dom,
   })
+  await mod.__test.poll()
   await mod.__test.poll()
   mod.__test.start()
   const clickListeners = dom.listeners.click || []
@@ -437,6 +502,7 @@ test('页内提示通道独立开关:关闭后投影事件不再弹页内提示'
   const storage = new FakeStorage({ 'turn-notify:toast': '0' })
   const { mod, shown } = loadClient({ storage, payload: { units, soundMapping: {}, version: 1 } })
   const { poll } = mod.__test
+  await poll()
   await poll()
   assert.equal(shown.length, 0)
   // 完成标记已写:事件被认领消费,仅通道被关

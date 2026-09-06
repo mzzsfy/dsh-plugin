@@ -16,6 +16,7 @@ const SELECTOR_AV = '[class$="_av"]'
 const SELECTOR_ALL = SELECTOR_CELL + ',' + SELECTOR_AV
 const SELECTOR_MARKED = '[data-navic]'
 const SELECTOR_LABEL = '.VOzbGW_navLabel'
+const NAVLIST_SCROLL_CSS = '.VOzbGW_navList{flex:1 1 0;min-height:0;overflow-y:auto;scrollbar-width:thin}'
 
 function fakeRaf() {
   const pending = new Map()
@@ -113,6 +114,25 @@ function fakeDocument() {
     marked: [],
     cells: [],
     avatars: [],
+    // 生命周期事件序:锁定"样式注入先于观察器挂载"的顺序契约
+    events: [],
+    head: {
+      children: [],
+      appendChild(el) { doc.head.children.push(el); doc.events.push('style') },
+    },
+    createdStyles: [],
+    createElement(tag) {
+      const el = {
+        tag,
+        textContent: '',
+        remove() {
+          doc.createdStyles.splice(doc.createdStyles.indexOf(el), 1)
+          doc.head.children.splice(doc.head.children.indexOf(el), 1)
+        },
+      }
+      if (tag === 'style') doc.createdStyles.push(el)
+      return el
+    },
     querySelectorAll(sel) {
       if (sel === SELECTOR_ALL) return [...doc.cells, ...doc.avatars]
       if (sel === SELECTOR_CELL) return doc.cells
@@ -136,7 +156,7 @@ function loadClient() {
       this.cb = cb
       observers.push(this)
     }
-    observe(...args) { observed.push(args) }
+    observe(...args) { observed.push(args); if (doc.events) doc.events.push('observe') }
     disconnect() { observed.length = 0 }
     takeRecords() { return [] }
   }
@@ -172,6 +192,58 @@ test('boot 观察:body 目标与三开关齐全,卸载后断开', () => {
     unload()
   }
   assert.equal(observed.length, 0, '卸载后 disconnect')
+})
+
+test('导航滚动样式:启动注入 head,卸载移除,重装恢复,先于观察器挂载', () => {
+  const { win, doc, observed } = loadClient()
+  assert.equal(doc.createdStyles.length, 0, '启动前无注入')
+  const unload = boot(win.__loaded, doc)
+  try {
+    assert.equal(doc.createdStyles.length, 1, '恰一次注入')
+    assert.equal(doc.createdStyles[0].textContent, NAVLIST_SCROLL_CSS, '滚动规则与实现同源')
+    assert.equal(doc.head.children.length, 1, '样式挂载在 head')
+    assert.deepEqual(doc.events, ['style', 'observe'], '样式注入先于观察器挂载')
+    unload()
+    assert.equal(doc.createdStyles.length, 0, '卸载后移除')
+    assert.equal(doc.head.children.length, 0, 'head 无残留')
+    const unload2 = boot(win.__loaded, doc)
+    try {
+      assert.equal(doc.createdStyles.length, 1, '重装恢复注入')
+    } finally {
+      unload2()
+    }
+    assert.equal(doc.createdStyles.length, 0, '二次卸载移除')
+  } finally {
+    unload()
+  }
+})
+
+test('导航滚动样式代际:HMR 不卸载重评估由新实例代拆,旧形槽跨版本容忍', () => {
+  // HMR 路径:旧实例未 stop 直接二次 boot(新实例读槽代拆上一代样式)
+  const { win, doc } = loadClient()
+  const unload1 = boot(win.__loaded, doc)
+  const oldStyle = doc.createdStyles[0]
+  const unload2 = boot(win.__loaded, doc)
+  try {
+    assert.equal(doc.createdStyles.length, 1, '代拆后恰一份样式')
+    assert.equal(doc.head.children.length, 1, 'head 无旧代残留')
+    assert.notEqual(doc.createdStyles[0], oldStyle, '存活者为新实例注入的新元素')
+    unload2()
+    assert.equal(doc.createdStyles.length, 0, '新实例卸载后干净')
+  } finally {
+    unload1()
+    unload2()
+  }
+
+  // 升级路径:上一代是旧版本槽(无 scrollStyle 字段),代拆不得抛错
+  const { win: win2, doc: doc2 } = loadClient()
+  win2[Symbol.for('@mzzsfy/dsh-settings-nav-icons')] = { observer: null, rafId: 0 }
+  const unload3 = boot(win2.__loaded, doc2)
+  try {
+    assert.equal(doc2.createdStyles.length, 1, '旧形槽不阻塞注入')
+  } finally {
+    unload3()
+  }
 })
 
 test('registerIcons 输入校验:数组与空值拒收', () => {

@@ -5,7 +5,8 @@
 import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, writeFile, utimes, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, utimes, mkdir, rm, readFile } from 'node:fs/promises'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -21,7 +22,14 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const MESSAGES = indexModule.MESSAGES
-const { DELETE_MESSAGES } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
+const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
+const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cache.mjs')
+
+// 插件激活即跑历史缓存启动对齐:所有测试统一隔离缓存目录,
+// 防止夹具工作区经默认路径(~/.dsh/historyPrompt)泄漏进真实用户目录
+const sharedCacheDir = mkdtempSync(path.join(tmpdir(), 'sm-hist-shared-'))
+process.env.DSH_HISTORY_CACHE_DIR = sharedCacheDir
+test.after(() => { rmSync(sharedCacheDir, { recursive: true, force: true }) })
 // 台账/重挂载夹具路径仅作数据,不落盘;形态与实现一致(会话目录)
 const LEDGER_FIXTURE_PATH = 'C:\\store\\s1'
 
@@ -1097,6 +1105,10 @@ test('归档评估:超期运行中会话零产物 IO(早退,core 过滤为第二
       },
     },
   })
+  // 历史启动对齐(运行中会话即时路径)也走 locate:等它跑完并清零计数,
+  // 此后断言只针对归档评估的产物 IO
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  locateCalls = 0
   activateSettings()
   // 等评估轮跑完(正常会话路径必然触达 locate):running 会话不得产生 locate 调用
   await new Promise((resolve) => setTimeout(resolve, 250))
@@ -1393,7 +1405,7 @@ test('移除记录:命中删除,未命中幂等无写', skipMissingDeps, async (
   assert.equal(ledger.writes, 1)
 })
 
-// ── 历史输入路由(GET /api/session-manager/inputs)──
+// ── 历史输入路由(GET /api/session-manager/inputs;工作区持久缓存)──
 
 function getRequest(query) {
   const req = new EventEmitter()
@@ -1411,8 +1423,8 @@ function userMessageEvent(text, at) {
   }
 }
 
-test('历史输入路由:sessionId 反查 cwd 后聚合同工作区输入倒序返回', skipMissingDeps, async () => {
-  const { handlers } = makeCtx({
+function makeHistoryCtx() {
+  return makeCtx({
     archivedIds: [],
     headers: [
       { id: 's1', cwd: 'C:\\x', createdAt: 0 },
@@ -1426,88 +1438,289 @@ test('历史输入路由:sessionId 反查 cwd 后聚合同工作区输入倒序�
       s3: [userMessageEvent('别的工作区', 999)],
     },
   })
-  const res = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
-  assert.equal(res.status, 200)
-  assert.deepEqual(res.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
-})
+}
 
-test('历史输入路由:未知会话拒绝;非 GET 拒绝;缺 sessionId 拒绝', skipMissingDeps, async () => {
-  const { handlers } = makeCtx({ archivedIds: [], headers: [], agents: new Map() })
-  const unknown = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=ghost'), unknown)
-  assert.equal(unknown.status, 400)
-  assert.equal(unknown.body.error, MESSAGES.unknownSession)
-  const wrongMethod = response()
-  await handlers.get('/api/session-manager/inputs')(request('s1'), wrongMethod)
-  assert.equal(wrongMethod.status, 405)
-  const missing = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest(''), missing)
-  assert.equal(missing.status, 400)
-})
+// 后台对齐是异步的:轮询等待响应满足条件(默认 aligned 翻真,可断言数据就绪)
+async function requestUntil(handlers, query, predicate, maxMs = 3000) {
+  for (let waited = 0; waited <= maxMs; waited += 100) {
+    const res = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest(query), res)
+    if (predicate(res.body)) return res
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error('条件未满足: ' + query)
+}
 
-test('历史输入路由:单会话产物读取失败跳过不中断;无 cwd 会话聚合空列表', skipMissingDeps, async () => {
-  const { handlers, logger } = makeCtx({
-    archivedIds: [],
-    headers: [
-      { id: 's1', cwd: 'C:\\x', createdAt: 0 },
-      { id: 'broken', cwd: 'C:\\x', createdAt: 0 },
-      { id: 'nocwd', createdAt: 0 },
-    ],
-    agents: new Map(),
-    readSessions: {
-      s1: [userMessageEvent('存活输入', 100)],
-      broken: () => { throw new Error('产物损坏') },
-    },
+function requestUntilAligned(handlers, query) {
+  return requestUntil(handlers, query, (body) => body.aligned)
+}
+
+// 每个测试独占临时缓存目录:插件 factory 在 makeCtx 时读取 env 解析缓存目录。
+// 后台对齐 fire-and-forget,测试结束仍在写目录——清理重试躲开 Windows 文件占用
+async function withHistoryCacheDir(run) {
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'sm-hist-'))
+  process.env.DSH_HISTORY_CACHE_DIR = cacheDir
+  try {
+    return await run(cacheDir)
+  } finally {
+    delete process.env.DSH_HISTORY_CACHE_DIR
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        await rm(cacheDir, { recursive: true, force: true })
+        break
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+    }
+  }
+}
+
+test('历史输入路由:首次 aligned=false 触发后台对齐,对齐后三范围正确且 session 按 sid 过滤', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeHistoryCtx()
+    const first = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), first)
+    assert.equal(first.status, 200)
+    assert.deepEqual(first.body.inputs, [])
+    assert.equal(first.body.aligned, false)
+    const workspaceRes = await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+    assert.deepEqual(workspaceRes.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
+    const sessionRes = await requestUntilAligned(handlers, '?sessionId=s1&scope=session')
+    assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+    const otherSessionRes = await requestUntilAligned(handlers, '?sessionId=s2&scope=session')
+    assert.deepEqual(otherSessionRes.body.inputs.map((item) => item.text), ['第二条'])
+    // global 合并全部工作区缓存:先触发 C:\other 对齐(模拟其已就绪),再等 global 汇聚
+    await requestUntilAligned(handlers, '?sessionId=s3&scope=workspace')
+    const globalRes = await requestUntil(handlers, '?sessionId=s1&scope=global',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '别的工作区'))
+    assert.deepEqual(globalRes.body.inputs.map((item) => item.text), ['别的工作区', '最新输入', '第二条', '更早的输入'])
   })
-  const res = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
-  assert.equal(res.status, 200)
-  assert.deepEqual(res.body.inputs.map((item) => item.text), ['存活输入'])
-  assert.ok(logger.warns.some((line) => line.includes('broken')), '读取失败未进服务端日志')
-  const noCwd = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=nocwd'), noCwd)
-  assert.equal(noCwd.status, 200)
-  assert.deepEqual(noCwd.body.inputs, [])
 })
 
-test('历史输入路由:缓存命中不重读产物,refresh=1 强制重读', skipMissingDeps, async () => {
-  const { handlers, readCounts } = makeCtx({
-    archivedIds: [],
-    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
-    agents: new Map(),
-    readSessions: { s1: [userMessageEvent('输入', 100)] },
+test('历史输入路由:对齐与既有缓存合并——旧条目保留、新输入追加、sid 溯源不变', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    await ensureCacheDir(process.env.DSH_HISTORY_CACHE_DIR)
+    await writeWorkspaceCache(process.env.DSH_HISTORY_CACHE_DIR, 'C:\\x', {
+      entries: [
+        { text: '更早的输入', at: 100, sid: 's1' },
+        { text: '已消失会话的输入', at: 50, sid: 'gone' },
+      ],
+      extracts: {},
+    })
+    const { handlers } = makeHistoryCtx()
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '最新输入'))
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入', '已消失会话的输入'])
+    const sessionRes = await requestUntil(handlers, '?sessionId=s1&scope=session',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '最新输入'))
+    assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
   })
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
-  assert.equal(readCounts.get('s1'), 1)
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&refresh=1'), response())
-  assert.equal(readCounts.get('s1'), 2)
 })
 
-test('历史输入路由:同 cwd 并发共享一轮扫描,跨 cwd 并发各返回各的数据', skipMissingDeps, async () => {
-  const { handlers, readCounts } = makeCtx({
-    archivedIds: [],
-    headers: [
-      { id: 'x1', cwd: 'C:\\x', createdAt: 0 },
-      { id: 'y1', cwd: 'C:\\y', createdAt: 0 },
-    ],
-    agents: new Map(),
-    readSessions: {
-      x1: [userMessageEvent('x工作区输入', 100)],
-      y1: [userMessageEvent('y工作区输入', 100)],
-    },
+test('历史输入路由:scope 缺省回退 session;未知会话/非 GET/缺 sessionId 拒绝', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeHistoryCtx()
+    const defaultRes = await requestUntilAligned(handlers, '?sessionId=s1')
+    assert.deepEqual(defaultRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+    const invalidRes = await requestUntilAligned(handlers, '?sessionId=s1&scope=bogus')
+    assert.deepEqual(invalidRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+    const unknown = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=ghost'), unknown)
+    assert.equal(unknown.status, 400)
+    assert.equal(unknown.body.error, MESSAGES.unknownSession)
+    const wrongMethod = response()
+    await handlers.get('/api/session-manager/inputs')(request('s1'), wrongMethod)
+    assert.equal(wrongMethod.status, 405)
+    const missing = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest(''), missing)
+    assert.equal(missing.status, 400)
   })
-  const xFirstRes = response()
-  const xFirst = handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=x1'), xFirstRes)
-  const xSecondRes = response()
-  const xSecond = handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=x1'), xSecondRes)
-  const yRes = response()
-  const y = handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=y1'), yRes)
-  await Promise.all([xFirst, xSecond, y])
-  assert.deepEqual(xFirstRes.body.inputs.map((item) => item.text), ['x工作区输入'])
-  assert.deepEqual(xSecondRes.body.inputs.map((item) => item.text), ['x工作区输入'])
-  assert.deepEqual(yRes.body.inputs.map((item) => item.text), ['y工作区输入'])
-  assert.equal(readCounts.get('x1'), 1)
-  assert.equal(readCounts.get('y1'), 1)
+})
+
+test('历史输入路由:损坏会话对齐跳过不中断;无 cwd 会话 workspace/session 返回空且 aligned', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers, logger } = makeCtx({
+      archivedIds: [],
+      headers: [
+        { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+        { id: 'broken', cwd: 'C:\\x', createdAt: 0 },
+        { id: 'nocwd', createdAt: 0 },
+      ],
+      agents: new Map(),
+      readSessions: {
+        s1: [userMessageEvent('存活输入', 100)],
+        broken: () => { throw new Error('产物损坏') },
+      },
+    })
+    const res = await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['存活输入'])
+    assert.ok(logger.warns.some((line) => line.includes('broken')), '对齐失败未进服务端日志')
+    const noCwdWorkspace = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=nocwd&scope=workspace'), noCwdWorkspace)
+    assert.deepEqual(noCwdWorkspace.body, { inputs: [], aligned: true })
+    const noCwdSession = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=nocwd&scope=session'), noCwdSession)
+    assert.deepEqual(noCwdSession.body, { inputs: [], aligned: true })
+  })
+})
+
+test('历史输入路由:运行中会话参与对齐(实时追加),缓存上限裁剪保留最新', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const agents = new Map([['running1', { status: 'running' }]])
+    const manyEvents = Array.from({ length: HISTORY_INPUT_LIMIT + 50 }, (_, i) => userMessageEvent('运行输入' + i, 1000 + i))
+    const { handlers, readCounts } = makeCtx({
+      archivedIds: [],
+      headers: [
+        { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+        { id: 'running1', cwd: 'C:\\x', createdAt: 0 },
+      ],
+      agents,
+      readSessions: {
+        s1: [userMessageEvent('历史输入', 1000 + manyEvents.length + 10)],
+        running1: manyEvents,
+      },
+    })
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.length === HISTORY_INPUT_LIMIT)
+    const texts = res.body.inputs.map((item) => item.text)
+    assert.equal(texts.length, HISTORY_INPUT_LIMIT)
+    assert.ok(texts.includes('历史输入'), '最新既有输入保留')
+    assert.ok(texts.includes('运行输入' + (HISTORY_INPUT_LIMIT + 49)), '次新运行输入保留')
+    assert.ok(!texts.includes('运行输入0'), '最旧输入被上限裁剪')
+    assert.ok(readCounts.get('running1') >= 1, '运行中会话被对齐解压')
+    const sessionRes = await requestUntilAligned(handlers, '?sessionId=running1&scope=session')
+    assert.ok(sessionRes.body.inputs.length > 0, 'session 范围可取运行中会话自身输入')
+  })
+})
+
+test('历史输入路由:再次请求读缓存不再解压产物(对齐节流内)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers, readCounts } = makeCtx({
+      archivedIds: [],
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      readSessions: { s1: [userMessageEvent('工作区输入', 100)] },
+    })
+    await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+    const readsAfterAlign = readCounts.get('s1')
+    const second = response()
+    await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), second)
+    assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
+    assert.equal(second.body.aligned, true)
+    assert.equal(readCounts.get('s1'), readsAfterAlign, '读路径不得解压产物')
+  })
+})
+
+test('历史输入路由:会话产物变化即席聚焦对齐,单次请求内拿到新输入(首条<3s)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-focus-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-v1')
+    try {
+      const shared = {
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+      }
+      const first = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('旧输入', 100)] } })
+      await requestUntilAligned(first.handlers, '?sessionId=s1&scope=session')
+      // 产物增长(会话有新输入):指纹失效——路由就地等待聚焦对齐,
+      // 测试桩的 readSession 立即完成,单次请求内应直接拿到新输入且 aligned
+      await writeFile(artifactPath, 'log-v1-much-longer-appended')
+      const second = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('旧输入', 100), userMessageEvent('新输入XYZ', 200)] } })
+      const res = response()
+      await second.handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=session'), res)
+      assert.equal(res.body.aligned, true, '焦点对齐快于等待时限,首请求即就绪')
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['新输入XYZ', '旧输入'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:聚焦对齐只更新目标会话,不抹其他会话的持久 extracts', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-prune-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-v1')
+    try {
+      await ensureCacheDir(process.env.DSH_HISTORY_CACHE_DIR)
+      await writeWorkspaceCache(process.env.DSH_HISTORY_CACHE_DIR, 'C:\\x', {
+        entries: [{ text: '更早的输入', at: 100, sid: 's1' }],
+        extracts: { s2: { mtimeMs: 1, size: 2, entries: [{ text: '邻居会话输入', at: 50 }] } },
+      })
+      const { handlers } = makeCtx({
+        archivedIds: [],
+        headers: [
+          { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+          { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+        ],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('更早的输入', 100), userMessageEvent('聚焦新输入', 200)] },
+      })
+      await requestUntil(handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '聚焦新输入'))
+      const cached = JSON.parse(await readFile(path.join(process.env.DSH_HISTORY_CACHE_DIR, 'x-5358b306.json'), 'utf8'))
+      assert.ok(cached.extracts.s2, '邻居会话 extracts 不得被聚焦对齐抹掉')
+      assert.ok(cached.extracts.s1, '目标会话 extracts 已更新')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:产物未变的会话跨对齐零解压(磁盘 extracts 指纹命中)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-art-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { handlers, readCounts } = makeCtx({
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('工作区输入', 100)] },
+      })
+      await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+      const readsAfterFirstAlign = readCounts.get('s1')
+      assert.ok(readsAfterFirstAlign >= 1, '首次对齐必然解压')
+      // 节流壳 30s 挡住同工作区二次触发:直接以新 makeCtx(新节流 Map)模拟"重启后再次对齐"
+      const { handlers: handlers2, readCounts: readCounts2 } = makeCtx({
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('工作区输入', 100)] },
+      })
+      // 同一缓存目录(env 未变,withHistoryCacheDir 复用):指纹命中 → 零解压
+      const second = response()
+      await handlers2.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), second)
+      assert.equal(second.body.aligned, true)
+      assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
+      // 触发一次对齐(绕过节流:新 ctx 节流 Map 为空,请求即触发)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(readCounts2.get('s1') === undefined, true, '产物未变,重启后对齐零解压')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老会话不解压', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const total = HISTORY_STARTUP_SCAN_LIMIT + 20
+    // 宿主 listSessions 为最新在前:数组首元素即最新会话
+    const headers = Array.from({ length: total }, (_, i) => ({ id: 's' + (total - 1 - i), cwd: 'C:\\x', createdAt: 0 }))
+    const readSessions = {}
+    for (let i = 0; i < total; i++) readSessions['s' + i] = [userMessageEvent('输入' + i, 1000 + i)]
+    const { handlers, readCounts } = makeCtx({ archivedIds: [], headers, agents: new Map(), readSessions })
+    // 触发对齐(请求工作区),等队列排空后窗口外老会话(s0..s19)不得被解压
+    await requestUntil(handlers, '?sessionId=s' + (total - 1) + '&scope=workspace',
+      (body) => body.aligned && body.inputs.length > 0)
+    assert.equal(readCounts.get('s0'), undefined, '窗口外最老会话不被启动对齐解压')
+    assert.ok(readCounts.get('s' + (total - 1)) >= 1, '窗口内最新会话被解压')
+  })
 })

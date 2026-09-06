@@ -550,6 +550,7 @@ function MaintainApp() {
           now: Date.now(),
           deadlineAt,
           prev,
+          readyStreak: prev.readyStreak,
           statusFetch: () => api(STATUS_URL, { signal: probeSignal() }),
           pageFetch: () => fetch(INDEX_URL, { cache: 'no-store', signal: probeSignal() }),
         })

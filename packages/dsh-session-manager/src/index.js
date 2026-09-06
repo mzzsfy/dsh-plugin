@@ -8,7 +8,8 @@
 // 行与归档集合做交集。
 
 import { open, realpath, stat } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 import schemastery from '@deepseek-ai/schemastery'
 import { z } from 'zod'
@@ -18,10 +19,17 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-  HISTORY_CACHE_TTL_MS,
+  HISTORY_ALIGN_MAX_ARTIFACT_BYTES,
+  HISTORY_ALIGN_SLICE_MS,
+  HISTORY_ALIGN_THROTTLE_MS,
+  HISTORY_ALIGN_YIELD_MS,
+  HISTORY_FOCUS_WAIT_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
+  HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
+  HISTORY_STARTUP_DELAY_MS,
+  HISTORY_STARTUP_SCAN_LIMIT,
   aggregateDeleteOutcome,
   aggregateInputs,
   artifactLooksBlank,
@@ -33,6 +41,7 @@ import {
   selectArchiveCandidates,
   updatedAtOf,
 } from './core.mjs'
+import { ensureCacheDir, listWorkspaceCaches, readWorkspaceCache, writeWorkspaceCache } from './history-cache.mjs'
 import { trashPath } from './trash.mjs'
 
 export const name = 'dsh-session-manager'
@@ -348,40 +357,233 @@ export function apply(ctx, config) {
     }
   }
 
-  // 历史输入缓存:cwd → { inputs, at };TTL 内键盘回溯免重复解压产物,浮层以 refresh 绕过。
-  // in-flight 按 cwd 键控:跨工作区并发请求各扫各的,同工作区并发共享同一轮扫描
-  const inputsCache = new Map()
-  const inputsInFlight = new Map()
-  ctx.effect(() => () => inputsCache.clear(), 'session-manager inputs cache')
+  // 历史输入:工作区粒度持久缓存(~/.dsh/historyPrompt/<工作区>-<hash>.json)。
+  // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内最近会话产物,
+  // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入)。
+  // 解压不重复执行:每会话提取结果持久化在工作区缓存 extracts 段,附产物 stat 指纹
+  // (mtimeMs+size),对齐时先 stat 比对,产物没变零解压——判断全部基于磁盘,跨重启生效。
+  // 运行中会话(当前会话)提取结果只保留内存不落盘(产物持续变化,落盘指纹立即失效)。
+  // 解压是同步 CPU 操作:对齐中连续占用超 SLICE 即让出 YIELD,启动对齐延迟
+  // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
+  const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
+    || join(homedir(), '.dsh', 'historyPrompt')
+  const alignThrottle = new Map()
+  const runtimeExtracts = new Map()
+  const headerCache = new Map()
+  ctx.effect(() => () => { alignThrottle.clear(); runtimeExtracts.clear(); headerCache.clear() }, 'session-manager history align state')
 
-  // 同工作区历史输入聚合:反查 cwd 后扫描近期会话产物提取人类输入;
-  // 会话并行读取,单会话产物读取失败仅告警跳过(损坏产物只降级该会话的历史贡献);
-  // 强刷与在途扫描数据等价(任一轮都是全量新数据)
-  async function collectWorkspaceInputs(cwd, refresh) {
-    const cached = inputsCache.get(cwd)
-    if (!refresh && cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return cached.inputs
-    const pending = inputsInFlight.get(cwd)
-    if (pending !== undefined) return pending
-    const scan = (async () => {
+  // 双车道对齐队列:批量车道(启动/请求触发,一次解一整个窗口)与焦点车道
+  // (单会话实时追加,延时敏感)各自串行、互不等待——焦点车道不被冷启动
+  // 批量任务的分钟级解压堵死。两车道并发写同一工作区缓存时,最坏丢一次
+  // 更新,但批量窗口必含活跃会话(其自身重读即收敛),下轮指纹失配自愈
+  function makeLane() {
+    const tasks = []
+    let draining = false
+    return (body) => new Promise((resolve) => {
+      tasks.push(() => body().then(resolve, resolve))
+      if (draining) return
+      draining = true
+      void (async () => {
+        while (tasks.length > 0) await tasks.shift()()
+        draining = false
+      })()
+    })
+  }
+  const enqueueBulkAlign = makeLane()
+  const enqueueFocusAlign = makeLane()
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  async function safeStat(path) {
+    try {
+      const info = await stat(path)
+      return { mtimeMs: info.mtimeMs, size: info.size }
+    } catch {
+      return null
+    }
+  }
+
+  // 单会话提取:产物 stat 指纹与缓存一致即复用(零解压);否则解压并更新缓存。
+  // 运行中会话走内存指纹(runtimeExtracts),其余走磁盘 extracts
+  async function extractSession(recordItem, fingerprint, extracts, isRunning) {
+    const sessionId = recordItem.header.id
+    const known = isRunning ? runtimeExtracts.get(sessionId) : extracts[sessionId]
+    if (fingerprint !== null && known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size) {
+      return known.entries
+    }
+    const snapshot = await ctx.sessionQuery.readSession(sessionId)
+    const entries = extractUserInputs(snapshot.events)
+    const record = { mtimeMs: fingerprint === null ? 0 : fingerprint.mtimeMs, size: fingerprint === null ? 0 : fingerprint.size, entries }
+    if (isRunning) runtimeExtracts.set(sessionId, record)
+    else if (fingerprint !== null) extracts[sessionId] = record
+    return entries
+  }
+
+  // 批量对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
+  // 与缓存合并后原子写回,extracts 裁剪到完整扫描窗口。经批量队列入队。
+  // 超过 MAX_ARTIFACT 的巨产物直接跳过:单次 readSession 内部同步解压不可让出,
+  // 巨会话一解卡死主循环;其历史来自缓存 entries 的既有贡献
+  function alignWorkspaceNow(cwd) {
+    return enqueueBulkAlign(async () => {
+      const agents = ctx.get('agents')
+      const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
-      const recent = records
+      const window = records
         .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      const entriesPerSession = await Promise.all(recent.map((recordItem) =>
-        ctx.sessionQuery.readSession(recordItem.header.id)
-          .then((snapshot) => extractUserInputs(snapshot.events))
-          .catch((error) => {
-            ctx.logger && ctx.logger.warn('session-manager 历史输入读取失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
-            return []
-          })))
-      const inputs = aggregateInputs([].concat(...entriesPerSession), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS })
-      inputsCache.set(cwd, { inputs, at: Date.now() })
-      return inputs
-    })().finally(() => {
-      if (inputsInFlight.get(cwd) === scan) inputsInFlight.delete(cwd)
+      const cached = await readWorkspaceCache(cacheDir, cwd)
+      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
+      const fresh = []
+      let sliceStart = Date.now()
+      for (const recordItem of window) {
+        const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
+        const located = persistence ? persistence.locate(recordItem.header) : undefined
+        const fingerprint = located ? await safeStat(located.path) : null
+        if (fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES) continue
+        try {
+          const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
+          fresh.push(...entries.map((entry) => ({ ...entry, sid: recordItem.header.id })))
+        } catch (error) {
+          ctx.logger && ctx.logger.warn('session-manager 历史输入对齐失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
+        }
+        // 解压(可能命中缓存跳过)后检查连续占用:超 SLICE 让出 YIELD 不霸占主循环
+        if (Date.now() - sliceStart > HISTORY_ALIGN_SLICE_MS) {
+          await sleep(HISTORY_ALIGN_YIELD_MS)
+          sliceStart = Date.now()
+        }
+      }
+      // extracts 裁剪:仅保留窗口内非运行会话(运行中走内存,窗口外已淘汰)
+      const windowIds = new Set(window.map((recordItem) => recordItem.header.id))
+      const prunedExtracts = {}
+      for (const [sessionId, record] of Object.entries(extracts)) {
+        if (windowIds.has(sessionId) && !isSessionRunning({ agents, sessionId })) prunedExtracts[sessionId] = record
+      }
+      const merged = aggregateInputs(
+        (cached ? cached.entries : []).concat(fresh),
+        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
+      )
+      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts: prunedExtracts })
     })
-    inputsInFlight.set(cwd, scan)
-    return scan
+  }
+
+  // 焦点对齐执行体:只解目标会话并写回(实时追加路径),走独立焦点车道,
+  // 不被批量车道的分钟级解压堵死。不裁剪 extracts(裁剪由批量对齐负责),
+  // 只新增/更新目标会话指纹
+  function alignSessionFocus(cwd, header) {
+    return enqueueFocusAlign(async () => {
+      const sessionId = header.id
+      const persistence = ctx.get('sessionPersistence')
+      const located = persistence ? persistence.locate(header) : undefined
+      const fingerprint = located ? await safeStat(located.path) : null
+      if (fingerprint === null || fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES) return
+      const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
+      const cached = await readWorkspaceCache(cacheDir, cwd)
+      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
+      const entries = await extractSession({ header }, fingerprint, extracts, isRunning)
+      const merged = aggregateInputs(
+        (cached ? cached.entries : []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))),
+        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
+      )
+      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts })
+    })
+  }
+
+  // 节流壳:请求触发的后台对齐入口,30s 内同工作区只排队一次
+  function alignWorkspace(cwd) {
+    const now = Date.now()
+    const last = alignThrottle.get(cwd)
+    if (last !== undefined && now - last < HISTORY_ALIGN_THROTTLE_MS) return
+    alignThrottle.set(cwd, now)
+    void alignWorkspaceNow(cwd)
+  }
+
+  // 启动:只确保目录存在,**零解压**——历史直接读磁盘缓存(重启前的输入本就在
+  // entries 里),宿主启动零负担;全量对齐延迟 STARTUP_DELAY 再跑(只解产物变过
+  // 的会话)。定时器随插件销毁清理
+  const startupTimers = []
+  ctx.effect(() => () => { for (const timer of startupTimers) clearTimeout(timer) }, 'session-manager history startup timers')
+
+  function scheduleStartupAlign() {
+    startupTimers.push(setTimeout(() => {
+      void (async () => {
+        await ensureCacheDir(cacheDir)
+        const records = await ctx.sessionQuery.listSessions()
+        const workspaces = []
+        for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
+          const recordCwd = recordItem.header.cwd
+          if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
+          workspaces.push(recordCwd)
+        }
+        for (const workspaceCwd of workspaces) alignWorkspace(workspaceCwd)
+      })().catch((error) => {
+        ctx.logger && ctx.logger.warn('session-manager 历史缓存启动对齐失败: ' + String(error && error.stack || error))
+      })
+    }, HISTORY_STARTUP_DELAY_MS))
+  }
+  scheduleStartupAlign()
+
+  // 聚焦对齐去重:同会话在队列/执行中不重复入队(轮询重入须挡住风暴)。
+  // 值为在途 promise,路由据此有界等待同一次对齐
+  const pendingFocus = new Map()
+  ctx.effect(() => () => pendingFocus.clear(), 'session-manager history pending focus')
+
+  // 按范围读取历史:全部直接读持久缓存(毫秒级)立即返回,对齐由后台进行;
+  // aligned=false 表示数据未就绪(首次无缓存,或请求会话产物已变而缓存未跟上),
+  // client 据此提示等待并静默重拉
+  async function collectInputs(scope, sessionId, header) {
+    const aggregateOptions = { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }
+    const cwd = header.cwd
+    if (scope === 'session') {
+      if (cwd === undefined) return { inputs: [], aligned: true }
+      alignWorkspace(cwd)
+      const read = async () => {
+        const cached = await readWorkspaceCache(cacheDir, cwd)
+        return {
+          cached,
+          mine: aggregateInputs(cached ? cached.entries.filter((entry) => entry.sid === sessionId) : [], aggregateOptions),
+        }
+      }
+      // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
+      // 只解该会话并写回。路由有界等待本次对齐(首条 <3s 预算):正常会话单次
+      // 请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,后续
+      // 轮询流式补齐。巨产物跳过聚焦(单次解压不可让出),维持 aligned=true
+      const check = async (cached) => {
+        const agents = ctx.get('agents')
+        const running = isSessionRunning({ agents, sessionId })
+        const known = running ? runtimeExtracts.get(sessionId) : cached && cached.extracts ? cached.extracts[sessionId] : undefined
+        const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
+        const fingerprint = located ? await safeStat(located.path) : null
+        return {
+          stale: fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
+          oversize: fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES,
+        }
+      }
+      let { cached, mine } = await read()
+      let { stale, oversize } = await check(cached)
+      if (stale && !oversize) {
+        let focus = pendingFocus.get(sessionId)
+        if (!focus) {
+          focus = alignSessionFocus(cwd, header).finally(() => pendingFocus.delete(sessionId))
+          pendingFocus.set(sessionId, focus)
+        }
+        const done = await Promise.race([focus.then(() => true), sleep(HISTORY_FOCUS_WAIT_MS).then(() => false)])
+        ;({ cached, mine } = await read())
+        ;({ stale } = await check(cached))
+        if (!done || stale) return { inputs: mine, aligned: false }
+        return { inputs: mine, aligned: true }
+      }
+      return { inputs: mine, aligned: cached !== null }
+    }
+    if (scope === 'global') {
+      const caches = await listWorkspaceCaches(cacheDir)
+      for (const cache of caches) alignWorkspace(cache.cwd)
+      return { inputs: aggregateInputs(caches.flatMap((cache) => cache.entries), aggregateOptions), aligned: true }
+    }
+    const cached = await readWorkspaceCache(cacheDir, cwd)
+    if (cwd !== undefined) alignWorkspace(cwd)
+    return { inputs: aggregateInputs(cached ? cached.entries : [], aggregateOptions), aligned: cached !== null }
   }
 
   // 幽灵残留清理:产物已缺失的会话仅解除列表可见性(detach + 归档清理),
@@ -421,7 +623,7 @@ export function apply(ctx, config) {
         if (!rejectMethod(req, res, 'POST')) return
         try {
           const sessionId = await requireSessionId(req)
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
@@ -465,7 +667,7 @@ export function apply(ctx, config) {
         }
         inFlightDeletes.add(sessionId)
         try {
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
@@ -590,16 +792,19 @@ export function apply(ctx, config) {
           const url = new URL(req.url, 'http://localhost')
           const sessionId = (url.searchParams.get('sessionId') || '').trim()
           if (sessionId === '') throw new Error('sessionId 不能为空')
-          const header = await findHeader(ctx, sessionId)
+          const scopeRaw = url.searchParams.get('scope') || 'session'
+          const scope = HISTORY_SCOPES.includes(scopeRaw) ? scopeRaw : 'session'
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
           }
-          // 无 cwd 会话没有工作区归属,历史为空集而非错误
-          const inputs = header.cwd === undefined
-            ? []
-            : await collectWorkspaceInputs(header.cwd, url.searchParams.get('refresh') === '1')
-          sendJson(res, 200, { inputs })
+          // workspace 范围依赖 cwd 归属;无 cwd 会话在 session 范围无从定位工作区缓存,
+          // global 不依赖 cwd 照常聚合
+          const result = scope === 'workspace' && header.cwd === undefined
+            ? { inputs: [], aligned: true }
+            : await collectInputs(scope, sessionId, header)
+          sendJson(res, 200, result)
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -624,7 +829,7 @@ export function apply(ctx, config) {
         try {
           const sessionId = await requireSessionId(req)
           // 产物还原的判定即持久层能重新读到 header:未还原时在此拒绝
-          const header = await findHeader(ctx, sessionId)
+          const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.notRestored })
             return
@@ -731,10 +936,23 @@ async function safeMtime(path) {
   }
 }
 
-async function findHeader(ctx, sessionId) {
-  const records = await ctx.sessionQuery.listSessions()
-  const found = records.find((recordItem) => String(recordItem.header.id) === sessionId)
-  return found ? found.header : undefined
+// header 查找缓存:inputs 路由每次请求都要查 header,listSessions 为全量扫描
+// (单次数百 ms,与后台对齐并发时成倍放大),而 sessionId→header 基本不变——
+// 扫一次进缓存,TTL 界定新鲜度,容量上限防无界增长;只缓存命中,
+// 未命中不缓存(新会话创建竞态下次扫描即命中,负缓存会误伤)
+const HEADER_CACHE_TTL_MS = 10 * 60 * 1000
+const HEADER_CACHE_MAX = 500
+
+function findHeader(ctx, sessionId, cache) {
+  const hit = cache.get(sessionId)
+  if (hit && Date.now() - hit.at < HEADER_CACHE_TTL_MS) return Promise.resolve(hit.header)
+  return ctx.sessionQuery.listSessions().then((records) => {
+    const found = records.find((recordItem) => String(recordItem.header.id) === sessionId)
+    if (!found) return undefined
+    if (cache.size >= HEADER_CACHE_MAX) cache.delete(cache.keys().next().value)
+    cache.set(sessionId, { header: found.header, at: Date.now() })
+    return found.header
+  })
 }
 
 // detach 幂等:遍历全部工作区逐个移除,不因首个工作区操作失败提前终止;

@@ -537,6 +537,9 @@ window.__ModuleLoader__.load({
       }
       // 版本缺失即异常响应:按失败退避,防游标停滞退化成紧密首拉循环
       if (typeof payload.version !== 'number') return false
+      // 冷启动对齐:页面关闭/刷新期间错过的存量通知只补游标与完成标记,不轰炸呈现;
+      // 错过即过期的投影设计下,重开逐条回放只剩连环提示与声音,信息价值为零
+      const coldStart = projectionCursor === null
       projectionCursor = payload.version
       soundMapping = payload.soundMapping || {}
       sessionHighlightEnabled = readSessionHighlightEnabled()
@@ -559,6 +562,12 @@ window.__ModuleLoader__.load({
         storageState.broken = true
       }
       for (const unit of units) {
+        // 冷启动对齐:错过窗口期的存量通知不回放轰炸;审批与提问例外——
+        // 它们在等用户动作,静默会把待办吞掉
+        if (coldStart && unit.category !== 'approval' && unit.category !== 'ask') {
+          try { markDone(unit.id) } catch { /* 存储不可用:标记缺失由内存去重兜底,冷启动本就不发声 */ }
+          continue
+        }
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
         const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category)
