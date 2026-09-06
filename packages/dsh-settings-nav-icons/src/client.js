@@ -12,6 +12,12 @@ window.__ModuleLoader__.load({
     const SELECTOR_LABEL = '.VOzbGW_navLabel'
     const ATTR_MARK = 'data-navic'
 
+    // ---- 设置导航滚动补偿:官方 navList 高度随内容撑开,溢出被 panel hidden
+    // 裁剪且无滚动机制,分区一多底部即不可达。样式表形态一次注入,对弹窗重开
+    // 等任意 React 重渲染持续生效;类名锚定与上方单元格同策略(哈希前缀字面量)。
+
+    const NAVLIST_SCROLL_CSS = '.VOzbGW_navList{flex:1 1 0;min-height:0;overflow-y:auto;scrollbar-width:thin}'
+
     /* LOGIC-BEGIN */
     // 纯逻辑层:图标映射 + 单元格替换决策,与 src/logic.mjs 同源,由 parity 测试保证。
 
@@ -459,6 +465,24 @@ window.__ModuleLoader__.load({
       schedule()
     }
 
+    // 滚动样式元素:start 注入 head,stop 移除,引用即状态源,幂等无守卫分支;
+    // 同挂代际槽, HMR 重评估 stop 未跑时由新实例代拆
+    let scrollStyle = null
+
+    function installScrollStyle() {
+      scrollStyle = document.createElement('style')
+      scrollStyle.textContent = NAVLIST_SCROLL_CSS
+      document.head.appendChild(scrollStyle)
+      if (slot !== null) slot.scrollStyle = scrollStyle
+    }
+
+    function uninstallScrollStyle() {
+      if (scrollStyle === null) return
+      scrollStyle.remove()
+      scrollStyle = null
+      if (slot !== null) slot.scrollStyle = null
+    }
+
     // 队列直通桩属主守卫:stop 仅复位本实例所置桩,乱序清理不覆盖新实例运行态
     let queueStub = null
 
@@ -485,10 +509,13 @@ window.__ModuleLoader__.load({
       if (previous !== undefined) {
         if (previous.observer !== null) previous.observer.disconnect()
         if (previous.rafId !== 0) cancelAnimationFrame(previous.rafId)
+        // 宽松判空:槽是跨代码版本通道,旧版槽无 scrollStyle 字段(undefined)
+        if (previous.scrollStyle != null) previous.scrollStyle.remove()
       }
-      slot = { observer: null, rafId: 0 }
+      slot = { observer: null, rafId: 0, scrollStyle: null }
       window[SLOT_KEY] = slot
-      // 可抛步骤(声明恢复/队列排水)先于观察器挂载,失败不产生孤儿扫描器
+      // 可抛步骤(声明恢复/队列排水/样式注入)先于观察器挂载,失败不产生孤儿扫描器
+      installScrollStyle()
       restoreDeclarations()
       drainQueue()
       observer = new MutationObserver(onMutations)
@@ -499,6 +526,7 @@ window.__ModuleLoader__.load({
 
     function stop() {
       active = false
+      uninstallScrollStyle()
       if (observer !== null) {
         observer.disconnect()
         observer = null
