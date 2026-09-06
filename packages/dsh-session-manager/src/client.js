@@ -356,9 +356,11 @@ function HistoryDock({ session, inputActions }) {
   const [loadError, setLoadError] = useState(false)
   const rootRef = React.useRef(null)
 
-  // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组
+  // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组。
+  // 不传 refresh:host TTL 缓存内直接返回(全量扫描秒级,每次强刷会让每次唤起都卡死);
+  // 缓存过期后由 host 自动重扫
   function fetchInputs() {
-    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(session.sessionId) + '&refresh=1')
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(session.sessionId))
       .then((payload) => (payload && Array.isArray(payload.inputs)) ? payload.inputs : [])
   }
 

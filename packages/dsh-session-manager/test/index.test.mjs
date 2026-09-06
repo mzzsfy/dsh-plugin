@@ -1471,18 +1471,26 @@ test('历史输入路由:单会话产物读取失败跳过不中断;无 cwd 会�
   assert.deepEqual(noCwd.body.inputs, [])
 })
 
-test('历史输入路由:缓存命中不重读产物,refresh=1 强制重读', skipMissingDeps, async () => {
+test('历史输入路由:TTL 缓存命中不重读产物;运行中会话跳过不参与聚合', skipMissingDeps, async () => {
+  const agents = new Map([['running1', { status: 'running' }]])
   const { handlers, readCounts } = makeCtx({
     archivedIds: [],
-    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
-    agents: new Map(),
-    readSessions: { s1: [userMessageEvent('输入', 100)] },
+    headers: [
+      { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'running1', cwd: 'C:\\x', createdAt: 0 },
+    ],
+    agents,
+    readSessions: {
+      s1: [userMessageEvent('历史输入', 100)],
+      running1: [userMessageEvent('运行中会话的输入', 200)],
+    },
   })
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
+  const res = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
+  assert.deepEqual(res.body.inputs.map((item) => item.text), ['历史输入'])
+  assert.equal(readCounts.get('running1'), undefined)
   await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
   assert.equal(readCounts.get('s1'), 1)
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&refresh=1'), response())
-  assert.equal(readCounts.get('s1'), 2)
 })
 
 test('历史输入路由:同 cwd 并发共享一轮扫描,跨 cwd 并发各返回各的数据', skipMissingDeps, async () => {

@@ -348,24 +348,26 @@ export function apply(ctx, config) {
     }
   }
 
-  // 历史输入缓存:cwd → { inputs, at };TTL 内键盘回溯免重复解压产物,浮层以 refresh 绕过。
+  // 历史输入缓存:cwd → { inputs, at };TTL 内唤起免重复解压产物(全量扫描秒级不可接受)。
   // in-flight 按 cwd 键控:跨工作区并发请求各扫各的,同工作区并发共享同一轮扫描
   const inputsCache = new Map()
   const inputsInFlight = new Map()
   ctx.effect(() => () => inputsCache.clear(), 'session-manager inputs cache')
 
-  // 同工作区历史输入聚合:反查 cwd 后扫描近期会话产物提取人类输入;
-  // 会话并行读取,单会话产物读取失败仅告警跳过(损坏产物只降级该会话的历史贡献);
-  // 强刷与在途扫描数据等价(任一轮都是全量新数据)
-  async function collectWorkspaceInputs(cwd, refresh) {
+  // 同工作区历史输入聚合:反查 cwd 后扫描近期非运行会话产物提取人类输入;
+  // 运行中会话跳过——其产物最大(解压最慢)且输入刚发生、回溯价值最低;
+  // 会话并行读取,单会话产物读取失败仅告警跳过(损坏产物只降级该会话的历史贡献)
+  async function collectWorkspaceInputs(cwd) {
     const cached = inputsCache.get(cwd)
-    if (!refresh && cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return cached.inputs
+    if (cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return cached.inputs
     const pending = inputsInFlight.get(cwd)
     if (pending !== undefined) return pending
     const scan = (async () => {
+      const agents = ctx.get('agents')
       const records = await ctx.sessionQuery.listSessions()
       const recent = records
         .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
+        .filter((recordItem) => !isSessionRunning({ agents, sessionId: recordItem.header.id }))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
       const entriesPerSession = await Promise.all(recent.map((recordItem) =>
         ctx.sessionQuery.readSession(recordItem.header.id)
@@ -598,7 +600,7 @@ export function apply(ctx, config) {
           // 无 cwd 会话没有工作区归属,历史为空集而非错误
           const inputs = header.cwd === undefined
             ? []
-            : await collectWorkspaceInputs(header.cwd, url.searchParams.get('refresh') === '1')
+            : await collectWorkspaceInputs(header.cwd)
           sendJson(res, 200, { inputs })
         } catch (error) {
           respondError(ctx, res, error)
