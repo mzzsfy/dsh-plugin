@@ -47,6 +47,7 @@ pnpm config set --global minimumReleaseAge 360
 - 仓库级测试:根目录执行 `node --test tests/engine.test.mjs`(rs-workflow engine.js 编排脚本验收)
 - 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 9 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test,只有下面的冒烟脚本
 - @mzzsfy/dsh-rs-workflow 冒烟:`node .\scripts\test-workflow-plugin.mjs`(默认测已安装副本,传入包目录路径可测任意构建;仓库内副本解析不了 peer 依赖,需先安装再测)
+- CI(`.github/workflows/test.yml`):提交推送与每 3 天定时触发,amd64/arm64 双架构并行,各自全量跑 10 轮(smoke-load + 仓库级测试 + 全部含 test/ 目录的包自动发现;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,不入库)
 
 ## 开发态链接(dev-link)
 

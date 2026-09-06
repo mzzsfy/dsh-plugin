@@ -1,4 +1,6 @@
 .*/
+# GitHub Actions 工作流入库
+!.github/
 /build/
 dist/
 node_modules/
