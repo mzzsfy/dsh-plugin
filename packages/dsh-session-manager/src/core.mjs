@@ -128,16 +128,18 @@ export function projectDeletedRows(deleted, sessionsById) {
 // 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)。
 // 范围从窄到宽排列,client ←/→ 切换即在此数组上移动索引。
 // 对齐 = 后台解压范围内会话产物与持久缓存合并;两次对齐最小间隔防持续解压。
-// 解压是同步 CPU 操作会阻塞主循环:启动对齐只回溯最近 STARTUP_SCAN 个会话,
-// 且分批解压(每批 BATCH 个,批间 PAUSE 让出主循环),多工作区串行
+// 解压是同步 CPU 操作会阻塞主循环:启动对齐延迟 STARTUP_DELAY 再跑(不与宿主启动抢 CPU),
+// 只回溯最近 STARTUP_SCAN 个会话;对齐中连续解压占用超 SLICE 即让出 YIELD。
+// 运行中会话(当前会话)提取结果只保留内存不落盘——产物持续变化,落盘指纹立即失效
 export const HISTORY_SESSION_SCAN_LIMIT = 20
 export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
 export const HISTORY_SCOPES = ['session', 'workspace', 'global']
 export const HISTORY_ALIGN_THROTTLE_MS = 30 * 1000
+export const HISTORY_STARTUP_DELAY_MS = 30 * 1000
 export const HISTORY_STARTUP_SCAN_LIMIT = 100
-export const HISTORY_ALIGN_BATCH_SIZE = 10
-export const HISTORY_ALIGN_BATCH_PAUSE_MS = 500
+export const HISTORY_ALIGN_SLICE_MS = 200
+export const HISTORY_ALIGN_YIELD_MS = 100
 
 /**
  * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,

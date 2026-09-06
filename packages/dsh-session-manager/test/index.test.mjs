@@ -1105,6 +1105,10 @@ test('归档评估:超期运行中会话零产物 IO(早退,core 过滤为第二
       },
     },
   })
+  // 历史启动对齐(运行中会话即时路径)也走 locate:等它跑完并清零计数,
+  // 此后断言只针对归档评估的产物 IO
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  locateCalls = 0
   activateSettings()
   // 等评估轮跑完(正常会话路径必然触达 locate):running 会话不得产生 locate 调用
   await new Promise((resolve) => setTimeout(resolve, 250))
@@ -1485,7 +1489,10 @@ test('历史输入路由:首次 aligned=false 触发后台对齐,对齐后三范
     assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
     const otherSessionRes = await requestUntilAligned(handlers, '?sessionId=s2&scope=session')
     assert.deepEqual(otherSessionRes.body.inputs.map((item) => item.text), ['第二条'])
-    const globalRes = await requestUntilAligned(handlers, '?sessionId=s1&scope=global')
+    // global 合并全部工作区缓存:先触发 C:\other 对齐(模拟其已就绪),再等 global 汇聚
+    await requestUntilAligned(handlers, '?sessionId=s3&scope=workspace')
+    const globalRes = await requestUntil(handlers, '?sessionId=s1&scope=global',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '别的工作区'))
     assert.deepEqual(globalRes.body.inputs.map((item) => item.text), ['别的工作区', '最新输入', '第二条', '更早的输入'])
   })
 })
@@ -1493,10 +1500,13 @@ test('历史输入路由:首次 aligned=false 触发后台对齐,对齐后三范
 test('历史输入路由:对齐与既有缓存合并——旧条目保留、新输入追加、sid 溯源不变', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     await ensureCacheDir(process.env.DSH_HISTORY_CACHE_DIR)
-    await writeWorkspaceCache(process.env.DSH_HISTORY_CACHE_DIR, 'C:\\x', [
-      { text: '更早的输入', at: 100, sid: 's1' },
-      { text: '已消失会话的输入', at: 50, sid: 'gone' },
-    ])
+    await writeWorkspaceCache(process.env.DSH_HISTORY_CACHE_DIR, 'C:\\x', {
+      entries: [
+        { text: '更早的输入', at: 100, sid: 's1' },
+        { text: '已消失会话的输入', at: 50, sid: 'gone' },
+      ],
+      extracts: {},
+    })
     const { handlers } = makeHistoryCtx()
     const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
       (body) => body.aligned && body.inputs.some((item) => item.text === '最新输入'))
@@ -1598,6 +1608,44 @@ test('历史输入路由:再次请求读缓存不再解压产物(对齐节流内
     assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
     assert.equal(second.body.aligned, true)
     assert.equal(readCounts.get('s1'), readsAfterAlign, '读路径不得解压产物')
+  })
+})
+
+test('历史输入路由:产物未变的会话跨对齐零解压(磁盘 extracts 指纹命中)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-art-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { handlers, readCounts } = makeCtx({
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('工作区输入', 100)] },
+      })
+      await requestUntilAligned(handlers, '?sessionId=s1&scope=workspace')
+      const readsAfterFirstAlign = readCounts.get('s1')
+      assert.ok(readsAfterFirstAlign >= 1, '首次对齐必然解压')
+      // 节流壳 30s 挡住同工作区二次触发:直接以新 makeCtx(新节流 Map)模拟"重启后再次对齐"
+      const { handlers: handlers2, readCounts: readCounts2 } = makeCtx({
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('工作区输入', 100)] },
+      })
+      // 同一缓存目录(env 未变,withHistoryCacheDir 复用):指纹命中 → 零解压
+      const second = response()
+      await handlers2.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), second)
+      assert.equal(second.body.aligned, true)
+      assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
+      // 触发一次对齐(绕过节流:新 ctx 节流 Map 为空,请求即触发)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(readCounts2.get('s1') === undefined, true, '产物未变,重启后对齐零解压')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

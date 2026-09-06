@@ -19,13 +19,14 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-  HISTORY_ALIGN_BATCH_PAUSE_MS,
-  HISTORY_ALIGN_BATCH_SIZE,
+  HISTORY_ALIGN_SLICE_MS,
   HISTORY_ALIGN_THROTTLE_MS,
+  HISTORY_ALIGN_YIELD_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
   HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
+  HISTORY_STARTUP_DELAY_MS,
   HISTORY_STARTUP_SCAN_LIMIT,
   aggregateDeleteOutcome,
   aggregateInputs,
@@ -356,46 +357,91 @@ export function apply(ctx, config) {
 
   // 历史输入:工作区粒度持久缓存(~/.dsh/historyPrompt/<工作区>-<hash>.json)。
   // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内最近会话产物,
-  // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入);
-  // 两次对齐最小间隔防持续解压,对齐失败静默(下次请求重试)。
-  // 解压是同步 CPU 操作:分批执行(每批 BATCH 个,批间 PAUSE 让出主循环),
-  // 多工作区串行排队,启动绝不阻塞宿主服务。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
+  // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入)。
+  // 解压不重复执行:每会话提取结果持久化在工作区缓存 extracts 段,附产物 stat 指纹
+  // (mtimeMs+size),对齐时先 stat 比对,产物没变零解压——判断全部基于磁盘,跨重启生效。
+  // 运行中会话(当前会话)提取结果只保留内存不落盘(产物持续变化,落盘指纹立即失效)。
+  // 解压是同步 CPU 操作:对齐中连续占用超 SLICE 即让出 YIELD,启动对齐延迟
+  // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
   const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
     || join(homedir(), '.dsh', 'historyPrompt')
   const alignThrottle = new Map()
+  const runtimeExtracts = new Map()
   let alignQueue = Promise.resolve()
-  ctx.effect(() => () => alignThrottle.clear(), 'session-manager history align throttle')
+  ctx.effect(() => () => { alignThrottle.clear(); runtimeExtracts.clear() }, 'session-manager history align state')
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
-  // 真正的对齐执行体:列出范围会话,分批解压提取,与缓存合并后原子写回。
+  async function safeStat(path) {
+    try {
+      const info = await stat(path)
+      return { mtimeMs: info.mtimeMs, size: info.size }
+    } catch {
+      return null
+    }
+  }
+
+  // 单会话提取:产物 stat 指纹与缓存一致即复用(零解压);否则解压并更新缓存。
+  // 运行中会话走内存指纹(runtimeExtracts),其余走磁盘 extracts
+  async function extractSession(recordItem, fingerprint, extracts, isRunning) {
+    const sessionId = recordItem.header.id
+    const known = isRunning ? runtimeExtracts.get(sessionId) : extracts[sessionId]
+    if (fingerprint !== null && known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size) {
+      return known.entries
+    }
+    const snapshot = await ctx.sessionQuery.readSession(sessionId)
+    const entries = extractUserInputs(snapshot.events)
+    const record = { mtimeMs: fingerprint === null ? 0 : fingerprint.mtimeMs, size: fingerprint === null ? 0 : fingerprint.size, entries }
+    if (isRunning) runtimeExtracts.set(sessionId, record)
+    else if (fingerprint !== null) extracts[sessionId] = record
+    return entries
+  }
+
+  // 真正的对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
+  // 与缓存合并后原子写回。runtimeOnly=true 仅处理运行中会话(启动即时路径)。
   // 入队串行执行(alignQueue 链),返回本工作区的对齐 promise
-  function alignWorkspaceNow(cwd) {
+  function alignWorkspaceNow(cwd, { runtimeOnly = false } = {}) {
     return alignQueue = alignQueue.then(async () => {
+      const agents = ctx.get('agents')
+      const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
       const inScope = records
         .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
+        .filter((recordItem) => !runtimeOnly || isSessionRunning({ agents, sessionId: recordItem.header.id }))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      const extracted = []
-      for (let start = 0; start < inScope.length; start += HISTORY_ALIGN_BATCH_SIZE) {
-        const batch = inScope.slice(start, start + HISTORY_ALIGN_BATCH_SIZE)
-        extracted.push(...await Promise.all(batch.map((recordItem) =>
-          ctx.sessionQuery.readSession(recordItem.header.id)
-            .then((snapshot) => extractUserInputs(snapshot.events).map((entry) => ({ ...entry, sid: recordItem.header.id })))
-            .catch((error) => {
-              ctx.logger && ctx.logger.warn('session-manager 历史输入对齐失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
-              return []
-            }))))
-        if (start + HISTORY_ALIGN_BATCH_SIZE < inScope.length) await sleep(HISTORY_ALIGN_BATCH_PAUSE_MS)
-      }
       const cached = await readWorkspaceCache(cacheDir, cwd)
+      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
+      const fresh = []
+      let sliceStart = Date.now()
+      for (const recordItem of inScope) {
+        const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
+        const located = persistence ? persistence.locate(recordItem.header) : undefined
+        const fingerprint = located ? await safeStat(located.path) : null
+        try {
+          const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
+          fresh.push(...entries.map((entry) => ({ ...entry, sid: recordItem.header.id })))
+        } catch (error) {
+          ctx.logger && ctx.logger.warn('session-manager 历史输入对齐失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
+        }
+        // 解压(可能命中缓存跳过)后检查连续占用:超 SLICE 让出 YIELD 不霸占主循环
+        if (Date.now() - sliceStart > HISTORY_ALIGN_SLICE_MS) {
+          await sleep(HISTORY_ALIGN_YIELD_MS)
+          sliceStart = Date.now()
+        }
+      }
+      // extracts 裁剪:仅保留窗口内非运行会话(运行中走内存,窗口外已淘汰)
+      const scopedIds = new Set(inScope.map((recordItem) => recordItem.header.id))
+      const prunedExtracts = {}
+      for (const [sessionId, record] of Object.entries(extracts)) {
+        if (scopedIds.has(sessionId) && !isSessionRunning({ agents, sessionId })) prunedExtracts[sessionId] = record
+      }
       const merged = aggregateInputs(
-        (cached ? cached.entries : []).concat(...extracted),
+        (cached ? cached.entries : []).concat(fresh),
         { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
       )
-      await writeWorkspaceCache(cacheDir, cwd, merged)
+      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts: prunedExtracts })
     }).catch((error) => {
       ctx.logger && ctx.logger.warn('session-manager 历史缓存对齐失败(' + cwd + '): ' + String(error && error.stack || error))
     })
@@ -410,23 +456,32 @@ export function apply(ctx, config) {
     void alignWorkspaceNow(cwd)
   }
 
-  // 启动对齐:只回溯最近 STARTUP_SCAN 个会话覆盖的工作区,串行排队逐个对齐,
-  // 不 await(插件激活不被阻塞),服务立即可用、历史随后就绪
-  void (async () => {
-    try {
-      await ensureCacheDir(cacheDir)
-      const records = await ctx.sessionQuery.listSessions()
-      const workspaces = []
-      for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
-        const recordCwd = recordItem.header.cwd
-        if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
-        workspaces.push(recordCwd)
-      }
-      for (const workspaceCwd of workspaces) alignWorkspace(workspaceCwd)
-    } catch (error) {
-      ctx.logger && ctx.logger.warn('session-manager 历史缓存启动对齐失败: ' + String(error && error.stack || error))
-    }
-  })()
+  // 启动:确保目录 + 当前会话(运行中)历史立即就绪——磁盘无缓存时首启也能秒出浮层;
+  // 全量启动对齐延迟 STARTUP_DELAY 再跑(不与宿主启动抢 CPU)。定时器随插件销毁清理
+  const startupTimers = []
+  ctx.effect(() => () => { for (const timer of startupTimers) clearTimeout(timer) }, 'session-manager history startup timers')
+
+  function scheduleStartupAlign(delayMs, runtimeOnly) {
+    startupTimers.push(setTimeout(() => {
+      void (async () => {
+        await ensureCacheDir(cacheDir)
+        const agents = ctx.get('agents')
+        const records = await ctx.sessionQuery.listSessions()
+        const workspaces = []
+        for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
+          if (runtimeOnly && !isSessionRunning({ agents, sessionId: recordItem.header.id })) continue
+          const recordCwd = recordItem.header.cwd
+          if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
+          workspaces.push(recordCwd)
+        }
+        for (const workspaceCwd of workspaces) alignWorkspace(workspaceCwd)
+      })().catch((error) => {
+        ctx.logger && ctx.logger.warn('session-manager 历史缓存启动对齐失败: ' + String(error && error.stack || error))
+      })
+    }, delayMs))
+  }
+  scheduleStartupAlign(0, true)
+  scheduleStartupAlign(HISTORY_STARTUP_DELAY_MS, false)
 
   // 按范围读取历史:全部直接读持久缓存(毫秒级)立即返回,对齐由后台进行;
   // aligned=false 表示该范围尚无缓存(首次),client 据此提示等待并静默重拉
