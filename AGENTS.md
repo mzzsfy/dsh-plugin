@@ -40,16 +40,20 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 3. 验证效果:确保 dev-link 已挂。**host 半区改动自动热重载**(dev-link 在 home 补丁层 `~/.dsh/cordis.patch.yml` 维护 hmr 覆盖行,watch 仓库 packages,保存后约 1 秒重载对应插件;测试/文档/依赖目录不触发);**client 半区改动刷新页面即生效**(client bundle 从磁盘按请求现读)。改完代码不要求重启 dsh,也不要建议用户重启
 4. 提交:语义化中文提交信息,一事一提交,禁止把无关改动混入
 
-## 发布(唯一入口)
+## 发布(唯一入口,版本管控以 git tag 为事实源)
 
 ```
 node scripts/publish.mjs <包名|all> [--bump patch|minor|major] [--skip-test] [--dry-run]
 ```
 
 - npm 2FA 认证需交互终端(publish.mjs 本身不检测 TTY,非 TTY 下会在 npm 认证阶段卡住),用弹出 shell 执行,不用于后台/管道;--dry-run 无此要求
-- 本地版本 == 线上:无 --bump 时自动 SKIP;本地 < 线上:拒绝(防回退)
-- 发布成功后脚本自动打 tag(`@mzzsfy-<包>-v<版本>`,轻量 tag;本地==线上 SKIP 时亦会补打本地缺失的 tag),推送 main 与 tag 由维护者执行
-- 发版后记得重跑 `node scripts/dev-link.mjs all`,让 profile 依赖行追上线上新版本
+- 每包独立版本 tag(格式 `@mzzsfy-<包>-v<版本>`,轻量 tag),发版即对齐:发布成功后脚本自动提交该包版本号变更(`chore(<包>): 发版版本号 x.y.z`)并把 tag 打在该提交上,tag 始终指向该版本的完整源码状态,不再需要手动"版本号对齐"提交
+- 发版判定(本地版本==线上时)以版本 tag 后的包目录提交数为事实源:
+  - tag 后无提交 → SKIP,该包无需发版(禁止凭"感觉有改动"重复发版,避免用户误判需要更新)
+  - tag 后有提交 → 拒绝发布并提示提交数,必须显式传 --bump 才发(防止代码已变而版本号未动被误判为无需更新而漏发);feat 用 minor,fix/style 用 patch
+  - 本地 tag 缺失 → 补打 tag 并跳过(自愈历史"发布成功未打 tag"状态)
+- 本地版本低于线上:拒绝(防回退);高于线上:直接发布(--bump 仅适用于本地等于线上的场景)
+- 推送 main 与 tag 由维护者执行;发版后重跑 `node scripts/dev-link.mjs all`,让 profile 依赖行追上线上新版本
 
 ## 双实现同源
 
