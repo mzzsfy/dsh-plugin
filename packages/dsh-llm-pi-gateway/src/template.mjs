@@ -5,17 +5,33 @@ const PLACEHOLDER_SESSION_ID = '{sessionId}'
 const PLACEHOLDER_MARKER = '{marker}'
 
 /**
- * 判定模板树中是否引用了 {marker} 占位符;配置期校验用,
- * 与渲染语义同步(字符串包含即算引用)。
+ * 判定模板树中是否引用了占位符;配置期校验与渲染语义同步(字符串包含即算引用)。
+ * @param {unknown} value 模板值
+ * @param {string} placeholder 占位符字面量
+ */
+function templateUses(value, placeholder) {
+  if (typeof value === 'string') return value.includes(placeholder)
+  if (Array.isArray(value)) return value.some((item) => templateUses(item, placeholder))
+  if (typeof value === 'object' && value !== null) {
+    return Object.values(value).some((item) => templateUses(item, placeholder))
+  }
+  return false
+}
+
+/**
+ * 判定模板树中是否引用了 {marker} 占位符。
  * @param {unknown} value 模板值
  */
 export function templateUsesMarker(value) {
-  if (typeof value === 'string') return value.includes(PLACEHOLDER_MARKER)
-  if (Array.isArray(value)) return value.some((item) => templateUsesMarker(item))
-  if (typeof value === 'object' && value !== null) {
-    return Object.values(value).some((item) => templateUsesMarker(item))
-  }
-  return false
+  return templateUses(value, PLACEHOLDER_MARKER)
+}
+
+/**
+ * 判定模板树中是否引用了 {sessionId} 占位符;adapter 以此判定 sessionId 是否必填。
+ * @param {unknown} value 模板值
+ */
+export function templateUsesSessionId(value) {
+  return templateUses(value, PLACEHOLDER_SESSION_ID)
 }
 
 /**

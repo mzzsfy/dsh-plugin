@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { resolveRoute } from '../src/config.mjs'
 import { createGatewayAdapter } from '../src/adapter.mjs'
 import { deriveMarker } from '../src/marker.mjs'
+import { GatewayError } from '../src/errors.mjs'
 
 function makeRoutes(profile) {
   return new Map(Object.entries({ 'new-api': resolveRoute('new-api', profile) }))
@@ -180,3 +181,143 @@ function baseProfile(overrides = {}) {
     ...overrides,
   }
 }
+
+test('场景: 凭据解析桩与请求选项齐备,apiKey/temperature/maxTokens/signal 原样到达 streamSimple', async () => {
+  const captured = []
+  const credentialCalls = []
+  const controller = new AbortController()
+  const routes = makeRoutes(baseProfile({ apiKeyEnv: 'DISPATCH_KEY_ENV' }))
+  const adapter = createGatewayAdapter(
+    routes,
+    async () => fakeProtocol(captured),
+    async (provider, ref) => {
+      credentialCalls.push([provider, ref])
+      return 'sk-stub'
+    },
+  )
+  await collect(adapter.stream(request({ temperature: 0.5, maxTokens: 4096, signal: controller.signal })))
+  const { options } = captured[0]
+  assert.deepEqual(credentialCalls, [['new-api', 'DISPATCH_KEY_ENV']])
+  assert.equal(options.apiKey, 'sk-stub')
+  assert.equal(options.temperature, 0.5)
+  assert.equal(options.maxTokens, 4096)
+  assert.equal(options.signal, controller.signal)
+})
+
+test('场景: 请求带 stop 选项,公共入口抛 UNSUPPORTED_OPTION 且凭据解析未发生', async () => {
+  let credentialAsked = false
+  const adapter = createGatewayAdapter(
+    makeRoutes(baseProfile({ apiKeyEnv: 'DISPATCH_KEY_ENV' })),
+    async () => fakeProtocol([]),
+    async () => {
+      credentialAsked = true
+      return 'sk-stub'
+    },
+  )
+  await assert.rejects(
+    collect(adapter.stream(request({ stop: ['END'] }))),
+    (error) => error.code === 'UNSUPPORTED_OPTION',
+  )
+  assert.equal(credentialAsked, false, '坏请求不得消耗凭据链副作用')
+})
+
+test('场景: prepareCall 快照回调路径带 stop 同样拒绝(官方 streamWithSnapshot 双入口同位检查)', async () => {
+  let credentialAsked = false
+  const adapter = createGatewayAdapter(
+    makeRoutes(baseProfile({ apiKeyEnv: 'DISPATCH_KEY_ENV' })),
+    async () => fakeProtocol([]),
+    async () => {
+      credentialAsked = true
+      return 'sk-stub'
+    },
+  )
+  const call = await adapter.prepareCall('new-api', 'auto')
+  await assert.rejects(
+    collect(call.stream(request({ stop: ['END'] }))),
+    (error) => error.code === 'UNSUPPORTED_OPTION',
+  )
+  assert.equal(credentialAsked, false, 'prepareCall 路径同样先于凭据解析拒绝')
+})
+
+test('场景: stop 键为 undefined 放行(官方值判断语义)', async () => {
+  const captured = []
+  const adapter = createGatewayAdapter(makeRoutes(baseProfile()), async () => fakeProtocol(captured))
+  await collect(adapter.stream(request({ stop: undefined })))
+  assert.equal(captured.length, 1, '{stop:undefined} 不构成拒绝')
+})
+
+test('场景: prepareCall 后热更换表,旧 call 的 stream 仍用旧代路由与模型条目', async () => {
+  const captured = []
+  let table = makeRoutes(baseProfile({
+    baseURL: 'https://old.example.com',
+    models: [{ id: 'auto', name: 'Old Entry', contextWindow: 200000 }],
+  }))
+  const adapter = createGatewayAdapter(() => table, async () => fakeProtocol(captured))
+  const call = await adapter.prepareCall('new-api', 'auto')
+  assert.equal(call.model.name, 'Old Entry')
+  table = makeRoutes(baseProfile({
+    baseURL: 'https://new.example.com',
+    models: [{ id: 'auto', name: 'New Entry', contextWindow: 4096 }],
+  }))
+  await collect(call.stream(request()))
+  assert.equal(captured[0].model.baseUrl, 'https://old.example.com', 'stream 绑定 prepareCall 时的路由快照')
+  assert.equal(captured[0].model.name, 'Old Entry', 'stream 绑定 prepareCall 时的模型条目快照')
+  assert.equal((await adapter.resolveModel('new-api', 'auto')).name, 'New Entry', '目录读取走新代表')
+})
+
+test('场景: 标记关闭且模板不引用 sessionId,请求缺省不抛,streamSimple 不收 sessionId 键(官方 wire 契约:缺省即省略)', async () => {
+  const captured = []
+  const routes = makeRoutes(baseProfile({ sessionMarker: { enabled: false } }))
+  const adapter = createGatewayAdapter(routes, async () => fakeProtocol(captured))
+  await collect(adapter.stream(request({ sessionId: undefined })))
+  assert.equal('sessionId' in captured[0].options, false, '空串会被 pi-ai clamp 成共享空桶,必须省略键')
+})
+
+test('场景: 标记关闭但 metadata 模板引用 sessionId,请求缺省仍拒 INVALID_REQUEST', async () => {
+  const routes = makeRoutes(baseProfile({
+    sessionMarker: { enabled: false },
+    metadata: { trace: '{sessionId}' },
+  }))
+  const adapter = createGatewayAdapter(routes, async () => fakeProtocol([]))
+  await assert.rejects(
+    collect(adapter.stream(request({ sessionId: undefined }))),
+    (error) => error.code === 'INVALID_REQUEST',
+  )
+})
+
+// 源流在产出 start 后抛普通错误:取消态经出口兜底归因,非取消态原样上抛
+function failingProtocol() {
+  return {
+    streamSimple: async function * () {
+      yield { type: 'start' }
+      throw new Error('upstream boom')
+    },
+  }
+}
+
+test('场景: 调用方 signal 已取消时源流出界,兜底抛 ABORTED 且 cause 为原错误', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const adapter = createGatewayAdapter(makeRoutes(baseProfile()), async () => failingProtocol())
+  await assert.rejects(
+    collect(adapter.stream(request({ signal: controller.signal }))),
+    (error) => {
+      assert.ok(error instanceof GatewayError)
+      assert.equal(error.code, 'ABORTED')
+      assert.equal(error.cause.message, 'upstream boom')
+      return true
+    },
+  )
+})
+
+test('场景: signal 未取消时源流错误原样上抛,不套 ABORTED 信封', async () => {
+  const adapter = createGatewayAdapter(makeRoutes(baseProfile()), async () => failingProtocol())
+  await assert.rejects(
+    collect(adapter.stream(request())),
+    (error) => {
+      assert.equal(error instanceof GatewayError, false)
+      assert.equal(error.message, 'upstream boom')
+      return true
+    },
+  )
+})
