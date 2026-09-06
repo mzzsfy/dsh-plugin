@@ -107,15 +107,27 @@ export function buildUpgradeCommand({ template, tag }) {
   return text.split(TAG_PLACEHOLDER).join(tag)
 }
 
-// 重启后是否整页刷新:经历失联后恢复,或宿主实例标识(pid)变化(停机时长小于重启轮询间隔的快速重启零失联),两者都是宿主已重启的可靠信号。
-export function shouldReloadAfterRestart({ lost, pidBefore, pidAfter }) {
-  if (lost) return true
-  return typeof pidBefore === 'number' && typeof pidAfter === 'number' && pidBefore !== pidAfter
+// 重启后是否整页刷新:prev/next 为 {lost,pid,bootAt} 快照。
+// lost=经历失联后恢复(强信号);bootAt=宿主进程启动时刻,变化即重启——容器内 pid 恒 1
+// 且停机时长小于轮询间隔(零失联)时这是唯一可靠信号;pid 比对是 bootAt 缺失(旧宿主
+// 未上报)时的退化路径。判定必须收敛在本函数,core 与 client LOGIC 段镜像,parity 对拍。
+export function shouldReloadAfterRestart(prev, next) {
+  if (prev.lost) return true
+  if (typeof prev.bootAt === 'number' && typeof next.bootAt === 'number') return prev.bootAt !== next.bootAt
+  return typeof prev.pid === 'number' && typeof next.pid === 'number' && prev.pid !== next.pid
 }
 
-// registry 基地址必须是 http(s) 地址(scheme 大小写不敏感,RFC 3986);保存侧与请求侧共用同一判定。
+// registry 基地址必须是 http(s) 地址(RFC 3986,scheme 大小写不敏感)且不带 query/hash:
+// 带查询串的输入拼接 dist-tags API 路径时 search 会吞掉路径,检查恒败且错误难反推根因。
+// 保存侧与请求侧共用同一判定。
 export function isValidRegistryBase(base) {
-  return typeof base === 'string' && /^https?:\/\//i.test(base.trim())
+  if (typeof base !== 'string') return false
+  try {
+    const parsed = new URL(base.trim())
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.search === '' && parsed.hash === ''
+  } catch {
+    return false
+  }
 }
 
 // dist-tags 响应体上限:正常响应远小于此;流式累计读取,超限即断

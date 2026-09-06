@@ -1,24 +1,13 @@
-// 重启等待拍决策行为测试:client.js 的 restartTick LOGIC 段提取工厂化后覆盖全场景。
-// 核心回归:宿主重启确认(pid 变化 / 失联恢复)后页面服务未就绪(SPA fallback 未注册,
-// `/` 返回裸 404)时必须等待重探,不得立即整页刷新。
+// 重启等待拍决策行为测试:client.js 的 restartTick / restartPostLost / apiError LOGIC 段
+// 经共享提取器(test/logic-extract.mjs)工厂化后覆盖全场景。
+// 核心回归:宿主重启确认(pid / bootAt 变化 / 失联恢复)后页面服务未就绪(SPA fallback
+// 未注册,`/` 返回裸 404)时必须等待重探,不得立即整页刷新;
+// 重启 POST 收到明确 HTTP 回绝(409/500)时不得进入等待轮询凭活宿主误判已重启。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const CLIENT_SOURCE = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
-
-// 提取 LOGIC-BEGIN <name> ... LOGIC-END <name> 函数体并工厂化,deps 为其自由变量
-function extractLogic(name, deps = {}) {
-  const pattern = new RegExp('// LOGIC-BEGIN ' + name + '\\n([\\s\\S]*?)\\n\\s*// LOGIC-END ' + name)
-  const match = CLIENT_SOURCE.match(pattern)
-  assert.ok(match, 'client.js 缺少 LOGIC 段: ' + name)
-  const keys = Object.keys(deps)
-  return new Function(...keys, 'return (' + match[1].trim() + ')')(...keys.map((key) => deps[key]))
-}
+import { extractLogic } from './logic-extract.mjs'
 
 const clientShouldReload = extractLogic('shouldReloadAfterRestart')
 const clientPageReady = extractLogic('pageReady')
@@ -26,10 +15,12 @@ const clientRestartTick = extractLogic('restartTick', {
   shouldReloadAfterRestart: clientShouldReload,
   pageReady: clientPageReady,
 })
+const clientRestartPostLost = extractLogic('restartPostLost')
+const clientApiError = extractLogic('apiError')
 
 const ALIVE_MS = 10 * 1000
 
-const statusOk = (pid) => () => Promise.resolve({ pid })
+const statusOk = (snapshot) => () => Promise.resolve(snapshot)
 const statusFail = () => () => Promise.reject(new Error('connection refused'))
 const pageHtmlOk = () => Promise.resolve(new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } }))
 const pageMiss = () => Promise.resolve(new Response('', { status: 404 }))
@@ -37,20 +28,20 @@ const pageUnauthorized = () => Promise.resolve(new Response('', { status: 401 })
 const pageNoType = () => Promise.resolve(new Response('<html></html>', { status: 200 }))
 const pageNetFail = () => Promise.reject(new Error('connection refused'))
 
-function tick({ now = 0, deadlineAt = ALIVE_MS, lost = false, pidBefore = 7, status, page }) {
+// prev 快照构造:{lost,pid,bootAt},默认与 pid 7 / bootAt 100 对齐
+function tick({ now = 0, deadlineAt = ALIVE_MS, lost = false, pid = 7, bootAt = 100, status, page }) {
   return clientRestartTick({
     now,
     deadlineAt,
-    lost,
-    pidBefore,
+    prev: { lost, pid, bootAt },
     statusFetch: status,
     pageFetch: page,
   })
 }
 
-test('restartTick: 等待中 pid 未变,宿主未重启,继续等待', async () => {
-  // Given 未失联且 pid 基线 7;When status 成功返回 pid 7;Then wait 且 lost 保持 false
-  const result = await tick({ status: statusOk(7), page: pageHtmlOk })
+test('restartTick: 等待中 pid 与 bootAt 均未变,宿主未重启,继续等待', async () => {
+  // Given 未失联基线(pid 7/bootAt 100);When status 成功返回同值;Then wait 且 lost 保持 false
+  const result = await tick({ status: statusOk({ pid: 7, bootAt: 100 }), page: pageHtmlOk })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
@@ -60,83 +51,131 @@ test('restartTick: status 拉取失败记为失联并等待', async () => {
   assert.deepEqual(result, { action: 'wait', lost: true })
 })
 
+test('restartTick: bootAt 变化即判定重启(容器 pid 恒 1 场景)', async () => {
+  // Given pid 基线 1/bootAt 100;When status 返回 pid 1(复用)而 bootAt 200;Then reload
+  const result = await tick({ pid: 1, bootAt: 100, status: statusOk({ pid: 1, bootAt: 200 }), page: pageHtmlOk })
+  assert.deepEqual(result, { action: 'reload', lost: false })
+})
+
 test('restartTick: 宿主已重启但页面 404,等待页面就绪', async () => {
   // Given pid 基线 7;When status 返回 pid 8(已重启)而主文档 404(fallback 未注册);Then wait,不得整页刷新
-  const result = await tick({ status: statusOk(8), page: pageMiss })
+  const result = await tick({ status: statusOk({ pid: 8, bootAt: 200 }), page: pageMiss })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
 test('restartTick: 宿主已重启且页面就绪,整页刷新', async () => {
-  // Given pid 基线 7;When status 返回 pid 8 且主文档 200 text/html;Then reload
-  const result = await tick({ status: statusOk(8), page: pageHtmlOk })
+  const result = await tick({ status: statusOk({ pid: 8, bootAt: 200 }), page: pageHtmlOk })
   assert.deepEqual(result, { action: 'reload', lost: false })
 })
 
 test('restartTick: 失联后恢复且页面就绪,整页刷新', async () => {
   // Given 曾失联;When status 恢复 200 且主文档 200;Then reload
-  const result = await tick({ lost: true, pidBefore: 7, status: statusOk(7), page: pageHtmlOk })
+  const result = await tick({ lost: true, status: statusOk({ pid: 7, bootAt: 100 }), page: pageHtmlOk })
   assert.deepEqual(result, { action: 'reload', lost: true })
 })
 
 test('restartTick: 失联恢复但页面未就绪,保持失联标记继续等待', async () => {
-  // Given 曾失联;When status 恢复但主文档 404;Then wait 且 lost 保持 true
-  const result = await tick({ lost: true, pidBefore: 7, status: statusOk(7), page: pageMiss })
+  const result = await tick({ lost: true, status: statusOk({ pid: 7, bootAt: 100 }), page: pageMiss })
   assert.deepEqual(result, { action: 'wait', lost: true })
 })
 
 test('restartTick: 超时拍直接转人工收尾,不再探测', async () => {
   // Given now 已到 deadline;When 拍触发;Then timeout
-  const result = await tick({ now: ALIVE_MS, deadlineAt: ALIVE_MS, status: statusOk(8), page: pageHtmlOk })
+  const result = await tick({ now: ALIVE_MS, deadlineAt: ALIVE_MS, status: statusOk({ pid: 8, bootAt: 200 }), page: pageHtmlOk })
   assert.deepEqual(result, { action: 'timeout', lost: false })
 })
 
 test('restartTick: 页面探测网络失败按未就绪处理', async () => {
-  // Given 宿主已重启;When 主文档 fetch 连接失败;Then wait
-  const result = await tick({ status: statusOk(8), page: pageNetFail })
+  const result = await tick({ status: statusOk({ pid: 8, bootAt: 200 }), page: pageNetFail })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
 test('restartTick: 页面 200 但缺失 content-type 按未就绪处理', async () => {
-  // Given 宿主已重启;When 主文档 200 无 content-type;Then wait
-  const result = await tick({ status: statusOk(8), page: pageNoType })
+  const result = await tick({ status: statusOk({ pid: 8, bootAt: 200 }), page: pageNoType })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
 test('restartTick: 页面 401 按未就绪处理', async () => {
-  // Given 宿主已重启;When 主文档 401(索引鉴权拒绝);Then wait
-  const result = await tick({ status: statusOk(8), page: pageUnauthorized })
+  const result = await tick({ status: statusOk({ pid: 8, bootAt: 200 }), page: pageUnauthorized })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
-test('restartTick: status 响应缺 pid 时不判定重启', async () => {
-  // Given pid 基线 7;When status 响应无 pid 字段;Then wait 且 lost 保持 false
-  const result = await tick({ status: () => Promise.resolve({}), page: pageHtmlOk })
+test('restartTick: status 响应缺 pid 与 bootAt 时不判定重启', async () => {
+  // Given pid/bootAt 基线 7/100;When status 响应无任一实例标识;Then wait 且 lost 保持 false
+  const result = await tick({ status: statusOk({}), page: pageHtmlOk })
+  assert.deepEqual(result, { action: 'wait', lost: false })
+})
+
+test('restartTick: 旧宿主缺 bootAt 时退化 pid 比对,不误判', async () => {
+  // Given prev 无 bootAt(旧宿主快照);When next bootAt 出现但 pid 相同;Then wait(bootAt 缺失单侧不构成证据)
+  const result = await clientRestartTick({
+    now: 0,
+    deadlineAt: ALIVE_MS,
+    prev: { lost: false, pid: 7, bootAt: null },
+    statusFetch: statusOk({ pid: 7, bootAt: 200 }),
+    pageFetch: pageHtmlOk,
+  })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
 test('restartTick: 无重启证据时不发起页面探测', async () => {
-  // Given pid 基线为空且未失联(无宿主重启证据);When status 成功;Then wait 且页面探测未被调用
+  // Given 基线为空且未失联;When status 成功;Then wait 且页面探测未被调用
   let pageCalls = 0
-  const result = await tick({
-    pidBefore: null,
-    status: statusOk(7),
-    page: () => { pageCalls += 1; return pageHtmlOk() },
+  const result = await clientRestartTick({
+    now: 0,
+    deadlineAt: ALIVE_MS,
+    prev: { lost: false, pid: null, bootAt: null },
+    statusFetch: statusOk({ pid: 7, bootAt: 100 }),
+    pageFetch: () => { pageCalls += 1; return pageHtmlOk() },
   })
   assert.deepEqual(result, { action: 'wait', lost: false })
   assert.equal(pageCalls, 0)
 })
 
 test('restartTick: 页面 204 无正文按未就绪处理', async () => {
-  // Given 宿主已重启;When 主文档 204(ok 为真但无 content-type 无正文);Then wait
-  const result = await tick({ status: statusOk(8), page: () => Promise.resolve(new Response(null, { status: 204 })) })
+  const result = await tick({ status: statusOk({ pid: 8, bootAt: 200 }), page: () => Promise.resolve(new Response(null, { status: 204 })) })
   assert.deepEqual(result, { action: 'wait', lost: false })
 })
 
 test('restartTick: content-type 大写仍按就绪处理', async () => {
-  // Given 宿主已重启;When 主文档 200 且 content-type 为大写 TEXT/HTML;Then reload
   const result = await tick({
-    status: statusOk(8),
+    status: statusOk({ pid: 8, bootAt: 200 }),
     page: () => Promise.resolve(new Response('<html></html>', { status: 200, headers: { 'content-type': 'TEXT/HTML; charset=utf-8' } })),
   })
   assert.deepEqual(result, { action: 'reload', lost: false })
+})
+
+test('restartPostLost: 网关 5xx(宿主退出窗口)视为失联,宿主应答回绝不算', () => {
+  // 502/503/504 出现在宿主退出窗口:网关可达而宿主不在,必须继续等待
+  for (const status of [502, 503, 504]) {
+    const gatewayError = new Error('HTTP ' + status)
+    gatewayError.status = status
+    assert.equal(clientRestartPostLost(gatewayError), true, 'status=' + status)
+  }
+  // 409 升级互斥/500 appExit 缺失为宿主自身应答:活宿主明确回绝,不得等待
+  const conflictError = new Error('升级进行中,禁止重启;等待升级完成后重试')
+  conflictError.status = 409
+  assert.equal(clientRestartPostLost(conflictError), false)
+  const capabilityError = new Error('启动器未提供 appExit,无法重启')
+  capabilityError.status = 500
+  assert.equal(clientRestartPostLost(capabilityError), false)
+  const okLikeError = new Error('HTTP 400')
+  okLikeError.status = 400
+  assert.equal(clientRestartPostLost(okLikeError), false)
+})
+
+test('restartPostLost: 无应答失败(网络/中止)属于失联', () => {
+  assert.equal(clientRestartPostLost(new TypeError('Failed to fetch')), true)
+  assert.equal(clientRestartPostLost(new DOMException('The operation was aborted due to timeout', 'TimeoutError')), true)
+  assert.equal(clientRestartPostLost(null), true)
+  assert.equal(clientRestartPostLost('boom'), true)
+})
+
+test('apiError: 携带 status 与 payload.error,解析失败回退 HTTP 码', () => {
+  const withBody = clientApiError({ status: 409 }, { error: '升级进行中,禁止重启;等待升级完成后重试' })
+  assert.equal(withBody.status, 409)
+  assert.equal(withBody.message, '升级进行中,禁止重启;等待升级完成后重试')
+  const withoutBody = clientApiError({ status: 500 }, {})
+  assert.equal(withoutBody.status, 500)
+  assert.equal(withoutBody.message, 'HTTP 500')
 })

@@ -6,7 +6,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, RESTART_DELAY_MS } from '../src/index.js'
+import { apply, RESTART_DELAY_MS, UPGRADE_LOCK_PATH } from '../src/index.js'
+import { rmSync } from 'node:fs'
+
+// 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
+rmSync(UPGRADE_LOCK_PATH, { force: true })
 
 // 全局 fetch 拦截:core.fetchDistTags 默认绑定全局 fetch,测试期返回与 dist-tags.test
 // 同形的流式响应(tags 就绪),防止启动检查/refresh 触发真实网络请求
@@ -116,6 +120,7 @@ async function call(routes, path, req) {
 }
 
 const post = (routes, path, body, headers) => call(routes, path, makeReq({ method: 'POST', body, headers }))
+const get = (routes, path) => call(routes, path, makeReq({ method: 'GET' }))
 
 test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
   const { ctx, routes } = makeCtx()
@@ -286,17 +291,92 @@ test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {
   assert.equal(store.upgradeCommandTemplate, undefined)
 })
 
-test('upgrade:真实挂起命令触达门闩,二次 409', async () => {
+test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', async () => {
   const store = { upgradeCommandTemplate: 'node -e "setTimeout(() => {}, 2000)"' }
   const { ctx, routes } = makeCtx({ settingsStore: store })
   apply(ctx)
+  const baseline = await get(routes, '/api/maintain/status').then((r) => r.payload)
   const first = await post(routes, '/api/maintain/upgrade')
   assert.equal(first.status, 200)
   assert.equal(first.payload.upgrade.running, true)
+  assert.equal(first.payload.upgradeLockHeld, true, '升级期间锁文件持有效力')
   const second = await post(routes, '/api/maintain/upgrade')
   assert.equal(second.status, 409)
-  // 等挂起命令自然退出,避免测试运行器等待子进程树
-  await new Promise((resolve) => setTimeout(resolve, 3000))
+  // 等挂起命令自然退出(轮询而非固定 sleep,兼做落定状态显式断言)
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+  }
+  assert.ok(settled, '升级应在挂起命令退出后落定')
+  assert.equal(settled.upgrade.last.ok, true)
+  assert.equal(settled.upgradeLockHeld, false, '升级结束后锁文件应删除')
+  assert.notEqual(settled.checkedAt, baseline.checkedAt, '升级落定后自动重查链应已刷新 checkedAt')
+  assert.ok(settled.checkedAt !== null)
+})
+
+test('restart:升级进行中 409 拒绝且不调度退出', async () => {
+  const store = { upgradeCommandTemplate: 'node -e "setTimeout(() => {}, 2000)"' }
+  const exits = []
+  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
+  apply(ctx)
+  const upgrade = await post(routes, '/api/maintain/upgrade')
+  assert.equal(upgrade.status, 200)
+  const denied = await post(routes, '/api/maintain/restart')
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /升级进行中/)
+  // 等挂起命令退出后确认 exit 未被调度(轮询上限 5s)
+  let running = true
+  for (let i = 0; i < 50 && running; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    running = Boolean(status && status.upgrade && status.upgrade.running)
+  }
+  assert.deepEqual(exits, [], '409 拒绝路径不得调度 exit')
+})
+
+test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exits = []
+  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  apply(ctx)
+  const restart = await post(routes, '/api/maintain/restart')
+  assert.equal(restart.status, 200)
+  const denied = await post(routes, '/api/maintain/upgrade')
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /重启已调度/)
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [0])
+})
+
+test('status:快照携带 bootAt 实例代际', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const status = await get(routes, '/api/maintain/status')
+  assert.equal(status.status, 200)
+  assert.equal(typeof status.payload.bootAt, 'number')
+  assert.ok(Number.isFinite(status.payload.bootAt) && status.payload.bootAt > 0)
+})
+
+test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {
+  const store = {}
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  apply(ctx)
+  const huge = await post(routes, '/api/maintain/poll-interval', { seconds: 1e308 })
+  assert.equal(huge.status, 400)
+  assert.equal(store.pollIntervalSec, undefined, '超上界值不得落盘')
+})
+
+test('registry-base:带 query 或 hash 的输入 400', async () => {
+  const store = {}
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  apply(ctx)
+  const withQuery = await post(routes, '/api/maintain/registry-base', { base: 'https://example.com?mirror=1' })
+  assert.equal(withQuery.status, 400)
+  const withHash = await post(routes, '/api/maintain/registry-base', { base: 'https://example.com#frag' })
+  assert.equal(withHash.status, 400)
+  assert.equal(store.registryBase, undefined)
 })
 
 test('restart:缺失 appExit 500;响应立即返回,延迟退出', async (t) => {

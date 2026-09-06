@@ -2,6 +2,10 @@
 // 双端模式照 dsh-usage-panel:webServer 具名路由供浏览器半区调用;
 // 设置持久化走 settings 命名空间 maintain,检查结果仅存内存,不落盘。
 
+import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { readFileSync, writeFileSync, rmSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 
 import {
@@ -25,12 +29,49 @@ export const inject = ['webServer']
 const NAMESPACE = 'maintain'
 
 const CHECK_TIMEOUT_MS = 20 * 1000
-const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
+// 升级命令超时:client 浮条观察上限与此对拍(parity 锁定),强杀宽限另计
+export const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
 // 导出仅供测试计算延迟窗口等待时长
 export const RESTART_DELAY_MS = 2 * 1000
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
+// 轮询间隔上界:超大值会让到期时间戳溢出为 Infinity,轮询静默失效
+export const POLL_INTERVAL_MAX_SEC = 30 * 24 * 60 * 60
+
+// 浏览器半区调用的 API 路径清单:client.js 同名常量与之对拍(parity),防单侧改路径生产 404
+export const API_PATHS = Object.freeze({
+  STATUS: '/api/maintain/status',
+  REFRESH: '/api/maintain/refresh',
+  CHANNEL: '/api/maintain/channel',
+  UPGRADE_TEMPLATE: '/api/maintain/upgrade-template',
+  POLL_INTERVAL: '/api/maintain/poll-interval',
+  REGISTRY_BASE: '/api/maintain/registry-base',
+  UPGRADE: '/api/maintain/upgrade',
+  RESTART: '/api/maintain/restart',
+})
+
+// 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
+const BOOT_AT = Date.now() - Math.round(process.uptime() * 1000)
+
+// 跨进程升级锁:升级子进程 detached 存活于宿主死后,宿主被外部重启时内存门闩归零
+// 会放行第二次升级,与仍在跑的旧包管理器并发写同一全局目录。锁文件随升级结束删除,
+// 宿主崩溃残留时按 startedAt 过期(超 UPGRADE_TIMEOUT_MS + 强杀宽限)自动失效
+// 升级锁绝对路径:导出仅供测试预热清理(防测试进程中断残留毒化后续运行)
+export const UPGRADE_LOCK_PATH = join(tmpdir(), 'dsh-maintain-upgrade.lock')
+const UPGRADE_LOCK_STALE_MS = UPGRADE_TIMEOUT_MS + 10 * 1000
+
+function readUpgradeLock() {
+  try {
+    const raw = JSON.parse(readFileSync(UPGRADE_LOCK_PATH, 'utf8'))
+    if (raw && typeof raw.startedAt === 'number') return raw
+  } catch { /* 缺失/损坏等同无锁 */ }
+  return null
+}
+
+function upgradeLockStale(lock) {
+  return lock === null || Date.now() - lock.startedAt > UPGRADE_LOCK_STALE_MS
+}
 
 const DEFAULT_CHANNEL = 'latest'
 // 默认值导出仅供 parity 测试作 host 侧锚点;行为入口全部经 readSettings 回落
@@ -107,7 +148,8 @@ function readBody(req) {
 
 function readSettings(ctx) {
   const settings = ctx.get('settings')
-  const value = settings ? settings.get(NAMESPACE) : undefined
+  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值
+  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
   return {
     channel: value && typeof value.channel === 'string' && value.channel.trim().length > 0 ? value.channel.trim() : DEFAULT_CHANNEL,
     pollIntervalSec:
@@ -129,7 +171,7 @@ async function resolveCurrentHostVersion() {
   return resolveHostVersion({
     execPath: process.execPath,
     platform: process.platform,
-    readFileImpl: (path) => import('node:fs/promises').then((fs) => fs.readFile(path, 'utf8')),
+    readFileImpl: readFile,
     resolveImpl: undefined,
   })
 }
@@ -138,6 +180,14 @@ async function resolveCurrentHostVersion() {
 export function apply(ctx) {
   // 启动器在挂载前提供 appExit(有界退出,5 秒兜底强制);缺失时重启能力关闭
   const exit = ctx.get('appExit')
+  if (typeof exit !== 'function') {
+    console.warn('[dsh-maintain] 启动器未提供 appExit,就地重启能力关闭(面板按钮禁用)')
+  }
+  // 幽灵锁检测:宿主外部重启后残留的锁文件若仍在有效期,升级能力保持锁定
+  const staleLock = upgradeLockStale(readUpgradeLock()) ? null : readUpgradeLock()
+  if (staleLock !== null) {
+    console.warn('[dsh-maintain] 检测到未过期的升级锁(可能存在残留升级子进程),升级端点保持拒绝直至锁过期: ' + UPGRADE_LOCK_PATH)
+  }
 
   // 内存快照:仅存当前态,进程重启后从启动检查重新开始(设计约束:不持久化)
   const snapshot = { currentVersion: null, tags: null, checkedAt: null, error: null }
@@ -166,9 +216,16 @@ export function apply(ctx) {
     })
   }
 
+  // 排空旧配置的在途检查再重查:runCheck 以 checkInFlight 去重,不排空会把
+  // 旧 registryBase 结果当作新配置的检查返回
+  async function drainInFlightThenCheck() {
+    if (checkInFlight) await checkInFlight
+    await runCheck()
+  }
+
   function scheduleNext() {
     const intervalSec = readSettings(ctx).pollIntervalSec
-    nextDueAt = intervalSec > 0 ? Date.now() + intervalSec * 1000 : null
+    nextDueAt = intervalSec > 0 && intervalSec <= POLL_INTERVAL_MAX_SEC ? Date.now() + intervalSec * 1000 : null
   }
 
   // 固定短 tick + 到期判断:间隔设置变更即时生效。timer 软依赖经嵌套 inject 等待:
@@ -176,7 +233,10 @@ export function apply(ctx) {
   // dispose 显式挂回插件 fiber:timer 服务重启导致嵌套 fiber 重跑时不产生双 interval
   let pollRunning = false
   ctx.inject(['timer'], (timerCtx) => {
-    if (typeof timerCtx.interval !== 'function') return
+    if (typeof timerCtx.interval !== 'function') {
+      console.warn('[dsh-maintain] timer 服务方法面不可用,自动轮询停用(面板可手动检查更新)')
+      return
+    }
     const dispose = timerCtx.interval(() => {
       if (checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
       runCheck().then(scheduleNext, scheduleNext)
@@ -188,10 +248,14 @@ export function apply(ctx) {
   function currentStatus() {
     const config = readSettings(ctx)
     const judged = judgeVersion({ currentVersion: snapshot.currentVersion, tags: snapshot.tags, channel: config.channel })
+    // running 即视为持锁:省一次盘读,且窗口期语义与 upgrade 路由的门闩一致
+    const lock = upgrade.running === true ? { startedAt: Date.now() } : readUpgradeLock()
     return {
       packageName: TARGET_PACKAGE,
       pid: process.pid,
+      bootAt: BOOT_AT,
       pollRunning,
+      upgradeLockHeld: lock !== null && !upgradeLockStale(lock),
       currentVersion: snapshot.currentVersion,
       channel: config.channel,
       upgradeTemplate: config.upgradeCommandTemplate,
@@ -212,18 +276,36 @@ export function apply(ctx) {
     const config = readSettings(ctx)
     // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
     const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
-    const last = { command, startedAt: Date.now(), ok: false, finishedAt: null, timedOut: false, code: null, stdoutTail: '', stderrTail: '', error: null }
+    const last = { command, startedAt: Date.now(), ok: false, finishedAt: null, timedOut: false, stillRunning: false, code: null, stdoutTail: '', stderrTail: '', error: null }
     // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
     upgrade = { running: true, last }
+    try {
+      writeFileSync(UPGRADE_LOCK_PATH, JSON.stringify({ startedAt: last.startedAt, pid: process.pid }), 'utf8')
+    } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
+    console.warn('[dsh-maintain] 升级开始: ' + command)
     runUpgrade({ command, timeoutMs: UPGRADE_TIMEOUT_MS })
       .then((result) => {
         upgrade = {
           running: false,
-          last: { ...last, ok: result.ok, finishedAt: Date.now(), timedOut: result.timedOut, code: result.code, stdoutTail: result.stdoutTail, stderrTail: result.stderrTail },
+          last: { ...last, ok: result.ok, finishedAt: Date.now(), timedOut: result.timedOut, stillRunning: result.stillRunning === true, code: result.code, stdoutTail: result.stdoutTail, stderrTail: result.stderrTail },
         }
       })
       .catch((error) => {
         upgrade = { running: false, last: { ...last, finishedAt: Date.now(), error: error && error.message ? error.message : String(error) } }
+      })
+      .then(() => {
+        // stillRunning(强杀后进程树疑似仍在写全局目录)时保留锁文件,由过期机制收敛,
+        // 与"宿主死后幽灵锁"防线对称;正常落定即删
+        if (upgrade.last.stillRunning === true) {
+          console.warn('[dsh-maintain] 升级超时强杀且进程疑似仍存活,升级锁保留至过期: ' + UPGRADE_LOCK_PATH)
+        } else {
+          try {
+            rmSync(UPGRADE_LOCK_PATH, { force: true })
+          } catch (lockError) {
+            console.warn('[dsh-maintain] 升级锁删除失败(将由过期机制收敛): ' + (lockError?.message ?? lockError))
+          }
+        }
+        console.warn('[dsh-maintain] 升级结束: ok=' + upgrade.last.ok + (upgrade.last.code !== null ? ' 退出码=' + upgrade.last.code : '') + (upgrade.last.error ? ' ' + upgrade.last.error : ''))
       })
       // 升级结束后自动重新检查版本并重排轮询(命令可能改了本地版本)
       .then(runCheck, runCheck)
@@ -234,21 +316,21 @@ export function apply(ctx) {
 
   const routes = [
     {
-      path: '/api/maintain/status',
+      path: API_PATHS.STATUS,
       handler: route('GET', {}, async (req, res) => {
         sendJson(res, 200, currentStatus())
       }),
     },
     {
-      path: '/api/maintain/refresh',
+      path: API_PATHS.REFRESH,
       handler: route('POST', WRITE, async (req, res) => {
-        await runCheck()
+        await drainInFlightThenCheck()
         scheduleNext()
         sendJson(res, 200, currentStatus())
       }),
     },
     {
-      path: '/api/maintain/channel',
+      path: API_PATHS.CHANNEL,
       handler: route('POST', WRITE, async (req, res) => {
         const body = JSON.parse(await readBody(req))
         const channel = body && typeof body.channel === 'string' ? body.channel.trim() : ''
@@ -271,13 +353,13 @@ export function apply(ctx) {
           return
         }
         await settings.update(NAMESPACE, { channel })
-        await runCheck()
+        // 切通道无需重查:dist-tags 与 channel 无关,白名单已用现有 snapshot 校验
         scheduleNext()
         sendJson(res, 200, currentStatus())
       }),
     },
     {
-      path: '/api/maintain/upgrade-template',
+      path: API_PATHS.UPGRADE_TEMPLATE,
       handler: route('POST', WRITE, async (req, res) => {
         const body = JSON.parse(await readBody(req))
         const template = body && typeof body.template === 'string' ? body.template.trim() : ''
@@ -295,13 +377,18 @@ export function apply(ctx) {
       }),
     },
     {
-      path: '/api/maintain/poll-interval',
+      path: API_PATHS.POLL_INTERVAL,
       handler: route('POST', WRITE, async (req, res) => {
         const body = JSON.parse(await readBody(req))
         // 严格类型:字符串/ null 等经 Number() 宽转后可能变 0,静默翻转轮询开关
         const seconds = body && typeof body.seconds === 'number' ? body.seconds : NaN
         if (!Number.isFinite(seconds) || seconds < 0) {
           sendJson(res, 400, { error: '轮询间隔必须是不小于 0 的秒数' })
+          return
+        }
+        // 上界防溢出:超过 30 天的间隔无运维意义,且秒转毫秒会溢出令轮询静默失效
+        if (seconds > POLL_INTERVAL_MAX_SEC) {
+          sendJson(res, 400, { error: '轮询间隔不能超过 ' + POLL_INTERVAL_MAX_SEC + ' 秒' })
           return
         }
         const settings = ctx.get('settings')
@@ -315,12 +402,12 @@ export function apply(ctx) {
       }),
     },
     {
-      path: '/api/maintain/registry-base',
+      path: API_PATHS.REGISTRY_BASE,
       handler: route('POST', WRITE, async (req, res) => {
         const body = JSON.parse(await readBody(req))
         const base = body && typeof body.base === 'string' ? body.base.trim() : ''
         if (!isValidRegistryBase(base)) {
-          sendJson(res, 400, { error: 'registry 基地址必须以 http:// 或 https:// 开头' })
+          sendJson(res, 400, { error: 'registry 基地址须为 http(s) 地址且不带查询串或锚点' })
           return
         }
         const settings = ctx.get('settings')
@@ -329,18 +416,22 @@ export function apply(ctx) {
           return
         }
         await settings.update(NAMESPACE, { registryBase: base })
-        // 排空旧源的在途检查:runCheck 以 checkInFlight 去重,不排空会把旧源结果当作新源检查返回
-        if (checkInFlight) await checkInFlight
-        await runCheck()
+        await drainInFlightThenCheck()
         scheduleNext()
         sendJson(res, 200, currentStatus())
       }),
     },
     {
-      path: '/api/maintain/upgrade',
+      path: API_PATHS.UPGRADE,
       handler: route('POST', WRITE, async (req, res) => {
-        if (upgrade.running) {
-          sendJson(res, 409, { error: '升级进行中' })
+        // 与重启调度双向互斥:restartScheduled 置位到 exit(0) 执行的窗口内触发升级,
+        // detached 孤儿会与新宿主交错
+        if (upgrade.running || restartScheduled) {
+          sendJson(res, 409, { error: restartScheduled ? '重启已调度,禁止触发升级' : '升级进行中' })
+          return
+        }
+        if (upgradeLockStale(readUpgradeLock()) === false) {
+          sendJson(res, 409, { error: '存在未过期的升级锁(可能有残留升级子进程),等待锁过期或删除 ' + UPGRADE_LOCK_PATH })
           return
         }
         triggerUpgrade()
@@ -348,7 +439,7 @@ export function apply(ctx) {
       }),
     },
     {
-      path: '/api/maintain/restart',
+      path: API_PATHS.RESTART,
       handler: route('POST', WRITE, async (req, res) => {
         // 与升级门闩互斥:升级子进程经 detached+unref 存活于宿主死后,
         // 重启后新宿主门闩归零会放行第二次升级,双 npm install 并发写全局目录
@@ -378,6 +469,12 @@ export function apply(ctx) {
   }
 
   ctx.inject(['settings'], (settingsCtx) => {
+    // 方法面防御对齐 timer 软依赖:宿主升级变更 settings 服务方法面时干净降级并留痕,
+    // 不让 fiber 激活即抛错拖垮启动检查与全部写路由
+    if (!settingsCtx.settings || typeof settingsCtx.settings.register !== 'function' || typeof settingsCtx.settings.update !== 'function') {
+      console.warn('[dsh-maintain] settings 服务方法面不可用,版本检查停用,通道/设置保存不可用')
+      return
+    }
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA)
     // 启动检查放在 settings 注册之后:命名空间未注册时 readSettings 只能拿默认值,
     // 配置了镜像地址的部署会确定性检查失败

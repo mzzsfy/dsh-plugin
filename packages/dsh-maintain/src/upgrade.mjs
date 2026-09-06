@@ -42,6 +42,22 @@ function killTree(child, platform) {
   child.kill('SIGKILL')
 }
 
+// 宽限期兜底收敛时探测主进程是否仍存活:stillRunning=true 意味着升级门闩已释放
+// 但旧进程树可能仍在写全局目录,调用方应保持升级入口禁用直至确认退出
+function probeStillRunning(child, platform) {
+  if (!child.pid) return false
+  if (platform === 'win32') {
+    // win32 侧 taskkill 失败事件无同步回执,保守报告存活
+    return true
+  }
+  try {
+    process.kill(child.pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // 执行结束返回结果对象,一切失败(含 spawn 本身失败与树终止后进程拒死)都收敛为
 // ok:false,不抛错、不悬挂:kill 后等 close,宽限期到点仍未 close 即强制 resolve。
 export function runUpgrade({ command, timeoutMs }) {
@@ -86,6 +102,8 @@ export function runUpgrade({ command, timeoutMs }) {
         ok: code === 0,
         code,
         timedOut: killRequested,
+        // 宽限期兜底收敛(code=null 且非正常 close)时主进程可能仍存活
+        stillRunning: code === null && killRequested ? probeStillRunning(child, platform) : false,
         stdoutTail: getStdoutTail(),
         stderrTail: getStderrTail(),
         durationMs: Date.now() - startedAt,

@@ -45,7 +45,8 @@ test('场景:命令超时被强制终止', async () => {
   const result = await runUpgrade({ command: NODE + ' -e "' + HANG_SCRIPT + '"', timeoutMs: 2 * 1000 })
   assert.equal(result.ok, false)
   assert.equal(result.timedOut, true)
-  assert.ok(Date.now() - startedAt < 30 * 1000, '超时后应立即终止而不是等满挂起时长')
+  // 上界收紧为 timeoutMs + 强杀宽限 + 数秒余量,防 killTree 回归被宽 assertion 掩盖
+  assert.ok(Date.now() - startedAt < 2 * 1000 + 5 * 1000 + 5 * 1000, '超时后应在强杀宽限内收敛而不是等满挂起时长')
 })
 
 test('场景:超长输出截尾保留末尾', async () => {

@@ -96,11 +96,45 @@ const RESTART_TIMEOUT_MS = 30 * 1000
 const INDEX_URL = '/'
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
 
+// abort-aware 睡眠:轮询顺序循环的拍间间隔,中止即提前唤醒
+function restartSleep(ms, controller) {
+  return new Promise((resolve) => {
+    const done = () => {
+      controller.signal.removeEventListener('abort', done)
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    controller.signal.addEventListener('abort', done)
+  })
+}
+
+// 错误分类:重启 POST 失败后是否应视为"宿主失联"继续等待。
+// 无应答(TypeError/abort)属失联;502-504 网关错误发生在宿主退出窗口内,同样属失联——
+// 只有网关可达、宿主应答的状态(409 互斥/500 能力缺失等)才是活宿主的明确回绝。
+// LOGIC-BEGIN restartPostLost
+function restartPostLost(error) {
+  const hasStatus = error !== null && typeof error === 'object' && typeof error.status === 'number'
+  if (!hasStatus) return true
+  return error.status >= 502 && error.status <= 504
+}
+// LOGIC-END restartPostLost
+
 // 判定常量与 host 侧 core.mjs 保持一致:client 半区无法 import ESM,
 // test/parity.test.mjs 按 const 名正则提取对拍,修改任一侧必须同步。
 const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
 const VERDICT_UNKNOWN = 'unknown'
+
+// 非 2xx 应答抛带 status 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
+// 与"网络失联"(fetch reject TypeError/abort DOMException,无 status)
+// LOGIC-BEGIN apiError
+function apiError(response, payload) {
+  const error = new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
+  error.status = response.status
+  return error
+}
+// LOGIC-END apiError
 
 async function api(url, options) {
   const response = await fetch(url, {
@@ -108,7 +142,7 @@ async function api(url, options) {
     ...options,
   })
   const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
+  if (!response.ok) throw apiError(response, payload)
   return payload
 }
 
@@ -118,19 +152,18 @@ function post(url, body) {
 
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
 // 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询;
-// 总时长上限与宿主升级命令超时同语义:超限说明宿主或进程管理器异常,浮条转状态未知
+// 总时长上限与宿主升级命令超时同语义(见 parity 对拍):超限说明宿主或进程管理器异常,浮条转状态未知。
+// 代际令牌防重叠拍:顺序自调度(settle 后排下一拍),单请求带超时,stop 后迟到拍经验代际丢弃
 const UPGRADE_WATCH_MAX_MS = 10 * 60 * 1000
-const upgradeWatch = { timer: null, startedAt: 0, listeners: new Set() }
+const UPGRADE_POLL_TIMEOUT_MS = 5 * 1000
+const upgradeWatch = { generation: null, startedAt: 0, listeners: new Set() }
 
 function broadcastUpgradeStatus(status) {
   for (const listener of upgradeWatch.listeners) listener(status)
 }
 
 function stopUpgradeWatch() {
-  if (upgradeWatch.timer !== null) {
-    clearInterval(upgradeWatch.timer)
-    upgradeWatch.timer = null
-  }
+  upgradeWatch.generation = null
 }
 
 function subscribeUpgradeStatus(listener) {
@@ -139,27 +172,42 @@ function subscribeUpgradeStatus(listener) {
 }
 
 function ensureUpgradeWatch() {
-  if (upgradeWatch.timer !== null) return
+  if (upgradeWatch.generation !== null) return
+  const generation = {}
+  upgradeWatch.generation = generation
   upgradeWatch.startedAt = Date.now()
   showUpgradeFloat(null)
-  upgradeWatch.timer = setInterval(() => {
+  let pollFailures = 0
+  const tick = async () => {
+    if (upgradeWatch.generation !== generation) return
     if (Date.now() - upgradeWatch.startedAt >= UPGRADE_WATCH_MAX_MS) {
-      stopUpgradeWatch()
+      upgradeWatch.generation = null
       showUpgradeFloat('unknown')
       return
     }
-    api(STATUS_URL)
-      .then((next) => {
-        broadcastUpgradeStatus(next)
-        const upgrade = next ? next.upgrade : null
-        if (!upgrade || upgrade.running !== true) {
-          stopUpgradeWatch()
-          // 快照归零(last 为空)不做失败渲染,保持进行中文案,由重启流程接管
-          if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
-        }
-      })
-      .catch(() => {})
-  }, UPGRADE_POLL_MS)
+    try {
+      const next = await api(STATUS_URL, { signal: AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS) })
+      if (upgradeWatch.generation !== generation) return
+      pollFailures = 0
+      broadcastUpgradeStatus(next)
+      const upgrade = next ? next.upgrade : null
+      if (!upgrade || upgrade.running !== true) {
+        upgradeWatch.generation = null
+        // 快照归零(last 为空)不做失败渲染,保持进行中文案,由重启流程接管
+        if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
+        return
+      }
+    } catch (pollError) {
+      if (upgradeWatch.generation !== generation) return
+      pollFailures += 1
+      // 失败限频:首条与之后每 15 条(约 30 秒)一条,防宿主重启窗口刷屏
+      if (pollFailures === 1 || pollFailures % 15 === 0) {
+        console.warn('[dsh-maintain] 升级状态轮询失败: ' + (pollError && pollError.message ? pollError.message : String(pollError)))
+      }
+    }
+    if (upgradeWatch.generation === generation) setTimeout(tick, UPGRADE_POLL_MS)
+  }
+  tick()
 }
 
 function ensureUpgradeFloatStyle() {
@@ -195,6 +243,12 @@ function showUpgradeFloat(state) {
     text.textContent = '升级状态长时间未更新,请刷新页面查看'
   } else if (state.ok) {
     text.textContent = '升级完成,重启宿主后生效(版本与运维页可重启)'
+  } else if (state.stillRunning === true) {
+    // 强杀后进程树疑似仍存活:升级入口已由锁锁定直至过期,不做"可重跑"的误导指引
+    text.textContent = '升级超时已终止;旧进程可能仍在运行,升级入口已锁定直至其退出或锁过期'
+  } else if (state.timedOut === true) {
+    // 超时强杀即包管理器被中途杀死,全局目录可能半写,提示先验证再重启
+    text.textContent = '升级超时已终止;安装可能只完成一半,重启宿主前请先确认命令需否重跑'
   } else {
     // 浮条只做通知,stderr 摘要在版本与运维页完整展示
     text.textContent = '升级失败:' + (state.error || '详情见版本与运维页')
@@ -282,19 +336,26 @@ function VersionCard(props) {
       }, props.busy.refresh ? '检查中…' : '刷新'),
       h('button', {
         className: 'dm-btn',
-        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running),
+        // upgradeLockHeld 为 host 权威信号(锁文件时效化):升级进行中或残留锁未过期时禁用
+        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running)
+          || status.upgradeLockHeld === true,
         onClick: props.onUpgrade,
       }, props.upgradeArmed ? '确认升级' : '升级'),
     ),
     h('div', { className: 'dm-row' },
       h('span', { className: 'dm-row__label' }, '追踪通道'),
       tagNames.length > 0
+        // 持久化通道不在通道表中(registry 侧删 tag/换镜像):作为标注项保留在 select 内,
+        // 保留切换出口(否则通道切换能力不可达,只能手改 settings.yaml)
         ? h('select', {
             className: 'dm-select',
             value: tagNames.indexOf(status.channel) >= 0 ? status.channel : tagNames[0],
             onChange: (e) => props.onChannel(e.target.value),
             disabled: props.busy.channel || props.restarting,
-          }, tagNames.map((name) => h('option', { key: name, value: name }, name + (tags[name] ? '  (' + tags[name] + ')' : ''))))
+          }, (tagNames.indexOf(status.channel) >= 0 ? [] : [status.channel]).concat(tagNames)
+            .map((name) => h('option', { key: name, value: name }, name
+              + (name === status.channel && tagNames.indexOf(name) < 0 ? '  (不在通道表中,请重新选择)' : '')
+              + (tags[name] ? '  (' + tags[name] + ')' : ''))))
         : h('span', { className: 'dm-meta' }, status.channel + '(通道表未就绪)'),
       checked ? h('span', { className: 'dm-meta' }, '上次检查 ' + checked) : null,
       status.checkError ? h('span', { className: 'dm-error' }, status.checkError) : null,
@@ -355,11 +416,12 @@ function UpgradeCard(props) {
     !upgrade.running && last
       ? h('div', { className: 'dm-row' },
           last.ok ? h('span', { className: 'dm-ok' }, '升级完成,重启宿主后生效')
-            : h('span', { className: 'dm-error' }, '升级失败' + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '') + (last.timedOut ? ',已超时终止' : '')),
+            : h('span', { className: 'dm-error' }, '升级失败' + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '') + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
           h('span', { className: 'dm-spacer' }),
           last.ok ? h('button', {
             className: 'dm-btn',
-            disabled: props.restarting,
+            // 与 OpsCard 入口行为归一:appExit 缺失时必然 500,不得开放重启入口
+            disabled: props.restarting || !props.status.canRestart,
             onClick: props.onRestart,
           }, props.restartArmed ? '确认重启' : '重启宿主') : null,
         )
@@ -396,8 +458,8 @@ function MaintainApp() {
   const [upgradeArmed, setUpgradeArmed] = useState(false)
   const [restartArmed, setRestartArmed] = useState(false)
   const [restarting, setRestarting] = useState(false)
-  const restartLostRef = useRef(false)
-  const restartPidRef = useRef(null)
+  // 重启探测的上一拍快照 {lost,pid,bootAt}:null=未在等待态
+  const restartPrevRef = useRef(null)
   const restartPendingRef = useRef(false)
 
   function markBusy(key, value) {
@@ -422,10 +484,13 @@ function MaintainApp() {
   }, [])
 
   // 重启判定与 core.mjs shouldReloadAfterRestart 同源:client 半区无法 import ESM,修改需两处同步。
+  // prev/next 均为 {lost,pid,bootAt} 快照:lost=经历失联(强信号);bootAt=宿主进程启动时刻,
+  // 变化即重启(容器 pid 恒 1 场景的唯一可靠信号);pid 比对为 bootAt 缺失时的退化路径
   // LOGIC-BEGIN shouldReloadAfterRestart
-  function shouldReloadAfterRestart(params) {
-    if (params.lost) return true
-    return typeof params.pidBefore === 'number' && typeof params.pidAfter === 'number' && params.pidBefore !== params.pidAfter
+  function shouldReloadAfterRestart(prev, next) {
+    if (prev.lost) return true
+    if (typeof prev.bootAt === 'number' && typeof next.bootAt === 'number') return prev.bootAt !== next.bootAt
+    return typeof prev.pid === 'number' && typeof next.pid === 'number' && prev.pid !== next.pid
   }
   // LOGIC-END shouldReloadAfterRestart
 
@@ -443,49 +508,59 @@ function MaintainApp() {
   // 重启等待的单拍决策:超时收尾;status 失败记失联;宿主重启判定通过后还须主文档可加载才刷新——
   // status 可达只证明 API 路由已注册,宿主页面服务的 fallback 注册晚于插件路由,
   // 该窗口期内整页刷新会拿到宿主裸 404
-  async function restartTick({ now, deadlineAt, lost, pidBefore, statusFetch, pageFetch }) {
-    if (now >= deadlineAt) return { action: 'timeout', lost }
+  async function restartTick({ now, deadlineAt, prev, statusFetch, pageFetch }) {
+    if (now >= deadlineAt) return { action: 'timeout', lost: prev.lost }
     let next
     try {
       next = await statusFetch()
     } catch {
       return { action: 'wait', lost: true }
     }
-    if (!shouldReloadAfterRestart({ lost, pidBefore, pidAfter: next ? next.pid : null })) {
-      return { action: 'wait', lost }
+    const snapshot = { lost: false, pid: next ? next.pid : null, bootAt: next ? next.bootAt : null }
+    if (!shouldReloadAfterRestart(prev, snapshot)) {
+      return { action: 'wait', lost: prev.lost }
     }
     const ready = await pageReady(pageFetch())
-    return { action: ready ? 'reload' : 'wait', lost }
+    return { action: ready ? 'reload' : 'wait', lost: prev.lost }
   }
   // LOGIC-END restartTick
 
-  // 重启确认后轮询拍决策(restartTick):等待态细节见 restartTick 段内注释,超时转人工处理
+  // 重启确认后顺序轮询(restartTick 拍决策):任意时刻至多一拍在途(settle 后排下一拍),
+  // 消除 setInterval 重叠拍的失联标记回退与超时后迟到拍 reload 竞态;卸载经 AbortController 中止
   useEffect(() => {
     if (!restarting) {
-      restartLostRef.current = false
-      restartPidRef.current = null
+      restartPrevRef.current = null
       return
     }
     const deadlineAt = Date.now() + RESTART_TIMEOUT_MS
-    const timer = setInterval(() => {
-      restartTick({
-        now: Date.now(),
-        deadlineAt,
-        lost: restartLostRef.current,
-        pidBefore: restartPidRef.current,
-        statusFetch: () => api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) }),
-        pageFetch: () => fetch(INDEX_URL, { cache: 'no-store', signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) }),
-      }).then((tick) => {
-        restartLostRef.current = tick.lost
-        if (tick.action === 'reload') window.location.reload()
+    const controller = new AbortController()
+    const probeSignal = () => AbortSignal.any([controller.signal, AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS)])
+    ;(async () => {
+      while (!controller.signal.aborted) {
+        const prev = restartPrevRef.current
+        if (prev === null) return
+        const tick = await restartTick({
+          now: Date.now(),
+          deadlineAt,
+          prev,
+          statusFetch: () => api(STATUS_URL, { signal: probeSignal() }),
+          pageFetch: () => fetch(INDEX_URL, { cache: 'no-store', signal: probeSignal() }),
+        })
+        if (controller.signal.aborted) return
+        restartPrevRef.current = { ...prev, lost: tick.lost }
+        if (tick.action === 'reload') {
+          window.location.reload()
+          return
+        }
         if (tick.action === 'timeout') {
-          clearInterval(timer)
           setRestarting(false)
           setError('重启未在 ' + RESTART_TIMEOUT_MS / 1000 + ' 秒内完成,宿主可能未被拉起,请检查进程管理器后手动刷新')
+          return
         }
-      }, () => {})
-    }, RESTART_POLL_MS)
-    return () => clearInterval(timer)
+        await restartSleep(RESTART_POLL_MS, controller)
+      }
+    })()
+    return () => controller.abort()
   }, [restarting])
 
   function onRefresh() {
@@ -541,9 +616,16 @@ function MaintainApp() {
   }
 
   // 与 host 的 isValidRegistryBase 同源:client 半区无法 import ESM,修改需两处同步。
+  // 拒绝带 query/hash 的输入:拼接 dist-tags API 路径时 search 会吞掉路径导致检查恒败
   // LOGIC-BEGIN isValidRegistryBase
   function isValidRegistryBase(value) {
-    return typeof value === 'string' && /^https?:\/\//i.test(value.trim())
+    if (typeof value !== 'string') return false
+    try {
+      const parsed = new URL(value.trim())
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.search === '' && parsed.hash === ''
+    } catch {
+      return false
+    }
   }
   // LOGIC-END isValidRegistryBase
 
@@ -555,7 +637,7 @@ function MaintainApp() {
       return
     }
     if (!isValidRegistryBase(base)) {
-      notify('registry 基地址必须以 http:// 或 https:// 开头', 'error')
+      notify('registry 基地址须为 http(s) 地址且不带查询串或锚点', 'error')
       return
     }
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
@@ -588,26 +670,43 @@ function MaintainApp() {
     }
     setRestartArmed(false)
     setError(null)
-    // 宿主重启后内存快照归零,升级观察与浮条随重启作废
-    stopUpgradeWatch()
-    removeUpgradeFloat()
-    restartLostRef.current = false
-    restartPidRef.current = status && typeof status.pid === 'number' ? status.pid : null
-    // 先取实时 status 修正 pid 基线(页面可能经历过一次未经面板感知的宿主重启),失败退回已有快照
+    restartPrevRef.current = {
+      lost: false,
+      pid: status && typeof status.pid === 'number' ? status.pid : null,
+      bootAt: status && typeof status.bootAt === 'number' ? status.bootAt : null,
+    }
+    // 先取实时 status 修正基线(页面可能经历过一次未经面板感知的宿主重启),失败退回已有快照
     restartPendingRef.current = true
     api(STATUS_URL, { signal: AbortSignal.timeout(RESTART_POLL_TIMEOUT_MS) })
       .then((fresh) => {
-        if (fresh && typeof fresh.pid === 'number') restartPidRef.current = fresh.pid
+        if (fresh) {
+          restartPrevRef.current = {
+            lost: false,
+            pid: typeof fresh.pid === 'number' ? fresh.pid : restartPrevRef.current.pid,
+            bootAt: typeof fresh.bootAt === 'number' ? fresh.bootAt : restartPrevRef.current.bootAt,
+          }
+        }
       })
       .catch(() => {})
       .then(() => {
         setRestarting(true)
+        // 宿主重启后内存快照归零,升级观察与浮条随重启作废;
+        // 放在受理成功之后:明确回绝(409 互斥)时升级仍在跑,观察器必须存活
+        stopUpgradeWatch()
+        removeUpgradeFloat()
         return post(RESTART_URL)
       })
-      .catch(() => {
-        // 等待期内一切非成功应答(连接错误/网关 5xx/业务错误)都不构成宿主状态证据,
-        // 一律视为失联继续等待,由恢复探测或总时长超时收尾,不逐一区分错误类别
-        restartLostRef.current = true
+      .catch((restartError) => {
+        if (restartPostLost(restartError)) {
+          // 无应答(连接失败/网关失联/中止)不构成宿主状态证据:视为失联继续等待,
+          // 由恢复探测或总时长超时收尾
+          if (restartPrevRef.current !== null) restartPrevRef.current = { ...restartPrevRef.current, lost: true }
+          return
+        }
+        // 有应答的明确回绝(409 升级互斥/500 能力缺失等):宿主未退出,不得进入等待轮询,
+        // 否则会凭"活宿主 + pageReady 恒真"误判已重启而整页刷新
+        setRestarting(false)
+        notify('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)), 'error')
       })
       .then(() => { restartPendingRef.current = false })
   }
