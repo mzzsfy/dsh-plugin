@@ -30,9 +30,12 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const modules = []
   const shown = []
+  const windowListeners = {}
   const windowStub = {
     __ModuleLoader__: { load: (module) => { modules.push(module) } },
-    addEventListener: () => {},
+    addEventListener: (type, fn) => { (windowListeners[type] = windowListeners[type] || []).push(fn) },
+    removeEventListener: (type, fn) => { windowListeners[type] = (windowListeners[type] || []).filter((f) => f !== fn) },
+    listeners: windowListeners,
     localStorage: storage,
   }
   const documentStub = {
@@ -239,6 +242,61 @@ test('Given 失焦期间挂上的当前会话高亮 When 页面重新可见 Then
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '返回后当前会话提醒应消失')
   assert.equal(dom.rows[1].classList.set.has('tn-sess-hl'), true, '其他会话的提醒不应被清除')
   winStub['turn-notify:polling'].abort()
+})
+
+test('Given 失焦挂上的当前会话高亮 When 窗口重获焦点 Then 提醒消失', async () => {
+  // 对齐 SessionStatusDots 的事实驱动语义:切到别的应用窗口不触发
+  // visibilitychange(标签页未切、未最小化),焦点通道负责这一场景
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-foc', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod, window: winStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话甲 — DeepSeek Harness', hasFocus: () => false, ...dom },
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true)
+  mod.__test.start()
+  const focusHandlers = (winStub.listeners.focus || []).slice()
+  assert.ok(focusHandlers.length > 0, 'window focus 未监听')
+  for (const fn of focusHandlers) fn()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '重获焦点后当前会话提醒应消失')
+  winStub['turn-notify:polling'].abort()
+})
+
+test('Given 行处于运行状态 When 通知认领 Then 不挂高亮', async () => {
+  // 对齐 SessionStatusDots:运行中的会话由原生状态点表达,闪烁只表达"状态已更新"
+  const dom = makeSidebarDom([{ leafText: '会话甲', rowText: '进行中会话甲 3分钟' }])
+  const hlUnits = [
+    { id: 'u-run', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: dom,
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '运行中的会话不应闪烁')
+})
+
+test('Given 已挂高亮 When 行进入运行状态 Then 清除闪烁', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-done', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: dom,
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true)
+  // 会话又开跑:状态点文案回到行内
+  dom.rows[0].textContent = '进行中会话甲 5分钟'
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '会话运行后应停止闪烁')
 })
 
 test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路不抛', async () => {
