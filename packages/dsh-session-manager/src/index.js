@@ -18,10 +18,9 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-  DELETE_CODES,
   artifactLooksBlank,
+  aggregateDeleteOutcome,
   deleteEligibility,
-  deleteOutcome,
   isSessionRunning,
   mergeDeletedEntry,
   removeDeletedEntry,
@@ -65,27 +64,23 @@ const PERIODIC_TICK_MS = 60 * 1000
 // 台账单次读改写超时:宿主存储域挂起时锁内 job 超时放行,防互斥链死锁与 inFlight 泄漏
 const LEDGER_OP_TIMEOUT_MS = 10 * 1000
 
-// 路由响应文案;导出供测试断言与实现同步
+// 路由响应文案;导出供测试断言与实现同步。
+// trash 半失败聚合 5 条在 core.DELETE_MESSAGES(经 aggregateDeleteOutcome 组装),此处不重复
 export const MESSAGES = {
   unsupportedBackend: '当前存储后端不支持按会话删除',
   notArchived: '仅已归档会话可删除',
   unknownSession: '会话不存在',
   running: '运行中的会话不可删除',
   trashFailed: '移入回收站失败',
-  partial: '已移入回收站,但移除列表记录失败',
-  archiveCleanup: '已移入回收站,但移除归档记录失败',
-  ledgerFailed: '已移入回收站,但重挂载记录失败',
   notRestored: '会话产物不在持久层,请先到系统回收站还原后重试',
   ghostCleanup: '产物已不存在,已完成列表清理',
   ghostDetach: '产物已不存在,但移除列表记录失败',
   ghostArchiveSuffix: ',且移除归档记录失败',
   noWorkspace: '未找到会话所属工作区,无法重新挂载',
   ledgerCleanup: '已重新挂载,但清除台账记录失败;可在「已删除」区移除记录收尾',
-  ledgerSuffix: ',且重挂载记录失败',
   inFlight: '该会话正在删除中,请稍后重试',
   badJsonBody: '请求体不是合法 JSON',
   systemError: '操作失败(系统级错误,详见服务端日志)',
-  runningDuringTrash: '警告:回收期间会话恢复运行,产物已移入回收站;建议检查会话状态',
 }
 
 // trash 执行器出口:进程级唯一 OS 副作用注入点,测试经此桩替
@@ -226,6 +221,9 @@ export function apply(ctx, config) {
         if (archived.has(String(header.id))) continue
         const live = sessionsService && sessionsService.get(header.id)
         const running = isSessionRunning({ agents, sessionId: header.id })
+        // 运行中永不入选归档,超期 running 在此早退免付产物 IO(64KB 读);
+        // core.selectArchiveCandidates 的 !running 过滤保留作第二道防线
+        if (running) continue
         const located = persistence && persistence.locate(header)
         // locate 缺失(第三方后端不支持定位)与产物不可读同规跳过:仅凭 createdAt
         // 判活跃会绕过 mtime 保护,与 delete 的 unsupportedBackend 拒绝口径对齐
@@ -349,10 +347,14 @@ export function apply(ctx, config) {
   async function cleanupDeletedSession(sessionId) {
     let suffix = ''
     const detachError = await detachSession(ctx, sessionId)
-    if (detachError !== undefined) suffix = MESSAGES.ghostDetach
+    if (detachError !== undefined) {
+      ctx.logger && ctx.logger.warn('session-manager 幽灵清理 detach 失败(' + sessionId + '): ' + String(detachError && detachError.stack || detachError))
+      suffix = MESSAGES.ghostDetach
+    }
     try {
       await removeArchivedId(sessionId)
-    } catch {
+    } catch (error) {
+      ctx.logger && ctx.logger.warn('session-manager 幽灵清理归档移除失败(' + sessionId + '): ' + String(error && error.stack || error))
       suffix += MESSAGES.ghostArchiveSuffix
     }
     return suffix
@@ -484,17 +486,16 @@ export function apply(ctx, config) {
           } catch (error) {
             trashError = error
           }
-          const outcome = deleteOutcome({ located: true, trashError })
-          if (outcome.code === DELETE_CODES.TRASH_FAILED) {
-            sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(outcome.error) })
+          if (trashError !== undefined) {
+            sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(trashError) })
             return
           }
           // 执行期翻转检测:OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行。
           // 产物已移走,中断只会更糟,照常完成收尾,但把不变量破坏变为可观测事件
-          if (isSessionRunning({ agents: ctx.get('agents'), sessionId })) {
+          const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
+          if (runningDuringTrash) {
             ctx.logger && ctx.logger.warn('session-manager 删除执行期间会话恢复运行: ' + sessionId)
           }
-          const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
           // 台账在 trash 成功后立即记录:产物已进回收站,后续任何半失败都不影响还原资格;
           // 台账失败只降级重挂载便利,不回滚删除
           let ledgerError
@@ -502,30 +503,29 @@ export function apply(ctx, config) {
             await recordDeletedEntry(sessionId, artifactDir)
           } catch (error) {
             ledgerError = error
+            ctx.logger && ctx.logger.warn('session-manager 台账记录失败(' + sessionId + '): ' + String(error && error.stack || error))
           }
-          const ledgerFailedSuffix = ledgerError !== undefined ? MESSAGES.ledgerSuffix : ''
-          // 执行期翻转向用户显式告警;各 partial 分支聚合该警告
-          const trashWindowSuffix = runningDuringTrash ? ';' + MESSAGES.runningDuringTrash : ''
           const detachError = await detachSession(ctx, sessionId)
           if (detachError !== undefined) {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.partial + ledgerFailedSuffix + trashWindowSuffix })
-            return
+            ctx.logger && ctx.logger.warn('session-manager detach 失败(' + sessionId + '): ' + String(detachError && detachError.stack || detachError))
           }
           // 归档集合同步清理:残留 id 会让面板行持续可见;detach 失败时不清理,
           // 保留归档资格供重试
-          try {
-            await removeArchivedId(sessionId)
-          } catch {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.archiveCleanup + ledgerFailedSuffix + trashWindowSuffix })
-            return
+          let archiveCleanupFailed = false
+          if (detachError === undefined) {
+            try {
+              await removeArchivedId(sessionId)
+            } catch (error) {
+              archiveCleanupFailed = true
+              ctx.logger && ctx.logger.warn('session-manager 归档清理失败(' + sessionId + '): ' + String(error && error.stack || error))
+            }
           }
-          if (ledgerError !== undefined) {
-            sendJson(res, 200, { ok: true, partial: true, message: MESSAGES.ledgerFailed + trashWindowSuffix })
-            return
-          }
-          sendJson(res, 200, runningDuringTrash
-            ? { ok: true, message: MESSAGES.runningDuringTrash }
-            : { ok: true })
+          sendJson(res, 200, aggregateDeleteOutcome({
+            detachFailed: detachError !== undefined,
+            archiveCleanupFailed,
+            ledgerFailed: ledgerError !== undefined,
+            runningDuringTrash,
+          }))
         } catch (error) {
           respondError(ctx, res, error)
         } finally {

@@ -7,10 +7,11 @@ import assert from 'node:assert/strict'
 import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
+  DELETE_MESSAGES,
+  aggregateDeleteOutcome,
   archiveToastStep,
   artifactLooksBlank,
   deleteEligibility,
-  deleteOutcome,
   diffArchived,
   isSessionRunning,
   mergeDeletedEntry,
@@ -149,11 +150,31 @@ test('非归档会话拒绝删除', () => {
   assert.equal(denied.code, 'not-archived')
 })
 
-test('删除失败矩阵逐格', () => {
-  assert.equal(deleteOutcome({ located: false }).code, 'unsupported')
-  assert.equal(deleteOutcome({ located: true, trashError: new Error('no trash') }).code, 'trash-failed')
-  assert.equal(deleteOutcome({ located: true, detachError: new Error('boom') }).code, 'partial')
-  assert.equal(deleteOutcome({ located: true }).code, 'deleted')
+test('删除收尾聚合:失败矩阵折叠为三形态响应体', () => {
+  const R = DELETE_MESSAGES.runningDuringTrash
+  // 全成功无警告:无多余键(index.test deepEqual 锁定同形态)
+  assert.deepEqual(aggregateDeleteOutcome({}), { ok: true })
+  // 单一失败:主文案优先级 detach → 归档清理 → 台账
+  assert.deepEqual(aggregateDeleteOutcome({ detachFailed: true }), { ok: true, partial: true, message: DELETE_MESSAGES.partial })
+  assert.deepEqual(aggregateDeleteOutcome({ archiveCleanupFailed: true }), { ok: true, partial: true, message: DELETE_MESSAGES.archiveCleanup })
+  assert.deepEqual(aggregateDeleteOutcome({ ledgerFailed: true }), { ok: true, partial: true, message: DELETE_MESSAGES.ledgerFailed })
+  // 双失败:高优先级主文案 + 台账后缀
+  assert.deepEqual(
+    aggregateDeleteOutcome({ detachFailed: true, ledgerFailed: true }),
+    { ok: true, partial: true, message: DELETE_MESSAGES.partial + DELETE_MESSAGES.ledgerSuffix },
+  )
+  // 运行中翻转警告后缀并入一切形态
+  assert.deepEqual(
+    aggregateDeleteOutcome({ detachFailed: true, ledgerFailed: true, runningDuringTrash: true }),
+    { ok: true, partial: true, message: DELETE_MESSAGES.partial + DELETE_MESSAGES.ledgerSuffix + ';' + R },
+  )
+  // 全失败
+  assert.deepEqual(
+    aggregateDeleteOutcome({ detachFailed: true, archiveCleanupFailed: true, ledgerFailed: true, runningDuringTrash: true }),
+    { ok: true, partial: true, message: DELETE_MESSAGES.partial + DELETE_MESSAGES.ledgerSuffix + ';' + R },
+  )
+  // 全成功警告态:非 partial 形态(ok+message,无 partial 键)
+  assert.deepEqual(aggregateDeleteOutcome({ runningDuringTrash: true }), { ok: true, message: R })
 })
 
 test('运行中判定:agent status running 即运行中,注册表缺失视为非运行', () => {

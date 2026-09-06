@@ -5,13 +5,6 @@ export const DAY_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_AUTO_ARCHIVE_DAYS = 7
 export const DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS = 24
 
-export const DELETE_CODES = {
-  UNSUPPORTED: 'unsupported',
-  TRASH_FAILED: 'trash-failed',
-  PARTIAL: 'partial',
-  DELETED: 'deleted',
-}
-
 /** 更新时间 = max(createdAt, 最近活跃时间)。 */
 export function updatedAtOf(header, activityAtMs) {
   return Math.max(header.createdAt, activityAtMs ?? 0)
@@ -73,12 +66,29 @@ export function isSessionRunning({ agents, sessionId }) {
   return Boolean(entry && entry.status === 'running')
 }
 
-/** 删除失败矩阵:locate → trash → detach 各失败点映射为稳定结果码。 */
-export function deleteOutcome({ located, trashError, detachError }) {
-  if (!located) return { code: DELETE_CODES.UNSUPPORTED }
-  if (trashError !== undefined) return { code: DELETE_CODES.TRASH_FAILED, error: trashError }
-  if (detachError !== undefined) return { code: DELETE_CODES.PARTIAL, error: detachError }
-  return { code: DELETE_CODES.DELETED }
+// 删除半失败聚合文案:trash 成功后各收尾失败点的主文案与后缀,host 响应逐键消费
+export const DELETE_MESSAGES = {
+  partial: '已移入回收站,但移除列表记录失败',
+  archiveCleanup: '已移入回收站,但移除归档记录失败',
+  ledgerFailed: '已移入回收站,但重挂载记录失败',
+  ledgerSuffix: ',且重挂载记录失败',
+  runningDuringTrash: '警告:回收期间会话恢复运行,产物已移入回收站;建议检查会话状态',
+}
+
+/**
+ * 删除收尾半失败聚合:trash 成功后的失败矩阵折叠为单一响应体。
+ * 主文案优先级 detach → 归档清理 → 台账,台账失败以后缀并入前两者,运行中翻转
+ * 以警告后缀并入一切形态。三形态逐键一致:{ok} / {ok,message} / {ok,partial,message}。
+ */
+export function aggregateDeleteOutcome({ detachFailed = false, archiveCleanupFailed = false, ledgerFailed = false, runningDuringTrash = false }) {
+  const warningSuffix = runningDuringTrash ? ';' + DELETE_MESSAGES.runningDuringTrash : ''
+  const ledgerSuffix = ledgerFailed ? DELETE_MESSAGES.ledgerSuffix : ''
+  if (detachFailed) return { ok: true, partial: true, message: DELETE_MESSAGES.partial + ledgerSuffix + warningSuffix }
+  if (archiveCleanupFailed) return { ok: true, partial: true, message: DELETE_MESSAGES.archiveCleanup + ledgerSuffix + warningSuffix }
+  if (ledgerFailed) return { ok: true, partial: true, message: DELETE_MESSAGES.ledgerFailed + warningSuffix }
+  return runningDuringTrash
+    ? { ok: true, message: DELETE_MESSAGES.runningDuringTrash }
+    : { ok: true }
 }
 
 /** 空白产物判定:读到 EOF 且换行数不足两行,即仅 header(或空)视为空白。 */

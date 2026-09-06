@@ -128,3 +128,22 @@ test('parity 文案:client 确认态文案与 host MESSAGES.unsupportedBackend �
   assert.ok(match, 'index.js 缺少 unsupportedBackend 文案')
   assert.ok(CLIENT_SRC.includes(match[1]), 'client.js 确认态文案与 host 漂移')
 })
+
+test('parity API 路径:client 字面量与 host 路由注册互为镜像', () => {
+  // 跨半区契约拼错只会在运行时 404,双向集合相等断言防漂移
+  const clientUrls = new Set([...CLIENT_SRC.matchAll("'(/api/session-manager/[^']*)'")].map((m) => m[1])
+    .filter((url) => !url.endsWith('/*')))
+  assert.ok(clientUrls.size >= 7, 'client.js API 路径字面量异常减少')
+  const hostPaths = new Set([...INDEX_SRC.matchAll(/path: '(\/api\/session-manager\/[^']*)'/g)].map((m) => m[1]))
+  assert.deepEqual([...hostPaths].sort(), [...clientUrls].sort(), 'client 与 host 的 API 路径集合不一致')
+})
+
+test('源码契约:Toast 差分 Set 每帧构建一次(禁止 filter 谓词内 new Set)', () => {
+  // 违规必为 new Set(...).has(...) 紧邻链式;合规形态是 new Set 赋值与 baseline.has 分离。
+  // 元断言先自证正则能命中回归样本,防正则本身失效时守卫恒绿
+  const regression = "ids.filter((id) => !new Set(previous.ids).has(id))"
+  const guard = /new Set\([^)]*\)\.has\(/
+  assert.ok(guard.test(regression), '守卫正则必须命中回归样本')
+  const slice = CLIENT_SRC.slice(MIRROR_START, MIRROR_END)
+  assert.ok(!guard.test(slice), '差分 new Set 必须逐帧构建一次,禁止谓词内逐元素重建')
+})
