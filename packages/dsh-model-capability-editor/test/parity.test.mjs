@@ -20,10 +20,10 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE,'
+      + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE, INPUT_MODES,'
       + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
-      + ' anchorsBroken, resolveTargetId, unwrapResult, makeSettingsFace, describeNs, modelsOf,'
+      + ' anchorsBroken, resolveTargetId, unwrapResult, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
       + ' writeModels, saveModels, draftsFromModels };',
   )
   return factory()
@@ -40,10 +40,52 @@ test('parity: 共享常量双副本一致', () => {
   assert.equal(C.INPUT_UNSET, logic.INPUT_UNSET)
   assert.equal(C.INPUT_TEXT, logic.INPUT_TEXT)
   assert.equal(C.INPUT_TEXT_IMAGE, logic.INPUT_TEXT_IMAGE)
+  assert.deepEqual(C.INPUT_MODES, logic.INPUT_MODES)
 })
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId } = L
+
+  test(prefix + '竞品痕迹:标记字段命中与非对象条目跳过', () => {
+    assert.deepEqual(
+      detectCompetitorTraces([{ id: 1, reasoningEffortsUnset: true }, { id: 'c', inputUnset: null }, { id: 'b' }]),
+      ['1', 'c'],
+    )
+    assert.deepEqual(detectCompetitorTraces(undefined), [])
+    assert.deepEqual(detectCompetitorTraces([{ id: 'clean' }]), [])
+  })
+
+  test(prefix + 'applyDraft: 冻结种子未触及跳过重写,他方并发修改不被回滚', () => {
+    // 加载时点种子 { low: 'low' };此后他方把线上值改为 'xhigh'
+    const draft = draftsFromModels([{ id: 'm', reasoningEfforts: { low: 'low' }, input: ['text'] }]).get('m')
+    assert.ok(draft.seed, 'draftsFromModels 产物必须携带冻结种子')
+    // 他方修改后的基线:未触及草稿不重写,他方值存活
+    const untouched = applyDraft({ id: 'm', reasoningEfforts: { low: 'xhigh' }, input: ['text'] }, draft)
+    assert.deepEqual(untouched.reasoningEfforts, { low: 'xhigh' }, '零编辑草稿不得回滚他方档位')
+    // 只改 input:efforts 判定仍按冻结种子,他方档位值存活,仅 input 被改写
+    const inputOnly = applyDraft(
+      { id: 'm', reasoningEfforts: { low: 'xhigh' }, input: ['text', 'image'] },
+      { ...draft, inputMode: 'text-image' },
+    )
+    assert.deepEqual(inputOnly.reasoningEfforts, { low: 'xhigh' }, '只改 input 不得回滚他方档位')
+    assert.deepEqual(inputOnly.input, ['text', 'image'])
+    // 无 seed 的裸草稿(旧测试夹具形态)回退写回时点投影:回退 seed 必须真实参与判定
+    const revert = applyDraft(
+      { id: 'm', reasoningEfforts: { low: 'low' }, input: ['text'] },
+      { checked: { low: true }, spellings: { low: 'v2' }, inputMode: 'unset' },
+    )
+    assert.deepEqual(revert.reasoningEfforts, { low: 'v2' }, '裸草稿拼写与写回时点投影不一致必须重写')
+    const bareInput = applyDraft(
+      { id: 'm', reasoningEfforts: { low: 'low' }, input: ['text'] },
+      { checked: { low: true }, spellings: { low: 'low' }, inputMode: 'text-image' },
+    )
+    assert.deepEqual(bareInput.input, ['text', 'image'], '裸草稿 inputMode 与写回时点投影不一致必须重写')
+    const bareUntouched = applyDraft(
+      { id: 'm', reasoningEfforts: { low: 'low' }, input: ['text'] },
+      { checked: { low: true }, spellings: { low: 'low' }, inputMode: 'text' },
+    )
+    assert.deepEqual(bareUntouched.reasoningEfforts, { low: 'low' }, '裸草稿与投影全一致即未触及')
+  })
 
   test(prefix + '目标模型解析:改名落盘(原 id 消失)采信新 ID;撞名兄弟 id 回落原 ID', () => {
     assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto-v2'])), 'auto-v2', '原 id 已从基线消失 = 改名已落盘')
@@ -144,10 +186,30 @@ function defineScenarios(prefix, L) {
     const drafts = draftsFromModels([
       { id: 1, reasoningEfforts: { off: null }, input: ['text'] },
       { id: 'b', input: ['text', 'image'] },
+      null,
     ])
-    assert.deepEqual(drafts.get('1'), { checked: { off: true }, spellings: { off: '' }, inputMode: 'text' })
-    assert.deepEqual(drafts.get('b'), { checked: {}, spellings: {}, inputMode: 'text-image' })
+    assert.deepEqual(drafts.get('1'), {
+      checked: { off: true }, spellings: { off: '' }, inputMode: 'text',
+      seed: { checked: { off: true }, spellings: { off: '' }, inputMode: 'text' },
+    })
+    assert.deepEqual(drafts.get('b'), {
+      checked: {}, spellings: {}, inputMode: 'text-image',
+      seed: { checked: {}, spellings: {}, inputMode: 'text-image' },
+    })
     assert.equal(drafts.get(1), undefined, '键一律字符串,与 DOM/UI 侧标识对齐')
+    // 非对象条目跳过(手写 yaml 旁路输入,渲染侧另有 filter 兜底)
+    assert.equal(drafts.size, 2)
+  })
+
+  test(prefix + 'mergeBaselineModels: 非对象条目原样透传', () => {
+    const baseline = [{ id: 'm1', reasoningEfforts: { low: 'low' } }, null]
+    const { models, droppedDraftIds } = mergeBaselineModels(baseline, new Map())
+    assert.deepEqual(models, baseline, 'null 条目保真透传,不静默删除')
+    assert.deepEqual(droppedDraftIds, [])
+    // null 条目不参与草稿命中,不得 TypeError
+    const withDraft = mergeBaselineModels(baseline, new Map([['m1', { checked: { low: true }, spellings: { low: '' }, inputMode: 'unset' }]]))
+    assert.deepEqual(withDraft.models[0].reasoningEfforts, { low: 'low' })
+    assert.equal(withDraft.models[1], null)
   })
 
   test(prefix + '草稿分桶:切换不丢弃,切回恢复,null 路由不存', () => {
@@ -171,12 +233,14 @@ test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
 })
 
-// 保存流双副本守卫:client.js 的 makeSettingsFace/describeNs/modelsOf/
+// 保存流双副本守卫:client.js 的 unwrapResult/makeSettingsFace/describeNs/modelsOf/
 // writeModels/saveModels/draftsFromModels 全段与 logic.mjs 必须逐字符一致(单文件
 // 格式无法 require,靠此测试防漂移;client 终点 LOGIC-END,logic 侧到文件尾)。
+// 锚点为 `function unwrapResult`:它是全部 RPC 解包路径的唯一入口,副本在旧锚点
+// '// dsh 0.1.2 remote.settings' 之前,不纳入守卫会让解包漂移无任何测试兜底。
 test('client.js wire 适配与保存流段与 logic.mjs 同源', () => {
   const sectionOf = (source, label) => {
-    const begin = source.indexOf('// dsh 0.1.2 remote.settings')
+    const begin = source.indexOf('function unwrapResult')
     assert.ok(begin >= 0, label + ' 缺少守卫段起点')
     // 终点:client 侧守卫段以 LOGIC-END 收束;logic 侧守卫段即文件尾
     const end = source.indexOf('/* LOGIC-END */')

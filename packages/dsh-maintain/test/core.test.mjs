@@ -152,16 +152,25 @@ test('场景:registry 基地址非法判定', () => {
 })
 
 test('场景:重启失联后恢复触发刷新', () => {
-  assert.equal(shouldReloadAfterRestart({ lost: true, pidBefore: 100, pidAfter: 100 }), true)
-  assert.equal(shouldReloadAfterRestart({ lost: true, pidBefore: null, pidAfter: null }), true)
+  assert.equal(shouldReloadAfterRestart({ lost: true, pid: 100, bootAt: 1 }, { lost: false, pid: 100, bootAt: 1 }), true)
+  assert.equal(shouldReloadAfterRestart({ lost: true, pid: null, bootAt: null }, { lost: false, pid: null, bootAt: null }), true)
 })
 
 test('场景:快速重启零失联凭 pid 变化触发刷新', () => {
-  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: 100, pidAfter: 200 }), true)
+  assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: 1 }, { lost: false, pid: 200, bootAt: 2 }), true)
 })
 
-test('场景:未失联且 pid 未变不刷新', () => {
-  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: 100, pidAfter: 100 }), false)
-  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: null, pidAfter: 200 }), false)
-  assert.equal(shouldReloadAfterRestart({ lost: false, pidBefore: 100, pidAfter: undefined }), false)
+test('场景:容器 pid 恒 1 零失联凭 bootAt 变化触发刷新', () => {
+  // Docker entrypoint 常驻 pid 1 + 停机时长小于轮询间隔:pid 信号结构性失效,
+  // bootAt(宿主进程启动时刻)变化是唯一可靠代际信号
+  assert.equal(shouldReloadAfterRestart({ lost: false, pid: 1, bootAt: 100 }, { lost: false, pid: 1, bootAt: 200 }), true)
+})
+
+test('场景:未失联且实例标识未变不刷新', () => {
+  assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: 1 }, { lost: false, pid: 100, bootAt: 1 }), false)
+  // 单侧缺失退化为 pid 比对;pid/bootAt 双双缺失不构成重启证据
+  assert.equal(shouldReloadAfterRestart({ lost: false, pid: null, bootAt: null }, { lost: false, pid: 200, bootAt: 2 }), false)
+  assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: 1 }, { lost: false, pid: undefined, bootAt: undefined }), false)
+  // bootAt 单侧出现不构成证据(防旧宿主快照缺字段误判)
+  assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: null }, { lost: false, pid: 100, bootAt: 200 }), false)
 })

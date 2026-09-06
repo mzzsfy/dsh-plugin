@@ -21,6 +21,7 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const MESSAGES = indexModule.MESSAGES
+const { DELETE_MESSAGES } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
 // 台账/重挂载夹具路径仅作数据,不落盘;形态与实现一致(会话目录)
 const LEDGER_FIXTURE_PATH = 'C:\\store\\s1'
 
@@ -135,7 +136,8 @@ function makeCtx({
     inject: (_deps, fn) => { pendingInjects.push(fn) },
     get: (name) => ({ agents, sessionPersistence, settings: settingsService }[name]),
     on: (event, handler) => { eventHandlers[event] = handler },
-    logger: undefined,
+    // 日志桩:partial 降级点(logger.warn)在测试中可执行且可断言,不再被 undefined 短路
+    logger: { warns: [], warn(message) { this.warns.push(message) }, info() {} },
   }
   const ctx = new Proxy(base, {
     get(target, prop) {
@@ -154,6 +156,7 @@ function makeCtx({
     domain,
     ledger: ledgerDomain,
     registry: services.workspaceRegistry,
+    logger: base.logger,
     // 模拟宿主 settings 与 timer 服务激活:触发 inject 回调(注册 + 启动补扫 + 周期武装)
     activateSettings: () => {
       const injected = { settings: settingsService, interval: timerAvailable === false ? undefined : intervalStub }
@@ -1022,7 +1025,7 @@ test('删除:产物已缺失时运行中守卫仍然生效', skipMissingDeps, as
 
 test('删除:产物已缺失且清理半失败时聚合失败点', skipMissingDeps, async () => {
   const workspace = makeWorkspace('C:\\x', ['s1'], { detachError: new Error('detach boom') })
-  const { handlers } = makeCtx({
+  const { handlers, logger } = makeCtx({
     archivedIds: [],
     headers: [HEADER],
     agents: IDLE_S1,
@@ -1038,6 +1041,53 @@ test('删除:产物已缺失且清理半失败时聚合失败点', skipMissingDe
   assert.equal(res.status, 200)
   assert.equal(res.body.partial, true)
   assert.equal(res.body.message, '产物已不存在,但移除列表记录失败,且移除归档记录失败')
+  // 幽灵清理半失败:原始错误进服务端日志(排障契约),响应文案保持摘要
+  assert.ok(logger.warns.some((message) => message.includes('s1') && message.includes('detach boom')), '幽灵 detach 失败应落日志')
+})
+
+test('删除:回收窗口内会话恢复运行,响应警告形态且无 partial 键', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    const agents = new Map([['s1', { status: 'idle' }]])
+    const { handlers } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents,
+      domain: makeDomain(['s1']),
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+    })
+    const res = response()
+    // trash 桩内翻转运行态:模拟 OS 回收异步窗口内的执行期翻转
+    await withTrashStub(async () => { agents.set('s1', { status: 'running' }) }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    })
+    assert.equal(res.status, 200)
+    // 全成功警告态:{ok,message} 形态,无 partial 键
+    assert.deepEqual(res.body, { ok: true, message: DELETE_MESSAGES.runningDuringTrash })
+  } finally {
+    await artifact.cleanup()
+  }
+})
+
+test('归档评估:超期运行中会话零产物 IO(早退,core 过滤为第二道防线)', skipMissingDeps, async () => {
+  const stale = Date.now() - 30 * 24 * 60 * 60 * 1000
+  let locateCalls = 0
+  const { activateSettings, registry } = makeCtx({
+    archivedIds: [],
+    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: stale }],
+    agents: new Map([['s1', { status: 'running' }]]),
+    sessionPersistence: {
+      locate: (header) => {
+        locateCalls += 1
+        return { path: 'C:\\x\\s1\\session.jsonl.zstd' }
+      },
+    },
+  })
+  activateSettings()
+  // 等评估轮跑完(正常会话路径必然触达 locate):running 会话不得产生 locate 调用
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  assert.equal(locateCalls, 0, '运行中会话应在产物 IO 前早退')
+  assert.deepEqual(registry.archiveCalls, [])
 })
 
 test('删除:workspace 域未打开时归档清理失败,响应 partial 且台账已记录', skipMissingDeps, async () => {
@@ -1070,7 +1120,7 @@ test('删除:detach 与台账同时失败时,partial 消息聚合两个失败点
     const brokenLedger = makeLedgerDomain([])
     brokenLedger.global.set = async () => { throw new Error('medium broken') }
     const workspace = makeWorkspace('C:\\x', ['s1'], { detachError: new Error('detach boom') })
-    const { handlers } = makeCtx({
+    const { handlers, logger } = makeCtx({
       archivedIds: ['s1'],
       headers: [HEADER],
       agents: IDLE_S1,
@@ -1086,6 +1136,9 @@ test('删除:detach 与台账同时失败时,partial 消息聚合两个失败点
     assert.equal(res.status, 200)
     assert.equal(res.body.partial, true)
     assert.equal(res.body.message, '已移入回收站,但移除列表记录失败,且重挂载记录失败')
+    // 台账与 detach 的原始错误均进服务端日志
+    assert.ok(logger.warns.some((message) => message.includes('s1') && message.includes('medium broken')), '台账失败应落日志')
+    assert.ok(logger.warns.some((message) => message.includes('s1') && message.includes('detach boom')), 'detach 失败应落日志')
   } finally {
     await artifact.cleanup()
   }

@@ -13,6 +13,7 @@ import { decideClaim as coreDecideClaim, CLAIM_LOCK_TTL_MS,
   removeImTargetFromList as coreRemoveImTargetFromList,
   unregisterImBotList as coreUnregisterImBotList,
   imBoundBotIds as coreImBoundBotIds } from '../src/notify.mjs'
+import { readFileSync as readFileAt } from 'node:fs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -91,3 +92,28 @@ test('IM 目标列表操作双实现对照', () => {
 })
 
 defineClaimScenarios('[client.js decideClaim] ', (args) => client.decideClaim(args.stored, args.done, args.now, args.windowId))
+
+// 平台类型清单双端对拍:host normalizeAccounts 白名单与 client TYPE_LABELS 键集必须一致,
+// 漂移即一侧能建另一侧不能渲染(徽章/下拉/表单)。
+test('ACCOUNT_TYPES 双端对拍:index.js 白名单与 client TYPE_LABELS 键集一致', () => {
+  const hostSource = readFileAt(join(PKG_ROOT, 'src', 'index.js'), 'utf8')
+  const clientSource = readFileAt(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  // 声明序:TYPE_* 常量定义顺序即 ACCOUNT_TYPES 与 TYPE_LABELS 的共同期望顺序
+  const hostTypes = [...hostSource.matchAll(/const TYPE_(?!META|LABELS|_)[A-Z]+ = '([a-z]+)'/g)].map((m) => m[1])
+  assert.ok(hostTypes.length >= 7, 'TYPE_* 常量提取失败')
+  assert.deepEqual(
+    hostTypes.filter((type, index, all) => all.indexOf(type) === index),
+    hostTypes,
+    'TYPE_* 常量有重复定义',
+  )
+  const clientLabels = clientSource.match(/const TYPE_LABELS = \{([^}]+)\}/)
+  assert.ok(clientLabels, 'client.js 缺少 TYPE_LABELS')
+  const clientTypes = [...clientLabels[1].matchAll(/^\s*([a-z]+):/gm)].map((m) => m[1])
+  assert.deepEqual(clientTypes, hostTypes, '双端平台类型清单漂移')
+  // ACCOUNT_TYPES 数组按常量名展开后与定义序一致,防数组漏项/多序
+  const listMatch = hostSource.match(/const ACCOUNT_TYPES = \[([^\]]*)\]/)
+  assert.ok(listMatch, 'index.js 缺少 ACCOUNT_TYPES 数组')
+  const constMap = new Map([...hostSource.matchAll(/const (TYPE_[A-Z]+) = '([a-z]+)'/g)].map((m) => [m[1], m[2]]))
+  const expanded = [...listMatch[1].matchAll(/TYPE_[A-Z]+/g)].map((m) => constMap.get(m[0]))
+  assert.deepEqual(expanded, hostTypes, 'ACCOUNT_TYPES 数组与 TYPE_* 常量漂移')
+})

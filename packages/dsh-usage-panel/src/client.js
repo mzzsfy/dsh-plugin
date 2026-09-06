@@ -88,40 +88,97 @@ window.__ModuleLoader__.load({
     }
     /* LOGIC-END */
 
-    // 页内通知轮询:client 激活即轮询,不依赖面板打开;toast 库缺失(权威代挂方
+    // 页内通知长轮询:client 激活即挂起等待,不依赖面板打开;toast 库缺失(权威代挂方
     // session-manager 未安装)整段跳过;批内逐条认领防多窗口重复弹;
-    // 代际令牌自愈:HMR/闭包重建首挂清旧代 interval 再启新代,旧代不滞留不叠加
-    const NOTIFY_POLL_MS = 5 * 1000
+    // 代际令牌自愈:HMR/闭包重建首挂 abort 旧代长轮询再启新代,旧代不滞留不叠加
+    const NOTIFY_REQUEST_TIMEOUT_MS = 30 * 1000
+    // 失败重连退避:指数增长至上限,防网络中断期间打爆服务端;须大于服务端挂起上限
+    const NOTIFY_RETRY_MIN_MS = 2 * 1000
+    const NOTIFY_RETRY_MAX_MS = 30 * 1000
     const NOTIFY_TOAST_MS = 6 * 1000
     const KEY_POLL_TOKEN = 'usage-panel:notify-poll'
     if (toast) {
-      // 句柄存在即清:旧版遗留布尔令牌传入 clearInterval 为无害空操作,顺带清偿旧形态
-      if (window[KEY_POLL_TOKEN] !== undefined) clearInterval(window[KEY_POLL_TOKEN])
-      window[KEY_POLL_TOKEN] = setInterval(() => {
-        api('/api/usage-panel/notifications')
-            .then((payload) => {
-              const units = payload && Array.isArray(payload.units) ? payload.units : []
-              const liveIds = new Set(units.map((unit) => unit.id))
-              // 投影中已过期的本地残留清理,防旧锁与完成标记无限滞留;
-              // 存储不可用时跳过清理,认领侧已放行直发
-              if (!storageBroken) {
-                try {
-                  for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
-                    const key = window.localStorage.key(index)
-                    if (key === null || (key.indexOf(KEY_LOCK) !== 0 && key.indexOf(KEY_DONE) !== 0)) continue
-                    const id = key.indexOf(KEY_LOCK) === 0 ? key.slice(KEY_LOCK.length) : key.slice(KEY_DONE.length)
-                    if (!liveIds.has(id)) localDel(key)
-                  }
-                } catch { storageBroken = true }
-              }
-              for (const unit of units) {
-                if (!claimEvent(unit.id)) continue
-                markDone(unit.id)
-                toast(unit.text, { kind: unit.kind === 'reset' ? 'ok' : 'error', holdMs: NOTIFY_TOAST_MS })
-              }
-            })
-            .catch(() => {})
-      }, NOTIFY_POLL_MS)
+      // 已有 AbortController 代即 abort 旧代长轮询;遗留非 AbortController 旧令牌
+      // (interval 形态)无法中止,由页面刷新自然清偿
+      if (window[KEY_POLL_TOKEN] instanceof AbortController) window[KEY_POLL_TOKEN].abort()
+      const notifyController = new AbortController()
+      window[KEY_POLL_TOKEN] = notifyController
+      // 已见投影版本:空即未首拉;长轮询续传游标,响应后随 payload 推进
+      let notifyCursor = null
+      const notifySleep = (ms, signal) => new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve()
+          return
+        }
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, ms)
+        const onAbort = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+      async function notifyPollOnce(signal) {
+        let payload
+        try {
+          // cursor 为空即首拉,服务端立即返回全量;之后携带版本挂起等待增量
+          const query = notifyCursor === null ? '' : '?cursor=' + notifyCursor
+          const timeoutSignal = AbortSignal.timeout(NOTIFY_REQUEST_TIMEOUT_MS)
+          const requestSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
+          const response = await fetch('/api/usage-panel/notifications' + query, { signal: requestSignal })
+          if (!response.ok) {
+            void response.body?.cancel()
+            return false
+          }
+          payload = await response.json()
+        } catch {
+          return false
+        }
+        // 版本缺失即异常响应:按失败退避,防游标停滞退化成紧密首拉循环
+        if (typeof payload.version !== 'number') return false
+        notifyCursor = payload.version
+        const units = payload && Array.isArray(payload.units) ? payload.units : []
+        const liveIds = new Set(units.map((unit) => unit.id))
+        // 投影中已过期的本地残留清理,防旧锁与完成标记无限滞留;
+        // 存储不可用时跳过清理,认领侧已放行直发
+        if (!storageBroken) {
+          try {
+            for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+              const key = window.localStorage.key(index)
+              if (key === null || (key.indexOf(KEY_LOCK) !== 0 && key.indexOf(KEY_DONE) !== 0)) continue
+              const id = key.indexOf(KEY_LOCK) === 0 ? key.slice(KEY_LOCK.length) : key.slice(KEY_DONE.length)
+              if (!liveIds.has(id)) localDel(key)
+            }
+          } catch { storageBroken = true }
+        }
+        for (const unit of units) {
+          if (!claimEvent(unit.id)) continue
+          markDone(unit.id)
+          toast(unit.text, { kind: unit.kind === 'reset' ? 'ok' : 'error', holdMs: NOTIFY_TOAST_MS })
+        }
+        return true
+      }
+      // 长轮询主循环:成功即立即重连(空闲期由服务端挂起兜底),失败指数退避;
+      // 循环体严格顺序,任何时刻至多一条在途请求
+      void (async () => {
+        let backoffMs = NOTIFY_RETRY_MIN_MS
+        while (!notifyController.signal.aborted) {
+          let ok = false
+          try {
+            ok = await notifyPollOnce(notifyController.signal)
+          } catch { ok = false }
+          if (notifyController.signal.aborted) break
+          if (ok) {
+            backoffMs = NOTIFY_RETRY_MIN_MS
+            await notifySleep(0, notifyController.signal)
+          } else {
+            await notifySleep(backoffMs, notifyController.signal)
+            backoffMs = Math.min(backoffMs * 2, NOTIFY_RETRY_MAX_MS)
+          }
+        }
+      })()
     }
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → plan);
@@ -165,7 +222,7 @@ const CSS = [
   '  background:rgba(128,148,180,0.06); }',
   '.up-card__row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
   '.up-card__name { font-weight:600; font-size:15px; }',
-  // 平台徽章:按平台固定色相着色的胶囊 pill;缺省灰底(档位徽章与低调平台共用)
+  // 平台徽章:按平台固定色相着色的胶囊 pill;custom 走缺省灰底(低调平台共用)
   '.up-badge { font-size:10px; font-weight:500; padding:1px 7px; border-radius:999px;',
   '  line-height:1.5; border:1px solid transparent; color:#fff;',
   '  background:var(--up-badge-color, rgba(128,128,128,0.55)); }',
@@ -174,6 +231,7 @@ const CSS = [
   '.up-badge[data-type="kimi"] { --up-badge-color:#0d9488; }',
   '.up-badge[data-type="minimax"] { --up-badge-color:#ea580c; }',
   '.up-badge[data-type="newapi"] { --up-badge-color:#8b5cf6; }',
+  '.up-badge[data-type="zhipu"] { --up-badge-color:#3859ff; }',
   // ---- 读数行:标签 + 渐变进度条 + 等宽数字 ----
   '.up-reading { display:flex; flex-direction:column; gap:6px; }',
   '.up-row { display:flex; align-items:center; gap:10px; position:relative; }',
@@ -729,7 +787,7 @@ function AccountForm(props) {
   )
 }
 
-// ---- 趋势视图(自绘 SVG,点位算法与 src/spark.mjs 参考实现一致) ----
+// ---- 趋势视图(自绘 SVG,点位算法唯一实现在本文件;原 src/spark.mjs 参考副本已删除) ----
 
 const SPARK_WIDTH = 220
 const SPARK_HEIGHT = 60
@@ -1200,7 +1258,6 @@ function UsagePanelApp() {
   const [notice, setNotice] = useState(null)
   const [armed, setArmed] = useState(null)
   const [sequences, setSequences] = useState({})
-  const [pollIntervalSec, setPollIntervalSec] = useState(null)
   const [pollArmed, setPollArmed] = useState(null)
 
   useEffect(() => {
@@ -1227,22 +1284,15 @@ function UsagePanelApp() {
     api('/api/usage-panel/settings')
       .then((res) => {
         if (!alive) return
-        setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : null)
         setPollArmed(res ? Boolean(res.pollArmed) : null)
       })
       .catch(() => {})
     return () => { alive = false }
   }, [])
 
-  function savePollInterval(value) {
-    api('/api/usage-panel/settings', { method: 'POST', body: JSON.stringify({ pollIntervalSec: value }) })
-      .then((res) => {
-        setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : value)
-        notify('轮询间隔已保存', 'ok')
-      })
-      .catch((error) => {
-        notify('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
-      })
+  function refreshSequences() {
+    return api('/api/usage-panel/history')
+      .then((res) => { setSequences(res && res.sequences ? res.sequences : {}) })
   }
 
   function markBusy(id, value) {
@@ -1269,7 +1319,19 @@ function UsagePanelApp() {
 
   function refreshAll() {
     if (!accounts) return
-    Promise.all(accounts.map((item) => refreshOne(item.id)))
+    const ids = accounts.map((item) => item.id)
+    ids.forEach((id) => markBusy(id, true))
+    // 批量查询后单次拉取 history,不做每账号一次 history GET
+    Promise.all(ids.map((id) =>
+      api('/api/usage-panel/query', { method: 'POST', body: JSON.stringify({ id }) })
+        .then((res) => { if (res && res.account) replaceAccount(res.account) })
+        .catch((error) => {
+          notify('查询失败:' + (error && error.message ? error.message : String(error)), 'error')
+        })
+    ))
+      .then(refreshSequences)
+      .catch(() => {})
+      .then(() => ids.forEach((id) => markBusy(id, false)))
   }
 
   function saveAccounts(nextAccounts) {
@@ -1325,15 +1387,6 @@ function UsagePanelApp() {
     h('div', { className: 'up-head' },
       h('span', { className: 'up-head__title' }, '账号详情'),
       h('span', { className: 'up-spacer' }),
-      h('label', { className: 'up-field__label', title: '自动刷新全部账号读数的间隔秒数;过短可能触发平台限流' }, '轮询间隔(秒)'),
-      h('span', { className: 'up-field' },
-        h('input', {
-          type: 'number', min: 1, style: { width: '80px' },
-          value: pollIntervalSec === null ? '' : pollIntervalSec,
-          onChange: (e) => setPollIntervalSec(e.target.value === '' ? null : Number(e.target.value)),
-        }),
-      ),
-      h('button', { className: 'up-btn', disabled: pollIntervalSec === null, onClick: () => savePollInterval(pollIntervalSec) }, '保存间隔'),
       h('button', { className: 'up-btn', title: '手动查询全部账号并更新读数', disabled: anyBusy || accounts.length === 0, onClick: refreshAll }, '全部刷新'),
       h('button', { className: 'up-btn up-btn--primary', onClick: () => setEditing({ isNew: true, id: null }) }, '添加账号'),
     ),

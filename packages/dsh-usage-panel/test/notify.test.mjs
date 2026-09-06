@@ -321,6 +321,38 @@ test('投影: 环形容量截断与 TTL 过期', () => {
   assert.deepEqual(projection.list().map((unit) => unit.id), ['c'])
 })
 
+test('投影: push 递增版本, wait 在版本追平时挂起至唤醒或超时', async () => {
+  // Given 空投影
+  const projection = createProjection({})
+  // Then 初始版本为 0
+  assert.equal(projection.version(), 0)
+  // When push 一条后以落后 cursor 挂起
+  projection.push({ id: 'a', ts: 1 })
+  assert.equal(await projection.wait(0, 60 * 1000), 1, '版本已超前 cursor 应立即返回')
+  // When 以追平 cursor 挂起再 push 第二条;绑定短 timer 防唤醒失效退化为超时假绿
+  const pending = projection.wait(1, 60 * 1000)
+  const raceGuard = new Promise((resolve) => { setTimeout(() => resolve('timeout'), 500) })
+  projection.push({ id: 'b', ts: 2 })
+  // Then 挂起在唤醒而非超时路径收尾,且版本单调
+  assert.equal(await Promise.race([pending.then(() => 'woken'), raceGuard]), 'woken')
+  assert.equal(await pending, 2)
+})
+
+test('投影: wait 超时以当前版本收尾, dispose 唤醒全部等待者', async () => {
+  // Given 空投影与两个挂起等待者
+  const projection = createProjection({})
+  const timeoutMs = 10
+  const timedOut = projection.wait(0, timeoutMs)
+  const disposed = projection.wait(0, 60 * 1000)
+  const raceGuard = new Promise((resolve) => { setTimeout(() => resolve('timeout'), 500) })
+  // When 超时窗口经过后 dispose
+  assert.equal(await timedOut, 0, '超时应以当前版本收尾不报错')
+  projection.dispose()
+  // Then 剩余等待者在 dispose 即被唤醒(非等满超时)
+  assert.equal(await Promise.race([disposed.then(() => 'woken'), raceGuard]), 'woken')
+  assert.equal(await disposed, 0)
+})
+
 test('认领决策: 无锁认领 / 有效他锁跳过 / 过期锁接管 / done 终态', () => {
   // Given 锁参数窗口 w1 与 w2
   // Then 四种存储形态各自命中对应决策

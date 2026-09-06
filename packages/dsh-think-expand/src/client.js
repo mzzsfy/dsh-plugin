@@ -1,6 +1,7 @@
 // 思考自动展开 Client 半区:纯前端 DOM 插件,流式思考自动展开最新一条。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory})。
-// 纯逻辑段在 LOGIC 标记之间,与 src/logic.mjs 保持同源,由 parity 测试保证。
+// 纯逻辑段在 LOGIC 标记之间,与 src/logic.mjs 保持同源,由 parity 测试(含逐函数
+// 源码文本对比)保证;容器观察器句柄挂 window 代际槽,HMR 重评估先拆上一代。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-think-expand',
@@ -23,6 +24,9 @@ window.__ModuleLoader__.load({
       attributes: true,
       attributeFilter: [ATTR_EXPANDED, ATTR_STATE],
     }
+    // 哨兵只关心容器出现/替换(childList 通道已覆盖),attributes 通道只会带来
+    // 全页 aria 扩散回波(含本插件自身点击引发的),独立最小配置
+    const SENTINEL_OPTIONS = { childList: true, subtree: true }
     const DEBOUNCE_MS = 50
 
     /* LOGIC-BEGIN */
@@ -30,12 +34,6 @@ window.__ModuleLoader__.load({
 
     // 已见文本 Map 容量上限,超出按插入序裁剪最旧条目(手动/已读标记增长有界)。
     const SEEN_MAP_CAP = 10 * 20
-
-    function hashText(text) {
-      let h = 5381
-      for (let i = 0; i < text.length; i += 1) h = ((h << 5) + h + text.charCodeAt(i)) | 0
-      return (h >>> 0).toString(16)
-    }
 
     function capMap(map, cap = SEEN_MAP_CAP) {
       while (map.size > cap) {
@@ -61,19 +59,27 @@ window.__ModuleLoader__.load({
       return seen.length > 0 && text.length >= seen.length && text.startsWith(seen)
     }
 
-    function findSeenKey(map, text) {
-      for (const [key, seen] of map) {
-        if (prefixOf(seen, text)) return key
+    // 标记命中:双侧行身份在场时 uid 优先(流式短前缀快照在不同行同名开头时前缀会错配),
+    // 任一侧无 uid 退化为纯前缀匹配。
+    function matchMark(entry, uid, text) {
+      if (entry.uid !== undefined && uid !== undefined && entry.uid !== uid) return false
+      return prefixOf(entry.seen, text)
+    }
+
+    function findSeenKey(map, uid, text) {
+      for (const [key, entry] of map) {
+        if (matchMark(entry, uid, text)) return key
       }
       return null
     }
 
-    function isCurrent(registry, text) {
-      return registry.current !== null && prefixOf(registry.current.seen, text)
+    function isCurrent(registry, uid, text) {
+      return registry.current !== null && matchMark(registry.current, uid, text)
     }
 
-    function putSeen(map, text) {
-      map.set(hashText(text), text)
+    // 标记以登记时文本为键(消哈希碰撞类),值携带行身份供命中判定。
+    function putSeen(map, uid, seen) {
+      map.set(seen, { uid, seen })
       capMap(map)
     }
 
@@ -81,8 +87,20 @@ window.__ModuleLoader__.load({
       return { marks: new Map(), manual: new Map(), read: new Map(), current: null }
     }
 
-    function findRow(registry, rows, seen) {
-      return rows.findIndex((row) => row.headable && prefixOf(seen, row.bodyText))
+    // 当前插件行定位:uid 优先(行序上 current 必然靠后,findLastIndex 消解同开头
+    // 历史行的前缀错配),无 uid 退化为前缀匹配。
+    function findRow(registry, rows) {
+      const current = registry.current
+      if (current.uid !== undefined) {
+        for (let index = rows.length - 1; index >= 0; index -= 1) {
+          if (rows[index].uid === current.uid) return index
+        }
+        return -1
+      }
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        if (rows[index].headable && prefixOf(current.seen, rows[index].bodyText)) return index
+      }
+      return -1
     }
 
     // 打开会话/刷新:展开最后一条可识别思考行,其余保持收起。
@@ -106,41 +124,48 @@ window.__ModuleLoader__.load({
       return { actions }
     }
 
-    // 行结构:{ headable, state, bodyText, expanded, plugged }。headable=false 表示识别失败,永不干预;
-    // plugged 为插件动作的内存标记(控制层执行展开时记入 WeakSet,不写 DOM 属性),用于区分手动展开。
+    // 行结构:{ uid, headable, state, bodyText, expanded, plugged }。headable=false 表示识别失败,永不干预;
+    // uid 为控制器侧行身份(元素稳定标识),标记命中按 uid 优先、前缀兜底;
+    // plugged 为插件动作的闩锁标记(展开记入,收起解除),用于区分手动展开。
+    // options.suppressManual 为真时跳过手动识别(容器重挂后首扫,既存展开行视为中性,
+    // 防止把上一代插件展开误登记为手动意图)。
     // 返回 { actions: [{ index, kind: 'expand' | 'collapse' }] },registry 原位更新。
-    function plan(registry, rows) {
+    function plan(registry, rows, options = {}) {
       const actions = []
 
-      // 手动行识别:已展开但无插件动作标记且非当前行 → 手动集合,此后永不干预;
+      // 手动行识别:已展开但无插件动作闩锁且非当前行 → 手动集合,此后永不干预;
       // 手动意图出现即收起当前插件行(至多一条展开)。
-      // running 行同样识别:插件展开带 plugged 标记,无标记的展开即用户手动意图;
+      // running 行同样识别:插件展开带 plugged 闩锁,无闩锁的展开即用户手动意图;
       // 正文未挂载时不识别,空串 seen 会污染全部前缀匹配。
-      for (const row of rows) {
-        if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
-        if (findSeenKey(registry.marks, row.bodyText) !== null) continue
-        if (isCurrent(registry, row.bodyText)) continue
-        if (findSeenKey(registry.manual, row.bodyText) === null) {
-          putSeen(registry.manual, row.bodyText)
-          if (registry.current !== null) {
-            const currentIndex = findRow(registry, rows, registry.current.seen)
-            const currentRow = currentIndex >= 0 ? rows[currentIndex] : null
-            if (currentRow !== null && currentRow.expanded) actions.push({ index: currentIndex, kind: 'collapse' })
-            registry.marks.delete(registry.current.hash)
-            registry.current = null
+      if (options.suppressManual !== true) {
+        for (const row of rows) {
+          if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
+          if (findSeenKey(registry.marks, row.uid, row.bodyText) !== null) continue
+          if (isCurrent(registry, row.uid, row.bodyText)) continue
+          if (findSeenKey(registry.manual, row.uid, row.bodyText) === null) {
+            putSeen(registry.manual, row.uid, row.bodyText)
+            if (registry.current !== null) {
+              const currentIndex = findRow(registry, rows)
+              const currentRow = currentIndex >= 0 ? rows[currentIndex] : null
+              if (currentRow !== null && currentRow.expanded) actions.push({ index: currentIndex, kind: 'collapse' })
+              registry.marks.delete(registry.current.seen)
+              registry.current = null
+            }
           }
         }
       }
 
+      // 插件展开的行变为收起 → 手动收起,视为已读。
       if (registry.current !== null) {
-        const index = findRow(registry, rows, registry.current.seen)
+        const index = findRow(registry, rows)
         if (index < 0 || !rows[index].expanded) {
-          putSeen(registry.read, registry.current.seen)
-          registry.marks.delete(registry.current.hash)
+          putSeen(registry.read, registry.current.uid, registry.current.seen)
+          registry.marks.delete(registry.current.seen)
           registry.current = null
         }
       }
 
+      // 只处理唯一流式尾块;多行 running 或无 running 均不干预(历史批量/异常降级)。
       const running = []
       rows.forEach((row, index) => {
         if (row.headable && row.state === STATE_RUNNING) running.push(index)
@@ -149,28 +174,30 @@ window.__ModuleLoader__.load({
       const targetIndex = running[0]
       const target = rows[targetIndex]
 
-      if (findSeenKey(registry.manual, target.bodyText) !== null) return { actions }
-      if (findSeenKey(registry.read, target.bodyText) !== null) return { actions }
-      if (isCurrent(registry, target.bodyText)) return { actions }
+      if (findSeenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
+      if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
+      if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
 
+      // 新思考行出现:收起旧的插件行(手动行除外),展开新行。
       if (registry.current !== null) {
-        const oldIndex = findRow(registry, rows, registry.current.seen)
-        const oldHash = registry.current.hash
-        const oldIsManual = registry.manual.has(oldHash)
+        const oldIndex = findRow(registry, rows)
+        const oldIsManual = findSeenKey(registry.manual, registry.current.uid, registry.current.seen) !== null
         const old = oldIndex >= 0 ? rows[oldIndex] : null
         if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
-        registry.marks.delete(oldHash)
+        registry.marks.delete(registry.current.seen)
         registry.current = null
       }
 
       if (!target.expanded) actions.push({ index: targetIndex, kind: 'expand' })
       // 正文未挂载时仅展开不登记,空串 seen 会污染全部前缀匹配;正文挂载后下轮补登记
-      if (target.bodyText !== '') {
-        const seen = target.bodyText
-        registry.current = { hash: hashText(seen), seen }
-        putSeen(registry.marks, seen)
-      }
+      if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
       return { actions }
+    }
+
+    // 当前插件行登记:current 与 marks 的单点写入口,状态形态单点拥有。
+    function registerCurrent(registry, uid, seen) {
+      registry.current = { uid, seen }
+      putSeen(registry.marks, uid, seen)
     }
     /* LOGIC-END */
 
@@ -180,24 +207,34 @@ window.__ModuleLoader__.load({
     let containerObserver = null
     let bodySentinel = null
     let observedContainer = null
-    let debounceTimer = null
-    // 插件动作标记:展开过的行元素记入 WeakSet,用于 plan() 区分手动展开;
-    // 只存内存不写 DOM 属性,元素移除自动回收。React 复用元素节点时陈旧标记
-    // 可能压制该位置新行的手动识别,概率极低,为已知局限。
+    // 插件动作闩锁:展开记入、收起解除,语义为"自上次收起以来的插件动作",
+    // 保证用户收起后再手动展开同一条能被识别为手动意图(至多一条展开契约)
     let pluginExpandedEls = new WeakSet()
-    // 容器就绪/重建后待执行的一次性"展开最后一条";
-    // finalExpandedEl/finalPendingRegister 追踪已展开行,落定后登记进 registry
-    let pendingFinal = false
-    let finalExpandedEl = null
-    let finalPendingRegister = false
+    // 行身份:元素稳定 uid(WeakMap 计数器),行重排/文本增长不影响标记命中
+    const rowUidMap = new WeakMap()
+    let rowUidSeq = 0
+    function rowUid(el) {
+      let uid = rowUidMap.get(el)
+      if (uid === undefined) {
+        rowUidSeq += 1
+        uid = rowUidSeq
+        rowUidMap.set(el, uid)
+      }
+      return uid
+    }
+
+    // final 握手状态单点:pending(容器就绪待执行)→ awaitRegister(已展开待登记),
+    // el 为待登记/待登记中的行元素(登记完成即清引用,不延长 detached 子树寿命)
+    const finalState = { pending: false, awaitRegister: false, el: null }
 
     function describeRow(el) {
       const head = el.querySelector(SELECTOR_HEAD)
       const state = el.getAttribute(ATTR_STATE)
-      const body = el.querySelector(SELECTOR_BODY)
       const headable = head !== null && (state === STATE_RUNNING || state === STATE_OK)
+      const body = headable ? el.querySelector(SELECTOR_BODY) : null
       return {
         el,
+        uid: rowUid(el),
         headable,
         state,
         bodyText: body !== null ? body.textContent || '' : '',
@@ -205,6 +242,12 @@ window.__ModuleLoader__.load({
         plugged: pluginExpandedEls.has(el),
       }
     }
+
+    // 剥离 el 等控制器字段,保持 plan() 纯度(单点定义防行结构加字段时漏改)
+    const toLogicRows = (described) => described.map(({ uid, headable, state, bodyText, expanded, plugged }) =>
+      ({ uid, headable, state, bodyText, expanded, plugged }))
+
+    const collectRows = (container) => Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
 
     // 执行动作并返回被点击的行元素(未触发点击返回 null)
     function applyAction(described, action) {
@@ -214,6 +257,7 @@ window.__ModuleLoader__.load({
       if (head === null) return null
       if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) {
         if (action.kind === 'expand') pluginExpandedEls.add(row.el)
+        else pluginExpandedEls.delete(row.el)
         head.click()
         return row.el
       }
@@ -222,28 +266,42 @@ window.__ModuleLoader__.load({
 
     function scan() {
       const container = document.querySelector(SELECTOR_SCROLL)
-      if (container === null) return 0
-      const described = Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
-      const rows = described.map(({ headable, state, bodyText, expanded, plugged }) =>
-        ({ headable, state, bodyText, expanded, plugged }))
-      for (const action of plan(registry, rows).actions) applyAction(described, action)
+      // 容器身份守卫:容器替换至哨兵回调之间,旧观察器投递的扫描不对新容器用旧 registry 决策
+      if (container === null || container !== observedContainer) return 0
+      const described = collectRows(container)
+      releaseLatchIfCollapsed(described)
+      for (const action of plan(registry, toLogicRows(described)).actions) applyAction(described, action)
       return described.length
+    }
+
+    // 用户手动收起不经 applyAction(闩锁解除只发生在插件 collapse 分支):
+    // current 行转为收起时在此解除闩锁,使"收起后再手动展开同一条"能被
+    // 识别为手动意图,不被新行出现时的接管收起强收
+    function releaseLatchIfCollapsed(described) {
+      if (registry.current === null) return
+      const row = described.find((item) => item.uid === registry.current.uid)
+      if (row !== undefined && !row.expanded) pluginExpandedEls.delete(row.el)
     }
 
     // 展开动作落定后登记当前行,使 plan() 识别为插件展开而非手动意图;
     // 行已收起(用户抢先)则放弃登记
     function registerFinal() {
-      if (!finalPendingRegister) return
-      finalPendingRegister = false
-      if (finalExpandedEl === null || !finalExpandedEl.isConnected) return
-      const described = describeRow(finalExpandedEl)
-      if (!described.expanded) return
-      if (described.bodyText === '') {
-        finalPendingRegister = true
+      if (!finalState.awaitRegister) return
+      finalState.awaitRegister = false
+      const el = finalState.el
+      finalState.el = null
+      if (el === null || !el.isConnected) return
+      const described = describeRow(el)
+      if (!described.expanded) {
+        pluginExpandedEls.delete(el)
         return
       }
-      registry.current = { hash: hashText(described.bodyText), seen: described.bodyText }
-      putSeen(registry.marks, described.bodyText)
+      if (described.bodyText === '') {
+        finalState.el = el
+        finalState.awaitRegister = true
+        return
+      }
+      registerCurrent(registry, described.uid, described.bodyText)
     }
 
     // 容器就绪/重建后执行一次:展开最后一条;
@@ -251,27 +309,29 @@ window.__ModuleLoader__.load({
     function tryPlanFinal() {
       const container = document.querySelector(SELECTOR_SCROLL)
       if (container === null) return
-      const described = Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
+      const described = collectRows(container)
       if (!described.some((row) => row.headable)) return
-      pendingFinal = false
-      const rows = described.map(({ headable, state, bodyText, expanded, plugged }) =>
-        ({ headable, state, bodyText, expanded, plugged }))
-      for (const action of planFinal(rows).actions) {
+      finalState.pending = false
+      for (const action of planFinal(toLogicRows(described)).actions) {
         const clicked = applyAction(described, action)
         if (clicked !== null) {
-          finalExpandedEl = clicked
-          finalPendingRegister = true
+          finalState.el = clicked
+          finalState.awaitRegister = true
         }
       }
     }
 
+    // 计时单点挂 slot(代际槽):旧代残余回调(disconnect 不取消已入队微任务)
+    // 经槽身份校验作废,防上一代决策机与新代同扫并发点击
     function scheduleScan() {
-      if (debounceTimer !== null) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(() => {
-        debounceTimer = null
+      if (window[SLOT_KEY] !== slot) return
+      if (slot.debounceTimer !== null) clearTimeout(slot.debounceTimer)
+      slot.debounceTimer = setTimeout(() => {
+        slot.debounceTimer = null
+        if (window[SLOT_KEY] !== slot) return
         registerFinal()
-        if (scan() === 0) pendingFinal = true
-        else if (pendingFinal) tryPlanFinal()
+        if (scan() === 0) finalState.pending = true
+        else if (finalState.pending) tryPlanFinal()
       }, DEBOUNCE_MS)
     }
 
@@ -284,26 +344,49 @@ window.__ModuleLoader__.load({
     }
 
     // 从 body 等待观察切换为容器子树观察,并记录已观察节点。
-    // 会话切换不继承标记,registry 重建
+    // 会话切换不继承标记,registry 重建;首扫抑制手动识别:
+    // 既存展开行视为中性(可能是上一代插件的展开),由 planFinal/流式流程接管
     function attach(container) {
       if (containerObserver !== null) containerObserver.disconnect()
       containerObserver = new MutationObserver(scheduleScan)
       containerObserver.observe(container, OBSERVER_OPTIONS)
+      if (slot !== null) slot.containerObserver = containerObserver
       observedContainer = container
       registry = createRegistry()
       pluginExpandedEls = new WeakSet()
-      finalExpandedEl = null
-      finalPendingRegister = false
-      pendingFinal = true
-      scan()
-      if (pendingFinal) tryPlanFinal()
+      finalState.el = null
+      finalState.awaitRegister = false
+      finalState.pending = true
+      scanSuppressManual()
+      if (finalState.pending) tryPlanFinal()
+    }
+
+    function scanSuppressManual() {
+      const container = observedContainer
+      if (container === null) return 0
+      const described = collectRows(container)
+      const actions = plan(registry, toLogicRows(described), { suppressManual: true }).actions
+      for (const action of actions) applyAction(described, action)
+      return described.length
     }
 
     // body 哨兵常驻,监视容器出现与身份变化;发现容器即挂载子树观察。
+    // 代际槽:HMR 同页重评估时先拆上一代观察器与挂起计时,防多套决策机并行同扫
+    const SLOT_KEY = Symbol.for('@mzzsfy/dsh-think-expand')
+    let slot = null
     function start() {
       if (bodySentinel !== null) return
+      const previous = window[SLOT_KEY]
+      if (previous !== undefined) {
+        if (previous.bodySentinel !== null) previous.bodySentinel.disconnect()
+        if (previous.containerObserver !== null) previous.containerObserver.disconnect()
+        if (previous.debounceTimer !== null) clearTimeout(previous.debounceTimer)
+      }
+      slot = { bodySentinel: null, containerObserver: null, debounceTimer: null }
+      window[SLOT_KEY] = slot
       bodySentinel = new MutationObserver(ensureAttached)
-      bodySentinel.observe(document.body, OBSERVER_OPTIONS)
+      slot.bodySentinel = bodySentinel
+      bodySentinel.observe(document.body, SENTINEL_OPTIONS)
       ensureAttached()
     }
 

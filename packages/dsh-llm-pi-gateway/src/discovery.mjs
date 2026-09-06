@@ -103,7 +103,7 @@ function usableProbeKey(raw) {
 
 /**
  * 探测一个草稿端点。请求描述尚未存储的草稿,不读写任何设置或凭据。
- * @param {object} request { provider?, api?, baseURL?, apiKey?, signal? }
+ * @param {object} request { provider?, api?, baseURL?, apiKey?, headers?, signal? }
  * @param {() => Promise<string|undefined>} resolveStoredKey 存量路由凭据,草稿未带键时使用
  * @param {typeof fetch} fetchImpl 注入的 fetch
  */
@@ -118,22 +118,25 @@ export async function discoverModels(request, resolveStoredKey, fetchImpl = fetc
   const url = listingUrl(request.baseURL)
   const supplied = request.apiKey ?? await resolveStoredKey?.()
   const apiKey = supplied === undefined ? undefined : usableProbeKey(supplied)
+  // 路由自定义头先行,accept/authorization/attribution 后写覆盖:
+  // 网关分组头等生效,保留头(attribution)不可被路由配置顶掉(官方同序);
+  // 构造入 try:草稿路径的 headers 不经配置期校验,非法头名归因 DISCOVERY_FAILED
   let response
   try {
+    const headers = new Headers(request.headers)
+    headers.set('accept', 'application/json')
+    if (apiKey !== undefined) headers.set('authorization', `Bearer ${apiKey}`)
+    for (const [name, value] of Object.entries(attributionHeaders())) headers.set(name, value)
     response = await fetchImpl(url, {
       method: 'GET',
-      headers: {
-        accept: 'application/json',
-        ...(apiKey === undefined ? {} : { authorization: `Bearer ${apiKey}` }),
-        ...attributionHeaders(),
-      },
+      headers,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     })
   } catch (error) {
     if (request.signal?.aborted) {
-      throw Object.assign(new Error('model discovery aborted by caller'), { code: 'ABORTED', cause: error })
+      throw new GatewayError('model discovery aborted by caller', 'ABORTED', { cause: error })
     }
-    throw new GatewayError(`could not reach ${url}`, 'DISCOVERY_FAILED')
+    throw new GatewayError(`could not reach ${url}`, 'DISCOVERY_FAILED', { cause: error })
   }
   if (!response.ok) {
     throw new GatewayError(
@@ -146,7 +149,7 @@ export async function discoverModels(request, resolveStoredKey, fetchImpl = fetc
     text = await readBounded(response, url)
   } catch (error) {
     if (request.signal?.aborted) {
-      throw Object.assign(new Error('model discovery aborted by caller'), { code: 'ABORTED', cause: error })
+      throw new GatewayError('model discovery aborted by caller', 'ABORTED', { cause: error })
     }
     if (error instanceof GatewayError) throw error
     throw new GatewayError(`${url} could not be read`, 'DISCOVERY_FAILED')
@@ -155,7 +158,7 @@ export async function discoverModels(request, resolveStoredKey, fetchImpl = fetc
   try {
     body = JSON.parse(text)
   } catch (error) {
-    throw new GatewayError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED')
+    throw new GatewayError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
   return readListing(body)
 }

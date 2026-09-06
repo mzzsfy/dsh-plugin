@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-turn-notify",
   "description": "消息通知:六类回合事件送达声音、系统弹窗、页内提示、webhook 与 IM;内置八种合成音色,自定义音效,按事件分类指定;多窗口只响一次",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -36,6 +36,7 @@
     "@mzzsfy/dsh-toast": "^0.1.0"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-session-title": ">=0.1.2-rc.1",
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
     "@deepseek-ai/schemastery": ">=3.18.0",
     "react": "^18.2.0"

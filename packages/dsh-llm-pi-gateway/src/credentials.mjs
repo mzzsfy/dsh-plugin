@@ -1,10 +1,14 @@
-// 凭据解析链(官方 resolveApiKey 同构):凭据 seam 引用优先,
-// 启动环境兜底,缺失即 MISSING_CREDENTIAL,可用性经官方校验器。
-// 服务经闭包注入,模块保持纯逻辑可测。
+// 凭据解析链(官方 resolveApiKey 同构):credentials 服务在场即唯一来源
+// (未命中即 MISSING_CREDENTIAL,不回落启动环境,防已删除凭据被过期环境变量
+// 静默复活),服务缺席才走启动环境。缺失即 MISSING_CREDENTIAL(GatewayError
+// 携 failure 信封,经宿主错误边界保真归因,不用裸 Error 丢码为 UNKNOWN)。
+// apiKeyEnv 引用名合法性在配置解析期校验(config.mjs isCredentialRefName,
+// 官方配置期拒绝同构),非法名到不了本模块。
 
-import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { assertUsableApiKey } from '@deepseek-ai/dsh-llm'
+import { GatewayError } from './errors.mjs'
 
 /**
  * 构造路由凭据解析器(官方 resolveApiKey 同构)。
@@ -15,15 +19,15 @@ export function createCredentialResolver(ctx) {
   return async (provider, ref) => {
     if (ref === undefined) return undefined
     const credentials = ctx.get('credentials')
-    const hit = credentials !== undefined && isCredentialRefName(ref)
+    const value = credentials !== undefined
       ? (await credentials.resolve(credentialRef(ref)))?.value
-      : undefined
-    const value = hit !== undefined ? hit : launchEnvironmentOf(ctx).get(ref)?.value
+      : launchEnvironmentOf(ctx).get(ref)?.value
     if (value !== undefined && value.length > 0) {
       return assertUsableApiKey(value, 'llm-pi-gateway', ref)
     }
-    throw Object.assign(new Error(
+    throw new GatewayError(
       `llm-pi-gateway: no credential for provider route "${provider}"; its profile resolves ${ref}, which is not set — store ${ref} through the credentials service (the web Models page writes it) or export it`,
-    ), { code: 'MISSING_CREDENTIAL' })
+      'MISSING_CREDENTIAL',
+    )
   }
 }

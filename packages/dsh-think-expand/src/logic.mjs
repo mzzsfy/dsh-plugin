@@ -1,15 +1,8 @@
-// 纯逻辑层:思考行分类、展开决策、哈希标记存活性。不依赖 DOM,client.js 内嵌同源实现,由 parity 测试保证一致。
+// 纯逻辑层:思考行分类、展开决策、标记存活性。不依赖 DOM,client.js 内嵌同源实现,由 parity 测试保证。
 
 // 行状态字面量,与官方 ReasoningRow 的 data-state 一致。
 export const STATE_RUNNING = 'running'
 export const STATE_OK = 'ok'
-
-// djb2 变体,确定性字符串哈希,作为行标识键。
-export function hashText(text) {
-  let h = 5381
-  for (let i = 0; i < text.length; i += 1) h = ((h << 5) + h + text.charCodeAt(i)) | 0
-  return (h >>> 0).toString(16)
-}
 
 // 已见文本 Map 容量上限,超出按插入序裁剪最旧条目(手动/已读标记增长有界)。
 export const SEEN_MAP_CAP = 10 * 20
@@ -19,16 +12,22 @@ function prefixOf(seen, text) {
   return seen.length > 0 && text.length >= seen.length && text.startsWith(seen)
 }
 
-// 标记匹配按"已见文本前缀",保证流式追加后标记不丢失。
-function findSeenKey(map, text) {
-  for (const [key, seen] of map) {
-    if (prefixOf(seen, text)) return key
+// 标记命中:双侧行身份在场时 uid 优先(流式短前缀快照在不同行同名开头时前缀会错配),
+// 任一侧无 uid 退化为纯前缀匹配。
+function matchMark(entry, uid, text) {
+  if (entry.uid !== undefined && uid !== undefined && entry.uid !== uid) return false
+  return prefixOf(entry.seen, text)
+}
+
+function findSeenKey(map, uid, text) {
+  for (const [key, entry] of map) {
+    if (matchMark(entry, uid, text)) return key
   }
   return null
 }
 
-function isCurrent(registry, text) {
-  return registry.current !== null && prefixOf(registry.current.seen, text)
+function isCurrent(registry, uid, text) {
+  return registry.current !== null && matchMark(registry.current, uid, text)
 }
 
 // 容量裁剪:超出上限按插入序删除最旧条目。
@@ -41,8 +40,9 @@ export function capMap(map, cap = SEEN_MAP_CAP) {
   return map
 }
 
-function putSeen(map, text) {
-  map.set(hashText(text), text)
+// 标记以登记时文本为键(消哈希碰撞类),值携带行身份供命中判定。
+function putSeen(map, uid, seen) {
+  map.set(seen, { uid, seen })
   capMap(map)
 }
 
@@ -50,8 +50,20 @@ export function createRegistry() {
   return { marks: new Map(), manual: new Map(), read: new Map(), current: null }
 }
 
-function findRow(registry, rows, seen) {
-  return rows.findIndex((row) => row.headable && prefixOf(seen, row.bodyText))
+// 当前插件行定位:uid 优先(行序上 current 必然靠后,findLastIndex 消解同开头
+// 历史行的前缀错配),无 uid 退化为前缀匹配。
+function findRow(registry, rows) {
+  const current = registry.current
+  if (current.uid !== undefined) {
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      if (rows[index].uid === current.uid) return index
+    }
+    return -1
+  }
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].headable && prefixOf(current.seen, rows[index].bodyText)) return index
+  }
+  return -1
 }
 
 // 打开会话/刷新:展开最后一条可识别思考行,其余保持收起。
@@ -75,38 +87,43 @@ export function planFinal(rows) {
   return { actions }
 }
 
-// 行结构:{ headable, state, bodyText, expanded, plugged }。headable=false 表示识别失败,永不干预;
-// plugged 为插件动作的内存标记(控制层执行展开时记入 WeakSet,不写 DOM 属性),用于区分手动展开。
+// 行结构:{ uid, headable, state, bodyText, expanded, plugged }。headable=false 表示识别失败,永不干预;
+// uid 为控制器侧行身份(元素稳定标识),标记命中按 uid 优先、前缀兜底;
+// plugged 为插件动作的闩锁标记(展开记入,收起解除),用于区分手动展开。
+// options.suppressManual 为真时跳过手动识别(容器重挂后首扫,既存展开行视为中性,
+// 防止把上一代插件展开误登记为手动意图)。
 // 返回 { actions: [{ index, kind: 'expand' | 'collapse' }] },registry 原位更新。
-export function plan(registry, rows) {
+export function plan(registry, rows, options = {}) {
   const actions = []
 
-  // 手动行识别:已展开但无插件动作标记且非当前行 → 手动集合,此后永不干预;
+  // 手动行识别:已展开但无插件动作闩锁且非当前行 → 手动集合,此后永不干预;
   // 手动意图出现即收起当前插件行(至多一条展开)。
-  // running 行同样识别:插件展开带 plugged 标记,无标记的展开即用户手动意图;
+  // running 行同样识别:插件展开带 plugged 闩锁,无闩锁的展开即用户手动意图;
   // 正文未挂载时不识别,空串 seen 会污染全部前缀匹配。
-  for (const row of rows) {
-    if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
-    if (findSeenKey(registry.marks, row.bodyText) !== null) continue
-    if (isCurrent(registry, row.bodyText)) continue
-    if (findSeenKey(registry.manual, row.bodyText) === null) {
-      putSeen(registry.manual, row.bodyText)
-      if (registry.current !== null) {
-        const currentIndex = findRow(registry, rows, registry.current.seen)
-        const currentRow = currentIndex >= 0 ? rows[currentIndex] : null
-        if (currentRow !== null && currentRow.expanded) actions.push({ index: currentIndex, kind: 'collapse' })
-        registry.marks.delete(registry.current.hash)
-        registry.current = null
+  if (options.suppressManual !== true) {
+    for (const row of rows) {
+      if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
+      if (findSeenKey(registry.marks, row.uid, row.bodyText) !== null) continue
+      if (isCurrent(registry, row.uid, row.bodyText)) continue
+      if (findSeenKey(registry.manual, row.uid, row.bodyText) === null) {
+        putSeen(registry.manual, row.uid, row.bodyText)
+        if (registry.current !== null) {
+          const currentIndex = findRow(registry, rows)
+          const currentRow = currentIndex >= 0 ? rows[currentIndex] : null
+          if (currentRow !== null && currentRow.expanded) actions.push({ index: currentIndex, kind: 'collapse' })
+          registry.marks.delete(registry.current.seen)
+          registry.current = null
+        }
       }
     }
   }
 
   // 插件展开的行变为收起 → 手动收起,视为已读。
   if (registry.current !== null) {
-    const index = findRow(registry, rows, registry.current.seen)
+    const index = findRow(registry, rows)
     if (index < 0 || !rows[index].expanded) {
-      putSeen(registry.read, registry.current.seen)
-      registry.marks.delete(registry.current.hash)
+      putSeen(registry.read, registry.current.uid, registry.current.seen)
+      registry.marks.delete(registry.current.seen)
       registry.current = null
     }
   }
@@ -120,29 +137,30 @@ export function plan(registry, rows) {
   const targetIndex = running[0]
   const target = rows[targetIndex]
 
-  if (findSeenKey(registry.manual, target.bodyText) !== null) return { actions }
-  if (findSeenKey(registry.read, target.bodyText) !== null) return { actions }
-  if (isCurrent(registry, target.bodyText)) return { actions }
+  if (findSeenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
+  if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
+  if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
 
   // 新思考行出现:收起旧的插件行(手动行除外),展开新行。
   if (registry.current !== null) {
-    const oldIndex = findRow(registry, rows, registry.current.seen)
-    const oldHash = registry.current.hash
-    const oldIsManual = registry.manual.has(oldHash)
+    const oldIndex = findRow(registry, rows)
+    const oldIsManual = findSeenKey(registry.manual, registry.current.uid, registry.current.seen) !== null
     const old = oldIndex >= 0 ? rows[oldIndex] : null
     if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
-    registry.marks.delete(oldHash)
+    registry.marks.delete(registry.current.seen)
     registry.current = null
   }
 
   if (!target.expanded) actions.push({ index: targetIndex, kind: 'expand' })
   // 正文未挂载时仅展开不登记,空串 seen 会污染全部前缀匹配;正文挂载后下轮补登记
-  if (target.bodyText !== '') {
-    const seen = target.bodyText
-    registry.current = { hash: hashText(seen), seen }
-    putSeen(registry.marks, seen)
-  }
+  if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
   return { actions }
+}
+
+// 当前插件行登记:current 与 marks 的单点写入口,状态形态单点拥有。
+export function registerCurrent(registry, uid, seen) {
+  registry.current = { uid, seen }
+  putSeen(registry.marks, uid, seen)
 }
 
 // 观察器重挂判定:已观察节点为空或与当前容器不一致(容器被重建)即需重挂,

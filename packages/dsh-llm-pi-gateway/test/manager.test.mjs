@@ -118,3 +118,49 @@ test('providerRetryPolicy 暴露已解析策略(注册捕获路径)', async () =
   const adapter = (await import('../src/adapter.mjs')).createGatewayAdapter(routesOf(harness.current))
   assert.equal(adapter.providerRetryPolicy('a').maxRetries, 5)
 })
+
+test('场景: routes getter 恒返同一 Map 引用,重复 ensure 不重放注册与目录,内容变化后才 replace', () => {
+  const counts = { adapters: 0, adapterReplaces: 0, directories: 0, directoryReplaces: 0 }
+  const table = routesOf({ a: profile() })
+  const manager = createRouteManager({
+    routes: () => table,
+    registerAdapter: () => {
+      counts.adapters += 1
+      return { replace: () => { counts.adapterReplaces += 1 } }
+    },
+    registerDirectory: () => {
+      counts.directories += 1
+      return { replace: () => { counts.directoryReplaces += 1 } }
+    },
+  })
+  manager.ensureRegistration()
+  manager.ensureDirectory()
+  manager.ensureRegistration()
+  manager.ensureDirectory()
+  assert.equal(counts.adapters, 1)
+  assert.equal(counts.directories, 1)
+  // 换表语义:同一 Map 引用内内容演进也构成变化(facts 由内容计算,非引用)
+  table.set('b', resolveRoute('b', profile({ baseURL: 'https://other.example.com' })))
+  manager.ensureRegistration()
+  manager.ensureDirectory()
+  assert.equal(counts.adapterReplaces, 1)
+  assert.equal(counts.directoryReplaces, 1)
+})
+
+test('场景: 换表但 provider 集纯重排,排序事实相同不触发重放', () => {
+  const counts = { adapters: 0, adapterReplaces: 0 }
+  let table = routesOf({ b: profile(), a: profile({ baseURL: 'https://other.example.com' }) })
+  const manager = createRouteManager({
+    routes: () => table,
+    registerAdapter: () => {
+      counts.adapters += 1
+      return { replace: () => { counts.adapterReplaces += 1 } }
+    },
+    registerDirectory: () => ({ replace: () => {} }),
+  })
+  manager.ensureRegistration()
+  table = routesOf({ a: profile({ baseURL: 'https://other.example.com' }), b: profile() })
+  manager.ensureRegistration()
+  assert.equal(counts.adapters, 1)
+  assert.equal(counts.adapterReplaces, 0, '纯重排不构成注册事实变化')
+})

@@ -55,3 +55,53 @@ test('场景: 文件不存在视为首次使用,不标记损坏', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('场景: 写链毒化防护——单次写入失败不永久断写', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'usage-panel-history-'))
+  const file = join(dir, 'history.json')
+  const writes = []
+  try {
+    const store = createHistoryStore({
+      file,
+      io: {
+        mkdir: async () => {},
+        readFile: async () => { const e = new Error('no'); e.code = 'ENOENT'; throw e },
+        rename: async () => {},
+        // 首次写失败(模拟瞬时 ENOSPC/占用),之后成功;写入内容记录供断言
+        writeFile: (() => {
+          let calls = 0
+          return async (_file, text) => {
+            calls += 1
+            if (calls === 1) throw new Error('ENOSPC')
+            writes.push(text)
+          }
+        })(),
+      },
+    })
+    await store.ensure()
+    store.sequences['a:balance'] = { granularity: '1h', points: [] }
+    await assert.rejects(store.persist(), /ENOSPC/, '调用方感知单次失败')
+    store.sequences['b:balance'] = { granularity: '1h', points: [] }
+    await store.persist()
+    // 后续写入不受毒化链影响,内容含两次写入的全部序列
+    assert.equal(writes.length, 1)
+    const saved = JSON.parse(writes[0])
+    assert.ok(saved.sequences['a:balance'] && saved.sequences['b:balance'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('场景: 落盘为紧凑 JSON(无缩进)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'usage-panel-history-'))
+  const file = join(dir, 'history.json')
+  try {
+    const store = createHistoryStore({ file })
+    await store.ensure()
+    await store.persist()
+    const text = await readFile(file, 'utf8')
+    assert.equal(text, JSON.stringify({ sequences: {} }), '序列化无第三参缩进')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

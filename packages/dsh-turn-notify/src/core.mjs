@@ -231,15 +231,21 @@ export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 // 提示音另受分类配置约束:soundCategories 中该分类显式 false 即静音,缺省键与空分类放行。
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
 // idleMs 为距上次用户行动的时长,满阈值视为离开,等效未聚焦。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS }) {
+// pageSound 为页内提示音:页内提示弹出且通知声音未播时补一声(聚焦场景的听觉提醒),
+// 不受聚焦静默压制,受页内总开关、页内分类配置(pageSoundCategories,独立于提示音分类)
+// 与通知声音互斥约束(同一通知至多一声)。
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false, pageSoundCategories = null }) {
   const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
   const quiet = hasFocus && focusQuiet && !idleAway
   const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
+  const pageCategoryMuted = pageSoundCategories != null && category != null && pageSoundCategories[category] === false
+  const sound = !quiet && soundEnabled && !categoryMuted
   return {
     toast: toastEnabled,
-    sound: !quiet && soundEnabled && !categoryMuted,
+    sound,
     system: !quiet && systemEnabled && permission === 'granted',
     blink: !quiet && systemEnabled && permission !== 'granted',
+    pageSound: pageSoundEnabled && toastEnabled && !pageCategoryMuted && !sound,
   }
 }
 
@@ -472,7 +478,7 @@ export function imBoundBotIds(list) {
 // 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'sessionHighlight']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -525,10 +531,6 @@ export function validateConfigPatch(patch) {
     if (typeof patch.suppressSubagentWake !== 'boolean') return { ok: false, reason: 'suppressSubagentWake 须为布尔' }
     next.suppressSubagentWake = patch.suppressSubagentWake
   }
-  if ('sessionHighlight' in patch) {
-    if (typeof patch.sessionHighlight !== 'boolean') return { ok: false, reason: 'sessionHighlight 须为布尔' }
-    next.sessionHighlight = patch.sessionHighlight
-  }
   if ('enabled' in patch) {
     const enabled = patch.enabled
     if (enabled === null || typeof enabled !== 'object' || Array.isArray(enabled)) return { ok: false, reason: 'enabled 须为对象' }
@@ -560,7 +562,6 @@ export function resolvedConfig(settings) {
     minTurnDurationMs: duration,
     rootsOnly: source.rootsOnly !== false,
     suppressSubagentWake: source.suppressSubagentWake !== false,
-    sessionHighlight: source.sessionHighlight !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
@@ -574,7 +575,6 @@ export function publicConfig(settings) {
     minTurnDurationMs: resolved.minTurnDurationMs,
     rootsOnly: resolved.rootsOnly,
     suppressSubagentWake: resolved.suppressSubagentWake,
-    sessionHighlight: resolved.sessionHighlight,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,

@@ -304,26 +304,48 @@ test('认领状态机:无锁认领 / 他锁跳过 / 过期接管 / 完成标记�
 
 test('发声通道判定:聚焦静默压声音与系统弹窗,页内提示与系统弹窗独立开关', () => {
   const base = { hasFocus: false, permission: 'granted' }
-  assert.deepEqual(chooseChannels(base), { toast: true, sound: true, system: true, blink: false })
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: true, system: true, blink: false, pageSound: false })
   // 聚焦静默:仅页内提示
-  assert.deepEqual(chooseChannels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false, pageSound: false })
   // 聚焦静默可关:聚焦窗口照常发声
   assert.deepEqual(chooseChannels({ ...base, hasFocus: true, focusQuiet: false }).sound, true)
   // 页内提示独立关闭
   assert.deepEqual(chooseChannels({ ...base, toastEnabled: false }).toast, false)
   // 系统弹窗独立关闭:不弹不闪
-  assert.deepEqual(chooseChannels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false, pageSound: false })
   // 想弹未授权:降级闪烁
-  assert.deepEqual(chooseChannels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true })
+  assert.deepEqual(chooseChannels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true, pageSound: false })
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied' }).blink, true)
   // 关闭系统弹窗后未授权不再闪
   assert.deepEqual(chooseChannels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
 })
 
+test('页内提示音:聚焦补位发声,失焦让位通知声音,页内分类独立配置', () => {
+  const base = { hasFocus: false, permission: 'granted', pageSoundEnabled: true }
+  // 聚焦静默压制通知声音,页内提示音补位:核心场景
+  assert.equal(chooseChannels({ ...base, hasFocus: true }).pageSound, true)
+  // 失焦时通知声音已播,页内提示音让位,同一通知至多一声
+  assert.equal(chooseChannels(base).pageSound, false)
+  // 通知声音总开关关闭:失焦时页内提示音顶上
+  assert.equal(chooseChannels({ ...base, soundEnabled: false }).pageSound, true)
+  // 页内提示关闭:无卡片即无声
+  assert.equal(chooseChannels({ ...base, hasFocus: true, toastEnabled: false }).pageSound, false)
+  // 页内分类显式静音:该分类不补位
+  assert.equal(chooseChannels({ ...base, hasFocus: true, pageSoundCategories: { ask: false }, category: 'ask' }).pageSound, false)
+  // 页内分类静音只压本分类:其他分类照常
+  assert.equal(chooseChannels({ ...base, hasFocus: true, pageSoundCategories: { ask: false }, category: 'completed' }).pageSound, true)
+  // 提示音分类静音不连带页内提示音:两套分类配置独立
+  assert.equal(chooseChannels({ ...base, hasFocus: true, soundCategories: { ask: false }, category: 'ask' }).pageSound, true)
+  // 未提供页内分类:全放行(null 与 undefined 等价)
+  assert.equal(chooseChannels({ ...base, hasFocus: true, pageSoundCategories: { ask: false } }).pageSound, true)
+  // 开关缺省关闭:行为与旧版一致
+  assert.equal(chooseChannels({ hasFocus: true, permission: 'granted' }).pageSound, false)
+})
+
 test('提示音开关:总开关与分类配置独立静音,缺省键与空分类放行', () => {
   const base = { hasFocus: false, permission: 'granted' }
   // 提示音总开关独立关闭:页内提示与系统弹窗不受影响
-  assert.deepEqual(chooseChannels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false, pageSound: false })
   // 分类显式 false:该分类静音
   assert.equal(chooseChannels({ ...base, soundCategories: { ask: false }, category: 'ask' }).sound, false)
   // 同配置其他分类照常出声
@@ -338,7 +360,7 @@ test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦
   const base = { hasFocus: true, permission: 'granted' }
   const idle = USER_IDLE_AWAY_MS
   // 空闲满阈值:离开,聚焦静默不再适用,全通道
-  assert.deepEqual(chooseChannels({ ...base, idleMs: idle }), { toast: true, sound: true, system: true, blink: false })
+  assert.deepEqual(chooseChannels({ ...base, idleMs: idle }), { toast: true, sound: true, system: true, blink: false, pageSound: false })
   // 恰等边界含
   assert.equal(chooseChannels({ ...base, idleMs: idle - 1 }).sound, false)
   // 活跃(刚行动):聚焦静默维持
@@ -346,7 +368,7 @@ test('用户行动空闲满阈值:聚焦也全通道齐发,活跃时维持聚焦
   // 空闲但未聚焦:行为不变
   assert.equal(chooseChannels({ hasFocus: false, permission: 'granted', idleMs: idle }).sound, true)
   // 未提供空闲时长:行为与旧版一致
-  assert.deepEqual(chooseChannels(base), { toast: true, sound: false, system: false, blink: false })
+  assert.deepEqual(chooseChannels(base), { toast: true, sound: false, system: false, blink: false, pageSound: false })
   // 空闲时聚焦静默关闭依旧生效
   assert.equal(chooseChannels({ ...base, idleMs: 0, focusQuiet: false }).sound, true)
 })
@@ -542,7 +564,6 @@ test('配置补丁校验:合法整补丁与部分补丁放行并归一化', () =
   assert.deepEqual(validateConfigPatch({ webhookUrl: '' }), { ok: true, patch: { webhookUrl: '' } })
   assert.deepEqual(validateConfigPatch({ rootsOnly: true }), { ok: true, patch: { rootsOnly: true } })
   assert.deepEqual(validateConfigPatch({ suppressSubagentWake: true }), { ok: true, patch: { suppressSubagentWake: true } })
-  assert.deepEqual(validateConfigPatch({ sessionHighlight: false }), { ok: true, patch: { sessionHighlight: false } })
   assert.deepEqual(validateConfigPatch({}), { ok: true, patch: {} })
 })
 
@@ -558,7 +579,6 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
   assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
   assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ suppressSubagentWake: 'yes' }).ok, false)
-  assert.equal(validateConfigPatch({ sessionHighlight: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
@@ -572,7 +592,6 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       suppressSubagentWake: true,
-      sessionHighlight: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
@@ -583,14 +602,12 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     minTurnDurationMs: MIN_TURN_MS,
     rootsOnly: true,
     suppressSubagentWake: true,
-    sessionHighlight: true,
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
     imTargets: [],
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
-  assert.equal(resolvedConfig({ sessionHighlight: false }).sessionHighlight, false)
 })
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
@@ -600,7 +617,6 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
       suppressSubagentWake: true,
-      sessionHighlight: true,
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],

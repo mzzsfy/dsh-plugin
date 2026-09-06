@@ -2,7 +2,7 @@
 // 孤儿草稿(模型已被他方删除)可观测,不静默丢弃。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mergeBaselineModels, INPUT_TEXT_IMAGE } from '../src/logic.mjs'
+import { mergeBaselineModels, draftsFromModels, INPUT_TEXT_IMAGE } from '../src/logic.mjs'
 
 const draft = (overrides) => ({
   checked: { off: true, high: true },
@@ -43,6 +43,23 @@ test('未触及字段真正原样保留:私有模态与词汇表外档位不被�
   const { models } = mergeBaselineModels(exotic, new Map([['m', seeded]]))
   assert.deepEqual(models[0].input, ['text', 'audio'], '未触及 input 不得被三态投影改写')
   assert.deepEqual(models[0].reasoningEfforts, { custom: 'x' }, '未触及档位不得整字段删除')
+})
+
+test('冻结种子:加载后他方修改基线,零编辑与单字段编辑不回滚他方值', () => {
+  // 加载时点基线 low:'low' → 草稿(含冻结种子);保存时基线已被他方改为 low:'xhigh'
+  const loaded = draftsFromModels([{ id: 'm', reasoningEfforts: { low: 'low' }, input: ['text'] }])
+  const frozen = loaded.get('m')
+  const afterOtherWrite = [{ id: 'm', reasoningEfforts: { low: 'xhigh' }, input: ['text'] }]
+  // 零编辑:untouched 跳过重写,他方值存活
+  const untouched = mergeBaselineModels(afterOtherWrite, new Map([['m', frozen]]))
+  assert.deepEqual(untouched.models[0].reasoningEfforts, { low: 'xhigh' }, '零编辑草稿不得回滚他方档位')
+  // 只改 input:efforts 判定按冻结种子仍为未触及,他方值存活
+  const inputOnly = mergeBaselineModels(
+    [{ id: 'm', reasoningEfforts: { low: 'xhigh' }, input: ['text', 'image'] }],
+    new Map([['m', { ...frozen, inputMode: 'text-image' }]]),
+  )
+  assert.deepEqual(inputOnly.models[0].reasoningEfforts, { low: 'xhigh' })
+  assert.deepEqual(inputOnly.models[0].input, ['text', 'image'])
 })
 
 test('用户显式改动后投影语义照常生效', () => {

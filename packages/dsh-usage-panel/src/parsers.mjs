@@ -290,6 +290,8 @@ function extractCustom(data, extract) {
   const remaining = extractByRule(data, extract && extract.remaining)
   requireOk(remaining !== null && Number.isFinite(Number(remaining)), 'extract.remaining 缺失或非数值')
   const num = (value) => {
+    // 规则解析失败(extractByRule 回 null)保持 null 语义,与真值 0 可区分
+    if (value === null || value === undefined) return null
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : null
   }
@@ -297,11 +299,17 @@ function extractCustom(data, extract) {
   const spend = extract && extract.spend !== undefined ? num(extractByRule(data, extract.spend)) : null
   const unit =
     extract && typeof extract.unit === 'string' && extract.unit.length > 0 ? extract.unit : 'USD'
+  // 与 balance 读数联合形态对齐:kind 判别使历史采样 / 通知评估 / 渲染三链路直接生效
   return {
-    currency: unit,
-    remaining: Number(remaining),
-    total: maxBudget,
-    used: spend,
+    kind: 'balance',
+    entries: [
+      {
+        currency: unit,
+        remaining: Number(remaining),
+        total: maxBudget,
+        used: spend,
+      },
+    ],
   }
 }
 

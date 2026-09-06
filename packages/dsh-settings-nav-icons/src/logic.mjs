@@ -121,27 +121,46 @@ export const GLYPHS = {
   db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
 }
 
-// 声明值解析与安全门:svg 字符串须完整开标签且不带事件属性/外联/内嵌载体,
-// 超长拒绝;glyph 名称查表(原型链成员经 typeof 收口不可能混入);非法值返回 undefined。
+// 声明值解析与安全门:svg 须完整开标签(大小写不敏感)且单根闭合(首个 </svg>
+// 后不得再有内容,堵尾缀活动 HTML);不带事件属性(\b 前界堵斜杠分隔绕过)、
+// 不带脚本/样式/SMIL 动画载体(内联 svg 的 style 全文档生效,@import 外联可达)、
+// 不带 href/xlink:href 与 SMIL attributeName 注入(16×16 静态图标无合法引用/
+// 动画场景,外联与事件注入一并封死),超长拒绝;glyph 名称查表(原型链成员经
+// typeof 收口不可能混入);非法值返回 undefined。
 export const SVG_MAX_CHARS = 4 * 1024
 export function resolveIcon(value) {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   if (
     trimmed.length <= SVG_MAX_CHARS
-    && /^<svg[\s>]/.test(trimmed)
-    && !/\son[a-z]+\s*=/i.test(trimmed)
+    && /^<svg[\s>]/i.test(trimmed)
+    && /<\/svg>\s*$/i.test(trimmed)
+    && !/\bon[a-z]+\s*=/i.test(trimmed)
     && !/<foreignObject/i.test(trimmed)
+    && !/<script[\s/>]/i.test(trimmed)
+    && !/<style[\s/>]/i.test(trimmed)
+    && !/<(animate|animatemotion|animatetransform|set)[\s/>]/i.test(trimmed)
+    && !/\b(xlink:)?href\s*=/i.test(trimmed)
+    && !/attributeName\s*=\s*["']?\s*(xlink:)?href/i.test(trimmed)
     && !/javascript:/i.test(trimmed)
   ) return trimmed
   return typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
 }
+
+// 官方 DOM 锚点:与 client.js 控制器字面量同源锁定(parity 断言对表)。
+export const SELECTOR_LABEL = '.VOzbGW_navLabel'
 
 // 官方默认齿轮首段路径前缀,用于识别"未装饰"单元格。
 export const GEAR_PATH = 'M14.0861'
 
 export function isGear(svg) {
   return svg.querySelector('path[d^="' + GEAR_PATH + '"]') !== null
+}
+
+// 完整 svg 字符串剥壳取内部内容:resolveIcon 输出与 GLYPHS/声明值均为完整 svg,
+// 内容改写制只写 official.innerHTML,壳由本函数剥除。输入已过安全门(单根闭合)。
+export function svgInner(html) {
+  return html.replace(/^<svg[^>]*>/i, '').replace(/<\/svg>\s*$/i, '')
 }
 
 // 稳定哈希:同一 label 永远取同一个池内图标,重渲染不闪动。
@@ -187,27 +206,34 @@ export function themedIcon(name) {
   return FALLBACK[poolIndexOf(name)]
 }
 
-// 市场卡片头像槽决策:img(作者头像)整体换插件图标;div(字母色块)清空后内嵌。
-// 记账值 = 插件名,换名重贴由该比较驱动。
+// 分区取图全链:声明 → 内置映射 → 关键词/哈希兜底。decide 与声明变更就地
+// 重写共用;撤销内置分区声明时回退必须含内置映射,否则卡死在哈希图。
+export function resolveForLabel(label) {
+  const declared = resolveIcon(DECLARED_ICONS[label])
+  if (declared !== undefined) return declared
+  const mapped = ICONS[label]
+  if (mapped !== undefined) return mapped
+  return themedIcon(label)
+}
+
+// 市场卡片头像槽决策:img(作者头像)与 div(字母色块)同构处理——原子节点隐藏,
+// 插件图标注入跟随。记账值 = 插件名,换名重贴由该比较驱动。
 export function decideAvatar(av, name) {
   if (name === '' || av.dataset.navic === name) return null
-  return { name, html: themedIcon(name), old: av }
+  return { name, html: themedIcon(name), av }
 }
 
 export function applyAvatar(av, decision) {
-  if (av.tagName === 'IMG') {
-    // IMG 不移除(React 持引用,移除后 reconcile 复活会双图):隐藏并记账,
-    // 注入图标跟随其后;换名重贴时先移除上次注入的图标防重复
-    av.hidden = true
-    av.dataset.navic = decision.name
-    const stale = av.nextElementSibling
-    if (stale !== null && stale.dataset.navic === '1') stale.remove()
-    av.insertAdjacentHTML('afterend', decision.html)
-    return
-  }
-  av.textContent = ''
-  av.insertAdjacentHTML('beforeend', decision.html)
+  // 原子节点不移除(React 持引用,移除/清空子树后 reconcile 报错):隐藏并记账,
+  // 注入图标跟随其后;重贴先清行内上次注入的图标(父容器范围扫描,防槽体被
+  // 外部替换后旧注入成孤儿双图)
+  av.hidden = true
   av.dataset.navic = decision.name
+  const parent = av.parentElement
+  if (parent !== null) {
+    for (const injected of parent.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
+  }
+  av.insertAdjacentHTML('afterend', decision.html)
 }
 
 // 内置映射:官方分区与无法改源的第三方插件分区。自有插件分区一律走
@@ -229,30 +255,37 @@ export const ICONS = {
 // 继承成员;污染面收敛在 window.__navicIcons 单一命名空间。
 export const DECLARED_ICONS = Object.create(null)
 
-// 单元格替换判定:先看记账与现役图标;label 有声明或内置映射直接换,
-// 未映射时官方原生图形(非齿轮且非本插件所贴)一律不动,齿轮与本插件所贴
-// 按 themedIcon(声明→关键词→哈希)兜底。
-// 幂等判定与注入内容解耦:记账 label 匹配且现役图标非官方齿轮即视为已处理,
-// 外部声明内容是否自带标记不影响短路;label 变化(如语言切换)则按新 label 重贴。
+// 单元格改写判定(内容改写制):不新建 svg、不动属性,直接把官方齿轮 svg 的
+// 内部内容改写为本插件图标;记账迁到官方 svg 自身(dataset.navic = label),
+// 节点与 class/位置等属性保持官方原样,第三方对官方图标的 CSS/选择器处理
+// 照常作用于改写结果(dream-skin 藏首 svg 的规则命中改写后的节点,无双图标)。
+// React 安全性:官方 nav 图标为静态子树,重渲染时前后 element 引用相等即
+// bailout,改写内容稳定存活;旧版 NotFoundError 仅源于 remove 节点本身。
+// 只对官方齿轮强补:非齿轮(官方原生图形或第三方供给形态)一律不动,
+// 映射/声明命中也不例外。已改写的按 svg 记账与当前 label 同异决定幂等或重写。
 export function decide(cell) {
-  const labelNode = cell.querySelector('.VOzbGW_navLabel')
+  const labelNode = cell.querySelector(SELECTOR_LABEL)
   if (labelNode === null) return null
   const label = (labelNode.textContent || '').trim()
   if (label === '') return null
-  const old = cell.querySelector('svg')
-  if (old === null) return null
-  if (cell.dataset.navic === label && !isGear(old)) return null
-  let html = resolveIcon(DECLARED_ICONS[label])
-  if (html === undefined) html = ICONS[label]
-  if (html === undefined) {
-    if (!isGear(old) && old.dataset.navic !== '1') return null
-    html = themedIcon(label)
+  const svgs = cell.querySelectorAll('svg')
+  let official = null
+  for (const svg of svgs) {
+    if (svg.dataset.navic !== '1') {
+      official = svg
+      break
+    }
   }
-  return { label, html, old }
+  if (official === null) return null
+  if (official.dataset.navic === label) return null
+  const touched = official.dataset.navic !== undefined && official.dataset.navic !== ''
+  if (!touched && !isGear(official)) return null
+  return { label, inner: svgInner(resolveForLabel(label)), official }
 }
 
 export function applyDecision(cell, decision) {
-  decision.old.insertAdjacentHTML('afterend', decision.html)
-  decision.old.remove()
-  cell.dataset.navic = decision.label
+  // 内容改写 + svg 自记账;先清 0.1.x 注入语义的升级残留(带 '1' 标记的旧节点)
+  for (const injected of cell.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
+  decision.official.innerHTML = decision.inner
+  decision.official.dataset.navic = decision.label
 }

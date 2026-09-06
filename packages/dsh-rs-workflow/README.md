@@ -31,7 +31,14 @@ dsh plugin --profile web remove @mzzsfy/dsh-rs-workflow   # 或 pnpm remove（pr
 rm -r ~/.dsh/.agent-presets/rs-workflow
 ```
 
-pnpm 不执行依赖的卸载脚本（preuninstall，pnpm 11 实测含 onlyBuiltDependencies 白名单均不放行），插件无法在自身被移除后自动清理，preset 残留会在模式选择器显示为 broken——按上面第二条命令手动删除即可。包内亦提供编程接口 `removePreset()`（lib/preset-sync.mjs）。
+pnpm 不执行依赖的卸载脚本（preuninstall，pnpm 11 实测含 onlyBuiltDependencies 白名单均不放行），插件无法在自身被移除后自动清理，preset 残留会在模式选择器显示为 broken——按上面第二条命令手动删除即可。包内亦提供编程接口（从包根导入，exports 只开放 `.` 单一入口）：
+
+```js
+import { presetDest, removePreset, syncPreset } from '@mzzsfy/dsh-rs-workflow'
+// presetDest(): 释放目标绝对路径（诊断 home 错位）
+// syncPreset(): 立即同步一次，返回 'created' | 'updated' | 'unchanged' | 'skipped-foreign'
+// removePreset(): 删除本包释放的 preset，返回 'removed' | 'missing' | 'foreign'
+```
 
 ## 冒烟测试
 

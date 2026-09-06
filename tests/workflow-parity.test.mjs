@@ -34,7 +34,26 @@ test('slot 键集合三处镜像一致(lib schema / slots.json5 / SKILL.md)', as
 
 test('lib 导出常量可从包外消费(发布物边界)', async () => {
   const lib = await import('../packages/dsh-rs-workflow/lib/index.js')
-  for (const key of ['BUDGET_DEFAULTS', 'BUDGET_MIN', 'BUDGET_MAX', 'MAX_TASKS_DEFAULT', 'MAX_TASKS_MIN', 'MAX_TASKS_MAX', 'SETTINGS_SCHEMA', 'Config']) {
+  for (const key of ['BUDGET_DEFAULTS', 'BUDGET_MIN', 'BUDGET_MAX', 'MAX_TASKS_DEFAULT', 'MAX_TASKS_MIN', 'MAX_TASKS_MAX', 'SETTINGS_SCHEMA', 'Config', 'syncPreset', 'presetDest', 'removePreset']) {
     assert.ok(lib[key] !== undefined, 'lib 应导出 ' + key)
   }
+  // 模块级 inject 已废除(tool 角色改 apply 内嵌套 inject,settings/preset-sync 不再被连坐)
+  assert.equal(lib.inject, undefined, 'inject 不应再从模块导出')
+})
+
+test('tool 输出 schema 工作位键集与 Config schema 同源', async () => {
+  const lib = await import('../packages/dsh-rs-workflow/lib/index.js')
+  let tool = null
+  const nestingCtx = {
+    inject(deps, cb) {
+      assert.deepEqual(deps, ['tools'], 'tool 角色应嵌套声明 tools 依赖')
+      cb({ tools: { register(t) { tool = t } }, get: () => undefined })
+    },
+  }
+  lib.apply(nestingCtx, { role: 'tool' })
+  assert.ok(tool, 'apply 应注册工具')
+  const schemaSlotKeys = Object.keys(tool.output.schema.properties.slots.properties).sort()
+  const cfg = lib.Config({ role: 'tool' })
+  assert.deepEqual(schemaSlotKeys, Object.keys(cfg.slots).sort(), '工具宣告的 slots 形状与可配集合脱节')
+  assert.deepEqual(tool.output.schema.properties.workflow.properties.defaultTemplate.enum, lib.TEMPLATES)
 })

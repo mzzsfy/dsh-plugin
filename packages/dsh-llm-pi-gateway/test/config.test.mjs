@@ -3,7 +3,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveRoute, modelOf, mergeCompat, validateCompat } from '../src/config.mjs'
+import { resolveRoute, resolveRoutes, modelOf, mergeCompat, validateCompat } from '../src/config.mjs'
 import { createCredentialResolver } from '../src/credentials.mjs'
 
 const NO_SERVICES = { get: () => undefined }
@@ -146,4 +146,76 @@ test('sessionMarker 关闭时 metadata 模板引用 {marker} 拒绝(语义自洽
 test('metadata 模板原样保存在路由上', () => {
   const template = { user_id: '{"session":"{sessionId}"}' }
   assert.deepEqual(resolveRoute('p', { ...BASE_PROFILE, metadata: template }).metadata, template)
+})
+
+test('场景: providers 为数组输入,resolveRoutes 抛 INVALID_CONFIG', () => {
+  assert.equal(codeOf(() => resolveRoutes(['a'], undefined)), 'INVALID_CONFIG')
+  assert.equal(codeOf(() => resolveRoutes(undefined, ['a'])), 'INVALID_CONFIG')
+})
+
+test('场景: headers 值为数字,resolveRoute 拒绝;字符串值合法通过', () => {
+  assert.equal(codeOf(() => resolveRoute('p', { ...BASE_PROFILE, headers: { 'x-group': 1 } })), 'INVALID_CONFIG')
+  const route = resolveRoute('p', { ...BASE_PROFILE, headers: { 'x-group': 'pool-a' } })
+  assert.equal(route.headers['x-group'], 'pool-a')
+})
+
+test('场景: modelOverrides 非空对象,resolveRoute 抛 INVALID_CONFIG 且文案同官方;空对象放行', () => {
+  const rejected = (() => {
+    try {
+      resolveRoute('p', { ...BASE_PROFILE, modelOverrides: { auto: { contextWindow: 1 } } })
+      return undefined
+    } catch (error) {
+      return error
+    }
+  })()
+  assert.equal(rejected.code, 'INVALID_CONFIG')
+  assert.match(rejected.message, /model overrides are not supported/)
+  const route = resolveRoute('p', { ...BASE_PROFILE, modelOverrides: {} })
+  assert.ok(route.models.has('auto'))
+})
+
+test('场景: compat 名单 0.84 新字段在对应协议路由合法通过', () => {
+  const completions = resolveRoute('p', {
+    ...BASE_PROFILE,
+    api: 'openai-completions',
+    compat: {
+      supportsFinishReason: true,
+      chatTemplateArgs: { stop: 'END' },
+      thinkingTokenBudgetField: 'reasoning_tokens',
+      supportsThinkingTokenBudget: true,
+    },
+  })
+  assert.equal(completions.api, 'openai-completions')
+  const anthropic = resolveRoute('p', { ...BASE_PROFILE, compat: { allowedFallbackModels: ['backup'] } })
+  assert.deepEqual(anthropic.models.get('auto').compat.allowedFallbackModels, ['backup'])
+})
+
+test('场景: 凭据服务在场但返回 undefined,抛 MISSING_CREDENTIAL,不回落启动环境', async () => {
+  const staleService = createCredentialResolver({
+    get: (name) => (name === 'credentials' ? { resolve: async () => undefined } : undefined),
+  })
+  process.env.CRED_TEST_STALE_1 = 'sk-stale-env'
+  try {
+    await assert.rejects(
+      staleService('p', 'CRED_TEST_STALE_1'),
+      (error) => {
+        assert.equal(error.code, 'MISSING_CREDENTIAL')
+        assert.equal(error.failure.code, 'MISSING_CREDENTIAL', '信封形态,宿主错误边界据此归因')
+        return true
+      },
+      '服务在场即唯一来源,环境变量残留不得兜底',
+    )
+  } finally {
+    delete process.env.CRED_TEST_STALE_1
+  }
+})
+
+test('场景: apiKeyEnv 非法引用名,配置期 INVALID_CONFIG 拒绝(官方配置期 credentialRef 同构)', () => {
+  assert.throws(
+    () => resolveRoute('p', { ...BASE_PROFILE, apiKeyEnv: 'MY-KEY' }),
+    (error) => error.code === 'INVALID_CONFIG',
+    '拖到请求期会以裸 TypeError 丢码为 UNKNOWN,必须在配置期拒绝',
+  )
+  const ok = resolveRoute('p', { ...BASE_PROFILE, apiKeyEnv: 'MY_KEY' })
+  assert.equal(ok.apiKeyEnv, 'MY_KEY', '合法引用名通过')
 })

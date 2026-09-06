@@ -4,6 +4,7 @@
 // 纯函数,无 I/O。
 
 import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import { GatewayError } from './errors.mjs'
 import { templateUsesMarker } from './template.mjs'
 
@@ -36,8 +37,10 @@ export const PROTOCOL_MODULES = {
   'openai-responses': '@earendil-works/pi-ai/api/openai-responses',
 }
 
-// compat 字段名单取自 pi-ai@0.82 各协议 compat 类型声明(类型即边界),
-// 与官方 dsh-llm-pi-ai 声明的 pi-ai 范围一致;
+// compat 字段名单取自 pi-ai@0.84.4 各协议 compat 类型声明(类型即边界),
+// 与官方 dsh-llm-pi-ai@0.1.2-rc.1 声明的 pi-ai 范围及宿主实装版本一致;
+// 名单含 0.84.4 才引入的 allowedFallbackModels/thinkingTokenBudgetField,
+// 依赖下界(^0.84.4)与名单取材版本必须同步;
 // 升级 pi-ai 依赖时必须同步核对本名单,新增/移除字段需同步。
 const ANTHROPIC_COMPAT_FIELDS = [
   'supportsEagerToolInputStreaming',
@@ -49,6 +52,7 @@ const ANTHROPIC_COMPAT_FIELDS = [
   'allowEmptySignature',
   'supportsStrictTools',
   'supportsToolReferences',
+  'allowedFallbackModels',
 ]
 
 const OPENAI_COMPLETIONS_COMPAT_FIELDS = [
@@ -63,6 +67,10 @@ const OPENAI_COMPLETIONS_COMPAT_FIELDS = [
   'requiresReasoningContentOnAssistantMessages',
   'thinkingFormat',
   'chatTemplateKwargs',
+  'supportsFinishReason',
+  'chatTemplateArgs',
+  'thinkingTokenBudgetField',
+  'supportsThinkingTokenBudget',
   'supportsStrictMode',
   'cacheControlFormat',
   'supportsLongCacheRetention',
@@ -188,15 +196,38 @@ export function mergeCompat(routeCompat, modelCompat) {
 
 /**
  * 解析整张路由表:官方节 ∪ 本包节(mergeProviderSections 合并),每条
- * 路由经 resolveRoute 全量校验;任一路由不可服务即抛(fail loud)。
+ * 路由经 resolveRoute 全量校验。本包节路由不可服务即抛(fail loud,手写
+ * 配置必须修好);官方节 catalog 形态路由(无协议/端点/模型目录的凭据级
+ * 声明)经 onUnserviceable 上报后跳过,不影响同节其余路由——硬拒会把整节
+ * 拖成全失服。跳过即失服:官方行已被 patch 禁用,无人服务该路由(本包
+ * 未复刻官方目录物化),如实告知需改写为手写路由。
+ * @param {(provider: string, reason: string) => void} [onUnserviceable] 官方节不可服务路由上报
  */
-export function resolveRoutes(officialProviders, gatewayProviders) {
+export function resolveRoutes(officialProviders, gatewayProviders, onUnserviceable) {
+  if (Array.isArray(officialProviders) || Array.isArray(gatewayProviders)) {
+    throw new GatewayError('llm-pi-gateway: providers 必须是对象映射,而非数组', 'INVALID_CONFIG')
+  }
   const merged = mergeProviderSections(officialProviders, gatewayProviders)
   const routes = new Map()
   for (const [provider, profile] of merged) {
+    const officialSourced = profile !== null && typeof profile === 'object' && profile.source === OFFICIAL_SETTINGS_NS
+    if (officialSourced && !routeServable(profile)) {
+      onUnserviceable?.(
+        provider,
+        `路由 "${provider}" 为官方目录形态(凭据级声明,缺协议/端点/模型目录),接管期间不被任何 adapter 服务,请求与配置面拉取模型都会失败;需要该路由请改写为手写完整路由或卸载本包`,
+      )
+      continue
+    }
     routes.set(provider, resolveRoute(provider, profile))
   }
   return routes
+}
+
+/** 官方节路由可服务判定:有协议、有端点、有非空模型目录。 */
+function routeServable(profile) {
+  return typeof profile.api === 'string' && profile.api.length > 0
+    && typeof profile.baseURL === 'string' && profile.baseURL.length > 0
+    && Array.isArray(profile.models) && profile.models.length > 0
 }
 
 /**
@@ -210,9 +241,15 @@ export function resolveRoute(provider, profile) {
   if (typeof profile !== 'object' || profile === null) {
     throw new GatewayError(`${where}: 配置必须是对象`, 'INVALID_CONFIG')
   }
-  // 官方节路由的形状由官方 schema 担保(含其规范化产物,如 modelOverrides
-  // 与目录 compat),不适用本包对手写配置的字段级拒绝
+  // 官方节路由的形状由官方 schema 担保(含其规范化产物,如目录 compat),
+  // 不适用本包对手写配置的字段级拒绝
   const officialSourced = profile.source === OFFICIAL_SETTINGS_NS
+  // modelOverrides 官方同款硬拒:本包无模型目录改写通道,静默丢弃会让
+  // 「配置看似生效实则无效」;official schema 不产生该键,出现即显式拒绝
+  if (profile.modelOverrides !== undefined && profile.modelOverrides !== null
+    && typeof profile.modelOverrides === 'object' && Object.keys(profile.modelOverrides).length > 0) {
+    throw new GatewayError(`${where}: model overrides are not supported`, 'INVALID_CONFIG')
+  }
   const { api, baseURL } = profile
   if (!(api in PROTOCOL_MODULES)) {
     throw new GatewayError(
@@ -275,6 +312,26 @@ export function resolveRoute(provider, profile) {
   if (profile.headers !== undefined
     && (typeof profile.headers !== 'object' || profile.headers === null || Array.isArray(profile.headers))) {
     throw new GatewayError(`${where}: headers 必须是对象`, 'INVALID_CONFIG')
+  }
+  // headers 值两层校验:先拒非字符串(new Headers 会把数字等静默转串,schema 层
+  // 之外这里是唯一类型防线);再按官方 assertValidHeaders 同构做 Fetch 头构造
+  // 合法性探测(非法头名/多行值运行期 fetch 组头才炸,提前到配置期)
+  if (profile.headers !== undefined) {
+    for (const [name, value] of Object.entries(profile.headers)) {
+      if (typeof value !== 'string') {
+        throw new GatewayError(`${where}: headers.${name} 必须是字符串`, 'INVALID_CONFIG')
+      }
+      try {
+        new Headers([[name, value]])
+      } catch {
+        throw new GatewayError(`${where}: header "${name}" is not valid for Fetch`, 'INVALID_CONFIG')
+      }
+    }
+  }
+  // apiKeyEnv 引用名合法性在配置期拒绝(官方配置期 credentialRef 同构):
+  // 拖到请求期 credentials.resolve 才炸会以裸 TypeError 丢码为 UNKNOWN
+  if (profile.apiKeyEnv !== undefined && !isCredentialRefName(profile.apiKeyEnv)) {
+    throw new GatewayError(`${where}: apiKeyEnv "${profile.apiKeyEnv}" 不是合法的凭据引用名`, 'INVALID_CONFIG')
   }
   const routeCompat = officialSourced
     ? { ...(profile.compat ?? {}) }

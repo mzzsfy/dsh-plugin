@@ -8,7 +8,7 @@ import { LlmAdapter, ReasoningEffortId, contentHasImage } from '@deepseek-ai/dsh
 import { GatewayError } from './errors.mjs'
 import { modelOf, PROTOCOL_MODULES } from './config.mjs'
 import { deriveMarker, markerOnPayload } from './marker.mjs'
-import { renderTemplate } from './template.mjs'
+import { renderTemplate, templateUsesSessionId } from './template.mjs'
 import { toPiContext, toPiContextWithImages } from './pi-context.mjs'
 import { toStreamChunks } from './pi-stream.mjs'
 import { requestHeaders } from './headers.mjs'
@@ -106,14 +106,20 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
     }
   }
 
-  async function* stream(options) {
-    const route = routeOf(options.provider)
-    const entry = modelOf(route, options.model)
-    // 纯入参校验先于凭据解析:坏请求不消耗凭据链副作用
-    if (typeof options.sessionId !== 'string' || options.sessionId.length === 0) {
-      throw new GatewayError('sessionId 必须为非空字符串', 'INVALID_REQUEST')
+  /** 流主链:路由/模型条目由调用方快照冻结传入(prepareCall 与公共 stream 各自解析)。 */
+  async function* streamWithRoute(options, route, entry) {
+    // 官方语义:不支持请求选项显式拒绝,防静默吞错(官方 streamWithSnapshot 同位,
+    // prepareCall 与公共 stream 两条入口在此汇合自然全覆盖;值判断对 {stop:undefined} 放行)
+    if (options?.stop !== undefined) {
+      throw new GatewayError('请求选项 "stop" 不受网关支持(终止请走 AbortSignal)', 'UNSUPPORTED_OPTION')
     }
-    const sessionId = options.sessionId
+    // 纯入参校验先于凭据解析:坏请求不消耗凭据链副作用
+    // sessionId 官方契约可缺省:标记关闭且模板不引用时放行缺失,零感知接管不侵蚀
+    const needsSessionId = route.sessionMarker.enabled || templateUsesSessionId(route.metadata)
+    if (needsSessionId && (typeof options.sessionId !== 'string' || options.sessionId.length === 0)) {
+      throw new GatewayError('sessionId 必须为非空字符串(该路由的会话标记或 metadata 模板依赖它)', 'INVALID_REQUEST')
+    }
+    const sessionId = typeof options.sessionId === 'string' && options.sessionId.length > 0 ? options.sessionId : ''
     const piModel = toPiModel(route, entry)
     const reasoning = resolveReasoningLevel(piModel, options.reasoningEffort ?? route.reasoning)
     const enabledReasoning = reasoning === 'off' ? undefined : reasoning
@@ -153,7 +159,8 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
       maxRetries: 0,
       ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
       ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
-      sessionId,
+      // 官方 wire 契约:缺省即省略键(空串会被 pi-ai clamp 成 prompt_cache_key:'' 共享空桶)
+      ...(sessionId === '' ? {} : { sessionId }),
       signal: options.signal,
       headers: requestHeaders(route.headers),
       metadata: renderedTemplate,
@@ -165,7 +172,23 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
         marker,
       }),
     })
-    yield* toStreamChunks(events, piModel.contextWindow, options.signal)
+    try {
+      yield* toStreamChunks(events, piModel.contextWindow, options.signal)
+    } catch (error) {
+      // 源流在调用方已取消时的抛出形态不可控(上游网络栈各异),出口兜底归因 ABORTED,
+      // 与官方「aborted 优先归因、不落 UNKNOWN」同构;唯一豁免是已是 ABORTED 的信封防双包
+      if (options.signal?.aborted === true && error?.code !== 'ABORTED') {
+        throw new GatewayError('pi-ai request aborted by caller', 'ABORTED', { cause: error })
+      }
+      throw error
+    }
+  }
+
+  /** 公共流入口:路由即时解析,供未走 prepareCall 的直接调用。 */
+  async function* stream(options) {
+    const route = routeOf(options.provider)
+    const entry = modelOf(route, options.model)
+    yield* streamWithRoute(options, route, entry)
   }
 
   return (
@@ -185,10 +208,13 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
     },
     resolveModel: (provider, model) => Promise.resolve(modelInfo(routeOf(provider), model)),
     prepareCall: (provider, model) => {
+      // 解析结果快照冻结:prepareCall 与后续 stream 回调绑定同一路由/模型条目,
+      // 热更换表不产生「目录信息旧代 + 请求路由新代」的错配(官方同构)
       const route = routeOf(provider)
+      const entry = modelOf(route, model)
       return Promise.resolve({
         model: modelInfo(route, model),
-        stream: (options) => stream(options),
+        stream: (options) => streamWithRoute(options, route, entry),
       })
     },
     stream,

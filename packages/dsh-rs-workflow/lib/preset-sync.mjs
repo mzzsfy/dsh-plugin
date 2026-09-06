@@ -47,7 +47,13 @@ export function presetDest() {
   return join(dshHome(), USER_PRESET_DIR, PRESET_ID)
 }
 
-const PKG_VERSION = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
+// 版本读取容错:package.json 恰逢包管理器替换窗口或损坏时不让包整体加载失败,
+// marker 的 version 字段恒有确定语义(缺失/非字符串归一 unknown)
+let PKG_VERSION = 'unknown'
+try {
+  const parsed = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
+  if (typeof parsed === 'string' && parsed.length > 0) PKG_VERSION = parsed
+} catch { /* 保留 unknown */ }
 
 /** 源目录内容指纹:文件名集合 + 逐文件 size 与 mtime 的聚合。粒度足够感知
  *  同版本内容改动与产物残缺,不引入 hash 依赖 */
@@ -103,12 +109,13 @@ export function syncPreset() {
 }
 
 /** 已确认归属本包后的重写。换入式原子替换:旧目录先 rename 到备份名,新目录
- *  rename 入位成功后才删备份;rename 失败时把备份还原,任意时刻 dest 要么完整
- *  存在要么不存在(后者由下次启动 created 自愈),不再出现"目录在 marker 丢"。 */
+ *  rename 入位成功后才删备份;换入失败时尽力还原,还原也失败则把旧副本改名为
+ *  orphan 前缀(不匹配清理规则,永不被自动删除)并告警,绝不静默销毁。 */
 function rewrite(dest, existed) {
   mkdirSync(dirname(dest), { recursive: true })
   const staging = mkdtempSync(join(dirname(dest), '.rs-workflow-staging-'))
   const backup = join(dirname(dest), `.rs-workflow-old-${Date.now()}`)
+  let orphan = null
   try {
     cpSync(PRESET_SRC, join(staging, 'out'), { recursive: true })
     writeFileSync(join(staging, 'out', MARKER_NAME), JSON.stringify({
@@ -124,12 +131,25 @@ function rewrite(dest, existed) {
     try {
       renameSync(join(staging, 'out'), dest)
     } catch (error) {
-      if (hasDest) renameSync(backup, dest)
+      if (hasDest) {
+        try {
+          renameSync(backup, dest)
+        } catch (restoreError) {
+          // dest 缺失且旧副本留存:改用清理规则不匹配的 orphan 前缀,保留待人工处置
+          orphan = join(dirname(backup), `.rs-workflow-orphan-${Date.now()}`)
+          try {
+            renameSync(backup, orphan)
+          } catch {
+            orphan = backup
+          }
+          console.warn(`[rs-workflow] preset 换入失败且还原失败,旧目录保留在 ${orphan}(不会被自动清理,需人工处置)`)
+        }
+      }
       throw error
     }
   } finally {
     rmSync(staging, { recursive: true, force: true })
-    rmSync(backup, { recursive: true, force: true })
+    if (orphan === null) rmSync(backup, { recursive: true, force: true })
   }
   return existed ? 'updated' : 'created'
 }
@@ -194,12 +214,14 @@ function cleanStaleStaging(parentDir) {
   }
 }
 
-/** 删除本包释放的 preset(仅供维护脚本/手工调用,插件生命周期内不触发) */
+/** 删除本包释放的 preset(仅供维护脚本/手工调用,插件生命周期内不触发)。
+ *  返回三态:'removed' 已删 | 'missing' 目录不存在 | 'foreign' 外来目录拒绝删除 */
 export function removePreset() {
   const dest = presetDest()
+  if (!existsSync(dest)) return 'missing'
   const marker = readMarker(dest)
-  if (marker === null || marker.package !== PACKAGE_NAME) return false
+  if (marker === null || marker.package !== PACKAGE_NAME) return 'foreign'
   rmSync(dest, { recursive: true, force: true })
   cleanStaleStaging(dirname(dest))
-  return true
+  return 'removed'
 }

@@ -3,12 +3,12 @@
 
 import z from '@deepseek-ai/schemastery'
 import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import { Config as OfficialConfig } from '@deepseek-ai/dsh-llm-pi-ai'
-import { mergeProviderSections, resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
+import { resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
 import { createGatewayAdapter } from './adapter.mjs'
 import { createCredentialResolver } from './credentials.mjs'
 import { createRouteManager } from './manager.mjs'
 import { discoverModels } from './discovery.mjs'
+import { takeoverFailureText } from './errors.mjs'
 
 export const name = 'llm-pi-gateway'
 
@@ -69,8 +69,14 @@ export function missingHostExports(dshLlm) {
   return HOST_REQUIRED_EXPORTS.filter((name) => dshLlm[name] === undefined)
 }
 
-/** @param {import('@deepseek-ai/cordis').Context} ctx */
-export async function apply(ctx, config) {
+/**
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {object} config 本节初始配置
+ * @param {() => Promise<object>} [importOfficial] 官方包加载器,测试注入桩;
+ *   默认动态 import(官方包缺失时仅降级本节接管,不拖垮本包加载——
+ *   静态 import 命名导出缺失即加载崩溃,违反干净禁用规约)
+ */
+export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai')) {
   // 宿主兼容探测:HOST_REQUIRED_EXPORTS 为 dsh 0.1.2 引入的 dsh-llm 导出,
   // 静态 import 命名导出缺失即加载崩溃,故动态探测;
   // 旧本体缺失时禁用插件,不注册 adapter 与 settings 节,boot 保持干净。
@@ -80,6 +86,12 @@ export async function apply(ctx, config) {
     ctx.logger.warn(`llm-pi-gateway: 宿主缺少 ${missing.join(', ')}(需要 dsh 本体 0.1.2+),插件禁用`)
     return undefined
   }
+  // 官方 Config 同样动态获取:官方包缺失(patch 未生效但包被移除/版本演进)时
+  // 打日志并跳过官方节接管,本包节照常服务;Promise.resolve().then 消化注入加载器的同步抛错
+  const OfficialConfig = await Promise.resolve().then(importOfficial).catch(() => undefined).then((mod) => mod?.Config)
+  if (OfficialConfig === undefined) {
+    ctx.logger.warn('llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节')
+  }
   // 两节来源:官方节(官方 schema 消费,零感知接管)+ 本包节(独立/增强)。
   // 合并路由表按原始快照恒等记忆;任一节解析即抛,记忆保持旧值,
   // 调用方捕获后沿用上一份好配置(官方同款)。
@@ -87,12 +99,21 @@ export async function apply(ctx, config) {
   let readGateway = () => config
   let lastSnapshot
   let memoized
+  // 官方节 catalog 形态路由 skip 上报:按 provider 去重,防 onChange 重放刷屏
+  const unserviceableReported = new Set()
+  const onUnserviceable = (provider, reason) => {
+    if (unserviceableReported.has(provider)) return
+    unserviceableReported.add(provider)
+    ctx.logger.warn(`llm-pi-gateway: ${reason}`)
+  }
   const snapshot = () => [readOfficial(), readGateway()]
   const profiles = () => {
     const current = snapshot()
     if (lastSnapshot !== undefined
       && current[0] === lastSnapshot[0] && current[1] === lastSnapshot[1]) return memoized
-    const next = resolveRoutes(current[0]?.providers, current[1]?.providers)
+    // 去重按配置代失效:真解析(重跑)才重报,记忆命中不重放;修复后再次劣化能再次告警
+    unserviceableReported.clear()
+    const next = resolveRoutes(current[0]?.providers, current[1]?.providers, onUnserviceable)
     lastSnapshot = current
     memoized = next
     return next
@@ -108,7 +129,25 @@ export async function apply(ctx, config) {
     registerAdapter: (providers, registered) => ctx.llm.registerAdapter(providers, registered),
     registerDirectory: (entries) => ctx.llm.registerConfigurableProviders(entries),
   })
-  ctx.llm.registerModelDiscovery(NS, (request) => discoverModels(request, () => resolveCredential(request.provider, profiles().get(request.provider)?.apiKeyEnv)))
+  // 模型发现:两节命名空间各注册同一回调(官方节被本包接管后,官方 ns 的
+  // discovery 注册随官方插件消失,不补注册则官方节配置面拉取模型必 NO_DISCOVERY);
+  // 宿主契约第二参为取消 signal,透传给探测 fetch;探测请求合入路由自定义头。
+  // 官方 ns 注册可能撞已在场的官方插件(同 ns 重复注册宿主硬抛),冲突即降级跳过,
+  // 与 settings 接管的降级路径对称——patch 失效共存场景双方都能活着
+  const discoverFor = (request, signal) => {
+    const route = profiles().get(request.provider)
+    return discoverModels(
+      { ...request, ...(signal === undefined ? {} : { signal }), headers: route?.headers },
+      () => resolveCredential(request.provider, route?.apiKeyEnv),
+    )
+  }
+  ctx.llm.registerModelDiscovery(NS, discoverFor)
+  try {
+    ctx.llm.registerModelDiscovery(OFFICIAL_NS, discoverFor)
+  } catch (error) {
+    ctx.logger.warn('llm-pi-gateway: 官方 discovery 注册冲突(官方 llm-pi-ai 插件仍在),由官方继续服务模型发现')
+    ctx.logger.warn(error)
+  }
   const onSectionChange = () => {
     try {
       manager.ensureRegistration()
@@ -126,20 +165,23 @@ export async function apply(ctx, config) {
   // 官方节接管:官方插件被本包 patch 禁用后,其 settings 节由本包以官方
   // schema 注册。若注册冲突(patch 失效、官方仍在),降级为只服务本包节。
   // validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles 快照记忆。
-  try {
-    ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
-      validate: (section) => resolveRoutes(section.providers, readGateway()?.providers),
-      setSource: (source) => {
-        readOfficial = source
-      },
-      onChange: () => onSectionChange(),
-    })
-  } catch (error) {
-    ctx.logger.error('llm-pi-gateway: 官方 llm-pi-ai 节接管失败(官方插件仍在?),降级为只服务 llm-pi-gateway 节')
-    ctx.logger.error(error)
+  // 官方包缺失时跳过接管(动态获取已告警)。
+  if (OfficialConfig !== undefined) {
+    try {
+      ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
+        validate: (section) => resolveRoutes(section.providers, readGateway()?.providers, onUnserviceable),
+        setSource: (source) => {
+          readOfficial = source
+        },
+        onChange: () => onSectionChange(),
+      })
+    } catch (error) {
+      ctx.logger.error(takeoverFailureText(error))
+      ctx.logger.error(error)
+    }
   }
   ctx.settings.installSection(ctx, NS, Config, config, {
-    validate: (section) => resolveRoutes(readOfficial()?.providers, section.providers),
+    validate: (section) => resolveRoutes(readOfficial()?.providers, section.providers, onUnserviceable),
     setSource: (source) => {
       readGateway = source
     },

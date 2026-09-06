@@ -58,8 +58,27 @@ test('openai-completions 草稿探测:listing 行解析,bearer + attribution 头
     { id: 'm2' },
   ])
   assert.equal(fetchOk.captured.url, 'https://gw.example/v1/models')
-  assert.equal(fetchOk.captured.init.headers.authorization, 'Bearer sk-x')
-  assert.match(fetchOk.captured.init.headers['user-agent'], /^deepseek-harness\//)
+  assert.equal(fetchOk.captured.init.headers.get('authorization'), 'Bearer sk-x')
+  assert.match(fetchOk.captured.init.headers.get('user-agent'), /^deepseek-harness\//)
+})
+
+test('路由自定义头先行,保留头后写覆盖;signal 透传探测请求', async () => {
+  const impl = fetchOk({ data: [] })
+  const controller = new AbortController()
+  await discoverModels(
+    {
+      api: 'openai-completions',
+      baseURL: 'https://gw.example',
+      apiKey: 'sk-x',
+      headers: { 'x-gateway-group': 'alpha', authorization: 'Bearer forged' },
+      signal: controller.signal,
+    },
+    async () => undefined,
+    impl,
+  )
+  assert.equal(fetchOk.captured.init.headers.get('x-gateway-group'), 'alpha', '网关分组头合入探测')
+  assert.equal(fetchOk.captured.init.headers.get('authorization'), 'Bearer sk-x', '探测键覆盖路由配置头')
+  assert.equal(fetchOk.captured.init.signal, controller.signal, '宿主取消信号透传')
 })
 
 test('openai-responses 可探测;anthropic-messages 报 DISCOVERY_UNSUPPORTED', async () => {
@@ -121,7 +140,7 @@ test('draft 无键时用存量凭据探测', async () => {
     impl,
   )
   assert.equal(asked, true)
-  assert.equal(fetchOk.captured.init.headers.authorization, 'Bearer sk-stored')
+  assert.equal(fetchOk.captured.init.headers.get('authorization'), 'Bearer sk-stored')
 })
 
 function streamingResponse(chunks, { headers = {} } = {}) {
