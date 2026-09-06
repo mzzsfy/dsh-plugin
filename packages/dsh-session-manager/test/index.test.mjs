@@ -1434,12 +1434,61 @@ test('历史输入路由:session 范围仅返回该会话输入;workspace 范围
   await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=session'), sessionRes)
   assert.equal(sessionRes.status, 200)
   assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+  assert.equal(sessionRes.body.scanned, 1)
+  assert.equal(sessionRes.body.total, 1)
   const workspaceRes = response()
   await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), workspaceRes)
   assert.deepEqual(workspaceRes.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
+  assert.equal(workspaceRes.body.scanned, 2)
+  assert.equal(workspaceRes.body.total, 2)
   const globalRes = response()
   await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=global'), globalRes)
   assert.deepEqual(globalRes.body.inputs.map((item) => item.text), ['别的工作区', '最新输入', '第二条', '更早的输入'])
+  assert.equal(globalRes.body.scanned, 3)
+  assert.equal(globalRes.body.total, 3)
+})
+
+test('历史输入路由:limit 分批按最近会话优先,响应回报 scanned/total 供滚动加深', skipMissingDeps, async () => {
+  const { handlers, readCounts } = makeHistoryCtx()
+  const first = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace&limit=3'), first)
+  assert.deepEqual(first.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
+  assert.equal(first.body.scanned, 2)
+  assert.equal(first.body.total, 2)
+  // 首档已扫尽范围内全部会话
+  const manyCtx = makeCtx({
+    archivedIds: [],
+    headers: [
+      { id: 'a1', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'a2', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'a3', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'a4', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'a5', cwd: 'C:\\x', createdAt: 0 },
+    ],
+    agents: new Map(),
+    readSessions: {
+      a1: [userMessageEvent('输入1', 100)],
+      a2: [userMessageEvent('输入2', 200)],
+      a3: [userMessageEvent('输入3', 300)],
+      a4: [userMessageEvent('输入4', 400)],
+      a5: [userMessageEvent('输入5', 500)],
+    },
+  })
+  const batch1 = response()
+  await manyCtx.handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=a1&scope=workspace&limit=3'), batch1)
+  assert.deepEqual(batch1.body.inputs.map((item) => item.text), ['输入3', '输入2', '输入1'])
+  assert.equal(batch1.body.scanned, 3)
+  assert.equal(batch1.body.total, 5)
+  assert.equal(manyCtx.readCounts.get('a4'), undefined)
+  assert.equal(manyCtx.readCounts.get('a5'), undefined)
+  const batch2 = response()
+  await manyCtx.handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=a1&scope=workspace&limit=10'), batch2)
+  assert.deepEqual(batch2.body.inputs.map((item) => item.text), ['输入5', '输入4', '输入3', '输入2', '输入1'])
+  assert.equal(batch2.body.scanned, 5)
+  assert.equal(batch2.body.total, 5)
+  // 加深只解压新会话,已缓存会话不重读
+  assert.equal(manyCtx.readCounts.get('a1'), 1)
+  assert.equal(manyCtx.readCounts.get('a4'), 1)
 })
 
 test('历史输入路由:scope 缺省为 session;非法 scope 回退 session', skipMissingDeps, async () => {

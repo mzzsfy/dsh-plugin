@@ -21,6 +21,7 @@ import {
   HISTORY_CACHE_TTL_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
+  HISTORY_BATCH_LIMITS,
   HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
   aggregateDeleteOutcome,
@@ -349,52 +350,58 @@ export function apply(ctx, config) {
     }
   }
 
-  // 历史输入缓存:scope+标识 → { inputs, at };TTL 内唤起免重复解压产物(全量扫描秒级不可接受)。
-  // in-flight 按缓存键控:跨范围并发请求各扫各的,同范围并发共享同一轮扫描
-  const inputsCache = new Map()
-  const inputsInFlight = new Map()
-  ctx.effect(() => () => inputsCache.clear(), 'session-manager inputs cache')
+  // 历史输入按需加载:会话级提取缓存(sessionId → { entries, at }),聚合纯内存零成本;
+  // limit 控制单次请求最多解压多少个范围会话,client 首屏小档、滚动逐档加深,
+  // 已缓存会话不重复解压。in-flight 按会话键控,并发请求共享同一次解压
+  const sessionEntriesCache = new Map()
+  const sessionEntriesInFlight = new Map()
+  ctx.effect(() => () => sessionEntriesCache.clear(), 'session-manager inputs cache')
+
+  function sessionEntries(sessionId) {
+    const cached = sessionEntriesCache.get(sessionId)
+    if (cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return Promise.resolve(cached.entries)
+    const pending = sessionEntriesInFlight.get(sessionId)
+    if (pending !== undefined) return pending
+    const task = ctx.sessionQuery.readSession(sessionId)
+      .then((snapshot) => {
+        const entries = extractUserInputs(snapshot.events)
+        sessionEntriesCache.set(sessionId, { entries, at: Date.now() })
+        return entries
+      })
+      .catch((error) => {
+        ctx.logger && ctx.logger.warn('session-manager 历史输入读取失败(' + sessionId + '): ' + String(error && error.stack || error))
+        return []
+      })
+      .finally(() => {
+        if (sessionEntriesInFlight.get(sessionId) === task) sessionEntriesInFlight.delete(sessionId)
+      })
+    sessionEntriesInFlight.set(sessionId, task)
+    return task
+  }
 
   // 按范围聚合历史输入:session=仅该会话(即使运行中,当前会话回溯的就是自己);
   // workspace=同 cwd 的最近非运行会话;global=全部工作区的最近非运行会话。
-  // 运行中会话在 workspace/global 跳过——产物最大解压最慢,且输入刚发生、回溯价值最低;
-  // 会话并行读取,单会话产物读取失败仅告警跳过(损坏产物只降级该会话的历史贡献)
-  async function collectInputs(scope, sessionId, cwd) {
-    const cacheKey = scope === 'session' ? 'session:' + sessionId : scope === 'global' ? 'global' : 'workspace:' + cwd
-    const cached = inputsCache.get(cacheKey)
-    if (cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return cached.inputs
-    const pending = inputsInFlight.get(cacheKey)
-    if (pending !== undefined) return pending
-    const scan = (async () => {
-      let sessionIds
-      if (scope === 'session') {
-        sessionIds = [sessionId]
-      } else {
-        const agents = ctx.get('agents')
-        const records = await ctx.sessionQuery.listSessions()
-        const inScope = scope === 'workspace'
-          ? records.filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
-          : records
-        sessionIds = inScope
-          .filter((recordItem) => !isSessionRunning({ agents, sessionId: recordItem.header.id }))
-          .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-          .map((recordItem) => recordItem.header.id)
-      }
-      const entriesPerSession = await Promise.all(sessionIds.map((id) =>
-        ctx.sessionQuery.readSession(id)
-          .then((snapshot) => extractUserInputs(snapshot.events))
-          .catch((error) => {
-            ctx.logger && ctx.logger.warn('session-manager 历史输入读取失败(' + id + '): ' + String(error && error.stack || error))
-            return []
-          })))
-      const inputs = aggregateInputs([].concat(...entriesPerSession), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS })
-      inputsCache.set(cacheKey, { inputs, at: Date.now() })
-      return inputs
-    })().finally(() => {
-      if (inputsInFlight.get(cacheKey) === scan) inputsInFlight.delete(cacheKey)
-    })
-    inputsInFlight.set(cacheKey, scan)
-    return scan
+  // 运行中会话在后两者跳过——产物最大解压最慢,且输入刚发生、回溯价值最低。
+  // 返回 { inputs, scanned, total }:scanned/total 供 client 判断是否还有更多可加载
+  async function collectInputs(scope, sessionId, cwd, limit) {
+    const aggregateOptions = { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }
+    if (scope === 'session') {
+      const entries = await sessionEntries(sessionId)
+      return { inputs: aggregateInputs(entries, aggregateOptions), scanned: 1, total: 1 }
+    }
+    const agents = ctx.get('agents')
+    const records = await ctx.sessionQuery.listSessions()
+    const inScope = scope === 'workspace'
+      ? records.filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
+      : records
+    const eligible = inScope.filter((recordItem) => !isSessionRunning({ agents, sessionId: recordItem.header.id }))
+    const batch = eligible.slice(0, limit)
+    const entriesPerSession = await Promise.all(batch.map((recordItem) => sessionEntries(recordItem.header.id)))
+    return {
+      inputs: aggregateInputs([].concat(...entriesPerSession), aggregateOptions),
+      scanned: batch.length,
+      total: eligible.length,
+    }
   }
 
   // 幽灵残留清理:产物已缺失的会话仅解除列表可见性(detach + 归档清理),
@@ -605,16 +612,18 @@ export function apply(ctx, config) {
           if (sessionId === '') throw new Error('sessionId 不能为空')
           const scopeRaw = url.searchParams.get('scope') || 'session'
           const scope = HISTORY_SCOPES.includes(scopeRaw) ? scopeRaw : 'session'
+          const limitRaw = Number.parseInt(url.searchParams.get('limit') || '', 10)
+          const limit = HISTORY_BATCH_LIMITS.includes(limitRaw) ? limitRaw : HISTORY_BATCH_LIMITS[0]
           const header = await findHeader(ctx, sessionId)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
           }
           // workspace 范围依赖 cwd 归属;无 cwd 会话在 session/global 范围照常聚合
-          const inputs = scope === 'workspace' && header.cwd === undefined
-            ? []
-            : await collectInputs(scope, sessionId, header.cwd)
-          sendJson(res, 200, { inputs })
+          const result = scope === 'workspace' && header.cwd === undefined
+            ? { inputs: [], scanned: 0, total: 0 }
+            : await collectInputs(scope, sessionId, header.cwd, limit)
+          sendJson(res, 200, result)
         } catch (error) {
           respondError(ctx, res, error)
         }

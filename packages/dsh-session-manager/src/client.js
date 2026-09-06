@@ -76,6 +76,7 @@ const CSS = [
   '.sm-hist__hint { padding:8px 12px 4px; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); flex:none; }',
   '.sm-hist__scope { margin-right:8px; padding:1px 8px; border-radius:999px;',
   '  background:var(--dsw-alias-interactive-bg-selected); color:var(--dsw-alias-label-primary); }',
+  '.sm-hist__more { padding:6px 10px; text-align:center; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); }',
   '.sm-hist__list { overflow-y:auto; padding:4px; }',
   '.sm-hist__row { display:flex; align-items:baseline; gap:8px; width:100%; border:0; background:transparent;',
   '  cursor:pointer; text-align:left; padding:6px 10px; border-radius:6px; min-width:0; }',
@@ -353,17 +354,20 @@ function SessionManagerApp(props) {
 // 不直改编辑器 DOM。数据由 host 按当前会话所属工作区聚合,每次唤起即强刷
 // 历史输入范围:索引即 ←/→ 切换顺序(← 向窄,→ 向宽),与 core.mjs HISTORY_SCOPES 同序
 const HISTORY_SCOPE_LABELS = ['当前会话', '本工作区', '全部工作区']
+// 单次请求最多解压的会话数档位(最近优先),与 core.mjs HISTORY_BATCH_LIMITS 同序同值
+const HISTORY_BATCH_LIMITS = [3, 10, 20]
 
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
   const [cursor, setCursor] = useState(-1)
   const [scopeIndex, setScopeIndex] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const rootRef = React.useRef(null)
   // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
   // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
-  const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0 })
+  const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, limitIdx: 0, scanned: 0, total: 0, loadingMore: false })
   const sessionRef = React.useRef(session)
   const inputActionsRef = React.useRef(inputActions)
   sessionRef.current = session
@@ -373,12 +377,14 @@ function HistoryDock({ session, inputActions }) {
     viewRef.current = { ...viewRef.current, ...patch }
   }
 
-  // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组。
-  // 不传 refresh:host TTL 缓存内直接返回(全量扫描秒级,每次强刷会让每次唤起都卡死);
-  // 缓存过期后由 host 自动重扫
-  function fetchInputs(scope) {
-    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId) + '&scope=' + scope)
-      .then((payload) => (payload && Array.isArray(payload.inputs)) ? payload.inputs : [])
+  // host 响应信封 { inputs, scanned, total };解包并防御形态漂移,消费侧恒为数组。
+  // 不传 refresh:host 会话级 TTL 缓存内不重复解压,缓存过期后由 host 自动重扫
+  function fetchInputs(scope, limit) {
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId) + '&scope=' + scope + '&limit=' + limit)
+      .then((payload) => {
+        const inputs = (payload && Array.isArray(payload.inputs)) ? payload.inputs : []
+        return { inputs, scanned: payload && Number.isFinite(payload.scanned) ? payload.scanned : inputs.length, total: payload && Number.isFinite(payload.total) ? payload.total : inputs.length }
+      })
   }
 
   function fill(text) {
@@ -388,16 +394,17 @@ function HistoryDock({ session, inputActions }) {
   }
 
   function openPopup() {
-    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0 })
+    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0, limitIdx: 0, scanned: 0, total: 0, loadingMore: false })
     setOpen(true)
     setScopeIndex(0)
     setCursor(-1)
+    setLoadingMore(false)
     setLoadError(false)
     setItems(null)
-    fetchInputs('session')
-      .then((fetched) => {
-        syncView({ items: fetched, cursor: -1 })
-        setItems(fetched)
+    fetchInputs('session', HISTORY_BATCH_LIMITS[0])
+      .then((result) => {
+        syncView({ items: result.inputs, cursor: -1, scanned: result.scanned, total: result.total })
+        setItems(result.inputs)
         setCursor(-1)
       })
       .catch((error) => {
@@ -408,20 +415,21 @@ function HistoryDock({ session, inputActions }) {
       })
   }
 
-  // 切换范围:向宽(→)/向窄(←),边界停住;切换即按新范围重新拉取(host 缓存内秒回)
+  // 切换范围:向宽(→)/向窄(←),边界停住;切换即按新范围首档拉取(已缓存会话秒回)
   function switchScope(delta) {
     const next = viewRef.current.scopeIndex + delta
     if (next < 0 || next >= HISTORY_SCOPE_LABELS.length) return
-    syncView({ scopeIndex: next, items: null, cursor: -1 })
+    syncView({ scopeIndex: next, items: null, cursor: -1, limitIdx: 0, scanned: 0, total: 0, loadingMore: false })
     setScopeIndex(next)
     setCursor(-1)
+    setLoadingMore(false)
     setLoadError(false)
     setItems(null)
-    fetchInputs(HISTORY_SCOPES[next])
-      .then((fetched) => {
+    fetchInputs(HISTORY_SCOPES[next], HISTORY_BATCH_LIMITS[0])
+      .then((result) => {
         if (viewRef.current.scopeIndex !== next) return
-        syncView({ items: fetched, cursor: -1 })
-        setItems(fetched)
+        syncView({ items: result.inputs, cursor: -1, scanned: result.scanned, total: result.total })
+        setItems(result.inputs)
         setCursor(-1)
       })
       .catch((error) => {
@@ -431,6 +439,38 @@ function HistoryDock({ session, inputActions }) {
         setItems([])
         toast(error && error.message ? error.message : String(error), { kind: 'error' })
       })
+  }
+
+  // 滚动近底部逐档加深:仅扩大解压档位重新聚合(host 对已缓存会话不再解压),
+  // 档位用尽或范围内会话已扫尽则不再请求
+  function loadMore() {
+    const view = viewRef.current
+    if (!view.open || view.items === null || view.loadingMore) return
+    const nextIdx = Math.min(view.limitIdx + 1, HISTORY_BATCH_LIMITS.length - 1)
+    if (nextIdx === view.limitIdx || view.scanned >= view.total) return
+    const scope = HISTORY_SCOPES[view.scopeIndex]
+    syncView({ limitIdx: nextIdx, loadingMore: true })
+    setLoadingMore(true)
+    fetchInputs(scope, HISTORY_BATCH_LIMITS[nextIdx])
+      .then((result) => {
+        if (viewRef.current.scopeIndex !== view.scopeIndex || viewRef.current.limitIdx !== nextIdx) return
+        const cursor = Math.min(viewRef.current.cursor, result.inputs.length - 1)
+        syncView({ items: result.inputs, cursor, scanned: result.scanned, total: result.total, loadingMore: false })
+        setItems(result.inputs)
+        setCursor(cursor)
+        setLoadingMore(false)
+      })
+      .catch(() => {
+        // 加载更多失败保留现有列表,静默可重试(再次滚动触发)
+        syncView({ loadingMore: false })
+        setLoadingMore(false)
+      })
+  }
+
+  function onListScroll(event) {
+    const el = event.currentTarget
+    if (el.scrollTop + el.clientHeight < el.scrollHeight - 40) return
+    loadMore()
   }
 
   // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动
@@ -497,10 +537,10 @@ function HistoryDock({ session, inputActions }) {
         h('span', { className: 'sm-hist__scope' }, HISTORY_SCOPE_LABELS[scopeIndex]),
         '↑/↓ 选择,←/→ 切换范围,Enter 填入,Esc 关闭'),
       items === null
-        ? h('div', { className: 'sm-hist__empty' }, '加载中…')
+        ? h('div', { className: 'sm-hist__empty' }, '正在解析历史会话,首次加载可能较长,请稍候…')
         : items.length === 0
           ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '该范围内还没有历史输入')
-          : h('div', { className: 'sm-hist__list' },
+          : h('div', { className: 'sm-hist__list', onScroll: onListScroll },
               items.map((item, index) => h('button', {
                 key: index + ':' + item.at,
                 className: 'sm-hist__row' + (index === cursor ? ' sm-hist__row--on' : ''),
@@ -508,7 +548,9 @@ function HistoryDock({ session, inputActions }) {
               },
                 h('span', { className: 'sm-hist__text', title: item.text }, item.text),
                 h('span', { className: 'sm-hist__time' }, fmtTime(item.at)),
-              ))),
+              )),
+              loadingMore && h('div', { className: 'sm-hist__more' }, '正在解析更多历史…'),
+            ),
     ),
   )
 }
