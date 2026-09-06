@@ -26,8 +26,15 @@ class BrokenStorage {
 }
 
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象、页内通知捕获表与 window 桩。
-function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride }) {
-  const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+// shortTimers:闪烁常量替换为毫秒级,配合真实定时器验证硬顶与重入(node:test mock.timers
+// 拦截不到 new Function 沙箱里的 timer,不能用于本 loader)
+function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers }) {
+  const raw = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  const source = shortTimers
+    ? raw.replace('const TOAST_MS = 6 * 1000', 'const TOAST_MS = 60')
+      .replace('const BLINK_MS = 1 * 1000', 'const BLINK_MS = 20')
+      .replace('const BLINK_MAX_MS = 30 * 1000', 'const BLINK_MAX_MS = 200')
+    : raw
   const modules = []
   const shown = []
   const windowListeners = {}
@@ -84,6 +91,74 @@ const units = [
   { id: 'u1', category: 'completed', text: '[dsh] 任务完成: t1' },
   { id: 'u2', category: 'error', text: '[dsh] 任务出错: t2' },
 ]
+
+// 标题闪烁:错误类通知在未授权系统通知时走 blink 降级通道,焦点回返与硬顶都必须复位标题
+test('Given 声音总开关关闭 When 错误通知到达 Then 降级闪烁照常触发', async () => {
+  // 声音关闭只应静音,不得连坐 system 弹窗与 blink 降级通道
+  const dom = { hasFocus: () => false, title: 'dsh', hidden: true }
+  const { mod, document: doc } = loadClient({
+    storage: new FakeStorage({ 'turn-notify:sound': '0' }),
+    payload: { units: [units[1]], soundMapping: {}, version: 1 },
+    document: dom,
+  })
+  const { poll } = mod.__test
+  await poll()
+  await poll()
+  assert.ok(await scanTitleBlink(doc, 1400), '声音关闭时 blink 不应被 continue 连坐跳过')
+})
+
+test('Given 标题闪烁进行中 When 窗口重获焦点 Then 标题立即复位', async () => {
+  const docListeners = {}
+  const dom = {
+    hasFocus: () => false, title: 'dsh', hidden: true,
+    addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn) },
+    removeEventListener: (type, fn) => { docListeners[type] = (docListeners[type] || []).filter((f) => f !== fn) },
+  }
+  const { mod, window: winStub, document: doc } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: [units[1]], soundMapping: {}, version: 1 },
+    document: dom,
+  })
+  const { poll } = mod.__test
+  await poll()
+  await poll()
+  mod.__test.start()
+  const focusHandlers = (winStub.listeners.focus || []).slice()
+  assert.ok(focusHandlers.length > 0, 'window focus 未监听')
+  doc.title = '⏳ dsh'
+  for (const fn of focusHandlers) fn()
+  assert.equal(doc.title, 'dsh', '焦点返回后标题应复位')
+  winStub['turn-notify:polling'].abort()
+})
+
+test('Given 连环错误通知重入闪烁 When 硬顶到期 Then 标题必停', async () => {
+  const dom = { hasFocus: () => false, title: 'dsh', hidden: true }
+  const { mod, document: doc } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: [{ id: 'e1', category: 'error', text: '[dsh] 任务出错: e1' }, { id: 'e2', category: 'error', text: '[dsh] 任务出错: e2' }], soundMapping: {}, version: 1 },
+    document: dom,
+    shortTimers: true,
+  })
+  const { poll } = mod.__test
+  await poll()
+  await poll()
+  // 同批两事件:第一条启动闪烁(单条 60ms 即停),第二条重入重排至硬顶 200ms
+  const sawBlink = await scanTitleBlink(doc, 150)
+  assert.ok(sawBlink, '重入应延长闪烁,不得按单条时长提前复位')
+  await sleep(200)
+  assert.equal(doc.title.indexOf('⏳'), -1, '硬顶到期标题必复位,不允许无限续闪')
+})
+
+async function scanTitleBlink(doc, ms) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (doc.title.indexOf('⏳') >= 0) return true
+    await sleep(5)
+  }
+  return false
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 test('broken localStorage:清理段不抛,降级发声恰好一次,第二轮不再发声', async () => {
   const { mod, shown } = loadClient({ storage: new BrokenStorage(), payload: { units, soundMapping: {}, version: 1 } })
