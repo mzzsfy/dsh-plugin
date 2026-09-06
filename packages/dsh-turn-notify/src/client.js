@@ -720,13 +720,27 @@ window.__ModuleLoader__.load({
       return walk(list) ?? prefixMatches[0] ?? null
     }
 
-    // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环
+    // 行状态与 SessionStatusDots 对齐:运行中的会话由原生状态点表达注意力,
+    // 闪烁只表达"状态已更新待查看"——行进入运行状态即让位,文案取官方 zh/en 两种
+    const isRowRunning = (row) => {
+      const text = typeof row.textContent === 'string' ? row.textContent : ''
+      return text.indexOf('进行中') >= 0 || text.toLowerCase().indexOf('running') >= 0
+    }
+
+    // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环;
+    // 快照遍历:行进入运行状态时清理对应条目,迭代中删除不改快照
     function applySessionHighlights() {
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
       if (!sessionHighlightEnabled) return
-      for (const [title, category] of sessionHighlights) {
+      for (const [title, category] of [...sessionHighlights]) {
         const row = findSessionRow(title)
-        if (!row || row.classList.contains(SESSION_HL_CLASS)) continue
+        if (!row) continue
+        if (isRowRunning(row)) {
+          sessionHighlights.delete(title)
+          removeRowHighlight(row)
+          continue
+        }
+        if (row.classList.contains(SESSION_HL_CLASS)) continue
         const colorClass = CATEGORIES.indexOf(category) >= 0 ? SESSION_HL_CLASS + '--' + category : SESSION_HL_CLASS + '--ask'
         row.classList.add(SESSION_HL_CLASS, colorClass)
       }
@@ -793,17 +807,26 @@ window.__ModuleLoader__.load({
       document.addEventListener('click', listener, true)
     }
 
-    // 可见性同步:令牌承载 handler,HMR 重建闭包后先摘旧代再挂新代
+    // 返回即已读:窗口重获焦点或页面重新可见时清除当前会话高亮。
+    // 单靠 visibilitychange 不够——切到别的应用窗口(不切标签、不最小化)时
+    // 本标签页 hidden 恒为 false,事件永不触发,焦点通道覆盖这一场景;
+    // 令牌承载 dispose,HMR 重建闭包后先摘旧代再挂新代
     const KEY_HL_VISIBLE = 'turn-notify:hl-visible'
     function ensureHighlightVisibilitySync() {
       if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
-      if (typeof window[KEY_HL_VISIBLE] === 'function') document.removeEventListener('visibilitychange', window[KEY_HL_VISIBLE])
-      const handler = () => {
+      if (window[KEY_HL_VISIBLE] && typeof window[KEY_HL_VISIBLE].dispose === 'function') window[KEY_HL_VISIBLE].dispose()
+      const onVisible = () => {
         if (document.hidden) return
         clearCurrentSessionHighlights()
       }
-      window[KEY_HL_VISIBLE] = handler
-      document.addEventListener('visibilitychange', handler)
+      const onFocus = () => clearCurrentSessionHighlights()
+      const dispose = () => {
+        if (typeof window.removeEventListener === 'function') window.removeEventListener('focus', onFocus)
+        document.removeEventListener('visibilitychange', onVisible)
+      }
+      if (typeof window.addEventListener === 'function') window.addEventListener('focus', onFocus)
+      document.addEventListener('visibilitychange', onVisible)
+      window[KEY_HL_VISIBLE] = { dispose }
     }
 
     function start() {

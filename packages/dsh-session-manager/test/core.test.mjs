@@ -9,10 +9,12 @@ import {
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_MESSAGES,
   aggregateDeleteOutcome,
+  aggregateInputs,
   archiveToastStep,
   artifactLooksBlank,
   deleteEligibility,
   diffArchived,
+  extractUserInputs,
   isSessionRunning,
   mergeDeletedEntry,
   projectArchiveRows,
@@ -242,4 +244,64 @@ test('台账移除:命中删除并报变化,未命中幂等不报变化', () => 
   const miss = removeDeletedEntry(existing, 'z')
   assert.deepEqual(miss.deleted, existing)
   assert.equal(miss.removed, false)
+})
+
+// ── 历史输入:事件提取(G1-G3)──
+
+function userEvent(overrides, text, at) {
+  return {
+    type: 'user/message',
+    seq: 1,
+    time: at,
+    ...overrides,
+    data: {
+      id: 'm1',
+      role: 'user',
+      source: { kind: 'user' },
+      content: text === undefined ? [] : [{ type: 'text', text }],
+      ...overrides?.data,
+    },
+  }
+}
+
+test('历史输入提取:user/message 且 kind=user 产出文本与时间', () => {
+  const events = [userEvent(null, '修复归档面板', 500)]
+  assert.deepEqual(extractUserInputs(events), [{ text: '修复归档面板', at: 500 }])
+})
+
+test('历史输入提取:tool 结果与 plugin 注入不产出', () => {
+  const tool = userEvent({ data: { source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }] } }, undefined, 100)
+  const plugin = userEvent({ data: { source: { kind: 'plugin', plugin: 'x', form: 'instructions' }, content: [{ type: 'text', text: '注入' }] } }, undefined, 200)
+  assert.deepEqual(extractUserInputs([tool, plugin]), [])
+})
+
+test('历史输入提取:纯图与空文本跳过', () => {
+  const image = userEvent({ data: { content: [{ type: 'image', attachment: { id: 'a1' } }] } }, undefined, 100)
+  const blank = userEvent(null, '', 200)
+  const whitespace = userEvent(null, ' \n ', 300)
+  assert.deepEqual(extractUserInputs([image, blank, whitespace]), [])
+})
+
+test('历史输入提取:多 text block 按行拼接为单条', () => {
+  const events = [userEvent({ data: { content: [{ type: 'text', text: '第一段' }, { type: 'text', text: '第二段' }] } }, undefined, 300)]
+  assert.deepEqual(extractUserInputs(events), [{ text: '第一段\n第二段', at: 300 }])
+})
+
+// ── 历史输入:聚合(G4-G5)──
+
+test('历史输入聚合:同文本去重保留最新时间,按时间倒序', () => {
+  const merged = aggregateInputs([
+    { text: 'a', at: 1 },
+    { text: 'b', at: 5 },
+    { text: 'a', at: 9 },
+  ], { limit: 10, maxChars: 100 })
+  assert.deepEqual(merged, [{ text: 'a', at: 9 }, { text: 'b', at: 5 }])
+})
+
+test('历史输入聚合:limit 裁剪与单条截断', () => {
+  const merged = aggregateInputs([
+    { text: 'abcdef', at: 1 },
+    { text: 'xy', at: 2 },
+  ], { limit: 1, maxChars: 3 })
+  assert.deepEqual(merged, [{ text: 'xy', at: 2 }])
 })

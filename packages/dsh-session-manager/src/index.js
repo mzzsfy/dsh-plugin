@@ -18,9 +18,15 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-  artifactLooksBlank,
+  HISTORY_CACHE_TTL_MS,
+  HISTORY_INPUT_LIMIT,
+  HISTORY_INPUT_MAX_CHARS,
+  HISTORY_SESSION_SCAN_LIMIT,
   aggregateDeleteOutcome,
+  aggregateInputs,
+  artifactLooksBlank,
   deleteEligibility,
+  extractUserInputs,
   isSessionRunning,
   mergeDeletedEntry,
   removeDeletedEntry,
@@ -342,6 +348,42 @@ export function apply(ctx, config) {
     }
   }
 
+  // 历史输入缓存:cwd → { inputs, at };TTL 内键盘回溯免重复解压产物,浮层以 refresh 绕过。
+  // in-flight 按 cwd 键控:跨工作区并发请求各扫各的,同工作区并发共享同一轮扫描
+  const inputsCache = new Map()
+  const inputsInFlight = new Map()
+  ctx.effect(() => () => inputsCache.clear(), 'session-manager inputs cache')
+
+  // 同工作区历史输入聚合:反查 cwd 后扫描近期会话产物提取人类输入;
+  // 会话并行读取,单会话产物读取失败仅告警跳过(损坏产物只降级该会话的历史贡献);
+  // 强刷与在途扫描数据等价(任一轮都是全量新数据)
+  async function collectWorkspaceInputs(cwd, refresh) {
+    const cached = inputsCache.get(cwd)
+    if (!refresh && cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return cached.inputs
+    const pending = inputsInFlight.get(cwd)
+    if (pending !== undefined) return pending
+    const scan = (async () => {
+      const records = await ctx.sessionQuery.listSessions()
+      const recent = records
+        .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
+        .slice(0, HISTORY_SESSION_SCAN_LIMIT)
+      const entriesPerSession = await Promise.all(recent.map((recordItem) =>
+        ctx.sessionQuery.readSession(recordItem.header.id)
+          .then((snapshot) => extractUserInputs(snapshot.events))
+          .catch((error) => {
+            ctx.logger && ctx.logger.warn('session-manager 历史输入读取失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
+            return []
+          })))
+      const inputs = aggregateInputs([].concat(...entriesPerSession), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS })
+      inputsCache.set(cwd, { inputs, at: Date.now() })
+      return inputs
+    })().finally(() => {
+      if (inputsInFlight.get(cwd) === scan) inputsInFlight.delete(cwd)
+    })
+    inputsInFlight.set(cwd, scan)
+    return scan
+  }
+
   // 幽灵残留清理:产物已缺失的会话仅解除列表可见性(detach + 归档清理),
   // 无回收与台账动作;失败点聚合成后缀,重试即补全
   async function cleanupDeletedSession(sessionId) {
@@ -538,6 +580,29 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'GET')) return
         sendJson(res, 200, { periodic: { ...periodic } })
+      },
+    },
+    {
+      path: '/api/session-manager/inputs',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'GET')) return
+        try {
+          const url = new URL(req.url, 'http://localhost')
+          const sessionId = (url.searchParams.get('sessionId') || '').trim()
+          if (sessionId === '') throw new Error('sessionId 不能为空')
+          const header = await findHeader(ctx, sessionId)
+          if (header === undefined) {
+            sendJson(res, 400, { error: MESSAGES.unknownSession })
+            return
+          }
+          // 无 cwd 会话没有工作区归属,历史为空集而非错误
+          const inputs = header.cwd === undefined
+            ? []
+            : await collectWorkspaceInputs(header.cwd, url.searchParams.get('refresh') === '1')
+          sendJson(res, 200, { inputs })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
       },
     },
     {

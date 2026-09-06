@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-maintain",
   "description": "DSH 自身的版本管理:追踪 npm dist-tag 新版本、一键升级、安全重启",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -33,7 +33,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@mzzsfy/dsh-toast": "^0.1.0"
+    "@mzzsfy/dsh-toast": "^0.1.2"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",

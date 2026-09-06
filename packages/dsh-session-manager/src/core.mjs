@@ -124,3 +124,44 @@ export function projectDeletedRows(deleted, sessionsById) {
       title: (byId[item.sessionId] && byId[item.sessionId].displayTitle) || item.sessionId,
     }))
 }
+
+// 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)
+export const HISTORY_SESSION_SCAN_LIMIT = 20
+export const HISTORY_INPUT_LIMIT = 200
+export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
+export const HISTORY_CACHE_TTL_MS = 5 * 60 * 1000
+
+/**
+ * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,
+ * 文本块按行拼接;工具结果回填、插件注入与空白输入(纯图/空/纯空白)均不产出。
+ * @param events - readSession 返回的原始事件数组
+ * @returns 条目 { text, at },时间取事件时间
+ */
+export function extractUserInputs(events) {
+  const entries = []
+  for (const event of events || []) {
+    if (!event || event.type !== 'user/message') continue
+    const message = event.data
+    if (!message || !message.source || message.source.kind !== 'user') continue
+    const text = (message.content || [])
+      .filter((block) => block && block.type === 'text' && block.text !== '')
+      .map((block) => block.text)
+      .join('\n')
+    if (text.trim() === '') continue
+    entries.push({ text, at: event.time })
+  }
+  return entries
+}
+
+/** 历史输入聚合:精确文本去重保留最新时间,时间倒序,截 limit 条,单条截 maxChars 字符。 */
+export function aggregateInputs(entries, { limit, maxChars }) {
+  const latestByText = new Map()
+  for (const entry of entries || []) {
+    const known = latestByText.get(entry.text)
+    if (known === undefined || entry.at > known.at) latestByText.set(entry.text, entry)
+  }
+  return [...latestByText.values()]
+    .sort((left, right) => right.at - left.at)
+    .slice(0, limit)
+    .map((entry) => ({ text: entry.text.slice(0, maxChars), at: entry.at }))
+}

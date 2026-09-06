@@ -30,5 +30,9 @@
     "test",
     "cordis.patch.yml",
     "README.md"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  }
 }

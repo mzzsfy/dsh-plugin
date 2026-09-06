@@ -106,6 +106,7 @@ function makeCtx({
   workspaces,
   settingsValue,
   timerAvailable,
+  readSessions,
 }) {
   const routes = []
   const eventHandlers = {}
@@ -122,10 +123,22 @@ function makeCtx({
     timer.unref()
     return () => clearInterval(timer)
   }
+  // readSession 桩:sessionId → 事件数组(工厂形态则调用后抛错);reads 记录实际读取次数供缓存断言
+  const readCounts = new Map()
+  const sessionQuery = {
+    listSessions: async () => headers.map((header) => ({ header })),
+    readSession: async (sessionId) => {
+      readCounts.set(sessionId, (readCounts.get(sessionId) || 0) + 1)
+      const events = readSessions ? readSessions[sessionId] : undefined
+      if (typeof events === 'function') throw events()
+      if (events === undefined) throw new Error('桩未配置该会话产物')
+      return { session: headers.find((header) => header.id === sessionId), events }
+    },
+  }
   const services = {
     webServer: { register: (route) => routes.push(route) },
     workspaceRegistry: Object.assign(makeRegistry(archivedIds), { list: () => workspaceList }),
-    sessionQuery: { listSessions: async () => headers.map((header) => ({ header })) },
+    sessionQuery,
     storageDomain: {
       get: (name) => name === 'workspace' ? (domain || undefined) : undefined,
       open: openRejected ? () => Promise.reject(openRejected) : async () => ledgerDomain,
@@ -157,6 +170,7 @@ function makeCtx({
     ledger: ledgerDomain,
     registry: services.workspaceRegistry,
     logger: base.logger,
+    readCounts,
     // 模拟宿主 settings 与 timer 服务激活:触发 inject 回调(注册 + 启动补扫 + 周期武装)
     activateSettings: () => {
       const injected = { settings: settingsService, interval: timerAvailable === false ? undefined : intervalStub }
@@ -1377,4 +1391,123 @@ test('移除记录:命中删除,未命中幂等无写', skipMissingDeps, async (
   await handlers.get('/api/session-manager/forget')(request('s9'), miss)
   assert.equal(miss.status, 200)
   assert.equal(ledger.writes, 1)
+})
+
+// ── 历史输入路由(GET /api/session-manager/inputs)──
+
+function getRequest(query) {
+  const req = new EventEmitter()
+  req.method = 'GET'
+  req.url = '/api/session-manager/inputs' + query
+  return req
+}
+
+function userMessageEvent(text, at) {
+  return {
+    type: 'user/message',
+    seq: at,
+    time: at,
+    data: { id: 'm' + at, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+  }
+}
+
+test('历史输入路由:sessionId 反查 cwd 后聚合同工作区输入倒序返回', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({
+    archivedIds: [],
+    headers: [
+      { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+      { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+      { id: 's3', cwd: 'C:\\other', createdAt: 0 },
+    ],
+    agents: new Map(),
+    readSessions: {
+      s1: [userMessageEvent('更早的输入', 100), userMessageEvent('最新输入', 900)],
+      s2: [userMessageEvent('第二条', 500)],
+      s3: [userMessageEvent('别的工作区', 999)],
+    },
+  })
+  const res = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
+})
+
+test('历史输入路由:未知会话拒绝;非 GET 拒绝;缺 sessionId 拒绝', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [], agents: new Map() })
+  const unknown = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=ghost'), unknown)
+  assert.equal(unknown.status, 400)
+  assert.equal(unknown.body.error, MESSAGES.unknownSession)
+  const wrongMethod = response()
+  await handlers.get('/api/session-manager/inputs')(request('s1'), wrongMethod)
+  assert.equal(wrongMethod.status, 405)
+  const missing = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest(''), missing)
+  assert.equal(missing.status, 400)
+})
+
+test('历史输入路由:单会话产物读取失败跳过不中断;无 cwd 会话聚合空列表', skipMissingDeps, async () => {
+  const { handlers, logger } = makeCtx({
+    archivedIds: [],
+    headers: [
+      { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'broken', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'nocwd', createdAt: 0 },
+    ],
+    agents: new Map(),
+    readSessions: {
+      s1: [userMessageEvent('存活输入', 100)],
+      broken: () => { throw new Error('产物损坏') },
+    },
+  })
+  const res = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.inputs.map((item) => item.text), ['存活输入'])
+  assert.ok(logger.warns.some((line) => line.includes('broken')), '读取失败未进服务端日志')
+  const noCwd = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=nocwd'), noCwd)
+  assert.equal(noCwd.status, 200)
+  assert.deepEqual(noCwd.body.inputs, [])
+})
+
+test('历史输入路由:缓存命中不重读产物,refresh=1 强制重读', skipMissingDeps, async () => {
+  const { handlers, readCounts } = makeCtx({
+    archivedIds: [],
+    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+    agents: new Map(),
+    readSessions: { s1: [userMessageEvent('输入', 100)] },
+  })
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
+  assert.equal(readCounts.get('s1'), 1)
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&refresh=1'), response())
+  assert.equal(readCounts.get('s1'), 2)
+})
+
+test('历史输入路由:同 cwd 并发共享一轮扫描,跨 cwd 并发各返回各的数据', skipMissingDeps, async () => {
+  const { handlers, readCounts } = makeCtx({
+    archivedIds: [],
+    headers: [
+      { id: 'x1', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'y1', cwd: 'C:\\y', createdAt: 0 },
+    ],
+    agents: new Map(),
+    readSessions: {
+      x1: [userMessageEvent('x工作区输入', 100)],
+      y1: [userMessageEvent('y工作区输入', 100)],
+    },
+  })
+  const xFirstRes = response()
+  const xFirst = handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=x1'), xFirstRes)
+  const xSecondRes = response()
+  const xSecond = handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=x1'), xSecondRes)
+  const yRes = response()
+  const y = handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=y1'), yRes)
+  await Promise.all([xFirst, xSecond, y])
+  assert.deepEqual(xFirstRes.body.inputs.map((item) => item.text), ['x工作区输入'])
+  assert.deepEqual(xSecondRes.body.inputs.map((item) => item.text), ['x工作区输入'])
+  assert.deepEqual(yRes.body.inputs.map((item) => item.text), ['y工作区输入'])
+  assert.equal(readCounts.get('x1'), 1)
+  assert.equal(readCounts.get('y1'), 1)
 })
