@@ -38,6 +38,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   const documentStub = {
     hasFocus: () => true,
     title: 'dsh',
+    hidden: true,
     createElement: () => ({ style: {}, remove() {} }),
     body: { appendChild: () => {} },
     head: { appendChild: () => {} },
@@ -69,7 +70,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   )
   assert.equal(modules.length, 1, 'client.js 模块未被捕获')
   // load({id, factory}) 结构:再调 factory(require) 得到真正的模块对象
-  return { mod: modules[0].factory(requireStub), shown, window: windowStub }
+  return { mod: modules[0].factory(requireStub), shown, window: windowStub, document: documentStub }
 }
 
 const units = [
@@ -200,6 +201,44 @@ test('Given 当前会话判定不受标题闪烁前缀干扰 When 认领 Then �
   })
   await mod.__test.poll()
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '闪烁前缀不应破坏当前会话判定')
+})
+
+test('Given 失焦且通知的是本标签页会话 When 认领 Then 挂高亮', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-away', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话甲 — DeepSeek Harness', hasFocus: () => false, ...dom },
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true, '失焦期间的本会话通知应闪烁提醒')
+})
+
+test('Given 失焦期间挂上的当前会话高亮 When 页面重新可见 Then 提醒消失且其他会话保留', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }, { leafText: '会话乙' }])
+  const hlUnits = [
+    { id: 'u-away', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+    { id: 'u-other', category: 'ask', text: '[dsh] AI 提问: 会话乙', session: '会话乙' },
+  ]
+  const { mod, window: winStub, document: docStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话甲 — DeepSeek Harness', hasFocus: () => false, ...dom },
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true)
+  assert.equal(dom.rows[1].classList.set.has('tn-sess-hl'), true)
+  mod.__test.start()
+  const visibleHandlers = (dom.listeners.visibilitychange || []).slice()
+  assert.ok(visibleHandlers.length > 0, 'visibilitychange 未监听')
+  docStub.hidden = false
+  for (const fn of visibleHandlers) fn()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '返回后当前会话提醒应消失')
+  assert.equal(dom.rows[1].classList.set.has('tn-sess-hl'), true, '其他会话的提醒不应被清除')
+  winStub['turn-notify:polling'].abort()
 })
 
 test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路不抛', async () => {
