@@ -369,8 +369,27 @@ export function apply(ctx, config) {
   const alignThrottle = new Map()
   const runtimeExtracts = new Map()
   const headerCache = new Map()
-  let alignQueue = Promise.resolve()
   ctx.effect(() => () => { alignThrottle.clear(); runtimeExtracts.clear(); headerCache.clear() }, 'session-manager history align state')
+
+  // 双车道对齐队列:批量车道(启动/请求触发,一次解一整个窗口)与焦点车道
+  // (单会话实时追加,延时敏感)各自串行、互不等待——焦点车道不被冷启动
+  // 批量任务的分钟级解压堵死。两车道并发写同一工作区缓存时,最坏丢一次
+  // 更新,但批量窗口必含活跃会话(其自身重读即收敛),下轮指纹失配自愈
+  function makeLane() {
+    const tasks = []
+    let draining = false
+    return (body) => new Promise((resolve) => {
+      tasks.push(() => body().then(resolve, resolve))
+      if (draining) return
+      draining = true
+      void (async () => {
+        while (tasks.length > 0) await tasks.shift()()
+        draining = false
+      })()
+    })
+  }
+  const enqueueBulkAlign = makeLane()
+  const enqueueFocusAlign = makeLane()
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms))
@@ -401,28 +420,23 @@ export function apply(ctx, config) {
     return entries
   }
 
-  // 真正的对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
-  // 与缓存合并后原子写回。focusSessionId 给定时只解该会话(实时追加路径),
-  // extracts 裁剪仍按完整扫描窗口,避免聚焦对齐抹掉其他会话的持久指纹。
+  // 批量对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
+  // 与缓存合并后原子写回,extracts 裁剪到完整扫描窗口。经批量队列入队。
   // 超过 MAX_ARTIFACT 的巨产物直接跳过:单次 readSession 内部同步解压不可让出,
-  // 巨会话一解卡死主循环;其历史来自缓存 entries 的既有贡献。
-  // 入队串行执行(alignQueue 链),返回本工作区的对齐 promise
-  function alignWorkspaceNow(cwd, { focusSessionId } = {}) {
-    return alignQueue = alignQueue.then(async () => {
+  // 巨会话一解卡死主循环;其历史来自缓存 entries 的既有贡献
+  function alignWorkspaceNow(cwd) {
+    return enqueueBulkAlign(async () => {
       const agents = ctx.get('agents')
       const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
       const window = records
         .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      const inScope = focusSessionId === undefined
-        ? window
-        : window.filter((recordItem) => recordItem.header.id === focusSessionId)
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
       const fresh = []
       let sliceStart = Date.now()
-      for (const recordItem of inScope) {
+      for (const recordItem of window) {
         const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
         const located = persistence ? persistence.locate(recordItem.header) : undefined
         const fingerprint = located ? await safeStat(located.path) : null
@@ -450,8 +464,28 @@ export function apply(ctx, config) {
         { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
       )
       await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts: prunedExtracts })
-    }).catch((error) => {
-      ctx.logger && ctx.logger.warn('session-manager 历史缓存对齐失败(' + cwd + '): ' + String(error && error.stack || error))
+    })
+  }
+
+  // 焦点对齐执行体:只解目标会话并写回(实时追加路径),走独立焦点车道,
+  // 不被批量车道的分钟级解压堵死。不裁剪 extracts(裁剪由批量对齐负责),
+  // 只新增/更新目标会话指纹
+  function alignSessionFocus(cwd, header) {
+    return enqueueFocusAlign(async () => {
+      const sessionId = header.id
+      const persistence = ctx.get('sessionPersistence')
+      const located = persistence ? persistence.locate(header) : undefined
+      const fingerprint = located ? await safeStat(located.path) : null
+      if (fingerprint === null || fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES) return
+      const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
+      const cached = await readWorkspaceCache(cacheDir, cwd)
+      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
+      const entries = await extractSession({ header }, fingerprint, extracts, isRunning)
+      const merged = aggregateInputs(
+        (cached ? cached.entries : []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))),
+        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
+      )
+      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts })
     })
   }
 
@@ -518,7 +552,7 @@ export function apply(ctx, config) {
       if (stale && !oversize) {
         if (!pendingFocus.has(sessionId)) {
           pendingFocus.add(sessionId)
-          void alignWorkspaceNow(cwd, { focusSessionId: sessionId }).finally(() => pendingFocus.delete(sessionId))
+          alignSessionFocus(cwd, header).finally(() => pendingFocus.delete(sessionId))
         }
         return { inputs: aggregateInputs(mine, aggregateOptions), aligned: false }
       }
