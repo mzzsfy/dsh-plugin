@@ -1411,8 +1411,8 @@ function userMessageEvent(text, at) {
   }
 }
 
-test('历史输入路由:sessionId 反查 cwd 后聚合同工作区输入倒序返回', skipMissingDeps, async () => {
-  const { handlers } = makeCtx({
+function makeHistoryCtx() {
+  return makeCtx({
     archivedIds: [],
     headers: [
       { id: 's1', cwd: 'C:\\x', createdAt: 0 },
@@ -1426,10 +1426,30 @@ test('历史输入路由:sessionId 反查 cwd 后聚合同工作区输入倒序�
       s3: [userMessageEvent('别的工作区', 999)],
     },
   })
-  const res = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
-  assert.equal(res.status, 200)
-  assert.deepEqual(res.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
+}
+
+test('历史输入路由:session 范围仅返回该会话输入;workspace 范围同 cwd 聚合;global 范围跨工作区', skipMissingDeps, async () => {
+  const { handlers } = makeHistoryCtx()
+  const sessionRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=session'), sessionRes)
+  assert.equal(sessionRes.status, 200)
+  assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+  const workspaceRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), workspaceRes)
+  assert.deepEqual(workspaceRes.body.inputs.map((item) => item.text), ['最新输入', '第二条', '更早的输入'])
+  const globalRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=global'), globalRes)
+  assert.deepEqual(globalRes.body.inputs.map((item) => item.text), ['别的工作区', '最新输入', '第二条', '更早的输入'])
+})
+
+test('历史输入路由:scope 缺省为 session;非法 scope 回退 session', skipMissingDeps, async () => {
+  const { handlers } = makeHistoryCtx()
+  const defaultRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), defaultRes)
+  assert.deepEqual(defaultRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
+  const invalidRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=bogus'), invalidRes)
+  assert.deepEqual(invalidRes.body.inputs.map((item) => item.text), ['最新输入', '更早的输入'])
 })
 
 test('历史输入路由:未知会话拒绝;非 GET 拒绝;缺 sessionId 拒绝', skipMissingDeps, async () => {
@@ -1461,17 +1481,17 @@ test('历史输入路由:单会话产物读取失败跳过不中断;无 cwd 会�
     },
   })
   const res = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), res)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body.inputs.map((item) => item.text), ['存活输入'])
   assert.ok(logger.warns.some((line) => line.includes('broken')), '读取失败未进服务端日志')
   const noCwd = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=nocwd'), noCwd)
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=nocwd&scope=workspace'), noCwd)
   assert.equal(noCwd.status, 200)
   assert.deepEqual(noCwd.body.inputs, [])
 })
 
-test('历史输入路由:TTL 缓存命中不重读产物;运行中会话跳过不参与聚合', skipMissingDeps, async () => {
+test('历史输入路由:TTL 缓存命中不重读产物;workspace 范围跳过运行中会话,session 范围照读', skipMissingDeps, async () => {
   const agents = new Map([['running1', { status: 'running' }]])
   const { handlers, readCounts } = makeCtx({
     archivedIds: [],
@@ -1485,11 +1505,14 @@ test('历史输入路由:TTL 缓存命中不重读产物;运行中会话跳过�
       running1: [userMessageEvent('运行中会话的输入', 200)],
     },
   })
-  const res = response()
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), res)
-  assert.deepEqual(res.body.inputs.map((item) => item.text), ['历史输入'])
+  const workspaceRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), workspaceRes)
+  assert.deepEqual(workspaceRes.body.inputs.map((item) => item.text), ['历史输入'])
   assert.equal(readCounts.get('running1'), undefined)
-  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1'), response())
+  const sessionRes = response()
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=running1&scope=session'), sessionRes)
+  assert.deepEqual(sessionRes.body.inputs.map((item) => item.text), ['运行中会话的输入'])
+  await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=workspace'), response())
   assert.equal(readCounts.get('s1'), 1)
 })
 

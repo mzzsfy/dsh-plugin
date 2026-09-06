@@ -21,6 +21,7 @@ import {
   HISTORY_CACHE_TTL_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
+  HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
   aggregateDeleteOutcome,
   aggregateInputs,
@@ -348,41 +349,51 @@ export function apply(ctx, config) {
     }
   }
 
-  // 历史输入缓存:cwd → { inputs, at };TTL 内唤起免重复解压产物(全量扫描秒级不可接受)。
-  // in-flight 按 cwd 键控:跨工作区并发请求各扫各的,同工作区并发共享同一轮扫描
+  // 历史输入缓存:scope+标识 → { inputs, at };TTL 内唤起免重复解压产物(全量扫描秒级不可接受)。
+  // in-flight 按缓存键控:跨范围并发请求各扫各的,同范围并发共享同一轮扫描
   const inputsCache = new Map()
   const inputsInFlight = new Map()
   ctx.effect(() => () => inputsCache.clear(), 'session-manager inputs cache')
 
-  // 同工作区历史输入聚合:反查 cwd 后扫描近期非运行会话产物提取人类输入;
-  // 运行中会话跳过——其产物最大(解压最慢)且输入刚发生、回溯价值最低;
+  // 按范围聚合历史输入:session=仅该会话(即使运行中,当前会话回溯的就是自己);
+  // workspace=同 cwd 的最近非运行会话;global=全部工作区的最近非运行会话。
+  // 运行中会话在 workspace/global 跳过——产物最大解压最慢,且输入刚发生、回溯价值最低;
   // 会话并行读取,单会话产物读取失败仅告警跳过(损坏产物只降级该会话的历史贡献)
-  async function collectWorkspaceInputs(cwd) {
-    const cached = inputsCache.get(cwd)
+  async function collectInputs(scope, sessionId, cwd) {
+    const cacheKey = scope === 'session' ? 'session:' + sessionId : scope === 'global' ? 'global' : 'workspace:' + cwd
+    const cached = inputsCache.get(cacheKey)
     if (cached && Date.now() - cached.at < HISTORY_CACHE_TTL_MS) return cached.inputs
-    const pending = inputsInFlight.get(cwd)
+    const pending = inputsInFlight.get(cacheKey)
     if (pending !== undefined) return pending
     const scan = (async () => {
-      const agents = ctx.get('agents')
-      const records = await ctx.sessionQuery.listSessions()
-      const recent = records
-        .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
-        .filter((recordItem) => !isSessionRunning({ agents, sessionId: recordItem.header.id }))
-        .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      const entriesPerSession = await Promise.all(recent.map((recordItem) =>
-        ctx.sessionQuery.readSession(recordItem.header.id)
+      let sessionIds
+      if (scope === 'session') {
+        sessionIds = [sessionId]
+      } else {
+        const agents = ctx.get('agents')
+        const records = await ctx.sessionQuery.listSessions()
+        const inScope = scope === 'workspace'
+          ? records.filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
+          : records
+        sessionIds = inScope
+          .filter((recordItem) => !isSessionRunning({ agents, sessionId: recordItem.header.id }))
+          .slice(0, HISTORY_SESSION_SCAN_LIMIT)
+          .map((recordItem) => recordItem.header.id)
+      }
+      const entriesPerSession = await Promise.all(sessionIds.map((id) =>
+        ctx.sessionQuery.readSession(id)
           .then((snapshot) => extractUserInputs(snapshot.events))
           .catch((error) => {
-            ctx.logger && ctx.logger.warn('session-manager 历史输入读取失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
+            ctx.logger && ctx.logger.warn('session-manager 历史输入读取失败(' + id + '): ' + String(error && error.stack || error))
             return []
           })))
       const inputs = aggregateInputs([].concat(...entriesPerSession), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS })
-      inputsCache.set(cwd, { inputs, at: Date.now() })
+      inputsCache.set(cacheKey, { inputs, at: Date.now() })
       return inputs
     })().finally(() => {
-      if (inputsInFlight.get(cwd) === scan) inputsInFlight.delete(cwd)
+      if (inputsInFlight.get(cacheKey) === scan) inputsInFlight.delete(cacheKey)
     })
-    inputsInFlight.set(cwd, scan)
+    inputsInFlight.set(cacheKey, scan)
     return scan
   }
 
@@ -592,15 +603,17 @@ export function apply(ctx, config) {
           const url = new URL(req.url, 'http://localhost')
           const sessionId = (url.searchParams.get('sessionId') || '').trim()
           if (sessionId === '') throw new Error('sessionId 不能为空')
+          const scopeRaw = url.searchParams.get('scope') || 'session'
+          const scope = HISTORY_SCOPES.includes(scopeRaw) ? scopeRaw : 'session'
           const header = await findHeader(ctx, sessionId)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
           }
-          // 无 cwd 会话没有工作区归属,历史为空集而非错误
-          const inputs = header.cwd === undefined
+          // workspace 范围依赖 cwd 归属;无 cwd 会话在 session/global 范围照常聚合
+          const inputs = scope === 'workspace' && header.cwd === undefined
             ? []
-            : await collectWorkspaceInputs(header.cwd)
+            : await collectInputs(scope, sessionId, header.cwd)
           sendJson(res, 200, { inputs })
         } catch (error) {
           respondError(ctx, res, error)

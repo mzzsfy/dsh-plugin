@@ -74,6 +74,8 @@ const CSS = [
   '  background:var(--dsw-alias-bg-module-platform); border:1px solid var(--dsw-alias-border-l3); border-radius:10px;',
   '  box-shadow:0 8px 24px rgba(0,0,0,.18); }',
   '.sm-hist__hint { padding:8px 12px 4px; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); flex:none; }',
+  '.sm-hist__scope { margin-right:8px; padding:1px 8px; border-radius:999px;',
+  '  background:var(--dsw-alias-interactive-bg-selected); color:var(--dsw-alias-label-primary); }',
   '.sm-hist__list { overflow-y:auto; padding:4px; }',
   '.sm-hist__row { display:flex; align-items:baseline; gap:8px; width:100%; border:0; background:transparent;',
   '  cursor:pointer; text-align:left; padding:6px 10px; border-radius:6px; min-width:0; }',
@@ -349,15 +351,19 @@ function SessionManagerApp(props) {
 // 历史输入浮层:Alt+↑ 快捷键唤起,平时零占位;浮层内点选或键盘(↑/↓ 选择、
 // Enter 填入、Esc 关闭)回填历史,填入走宿主公共契约 inputActions.setDraft,
 // 不直改编辑器 DOM。数据由 host 按当前会话所属工作区聚合,每次唤起即强刷
+// 历史输入范围:索引即 ←/→ 切换顺序(← 向窄,→ 向宽),与 core.mjs HISTORY_SCOPES 同序
+const HISTORY_SCOPE_LABELS = ['当前会话', '本工作区', '全部工作区']
+
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
   const [cursor, setCursor] = useState(-1)
+  const [scopeIndex, setScopeIndex] = useState(0)
   const [loadError, setLoadError] = useState(false)
   const rootRef = React.useRef(null)
   // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
   // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
-  const viewRef = React.useRef({ open: false, items: null, cursor: -1 })
+  const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0 })
   const sessionRef = React.useRef(session)
   const inputActionsRef = React.useRef(inputActions)
   sessionRef.current = session
@@ -370,8 +376,8 @@ function HistoryDock({ session, inputActions }) {
   // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组。
   // 不传 refresh:host TTL 缓存内直接返回(全量扫描秒级,每次强刷会让每次唤起都卡死);
   // 缓存过期后由 host 自动重扫
-  function fetchInputs() {
-    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId))
+  function fetchInputs(scope) {
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId) + '&scope=' + scope)
       .then((payload) => (payload && Array.isArray(payload.inputs)) ? payload.inputs : [])
   }
 
@@ -382,18 +388,44 @@ function HistoryDock({ session, inputActions }) {
   }
 
   function openPopup() {
-    syncView({ open: true, items: null, cursor: -1 })
+    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0 })
     setOpen(true)
+    setScopeIndex(0)
     setCursor(-1)
     setLoadError(false)
     setItems(null)
-    fetchInputs()
+    fetchInputs('session')
       .then((fetched) => {
         syncView({ items: fetched, cursor: -1 })
         setItems(fetched)
         setCursor(-1)
       })
       .catch((error) => {
+        syncView({ items: [] })
+        setLoadError(true)
+        setItems([])
+        toast(error && error.message ? error.message : String(error), { kind: 'error' })
+      })
+  }
+
+  // 切换范围:向宽(→)/向窄(←),边界停住;切换即按新范围重新拉取(host 缓存内秒回)
+  function switchScope(delta) {
+    const next = viewRef.current.scopeIndex + delta
+    if (next < 0 || next >= HISTORY_SCOPE_LABELS.length) return
+    syncView({ scopeIndex: next, items: null, cursor: -1 })
+    setScopeIndex(next)
+    setCursor(-1)
+    setLoadError(false)
+    setItems(null)
+    fetchInputs(HISTORY_SCOPES[next])
+      .then((fetched) => {
+        if (viewRef.current.scopeIndex !== next) return
+        syncView({ items: fetched, cursor: -1 })
+        setItems(fetched)
+        setCursor(-1)
+      })
+      .catch((error) => {
+        if (viewRef.current.scopeIndex !== next) return
         syncView({ items: [] })
         setLoadError(true)
         setItems([])
@@ -422,6 +454,12 @@ function HistoryDock({ session, inputActions }) {
         const next = Math.min(Math.max(view.cursor + delta, 0), view.items.length - 1)
         syncView({ cursor: next })
         setCursor(next)
+        return
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        event.stopPropagation()
+        switchScope(event.key === 'ArrowLeft' ? -1 : 1)
         return
       }
       if (event.key === 'Enter') {
@@ -455,11 +493,13 @@ function HistoryDock({ session, inputActions }) {
   if (session === undefined || inputActions === undefined) return null
   return h('div', { className: 'sm-hist', ref: rootRef },
     open && h('div', { className: 'sm-hist__pop' },
-      h('div', { className: 'sm-hist__hint' }, '当前工作区历史输入;↑/↓ 选择,Enter 填入,Esc 关闭'),
+      h('div', { className: 'sm-hist__hint' },
+        h('span', { className: 'sm-hist__scope' }, HISTORY_SCOPE_LABELS[scopeIndex]),
+        '↑/↓ 选择,←/→ 切换范围,Enter 填入,Esc 关闭'),
       items === null
         ? h('div', { className: 'sm-hist__empty' }, '加载中…')
         : items.length === 0
-          ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '当前工作区还没有历史输入')
+          ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '该范围内还没有历史输入')
           : h('div', { className: 'sm-hist__list' },
               items.map((item, index) => h('button', {
                 key: index + ':' + item.at,

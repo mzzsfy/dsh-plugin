@@ -125,11 +125,13 @@ export function projectDeletedRows(deleted, sessionsById) {
     }))
 }
 
-// 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)
+// 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)。
+// 范围从窄到宽排列,client ←/→ 切换即在此数组上移动索引
 export const HISTORY_SESSION_SCAN_LIMIT = 20
 export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
 export const HISTORY_CACHE_TTL_MS = 5 * 60 * 1000
+export const HISTORY_SCOPES = ['session', 'workspace', 'global']
 
 /**
  * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,
