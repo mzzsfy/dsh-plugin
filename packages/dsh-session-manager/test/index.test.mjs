@@ -22,7 +22,7 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const MESSAGES = indexModule.MESSAGES
-const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
+const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
 const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cache.mjs')
 
 // 插件激活即跑历史缓存启动对齐:所有测试统一隔离缓存目录,
@@ -1598,5 +1598,21 @@ test('历史输入路由:再次请求读缓存不再解压产物(对齐节流内
     assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
     assert.equal(second.body.aligned, true)
     assert.equal(readCounts.get('s1'), readsAfterAlign, '读路径不得解压产物')
+  })
+})
+
+test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老会话不解压', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const total = HISTORY_STARTUP_SCAN_LIMIT + 20
+    // 宿主 listSessions 为最新在前:数组首元素即最新会话
+    const headers = Array.from({ length: total }, (_, i) => ({ id: 's' + (total - 1 - i), cwd: 'C:\\x', createdAt: 0 }))
+    const readSessions = {}
+    for (let i = 0; i < total; i++) readSessions['s' + i] = [userMessageEvent('输入' + i, 1000 + i)]
+    const { handlers, readCounts } = makeCtx({ archivedIds: [], headers, agents: new Map(), readSessions })
+    // 触发对齐(请求工作区),等队列排空后窗口外老会话(s0..s19)不得被解压
+    await requestUntil(handlers, '?sessionId=s' + (total - 1) + '&scope=workspace',
+      (body) => body.aligned && body.inputs.length > 0)
+    assert.equal(readCounts.get('s0'), undefined, '窗口外最老会话不被启动对齐解压')
+    assert.ok(readCounts.get('s' + (total - 1)) >= 1, '窗口内最新会话被解压')
   })
 })

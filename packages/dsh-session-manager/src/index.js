@@ -19,11 +19,14 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
+  HISTORY_ALIGN_BATCH_PAUSE_MS,
+  HISTORY_ALIGN_BATCH_SIZE,
   HISTORY_ALIGN_THROTTLE_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
   HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
+  HISTORY_STARTUP_SCAN_LIMIT,
   aggregateDeleteOutcome,
   aggregateInputs,
   artifactLooksBlank,
@@ -355,51 +358,69 @@ export function apply(ctx, config) {
   // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内最近会话产物,
   // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入);
   // 两次对齐最小间隔防持续解压,对齐失败静默(下次请求重试)。
-  // 测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
+  // 解压是同步 CPU 操作:分批执行(每批 BATCH 个,批间 PAUSE 让出主循环),
+  // 多工作区串行排队,启动绝不阻塞宿主服务。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
   const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
     || join(homedir(), '.dsh', 'historyPrompt')
   const alignThrottle = new Map()
+  let alignQueue = Promise.resolve()
   ctx.effect(() => () => alignThrottle.clear(), 'session-manager history align throttle')
 
-  function alignWorkspace(cwd) {
-    const now = Date.now()
-    const last = alignThrottle.get(cwd)
-    if (last !== undefined && now - last < HISTORY_ALIGN_THROTTLE_MS) return
-    alignThrottle.set(cwd, now)
-    void (async () => {
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  // 真正的对齐执行体:列出范围会话,分批解压提取,与缓存合并后原子写回。
+  // 入队串行执行(alignQueue 链),返回本工作区的对齐 promise
+  function alignWorkspaceNow(cwd) {
+    return alignQueue = alignQueue.then(async () => {
       const records = await ctx.sessionQuery.listSessions()
       const inScope = records
         .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      const extracted = await Promise.all(inScope.map((recordItem) =>
-        ctx.sessionQuery.readSession(recordItem.header.id)
-          .then((snapshot) => extractUserInputs(snapshot.events).map((entry) => ({ ...entry, sid: recordItem.header.id })))
-          .catch((error) => {
-            ctx.logger && ctx.logger.warn('session-manager 历史输入对齐失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
-            return []
-          })))
+      const extracted = []
+      for (let start = 0; start < inScope.length; start += HISTORY_ALIGN_BATCH_SIZE) {
+        const batch = inScope.slice(start, start + HISTORY_ALIGN_BATCH_SIZE)
+        extracted.push(...await Promise.all(batch.map((recordItem) =>
+          ctx.sessionQuery.readSession(recordItem.header.id)
+            .then((snapshot) => extractUserInputs(snapshot.events).map((entry) => ({ ...entry, sid: recordItem.header.id })))
+            .catch((error) => {
+              ctx.logger && ctx.logger.warn('session-manager 历史输入对齐失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
+              return []
+            }))))
+        if (start + HISTORY_ALIGN_BATCH_SIZE < inScope.length) await sleep(HISTORY_ALIGN_BATCH_PAUSE_MS)
+      }
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const merged = aggregateInputs(
         (cached ? cached.entries : []).concat(...extracted),
         { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
       )
       await writeWorkspaceCache(cacheDir, cwd, merged)
-    })().catch((error) => {
+    }).catch((error) => {
       ctx.logger && ctx.logger.warn('session-manager 历史缓存对齐失败(' + cwd + '): ' + String(error && error.stack || error))
     })
   }
 
-  // 启动对齐:最近会话覆盖的工作区在插件激活后自动对齐一次,此后缓存保持新鲜
+  // 节流壳:请求触发的后台对齐入口,30s 内同工作区只排队一次
+  function alignWorkspace(cwd) {
+    const now = Date.now()
+    const last = alignThrottle.get(cwd)
+    if (last !== undefined && now - last < HISTORY_ALIGN_THROTTLE_MS) return
+    alignThrottle.set(cwd, now)
+    void alignWorkspaceNow(cwd)
+  }
+
+  // 启动对齐:只回溯最近 STARTUP_SCAN 个会话覆盖的工作区,串行排队逐个对齐,
+  // 不 await(插件激活不被阻塞),服务立即可用、历史随后就绪
   void (async () => {
     try {
       await ensureCacheDir(cacheDir)
       const records = await ctx.sessionQuery.listSessions()
       const workspaces = []
-      for (const recordItem of records) {
+      for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
         const recordCwd = recordItem.header.cwd
         if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
         workspaces.push(recordCwd)
-        if (workspaces.length >= HISTORY_SESSION_SCAN_LIMIT) break
       }
       for (const workspaceCwd of workspaces) alignWorkspace(workspaceCwd)
     } catch (error) {
