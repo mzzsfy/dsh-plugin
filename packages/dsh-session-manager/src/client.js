@@ -66,6 +66,18 @@ const CSS = [
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
+  '.sm-histsw { display:inline-flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer;',
+  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
+  '.sm-histsw input[type="checkbox"] { position:absolute; width:1px; height:1px; margin:-1px; opacity:0; }',
+  '.sm-histsw__track { position:relative; flex:none; width:28px; height:16px; border-radius:999px;',
+  '  background:light-dark(rgba(15,17,21,.22), rgba(255,255,255,.26)); transition:background .15s; }',
+  '.sm-histsw__thumb { position:absolute; left:2px; top:2px; width:12px; height:12px; border-radius:999px;',
+  '  background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25); transition:transform .15s; }',
+  '.sm-histsw input[type="checkbox"]:checked + .sm-histsw__track { background:#1677ff; }',
+  '.sm-histsw input[type="checkbox"]:checked + .sm-histsw__track .sm-histsw__thumb { transform:translateX(12px); }',
+  '.sm-histsw input[type="checkbox"]:focus-visible + .sm-histsw__track { outline:2px solid #1677ff; outline-offset:1px; }',
+  '.sm-histsw:hover { color:var(--dsw-alias-label-primary, inherit); }',
+  '@media (prefers-reduced-motion: reduce) { .sm-histsw__track, .sm-histsw__thumb { transition:none; } }',
   '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
   // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,
   // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
@@ -96,6 +108,30 @@ const CSS = [
   '.sm-hist__time { font:12px/18px var(--ds-font-family-code, monospace);',
   '  color:light-dark(rgba(15,17,21,.4), rgba(232,234,237,.4));',
   '  font-variant-numeric:tabular-nums; flex:none; }',
+  '.sm-hist__star { border:0; background:transparent; cursor:pointer; flex:none;',
+  '  font-size:15px; line-height:1; padding:2px 4px; border-radius:6px;',
+  '  color:light-dark(rgba(15,17,21,.35), rgba(232,234,237,.35));',
+  '  opacity:0; transition:opacity .12s; }',
+  '.sm-hist__row:hover .sm-hist__star, .sm-hist__star:focus-visible { opacity:1; }',
+  '.sm-hist__star--on { opacity:1; color:#f5a623; }',
+  '.sm-hist__star:hover { color:#f5a623; }',
+  '.sm-hist__editbtn { border:0; background:transparent; cursor:pointer; flex:none; padding:2px 8px;',
+  '  border-radius:999px; font:12px/18px sans-serif; font-weight:600;',
+  '  color:#1677ff; background:light-dark(rgba(22,119,255,.1), rgba(22,119,255,.22)); }',
+  '.sm-hist__editbtn:hover { background:light-dark(rgba(22,119,255,.18), rgba(22,119,255,.3)); }',
+  '.sm-hist__editwrap { display:flex; flex-direction:column; flex:1; min-height:0; }',
+  '.sm-hist__editwrap .sm-hist__list { flex:1; min-height:0; }',
+  '.sm-hist__editrow { display:flex; align-items:center; gap:6px; padding:4px 8px; }',
+  '.sm-hist__editinput { flex:1; min-width:0; border:1px solid light-dark(rgba(15,17,21,.14), rgba(255,255,255,.18));',
+  '  border-radius:8px; padding:6px 10px; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
+  '  color:inherit; background:transparent; }',
+  '.sm-hist__editinput:focus { outline:2px solid #1677ff; outline-offset:-1px; }',
+  '.sm-hist__del { border:0; background:transparent; cursor:pointer; flex:none;',
+  '  font-size:16px; line-height:1; padding:2px 8px; border-radius:6px;',
+  '  color:light-dark(rgba(15,17,21,.45), rgba(232,234,237,.45)); }',
+  '.sm-hist__del:hover { color:#e5484d; }',
+  '.sm-hist__addrow { display:flex; gap:6px; padding:8px; flex:none;',
+  '  border-top:1px solid light-dark(rgba(15,17,21,.08), rgba(255,255,255,.1)); }',
   '.sm-hist__empty { padding:24px 14px; text-align:center; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
   '  color:light-dark(rgba(15,17,21,.5), rgba(232,234,237,.5)); }',
   '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
@@ -374,6 +410,33 @@ function SessionManagerApp(props) {
       onRemount,
       onForget,
     }),
+    h(HistorySwitchRow, null),
+  )
+}
+
+// 历史浮层启停开关:低频功能,收在面板末行小尺寸呈现;
+// 值存宿主 settings(与原生设置页同存储),切换经本插件路由中转
+function HistorySwitchRow() {
+  const [enabled, setEnabled] = useState(null)
+  useEffect(() => {
+    api(HISTORY_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => setEnabled(true))
+  }, [])
+  const flip = () => {
+    const next = !(enabled !== false)
+    setEnabled(next)
+    api(HISTORY_ENABLED_URL, { method: 'POST', body: JSON.stringify({ enabled: next }) })
+      .then((payload) => {
+        setEnabled(payload ? payload.enabled !== false : next)
+        toast('历史输入浮层已' + (payload && payload.enabled !== false ? '启用' : '停用') + ',刷新页面后生效')
+      })
+      .catch(() => setEnabled(!next))
+  }
+  return h('label', { className: 'sm-histsw' },
+    h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
+    h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
+    h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '历史输入浮层(Alt+↑)'),
   )
 }
 
@@ -381,27 +444,47 @@ function SessionManagerApp(props) {
 // ←/→ 切范围、Enter 填入、Esc 关闭)回填历史,填入走宿主公共契约
 // inputActions.setDraft,不直改编辑器 DOM。数据由 host 工作区持久缓存
 // (~/.dsh/historyPrompt)直接返回,后台对齐保持新鲜
-// 历史输入范围:索引即 ←/→ 切换顺序(← 向窄,→ 向宽),与 core.mjs HISTORY_SCOPES 同序同值
-const HISTORY_SCOPES = ['session', 'workspace', 'global']
-const HISTORY_SCOPE_LABELS = ['当前会话', '本工作区', '全部工作区']
+// 历史输入范围:索引即 ←/→ 切换顺序(索引 0 为常用收藏,→ 向更大范围),
+// 与 core.mjs HISTORY_SCOPES 同序同值;浮层默认落点为当前会话
+const HISTORY_SCOPES = ['prompts', 'session', 'workspace', 'global']
+const HISTORY_SCOPE_LABELS = ['常用', '当前会话', '本工作区', '全部工作区']
+const HISTORY_SCOPE_DEFAULT = HISTORY_SCOPES.indexOf('session')
 // 对齐未就绪时的静默重拉间隔与上限(对齐通常秒级完成,上限防死循环)
 const HISTORY_REPULL_MS = 3 * 1000
+const PROMPTS_TOGGLE_URL = '/api/session-manager/prompts/toggle'
+const HISTORY_ENABLED_URL = '/api/session-manager/history-enabled'
 
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
   const [cursor, setCursor] = useState(-1)
-  const [scopeIndex, setScopeIndex] = useState(0)
+  const [scopeIndex, setScopeIndex] = useState(HISTORY_SCOPE_DEFAULT)
   const [aligning, setAligning] = useState(false)
   const [loadError, setLoadError] = useState(false)
+  // 收藏集合:浮层打开时并行拉一次,行悬停星标据此显示实/空心;
+  // editing 仅常用范围可进入(行内改/删 + 底部新增)
+  const [collected, setCollected] = useState(() => new Set())
+  const [editing, setEditing] = useState(false)
   const rootRef = React.useRef(null)
   // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
   // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
   const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, aligning: false })
   const sessionRef = React.useRef(session)
   const inputActionsRef = React.useRef(inputActions)
+  // 历史浮层启停(设置开关):挂载拉取一次,停用即整体不渲染、键盘放行
+  const enabledRef = React.useRef(true)
+  const [historyEnabled, setHistoryEnabled] = useState(true)
   sessionRef.current = session
   inputActionsRef.current = inputActions
+  useEffect(() => {
+    api(HISTORY_ENABLED_URL)
+      .then((payload) => {
+        const on = payload ? payload.enabled !== false : true
+        enabledRef.current = on
+        setHistoryEnabled(on)
+      })
+      .catch(() => {})
+  }, [])
 
   function syncView(patch) {
     viewRef.current = { ...viewRef.current, ...patch }
@@ -415,6 +498,41 @@ function HistoryDock({ session, inputActions }) {
         inputs: (payload && Array.isArray(payload.inputs)) ? payload.inputs : [],
         aligned: Boolean(payload && payload.aligned),
       }))
+  }
+
+  // 收藏集合与浮层列表共用 inputs 路由(scope=prompts),毫秒级缓存读
+  function refreshCollected() {
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(sessionRef.current.sessionId) + '&scope=prompts')
+      .then((payload) => {
+        const list = payload && Array.isArray(payload.inputs) ? payload.inputs : []
+        setCollected(new Set(list.map((item) => item.text)))
+      })
+      .catch(() => {})
+  }
+
+  // 收藏切换:行悬停星标与编辑态删除共用;成功后同步星标集,
+  // 当前正处于常用范围时立即重拉列表(不等轮询)
+  function togglePrompt(text) {
+    return api(PROMPTS_TOGGLE_URL, { method: 'POST', body: JSON.stringify({ text }) })
+      .then((payload) => {
+        const on = Boolean(payload && payload.collected)
+        toast(on ? '已收藏到常用' : '已取消收藏')
+        setCollected((prev) => {
+          const next = new Set(prev)
+          if (on) next.add(text)
+          else next.delete(text)
+          return next
+        })
+        if (viewRef.current.open && viewRef.current.scopeIndex === HISTORY_SCOPES.indexOf('prompts')) requestScope(viewRef.current.scopeIndex)
+        return on
+      })
+  }
+
+  // 编辑态改文本 = 移除旧文本 + 收藏新文本(两次 toggle 原子性由"同文本去重"保证:
+  // 中断最坏留下旧文本,重改一次即自愈)
+  function renamePrompt(from, to) {
+    return togglePrompt(from)
+      .then(() => (to === '' ? Promise.resolve() : togglePrompt(to)))
   }
 
   // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围。
@@ -467,17 +585,19 @@ function HistoryDock({ session, inputActions }) {
   }
 
   function openPopup() {
-    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0, aligning: false })
+    syncView({ open: true, items: null, cursor: -1, scopeIndex: HISTORY_SCOPE_DEFAULT, aligning: false })
     setOpen(true)
-    setScopeIndex(0)
+    setScopeIndex(HISTORY_SCOPE_DEFAULT)
     setCursor(-1)
     setAligning(false)
     setLoadError(false)
     setItems(null)
-    requestScope(0)
+    setEditing(false)
+    refreshCollected()
+    requestScope(HISTORY_SCOPE_DEFAULT)
   }
 
-  // 切换范围:向宽(→)/向窄(←),边界停住;缓存直接返回(毫秒级),后台保持对齐
+  // 切换范围:→ 向大(工作区/全局),← 返回收藏;边界停住;缓存直接返回(毫秒级),后台保持对齐
   function switchScope(delta) {
     const next = viewRef.current.scopeIndex + delta
     if (next < 0 || next >= HISTORY_SCOPE_LABELS.length) return
@@ -487,12 +607,15 @@ function HistoryDock({ session, inputActions }) {
     setAligning(false)
     setLoadError(false)
     setItems(null)
+    setEditing(false)
     requestScope(next)
   }
 
-  // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动
+  // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动。
+  // 设置开关停用时监听器直接放行(读 ref,开关值挂载拉取后即时反映)
   useEffect(() => {
     function onKeyDown(event) {
+      if (enabledRef.current === false) return
       const view = viewRef.current
       if (event.isComposing) return
       if (!view.open) {
@@ -558,8 +681,20 @@ function HistoryDock({ session, inputActions }) {
     return () => document.removeEventListener('mousedown', onPointerDown, true)
   }, [open])
 
-  // 零高度锚点:平时不占任何界面空间,仅浮层打开时渲染
-  if (session === undefined || inputActions === undefined) return null
+  // 零高度锚点:平时不占任何界面空间,仅浮层打开时渲染;设置停用整体不渲染
+  if (session === undefined || inputActions === undefined || historyEnabled === false) return null
+  const promptsIdx = HISTORY_SCOPES.indexOf('prompts')
+  const inPrompts = scopeIndex === promptsIdx
+  // 行悬停星标:非常用范围显示,已收藏实星(点击取消),未收藏空心(点击收藏);
+  // stopPropagation 防止触发行回填
+  const starButton = (item) => h('button', {
+    className: 'sm-hist__star' + (collected.has(item.text) ? ' sm-hist__star--on' : ''),
+    title: collected.has(item.text) ? '取消收藏' : '收藏',
+    onClick: (event) => {
+      event.stopPropagation()
+      togglePrompt(item.text)
+    },
+  }, collected.has(item.text) ? '★' : '☆')
   const rowButton = (item, index) => h('button', {
     key: index + ':' + item.at,
     className: 'sm-hist__row' + (index === cursor ? ' sm-hist__row--on' : ''),
@@ -567,18 +702,74 @@ function HistoryDock({ session, inputActions }) {
   },
     h('span', { className: 'sm-hist__text', title: item.text }, item.text),
     h('span', { className: 'sm-hist__time' }, fmtTime(item.at)),
+    !inPrompts ? starButton(item) : null,
+  )
+  // 编辑态行:文本可改(行内 input,回车/失焦保存)+ 删除
+  const editRow = (item, index) => h('div', {
+    key: index + ':' + item.at,
+    className: 'sm-hist__editrow',
+  },
+    h('input', {
+      className: 'sm-hist__editinput',
+      defaultValue: item.text,
+      title: item.text,
+      onKeyDown: (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          renamePrompt(item.text, event.target.value.trim())
+        }
+      },
+      onBlur: (event) => {
+        const next = event.target.value.trim()
+        if (next !== item.text) renamePrompt(item.text, next)
+      },
+    }),
+    h('button', {
+      className: 'sm-hist__del',
+      title: '删除',
+      onClick: () => togglePrompt(item.text),
+    }, '×'),
   )
   return h('div', { className: 'sm-hist', ref: rootRef },
     open && h('div', { className: 'sm-hist__pop' },
       h('div', { className: 'sm-hist__hint' },
         h('span', { className: 'sm-hist__scope' }, HISTORY_SCOPE_LABELS[scopeIndex]),
+        inPrompts
+          ? h('button', {
+              className: 'sm-hist__editbtn',
+              onClick: () => setEditing(!editing),
+            }, editing ? '完成' : '编辑')
+          : null,
         h('span', null, '↑/↓ 选择 · ←/→ 切换范围 · Enter 填入 · Esc 关闭')),
       aligning && h('div', { className: 'sm-hist__banner' }, '首次对齐历史中,可能需要稍等'),
       items === null
         ? h('div', { className: 'sm-hist__empty' }, '正在读取历史输入…')
-        : items.length === 0
-          ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '该范围内还没有历史输入')
-          : h('div', { className: 'sm-hist__list' }, items.map(rowButton)),
+        : editing && inPrompts
+          ? h('div', { className: 'sm-hist__editwrap' },
+              items.length === 0
+                ? h('div', { className: 'sm-hist__empty' }, '还没有常用提示词,可从历史行悬停收藏,或在下方添加')
+                : h('div', { className: 'sm-hist__list' }, items.map(editRow)),
+              h('div', { className: 'sm-hist__addrow' },
+                h('input', {
+                  className: 'sm-hist__editinput',
+                  placeholder: '输入常用提示词,Enter 添加',
+                  ref: (el) => { if (el) el.dataset.addinput = '1' },
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      const text = event.target.value.trim()
+                      if (text !== '') {
+                        togglePrompt(text)
+                        event.target.value = ''
+                      }
+                    }
+                  },
+                }),
+              ),
+            )
+          : items.length === 0
+            ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : (inPrompts ? '还没有常用提示词' : '该范围内还没有历史输入'))
+            : h('div', { className: 'sm-hist__list' }, items.map(rowButton)),
     ),
   )
 }
