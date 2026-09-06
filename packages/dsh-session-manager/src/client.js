@@ -423,15 +423,19 @@ function HistorySwitchRow() {
       .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
       .catch(() => setEnabled(true))
   }, [])
-  const flip = () => {
-    const next = !(enabled !== false)
+  // 受控 checkbox:onChange 内同步落 state(异步确认会让 DOM 与渲染竞态,
+  // 视觉慢一拍),服务端响应仅用于失败回滚
+  const flip = (event) => {
+    const next = event.target.checked
     setEnabled(next)
     api(HISTORY_ENABLED_URL, { method: 'POST', body: JSON.stringify({ enabled: next }) })
       .then((payload) => {
-        setEnabled(payload ? payload.enabled !== false : next)
         toast('历史输入浮层已' + (payload && payload.enabled !== false ? '启用' : '停用') + ',刷新页面后生效')
       })
-      .catch(() => setEnabled(!next))
+      .catch(() => {
+        setEnabled(!next)
+        toast('切换失败', { kind: 'error' })
+      })
   }
   return h('label', { className: 'sm-histsw' },
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
