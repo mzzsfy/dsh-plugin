@@ -167,11 +167,39 @@ test('Given 通知带 session 标题 When 认领 Then 会话行挂上高亮类',
   const { mod } = loadClient({
     storage: new FakeStorage(),
     payload: { units: hlUnits, soundMapping: {}, version: 1 },
-    document: dom,
+    document: { title: '会话乙 — DeepSeek Harness', ...dom },
   })
   await mod.__test.poll()
   assert.ok(dom.rows[0].classList.set.has('tn-sess-hl'), '会话行未挂高亮类')
   assert.ok(dom.rows[0].classList.set.has('tn-sess-hl--completed'), '高亮类缺少分类色')
+})
+
+test('Given 通知的是当前查看的会话 When 认领 Then 不挂高亮', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-cur', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话甲 — DeepSeek Harness', ...dom },
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '当前查看的会话不应闪烁')
+})
+
+test('Given 当前会话判定不受标题闪烁前缀干扰 When 认领 Then 仍不挂高亮', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-blink', category: 'error', text: '[dsh] 任务出错: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '⏳ 会话甲 — DeepSeek Harness', ...dom },
+  })
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '闪烁前缀不应破坏当前会话判定')
 })
 
 test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路不抛', async () => {

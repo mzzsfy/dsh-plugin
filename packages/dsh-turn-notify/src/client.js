@@ -565,8 +565,9 @@ window.__ModuleLoader__.load({
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast || channels.sound || channels.system || channels.blink) {
           if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
-          // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名)
-          if (unit.session) sessionHighlights.set(unit.session, unit.category)
+          // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名);
+          // 当前正在查看的会话不闪烁——与 dsh 原版一致,正在看的会话不做未读强调
+          if (unit.session && !isCurrentSessionTitle(unit.session)) sessionHighlights.set(unit.session, unit.category)
         }
         if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
@@ -666,6 +667,14 @@ window.__ModuleLoader__.load({
       }
     }
     let sessionHighlightEnabled = readSessionHighlightEnabled()
+
+    // document.title 首段为当前会话名(切会话即变);标题闪烁的前缀符号
+    // 落在同段首部,indexOf 匹配天然免疫;投影标题可能截断故用单向前缀匹配
+    function isCurrentSessionTitle(title) {
+      if (typeof document === 'undefined' || typeof document.title !== 'string') return false
+      const segment = document.title.split(' — ')[0]
+      return segment.indexOf(title) >= 0
+    }
 
     // 会话行探测:先定位“类名含 _list 段且子树含多个标题”的最内层列表容器,
     // 再按标题文本下钻;行级确认要求标题叶文本与 title 全等或前缀互含
