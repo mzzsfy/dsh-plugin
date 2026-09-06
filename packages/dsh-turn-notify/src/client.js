@@ -565,8 +565,10 @@ window.__ModuleLoader__.load({
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast || channels.sound || channels.system || channels.blink) {
           if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
-          // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名)
-          if (unit.session) sessionHighlights.set(unit.session, unit.category)
+          // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名);
+          // 聚焦时正在查看的会话不闪烁——与 dsh 原版一致,正在看的会话不做未读强调;
+          // 失焦期间照常挂,返回页面时由可见性同步清除(回来即已读)
+          if (unit.session && !(document.hasFocus() && isCurrentSessionTitle(unit.session))) sessionHighlights.set(unit.session, unit.category)
         }
         if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
@@ -667,6 +669,14 @@ window.__ModuleLoader__.load({
     }
     let sessionHighlightEnabled = readSessionHighlightEnabled()
 
+    // document.title 首段为当前会话名(切会话即变);标题闪烁的前缀符号
+    // 落在同段首部,indexOf 匹配天然免疫;投影标题可能截断故用单向前缀匹配
+    function isCurrentSessionTitle(title) {
+      if (typeof document === 'undefined' || typeof document.title !== 'string') return false
+      const segment = document.title.split(' — ')[0]
+      return segment.indexOf(title) >= 0
+    }
+
     // 会话行探测:先定位“类名含 _list 段且子树含多个标题”的最内层列表容器,
     // 再按标题文本下钻;行级确认要求标题叶文本与 title 全等或前缀互含
     // (行标题完整而投影标题可能截断),防止同前缀会话被子串误吸;
@@ -749,6 +759,19 @@ window.__ModuleLoader__.load({
     // 旧闭包不滞留(否则点击清除永远操作旧代高亮状态)。
     // 行标题按叶文本与 Map 键前缀互含精确删除,只清该行——其他会话的进行中提示不受影响
     const KEY_HL_LISTENER = 'turn-notify:hl-listener'
+    function removeRowHighlight(row) {
+      if (typeof row.className !== 'string') return
+      row.className = row.className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
+    }
+    // 页面重新可见即视为已读:清除当前会话的高亮,其他会话的提醒保留
+    function clearCurrentSessionHighlights() {
+      for (const title of [...sessionHighlights.keys()]) {
+        if (!isCurrentSessionTitle(title)) continue
+        sessionHighlights.delete(title)
+        const row = findSessionRow(title)
+        if (row) removeRowHighlight(row)
+      }
+    }
     function ensureHighlightListener() {
       if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
       if (typeof window[KEY_HL_LISTENER] === 'function') document.removeEventListener('click', window[KEY_HL_LISTENER], true)
@@ -764,10 +787,23 @@ window.__ModuleLoader__.load({
           cleared = true
         }
         if (!cleared) return
-        target.className = target.className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
+        removeRowHighlight(target)
       }
       window[KEY_HL_LISTENER] = listener
       document.addEventListener('click', listener, true)
+    }
+
+    // 可见性同步:令牌承载 handler,HMR 重建闭包后先摘旧代再挂新代
+    const KEY_HL_VISIBLE = 'turn-notify:hl-visible'
+    function ensureHighlightVisibilitySync() {
+      if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
+      if (typeof window[KEY_HL_VISIBLE] === 'function') document.removeEventListener('visibilitychange', window[KEY_HL_VISIBLE])
+      const handler = () => {
+        if (document.hidden) return
+        clearCurrentSessionHighlights()
+      }
+      window[KEY_HL_VISIBLE] = handler
+      document.addEventListener('visibilitychange', handler)
     }
 
     function start() {
@@ -780,6 +816,7 @@ window.__ModuleLoader__.load({
       const controller = new AbortController()
       window[KEY_POLL_TOKEN] = controller
       ensureHighlightListener()
+      ensureHighlightVisibilitySync()
       ensureHighlightObserver()
       refreshSounds()
       void runLoop(controller.signal)

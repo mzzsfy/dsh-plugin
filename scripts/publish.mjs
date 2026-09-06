@@ -10,10 +10,13 @@
  *   --dry-run                  只打印将执行的动作,不发布、不改版本、不打 tag
  *
  * 规则:
+ *   - 发版判定以 tag 为事实源:发布成功后自动提交版本号变更并打 tag,tag 始终指向该版本的完整源码状态
  *   - 本地版本低于线上:拒绝发布(防版本回退);版本无法比较(如 prerelease)时中止
- *   - 本地版本等于线上:无 --bump 时跳过发布,但仍补打缺失的 tag(自愈此前"发布成功未打 tag"的状态)
+ *   - 本地版本等于线上:按版本 tag 后的包目录提交数判定——无提交则 SKIP(无需发版);
+ *     有提交则拒绝并要求显式 --bump(防止代码已变而版本未动被误判为无需更新);
+ *     tag 缺失则补打 tag 并跳过(自愈历史"发布成功未打 tag"状态)
  *   - npm view 非 E404 失败直接中止(防把网络故障当未发布造成重复发布)
- *   - 发布后回读 registry 做多次确认,通过后打本地 tag(npm 名斜杠替换为连字符,如 @mzzsfy-dsh-usage-panel-v0.1.0),推送由维护者执行
+ *   - 发布后回读 registry 做多次确认,通过后提交版本号并打本地 tag(npm 名斜杠替换为连字符,如 @mzzsfy-dsh-usage-panel-v0.1.0),推送由维护者执行
  */
 
 import {spawnSync} from 'node:child_process'
@@ -132,12 +135,26 @@ function onlineVersion(name) {
   fail(`查询 ${name} 线上版本失败(非 E404,可能是网络问题),中止以避免误判:\n${r.stderr}`)
 }
 
+/** 版本 tag 名;npm 包名中的 scope 斜杠替换为连字符 */
+function tagFor(pkgName, version) {
+  return `${pkgName.replace('/', '-')}-v${version}`
+}
+
+function tagExists(tag) {
+  return spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`], { cwd: repoRoot, encoding: 'utf8' }).status === 0
+}
+
+/** 版本 tag 之后涉及包目录的提交数;tag 不存在或 git 失败返回 null(调用方走自愈分支) */
+function commitsSinceTag(dirName, tag) {
+  const r = spawnSync('git', ['log', `${tag}..HEAD`, '--oneline', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
+  if (r.status !== 0) return null
+  return r.stdout.split('\n').filter(Boolean).length
+}
+
 /** 打版本 tag;已存在则跳过,失败置非零退出码 */
-/** 打版本 tag;npm 包名中的 scope 斜杠替换为连字符;已存在则跳过,失败置非零退出码 */
 function ensureTag(pkgName, version, opts) {
-  const tag = `${pkgName.replace('/', '-')}-v${version}`
-  const exists = spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`], { cwd: repoRoot, encoding: 'utf8' })
-  if (exists.status === 0) {
+  const tag = tagFor(pkgName, version)
+  if (tagExists(tag)) {
     console.log(`OK    tag ${tag} 已存在`)
     return
   }
@@ -180,9 +197,19 @@ function publishOne(dirName, opts) {
         if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`npm version 输出异常: ${version}`)
       }
     } else if (order === 0) {
-      console.log(`SKIP  ${name}@${version} 已发布;不重复发布。要发新版本请先改版本号或传 --bump patch|minor|major`)
-      ensureTag(name, version, opts)
-      return
+      const tag = tagFor(name, version)
+      if (!tagExists(tag)) {
+        console.log(`SKIP  ${name}@${version} 线上已最新且本地 tag 缺失,补打 tag(自愈历史状态)`)
+        ensureTag(name, version, opts)
+        return
+      }
+      const commits = commitsSinceTag(dirName, tag)
+      if (commits === null) fail(`查询 tag ${tag} 后的变更失败,中止以避免误判`)
+      if (commits === 0) {
+        console.log(`SKIP  ${name}@${version} 线上已最新,tag ${tag} 后包目录无变更,无需发版`)
+        return
+      }
+      fail(`本地 ${version} 与线上相同,但 tag ${tag} 后包目录有 ${commits} 个新提交未发布。请传 --bump patch|minor|major 后发布(feat 用 minor,fix/style 用 patch)`)
     } else if (order < 0) {
       fail(`本地 ${version} 低于线上 ${online},拒绝发布(防版本回退)。请提升版本号(--bump 仅适用于本地等于线上的场景)`)
     } else if (opts.bump) {
@@ -219,6 +246,18 @@ function publishOne(dirName, opts) {
   const readback = runNpm(['view', name, 'version', '--registry', REGISTRY])
   if (readback.status === 0 && readback.stdout.trim() === version) console.log(`OK    ${name}@${version} 已上线`)
   else console.log(`OK    ${name}@${version} 发布成功(CDN 传播中,registry 稍后可见)`)
+
+  // 版本号变更入库后 tag 才指向该版本的完整源码状态,tag 后无提交的判定才能成立;
+  // manifest 无变更(如首发时版本已提交)则直接打 tag。提交失败不回滚发布,仅提示手动收尾
+  const dirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}/package.json`], { cwd: repoRoot, encoding: 'utf8' })
+  if (dirty.status === 0 && dirty.stdout.trim() !== '') {
+    const c = run('git', ['add', `packages/${dirName}/package.json`], repoRoot)
+    const cm = c.status === 0 ? run('git', ['commit', '-m', `chore(${dirName}): 发版版本号 ${version}`], repoRoot) : { status: 1 }
+    if (cm.status !== 0) {
+      console.error(`FAIL  版本号提交失败(发布已成功,请手动 git commit packages/${dirName}/package.json 后重跑补 tag)`)
+      exitCode = 1
+    }
+  }
   ensureTag(name, version, opts)
 }
 
