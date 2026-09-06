@@ -565,7 +565,8 @@ window.__ModuleLoader__.load({
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast || channels.sound || channels.system || channels.blink) {
           if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
-          if (unit.sessionTitle) sessionHighlights.set(unit.sessionTitle, unit.category)
+          // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名)
+          if (unit.session) sessionHighlights.set(unit.session, unit.category)
         }
         if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;

@@ -26,7 +26,7 @@ class BrokenStorage {
 }
 
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象、页内通知捕获表与 window 桩。
-function loadClient({ storage, payload, onFetch, fetchImpl }) {
+function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride }) {
   const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const modules = []
   const shown = []
@@ -41,6 +41,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl }) {
     createElement: () => ({ style: {}, remove() {} }),
     body: { appendChild: () => {} },
     head: { appendChild: () => {} },
+    ...documentOverride,
   }
   const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {}, useSyncExternalStore: () => [] }
   const requireStub = (name) => {
@@ -107,6 +108,59 @@ test('页内通知经公共组件:文案与展示期随事件传入', async () =
   await mod.__test.poll()
   assert.deepEqual(shown.map((call) => call.text), units.map((unit) => unit.text))
   assert.ok(shown.every((call) => call.opts && call.opts.holdMs === 6 * 1000))
+})
+
+// ---- 会话行高亮:认领后按投影 session 字段在侧边栏定位行并挂类 ----
+
+// 最小侧边栏 DOM:列表容器(多标题)→ 会话行(单标题),classList 记录变更
+function makeSidebarDom(title) {
+  const rowClassList = { set: new Set(), contains: (c) => rowClassList.set.has(c), add: (...cs) => cs.forEach((c) => rowClassList.set.add(c)) }
+  const titleLeaf = { className: 'a_title', textContent: title, querySelectorAll: () => [] }
+  const row = {
+    className: 'x_row', textContent: title + ' 3分钟',
+    querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? [titleLeaf] : []),
+    children: [], classList: rowClassList,
+  }
+  const listEl = {
+    className: 'x_list', textContent: title + ' 3分钟',
+    querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? [titleLeaf, titleLeaf, titleLeaf] : []),
+    children: [row],
+  }
+  const dom = {
+    querySelectorAll: (sel) => (sel.indexOf('_list') >= 0 ? [listEl] : []),
+    row, rowClassList,
+  }
+  return dom
+}
+
+test('Given 通知带 session 标题 When 认领 Then 会话行挂上高亮类', async () => {
+  const dom = makeSidebarDom('会话甲')
+  const hlUnits = [
+    { id: 'u-hl', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, sessionHighlight: true, version: 1 },
+    document: dom,
+  })
+  await mod.__test.poll()
+  assert.ok(dom.rowClassList.set.has('tn-sess-hl'), '会话行未挂高亮类')
+  assert.ok(dom.rowClassList.set.has('tn-sess-hl--completed'), '高亮类缺少分类色')
+})
+
+test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路不抛', async () => {
+  const dom = makeSidebarDom('会话甲')
+  const bareUnits = [
+    { id: 'u-bare', category: 'completed', text: '[dsh] 任务完成: 无标题' },
+  ]
+  const { mod, shown } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: bareUnits, soundMapping: {}, sessionHighlight: true, version: 1 },
+    document: dom,
+  })
+  await mod.__test.poll()
+  assert.equal(shown.length, 1)
+  assert.equal(dom.rowClassList.set.has('tn-sess-hl'), false)
 })
 
 test('announcedIds 去重窗口按 TTL 过期清理', () => {
