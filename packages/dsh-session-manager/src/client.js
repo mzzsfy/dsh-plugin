@@ -112,14 +112,29 @@ const FORGET_URL = '/api/session-manager/forget'
 const STATUS_URL = '/api/session-manager/status'
 const INPUTS_URL = '/api/session-manager/inputs'
 
+// 请求默认超时:host 被批量解压等同步任务阻塞时路由会迟滞数秒,
+// 无超时则浮层停在「正在读取…」假死;超时按错误抛出,由调用方兜底,
+// 轮询链继续,host 恢复后自动跟上
+const API_TIMEOUT_MS = 8 * 1000
+
 async function api(url, options) {
-  const response = await fetch(url, {
-    headers: { 'content-type': 'application/json' },
-    ...options,
-  })
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
-  return payload
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, {
+      headers: { 'content-type': 'application/json' },
+      signal: controller.signal,
+      ...options,
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
+    return payload
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw new Error('响应超时(' + Math.round(API_TIMEOUT_MS / 1000) + 's),宿主繁忙中')
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function h(type, props) {
@@ -420,17 +435,20 @@ function HistoryDock({ session, inputActions }) {
 
   // 浮层打开期间固定节奏轮询当前范围:host 侧对齐/焦点对齐是异步的,
   // 数据可能晚于首次响应到达,一次性重拉预算耗尽后迟到的数据将永不出现
-  // (实机验证实测:API 已就绪而浮层停在旧列表)。轮询开销为毫秒级缓存读
+  // (实机验证实测:API 已就绪而浮层停在旧列表)。轮询开销为毫秒级缓存读;
+  // 请求失败(含超时)也保持轮询,host 恢复后列表自愈,不假死
   function requestScope(scopeIdx) {
     const scope = HISTORY_SCOPES[scopeIdx]
+    const scheduleNext = () => {
+      if (!viewRef.current.open || viewRef.current.scopeIndex !== scopeIdx) return
+      setTimeout(() => {
+        if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
+      }, HISTORY_REPULL_MS)
+    }
     fetchInputs(scope)
       .then((result) => {
         applyResult(scopeIdx, result)
-        if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) {
-          setTimeout(() => {
-            if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
-          }, HISTORY_REPULL_MS)
-        }
+        scheduleNext()
       })
       .catch((error) => {
         if (viewRef.current.scopeIndex !== scopeIdx) return
@@ -438,6 +456,7 @@ function HistoryDock({ session, inputActions }) {
         setLoadError(true)
         setItems([])
         toast(error && error.message ? error.message : String(error), { kind: 'error' })
+        scheduleNext()
       })
   }
 
