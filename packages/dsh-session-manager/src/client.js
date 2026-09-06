@@ -371,7 +371,6 @@ const HISTORY_SCOPES = ['session', 'workspace', 'global']
 const HISTORY_SCOPE_LABELS = ['当前会话', '本工作区', '全部工作区']
 // 对齐未就绪时的静默重拉间隔与上限(对齐通常秒级完成,上限防死循环)
 const HISTORY_REPULL_MS = 3 * 1000
-const HISTORY_REPULL_MAX = 10
 
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
@@ -383,7 +382,7 @@ function HistoryDock({ session, inputActions }) {
   const rootRef = React.useRef(null)
   // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
   // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
-  const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, repulls: 0, aligning: false })
+  const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, aligning: false })
   const sessionRef = React.useRef(session)
   const inputActionsRef = React.useRef(inputActions)
   sessionRef.current = session
@@ -403,31 +402,34 @@ function HistoryDock({ session, inputActions }) {
       }))
   }
 
-  // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围
+  // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围。
+  // items 深度不变的重复响应不重置光标(轮询期间保持用户选位)
   function applyResult(scopeIdx, result) {
     if (viewRef.current.scopeIndex !== scopeIdx) return
+    const prev = viewRef.current.items
+    if (prev !== null && JSON.stringify(prev) === JSON.stringify(result.inputs)) {
+      syncView({ aligning: !result.aligned })
+      setAligning(!result.aligned)
+      return
+    }
     syncView({ items: result.inputs, cursor: -1, aligning: !result.aligned })
     setItems(result.inputs)
     setCursor(-1)
     setAligning(!result.aligned)
   }
 
+  // 浮层打开期间固定节奏轮询当前范围:host 侧对齐/焦点对齐是异步的,
+  // 数据可能晚于首次响应到达,一次性重拉预算耗尽后迟到的数据将永不出现
+  // (实机验证实测:API 已就绪而浮层停在旧列表)。轮询开销为毫秒级缓存读
   function requestScope(scopeIdx) {
     const scope = HISTORY_SCOPES[scopeIdx]
     fetchInputs(scope)
       .then((result) => {
         applyResult(scopeIdx, result)
-        if (!result.aligned && viewRef.current.repulls < HISTORY_REPULL_MAX) {
-          syncView({ repulls: viewRef.current.repulls + 1 })
+        if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) {
           setTimeout(() => {
             if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
           }, HISTORY_REPULL_MS)
-          return
-        }
-        // 首次重拉耗尽仍未见缓存(或响应缺 aligned 的旧行为):熄灭横幅不再骚扰
-        if (!result.aligned) {
-          syncView({ aligning: false })
-          setAligning(false)
         }
       })
       .catch((error) => {
@@ -446,7 +448,7 @@ function HistoryDock({ session, inputActions }) {
   }
 
   function openPopup() {
-    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0, repulls: 0, aligning: false })
+    syncView({ open: true, items: null, cursor: -1, scopeIndex: 0, aligning: false })
     setOpen(true)
     setScopeIndex(0)
     setCursor(-1)
@@ -460,7 +462,7 @@ function HistoryDock({ session, inputActions }) {
   function switchScope(delta) {
     const next = viewRef.current.scopeIndex + delta
     if (next < 0 || next >= HISTORY_SCOPE_LABELS.length) return
-    syncView({ scopeIndex: next, items: null, cursor: -1, repulls: 0, aligning: false })
+    syncView({ scopeIndex: next, items: null, cursor: -1, aligning: false })
     setScopeIndex(next)
     setCursor(-1)
     setAligning(false)
