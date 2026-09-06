@@ -6,10 +6,10 @@ export const NS = 'llm-pi-ai'
 export const CONFLICT_CODE = 'settings-conflict'
 export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 export const OFF_LEVEL = 'off'
-export const MODALITIES = ['text', 'image']
 export const INPUT_UNSET = 'unset'
 export const INPUT_TEXT = 'text'
 export const INPUT_TEXT_IMAGE = 'text-image'
+export const INPUT_MODES = [INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE]
 // 竞品 dsh-better-reasoning-effort 的 host autofill 写入痕迹:模型条目上的
 // 词汇表外标记字段,出现即说明竞品仍在运行,双写者并存。
 export const COMPETITOR_MARKERS = ['reasoningEffortsUnset', 'inputUnset']
@@ -84,21 +84,25 @@ function draftMapsEqual(a, b) {
 }
 
 // 单模型应用草稿:仅写 reasoningEfforts 与 input 两字段,其余字段保留最新条目值。
-// 未触及判定:草稿与当前基线的投影逐键一致即视为用户未编辑该字段,跳过重写,
-// 私有模态(input 含网关私有值)与词汇表外档位在整组保存时真正原样保留。
+// 未触及判定以草稿冻结的加载时点种子(draft.seed)为参照,而非写回时点重算的投影:
+// 加载后他方修改基线时,零编辑与仅改单一字段的草稿不会把另一字段静默回滚到他方
+// 修改之前。无 seed 的裸草稿(测试夹具/现场兜底)回退写回时点投影,与旧语义一致。
 // 词汇表外档位透传基线取"写回时点的最新条目值"而非草稿快照,冲突重放路径下
 // 他方并发新增的外档位不丢;基线为不可表达形态(字符串/数组)时跳过该字段防误删。
 export function applyDraft(model, draft) {
   const result = { ...model }
-  const seeded = effortsToDrafts(model.reasoningEfforts)
-  const effortsUntouched = draftMapsEqual(seeded.checked, draft.checked) &&
-    draftMapsEqual(seeded.spellings, draft.spellings)
+  // 无 seed 兜底 = 写回时点全投影(efforts + inputMode),与旧判定语义一致
+  const seed = draft.seed !== undefined
+    ? draft.seed
+    : { ...effortsToDrafts(model.reasoningEfforts), inputMode: inputToMode(model.input) }
+  const effortsUntouched = draftMapsEqual(seed.checked, draft.checked) &&
+    draftMapsEqual(seed.spellings, draft.spellings)
   if (!effortsUntouched && isExpressibleEfforts(model.reasoningEfforts)) {
     const efforts = draftsToEfforts(draft, model.reasoningEfforts)
     if (efforts === undefined) delete result.reasoningEfforts
     else result.reasoningEfforts = efforts
   }
-  if (draft.inputMode !== inputToMode(model.input)) {
+  if (draft.inputMode !== seed.inputMode) {
     const input = modeToInput(draft.inputMode)
     if (input === undefined) delete result.input
     else result.input = input
@@ -106,17 +110,24 @@ export function applyDraft(model, draft) {
   return result
 }
 
+// 模型条目形态:官方 schema 已拒绝非对象条目,此处守卫仅防手写 yaml 等旁路输入。
+// 判式与 detectCompetitorTraces 一致。
+function isModelEntry(model) {
+  return model !== null && typeof model === 'object'
+}
+
 // 整组写回:以 describe 读到的模型数组为基线,仅重写有草稿的条目,未编辑条目原样保留。
-// 返回合并结果与未命中基线的草稿 id(他方删除该模型后草稿无处可写),调用方负责告警。
+// 非对象条目原样透传(保真不静默删数据);返回合并结果与未命中基线的草稿 id
+// (他方删除该模型后草稿无处可写),调用方负责告警。
 // 键一律 String 归一:DOM 输入与 UI 状态恒为字符串,基线 id 形态不定。
 export function mergeBaselineModels(baselineModels, draftsById) {
   const droppedDraftIds = []
   const models = baselineModels.map((model) => {
-    const draft = draftsById.get(String(model.id))
+    const draft = isModelEntry(model) ? draftsById.get(String(model.id)) : undefined
     return draft === undefined ? model : applyDraft(model, draft)
   })
   for (const id of draftsById.keys()) {
-    if (!baselineModels.some((model) => String(model.id) === String(id))) droppedDraftIds.push(id)
+    if (!baselineModels.some((model) => isModelEntry(model) && String(model.id) === String(id))) droppedDraftIds.push(id)
   }
   return { models, droppedDraftIds }
 }
@@ -179,17 +190,42 @@ export function makeSettingsFace(remote) {
   }
 }
 
+// describe 信封 → 本插件命名空间条目投影。namespaces 非数组按空表处理,缺失策略由调用方定。
+function findNsEntry(value) {
+  const namespaces = value !== null && typeof value === 'object' && Array.isArray(value.namespaces)
+    ? value.namespaces
+    : []
+  return namespaces.find((entry) => entry !== null && typeof entry === 'object' && entry.ns === NS)
+}
+
 async function describeNs(settings) {
   const value = await settings.describe()
-  const ns = (value.namespaces || []).find((entry) => entry.ns === NS)
+  const ns = findNsEntry(value)
   if (ns === undefined) throw new Error('settings 中不存在 ' + NS + ' 命名空间')
+  // expectedRevision 为 undefined 时宿主跳过冲突检查即盲写,revision 缺失拒绝保存
+  if (typeof ns.revision !== 'number') throw new Error('settings 未返回 revision,已拒绝盲写,请刷新页面重读')
   return { writable: value.writable === true, revision: ns.revision, value: ns.value }
 }
 
 function modelsOf(nsValue, route) {
   const providers = nsValue && typeof nsValue === 'object' ? nsValue.providers : {}
   const provider = providers && typeof providers === 'object' ? providers[route] : undefined
-  return provider && typeof provider === 'object' && Array.isArray(provider.models) ? provider.models : []
+  const models = provider && typeof provider === 'object' && Array.isArray(provider.models) ? provider.models : []
+  // 非对象条目读侧过滤:手写 yaml 旁路输入不得让 String(model.id) 读侧迭代崩溃
+  return models.filter((model) => model !== null && typeof model === 'object')
+}
+
+// 保存前基线形态校验:providers 缺失或 models 非数组时 modelsOf 会静默归空数组,
+// 一次保存即把他方(或损坏)的整组模型覆写为空;此处拒绝保存,呈现通道由调用方 catch 承担。
+function assertWritableBaseline(nsValue, route) {
+  const providers = nsValue !== null && typeof nsValue === 'object' ? nsValue.providers : undefined
+  if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) {
+    throw new Error('llm-pi-ai 声明缺少 providers 对象,已拒绝保存,请刷新页面重读')
+  }
+  const provider = providers[route]
+  if (provider === null || typeof provider !== 'object' || !Array.isArray(provider.models)) {
+    throw new Error('provider ' + String(route) + ' 的 models 不是数组,已拒绝保存,请刷新页面重读')
+  }
 }
 
 async function writeModels(settings, route, models, revision) {
@@ -207,6 +243,7 @@ export async function saveModels(settings, route, draftsById) {
     error.code = 'settings-readonly'
     throw error
   }
+  assertWritableBaseline(first.value, route)
   const attempt = (baseline, revision) =>
     writeModels(settings, route, mergeBaselineModels(baseline, draftsById).models, revision)
   let baseline = modelsOf(first.value, route)
@@ -216,14 +253,22 @@ export async function saveModels(settings, route, draftsById) {
   } catch (error) {
     if (error.code !== CONFLICT_CODE) throw error
     const second = await describeNs(settings)
-    if (!second.writable) throw error
+    // 重读发现已转只读:终态是只读而非冲突,抛只读语义而非原冲突错误
+    if (!second.writable) {
+      const readonlyError = new Error('settings 已转只读,保存终止,未覆盖他人改动')
+      readonlyError.code = 'settings-readonly'
+      throw readonlyError
+    }
+    assertWritableBaseline(second.value, route)
     baseline = modelsOf(second.value, route)
     revision = second.revision
     try {
       await attempt(baseline, revision)
     } catch (retryError) {
       if (retryError.code === CONFLICT_CODE) {
-        throw new Error('保存冲突:重试一次后仍与其他写者冲突,已保留本次修改,未覆盖他人改动')
+        const finalConflict = new Error('保存冲突:重试一次后仍与其他写者冲突,已保留本次修改,未覆盖他人改动')
+        finalConflict.code = CONFLICT_CODE
+        throw finalConflict
       }
       throw retryError
     }
@@ -231,16 +276,19 @@ export async function saveModels(settings, route, draftsById) {
   return mergeBaselineModels(baseline, draftsById)
 }
 
-// 基线模型 → 可编辑草稿 Map(初值 = 当前声明)。键一律 String:基线 id 形态不定,
-// 而 UI 与 DOM 侧的模型标识恒为字符串。
+// 基线模型 → 可编辑草稿 Map(初值 = 当前声明)。seed 冻结加载时点投影,
+// applyDraft 的未触及判定以其为参照(见 applyDraft 注释)。键一律 String:
+// 基线 id 形态不定,而 UI 与 DOM 侧的模型标识恒为字符串。
 export function draftsFromModels(models) {
   const drafts = new Map()
   for (const model of Array.isArray(models) ? models : []) {
+    if (!isModelEntry(model)) continue
     const efforts = effortsToDrafts(model.reasoningEfforts)
     drafts.set(String(model.id), {
       checked: efforts.checked,
       spellings: efforts.spellings,
       inputMode: inputToMode(model.input),
+      seed: { checked: { ...efforts.checked }, spellings: { ...efforts.spellings }, inputMode: inputToMode(model.input) },
     })
   }
   return drafts

@@ -23,9 +23,9 @@ DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方�
   | off 勾选拼写填值 | 对象形态 `off: "拼写"` |
 
 - input 三态:未声明(删除字段)/ 仅文本(`["text"]`)/ 文本+图像(`["text", "image"]`)。
-- 保存 = mutate set `providers.<route>.models` 整个数组:以 describe 读到的数组为基线,未编辑条目原样保留,settings 未声明的(自动发现的)模型不被删除。
-- 修订冲突:重读 describe 取新 revision,按字段级 diff 仅重放本次修改(仅用户改过的模型条目的 `reasoningEfforts` / `input` 两字段,其余字段保留最新文档值),重试一次;再冲突报错终止并保留用户输入,绝不静默覆盖。
-- `settings` wire 面缺失 / describe 失败 / `writable === false`:卡片显示具体原因并只读,绝不静默。
+- 保存 = mutate set `providers.<route>.models` 整个数组:以 describe 读到的数组为基线,未编辑条目原样保留,settings 未声明的(自动发现的)模型不被删除;providers 缺失或 models 非数组时拒绝保存(防静默覆写为空数组)。
+- 修订冲突:重读 describe 取新 revision,按字段级 diff 仅重放本次修改(仅用户改过的模型条目的 `reasoningEfforts` / `input` 两字段,其余字段保留最新文档值),重试一次;再冲突报错终止并保留用户输入,绝不静默覆盖。"本次修改"以草稿加载时点冻结的种子为参照:加载后他方对基线的修改,不会被零编辑或仅改单一字段的保存静默回滚(该保证覆盖保存开始后的并发写,revision 乐观锁语义)。
+- `settings` wire 面缺失 / describe 失败 / `writable === false`:卡片显示具体原因并只读,绝不静默;describe 返回缺 revision 时拒绝盲写。
 - 行内注入块:每模型档位与模态编辑,应用 = 单模型草稿并入整组保存流,语义与独立分区一致。
 
 ## 安装

@@ -6,7 +6,8 @@ import { effortsToDrafts, draftsToEfforts, OFF_LEVEL, EFFORT_LEVELS } from '../s
 
 const NO_CHECKS = { checked: {}, spellings: {} }
 
-test('标准档位共 7 档,与宿主 pi-ai THINKING_LEVELS 升序一致', () => {
+test('标准档位共 7 档:本地字面量锁定(宿主改档位时此处须人工同步)', () => {
+  // 注:仅锁本地字面量,不读宿主源码;与 pi-ai THINKING_LEVELS 的一致性靠人工核对
   assert.deepEqual(EFFORT_LEVELS, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 })
 

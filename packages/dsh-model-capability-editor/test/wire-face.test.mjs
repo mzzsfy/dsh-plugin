@@ -72,6 +72,32 @@ test('适配面 mutate:settings-conflict 拒绝以 code 透传', async () => {
   )
 })
 
+test('适配面畸形信封兜底:默认文案 + code undefined,绝不静默成功', async () => {
+  const malformed = [null, undefined, 'str', 42, {}, { ok: false }]
+  for (const envelope of malformed) {
+    const face = makeSettingsFace({
+      async describe() { return envelope },
+      async mutate() { return envelope },
+    })
+    await assert.rejects(
+      () => face.describe(),
+      (error) => error.message === 'settings RPC 调用失败' && error.code === undefined,
+      '信封 ' + JSON.stringify(envelope) + ' 必须 reject 且走兜底文案',
+    )
+  }
+})
+
+test('适配面 ok:false 带 code 无 message:code 透传且 message 兜底', async () => {
+  const face = makeSettingsFace({
+    async describe() { return { ok: false, error: { code: 'x' } } },
+    async mutate() { return { ok: false, error: { code: 'x' } } },
+  })
+  await assert.rejects(
+    () => face.describe(),
+    (error) => error.code === 'x' && error.message === 'settings RPC 调用失败',
+  )
+})
+
 test('端到端:保存流经适配层,冲突一次重放成功', async () => {
   let describeCount = 0
   let mutateCount = 0
