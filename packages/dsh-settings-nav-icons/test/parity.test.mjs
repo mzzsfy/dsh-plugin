@@ -26,20 +26,20 @@ function clientLogic() {
   }
   const factory = new Function(
     'ATTR_MARK', 'SELECTOR_LABEL',
-    section + '; return { ICONS, DECLARED_ICONS, FALLBACK, GLYPHS, GEAR_PATH, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, themedIcon, decide, applyDecision, decideAvatar, applyAvatar };',
+    section + '; return { ICONS, DECLARED_ICONS, FALLBACK, GLYPHS, GEAR_PATH, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, decide, applyDecision, decideAvatar, applyAvatar };',
   )
   return factory(pick('ATTR_MARK'), pick('SELECTOR_LABEL'))
 }
 
 // 假 DOM:单元格 + label + svg 的最小接口。svg 的 path 探测按选择器里的
 // d 前缀与节点实际存储路径比对,防探测逻辑退化为恒真断言。
-// 隐藏语义与真实浏览器一致:SVGElement 无 hidden 访问器,实现走 style.display,
-// 桩以 style 对象模拟。单元格形态:官方 svg 恒为首个;贴图语义 = 隐藏官方 +
-// 注入跟随,hidden 选项直接构造"已处理形态"(记账匹配 + 官方已隐藏)。
+// 内容改写制:决策直接写 official.innerHTML 与 official.dataset.navic,
+// 不新建节点、不动其余属性;桩以普通属性承接 innerHTML 写入。
 function makeSvg({ gear = false } = {}) {
   const node = {
     dataset: {},
     style: { display: '' },
+    inner: '',
     paths: gear ? ['M14.0861 3.2c-.9.4-1.4 1-1.6 1.9'] : ['M8 2.2a4 4 0 0 1 4 4'],
     insertAdjacentHTML() {},
     remove() {},
@@ -52,11 +52,11 @@ function makeSvg({ gear = false } = {}) {
   return node
 }
 
-function makeCell(labelText, { marked = false, hidden = false, gear, noSvg = false } = {}) {
-  const official = makeSvg({ gear: gear !== undefined ? gear : !hidden })
-  if (hidden) official.style.display = 'none'
+function makeCell(labelText, { marked = false, gear, noSvg = false } = {}) {
+  const official = makeSvg({ gear: gear !== undefined ? gear : true })
+  if (marked) official.dataset.navic = labelText
   const cell = {
-    dataset: marked ? { navic: labelText } : {},
+    dataset: {},
     svgs: noSvg ? [] : [official],
     querySelector(sel) {
       if (sel === SELECTOR_LABEL) return { textContent: labelText }
@@ -64,32 +64,23 @@ function makeCell(labelText, { marked = false, hidden = false, gear, noSvg = fal
     },
     querySelectorAll(sel) {
       if (sel === 'svg') return cell.svgs
-      if (sel === '[data-navic="1"]') return cell.svgs.filter((s) => s !== official && s.dataset.navic === '1')
+      if (sel === '[data-navic="1"]') return cell.svgs.filter((s) => s.dataset.navic === '1')
       return []
     },
-  }
-  // applyDecision 经 official.insertAdjacentHTML('afterend') 注入,桩同步进 svgs
-  official.insertAdjacentHTML = (pos, html) => {
-    const injected = makeSvg({ gear: false })
-    injected.dataset.navic = '1'
-    injected.html = html
-    cell.svgs.push(injected)
   }
   cell._official = official
   return cell
 }
-// 官方已隐藏的判定口径与实现一致(style.display)
-const isHidden = (svg) => svg.style.display === 'none'
 
 function defineScenarios(prefix, L) {
-  const { ICONS, FALLBACK, GEAR_PATH, poolIndexOf, themedIcon, decide, applyDecision } = L
+  const { ICONS, FALLBACK, GEAR_PATH, poolIndexOf, themedIcon, decide, applyDecision, svgInner } = L
 
-  test(prefix + '收录分区返回替换决策', () => {
+  test(prefix + '收录分区返回改写决策:剥壳 inner,不建节点', () => {
     const cell = makeCell('插件市场')
     const d = decide(cell)
     assert.ok(d, '收录分区应有决策')
     assert.equal(d.label, '插件市场')
-    assert.equal(d.html, ICONS['插件市场'])
+    assert.equal(d.inner, svgInner(ICONS['插件市场']), '决策为剥壳内容')
     assert.equal(d.official, cell._official)
   })
 
@@ -97,12 +88,13 @@ function defineScenarios(prefix, L) {
     const cell = makeCell('某新装插件分区', { gear: true })
     const d = decide(cell)
     assert.ok(d, '齿轮兜底应有决策')
-    assert.ok(FALLBACK.includes(d.html), '兜底图标必须来自备用池')
-    assert.equal(d.html, FALLBACK[poolIndexOf('某新装插件分区')])
+    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某新装插件分区')]))
   })
 
-  test(prefix + '未收录且现役是官方原生图标:不干预', () => {
-    assert.equal(decide(makeCell('模型', { gear: false })), null, '模型分区自带柱状/原生图标')
+  test(prefix + '非齿轮官方一律不动:映射或声明命中也不例外', () => {
+    // 只对官方齿轮做强补;官方原生图标(模型/使用统计)与第三方供给形态不干预
+    assert.equal(decide(makeCell('模型', { gear: false })), null, '模型分区自带原生图标')
+    assert.equal(decide(makeCell('插件市场', { gear: false })), null, '映射命中非齿轮同样不动')
     assert.equal(decide(makeCell('未知官方分区', { gear: false })), null)
   })
 
@@ -117,35 +109,28 @@ function defineScenarios(prefix, L) {
     assert.equal(GEAR_PATH, 'M14.0861')
   })
 
-  test(prefix + '已处理形态(记账匹配且官方已隐藏)返回 null', () => {
-    assert.equal(decide(makeCell('认证', { marked: true, hidden: true })), null)
-    assert.equal(decide(makeCell('某新装插件分区', { marked: true, hidden: true })), null, '兜底分区同样幂等')
+  test(prefix + '已改写形态(svg 记账等于 label)返回 null', () => {
+    assert.equal(decide(makeCell('认证', { marked: true })), null)
+    assert.equal(decide(makeCell('某新装插件分区', { marked: true })), null, '兜底分区同样幂等')
   })
 
-  test(prefix + '幂等与注入内容解耦:官方隐藏即短路,不看注入内容', () => {
-    // 官方已隐藏 + 记账匹配:即使注入图标缺失(极端外部干预)也不重贴死循环
-    const cell = makeCell('插件市场', { marked: true, hidden: true, gear: true })
-    assert.equal(decide(cell), null)
-  })
-
-  test(prefix + 'label 变化时重贴(语言切换)', () => {
-    const cell = makeCell('General', { marked: true, hidden: true })
-    assert.equal(decide(cell), null, 'General 已按 General 替换')
-    cell.dataset.navic = '通用设置'
+  test(prefix + 'svg 记账变化时按新 label 重写(语言切换)', () => {
+    const cell = makeCell('General', { marked: true })
+    assert.equal(decide(cell), null, 'General 已按 General 改写')
+    cell._official.dataset.navic = '通用设置'
     const d = decide(cell)
-    assert.ok(d, 'label 与记账不符时必须按新 label 重贴')
+    assert.ok(d, 'label 与记账不符时必须按新 label 重写')
     assert.equal(d.label, 'General')
-    assert.equal(d.html, ICONS['General'])
+    assert.equal(d.inner, svgInner(ICONS['General']))
   })
 
-  test(prefix + '语言切换后新 label 无映射:已隐藏的重贴,官方原生保留', () => {
-    const ours = makeCell('某无规则分区', { marked: true, hidden: true })
-    ours.dataset.navic = '认证'
+  test(prefix + '语言切换后新 label 无映射:已改写的重写,官方原生保留', () => {
+    const ours = makeCell('某无规则分区', { marked: true })
+    ours._official.dataset.navic = '认证'
     const d = decide(ours)
-    assert.ok(d, '记账失配的已处理单元格按新 label 重贴(清账失效场景)')
-    assert.ok(FALLBACK.includes(d.html), '重贴走哈希兜底')
-    const native = makeCell('某无规则分区', { marked: true, gear: false })
-    native.dataset.navic = '认证'
+    assert.ok(d, '记账失配的已改写 svg 按新 label 重写')
+    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某无规则分区')]), '重写走哈希兜底')
+    const native = makeCell('某无规则分区', { gear: false })
     assert.equal(decide(native), null, '官方原生图形不被改写')
   })
 
@@ -156,23 +141,42 @@ function defineScenarios(prefix, L) {
     assert.equal(decide(makeCell('   ')), null, '纯空白 label 直接跳过')
   })
 
-  test(prefix + '无 svg 返回 null;无记账有映射按当前 label 重贴(声明变更场景)', () => {
+  test(prefix + '无 svg 返回 null;无记账的官方齿轮按当前 label 改写', () => {
     assert.equal(decide(makeCell('MCP 服务', { noSvg: true })), null)
     const d = decide(makeCell('MCP 服务'))
-    assert.ok(d, '记账被清(声明变更强制重贴)后应按当前 label 重贴')
+    assert.ok(d, '无记账的官方齿轮属于强补范围')
     assert.equal(d.label, 'MCP 服务')
   })
 
-  test(prefix + 'applyDecision 隐藏官方、注入跟随、记账 label,再扫幂等', () => {
+  test(prefix + 'applyDecision 只改内容与记账:节点数、属性、style 均不动', () => {
     const cell = makeCell('侧边卡片')
+    const official = cell._official
+    const svgCountBefore = cell.svgs.length
+    const styleBefore = official.style.display
     const d = decide(cell)
     applyDecision(cell, d)
-    assert.equal(isHidden(cell._official), true, '官方 svg 隐藏不移除(React 受管)')
-    assert.equal(cell.svgs.length, 2, '官方 + 注入图标')
-    assert.equal(cell.svgs[1].dataset.navic, '1', '注入图标带标记')
-    assert.equal(cell.svgs[1].html, d.html, '注入内容为决策 html')
-    assert.equal(cell.dataset.navic, '侧边卡片', '记账')
-    assert.equal(decide(cell), null, '贴后再扫幂等')
+    assert.equal(official.innerHTML, svgInner(ICONS['侧边卡片']), '官方 svg 内容被改写')
+    assert.equal(official.dataset.navic, '侧边卡片', '记账迁到官方 svg')
+    assert.equal(cell.svgs.length, svgCountBefore, '不新建 svg 节点')
+    assert.equal(official.style.display, styleBefore, '属性与 style 不驱动')
+    assert.equal(decide(cell), null, '改写后再扫幂等')
+  })
+
+  test(prefix + 'applyDecision 清理 0.1.x 升级残留的注入节点', () => {
+    const cell = makeCell('侧边卡片')
+    const stale = makeSvg({ gear: false })
+    stale.dataset.navic = '1'
+    cell.svgs.push(stale)
+    let removed = false
+    stale.remove = () => { removed = true }
+    applyDecision(cell, decide(cell))
+    assert.equal(removed, true, '旧版注入残留清除')
+  })
+
+  test(prefix + 'svgInner 剥壳:属性/嵌套/大写(输入契约 = resolveIcon 已 trim 输出)', () => {
+    assert.equal(svgInner('<svg x="1"><path/></svg>'), '<path/>')
+    assert.equal(svgInner('<svg><svg></svg></svg>'), '<svg></svg>', '嵌套只剥最外层')
+    assert.equal(svgInner('<SVG></SVG>'), '')
   })
 
   test(prefix + '映射表仅收官方与第三方分区,自有插件分区走声明', () => {
@@ -187,14 +191,26 @@ function defineScenarios(prefix, L) {
     try {
       DECLARED_ICONS['插件市场'] = 'git'
       const d = decide(makeCell('插件市场'))
-      assert.equal(d.html, resolveIcon('git'), '声明覆盖内置映射')
+      assert.equal(d.inner, svgInner(resolveIcon('git')), '声明覆盖内置映射')
+    } finally {
+      delete DECLARED_ICONS['插件市场']
+    }
+  })
+
+  test(prefix + '声明撤销:内置映射分区回退到内置映射而非哈希(取图链一致)', () => {
+    const { DECLARED_ICONS, ICONS, resolveIcon, resolveForLabel } = L
+    try {
+      DECLARED_ICONS['插件市场'] = 'git'
+      assert.equal(resolveForLabel('插件市场'), resolveIcon('git'), '声明在')
+      delete DECLARED_ICONS['插件市场']
+      assert.equal(resolveForLabel('插件市场'), ICONS['插件市场'], '撤销后回内置映射')
     } finally {
       delete DECLARED_ICONS['插件市场']
     }
   })
 
   test(prefix + '声明机制:glyph 解析与合法值原样通过', () => {
-    const { DECLARED_ICONS, GLYPHS, resolveIcon, FALLBACK, SVG_MAX_CHARS } = L
+    const { DECLARED_ICONS, GLYPHS, resolveIcon, FALLBACK, SVG_MAX_CHARS, poolIndexOf, svgInner } = L
     try {
       assert.equal(resolveIcon('bell'), GLYPHS.bell)
       assert.equal(resolveIcon(' <svg></svg> '), '<svg></svg>', '首尾空白容忍')
@@ -208,7 +224,11 @@ function defineScenarios(prefix, L) {
       assert.equal(resolveIcon('constructor'), undefined, '原型链成员不可能被当 html 注入')
       assert.equal(resolveIcon('toString'), undefined)
       DECLARED_ICONS['某分区'] = 'no-such-glyph'
-      assert.ok(FALLBACK.includes(decide(makeCell('某分区')).html), '非法声明值回退哈希兜底')
+      assert.equal(
+        decide(makeCell('某分区')).inner,
+        svgInner(FALLBACK[poolIndexOf('某分区')]),
+        '非法声明值回退哈希兜底',
+      )
     } finally {
       delete DECLARED_ICONS['某分区']
     }
@@ -360,7 +380,7 @@ test('LOGIC 段与 logic.mjs 决策函数逐函数源码一致(归一化注释�
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\s+/g, '')
-  for (const name of ['resolveIcon', 'themedIcon', 'decide', 'applyDecision', 'decideAvatar', 'applyAvatar', 'poolIndexOf']) {
+  for (const name of ['resolveIcon', 'svgInner', 'resolveForLabel', 'themedIcon', 'decide', 'applyDecision', 'decideAvatar', 'applyAvatar', 'poolIndexOf']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(logic[name].toString()),

@@ -194,6 +194,16 @@ window.__ModuleLoader__.load({
       return FALLBACK[poolIndexOf(name)]
     }
 
+    // 分区取图全链:声明 → 内置映射 → 关键词/哈希兜底。decide 与声明变更就地
+    // 重写共用;撤销内置分区声明时回退必须含内置映射,否则卡死在哈希图。
+    function resolveForLabel(label) {
+      const declared = resolveIcon(DECLARED_ICONS[label])
+      if (declared !== undefined) return declared
+      const mapped = ICONS[label]
+      if (mapped !== undefined) return mapped
+      return themedIcon(label)
+    }
+
     // 市场卡片头像槽决策:img(作者头像)与 div(字母色块)同构处理——原子节点隐藏,
     // 插件图标注入跟随。记账值 = 插件名,换名重贴由该比较驱动。
     function decideAvatar(av, name) {
@@ -219,6 +229,12 @@ window.__ModuleLoader__.load({
 
     function isGear(svg) {
       return svg.querySelector('path[d^="' + GEAR_PATH + '"]') !== null
+    }
+
+    // 完整 svg 字符串剥壳取内部内容:resolveIcon 输出与 GLYPHS/声明值均为完整 svg,
+    // 内容改写制只写 official.innerHTML,壳由本函数剥除。输入已过安全门(单根闭合)。
+    function svgInner(html) {
+      return html.replace(/^<svg[^>]*>/i, '').replace(/<\/svg>\s*$/i, '')
     }
 
     // 稳定哈希:同一 label 永远取同一个池内图标,重渲染不闪动。
@@ -248,15 +264,14 @@ window.__ModuleLoader__.load({
     // 继承成员;污染面收敛在 window.__navicIcons 单一命名空间。
     const DECLARED_ICONS = Object.create(null)
 
-    // 单元格替换判定:官方 svg 为 React 受管节点,替换语义 = 隐藏官方 + 注入跟随,
-    // 注入图标(data-navic="1")与官方 svg 同存;已处理形态 = 记账匹配且官方已隐藏。
-    // 官方节点选取跳过带标记的注入图标(兼容旧版 remove 语义的升级残留)。
-    // 注意:隐藏用 style.display='none'——SVGElement 原型无 hidden 访问器,
-    // svg.hidden 只是 expando 不产生视觉隐藏。
-    // label 有声明或内置映射直接换;未映射时官方原生图形(非齿轮且未隐藏)一律不动,
-    // 齿轮与本插件已隐藏的按 themedIcon(声明→关键词→哈希)兜底。
-    // 幂等判定与注入内容解耦:外部声明内容是否自带标记不影响短路;label 变化
-    // (如语言切换)则按新 label 重贴。
+    // 单元格改写判定(内容改写制):不新建 svg、不动属性,直接把官方齿轮 svg 的
+    // 内部内容改写为本插件图标;记账迁到官方 svg 自身(dataset.navic = label),
+    // 节点与 class/位置等属性保持官方原样,第三方对官方图标的 CSS/选择器处理
+    // 照常作用于改写结果(dream-skin 藏首 svg 的规则命中改写后的节点,无双图标)。
+    // React 安全性:官方 nav 图标为静态子树,重渲染时前后 element 引用相等即
+    // bailout,改写内容稳定存活;旧版 NotFoundError 仅源于 remove 节点本身。
+    // 只对官方齿轮强补:非齿轮(官方原生图形或第三方供给形态)一律不动,
+    // 映射/声明命中也不例外。已改写的按 svg 记账与当前 label 同异决定幂等或重写。
     function decide(cell) {
       const labelNode = cell.querySelector(SELECTOR_LABEL)
       if (labelNode === null) return null
@@ -271,21 +286,17 @@ window.__ModuleLoader__.load({
         }
       }
       if (official === null) return null
-      if (cell.dataset.navic === label && official.style.display === 'none') return null
-      let html = resolveIcon(DECLARED_ICONS[label])
-      if (html === undefined) html = ICONS[label]
-      if (html === undefined && official.style.display !== 'none' && !isGear(official) && cell.dataset.navic !== label) return null
-      return { label, html: html !== undefined ? html : themedIcon(label), official }
+      if (official.dataset.navic === label) return null
+      const touched = official.dataset.navic !== undefined && official.dataset.navic !== ''
+      if (!touched && !isGear(official)) return null
+      return { label, inner: svgInner(resolveForLabel(label)), official }
     }
 
     function applyDecision(cell, decision) {
-      // 官方 svg 不移除(React 持引用,移除后 reconcile 报 NotFoundError):隐藏并记账,
-      // 注入图标跟随其后;重贴先清上一次注入的图标防重复。
-      // 隐藏必须走 style(SVGElement 无 hidden 访问器,hidden 属性只是 expando)
+      // 内容改写 + svg 自记账;先清 0.1.x 注入语义的升级残留(带 '1' 标记的旧节点)
       for (const injected of cell.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
-      decision.official.style.display = 'none'
-      decision.official.insertAdjacentHTML('afterend', decision.html)
-      cell.dataset.navic = decision.label
+      decision.official.innerHTML = decision.inner
+      decision.official.dataset.navic = decision.label
     }
 
     /* LOGIC-END */
@@ -434,9 +445,16 @@ window.__ModuleLoader__.load({
       }
       if (touched.length === 0) return
       persistDeclarations()
-      // 只清受影响 label/插件名的记账: 无关分区不重贴(svg 的纯标记 '1' 不命中声明键)
+      // 声明变更就地生效:nav svg(记账为分区/插件名)直接重写内容且记账保留——
+      // 改写后的 svg 非齿轮,清账会让 isGear 判定失配卡死;头像槽(非 svg 节点)
+      // 清账后走 decideAvatar 重贴。'1' 为注入纯标记,不命中声明键。
       for (const el of document.querySelectorAll('[' + ATTR_MARK + ']')) {
-        if (touched.indexOf(el.dataset.navic) >= 0) delete el.dataset.navic
+        if (touched.indexOf(el.dataset.navic) < 0) continue
+        if (el.tagName === 'svg') {
+          el.innerHTML = svgInner(resolveForLabel(el.dataset.navic))
+        } else {
+          delete el.dataset.navic
+        }
       }
       schedule()
     }

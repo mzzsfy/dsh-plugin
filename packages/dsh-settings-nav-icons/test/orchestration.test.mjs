@@ -28,26 +28,25 @@ function fakeRaf() {
   }
 }
 
-// 官方 svg 桩:gear=true 模拟官方齿轮路径,否则为无路径原生图形;记录注入内容。
-// 隐藏语义与真实浏览器一致:SVGElement 无 hidden 访问器,实现走 style.display
-function makeOfficialSvg({ gear = true, hidden = false } = {}) {
+// 官方 svg 桩:gear=true 模拟官方齿轮路径,否则为无路径原生图形;内容改写制下
+// applyDecision 直接写 innerHTML(桩以 innerHTML 属性承接)与 dataset.navic
+function makeOfficialSvg({ gear = true } = {}) {
   const svg = {
     dataset: { navic: '' },
-    style: { display: hidden ? 'none' : '' },
-    html: '',
-    lastHtml: '',
-    insertAdjacentHTML(position, html) { svg.lastHtml = html },
+    style: { display: '' },
+    innerHTML: '',
     remove() {},
     querySelector(sel) { return gear && sel.includes('M14.0861') ? {} : null },
   }
   return svg
 }
 
-// 导航单元格桩:官方 svg 恒为首个,注入图标尾部追加、remove 即出列;
-// applyDecision 经 official.insertAdjacentHTML('afterend') 注入,桩同步进 svgs
-function makeCell(label, { gear = true, hidden = false, navic = '' } = {}) {
-  const cell = { dataset: { navic }, injectedCount: 0, svgs: [] }
-  const official = makeOfficialSvg({ gear, hidden })
+// 导航单元格桩:官方 svg 恒为首个;内容改写制下不再产生注入节点,
+// remove 语义仅服务于 0.1.x 升级残留清理路径
+function makeCell(label, { gear = true, navic = '' } = {}) {
+  const cell = { dataset: {}, injectedCount: 0, svgs: [] }
+  const official = makeOfficialSvg({ gear })
+  if (navic) official.dataset.navic = navic
   official.remove = () => {
     const index = cell.svgs.indexOf(official)
     if (index >= 0) cell.svgs.splice(index, 1)
@@ -211,18 +210,22 @@ test('registerIcons:归一化精确等值,__proto__ 键跳过,非法值撤销,�
   }
 })
 
-test('registerIcons:仅受影响键清记账,无关记账保留', () => {
+test('registerIcons:受影响 nav svg 就地重写内容,无关记账保留,纯标记不误清', () => {
   const { win, doc, raf } = loadClient()
   const unload = boot(win.__loaded, doc)
   try {
-    const hit = { dataset: { navic: '目标分区' } }
-    const other = { dataset: { navic: '无关分区' } }
+    const hit = { tagName: 'svg', dataset: { navic: '目标分区' }, innerHTML: '' }
+    const other = { tagName: 'svg', dataset: { navic: '无关分区' }, innerHTML: '' }
+    const avMark = { dataset: { navic: '无关插件' } }
     const svgMark = { dataset: { navic: '1' } }
-    doc.marked.push(hit, other, svgMark)
+    doc.marked.push(hit, other, avMark, svgMark)
     win.__navicIcons.register({ 目标分区: 'bell' })
     raf.flush()
-    assert.equal(hit.dataset.navic, undefined, '受影响记账清除')
+    assert.equal(hit.innerHTML, logic.svgInner(logic.GLYPHS.bell), '受影响 nav svg 内容就地重写')
+    assert.equal(hit.dataset.navic, '目标分区', 'nav svg 记账保留(清账会令 isGear 失配)')
+    assert.equal(other.innerHTML, '', '无关 nav svg 不重写')
     assert.equal(other.dataset.navic, '无关分区', '无关记账保留')
+    assert.equal(avMark.dataset.navic, '无关插件', '头像槽记账不误清')
     assert.equal(svgMark.dataset.navic, '1', 'svg 纯标记不误清')
   } finally {
     unload()
@@ -263,11 +266,11 @@ test('队列时序:畸形条目不中断排空,同键后者覆盖,排空先于�
   const unload = boot(win.__loaded, doc)
   try {
     assert.equal(win.__navicIconDeclarations.目标分区, logic.GLYPHS.bell, '同键后者覆盖')
-    assert.equal(cell.official.style.display, 'none', '排空先于首扫:队列声明直接参与首帧贴图')
-    assert.equal(cell.dataset.navic, '目标分区', '首帧已完成替换')
+    assert.ok(cell.official.innerHTML.length > 0, '排空先于首扫:队列声明直接参与首帧改写')
+    assert.equal(cell.official.dataset.navic, '目标分区', '首帧已完成改写')
     assert.ok(warns.length >= 3, '畸形条目逐条告警但不中断')
     raf.flush()
-    assert.equal(cell.svgs.length, 2, '二扫幂等,无重复注入')
+    assert.equal(cell.svgs.length, 1, '二扫幂等,不产生新节点')
   } finally {
     unload()
   }
@@ -300,7 +303,12 @@ test('声明持久层:重装恢复走安全门,同值注册幂等,恶意值不�
     win.__navicIcons.register({ persisted: 'bell' })
     assert.equal(raf.size(), rafBefore, '恢复后同值注册幂等短路')
     raf.flush()
-    assert.notEqual(evilCell.official.lastHtml, '<svg onload="x"></svg>', '恶意声明未过闸,贴图走默认管线')
+    assert.notEqual(evilCell.official.innerHTML, '<svg onload="x"></svg>', '恶意声明未过闸')
+    assert.equal(
+      evilCell.official.innerHTML,
+      logic.svgInner(logic.FALLBACK[logic.poolIndexOf('evil')]),
+      '恶意声明未过闸,贴图走默认管线',
+    )
   } finally {
     unload2()
   }
@@ -320,39 +328,39 @@ test('恢复守卫:持久层被写成数组/字符串/null 时跳过恢复且不
   }
 })
 
-test('replacePass:单元格替换为隐藏官方+注入跟随的幂等形态', () => {
+test('replacePass:官方齿轮 svg 内容改写 + 记账,不建节点,再扫幂等', () => {
   const cell = makeCell('插件市场')
   const { win, doc, raf } = loadClient()
   doc.cells.push(cell)
   const unload = boot(win.__loaded, doc)
   try {
     raf.flush()
-    assert.equal(cell.official.style.display, 'none', '官方 svg 隐藏不移除')
-    assert.equal(cell.svgs.length, 2, '官方 + 注入图标')
-    assert.equal(cell.dataset.navic, '插件市场', '记账')
+    assert.ok(cell.official.innerHTML.length > 0, '官方 svg 内容被改写')
+    assert.equal(cell.svgs.length, 1, '不新建 svg 节点')
+    assert.equal(cell.official.dataset.navic, '插件市场', '记账在官方 svg 上')
     win.__navicIcons.register({ 触发二扫: 'bell' })
     raf.flush()
-    assert.equal(cell.svgs.length, 2, '幂等:清旧注新后仍为一对')
-    assert.equal(cell.official.style.display, 'none')
+    assert.equal(cell.svgs.length, 1, '幂等:再扫无新节点')
+    assert.equal(cell.official.dataset.navic, '插件市场')
   } finally {
     unload()
   }
 })
 
-test('replacePass:语言切换 label 变化按新 label 重贴', () => {
+test('replacePass:语言切换 label 变化按新 label 重写', () => {
   const cell = makeCell('插件市场')
   const { win, doc, raf } = loadClient()
   doc.cells.push(cell)
   const unload = boot(win.__loaded, doc)
   try {
     raf.flush()
-    assert.equal(cell.dataset.navic, '插件市场')
+    assert.equal(cell.official.dataset.navic, '插件市场')
     cell.querySelector = (sel) => (sel === SELECTOR_LABEL ? { textContent: 'General' } : null)
     win.__navicIcons.register({ 触发二扫: 'bell' })
     raf.flush()
-    assert.equal(cell.dataset.navic, 'General', '按新 label 重贴')
-    assert.equal(cell.injectedCount, 2, '贴图两次(旧注入已清)')
-    assert.equal(cell.svgs.length, 2, '结构仍为官方+单注入')
+    assert.equal(cell.official.dataset.navic, 'General', '按新 label 重写')
+    assert.equal(cell.injectedCount, 0, '内容改写制无注入')
+    assert.equal(cell.svgs.length, 1, '结构仍为官方单 svg')
   } finally {
     unload()
   }
@@ -426,7 +434,7 @@ test('replacePass 逐项异常隔离:单项失败不中断其余', () => {
     doc.cells.push(bad, good)
     win.__navicIcons.register({ 触发: 'bell' })
     raf.flush()
-    assert.equal(good.dataset.navic, '插件市场', '异常项之后的正常项完成替换')
+    assert.equal(good.official.dataset.navic, '插件市场', '异常项之后的正常项完成改写')
     assert.ok(warns.some((line) => line.includes('单元格')), '异常告警留痕')
   } finally {
     unload()
@@ -466,13 +474,13 @@ test('语言切换端到端:characterData 域内变更经回调触发重贴', ()
   const unload = boot(win.__loaded, doc)
   try {
     raf.flush()
-    assert.equal(cell.dataset.navic, '插件市场')
+    assert.equal(cell.official.dataset.navic, '插件市场')
     // 语言切换:label 文本原地改写(characterData 通道)
     cell.querySelector = (sel) => (sel === SELECTOR_LABEL ? { textContent: 'General' } : null)
     const labelParent = { closest(sel) { return sel.includes('navCell') ? cell : null } }
     observers[observers.length - 1].cb([{ type: 'characterData', target: { parentElement: labelParent } }])
     raf.flush()
-    assert.equal(cell.dataset.navic, 'General', '穿真实唤醒通道完成重贴')
+    assert.equal(cell.official.dataset.navic, 'General', '穿真实唤醒通道完成重写')
   } finally {
     unload()
   }
