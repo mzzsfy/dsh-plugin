@@ -222,7 +222,7 @@ const CSS = [
   '  background:rgba(128,148,180,0.06); }',
   '.up-card__row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
   '.up-card__name { font-weight:600; font-size:15px; }',
-  // 平台徽章:按平台固定色相着色的胶囊 pill;缺省灰底(档位徽章与低调平台共用)
+  // 平台徽章:按平台固定色相着色的胶囊 pill;custom 走缺省灰底(低调平台共用)
   '.up-badge { font-size:10px; font-weight:500; padding:1px 7px; border-radius:999px;',
   '  line-height:1.5; border:1px solid transparent; color:#fff;',
   '  background:var(--up-badge-color, rgba(128,128,128,0.55)); }',
@@ -231,6 +231,7 @@ const CSS = [
   '.up-badge[data-type="kimi"] { --up-badge-color:#0d9488; }',
   '.up-badge[data-type="minimax"] { --up-badge-color:#ea580c; }',
   '.up-badge[data-type="newapi"] { --up-badge-color:#8b5cf6; }',
+  '.up-badge[data-type="zhipu"] { --up-badge-color:#3859ff; }',
   // ---- 读数行:标签 + 渐变进度条 + 等宽数字 ----
   '.up-reading { display:flex; flex-direction:column; gap:6px; }',
   '.up-row { display:flex; align-items:center; gap:10px; position:relative; }',
@@ -786,7 +787,7 @@ function AccountForm(props) {
   )
 }
 
-// ---- 趋势视图(自绘 SVG,点位算法与 src/spark.mjs 参考实现一致) ----
+// ---- 趋势视图(自绘 SVG,点位算法唯一实现在本文件;原 src/spark.mjs 参考副本已删除) ----
 
 const SPARK_WIDTH = 220
 const SPARK_HEIGHT = 60
@@ -1257,7 +1258,6 @@ function UsagePanelApp() {
   const [notice, setNotice] = useState(null)
   const [armed, setArmed] = useState(null)
   const [sequences, setSequences] = useState({})
-  const [pollIntervalSec, setPollIntervalSec] = useState(null)
   const [pollArmed, setPollArmed] = useState(null)
 
   useEffect(() => {
@@ -1284,22 +1284,15 @@ function UsagePanelApp() {
     api('/api/usage-panel/settings')
       .then((res) => {
         if (!alive) return
-        setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : null)
         setPollArmed(res ? Boolean(res.pollArmed) : null)
       })
       .catch(() => {})
     return () => { alive = false }
   }, [])
 
-  function savePollInterval(value) {
-    api('/api/usage-panel/settings', { method: 'POST', body: JSON.stringify({ pollIntervalSec: value }) })
-      .then((res) => {
-        setPollIntervalSec(res && res.pollIntervalSec ? res.pollIntervalSec : value)
-        notify('轮询间隔已保存', 'ok')
-      })
-      .catch((error) => {
-        notify('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
-      })
+  function refreshSequences() {
+    return api('/api/usage-panel/history')
+      .then((res) => { setSequences(res && res.sequences ? res.sequences : {}) })
   }
 
   function markBusy(id, value) {
@@ -1326,7 +1319,19 @@ function UsagePanelApp() {
 
   function refreshAll() {
     if (!accounts) return
-    Promise.all(accounts.map((item) => refreshOne(item.id)))
+    const ids = accounts.map((item) => item.id)
+    ids.forEach((id) => markBusy(id, true))
+    // 批量查询后单次拉取 history,不做每账号一次 history GET
+    Promise.all(ids.map((id) =>
+      api('/api/usage-panel/query', { method: 'POST', body: JSON.stringify({ id }) })
+        .then((res) => { if (res && res.account) replaceAccount(res.account) })
+        .catch((error) => {
+          notify('查询失败:' + (error && error.message ? error.message : String(error)), 'error')
+        })
+    ))
+      .then(refreshSequences)
+      .catch(() => {})
+      .then(() => ids.forEach((id) => markBusy(id, false)))
   }
 
   function saveAccounts(nextAccounts) {
@@ -1382,15 +1387,6 @@ function UsagePanelApp() {
     h('div', { className: 'up-head' },
       h('span', { className: 'up-head__title' }, '账号详情'),
       h('span', { className: 'up-spacer' }),
-      h('label', { className: 'up-field__label', title: '自动刷新全部账号读数的间隔秒数;过短可能触发平台限流' }, '轮询间隔(秒)'),
-      h('span', { className: 'up-field' },
-        h('input', {
-          type: 'number', min: 1, style: { width: '80px' },
-          value: pollIntervalSec === null ? '' : pollIntervalSec,
-          onChange: (e) => setPollIntervalSec(e.target.value === '' ? null : Number(e.target.value)),
-        }),
-      ),
-      h('button', { className: 'up-btn', disabled: pollIntervalSec === null, onClick: () => savePollInterval(pollIntervalSec) }, '保存间隔'),
       h('button', { className: 'up-btn', title: '手动查询全部账号并更新读数', disabled: anyBusy || accounts.length === 0, onClick: refreshAll }, '全部刷新'),
       h('button', { className: 'up-btn up-btn--primary', onClick: () => setEditing({ isNew: true, id: null }) }, '添加账号'),
     ),

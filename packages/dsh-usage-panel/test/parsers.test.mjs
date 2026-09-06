@@ -261,7 +261,11 @@ test('场景8 custom extract:点路径/add/subtract/divide/常量', () => {
     spend: 'info.spend',
     unit: 'CNY',
   })
-  assert.deepEqual(reading, { currency: 'CNY', remaining: 60, total: 100, used: 40 })
+  // kind+entries 形态与 balance 读数联合对齐:历史采样/通知评估/渲染三链路按 kind 判别
+  assert.deepEqual(reading, {
+    kind: 'balance',
+    entries: [{ currency: 'CNY', remaining: 60, total: 100, used: 40 }],
+  })
   assert.throws(() => extractCustom(data, { remaining: 'info.missing' }), /remaining/)
 })
 

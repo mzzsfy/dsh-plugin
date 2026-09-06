@@ -40,11 +40,11 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 
 ## 定期查询与趋势(v2)
 
-- 定期查询:设置面板可调「轮询间隔(秒)」,默认 600,仅正数有效;短窗口账号每轮查询,长窗口 / 余额账号分频到约每小时一次。定时轮询为软依赖:宿主 timer 服务不可用时仅停用自动轮询,面板显示降级提示,手动查询与全部配置能力不受影响
-- 失败退避:单账号失败按指数退避(基期 = 查询周期,×2 封顶 8 倍),成功即恢复;面板打开触发的自动查询同样受退避约束,手动刷新不受限
-- 历史快照:按序列分档落盘 `history.json`(5 小时滚动 → 10 分钟粒度留 7 天;7 天 / 月 / 余额 → 小时粒度留 30 天),档内去重,超期修剪,硬点数上限兜底
+- 定期查询:时间驱动调度——每账号按读数档位定档,含 5 小时窗口的账号每 10 分钟查询一次(= 短窗口快照粒度),其余账号每小时一次(= 长窗口快照粒度);上次尝试查询时刻随配置持久化,宿主重启后调度无缝衔接。定时轮询为软依赖:宿主 timer 服务不可用时仅停用自动轮询,面板显示降级提示,手动查询与全部配置能力不受影响
+- 失败退避:单账号失败按指数退避(基期 = 账号档位间隔,×2 封顶 8 倍),成功即恢复;失败账号按短档节奏(10 分钟)调度重试,退避指数压制实际频率,避免一次瞬时失败造成短窗序列长时间空洞。退避与档位到点独立叠加,二者皆过才发起查询。面板打开触发的自动查询同样受退避约束,手动刷新不受限
+- 历史快照:按序列分档落盘 `history.json`(5 小时滚动 → 10 分钟粒度留 7 天;7 天 / 月 / 余额 → 小时粒度留 30 天),档内去重,超期修剪,硬点数上限兜底;删除账号时其历史序列同步清理
 - 趋势视图:悬浮账号卡片弹出 sparkline(自绘 SVG),短 / 长窗口独立成图,绝对值 / 差值双视角;「详情」对话框可切时间范围(长窗口 / 月 / 余额:近 7 天 / 30 天 / 全部;5 小时短窗口仅近 7 天 / 全部),含区间摘要与明细表
-- 历史文件解析失败时自动备份为 `history.json.bak` 并暂停写入(防空数据覆盖);`history.json` 被移除或恢复为可解析内容后自动恢复写入,`.bak` 是损坏前的最后数据,删除前请确认不再需要
+- 历史文件解析失败时自动备份为 `history.json.bak` 并暂停写入(防空数据覆盖);`history.json` 被移除或恢复为可解析内容后自动恢复写入,`.bak` 是损坏前的最后数据,删除前请确认不再需要。`accounts.json` 同构守卫:损坏时备份为 `accounts.json.bak` 并拒绝一切写入(防账号 Key 被空配置覆盖),恢复后解除
 - 月窗口序列 `月` 由 host 侧按当月余额快照聚合产出
 
 ## 通知(v3)
@@ -67,7 +67,6 @@ dsh plugin --profile web add @mzzsfy/dsh-usage-panel
 
 ```yaml
 usage-panel:
-  pollIntervalSec: 600
   notify:
     enabled: false                # 总开关,默认关闭
     quotaThresholdPct: 90         # 用量窗口阈值百分比,(0,100]
@@ -93,11 +92,11 @@ usage-panel:
 - `POST /api/usage-panel/test-webhook` / `POST /api/usage-panel/test-im`:测试投递,返回真实结果
 - `GET /api/usage-panel/im-targets?botId=`:列出 dsh-im 该 bot 已保存投递目标
 
-写路由(notify-config POST / test-webhook / test-im)带同源守卫(Origin 与 Host 不符 403)与 JSON content-type 校验(text/plain 等简单请求 400),阻断跨站 drive-by 改写通知配置或借测试通道外发;已知边界同 turn-notify:同源守卫不防 DNS rebinding,该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决。
+全部路由统一经守卫样板:POST 带同源守卫(Origin 与 Host 不符 403)与 JSON content-type 校验(text/plain 等简单请求 400),阻断跨站 drive-by 改写账号配置(含注入指向攻击者端点的账号)、通知配置或借测试通道外发;非 GET/POST 方法一律 405;已知边界同 turn-notify:同源守卫不防 DNS rebinding,该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决。
 
 ## custom 提取规则
 
-`extract` 是 JSON 对象,`remaining` 必填;取值支持四种形式:
+`extract` 是 JSON 对象,`remaining` 必填;读数按余额(balance)形态呈现并参与余额阈值通知、余额历史序列与月窗口聚合。取值支持四种形式:
 
 - 点路径字符串:`"data.total_available"`
 - 数字常量:`42`
@@ -110,9 +109,9 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 
 ## 架构与依赖
 
-- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings / notifications / notify-config / test-webhook / test-im / im-targets);需要 DSH 提供 `webServer` 服务与 `settings` 服务(轮询间隔与通知规则持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
+- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings / notifications / notify-config / test-webhook / test-im / im-targets);需要 DSH 提供 `webServer` 服务与 `settings` 服务(通知规则持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
 - Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;`@mzzsfy/dsh-toast` 可选消费(动态 require,模块表缺失即页内通道停用,操作反馈降级 `console.warn`)
-- 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/spark.mjs` / `src/notify.mjs`):无 IO 数据变换,`npm test` 覆盖解析、退避分频、快照留存、SVG 点位与规则合并 / 沿触发评估 / 投影认领 / 配置校验
+- 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/historyStore.mjs` / `src/notify.mjs`):无 IO 数据变换,`npm test` 覆盖解析、时间驱动调度与退避、快照留存、持久化守卫与规则合并 / 沿触发评估 / 投影认领 / 配置校验;趋势图 SVG 点位算法内联于 client.js(唯一实现)
 
 ## 安全提示
 
@@ -120,8 +119,9 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 
 ## 已知取舍
 
-- spark / feebar 视图组件的前端渲染逻辑以内联方式维护,未做 host/client 双端 parity 测试,属已知技术债务
+- spark / feebar 视图组件的前端渲染逻辑以内联方式维护,未做 host/client 双端 parity 测试,属已知技术债务(点位算法纯客户端消费,单一实现无漂移面)
 - 早期版本允许无 `id` 的账号(落盘时按索引一次性补齐);当前前端保存时总携带 `id`,不再做旧数据特判
+- 账号卡片渲染未做 memo 化、趋势浮层常挂载:数据规模受账号上限(20)与悬浮窗口点数(24)双重钳制,无可感知卡顿,后置观察
 
 ## 开发安装(不经 npm 发布直接装仓库副本)
 

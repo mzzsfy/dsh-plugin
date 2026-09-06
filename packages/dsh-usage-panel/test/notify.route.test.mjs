@@ -18,7 +18,7 @@ after(async () => {
   await rm(tempDir, { recursive: true, force: true })
 })
 
-const NOTIFY_ON = { pollIntervalSec: 600, notify: { enabled: true, quotaThresholdPct: 50 } }
+const NOTIFY_ON = { notify: { enabled: true, quotaThresholdPct: 50 } }
 
 function makeCtx({ settingsValue = {}, dshIm = undefined } = {}) {
   let value = settingsValue
@@ -118,7 +118,7 @@ test('评估接线: 查询成功后越阈窗口产生事件并进入投影', asy
 
 test('评估接线: 全局通知关闭时查询不产生事件', async () => {
   // Given 通知总开关关闭
-  const { ctx, routes } = makeCtx({ settingsValue: { pollIntervalSec: 600, notify: { enabled: false, quotaThresholdPct: 50 } } })
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: false, quotaThresholdPct: 50 } } })
   apply(ctx)
   const original = globalThis.fetch
   globalThis.fetch = async () => ({ ok: true, text: async () => JSON.stringify(KIMI_BODY) })
@@ -133,9 +133,52 @@ test('评估接线: 全局通知关闭时查询不产生事件', async () => {
   }
 })
 
+test('评估接线: custom 账号 extract 规则驱动 balance 读数全链路(分发/评估/历史)', async () => {
+  // Given 通知启用且余额阈值 50;custom 账号 extract.remaining 指向响应字段,值 30 越阈
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true, balanceThreshold: 50 } } })
+  apply(ctx)
+  const original = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    // URL 负向校验:锁定请求端点确实来自 account.custom.url
+    if (String(url) === 'https://gw.example.com/quota') return { ok: true, text: async () => JSON.stringify({ data: { left: 30, budget: 100 } }) }
+    throw new Error('unexpected url: ' + url)
+  }
+  try {
+    await call(routes, '/api/usage-panel/accounts', makeReq('POST', {
+      accounts: [{
+        id: 'acct-c',
+        name: '自定义',
+        type: 'custom',
+        custom: {
+          url: 'https://gw.example.com/quota',
+          extract: { remaining: 'data.left', maxBudget: 'data.budget', unit: 'CNY' },
+        },
+      }],
+    }))
+    // When 手动查询
+    const queryRes = await call(routes, '/api/usage-panel/query', makeReq('POST', { id: 'acct-c' }))
+    // Then 查询成功且读数形态为 balance 联合(extract 真实进入解析器)
+    assert.equal(queryRes.status, 200)
+    assert.equal(queryRes.payload.ok, true)
+    const reading = queryRes.payload.account.last.reading
+    assert.equal(reading.kind, 'balance')
+    assert.deepEqual(reading.entries, [{ currency: 'CNY', remaining: 30, total: 100, used: null }])
+    // And 余额越阈产生 balance 事件(评估链按 kind 判别生效)
+    const notifyRes = await call(routes, '/api/usage-panel/notifications', makeReq('GET'))
+    assert.equal(notifyRes.payload.units.length, 1)
+    assert.equal(notifyRes.payload.units[0].kind, 'balance')
+    assert.match(notifyRes.payload.units[0].text, /自定义/)
+    // And 历史采样落 balance 序列(采样链按 kind 判别生效)
+    const historyRes = await call(routes, '/api/usage-panel/history', makeReq('GET'))
+    assert.ok(historyRes.payload.sequences['acct-c:balance'], 'balance 序列已落点')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 test('notify-config: GET 不回显 webhookUrl 原文, 仅回是否已配置', async () => {
   // Given 已配置 webhook 的 settings
-  const { ctx, routes } = makeCtx({ settingsValue: { pollIntervalSec: 600, notify: { enabled: true, webhookUrl: 'https://hooks.example.com/private' } } })
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true, webhookUrl: 'https://hooks.example.com/private' } } })
   apply(ctx)
   // When 读取通知配置
   const res = await call(routes, '/api/usage-panel/notify-config', makeReq('GET'))
@@ -148,7 +191,7 @@ test('notify-config: GET 不回显 webhookUrl 原文, 仅回是否已配置', as
 
 test('notify-config: 非法补丁 400, 合法补丁合并生效', async () => {
   // Given 合法 ctx
-  const { ctx, routes } = makeCtx({ settingsValue: { pollIntervalSec: 600, notify: { enabled: true } } })
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true } } })
   apply(ctx)
   // When 提交越界阈值
   const bad = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { quotaThresholdPct: 0 }))
@@ -166,7 +209,7 @@ test('notify-config: 非法补丁 400, 合法补丁合并生效', async () => {
 
 test('test-webhook: 返回真实投递结果而非谎报成功', async () => {
   // Given webhook 已配置, fetch 桩标记调用
-  const { ctx, routes } = makeCtx({ settingsValue: { pollIntervalSec: 600, notify: { enabled: true, webhookUrl: 'https://hooks.example.com/hook' } } })
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true, webhookUrl: 'https://hooks.example.com/hook' } } })
   apply(ctx)
   const original = globalThis.fetch
   let captured = null
@@ -199,7 +242,7 @@ test('test-im: dsh-im 缺失如实降级, 在场时逐目标返回结果', async
   // Given dsh-im 在场且已配置一个投递目标
   const sent = []
   const dshIm = { send: async (botId, targetId, text) => { sent.push({ botId, targetId, text }) } }
-  const on = makeCtx({ settingsValue: { pollIntervalSec: 600, notify: { enabled: true, imTargets: [{ botId: 'wx_a', targetId: 'owner' }] } }, dshIm })
+  const on = makeCtx({ settingsValue: { notify: { enabled: true, imTargets: [{ botId: 'wx_a', targetId: 'owner' }] } }, dshIm })
   apply(on.ctx)
   // When 触发测试投递
   const onRes = await call(on.routes, '/api/usage-panel/test-im', makeReq('POST', {}, { origin: 'http://localhost:3000' }))
@@ -269,7 +312,7 @@ test('编辑账号保留沿触发状态与读数: 提交对象缺 last/notifySta
 
 test('toast 开关: 关闭后事件不进投影(出站通道不受影响无直接断言)', async () => {
   // Given 通知启用但页内 toast 关闭
-  const settings = { pollIntervalSec: 600, notify: { enabled: true, quotaThresholdPct: 50, toast: false } }
+  const settings = { notify: { enabled: true, quotaThresholdPct: 50, toast: false } }
   const { ctx, routes } = makeCtx({ settingsValue: settings })
   apply(ctx)
   const original = globalThis.fetch

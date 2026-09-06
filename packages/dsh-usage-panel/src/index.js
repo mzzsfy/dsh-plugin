@@ -1,7 +1,7 @@
 // 用量面板 Host 半区:多平台余额查询 + 定期轮询 + 历史快照落盘。webServer 路由供浏览器半区调用,
 // fetch 直连平台 API,配置持久化在 ~/.dsh/dsh-usage-panel/accounts.json,快照在 history.json。
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -16,7 +16,7 @@ import {
 } from './parsers.mjs'
 import { readingToSnapshots, appendPoint, buildMonthSequence, newSequenceStore } from './history.mjs'
 import { createHistoryStore } from './historyStore.mjs'
-import { DEFAULT_POLL_INTERVAL_SEC, resolvePollIntervalSec, createBackoff, longWindowDivisor, shouldQueryThisRound, isShortWindowTier } from './poller.mjs'
+import { createBackoff, isShortWindowTier, tierIntervalSec, lastQuerySecOf, isDue } from './poller.mjs'
 import {
   DEFAULT_QUOTA_THRESHOLD_PCT,
   WEBHOOK_TIMEOUT_MS,
@@ -45,13 +45,14 @@ const LONG_POLL_WAIT_MS = 25 * 1000
 const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR || join(homedir(), '.dsh', 'dsh-usage-panel')
 const DATA_FILE = join(DATA_DIR, 'accounts.json')
 const HISTORY_FILE = join(DATA_DIR, 'history.json')
+const BAK_SUFFIX = '.bak'
+const ACCOUNTS_BROKEN_MESSAGE = '账号配置文件已损坏已备份,已暂停写入以防数据丢失'
 const TICK_SEC = 30
 const SHORT_SUFFIX = '5h'
 
 const NAMESPACE = 'usage-panel'
 
 const SETTINGS_SCHEMA = z.object({
-  pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('定期查询间隔秒数,仅正数有效'),
   notify: z.object({
     enabled: z.boolean().default(false).description('通知总开关,默认关闭'),
     quotaThresholdPct: z.number().default(DEFAULT_QUOTA_THRESHOLD_PCT).description('用量窗口阈值百分比'),
@@ -92,13 +93,19 @@ const PARSERS = {
   [TYPE_ZHIPU]: parseZhipu,
   [TYPE_MINIMAX]: parseMiniMax,
   [TYPE_NEWAPI]: parseNewApi,
-  [TYPE_CUSTOM]: extractCustom,
+}
+
+// 解析分发:custom 需要账号级 extract 规则,单参表无法表达,特化传参
+function parseReading(account, body) {
+  return account.type === TYPE_CUSTOM
+    ? extractCustom(body, account.custom && account.custom.extract)
+    : PARSERS[account.type](body)
 }
 
 // ---- HTTP 工具 ----
 // 访问控制交给 DSH web 鉴权层(非本机 Host 的请求必须携带凭据);
-// 读路由响应不含明文 Key,读数不含敏感凭据;写路由另加同源 + JSON 守卫,
-// 阻断跨站简单请求 drive-by 改写通知配置或借测试通道外发(turn-notify 同构)。
+// 读路由响应不含明文 Key,读数不含敏感凭据;写路由统一经 guardedRoute
+// (同源 + JSON 守卫),阻断跨站简单请求 drive-by 改写账号/配置或借测试通道外发(turn-notify 同构)。
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -145,19 +152,30 @@ function rejectNonJson(req, res) {
   return true
 }
 
-// 写路由样板:方法守卫 + 跨源/JSON 守卫统一在此,业务异常归一,handler 只留业务体。
+// 路由样板:双方法变体放行 GET(读无 CSRF 面),其余 405;POST-only 变体供无读面的
+// 写路由(测试通道/查询)使用——GET 放行会让跨站 <img src> 无守卫驱动外发;
+// POST 加跨源/JSON 守卫;业务异常归一,handler 只留业务体。全部路由统一经此,防逐路由遗漏。
 const guardedRoute = (handler) => async (req, res) => {
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method not allowed' })
-    return
-  }
-  if (rejectCrossOrigin(req, res)) return
-  if (rejectNonJson(req, res)) return
   try {
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' })
+      return
+    }
+    if (req.method === 'POST') {
+      if (rejectCrossOrigin(req, res)) return
+      if (rejectNonJson(req, res)) return
+    }
     await handler(req, res)
   } catch (error) {
     sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
   }
+}
+guardedRoute.post = (handler) => async (req, res) => {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method not allowed' })
+    return
+  }
+  return guardedRoute(handler)(req, res)
 }
 
 // ---- 平台请求 ----
@@ -240,8 +258,23 @@ function normalizeAccounts(input) {
       }
     }
     const lastSource = raw.last && typeof raw.last === 'object' ? raw.last : null
+    const last = lastSource && typeof lastSource.ok === 'boolean'
+      ? {
+          ok: lastSource.ok,
+          // 无 kind 判别字段的旧形态读数(v1 custom)单点清洗为 null,渲染回落空态,首轮刷新自然归一
+          reading: lastSource.reading !== null && lastSource.reading !== undefined && typeof lastSource.reading === 'object' &&
+            (lastSource.reading.kind === 'quota' || lastSource.reading.kind === 'balance')
+            ? lastSource.reading
+            : null,
+          error: typeof lastSource.error === 'string' ? lastSource.error : null,
+          queriedAt: Number.isFinite(Number(lastSource.queriedAt)) ? Number(lastSource.queriedAt) : null,
+        }
+      : null
+    const id = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : 'acct-' + String(index)
+    // 序列键以「id:后缀」拼接,id 含冒号会破坏键解析与孤儿清理的账号段切分
+    requireOk(id.indexOf(':') < 0, '账号 id 不得包含冒号: ' + id)
     return {
-      id: typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : 'acct-' + String(index),
+      id,
       name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : type,
       type,
       baseUrl: typeof raw.baseUrl === 'string' ? raw.baseUrl.trim() : '',
@@ -253,14 +286,7 @@ function normalizeAccounts(input) {
         body: typeof customSource.body === 'string' ? customSource.body : '',
         extract: customSource.extract && typeof customSource.extract === 'object' ? customSource.extract : {},
       },
-      last: lastSource && typeof lastSource.ok === 'boolean'
-        ? {
-            ok: lastSource.ok,
-            reading: lastSource.reading || null,
-            error: typeof lastSource.error === 'string' ? lastSource.error : null,
-            queriedAt: Number.isFinite(Number(lastSource.queriedAt)) ? Number(lastSource.queriedAt) : null,
-          }
-        : null,
+      last,
       notify: normalizeAccountNotify(raw.notify),
       notifyState: normalizeNotifyState(raw.notifyState),
     }
@@ -272,7 +298,7 @@ function redactAccount(account) {
   return { ...account, apiKey: '', hasKey: account.apiKey.length > 0 }
 }
 
-async function queryAccount(config, account) {
+async function queryAccount(account) {
   const queriedAt = Date.now()
   let last
   try {
@@ -285,7 +311,7 @@ async function queryAccount(config, account) {
     }
     const topError = body && body.error
     if (topError && typeof topError.message === 'string') throw new Error(topError.message)
-    const reading = PARSERS[account.type](body)
+    const reading = parseReading(account, body)
     last = { ok: true, reading, error: null, queriedAt }
   } catch (error) {
     last = { ok: false, reading: null, error: error && error.message ? error.message : String(error), queriedAt }
@@ -302,9 +328,10 @@ export function apply(ctx) {
   let config = null
   let loadPromise = null
   let writeChain = Promise.resolve()
+  let accountsBroken = false
   let historyStore = createHistoryStore({ file: HISTORY_FILE })
   let history = newSequenceStore()
-  // 账号级轮询状态:分频轮次计数(退避期间不递增)与失败退避状态机
+  // 账号级档位退避状态:基期随读数档位翻转重建;调度到点由 last.queriedAt + 档位间隔另行判定
   const pollState = new Map()
   // 通知投影(client 轮询展示)与事件序号
   const projection = createProjection({})
@@ -314,12 +341,6 @@ export function apply(ctx) {
     const settings = ctx.get('settings')
     const value = settings ? settings.get(NAMESPACE) : undefined
     return resolvedNotifySettings(value && typeof value === 'object' ? value.notify : undefined)
-  }
-
-  function readPollIntervalSec() {
-    const settings = ctx.get('settings')
-    const value = settings ? settings.get(NAMESPACE) : undefined
-    return resolvePollIntervalSec(value ? value.pollIntervalSec : undefined)
   }
 
   function ensureHistory() {
@@ -343,16 +364,13 @@ export function apply(ctx) {
     return persistHistory()
   }
 
-  function pollEntry(accountId, intervalSec) {
-    const existing = pollState.get(accountId)
-    if (existing && existing.baseSec === intervalSec) return existing
-    // 查询周期变更:重建退避使基期始终跟随当前间隔,保留分频轮次
-    const state = {
-      baseSec: intervalSec,
-      round: existing ? existing.round : 0,
-      backoff: createBackoff({ baseSec: intervalSec }),
-    }
-    pollState.set(accountId, state)
+  // 账号级退避状态:基期 = 账号档位间隔(读数档位翻转时重建),只管退避不管调度
+  function pollEntry(account) {
+    const baseSec = tierIntervalSec(hasShortWindow(account))
+    const existing = pollState.get(account.id)
+    if (existing && existing.baseSec === baseSec) return existing
+    const state = { baseSec, backoff: createBackoff({ baseSec }) }
+    pollState.set(account.id, state)
     return state
   }
 
@@ -366,15 +384,15 @@ export function apply(ctx) {
 
   function runQuery(account) {
     const queriedAt = Date.now()
-    return queryAccount(config, account).then((result) => {
-      const state = pollEntry(account.id, readPollIntervalSec())
+    return queryAccount(account).then((result) => {
+      const state = pollEntry(account)
       if (result.ok) {
         state.backoff.onSuccess()
+        // 先评估后落盘:阈值穿越事件不因落盘失败丢失;落盘失败仅弃本轮快照
+        evaluateAndDispatch(account, queriedAt)
         return recordSnapshots(account, account.last.reading, queriedAt)
-          .then(() => {
-            evaluateAndDispatch(account, queriedAt)
-            return result
-          })
+          .catch(() => {})
+          .then(() => result)
       }
       state.backoff.onFailure(Math.floor(queriedAt / 1000))
       return result
@@ -415,28 +433,47 @@ export function apply(ctx) {
   }
 
   function ensureConfig() {
-    if (config !== null) return Promise.resolve(config)
+    if (config !== null && !accountsBroken) return Promise.resolve(config)
+    if (accountsBroken) {
+      // 损坏解除路径(historyStore 同构):坏文件已被备份移走,重读 ENOENT 即解除;
+      // 用户手工修复后放回合法文件,重读解析成功同样解除
+      loadPromise = null
+      accountsBroken = false
+    }
     if (!loadPromise) {
+      // 损坏守卫(historyStore 同构):解析失败先把坏文件备份 .bak 并标记 broken 拒写,
+      // 防空配置被后续持久化覆盖,账号 Key 全部丢失;修复文件后重读成功即解除
       loadPromise = readFile(DATA_FILE, 'utf8')
         .then((text) => {
           const parsed = JSON.parse(text)
-          config = parsed && Array.isArray(parsed.accounts) ? parsed : defaultConfig()
+          requireOk(parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.accounts), '配置形态无效')
+          config = parsed
+          accountsBroken = false
           return config
         })
-        .catch(() => {
+        .catch((error) => {
+          const missing = error && error.code === 'ENOENT'
           config = defaultConfig()
-          return config
+          if (missing) {
+            accountsBroken = false
+            return config
+          }
+          accountsBroken = true
+          return rename(DATA_FILE, DATA_FILE + BAK_SUFFIX).catch(() => {}).then(() => config)
         })
     }
     return loadPromise
   }
 
   function persistConfig() {
-    writeChain = writeChain.then(async () => {
+    if (accountsBroken) return Promise.reject(new Error(ACCOUNTS_BROKEN_MESSAGE))
+    // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败)
+    const result = writeChain.then(async () => {
       await mkdir(dirname(DATA_FILE), { recursive: true })
-      await writeFile(DATA_FILE, JSON.stringify(config, null, 2), 'utf8')
+      await writeFile(DATA_FILE, JSON.stringify(config), 'utf8')
     })
-    return writeChain
+    writeChain = result.catch(() => {})
+    return result
   }
 
   ctx.effect(
@@ -444,39 +481,43 @@ export function apply(ctx) {
       ctx.webServer.register({
         kind: 'exact',
         path: '/api/usage-panel/accounts',
-        handler: async (req, res) => {
-          try {
-            if (req.method === 'GET') {
-              const current = await ensureConfig()
-              sendJson(res, 200, { accounts: current.accounts.map(redactAccount) })
-              return
-            }
-            if (req.method !== 'POST') {
-              sendJson(res, 405, { error: 'method not allowed' })
-              return
-            }
-            const body = JSON.parse(await readBody(req))
-            await ensureConfig()
-            const previous = Array.isArray(config.accounts) ? config.accounts : []
-            const saved = normalizeAccounts(body && body.accounts).map((account) => {
-              const old = previous.find((item) => item.id === account.id)
-              if (old === undefined) return account
-              // 客户端拿不到旧 Key,空 Key 视为「保持不变」;last 与 notifyState 不经表单,
-              // 同 id 旧值回填,防编辑账号丢失读数与沿触发防抖基线
-              const merged = account.apiKey.length > 0 ? account : { ...account, apiKey: old.apiKey }
-              return { ...merged, last: old.last, notifyState: old.notifyState }
-            })
-            config = { version: 1, accounts: saved }
-            // 已删除账号的轮询状态同步清理,不留悬挂退避
-            for (const id of [...pollState.keys()]) {
-              if (!saved.some((account) => account.id === id)) pollState.delete(id)
-            }
-            await persistConfig()
-            sendJson(res, 200, { ok: true, accounts: saved.map(redactAccount) })
-          } catch (error) {
-            sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+        handler: guardedRoute(async (req, res) => {
+          if (req.method === 'GET') {
+            const current = await ensureConfig()
+            sendJson(res, 200, { accounts: current.accounts.map(redactAccount) })
+            return
           }
-        },
+          const body = JSON.parse(await readBody(req))
+          await ensureConfig()
+          await ensureHistory()
+          const previous = Array.isArray(config.accounts) ? config.accounts : []
+          const saved = normalizeAccounts(body && body.accounts).map((account) => {
+            const old = previous.find((item) => item.id === account.id)
+            if (old === undefined) return account
+            // 客户端拿不到旧 Key,空 Key 视为「保持不变」;last 与 notifyState 不经表单,
+            // 同 id 旧值回填,防编辑账号丢失读数与沿触发防抖基线
+            const merged = account.apiKey.length > 0 ? account : { ...account, apiKey: old.apiKey }
+            return { ...merged, last: old.last, notifyState: old.notifyState }
+          })
+          config = { version: 1, accounts: saved }
+          // 已删除账号的轮询状态同步清理,不留悬挂退避
+          for (const id of [...pollState.keys()]) {
+            if (!saved.some((account) => account.id === id)) pollState.delete(id)
+          }
+          // 已删除账号的历史序列同步清理(id 无冒号前置校验保证账号段切分可靠),
+          // 防 history.json 无主数据无限累积
+          for (const key of Object.keys(history)) {
+            const accountId = key.slice(0, key.indexOf(':'))
+            if (!saved.some((account) => account.id === accountId)) delete history[key]
+          }
+          await persistConfig().catch((error) => {
+            // 写失败(如 broken 拒写)回滚内存态,防 tick/GET 与磁盘不一致
+            config = { version: 1, accounts: previous }
+            throw error
+          })
+          await persistHistory().catch(() => {})
+          sendJson(res, 200, { ok: true, accounts: saved.map(redactAccount) })
+        }),
       }),
     'usage-panel accounts route',
   )
@@ -486,33 +527,24 @@ export function apply(ctx) {
       ctx.webServer.register({
         kind: 'exact',
         path: '/api/usage-panel/query',
-        handler: async (req, res) => {
-          try {
-            if (req.method !== 'POST') {
-              sendJson(res, 405, { error: 'method not allowed' })
-              return
-            }
-            const body = JSON.parse(await readBody(req))
-            const id = body && typeof body.id === 'string' ? body.id : ''
-            const auto = body && body.auto === true
-            const current = await ensureConfig()
-            const account = current.accounts.find((item) => item.id === id)
-            requireOk(account !== undefined, '账号不存在: ' + id)
-            const intervalSec = readPollIntervalSec()
-            const state = pollEntry(id, intervalSec)
-            // 面板打开触发的自动查询受退避约束,避免绕过退避轰炸上游;手动刷新不受限
-            if (auto && state.backoff.isBlocked(Math.floor(Date.now() / 1000))) {
-              sendJson(res, 200, { ok: false, skipped: true, account: redactAccount(account) })
-              return
-            }
-            await ensureHistory()
-            const result = await runQuery(account)
-            await persistConfig()
-            sendJson(res, 200, { ok: result.ok, account: redactAccount(result.account) })
-          } catch (error) {
-            sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+        handler: guardedRoute.post(async (req, res) => {
+          const body = JSON.parse(await readBody(req))
+          const id = body && typeof body.id === 'string' ? body.id : ''
+          const auto = body && body.auto === true
+          const current = await ensureConfig()
+          const account = current.accounts.find((item) => item.id === id)
+          requireOk(account !== undefined, '账号不存在: ' + id)
+          // 面板打开触发的自动查询受退避约束,避免绕过退避轰炸上游;手动刷新不受限
+          if (auto && pollEntry(account).backoff.isBlocked(Math.floor(Date.now() / 1000))) {
+            sendJson(res, 200, { ok: false, skipped: true, account: redactAccount(account) })
+            return
           }
-        },
+          await ensureHistory()
+          const result = await runQuery(account)
+          // last/notifyState 落盘失败不否定已成功的查询
+          await persistConfig().catch(() => {})
+          sendJson(res, 200, { ok: result.ok, account: redactAccount(result.account) })
+        }),
       }),
     'usage-panel query route',
   )
@@ -540,24 +572,11 @@ export function apply(ctx) {
         kind: 'exact',
         path: '/api/usage-panel/settings',
         handler: async (req, res) => {
-          try {
-            if (req.method === 'GET') {
-              sendJson(res, 200, { pollIntervalSec: readPollIntervalSec(), pollArmed })
-              return
-            }
-            if (req.method !== 'POST') {
-              sendJson(res, 405, { error: 'method not allowed' })
-              return
-            }
-            const body = JSON.parse(await readBody(req))
-            const intervalSec = resolvePollIntervalSec(body ? body.pollIntervalSec : undefined)
-            const settings = ctx.get('settings')
-            requireOk(settings !== undefined, 'settings 服务不可用')
-            await settings.update(NAMESPACE, { pollIntervalSec: intervalSec })
-            sendJson(res, 200, { ok: true, pollIntervalSec: readPollIntervalSec() })
-          } catch (error) {
-            sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+          if (req.method !== 'GET') {
+            sendJson(res, 405, { error: 'method not allowed' })
+            return
           }
+          sendJson(res, 200, { pollArmed })
         },
       }),
     'usage-panel settings route',
@@ -611,31 +630,21 @@ export function apply(ctx) {
       ctx.webServer.register({
         kind: 'exact',
         path: '/api/usage-panel/notify-config',
-        handler: async (req, res) => {
-          try {
-            if (req.method === 'GET') {
-              sendJson(res, 200, { notify: publicNotify(readNotifySettings()), imAvailable: ctx.get('dshIm') !== undefined })
-              return
-            }
-            if (req.method !== 'POST') {
-              sendJson(res, 405, { error: 'method not allowed' })
-              return
-            }
-            if (rejectCrossOrigin(req, res)) return
-            if (rejectNonJson(req, res)) return
-            const body = JSON.parse(await readBody(req))
-            const check = validateNotifyPatch(body)
-            requireOk(check.ok, check.reason)
-            // 读出当前值做浅合并后整体写回,不依赖 settings.update 的嵌套合并语义
-            const merged = { ...readNotifySettings(), ...check.patch }
-            const settings = ctx.get('settings')
-            requireOk(settings !== undefined, 'settings 服务不可用')
-            await settings.update(NAMESPACE, { notify: merged })
-            sendJson(res, 200, { ok: true, notify: publicNotify(readNotifySettings()) })
-          } catch (error) {
-            sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+        handler: guardedRoute(async (req, res) => {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { notify: publicNotify(readNotifySettings()), imAvailable: ctx.get('dshIm') !== undefined })
+            return
           }
-        },
+          const body = JSON.parse(await readBody(req))
+          const check = validateNotifyPatch(body)
+          requireOk(check.ok, check.reason)
+          // 读出当前值做浅合并后整体写回,不依赖 settings.update 的嵌套合并语义
+          const merged = { ...readNotifySettings(), ...check.patch }
+          const settings = ctx.get('settings')
+          requireOk(settings !== undefined, 'settings 服务不可用')
+          await settings.update(NAMESPACE, { notify: merged })
+          sendJson(res, 200, { ok: true, notify: publicNotify(readNotifySettings()) })
+        }),
       }),
     'usage-panel notify-config route',
   )
@@ -645,7 +654,7 @@ export function apply(ctx) {
       ctx.webServer.register({
         kind: 'exact',
         path: '/api/usage-panel/test-webhook',
-        handler: guardedRoute(async (req, res) => {
+        handler: guardedRoute.post(async (req, res) => {
           const result = await sendWebhook({ url: readNotifySettings().webhookUrl, payload: buildWebhookPayload(buildTestEvent()) })
           sendJson(res, 200, result)
         }),
@@ -691,7 +700,7 @@ export function apply(ctx) {
       ctx.webServer.register({
         kind: 'exact',
         path: '/api/usage-panel/test-im',
-        handler: guardedRoute(async (req, res) => {
+        handler: guardedRoute.post(async (req, res) => {
           const dshIm = ctx.get('dshIm')
           if (dshIm === undefined) {
             sendJson(res, 200, { ok: false, detail: 'dsh-im 未安装' })
@@ -717,7 +726,10 @@ export function apply(ctx) {
     'usage-panel test-im route',
   )
 
-  // 定期轮询:固定短 tick,串行查询到期账号;退避期间跳过且不消耗分频轮次。
+  // 定期轮询:固定短 tick,时间驱动调度——上次尝试查询时刻(account.last.queriedAt,
+  // 成功失败均记、随配置持久化)距今超过账号档位间隔即到点;退避独立叠加,二者皆过才查。
+  // 旧 round 分频形态已废:round 仅查询时递增使余额类账号死锁停摆,短窗账号每 tick 必查
+  // 使间隔设置失效。
   // timer 软依赖经嵌套 inject 等待:服务激活才武装轮询,缺失则自动轮询停用,
   // 面板手动查询不受影响,也不因等待服务而阻塞插件装载。
   // pollArmed(武装,外露)与 pollInFlight(单轮在途互斥)分离:在途是瞬态,
@@ -731,24 +743,24 @@ export function apply(ctx) {
       if (pollInFlight) return
       const current = config
       if (!current) return
-      const intervalSec = readPollIntervalSec()
       const nowSec = Math.floor(Date.now() / 1000)
-      const divisor = longWindowDivisor(intervalSec)
       const due = current.accounts.filter((account) => {
-        const state = pollEntry(account.id, intervalSec)
-        if (state.backoff.isBlocked(nowSec)) return false
-        return shouldQueryThisRound({ round: state.round + 1, hasShortWindow: hasShortWindow(account), divisor })
+        if (pollEntry(account).backoff.isBlocked(nowSec)) return false
+        return isDue({
+          lastQuerySec: lastQuerySecOf(account.last),
+          nowSec,
+          intervalSec: tierIntervalSec(hasShortWindow(account)),
+        })
       })
       if (due.length === 0) return
       pollInFlight = true
       ensureHistory()
         .then(async () => {
           for (const account of due) {
-            pollEntry(account.id, intervalSec).round += 1
             // 单账号失败不中止本轮其余账号(broken 等持久态下尤为关键)
             await runQuery(account).catch(() => {})
           }
-          await persistConfig()
+          await persistConfig().catch(() => {})
         })
         .catch(() => {})
         .then(() => {

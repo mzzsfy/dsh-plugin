@@ -49,11 +49,13 @@ export function createHistoryStore({ file, io }) {
     },
     persist() {
       if (broken) return Promise.reject(new Error(HISTORY_BROKEN_MESSAGE))
-      chain = chain.then(async () => {
+      // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败)
+      const result = chain.then(async () => {
         await fs.mkdir(dirname(file), { recursive: true })
-        await fs.writeFile(file, JSON.stringify({ sequences }, null, 2), 'utf8')
+        await fs.writeFile(file, JSON.stringify({ sequences }), 'utf8')
       })
-      return chain
+      chain = result.catch(() => {})
+      return result
     },
   }
 }
