@@ -1,5 +1,5 @@
 // dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知
-// + 历史输入浮层(dock 入口、列表浏览与点选回填)。
+// + 历史输入浮层(Alt+↑ 唤起,列表浏览与点选回填)。
 // 归档快照来自官方 workspace.follow 客户端模型(ctx.get('workspaces')),会话行来自
 // ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),通知由 archived
 // 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。历史输入挂官方
@@ -67,13 +67,9 @@ const CSS = [
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
   '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
-  // 历史输入:dock 入口按钮 + 向上弹出浮层
-  '.sm-hist { position:relative; display:flex; justify-content:flex-end; padding:0 10px 4px; }',
-  '.sm-hist__btn { border:0; background:transparent; cursor:pointer; padding:2px 10px; border-radius:6px;',
-  '  font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); }',
-  '.sm-hist__btn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
-  '.sm-hist__btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
-  '.sm-hist__pop { position:absolute; right:10px; bottom:calc(100% + 4px); z-index:30; width:min(560px, 90%);',
+  // 历史输入:零高度锚点容器 + 向上弹出浮层(Alt+↑ 唤起)
+  '.sm-hist { position:relative; height:0; }',
+  '.sm-hist__pop { position:absolute; right:12px; bottom:8px; z-index:30; width:min(560px, 90%);',
   '  max-height:320px; display:flex; flex-direction:column; overflow:hidden;',
   '  background:var(--dsw-alias-bg-module-platform); border:1px solid var(--dsw-alias-border-l3); border-radius:10px;',
   '  box-shadow:0 8px 24px rgba(0,0,0,.18); }',
@@ -350,10 +346,9 @@ function SessionManagerApp(props) {
   )
 }
 
-// 历史输入浮层:dock 条目常驻按钮 + 向上弹出的列表浮层,点选或键盘(浮层内
-// ↑/↓ 选择、Enter 填入、Esc 关闭)回填历史;填入走宿主公共契约
-// inputActions.setDraft,不直改编辑器 DOM。数据由 host 按当前会话所属工作区
-// 聚合,浮层每次打开即强刷
+// 历史输入浮层:Alt+↑ 快捷键唤起,平时零占位;浮层内点选或键盘(↑/↓ 选择、
+// Enter 填入、Esc 关闭)回填历史,填入走宿主公共契约 inputActions.setDraft,
+// 不直改编辑器 DOM。数据由 host 按当前会话所属工作区聚合,每次唤起即强刷
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
@@ -389,11 +384,19 @@ function HistoryDock({ session, inputActions }) {
       })
   }
 
-  // 浮层开 = 菜单模态:捕获阶段拦截导航键,先于 Lexical 光标移动
+  // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动
   useEffect(() => {
-    if (!open) return undefined
+    if (inputActions === undefined || typeof inputActions.setDraft !== 'function') return undefined
     function onKeyDown(event) {
       if (event.isComposing) return
+      if (!open) {
+        if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === 'ArrowUp') {
+          event.preventDefault()
+          event.stopPropagation()
+          openPopup()
+        }
+        return
+      }
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
         event.stopPropagation()
@@ -430,13 +433,9 @@ function HistoryDock({ session, inputActions }) {
     return () => document.removeEventListener('mousedown', onPointerDown, true)
   }, [open])
 
+  // 零高度锚点:平时不占任何界面空间,仅浮层打开时渲染
   if (session === undefined || inputActions === undefined) return null
   return h('div', { className: 'sm-hist', ref: rootRef },
-    h('button', {
-      className: 'sm-hist__btn',
-      onClick: open ? () => setOpen(false) : openPopup,
-      title: '浏览并回填同一工作区的历史输入',
-    }, open ? '收起历史' : '历史输入'),
     open && h('div', { className: 'sm-hist__pop' },
       h('div', { className: 'sm-hist__hint' }, '当前工作区历史输入;↑/↓ 选择,Enter 填入,Esc 关闭'),
       items === null
