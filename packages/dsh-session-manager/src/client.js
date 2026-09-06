@@ -1,10 +1,13 @@
-// dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知。
+// dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知
+// + 历史输入浮层(dock 入口、列表浏览与点选回填)。
 // 归档快照来自官方 workspace.follow 客户端模型(ctx.get('workspaces')),会话行来自
 // ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),通知由 archived
-// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。浏览器半区经 webServer
+// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。历史输入挂官方
+// conversation.input.dock 插槽(行数据由 host /api/session-manager/inputs 聚合),
+// 回填走宿主公共契约 inputActions.setDraft。浏览器半区经 webServer
 // 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
-// require;与 src/core.mjs 镜像的纯函数(projectArchiveRows / archiveToastStep)
-// 修改需两处同步。
+// require;与 src/core.mjs 镜像的纯函数(projectArchiveRows / archiveToastStep /
+// projectDeletedRows)修改需两处同步。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
@@ -64,6 +67,28 @@ const CSS = [
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
   '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
+  // 历史输入:dock 入口按钮 + 向上弹出浮层
+  '.sm-hist { position:relative; display:flex; justify-content:flex-end; padding:0 10px 4px; }',
+  '.sm-hist__btn { border:0; background:transparent; cursor:pointer; padding:2px 10px; border-radius:6px;',
+  '  font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); }',
+  '.sm-hist__btn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
+  '.sm-hist__btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
+  '.sm-hist__pop { position:absolute; right:10px; bottom:calc(100% + 4px); z-index:30; width:min(560px, 90%);',
+  '  max-height:320px; display:flex; flex-direction:column; overflow:hidden;',
+  '  background:var(--dsw-alias-bg-module-platform); border:1px solid var(--dsw-alias-border-l3); border-radius:10px;',
+  '  box-shadow:0 8px 24px rgba(0,0,0,.18); }',
+  '.sm-hist__hint { padding:8px 12px 4px; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); flex:none; }',
+  '.sm-hist__list { overflow-y:auto; padding:4px; }',
+  '.sm-hist__row { display:flex; align-items:baseline; gap:8px; width:100%; border:0; background:transparent;',
+  '  cursor:pointer; text-align:left; padding:6px 10px; border-radius:6px; min-width:0; }',
+  '.sm-hist__row:hover { background:var(--dsw-alias-interactive-bg-hover); }',
+  '.sm-hist__row--on, .sm-hist__row--on:hover { background:var(--dsw-alias-interactive-bg-selected); }',
+  '.sm-hist__row:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-2px; }',
+  '.sm-hist__text { flex:1; min-width:0; font:var(--dsw-font-s-14); color:var(--dsw-alias-label-primary);',
+  '  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+  '.sm-hist__time { font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption);',
+  '  font-variant-numeric:tabular-nums; flex:none; }',
+  '.sm-hist__empty { padding:20px 12px; text-align:center; font:var(--dsw-font-s-14); color:var(--dsw-alias-label-caption); }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -73,6 +98,7 @@ const DELETED_URL = '/api/session-manager/deleted'
 const REMOUNT_URL = '/api/session-manager/remount'
 const FORGET_URL = '/api/session-manager/forget'
 const STATUS_URL = '/api/session-manager/status'
+const INPUTS_URL = '/api/session-manager/inputs'
 
 async function api(url, options) {
   const response = await fetch(url, {
@@ -324,6 +350,112 @@ function SessionManagerApp(props) {
   )
 }
 
+// 历史输入浮层:dock 条目常驻按钮 + 向上弹出的列表浮层,点选或键盘(浮层内
+// ↑/↓ 选择、Enter 填入、Esc 关闭)回填历史;填入走宿主公共契约
+// inputActions.setDraft,不直改编辑器 DOM。数据由 host 按当前会话所属工作区
+// 聚合,浮层每次打开即强刷
+function HistoryDock({ session, inputActions }) {
+  const [open, setOpen] = useState(false)
+  const [items, setItems] = useState(null)
+  const [cursor, setCursor] = useState(-1)
+  const [loadError, setLoadError] = useState(false)
+  const rootRef = React.useRef(null)
+
+  // host 响应信封 { inputs: [...] };解包并防御形态漂移,消费侧恒为数组
+  function fetchInputs() {
+    return api(INPUTS_URL + '?sessionId=' + encodeURIComponent(session.sessionId) + '&refresh=1')
+      .then((payload) => (payload && Array.isArray(payload.inputs)) ? payload.inputs : [])
+  }
+
+  function fill(text) {
+    inputActions.setDraft(text)
+    setOpen(false)
+  }
+
+  function openPopup() {
+    setOpen(true)
+    setCursor(-1)
+    setLoadError(false)
+    setItems(null)
+    fetchInputs()
+      .then((fetched) => {
+        setItems(fetched)
+        setCursor(-1)
+      })
+      .catch((error) => {
+        setLoadError(true)
+        setItems([])
+        toast(error && error.message ? error.message : String(error), { kind: 'error' })
+      })
+  }
+
+  // 浮层开 = 菜单模态:捕获阶段拦截导航键,先于 Lexical 光标移动
+  useEffect(() => {
+    if (!open) return undefined
+    function onKeyDown(event) {
+      if (event.isComposing) return
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault()
+        event.stopPropagation()
+        setCursor((previous) => {
+          if (items === null || items.length === 0) return previous
+          const delta = event.key === 'ArrowUp' ? -1 : 1
+          return Math.min(Math.max(previous + delta, 0), items.length - 1)
+        })
+        return
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        event.stopPropagation()
+        if (items !== null && cursor >= 0 && cursor < items.length) fill(items[cursor].text)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setOpen(false)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
+  }, [open, items, cursor])
+
+  // 浮层外点击关闭
+  useEffect(() => {
+    if (!open) return undefined
+    function onPointerDown(event) {
+      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown, true)
+    return () => document.removeEventListener('mousedown', onPointerDown, true)
+  }, [open])
+
+  if (session === undefined || inputActions === undefined) return null
+  return h('div', { className: 'sm-hist', ref: rootRef },
+    h('button', {
+      className: 'sm-hist__btn',
+      onClick: open ? () => setOpen(false) : openPopup,
+      title: '浏览并回填同一工作区的历史输入',
+    }, open ? '收起历史' : '历史输入'),
+    open && h('div', { className: 'sm-hist__pop' },
+      h('div', { className: 'sm-hist__hint' }, '当前工作区历史输入;↑/↓ 选择,Enter 填入,Esc 关闭'),
+      items === null
+        ? h('div', { className: 'sm-hist__empty' }, '加载中…')
+        : items.length === 0
+          ? h('div', { className: 'sm-hist__empty' }, loadError ? '历史输入加载失败,可关闭后重试' : '当前工作区还没有历史输入')
+          : h('div', { className: 'sm-hist__list' },
+              items.map((item, index) => h('button', {
+                key: index + ':' + item.at,
+                className: 'sm-hist__row' + (index === cursor ? ' sm-hist__row--on' : ''),
+                onClick: () => fill(item.text),
+              },
+                h('span', { className: 'sm-hist__text', title: item.text }, item.text),
+                h('span', { className: 'sm-hist__time' }, fmtTime(item.at)),
+              ))),
+    ),
+  )
+}
+
     return {
       inject: ['slots', 'sessions', 'workspaces'],
       apply(ctx) {
@@ -352,6 +484,18 @@ function SessionManagerApp(props) {
             { name: 'settings.section', id: 'session-manager', order: 46, label: '会话归档' },
             () => React.createElement(SessionManagerPanel, { sessions, workspaces }),
           ))
+
+        // 历史输入回溯入口:官方 conversation.input.dock 插槽(dsh-client-ui-goal 同构)。
+        // 宿主缺该插槽时注册抛错即禁用本功能,不阻塞其余能力
+        try {
+          ctx.slots.inject('conversation.input.dock', () =>
+            ctx.slots.register(
+              { name: 'conversation.input.dock', id: 'session-manager-history', order: 90 },
+              HistoryDock,
+            ))
+        } catch (error) {
+          console.warn('[session-manager] 历史输入入口未注册(宿主无 conversation.input.dock 插槽)', error)
+        }
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')
 

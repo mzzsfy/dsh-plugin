@@ -18,7 +18,7 @@ const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_SRC = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
 const INDEX_SRC = readFileSync(join(PKG_ROOT, 'src', 'index.js'), 'utf8')
 
-// 切片:从 projectRows 定义起到 archiveToastStep 函数结束,三函数均为无外部依赖纯函数
+// 切片:从 projectRows 定义起到最后一个镜像纯函数止,均为无外部依赖纯函数
 const MIRROR_START = CLIENT_SRC.indexOf('function projectRows(')
 const MIRROR_END_MARKER = 'function ArchiveRow('
 const MIRROR_END = CLIENT_SRC.indexOf(MIRROR_END_MARKER)
@@ -121,6 +121,17 @@ test('parity Toast 差分:大集合增量性能形态一致性(n=5000)', () => {
     { phase: 'ready', archivedSessionIds: [] },
     { phase: 'ready', archivedSessionIds: big },
   ])
+})
+
+test('源码契约:client fetchInputs 必须解包 host 响应信封 { inputs }', () => {
+  // host 与 client 对信封各自测试自洽时,信封形状漂移只会以运行时 TypeError 暴露;
+  // 此守卫锁定解包点存在,防消费侧把信封对象当数组使用
+  const guard = /Array\.isArray\((\w+)\.inputs\)/
+  assert.ok(guard.test('Array.isArray(payload.inputs)'), '守卫正则必须命中合规样本')
+  const fetchStart = CLIENT_SRC.indexOf('function fetchInputs(')
+  const fetchBody = fetchStart >= 0 ? CLIENT_SRC.slice(fetchStart, CLIENT_SRC.indexOf('}', fetchStart)) : ''
+  assert.ok(fetchBody.includes('api(INPUTS_URL'), '未找到 fetchInputs 的 host 请求')
+  assert.ok(guard.test(fetchBody), 'fetchInputs 缺少 payload.inputs 数组解包')
 })
 
 test('parity 文案:client 确认态文案与 host MESSAGES.unsupportedBackend 同值', () => {
