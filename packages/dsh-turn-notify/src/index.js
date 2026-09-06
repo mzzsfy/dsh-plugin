@@ -80,7 +80,6 @@ const SETTINGS_SCHEMA = z.object({
   suppressSubagentWake: z.boolean().default(true).description('子代理相关回合不通知(仅任务完成类):后台委托未收尾的回合与收尾唤醒的回合'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
-  sessionHighlight: z.boolean().default(true).description('通知送达时高亮侧边栏对应会话行'),
   imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 推送目标列表,空数组禁用 IM 通道'),
 })
 
@@ -384,7 +383,7 @@ export function apply(ctx) {
           await projection.wait(cursor, LONG_POLL_WAIT_MS)
         }
         const settings = readSettings(ctx)
-        sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, sessionHighlight: settings.sessionHighlight, version: projection.version() })
+        sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
       }),
     })
     return () => projection.dispose()

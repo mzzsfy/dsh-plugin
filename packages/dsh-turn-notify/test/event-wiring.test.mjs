@@ -576,10 +576,10 @@ test('Given 配置 POST 成功 When 长轮询挂起 Then bump 唤醒返回新版
   await flushMicrotasks()
   assert.equal(res.body, null, '未唤醒前不应响应')
   const config = makeRes()
-  await routes.get('/api/turn-notify/config')(makeReq('POST', { sessionHighlight: false }, JSON_HEADERS), config)
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { suppressSubagentWake: false }, JSON_HEADERS), config)
   assert.equal(config.status, 200)
   await pending
   assert.equal(res.status, 200)
   assert.ok(res.body.version > 0, '配置变更应唤醒挂起连接')
-  assert.equal(res.body.sessionHighlight, false)
+  assert.equal(config.body.suppressSubagentWake, false)
 })

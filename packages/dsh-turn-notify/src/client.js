@@ -539,7 +539,7 @@ window.__ModuleLoader__.load({
       if (typeof payload.version !== 'number') return false
       projectionCursor = payload.version
       soundMapping = payload.soundMapping || {}
-      sessionHighlightEnabled = payload.sessionHighlight !== false
+      sessionHighlightEnabled = readSessionHighlightEnabled()
       if (!sessionHighlightEnabled && sessionHighlights.size > 0) {
         sessionHighlights.clear()
         clearSessionHighlightClasses()
@@ -649,13 +649,39 @@ window.__ModuleLoader__.load({
     // 集合上限:用户始终不点击时防无界增长,超限淘汰最旧(插入序即迭代序)
     const SESSION_HL_MAX = 20
     const sessionHighlights = new Map()
-    let sessionHighlightEnabled = false
+    // 会话高亮为纯本机 UI 行为:开关存 localStorage,存储不可用按默认开
+    const KEY_SESSION_HL = 'turn-notify:session-hl'
+    function readSessionHighlightEnabled() {
+      try { return window.localStorage.getItem(KEY_SESSION_HL) !== '0' } catch { return true }
+    }
+    function writeSessionHighlightEnabled(on) {
+      try {
+        if (on) window.localStorage.removeItem(KEY_SESSION_HL)
+        else window.localStorage.setItem(KEY_SESSION_HL, '0')
+      } catch { /* 存储不可用时开关仍可点,本次会话生效 */ }
+      sessionHighlightEnabled = on
+      if (!on) {
+        sessionHighlights.clear()
+        clearSessionHighlightClasses()
+      }
+    }
+    let sessionHighlightEnabled = readSessionHighlightEnabled()
 
     // 会话行探测:先定位“类名含 _list 段且子树含多个标题”的最内层列表容器,
-    // 再沿标题文本匹配路径下钻,取子树恰含单个标题的最深节点为行级;
-    // 正面锚定列表容器,页首面包屑等同名文本天然排除;本体改版探测不到即静默失效,不报错
+    // 再按标题文本下钻;行级确认要求标题叶文本与 title 全等或前缀互含
+    // (行标题完整而投影标题可能截断),防止同前缀会话被子串误吸;
+    // 全等行优先于前缀行;本体改版探测不到即静默失效,不报错
     const TITLE_LEAF_SELECTOR = '[class*="_title"]'
     const SESSION_LIST_SUFFIX = '_list'
+    const leafTextOf = (row) => {
+      if (typeof row.querySelector !== 'function') return ''
+      const leaf = row.querySelector(TITLE_LEAF_SELECTOR)
+      return leaf && typeof leaf.textContent === 'string' ? leaf.textContent : ''
+    }
+    const titleMatchesRow = (title, row) => {
+      const leafText = leafTextOf(row)
+      return leafText === title || leafText.startsWith(title) || title.startsWith(leafText)
+    }
     function findSessionRow(title) {
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return null
       let list = null
@@ -666,15 +692,22 @@ window.__ModuleLoader__.load({
         if (count > 1 && (list === null || count < listCount)) { list = el; listCount = count }
       }
       if (list === null) return null
-      let node = list
-      let row = null
-      while (true) {
-        const kids = [...node.children].filter((kid) => kid.textContent.indexOf(title) >= 0)
-        if (kids.length === 0) break
-        node = kids[0]
-        if (node.querySelectorAll(TITLE_LEAF_SELECTOR).length === 1) row = node
+      const prefixMatches = []
+      const walk = (node) => {
+        for (const kid of node.children) {
+          if (typeof kid.textContent !== 'string' || kid.textContent.indexOf(title) < 0) continue
+          if (typeof kid.querySelectorAll !== 'function') continue
+          if (kid.querySelectorAll(TITLE_LEAF_SELECTOR).length === 1) {
+            if (leafTextOf(kid) === title) return kid
+            if (titleMatchesRow(title, kid)) prefixMatches.push(kid)
+          } else if (kid.children.length > 0) {
+            const deeper = walk(kid)
+            if (deeper !== null && deeper !== undefined) return deeper
+          }
+        }
+        return null
       }
-      return row
+      return walk(list) ?? prefixMatches[0] ?? null
     }
 
     // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环
@@ -713,7 +746,8 @@ window.__ModuleLoader__.load({
     }
 
     // 点击清除走捕获委托;令牌承载 listener:HMR 重建闭包后先摘旧代再挂新代,
-    // 旧闭包不滞留(否则点击清除永远操作旧代高亮状态)
+    // 旧闭包不滞留(否则点击清除永远操作旧代高亮状态)。
+    // 行标题按叶文本与 Map 键前缀互含精确删除,只清该行——其他会话的进行中提示不受影响
     const KEY_HL_LISTENER = 'turn-notify:hl-listener'
     function ensureHighlightListener() {
       if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
@@ -721,17 +755,16 @@ window.__ModuleLoader__.load({
       const listener = (event) => {
         const target = event.target && event.target.closest ? event.target.closest('.' + SESSION_HL_CLASS) : null
         if (!target) return
+        const rowTitle = leafTextOf(target)
+        if (!rowTitle) return
         let cleared = false
         for (const title of [...sessionHighlights.keys()]) {
-          if (target.textContent.indexOf(title) >= 0) {
-            sessionHighlights.delete(title)
-            cleared = true
-          }
+          if (!titleMatchesRow(title, target)) continue
+          sessionHighlights.delete(title)
+          cleared = true
         }
-        if (cleared) {
-          clearSessionHighlightClasses()
-          applySessionHighlights()
-        }
+        if (!cleared) return
+        target.className = target.className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
       }
       window[KEY_HL_LISTENER] = listener
       document.addEventListener('click', listener, true)
@@ -784,7 +817,6 @@ window.__ModuleLoader__.load({
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
       suppressSubagentWake: true,
-      sessionHighlight: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
       imTargets: [],
     }
@@ -1135,8 +1167,8 @@ window.__ModuleLoader__.load({
             : String(config.minTurnDurationMs)
           if (raw.length === 0) throw new Error('最短回合时长不能为空')
           const trimmedUrl = urlDraft.trim()
-          // imTargets 由勾选单独即时保存,不随此入口提交
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, sessionHighlight: config.sessionHighlight !== false }
+          // imTargets 由勾选单独即时保存,不随此入口提交;会话高亮为本机开关,不进 host 配置
+          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
           // 只写语义:输入留空即保持现有 webhook 不变
           if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
@@ -1439,14 +1471,8 @@ window.__ModuleLoader__.load({
                 onClick: () => void toggleCategory(category, !config.enabled[category]),
               }, CATEGORY_LABELS[category])),
             ), '亮=触发通知,暗=不触发,点击即存即时生效'),
-            field('会话高亮', h('label', { className: 'tn-meta tn-switch', title: '通知触发时脉冲闪烁侧边栏对应会话行(完成绿/出错红/提问蓝等六类各一色),点击该会话后停止' },
-              ...switchToggle({
-                checked: config.sessionHighlight !== false,
-                onChange: (e) => setConfig({ ...config, sessionHighlight: e.target.checked }),
-              }),
-              ' 通知高亮会话行')),
             h('div', { className: 'tn-actions' },
-              h('button', { className: 'tn-btn tn-btn--primary', disabled: busy, title: '保存 webhook、时长、子代理过滤与会话高亮的改动;六类事件开关点击时已即时保存', onClick: () => void saveConfig() }, '保存'),
+              h('button', { className: 'tn-btn tn-btn--primary', disabled: busy, title: '保存 webhook、时长与子代理过滤的改动;六类事件开关点击时已即时保存', onClick: () => void saveConfig() }, '保存'),
             ),
           ) : null,
           activeTab === '偏好' ? h('div', { className: 'tn-card' },
@@ -1454,6 +1480,14 @@ window.__ModuleLoader__.load({
               h('span', { className: 'tn-card__title' }, '本机偏好'),
               h('span', { className: 'tn-card__sub' }, '仅存当前浏览器(同浏览器各窗口共用),不影响其他浏览器与设备'),
             ),
+            field('会话高亮', [
+              h('label', { className: 'tn-meta tn-switch', title: '通知触发时脉冲闪烁侧边栏对应会话行(完成绿/出错红/提问蓝等六类各一色),点击该会话行即停止闪烁;仅本机开关,各浏览器独立' },
+                ...switchToggle({
+                  defaultChecked: readSessionHighlightEnabled(),
+                  onChange: (e) => writeSessionHighlightEnabled(e.target.checked),
+                }),
+                ' 通知高亮侧边栏会话行'),
+            ], '通知送达时对应会话行整行脉冲闪烁,一眼定位刚有动静的会话;点击闪烁的行或切走后自然停止。'),
             field('提示音', [
               h('label', { className: 'tn-meta tn-switch', title: '通知声音总开关,失焦时播报;关闭后通知声音静默,已开启的页内提示音会在无声时补位' },
                 ...switchToggle({
@@ -1757,7 +1791,7 @@ window.__ModuleLoader__.load({
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
       // 页内通知的展示结果经 require 桩捕获,不在本包断言
-      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle },
+      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle, start },
     }
   },
 })

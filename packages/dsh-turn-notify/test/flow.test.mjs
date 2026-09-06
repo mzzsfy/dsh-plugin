@@ -112,55 +112,127 @@ test('页内通知经公共组件:文案与展示期随事件传入', async () =
 
 // ---- 会话行高亮:认领后按投影 session 字段在侧边栏定位行并挂类 ----
 
-// 最小侧边栏 DOM:列表容器(多标题)→ 会话行(单标题),classList 记录变更
-function makeSidebarDom(title) {
-  const rowClassList = { set: new Set(), contains: (c) => rowClassList.set.has(c), add: (...cs) => cs.forEach((c) => rowClassList.set.add(c)) }
-  const titleLeaf = { className: 'a_title', textContent: title, querySelectorAll: () => [] }
-  const row = {
-    className: 'x_row', textContent: title + ' 3分钟',
-    querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? [titleLeaf] : []),
-    children: [], classList: rowClassList,
-  }
+// 最小侧边栏 DOM:列表容器(多标题)→ 多会话行(各单标题),classList 记录变更,click listener 捕获;
+// className 与 classList 双向同步(对齐真 DOM 语义:任一写入对方可见)
+function makeSidebarDom(rows) {
+  const listeners = {}
+  const rowEls = rows.map((spec) => {
+    const rowClassList = { set: new Set() }
+    rowClassList.contains = (c) => rowClassList.set.has(c)
+    rowClassList.add = (...cs) => cs.forEach((c) => rowClassList.set.add(c))
+    rowClassList.remove = (...cs) => cs.forEach((c) => rowClassList.set.delete(c))
+    const sync = function (value) {
+      rowClassList.set.clear()
+      String(value).split(' ').filter(Boolean).forEach((c) => rowClassList.set.add(c))
+    }
+    const leaf = { className: 'a_title', textContent: spec.leafText, querySelectorAll: () => [] }
+    const row = {
+      leafText: spec.leafText,
+      textContent: spec.rowText || spec.leafText,
+      querySelector: (sel) => (sel.indexOf('_title') >= 0 ? leaf : null),
+      querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? [leaf] : []),
+      children: [], classList: rowClassList,
+    }
+    Object.defineProperty(row, 'className', {
+      get: () => [...rowClassList.set].join(' '),
+      set: sync,
+    })
+    sync('x_row')
+    return row
+  })
+  const leaves = rows.map((spec, index) => rowEls[index].querySelector('[class*="_title"]'))
   const listEl = {
-    className: 'x_list', textContent: title + ' 3分钟',
-    querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? [titleLeaf, titleLeaf, titleLeaf] : []),
-    children: [row],
+    className: 'x_list',
+    // 容器探测要求子树含多个标题,单行场景补哑叶满足
+    querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? leaves.concat([{ className: 'a_title', textContent: '哑叶', querySelectorAll: () => [] }]) : []),
+    children: rowEls,
   }
   const dom = {
     querySelectorAll: (sel) => (sel.indexOf('_list') >= 0 ? [listEl] : []),
-    row, rowClassList,
+    addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn) },
+    removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter((f) => f !== fn) },
+    listeners,
+    rows: rowEls,
   }
   return dom
 }
 
+const clickEventOn = (row) => ({ target: { closest: (sel) => (sel === '.tn-sess-hl' ? row : null) } })
+
 test('Given 通知带 session 标题 When 认领 Then 会话行挂上高亮类', async () => {
-  const dom = makeSidebarDom('会话甲')
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
   const hlUnits = [
     { id: 'u-hl', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
   ]
   const { mod } = loadClient({
     storage: new FakeStorage(),
-    payload: { units: hlUnits, soundMapping: {}, sessionHighlight: true, version: 1 },
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
     document: dom,
   })
   await mod.__test.poll()
-  assert.ok(dom.rowClassList.set.has('tn-sess-hl'), '会话行未挂高亮类')
-  assert.ok(dom.rowClassList.set.has('tn-sess-hl--completed'), '高亮类缺少分类色')
+  assert.ok(dom.rows[0].classList.set.has('tn-sess-hl'), '会话行未挂高亮类')
+  assert.ok(dom.rows[0].classList.set.has('tn-sess-hl--completed'), '高亮类缺少分类色')
 })
 
 test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路不抛', async () => {
-  const dom = makeSidebarDom('会话甲')
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
   const bareUnits = [
     { id: 'u-bare', category: 'completed', text: '[dsh] 任务完成: 无标题' },
   ]
   const { mod, shown } = loadClient({
     storage: new FakeStorage(),
-    payload: { units: bareUnits, soundMapping: {}, sessionHighlight: true, version: 1 },
+    payload: { units: bareUnits, soundMapping: {}, version: 1 },
     document: dom,
   })
   await mod.__test.poll()
   assert.equal(shown.length, 1)
-  assert.equal(dom.rowClassList.set.has('tn-sess-hl'), false)
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false)
+})
+
+test('Given 短标题先于长前缀行匹配 When 挂类 Then 短标题精确命中自身行', async () => {
+  // 长标题行在前,短标题是长标题的子串:短标题通知必须挂到全等行,不得被子串误吸
+  const dom = makeSidebarDom([
+    { leafText: '修复通知插件长轮询问题' },
+    { leafText: '通知插件' },
+  ])
+  const hlUnits = [
+    { id: 'u-long', category: 'completed', text: '[dsh] 任务完成: 长标题', session: '修复通知插件长轮询问题' },
+    { id: 'u-short', category: 'ask', text: '[dsh] AI 提问: 短标题', session: '通知插件' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: dom,
+  })
+  await mod.__test.poll()
+  assert.ok(dom.rows[0].classList.set.has('tn-sess-hl--completed'), '长标题行未挂类')
+  assert.ok(dom.rows[1].classList.set.has('tn-sess-hl--ask'), '短标题行未挂到自身行')
+  assert.equal(dom.rows[1].classList.set.has('tn-sess-hl--completed'), false, '长标题类误挂到短标题行')
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl--ask'), false, '短标题类误挂到长标题行')
+})
+
+test('Given 两行各自高亮 When 点击其中一行 Then 仅该行清除且另一行不受影响', async () => {
+  const dom = makeSidebarDom([
+    { leafText: '修复通知插件长轮询问题' },
+    { leafText: '通知插件' },
+  ])
+  const hlUnits = [
+    { id: 'u-long', category: 'completed', text: '[dsh] 任务完成: 长标题', session: '修复通知插件长轮询问题' },
+    { id: 'u-short', category: 'ask', text: '[dsh] AI 提问: 短标题', session: '通知插件' },
+  ]
+  const { mod, window: winStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: dom,
+  })
+  await mod.__test.poll()
+  mod.__test.start()
+  const clickListeners = dom.listeners.click || []
+  assert.ok(clickListeners.length > 0, 'click listener 未挂载')
+  for (const fn of clickListeners) fn(clickEventOn(dom.rows[0]))
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '点击行未清除')
+  assert.equal(dom.rows[1].classList.set.has('tn-sess-hl'), true, '另一行被误清除')
+  winStub['turn-notify:polling'].abort()
 })
 
 test('announcedIds 去重窗口按 TTL 过期清理', () => {
