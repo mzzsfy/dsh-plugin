@@ -23,6 +23,7 @@ import {
   HISTORY_ALIGN_SLICE_MS,
   HISTORY_ALIGN_THROTTLE_MS,
   HISTORY_ALIGN_YIELD_MS,
+  HISTORY_FOCUS_WAIT_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
   HISTORY_SCOPES,
@@ -523,8 +524,9 @@ export function apply(ctx, config) {
   }
   scheduleStartupAlign()
 
-  // 聚焦对齐去重:同会话在队列/执行中不重复入队(repull 每 3s 重入,须挡住风暴)
-  const pendingFocus = new Set()
+  // 聚焦对齐去重:同会话在队列/执行中不重复入队(轮询重入须挡住风暴)。
+  // 值为在途 promise,路由据此有界等待同一次对齐
+  const pendingFocus = new Map()
   ctx.effect(() => () => pendingFocus.clear(), 'session-manager history pending focus')
 
   // 按范围读取历史:全部直接读持久缓存(毫秒级)立即返回,对齐由后台进行;
@@ -535,28 +537,44 @@ export function apply(ctx, config) {
     const cwd = header.cwd
     if (scope === 'session') {
       if (cwd === undefined) return { inputs: [], aligned: true }
-      const cached = await readWorkspaceCache(cacheDir, cwd)
       alignWorkspace(cwd)
-      const mine = cached ? cached.entries.filter((entry) => entry.sid === sessionId) : []
-      // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
-      // 只解该会话并写回,aligned=false 让客户端横幅重拉;巨产物跳过(单次解压
-      // 不可让出,实时性让位于不卡主循环),维持 aligned=true 返回既有数据
-      const agents = ctx.get('agents')
-      const running = isSessionRunning({ agents, sessionId })
-      const known = running ? runtimeExtracts.get(sessionId) : cached && cached.extracts ? cached.extracts[sessionId] : undefined
-      const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
-      const fingerprint = located ? await safeStat(located.path) : null
-      const stale = fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size)
-      const oversize = fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES
-      const fresh = cached !== null && !(stale && !oversize)
-      if (stale && !oversize) {
-        if (!pendingFocus.has(sessionId)) {
-          pendingFocus.add(sessionId)
-          alignSessionFocus(cwd, header).finally(() => pendingFocus.delete(sessionId))
+      const read = async () => {
+        const cached = await readWorkspaceCache(cacheDir, cwd)
+        return {
+          cached,
+          mine: aggregateInputs(cached ? cached.entries.filter((entry) => entry.sid === sessionId) : [], aggregateOptions),
         }
-        return { inputs: aggregateInputs(mine, aggregateOptions), aligned: false }
       }
-      return { inputs: aggregateInputs(mine, aggregateOptions), aligned: fresh }
+      // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
+      // 只解该会话并写回。路由有界等待本次对齐(首条 <3s 预算):正常会话单次
+      // 请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,后续
+      // 轮询流式补齐。巨产物跳过聚焦(单次解压不可让出),维持 aligned=true
+      const check = async (cached) => {
+        const agents = ctx.get('agents')
+        const running = isSessionRunning({ agents, sessionId })
+        const known = running ? runtimeExtracts.get(sessionId) : cached && cached.extracts ? cached.extracts[sessionId] : undefined
+        const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
+        const fingerprint = located ? await safeStat(located.path) : null
+        return {
+          stale: fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
+          oversize: fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES,
+        }
+      }
+      let { cached, mine } = await read()
+      let { stale, oversize } = await check(cached)
+      if (stale && !oversize) {
+        let focus = pendingFocus.get(sessionId)
+        if (!focus) {
+          focus = alignSessionFocus(cwd, header).finally(() => pendingFocus.delete(sessionId))
+          pendingFocus.set(sessionId, focus)
+        }
+        const done = await Promise.race([focus.then(() => true), sleep(HISTORY_FOCUS_WAIT_MS).then(() => false)])
+        ;({ cached, mine } = await read())
+        ;({ stale } = await check(cached))
+        if (!done || stale) return { inputs: mine, aligned: false }
+        return { inputs: mine, aligned: true }
+      }
+      return { inputs: mine, aligned: cached !== null }
     }
     if (scope === 'global') {
       const caches = await listWorkspaceCaches(cacheDir)

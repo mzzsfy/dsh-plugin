@@ -1611,7 +1611,7 @@ test('历史输入路由:再次请求读缓存不再解压产物(对齐节流内
   })
 })
 
-test('历史输入路由:会话产物变化触发聚焦对齐,重拉后看到新输入(实时追加)', skipMissingDeps, async () => {
+test('历史输入路由:会话产物变化即席聚焦对齐,单次请求内拿到新输入(首条<3s)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-focus-'))
     const artifactPath = path.join(dir, 'session.jsonl.zstd')
@@ -1625,16 +1625,14 @@ test('历史输入路由:会话产物变化触发聚焦对齐,重拉后看到新
       }
       const first = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('旧输入', 100)] } })
       await requestUntilAligned(first.handlers, '?sessionId=s1&scope=session')
-      // 产物增长(会话有新输入):指纹失效,会话范围应 aligned=false 并触发聚焦对齐
+      // 产物增长(会话有新输入):指纹失效——路由就地等待聚焦对齐,
+      // 测试桩的 readSession 立即完成,单次请求内应直接拿到新输入且 aligned
       await writeFile(artifactPath, 'log-v1-much-longer-appended')
       const second = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('旧输入', 100), userMessageEvent('新输入XYZ', 200)] } })
-      const staleRes = await requestUntil(second.handlers, '?sessionId=s1&scope=session',
-        (body) => body.aligned === false)
-      assert.deepEqual(staleRes.body.inputs.map((item) => item.text), ['旧输入'])
-      // 聚焦对齐完成后重拉:新输入可见
-      const freshRes = await requestUntil(second.handlers, '?sessionId=s1&scope=session',
-        (body) => body.aligned && body.inputs.some((item) => item.text === '新输入XYZ'))
-      assert.deepEqual(freshRes.body.inputs.map((item) => item.text), ['新输入XYZ', '旧输入'])
+      const res = response()
+      await second.handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=session'), res)
+      assert.equal(res.body.aligned, true, '焦点对齐快于等待时限,首请求即就绪')
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['新输入XYZ', '旧输入'])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -143,6 +143,9 @@ export const HISTORY_STARTUP_SCAN_LIMIT = 100
 export const HISTORY_ALIGN_SLICE_MS = 200
 export const HISTORY_ALIGN_YIELD_MS = 100
 export const HISTORY_ALIGN_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+// 会话范围路由触发焦点对齐后就地等待的时限:首条数据可见预算(3s)内
+// 留出解压+读盘份额,超时改走轮询流式补齐
+export const HISTORY_FOCUS_WAIT_MS = 2 * 1000
 
 /**
  * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,
