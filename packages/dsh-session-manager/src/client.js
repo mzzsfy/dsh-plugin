@@ -499,9 +499,11 @@ function HistoryDock({ session, inputActions }) {
         return
       }
       if (event.key === 'Enter') {
+        // 未选中条目时放行:用户可能只是在草稿里按 Enter 发消息,吞掉即是「假死锁定」
+        if (!(view.items !== null && view.cursor >= 0 && view.cursor < view.items.length)) return
         event.preventDefault()
         event.stopPropagation()
-        if (view.items !== null && view.cursor >= 0 && view.cursor < view.items.length) fill(view.items[view.cursor].text)
+        fill(view.items[view.cursor].text)
         return
       }
       if (event.key === 'Escape') {
@@ -522,11 +524,14 @@ function HistoryDock({ session, inputActions }) {
     if (row) row.scrollIntoView({ block: 'nearest' })
   }, [open, cursor, items])
 
-  // 浮层外点击关闭
+  // 浮层外点击关闭(双写:漏写 viewRef 会让键盘层误判浮层仍开,吞掉输入框方向键)
   useEffect(() => {
     if (!open) return undefined
     function onPointerDown(event) {
-      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false)
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        syncView({ open: false })
+        setOpen(false)
+      }
     }
     document.addEventListener('mousedown', onPointerDown, true)
     return () => document.removeEventListener('mousedown', onPointerDown, true)

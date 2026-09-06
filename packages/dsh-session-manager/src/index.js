@@ -19,6 +19,7 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
+  HISTORY_ALIGN_MAX_ARTIFACT_BYTES,
   HISTORY_ALIGN_SLICE_MS,
   HISTORY_ALIGN_THROTTLE_MS,
   HISTORY_ALIGN_YIELD_MS,
@@ -400,16 +401,16 @@ export function apply(ctx, config) {
   }
 
   // 真正的对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
-  // 与缓存合并后原子写回。runtimeOnly=true 仅处理运行中会话(启动即时路径)。
-  // 入队串行执行(alignQueue 链),返回本工作区的对齐 promise
-  function alignWorkspaceNow(cwd, { runtimeOnly = false } = {}) {
+  // 与缓存合并后原子写回。入队串行执行(alignQueue 链),返回本工作区的对齐 promise。
+  // 超过 MAX_ARTIFACT 的巨产物直接跳过:单次 readSession 内部同步解压不可让出,
+  // 巨会话一解卡死主循环;其历史来自缓存 entries 的既有贡献
+  function alignWorkspaceNow(cwd) {
     return alignQueue = alignQueue.then(async () => {
       const agents = ctx.get('agents')
       const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
       const inScope = records
         .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
-        .filter((recordItem) => !runtimeOnly || isSessionRunning({ agents, sessionId: recordItem.header.id }))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
@@ -419,6 +420,7 @@ export function apply(ctx, config) {
         const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
         const located = persistence ? persistence.locate(recordItem.header) : undefined
         const fingerprint = located ? await safeStat(located.path) : null
+        if (fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES) continue
         try {
           const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
           fresh.push(...entries.map((entry) => ({ ...entry, sid: recordItem.header.id })))
@@ -456,20 +458,19 @@ export function apply(ctx, config) {
     void alignWorkspaceNow(cwd)
   }
 
-  // 启动:确保目录 + 当前会话(运行中)历史立即就绪——磁盘无缓存时首启也能秒出浮层;
-  // 全量启动对齐延迟 STARTUP_DELAY 再跑(不与宿主启动抢 CPU)。定时器随插件销毁清理
+  // 启动:只确保目录存在,**零解压**——历史直接读磁盘缓存(重启前的输入本就在
+  // entries 里),宿主启动零负担;全量对齐延迟 STARTUP_DELAY 再跑(只解产物变过
+  // 的会话)。定时器随插件销毁清理
   const startupTimers = []
   ctx.effect(() => () => { for (const timer of startupTimers) clearTimeout(timer) }, 'session-manager history startup timers')
 
-  function scheduleStartupAlign(delayMs, runtimeOnly) {
+  function scheduleStartupAlign() {
     startupTimers.push(setTimeout(() => {
       void (async () => {
         await ensureCacheDir(cacheDir)
-        const agents = ctx.get('agents')
         const records = await ctx.sessionQuery.listSessions()
         const workspaces = []
         for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
-          if (runtimeOnly && !isSessionRunning({ agents, sessionId: recordItem.header.id })) continue
           const recordCwd = recordItem.header.cwd
           if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
           workspaces.push(recordCwd)
@@ -478,10 +479,9 @@ export function apply(ctx, config) {
       })().catch((error) => {
         ctx.logger && ctx.logger.warn('session-manager 历史缓存启动对齐失败: ' + String(error && error.stack || error))
       })
-    }, delayMs))
+    }, HISTORY_STARTUP_DELAY_MS))
   }
-  scheduleStartupAlign(0, true)
-  scheduleStartupAlign(HISTORY_STARTUP_DELAY_MS, false)
+  scheduleStartupAlign()
 
   // 按范围读取历史:全部直接读持久缓存(毫秒级)立即返回,对齐由后台进行;
   // aligned=false 表示该范围尚无缓存(首次),client 据此提示等待并静默重拉
@@ -496,7 +496,7 @@ export function apply(ctx, config) {
     }
     if (scope === 'global') {
       const caches = await listWorkspaceCaches(cacheDir)
-      if (caches.length > 0) alignWorkspace(caches[0].cwd)
+      for (const cache of caches) alignWorkspace(cache.cwd)
       return { inputs: aggregateInputs(caches.flatMap((cache) => cache.entries), aggregateOptions), aligned: true }
     }
     const cached = await readWorkspaceCache(cacheDir, cwd)
