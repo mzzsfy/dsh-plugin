@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "@mzzsfy/dsh-maintain",
-  "description": "DSH 鑷韩鐨勭増鏈鐞?杩借釜 npm dist-tag 鏂扮増鏈€佷竴閿崌绾с€佸畨鍏ㄩ噸鍚?,
+  "description": "DSH 自身的版本管理:追踪 npm dist-tag 新版本、一键升级、安全重启",
   "version": "0.5.1",
   "type": "module",
   "main": "src/index.js",
