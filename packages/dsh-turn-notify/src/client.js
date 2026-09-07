@@ -28,6 +28,8 @@ window.__ModuleLoader__.load({
     // 页内通知展示期,经公共依赖 holdMs 传入
     const TOAST_MS = 6 * 1000
     const BLINK_MS = 1 * 1000
+    // 连环通知下标题闪烁的总时长硬顶
+    const BLINK_MAX_MS = 30 * 1000
     // 系统通知测试延迟:浏览器对聚焦窗口抑制系统弹窗,倒计时供用户切出窗口
     const SYSTEM_TEST_DELAY_MS = 5 * 1000
     // 显示回执等待上限:超时未回执按环境层拦截给出诊断
@@ -475,17 +477,28 @@ window.__ModuleLoader__.load({
     // 本包只保留标题闪烁通道
 
     let blinkTimer = null
+    let blinkStopTimer = null
     const baseTitle = () => document.title.replace(/^⏳ /, '')
 
+    // 连环通知(并行会话批量报错)间隔小于 TOAST_MS 时,闪烁会被逐条续命;
+    // 硬顶 BLINK_MAX_MS 保证任何情况下标题必停,焦点返回时由可见性同步立即清除
     function startTitleBlink() {
-      if (blinkTimer !== null) return
+      if (blinkTimer !== null) {
+        clearTimeout(blinkStopTimer)
+        blinkStopTimer = setTimeout(stopTitleBlink, BLINK_MAX_MS - BLINK_MS)
+        return
+      }
       blinkTimer = setInterval(() => {
         document.title = document.title.startsWith('⏳ ') ? baseTitle() : '⏳ ' + baseTitle()
       }, BLINK_MS)
-      setTimeout(stopTitleBlink, TOAST_MS)
+      blinkStopTimer = setTimeout(stopTitleBlink, TOAST_MS)
     }
 
     function stopTitleBlink() {
+      if (blinkStopTimer !== null) {
+        clearTimeout(blinkStopTimer)
+        blinkStopTimer = null
+      }
       if (blinkTimer === null) return
       clearInterval(blinkTimer)
       blinkTimer = null
@@ -586,8 +599,8 @@ window.__ModuleLoader__.load({
         if (channels.pageSound && toast) {
           playSound(resolveSound(unit.category, mergeMapping(effectiveMapping(), readPageMapping()), uploadedIds)).catch(() => {})
         }
-        if (!channels.sound) continue
-        playSound(sound).catch(() => {})
+        // 声音关闭只静音自身:system 弹窗与 blink 降级通道独立判断,不因无声 continue 连坐
+        if (channels.sound) playSound(sound).catch(() => {})
         if (channels.system) notifySystem(unit)
         else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
       }
@@ -827,8 +840,12 @@ window.__ModuleLoader__.load({
       const onVisible = () => {
         if (document.hidden) return
         clearCurrentSessionHighlights()
+        stopTitleBlink()
       }
-      const onFocus = () => clearCurrentSessionHighlights()
+      const onFocus = () => {
+        clearCurrentSessionHighlights()
+        stopTitleBlink()
+      }
       const dispose = () => {
         if (typeof window.removeEventListener === 'function') window.removeEventListener('focus', onFocus)
         document.removeEventListener('visibilitychange', onVisible)

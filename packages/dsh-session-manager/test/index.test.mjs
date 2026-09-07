@@ -22,7 +22,7 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const MESSAGES = indexModule.MESSAGES
-const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
+const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT, HISTORY_INPUT_MAX_CHARS, HISTORY_PROMPTS_MAX, HISTORY_SCOPES } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
 const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cache.mjs')
 
 // 插件激活即跑历史缓存启动对齐:所有测试统一隔离缓存目录,
@@ -121,9 +121,11 @@ function makeCtx({
   const pendingInjects = []
   const ledgerDomain = ledger === undefined ? makeLedgerDomain([]) : ledger
   const workspaceList = workspaces || []
+  const settingsState = { value: settingsValue }
   const settingsService = {
-    get: () => settingsValue,
+    get: () => settingsState.value,
     register: () => ({ resolved: undefined }),
+    update: (ns, patch) => { settingsState.value = { ...(settingsState.value || {}), ...patch } },
   }
   // timer 服务桩:模拟宿主 timer 激活后的 interval;unref 保证测试进程可自然退出
   const intervalStub = (fn, ms) => {
@@ -1455,6 +1457,19 @@ function requestUntilAligned(handlers, query) {
   return requestUntil(handlers, query, (body) => body.aligned)
 }
 
+// POST 夹具:请求体走 readBody 的 data/end 事件流,handler 按路径查找
+async function postJson(handlers, routePath, body) {
+  const req = new EventEmitter()
+  req.method = 'POST'
+  req.url = routePath
+  const res = response()
+  const done = handlers.get(routePath)(req, res)
+  req.emit('data', Buffer.from(JSON.stringify(body), 'utf8'))
+  req.emit('end')
+  await done
+  return res
+}
+
 // 每个测试独占临时缓存目录:插件 factory 在 makeCtx 时读取 env 解析缓存目录。
 // 后台对齐 fire-and-forget,测试结束仍在写目录——清理重试躲开 Windows 文件占用
 async function withHistoryCacheDir(run) {
@@ -1724,3 +1739,113 @@ test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老�
     assert.ok(readCounts.get('s' + (total - 1)) >= 1, '窗口内最新会话被解压')
   })
 })
+
+test('常用提示词:toggle 收藏/取消,prompts 范围可见,与工作区缓存互不污染', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-prompts-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    try {
+      await writeFile(artifactPath, 'log-v1')
+      const { handlers } = makeCtx({
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('历史输入A', 100)] },
+      })
+      // 初始为空
+      const empty = response()
+      await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=prompts'), empty)
+      assert.deepEqual(empty.body.inputs, [])
+      // 收藏 → prompts 可见;工作区范围不混入
+      await postJson(handlers, '/api/session-manager/prompts/toggle', { text: '常用句子X' })
+      const listed = response()
+      await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=prompts'), listed)
+      assert.deepEqual(listed.body.inputs.map((item) => item.text), ['常用句子X'])
+      const workspace = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '历史输入A'))
+      assert.equal(workspace.body.inputs.some((item) => item.text === '常用句子X'), false, '收藏不混入工作区历史')
+      // 再 toggle = 取消
+      await postJson(handlers, '/api/session-manager/prompts/toggle', { text: '常用句子X' })
+      const cleared = response()
+      await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=prompts'), cleared)
+      assert.deepEqual(cleared.body.inputs, [])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('常用提示词:超长截断、上限裁剪、空 text 拒绝', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sm-hist-prompts-cap-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    try {
+      await writeFile(artifactPath, 'log-v1')
+      const { handlers } = makeCtx({
+        archivedIds: [],
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('占位', 100)] },
+      })
+      await requestUntilAligned(handlers, '?sessionId=s1&scope=prompts')
+      // 空白文本拒绝
+      const blank = await postJson(handlers, '/api/session-manager/prompts/toggle', { text: '   ' })
+      assert.equal(blank.status, 400)
+      // 截断:HISTORY_INPUT_MAX_CHARS 以上裁到上限
+      const long = '长'.repeat(HISTORY_INPUT_MAX_CHARS + 10)
+      await postJson(handlers, '/api/session-manager/prompts/toggle', { text: long })
+      const listed = response()
+      await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=prompts'), listed)
+      assert.equal(listed.body.inputs[0].text.length, HISTORY_INPUT_MAX_CHARS)
+      await postJson(handlers, '/api/session-manager/prompts/toggle', { text: '长'.repeat(HISTORY_INPUT_MAX_CHARS) })
+      // 上限:超过 HISTORY_PROMPTS_MAX 后最旧被裁
+      for (let i = 0; i < HISTORY_PROMPTS_MAX + 1; i++) {
+        await postJson(handlers, '/api/session-manager/prompts/toggle', { text: '条目' + i })
+      }
+      const capped = response()
+      await handlers.get('/api/session-manager/inputs')(getRequest('?sessionId=s1&scope=prompts'), capped)
+      assert.equal(capped.body.inputs.length, HISTORY_PROMPTS_MAX)
+      assert.equal(capped.body.inputs.some((item) => item.text === '条目0'), false, '最旧条目被裁掉')
+      assert.equal(capped.body.inputs[0].text, '条目' + HISTORY_PROMPTS_MAX, '最新条目在顶部')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('常用提示词:client 与 core 的 HISTORY_SCOPES 镜像同序同值,默认落点为当前会话', { skip: process.env.TEST_SKIP_PARITY }, async () => {
+  const clientSource = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const declared = clientSource.match(/const HISTORY_SCOPES = (\[[^\]]*\])/)
+  assert.ok(declared, 'client.js 必须内联声明 HISTORY_SCOPES')
+  assert.deepEqual(JSON.parse(declared[1].replace(/'/g, '"')), HISTORY_SCOPES)
+  const labels = clientSource.match(/const HISTORY_SCOPE_LABELS = (\[[^\]]*\])/)
+  assert.ok(labels, 'client.js 必须内联声明 HISTORY_SCOPE_LABELS')
+  assert.equal(JSON.parse(labels[1].replace(/'/g, '"')).length, HISTORY_SCOPES.length, '标签与范围一一对应')
+  assert.equal(HISTORY_SCOPES.indexOf('session'), 1, '浮层默认落点为当前会话(索引 1)')
+})
+
+test('历史浮层启停:GET 默认启用,POST 切换经 settings 持久,GET 反映新值', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const initial = response()
+  await handlers.get('/api/session-manager/history-enabled')(getRequest2('/api/session-manager/history-enabled', 'GET'), initial)
+  assert.equal(initial.body.enabled, true, '默认启用')
+  const off = await postJson(handlers, '/api/session-manager/history-enabled', { enabled: false })
+  assert.equal(off.body.enabled, false)
+  // settings 持久:重读反映关闭态;POST 回 true 恢复
+  const reread = response()
+  await handlers.get('/api/session-manager/history-enabled')(getRequest2('/api/session-manager/history-enabled', 'GET'), reread)
+  assert.equal(reread.body.enabled, false, 'settings 持久化关闭态')
+  await postJson(handlers, '/api/session-manager/history-enabled', { enabled: true })
+  const restored = response()
+  await handlers.get('/api/session-manager/history-enabled')(getRequest2('/api/session-manager/history-enabled', 'GET'), restored)
+  assert.equal(restored.body.enabled, true)
+})
+
+function getRequest2(url, method) {
+  const req = new EventEmitter()
+  req.method = method
+  req.url = url
+  return req
+}

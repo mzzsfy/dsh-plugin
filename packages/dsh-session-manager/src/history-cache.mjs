@@ -53,15 +53,42 @@ export async function listWorkspaceCaches(dir) {
     return []
   }
   const caches = await Promise.all(names
-    .filter((name) => name.endsWith('.json'))
+    .filter((name) => name.endsWith('.json') && name !== PROMPTS_FILE)
     .map(async (name) => {
       try {
-        return normalize(JSON.parse(await readFile(join(dir, name), 'utf8')), undefined) === undefined
-          ? null
-          : JSON.parse(await readFile(join(dir, name), 'utf8'))
+        const parsed = JSON.parse(await readFile(join(dir, name), 'utf8'))
+        if (!parsed || typeof parsed.cwd !== 'string' || !Array.isArray(parsed.entries)) return null
+        return parsed
       } catch {
         return null
       }
     }))
   return caches.filter((cache) => cache && typeof cache.cwd === 'string' && Array.isArray(cache.entries))
+}
+
+// 常用提示词:全局单文件(不按工作区),记录用户显式收藏的输入文本。
+// 收藏是用户意志,与自动对齐的历史缓存互不覆写
+const PROMPTS_FILE = 'prompts.json'
+
+function normalizePrompts(parsed) {
+  if (!parsed || !Array.isArray(parsed.items)) return []
+  return parsed.items
+    .filter((item) => item && typeof item.text === 'string' && item.text.length > 0)
+    .map((item) => ({ text: item.text, at: typeof item.at === 'number' ? item.at : 0 }))
+}
+
+export async function readPrompts(dir) {
+  try {
+    return normalizePrompts(JSON.parse(await readFile(join(dir, PROMPTS_FILE), 'utf8')))
+  } catch {
+    return []
+  }
+}
+
+export async function writePrompts(dir, items) {
+  await ensureCacheDir(dir)
+  const target = join(dir, PROMPTS_FILE)
+  const tmp = target + '.tmp'
+  await writeFile(tmp, JSON.stringify({ items }, null, 0), 'utf8')
+  await rename(tmp, target)
 }

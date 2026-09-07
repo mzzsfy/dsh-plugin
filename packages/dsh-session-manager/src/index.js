@@ -28,6 +28,7 @@ import {
   HISTORY_INPUT_MAX_CHARS,
   HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
+  HISTORY_PROMPTS_MAX,
   HISTORY_STARTUP_DELAY_MS,
   HISTORY_STARTUP_SCAN_LIMIT,
   aggregateDeleteOutcome,
@@ -41,7 +42,7 @@ import {
   selectArchiveCandidates,
   updatedAtOf,
 } from './core.mjs'
-import { ensureCacheDir, listWorkspaceCaches, readWorkspaceCache, writeWorkspaceCache } from './history-cache.mjs'
+import { ensureCacheDir, listWorkspaceCaches, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
 import { trashPath } from './trash.mjs'
 
 export const name = 'dsh-session-manager'
@@ -106,6 +107,8 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('自动归档阈值天数,0 表示关闭;新会话创建、启动与周期评估时生效'),
   autoArchiveIntervalHours: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS)
     .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
+  historyEnabled: schemastery.boolean().default(true)
+    .description('历史输入浮层(Alt+↑),低频功能,关闭后输入框锚点与快捷键整体不渲染;变更刷新页面生效'),
 })
 
 function sendJson(res, status, payload) {
@@ -132,6 +135,7 @@ function readSettings(ctx) {
   return {
     days: Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS,
     intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
+    historyEnabled: !value || value.historyEnabled !== false,
   }
 }
 
@@ -535,6 +539,10 @@ export function apply(ctx, config) {
   async function collectInputs(scope, sessionId, header) {
     const aggregateOptions = { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }
     const cwd = header.cwd
+    if (scope === 'prompts') {
+      const items = await readPrompts(cacheDir)
+      return { inputs: aggregateInputs(items, aggregateOptions), aligned: true }
+    }
     if (scope === 'session') {
       if (cwd === undefined) return { inputs: [], aligned: true }
       alignWorkspace(cwd)
@@ -805,6 +813,64 @@ export function apply(ctx, config) {
             ? { inputs: [], aligned: true }
             : await collectInputs(scope, sessionId, header)
           sendJson(res, 200, result)
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 常用提示词收藏切换:text 已收藏则移除,否则收藏(截断与上限同历史输入)
+      path: '/api/session-manager/prompts/toggle',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'POST')) return
+        try {
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const text = typeof body.text === 'string' ? body.text.trim() : ''
+          if (text === '') throw new Error('text 不能为空')
+          const items = await readPrompts(cacheDir)
+          const at = items.findIndex((item) => item.text === text)
+          let collected
+          if (at >= 0) {
+            items.splice(at, 1)
+            collected = false
+          } else {
+            items.unshift({ text: text.slice(0, HISTORY_INPUT_MAX_CHARS), at: Date.now() })
+            if (items.length > HISTORY_PROMPTS_MAX) items.length = HISTORY_PROMPTS_MAX
+            collected = true
+          }
+          await writePrompts(cacheDir, items)
+          sendJson(res, 200, { collected })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 历史浮层启停:读走 settings(原生设置页与本面板开关同一存储),
+      // 写经 settings.update,原生设置页与本面板即时同值
+      path: '/api/session-manager/history-enabled',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const settings = ctx.get('settings')
+          if (!settings) throw new Error('宿主设置服务不可用')
+          settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }

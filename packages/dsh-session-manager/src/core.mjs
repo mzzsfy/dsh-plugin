@@ -126,7 +126,8 @@ export function projectDeletedRows(deleted, sessionsById) {
 }
 
 // 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)。
-// 范围从窄到宽排列,client ←/→ 切换即在此数组上移动索引。
+// 范围按 ←/→ 切换序排列:索引 0 为常用提示词(个人收藏),索引 1 为当前会话
+// (浮层默认落点),→ 向更大范围,← 返回收藏
 // 对齐 = 后台解压范围内会话产物与持久缓存合并;两次对齐最小间隔防持续解压。
 // 解压是同步 CPU 操作会阻塞主循环:启动零解压(历史直接读磁盘缓存),
 // 全量对齐延迟 STARTUP_DELAY 再跑、只回溯最近 STARTUP_SCAN 个会话、
@@ -136,7 +137,8 @@ export function projectDeletedRows(deleted, sessionsById) {
 export const HISTORY_SESSION_SCAN_LIMIT = 20
 export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
-export const HISTORY_SCOPES = ['session', 'workspace', 'global']
+export const HISTORY_SCOPES = ['prompts', 'session', 'workspace', 'global']
+export const HISTORY_PROMPTS_MAX = 100
 export const HISTORY_ALIGN_THROTTLE_MS = 30 * 1000
 export const HISTORY_STARTUP_DELAY_MS = 30 * 1000
 export const HISTORY_STARTUP_SCAN_LIMIT = 100

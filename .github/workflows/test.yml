@@ -1,0 +1,66 @@
+name: 全量测试
+
+on:
+  push:
+    # 全部分支的提交推送;排除 tag 推送(发版 tag 不重复触发全量)
+    branches: ['**']
+  schedule:
+    # UTC 03:00 = 北京 11:00;每 3 个日历日(按 day-of-month 取模,跨月间隔略有浮动)
+    - cron: '0 3 */3 * *'
+
+permissions:
+  contents: read
+
+# push 同分支新提交取消在途运行;定时运行独立分组,不被 push 取消
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  test:
+    name: 全量测试 x10 (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # 双架构结果独立完整,一方失败不取消另一方
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # CI 无 dsh 本体:按测试静态 import 闭包在仓库根装宿主 peer 与 zod
+      # (session-manager 顶层 import zod;node ESM 逐级向上解析命中根 node_modules,
+      # 镜像开发态 junction 桥);--no-save --no-package-lock 保证不产生任何入库文件
+      - name: 安装宿主 peer(仓库根解析桥)
+        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.1-rc.2 @deepseek-ai/dsh-tools@0.1.1-rc.2 zod@4.5.4
+      # 该包 devDependencies 钉住宿主包版本,自身安装后其测试的宿主 import 就地解析
+      - name: 安装 dsh-llm-pi-gateway 依赖
+        working-directory: packages/dsh-llm-pi-gateway
+        run: npm install --no-save --no-package-lock --no-audit --no-fund
+      - name: 全量测试 x10
+        run: |
+          total=10
+          failures=0
+          for i in $(seq 1 "$total"); do
+            echo "::group::第 ${i}/${total} 轮"
+            round_start=$failures
+            node scripts/smoke-load.mjs || failures=$((failures+1))
+            node --test tests/engine.test.mjs || failures=$((failures+1))
+            node --test tests/workflow-parity.test.mjs || failures=$((failures+1))
+            # 包自动发现:凡含 test/ 目录的包全量执行,新增包无需改本文件
+            for dir in packages/*/; do
+              [ -d "${dir}test" ] || continue
+              (cd "$dir" && node --test "test/*.test.mjs") || failures=$((failures+1))
+            done
+            echo "本轮失败单元数: $((failures-round_start))"
+            echo "::endgroup::"
+          done
+          echo "汇总: ${total} 轮, 失败单元累计 ${failures}"
+          [ "$failures" -eq 0 ]
