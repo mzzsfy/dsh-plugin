@@ -1,12 +1,21 @@
 // client 纯函数层测试:滚动窗口映射/信封解析/上限裁剪/文案/格式化/分组/柱状几何
 // Given/When/Then 场景内嵌于用例描述
+// client.js 为非模块 script(bundle 求值形态,禁 import/export),整源求值后按顶层声明名收集
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-import {
+const CLIENT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
+const DECLARATION_NAMES = [
+  ...new Set(
+    [...CLIENT_SOURCE.matchAll(/^(?:const|function|let) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
+  ),
+]
+const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
+
+const {
   DAY_MAX_SLOTS,
   DAY_PRESETS,
   HOUR_PRESETS,
@@ -33,7 +42,7 @@ import {
   t,
   trimSlots,
   trendLayout,
-} from '../src/client-core.js'
+} = core
 
 const EPSILON = 1e-9
 const approx = (actual, expected) => assert.ok(Math.abs(actual - expected) < EPSILON, `expected ${expected}, got ${actual}`)
