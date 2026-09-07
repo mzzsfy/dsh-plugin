@@ -23,12 +23,48 @@ export function selectArchiveCandidates({ records, nowMs, thresholdDays }) {
     .map((item) => item.id)
 }
 
-/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id(与 client 镜像同规)。 */
-export function projectArchiveRows({ rows, archivedIds }) {
+/**
+ * 会话所属工作区标题解析(与 client 镜像同规):workspace 账本(sessionIds)
+ * 一级映射与官方 dsh-client-ui-workspace 的 workspaceBySession 同构;回退链为本
+ * 插件收紧决策——官方对账本缺失回退会话 cwd 的 basename(无需命中登记工作区),
+ * 此处要求 cwd 命中某登记工作区路径才回退其标题,否则未分组(null),避免把未
+ * 登记目录名冒充工作区。工作区 title 缺失时回退路径末段(官方 workspaceTitleOf
+ * 同构);title 与 path 皆缺返回 null。
+ */
+export function workspaceTitleOf(path) {
+  const trimmed = String(path).replace(/[/\\]+$/, '')
+  const separator = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return trimmed.slice(separator + 1)
+}
+
+export function workspaceTitleForSession({ workspaces, sessionId, cwd }) {
+  const items = Array.isArray(workspaces) ? workspaces : []
+  for (const workspace of items) {
+    if (workspace && Array.isArray(workspace.sessionIds) && workspace.sessionIds.includes(sessionId)) {
+      return workspace.title || (workspace.path ? workspaceTitleOf(workspace.path) : null)
+    }
+  }
+  const normalizedCwd = cwd ? String(cwd).replace(/[/\\]+$/, '') : ''
+  if (!normalizedCwd) return null
+  for (const workspace of items) {
+    if (workspace && workspace.path && String(workspace.path).replace(/[/\\]+$/, '') === normalizedCwd) {
+      return workspace.title || workspaceTitleOf(workspace.path)
+    }
+  }
+  return null
+}
+
+/** 归档面板行:session.list 行与归档集合的交集,按更新时间倒序;标题缺失回退会话 id;workspace 为所属工作区标题或 null(与 client 镜像同规)。 */
+export function projectArchiveRows({ rows, archivedIds, workspaces }) {
   const archived = new Set(archivedIds)
   return rows
     .filter((row) => archived.has(row.id))
-    .map((row) => ({ id: row.id, title: row.title || row.id, updatedAt: row.updatedAt }))
+    .map((row) => ({
+      id: row.id,
+      title: row.title || row.id,
+      updatedAt: row.updatedAt,
+      workspace: workspaceTitleForSession({ workspaces, sessionId: row.id, cwd: row.cwd }),
+    }))
     .sort((left, right) => right.updatedAt - left.updatedAt)
 }
 

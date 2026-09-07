@@ -47,6 +47,11 @@ const CSS = [
   '.sm-row--busy { opacity:.45; pointer-events:none; }',
   '.sm-row__time, .sm-row__size { font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-tertiary); font-variant-numeric:tabular-nums; }',
   '.sm-row__size { color:var(--dsw-alias-state-error-primary); }',
+  '.sm-row__title-wrap { display:flex; align-items:center; gap:6px; min-width:0; }',
+  '.sm-row__ws { flex:none; max-width:40%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
+  '  padding:0 6px; border-radius:999px; font:11px/18px var(--ds-font-family-code, monospace);',
+  '  color:var(--dsw-alias-label-tertiary); background:var(--dsw-alias-interactive-bg-hover); }',
+  '.sm-row__ws--none { background:transparent; box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l3); }',
   '.sm-row__title { font:var(--dsw-font-s-strong-14); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
   '.sm-row__error { grid-column:2 / -1; font:var(--dsw-font-xxs-12); color:var(--dsw-alias-state-error-primary); }',
   '.sm-row__path { grid-column:2 / -1; font:12px/16px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption);',
@@ -205,13 +210,48 @@ function useSnapshot(source) {
   )
 }
 
-// 已归档会话面板行:官方会话行 ∩ 归档集合,按更新时间倒序(镜像 core.mjs projectArchiveRows)
-function projectRows(listState, archivedIds) {
+// 工作区路径末段(官方 workspaceTitleOf 同构,镜像 core.mjs 同名函数)
+function workspaceTitleOf(path) {
+  const trimmed = String(path).replace(/[/\\]+$/, '')
+  const separator = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return trimmed.slice(separator + 1)
+}
+
+// 会话所属工作区标题:workspace 账本(sessionIds)一级映射与官方
+// dsh-client-ui-workspace workspaceBySession 同构;cwd 回退为本插件收紧决策
+// (官方回退 cwd basename 无需命中工作区,此处要求命中登记路径,防未登记目录名
+// 冒充工作区),未命中 null(未分组)(镜像 core.mjs workspaceTitleForSession)
+function workspaceTitleForSession(workspaces, sessionId, cwd) {
+  const items = Array.isArray(workspaces) ? workspaces : []
+  for (const workspace of items) {
+    if (workspace && Array.isArray(workspace.sessionIds) && workspace.sessionIds.includes(sessionId)) {
+      return workspace.title || (workspace.path ? workspaceTitleOf(workspace.path) : null)
+    }
+  }
+  const normalizedCwd = cwd ? String(cwd).replace(/[/\\]+$/, '') : ''
+  if (!normalizedCwd) return null
+  for (const workspace of items) {
+    if (workspace && workspace.path && String(workspace.path).replace(/[/\\]+$/, '') === normalizedCwd) {
+      return workspace.title || workspaceTitleOf(workspace.path)
+    }
+  }
+  return null
+}
+
+// 已归档会话面板行:官方会话行 ∩ 归档集合,按更新时间倒序;workspace 为所属
+// 工作区标题或 null(镜像 core.mjs projectArchiveRows)
+function projectRows(listState, archivedIds, workspaceState) {
   const archived = new Set(archivedIds)
   const byId = (listState && listState.byId) || {}
+  const workspaces = (workspaceState && workspaceState.items) || []
   return Object.keys(byId)
     .filter((id) => archived.has(id))
-    .map((id) => ({ id, title: byId[id].displayTitle || id, updatedAt: byId[id].updatedAt }))
+    .map((id) => ({
+      id,
+      title: byId[id].displayTitle || id,
+      updatedAt: byId[id].updatedAt,
+      workspace: workspaceTitleForSession(workspaces, id, byId[id].cwd),
+    }))
     .sort((left, right) => right.updatedAt - left.updatedAt)
 }
 
@@ -264,7 +304,12 @@ function ArchiveRow(props) {
     armed && confirm && !confirm.error
       ? h('span', { key: 'meta', className: 'sm-row__size' }, confirm.missing ? '产物已丢失' : fmtSize(confirm.sizeBytes))
       : h('span', { key: 'meta', className: 'sm-row__time', title: new Date(row.updatedAt).toLocaleString() }, fmtTime(row.updatedAt)),
-    h('span', { className: 'sm-row__title', title: row.title }, row.title),
+    h('span', { className: 'sm-row__title-wrap' },
+      row.workspace
+        ? h('span', { className: 'sm-row__ws', title: row.workspace }, row.workspace)
+        : h('span', { className: 'sm-row__ws sm-row__ws--none', title: '该会话不属于任何已登记工作区' }, '未分组'),
+      h('span', { className: 'sm-row__title', title: row.title }, row.title),
+    ),
     h('div', { className: 'sm-row__actions' }, actions),
     confirm && confirm.error ? h('span', { className: 'sm-row__error' }, confirm.error) : null,
   )
@@ -825,7 +870,7 @@ function HistoryDock({ session, inputActions }) {
           const listState = useSnapshot(sessionSvc.list)
           const workspaceState = useSnapshot(workspaceSvc.list)
           return React.createElement(SessionManagerApp, {
-            rows: projectRows(listState, (workspaceState && workspaceState.archivedSessionIds) || []),
+            rows: projectRows(listState, (workspaceState && workspaceState.archivedSessionIds) || [], workspaceState),
             listState,
           })
         }
