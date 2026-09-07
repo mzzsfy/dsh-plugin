@@ -301,8 +301,8 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
 }
 
 
-if (typeof __ModuleLoader__ !== 'undefined') {
-  __ModuleLoader__.load({ id: 'usage-dash', factory })
+if (typeof window !== 'undefined' && window.__ModuleLoader__) {
+  window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
 
   function factory(require) {
     let React = null
