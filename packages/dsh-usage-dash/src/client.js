@@ -476,11 +476,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     function Card({ icon, label, hint, children }) {
+      const lines = Array.isArray(children) ? children : [children]
       return h('div', { className: 'ud-card', title: hint },
         h('div', { className: 'ud-card-head' },
           h('span', { className: 'ud-card-icon' }, h(Icon, { paths: icon })),
           h('span', { className: 'ud-card-label' }, label)),
-        ...children)
+        ...lines)
     }
 
     function StatCards({ stats }) {
