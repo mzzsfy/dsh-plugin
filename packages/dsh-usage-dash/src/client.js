@@ -1771,24 +1771,21 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'locale'],
       apply(ctx) {
         ensureStyle(document)
-        // locale 面由宿主装配提供:缺席即干净降级(不注册字典、不声明 locale 座),恒 zh
-        const hasLocale = typeof ctx.locale?.register === 'function'
-        if (hasLocale) ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh: MESSAGES_ZH, en: MESSAGES_EN }), 'usage-dash: dictionaries')
-        const navLabel = hasLocale ? () => ctx.locale.bind(LOCALE_NS)('nav') : defaultT('nav')
-        const withLocale = hasLocale ? { locale: LOCALE_NS } : {}
+        // locale 座随槽声明,语言切换经新 t 引用驱动重渲染;旧宿主无 locale 服务时由 cordis 门控整体未激活
+        ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh: MESSAGES_ZH, en: MESSAGES_EN }), 'usage-dash: dictionaries')
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'usage-dash', order: 45, label: navLabel, ...withLocale },
+            { name: 'settings.section', id: 'usage-dash', order: 45, label: () => ctx.locale.bind(LOCALE_NS)('nav'), locale: LOCALE_NS },
             UsageDashPanel,
           ))
         // 两段式接管官方 stats 格:宿主缺该插槽时注册抛错即禁用本功能
         try {
           ctx.slots.inject('conversation.composer.dock', () =>
             ctx.slots.register(
-              { name: 'conversation.composer.dock', id: 'stats', order: 0, priority: STATS_SLOT_PRIORITY, ...withLocale },
+              { name: 'conversation.composer.dock', id: 'stats', order: 0, priority: STATS_SLOT_PRIORITY, locale: LOCALE_NS },
               StatsLineEnhanced,
             ))
         } catch (error) {
