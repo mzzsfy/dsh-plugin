@@ -313,6 +313,28 @@ test('minutes 禁用保留时标注空 covered', async () => {
   assert.equal(parsed.value.coveredTo, '')
 })
 
+test('minutes from 未对齐 10 分钟桶边界拒绝 400', async () => {
+  const { routes } = mount()
+  const d = new Date(FIXED_NOW)
+  const unaligned = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T12:07`
+  const res = await invokeJson(routes, PATH_MINUTES, { payload: { from: unaligned, to: minuteKey(FIXED_NOW) } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 400)
+  assert.equal(parsed.ok, false)
+  assert.match(parsed.error.message, /align to 10 minutes/)
+})
+
+test('minutes 保留值超上限时 covered 窗口按 clamp 计算', async () => {
+  const { routes } = mount({ retentionDays: () => 30 })
+  const from = minuteKey(FIXED_NOW - 3 * DAY_MS)
+  const to = minuteKey(FIXED_NOW)
+  const res = await invokeJson(routes, PATH_MINUTES, { payload: { from, to } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal(parsed.value.coveredFrom, minuteKey(FIXED_NOW - 2 * DAY_MS))
+  assert.equal(parsed.value.coveredTo, to)
+})
+
 test('请求体缺失 from/to 拒绝 400', async () => {
   const { routes } = mount()
   const res = await invoke(routes, PATH_RANGE, { headers: { ...JSON_HEADERS } })

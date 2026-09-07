@@ -31,15 +31,18 @@ const nextHour = (date) => {
 }
 const nextMinute = (date) => {
   const next = new Date(date)
-  next.setMinutes(next.getMinutes() + 1)
+  next.setMinutes(next.getMinutes() + MINUTE_STEP_MINUTES)
   return next
 }
+
+// 分钟桶粒度:枚举与桶键共用同一步长,from 必须对齐桶边界
+const MINUTE_STEP_MINUTES = 10
 
 // pattern 锚定桶串形态,suffix 补全为本地时区可解析日期串,format 回读校验分量合法性
 const BUCKET_FORMS = {
   [GRANULARITY_DAILY]: { pattern: DAY_KEY_PATTERN, suffix: 'T00:00:00', format: formatDate, step: nextDay },
   [GRANULARITY_HOURLY]: { pattern: HOUR_KEY_PATTERN, suffix: ':00:00', format: formatHour, step: nextHour },
-  [GRANULARITY_MINUTE]: { pattern: MINUTE_KEY_PATTERN, suffix: ':00', format: formatMinute, step: nextMinute },
+  [GRANULARITY_MINUTE]: { pattern: MINUTE_KEY_PATTERN, suffix: ':00', format: formatMinute, step: nextMinute, align: MINUTE_STEP_MINUTES },
 }
 
 const parseBucketKey = (key, form) => {
@@ -52,6 +55,7 @@ const enumerateBucketKeys = (form) => (from, to) => {
   const start = parseBucketKey(from, form)
   const end = parseBucketKey(to, form)
   if (!start || !end) return []
+  if (form.align && start.getMinutes() % form.align !== 0) return []
   const keys = []
   for (let cursor = start, key = form.format(cursor); key <= to; key = form.format(cursor)) {
     keys.push(key)
@@ -93,8 +97,10 @@ export function aggregateRange(rows, g, from, to) {
   const providerTotals = new Map()
   const activeBuckets = new Set()
   for (const row of rows) {
-    const tokens = row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens
     const slot = slotByKey.get(row.bucket)
+    // 桶串未落在枚举序列(如改粒度前的历史残行)不可归属,跳过防崩
+    if (!slot) continue
+    const tokens = row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens
     addRowToSlot(slot, row, tokens)
     if (tokens === 0) continue
     activeBuckets.add(row.bucket)

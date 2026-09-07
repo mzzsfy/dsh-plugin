@@ -73,12 +73,14 @@ test('hour 预设跨日且窗口起点落整点', () => {
   assert.deepEqual(resolveHourRange('24h', new Date(2026, 2, 15, 0, 30)), { from: '2026-03-14T00', to: '2026-03-15T00' })
 })
 
-test('minute 预设 now-N 舍入到整分桶起点', () => {
+test('minute 预设起点对齐 10 分钟桶,to 保持原始分钟', () => {
   assert.deepEqual(resolveMinuteRange('60m', NOW), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
   assert.deepEqual(resolveMinuteRange('360m', NOW), { from: '2026-03-15T08:30', to: '2026-03-15T14:30' })
+  const offGrid = new Date(2026, 2, 15, 14, 37, 20)
+  assert.deepEqual(resolveMinuteRange('60m', offGrid), { from: '2026-03-15T13:30', to: '2026-03-15T14:37' })
 })
 
-test('minute 预设整分边界不再回退', () => {
+test('minute 预设整桶边界不再回退', () => {
   assert.deepEqual(resolveMinuteRange('60m', new Date(2026, 2, 15, 14, 30, 0)), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
 })
 
@@ -93,9 +95,9 @@ test('每视图渲染上限等于闭区间桶数', () => {
   assert.equal(maxSlotsFor('hour', '24h'), 25)
   assert.equal(maxSlotsFor('hour', '48h'), 49)
   assert.equal(maxSlotsFor('hour', '72h'), 73)
-  assert.equal(maxSlotsFor('minute', '60m'), 61)
-  assert.equal(maxSlotsFor('minute', '180m'), 181)
-  assert.equal(maxSlotsFor('minute', '360m'), 361)
+  assert.equal(maxSlotsFor('minute', '60m'), 7)
+  assert.equal(maxSlotsFor('minute', '180m'), 19)
+  assert.equal(maxSlotsFor('minute', '360m'), 37)
 })
 
 test('trim 超上限裁最旧且恰好达上限不裁', () => {

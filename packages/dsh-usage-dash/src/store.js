@@ -15,7 +15,14 @@ export const PROVIDER_DEFAULT = 'default'
 export const MODEL_TURNS = '(turns)'
 export const MODEL_UNKNOWN = '(unknown)'
 
-export const DEFAULT_MINUTE_RETENTION_DAYS = 7
+export const DEFAULT_MINUTE_RETENTION_DAYS = 2
+
+// 分钟桶对齐粒度(分钟);小时/天桶不受影响
+export const MINUTE_BUCKET_SPAN_MINUTES = 10
+
+// 保留上限:小时桶固定 15 天,分钟桶可配置但最大 2 天(48h)
+export const HOUR_RETENTION_DAYS = 15
+export const MINUTE_RETENTION_MAX_DAYS = 2
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const PAD_WIDTH = 2
@@ -23,6 +30,13 @@ const DOMAIN_NAME = 'usage_stats'
 const TABLE_BUCKETS = 'buckets'
 const MISSING_RECORD_PATTERN = /no record .* to update/
 const MINUTE_KEY_PREFIX = `${GRANULARITY_MINUTE}|`
+const HOUR_KEY_PREFIX = `${GRANULARITY_HOURLY}|`
+
+// 保留值归一:非法回落默认,超出上限截到上限;0(禁用)合法保留
+export function clampMinuteRetentionDays(days) {
+  const raw = Number.isFinite(days) && days >= 0 ? days : DEFAULT_MINUTE_RETENTION_DAYS
+  return Math.min(raw, MINUTE_RETENTION_MAX_DAYS)
+}
 
 // 桶串统一本地时区推导,同粒度内字典序即时间序
 const pad = (value) => String(value).padStart(PAD_WIDTH, '0')
@@ -36,8 +50,11 @@ export function hourKey(ts) {
   return `${dayKey(ts)}T${pad(new Date(ts).getHours())}`
 }
 
+// 分钟桶起点对齐 10 分钟:向下取整到桶边界,不跨时
 export function minuteKey(ts) {
-  return `${hourKey(ts)}:${pad(new Date(ts).getMinutes())}`
+  const d = new Date(ts)
+  const aligned = d.getMinutes() - (d.getMinutes() % MINUTE_BUCKET_SPAN_MINUTES)
+  return `${hourKey(ts)}:${pad(aligned)}`
 }
 
 // 同一样本依次落三粒度
@@ -174,6 +191,7 @@ export class UsageStore {
     this.lastPruneDay = today
     try {
       await this.pruneMinutes()
+      await this.pruneHours()
     } catch {
       // 清理失败不阻断写入,次日首写再试
     }
@@ -183,11 +201,22 @@ export class UsageStore {
   async pruneMinutes(days = this.retentionDays()) {
     await this.ready
     const table = this.requireTable()
-    const retention = Number.isFinite(days) && days >= 0 ? days : DEFAULT_MINUTE_RETENTION_DAYS
+    const retention = clampMinuteRetentionDays(days)
     const cutoff = retention === 0 ? null : minuteKey(this.now() - retention * DAY_MS)
     for (const [key, existing] of table.entries()) {
       if (!key.startsWith(MINUTE_KEY_PREFIX)) continue
       if (cutoff === null || existing.bucket < cutoff) await table.delete(key)
+    }
+  }
+
+  // 小时桶保留固定 15 天,无配置项
+  async pruneHours() {
+    await this.ready
+    const table = this.requireTable()
+    const cutoff = hourKey(this.now() - HOUR_RETENTION_DAYS * DAY_MS)
+    for (const [key, existing] of table.entries()) {
+      if (!key.startsWith(HOUR_KEY_PREFIX)) continue
+      if (existing.bucket < cutoff) await table.delete(key)
     }
   }
 

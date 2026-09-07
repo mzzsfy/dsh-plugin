@@ -13,7 +13,7 @@ const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
 const DEFAULT_MINUTE_PRESET = '60m'
 
-// 天视图渲染上限;时/分上限 = 闭区间桶数(预设 N 得 N+1 槽)
+// 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
 const API_PREFIX = '/api/usage-dash/'
 const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset' }
@@ -60,15 +60,24 @@ function resolveHourRange(presetId, now = new Date()) {
   return { from: hourBucket(new Date(now.getTime() - hours * MS_PER_HOUR)), to: hourBucket(now) }
 }
 
+// 分钟桶对齐 10 分钟粒度:窗口起点落到桶边界,to 保持原始分钟(闭区间上界)
+const MINUTE_BUCKET_SPAN_MINUTES = 10
+const MINUTE_BUCKET_SPAN_MS = MINUTE_BUCKET_SPAN_MINUTES * MS_PER_MINUTE
+
+function minuteBucketFloor(ts) {
+  return Math.floor(ts / MINUTE_BUCKET_SPAN_MS) * MINUTE_BUCKET_SPAN_MS
+}
+
 function resolveMinuteRange(presetId, now = new Date()) {
   const minutes = minuteValueOf(presetId)
   if (!minutes) return null
-  return { from: minuteBucket(new Date(now.getTime() - minutes * MS_PER_MINUTE)), to: minuteBucket(now) }
+  const from = minuteBucket(new Date(minuteBucketFloor(now.getTime()) - minutes * MS_PER_MINUTE))
+  return { from, to: minuteBucket(now) }
 }
 
 function maxSlotsFor(view, presetId) {
   if (view === 'hour') return hourValueOf(presetId) + 1
-  if (view === 'minute') return minuteValueOf(presetId) + 1
+  if (view === 'minute') return minuteValueOf(presetId) / MINUTE_BUCKET_SPAN_MINUTES + 1
   return DAY_MAX_SLOTS
 }
 

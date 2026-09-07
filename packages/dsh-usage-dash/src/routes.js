@@ -5,10 +5,11 @@
 
 import { aggregateRange } from './query.js'
 import {
-  DEFAULT_MINUTE_RETENTION_DAYS,
   GRANULARITY_DAILY,
   GRANULARITY_HOURLY,
   GRANULARITY_MINUTE,
+  MINUTE_BUCKET_SPAN_MINUTES,
+  clampMinuteRetentionDays,
   minuteKey,
 } from './store.js'
 
@@ -172,13 +173,15 @@ const hoursHandler = (deps) => async (req, res) => {
 
 // 分钟保留窗口(天)换算为起点桶串:起点晚于请求 from 即窗口外已清理,
 // 标注实际可用范围;禁用(0)时恒无数据,covered 标注空串。
-// retentionDays 与 store.pruneMinutes 同构归一,异常值回落默认保留
+// retentionDays 经 clamp 归一(非法回落默认,超上限截断),与 store.pruneMinutes 同源
 const minuteHandler = (deps) => async (req, res) => {
-  const { from, to } = requireBucketRange(await readJsonBody(req), MINUTE_KEY_PARTS, 'minute key')
+  const { from, to, fromParts } = requireBucketRange(await readJsonBody(req), MINUTE_KEY_PARTS, 'minute key')
+  if (fromParts[fromParts.length - 1] % MINUTE_BUCKET_SPAN_MINUTES !== 0) {
+    throw usageError(HTTP_STATUS_BAD_REQUEST, `${ERROR_PREFIX}minute key must align to ${MINUTE_BUCKET_SPAN_MINUTES} minutes`)
+  }
   const rows = await deps.store.rangeRows(GRANULARITY_MINUTE, from, to)
   const value = aggregateRange(rows, GRANULARITY_MINUTE, from, to)
-  const days = deps.retentionDays()
-  const retention = Number.isFinite(days) && days >= 0 ? days : DEFAULT_MINUTE_RETENTION_DAYS
+  const retention = clampMinuteRetentionDays(deps.retentionDays())
   if (retention > 0) {
     const windowStart = minuteKey(deps.now() - retention * MS_PER_DAY)
     if (windowStart > from) Object.assign(value, { coveredFrom: windowStart, coveredTo: to })

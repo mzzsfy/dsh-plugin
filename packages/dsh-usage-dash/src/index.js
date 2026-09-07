@@ -7,7 +7,6 @@ import schemastery from '@deepseek-ai/schemastery'
 import { UsageCollector } from './collector.js'
 import { registerUsageRoutes } from './routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, sharedStore } from './store.js'
-
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
 // 嵌套 inject(通道级静默不激活),构成干净禁用。
 export const inject = ['webServer', 'sessionPersistence', 'sessions', 'storageDomain']
@@ -18,7 +17,7 @@ const SETTINGS_NAMESPACE = 'usage-dash'
 
 const SETTINGS_SCHEMA = schemastery.object({
   minuteRetentionDays: schemastery.number().min(0).step(1).default(DEFAULT_MINUTE_RETENTION_DAYS)
-    .description('分钟桶保留天数,0 表示禁用分钟桶'),
+    .description('分钟桶保留天数(上限 48h),0 表示禁用分钟桶'),
 })
 
 export function apply(ctx, config) {
@@ -26,13 +25,14 @@ export function apply(ctx, config) {
   const collector = new UsageCollector(ctx, store)
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.register(SETTINGS_NAMESPACE, SETTINGS_SCHEMA, { base: config })
-    // 每日本地日首次写入时按保留值清理分钟桶;启动回扫前的触发在下方回扫入口
+    // 每日本地日首次写入时按保留值清理分钟/小时桶;启动回扫前的触发在下方回扫入口
     store.retentionDays = () =>
       settingsCtx.settings.get(SETTINGS_NAMESPACE)?.minuteRetentionDays ?? DEFAULT_MINUTE_RETENTION_DAYS
   })
   const bootScan = async () => {
     await store.readyPromise()
     await store.pruneMinutes()
+    await store.pruneHours()
     await collector.rescan()
   }
   ctx.effect(() => {

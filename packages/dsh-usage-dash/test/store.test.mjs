@@ -6,8 +6,11 @@ import assert from 'node:assert/strict'
 
 import {
   DEFAULT_MINUTE_RETENTION_DAYS,
+  HOUR_RETENTION_DAYS,
+  MINUTE_RETENTION_MAX_DAYS,
   UsageStore,
   __resetSharedStoreForTests,
+  clampMinuteRetentionDays,
   dayKey,
   hourKey,
   minuteKey,
@@ -90,18 +93,30 @@ const tokenSample = (time, extra = {}) => ({
   ...extra,
 })
 
-test('分钟保留天数默认常量与计划一致', () => {
-  assert.equal(DEFAULT_MINUTE_RETENTION_DAYS, 7)
+test('分钟保留天数默认常量与上限和计划一致', () => {
+  assert.equal(DEFAULT_MINUTE_RETENTION_DAYS, 2)
+  assert.equal(MINUTE_RETENTION_MAX_DAYS, 2)
+  assert.equal(HOUR_RETENTION_DAYS, 15)
 })
 
-test('桶键生成含补零', () => {
+test('分钟保留值归一:非法回落默认,超上限截断,0 保留', () => {
+  assert.equal(clampMinuteRetentionDays(1), 1)
+  assert.equal(clampMinuteRetentionDays(0), 0)
+  assert.equal(clampMinuteRetentionDays(7), 2)
+  assert.equal(clampMinuteRetentionDays(-1), 2)
+  assert.equal(clampMinuteRetentionDays('x'), 2)
+})
+
+test('桶键生成含补零,分钟桶对齐 10 分钟', () => {
   const ts = local(2026, 1, 5, 3, 7)
   assert.equal(dayKey(ts), '2026-01-05')
   assert.equal(hourKey(ts), '2026-01-05T03')
-  assert.equal(minuteKey(ts), '2026-01-05T03:07')
+  assert.equal(minuteKey(ts), '2026-01-05T03:00')
   const late = local(2026, 12, 31, 23, 59)
   assert.equal(hourKey(late), '2026-12-31T23')
-  assert.equal(minuteKey(late), '2026-12-31T23:59')
+  assert.equal(minuteKey(late), '2026-12-31T23:50')
+  const aligned = local(2026, 1, 5, 3, 20)
+  assert.equal(minuteKey(aligned), '2026-01-05T03:20')
 })
 
 test('跨日跨时跨分边界:毫秒推进即换桶', () => {
@@ -111,7 +126,7 @@ test('跨日跨时跨分边界:毫秒推进即换桶', () => {
   assert.equal(dayKey(after), '2026-08-03')
   assert.equal(hourKey(before), '2026-08-02T23')
   assert.equal(hourKey(after), '2026-08-03T00')
-  assert.equal(minuteKey(before), '2026-08-02T23:59')
+  assert.equal(minuteKey(before), '2026-08-02T23:50')
   assert.equal(minuteKey(after), '2026-08-03T00:00')
 })
 
@@ -119,7 +134,7 @@ test('token 样本同刻落三粒度三行,行内无 g 字段', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
-  const keys = ['D|2026-08-02', 'H|2026-08-02T14', 'M|2026-08-02T14:37'].map(
+  const keys = ['D|2026-08-02', 'H|2026-08-02T14', 'M|2026-08-02T14:30'].map(
     (prefix) => `${prefix}|deepseek|deepseek/deepseek-chat`,
   )
   assert.equal(domain.rows.size, 3)
@@ -179,7 +194,7 @@ test('allSettled 聚合:单粒度失败上抛且其余粒度不丢', async () =>
     (err) => err.name === 'AggregateError' && err.errors.length === 1,
   )
   assert.ok(domain.rows.has('D|2026-08-02|deepseek|deepseek/deepseek-chat'))
-  assert.ok(domain.rows.has('M|2026-08-02T14:37|deepseek|deepseek/deepseek-chat'))
+  assert.ok(domain.rows.has('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat'))
   assert.equal(domain.rows.has('H|2026-08-02T14|deepseek|deepseek/deepseek-chat'), false)
 })
 
@@ -217,14 +232,14 @@ test('pruneMinutes 按保留窗口清理分钟桶且不碰其他粒度', async (
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
-  await table.put('M|2026-08-03T11:59|a|m', rowOf('2026-08-03T11:59', 'a', 'm'))
-  await table.put('M|2026-08-03T12:00|a|m', rowOf('2026-08-03T12:00', 'a', 'm'))
+  await table.put('M|2026-08-08T11:00|a|m', rowOf('2026-08-08T11:00', 'a', 'm'))
+  await table.put('M|2026-08-08T12:00|a|m', rowOf('2026-08-08T12:00', 'a', 'm'))
   await table.put('M|2026-08-09T00:00|a|m', rowOf('2026-08-09T00:00', 'a', 'm'))
   await table.put('D|2026-08-01|a|m', rowOf('2026-08-01', 'a', 'm'))
   await table.put('H|2026-08-01T00|a|m', rowOf('2026-08-01T00', 'a', 'm'))
   await store.pruneMinutes(DEFAULT_MINUTE_RETENTION_DAYS)
-  assert.equal(domain.rows.has('M|2026-08-03T11:59|a|m'), false)
-  assert.equal(domain.rows.has('M|2026-08-03T12:00|a|m'), true)
+  assert.equal(domain.rows.has('M|2026-08-08T11:00|a|m'), false)
+  assert.equal(domain.rows.has('M|2026-08-08T12:00|a|m'), true)
   assert.equal(domain.rows.has('M|2026-08-09T00:00|a|m'), true)
   assert.equal(domain.rows.has('D|2026-08-01|a|m'), true)
   assert.equal(domain.rows.has('H|2026-08-01T00|a|m'), true)
@@ -234,11 +249,38 @@ test('保留窗口为 0 时分钟桶全部清理', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
-  await table.put('M|2026-08-10T11:59|a|m', rowOf('2026-08-10T11:59', 'a', 'm'))
+  await table.put('M|2026-08-10T11:00|a|m', rowOf('2026-08-10T11:00', 'a', 'm'))
   await table.put('D|2026-08-10|a|m', rowOf('2026-08-10', 'a', 'm'))
   await store.pruneMinutes(0)
-  assert.equal(domain.rows.has('M|2026-08-10T11:59|a|m'), false)
+  assert.equal(domain.rows.has('M|2026-08-10T11:00|a|m'), false)
   assert.equal(domain.rows.has('D|2026-08-10|a|m'), true)
+})
+
+test('分钟保留超上限时 clamp 到 48h 窗口', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
+  const table = domain.table()
+  // clamp 后窗口起点 = 08-08T12:00,02 天前的桶一律清理,即使注入 30 天
+  await table.put('M|2026-08-05T00:00|a|m', rowOf('2026-08-05T00:00', 'a', 'm'))
+  await table.put('M|2026-08-08T12:00|a|m', rowOf('2026-08-08T12:00', 'a', 'm'))
+  await store.pruneMinutes(30)
+  assert.equal(domain.rows.has('M|2026-08-05T00:00|a|m'), false)
+  assert.equal(domain.rows.has('M|2026-08-08T12:00|a|m'), true)
+})
+
+test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
+  const table = domain.table()
+  await table.put('H|2026-07-25T00:00|a|m', rowOf('2026-07-25T00:00', 'a', 'm'))
+  await table.put('H|2026-07-26T12:00|a|m', rowOf('2026-07-26T12:00', 'a', 'm'))
+  await table.put('D|2026-07-20|a|m', rowOf('2026-07-20', 'a', 'm'))
+  await table.put('M|2026-07-25T00:00|a|m', rowOf('2026-07-25T00:00', 'a', 'm'))
+  await store.pruneHours()
+  assert.equal(domain.rows.has('H|2026-07-25T00:00|a|m'), false)
+  assert.equal(domain.rows.has('H|2026-07-26T12:00|a|m'), true)
+  assert.equal(domain.rows.has('D|2026-07-20|a|m'), true)
+  assert.equal(domain.rows.has('M|2026-07-25T00:00|a|m'), true)
 })
 
 test('每日本地日首次写入触发清理,同日后续写入不重复触发', async () => {

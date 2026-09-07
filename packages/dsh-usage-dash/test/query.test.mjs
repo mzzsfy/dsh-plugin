@@ -62,18 +62,22 @@ test('hourKeysInRange 倒序或非法格式返回空数组', () => {
   assert.deepEqual(hourKeysInRange('2020-01-01T25', '2020-01-02T00'), [])
 })
 
-test('minuteKeysInRange 跨时闭区间连续枚举', () => {
-  assert.deepEqual(minuteKeysInRange('2020-01-01T23:58', '2020-01-02T00:01'), [
-    '2020-01-01T23:58',
-    '2020-01-01T23:59',
+test('minuteKeysInRange 按 10 分钟步长跨时枚举', () => {
+  assert.deepEqual(minuteKeysInRange('2020-01-01T23:50', '2020-01-02T00:10'), [
+    '2020-01-01T23:50',
     '2020-01-02T00:00',
-    '2020-01-02T00:01',
+    '2020-01-02T00:10',
   ])
 })
 
+test('minuteKeysInRange from 未对齐桶边界返回空数组', () => {
+  assert.deepEqual(minuteKeysInRange('2020-01-01T23:58', '2020-01-02T00:10'), [])
+  assert.deepEqual(minuteKeysInRange('2020-01-01T00:01', '2020-01-01T00:31'), [])
+})
+
 test('minuteKeysInRange 倒序或格式不匹配返回空数组', () => {
-  assert.deepEqual(minuteKeysInRange('2020-01-01T00:01', '2020-01-01T00:00'), [])
-  assert.deepEqual(minuteKeysInRange('2020-01-01T00', '2020-01-01T00:02'), [])
+  assert.deepEqual(minuteKeysInRange('2020-01-01T00:10', '2020-01-01T00:00'), [])
+  assert.deepEqual(minuteKeysInRange('2020-01-01T00', '2020-01-01T00:20'), [])
 })
 
 test('MAX_SLOTS 为文档定值', () => {
@@ -160,10 +164,11 @@ test('H 粒度零值槽全枚举含无数据槽', () => {
   assert.equal(out.activeDays, 1)
 })
 
-test('M 粒度纯计数行不计入模型与活跃桶', () => {
+test('M 粒度纯计数行不计入模型与活跃桶,未对齐残行跳过', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01T00:00', model: '(turns)', provider: 'default', turns: 1 }),
     makeRow({ bucket: '2020-01-01T00:00', model: 'm1', provider: 'p1', requests: 2 }),
+    makeRow({ bucket: '2020-01-01T00:07', model: 'm1', provider: 'p1', inputTokens: 9 }),
   ]
   const out = aggregateRange(rows, 'M', '2020-01-01T00:00', '2020-01-01T00:00')
   assert.equal(out.tokens, 0)
@@ -184,6 +189,7 @@ test('M 粒度纯计数行不计入模型与活跃桶', () => {
       cacheMiss: 0,
     },
   ])
+  assert.equal(out.tokens, 0)
 })
 
 test('空 rows 时 top 值为空串且 daily 全零槽', () => {
