@@ -1,9 +1,10 @@
 // 用量统计面板 Host 半区:采集 session/event 落 usage_stats 域,经 webServer
-// 暴露 /api/usage-dash/* 供浏览器半区消费。S2 已落存储域(store.js)与 settings
-// 注册;采集(collector)随 S3、查询与路由随 S4 接入。
+// 暴露 /api/usage-dash/* 供浏览器半区消费。S2 落存储域与 settings 注册,
+// S3 接入采集与启动回扫,查询与路由随 S4 接入。
 
 import schemastery from '@deepseek-ai/schemastery'
 
+import { UsageCollector } from './collector.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, sharedStore } from './store.js'
 
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
@@ -21,10 +22,24 @@ const SETTINGS_SCHEMA = schemastery.object({
 
 export function apply(ctx, config) {
   const store = sharedStore(ctx.storageDomain)
+  const collector = new UsageCollector(ctx, store)
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.register(SETTINGS_NAMESPACE, SETTINGS_SCHEMA, { base: config })
-    // 每日本地日首次写入时按保留值清理分钟桶;启动回扫前的触发在 S3 回扫入口接线
+    // 每日本地日首次写入时按保留值清理分钟桶;启动回扫前的触发在下方回扫入口
     store.retentionDays = () =>
       settingsCtx.settings.get(SETTINGS_NAMESPACE)?.minuteRetentionDays ?? DEFAULT_MINUTE_RETENTION_DAYS
   })
+  const bootScan = async () => {
+    await store.readyPromise()
+    await store.pruneMinutes()
+    await collector.rescan()
+  }
+  ctx.effect(() => {
+    collector.start()
+    void bootScan().catch((err) => {
+      ctx.logger?.warn(`usage-dash: 启动回扫未完成 ${err instanceof Error ? err.message : String(err)}`)
+    })
+    // 卸载中止在飞扫描,防热重载后遗留扫描向已关闭的域写入
+    return () => collector.abort()
+  }, 'usage-dash: collector')
 }
