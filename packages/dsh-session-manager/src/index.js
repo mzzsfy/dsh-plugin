@@ -139,6 +139,22 @@ function readSettings(ctx) {
   }
 }
 
+// auto-archive 路由请求体 → settings patch:仅接受出现且为非负整数的字段(部分更新),
+// 一个合法字段都没有即拒绝;返回形态错误以业务错误抛出,由路由统一转 400
+const AUTO_ARCHIVE_FIELDS = [['days', 'autoArchiveDays'], ['intervalHours', 'autoArchiveIntervalHours']]
+
+function readAutoArchivePatch(body) {
+  const patch = {}
+  for (const [input, setting] of AUTO_ARCHIVE_FIELDS) {
+    const raw = body ? body[input] : undefined
+    if (raw === undefined) continue
+    if (!Number.isInteger(raw) || raw < 0) throw new Error('自动归档配置须为非负整数: ' + input)
+    patch[setting] = raw
+  }
+  if (Object.keys(patch).length === 0) throw new Error('缺少可更新的配置字段')
+  return patch
+}
+
 function readBody(req) {
   const BODY_MAX_BYTES = 64 * 1024
   return new Promise((resolve, reject) => {
@@ -869,8 +885,39 @@ export function apply(ctx, config) {
           }
           const settings = ctx.get('settings')
           if (!settings) throw new Error('宿主设置服务不可用')
-          settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
+          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
+          await settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 自动归档配置:读回生效值(含默认回退),写经 settings.update 部分更新;
+      // 0 = 关闭(阈值天数关自动归档,间隔小时数关周期轮),与评估逻辑同源语义
+      path: '/api/session-manager/auto-archive',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            const current = readSettings(ctx)
+            sendJson(res, 200, { days: current.days, intervalHours: current.intervalHours })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const patch = readAutoArchivePatch(body)
+          const settings = ctx.get('settings')
+          if (!settings) throw new Error('宿主设置服务不可用')
+          // update 异步落盘后才提交新值:await 保证回显为新值,persist 失败走 respondError
+          await settings.update(NAMESPACE, patch)
+          const current = readSettings(ctx)
+          sendJson(res, 200, { days: current.days, intervalHours: current.intervalHours })
         } catch (error) {
           respondError(ctx, res, error)
         }
