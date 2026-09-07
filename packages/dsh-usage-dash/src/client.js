@@ -783,7 +783,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const SWITCH_EDGE_INSET = 2
     const SWITCH_THUMB_TRAVEL = SWITCH_TRACK_WIDTH - SWITCH_THUMB_SIZE - SWITCH_EDGE_INSET * 2
     const SWITCH_TRANSITION_MS = 120
-    const STATS_SLOT_PRIORITY = -1
+    // 遮蔽语义:同 id 同 priority 属注册冲突(注册表抛错),需取更低值压过
+    // 同格竞争者;usp 同款接管注册用 -1,本插件取次低值,官方无显式 priority(默认 0)
+    const STATS_SLOT_PRIORITY = -2
     const STATS_LINE_TITLE_SEPARATOR = ' | '
     const DAY_PRESET_LABELS = {
       '7': t('rangePreset.7'),
