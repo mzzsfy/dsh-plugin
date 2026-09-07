@@ -5,6 +5,7 @@
 import schemastery from '@deepseek-ai/schemastery'
 
 import { UsageCollector } from './collector.js'
+import { registerUsageRoutes } from './routes.js'
 import { DEFAULT_MINUTE_RETENTION_DAYS, sharedStore } from './store.js'
 
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
@@ -42,4 +43,6 @@ export function apply(ctx, config) {
     // 卸载中止在飞扫描,防热重载后遗留扫描向已关闭的域写入
     return () => collector.abort()
   }, 'usage-dash: collector')
+  // 保留值经 store 单源转发:settings 激活即取设置值,未激活回落构造默认
+  registerUsageRoutes(ctx, { store, collector, retentionDays: () => store.retentionDays() })
 }
