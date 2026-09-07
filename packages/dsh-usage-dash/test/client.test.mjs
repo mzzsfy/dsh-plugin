@@ -36,11 +36,15 @@ const {
   MESSAGES_EN,
   MESSAGES_ZH,
   OTHER_MODEL,
+  aggregateCurrencyOf,
   cacheRateText,
+  costOf,
+  costTitleText,
   createTranslator,
   daysInRange,
   donutSegments,
   formatCompact,
+  formatCost,
   formatDuration,
   formatTokens,
   formatTokensCompact,
@@ -53,6 +57,7 @@ const {
   hourTickLabel,
   indexOfDay,
   isEmptyRange,
+  matchPrice,
   maxSlotsFor,
   minuteTickLabel,
   modelSegmentLabel,
@@ -72,6 +77,7 @@ const {
   trimSlots,
   trendLayout,
   trendRatePoints,
+  validatePricingRules,
 } = core
 
 const EPSILON = 1e-9
@@ -516,4 +522,54 @@ test('otherDetailItems 取哨兵明细无哨兵为空表', () => {
 
 test('donut 分段可访问标签格式化名称数值与占比', () => {
   assert.equal(modelSegmentLabel('p/m', 1234, 12.34), 'p/m: 1,234 (12.3%)')
+})
+
+// —— S14 费用格式化与展示辅助(镜像函数核心语义见 pricing-parity.test.mjs) ——
+
+test('formatCost 千分位与两位小数', () => {
+  assert.equal(formatCost(1234567.891, '¥'), '¥1,234,567.89')
+  assert.equal(formatCost(1234.5, '¥'), '¥1,234.50')
+  assert.equal(formatCost(1.5, ''), '1.50')
+  assert.equal(formatCost(0, '$'), '$0.00')
+})
+
+test('formatCost 微观值四位小数', () => {
+  assert.equal(formatCost(0.001, ''), '0.0010')
+  assert.equal(formatCost(0.009999, '$'), '$0.0100')
+})
+
+test('镜像函数基本行为:非法输入 null 与命中计价', () => {
+  assert.equal(matchPrice(null, 'm', NOW), null)
+  assert.equal(matchPrice([], 'm', NOW), null)
+  assert.deepEqual(
+    matchPrice([{ model: 'm', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], 'm', NOW),
+    { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+  )
+  assert.equal(costOf({ input: 2, output: 0, cacheRead: 0, cacheWrite: 0 }, { inputTokens: 1000 * 1000 }), 2)
+})
+
+test('aggregateCurrencyOf 取首个非空货币,无则空串', () => {
+  assert.equal(aggregateCurrencyOf([{ currency: '' }, { currency: '$' }]), '$')
+  assert.equal(aggregateCurrencyOf([{ currency: '¥' }]), '¥')
+  assert.equal(aggregateCurrencyOf([{ currency: '' }]), '')
+  assert.equal(aggregateCurrencyOf(null), '')
+})
+
+test('validatePricingRules 就地校验 model 必填与价格非空非负', () => {
+  const valid = [{ model: 'p/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }]
+  assert.equal(validatePricingRules(valid).size, 0)
+  const broken = [
+    { model: '  ', currency: '¥', price: { input: '', output: -1, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+  ]
+  const errors = validatePricingRules(broken)
+  assert.equal(errors.get('0.model'), 'required')
+  assert.equal(errors.get('0.price.input'), 'required')
+  assert.equal(errors.get('0.price.output'), 'priceInvalid')
+  assert.equal(errors.has('0.price.cacheRead'), false)
+})
+
+test('costTitleText 未计价计数后缀', () => {
+  const zhT = createTranslator(MESSAGES_ZH)
+  assert.equal(costTitleText(zhT, 0), '按当前费率对历史用量估算,精度为小时级')
+  assert.equal(costTitleText(zhT, 3), '按当前费率对历史用量估算,精度为小时级,3 个小时桶未计价')
 })

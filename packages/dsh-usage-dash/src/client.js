@@ -16,7 +16,7 @@ const DEFAULT_MINUTE_PRESET = '60m'
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
 const API_PREFIX = '/api/usage-dash/'
-const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset' }
+const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', pricing: 'pricing' }
 
 // 宿主语义 token 之外的插件本地模型色板容量与哨兵
 const GROUP_TOP_COUNT = 5
@@ -162,6 +162,31 @@ const MESSAGES_ZH = {
   cachePrecisionDesc: '在会话底部信息栏以两位小数显示缓存命中率。',
   tokenDetail: '会话 Token 明细',
   tokenDetailDesc: '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。',
+  costDisplay: '费用显示',
+  costDisplayDesc: '在信息栏与趋势悬浮中显示按当前费率估算的费用。',
+  costTitle: '按当前费率对历史用量估算,精度为小时级',
+  costUnpriced: '{n} 个小时桶未计价',
+  statsCostTitle: '按当前费率对会话累计 token 估算',
+  'stats.cost': '费用 ≈ {cost}',
+  pricing: '定价规则',
+  pricingUnavailable: '定价规则不可用',
+  pricingModel: '模型',
+  pricingModelPlaceholder: 'provider/model 或 *',
+  pricingCurrency: '货币',
+  pricingCurrencyNone: '空',
+  pricingUnit: '每百万 token',
+  priceInput: '输入',
+  priceOutput: '输出',
+  priceCacheRead: '缓存读',
+  priceCacheWrite: '缓存写',
+  noCondition: '无条件 = 恒生效',
+  conditionsPreserved: '已有 {n} 条条件,本编辑器暂不支持修改,保存时原样保留',
+  deleteRule: '删除规则',
+  addRule: '添加规则',
+  save: '保存',
+  saved: '已保存',
+  required: '必填',
+  priceInvalid: '不能为负',
   'duration.compactSeconds': '{seconds}秒',
   'duration.compactMinutes': '{minutes}分{seconds}秒',
   'number.thousand': '{value}K',
@@ -232,6 +257,31 @@ const MESSAGES_EN = {
   cachePrecisionDesc: 'Show the cache-hit rate with two decimals in the session stats line.',
   tokenDetail: 'Session token detail',
   tokenDetailDesc: 'Show total, cache hit/miss and output tokens in the session stats line.',
+  costDisplay: 'Cost display',
+  costDisplayDesc: 'Show costs estimated at current rates in the stats line and trend tooltips.',
+  costTitle: 'Estimated at current rates over historical usage, hourly precision',
+  costUnpriced: '{n} hour buckets unpriced',
+  statsCostTitle: 'Estimated at current rates over session token totals',
+  'stats.cost': 'Cost ≈ {cost}',
+  pricing: 'Pricing rules',
+  pricingUnavailable: 'Pricing rules unavailable',
+  pricingModel: 'Model',
+  pricingModelPlaceholder: 'provider/model or *',
+  pricingCurrency: 'Currency',
+  pricingCurrencyNone: 'None',
+  pricingUnit: 'per million tokens',
+  priceInput: 'Input',
+  priceOutput: 'Output',
+  priceCacheRead: 'Cache read',
+  priceCacheWrite: 'Cache write',
+  noCondition: 'No condition = always applies',
+  conditionsPreserved: '{n} existing conditions are kept as-is; editing them is not supported yet',
+  deleteRule: 'Remove rule',
+  addRule: 'Add rule',
+  save: 'Save',
+  saved: 'Saved',
+  required: 'Required',
+  priceInvalid: 'Must not be negative',
   'duration.compactSeconds': '{seconds}s',
   'duration.compactMinutes': '{minutes}m{seconds}s',
   'number.thousand': '{value}K',
@@ -728,8 +778,9 @@ function deriveStats(nodes) {
   return stats
 }
 
-// 分组装配:官方 StatsLine 分组序 + usp 双开关(精确命中率/Token 明细)
-function buildStatsGroups(stats, usage, prefs, t) {
+// 分组装配:官方 StatsLine 分组序 + usp 双开关(精确命中率/Token 明细)+ 费用开关;
+// 费用组在 Token 组后追加:开关关/无用量/价格未加载不渲染,规则已载无命中价显示占位符
+function buildStatsGroups(stats, usage, prefs, t, pricingRules = null) {
   const groups = []
   if (stats.steps > 0) {
     groups.push(t('stats.counts', { turns: stats.turns, steps: stats.steps }))
@@ -762,20 +813,26 @@ function buildStatsGroups(stats, usage, prefs, t) {
         output: formatTokensCompact(usage.outputTokens, t),
       }))
     }
+    const costItem = buildCostItem(usage, pricingRules, prefs, t)
+    if (costItem !== null) groups.push(costItem)
   }
   return groups
 }
 
 // usp stats-line 偏好状态工厂:storage 注入便于 Node 测试,读写全防御,内存值始终生效
 function createStatsLineState(storage) {
-  const DEFAULT_PREFS = { cachePrecision: false, tokenDetail: false }
+  const DEFAULT_PREFS = { cachePrecision: false, tokenDetail: false, costDisplay: false }
   const listeners = new Set()
   const read = () => {
     if (!storage) return { ...DEFAULT_PREFS }
     try {
       const parsed = JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY))
       if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PREFS }
-      return { cachePrecision: parsed.cachePrecision === true, tokenDetail: parsed.tokenDetail === true }
+      return {
+        cachePrecision: parsed.cachePrecision === true,
+        tokenDetail: parsed.tokenDetail === true,
+        costDisplay: parsed.costDisplay === true,
+      }
     } catch {
       return { ...DEFAULT_PREFS }
     }
@@ -809,6 +866,228 @@ function createStatsLineState(storage) {
 }
 
 
+// ===== 定价镜像:官方无此物,宿主 pricing.js 镜像(双实现同源,parity 测试锁定) =====
+// 语义逐条对齐宿主模块:本地时区取 Date 本地分量,匹配只读遍历入参规则;
+// 零填充与 ISO 日串格式化复用本文件既有同义部件(pad/formatDate)
+const UNIT_PER_MILLION = 'perMillion'
+const CURRENCIES = ['¥', '$', '']
+const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
+const TOKENS_PER_MILLION = 1000 * 1000
+
+const MODEL_WILDCARD = '*'
+const MINUTES_PER_HOUR = 60
+
+const minutesOfDay = (date) => date.getHours() * MINUTES_PER_HOUR + date.getMinutes()
+
+const toMinutesOfDay = (hhmm) => {
+  if (typeof hhmm !== 'string') return Number.NaN
+  const [hours, minutes] = hhmm.split(':')
+  const h = Number(hours)
+  const m = Number(minutes)
+  return Number.isFinite(h) && Number.isFinite(m) ? h * MINUTES_PER_HOUR + m : Number.NaN
+}
+
+// from<to 含头不含尾;from>to 跨午夜;from===to 全天生效
+function dailyWindowMatches(condition, date) {
+  const from = toMinutesOfDay(condition.from)
+  const to = toMinutesOfDay(condition.to)
+  if (Number.isNaN(from) || Number.isNaN(to)) return false
+  const m = minutesOfDay(date)
+  if (from < to) return m >= from && m < to
+  if (from > to) return m >= from || m < to
+  return true
+}
+
+// days 空数组不成立;0=周日,取 getDay()
+function weekdaysMatches(condition, date) {
+  const { days } = condition
+  return Array.isArray(days) && days.length > 0 && days.includes(date.getDay())
+}
+
+// 号段双闭;from>to 跨月环绕;日号必须整数,2 月无 31 号自然不触发
+function monthDaysMatches(condition, date) {
+  const { from, to } = condition
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return false
+  const d = date.getDate()
+  return from <= to ? d >= from && d <= to : d >= from || d <= to
+}
+
+// 要求零填充 YYYY-MM-DD 字典序双闭;from>to 属配置错误不成立,非规范串同样不成立
+const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+function dateRangeMatches(condition, date) {
+  const { from, to } = condition
+  if (typeof from !== 'string' || typeof to !== 'string') return false
+  if (!ISO_DAY_PATTERN.test(from) || !ISO_DAY_PATTERN.test(to) || from > to) return false
+  const iso = formatDate(date)
+  return iso >= from && iso <= to
+}
+
+const CONDITION_MATCHERS = {
+  dailyWindow: dailyWindowMatches,
+  weekdays: weekdaysMatches,
+  monthDays: monthDaysMatches,
+  dateRange: dateRangeMatches,
+}
+
+// 单条件判定;未知 kind、形状残缺或非法 Date 一律不成立
+function conditionMatches(condition, date) {
+  const matcher = condition && CONDITION_MATCHERS[condition.kind]
+  if (!matcher || !(date instanceof Date) || Number.isNaN(date.getTime())) return false
+  return matcher(condition, date)
+}
+
+// 形状残缺规则跳过:缺 model/price、unit 非 perMillion、conditions 非数组(含缺失)
+function isRuleShaped(rule) {
+  return !!rule && typeof rule === 'object' && typeof rule.model === 'string'
+    && (rule.unit === undefined || rule.unit === UNIT_PER_MILLION)
+    && !!rule.price && typeof rule.price === 'object' && !Array.isArray(rule.price)
+    && Array.isArray(rule.conditions)
+}
+
+const firstMatchingPrice = (rules, date, modelFilter) => {
+  for (const rule of rules) {
+    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
+    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule.price
+  }
+  return null
+}
+
+const toLocalDate = (timestamp) => {
+  const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+// 精确子集按数组序取首个命中;无精确子集或全不命中回落 '*' 子集;仍无命中为 null
+function matchPrice(rules, model, timestamp) {
+  const date = toLocalDate(timestamp)
+  if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
+  return firstMatchingPrice(rules, date, (rule) => rule.model === model)
+    ?? firstMatchingPrice(rules, date, (rule) => rule.model === MODEL_WILDCARD)
+}
+
+const BUCKET_PRICE_KEYS = [
+  { tokens: 'inputTokens', price: 'input' },
+  { tokens: 'outputTokens', price: 'output' },
+  { tokens: 'cacheReadTokens', price: 'cacheRead' },
+  { tokens: 'cacheWriteTokens', price: 'cacheWrite' },
+]
+
+const toFiniteNumber = (value) => (Number.isFinite(value) ? value : 0)
+
+// 费用 = Σ(桶 token × 桶单价) / 每百万;缺桶或非法值按 0,原始浮点不圆整(展示层负责)
+function costOf(price, buckets) {
+  let raw = 0
+  for (const { tokens, price: priceKey } of BUCKET_PRICE_KEYS) {
+    raw += toFiniteNumber(buckets?.[tokens]) * toFiniteNumber(price?.[priceKey])
+  }
+  return raw / TOKENS_PER_MILLION
+}
+
+// ===== 费用展示辅助(展示层专用,非镜像) =====
+const COST_DECIMALS = 2
+const COST_MICRO_DECIMALS = 4
+const COST_MICRO_THRESHOLD = 0.01
+const COST_PLACEHOLDER = '—'
+const THOUSANDS_PATTERN = /(\d)(?=(\d{3})+(?!\d))/g
+
+// 千分位 + 至少两位小数,正值小于 0.01 时四位;货币空串不加符号,「≈」前缀由调用方拼
+function formatCost(value, currency) {
+  const decimals = value > 0 && value < COST_MICRO_THRESHOLD ? COST_MICRO_DECIMALS : COST_DECIMALS
+  const [whole, fraction] = value.toFixed(decimals).split('.')
+  return `${currency}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
+}
+
+// 汇总费用货币:规则表首个非空 currency;无则空串即不带符号
+function aggregateCurrencyOf(rules) {
+  if (!Array.isArray(rules)) return ''
+  const found = rules.find((rule) => typeof rule?.currency === 'string' && rule.currency !== '')
+  return found ? found.currency : ''
+}
+
+// 与 firstMatchingPrice 同一选择序,返回整条规则供货币读取(展示层专用)
+const firstMatchingRule = (rules, date, modelFilter) => {
+  for (const rule of rules) {
+    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
+    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule
+  }
+  return null
+}
+
+// 命中规则的 currency;无命中或非法形状为空串
+function matchedCurrency(rules, model, timestamp) {
+  const date = toLocalDate(timestamp)
+  if (!Array.isArray(rules) || !date || typeof model !== 'string') return ''
+  const rule = firstMatchingRule(rules, date, (item) => item.model === model)
+    ?? firstMatchingRule(rules, date, (item) => item.model === MODEL_WILDCARD)
+  return typeof rule?.currency === 'string' ? rule.currency : ''
+}
+
+// 投影四桶 → 计价桶形:投影的 uncachedInputTokens 即计价 inputTokens(host 存储行同口径)
+const pricingBucketsOf = (usage) => ({
+  inputTokens: usage.uncachedInputTokens,
+  outputTokens: usage.outputTokens,
+  cacheReadTokens: usage.cacheReadTokens,
+  cacheWriteTokens: usage.cacheWriteTokens,
+})
+
+// 注入点A 费用组装配:开关关/无用量/价格未加载不渲染;规则已载无命中价显示占位符;
+// routes 缺席时 model 取通配,只匹配通配规则;时间条件按当前时刻评估(估算口径)
+function buildCostItem(usage, rules, prefs, t, now = new Date()) {
+  if (!prefs?.costDisplay || !usage || !Array.isArray(rules)) return null
+  const model = usage.routes?.[0]?.model ?? MODEL_WILDCARD
+  const price = matchPrice(rules, model, now)
+  if (!price) return COST_PLACEHOLDER
+  return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), matchedCurrency(rules, model, now)) })
+}
+
+// 历史费用口径标注:估算说明,未计价小时桶计数为正时追加后缀
+function costTitleText(t, unpriced) {
+  const base = t('costTitle')
+  return unpriced > 0 ? `${base},${t('costUnpriced', { n: unpriced })}` : base
+}
+
+// ===== 定价编辑器纯函数(校验/规整/默认值) =====
+const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
+const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
+
+// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型与四桶价格)
+function validatePricingRules(rules) {
+  const errors = new Map()
+  if (!Array.isArray(rules)) return errors
+  rules.forEach((rule, ruleIndex) => {
+    if (typeof rule.model !== 'string' || rule.model.trim().length === 0) errors.set(`${ruleIndex}.model`, 'required')
+    PRICE_KEYS.forEach((key) => {
+      const value = rule.price?.[key]
+      const path = `${ruleIndex}.price.${key}`
+      if (value === '' || value === null || value === undefined) errors.set(path, 'required')
+      else if (!Number.isFinite(Number(value)) || Number(value) < 0) errors.set(path, 'priceInvalid')
+    })
+  })
+  return errors
+}
+
+// POST 前规整:输入框字符串值转数值;模型原样(校验已确保非空)
+function coercePricingRules(rules) {
+  return rules.map((rule) => ({
+    ...rule,
+    price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: Number(rule.price[key]) }), {}),
+  }))
+}
+
+// 服务端规则为纯 JSON,编辑副本深拷贝与缓存脱钩
+const copyRules = (rules) => JSON.parse(JSON.stringify(rules))
+
+// 新增规则默认:空模型 + 人民币 + 四桶零价 + 无条件(恒生效);已有条件整条保留原样
+const defaultPricingRule = () => ({
+  model: '',
+  currency: CURRENCIES[0],
+  price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: 0 }), {}),
+  conditions: [],
+})
+
+const updateRuleAt = (rules, index, patch) => rules.map((rule, i) => (i === index ? { ...rule, ...patch } : rule))
+
+
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
 
@@ -836,6 +1115,40 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // stats-line 偏好单例:模块表内同实例,面板偏好卡与底部信息栏订阅互通
     const statsLineState = createStatsLineState(typeof localStorage !== 'undefined' ? localStorage : null)
+
+    // 价格规则内存缓存单例:TTL 内直读,失败回退旧值待下次重试;禁 localStorage 持久化价格
+    const PRICING_CACHE_TTL_MS = 5 * 60 * 1000
+    const PRICING_SAVED_NOTICE_MS = 3 * 1000
+    let cached = null
+    const applyPricingValue = (value) => {
+      cached = { revision: value.revision, rules: value.rules, fetchedAt: Date.now() }
+      return cached
+    }
+
+    const requestGet = async (endpoint) => {
+      let response
+      try {
+        response = await fetch(API_PREFIX + endpoint)
+      } catch (error) {
+        return { ok: false, code: 'network', message: String(error?.message ?? error) }
+      }
+      let json = null
+      try {
+        json = await response.json()
+      } catch {
+        json = null
+      }
+      return parseEnvelope(json)
+    }
+
+    // value 缺形状按失败处理:回退旧值,无旧值为 null(费用显示占位)
+    const fetchPricing = async (force = false) => {
+      if (!force && cached && Date.now() - cached.fetchedAt < PRICING_CACHE_TTL_MS) return cached
+      const result = await requestGet(ENDPOINTS.pricing)
+      const value = result.ok ? result.value : null
+      if (value && Number.isFinite(value.revision) && Array.isArray(value.rules)) return applyPricingValue(value)
+      return cached
+    }
 
     // 交互与尺寸常量
     const STATUS_POLL_FAST_MS = 1000
@@ -1025,6 +1338,19 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-pref-text{display:flex;flex-direction:column;gap:2px;min-width:0}
 .ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
 .ud-pref-desc{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.ud-rule{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:10px 12px}
+.ud-rule-head{display:flex;align-items:flex-end;gap:8px}
+.ud-rule-head .ud-field{flex:1}
+.ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.ud-field-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-field-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}
+.ud-input{border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:12px;padding:4px 6px;min-width:0;width:100%;box-sizing:border-box}
+.ud-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.ud-price-grid .ud-input{text-align:right}
+.ud-unit-note{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.ud-rule-add{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;cursor:pointer}
+.ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
 .ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
 `
@@ -1075,10 +1401,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         ...lines)
     }
 
-    function StatCards({ stats, t = defaultT }) {
+    function StatCards({ stats, costCurrency = '', t = defaultT }) {
       return h('div', { className: 'ud-cards' },
         h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint') },
-          h(FitText, null, formatTokens(stats.tokens))),
+          h(FitText, null, formatTokens(stats.tokens)),
+          stats.cost !== undefined
+            ? h('span', {
+                className: 'ud-card-sub',
+                title: costTitleText(t, stats.unpriced ?? 0),
+              }, `≈ ${formatCost(stats.cost, costCurrency)}`)
+            : null),
         h(Card, { key: 'turns', icon: ICONS.sessions, label: t('sessions') },
           h(FitText, null, String(stats.turns))),
         h(Card, { key: 'requests', icon: ICONS.requests, label: t('requests') },
@@ -1113,10 +1445,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef, t = defaultT }) {
+    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, t = defaultT }) {
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
+      const [prefs, setPrefs] = useState(() => statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       useEffect(() => {
         const element = wrapRef.current
         const observer = new ResizeObserver((entries) => {
@@ -1193,6 +1527,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
                   `${model}: ${formatTokens(tokens)}`)),
                 h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`),
+                costEnabled && prefs.costDisplay && hoverSlot.cost !== undefined
+                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
+                  : null,
               ]
             : null))
     }
@@ -1424,7 +1761,21 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const stats = useMemo(() => projected ?? deriveStats(settledNodes ?? []), [projected, settledNodes])
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
-      const groups = buildStatsGroups(stats, usage, prefs, t)
+      // 价格异步首帧可能未回:回包经状态刷新补渲染,未回期间费用组不渲染
+      const [pricingRules, setPricingRules] = useState(null)
+      useEffect(() => {
+        let alive = true
+        fetchPricing().then((value) => {
+          if (alive && value) setPricingRules(value.rules)
+        })
+        return () => { alive = false }
+      }, [])
+      const groups = buildStatsGroups(stats, usage, prefs, t, pricingRules)
+      const costItem = buildCostItem(usage, pricingRules, prefs, t)
+      const entries = groups.map((text) => ({ text }))
+      if (costItem !== null && groups[groups.length - 1] === costItem) {
+        entries[entries.length - 1] = { text: costItem, title: t('statsCostTitle') }
+      }
       const rootRef = useRef(null)
       const [truncated, setTruncated] = useState(false)
       useLayoutEffect(() => {
@@ -1436,14 +1787,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         observer.observe(element)
         return () => observer.disconnect()
       }, [groups])
-      if (groups.length === 0) return null
+      if (entries.length === 0) return null
       return h('div', {
         className: 'ud-statsline-root',
         ref: rootRef,
-        title: truncated ? groups.join(STATS_LINE_TITLE_SEPARATOR) : undefined,
-      }, groups.map((group, index) => h(React.Fragment, { key: index },
+        title: truncated ? entries.map((entry) => entry.text).join(STATS_LINE_TITLE_SEPARATOR) : undefined,
+      }, entries.map((entry, index) => h(React.Fragment, { key: index },
         index > 0 && h('span', { className: 'ud-statsline-sep', 'aria-hidden': true }, '|'),
-        group)))
+        entry.title ? h('span', { title: entry.title }, entry.text) : entry.text)))
     })
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
@@ -1474,7 +1825,144 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           checked: prefs.tokenDetail,
           onToggle: (value) => statsLineState.set({ tokenDetail: value }),
           t,
+        }),
+        h(StatsLineOptionRow, {
+          labelKey: 'costDisplay',
+          descKey: 'costDisplayDesc',
+          checked: prefs.costDisplay,
+          onToggle: (value) => statsLineState.set({ costDisplay: value }),
+          t,
         }))
+    }
+
+    // 定价规则编辑器:阶段 3 降级形态——条件行不支持编辑,已有条件整条保留原样,
+    // 空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
+    const PRICING_STATE_READY = 'ready'
+    const PRICING_STATE_UNAVAILABLE = 'unavailable'
+
+    function PricingRuleCard({ rule, errors, pathPrefix, t, onPatch, onRemove }) {
+      const errorTextOf = (path) => {
+        const key = errors.get(path)
+        return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
+      }
+      const priceField = (key, labelKey) => h('label', { key, className: 'ud-field' },
+        h('span', { className: 'ud-field-label' }, t(labelKey)),
+        h('input', {
+          type: 'number', className: 'ud-input', min: 0, step: 'any',
+          value: rule.price?.[key] ?? '',
+          onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
+        }),
+        errorTextOf(`${pathPrefix}price.${key}`))
+      return h('div', { className: 'ud-rule' },
+        h('div', { className: 'ud-rule-head' },
+          h('label', { className: 'ud-field' },
+            h('span', { className: 'ud-field-label' }, t('pricingModel')),
+            h('input', {
+              type: 'text', className: 'ud-input', value: rule.model,
+              placeholder: t('pricingModelPlaceholder'),
+              onChange: (event) => onPatch({ model: event.target.value }),
+            }),
+            errorTextOf(`${pathPrefix}model`)),
+          h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
+            'aria-label': t('deleteRule'), title: t('deleteRule'),
+          }, '×')),
+        h('div', { className: 'ud-pref-row' },
+          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
+            CURRENCIES.map((symbol) => h('button', {
+              key: symbol || 'none', type: 'button',
+              className: cx('ud-seg-item', rule.currency === symbol && 'ud-seg-item--on'),
+              'aria-pressed': rule.currency === symbol,
+              onClick: () => onPatch({ currency: symbol }),
+            }, symbol === '' ? t('pricingCurrencyNone') : symbol))),
+          h('span', { className: 'ud-unit-note' }, t('pricingUnit'))),
+        h('div', { className: 'ud-price-grid' },
+          priceField('input', 'priceInput'),
+          priceField('output', 'priceOutput'),
+          priceField('cacheRead', 'priceCacheRead'),
+          priceField('cacheWrite', 'priceCacheWrite')),
+        h('span', { className: 'ud-rule-cond' },
+          (rule.conditions ?? []).length === 0
+            ? t('noCondition')
+            : t('conditionsPreserved', { n: rule.conditions.length })))
+    }
+
+    function PricingEditor({ t = defaultT }) {
+      const [phase, setPhase] = useState(null)
+      const [rules, setRules] = useState(null)
+      const [errors, setErrors] = useState(() => new Map())
+      const [saveError, setSaveError] = useState('')
+      const [saving, setSaving] = useState(false)
+      const [saved, setSaved] = useState(false)
+      const savedTimerRef = useRef(null)
+
+      useEffect(() => {
+        let alive = true
+        fetchPricing().then((value) => {
+          if (!alive) return
+          if (!value) {
+            setPhase(PRICING_STATE_UNAVAILABLE)
+            return
+          }
+          setRules(copyRules(value.rules))
+          setPhase(PRICING_STATE_READY)
+        })
+        return () => { alive = false }
+      }, [])
+
+      useEffect(() => () => {
+        if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+      }, [])
+
+      const save = async () => {
+        const found = validatePricingRules(rules)
+        setErrors(found)
+        setSaved(false)
+        if (found.size > 0) return
+        setSaving(true)
+        const result = await requestPost(ENDPOINTS.pricing, { rules: coercePricingRules(rules) })
+        setSaving(false)
+        if (!result.ok) {
+          setSaveError(result.message)
+          return
+        }
+        // 保存即生效:响应 value 直接覆盖缓存,编辑副本同步为服务端规整后的规则
+        applyPricingValue(result.value)
+        setSaveError('')
+        setErrors(new Map())
+        setRules(copyRules(result.value.rules))
+        setSaved(true)
+        if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+        savedTimerRef.current = setTimeout(() => setSaved(false), PRICING_SAVED_NOTICE_MS)
+      }
+
+      if (phase === PRICING_STATE_UNAVAILABLE) {
+        return h('div', { className: 'ud-pref-group' },
+          h('span', { className: 'ud-pref-title' }, t('pricing')),
+          h('div', { className: 'ud-empty' }, t('pricingUnavailable')))
+      }
+      if (phase !== PRICING_STATE_READY) return null
+
+      return h('div', { className: 'ud-pref-group' },
+        h('div', { className: 'ud-pref-row' },
+          h('div', { className: 'ud-pref-text' },
+            h('span', { className: 'ud-pref-title' }, t('pricing')),
+            saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
+          h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save'))),
+        saveError ? h('div', { className: 'ud-error' }, saveError) : null,
+        rules.map((rule, index) => h(PricingRuleCard, {
+          key: index,
+          rule,
+          errors,
+          pathPrefix: `${index}.`,
+          t,
+          onPatch: (part) => setRules((prev) => updateRuleAt(prev, index, part)),
+          onRemove: () => setRules((prev) => prev.filter((_, i) => i !== index)),
+        })),
+        h('button', {
+          className: 'ud-rule-add', type: 'button',
+          onClick: () => setRules((prev) => [...prev, defaultPricingRule()]),
+        }, t('addRule')))
     }
 
     function StatusRow({ onChanged, onError, t = defaultT }) {
@@ -1588,6 +2076,18 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const heatGenerationRef = useRef(0)
       const panelRef = useRef(null)
       const [heatDays, setHeatDays] = useState(null)
+      // 费用展示货币来源:价格规则异步首帧未回时空串即不带符号
+      const [pricingRules, setPricingRules] = useState(null)
+
+      useEffect(() => {
+        let alive = true
+        fetchPricing().then((value) => {
+          if (alive && value) setPricingRules(value.rules)
+        })
+        return () => { alive = false }
+      }, [])
+
+      const costCurrency = aggregateCurrencyOf(pricingRules)
 
       // 热力图独立请求:与所选范围无关,失败静默留空,过期响应丢弃
       useEffect(() => {
@@ -1746,7 +2246,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         error ? h('div', { className: 'ud-error' }, error) : null,
         h(StatusRow, { onChanged: scheduleRefresh, onError: setError, t }),
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
-        stats ? h(StatCards, { key: 'cards', stats, t }) : null,
+        stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
         h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),
         trimmedSlots
           ? h(TrendChart, {
@@ -1761,13 +2261,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               busy,
               legendModels: trendSource.models,
               panelRef,
+              costCurrency,
+              costEnabled: view === 'day',
               t,
             })
           : null,
         grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, t }) : null,
         stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
-        h(StatsLineOptions, { key: 'prefs', t }))
+        h(StatsLineOptions, { key: 'prefs', t }),
+        h(PricingEditor, { key: 'pricing', t }))
     }
 
     return {
