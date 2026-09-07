@@ -18,16 +18,27 @@ const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join('
 const {
   DAY_MAX_SLOTS,
   DAY_PRESETS,
+  HEAT_BASE,
+  HEAT_GAP,
+  HEAT_RX,
+  HEAT_WEEKS,
+  HEAT_WINDOW_DAYS,
   HOUR_PRESETS,
   MINUTE_PRESETS,
   MESSAGES,
   OTHER_MODEL,
   cacheRateText,
+  daysInRange,
   formatCompact,
   formatTokens,
   groupPointSlots,
   groupStats,
+  heatDisplayDays,
+  heatGrid,
+  heatLayout,
+  heatLevel,
   hourTickLabel,
+  indexOfDay,
   isEmptyRange,
   maxSlotsFor,
   minuteTickLabel,
@@ -40,6 +51,7 @@ const {
   resolveMinuteRange,
   shortDay,
   t,
+  tipPlace,
   trimSlots,
   trendLayout,
 } = core
@@ -250,4 +262,110 @@ test('trendLayout 标签密度随列距收敛', () => {
   const slots = Array.from({ length: 100 }, (_, i) => ({ day: `d${i}`, total: 0, byModel: {} }))
   const layout = trendLayout(slots, [], 720, 46)
   assert.equal(layout.labelEvery, 8)
+})
+
+test('热力图常量锁定窗口与几何基准', () => {
+  assert.equal(HEAT_WEEKS, 26)
+  assert.equal(HEAT_WINDOW_DAYS, HEAT_WEEKS * 7)
+  assert.equal(HEAT_BASE, 14)
+  assert.equal(HEAT_GAP, 3)
+  assert.equal(HEAT_RX, 3)
+})
+
+test('indexOfDay 周一为零周日为六', () => {
+  assert.equal(indexOfDay('2026-03-09'), 0)
+  assert.equal(indexOfDay('2026-03-11'), 2)
+  assert.equal(indexOfDay('2026-03-15'), 6)
+})
+
+test('daysInRange 闭区间含两端且跨月连续', () => {
+  assert.deepEqual(daysInRange('2026-02-27', '2026-03-02'), ['2026-02-27', '2026-02-28', '2026-03-01', '2026-03-02'])
+  assert.deepEqual(daysInRange('2026-03-15', '2026-03-15'), ['2026-03-15'])
+})
+
+test('daysInRange 非法日期返回空表', () => {
+  assert.deepEqual(daysInRange('junk', 'junk'), [])
+})
+
+test('heatLayout 过窄保基准尺寸裁到可容列数', () => {
+  assert.deepEqual(heatLayout(200, '2026-03-09'), { size: HEAT_BASE, cols: 11 })
+})
+
+test('heatLayout 够宽连续生长铺满窗口', () => {
+  const layout = heatLayout(800, '2026-03-09')
+  assert.equal(layout.cols, HEAT_WEEKS)
+  approx(layout.size, 798 / 27 - 3)
+})
+
+test('heatLayout 生长下限不小于基准尺寸', () => {
+  assert.deepEqual(heatLayout(460, '2026-03-09'), { size: HEAT_BASE, cols: HEAT_WEEKS })
+})
+
+test('heatLayout 极窄至少保一列', () => {
+  assert.deepEqual(heatLayout(0, '2026-03-09'), { size: HEAT_BASE, cols: 1 })
+})
+
+test('heatDisplayDays 裁剪取尾部保最新且整窗不裁', () => {
+  const all = daysInRange('2025-09-15', '2026-03-15')
+  assert.equal(all.length, HEAT_WINDOW_DAYS)
+  assert.deepEqual(heatDisplayDays(all, 11), all.slice(-11 * 7))
+  assert.deepEqual(heatDisplayDays(all, HEAT_WEEKS), all)
+})
+
+test('heatGrid 周首位移换行且坐标含格距', () => {
+  const rows = daysInRange('2026-03-09', '2026-03-15').map((day) => ({ day }))
+  const grid = heatGrid(rows, 14)
+  assert.equal(grid.weeks, 2)
+  assert.deepEqual(grid.cells[0], { day: '2026-03-09', x: HEAT_GAP, y: HEAT_GAP + 17 })
+  assert.deepEqual(grid.cells[6], { day: '2026-03-15', x: HEAT_GAP + 17, y: HEAT_GAP })
+  assert.equal(grid.width, 2 * 17 + HEAT_GAP)
+  assert.equal(grid.height, 7 * 17 + HEAT_GAP)
+})
+
+test('heatGrid 周日对齐零位移整周单列', () => {
+  const rows = daysInRange('2026-03-15', '2026-03-21').map((day) => ({ day }))
+  const grid = heatGrid(rows, 14)
+  assert.equal(grid.weeks, 1)
+  assert.deepEqual(grid.cells[6], { day: '2026-03-21', x: HEAT_GAP, y: HEAT_GAP + 6 * 17 })
+  assert.equal(grid.width, 17 + HEAT_GAP)
+})
+
+test('heatLevel 零值为空档其余按峰值四分位', () => {
+  assert.equal(heatLevel(0, 100), 0)
+  assert.equal(heatLevel(24, 100), 1)
+  assert.equal(heatLevel(25, 100), 2)
+  assert.equal(heatLevel(50, 100), 3)
+  assert.equal(heatLevel(75, 100), 4)
+  assert.equal(heatLevel(100, 100), 5)
+  assert.equal(heatLevel(1, 1), 5)
+})
+
+const TIP_ANCHOR = { left: 100, top: 100, right: 140, bottom: 114 }
+const TIP_SIZE = { width: 80, height: 40 }
+const TIP_BOUNDS = { left: 0, top: 0, right: 800, bottom: 600 }
+
+test('tipPlace 默认锚点下方水平居中', () => {
+  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 80, top: 122 })
+})
+
+test('tipPlace 下方放不下翻转上方', () => {
+  const anchor = { ...TIP_ANCHOR, top: 540, bottom: 580 }
+  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).top, 492)
+})
+
+test('tipPlace 两侧均放不下钳到边界顶', () => {
+  const bounds = { left: 0, top: 0, right: 800, bottom: 50 }
+  const anchor = { left: 100, top: 20, right: 140, bottom: 50 }
+  assert.equal(tipPlace(anchor, TIP_SIZE, bounds).top, 8)
+})
+
+test('tipPlace 水平越界钳到边界左缘', () => {
+  const anchor = { left: 2, top: 100, right: 10, bottom: 114 }
+  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).left, 8)
+})
+
+test('tipPlace 零尺寸或全零锚定矩形返回隐藏', () => {
+  assert.equal(tipPlace(TIP_ANCHOR, { width: 0, height: 0 }, TIP_BOUNDS), null)
+  assert.equal(tipPlace({ left: 0, top: 0, right: 0, bottom: 0 }, TIP_SIZE, TIP_BOUNDS), null)
+  assert.equal(tipPlace(null, TIP_SIZE, TIP_BOUNDS), null)
 })

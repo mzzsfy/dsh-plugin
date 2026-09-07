@@ -309,6 +309,84 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
   }
 }
 
+// 热力图:窗口固定 26 周,与所选范围无关
+const HEAT_WEEKS = 26
+const HEAT_ROW_COUNT = 7
+const HEAT_WINDOW_DAYS = HEAT_WEEKS * HEAT_ROW_COUNT
+const HEAT_BASE = 14
+const HEAT_GAP = 3
+const HEAT_RX = 3
+const HEAT_WIDTH_EPSILON = 1
+const HEAT_LEVELS = 6
+const HEAT_LEVEL_BANDS = 4
+const HEAT_EDGE_TRIM = 2
+
+function indexOfDay(day) {
+  return (new Date(`${day}T00:00:00`).getDay() + HEAT_ROW_COUNT - 1) % HEAT_ROW_COUNT
+}
+
+function daysInRange(from, to) {
+  const days = []
+  const cursor = new Date(`${from}T00:00:00`)
+  const end = new Date(`${to}T00:00:00`)
+  while (cursor.getTime() <= end.getTime()) {
+    days.push(formatDate(cursor))
+    cursor.setDate(cursor.getDate() + 1)
+  }
+  return days
+}
+
+// 够宽格子连续生长铺满窗口,过窄保最新列裁最早
+function heatLayout(width, firstDay) {
+  const avail = Math.max(1, width - HEAT_EDGE_TRIM)
+  const baseCols = Math.max(1, Math.floor((avail + HEAT_GAP) / (HEAT_BASE + HEAT_GAP)))
+  if (baseCols < HEAT_WEEKS || !firstDay) return { size: HEAT_BASE, cols: baseCols }
+  const totalWeeks = Math.ceil((HEAT_WINDOW_DAYS + (indexOfDay(firstDay) + 1) % HEAT_ROW_COUNT) / HEAT_ROW_COUNT)
+  return { size: Math.max(HEAT_BASE, avail / totalWeeks - HEAT_GAP), cols: HEAT_WEEKS }
+}
+
+function heatDisplayDays(allDays, cols) {
+  return allDays.slice(-Math.min(cols * HEAT_ROW_COUNT, allDays.length))
+}
+
+// 行序位移:indexOfDay 周一为零,+1 取模后周日..周六落行首
+function heatGrid(rows, size) {
+  const startOffset = (indexOfDay(rows[0].day) + 1) % HEAT_ROW_COUNT
+  const weeks = Math.max(1, Math.ceil((rows.length + startOffset) / HEAT_ROW_COUNT))
+  const pitch = size + HEAT_GAP
+  const cells = rows.map((row, index) => {
+    const col = Math.floor((index + startOffset) / HEAT_ROW_COUNT)
+    const cellRow = (index + startOffset) % HEAT_ROW_COUNT
+    return { ...row, x: HEAT_GAP + col * pitch, y: HEAT_GAP + cellRow * pitch }
+  })
+  return { weeks, cells, width: weeks * pitch + HEAT_GAP, height: HEAT_ROW_COUNT * pitch + HEAT_GAP }
+}
+
+function heatLevel(tokens, max) {
+  return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
+}
+
+// ChartTip 定位:锚定格子矩形,边界内 clamp,下方优先放不下翻上方
+const TIP_GAP_PX = 8
+const TIP_MARGIN_PX = 8
+
+function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX) {
+  if (!tip || tip.width <= 0 || tip.height <= 0) return null
+  if (!anchor || (anchor.left === 0 && anchor.top === 0 && anchor.right === 0 && anchor.bottom === 0)) return null
+  const minX = bounds.left + margin
+  const minY = bounds.top + margin
+  const maxX = bounds.right - margin
+  const maxY = bounds.bottom - margin
+  const left = Math.max(minX, Math.min((anchor.left + anchor.right) / 2 - tip.width / 2, maxX - tip.width))
+  const below = anchor.bottom + gap
+  const above = anchor.top - gap - tip.height
+  let top
+  if (below + tip.height <= maxY) top = below
+  else if (above >= minY) top = above
+  else top = minY
+  return { left, top }
+}
+
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
@@ -321,6 +399,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return { inject: [], apply() {} }
     }
     const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = React
+
+    let createPortal = null
+    try {
+      createPortal = require('react-dom').createPortal
+    } catch {
+      createPortal = null
+    }
 
     const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)
     const cx = (...values) => values.filter(Boolean).join(' ')
@@ -346,6 +431,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const ICON_SIZE = 14
     const ICON_STROKE_WIDTH = 2
     const NOTE_SEPARATOR = ' · '
+    const TIP_Z_INDEX = 1100
     const STYLE_ID = 'dsh-usage-dash'
     const DAY_PRESET_LABELS = {
       '7': t('rangePreset.7'),
@@ -399,8 +485,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     const STYLE_CSS = `
 .ud-panel{display:flex;flex-direction:column;gap:16px;font-size:13px;color:var(--dsw-alias-label-primary);
---ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white)}
-body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white)}
+--ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
+--dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe}
+body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
+--dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff}
 .ud-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
 .ud-seg-item{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
@@ -445,6 +533,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0}
 .ud-legend-item span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-legend-swatch{width:8px;height:8px;border-radius:2px;flex:none}
+.ud-heat-wrap{width:100%;min-width:0;overflow:hidden}
+.ud-heat{display:block}
+.ud-heat-cell{stroke:none}
+.ud-heat-l0{fill:var(--dsw-heat-0);background:var(--dsw-heat-0)}
+.ud-heat-l1{fill:var(--dsw-heat-1);background:var(--dsw-heat-1)}
+.ud-heat-l2{fill:var(--dsw-heat-2);background:var(--dsw-heat-2)}
+.ud-heat-l3{fill:var(--dsw-heat-3);background:var(--dsw-heat-3)}
+.ud-heat-l4{fill:var(--dsw-heat-4);background:var(--dsw-heat-4)}
+.ud-heat-l5{fill:var(--dsw-heat-5);background:var(--dsw-heat-5)}
+.ud-heat-legend{display:inline-flex;align-items:center;gap:${HEAT_GAP}px;margin-left:auto;flex:none;font-size:11px;color:var(--dsw-alias-label-secondary)}
+.ud-heat-legend i{display:inline-block;width:${HEAT_BASE}px;height:${HEAT_BASE}px;border-radius:${HEAT_RX}px;flex:none}
+.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);box-shadow:0 4px 12px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:8px 10px}
+.ud-tip-title{font-weight:600}
+.ud-tip-row{font-size:12px;color:var(--dsw-alias-label-secondary)}
 `
 
     function ensureStyle(document) {
@@ -565,6 +667,109 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         h(Legend, { models: legendModels, colorFor }))
     }
 
+    // 浮层 tooltip:portal 到 body,模块表缺失时降级面板内 fixed
+    function ChartTip({ anchor, panelRef, children }) {
+      const tipRef = useRef(null)
+      const [pos, setPos] = useState(null)
+      const place = useCallback(() => {
+        const tip = tipRef.current
+        if (!tip) return
+        const panel = panelRef ? panelRef.current : null
+        const bounds = panel
+          ? panel.getBoundingClientRect()
+          : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+        const next = tipPlace(
+          anchor ? anchor.getBoundingClientRect() : null,
+          { width: tip.offsetWidth, height: tip.offsetHeight },
+          bounds,
+        )
+        setPos((prev) => (prev && next && prev.left === next.left && prev.top === next.top ? prev : next))
+      }, [anchor, panelRef])
+      useLayoutEffect(() => {
+        place()
+      }, [place])
+      useEffect(() => {
+        window.addEventListener('scroll', place, true)
+        window.addEventListener('resize', place)
+        const observer = new ResizeObserver(() => place())
+        if (tipRef.current) observer.observe(tipRef.current)
+        if (panelRef && panelRef.current) observer.observe(panelRef.current)
+        return () => {
+          window.removeEventListener('scroll', place, true)
+          window.removeEventListener('resize', place)
+          observer.disconnect()
+        }
+      }, [place])
+      const element = h('div', {
+        className: 'ud-tip',
+        ref: tipRef,
+        style: {
+          left: pos ? pos.left : 0,
+          top: pos ? pos.top : 0,
+          visibility: pos && anchor ? 'visible' : 'hidden',
+        },
+      }, anchor ? children : null)
+      return createPortal && typeof document !== 'undefined' && document.body
+        ? createPortal(element, document.body)
+        : element
+    }
+
+    function HeatSection({ days, panelRef }) {
+      const wrapRef = useRef(null)
+      const [width, setWidth] = useState(0)
+      const [hover, setHover] = useState(null)
+      useEffect(() => {
+        const element = wrapRef.current
+        const observer = new ResizeObserver((entries) => {
+          const next = entries[0].contentRect.width
+          setWidth((prev) => (Math.abs(prev - next) < HEAT_WIDTH_EPSILON ? prev : next))
+        })
+        observer.observe(element)
+        return () => observer.disconnect()
+      }, [])
+      const geom = width > 0 && days ? heatLayout(width, days[0].day) : null
+      const display = geom ? heatDisplayDays(days, geom.cols) : null
+      const grid = display ? heatGrid(display, geom.size) : null
+      const peak = display ? Math.max(1, ...display.map((slot) => slot.tokens)) : 1
+      const pick = (cell) => (event) => setHover({ ...cell, anchor: event.currentTarget })
+      const clear = () => setHover(null)
+      return h('div', { className: 'ud-section' },
+        h('div', { className: 'ud-section-head' },
+          h('span', { className: 'ud-section-title' }, t('heatmap')),
+          h('div', { className: 'ud-heat-legend' },
+            h('span', null, t('heatLess')),
+            Array.from({ length: HEAT_LEVELS - 1 }, (_, index) => h('i', {
+              key: index,
+              className: `ud-heat-l${index + 1}`,
+              style: geom ? { width: geom.size, height: geom.size } : undefined,
+            })),
+            h('span', null, t('heatMore')))),
+        h('div', { className: 'ud-heat-wrap', ref: wrapRef },
+          grid
+            ? h('svg', { className: 'ud-heat', width: grid.width, height: grid.height, role: 'img', 'aria-label': t('heatmap') },
+                grid.cells.map((cell) => {
+                  const level = heatLevel(cell.tokens, peak)
+                  return h('rect', {
+                    key: cell.day,
+                    className: `ud-heat-cell ud-heat-l${level}`,
+                    x: cell.x, y: cell.y, width: geom.size, height: geom.size, rx: HEAT_RX,
+                    'aria-hidden': level === 0,
+                    onMouseEnter: pick(cell), onFocus: pick(cell),
+                    onMouseLeave: clear, onBlur: clear,
+                  })
+                }))
+            : null),
+        h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
+          hover
+            ? [
+                h('div', { key: 'title', className: 'ud-tip-title' }, hover.day),
+                h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('tokens')}: ${formatTokens(hover.tokens)}`),
+                h('div', { key: 'requests', className: 'ud-tip-row' }, `${t('requests')}: ${hover.requests}`),
+                h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hover.cacheHit, hover.cacheMiss)}`),
+              ]
+            : null))
+    }
+
     function StatusRow({ onChanged, onError }) {
       const [status, setStatus] = useState(null)
       const [armed, setArmed] = useState(false)
@@ -673,6 +878,29 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [fetchTick, setFetchTick] = useState(0)
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
+      const heatGenerationRef = useRef(0)
+      const panelRef = useRef(null)
+      const [heatDays, setHeatDays] = useState(null)
+
+      // 热力图独立请求:与所选范围无关,失败静默留空,过期响应丢弃
+      useEffect(() => {
+        const generation = ++heatGenerationRef.current
+        const request = { from: localDay(-(HEAT_WINDOW_DAYS - 1)), to: localDay(0) }
+        requestPost(ENDPOINTS.range, request).then((result) => {
+          if (heatGenerationRef.current !== generation || !result.ok) return
+          const byDay = new Map(result.value.daily.map((slot) => [slot.day, slot]))
+          setHeatDays(daysInRange(request.from, request.to).map((day) => {
+            const slot = byDay.get(day)
+            return {
+              day,
+              tokens: slot ? slot.total : 0,
+              requests: slot ? slot.requests : 0,
+              cacheHit: slot ? slot.cacheHit : 0,
+              cacheMiss: slot ? slot.cacheMiss : 0,
+            }
+          }))
+        })
+      }, [])
 
       const load = useCallback(async () => {
         const request = range === 'custom'
@@ -763,7 +991,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const loadingVisible = pointActive ? pointStatus === 'loading' && !pointView : loading && !stats
       const emptyVisible = !error && (pointActive ? pointView && isEmptyRange(pointView) : stats && isEmptyRange(stats))
 
-      return h('div', { className: 'ud-panel' },
+      return h('div', { className: 'ud-panel', ref: panelRef },
         h('div', { className: 'ud-toolbar' },
           h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
             VIEW_TABS.map((tab) => h('button', {
@@ -807,6 +1035,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         h(StatusRow, { onChanged: scheduleRefresh, onError: setError }),
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats }) : null,
+        h(HeatSection, { key: 'heat', days: heatDays, panelRef }),
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',
