@@ -1,0 +1,46 @@
+{
+  "name": "@mzzsfy/dsh-usage-dash",
+  "description": "用量统计面板:天/小时/分钟三粒度 token 与请求统计,26 周活跃热力图,会话底栏信息接管与回合级用量注入,多条件分时段定价规则与费用估算",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.1-rc.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "zod": ">=4.5.4"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

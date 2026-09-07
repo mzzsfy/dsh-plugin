@@ -1,0 +1,9 @@
+# The usage-dash bundle patch: inserts the usage dashboard plugin into the
+# profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-usage-dash`;
+# the row id addresses this plugin's host half, which collects session usage
+# into the usage_stats storage domain and serves /api/usage-dash/* to the
+# browser half (settings section panel + stats-line / turn-tail injections).
+
+- insert:
+    - id: usage-dash
+      name: '@mzzsfy/dsh-usage-dash'
