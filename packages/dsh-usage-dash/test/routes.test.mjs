@@ -16,6 +16,7 @@ const PATH_HOURS = `${ROUTE_PREFIX}/hours`
 const PATH_MINUTES = `${ROUTE_PREFIX}/minutes`
 const PATH_STATUS = `${ROUTE_PREFIX}/status`
 const PATH_RESET = `${ROUTE_PREFIX}/reset`
+const PATH_PRICING = `${ROUTE_PREFIX}/pricing`
 const PATH_UNKNOWN = `${ROUTE_PREFIX}/unknown`
 const LOCAL_HOST = '127.0.0.1:3080'
 // 固定"当前时刻",分钟保留窗口断言以此换算,消除真实时钟不确定性
@@ -105,7 +106,28 @@ function makeCollector({ stateOverrides = {}, rebuilding = false } = {}) {
   }
 }
 
-function mount({ store, collector, retentionDays, now } = {}) {
+function makePricing({ active = true, rules = [] } = {}) {
+  const state = { rules: [...rules], revision: 0 }
+  const calls = { replace: 0 }
+  return {
+    active,
+    calls,
+    rules() {
+      return state.rules
+    },
+    revision() {
+      return state.revision
+    },
+    async replace(next) {
+      calls.replace += 1
+      state.rules = next
+      state.revision += 1
+      return next
+    },
+  }
+}
+
+function mount({ store, collector, retentionDays, now, pricing } = {}) {
   const ctx = makeCtx()
   ctx.webServer = makeWebServer()
   const dispose = registerUsageRoutes(ctx, {
@@ -113,6 +135,7 @@ function mount({ store, collector, retentionDays, now } = {}) {
     collector: collector ?? makeCollector(),
     retentionDays: retentionDays ?? (() => DEFAULT_MINUTE_RETENTION_DAYS),
     now: now ?? (() => FIXED_NOW),
+    pricing,
   })
   return { routes: ctx.webServer.routes, dispose, ctx }
 }
@@ -354,4 +377,190 @@ test('内部错误 500 不回显内部文本', async () => {
   assert.equal(parsed.error.message, 'internal error')
   assert.ok(!res.body.includes('secret'))
   assert.equal(ctx.logger.warnings.length, 1)
+})
+
+// ---- S13 pricing 端点与 cost 集成 ----
+
+const PRICING_RULE = {
+  model: 'deepseek-chat',
+  currency: '¥',
+  price: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+  conditions: [{ kind: 'dailyWindow', from: '09:00', to: '18:00' }],
+}
+
+const ruleWithInputPrice = (input) => ({
+  model: 'deepseek-chat',
+  currency: '¥',
+  price: { input, output: 0, cacheRead: 0, cacheWrite: 0 },
+  conditions: [],
+})
+
+test('pricing GET 默认返回空规则与零 revision 且不要求 content-type', async () => {
+  const { routes } = mount()
+  const res = await invoke(routes, PATH_PRICING, { method: 'GET' })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(parsed, { ok: true, value: { revision: 0, rules: [] } })
+})
+
+test('pricing GET 回读能力当前规则', async () => {
+  const pricing = makePricing({ rules: [PRICING_RULE] })
+  const { routes } = mount({ pricing })
+  const res = await invoke(routes, PATH_PRICING, { method: 'GET' })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(parsed, { ok: true, value: { revision: 0, rules: [PRICING_RULE] } })
+})
+
+test('pricing POST 合法规则写入并回读自增 revision', async () => {
+  const pricing = makePricing()
+  const { routes } = mount({ pricing })
+  const res = await invokeJson(routes, PATH_PRICING, { payload: { rules: [PRICING_RULE] } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(parsed, { ok: true, value: { revision: 1, rules: [PRICING_RULE] } })
+  assert.equal(pricing.calls.replace, 1)
+  assert.deepEqual(pricing.rules(), [PRICING_RULE])
+})
+
+test('pricing POST 缺 content-type 同样放行', async () => {
+  const pricing = makePricing()
+  const { routes } = mount({ pricing })
+  const res = await invoke(routes, PATH_PRICING, { body: JSON.stringify({ rules: [] }) })
+  assert.equal(res.statusCode, 200)
+  assert.equal(JSON.parse(res.body).ok, true)
+})
+
+test('pricing POST 非法规则拒绝 400 且不写入', async () => {
+  const pricing = makePricing()
+  const { routes } = mount({ pricing })
+  const invalidPayloads = [
+    { rules: 'x' },
+    {},
+    { rules: [{ model: 1, currency: '¥', price: PRICING_RULE.price, conditions: [] }] },
+    { rules: [{ ...PRICING_RULE, price: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
+    { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'unknown' }] }] },
+    { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'weekdays', days: [7] }] }] },
+    { rules: [{ ...PRICING_RULE, currency: '€' }] },
+  ]
+  for (const payload of invalidPayloads) {
+    const res = await invokeJson(routes, PATH_PRICING, { payload })
+    const parsed = JSON.parse(res.body)
+    assert.equal(res.statusCode, 400)
+    assert.equal(parsed.ok, false)
+    assert.equal(parsed.error.message, 'usage stats: invalid pricing rules')
+  }
+  assert.equal(pricing.calls.replace, 0)
+})
+
+test('pricing POST 跨 Origin 拒绝 403', async () => {
+  const pricing = makePricing()
+  const { routes } = mount({ pricing })
+  const res = await invokeJson(routes, PATH_PRICING, {
+    payload: { rules: [] },
+    headers: { origin: 'http://evil.example', host: LOCAL_HOST },
+  })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 403)
+  assert.equal(parsed.error.code, 'forbidden')
+  assert.equal(pricing.calls.replace, 0)
+})
+
+test('pricing 非 GET/POST 方法拒绝 405', async () => {
+  const { routes } = mount({ pricing: makePricing() })
+  const res = await invoke(routes, PATH_PRICING, { method: 'PUT' })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 405)
+  assert.equal(parsed.error.code, 'usage_api_error')
+})
+
+test('settings 缺席时 pricing POST 拒绝 503', async () => {
+  const { routes } = mount()
+  const res = await invokeJson(routes, PATH_PRICING, { payload: { rules: [] } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 503)
+  assert.equal(parsed.error.code, 'usage_api_error')
+  assert.equal(parsed.error.message, 'usage stats: pricing unavailable')
+})
+
+test('写入规则后 range 响应携带 cost 与 unpriced', async () => {
+  const store = makeStore({
+    rows: [
+      makeRow({ bucket: '2026-02-01', model: 'deepseek-chat', inputTokens: 1000000 }),
+      makeRow({ bucket: '2026-02-01', model: 'other-model', inputTokens: 500000 }),
+      makeRow({ bucket: '2026-02-01T05', model: 'deepseek-chat', inputTokens: 1000000 }),
+      makeRow({ bucket: '2026-02-01T06', model: 'other-model', inputTokens: 500000 }),
+    ],
+  })
+  const pricing = makePricing({ rules: [ruleWithInputPrice(2)] })
+  const { routes } = mount({ store, pricing })
+  const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal(parsed.value.cost, 2)
+  assert.equal(parsed.value.unpriced, 1)
+  assert.equal(parsed.value.daily[0].cost, 2)
+  assert.deepEqual(parsed.value.models.map((entry) => [entry.model, entry.cost]), [
+    ['deepseek-chat', 2],
+    ['other-model', 0],
+  ])
+})
+
+test('改规则重查 range cost 随之变化', async () => {
+  const store = makeStore({ rows: [makeRow({ bucket: '2026-02-01T05', model: 'deepseek-chat', inputTokens: 1000000 })] })
+  const pricing = makePricing()
+  const { routes } = mount({ store, pricing })
+  const rangeCost = async () => {
+    const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
+    return JSON.parse(res.body).value.cost
+  }
+  assert.equal(await rangeCost(), 0)
+  await invokeJson(routes, PATH_PRICING, { payload: { rules: [ruleWithInputPrice(1)] } })
+  assert.equal(await rangeCost(), 1)
+  await invokeJson(routes, PATH_PRICING, { payload: { rules: [ruleWithInputPrice(3)] } })
+  assert.equal(await rangeCost(), 3)
+})
+
+test('range 末日 H 行计入 cost(上界补足当日末小时)', async () => {
+  const store = makeStore({ rows: [makeRow({ bucket: '2026-02-01T23', model: 'deepseek-chat', inputTokens: 1000000 })] })
+  const pricing = makePricing({ rules: [ruleWithInputPrice(1)] })
+  const { routes } = mount({ store, pricing })
+  const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(parsed.value.cost, 1)
+  assert.equal(parsed.value.unpriced, 0)
+})
+
+test('hours 端点同窗口行直接计价', async () => {
+  const store = makeStore({ rows: [makeRow({ bucket: '2026-02-01T05', model: 'deepseek-chat', inputTokens: 1000000 })] })
+  const pricing = makePricing({ rules: [ruleWithInputPrice(4)] })
+  const { routes } = mount({ store, pricing })
+  const res = await invokeJson(routes, PATH_HOURS, { payload: { from: '2026-02-01T05', to: '2026-02-01T05' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(parsed.value.cost, 4)
+  assert.equal(parsed.value.daily[0].cost, 4)
+})
+
+test('minutes 端点按父 H 价格计价', async () => {
+  const to = minuteKey(FIXED_NOW)
+  const store = makeStore({ rows: [makeRow({ bucket: to, model: 'deepseek-chat', inputTokens: 1000000 })] })
+  const pricing = makePricing({ rules: [ruleWithInputPrice(2)] })
+  const { routes } = mount({ store, pricing })
+  const from = minuteKey(FIXED_NOW - 10 * MINUTE_MS)
+  const res = await invokeJson(routes, PATH_MINUTES, { payload: { from, to } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(parsed.value.cost, 2)
+  assert.equal(parsed.value.unpriced, 0)
+})
+
+test('settings 缺席时 range 响应与现状形状一致(无 cost/unpriced)', async () => {
+  const store = makeStore({ rows: [makeRow({ bucket: '2026-02-01', inputTokens: 10, requests: 1 })] })
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal('cost' in parsed.value, false)
+  assert.equal('unpriced' in parsed.value, false)
+  assert.equal('cost' in parsed.value.daily[0], false)
+  assert.equal('cost' in parsed.value.models[0], false)
 })

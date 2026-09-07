@@ -1,6 +1,8 @@
 // 用量聚合纯函数:store 行形状仅作数据约定,零宿主依赖。
 // 桶串本地时区推导,同粒度字典序即时间序;daily 零值槽全枚举,超槽数保最新丢最旧。
 
+import { costOf, matchPrice } from './pricing.js'
+
 export const MAX_SLOTS = 2000
 
 const PAD_WIDTH = 2
@@ -13,6 +15,10 @@ const GRANULARITY_MINUTE = 'M'
 const DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const HOUR_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}$/
 const MINUTE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
+
+// 桶串前缀宽:D 段定位日槽,M 行截取父 H 桶
+const DAY_KEY_WIDTH = 'YYYY-MM-DD'.length
+const HOUR_KEY_WIDTH = 'YYYY-MM-DDTHH'.length
 
 const pad = (value) => String(value).padStart(PAD_WIDTH, '0')
 const formatDate = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
@@ -89,6 +95,8 @@ const addRowToSlot = (slot, row, tokens) => {
 
 const percentOf = (part, total) => (total === 0 ? 0 : (part / total) * PERCENT_SCALE)
 
+const rowTokens = (row) => row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens
+
 export function aggregateRange(rows, g, from, to) {
   const form = BUCKET_FORMS[g]
   const slots = enumerateBucketKeys(form)(from, to).map((key) => emptySlot(key))
@@ -100,7 +108,7 @@ export function aggregateRange(rows, g, from, to) {
     const slot = slotByKey.get(row.bucket)
     // 桶串未落在枚举序列(如改粒度前的历史残行)不可归属,跳过防崩
     if (!slot) continue
-    const tokens = row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens
+    const tokens = rowTokens(row)
     addRowToSlot(slot, row, tokens)
     if (tokens === 0) continue
     activeBuckets.add(row.bucket)
@@ -145,4 +153,41 @@ export function aggregateRange(rows, g, from, to) {
   }
   if (truncated) result.truncated = true
   return result
+}
+
+// 聚合计价的槽定位:D 折叠到日槽,H/M 即本槽;计价一律取行所属 H 桶起点
+const COST_SLOT_KEYS = {
+  [GRANULARITY_DAILY]: (bucket) => bucket.slice(0, DAY_KEY_WIDTH),
+  [GRANULARITY_HOURLY]: (bucket) => bucket,
+  [GRANULARITY_MINUTE]: (bucket) => bucket,
+}
+
+// 聚合计价:以可见槽为唯一口径,cost 行按 H 桶起点匹配价格后累加;
+// unpriced = 有 token 而未命中价的去重 H 桶数,被截断丢弃的行整体不参与。
+// 纯函数返回新 result,不修改入参;调用方不调用则响应无 cost/unpriced 字段
+export function attachCosts(result, costRows, granularity, rules) {
+  const slotKeyOf = COST_SLOT_KEYS[granularity]
+  const slotOfDay = new Map(result.daily.map((slot) => [slot.day, slot]))
+  const slotCosts = new Map()
+  const modelCosts = new Map(result.models.map((entry) => [entry.model, 0]))
+  const unpricedHours = new Set()
+  for (const row of costRows) {
+    const slot = slotOfDay.get(slotKeyOf(row.bucket))
+    if (!slot || rowTokens(row) === 0) continue
+    const hourKey = row.bucket.slice(0, HOUR_KEY_WIDTH)
+    const date = parseBucketKey(hourKey, BUCKET_FORMS[GRANULARITY_HOURLY])
+    if (!date) continue
+    const price = matchPrice(rules, row.model, date)
+    if (!price) {
+      unpricedHours.add(hourKey)
+      continue
+    }
+    const cost = costOf(price, row)
+    slotCosts.set(slot.day, (slotCosts.get(slot.day) ?? 0) + cost)
+    if (modelCosts.has(row.model)) modelCosts.set(row.model, modelCosts.get(row.model) + cost)
+  }
+  const daily = result.daily.map((slot) => ({ ...slot, cost: slotCosts.get(slot.day) ?? 0 }))
+  const cost = daily.reduce((sum, slot) => sum + slot.cost, 0)
+  const models = result.models.map((entry) => ({ ...entry, cost: modelCosts.get(entry.model) }))
+  return { ...result, daily, models, cost, unpriced: unpricedHours.size }
 }
