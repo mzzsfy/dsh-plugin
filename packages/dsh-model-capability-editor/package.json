@@ -33,7 +33,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@mzzsfy/dsh-toast": "^0.1.0"
+    "@mzzsfy/dsh-toast": "^0.1.2"
   },
   "peerDependencies": {
     "react": "^18.2.0",
