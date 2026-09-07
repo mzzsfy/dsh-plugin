@@ -1015,7 +1015,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
                     'aria-pressed': range === id,
                     onClick: () => setRange(id),
-                  }, DAY_PRESET_LABELS[id]))),
+                  }, DAY_PRESET_LABELS[id])),
+                  h('button', {
+                    className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
+                    'aria-pressed': range === 'custom',
+                    onClick: () => setRange('custom'),
+                  }, t('rangeCustom'))),
                 range === 'custom'
                   ? h('div', { className: 'ud-custom-range' },
                       h('input', {
