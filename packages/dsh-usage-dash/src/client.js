@@ -168,6 +168,9 @@ const MESSAGES_ZH = {
   costUnpriced: '{n} 个小时桶未计价',
   statsCostTitle: '按当前费率对会话累计 token 估算',
   'stats.cost': '费用 ≈ {cost}',
+  'stats.turnCost': '{summary} · 费用 ≈ {cost}',
+  turnCostTitle: '单轮用量按当前费率估算',
+  turnTokensUnreported: '该提供商未上报此桶',
   pricing: '定价规则',
   pricingUnavailable: '定价规则不可用',
   pricingModel: '模型',
@@ -263,6 +266,9 @@ const MESSAGES_EN = {
   costUnpriced: '{n} hour buckets unpriced',
   statsCostTitle: 'Estimated at current rates over session token totals',
   'stats.cost': 'Cost ≈ {cost}',
+  'stats.turnCost': '{summary} · Cost ≈ {cost}',
+  turnCostTitle: 'Per-turn usage estimated at current rates',
+  turnTokensUnreported: 'Not reported by this provider',
   pricing: 'Pricing rules',
   pricingUnavailable: 'Pricing rules unavailable',
   pricingModel: 'Model',
@@ -1046,6 +1052,54 @@ function costTitleText(t, unpriced) {
   return unpriced > 0 ? `${base},${t('costUnpriced', { n: unpriced })}` : base
 }
 
+// ===== 注入点B:turnTail 单轮用量行(chain 条目,官方 TurnTailNodeView 容器内渲染) =====
+// chain 尝试顺序 = priority 升序:deliverables 产物行(默认 0)先试,本条目后试让位
+const TURN_TAIL_DATA_KEY = 'turn-tail'
+const TURN_TAIL_PRIORITY = 1
+const TURN_COST_REVEAL_MS = 80
+const TURN_TAIL_ACTIONS_INSET_PX = -6
+
+// Turn 位置数据读取:owner 形状残缺一律 null 不抛;tokenUsage 缺失(证据不完整)即放弃渲染
+function selectTurnTokenUsage(owner) {
+  return owner?.turn?.data?.get
+    ? (owner.turn.data.get(TURN_TAIL_DATA_KEY)?.tokenUsage ?? null)
+    : null
+}
+
+// 计价模型键:routes 首个 route.model,缺席回退通配(与注入点A 同款)
+const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_WILDCARD
+
+// 可选桶(cacheRead/cacheWrite)仅部分 provider 上报,缺失按 0 计入摘要与费用
+const turnReportedBucket = (value) => (value ?? 0)
+
+// 摘要计费输入 = prompt 侧三桶(官方 billing 分母口径)
+function turnBilledInputTokens(tokenUsage) {
+  return tokenUsage.uncachedInputTokens
+    + turnReportedBucket(tokenUsage.cacheReadTokens)
+    + turnReportedBucket(tokenUsage.cacheWriteTokens)
+}
+
+// 可选桶未上报判定:与取不到价的「—」是两种降级,仅在 title 标注
+function turnOptionalUnreported(tokenUsage) {
+  return tokenUsage?.cacheReadTokens === undefined || tokenUsage?.cacheWriteTokens === undefined
+}
+
+// 单轮行文本:摘要 + 费用;token 复用官方 compact 族,价未命中为占位符
+function buildTurnCostLine(t, tokenUsage, price, currency) {
+  const summary = t('stats.tokens', {
+    input: formatTokensCompact(turnBilledInputTokens(tokenUsage), t),
+    output: formatTokensCompact(tokenUsage.outputTokens, t),
+  })
+  const cost = price ? formatCost(costOf(price, pricingBucketsOf(tokenUsage)), currency) : COST_PLACEHOLDER
+  return t('stats.turnCost', { summary, cost })
+}
+
+// 行 title:估算口径说明,可选桶未上报时追加标注
+function turnCostTitleText(t, tokenUsage) {
+  const base = t('turnCostTitle')
+  return turnOptionalUnreported(tokenUsage) ? `${base},${t('turnTokensUnreported')}` : base
+}
+
 // ===== 定价编辑器纯函数(校验/规整/默认值) =====
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
@@ -1353,6 +1407,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
 .ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
+.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);margin-left:${TURN_TAIL_ACTIONS_INSET_PX}px;font-variant-numeric:tabular-nums;white-space:nowrap}
+@media (hover:hover){[data-actions-reveal=hover] .ud-turn-cost{opacity:0;transition:opacity ${TURN_COST_REVEAL_MS}ms}[data-actions-reveal=hover]:hover .ud-turn-cost,[data-actions-reveal=hover]:focus-within .ud-turn-cost{opacity:1}}
 `
 
     function ensureStyle(document) {
@@ -1795,6 +1851,26 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }, entries.map((entry, index) => h(React.Fragment, { key: index },
         index > 0 && h('span', { className: 'ud-statsline-sep', 'aria-hidden': true }, '|'),
         entry.title ? h('span', { title: entry.title }, entry.text) : entry.text)))
+    })
+
+    // 注入点B 组件:Turn 尾部单轮用量行,chain matched 即 TurnTokenUsage,渲染于动作行之前;
+    // 无独立费用开关(plan 决策),显隐随容器 data-actions-reveal;价格未载期间费用为占位符
+    const CostTail = React.memo(function CostTail({ matched, useChat, t = defaultT }) {
+      if (!matched || typeof useChat !== 'function') return null
+      const [pricingRules, setPricingRules] = useState(null)
+      useEffect(() => {
+        let alive = true
+        fetchPricing().then((value) => {
+          if (alive && value) setPricingRules(value.rules)
+        })
+        return () => { alive = false }
+      }, [])
+      const model = turnModelOf(matched)
+      const now = new Date()
+      const price = pricingRules ? matchPrice(pricingRules, model, now) : null
+      const currency = pricingRules ? matchedCurrency(pricingRules, model, now) : ''
+      return h('div', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
+        buildTurnCostLine(t, matched, price, currency))
     })
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
@@ -2293,6 +2369,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             ))
         } catch (error) {
           console.warn('[usage-dash] 底部信息栏未注册(宿主无 conversation.composer.dock 插槽)', error)
+        }
+        // 注入点B:turnTail chain 条目,同款两段式与降级;旧宿主无该插槽仅告警禁用
+        try {
+          ctx.slots.inject('conversation.chat.turnTail', () =>
+            ctx.slots.register(
+              { name: 'conversation.chat.turnTail', select: selectTurnTokenUsage, priority: TURN_TAIL_PRIORITY, locale: LOCALE_NS },
+              CostTail,
+            ))
+        } catch (error) {
+          console.warn('[usage-dash] 会话尾部用量行未注册(宿主无 conversation.chat.turnTail 插槽)', error)
         }
         // 跨实例同步:其他实例写开关经 storage 事件触发重读(同实例写入不触发该事件)
         window.addEventListener('storage', (event) => {
