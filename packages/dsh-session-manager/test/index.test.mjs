@@ -32,6 +32,10 @@ process.env.DSH_HISTORY_CACHE_DIR = sharedCacheDir
 test.after(() => { rmSync(sharedCacheDir, { recursive: true, force: true }) })
 // 台账/重挂载夹具路径仅作数据,不落盘;形态与实现一致(会话目录)
 const LEDGER_FIXTURE_PATH = 'C:\\store\\s1'
+// 幽灵产物夹具:tmpdir 下未创建的路径,跨平台 stat 必 ENOENT
+// (POSIX 对纯反斜杠 Windows 字面量取 dirname 会落回 '.',stat 成功使幽灵分支不可达)
+const GHOST_DIR = path.join(tmpdir(), 'sm-ghost-fixture', 's1')
+const GHOST_PATH = path.join(GHOST_DIR, 'session.jsonl.zstd')
 
 function makeRegistry(initialIds) {
   // 真实注册表契约:archivedSessionIds 是进程内快照的 getter,官方读路径全部经快照;
@@ -469,7 +473,7 @@ test('info 路由:产物已缺失按 missing 返回,不裸抛', skipMissingDeps,
     archivedIds: [],
     headers: [HEADER],
     agents: new Map(),
-    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
+    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: GHOST_PATH } : undefined },
   })
   const res = response()
   await handlers.get('/api/session-manager/info')(request('s1'), res)
@@ -993,8 +997,8 @@ test('删除:产物已缺失时跳过 trash 与台账,完成列表清理(同 id 
     headers: [HEADER],
     agents: IDLE_S1,
     domain,
-    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
-    ledger: makeLedgerDomain([{ sessionId: 's1', path: 'C:\\gone\\s1', deletedAt: 1 }]),
+    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: GHOST_PATH } : undefined },
+    ledger: makeLedgerDomain([{ sessionId: 's1', path: GHOST_DIR, deletedAt: 1 }]),
     workspaces: [workspace],
   })
   const trashed = []
@@ -1018,7 +1022,7 @@ test('删除:产物缺失且无归档记录无台账时拒绝(防新建会话未
     headers: [HEADER],
     agents: IDLE_S1,
     domain: makeDomain([]),
-    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
+    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: GHOST_PATH } : undefined },
     workspaces: [workspace],
   })
   const res = response()
@@ -1037,7 +1041,7 @@ test('删除:产物已缺失时运行中守卫仍然生效', skipMissingDeps, as
     headers: [HEADER],
     agents: new Map([['s1', { status: 'running' }]]),
     domain: makeDomain([]),
-    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
+    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: GHOST_PATH } : undefined },
   })
   const res = response()
   await withTrashStub(async () => {}, async () => {
@@ -1054,8 +1058,8 @@ test('删除:产物已缺失且清理半失败时聚合失败点', skipMissingDe
     headers: [HEADER],
     agents: IDLE_S1,
     domain: null,
-    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: 'C:\\gone\\s1\\session.jsonl.zstd' } : undefined },
-    ledger: makeLedgerDomain([{ sessionId: 's1', path: 'C:\\gone\\s1', deletedAt: 1 }]),
+    sessionPersistence: { locate: (header) => header.id === 's1' ? { path: GHOST_PATH } : undefined },
+    ledger: makeLedgerDomain([{ sessionId: 's1', path: GHOST_DIR, deletedAt: 1 }]),
     workspaces: [workspace],
   })
   const res = response()

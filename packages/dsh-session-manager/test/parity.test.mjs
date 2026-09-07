@@ -18,8 +18,9 @@ const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_SRC = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
 const INDEX_SRC = readFileSync(join(PKG_ROOT, 'src', 'index.js'), 'utf8')
 
-// 切片:从 projectRows 定义起到最后一个镜像纯函数止,均为无外部依赖纯函数
-const MIRROR_START = CLIENT_SRC.indexOf('function projectRows(')
+// 切片:从首个镜像纯函数(workspaceTitleOf)起到最后一个镜像纯函数止,
+// 均为无外部依赖纯函数
+const MIRROR_START = CLIENT_SRC.indexOf('function workspaceTitleOf(')
 const MIRROR_END_MARKER = 'function ArchiveRow('
 const MIRROR_END = CLIENT_SRC.indexOf(MIRROR_END_MARKER)
 assert.ok(MIRROR_START >= 0 && MIRROR_END > MIRROR_START, 'client.js 镜像函数切片定位失败')
@@ -29,16 +30,28 @@ const mirror = new Function(
   + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep }',
 )()
 
-// client 侧输入形态 byId 字典,core 侧 rows 数组:按 title 约定构造等价输入
+// client 侧输入形态 byId 字典,core 侧 rows 数组:按 title/cwd 约定构造等价输入
 function byIdOf(rows) {
   const byId = {}
-  for (const row of rows) byId[row.id] = { displayTitle: row.title, updatedAt: row.updatedAt }
+  for (const row of rows) {
+    byId[row.id] = { displayTitle: row.title, updatedAt: row.updatedAt }
+    if (row.cwd !== undefined) byId[row.id].cwd = row.cwd
+  }
   return byId
 }
 
-function assertArchiveProjectionParity(rows, archivedIds) {
-  const clientRows = mirror.projectRows({ byId: byIdOf(rows) }, archivedIds)
-  const coreRows = projectArchiveRows({ rows, archivedIds })
+const PARITY_WORKSPACES = [
+  { workspaceId: 'w1', path: 'C:\\work\\alpha', title: 'alpha', sessionIds: ['b'] },
+  { workspaceId: 'w2', path: 'C:\\work\\beta', title: 'beta', sessionIds: ['c'] },
+  { workspaceId: 'w3', path: 'C:\\work\\gamma', sessionIds: ['t'] },
+]
+
+function assertArchiveProjectionParity(rows, archivedIds, workspaceState) {
+  // workspaceState 缺省时传 undefined,同步覆盖 client 侧快照缺省守卫与 core 侧
+  // workspaces 缺省守卫(双侧均回退无工作区,输出 workspace 全 null)
+  const clientWorkspaceState = workspaceState === undefined ? undefined : { items: workspaceState }
+  const clientRows = mirror.projectRows({ byId: byIdOf(rows) }, archivedIds, clientWorkspaceState ?? { items: PARITY_WORKSPACES })
+  const coreRows = projectArchiveRows({ rows, archivedIds, workspaces: workspaceState ?? PARITY_WORKSPACES })
   assert.deepEqual(clientRows, coreRows)
 }
 
@@ -56,6 +69,11 @@ test('parity 归档投影:空输入与空集合', () => {
   assertArchiveProjectionParity([{ id: 'a', title: 'A', updatedAt: 1 }], [])
 })
 
+test('parity 归档投影:workspaceState 缺省守卫(双侧均回退全 null)', () => {
+  assertArchiveProjectionParity([{ id: 'a', title: 'A', updatedAt: 1, cwd: 'C:\\work\\alpha' }], ['a'], undefined)
+  assertArchiveProjectionParity([{ id: 'a', title: 'A', updatedAt: 1 }], ['a'], [])
+})
+
 test('parity 归档投影:标题缺失回退会话 id', () => {
   assertArchiveProjectionParity([{ id: 'a', title: '', updatedAt: 5 }], ['a'])
 })
@@ -66,6 +84,17 @@ test('parity 归档投影:updatedAt 并列时排序不漂移(同数组序)', () 
     { id: 'y', title: 'Y', updatedAt: 100 },
     { id: 'z', title: 'Z', updatedAt: 100 },
   ], ['x', 'y', 'z'])
+})
+
+test('parity 归档投影:工作区映射账本/cwd/未分组/缺 title 回退全路径', () => {
+  assertArchiveProjectionParity([
+    { id: 'b', title: 'B', updatedAt: 400 },
+    { id: 'a', title: 'A', updatedAt: 300, cwd: 'C:\\work\\alpha' },
+    { id: 'u', title: 'U', updatedAt: 200 },
+    { id: 't', title: 'T', updatedAt: 100 },
+    { id: 'm', title: 'M', updatedAt: 50, cwd: 'C:\\elsewhere\\other' },
+  ], ['b', 'a', 'u', 't', 'm'])
+  assertArchiveProjectionParity([{ id: 'a', title: 'A', updatedAt: 1, cwd: 'C:\\work\\alpha' }], ['a'])
 })
 
 function assertDeletedProjectionParity(deleted, sessionsById) {

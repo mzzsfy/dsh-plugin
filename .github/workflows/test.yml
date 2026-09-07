@@ -39,11 +39,19 @@ jobs:
       # (session-manager 顶层 import zod;node ESM 逐级向上解析命中根 node_modules,
       # 镜像开发态 junction 桥);--no-save --no-package-lock 保证不产生任何入库文件
       - name: 安装宿主 peer(仓库根解析桥)
-        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.1-rc.2 @deepseek-ai/dsh-tools@0.1.1-rc.2 zod@4.5.4
+        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4
       # 该包 devDependencies 钉住宿主包版本,自身安装后其测试的宿主 import 就地解析
       - name: 安装 dsh-llm-pi-gateway 依赖
         working-directory: packages/dsh-llm-pi-gateway
         run: npm install --no-save --no-package-lock --no-audit --no-fund
+      # 包间依赖禁止经 npm registry 解析(不自依赖):@mzzsfy 全量符号链接到本地工作副本,
+      # 必须在全部 npm install 之后执行,防止被安装过程清理
+      - name: 自依赖全走本地(@mzzsfy 符号链接桥)
+        run: |
+          mkdir -p node_modules/@mzzsfy
+          for dir in packages/*/; do
+            ln -sfn "$(pwd)/${dir%/}" "node_modules/@mzzsfy/$(basename "$dir")"
+          done
       - name: 全量测试 x10
         run: |
           total=10

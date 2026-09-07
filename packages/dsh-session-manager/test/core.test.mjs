@@ -22,6 +22,8 @@ import {
   removeDeletedEntry,
   selectArchiveCandidates,
   updatedAtOf,
+  workspaceTitleForSession,
+  workspaceTitleOf,
 } from '../src/core.mjs'
 
 const NOW = Date.parse('2026-01-10T00:00:00Z')
@@ -88,14 +90,82 @@ test('归档面板投影:交集过滤且按更新时间倒序', () => {
   ]
   const projected = projectArchiveRows({ rows, archivedIds: ['b', 'c', 'gone'] })
   assert.deepEqual(projected, [
-    { id: 'b', title: 'B', updatedAt: 200 },
-    { id: 'c', title: 'C', updatedAt: 100 },
+    { id: 'b', title: 'B', updatedAt: 200, workspace: null },
+    { id: 'c', title: 'C', updatedAt: 100, workspace: null },
   ])
 })
 
 test('归档面板投影:标题缺失回退会话 id(与 client 镜像同规)', () => {
   const projected = projectArchiveRows({ rows: [{ id: 'a', title: '', updatedAt: 5 }], archivedIds: ['a'] })
-  assert.deepEqual(projected, [{ id: 'a', title: 'a', updatedAt: 5 }])
+  assert.deepEqual(projected, [{ id: 'a', title: 'a', updatedAt: 5, workspace: null }])
+})
+
+const WORKSPACES = [
+  { workspaceId: 'w1', path: 'C:\\work\\alpha', title: 'alpha', sessionIds: ['a', 'b'] },
+  { workspaceId: 'w2', path: 'C:\\work\\beta', title: 'beta', sessionIds: ['c'] },
+]
+
+test('归档面板投影:会话经 workspace 账本映射到工作区标题', () => {
+  const rows = [
+    { id: 'a', title: 'A', updatedAt: 300 },
+    { id: 'c', title: 'C', updatedAt: 100 },
+  ]
+  const projected = projectArchiveRows({ rows, archivedIds: ['a', 'c'], workspaces: WORKSPACES })
+  assert.deepEqual(projected, [
+    { id: 'a', title: 'A', updatedAt: 300, workspace: 'alpha' },
+    { id: 'c', title: 'C', updatedAt: 100, workspace: 'beta' },
+  ])
+})
+
+test('归档面板投影:账本缺失时 cwd 匹配工作区路径回退', () => {
+  const rows = [{ id: 'x', title: 'X', updatedAt: 1, cwd: 'C:\\work\\beta' }]
+  const projected = projectArchiveRows({ rows, archivedIds: ['x'], workspaces: WORKSPACES })
+  assert.deepEqual(projected, [{ id: 'x', title: 'X', updatedAt: 1, workspace: 'beta' }])
+})
+
+test('归档面板投影:无匹配工作区输出 null,账本缺 title 回退路径末段', () => {
+  const rows = [
+    { id: 'x', title: 'X', updatedAt: 3 },
+    { id: 'y', title: 'Y', updatedAt: 2, cwd: 'C:\\nowhere\\lost\\' },
+    { id: 'z', title: 'Z', updatedAt: 1 },
+  ]
+  const workspaces = [
+    ...WORKSPACES,
+    { workspaceId: 'w3', path: 'C:\\work\\titleless', sessionIds: ['z'] },
+  ]
+  const projected = projectArchiveRows({ rows, archivedIds: ['x', 'y', 'z'], workspaces })
+  assert.deepEqual(projected, [
+    { id: 'x', title: 'X', updatedAt: 3, workspace: null },
+    { id: 'y', title: 'Y', updatedAt: 2, workspace: null },
+    { id: 'z', title: 'Z', updatedAt: 1, workspace: 'titleless' },
+  ])
+})
+
+test('归档面板投影:workspaces 缺省时全部回退 null', () => {
+  const rows = [{ id: 'a', title: 'A', updatedAt: 1, cwd: 'C:\\work\\alpha' }]
+  assert.deepEqual(
+    projectArchiveRows({ rows, archivedIds: ['a'] }),
+    [{ id: 'a', title: 'A', updatedAt: 1, workspace: null }],
+  )
+})
+
+test('workspaceTitleOf 路径末段边界', () => {
+  assert.equal(workspaceTitleOf('C:\\work\\alpha'), 'alpha')
+  assert.equal(workspaceTitleOf('/home/user/project/'), 'project')
+  assert.equal(workspaceTitleOf('C:\\work\\mixed/slash\\path'), 'path')
+  assert.equal(workspaceTitleOf('C:\\'), 'C:')
+  assert.equal(workspaceTitleOf('/'), '')
+  assert.equal(workspaceTitleOf('///'), '')
+})
+
+test('workspaceTitleForSession 直接边界:title 与 path 皆缺为 null,title 空串回退路径末段', () => {
+  assert.equal(workspaceTitleForSession({ workspaces: [{ sessionIds: ['a'] }], sessionId: 'a' }), null)
+  assert.equal(
+    workspaceTitleForSession({ workspaces: [{ path: 'C:\\work\\x', title: '', sessionIds: ['a'] }], sessionId: 'a' }),
+    'x',
+  )
+  assert.equal(workspaceTitleForSession({ workspaces: 'bad', sessionId: 'a' }), null)
+  assert.equal(workspaceTitleForSession({ workspaces: [{ path: 'C:\\w\\a', sessionIds: ['a'] }], sessionId: 'a', cwd: undefined }), 'a')
 })
 
 test('归档集合差分只报新增,首帧基线不提示', () => {
