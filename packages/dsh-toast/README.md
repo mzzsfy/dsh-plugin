@@ -2,7 +2,7 @@
 
 DSH 全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻确认两种生命周期。供各插件发送全局操作反馈与事件通知,替代各插件自写通知 UI。
 
-**本包是普通 npm 依赖,不是 dsh 插件**:不声明 `dsh.bundle.patch`,不进 profile 插件层,无需也不应 `dsh plugin add`。消费插件在 `dependencies` 中声明本包(pnpm 随装),并在自身 `cordis.patch.yml` 中代挂本包宿主占位条目使 client 进入客户端模块表。
+**本包是普通 npm 依赖,不是 dsh 插件**:不声明 `dsh.bundle.patch`,不自带 cordis.patch.yml,无需也不应 `dsh plugin add`,且**不进 profile 表层 manifest 依赖行**(插件市场已装列表因此不显示本包)。安装与装载链:消费插件 `dependencies` 声明本包 → pnpm(hoisted 布局)作为传递依赖实体安装到顶层 node_modules,dsh 启动 fallback 沿 bundles 依赖闭包补链兜底;开发态由 dev-link 的 junction 指向仓库工作副本保热更。消费插件在自身 `cordis.patch.yml` 中代挂本包宿主占位条目使 client 进入客户端模块表。
 
 ## 消费方接入
 

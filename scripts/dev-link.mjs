@@ -11,6 +11,9 @@
  *   - 已发布包:profile 依赖行一律 semver(^线上最新版),link:/file:/本地路径一律被本脚本归一清除
  *   - 未发布包(线上 404):依赖行 = file 协议直指仓库工作副本,不强制发布;junction 照挂,
  *     线上出版本后重跑本脚本自动归一 ^latest
+ *   - 公共依赖包(manifest 无 dsh.bundle,如 dsh-toast):不走表层依赖行,任意形态残留行一律删除;
+ *     安装与装载由消费插件 dependencies 声明 + dsh module fallback 启动补链承载,
+ *     junction 照挂工作副本保开发热更
  *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径(未发布包的
  *     file 行除外——它同时承担 pnpm 依赖解析)
  *   - 依赖行版本以 npm 线上 latest 为准,本地 manifest 未发布的版本不影响依赖行
@@ -24,7 +27,8 @@
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
  *     realpath,天然读到仓库工作副本;同时本脚本在 home 补丁层维护 hmr 覆盖行,
  *     watch 仓库 packages —— host 半区保存即热重载,client 半区刷新页面即生效。
- *   - pnpm install / dsh plugin add 会重建 node_modules:两者之后必须重跑本脚本。
+ *   - pnpm install(依赖图变化)与 dsh plugin add 会重建 node_modules:之后必须重跑本脚本;
+ *     增量 install(Already up to date)按实测不动 junction,重跑幂等可作兜底。
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
 import {spawnSync} from 'node:child_process'
@@ -153,7 +157,16 @@ function syncDevHmr(enable) {
   console.log('FIX  已在 home 补丁层写入 dev 热更新块(hmr root -> 仓库 packages)')
 }
 
-/** 归一依赖行:非 semver(历史 link:/file: 残留)或落后线上的一律改为 ^线上最新;返回 变更与否 + 各包线上 latest */
+/** 读包 manifest;dsh.bundle 缺失即公共依赖包(装载经消费方依赖声明 + dsh fallback 补链,不走表层依赖行) */
+function isLibPackage(dir) {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', dir, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
+  return manifest.dsh?.bundle === undefined
+}
+
+/**
+ * 归一依赖行:非 semver(历史 link:/file: 残留)或落后线上的一律改为 ^线上最新;返回 变更与否 + 各包线上 latest。
+ * 公共依赖包不走表层依赖行:任意形态残留行一律删除(删除计入变更,触发 install),版本语义由消费方 dependencies 承载
+ */
 function normalizeDeps(packages) {
   const manifest = readProfileManifest()
   manifest.dependencies = manifest.dependencies || {}
@@ -161,6 +174,16 @@ function normalizeDeps(packages) {
   const latests = {}
   for (const dir of packages) {
     const key = SCOPE + dir
+    if (isLibPackage(dir)) {
+      if (manifest.dependencies[key] !== undefined) {
+        console.log(`FIX  ${key}: 删除表层依赖行 ${manifest.dependencies[key]}(公共依赖包由消费方声明承载)`)
+        delete manifest.dependencies[key]
+        changed = true
+      } else {
+        console.log(`OK   ${key}: 公共依赖包,无表层行`)
+      }
+      continue
+    }
     latests[dir] = onlineLatest(key)
     // 未发布包(线上 404)不强制发布:依赖行走 file 协议,junction 照挂,发布后重跑自动归一 ^latest
     const want = latests[dir] === null ? fileSpec(dir) : `^${latests[dir]}`
@@ -225,12 +248,29 @@ function verifyAll(packages, latests, unlink, scope) {
     const key = SCOPE + dir
     // 单包模式只校验指定包,其余包终态不随之校验
     if (!scope.includes(dir)) continue
+    const phys = junctionPath(dir)
+    if (isLibPackage(dir)) {
+      // 公共依赖包无表层依赖行与版本语义:链接态只验 junction 指向仓库;卸链后顶层留空由 dsh fallback 启动接管
+      if (unlink) {
+        if (readJunctionTarget(phys) !== null) failures.push(`${key}: 卸链后 node_modules 仍是链接`)
+        continue
+      }
+      const target = existsSync(phys) ? readJunctionTarget(phys) : null
+      if (target === null) {
+        failures.push(`${key}: node_modules 不是 junction(实体目录或缺失),工作副本不生效`)
+        continue
+      }
+      const expected = resolve(join(repoRoot, 'packages', dir)).toLowerCase()
+      if (resolve(target).toLowerCase() !== expected) {
+        failures.push(`${key}: junction 指向 ${target} 应为 ${expected}`)
+      }
+      continue
+    }
     const latest = latests[dir] !== undefined ? latests[dir] : onlineLatest(key)
     const want = latest === null ? fileSpec(dir) : `^${latest}`
     const dep = manifest.dependencies[key]
     if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
 
-    const phys = junctionPath(dir)
     if (unlink) {
       if (readJunctionTarget(phys) !== null) {
         failures.push(`${key}: 卸链后 node_modules 仍是链接`)
@@ -261,7 +301,7 @@ function verifyAll(packages, latests, unlink, scope) {
     process.exitCode = 1
     return false
   }
-  console.log(`\n校验通过:${packages.length} 个包依赖行 = ^线上最新,挂载/安装状态与声明一致`)
+  console.log(`\n校验通过:${scope.length} 个包(插件包依赖行 = ^线上最新,公共依赖包仅验挂载),挂载/安装状态与声明一致`)
   return true
 }
 
@@ -301,11 +341,11 @@ if (!unlink) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
       process.exitCode = 1
     }
-    // pnpm 重建过整个 node_modules:凡有依赖声明的包全部重挂,保住既有链接;
-    // 无依赖声明的包(如未发布新品)不产生 junction
+    // pnpm 重建过整个 node_modules:凡有依赖声明的包与公共依赖包全部重挂,保住既有链接;
+    // 公共依赖包无依赖声明(依赖行走消费方声明),须显式纳入否则删行后漏挂
     const declared = readProfileManifest().dependencies || {}
     for (const dir of packages) {
-      if (declared[SCOPE + dir] !== undefined) mountJunction(dir)
+      if (declared[SCOPE + dir] !== undefined || isLibPackage(dir)) mountJunction(dir)
     }
   }
 }
@@ -317,9 +357,11 @@ if (unlink) {
       console.log(`SKIP ${name}: 未挂链接`)
       continue
     }
+    const lib = isLibPackage(name)
     rmSync(junctionPath(name), {recursive: true, force: true})
     const run = spawnSync('pnpm', ['install'], {cwd: profileRoot, encoding: 'utf8', shell: true})
-    console.log(`${run.status === 0 ? 'OK  ' : 'FAIL'} ${name}: 已卸链接并恢复 registry 版本`)
+    const done = lib ? '已卸链接,顶层不留实体,dsh fallback 启动接管' : '已卸链接并恢复 registry 版本'
+    console.log(`${run.status === 0 ? 'OK  ' : 'FAIL'} ${name}: ${done}`)
   }
 } else {
   syncDevHmr(true)
@@ -327,4 +369,4 @@ if (unlink) {
 }
 
 verifyAll(packages, latests, unlink, names)
-console.log('\n提醒: profile 内执行过 pnpm install / dsh plugin add 后,链接会被覆盖,需重跑本脚本。')
+console.log(`\n提醒: 依赖图变化的 pnpm install / dsh plugin add 之后须重跑本脚本;增量 install 不动 junction,重跑幂等。`)

@@ -15,6 +15,7 @@ profile 位于 `~/.dsh/profiles/web`。合法状态只有一种,禁止第三种:
 1. **已发布包依赖行 = semver**:线上已有版本的包,profile 的 package.json 中依赖行必须是 `^线上最新版`,禁止 `link:` / 本地路径
 2. **未发布包依赖行 = file 协议**:线上 404 的包,依赖行由 dev-link 自动写为 `file:<仓库>/packages/<包>`(不强制先发布;junction 照挂,线上出版本后重跑 dev-link 自动归一 ^latest)
 3. **工作副本挂载 = junction**:`node_modules/@mzzsfy/<包>` 是指向仓库 `packages/<包>` 的 junction
+4. **公共依赖包(manifest 无 dsh.bundle,如 dsh-toast)= 无表层依赖行**:不写依赖行(任意形态残留由 dev-link 删除);安装与装载由消费插件 dependencies 声明承载——pnpm hoisted 布局把传递依赖实体安装到顶层 node_modules,dsh 启动 fallback 沿 bundles 依赖闭包补链兜底;junction 照挂工作副本保开发热更。junction(仓库工作副本)与 pnpm/fallback 安装实体是同一 npm 包的两种实体来源。禁止手工放置非脚本管理的目录
 
 **操作唯一入口:**
 
@@ -25,11 +26,12 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ```
 
 - 单包模式用于两点:只想调试某一个包;或清单内存在未发布包(线上查询 404)卡住 `all` 时的绕行路径。`all` 仍是日常默认,单包后其余包的终态不随之校验
-- 依赖行变化触发 `pnpm install` 重建 node_modules 时,脚本会重挂所有**有依赖声明**的包,保住既有链接;无声明的包(如未发布新品)不产生 junction
+- 依赖行变化触发 `pnpm install` 重建 node_modules 时,脚本会重挂所有**有依赖声明**的包与**公共依赖包**,保住既有链接
+- `--unlink` 对公共依赖包:卸链后顶层不留实体,不恢复 registry 版本(无依赖行可恢复),dsh 启动 fallback 补链接管
 
 禁止手工编辑 profile 的 package.json;禁止 `pnpm add file:...` / `pnpm add link:...`;禁止在 profile 里直接 mklink。
 
-**重新挂载时机:** profile 内跑过 `pnpm install` 或 `dsh plugin add` 之后,junction 被实体目录覆盖,必须重跑 `node scripts/dev-link.mjs all`。
+**重新挂载时机:** `dsh plugin add`(重建 junction)与依赖图变化的 `pnpm install` 之后须重跑 `node scripts/dev-link.mjs all`;增量 install(Already up to date)按实测不动 junction,重跑幂等,拿不准就重跑。
 
 **已知策略:** profile 的 pnpm 配了 `minimumReleaseAge`(新发布包有安装宽限期)。刚发版后 install 可能被拦,等宽限期过再装,或单次 `node scripts/dev-link.mjs all --allow-fresh`(仅限自家刚发的包,知根知底)。
 
@@ -70,7 +72,9 @@ client.js 与 core 之间存在镜像逻辑的(如 turn-notify 的 chooseChannel
 
 跨插件共享的 client 能力(如 `dsh-toast` 的浮出通知)按**普通 npm 依赖**形态发布,禁止做成 dsh 插件(不声明 `dsh.bundle.patch`、不自带 cordis.patch.yml、无需 plugin add):
 
-- 消费插件在 `dependencies` 声明该包(pnpm 随装),在 `dsh.client.external` 声明 `'@mzzsfy/<包>/client'`,factory 内直接 `require` 使用;禁止 window 全局注册器 + 队列模式——纯依赖包不经宿主条目装载,其模块永不物化,window API 无人物化挂载
+- 消费插件在 `dependencies` 声明该包,在 `dsh.client.external` 声明 `'@mzzsfy/<包>/client'`,factory 内直接 `require` 使用;禁止 window 全局注册器 + 队列模式——纯依赖包不经宿主条目装载,其模块永不物化,window API 无人物化挂载
+- **安装与装载链(不进 profile 表层 manifest 依赖行)**:消费插件 dependencies 声明 → pnpm 安装时作为传递依赖落顶层 node_modules(profile 为 `nodeLinker: hoisted` 布局,传递依赖实体直达解析链;dev-link junction 覆盖同一路径保工作副本,`pnpm install` 对既有 junction 不 prune 不覆盖)。dsh 启动 `healProfileModuleFallback` 沿 bundles 依赖闭包补链顶层缺失的包(`ensureProfileSymlink` 对已存在链接跳过不替换;卸载最后消费方后 owned 清理循环自动移除残留链接)作为兜底。表层 manifest 无此包行 → 插件市场已装列表不显示它。机制对齐版本:dsh 0.1.2-rc.1 源码实测 + hoisted 传递依赖落顶层的 pnpm 11.24 实测(dsh-app-boot lib/index.js healProfileModuleFallback / ensureProfileSymlink / ownedPackageNames)
+- **装载前提**:代挂方 session-manager 必须存在于 `dsh.profile.bundles`(占位条目随其装载,模块表才物化依赖包 client);全部消费方都退出 bundles 时闭包不覆盖、fallback 不补链。已知空窗形态:顶层 junction 不在 + `pnpm install` 增量(Already up to date)不补装 → 顶层暂无该包,直到依赖图变化触发真实安装 / 重跑 dev-link / dsh 启动 fallback 补链
 - 依赖包的 client 进入客户端模块表靠**消费插件代挂**:消费插件 cordis.patch.yml 的 insert 列表追加该包宿主占位条目,**id 必须带消费插件前缀**(如 `session-manager-dsh-toast`),`name` 指向依赖包 npm 名(name 才是 cordis 加载与模块表的包解析键);依赖包宿主入口形态 = **仅 `export function apply() {}`**(对齐 `dsh-think-expand`;name+inject+apply 三件套命名空间形态经 dsh-web-app 装载链被判 invalid plugin 拖垮整树,禁止使用)
 - **占位条目全仓唯一**:同一依赖包的占位只允许一个 insert——client-modules 按 npm 名做多源检查,两个占位条目若装载基不同(如市场托管 .dsh-market 与 profile 根 junction)即判 fatal 拖垮整树组合。其余消费方一律**可选消费**:factory 内 try/catch 动态 require,模块表缺失即禁用该通道,禁止再代挂占位(参考 `dsh-turn-notify`)
 - client.js 仍以 `__ModuleLoader__.load({id, factory})` 自注册格式发布;**factory 返回值必须含空 `apply()`**——浏览器 cordis loader 装载宿主占位条目时经裸名 id 从模块表取同一记录(stripClientSuffix 使裸名与 /client 共享),无 apply 即判 invalid plugin 拖垮整树(参考 `dsh-toast`:库导出 show/dismiss/mount + 空 apply 共存);渲染容器惰性自举、按 id 幂等自愈(HMR 新代首挂清旧代残留),不依赖宿主生命周期
