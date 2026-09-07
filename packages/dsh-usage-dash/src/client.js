@@ -1,4 +1,4 @@
-// 用量统计面板 client 半区:设置页 settings.section 注入,阶段 1 基础面板。
+// 用量统计面板 client 半区:设置页 settings.section 注入与底部信息栏接管,en/zh 双语。
 // 无构建:createElement + 一次性样式注入;协议与渲染形态见 docs/feat-usage-dash/client-design.md。
 // 单文件自包含:client-modules bundle 以非模块 script 求值,禁止 import/export(整捆语法共担);纯函数区经测试整源求值收集。
 
@@ -99,7 +99,7 @@ function parseEnvelope(json) {
   return envelopeFailure(DEFAULT_ERROR_CODE, DEFAULT_ERROR_MESSAGE)
 }
 
-const MESSAGES = {
+const MESSAGES_ZH = {
   nav: '使用统计',
   range: '时间范围',
   'rangePreset.7': '最近 7 天',
@@ -162,14 +162,94 @@ const MESSAGES = {
   cachePrecisionDesc: '在会话底部信息栏以两位小数显示缓存命中率。',
   tokenDetail: '会话 Token 明细',
   tokenDetailDesc: '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。',
+  'duration.compactSeconds': '{seconds}秒',
+  'duration.compactMinutes': '{minutes}分{seconds}秒',
+  'number.thousand': '{value}K',
+  'number.million': '{value}M',
+}
+
+// en 词典:stats/duration/number 族逐字节取官方 chat 值,其余为本插件自有文案
+const MESSAGES_EN = {
+  nav: 'Usage',
+  range: 'Time range',
+  'rangePreset.7': 'Last 7 days',
+  'rangePreset.14': 'Last 14 days',
+  'rangePreset.30': 'Last 30 days',
+  'rangePreset.90': 'Last 90 days',
+  rangeCustom: 'Custom',
+  from: 'From',
+  to: 'To',
+  refresh: 'Refresh',
+  loading: 'Loading',
+  tokens: 'Token usage',
+  tokensHint: 'Provider total: uncached input + output + cache-read tokens',
+  cachedTokens: 'Cache hit',
+  sessions: 'Sessions',
+  requests: 'Requests',
+  activeDays: 'Active days',
+  cacheRate: 'Avg cache-hit rate',
+  cacheRateHint: 'Cache-hit tokens as a share of input tokens within the range',
+  cacheHitRate: 'Cache-hit rate',
+  hitRateLegend: 'Cache-hit rate',
+  topModel: 'Top model',
+  topModelHint: 'Ranked by token usage, not call count',
+  heatmap: 'Activity heatmap',
+  heatLess: 'Less',
+  heatMore: 'More',
+  dailyTrend: 'Daily token trend',
+  trendLimited: 'Showing only the last {n} days',
+  modelUsage: 'Model usage',
+  other: 'Other',
+  total: 'Total',
+  percent: 'Share',
+  asOf: 'Stats as of',
+  empty: 'No usage data in this range yet. Token usage accumulates from when this panel is enabled, and existing sessions are scanned once.',
+  viewDay: 'Daily',
+  viewHour: 'Hourly',
+  viewMinute: 'Per-minute',
+  viewGroup: 'Granularity',
+  'status.idle': '{n} sessions collected',
+  'status.running': 'Rescanning {done}/{total}',
+  rebuild: 'Rebuild',
+  rebuildConfirm: 'Confirm rebuild',
+  hourTrend: 'Hourly token trend',
+  minuteTrend: 'Per-minute token trend',
+  hourPreset: 'Last {n} hours',
+  minutePreset: 'Last {n} minutes',
+  trendLimitedHour: 'Too much data, showing only the last {n} hours',
+  trendLimitedMinute: 'Too much data, showing only the last {n} minutes',
+  trendTruncated: 'Too much data, showing only the latest part',
+  recordFailures: '{n} records failed to write',
+  'stats.counts': '{turns} turns · {steps} steps',
+  'stats.llm': 'LLM {duration}',
+  'stats.toolCall': 'Tool call {duration}',
+  'stats.ttftAverage': 'TTFT avg {duration}',
+  'stats.tokensPerSecond': '{throughput} tok/s',
+  'stats.cacheHit': 'Cache hit {percent}%',
+  'stats.tokens': 'Input {input} tok · Output {output} tok',
+  'stats.tokensDetail': 'Total {total} tok · Input {input} tok · Cache hit {hit} tok · Cache miss {miss} tok · Output {output} tok',
+  cachePrecision: 'Precise cache-hit rate',
+  cachePrecisionDesc: 'Show the cache-hit rate with two decimals in the session stats line.',
+  tokenDetail: 'Session token detail',
+  tokenDetailDesc: 'Show total, cache hit/miss and output tokens in the session stats line.',
+  'duration.compactSeconds': '{seconds}s',
+  'duration.compactMinutes': '{minutes}m{seconds}s',
+  'number.thousand': '{value}K',
+  'number.million': '{value}M',
 }
 
 const PLACEHOLDER_PATTERN = /\{(\w+)\}/g
 
-function t(key, params) {
-  const text = MESSAGES[key] ?? key
+// 纯查表翻译:缺键回退键名,占位 {k} 插值
+function translateWith(dict, key, params) {
+  const text = dict[key] ?? key
   if (!params) return text
   return text.replace(PLACEHOLDER_PATTERN, (raw, name) => (name in params ? String(params[name]) : raw))
+}
+
+// 词典绑定翻译器:与宿主 t 座同构,locale 缺席时的本地回退形态
+function createTranslator(dict) {
+  return (key, params) => translateWith(dict, key, params)
 }
 
 const COMPACT_BASE = 1000
@@ -486,6 +566,7 @@ function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX)
 
 // ===== 底部信息栏:官方 StatsLine 口径(dsh-client-ui-chat/lib/client.js 同构)+ usp 双开关 =====
 const STATS_LINE_STORAGE_KEY = 'dsh-usage-dash:stats-line'
+const LOCALE_NS = 'usage-dash'
 const STATS_ITEM_SEPARATOR = ' · '
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -577,22 +658,22 @@ function cacheHitPercentPrecise(usage) {
   return percent.toFixed(2)
 }
 
-// 官方 compact 数字族:number.thousand='{value}K'、million='{value}M'
-function formatTokensCompact(value) {
+// 官方 compact 数字族:number.thousand='{value}K'、million='{value}M'(官方同构签名)
+function formatTokensCompact(value, t) {
   const scaled = (count) => (count >= NUMBER_COMPACT_INT_THRESHOLD
     ? String(Math.round(count))
     : String(Math.round(count * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL))
   if (value < COMPACT_BASE) return String(value)
-  if (value < COMPACT_BASE ** 2) return `${scaled(value / COMPACT_BASE)}K`
-  return `${scaled(value / COMPACT_BASE ** 2)}M`
+  if (value < COMPACT_BASE ** 2) return t('number.thousand', { value: scaled(value / COMPACT_BASE) })
+  return t('number.million', { value: scaled(value / COMPACT_BASE ** 2) })
 }
 
-// 官方时长:60 秒内保留一位小数,以上整秒折分秒
-function formatDuration(ms) {
+// 官方时长:60 秒内保留一位小数,以上整秒折分秒(官方同构签名)
+function formatDuration(ms, t) {
   const seconds = ms / MS_PER_SECOND
-  if (seconds < DURATION_MINUTE_SECONDS) return `${Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL}秒`
+  if (seconds < DURATION_MINUTE_SECONDS) return t('duration.compactSeconds', { seconds: Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL })
   const whole = Math.round(seconds)
-  return `${Math.floor(whole / SECONDS_PER_MINUTE)}分${whole % SECONDS_PER_MINUTE}秒`
+  return t('duration.compactMinutes', { minutes: Math.floor(whole / SECONDS_PER_MINUTE), seconds: whole % SECONDS_PER_MINUTE })
 }
 
 // 官方吞吐:钳负值,阈值上取整、下一位小数
@@ -648,16 +729,16 @@ function deriveStats(nodes) {
 }
 
 // 分组装配:官方 StatsLine 分组序 + usp 双开关(精确命中率/Token 明细)
-function buildStatsGroups(stats, usage, prefs) {
+function buildStatsGroups(stats, usage, prefs, t) {
   const groups = []
   if (stats.steps > 0) {
     groups.push(t('stats.counts', { turns: stats.turns, steps: stats.steps }))
     const durations = []
-    if (stats.llmMs > 0) durations.push(t('stats.llm', { duration: formatDuration(stats.llmMs) }))
-    if (stats.toolMs > 0) durations.push(t('stats.toolCall', { duration: formatDuration(stats.toolMs) }))
+    if (stats.llmMs > 0) durations.push(t('stats.llm', { duration: formatDuration(stats.llmMs, t) }))
+    if (stats.toolMs > 0) durations.push(t('stats.toolCall', { duration: formatDuration(stats.toolMs, t) }))
     if (durations.length > 0) groups.push(durations.join(STATS_ITEM_SEPARATOR))
     const speeds = []
-    if (stats.ttftSteps > 0) speeds.push(t('stats.ttftAverage', { duration: formatDuration(stats.ttftMs / stats.ttftSteps) }))
+    if (stats.ttftSteps > 0) speeds.push(t('stats.ttftAverage', { duration: formatDuration(stats.ttftMs / stats.ttftSteps, t) }))
     if (stats.decodeMs > 0) speeds.push(t('stats.tokensPerSecond', {
       throughput: formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / MS_PER_SECOND)),
     }))
@@ -669,16 +750,16 @@ function buildStatsGroups(stats, usage, prefs) {
     if (prefs.tokenDetail) {
       const billed = billedInputTokens(usage)
       groups.push(t('stats.tokensDetail', {
-        total: formatTokensCompact(billed + usage.outputTokens),
-        input: formatTokensCompact(billed),
-        hit: formatTokensCompact(usage.cacheReadTokens),
-        miss: formatTokensCompact(usage.uncachedInputTokens + usage.cacheWriteTokens),
-        output: formatTokensCompact(usage.outputTokens),
+        total: formatTokensCompact(billed + usage.outputTokens, t),
+        input: formatTokensCompact(billed, t),
+        hit: formatTokensCompact(usage.cacheReadTokens, t),
+        miss: formatTokensCompact(usage.uncachedInputTokens + usage.cacheWriteTokens, t),
+        output: formatTokensCompact(usage.outputTokens, t),
       }))
     } else {
       groups.push(t('stats.tokens', {
-        input: formatTokensCompact(billedInputTokens(usage)),
-        output: formatTokensCompact(usage.outputTokens),
+        input: formatTokensCompact(billedInputTokens(usage), t),
+        output: formatTokensCompact(usage.outputTokens, t),
       }))
     }
   }
@@ -750,6 +831,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)
     const cx = (...values) => values.filter(Boolean).join(' ')
 
+    // locale 服务缺席时的回退翻译器(zh 固定);槽组件以 props.t 缺省参数承接宿主响应式 t
+    const defaultT = createTranslator(MESSAGES_ZH)
+
     // stats-line 偏好单例:模块表内同实例,面板偏好卡与底部信息栏订阅互通
     const statsLineState = createStatsLineState(typeof localStorage !== 'undefined' ? localStorage : null)
 
@@ -787,12 +871,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // 同格竞争者;usp 同款接管注册用 -1,本插件取次低值,官方无显式 priority(默认 0)
     const STATS_SLOT_PRIORITY = -2
     const STATS_LINE_TITLE_SEPARATOR = ' | '
-    const DAY_PRESET_LABELS = {
-      '7': t('rangePreset.7'),
-      '14': t('rangePreset.14'),
-      '30': t('rangePreset.30'),
-      '90': t('rangePreset.90'),
-    }
     const VIEW_TABS = [
       { id: 'day', labelKey: 'viewDay' },
       { id: 'hour', labelKey: 'viewHour' },
@@ -997,7 +1075,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         ...lines)
     }
 
-    function StatCards({ stats }) {
+    function StatCards({ stats, t = defaultT }) {
       return h('div', { className: 'ud-cards' },
         h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint') },
           h(FitText, null, formatTokens(stats.tokens))),
@@ -1018,7 +1096,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h(FitText, null, String(stats.activeDays))))
     }
 
-    function Legend({ models, colorFor }) {
+    function Legend({ models, colorFor, t = defaultT }) {
       return h('div', { className: 'ud-legend' },
         models.map((item) => h('span', { key: item.model, className: 'ud-legend-item', title: item.model === OTHER_MODEL ? t('other') : item.model },
           h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
@@ -1035,7 +1113,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef }) {
+    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef, t = defaultT }) {
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
@@ -1166,7 +1244,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         : element
     }
 
-    function HeatSection({ days, panelRef }) {
+    function HeatSection({ days, panelRef, t = defaultT }) {
       const wrapRef = useRef(null)
       const [width, setWidth] = useState(0)
       const [hover, setHover] = useState(null)
@@ -1223,7 +1301,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 模型用量:donut + 列表,恒按天口径,不随视图切换
-    function ModelUsage({ models, colorFor, panelRef }) {
+    function ModelUsage({ models, colorFor, panelRef, t = defaultT }) {
       const [hover, setHover] = useState(null)
       const [tip, setTip] = useState(null)
       const [expandedOther, setExpandedOther] = useState(false)
@@ -1337,7 +1415,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 底部信息栏接管:与官方 StatsLine 同 id 'stats' 的槽条目,双开关控制增强项
-    const StatsLineEnhanced = React.memo(function StatsLineEnhanced({ useChat, useProjection }) {
+    // 语言切换经槽的 locale 座以新 t 引用驱动 memo 重渲染
+    const StatsLineEnhanced = React.memo(function StatsLineEnhanced({ useChat, useProjection, t = defaultT }) {
       if (typeof useProjection !== 'function' || typeof useChat !== 'function') return null
       const usage = useProjection('tokenUsage')
       const projected = useProjection('sessionStats')
@@ -1345,7 +1424,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const stats = useMemo(() => projected ?? deriveStats(settledNodes ?? []), [projected, settledNodes])
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
-      const groups = buildStatsGroups(stats, usage, prefs)
+      const groups = buildStatsGroups(stats, usage, prefs, t)
       const rootRef = useRef(null)
       const [truncated, setTruncated] = useState(false)
       useLayoutEffect(() => {
@@ -1368,7 +1447,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     })
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
-    function StatsLineOptionRow({ labelKey, descKey, checked, onToggle }) {
+    function StatsLineOptionRow({ labelKey, descKey, checked, onToggle, t = defaultT }) {
       const describeId = React.useId()
       return h('div', { className: 'ud-pref-row' },
         h('div', { className: 'ud-pref-text' },
@@ -1378,7 +1457,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 偏好卡:与底部信息栏同 store 实例,改动即时互通
-    function StatsLineOptions() {
+    function StatsLineOptions({ t = defaultT }) {
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       return h('div', { className: 'ud-pref-group' },
@@ -1387,16 +1466,18 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           descKey: 'cachePrecisionDesc',
           checked: prefs.cachePrecision,
           onToggle: (value) => statsLineState.set({ cachePrecision: value }),
+          t,
         }),
         h(StatsLineOptionRow, {
           labelKey: 'tokenDetail',
           descKey: 'tokenDetailDesc',
           checked: prefs.tokenDetail,
           onToggle: (value) => statsLineState.set({ tokenDetail: value }),
+          t,
         }))
     }
 
-    function StatusRow({ onChanged, onError }) {
+    function StatusRow({ onChanged, onError, t = defaultT }) {
       const [status, setStatus] = useState(null)
       const [armed, setArmed] = useState(false)
       const machineRef = useRef(null)
@@ -1479,17 +1560,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           armed ? t('rebuildConfirm') : t('rebuild')))
     }
 
-    const viewLabel = (id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
-    const trendTitle = (id) => (id === 'day' ? t('dailyTrend') : id === 'hour' ? t('hourTrend') : t('minuteTrend'))
-    const trendLimitedText = (id, count) => (id === 'day'
+    const viewLabel = (t, id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
+    const trendTitle = (t, id) => (id === 'day' ? t('dailyTrend') : id === 'hour' ? t('hourTrend') : t('minuteTrend'))
+    const trendLimitedText = (t, id, count) => (id === 'day'
       ? t('trendLimited', { n: count })
       : id === 'hour' ? t('trendLimitedHour', { n: count }) : t('trendLimitedMinute', { n: count }))
-    const presetLabel = (view, id) => (view === 'hour'
+    const presetLabel = (t, view, id) => (view === 'hour'
       ? t('hourPreset', { n: parseInt(id, 10) })
       : t('minutePreset', { n: parseInt(id, 10) }))
     const tickLabelFor = (view) => (view === 'day' ? shortDay : view === 'hour' ? hourTickLabel : minuteTickLabel)
 
-    function UsageDashPanel() {
+    function UsageDashPanel({ t = defaultT }) {
       const [view, setView] = useState('day')
       const [range, setRange] = useState(DEFAULT_RANGE)
       const [customFrom, setCustomFrom] = useState('')
@@ -1610,7 +1691,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const maxSlots = pointActive ? maxSlotsFor(view, presetId) : DAY_MAX_SLOTS
       const trimmedSlots = trendSource ? trimSlots(trendSource.slots, maxSlots) : null
       const notes = []
-      if (trendSource && trendSource.slots.length > trimmedSlots.length) notes.push(trendLimitedText(view, trimmedSlots.length))
+      if (trendSource && trendSource.slots.length > trimmedSlots.length) notes.push(trendLimitedText(t, view, trimmedSlots.length))
       if (trendSource?.value?.truncated) notes.push(t('trendTruncated'))
 
       const busy = pointActive ? pointStatus === 'loading' : loading
@@ -1625,7 +1706,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               className: cx('ud-seg-item', view === tab.id && 'ud-seg-item--on'),
               'aria-pressed': view === tab.id,
               onClick: () => setView(tab.id),
-            }, viewLabel(tab.id)))),
+            }, viewLabel(t, tab.id)))),
           pointActive
             ? h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
                 (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
@@ -1633,7 +1714,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                   className: cx('ud-seg-item', presetId === id && 'ud-seg-item--on'),
                   'aria-pressed': presetId === id,
                   onClick: () => (view === 'hour' ? setHourPreset(id) : setMinutePreset(id)),
-                }, presetLabel(view, id))))
+                }, presetLabel(t, view, id))))
             : h(React.Fragment, null,
                 h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
                   DAY_PRESETS.map((id) => h('button', {
@@ -1641,7 +1722,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
                     'aria-pressed': range === id,
                     onClick: () => setRange(id),
-                  }, DAY_PRESET_LABELS[id])),
+                  }, t(`rangePreset.${id}`))),
                   h('button', {
                     className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
                     'aria-pressed': range === 'custom',
@@ -1663,14 +1744,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                   : null),
           h('button', { className: 'ud-btn ud-refresh', disabled: busy, onClick: refresh }, t('refresh'))),
         error ? h('div', { className: 'ud-error' }, error) : null,
-        h(StatusRow, { onChanged: scheduleRefresh, onError: setError }),
+        h(StatusRow, { onChanged: scheduleRefresh, onError: setError, t }),
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
-        stats ? h(StatCards, { key: 'cards', stats }) : null,
-        h(HeatSection, { key: 'heat', days: heatDays, panelRef }),
+        stats ? h(StatCards, { key: 'cards', stats, t }) : null,
+        h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',
-              title: trendTitle(view),
+              title: trendTitle(t, view),
               notes,
               slots: trimmedSlots,
               modelOrder: trendSource.models.map((item) => item.model),
@@ -1680,28 +1761,34 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               busy,
               legendModels: trendSource.models,
               panelRef,
+              t,
             })
           : null,
-        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef }) : null,
+        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, t }) : null,
         stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
-        h(StatsLineOptions, { key: 'prefs' }))
+        h(StatsLineOptions, { key: 'prefs', t }))
     }
 
     return {
       inject: ['slots'],
       apply(ctx) {
         ensureStyle(document)
+        // locale 面由宿主装配提供:缺席即干净降级(不注册字典、不声明 locale 座),恒 zh
+        const hasLocale = typeof ctx.locale?.register === 'function'
+        if (hasLocale) ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh: MESSAGES_ZH, en: MESSAGES_EN }), 'usage-dash: dictionaries')
+        const navLabel = hasLocale ? () => ctx.locale.bind(LOCALE_NS)('nav') : defaultT('nav')
+        const withLocale = hasLocale ? { locale: LOCALE_NS } : {}
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'usage-dash', order: 45, label: '使用统计' },
-            () => h(UsageDashPanel),
+            { name: 'settings.section', id: 'usage-dash', order: 45, label: navLabel, ...withLocale },
+            UsageDashPanel,
           ))
         // 两段式接管官方 stats 格:宿主缺该插槽时注册抛错即禁用本功能
         try {
           ctx.slots.inject('conversation.composer.dock', () =>
             ctx.slots.register(
-              { name: 'conversation.composer.dock', id: 'stats', order: 0, priority: STATS_SLOT_PRIORITY },
+              { name: 'conversation.composer.dock', id: 'stats', order: 0, priority: STATS_SLOT_PRIORITY, ...withLocale },
               StatsLineEnhanced,
             ))
         } catch (error) {

@@ -33,13 +33,17 @@ const {
   HEAT_WINDOW_DAYS,
   HOUR_PRESETS,
   MINUTE_PRESETS,
-  MESSAGES,
+  MESSAGES_EN,
+  MESSAGES_ZH,
   OTHER_MODEL,
   cacheRateText,
+  createTranslator,
   daysInRange,
   donutSegments,
   formatCompact,
+  formatDuration,
   formatTokens,
+  formatTokensCompact,
   groupPointSlots,
   groupStats,
   heatDisplayDays,
@@ -63,8 +67,8 @@ const {
   resolveMinuteRange,
   shortDay,
   smoothPath,
-  t,
   tipPlace,
+  translateWith,
   trimSlots,
   trendLayout,
   trendRatePoints,
@@ -150,18 +154,41 @@ test('信封解析键缺失回退默认 code 与 message', () => {
   assert.equal(parseEnvelope('junk').code, 'error')
 })
 
-test('t 占位替换与缺键防御', () => {
-  assert.equal(t('status.running', { done: 2, total: 9 }), '回扫中 2/9')
-  assert.equal(t('trendLimited', { n: 45 }), '仅显示最近 45 天')
-  assert.equal(t('refresh'), '刷新')
-  assert.equal(t('no.such.key'), 'no.such.key')
+test('translateWith zh/en 占位替换与缺键回退键名', () => {
+  assert.equal(translateWith(MESSAGES_ZH, 'status.running', { done: 2, total: 9 }), '回扫中 2/9')
+  assert.equal(translateWith(MESSAGES_ZH, 'trendLimited', { n: 45 }), '仅显示最近 45 天')
+  assert.equal(translateWith(MESSAGES_ZH, 'refresh'), '刷新')
+  assert.equal(translateWith(MESSAGES_ZH, 'no.such.key'), 'no.such.key')
+  assert.equal(translateWith(MESSAGES_EN, 'status.idle', { n: 7 }), '7 sessions collected')
+  assert.equal(translateWith(MESSAGES_EN, 'trendLimited', { n: 45 }), 'Showing only the last 45 days')
+  assert.equal(translateWith(MESSAGES_EN, 'rebuild'), 'Rebuild')
+  assert.equal(translateWith(MESSAGES_EN, 'no.such.key'), 'no.such.key')
+})
+
+test('createTranslator 与纯查表同构', () => {
+  const enT = createTranslator(MESSAGES_EN)
+  assert.equal(enT('rangeCustom'), 'Custom')
+  assert.equal(enT('hourPreset', { n: 48 }), 'Last 48 hours')
+  assert.equal(enT('missing.key'), 'missing.key')
+})
+
+test('zh/en 词典键集完全一致', () => {
+  assert.deepEqual(Object.keys(MESSAGES_ZH).sort(), Object.keys(MESSAGES_EN).sort())
 })
 
 test('文案表覆盖 client.js 全部 t 键', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/client.js'), 'utf8')
   const keys = [...source.matchAll(/\bt\('([^']+)'\)/g)].map((match) => match[1])
   assert.ok(keys.length >= 10, `应从 client.js 抽到 t 调用,实际 ${keys.length}`)
-  for (const key of keys) assert.ok(key in MESSAGES, `缺少文案键: ${key}`)
+  for (const key of keys) assert.ok(key in MESSAGES_ZH, `缺少文案键: ${key}`)
+})
+
+test('formatDuration/formatTokensCompact 传 en 翻译器输出官方口径', () => {
+  const enT = createTranslator(MESSAGES_EN)
+  assert.equal(formatDuration(4500, enT), '4.5s')
+  assert.equal(formatDuration(162000, enT), '2m42s')
+  assert.equal(formatTokensCompact(12200, enT), '12.2K')
+  assert.equal(formatTokensCompact(5000, enT), '5K')
 })
 
 test('数字格式化千分位与紧凑单位', () => {

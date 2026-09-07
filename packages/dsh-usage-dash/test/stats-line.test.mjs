@@ -17,7 +17,8 @@ const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join('
 
 const {
   STATS_LINE_STORAGE_KEY,
-  MESSAGES,
+  MESSAGES_EN,
+  MESSAGES_ZH,
   billedInputTokens,
   roundedPercentUnits,
   displayPercentUnits,
@@ -31,11 +32,14 @@ const {
   deriveStats,
   buildStatsGroups,
   createStatsLineState,
+  createTranslator,
 } = core
 
 const USAGE = { uncachedInputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 0, outputTokens: 500 }
 const STATS = { turns: 2, steps: 3, llmMs: 1500, toolMs: 2000, ttftMs: 200, ttftSteps: 1, decodeMs: 800, decodeTokens: 50 }
 const PREFS_OFF = { cachePrecision: false, tokenDetail: false }
+const zhT = createTranslator(MESSAGES_ZH)
+const enT = createTranslator(MESSAGES_EN)
 
 function fakeStorage(initial = {}) {
   const map = new Map(Object.entries(initial))
@@ -45,20 +49,36 @@ function fakeStorage(initial = {}) {
   }
 }
 
-test('stats 词典与存储键逐字节对齐官方 zh 值', () => {
+test('stats 词典 zh 关键值逐字节对齐官方,en 族逐字节取官方 chat', () => {
   assert.equal(STATS_LINE_STORAGE_KEY, 'dsh-usage-dash:stats-line')
-  assert.equal(MESSAGES['stats.counts'], '{turns} 轮 · {steps} 步')
-  assert.equal(MESSAGES['stats.llm'], 'LLM {duration}')
-  assert.equal(MESSAGES['stats.toolCall'], '工具调用 {duration}')
-  assert.equal(MESSAGES['stats.ttftAverage'], '首 token 平均 {duration}')
-  assert.equal(MESSAGES['stats.tokensPerSecond'], '{throughput} tok/s')
-  assert.equal(MESSAGES['stats.cacheHit'], '缓存命中 {percent}%')
-  assert.equal(MESSAGES['stats.tokens'], '输入 {input} tok · 输出 {output} tok')
-  assert.equal(MESSAGES['stats.tokensDetail'], '总 {total} tok · 输入 {input} tok · 命中缓存 {hit} tok · 未命中缓存 {miss} tok · 输出 {output} tok')
-  assert.equal(MESSAGES.cachePrecision, '精确缓存命中率')
-  assert.equal(MESSAGES.cachePrecisionDesc, '在会话底部信息栏以两位小数显示缓存命中率。')
-  assert.equal(MESSAGES.tokenDetail, '会话 Token 明细')
-  assert.equal(MESSAGES.tokenDetailDesc, '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。')
+  assert.equal(MESSAGES_ZH['stats.counts'], '{turns} 轮 · {steps} 步')
+  assert.equal(MESSAGES_ZH['stats.llm'], 'LLM {duration}')
+  assert.equal(MESSAGES_ZH['stats.toolCall'], '工具调用 {duration}')
+  assert.equal(MESSAGES_ZH['stats.ttftAverage'], '首 token 平均 {duration}')
+  assert.equal(MESSAGES_ZH['stats.tokensPerSecond'], '{throughput} tok/s')
+  assert.equal(MESSAGES_ZH['stats.cacheHit'], '缓存命中 {percent}%')
+  assert.equal(MESSAGES_ZH['stats.tokens'], '输入 {input} tok · 输出 {output} tok')
+  assert.equal(MESSAGES_ZH['stats.tokensDetail'], '总 {total} tok · 输入 {input} tok · 命中缓存 {hit} tok · 未命中缓存 {miss} tok · 输出 {output} tok')
+  assert.equal(MESSAGES_ZH.cachePrecision, '精确缓存命中率')
+  assert.equal(MESSAGES_ZH.cachePrecisionDesc, '在会话底部信息栏以两位小数显示缓存命中率。')
+  assert.equal(MESSAGES_ZH.tokenDetail, '会话 Token 明细')
+  assert.equal(MESSAGES_ZH.tokenDetailDesc, '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。')
+  assert.equal(MESSAGES_ZH['duration.compactSeconds'], '{seconds}秒')
+  assert.equal(MESSAGES_ZH['duration.compactMinutes'], '{minutes}分{seconds}秒')
+  assert.equal(MESSAGES_ZH['number.thousand'], '{value}K')
+  assert.equal(MESSAGES_ZH['number.million'], '{value}M')
+  assert.equal(MESSAGES_EN['stats.counts'], '{turns} turns · {steps} steps')
+  assert.equal(MESSAGES_EN['stats.llm'], 'LLM {duration}')
+  assert.equal(MESSAGES_EN['stats.toolCall'], 'Tool call {duration}')
+  assert.equal(MESSAGES_EN['stats.ttftAverage'], 'TTFT avg {duration}')
+  assert.equal(MESSAGES_EN['stats.tokensPerSecond'], '{throughput} tok/s')
+  assert.equal(MESSAGES_EN['stats.cacheHit'], 'Cache hit {percent}%')
+  assert.equal(MESSAGES_EN['stats.tokens'], 'Input {input} tok · Output {output} tok')
+  assert.equal(MESSAGES_EN['stats.tokensDetail'], 'Total {total} tok · Input {input} tok · Cache hit {hit} tok · Cache miss {miss} tok · Output {output} tok')
+  assert.equal(MESSAGES_EN['duration.compactSeconds'], '{seconds}s')
+  assert.equal(MESSAGES_EN['duration.compactMinutes'], '{minutes}m{seconds}s')
+  assert.equal(MESSAGES_EN['number.thousand'], '{value}K')
+  assert.equal(MESSAGES_EN['number.million'], '{value}M')
 })
 
 test('billedInputTokens 为三个互斥 prompt 桶之和', () => {
@@ -114,17 +134,17 @@ test('cacheHitPercentPrecise 恒两位小数且 99.99 封顶', () => {
 })
 
 test('formatTokensCompact 官方 K/M 紧凑族', () => {
-  assert.equal(formatTokensCompact(517), '517')
-  assert.equal(formatTokensCompact(12200), '12.2K')
-  assert.equal(formatTokensCompact(517000), '517K')
-  assert.equal(formatTokensCompact(1200000), '1.2M')
-  assert.equal(formatTokensCompact(0), '0')
+  assert.equal(formatTokensCompact(517, zhT), '517')
+  assert.equal(formatTokensCompact(12200, zhT), '12.2K')
+  assert.equal(formatTokensCompact(517000, zhT), '517K')
+  assert.equal(formatTokensCompact(1200000, zhT), '1.2M')
+  assert.equal(formatTokensCompact(0, zhT), '0')
 })
 
 test('formatDuration 60 秒内一位小数,以上折分秒', () => {
-  assert.equal(formatDuration(45200), '45.2秒')
-  assert.equal(formatDuration(162000), '2分42秒')
-  assert.equal(formatDuration(0), '0秒')
+  assert.equal(formatDuration(45200, zhT), '45.2秒')
+  assert.equal(formatDuration(162000, zhT), '2分42秒')
+  assert.equal(formatDuration(0, zhT), '0秒')
 })
 
 test('formatTokensPerSecond 钳负值且阈值上下分别取整', () => {
@@ -186,7 +206,7 @@ test('deriveStats 空节点为零值统计', () => {
 })
 
 test('buildStatsGroups 双开关全关与官方行逐字节一致', () => {
-  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_OFF), [
+  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_OFF, zhT), [
     '2 轮 · 3 步',
     'LLM 1.5秒 · 工具调用 2秒',
     '首 token 平均 0.2秒 · 63 tok/s',
@@ -195,8 +215,28 @@ test('buildStatsGroups 双开关全关与官方行逐字节一致', () => {
   ])
 })
 
+test('buildStatsGroups 传 en 翻译器输出官方 en 口径逐字节', () => {
+  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_OFF, enT), [
+    '2 turns · 3 steps',
+    'LLM 1.5s · Tool call 2s',
+    'TTFT avg 0.2s · 63 tok/s',
+    'Cache hit 80%',
+    'Input 5K tok · Output 500 tok',
+  ])
+})
+
+test('buildStatsGroups en 零命中率呈现 Cache hit 0%', () => {
+  const zeroHitStats = { turns: 2, steps: 3, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
+  const zeroHitUsage = { uncachedInputTokens: 4000, cacheReadTokens: 0, cacheWriteTokens: 1000, outputTokens: 0 }
+  assert.deepEqual(buildStatsGroups(zeroHitStats, zeroHitUsage, PREFS_OFF, enT), [
+    '2 turns · 3 steps',
+    'Cache hit 0%',
+    'Input 5K tok · Output 0 tok',
+  ])
+})
+
 test('buildStatsGroups tokenDetail 开关切换五项明细组', () => {
-  const groups = buildStatsGroups(STATS, USAGE, { cachePrecision: false, tokenDetail: true })
+  const groups = buildStatsGroups(STATS, USAGE, { cachePrecision: false, tokenDetail: true }, zhT)
   assert.deepEqual(groups.slice(0, 4), [
     '2 轮 · 3 步',
     'LLM 1.5秒 · 工具调用 2秒',
@@ -207,12 +247,12 @@ test('buildStatsGroups tokenDetail 开关切换五项明细组', () => {
 })
 
 test('buildStatsGroups cachePrecision 开关切精确命中率', () => {
-  const groups = buildStatsGroups(STATS, USAGE, { cachePrecision: true, tokenDetail: false })
+  const groups = buildStatsGroups(STATS, USAGE, { cachePrecision: true, tokenDetail: false }, zhT)
   assert.equal(groups[3], '缓存命中 80.00%')
 })
 
 test('buildStatsGroups usage 缺席时命中与 Token 组整体缺席', () => {
-  assert.deepEqual(buildStatsGroups(STATS, undefined, PREFS_OFF), [
+  assert.deepEqual(buildStatsGroups(STATS, undefined, PREFS_OFF, zhT), [
     '2 轮 · 3 步',
     'LLM 1.5秒 · 工具调用 2秒',
     '首 token 平均 0.2秒 · 63 tok/s',
@@ -222,13 +262,13 @@ test('buildStatsGroups usage 缺席时命中与 Token 组整体缺席', () => {
 test('buildStatsGroups 无步进且用量空为空数组', () => {
   const zeroStats = { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
   const zeroUsage = { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
-  assert.deepEqual(buildStatsGroups(zeroStats, zeroUsage, PREFS_OFF), [])
+  assert.deepEqual(buildStatsGroups(zeroStats, zeroUsage, PREFS_OFF, zhT), [])
 })
 
 test('buildStatsGroups 仅输出时命中率组因 null 丢弃', () => {
   const zeroStats = { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
   const usage = { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 500 }
-  assert.deepEqual(buildStatsGroups(zeroStats, usage, PREFS_OFF), ['输入 0 tok · 输出 500 tok'])
+  assert.deepEqual(buildStatsGroups(zeroStats, usage, PREFS_OFF, zhT), ['输入 0 tok · 输出 500 tok'])
 })
 
 test('createStatsLineState 默认双关且非法 JSON 回落', () => {
