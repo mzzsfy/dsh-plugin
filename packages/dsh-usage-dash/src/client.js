@@ -150,6 +150,18 @@ const MESSAGES = {
   trendLimitedMinute: '数据量过大,仅显示最近 {n} 分钟',
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
+  'stats.counts': '{turns} 轮 · {steps} 步',
+  'stats.llm': 'LLM {duration}',
+  'stats.toolCall': '工具调用 {duration}',
+  'stats.ttftAverage': '首 token 平均 {duration}',
+  'stats.tokensPerSecond': '{throughput} tok/s',
+  'stats.cacheHit': '缓存命中 {percent}%',
+  'stats.tokens': '输入 {input} tok · 输出 {output} tok',
+  'stats.tokensDetail': '总 {total} tok · 输入 {input} tok · 命中缓存 {hit} tok · 未命中缓存 {miss} tok · 输出 {output} tok',
+  cachePrecision: '精确缓存命中率',
+  cachePrecisionDesc: '在会话底部信息栏以两位小数显示缓存命中率。',
+  tokenDetail: '会话 Token 明细',
+  tokenDetailDesc: '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。',
 }
 
 const PLACEHOLDER_PATTERN = /\{(\w+)\}/g
@@ -472,6 +484,249 @@ function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX)
   return { left, top }
 }
 
+// ===== 底部信息栏:官方 StatsLine 口径(dsh-client-ui-chat/lib/client.js 同构)+ usp 双开关 =====
+const STATS_LINE_STORAGE_KEY = 'dsh-usage-dash:stats-line'
+const STATS_ITEM_SEPARATOR = ' · '
+const MS_PER_SECOND = 1000
+const SECONDS_PER_MINUTE = 60
+const NUMBER_ONE_DECIMAL = 10
+const NUMBER_COMPACT_INT_THRESHOLD = 100
+const PERCENT_TENTH_SCALE = 10
+const PERCENT_GAP_DOUBLE_SCALE = 2 * PERCENT_SCALE
+const PERCENT_LOSS_BASE = 10
+const PERCENT_LOSS_CAP = 4
+const PERCENT_LOSS_DEFAULT = 5
+const PERCENT_PRECISE_CAP = 99.99
+const DURATION_MINUTE_SECONDS = 60
+const TPS_INTEGER_THRESHOLD = 10
+
+// 官方 billing 分母:三个互斥的 prompt 侧计费桶
+function billedInputTokens(usage) {
+  return usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+}
+
+// 官方二分取整:求最大 units 使 hit ≥ (2u-1)q + ceil((2u-1)r/2s),Math.round(hit·scale/D) 的保守复刻
+function roundedPercentUnits(cacheReadTokens, denominator, decimalPlaces) {
+  const scale = (decimalPlaces === 0 ? 1 : PERCENT_TENTH_SCALE) * PERCENT_SCALE
+  const doubledScale = scale * 2
+  const quotient = Math.floor(denominator / doubledScale)
+  const remainder = denominator % doubledScale
+  const holds = (candidate) => {
+    const doubled = candidate * 2 - 1
+    return cacheReadTokens >= doubled * quotient + Math.ceil((doubled * remainder) / doubledScale)
+  }
+  let low = 0
+  let high = scale
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2)
+    if (holds(mid)) low = mid
+    else high = mid - 1
+  }
+  return low
+}
+
+function displayPercentUnits(units, decimalPlaces) {
+  if (decimalPlaces === 0) return String(units)
+  const whole = Math.floor(units / PERCENT_TENTH_SCALE)
+  const tenths = units % PERCENT_TENTH_SCALE
+  return tenths === 0 ? String(whole) : `${whole}.${tenths}`
+}
+
+// 官方整数百分比:0.5 进位;舍入溢出 100 而仍有 miss 时以 99.x 闭式诚实呈现
+function formatCacheHitPercent(cacheReadTokens, promptTokens, decimalPlaces = 0) {
+  if (promptTokens === 0) return null
+  const missed = promptTokens - cacheReadTokens
+  if (missed === 0) return '100'
+  const roundedUnits = roundedPercentUnits(cacheReadTokens, promptTokens, decimalPlaces)
+  const unitsCeiling = decimalPlaces === 0 ? PERCENT_SCALE : PERCENT_SCALE * PERCENT_TENTH_SCALE
+  if (roundedUnits < unitsCeiling) return displayPercentUnits(roundedUnits, decimalPlaces)
+  let distinguishingPlaces = 1
+  let scaledDoubleGap = missed * PERCENT_GAP_DOUBLE_SCALE
+  const denominatorTens = Math.floor(promptTokens / PERCENT_TENTH_SCALE)
+  while (scaledDoubleGap <= denominatorTens) {
+    scaledDoubleGap *= PERCENT_TENTH_SCALE
+    distinguishingPlaces += 1
+  }
+  const denominatorOnes = promptTokens % PERCENT_TENTH_SCALE
+  let roundedLoss = PERCENT_LOSS_DEFAULT
+  for (let loss = 1; loss <= PERCENT_LOSS_CAP; loss++) {
+    const factor = loss * 2 + 1
+    const threshold = factor * denominatorTens + Math.floor((factor * denominatorOnes) / PERCENT_TENTH_SCALE)
+    if (scaledDoubleGap <= threshold) {
+      roundedLoss = loss
+      break
+    }
+  }
+  return `99.${'9'.repeat(distinguishingPlaces - 1)}${PERCENT_LOSS_BASE - roundedLoss}`
+}
+
+function cacheHitPercent(usage) {
+  return formatCacheHitPercent(usage.cacheReadTokens, billedInputTokens(usage), 0)
+}
+
+// usp 增强:恒两位小数,有 miss 即 99.99 封顶(镜像官方整数路径的诚实性)
+function cacheHitPercentPrecise(usage) {
+  const billed = billedInputTokens(usage)
+  if (billed === 0) return null
+  const missed = usage.uncachedInputTokens + usage.cacheWriteTokens
+  if (missed === 0) return '100.00'
+  const percent = Math.min(
+    Math.round((usage.cacheReadTokens * PERCENT_SCALE * PERCENT_SCALE) / billed) / PERCENT_SCALE,
+    PERCENT_PRECISE_CAP,
+  )
+  return percent.toFixed(2)
+}
+
+// 官方 compact 数字族:number.thousand='{value}K'、million='{value}M'
+function formatTokensCompact(value) {
+  const scaled = (count) => (count >= NUMBER_COMPACT_INT_THRESHOLD
+    ? String(Math.round(count))
+    : String(Math.round(count * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL))
+  if (value < COMPACT_BASE) return String(value)
+  if (value < COMPACT_BASE ** 2) return `${scaled(value / COMPACT_BASE)}K`
+  return `${scaled(value / COMPACT_BASE ** 2)}M`
+}
+
+// 官方时长:60 秒内保留一位小数,以上整秒折分秒
+function formatDuration(ms) {
+  const seconds = ms / MS_PER_SECOND
+  if (seconds < DURATION_MINUTE_SECONDS) return `${Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL}秒`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / SECONDS_PER_MINUTE)}分${whole % SECONDS_PER_MINUTE}秒`
+}
+
+// 官方吞吐:钳负值,阈值上取整、下一位小数
+function formatTokensPerSecond(tps) {
+  const clamped = Math.max(0, tps)
+  if (clamped >= TPS_INTEGER_THRESHOLD) return String(Math.round(clamped))
+  return String(Math.round(clamped * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL)
+}
+
+// 官方节点读数:TTFT/decode 仅在对应时间戳齐全时产出,usage 须为非负有限数
+function assistantStepReading(node) {
+  const timing = node.timing
+  const ttftMs = timing !== undefined && timing.stepStartTime !== null && timing.firstTokenTime !== null
+    ? Math.max(0, timing.firstTokenTime - timing.stepStartTime)
+    : null
+  const decodeMs = timing !== undefined && timing.firstTokenTime !== null
+    ? Math.max(0, timing.completedTime - timing.firstTokenTime)
+    : null
+  const outputTokens = typeof node.usage === 'number' && Number.isFinite(node.usage) && node.usage >= 0
+    ? node.usage
+    : null
+  return { ttftMs, decodeMs, outputTokens }
+}
+
+// 官方窗口折叠:tool-result 累计工具时长,assistant 计轮次/步数/LLM 时长并聚合读数
+function deriveStats(nodes) {
+  const turns = new Set()
+  const stats = { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
+  for (const node of nodes) {
+    if (node.kind === 'tool-result') {
+      if (node.callTime !== null) stats.toolMs += Math.max(0, node.time - node.callTime)
+      continue
+    }
+    if (node.kind !== 'assistant') continue
+    turns.add(node.turn)
+    stats.steps += 1
+    const timing = node.timing
+    if (timing !== undefined && timing.stepStartTime !== null) {
+      stats.llmMs += Math.max(0, timing.completedTime - timing.stepStartTime)
+    }
+    const reading = assistantStepReading(node)
+    if (reading.ttftMs !== null) {
+      stats.ttftMs += reading.ttftMs
+      stats.ttftSteps += 1
+    }
+    if (reading.decodeMs !== null && reading.outputTokens !== null) {
+      stats.decodeMs += reading.decodeMs
+      stats.decodeTokens += reading.outputTokens
+    }
+  }
+  stats.turns = turns.size
+  return stats
+}
+
+// 分组装配:官方 StatsLine 分组序 + usp 双开关(精确命中率/Token 明细)
+function buildStatsGroups(stats, usage, prefs) {
+  const groups = []
+  if (stats.steps > 0) {
+    groups.push(t('stats.counts', { turns: stats.turns, steps: stats.steps }))
+    const durations = []
+    if (stats.llmMs > 0) durations.push(t('stats.llm', { duration: formatDuration(stats.llmMs) }))
+    if (stats.toolMs > 0) durations.push(t('stats.toolCall', { duration: formatDuration(stats.toolMs) }))
+    if (durations.length > 0) groups.push(durations.join(STATS_ITEM_SEPARATOR))
+    const speeds = []
+    if (stats.ttftSteps > 0) speeds.push(t('stats.ttftAverage', { duration: formatDuration(stats.ttftMs / stats.ttftSteps) }))
+    if (stats.decodeMs > 0) speeds.push(t('stats.tokensPerSecond', {
+      throughput: formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / MS_PER_SECOND)),
+    }))
+    if (speeds.length > 0) groups.push(speeds.join(STATS_ITEM_SEPARATOR))
+  }
+  if (usage !== undefined && (billedInputTokens(usage) > 0 || usage.outputTokens > 0)) {
+    const percent = prefs.cachePrecision ? cacheHitPercentPrecise(usage) : cacheHitPercent(usage)
+    if (percent !== null) groups.push(t('stats.cacheHit', { percent }))
+    if (prefs.tokenDetail) {
+      const billed = billedInputTokens(usage)
+      groups.push(t('stats.tokensDetail', {
+        total: formatTokensCompact(billed + usage.outputTokens),
+        input: formatTokensCompact(billed),
+        hit: formatTokensCompact(usage.cacheReadTokens),
+        miss: formatTokensCompact(usage.uncachedInputTokens + usage.cacheWriteTokens),
+        output: formatTokensCompact(usage.outputTokens),
+      }))
+    } else {
+      groups.push(t('stats.tokens', {
+        input: formatTokensCompact(billedInputTokens(usage)),
+        output: formatTokensCompact(usage.outputTokens),
+      }))
+    }
+  }
+  return groups
+}
+
+// usp stats-line 偏好状态工厂:storage 注入便于 Node 测试,读写全防御,内存值始终生效
+function createStatsLineState(storage) {
+  const DEFAULT_PREFS = { cachePrecision: false, tokenDetail: false }
+  const listeners = new Set()
+  const read = () => {
+    if (!storage) return { ...DEFAULT_PREFS }
+    try {
+      const parsed = JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY))
+      if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PREFS }
+      return { cachePrecision: parsed.cachePrecision === true, tokenDetail: parsed.tokenDetail === true }
+    } catch {
+      return { ...DEFAULT_PREFS }
+    }
+  }
+  let state = read()
+  const notify = () => {
+    for (const listener of listeners) listener()
+  }
+  return {
+    get: () => state,
+    set(patch) {
+      state = { ...state, ...patch }
+      if (storage) {
+        try {
+          storage.setItem(STATS_LINE_STORAGE_KEY, JSON.stringify(state))
+        } catch {
+          // 写失败仅丢持久化
+        }
+      }
+      notify()
+    },
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    reload() {
+      state = read()
+      notify()
+    },
+  }
+}
+
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
@@ -494,6 +749,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)
     const cx = (...values) => values.filter(Boolean).join(' ')
+
+    // stats-line 偏好单例:模块表内同实例,面板偏好卡与底部信息栏订阅互通
+    const statsLineState = createStatsLineState(typeof localStorage !== 'undefined' ? localStorage : null)
 
     // 交互与尺寸常量
     const STATUS_POLL_FAST_MS = 1000
@@ -518,6 +776,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const NOTE_SEPARATOR = ' · '
     const TIP_Z_INDEX = 1100
     const STYLE_ID = 'dsh-usage-dash'
+    // 开关视觉常量(规约形态:隐藏 checkbox + track 胶囊 + thumb 圆点)
+    const SWITCH_TRACK_WIDTH = 40
+    const SWITCH_TRACK_HEIGHT = 22
+    const SWITCH_THUMB_SIZE = 18
+    const SWITCH_EDGE_INSET = 2
+    const SWITCH_THUMB_TRAVEL = SWITCH_TRACK_WIDTH - SWITCH_THUMB_SIZE - SWITCH_EDGE_INSET * 2
+    const SWITCH_TRANSITION_MS = 120
+    const STATS_SLOT_PRIORITY = -1
+    const STATS_LINE_TITLE_SEPARATOR = ' | '
     const DAY_PRESET_LABELS = {
       '7': t('rangePreset.7'),
       '14': t('rangePreset.14'),
@@ -664,6 +931,22 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-model-other--open{grid-template-rows:1fr}
 .ud-model-other-list{overflow:hidden;min-height:0}
 .ud-model-row--sub{min-height:0;padding:4px 4px 4px 28px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent);border-bottom:none}
+.ud-switch{display:inline-flex;align-items:center;cursor:pointer}
+.ud-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); }
+.ud-switch__track{position:relative;width:${SWITCH_TRACK_WIDTH}px;height:${SWITCH_TRACK_HEIGHT}px;border-radius:999px;box-sizing:border-box;flex:none;background:var(--dsw-alias-border-l2);transition:background ${SWITCH_TRANSITION_MS}ms var(--ds-ease-in-out)}
+.ud-switch__thumb{position:absolute;top:${SWITCH_EDGE_INSET}px;left:${SWITCH_EDGE_INSET}px;width:${SWITCH_THUMB_SIZE}px;height:${SWITCH_THUMB_SIZE}px;border-radius:50%;background:var(--dsw-alias-bg-layer-1);transition:transform ${SWITCH_TRANSITION_MS}ms var(--ds-ease-in-out)}
+.ud-switch:not(:has(input[type="checkbox"]:disabled)):hover .ud-switch__track{background:color-mix(in srgb,var(--dsw-alias-border-l2) 85%,var(--dsw-alias-label-tertiary))}
+.ud-switch input[type="checkbox"]:checked + .ud-switch__track{background:var(--dsw-alias-state-business-primary)}
+.ud-switch input[type="checkbox"]:checked + .ud-switch__track .ud-switch__thumb{transform:translateX(${SWITCH_THUMB_TRAVEL}px)}
+.ud-switch input[type="checkbox"]:focus-visible + .ud-switch__track{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.ud-switch input[type="checkbox"]:disabled + .ud-switch__track{opacity:.45;cursor:default}
+.ud-pref-group{display:flex;flex-direction:column;gap:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 16px}
+.ud-pref-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.ud-pref-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
+.ud-pref-desc{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
+.ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
 `
 
     function ensureStyle(document) {
@@ -1037,6 +1320,80 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             : null))
     }
 
+    // 规约形态开关:原生 checkbox 保语义并视觉隐藏,track/thumb 呈现选中态
+    function Switch({ checked, onChange, disabled, describedbyId }) {
+      return h('label', { className: 'ud-switch' },
+        h('input', {
+          type: 'checkbox',
+          checked,
+          disabled,
+          'aria-describedby': describedbyId,
+          onChange: (event) => onChange(event.target.checked),
+        }),
+        h('span', { className: 'ud-switch__track' },
+          h('span', { className: 'ud-switch__thumb' })))
+    }
+
+    // 底部信息栏接管:与官方 StatsLine 同 id 'stats' 的槽条目,双开关控制增强项
+    const StatsLineEnhanced = React.memo(function StatsLineEnhanced({ useChat, useProjection }) {
+      if (typeof useProjection !== 'function' || typeof useChat !== 'function') return null
+      const usage = useProjection('tokenUsage')
+      const projected = useProjection('sessionStats')
+      const settledNodes = useChat((state) => state.legacy.nodes)
+      const stats = useMemo(() => projected ?? deriveStats(settledNodes ?? []), [projected, settledNodes])
+      const [prefs, setPrefs] = useState(() => statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
+      const groups = buildStatsGroups(stats, usage, prefs)
+      const rootRef = useRef(null)
+      const [truncated, setTruncated] = useState(false)
+      useLayoutEffect(() => {
+        const element = rootRef.current
+        if (!element) return undefined
+        const measure = () => setTruncated(element.scrollWidth > element.clientWidth)
+        measure()
+        const observer = new ResizeObserver(measure)
+        observer.observe(element)
+        return () => observer.disconnect()
+      }, [groups])
+      if (groups.length === 0) return null
+      return h('div', {
+        className: 'ud-statsline-root',
+        ref: rootRef,
+        title: truncated ? groups.join(STATS_LINE_TITLE_SEPARATOR) : undefined,
+      }, groups.map((group, index) => h(React.Fragment, { key: index },
+        index > 0 && h('span', { className: 'ud-statsline-sep', 'aria-hidden': true }, '|'),
+        group)))
+    })
+
+    // 偏好卡行:说明文案承担 aria-describedby 目标
+    function StatsLineOptionRow({ labelKey, descKey, checked, onToggle }) {
+      const describeId = React.useId()
+      return h('div', { className: 'ud-pref-row' },
+        h('div', { className: 'ud-pref-text' },
+          h('span', { className: 'ud-pref-title' }, t(labelKey)),
+          h('span', { className: 'ud-pref-desc', id: describeId }, t(descKey))),
+        h(Switch, { checked, onChange: onToggle, describedbyId: describeId }))
+    }
+
+    // 偏好卡:与底部信息栏同 store 实例,改动即时互通
+    function StatsLineOptions() {
+      const [prefs, setPrefs] = useState(() => statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
+      return h('div', { className: 'ud-pref-group' },
+        h(StatsLineOptionRow, {
+          labelKey: 'cachePrecision',
+          descKey: 'cachePrecisionDesc',
+          checked: prefs.cachePrecision,
+          onToggle: (value) => statsLineState.set({ cachePrecision: value }),
+        }),
+        h(StatsLineOptionRow, {
+          labelKey: 'tokenDetail',
+          descKey: 'tokenDetailDesc',
+          checked: prefs.tokenDetail,
+          onToggle: (value) => statsLineState.set({ tokenDetail: value }),
+        }))
+    }
+
     function StatusRow({ onChanged, onError }) {
       const [status, setStatus] = useState(null)
       const [armed, setArmed] = useState(false)
@@ -1325,7 +1682,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           : null,
         grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef }) : null,
         stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
-        emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null)
+        emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
+        h(StatsLineOptions, { key: 'prefs' }))
     }
 
     return {
@@ -1337,6 +1695,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             { name: 'settings.section', id: 'usage-dash', order: 45, label: '使用统计' },
             () => h(UsageDashPanel),
           ))
+        // 两段式接管官方 stats 格:宿主缺该插槽时注册抛错即禁用本功能
+        try {
+          ctx.slots.inject('conversation.composer.dock', () =>
+            ctx.slots.register(
+              { name: 'conversation.composer.dock', id: 'stats', order: 0, priority: STATS_SLOT_PRIORITY },
+              StatsLineEnhanced,
+            ))
+        } catch (error) {
+          console.warn('[usage-dash] 底部信息栏未注册(宿主无 conversation.composer.dock 插槽)', error)
+        }
+        // 跨实例同步:其他实例写开关经 storage 事件触发重读(同实例写入不触发该事件)
+        window.addEventListener('storage', (event) => {
+          if (event.key === STATS_LINE_STORAGE_KEY) statsLineState.reload()
+        })
       },
     }
   }
