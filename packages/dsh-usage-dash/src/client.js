@@ -217,23 +217,29 @@ function isEmptyRange(value) {
 const toRankedModels = (totals) =>
   [...totals.entries()].map(([model, tokens]) => ({ model, tokens })).sort((a, b) => b.tokens - a.tokens)
 
-// 逐槽 byModel 把非 top 模型并入哨兵桶,模型顺序 = 图例序(哨兵恒最后)
+// 逐槽 byModel 把非 top 模型并入哨兵桶,原明细留 otherByModel 供 tooltip;模型顺序 = 图例序(哨兵恒最后)
 const foldSlotsByTop = (slots, topModels) => {
   const top = new Set(topModels)
   return slots.map((slot) => {
     const byModel = {}
+    const otherByModel = {}
     for (const [model, tokens] of Object.entries(slot.byModel)) {
-      const target = top.has(model) ? model : OTHER_MODEL
-      byModel[target] = (byModel[target] ?? 0) + tokens
+      if (top.has(model)) {
+        byModel[model] = (byModel[model] ?? 0) + tokens
+        continue
+      }
+      byModel[OTHER_MODEL] = (byModel[OTHER_MODEL] ?? 0) + tokens
+      otherByModel[model] = (otherByModel[model] ?? 0) + tokens
     }
-    return { ...slot, byModel }
+    return { ...slot, byModel, otherByModel }
   })
 }
 
 const topWithOther = (ranked) => {
   const models = ranked.slice(0, GROUP_TOP_COUNT)
   if (ranked.length > GROUP_TOP_COUNT) {
-    models.push({ model: OTHER_MODEL, tokens: ranked.slice(GROUP_TOP_COUNT).reduce((sum, item) => sum + item.tokens, 0) })
+    const rest = ranked.slice(GROUP_TOP_COUNT)
+    models.push({ model: OTHER_MODEL, tokens: rest.reduce((sum, item) => sum + item.tokens, 0), items: rest })
   }
   return models
 }
@@ -307,6 +313,85 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
     labelEvery: Math.max(1, Math.ceil(labelMinPitch / step)),
     bars,
   }
+}
+
+// 命中率副轴与曲线
+const PERCENT_SCALE = 100
+const RATE_AXIS_STEPS = 4
+const TREND_LINE_WIDTH = 2
+const TREND_DOT_RADIUS = 4
+const TREND_DOT_RING = 2
+const AXIS_RATE_GAP = 8
+const BAR_HOVER_GROW = 3
+
+const rateAxisTicks = () =>
+  Array.from({ length: RATE_AXIS_STEPS + 1 }, (_, index) => (index / RATE_AXIS_STEPS) * PERCENT_SCALE)
+
+function trendRatePoints(slots, bars, plotHeight) {
+  const points = []
+  slots.forEach((slot, index) => {
+    const rate = cacheRate(slot.cacheHit, slot.cacheMiss)
+    if (rate === null) return
+    points.push({
+      day: slot.day,
+      x: bars[index].x,
+      y: CHART_PAD.top + plotHeight - (rate / PERCENT_SCALE) * plotHeight,
+    })
+  })
+  return points
+}
+
+// Catmull-Rom 转三次贝塞尔:控制点取邻点差六分之一,端点折返
+function smoothPath(points) {
+  if (points.length === 0) return ''
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`
+  let d = `M ${points[0].x} ${points[0].y}`
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] ?? points[i]
+    const p1 = points[i]
+    const p2 = points[i + 1]
+    const p3 = points[i + 2] ?? p2
+    const c1x = p1.x + (p2.x - p0.x) / 6
+    const c1y = p1.y + (p2.y - p0.y) / 6
+    const c2x = p2.x - (p3.x - p1.x) / 6
+    const c2y = p2.y - (p3.y - p1.y) / 6
+    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`
+  }
+  return d
+}
+
+// donut:circle+stroke-dash 几何,offset 渲染序累加
+const DONUT_VIEWBOX_SIZE = 200
+const DONUT_CENTER_XY = 100
+const DONUT_OUTER_RADIUS = 95
+const DONUT_STROKE_WIDTH = 30
+const DONUT_ACTIVE_STROKE_GROW = 5
+const DONUT_DIM_OPACITY = 0.35
+const DONUT_RADIUS = DONUT_OUTER_RADIUS - DONUT_STROKE_WIDTH / 2
+const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_RADIUS
+const DONUT_TOTAL_FLOOR = 1
+const DONUT_CENTER_VALUE_OFFSET = 8
+const DONUT_CENTER_LABEL_OFFSET = 26
+
+function donutSegments(models, total) {
+  const denom = Math.max(DONUT_TOTAL_FLOOR, total)
+  let offset = 0
+  return models.map((item) => {
+    const dash = (item.tokens / denom) * DONUT_CIRCUMFERENCE
+    const segment = { ...item, dash, offset, percent: (item.tokens / denom) * PERCENT_SCALE }
+    offset += dash
+    return segment
+  })
+}
+
+// 列表手风琴明细与分段可访问标签
+function otherDetailItems(models) {
+  const other = models.find((item) => item.model === OTHER_MODEL)
+  return other ? other.items ?? [] : []
+}
+
+function modelSegmentLabel(name, tokens, percent) {
+  return `${name}: ${formatTokens(tokens)} (${formatPercent(percent)})`
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -486,9 +571,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STYLE_CSS = `
 .ud-panel{display:flex;flex-direction:column;gap:16px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
---dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe}
+--dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
---dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff}
+--dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe}
 .ud-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
 .ud-seg-item{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
@@ -546,7 +631,39 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-heat-legend i{display:inline-block;width:${HEAT_BASE}px;height:${HEAT_BASE}px;border-radius:${HEAT_RX}px;flex:none}
 .ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);box-shadow:0 4px 12px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:8px 10px}
 .ud-tip-title{font-weight:600}
-.ud-tip-row{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.ud-tip-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.ud-tip-row--sub{padding-left:12px;color:var(--dsw-alias-label-tertiary);font-size:11px}
+.ud-tip-breakdown{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--dsw-alias-border-l1);margin-top:6px;padding-top:6px}
+.ud-axis-rate{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums}
+.ud-bar{transform-box:fill-box;transform-origin:center}
+.ud-bar-hit{fill:transparent;pointer-events:all}
+.ud-trend{stroke:var(--ud-trend-line);opacity:.9;fill:none;pointer-events:none}
+.ud-trend-dot{fill:var(--ud-trend-line);stroke:var(--dsw-alias-bg-layer-1);stroke-width:${TREND_DOT_RING}px;pointer-events:none}
+.ud-legend-swatch--line{height:2px;border-radius:1px;background:var(--ud-trend-line)}
+.ud-model-usage{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px}
+.ud-donut-wrap{flex:0 0 auto}
+.ud-donut-seg{cursor:pointer;outline:none;transition:stroke-width .12s ease}
+.ud-donut-seg--dim{opacity:${DONUT_DIM_OPACITY}}
+.ud-donut-center{font-size:18px;font-weight:600;fill:var(--dsw-alias-label-primary)}
+.ud-donut-label{font-size:11px;fill:var(--dsw-alias-label-tertiary)}
+.ud-models{flex:1 1 260px;min-width:240px;display:flex;flex-direction:column}
+.ud-model-row{display:flex;align-items:center;gap:8px;min-height:44px;padding:2px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ud-model-row--expand{cursor:pointer}
+.ud-model-row--expand:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ud-model-swatch{width:10px;height:10px;border-radius:2px;flex:none}
+.ud-model-id{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.ud-model-name{font-size:13px;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ud-model-provider{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
+.ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-toggle{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;transition:transform .2s ease}
+.ud-model-toggle[aria-expanded="true"]{transform:rotate(90deg)}
+.ud-model-toggle:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);border-radius:4px}
+.ud-model-other{display:grid;grid-template-rows:0fr;transition:grid-template-rows .25s ease}
+.ud-model-other--open{grid-template-rows:1fr}
+.ud-model-other-list{overflow:hidden;min-height:0}
+.ud-model-row--sub{min-height:0;padding:4px 4px 4px 28px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 55%,transparent);border-bottom:none}
 `
 
     function ensureStyle(document) {
@@ -620,7 +737,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return h('div', { className: 'ud-legend' },
         models.map((item) => h('span', { key: item.model, className: 'ud-legend-item', title: item.model === OTHER_MODEL ? t('other') : item.model },
           h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
-          h('span', null, item.model === OTHER_MODEL ? t('other') : item.model))))
+          h('span', null, item.model === OTHER_MODEL ? t('other') : item.model))),
+        h('span', { key: 'hit-rate', className: 'ud-legend-item', title: t('hitRateLegend') },
+          h('i', { className: 'ud-legend-swatch ud-legend-swatch--line' }),
+          h('span', null, t('hitRateLegend'))))
     }
 
     const colorForModel = (models) => (model) => {
@@ -630,9 +750,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels }) {
+    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef }) {
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
+      const [hover, setHover] = useState(null)
       useEffect(() => {
         const element = wrapRef.current
         const observer = new ResizeObserver((entries) => {
@@ -644,27 +765,73 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }, [])
       const layout = trendLayout(slots, modelOrder, avail, labelMinPitch)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
+      const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
+      const hoverSlot = hover ? slots[hover.index] : null
+      const hoverRatePoint = hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
+      const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
+      const clear = () => setHover(null)
+      const otherEntries = hoverSlot
+        ? Object.entries(hoverSlot.otherByModel ?? {}).sort((a, b) => b[1] - a[1])
+        : []
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, title),
           notes.length > 0 ? h('span', { className: 'ud-trend-note' }, notes.join(NOTE_SEPARATOR)) : null),
         h('div', { className: 'ud-chart-wrap', ref: wrapRef, style: busy ? { opacity: CHART_BUSY_OPACITY } : undefined },
-          h('svg', { className: 'ud-chart', viewBox: `0 0 ${avail} ${CHART_HEIGHT}`, width: '100%', role: 'img', 'aria-label': title },
+          h('svg', {
+            className: 'ud-chart', viewBox: `0 0 ${avail} ${CHART_HEIGHT}`, width: '100%', role: 'img',
+            'aria-label': title, onMouseLeave: clear,
+          },
             layout.ticks.map((tick) => {
               const y = CHART_PAD.top + layout.plotHeight - (tick / layout.maxTotal) * layout.plotHeight
               return h('g', { key: tick },
                 h('line', { className: 'ud-grid', x1: CHART_PAD.left, x2: plotRight, y1: y, y2: y }),
                 h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, formatCompact(tick)))
             }),
-            layout.bars.flatMap((bar) => bar.segments.map((segment) => h('rect', {
+            rateAxisTicks().map((tick) => {
+              const y = CHART_PAD.top + layout.plotHeight - (tick / PERCENT_SCALE) * layout.plotHeight
+              return h('text', {
+                key: `rate-${tick}`, className: 'ud-axis-rate',
+                x: plotRight + AXIS_RATE_GAP, y: y + AXIS_LABEL_BASELINE,
+              }, String(tick))
+            }),
+            layout.bars.flatMap((bar, barIndex) => bar.segments.map((segment) => h('rect', {
               key: `${bar.key}/${segment.model}`, className: 'ud-bar',
               x: bar.x - layout.barWidth / 2, y: segment.y, width: layout.barWidth, height: segment.height,
               fill: colorFor(segment.model),
+              style: hover?.index === barIndex
+                ? { transform: `scaleX(${(layout.barWidth + BAR_HOVER_GROW) / layout.barWidth})` }
+                : undefined,
             }))),
             slots.map((slot, index) => (index % layout.labelEvery === 0 || index === slots.length - 1)
               ? h('text', { key: slot.day, className: 'ud-axis', x: layout.bars[index].x, y: CHART_HEIGHT - X_LABEL_OFFSET, textAnchor: 'middle' }, labelFor(slot.day))
-              : null))),
-        h(Legend, { models: legendModels, colorFor }))
+              : null),
+            h('path', {
+              className: 'ud-trend', d: smoothPath(ratePoints),
+              strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
+            }),
+            hoverRatePoint
+              ? h('circle', { className: 'ud-trend-dot', cx: hoverRatePoint.x, cy: hoverRatePoint.y, r: TREND_DOT_RADIUS })
+              : null,
+            slots.map((slot, index) => h('rect', {
+              key: `hit-${slot.day}`, className: 'ud-bar-hit',
+              x: layout.bars[index].x - layout.step / 2, y: CHART_PAD.top, width: layout.step, height: layout.plotHeight,
+              onMouseEnter: pick(index), onFocus: pick(index), onMouseLeave: clear, onBlur: clear,
+            })))),
+        h(Legend, { models: legendModels, colorFor }),
+        h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
+          hoverSlot
+            ? [
+                h('div', { key: 'title', className: 'ud-tip-title' }, hoverSlot.day),
+                h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
+                ...legendModels.map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
+                  h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
+                  `${item.model === OTHER_MODEL ? t('other') : item.model}: ${formatTokens(hoverSlot.byModel[item.model] ?? 0)}`)),
+                ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
+                  `${model}: ${formatTokens(tokens)}`)),
+                h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`),
+              ]
+            : null))
     }
 
     // 浮层 tooltip:portal 到 body,模块表缺失时降级面板内 fixed
@@ -766,6 +933,106 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('tokens')}: ${formatTokens(hover.tokens)}`),
                 h('div', { key: 'requests', className: 'ud-tip-row' }, `${t('requests')}: ${hover.requests}`),
                 h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hover.cacheHit, hover.cacheMiss)}`),
+              ]
+            : null))
+    }
+
+    // 模型用量:donut + 列表,恒按天口径,不随视图切换
+    function ModelUsage({ models, colorFor, panelRef }) {
+      const [hover, setHover] = useState(null)
+      const [tip, setTip] = useState(null)
+      const [expandedOther, setExpandedOther] = useState(false)
+      const total = Math.max(DONUT_TOTAL_FLOOR, models.reduce((sum, item) => sum + item.tokens, 0))
+      const segments = donutSegments(models, total)
+      const displayName = (model) => (model === OTHER_MODEL ? t('other') : model)
+      const pick = (model) => (event) => {
+        setHover(model)
+        setTip({ model, anchor: event.currentTarget })
+      }
+      const clear = () => {
+        setHover(null)
+        setTip(null)
+      }
+      const toggleOther = () => setExpandedOther((value) => !value)
+      const tipSegment = tip ? segments.find((segment) => segment.model === tip.model) : null
+      return h('div', { className: 'ud-section' },
+        h('div', { className: 'ud-section-head' },
+          h('span', { className: 'ud-section-title' }, t('modelUsage'))),
+        h('div', { className: 'ud-model-usage' },
+          h('svg', {
+            className: 'ud-donut-wrap', viewBox: `0 0 ${DONUT_VIEWBOX_SIZE} ${DONUT_VIEWBOX_SIZE}`,
+            width: DONUT_VIEWBOX_SIZE, height: DONUT_VIEWBOX_SIZE,
+          },
+            h('circle', {
+              className: 'ud-donut-track', cx: DONUT_CENTER_XY, cy: DONUT_CENTER_XY, r: DONUT_RADIUS,
+              fill: 'none', strokeWidth: DONUT_STROKE_WIDTH, stroke: 'var(--dsw-alias-bg-mask-1)',
+            }),
+            segments.map((segment) => h('circle', {
+              key: segment.model,
+              className: cx('ud-donut-seg', hover && hover !== segment.model && 'ud-donut-seg--dim'),
+              cx: DONUT_CENTER_XY, cy: DONUT_CENTER_XY, r: DONUT_RADIUS, fill: 'none',
+              stroke: colorFor(segment.model),
+              strokeWidth: hover === segment.model ? DONUT_STROKE_WIDTH + DONUT_ACTIVE_STROKE_GROW : DONUT_STROKE_WIDTH,
+              strokeDasharray: `${segment.dash} ${DONUT_CIRCUMFERENCE - segment.dash}`,
+              strokeDashoffset: -segment.offset,
+              transform: `rotate(-90 ${DONUT_CENTER_XY} ${DONUT_CENTER_XY})`,
+              tabIndex: 0, role: 'button',
+              'aria-label': modelSegmentLabel(displayName(segment.model), segment.tokens, segment.percent),
+              onMouseEnter: pick(segment.model), onFocus: pick(segment.model),
+              onMouseLeave: clear, onBlur: clear,
+            })),
+            h('text', { className: 'ud-donut-center', x: DONUT_CENTER_XY, y: DONUT_CENTER_XY + DONUT_CENTER_VALUE_OFFSET, textAnchor: 'middle', 'aria-hidden': true }, formatCompact(total)),
+            h('text', { className: 'ud-donut-label', x: DONUT_CENTER_XY, y: DONUT_CENTER_XY + DONUT_CENTER_LABEL_OFFSET, textAnchor: 'middle', 'aria-hidden': true }, t('tokens'))),
+          h('div', { className: 'ud-models' },
+            models.map((item) => {
+              const isOther = item.model === OTHER_MODEL
+              return h(React.Fragment, { key: item.model },
+                h('div', {
+                  className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
+                  onClick: isOther ? toggleOther : undefined,
+                  onMouseEnter: () => setHover(item.model),
+                  onMouseLeave: clear,
+                },
+                  h('i', { className: 'ud-model-swatch', style: { background: colorFor(item.model) } }),
+                  h('div', { className: 'ud-model-id' },
+                    h('span', { className: 'ud-model-name' }, displayName(item.model)),
+                    isOther ? null : h('span', { className: 'ud-model-provider' }, providerOf(item.model))),
+                  isOther
+                    ? h('button', {
+                        className: 'ud-model-toggle', 'aria-expanded': expandedOther, 'aria-label': t('other'),
+                        onClick: (event) => {
+                          event.stopPropagation()
+                          toggleOther()
+                        },
+                      }, '›')
+                    : null,
+                  h('div', { className: 'ud-model-values' },
+                    h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
+                    h('span', { className: 'ud-model-pct' }, formatPercent((item.tokens / total) * PERCENT_SCALE)))),
+                isOther
+                  ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
+                      h('div', { className: 'ud-model-other-list' },
+                        otherDetailItems(models).map((detail) => h('div', {
+                          key: detail.model, className: 'ud-model-row ud-model-row--sub',
+                          onMouseEnter: () => setHover(OTHER_MODEL), onMouseLeave: clear,
+                        },
+                          h('span', { className: 'ud-model-name' }, detail.model),
+                          h('div', { className: 'ud-model-values' },
+                            h('span', { className: 'ud-model-tokens' }, formatTokens(detail.tokens)))))))
+                  : null)
+            }))),
+        h(ChartTip, { anchor: tip ? tip.anchor : null, panelRef },
+          tipSegment
+            ? [
+                h('div', { key: 'title', className: 'ud-tip-title' }, displayName(tipSegment.model)),
+                h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(tipSegment.tokens)}`),
+                h('div', { key: 'pct', className: 'ud-tip-row' }, `${t('percent')}: ${formatPercent(tipSegment.percent)}`),
+                tipSegment.model === OTHER_MODEL && (tipSegment.items ?? []).length > 0
+                  ? h('div', { key: 'breakdown', className: 'ud-tip-breakdown' },
+                      tipSegment.items.map((detail) => h('div', { key: detail.model, className: 'ud-tip-row ud-tip-row--sub' },
+                        h('i', { className: 'ud-legend-swatch', style: { background: 'var(--ud-chart-other)' } }),
+                        `${detail.model}: ${formatTokens(detail.tokens)}`)))
+                  : null,
               ]
             : null))
     }
@@ -1053,8 +1320,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               labelMinPitch: pointActive ? LABEL_PITCH_TIME : LABEL_PITCH_DAY,
               busy,
               legendModels: trendSource.models,
+              panelRef,
             })
           : null,
+        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef }) : null,
         stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null)
     }

@@ -16,8 +16,16 @@ const DECLARATION_NAMES = [
 const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
 const {
+  CHART_HEIGHT,
+  CHART_PAD,
   DAY_MAX_SLOTS,
   DAY_PRESETS,
+  DONUT_CENTER_XY,
+  DONUT_CIRCUMFERENCE,
+  DONUT_OUTER_RADIUS,
+  DONUT_RADIUS,
+  DONUT_STROKE_WIDTH,
+  DONUT_VIEWBOX_SIZE,
   HEAT_BASE,
   HEAT_GAP,
   HEAT_RX,
@@ -29,6 +37,7 @@ const {
   OTHER_MODEL,
   cacheRateText,
   daysInRange,
+  donutSegments,
   formatCompact,
   formatTokens,
   groupPointSlots,
@@ -42,18 +51,23 @@ const {
   isEmptyRange,
   maxSlotsFor,
   minuteTickLabel,
+  modelSegmentLabel,
   modelNameOf,
   niceTicks,
+  otherDetailItems,
   parseEnvelope,
   providerOf,
+  rateAxisTicks,
   resolveDayRange,
   resolveHourRange,
   resolveMinuteRange,
   shortDay,
+  smoothPath,
   t,
   tipPlace,
   trimSlots,
   trendLayout,
+  trendRatePoints,
 } = core
 
 const EPSILON = 1e-9
@@ -368,4 +382,111 @@ test('tipPlace 零尺寸或全零锚定矩形返回隐藏', () => {
   assert.equal(tipPlace(TIP_ANCHOR, { width: 0, height: 0 }, TIP_BOUNDS), null)
   assert.equal(tipPlace({ left: 0, top: 0, right: 0, bottom: 0 }, TIP_SIZE, TIP_BOUNDS), null)
   assert.equal(tipPlace(null, TIP_SIZE, TIP_BOUNDS), null)
+})
+
+// —— S8 命中率曲线 ——
+
+test('命中率副轴固定零到百五等分刻度', () => {
+  assert.deepEqual(rateAxisTicks(), [0, 25, 50, 75, 100])
+})
+
+test('trendRatePoints 点映射列中心与百分比高度且零数据日跳过', () => {
+  const slots = [
+    { day: 'd0', cacheHit: 75, cacheMiss: 25 },
+    { day: 'd1', cacheHit: 0, cacheMiss: 0 },
+    { day: 'd2', cacheHit: 50, cacheMiss: 50 },
+  ]
+  const bars = [{ x: 10 }, { x: 20 }, { x: 30 }]
+  const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
+  const points = trendRatePoints(slots, bars, plotHeight)
+  assert.equal(points.length, 2)
+  assert.equal(points[0].day, 'd0')
+  assert.equal(points[0].x, 10)
+  approx(points[0].y, CHART_PAD.top + plotHeight - 0.75 * plotHeight)
+  assert.equal(points[1].day, 'd2')
+  assert.equal(points[1].x, 30)
+  approx(points[1].y, CHART_PAD.top + plotHeight - 0.5 * plotHeight)
+})
+
+test('smoothPath 空点集为空串单点为移动命令', () => {
+  assert.equal(smoothPath([]), '')
+  assert.equal(smoothPath([{ x: 1, y: 2 }]), 'M 1 2')
+})
+
+test('smoothPath 两点控制点取邻点差六分之一端点折返', () => {
+  const d = smoothPath([{ x: 0, y: 0 }, { x: 60, y: 30 }])
+  assert.equal(d, 'M 0 0 C 10 5, 50 25, 60 30')
+})
+
+test('smoothPath 三点后段取真实邻点', () => {
+  const d = smoothPath([{ x: 0, y: 0 }, { x: 60, y: 30 }, { x: 120, y: 0 }])
+  assert.equal(d, 'M 0 0 C 10 5, 40 30, 60 30 C 80 30, 110 5, 120 0')
+})
+
+// —— S8 模型 donut 与列表 ——
+
+test('donut 常量锁定视口与环几何', () => {
+  assert.equal(DONUT_VIEWBOX_SIZE, 200)
+  assert.equal(DONUT_CENTER_XY, 100)
+  assert.equal(DONUT_OUTER_RADIUS, 95)
+  assert.equal(DONUT_STROKE_WIDTH, 30)
+  assert.equal(DONUT_RADIUS, DONUT_OUTER_RADIUS - DONUT_STROKE_WIDTH / 2)
+  approx(DONUT_CIRCUMFERENCE, 2 * Math.PI * DONUT_RADIUS)
+})
+
+test('donutSegments 分段 dash 按 token 占比 offset 渲染序累加', () => {
+  const segments = donutSegments([{ model: 'a', tokens: 75 }, { model: 'b', tokens: 25 }], 100)
+  approx(segments[0].dash, DONUT_CIRCUMFERENCE * 0.75)
+  assert.equal(segments[0].offset, 0)
+  approx(segments[0].percent, 75)
+  approx(segments[1].dash, DONUT_CIRCUMFERENCE * 0.25)
+  approx(segments[1].offset, DONUT_CIRCUMFERENCE * 0.75)
+  approx(segments[0].dash + segments[1].dash, DONUT_CIRCUMFERENCE)
+})
+
+test('donutSegments 全零 total 回落下限防除零', () => {
+  const segments = donutSegments([{ model: 'a', tokens: 0 }], 0)
+  assert.equal(segments.length, 1)
+  assert.equal(segments[0].dash, 0)
+  assert.equal(segments[0].offset, 0)
+  assert.equal(segments[0].percent, 0)
+})
+
+test('groupStats 哨兵保留其他模型明细供展开与提示', () => {
+  const stats = {
+    models: [
+      { model: 'p/m1', tokens: 500 },
+      { model: 'p/m2', tokens: 400 },
+      { model: 'p/m3', tokens: 300 },
+      { model: 'p/m4', tokens: 200 },
+      { model: 'p/m5', tokens: 100 },
+      { model: 'p/m6', tokens: 50 },
+    ],
+    daily: [],
+  }
+  const grouped = groupStats(stats)
+  assert.deepEqual(grouped.models[5].items, [{ model: 'p/m6', tokens: 50 }])
+})
+
+test('groupStats 逐日保留其他明细映射供 tooltip', () => {
+  const stats = {
+    models: Array.from({ length: 6 }, (_, index) => ({ model: `m${index + 1}`, tokens: 70 - (index + 1) * 10 })),
+    daily: [{ day: 'd', total: 110, byModel: { m1: 50, m2: 40, m6: 20 } }],
+  }
+  const grouped = groupStats(stats)
+  assert.deepEqual(grouped.daily[0].byModel, { m1: 50, m2: 40, [OTHER_MODEL]: 20 })
+  assert.deepEqual(grouped.daily[0].otherByModel, { m6: 20 })
+})
+
+test('otherDetailItems 取哨兵明细无哨兵为空表', () => {
+  const withOther = [
+    { model: 'a', tokens: 9 },
+    { model: OTHER_MODEL, tokens: 3, items: [{ model: 'x', tokens: 2 }, { model: 'y', tokens: 1 }] },
+  ]
+  assert.deepEqual(otherDetailItems(withOther), [{ model: 'x', tokens: 2 }, { model: 'y', tokens: 1 }])
+  assert.deepEqual(otherDetailItems([{ model: 'a', tokens: 9 }]), [])
+})
+
+test('donut 分段可访问标签格式化名称数值与占比', () => {
+  assert.equal(modelSegmentLabel('p/m', 1234, 12.34), 'p/m: 1,234 (12.3%)')
 })
