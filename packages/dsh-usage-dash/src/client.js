@@ -161,6 +161,7 @@ const MESSAGES_ZH = {
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
   skippedSessions: '跳过 {n} 个无法读取的会话',
+  skippedSessionsShort: '跳过 {n} 个会话',
   'stats.counts': '{turns} 轮 · {steps} 步',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': '工具调用 {duration}',
@@ -283,6 +284,7 @@ const MESSAGES_EN = {
   trendTruncated: 'Too much data, showing only the latest part',
   recordFailures: '{n} records failed to write',
   skippedSessions: '{n} unreadable sessions skipped',
+  skippedSessionsShort: '{n} skipped',
   'stats.counts': '{turns} turns · {steps} steps',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': 'Tool call {duration}',
@@ -413,15 +415,6 @@ function minuteTickLabel(key) {
 
 function isEmptyRange(value) {
   return value.tokens === 0 && value.cacheHit === 0 && value.requests === 0 && value.turns === 0
-}
-
-// 状态行仅在回扫进行或异常存在时可见,空闲干净态不占版面
-function statusLineActive(status) {
-  if (!status) return false
-  return Boolean(status.running)
-    || Boolean(status.error)
-    || (status.skippedSessions ?? 0) > 0
-    || (status.recordFailures ?? 0) > 0
 }
 
 const toRankedModels = (totals) =>
@@ -1482,6 +1475,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.ud-status-fold{display:inline-flex;align-items:center;gap:4px;border:none;background:none;padding:0;font:inherit;font-size:12px;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.ud-status-fold:hover{color:var(--dsw-alias-label-secondary)}
+.ud-status-fold-caret{font-size:10px;line-height:1}
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
@@ -2300,9 +2296,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addRule')))
     }
 
-    function StatusLine({ status, t = defaultT }) {
-      if (!statusLineActive(status)) return null
+    // 无法读取是日志固有损伤,提示用中性色不算错误:默认折叠为紧凑标识,展开才显示完整说明
+    function SkippedChip({ count, open, onToggle, t = defaultT }) {
+      return h('button', {
+        type: 'button', className: 'ud-status-fold', 'aria-expanded': open,
+        onClick: onToggle,
+      },
+      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
+      t('skippedSessionsShort', { n: count }))
+    }
+
+    function StatusLine({ status, showSkipped, t = defaultT }) {
       const running = status.running === true
+      const skippedVisible = (status.skippedSessions ?? 0) > 0 && showSkipped === true
+      if (!running && !status.error && (status.recordFailures ?? 0) === 0 && !skippedVisible) return null
       const progress = running && status.total > 0
         ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
         : 0
@@ -2314,10 +2321,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
           : null,
         status.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
-        // 无法读取是日志固有损伤,常态提示用中性色,不算错误
-        (status.skippedSessions ?? 0) > 0
-          ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
-          : null,
+        skippedVisible ? h('span', null, t('skippedSessions', { n: status.skippedSessions })) : null,
         (status.recordFailures ?? 0) > 0
           ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
           : null)
@@ -2372,6 +2376,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [pointStatus, setPointStatus] = useState('idle')
       const [fetchTick, setFetchTick] = useState(0)
       const [status, setStatus] = useState(null)
+      const [skippedOpen, setSkippedOpen] = useState(false)
       const statusMachineRef = useRef(null)
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
@@ -2583,9 +2588,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                       }))
                   : null),
           h('div', { className: 'ud-toolbar-side' },
+            (status?.skippedSessions ?? 0) > 0
+              ? h(SkippedChip, { count: status.skippedSessions, open: skippedOpen, onToggle: () => setSkippedOpen((v) => !v), t })
+              : null,
             h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: refresh }, t('refresh')),
             h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t }))),
-        h(StatusLine, { status, t }),
+        h(StatusLine, { status, showSkipped: skippedOpen, t }),
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,

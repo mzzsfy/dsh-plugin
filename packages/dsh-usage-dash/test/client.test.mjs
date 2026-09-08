@@ -73,7 +73,6 @@ const {
   resolveMinuteRange,
   shortDay,
   smoothPath,
-  statusLineActive,
   tipPlace,
   translateWith,
   trimSlots,
@@ -202,15 +201,6 @@ test('createTranslator 与纯查表同构', () => {
   assert.equal(enT('hourPreset.15d'), '15 days')
   assert.equal(enT('minutePreset.7d'), '7 days')
   assert.equal(enT('missing.key'), 'missing.key')
-})
-
-test('状态行仅在回扫进行或异常存在时可见', () => {
-  assert.equal(statusLineActive(null), false)
-  assert.equal(statusLineActive({ running: false, skippedSessions: 0, recordFailures: 0 }), false)
-  assert.equal(statusLineActive({ running: true, total: 3, done: 1 }), true)
-  assert.equal(statusLineActive({ running: false, error: 'boom' }), true)
-  assert.equal(statusLineActive({ running: false, skippedSessions: 2 }), true)
-  assert.equal(statusLineActive({ running: false, recordFailures: 1 }), true)
 })
 
 test('zh/en 词典键集完全一致', () => {
