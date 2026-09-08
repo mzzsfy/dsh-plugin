@@ -353,10 +353,10 @@ test('buildCostItem 开关关恒为 null,组数组不受 rules 影响', () => {
   ])
 })
 
-test('buildCostItem routes 缺席按通配规则匹配,通配货币空则不带符号', () => {
-  // 无 routes → model '*',500000 × 1 / 每百万 = 0.5,货币 '' → 无符号
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ 0.50')
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), 'Cost ≈ 0.50')
+test('buildCostItem routes 缺席按通配规则匹配,符号取全局口径(首个非空货币)', () => {
+  // 无 routes → model '*',500000 × 1 / 每百万 = 0.5;命中通配(货币空),符号取表内首个非空 ¥
+  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥0.50')
+  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), 'Cost ≈ ¥0.50')
 })
 
 test('buildCostItem routes 首个 model 精确规则优先于通配', () => {
@@ -384,15 +384,15 @@ test('buildCostItem usage 缺席为 null', () => {
   assert.equal(buildCostItem(undefined, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), null)
 })
 
-test('buildStatsGroups 开+有费用在 Token 组后追加费用组,组内其余逐字节不变', () => {
-  // USAGE 无 routes → 通配价 input 1:1000 × 1 / 每百万 = 0.001 → 四位小数微观格式
+test('buildCostItem buildStatsGroups 费用组符号同全局口径', () => {
+  // USAGE 无 routes → 通配价 input 1:1000 × 1 / 每百万 = 0.001 → 四位小数微观格式;符号取首个非空 ¥
   assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_COST_ON, zhT, COST_RULES), [
     '2 轮 · 3 步',
     'LLM 1.5秒 · 工具调用 2秒',
     '首 token 平均 0.2秒 · 63 tok/s',
     '缓存命中 80%',
     '输入 5K tok · 输出 500 tok',
-    '费用 ≈ 0.0010',
+    '费用 ≈ ¥0.0010',
   ])
 })
 

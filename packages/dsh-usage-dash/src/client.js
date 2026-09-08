@@ -1022,22 +1022,13 @@ function aggregateCurrencyOf(rules) {
   return found ? found.currency : ''
 }
 
-// 与 firstMatchingPrice 同一选择序,返回整条规则供货币读取(展示层专用)
+// 与 firstMatchingPrice 同一选择序,返回整条规则(展示层专用)
 const firstMatchingRule = (rules, date, modelFilter) => {
   for (const rule of rules) {
     if (!isRuleShaped(rule) || !modelFilter(rule)) continue
     if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule
   }
   return null
-}
-
-// 命中规则的 currency;无命中或非法形状为空串
-function matchedCurrency(rules, model, timestamp) {
-  const date = toLocalDate(timestamp)
-  if (!Array.isArray(rules) || !date || typeof model !== 'string') return ''
-  const rule = firstMatchingRule(rules, date, (item) => item.model === model)
-    ?? firstMatchingRule(rules, date, (item) => item.model === MODEL_WILDCARD)
-  return typeof rule?.currency === 'string' ? rule.currency : ''
 }
 
 // 投影四桶 → 计价桶形:投影的 uncachedInputTokens 即计价 inputTokens(host 存储行同口径)
@@ -1055,7 +1046,7 @@ function buildCostItem(usage, rules, prefs, t, now = new Date()) {
   const model = usage.routes?.[0]?.model ?? MODEL_WILDCARD
   const price = matchPrice(rules, model, now)
   if (!price) return COST_PLACEHOLDER
-  return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), matchedCurrency(rules, model, now)) })
+  return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), aggregateCurrencyOf(rules)) })
 }
 
 // 历史费用口径标注:估算说明,未计价小时桶计数为正时追加后缀
@@ -1892,7 +1883,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const model = turnModelOf(matched)
       const now = new Date()
       const price = pricingRules ? matchPrice(pricingRules, model, now) : null
-      const currency = pricingRules ? matchedCurrency(pricingRules, model, now) : ''
+      const currency = pricingRules ? aggregateCurrencyOf(pricingRules) : ''
       return h('div', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
         buildTurnCostLine(t, matched, price, currency))
     })
