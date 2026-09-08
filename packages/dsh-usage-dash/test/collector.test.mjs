@@ -313,6 +313,8 @@ test('采集侧 store 失败计入 recordFailures 且不抛断采集', async () 
   await tick()
   await tick()
   assert.equal(collector.status().recordFailures, 2)
+  assert.equal(collector.status().log.length, 2)
+  assert.ok(collector.status().log.every((entry) => entry.kind === 'record' && typeof entry.time === 'number'))
   assert.equal(store.samples.length, 0)
 })
 
@@ -473,6 +475,9 @@ test('回扫:单会话失败不中断整轮且不进游标', async () => {
   assert.equal(collector.status().error, undefined)
   assert.equal(collector.status().skippedSessions, 1)
   assert.equal(collector.status().done, 2)
+  assert.equal(collector.status().log.length, 1)
+  assert.equal(collector.status().log[0].kind, 'skipped')
+  assert.ok(collector.status().log[0].detail.startsWith('s2'))
 })
 
 test('回扫:record 失败使会话失败并保留游标重试机会', async () => {
@@ -590,6 +595,7 @@ test('status() 返回快照,外部修改不影响内部状态', async () => {
     error: undefined,
     recordFailures: 0,
     skippedSessions: 0,
+    log: [],
   })
   await collector.backfill(persistence, fakeSessions())
   const snapshot = collector.status()

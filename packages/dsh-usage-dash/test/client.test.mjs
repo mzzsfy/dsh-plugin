@@ -58,6 +58,7 @@ const {
   hourTickLabel,
   indexOfDay,
   isEmptyRange,
+  logTimeOf,
   matchPrice,
   maxSlotsFor,
   minuteTickLabel,
@@ -164,6 +165,11 @@ test('trim 超上限裁最旧且恰好达上限不裁', () => {
   const slots = ['1', '2', '3', '4', '5', '6'].map((day) => ({ day }))
   assert.deepEqual(trimSlots(slots, 3).map((slot) => slot.day), ['4', '5', '6'])
   assert.equal(trimSlots(slots, 6), slots)
+})
+
+test('日志条目时刻补零为 HH:mm:ss', () => {
+  assert.equal(logTimeOf(new Date(2026, 8, 8, 9, 3, 7).getTime()), '09:03:07')
+  assert.equal(logTimeOf(new Date(2026, 8, 8, 19, 13, 47).getTime()), '19:13:47')
 })
 
 test('信封解析成功透传 value', () => {

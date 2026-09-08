@@ -9,6 +9,7 @@ const UNKNOWN_SESSION_ID = '(unknown-session)'
 const SEQ_UNKNOWN = -1
 const DEFAULT_BACKFILL_CONCURRENCY = 4
 const MARK_BATCH = 32
+const SCAN_LOG_MAX_ENTRIES = 200
 
 // 会话内单 pass 折叠:跟踪每个 (turn,step) 槽的最新报告,只把首次发射交 store
 export class UsageFold {
@@ -110,6 +111,7 @@ export class UsageCollector {
       error: undefined,
       recordFailures: 0,
       skippedSessions: 0,
+      log: [],
     }
     // error 保留给采集器自身故障;单会话读取失败走 skippedSessions 跳过计数
   }
@@ -117,7 +119,14 @@ export class UsageCollector {
   #state
 
   status() {
-    return { ...this.#state }
+    return { ...this.#state, log: [...this.#state.log] }
+  }
+
+  // 扫描异常日志:供面板明细展示,超上限丢最旧
+  pushLog(kind, detail) {
+    const log = this.#state.log
+    log.push({ time: Date.now(), kind, detail })
+    if (log.length > SCAN_LOG_MAX_ENTRIES) log.splice(0, log.length - SCAN_LOG_MAX_ENTRIES)
   }
 
   get running() {
@@ -148,8 +157,9 @@ export class UsageCollector {
       if (!sample) return
       // turn 标记落合成行不归因;其余样本先取本调用 source,再取会话路由
       if (!sample.turn) sample.model = fromSource ?? this.routeFor(sid)
-      void this.store.record(sample).catch(() => {
+      void this.store.record(sample).catch((error) => {
         this.#state.recordFailures += 1
+        this.pushLog('record', error?.message ?? String(error))
       })
     })
     // 释放销毁会话的内存桶,防长跑宿主按会话数累积
@@ -192,8 +202,9 @@ export class UsageCollector {
       const batch = [...this.liveMarkBuffer.entries()]
       this.liveMarkBuffer.clear()
       if (batch.length > 0) {
-        void this.store.markLiveSequences(batch).catch(() => {
+        void this.store.markLiveSequences(batch).catch((error) => {
           this.#state.recordFailures += 1
+          this.pushLog('record', error?.message ?? String(error))
         })
       }
     })
@@ -253,6 +264,7 @@ export class UsageCollector {
       this.#state.total = targets.length
       this.#state.done = 0
       this.#state.skippedSessions = 0
+      this.#state.log = []
       const workerCount = Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
       let next = 0
       const completed = []
@@ -310,9 +322,10 @@ export class UsageCollector {
             completed.push(header.id)
             if (completed.length >= MARK_BATCH) await flushCompleted()
             this.#state.scannedSessions += 1
-          } catch {
+          } catch (error) {
             // 读取失败(如宿主报会话日志损坏)按定案跳过:计数并继续,不中断回扫、不挂错误横幅
             this.#state.skippedSessions += 1
+            this.pushLog('skipped', error?.message ? `${header.id} ${error.message}` : header.id)
           } finally {
             this.#state.done += 1
           }

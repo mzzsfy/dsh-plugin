@@ -161,8 +161,10 @@ const MESSAGES_ZH = {
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
   skippedSessions: '跳过 {n} 个无法读取的会话',
-  skippedSessionsShort: '跳过 {n}',
-  recordFailuresShort: '写入失败 {n}',
+  anomalyLog: '扫描异常日志',
+  logKindSkipped: '跳过会话',
+  logKindRecord: '写入失败',
+  logEmpty: '暂无异常明细',
   'stats.counts': '{turns} 轮 · {steps} 步',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': '工具调用 {duration}',
@@ -285,8 +287,10 @@ const MESSAGES_EN = {
   trendTruncated: 'Too much data, showing only the latest part',
   recordFailures: '{n} records failed to write',
   skippedSessions: '{n} unreadable sessions skipped',
-  skippedSessionsShort: '{n} skipped',
-  recordFailuresShort: '{n} failed',
+  anomalyLog: 'Scan anomaly log',
+  logKindSkipped: 'skipped',
+  logKindRecord: 'write failed',
+  logEmpty: 'No anomaly details',
   'stats.counts': '{turns} turns · {steps} steps',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': 'Tool call {duration}',
@@ -417,6 +421,13 @@ function minuteTickLabel(key) {
 
 function isEmptyRange(value) {
   return value.tokens === 0 && value.cacheHit === 0 && value.requests === 0 && value.turns === 0
+}
+
+// 日志条目时刻仅显示当日时分秒
+function logTimeOf(ms) {
+  const date = new Date(ms)
+  const part = (value) => String(value).padStart(2, '0')
+  return `${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`
 }
 
 const toRankedModels = (totals) =>
@@ -1478,12 +1489,19 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-status-fold{display:inline-flex;align-items:center;gap:4px;border:none;background:none;padding:0;font:inherit;font-size:12px;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.ud-status-fold{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;border:none;background:none;padding:2px 4px;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer}
 .ud-status-fold:hover{color:var(--dsw-alias-label-secondary)}
-.ud-status-fold-caret{font-size:10px;line-height:1}
+.ud-status-fold-caret{line-height:1}
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
+.ud-log{width:100%;margin-top:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:8px 10px;display:flex;flex-direction:column;gap:3px;max-height:200px;overflow-y:auto;font-size:11px;line-height:1.5}
+.ud-log-summary{display:flex;gap:12px;flex-wrap:wrap;color:var(--dsw-alias-label-tertiary);font-size:12px;padding-bottom:4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ud-log-line{display:flex;gap:8px;align-items:baseline;min-width:0}
+.ud-log-time{flex:none;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);opacity:.7}
+.ud-log-kind{flex:none}
+.ud-log-err{color:var(--dsw-alias-state-error-primary)}
+.ud-log-detail{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ud-cards{display:grid;grid-template-columns:1.35fr 1fr 1fr;gap:10px}
 @media (max-width:560px){.ud-cards{grid-template-columns:1fr 1fr}}
 @media (max-width:380px){.ud-cards{grid-template-columns:1fr}}
@@ -2299,24 +2317,21 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addRule')))
     }
 
-    // 无法读取与写入失败是扫描固有损伤提示:默认折叠为紧凑标识,展开才显示完整明细
-    function AnomalyChip({ status, open, onToggle, t = defaultT }) {
-      const parts = []
-      if ((status.skippedSessions ?? 0) > 0) parts.push(t('skippedSessionsShort', { n: status.skippedSessions }))
-      if ((status.recordFailures ?? 0) > 0) parts.push(t('recordFailuresShort', { n: status.recordFailures }))
+    // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示
+    function AnomalyChip({ open, onToggle, t = defaultT }) {
       return h('button', {
         type: 'button', className: 'ud-status-fold', 'aria-expanded': open,
+        'aria-label': t('anomalyLog'), title: t('anomalyLog'),
         onClick: onToggle,
       },
-      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
-      parts.join(' · '))
+      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'))
     }
 
-    function StatusLine({ status, showDetails, t = defaultT }) {
+    // 回扫进度与采集错误是运行状态,常显;异常明细走日志块
+    function StatusRow({ status, t = defaultT }) {
       if (!status) return null
       const running = status.running === true
-      const detailVisible = showDetails === true
-      if (!running && !status.error && !detailVisible) return null
+      if (!running && !status.error) return null
       const progress = running && status.total > 0
         ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
         : 0
@@ -2327,13 +2342,26 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               h('span', { className: 'ud-status-track' },
                 h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
           : null,
-        status.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
-        detailVisible && (status.skippedSessions ?? 0) > 0
-          ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
-          : null,
-        detailVisible && (status.recordFailures ?? 0) > 0
-          ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
-          : null)
+        status.error ? h('span', { className: 'ud-status-err' }, status.error) : null)
+    }
+
+    // 展开后的异常日志块:汇总行 + 逐条明细(时间/类型/内容)
+    function AnomalyLog({ status, t = defaultT }) {
+      const lines = status.log ?? []
+      return h('div', { className: 'ud-log' },
+        h('div', { className: 'ud-log-summary' },
+          (status.skippedSessions ?? 0) > 0
+            ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+            : null,
+          (status.recordFailures ?? 0) > 0
+            ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
+            : null,
+          lines.length === 0 ? h('span', null, t('logEmpty')) : null),
+        lines.map((entry, index) => h('div', { className: 'ud-log-line', key: index },
+          h('span', { className: 'ud-log-time' }, logTimeOf(entry.time)),
+          h('span', { className: cx('ud-log-kind', entry.kind === 'record' && 'ud-log-err') },
+            entry.kind === 'record' ? t('logKindRecord') : t('logKindSkipped')),
+          h('span', { className: 'ud-log-detail', title: entry.detail }, entry.detail))))
     }
 
     function RebuildButton({ machineRef, busy, onError, t = defaultT }) {
@@ -2600,11 +2628,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     : null)),
           h('div', { className: 'ud-toolbar-side' },
             hasAnomalies
-              ? h(AnomalyChip, { status, open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t })
+              ? h(AnomalyChip, { open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t })
               : null,
             h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: refresh }, t('refresh')),
             h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t }))),
-        h(StatusLine, { status, showDetails: detailsOpen, t }),
+        h(StatusRow, { status, t }),
+        detailsOpen && hasAnomalies ? h(AnomalyLog, { status, t }) : null,
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
