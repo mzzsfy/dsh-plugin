@@ -85,6 +85,11 @@ function trimSlots(slots, max) {
   return slots.length > max ? slots.slice(-max) : slots
 }
 
+// 时/分挡位表存在同 id(如 '24h'),点数据缓存命中须视图与挡位双匹配,防跨视图误用他端点数据
+function pointStatsMatches(cached, view, presetId) {
+  return !!cached && cached.view === view && cached.preset === presetId
+}
+
 const DEFAULT_ERROR_CODE = 'error'
 const DEFAULT_ERROR_MESSAGE = 'usage api error'
 const envelopeFailure = (code, message) => ({ ok: false, code, message })
@@ -2247,7 +2252,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
       useEffect(() => {
         if (view === 'day') return
-        if (pointStats && pointStats.preset === presetId) return
+        if (pointStatsMatches(pointStats, view, presetId)) return
         const request = view === 'hour'
           ? resolveHourRange(presetId, new Date())
           : resolveMinuteRange(presetId, new Date())
@@ -2262,7 +2267,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           }
           setError('')
           setPointStatus('ok')
-          setPointStats({ preset: presetId, value: result.value })
+          setPointStats({ view, preset: presetId, value: result.value })
         })
       }, [view, presetId, fetchTick])
 
@@ -2330,7 +2335,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }, [])
 
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
-      const pointView = pointStats && pointStats.preset === presetId ? pointStats.value : null
+      const pointView = pointStatsMatches(pointStats, view, presetId) ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
       const colorFor = useMemo(() => colorForModel(stats ? stats.models : []), [stats])
 

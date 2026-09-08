@@ -45,6 +45,7 @@ const {
   daysInRange,
   defaultPricingRule,
   donutSegments,
+  pointStatsMatches,
   formatCompact,
   formatCost,
   formatDuration,
@@ -127,6 +128,27 @@ test('预设定义表覆盖三视图', () => {
   assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
   assert.deepEqual(HOUR_PRESETS, ['24h', '72h', '5d', '15d'])
   assert.deepEqual(MINUTE_PRESETS, ['60m', '6h', '24h', '7d'])
+})
+
+test('时/分挡位文案键逐挡齐备,含跨表同 id 挡位', () => {
+  // Given 时/分挡位表存在同 id('24h') When 逐挡查词典 Then 两语言均有对应键,漏配即回退键名
+  for (const id of HOUR_PRESETS) {
+    assert.notEqual(MESSAGES_ZH[`hourPreset.${id}`], undefined, `zh hourPreset.${id}`)
+    assert.notEqual(MESSAGES_EN[`hourPreset.${id}`], undefined, `en hourPreset.${id}`)
+  }
+  for (const id of MINUTE_PRESETS) {
+    assert.notEqual(MESSAGES_ZH[`minutePreset.${id}`], undefined, `zh minutePreset.${id}`)
+    assert.notEqual(MESSAGES_EN[`minutePreset.${id}`], undefined, `en minutePreset.${id}`)
+  }
+})
+
+test('pointStats 缓存命中须视图与挡位双匹配', () => {
+  // Given 同挡位 id 跨视图('24h') When 判定缓存命中 Then 视图不同即不命中,防误用他端点数据
+  const cached = { view: 'hour', preset: '24h', value: { daily: [] } }
+  assert.equal(pointStatsMatches(cached, 'hour', '24h'), true)
+  assert.equal(pointStatsMatches(cached, 'minute', '24h'), false)
+  assert.equal(pointStatsMatches(cached, 'hour', '72h'), false)
+  assert.equal(pointStatsMatches(null, 'hour', '24h'), false)
 })
 
 test('每视图渲染上限等于闭区间桶数', () => {
