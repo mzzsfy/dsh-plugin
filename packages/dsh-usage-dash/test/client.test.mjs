@@ -104,7 +104,7 @@ test('day 90 天预设起点回卷上年', () => {
 
 test('hour 预设 now-N 舍入到整点桶起点', () => {
   assert.deepEqual(resolveHourRange('24h', NOW), { from: '2026-03-14T14', to: '2026-03-15T14' })
-  assert.deepEqual(resolveHourRange('72h', NOW), { from: '2026-03-12T14', to: '2026-03-15T14' })
+  assert.deepEqual(resolveHourRange('3d', NOW), { from: '2026-03-12T14', to: '2026-03-15T14' })
 })
 
 test('hour 预设跨日且窗口起点落整点', () => {
@@ -124,7 +124,7 @@ test('minute 预设整桶边界不再回退', () => {
 
 test('预设定义表覆盖三视图', () => {
   assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
-  assert.deepEqual(HOUR_PRESETS, ['24h', '72h', '5d', '15d'])
+  assert.deepEqual(HOUR_PRESETS, ['24h', '3d', '7d', '15d'])
   assert.deepEqual(MINUTE_PRESETS, ['60m', '6h', '24h', '7d'])
 })
 
@@ -145,15 +145,15 @@ test('pointStats 缓存命中须视图与挡位双匹配', () => {
   const cached = { view: 'hour', preset: '24h', value: { daily: [] } }
   assert.equal(pointStatsMatches(cached, 'hour', '24h'), true)
   assert.equal(pointStatsMatches(cached, 'minute', '24h'), false)
-  assert.equal(pointStatsMatches(cached, 'hour', '72h'), false)
+  assert.equal(pointStatsMatches(cached, 'hour', '3d'), false)
   assert.equal(pointStatsMatches(null, 'hour', '24h'), false)
 })
 
 test('每视图渲染上限等于闭区间桶数', () => {
   assert.equal(maxSlotsFor('day', '90'), DAY_MAX_SLOTS)
   assert.equal(maxSlotsFor('hour', '24h'), 25)
-  assert.equal(maxSlotsFor('hour', '72h'), 73)
-  assert.equal(maxSlotsFor('hour', '5d'), 121)
+  assert.equal(maxSlotsFor('hour', '3d'), 73)
+  assert.equal(maxSlotsFor('hour', '7d'), 169)
   assert.equal(maxSlotsFor('hour', '15d'), 361)
   assert.equal(maxSlotsFor('minute', '60m'), 7)
   assert.equal(maxSlotsFor('minute', '6h'), 37)
@@ -199,8 +199,8 @@ test('translateWith zh/en 占位替换与缺键回退键名', () => {
 test('createTranslator 与纯查表同构', () => {
   const enT = createTranslator(MESSAGES_EN)
   assert.equal(enT('rangeCustom'), 'Custom')
-  assert.equal(enT('hourPreset.15d'), 'Last 15 days')
-  assert.equal(enT('minutePreset.7d'), 'Last 7 days')
+  assert.equal(enT('hourPreset.15d'), '15 days')
+  assert.equal(enT('minutePreset.7d'), '7 days')
   assert.equal(enT('missing.key'), 'missing.key')
 })
 

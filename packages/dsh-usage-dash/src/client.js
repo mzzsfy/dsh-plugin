@@ -5,10 +5,10 @@
 // 顶层零词法声明(经典 script 全局词法环境跨 bundle 共享,顶层同名即整脚本拒载);测试经书挡剥壳求值纯函数区。
 
 const DAY_PRESETS = ['7', '30', '90']
-const HOUR_PRESETS = ['24h', '72h', '5d', '15d']
+const HOUR_PRESETS = ['24h', '3d', '7d', '15d']
 const MINUTE_PRESETS = ['60m', '6h', '24h', '7d']
 
-const HOUR_PRESET_HOURS = { '24h': 24, '72h': 72, '5d': 5 * 24, '15d': 15 * 24 }
+const HOUR_PRESET_HOURS = { '24h': 24, '3d': 3 * 24, '7d': 7 * 24, '15d': 15 * 24 }
 const MINUTE_PRESET_MINUTES = { '60m': 60, '6h': 6 * 60, '24h': 24 * 60, '7d': 7 * 24 * 60 }
 
 const DEFAULT_RANGE = '30'
@@ -109,9 +109,9 @@ function parseEnvelope(json) {
 const MESSAGES_ZH = {
   nav: '使用统计',
   range: '时间范围',
-  'rangePreset.7': '最近 7 天',
-  'rangePreset.30': '最近 30 天',
-  'rangePreset.90': '最近 90 天',
+  'rangePreset.7': '7 天',
+  'rangePreset.30': '30 天',
+  'rangePreset.90': '90 天',
   rangeCustom: '自定义',
   from: '开始日期',
   to: '结束日期',
@@ -148,14 +148,14 @@ const MESSAGES_ZH = {
   rebuildConfirm: '确认重建',
   hourTrend: '按小时 Token 趋势',
   minuteTrend: '按分钟 Token 趋势',
-  'hourPreset.24h': '最近 24 小时',
-  'hourPreset.72h': '最近 72 小时',
-  'hourPreset.5d': '最近 5 天',
-  'hourPreset.15d': '最近 15 天',
-  'minutePreset.60m': '最近 60 分钟',
-  'minutePreset.6h': '最近 6 小时',
-  'minutePreset.24h': '最近 24 小时',
-  'minutePreset.7d': '最近 7 天',
+  'hourPreset.24h': '24 小时',
+  'hourPreset.3d': '3 天',
+  'hourPreset.7d': '7 天',
+  'hourPreset.15d': '15 天',
+  'minutePreset.60m': '60 分钟',
+  'minutePreset.6h': '6 小时',
+  'minutePreset.24h': '24 小时',
+  'minutePreset.7d': '7 天',
   trendLimitedHour: '数据量过大,仅显示最近 {n} 小时',
   trendLimitedMinute: '数据量过大,仅显示最近 {n} 分钟',
   trendTruncated: '数据量过大,仅显示最近部分',
@@ -231,9 +231,9 @@ const MESSAGES_ZH = {
 const MESSAGES_EN = {
   nav: 'Usage',
   range: 'Time range',
-  'rangePreset.7': 'Last 7 days',
-  'rangePreset.30': 'Last 30 days',
-  'rangePreset.90': 'Last 90 days',
+  'rangePreset.7': '7 days',
+  'rangePreset.30': '30 days',
+  'rangePreset.90': '90 days',
   rangeCustom: 'Custom',
   from: 'From',
   to: 'To',
@@ -270,14 +270,14 @@ const MESSAGES_EN = {
   rebuildConfirm: 'Confirm rebuild',
   hourTrend: 'Hourly token trend',
   minuteTrend: 'Per-minute token trend',
-  'hourPreset.24h': 'Last 24 hours',
-  'hourPreset.72h': 'Last 72 hours',
-  'hourPreset.5d': 'Last 5 days',
-  'hourPreset.15d': 'Last 15 days',
-  'minutePreset.60m': 'Last 60 minutes',
-  'minutePreset.6h': 'Last 6 hours',
-  'minutePreset.24h': 'Last 24 hours',
-  'minutePreset.7d': 'Last 7 days',
+  'hourPreset.24h': '24 hours',
+  'hourPreset.3d': '3 days',
+  'hourPreset.7d': '7 days',
+  'hourPreset.15d': '15 days',
+  'minutePreset.60m': '60 minutes',
+  'minutePreset.6h': '6 hours',
+  'minutePreset.24h': '24 hours',
+  'minutePreset.7d': '7 days',
   trendLimitedHour: 'Too much data, showing only the last {n} hours',
   trendLimitedMinute: 'Too much data, showing only the last {n} minutes',
   trendTruncated: 'Too much data, showing only the latest part',
