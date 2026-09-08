@@ -1417,6 +1417,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-input{border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:12px;padding:4px 6px;min-width:0;width:100%;box-sizing:border-box}
 .ud-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 .ud-price-grid .ud-input{text-align:right}
+.ud-price-input{position:relative;display:block}
+.ud-price-input .ud-input{padding-left:20px}
+.ud-price-currency{position:absolute;left:7px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--dsw-alias-label-tertiary);pointer-events:none}
 .ud-unit-note{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-pricing-actions{display:flex;align-items:center;gap:8px}
 .ud-rule-add{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;cursor:pointer}
@@ -2058,6 +2061,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         rules.map((rule, index) => h(PricingRuleCard, {
           key: index,
           rule,
+          currency,
           errors,
           pathPrefix: `${index}.`,
           t,
