@@ -113,7 +113,6 @@ const MESSAGES_ZH = {
   loading: '加载中',
   tokens: 'Tokens 用量',
   tokensHint: '服务商总口径:未缓存输入 + 输出 + 缓存命中 token',
-  cachedTokens: '缓存命中',
   sessions: '会话数量',
   requests: '请求数量',
   activeDays: '活跃天数',
@@ -176,7 +175,6 @@ const MESSAGES_ZH = {
   pricingModel: '模型',
   pricingModelPlaceholder: 'provider/model 或 *',
   pricingCurrency: '货币',
-  pricingCurrencyNone: '空',
   pricingUnit: '每百万 token',
   priceInput: '输入',
   priceOutput: '输出',
@@ -211,7 +209,6 @@ const MESSAGES_EN = {
   loading: 'Loading',
   tokens: 'Token usage',
   tokensHint: 'Provider total: uncached input + output + cache-read tokens',
-  cachedTokens: 'Cache hit',
   sessions: 'Sessions',
   requests: 'Requests',
   activeDays: 'Active days',
@@ -274,7 +271,6 @@ const MESSAGES_EN = {
   pricingModel: 'Model',
   pricingModelPlaceholder: 'provider/model or *',
   pricingCurrency: 'Currency',
-  pricingCurrencyNone: 'None',
   pricingUnit: 'per million tokens',
   priceInput: 'Input',
   priceOutput: 'Output',
@@ -885,7 +881,7 @@ function createStatsLineState(storage) {
 // 语义逐条对齐宿主模块:本地时区取 Date 本地分量,匹配只读遍历入参规则;
 // 零填充与 ISO 日串格式化复用本文件既有同义部件(pad/formatDate)
 const UNIT_PER_MILLION = 'perMillion'
-const CURRENCIES = ['¥', '$', '']
+const CURRENCIES = ['¥', '$']
 const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const TOKENS_PER_MILLION = 1000 * 1000
 
@@ -1326,6 +1322,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 @media (max-width:380px){.ud-cards{grid-template-columns:1fr}}
 .ud-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:12px 14px;min-width:0}
 .ud-card-head{display:flex;align-items:center;gap:6px}
+.ud-card-cost{margin-left:auto;font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-card-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
 .ud-card-label{font-size:13px;color:var(--dsw-alias-label-secondary)}
 .ud-card-value{font-size:${FIT_MAX_SIZE}px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
@@ -1460,25 +1457,26 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return h('div', { className: 'ud-card-value', ref }, children)
     }
 
-    function Card({ icon, label, hint, children }) {
+    function Card({ icon, label, hint, head, children }) {
       const lines = Array.isArray(children) ? children : [children]
       return h('div', { className: 'ud-card', title: hint },
         h('div', { className: 'ud-card-head' },
           h('span', { className: 'ud-card-icon' }, h(Icon, { paths: icon })),
-          h('span', { className: 'ud-card-label' }, label)),
+          h('span', { className: 'ud-card-label' }, label),
+          head ?? null),
         ...lines)
     }
 
     function StatCards({ stats, costCurrency = '', t = defaultT }) {
       return h('div', { className: 'ud-cards' },
-        h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint') },
-          h(FitText, null, formatTokens(stats.tokens)),
-          stats.cost !== undefined
+        h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint'),
+          head: stats.cost !== undefined
             ? h('span', {
-                className: 'ud-card-sub',
+                className: 'ud-card-cost',
                 title: costTitleText(t, stats.unpriced ?? 0),
               }, `≈ ${formatCost(stats.cost, costCurrency)}`)
-            : null),
+            : null },
+          h(FitText, null, formatTokens(stats.tokens))),
         h(Card, { key: 'turns', icon: ICONS.sessions, label: t('sessions') },
           h(FitText, null, String(stats.turns))),
         h(Card, { key: 'requests', icon: ICONS.requests, label: t('requests') },
@@ -1490,8 +1488,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('span', { className: 'ud-card-sub' }, providerOf(stats.topModel)))
             : h('div', { className: 'ud-card-value' }, '—')),
         h(Card, { key: 'cache', icon: ICONS.rate, label: t('cacheRate'), hint: t('cacheRateHint') },
-          h(FitText, null, cacheRateText(stats.cacheHit, stats.cacheMiss)),
-          h('span', { className: 'ud-card-sub' }, `${formatCompact(stats.cacheHit)} ${t('cachedTokens')}`)),
+          h(FitText, null, cacheRateText(stats.cacheHit, stats.cacheMiss))),
         h(Card, { key: 'days', icon: ICONS.days, label: t('activeDays') },
           h(FitText, null, String(stats.activeDays))))
     }
@@ -1986,9 +1983,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             setPhase(PRICING_STATE_UNAVAILABLE)
             return
           }
-          // 打开即按首个非空货币归一显示,整表状态与全局货币恒一致
+          // 打开即按首个非空货币归一显示(无非空则回落首档),整表状态与全局货币恒一致
           const loaded = copyRules(value.rules)
-          const unified = aggregateCurrencyOf(loaded)
+          const unified = aggregateCurrencyOf(loaded) || CURRENCIES[0]
           setCurrency(unified)
           setRules(applyCurrencyToRules(loaded, unified))
           setPhase(PRICING_STATE_READY)
@@ -2036,14 +2033,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
           h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
             CURRENCIES.map((symbol) => h('button', {
-              key: symbol || 'none', type: 'button',
+              key: symbol, type: 'button',
               className: cx('ud-seg-item', currency === symbol && 'ud-seg-item--on'),
               'aria-pressed': currency === symbol,
               onClick: () => {
                 setCurrency(symbol)
                 setRules((prev) => applyCurrencyToRules(prev, symbol))
               },
-            }, symbol === '' ? t('pricingCurrencyNone') : symbol))),
+            }, symbol))),
           h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
           h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save'))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
