@@ -600,6 +600,38 @@ test('自动归档评估:locate 缺失(第三方后端)的会话不参与归档'
   }
 })
 
+test('自动归档评估:subagent 内部会话不参与归档(官方主列表不收录 subagent)', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-eval-subagent-'))
+  try {
+    const plainPath = path.join(dir, 'plain.jsonl')
+    const childPath = path.join(dir, 'child.jsonl')
+    await writeFile(plainPath, '{"header":1}\n{"event":0}\n')
+    await writeFile(childPath, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(plainPath, stale / 1000, stale / 1000)
+    await utimes(childPath, stale / 1000, stale / 1000)
+    const cwd = 'C:\\x'
+    const headers = [
+      { id: 'plain', cwd, createdAt: stale },
+      { id: 'child', cwd, createdAt: stale, origin: 'subagent', parentSession: 'parent' },
+    ]
+    const { eventHandlers, registry } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      sessionPersistence: {
+        locate: (header) => ({ path: header.id === 'plain' ? plainPath : childPath }),
+      },
+    })
+    eventHandlers['session/created']({ header: { id: 'trigger', cwd } })
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['plain'], 'subagent 会话永不入选归档')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('启动评估:settings 就绪后全量归档超期会话,不限于单工作区', skipMissingDeps, async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'sm-startup-'))
   try {

@@ -250,6 +250,9 @@ export function apply(ctx, config) {
       for (const recordItem of records) {
         const header = recordItem.header
         if (cwd !== undefined && header.cwd !== cwd) continue
+        // subagent 内部会话不属主列表(官方 sessionVisible 以 origin 排除),归档集合
+        // 仅服务用户会话:误归档只产出不可辨认的面板行与无意义通知
+        if (header.origin === 'subagent') continue
         // 预筛:createdAt 未超期必不超期(见上),跳过产物 IO
         if (header.createdAt >= cutoff) continue
         // 已归档记录永不是候选,集合随历史增长,提前跳过省产物 IO
