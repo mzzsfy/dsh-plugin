@@ -39,10 +39,13 @@ const {
   aggregateCurrencyOf,
   applyCurrencyToRules,
   cacheRateText,
+  coerceConditions,
+  coercePricingRules,
   costOf,
   costTitleText,
   createTranslator,
   daysInRange,
+  defaultCondition,
   defaultPricingRule,
   donutSegments,
   pointStatsMatches,
@@ -642,4 +645,79 @@ test('costTitleText 未计价计数后缀', () => {
   const zhT = createTranslator(MESSAGES_ZH)
   assert.equal(costTitleText(zhT, 0), '按当前费率对历史用量估算,精度为小时级')
   assert.equal(costTitleText(zhT, 3), '按当前费率对历史用量估算,精度为小时级,3 个小时桶未计价')
+})
+
+test('defaultCondition 各类型默认值即填即用', () => {
+  // Given 四种条件类型 When 取默认 Then 时段全天/周几空/号段全月/日期段当天
+  assert.deepEqual(defaultCondition('dailyWindow'), { kind: 'dailyWindow', from: '00:00', to: '00:00' })
+  assert.deepEqual(defaultCondition('weekdays'), { kind: 'weekdays', days: [] })
+  assert.deepEqual(defaultCondition('monthDays'), { kind: 'monthDays', from: 1, to: 31 })
+  assert.deepEqual(defaultCondition('dateRange', new Date(2026, 2, 15)), { kind: 'dateRange', from: '2026-03-15', to: '2026-03-15' })
+})
+
+test('validatePricingRules 拒绝非法时刻与时刻字段缺失', () => {
+  // Given dailyWindow 时刻超界或缺失 When 校验 Then 标 condTime/required
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '99:99', to: '08:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '', to: '08:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '23:59', to: '24:00' }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0.from'), 'condTime')
+  assert.equal(errors.get('1.conditions.0.from'), 'required')
+  assert.equal(errors.get('2.conditions.0.to'), 'condTime')
+})
+
+test('validatePricingRules 校验周几与月号段边界', () => {
+  // Given weekdays 含 7、monthDays 含 0 或 32 When 校验 Then 标 condWeekday/condMonthDay
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'weekdays', days: [0, 7] }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 0, to: 31 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 1, to: 32 }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0.days'), 'condWeekday')
+  assert.equal(errors.get('1.conditions.0.from'), 'condMonthDay')
+  assert.equal(errors.get('2.conditions.0.to'), 'condMonthDay')
+})
+
+test('validatePricingRules 校验日期段格式与倒序', () => {
+  // Given dateRange 非规范日期或倒序 When 校验 Then 标 condDate/condRange
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-3-5', to: '2026-03-08' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-08', to: '2026-03-05' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-08' }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0.from'), 'condDate')
+  assert.equal(errors.get('1.conditions.0'), 'condRange')
+  assert.equal(errors.has('2.conditions.0'), false)
+  assert.equal(errors.has('2.conditions.0.from'), false)
+})
+
+test('coerceConditions 规整数字字段且不改其余字段', () => {
+  // Given 输入框字符串形态 When 规整 Then weekdays days 与 monthDays 号段转数字,时段日期原样
+  const conditions = [
+    { kind: 'weekdays', days: ['1', '5'] },
+    { kind: 'monthDays', from: '26', to: '5' },
+    { kind: 'dailyWindow', from: '09:00', to: '18:00' },
+    { kind: 'dateRange', from: '2026-03-01', to: '2026-03-15' },
+  ]
+  const coerced = coerceConditions(conditions)
+  assert.deepEqual(coerced[0], { kind: 'weekdays', days: [1, 5] })
+  assert.deepEqual(coerced[1], { kind: 'monthDays', from: 26, to: 5 })
+  assert.deepEqual(coerced[2], conditions[2])
+  assert.deepEqual(coerced[3], conditions[3])
+})
+
+test('coercePricingRules 连带规整条件', () => {
+  // Given 含条件规则 When POST 前规整 Then 价格与条件数字字段同时规整
+  const rules = [{
+    model: 'a/b', currency: '¥',
+    price: { input: '1', output: '0', cacheRead: '0', cacheWrite: '0' },
+    conditions: [{ kind: 'weekdays', days: ['1'] }, { kind: 'monthDays', from: '1', to: '31' }],
+  }]
+  const coerced = coercePricingRules(rules)
+  assert.deepEqual(coerced[0].conditions, [{ kind: 'weekdays', days: [1] }, { kind: 'monthDays', from: 1, to: 31 }])
+  assert.deepEqual(coerced[0].price, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
 })

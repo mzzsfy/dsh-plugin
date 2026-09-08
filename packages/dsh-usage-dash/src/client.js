@@ -191,7 +191,27 @@ const MESSAGES_ZH = {
   priceCacheRead: '缓存读',
   priceCacheWrite: '缓存写',
   noCondition: '无条件 = 恒生效',
-  conditionsPreserved: '已有 {n} 条条件,本编辑器暂不支持修改,保存时原样保留',
+  addCondition: '添加条件',
+  deleteCondition: '删除条件',
+  condKind: '条件类型',
+  condDailyWindow: '每日时段',
+  condWeekdays: '星期几',
+  condMonthDays: '每月号段',
+  condDateRange: '日期段',
+  condFrom: '从',
+  condTo: '至',
+  'weekday.0': '日',
+  'weekday.1': '一',
+  'weekday.2': '二',
+  'weekday.3': '三',
+  'weekday.4': '四',
+  'weekday.5': '五',
+  'weekday.6': '六',
+  condTime: '需 HH:MM',
+  condWeekday: '需 0-6 整数',
+  condMonthDay: '需 1-31 整数',
+  condDate: '需 YYYY-MM-DD',
+  condRange: '起始不得晚于结束',
   deleteRule: '删除规则',
   addRule: '添加规则',
   save: '保存',
@@ -293,7 +313,27 @@ const MESSAGES_EN = {
   priceCacheRead: 'Cache read',
   priceCacheWrite: 'Cache write',
   noCondition: 'No condition = always applies',
-  conditionsPreserved: '{n} existing conditions are kept as-is; editing them is not supported yet',
+  addCondition: 'Add condition',
+  deleteCondition: 'Remove condition',
+  condKind: 'Condition kind',
+  condDailyWindow: 'Daily window',
+  condWeekdays: 'Weekdays',
+  condMonthDays: 'Month days',
+  condDateRange: 'Date range',
+  condFrom: 'From',
+  condTo: 'To',
+  'weekday.0': 'Su',
+  'weekday.1': 'Mo',
+  'weekday.2': 'Tu',
+  'weekday.3': 'We',
+  'weekday.4': 'Th',
+  'weekday.5': 'Fr',
+  'weekday.6': 'Sa',
+  condTime: 'Requires HH:MM',
+  condWeekday: 'Requires integer 0-6',
+  condMonthDay: 'Requires integer 1-31',
+  condDate: 'Requires YYYY-MM-DD',
+  condRange: 'From must not be after to',
   deleteRule: 'Remove rule',
   addRule: 'Add rule',
   save: 'Save',
@@ -1152,8 +1192,83 @@ function turnCostTitleText(t, tokenUsage) {
 // ===== 定价编辑器纯函数(校验/规整/默认值) =====
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
+const ISO_DAY_PATTERN_CLIENT = /^\d{4}-\d{2}-\d{2}$/
+// 时刻分量界:小时含头不含尾,分钟双闭
+const HOUR_MAX = 24
+const MINUTE_MAX = 59
+const WEEKDAY_MIN = 0
+const WEEKDAY_MAX = 6
+const MONTH_DAY_MIN = 1
+const MONTH_DAY_MAX = 31
+const CONDITION_KIND_OPTIONS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
+const CONDITION_KIND_LABEL_KEYS = {
+  dailyWindow: 'condDailyWindow',
+  weekdays: 'condWeekdays',
+  monthDays: 'condMonthDays',
+  dateRange: 'condDateRange',
+}
+const WEEKDAY_COUNT = 7
 
-// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型与四桶价格);模型须两段式
+const parseHHMM = (value) => {
+  if (typeof value !== 'string' || !HHMM_PATTERN.test(value)) return null
+  const [hours, minutes] = value.split(':').map(Number)
+  return hours >= 0 && hours < HOUR_MAX && minutes >= 0 && minutes <= MINUTE_MAX ? value : null
+}
+
+const isValidMonthDay = (value) => Number.isInteger(value) && value >= MONTH_DAY_MIN && value <= MONTH_DAY_MAX
+
+const isValidWeekday = (value) => Number.isInteger(value) && value >= WEEKDAY_MIN && value <= WEEKDAY_MAX
+
+// 各条件类型合法默认:时段全天(from===to)、周几空、号段全月(短月高位号自然不触发)、日期段当天
+const defaultCondition = (kind, now = new Date()) => {
+  const today = formatDate(now)
+  const defaults = {
+    dailyWindow: { kind: 'dailyWindow', from: '00:00', to: '00:00' },
+    weekdays: { kind: 'weekdays', days: [] },
+    monthDays: { kind: 'monthDays', from: MONTH_DAY_MIN, to: MONTH_DAY_MAX },
+    dateRange: { kind: 'dateRange', from: today, to: today },
+  }
+  return defaults[kind] ? { ...defaults[kind] } : null
+}
+
+// 条件字段级校验:路径前缀 + 键 → 错误键;倒序仅 dateRange 非法(时段/号段倒序为跨午夜/跨月语义)
+const validateCondition = (condition, path, errors) => {
+  if (!condition || typeof condition !== 'object') {
+    errors.set(path, 'required')
+    return
+  }
+  if (condition.kind === 'dailyWindow') {
+    if (parseHHMM(condition.from) === null) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condTime')
+    if (parseHHMM(condition.to) === null) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condTime')
+    return
+  }
+  if (condition.kind === 'weekdays') {
+    if (!Array.isArray(condition.days) || !condition.days.every(isValidWeekday)) errors.set(`${path}.days`, 'condWeekday')
+    return
+  }
+  if (condition.kind === 'monthDays') {
+    if (!isValidMonthDay(condition.from)) errors.set(`${path}.from`, 'condMonthDay')
+    if (!isValidMonthDay(condition.to)) errors.set(`${path}.to`, 'condMonthDay')
+    return
+  }
+  if (condition.kind === 'dateRange') {
+    if (typeof condition.from !== 'string' || !ISO_DAY_PATTERN_CLIENT.test(condition.from)) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condDate')
+    if (typeof condition.to !== 'string' || !ISO_DAY_PATTERN_CLIENT.test(condition.to)) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condDate')
+    if (errors.has(`${path}.from`) || errors.has(`${path}.to`)) return
+    if (condition.from > condition.to) errors.set(path, 'condRange')
+  }
+}
+
+// POST 前条件规整:输入框字符串值转数字字段;时段/日期段为字符串原样
+function coerceConditions(conditions) {
+  return conditions.map((condition) => {
+    if (condition.kind === 'weekdays') return { ...condition, days: condition.days.map(Number) }
+    if (condition.kind === 'monthDays') return { ...condition, from: Number(condition.from), to: Number(condition.to) }
+    return condition
+  })
+}
+
+// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型/四桶价格/时间条件);模型须两段式
 function validatePricingRules(rules) {
   const errors = new Map()
   if (!Array.isArray(rules)) return errors
@@ -1166,6 +1281,10 @@ function validatePricingRules(rules) {
       if (value === '' || value === null || value === undefined) errors.set(path, 'required')
       else if (!Number.isFinite(Number(value)) || Number(value) < 0) errors.set(path, 'priceInvalid')
     })
+    const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
+    conditions.forEach((condition, conditionIndex) => {
+      validateCondition(condition, `${ruleIndex}.conditions.${conditionIndex}`, errors)
+    })
   })
   return errors
 }
@@ -1175,6 +1294,7 @@ function coercePricingRules(rules) {
   return rules.map((rule) => ({
     ...rule,
     price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: Number(rule.price[key]) }), {}),
+    conditions: coerceConditions(rule.conditions ?? []),
   }))
 }
 
@@ -1192,7 +1312,7 @@ const defaultPricingRule = (currency = CURRENCIES[0]) => ({
   conditions: [],
 })
 
-const updateRuleAt = (rules, index, patch) => rules.map((rule, i) => (i === index ? { ...rule, ...patch } : rule))
+const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
 
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
@@ -1452,6 +1572,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-head{display:flex;align-items:flex-end;gap:8px}
 .ud-rule-head .ud-field{flex:1}
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-rule-conds{display:flex;flex-direction:column;gap:6px}
+.ud-cond{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap}
+.ud-cond-kind{width:auto;min-width:88px}
+.ud-cond-fields{display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
+.ud-cond-fields .ud-field{flex:0 1 auto}
+.ud-cond-fields .ud-input{width:auto}
+.ud-cond-add{display:flex;gap:6px;flex-wrap:wrap}
 .ud-field{display:flex;flex-direction:column;gap:3px;min-width:0}
 .ud-field-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-field-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}
@@ -1975,10 +2102,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 定价规则编辑器:货币为编辑器级全局设置(标题右侧切换,整表统一,不逐模型设置);
-    // 条件行不支持编辑,已有条件整条保留原样,空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
+    // 每规则可挂多条时间条件(时段/周几/号段/日期段),全部条件命中才生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
+    // 条件行:类型下拉 + 按类型字段区 + 删除;类型切换重置为该类型默认值(字段结构互不相通)
     function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
@@ -1994,6 +2122,57 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
           })),
         errorTextOf(`${pathPrefix}price.${key}`))
+      const patchConditions = (conditions) => onPatch({ conditions })
+      const patchConditionAt = (conditionIndex, patch) => patchConditions(patchItemAt(rule.conditions, conditionIndex, patch))
+      const removeConditionAt = (conditionIndex) => patchConditions(rule.conditions.filter((_, i) => i !== conditionIndex))
+      const conditionRow = (condition, conditionIndex) => {
+        const condPath = `${pathPrefix}conditions.${conditionIndex}`
+        const patchCondition = (patch) => patchConditionAt(conditionIndex, patch)
+        const textInput = (field, type, labelKey) => h('label', { key: field, className: 'ud-field' },
+          h('span', { className: 'ud-field-label' }, t(labelKey)),
+          h('input', {
+            type, className: 'ud-input', value: condition[field] ?? '',
+            onChange: (event) => patchCondition({ [field]: event.target.value }),
+          }),
+          errorTextOf(`${condPath}.${field}`))
+        const numberInput = (field, labelKey) => h('label', { key: field, className: 'ud-field' },
+          h('span', { className: 'ud-field-label' }, t(labelKey)),
+          h('input', {
+            type: 'number', className: 'ud-input', min: MONTH_DAY_MIN, max: MONTH_DAY_MAX, step: 1,
+            value: condition[field] ?? '',
+            onChange: (event) => patchCondition({ [field]: event.target.value }),
+          }),
+          errorTextOf(`${condPath}.${field}`))
+        const daysPills = h('div', { className: 'ud-group', role: 'group', 'aria-label': t('condWeekdays') },
+          Array.from({ length: WEEKDAY_COUNT }, (_, day) => {
+            const active = condition.days.includes(day)
+            return h('button', {
+              key: day, type: 'button',
+              className: cx('ud-seg-item', active && 'ud-seg-item--on'),
+              'aria-pressed': active,
+              onClick: () => patchCondition({
+                days: active ? condition.days.filter((value) => value !== day) : [...condition.days, day],
+              }),
+            }, t(`weekday.${day}`))
+          }))
+        const fields = {
+          dailyWindow: [textInput('from', 'time', 'condFrom'), textInput('to', 'time', 'condTo')],
+          weekdays: [daysPills],
+          monthDays: [numberInput('from', 'condFrom'), numberInput('to', 'condTo')],
+          dateRange: [textInput('from', 'date', 'condFrom'), textInput('to', 'date', 'condTo')],
+        }
+        return h('div', { key: conditionIndex, className: 'ud-cond' },
+          h('select', {
+            className: 'ud-input ud-cond-kind', value: condition.kind, 'aria-label': t('condKind'),
+            onChange: (event) => patchCondition(defaultCondition(event.target.value)),
+          }, CONDITION_KIND_OPTIONS.map((kind) => h('option', { key: kind, value: kind }, t(CONDITION_KIND_LABEL_KEYS[kind])))),
+          h('div', { className: 'ud-cond-fields' }, ...(fields[condition.kind] ?? [])),
+          errorTextOf(condPath),
+          h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => removeConditionAt(conditionIndex),
+            'aria-label': t('deleteCondition'), title: t('deleteCondition'),
+          }, '×'))
+      }
       return h('div', { className: 'ud-rule' },
         h('div', { className: 'ud-rule-head' },
           h('label', { className: 'ud-field' },
@@ -2013,10 +2192,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           priceField('output', 'priceOutput'),
           priceField('cacheRead', 'priceCacheRead'),
           priceField('cacheWrite', 'priceCacheWrite')),
-        h('span', { className: 'ud-rule-cond' },
-          (rule.conditions ?? []).length === 0
-            ? t('noCondition')
-            : t('conditionsPreserved', { n: rule.conditions.length })))
+        h('div', { className: 'ud-rule-conds' },
+          (rule.conditions ?? []).length === 0 ? h('span', { className: 'ud-rule-cond' }, t('noCondition')) : null,
+          (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
+          h('div', { className: 'ud-cond-add' },
+            CONDITION_KIND_OPTIONS.map((kind) => h('button', {
+              key: kind, type: 'button', className: 'ud-btn ud-btn--text',
+              onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(kind)]),
+            }, `+${t(CONDITION_KIND_LABEL_KEYS[kind])}`)))))
     }
 
     function PricingEditor({ t = defaultT }) {
@@ -2106,7 +2289,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           errors,
           pathPrefix: `${index}.`,
           t,
-          onPatch: (part) => setRules((prev) => updateRuleAt(prev, index, part)),
+          onPatch: (part) => setRules((prev) => patchItemAt(prev, index, part)),
           onRemove: () => setRules((prev) => prev.filter((_, i) => i !== index)),
         })),
         h('button', {
