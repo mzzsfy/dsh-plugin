@@ -374,7 +374,8 @@ test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', 
 
 test('upgrade:落定后复读磁盘版本,假命令未升级版本时标 stale', async () => {
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const { ctx, routes } = makeCtx({ settingsStore: store })
+  const exits = []
+  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
   apply(ctx)
   const first = await post(routes, '/api/maintain/upgrade')
   assert.equal(first.status, 200)
@@ -390,6 +391,28 @@ test('upgrade:落定后复读磁盘版本,假命令未升级版本时标 stale',
   assert.equal(settled.upgrade.last.installedVersion, settled.upgrade.last.previousVersion, '假命令不改磁盘,复读版本应与快照一致')
   assert.equal(settled.upgrade.last.stale, true, '版本未前进必须标 stale(镜像滞后/静默未升)')
   assert.ok(typeof settled.upgrade.last.reason === 'string' && settled.upgrade.last.reason.length > 0)
+  // stale 抑制自动重启:不调度退出、不标手动指引;重启互斥同步释放
+  assert.equal(settled.autoRestartScheduled, false)
+  assert.equal(settled.upgrade.last.requiresManualRestart, undefined)
+  assert.ok(typeof settled.runtimeEnv === 'object' && typeof settled.runtimeEnv.kind === 'string', 'runtimeEnv 必须进 status')
+  const restart = await post(routes, '/api/maintain/restart')
+  assert.equal(restart.status, 200, 'stale 落定后重启互斥必须已释放')
+})
+
+test('upgrade:stale 落定不调度自动重启(宿主退出零触发)', async () => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const exits = []
+  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
+  apply(ctx)
+  await post(routes, '/api/maintain/upgrade')
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) break
+  }
+  // 观察窗口覆盖自动重启延迟:若误调度,延迟窗口内 exit 会被调用
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.deepEqual(exits, [], 'stale 时禁止调度任何宿主退出')
 })
 
 test('restart:升级进行中 409 拒绝且不调度退出', async () => {

@@ -25,6 +25,7 @@ import {
   VERDICT_UP_TO_DATE,
 } from './core.mjs'
 import { runUpgrade } from './upgrade.mjs'
+import { detectRuntimeEnv, RUNTIME_KINDS } from './runtime.mjs'
 
 export const name = 'dsh-maintain'
 
@@ -40,6 +41,9 @@ export const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
 // 导出仅供测试计算延迟窗口等待时长
 export const RESTART_DELAY_MS = 2 * 1000
+// 升级成功后自动重启的延迟:给 runCheck 与浮条终态一拍时间,观察器轮询可赶上;
+// 导出仅供测试计算延迟窗口等待时长
+export const AUTO_RESTART_DELAY_MS = 3 * 1000
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
 // 轮询间隔上界:超大值会让到期时间戳溢出为 Infinity,轮询静默失效
@@ -104,6 +108,16 @@ export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT
     await sleepImpl(backoffMs)
   }
   return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: null }
+}
+
+// 升级后自动重启守卫:四条件缺一不可——成功、非 stale、非手动直跑、appExit 可用。
+// 手动直跑(双 TTY)进程退出后无人拉起,只标 requiresManualRestart 交面板指引
+export function judgeAutoRestart({ ok, stale, runtimeKind, hasExit }) {
+  if (ok !== true) return { schedule: false, requiresManualRestart: false }
+  if (stale === true) return { schedule: false, requiresManualRestart: false }
+  if (runtimeKind === RUNTIME_KINDS.MANUAL_START) return { schedule: false, requiresManualRestart: true }
+  if (hasExit !== true) return { schedule: false, requiresManualRestart: false }
+  return { schedule: true, requiresManualRestart: false }
 }
 
 // 浏览器半区调用的 API 路径清单:client.js 同名常量与之对拍(parity),防单侧改路径生产 404
@@ -266,10 +280,21 @@ export function apply(ctx) {
   const runningVersionReady = resolveCurrentHostVersion()
     .then((version) => { runningVersion = version })
     .catch(() => {})
+
+  // 运行环境:apply 时一次检测;探测异步,以 ready 链收口,异常回退 unknown(维持自动重启)
+  let runtimeEnv = { kind: RUNTIME_KINDS.UNKNOWN, declared: false }
+  const runtimeEnvReady = detectRuntimeEnv({
+    env: process.env,
+    platform: process.platform,
+    isTTY: { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true },
+  })
+    .then((env) => { runtimeEnv = env })
+    .catch(() => {})
   let upgrade = { running: false, last: null }
   let checkInFlight = null
   let nextDueAt = null
   let restartScheduled = false
+  let autoRestartScheduled = false
 
   function runCheck() {
     if (checkInFlight) return checkInFlight
@@ -326,8 +351,8 @@ export function apply(ctx) {
   }
 
   async function currentStatus() {
-    // 等运行版本首读落定:apply 即发起读盘,此处仅吸收启动窗口的微小延迟
-    await runningVersionReady
+    // 等运行版本首读与运行环境检测落定:apply 即发起,此处仅吸收启动窗口的微小延迟
+    await Promise.all([runningVersionReady, runtimeEnvReady])
     const config = readSettings(ctx)
     const judged = judgeNow()
     // running 即视为持锁:省一次盘读,且窗口期语义与 upgrade 路由的门闩一致
@@ -352,6 +377,8 @@ export function apply(ctx) {
       checkedAt: snapshot.checkedAt,
       checkError: snapshot.error,
       upgrade,
+      runtimeEnv,
+      autoRestartScheduled,
       canRestart: typeof exit === 'function',
     }
   }
@@ -391,6 +418,14 @@ export function apply(ctx) {
     try {
       writeFileSync(UPGRADE_LOCK_PATH, JSON.stringify({ startedAt, pid: process.pid }), 'utf8')
     } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
+  }
+
+  // 自动重启与手动重启共用 restartScheduled 互斥:调度窗口内到达的升级被 409,
+  // 手动重启端点幂等;autoRestartScheduled 单独给 status/client 分流终态文案
+  function scheduleAutoRestart() {
+    restartScheduled = true
+    autoRestartScheduled = true
+    setTimeout(() => exit(0), AUTO_RESTART_DELAY_MS)
   }
 
   async function performUpgrade(command, last, channel) {
@@ -445,6 +480,15 @@ export function apply(ctx) {
         + (last.code !== null ? ' 退出码=' + last.code : '')
         + (last.error ? ' ' + singleLine(last.error) : '')
         + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
+      // 自动重启守卫:等环境检测落定后按四条件分流(手动直跑只标指引,不退出)
+      await runtimeEnvReady
+      const decision = judgeAutoRestart({ ok: last.ok === true, stale: last.stale === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function' })
+      if (decision.requiresManualRestart === true) last.requiresManualRestart = true
+      if (decision.schedule === true) {
+        // last 镜像调度标记:浮条终态文案按其分流(与 status.autoRestartScheduled 同值)
+        last.autoRestartScheduled = true
+        scheduleAutoRestart()
+      }
       // 升级结束后自动重新检查版本并重排轮询(命令可能改了本地版本)
       runCheck().then(scheduleNext, scheduleNext)
     }

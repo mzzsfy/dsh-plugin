@@ -205,3 +205,29 @@ test('restartTick 调用点实参完整性:轮询 effect 必须传 readyStreak=p
   assert.ok(callSite, 'client.js 找不到 effect 内 restartTick 调用点')
   assert.match(callSite[1], /readyStreak:\s*prev\.readyStreak/, 'restartTick 调用点缺少 readyStreak: prev.readyStreak 实参')
 })
+
+// 升级浮条终态文案:ok 落定后 stale / 手动直跑 / 自动重启三条终态分流,失败与未知不在此列
+const clientUpgradeFinalText = extractLogic('upgradeFinalText')
+
+test('upgradeFinalText: stale 优先于两种重启指引,不得引导重启', () => {
+  const text = clientUpgradeFinalText({ ok: true, stale: true, requiresManualRestart: true, autoRestartScheduled: true })
+  assert.match(text, /未前进|未达目标/)
+  assert.doesNotMatch(text, /重启/)
+})
+
+test('upgradeFinalText: 手动直跑终态指向手动重启,自动重启终态指向页面自恢复', () => {
+  assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: true, autoRestartScheduled: false }), /手动重启/)
+  assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: false, autoRestartScheduled: true }), /自动重启/)
+  // 默认成功终态
+  assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: false, autoRestartScheduled: false }), /重启宿主/)
+})
+
+test('client 自动重启接管:订阅回调必须按 autoRestartScheduled 守卫进入等待态', () => {
+  // 接管点实参形态锁定:beginRestartWait 基线必须取观察器快照的 pid/bootAt,并以 restartPendingRef 防重入
+  const takeover = clientSource().match(/subscribeUpgradeStatus\(\(snapshot\)\s*=>\s*\{([\s\S]*?)\}\)/)
+  assert.ok(takeover, 'client.js 缺少订阅回调自动重启接管')
+  assert.match(takeover[1], /autoRestartScheduled/, '接管必须以 autoRestartScheduled 触发')
+  assert.match(takeover[1], /restartPendingRef\.current/, '接管必须以 restartPendingRef 防重入')
+  assert.match(takeover[1], /pid:\s*snapshot\.pid/, '接管基线必须取快照 pid')
+  assert.match(takeover[1], /bootAt:\s*snapshot\.bootAt/, '接管基线必须取快照 bootAt')
+})

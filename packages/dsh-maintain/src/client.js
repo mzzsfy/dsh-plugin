@@ -229,6 +229,17 @@ function ensureUpgradeFloatStyle() {
   document.head.appendChild(style)
 }
 
+// 升级成功落定的浮条终态文案:stale(执行成功但目标未达成)最优先且不得提及重启,
+// 其后按宿主是否自动重启分流指引
+// LOGIC-BEGIN upgradeFinalText
+function upgradeFinalText(state) {
+  if (state.stale === true) return '升级命令执行完成,但磁盘版本未前进或未达目标,详情见版本与运维页'
+  if (state.requiresManualRestart === true) return '升级完成,当前为手动直跑环境,请手动重启宿主后生效'
+  if (state.autoRestartScheduled === true) return '升级完成,宿主将自动重启,页面恢复后可直接使用'
+  return '升级完成,重启宿主后生效(版本与运维页可重启)'
+}
+// LOGIC-END upgradeFinalText
+
 // state:null=进行中;对象=升级结果(last,ok 区分成败);'unknown'=观察超限状态未知
 function showUpgradeFloat(state) {
   ensureUpgradeFloatStyle()
@@ -247,10 +258,7 @@ function showUpgradeFloat(state) {
   } else if (state === 'unknown') {
     text.textContent = '升级状态长时间未更新,请刷新页面查看'
   } else if (state.ok) {
-    // 版本未前进(镜像滞后/静默未升)或未达通道目标:执行成功但目标未达成,不得引导重启
-    text.textContent = state.stale === true
-      ? '升级命令执行完成,但磁盘版本未前进或未达目标,详情见版本与运维页'
-      : '升级完成,重启宿主后生效(版本与运维页可重启)'
+    text.textContent = upgradeFinalText(state)
   } else if (state.stillRunning === true) {
     // 强杀后进程树疑似仍存活:升级入口已由锁锁定直至过期,不做"可重跑"的误导指引
     text.textContent = '升级超时已终止;旧进程可能仍在运行,升级入口已锁定直至其退出或锁过期'
@@ -487,6 +495,8 @@ function MaintainApp() {
   // pid/bootAt 保持确认时刻基线不可被拍结果覆盖,否则重启判定恒 false;null=未在等待态
   const restartPrevRef = useRef(null)
   const restartPendingRef = useRef(false)
+  // 自动重启接管防重入:接管无 POST 在途语义(restartPendingRef),需独立一次性令牌
+  const autoRestartTakenRef = useRef(false)
 
   function markBusy(key, value) {
     setBusy((prev) => Object.assign({}, prev, { [key]: value }))
@@ -498,16 +508,28 @@ function MaintainApp() {
       .catch((loadError) => { setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError))); return null })
   }
 
-  // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察
+  // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察;
+  // 快照带 autoRestartScheduled 且未在等待/接管态时,以该快照为基线自动进入重启等待
+  // (复用 restartTick 探测,无需用户点击;autoRestartTakenRef 防多拍重入)
   useEffect(() => {
-    const unsubscribe = subscribeUpgradeStatus((next) => {
-      if (next !== null) setStatus(next)
+    const unsubscribe = subscribeUpgradeStatus((snapshot) => {
+      if (snapshot !== null) setStatus(snapshot)
+      if (snapshot !== null && snapshot.autoRestartScheduled === true && restartPendingRef.current === false && autoRestartTakenRef.current === false) {
+        autoRestartTakenRef.current = true
+        beginRestartWait({ lost: false, pid: snapshot.pid, bootAt: snapshot.bootAt, readyStreak: 0 })
+      }
     })
     void load().then((next) => {
       if (next !== null && next.upgrade !== null && next.upgrade.running === true) ensureUpgradeWatch()
     })
     return unsubscribe
   }, [])
+
+  function beginRestartWait(baseline) {
+    restartPrevRef.current = baseline
+    setError(null)
+    setRestarting(true)
+  }
 
   // 重启判定与 core.mjs shouldReloadAfterRestart 同源:client 半区无法 import ESM,修改需两处同步。
   // prev/next 均为 {lost,pid,bootAt} 快照:lost=经历失联(强信号);bootAt=宿主进程启动时刻,

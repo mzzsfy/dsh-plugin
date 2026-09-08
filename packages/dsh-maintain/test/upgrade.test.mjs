@@ -5,13 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { runUpgrade } from '../src/upgrade.mjs'
-import { runUpgradeWithRetry, UPGRADE_MAX_ATTEMPTS, UPGRADE_RETRY_BACKOFF_MS } from '../src/index.js'
+import { runUpgradeWithRetry, judgeAutoRestart, UPGRADE_MAX_ATTEMPTS, UPGRADE_RETRY_BACKOFF_MS } from '../src/index.js'
 import {
   UPGRADE_FAIL_FILE_LOCKED,
   UPGRADE_FAIL_TRANSIENT_NETWORK,
   UPGRADE_FAIL_NPM_MISSING,
   UPGRADE_FAIL_TIMEOUT,
 } from '../src/core.mjs'
+import { RUNTIME_KINDS } from '../src/runtime.mjs'
 
 // 脚本体一律单引号:Windows shell 化 spawn 经 cmd.exe,双层双引号会被截断。
 const NODE = 'node'
@@ -216,4 +217,21 @@ test('重试:假命令真实进程 文件锁失败后重试成功', async () => 
   } finally {
     rmSync(statePath, { force: true })
   }
+})
+
+test('自动重启:四条件守卫(成功/非 stale/非手动直跑/appExit 可用)', () => {
+  // 成功+托管(含 unknown)→ 调度
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true }), { schedule: true, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.DECLARED_MANAGED, hasExit: true }), { schedule: true, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.PM2, hasExit: true }), { schedule: true, requiresManualRestart: false })
+  // 失败不调度
+  assert.deepEqual(judgeAutoRestart({ ok: false, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true }), { schedule: false, requiresManualRestart: false })
+  // stale 不调度
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true }), { schedule: false, requiresManualRestart: false })
+  // 手动直跑 → 手动指引,不调度
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: true }), { schedule: false, requiresManualRestart: true })
+  // appExit 缺失不调度
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: false }), { schedule: false, requiresManualRestart: false })
+  // 手动直跑与 appExit 缺失并存 → 仍以手动指引标记(指引面板,与退出能力无关)
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: false }), { schedule: false, requiresManualRestart: true })
 })
