@@ -2,8 +2,6 @@
 
 DeepSeek Harness 设置页插件:版本与进程运维一体化——监测 npm 新版本、一键升级、安全重启。
 
-设计文档见 [docs/design/dsh-maintain.md](../../docs/design/dsh-maintain.md)。
-
 ## 功能
 
 - 版本监测:host 启动即检查一次,按轮询间隔重复检查(内存快照,不持久化);当前版本与追踪通道最新版对比,落后即提示。定时轮询为软依赖:宿主 timer 服务不可用时仅停用自动轮询,面板显示降级提示,手动检查与升级能力不受影响。
@@ -19,15 +17,15 @@ DeepSeek Harness 设置页插件:版本与进程运维一体化——监测 npm 
 dsh plugin --profile web add @mzzsfy/dsh-maintain
 ```
 
-标准插件安装:包进入 profile node_modules(pnpm 标准布局,声明的 peer 由虚拟层链入),bundle patch 随下次 dsh 重启自动生效,无需手动编辑 cordis.patch.yml。
+标准插件安装:包进入 profile node_modules(pnpm hoisted 布局),bundle patch 随下次 dsh 重启自动生效,无需手动编辑 cordis.patch.yml;宿主 peer(`@deepseek-ai/*`)不落盘,经目录逐级兜底解析到 dsh 本体全局安装目录。
 
-发布前开发安装(拷贝进 store,行为与 registry 安装一致):
+开发安装(仓库工作副本直挂,不经 npm 发布):
 
 ```sh
-dsh plugin --profile web add file:./packages/dsh-maintain
+node scripts/dev-link.mjs dsh-maintain   # 仓库根执行:归一 profile 依赖行 + 挂 junction
 ```
 
-注意:勿用 `link:` 或裸相对路径——那是符号链接模式,realpath 后 peer 从仓库目录解析会失败(这正是早期"必须手工拷贝部署"结论的成因,对标准安装不成立)。
+工作副本以 junction 挂进 profile,host 半区改动保存约 1 秒热重载,client 半区改动刷新页面即生效,无需发版;规约与全仓归一见 `node scripts/dev-link.mjs all`。勿用 `link:` 或裸相对路径手工挂载——realpath 后 peer 从仓库目录解析会失败(早期"必须手工拷贝部署"结论的成因,对 dev-link junction 不成立,junction 内 peer 沿 profile 解析)。
 
 ## 设置(settings.yaml,热加载)
 

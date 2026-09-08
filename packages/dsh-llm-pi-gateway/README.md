@@ -28,7 +28,7 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 - **错误分类对齐**:quota 判定(`QUOTA`,经 dsh-llm `QUOTA_EXCEEDED_CODE`)、超窗双通道(pi-ai usage 判定器 + dsh-llm 文本判定器 → `CONTEXT_WINDOW_EXCEEDED`);调用方取消时流出界兜底归因 `ABORTED`(带根因 cause),不落 `UNKNOWN`。
 - **热更新**:改配置即生效(settings 服务 `installSection` 模式)——写入时校验拒绝坏配置,路由集/重试策略/显示名变化原地 `replace`,解析失败保旧路由;无路由时休眠,不注册 adapter。`prepareCall` 解析结果快照冻结,热更换表不产生目录信息与请求路由代际错配。
 - **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系协议可"拉取模型",anthropic 等明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册);adapter 挂 `LlmAdapter` 原型继承基类默认方法(含 `imageRequestPricing`,声明无 provider 侧图片定价,计量回退中性估算),宿主接口演进新增默认实现时自动跟随。
-- **pi-ai 同栈**:依赖范围与官方一致(^0.84.4),协议行为与官方路由同一版本保证;compat 字段名单按 pi-ai 0.84.4 各协议类型声明校验。
+- **pi-ai 同栈**:依赖下界较官方收紧(官方 dsh-llm-pi-ai 0.1.2-rc.1 为 ^0.84.2;本包 compat 名单含 0.84.4 才引入的字段,下界抬至 ^0.84.4),协议行为与官方路由同一版本保证;compat 字段名单按 pi-ai 0.84.4 各协议类型声明校验。
 
 ## 错误码
 
@@ -65,7 +65,7 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 
 - **图片输入(多模态,官方管线同构)**:请求含图片且模型声明 `input: [text, image]` 时,经 attachments 服务读出为 base64 块(handle 文本 + `image` 块),预算策略 `maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes` 与官方同款(缺省 20MiB / 4Mi 像素 / 1MiB);非 user 角色图片、模型无 image 能力、attachments 服务缺失均按官方语义 `UNSUPPORTED_CONTENT`;纯文本路径零开销。
 - **全协议会话标记(默认开启,每路由可关)**:请求体自动携带由 sessionId 单向派生的稳定标记(`dsh:<sha256 前 40 位>`,前缀可配)——anthropic-messages 写 `metadata.user_id`(同 Claude Code),openai-completions / openai-responses 写顶层 `prompt_cache_key`(同 Codex,无 `prompt_cache_retention` 副作用);未知协议形状不注入。经 pi-ai `onPayload`(请求体发出前最后一步)直写,不依赖 baseURL / retention 条件,上游原生发射时以本包标记覆盖。
-- **compat 全控**:官方包 withhold 的粘性等字段全部开放(`sendSessionAffinityHeaders`、`sessionAffinityFormat`、`supportsDeveloperRole` 等),字段名按 pi-ai 0.84 各协议 compat 类型校验,值为 null 拒绝;模型级 compat 覆盖路由级。
+- **compat 全控**:官方包 withhold 的粘性等字段全部开放(`sendSessionAffinityHeaders`、`sessionAffinityFormat`、`supportsDeveloperRole` 等),字段名按 pi-ai 0.84.4 各协议 compat 类型校验,值为 null 拒绝;模型级 compat 覆盖路由级。
 - **metadata 模板透传**:字符串值支持 `{sessionId}` / `{marker}` 占位符;标记注入与模板独立,模板 `user_id` 键被标记覆盖,其余键照常透传。
 - **静态 headers**:任意网关约定的兜底通道(请避开 attribution 保留头名)。
 - **多模型路由**:一条路由声明多个模型,按请求 model 字段分发,未命中返回 `UNKNOWN_MODEL`。
@@ -136,7 +136,7 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 ## 已知取舍
 
 - 事件流适配与 pi-ai 数据结构耦合,pi-ai 协议 payload 形状大改时标记器判别需跟随;未知形状不注入保证不误伤。
-- 无流空闲超时看门狗(官方 0.1.2-rc.1 经 `streamIdleTimeoutMs` 300 秒兜底;实现需进程内动态 import dsh-timeout,宿主可达性待实测后补齐,当前纯披露);pi-ai 依赖范围与官方 dsh-llm-pi-ai 保持一致(^0.84.2),官方升级范围时本包需跟随。
+- 无流空闲超时看门狗(官方 0.1.2-rc.1 经 `streamIdleTimeoutMs` 300 秒兜底;实现需进程内动态 import dsh-timeout,宿主可达性待实测后补齐,当前纯披露);pi-ai 依赖下界较官方收紧(官方 0.1.2-rc.1 为 ^0.84.2,本包因 compat 名单取材 0.84.4 抬至 ^0.84.4),官方升级范围时本包需跟随。
 - sessionMarker.enabled=false 不拦截 metadata 模板的静态 user_id 键透传(该键来自模板而非标记器,不含会话派生标识)。
 - `sessionId` 缺省契约:会话标记关闭且模板不引用 `{sessionId}` 的路由允许缺失(官方 wire 契约同构,缺省即省略该键);接管路由会话标记**默认开启**,sessionId 因此默认必填——官方节路由无法声明关闭该键,依赖 sessionId 的零感知承诺仅对显式关闭标记或模板不引用的路由兑现。
 - 上游错误以文本分类(pi-ai 把捕获错误展平为 message 字符串),quota/超窗判定用官方同款判定器,其余分支与官方同序同构。

@@ -13,7 +13,7 @@ DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方�
 ## 功能
 
 - provider 选择(来源为 describe 返回的 `providers` 键),列出各模型行(独立编辑卡形态,当前仅作为锚点破坏时的浮动回退面板呈现)。
-- 推理档位七档(off / minimal / low / medium / high / xhigh / max,与宿主 pi-ai `THINKING_LEVELS` 一致)复选框 + 每档线上值输入,判定表:
+- 推理档位七档(off / minimal / low / medium / high / xhigh / max,与宿主 pi-ai `THINKING_LEVELS` 一致)开关(语义保留 checkbox,视觉为 `mce-switch` 开关形态)+ 每档线上值输入,判定表:
 
   | 勾选状态 | 写回行为 |
   |---|---|
@@ -61,16 +61,16 @@ dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 npm test
 ```
 
-纯逻辑层单测(node --test,无外部依赖):档位四态判定表与拼写回填、input 三态、整组写回基线合并、冲突字段级重放与一次重试判定、竞品痕迹检测、wire 信封适配(含 transport 抛错透传)与端到端冲突重放、client.js 与 logic.mjs 的 wire 适配段同源守卫。
+纯逻辑层单测(node --test,无外部依赖):档位四态判定表与拼写回填、input 三态、整组写回基线合并、冲突字段级重放与一次重试判定、竞品痕迹检测、wire 信封适配(含 transport 抛错透传)与端到端冲突重放、client.js 与 logic.mjs 的 wire 适配段同源守卫,以及锚点判定与行内目标解析、注入编排与生命周期、开关守卫、client id 等其余模块测试。
 
 ## License
 
 MIT
 
-## 开发安装(不经 npm 发布直接装仓库副本)
+## 开发安装(仓库工作副本直挂,不经 npm 发布)
 
 ```sh
-dsh plugin --profile web add file:./packages/dsh-model-capability-editor
+node scripts/dev-link.mjs dsh-model-capability-editor   # 仓库根执行:归一 profile 依赖行 + 挂 junction
 ```
 
-`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。
+工作副本以 junction 挂进 profile,client 半区改动刷新页面即生效,无需发版;规约与全仓归一见仓库根 `node scripts/dev-link.mjs all`。

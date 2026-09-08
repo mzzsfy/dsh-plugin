@@ -10,7 +10,7 @@ DSH 全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻�
 
 ```json
 {
-  "dependencies": { "@mzzsfy/dsh-toast": "^0.1.0" },
+  "dependencies": { "@mzzsfy/dsh-toast": "^0.1.2" },
   "dsh": {
     "client": {
       "external": ["@mzzsfy/dsh-toast/client"]

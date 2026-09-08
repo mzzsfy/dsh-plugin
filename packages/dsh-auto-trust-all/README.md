@@ -2,8 +2,6 @@
 
 DeepSeek Harness web 入口插件:动态信任所有实际到达的 Host,并将 web 默认绑定翻转为全部网卡——`dsh web` 零参数启动等效 `dsh web --host 0.0.0.0 --trusted-host=<任何实际到达的 host>`。
 
-设计文档见 [docs/design/dsh-auto-trust-all.md](../../docs/design/dsh-auto-trust-all.md)。
-
 ## 功能
 
 - **动态信任**:包装 webServer 全部路由(exact / prefix / upgrade / fallback,含激活前已注册与后续新注册),请求到达即提取 Host 头(与官方信任闸门同构的 WHATWG 解析:小写、去端口、IPv6 保留方括号),去重后**双写** `webRuntime.trustedHosts` 与 `connection` 服务实例的 `trustedHosts` 快照数组(官方闸门读后者;两数组是装配期克隆的不同对象,缺一则动态域名对 `/api` 闸门不可见),闸门每请求实时读数组,无需重启。泛域名(`*.example.com`)等无法枚举的入口不再需要改启动命令。
@@ -36,13 +34,13 @@ DeepSeek Harness web 入口插件:动态信任所有实际到达的 Host,并将 
 dsh plugin --profile web add @mzzsfy/dsh-auto-trust-all
 ```
 
-发布前开发安装(在仓库根目录执行——`file:` 相对路径按执行时所在目录锚定):
+开发安装(仓库工作副本直挂,不经 npm 发布):
 
 ```sh
-dsh plugin --profile web add file:./packages/dsh-auto-trust-all
+node scripts/dev-link.mjs dsh-auto-trust-all   # 仓库根执行:归一 profile 依赖行 + 挂 junction
 ```
 
-bundle patch 随下次 dsh 重启生效。开发安装的依赖行是 `file:` 过渡态,发布后由 `dev-link.mjs all` 归一为 semver。
+bundle patch 经 dev-link 维护的 hmr 覆盖行保存约 1 秒热重载;规约与全仓归一见 `node scripts/dev-link.mjs all`。
 
 patch 覆盖官方 webserver 行的 config 是整体替换语义,本包已完整镜像官方全部键;该镜像由 `test/patch.test.mjs` 快照锁定——但该测试读不到官方安装目录,**不能**自动检出上游增删键。dsh 升级后请用 `dsh web --dump-default-config` 对照官方 webserver 行核对键集,发现新键需同步 `cordis.patch.yml`。
 
@@ -73,4 +71,4 @@ cd packages/dsh-auto-trust-all
 node --test "test/*.test.mjs"
 ```
 
-宿主半区改动经 dev-link junction 热重载;冒烟验证步骤见设计文档。
+宿主半区改动经 dev-link junction 热重载,保存约 1 秒重载;冒烟验证:dsh web 启动后以非常见 Host 头请求任一路由,响应正常且 console 出现 registered 前缀日志。

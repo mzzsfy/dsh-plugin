@@ -74,10 +74,10 @@ npm test
 
 纯逻辑层(评估状态机 / 删除资格与失败矩阵 / 面板投影 / 归档差分 / 空白判定 / 回收站命令构造)以 `node --test` 覆盖,无外部依赖。路由层测试依赖 peer 包可解析,仓库根未安装依赖时自动 skip,`npm install` 后激活。Windows 真实回收站执行测试仅在本平台执行,其余平台自动 skip。周期评估测试经 `mock.timers` 接管 `setInterval` 与 `Date`(显式传 `now`:接管后虚拟时钟从 epoch 起算,夹具时间戳会全成「未来」),timer 服务以 makeCtx 桩模拟激活与缺失两种形态。
 
-## 开发安装(不经 npm 发布直接装仓库副本)
+## 开发安装(仓库工作副本直挂,不经 npm 发布)
 
 ```sh
-dsh plugin --profile web add file:./packages/dsh-session-manager
+node scripts/dev-link.mjs dsh-session-manager   # 仓库根执行:归一 profile 依赖行 + 挂 junction
 ```
 
-`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。
+工作副本以 junction 挂进 profile,改代码保存即热重载(host 半区)或刷新页面生效(client 半区),无需发版;规约与全仓归一见仓库根 `node scripts/dev-link.mjs all`。
