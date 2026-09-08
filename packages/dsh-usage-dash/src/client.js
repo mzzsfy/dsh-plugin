@@ -175,7 +175,7 @@ const MESSAGES_ZH = {
   pricingModel: '模型',
   pricingModelPlaceholder: 'provider/model 或 *',
   pricingCurrency: '货币',
-  pricingUnit: '每百万 token',
+  pricingUnit: '每百万 token 定价',
   priceInput: '输入',
   priceOutput: '输出',
   priceCacheRead: '缓存读',
@@ -271,7 +271,7 @@ const MESSAGES_EN = {
   pricingModel: 'Model',
   pricingModelPlaceholder: 'provider/model or *',
   pricingCurrency: 'Currency',
-  pricingUnit: 'per million tokens',
+  pricingUnit: 'per million tokens pricing',
   priceInput: 'Input',
   priceOutput: 'Output',
   priceCacheRead: 'Cache read',
@@ -392,7 +392,12 @@ const topWithOther = (ranked) => {
   const models = ranked.slice(0, GROUP_TOP_COUNT)
   if (ranked.length > GROUP_TOP_COUNT) {
     const rest = ranked.slice(GROUP_TOP_COUNT)
-    models.push({ model: OTHER_MODEL, tokens: rest.reduce((sum, item) => sum + item.tokens, 0), items: rest })
+    models.push({
+      model: OTHER_MODEL,
+      tokens: rest.reduce((sum, item) => sum + item.tokens, 0),
+      cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0),
+      items: rest,
+    })
   }
   return models
 }
@@ -1380,6 +1385,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
 .ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
 .ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-cost{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-model-toggle{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;transition:transform .2s ease}
 .ud-model-toggle[aria-expanded="true"]{transform:rotate(90deg)}
 .ud-model-toggle:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);border-radius:4px}
@@ -1484,8 +1490,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         h(Card, { key: 'model', icon: ICONS.model, label: t('topModel'), hint: t('topModelHint') },
           stats.topModel
             ? h('div', { className: 'ud-card-lines' },
-                h('span', { className: 'ud-card-name' }, modelNameOf(stats.topModel)),
-                h('span', { className: 'ud-card-sub' }, providerOf(stats.topModel)))
+                h('span', { className: 'ud-card-name' }, `${providerOf(stats.topModel)} / ${modelNameOf(stats.topModel)}`))
             : h('div', { className: 'ud-card-value' }, '—')),
         h(Card, { key: 'cache', icon: ICONS.rate, label: t('cacheRate'), hint: t('cacheRateHint') },
           h(FitText, null, cacheRateText(stats.cacheHit, stats.cacheMiss))),
@@ -1705,7 +1710,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 模型用量:donut + 列表,恒按天口径,不随视图切换
-    function ModelUsage({ models, colorFor, panelRef, t = defaultT }) {
+    function ModelUsage({ models, colorFor, panelRef, costCurrency = '', t = defaultT }) {
       const [hover, setHover] = useState(null)
       const [tip, setTip] = useState(null)
       const [expandedOther, setExpandedOther] = useState(false)
@@ -1775,7 +1780,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     : null,
                   h('div', { className: 'ud-model-values' },
                     h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
-                    h('span', { className: 'ud-model-pct' }, formatPercent((item.tokens / total) * PERCENT_SCALE)))),
+                    h('span', { className: 'ud-model-pct' }, formatPercent((item.tokens / total) * PERCENT_SCALE)),
+                    item.cost !== undefined
+                      ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)}`)
+                      : null)),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },
@@ -2031,18 +2039,19 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('div', { className: 'ud-pref-text' },
             h('span', { className: 'ud-pref-title' }, t('pricing')),
             saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
-          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
-            CURRENCIES.map((symbol) => h('button', {
-              key: symbol, type: 'button',
-              className: cx('ud-seg-item', currency === symbol && 'ud-seg-item--on'),
-              'aria-pressed': currency === symbol,
-              onClick: () => {
-                setCurrency(symbol)
-                setRules((prev) => applyCurrencyToRules(prev, symbol))
-              },
-            }, symbol))),
-          h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
-          h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save'))),
+          h('div', { className: 'ud-pricing-actions' },
+            h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
+            h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
+              CURRENCIES.map((symbol) => h('button', {
+                key: symbol, type: 'button',
+                className: cx('ud-seg-item', currency === symbol && 'ud-seg-item--on'),
+                'aria-pressed': currency === symbol,
+                onClick: () => {
+                  setCurrency(symbol)
+                  setRules((prev) => applyCurrencyToRules(prev, symbol))
+                },
+              }, symbol))),
+            h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
         rules.map((rule, index) => h(PricingRuleCard, {
           key: index,
@@ -2368,7 +2377,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               t,
             })
           : null,
-        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, t }) : null,
+        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, costCurrency, t }) : null,
         stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
         h(StatsLineOptions, { key: 'prefs', t }),
