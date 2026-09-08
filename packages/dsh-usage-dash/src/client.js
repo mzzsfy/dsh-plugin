@@ -2168,21 +2168,22 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),
           errorTextOf(`${condPath}.${field}`))
-        const daysPills = h('div', { className: 'ud-group', role: 'group', 'aria-label': t('condWeekdays') },
+        // 周几 pill 仅 weekdays 条件才构造:其余类型无 days 字段,提前求值会使渲染崩溃白屏
+        const weekdaysPills = () => h('div', { className: 'ud-group', role: 'group', 'aria-label': t('condWeekdays') },
           Array.from({ length: WEEKDAY_COUNT }, (_, day) => {
-            const active = condition.days.includes(day)
+            const active = (condition.days ?? []).includes(day)
             return h('button', {
               key: day, type: 'button',
               className: cx('ud-seg-item', active && 'ud-seg-item--on'),
               'aria-pressed': active,
               onClick: () => patchCondition({
-                days: active ? condition.days.filter((value) => value !== day) : [...condition.days, day],
+                days: active ? condition.days.filter((value) => value !== day) : [...(condition.days ?? []), day],
               }),
             }, t(`weekday.${day}`))
           }))
         const fields = {
           dailyWindow: [textInput('from', 'time', 'condFrom'), textInput('to', 'time', 'condTo')],
-          weekdays: [daysPills],
+          weekdays: [weekdaysPills()],
           monthDays: [numberInput('from', 'condFrom'), numberInput('to', 'condTo')],
           dateRange: [textInput('from', 'date', 'condFrom'), textInput('to', 'date', 'condTo')],
         }
