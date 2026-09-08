@@ -294,6 +294,93 @@ function makeSidebarDom(rows) {
 
 const clickEventOn = (row) => ({ target: { closest: (sel) => (sel === '.tn-sess-hl' ? row : null) } })
 
+test('Given 冷启动存量通知带会话标题 When 静默对齐 Then 不呈现但行挂高亮', async () => {
+  // 冷启动对齐只静默通知呈现,未读会话闪烁是本机 UI 状态,不属轰炸,必须保留
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-cold', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod, shown } = loadClient({
+    storage: new FakeStorage(),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: hlUnits, soundMapping: {}, version: 1 }) }),
+    document: { title: '会话乙 — DeepSeek Harness', ...dom },
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(shown.length, 0, '冷启动对齐不轰炸呈现')
+  assert.ok(dom.rows[0].classList.set.has('tn-sess-hl'), '静默对齐仍应挂未读会话高亮')
+  assert.ok(dom.rows[0].classList.set.has('tn-sess-hl--completed'), '冷启动高亮携带分类色')
+})
+
+test('Given 冷启动存量通知是当前查看的会话 When 静默对齐 Then 不挂高亮', async () => {
+  // 与正常路径同语义:正在查看即已读,不做未读强调
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-cold-cur', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: hlUnits, soundMapping: {}, version: 1 }) }),
+    document: { title: '会话甲 — DeepSeek Harness', ...dom },
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '正在查看的会话冷启动也不挂高亮')
+})
+
+test('Given 高亮开关关闭且冷启动带存量通知 When 静默对齐 Then 不挂任何类', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-off', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod } = loadClient({
+    storage: new FakeStorage({ 'turn-notify:session-hl': '0' }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: hlUnits, soundMapping: {}, version: 1 }) }),
+    document: { title: '会话乙 — DeepSeek Harness', ...dom },
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '开关关闭时冷启动也不挂高亮')
+})
+
+test('Given 冷启动存量超过高亮容量上限 When 静默对齐 Then 仅保留最新一批,最旧被淘汰', async () => {
+  const titles = Array.from({ length: 22 }, (unused, index) => '会话' + (index + 1))
+  const dom = makeSidebarDom(titles.map((leafText) => ({ leafText })))
+  const hlUnits = titles.map((title, index) => ({
+    id: 'u-cap-' + index, category: 'completed', text: '[dsh] 任务完成: ' + title, session: title,
+  }))
+  const { mod } = loadClient({
+    storage: new FakeStorage(),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: hlUnits, soundMapping: {}, version: 1 }) }),
+    document: { title: 'dsh', ...dom },
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '最旧条目被淘汰')
+  assert.equal(dom.rows[1].classList.set.has('tn-sess-hl'), false, '最旧条目被淘汰')
+  assert.ok(dom.rows[2].classList.set.has('tn-sess-hl'), '上限内条目保留')
+  assert.ok(dom.rows[21].classList.set.has('tn-sess-hl'), '最新条目保留')
+})
+
+test('Given 冷启动标题未就绪误挂当前会话 When 标题就绪后任一应用帧 Then 自愈摘除', async () => {
+  // 首拉早于宿主设置 title 时,"正在看即已读"排除失效误挂;就绪后的应用帧复核自愈
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-race', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲' },
+  ]
+  const { mod, document: docStub } = loadClient({
+    storage: new FakeStorage(),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ units: hlUnits, soundMapping: {}, version: 1 }) }),
+    document: { title: 'dsh', ...dom },
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), true, '标题未就绪时误挂,复现竞态')
+  docStub.title = '会话甲 — DeepSeek Harness'
+  await mod.__test.poll()
+  assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false, '标题就绪后应用帧自愈摘除')
+})
+
 test('Given 通知带 session 标题 When 认领 Then 会话行挂上高亮类', async () => {
   const dom = makeSidebarDom([{ leafText: '会话甲' }])
   const hlUnits = [

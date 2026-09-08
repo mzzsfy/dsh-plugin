@@ -588,26 +588,24 @@ window.__ModuleLoader__.load({
       } catch {
         storageState.broken = true
       }
+      // 聚焦静默双条件:可见且有焦点才静默(竞品对齐)。hasFocus 单独成立而页面
+      // hidden 的边界(多屏/预渲染)不静默
+      const engaged = isEngaged()
       for (const unit of units) {
         // 冷启动对齐:错过窗口期的存量通知不回放轰炸;审批与提问例外——
         // 它们在等用户动作,静默会把待办吞掉
         if (coldStart && unit.category !== 'approval' && unit.category !== 'ask') {
           try { markDone(unit.id) } catch { /* 存储不可用:标记缺失由内存去重兜底,冷启动本就不发声 */ }
+          // 静默对齐只不呈现通知,未读会话闪烁照常:高亮是本机 UI 状态,不属轰炸
+          rememberSessionHighlight(unit, engaged)
           continue
         }
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
-        // 聚焦静默双条件:可见且有焦点才静默(竞品对齐)。hasFocus 单独成立而页面
-        // hidden 的边界(多屏/预渲染)不静默;unit.routes 为事件→通道路由放行名单
-        const engaged = document.hasFocus() && document.hidden === false
         const channels = chooseChannels(engaged, notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category, unit.routes ?? null)
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast || channels.sound || channels.system || channels.blink) {
-          if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
-          // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名);
-          // 聚焦时正在查看的会话不闪烁——与 dsh 原版一致,正在看的会话不做未读强调;
-          // 失焦期间照常挂,返回页面时由可见性同步清除(回来即已读)
-          if (unit.session && !(engaged && isCurrentSessionTitle(unit.session))) sessionHighlights.set(unit.session, unit.category)
+          rememberSessionHighlight(unit, engaged)
         }
         if (channels.toast) {
           toast?.(unit.text + (unit.summary ? '\n' + unit.summary : ''), {
@@ -773,12 +771,38 @@ window.__ModuleLoader__.load({
       return text.indexOf('进行中') >= 0 || text.toLowerCase().indexOf('running') >= 0
     }
 
+    // 聚焦静默双条件:可见且有焦点才静默(竞品对齐)。hasFocus 单独成立而页面
+    // hidden 的边界(多屏/预渲染)不静默
+    const isEngaged = () => document.hasFocus() && document.hidden === false
+
+    // 高亮挂载单一入口:正常送达与冷启动静默对齐共用;
+    // 门控差异:正常送达仅在通知实际投递(任一呈现通道放行)时挂,冷启动静默对齐
+    // 无条件挂——高亮是未读 UI 状态,不属通知轰炸,错过窗口的存量照样强调;
+    // 开关关闭不积累条目;聚焦时正在查看的会话不挂——与 dsh 原版一致,正在看即已读,
+    // 失焦期间照常挂,返回页面时由可见性同步清除(回来即已读);
+    // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名)
+    function rememberSessionHighlight(unit, engaged) {
+      if (!sessionHighlightEnabled || !unit.session) return
+      if (engaged && isCurrentSessionTitle(unit.session)) return
+      if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
+      sessionHighlights.set(unit.session, unit.category)
+    }
+
     // 增量重应用:仅补缺失类,不产生多余 DOM 写,防 MutationObserver 回调自我触发成环;
     // 快照遍历:行进入运行状态时清理对应条目,迭代中删除不改快照
     function applySessionHighlights() {
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return
       if (!sessionHighlightEnabled) return
+      const engaged = isEngaged()
       for (const [title, category] of [...sessionHighlights]) {
+        // 聚焦态复核:冷启动首拉早于标题就绪时误挂的当前会话高亮,标题就绪后的
+        // 任一应用帧在此自愈(与返回即已读同语义:正在看即不强调)
+        if (engaged && isCurrentSessionTitle(title)) {
+          sessionHighlights.delete(title)
+          const stale = findSessionRow(title)
+          if (stale) removeRowHighlight(stale)
+          continue
+        }
         const row = findSessionRow(title)
         if (!row) continue
         if (isRowRunning(row)) {
