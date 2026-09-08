@@ -22,7 +22,7 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const MESSAGES = indexModule.MESSAGES
-const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT, HISTORY_INPUT_MAX_CHARS, HISTORY_PROMPTS_MAX, HISTORY_SCOPES } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
+const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT, HISTORY_INPUT_MAX_CHARS, HISTORY_PROMPTS_MAX, HISTORY_SCOPES, DEFAULT_AUTO_ARCHIVE_DAYS, DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
 const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cache.mjs')
 
 // 插件激活即跑历史缓存启动对齐:所有测试统一隔离缓存目录,
@@ -129,7 +129,11 @@ function makeCtx({
   const settingsService = {
     get: () => settingsState.value,
     register: () => ({ resolved: undefined }),
-    update: (ns, patch) => { settingsState.value = { ...(settingsState.value || {}), ...patch } },
+    // 宿主 update 为异步串行:合并进微任务队列后生效,读旧值发生在 flush 前
+    update: (ns, patch) => new Promise((resolve) => queueMicrotask(() => {
+      settingsState.value = { ...(settingsState.value || {}), ...patch }
+      resolve()
+    })),
   }
   // timer 服务桩:模拟宿主 timer 激活后的 interval;unref 保证测试进程可自然退出
   const intervalStub = (fn, ms) => {
@@ -1845,6 +1849,78 @@ test('历史浮层启停:GET 默认启用,POST 切换经 settings 持久,GET 反
   const restored = response()
   await handlers.get('/api/session-manager/history-enabled')(getRequest2('/api/session-manager/history-enabled', 'GET'), restored)
   assert.equal(restored.body.enabled, true)
+})
+
+test('自动归档配置:GET 回显生效值(未配置回默认),POST 持久,GET 反映新值', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const initial = response()
+  await handlers.get('/api/session-manager/auto-archive')(getRequest2('/api/session-manager/auto-archive', 'GET'), initial)
+  assert.deepEqual(initial.body, { days: DEFAULT_AUTO_ARCHIVE_DAYS, intervalHours: DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS }, '未配置时回显默认值')
+  const changed = await postJson(handlers, '/api/session-manager/auto-archive', { days: 3, intervalHours: 12 })
+  assert.deepEqual(changed.body, { days: 3, intervalHours: 12 })
+  const reread = response()
+  await handlers.get('/api/session-manager/auto-archive')(getRequest2('/api/session-manager/auto-archive', 'GET'), reread)
+  assert.deepEqual(reread.body, { days: 3, intervalHours: 12 }, 'settings 持久化新值')
+})
+
+test('自动归档配置:单字段部分更新,未提交字段保持不变', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const onlyDays = await postJson(handlers, '/api/session-manager/auto-archive', { days: 3 })
+  assert.deepEqual(onlyDays.body, { days: 3, intervalHours: DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS }, '仅更新 days')
+  const onlyHours = await postJson(handlers, '/api/session-manager/auto-archive', { intervalHours: 12 })
+  assert.deepEqual(onlyHours.body, { days: 3, intervalHours: 12 }, '仅更新 intervalHours,days 保持')
+})
+
+test('自动归档配置:0 值合法且持久(阈值天数关自动归档,间隔小时数关周期轮)', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const off = await postJson(handlers, '/api/session-manager/auto-archive', { days: 0, intervalHours: 0 })
+  assert.deepEqual(off.body, { days: 0, intervalHours: 0 })
+  const reread = response()
+  await handlers.get('/api/session-manager/auto-archive')(getRequest2('/api/session-manager/auto-archive', 'GET'), reread)
+  assert.deepEqual(reread.body, { days: 0, intervalHours: 0 }, '关闭值持久化')
+})
+
+test('自动归档配置:负数/非整数/非数值/空字段一律 400,配置不变', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const invalidPayloads = [
+    { days: -1, intervalHours: 1 },
+    { days: 1.5, intervalHours: 1 },
+    { days: '3', intervalHours: 1 },
+    { days: true, intervalHours: 1 },
+    { days: null, intervalHours: 1 },
+    {},
+  ]
+  for (const payload of invalidPayloads) {
+    const rejected = await postJson(handlers, '/api/session-manager/auto-archive', payload)
+    assert.equal(rejected.status, 400, JSON.stringify(payload))
+  }
+  const after = response()
+  await handlers.get('/api/session-manager/auto-archive')(getRequest2('/api/session-manager/auto-archive', 'GET'), after)
+  assert.deepEqual(after.body, { days: DEFAULT_AUTO_ARCHIVE_DAYS, intervalHours: DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS }, '被拒请求不改动配置')
+})
+
+test('自动归档配置提交判定:noop/invalid/post 三态分类', async () => {
+  const { classifyAutoArchiveInput } = await import('../src/core.mjs')
+  assert.deepEqual(classifyAutoArchiveInput('7', '7'), { action: 'noop' }, '值未变不提交')
+  assert.deepEqual(classifyAutoArchiveInput('7', '  7  '), { action: 'noop' }, '空白差异修剪后视为未变')
+  assert.deepEqual(classifyAutoArchiveInput('7', '-1'), { action: 'invalid' }, '负数拒绝')
+  assert.deepEqual(classifyAutoArchiveInput('7', '1.5'), { action: 'invalid' }, '非整数拒绝')
+  assert.deepEqual(classifyAutoArchiveInput('7', 'abc'), { action: 'invalid' }, '非数值拒绝')
+  assert.deepEqual(classifyAutoArchiveInput('7', ''), { action: 'invalid' }, '空文本拒绝')
+  assert.deepEqual(classifyAutoArchiveInput('7', '0'), { action: 'post', value: 0 }, '0 合法(关闭语义)')
+  assert.deepEqual(classifyAutoArchiveInput('7', '3'), { action: 'post', value: 3 }, '正整数可提交')
+})
+
+test('自动归档配置提交判定:client 与 core 镜像同源,提交守卫对照已提交值', { skip: process.env.TEST_SKIP_PARITY }, async () => {
+  const clientSource = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const declared = clientSource.match(/function classifyAutoArchiveInput\(committedText, text\) \{([\s\S]*?)\n\}/)
+  assert.ok(declared, 'client.js 必须内联声明 classifyAutoArchiveInput')
+  const coreSource = await readFile(new URL('../src/core.mjs', import.meta.url), 'utf8')
+  const coreBody = coreSource.match(/export function classifyAutoArchiveInput\(committedText, text\) \{([\s\S]*?)\n\}/)
+  assert.ok(coreBody, 'core.mjs 必须声明 classifyAutoArchiveInput')
+  assert.equal(declared[1].trim(), coreBody[1].trim(), 'client 内联实现与 core 逐行一致')
+  // 调用点契约:守卫实参必须是已提交基准 committed[field],对照显示值比较恒相等(受控输入击键已同步)
+  assert.match(clientSource, /classifyAutoArchiveInput\(committed\[field\], text\)/, 'commit 必须以 committed[field] 为守卫基准')
 })
 
 function getRequest2(url, method) {

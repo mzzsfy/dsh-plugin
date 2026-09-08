@@ -5,6 +5,20 @@ export const DAY_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_AUTO_ARCHIVE_DAYS = 7
 export const DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS = 24
 
+/**
+ * 自动归档配置的提交判定:输入框文本对照已提交值分类。
+ * @param committedText - 该字段已提交值的字符串形态
+ * @param text - 输入框当前文本
+ * @returns noop 值未变 | invalid 非非负整数 | post 可提交(携带解析后的数值)
+ */
+export function classifyAutoArchiveInput(committedText, text) {
+  const trimmed = text.trim()
+  if (trimmed === committedText) return { action: 'noop' }
+  const value = Number(trimmed)
+  if (trimmed === '' || !Number.isInteger(value) || value < 0) return { action: 'invalid' }
+  return { action: 'post', value }
+}
+
 /** 更新时间 = max(createdAt, 最近活跃时间)。 */
 export function updatedAtOf(header, activityAtMs) {
   return Math.max(header.createdAt, activityAtMs ?? 0)

@@ -84,6 +84,14 @@ const CSS = [
   '.sm-histsw:hover { color:var(--dsw-alias-label-primary, inherit); }',
   '@media (prefers-reduced-motion: reduce) { .sm-histsw__track, .sm-histsw__thumb { transition:none; } }',
   '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
+  // 自动归档配置行:数值输入内联呈现,窄面板可换行
+  '.sm-cfg { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:10px;',
+  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
+  '.sm-cfg__field { display:inline-flex; align-items:center; gap:4px; }',
+  '.sm-cfg__field input { width:56px; padding:2px 6px; border-radius:6px; color-scheme:light dark;',
+  '  border:1px solid light-dark(rgba(15,17,21,.18), rgba(255,255,255,.22));',
+  '  background:transparent; color:inherit; font:inherit; }',
+  '.sm-cfg__field input:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary, #1677ff); outline-offset:0; }',
   // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,
   // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
   // 色值取自宿主实测(白底卡片/墨色文字/蓝色强调):dsw alias 变量在宿主为空,不可依赖
@@ -455,6 +463,7 @@ function SessionManagerApp(props) {
       onRemount,
       onForget,
     }),
+    h(AutoArchiveConfig, null),
     h(HistorySwitchRow, null),
   )
 }
@@ -486,6 +495,87 @@ function HistorySwitchRow() {
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '历史输入浮层(Alt+↑)'),
+  )
+}
+
+// 自动归档配置:阈值天数与周期小时数,数值语义,失焦或 Enter 单字段即时提交;
+// 值存宿主 settings(与评估逻辑同源,0 = 关闭),非法输入前端拒绝不发包,
+// 服务端失败后回读生效值回滚显示
+const AUTO_ARCHIVE_URL = '/api/session-manager/auto-archive'
+
+// 提交判定三态(镜像 core.mjs classifyAutoArchiveInput):noop 值未变 /
+// invalid 非非负整数 / post 可提交;受控输入下显示值随击键同步,提交守卫
+// 必须对照已提交值而非显示值
+function classifyAutoArchiveInput(committedText, text) {
+  const trimmed = text.trim()
+  if (trimmed === committedText) return { action: 'noop' }
+  const value = Number(trimmed)
+  if (trimmed === '' || !Number.isInteger(value) || value < 0) return { action: 'invalid' }
+  return { action: 'post', value }
+}
+
+function AutoArchiveConfig() {
+  const [state, setState] = useState(null)
+  // 已提交值快照:非法输入与保存失败的回滚基准,与编辑中的显示值分离
+  const committedRef = React.useRef(null)
+  useEffect(() => {
+    api(AUTO_ARCHIVE_URL)
+      .then((payload) => {
+        if (!payload) return
+        const next = { days: String(payload.days), intervalHours: String(payload.intervalHours) }
+        committedRef.current = next
+        setState(next)
+      })
+      .catch((error) => { console.warn('[session-manager] 自动归档配置读取失败', error) })
+  }, [])
+  function refresh() {
+    return api(AUTO_ARCHIVE_URL)
+      .then((payload) => {
+        if (!payload) return
+        const next = { days: String(payload.days), intervalHours: String(payload.intervalHours) }
+        committedRef.current = next
+        setState(next)
+      })
+      .catch((error) => { console.warn('[session-manager] 自动归档配置回读失败', error) })
+  }
+  function commit(field, text) {
+    const committed = committedRef.current
+    if (committed === null) return
+    // 提交判定与 core.mjs classifyAutoArchiveInput 镜像同规:受控输入下显示值已随
+    // 击键同步,守卫必须对已提交基准比较,与显示值比较恒相等
+    const verdict = classifyAutoArchiveInput(committed[field], text)
+    if (verdict.action === 'noop') return
+    if (verdict.action === 'invalid') {
+      setState({ ...committed })
+      toast('自动归档配置须为非负整数', { kind: 'error' })
+      return
+    }
+    const value = verdict.value
+    api(AUTO_ARCHIVE_URL, { method: 'POST', body: JSON.stringify({ [field]: value }) })
+      .then((payload) => {
+        // 仅合回已提交字段,不清掉另一字段的未提交编辑
+        const saved = String(payload[field])
+        committedRef.current = { ...committedRef.current, [field]: saved }
+        setState((prev) => (prev === null ? prev : { ...prev, [field]: saved }))
+        toast('自动归档配置已保存')
+      })
+      .catch(() => {
+        toast('自动归档配置保存失败', { kind: 'error' })
+        void refresh()
+      })
+  }
+  if (state === null) return null
+  const numberInput = (field) => h('input', {
+    type: 'number', min: 0, step: 1, value: state[field],
+    onChange: (event) => setState((prev) => (prev === null ? prev : { ...prev, [field]: event.target.value })),
+    // Enter 经 blur 走同一提交路径,避免与 onBlur 双触发重复提交
+    onKeyDown: (event) => { if (event.key === 'Enter') event.target.blur() },
+    onBlur: (event) => commit(field, event.target.value),
+  })
+  return h('div', { className: 'sm-cfg' },
+    h('span', null, '自动归档'),
+    h('label', { className: 'sm-cfg__field' }, '阈值', numberInput('days'), '天未活跃(0 关闭)'),
+    h('label', { className: 'sm-cfg__field' }, '周期', numberInput('intervalHours'), '小时(0 关闭)'),
   )
 }
 
