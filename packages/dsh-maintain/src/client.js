@@ -156,9 +156,10 @@ function post(url, body) {
 
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
 // 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询;
-// 总时长上限与宿主升级命令超时同语义(见 parity 对拍):超限说明宿主或进程管理器异常,浮条转状态未知。
+// 总时长上限覆盖宿主重试链上限(尝试次数×单次超时+退避+强杀宽限,见 parity 对拍):
+// 超限说明宿主或进程管理器异常,浮条转状态未知。
 // 代际令牌防重叠拍:顺序自调度(settle 后排下一拍),单请求带超时,stop 后迟到拍经验代际丢弃
-const UPGRADE_WATCH_MAX_MS = 10 * 60 * 1000
+const UPGRADE_WATCH_MAX_MS = 32 * 60 * 1000
 const UPGRADE_POLL_TIMEOUT_MS = 5 * 1000
 const upgradeWatch = { generation: null, startedAt: 0, listeners: new Set() }
 

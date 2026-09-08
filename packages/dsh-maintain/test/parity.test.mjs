@@ -92,7 +92,16 @@ test('parity: VERDICT 三常量 client 与 core 一致', () => {
 })
 
 // host 侧锚点直接 import index.js 实现,防测试内手抄字面量漂移假绿
-import { DEFAULT_UPGRADE_TEMPLATE, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, TICK_MS, API_PATHS, UPGRADE_TIMEOUT_MS } from '../src/index.js'
+import {
+  DEFAULT_UPGRADE_TEMPLATE,
+  DEFAULT_POLL_INTERVAL_SEC,
+  DEFAULT_REGISTRY_BASE,
+  TICK_MS,
+  API_PATHS,
+  UPGRADE_TIMEOUT_MS,
+  UPGRADE_MAX_ATTEMPTS,
+  UPGRADE_RETRY_BACKOFF_MS,
+} from '../src/index.js'
 
 test('parity: 默认升级命令模板 client 字面量与 host 实现一致', () => {
   assert.equal(extractConst('DEFAULT_UPGRADE_TEMPLATE'), DEFAULT_UPGRADE_TEMPLATE)
@@ -132,9 +141,17 @@ test('parity: 重启等待总时长大于宿主退出延迟', () => {
   assert.ok(restartTimeoutMs > RESTART_DELAY_MS, 'RESTART_TIMEOUT_MS 必须大于 RESTART_DELAY_MS')
 })
 
-test('parity: 升级观察上限不早于宿主升级超时(防抢跑转状态未知)', () => {
+test('parity: 升级观察上限覆盖宿主重试链上限(防抢跑转状态未知)', () => {
+  // 重试链上限 = 尝试次数×单次超时 + 最大退避累计 + 强杀宽限;超时强杀只会终止链,不叠加
+  const KILL_GRACE_MS = 5 * 1000
+  const maxBackoffTotal = Object.values(UPGRADE_RETRY_BACKOFF_MS)
+    .reduce((max, seq) => Math.max(max, seq.reduce((sum, ms) => sum + ms, 0)), 0)
+  const chainUpperBound = UPGRADE_MAX_ATTEMPTS * UPGRADE_TIMEOUT_MS + maxBackoffTotal + KILL_GRACE_MS
   const watchMaxMs = extractNumberConst('UPGRADE_WATCH_MAX_MS')
-  assert.ok(watchMaxMs >= UPGRADE_TIMEOUT_MS, 'UPGRADE_WATCH_MAX_MS(' + watchMaxMs + ') 必须不小于宿主 UPGRADE_TIMEOUT_MS(' + UPGRADE_TIMEOUT_MS + ')')
+  assert.ok(
+    watchMaxMs >= chainUpperBound,
+    'UPGRADE_WATCH_MAX_MS(' + watchMaxMs + ') 必须不小于重试链上限(' + chainUpperBound + ')',
+  )
 })
 
 test('parity: npm 版本页链接与追踪包名同源', () => {

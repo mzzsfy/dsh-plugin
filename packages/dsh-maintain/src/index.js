@@ -12,11 +12,14 @@ import {
   TARGET_PACKAGE,
   TAG_PLACEHOLDER,
   buildUpgradeCommand,
+  classifyUpgradeFailure,
   fetchDistTags,
   isValidChannelName,
   isValidRegistryBase,
   judgeVersion,
   resolveHostVersion,
+  UPGRADE_FAIL_FILE_LOCKED,
+  UPGRADE_FAIL_TRANSIENT_NETWORK,
 } from './core.mjs'
 import { runUpgrade } from './upgrade.mjs'
 
@@ -38,6 +41,61 @@ export const RESTART_DELAY_MS = 2 * 1000
 export const TICK_MS = 60 * 1000
 // 轮询间隔上界:超大值会让到期时间戳溢出为 Infinity,轮询静默失效
 export const POLL_INTERVAL_MAX_SEC = 30 * 24 * 60 * 60
+
+// 升级尝试次数上限(含首次):npm 文件锁重试收益递减,收敛防长期占锁;导出仅供测试与 parity 对拍
+export const UPGRADE_MAX_ATTEMPTS = 3
+// 可重试失败的退避序列,按重试序号取值,越界取末位;导出仅供测试与 parity 对拍
+export const UPGRADE_RETRY_BACKOFF_MS = Object.freeze({
+  [UPGRADE_FAIL_FILE_LOCKED]: Object.freeze([5 * 1000, 15 * 1000]),
+  [UPGRADE_FAIL_TRANSIENT_NETWORK]: Object.freeze([3 * 1000, 9 * 1000]),
+})
+
+function upgradeRetryBackoffMs(kind, retryIndex) {
+  const seq = UPGRADE_RETRY_BACKOFF_MS[kind]
+  if (!seq || seq.length === 0) return 0
+  return seq[Math.min(retryIndex, seq.length - 1)]
+}
+
+const sleepMs = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
+
+// 升级尝试循环:单次执行语义与超时不变,失败经分类,可重试类按退避重试,
+// 直至成功/不可重试/次数上限;runImpl/sleepImpl 注入仅供测试,默认真实执行器与定时睡眠
+export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT_MS, maxAttempts = UPGRADE_MAX_ATTEMPTS, runImpl = runUpgrade, sleepImpl = sleepMs, onAttemptStart }) {
+  const attempts = []
+  for (let index = 0; index < maxAttempts; index += 1) {
+    if (index > 0 && typeof onAttemptStart === 'function') onAttemptStart()
+    const startedAt = Date.now()
+    let result = null
+    let thrownMessage = null
+    try {
+      result = await runImpl({ command, timeoutMs })
+    } catch (error) {
+      thrownMessage = error && error.message ? error.message : String(error)
+    }
+    if (thrownMessage !== null) {
+      attempts.push({ startedAt, finishedAt: Date.now(), ok: false, code: null, timedOut: false, kind: null, stdoutTail: '', stderrTail: '' })
+      return { attempts, ok: false, kind: null, stillRunning: false, error: thrownMessage }
+    }
+    const failure = result.ok ? null : classifyUpgradeFailure(result)
+    attempts.push({
+      startedAt,
+      finishedAt: Date.now(),
+      ok: result.ok === true,
+      code: typeof result.code === 'number' ? result.code : null,
+      timedOut: result.timedOut === true,
+      kind: failure === null ? null : failure.kind,
+      stdoutTail: result.stdoutTail ?? '',
+      stderrTail: result.stderrTail ?? '',
+    })
+    if (result.ok) return { attempts, ok: true, kind: null, stillRunning: false, error: null }
+    if (failure.retryable !== true || index >= maxAttempts - 1) {
+      return { attempts, ok: false, kind: failure.kind, stillRunning: result.stillRunning === true, error: null }
+    }
+    const backoffMs = upgradeRetryBackoffMs(failure.kind, index)
+    if (backoffMs > 0) await sleepImpl(backoffMs)
+  }
+  return { attempts, ok: false, kind: null, stillRunning: false, error: null }
+}
 
 // 浏览器半区调用的 API 路径清单:client.js 同名常量与之对拍(parity),防单侧改路径生产 404
 export const API_PATHS = Object.freeze({
@@ -276,40 +334,77 @@ export function apply(ctx) {
     const config = readSettings(ctx)
     // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
     const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
-    const last = { command, startedAt: Date.now(), ok: false, finishedAt: null, timedOut: false, stillRunning: false, code: null, stdoutTail: '', stderrTail: '', error: null }
+    const last = {
+      command,
+      startedAt: Date.now(),
+      ok: false,
+      finishedAt: null,
+      timedOut: false,
+      stillRunning: false,
+      code: null,
+      stdoutTail: '',
+      stderrTail: '',
+      error: null,
+      kind: null,
+      attempts: [],
+    }
     // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
     upgrade = { running: true, last }
-    try {
-      writeFileSync(UPGRADE_LOCK_PATH, JSON.stringify({ startedAt: last.startedAt, pid: process.pid }), 'utf8')
-    } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
+    writeUpgradeLock(last.startedAt)
     console.warn('[dsh-maintain] 升级开始: ' + command)
-    runUpgrade({ command, timeoutMs: UPGRADE_TIMEOUT_MS })
-      .then((result) => {
-        upgrade = {
-          running: false,
-          last: { ...last, ok: result.ok, finishedAt: Date.now(), timedOut: result.timedOut, stillRunning: result.stillRunning === true, code: result.code, stdoutTail: result.stdoutTail, stderrTail: result.stderrTail },
+    void performUpgrade(command, last)
+  }
+
+  // 升级锁文件只在此写入:首次与每次重试覆写,startedAt 取当前尝试开始时刻,
+  // 过期阈值覆盖单次尝试的完整时长(超时 + 强杀宽限)
+  function writeUpgradeLock(startedAt) {
+    try {
+      writeFileSync(UPGRADE_LOCK_PATH, JSON.stringify({ startedAt, pid: process.pid }), 'utf8')
+    } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
+  }
+
+  async function performUpgrade(command, last) {
+    try {
+      const settle = await runUpgradeWithRetry({
+        command,
+        onAttemptStart: () => writeUpgradeLock(Date.now()),
+      })
+      const final = settle.attempts[settle.attempts.length - 1] ?? null
+      Object.assign(last, {
+        attempts: settle.attempts,
+        ok: settle.ok,
+        kind: settle.kind,
+        error: settle.error,
+        finishedAt: Date.now(),
+        timedOut: final !== null ? final.timedOut : false,
+        stillRunning: settle.stillRunning,
+        code: final !== null ? final.code : null,
+        stdoutTail: final !== null ? final.stdoutTail : '',
+        stderrTail: final !== null ? final.stderrTail : '',
+      })
+    } catch (error) {
+      last.error = error && error.message ? error.message : String(error)
+    } finally {
+      if (last.finishedAt === null) last.finishedAt = Date.now()
+      upgrade = { running: false, last }
+      // stillRunning(强杀后进程树疑似仍在写全局目录)时保留锁文件,由过期机制收敛,
+      // 与"宿主死后幽灵锁"防线对称;正常落定即删
+      if (last.stillRunning === true) {
+        console.warn('[dsh-maintain] 升级超时强杀且进程疑似仍存活,升级锁保留至过期: ' + UPGRADE_LOCK_PATH)
+      } else {
+        try {
+          rmSync(UPGRADE_LOCK_PATH, { force: true })
+        } catch (lockError) {
+          console.warn('[dsh-maintain] 升级锁删除失败(将由过期机制收敛): ' + (lockError?.message ?? lockError))
         }
-      })
-      .catch((error) => {
-        upgrade = { running: false, last: { ...last, finishedAt: Date.now(), error: error && error.message ? error.message : String(error) } }
-      })
-      .then(() => {
-        // stillRunning(强杀后进程树疑似仍在写全局目录)时保留锁文件,由过期机制收敛,
-        // 与"宿主死后幽灵锁"防线对称;正常落定即删
-        if (upgrade.last.stillRunning === true) {
-          console.warn('[dsh-maintain] 升级超时强杀且进程疑似仍存活,升级锁保留至过期: ' + UPGRADE_LOCK_PATH)
-        } else {
-          try {
-            rmSync(UPGRADE_LOCK_PATH, { force: true })
-          } catch (lockError) {
-            console.warn('[dsh-maintain] 升级锁删除失败(将由过期机制收敛): ' + (lockError?.message ?? lockError))
-          }
-        }
-        console.warn('[dsh-maintain] 升级结束: ok=' + upgrade.last.ok + (upgrade.last.code !== null ? ' 退出码=' + upgrade.last.code : '') + (upgrade.last.error ? ' ' + upgrade.last.error : ''))
-      })
+      }
+      console.warn('[dsh-maintain] 升级结束: ok=' + last.ok + ' kind=' + last.kind
+        + (last.code !== null ? ' 退出码=' + last.code : '')
+        + (last.error ? ' ' + last.error : '')
+        + (last.stale === true ? ' stale=' + last.reason : ''))
       // 升级结束后自动重新检查版本并重排轮询(命令可能改了本地版本)
-      .then(runCheck, runCheck)
-      .then(scheduleNext, scheduleNext)
+      runCheck().then(scheduleNext, scheduleNext)
+    }
   }
 
   const WRITE = { crossOrigin: true }
@@ -318,7 +413,7 @@ export function apply(ctx) {
     {
       path: API_PATHS.STATUS,
       handler: route('GET', {}, async (req, res) => {
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {
@@ -326,7 +421,7 @@ export function apply(ctx) {
       handler: route('POST', WRITE, async (req, res) => {
         await drainInFlightThenCheck()
         scheduleNext()
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {
@@ -355,7 +450,7 @@ export function apply(ctx) {
         await settings.update(NAMESPACE, { channel })
         // 切通道无需重查:dist-tags 与 channel 无关,白名单已用现有 snapshot 校验
         scheduleNext()
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {
@@ -373,7 +468,7 @@ export function apply(ctx) {
           return
         }
         await settings.update(NAMESPACE, { upgradeCommandTemplate: template })
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {
@@ -398,7 +493,7 @@ export function apply(ctx) {
         }
         await settings.update(NAMESPACE, { pollIntervalSec: seconds })
         scheduleNext()
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {
@@ -418,7 +513,7 @@ export function apply(ctx) {
         await settings.update(NAMESPACE, { registryBase: base })
         await drainInFlightThenCheck()
         scheduleNext()
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {
@@ -435,7 +530,7 @@ export function apply(ctx) {
           return
         }
         triggerUpgrade()
-        sendJson(res, 200, currentStatus())
+        sendJson(res, 200, await currentStatus())
       }),
     },
     {

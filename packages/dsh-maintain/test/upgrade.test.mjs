@@ -1,7 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { runUpgrade } from '../src/upgrade.mjs'
+import { runUpgradeWithRetry, UPGRADE_MAX_ATTEMPTS, UPGRADE_RETRY_BACKOFF_MS } from '../src/index.js'
+import {
+  UPGRADE_FAIL_FILE_LOCKED,
+  UPGRADE_FAIL_TRANSIENT_NETWORK,
+  UPGRADE_FAIL_NPM_MISSING,
+  UPGRADE_FAIL_TIMEOUT,
+} from '../src/core.mjs'
 
 // 脚本体一律单引号:Windows shell 化 spawn 经 cmd.exe,双层双引号会被截断。
 const NODE = 'node'
@@ -62,4 +72,127 @@ test('场景:超长输出截尾保留末尾', async () => {
 test('场景:命令不存在失败不抛错', async () => {
   const result = await runUpgrade({ command: 'definitely-not-exist-cmd-xyz --version', timeoutMs: 10 * 1000 })
   assert.equal(result.ok, false)
+})
+
+// ---- S2 限次重试:尝试循环以注入式执行器单测,退避零等待;末尾附真实假命令端到端 ----
+
+const FILE_LOCKED_FAIL = {
+  ok: false,
+  code: 1,
+  timedOut: false,
+  stillRunning: false,
+  stdoutTail: '',
+  stderrTail: 'npm error code EBUSY\nnpm error syscall rename',
+}
+const NETWORK_FAIL = {
+  ok: false,
+  code: 1,
+  timedOut: false,
+  stillRunning: false,
+  stdoutTail: '',
+  stderrTail: 'npm error code ECONNRESET',
+}
+const OK_RESULT = { ok: true, code: 0, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: '' }
+
+function makeHarness(results) {
+  const queue = results.slice()
+  const sleeps = []
+  let attemptStarts = 0
+  return {
+    sleeps,
+    runImpl: async () => (queue.length > 1 ? queue.shift() : queue[0]),
+    sleepImpl: async (ms) => { sleeps.push(ms) },
+    onAttemptStart: () => { attemptStarts += 1 },
+    get starts() { return attemptStarts },
+  }
+}
+
+const ATTEMPT_KEYS = ['startedAt', 'finishedAt', 'ok', 'code', 'timedOut', 'kind', 'stdoutTail', 'stderrTail'].sort()
+
+test('重试:可重试失败按退避序列重试至成功', async () => {
+  const harness = makeHarness([FILE_LOCKED_FAIL, NETWORK_FAIL, OK_RESULT])
+  const settle = await runUpgradeWithRetry({ command: 'fake', runImpl: harness.runImpl, sleepImpl: harness.sleepImpl, onAttemptStart: harness.onAttemptStart })
+  assert.equal(settle.ok, true)
+  assert.equal(settle.attempts.length, 3)
+  assert.equal(settle.kind, null)
+  assert.deepEqual(settle.attempts.map((a) => a.kind), [UPGRADE_FAIL_FILE_LOCKED, UPGRADE_FAIL_TRANSIENT_NETWORK, null])
+  // 退避按 kind 取序列对应位:file-locked 首退避、transient-network 次退避
+  assert.deepEqual(harness.sleeps, [UPGRADE_RETRY_BACKOFF_MS[UPGRADE_FAIL_FILE_LOCKED][0], UPGRADE_RETRY_BACKOFF_MS[UPGRADE_FAIL_TRANSIENT_NETWORK][1]])
+  assert.equal(harness.starts, 2, '首次尝试不经 onAttemptStart,每次重试各触发一次(锁覆写点)')
+})
+
+test('重试:尝试条目形态锁定为计划字段集', async () => {
+  const harness = makeHarness([FILE_LOCKED_FAIL, OK_RESULT])
+  const settle = await runUpgradeWithRetry({ command: 'fake', runImpl: harness.runImpl, sleepImpl: harness.sleepImpl })
+  assert.deepEqual(Object.keys(settle.attempts[0]).sort(), ATTEMPT_KEYS)
+  assert.equal(settle.attempts[0].code, 1)
+  assert.equal(settle.attempts[0].timedOut, false)
+  assert.ok(settle.attempts[0].finishedAt >= settle.attempts[0].startedAt)
+})
+
+test('重试:不可重试类立即落定,不睡眠不重试', async () => {
+  for (const [fail, kind] of [
+    [{ ...FILE_LOCKED_FAIL, stderrTail: 'spawn npmm ENOENT' }, UPGRADE_FAIL_NPM_MISSING],
+    [{ ok: false, code: null, timedOut: true, stillRunning: false, stdoutTail: '', stderrTail: '' }, UPGRADE_FAIL_TIMEOUT],
+    [{ ok: false, code: 3, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: 'boom-fail' }, 'unknown'],
+  ]) {
+    const harness = makeHarness([fail])
+    const settle = await runUpgradeWithRetry({ command: 'fake', runImpl: harness.runImpl, sleepImpl: harness.sleepImpl })
+    assert.equal(settle.ok, false)
+    assert.equal(settle.kind, kind, JSON.stringify(fail))
+    assert.equal(settle.attempts.length, 1, JSON.stringify(fail))
+    assert.deepEqual(harness.sleeps, [], JSON.stringify(fail))
+  }
+})
+
+test('重试:持续可重试失败收敛于次数上限,末次不安排退避', async () => {
+  const harness = makeHarness([NETWORK_FAIL])
+  const settle = await runUpgradeWithRetry({ command: 'fake', runImpl: harness.runImpl, sleepImpl: harness.sleepImpl })
+  assert.equal(settle.ok, false)
+  assert.equal(settle.kind, UPGRADE_FAIL_TRANSIENT_NETWORK)
+  assert.equal(settle.attempts.length, UPGRADE_MAX_ATTEMPTS)
+  assert.equal(harness.sleeps.length, UPGRADE_MAX_ATTEMPTS - 1, '末次尝试后不得再安排退避')
+  assert.equal(settle.attempts.every((a) => a.kind === UPGRADE_FAIL_TRANSIENT_NETWORK), true)
+})
+
+test('重试:执行器抛错收敛为失败落定不重试', async () => {
+  const settle = await runUpgradeWithRetry({
+    command: 'fake',
+    runImpl: async () => { throw new Error('spawn exploded') },
+    sleepImpl: async () => {},
+  })
+  assert.equal(settle.ok, false)
+  assert.equal(settle.error, 'spawn exploded')
+  assert.equal(settle.attempts.length, 1)
+})
+
+test('重试:常量形态为计算式导出', () => {
+  assert.equal(UPGRADE_MAX_ATTEMPTS, 3)
+  assert.deepEqual(UPGRADE_RETRY_BACKOFF_MS[UPGRADE_FAIL_FILE_LOCKED], [5 * 1000, 15 * 1000])
+  assert.deepEqual(UPGRADE_RETRY_BACKOFF_MS[UPGRADE_FAIL_TRANSIENT_NETWORK], [3 * 1000, 9 * 1000])
+})
+
+test('重试:假命令真实进程 文件锁失败后重试成功', async () => {
+  const statePath = join(tmpdir(), 'dsh-maintain-retry-test-' + process.pid + '.flag')
+  rmSync(statePath, { force: true })
+  process.env.DSH_MAINTAIN_TEST_RETRY_STATE = statePath
+  try {
+    const script = "const fs=require('fs');const p=process.env.DSH_MAINTAIN_TEST_RETRY_STATE;if(fs.existsSync(p)){process.exit(0)}fs.writeFileSync(p,'1');console.error('npm error code EBUSY');console.error('npm error syscall rename');process.exit(1)"
+    let attemptStarts = 0
+    const settle = await runUpgradeWithRetry({
+      command: NODE + ' -e "' + script + '"',
+      runImpl: (opts) => runUpgrade(opts),
+      sleepImpl: async () => {},
+      onAttemptStart: () => { attemptStarts += 1 },
+    })
+    assert.equal(settle.ok, true)
+    assert.equal(settle.attempts.length, 2)
+    assert.equal(settle.attempts[0].ok, false)
+    assert.equal(settle.attempts[0].kind, UPGRADE_FAIL_FILE_LOCKED, '真实进程 stderr 应命中文件锁特征: ' + settle.attempts[0].stderrTail)
+    assert.equal(settle.attempts[1].ok, true)
+    assert.equal(settle.attempts[1].kind, null)
+    assert.equal(attemptStarts, 1, '仅重试尝试覆写锁')
+  } finally {
+    rmSync(statePath, { force: true })
+  }
 })

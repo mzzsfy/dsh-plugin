@@ -5,6 +5,7 @@ import {
   parseSemver,
   gtSemver,
   judgeVersion,
+  classifyUpgradeFailure,
   buildUpgradeCommand,
   isValidChannelName,
   isValidRegistryBase,
@@ -12,6 +13,11 @@ import {
   VERDICT_OUTDATED,
   VERDICT_UP_TO_DATE,
   VERDICT_UNKNOWN,
+  UPGRADE_FAIL_TRANSIENT_NETWORK,
+  UPGRADE_FAIL_FILE_LOCKED,
+  UPGRADE_FAIL_NPM_MISSING,
+  UPGRADE_FAIL_TIMEOUT,
+  UPGRADE_FAIL_UNKNOWN,
 } from '../src/core.mjs'
 
 const CURRENT = '0.1.1-rc.2'
@@ -173,4 +179,84 @@ test('场景:未失联且实例标识未变不刷新', () => {
   assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: 1 }, { lost: false, pid: undefined, bootAt: undefined }), false)
   // bootAt 单侧出现不构成证据(防旧宿主快照缺字段误判)
   assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: null }, { lost: false, pid: 100, bootAt: 200 }), false)
+})
+
+// 升级失败分类:npm 输出特征取自 npm 10/11 真实错误行形态(npm error code/syscall),
+// 特征未命中一律宽松归 unknown,不可重试类绝不重试。
+test('分类:Windows 文件锁形态归 file-locked 且可重试', () => {
+  const samples = [
+    'npm error code EBUSY\nnpm error syscall rename\nnpm error path C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\package.json',
+    'npm error code EPERM\nnpm error syscall unlink\nnpm error path C:\\nvm\\node_modules\\.bin\\dsh.cmd',
+    'npm error code ENOENT\nnpm error syscall rename\nnpm error path C:\\nvm\\node_modules\\@deepseek-ai\\dsh',
+    'C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\lib\\index.js is being used by another process',
+    'EBUSY: resource busy or locked, unlink C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\lib\\index.js',
+  ]
+  for (const stderrTail of samples) {
+    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
+    assert.equal(result.kind, UPGRADE_FAIL_FILE_LOCKED, stderrTail)
+    assert.equal(result.retryable, true, stderrTail)
+    assert.ok(typeof result.reason === 'string' && result.reason.length > 0)
+  }
+})
+
+test('分类:网络瞬断形态归 transient-network 且可重试', () => {
+  const samples = [
+    'npm error network request to https://registry.npmjs.org/@deepseek-ai%2fdsh failed, reason: socket hang up',
+    'npm error code ECONNRESET\nnpm error errno ECONNRESET\nnpm error network This is a problem related to network connectivity.',
+    'npm error code EAI_AGAIN\nnpm error syscall getaddrinfo',
+    'npm error code ECONNREFUSED',
+    'fetch failed',
+    'npm error code E503\nnpm error 503 Service Unavailable - GET https://registry.npmjs.org/dsh',
+  ]
+  for (const stderrTail of samples) {
+    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
+    assert.equal(result.kind, UPGRADE_FAIL_TRANSIENT_NETWORK, stderrTail)
+    assert.equal(result.retryable, true, stderrTail)
+  }
+})
+
+test('分类:命令未找到形态归 npm-missing 且不可重试', () => {
+  const samples = [
+    "'npmm' 不是内部或外部命令,也不是可运行的程序或批处理文件。",
+    '/bin/sh: 1: npmm: command not found',
+    '/bin/sh: 1: npmm: not found',
+    'spawn npmm ENOENT',
+  ]
+  for (const stderrTail of samples) {
+    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
+    assert.equal(result.kind, UPGRADE_FAIL_NPM_MISSING, stderrTail)
+    assert.equal(result.retryable, false, stderrTail)
+  }
+})
+
+test('分类:超时强杀优先归 timeout,尾流含文件锁特征也不重试', () => {
+  const result = classifyUpgradeFailure({ code: null, timedOut: true, stillRunning: false, stdoutTail: '', stderrTail: 'npm error code EBUSY' })
+  assert.equal(result.kind, UPGRADE_FAIL_TIMEOUT)
+  assert.equal(result.retryable, false)
+})
+
+test('分类:未识别输出归 unknown 兜底且不可重试', () => {
+  for (const input of [
+    { code: 3, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: 'boom-fail' },
+    { code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: '' },
+    { code: null, timedOut: false, stillRunning: true, stdoutTail: '', stderrTail: '' },
+    { code: 1, timedOut: false, stillRunning: false, stdoutTail: 'npm warn deprecated x', stderrTail: 'exit 1' },
+  ]) {
+    const result = classifyUpgradeFailure(input)
+    assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN, JSON.stringify(input))
+    assert.equal(result.retryable, false, JSON.stringify(input))
+  }
+})
+
+test('分类:stdout 尾流特征同样参与匹配', () => {
+  const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: 'npm error code EBUSY', stderrTail: '' })
+  assert.equal(result.kind, UPGRADE_FAIL_FILE_LOCKED)
+  assert.equal(result.retryable, true)
+})
+
+test('分类:输入字段缺省容忍不抛错', () => {
+  const result = classifyUpgradeFailure({})
+  assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN)
+  assert.equal(result.retryable, false)
+  assert.ok(typeof result.reason === 'string')
 })
