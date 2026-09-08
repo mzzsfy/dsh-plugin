@@ -138,7 +138,6 @@ const MESSAGES_ZH = {
   viewHour: '按小时',
   viewMinute: '按分钟',
   viewGroup: '统计粒度',
-  'status.idle': '已收录 {n} 个会话',
   'status.running': '回扫中 {done}/{total}',
   rebuild: '重建',
   rebuildConfirm: '确认重建',
@@ -237,7 +236,6 @@ const MESSAGES_EN = {
   viewHour: 'Hourly',
   viewMinute: 'Per-minute',
   viewGroup: 'Granularity',
-  'status.idle': '{n} sessions collected',
   'status.running': 'Rescanning {done}/{total}',
   rebuild: 'Rebuild',
   rebuildConfirm: 'Confirm rebuild',
@@ -362,6 +360,15 @@ function minuteTickLabel(key) {
 
 function isEmptyRange(value) {
   return value.tokens === 0 && value.cacheHit === 0 && value.requests === 0 && value.turns === 0
+}
+
+// 状态行仅在回扫进行或异常存在时可见,空闲干净态不占版面
+function statusLineActive(status) {
+  if (!status) return false
+  return Boolean(status.running)
+    || Boolean(status.error)
+    || (status.skippedSessions ?? 0) > 0
+    || (status.recordFailures ?? 0) > 0
 }
 
 const toRankedModels = (totals) =>
@@ -2043,48 +2050,32 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addRule')))
     }
 
-    function StatusRow({ onChanged, onError, t = defaultT }) {
-      const [status, setStatus] = useState(null)
-      const [armed, setArmed] = useState(false)
-      const machineRef = useRef(null)
-      const armedTimerRef = useRef(null)
+    function StatusLine({ status, t = defaultT }) {
+      if (!statusLineActive(status)) return null
+      const running = status.running === true
+      const progress = running && status.total > 0
+        ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
+        : 0
+      return h('div', { className: 'ud-status' },
+        running
+          ? h(React.Fragment, null,
+              h('span', null, t('status.running', { done: status.done, total: status.total })),
+              h('span', { className: 'ud-status-track' },
+                h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
+          : null,
+        status.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
+        // 无法读取是日志固有损伤,常态提示用中性色,不算错误
+        (status.skippedSessions ?? 0) > 0
+          ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+          : null,
+        (status.recordFailures ?? 0) > 0
+          ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
+          : null)
+    }
 
-      useEffect(() => {
-        let timer = null
-        let alive = true
-        let baseDone = null
-        const schedule = (delay) => {
-          if (!alive) return
-          if (timer) clearTimeout(timer)
-          timer = setTimeout(tick, delay)
-        }
-        const tick = async () => {
-          timer = null
-          const result = await requestPost(ENDPOINTS.status)
-          if (!alive) return
-          if (!result.ok) {
-            schedule(STATUS_POLL_SLOW_MS)
-            return
-          }
-          const value = result.value
-          setStatus(value)
-          if (value.running) {
-            if (baseDone === null || value.done < baseDone) baseDone = value.done
-            else if (value.done > baseDone) {
-              baseDone = value.done
-              onChanged()
-            }
-            schedule(STATUS_POLL_FAST_MS)
-          }
-        }
-        tick()
-        machineRef.current = { restart: () => { baseDone = 0; schedule(STATUS_POLL_FAST_MS) } }
-        return () => {
-          alive = false
-          if (timer) clearTimeout(timer)
-          machineRef.current = null
-        }
-      }, [])
+    function RebuildButton({ machineRef, busy, onError, t = defaultT }) {
+      const [armed, setArmed] = useState(false)
+      const armedTimerRef = useRef(null)
 
       useEffect(() => () => {
         if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
@@ -2102,31 +2093,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           onError(result.message)
           return
         }
-        const value = result.value
-        setStatus(value)
-        if (value.running && machineRef.current) machineRef.current.restart()
+        machineRef.current?.restart()
       }
 
-      const running = status?.running === true
-      const progress = running && status.total > 0
-        ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
-        : 0
-      return h('div', { className: 'ud-status' },
-        running
-          ? h(React.Fragment, null,
-              h('span', null, t('status.running', { done: status.done, total: status.total })),
-              h('span', { className: 'ud-status-track' },
-                h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
-          : h('span', null, t('status.idle', { n: status?.scannedSessions ?? 0 })),
-        status?.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
-        (status?.skippedSessions ?? 0) > 0
-          ? h('span', { className: 'ud-status-err' }, t('skippedSessions', { n: status.skippedSessions }))
-          : null,
-        (status?.recordFailures ?? 0) > 0
-          ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
-          : null,
-        h('button', { className: 'ud-btn ud-btn--text', disabled: running, onClick: rebuild },
-          armed ? t('rebuildConfirm') : t('rebuild')))
+      return h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: rebuild },
+        armed ? t('rebuildConfirm') : t('rebuild'))
     }
 
     const viewLabel = (t, id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
@@ -2152,6 +2123,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [pointStats, setPointStats] = useState(null)
       const [pointStatus, setPointStatus] = useState('idle')
       const [fetchTick, setFetchTick] = useState(0)
+      const [status, setStatus] = useState(null)
+      const statusMachineRef = useRef(null)
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
       const heatGenerationRef = useRef(0)
@@ -2260,6 +2233,44 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         else refreshPoints()
       }
 
+      // 回扫状态轮询:运行中快轮,推进时联动数据刷新;restart 供重建按钮重置基线快轮
+      useEffect(() => {
+        let timer = null
+        let alive = true
+        let baseDone = null
+        const schedule = (delay) => {
+          if (!alive) return
+          if (timer) clearTimeout(timer)
+          timer = setTimeout(tick, delay)
+        }
+        const tick = async () => {
+          timer = null
+          const result = await requestPost(ENDPOINTS.status)
+          if (!alive) return
+          if (!result.ok) {
+            schedule(STATUS_POLL_SLOW_MS)
+            return
+          }
+          const value = result.value
+          setStatus(value)
+          if (value.running) {
+            if (baseDone === null || value.done < baseDone) baseDone = value.done
+            else if (value.done > baseDone) {
+              baseDone = value.done
+              scheduleRefresh()
+            }
+            schedule(STATUS_POLL_FAST_MS)
+          }
+        }
+        tick()
+        statusMachineRef.current = { restart: () => { baseDone = 0; schedule(STATUS_POLL_FAST_MS) } }
+        return () => {
+          alive = false
+          if (timer) clearTimeout(timer)
+          statusMachineRef.current = null
+        }
+      }, [])
+
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
       const pointView = pointStats && pointStats.preset === presetId ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
@@ -2323,9 +2334,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                         onChange: (event) => setCustomTo(event.target.value),
                       }))
                   : null),
-          h('button', { className: 'ud-btn ud-refresh', disabled: busy, onClick: refresh }, t('refresh'))),
+          h('button', { className: 'ud-btn ud-refresh', disabled: busy, onClick: refresh }, t('refresh')),
+          h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })),
         error ? h('div', { className: 'ud-error' }, error) : null,
-        h(StatusRow, { onChanged: scheduleRefresh, onError: setError, t }),
+        h(StatusLine, { status, t }),
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
         h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),

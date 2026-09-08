@@ -72,6 +72,7 @@ const {
   resolveMinuteRange,
   shortDay,
   smoothPath,
+  statusLineActive,
   tipPlace,
   translateWith,
   trimSlots,
@@ -165,7 +166,7 @@ test('translateWith zh/en 占位替换与缺键回退键名', () => {
   assert.equal(translateWith(MESSAGES_ZH, 'trendLimited', { n: 45 }), '仅显示最近 45 天')
   assert.equal(translateWith(MESSAGES_ZH, 'refresh'), '刷新')
   assert.equal(translateWith(MESSAGES_ZH, 'no.such.key'), 'no.such.key')
-  assert.equal(translateWith(MESSAGES_EN, 'status.idle', { n: 7 }), '7 sessions collected')
+  assert.equal(translateWith(MESSAGES_EN, 'skippedSessions', { n: 2 }), '2 unreadable sessions skipped')
   assert.equal(translateWith(MESSAGES_EN, 'trendLimited', { n: 45 }), 'Showing only the last 45 days')
   assert.equal(translateWith(MESSAGES_EN, 'rebuild'), 'Rebuild')
   assert.equal(translateWith(MESSAGES_EN, 'no.such.key'), 'no.such.key')
@@ -176,6 +177,15 @@ test('createTranslator 与纯查表同构', () => {
   assert.equal(enT('rangeCustom'), 'Custom')
   assert.equal(enT('hourPreset', { n: 48 }), 'Last 48 hours')
   assert.equal(enT('missing.key'), 'missing.key')
+})
+
+test('状态行仅在回扫进行或异常存在时可见', () => {
+  assert.equal(statusLineActive(null), false)
+  assert.equal(statusLineActive({ running: false, skippedSessions: 0, recordFailures: 0 }), false)
+  assert.equal(statusLineActive({ running: true, total: 3, done: 1 }), true)
+  assert.equal(statusLineActive({ running: false, error: 'boom' }), true)
+  assert.equal(statusLineActive({ running: false, skippedSessions: 2 }), true)
+  assert.equal(statusLineActive({ running: false, recordFailures: 1 }), true)
 })
 
 test('zh/en 词典键集完全一致', () => {
