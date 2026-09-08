@@ -164,7 +164,6 @@ const MESSAGES_ZH = {
   anomalyLog: '扫描异常日志',
   logKindSkipped: '跳过会话',
   logKindRecord: '写入失败',
-  logNoDetails: '暂无明细,仅记录本次启动后的异常',
   'stats.counts': '{turns} 轮 · {steps} 步',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': '工具调用 {duration}',
@@ -290,7 +289,6 @@ const MESSAGES_EN = {
   anomalyLog: 'Scan anomaly log',
   logKindSkipped: 'skipped',
   logKindRecord: 'write failed',
-  logNoDetails: 'No details kept; anomalies are logged since this launch',
   'stats.counts': '{turns} turns · {steps} steps',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': 'Tool call {duration}',
@@ -2353,11 +2351,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         status.error ? h('span', { className: 'ud-status-err' }, status.error) : null)
     }
 
-    // 展开后的异常日志块:汇总行 + 逐条明细(时间/类型/内容);明细仅覆盖本次启动后的异常,无明细时说明口径
+    // 展开后的异常日志块:汇总计数即明细条数(单一事实源),逐条展示(时间/类型/内容)
     function AnomalyLog({ status, t = defaultT }) {
       const lines = status.log ?? []
-      const hasCounts = (status.skippedSessions ?? 0) > 0 || (status.recordFailures ?? 0) > 0
-      if (!hasCounts && lines.length === 0) return null
+      if (lines.length === 0) return null
       return h('div', { className: 'ud-log' },
         h('div', { className: 'ud-log-summary' },
           (status.skippedSessions ?? 0) > 0
@@ -2365,8 +2362,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             : null,
           (status.recordFailures ?? 0) > 0
             ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
-            : null,
-          lines.length === 0 && hasCounts ? h('span', null, t('logNoDetails')) : null),
+            : null),
         lines.map((entry, index) => h('div', { className: 'ud-log-line', key: index },
           h('span', { className: 'ud-log-time' }, logTimeOf(entry.time)),
           h('span', { className: cx('ud-log-kind', entry.kind === 'record' && 'ud-log-err') },
