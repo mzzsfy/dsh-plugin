@@ -11,7 +11,7 @@ import vm from 'node:vm'
 const CLIENT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8').trimEnd()
 const DECLARATION_NAMES = [
   ...new Set(
-    [...CLIENT_SOURCE.matchAll(/^(?:const|function|let) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
+    [...CLIENT_SOURCE.matchAll(/^(?:const|let|var|class|(?:async )?function\*?) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
   ),
 ]
 const BUNDLE_ID = '@mzzsfy/dsh-usage-dash'
@@ -29,10 +29,17 @@ test('Given client.js 已整源求值, When 同 context 再声明外部 CHART_PA
   vm.runInContext('const CHART_PAD = 1', ctx)
 })
 
-test('Given client.js 整源求值完成, When 逐名探针行首 const/function/let 声明, Then 全局词法环境零泄漏', () => {
+test('Given client.js 整源求值完成, When 逐名以 const 重声明探针行首声明名, Then 全局词法环境零泄漏', () => {
   const ctx = vm.createContext({})
   vm.runInContext(CLIENT_SOURCE, ctx)
-  const leaked = DECLARATION_NAMES.filter((name) => vm.runInContext(`typeof ${name}`, ctx) !== 'undefined')
+  const leaked = DECLARATION_NAMES.filter((name) => {
+    try {
+      vm.runInContext(`const ${name} = null`, ctx)
+      return false
+    } catch {
+      return true
+    }
+  })
   assert.deepEqual(leaked, [])
 })
 
