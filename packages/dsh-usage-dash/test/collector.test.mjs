@@ -470,7 +470,8 @@ test('回扫:单会话失败不中断整轮且不进游标', async () => {
   await collector.backfill(persistence, fakeSessions())
   assert.equal(store.samples.length, 1)
   assert.deepEqual([...store.state.backfilledSessions], ['s1'])
-  assert.match(collector.status().error, /session s2/)
+  assert.equal(collector.status().error, undefined)
+  assert.equal(collector.status().skippedSessions, 1)
   assert.equal(collector.status().done, 2)
 })
 
@@ -481,7 +482,7 @@ test('回扫:record 失败使会话失败并保留游标重试机会', async () 
   const collector = new UsageCollector(fakeCtx({ persistence }), store)
   await collector.backfill(persistence, fakeSessions())
   assert.equal(store.state.backfilledSessions.size, 0)
-  assert.match(collector.status().error, /session s1/)
+  assert.equal(collector.status().skippedSessions, 1)
   assert.equal(collector.status().done, 1)
 })
 
@@ -588,6 +589,7 @@ test('status() 返回快照,外部修改不影响内部状态', async () => {
     lastSessionId: undefined,
     error: undefined,
     recordFailures: 0,
+    skippedSessions: 0,
   })
   await collector.backfill(persistence, fakeSessions())
   const snapshot = collector.status()

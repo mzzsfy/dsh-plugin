@@ -150,6 +150,7 @@ const MESSAGES_ZH = {
   trendLimitedMinute: '数据量过大,仅显示最近 {n} 分钟',
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
+  skippedSessions: '跳过 {n} 个无法读取的会话',
   'stats.counts': '{turns} 轮 · {steps} 步',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': '工具调用 {duration}',
@@ -248,6 +249,7 @@ const MESSAGES_EN = {
   trendLimitedMinute: 'Too much data, showing only the last {n} minutes',
   trendTruncated: 'Too much data, showing only the latest part',
   recordFailures: '{n} records failed to write',
+  skippedSessions: '{n} unreadable sessions skipped',
   'stats.counts': '{turns} turns · {steps} steps',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': 'Tool call {duration}',
@@ -2117,6 +2119,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
           : h('span', null, t('status.idle', { n: status?.scannedSessions ?? 0 })),
         status?.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
+        (status?.skippedSessions ?? 0) > 0
+          ? h('span', { className: 'ud-status-err' }, t('skippedSessions', { n: status.skippedSessions }))
+          : null,
         (status?.recordFailures ?? 0) > 0
           ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
           : null,

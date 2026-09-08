@@ -109,7 +109,9 @@ export class UsageCollector {
       lastSessionId: undefined,
       error: undefined,
       recordFailures: 0,
+      skippedSessions: 0,
     }
+    // error 保留给采集器自身故障;单会话读取失败走 skippedSessions 跳过计数
   }
 
   #state
@@ -250,6 +252,7 @@ export class UsageCollector {
       const targets = headers.filter((header) => !seen.has(header.id))
       this.#state.total = targets.length
       this.#state.done = 0
+      this.#state.skippedSessions = 0
       const workerCount = Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
       let next = 0
       const completed = []
@@ -307,8 +310,9 @@ export class UsageCollector {
             completed.push(header.id)
             if (completed.length >= MARK_BATCH) await flushCompleted()
             this.#state.scannedSessions += 1
-          } catch (err) {
-            this.#state.error = `session ${header.id}: ${err instanceof Error ? err.message : String(err)}`
+          } catch {
+            // 读取失败(如宿主报会话日志损坏)按定案跳过:计数并继续,不中断回扫、不挂错误横幅
+            this.#state.skippedSessions += 1
           } finally {
             this.#state.done += 1
           }
