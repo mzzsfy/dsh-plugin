@@ -1482,16 +1482,18 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-btn{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:5px 14px;font-size:12px;line-height:1;cursor:pointer}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-btn:disabled{opacity:.5;cursor:default}
-.ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto}
+.ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;align-self:stretch}
+.ud-toolbar-side .ud-btn--text{display:inline-flex;align-items:center;height:100%}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
 .ud-error{border:1px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:8px;padding:8px 12px;font-size:12px}
 .ud-loading{color:var(--dsw-alias-label-tertiary);text-align:center;padding:32px 0}
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-status-fold{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;border:none;background:none;padding:2px 4px;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer}
-.ud-status-fold:hover{color:var(--dsw-alias-label-secondary)}
-.ud-status-fold-caret{line-height:1}
+.ud-status-fold{display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px}
+.ud-status-fold:hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}
+.ud-status-fold-caret{display:block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s ease}
+.ud-status-fold[aria-expanded="true"] .ud-status-fold-caret{transform:rotate(180deg)}
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
@@ -2324,7 +2326,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         'aria-label': t('anomalyLog'), title: t('anomalyLog'),
         onClick: onToggle,
       },
-      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'))
+      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }))
     }
 
     // 回扫进度与采集错误是运行状态,常显;异常明细走日志块
