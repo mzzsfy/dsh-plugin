@@ -94,17 +94,17 @@ const tokenSample = (time, extra = {}) => ({
 })
 
 test('分钟保留天数默认常量与上限和计划一致', () => {
-  assert.equal(DEFAULT_MINUTE_RETENTION_DAYS, 2)
-  assert.equal(MINUTE_RETENTION_MAX_DAYS, 2)
+  assert.equal(DEFAULT_MINUTE_RETENTION_DAYS, 7)
+  assert.equal(MINUTE_RETENTION_MAX_DAYS, 7)
   assert.equal(HOUR_RETENTION_DAYS, 15)
 })
 
 test('分钟保留值归一:非法回落默认,超上限截断,0 保留', () => {
   assert.equal(clampMinuteRetentionDays(1), 1)
   assert.equal(clampMinuteRetentionDays(0), 0)
-  assert.equal(clampMinuteRetentionDays(7), 2)
-  assert.equal(clampMinuteRetentionDays(-1), 2)
-  assert.equal(clampMinuteRetentionDays('x'), 2)
+  assert.equal(clampMinuteRetentionDays(30), 7)
+  assert.equal(clampMinuteRetentionDays(-1), 7)
+  assert.equal(clampMinuteRetentionDays('x'), 7)
 })
 
 test('桶键生成含补零,分钟桶对齐 10 分钟', () => {
@@ -256,16 +256,16 @@ test('保留窗口为 0 时分钟桶全部清理', async () => {
   assert.equal(domain.rows.has('D|2026-08-10|a|m'), true)
 })
 
-test('分钟保留超上限时 clamp 到 48h 窗口', async () => {
+test('分钟保留超上限时 clamp 到 7 天窗口', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
-  // clamp 后窗口起点 = 08-08T12:00,02 天前的桶一律清理,即使注入 30 天
-  await table.put('M|2026-08-05T00:00|a|m', rowOf('2026-08-05T00:00', 'a', 'm'))
-  await table.put('M|2026-08-08T12:00|a|m', rowOf('2026-08-08T12:00', 'a', 'm'))
+  // clamp 后窗口起点 = 08-03T12:00,7 天前的桶一律清理,即使注入 30 天
+  await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
+  await table.put('M|2026-08-03T12:00|a|m', rowOf('2026-08-03T12:00', 'a', 'm'))
   await store.pruneMinutes(30)
-  assert.equal(domain.rows.has('M|2026-08-05T00:00|a|m'), false)
-  assert.equal(domain.rows.has('M|2026-08-08T12:00|a|m'), true)
+  assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), false)
+  assert.equal(domain.rows.has('M|2026-08-03T12:00|a|m'), true)
 })
 
 test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async () => {

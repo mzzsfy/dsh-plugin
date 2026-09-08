@@ -2,12 +2,12 @@
 // 无构建:createElement + 一次性样式注入;协议与渲染形态见 docs/feat-usage-dash/client-design.md。
 // 单文件自包含:client-modules bundle 以非模块 script 求值,禁止 import/export(整捆语法共担);纯函数区经测试整源求值收集。
 
-const DAY_PRESETS = ['7', '14', '30', '90']
-const HOUR_PRESETS = ['24h', '48h', '72h']
-const MINUTE_PRESETS = ['60m', '180m', '360m']
+const DAY_PRESETS = ['7', '30', '90']
+const HOUR_PRESETS = ['24h', '72h', '5d', '15d']
+const MINUTE_PRESETS = ['60m', '6h', '24h', '7d']
 
-const HOUR_PRESET_HOURS = { '24h': 24, '48h': 48, '72h': 72 }
-const MINUTE_PRESET_MINUTES = { '60m': 60, '180m': 180, '360m': 360 }
+const HOUR_PRESET_HOURS = { '24h': 24, '72h': 72, '5d': 5 * 24, '15d': 15 * 24 }
+const MINUTE_PRESET_MINUTES = { '60m': 60, '6h': 6 * 60, '24h': 24 * 60, '7d': 7 * 24 * 60 }
 
 const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
@@ -103,7 +103,6 @@ const MESSAGES_ZH = {
   nav: '使用统计',
   range: '时间范围',
   'rangePreset.7': '最近 7 天',
-  'rangePreset.14': '最近 14 天',
   'rangePreset.30': '最近 30 天',
   'rangePreset.90': '最近 90 天',
   rangeCustom: '自定义',
@@ -142,8 +141,14 @@ const MESSAGES_ZH = {
   rebuildConfirm: '确认重建',
   hourTrend: '按小时 Token 趋势',
   minuteTrend: '按分钟 Token 趋势',
-  hourPreset: '最近 {n} 小时',
-  minutePreset: '最近 {n} 分钟',
+  'hourPreset.24h': '最近 24 小时',
+  'hourPreset.72h': '最近 72 小时',
+  'hourPreset.5d': '最近 5 天',
+  'hourPreset.15d': '最近 15 天',
+  'minutePreset.60m': '最近 60 分钟',
+  'minutePreset.6h': '最近 6 小时',
+  'minutePreset.24h': '最近 24 小时',
+  'minutePreset.7d': '最近 7 天',
   trendLimitedHour: '数据量过大,仅显示最近 {n} 小时',
   trendLimitedMinute: '数据量过大,仅显示最近 {n} 分钟',
   trendTruncated: '数据量过大,仅显示最近部分',
@@ -200,7 +205,6 @@ const MESSAGES_EN = {
   nav: 'Usage',
   range: 'Time range',
   'rangePreset.7': 'Last 7 days',
-  'rangePreset.14': 'Last 14 days',
   'rangePreset.30': 'Last 30 days',
   'rangePreset.90': 'Last 90 days',
   rangeCustom: 'Custom',
@@ -239,8 +243,14 @@ const MESSAGES_EN = {
   rebuildConfirm: 'Confirm rebuild',
   hourTrend: 'Hourly token trend',
   minuteTrend: 'Per-minute token trend',
-  hourPreset: 'Last {n} hours',
-  minutePreset: 'Last {n} minutes',
+  'hourPreset.24h': 'Last 24 hours',
+  'hourPreset.72h': 'Last 72 hours',
+  'hourPreset.5d': 'Last 5 days',
+  'hourPreset.15d': 'Last 15 days',
+  'minutePreset.60m': 'Last 60 minutes',
+  'minutePreset.6h': 'Last 6 hours',
+  'minutePreset.24h': 'Last 24 hours',
+  'minutePreset.7d': 'Last 7 days',
   trendLimitedHour: 'Too much data, showing only the last {n} hours',
   trendLimitedMinute: 'Too much data, showing only the last {n} minutes',
   trendTruncated: 'Too much data, showing only the latest part',
@@ -2155,9 +2165,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const trendLimitedText = (t, id, count) => (id === 'day'
       ? t('trendLimited', { n: count })
       : id === 'hour' ? t('trendLimitedHour', { n: count }) : t('trendLimitedMinute', { n: count }))
-    const presetLabel = (t, view, id) => (view === 'hour'
-      ? t('hourPreset', { n: parseInt(id, 10) })
-      : t('minutePreset', { n: parseInt(id, 10) }))
+    const presetLabel = (t, view, id) => t(`${view === 'hour' ? 'hourPreset' : 'minutePreset'}.${id}`)
     const tickLabelFor = (view) => (view === 'day' ? shortDay : view === 'hour' ? hourTickLabel : minuteTickLabel)
 
     function UsageDashPanel({ t = defaultT }) {
@@ -2390,7 +2398,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
-        h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),
+        // 活跃热力图仅按天视图展示:热力图口径为日桶,时/分视图无对应语义
+        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }) : null,
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',

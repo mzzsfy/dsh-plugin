@@ -350,12 +350,12 @@ test('minutes from 未对齐 10 分钟桶边界拒绝 400', async () => {
 
 test('minutes 保留值超上限时 covered 窗口按 clamp 计算', async () => {
   const { routes } = mount({ retentionDays: () => 30 })
-  const from = minuteKey(FIXED_NOW - 3 * DAY_MS)
+  const from = minuteKey(FIXED_NOW - 8 * DAY_MS)
   const to = minuteKey(FIXED_NOW)
   const res = await invokeJson(routes, PATH_MINUTES, { payload: { from, to } })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 200)
-  assert.equal(parsed.value.coveredFrom, minuteKey(FIXED_NOW - 2 * DAY_MS))
+  assert.equal(parsed.value.coveredFrom, minuteKey(FIXED_NOW - 7 * DAY_MS))
   assert.equal(parsed.value.coveredTo, to)
 })
 

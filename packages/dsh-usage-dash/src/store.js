@@ -16,14 +16,14 @@ export const GRANULARITY_MINUTE = 'M'
 export const MODEL_TURNS = '(turns)'
 export const MODEL_UNKNOWN = '(unknown)'
 
-export const DEFAULT_MINUTE_RETENTION_DAYS = 2
+export const DEFAULT_MINUTE_RETENTION_DAYS = 7
 
 // 分钟桶对齐粒度(分钟);小时/天桶不受影响
 export const MINUTE_BUCKET_SPAN_MINUTES = 10
 
-// 保留上限:小时桶固定 15 天,分钟桶可配置但最大 2 天(48h)
+// 保留上限:小时桶固定 15 天,分钟桶可配置但最大 7 天(与分钟视图选择上限一致)
 export const HOUR_RETENTION_DAYS = 15
-export const MINUTE_RETENTION_MAX_DAYS = 2
+export const MINUTE_RETENTION_MAX_DAYS = 7
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const PAD_WIDTH = 2

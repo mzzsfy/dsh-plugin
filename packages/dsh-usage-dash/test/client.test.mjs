@@ -91,7 +91,7 @@ const NOW = new Date(2026, 2, 15, 14, 30, 45)
 
 test('day 预设映射为最近 N 天闭区间', () => {
   assert.deepEqual(resolveDayRange('7', NOW), { from: '2026-03-09', to: '2026-03-15' })
-  assert.deepEqual(resolveDayRange('14', NOW), { from: '2026-03-02', to: '2026-03-15' })
+  assert.deepEqual(resolveDayRange('30', NOW), { from: '2026-02-14', to: '2026-03-15' })
 })
 
 test('day 预设跨年与跨月边界', () => {
@@ -114,7 +114,7 @@ test('hour 预设跨日且窗口起点落整点', () => {
 
 test('minute 预设起点对齐 10 分钟桶,to 保持原始分钟', () => {
   assert.deepEqual(resolveMinuteRange('60m', NOW), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
-  assert.deepEqual(resolveMinuteRange('360m', NOW), { from: '2026-03-15T08:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('6h', NOW), { from: '2026-03-15T08:30', to: '2026-03-15T14:30' })
   const offGrid = new Date(2026, 2, 15, 14, 37, 20)
   assert.deepEqual(resolveMinuteRange('60m', offGrid), { from: '2026-03-15T13:30', to: '2026-03-15T14:37' })
 })
@@ -124,19 +124,21 @@ test('minute 预设整桶边界不再回退', () => {
 })
 
 test('预设定义表覆盖三视图', () => {
-  assert.deepEqual(DAY_PRESETS, ['7', '14', '30', '90'])
-  assert.deepEqual(HOUR_PRESETS, ['24h', '48h', '72h'])
-  assert.deepEqual(MINUTE_PRESETS, ['60m', '180m', '360m'])
+  assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
+  assert.deepEqual(HOUR_PRESETS, ['24h', '72h', '5d', '15d'])
+  assert.deepEqual(MINUTE_PRESETS, ['60m', '6h', '24h', '7d'])
 })
 
 test('每视图渲染上限等于闭区间桶数', () => {
   assert.equal(maxSlotsFor('day', '90'), DAY_MAX_SLOTS)
   assert.equal(maxSlotsFor('hour', '24h'), 25)
-  assert.equal(maxSlotsFor('hour', '48h'), 49)
   assert.equal(maxSlotsFor('hour', '72h'), 73)
+  assert.equal(maxSlotsFor('hour', '5d'), 121)
+  assert.equal(maxSlotsFor('hour', '15d'), 361)
   assert.equal(maxSlotsFor('minute', '60m'), 7)
-  assert.equal(maxSlotsFor('minute', '180m'), 19)
-  assert.equal(maxSlotsFor('minute', '360m'), 37)
+  assert.equal(maxSlotsFor('minute', '6h'), 37)
+  assert.equal(maxSlotsFor('minute', '24h'), 145)
+  assert.equal(maxSlotsFor('minute', '7d'), 1009)
 })
 
 test('trim 超上限裁最旧且恰好达上限不裁', () => {
@@ -177,7 +179,8 @@ test('translateWith zh/en 占位替换与缺键回退键名', () => {
 test('createTranslator 与纯查表同构', () => {
   const enT = createTranslator(MESSAGES_EN)
   assert.equal(enT('rangeCustom'), 'Custom')
-  assert.equal(enT('hourPreset', { n: 48 }), 'Last 48 hours')
+  assert.equal(enT('hourPreset.15d'), 'Last 15 days')
+  assert.equal(enT('minutePreset.7d'), 'Last 7 days')
   assert.equal(enT('missing.key'), 'missing.key')
 })
 
