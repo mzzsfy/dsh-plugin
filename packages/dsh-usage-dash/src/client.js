@@ -1295,7 +1295,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     const STYLE_CSS = `
-.ud-panel{display:flex;flex-direction:column;gap:16px;font-size:13px;color:var(--dsw-alias-label-primary);
+.ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
 --dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
@@ -2346,10 +2346,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                         onChange: (event) => setCustomTo(event.target.value),
                       }))
                   : null),
-          h('button', { className: 'ud-btn ud-refresh', disabled: busy, onClick: refresh }, t('refresh')),
+          h(StatusLine, { status, t }),
+          h('button', { className: 'ud-btn ud-btn--text ud-refresh', disabled: busy, onClick: refresh }, t('refresh')),
           h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })),
         error ? h('div', { className: 'ud-error' }, error) : null,
-        h(StatusLine, { status, t }),
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
         h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),
