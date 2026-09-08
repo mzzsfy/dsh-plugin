@@ -6,10 +6,10 @@
 
 const DAY_PRESETS = ['7', '30', '90']
 const HOUR_PRESETS = ['24h', '3d', '7d', '15d']
-const MINUTE_PRESETS = ['60m', '6h', '24h', '7d']
+const MINUTE_PRESETS = ['3h', '24h', '3d', '7d']
 
 const HOUR_PRESET_HOURS = { '24h': 24, '3d': 3 * 24, '7d': 7 * 24, '15d': 15 * 24 }
-const MINUTE_PRESET_MINUTES = { '60m': 60, '6h': 6 * 60, '24h': 24 * 60, '7d': 7 * 24 * 60 }
+const MINUTE_PRESET_MINUTES = { '3h': 3 * 60, '24h': 24 * 60, '3d': 3 * 24 * 60, '7d': 7 * 24 * 60 }
 
 const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
@@ -139,9 +139,9 @@ const MESSAGES_ZH = {
   percent: '占比',
   asOf: '统计截至',
   empty: '当前时间范围内暂无用量数据。Token 用量从本面板启用后开始累计,并会一次性回扫已有的历史会话。',
-  viewDay: '按天',
-  viewHour: '按小时',
-  viewMinute: '按分钟',
+  viewDay: '天',
+  viewHour: '小时',
+  viewMinute: '分钟',
   viewGroup: '统计粒度',
   'status.running': '回扫中 {done}/{total}',
   rebuild: '重建',
@@ -152,9 +152,9 @@ const MESSAGES_ZH = {
   'hourPreset.3d': '3 天',
   'hourPreset.7d': '7 天',
   'hourPreset.15d': '15 天',
-  'minutePreset.60m': '60 分钟',
-  'minutePreset.6h': '6 小时',
+  'minutePreset.3h': '3 小时',
   'minutePreset.24h': '24 小时',
+  'minutePreset.3d': '3 天',
   'minutePreset.7d': '7 天',
   trendLimitedHour: '数据量过大,仅显示最近 {n} 小时',
   trendLimitedMinute: '数据量过大,仅显示最近 {n} 分钟',
@@ -265,9 +265,9 @@ const MESSAGES_EN = {
   percent: 'Share',
   asOf: 'Stats as of',
   empty: 'No usage data in this range yet. Token usage accumulates from when this panel is enabled, and existing sessions are scanned once.',
-  viewDay: 'Daily',
-  viewHour: 'Hourly',
-  viewMinute: 'Per-minute',
+  viewDay: 'Day',
+  viewHour: 'Hour',
+  viewMinute: 'Minute',
   viewGroup: 'Granularity',
   'status.running': 'Rescanning {done}/{total}',
   rebuild: 'Rebuild',
@@ -278,9 +278,9 @@ const MESSAGES_EN = {
   'hourPreset.3d': '3 days',
   'hourPreset.7d': '7 days',
   'hourPreset.15d': '15 days',
-  'minutePreset.60m': '60 minutes',
-  'minutePreset.6h': '6 hours',
+  'minutePreset.3h': '3 hours',
   'minutePreset.24h': '24 hours',
+  'minutePreset.3d': '3 days',
   'minutePreset.7d': '7 days',
   trendLimitedHour: 'Too much data, showing only the last {n} hours',
   trendLimitedMinute: 'Too much data, showing only the last {n} minutes',
@@ -1389,6 +1389,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STATUS_POLL_FAST_MS = 1000
     const STATUS_POLL_SLOW_MS = 5000
     const REBUILD_CONFIRM_MS = 3000
+    // Material Symbols 风格刷新图标路径,currentColor 继承按钮色
+    const REFRESH_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A7.96 7.96 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>'
     const STATUS_REFRESH_DEBOUNCE_MS = 800
     const FIT_MAX_SIZE = 22
     const FIT_MIN_SIZE = 11
@@ -1484,6 +1486,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-btn:disabled{opacity:.5;cursor:default}
 .ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;align-self:stretch}
 .ud-toolbar-side .ud-btn--text{display:inline-flex;align-items:center;height:100%}
+.ud-icon-btn{padding:0 12px}
+.ud-icon{display:inline-flex;align-items:center;justify-content:center}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
 .ud-error{border:1px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:8px;padding:8px 12px;font-size:12px}
 .ud-loading{color:var(--dsw-alias-label-tertiary);text-align:center;padding:32px 0}
@@ -1497,7 +1501,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
-.ud-log{width:100%;margin-top:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:8px 10px;display:flex;flex-direction:column;gap:3px;max-height:200px;overflow-y:auto;font-size:11px;line-height:1.5}
+.ud-detail{width:100%;margin-top:4px;display:flex;flex-direction:column;gap:6px}
+.ud-detail-foot{display:flex;justify-content:flex-end;align-items:center}
+.ud-log{width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:8px 10px;display:flex;flex-direction:column;gap:3px;max-height:200px;overflow-y:auto;font-size:11px;line-height:1.5}
 .ud-log-summary{display:flex;gap:12px;flex-wrap:wrap;color:var(--dsw-alias-label-tertiary);font-size:12px;padding-bottom:4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .ud-log-line{display:flex;gap:8px;align-items:baseline;min-width:0}
 .ud-log-time{flex:none;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);opacity:.7}
@@ -2581,7 +2587,6 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const busy = pointActive ? pointStatus === 'loading' : loading
       const loadingVisible = pointActive ? pointStatus === 'loading' && !pointView : loading && !stats
       const emptyVisible = !error && (pointActive ? pointView && isEmptyRange(pointView) : stats && isEmptyRange(stats))
-      const hasAnomalies = (status?.skippedSessions ?? 0) > 0 || (status?.recordFailures ?? 0) > 0
 
       return h('div', { className: 'ud-panel', ref: panelRef },
         h('div', { className: 'ud-toolbar' },
@@ -2629,13 +2634,18 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                         }))
                     : null)),
           h('div', { className: 'ud-toolbar-side' },
-            hasAnomalies
-              ? h(AnomalyChip, { open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t })
-              : null,
-            h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: refresh }, t('refresh')),
-            h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t }))),
+            h(AnomalyChip, { open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t }),
+            h('button', {
+              className: 'ud-btn ud-btn--text ud-icon-btn', 'aria-label': t('refresh'), title: t('refresh'),
+              disabled: busy, onClick: refresh,
+            }, h('span', { className: 'ud-icon', dangerouslySetInnerHTML: { __html: REFRESH_ICON_SVG } })))),
         h(StatusRow, { status, t }),
-        detailsOpen && hasAnomalies ? h(AnomalyLog, { status, t }) : null,
+        detailsOpen
+          ? h('div', { className: 'ud-detail' },
+              h(AnomalyLog, { status, t }),
+              h('div', { className: 'ud-detail-foot' },
+                h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })))
+          : null,
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,

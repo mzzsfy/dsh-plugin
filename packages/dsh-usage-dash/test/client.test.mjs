@@ -112,20 +112,20 @@ test('hour 预设跨日且窗口起点落整点', () => {
 })
 
 test('minute 预设起点对齐 10 分钟桶,to 保持原始分钟', () => {
-  assert.deepEqual(resolveMinuteRange('60m', NOW), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
-  assert.deepEqual(resolveMinuteRange('6h', NOW), { from: '2026-03-15T08:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('3h', NOW), { from: '2026-03-15T11:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('24h', NOW), { from: '2026-03-14T14:30', to: '2026-03-15T14:30' })
   const offGrid = new Date(2026, 2, 15, 14, 37, 20)
-  assert.deepEqual(resolveMinuteRange('60m', offGrid), { from: '2026-03-15T13:30', to: '2026-03-15T14:37' })
+  assert.deepEqual(resolveMinuteRange('3h', offGrid), { from: '2026-03-15T11:30', to: '2026-03-15T14:37' })
 })
 
 test('minute 预设整桶边界不再回退', () => {
-  assert.deepEqual(resolveMinuteRange('60m', new Date(2026, 2, 15, 14, 30, 0)), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('3h', new Date(2026, 2, 15, 14, 30, 0)), { from: '2026-03-15T11:30', to: '2026-03-15T14:30' })
 })
 
 test('预设定义表覆盖三视图', () => {
   assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
   assert.deepEqual(HOUR_PRESETS, ['24h', '3d', '7d', '15d'])
-  assert.deepEqual(MINUTE_PRESETS, ['60m', '6h', '24h', '7d'])
+  assert.deepEqual(MINUTE_PRESETS, ['3h', '24h', '3d', '7d'])
 })
 
 test('时/分挡位文案键逐挡齐备,含跨表同 id 挡位', () => {
@@ -155,9 +155,9 @@ test('每视图渲染上限等于闭区间桶数', () => {
   assert.equal(maxSlotsFor('hour', '3d'), 73)
   assert.equal(maxSlotsFor('hour', '7d'), 169)
   assert.equal(maxSlotsFor('hour', '15d'), 361)
-  assert.equal(maxSlotsFor('minute', '60m'), 7)
-  assert.equal(maxSlotsFor('minute', '6h'), 37)
+  assert.equal(maxSlotsFor('minute', '3h'), 19)
   assert.equal(maxSlotsFor('minute', '24h'), 145)
+  assert.equal(maxSlotsFor('minute', '3d'), 433)
   assert.equal(maxSlotsFor('minute', '7d'), 1009)
 })
 
