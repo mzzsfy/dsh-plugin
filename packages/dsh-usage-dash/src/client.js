@@ -1208,7 +1208,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STATUS_REFRESH_DEBOUNCE_MS = 800
     const FIT_MAX_SIZE = 22
     const FIT_MIN_SIZE = 11
-    const FIT_NAME_MAX_SIZE = 16
+    const FIT_NAME_MAX_SIZE = 20
     const FIT_STEP_SIZE = 0.5
     const FIT_OVERFLOW_TOLERANCE = 1
     const CHART_NOMINAL_WIDTH = 720
