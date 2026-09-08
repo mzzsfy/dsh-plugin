@@ -282,6 +282,7 @@ export function apply(ctx, config) {
       for (const id of selectArchiveCandidates({ records: candidates, nowMs, thresholdDays: days })) {
         try {
           await registry.archiveSession(id)
+          ctx.logger && ctx.logger.info && ctx.logger.info('session-manager 已归档会话: ' + id)
         } catch (error) {
           // 单个归档失败不中断整轮,剩余候选继续;失败者由下一次触发重试
           ctx.logger && ctx.logger.warn('session-manager 归档 ' + id + ' 失败: ' + String(error))

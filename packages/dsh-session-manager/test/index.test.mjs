@@ -168,7 +168,7 @@ function makeCtx({
     get: (name) => ({ agents, sessionPersistence, settings: settingsService }[name]),
     on: (event, handler) => { eventHandlers[event] = handler },
     // 日志桩:partial 降级点(logger.warn)在测试中可执行且可断言,不再被 undefined 短路
-    logger: { warns: [], warn(message) { this.warns.push(message) }, info() {} },
+    logger: { warns: [], warn(message) { this.warns.push(message) }, infos: [], info(message) { this.infos.push(message) } },
   }
   const ctx = new Proxy(base, {
     get(target, prop) {
@@ -554,7 +554,7 @@ test('自动归档评估:产物不可读的会话不参与归档(防删除后复
   const sessionPersistence = {
     locate: (header) => header.id === 's1' ? { path: alivePath } : { path: path.join(dir, 'gone.jsonl') },
   }
-  const { eventHandlers, registry } = makeCtx({
+  const { eventHandlers, registry, logger } = makeCtx({
     archivedIds: [],
     headers,
     agents: new Map(),
@@ -564,6 +564,9 @@ test('自动归档评估:产物不可读的会话不参与归档(防删除后复
   await waitFor(() => registry.archiveCalls.length > 0)
   // s2 产物缺失必须被守卫跳过:否则已删除会话会被重新归档而在面板复活
   assert.deepEqual(registry.archiveCalls, ['s1'])
+  // 归档成功须落可追溯日志(含会话 id)
+  await waitFor(() => logger.infos.length > 0)
+  assert.ok(logger.infos.some((message) => message.includes('s1')), '归档成功应落 info 日志')
 })
 
 test('自动归档评估:locate 缺失(第三方后端)的会话不参与归档', skipMissingDeps, async () => {

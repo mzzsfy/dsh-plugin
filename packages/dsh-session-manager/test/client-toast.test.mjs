@@ -43,9 +43,24 @@ function loadClient() {
       getSnapshot: () => snapshot,
     },
   }
+  // 会话行模型:与官方 sessions.list 快照同构(ids + byId,行标题为 displayTitle),
+  // 行数据可由用例覆写
+  let sessionSnapshot = {
+    ids: ['c', 'd'],
+    byId: {
+      c: { id: 'c', displayTitle: 'c 标题' },
+      d: { id: 'd', displayTitle: 'd 标题' },
+    },
+  }
+  const sessions = {
+    list: {
+      subscribe: () => () => {},
+      getSnapshot: () => sessionSnapshot,
+    },
+  }
   const effects = []
   const ctx = {
-    get: (name) => (name === 'workspaces' ? workspaces : {}),
+    get: (name) => (name === 'workspaces' ? workspaces : name === 'sessions' ? sessions : {}),
     effect: (fn, tag) => effects.push(tag),
     slots: { inject: () => {}, register: () => {} },
   }
@@ -54,6 +69,7 @@ function loadClient() {
     shown,
     required,
     emit(next) { snapshot = next; if (listener !== null) listener() },
+    setSessions(next) { sessionSnapshot = next },
     effects,
   }
 }
@@ -74,10 +90,23 @@ test('apply:归档差分经 toast 出口,连续 ready 才计新增', () => {
     client.emit(READY(['a', 'b']))
     assert.deepEqual(client.shown, [], '首帧基线(存量归档)不通知')
     client.emit(READY(['a', 'b', 'c', 'd']))
-    assert.deepEqual(client.shown.map((call) => call.text), ['有 2 个会话已归档'])
+    assert.deepEqual(client.shown.map((call) => call.text), ['有 2 个会话已归档:c 标题、d 标题'])
     assert.deepEqual(client.shown.map((call) => call.opts), [undefined])
     client.emit(READY(['a', 'b', 'c', 'd']))
     assert.equal(client.shown.length, 1, '无新增不重复通知')
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('apply:行数据缺标题时通知文案回退会话 id,单个报标题', () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const client = loadClient()
+    client.setSessions({ ids: ['z'], byId: { z: { id: 'z' } } })
+    client.emit(READY(['a']))
+    client.emit(READY(['a', 'z']))
+    assert.deepEqual(client.shown.map((call) => call.text), ['会话「z」已归档'])
   } finally {
     mock.timers.reset()
   }

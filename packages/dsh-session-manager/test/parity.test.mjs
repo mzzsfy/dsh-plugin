@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 
 import {
   archiveToastStep as coreArchiveToastStep,
+  archiveToastText as coreArchiveToastText,
   projectArchiveRows,
   projectDeletedRows,
 } from '../src/core.mjs'
@@ -27,7 +28,7 @@ assert.ok(MIRROR_START >= 0 && MIRROR_END > MIRROR_START, 'client.js 镜像函�
 
 const mirror = new Function(
   CLIENT_SRC.slice(MIRROR_START, MIRROR_END)
-  + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep }',
+  + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep, archiveToastText: archiveToastText }',
 )()
 
 // client 侧输入形态 byId 字典,core 侧 rows 数组:按 title/cwd 约定构造等价输入
@@ -142,6 +143,25 @@ test('parity Toast 差分:订阅即 ready(无 pending 帧)首帧守卫', () => {
     { phase: 'ready', archivedSessionIds: ['a'] },
     { phase: 'ready', archivedSessionIds: ['a', 'b'] },
   ])
+})
+
+function assertToastTextParity(addedIds, rows) {
+  assert.equal(mirror.archiveToastText(addedIds, rows), coreArchiveToastText(addedIds, rows),
+    '归档通知文案不一致: ' + JSON.stringify(addedIds))
+}
+
+test('parity 归档通知文案:单标题/多标题/截断/回退/非数组行同输入同输出', () => {
+  const rows = [
+    { id: 'a', title: 'A' },
+    { id: 'b', title: ' B ' },
+    { id: 'c' },
+    { id: 'd', title: '  ' },
+  ]
+  assertToastTextParity(['a'], rows)
+  assertToastTextParity(['a', 'b'], rows)
+  assertToastTextParity(['a', 'b', 'c', 'd'], rows)
+  assertToastTextParity(['missing'], rows)
+  assertToastTextParity(['a', 'b'], undefined)
 })
 
 test('parity Toast 差分:大集合增量性能形态一致性(n=5000)', () => {
