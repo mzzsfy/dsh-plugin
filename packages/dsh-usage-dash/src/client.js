@@ -836,8 +836,9 @@ function buildStatsGroups(stats, usage, prefs, t, pricingRules = null) {
 }
 
 // usp stats-line 偏好状态工厂:storage 注入便于 Node 测试,读写全防御,内存值始终生效
+// 默认三开:存储缺键/非法值一律按开,仅显式 false 视为用户关闭
 function createStatsLineState(storage) {
-  const DEFAULT_PREFS = { cachePrecision: false, tokenDetail: false, costDisplay: false }
+  const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true }
   const listeners = new Set()
   const read = () => {
     if (!storage) return { ...DEFAULT_PREFS }
@@ -845,9 +846,9 @@ function createStatsLineState(storage) {
       const parsed = JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY))
       if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PREFS }
       return {
-        cachePrecision: parsed.cachePrecision === true,
-        tokenDetail: parsed.tokenDetail === true,
-        costDisplay: parsed.costDisplay === true,
+        cachePrecision: parsed.cachePrecision !== false,
+        tokenDetail: parsed.tokenDetail !== false,
+        costDisplay: parsed.costDisplay !== false,
       }
     } catch {
       return { ...DEFAULT_PREFS }
@@ -1013,7 +1014,8 @@ function formatCost(value, currency) {
   return `${currency}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
 }
 
-// 汇总费用货币:规则表首个非空 currency;无则空串即不带符号
+// 全局显示货币:规则表首个非空 currency,所有费用显示点统一取此值(全局价格定位);
+// 无则空串即不带符号。数值仍按命中规则单价计算,符号不随命中规则变化
 function aggregateCurrencyOf(rules) {
   if (!Array.isArray(rules)) return ''
   const found = rules.find((rule) => typeof rule?.currency === 'string' && rule.currency !== '')

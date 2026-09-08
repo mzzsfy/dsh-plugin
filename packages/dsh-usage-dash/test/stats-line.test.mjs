@@ -288,13 +288,15 @@ test('buildStatsGroups 仅输出时命中率组因 null 丢弃', () => {
   assert.deepEqual(buildStatsGroups(zeroStats, usage, PREFS_OFF, zhT), ['输入 0 tok · 输出 500 tok'])
 })
 
-test('createStatsLineState 默认三关且非法 JSON 回落', () => {
-  assert.deepEqual(createStatsLineState(fakeStorage()).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
-  assert.deepEqual(createStatsLineState(null).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
+test('createStatsLineState 默认三开,非法 JSON 回落三开,显式 false 才视为关', () => {
+  assert.deepEqual(createStatsLineState(fakeStorage()).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(createStatsLineState(null).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
   const broken = fakeStorage({ [STATS_LINE_STORAGE_KEY]: '{broken json' })
-  assert.deepEqual(createStatsLineState(broken).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
+  assert.deepEqual(createStatsLineState(broken).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
   const junk = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: 'yes', tokenDetail: 1 }) })
-  assert.deepEqual(createStatsLineState(junk).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
+  assert.deepEqual(createStatsLineState(junk).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  const partialOff = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: false, tokenDetail: true }) })
+  assert.deepEqual(createStatsLineState(partialOff).get(), { cachePrecision: false, tokenDetail: true, costDisplay: true })
 })
 
 test('createStatsLineState set 合并生效并持久化且通知订阅者', () => {
@@ -302,9 +304,9 @@ test('createStatsLineState set 合并生效并持久化且通知订阅者', () =
   const state = createStatsLineState(storage)
   const seen = []
   state.subscribe(() => seen.push(state.get()))
-  state.set({ cachePrecision: true })
-  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: false, costDisplay: false })
-  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { cachePrecision: true, tokenDetail: false, costDisplay: false })
+  state.set({ cachePrecision: false })
+  assert.deepEqual(state.get(), { cachePrecision: false, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { cachePrecision: false, tokenDetail: true, costDisplay: true })
   assert.equal(seen.length, 1)
 })
 
@@ -312,9 +314,9 @@ test('createStatsLineState subscribe 退订后不再通知', () => {
   const state = createStatsLineState(fakeStorage())
   let count = 0
   const unsubscribe = state.subscribe(() => { count += 1 })
-  state.set({ cachePrecision: true })
+  state.set({ cachePrecision: false })
   unsubscribe()
-  state.set({ tokenDetail: true })
+  state.set({ tokenDetail: false })
   assert.equal(count, 1)
 })
 
@@ -325,7 +327,7 @@ test('createStatsLineState reload 吸收外部写入', () => {
   state.subscribe(() => { notified += 1 })
   storage.setItem(STATS_LINE_STORAGE_KEY, JSON.stringify({ cachePrecision: true, tokenDetail: true }))
   state.reload()
-  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: true, costDisplay: false })
+  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
   assert.equal(notified, 1)
 })
 
@@ -334,8 +336,8 @@ test('createStatsLineState 写入失败仅丢持久化,内存仍生效', () => {
     getItem: () => null,
     setItem: () => { throw new Error('quota') },
   })
-  state.set({ tokenDetail: true })
-  assert.deepEqual(state.get(), { cachePrecision: false, tokenDetail: true, costDisplay: false })
+  state.set({ tokenDetail: false })
+  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: false, costDisplay: true })
 })
 
 // —— S14 费用组(buildCostItem) ——
