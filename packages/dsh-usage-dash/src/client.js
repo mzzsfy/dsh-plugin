@@ -1,6 +1,8 @@
+(() => {
 // 用量统计面板 client 半区:设置页 settings.section 注入与底部信息栏接管,en/zh 双语。
-// 无构建:createElement + 一次性样式注入;协议与渲染形态见 docs/feat-usage-dash/client-design.md。
-// 单文件自包含:client-modules bundle 以非模块 script 求值,禁止 import/export(整捆语法共担);纯函数区经测试整源求值收集。
+// 无构建:createElement + 一次性样式注入。
+// 单文件自包含:client-modules bundle 以经典 script 整源求值,禁止 import/export;整文件 IIFE 书挡,
+// 顶层零词法声明(经典 script 全局词法环境跨 bundle 共享,顶层同名即整脚本拒载);测试经书挡剥壳求值纯函数区。
 
 const DAY_PRESETS = ['7', '30', '90']
 const HOUR_PRESETS = ['24h', '72h', '5d', '15d']
@@ -2652,3 +2654,4 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
   }
 }
+})()

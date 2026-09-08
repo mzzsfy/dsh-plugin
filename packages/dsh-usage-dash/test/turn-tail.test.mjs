@@ -1,18 +1,10 @@
 // 注入点B(S15)纯函数层测试:select 矩阵/模型键回退/单轮行文本/title 口径/文案键/显隐 CSS 镜像
-// client.js 为非模块 script(bundle 求值形态,禁 import/export),整源求值后按顶层声明名收集
+// client.js 为经典 script bundle(禁 import/export),整文件 IIFE 书挡;经 client-eval 剥壳后整源求值,按顶层声明名收集
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { CLIENT_SOURCE, CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
 
-const CLIENT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
-const DECLARATION_NAMES = [
-  ...new Set(
-    [...CLIENT_SOURCE.matchAll(/^(?:const|function|let) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
-  ),
-]
-const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
+const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
 const {
   MESSAGES_EN,

@@ -1,11 +1,9 @@
 // 双实现同源 parity 测试:client.js 顶层定价镜像函数与宿主 src/pricing.js 同输入同输出
 // 向量表驱动:同一批向量喂双侧,deepEqual 双侧结果并对期望值断言
-// client.js 为非模块 script(bundle 求值形态,禁 import/export),整源求值后按顶层声明名收集
+// client.js 为经典 script bundle(禁 import/export),整文件 IIFE 书挡;经 client-eval 剥壳后整源求值,按顶层声明名收集
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
 
 import {
   matchPrice as hostMatchPrice,
@@ -18,13 +16,7 @@ import {
   TOKENS_PER_MILLION as hostTokensPerMillion,
 } from '../src/pricing.js'
 
-const CLIENT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
-const DECLARATION_NAMES = [
-  ...new Set(
-    [...CLIENT_SOURCE.matchAll(/^(?:const|function|let) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
-  ),
-]
-const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
+const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
 const {
   matchPrice: clientMatchPrice,
