@@ -498,7 +498,7 @@ function HistorySwitchRow() {
   )
 }
 
-// 自动归档配置:阈值天数与周期小时数,数值语义,失焦或 Enter 单字段即时提交;
+// 自动归档配置:阈值天数与检查周期小时数,数值语义,失焦或 Enter 单字段即时提交;
 // 值存宿主 settings(与评估逻辑同源,0 = 关闭),非法输入前端拒绝不发包,
 // 服务端失败后回读生效值回滚显示
 const AUTO_ARCHIVE_URL = '/api/session-manager/auto-archive'
@@ -575,7 +575,7 @@ function AutoArchiveConfig() {
   return h('div', { className: 'sm-cfg' },
     h('span', null, '自动归档'),
     h('label', { className: 'sm-cfg__field' }, '阈值', numberInput('days'), '天未活跃(0 关闭)'),
-    h('label', { className: 'sm-cfg__field' }, '周期', numberInput('intervalHours'), '小时(0 关闭)'),
+    h('label', { className: 'sm-cfg__field' }, '检查周期', numberInput('intervalHours'), '小时(0 关闭)'),
   )
 }
 
