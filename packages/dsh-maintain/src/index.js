@@ -340,15 +340,6 @@ function readSettings(ctx) {
   }
 }
 
-async function resolveCurrentHostVersion() {
-  return resolveHostVersion({
-    execPath: process.execPath,
-    platform: process.platform,
-    readFileImpl: readFile,
-    resolveImpl: undefined,
-  })
-}
-
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx) {
   // 启动器在挂载前提供 appExit(有界退出,5 秒兜底强制);缺失时重启能力关闭
@@ -360,6 +351,19 @@ export function apply(ctx) {
   const staleLock = upgradeLockStale(readUpgradeLock()) ? null : readUpgradeLock()
   if (staleLock !== null) {
     console.warn('[dsh-maintain] 检测到未过期的升级锁(可能存在残留升级子进程),升级端点保持拒绝直至锁过期: ' + UPGRADE_LOCK_PATH)
+  }
+
+  // 运行版本探测:服务面可注入受控实现(测试面),缺省走真实盘读;
+  // 约定恒 resolve 不 reject,真实实现全失败回 null,注入侧经 then 同步抛错同折进 rejection
+  function resolveCurrentHostVersion() {
+    const probe = ctx.get('hostVersionProbe')
+    if (typeof probe === 'function') return Promise.resolve().then(probe)
+    return resolveHostVersion({
+      execPath: process.execPath,
+      platform: process.platform,
+      readFileImpl: readFile,
+      resolveImpl: undefined,
+    })
   }
 
   // 内存快照:仅存当前态,进程重启后从启动检查重新开始(设计约束:不持久化)。

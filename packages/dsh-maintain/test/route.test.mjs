@@ -288,15 +288,20 @@ test('registry-base:非法 scheme 400;合法值持久化', async () => {
 
 test('upgrade:运行版本已是通道最新 409 拒绝(防降级),unknown 放行', async () => {
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const { ctx, routes } = makeCtx({ settingsStore: store })
+  // 版本探测注入受控值:CI 无 dsh 本体,真实盘读回 null 会把 verdict 打成 unknown,
+  // 防降级门控(核心断言)在 CI 恒不触发
+  const { ctx, routes } = makeCtx({
+    settingsStore: store,
+    services: { hostVersionProbe: () => Promise.resolve('5.4.3') },
+  })
   apply(ctx)
-  // 假目标版本远低于真实磁盘版本:verdict 应转 up-to-date,升级入口拒绝
+  // 注入运行版本远低于假目标版本:verdict 应转 up-to-date,升级入口拒绝
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => tagsBody({ latest: '0.0.1', next: '0.0.2' })
   try {
     const refreshed = await post(routes, '/api/maintain/refresh')
     assert.equal(refreshed.status, 200)
-    assert.equal(refreshed.payload.verdict, 'up-to-date', '前置:磁盘版本应高于 0.0.1 假目标')
+    assert.equal(refreshed.payload.verdict, 'up-to-date', '前置:注入运行版本应高于 0.0.1 假目标')
     const denied = await post(routes, '/api/maintain/upgrade')
     assert.equal(denied.status, 409)
     assert.match(denied.payload.error, /已是通道最新版/)
