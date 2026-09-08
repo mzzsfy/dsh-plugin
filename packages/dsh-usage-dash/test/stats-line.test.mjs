@@ -288,13 +288,15 @@ test('buildStatsGroups 仅输出时命中率组因 null 丢弃', () => {
   assert.deepEqual(buildStatsGroups(zeroStats, usage, PREFS_OFF, zhT), ['输入 0 tok · 输出 500 tok'])
 })
 
-test('createStatsLineState 默认三关且非法 JSON 回落', () => {
-  assert.deepEqual(createStatsLineState(fakeStorage()).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
-  assert.deepEqual(createStatsLineState(null).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
+test('createStatsLineState 默认三开,非法 JSON 回落三开,显式 false 才视为关', () => {
+  assert.deepEqual(createStatsLineState(fakeStorage()).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(createStatsLineState(null).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
   const broken = fakeStorage({ [STATS_LINE_STORAGE_KEY]: '{broken json' })
-  assert.deepEqual(createStatsLineState(broken).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
+  assert.deepEqual(createStatsLineState(broken).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
   const junk = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: 'yes', tokenDetail: 1 }) })
-  assert.deepEqual(createStatsLineState(junk).get(), { cachePrecision: false, tokenDetail: false, costDisplay: false })
+  assert.deepEqual(createStatsLineState(junk).get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
+  const partialOff = fakeStorage({ [STATS_LINE_STORAGE_KEY]: JSON.stringify({ cachePrecision: false, tokenDetail: true }) })
+  assert.deepEqual(createStatsLineState(partialOff).get(), { cachePrecision: false, tokenDetail: true, costDisplay: true })
 })
 
 test('createStatsLineState set 合并生效并持久化且通知订阅者', () => {
@@ -302,9 +304,9 @@ test('createStatsLineState set 合并生效并持久化且通知订阅者', () =
   const state = createStatsLineState(storage)
   const seen = []
   state.subscribe(() => seen.push(state.get()))
-  state.set({ cachePrecision: true })
-  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: false, costDisplay: false })
-  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { cachePrecision: true, tokenDetail: false, costDisplay: false })
+  state.set({ cachePrecision: false })
+  assert.deepEqual(state.get(), { cachePrecision: false, tokenDetail: true, costDisplay: true })
+  assert.deepEqual(JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY)), { cachePrecision: false, tokenDetail: true, costDisplay: true })
   assert.equal(seen.length, 1)
 })
 
@@ -312,9 +314,9 @@ test('createStatsLineState subscribe 退订后不再通知', () => {
   const state = createStatsLineState(fakeStorage())
   let count = 0
   const unsubscribe = state.subscribe(() => { count += 1 })
-  state.set({ cachePrecision: true })
+  state.set({ cachePrecision: false })
   unsubscribe()
-  state.set({ tokenDetail: true })
+  state.set({ tokenDetail: false })
   assert.equal(count, 1)
 })
 
@@ -325,7 +327,7 @@ test('createStatsLineState reload 吸收外部写入', () => {
   state.subscribe(() => { notified += 1 })
   storage.setItem(STATS_LINE_STORAGE_KEY, JSON.stringify({ cachePrecision: true, tokenDetail: true }))
   state.reload()
-  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: true, costDisplay: false })
+  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: true, costDisplay: true })
   assert.equal(notified, 1)
 })
 
@@ -334,8 +336,8 @@ test('createStatsLineState 写入失败仅丢持久化,内存仍生效', () => {
     getItem: () => null,
     setItem: () => { throw new Error('quota') },
   })
-  state.set({ tokenDetail: true })
-  assert.deepEqual(state.get(), { cachePrecision: false, tokenDetail: true, costDisplay: false })
+  state.set({ tokenDetail: false })
+  assert.deepEqual(state.get(), { cachePrecision: true, tokenDetail: false, costDisplay: true })
 })
 
 // —— S14 费用组(buildCostItem) ——
@@ -351,10 +353,10 @@ test('buildCostItem 开关关恒为 null,组数组不受 rules 影响', () => {
   ])
 })
 
-test('buildCostItem routes 缺席按通配规则匹配,通配货币空则不带符号', () => {
-  // 无 routes → model '*',500000 × 1 / 每百万 = 0.5,货币 '' → 无符号
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ 0.50')
-  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), 'Cost ≈ 0.50')
+test('buildCostItem routes 缺席按通配规则匹配,符号取全局口径(首个非空货币)', () => {
+  // 无 routes → model '*',500000 × 1 / 每百万 = 0.5;命中通配(货币空),符号取表内首个非空 ¥
+  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥0.50')
+  assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), 'Cost ≈ ¥0.50')
 })
 
 test('buildCostItem routes 首个 model 精确规则优先于通配', () => {
@@ -382,15 +384,15 @@ test('buildCostItem usage 缺席为 null', () => {
   assert.equal(buildCostItem(undefined, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), null)
 })
 
-test('buildStatsGroups 开+有费用在 Token 组后追加费用组,组内其余逐字节不变', () => {
-  // USAGE 无 routes → 通配价 input 1:1000 × 1 / 每百万 = 0.001 → 四位小数微观格式
+test('buildCostItem buildStatsGroups 费用组符号同全局口径', () => {
+  // USAGE 无 routes → 通配价 input 1:1000 × 1 / 每百万 = 0.001 → 四位小数微观格式;符号取首个非空 ¥
   assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_COST_ON, zhT, COST_RULES), [
     '2 轮 · 3 步',
     'LLM 1.5秒 · 工具调用 2秒',
     '首 token 平均 0.2秒 · 63 tok/s',
     '缓存命中 80%',
     '输入 5K tok · 输出 500 tok',
-    '费用 ≈ 0.0010',
+    '费用 ≈ ¥0.0010',
   ])
 })
 

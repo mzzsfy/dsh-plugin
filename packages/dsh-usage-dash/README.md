@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-usage-dash
 
-用量统计面板(dsh 插件)。天/小时/分钟三粒度 token 与请求统计,设置页自绘面板:汇总卡、活动热力图、缓存命中率曲线、模型 donut 与列表、回扫状态行、会话底栏接管与单轮用量费用行,支持 en/zh 双语与可选费用估算。
+用量统计面板(dsh 插件)。天/小时/分钟三粒度 token 与请求统计,设置页自绘面板:汇总卡、活动热力图、缓存命中率曲线、模型 donut 与列表、回扫状态行、会话底栏接管与单轮用量费用行,支持 en/zh 双语与可选费用估算。复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),感谢原作者。
 
 ## 功能(全阶段已交付)
 
@@ -12,10 +12,10 @@
 - 缓存命中率曲线:日粒度命中率 + 右侧副轴,悬停显示当日命中率与 token 明细(配置定价规则后附当日估算费用行,受「费用显示」开关)
 - 模型 donut 与列表:按 token 前 5 模型占比环形图(中心为总量),列表含命中率与占比,悬停联动
 - 三粒度堆叠柱状趋势图(数据量大时裁最旧并提示)
-- 回扫状态行:空闲常显已收录会话数;首次启用自动回扫历史会话,运行中显示进度;「重建」按钮二次确认(3 秒)后清库重扫
-- 会话底栏接管:替换官方信息行为增强版,偏好卡三个开关——精确缓存命中率(两位小数)、会话 Token 明细(总/命中缓存/未命中缓存/输出)、费用显示(底栏费用项与趋势 tooltip 费用行);三开关全关时与官方逐字节一致
+- 回扫状态行默认隐藏:首次启用自动回扫历史会话,运行中显示进度,出现跳过会话/写入失败/采集错误时提示;「重建」按钮在面板工具栏,二次确认(3 秒)后清库重扫
+- 会话底栏接管:替换官方信息行为增强版,偏好卡三个开关默认全开——精确缓存命中率(两位小数)、会话 Token 明细(总/命中缓存/未命中缓存/输出)、费用显示(底栏费用项与趋势 tooltip 费用行);三开关全关时与官方逐字节一致
 - 会话尾部单轮行:每轮对话结束后动作行上方显示该轮 token 摘要与估算费用(最新一轮常显,历史轮悬停显现,触屏恒显;有产出文件的轮次自动让位产物行)
-- 定价规则编辑器:设置面板内编辑模型/货币/四桶单价,显式「保存」整表写入
+- 定价规则编辑器:设置面板内编辑模型与四桶单价,货币为全局切换(「定价规则」标题右侧,仅 ¥/$ 两档,整表统一,不逐模型设置),显式「保存」整表写入
 - 双语:跟随宿主语言设置(设置 → 通用 → 语言)即时切换 en/zh
 - 数据 API 守卫:POST 同源校验 + JSON content-type(与 dsh-usage-panel 同构),局域网远程访问可用
 
@@ -25,7 +25,7 @@
 
 规则存于设置存储域,经 `GET/POST /api/usage-dash/pricing` 读写(响应含单调 revision);设置面板编辑器为常规入口。
 
-规则形态:`{ model, currency, price: { input, output, cacheRead, cacheWrite }, conditions }`,单价单位固定「每百万 token」。
+规则形态:`{ model, currency, price: { input, output, cacheRead, cacheWrite }, conditions }`,单价单位固定「每百万 token」。货币为编辑器级全局设置:「定价规则」标题右侧切换,仅 ¥/$ 两档(无「空」档),打开编辑器即按首个非空货币归一显示(无非空回落 ¥),切换或保存后整表统一;wire 形态不变(仍为逐规则字段),存量空货币规则经编辑器保存后归一。费用显示为全局价格定位:汇总卡/趋势悬浮/模型列表/底栏费用项/单轮费用行的货币符号统一取规则表首个非空货币(数值仍按命中规则单价计算),切换并保存后全部显示点随之变更。
 
 - 模型匹配:`model` 精确相等的规则按数组序取首个命中;无命中回落 `*` 通配规则;仍无命中不计费用并计 unpriced
 - 条件类型(数组内 AND,空数组恒生效):
@@ -38,7 +38,7 @@
 
 ## 与 dsh-usage-statistics-panel 的关系
 
-本插件是 [dsh-usage-statistics-panel](https://www.npmjs.com/package/dsh-usage-statistics-panel) 的自研替代:补足其缺失的小时/分钟粒度与热力图/曲线/donut,移除其远程访问限制。路由(`/api/usage-dash/*`)与存储域(`usage_stats`)均不冲突,共存只是重复采集。
+本插件复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel)(npm 包 [dsh-usage-statistics-panel](https://www.npmjs.com/package/dsh-usage-statistics-panel)),感谢原作者 HaoyueQin 的开源实现。在其基础上补足缺失的小时/分钟粒度与热力图/曲线/donut,移除其远程访问限制。路由(`/api/usage-dash/*`)与存储域(`usage_stats`)均不冲突,共存只是重复采集。
 
 同装时两插件争抢会话底栏 'stats' 槽位:槽注册表对同 id 同 priority 直接抛错,本插件以更低 priority 注册遮蔽原插件(lowest renders),同装时本插件胜出、卸载本插件后原插件恢复。仍建议卸载原插件以避免重复采集。
 

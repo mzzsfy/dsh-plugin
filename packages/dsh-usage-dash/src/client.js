@@ -113,7 +113,6 @@ const MESSAGES_ZH = {
   loading: '加载中',
   tokens: 'Tokens 用量',
   tokensHint: '服务商总口径:未缓存输入 + 输出 + 缓存命中 token',
-  cachedTokens: '缓存命中',
   sessions: '会话数量',
   requests: '请求数量',
   activeDays: '活跃天数',
@@ -138,7 +137,6 @@ const MESSAGES_ZH = {
   viewHour: '按小时',
   viewMinute: '按分钟',
   viewGroup: '统计粒度',
-  'status.idle': '已收录 {n} 个会话',
   'status.running': '回扫中 {done}/{total}',
   rebuild: '重建',
   rebuildConfirm: '确认重建',
@@ -177,8 +175,7 @@ const MESSAGES_ZH = {
   pricingModel: '模型',
   pricingModelPlaceholder: 'provider/model 或 *',
   pricingCurrency: '货币',
-  pricingCurrencyNone: '空',
-  pricingUnit: '每百万 token',
+  pricingUnit: '每百万 token 定价',
   priceInput: '输入',
   priceOutput: '输出',
   priceCacheRead: '缓存读',
@@ -212,7 +209,6 @@ const MESSAGES_EN = {
   loading: 'Loading',
   tokens: 'Token usage',
   tokensHint: 'Provider total: uncached input + output + cache-read tokens',
-  cachedTokens: 'Cache hit',
   sessions: 'Sessions',
   requests: 'Requests',
   activeDays: 'Active days',
@@ -237,7 +233,6 @@ const MESSAGES_EN = {
   viewHour: 'Hourly',
   viewMinute: 'Per-minute',
   viewGroup: 'Granularity',
-  'status.idle': '{n} sessions collected',
   'status.running': 'Rescanning {done}/{total}',
   rebuild: 'Rebuild',
   rebuildConfirm: 'Confirm rebuild',
@@ -276,8 +271,7 @@ const MESSAGES_EN = {
   pricingModel: 'Model',
   pricingModelPlaceholder: 'provider/model or *',
   pricingCurrency: 'Currency',
-  pricingCurrencyNone: 'None',
-  pricingUnit: 'per million tokens',
+  pricingUnit: 'per million tokens pricing',
   priceInput: 'Input',
   priceOutput: 'Output',
   priceCacheRead: 'Cache read',
@@ -364,6 +358,15 @@ function isEmptyRange(value) {
   return value.tokens === 0 && value.cacheHit === 0 && value.requests === 0 && value.turns === 0
 }
 
+// 状态行仅在回扫进行或异常存在时可见,空闲干净态不占版面
+function statusLineActive(status) {
+  if (!status) return false
+  return Boolean(status.running)
+    || Boolean(status.error)
+    || (status.skippedSessions ?? 0) > 0
+    || (status.recordFailures ?? 0) > 0
+}
+
 const toRankedModels = (totals) =>
   [...totals.entries()].map(([model, tokens]) => ({ model, tokens })).sort((a, b) => b.tokens - a.tokens)
 
@@ -389,7 +392,12 @@ const topWithOther = (ranked) => {
   const models = ranked.slice(0, GROUP_TOP_COUNT)
   if (ranked.length > GROUP_TOP_COUNT) {
     const rest = ranked.slice(GROUP_TOP_COUNT)
-    models.push({ model: OTHER_MODEL, tokens: rest.reduce((sum, item) => sum + item.tokens, 0), items: rest })
+    models.push({
+      model: OTHER_MODEL,
+      tokens: rest.reduce((sum, item) => sum + item.tokens, 0),
+      cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0),
+      items: rest,
+    })
   }
   return models
 }
@@ -828,8 +836,9 @@ function buildStatsGroups(stats, usage, prefs, t, pricingRules = null) {
 }
 
 // usp stats-line 偏好状态工厂:storage 注入便于 Node 测试,读写全防御,内存值始终生效
+// 默认三开:存储缺键/非法值一律按开,仅显式 false 视为用户关闭
 function createStatsLineState(storage) {
-  const DEFAULT_PREFS = { cachePrecision: false, tokenDetail: false, costDisplay: false }
+  const DEFAULT_PREFS = { cachePrecision: true, tokenDetail: true, costDisplay: true }
   const listeners = new Set()
   const read = () => {
     if (!storage) return { ...DEFAULT_PREFS }
@@ -837,9 +846,9 @@ function createStatsLineState(storage) {
       const parsed = JSON.parse(storage.getItem(STATS_LINE_STORAGE_KEY))
       if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PREFS }
       return {
-        cachePrecision: parsed.cachePrecision === true,
-        tokenDetail: parsed.tokenDetail === true,
-        costDisplay: parsed.costDisplay === true,
+        cachePrecision: parsed.cachePrecision !== false,
+        tokenDetail: parsed.tokenDetail !== false,
+        costDisplay: parsed.costDisplay !== false,
       }
     } catch {
       return { ...DEFAULT_PREFS }
@@ -878,7 +887,7 @@ function createStatsLineState(storage) {
 // 语义逐条对齐宿主模块:本地时区取 Date 本地分量,匹配只读遍历入参规则;
 // 零填充与 ISO 日串格式化复用本文件既有同义部件(pad/formatDate)
 const UNIT_PER_MILLION = 'perMillion'
-const CURRENCIES = ['¥', '$', '']
+const CURRENCIES = ['¥', '$']
 const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const TOKENS_PER_MILLION = 1000 * 1000
 
@@ -1005,29 +1014,12 @@ function formatCost(value, currency) {
   return `${currency}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
 }
 
-// 汇总费用货币:规则表首个非空 currency;无则空串即不带符号
+// 全局显示货币:规则表首个非空 currency,所有费用显示点统一取此值(全局价格定位);
+// 无则空串即不带符号。数值仍按命中规则单价计算,符号不随命中规则变化
 function aggregateCurrencyOf(rules) {
   if (!Array.isArray(rules)) return ''
   const found = rules.find((rule) => typeof rule?.currency === 'string' && rule.currency !== '')
   return found ? found.currency : ''
-}
-
-// 与 firstMatchingPrice 同一选择序,返回整条规则供货币读取(展示层专用)
-const firstMatchingRule = (rules, date, modelFilter) => {
-  for (const rule of rules) {
-    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
-    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule
-  }
-  return null
-}
-
-// 命中规则的 currency;无命中或非法形状为空串
-function matchedCurrency(rules, model, timestamp) {
-  const date = toLocalDate(timestamp)
-  if (!Array.isArray(rules) || !date || typeof model !== 'string') return ''
-  const rule = firstMatchingRule(rules, date, (item) => item.model === model)
-    ?? firstMatchingRule(rules, date, (item) => item.model === MODEL_WILDCARD)
-  return typeof rule?.currency === 'string' ? rule.currency : ''
 }
 
 // 投影四桶 → 计价桶形:投影的 uncachedInputTokens 即计价 inputTokens(host 存储行同口径)
@@ -1045,7 +1037,7 @@ function buildCostItem(usage, rules, prefs, t, now = new Date()) {
   const model = usage.routes?.[0]?.model ?? MODEL_WILDCARD
   const price = matchPrice(rules, model, now)
   if (!price) return COST_PLACEHOLDER
-  return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), matchedCurrency(rules, model, now)) })
+  return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), aggregateCurrencyOf(rules)) })
 }
 
 // 历史费用口径标注:估算说明,未计价小时桶计数为正时追加后缀
@@ -1133,10 +1125,13 @@ function coercePricingRules(rules) {
 // 服务端规则为纯 JSON,编辑副本深拷贝与缓存脱钩
 const copyRules = (rules) => JSON.parse(JSON.stringify(rules))
 
-// 新增规则默认:空模型 + 人民币 + 四桶零价 + 无条件(恒生效);已有条件整条保留原样
-const defaultPricingRule = () => ({
+// 货币为编辑器级全局设置:整表统一,规则内 currency 由切换值派生(wire 形态不变)
+const applyCurrencyToRules = (rules, currency) => rules.map((rule) => ({ ...rule, currency }))
+
+// 新增规则默认:空模型 + 承接全局货币 + 四桶零价 + 无条件(恒生效);已有条件整条保留原样
+const defaultPricingRule = (currency = CURRENCIES[0]) => ({
   model: '',
-  currency: CURRENCIES[0],
+  currency,
   price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: 0 }), {}),
   conditions: [],
 })
@@ -1213,6 +1208,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STATUS_REFRESH_DEBOUNCE_MS = 800
     const FIT_MAX_SIZE = 22
     const FIT_MIN_SIZE = 11
+    const FIT_NAME_MAX_SIZE = 20
     const FIT_STEP_SIZE = 0.5
     const FIT_OVERFLOW_TOLERANCE = 1
     const CHART_NOMINAL_WIDTH = 720
@@ -1285,7 +1281,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     const STYLE_CSS = `
-.ud-panel{display:flex;flex-direction:column;gap:16px;font-size:13px;color:var(--dsw-alias-label-primary);
+.ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
 --dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
@@ -1316,6 +1312,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 @media (max-width:380px){.ud-cards{grid-template-columns:1fr}}
 .ud-card{display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:12px 14px;min-width:0}
 .ud-card-head{display:flex;align-items:center;gap:6px}
+.ud-card-cost{margin-left:auto;font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-card-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
 .ud-card-label{font-size:13px;color:var(--dsw-alias-label-secondary)}
 .ud-card-value{font-size:${FIT_MAX_SIZE}px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
@@ -1372,7 +1369,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-model-provider{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
 .ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.ud-model-cost{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .ud-model-toggle{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;transition:transform .2s ease}
 .ud-model-toggle[aria-expanded="true"]{transform:rotate(90deg)}
 .ud-model-toggle:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);border-radius:4px}
@@ -1404,7 +1402,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-input{border:1px solid var(--dsw-alias-border-l2);border-radius:6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:12px;padding:4px 6px;min-width:0;width:100%;box-sizing:border-box}
 .ud-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
 .ud-price-grid .ud-input{text-align:right}
+.ud-price-input{position:relative;display:block}
+.ud-price-input .ud-input{padding-left:20px}
+.ud-price-currency{position:absolute;left:7px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--dsw-alias-label-tertiary);pointer-events:none}
 .ud-unit-note{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.ud-pricing-actions{display:flex;align-items:center;gap:8px}
 .ud-rule-add{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:transparent;color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;cursor:pointer}
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
@@ -1421,20 +1423,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       document.head.appendChild(element)
     }
 
-    const fitFontSize = (element) => {
-      let size = FIT_MAX_SIZE
+    const fitFontSize = (element, maxSize = FIT_MAX_SIZE, minSize = FIT_MIN_SIZE) => {
+      let size = maxSize
       element.style.fontSize = `${size}px`
-      while (element.scrollWidth > element.clientWidth + FIT_OVERFLOW_TOLERANCE && size > FIT_MIN_SIZE) {
+      while (element.scrollWidth > element.clientWidth + FIT_OVERFLOW_TOLERANCE && size > minSize) {
         size -= FIT_STEP_SIZE
         element.style.fontSize = `${size}px`
       }
     }
 
-    function FitText({ children }) {
+    function FitText({ children, className = 'ud-card-value', maxSize = FIT_MAX_SIZE, minSize = FIT_MIN_SIZE }) {
       const ref = useRef(null)
       useLayoutEffect(() => {
-        fitFontSize(ref.current)
-      }, [children])
+        fitFontSize(ref.current, maxSize, minSize)
+      }, [children, maxSize, minSize])
       useEffect(() => {
         const element = ref.current
         let lastWidth = element.clientWidth
@@ -1442,46 +1444,45 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           const width = element.clientWidth
           if (width === lastWidth) return
           lastWidth = width
-          fitFontSize(element)
+          fitFontSize(element, maxSize, minSize)
         })
         observer.observe(element)
         return () => observer.disconnect()
-      }, [])
-      return h('div', { className: 'ud-card-value', ref }, children)
+      }, [maxSize, minSize])
+      return h('div', { className, ref }, children)
     }
 
-    function Card({ icon, label, hint, children }) {
+    function Card({ icon, label, hint, head, children }) {
       const lines = Array.isArray(children) ? children : [children]
       return h('div', { className: 'ud-card', title: hint },
         h('div', { className: 'ud-card-head' },
           h('span', { className: 'ud-card-icon' }, h(Icon, { paths: icon })),
-          h('span', { className: 'ud-card-label' }, label)),
+          h('span', { className: 'ud-card-label' }, label),
+          head ?? null),
         ...lines)
     }
 
     function StatCards({ stats, costCurrency = '', t = defaultT }) {
       return h('div', { className: 'ud-cards' },
-        h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint') },
-          h(FitText, null, formatTokens(stats.tokens)),
-          stats.cost !== undefined
+        h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint'),
+          head: stats.cost !== undefined
             ? h('span', {
-                className: 'ud-card-sub',
+                className: 'ud-card-cost',
                 title: costTitleText(t, stats.unpriced ?? 0),
               }, `≈ ${formatCost(stats.cost, costCurrency)}`)
-            : null),
+            : null },
+          h(FitText, null, formatTokens(stats.tokens))),
         h(Card, { key: 'turns', icon: ICONS.sessions, label: t('sessions') },
           h(FitText, null, String(stats.turns))),
         h(Card, { key: 'requests', icon: ICONS.requests, label: t('requests') },
           h(FitText, null, String(stats.requests))),
         h(Card, { key: 'model', icon: ICONS.model, label: t('topModel'), hint: t('topModelHint') },
           stats.topModel
-            ? h('div', { className: 'ud-card-lines' },
-                h('span', { className: 'ud-card-name' }, modelNameOf(stats.topModel)),
-                h('span', { className: 'ud-card-sub' }, providerOf(stats.topModel)))
+            ? h(FitText, { className: 'ud-card-name', maxSize: FIT_NAME_MAX_SIZE },
+                `${providerOf(stats.topModel)} / ${modelNameOf(stats.topModel)}`)
             : h('div', { className: 'ud-card-value' }, '—')),
         h(Card, { key: 'cache', icon: ICONS.rate, label: t('cacheRate'), hint: t('cacheRateHint') },
-          h(FitText, null, cacheRateText(stats.cacheHit, stats.cacheMiss)),
-          h('span', { className: 'ud-card-sub' }, `${formatCompact(stats.cacheHit)} ${t('cachedTokens')}`)),
+          h(FitText, null, cacheRateText(stats.cacheHit, stats.cacheMiss))),
         h(Card, { key: 'days', icon: ICONS.days, label: t('activeDays') },
           h(FitText, null, String(stats.activeDays))))
     }
@@ -1507,8 +1508,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
-      const [prefs, setPrefs] = useState(() => statsLineState.get())
-      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
+      // prefs 仅用于 hover tooltip 的费用显隐,经 ref 读取:开关切换不触发本组件重渲染,
+      // 避免宿主设置弹窗滚动锚定被重渲染扰动而跳变
+      const prefsRef = useRef(statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => { prefsRef.current = statsLineState.get() }), [])
       useEffect(() => {
         const element = wrapRef.current
         const observer = new ResizeObserver((entries) => {
@@ -1585,7 +1588,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
                   `${model}: ${formatTokens(tokens)}`)),
                 h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`),
-                costEnabled && prefs.costDisplay && hoverSlot.cost !== undefined
+                costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,
               ]
@@ -1696,7 +1699,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 模型用量:donut + 列表,恒按天口径,不随视图切换
-    function ModelUsage({ models, colorFor, panelRef, t = defaultT }) {
+    function ModelUsage({ models, colorFor, panelRef, costCurrency = '', t = defaultT }) {
       const [hover, setHover] = useState(null)
       const [tip, setTip] = useState(null)
       const [expandedOther, setExpandedOther] = useState(false)
@@ -1766,7 +1769,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     : null,
                   h('div', { className: 'ud-model-values' },
                     h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
-                    h('span', { className: 'ud-model-pct' }, formatPercent((item.tokens / total) * PERCENT_SCALE)))),
+                    h('span', { className: 'ud-model-pct' },
+                      item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
+                      formatPercent((item.tokens / total) * PERCENT_SCALE)))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },
@@ -1870,7 +1875,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const model = turnModelOf(matched)
       const now = new Date()
       const price = pricingRules ? matchPrice(pricingRules, model, now) : null
-      const currency = pricingRules ? matchedCurrency(pricingRules, model, now) : ''
+      const currency = pricingRules ? aggregateCurrencyOf(pricingRules) : ''
       return h('div', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
         buildTurnCostLine(t, matched, price, currency))
     })
@@ -1913,23 +1918,25 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }))
     }
 
-    // 定价规则编辑器:阶段 3 降级形态——条件行不支持编辑,已有条件整条保留原样,
-    // 空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
+    // 定价规则编辑器:货币为编辑器级全局设置(标题右侧切换,整表统一,不逐模型设置);
+    // 条件行不支持编辑,已有条件整条保留原样,空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
-    function PricingRuleCard({ rule, errors, pathPrefix, t, onPatch, onRemove }) {
+    function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
       }
       const priceField = (key, labelKey) => h('label', { key, className: 'ud-field' },
         h('span', { className: 'ud-field-label' }, t(labelKey)),
-        h('input', {
-          type: 'number', className: 'ud-input', min: 0, step: 'any',
-          value: rule.price?.[key] ?? '',
-          onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
-        }),
+        h('span', { className: 'ud-price-input' },
+          h('span', { className: 'ud-price-currency', 'aria-hidden': 'true' }, currency),
+          h('input', {
+            type: 'number', className: 'ud-input', min: 0, step: 'any',
+            value: rule.price?.[key] ?? '',
+            onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
+          })),
         errorTextOf(`${pathPrefix}price.${key}`))
       return h('div', { className: 'ud-rule' },
         h('div', { className: 'ud-rule-head' },
@@ -1945,15 +1952,6 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
             'aria-label': t('deleteRule'), title: t('deleteRule'),
           }, '×')),
-        h('div', { className: 'ud-pref-row' },
-          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
-            CURRENCIES.map((symbol) => h('button', {
-              key: symbol || 'none', type: 'button',
-              className: cx('ud-seg-item', rule.currency === symbol && 'ud-seg-item--on'),
-              'aria-pressed': rule.currency === symbol,
-              onClick: () => onPatch({ currency: symbol }),
-            }, symbol === '' ? t('pricingCurrencyNone') : symbol))),
-          h('span', { className: 'ud-unit-note' }, t('pricingUnit'))),
         h('div', { className: 'ud-price-grid' },
           priceField('input', 'priceInput'),
           priceField('output', 'priceOutput'),
@@ -1967,6 +1965,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
     function PricingEditor({ t = defaultT }) {
       const [phase, setPhase] = useState(null)
+      const [currency, setCurrency] = useState(CURRENCIES[0])
       const [rules, setRules] = useState(null)
       const [errors, setErrors] = useState(() => new Map())
       const [saveError, setSaveError] = useState('')
@@ -1982,7 +1981,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             setPhase(PRICING_STATE_UNAVAILABLE)
             return
           }
-          setRules(copyRules(value.rules))
+          // 打开即按首个非空货币归一显示(无非空则回落首档),整表状态与全局货币恒一致
+          const loaded = copyRules(value.rules)
+          const unified = aggregateCurrencyOf(loaded) || CURRENCIES[0]
+          setCurrency(unified)
+          setRules(applyCurrencyToRules(loaded, unified))
           setPhase(PRICING_STATE_READY)
         })
         return () => { alive = false }
@@ -2026,11 +2029,24 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('div', { className: 'ud-pref-text' },
             h('span', { className: 'ud-pref-title' }, t('pricing')),
             saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
-          h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save'))),
+          h('div', { className: 'ud-pricing-actions' },
+            h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
+            h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
+              CURRENCIES.map((symbol) => h('button', {
+                key: symbol, type: 'button',
+                className: cx('ud-seg-item', currency === symbol && 'ud-seg-item--on'),
+                'aria-pressed': currency === symbol,
+                onClick: () => {
+                  setCurrency(symbol)
+                  setRules((prev) => applyCurrencyToRules(prev, symbol))
+                },
+              }, symbol))),
+            h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
         rules.map((rule, index) => h(PricingRuleCard, {
           key: index,
           rule,
+          currency,
           errors,
           pathPrefix: `${index}.`,
           t,
@@ -2039,52 +2055,36 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         })),
         h('button', {
           className: 'ud-rule-add', type: 'button',
-          onClick: () => setRules((prev) => [...prev, defaultPricingRule()]),
+          onClick: () => setRules((prev) => [...prev, defaultPricingRule(currency)]),
         }, t('addRule')))
     }
 
-    function StatusRow({ onChanged, onError, t = defaultT }) {
-      const [status, setStatus] = useState(null)
-      const [armed, setArmed] = useState(false)
-      const machineRef = useRef(null)
-      const armedTimerRef = useRef(null)
+    function StatusLine({ status, t = defaultT }) {
+      if (!statusLineActive(status)) return null
+      const running = status.running === true
+      const progress = running && status.total > 0
+        ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
+        : 0
+      return h('div', { className: 'ud-status' },
+        running
+          ? h(React.Fragment, null,
+              h('span', null, t('status.running', { done: status.done, total: status.total })),
+              h('span', { className: 'ud-status-track' },
+                h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
+          : null,
+        status.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
+        // 无法读取是日志固有损伤,常态提示用中性色,不算错误
+        (status.skippedSessions ?? 0) > 0
+          ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+          : null,
+        (status.recordFailures ?? 0) > 0
+          ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
+          : null)
+    }
 
-      useEffect(() => {
-        let timer = null
-        let alive = true
-        let baseDone = null
-        const schedule = (delay) => {
-          if (!alive) return
-          if (timer) clearTimeout(timer)
-          timer = setTimeout(tick, delay)
-        }
-        const tick = async () => {
-          timer = null
-          const result = await requestPost(ENDPOINTS.status)
-          if (!alive) return
-          if (!result.ok) {
-            schedule(STATUS_POLL_SLOW_MS)
-            return
-          }
-          const value = result.value
-          setStatus(value)
-          if (value.running) {
-            if (baseDone === null || value.done < baseDone) baseDone = value.done
-            else if (value.done > baseDone) {
-              baseDone = value.done
-              onChanged()
-            }
-            schedule(STATUS_POLL_FAST_MS)
-          }
-        }
-        tick()
-        machineRef.current = { restart: () => { baseDone = 0; schedule(STATUS_POLL_FAST_MS) } }
-        return () => {
-          alive = false
-          if (timer) clearTimeout(timer)
-          machineRef.current = null
-        }
-      }, [])
+    function RebuildButton({ machineRef, busy, onError, t = defaultT }) {
+      const [armed, setArmed] = useState(false)
+      const armedTimerRef = useRef(null)
 
       useEffect(() => () => {
         if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
@@ -2102,31 +2102,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           onError(result.message)
           return
         }
-        const value = result.value
-        setStatus(value)
-        if (value.running && machineRef.current) machineRef.current.restart()
+        machineRef.current?.restart()
       }
 
-      const running = status?.running === true
-      const progress = running && status.total > 0
-        ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
-        : 0
-      return h('div', { className: 'ud-status' },
-        running
-          ? h(React.Fragment, null,
-              h('span', null, t('status.running', { done: status.done, total: status.total })),
-              h('span', { className: 'ud-status-track' },
-                h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
-          : h('span', null, t('status.idle', { n: status?.scannedSessions ?? 0 })),
-        status?.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
-        (status?.skippedSessions ?? 0) > 0
-          ? h('span', { className: 'ud-status-err' }, t('skippedSessions', { n: status.skippedSessions }))
-          : null,
-        (status?.recordFailures ?? 0) > 0
-          ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
-          : null,
-        h('button', { className: 'ud-btn ud-btn--text', disabled: running, onClick: rebuild },
-          armed ? t('rebuildConfirm') : t('rebuild')))
+      return h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: rebuild },
+        armed ? t('rebuildConfirm') : t('rebuild'))
     }
 
     const viewLabel = (t, id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
@@ -2152,6 +2132,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [pointStats, setPointStats] = useState(null)
       const [pointStatus, setPointStatus] = useState('idle')
       const [fetchTick, setFetchTick] = useState(0)
+      const [status, setStatus] = useState(null)
+      const statusMachineRef = useRef(null)
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
       const heatGenerationRef = useRef(0)
@@ -2260,6 +2242,44 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         else refreshPoints()
       }
 
+      // 回扫状态轮询:运行中快轮,推进时联动数据刷新;restart 供重建按钮重置基线快轮
+      useEffect(() => {
+        let timer = null
+        let alive = true
+        let baseDone = null
+        const schedule = (delay) => {
+          if (!alive) return
+          if (timer) clearTimeout(timer)
+          timer = setTimeout(tick, delay)
+        }
+        const tick = async () => {
+          timer = null
+          const result = await requestPost(ENDPOINTS.status)
+          if (!alive) return
+          if (!result.ok) {
+            schedule(STATUS_POLL_SLOW_MS)
+            return
+          }
+          const value = result.value
+          setStatus(value)
+          if (value.running) {
+            if (baseDone === null || value.done < baseDone) baseDone = value.done
+            else if (value.done > baseDone) {
+              baseDone = value.done
+              scheduleRefresh()
+            }
+            schedule(STATUS_POLL_FAST_MS)
+          }
+        }
+        tick()
+        statusMachineRef.current = { restart: () => { baseDone = 0; schedule(STATUS_POLL_FAST_MS) } }
+        return () => {
+          alive = false
+          if (timer) clearTimeout(timer)
+          statusMachineRef.current = null
+        }
+      }, [])
+
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
       const pointView = pointStats && pointStats.preset === presetId ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
@@ -2323,9 +2343,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                         onChange: (event) => setCustomTo(event.target.value),
                       }))
                   : null),
-          h('button', { className: 'ud-btn ud-refresh', disabled: busy, onClick: refresh }, t('refresh'))),
+          h(StatusLine, { status, t }),
+          h('button', { className: 'ud-btn ud-btn--text ud-refresh', disabled: busy, onClick: refresh }, t('refresh')),
+          h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })),
         error ? h('div', { className: 'ud-error' }, error) : null,
-        h(StatusRow, { onChanged: scheduleRefresh, onError: setError, t }),
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
         h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),
@@ -2347,7 +2368,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               t,
             })
           : null,
-        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, t }) : null,
+        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, costCurrency, t }) : null,
         stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
         h(StatsLineOptions, { key: 'prefs', t }),
