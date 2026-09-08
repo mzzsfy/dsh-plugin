@@ -247,7 +247,10 @@ function showUpgradeFloat(state) {
   } else if (state === 'unknown') {
     text.textContent = '升级状态长时间未更新,请刷新页面查看'
   } else if (state.ok) {
-    text.textContent = '升级完成,重启宿主后生效(版本与运维页可重启)'
+    // 版本未前进(镜像滞后/静默未升)或未达通道目标:执行成功但目标未达成,不得引导重启
+    text.textContent = state.stale === true
+      ? '升级命令执行完成,但磁盘版本未前进或未达目标,详情见版本与运维页'
+      : '升级完成,重启宿主后生效(版本与运维页可重启)'
   } else if (state.stillRunning === true) {
     // 强杀后进程树疑似仍存活:升级入口已由锁锁定直至过期,不做"可重跑"的误导指引
     text.textContent = '升级超时已终止;旧进程可能仍在运行,升级入口已锁定直至其退出或锁过期'
@@ -330,8 +333,8 @@ function VersionCard(props) {
   const checked = fmtTime(status.checkedAt)
   return h('div', { className: 'dm-card' },
     h('div', { className: 'dm-row' },
-      h('span', { className: 'dm-row__label' }, '当前版本'),
-      h('span', null, status.currentVersion || '未知'),
+      h('span', { className: 'dm-row__label' }, '版本'),
+      h('span', null, '运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h(VerdictBadge, { status }),
       h('span', { className: 'dm-spacer' }),
       h('button', {
@@ -341,12 +344,19 @@ function VersionCard(props) {
       }, props.busy.refresh ? '检查中…' : '刷新'),
       h('button', {
         className: 'dm-btn',
-        // upgradeLockHeld 为 host 权威信号(锁文件时效化):升级进行中或残留锁未过期时禁用
+        // upgradeLockHeld 为 host 权威信号(锁文件时效化):升级进行中或残留锁未过期时禁用;
+        // 运行版本已是通道最新时同样禁用(host 侧同步 409 拒绝,防重装降级)
         disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running)
-          || status.upgradeLockHeld === true,
+          || status.upgradeLockHeld === true
+          || status.verdict === VERDICT_UP_TO_DATE,
+        title: status.verdict === VERDICT_UP_TO_DATE ? '当前已是通道最新版,无需升级;重装请走命令行' : undefined,
         onClick: props.onUpgrade,
       }, props.upgradeArmed ? '确认升级' : '升级'),
     ),
+    status.restartPending === true
+      ? h('div', { className: 'dm-notice dm-notice--warn' },
+          '已装新版本 ' + (status.installedVersion || '') + ',重启宿主后生效。')
+      : null,
     h('div', { className: 'dm-row' },
       h('span', { className: 'dm-row__label' }, '追踪通道'),
       tagNames.length > 0
@@ -421,7 +431,10 @@ function UpgradeCard(props) {
     !upgrade.running && last
       ? h('div', { className: 'dm-row' },
           last.ok ? h('span', { className: 'dm-ok' }, '升级完成,重启宿主后生效')
-            : h('span', { className: 'dm-error' }, '升级失败' + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '') + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
+            : h('span', { className: 'dm-error' }, '升级失败'
+                + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '')
+                + (Array.isArray(last.attempts) && last.attempts.length > 1 ? '(已尝试 ' + last.attempts.length + ' 次)' : '')
+                + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
           h('span', { className: 'dm-spacer' }),
           last.ok ? h('button', {
             className: 'dm-btn',
@@ -430,6 +443,10 @@ function UpgradeCard(props) {
             onClick: props.onRestart,
           }, props.restartArmed ? '确认重启' : '重启宿主') : null,
         )
+      : null,
+    !upgrade.running && last && last.ok === true && last.stale === true
+      ? h('div', { className: 'dm-row' },
+          h('span', { className: 'dm-warn' }, '磁盘版本未前进或未达目标: ' + (last.reason || '镜像可能滞后')))
       : null,
     !upgrade.running && last && !last.ok && last.stderrTail
       ? h('pre', { className: 'dm-pre' }, last.stderrTail)

@@ -5,6 +5,8 @@ import {
   parseSemver,
   gtSemver,
   judgeVersion,
+  judgeUpgradeFreshness,
+  isVersionPendingRestart,
   classifyUpgradeFailure,
   buildUpgradeCommand,
   isValidChannelName,
@@ -259,4 +261,46 @@ test('分类:输入字段缺省容忍不抛错', () => {
   assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN)
   assert.equal(result.retryable, false)
   assert.ok(typeof result.reason === 'string')
+})
+
+// 升级后磁盘版本复读判定:stale=版本未前进或未达通道目标;信息缺失宽松不误报。
+test('复读:版本前进且达通道目标判 fresh', () => {
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
+  // prerelease 目标达成也算 fresh;prerelease 低于正式版属未达目标(见下例)
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '2.1.0-rc.1', channelLatest: '2.1.0-rc.1' }), { stale: false, reason: null })
+})
+
+test('复读:磁盘版本未前进或回退判 stale', () => {
+  const same = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '2.0.0' })
+  assert.equal(same.stale, true)
+  assert.match(same.reason, /未前进/)
+  const rollback = judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '1.9.0', channelLatest: '2.0.0' })
+  assert.equal(rollback.stale, true)
+})
+
+test('复读:前进但未达通道目标判 stale', () => {
+  const result = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.5.0', channelLatest: '2.0.0' })
+  assert.equal(result.stale, true)
+  assert.match(result.reason, /未达/)
+})
+
+// 运行/已装版本区分:磁盘版本领先运行版本即待重启生效;任一侧不可解析一律 false 不误报。
+test('重启待生效:仅已装版本严格领先运行版本时为真', () => {
+  assert.equal(isVersionPendingRestart({ runningVersion: '1.0.0', installedVersion: '2.0.0' }), true)
+  assert.equal(isVersionPendingRestart({ runningVersion: '2.1.0-rc.1', installedVersion: '2.1.0' }), true)
+  assert.equal(isVersionPendingRestart({ runningVersion: '2.0.0', installedVersion: '2.0.0' }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: '3.0.0', installedVersion: '2.0.0' }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: null, installedVersion: '2.0.0' }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: '2.0.0', installedVersion: null }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: 'dev-main', installedVersion: '2.0.0' }), false)
+})
+
+test('复读:installed 解析失败判 stale,previous 缺失宽松判 fresh', () => {  const broken = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: null, channelLatest: '2.0.0' })
+  assert.equal(broken.stale, true)
+  assert.match(broken.reason, /解析失败|读取/)
+  const garbage = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: 'dev-main', channelLatest: '2.0.0' })
+  assert.equal(garbage.stale, true)
+  // 旧版本未知时无法证明未前进,宽松不误报;通道目标缺失同理
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: null, installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: null }), { stale: false, reason: null })
 })

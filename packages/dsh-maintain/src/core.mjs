@@ -86,6 +86,26 @@ export function judgeVersion({ currentVersion, tags, channel }) {
   return { channelLatest, verdict, reason: null }
 }
 
+// 运行/已装版本区分:磁盘版本严格领先运行版本即待重启生效;任一侧不可解析一律 false 不误报。
+export function isVersionPendingRestart({ runningVersion, installedVersion }) {
+  return Boolean(parseSemver(runningVersion) && parseSemver(installedVersion) && gtSemver(installedVersion, runningVersion))
+}
+
+// 升级后磁盘版本复读判定:stale=版本未前进(镜像滞后/静默未升)或未达通道目标。
+// previous 未知或目标缺失时无法证明未达标,宽松判 fresh 不误报。
+export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest }) {
+  if (!parseSemver(installedVersion)) {
+    return { stale: true, reason: '升级后磁盘版本解析失败' + (installedVersion ? ': ' + installedVersion : '(读取失败)') }
+  }
+  if (parseSemver(previousVersion) && !gtSemver(installedVersion, previousVersion)) {
+    return { stale: true, reason: '磁盘版本未前进,升级可能静默失败或镜像滞后: ' + installedVersion }
+  }
+  if (parseSemver(previousVersion) && parseSemver(channelLatest) && gtSemver(channelLatest, installedVersion)) {
+    return { stale: true, reason: '已升级但未达通道目标: ' + installedVersion + ' < ' + channelLatest }
+  }
+  return { stale: false, reason: null }
+}
+
 // 升级失败分类 kind 常量;导出供重试循环与测试对拍
 export const UPGRADE_FAIL_TRANSIENT_NETWORK = 'transient-network'
 export const UPGRADE_FAIL_FILE_LOCKED = 'file-locked'

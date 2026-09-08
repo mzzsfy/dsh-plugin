@@ -15,19 +15,25 @@ rmSync(UPGRADE_LOCK_PATH, { force: true })
 // 全局 fetch 拦截:core.fetchDistTags 默认绑定全局 fetch,测试期返回与 dist-tags.test
 // 同形的流式响应(tags 就绪),防止启动检查/refresh 触发真实网络请求
 const MOCK_TAGS = { latest: '9.9.9', next: '10.0.0' }
-globalThis.fetch = async () => ({
-  ok: true,
-  status: 200,
-  body: {
-    getReader: () => {
-      const chunks = [new TextEncoder().encode(JSON.stringify(MOCK_TAGS))]
-      return {
-        read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true, value: undefined }),
-        cancel: async () => {},
-      }
+
+// 与文件顶部全局 fetch 拦截同形的流式响应体
+function tagsBody(tags) {
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      getReader: () => {
+        const chunks = [new TextEncoder().encode(JSON.stringify(tags))]
+        return {
+          read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true, value: undefined }),
+          cancel: async () => {},
+        }
+      },
     },
-  },
-})
+  }
+}
+
+globalThis.fetch = async () => tagsBody(MOCK_TAGS)
 
 function makeCtx({ appExit, settingsStore, timerAvailable = true } = {}) {
   const routes = new Map()
@@ -280,8 +286,27 @@ test('registry-base:非法 scheme 400;合法值持久化', async () => {
   assert.equal(store.registryBase, 'https://mirror.example')
 })
 
-test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {
-  // 默认模板是真实 npm install 命令,POST upgrade 的默认路径禁止在测试中触发;
+test('upgrade:运行版本已是通道最新 409 拒绝(防降级),unknown 放行', async () => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  apply(ctx)
+  // 假目标版本远低于真实磁盘版本:verdict 应转 up-to-date,升级入口拒绝
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => tagsBody({ latest: '0.0.1', next: '0.0.2' })
+  try {
+    const refreshed = await post(routes, '/api/maintain/refresh')
+    assert.equal(refreshed.status, 200)
+    assert.equal(refreshed.payload.verdict, 'up-to-date', '前置:磁盘版本应高于 0.0.1 假目标')
+    const denied = await post(routes, '/api/maintain/upgrade')
+    assert.equal(denied.status, 409)
+    assert.match(denied.payload.error, /已是通道最新版/)
+    assert.equal(store.upgradeCommandTemplate, 'node -e "process.exit(0)"', '拒绝路径不得触发升级')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {  // 默认模板是真实 npm install 命令,POST upgrade 的默认路径禁止在测试中触发;
   // 门闩语义由"真实挂起命令"用例覆盖,此处锁定保存侧空白拒绝
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
@@ -314,6 +339,26 @@ test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', 
   assert.equal(settled.upgradeLockHeld, false, '升级结束后锁文件应删除')
   assert.notEqual(settled.checkedAt, baseline.checkedAt, '升级落定后自动重查链应已刷新 checkedAt')
   assert.ok(settled.checkedAt !== null)
+})
+
+test('upgrade:落定后复读磁盘版本,假命令未升级版本时标 stale', async () => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  apply(ctx)
+  const first = await post(routes, '/api/maintain/upgrade')
+  assert.equal(first.status, 200)
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+  }
+  assert.ok(settled, '升级应在假命令退出后落定')
+  assert.equal(settled.upgrade.last.ok, true)
+  assert.ok('previousVersion' in settled.upgrade.last, '触发前磁盘版本快照必须进 status')
+  assert.equal(settled.upgrade.last.installedVersion, settled.upgrade.last.previousVersion, '假命令不改磁盘,复读版本应与快照一致')
+  assert.equal(settled.upgrade.last.stale, true, '版本未前进必须标 stale(镜像滞后/静默未升)')
+  assert.ok(typeof settled.upgrade.last.reason === 'string' && settled.upgrade.last.reason.length > 0)
 })
 
 test('restart:升级进行中 409 拒绝且不调度退出', async () => {
@@ -357,6 +402,29 @@ test('status:快照携带 bootAt 实例代际', async () => {
   assert.equal(status.status, 200)
   assert.equal(typeof status.payload.bootAt, 'number')
   assert.ok(Number.isFinite(status.payload.bootAt) && status.payload.bootAt > 0)
+})
+
+test('status:运行版本与已装版本双字段,verdict 以运行版本为准', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  // 等启动检查落定:installedVersion 由检查快照填充
+  let ready = null
+  for (let waited = 0; waited < 5000 && ready === null; waited += 25) {
+    const poll = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
+    if (poll.payload.checkedAt !== null) ready = poll.payload
+    else await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.ok(ready, '启动检查 5 秒内未完成')
+  assert.ok('runningVersion' in ready, 'status 必须返回 runningVersion')
+  assert.ok('installedVersion' in ready, 'status 必须返回 installedVersion')
+  assert.equal(ready.currentVersion, undefined, '旧 currentVersion 字段移除,不保留兼容层')
+  // 静态磁盘下两读一致;磁盘领先运行版本(升级后未重启)才置 restartPending
+  assert.equal(ready.installedVersion, ready.runningVersion)
+  assert.equal(ready.restartPending, false)
+  // 运行版本与已装版本来源不同(apply 缓存 vs 检查快照):缺失时 verdict 未知
+  if (ready.runningVersion === null) {
+    assert.equal(ready.verdict, 'unknown')
+  }
 })
 
 test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {

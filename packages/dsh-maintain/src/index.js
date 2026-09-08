@@ -16,10 +16,13 @@ import {
   fetchDistTags,
   isValidChannelName,
   isValidRegistryBase,
+  isVersionPendingRestart,
+  judgeUpgradeFreshness,
   judgeVersion,
   resolveHostVersion,
   UPGRADE_FAIL_FILE_LOCKED,
   UPGRADE_FAIL_TRANSIENT_NETWORK,
+  VERDICT_UP_TO_DATE,
 } from './core.mjs'
 import { runUpgrade } from './upgrade.mjs'
 
@@ -247,8 +250,12 @@ export function apply(ctx) {
     console.warn('[dsh-maintain] 检测到未过期的升级锁(可能存在残留升级子进程),升级端点保持拒绝直至锁过期: ' + UPGRADE_LOCK_PATH)
   }
 
-  // 内存快照:仅存当前态,进程重启后从启动检查重新开始(设计约束:不持久化)
-  const snapshot = { currentVersion: null, tags: null, checkedAt: null, error: null }
+  // 内存快照:仅存当前态,进程重启后从启动检查重新开始(设计约束:不持久化)。
+  // installedVersion 为磁盘实时版本(每次检查读取),与运行版本区分
+  const snapshot = { installedVersion: null, tags: null, checkedAt: null, error: null }
+  // 运行版本:apply 时读一次缓存,即宿主启动时的版本;verdict 以它判定
+  let runningVersion = null
+  const runningVersionReady = resolveCurrentHostVersion().then((version) => { runningVersion = version })
   let upgrade = { running: false, last: null }
   let checkInFlight = null
   let nextDueAt = null
@@ -265,7 +272,7 @@ export function apply(ctx) {
         // registry 不可达:保留上次 tags,仅记录错误
         snapshot.error = error && error.message ? error.message : String(error)
       }
-      snapshot.currentVersion = await resolveCurrentHostVersion()
+      snapshot.installedVersion = await resolveCurrentHostVersion()
       snapshot.checkedAt = Date.now()
       return snapshot
     })()
@@ -303,9 +310,16 @@ export function apply(ctx) {
     pollRunning = true
   })
 
-  function currentStatus() {
+  function judgeNow() {
+    // verdict 以运行版本判定:用户关心"跑的是不是最新";已装版本供升级复读校验
+    return judgeVersion({ currentVersion: runningVersion, tags: snapshot.tags, channel: readSettings(ctx).channel })
+  }
+
+  async function currentStatus() {
+    // 等运行版本首读落定:apply 即发起读盘,此处仅吸收启动窗口的微小延迟
+    await runningVersionReady
     const config = readSettings(ctx)
-    const judged = judgeVersion({ currentVersion: snapshot.currentVersion, tags: snapshot.tags, channel: config.channel })
+    const judged = judgeNow()
     // running 即视为持锁:省一次盘读,且窗口期语义与 upgrade 路由的门闩一致
     const lock = upgrade.running === true ? { startedAt: Date.now() } : readUpgradeLock()
     return {
@@ -314,7 +328,9 @@ export function apply(ctx) {
       bootAt: BOOT_AT,
       pollRunning,
       upgradeLockHeld: lock !== null && !upgradeLockStale(lock),
-      currentVersion: snapshot.currentVersion,
+      runningVersion,
+      installedVersion: snapshot.installedVersion,
+      restartPending: isVersionPendingRestart({ runningVersion, installedVersion: snapshot.installedVersion }),
       channel: config.channel,
       upgradeTemplate: config.upgradeCommandTemplate,
       pollIntervalSec: config.pollIntervalSec,
@@ -347,12 +363,16 @@ export function apply(ctx) {
       error: null,
       kind: null,
       attempts: [],
+      previousVersion: null,
+      installedVersion: null,
+      stale: null,
+      reason: null,
     }
     // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
     upgrade = { running: true, last }
     writeUpgradeLock(last.startedAt)
     console.warn('[dsh-maintain] 升级开始: ' + command)
-    void performUpgrade(command, last)
+    void performUpgrade(command, last, config.channel)
   }
 
   // 升级锁文件只在此写入:首次与每次重试覆写,startedAt 取当前尝试开始时刻,
@@ -363,8 +383,10 @@ export function apply(ctx) {
     } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
   }
 
-  async function performUpgrade(command, last) {
+  async function performUpgrade(command, last, channel) {
     try {
+      // 触发前快照磁盘版本,成功落定后复读对比,版本未前进或未达目标即标 stale
+      last.previousVersion = await resolveCurrentHostVersion()
       const settle = await runUpgradeWithRetry({
         command,
         onAttemptStart: () => writeUpgradeLock(Date.now()),
@@ -382,6 +404,17 @@ export function apply(ctx) {
         stdoutTail: final !== null ? final.stdoutTail : '',
         stderrTail: final !== null ? final.stderrTail : '',
       })
+      if (settle.ok) {
+        last.installedVersion = await resolveCurrentHostVersion()
+        const tags = snapshot.tags
+        const freshness = judgeUpgradeFreshness({
+          previousVersion: last.previousVersion,
+          installedVersion: last.installedVersion,
+          channelLatest: tags !== null && Object.prototype.hasOwnProperty.call(tags, channel) ? tags[channel] : null,
+        })
+        last.stale = freshness.stale
+        last.reason = freshness.reason
+      }
     } catch (error) {
       last.error = error && error.message ? error.message : String(error)
     } finally {
@@ -527,6 +560,13 @@ export function apply(ctx) {
         }
         if (upgradeLockStale(readUpgradeLock()) === false) {
           sendJson(res, 409, { error: '存在未过期的升级锁(可能有残留升级子进程),等待锁过期或删除 ' + UPGRADE_LOCK_PATH })
+          return
+        }
+        // 防降级:运行版本已达通道最新时拒绝(重装旧版即降级,对齐 no-newer-version);
+        // 信息不足(verdict unknown)放行,宽松不误拒
+        const judged = judgeNow()
+        if (judged.verdict === VERDICT_UP_TO_DATE) {
+          sendJson(res, 409, { error: '当前已是通道最新版,无需升级;重装请走命令行' })
           return
         }
         triggerUpgrade()
