@@ -136,7 +136,7 @@ export function shouldNotify({ category, kind, durationMs, settings, header, wak
   return true
 }
 
-export function buildUnit({ id, category, status, sessionTitle, workspace, durationMs, ts }) {
+export function buildUnit({ id, category, status, sessionTitle, workspace, durationMs, ts, tokens, summary }) {
   const label = CATEGORY_LABELS[category] || category
   return {
     id,
@@ -145,21 +145,76 @@ export function buildUnit({ id, category, status, sessionTitle, workspace, durat
     session: sessionTitle,
     workspace,
     durationMs,
+    tokens: typeof tokens === 'number' && tokens > 0 ? tokens : null,
+    summary: typeof summary === 'string' && summary.length > 0 ? summary : null,
     ts,
     text: '[dsh] ' + label + (sessionTitle ? ': ' + sessionTitle : ''),
   }
 }
 
-// 投影单元字段到 webhook 结构化字段的一比一映射(text 随行)。
+// 通知一句话小结:耗时 + tokens + 回答前缀,均缺省返回 null(各通道按需拼装)。
+// 前缀为最终回答的首个文本块,host 侧已按码点截断,此处原样拼装。
+export function buildSummary({ durationMs, tokens, prefix }) {
+  const parts = []
+  if (typeof durationMs === 'number' && durationMs >= 0) {
+    parts.push('耗时 ' + (durationMs >= 1000 ? Math.round(durationMs / 1000) + ' 秒' : Math.round(durationMs) + ' 毫秒'))
+  }
+  if (typeof tokens === 'number' && tokens > 0) parts.push(formatTokenCount(tokens) + ' tokens')
+  if (typeof prefix === 'string' && prefix.trim().length > 0) parts.push(prefix.trim())
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
+// tokens 紧凑格式:千以下原样,以上 k 计一位小数
+export function formatTokenCount(tokens) {
+  if (tokens < 1000) return String(tokens)
+  const k = tokens / 1000
+  return (k >= 100 ? Math.round(k) : Math.round(k * 10) / 10) + 'k'
+}
+
+// 回答前缀截断:按码点截断防切断代理对,与 sessionTitle 同策略
+export const ANSWER_PREFIX_MAX_CHARS = 80
+
+// assistant/message 事件 → 会话尾部统计累积:tokens 跨 step 累加(一回合多步),
+// 回答前缀取本回合最后一条含文本的消息(后到覆盖);usage 缺失不减不崩。
+export function collectAssistantTail(tail, sessionId, data) {
+  const message = data && data.message
+  const blocks = message !== null && typeof message === 'object' && Array.isArray(message.content) ? message.content : []
+  let prefix = null
+  for (const block of blocks) {
+    if (block && typeof block.text === 'string' && block.text.trim().length > 0) {
+      const text = block.text.trim()
+      prefix = text.length <= ANSWER_PREFIX_MAX_CHARS
+        ? text
+        : Array.from(text.slice(0, ANSWER_PREFIX_MAX_CHARS + 1)).slice(0, ANSWER_PREFIX_MAX_CHARS).join('')
+      break
+    }
+  }
+  const usage = data && typeof data.usage === 'object' && data.usage !== null ? data.usage : null
+  let tokens = 0
+  if (usage !== null) {
+    tokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+  }
+  const prev = tail.get(sessionId)
+  const next = {
+    tokens: (prev?.tokens ?? 0) + tokens,
+    prefix: prefix !== null ? prefix : (prev?.prefix ?? null),
+  }
+  tail.set(sessionId, next)
+  return next
+}
+
+// 投影单元字段到 webhook 结构化字段的一比一映射(text/summary 随行)。
 export function buildWebhookPayload(unit) {
   return {
     text: unit.text,
+    summary: unit.summary,
     event: unit.id,
     category: unit.category,
     status: unit.status,
     session: unit.session,
     workspace: unit.workspace,
     durationMs: unit.durationMs,
+    tokens: unit.tokens,
     ts: unit.ts,
   }
 }
@@ -227,6 +282,10 @@ export function decideClaim({ stored, done, now, windowId, lockTtlMs = CLAIM_LOC
 // 用户行动空闲满此时长视为离开:聚焦静默不再适用,通知全通道齐发。
 export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 
+// 呈现通道名单:事件→通道路由(kindRoutes)的合法取值;host 直发通道
+// (webhook/im)由 host 侧过滤,投影单元携带 routes 供浏览器侧过滤呈现通道。
+export const CHANNELS = ['sound', 'system', 'toast', 'blink', 'webhook', 'im']
+
 // 发声通道判定:页内提示、提示音与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
 // 提示音另受分类配置约束:soundCategories 中该分类显式 false 即静音,缺省键与空分类放行。
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
@@ -234,18 +293,21 @@ export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 // pageSound 为页内提示音:页内提示弹出且通知声音未播时补一声(聚焦场景的听觉提醒),
 // 不受聚焦静默压制,受页内总开关、页内分类配置(pageSoundCategories,独立于提示音分类)
 // 与通知声音互斥约束(同一通知至多一声)。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false, pageSoundCategories = null }) {
+// routes 为事件→通道路由放行名单(null=未配置全放行):单元级 AND 叠加在本机偏好之上,
+// 名单外的呈现通道一律不出。
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false, pageSoundCategories = null, routes = null }) {
   const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
   const quiet = hasFocus && focusQuiet && !idleAway
   const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
   const pageCategoryMuted = pageSoundCategories != null && category != null && pageSoundCategories[category] === false
-  const sound = !quiet && soundEnabled && !categoryMuted
+  const routed = (channel) => routes === null || routes.indexOf(channel) >= 0
+  const sound = !quiet && soundEnabled && !categoryMuted && routed('sound')
   return {
-    toast: toastEnabled,
+    toast: toastEnabled && routed('toast'),
     sound,
-    system: !quiet && systemEnabled && permission === 'granted',
-    blink: !quiet && systemEnabled && permission !== 'granted',
-    pageSound: pageSoundEnabled && toastEnabled && !pageCategoryMuted && !sound,
+    system: !quiet && systemEnabled && permission === 'granted' && routed('system'),
+    blink: !quiet && systemEnabled && permission !== 'granted' && routed('blink'),
+    pageSound: pageSoundEnabled && toastEnabled && !pageCategoryMuted && !sound && routed('toast'),
   }
 }
 
@@ -475,10 +537,11 @@ export function imBoundBotIds(list) {
 }
 
 // 配置补丁校验:顶层键白名单,webhookUrl 空串(禁用)或 http(s) URL,
-// 时长须非负整数,开关须布尔,enabled 分类须已知。返回归一化后的补丁。
+// 时长须非负整数,开关须布尔,enabled 分类须已知,kindRoutes 条目须合法通道名单。
+// 返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'kindRoutes']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -540,7 +603,38 @@ export function validateConfigPatch(patch) {
     }
     next.enabled = { ...enabled }
   }
+  if ('kindRoutes' in patch) {
+    next.kindRoutes = normalizeKindRoutes(patch.kindRoutes).routes
+  }
   return { ok: true, patch: next }
+}
+
+// kindRoutes 读侧归一化:分类 → 放行通道名单。非对象回空(全通道);未知分类的
+// 条目剔除、名单内未知通道剔除,余项去重保序(与 normalizeImTargets 同宽松读侧:
+// 剔除非法而非整体拒绝);全空名单等价全禁(合法,用户显式配置),与缺省键(全放行)区分。
+// 写侧校验(validateConfigPatch)对未知分类/通道拒绝,两侧严格度分工不同。
+export function normalizeKindRoutes(raw) {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return { ok: true, routes: {} }
+  const routes = {}
+  for (const key of Object.keys(raw)) {
+    if (CATEGORIES.indexOf(key) < 0) continue
+    const list = raw[key]
+    if (!Array.isArray(list)) continue
+    const seen = new Set()
+    for (const channel of list) {
+      if (typeof channel !== 'string' || CHANNELS.indexOf(channel) < 0) continue
+      if (!seen.has(channel)) seen.add(channel)
+    }
+    routes[key] = [...seen]
+  }
+  return { ok: true, routes }
+}
+
+// 投影单元放行名单读取:kindRoutes 未配置该分类即全放行(null),配置即名单。
+export function unitRoutes(kindRoutes, category) {
+  if (kindRoutes === null || typeof kindRoutes !== 'object') return null
+  const list = kindRoutes[category]
+  return Array.isArray(list) ? list : null
 }
 
 // 面板读取的解析形态:enabled 缺省键按开补全,字段类型异常回退默认值;
@@ -557,6 +651,7 @@ export function resolvedConfig(settings) {
     if (typeof value === 'string' && value.length > 0) soundMapping[key] = value
   }
   const duration = Number.isFinite(source.minTurnDurationMs) ? Math.max(0, Math.floor(source.minTurnDurationMs)) : MIN_TURN_DURATION_MS
+  const routesVerdict = normalizeKindRoutes(source.kindRoutes)
   return {
     webhookUrl: typeof source.webhookUrl === 'string' ? source.webhookUrl : '',
     minTurnDurationMs: duration,
@@ -565,6 +660,7 @@ export function resolvedConfig(settings) {
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
+    kindRoutes: routesVerdict.ok ? routesVerdict.routes : {},
   }
 }
 
@@ -578,6 +674,7 @@ export function publicConfig(settings) {
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,
+    kindRoutes: resolved.kindRoutes,
     webhookConfigured: resolved.webhookUrl.trim().length > 0,
   }
 }

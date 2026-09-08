@@ -144,7 +144,7 @@ defineDeadScenarios('[core.mjs deadCustomIds] ', coreDeadCustomIds)
 defineDeadScenarios('[client.js deadCustomIds] ', client.deadCustomIds)
 
 // 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
-function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, soundEnabled, soundCategories, category, systemEnabled, idleMs, idleThresholdMs, pageSoundEnabled, pageSoundCategories }) {
+function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, soundEnabled, soundCategories, category, systemEnabled, idleMs, idleThresholdMs, pageSoundEnabled, pageSoundCategories, routes }) {
   const backing = new Map()
   if (focusQuiet === false) backing.set(client.KEY_DND, '0')
   if (systemEnabled === false) backing.set(client.KEY_SYSTEM, '0')
@@ -155,7 +155,7 @@ function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, 
   globalThis.window = { localStorage: { getItem: (key) => (backing.has(key) ? backing.get(key) : null) } }
   try {
     if (idleThresholdMs !== undefined) assert.equal(client.IDLE_AWAY_MS, idleThresholdMs)
-    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined, soundCategories ?? null, category ?? null)
+    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined, soundCategories ?? null, category ?? null, routes ?? null)
   } finally {
     delete globalThis.window
   }
@@ -195,6 +195,31 @@ function defineChannelScenarios(prefix, channels) {
     assert.equal(channels({ ...base, idleMs: USER_IDLE_AWAY_MS - 1 }).sound, false)
     assert.equal(channels({ ...base, idleMs: 0 }).sound, false)
     assert.deepEqual(channels(base), { toast: true, sound: false, system: false, blink: false, pageSound: false })
+  })
+  test(prefix + '事件→通道路由:放行名单叠加本机偏好,缺省全放行', () => {
+    const base = { hasFocus: false, permission: 'granted' }
+    // 未配置(null):全通道,与旧行为一致
+    assert.deepEqual(channels({ ...base, routes: null }), { toast: true, sound: true, system: true, blink: false, pageSound: false })
+    // 名单外通道一律不出
+    assert.deepEqual(
+      channels({ ...base, routes: ['webhook', 'im'] }),
+      { toast: false, sound: false, system: false, blink: false, pageSound: false },
+      '呈现通道全被路由排除',
+    )
+    assert.equal(channels({ ...base, routes: ['sound'] }).sound, true)
+    assert.equal(channels({ ...base, routes: ['sound', 'toast'] }).toast, true)
+    assert.equal(channels({ ...base, routes: ['toast'] }).sound, false, '名单外声音通道关闭')
+    // 空名单 = 全禁(显式配置)
+    assert.deepEqual(
+      channels({ ...base, routes: [] }),
+      { toast: false, sound: false, system: false, blink: false, pageSound: false },
+    )
+    // 路由与聚焦静默叠加:名单放行 + 聚焦静默仍压声音
+    assert.equal(channels({ ...base, hasFocus: true, routes: ['sound', 'system'] }).sound, false)
+    assert.equal(channels({ ...base, hasFocus: true, routes: ['sound', 'system'] }).system, false)
+    // 页内提示音随 toast 路由:toast 被排除即补位音不出
+    assert.equal(channels({ ...base, hasFocus: true, pageSoundEnabled: true, routes: ['toast'] }).pageSound, true)
+    assert.equal(channels({ ...base, hasFocus: true, pageSoundEnabled: true, routes: ['sound'] }).pageSound, false)
   })
 }
 

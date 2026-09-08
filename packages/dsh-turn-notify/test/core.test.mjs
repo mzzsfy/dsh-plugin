@@ -14,6 +14,10 @@ import {
   SUBAGENT_WAKE_WINDOW_MS,
   buildUnit,
   buildWebhookPayload,
+  buildSummary,
+  collectAssistantTail,
+  normalizeKindRoutes,
+  unitRoutes,
   createProjection,
   decideClaim,
   chooseChannels,
@@ -377,18 +381,81 @@ test('webhook payload 字段映射', () => {
   const unit = buildUnit({
     id: 'n1', category: CATEGORY_DONE, status: 'completed',
     sessionTitle: '修复登录', workspace: '/repo', durationMs: 12 * 1000, ts: 1234,
+    tokens: 1500, summary: '耗时 12 秒 · 1.5k tokens · 已修复',
   })
   const payload = buildWebhookPayload(unit)
   assert.deepEqual(payload, {
     text: '[dsh] 任务完成: 修复登录',
+    summary: '耗时 12 秒 · 1.5k tokens · 已修复',
     event: 'n1',
     category: CATEGORY_DONE,
     status: 'completed',
     session: '修复登录',
     workspace: '/repo',
     durationMs: 12 * 1000,
+    tokens: 1500,
     ts: 1234,
   })
+})
+
+test('通知统计与降级小结:buildSummary 组装与空缺归 null', () => {
+  assert.equal(buildSummary({ durationMs: null, tokens: null, prefix: null }), null)
+  assert.equal(buildSummary({ durationMs: 5200, tokens: 0, prefix: '' }), '耗时 5 秒')
+  assert.equal(buildSummary({ durationMs: 800, tokens: null, prefix: null }), '耗时 800 毫秒')
+  assert.equal(buildSummary({ durationMs: null, tokens: 940, prefix: null }), '940 tokens')
+  assert.equal(buildSummary({ durationMs: null, tokens: 123456, prefix: null }), '123k tokens')
+  assert.equal(
+    buildSummary({ durationMs: 65 * 1000, tokens: 45, prefix: '已修复崩溃' }),
+    '耗时 65 秒 · 45 tokens · 已修复崩溃',
+  )
+  // 前缀纯空白按缺省处理
+  assert.equal(buildSummary({ durationMs: null, tokens: null, prefix: '   ' }), null)
+})
+
+test('collectAssistantTail:tokens 累加,回答前缀后到覆盖,usage 缺失不减不崩', () => {
+  const tail = new Map()
+  const first = collectAssistantTail(tail, 's1', {
+    usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 10, cacheWriteTokens: 0 },
+    message: { content: [{ type: 'text', text: '  第一段回答  ' }] },
+  })
+  assert.deepEqual(first, { tokens: 160, prefix: '第一段回答' })
+  const second = collectAssistantTail(tail, 's1', {
+    usage: { inputTokens: 20, outputTokens: 30 },
+    message: { content: [{ type: 'text', text: '最终回答' }] },
+  })
+  assert.deepEqual(second, { tokens: 210, prefix: '最终回答' })
+  // 无 usage 无文本:tokens 保留,前缀保留
+  const third = collectAssistantTail(tail, 's1', { message: { content: [{ type: 'image' }] } })
+  assert.deepEqual(third, { tokens: 210, prefix: '最终回答' })
+  // 畸形数据不崩
+  const fourth = collectAssistantTail(tail, 's1', null)
+  assert.deepEqual(fourth, { tokens: 210, prefix: '最终回答' })
+  // 长前缀按码点截断
+  const long = '好'.repeat(120)
+  collectAssistantTail(new Map(), 's2', { message: { content: [{ type: 'text', text: long }] } })
+  const cut = collectAssistantTail(new Map(), 's2', { message: { content: [{ type: 'text', text: long }] } })
+  assert.equal(Array.from(cut.prefix).length, 80)
+})
+
+test('kindRoutes 归一化:非法剔除合法保留,去重保序,写侧宽松读侧剔除', () => {
+  assert.deepEqual(normalizeKindRoutes(undefined), { ok: true, routes: {} })
+  assert.deepEqual(normalizeKindRoutes(null), { ok: true, routes: {} })
+  assert.deepEqual(normalizeKindRoutes('x'), { ok: true, routes: {} })
+  assert.deepEqual(normalizeKindRoutes({ bogus: ['sound'] }), { ok: true, routes: {} }, '未知分类条目剔除')
+  assert.deepEqual(normalizeKindRoutes({ completed: 'sound' }), { ok: true, routes: {} }, '形态非法条目剔除')
+  const merged = normalizeKindRoutes({
+    completed: ['webhook', 'sound', 'webhook', 'sms'],
+    error: [],
+    bogus: ['sound'],
+  })
+  assert.deepEqual(merged, { ok: true, routes: { completed: ['webhook', 'sound'], error: [] } }, '未知通道剔除,合法去重保序,空名单=全禁')
+  // 空数组 = 全禁(显式配置),与缺省键(全放行)可区分
+  assert.deepEqual(unitRoutes({ completed: [] }, 'completed'), [])
+  assert.deepEqual(unitRoutes({ completed: ['webhook'] }, 'error'), null)
+  assert.deepEqual(unitRoutes(null, 'completed'), null)
+  // 写侧经 validateConfigPatch 归一后写入
+  const verdict = validateConfigPatch({ kindRoutes: { completed: ['webhook'] } })
+  assert.deepEqual(verdict, { ok: true, patch: { kindRoutes: { completed: ['webhook'] } } })
 })
 
 test('音效映射:自定义命中用自定义,内置备选与失效回落', () => {
@@ -586,7 +653,7 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
 
 test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () => {
   assert.deepEqual(
-    resolvedConfig({ webhookUrl: 'https://hook.example', enabled: { completed: false }, soundMapping: { completed: 'snd-1' } }),
+    resolvedConfig({ webhookUrl: 'https://hook.example', enabled: { completed: false }, soundMapping: { completed: 'snd-1' }, kindRoutes: { completed: ['webhook'], bogus: ['sound'] } }),
     {
       webhookUrl: 'https://hook.example',
       minTurnDurationMs: MIN_TURN_MS,
@@ -595,6 +662,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
+      kindRoutes: { completed: ['webhook'] },
     },
   )
   assert.deepEqual(resolvedConfig({}), {
@@ -605,6 +673,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
     imTargets: [],
+    kindRoutes: {},
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
@@ -612,7 +681,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
 
 test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
   assert.deepEqual(
-    publicConfig({ webhookUrl: 'https://hook.example/service/xxx', enabled: { completed: false }, soundMapping: { completed: 'snd-1' } }),
+    publicConfig({ webhookUrl: 'https://hook.example/service/xxx', enabled: { completed: false }, soundMapping: { completed: 'snd-1' }, kindRoutes: { ask: ['im'] } }),
     {
       minTurnDurationMs: MIN_TURN_MS,
       rootsOnly: true,
@@ -620,6 +689,7 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
+      kindRoutes: { ask: ['im'] },
       webhookConfigured: true,
     },
   )

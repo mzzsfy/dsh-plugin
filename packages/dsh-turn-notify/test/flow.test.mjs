@@ -47,8 +47,9 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   }
   const documentStub = {
     hasFocus: () => true,
+    // 默认桩:聚焦窗口恒可见(浏览器不变式);聚焦静默判定为可见+焦点双条件
+    hidden: false,
     title: 'dsh',
-    hidden: true,
     createElement: () => ({ style: {}, remove() {} }),
     body: { appendChild: () => {} },
     head: { appendChild: () => {} },
@@ -264,6 +265,8 @@ function makeSidebarDom(rows) {
       querySelector: (sel) => (sel.indexOf('_title') >= 0 ? leaf : null),
       querySelectorAll: (sel) => (sel.indexOf('_title') >= 0 ? [leaf] : []),
       children: [], classList: rowClassList,
+      clicks: 0,
+      click() { row.clicks += 1 },
     }
     Object.defineProperty(row, 'className', {
       get: () => [...rowClassList.set].join(' '),
@@ -452,8 +455,81 @@ test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路�
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false)
 })
 
-test('Given 短标题先于长前缀行匹配 When 挂类 Then 短标题精确命中自身行', async () => {
-  // 长标题行在前,短标题是长标题的子串:短标题通知必须挂到全等行,不得被子串误吸
+// 点击直达:页内卡片 onClick 聚焦窗口并模拟点击侧边栏会话行(切换会话即已读);
+// 无标题通知只聚焦不点击
+test('Given 带标题通知 When 点击页内卡片 Then 聚焦窗口并点击会话行;无标题仅聚焦', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-jump', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲', summary: '耗时 12 秒' },
+    { id: 'u-bare', category: 'error', text: '[dsh] 任务出错: 无标题' },
+  ]
+  const focuses = []
+  const { mod, shown, window: winStub } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话乙 — DeepSeek Harness', ...dom },
+  })
+  winStub.focus = () => { focuses.push('focus') }
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(shown.length, 2)
+  // 摘要随文本两行呈现
+  assert.ok(shown[0].text.includes('\n耗时 12 秒'), '卡片文本含小结行')
+  assert.equal(typeof shown[0].opts.onClick, 'function', '带标题通知携带直达回调')
+  assert.equal(typeof shown[1].opts.onClick, 'function', '无标题通知仍携带回调(仅聚焦)')
+  shown[0].opts.onClick()
+  assert.deepEqual(focuses, ['focus'], '直达先聚焦窗口')
+  assert.equal(dom.rows[0].clicks, 1, '模拟点击侧边栏会话行切换会话')
+  const clicksBefore = dom.rows[0].clicks
+  shown[1].opts.onClick()
+  assert.deepEqual(focuses, ['focus', 'focus'])
+  assert.equal(dom.rows[0].clicks, clicksBefore, '无标题通知不点击任何行')
+})
+
+// 二次提醒:等待用户动作的事件超时未处理补发一轮;已处理(点击行/切到会话)与投影过期不补
+test('Given 审批通知超时未处理 When 提醒到期 Then 补发一轮;已处理与投影过期不补', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }, { leafText: '会话乙' }])
+  const hlUnits = [
+    { id: 'u-appr', category: 'approval', text: '[dsh] 等待审批: 会话甲', session: '会话甲' },
+    { id: 'u-done', category: 'completed', text: '[dsh] 任务完成: 会话乙', session: '会话乙' },
+  ]
+  const { mod, shown } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话乙 — DeepSeek Harness', ...dom },
+    shortTimers: false,
+  })
+  const { poll } = mod.__test
+  await poll()
+  await poll()
+  const before = shown.length
+  // 推进到提醒到期:approval 未读(高亮仍在)→ 补发;completed 非等待类从不登记
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(shown.length, before, '提醒未到期不补发')
+})
+
+test('Given 审批提醒登记 When 单元过期(prune)Then 不再补发', async () => {
+  const dom = makeSidebarDom([{ leafText: '会话甲' }])
+  const hlUnits = [
+    { id: 'u-appr-gone', category: 'approval', text: '[dsh] 等待审批: 会话甲', session: '会话甲' },
+  ]
+  // 第二轮投影不再含该单元:prune 撤销登记
+  const { mod, shown } = loadClient({
+    storage: new FakeStorage(),
+    payload: { units: hlUnits, soundMapping: {}, version: 1 },
+    document: { title: '会话乙 — DeepSeek Harness', ...dom },
+  })
+  const { poll } = mod.__test
+  await poll()
+  await poll()
+  // 第三轮投影单元消失
+  mod.__test.pruneReminders(new Set())
+  const before = shown.length
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(shown.length, before, '登记撤销后不补发')
+})
+
+test('Given 短标题先于长前缀行匹配 When 挂类 Then 短标题精确命中自身行', async () => {  // 长标题行在前,短标题是长标题的子串:短标题通知必须挂到全等行,不得被子串误吸
   const dom = makeSidebarDom([
     { leafText: '修复通知插件长轮询问题' },
     { leafText: '通知插件' },

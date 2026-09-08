@@ -199,6 +199,26 @@ test('config POST 非法 imTargets 400', async () => {
   assert.equal(res.status, 400)
 })
 
+test('config POST 持久化 kindRoutes 并回显面板状态,部分补丁不触碰其他配置', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  const res = makeRes()
+  await handler(makeReq('POST', { kindRoutes: { completed: ['webhook'], approval: ['im', 'sound', 'system'] } }, JSON_HEADERS), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body.kindRoutes, { completed: ['webhook'], approval: ['im', 'sound', 'system'] })
+  const readback = makeRes()
+  await handler(makeReq('GET'), readback)
+  assert.deepEqual(readback.body.kindRoutes, { completed: ['webhook'], approval: ['im', 'sound', 'system'] })
+  // 部分补丁按分类合并进已存路由(与 enabled 同语义):新键并入,既有键不动
+  const patch = makeRes()
+  await handler(makeReq('POST', { kindRoutes: { ask: [] } }, JSON_HEADERS), patch)
+  assert.equal(patch.status, 200)
+  const final = makeRes()
+  await handler(makeReq('GET'), final)
+  assert.deepEqual(final.body.kindRoutes, { completed: ['webhook'], approval: ['im', 'sound', 'system'], ask: [] })
+})
+
 test('config POST 仅 imTargets 的部分补丁:不触碰其他配置项,响应含完整面板状态', async () => {
   // 勾选即存契约:面板勾选/取消注册只 POST {imTargets},不得清掉已存的 webhook 与分类开关
   const dshIm = { send: async () => ({ sent: true }), listTargets: async () => [] }

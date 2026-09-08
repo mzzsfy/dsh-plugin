@@ -277,7 +277,8 @@ window.__ModuleLoader__.load({
     // 放入 LOGIC 段由 parity 测试保证双实现不漂移
     const IDLE_AWAY_MS = 5 * 60 * 1000
 
-    function chooseChannels(hasFocus, permission, idleMs, soundCategories, category) {
+    // routes 为事件→通道路由放行名单(null=未配置全放行),语义与 core 同源
+    function chooseChannels(hasFocus, permission, idleMs, soundCategories, category, routes) {
       const idleAway = typeof idleMs === 'number' && idleMs >= IDLE_AWAY_MS
       const quiet = hasFocus && localGet(KEY_DND) !== '0' && !idleAway
       const systemEnabled = localGet(KEY_SYSTEM) !== '0'
@@ -286,13 +287,14 @@ window.__ModuleLoader__.load({
       const pageSoundCategories = readPageSoundCategories()
       const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
       const pageCategoryMuted = pageSoundCategories != null && category != null && pageSoundCategories[category] === false
-      const sound = !quiet && soundEnabled && !categoryMuted
+      const routed = (channel) => routes == null || routes.indexOf(channel) >= 0
+      const sound = !quiet && soundEnabled && !categoryMuted && routed('sound')
       return {
-        toast: toastEnabled,
+        toast: toastEnabled && routed('toast'),
         sound,
-        system: !quiet && systemEnabled && permission === 'granted',
-        blink: !quiet && systemEnabled && permission !== 'granted',
-        pageSound: localGet(KEY_PAGE_SOUND) === '1' && toastEnabled && !pageCategoryMuted && !sound,
+        system: !quiet && systemEnabled && permission === 'granted' && routed('system'),
+        blink: !quiet && systemEnabled && permission !== 'granted' && routed('blink'),
+        pageSound: localGet(KEY_PAGE_SOUND) === '1' && toastEnabled && !pageCategoryMuted && !sound && routed('toast'),
       }
     }
 
@@ -507,10 +509,21 @@ window.__ModuleLoader__.load({
 
     const notificationPermission = () => (typeof Notification === 'undefined' ? 'denied' : Notification.permission)
 
-    // onOutcome 仅供测试路径取显示回执(onshow/onerror),真实路径吞错降级已在链路内
+    // onOutcome 仅供测试路径取显示回执(onshow/onerror),真实路径吞错降级已在链路内。
+    // onclick 点击直达:聚焦窗口并切到对应会话后关闭弹窗;summary 作 body 两级呈现
     function notifySystem(unit, onOutcome) {
       try {
-        const notification = new Notification(unit.text, { tag: unit.id })
+        const notification = new Notification(unit.text, { tag: unit.id, body: unit.summary ?? '' })
+        notification.onclick = () => {
+          try {
+            if (typeof window.focus === 'function') window.focus()
+            if (unit.session) {
+              const row = findSessionRow(unit.session)
+              if (row !== null && typeof row.click === 'function') row.click()
+            }
+          } catch { /* 直达失败不掩盖通知主流程 */ }
+          notification.close()
+        }
         if (typeof onOutcome === 'function') {
           notification.onshow = () => { onOutcome(true) }
           notification.onerror = () => { onOutcome(false) }
@@ -562,6 +575,7 @@ window.__ModuleLoader__.load({
       }
       const units = payload.units || []
       const liveIds = new Set(units.map((unit) => unit.id))
+      pruneReminders(liveIds)
       // 投影中已过期的本地残留清理,防旧锁与完成标记滞留;
       // 访问失败即标记 broken 并整段跳过,防抛出被外层吞掉、发声链路失效
       try {
@@ -583,16 +597,24 @@ window.__ModuleLoader__.load({
         }
         if (!claimEvent(unit.id)) continue
         markDone(unit.id)
-        const channels = chooseChannels(document.hasFocus(), notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category)
+        // 聚焦静默双条件:可见且有焦点才静默(竞品对齐)。hasFocus 单独成立而页面
+        // hidden 的边界(多屏/预渲染)不静默;unit.routes 为事件→通道路由放行名单
+        const engaged = document.hasFocus() && document.hidden === false
+        const channels = chooseChannels(engaged, notificationPermission(), Date.now() - lastActionAt(), readSoundCategories(), unit.category, unit.routes ?? null)
         const sound = resolveSound(unit.category, effectiveMapping(), uploadedIds)
         if (channels.toast || channels.sound || channels.system || channels.blink) {
           if (sessionHighlights.size >= SESSION_HL_MAX) sessionHighlights.delete(sessionHighlights.keys().next().value)
           // 投影字段名为 session(buildUnit 输出形态,webhook 结构化字段同名);
           // 聚焦时正在查看的会话不闪烁——与 dsh 原版一致,正在看的会话不做未读强调;
           // 失焦期间照常挂,返回页面时由可见性同步清除(回来即已读)
-          if (unit.session && !(document.hasFocus() && isCurrentSessionTitle(unit.session))) sessionHighlights.set(unit.session, unit.category)
+          if (unit.session && !(engaged && isCurrentSessionTitle(unit.session))) sessionHighlights.set(unit.session, unit.category)
         }
-        if (channels.toast) toast?.(unit.text, { holdMs: TOAST_MS })
+        if (channels.toast) {
+          toast?.(unit.text + (unit.summary ? '\n' + unit.summary : ''), {
+            holdMs: TOAST_MS,
+            onClick: activateSessionFromUnit(unit),
+          })
+        }
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
         // toast 库缺失时卡片不存在,补位音随之禁用(声明与可用分离,可用性在调用点合流);
         // 页内音色按页内场景映射解析:通知生效映射为底,页内显式配置覆盖
@@ -603,6 +625,8 @@ window.__ModuleLoader__.load({
         if (channels.sound) playSound(sound).catch(() => {})
         if (channels.system) notifySystem(unit)
         else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') startTitleBlink()
+        // 等待用户动作的事件超时未处理:补发一轮提醒(审批与提问)
+        scheduleActionReminder(unit, channels)
       }
       applySessionHighlights()
       return true
@@ -798,6 +822,56 @@ window.__ModuleLoader__.load({
     function removeRowHighlight(row) {
       if (typeof row.className !== 'string') return
       row.className = row.className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
+    }
+
+    // ---- 点击直达会话:页内卡片与系统弹窗共用 ----
+
+    // 按通知单元激活会话:聚焦窗口并模拟点击侧边栏会话行(官方行点击即切换会话);
+    // 点击事件经高亮清除委托,天然完成"查看即已读"。行未渲染(列表折叠/懒加载)
+    // 或无标题时仅聚焦窗口。
+    function activateSessionFromUnit(unit) {
+      return () => {
+        if (typeof window.focus === 'function') window.focus()
+        if (!unit.session) return
+        const row = findSessionRow(unit.session)
+        if (row !== null && typeof row.click === 'function') row.click()
+      }
+    }
+
+    // ---- 审批/提问超时二次提醒 ----
+
+    // 等待用户动作的事件超此时长未处理即补发一轮(一次,不连环)。
+    const ACTION_REMIND_MS = 10 * 60 * 1000
+    // 待提醒登记:unit id → timer;处理判定与生命周期清理共用
+    const pendingReminders = new Map()
+    // "已处理"近似:用户切到该会话(标题匹配)或点掉了高亮行(高亮条目消失);
+    // 无标题通知(审批 waterfall)无法感知处理,按未处理补发,宁可多响一次。
+    function actionHandled(unit) {
+      if (!unit.session) return false
+      if (isCurrentSessionTitle(unit.session)) return true
+      return !sessionHighlights.has(unit.session)
+    }
+    function scheduleActionReminder(unit, channels) {
+      if (unit.category !== 'approval' && unit.category !== 'ask') return
+      if (pendingReminders.has(unit.id)) return
+      const timer = setTimeout(() => {
+        pendingReminders.delete(unit.id)
+        if (actionHandled(unit)) return
+        // 补发独立于聚焦静默与路由名单:它就是"通道没送达"的兜底
+        toast?.('[再次提醒] ' + unit.text + (unit.summary ? '\n' + unit.summary : ''), { holdMs: TOAST_MS, onClick: activateSessionFromUnit(unit) })
+        playSound(resolveSound(unit.category, effectiveMapping(), uploadedIds)).catch(() => {})
+        startTitleBlink()
+      }, ACTION_REMIND_MS)
+      if (typeof timer.unref === 'function') timer.unref()
+      pendingReminders.set(unit.id, timer)
+    }
+    // 投影刷新同步:单元过期即撤登记(通知已被其他窗口处理或已出投影窗口)
+    function pruneReminders(liveIds) {
+      for (const [id, timer] of pendingReminders) {
+        if (liveIds.has(id)) continue
+        clearTimeout(timer)
+        pendingReminders.delete(id)
+      }
     }
     // 页面重新可见即视为已读:清除当前会话的高亮,其他会话的提醒保留
     function clearCurrentSessionHighlights() {
@@ -1877,7 +1951,7 @@ window.__ModuleLoader__.load({
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
       // 页内通知的展示结果经 require 桩捕获,不在本包断言
-      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle, start },
+      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders },
     }
   },
 })
