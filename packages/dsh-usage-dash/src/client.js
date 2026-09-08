@@ -1022,15 +1022,6 @@ function aggregateCurrencyOf(rules) {
   return found ? found.currency : ''
 }
 
-// 与 firstMatchingPrice 同一选择序,返回整条规则(展示层专用)
-const firstMatchingRule = (rules, date, modelFilter) => {
-  for (const rule of rules) {
-    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
-    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule
-  }
-  return null
-}
-
 // 投影四桶 → 计价桶形:投影的 uncachedInputTokens 即计价 inputTokens(host 存储行同口径)
 const pricingBucketsOf = (usage) => ({
   inputTokens: usage.uncachedInputTokens,
@@ -1217,6 +1208,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STATUS_REFRESH_DEBOUNCE_MS = 800
     const FIT_MAX_SIZE = 22
     const FIT_MIN_SIZE = 11
+    const FIT_NAME_MAX_SIZE = 16
     const FIT_STEP_SIZE = 0.5
     const FIT_OVERFLOW_TOLERANCE = 1
     const CHART_NOMINAL_WIDTH = 720
@@ -1431,20 +1423,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       document.head.appendChild(element)
     }
 
-    const fitFontSize = (element) => {
-      let size = FIT_MAX_SIZE
+    const fitFontSize = (element, maxSize = FIT_MAX_SIZE, minSize = FIT_MIN_SIZE) => {
+      let size = maxSize
       element.style.fontSize = `${size}px`
-      while (element.scrollWidth > element.clientWidth + FIT_OVERFLOW_TOLERANCE && size > FIT_MIN_SIZE) {
+      while (element.scrollWidth > element.clientWidth + FIT_OVERFLOW_TOLERANCE && size > minSize) {
         size -= FIT_STEP_SIZE
         element.style.fontSize = `${size}px`
       }
     }
 
-    function FitText({ children }) {
+    function FitText({ children, className = 'ud-card-value', maxSize = FIT_MAX_SIZE, minSize = FIT_MIN_SIZE }) {
       const ref = useRef(null)
       useLayoutEffect(() => {
-        fitFontSize(ref.current)
-      }, [children])
+        fitFontSize(ref.current, maxSize, minSize)
+      }, [children, maxSize, minSize])
       useEffect(() => {
         const element = ref.current
         let lastWidth = element.clientWidth
@@ -1452,12 +1444,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           const width = element.clientWidth
           if (width === lastWidth) return
           lastWidth = width
-          fitFontSize(element)
+          fitFontSize(element, maxSize, minSize)
         })
         observer.observe(element)
         return () => observer.disconnect()
-      }, [])
-      return h('div', { className: 'ud-card-value', ref }, children)
+      }, [maxSize, minSize])
+      return h('div', { className, ref }, children)
     }
 
     function Card({ icon, label, hint, head, children }) {
@@ -1486,8 +1478,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h(FitText, null, String(stats.requests))),
         h(Card, { key: 'model', icon: ICONS.model, label: t('topModel'), hint: t('topModelHint') },
           stats.topModel
-            ? h('div', { className: 'ud-card-lines' },
-                h('span', { className: 'ud-card-name' }, `${providerOf(stats.topModel)} / ${modelNameOf(stats.topModel)}`))
+            ? h(FitText, { className: 'ud-card-name', maxSize: FIT_NAME_MAX_SIZE },
+                `${providerOf(stats.topModel)} / ${modelNameOf(stats.topModel)}`)
             : h('div', { className: 'ud-card-value' }, '—')),
         h(Card, { key: 'cache', icon: ICONS.rate, label: t('cacheRate'), hint: t('cacheRateHint') },
           h(FitText, null, cacheRateText(stats.cacheHit, stats.cacheMiss))),
