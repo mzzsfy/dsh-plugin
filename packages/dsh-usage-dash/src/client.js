@@ -2307,6 +2307,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     function StatusLine({ status, showSkipped, t = defaultT }) {
+      if (!status) return null
       const running = status.running === true
       const skippedVisible = (status.skippedSessions ?? 0) > 0 && showSkipped === true
       if (!running && !status.error && (status.recordFailures ?? 0) === 0 && !skippedVisible) return null
