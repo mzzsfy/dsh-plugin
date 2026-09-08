@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-usage-dash
 
-用量统计面板(dsh 插件)。天/小时/分钟三粒度 token 与请求统计,设置页自绘面板:汇总卡、活动热力图、缓存命中率曲线、模型 donut 与列表、回扫状态行、会话底栏接管与单轮用量费用行,支持 en/zh 双语与可选费用估算。
+用量统计面板(dsh 插件)。天/小时/分钟三粒度 token 与请求统计,设置页自绘面板:汇总卡、活动热力图、缓存命中率曲线、模型 donut 与列表、回扫状态行、会话底栏接管与单轮用量费用行,支持 en/zh 双语与可选费用估算。复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),感谢原作者。
 
 ## 功能(全阶段已交付)
 
@@ -38,7 +38,7 @@
 
 ## 与 dsh-usage-statistics-panel 的关系
 
-本插件是 [dsh-usage-statistics-panel](https://www.npmjs.com/package/dsh-usage-statistics-panel) 的自研替代:补足其缺失的小时/分钟粒度与热力图/曲线/donut,移除其远程访问限制。路由(`/api/usage-dash/*`)与存储域(`usage_stats`)均不冲突,共存只是重复采集。
+本插件复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel)(npm 包 [dsh-usage-statistics-panel](https://www.npmjs.com/package/dsh-usage-statistics-panel)),感谢原作者 HaoyueQin 的开源实现。在其基础上补足缺失的小时/分钟粒度与热力图/曲线/donut,移除其远程访问限制。路由(`/api/usage-dash/*`)与存储域(`usage_stats`)均不冲突,共存只是重复采集。
 
 同装时两插件争抢会话底栏 'stats' 槽位:槽注册表对同 id 同 priority 直接抛错,本插件以更低 priority 注册遮蔽原插件(lowest renders),同装时本插件胜出、卸载本插件后原插件恢复。仍建议卸载原插件以避免重复采集。
 
