@@ -7,11 +7,12 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 
+import { PROVIDER_UNSET, splitRequestSegments } from './pricing.js'
+
 export const GRANULARITY_DAILY = 'D'
 export const GRANULARITY_HOURLY = 'H'
 export const GRANULARITY_MINUTE = 'M'
 
-export const PROVIDER_DEFAULT = 'default'
 export const MODEL_TURNS = '(turns)'
 export const MODEL_UNKNOWN = '(unknown)'
 
@@ -64,9 +65,9 @@ export const GRANULARITIES = [
   [GRANULARITY_MINUTE, minuteKey],
 ]
 
+// vendor 段推导与定价匹配同源:首个 / 前段,无 / 或首位斜杠归 default
 export function providerOf(modelRef) {
-  const slash = modelRef.indexOf('/')
-  return slash > 0 ? modelRef.slice(0, slash) : PROVIDER_DEFAULT
+  return splitRequestSegments(modelRef)[0]
 }
 
 export const usageRowSchema = z.object({
@@ -222,7 +223,7 @@ export class UsageStore {
 
   async recordRow(table, g, bucket, sample, nowMs) {
     const model = sample.turn ? MODEL_TURNS : sample.model ? sample.model : MODEL_UNKNOWN
-    const provider = sample.turn ? PROVIDER_DEFAULT : providerOf(model)
+    const provider = sample.turn ? PROVIDER_UNSET : providerOf(model)
     const key = rowKey(g, bucket, provider, model)
     const apply = (current) => {
       const base = current ?? emptyRow(bucket, provider, model, nowMs)

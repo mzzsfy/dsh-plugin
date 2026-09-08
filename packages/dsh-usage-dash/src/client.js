@@ -173,7 +173,7 @@ const MESSAGES_ZH = {
   pricing: '定价规则',
   pricingUnavailable: '定价规则不可用',
   pricingModel: '模型',
-  pricingModelPlaceholder: 'provider/model 或 *',
+  pricingModelPlaceholder: 'provider/model,段可通配如 */*',
   pricingCurrency: '货币',
   pricingUnit: '每百万 token 定价',
   priceInput: '输入',
@@ -188,6 +188,7 @@ const MESSAGES_ZH = {
   saved: '已保存',
   required: '必填',
   priceInvalid: '不能为负',
+  modelFormat: '需两段 provider/model,段可通配',
   'duration.compactSeconds': '{seconds}秒',
   'duration.compactMinutes': '{minutes}分{seconds}秒',
   'number.thousand': '{value}K',
@@ -269,7 +270,7 @@ const MESSAGES_EN = {
   pricing: 'Pricing rules',
   pricingUnavailable: 'Pricing rules unavailable',
   pricingModel: 'Model',
-  pricingModelPlaceholder: 'provider/model or *',
+  pricingModelPlaceholder: 'provider/model, segments may be */*',
   pricingCurrency: 'Currency',
   pricingUnit: 'per million tokens pricing',
   priceInput: 'Input',
@@ -284,6 +285,7 @@ const MESSAGES_EN = {
   saved: 'Saved',
   required: 'Required',
   priceInvalid: 'Must not be negative',
+  modelFormat: 'Requires two segments provider/model; segments may be wildcards',
   'duration.compactSeconds': '{seconds}s',
   'duration.compactMinutes': '{minutes}m{seconds}s',
   'number.thousand': '{value}K',
@@ -327,14 +329,12 @@ function cacheRateText(hit, miss) {
   return rate === null ? '—' : formatPercent(rate)
 }
 
-const REF_SPLIT_LIMIT = 2
+// 模型键展示分段与定价/存储口径同源:首个 / 前 vendor 段,余为模型段
 function modelNameOf(ref) {
-  const parts = ref.split('/')
-  return parts.length < REF_SPLIT_LIMIT ? ref : parts.slice(1).join('/')
+  return splitRequestSegments(ref)[1]
 }
 function providerOf(ref) {
-  const parts = ref.split('/')
-  return parts.length < REF_SPLIT_LIMIT ? 'default' : parts[0]
+  return splitRequestSegments(ref)[0]
 }
 
 function shortDay(day) {
@@ -892,6 +892,11 @@ const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const TOKENS_PER_MILLION = 1000 * 1000
 
 const MODEL_WILDCARD = '*'
+const SEGMENT_SEPARATOR = '/'
+const PROVIDER_UNSET = 'default'
+// 档位权重:vendor 段通配 1 档、model 段通配 2 档,和越小越优先(模型名精确档恒优于供应商精确档)
+const VENDOR_WILDCARD_TIER = 1
+const MODEL_WILDCARD_TIER = 2
 const MINUTES_PER_HOUR = 60
 
 const minutesOfDay = (date) => date.getHours() * MINUTES_PER_HOUR + date.getMinutes()
@@ -961,12 +966,31 @@ function isRuleShaped(rule) {
     && Array.isArray(rule.conditions)
 }
 
-const firstMatchingPrice = (rules, date, modelFilter) => {
-  for (const rule of rules) {
-    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
-    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule.price
-  }
-  return null
+// 规则模型键必须两段式:首个 / 前 vendor 段、后模型段(允许含 /),首位斜杠或无斜杠均非法
+function splitRuleSegments(pattern) {
+  const slash = pattern.indexOf(SEGMENT_SEPARATOR)
+  return slash > 0 ? [pattern.slice(0, slash), pattern.slice(slash + SEGMENT_SEPARATOR.length)] : null
+}
+
+// 段须非空且不含空白:含空白的模型键永不匹配真实请求
+function isTwoSegmentModel(pattern) {
+  const segments = splitRuleSegments(pattern)
+  return segments !== null && segments.every((segment) => /^\S+$/.test(segment))
+}
+
+// 请求侧模型键按同构规则分段,无 / 或首位斜杠时 vendor 段缺省归 default(与存储行口径一致)
+function splitRequestSegments(model) {
+  return splitRuleSegments(model) ?? [PROVIDER_UNSET, model]
+}
+
+// 段级比对:规则段为通配或与请求段相等;两段全过才成立,通配段按各自档位计权
+function matchTier(ruleSegments, requestSegments) {
+  const [ruleVendor, ruleModel] = ruleSegments
+  const [requestVendor, requestModel] = requestSegments
+  if (ruleVendor !== MODEL_WILDCARD && ruleVendor !== requestVendor) return null
+  if (ruleModel !== MODEL_WILDCARD && ruleModel !== requestModel) return null
+  return (ruleVendor === MODEL_WILDCARD ? VENDOR_WILDCARD_TIER : 0)
+    + (ruleModel === MODEL_WILDCARD ? MODEL_WILDCARD_TIER : 0)
 }
 
 const toLocalDate = (timestamp) => {
@@ -974,12 +998,25 @@ const toLocalDate = (timestamp) => {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-// 精确子集按数组序取首个命中;无精确子集或全不命中回落 '*' 子集;仍无命中为 null
+// 匹配链:全名 > 模型名(vendor 通配)> 供应商(model 通配)> '*/*' 全通;
+// 档位最小者胜,同档按数组序取首个;高档条件不满足自然落低档;无命中为 null(调用方计 unpriced)
 function matchPrice(rules, model, timestamp) {
   const date = toLocalDate(timestamp)
   if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
-  return firstMatchingPrice(rules, date, (rule) => rule.model === model)
-    ?? firstMatchingPrice(rules, date, (rule) => rule.model === MODEL_WILDCARD)
+  const requestSegments = splitRequestSegments(model)
+  let bestTier = Infinity
+  let bestPrice = null
+  for (const rule of rules) {
+    if (!isRuleShaped(rule)) continue
+    const ruleSegments = splitRuleSegments(rule.model)
+    if (!ruleSegments) continue
+    const tier = matchTier(ruleSegments, requestSegments)
+    if (tier === null || tier >= bestTier) continue
+    if (!rule.conditions.every((condition) => conditionMatches(condition, date))) continue
+    bestTier = tier
+    bestPrice = rule.price
+  }
+  return bestPrice
 }
 
 const BUCKET_PRICE_KEYS = [
@@ -1030,11 +1067,14 @@ const pricingBucketsOf = (usage) => ({
   cacheWriteTokens: usage.cacheWriteTokens,
 })
 
+// routes 缺席占位:双段通配模型键,仅被 '*/*' 全通配规则命中(供应商与模型全未知)
+const MODEL_UNROUTED = '*/*'
+
 // 注入点A 费用组装配:开关关/无用量/价格未加载不渲染;规则已载无命中价显示占位符;
-// routes 缺席时 model 取通配,只匹配通配规则;时间条件按当前时刻评估(估算口径)
+// routes 缺席时 model 取全通配键;时间条件按当前时刻评估(估算口径)
 function buildCostItem(usage, rules, prefs, t, now = new Date()) {
   if (!prefs?.costDisplay || !usage || !Array.isArray(rules)) return null
-  const model = usage.routes?.[0]?.model ?? MODEL_WILDCARD
+  const model = usage.routes?.[0]?.model ?? MODEL_UNROUTED
   const price = matchPrice(rules, model, now)
   if (!price) return COST_PLACEHOLDER
   return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), aggregateCurrencyOf(rules)) })
@@ -1060,8 +1100,8 @@ function selectTurnTokenUsage(owner) {
     : null
 }
 
-// 计价模型键:routes 首个 route.model,缺席回退通配(与注入点A 同款)
-const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_WILDCARD
+// 计价模型键:routes 首个 route.model,缺席回退全通配键(与注入点A 同款)
+const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_UNROUTED
 
 // 可选桶(cacheRead/cacheWrite)仅部分 provider 上报,缺失按 0 计入摘要与费用
 const turnReportedBucket = (value) => (value ?? 0)
@@ -1098,12 +1138,13 @@ function turnCostTitleText(t, tokenUsage) {
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
 
-// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型与四桶价格)
+// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型与四桶价格);模型须两段式
 function validatePricingRules(rules) {
   const errors = new Map()
   if (!Array.isArray(rules)) return errors
   rules.forEach((rule, ruleIndex) => {
     if (typeof rule.model !== 'string' || rule.model.trim().length === 0) errors.set(`${ruleIndex}.model`, 'required')
+    else if (!isTwoSegmentModel(rule.model)) errors.set(`${ruleIndex}.model`, 'modelFormat')
     PRICE_KEYS.forEach((key) => {
       const value = rule.price?.[key]
       const path = `${ruleIndex}.price.${key}`
@@ -1114,7 +1155,7 @@ function validatePricingRules(rules) {
   return errors
 }
 
-// POST 前规整:输入框字符串值转数值;模型原样(校验已确保非空)
+// POST 前规整:输入框字符串值转数值;模型已校验确保两段式且无空白,原样提交
 function coercePricingRules(rules) {
   return rules.map((rule) => ({
     ...rule,

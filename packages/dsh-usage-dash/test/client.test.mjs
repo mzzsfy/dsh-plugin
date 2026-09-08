@@ -551,10 +551,10 @@ test('formatCost 微观值四位小数', () => {
 })
 
 test('镜像函数基本行为:非法输入 null 与命中计价', () => {
-  assert.equal(matchPrice(null, 'm', NOW), null)
-  assert.equal(matchPrice([], 'm', NOW), null)
+  assert.equal(matchPrice(null, 'x/m', NOW), null)
+  assert.equal(matchPrice([], 'x/m', NOW), null)
   assert.deepEqual(
-    matchPrice([{ model: 'm', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], 'm', NOW),
+    matchPrice([{ model: 'x/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], 'x/m', NOW),
     { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
   )
   assert.equal(costOf({ input: 2, output: 0, cacheRead: 0, cacheWrite: 0 }, { inputTokens: 1000 * 1000 }), 2)
@@ -594,17 +594,23 @@ test('defaultPricingRule 承接给定货币,缺省回落首档', () => {
   assert.deepEqual(defaultPricingRule('$').conditions, [])
 })
 
-test('validatePricingRules 就地校验 model 必填与价格非空非负', () => {
+test('validatePricingRules 就地校验 model 必填两段式与价格非空非负', () => {
   const valid = [{ model: 'p/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }]
   assert.equal(validatePricingRules(valid).size, 0)
   const broken = [
     { model: '  ', currency: '¥', price: { input: '', output: -1, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: 'solo', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '*', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '/x', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
   ]
   const errors = validatePricingRules(broken)
   assert.equal(errors.get('0.model'), 'required')
   assert.equal(errors.get('0.price.input'), 'required')
   assert.equal(errors.get('0.price.output'), 'priceInvalid')
   assert.equal(errors.has('0.price.cacheRead'), false)
+  assert.equal(errors.get('1.model'), 'modelFormat')
+  assert.equal(errors.get('2.model'), 'modelFormat')
+  assert.equal(errors.get('3.model'), 'modelFormat')
 })
 
 test('costTitleText 未计价计数后缀', () => {

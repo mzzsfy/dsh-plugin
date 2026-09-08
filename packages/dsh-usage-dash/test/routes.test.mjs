@@ -383,14 +383,14 @@ test('内部错误 500 不回显内部文本', async () => {
 // ---- S13 pricing 端点与 cost 集成 ----
 
 const PRICING_RULE = {
-  model: 'deepseek-chat',
+  model: 'deepseek/deepseek-chat',
   currency: '¥',
   price: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
   conditions: [{ kind: 'dailyWindow', from: '09:00', to: '18:00' }],
 }
 
 const ruleWithInputPrice = (input) => ({
-  model: 'deepseek-chat',
+  model: 'default/deepseek-chat',
   currency: '¥',
   price: { input, output: 0, cacheRead: 0, cacheWrite: 0 },
   conditions: [],
@@ -439,6 +439,9 @@ test('pricing POST 非法规则拒绝 400 且不写入', async () => {
     { rules: 'x' },
     {},
     { rules: [{ model: 1, currency: '¥', price: PRICING_RULE.price, conditions: [] }] },
+    { rules: [{ ...PRICING_RULE, model: 'deepseek-chat' }] },
+    { rules: [{ ...PRICING_RULE, model: '*' }] },
+    { rules: [{ ...PRICING_RULE, model: '/deepseek-chat' }] },
     { rules: [{ ...PRICING_RULE, price: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
     { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'unknown' }] }] },
     { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'weekdays', days: [7] }] }] },

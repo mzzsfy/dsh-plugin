@@ -8,6 +8,7 @@ import {
   UNIT_PER_MILLION,
   conditionMatches,
   costOf,
+  isTwoSegmentModel,
   matchPrice,
 } from '../src/pricing.js'
 
@@ -19,7 +20,7 @@ const SATURDAY = new Date(2026, 8, 12)
 const localTime = (day, hour, minute = 0) => new Date(2026, 8, day, hour, minute)
 
 const makeRule = (overrides = {}) => ({
-  model: '*',
+  model: '*/*',
   unit: UNIT_PER_MILLION,
   currency: '¥',
   price: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 },
@@ -53,9 +54,9 @@ test('无条件规则恒命中', () => {
 })
 
 test('精确模型优先于通配规则', () => {
-  // Given 精确规则与 '*' 规则并存 When 匹配 Then 取精确规则 price
+  // Given 精确规则与 '*/*' 规则并存 When 匹配 Then 取精确规则 price
   const exact = makeRule({ model: 'a/b', price: { input: 5 } })
-  const wildcard = makeRule({ model: '*', price: { input: 1 } })
+  const wildcard = makeRule({ model: '*/*', price: { input: 1 } })
   assert.deepEqual(matchPrice([wildcard, exact], 'a/b', SUNDAY), exact.price)
 })
 
@@ -67,23 +68,124 @@ test('精确子集按数组序取首个命中', () => {
 })
 
 test('精确子集全不命中回落通配子集', () => {
-  // Given 精确规则条件不满足、'*' 规则无条件 When 匹配 Then 回落 '*' 而非 null
+  // Given 精确规则条件不满足、'*/*' 规则无条件 When 匹配 Then 回落 '*/*' 而非 null
   const exact = makeRule({ model: 'a/b', conditions: [{ kind: 'weekdays', days: [1] }] })
-  const wildcard = makeRule({ model: '*', price: { input: 3 } })
+  const wildcard = makeRule({ model: '*/*', price: { input: 3 } })
   assert.deepEqual(matchPrice([exact, wildcard], 'a/b', SUNDAY), wildcard.price)
 })
 
 test('通配子集按数组序取首个命中', () => {
-  // Given 首条 '*' 条件满足、次条无条件 When 匹配 Then 取首条
-  const first = makeRule({ model: '*', conditions: [{ kind: 'weekdays', days: [0] }], price: { input: 1 } })
-  const second = makeRule({ model: '*', price: { input: 2 } })
+  // Given 首条 '*/*' 条件满足、次条无条件 When 匹配 Then 取首条
+  const first = makeRule({ model: '*/*', conditions: [{ kind: 'weekdays', days: [0] }], price: { input: 1 } })
+  const second = makeRule({ model: '*/*', price: { input: 2 } })
   assert.deepEqual(matchPrice([first, second], 'a/b', SUNDAY), first.price)
 })
 
 test('无精确子集直接查通配子集', () => {
-  // Given 仅 '*' 规则 When 匹配未列出模型 Then 命中通配
-  const wildcard = makeRule({ model: '*', price: { input: 4 } })
+  // Given 仅 '*/*' 规则 When 匹配未列出模型 Then 命中通配
+  const wildcard = makeRule({ model: '*/*', price: { input: 4 } })
   assert.deepEqual(matchPrice([wildcard], 'other/c', SUNDAY), wildcard.price)
+})
+
+test('匹配链:全名优先于模型名、供应商、全通配', () => {
+  // Given 四档规则并存 When 匹配 Then 依次全名 > 模型名 > 供应商 > 全通配
+  const rules = [
+    makeRule({ model: 'x/*', price: { input: 3 } }),
+    makeRule({ model: '*/*', price: { input: 4 } }),
+    makeRule({ model: '*/a', price: { input: 2 } }),
+    makeRule({ model: 'x/a', price: { input: 1 } }),
+  ]
+  assert.deepEqual(matchPrice(rules, 'x/a', SUNDAY), { input: 1 })
+})
+
+test('匹配链:模型名通配优先于供应商通配', () => {
+  // Given '*/a' 与 'x/*' 并存 When 匹配 x/a Then 模型名精确档胜
+  const rules = [
+    makeRule({ model: 'x/*', price: { input: 3 } }),
+    makeRule({ model: '*/a', price: { input: 2 } }),
+  ]
+  assert.deepEqual(matchPrice(rules, 'x/a', SUNDAY), { input: 2 })
+})
+
+test('匹配链:供应商通配优先于全通配', () => {
+  // Given 'x/*' 与 '*/*' 并存 When 匹配 x/a Then 供应商精确档胜
+  const rules = [
+    makeRule({ model: '*/*', price: { input: 4 } }),
+    makeRule({ model: 'x/*', price: { input: 3 } }),
+  ]
+  assert.deepEqual(matchPrice(rules, 'x/a', SUNDAY), { input: 3 })
+})
+
+test('模型名通配跨供应商命中同模型名', () => {
+  // Given '*/gpt-4o' When 匹配不同供应商同模型名 Then 命中;模型名不同不命中
+  const rule = makeRule({ model: '*/gpt-4o', price: { input: 7 } })
+  assert.deepEqual(matchPrice([rule], 'openai/gpt-4o', SUNDAY), { input: 7 })
+  assert.deepEqual(matchPrice([rule], 'azure/gpt-4o', SUNDAY), { input: 7 })
+  assert.equal(matchPrice([rule], 'openai/gpt-4o-mini', SUNDAY), null)
+})
+
+test('供应商通配命中同供应商全部模型', () => {
+  // Given 'openai/*' When 匹配同供应商多模型 Then 命中;异供应商不命中
+  const rule = makeRule({ model: 'openai/*', price: { input: 6 } })
+  assert.deepEqual(matchPrice([rule], 'openai/gpt-4o', SUNDAY), { input: 6 })
+  assert.deepEqual(matchPrice([rule], 'openai/o3', SUNDAY), { input: 6 })
+  assert.equal(matchPrice([rule], 'azure/gpt-4o', SUNDAY), null)
+})
+
+test('模型名段允许含斜杠按首个斜杠分段', () => {
+  // Given vendor 段通配或精确 When 匹配模型名含斜杠的多级模型 Then 按 vendor/余段比对
+  const vendorWide = makeRule({ model: 'openrouter/*', price: { input: 8 } })
+  assert.deepEqual(matchPrice([vendorWide], 'openrouter/deepseek/deepseek-chat', SUNDAY), { input: 8 })
+  const named = makeRule({ model: '*/deepseek/deepseek-chat', price: { input: 9 } })
+  assert.deepEqual(matchPrice([named], 'openrouter/deepseek/deepseek-chat', SUNDAY), { input: 9 })
+  assert.equal(matchPrice([named], 'openrouter/deepseek/chat', SUNDAY), null)
+})
+
+test('单段规则属旧形态失效不命中', () => {
+  // Given 旧写法 '*' 与裸名规则 When 匹配 Then 一律 null
+  const legacy = makeRule({ model: '*', price: { input: 1 } })
+  const bare = makeRule({ model: 'a', price: { input: 2 } })
+  assert.equal(matchPrice([legacy, bare], 'a/b', SUNDAY), null)
+  assert.equal(matchPrice([legacy, bare], 'a', SUNDAY), null)
+})
+
+test('请求裸名模型归 default 供应商', () => {
+  // Given 无斜杠请求 When 匹配 'default/名' 与 '*/名' Then 全名档优先
+  const exact = makeRule({ model: 'default/abc', price: { input: 1 } })
+  const named = makeRule({ model: '*/abc', price: { input: 2 } })
+  assert.deepEqual(matchPrice([named, exact], 'abc', SUNDAY), { input: 1 })
+  assert.deepEqual(matchPrice([named], 'abc', SUNDAY), { input: 2 })
+})
+
+test('档位回落:高档条件不满足逐层落低档', () => {
+  // Given 全名与模型名档条件仅周一 When 周日匹配 Then 落到无条件的供应商档
+  const exact = makeRule({ model: 'x/a', conditions: [{ kind: 'weekdays', days: [1] }], price: { input: 1 } })
+  const modelName = makeRule({ model: '*/a', conditions: [{ kind: 'weekdays', days: [1] }], price: { input: 2 } })
+  const vendor = makeRule({ model: 'x/*', price: { input: 3 } })
+  assert.deepEqual(matchPrice([exact, modelName, vendor], 'x/a', SUNDAY), { input: 3 })
+})
+
+test('同档规则按数组序取首个条件满足者', () => {
+  // Given 同为 '*/a' 两条,首条条件周日 When 周日匹配 Then 取首条
+  const first = makeRule({ model: '*/a', price: { input: 1 }, conditions: [{ kind: 'weekdays', days: [0] }] })
+  const second = makeRule({ model: '*/a', price: { input: 2 } })
+  assert.deepEqual(matchPrice([first, second], 'x/a', SUNDAY), { input: 1 })
+})
+
+test('isTwoSegmentModel 判定提交形态两段式', () => {
+  // Given 两段式与单段/空白段串 When 判定 Then 首斜杠在首位之后且两段无空白才成立
+  assert.equal(isTwoSegmentModel('a/b'), true)
+  assert.equal(isTwoSegmentModel('*/*'), true)
+  assert.equal(isTwoSegmentModel('a/b/c'), true)
+  assert.equal(isTwoSegmentModel('a'), false)
+  assert.equal(isTwoSegmentModel('*'), false)
+  assert.equal(isTwoSegmentModel('/b'), false)
+  assert.equal(isTwoSegmentModel(''), false)
+  assert.equal(isTwoSegmentModel('a/'), false)
+  assert.equal(isTwoSegmentModel(' /b'), false)
+  assert.equal(isTwoSegmentModel('a/ '), false)
+  assert.equal(isTwoSegmentModel('a /b'), false)
+  assert.equal(isTwoSegmentModel('* /b'), false)
 })
 
 test('两子集全不命中返回 null 计 unpriced', () => {

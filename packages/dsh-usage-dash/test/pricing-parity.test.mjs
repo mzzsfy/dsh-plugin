@@ -11,6 +11,7 @@ import {
   matchPrice as hostMatchPrice,
   costOf as hostCostOf,
   conditionMatches as hostConditionMatches,
+  isTwoSegmentModel as hostIsTwoSegmentModel,
   UNIT_PER_MILLION as hostUnitPerMillion,
   CURRENCIES as hostCurrencies,
   CONDITION_KINDS as hostConditionKinds,
@@ -29,6 +30,7 @@ const {
   matchPrice: clientMatchPrice,
   costOf: clientCostOf,
   conditionMatches: clientConditionMatches,
+  isTwoSegmentModel: clientIsTwoSegmentModel,
   UNIT_PER_MILLION: clientUnitPerMillion,
   CURRENCIES: clientCurrencies,
   CONDITION_KINDS: clientConditionKinds,
@@ -83,67 +85,112 @@ const MATCH_SUNDAY_1000 = [2026, 2, 15, 10, 0]
 
 const MATCH_VECTORS = [
   {
-    name: '精确命中按数组序取首个',
-    rules: [ruleOf('a', 1), ruleOf('b', 2)], model: 'b', date: MATCH_SUNDAY_1000, expected: priceOf(2),
+    name: '全名精确命中按数组序取首个',
+    rules: [ruleOf('x/a', 1), ruleOf('x/b', 2)], model: 'x/b', date: MATCH_SUNDAY_1000, expected: priceOf(2),
   },
   {
-    name: '同 model 多条取数组序第一条',
-    rules: [ruleOf('a', 1), ruleOf('a', 3)], model: 'a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+    name: '同全名多条取数组序第一条',
+    rules: [ruleOf('x/a', 1), ruleOf('x/a', 3)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
   },
   {
-    name: '无精确回落通配',
-    rules: [ruleOf('*', 5)], model: 'zzz', date: MATCH_SUNDAY_1000, expected: priceOf(5),
+    name: '模型名通配跨供应商命中',
+    rules: [ruleOf('*/a', 5)], model: 'zzz/a', date: MATCH_SUNDAY_1000, expected: priceOf(5),
   },
   {
-    name: '精确优先于通配',
-    rules: [ruleOf('*', 5), ruleOf('a', 1)], model: 'a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+    name: '供应商通配命中同供应商模型',
+    rules: [ruleOf('x/*', 5)], model: 'x/zzz', date: MATCH_SUNDAY_1000, expected: priceOf(5),
+  },
+  {
+    name: '无精确回落全通配',
+    rules: [ruleOf('*/*', 5)], model: 'zzz/yyy', date: MATCH_SUNDAY_1000, expected: priceOf(5),
+  },
+  {
+    name: '全名精确优先于全通配',
+    rules: [ruleOf('*/*', 5), ruleOf('x/a', 1)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+  },
+  {
+    name: '匹配链:模型名通配优先于供应商通配',
+    rules: [ruleOf('x/*', 3), ruleOf('*/a', 2)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(2),
+  },
+  {
+    name: '匹配链:供应商通配优先于全通配',
+    rules: [ruleOf('*/*', 4), ruleOf('x/*', 3)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(3),
+  },
+  {
+    name: '模型名段允许含斜杠',
+    rules: [ruleOf('x/*', 1)], model: 'x/deepseek/deepseek-chat', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+  },
+  {
+    name: '请求裸名归 default 供应商',
+    rules: [ruleOf('default/a', 1), ruleOf('*/a', 2)], model: 'a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+  },
+  {
+    name: '请求首位斜杠不拆段归 default 供应商',
+    rules: [ruleOf('default//x', 1), ruleOf('*/x', 2)], model: '/x', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+  },
+  {
+    name: '单段旧形态规则失效',
+    rules: [ruleOf('*', 5), ruleOf('a', 1)], model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
+  },
+  {
+    name: '供应商段不同不命中',
+    rules: [ruleOf('x/*', 1)], model: 'y/a', date: MATCH_SUNDAY_1000, expected: null,
+  },
+  {
+    name: '模型段不同不命中',
+    rules: [ruleOf('*/a', 1)], model: 'x/b', date: MATCH_SUNDAY_1000, expected: null,
   },
   {
     name: '多条件 AND 全过命中',
-    rules: [ruleOf('a', 1, [{ kind: 'weekdays', days: [0] }, { kind: 'dailyWindow', from: '00:00', to: '23:59' }])],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+    rules: [ruleOf('x/a', 1, [{ kind: 'weekdays', days: [0] }, { kind: 'dailyWindow', from: '00:00', to: '23:59' }])],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
   },
   {
     name: '一条件不过跳至下一条规则',
-    rules: [ruleOf('a', 1, [{ kind: 'weekdays', days: [1] }]), ruleOf('a', 2, [])],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: priceOf(2),
+    rules: [ruleOf('x/a', 1, [{ kind: 'weekdays', days: [1] }]), ruleOf('x/a', 2, [])],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(2),
+  },
+  {
+    name: '高档条件不过逐层落低档',
+    rules: [ruleOf('x/a', 1, [{ kind: 'weekdays', days: [1] }]), ruleOf('*/a', 5)],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(5),
   },
   {
     name: '缺 conditions 形状残缺跳过',
-    rules: [{ model: 'a', currency: '¥', price: priceOf(1) }],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: null,
+    rules: [{ model: 'x/a', currency: '¥', price: priceOf(1) }],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
   },
   {
     name: '缺 price 形状残缺跳过',
-    rules: [{ model: 'a', currency: '¥', conditions: [] }],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: null,
+    rules: [{ model: 'x/a', currency: '¥', conditions: [] }],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
   },
   {
     name: 'unit 非 perMillion 跳过',
-    rules: [{ ...ruleOf('a', 1), unit: 'perThousand' }],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: null,
+    rules: [{ ...ruleOf('x/a', 1), unit: 'perThousand' }],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
   },
   {
     name: 'unit 缺省视为 perMillion 命中',
-    rules: [ruleOf('a', 1)],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
+    rules: [ruleOf('x/a', 1)],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: priceOf(1),
   },
   {
     name: 'rules 非数组为 null',
-    rules: 'nope', model: 'a', date: MATCH_SUNDAY_1000, expected: null,
+    rules: 'nope', model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
   },
   {
     name: 'model 非字符串为 null',
-    rules: [ruleOf('a', 1)], model: 7, date: MATCH_SUNDAY_1000, expected: null,
+    rules: [ruleOf('x/a', 1)], model: 7, date: MATCH_SUNDAY_1000, expected: null,
   },
   {
     name: '非法时间戳为 null',
-    rules: [ruleOf('a', 1)], model: 'a', date: null, expected: null,
+    rules: [ruleOf('x/a', 1)], model: 'x/a', date: null, expected: null,
   },
   {
     name: '条件不满足且无通配为 null',
-    rules: [ruleOf('a', 1, [{ kind: 'weekdays', days: [1] }])],
-    model: 'a', date: MATCH_SUNDAY_1000, expected: null,
+    rules: [ruleOf('x/a', 1, [{ kind: 'weekdays', days: [1] }])],
+    model: 'x/a', date: MATCH_SUNDAY_1000, expected: null,
   },
 ]
 
@@ -218,6 +265,30 @@ test(`matchPrice 双侧一致(${MATCH_VECTORS.length} 向量)`, () => {
     const client = clientMatchPrice(vector.rules, vector.model, date)
     assert.deepEqual(client, host, vector.name)
     assert.deepEqual(host, vector.expected, vector.name)
+  }
+})
+
+const SEGMENT_VECTORS = [
+  { name: '两段合法', model: 'a/b', expected: true },
+  { name: '通配段合法', model: '*/*', expected: true },
+  { name: '多级模型名合法', model: 'a/b/c', expected: true },
+  { name: '单段非法', model: 'a', expected: false },
+  { name: '通配单段非法', model: '*', expected: false },
+  { name: '首位斜杠非法', model: '/b', expected: false },
+  { name: '空串非法', model: '', expected: false },
+  { name: '模型段空非法', model: 'a/', expected: false },
+  { name: '段含前导空白非法', model: ' /b', expected: false },
+  { name: '段含尾随空白非法', model: 'a/ ', expected: false },
+  { name: '段内含空白非法', model: 'a /b', expected: false },
+  { name: '通配段含空白非法', model: '* /b', expected: false },
+]
+
+test(`isTwoSegmentModel 双侧一致(${SEGMENT_VECTORS.length} 向量)`, () => {
+  for (const vector of SEGMENT_VECTORS) {
+    const host = hostIsTwoSegmentModel(vector.model)
+    const client = clientIsTwoSegmentModel(vector.model)
+    assert.deepEqual(client, host, vector.name)
+    assert.equal(host, vector.expected, vector.name)
   }
 })
 

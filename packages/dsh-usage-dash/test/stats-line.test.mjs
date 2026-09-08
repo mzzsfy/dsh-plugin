@@ -43,11 +43,11 @@ const PREFS_COST_ON = { cachePrecision: false, tokenDetail: false, costDisplay: 
 const zhT = createTranslator(MESSAGES_ZH)
 const enT = createTranslator(MESSAGES_EN)
 
-// 费用组装配输入:精确规则在前、通配规则兜底,通配仅全天时段生效
+// 费用组装配输入:精确规则在前、全通配规则兜底,通配仅全天时段生效
 const COST_RULES = [
   { model: 'p/m', currency: '¥', price: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
   {
-    model: '*', currency: '', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+    model: '*/*', currency: '', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
     conditions: [{ kind: 'dailyWindow', from: '00:00', to: '00:00' }],
   },
 ]
@@ -353,8 +353,8 @@ test('buildCostItem 开关关恒为 null,组数组不受 rules 影响', () => {
   ])
 })
 
-test('buildCostItem routes 缺席按通配规则匹配,符号取全局口径(首个非空货币)', () => {
-  // 无 routes → model '*',500000 × 1 / 每百万 = 0.5;命中通配(货币空),符号取表内首个非空 ¥
+test('buildCostItem routes 缺席按全通配规则匹配,符号取全局口径(首个非空货币)', () => {
+  // 无 routes → model '*/*',500000 × 1 / 每百万 = 0.5;命中全通配(货币空),符号取表内首个非空 ¥
   assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥0.50')
   assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_COST_ON, enT, COST_NOW), 'Cost ≈ ¥0.50')
 })

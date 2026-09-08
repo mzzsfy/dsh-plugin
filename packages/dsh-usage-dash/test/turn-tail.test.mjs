@@ -17,7 +17,7 @@ const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join('
 const {
   MESSAGES_EN,
   MESSAGES_ZH,
-  MODEL_WILDCARD,
+  MODEL_UNROUTED,
   TURN_TAIL_DATA_KEY,
   TURN_TAIL_PRIORITY,
   buildTurnCostLine,
@@ -58,20 +58,20 @@ test('select owner 形状残缺全部 null 不抛', () => {
   assert.equal(selectTurnTokenUsage(undefined), null)
 })
 
-test('计价模型键取 routes 首个,缺失回退通配', () => {
+test('计价模型键取 routes 首个,缺失回退全通配键', () => {
   assert.equal(turnModelOf({ routes: [{ provider: 'p', model: 'p/m' }] }), 'p/m')
-  assert.equal(turnModelOf({ routes: [] }), MODEL_WILDCARD)
-  assert.equal(turnModelOf({}), MODEL_WILDCARD)
-  assert.equal(turnModelOf(null), MODEL_WILDCARD)
+  assert.equal(turnModelOf({ routes: [] }), MODEL_UNROUTED)
+  assert.equal(turnModelOf({}), MODEL_UNROUTED)
+  assert.equal(turnModelOf(null), MODEL_UNROUTED)
 })
 
-test('routes 缺失模型键命中通配规则', () => {
+test('routes 缺失模型键命中全通配规则', () => {
   const rules = [
     { model: 'p/m', currency: '¥', price: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 }, conditions: [] },
-    { model: MODEL_WILDCARD, currency: '$', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '*/*', currency: '$', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
   ]
   const tokenUsage = { uncachedInputTokens: 1000, outputTokens: 0, totalTokens: 1000 }
-  assert.equal(turnModelOf(tokenUsage), MODEL_WILDCARD)
+  assert.equal(turnModelOf(tokenUsage), MODEL_UNROUTED)
   assert.deepEqual(matchPrice(rules, turnModelOf(tokenUsage), NOW), { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
 })
 

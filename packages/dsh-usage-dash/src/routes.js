@@ -7,7 +7,7 @@
 import { z } from 'zod'
 
 import { aggregateRange, attachCosts } from './query.js'
-import { CURRENCIES, CONDITION_KINDS, UNIT_PER_MILLION } from './pricing.js'
+import { CURRENCIES, CONDITION_KINDS, UNIT_PER_MILLION, isTwoSegmentModel } from './pricing.js'
 import {
   GRANULARITY_DAILY,
   GRANULARITY_HOURLY,
@@ -75,7 +75,8 @@ const conditionSchema = z.union(
 
 const pricingRulesSchema = z.array(
   z.object({
-    model: z.string(),
+    // 模型键强制两段式 vendor/model(段可通配),单段旧形态提交即拒
+    model: z.string().refine(isTwoSegmentModel),
     unit: z.literal(UNIT_PER_MILLION).optional(),
     currency: z.enum(CURRENCIES).nullable(),
     price: z.object({
