@@ -67,6 +67,93 @@ function upgradeRetryBackoffMs(backoff, kind, retryIndex) {
 // 日志单行化:拼入 console.warn 的动态串不得携带换行,防日志结构被打散
 const singleLine = (text) => String(text ?? '').replace(/[\r\n]+/g, ' ')
 
+// 审计日志:升级/重启的触发、落定、拒绝各一行结构化输出,不引日志框架
+const audit = (endpoint, outcome, extra) => {
+  console.warn('[dsh-maintain] audit endpoint=' + endpoint + ' outcome=' + outcome + (extra ? ' ' + extra : ''))
+}
+
+// 活跃工作检测:agents/jobs/terminals 全软依赖方法面守卫,缺失或异常即降级放行(fail-open,
+// 不因安全网缺失死锁重启)。terminals 主路径逐 agent 的 realm 作用域解析(PTY 注册表随
+// agent 挂载且 isolate,共享根作用域因 realm 隔离恒缺,仅兜底);sessions 不作活跃指标;
+// 禁止顶层 inject(阻塞装载)。导出仅供测试
+export function collectActiveWork(ctx) {
+  const counts = { agents: 0, jobs: 0, terminals: 0 }
+  let detectionAvailable = true
+  const degrade = (message) => {
+    detectionAvailable = false
+    console.warn('[dsh-maintain] 活跃工作检测降级,门控放行: ' + singleLine(message))
+  }
+
+  let agentList = []
+  try {
+    const agents = ctx.get('agents')
+    if (!agents || typeof agents.list !== 'function') throw new Error('agents 服务方法面不可用')
+    const rows = agents.list()
+    agentList = Array.isArray(rows) ? rows : []
+    counts.agents = agentList.filter((agent) => agent && agent.status === 'running').length
+  } catch (error) {
+    degrade(error && error.message ? error.message : String(error))
+  }
+
+  try {
+    const jobs = ctx.get('jobs')
+    if (!jobs || typeof jobs.list !== 'function') throw new Error('jobs 服务方法面不可用')
+    const seen = new Set()
+    for (const caller of [undefined, ...agentList]) {
+      const rows = jobs.list(caller)
+      for (const job of Array.isArray(rows) ? rows : []) {
+        const key = String(job && job.id)
+        if (seen.has(key)) continue
+        seen.add(key)
+        // stopping 必须计活:kill 置 stopping 后未落定,进程仍在
+        if (job && (job.status === 'running' || job.status === 'stopping')) counts.jobs += 1
+      }
+    }
+  } catch (error) {
+    degrade(error && error.message ? error.message : String(error))
+  }
+
+  try {
+    const seen = new Set()
+    let sawTerminalsService = false
+    const scan = (terminals, owner) => {
+      if (!terminals || typeof terminals.list !== 'function') return
+      sawTerminalsService = true
+      const rows = terminals.list(owner)
+      for (const terminal of Array.isArray(rows) ? rows : []) {
+        const key = String(terminal && terminal.sessionId)
+        if (seen.has(key)) continue
+        seen.add(key)
+        if (terminal && terminal.status && terminal.status.kind === 'running') counts.terminals += 1
+      }
+    }
+    for (const agent of agentList) {
+      try {
+        const agentCtx = agent && agent.ctx
+        if (agentCtx && typeof agentCtx.get === 'function') scan(agentCtx.get('terminals'), agent)
+      } catch (error) {
+        degrade('terminals realm 探测异常: ' + (error && error.message ? error.message : String(error)))
+      }
+    }
+    try {
+      scan(ctx.get('terminals'), undefined)
+    } catch (error) {
+      degrade('terminals 根探测异常: ' + (error && error.message ? error.message : String(error)))
+    }
+    if (!sawTerminalsService) degrade('terminals 服务面不可用')
+  } catch (error) {
+    degrade('terminals 检测异常: ' + (error && error.message ? error.message : String(error)))
+  }
+
+  return {
+    agents: counts.agents,
+    jobs: counts.jobs,
+    terminals: counts.terminals,
+    total: counts.agents + counts.jobs + counts.terminals,
+    detectionAvailable,
+  }
+}
+
 const sleepMs = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
 
 // 升级尝试循环:单次执行语义与超时不变,失败经分类,可重试类按退避重试,
@@ -379,6 +466,7 @@ export function apply(ctx) {
       upgrade,
       runtimeEnv,
       autoRestartScheduled,
+      activeWork: collectActiveWork(ctx),
       canRestart: typeof exit === 'function',
     }
   }
@@ -408,7 +496,7 @@ export function apply(ctx) {
     // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
     upgrade = { running: true, last }
     writeUpgradeLock(last.startedAt)
-    console.warn('[dsh-maintain] 升级开始: ' + command)
+    audit('upgrade', 'triggered', 'command=' + singleLine(command))
     void performUpgrade(command, last, config.channel)
   }
 
@@ -425,6 +513,7 @@ export function apply(ctx) {
   function scheduleAutoRestart() {
     restartScheduled = true
     autoRestartScheduled = true
+    audit('restart', 'scheduled', 'reason=upgrade-ok delayMs=' + AUTO_RESTART_DELAY_MS)
     setTimeout(() => exit(0), AUTO_RESTART_DELAY_MS)
   }
 
@@ -480,6 +569,8 @@ export function apply(ctx) {
         + (last.code !== null ? ' 退出码=' + last.code : '')
         + (last.error ? ' ' + singleLine(last.error) : '')
         + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
+      audit('upgrade', last.ok === true ? 'ok' : 'failed',
+        'durationMs=' + (last.finishedAt - last.startedAt) + ' code=' + last.code + ' kind=' + singleLine(last.kind))
       // 自动重启守卫:等环境检测落定后按四条件分流(手动直跑只标指引,不退出)
       await runtimeEnvReady
       const decision = judgeAutoRestart({ ok: last.ok === true, stale: last.stale === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function' })
@@ -609,10 +700,12 @@ export function apply(ctx) {
         // 与重启调度双向互斥:restartScheduled 置位到 exit(0) 执行的窗口内触发升级,
         // detached 孤儿会与新宿主交错
         if (upgrade.running || restartScheduled) {
+          audit('upgrade', 'rejected', restartScheduled ? 'reason=restart-scheduled' : 'reason=running')
           sendJson(res, 409, { error: restartScheduled ? '重启已调度,禁止触发升级' : '升级进行中' })
           return
         }
         if (upgradeLockStale(readUpgradeLock()) === false) {
+          audit('upgrade', 'rejected', 'reason=lock')
           sendJson(res, 409, { error: '存在未过期的升级锁(可能有残留升级子进程),等待锁过期或删除 ' + UPGRADE_LOCK_PATH })
           return
         }
@@ -620,7 +713,19 @@ export function apply(ctx) {
         // 信息不足(verdict unknown)放行,宽松不误拒
         const judged = judgeNow()
         if (judged.verdict === VERDICT_UP_TO_DATE) {
+          audit('upgrade', 'rejected', 'reason=up-to-date')
           sendJson(res, 409, { error: '当前已是通道最新版,无需升级;重装请走命令行' })
+          return
+        }
+        // 活跃工作门控:升级不可越(agent 会话/job 在跑时强行升级会被中断)
+        const activeWork = collectActiveWork(ctx)
+        if (activeWork.total > 0) {
+          audit('upgrade', 'rejected', 'reason=active-work total=' + activeWork.total)
+          sendJson(res, 409, {
+            error: '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),升级会中断它们,请等待完成',
+            items: activeWork,
+            detectionAvailable: activeWork.detectionAvailable,
+          })
           return
         }
         triggerUpgrade()
@@ -633,10 +738,12 @@ export function apply(ctx) {
         // 与升级门闩互斥:升级子进程经 detached+unref 存活于宿主死后,
         // 重启后新宿主门闩归零会放行第二次升级,双 npm install 并发写全局目录
         if (upgrade.running) {
+          audit('restart', 'rejected', 'reason=upgrade-running')
           sendJson(res, 409, { error: '升级进行中,禁止重启;等待升级完成后重试' })
           return
         }
         if (typeof exit !== 'function') {
+          audit('restart', 'rejected', 'reason=no-appExit')
           sendJson(res, 500, { error: '启动器未提供 appExit,无法重启' })
           return
         }
@@ -644,7 +751,22 @@ export function apply(ctx) {
           sendJson(res, 200, { ok: true, restarting: true })
           return
         }
+        // 活跃工作门控:重启可被 force 越过(升级后自动重启链路无法等待人工确认,
+        // 对齐 dsh-service:升级不可越/重启 force 可越)
+        const rawBody = await readBody(req)
+        const requestBody = rawBody ? JSON.parse(rawBody) : {}
+        const activeWork = collectActiveWork(ctx)
+        if (activeWork.total > 0 && requestBody.force !== true) {
+          audit('restart', 'rejected', 'reason=active-work total=' + activeWork.total)
+          sendJson(res, 409, {
+            error: '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),重启会中断它们;确认无误请带 force 重试',
+            items: activeWork,
+            detectionAvailable: activeWork.detectionAvailable,
+          })
+          return
+        }
         restartScheduled = true
+        audit('restart', 'triggered', requestBody.force === true ? 'forced=true' : 'forced=false')
         sendJson(res, 200, { ok: true, restarting: true })
         // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
         // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达

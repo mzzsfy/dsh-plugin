@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, RESTART_DELAY_MS, UPGRADE_LOCK_PATH } from '../src/index.js'
+import { apply, RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
 import { rmSync } from 'node:fs'
 
 // 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
@@ -35,7 +35,7 @@ function tagsBody(tags) {
 
 globalThis.fetch = async () => tagsBody(MOCK_TAGS)
 
-function makeCtx({ appExit, settingsStore, timerAvailable = true } = {}) {
+function makeCtx({ appExit, settingsStore, timerAvailable = true, services = {} } = {}) {
   const routes = new Map()
   let tick = null
   const store = settingsStore ?? {}
@@ -45,6 +45,7 @@ function makeCtx({ appExit, settingsStore, timerAvailable = true } = {}) {
     get(name) {
       if (name === 'appExit') return appExit
       if (name === 'settings') return settingsService
+      if (Object.prototype.hasOwnProperty.call(services, name)) return services[name]
       return undefined
     },
     // effect 桩:执行装配函数并捕获其返回的 disposer,供测试模拟 fiber 停用
@@ -97,12 +98,11 @@ function makeReq({ method = 'POST', body, headers = {} } = {}) {
   req.destroy = () => {
     req.destroyed = true
   }
-  if (body !== undefined) {
-    queueMicrotask(() => {
-      req.emit('data', Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)))
-      req.emit('end')
-    })
-  }
+  // 无 body 也须发 end:路由侧读体(如 restart 的 force)对空体解析为空对象
+  queueMicrotask(() => {
+    if (body !== undefined) req.emit('data', Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)))
+    req.emit('end')
+  })
   return req
 }
 
@@ -544,4 +544,121 @@ test('readBody 超限:路由归一 400', async () => {
   await done
   assert.equal(res.status, 400)
   assert.match(res.payload.error, /上限/)
+})
+
+// ---- 活跃工作门控(S10)----
+
+test('collectActiveWork:agents/jobs/terminals 计活与去重', () => {
+  const terminals = {
+    list: (owner) => owner && owner.id === 'a1'
+      ? [{ sessionId: 't1', status: { kind: 'running' } }, { sessionId: 't3', status: { kind: 'exited' } }]
+      : [{ sessionId: 't1', status: { kind: 'running' } }, { sessionId: 't2', status: { kind: 'running' } }],
+  }
+  const agentA = { id: 'a1', status: 'running', ctx: { get: (n) => (n === 'terminals' ? terminals : undefined) } }
+  const agentB = { id: 'a2', status: 'idle' }
+  const agents = { list: () => [agentA, agentB] }
+  const jobs = {
+    list: (caller) => caller === undefined
+      ? [{ id: 'j1', status: 'running' }]
+      : [{ id: 'j1', status: 'running' }, { id: 'j2', status: 'stopping' }, { id: 'j3', status: 'done' }],
+  }
+  const result = collectActiveWork({ get: (n) => (n === 'agents' ? agents : n === 'jobs' ? jobs : n === 'terminals' ? terminals : undefined) })
+  // agents:a1 running;a jobs:j1 双 caller 去重计一,j2 stopping 计活,j3 不计;terminals:t1 去重,t2 计,t3 非运行不计
+  assert.deepEqual({ agents: result.agents, jobs: result.jobs, terminals: result.terminals }, { agents: 1, jobs: 2, terminals: 2 })
+  assert.equal(result.total, 5)
+  assert.equal(result.detectionAvailable, true)
+})
+
+test('collectActiveWork:服务缺失或异常 fail-open 降级', () => {
+  const empty = collectActiveWork({ get: () => undefined })
+  assert.deepEqual([empty.agents, empty.jobs, empty.terminals], [0, 0, 0])
+  assert.equal(empty.detectionAvailable, false)
+  const throwing = { get: () => ({ list: () => { throw new Error('boom') } }) }
+  const degraded = collectActiveWork(throwing)
+  assert.equal(degraded.total, 0)
+  assert.equal(degraded.detectionAvailable, false)
+  // 根作用域 terminals 缺失但 agent realm 有,不算降级(realm 隔离常态)
+  const agent = { id: 'a1', status: 'idle', ctx: { get: (n) => (n === 'terminals' ? { list: () => [{ sessionId: 't1', status: { kind: 'running' } }] } : undefined) } }
+  const realmOnly = collectActiveWork({ get: (n) => (n === 'agents' ? { list: () => [agent] } : n === 'jobs' ? { list: () => [] } : undefined) })
+  assert.equal(realmOnly.terminals, 1)
+  assert.equal(realmOnly.detectionAvailable, true)
+})
+
+test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const agents = { list: () => [{ id: 'a1', status: 'running' }] }
+  const jobs = { list: () => [] }
+  const terminals = { list: () => [] }
+  const { ctx, routes } = makeCtx({ settingsStore: store, services: { agents, jobs, terminals } })
+  apply(ctx)
+  const denied = await post(routes, '/api/maintain/upgrade')
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /活跃工作/)
+  assert.equal(denied.payload.items.agents, 1)
+  assert.equal(denied.payload.detectionAvailable, true)
+  const status = await get(routes, '/api/maintain/status').then((r) => r.payload)
+  assert.equal(status.upgrade.running, false, '拒绝路径不得触发升级')
+})
+
+test('restart:活跃工作 409,force 越过', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exits = []
+  const agents = { list: () => [{ id: 'a1', status: 'running' }] }
+  const jobs = { list: () => [] }
+  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: { agents, jobs } })
+  apply(ctx)
+  const denied = await post(routes, '/api/maintain/restart')
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /活跃工作/)
+  assert.deepEqual(exits, [])
+  const forced = await post(routes, '/api/maintain/restart', { force: true })
+  assert.equal(forced.status, 200)
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [0], 'force 越过后必须正常调度退出')
+})
+
+test('status:activeWork 概要进快照,服务缺失标 detectionAvailable=false', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const status = await get(routes, '/api/maintain/status').then((r) => r.payload)
+  assert.equal(status.activeWork.total, 0)
+  assert.equal(status.activeWork.detectionAvailable, false)
+})
+
+// ---- 审计日志(S12)----
+
+test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
+  const warns = []
+  const originalWarn = console.warn
+  console.warn = (text) => warns.push(String(text))
+  try {
+    const agents = { list: () => [{ id: 'a1', status: 'running' }] }
+    const { ctx, routes } = makeCtx({ services: { agents }, appExit: () => {} })
+    apply(ctx)
+    await post(routes, '/api/maintain/upgrade')
+    assert.equal(warns.some((text) => text.includes('audit endpoint=upgrade outcome=rejected reason=active-work')), true, '门控拒绝须留审计行')
+    await post(routes, '/api/maintain/restart')
+    assert.equal(warns.some((text) => text.includes('audit endpoint=restart outcome=rejected reason=active-work')), true, '重启门控拒绝须留审计行')
+    await post(routes, '/api/maintain/restart', { force: true })
+    assert.equal(warns.some((text) => /audit endpoint=restart outcome=triggered\b/.test(text) && text.includes('forced=true')), true, 'force 触发须留审计行')
+  } finally {
+    console.warn = originalWarn
+  }
+  // 升级触发与落定:假命令真实进程,落定行带 durationMs 与 code
+  const plainWarns = []
+  const plainCtx = makeCtx({ settingsStore: { upgradeCommandTemplate: 'node -e "process.exit(0)"' }, appExit: () => {} })
+  console.warn = (text) => plainWarns.push(String(text))
+  try {
+    apply(plainCtx.ctx)
+    await post(plainCtx.routes, '/api/maintain/upgrade')
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const status = await get(plainCtx.routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) break
+    }
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=triggered/.test(text)), true, '升级触发须留审计行')
+  assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=(ok|failed) durationMs=[0-9]+ code=/.test(text)), true, '升级落定须留审计行')
 })

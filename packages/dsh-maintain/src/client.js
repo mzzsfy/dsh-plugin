@@ -452,7 +452,7 @@ function UpgradeCard(props) {
             // 与 OpsCard 入口行为归一:appExit 缺失时必然 500,不得开放重启入口
             disabled: props.restarting || !props.status.canRestart,
             onClick: props.onRestart,
-          }, props.restartArmed ? '确认重启' : '重启宿主') : null,
+          }, restartConfirmLabel(props.restartArmed, props.activeWorkTotal)) : null,
         )
       : null,
     !upgrade.running && last && last.ok === true && last.stale === true
@@ -465,6 +465,12 @@ function UpgradeCard(props) {
   )
 }
 
+// 重启按钮确认态文案:有活跃工作时改为「仍要重启」,点发即带 force 越过门控
+function restartConfirmLabel(armed, activeWorkTotal) {
+  if (!armed) return '重启宿主'
+  return activeWorkTotal > 0 ? '仍要重启(' + activeWorkTotal + ' 项活跃工作)' : '确认重启'
+}
+
 // 运维区:两段式重启 + 托管环境说明。
 function OpsCard(props) {
   const status = props.status
@@ -475,7 +481,7 @@ function OpsCard(props) {
         className: 'dm-btn dm-btn--danger',
         disabled: !status.canRestart || props.restarting,
         onClick: props.onRestart,
-      }, props.armed ? '确认重启' : '重启宿主'),
+      }, restartConfirmLabel(props.armed, props.activeWorkTotal)),
       !status.canRestart ? h('span', { className: 'dm-meta' }, '当前启动方式不支持就地重启') : null,
     ),
     h('div', { className: 'dm-meta' },
@@ -751,7 +757,7 @@ function MaintainApp() {
         // 放在受理成功之后:明确回绝(409 互斥)时升级仍在跑,观察器必须存活
         stopUpgradeWatch()
         removeUpgradeFloat()
-        return post(RESTART_URL)
+        return post(RESTART_URL, activeWorkTotal > 0 ? { force: true } : undefined)
       })
       .catch((restartError) => {
         if (restartPostLost(restartError)) {
@@ -782,6 +788,8 @@ function MaintainApp() {
       || status.upgradeLockHeld === true
       || status.verdict === VERDICT_UP_TO_DATE))
   const upgradeArmedLive = upgradeArmed && !upgradeUnavailable
+  // 活跃工作计数:重启确认态显示计数并发 force 越过门控
+  const activeWorkTotal = status !== null && status.activeWork ? status.activeWork.total : 0
 
   return h('div', { className: 'dm-panel' },
     h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
@@ -813,8 +821,8 @@ function MaintainApp() {
       onPollInterval,
       onRegistryBase,
     }),
-    h(UpgradeCard, { status, restartArmed, restarting, onRestart }),
-    h(OpsCard, { status, armed: restartArmed, restarting, onRestart }),
+    h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
+    h(OpsCard, { status, armed: restartArmed, restarting, activeWorkTotal, onRestart }),
   )
 }
 
