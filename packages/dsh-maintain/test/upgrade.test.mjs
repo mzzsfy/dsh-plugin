@@ -107,7 +107,7 @@ function makeHarness(results) {
   }
 }
 
-const ATTEMPT_KEYS = ['startedAt', 'finishedAt', 'ok', 'code', 'timedOut', 'kind', 'stdoutTail', 'stderrTail'].sort()
+const ATTEMPT_KEYS = ['startedAt', 'finishedAt', 'ok', 'code', 'timedOut', 'kind'].sort()
 
 test('重试:可重试失败按退避序列重试至成功', async () => {
   const harness = makeHarness([FILE_LOCKED_FAIL, NETWORK_FAIL, OK_RESULT])
@@ -121,13 +121,16 @@ test('重试:可重试失败按退避序列重试至成功', async () => {
   assert.equal(harness.starts, 2, '首次尝试不经 onAttemptStart,每次重试各触发一次(锁覆写点)')
 })
 
-test('重试:尝试条目形态锁定为计划字段集', async () => {
+test('重试:尝试条目形态锁定为裁剪后字段集,尾流仅在落定结果上', async () => {
   const harness = makeHarness([FILE_LOCKED_FAIL, OK_RESULT])
   const settle = await runUpgradeWithRetry({ command: 'fake', runImpl: harness.runImpl, sleepImpl: harness.sleepImpl })
   assert.deepEqual(Object.keys(settle.attempts[0]).sort(), ATTEMPT_KEYS)
   assert.equal(settle.attempts[0].code, 1)
   assert.equal(settle.attempts[0].timedOut, false)
   assert.ok(settle.attempts[0].finishedAt >= settle.attempts[0].startedAt)
+  // 末次尝试的尾流上浮到落定结果,供 last 直接消费
+  assert.equal(settle.stdoutTail, '')
+  assert.equal(settle.stderrTail, '')
 })
 
 test('重试:不可重试类立即落定,不睡眠不重试', async () => {
@@ -153,6 +156,24 @@ test('重试:持续可重试失败收敛于次数上限,末次不安排退避', 
   assert.equal(settle.attempts.length, UPGRADE_MAX_ATTEMPTS)
   assert.equal(harness.sleeps.length, UPGRADE_MAX_ATTEMPTS - 1, '末次尝试后不得再安排退避')
   assert.equal(settle.attempts.every((a) => a.kind === UPGRADE_FAIL_TRANSIENT_NETWORK), true)
+})
+
+test('重试:退避序列缺失按不可重试落定,不得零间隔轰击', async () => {
+  // 注入空退避表模拟"可重试分类缺少序列"的配置缺口:宁可不重试,不可无间隔重试
+  const warns = []
+  const originalWarn = console.warn
+  console.warn = (text) => { warns.push(String(text)) }
+  try {
+    const harness = makeHarness([FILE_LOCKED_FAIL])
+    const settle = await runUpgradeWithRetry({ command: 'fake', backoff: {}, runImpl: harness.runImpl, sleepImpl: harness.sleepImpl })
+    assert.equal(settle.ok, false)
+    assert.equal(settle.kind, UPGRADE_FAIL_FILE_LOCKED)
+    assert.equal(settle.attempts.length, 1, '序列缺失不得进入下一轮尝试')
+    assert.deepEqual(harness.sleeps, [], '序列缺失不得安排退避')
+    assert.equal(warns.some((text) => text.includes('退避')), true, '序列缺失必须留痕')
+  } finally {
+    console.warn = originalWarn
+  }
 })
 
 test('重试:执行器抛错收敛为失败落定不重试', async () => {

@@ -430,13 +430,16 @@ function UpgradeCard(props) {
       : null,
     !upgrade.running && last
       ? h('div', { className: 'dm-row' },
-          last.ok ? h('span', { className: 'dm-ok' }, '升级完成,重启宿主后生效')
+          // stale(执行成功但版本未前进/未达目标)时成功行降格为中性表述,不引导重启,
+          // 与下方 stale 警告行自洽
+          last.ok ? h('span', { className: last.stale === true ? 'dm-warn' : 'dm-ok' },
+              last.stale === true ? '升级命令执行完成,但版本未前进或未达目标' : '升级完成,重启宿主后生效')
             : h('span', { className: 'dm-error' }, '升级失败'
                 + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '')
                 + (Array.isArray(last.attempts) && last.attempts.length > 1 ? '(已尝试 ' + last.attempts.length + ' 次)' : '')
                 + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
           h('span', { className: 'dm-spacer' }),
-          last.ok ? h('button', {
+          last.ok && last.stale !== true ? h('button', {
             className: 'dm-btn',
             // 与 OpsCard 入口行为归一:appExit 缺失时必然 500,不得开放重启入口
             disabled: props.restarting || !props.status.canRestart,
@@ -750,6 +753,14 @@ function MaintainApp() {
       error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null)
   }
 
+  // 升级入口不可用即解除两段式待发:渲染时派生,不引入 effect。
+  // 不可用与 VersionCard 按钮 disabled 条件同源(升级进行中/残留锁/已最新/重启中)
+  const upgradeUnavailable = restarting
+    || (status !== null && ((status.upgrade && status.upgrade.running === true)
+      || status.upgradeLockHeld === true
+      || status.verdict === VERDICT_UP_TO_DATE))
+  const upgradeArmedLive = upgradeArmed && !upgradeUnavailable
+
   return h('div', { className: 'dm-panel' },
     h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'dm-head' },
@@ -764,7 +775,7 @@ function MaintainApp() {
     h(VersionCard, {
       status,
       busy,
-      upgradeArmed,
+      upgradeArmed: upgradeArmedLive,
       restartArmed,
       restarting,
       onRefresh,

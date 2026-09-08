@@ -16,6 +16,7 @@ import {
   TARGET_PACKAGE,
 } from '../src/core.mjs'
 import { clientSource, extractLogic } from './logic-extract.mjs'
+import { KILL_GRACE_MS } from '../src/upgrade.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_SOURCE = clientSource()
@@ -143,7 +144,6 @@ test('parity: 重启等待总时长大于宿主退出延迟', () => {
 
 test('parity: 升级观察上限覆盖宿主重试链上限(防抢跑转状态未知)', () => {
   // 重试链上限 = 尝试次数×单次超时 + 最大退避累计 + 强杀宽限;超时强杀只会终止链,不叠加
-  const KILL_GRACE_MS = 5 * 1000
   const maxBackoffTotal = Object.values(UPGRADE_RETRY_BACKOFF_MS)
     .reduce((max, seq) => Math.max(max, seq.reduce((sum, ms) => sum + ms, 0)), 0)
   const chainUpperBound = UPGRADE_MAX_ATTEMPTS * UPGRADE_TIMEOUT_MS + maxBackoffTotal + KILL_GRACE_MS

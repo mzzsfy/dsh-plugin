@@ -53,17 +53,22 @@ export const UPGRADE_RETRY_BACKOFF_MS = Object.freeze({
   [UPGRADE_FAIL_TRANSIENT_NETWORK]: Object.freeze([3 * 1000, 9 * 1000]),
 })
 
-function upgradeRetryBackoffMs(kind, retryIndex) {
-  const seq = UPGRADE_RETRY_BACKOFF_MS[kind]
-  if (!seq || seq.length === 0) return 0
+// 退避序列缺失返回 null,由调用方判不可重试:宁可不重试,不可零间隔轰击上游
+function upgradeRetryBackoffMs(backoff, kind, retryIndex) {
+  const seq = backoff[kind]
+  if (!seq || seq.length === 0) return null
   return seq[Math.min(retryIndex, seq.length - 1)]
 }
+
+// 日志单行化:拼入 console.warn 的动态串不得携带换行,防日志结构被打散
+const singleLine = (text) => String(text ?? '').replace(/[\r\n]+/g, ' ')
 
 const sleepMs = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
 
 // 升级尝试循环:单次执行语义与超时不变,失败经分类,可重试类按退避重试,
-// 直至成功/不可重试/次数上限;runImpl/sleepImpl 注入仅供测试,默认真实执行器与定时睡眠
-export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT_MS, maxAttempts = UPGRADE_MAX_ATTEMPTS, runImpl = runUpgrade, sleepImpl = sleepMs, onAttemptStart }) {
+// 直至成功/不可重试/次数上限;尾流只在落定结果上,attempts 条目只留判定字段。
+// runImpl/sleepImpl/backoff 注入仅供测试,默认真实执行器、定时睡眠与导出退避表
+export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT_MS, maxAttempts = UPGRADE_MAX_ATTEMPTS, backoff = UPGRADE_RETRY_BACKOFF_MS, runImpl = runUpgrade, sleepImpl = sleepMs, onAttemptStart }) {
   const attempts = []
   for (let index = 0; index < maxAttempts; index += 1) {
     if (index > 0 && typeof onAttemptStart === 'function') onAttemptStart()
@@ -76,8 +81,8 @@ export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT
       thrownMessage = error && error.message ? error.message : String(error)
     }
     if (thrownMessage !== null) {
-      attempts.push({ startedAt, finishedAt: Date.now(), ok: false, code: null, timedOut: false, kind: null, stdoutTail: '', stderrTail: '' })
-      return { attempts, ok: false, kind: null, stillRunning: false, error: thrownMessage }
+      attempts.push({ startedAt, finishedAt: Date.now(), ok: false, code: null, timedOut: false, kind: null })
+      return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: thrownMessage }
     }
     const failure = result.ok ? null : classifyUpgradeFailure(result)
     attempts.push({
@@ -87,17 +92,18 @@ export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT
       code: typeof result.code === 'number' ? result.code : null,
       timedOut: result.timedOut === true,
       kind: failure === null ? null : failure.kind,
-      stdoutTail: result.stdoutTail ?? '',
-      stderrTail: result.stderrTail ?? '',
     })
-    if (result.ok) return { attempts, ok: true, kind: null, stillRunning: false, error: null }
-    if (failure.retryable !== true || index >= maxAttempts - 1) {
-      return { attempts, ok: false, kind: failure.kind, stillRunning: result.stillRunning === true, error: null }
+    const settle = { attempts, ok: result.ok === true, kind: failure === null ? null : failure.kind, stillRunning: result.stillRunning === true, stdoutTail: result.stdoutTail ?? '', stderrTail: result.stderrTail ?? '', error: null }
+    if (result.ok) return settle
+    if (failure.retryable !== true || index >= maxAttempts - 1) return settle
+    const backoffMs = upgradeRetryBackoffMs(backoff, failure.kind, index)
+    if (backoffMs === null) {
+      console.warn('[dsh-maintain] 可重试分类缺少退避序列,按不可重试落定: kind=' + singleLine(failure.kind))
+      return settle
     }
-    const backoffMs = upgradeRetryBackoffMs(failure.kind, index)
-    if (backoffMs > 0) await sleepImpl(backoffMs)
+    await sleepImpl(backoffMs)
   }
-  return { attempts, ok: false, kind: null, stillRunning: false, error: null }
+  return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: null }
 }
 
 // 浏览器半区调用的 API 路径清单:client.js 同名常量与之对拍(parity),防单侧改路径生产 404
@@ -253,9 +259,13 @@ export function apply(ctx) {
   // 内存快照:仅存当前态,进程重启后从启动检查重新开始(设计约束:不持久化)。
   // installedVersion 为磁盘实时版本(每次检查读取),与运行版本区分
   const snapshot = { installedVersion: null, tags: null, checkedAt: null, error: null }
-  // 运行版本:apply 时读一次缓存,即宿主启动时的版本;verdict 以它判定
+  // 运行版本:apply 时读一次缓存,即宿主启动时的版本;verdict 以它判定。
+  // resolveCurrentHostVersion 约定恒 resolve 不 reject,此处 catch 锁定该约束,
+  // 防读盘异常以未处理拒绝形式逃逸
   let runningVersion = null
-  const runningVersionReady = resolveCurrentHostVersion().then((version) => { runningVersion = version })
+  const runningVersionReady = resolveCurrentHostVersion()
+    .then((version) => { runningVersion = version })
+    .catch(() => {})
   let upgrade = { running: false, last: null }
   let checkInFlight = null
   let nextDueAt = null
@@ -401,8 +411,8 @@ export function apply(ctx) {
         timedOut: final !== null ? final.timedOut : false,
         stillRunning: settle.stillRunning,
         code: final !== null ? final.code : null,
-        stdoutTail: final !== null ? final.stdoutTail : '',
-        stderrTail: final !== null ? final.stderrTail : '',
+        stdoutTail: settle.stdoutTail,
+        stderrTail: settle.stderrTail,
       })
       if (settle.ok) {
         last.installedVersion = await resolveCurrentHostVersion()
@@ -431,10 +441,10 @@ export function apply(ctx) {
           console.warn('[dsh-maintain] 升级锁删除失败(将由过期机制收敛): ' + (lockError?.message ?? lockError))
         }
       }
-      console.warn('[dsh-maintain] 升级结束: ok=' + last.ok + ' kind=' + last.kind
+      console.warn('[dsh-maintain] 升级结束: ok=' + last.ok + ' kind=' + singleLine(last.kind)
         + (last.code !== null ? ' 退出码=' + last.code : '')
-        + (last.error ? ' ' + last.error : '')
-        + (last.stale === true ? ' stale=' + last.reason : ''))
+        + (last.error ? ' ' + singleLine(last.error) : '')
+        + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
       // 升级结束后自动重新检查版本并重排轮询(命令可能改了本地版本)
       runCheck().then(scheduleNext, scheduleNext)
     }

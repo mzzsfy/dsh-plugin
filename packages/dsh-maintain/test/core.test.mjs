@@ -295,12 +295,17 @@ test('重启待生效:仅已装版本严格领先运行版本时为真', () => {
   assert.equal(isVersionPendingRestart({ runningVersion: 'dev-main', installedVersion: '2.0.0' }), false)
 })
 
-test('复读:installed 解析失败判 stale,previous 缺失宽松判 fresh', () => {  const broken = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: null, channelLatest: '2.0.0' })
+test('复读:installed 解析失败判 stale,previous 缺失不豁免未达目标', () => {
+  const broken = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: null, channelLatest: '2.0.0' })
   assert.equal(broken.stale, true)
   assert.match(broken.reason, /解析失败|读取/)
   const garbage = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: 'dev-main', channelLatest: '2.0.0' })
   assert.equal(garbage.stale, true)
-  // 旧版本未知时无法证明未前进,宽松不误报;通道目标缺失同理
+  // 旧版本未知只豁免"未前进"分支:磁盘低于通道目标仍判 stale
+  const unknownPrevious = judgeUpgradeFreshness({ previousVersion: null, installedVersion: '1.5.0', channelLatest: '2.0.0' })
+  assert.equal(unknownPrevious.stale, true)
+  assert.match(unknownPrevious.reason, /未达/)
   assert.deepEqual(judgeUpgradeFreshness({ previousVersion: null, installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
+  // 通道目标缺失时无法证明未达标,宽松判 fresh
   assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: null }), { stale: false, reason: null })
 })

@@ -92,7 +92,7 @@ export function isVersionPendingRestart({ runningVersion, installedVersion }) {
 }
 
 // 升级后磁盘版本复读判定:stale=版本未前进(镜像滞后/静默未升)或未达通道目标。
-// previous 未知或目标缺失时无法证明未达标,宽松判 fresh 不误报。
+// previous 未知只豁免"未前进"分支;目标缺失时无法证明未达标,宽松判 fresh 不误报。
 export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest }) {
   if (!parseSemver(installedVersion)) {
     return { stale: true, reason: '升级后磁盘版本解析失败' + (installedVersion ? ': ' + installedVersion : '(读取失败)') }
@@ -100,7 +100,7 @@ export function judgeUpgradeFreshness({ previousVersion, installedVersion, chann
   if (parseSemver(previousVersion) && !gtSemver(installedVersion, previousVersion)) {
     return { stale: true, reason: '磁盘版本未前进,升级可能静默失败或镜像滞后: ' + installedVersion }
   }
-  if (parseSemver(previousVersion) && parseSemver(channelLatest) && gtSemver(channelLatest, installedVersion)) {
+  if (parseSemver(channelLatest) && gtSemver(channelLatest, installedVersion)) {
     return { stale: true, reason: '已升级但未达通道目标: ' + installedVersion + ' < ' + channelLatest }
   }
   return { stale: false, reason: null }
@@ -135,10 +135,7 @@ export function classifyUpgradeFailure({ code, timedOut, stdoutTail, stderrTail 
     return { kind: UPGRADE_FAIL_FILE_LOCKED, retryable: true, reason: '全局目录文件被占用(杀毒/索引服务或并行进程)' }
   }
   const hasNpmErrorPrefix = text.includes(NPM_ERROR_MARKER)
-  if (COMMAND_MISSING_PATTERN.test(text) && !hasNpmErrorPrefix) {
-    return { kind: UPGRADE_FAIL_NPM_MISSING, retryable: false, reason: '命令未找到,检查升级命令模板' }
-  }
-  if (ENOENT_PATTERN.test(text) && !hasNpmErrorPrefix) {
+  if ((COMMAND_MISSING_PATTERN.test(text) || ENOENT_PATTERN.test(text)) && !hasNpmErrorPrefix) {
     return { kind: UPGRADE_FAIL_NPM_MISSING, retryable: false, reason: '命令未找到,检查升级命令模板' }
   }
   if (TRANSIENT_NETWORK_PATTERN.test(text)) {

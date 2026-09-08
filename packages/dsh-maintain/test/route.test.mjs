@@ -306,6 +306,37 @@ test('upgrade:运行版本已是通道最新 409 拒绝(防降级),unknown 放�
   }
 })
 
+test('upgrade:verdict unknown 放行(tags 未就绪不得 409 误拒)', async () => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  // fetch 在 apply 前替换:启动检查即失败,tags 保持 null,verdict 恒 unknown
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
+  try {
+    const { ctx, routes } = makeCtx({ settingsStore: store })
+    apply(ctx)
+    let snapshot = null
+    for (let waited = 0; waited < 5000 && snapshot === null; waited += 25) {
+      const poll = await get(routes, '/api/maintain/status').then((r) => r.payload)
+      if (poll.checkedAt !== null) snapshot = poll
+      else await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    assert.ok(snapshot, '启动检查 5 秒内未完成')
+    assert.equal(snapshot.tags, null, '前置:registry 不可达,tags 未就绪')
+    assert.equal(snapshot.verdict, 'unknown', '前置:verdict 应为 unknown')
+    const allowed = await post(routes, '/api/maintain/upgrade')
+    assert.equal(allowed.status, 200, 'verdict unknown 必须放行,不得 409 误拒')
+    assert.equal(allowed.payload.upgrade.running, true)
+    // 等假命令落定:防残留升级锁毒化后续用例
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const s = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (s && s.upgrade && s.upgrade.running === false && s.upgrade.last !== null) break
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {  // 默认模板是真实 npm install 命令,POST upgrade 的默认路径禁止在测试中触发;
   // 门闩语义由"真实挂起命令"用例覆盖,此处锁定保存侧空白拒绝
   const store = {}

@@ -9,8 +9,9 @@ import { spawn } from 'node:child_process'
 
 const OUTPUT_TAIL_BYTES = 2000
 const SPAWN_ERROR_CODE = 127
-// 树终止后的宽限期:子进程树拒死(权限/管道悬挂)时强制收敛,防升级门闩永久卡死
-const KILL_GRACE_MS = 5 * 1000
+// 树终止后的宽限期:子进程树拒死(权限/管道悬挂)时强制收敛,防升级门闩永久卡死;
+// 导出仅供 parity 测试作观察窗口上界的构成项对拍
+export const KILL_GRACE_MS = 5 * 1000
 
 function collectTail(stream) {
   let text = ''
