@@ -588,7 +588,6 @@ test('applyCurrencyToRules 空表恒等', () => {
 
 test('defaultPricingRule 承接给定货币,缺省回落首档', () => {
   assert.equal(defaultPricingRule('$').currency, '$')
-  assert.equal(defaultPricingRule('').currency, '')
   assert.equal(defaultPricingRule().currency, '¥')
   assert.equal(defaultPricingRule('$').model, '')
   assert.deepEqual(defaultPricingRule('$').price, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })

@@ -2,7 +2,7 @@
 // 本地时区取 Date 本地分量,timestamp 接受 Date 或 epoch 毫秒;匹配只读遍历入参规则。
 
 export const UNIT_PER_MILLION = 'perMillion'
-export const CURRENCIES = ['¥', '$', '']
+export const CURRENCIES = ['¥', '$']
 export const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 export const TOKENS_PER_MILLION = 1000 * 1000
 

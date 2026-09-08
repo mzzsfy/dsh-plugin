@@ -32,7 +32,7 @@ const EPSILON = 1e-9
 
 test('常量为文档定值', () => {
   assert.equal(UNIT_PER_MILLION, 'perMillion')
-  assert.deepEqual(CURRENCIES, ['¥', '$', ''])
+  assert.deepEqual(CURRENCIES, ['¥', '$'])
   assert.deepEqual(CONDITION_KINDS, ['dailyWindow', 'weekdays', 'monthDays', 'dateRange'])
   assert.equal(TOKENS_PER_MILLION, 1000 * 1000)
 })
