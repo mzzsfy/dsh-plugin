@@ -37,11 +37,13 @@ const {
   MESSAGES_ZH,
   OTHER_MODEL,
   aggregateCurrencyOf,
+  applyCurrencyToRules,
   cacheRateText,
   costOf,
   costTitleText,
   createTranslator,
   daysInRange,
+  defaultPricingRule,
   donutSegments,
   formatCompact,
   formatCost,
@@ -563,6 +565,34 @@ test('aggregateCurrencyOf 取首个非空货币,无则空串', () => {
   assert.equal(aggregateCurrencyOf([{ currency: '¥' }]), '¥')
   assert.equal(aggregateCurrencyOf([{ currency: '' }]), '')
   assert.equal(aggregateCurrencyOf(null), '')
+})
+
+test('applyCurrencyToRules 整表统一货币,不改其余字段且不动原数组', () => {
+  const rules = [
+    { model: 'a', currency: '', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '*', currency: '¥', price: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ type: 'weekdays', days: [1] }] },
+  ]
+  const stamped = applyCurrencyToRules(rules, '$')
+  assert.equal(stamped.length, rules.length)
+  assert.equal(stamped[0].currency, '$')
+  assert.equal(stamped[1].currency, '$')
+  assert.deepEqual(stamped[1].conditions, [{ type: 'weekdays', days: [1] }])
+  assert.deepEqual(stamped[1].price, rules[1].price)
+  assert.equal(rules[0].currency, '')
+  assert.equal(rules[1].currency, '¥')
+})
+
+test('applyCurrencyToRules 空表恒等', () => {
+  assert.deepEqual(applyCurrencyToRules([], '$'), [])
+})
+
+test('defaultPricingRule 承接给定货币,缺省回落首档', () => {
+  assert.equal(defaultPricingRule('$').currency, '$')
+  assert.equal(defaultPricingRule('').currency, '')
+  assert.equal(defaultPricingRule().currency, '¥')
+  assert.equal(defaultPricingRule('$').model, '')
+  assert.deepEqual(defaultPricingRule('$').price, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+  assert.deepEqual(defaultPricingRule('$').conditions, [])
 })
 
 test('validatePricingRules 就地校验 model 必填与价格非空非负', () => {

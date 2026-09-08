@@ -1140,10 +1140,13 @@ function coercePricingRules(rules) {
 // 服务端规则为纯 JSON,编辑副本深拷贝与缓存脱钩
 const copyRules = (rules) => JSON.parse(JSON.stringify(rules))
 
-// 新增规则默认:空模型 + 人民币 + 四桶零价 + 无条件(恒生效);已有条件整条保留原样
-const defaultPricingRule = () => ({
+// 货币为编辑器级全局设置:整表统一,规则内 currency 由切换值派生(wire 形态不变)
+const applyCurrencyToRules = (rules, currency) => rules.map((rule) => ({ ...rule, currency }))
+
+// 新增规则默认:空模型 + 承接全局货币 + 四桶零价 + 无条件(恒生效);已有条件整条保留原样
+const defaultPricingRule = (currency = CURRENCIES[0]) => ({
   model: '',
-  currency: CURRENCIES[0],
+  currency,
   price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: 0 }), {}),
   conditions: [],
 })
@@ -1514,8 +1517,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
-      const [prefs, setPrefs] = useState(() => statsLineState.get())
-      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
+      // prefs 仅用于 hover tooltip 的费用显隐,经 ref 读取:开关切换不触发本组件重渲染,
+      // 避免宿主设置弹窗滚动锚定被重渲染扰动而跳变
+      const prefsRef = useRef(statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => { prefsRef.current = statsLineState.get() }), [])
       useEffect(() => {
         const element = wrapRef.current
         const observer = new ResizeObserver((entries) => {
@@ -1592,7 +1597,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
                   `${model}: ${formatTokens(tokens)}`)),
                 h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`),
-                costEnabled && prefs.costDisplay && hoverSlot.cost !== undefined
+                costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,
               ]
@@ -1920,8 +1925,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }))
     }
 
-    // 定价规则编辑器:阶段 3 降级形态——条件行不支持编辑,已有条件整条保留原样,
-    // 空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
+    // 定价规则编辑器:货币为编辑器级全局设置(标题右侧切换,整表统一,不逐模型设置);
+    // 条件行不支持编辑,已有条件整条保留原样,空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
@@ -1952,15 +1957,6 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
             'aria-label': t('deleteRule'), title: t('deleteRule'),
           }, '×')),
-        h('div', { className: 'ud-pref-row' },
-          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
-            CURRENCIES.map((symbol) => h('button', {
-              key: symbol || 'none', type: 'button',
-              className: cx('ud-seg-item', rule.currency === symbol && 'ud-seg-item--on'),
-              'aria-pressed': rule.currency === symbol,
-              onClick: () => onPatch({ currency: symbol }),
-            }, symbol === '' ? t('pricingCurrencyNone') : symbol))),
-          h('span', { className: 'ud-unit-note' }, t('pricingUnit'))),
         h('div', { className: 'ud-price-grid' },
           priceField('input', 'priceInput'),
           priceField('output', 'priceOutput'),
@@ -1974,6 +1970,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
     function PricingEditor({ t = defaultT }) {
       const [phase, setPhase] = useState(null)
+      const [currency, setCurrency] = useState(CURRENCIES[0])
       const [rules, setRules] = useState(null)
       const [errors, setErrors] = useState(() => new Map())
       const [saveError, setSaveError] = useState('')
@@ -1989,7 +1986,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             setPhase(PRICING_STATE_UNAVAILABLE)
             return
           }
-          setRules(copyRules(value.rules))
+          // 打开即按首个非空货币归一显示,整表状态与全局货币恒一致
+          const loaded = copyRules(value.rules)
+          const unified = aggregateCurrencyOf(loaded)
+          setCurrency(unified)
+          setRules(applyCurrencyToRules(loaded, unified))
           setPhase(PRICING_STATE_READY)
         })
         return () => { alive = false }
@@ -2033,6 +2034,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('div', { className: 'ud-pref-text' },
             h('span', { className: 'ud-pref-title' }, t('pricing')),
             saved ? h('span', { className: 'ud-pref-desc' }, t('saved')) : null),
+          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('pricingCurrency') },
+            CURRENCIES.map((symbol) => h('button', {
+              key: symbol || 'none', type: 'button',
+              className: cx('ud-seg-item', currency === symbol && 'ud-seg-item--on'),
+              'aria-pressed': currency === symbol,
+              onClick: () => {
+                setCurrency(symbol)
+                setRules((prev) => applyCurrencyToRules(prev, symbol))
+              },
+            }, symbol === '' ? t('pricingCurrencyNone') : symbol))),
+          h('span', { className: 'ud-unit-note' }, t('pricingUnit')),
           h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save'))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
         rules.map((rule, index) => h(PricingRuleCard, {
@@ -2046,7 +2058,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         })),
         h('button', {
           className: 'ud-rule-add', type: 'button',
-          onClick: () => setRules((prev) => [...prev, defaultPricingRule()]),
+          onClick: () => setRules((prev) => [...prev, defaultPricingRule(currency)]),
         }, t('addRule')))
     }
 
