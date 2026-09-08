@@ -130,12 +130,14 @@ const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
 const VERDICT_UNKNOWN = 'unknown'
 
-// 非 2xx 应答抛带 status 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
-// 与"网络失联"(fetch reject TypeError/abort DOMException,无 status)
+// 非 2xx 应答抛带 status 与完整 payload 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
+// 与"网络失联"(fetch reject TypeError/abort DOMException,无 status);payload 供活跃工作
+// 409 回绝回写 items 计数
 // LOGIC-BEGIN apiError
 function apiError(response, payload) {
   const error = new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
   error.status = response.status
+  error.payload = payload === undefined || payload === null ? {} : payload
   return error
 }
 // LOGIC-END apiError
@@ -161,6 +163,8 @@ function post(url, body) {
 // 代际令牌防重叠拍:顺序自调度(settle 后排下一拍),单请求带超时,stop 后迟到拍经验代际丢弃
 const UPGRADE_WATCH_MAX_MS = 32 * 60 * 1000
 const UPGRADE_POLL_TIMEOUT_MS = 5 * 1000
+// 落定补查宽限:宿主自动重启调度延迟与观察裕量之和(parity 对拍提取形态限单项乘积)
+const UPGRADE_AUTO_RESTART_GRACE_MS = 5 * 1000
 const upgradeWatch = { generation: null, startedAt: 0, listeners: new Set() }
 
 function broadcastUpgradeStatus(status) {
@@ -169,6 +173,22 @@ function broadcastUpgradeStatus(status) {
 
 function stopUpgradeWatch() {
   upgradeWatch.generation = null
+}
+
+// 落定补查:延迟窗口后单拍重拉状态并广播(驱动自动重启接管守卫),按标记终判;
+// 补查前后验让位——新一轮升级观察已启动即放弃,其自身落定拍会终判
+async function recheckUpgradeSettle(previousLast) {
+  let final = null
+  try {
+    final = await api(STATUS_URL, { signal: AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS) })
+  } catch {
+    final = null
+  }
+  if (upgradeWatch.generation !== null) return
+  if (final !== null) broadcastUpgradeStatus(final)
+  const last = final !== null && final.upgrade ? final.upgrade.last : null
+  if (last !== null && (last.autoRestartScheduled === true || last.requiresManualRestart === true)) showUpgradeFloat(last)
+  else showUpgradeFloat(previousLast)
 }
 
 function subscribeUpgradeStatus(listener) {
@@ -199,7 +219,17 @@ function ensureUpgradeWatch() {
       if (!upgrade || upgrade.running !== true) {
         upgradeWatch.generation = null
         // 快照归零(last 为空)不做失败渲染,保持进行中文案,由重启流程接管
-        if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
+        if (upgrade && upgrade.last) {
+          // 落定拍可能早于宿主置调度标记:未见标记不立即终判,延迟宽限后补查一拍
+          if (upgrade.last.autoRestartScheduled === true || upgrade.last.requiresManualRestart === true) {
+            showUpgradeFloat(upgrade.last)
+            return
+          }
+          setTimeout(() => {
+            if (upgradeWatch.generation !== null) return
+            void recheckUpgradeSettle(upgrade.last)
+          }, UPGRADE_AUTO_RESTART_GRACE_MS)
+        }
         return
       }
     } catch (pollError) {
@@ -465,11 +495,13 @@ function UpgradeCard(props) {
   )
 }
 
-// 重启按钮确认态文案:有活跃工作时改为「仍要重启」,点发即带 force 越过门控
+// 重启确认按钮文案:armed 且有活跃计数时改「仍要重启」,点发即带 force 越过门控
+// LOGIC-BEGIN restartConfirmLabel
 function restartConfirmLabel(armed, activeWorkTotal) {
   if (!armed) return '重启宿主'
   return activeWorkTotal > 0 ? '仍要重启(' + activeWorkTotal + ' 项活跃工作)' : '确认重启'
 }
+// LOGIC-END restartConfirmLabel
 
 // 运维区:两段式重启 + 托管环境说明。
 function OpsCard(props) {
@@ -515,21 +547,27 @@ function MaintainApp() {
   }
 
   // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察;
-  // 快照带 autoRestartScheduled 且未在等待/接管态时,以该快照为基线自动进入重启等待
-  // (复用 restartTick 探测,无需用户点击;autoRestartTakenRef 防多拍重入)
+  // 订阅回调(落定拍)与初始 load 快照(刷新落在调度窗口)两路同走接管守卫
   useEffect(() => {
     const unsubscribe = subscribeUpgradeStatus((snapshot) => {
       if (snapshot !== null) setStatus(snapshot)
-      if (snapshot !== null && snapshot.autoRestartScheduled === true && restartPendingRef.current === false && autoRestartTakenRef.current === false) {
-        autoRestartTakenRef.current = true
-        beginRestartWait({ lost: false, pid: snapshot.pid, bootAt: snapshot.bootAt, readyStreak: 0 })
-      }
+      takeOverAutoRestart(snapshot)
     })
     void load().then((next) => {
+      if (next !== null) takeOverAutoRestart(next)
       if (next !== null && next.upgrade !== null && next.upgrade.running === true) ensureUpgradeWatch()
     })
     return unsubscribe
   }, [])
+
+  // 自动重启接管守卫:快照带调度标记且未在等待/接管态时,以该快照为基线自动进入
+  // 重启等待(复用 restartTick 探测,无需用户点击);autoRestartTakenRef 防多拍重入
+  function takeOverAutoRestart(snapshot) {
+    if (snapshot === null || snapshot.autoRestartScheduled !== true) return
+    if (restartPendingRef.current === true || autoRestartTakenRef.current === true) return
+    autoRestartTakenRef.current = true
+    beginRestartWait({ lost: false, pid: snapshot.pid, bootAt: snapshot.bootAt, readyStreak: 0 })
+  }
 
   function beginRestartWait(baseline) {
     restartPrevRef.current = baseline
@@ -769,6 +807,13 @@ function MaintainApp() {
         // 有应答的明确回绝(409 升级互斥/500 能力缺失等):宿主未退出,不得进入等待轮询,
         // 否则会凭"活宿主 + pageReady 恒真"误判已重启而整页刷新
         setRestarting(false)
+        // 活跃工作回绝:保留确认态并回写计数(下一拍确认即可带 force)
+        if (restartError && restartError.payload && restartError.payload.items) {
+          setRestartArmed(true)
+          void load()
+          notify('存在活跃工作(共 ' + restartError.payload.items.total + ' 项),已保留确认态,再次点击将以 force 重启', 'error')
+          return
+        }
         notify('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)), 'error')
       })
       .then(() => { restartPendingRef.current = false })

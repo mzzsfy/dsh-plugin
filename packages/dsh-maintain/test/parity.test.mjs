@@ -102,6 +102,7 @@ import {
   UPGRADE_TIMEOUT_MS,
   UPGRADE_MAX_ATTEMPTS,
   UPGRADE_RETRY_BACKOFF_MS,
+  AUTO_RESTART_DELAY_MS,
 } from '../src/index.js'
 
 test('parity: 默认升级命令模板 client 字面量与 host 实现一致', () => {
@@ -156,6 +157,15 @@ test('parity: 升级观察上限覆盖宿主重试链上限(防抢跑转状态�
 
 test('parity: npm 版本页链接与追踪包名同源', () => {
   assert.ok(extractConst('NPM_VERSIONS_URL').includes(TARGET_PACKAGE), 'NPM_VERSIONS_URL 应包含 TARGET_PACKAGE 字面量')
+})
+
+test('parity: 落定补查宽限覆盖宿主自动重启调度延迟', () => {
+  // 落定拍与调度置位之间存在宿主侧 await 窗口:client 补查宽限必须不小于调度延迟 + 观察裕量
+  const graceMs = extractNumberConst('UPGRADE_AUTO_RESTART_GRACE_MS')
+  assert.ok(
+    graceMs >= AUTO_RESTART_DELAY_MS + 1 * 1000,
+    'UPGRADE_AUTO_RESTART_GRACE_MS(' + graceMs + ') 必须不小于 AUTO_RESTART_DELAY_MS(' + AUTO_RESTART_DELAY_MS + ') 加观察裕量',
+  )
 })
 
 test('源码契约: 重启轮询与升级观察器不得回退 setInterval 重叠拍形态', () => {

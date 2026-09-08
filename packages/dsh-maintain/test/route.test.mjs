@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
 import { apply, RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
-import { rmSync } from 'node:fs'
+import { rmSync, readFileSync } from 'node:fs'
 
 // 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
 rmSync(UPGRADE_LOCK_PATH, { force: true })
@@ -623,6 +623,53 @@ test('status:activeWork 概要进快照,服务缺失标 detectionAvailable=false
   const status = await get(routes, '/api/maintain/status').then((r) => r.payload)
   assert.equal(status.activeWork.total, 0)
   assert.equal(status.activeWork.detectionAvailable, false)
+})
+
+// ---- 批 2 审查建议落地 ----
+
+test('restart:null 体按空体处理,内部形态不泄漏', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exits = []
+  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  apply(ctx)
+  const ok = await post(routes, '/api/maintain/restart', 'null')
+  assert.equal(ok.status, 200, 'null 体须按空体处理,不得以内部错误形态 400/500 泄漏')
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [0], 'null 体等价空体:正常调度退出')
+})
+
+test('自动重启接线:落定链消费运行环境并分流调度与手动指引(源码形态锁定)', () => {
+  const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  const settle = source.match(/const decision = judgeAutoRestart\(\{([\s\S]*?)\}\)/)
+  assert.ok(settle, '落定链缺少 judgeAutoRestart 判定')
+  assert.match(settle[1], /runtimeKind: runtimeEnv\.kind/, '落定判定必须消费运行环境检测结果')
+  assert.match(source, /if \(decision\.requiresManualRestart === true\) last\.requiresManualRestart = true/, '手动直跑指引必须回写 last')
+  assert.match(source, /if \(decision\.schedule === true\) \{[\s\S]*?last\.autoRestartScheduled = true[\s\S]*?scheduleAutoRestart\(\)/, '调度链必须置位标记并调用 scheduleAutoRestart')
+})
+
+test('upgrade:env 注入手动直跑环境,落定链保守分流零退出', async () => {
+  process.env.DSH_MAINTAIN_RUNTIME_ENV = 'manual'
+  try {
+    const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+    const exits = []
+    const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
+    apply(ctx)
+    await post(routes, '/api/maintain/upgrade')
+    let settled = null
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.runtimeEnv.kind, 'manual-start-likely', 'env 注入必须经 apply 检测进 status')
+    assert.equal(settled.autoRestartScheduled, false, '手动直跑禁止调度自动重启')
+    assert.deepEqual(exits, [], '手动直跑禁止任何宿主退出')
+    // stale 优先:版本未前进时不引导手动重启(重启无意义)
+    assert.equal(settled.upgrade.last.requiresManualRestart, undefined)
+  } finally {
+    delete process.env.DSH_MAINTAIN_RUNTIME_ENV
+  }
 })
 
 // ---- 审计日志(S12)----

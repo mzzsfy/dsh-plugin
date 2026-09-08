@@ -76,12 +76,17 @@ const audit = (endpoint, outcome, extra) => {
 // 不因安全网缺失死锁重启)。terminals 主路径逐 agent 的 realm 作用域解析(PTY 注册表随
 // agent 挂载且 isolate,共享根作用域因 realm 隔离恒缺,仅兜底);sessions 不作活跃指标;
 // 禁止顶层 inject(阻塞装载)。导出仅供测试
+// 降级留痕按服务键进程首见一次:status 每拍重检,不限频会刷屏
+const degradedWarned = new Set()
+
 export function collectActiveWork(ctx) {
   const counts = { agents: 0, jobs: 0, terminals: 0 }
   let detectionAvailable = true
-  const degrade = (message) => {
+  const degrade = (key, detail) => {
     detectionAvailable = false
-    console.warn('[dsh-maintain] 活跃工作检测降级,门控放行: ' + singleLine(message))
+    if (degradedWarned.has(key)) return
+    degradedWarned.add(key)
+    console.warn('[dsh-maintain] 活跃工作检测降级,门控放行(' + key + '): ' + singleLine(detail))
   }
 
   let agentList = []
@@ -92,7 +97,7 @@ export function collectActiveWork(ctx) {
     agentList = Array.isArray(rows) ? rows : []
     counts.agents = agentList.filter((agent) => agent && agent.status === 'running').length
   } catch (error) {
-    degrade(error && error.message ? error.message : String(error))
+    degrade('agents', error && error.message ? error.message : String(error))
   }
 
   try {
@@ -110,7 +115,7 @@ export function collectActiveWork(ctx) {
       }
     }
   } catch (error) {
-    degrade(error && error.message ? error.message : String(error))
+    degrade('jobs', error && error.message ? error.message : String(error))
   }
 
   try {
@@ -132,17 +137,17 @@ export function collectActiveWork(ctx) {
         const agentCtx = agent && agent.ctx
         if (agentCtx && typeof agentCtx.get === 'function') scan(agentCtx.get('terminals'), agent)
       } catch (error) {
-        degrade('terminals realm 探测异常: ' + (error && error.message ? error.message : String(error)))
+        degrade('terminals', 'realm 探测异常: ' + (error && error.message ? error.message : String(error)))
       }
     }
     try {
       scan(ctx.get('terminals'), undefined)
     } catch (error) {
-      degrade('terminals 根探测异常: ' + (error && error.message ? error.message : String(error)))
+      degrade('terminals', '根探测异常: ' + (error && error.message ? error.message : String(error)))
     }
-    if (!sawTerminalsService) degrade('terminals 服务面不可用')
+    if (!sawTerminalsService) degrade('terminals', 'terminals 服务面不可用')
   } catch (error) {
-    degrade('terminals 检测异常: ' + (error && error.message ? error.message : String(error)))
+    degrade('terminals', error && error.message ? error.message : String(error))
   }
 
   return {
@@ -754,7 +759,8 @@ export function apply(ctx) {
         // 活跃工作门控:重启可被 force 越过(升级后自动重启链路无法等待人工确认,
         // 对齐 dsh-service:升级不可越/重启 force 可越)
         const rawBody = await readBody(req)
-        const requestBody = rawBody ? JSON.parse(rawBody) : {}
+        // 'null' 字面量解析为 null:按空体处理,防 null.force 形态的内部错误外泄
+        const requestBody = rawBody ? (JSON.parse(rawBody) || {}) : {}
         const activeWork = collectActiveWork(ctx)
         if (activeWork.total > 0 && requestBody.force !== true) {
           audit('restart', 'rejected', 'reason=active-work total=' + activeWork.total)

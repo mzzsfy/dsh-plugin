@@ -188,15 +188,6 @@ test('restartPostLost: 无应答失败(网络/中止)属于失联', () => {
   assert.equal(clientRestartPostLost('boom'), true)
 })
 
-test('apiError: 携带 status 与 payload.error,解析失败回退 HTTP 码', () => {
-  const withBody = clientApiError({ status: 409 }, { error: '升级进行中,禁止重启;等待升级完成后重试' })
-  assert.equal(withBody.status, 409)
-  assert.equal(withBody.message, '升级进行中,禁止重启;等待升级完成后重试')
-  const withoutBody = clientApiError({ status: 500 }, {})
-  assert.equal(withoutBody.status, 500)
-  assert.equal(withoutBody.message, 'HTTP 500')
-})
-
 test('restartTick 调用点实参完整性:轮询 effect 必须传 readyStreak=prev.readyStreak', () => {
   // 回归:f58f47b 给 restartTick 加 readyStreak 参数时调用点漏传,ready=true 分支
   // undefined+1=NaN,NaN>=门槛恒 false,宿主恢复后页面永不自动刷新。
@@ -208,6 +199,9 @@ test('restartTick 调用点实参完整性:轮询 effect 必须传 readyStreak=p
 
 // 升级浮条终态文案:ok 落定后 stale / 手动直跑 / 自动重启三条终态分流,失败与未知不在此列
 const clientUpgradeFinalText = extractLogic('upgradeFinalText')
+
+// 重启确认态文案:armed 且有活跃计数时改「仍要重启」
+const clientRestartConfirmLabel = extractLogic('restartConfirmLabel')
 
 test('upgradeFinalText: stale 优先于两种重启指引,不得引导重启', () => {
   const text = clientUpgradeFinalText({ ok: true, stale: true, requiresManualRestart: true, autoRestartScheduled: true })
@@ -222,12 +216,48 @@ test('upgradeFinalText: 手动直跑终态指向手动重启,自动重启终态�
   assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: false, autoRestartScheduled: false }), /重启宿主/)
 })
 
-test('client 自动重启接管:订阅回调必须按 autoRestartScheduled 守卫进入等待态', () => {
-  // 接管点实参形态锁定:beginRestartWait 基线必须取观察器快照的 pid/bootAt,并以 restartPendingRef 防重入
-  const takeover = clientSource().match(/subscribeUpgradeStatus\(\(snapshot\)\s*=>\s*\{([\s\S]*?)\}\)/)
-  assert.ok(takeover, 'client.js 缺少订阅回调自动重启接管')
-  assert.match(takeover[1], /autoRestartScheduled/, '接管必须以 autoRestartScheduled 触发')
-  assert.match(takeover[1], /restartPendingRef\.current/, '接管必须以 restartPendingRef 防重入')
-  assert.match(takeover[1], /pid:\s*snapshot\.pid/, '接管基线必须取快照 pid')
-  assert.match(takeover[1], /bootAt:\s*snapshot\.bootAt/, '接管基线必须取快照 bootAt')
+test('restartConfirmLabel: armed 且活跃计数>0 才显示仍要重启文案', () => {
+  assert.equal(clientRestartConfirmLabel(false, 0), '重启宿主')
+  assert.equal(clientRestartConfirmLabel(true, 0), '确认重启')
+  assert.equal(clientRestartConfirmLabel(false, 3), '重启宿主', '未进入确认态不得显示仍要重启')
+  assert.equal(clientRestartConfirmLabel(true, 3), '仍要重启(3 项活跃工作)')
+})
+
+test('client 自动重启接管:单一守卫函数,订阅回调与初始加载两路同走', () => {
+  const source = clientSource()
+  const guardFn = source.match(/function takeOverAutoRestart\(snapshot\)\s*\{([\s\S]*?)\n  \}/)
+  assert.ok(guardFn, 'client.js 缺少 takeOverAutoRestart 接管守卫')
+  assert.match(guardFn[1], /autoRestartScheduled !== true/, '守卫必须以 autoRestartScheduled 触发')
+  assert.match(guardFn[1], /restartPendingRef\.current === true/, '重启 POST 在途不得接管')
+  assert.match(guardFn[1], /autoRestartTakenRef\.current === true/, '不得重复接管')
+  assert.match(guardFn[1], /pid:\s*snapshot\.pid/, '接管基线必须取快照 pid')
+  assert.match(guardFn[1], /bootAt:\s*snapshot\.bootAt/, '接管基线必须取快照 bootAt')
+  // 两路调用:观察器订阅回调(升级落定拍)+ 初始 load 快照(页面刷新落在调度窗口)
+  assert.match(source, /subscribeUpgradeStatus\(\(snapshot\)\s*=>\s*\{[\s\S]*?takeOverAutoRestart\(snapshot\)/, '订阅回调必须走接管守卫')
+  assert.match(source, /void load\(\)\.then\(\(next\)\s*=>\s*\{[\s\S]*?takeOverAutoRestart\(next\)/, '初始快照必须走接管守卫')
+})
+
+test('client 落定补查:未见自动重启标记时延迟宽限补查一拍再终判', () => {
+  const source = clientSource()
+  // 落定拍 running 翻转与宿主置调度标记之间存在 await 窗口:未见标记不得立即终判
+  assert.match(source, /setTimeout\(\(\)\s*=>\s*\{[\s\S]*?recheckUpgradeSettle\(/, '落定拍未见标记必须延迟补查')
+  assert.match(source, /async function recheckUpgradeSettle\([\s\S]*?broadcastUpgradeStatus\(final\)/, '补查必须广播以驱动接管守卫')
+  assert.match(source, /upgradeWatch\.generation !== null\) return[\s\S]*?recheckUpgradeSettle|recheckUpgradeSettle\([\s\S]*?upgradeWatch\.generation !== null\) return/, '补查前后必须验让位新观察')
+})
+
+test('force 发送条件锁定:仅活跃计数>0 的重启确认带 force', () => {
+  const callSite = clientSource().match(/post\(RESTART_URL,\s*([^)]+)\)/)
+  assert.ok(callSite, 'client.js 找不到重启 POST 调用点')
+  assert.match(callSite[1], /activeWorkTotal > 0 \? \{ force: true \} : undefined/, 'force 必须仅在活跃计数>0 时携带')
+})
+
+test('apiError: 携带 status 与完整 payload,解析失败回退 HTTP 码', () => {
+  const withBody = clientApiError({ status: 409 }, { error: '升级进行中,禁止重启;等待升级完成后重试', items: { total: 2 } })
+  assert.equal(withBody.status, 409)
+  assert.equal(withBody.message, '升级进行中,禁止重启;等待升级完成后重试')
+  assert.deepEqual(withBody.payload, { error: '升级进行中,禁止重启;等待升级完成后重试', items: { total: 2 } }, 'payload 必须挂在错误对象上供回写计数')
+  const withoutBody = clientApiError({ status: 500 }, {})
+  assert.equal(withoutBody.status, 500)
+  assert.equal(withoutBody.message, 'HTTP 500')
+  assert.deepEqual(withoutBody.payload, {})
 })
