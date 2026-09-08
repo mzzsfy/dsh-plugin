@@ -178,6 +178,45 @@ test('request 样本只计请求数,无归因落 (unknown)', async () => {
   assert.equal(unknown.requests, 1)
 })
 
+test('token 样本时长落三粒度累加,request 与 turn 行时长恒 0', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  await store.record(tokenSample(at, { durationMs: 6500 }))
+  await store.record(tokenSample(at + 1000, { durationMs: 2500 }))
+  await store.record({ time: at, request: true, model: 'deepseek/deepseek-chat' })
+  await store.record({ time: at, turn: true })
+  await store.flushNow()
+  const daily = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(daily.outputTokens, 40)
+  assert.equal(daily.durationMs, 9000)
+  const hourly = domain.rows.get('H|2026-08-02T14|deepseek|deepseek/deepseek-chat')
+  assert.equal(hourly.durationMs, 9000)
+  const minute = domain.rows.get('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat')
+  assert.equal(minute.durationMs, 9000)
+  const requestRow = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(requestRow.requests, 1)
+  const turnRow = domain.rows.get('D|2026-08-02|default|(turns)')
+  assert.equal(turnRow.durationMs, 0)
+})
+
+test('老行缺 durationMs 字段:增量求和不产 NaN', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  const key = 'D|2026-08-02|deepseek|deepseek/deepseek-chat'
+  await store.record(tokenSample(at))
+  await store.flushNow()
+  // 模拟存量旧格式行:回写去掉 durationMs 字段
+  const stored = domain.rows.get(key)
+  delete stored.durationMs
+  await store.record(tokenSample(at + 1000, { durationMs: 3000 }))
+  await store.flushNow()
+  const seen = domain.rows.get(key)
+  assert.equal(seen.durationMs, 3000)
+  assert.equal(seen.outputTokens, 40)
+})
+
 test('missing-record 首写竞态:put 种子后重试写入真值', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))

@@ -82,6 +82,8 @@ export const usageRowSchema = z.object({
   outputTokens: z.number(),
   cacheReadTokens: z.number(),
   cacheWriteTokens: z.number(),
+  // 模型时长累计(毫秒):optional 兼容存量记录(域 open 逐记录 parse)
+  durationMs: z.number().optional(),
   requests: z.number(),
   turns: z.number(),
   lastSeen: z.number(),
@@ -115,6 +117,7 @@ function emptyRow(bucket, provider, model, nowMs) {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    durationMs: 0,
     requests: 0,
     turns: 0,
     lastSeen: nowMs,
@@ -134,6 +137,7 @@ function deltaOf(sample, nowMs) {
     delta.outputTokens = sample.outputTokens
     delta.cacheReadTokens = sample.cacheReadTokens
     delta.cacheWriteTokens = sample.cacheWriteTokens
+    delta.durationMs = sample.durationMs ?? 0
   }
   return delta
 }
@@ -146,6 +150,8 @@ function addDelta(base, delta) {
     outputTokens: base.outputTokens + delta.outputTokens,
     cacheReadTokens: base.cacheReadTokens + delta.cacheReadTokens,
     cacheWriteTokens: base.cacheWriteTokens + delta.cacheWriteTokens,
+    // base 侧 ?? 0 容存量旧格式行(缺字段);delta 侧经 deltaOf 恒为数值
+    durationMs: (base.durationMs ?? 0) + delta.durationMs,
     requests: base.requests + delta.requests,
     turns: base.turns + delta.turns,
     lastSeen: Math.max(base.lastSeen, delta.lastSeen),

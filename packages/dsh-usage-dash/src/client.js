@@ -613,6 +613,12 @@ function modelSegmentLabel(name, tokens, percent) {
   return `${name}: ${formatTokens(tokens)} (${formatPercent(percent)})`
 }
 
+// 模型平均生成速度文本:官方吞吐口径格式化 + 单位(语言中立);无速度(无时长数据)为空串
+function modelSpeedText(speed) {
+  if (speed === undefined) return ''
+  return `${formatTokensPerSecond(speed)} tok/s`
+}
+
 // 热力图:窗口固定 26 周,与所选范围无关
 const HEAT_WEEKS = 26
 const HEAT_ROW_COUNT = 7
@@ -1955,6 +1961,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('div', { className: 'ud-models' },
             models.map((item) => {
               const isOther = item.model === OTHER_MODEL
+              const speedText = modelSpeedText(item.speed)
               return h(React.Fragment, { key: item.model },
                 h('div', {
                   className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
@@ -1979,7 +1986,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
                     h('span', { className: 'ud-model-pct' },
                       item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
-                      formatPercent((item.tokens / total) * PERCENT_SCALE)))),
+                      formatPercent((item.tokens / total) * PERCENT_SCALE),
+                      speedText ? ` · ${speedText}` : null))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },

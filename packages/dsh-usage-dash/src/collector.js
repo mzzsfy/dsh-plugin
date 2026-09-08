@@ -15,6 +15,9 @@ const SCAN_LOG_MAX_ENTRIES = 200
 export class UsageFold {
   constructor() {
     this.seen = new Map()
+    // (turn,step) 最近一次模型启动时刻:retry-started 覆盖重置,时长与首样本
+    // token 同源配对(分子只含最终尝试,分母不含失败尝试,避免速度被污染)
+    this.starts = new Map()
   }
 
   keyOf(event) {
@@ -38,6 +41,8 @@ export class UsageFold {
     if (event.type === 'step/start' || event.type === 'llm/retry-started') {
       // step/start 恰开一次模型调用,retry-started 标记每次实际启动的重试;
       // 请求只由标记计数,与 token 样本双计
+      const key = this.keyOf(event)
+      if (key !== null) this.starts.set(key, event.time)
       return {
         time: event.time,
         inputTokens: 0,
@@ -69,6 +74,13 @@ export class UsageFold {
       outputTokens: usage.outputTokens ?? 0,
       cacheReadTokens: usage.cacheReadTokens ?? 0,
       cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+    }
+    // 模型时长口径与官方 session-stats 投影 llmMs 同构(step/start → 汇报时刻),
+    // 附加到交 store 的首样本;未观测起点或时刻倒挂(时钟回拨)不附,0 视为无
+    const start = key !== null ? this.starts.get(key) : undefined
+    if (start !== undefined) {
+      const durationMs = Math.max(0, event.time - start)
+      if (durationMs > 0) sample.durationMs = durationMs
     }
     if (key === null) return sample
     const prev = this.seen.get(key)

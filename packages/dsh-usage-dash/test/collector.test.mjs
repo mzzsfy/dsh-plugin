@@ -139,6 +139,22 @@ test('step/start 与 llm/retry-started 产生 request 标记样本', async () =>
   }
 })
 
+test('step/start 观测起点:首个 usage 样本附 durationMs(start 到样本时刻)', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  const sampleAt = start + 6 * 1000 + 500
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 2, sampleAt, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.durationMs, 6500)
+})
+
 test('(session,turn,step) 去重:同键先到样本生效,重复报告吞掉', async () => {
   const { ctx, store } = liveCollector()
   const t = local(2026, 8, 2, 10, 0)
@@ -156,6 +172,55 @@ test('(session,turn,step) 去重:同键先到样本生效,重复报告吞掉', a
   await tick()
   assert.equal(store.samples.length, 1)
   assert.equal(store.samples[0].inputTokens, 100)
+})
+
+test('无 step/start 起点的 usage 样本不带 durationMs', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 1, t, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.samples[0].durationMs, undefined)
+})
+
+test('retry-started 重置起点:时长只含最终尝试', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  const retryAt = start + 60 * 1000
+  const sampleAt = retryAt + 5 * 1000
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('llm/retry-started', 2, retryAt, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, sampleAt, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.durationMs, 5000)
+})
+
+test('同时刻零时长不附 durationMs,request 标记样本不带时长', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, t, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 2, t, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  assert.equal(store.samples.length, 2)
+  for (const sample of store.samples) {
+    assert.equal(sample.durationMs, undefined)
+  }
 })
 
 test('不同 (turn,step) 各自成立,跨会话同键互不影响', async () => {
@@ -362,6 +427,28 @@ test('回扫:无边界会话全量重放,归因与游标写回', async () => {
   assert.equal(collector.status().total, 1)
   assert.equal(collector.status().done, 1)
   assert.equal(collector.status().scannedSessions, 1)
+})
+
+test('回扫:重放路径同样附加 durationMs', async () => {
+  const start = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([{
+    id: 's1',
+    events: [
+      ev('request/context', 0, start, { provider: 'deepseek', model: 'chat' }),
+      ev('step/start', 1, start, { turn: 0, step: 0 }),
+      ev('assistant/message', 2, start + 7 * 1000, {
+        turn: 0,
+        step: 0,
+        usage: usage(),
+        message: { source: { provider: 'deepseek', model: 'chat' } },
+      }),
+    ],
+  }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.durationMs, 7000)
 })
 
 test('回扫:已入游标会话不再重扫', async () => {

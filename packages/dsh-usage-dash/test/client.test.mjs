@@ -63,6 +63,7 @@ const {
   maxSlotsFor,
   minuteTickLabel,
   modelSegmentLabel,
+  modelSpeedText,
   modelNameOf,
   niceTicks,
   otherDetailItems,
@@ -553,6 +554,13 @@ test('otherDetailItems 取哨兵明细无哨兵为空表', () => {
 
 test('donut 分段可访问标签格式化名称数值与占比', () => {
   assert.equal(modelSegmentLabel('p/m', 1234, 12.34), 'p/m: 1,234 (12.3%)')
+})
+
+test('模型速度文本:官方吞吐口径格式化,无速度为空串', () => {
+  assert.equal(modelSpeedText(5.5556), '5.6 tok/s')
+  assert.equal(modelSpeedText(12.34), '12 tok/s')
+  assert.equal(modelSpeedText(0), '0 tok/s')
+  assert.equal(modelSpeedText(undefined), '')
 })
 
 // —— S14 费用格式化与展示辅助(镜像函数核心语义见 pricing-parity.test.mjs) ——
