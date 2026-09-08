@@ -1,8 +1,9 @@
 // 用量统计存储:usage_stats 域,单表 buckets,行键 <粒度>|<桶串>|<provider>|<model>。
-// 写入走 update 的原子读改写,缺键时 put 种子后重试一次;同一样本三粒度三行
-// 全部尝试后聚合上抛,单粒度失败不造成其余粒度缺失。游标读写全部串行在
-// 同一条 promise 链上,防 global 整值覆写的 lost update。进程级单例挂
-// globalThis,防 HMR 热重载后重复开域。
+// single 布局每次持久化写都全量重发布 unit 文档,故写入侧做合并(write-behind):
+// record 同步累加进内存 pending,按周期 flush 批量落盘,同桶多样本折叠为一次
+// update;flush 失败的行留在 pending 下轮重试,错误经 onFlushError 上抛。
+// 游标读写与 flush 全部串行在同一条 promise 链上,防 lost update。进程级单例
+// 挂 globalThis,防 HMR 热重载后重复开域。
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
@@ -24,6 +25,9 @@ export const MINUTE_BUCKET_SPAN_MINUTES = 10
 // 保留上限:小时桶固定 15 天,分钟桶可配置但最大 7 天(与分钟视图选择上限一致)
 export const HOUR_RETENTION_DAYS = 15
 export const MINUTE_RETENTION_MAX_DAYS = 7
+
+// 写合并周期:pending 样本最长延迟该时长落盘;统计可由会话重扫重建,容忍窗口内丢失
+export const FLUSH_INTERVAL_MS = 2000
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const PAD_WIDTH = 2
@@ -117,6 +121,37 @@ function emptyRow(bucket, provider, model, nowMs) {
   }
 }
 
+// 样本折叠为计数增量:turn/request 只计次,token 样本累加四类桶
+function deltaOf(sample, nowMs) {
+  const delta = emptyRow('', '', '', nowMs)
+  delete delta.bucket
+  delete delta.provider
+  delete delta.model
+  if (sample.turn) delta.turns = 1
+  else if (sample.request) delta.requests = 1
+  else {
+    delta.inputTokens = sample.inputTokens
+    delta.outputTokens = sample.outputTokens
+    delta.cacheReadTokens = sample.cacheReadTokens
+    delta.cacheWriteTokens = sample.cacheWriteTokens
+  }
+  return delta
+}
+
+// 增量累加:行与 pending 条目同构,恒等字段取 base,计数逐项相加,时刻取较新
+function addDelta(base, delta) {
+  return {
+    ...base,
+    inputTokens: base.inputTokens + delta.inputTokens,
+    outputTokens: base.outputTokens + delta.outputTokens,
+    cacheReadTokens: base.cacheReadTokens + delta.cacheReadTokens,
+    cacheWriteTokens: base.cacheWriteTokens + delta.cacheWriteTokens,
+    requests: base.requests + delta.requests,
+    turns: base.turns + delta.turns,
+    lastSeen: Math.max(base.lastSeen, delta.lastSeen),
+  }
+}
+
 function isMissingRecord(err) {
   return err instanceof Error && MISSING_RECORD_PATTERN.test(err.message)
 }
@@ -125,11 +160,16 @@ export class UsageStore {
   constructor(facility, options = {}) {
     this.now = options.now ?? Date.now
     this.retentionDays = options.retentionDays ?? (() => DEFAULT_MINUTE_RETENTION_DAYS)
+    this.flushIntervalMs = options.flushIntervalMs ?? FLUSH_INTERVAL_MS
+    // flush 行级失败上抛缝:采集器注入后接入扫描异常日志
+    this.onFlushError = options.onFlushError
     this.table = null
     this.domain = null
     this.openError = undefined
     this.lastPruneDay = ''
     this.markChain = Promise.resolve()
+    this.pending = new Map()
+    this.flushTimer = undefined
     // ready 永远 resolve:打开失败转降级,操作按调用失败,逃逸拒绝会拖垮宿主
     this.ready = this.initialize(facility).catch((err) => {
       this.openError = err
@@ -174,16 +214,73 @@ export class UsageStore {
     return this.readCursor() ?? {}
   }
 
+  // 同步合并进 pending,不等待持久化;崩溃丢失窗口 = flush 周期
   async record(sample) {
     await this.ready
-    const table = this.requireTable()
-    await this.pruneOncePerDay()
+    this.requireTable()
     const nowMs = this.now()
-    const outcomes = await Promise.allSettled(
-      GRANULARITIES.map(([g, bucketOf]) => this.recordRow(table, g, bucketOf(sample.time), sample, nowMs)),
-    )
-    const failures = outcomes.flatMap((outcome) => (outcome.status === 'rejected' ? [outcome.reason] : []))
-    if (failures.length > 0) throw new AggregateError(failures, 'usage store record failed')
+    const model = sample.turn ? MODEL_TURNS : sample.model ? sample.model : MODEL_UNKNOWN
+    const provider = sample.turn ? PROVIDER_UNSET : providerOf(model)
+    const delta = deltaOf(sample, nowMs)
+    for (const [g, bucketOf] of GRANULARITIES) {
+      const bucket = bucketOf(sample.time)
+      const entry = { ...delta, bucket, provider, model }
+      const existing = this.pending.get(rowKey(g, bucket, provider, model))
+      this.pending.set(rowKey(g, bucket, provider, model), existing ? addDelta(existing, entry) : entry)
+    }
+    this.scheduleFlush()
+  }
+
+  scheduleFlush() {
+    if (this.flushTimer !== undefined) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined
+      void this.flushNow()
+    }, this.flushIntervalMs)
+  }
+
+  // pending 批量落盘:每脏行一次原子读改写,失败的行并回 pending 下轮重试,
+  // 错误聚合后经 onFlushError 上抛;与游标写同链串行
+  flushNow() {
+    const run = this.markChain.then(async () => {
+      await this.ready
+      if (this.pending.size === 0) return
+      try {
+        await this.flushBatch()
+      } catch (err) {
+        this.onFlushError?.(err)
+      }
+    })
+    this.markChain = run.then(() => {}, () => {})
+    return run
+  }
+
+  async flushBatch() {
+    await this.pruneOncePerDay()
+    const table = this.requireTable()
+    const batch = this.pending
+    this.pending = new Map()
+    const outcomes = await Promise.allSettled([...batch].map(([key, delta]) => this.applyDelta(table, key, delta)))
+    const failures = outcomes.flatMap((outcome, index) => {
+      if (outcome.status !== 'rejected') return []
+      const key = [...batch.keys()][index]
+      const [entryKey, entry] = [key, batch.get(key)]
+      const existing = this.pending.get(entryKey)
+      this.pending.set(entryKey, existing ? addDelta(existing, entry) : entry)
+      return [outcome.reason]
+    })
+    if (failures.length > 0) throw new AggregateError(failures, 'usage store flush failed')
+  }
+
+  async applyDelta(table, key, delta) {
+    const apply = (current) => addDelta(current ?? emptyRow(delta.bucket, delta.provider, delta.model, delta.lastSeen), delta)
+    try {
+      await table.update(key, apply)
+    } catch (err) {
+      if (!isMissingRecord(err)) throw err
+      await table.put(key, emptyRow(delta.bucket, delta.provider, delta.model, delta.lastSeen))
+      await table.update(key, apply)
+    }
   }
 
   async pruneOncePerDay() {
@@ -221,33 +318,8 @@ export class UsageStore {
     }
   }
 
-  async recordRow(table, g, bucket, sample, nowMs) {
-    const model = sample.turn ? MODEL_TURNS : sample.model ? sample.model : MODEL_UNKNOWN
-    const provider = sample.turn ? PROVIDER_UNSET : providerOf(model)
-    const key = rowKey(g, bucket, provider, model)
-    const apply = (current) => {
-      const base = current ?? emptyRow(bucket, provider, model, nowMs)
-      if (sample.turn) return { ...base, turns: base.turns + 1, lastSeen: nowMs }
-      if (sample.request) return { ...base, requests: base.requests + 1, lastSeen: nowMs }
-      return {
-        ...base,
-        inputTokens: base.inputTokens + sample.inputTokens,
-        outputTokens: base.outputTokens + sample.outputTokens,
-        cacheReadTokens: base.cacheReadTokens + sample.cacheReadTokens,
-        cacheWriteTokens: base.cacheWriteTokens + sample.cacheWriteTokens,
-        lastSeen: nowMs,
-      }
-    }
-    try {
-      await table.update(key, apply)
-    } catch (err) {
-      if (!isMissingRecord(err)) throw err
-      await table.put(key, emptyRow(bucket, provider, model, nowMs))
-      await table.update(key, apply)
-    }
-  }
-
   async rangeRows(g, from, to) {
+    await this.flushNow()
     await this.ready
     const table = this.requireTable()
     const prefix = `${g}|`
@@ -296,6 +368,7 @@ export class UsageStore {
 
   reset(boundaries) {
     return this.enqueueGlobalWrite(async () => {
+      await this.flushBatch()
       const table = this.requireTable()
       for (const key of [...table.keys()]) await table.delete(key)
       const liveFirstSeq = {}

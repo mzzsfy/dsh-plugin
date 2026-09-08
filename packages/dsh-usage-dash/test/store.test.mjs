@@ -134,6 +134,7 @@ test('token 样本同刻落三粒度三行,行内无 g 字段', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   const keys = ['D|2026-08-02', 'H|2026-08-02T14', 'M|2026-08-02T14:30'].map(
     (prefix) => `${prefix}|deepseek|deepseek/deepseek-chat`,
   )
@@ -155,6 +156,7 @@ test('turn 样本落合成行:provider default 与 model (turns)', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record({ time: local(2026, 8, 2, 14, 37), turn: true })
+  await store.flushNow()
   const seen = domain.rows.get('D|2026-08-02|default|(turns)')
   assert.ok(seen)
   assert.equal(seen.turns, 1)
@@ -166,6 +168,7 @@ test('request 样本只计请求数,无归因落 (unknown)', async () => {
   const store = new UsageStore(facilityOf(domain))
   await store.record({ time: local(2026, 8, 2, 14, 37), request: true, model: 'deepseek-chat' })
   await store.record({ time: local(2026, 8, 2, 14, 38), request: true })
+  await store.flushNow()
   const labelled = domain.rows.get('D|2026-08-02|default|deepseek-chat')
   assert.ok(labelled)
   assert.equal(labelled.requests, 1)
@@ -179,23 +182,35 @@ test('missing-record 首写竞态:put 种子后重试写入真值', async () => 
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   assert.equal(domain.stats.puts, 3)
   const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
   assert.equal(seen.inputTokens, 10)
 })
 
-test('allSettled 聚合:单粒度失败上抛且其余粒度不丢', async () => {
+test('flush 中单粒度失败:错误经 onFlushError 上抛,失败行留 pending 重试,成功粒度落盘', async () => {
+  const failedKeys = new Set()
   const domain = fakeDomain({
-    failUpdate: (key) => (key.startsWith('H|') ? new Error('simulated hour failure') : null),
+    failUpdate: (key) => {
+      if (!key.startsWith('H|') || failedKeys.has(key)) return null
+      failedKeys.add(key)
+      return new Error('simulated hour failure')
+    },
   })
   const store = new UsageStore(facilityOf(domain))
-  await assert.rejects(
-    store.record(tokenSample(local(2026, 8, 2, 14, 37))),
-    (err) => err.name === 'AggregateError' && err.errors.length === 1,
-  )
+  const errors = []
+  store.onFlushError = (err) => errors.push(err)
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   assert.ok(domain.rows.has('D|2026-08-02|deepseek|deepseek/deepseek-chat'))
   assert.ok(domain.rows.has('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat'))
   assert.equal(domain.rows.has('H|2026-08-02T14|deepseek|deepseek/deepseek-chat'), false)
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].name, 'AggregateError')
+  assert.equal(errors[0].errors.length, 1)
+  await store.flushNow()
+  assert.ok(domain.rows.has('H|2026-08-02T14|deepseek|deepseek/deepseek-chat'))
 })
 
 test('非 missing 错误不触发种子重试', async () => {
@@ -204,11 +219,15 @@ test('非 missing 错误不触发种子重试', async () => {
     failUpdate: (candidate) => (candidate === key ? new Error('backend write failed') : null),
   })
   const store = new UsageStore(facilityOf(domain))
-  await assert.rejects(
-    store.record(tokenSample(local(2026, 8, 2, 14, 37))),
-    (err) => err.name === 'AggregateError' && /backend write failed/.test(err.errors[0].message),
-  )
+  const errors = []
+  store.onFlushError = (err) => errors.push(err)
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   assert.equal(domain.rows.has(key), false)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0].errors[0].message, /backend write failed/)
+  assert.equal(domain.stats.puts, 2)
 })
 
 test('rangeRows 按粒度前缀与桶串闭区间扫描', async () => {
@@ -283,19 +302,22 @@ test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async
   assert.equal(domain.rows.has('M|2026-07-25T00:00|a|m'), true)
 })
 
-test('每日本地日首次写入触发清理,同日后续写入不重复触发', async () => {
+test('每日本地日首次 flush 触发清理,同日后续 flush 不重复触发', async () => {
   let clock = local(2026, 8, 10, 12, 0)
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain), { now: () => clock, retentionDays: () => 0 })
   const table = domain.table()
   await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
   await store.record(tokenSample(local(2026, 8, 10, 12, 0)))
+  await store.flushNow()
   assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), false)
   await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
   await store.record(tokenSample(local(2026, 8, 10, 12, 1)))
+  await store.flushNow()
   assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), true)
   clock = local(2026, 8, 11, 0, 0)
   await store.record(tokenSample(local(2026, 8, 11, 0, 0)))
+  await store.flushNow()
   assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), false)
 })
 
@@ -394,4 +416,66 @@ test('globalThis 单例复用同实例,重置缝生效', () => {
   __resetSharedStoreForTests()
   assert.notEqual(sharedStore(facilityOf(fakeDomain())), first)
   __resetSharedStoreForTests()
+})
+
+// —— 写合并(write-behind):record 同步入 pending,flush 周期落盘 ——
+
+test('record 只入 pending 不产生持久化写,flushNow 后每脏行恰一次 update', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  assert.equal(domain.rows.size, 0)
+  await store.flushNow()
+  assert.equal(domain.rows.size, 3)
+  const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(seen.inputTokens, 10)
+})
+
+test('同桶多样本合并:pending 累加,一次 update 落全部计数', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.record(tokenSample(local(2026, 8, 2, 14, 38)))
+  await store.record(tokenSample(local(2026, 8, 2, 14, 39)))
+  await store.flushNow()
+  const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(seen.inputTokens, 30)
+  assert.equal(domain.stats.puts, 3)
+})
+
+test('flush 周期自动落盘', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain), { flushIntervalMs: 5 })
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(domain.rows.size, 3)
+})
+
+test('rangeRows 前自动 flush,读己之写', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  const rows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].inputTokens, 10)
+})
+
+test('reset 前 pending 先落盘再清表', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.reset(new Map())
+  assert.equal(domain.rows.size, 0)
+  assert.equal(domain.stats.puts, 3)
+})
+
+test('降级态 record 仍按调用失败', async () => {
+  const store = new UsageStore({ open: () => Promise.reject(new Error('domain already open')) })
+  await store.readyPromise()
+  await assert.rejects(store.record(tokenSample(local(2026, 8, 2, 14, 37))), /usage store degraded/)
 })

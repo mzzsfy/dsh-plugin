@@ -94,6 +94,10 @@ export class UsageCollector {
   constructor(ctx, store) {
     this.ctx = ctx
     this.store = store
+    // store 写合并周期落盘的失败行接入扫描异常日志,面板可观测
+    store.onFlushError = (error) => {
+      this.pushLog('record', error instanceof Error ? error.message : String(error))
+    }
     this.folds = new Map()
     this.routes = new Map()
     this.started = false
