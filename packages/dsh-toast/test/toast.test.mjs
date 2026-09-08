@@ -154,6 +154,18 @@ test('kind: error 合法直通', () => {
   assert.equal(mod.__test.getItems()[0].kind, 'error')
 })
 
+test('onClick:函数入栈携带,非函数剔除;activate 语义由消费方经快照 item 驱动', () => {
+  const mod = loadModule()
+  const hit = () => {}
+  mod.__test.show('可点', { onClick: hit })
+  mod.__test.show('不可点', { onClick: 'not-a-function' })
+  mod.__test.show('缺省')
+  const items = mod.__test.getItems()
+  assert.equal(items[0].onClick, hit)
+  assert.equal(items[1].onClick, undefined)
+  assert.equal(items[2].onClick, undefined)
+})
+
 test('纯空白 text 拒绝,非空白正常入栈', () => {
   const mod = loadModule()
   assert.equal(mod.__test.show('   '), null)

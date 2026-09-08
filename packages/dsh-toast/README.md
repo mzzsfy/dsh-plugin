@@ -40,7 +40,7 @@ toast('回合完成', { holdMs: 6 * 1000 })            // 自定义展示期
 
 ## API
 
-- `show(text, opts)` → `id`:入栈一条通知。`opts.kind` 为 `'info' | 'ok' | 'error'`(非法归 `info`,默认深色 / 成功绿 / 错误红);`opts.sticky` 真值常驻不自动消失,渲染「知道了」按钮;`opts.holdMs` 有限正值自定义展示期(默认 4 秒,非有限值或超出 setTimeout 钳位上界回落默认)。`text` 非字符串或纯空白时忽略并返回 `null`
+- `show(text, opts)` → `id`:入栈一条通知。`opts.kind` 为 `'info' | 'ok' | 'error'`(非法归 `info`,默认深色 / 成功绿 / 错误红);`opts.sticky` 真值常驻不自动消失,渲染「知道了」按钮;`opts.holdMs` 有限正值自定义展示期(默认 4 秒,非有限值或超出 setTimeout 钳位上界回落默认);`opts.onClick` 函数使整卡可点(带 pointer 样式),点击即触发回调并消失,「知道了」按钮显式关闭不连带触发。`text` 非字符串或纯空白时忽略并返回 `null`
 - `dismiss(id)`:移除指定条目并撤销其自动消失计时,幂等
 - `mount()`:显式挂载渲染容器(一般无需调用,首次 `show` 惰性自举)
 - `__test`:非公开 API,仅供本包测试驱动 store 消费,无兼容承诺,消费方禁用
@@ -51,6 +51,7 @@ toast('回合完成', { holdMs: 6 * 1000 })            // 自定义展示期
 - Given 栈内已有 4 条,When 再入栈一条,Then 最旧条目立即移除(含 sticky,新通知优先),被裁条目的自动消失计时同步撤销
 - Given `show(text, {sticky: true})`,Then 通知常驻,点「知道了」或 `dismiss(id)` 后消失
 - Given `kind: 'error'`,Then 红色变体渲染
+- Given `show(text, {onClick})`,Then 整卡可点,点击即消失并触发 `onClick`;Given 该条目另有 sticky,点「知道了」仅关闭不触发 `onClick`
 - Given 首次 `show`,Then 渲染容器与样式惰性挂载(容器直挂 body,不受设置页全屏层 z-index 遮挡)
 - Given HMR 重载产生同 id 旧容器,When 新代首次挂载,Then 旧容器移除、新容器就位;旧代闭包再调 `show`/`mount` 时发现在位容器属更新代际即退避,不拆新代容器
 - Given 容器在场而样式节点被外部移除,When 再次 `show`,Then 样式补挂(容器与样式同级自愈)

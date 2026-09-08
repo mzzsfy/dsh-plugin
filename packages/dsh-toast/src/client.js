@@ -36,6 +36,7 @@ window.__ModuleLoader__.load({
       '  animation:dsh-toast-in 0.18s ease-out; max-width:520px; max-height:60vh; overflow:auto; overflow-wrap:anywhere; display:flex; align-items:safe center; gap:10px; }',
       '.dsh-toast--ok { background:var(--dsw-alias-state-success-primary, #1a7f37); color:var(--dsw-alias-label-primary-inverted, #fff); }',
       '.dsh-toast--error { background:var(--dsw-alias-state-error-primary, #d93025); color:#fff; }',
+      '.dsh-toast--click { cursor:pointer; }',
       '.dsh-toast__close { border:0; background:transparent; cursor:pointer; color:inherit;',
       '  font:var(--dsw-font-xs-strong-13, 13px system-ui, sans-serif); padding:0 2px; opacity:.8; }',
       '.dsh-toast__close:hover { opacity:1; }',
@@ -91,7 +92,8 @@ window.__ModuleLoader__.load({
     function show(text, opts) {
       if (typeof text !== 'string' || text.trim() === '') return null
       const sticky = Boolean(opts && opts.sticky)
-      const entry = { id: ++seq, text, kind: normalizeKind(opts && opts.kind), sticky, timer: undefined }
+      const onClick = typeof (opts && opts.onClick) === 'function' ? opts.onClick : undefined
+      const entry = { id: ++seq, text, kind: normalizeKind(opts && opts.kind), sticky, onClick, timer: undefined }
       const merged = items.concat(entry)
       if (merged.length > TOAST_MAX) {
         for (const dropped of merged.slice(0, merged.length - TOAST_MAX)) clearTimer(dropped)
@@ -179,10 +181,22 @@ window.__ModuleLoader__.load({
 
     function ToastItem(props) {
       const item = props.item
-      return h('div', { className: 'dsh-toast dsh-toast--' + item.kind, role: 'alert' },
+      // 携带 onClick 的条目整卡可点:触发回调并消失;「知道了」按钮先阻断冒泡,
+      // 显式关闭不得连带触发直达动作
+      const activate = item.onClick === undefined
+        ? undefined
+        : () => { dismiss(item.id); item.onClick() }
+      return h('div', {
+        className: 'dsh-toast dsh-toast--' + item.kind + (activate !== undefined ? ' dsh-toast--click' : ''),
+        role: 'alert',
+        onClick: activate,
+      },
         h('span', null, item.text),
         item.sticky
-          ? h('button', { className: 'dsh-toast__close', onClick: () => dismiss(item.id) }, '知道了')
+          ? h('button', {
+              className: 'dsh-toast__close',
+              onClick: (event) => { event.stopPropagation(); dismiss(item.id) },
+            }, '知道了')
           : null,
       )
     }
