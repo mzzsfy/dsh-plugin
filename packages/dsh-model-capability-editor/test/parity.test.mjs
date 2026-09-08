@@ -20,8 +20,9 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE, INPUT_MODES,'
+      + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE, INPUT_IMAGE, INPUT_MODES,'
       + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
+      + ' invalidReasoningLevels, fillDrafts,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
       + ' anchorsBroken, resolveTargetId, unwrapResult, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
       + ' writeModels, saveModels, draftsFromModels };',
@@ -40,11 +41,12 @@ test('parity: 共享常量双副本一致', () => {
   assert.equal(C.INPUT_UNSET, logic.INPUT_UNSET)
   assert.equal(C.INPUT_TEXT, logic.INPUT_TEXT)
   assert.equal(C.INPUT_TEXT_IMAGE, logic.INPUT_TEXT_IMAGE)
+  assert.equal(C.INPUT_IMAGE, logic.INPUT_IMAGE)
   assert.deepEqual(C.INPUT_MODES, logic.INPUT_MODES)
 })
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId, invalidReasoningLevels, fillDrafts } = L
 
   test(prefix + '竞品痕迹:标记字段命中与非对象条目跳过', () => {
     assert.deepEqual(
@@ -131,14 +133,61 @@ function defineScenarios(prefix, L) {
     )
   })
 
-  test(prefix + 'input 三态映射', () => {
-    assert.equal(inputToMode(undefined), 'unset')
-    assert.equal(inputToMode([]), 'unset')
-    assert.equal(inputToMode(['text']), 'text')
-    assert.equal(inputToMode(['text', 'image']), 'text-image')
-    assert.deepEqual(modeToInput('text'), ['text'])
-    assert.deepEqual(modeToInput('text-image'), ['text', 'image'])
-    assert.equal(modeToInput('unset'), undefined)
+  test(prefix + 'input 四态映射:未声明/文本/双模态/纯图像/未知成员数组', () => {
+    const { INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE, INPUT_IMAGE } = L
+    assert.equal(inputToMode(undefined), INPUT_UNSET)
+    assert.equal(inputToMode([]), INPUT_UNSET)
+    assert.equal(inputToMode(['text']), INPUT_TEXT)
+    assert.equal(inputToMode(['text', 'image']), INPUT_TEXT_IMAGE)
+    assert.equal(inputToMode(['image']), INPUT_IMAGE, '仅 image 无 text 为纯图像')
+    assert.equal(inputToMode(['audio']), INPUT_UNSET, '未知成员数组按 schema 未回答处理')
+    assert.deepEqual(modeToInput(INPUT_TEXT), ['text'])
+    assert.deepEqual(modeToInput(INPUT_TEXT_IMAGE), ['text', 'image'])
+    assert.deepEqual(modeToInput(INPUT_IMAGE), ['image'])
+    assert.equal(modeToInput(INPUT_UNSET), undefined)
+  })
+
+  test(prefix + '保存前校验:非 off 勾选空拼写即违规,off 与未勾选不参与', () => {
+    const { invalidReasoningLevels } = L
+    assert.deepEqual(invalidReasoningLevels({ checked: {}, spellings: {} }), [])
+    assert.deepEqual(
+      invalidReasoningLevels({ checked: { low: true, high: true }, spellings: { low: 'u', high: '' } }),
+      ['high'],
+      '混合场景只报空拼写的档位',
+    )
+    assert.deepEqual(
+      invalidReasoningLevels({ checked: { low: true }, spellings: { low: '   ' } }),
+      ['low'],
+      '纯空白拼写按空处理',
+    )
+    assert.deepEqual(
+      invalidReasoningLevels({ checked: { off: true }, spellings: { off: '' } }),
+      [],
+      'off 留空有 false/off:null 语义,不参与校验',
+    )
+  })
+
+  test(prefix + '一键草稿填充:只补未声明模型,已声明模型与 inputMode 不动', () => {
+    const { fillDrafts, draftsFromModels } = L
+    const models = [
+      { id: 'fresh', name: '未声明' },
+      { id: 'declared', reasoningEfforts: { low: 'low' } },
+    ]
+    const drafts = draftsFromModels(models)
+    const filled = fillDrafts(drafts, models)
+    const fresh = filled.get('fresh')
+    assert.equal(fresh.checked.off, true)
+    assert.equal(fresh.checked.max, true, '七档全勾')
+    assert.deepEqual(fresh.spellings, {}, '拼写留空 = 线上值取档位名')
+    assert.equal(fresh.inputMode, 'unset', 'inputMode 不动')
+    assert.equal(filled.get('declared').checked.low, true)
+    assert.equal(filled.get('declared').checked.high, undefined, '已声明模型不被填充')
+    assert.equal(filled.get('declared').spellings.low, 'low', '已声明模型的拼写保留')
+    // 原 Map 不被原地修改(内存草稿填充可撤销:重载即回)
+    assert.equal(drafts.get('fresh').checked.off, undefined)
+    // 空档基线上的低风险幂等:再填一次无变化
+    const again = fillDrafts(filled, models)
+    assert.equal(again.get('fresh') === filled.get('fresh'), true)
   })
 
   test(prefix + '合并:有草稿条目重写两字段,其余原样保留;孤儿草稿可观测', () => {

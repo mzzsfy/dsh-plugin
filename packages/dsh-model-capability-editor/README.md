@@ -22,7 +22,9 @@ DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方�
   | off 勾选拼写留空,存在其他勾选档 | 对象形态 `off: null` |
   | off 勾选拼写填值 | 对象形态 `off: "拼写"` |
 
-- input 三态:未声明(删除字段)/ 仅文本(`["text"]`)/ 文本+图像(`["text", "image"]`)。
+- input 四态:未声明(删除字段)/ 仅文本(`["text"]`)/ 文本+图像(`["text", "image"]`)/ 仅图片(`["image"]`,纯视觉网关不收文本输入)。
+- 保存前本地校验:非 off 档勾选但拼写空白时拒绝保存并提示具体模型与档位(空白拼写会静默以档位名作线上值,易被误当作已填;off 档留空有专门语义,不参与校验)。卡片与行内编辑块均拦截。
+- 一键草稿填充:卡片底部「填充草稿」对当前 provider 内未声明任何档位的模型填入七档全勾、拼写留空(线上值=档位名)的草稿;只改内存草稿,不触碰 inputMode,已声明档位的模型不受影响,写回仍需手动保存。
 - 保存 = mutate set `providers.<route>.models` 整个数组:以 describe 读到的数组为基线,未编辑条目原样保留,settings 未声明的(自动发现的)模型不被删除;providers 缺失或 models 非数组时拒绝保存(防静默覆写为空数组)。
 - 修订冲突:重读 describe 取新 revision,按字段级 diff 仅重放本次修改(仅用户改过的模型条目的 `reasoningEfforts` / `input` 两字段,其余字段保留最新文档值),重试一次;再冲突报错终止并保留用户输入,绝不静默覆盖。"本次修改"以草稿加载时点冻结的种子为参照:加载后他方对基线的修改,不会被零编辑或仅改单一字段的保存静默回滚(该保证覆盖保存开始后的并发写,revision 乐观锁语义)。
 - `settings` wire 面缺失 / describe 失败 / `writable === false`:卡片显示具体原因并只读,绝不静默;describe 返回缺 revision 时拒绝盲写。
@@ -61,7 +63,7 @@ dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 npm test
 ```
 
-纯逻辑层单测(node --test,无外部依赖):档位四态判定表与拼写回填、input 三态、整组写回基线合并、冲突字段级重放与一次重试判定、竞品痕迹检测、wire 信封适配(含 transport 抛错透传)与端到端冲突重放、client.js 与 logic.mjs 的 wire 适配段同源守卫,以及锚点判定与行内目标解析、注入编排与生命周期、开关守卫、client id 等其余模块测试。
+纯逻辑层单测(node --test,无外部依赖):档位四态判定表与拼写回填、input 四态(含纯图像)、保存前空拼写校验、一键草稿填充、整组写回基线合并、冲突字段级重放与一次重试判定、竞品痕迹检测、wire 信封适配(含 transport 抛错透传)与端到端冲突重放、client.js 与 logic.mjs 的 wire 适配段同源守卫,以及锚点判定与行内目标解析、注入编排与生命周期、开关守卫、client id 等其余模块测试。
 
 ## License
 
