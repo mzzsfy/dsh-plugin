@@ -161,7 +161,8 @@ const MESSAGES_ZH = {
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
   skippedSessions: '跳过 {n} 个无法读取的会话',
-  skippedSessionsShort: '跳过 {n} 个会话',
+  skippedSessionsShort: '跳过 {n}',
+  recordFailuresShort: '写入失败 {n}',
   'stats.counts': '{turns} 轮 · {steps} 步',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': '工具调用 {duration}',
@@ -285,6 +286,7 @@ const MESSAGES_EN = {
   recordFailures: '{n} records failed to write',
   skippedSessions: '{n} unreadable sessions skipped',
   skippedSessionsShort: '{n} skipped',
+  recordFailuresShort: '{n} failed',
   'stats.counts': '{turns} turns · {steps} steps',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': 'Tool call {duration}',
@@ -1457,7 +1459,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 --dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
 --dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe}
-.ud-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ud-toolbar{display:flex;align-items:flex-start;gap:8px}
+.ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
 .ud-seg-item{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
 .ud-seg-item:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
@@ -1468,7 +1471,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-btn{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:5px 14px;font-size:12px;line-height:1;cursor:pointer}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-btn:disabled{opacity:.5;cursor:default}
-.ud-toolbar-side{margin-left:auto;display:flex;align-items:center;gap:8px}
+.ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
 .ud-error{border:1px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:8px;padding:8px 12px;font-size:12px}
 .ud-loading{color:var(--dsw-alias-label-tertiary);text-align:center;padding:32px 0}
@@ -2296,21 +2299,24 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addRule')))
     }
 
-    // 无法读取是日志固有损伤,提示用中性色不算错误:默认折叠为紧凑标识,展开才显示完整说明
-    function SkippedChip({ count, open, onToggle, t = defaultT }) {
+    // 无法读取与写入失败是扫描固有损伤提示:默认折叠为紧凑标识,展开才显示完整明细
+    function AnomalyChip({ status, open, onToggle, t = defaultT }) {
+      const parts = []
+      if ((status.skippedSessions ?? 0) > 0) parts.push(t('skippedSessionsShort', { n: status.skippedSessions }))
+      if ((status.recordFailures ?? 0) > 0) parts.push(t('recordFailuresShort', { n: status.recordFailures }))
       return h('button', {
         type: 'button', className: 'ud-status-fold', 'aria-expanded': open,
         onClick: onToggle,
       },
       h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
-      t('skippedSessionsShort', { n: count }))
+      parts.join(' · '))
     }
 
-    function StatusLine({ status, showSkipped, t = defaultT }) {
+    function StatusLine({ status, showDetails, t = defaultT }) {
       if (!status) return null
       const running = status.running === true
-      const skippedVisible = (status.skippedSessions ?? 0) > 0 && showSkipped === true
-      if (!running && !status.error && (status.recordFailures ?? 0) === 0 && !skippedVisible) return null
+      const detailVisible = showDetails === true
+      if (!running && !status.error && !detailVisible) return null
       const progress = running && status.total > 0
         ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
         : 0
@@ -2322,8 +2328,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
           : null,
         status.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
-        skippedVisible ? h('span', null, t('skippedSessions', { n: status.skippedSessions })) : null,
-        (status.recordFailures ?? 0) > 0
+        detailVisible && (status.skippedSessions ?? 0) > 0
+          ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+          : null,
+        detailVisible && (status.recordFailures ?? 0) > 0
           ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
           : null)
     }
@@ -2377,7 +2385,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [pointStatus, setPointStatus] = useState('idle')
       const [fetchTick, setFetchTick] = useState(0)
       const [status, setStatus] = useState(null)
-      const [skippedOpen, setSkippedOpen] = useState(false)
+      const [detailsOpen, setDetailsOpen] = useState(false)
       const statusMachineRef = useRef(null)
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
@@ -2543,58 +2551,60 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const busy = pointActive ? pointStatus === 'loading' : loading
       const loadingVisible = pointActive ? pointStatus === 'loading' && !pointView : loading && !stats
       const emptyVisible = !error && (pointActive ? pointView && isEmptyRange(pointView) : stats && isEmptyRange(stats))
+      const hasAnomalies = (status?.skippedSessions ?? 0) > 0 || (status?.recordFailures ?? 0) > 0
 
       return h('div', { className: 'ud-panel', ref: panelRef },
         h('div', { className: 'ud-toolbar' },
-          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
-            VIEW_TABS.map((tab) => h('button', {
-              key: tab.id,
-              className: cx('ud-seg-item', view === tab.id && 'ud-seg-item--on'),
-              'aria-pressed': view === tab.id,
-              onClick: () => setView(tab.id),
-            }, viewLabel(t, tab.id)))),
-          pointActive
-            ? h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
-                (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
-                  key: id,
-                  className: cx('ud-seg-item', presetId === id && 'ud-seg-item--on'),
-                  'aria-pressed': presetId === id,
-                  onClick: () => (view === 'hour' ? setHourPreset(id) : setMinutePreset(id)),
-                }, presetLabel(t, view, id))))
-            : h(React.Fragment, null,
-                h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
-                  DAY_PRESETS.map((id) => h('button', {
+          h('div', { className: 'ud-toolbar-main' },
+            h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
+              VIEW_TABS.map((tab) => h('button', {
+                key: tab.id,
+                className: cx('ud-seg-item', view === tab.id && 'ud-seg-item--on'),
+                'aria-pressed': view === tab.id,
+                onClick: () => setView(tab.id),
+              }, viewLabel(t, tab.id)))),
+            pointActive
+              ? h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
+                  (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
                     key: id,
-                    className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
-                    'aria-pressed': range === id,
-                    onClick: () => setRange(id),
-                  }, t(`rangePreset.${id}`))),
-                  h('button', {
-                    className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
-                    'aria-pressed': range === 'custom',
-                    onClick: () => setRange('custom'),
-                  }, t('rangeCustom'))),
-                range === 'custom'
-                  ? h('div', { className: 'ud-custom-range' },
-                      h('input', {
-                        type: 'date', className: 'ud-date-input', 'aria-label': t('from'),
-                        value: customFrom, max: customTo || undefined,
-                        onChange: (event) => setCustomFrom(event.target.value),
-                      }),
-                      h('span', { className: 'ud-custom-sep' }, '–'),
-                      h('input', {
-                        type: 'date', className: 'ud-date-input', 'aria-label': t('to'),
-                        value: customTo, min: customFrom || undefined, max: dayBucket(new Date()),
-                        onChange: (event) => setCustomTo(event.target.value),
-                      }))
-                  : null),
+                    className: cx('ud-seg-item', presetId === id && 'ud-seg-item--on'),
+                    'aria-pressed': presetId === id,
+                    onClick: () => (view === 'hour' ? setHourPreset(id) : setMinutePreset(id)),
+                  }, presetLabel(t, view, id))))
+              : h(React.Fragment, null,
+                  h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
+                    DAY_PRESETS.map((id) => h('button', {
+                      key: id,
+                      className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
+                      'aria-pressed': range === id,
+                      onClick: () => setRange(id),
+                    }, t(`rangePreset.${id}`))),
+                    h('button', {
+                      className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
+                      'aria-pressed': range === 'custom',
+                      onClick: () => setRange('custom'),
+                    }, t('rangeCustom'))),
+                  range === 'custom'
+                    ? h('div', { className: 'ud-custom-range' },
+                        h('input', {
+                          type: 'date', className: 'ud-date-input', 'aria-label': t('from'),
+                          value: customFrom, max: customTo || undefined,
+                          onChange: (event) => setCustomFrom(event.target.value),
+                        }),
+                        h('span', { className: 'ud-custom-sep' }, '–'),
+                        h('input', {
+                          type: 'date', className: 'ud-date-input', 'aria-label': t('to'),
+                          value: customTo, min: customFrom || undefined, max: dayBucket(new Date()),
+                          onChange: (event) => setCustomTo(event.target.value),
+                        }))
+                    : null)),
           h('div', { className: 'ud-toolbar-side' },
-            (status?.skippedSessions ?? 0) > 0
-              ? h(SkippedChip, { count: status.skippedSessions, open: skippedOpen, onToggle: () => setSkippedOpen((v) => !v), t })
+            hasAnomalies
+              ? h(AnomalyChip, { status, open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t })
               : null,
             h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: refresh }, t('refresh')),
             h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t }))),
-        h(StatusLine, { status, showSkipped: skippedOpen, t }),
+        h(StatusLine, { status, showDetails: detailsOpen, t }),
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
