@@ -1384,8 +1384,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-model-provider{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
 .ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary)}
-.ud-model-cost{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.ud-model-cost{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .ud-model-toggle{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;transition:transform .2s ease}
 .ud-model-toggle[aria-expanded="true"]{transform:rotate(90deg)}
 .ud-model-toggle:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);border-radius:4px}
@@ -1781,10 +1781,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     : null,
                   h('div', { className: 'ud-model-values' },
                     h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
-                    h('span', { className: 'ud-model-pct' }, formatPercent((item.tokens / total) * PERCENT_SCALE)),
-                    item.cost !== undefined
-                      ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)}`)
-                      : null)),
+                    h('span', { className: 'ud-model-pct' },
+                      item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
+                      formatPercent((item.tokens / total) * PERCENT_SCALE)))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },
@@ -1936,18 +1935,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
-    function PricingRuleCard({ rule, errors, pathPrefix, t, onPatch, onRemove }) {
+    function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
       }
       const priceField = (key, labelKey) => h('label', { key, className: 'ud-field' },
         h('span', { className: 'ud-field-label' }, t(labelKey)),
-        h('input', {
-          type: 'number', className: 'ud-input', min: 0, step: 'any',
-          value: rule.price?.[key] ?? '',
-          onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
-        }),
+        h('span', { className: 'ud-price-input' },
+          h('span', { className: 'ud-price-currency', 'aria-hidden': 'true' }, currency),
+          h('input', {
+            type: 'number', className: 'ud-input', min: 0, step: 'any',
+            value: rule.price?.[key] ?? '',
+            onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
+          })),
         errorTextOf(`${pathPrefix}price.${key}`))
       return h('div', { className: 'ud-rule' },
         h('div', { className: 'ud-rule-head' },
