@@ -30,7 +30,8 @@ function stubRunner() {
 
 async function makeScheduler(t, { maxConcurrent = 2 } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-sched-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  // Windows 下并行测试时 Defender/索引器短暂锁目录,rmdir 报瞬态 EBUSY,有界重试消解
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
   const store = await createStore({ dir })
   const logger = createLogger({ rootDir: join(dir, 'logs') })
   const runner = stubRunner()
