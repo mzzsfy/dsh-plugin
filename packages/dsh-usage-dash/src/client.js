@@ -13,7 +13,7 @@ const MINUTE_PRESET_MINUTES = { '3h': 3 * 60, '24h': 24 * 60, '3d': 3 * 24 * 60,
 
 const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
-const DEFAULT_MINUTE_PRESET = '60m'
+const DEFAULT_MINUTE_PRESET = '24h'
 
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
@@ -126,6 +126,8 @@ const MESSAGES_ZH = {
   cacheRateHint: '时间段内缓存命中 token 占输入 token 的比例',
   cacheHitRate: '缓存命中率',
   hitRateLegend: '缓存命中率',
+  avgSpeed: '平均生成速度',
+  speedLegend: '平均生成速度',
   topModel: '最常用模型',
   topModelHint: '按 token 用量排序,非调用次数',
   heatmap: '活跃热力图',
@@ -251,6 +253,8 @@ const MESSAGES_EN = {
   cacheRateHint: 'Cache-hit tokens as a share of input tokens within the range',
   cacheHitRate: 'Cache-hit rate',
   hitRateLegend: 'Cache-hit rate',
+  avgSpeed: 'Avg speed',
+  speedLegend: 'Avg speed',
   topModel: 'Top model',
   topModelHint: 'Ranked by token usage, not call count',
   heatmap: 'Activity heatmap',
@@ -383,13 +387,15 @@ function formatCompact(value) {
 function formatPercent(value) {
   return (Math.round(value * 10) / 10).toFixed(1) + '%'
 }
+// tooltip 数值缺席占位
+const TOOLTIP_MISSING = '—'
 function cacheRate(hit, miss) {
   const total = hit + miss
   return total <= 0 ? null : (hit / total) * 100
 }
 function cacheRateText(hit, miss) {
   const rate = cacheRate(hit, miss)
-  return rate === null ? '—' : formatPercent(rate)
+  return rate === null ? TOOLTIP_MISSING : formatPercent(rate)
 }
 
 // 模型键展示分段与定价/存储口径同源:首个 / 前 vendor 段,余为模型段
@@ -415,6 +421,15 @@ function hourTickLabel(key) {
 function minuteTickLabel(key) {
   const time = key.slice(DAY_KEY_LENGTH + 1)
   return time === MIDNIGHT_TIME ? `${shortDay(key.slice(0, DAY_KEY_LENGTH))} ${time}` : time
+}
+
+// 悬浮窗槽标签:完整日期去 T 分隔,小时以 h 后缀标定(避免 i18n 单位问题),分钟保留 HH:MM
+function hourSlotLabel(key) {
+  return `${key.slice(0, DAY_KEY_LENGTH)} ${key.slice(DAY_KEY_LENGTH + 1)}h`
+}
+
+function minuteSlotLabel(key) {
+  return `${key.slice(0, DAY_KEY_LENGTH)} ${key.slice(DAY_KEY_LENGTH + 1)}`
 }
 
 function isEmptyRange(value) {
@@ -488,6 +503,13 @@ const BAR_WIDTH_RATIO = 0.62
 const BAR_MIN_WIDTH = 3
 const BAR_MAX_WIDTH = 30
 const AXIS_TICK_COUNT = 4
+// 速度刻度上限钳底:全零或无速度防除零(速度不设轴,读数走 tooltip)
+const SPEED_SCALE_FLOOR = 1
+// 轴上限留白系数:数据峰不顶满绘图区,顶部留出标注空间
+const AXIS_SCALE_HEADROOM = 1.1
+// 图例键:折线项与模型项共处同一显隐集合
+const LEGEND_KEY_RATE = 'rate'
+const LEGEND_KEY_SPEED = 'speed'
 
 function niceTicks(max, count) {
   if (max <= 0 || count <= 0) return []
@@ -500,14 +522,43 @@ function niceTicks(max, count) {
   return ticks
 }
 
-// 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度
+// 图例显隐切换:current 为 null 表示全部可见;普通点击单选/再点恢复,
+// ctrl 单项切换,隐藏最后一项为无操作(返回原引用)
+function legendToggle(current, key, ctrl) {
+  if (ctrl) {
+    const next = new Set(current ?? [])
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    return next.size === 0 ? current : next
+  }
+  const solo = current !== null && current.size === 1 && current.has(key)
+  return solo ? null : new Set([key])
+}
+
+// 左轴刻度:速度刻度存在时左轴标定速度(tok/s),否则标定 token;
+// 刻度值统一换算为绘图区高度占比
+function leftAxisTicks(tokenTicks, tokenMax, speedTicks, speedMax) {
+  const useSpeed = speedTicks.length > 0
+  return (useSpeed ? speedTicks : tokenTicks).map((tick) => ({
+    label: formatCompact(tick),
+    ratio: tick / (useSpeed ? speedMax : tokenMax),
+  }))
+}
+
+// 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度;
+// maxTotal 按可见模型求和,单选模型时刻度跟随归一
 function trendLayout(slots, modelOrder, avail, labelMinPitch) {
   const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
   const innerWidth = Math.max(1, avail - CHART_PAD.left - CHART_PAD.right)
   const count = slots.length
   const step = count > 1 ? innerWidth / (count - 1) : innerWidth
   const barWidth = Math.max(BAR_MIN_WIDTH, Math.min(BAR_MAX_WIDTH, step * BAR_WIDTH_RATIO))
-  const maxTotal = Math.max(1, ...slots.map((slot) => slot.total))
+  const slotVisibleTotal = (slot) => modelOrder.reduce((sum, model) => sum + (slot.byModel[model] ?? 0), 0)
+  const maxTotal = Math.max(1, ...slots.map(slotVisibleTotal))
+  // 轴上限 = 数据峰 × 留白系数,柱高分母与左轴刻度分母同源
+  const scaleMax = maxTotal * AXIS_SCALE_HEADROOM
+  // 可见模型无任何数据时左轴无标定对象,空刻度防钳底值漏成假刻度
+  const visibleTotal = slots.reduce((sum, slot) => sum + slotVisibleTotal(slot), 0)
   const bars = slots.map((slot, index) => {
     const centerX = CHART_PAD.left + barWidth / 2 + index * step
     let yBottom = CHART_PAD.top + plotHeight
@@ -515,7 +566,7 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
     for (const model of modelOrder) {
       const tokens = slot.byModel[model] ?? 0
       if (tokens === 0) continue
-      const height = (tokens / maxTotal) * plotHeight
+      const height = (tokens / scaleMax) * plotHeight
       yBottom -= height
       segments.push({ model, y: yBottom, height })
     }
@@ -528,7 +579,8 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
     step,
     barWidth,
     maxTotal,
-    ticks: niceTicks(maxTotal, AXIS_TICK_COUNT),
+    scaleMax,
+    ticks: visibleTotal === 0 ? [] : niceTicks(maxTotal, AXIS_TICK_COUNT),
     labelEvery: Math.max(1, Math.ceil(labelMinPitch / step)),
     bars,
   }
@@ -555,6 +607,20 @@ function trendRatePoints(slots, bars, plotHeight) {
       day: slot.day,
       x: bars[index].x,
       y: CHART_PAD.top + plotHeight - (rate / PERCENT_SCALE) * plotHeight,
+    })
+  })
+  return points
+}
+
+// 速度曲线点:仅带速度槽产出,高度按刻度上限归一
+function trendSpeedPoints(slots, bars, plotHeight, scaleMax) {
+  const points = []
+  slots.forEach((slot, index) => {
+    if (slot.speed === undefined) return
+    points.push({
+      day: slot.day,
+      x: bars[index].x,
+      y: CHART_PAD.top + plotHeight - (slot.speed / scaleMax) * plotHeight,
     })
   })
   return points
@@ -617,6 +683,16 @@ function modelSegmentLabel(name, tokens, percent) {
 function modelSpeedText(speed) {
   if (speed === undefined) return ''
   return `${formatTokensPerSecond(speed)} tok/s`
+}
+
+// tooltip 速度行文本:无速度与命中率同款占位符
+function speedTipText(speed) {
+  return speed === undefined ? TOOLTIP_MISSING : modelSpeedText(speed)
+}
+
+// 速度刻度上限:全零或无速度钳底,防除零
+function speedScaleMax(slots) {
+  return Math.max(SPEED_SCALE_FLOOR, ...slots.map((slot) => slot.speed ?? 0))
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -1473,9 +1549,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STYLE_CSS = `
 .ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
---dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff}
+--dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff;--ud-trend-speed:#0ca678}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
---dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe}
+--dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe;--ud-trend-speed:#2fbf8f}
 .ud-toolbar{display:flex;align-items:flex-start;gap:8px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
@@ -1535,7 +1611,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-grid{stroke:var(--dsw-alias-border-l1);stroke-width:1}
 .ud-axis{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums}
 .ud-legend{display:flex;flex-wrap:wrap;gap:4px 12px}
-.ud-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0}
+.ud-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0;user-select:none;cursor:pointer}
+.ud-legend-item--off{opacity:.35}
 .ud-legend-item span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-legend-swatch{width:8px;height:8px;border-radius:2px;flex:none}
 .ud-heat-wrap{width:100%;min-width:0;overflow:hidden}
@@ -1558,8 +1635,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-bar{transform-box:fill-box;transform-origin:center}
 .ud-bar-hit{fill:transparent;pointer-events:all}
 .ud-trend{stroke:var(--ud-trend-line);opacity:.9;fill:none;pointer-events:none}
+.ud-trend--speed{stroke:var(--ud-trend-speed)}
 .ud-trend-dot{fill:var(--ud-trend-line);stroke:var(--dsw-alias-bg-layer-1);stroke-width:${TREND_DOT_RING}px;pointer-events:none}
+.ud-trend-dot--speed{fill:var(--ud-trend-speed)}
 .ud-legend-swatch--line{height:2px;border-radius:1px;background:var(--ud-trend-line)}
+.ud-legend-swatch--line--speed{background:var(--ud-trend-speed)}
 .ud-model-usage{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px}
 .ud-donut-wrap{flex:0 0 auto}
 .ud-donut-seg{cursor:pointer;outline:none;transition:stroke-width .12s ease}
@@ -1701,14 +1781,22 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h(FitText, null, String(stats.activeDays))))
     }
 
-    function Legend({ models, colorFor, t = defaultT }) {
+    function Legend({ models, colorFor, speedEnabled = false, isVisible, onItem, t = defaultT }) {
+      const itemProps = (key) => ({
+        className: cx('ud-legend-item', isVisible && !isVisible(key) && 'ud-legend-item--off'),
+        onClick: onItem ? (event) => onItem(key, event.ctrlKey || event.metaKey) : undefined,
+        role: onItem ? 'button' : undefined,
+      })
       return h('div', { className: 'ud-legend' },
-        models.map((item) => h('span', { key: item.model, className: 'ud-legend-item', title: item.model === OTHER_MODEL ? t('other') : item.model },
+        models.map((item) => h('span', { key: item.model, title: item.model === OTHER_MODEL ? t('other') : item.model, ...itemProps(item.model) },
           h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
           h('span', null, item.model === OTHER_MODEL ? t('other') : item.model))),
-        h('span', { key: 'hit-rate', className: 'ud-legend-item', title: t('hitRateLegend') },
+        h('span', { key: 'hit-rate', title: t('hitRateLegend'), ...itemProps(LEGEND_KEY_RATE) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line' }),
-          h('span', null, t('hitRateLegend'))))
+          h('span', null, t('hitRateLegend'))),
+        speedEnabled ? h('span', { key: 'speed', title: t('speedLegend'), ...itemProps(LEGEND_KEY_SPEED) },
+          h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--speed' }),
+          h('span', null, t('speedLegend'))) : null)
     }
 
     const colorForModel = (models) => (model) => {
@@ -1718,10 +1806,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, t = defaultT }) {
+    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, t = defaultT }) {
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
+      // 图例显隐:null = 全部可见;键集 = 模型项与折线项(rate/speed)
+      const [visibleKeys, setVisibleKeys] = useState(null)
       // prefs 仅用于 hover tooltip 的费用显隐,经 ref 读取:开关切换不触发本组件重渲染,
       // 避免宿主设置弹窗滚动锚定被重渲染扰动而跳变
       const prefsRef = useRef(statsLineState.get())
@@ -1735,11 +1825,23 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         observer.observe(element)
         return () => observer.disconnect()
       }, [])
-      const layout = trendLayout(slots, modelOrder, avail, labelMinPitch)
+      const hasSpeed = slots.some((slot) => slot.speed !== undefined)
+      const visibleSet = visibleKeys ?? new Set([...modelOrder, LEGEND_KEY_RATE, ...(hasSpeed ? [LEGEND_KEY_SPEED] : [])])
+      const visibleModels = modelOrder.filter((model) => visibleSet.has(model))
+      const showRate = visibleSet.has(LEGEND_KEY_RATE)
+      const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
+      const layout = trendLayout(slots, visibleModels, avail, labelMinPitch)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
+      const speedMax = speedScaleMax(slots)
+      const speedAxisMax = speedMax * AXIS_SCALE_HEADROOM
+      const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedAxisMax) : []
+      // 左轴标定:可见柱有数据标 token;无柱数据且速度线可见标速度(tok/s);否则空
+      const speedAxisTicks = layout.ticks.length === 0 && showSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []
+      const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax)
       const hoverSlot = hover ? slots[hover.index] : null
-      const hoverRatePoint = hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
+      const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
+      const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
       const clear = () => setHover(null)
       const otherEntries = hoverSlot
@@ -1754,13 +1856,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             className: 'ud-chart', viewBox: `0 0 ${avail} ${CHART_HEIGHT}`, width: '100%', role: 'img',
             'aria-label': title, onMouseLeave: clear,
           },
-            layout.ticks.map((tick) => {
-              const y = CHART_PAD.top + layout.plotHeight - (tick / layout.maxTotal) * layout.plotHeight
-              return h('g', { key: tick },
+            yTicks.map((tick) => {
+              const y = CHART_PAD.top + layout.plotHeight - tick.ratio * layout.plotHeight
+              return h('g', { key: tick.label },
                 h('line', { className: 'ud-grid', x1: CHART_PAD.left, x2: plotRight, y1: y, y2: y }),
-                h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, formatCompact(tick)))
+                h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, tick.label))
             }),
-            rateAxisTicks().map((tick) => {
+            speedAxisTicks.length > 0
+              ? h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: CHART_PAD.top + AXIS_LABEL_BASELINE, textAnchor: 'end' }, 'tok/s')
+              : null,
+            (showRate ? rateAxisTicks() : []).map((tick) => {
               const y = CHART_PAD.top + layout.plotHeight - (tick / PERCENT_SCALE) * layout.plotHeight
               return h('text', {
                 key: `rate-${tick}`, className: 'ud-axis-rate',
@@ -1778,30 +1883,42 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             slots.map((slot, index) => (index % layout.labelEvery === 0 || index === slots.length - 1)
               ? h('text', { key: slot.day, className: 'ud-axis', x: layout.bars[index].x, y: CHART_HEIGHT - X_LABEL_OFFSET, textAnchor: 'middle' }, labelFor(slot.day))
               : null),
-            h('path', {
+            showRate ? h('path', {
               className: 'ud-trend', d: smoothPath(ratePoints),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
-            }),
+            }) : null,
+            showSpeed ? h('path', {
+              className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints),
+              strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
+            }) : null,
             hoverRatePoint
               ? h('circle', { className: 'ud-trend-dot', cx: hoverRatePoint.x, cy: hoverRatePoint.y, r: TREND_DOT_RADIUS })
+              : null,
+            hoverSpeedPoint
+              ? h('circle', { className: cx('ud-trend-dot', 'ud-trend-dot--speed'), cx: hoverSpeedPoint.x, cy: hoverSpeedPoint.y, r: TREND_DOT_RADIUS })
               : null,
             slots.map((slot, index) => h('rect', {
               key: `hit-${slot.day}`, className: 'ud-bar-hit',
               x: layout.bars[index].x - layout.step / 2, y: CHART_PAD.top, width: layout.step, height: layout.plotHeight,
               onMouseEnter: pick(index), onFocus: pick(index), onMouseLeave: clear, onBlur: clear,
             })))),
-        h(Legend, { models: legendModels, colorFor }),
+        h(Legend, {
+          models: legendModels, colorFor, speedEnabled: hasSpeed,
+          isVisible: (key) => visibleSet.has(key),
+          onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
+        }),
         h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
           hoverSlot
             ? [
-                h('div', { key: 'title', className: 'ud-tip-title' }, hoverSlot.day),
+                h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
                 h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
-                ...legendModels.map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
+                ...legendModels.filter((item) => visibleSet.has(item.model)).map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
                   h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
                   `${item.model === OTHER_MODEL ? t('other') : item.model}: ${formatTokens(hoverSlot.byModel[item.model] ?? 0)}`)),
-                ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${formatTokens(tokens)}`)),
-                h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`),
+                ...(visibleSet.has(OTHER_MODEL) ? otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
+                  `${model}: ${formatTokens(tokens)}`)) : []),
+                showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
+                showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,
@@ -2413,6 +2530,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       : id === 'hour' ? t('trendLimitedHour', { n: count }) : t('trendLimitedMinute', { n: count }))
     const presetLabel = (t, view, id) => t(`${view === 'hour' ? 'hourPreset' : 'minutePreset'}.${id}`)
     const tickLabelFor = (view) => (view === 'day' ? shortDay : view === 'hour' ? hourTickLabel : minuteTickLabel)
+    const slotLabelFor = (view) => (view === 'hour' ? hourSlotLabel : view === 'minute' ? minuteSlotLabel : (day) => day)
 
     function UsageDashPanel({ t = defaultT }) {
       const [view, setView] = useState('day')
@@ -2667,6 +2785,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               modelOrder: trendSource.models.map((item) => item.model),
               colorFor,
               labelFor: tickLabelFor(view),
+              slotLabelFor: slotLabelFor(view),
               labelMinPitch: pointActive ? LABEL_PITCH_TIME : LABEL_PITCH_DAY,
               busy,
               legendModels: trendSource.models,

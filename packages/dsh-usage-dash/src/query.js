@@ -105,6 +105,8 @@ export function aggregateRange(rows, g, from, to) {
   const modelTotals = new Map()
   const providerTotals = new Map()
   const activeBuckets = new Set()
+  // 槽级速度配对:桶串 → {outputTokens, durationMs},与模型级同口径(仅带时长行)
+  const slotSpeeds = new Map()
   for (const row of rows) {
     const slot = slotByKey.get(row.bucket)
     // 桶串未落在枚举序列(如改粒度前的历史残行)不可归属,跳过防崩
@@ -115,6 +117,12 @@ export function aggregateRange(rows, g, from, to) {
     activeBuckets.add(row.bucket)
     slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
     slot.byProvider[row.provider] = (slot.byProvider[row.provider] ?? 0) + tokens
+    if (row.durationMs) {
+      const pair = slotSpeeds.get(row.bucket) ?? { outputTokens: 0, durationMs: 0 }
+      pair.outputTokens += row.outputTokens
+      pair.durationMs += row.durationMs
+      slotSpeeds.set(row.bucket, pair)
+    }
     const modelTotal = modelTotals.get(row.model)
     if (modelTotal) {
       modelTotal.tokens += tokens
@@ -129,6 +137,11 @@ export function aggregateRange(rows, g, from, to) {
       })
     }
     providerTotals.set(row.provider, (providerTotals.get(row.provider) ?? 0) + tokens)
+  }
+  // 槽级 speed 条件挂:无时长数据的槽不挂字段(存量槽形契约不变)
+  for (const slot of slots) {
+    const pair = slotSpeeds.get(slot.day)
+    if (pair && pair.durationMs > 0) slot.speed = pair.outputTokens / (pair.durationMs / MS_PER_SECOND)
   }
   const totals = { tokens: 0, requests: 0, turns: 0, cacheHit: 0, cacheMiss: 0 }
   for (const slot of slots) {

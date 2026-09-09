@@ -296,6 +296,26 @@ test('纯缓存行带时长:输出 0 计入分母,speed 为 0', () => {
   assert.equal(out.models[0].speed, 0)
 })
 
+test('槽级 speed 配对聚合:同槽带时长行合计,无时长槽无 speed 字段', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 20, durationMs: 6500 }),
+    makeRow({ bucket: '2020-01-01', model: 'm2', provider: 'p2', outputTokens: 30, durationMs: 2500 }),
+    makeRow({ bucket: '2020-01-02', model: 'm1', provider: 'p1', outputTokens: 100 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-02')
+  assert.equal(out.daily[0].speed, (20 + 30) / ((6500 + 2500) / 1000))
+  assert.equal('speed' in out.daily[1], false)
+})
+
+test('attachCosts 保留槽级 speed 字段供曲线消费', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01T01', model: 'm1', provider: 'p1', outputTokens: 20, durationMs: 4000 }),
+  ]
+  const result = aggregateRange(rows, 'H', '2020-01-01T00', '2020-01-01T02')
+  const out = attachCosts(result, rows, 'H', [ruleOf()])
+  assert.equal(out.daily[1].speed, 5)
+})
+
 test('attachCosts H 槽按桶起点计价并归集 totals 与 models', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01T01', model: 'm1', provider: 'p1', inputTokens: 1000000, outputTokens: 500000 }),

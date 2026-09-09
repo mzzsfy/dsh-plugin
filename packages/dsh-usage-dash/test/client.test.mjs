@@ -15,6 +15,9 @@ const {
   CHART_PAD,
   DAY_MAX_SLOTS,
   DAY_PRESETS,
+  DEFAULT_HOUR_PRESET,
+  DEFAULT_MINUTE_PRESET,
+  DEFAULT_RANGE,
   DONUT_CENTER_XY,
   DONUT_CIRCUMFERENCE,
   DONUT_OUTER_RADIUS,
@@ -80,6 +83,13 @@ const {
   trimSlots,
   trendLayout,
   trendRatePoints,
+  trendSpeedPoints,
+  speedTipText,
+  speedScaleMax,
+  legendToggle,
+  leftAxisTicks,
+  hourSlotLabel,
+  minuteSlotLabel,
   validatePricingRules,
 } = core
 
@@ -127,6 +137,13 @@ test('预设定义表覆盖三视图', () => {
   assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
   assert.deepEqual(HOUR_PRESETS, ['24h', '3d', '7d', '15d'])
   assert.deepEqual(MINUTE_PRESETS, ['3h', '24h', '3d', '7d'])
+})
+
+test('默认挡位均在其挡位列表内,分钟窗口可解析', () => {
+  assert.ok(DAY_PRESETS.includes(DEFAULT_RANGE))
+  assert.ok(HOUR_PRESETS.includes(DEFAULT_HOUR_PRESET))
+  assert.ok(MINUTE_PRESETS.includes(DEFAULT_MINUTE_PRESET))
+  assert.notEqual(resolveMinuteRange(DEFAULT_MINUTE_PRESET, NOW), null)
 })
 
 test('时/分挡位文案键逐挡齐备,含跨表同 id 挡位', () => {
@@ -320,21 +337,51 @@ test('trendLayout 单槽列距铺满且柱宽取上限', () => {
   assert.equal(layout.maxTotal, 50)
 })
 
-test('trendLayout 零值槽无分段但保留刻度', () => {
+test('trendLayout 零值槽无分段,无可见数据时刻度为空表', () => {
   const layout = trendLayout([{ day: '2026-03-15', total: 0, byModel: {} }], [], 720, 46)
   assert.deepEqual(layout.bars[0].segments, [])
-  assert.deepEqual(layout.ticks, [0.5, 1])
+  assert.deepEqual(layout.ticks, [])
 })
 
-test('trendLayout 堆叠分段自底向上且高度求和等于绘图高', () => {
+test('trendLayout 堆叠分段自底向上,轴上限为数据峰乘留白系数', () => {
   const layout = trendLayout([{ day: 'd', total: 50, byModel: { a: 30, b: 20 } }], ['a', 'b'], 720, 46)
   const [segA, segB] = layout.bars[0].segments
   assert.deepEqual(segA.model, 'a')
   assert.deepEqual(segB.model, 'b')
-  approx(segA.height, (30 / 50) * 184)
-  approx(segB.height, (20 / 50) * 184)
-  approx(segA.height + segB.height, 184)
+  approx(segA.height, (30 / (50 * 1.1)) * 184)
+  approx(segB.height, (20 / (50 * 1.1)) * 184)
+  approx(segA.height + segB.height, (50 / (50 * 1.1)) * 184)
   approx(segB.y + segB.height, segA.y)
+})
+
+test('trendLayout 数据峰不顶满绘图区,留白系数 1.1', () => {
+  const layout = trendLayout([{ day: 'd', total: 30, byModel: { a: 30 } }], ['a'], 720, 46)
+  const [segA] = layout.bars[0].segments
+  approx(segA.height + CHART_PAD.top, CHART_PAD.top + (1 / 1.1) * 184)
+})
+
+test('trendLayout 可见模型无数据时左轴刻度为空表', () => {
+  const slots = [{ day: 'd', total: 50, byModel: { a: 50 } }]
+  assert.deepEqual(trendLayout(slots, [], 720, 46).ticks, [])
+  assert.deepEqual(trendLayout(slots, ['b'], 720, 46).ticks, [])
+  assert.ok(trendLayout(slots, ['a'], 720, 46).ticks.length > 0)
+})
+
+test('leftAxisTicks 速度模式标定速度刻度,否则标定 token 刻度', () => {
+  const tokenTicks = leftAxisTicks([100, 200], 200, [], 1)
+  assert.deepEqual(tokenTicks.map((tick) => tick.label), ['100', '200'])
+  approx(tokenTicks[0].ratio, 0.5)
+  const speedTicks = leftAxisTicks([], 1, [0.5, 1], 1)
+  assert.deepEqual(speedTicks.map((tick) => tick.label), ['0.5', '1'])
+  approx(speedTicks[0].ratio, 0.5)
+  approx(speedTicks[1].ratio, 1)
+})
+
+test('hour/minute 悬浮窗槽标签:T 换空格,小时带 h 后缀,分钟保 HH:MM', () => {
+  assert.equal(hourSlotLabel('2026-03-15T14'), '2026-03-15 14h')
+  assert.equal(hourSlotLabel('2026-03-15T00'), '2026-03-15 00h')
+  assert.equal(minuteSlotLabel('2026-03-15T14:30'), '2026-03-15 14:30')
+  assert.equal(minuteSlotLabel('2026-03-15T00:00'), '2026-03-15 00:00')
 })
 
 test('trendLayout 标签密度随列距收敛', () => {
@@ -471,6 +518,61 @@ test('trendRatePoints 点映射列中心与百分比高度且零数据日跳过'
   assert.equal(points[1].day, 'd2')
   assert.equal(points[1].x, 30)
   approx(points[1].y, CHART_PAD.top + plotHeight - 0.5 * plotHeight)
+})
+
+test('trendSpeedPoints 点映射列中心与刻度上限比例高度且无速度槽跳过', () => {
+  const slots = [
+    { day: 'd0', speed: 50 },
+    { day: 'd1', total: 10 },
+    { day: 'd2', speed: 25 },
+  ]
+  const bars = [{ x: 10 }, { x: 20 }, { x: 30 }]
+  const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
+  const points = trendSpeedPoints(slots, bars, plotHeight, 100)
+  assert.equal(points.length, 2)
+  assert.equal(points[0].day, 'd0')
+  assert.equal(points[0].x, 10)
+  approx(points[0].y, CHART_PAD.top + plotHeight - 0.5 * plotHeight)
+  assert.equal(points[1].day, 'd2')
+  assert.equal(points[1].x, 30)
+  approx(points[1].y, CHART_PAD.top + plotHeight - 0.25 * plotHeight)
+})
+
+test('speedTipText 无速度为占位符有速度为官方吞吐口径', () => {
+  assert.equal(speedTipText(undefined), '—')
+  assert.equal(speedTipText(5.5556), '5.6 tok/s')
+  assert.equal(speedTipText(12.34), '12 tok/s')
+})
+
+test('legendToggle 普通点击单选,再点恢复全部,ctrl 多选且禁全藏', () => {
+  // null 表示全部可见
+  assert.deepEqual(legendToggle(null, 'a', false), new Set(['a']))
+  // 单选态再点同项恢复全部(null)
+  assert.equal(legendToggle(new Set(['a']), 'a', false), null)
+  // 单选态点他项 → 切换单选目标
+  assert.deepEqual(legendToggle(new Set(['a']), 'b', false), new Set(['b']))
+  // ctrl 切换单项:加入与移除
+  assert.deepEqual(legendToggle(new Set(['a']), 'b', true), new Set(['a', 'b']))
+  assert.deepEqual(legendToggle(new Set(['a', 'b']), 'b', true), new Set(['a']))
+  // ctrl 隐藏最后一项:无操作,保持原态
+  const solo = new Set(['a'])
+  assert.equal(legendToggle(solo, 'a', true), solo)
+})
+
+test('trendLayout 刻度跟随可见模型:单模型刻度按该槽内合计归一', () => {
+  const slots = [
+    { day: 'd0', total: 50, byModel: { a: 30, b: 20 } },
+    { day: 'd1', total: 90, byModel: { a: 40, b: 50 } },
+  ]
+  assert.equal(trendLayout(slots, ['a', 'b'], 720, 46).maxTotal, 90)
+  assert.equal(trendLayout(slots, ['a'], 720, 46).maxTotal, 40)
+  assert.equal(trendLayout(slots, [], 720, 46).maxTotal, 1)
+})
+
+test('speedScaleMax 全零或空槽钳底防除零,混合取最大速度', () => {
+  assert.equal(speedScaleMax([]), 1)
+  assert.equal(speedScaleMax([{ day: 'd0' }, { day: 'd1', speed: 0 }]), 1)
+  assert.equal(speedScaleMax([{ day: 'd0', speed: 30 }, { day: 'd1', speed: 12.5 }]), 30)
 })
 
 test('smoothPath 空点集为空串单点为移动命令', () => {
