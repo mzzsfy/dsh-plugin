@@ -35,13 +35,57 @@ function emptySkipCounts() {
   return { [SKIP_KINDS.descriptor]: 0, [SKIP_KINDS.corrupt]: 0, [SKIP_KINDS.legacy]: 0, [SKIP_KINDS.other]: 0 }
 }
 
+// 官方 dsh-llm 助手流读取器同构镜像(isTokenDelta/runFirstTokenTime/
+// assistantStreamFirstTokenTime):从紧凑记录还原首个产出 token 的时刻。
+// 语义由 test/stream-parity.test.mjs 锁定,改一侧必须同步 parity
+function isTokenDelta(chunk) {
+  if (chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta') return chunk.text !== ''
+  return chunk?.type === 'tool-call-delta' && (chunk.argumentsDelta !== '' || chunk.name !== undefined)
+}
+
+function runFirstTokenTime(run) {
+  if (run.type === 'tool-call-chunks' && run.name !== undefined) return run.time0
+  const fragments = run.type === 'tool-call-chunks' ? run.args : run.texts
+  let time = run.time0
+  for (let index = 0; index < fragments.length; index += 1) {
+    if (index > 0) {
+      const gap = run.dt[index - 1]
+      // 差分短缺属存储形态损坏,按无首 token 处理,保留后续报告锁定机会
+      if (typeof gap !== 'number') return undefined
+      time += gap
+    }
+    if (fragments[index] !== '') return time
+  }
+  return undefined
+}
+
+// 已知 packed run 形态白名单:未知记录形态(宿主未来新字段)安全跳过,
+// 采集是观测性的,绝不因流记录形态漂移而崩溃
+const RUN_RECORD_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool-call-chunks'])
+
+export function assistantStreamFirstTokenTime(stream) {
+  if (!Array.isArray(stream)) return undefined
+  for (const record of stream) {
+    const time = record?.type === 'chunk'
+      ? (isTokenDelta(record.chunk) ? record.time : undefined)
+      : RUN_RECORD_TYPES.has(record?.type) ? runFirstTokenTime(record) : undefined
+    if (time !== undefined) return time
+  }
+  return undefined
+}
+
 // 会话内单 pass 折叠:跟踪每个 (turn,step) 槽的最新报告,只把首次发射交 store
 export class UsageFold {
   constructor() {
     this.seen = new Map()
-    // (turn,step) 最近一次模型启动时刻:retry-started 覆盖重置,时长与首样本
-    // token 同源配对(分子只含最终尝试,分母不含失败尝试,避免速度被污染)
+    // (turn,step) 模型启动时刻:仅 step/start 设定(官方口径 TTFT 含失败尝试,
+    // 不随 retry-started 重置);(turn,step) 首 token 时刻:由首个产出 token
+    // 的 attempt 锁定,存活于步内重试。时长均为官方 decode 口径:durationMs
+    // = 汇报 - 首 token(吞吐分母),ttftMs = 首 token - 启动
     this.starts = new Map()
+    this.firstTokens = new Map()
+    // 已补发 timing 的键:token 先发后只补一次,重复报告不重复配对
+    this.timingDone = new Set()
   }
 
   keyOf(event) {
@@ -64,9 +108,9 @@ export class UsageFold {
     }
     if (event.type === 'step/start' || event.type === 'llm/retry-started') {
       // step/start 恰开一次模型调用,retry-started 标记每次实际启动的重试;
-      // 请求只由标记计数,与 token 样本双计
+      // 请求只由标记计数,与 token 样本双计;时长起点不随重试重置
       const key = this.keyOf(event)
-      if (key !== null) this.starts.set(key, event.time)
+      if (event.type === 'step/start' && key !== null) this.starts.set(key, event.time)
       return {
         time: event.time,
         inputTokens: 0,
@@ -75,6 +119,15 @@ export class UsageFold {
         cacheWriteTokens: 0,
         request: true,
       }
+    }
+    if (event.type === 'assistant/attempt') {
+      // 首 token 锁定:仅首个产出 token 的 attempt 生效,后续 attempt 不覆盖
+      const key = this.keyOf(event)
+      if (key !== null && !this.firstTokens.has(key)) {
+        const first = assistantStreamFirstTokenTime(event.data?.stream)
+        if (typeof first === 'number') this.firstTokens.set(key, first)
+      }
+      return null
     }
     if (event.type === 'assistant/chunk') {
       const usage = event.data?.chunk?.type === 'usage' ? event.data.chunk.usage : undefined
@@ -87,11 +140,39 @@ export class UsageFold {
   }
 
   replaceSample(event, usage) {
-    // 四桶全零为噪声;纯缓存调用(仅缓存桶非零)仍有效
+    const key = this.keyOf(event)
+    const first = key !== null
+      ? this.firstTokens.get(key) ?? assistantStreamFirstTokenTime(event.data?.stream)
+      : assistantStreamFirstTokenTime(event.data?.stream)
+    // decode 配对有效性对齐官方 usageOutputTokens 守卫:输出 token 非有效数值
+    // 不建配对(官方同款),首字延迟不受 usage 影响照常采集;
+    // 负差值按官方 Math.max(0) 钳 0(时钟回拨计 0 延迟样本),0 时长不附配对
+    // (存储侧 0 时长配对天然惰性,防 0 分母放大)
+    const decodeable = typeof usage.outputTokens === 'number'
+      && Number.isFinite(usage.outputTokens) && usage.outputTokens >= 0
+    const timing = typeof first === 'number'
+      ? {
+          durationMs: Math.max(0, event.time - first),
+          ttftMs: key !== null && this.starts.has(key) ? Math.max(0, first - this.starts.get(key)) : undefined,
+          decodeable,
+        }
+      : undefined
+    const prev = key !== null ? this.seen.get(key) : undefined
+    // 首样本生效:内部无条件跟踪最新报告,但交 store 的只有首次发射;
+    // 首 token 时刻不在 chunk 事件上,token 先发后由后续报告补纯 timing 增量,
+    // 已补发的键不重复补(timingDone 独立集合持久跟踪,防重复报告双计);
+    // 补发判定先于四桶和门:usage 全零的报告仍补 timing(token 已由首发承载)
+    if (prev) {
+      if (timing === undefined || this.timingDone.has(key)) return null
+      this.timingDone.add(key)
+      return this.emitTimingOnly(usage, timing, event.time)
+    }
+    // 四桶全零为噪声(不占去重键),纯缓存调用(仅缓存桶非零)仍有效。
+    // retry 场景 attempt 先于 chunk 落流时,chunk 首发即带 timing,分母以
+    // chunk 时刻近似官方汇报时刻(毫秒级组装间隔),主路径仍由 message 补发
     const sum = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
       + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
     if (sum <= 0) return null
-    const key = this.keyOf(event)
     const sample = {
       time: event.time,
       inputTokens: usage.inputTokens ?? 0,
@@ -99,18 +180,37 @@ export class UsageFold {
       cacheReadTokens: usage.cacheReadTokens ?? 0,
       cacheWriteTokens: usage.cacheWriteTokens ?? 0,
     }
-    // 模型时长口径与官方 session-stats 投影 llmMs 同构(step/start → 汇报时刻),
-    // 附加到交 store 的首样本;未观测起点或时刻倒挂(时钟回拨)不附,0 视为无
-    const start = key !== null ? this.starts.get(key) : undefined
-    if (start !== undefined) {
-      const durationMs = Math.max(0, event.time - start)
-      if (durationMs > 0) sample.durationMs = durationMs
+    if (key !== null) this.seen.set(key, sample)
+    return this.emitSample(sample, timing, key)
+  }
+
+  emitSample(sample, timing, key) {
+    if (timing === undefined) return { ...sample }
+    // decode 口径聚合对:分子 decodeTokens 与分母 durationMs 同源配对
+    if (timing.decodeable && timing.durationMs > 0) {
+      sample.decodeTokens = sample.outputTokens
+      sample.durationMs = timing.durationMs
     }
-    if (key === null) return sample
-    const prev = this.seen.get(key)
-    this.seen.set(key, sample)
-    // 首样本生效:内部无条件跟踪最新报告,但交 store 的只有首次发射的独立拷贝
-    return prev ? null : { ...sample }
+    if (timing.ttftMs !== undefined) sample.ttftMs = timing.ttftMs
+    if (key !== undefined && key !== null) this.timingDone.add(key)
+    return { ...sample }
+  }
+
+  emitTimingOnly(usage, timing, time) {
+    // 纯 timing 增量:token 桶全零不重复计数,decodeTokens 单独承载速度分子
+    const delta = {
+      time,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    }
+    if (timing.decodeable && timing.durationMs > 0) {
+      delta.decodeTokens = usage.outputTokens
+      delta.durationMs = timing.durationMs
+    }
+    if (timing.ttftMs !== undefined) delta.ttftMs = timing.ttftMs
+    return delta
   }
 }
 

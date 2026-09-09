@@ -316,6 +316,54 @@ test('attachCosts 保留槽级 speed 字段供曲线消费', () => {
   assert.equal(out.daily[1].speed, 5)
 })
 
+test('decode 口径:速度分子取 decodeTokens,timing 样本零桶不稀释 token 总量', () => {
+  const rows = [
+    // token 样本行:只有 token 桶,无时长
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 20 }),
+    // 纯 timing 增量行:零 token 桶 + decode 配对
+    makeRow({ bucket: '2020-01-02', model: 'm1', provider: 'p1', outputTokens: 0, decodeTokens: 30, durationMs: 2500 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-02')
+  const entry = out.models.find((item) => item.model === 'm1')
+  assert.equal(entry.tokens, 20)
+  assert.equal(entry.speed, 30 / (2500 / 1000))
+})
+
+test('旧格式行 durationMs 无 decodeTokens:分子回落 outputTokens', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 20, durationMs: 4000 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-01')
+  assert.equal(out.models[0].speed, 5)
+})
+
+test('ttft 模型级聚合:加权平均,无 ttft 行不参与,无数据不挂字段', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 20, ttftMs: 1000, ttftSteps: 1 }),
+    makeRow({ bucket: '2020-01-02', model: 'm1', provider: 'p1', outputTokens: 30, ttftMs: 3000, ttftSteps: 2 }),
+    makeRow({ bucket: '2020-01-03', model: 'm1', provider: 'p1', outputTokens: 100 }),
+    makeRow({ bucket: '2020-01-01', model: 'm2', provider: 'p2', outputTokens: 5 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-03')
+  const m1 = out.models.find((item) => item.model === 'm1')
+  assert.equal(m1.ttft, (1000 + 3000) / (1 + 2))
+  const m2 = out.models.find((item) => item.model === 'm2')
+  assert.equal('ttft' in m2, false)
+})
+
+test('槽级 ttft 聚合:同槽配对,无 ttft 槽不挂字段,attachCosts 保留', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 20, ttftMs: 2000, ttftSteps: 1 }),
+    makeRow({ bucket: '2020-01-01', model: 'm2', provider: 'p2', outputTokens: 30, ttftMs: 4000, ttftSteps: 1 }),
+    makeRow({ bucket: '2020-01-02', model: 'm1', provider: 'p1', outputTokens: 100 }),
+  ]
+  const result = aggregateRange(rows, 'D', '2020-01-01', '2020-01-02')
+  assert.equal(result.daily[0].ttft, (2000 + 4000) / 2)
+  assert.equal('ttft' in result.daily[1], false)
+  const out = attachCosts(result, rows, 'D', [ruleOf()])
+  assert.equal(out.daily[0].ttft, 3000)
+})
+
 test('attachCosts H 槽按桶起点计价并归集 totals 与 models', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01T01', model: 'm1', provider: 'p1', inputTokens: 1000000, outputTokens: 500000 }),

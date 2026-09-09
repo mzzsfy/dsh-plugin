@@ -90,6 +90,10 @@ const {
   trendLayout,
   trendRatePoints,
   trendSpeedPoints,
+  trendTtftPoints,
+  ttftScaleMax,
+  ttftTipText,
+  modelTtftText,
   speedTipText,
   speedScaleMax,
   legendToggle,
@@ -597,6 +601,44 @@ test('speedScaleMax 全零或空槽钳底防除零,混合取最大速度', () =>
   assert.equal(speedScaleMax([{ day: 'd0', speed: 30 }, { day: 'd1', speed: 12.5 }]), 30)
 })
 
+test('trendTtftPoints 点映射列中心与刻度上限比例高度且无 ttft 槽跳过', () => {
+  const slots = [
+    { day: 'd0', ttft: 2000 },
+    { day: 'd1', total: 10 },
+    { day: 'd2', ttft: 1000 },
+  ]
+  const bars = [{ x: 10 }, { x: 20 }, { x: 30 }]
+  const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
+  const points = trendTtftPoints(slots, bars, plotHeight, 2200)
+  assert.equal(points.length, 2)
+  assert.equal(points[0].day, 'd0')
+  assert.equal(points[0].x, 10)
+  approx(points[0].y, CHART_PAD.top + plotHeight - (2000 / 2200) * plotHeight)
+  assert.equal(points[1].day, 'd2')
+  assert.equal(points[1].x, 30)
+  approx(points[1].y, CHART_PAD.top + plotHeight - (1000 / 2200) * plotHeight)
+})
+
+test('ttftScaleMax 全零或空槽钳底防除零,混合取最大延迟', () => {
+  assert.equal(ttftScaleMax([]), 1)
+  assert.equal(ttftScaleMax([{ day: 'd0' }, { day: 'd1', ttft: 0 }]), 1)
+  assert.equal(ttftScaleMax([{ day: 'd0', ttft: 3000 }, { day: 'd1', ttft: 1250 }]), 3000)
+})
+
+test('ttftTipText 无 ttft 为占位符有 ttft 为官方时长口径', () => {
+  const zhT = createTranslator(MESSAGES_ZH)
+  const enT = createTranslator(MESSAGES_EN)
+  assert.equal(ttftTipText(undefined, zhT), '—')
+  assert.equal(ttftTipText(200, zhT), '0.2秒')
+  assert.equal(ttftTipText(200, enT), '0.2s')
+  assert.equal(ttftTipText(9500, zhT), '9.5秒')
+})
+
+test('ttftLegend 中英文案注册', () => {
+  assert.equal(MESSAGES_ZH.ttftLegend, '首 token 延迟')
+  assert.equal(MESSAGES_EN.ttftLegend, 'First-token latency')
+})
+
 test('smoothPath 空点集为空串单点为移动命令', () => {
   assert.equal(smoothPath([]), '')
   assert.equal(smoothPath([{ x: 1, y: 2 }]), 'M 1 2')
@@ -685,6 +727,15 @@ test('模型速度文本:官方吞吐口径格式化,无速度为空串', () => 
   assert.equal(modelSpeedText(12.34), '12 tok/s')
   assert.equal(modelSpeedText(0), '0 tok/s')
   assert.equal(modelSpeedText(undefined), '')
+})
+
+test('模型首字文本:图例标签 + 官方时长口径,无 ttft 为空串', () => {
+  const zhT = createTranslator(MESSAGES_ZH)
+  const enT = createTranslator(MESSAGES_EN)
+  assert.equal(modelTtftText(200, zhT), '首 token 延迟 0.2秒')
+  assert.equal(modelTtftText(162000, enT), 'First-token latency 2m42s')
+  assert.equal(modelTtftText(0, zhT), '首 token 延迟 0秒')
+  assert.equal(modelTtftText(undefined, zhT), '')
 })
 
 // —— S14 费用格式化与展示辅助(镜像函数核心语义见 pricing-parity.test.mjs) ——

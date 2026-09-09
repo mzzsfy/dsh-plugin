@@ -82,8 +82,12 @@ export const usageRowSchema = z.object({
   outputTokens: z.number(),
   cacheReadTokens: z.number(),
   cacheWriteTokens: z.number(),
-  // 模型时长累计(毫秒):optional 兼容存量记录(域 open 逐记录 parse)
+  // 模型时长累计(毫秒)与 decode 口径速度分子:optional 兼容存量记录(域 open 逐记录 parse)
   durationMs: z.number().optional(),
+  decodeTokens: z.number().optional(),
+  // 首 token 延迟累计(毫秒)与样本步数:optional 兼容存量记录
+  ttftMs: z.number().optional(),
+  ttftSteps: z.number().optional(),
   requests: z.number(),
   turns: z.number(),
   lastSeen: z.number(),
@@ -136,13 +140,17 @@ function emptyRow(bucket, provider, model, nowMs) {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     durationMs: 0,
+    decodeTokens: 0,
+    ttftMs: 0,
+    ttftSteps: 0,
     requests: 0,
     turns: 0,
     lastSeen: nowMs,
   }
 }
 
-// 样本折叠为计数增量:turn/request 只计次,token 样本累加四类桶
+// 样本折叠为计数增量:turn/request 只计次,token 样本累加四类桶;
+// decodeTokens 与 durationMs 同源配对构成速度,timing 缺失按零累计
 function deltaOf(sample, nowMs) {
   const delta = emptyRow('', '', '', nowMs)
   delete delta.bucket
@@ -156,6 +164,9 @@ function deltaOf(sample, nowMs) {
     delta.cacheReadTokens = sample.cacheReadTokens
     delta.cacheWriteTokens = sample.cacheWriteTokens
     delta.durationMs = sample.durationMs ?? 0
+    delta.decodeTokens = sample.decodeTokens ?? 0
+    delta.ttftMs = sample.ttftMs ?? 0
+    delta.ttftSteps = sample.ttftMs !== undefined ? 1 : 0
   }
   return delta
 }
@@ -170,6 +181,9 @@ function addDelta(base, delta) {
     cacheWriteTokens: base.cacheWriteTokens + delta.cacheWriteTokens,
     // base 侧 ?? 0 容存量旧格式行(缺字段);delta 侧经 deltaOf 恒为数值
     durationMs: (base.durationMs ?? 0) + delta.durationMs,
+    decodeTokens: (base.decodeTokens ?? 0) + delta.decodeTokens,
+    ttftMs: (base.ttftMs ?? 0) + delta.ttftMs,
+    ttftSteps: (base.ttftSteps ?? 0) + delta.ttftSteps,
     requests: base.requests + delta.requests,
     turns: base.turns + delta.turns,
     lastSeen: Math.max(base.lastSeen, delta.lastSeen),

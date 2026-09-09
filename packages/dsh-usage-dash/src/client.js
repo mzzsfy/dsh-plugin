@@ -128,6 +128,7 @@ const MESSAGES_ZH = {
   hitRateLegend: '缓存命中率',
   avgSpeed: '平均生成速度',
   speedLegend: '平均生成速度',
+  ttftLegend: '首 token 延迟',
   topModel: '最常用模型',
   topModelHint: '按 token 用量排序,非调用次数',
   heatmap: '活跃热力图',
@@ -267,6 +268,7 @@ const MESSAGES_EN = {
   hitRateLegend: 'Cache-hit rate',
   avgSpeed: 'Avg speed',
   speedLegend: 'Avg speed',
+  ttftLegend: 'First-token latency',
   topModel: 'Top model',
   topModelHint: 'Ranked by token usage, not call count',
   heatmap: 'Activity heatmap',
@@ -529,11 +531,14 @@ const BAR_MAX_WIDTH = 30
 const AXIS_TICK_COUNT = 4
 // 速度刻度上限钳底:全零或无速度防除零(速度不设轴,读数走 tooltip)
 const SPEED_SCALE_FLOOR = 1
+// 首 token 延迟刻度上限钳底(毫秒):全零或无数据防除零(不设轴,读数走 tooltip)
+const TTFT_SCALE_FLOOR = 1
 // 轴上限留白系数:数据峰不顶满绘图区,顶部留出标注空间
 const AXIS_SCALE_HEADROOM = 1.1
 // 图例键:折线项与模型项共处同一显隐集合
 const LEGEND_KEY_RATE = 'rate'
 const LEGEND_KEY_SPEED = 'speed'
+const LEGEND_KEY_TTFT = 'ttft'
 
 function niceTicks(max, count) {
   if (max <= 0 || count <= 0) return []
@@ -650,6 +655,20 @@ function trendSpeedPoints(slots, bars, plotHeight, scaleMax) {
   return points
 }
 
+// 首 token 延迟曲线点:仅带 ttft 槽产出,高度按刻度上限归一(毫秒域独立归一)
+function trendTtftPoints(slots, bars, plotHeight, scaleMax) {
+  const points = []
+  slots.forEach((slot, index) => {
+    if (slot.ttft === undefined) return
+    points.push({
+      day: slot.day,
+      x: bars[index].x,
+      y: CHART_PAD.top + plotHeight - (slot.ttft / scaleMax) * plotHeight,
+    })
+  })
+  return points
+}
+
 // Catmull-Rom 转三次贝塞尔:控制点取邻点差六分之一,端点折返
 function smoothPath(points) {
   if (points.length === 0) return ''
@@ -717,6 +736,22 @@ function speedTipText(speed) {
 // 速度刻度上限:全零或无速度钳底,防除零
 function speedScaleMax(slots) {
   return Math.max(SPEED_SCALE_FLOOR, ...slots.map((slot) => slot.speed ?? 0))
+}
+
+// 首 token 延迟刻度上限(毫秒):全零或无数据钳底防除零
+function ttftScaleMax(slots) {
+  return Math.max(TTFT_SCALE_FLOOR, ...slots.map((slot) => slot.ttft ?? 0))
+}
+
+// tooltip 首 token 延迟行文本:无 ttft 与命中率同款占位符,有则为官方时长口径
+function ttftTipText(ttft, t) {
+  return ttft === undefined ? TOOLTIP_MISSING : formatDuration(ttft, t)
+}
+
+// 模型首 token 延迟文本:图例标签 + 官方时长口径;无 ttft(无配对数据)为空串
+function modelTtftText(ttft, t) {
+  if (ttft === undefined) return ''
+  return `${t('ttftLegend')} ${formatDuration(ttft, t)}`
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -1693,9 +1728,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STYLE_CSS = `
 .ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
---dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff;--ud-trend-speed:#0ca678}
+--dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff;--ud-trend-speed:#0ca678;--ud-trend-ttft:#e8590c}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
---dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe;--ud-trend-speed:#2fbf8f}
+--dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe;--ud-trend-speed:#2fbf8f;--ud-trend-ttft:#ffa94d}
 .ud-toolbar{display:flex;align-items:flex-start;gap:8px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
@@ -1781,10 +1816,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-bar-hit{fill:transparent;pointer-events:all}
 .ud-trend{stroke:var(--ud-trend-line);opacity:.9;fill:none;pointer-events:none}
 .ud-trend--speed{stroke:var(--ud-trend-speed)}
+.ud-trend--ttft{stroke:var(--ud-trend-ttft)}
 .ud-trend-dot{fill:var(--ud-trend-line);stroke:var(--dsw-alias-bg-layer-1);stroke-width:${TREND_DOT_RING}px;pointer-events:none}
 .ud-trend-dot--speed{fill:var(--ud-trend-speed)}
+.ud-trend-dot--ttft{fill:var(--ud-trend-ttft)}
 .ud-legend-swatch--line{height:2px;border-radius:1px;background:var(--ud-trend-line)}
 .ud-legend-swatch--line--speed{background:var(--ud-trend-speed)}
+.ud-legend-swatch--line--ttft{background:var(--ud-trend-ttft)}
 .ud-model-usage{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px}
 .ud-donut-wrap{flex:0 0 auto}
 .ud-donut-seg{cursor:pointer;outline:none;transition:stroke-width .12s ease}
@@ -1935,7 +1973,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h(FitText, null, String(stats.activeDays))))
     }
 
-    function Legend({ models, colorFor, speedEnabled = false, isVisible, onItem, t = defaultT }) {
+    function Legend({ models, colorFor, speedEnabled = false, ttftEnabled = false, isVisible, onItem, t = defaultT }) {
       const itemProps = (key) => ({
         className: cx('ud-legend-item', isVisible && !isVisible(key) && 'ud-legend-item--off'),
         onClick: onItem ? (event) => onItem(key, event.ctrlKey || event.metaKey) : undefined,
@@ -1950,7 +1988,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('span', null, t('hitRateLegend'))),
         speedEnabled ? h('span', { key: 'speed', title: t('speedLegend'), ...itemProps(LEGEND_KEY_SPEED) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--speed' }),
-          h('span', null, t('speedLegend'))) : null)
+          h('span', null, t('speedLegend'))) : null,
+        ttftEnabled ? h('span', { key: 'ttft', title: t('ttftLegend'), ...itemProps(LEGEND_KEY_TTFT) },
+          h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--ttft' }),
+          h('span', null, t('ttftLegend'))) : null)
     }
 
     const colorForModel = (models) => (model) => {
@@ -1980,22 +2021,33 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         return () => observer.disconnect()
       }, [])
       const hasSpeed = slots.some((slot) => slot.speed !== undefined)
-      const visibleSet = visibleKeys ?? new Set([...modelOrder, LEGEND_KEY_RATE, ...(hasSpeed ? [LEGEND_KEY_SPEED] : [])])
+      const hasTtft = slots.some((slot) => slot.ttft !== undefined)
+      const visibleSet = visibleKeys ?? new Set([
+        ...modelOrder, LEGEND_KEY_RATE,
+        ...(hasSpeed ? [LEGEND_KEY_SPEED] : []),
+        ...(hasTtft ? [LEGEND_KEY_TTFT] : []),
+      ])
       const visibleModels = modelOrder.filter((model) => visibleSet.has(model))
       const showRate = visibleSet.has(LEGEND_KEY_RATE)
       const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
+      const showTtft = hasTtft && visibleSet.has(LEGEND_KEY_TTFT)
       const layout = trendLayout(slots, visibleModels, avail, labelMinPitch)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
       const speedAxisMax = speedMax * AXIS_SCALE_HEADROOM
       const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedAxisMax) : []
+      const ttftMax = ttftScaleMax(slots)
+      const ttftAxisMax = ttftMax * AXIS_SCALE_HEADROOM
+      const ttftPoints = showTtft ? trendTtftPoints(slots, layout.bars, layout.plotHeight, ttftAxisMax) : []
       // 左轴标定:可见柱有数据标 token;无柱数据且速度线可见标速度(tok/s);否则空
+      // (ttft 不设轴,读数走 tooltip,毫秒域与速度轴不同单位不混轴)
       const speedAxisTicks = layout.ticks.length === 0 && showSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []
       const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax)
       const hoverSlot = hover ? slots[hover.index] : null
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
+      const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
       const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
       const clear = () => setHover(null)
       const otherEntries = hoverSlot
@@ -2045,11 +2097,18 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
+            showTtft ? h('path', {
+              className: cx('ud-trend', 'ud-trend--ttft'), d: smoothPath(ttftPoints),
+              strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
+            }) : null,
             hoverRatePoint
               ? h('circle', { className: 'ud-trend-dot', cx: hoverRatePoint.x, cy: hoverRatePoint.y, r: TREND_DOT_RADIUS })
               : null,
             hoverSpeedPoint
               ? h('circle', { className: cx('ud-trend-dot', 'ud-trend-dot--speed'), cx: hoverSpeedPoint.x, cy: hoverSpeedPoint.y, r: TREND_DOT_RADIUS })
+              : null,
+            hoverTtftPoint
+              ? h('circle', { className: cx('ud-trend-dot', 'ud-trend-dot--ttft'), cx: hoverTtftPoint.x, cy: hoverTtftPoint.y, r: TREND_DOT_RADIUS })
               : null,
             slots.map((slot, index) => h('rect', {
               key: `hit-${slot.day}`, className: 'ud-bar-hit',
@@ -2057,7 +2116,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               onMouseEnter: pick(index), onFocus: pick(index), onMouseLeave: clear, onBlur: clear,
             })))),
         h(Legend, {
-          models: legendModels, colorFor, speedEnabled: hasSpeed,
+          models: legendModels, colorFor, speedEnabled: hasSpeed, ttftEnabled: hasTtft,
           isVisible: (key) => visibleSet.has(key),
           onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
         }),
@@ -2073,6 +2132,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                   `${model}: ${formatTokens(tokens)}`)) : []),
                 showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
+                showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
                 costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,
@@ -2233,6 +2293,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             models.map((item) => {
               const isOther = item.model === OTHER_MODEL
               const speedText = modelSpeedText(item.speed)
+              const ttftText = modelTtftText(item.ttft, t)
               return h(React.Fragment, { key: item.model },
                 h('div', {
                   className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
@@ -2258,7 +2319,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     h('span', { className: 'ud-model-pct' },
                       item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
                       formatPercent((item.tokens / total) * PERCENT_SCALE),
-                      speedText ? ` · ${speedText}` : null))),
+                      speedText ? ` · ${speedText}` : null,
+                      ttftText ? ` · ${ttftText}` : null))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },

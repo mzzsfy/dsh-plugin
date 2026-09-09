@@ -17,6 +17,12 @@ const usage = (extra = {}) => ({
   cacheWriteTokens: 4,
   ...extra,
 })
+// 官方助手流紧凑记录构造(与 dsh-llm AssistantStreamAccumulator.snapshot 同形):
+// packed run 以 time0 + dt 差分还原成员时刻,裸 chunk 携带原始 time
+const textRun = (time0, texts, dt = []) => ({ type: 'text-chunks', time0, index: 0, dt, texts })
+const toolRun = (time0, args, extra = {}) => ({ type: 'tool-call-chunks', time0, index: 0, dt: [], id: 't1', args, ...extra })
+const rawChunk = (time, chunk) => ({ type: 'chunk', time, chunk })
+const attempt = (seq, time, turn, step, stream) => ev('assistant/attempt', seq, time, { turn, step, stream })
 const session = (id) => ({ id })
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 
@@ -168,12 +174,12 @@ test('step/start 与 llm/retry-started 产生 request 标记样本', async () =>
   }
 })
 
-test('step/start 观测起点:首个 usage 样本附 durationMs(start 到样本时刻)', async () => {
+test('decode 口径:durationMs 为首 token 到汇报,ttftMs 为起点到首 token', async () => {
   const { ctx, store } = liveCollector()
   const start = local(2026, 8, 2, 10, 0)
-  const sampleAt = start + 6 * 1000 + 500
   ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
-  ctx.emit('session/event', session('s1'), ev('assistant/message', 2, sampleAt, {
+  ctx.emit('session/event', session('s1'), attempt(2, start + 35 * 1000, 0, 0, [textRun(start + 10 * 1000, ['你好'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, start + 40 * 1000, {
     turn: 0,
     step: 0,
     usage: usage(),
@@ -181,7 +187,98 @@ test('step/start 观测起点:首个 usage 样本附 durationMs(start 到样本�
   }))
   await tick()
   const usageSample = store.samples.find((sample) => !sample.request)
-  assert.equal(usageSample.durationMs, 6500)
+  assert.equal(usageSample.durationMs, 30 * 1000)
+  assert.equal(usageSample.ttftMs, 10 * 1000)
+  assert.equal(usageSample.decodeTokens, 20)
+  assert.equal(usageSample.outputTokens, 20)
+})
+
+test('无 attempt 时回落 message 自带 stream 取首 token', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 2, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    stream: [textRun(start + 8 * 1000, ['好'])],
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.durationMs, 32 * 1000)
+  assert.equal(usageSample.ttftMs, 8 * 1000)
+})
+
+test('chunk 先发 token 契约保持,message 补发纯 timing 增量样本', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/chunk', 2, start + 30 * 1000, {
+    turn: 0,
+    step: 0,
+    chunk: { type: 'usage', usage: usage() },
+  }))
+  ctx.emit('session/event', session('s1'), attempt(3, start + 35 * 1000, 0, 0, [textRun(start + 10 * 1000, ['你好'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 4, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage({ inputTokens: 999 }),
+    message: {},
+  }))
+  await tick()
+  assert.equal(store.samples.length, 3)
+  const chunkSample = store.samples[1]
+  assert.equal(chunkSample.inputTokens, 10)
+  assert.equal(chunkSample.durationMs, undefined)
+  assert.equal(chunkSample.ttftMs, undefined)
+  assert.equal(chunkSample.decodeTokens, undefined)
+  assert.equal(store.samples[0].request, true)
+  const timingSample = store.samples[2]
+  assert.equal(timingSample.inputTokens, 0)
+  assert.equal(timingSample.outputTokens, 0)
+  assert.equal(timingSample.decodeTokens, 20)
+  assert.equal(timingSample.durationMs, 30 * 1000)
+  assert.equal(timingSample.ttftMs, 10 * 1000)
+})
+
+test('attempt 首 token 锁定:后续 attempt 不覆盖首个产出 token 的时刻', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 35 * 1000, 0, 0, [textRun(start + 10 * 1000, ['a'])]))
+  ctx.emit('session/event', session('s1'), attempt(3, start + 38 * 1000, 0, 0, [textRun(start + 20 * 1000, ['b'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 4, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.ttftMs, 10 * 1000)
+  assert.equal(usageSample.durationMs, 30 * 1000)
+})
+
+test('首个 attempt 无 token,由后续产出 token 的 attempt 锁定', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 5 * 1000, 0, 0, [
+    textRun(start + 5 * 1000, ['']),
+    rawChunk(start + 6 * 1000, { type: 'usage' }),
+  ]))
+  ctx.emit('session/event', session('s1'), attempt(3, start + 38 * 1000, 0, 0, [toolRun(start + 15 * 1000, ['{'], { name: 'fn' })]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 4, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.ttftMs, 15 * 1000)
+  assert.equal(usageSample.durationMs, 25 * 1000)
 })
 
 test('(session,turn,step) 去重:同键先到样本生效,重复报告吞掉', async () => {
@@ -217,14 +314,14 @@ test('无 step/start 起点的 usage 样本不带 durationMs', async () => {
   assert.equal(store.samples[0].durationMs, undefined)
 })
 
-test('retry-started 重置起点:时长只含最终尝试', async () => {
+test('retry 不重置起点:TTFT 含失败尝试,decode 段自成功首 token 起', async () => {
   const { ctx, store } = liveCollector()
   const start = local(2026, 8, 2, 10, 0)
   const retryAt = start + 60 * 1000
-  const sampleAt = retryAt + 5 * 1000
   ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
   ctx.emit('session/event', session('s1'), ev('llm/retry-started', 2, retryAt, { turn: 0, step: 0 }))
-  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, sampleAt, {
+  ctx.emit('session/event', session('s1'), attempt(3, retryAt + 3 * 1000, 0, 0, [textRun(retryAt + 5 * 1000, ['好'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 4, retryAt + 35 * 1000, {
     turn: 0,
     step: 0,
     usage: usage(),
@@ -232,7 +329,203 @@ test('retry-started 重置起点:时长只含最终尝试', async () => {
   }))
   await tick()
   const usageSample = store.samples.find((sample) => !sample.request)
-  assert.equal(usageSample.durationMs, 5000)
+  assert.equal(usageSample.ttftMs, 65 * 1000)
+  assert.equal(usageSample.durationMs, 30 * 1000)
+})
+
+test('零 TTFT(起点即出 token)附 ttftMs 为 0', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 30 * 1000, 0, 0, [textRun(start, ['快'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, start + 30 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.ttftMs, 0)
+  assert.equal(usageSample.durationMs, 30 * 1000)
+})
+
+test('时刻倒挂防回拨:首 token 晚于汇报,durationMs 钳 0 不附,ttftMs 照常', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 50 * 1000, 0, 0, [textRun(start + 50 * 1000, ['晚'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, start + 3 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.durationMs, undefined)
+  assert.equal(usageSample.decodeTokens, undefined)
+  assert.equal(usageSample.ttftMs, 50 * 1000)
+})
+
+test('时刻倒挂防回拨:首 token 早于起点,ttftMs 钳 0 照常计步,durationMs 照常', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 1 * 1000, 0, 0, [textRun(start - 5 * 1000, ['回拨'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, start + 3 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.ttftMs, 0)
+  assert.equal(usageSample.durationMs, 8 * 1000)
+})
+
+test('usage 缺 outputTokens:不建 decode 配对(官方守卫),ttft 照常', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 30 * 1000, 0, 0, [textRun(start + 10 * 1000, ['早'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage({ outputTokens: undefined }),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.outputTokens, 0)
+  assert.equal(usageSample.durationMs, undefined)
+  assert.equal(usageSample.decodeTokens, undefined)
+  assert.equal(usageSample.ttftMs, 10 * 1000)
+})
+
+test('重复报告不重复补发 timing:chunk → message → 重复 message 恰一条增量', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/chunk', 2, start + 30 * 1000, {
+    turn: 0,
+    step: 0,
+    chunk: { type: 'usage', usage: usage() },
+  }))
+  ctx.emit('session/event', session('s1'), attempt(3, start + 35 * 1000, 0, 0, [textRun(start + 10 * 1000, ['好'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 4, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage({ inputTokens: 999 }),
+    message: {},
+  }))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 5, start + 41 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const timingSamples = store.samples.filter((sample) => !sample.request && sample.decodeTokens !== undefined)
+  assert.equal(timingSamples.length, 1)
+  assert.equal(timingSamples[0].decodeTokens, 20)
+  assert.equal(timingSamples[0].durationMs, 30 * 1000)
+  assert.equal(timingSamples[0].ttftMs, 10 * 1000)
+})
+
+test('message 首发后到达的 chunk usage 不补 timing', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), attempt(2, start + 35 * 1000, 0, 0, [textRun(start + 10 * 1000, ['好'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 3, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  ctx.emit('session/event', session('s1'), ev('assistant/chunk', 4, start + 41 * 1000, {
+    turn: 0,
+    step: 0,
+    chunk: { type: 'usage', usage: usage() },
+  }))
+  await tick()
+  const usageSamples = store.samples.filter((sample) => !sample.request)
+  assert.equal(usageSamples.length, 1)
+  assert.equal(usageSamples[0].decodeTokens, 20)
+  assert.equal(usageSamples[0].durationMs, 30 * 1000)
+})
+
+test('chunk 非零后 message usage 全零仍补发 timing', async () => {
+  const { ctx, store } = liveCollector()
+  const start = local(2026, 8, 2, 10, 0)
+  const zeroUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  ctx.emit('session/event', session('s1'), ev('step/start', 1, start, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('assistant/chunk', 2, start + 30 * 1000, {
+    turn: 0,
+    step: 0,
+    chunk: { type: 'usage', usage: usage() },
+  }))
+  ctx.emit('session/event', session('s1'), attempt(3, start + 35 * 1000, 0, 0, [textRun(start + 10 * 1000, ['好'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 4, start + 40 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: zeroUsage,
+    message: {},
+  }))
+  await tick()
+  const timingSamples = store.samples.filter((sample) => !sample.request && sample.ttftMs !== undefined)
+  assert.equal(timingSamples.length, 1)
+  assert.equal(timingSamples[0].inputTokens, 0)
+  assert.equal(timingSamples[0].ttftMs, 10 * 1000)
+  assert.equal(timingSamples[0].decodeTokens, 0)
+  assert.equal(timingSamples[0].durationMs, 30 * 1000)
+})
+
+test('缺 turn/step 的 message 带 stream:首发全量样本含 timing 且不污染去重集合', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 1, t + 30 * 1000, {
+    usage: usage(),
+    stream: [textRun(t, ['早'])],
+    message: {},
+  }))
+  await tick()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.samples[0].durationMs, 30 * 1000)
+  assert.equal(store.samples[0].ttftMs, undefined)
+})
+
+test('有首 token 无起点:durationMs 附而 ttftMs 不附', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), attempt(1, t + 10 * 1000, 0, 0, [textRun(t, ['早'])]))
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 2, t + 30 * 1000, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  const usageSample = store.samples.find((sample) => !sample.request)
+  assert.equal(usageSample.durationMs, 30 * 1000)
+  assert.equal(usageSample.ttftMs, undefined)
+})
+
+test('无任何 stream 信息不附时长与首字(存量超旧日志形态)', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 1, t, {
+    turn: 0,
+    step: 0,
+    usage: usage(),
+    message: {},
+  }))
+  await tick()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.samples[0].durationMs, undefined)
+  assert.equal(store.samples[0].ttftMs, undefined)
 })
 
 test('同时刻零时长不附 durationMs,request 标记样本不带时长', async () => {
@@ -519,14 +812,15 @@ test('回扫:无边界会话全量重放,归因与游标写回', async () => {
   assert.equal(collector.status().scannedSessions, 1)
 })
 
-test('回扫:重放路径同样附加 durationMs', async () => {
+test('回扫:重放路径同样产出 decode 口径时长与首字', async () => {
   const start = local(2026, 8, 2, 14, 0)
   const persistence = fakePersistence([{
     id: 's1',
     events: [
       ev('request/context', 0, start, { provider: 'deepseek', model: 'chat' }),
       ev('step/start', 1, start, { turn: 0, step: 0 }),
-      ev('assistant/message', 2, start + 7 * 1000, {
+      attempt(2, start + 5 * 1000, 0, 0, [textRun(start + 2 * 1000, ['回'])]),
+      ev('assistant/message', 3, start + 7 * 1000, {
         turn: 0,
         step: 0,
         usage: usage(),
@@ -538,7 +832,8 @@ test('回扫:重放路径同样附加 durationMs', async () => {
   const collector = new UsageCollector(fakeCtx({ persistence }), store)
   await collector.backfill(persistence, fakeSessions())
   const usageSample = store.samples.find((sample) => !sample.request)
-  assert.equal(usageSample.durationMs, 7000)
+  assert.equal(usageSample.durationMs, 5 * 1000)
+  assert.equal(usageSample.ttftMs, 2 * 1000)
 })
 
 test('回扫:已入游标会话不再重扫', async () => {
