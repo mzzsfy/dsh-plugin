@@ -15,6 +15,7 @@ import {
   CONDITION_KINDS as hostConditionKinds,
   TOKENS_PER_MILLION as hostTokensPerMillion,
 } from '../src/pricing.js'
+import { refOf as hostRefOf } from '../src/collector.js'
 
 const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
@@ -27,6 +28,8 @@ const {
   CURRENCIES: clientCurrencies,
   CONDITION_KINDS: clientConditionKinds,
   TOKENS_PER_MILLION: clientTokensPerMillion,
+  MODEL_UNROUTED: clientModelUnrouted,
+  turnModelOf: clientTurnModelOf,
 } = core
 
 // 本地时区固定时刻(2026-03-15 为周日):同一 Date 实例喂双侧
@@ -299,4 +302,27 @@ test(`costOf 双侧一致(${COST_VECTORS.length} 向量)`, () => {
     assert.deepEqual(client, host, vector.name)
     assert.deepEqual(host, vector.expected, vector.name)
   }
+})
+
+// 路由引用键双实现同源:采集器 refOf(样本 model 键)与 client 注入点B turnModelOf(回合计价键)
+// 双全拼两段、仅 model 用裸名、多 route 取首条;键不成立时两侧各按自身约定降级
+// (refOf→undefined,turnModelOf→全通配键),该场景单独断言各自约定值
+const REF_VECTORS = [
+  { name: '双全拼两段', route: { provider: 'deepseek', model: 'deepseek-chat' }, expected: 'deepseek/deepseek-chat' },
+  { name: '仅 model 用裸名', route: { model: 'm' }, expected: 'm' },
+  { name: 'provider 空串按裸名', route: { provider: '', model: 'm' }, expected: 'm' },
+  { name: 'provider 非空 model 空串不成立', route: { provider: 'p', model: '' }, expected: undefined },
+  { name: '空 route 对象不成立', route: {}, expected: undefined },
+  { name: '多 route 取首条', route: { provider: 'a', model: 'x' }, tail: { provider: 'b', model: 'y' }, expected: 'a/x' },
+]
+
+test(`路由引用键双侧一致(${REF_VECTORS.length} 向量)`, () => {
+  for (const vector of REF_VECTORS) {
+    const routes = vector.tail ? [vector.route, vector.tail] : [vector.route]
+    assert.equal(hostRefOf(vector.route), vector.expected, vector.name)
+    assert.equal(clientTurnModelOf({ routes }), vector.expected ?? clientModelUnrouted, vector.name)
+  }
+  assert.equal(hostRefOf(null), undefined)
+  assert.equal(clientTurnModelOf({ routes: [] }), clientModelUnrouted)
+  assert.equal(clientTurnModelOf(null), clientModelUnrouted)
 })

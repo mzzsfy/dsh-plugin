@@ -57,6 +57,17 @@ test('反查:非数组与空列表返回 null', () => {
   assert.equal(turnTokenUsageOfMessage([], 'm-1'), null)
 })
 
+test('反查:chat 节点表 Map 形态与数组等价', () => {
+  const tokenUsage = { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 }
+  const nodes = new Map([
+    ['k1', tailNode('m-0', { uncachedInputTokens: 9, outputTokens: 9, totalTokens: 18 })],
+    ['k2', tailNode('m-1', tokenUsage)],
+  ])
+  assert.equal(turnTokenUsageOfMessage(nodes, 'm-1'), tokenUsage)
+  assert.equal(turnTokenUsageOfMessage(new Map(), 'm-1'), null)
+  assert.equal(turnTokenUsageOfMessage({ size: 0 }, 'm-1'), null)
+})
+
 test('反查:单节点形状残缺跳过不抛,后续命中不受阻', () => {
   const hostile = { get kind() { throw new Error('boom') } }
   const tokenUsage = { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 }
@@ -65,8 +76,10 @@ test('反查:单节点形状残缺跳过不抛,后续命中不受阻', () => {
   assert.equal(turnTokenUsageOfMessage([null, 'x', 42], 'm-1'), null)
 })
 
-test('计价模型键取 routes 首个,缺失回退全通配键', () => {
-  assert.equal(turnModelOf({ routes: [{ provider: 'p', model: 'p/m' }] }), 'p/m')
+test('计价模型键:双全拼两段,仅 model 用裸名,双缺回退全通配键', () => {
+  assert.equal(turnModelOf({ routes: [{ provider: 'p', model: 'm' }] }), 'p/m')
+  assert.equal(turnModelOf({ routes: [{ model: 'm' }] }), 'm')
+  assert.equal(turnModelOf({ routes: [{ provider: 'p' }] }), MODEL_UNROUTED)
   assert.equal(turnModelOf({ routes: [] }), MODEL_UNROUTED)
   assert.equal(turnModelOf({}), MODEL_UNROUTED)
   assert.equal(turnModelOf(null), MODEL_UNROUTED)
@@ -85,7 +98,7 @@ test('routes 缺失模型键命中全通配规则', () => {
 test('芯片文本四桶全带:prompt 三桶入费用分母按价计', () => {
   const tokenUsage = {
     uncachedInputTokens: 8000, outputTokens: 1000, totalTokens: 10000,
-    cacheReadTokens: 1000, cacheWriteTokens: 0, routes: [{ provider: 'p', model: 'p/m' }],
+    cacheReadTokens: 1000, cacheWriteTokens: 0, routes: [{ provider: 'p', model: 'm' }],
   }
   const price = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }
   assert.equal(buildTurnCostChipText(zhT, tokenUsage, price, '¥'), '费用 ≈ ¥0.01')
@@ -129,8 +142,7 @@ test('注册指向官方动作行槽,turnTail 旧路径移除', () => {
   assert.ok(!CLIENT_SOURCE.includes('conversation.chat.turnTail'))
 })
 
-test('芯片样式镜像官方动作行显隐:历史悬停显现与焦点恢复', () => {
+test('芯片样式:显隐随官方动作行父级,不自绘重复规则', () => {
   assert.ok(CLIENT_SOURCE.includes('.ud-turn-cost{'))
-  assert.ok(CLIENT_SOURCE.includes('@media (hover:hover){[data-actions-reveal=hover] .ud-turn-cost{opacity:0'))
-  assert.ok(CLIENT_SOURCE.includes('[data-actions-reveal=hover]:hover .ud-turn-cost,[data-actions-reveal=hover]:focus-within .ud-turn-cost{opacity:1}'))
+  assert.ok(!CLIENT_SOURCE.includes('[data-actions-reveal=hover] .ud-turn-cost'))
 })

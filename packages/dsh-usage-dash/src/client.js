@@ -1239,30 +1239,41 @@ function costTitleText(t, unpriced) {
 // ===== 注入点B:回合费用芯片(官方动作行 assistant-actions 槽条目,赞踩/上下文跳转同排) =====
 // 排序取上下文插件条目(20)之后,贴近尾部用量/用时芯片一侧
 const TURN_COST_CHIP_ORDER = 20 + 10
-const TURN_COST_REVEAL_MS = 80
 
-// messageId 反查:turn-tail 视图节点 data.closing.finalNode.messageId 即该轮收尾消息,单次扫描命中
+// messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
+// 视图节点 data 只带 closing,全量回合数据(含 tokenUsage)在回合位置数据(location.turn.data.get('turn-tail')),
+// 位置数据缺失(旧宿主形状差异)时回退视图节点本体字段
 function turnTokenUsageOfMessage(nodes, messageId) {
-  if (!Array.isArray(nodes)) return null
-  for (const node of nodes) {
+  const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
+  if (!Array.isArray(list)) return null
+  for (const node of list) {
     try {
       if (node?.kind !== 'turn-tail') continue
       if (node.data?.closing?.finalNode?.messageId !== messageId) continue
-      return node.data.tokenUsage ?? null
+      const turnData = node.location?.turn?.data
+      const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
+      return tail?.tokenUsage ?? node.data.tokenUsage ?? null
     } catch { /* 单节点形状残缺跳过,扫描继续 */ }
   }
   return null
 }
 
-// 计价模型键:routes 首个 route.model,缺席回退全通配键(与注入点A 同款)
-const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_UNROUTED
+// 计价模型键:routes 首条按官方 messageRoute 分离字段拼两段键,与采集器 refOf 双实现同源
+// (官方 source.provider/model 是分离字段,routes[].model 是裸模型名,展示侧才拼 provider),
+// 仅 model 用裸名命中 */model 档,双缺回退全通配键;多 route 取首条(单轮估算口径)
+const turnModelOf = (tokenUsage) => {
+  const route = tokenUsage?.routes?.[0]
+  if (!route) return MODEL_UNROUTED
+  if (route.provider && route.model) return `${route.provider}/${route.model}`
+  return route.model || MODEL_UNROUTED
+}
 
 // 可选桶(cacheRead/cacheWrite)仅部分 provider 上报,缺失按 0 计入摘要与费用
 const turnReportedBucket = (value) => (value ?? 0)
 
-// 摘要计费输入 = prompt 侧三桶(官方 billing 分母口径)
+// 摘要计费输入 = prompt 侧三桶(官方 billing 分母口径),核心桶缺省同按 0 保证降级形态对称
 function turnBilledInputTokens(tokenUsage) {
-  return tokenUsage.uncachedInputTokens
+  return turnReportedBucket(tokenUsage.uncachedInputTokens)
     + turnReportedBucket(tokenUsage.cacheReadTokens)
     + turnReportedBucket(tokenUsage.cacheWriteTokens)
 }
@@ -1283,7 +1294,7 @@ function turnCostTitleText(t, tokenUsage) {
   const notes = [
     t('stats.tokens', {
       input: formatTokensCompact(turnBilledInputTokens(tokenUsage), t),
-      output: formatTokensCompact(tokenUsage.outputTokens, t),
+      output: formatTokensCompact(turnReportedBucket(tokenUsage.outputTokens), t),
     }),
     t('turnCostTitle'),
   ]
@@ -1746,8 +1757,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
 .ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
+/* 芯片在官方动作行 div 内部,历史轮悬停/焦点显隐随父级 data-actions-reveal,无需自绘规则 */
 .ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
-@media (hover:hover){[data-actions-reveal=hover] .ud-turn-cost{opacity:0;transition:opacity ${TURN_COST_REVEAL_MS}ms}[data-actions-reveal=hover]:hover .ud-turn-cost,[data-actions-reveal=hover]:focus-within .ud-turn-cost{opacity:1}}
 `
 
     function ensureStyle(document) {
@@ -2238,7 +2249,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     // 受费用显示开关;价格异步首帧未回不渲染,回包后补渲染;显隐节奏随官方 data-actions-reveal
     const CostChip = React.memo(function CostChip({ messageId, useChat, t = defaultT }) {
       if (typeof useChat !== 'function') return null
-      const legacy = useChat((state) => (state && typeof state === 'object') ? state.legacy : undefined)
+      const chatNodes = useChat((state) => (state && typeof state === 'object') ? state.nodes : undefined)
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const [pricingRules, setPricingRules] = useState(null)
@@ -2250,7 +2261,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         return () => { alive = false }
       }, [])
       const matched = typeof messageId === 'string' && messageId !== ''
-        ? turnTokenUsageOfMessage(legacy?.nodes, messageId)
+        ? turnTokenUsageOfMessage(chatNodes, messageId)
         : null
       if (!matched || !prefs.costDisplay || pricingRules === null) return null
       const price = matchPrice(pricingRules, turnModelOf(matched), new Date())

@@ -95,8 +95,9 @@ function sessionIdOf(target) {
   return typeof id === 'string' && id !== '' ? id : UNKNOWN_SESSION_ID
 }
 
-// 规范 provider/model 引用:双全拼引用,仅 model 用裸名
-function refOf(route) {
+// 规范 provider/model 引用:双全拼引用,仅 model 用裸名;
+// 与 client 侧注入点B turnModelOf 双实现同源(routes[].model 是裸模型名,展示侧才拼 provider),改一侧必须同步 parity
+export function refOf(route) {
   if (!route) return undefined
   if (route.provider && route.model) return `${route.provider}/${route.model}`
   return route.model || undefined
