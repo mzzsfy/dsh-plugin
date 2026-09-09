@@ -198,6 +198,7 @@ const MESSAGES_ZH = {
   priceCacheRead: '缓存读',
   priceCacheWrite: '缓存写',
   addCondition: '添加条件',
+  confirmDelete: '确认删除',
   deleteCondition: '删除条件',
   condKind: '条件类型',
   condDailyWindow: '每日时段',
@@ -332,6 +333,7 @@ const MESSAGES_EN = {
   priceCacheRead: 'Cache read',
   priceCacheWrite: 'Cache write',
   addCondition: 'Add condition',
+  confirmDelete: 'Confirm delete',
   deleteCondition: 'Remove condition',
   condKind: 'Condition kind',
   condDailyWindow: 'Daily window',
@@ -1661,6 +1663,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       model: ['M5 5h14v14H5Z', 'M9 9h6v6H9Z', 'M9 2v3', 'M15 2v3', 'M9 19v3', 'M15 19v3', 'M2 9h3', 'M2 15h3', 'M19 9h3', 'M19 15h3'],
       rate: ['M22 12h-4l-3 9L9 3l-3 9H2'],
       days: ['M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z', 'M16 3v4', 'M8 3v4', 'M3 11h18'],
+      trash: ['M3 6h18', 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M10 11v6', 'M14 11v6'],
     }
 
     function Icon({ paths }) {
@@ -1669,6 +1672,29 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         stroke: 'currentColor', strokeWidth: ICON_STROKE_WIDTH,
         strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
       }, paths.map((d, index) => h('path', { key: index, d })))
+    }
+
+    // 危险删除按钮:首点进武装态(垃圾桶变"确认删除"文字),再点才执行,超时自动解除
+    function DeleteArmedButton({ labelKey, confirmKey, onConfirm, t = defaultT }) {
+      const [armed, setArmed] = useState(false)
+      const armedTimerRef = useRef(null)
+      useEffect(() => () => {
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+      }, [])
+      const click = () => {
+        if (!armed) {
+          setArmed(true)
+          armedTimerRef.current = setTimeout(() => setArmed(false), REBUILD_CONFIRM_MS)
+          return
+        }
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+        setArmed(false)
+        onConfirm()
+      }
+      return h('button', {
+        className: cx('ud-btn ud-btn--text', armed && 'ud-delete-armed'), type: 'button', onClick: click,
+        'aria-label': t(labelKey), title: t(labelKey),
+      }, armed ? t(confirmKey) : h(Icon, { paths: ICONS.trash }))
     }
 
     const STYLE_CSS = `
@@ -1694,6 +1720,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-icon-btn{padding:0 12px}
 .ud-icon{display:inline-flex;align-items:center;justify-content:center}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
+.ud-delete-armed{color:var(--dsw-alias-state-error-primary);font-size:12px;white-space:nowrap}
 .ud-error{border:1px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:8px;padding:8px 12px;font-size:12px}
 .ud-loading{color:var(--dsw-alias-label-tertiary);text-align:center;padding:32px 0}
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
@@ -1817,11 +1844,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-head .ud-field{flex:1}
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-rule-conds{display:flex;flex-direction:column;gap:6px}
-.ud-cond{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap}
+.ud-cond{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 /* specificity 须高于 .ud-input 的 width:100%,否则类型下拉撑满整行把字段区挤到下一行 */
 .ud-cond .ud-cond-kind{width:auto;min-width:88px;flex:0 0 auto}
-.ud-cond-fields{display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
-.ud-cond-fields .ud-field{flex:0 1 auto}
+.ud-cond-fields{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
+.ud-cond-fields .ud-field{flex-direction:row;align-items:center;gap:4px;flex:0 1 auto}
 .ud-cond-fields .ud-input{width:auto}
 .ud-cond-add{display:flex;gap:6px;flex-wrap:wrap}
 .ud-field{display:flex;flex-direction:column;gap:3px;min-width:0}
@@ -2511,10 +2538,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(1),
             'aria-label': t('moveDown'), title: t('moveDown'),
           }, '↓') : null,
-          h('button', {
-            className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
-            'aria-label': t('deleteRule'), title: t('deleteRule'),
-          }, '×')),
+          h(DeleteArmedButton, { labelKey: 'deleteRule', confirmKey: 'confirmDelete', onConfirm: onRemove, t })),
         h('div', { className: 'ud-rule-conds' },
           (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
           h('div', { className: 'ud-cond-add' },
@@ -2542,10 +2566,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               onChange: (event) => onModelChange(event.target.value),
             }),
             modelError ? h('span', { className: 'ud-field-error' }, t(modelError)) : null),
-          h('button', {
-            className: 'ud-btn ud-btn--text', type: 'button', onClick: onGroupRemove,
-            'aria-label': t('deleteGroup'), title: t('deleteGroup'),
-          }, '×')),
+          h(DeleteArmedButton, { labelKey: 'deleteGroup', confirmKey: 'confirmDelete', onConfirm: onGroupRemove, t })),
         h('div', { className: 'ud-rule-group-slots' },
           defaultSlot ? h('div', { className: 'ud-rule ud-rule-default' },
             h('div', { className: 'ud-slot-head' },
