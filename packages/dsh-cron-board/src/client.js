@@ -444,7 +444,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         h('div', { className: 'cb-field cb-field--wide' },
           h('textarea', { style: { minHeight: '120px' }, placeholder: 'NAME=value #备注', value: text, onChange: (e) => setText(e.target.value) })),
         preview ? h('div', { className: 'cb-preview' },
-          '解析 ' + preview.parsed.length + ' 条,非法 ' + preview.invalid.length + ' 条') : null,
+          '解析 ' + preview.parsed.length + ' 条,非法 ' + preview.invalid + ' 条') : null,
         error ? h('div', { className: 'cb-hint', style: { color: '#e5484d' } }, error) : null,
         h('div', { className: 'cb-toolbar' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
@@ -503,7 +503,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // —— 日志 Tab ——
-    function LogsTab({ jobs, reload }) {
+    function LogsTab({ jobs, reload, reloadFlag }) {
       const [jobId, setJobId] = useState(jobs.length > 0 ? jobs[0].id : null)
       const [runs, setRuns] = useState([])
       const [logText, setLogText] = useState(null)
@@ -516,7 +516,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           if (alive && outcome.ok) setRuns(outcome.data.items)
         })
         return () => { alive = false }
-      }, [jobId, reload])
+      }, [jobId, reloadFlag])
 
       const openLog = async (run) => {
         const outcome = await request('GET', 'runs/' + run.runId + '/log')
@@ -592,7 +592,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             (status.nextAt ? ' · 下次 ' + relativeTime(status.nextAt, now) : '')) : null),
         tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload }) : null,
         tab === 'envs' ? h(EnvsTab, { key: 'envs', envs, reload }) : null,
-        tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload }) : null)
+        tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag }) : null)
     }
 
     return {
