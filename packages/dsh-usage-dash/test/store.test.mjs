@@ -94,17 +94,17 @@ const tokenSample = (time, extra = {}) => ({
 })
 
 test('分钟保留天数默认常量与上限和计划一致', () => {
-  assert.equal(DEFAULT_MINUTE_RETENTION_DAYS, 2)
-  assert.equal(MINUTE_RETENTION_MAX_DAYS, 2)
+  assert.equal(DEFAULT_MINUTE_RETENTION_DAYS, 7)
+  assert.equal(MINUTE_RETENTION_MAX_DAYS, 7)
   assert.equal(HOUR_RETENTION_DAYS, 15)
 })
 
 test('分钟保留值归一:非法回落默认,超上限截断,0 保留', () => {
   assert.equal(clampMinuteRetentionDays(1), 1)
   assert.equal(clampMinuteRetentionDays(0), 0)
-  assert.equal(clampMinuteRetentionDays(7), 2)
-  assert.equal(clampMinuteRetentionDays(-1), 2)
-  assert.equal(clampMinuteRetentionDays('x'), 2)
+  assert.equal(clampMinuteRetentionDays(30), 7)
+  assert.equal(clampMinuteRetentionDays(-1), 7)
+  assert.equal(clampMinuteRetentionDays('x'), 7)
 })
 
 test('桶键生成含补零,分钟桶对齐 10 分钟', () => {
@@ -134,6 +134,7 @@ test('token 样本同刻落三粒度三行,行内无 g 字段', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   const keys = ['D|2026-08-02', 'H|2026-08-02T14', 'M|2026-08-02T14:30'].map(
     (prefix) => `${prefix}|deepseek|deepseek/deepseek-chat`,
   )
@@ -155,6 +156,7 @@ test('turn 样本落合成行:provider default 与 model (turns)', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record({ time: local(2026, 8, 2, 14, 37), turn: true })
+  await store.flushNow()
   const seen = domain.rows.get('D|2026-08-02|default|(turns)')
   assert.ok(seen)
   assert.equal(seen.turns, 1)
@@ -166,6 +168,7 @@ test('request 样本只计请求数,无归因落 (unknown)', async () => {
   const store = new UsageStore(facilityOf(domain))
   await store.record({ time: local(2026, 8, 2, 14, 37), request: true, model: 'deepseek-chat' })
   await store.record({ time: local(2026, 8, 2, 14, 38), request: true })
+  await store.flushNow()
   const labelled = domain.rows.get('D|2026-08-02|default|deepseek-chat')
   assert.ok(labelled)
   assert.equal(labelled.requests, 1)
@@ -175,27 +178,78 @@ test('request 样本只计请求数,无归因落 (unknown)', async () => {
   assert.equal(unknown.requests, 1)
 })
 
+test('token 样本时长落三粒度累加,request 与 turn 行时长恒 0', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  await store.record(tokenSample(at, { durationMs: 6500 }))
+  await store.record(tokenSample(at + 1000, { durationMs: 2500 }))
+  await store.record({ time: at, request: true, model: 'deepseek/deepseek-chat' })
+  await store.record({ time: at, turn: true })
+  await store.flushNow()
+  const daily = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(daily.outputTokens, 40)
+  assert.equal(daily.durationMs, 9000)
+  const hourly = domain.rows.get('H|2026-08-02T14|deepseek|deepseek/deepseek-chat')
+  assert.equal(hourly.durationMs, 9000)
+  const minute = domain.rows.get('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat')
+  assert.equal(minute.durationMs, 9000)
+  const requestRow = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(requestRow.requests, 1)
+  const turnRow = domain.rows.get('D|2026-08-02|default|(turns)')
+  assert.equal(turnRow.durationMs, 0)
+})
+
+test('老行缺 durationMs 字段:增量求和不产 NaN', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  const key = 'D|2026-08-02|deepseek|deepseek/deepseek-chat'
+  await store.record(tokenSample(at))
+  await store.flushNow()
+  // 模拟存量旧格式行:回写去掉 durationMs 字段
+  const stored = domain.rows.get(key)
+  delete stored.durationMs
+  await store.record(tokenSample(at + 1000, { durationMs: 3000 }))
+  await store.flushNow()
+  const seen = domain.rows.get(key)
+  assert.equal(seen.durationMs, 3000)
+  assert.equal(seen.outputTokens, 40)
+})
+
 test('missing-record 首写竞态:put 种子后重试写入真值', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   assert.equal(domain.stats.puts, 3)
   const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
   assert.equal(seen.inputTokens, 10)
 })
 
-test('allSettled 聚合:单粒度失败上抛且其余粒度不丢', async () => {
+test('flush 中单粒度失败:错误经 onFlushError 上抛,失败行留 pending 重试,成功粒度落盘', async () => {
+  const failedKeys = new Set()
   const domain = fakeDomain({
-    failUpdate: (key) => (key.startsWith('H|') ? new Error('simulated hour failure') : null),
+    failUpdate: (key) => {
+      if (!key.startsWith('H|') || failedKeys.has(key)) return null
+      failedKeys.add(key)
+      return new Error('simulated hour failure')
+    },
   })
   const store = new UsageStore(facilityOf(domain))
-  await assert.rejects(
-    store.record(tokenSample(local(2026, 8, 2, 14, 37))),
-    (err) => err.name === 'AggregateError' && err.errors.length === 1,
-  )
+  const errors = []
+  store.onFlushError = (err) => errors.push(err)
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   assert.ok(domain.rows.has('D|2026-08-02|deepseek|deepseek/deepseek-chat'))
   assert.ok(domain.rows.has('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat'))
   assert.equal(domain.rows.has('H|2026-08-02T14|deepseek|deepseek/deepseek-chat'), false)
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].name, 'AggregateError')
+  assert.equal(errors[0].errors.length, 1)
+  await store.flushNow()
+  assert.ok(domain.rows.has('H|2026-08-02T14|deepseek|deepseek/deepseek-chat'))
 })
 
 test('非 missing 错误不触发种子重试', async () => {
@@ -204,11 +258,15 @@ test('非 missing 错误不触发种子重试', async () => {
     failUpdate: (candidate) => (candidate === key ? new Error('backend write failed') : null),
   })
   const store = new UsageStore(facilityOf(domain))
-  await assert.rejects(
-    store.record(tokenSample(local(2026, 8, 2, 14, 37))),
-    (err) => err.name === 'AggregateError' && /backend write failed/.test(err.errors[0].message),
-  )
+  const errors = []
+  store.onFlushError = (err) => errors.push(err)
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
   assert.equal(domain.rows.has(key), false)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0].errors[0].message, /backend write failed/)
+  assert.equal(domain.stats.puts, 2)
 })
 
 test('rangeRows 按粒度前缀与桶串闭区间扫描', async () => {
@@ -256,16 +314,16 @@ test('保留窗口为 0 时分钟桶全部清理', async () => {
   assert.equal(domain.rows.has('D|2026-08-10|a|m'), true)
 })
 
-test('分钟保留超上限时 clamp 到 48h 窗口', async () => {
+test('分钟保留超上限时 clamp 到 7 天窗口', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
-  // clamp 后窗口起点 = 08-08T12:00,02 天前的桶一律清理,即使注入 30 天
-  await table.put('M|2026-08-05T00:00|a|m', rowOf('2026-08-05T00:00', 'a', 'm'))
-  await table.put('M|2026-08-08T12:00|a|m', rowOf('2026-08-08T12:00', 'a', 'm'))
+  // clamp 后窗口起点 = 08-03T12:00,7 天前的桶一律清理,即使注入 30 天
+  await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
+  await table.put('M|2026-08-03T12:00|a|m', rowOf('2026-08-03T12:00', 'a', 'm'))
   await store.pruneMinutes(30)
-  assert.equal(domain.rows.has('M|2026-08-05T00:00|a|m'), false)
-  assert.equal(domain.rows.has('M|2026-08-08T12:00|a|m'), true)
+  assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), false)
+  assert.equal(domain.rows.has('M|2026-08-03T12:00|a|m'), true)
 })
 
 test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async () => {
@@ -283,19 +341,22 @@ test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async
   assert.equal(domain.rows.has('M|2026-07-25T00:00|a|m'), true)
 })
 
-test('每日本地日首次写入触发清理,同日后续写入不重复触发', async () => {
+test('每日本地日首次 flush 触发清理,同日后续 flush 不重复触发', async () => {
   let clock = local(2026, 8, 10, 12, 0)
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain), { now: () => clock, retentionDays: () => 0 })
   const table = domain.table()
   await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
   await store.record(tokenSample(local(2026, 8, 10, 12, 0)))
+  await store.flushNow()
   assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), false)
   await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
   await store.record(tokenSample(local(2026, 8, 10, 12, 1)))
+  await store.flushNow()
   assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), true)
   clock = local(2026, 8, 11, 0, 0)
   await store.record(tokenSample(local(2026, 8, 11, 0, 0)))
+  await store.flushNow()
   assert.equal(domain.rows.has('M|2026-08-01T00:00|a|m'), false)
 })
 
@@ -394,4 +455,66 @@ test('globalThis 单例复用同实例,重置缝生效', () => {
   __resetSharedStoreForTests()
   assert.notEqual(sharedStore(facilityOf(fakeDomain())), first)
   __resetSharedStoreForTests()
+})
+
+// —— 写合并(write-behind):record 同步入 pending,flush 周期落盘 ——
+
+test('record 只入 pending 不产生持久化写,flushNow 后每脏行恰一次 update', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  assert.equal(domain.rows.size, 0)
+  await store.flushNow()
+  assert.equal(domain.rows.size, 3)
+  const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(seen.inputTokens, 10)
+})
+
+test('同桶多样本合并:pending 累加,一次 update 落全部计数', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.record(tokenSample(local(2026, 8, 2, 14, 38)))
+  await store.record(tokenSample(local(2026, 8, 2, 14, 39)))
+  await store.flushNow()
+  const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(seen.inputTokens, 30)
+  assert.equal(domain.stats.puts, 3)
+})
+
+test('flush 周期自动落盘', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain), { flushIntervalMs: 5 })
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(domain.rows.size, 3)
+})
+
+test('rangeRows 前自动 flush,读己之写', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  const rows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].inputTokens, 10)
+})
+
+test('reset 前 pending 先落盘再清表', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  await store.readyPromise()
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.reset(new Map())
+  assert.equal(domain.rows.size, 0)
+  assert.equal(domain.stats.puts, 3)
+})
+
+test('降级态 record 仍按调用失败', async () => {
+  const store = new UsageStore({ open: () => Promise.reject(new Error('domain already open')) })
+  await store.readyPromise()
+  await assert.rejects(store.record(tokenSample(local(2026, 8, 2, 14, 37))), /usage store degraded/)
 })

@@ -7,6 +7,7 @@ export const MAX_SLOTS = 2000
 
 const PAD_WIDTH = 2
 const PERCENT_SCALE = 100
+const MS_PER_SECOND = 1000
 
 const GRANULARITY_DAILY = 'D'
 const GRANULARITY_HOURLY = 'H'
@@ -115,8 +116,18 @@ export function aggregateRange(rows, g, from, to) {
     slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
     slot.byProvider[row.provider] = (slot.byProvider[row.provider] ?? 0) + tokens
     const modelTotal = modelTotals.get(row.model)
-    if (modelTotal) modelTotal.tokens += tokens
-    else modelTotals.set(row.model, { provider: row.provider, tokens })
+    if (modelTotal) {
+      modelTotal.tokens += tokens
+      modelTotal.speedDurationMs += row.durationMs ?? 0
+      modelTotal.speedOutputTokens += row.durationMs ? row.outputTokens : 0
+    } else {
+      modelTotals.set(row.model, {
+        provider: row.provider,
+        tokens,
+        speedDurationMs: row.durationMs ?? 0,
+        speedOutputTokens: row.durationMs ? row.outputTokens : 0,
+      })
+    }
     providerTotals.set(row.provider, (providerTotals.get(row.provider) ?? 0) + tokens)
   }
   const totals = { tokens: 0, requests: 0, turns: 0, cacheHit: 0, cacheMiss: 0 }
@@ -127,8 +138,16 @@ export function aggregateRange(rows, g, from, to) {
     totals.cacheHit += slot.cacheHit
     totals.cacheMiss += slot.cacheMiss
   }
+  // speed = 配对口径的输出 token ÷ 模型时长秒;仅时长>0 的行计入分子分母,
+  // 存量旧格式行只进 tokens 不进分母,无时长数据条目不挂 speed 字段
   const models = [...modelTotals.entries()]
-    .map(([model, agg]) => ({ model, provider: agg.provider, tokens: agg.tokens, percent: percentOf(agg.tokens, totals.tokens) }))
+    .map(([model, agg]) => ({
+      model,
+      provider: agg.provider,
+      tokens: agg.tokens,
+      percent: percentOf(agg.tokens, totals.tokens),
+      ...(agg.speedDurationMs > 0 ? { speed: agg.speedOutputTokens / (agg.speedDurationMs / MS_PER_SECOND) } : {}),
+    }))
     .sort((a, b) => b.tokens - a.tokens)
   const providers = [...providerTotals.entries()]
     .map(([provider, tokens]) => ({ provider, tokens, percent: percentOf(tokens, totals.tokens) }))

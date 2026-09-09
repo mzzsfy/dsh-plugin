@@ -9,7 +9,8 @@ export const OFF_LEVEL = 'off'
 export const INPUT_UNSET = 'unset'
 export const INPUT_TEXT = 'text'
 export const INPUT_TEXT_IMAGE = 'text-image'
-export const INPUT_MODES = [INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE]
+export const INPUT_IMAGE = 'image-only'
+export const INPUT_MODES = [INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE, INPUT_IMAGE]
 // 竞品 dsh-better-reasoning-effort 的 host autofill 写入痕迹:模型条目上的
 // 词汇表外标记字段,出现即说明竞品仍在运行,双写者并存。
 export const COMPETITOR_MARKERS = ['reasoningEffortsUnset', 'inputUnset']
@@ -54,17 +55,54 @@ export function draftsToEfforts(drafts, baselineValue) {
   return result
 }
 
-// input 数组 → 三态。未声明与空数组(schema 视为未回答)同为未声明。
+// input 数组 → 四态。未声明与空数组(schema 视为未回答)同为未声明;仅 image
+// (无 text)为纯图像输入(部分视觉网关不收文本)。非法成员仅不影响判定。
 export function inputToMode(value) {
   if (!Array.isArray(value) || value.length === 0) return INPUT_UNSET
-  return value.indexOf('image') >= 0 ? INPUT_TEXT_IMAGE : INPUT_TEXT
+  const hasText = value.indexOf('text') >= 0
+  const hasImage = value.indexOf('image') >= 0
+  if (hasText) return hasImage ? INPUT_TEXT_IMAGE : INPUT_TEXT
+  return hasImage ? INPUT_IMAGE : INPUT_UNSET
 }
 
-// 三态 → input 写回值(undefined 表示删除字段)。
+// 四态 → input 写回值(undefined 表示删除字段)。
 export function modeToInput(mode) {
   if (mode === INPUT_TEXT) return ['text']
   if (mode === INPUT_TEXT_IMAGE) return ['text', 'image']
+  if (mode === INPUT_IMAGE) return ['image']
   return undefined
+}
+
+// 保存前本地校验:非 off 档勾选但拼写为空白。空拼写会静默以档位名作线上值
+// (draftsToEfforts 语义),易被误当作"已填"。返回违规档位列表,空数组即通过;
+// off 档留空有专门语义(false / off:null),不参与此校验。
+export function invalidReasoningLevels(draft) {
+  const invalid = []
+  for (const level of EFFORT_LEVELS) {
+    if (level === OFF_LEVEL) continue
+    if (draft.checked[level] === true && String(draft.spellings[level] || '').trim().length === 0) {
+      invalid.push(level)
+    }
+  }
+  return invalid
+}
+
+// 一键草稿填充:只动内存草稿,写回仍走显式保存。仅补"未勾选任何档位"的模型
+// (即 reasoningEfforts 未声明的手声明模型,本插件核心场景):七档全勾、拼写
+// 留空(线上值 = 档位名)。已编辑(有勾选)与 inputMode 一律不碰,防覆盖既有声明。
+export function fillDrafts(drafts, models) {
+  const filled = new Map(drafts)
+  for (const model of Array.isArray(models) ? models : []) {
+    const key = String(model.id)
+    const draft = filled.get(key)
+    if (draft === undefined) continue
+    const hasChecked = EFFORT_LEVELS.some((level) => draft.checked[level] === true)
+    if (hasChecked) continue
+    const checked = {}
+    for (const level of EFFORT_LEVELS) checked[level] = true
+    filled.set(key, { ...draft, checked, spellings: { ...draft.spellings } })
+  }
+  return filled
 }
 
 // reasoningEfforts 基线的可表达形态:未声明(undefined)/ false / null / 纯对象。

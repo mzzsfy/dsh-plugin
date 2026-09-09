@@ -1,19 +1,14 @@
 // client 纯函数层测试:滚动窗口映射/信封解析/上限裁剪/文案/格式化/分组/柱状几何
 // Given/When/Then 场景内嵌于用例描述
-// client.js 为非模块 script(bundle 求值形态,禁 import/export),整源求值后按顶层声明名收集
+// client.js 为经典 script bundle(禁 import/export),整文件 IIFE 书挡;经 client-eval 剥壳后整源求值,按顶层声明名收集
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
 
-const CLIENT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
-const DECLARATION_NAMES = [
-  ...new Set(
-    [...CLIENT_SOURCE.matchAll(/^(?:const|function|let) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
-  ),
-]
-const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
+const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
 const {
   CHART_HEIGHT,
@@ -39,12 +34,16 @@ const {
   aggregateCurrencyOf,
   applyCurrencyToRules,
   cacheRateText,
+  coerceConditions,
+  coercePricingRules,
   costOf,
   costTitleText,
   createTranslator,
   daysInRange,
+  defaultCondition,
   defaultPricingRule,
   donutSegments,
+  pointStatsMatches,
   formatCompact,
   formatCost,
   formatDuration,
@@ -59,10 +58,12 @@ const {
   hourTickLabel,
   indexOfDay,
   isEmptyRange,
+  logTimeOf,
   matchPrice,
   maxSlotsFor,
   minuteTickLabel,
   modelSegmentLabel,
+  modelSpeedText,
   modelNameOf,
   niceTicks,
   otherDetailItems,
@@ -74,7 +75,6 @@ const {
   resolveMinuteRange,
   shortDay,
   smoothPath,
-  statusLineActive,
   tipPlace,
   translateWith,
   trimSlots,
@@ -91,7 +91,7 @@ const NOW = new Date(2026, 2, 15, 14, 30, 45)
 
 test('day 预设映射为最近 N 天闭区间', () => {
   assert.deepEqual(resolveDayRange('7', NOW), { from: '2026-03-09', to: '2026-03-15' })
-  assert.deepEqual(resolveDayRange('14', NOW), { from: '2026-03-02', to: '2026-03-15' })
+  assert.deepEqual(resolveDayRange('30', NOW), { from: '2026-02-14', to: '2026-03-15' })
 })
 
 test('day 预设跨年与跨月边界', () => {
@@ -105,7 +105,7 @@ test('day 90 天预设起点回卷上年', () => {
 
 test('hour 预设 now-N 舍入到整点桶起点', () => {
   assert.deepEqual(resolveHourRange('24h', NOW), { from: '2026-03-14T14', to: '2026-03-15T14' })
-  assert.deepEqual(resolveHourRange('72h', NOW), { from: '2026-03-12T14', to: '2026-03-15T14' })
+  assert.deepEqual(resolveHourRange('3d', NOW), { from: '2026-03-12T14', to: '2026-03-15T14' })
 })
 
 test('hour 预设跨日且窗口起点落整点', () => {
@@ -113,36 +113,64 @@ test('hour 预设跨日且窗口起点落整点', () => {
 })
 
 test('minute 预设起点对齐 10 分钟桶,to 保持原始分钟', () => {
-  assert.deepEqual(resolveMinuteRange('60m', NOW), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
-  assert.deepEqual(resolveMinuteRange('360m', NOW), { from: '2026-03-15T08:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('3h', NOW), { from: '2026-03-15T11:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('24h', NOW), { from: '2026-03-14T14:30', to: '2026-03-15T14:30' })
   const offGrid = new Date(2026, 2, 15, 14, 37, 20)
-  assert.deepEqual(resolveMinuteRange('60m', offGrid), { from: '2026-03-15T13:30', to: '2026-03-15T14:37' })
+  assert.deepEqual(resolveMinuteRange('3h', offGrid), { from: '2026-03-15T11:30', to: '2026-03-15T14:37' })
 })
 
 test('minute 预设整桶边界不再回退', () => {
-  assert.deepEqual(resolveMinuteRange('60m', new Date(2026, 2, 15, 14, 30, 0)), { from: '2026-03-15T13:30', to: '2026-03-15T14:30' })
+  assert.deepEqual(resolveMinuteRange('3h', new Date(2026, 2, 15, 14, 30, 0)), { from: '2026-03-15T11:30', to: '2026-03-15T14:30' })
 })
 
 test('预设定义表覆盖三视图', () => {
-  assert.deepEqual(DAY_PRESETS, ['7', '14', '30', '90'])
-  assert.deepEqual(HOUR_PRESETS, ['24h', '48h', '72h'])
-  assert.deepEqual(MINUTE_PRESETS, ['60m', '180m', '360m'])
+  assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
+  assert.deepEqual(HOUR_PRESETS, ['24h', '3d', '7d', '15d'])
+  assert.deepEqual(MINUTE_PRESETS, ['3h', '24h', '3d', '7d'])
+})
+
+test('时/分挡位文案键逐挡齐备,含跨表同 id 挡位', () => {
+  // Given 时/分挡位表存在同 id('24h') When 逐挡查词典 Then 两语言均有对应键,漏配即回退键名
+  for (const id of HOUR_PRESETS) {
+    assert.notEqual(MESSAGES_ZH[`hourPreset.${id}`], undefined, `zh hourPreset.${id}`)
+    assert.notEqual(MESSAGES_EN[`hourPreset.${id}`], undefined, `en hourPreset.${id}`)
+  }
+  for (const id of MINUTE_PRESETS) {
+    assert.notEqual(MESSAGES_ZH[`minutePreset.${id}`], undefined, `zh minutePreset.${id}`)
+    assert.notEqual(MESSAGES_EN[`minutePreset.${id}`], undefined, `en minutePreset.${id}`)
+  }
+})
+
+test('pointStats 缓存命中须视图与挡位双匹配', () => {
+  // Given 同挡位 id 跨视图('24h') When 判定缓存命中 Then 视图不同即不命中,防误用他端点数据
+  const cached = { view: 'hour', preset: '24h', value: { daily: [] } }
+  assert.equal(pointStatsMatches(cached, 'hour', '24h'), true)
+  assert.equal(pointStatsMatches(cached, 'minute', '24h'), false)
+  assert.equal(pointStatsMatches(cached, 'hour', '3d'), false)
+  assert.equal(pointStatsMatches(null, 'hour', '24h'), false)
 })
 
 test('每视图渲染上限等于闭区间桶数', () => {
   assert.equal(maxSlotsFor('day', '90'), DAY_MAX_SLOTS)
   assert.equal(maxSlotsFor('hour', '24h'), 25)
-  assert.equal(maxSlotsFor('hour', '48h'), 49)
-  assert.equal(maxSlotsFor('hour', '72h'), 73)
-  assert.equal(maxSlotsFor('minute', '60m'), 7)
-  assert.equal(maxSlotsFor('minute', '180m'), 19)
-  assert.equal(maxSlotsFor('minute', '360m'), 37)
+  assert.equal(maxSlotsFor('hour', '3d'), 73)
+  assert.equal(maxSlotsFor('hour', '7d'), 169)
+  assert.equal(maxSlotsFor('hour', '15d'), 361)
+  assert.equal(maxSlotsFor('minute', '3h'), 19)
+  assert.equal(maxSlotsFor('minute', '24h'), 145)
+  assert.equal(maxSlotsFor('minute', '3d'), 433)
+  assert.equal(maxSlotsFor('minute', '7d'), 1009)
 })
 
 test('trim 超上限裁最旧且恰好达上限不裁', () => {
   const slots = ['1', '2', '3', '4', '5', '6'].map((day) => ({ day }))
   assert.deepEqual(trimSlots(slots, 3).map((slot) => slot.day), ['4', '5', '6'])
   assert.equal(trimSlots(slots, 6), slots)
+})
+
+test('日志条目时刻补零为 HH:mm:ss', () => {
+  assert.equal(logTimeOf(new Date(2026, 8, 8, 9, 3, 7).getTime()), '09:03:07')
+  assert.equal(logTimeOf(new Date(2026, 8, 8, 19, 13, 47).getTime()), '19:13:47')
 })
 
 test('信封解析成功透传 value', () => {
@@ -177,17 +205,9 @@ test('translateWith zh/en 占位替换与缺键回退键名', () => {
 test('createTranslator 与纯查表同构', () => {
   const enT = createTranslator(MESSAGES_EN)
   assert.equal(enT('rangeCustom'), 'Custom')
-  assert.equal(enT('hourPreset', { n: 48 }), 'Last 48 hours')
+  assert.equal(enT('hourPreset.15d'), '15 days')
+  assert.equal(enT('minutePreset.7d'), '7 days')
   assert.equal(enT('missing.key'), 'missing.key')
-})
-
-test('状态行仅在回扫进行或异常存在时可见', () => {
-  assert.equal(statusLineActive(null), false)
-  assert.equal(statusLineActive({ running: false, skippedSessions: 0, recordFailures: 0 }), false)
-  assert.equal(statusLineActive({ running: true, total: 3, done: 1 }), true)
-  assert.equal(statusLineActive({ running: false, error: 'boom' }), true)
-  assert.equal(statusLineActive({ running: false, skippedSessions: 2 }), true)
-  assert.equal(statusLineActive({ running: false, recordFailures: 1 }), true)
 })
 
 test('zh/en 词典键集完全一致', () => {
@@ -536,6 +556,13 @@ test('donut 分段可访问标签格式化名称数值与占比', () => {
   assert.equal(modelSegmentLabel('p/m', 1234, 12.34), 'p/m: 1,234 (12.3%)')
 })
 
+test('模型速度文本:官方吞吐口径格式化,无速度为空串', () => {
+  assert.equal(modelSpeedText(5.5556), '5.6 tok/s')
+  assert.equal(modelSpeedText(12.34), '12 tok/s')
+  assert.equal(modelSpeedText(0), '0 tok/s')
+  assert.equal(modelSpeedText(undefined), '')
+})
+
 // —— S14 费用格式化与展示辅助(镜像函数核心语义见 pricing-parity.test.mjs) ——
 
 test('formatCost 千分位与两位小数', () => {
@@ -551,10 +578,10 @@ test('formatCost 微观值四位小数', () => {
 })
 
 test('镜像函数基本行为:非法输入 null 与命中计价', () => {
-  assert.equal(matchPrice(null, 'm', NOW), null)
-  assert.equal(matchPrice([], 'm', NOW), null)
+  assert.equal(matchPrice(null, 'x/m', NOW), null)
+  assert.equal(matchPrice([], 'x/m', NOW), null)
   assert.deepEqual(
-    matchPrice([{ model: 'm', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], 'm', NOW),
+    matchPrice([{ model: 'x/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }], 'x/m', NOW),
     { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
   )
   assert.equal(costOf({ input: 2, output: 0, cacheRead: 0, cacheWrite: 0 }, { inputTokens: 1000 * 1000 }), 2)
@@ -594,21 +621,102 @@ test('defaultPricingRule 承接给定货币,缺省回落首档', () => {
   assert.deepEqual(defaultPricingRule('$').conditions, [])
 })
 
-test('validatePricingRules 就地校验 model 必填与价格非空非负', () => {
+test('validatePricingRules 就地校验 model 必填两段式与价格非空非负', () => {
   const valid = [{ model: 'p/m', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] }]
   assert.equal(validatePricingRules(valid).size, 0)
   const broken = [
     { model: '  ', currency: '¥', price: { input: '', output: -1, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: 'solo', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '*', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '/x', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
   ]
   const errors = validatePricingRules(broken)
   assert.equal(errors.get('0.model'), 'required')
   assert.equal(errors.get('0.price.input'), 'required')
   assert.equal(errors.get('0.price.output'), 'priceInvalid')
   assert.equal(errors.has('0.price.cacheRead'), false)
+  assert.equal(errors.get('1.model'), 'modelFormat')
+  assert.equal(errors.get('2.model'), 'modelFormat')
+  assert.equal(errors.get('3.model'), 'modelFormat')
 })
 
 test('costTitleText 未计价计数后缀', () => {
   const zhT = createTranslator(MESSAGES_ZH)
   assert.equal(costTitleText(zhT, 0), '按当前费率对历史用量估算,精度为小时级')
   assert.equal(costTitleText(zhT, 3), '按当前费率对历史用量估算,精度为小时级,3 个小时桶未计价')
+})
+
+test('defaultCondition 各类型默认值即填即用', () => {
+  // Given 四种条件类型 When 取默认 Then 时段全天/周几空/号段全月/日期段当天
+  assert.deepEqual(defaultCondition('dailyWindow'), { kind: 'dailyWindow', from: '00:00', to: '00:00' })
+  assert.deepEqual(defaultCondition('weekdays'), { kind: 'weekdays', days: [] })
+  assert.deepEqual(defaultCondition('monthDays'), { kind: 'monthDays', from: 1, to: 31 })
+  assert.deepEqual(defaultCondition('dateRange', new Date(2026, 2, 15)), { kind: 'dateRange', from: '2026-03-15', to: '2026-03-15' })
+})
+
+test('validatePricingRules 拒绝非法时刻与时刻字段缺失', () => {
+  // Given dailyWindow 时刻超界或缺失 When 校验 Then 标 condTime/required
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '99:99', to: '08:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '', to: '08:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '23:59', to: '24:00' }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0.from'), 'condTime')
+  assert.equal(errors.get('1.conditions.0.from'), 'required')
+  assert.equal(errors.get('2.conditions.0.to'), 'condTime')
+})
+
+test('validatePricingRules 校验周几与月号段边界', () => {
+  // Given weekdays 含 7、monthDays 含 0 或 32 When 校验 Then 标 condWeekday/condMonthDay
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'weekdays', days: [0, 7] }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 0, to: 31 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 1, to: 32 }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0.days'), 'condWeekday')
+  assert.equal(errors.get('1.conditions.0.from'), 'condMonthDay')
+  assert.equal(errors.get('2.conditions.0.to'), 'condMonthDay')
+})
+
+test('validatePricingRules 校验日期段格式与倒序', () => {
+  // Given dateRange 非规范日期或倒序 When 校验 Then 标 condDate/condRange
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-3-5', to: '2026-03-08' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-08', to: '2026-03-05' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-08' }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0.from'), 'condDate')
+  assert.equal(errors.get('1.conditions.0'), 'condRange')
+  assert.equal(errors.has('2.conditions.0'), false)
+  assert.equal(errors.has('2.conditions.0.from'), false)
+})
+
+test('coerceConditions 规整数字字段且不改其余字段', () => {
+  // Given 输入框字符串形态 When 规整 Then weekdays days 与 monthDays 号段转数字,时段日期原样
+  const conditions = [
+    { kind: 'weekdays', days: ['1', '5'] },
+    { kind: 'monthDays', from: '26', to: '5' },
+    { kind: 'dailyWindow', from: '09:00', to: '18:00' },
+    { kind: 'dateRange', from: '2026-03-01', to: '2026-03-15' },
+  ]
+  const coerced = coerceConditions(conditions)
+  assert.deepEqual(coerced[0], { kind: 'weekdays', days: [1, 5] })
+  assert.deepEqual(coerced[1], { kind: 'monthDays', from: 26, to: 5 })
+  assert.deepEqual(coerced[2], conditions[2])
+  assert.deepEqual(coerced[3], conditions[3])
+})
+
+test('coercePricingRules 连带规整条件', () => {
+  // Given 含条件规则 When POST 前规整 Then 价格与条件数字字段同时规整
+  const rules = [{
+    model: 'a/b', currency: '¥',
+    price: { input: '1', output: '0', cacheRead: '0', cacheWrite: '0' },
+    conditions: [{ kind: 'weekdays', days: ['1'] }, { kind: 'monthDays', from: '1', to: '31' }],
+  }]
+  const coerced = coercePricingRules(rules)
+  assert.deepEqual(coerced[0].conditions, [{ kind: 'weekdays', days: [1] }, { kind: 'monthDays', from: 1, to: 31 }])
+  assert.deepEqual(coerced[0].price, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
 })

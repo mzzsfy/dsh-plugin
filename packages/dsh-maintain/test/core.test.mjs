@@ -5,6 +5,9 @@ import {
   parseSemver,
   gtSemver,
   judgeVersion,
+  judgeUpgradeFreshness,
+  isVersionPendingRestart,
+  classifyUpgradeFailure,
   buildUpgradeCommand,
   isValidChannelName,
   isValidRegistryBase,
@@ -12,6 +15,11 @@ import {
   VERDICT_OUTDATED,
   VERDICT_UP_TO_DATE,
   VERDICT_UNKNOWN,
+  UPGRADE_FAIL_TRANSIENT_NETWORK,
+  UPGRADE_FAIL_FILE_LOCKED,
+  UPGRADE_FAIL_NPM_MISSING,
+  UPGRADE_FAIL_TIMEOUT,
+  UPGRADE_FAIL_UNKNOWN,
 } from '../src/core.mjs'
 
 const CURRENT = '0.1.1-rc.2'
@@ -173,4 +181,131 @@ test('场景:未失联且实例标识未变不刷新', () => {
   assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: 1 }, { lost: false, pid: undefined, bootAt: undefined }), false)
   // bootAt 单侧出现不构成证据(防旧宿主快照缺字段误判)
   assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: null }, { lost: false, pid: 100, bootAt: 200 }), false)
+})
+
+// 升级失败分类:npm 输出特征取自 npm 10/11 真实错误行形态(npm error code/syscall),
+// 特征未命中一律宽松归 unknown,不可重试类绝不重试。
+test('分类:Windows 文件锁形态归 file-locked 且可重试', () => {
+  const samples = [
+    'npm error code EBUSY\nnpm error syscall rename\nnpm error path C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\package.json',
+    'npm error code EPERM\nnpm error syscall unlink\nnpm error path C:\\nvm\\node_modules\\.bin\\dsh.cmd',
+    'npm error code ENOENT\nnpm error syscall rename\nnpm error path C:\\nvm\\node_modules\\@deepseek-ai\\dsh',
+    'C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\lib\\index.js is being used by another process',
+    'EBUSY: resource busy or locked, unlink C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\lib\\index.js',
+  ]
+  for (const stderrTail of samples) {
+    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
+    assert.equal(result.kind, UPGRADE_FAIL_FILE_LOCKED, stderrTail)
+    assert.equal(result.retryable, true, stderrTail)
+    assert.ok(typeof result.reason === 'string' && result.reason.length > 0)
+  }
+})
+
+test('分类:网络瞬断形态归 transient-network 且可重试', () => {
+  const samples = [
+    'npm error network request to https://registry.npmjs.org/@deepseek-ai%2fdsh failed, reason: socket hang up',
+    'npm error code ECONNRESET\nnpm error errno ECONNRESET\nnpm error network This is a problem related to network connectivity.',
+    'npm error code EAI_AGAIN\nnpm error syscall getaddrinfo',
+    'npm error code ECONNREFUSED',
+    'fetch failed',
+    'npm error code E503\nnpm error 503 Service Unavailable - GET https://registry.npmjs.org/dsh',
+  ]
+  for (const stderrTail of samples) {
+    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
+    assert.equal(result.kind, UPGRADE_FAIL_TRANSIENT_NETWORK, stderrTail)
+    assert.equal(result.retryable, true, stderrTail)
+  }
+})
+
+test('分类:命令未找到形态归 npm-missing 且不可重试', () => {
+  const samples = [
+    "'npmm' 不是内部或外部命令,也不是可运行的程序或批处理文件。",
+    '/bin/sh: 1: npmm: command not found',
+    '/bin/sh: 1: npmm: not found',
+    'spawn npmm ENOENT',
+  ]
+  for (const stderrTail of samples) {
+    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
+    assert.equal(result.kind, UPGRADE_FAIL_NPM_MISSING, stderrTail)
+    assert.equal(result.retryable, false, stderrTail)
+  }
+})
+
+test('分类:超时强杀优先归 timeout,尾流含文件锁特征也不重试', () => {
+  const result = classifyUpgradeFailure({ code: null, timedOut: true, stillRunning: false, stdoutTail: '', stderrTail: 'npm error code EBUSY' })
+  assert.equal(result.kind, UPGRADE_FAIL_TIMEOUT)
+  assert.equal(result.retryable, false)
+})
+
+test('分类:未识别输出归 unknown 兜底且不可重试', () => {
+  for (const input of [
+    { code: 3, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: 'boom-fail' },
+    { code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: '' },
+    { code: null, timedOut: false, stillRunning: true, stdoutTail: '', stderrTail: '' },
+    { code: 1, timedOut: false, stillRunning: false, stdoutTail: 'npm warn deprecated x', stderrTail: 'exit 1' },
+  ]) {
+    const result = classifyUpgradeFailure(input)
+    assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN, JSON.stringify(input))
+    assert.equal(result.retryable, false, JSON.stringify(input))
+  }
+})
+
+test('分类:stdout 尾流特征同样参与匹配', () => {
+  const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: 'npm error code EBUSY', stderrTail: '' })
+  assert.equal(result.kind, UPGRADE_FAIL_FILE_LOCKED)
+  assert.equal(result.retryable, true)
+})
+
+test('分类:输入字段缺省容忍不抛错', () => {
+  const result = classifyUpgradeFailure({})
+  assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN)
+  assert.equal(result.retryable, false)
+  assert.ok(typeof result.reason === 'string')
+})
+
+// 升级后磁盘版本复读判定:stale=版本未前进或未达通道目标;信息缺失宽松不误报。
+test('复读:版本前进且达通道目标判 fresh', () => {
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
+  // prerelease 目标达成也算 fresh;prerelease 低于正式版属未达目标(见下例)
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '2.1.0-rc.1', channelLatest: '2.1.0-rc.1' }), { stale: false, reason: null })
+})
+
+test('复读:磁盘版本未前进或回退判 stale', () => {
+  const same = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '2.0.0' })
+  assert.equal(same.stale, true)
+  assert.match(same.reason, /未前进/)
+  const rollback = judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '1.9.0', channelLatest: '2.0.0' })
+  assert.equal(rollback.stale, true)
+})
+
+test('复读:前进但未达通道目标判 stale', () => {
+  const result = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.5.0', channelLatest: '2.0.0' })
+  assert.equal(result.stale, true)
+  assert.match(result.reason, /未达/)
+})
+
+// 运行/已装版本区分:磁盘版本领先运行版本即待重启生效;任一侧不可解析一律 false 不误报。
+test('重启待生效:仅已装版本严格领先运行版本时为真', () => {
+  assert.equal(isVersionPendingRestart({ runningVersion: '1.0.0', installedVersion: '2.0.0' }), true)
+  assert.equal(isVersionPendingRestart({ runningVersion: '2.1.0-rc.1', installedVersion: '2.1.0' }), true)
+  assert.equal(isVersionPendingRestart({ runningVersion: '2.0.0', installedVersion: '2.0.0' }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: '3.0.0', installedVersion: '2.0.0' }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: null, installedVersion: '2.0.0' }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: '2.0.0', installedVersion: null }), false)
+  assert.equal(isVersionPendingRestart({ runningVersion: 'dev-main', installedVersion: '2.0.0' }), false)
+})
+
+test('复读:installed 解析失败判 stale,previous 缺失不豁免未达目标', () => {
+  const broken = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: null, channelLatest: '2.0.0' })
+  assert.equal(broken.stale, true)
+  assert.match(broken.reason, /解析失败|读取/)
+  const garbage = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: 'dev-main', channelLatest: '2.0.0' })
+  assert.equal(garbage.stale, true)
+  // 旧版本未知只豁免"未前进"分支:磁盘低于通道目标仍判 stale
+  const unknownPrevious = judgeUpgradeFreshness({ previousVersion: null, installedVersion: '1.5.0', channelLatest: '2.0.0' })
+  assert.equal(unknownPrevious.stale, true)
+  assert.match(unknownPrevious.reason, /未达/)
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: null, installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
+  // 通道目标缺失时无法证明未达标,宽松判 fresh
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: null }), { stale: false, reason: null })
 })

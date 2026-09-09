@@ -212,6 +212,7 @@ test('渲染产物:栈容器类名、变体类、role 与 sticky 按钮接线', 
   const okTree = okItem.type(okItem.props)
   assert.equal(okTree.props.className, 'dsh-toast dsh-toast--ok')
   assert.equal(okTree.props.role, 'alert')
+  assert.equal(okTree.props.onClick, undefined, '无 onClick 条目整卡不可点')
   assert.equal(okTree.children[1], null, '非 sticky 无按钮')
 
   const stickyItem = items.find((vnode) => vnode.props.item.text === '常驻')
@@ -220,8 +221,33 @@ test('渲染产物:栈容器类名、变体类、role 与 sticky 按钮接线', 
   const button = stickyTree.children[1]
   assert.equal(button.type, 'button')
   assert.equal(button.props.className, 'dsh-toast__close')
-  button.props.onClick()
+  button.props.onClick({ stopPropagation() {} })
   assert.equal(mod.__test.getItems().some((item) => item.id === stickyId), false, '按钮接线 dismiss 生效')
+})
+
+test('渲染产物:onClick 条目整卡可点,点击即消失并触发回调;按钮关闭不连带', () => {
+  const state = makeState()
+  const { mod, roots } = loadRenderModule(state)
+  let activated = false
+  mod.show('可点通知', { onClick: () => { activated = true } })
+  const root = roots[roots.length - 1]
+  const tree = root.vnode.type()
+  const vnode = tree.children.flat().find((entry) => entry.props.item.text === '可点通知')
+  const card = vnode.type(vnode.props)
+  assert.equal(card.props.className, 'dsh-toast dsh-toast--info dsh-toast--click', '可点条目带标记类')
+  card.props.onClick()
+  assert.equal(activated, true, '点击触发回调')
+  assert.equal(mod.__test.getItems().length, 0, '点击后条目消失')
+  // sticky + onClick:「知道了」只关闭,不触发直达
+  let stickyActivated = false
+  mod.show('常驻可点', { sticky: true, onClick: () => { stickyActivated = true } })
+  const tree2 = roots[roots.length - 1].vnode.type()
+  const vnode2 = tree2.children.flat().find((entry) => entry.props.item.text === '常驻可点')
+  const card2 = vnode2.type(vnode2.props)
+  const button = card2.children[1]
+  button.props.onClick({ stopPropagation() {} })
+  assert.equal(stickyActivated, false, '显式关闭不触发直达')
+  assert.equal(mod.__test.getItems().length, 0)
 })
 
 test('样式内容不一致原位替换:节点不重建,内容与写入计数还原', () => {

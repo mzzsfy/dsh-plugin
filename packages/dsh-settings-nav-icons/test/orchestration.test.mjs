@@ -29,10 +29,21 @@ function fakeRaf() {
   }
 }
 
+// 浮层桩内递归找节点:按钮嵌在 row 子层
+function overlayFind(root, pred) {
+  for (const node of root.children) {
+    if (pred(node)) return node
+    const hit = overlayFind(node, pred)
+    if (hit) return hit
+  }
+  return null
+}
+
 // 官方 svg 桩:gear=true 模拟官方齿轮路径,否则为无路径原生图形;内容改写制下
 // applyDecision 直接写 innerHTML(桩以 innerHTML 属性承接)与 dataset.navic
 function makeOfficialSvg({ gear = true } = {}) {
   const svg = {
+    tagName: 'svg',
     dataset: { navic: '' },
     style: { display: '' },
     innerHTML: '',
@@ -69,6 +80,7 @@ function makeCell(label, { gear = true, navic = '' } = {}) {
   cell.official = official
   cell.svgs.push(official)
   cell.matches = (sel) => sel !== SELECTOR_AV
+  cell.closest = (sel) => (sel === SELECTOR_CELL ? cell : null)
   cell.querySelector = (sel) => (sel === SELECTOR_LABEL ? { textContent: label } : null)
   cell.querySelectorAll = (sel) => {
     if (sel === 'svg') return cell.svgs
@@ -121,17 +133,47 @@ function fakeDocument() {
       appendChild(el) { doc.head.children.push(el); doc.events.push('style') },
     },
     createdStyles: [],
+    listeners: {},
     createElement(tag) {
       const el = {
         tag,
         textContent: '',
+        children: [],
+        className: '',
+        value: '',
+        placeholder: '',
+        innerHTML: '',
+        appendChild(child) { el.children.push(child) },
+        focus() { el.focused = true },
+        addEventListener(type, fn) { el.handlers[type] = fn },
+        handlers: {},
+        classList: {
+          add(cls) { el.classes.add(cls) },
+          remove(cls) { el.classes.delete(cls) },
+        },
+        classes: new Set(),
         remove() {
+          const list = doc.bodyChildren
+          const at = list.indexOf(el)
+          if (at >= 0) list.splice(at, 1)
           doc.createdStyles.splice(doc.createdStyles.indexOf(el), 1)
           doc.head.children.splice(doc.head.children.indexOf(el), 1)
         },
       }
       if (tag === 'style') doc.createdStyles.push(el)
       return el
+    },
+    bodyChildren: [],
+    addEventListener(type, fn) {
+      ;(doc.listeners[type] ??= []).push(fn)
+    },
+    removeEventListener(type, fn) {
+      const list = doc.listeners[type] ?? []
+      const at = list.indexOf(fn)
+      if (at >= 0) list.splice(at, 1)
+    },
+    dispatch(type, event) {
+      for (const fn of [...(doc.listeners[type] ?? [])]) fn(event)
     },
     querySelectorAll(sel) {
       if (sel === SELECTOR_ALL) return [...doc.cells, ...doc.avatars]
@@ -141,6 +183,7 @@ function fakeDocument() {
       return []
     },
   }
+  doc.body.appendChild = (el) => { doc.bodyChildren.push(el) }
   return doc
 }
 
@@ -164,6 +207,11 @@ function loadClient() {
     __ModuleLoader__: { load(mod) { win.__loaded = mod } },
     requestAnimationFrame: raf.requestAnimationFrame,
     cancelAnimationFrame: raf.cancelAnimationFrame,
+    localStorage: {
+      map: new Map(),
+      getItem(k) { return win.localStorage.map.has(k) ? win.localStorage.map.get(k) : null },
+      setItem(k, v) { win.localStorage.map.set(k, String(v)) },
+    },
   }
   const doc = fakeDocument()
   new Function('window', 'document', 'MutationObserver', 'requestAnimationFrame', 'cancelAnimationFrame', 'console', src)(
@@ -194,21 +242,22 @@ test('boot 观察:body 目标与三开关齐全,卸载后断开', () => {
   assert.equal(observed.length, 0, '卸载后 disconnect')
 })
 
-test('导航滚动样式:启动注入 head,卸载移除,重装恢复,先于观察器挂载', () => {
+test('启动样式:覆盖浮层样式与滚动样式注入 head,卸载移除,重装恢复,先于观察器挂载', () => {
   const { win, doc, observed } = loadClient()
   assert.equal(doc.createdStyles.length, 0, '启动前无注入')
   const unload = boot(win.__loaded, doc)
   try {
-    assert.equal(doc.createdStyles.length, 1, '恰一次注入')
-    assert.equal(doc.createdStyles[0].textContent, NAVLIST_SCROLL_CSS, '滚动规则与实现同源')
-    assert.equal(doc.head.children.length, 1, '样式挂载在 head')
-    assert.deepEqual(doc.events, ['style', 'observe'], '样式注入先于观察器挂载')
+    assert.equal(doc.createdStyles.length, 2, '恰两次注入(浮层+滚动)')
+    assert.ok(doc.createdStyles.some((el) => el.textContent.includes('sni-ov')), '浮层样式随启动注入')
+    assert.ok(doc.createdStyles.some((el) => el.textContent === NAVLIST_SCROLL_CSS), '滚动规则与实现同源')
+    assert.equal(doc.head.children.length, 2, '样式挂载在 head')
+    assert.deepEqual(doc.events, ['style', 'style', 'observe'], '样式注入先于观察器挂载')
     unload()
     assert.equal(doc.createdStyles.length, 0, '卸载后移除')
     assert.equal(doc.head.children.length, 0, 'head 无残留')
     const unload2 = boot(win.__loaded, doc)
     try {
-      assert.equal(doc.createdStyles.length, 1, '重装恢复注入')
+      assert.equal(doc.createdStyles.length, 2, '重装恢复注入')
     } finally {
       unload2()
     }
@@ -218,16 +267,18 @@ test('导航滚动样式:启动注入 head,卸载移除,重装恢复,先于观�
   }
 })
 
-test('导航滚动样式代际:HMR 不卸载重评估由新实例代拆,旧形槽跨版本容忍', () => {
+test('启动样式代际:HMR 不卸载重评估由新实例代拆,旧形槽跨版本容忍', () => {
   // HMR 路径:旧实例未 stop 直接二次 boot(新实例读槽代拆上一代样式)
   const { win, doc } = loadClient()
   const unload1 = boot(win.__loaded, doc)
-  const oldStyle = doc.createdStyles[0]
+  const oldStyles = [...doc.createdStyles]
   const unload2 = boot(win.__loaded, doc)
   try {
-    assert.equal(doc.createdStyles.length, 1, '代拆后恰一份样式')
-    assert.equal(doc.head.children.length, 1, 'head 无旧代残留')
-    assert.notEqual(doc.createdStyles[0], oldStyle, '存活者为新实例注入的新元素')
+    assert.equal(doc.createdStyles.length, 2, '代拆后恰两份样式')
+    assert.equal(doc.head.children.length, 2, 'head 无旧代残留')
+    for (const old of oldStyles) {
+      assert.ok(!doc.createdStyles.includes(old), '旧代样式被替换')
+    }
     unload2()
     assert.equal(doc.createdStyles.length, 0, '新实例卸载后干净')
   } finally {
@@ -235,12 +286,12 @@ test('导航滚动样式代际:HMR 不卸载重评估由新实例代拆,旧形�
     unload2()
   }
 
-  // 升级路径:上一代是旧版本槽(无 scrollStyle 字段),代拆不得抛错
+  // 升级路径:上一代是旧版本槽(无 scrollStyle/overlayStyle 字段),代拆不得抛错
   const { win: win2, doc: doc2 } = loadClient()
   win2[Symbol.for('@mzzsfy/dsh-settings-nav-icons')] = { observer: null, rafId: 0 }
   const unload3 = boot(win2.__loaded, doc2)
   try {
-    assert.equal(doc2.createdStyles.length, 1, '旧形槽不阻塞注入')
+    assert.equal(doc2.createdStyles.length, 2, '旧形槽不阻塞注入')
   } finally {
     unload3()
   }
@@ -553,6 +604,137 @@ test('语言切换端到端:characterData 域内变更经回调触发重贴', ()
     observers[observers.length - 1].cb([{ type: 'characterData', target: { parentElement: labelParent } }])
     raf.flush()
     assert.equal(cell.official.dataset.navic, 'General', '穿真实唤醒通道完成重写')
+  } finally {
+    unload()
+  }
+})
+
+// 用户覆盖:恢复走安全门、写入幂等/非法拒绝、等价组全键触达、localStorage 持久往返
+test('用户覆盖:启动从 localStorage 恢复,非法键值跳过', () => {
+  const { win, doc } = loadClient()
+  doc.cells.push(makeCell('插件市场'))
+  win.localStorage.map.set('__navicUserIcons', JSON.stringify({
+    '插件市场': 'bell',
+    '坏 glyph': 'no-such-glyph',
+    '活动 html': '<svg><script>alert(1)</script></svg>',
+    '1': 'bell',
+    __proto__: 'bell',
+    '超长键': 'x'.repeat(4097),
+  }))
+  const unload = boot(win.__loaded, doc)
+  try {
+    const market = doc.cells[0]
+    assert.equal(market.official.dataset.navic, '插件市场')
+    assert.ok(market.official.innerHTML.includes('M8 2.2'), '合法覆盖生效(bell 内容)')
+    assert.ok(!doc.marked.some((el) => el.dataset.navic === '坏 glyph'), '未知 glyph 不入表')
+    assert.ok(!doc.marked.some((el) => el.dataset.navic === '活动 html'), '安全门拒绝直通')
+  } finally {
+    unload()
+  }
+})
+
+test('用户覆盖:右键浮层保存/非法行内提示/清除,持久化往返,卸载后重装恢复', () => {
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(makeCell('插件市场'))
+  const unload = boot(win.__loaded, doc)
+  try {
+    const cell = doc.cells[0]
+    doc.marked.push(cell.official)
+    // 右键打开浮层:preventDefault + 单例 + 输入聚焦
+    const evt = { target: cell, preventDefault() { evt.prevented = true } }
+    doc.dispatch('contextmenu', evt)
+    assert.ok(evt.prevented, '右键默认菜单被阻止')
+    const overlay = doc.bodyChildren[doc.bodyChildren.length - 1]
+    assert.ok(overlay.className.includes('sni-ov'), '浮层挂 body')
+    const input = overlayFind(overlay, (n) => n.tag === 'input')
+    const save = overlayFind(overlay, (n) => n.tag === 'button' && n.textContent === '保存')
+    const clear = overlayFind(overlay, (n) => n.tag === 'button' && n.textContent === '清除')
+    assert.ok(input && save && clear, '浮层含输入与双按钮')
+    assert.equal(input.focused, true, '打开即聚焦')
+    // 非法值:行内提示,不落库
+    input.value = 'no-such-glyph'
+    save.handlers.click()
+    const bad = overlayFind(overlay, (n) => (n.classes ?? new Set()).size > 0)
+    assert.ok(bad && [...bad.classes].some((c) => c.includes('__bad--on')), '非法值行内提示')
+    assert.equal(win.localStorage.map.get('__navicUserIcons'), undefined, '非法值不持久化')
+    // 合法保存:落库 + 单元格就地重写 + 浮层关闭
+    input.value = 'bell'
+    save.handlers.click()
+    assert.ok(!doc.bodyChildren.includes(overlay), '保存成功关闭浮层')
+    assert.ok(cell.official.innerHTML.includes('M8 2.2'), '覆盖内容生效')
+    const saved = JSON.parse(win.localStorage.map.get('__navicUserIcons'))
+    assert.ok(saved['插件市场'], '覆盖持久化')
+    // 再开浮层:回填当前覆盖值;清除:回默认管线 + 删键
+    doc.dispatch('contextmenu', { target: cell, preventDefault() {} })
+    const overlay2 = doc.bodyChildren[doc.bodyChildren.length - 1]
+    const input2 = overlayFind(overlay2, (n) => n.tag === 'input')
+    const clear2 = overlayFind(overlay2, (n) => n.tag === 'button' && n.textContent === '清除')
+    assert.equal(input2.value, 'bell', '回填当前覆盖原文(glyph 名)')
+    clear2.handlers.click()
+    assert.equal(win.localStorage.map.get('__navicUserIcons'), '{}', '清除后持久化为空表')
+    assert.ok(!cell.official.innerHTML.includes('M8 2.2'), '清除后回默认管线(店面图标)')
+    assert.ok(doc.bodyChildren.indexOf(overlay2) < 0, '清除关闭浮层')
+    // 浮层外点击与 Escape 关闭
+    doc.dispatch('contextmenu', { target: cell, preventDefault() {} })
+    const overlay3 = doc.bodyChildren[doc.bodyChildren.length - 1]
+    doc.dispatch('pointerdown', { target: cell })
+    assert.ok(!doc.bodyChildren.includes(overlay3), '外部点击关闭')
+    doc.dispatch('contextmenu', { target: cell, preventDefault() {} })
+    const overlay4 = doc.bodyChildren[doc.bodyChildren.length - 1]
+    doc.dispatch('keydown', { key: 'Escape' })
+    assert.ok(!doc.bodyChildren.includes(overlay4), 'Escape 关闭')
+    // 卸载重装:localStorage 覆盖恢复生效
+    win.localStorage.map.set('__navicUserIcons', JSON.stringify({ '插件市场': 'bell' }))
+  } finally {
+    unload()
+  }
+  const unload2 = boot(win.__loaded, doc)
+  try {
+    assert.ok(doc.cells[0].official.innerHTML.includes('M8 2.2'), '重装恢复用户覆盖')
+  } finally {
+    unload2()
+  }
+})
+
+test('用户覆盖:别名等价键写入/清除,双语分区两侧触达', () => {
+  const { win, doc } = loadClient()
+  // 双语两格均按齿轮改写链记账:'通用设置' 与 'General' 各持内置映射
+  doc.cells.push(makeCell('通用设置'))
+  doc.cells.push(makeCell('General'))
+  const unload = boot(win.__loaded, doc)
+  try {
+    const zhCell = doc.cells[0]
+    const enCell = doc.cells[1]
+    doc.marked.push(zhCell.official, enCell.official)
+    doc.dispatch('contextmenu', { target: zhCell, preventDefault() {} })
+    const overlay = doc.bodyChildren[doc.bodyChildren.length - 1]
+    const input = overlayFind(overlay, (n) => n.tag === 'input')
+    const save = overlayFind(overlay, (n) => n.tag === 'button' && n.textContent === '保存')
+    input.value = 'bell'
+    save.handlers.click()
+    assert.equal(JSON.parse(win.localStorage.map.get('__navicUserIcons'))['通用设置'], 'bell', '按打开侧语言键落库')
+    assert.ok(zhCell.official.innerHTML.includes('M8 2.2'), '中文侧覆盖生效')
+    assert.ok(enCell.official.innerHTML.includes('M8 2.2'), '英文侧等价触达重写')
+    // 清除:等价组全键删除,两侧回各语言内置映射
+    doc.dispatch('contextmenu', { target: enCell, preventDefault() {} })
+    const overlay2 = doc.bodyChildren[doc.bodyChildren.length - 1]
+    assert.ok(overlayFind(overlay2, (n) => n.tag === 'input').value === 'bell', '英文侧打开回填中文键覆盖')
+    const clear2 = overlayFind(overlay2, (n) => n.tag === 'button' && n.textContent === '清除')
+    clear2.handlers.click()
+    assert.equal(JSON.parse(win.localStorage.map.get('__navicUserIcons'))['通用设置'], undefined, '清除走等价组全键')
+    assert.ok(!zhCell.official.innerHTML.includes('M8 2.2'), '中文侧回内置映射')
+    assert.ok(!enCell.official.innerHTML.includes('M8 2.2'), '英文侧回内置映射')
+  } finally {
+    unload()
+  }
+})
+
+test('用户覆盖:非 nav 单元格右键不弹浮层', () => {
+  const { win, doc } = loadClient()
+  const unload = boot(win.__loaded, doc)
+  try {
+    doc.dispatch('contextmenu', { target: doc.avatars[0], preventDefault() {} })
+    assert.equal(doc.bodyChildren.length, 0, '头像槽右键无浮层')
   } finally {
     unload()
   }

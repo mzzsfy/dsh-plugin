@@ -16,6 +16,7 @@ import {
   TARGET_PACKAGE,
 } from '../src/core.mjs'
 import { clientSource, extractLogic } from './logic-extract.mjs'
+import { KILL_GRACE_MS } from '../src/upgrade.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLIENT_SOURCE = clientSource()
@@ -92,7 +93,17 @@ test('parity: VERDICT 三常量 client 与 core 一致', () => {
 })
 
 // host 侧锚点直接 import index.js 实现,防测试内手抄字面量漂移假绿
-import { DEFAULT_UPGRADE_TEMPLATE, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, TICK_MS, API_PATHS, UPGRADE_TIMEOUT_MS } from '../src/index.js'
+import {
+  DEFAULT_UPGRADE_TEMPLATE,
+  DEFAULT_POLL_INTERVAL_SEC,
+  DEFAULT_REGISTRY_BASE,
+  TICK_MS,
+  API_PATHS,
+  UPGRADE_TIMEOUT_MS,
+  UPGRADE_MAX_ATTEMPTS,
+  UPGRADE_RETRY_BACKOFF_MS,
+  AUTO_RESTART_DELAY_MS,
+} from '../src/index.js'
 
 test('parity: 默认升级命令模板 client 字面量与 host 实现一致', () => {
   assert.equal(extractConst('DEFAULT_UPGRADE_TEMPLATE'), DEFAULT_UPGRADE_TEMPLATE)
@@ -132,13 +143,29 @@ test('parity: 重启等待总时长大于宿主退出延迟', () => {
   assert.ok(restartTimeoutMs > RESTART_DELAY_MS, 'RESTART_TIMEOUT_MS 必须大于 RESTART_DELAY_MS')
 })
 
-test('parity: 升级观察上限不早于宿主升级超时(防抢跑转状态未知)', () => {
+test('parity: 升级观察上限覆盖宿主重试链上限(防抢跑转状态未知)', () => {
+  // 重试链上限 = 尝试次数×单次超时 + 最大退避累计 + 强杀宽限;超时强杀只会终止链,不叠加
+  const maxBackoffTotal = Object.values(UPGRADE_RETRY_BACKOFF_MS)
+    .reduce((max, seq) => Math.max(max, seq.reduce((sum, ms) => sum + ms, 0)), 0)
+  const chainUpperBound = UPGRADE_MAX_ATTEMPTS * UPGRADE_TIMEOUT_MS + maxBackoffTotal + KILL_GRACE_MS
   const watchMaxMs = extractNumberConst('UPGRADE_WATCH_MAX_MS')
-  assert.ok(watchMaxMs >= UPGRADE_TIMEOUT_MS, 'UPGRADE_WATCH_MAX_MS(' + watchMaxMs + ') 必须不小于宿主 UPGRADE_TIMEOUT_MS(' + UPGRADE_TIMEOUT_MS + ')')
+  assert.ok(
+    watchMaxMs >= chainUpperBound,
+    'UPGRADE_WATCH_MAX_MS(' + watchMaxMs + ') 必须不小于重试链上限(' + chainUpperBound + ')',
+  )
 })
 
 test('parity: npm 版本页链接与追踪包名同源', () => {
   assert.ok(extractConst('NPM_VERSIONS_URL').includes(TARGET_PACKAGE), 'NPM_VERSIONS_URL 应包含 TARGET_PACKAGE 字面量')
+})
+
+test('parity: 落定补查宽限覆盖宿主自动重启调度延迟', () => {
+  // 落定拍与调度置位之间存在宿主侧 await 窗口:client 补查宽限必须不小于调度延迟 + 观察裕量
+  const graceMs = extractNumberConst('UPGRADE_AUTO_RESTART_GRACE_MS')
+  assert.ok(
+    graceMs >= AUTO_RESTART_DELAY_MS + 1 * 1000,
+    'UPGRADE_AUTO_RESTART_GRACE_MS(' + graceMs + ') 必须不小于 AUTO_RESTART_DELAY_MS(' + AUTO_RESTART_DELAY_MS + ') 加观察裕量',
+  )
 })
 
 test('源码契约: 重启轮询与升级观察器不得回退 setInterval 重叠拍形态', () => {

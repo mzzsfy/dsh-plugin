@@ -103,6 +103,31 @@ export function archiveToastStep(previous, snapshot) {
   return { state: { ready, ids }, added }
 }
 
+/** 归档通知标题列举上限:超过该数只列前段并以「 等」收尾。 */
+export const TOAST_MAX_TITLES = 3
+
+/**
+ * 归档通知文案:单个报标题,多个为计数加列举标题,标题数超展示阈值只列前段并以
+ * 「 等」收尾,计数恒为真实总数。标题按去除首尾空白取值,缺失、空白或行不存在
+ * 回退会话 id,行数据非数组视为空。client.js 有镜像实现(单文件自包含无法跨文件
+ * require),修改需两处同步。
+ */
+export function archiveToastText(addedIds, rows) {
+  const added = Array.isArray(addedIds) ? addedIds : []
+  if (added.length === 0) return ''
+  const safeRows = Array.isArray(rows) ? rows : []
+  const titleById = new Map()
+  for (const row of safeRows) {
+    if (!row || row.id === undefined || row.id === null) continue
+    const trimmed = String(row.title ?? '').trim()
+    if (trimmed !== '') titleById.set(String(row.id), trimmed)
+  }
+  const names = added.map((id) => titleById.get(String(id)) || String(id))
+  if (names.length === 1) return '会话「' + names[0] + '」已归档'
+  const listed = names.slice(0, TOAST_MAX_TITLES)
+  return '有 ' + names.length + ' 个会话已归档:' + listed.join('、') + (names.length > TOAST_MAX_TITLES ? ' 等' : '')
+}
+
 /** 删除资格:仅已归档会话,其余拒绝(竞态防护的 client 前置与 host 权威共用判定)。 */
 export function deleteEligibility({ archivedIds, sessionId }) {
   return archivedIds.includes(sessionId)

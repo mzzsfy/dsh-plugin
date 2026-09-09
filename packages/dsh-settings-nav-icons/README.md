@@ -6,21 +6,34 @@ DeepSeek Harness 纯前端插件:设置弹窗左侧导航与 dsh-market 插件�
 
 | 场景 | 行为 |
 |---|---|
-| 分区当前是官方齿轮 | 改写官方 svg 内部内容为专属图形(声明 → 内置映射 → 关键词 → 哈希) |
+| 分区当前是官方齿轮 | 改写官方 svg 内部内容为专属图形(用户覆盖 → 声明 → 内置映射 → 关键词 → 哈希) |
 | 分区当前非齿轮(官方原生图标 / 第三方插件供给的图标) | 不干预,映射或声明命中也不例外 |
+| 右键导航分区 | 打开图标编辑浮层:保存/清除用户覆盖(localStorage 持久),非法值行内提示 |
 | 左侧导航分区溢出(弹窗高度不足) | 列表区域滚动,标题固定;官方无滚动机制,溢出被弹窗裁剪致底部分区不可达 |
 | 市场卡片头像槽(有名称锚) | 按插件名取图替换作者头像/字母色块 |
-| 语言切换导致 label 变化 | 已改写的分区按新 label 重新取图改写 |
+| 语言切换导致 label 变化 | 已改写的分区按新 label 重新取图改写;双语分区覆盖/声明按等价组跨语言命中 |
 | 面板关闭后重新打开 / 会话切换 | 新渲染的齿轮自动再改写 |
 | 声明变更(注册新值/撤销) | 受影响分区 svg 内容就地重写,头像槽重新取图 |
 | 插件卸载 | 观察器随 `ctx.effect` 销毁,重载页面即恢复官方默认 |
 
 改写采用**内容制**:直接替换官方齿轮 svg 的内部内容,不新建节点、不动属性——节点、class、DOM 位置全部保持官方原样,其他插件针对官方图标的 CSS(如按 `> svg:first-child` 隐藏、伪元素 mask 叠加)照常作用于改写结果,不会出现双图标。
 
+## 用户自定义覆盖
+
+右键点击设置弹窗左侧导航任意分区,弹出图标编辑浮层:
+
+- 输入内置 glyph 名(见下表)或完整 16×16 `<svg>` 字符串,「保存」即时生效并写入 localStorage(`__navicUserIcons`),刷新页面后仍然生效
+- 「清除」删除该分区覆盖,回到默认取图管线;Esc 或点击浮层外部关闭
+- 浮层展示当前取图来源(用户覆盖 / 插件声明 / 内置映射 / 自动推导)与当前图标预览
+- 覆盖值与声明走同一安全门(未知 glyph 拒绝、svg 过闸),存储值被篡改时该键跳过,不直通注入
+- 官方双语分区(通用设置 / General)的覆盖与声明按等价组生效:写在任一语言键,两种语言下都命中;保存/清除/重写均按组内全键触达,两侧同步
+
+插件卸载后浮层与样式随生命周期销毁;localStorage 中的覆盖数据不影响官方 UI,重装即恢复。
+
 ## 取图优先级
 
 ```
-外部声明(register) → 内置映射(ICONS) → 名称关键词(NAME_RULES) → 稳定哈希备用池(FALLBACK)
+用户覆盖(localStorage) → 外部声明(register) → 内置映射(ICONS) → 名称关键词(NAME_RULES) → 稳定哈希备用池(FALLBACK)
 ```
 
 - **外部声明**:其他插件运行时注册自己的 label/插件名 → 图标,优先级最高(见下节)。
@@ -40,7 +53,7 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 ;(window.__navicIconQueue ??= []).push({ '消息通知': 'bell' })
 ```
 
-- 键:分区显示文本(设置导航)或插件名(dsh-market 卡片)。两域共用一张表,同名时以先命中者生效,键请取不易与官方分区撞名的插件名。
+- 键:分区显示文本(设置导航)或插件名(dsh-market 卡片)。两域共用一张表,同名时以先命中者生效,键请取不易与官方分区撞名的插件名。官方双语分区按等价组解析:任一语言 label 作键,两种语言下均命中(消除语言切换的声明键漂移)。
 - 值:内置 glyph 名(`tune/theme/bot/market/cube/mcp/shield/cards/plan/bell/wrench/archive/spark/layers/tag/grid/git/search/term/chart/code/doc/db/flow/globe/lock/image/zap`)或完整 16×16 `<svg>` 字符串。svg 字符串过安全门:完整开标签(大小写不敏感,拒绝 `<svgx` 残串)且单根闭合(首个 `</svg>` 后不得再有内容,堵尾缀活动 HTML);不带 `on*` 事件属性(`\b` 前界堵斜杠分隔绕过)、不带 `<script>`/`<style>`(内联样式全文档生效且 @import 可外联)/`<foreignObject>`/SMIL 动画(`<animate>`/`<set>` 等)载体;不带 `href`/`xlink:href` 及 `attributeName="href"` 注入(16×16 静态图标无合法引用/动画场景,外联请求一并封死);不带 `javascript:`(纵深);长度 ≤4096 字符;glyph 名查表经 `typeof` 收口,原型链成员不可能被注入。
 - 声明值经归一化后写入注册表;同值重复注册幂等短路;非法值(未知 glyph/被安全门拒绝/非字符串)撤销该键声明,该分区回到内置映射或关键词/哈希默认管线,已改写的 nav svg 内容就地重写。
 - 声明持久化在 `window.__navicIconDeclarations`:本插件 client 半区热重载会重跑工厂而生产者不重发注册,持久层让重装实例恢复声明,页面刷新随 window 释放。
@@ -87,7 +100,7 @@ node scripts/dev-link.mjs dsh-settings-nav-icons
 
 前提:profile `package.json` 的 dependencies 有本包 semver 行、`dsh.profile.bundles` 有本包名(未发布包 registry 拉取会失败,junction 覆盖 node_modules 物理目录后启动只走 realpath)。junction 会被 `pnpm install` / `dsh plugin add` 抹掉,之后重跑本脚本即可。
 
-重启 dsh 后设置面板即生效;无设置项。
+重启 dsh 后设置面板即生效;设置项即「用户自定义覆盖」的右键浮层,无独立设置页。
 
 ## 升级 / 卸载
 
@@ -106,7 +119,7 @@ pnpm --dir packages/dsh-settings-nav-icons test
 node --test packages/dsh-settings-nav-icons/test/*.test.mjs
 ```
 
-覆盖:上表全部行为场景(齿轮强补 / 非齿轮不动 / svg 记账幂等与 label 重写 / trim 与空 label / 无 svg 降级 / 内容改写与不建节点 / 0.1.x 残留清理 / 声明安全门 / 撤销回退取图链 / 关键词边界 / 头像槽 img+div / 导航滚动样式注入与卸载)、映射表契约、双实现全量同源 parity、client.js 注册 id 守卫、编排层契约(注册校验 / 就地重写 / 队列三态 / 生命周期 / 异常隔离 / 持久层恢复)、四生产者样板契约。
+覆盖:上表全部行为场景(齿轮强补 / 非齿轮不动 / svg 记账幂等与 label 重写 / trim 与空 label / 无 svg 降级 / 内容改写与不建节点 / 0.1.x 残留清理 / 声明安全门 / 撤销回退取图链 / 关键词边界 / 头像槽 img+div / 导航滚动样式注入与卸载)、映射表契约、双实现全量同源 parity、client.js 注册 id 守卫、编排层契约(注册校验 / 就地重写 / 队列三态 / 生命周期 / 异常隔离 / 持久层恢复)、用户覆盖(localStorage 恢复安全门 / 右键浮层保存与非法行内提示 / 清除回默认管线 / 等价组双语触达 / 浮层开闭)、别名等价查询(lookupWithAlias / aliasKeysOf / iconSourceOf)、四生产者样板契约。
 
 ## License
 

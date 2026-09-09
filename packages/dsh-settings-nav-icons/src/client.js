@@ -12,6 +12,266 @@ window.__ModuleLoader__.load({
     const SELECTOR_LABEL = '.VOzbGW_navLabel'
     const ATTR_MARK = 'data-navic'
 
+    // 恢复路径内容刷新:页面刷新后 DOM 全新无此需求;HMR 热重载复用旧 DOM,
+    // 记账与 label 相同会被 replacePass 幂等跳过,恢复的声明/覆盖必须就地重算。
+    function refreshMarkedContent() {
+      const keys = []
+      for (const el of document.querySelectorAll('[' + ATTR_MARK + ']')) {
+        const key = el.dataset.navic
+        if (key !== undefined && key !== '' && key !== '1' && keys.indexOf(key) < 0) keys.push(key)
+      }
+      if (keys.length === 0) return
+      rewriteTouched(keys)
+    }
+
+    // ---- 用户逐分区覆盖:localStorage 持久层 + 右键浮层 UI ----
+
+    // 覆盖持久化跨会话存活(localStorage),与声明持久层(window 属性,页面级)
+    // 的差异:声明服务于热重载恢复,覆盖服务于用户长期自定义。恢复走同一
+    // resolveIcon 安全门收口,被篡改的存储不直通注入。
+    const USER_STORE_KEY = '__navicUserIcons'
+
+    function restoreUserOverrides() {
+      let raw
+      try {
+        raw = window.localStorage.getItem(USER_STORE_KEY)
+      } catch (error) {
+        console.warn('[nav-icons] 用户覆盖存储不可读,已跳过', error)
+        return
+      }
+      if (typeof raw !== 'string' || raw === '') return
+      let saved
+      try {
+        saved = JSON.parse(raw)
+      } catch (error) {
+        console.warn('[nav-icons] 用户覆盖存储解析失败,已跳过', error)
+        return
+      }
+      if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return
+      for (const key of Object.keys(saved)) {
+        if (key === '__proto__' || key === '1' || key.length > KEY_MAX_CHARS) continue
+        try {
+          if (resolveIcon(saved[key]) !== undefined) USER_OVERRIDES[key] = saved[key]
+        } catch (error) {
+          console.warn('[nav-icons] 用户覆盖键 ' + key + ' 恢复失败,已跳过', error)
+        }
+      }
+    }
+
+    function persistUserOverrides() {
+      try {
+        window.localStorage.setItem(USER_STORE_KEY, JSON.stringify(Object.assign({}, USER_OVERRIDES)))
+      } catch (error) {
+        console.warn('[nav-icons] 用户覆盖存储不可写', error)
+      }
+    }
+
+    // 覆盖写入/清除:值 undefined 视为清除(等价组全键删除);非法值返回 false
+    // 交由浮层行内提示,不落库不重贴。变更后按等价组全键触达重写。
+    function setUserOverride(key, value) {
+      if (!active) return false
+      if (key === '' || key === '__proto__' || key === '1' || key.length > KEY_MAX_CHARS) return false
+      if (value === undefined || value === null) {
+        let cleared = false
+        for (const k of aliasKeysOf(key)) {
+          if (USER_OVERRIDES[k] !== undefined) {
+            delete USER_OVERRIDES[k]
+            cleared = true
+          }
+        }
+        if (cleared) {
+          persistUserOverrides()
+          rewriteTouched(aliasKeysOf(key))
+          schedule()
+        }
+        return true
+      }
+      let resolved
+      try {
+        resolved = resolveIcon(value)
+      } catch (error) {
+        return false
+      }
+      if (resolved === undefined) return false
+      let changed = false
+      for (const k of aliasKeysOf(key)) {
+        if (k !== key && USER_OVERRIDES[k] !== undefined) {
+          delete USER_OVERRIDES[k]
+          changed = true
+        }
+      }
+      // 存原始输入(与声明表同语义,glyph 名回填浮层可读),查询侧过闸展开
+      if (USER_OVERRIDES[key] !== value) {
+        USER_OVERRIDES[key] = value
+        changed = true
+      }
+      if (changed) {
+        persistUserOverrides()
+        rewriteTouched(aliasKeysOf(key))
+        schedule()
+      }
+      return true
+    }
+
+    // 覆盖浮层:右键 nav 单元格打开,单例常驻 body,随插件 stop 移除。
+    // 类名全仓唯一前缀 sni-(dsh-settings-nav-icons 缩写),样式随启动注入。
+    const OVERLAY_CLASS = 'sni-ov'
+    const OVERLAY_CSS =
+      '.' + OVERLAY_CLASS + '{position:fixed;z-index:2147483647;width:264px;padding:10px;' +
+      'border-radius:8px;color-scheme:light dark;background:light-dark(#ffffff,#1f1f1f);' +
+      'color:light-dark(#111111,#eeeeee);box-shadow:0 4px 16px rgba(0,0,0,.28);' +
+      'font:12px/1.5 system-ui,sans-serif}' +
+      '.' + OVERLAY_CLASS + '__title{font-weight:600;margin-bottom:2px;word-break:break-all}' +
+      '.' + OVERLAY_CLASS + '__src{opacity:.65;margin-bottom:6px}' +
+      '.' + OVERLAY_CLASS + '__input{width:100%;box-sizing:border-box;margin-bottom:4px;' +
+      'padding:4px 6px;border:1px solid rgba(128,128,128,.5);border-radius:6px;' +
+      'background:transparent;color:inherit;font:inherit}' +
+      '.' + OVERLAY_CLASS + '__input:focus-visible{outline:2px solid #4d6bfe;outline-offset:-1px}' +
+      '.' + OVERLAY_CLASS + '__bad{display:none;color:#d5484c;margin-bottom:4px}' +
+      '.' + OVERLAY_CLASS + '__bad--on{display:block}' +
+      '.' + OVERLAY_CLASS + '__cur{display:flex;align-items:center;gap:6px;margin-bottom:8px;' +
+      'opacity:.9}' +
+      '.' + OVERLAY_CLASS + '__row{display:flex;gap:6px;justify-content:flex-end}' +
+      '.' + OVERLAY_CLASS + '__btn{padding:4px 12px;border:1px solid rgba(128,128,128,.5);' +
+      'border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer}' +
+      '.' + OVERLAY_CLASS + '__btn:hover{border-color:#4d6bfe}' +
+      '.' + OVERLAY_CLASS + '__btn:focus-visible{outline:2px solid #4d6bfe;outline-offset:1px}' +
+      '.' + OVERLAY_CLASS + '__btn--primary{background:#4d6bfe;border-color:#4d6bfe;color:#ffffff}'
+
+    const SOURCE_LABELS = {
+      user: '用户覆盖',
+      declared: '插件声明',
+      builtin: '内置映射',
+      derived: '自动推导',
+    }
+
+    let overlayStyle = null
+    let overlay = null
+    let overlayCell = null
+
+    function removeOverlay() {
+      if (overlay === null) return
+      overlay.remove()
+      overlay = null
+      overlayCell = null
+      if (slot !== null) slot.overlayEl = null
+    }
+
+    // 就地取当前覆盖原文作输入框回填:等价组任一侧键命中都回填。
+    function overlayInputValue(label) {
+      const hit = lookupWithAlias(USER_OVERRIDES, label)
+      return hit === undefined ? '' : hit
+    }
+
+    function openOverlay(cell) {
+      const labelNode = cell.querySelector(SELECTOR_LABEL)
+      if (labelNode === null) return
+      const label = (labelNode.textContent || '').trim()
+      if (label === '') return
+      removeOverlay()
+      overlayCell = cell
+      overlay = document.createElement('div')
+      overlay.className = OVERLAY_CLASS
+      const title = document.createElement('div')
+      title.className = OVERLAY_CLASS + '__title'
+      title.textContent = label
+      const src = document.createElement('div')
+      src.className = OVERLAY_CLASS + '__src'
+      src.textContent = '当前来源:' + (SOURCE_LABELS[iconSourceOf(label)] || SOURCE_LABELS.derived)
+      const cur = document.createElement('span')
+      cur.className = OVERLAY_CLASS + '__cur'
+      cur.innerHTML = resolveForLabel(label)
+      cur.title = '当前图标'
+      const input = document.createElement('input')
+      input.className = OVERLAY_CLASS + '__input'
+      input.placeholder = 'glyph 名或完整 <svg>(留空不清除,用清除按钮)'
+      input.value = overlayInputValue(label)
+      const bad = document.createElement('div')
+      bad.className = OVERLAY_CLASS + '__bad'
+      bad.textContent = '非法值:须为内置 glyph 名或过安全门的 16×16 <svg>'
+      const row = document.createElement('div')
+      row.className = OVERLAY_CLASS + '__row'
+      const clearBtn = document.createElement('button')
+      clearBtn.className = OVERLAY_CLASS + '__btn'
+      clearBtn.textContent = '清除'
+      const saveBtn = document.createElement('button')
+      saveBtn.className = OVERLAY_CLASS + '__btn ' + OVERLAY_CLASS + '__btn--primary'
+      saveBtn.textContent = '保存'
+      row.appendChild(clearBtn)
+      row.appendChild(saveBtn)
+      overlay.appendChild(title)
+      overlay.appendChild(src)
+      overlay.appendChild(cur)
+      overlay.appendChild(input)
+      overlay.appendChild(bad)
+      overlay.appendChild(row)
+      document.body.appendChild(overlay)
+      if (slot !== null) slot.overlayEl = overlay
+      input.focus()
+      saveBtn.addEventListener('click', function () {
+        if (setUserOverride(label, input.value)) removeOverlay()
+        else bad.classList.add(OVERLAY_CLASS + '__bad--on')
+      })
+      clearBtn.addEventListener('click', function () {
+        setUserOverride(label, undefined)
+        removeOverlay()
+      })
+    }
+
+    // 文档级监听:右键开浮层、浮层外点击/Escape 关闭;start 挂载,stop 卸载。
+    let contextHandler = null
+    let pointerHandler = null
+    let keyHandler = null
+
+    function installOverlayListeners() {
+      contextHandler = function (event) {
+        const target = event.target
+        const cell = target != null && typeof target.closest === 'function'
+          ? target.closest(SELECTOR_CELL)
+          : null
+        if (cell === null) return
+        event.preventDefault()
+        openOverlay(cell)
+      }
+      pointerHandler = function (event) {
+        if (overlay === null) return
+        const target = event.target
+        if (target != null && typeof target.closest === 'function'
+          && target.closest('.' + OVERLAY_CLASS) !== null) return
+        removeOverlay()
+      }
+      keyHandler = function (event) {
+        if (overlay === null) return
+        if (event.key === 'Escape') removeOverlay()
+      }
+      document.addEventListener('contextmenu', contextHandler)
+      document.addEventListener('pointerdown', pointerHandler)
+      document.addEventListener('keydown', keyHandler)
+    }
+
+    function uninstallOverlayListeners() {
+      if (contextHandler !== null) document.removeEventListener('contextmenu', contextHandler)
+      if (pointerHandler !== null) document.removeEventListener('pointerdown', pointerHandler)
+      if (keyHandler !== null) document.removeEventListener('keydown', keyHandler)
+      contextHandler = null
+      pointerHandler = null
+      keyHandler = null
+    }
+
+    function installOverlayStyle() {
+      overlayStyle = document.createElement('style')
+      overlayStyle.textContent = OVERLAY_CSS
+      document.head.appendChild(overlayStyle)
+      if (slot !== null) slot.overlayStyle = overlayStyle
+    }
+
+    function uninstallOverlayStyle() {
+      if (overlayStyle === null) return
+      overlayStyle.remove()
+      overlayStyle = null
+      if (slot !== null) slot.overlayStyle = null
+    }
+
     // ---- 设置导航滚动补偿:官方 navList 高度随内容撑开,溢出被 panel hidden
     // 裁剪且无滚动机制,分区一多底部即不可达。样式表形态一次注入,对弹窗重开
     // 等任意 React 重渲染持续生效;类名锚定与上方单元格同策略(哈希前缀字面量)。
@@ -189,10 +449,59 @@ window.__ModuleLoader__.load({
       ['zap|flash|fast|quick|boost|speed|turbo', ZAP],
     ].map(function (pair) { return { re: new RegExp('(^|[^a-z])(' + pair[0] + ')([^a-z]|$)'), icon: pair[1] } })
 
-    // 插件名/分区 label 两级取图:外部声明 → 关键词主题图 → 稳定哈希备用池。
+    // 用户逐分区覆盖注册表:取图链最前端,值经 resolveIcon 归一化,持久化由
+    // 编排层落 localStorage(纯逻辑层不触碰存储)。
+    const USER_OVERRIDES = Object.create(null)
+
+    // 官方双语分区等价组:组内任一语言 label 作声明/覆盖键,组内其他语言取图时
+    // 同样命中(消除语言切换下声明键漂移)。仅收官方现有展示形态,不发明未知 id。
+    const ALIAS_GROUPS = [
+      ['通用设置', 'General'],
+    ]
+
+    // 表查询的别名等价扩展:先按原键直查,再沿等价组用同组成员试查。
+    // 表为 Object.create(null) 帧装,继承成员不可达。
+    function lookupWithAlias(table, label) {
+      const direct = table[label]
+      if (direct !== undefined) return direct
+      for (const group of ALIAS_GROUPS) {
+        if (group.indexOf(label) < 0) continue
+        for (const member of group) {
+          if (member === label) continue
+          const hit = table[member]
+          if (hit !== undefined) return hit
+        }
+      }
+      return undefined
+    }
+
+    // 键的等价组展开:自身 + 所属组内其他成员;不入组的键只返回自身。
+    // 覆盖写入/清除与就地重写按该范围触达,保证双语分区两侧状态一致。
+    function aliasKeysOf(label) {
+      const keys = [label]
+      for (const group of ALIAS_GROUPS) {
+        if (group.indexOf(label) < 0) continue
+        for (const member of group) {
+          if (member !== label && keys.indexOf(member) < 0) keys.push(member)
+        }
+      }
+      return keys
+    }
+
+    // 插件名/分区 label 两级取图:用户覆盖 → 外部声明 → 关键词主题图 → 稳定哈希备用池。
+    // 表值为原始声明(glyph 名或 svg),命中后过 resolveIcon 归一化展开;归一化失败
+    // (声明值被撤销/存储被篡改)视为该层未命中,继续下一层。
     function themedIcon(name) {
-      const declared = resolveIcon(DECLARED_ICONS[name])
-      if (declared !== undefined) return declared
+      const overridden = lookupWithAlias(USER_OVERRIDES, name)
+      if (overridden !== undefined) {
+        const resolved = resolveIcon(overridden)
+        if (resolved !== undefined) return resolved
+      }
+      const declared = lookupWithAlias(DECLARED_ICONS, name)
+      if (declared !== undefined) {
+        const resolved = resolveIcon(declared)
+        if (resolved !== undefined) return resolved
+      }
       const n = name.toLowerCase()
       for (const rule of NAME_RULES) {
         if (rule.re.test(n)) return rule.icon
@@ -200,14 +509,31 @@ window.__ModuleLoader__.load({
       return FALLBACK[poolIndexOf(name)]
     }
 
-    // 分区取图全链:声明 → 内置映射 → 关键词/哈希兜底。decide 与声明变更就地
-    // 重写共用;撤销内置分区声明时回退必须含内置映射,否则卡死在哈希图。
+    // 分区取图全链:用户覆盖 → 声明(含别名) → 内置映射 → 关键词/哈希兜底。decide
+    // 与声明/覆盖变更就地重写共用;撤销时回退必须含内置映射,否则卡死在哈希图。
     function resolveForLabel(label) {
-      const declared = resolveIcon(DECLARED_ICONS[label])
-      if (declared !== undefined) return declared
+      const overridden = lookupWithAlias(USER_OVERRIDES, label)
+      if (overridden !== undefined) {
+        const resolved = resolveIcon(overridden)
+        if (resolved !== undefined) return resolved
+      }
+      const declared = lookupWithAlias(DECLARED_ICONS, label)
+      if (declared !== undefined) {
+        const resolved = resolveIcon(declared)
+        if (resolved !== undefined) return resolved
+      }
       const mapped = ICONS[label]
       if (mapped !== undefined) return mapped
       return themedIcon(label)
+    }
+
+    // 当前 label 的取图来源:用户覆盖 / 插件声明 / 内置映射 / 关键词与哈希推导。
+    // 与 resolveForLabel 同序遍历,供覆盖浮层展示当前生效层。
+    function iconSourceOf(label) {
+      if (lookupWithAlias(USER_OVERRIDES, label) !== undefined) return 'user'
+      if (lookupWithAlias(DECLARED_ICONS, label) !== undefined) return 'declared'
+      if (ICONS[label] !== undefined) return 'builtin'
+      return 'derived'
     }
 
     // 市场卡片头像槽决策:img(作者头像)与 div(字母色块)同构处理——原子节点隐藏,
@@ -306,7 +632,6 @@ window.__ModuleLoader__.load({
     }
 
     /* LOGIC-END */
-
     // ---- 市场卡片 DOM 锚点(css-modules 哈希前缀随版本变,按后缀匹配) ----
 
     const SELECTOR_AV = '[class$="_av"]'
@@ -451,18 +776,29 @@ window.__ModuleLoader__.load({
       }
       if (touched.length === 0) return
       persistDeclarations()
-      // 声明变更就地生效:nav svg(记账为分区/插件名)直接重写内容且记账保留——
-      // 改写后的 svg 非齿轮,清账会让 isGear 判定失配卡死;头像槽(非 svg 节点)
-      // 清账后走 decideAvatar 重贴。'1' 为注入纯标记,不命中声明键。
+      rewriteTouched(touched)
+      schedule()
+    }
+
+    // 键命中元素就地重写:nav svg(记账为分区/插件名)直接重写内容且记账保留——
+    // 改写后的 svg 非齿轮,清账会让 isGear 判定失配卡死;头像槽(非 svg 节点)
+    // 清账后走 decideAvatar 重贴。'1' 为注入纯标记,不命中声明/覆盖键。
+    // 触达键先按等价组展开:声明/覆盖写在哪一侧语言键,双语分区两侧都立即生效。
+    function rewriteTouched(touched) {
+      const expanded = []
+      for (const key of touched) {
+        for (const k of aliasKeysOf(key)) {
+          if (expanded.indexOf(k) < 0) expanded.push(k)
+        }
+      }
       for (const el of document.querySelectorAll('[' + ATTR_MARK + ']')) {
-        if (touched.indexOf(el.dataset.navic) < 0) continue
+        if (expanded.indexOf(el.dataset.navic) < 0) continue
         if (el.tagName === 'svg') {
           el.innerHTML = svgInner(resolveForLabel(el.dataset.navic))
         } else {
           delete el.dataset.navic
         }
       }
-      schedule()
     }
 
     // 滚动样式元素:start 注入 head,stop 移除,引用即状态源,幂等无守卫分支;
@@ -509,23 +845,32 @@ window.__ModuleLoader__.load({
       if (previous !== undefined) {
         if (previous.observer !== null) previous.observer.disconnect()
         if (previous.rafId !== 0) cancelAnimationFrame(previous.rafId)
-        // 宽松判空:槽是跨代码版本通道,旧版槽无 scrollStyle 字段(undefined)
+        // 宽松判空:槽是跨代码版本通道,旧版槽缺新字段(undefined)
         if (previous.scrollStyle != null) previous.scrollStyle.remove()
+        if (previous.overlayStyle != null) previous.overlayStyle.remove()
+        if (previous.overlayEl != null) previous.overlayEl.remove()
       }
-      slot = { observer: null, rafId: 0, scrollStyle: null }
+      slot = { observer: null, rafId: 0, scrollStyle: null, overlayStyle: null, overlayEl: null }
       window[SLOT_KEY] = slot
-      // 可抛步骤(声明恢复/队列排水/样式注入)先于观察器挂载,失败不产生孤儿扫描器
+      // 可抛步骤(覆盖/声明恢复、队列排水、样式注入)先于观察器挂载,失败不产生孤儿扫描器
+      installOverlayStyle()
       installScrollStyle()
+      restoreUserOverrides()
       restoreDeclarations()
       drainQueue()
       observer = new MutationObserver(onMutations)
       observer.observe(document.body, { childList: true, subtree: true, characterData: true })
       slot.observer = observer
+      installOverlayListeners()
+      refreshMarkedContent()
       replacePass()
     }
 
     function stop() {
       active = false
+      uninstallOverlayListeners()
+      removeOverlay()
+      uninstallOverlayStyle()
       uninstallScrollStyle()
       if (observer !== null) {
         observer.disconnect()

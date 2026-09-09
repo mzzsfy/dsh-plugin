@@ -26,7 +26,7 @@ function clientLogic() {
   }
   const factory = new Function(
     'ATTR_MARK', 'SELECTOR_LABEL',
-    section + '; return { ICONS, DECLARED_ICONS, FALLBACK, GLYPHS, GEAR_PATH, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, decide, applyDecision, decideAvatar, applyAvatar };',
+    section + '; return { ICONS, DECLARED_ICONS, USER_OVERRIDES, ALIAS_GROUPS, FALLBACK, GLYPHS, GEAR_PATH, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, iconSourceOf, lookupWithAlias, aliasKeysOf, decide, applyDecision, decideAvatar, applyAvatar };',
   )
   return factory(pick('ATTR_MARK'), pick('SELECTOR_LABEL'))
 }
@@ -285,6 +285,51 @@ function defineScenarios(prefix, L) {
     assert.equal(themedIcon('git-notify'), themedIcon('git'), 'git 先于 notify')
   })
 
+  test(prefix + '别名等价:双语分区任一语言键命中,组外键不受影响', () => {
+    const { USER_OVERRIDES, lookupWithAlias, aliasKeysOf } = L
+    try {
+      USER_OVERRIDES['通用设置'] = 'bell'
+      assert.equal(lookupWithAlias(USER_OVERRIDES, 'General'), 'bell', '反向等价命中')
+      assert.equal(lookupWithAlias(USER_OVERRIDES, '通用设置'), 'bell', '正向直查')
+      assert.equal(aliasKeysOf('General').length, 2, '等价组键展开为双语两侧')
+      assert.deepEqual(aliasKeysOf('插件市场'), ['插件市场'], '组外键只返回自身')
+    } finally {
+      delete USER_OVERRIDES['通用设置']
+    }
+  })
+
+  test(prefix + '用户覆盖插到取图链最前,撤销后回声明/内置/推导管线', () => {
+    const { USER_OVERRIDES, DECLARED_ICONS, ICONS, resolveForLabel, resolveIcon, iconSourceOf } = L
+    try {
+      DECLARED_ICONS['插件市场'] = 'git'
+      assert.equal(resolveForLabel('插件市场'), resolveIcon('git'), '基线:声明命中')
+      assert.equal(iconSourceOf('插件市场'), 'declared')
+      USER_OVERRIDES['插件市场'] = 'bell'
+      assert.equal(resolveForLabel('插件市场'), resolveIcon('bell'), '覆盖压过声明')
+      assert.equal(iconSourceOf('插件市场'), 'user')
+      delete USER_OVERRIDES['插件市场']
+      assert.equal(resolveForLabel('插件市场'), resolveIcon('git'), '撤销覆盖回声明')
+      delete DECLARED_ICONS['插件市场']
+      assert.equal(resolveForLabel('插件市场'), ICONS['插件市场'], '再撤声明回内置映射')
+      assert.equal(iconSourceOf('插件市场'), 'builtin')
+      assert.equal(iconSourceOf('无任何命中的分区'), 'derived', '无命中归推导')
+    } finally {
+      delete USER_OVERRIDES['插件市场']
+      delete DECLARED_ICONS['插件市场']
+    }
+  })
+
+  test(prefix + '覆盖的别名等价:覆盖写在任一语言键,双语 label 都命中且来源为 user', () => {
+    const { USER_OVERRIDES, resolveForLabel, resolveIcon, iconSourceOf } = L
+    try {
+      USER_OVERRIDES['General'] = 'search'
+      assert.equal(resolveForLabel('通用设置'), resolveIcon('search'), '反向 label 命中覆盖')
+      assert.equal(iconSourceOf('通用设置'), 'user')
+    } finally {
+      delete USER_OVERRIDES['General']
+    }
+  })
+
   test(prefix + '头像槽:原子节点隐藏记账,换名清旧注入不误删外来兄弟', () => {
     const { decideAvatar, applyAvatar } = L
     const removed = []
@@ -351,6 +396,9 @@ test('两份实现常量同源', () => {
   assert.equal(logic.SELECTOR_LABEL, client.SELECTOR_LABEL, 'label 选择器同源(精确匹配桩防子串容忍)')
   assert.equal(logic.GEAR_PATH, client.GEAR_PATH)
   assert.equal(logic.SVG_MAX_CHARS, client.SVG_MAX_CHARS)
+  assert.deepEqual(logic.ALIAS_GROUPS, client.ALIAS_GROUPS, '别名组同源')
+  assert.equal(Object.keys(logic.USER_OVERRIDES).length, 0, '用户覆盖表初始为空(logic 侧)')
+  assert.equal(Object.keys(client.USER_OVERRIDES).length, 0, '用户覆盖表初始为空(client 侧)')
 })
 
 test('两份实现 ICONS/GLYPHS/FALLBACK 全量同源', () => {
@@ -380,7 +428,7 @@ test('LOGIC 段与 logic.mjs 决策函数逐函数源码一致(归一化注释�
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\s+/g, '')
-  for (const name of ['resolveIcon', 'svgInner', 'resolveForLabel', 'themedIcon', 'decide', 'applyDecision', 'decideAvatar', 'applyAvatar', 'poolIndexOf']) {
+  for (const name of ['resolveIcon', 'svgInner', 'resolveForLabel', 'themedIcon', 'iconSourceOf', 'lookupWithAlias', 'aliasKeysOf', 'decide', 'applyDecision', 'decideAvatar', 'applyAvatar', 'poolIndexOf']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(logic[name].toString()),

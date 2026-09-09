@@ -1,23 +1,15 @@
 // 注入点B(S15)纯函数层测试:select 矩阵/模型键回退/单轮行文本/title 口径/文案键/显隐 CSS 镜像
-// client.js 为非模块 script(bundle 求值形态,禁 import/export),整源求值后按顶层声明名收集
+// client.js 为经典 script bundle(禁 import/export),整文件 IIFE 书挡;经 client-eval 剥壳后整源求值,按顶层声明名收集
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { CLIENT_SOURCE, CLIENT_BODY, DECLARATION_NAMES } from './client-eval.mjs'
 
-const CLIENT_SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
-const DECLARATION_NAMES = [
-  ...new Set(
-    [...CLIENT_SOURCE.matchAll(/^(?:const|function|let) ([A-Za-z_$][\w$]*)/gm)].map((match) => match[1])
-  ),
-]
-const core = new Function(`${CLIENT_SOURCE}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
+const core = new Function(`${CLIENT_BODY}\nreturn { ${DECLARATION_NAMES.join(', ')} }`)()
 
 const {
   MESSAGES_EN,
   MESSAGES_ZH,
-  MODEL_WILDCARD,
+  MODEL_UNROUTED,
   TURN_TAIL_DATA_KEY,
   TURN_TAIL_PRIORITY,
   buildTurnCostLine,
@@ -58,20 +50,20 @@ test('select owner 形状残缺全部 null 不抛', () => {
   assert.equal(selectTurnTokenUsage(undefined), null)
 })
 
-test('计价模型键取 routes 首个,缺失回退通配', () => {
+test('计价模型键取 routes 首个,缺失回退全通配键', () => {
   assert.equal(turnModelOf({ routes: [{ provider: 'p', model: 'p/m' }] }), 'p/m')
-  assert.equal(turnModelOf({ routes: [] }), MODEL_WILDCARD)
-  assert.equal(turnModelOf({}), MODEL_WILDCARD)
-  assert.equal(turnModelOf(null), MODEL_WILDCARD)
+  assert.equal(turnModelOf({ routes: [] }), MODEL_UNROUTED)
+  assert.equal(turnModelOf({}), MODEL_UNROUTED)
+  assert.equal(turnModelOf(null), MODEL_UNROUTED)
 })
 
-test('routes 缺失模型键命中通配规则', () => {
+test('routes 缺失模型键命中全通配规则', () => {
   const rules = [
     { model: 'p/m', currency: '¥', price: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 }, conditions: [] },
-    { model: MODEL_WILDCARD, currency: '$', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
+    { model: '*/*', currency: '$', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
   ]
   const tokenUsage = { uncachedInputTokens: 1000, outputTokens: 0, totalTokens: 1000 }
-  assert.equal(turnModelOf(tokenUsage), MODEL_WILDCARD)
+  assert.equal(turnModelOf(tokenUsage), MODEL_UNROUTED)
   assert.deepEqual(matchPrice(rules, turnModelOf(tokenUsage), NOW), { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
 })
 

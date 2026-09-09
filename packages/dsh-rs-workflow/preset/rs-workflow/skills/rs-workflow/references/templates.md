@@ -13,7 +13,7 @@
 | 3 | complexity=medium 或 risk=medium | plan-final | 先计划（计划审 pr），通过后执行，干完终审 |
 | 4 | 其余（低复杂 + 低风险 + 小范围） | lite | 单任务直干，终审一次 |
 
-缺失信号按 low/small 降级（planner 未标注的信号视为不存在）；三信号全缺 → 按 `defaultTemplate` 兜底（`auto`/缺省 → multi-plan）。模板兜底链（与原版 `resolvePlanTemplateId` 一致）：**锁定**（lockedTemplate，跳过分诊直接实例化）→ **planner 声明**（合法时采纳）→ **矩阵**（按信号裁定）→ **无信号兜底**（defaultTemplate）。特例：兜底选中 lite 但 planner 拆了多任务（信号与拆解自相矛盾）→ 升最小兼容模板 plan-final（lite 单元无依赖出口）。
+缺失信号按 low/small 降级（planner 未标注的信号视为不存在）；三信号全缺 → 按 `defaultTemplate` 兜底（`auto`/缺省 → multi-plan）。模板兜底链（与原版 `resolvePlanTemplateId` 一致）：**锁定**（lockedTemplate，跳过分诊直接实例化）→ **planner 声明**（合法时采纳）→ **矩阵**（按信号裁定）→ **无信号兜底**（defaultTemplate）。特例：非锁定路径（声明、矩阵或兜底）选中 lite 但 planner 拆了多任务（信号与拆解自相矛盾）→ 升最小兼容模板 plan-final（lite 单元无依赖出口）。
 
 ## 2. 四模板拓扑
 
@@ -74,7 +74,7 @@ budgets 四字段经 `args.budgets` 传入，GUI/slots.json5 配置，缺省 2/2
 [进度] i/n                                （首个未完成 task 序号/总任务数，全完成 = n/n）
 [已完成子任务]
 1. 描述: 关键输出                          （最近 10 条携带 keyOutput，截 500 字符；更早仅描述；无则"无"）
-[当前子任务] …                            （活跃集合，并行时"；"连接）
+[当前子任务] …                            （当前节点描述；并行兄弟见 [并行执行中] 段）
 [并行执行中]                              （有并行兄弟任务才有）
 - 描述
 [下一步] …                                （活跃节点前向首个 pending 后继；无则"无,全部完成"）

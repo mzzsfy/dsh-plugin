@@ -7,7 +7,7 @@ import schemastery from '@deepseek-ai/schemastery'
 import { UsageCollector } from './collector.js'
 import { CURRENCIES, CONDITION_KINDS, UNIT_PER_MILLION } from './pricing.js'
 import { registerUsageRoutes } from './routes.js'
-import { DEFAULT_MINUTE_RETENTION_DAYS, sharedStore } from './store.js'
+import { DEFAULT_MINUTE_RETENTION_DAYS, MINUTE_RETENTION_MAX_DAYS, sharedStore } from './store.js'
 // 顶层 inject 仅声明 web profile 必然存在的四个服务;settings 在 apply 内
 // 嵌套 inject(通道级静默不激活),构成干净禁用。
 export const inject = ['webServer', 'sessionPersistence', 'sessions', 'storageDomain']
@@ -50,7 +50,7 @@ const PRICING_RULE_SCHEMA = schemastery.object({
 
 const SETTINGS_SCHEMA = schemastery.object({
   minuteRetentionDays: schemastery.number().min(0).step(1).default(DEFAULT_MINUTE_RETENTION_DAYS)
-    .description('分钟桶保留天数(上限 48h),0 表示禁用分钟桶'),
+    .description(`分钟桶保留天数(上限 ${MINUTE_RETENTION_MAX_DAYS} 天),0 表示禁用分钟桶`),
   pricing: schemastery.object({ rules: schemastery.array(PRICING_RULE_SCHEMA) })
     .description('定价规则(wire 由 /api/usage-dash/pricing 读写)'),
 })

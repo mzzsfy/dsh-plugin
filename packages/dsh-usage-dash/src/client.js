@@ -1,13 +1,15 @@
+(() => {
 // 用量统计面板 client 半区:设置页 settings.section 注入与底部信息栏接管,en/zh 双语。
-// 无构建:createElement + 一次性样式注入;协议与渲染形态见 docs/feat-usage-dash/client-design.md。
-// 单文件自包含:client-modules bundle 以非模块 script 求值,禁止 import/export(整捆语法共担);纯函数区经测试整源求值收集。
+// 无构建:createElement + 一次性样式注入。
+// 单文件自包含:client-modules bundle 以经典 script 整源求值,禁止 import/export;整文件 IIFE 书挡,
+// 顶层零词法声明(经典 script 全局词法环境跨 bundle 共享,顶层同名即整脚本拒载);测试经书挡剥壳求值纯函数区。
 
-const DAY_PRESETS = ['7', '14', '30', '90']
-const HOUR_PRESETS = ['24h', '48h', '72h']
-const MINUTE_PRESETS = ['60m', '180m', '360m']
+const DAY_PRESETS = ['7', '30', '90']
+const HOUR_PRESETS = ['24h', '3d', '7d', '15d']
+const MINUTE_PRESETS = ['3h', '24h', '3d', '7d']
 
-const HOUR_PRESET_HOURS = { '24h': 24, '48h': 48, '72h': 72 }
-const MINUTE_PRESET_MINUTES = { '60m': 60, '180m': 180, '360m': 360 }
+const HOUR_PRESET_HOURS = { '24h': 24, '3d': 3 * 24, '7d': 7 * 24, '15d': 15 * 24 }
+const MINUTE_PRESET_MINUTES = { '3h': 3 * 60, '24h': 24 * 60, '3d': 3 * 24 * 60, '7d': 7 * 24 * 60 }
 
 const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
@@ -85,6 +87,11 @@ function trimSlots(slots, max) {
   return slots.length > max ? slots.slice(-max) : slots
 }
 
+// 时/分挡位表存在同 id(如 '24h'),点数据缓存命中须视图与挡位双匹配,防跨视图误用他端点数据
+function pointStatsMatches(cached, view, presetId) {
+  return !!cached && cached.view === view && cached.preset === presetId
+}
+
 const DEFAULT_ERROR_CODE = 'error'
 const DEFAULT_ERROR_MESSAGE = 'usage api error'
 const envelopeFailure = (code, message) => ({ ok: false, code, message })
@@ -102,15 +109,14 @@ function parseEnvelope(json) {
 const MESSAGES_ZH = {
   nav: '使用统计',
   range: '时间范围',
-  'rangePreset.7': '最近 7 天',
-  'rangePreset.14': '最近 14 天',
-  'rangePreset.30': '最近 30 天',
-  'rangePreset.90': '最近 90 天',
+  'rangePreset.7': '7 天',
+  'rangePreset.30': '30 天',
+  'rangePreset.90': '90 天',
   rangeCustom: '自定义',
   from: '开始日期',
   to: '结束日期',
   refresh: '刷新',
-  loading: '加载中',
+  loading: '正在扫描历史会话。安装插件后首次会全量回扫,数据量大时耗时较久,期间尽量减少操作以免服务变卡',
   tokens: 'Tokens 用量',
   tokensHint: '服务商总口径:未缓存输入 + 输出 + 缓存命中 token',
   sessions: '会话数量',
@@ -133,22 +139,31 @@ const MESSAGES_ZH = {
   percent: '占比',
   asOf: '统计截至',
   empty: '当前时间范围内暂无用量数据。Token 用量从本面板启用后开始累计,并会一次性回扫已有的历史会话。',
-  viewDay: '按天',
-  viewHour: '按小时',
-  viewMinute: '按分钟',
+  viewDay: '天',
+  viewHour: '小时',
+  viewMinute: '分钟',
   viewGroup: '统计粒度',
   'status.running': '回扫中 {done}/{total}',
   rebuild: '重建',
   rebuildConfirm: '确认重建',
   hourTrend: '按小时 Token 趋势',
   minuteTrend: '按分钟 Token 趋势',
-  hourPreset: '最近 {n} 小时',
-  minutePreset: '最近 {n} 分钟',
+  'hourPreset.24h': '24 小时',
+  'hourPreset.3d': '3 天',
+  'hourPreset.7d': '7 天',
+  'hourPreset.15d': '15 天',
+  'minutePreset.3h': '3 小时',
+  'minutePreset.24h': '24 小时',
+  'minutePreset.3d': '3 天',
+  'minutePreset.7d': '7 天',
   trendLimitedHour: '数据量过大,仅显示最近 {n} 小时',
   trendLimitedMinute: '数据量过大,仅显示最近 {n} 分钟',
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
   skippedSessions: '跳过 {n} 个无法读取的会话',
+  anomalyLog: '扫描异常日志',
+  logKindSkipped: '跳过会话',
+  logKindRecord: '写入失败',
   'stats.counts': '{turns} 轮 · {steps} 步',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': '工具调用 {duration}',
@@ -173,7 +188,7 @@ const MESSAGES_ZH = {
   pricing: '定价规则',
   pricingUnavailable: '定价规则不可用',
   pricingModel: '模型',
-  pricingModelPlaceholder: 'provider/model 或 *',
+  pricingModelPlaceholder: 'provider/model,段可通配如 */*',
   pricingCurrency: '货币',
   pricingUnit: '每百万 token 定价',
   priceInput: '输入',
@@ -181,13 +196,34 @@ const MESSAGES_ZH = {
   priceCacheRead: '缓存读',
   priceCacheWrite: '缓存写',
   noCondition: '无条件 = 恒生效',
-  conditionsPreserved: '已有 {n} 条条件,本编辑器暂不支持修改,保存时原样保留',
+  addCondition: '添加条件',
+  deleteCondition: '删除条件',
+  condKind: '条件类型',
+  condDailyWindow: '每日时段',
+  condWeekdays: '星期几',
+  condMonthDays: '每月号段',
+  condDateRange: '日期段',
+  condFrom: '从',
+  condTo: '至',
+  'weekday.0': '日',
+  'weekday.1': '一',
+  'weekday.2': '二',
+  'weekday.3': '三',
+  'weekday.4': '四',
+  'weekday.5': '五',
+  'weekday.6': '六',
+  condTime: '需 HH:MM',
+  condWeekday: '需 0-6 整数',
+  condMonthDay: '需 1-31 整数',
+  condDate: '需 YYYY-MM-DD',
+  condRange: '起始不得晚于结束',
   deleteRule: '删除规则',
   addRule: '添加规则',
   save: '保存',
   saved: '已保存',
   required: '必填',
   priceInvalid: '不能为负',
+  modelFormat: '需两段 provider/model,段可通配',
   'duration.compactSeconds': '{seconds}秒',
   'duration.compactMinutes': '{minutes}分{seconds}秒',
   'number.thousand': '{value}K',
@@ -198,15 +234,14 @@ const MESSAGES_ZH = {
 const MESSAGES_EN = {
   nav: 'Usage',
   range: 'Time range',
-  'rangePreset.7': 'Last 7 days',
-  'rangePreset.14': 'Last 14 days',
-  'rangePreset.30': 'Last 30 days',
-  'rangePreset.90': 'Last 90 days',
+  'rangePreset.7': '7 days',
+  'rangePreset.30': '30 days',
+  'rangePreset.90': '90 days',
   rangeCustom: 'Custom',
   from: 'From',
   to: 'To',
   refresh: 'Refresh',
-  loading: 'Loading',
+  loading: 'Scanning past sessions. The first scan after installing runs a full backfill and can take a while on large histories; avoid heavy activity meanwhile to keep the service responsive',
   tokens: 'Token usage',
   tokensHint: 'Provider total: uncached input + output + cache-read tokens',
   sessions: 'Sessions',
@@ -229,22 +264,31 @@ const MESSAGES_EN = {
   percent: 'Share',
   asOf: 'Stats as of',
   empty: 'No usage data in this range yet. Token usage accumulates from when this panel is enabled, and existing sessions are scanned once.',
-  viewDay: 'Daily',
-  viewHour: 'Hourly',
-  viewMinute: 'Per-minute',
+  viewDay: 'Day',
+  viewHour: 'Hour',
+  viewMinute: 'Minute',
   viewGroup: 'Granularity',
   'status.running': 'Rescanning {done}/{total}',
   rebuild: 'Rebuild',
   rebuildConfirm: 'Confirm rebuild',
   hourTrend: 'Hourly token trend',
   minuteTrend: 'Per-minute token trend',
-  hourPreset: 'Last {n} hours',
-  minutePreset: 'Last {n} minutes',
+  'hourPreset.24h': '24 hours',
+  'hourPreset.3d': '3 days',
+  'hourPreset.7d': '7 days',
+  'hourPreset.15d': '15 days',
+  'minutePreset.3h': '3 hours',
+  'minutePreset.24h': '24 hours',
+  'minutePreset.3d': '3 days',
+  'minutePreset.7d': '7 days',
   trendLimitedHour: 'Too much data, showing only the last {n} hours',
   trendLimitedMinute: 'Too much data, showing only the last {n} minutes',
   trendTruncated: 'Too much data, showing only the latest part',
   recordFailures: '{n} records failed to write',
   skippedSessions: '{n} unreadable sessions skipped',
+  anomalyLog: 'Scan anomaly log',
+  logKindSkipped: 'skipped',
+  logKindRecord: 'write failed',
   'stats.counts': '{turns} turns · {steps} steps',
   'stats.llm': 'LLM {duration}',
   'stats.toolCall': 'Tool call {duration}',
@@ -269,7 +313,7 @@ const MESSAGES_EN = {
   pricing: 'Pricing rules',
   pricingUnavailable: 'Pricing rules unavailable',
   pricingModel: 'Model',
-  pricingModelPlaceholder: 'provider/model or *',
+  pricingModelPlaceholder: 'provider/model, segments may be */*',
   pricingCurrency: 'Currency',
   pricingUnit: 'per million tokens pricing',
   priceInput: 'Input',
@@ -277,13 +321,34 @@ const MESSAGES_EN = {
   priceCacheRead: 'Cache read',
   priceCacheWrite: 'Cache write',
   noCondition: 'No condition = always applies',
-  conditionsPreserved: '{n} existing conditions are kept as-is; editing them is not supported yet',
+  addCondition: 'Add condition',
+  deleteCondition: 'Remove condition',
+  condKind: 'Condition kind',
+  condDailyWindow: 'Daily window',
+  condWeekdays: 'Weekdays',
+  condMonthDays: 'Month days',
+  condDateRange: 'Date range',
+  condFrom: 'From',
+  condTo: 'To',
+  'weekday.0': 'Su',
+  'weekday.1': 'Mo',
+  'weekday.2': 'Tu',
+  'weekday.3': 'We',
+  'weekday.4': 'Th',
+  'weekday.5': 'Fr',
+  'weekday.6': 'Sa',
+  condTime: 'Requires HH:MM',
+  condWeekday: 'Requires integer 0-6',
+  condMonthDay: 'Requires integer 1-31',
+  condDate: 'Requires YYYY-MM-DD',
+  condRange: 'From must not be after to',
   deleteRule: 'Remove rule',
   addRule: 'Add rule',
   save: 'Save',
   saved: 'Saved',
   required: 'Required',
   priceInvalid: 'Must not be negative',
+  modelFormat: 'Requires two segments provider/model; segments may be wildcards',
   'duration.compactSeconds': '{seconds}s',
   'duration.compactMinutes': '{minutes}m{seconds}s',
   'number.thousand': '{value}K',
@@ -327,14 +392,12 @@ function cacheRateText(hit, miss) {
   return rate === null ? '—' : formatPercent(rate)
 }
 
-const REF_SPLIT_LIMIT = 2
+// 模型键展示分段与定价/存储口径同源:首个 / 前 vendor 段,余为模型段
 function modelNameOf(ref) {
-  const parts = ref.split('/')
-  return parts.length < REF_SPLIT_LIMIT ? ref : parts.slice(1).join('/')
+  return splitRequestSegments(ref)[1]
 }
 function providerOf(ref) {
-  const parts = ref.split('/')
-  return parts.length < REF_SPLIT_LIMIT ? 'default' : parts[0]
+  return splitRequestSegments(ref)[0]
 }
 
 function shortDay(day) {
@@ -358,13 +421,11 @@ function isEmptyRange(value) {
   return value.tokens === 0 && value.cacheHit === 0 && value.requests === 0 && value.turns === 0
 }
 
-// 状态行仅在回扫进行或异常存在时可见,空闲干净态不占版面
-function statusLineActive(status) {
-  if (!status) return false
-  return Boolean(status.running)
-    || Boolean(status.error)
-    || (status.skippedSessions ?? 0) > 0
-    || (status.recordFailures ?? 0) > 0
+// 日志条目时刻仅显示当日时分秒
+function logTimeOf(ms) {
+  const date = new Date(ms)
+  const part = (value) => String(value).padStart(2, '0')
+  return `${part(date.getHours())}:${part(date.getMinutes())}:${part(date.getSeconds())}`
 }
 
 const toRankedModels = (totals) =>
@@ -550,6 +611,12 @@ function otherDetailItems(models) {
 
 function modelSegmentLabel(name, tokens, percent) {
   return `${name}: ${formatTokens(tokens)} (${formatPercent(percent)})`
+}
+
+// 模型平均生成速度文本:官方吞吐口径格式化 + 单位(语言中立);无速度(无时长数据)为空串
+function modelSpeedText(speed) {
+  if (speed === undefined) return ''
+  return `${formatTokensPerSecond(speed)} tok/s`
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -892,6 +959,11 @@ const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const TOKENS_PER_MILLION = 1000 * 1000
 
 const MODEL_WILDCARD = '*'
+const SEGMENT_SEPARATOR = '/'
+const PROVIDER_UNSET = 'default'
+// 档位权重:vendor 段通配 1 档、model 段通配 2 档,和越小越优先(模型名精确档恒优于供应商精确档)
+const VENDOR_WILDCARD_TIER = 1
+const MODEL_WILDCARD_TIER = 2
 const MINUTES_PER_HOUR = 60
 
 const minutesOfDay = (date) => date.getHours() * MINUTES_PER_HOUR + date.getMinutes()
@@ -961,12 +1033,31 @@ function isRuleShaped(rule) {
     && Array.isArray(rule.conditions)
 }
 
-const firstMatchingPrice = (rules, date, modelFilter) => {
-  for (const rule of rules) {
-    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
-    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule.price
-  }
-  return null
+// 规则模型键必须两段式:首个 / 前 vendor 段、后模型段(允许含 /),首位斜杠或无斜杠均非法
+function splitRuleSegments(pattern) {
+  const slash = pattern.indexOf(SEGMENT_SEPARATOR)
+  return slash > 0 ? [pattern.slice(0, slash), pattern.slice(slash + SEGMENT_SEPARATOR.length)] : null
+}
+
+// 段须非空且不含空白:含空白的模型键永不匹配真实请求
+function isTwoSegmentModel(pattern) {
+  const segments = splitRuleSegments(pattern)
+  return segments !== null && segments.every((segment) => /^\S+$/.test(segment))
+}
+
+// 请求侧模型键按同构规则分段,无 / 或首位斜杠时 vendor 段缺省归 default(与存储行口径一致)
+function splitRequestSegments(model) {
+  return splitRuleSegments(model) ?? [PROVIDER_UNSET, model]
+}
+
+// 段级比对:规则段为通配或与请求段相等;两段全过才成立,通配段按各自档位计权
+function matchTier(ruleSegments, requestSegments) {
+  const [ruleVendor, ruleModel] = ruleSegments
+  const [requestVendor, requestModel] = requestSegments
+  if (ruleVendor !== MODEL_WILDCARD && ruleVendor !== requestVendor) return null
+  if (ruleModel !== MODEL_WILDCARD && ruleModel !== requestModel) return null
+  return (ruleVendor === MODEL_WILDCARD ? VENDOR_WILDCARD_TIER : 0)
+    + (ruleModel === MODEL_WILDCARD ? MODEL_WILDCARD_TIER : 0)
 }
 
 const toLocalDate = (timestamp) => {
@@ -974,12 +1065,25 @@ const toLocalDate = (timestamp) => {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-// 精确子集按数组序取首个命中;无精确子集或全不命中回落 '*' 子集;仍无命中为 null
+// 匹配链:全名 > 模型名(vendor 通配)> 供应商(model 通配)> '*/*' 全通;
+// 档位最小者胜,同档按数组序取首个;高档条件不满足自然落低档;无命中为 null(调用方计 unpriced)
 function matchPrice(rules, model, timestamp) {
   const date = toLocalDate(timestamp)
   if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
-  return firstMatchingPrice(rules, date, (rule) => rule.model === model)
-    ?? firstMatchingPrice(rules, date, (rule) => rule.model === MODEL_WILDCARD)
+  const requestSegments = splitRequestSegments(model)
+  let bestTier = Infinity
+  let bestPrice = null
+  for (const rule of rules) {
+    if (!isRuleShaped(rule)) continue
+    const ruleSegments = splitRuleSegments(rule.model)
+    if (!ruleSegments) continue
+    const tier = matchTier(ruleSegments, requestSegments)
+    if (tier === null || tier >= bestTier) continue
+    if (!rule.conditions.every((condition) => conditionMatches(condition, date))) continue
+    bestTier = tier
+    bestPrice = rule.price
+  }
+  return bestPrice
 }
 
 const BUCKET_PRICE_KEYS = [
@@ -1030,11 +1134,14 @@ const pricingBucketsOf = (usage) => ({
   cacheWriteTokens: usage.cacheWriteTokens,
 })
 
+// routes 缺席占位:双段通配模型键,仅被 '*/*' 全通配规则命中(供应商与模型全未知)
+const MODEL_UNROUTED = '*/*'
+
 // 注入点A 费用组装配:开关关/无用量/价格未加载不渲染;规则已载无命中价显示占位符;
-// routes 缺席时 model 取通配,只匹配通配规则;时间条件按当前时刻评估(估算口径)
+// routes 缺席时 model 取全通配键;时间条件按当前时刻评估(估算口径)
 function buildCostItem(usage, rules, prefs, t, now = new Date()) {
   if (!prefs?.costDisplay || !usage || !Array.isArray(rules)) return null
-  const model = usage.routes?.[0]?.model ?? MODEL_WILDCARD
+  const model = usage.routes?.[0]?.model ?? MODEL_UNROUTED
   const price = matchPrice(rules, model, now)
   if (!price) return COST_PLACEHOLDER
   return t('stats.cost', { cost: formatCost(costOf(price, pricingBucketsOf(usage)), aggregateCurrencyOf(rules)) })
@@ -1060,8 +1167,8 @@ function selectTurnTokenUsage(owner) {
     : null
 }
 
-// 计价模型键:routes 首个 route.model,缺席回退通配(与注入点A 同款)
-const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_WILDCARD
+// 计价模型键:routes 首个 route.model,缺席回退全通配键(与注入点A 同款)
+const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_UNROUTED
 
 // 可选桶(cacheRead/cacheWrite)仅部分 provider 上报,缺失按 0 计入摘要与费用
 const turnReportedBucket = (value) => (value ?? 0)
@@ -1097,28 +1204,109 @@ function turnCostTitleText(t, tokenUsage) {
 // ===== 定价编辑器纯函数(校验/规整/默认值) =====
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
+const ISO_DAY_PATTERN_CLIENT = /^\d{4}-\d{2}-\d{2}$/
+// 时刻分量界:小时含头不含尾,分钟双闭
+const HOUR_MAX = 24
+const MINUTE_MAX = 59
+const WEEKDAY_MIN = 0
+const WEEKDAY_MAX = 6
+const MONTH_DAY_MIN = 1
+const MONTH_DAY_MAX = 31
+const CONDITION_KIND_OPTIONS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
+const CONDITION_KIND_LABEL_KEYS = {
+  dailyWindow: 'condDailyWindow',
+  weekdays: 'condWeekdays',
+  monthDays: 'condMonthDays',
+  dateRange: 'condDateRange',
+}
+const WEEKDAY_COUNT = 7
 
-// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型与四桶价格)
+const parseHHMM = (value) => {
+  if (typeof value !== 'string' || !HHMM_PATTERN.test(value)) return null
+  const [hours, minutes] = value.split(':').map(Number)
+  return hours >= 0 && hours < HOUR_MAX && minutes >= 0 && minutes <= MINUTE_MAX ? value : null
+}
+
+const isValidMonthDay = (value) => Number.isInteger(value) && value >= MONTH_DAY_MIN && value <= MONTH_DAY_MAX
+
+const isValidWeekday = (value) => Number.isInteger(value) && value >= WEEKDAY_MIN && value <= WEEKDAY_MAX
+
+// 各条件类型合法默认:时段全天(from===to)、周几空、号段全月(短月高位号自然不触发)、日期段当天
+const defaultCondition = (kind, now = new Date()) => {
+  const today = formatDate(now)
+  const defaults = {
+    dailyWindow: { kind: 'dailyWindow', from: '00:00', to: '00:00' },
+    weekdays: { kind: 'weekdays', days: [] },
+    monthDays: { kind: 'monthDays', from: MONTH_DAY_MIN, to: MONTH_DAY_MAX },
+    dateRange: { kind: 'dateRange', from: today, to: today },
+  }
+  return defaults[kind] ? { ...defaults[kind] } : null
+}
+
+// 条件字段级校验:路径前缀 + 键 → 错误键;倒序仅 dateRange 非法(时段/号段倒序为跨午夜/跨月语义)
+const validateCondition = (condition, path, errors) => {
+  if (!condition || typeof condition !== 'object') {
+    errors.set(path, 'required')
+    return
+  }
+  if (condition.kind === 'dailyWindow') {
+    if (parseHHMM(condition.from) === null) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condTime')
+    if (parseHHMM(condition.to) === null) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condTime')
+    return
+  }
+  if (condition.kind === 'weekdays') {
+    if (!Array.isArray(condition.days) || !condition.days.every(isValidWeekday)) errors.set(`${path}.days`, 'condWeekday')
+    return
+  }
+  if (condition.kind === 'monthDays') {
+    if (!isValidMonthDay(condition.from)) errors.set(`${path}.from`, 'condMonthDay')
+    if (!isValidMonthDay(condition.to)) errors.set(`${path}.to`, 'condMonthDay')
+    return
+  }
+  if (condition.kind === 'dateRange') {
+    if (typeof condition.from !== 'string' || !ISO_DAY_PATTERN_CLIENT.test(condition.from)) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condDate')
+    if (typeof condition.to !== 'string' || !ISO_DAY_PATTERN_CLIENT.test(condition.to)) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condDate')
+    if (errors.has(`${path}.from`) || errors.has(`${path}.to`)) return
+    if (condition.from > condition.to) errors.set(path, 'condRange')
+  }
+}
+
+// POST 前条件规整:输入框字符串值转数字字段;时段/日期段为字符串原样
+function coerceConditions(conditions) {
+  return conditions.map((condition) => {
+    if (condition.kind === 'weekdays') return { ...condition, days: condition.days.map(Number) }
+    if (condition.kind === 'monthDays') return { ...condition, from: Number(condition.from), to: Number(condition.to) }
+    return condition
+  })
+}
+
+// 就地校验:字段路径 → 文案键;仅覆盖编辑器可编辑字段(模型/四桶价格/时间条件);模型须两段式
 function validatePricingRules(rules) {
   const errors = new Map()
   if (!Array.isArray(rules)) return errors
   rules.forEach((rule, ruleIndex) => {
     if (typeof rule.model !== 'string' || rule.model.trim().length === 0) errors.set(`${ruleIndex}.model`, 'required')
+    else if (!isTwoSegmentModel(rule.model)) errors.set(`${ruleIndex}.model`, 'modelFormat')
     PRICE_KEYS.forEach((key) => {
       const value = rule.price?.[key]
       const path = `${ruleIndex}.price.${key}`
       if (value === '' || value === null || value === undefined) errors.set(path, 'required')
       else if (!Number.isFinite(Number(value)) || Number(value) < 0) errors.set(path, 'priceInvalid')
     })
+    const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
+    conditions.forEach((condition, conditionIndex) => {
+      validateCondition(condition, `${ruleIndex}.conditions.${conditionIndex}`, errors)
+    })
   })
   return errors
 }
 
-// POST 前规整:输入框字符串值转数值;模型原样(校验已确保非空)
+// POST 前规整:输入框字符串值转数值;模型已校验确保两段式且无空白,原样提交
 function coercePricingRules(rules) {
   return rules.map((rule) => ({
     ...rule,
     price: PRICE_KEYS.reduce((price, key) => ({ ...price, [key]: Number(rule.price[key]) }), {}),
+    conditions: coerceConditions(rule.conditions ?? []),
   }))
 }
 
@@ -1136,7 +1324,7 @@ const defaultPricingRule = (currency = CURRENCIES[0]) => ({
   conditions: [],
 })
 
-const updateRuleAt = (rules, index, patch) => rules.map((rule, i) => (i === index ? { ...rule, ...patch } : rule))
+const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
 
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
@@ -1205,6 +1393,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STATUS_POLL_FAST_MS = 1000
     const STATUS_POLL_SLOW_MS = 5000
     const REBUILD_CONFIRM_MS = 3000
+    // Material Symbols 风格刷新图标路径,currentColor 继承按钮色
+    const REFRESH_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A7.96 7.96 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>'
     const STATUS_REFRESH_DEBOUNCE_MS = 800
     const FIT_MAX_SIZE = 22
     const FIT_MIN_SIZE = 11
@@ -1286,7 +1476,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 --dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
 --dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe}
-.ud-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ud-toolbar{display:flex;align-items:flex-start;gap:8px}
+.ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
 .ud-seg-item{border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;padding:5px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
 .ud-seg-item:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
@@ -1297,16 +1488,32 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-btn{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:5px 14px;font-size:12px;line-height:1;cursor:pointer}
 .ud-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-btn:disabled{opacity:.5;cursor:default}
-.ud-refresh{margin-left:auto}
+.ud-toolbar-side{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;align-self:stretch}
+.ud-toolbar-side .ud-btn--text{display:inline-flex;align-items:center;height:100%}
+.ud-icon-btn{padding:0 12px}
+.ud-icon{display:inline-flex;align-items:center;justify-content:center}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
 .ud-error{border:1px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:8px;padding:8px 12px;font-size:12px}
 .ud-loading{color:var(--dsw-alias-label-tertiary);text-align:center;padding:32px 0}
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
-.ud-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.ud-status-fold{display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px}
+.ud-status-fold:hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}
+.ud-status-fold-caret{display:block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s ease}
+.ud-status-fold[aria-expanded="true"] .ud-status-fold-caret{transform:rotate(180deg)}
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
+.ud-detail{width:100%;margin-top:4px;display:flex;flex-direction:column;gap:6px}
+.ud-detail-foot{display:flex;justify-content:flex-end;align-items:center}
+.ud-log{width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);padding:8px 10px;display:flex;flex-direction:column;gap:3px;max-height:200px;overflow-y:auto;font-size:11px;line-height:1.5}
+.ud-log-summary{display:flex;gap:12px;flex-wrap:wrap;color:var(--dsw-alias-label-tertiary);font-size:12px;padding-bottom:4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ud-log-line{display:flex;gap:8px;align-items:baseline;min-width:0}
+.ud-log-time{flex:none;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary);opacity:.7}
+.ud-log-kind{flex:none}
+.ud-log-err{color:var(--dsw-alias-state-error-primary)}
+.ud-log-detail{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ud-cards{display:grid;grid-template-columns:1.35fr 1fr 1fr;gap:10px}
 @media (max-width:560px){.ud-cards{grid-template-columns:1fr 1fr}}
 @media (max-width:380px){.ud-cards{grid-template-columns:1fr}}
@@ -1396,6 +1603,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-head{display:flex;align-items:flex-end;gap:8px}
 .ud-rule-head .ud-field{flex:1}
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-rule-conds{display:flex;flex-direction:column;gap:6px}
+.ud-cond{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap}
+.ud-cond-kind{width:auto;min-width:88px}
+.ud-cond-fields{display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
+.ud-cond-fields .ud-field{flex:0 1 auto}
+.ud-cond-fields .ud-input{width:auto}
+.ud-cond-add{display:flex;gap:6px;flex-wrap:wrap}
 .ud-field{display:flex;flex-direction:column;gap:3px;min-width:0}
 .ud-field-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-field-error{font-size:11px;color:var(--dsw-alias-state-error-primary)}
@@ -1747,6 +1961,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('div', { className: 'ud-models' },
             models.map((item) => {
               const isOther = item.model === OTHER_MODEL
+              const speedText = modelSpeedText(item.speed)
               return h(React.Fragment, { key: item.model },
                 h('div', {
                   className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
@@ -1771,7 +1986,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                     h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
                     h('span', { className: 'ud-model-pct' },
                       item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
-                      formatPercent((item.tokens / total) * PERCENT_SCALE)))),
+                      formatPercent((item.tokens / total) * PERCENT_SCALE),
+                      speedText ? ` · ${speedText}` : null))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },
@@ -1919,10 +2135,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 定价规则编辑器:货币为编辑器级全局设置(标题右侧切换,整表统一,不逐模型设置);
-    // 条件行不支持编辑,已有条件整条保留原样,空条件即恒生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
+    // 每规则可挂多条时间条件(时段/周几/号段/日期段),全部条件命中才生效;打开面板时经 fetchPricing 初始化,未保存离开即弃
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
+    // 条件行:类型下拉 + 按类型字段区 + 删除;类型切换重置为该类型默认值(字段结构互不相通)
     function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
@@ -1938,6 +2155,58 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
           })),
         errorTextOf(`${pathPrefix}price.${key}`))
+      const patchConditions = (conditions) => onPatch({ conditions })
+      const patchConditionAt = (conditionIndex, patch) => patchConditions(patchItemAt(rule.conditions, conditionIndex, patch))
+      const removeConditionAt = (conditionIndex) => patchConditions(rule.conditions.filter((_, i) => i !== conditionIndex))
+      const conditionRow = (condition, conditionIndex) => {
+        const condPath = `${pathPrefix}conditions.${conditionIndex}`
+        const patchCondition = (patch) => patchConditionAt(conditionIndex, patch)
+        const textInput = (field, type, labelKey) => h('label', { key: field, className: 'ud-field' },
+          h('span', { className: 'ud-field-label' }, t(labelKey)),
+          h('input', {
+            type, className: 'ud-input', value: condition[field] ?? '',
+            onChange: (event) => patchCondition({ [field]: event.target.value }),
+          }),
+          errorTextOf(`${condPath}.${field}`))
+        const numberInput = (field, labelKey) => h('label', { key: field, className: 'ud-field' },
+          h('span', { className: 'ud-field-label' }, t(labelKey)),
+          h('input', {
+            type: 'number', className: 'ud-input', min: MONTH_DAY_MIN, max: MONTH_DAY_MAX, step: 1,
+            value: condition[field] ?? '',
+            onChange: (event) => patchCondition({ [field]: event.target.value }),
+          }),
+          errorTextOf(`${condPath}.${field}`))
+        // 周几 pill 仅 weekdays 条件才构造:其余类型无 days 字段,提前求值会使渲染崩溃白屏
+        const weekdaysPills = () => h('div', { className: 'ud-group', role: 'group', 'aria-label': t('condWeekdays') },
+          Array.from({ length: WEEKDAY_COUNT }, (_, day) => {
+            const active = (condition.days ?? []).includes(day)
+            return h('button', {
+              key: day, type: 'button',
+              className: cx('ud-seg-item', active && 'ud-seg-item--on'),
+              'aria-pressed': active,
+              onClick: () => patchCondition({
+                days: active ? condition.days.filter((value) => value !== day) : [...(condition.days ?? []), day],
+              }),
+            }, t(`weekday.${day}`))
+          }))
+        const fields = {
+          dailyWindow: [textInput('from', 'time', 'condFrom'), textInput('to', 'time', 'condTo')],
+          weekdays: [weekdaysPills()],
+          monthDays: [numberInput('from', 'condFrom'), numberInput('to', 'condTo')],
+          dateRange: [textInput('from', 'date', 'condFrom'), textInput('to', 'date', 'condTo')],
+        }
+        return h('div', { key: conditionIndex, className: 'ud-cond' },
+          h('select', {
+            className: 'ud-input ud-cond-kind', value: condition.kind, 'aria-label': t('condKind'),
+            onChange: (event) => patchCondition(defaultCondition(event.target.value)),
+          }, CONDITION_KIND_OPTIONS.map((kind) => h('option', { key: kind, value: kind }, t(CONDITION_KIND_LABEL_KEYS[kind])))),
+          h('div', { className: 'ud-cond-fields' }, ...(fields[condition.kind] ?? [])),
+          errorTextOf(condPath),
+          h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => removeConditionAt(conditionIndex),
+            'aria-label': t('deleteCondition'), title: t('deleteCondition'),
+          }, '×'))
+      }
       return h('div', { className: 'ud-rule' },
         h('div', { className: 'ud-rule-head' },
           h('label', { className: 'ud-field' },
@@ -1957,10 +2226,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           priceField('output', 'priceOutput'),
           priceField('cacheRead', 'priceCacheRead'),
           priceField('cacheWrite', 'priceCacheWrite')),
-        h('span', { className: 'ud-rule-cond' },
-          (rule.conditions ?? []).length === 0
-            ? t('noCondition')
-            : t('conditionsPreserved', { n: rule.conditions.length })))
+        h('div', { className: 'ud-rule-conds' },
+          (rule.conditions ?? []).length === 0 ? h('span', { className: 'ud-rule-cond' }, t('noCondition')) : null,
+          (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
+          h('div', { className: 'ud-cond-add' },
+            CONDITION_KIND_OPTIONS.map((kind) => h('button', {
+              key: kind, type: 'button', className: 'ud-btn ud-btn--text',
+              onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(kind)]),
+            }, `+${t(CONDITION_KIND_LABEL_KEYS[kind])}`)))))
     }
 
     function PricingEditor({ t = defaultT }) {
@@ -2050,7 +2323,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           errors,
           pathPrefix: `${index}.`,
           t,
-          onPatch: (part) => setRules((prev) => updateRuleAt(prev, index, part)),
+          onPatch: (part) => setRules((prev) => patchItemAt(prev, index, part)),
           onRemove: () => setRules((prev) => prev.filter((_, i) => i !== index)),
         })),
         h('button', {
@@ -2059,9 +2332,21 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addRule')))
     }
 
-    function StatusLine({ status, t = defaultT }) {
-      if (!statusLineActive(status)) return null
+    // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示
+    function AnomalyChip({ open, onToggle, t = defaultT }) {
+      return h('button', {
+        type: 'button', className: 'ud-status-fold', 'aria-expanded': open,
+        'aria-label': t('anomalyLog'), title: t('anomalyLog'),
+        onClick: onToggle,
+      },
+      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }))
+    }
+
+    // 回扫进度与采集错误是运行状态,常显;异常明细走日志块
+    function StatusRow({ status, t = defaultT }) {
+      if (!status) return null
       const running = status.running === true
+      if (!running && !status.error) return null
       const progress = running && status.total > 0
         ? Math.min(PROGRESS_FULL_PERCENT, (status.done / status.total) * PROGRESS_FULL_PERCENT)
         : 0
@@ -2072,14 +2357,26 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               h('span', { className: 'ud-status-track' },
                 h('span', { className: 'ud-status-fill', style: { width: `${progress}%` } })))
           : null,
-        status.error ? h('span', { className: 'ud-status-err' }, status.error) : null,
-        // 无法读取是日志固有损伤,常态提示用中性色,不算错误
-        (status.skippedSessions ?? 0) > 0
-          ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
-          : null,
-        (status.recordFailures ?? 0) > 0
-          ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
-          : null)
+        status.error ? h('span', { className: 'ud-status-err' }, status.error) : null)
+    }
+
+    // 展开后的异常日志块:汇总计数即明细条数(单一事实源),逐条展示(时间/类型/内容)
+    function AnomalyLog({ status, t = defaultT }) {
+      const lines = status.log ?? []
+      if (lines.length === 0) return null
+      return h('div', { className: 'ud-log' },
+        h('div', { className: 'ud-log-summary' },
+          (status.skippedSessions ?? 0) > 0
+            ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+            : null,
+          (status.recordFailures ?? 0) > 0
+            ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
+            : null),
+        lines.map((entry, index) => h('div', { className: 'ud-log-line', key: index },
+          h('span', { className: 'ud-log-time' }, logTimeOf(entry.time)),
+          h('span', { className: cx('ud-log-kind', entry.kind === 'record' && 'ud-log-err') },
+            entry.kind === 'record' ? t('logKindRecord') : t('logKindSkipped')),
+          h('span', { className: 'ud-log-detail', title: entry.detail }, entry.detail))))
     }
 
     function RebuildButton({ machineRef, busy, onError, t = defaultT }) {
@@ -2114,9 +2411,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const trendLimitedText = (t, id, count) => (id === 'day'
       ? t('trendLimited', { n: count })
       : id === 'hour' ? t('trendLimitedHour', { n: count }) : t('trendLimitedMinute', { n: count }))
-    const presetLabel = (t, view, id) => (view === 'hour'
-      ? t('hourPreset', { n: parseInt(id, 10) })
-      : t('minutePreset', { n: parseInt(id, 10) }))
+    const presetLabel = (t, view, id) => t(`${view === 'hour' ? 'hourPreset' : 'minutePreset'}.${id}`)
     const tickLabelFor = (view) => (view === 'day' ? shortDay : view === 'hour' ? hourTickLabel : minuteTickLabel)
 
     function UsageDashPanel({ t = defaultT }) {
@@ -2133,6 +2428,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [pointStatus, setPointStatus] = useState('idle')
       const [fetchTick, setFetchTick] = useState(0)
       const [status, setStatus] = useState(null)
+      const [detailsOpen, setDetailsOpen] = useState(false)
       const statusMachineRef = useRef(null)
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
@@ -2198,7 +2494,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
       useEffect(() => {
         if (view === 'day') return
-        if (pointStats && pointStats.preset === presetId) return
+        if (pointStatsMatches(pointStats, view, presetId)) return
         const request = view === 'hour'
           ? resolveHourRange(presetId, new Date())
           : resolveMinuteRange(presetId, new Date())
@@ -2213,7 +2509,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           }
           setError('')
           setPointStatus('ok')
-          setPointStats({ preset: presetId, value: result.value })
+          setPointStats({ view, preset: presetId, value: result.value })
         })
       }, [view, presetId, fetchTick])
 
@@ -2281,7 +2577,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }, [])
 
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
-      const pointView = pointStats && pointStats.preset === presetId ? pointStats.value : null
+      const pointView = pointStatsMatches(pointStats, view, presetId) ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
       const colorFor = useMemo(() => colorForModel(stats ? stats.models : []), [stats])
 
@@ -2301,55 +2597,67 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
       return h('div', { className: 'ud-panel', ref: panelRef },
         h('div', { className: 'ud-toolbar' },
-          h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
-            VIEW_TABS.map((tab) => h('button', {
-              key: tab.id,
-              className: cx('ud-seg-item', view === tab.id && 'ud-seg-item--on'),
-              'aria-pressed': view === tab.id,
-              onClick: () => setView(tab.id),
-            }, viewLabel(t, tab.id)))),
-          pointActive
-            ? h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
-                (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
-                  key: id,
-                  className: cx('ud-seg-item', presetId === id && 'ud-seg-item--on'),
-                  'aria-pressed': presetId === id,
-                  onClick: () => (view === 'hour' ? setHourPreset(id) : setMinutePreset(id)),
-                }, presetLabel(t, view, id))))
-            : h(React.Fragment, null,
-                h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
-                  DAY_PRESETS.map((id) => h('button', {
+          h('div', { className: 'ud-toolbar-main' },
+            h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
+              VIEW_TABS.map((tab) => h('button', {
+                key: tab.id,
+                className: cx('ud-seg-item', view === tab.id && 'ud-seg-item--on'),
+                'aria-pressed': view === tab.id,
+                onClick: () => setView(tab.id),
+              }, viewLabel(t, tab.id)))),
+            pointActive
+              ? h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
+                  (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
                     key: id,
-                    className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
-                    'aria-pressed': range === id,
-                    onClick: () => setRange(id),
-                  }, t(`rangePreset.${id}`))),
-                  h('button', {
-                    className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
-                    'aria-pressed': range === 'custom',
-                    onClick: () => setRange('custom'),
-                  }, t('rangeCustom'))),
-                range === 'custom'
-                  ? h('div', { className: 'ud-custom-range' },
-                      h('input', {
-                        type: 'date', className: 'ud-date-input', 'aria-label': t('from'),
-                        value: customFrom, max: customTo || undefined,
-                        onChange: (event) => setCustomFrom(event.target.value),
-                      }),
-                      h('span', { className: 'ud-custom-sep' }, '–'),
-                      h('input', {
-                        type: 'date', className: 'ud-date-input', 'aria-label': t('to'),
-                        value: customTo, min: customFrom || undefined, max: dayBucket(new Date()),
-                        onChange: (event) => setCustomTo(event.target.value),
-                      }))
-                  : null),
-          h(StatusLine, { status, t }),
-          h('button', { className: 'ud-btn ud-btn--text ud-refresh', disabled: busy, onClick: refresh }, t('refresh')),
-          h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })),
+                    className: cx('ud-seg-item', presetId === id && 'ud-seg-item--on'),
+                    'aria-pressed': presetId === id,
+                    onClick: () => (view === 'hour' ? setHourPreset(id) : setMinutePreset(id)),
+                  }, presetLabel(t, view, id))))
+              : h(React.Fragment, null,
+                  h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
+                    DAY_PRESETS.map((id) => h('button', {
+                      key: id,
+                      className: cx('ud-seg-item', range === id && 'ud-seg-item--on'),
+                      'aria-pressed': range === id,
+                      onClick: () => setRange(id),
+                    }, t(`rangePreset.${id}`))),
+                    h('button', {
+                      className: cx('ud-seg-item', range === 'custom' && 'ud-seg-item--on'),
+                      'aria-pressed': range === 'custom',
+                      onClick: () => setRange('custom'),
+                    }, t('rangeCustom'))),
+                  range === 'custom'
+                    ? h('div', { className: 'ud-custom-range' },
+                        h('input', {
+                          type: 'date', className: 'ud-date-input', 'aria-label': t('from'),
+                          value: customFrom, max: customTo || undefined,
+                          onChange: (event) => setCustomFrom(event.target.value),
+                        }),
+                        h('span', { className: 'ud-custom-sep' }, '–'),
+                        h('input', {
+                          type: 'date', className: 'ud-date-input', 'aria-label': t('to'),
+                          value: customTo, min: customFrom || undefined, max: dayBucket(new Date()),
+                          onChange: (event) => setCustomTo(event.target.value),
+                        }))
+                    : null)),
+          h('div', { className: 'ud-toolbar-side' },
+            h(AnomalyChip, { open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t }),
+            h('button', {
+              className: 'ud-btn ud-btn--text ud-icon-btn', 'aria-label': t('refresh'), title: t('refresh'),
+              disabled: busy, onClick: refresh,
+            }, h('span', { className: 'ud-icon', dangerouslySetInnerHTML: { __html: REFRESH_ICON_SVG } })))),
+        h(StatusRow, { status, t }),
+        detailsOpen
+          ? h('div', { className: 'ud-detail' },
+              h(AnomalyLog, { status, t }),
+              h('div', { className: 'ud-detail-foot' },
+                h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })))
+          : null,
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
-        h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }),
+        // 活跃热力图仅按天视图展示:热力图口径为日桶,时/分视图无对应语义
+        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }) : null,
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',
@@ -2414,3 +2722,4 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
   }
 }
+})()

@@ -25,7 +25,7 @@ node scripts/dev-link.mjs <包名>       # 单包模式:仅归一/挂载/校验�
 node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ```
 
-- 单包模式用于两点:只想调试某一个包;或清单内存在未发布包(线上查询 404)卡住 `all` 时的绕行路径。`all` 仍是日常默认,单包后其余包的终态不随之校验
+- 单包模式用于只想调试某一个包的场景(线上 404 的未发布包不会卡住 `all`:其依赖行自动写 file 协议,归一继续)。`all` 仍是日常默认,单包后其余包的终态不随之校验
 - 依赖行变化触发 `pnpm install` 重建 node_modules 时,脚本会重挂所有**有依赖声明**的包与**公共依赖包**,保住既有链接
 - `--unlink` 对公共依赖包:卸链后顶层不留实体,不恢复 registry 版本(无依赖行可恢复),dsh 启动 fallback 补链接管
 
@@ -33,12 +33,12 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 
 **重新挂载时机:** `dsh plugin add`(重建 junction)与依赖图变化的 `pnpm install` 之后须重跑 `node scripts/dev-link.mjs all`;增量 install(Already up to date)按实测不动 junction,重跑幂等,拿不准就重跑。
 
-**已知策略:** profile 的 pnpm 配了 `minimumReleaseAge`(新发布包有安装宽限期)。刚发版后 install 可能被拦,等宽限期过再装,或单次 `node scripts/dev-link.mjs all --allow-fresh`(仅限自家刚发的包,知根知底)。
+**已知策略:** profile 的 pnpm 配了 `minimumReleaseAge`(新发布包有安装宽限期)。`dev-link all` 每次全量重写 profile pnpm-workspace.yaml 的 `minimumReleaseAgeExclude` 为各已发布包线上最新版精确并集,自家刚发版的包即装不被拦;`node scripts/dev-link.mjs all --allow-fresh`(仅限自家刚发的包,知根知底)在豁免未生效、install 仍被拦时兜底(如 profile pnpm-workspace.yaml 的豁免节缺失或 pnpm 版本不识别该配置)。
 
 ## 日常开发循环
 
 1. 改代码在仓库 `packages/<包>/` 内进行,直接改工作副本
-2. 测试:`node --test "test/*.test.mjs"`(在包目录内);rs-workflow 引擎测试在仓库根 `node --test tests/engine.test.mjs`;rs-workflow 插件冒烟在仓库根 `node scripts/test-workflow-plugin.mjs`(默认测 profile 安装副本,传包目录可测任意构建)
+2. 测试:`node --test "test/*.test.mjs"`(在包目录内);仓库级:rs-workflow 引擎测试 `node --test tests/engine.test.mjs` 与 rs-workflow 模板 slot 三处镜像 parity `node --test tests/workflow-parity.test.mjs`(均在仓库根);rs-workflow 插件冒烟在仓库根 `node scripts/test-workflow-plugin.mjs`(默认测 profile 安装副本,传包目录可测任意构建)
 3. 验证效果:确保 dev-link 已挂。**host 半区改动自动热重载**(dev-link 在 home 补丁层 `~/.dsh/cordis.patch.yml` 维护 hmr 覆盖行,watch 仓库 packages,保存后约 1 秒重载对应插件;测试/文档/依赖目录不触发);**client 半区改动刷新页面即生效**(client bundle 从磁盘按请求现读)。改完代码不要求重启 dsh,也不要建议用户重启
 4. 提交:语义化中文提交信息,一事一提交,禁止把无关改动混入
 
@@ -91,5 +91,5 @@ client.js 与 core 之间存在镜像逻辑的(如 turn-notify 的 chooseChannel
 
 1. **服务优先,禁止静态 import 版本脆弱的模块级导出**:宿主能力一律通过服务注入使用——`export const inject = [...]` 或 `ctx.inject(['settings'], (sctx) => ...)`,然后调服务方法(settings 服务:`register(ns, schema, {base})` / `get(ns)` / `update(ns, patch)` / `installSection(ctx, ns, schema, entry, hooks)`;ns 直接传合法字符串,格式校验内置于方法)。确需模块级 API(如 dsh-settings 的 `SettingsConflictError` 这类稳定导出)时,只 import 官方文档级稳定符号;不确定稳定与否就用动态 `import()` + 特性检测 + 降级告警(范例:dsh-free-search 的 installSection 双兼容写法)。同理,**client 半区的版本脆弱 namespace 服务以点分 inject 声明交由 cordis 门控**:`ctx.remote.<ns>` 面由宿主 dsh-api-remotes assembly 异步 `$mount` 挂载,inject 必须点分声明(如 `['remote', 'remote.settings']`,官方 dsh-client-ui-settings-general 同构),fiber 等 namespace 就绪才激活,旧宿主无此 namespace 即保持未激活(即干净禁用);**禁止在 apply 内同步可选链探测该面**——探测跑在挂载完成前,时序竞态会误报缺失而禁用插件(mce 0.2.1 在 0.1.2-rc.1 实测事故)。host 半区服务为同步注册,不受此限,apply 内缺失探测(如 dsh-llm-pi-gateway)仍合法
 2. **peerDependencies 声明实际使用的 API 最低引入版本**,不照抄其他包的旧模板
-3. **dsh 本体升级后必跑回归**:仓库根 `node scripts/smoke-load.mjs`(全包逐个加载,命名导出缺失当场暴露)+ 各包 `node --test "test/*.test.mjs"`;镜像官方语义的包(如 llm-pi-gateway 之于 dsh-llm-pi-ai)以官方新源码为规范逐项对表
+3. **dsh 本体升级后必跑回归**:仓库根 `node scripts/smoke-load.mjs`(全包逐个加载,命名导出缺失当场暴露)+ 各包 `node --test "test/*.test.mjs"` + 仓库根 `node --test tests/engine.test.mjs tests/workflow-parity.test.mjs`;镜像官方语义的包(如 llm-pi-gateway 之于 dsh-llm-pi-ai)以官方新源码为规范逐项对表
 4. 镜像官方语义的代码,注释保留"官方同构"定位;官方源码位于 dsh 本体安装目录 `node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>/lib/`

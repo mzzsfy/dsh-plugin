@@ -130,12 +130,14 @@ const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
 const VERDICT_UNKNOWN = 'unknown'
 
-// 非 2xx 应答抛带 status 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
-// 与"网络失联"(fetch reject TypeError/abort DOMException,无 status)
+// 非 2xx 应答抛带 status 与完整 payload 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
+// 与"网络失联"(fetch reject TypeError/abort DOMException,无 status);payload 供活跃工作
+// 409 回绝回写 items 计数
 // LOGIC-BEGIN apiError
 function apiError(response, payload) {
   const error = new Error(payload && payload.error ? payload.error : 'HTTP ' + response.status)
   error.status = response.status
+  error.payload = payload === undefined || payload === null ? {} : payload
   return error
 }
 // LOGIC-END apiError
@@ -156,10 +158,13 @@ function post(url, body) {
 
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
 // 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询;
-// 总时长上限与宿主升级命令超时同语义(见 parity 对拍):超限说明宿主或进程管理器异常,浮条转状态未知。
+// 总时长上限覆盖宿主重试链上限(尝试次数×单次超时+退避+强杀宽限,见 parity 对拍):
+// 超限说明宿主或进程管理器异常,浮条转状态未知。
 // 代际令牌防重叠拍:顺序自调度(settle 后排下一拍),单请求带超时,stop 后迟到拍经验代际丢弃
-const UPGRADE_WATCH_MAX_MS = 10 * 60 * 1000
+const UPGRADE_WATCH_MAX_MS = 32 * 60 * 1000
 const UPGRADE_POLL_TIMEOUT_MS = 5 * 1000
+// 落定补查宽限:宿主自动重启调度延迟与观察裕量之和(parity 对拍提取形态限单项乘积)
+const UPGRADE_AUTO_RESTART_GRACE_MS = 5 * 1000
 const upgradeWatch = { generation: null, startedAt: 0, listeners: new Set() }
 
 function broadcastUpgradeStatus(status) {
@@ -168,6 +173,22 @@ function broadcastUpgradeStatus(status) {
 
 function stopUpgradeWatch() {
   upgradeWatch.generation = null
+}
+
+// 落定补查:延迟窗口后单拍重拉状态并广播(驱动自动重启接管守卫),按标记终判;
+// 补查前后验让位——新一轮升级观察已启动即放弃,其自身落定拍会终判
+async function recheckUpgradeSettle(previousLast) {
+  let final = null
+  try {
+    final = await api(STATUS_URL, { signal: AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS) })
+  } catch {
+    final = null
+  }
+  if (upgradeWatch.generation !== null) return
+  if (final !== null) broadcastUpgradeStatus(final)
+  const last = final !== null && final.upgrade ? final.upgrade.last : null
+  if (last !== null && (last.autoRestartScheduled === true || last.requiresManualRestart === true)) showUpgradeFloat(last)
+  else showUpgradeFloat(previousLast)
 }
 
 function subscribeUpgradeStatus(listener) {
@@ -198,7 +219,17 @@ function ensureUpgradeWatch() {
       if (!upgrade || upgrade.running !== true) {
         upgradeWatch.generation = null
         // 快照归零(last 为空)不做失败渲染,保持进行中文案,由重启流程接管
-        if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
+        if (upgrade && upgrade.last) {
+          // 落定拍可能早于宿主置调度标记:未见标记不立即终判,延迟宽限后补查一拍
+          if (upgrade.last.autoRestartScheduled === true || upgrade.last.requiresManualRestart === true) {
+            showUpgradeFloat(upgrade.last)
+            return
+          }
+          setTimeout(() => {
+            if (upgradeWatch.generation !== null) return
+            void recheckUpgradeSettle(upgrade.last)
+          }, UPGRADE_AUTO_RESTART_GRACE_MS)
+        }
         return
       }
     } catch (pollError) {
@@ -228,6 +259,17 @@ function ensureUpgradeFloatStyle() {
   document.head.appendChild(style)
 }
 
+// 升级成功落定的浮条终态文案:stale(执行成功但目标未达成)最优先且不得提及重启,
+// 其后按宿主是否自动重启分流指引
+// LOGIC-BEGIN upgradeFinalText
+function upgradeFinalText(state) {
+  if (state.stale === true) return '升级命令执行完成,但磁盘版本未前进或未达目标,详情见版本与运维页'
+  if (state.requiresManualRestart === true) return '升级完成,当前为手动直跑环境,请手动重启宿主后生效'
+  if (state.autoRestartScheduled === true) return '升级完成,宿主将自动重启,页面恢复后可直接使用'
+  return '升级完成,重启宿主后生效(版本与运维页可重启)'
+}
+// LOGIC-END upgradeFinalText
+
 // state:null=进行中;对象=升级结果(last,ok 区分成败);'unknown'=观察超限状态未知
 function showUpgradeFloat(state) {
   ensureUpgradeFloatStyle()
@@ -246,7 +288,7 @@ function showUpgradeFloat(state) {
   } else if (state === 'unknown') {
     text.textContent = '升级状态长时间未更新,请刷新页面查看'
   } else if (state.ok) {
-    text.textContent = '升级完成,重启宿主后生效(版本与运维页可重启)'
+    text.textContent = upgradeFinalText(state)
   } else if (state.stillRunning === true) {
     // 强杀后进程树疑似仍存活:升级入口已由锁锁定直至过期,不做"可重跑"的误导指引
     text.textContent = '升级超时已终止;旧进程可能仍在运行,升级入口已锁定直至其退出或锁过期'
@@ -329,8 +371,8 @@ function VersionCard(props) {
   const checked = fmtTime(status.checkedAt)
   return h('div', { className: 'dm-card' },
     h('div', { className: 'dm-row' },
-      h('span', { className: 'dm-row__label' }, '当前版本'),
-      h('span', null, status.currentVersion || '未知'),
+      h('span', { className: 'dm-row__label' }, '版本'),
+      h('span', null, '运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h(VerdictBadge, { status }),
       h('span', { className: 'dm-spacer' }),
       h('button', {
@@ -340,12 +382,19 @@ function VersionCard(props) {
       }, props.busy.refresh ? '检查中…' : '刷新'),
       h('button', {
         className: 'dm-btn',
-        // upgradeLockHeld 为 host 权威信号(锁文件时效化):升级进行中或残留锁未过期时禁用
+        // upgradeLockHeld 为 host 权威信号(锁文件时效化):升级进行中或残留锁未过期时禁用;
+        // 运行版本已是通道最新时同样禁用(host 侧同步 409 拒绝,防重装降级)
         disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running)
-          || status.upgradeLockHeld === true,
+          || status.upgradeLockHeld === true
+          || status.verdict === VERDICT_UP_TO_DATE,
+        title: status.verdict === VERDICT_UP_TO_DATE ? '当前已是通道最新版,无需升级;重装请走命令行' : undefined,
         onClick: props.onUpgrade,
       }, props.upgradeArmed ? '确认升级' : '升级'),
     ),
+    status.restartPending === true
+      ? h('div', { className: 'dm-notice dm-notice--warn' },
+          '已装新版本 ' + (status.installedVersion || '') + ',重启宿主后生效。')
+      : null,
     h('div', { className: 'dm-row' },
       h('span', { className: 'dm-row__label' }, '追踪通道'),
       tagNames.length > 0
@@ -419,22 +468,40 @@ function UpgradeCard(props) {
       : null,
     !upgrade.running && last
       ? h('div', { className: 'dm-row' },
-          last.ok ? h('span', { className: 'dm-ok' }, '升级完成,重启宿主后生效')
-            : h('span', { className: 'dm-error' }, '升级失败' + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '') + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
+          // stale(执行成功但版本未前进/未达目标)时成功行降格为中性表述,不引导重启,
+          // 与下方 stale 警告行自洽
+          last.ok ? h('span', { className: last.stale === true ? 'dm-warn' : 'dm-ok' },
+              last.stale === true ? '升级命令执行完成,但版本未前进或未达目标' : '升级完成,重启宿主后生效')
+            : h('span', { className: 'dm-error' }, '升级失败'
+                + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '')
+                + (Array.isArray(last.attempts) && last.attempts.length > 1 ? '(已尝试 ' + last.attempts.length + ' 次)' : '')
+                + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
           h('span', { className: 'dm-spacer' }),
-          last.ok ? h('button', {
+          last.ok && last.stale !== true ? h('button', {
             className: 'dm-btn',
             // 与 OpsCard 入口行为归一:appExit 缺失时必然 500,不得开放重启入口
             disabled: props.restarting || !props.status.canRestart,
             onClick: props.onRestart,
-          }, props.restartArmed ? '确认重启' : '重启宿主') : null,
+          }, restartConfirmLabel(props.restartArmed, props.activeWorkTotal)) : null,
         )
+      : null,
+    !upgrade.running && last && last.ok === true && last.stale === true
+      ? h('div', { className: 'dm-row' },
+          h('span', { className: 'dm-warn' }, '磁盘版本未前进或未达目标: ' + (last.reason || '镜像可能滞后')))
       : null,
     !upgrade.running && last && !last.ok && last.stderrTail
       ? h('pre', { className: 'dm-pre' }, last.stderrTail)
       : null,
   )
 }
+
+// 重启确认按钮文案:armed 且有活跃计数时改「仍要重启」,点发即带 force 越过门控
+// LOGIC-BEGIN restartConfirmLabel
+function restartConfirmLabel(armed, activeWorkTotal) {
+  if (!armed) return '重启宿主'
+  return activeWorkTotal > 0 ? '仍要重启(' + activeWorkTotal + ' 项活跃工作)' : '确认重启'
+}
+// LOGIC-END restartConfirmLabel
 
 // 运维区:两段式重启 + 托管环境说明。
 function OpsCard(props) {
@@ -446,7 +513,7 @@ function OpsCard(props) {
         className: 'dm-btn dm-btn--danger',
         disabled: !status.canRestart || props.restarting,
         onClick: props.onRestart,
-      }, props.armed ? '确认重启' : '重启宿主'),
+      }, restartConfirmLabel(props.armed, props.activeWorkTotal)),
       !status.canRestart ? h('span', { className: 'dm-meta' }, '当前启动方式不支持就地重启') : null,
     ),
     h('div', { className: 'dm-meta' },
@@ -466,6 +533,8 @@ function MaintainApp() {
   // pid/bootAt 保持确认时刻基线不可被拍结果覆盖,否则重启判定恒 false;null=未在等待态
   const restartPrevRef = useRef(null)
   const restartPendingRef = useRef(false)
+  // 自动重启接管防重入:接管无 POST 在途语义(restartPendingRef),需独立一次性令牌
+  const autoRestartTakenRef = useRef(false)
 
   function markBusy(key, value) {
     setBusy((prev) => Object.assign({}, prev, { [key]: value }))
@@ -477,16 +546,34 @@ function MaintainApp() {
       .catch((loadError) => { setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError))); return null })
   }
 
-  // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察
+  // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察;
+  // 订阅回调(落定拍)与初始 load 快照(刷新落在调度窗口)两路同走接管守卫
   useEffect(() => {
-    const unsubscribe = subscribeUpgradeStatus((next) => {
-      if (next !== null) setStatus(next)
+    const unsubscribe = subscribeUpgradeStatus((snapshot) => {
+      if (snapshot !== null) setStatus(snapshot)
+      takeOverAutoRestart(snapshot)
     })
     void load().then((next) => {
+      if (next !== null) takeOverAutoRestart(next)
       if (next !== null && next.upgrade !== null && next.upgrade.running === true) ensureUpgradeWatch()
     })
     return unsubscribe
   }, [])
+
+  // 自动重启接管守卫:快照带调度标记且未在等待/接管态时,以该快照为基线自动进入
+  // 重启等待(复用 restartTick 探测,无需用户点击);autoRestartTakenRef 防多拍重入
+  function takeOverAutoRestart(snapshot) {
+    if (snapshot === null || snapshot.autoRestartScheduled !== true) return
+    if (restartPendingRef.current === true || autoRestartTakenRef.current === true) return
+    autoRestartTakenRef.current = true
+    beginRestartWait({ lost: false, pid: snapshot.pid, bootAt: snapshot.bootAt, readyStreak: 0 })
+  }
+
+  function beginRestartWait(baseline) {
+    restartPrevRef.current = baseline
+    setError(null)
+    setRestarting(true)
+  }
 
   // 重启判定与 core.mjs shouldReloadAfterRestart 同源:client 半区无法 import ESM,修改需两处同步。
   // prev/next 均为 {lost,pid,bootAt} 快照:lost=经历失联(强信号);bootAt=宿主进程启动时刻,
@@ -708,7 +795,7 @@ function MaintainApp() {
         // 放在受理成功之后:明确回绝(409 互斥)时升级仍在跑,观察器必须存活
         stopUpgradeWatch()
         removeUpgradeFloat()
-        return post(RESTART_URL)
+        return post(RESTART_URL, activeWorkTotal > 0 ? { force: true } : undefined)
       })
       .catch((restartError) => {
         if (restartPostLost(restartError)) {
@@ -720,6 +807,13 @@ function MaintainApp() {
         // 有应答的明确回绝(409 升级互斥/500 能力缺失等):宿主未退出,不得进入等待轮询,
         // 否则会凭"活宿主 + pageReady 恒真"误判已重启而整页刷新
         setRestarting(false)
+        // 活跃工作回绝:保留确认态并回写计数(下一拍确认即可带 force)
+        if (restartError && restartError.payload && restartError.payload.items) {
+          setRestartArmed(true)
+          void load()
+          notify('存在活跃工作(共 ' + restartError.payload.items.total + ' 项),已保留确认态,再次点击将以 force 重启', 'error')
+          return
+        }
         notify('重启失败:' + (restartError && restartError.message ? restartError.message : String(restartError)), 'error')
       })
       .then(() => { restartPendingRef.current = false })
@@ -731,6 +825,16 @@ function MaintainApp() {
       h('span', { className: 'dm-meta' }, error !== null ? '读取失败' : '加载中…'),
       error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null)
   }
+
+  // 升级入口不可用即解除两段式待发:渲染时派生,不引入 effect。
+  // 不可用与 VersionCard 按钮 disabled 条件同源(升级进行中/残留锁/已最新/重启中)
+  const upgradeUnavailable = restarting
+    || (status !== null && ((status.upgrade && status.upgrade.running === true)
+      || status.upgradeLockHeld === true
+      || status.verdict === VERDICT_UP_TO_DATE))
+  const upgradeArmedLive = upgradeArmed && !upgradeUnavailable
+  // 活跃工作计数:重启确认态显示计数并发 force 越过门控
+  const activeWorkTotal = status !== null && status.activeWork ? status.activeWork.total : 0
 
   return h('div', { className: 'dm-panel' },
     h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
@@ -746,7 +850,7 @@ function MaintainApp() {
     h(VersionCard, {
       status,
       busy,
-      upgradeArmed,
+      upgradeArmed: upgradeArmedLive,
       restartArmed,
       restarting,
       onRefresh,
@@ -762,8 +866,8 @@ function MaintainApp() {
       onPollInterval,
       onRegistryBase,
     }),
-    h(UpgradeCard, { status, restartArmed, restarting, onRestart }),
-    h(OpsCard, { status, armed: restartArmed, restarting, onRestart }),
+    h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
+    h(OpsCard, { status, armed: restartArmed, restarting, activeWorkTotal, onRestart }),
   )
 }
 

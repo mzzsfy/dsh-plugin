@@ -257,7 +257,7 @@ test('H 粒度槽数恰为 MAX_SLOTS 时不出现 truncated', () => {
 // ---- attachCosts 聚合计价:计价唯一以 H 桶起点匹配,费用精度=小时级 ----
 
 const ruleOf = (overrides = {}) => ({
-  model: '*',
+  model: '*/*',
   currency: '¥',
   price: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   conditions: [],
@@ -266,12 +266,42 @@ const ruleOf = (overrides = {}) => ({
 
 const inputPrice = (input) => ({ input, output: 0, cacheRead: 0, cacheWrite: 0 })
 
+test('speed 配对聚合:仅 durationMs>0 行计入分子分母,老行只进 tokens', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', inputTokens: 5, outputTokens: 20, durationMs: 6500 }),
+    makeRow({ bucket: '2020-01-02', model: 'm1', provider: 'p1', outputTokens: 30, durationMs: 2500 }),
+    // 存量旧格式行:无 durationMs,token 计入总量但速度分母不含
+    makeRow({ bucket: '2020-01-03', model: 'm1', provider: 'p1', outputTokens: 100 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-03')
+  const entry = out.models.find((item) => item.model === 'm1')
+  assert.equal(entry.tokens, 25 + 30 + 100)
+  assert.equal(entry.speed, (20 + 30) / ((6500 + 2500) / 1000))
+})
+
+test('无 durationMs 数据时 models 条目无 speed 字段', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 30 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-01')
+  assert.equal(out.models.length, 1)
+  assert.equal('speed' in out.models[0], false)
+})
+
+test('纯缓存行带时长:输出 0 计入分母,speed 为 0', () => {
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', cacheReadTokens: 10, outputTokens: 0, durationMs: 4000 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-01')
+  assert.equal(out.models[0].speed, 0)
+})
+
 test('attachCosts H 槽按桶起点计价并归集 totals 与 models', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01T01', model: 'm1', provider: 'p1', inputTokens: 1000000, outputTokens: 500000 }),
   ]
   const result = aggregateRange(rows, 'H', '2020-01-01T00', '2020-01-01T02')
-  const out = attachCosts(result, rows, 'H', [ruleOf({ model: 'm1', price: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } })])
+  const out = attachCosts(result, rows, 'H', [ruleOf({ model: 'default/m1', price: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } })])
   assert.equal(out.daily[1].cost, 2)
   assert.equal(out.cost, 2)
   assert.equal(out.unpriced, 0)
@@ -289,7 +319,7 @@ test('attachCosts 多行同桶多规则累加且残缺规则跳过后回落通�
     makeRow({ bucket: '2020-01-01T01', model: 'm2', inputTokens: 1000000 }),
   ]
   const rules = [
-    ruleOf({ model: 'm1', price: inputPrice(1) }),
+    ruleOf({ model: 'default/m1', price: inputPrice(1) }),
     { model: 'm2' },
     ruleOf({ price: inputPrice(3) }),
   ]

@@ -9,11 +9,15 @@ const UNKNOWN_SESSION_ID = '(unknown-session)'
 const SEQ_UNKNOWN = -1
 const DEFAULT_BACKFILL_CONCURRENCY = 4
 const MARK_BATCH = 32
+const SCAN_LOG_MAX_ENTRIES = 200
 
 // 会话内单 pass 折叠:跟踪每个 (turn,step) 槽的最新报告,只把首次发射交 store
 export class UsageFold {
   constructor() {
     this.seen = new Map()
+    // (turn,step) 最近一次模型启动时刻:retry-started 覆盖重置,时长与首样本
+    // token 同源配对(分子只含最终尝试,分母不含失败尝试,避免速度被污染)
+    this.starts = new Map()
   }
 
   keyOf(event) {
@@ -37,6 +41,8 @@ export class UsageFold {
     if (event.type === 'step/start' || event.type === 'llm/retry-started') {
       // step/start 恰开一次模型调用,retry-started 标记每次实际启动的重试;
       // 请求只由标记计数,与 token 样本双计
+      const key = this.keyOf(event)
+      if (key !== null) this.starts.set(key, event.time)
       return {
         time: event.time,
         inputTokens: 0,
@@ -69,6 +75,13 @@ export class UsageFold {
       cacheReadTokens: usage.cacheReadTokens ?? 0,
       cacheWriteTokens: usage.cacheWriteTokens ?? 0,
     }
+    // 模型时长口径与官方 session-stats 投影 llmMs 同构(step/start → 汇报时刻),
+    // 附加到交 store 的首样本;未观测起点或时刻倒挂(时钟回拨)不附,0 视为无
+    const start = key !== null ? this.starts.get(key) : undefined
+    if (start !== undefined) {
+      const durationMs = Math.max(0, event.time - start)
+      if (durationMs > 0) sample.durationMs = durationMs
+    }
     if (key === null) return sample
     const prev = this.seen.get(key)
     this.seen.set(key, sample)
@@ -93,6 +106,10 @@ export class UsageCollector {
   constructor(ctx, store) {
     this.ctx = ctx
     this.store = store
+    // store 写合并周期落盘的失败行接入扫描异常日志,面板可观测
+    store.onFlushError = (error) => {
+      this.pushLog('record', error instanceof Error ? error.message : String(error))
+    }
     this.folds = new Map()
     this.routes = new Map()
     this.started = false
@@ -108,16 +125,33 @@ export class UsageCollector {
       scannedSessions: 0,
       lastSessionId: undefined,
       error: undefined,
-      recordFailures: 0,
-      skippedSessions: 0,
+      log: [],
     }
-    // error 保留给采集器自身故障;单会话读取失败走 skippedSessions 跳过计数
+    // error 保留给采集器自身故障;单会话读取失败走日志 skipped 条目,计数由日志派生
   }
 
   #state
 
   status() {
-    return { ...this.#state }
+    const log = [...this.#state.log]
+    return {
+      running: this.#state.running,
+      total: this.#state.total,
+      done: this.#state.done,
+      scannedSessions: this.#state.scannedSessions,
+      lastSessionId: this.#state.lastSessionId,
+      error: this.#state.error,
+      skippedSessions: log.filter((entry) => entry.kind === 'skipped').length,
+      recordFailures: log.filter((entry) => entry.kind === 'record').length,
+      log,
+    }
+  }
+
+  // 扫描异常日志:供面板明细展示,超上限丢最旧
+  pushLog(kind, detail) {
+    const log = this.#state.log
+    log.push({ time: Date.now(), kind, detail })
+    if (log.length > SCAN_LOG_MAX_ENTRIES) log.splice(0, log.length - SCAN_LOG_MAX_ENTRIES)
   }
 
   get running() {
@@ -148,8 +182,8 @@ export class UsageCollector {
       if (!sample) return
       // turn 标记落合成行不归因;其余样本先取本调用 source,再取会话路由
       if (!sample.turn) sample.model = fromSource ?? this.routeFor(sid)
-      void this.store.record(sample).catch(() => {
-        this.#state.recordFailures += 1
+      void this.store.record(sample).catch((error) => {
+        this.pushLog('record', error?.message ?? String(error))
       })
     })
     // 释放销毁会话的内存桶,防长跑宿主按会话数累积
@@ -192,8 +226,8 @@ export class UsageCollector {
       const batch = [...this.liveMarkBuffer.entries()]
       this.liveMarkBuffer.clear()
       if (batch.length > 0) {
-        void this.store.markLiveSequences(batch).catch(() => {
-          this.#state.recordFailures += 1
+        void this.store.markLiveSequences(batch).catch((error) => {
+          this.pushLog('record', error?.message ?? String(error))
         })
       }
     })
@@ -252,7 +286,7 @@ export class UsageCollector {
       const targets = headers.filter((header) => !seen.has(header.id))
       this.#state.total = targets.length
       this.#state.done = 0
-      this.#state.skippedSessions = 0
+      this.#state.log = []
       const workerCount = Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
       let next = 0
       const completed = []
@@ -310,9 +344,9 @@ export class UsageCollector {
             completed.push(header.id)
             if (completed.length >= MARK_BATCH) await flushCompleted()
             this.#state.scannedSessions += 1
-          } catch {
-            // 读取失败(如宿主报会话日志损坏)按定案跳过:计数并继续,不中断回扫、不挂错误横幅
-            this.#state.skippedSessions += 1
+          } catch (error) {
+            // 读取失败(如宿主报会话日志损坏)按定案跳过:记日志并继续,不中断回扫、不挂错误横幅
+            this.pushLog('skipped', error?.message ? `${header.id} ${error.message}` : header.id)
           } finally {
             this.#state.done += 1
           }

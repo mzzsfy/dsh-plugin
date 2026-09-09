@@ -7,7 +7,7 @@
 // 回填走宿主公共契约 inputActions.setDraft。浏览器半区经 webServer
 // 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
 // require;与 src/core.mjs 镜像的纯函数(projectArchiveRows / archiveToastStep /
-// projectDeletedRows)修改需两处同步。
+// archiveToastText / projectDeletedRows)修改需两处同步。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
@@ -285,6 +285,28 @@ function archiveToastStep(previous, snapshot) {
   const baseline = previous !== undefined && previous.ready && ready ? new Set(previous.ids) : null
   const added = baseline ? ids.filter((id) => !baseline.has(id)) : []
   return { state: { ready, ids }, added }
+}
+
+// 归档通知标题列举上限:超过该数只列前段并以「 等」收尾(镜像 core.mjs 同名常量)
+const TOAST_MAX_TITLES = 3
+
+// 归档通知文案:单个报标题,多个为计数加列举标题,标题数超展示阈值只列前段并以
+// 「 等」收尾,计数恒为真实总数;标题缺失、空白或行不存在回退会话 id
+// (镜像 core.mjs archiveToastText,修改需两处同步)
+function archiveToastText(addedIds, rows) {
+  const added = Array.isArray(addedIds) ? addedIds : []
+  if (added.length === 0) return ''
+  const safeRows = Array.isArray(rows) ? rows : []
+  const titleById = new Map()
+  for (const row of safeRows) {
+    if (!row || row.id === undefined || row.id === null) continue
+    const trimmed = String(row.title ?? '').trim()
+    if (trimmed !== '') titleById.set(String(row.id), trimmed)
+  }
+  const names = added.map((id) => titleById.get(String(id)) || String(id))
+  if (names.length === 1) return '会话「' + names[0] + '」已归档'
+  const listed = names.slice(0, TOAST_MAX_TITLES)
+  return '有 ' + names.length + ' 个会话已归档:' + listed.join('、') + (names.length > TOAST_MAX_TITLES ? ' 等' : '')
 }
 
 function ArchiveRow(props) {
@@ -928,12 +950,18 @@ function HistoryDock({ session, inputActions }) {
           return () => style.remove()
         }, 'session-manager styles')
 
-        // 归档快照差分:新增条数驱动通知
+        // 归档快照差分:新增驱动通知,文案携带会话标题
         let previous
         const unsubscribe = workspaces.list.subscribe(() => {
           const step = archiveToastStep(previous, workspaces.list.getSnapshot())
           previous = step.state
-          if (step.added.length > 0) toast('有 ' + step.added.length + ' 个会话已归档')
+          if (step.added.length > 0) {
+            // 会话行快照与面板投影同源取 byId,标题映射为通知文案行数据
+            const listState = sessions.list.getSnapshot()
+            const byId = (listState && listState.byId) || {}
+            const rows = Object.keys(byId).map((id) => ({ id, title: byId[id].displayTitle }))
+            toast(archiveToastText(step.added, rows))
+          }
         })
 
         ctx.slots.inject('settings.section', () =>

@@ -8,9 +8,11 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_MESSAGES,
+  TOAST_MAX_TITLES,
   aggregateDeleteOutcome,
   aggregateInputs,
   archiveToastStep,
+  archiveToastText,
   artifactLooksBlank,
   deleteEligibility,
   diffArchived,
@@ -213,6 +215,51 @@ test('Toast 差分:ready→pending→ready 重连序列不误报存量', () => {
   assert.deepEqual(step.added, [])
   // 重连建立后:增量照常提示
   assert.deepEqual(archiveToastStep(previous, { phase: 'ready', archivedSessionIds: ['a', 'b', 'c'] }).added, ['c'])
+})
+
+test('归档通知文案:截断阈值常量', () => {
+  assert.equal(TOAST_MAX_TITLES, 3)
+})
+
+test('归档通知文案:单个会话报标题', () => {
+  assert.equal(archiveToastText(['a'], [{ id: 'a', title: '修复登录页' }]), '会话「修复登录页」已归档')
+})
+
+test('归档通知文案:多个会话列举标题,计数为真实总数', () => {
+  const rows = [
+    { id: 'a', title: 'A' },
+    { id: 'b', title: 'B' },
+  ]
+  assert.equal(archiveToastText(['a', 'b'], rows), '有 2 个会话已归档:A、B')
+})
+
+test('归档通知文案:恰好等于展示阈值不截断', () => {
+  const rows = [
+    { id: 'a', title: 'A' },
+    { id: 'b', title: 'B' },
+    { id: 'c', title: 'C' },
+  ]
+  assert.equal(archiveToastText(['a', 'b', 'c'], rows), '有 3 个会话已归档:A、B、C')
+})
+
+test('归档通知文案:超展示阈值只列前段并以「 等」收尾,计数仍为真实总数', () => {
+  const rows = [
+    { id: 'a', title: 'A' },
+    { id: 'b', title: 'B' },
+    { id: 'c', title: 'C' },
+    { id: 'd', title: 'D' },
+  ]
+  assert.equal(archiveToastText(['a', 'b', 'c', 'd'], rows), '有 4 个会话已归档:A、B、C 等')
+})
+
+test('归档通知文案:标题缺失、空白与行缺失回退会话 id,标题按去除首尾空白取值', () => {
+  const rows = [{ id: 'a' }, { id: 'b', title: '   ' }, { id: 'x', title: 'X' }]
+  assert.equal(archiveToastText(['a', 'b', 'c'], rows), '有 3 个会话已归档:a、b、c')
+  assert.equal(archiveToastText(['t'], [{ id: 't', title: '  T  ' }]), '会话「T」已归档')
+})
+
+test('归档通知文案:行数据非数组按空处理,标题全部回退会话 id', () => {
+  assert.equal(archiveToastText(['a', 'b'], undefined), '有 2 个会话已归档:a、b')
 })
 
 test('非归档会话拒绝删除', () => {

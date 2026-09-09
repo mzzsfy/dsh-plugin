@@ -7,6 +7,12 @@ export const CONDITION_KINDS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRan
 export const TOKENS_PER_MILLION = 1000 * 1000
 
 const MODEL_WILDCARD = '*'
+const SEGMENT_SEPARATOR = '/'
+// 请求侧无斜杠时的 vendor 段缺省值,与存储行 provider 口径同源
+export const PROVIDER_UNSET = 'default'
+// 档位权重:vendor 段通配 1 档、model 段通配 2 档,和越小越优先(模型名精确档恒优于供应商精确档)
+const VENDOR_WILDCARD_TIER = 1
+const MODEL_WILDCARD_TIER = 2
 const MINUTES_PER_HOUR = 60
 const DAY_PART_WIDTH = 2
 const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
@@ -79,12 +85,31 @@ const isRuleShaped = (rule) =>
   && !!rule.price && typeof rule.price === 'object' && !Array.isArray(rule.price)
   && Array.isArray(rule.conditions)
 
-const firstMatchingPrice = (rules, date, modelFilter) => {
-  for (const rule of rules) {
-    if (!isRuleShaped(rule) || !modelFilter(rule)) continue
-    if (rule.conditions.every((condition) => conditionMatches(condition, date))) return rule.price
-  }
-  return null
+// 规则模型键必须两段式:首个 / 前 vendor 段、后模型段(允许含 /),首位斜杠或无斜杠均非法
+export const splitRuleSegments = (pattern) => {
+  const slash = pattern.indexOf(SEGMENT_SEPARATOR)
+  return slash > 0 ? [pattern.slice(0, slash), pattern.slice(slash + SEGMENT_SEPARATOR.length)] : null
+}
+
+// 段须非空且不含空白:含空白的模型键永不匹配真实请求
+const SEGMENT_PATTERN = /^\S+$/
+
+export const isTwoSegmentModel = (pattern) => {
+  const segments = splitRuleSegments(pattern)
+  return segments !== null && segments.every((segment) => SEGMENT_PATTERN.test(segment))
+}
+
+// 请求侧模型键按同构规则分段,无 / 或首位斜杠时 vendor 段缺省归 default(与存储行口径一致)
+export const splitRequestSegments = (model) => splitRuleSegments(model) ?? [PROVIDER_UNSET, model]
+
+// 段级比对:规则段为通配或与请求段相等;两段全过才成立,通配段按各自档位计权
+const matchTier = (ruleSegments, requestSegments) => {
+  const [ruleVendor, ruleModel] = ruleSegments
+  const [requestVendor, requestModel] = requestSegments
+  if (ruleVendor !== MODEL_WILDCARD && ruleVendor !== requestVendor) return null
+  if (ruleModel !== MODEL_WILDCARD && ruleModel !== requestModel) return null
+  return (ruleVendor === MODEL_WILDCARD ? VENDOR_WILDCARD_TIER : 0)
+    + (ruleModel === MODEL_WILDCARD ? MODEL_WILDCARD_TIER : 0)
 }
 
 const toLocalDate = (timestamp) => {
@@ -92,12 +117,25 @@ const toLocalDate = (timestamp) => {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-// 精确子集按数组序取首个命中;无精确子集或全不命中回落 '*' 子集;仍无命中为 null(调用方计 unpriced)
+// 匹配链:全名 > 模型名(vendor 通配)> 供应商(model 通配)> '*/*' 全通;
+// 档位最小者胜,同档按数组序取首个;高档条件不满足自然落低档;无命中为 null(调用方计 unpriced)
 export const matchPrice = (rules, model, timestamp) => {
   const date = toLocalDate(timestamp)
   if (!Array.isArray(rules) || !date || typeof model !== 'string') return null
-  return firstMatchingPrice(rules, date, (rule) => rule.model === model)
-    ?? firstMatchingPrice(rules, date, (rule) => rule.model === MODEL_WILDCARD)
+  const requestSegments = splitRequestSegments(model)
+  let bestTier = Infinity
+  let bestPrice = null
+  for (const rule of rules) {
+    if (!isRuleShaped(rule)) continue
+    const ruleSegments = splitRuleSegments(rule.model)
+    if (!ruleSegments) continue
+    const tier = matchTier(ruleSegments, requestSegments)
+    if (tier === null || tier >= bestTier) continue
+    if (!rule.conditions.every((condition) => conditionMatches(condition, date))) continue
+    bestTier = tier
+    bestPrice = rule.price
+  }
+  return bestPrice
 }
 
 const BUCKET_PRICE_KEYS = [

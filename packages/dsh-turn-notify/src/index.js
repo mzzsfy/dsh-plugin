@@ -15,8 +15,10 @@ import {
   MIN_TURN_DURATION_MS,
   OPEN_TURN_STALE_MS,
   SUBAGENT_WAKE_WINDOW_MS,
+  buildSummary,
   buildUnit,
   buildWebhookPayload,
+  collectAssistantTail,
   collectSessionEvents,
   createApprovalTap,
   createProjection,
@@ -32,6 +34,7 @@ import {
   sendWebhook,
   shouldNotify,
   storedSessionTitle,
+  unitRoutes,
   uploadExt,
   UPLOAD_FILE_MAX_BYTES,
   validateConfigPatch,
@@ -81,6 +84,7 @@ const SETTINGS_SCHEMA = z.object({
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
   imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 推送目标列表,空数组禁用 IM 通道'),
+  kindRoutes: z.dict(z.array(z.string())).default({}).description('事件→通道路由:分类到放行通道名单(sound/system/toast/blink/webhook/im),未配置的分类全通道放行'),
 })
 
 // 读侧归一交由 core 的 resolvedConfig:字段类型异常回退默认值,与写路径校验宽松度一致
@@ -188,6 +192,8 @@ export function apply(ctx) {
   // 事件读序:标题提取需要事件流,按会话累积 user/message 文本;标题封账后不再累积
   const sessionEvents = new Map()
   const titledSessions = new Set()
+  // 回合尾部统计:assistant/message 的 tokens 累加与回答前缀,回合结束随通知消费即清
+  const assistantTails = new Map()
   let seq = 0
   // 音效库写互斥:展示名索引读改写与落盘非原子,串行化防并发交错
   let soundWriteQueue = Promise.resolve()
@@ -220,7 +226,16 @@ export function apply(ctx) {
     const header = session.header || {}
     const sessionId = String(session.id ?? '')
     if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn, awaitingChildren })) return
+    // 回合尾部统计:tokens 与回答前缀随回合结束消费,统计缺失不影响送达
+    const tail = assistantTails.get(sessionId) ?? null
+    assistantTails.delete(sessionId)
     seq += 1
+    const summary = buildSummary({
+      durationMs,
+      tokens: tail === null ? null : tail.tokens,
+      prefix: tail === null ? null : tail.prefix,
+    })
+    const routes = unitRoutes(settings.kindRoutes, category)
     const unit = buildUnit({
       id: 'n-' + Date.now().toString(36) + '-' + String(seq) + '-' + String(category),
       category,
@@ -228,11 +243,16 @@ export function apply(ctx) {
       sessionTitle: sessionDisplayTitle(session, sessionId),
       workspace: typeof header.cwd === 'string' ? header.cwd : '',
       durationMs,
+      tokens: tail === null ? null : tail.tokens,
+      summary,
       ts: Date.now(),
     })
+    unit.routes = routes
     projection.push(unit)
-    void sendWebhook({ url: settings.webhookUrl, payload: buildWebhookPayload(unit) })
-    deliverIm(unit, settings)
+    if (routes === null || routes.indexOf('webhook') >= 0) {
+      void sendWebhook({ url: settings.webhookUrl, payload: buildWebhookPayload(unit) })
+    }
+    if (routes === null || routes.indexOf('im') >= 0) deliverIm(unit, settings)
   }
 
   // 会话显示标题:优先 session-title 服务(与侧边栏行标题同一投影,客户端文本匹配高亮
@@ -270,7 +290,10 @@ export function apply(ctx) {
     const currentTurnStart = openTurns.get(sessionId)
     pruneTimestamps(childDoneAt, now, SUBAGENT_WAKE_WINDOW_MS)
     for (const [turnId, turn] of openTurns) {
-      if (now - turn.at > OPEN_TURN_STALE_MS) openTurns.delete(turnId)
+      if (now - turn.at > OPEN_TURN_STALE_MS) {
+        openTurns.delete(turnId)
+        assistantTails.delete(turnId)
+      }
     }
     for (const [childId, entry] of childActive) {
       if (now - entry.at > ACTIVE_CHILD_STALE_MS) childActive.delete(childId)
@@ -279,6 +302,10 @@ export function apply(ctx) {
     let endedTurn = null
     if (event.type === 'user/message') {
       collectSessionEvents(sessionEvents, titledSessions, sessionId, event)
+      return
+    }
+    if (event.type === 'assistant/message') {
+      collectAssistantTail(assistantTails, sessionId, event.data)
       return
     }
     if (event.type === 'turn/start') {

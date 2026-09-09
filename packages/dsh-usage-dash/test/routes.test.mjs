@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
 
 import { MAX_RANGE_SPAN_DAYS, registerUsageRoutes } from '../src/routes.js'
-import { DEFAULT_MINUTE_RETENTION_DAYS, minuteKey } from '../src/store.js'
+import { DEFAULT_MINUTE_RETENTION_DAYS, hourKey, minuteKey } from '../src/store.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const MINUTE_MS = 60 * 1000
@@ -338,8 +338,9 @@ test('minutes 禁用保留时标注空 covered', async () => {
 
 test('minutes from 未对齐 10 分钟桶边界拒绝 400', async () => {
   const { routes } = mount()
-  const d = new Date(FIXED_NOW)
-  const unaligned = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T12:07`
+  // from 由 hourKey 本地渲染保证与 to 同一时区基准,前一小时的 :07 早于 to 且未对齐;
+  // 前提是 FIXED_NOW 不落入 DST 回拨小时(当前 2 月常量全球无转变日)
+  const unaligned = `${hourKey(FIXED_NOW - 60 * MINUTE_MS)}:07`
   const res = await invokeJson(routes, PATH_MINUTES, { payload: { from: unaligned, to: minuteKey(FIXED_NOW) } })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 400)
@@ -349,12 +350,12 @@ test('minutes from 未对齐 10 分钟桶边界拒绝 400', async () => {
 
 test('minutes 保留值超上限时 covered 窗口按 clamp 计算', async () => {
   const { routes } = mount({ retentionDays: () => 30 })
-  const from = minuteKey(FIXED_NOW - 3 * DAY_MS)
+  const from = minuteKey(FIXED_NOW - 8 * DAY_MS)
   const to = minuteKey(FIXED_NOW)
   const res = await invokeJson(routes, PATH_MINUTES, { payload: { from, to } })
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 200)
-  assert.equal(parsed.value.coveredFrom, minuteKey(FIXED_NOW - 2 * DAY_MS))
+  assert.equal(parsed.value.coveredFrom, minuteKey(FIXED_NOW - 7 * DAY_MS))
   assert.equal(parsed.value.coveredTo, to)
 })
 
@@ -382,14 +383,14 @@ test('内部错误 500 不回显内部文本', async () => {
 // ---- S13 pricing 端点与 cost 集成 ----
 
 const PRICING_RULE = {
-  model: 'deepseek-chat',
+  model: 'deepseek/deepseek-chat',
   currency: '¥',
   price: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
   conditions: [{ kind: 'dailyWindow', from: '09:00', to: '18:00' }],
 }
 
 const ruleWithInputPrice = (input) => ({
-  model: 'deepseek-chat',
+  model: 'default/deepseek-chat',
   currency: '¥',
   price: { input, output: 0, cacheRead: 0, cacheWrite: 0 },
   conditions: [],
@@ -438,6 +439,9 @@ test('pricing POST 非法规则拒绝 400 且不写入', async () => {
     { rules: 'x' },
     {},
     { rules: [{ model: 1, currency: '¥', price: PRICING_RULE.price, conditions: [] }] },
+    { rules: [{ ...PRICING_RULE, model: 'deepseek-chat' }] },
+    { rules: [{ ...PRICING_RULE, model: '*' }] },
+    { rules: [{ ...PRICING_RULE, model: '/deepseek-chat' }] },
     { rules: [{ ...PRICING_RULE, price: { input: -1, output: 0, cacheRead: 0, cacheWrite: 0 } }] },
     { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'unknown' }] }] },
     { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'weekdays', days: [7] }] }] },

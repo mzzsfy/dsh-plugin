@@ -123,10 +123,10 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 - 早期版本允许无 `id` 的账号(落盘时按索引一次性补齐);当前前端保存时总携带 `id`,不再做旧数据特判
 - 账号卡片渲染未做 memo 化、趋势浮层常挂载:数据规模受账号上限(20)与悬浮窗口点数(24)双重钳制,无可感知卡顿,后置观察
 
-## 开发安装(不经 npm 发布直接装仓库副本)
+## 开发安装(仓库工作副本直挂,不经 npm 发布)
 
 ```sh
-dsh plugin --profile web add file:./packages/dsh-usage-panel
+node scripts/dev-link.mjs dsh-usage-panel   # 仓库根执行:归一 profile 依赖行 + 挂 junction
 ```
 
-`file:` 安装指向仓库工作副本,改代码后重跑该命令即同步,无需发版。
+工作副本以 junction 挂进 profile,改代码保存即热重载(host 半区)或刷新页面生效(client 半区),无需发版;规约与全仓归一见仓库根 `node scripts/dev-link.mjs all`。
