@@ -898,7 +898,7 @@ function DetailDialog(props) {
         ranges.map((r) => h('button', {
           key: r, className: 'up-btn', disabled: r === range,
           onClick: () => setRange(r),
-        }, r === 'all' ? '全部' : '近 ' + r)),
+        }, r === 'all' ? '全部' : '近 ' + ({ '7d': '7 天', '30d': '30 天' })[r])),
         h('button', { className: 'up-btn', onClick: props.onClose }, '关闭'),
       ),
       h(TrendChart, { label: props.label, points, onDetail: null }),
