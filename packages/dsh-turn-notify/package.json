@@ -33,7 +33,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@mzzsfy/dsh-toast": "^0.1.2"
+    "@mzzsfy/dsh-toast": "^0.2.0"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-session-title": ">=0.1.2-rc.1",
