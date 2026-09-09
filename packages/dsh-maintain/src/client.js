@@ -517,7 +517,7 @@ function OpsCard(props) {
       !status.canRestart ? h('span', { className: 'dm-meta' }, '当前启动方式不支持就地重启') : null,
     ),
     h('div', { className: 'dm-meta' },
-      '重启依赖进程管理器(pm2 / systemd / nssm / Docker 等)自动拉起;手动终端启动的进程不会自动恢复。',
+      '重启依赖进程管理器(pm2 / systemd / supervisord / Kubernetes / 容器等)自动拉起;手动终端启动的进程不会自动恢复。',
       '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。运行中的 agent 将被中断,会话已持久化,重开后可 resume。'),
   )
 }
