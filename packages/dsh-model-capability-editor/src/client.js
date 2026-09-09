@@ -1,4 +1,4 @@
-// 模型能力编辑 Client 半区:settings.section 独立设置页卡片。
+// 模型能力编辑 Client 半区:官方模型页行内注入,锚点破坏时浮动入口回退。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 与 require('react-dom/client') 由 DSH client
 // runtime 的模块表解析(宿主种子一级键,缺失即整个宿主 UI 不存在,不降级)。
