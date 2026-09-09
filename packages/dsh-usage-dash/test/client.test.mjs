@@ -88,6 +88,8 @@ const {
   speedScaleMax,
   legendToggle,
   leftAxisTicks,
+  hourSlotLabel,
+  minuteSlotLabel,
   validatePricingRules,
 } = core
 
@@ -373,6 +375,13 @@ test('leftAxisTicks 速度模式标定速度刻度,否则标定 token 刻度', (
   assert.deepEqual(speedTicks.map((tick) => tick.label), ['0.5', '1'])
   approx(speedTicks[0].ratio, 0.5)
   approx(speedTicks[1].ratio, 1)
+})
+
+test('hour/minute 悬浮窗槽标签:T 换空格,小时带时,分钟保 HH:MM', () => {
+  assert.equal(hourSlotLabel('2026-03-15T14'), '2026-03-15 14时')
+  assert.equal(hourSlotLabel('2026-03-15T00'), '2026-03-15 00时')
+  assert.equal(minuteSlotLabel('2026-03-15T14:30'), '2026-03-15 14:30')
+  assert.equal(minuteSlotLabel('2026-03-15T00:00'), '2026-03-15 00:00')
 })
 
 test('trendLayout 标签密度随列距收敛', () => {

@@ -423,6 +423,15 @@ function minuteTickLabel(key) {
   return time === MIDNIGHT_TIME ? `${shortDay(key.slice(0, DAY_KEY_LENGTH))} ${time}` : time
 }
 
+// 悬浮窗槽标签:完整日期去 T 分隔,小时带"时"后缀,分钟保留 HH:MM
+function hourSlotLabel(key) {
+  return `${key.slice(0, DAY_KEY_LENGTH)} ${key.slice(DAY_KEY_LENGTH + 1)}时`
+}
+
+function minuteSlotLabel(key) {
+  return `${key.slice(0, DAY_KEY_LENGTH)} ${key.slice(DAY_KEY_LENGTH + 1)}`
+}
+
 function isEmptyRange(value) {
   return value.tokens === 0 && value.cacheHit === 0 && value.requests === 0 && value.turns === 0
 }
@@ -1797,7 +1806,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, t = defaultT }) {
+    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, t = defaultT }) {
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
@@ -1901,7 +1910,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
           hoverSlot
             ? [
-                h('div', { key: 'title', className: 'ud-tip-title' }, hoverSlot.day),
+                h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
                 h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
                 ...legendModels.filter((item) => visibleSet.has(item.model)).map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
                   h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
@@ -2521,6 +2530,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       : id === 'hour' ? t('trendLimitedHour', { n: count }) : t('trendLimitedMinute', { n: count }))
     const presetLabel = (t, view, id) => t(`${view === 'hour' ? 'hourPreset' : 'minutePreset'}.${id}`)
     const tickLabelFor = (view) => (view === 'day' ? shortDay : view === 'hour' ? hourTickLabel : minuteTickLabel)
+    const slotLabelFor = (view) => (view === 'hour' ? hourSlotLabel : view === 'minute' ? minuteSlotLabel : (day) => day)
 
     function UsageDashPanel({ t = defaultT }) {
       const [view, setView] = useState('day')
@@ -2775,6 +2785,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               modelOrder: trendSource.models.map((item) => item.model),
               colorFor,
               labelFor: tickLabelFor(view),
+              slotLabelFor: slotLabelFor(view),
               labelMinPitch: pointActive ? LABEL_PITCH_TIME : LABEL_PITCH_DAY,
               busy,
               legendModels: trendSource.models,
