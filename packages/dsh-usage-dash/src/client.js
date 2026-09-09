@@ -220,6 +220,9 @@ const MESSAGES_ZH = {
   condRange: '起始不得晚于结束',
   deleteRule: '删除规则',
   addRule: '添加规则',
+  ruleOrderHint: '规则从上到下匹配,首个命中生效;建议无条件规则放末尾兜底',
+  moveUp: '上移',
+  moveDown: '下移',
   save: '保存',
   saved: '已保存',
   required: '必填',
@@ -346,6 +349,9 @@ const MESSAGES_EN = {
   condRange: 'From must not be after to',
   deleteRule: 'Remove rule',
   addRule: 'Add rule',
+  ruleOrderHint: 'Rules match top-down; the first hit wins. Put the condition-less rule last as the fallback',
+  moveUp: 'Move up',
+  moveDown: 'Move down',
   save: 'Save',
   saved: 'Saved',
   required: 'Required',
@@ -1409,6 +1415,16 @@ const defaultPricingRule = (currency = CURRENCIES[0]) => ({
 
 const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
 
+// 规则排序纯函数:与相邻项交换;越界/零步长返回原引用(UI 侧按钮按位置隐藏,双保险)
+function moveRuleAt(rules, index, delta) {
+  const target = index + delta
+  if (!Array.isArray(rules) || delta === 0 || index < 0 || index >= rules.length || target < 0 || target >= rules.length) return rules
+  const moved = [...rules]
+  const [item] = moved.splice(index, 1)
+  moved.splice(target, 0, item)
+  return moved
+}
+
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
@@ -2346,6 +2362,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               onChange: (event) => onPatch({ model: event.target.value }),
             }),
             errorTextOf(`${pathPrefix}model`)),
+          canMoveUp ? h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(-1),
+            'aria-label': t('moveUp'), title: t('moveUp'),
+          }, '↑') : null,
+          canMoveDown ? h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(1),
+            'aria-label': t('moveDown'), title: t('moveDown'),
+          }, '↓') : null,
           h('button', {
             className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
             'aria-label': t('deleteRule'), title: t('deleteRule'),
@@ -2445,6 +2469,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               }, symbol))),
             h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
+        h('span', { className: 'ud-rule-cond' }, t('ruleOrderHint')),
         rules.map((rule, index) => h(PricingRuleCard, {
           key: index,
           rule,
@@ -2454,6 +2479,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           t,
           onPatch: (part) => setRules((prev) => patchItemAt(prev, index, part)),
           onRemove: () => setRules((prev) => prev.filter((_, i) => i !== index)),
+          onMove: (delta) => setRules((prev) => moveRuleAt(prev, index, delta)),
+          canMoveUp: index > 0,
+          canMoveDown: index < rules.length - 1,
         })),
         h('button', {
           className: 'ud-rule-add', type: 'button',

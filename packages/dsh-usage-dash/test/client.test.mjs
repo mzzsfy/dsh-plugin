@@ -68,6 +68,7 @@ const {
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
+  moveRuleAt,
   niceTicks,
   otherDetailItems,
   parseEnvelope,
@@ -837,4 +838,31 @@ test('coercePricingRules 连带规整条件', () => {
   const coerced = coercePricingRules(rules)
   assert.deepEqual(coerced[0].conditions, [{ kind: 'weekdays', days: [1] }, { kind: 'monthDays', from: 1, to: 31 }])
   assert.deepEqual(coerced[0].price, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
+})
+
+// —— 定价规则排序:同模型多规则从上到下匹配,顺序即优先级 ——
+
+test('moveRuleAt 相邻交换返回新数组且不动原数组', () => {
+  // Given 三条规则 When 第 2 条上移一格 Then 新序 [B,A,C],原数组保持 [A,B,C]
+  const rules = [{ model: 'a/1' }, { model: 'a/2' }, { model: 'a/3' }]
+  const moved = moveRuleAt(rules, 1, -1)
+  assert.deepEqual(moved.map((rule) => rule.model), ['a/2', 'a/1', 'a/3'])
+  assert.deepEqual(rules.map((rule) => rule.model), ['a/1', 'a/2', 'a/3'])
+  assert.notEqual(moved, rules)
+})
+
+test('moveRuleAt 下移一格', () => {
+  // Given 三条规则 When 首条下移一格 Then 新序 [B,A,C]
+  const rules = [{ model: 'a/1' }, { model: 'a/2' }, { model: 'a/3' }]
+  assert.deepEqual(moveRuleAt(rules, 0, 1).map((rule) => rule.model), ['a/2', 'a/1', 'a/3'])
+})
+
+test('moveRuleAt 越界或零步长返回原数组引用', () => {
+  // Given 首条上移/末条下移/零步长 When 移动 Then 恒返回原引用,UI 无操作
+  const rules = [{ model: 'a/1' }, { model: 'a/2' }]
+  assert.equal(moveRuleAt(rules, 0, -1), rules)
+  assert.equal(moveRuleAt(rules, rules.length - 1, 1), rules)
+  assert.equal(moveRuleAt(rules, 0, 0), rules)
+  assert.equal(moveRuleAt(rules, -1, 1), rules)
+  assert.equal(moveRuleAt(rules, rules.length, -1), rules)
 })
