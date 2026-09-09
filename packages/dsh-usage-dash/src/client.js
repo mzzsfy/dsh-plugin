@@ -218,7 +218,7 @@ const MESSAGES_ZH = {
   condWeekday: '需 0-6 整数',
   condMonthDay: '需 1-31 整数',
   condDate: '需 YYYY-MM-DD',
-  condRange: '区间不能为空,起始须早于结束(左闭右开)',
+  condRange: '结束不得早于起始(两端均含)',
   ruleOrderHint: '附加计费规则从上到下匹配,首个命中生效;全不命中落默认价',
   moveUp: '上移',
   moveDown: '下移',
@@ -353,7 +353,7 @@ const MESSAGES_EN = {
   condWeekday: 'Requires integer 0-6',
   condMonthDay: 'Requires integer 1-31',
   condDate: 'Requires YYYY-MM-DD',
-  condRange: 'Range must not be empty: from must be before to (end-exclusive)',
+  condRange: 'End must not be before start (both ends inclusive)',
   ruleOrderHint: '附加计费规则从上到下匹配,首个命中生效;全不命中落默认价',
   moveUp: 'Move up',
   moveDown: 'Move down',
@@ -1073,15 +1073,14 @@ const toMinutesOfDay = (hhmm) => {
   return Number.isFinite(h) && Number.isFinite(m) ? h * MINUTES_PER_HOUR + m : Number.NaN
 }
 
-// 所有范围条件统一左闭右开;from>to 跨午夜/跨月环绕;from===to 空区间不成立
+// 所有范围条件统一双侧包含;from>to 跨午夜/跨月环绕;from===to 单点/单日(与宿主 pricing.js 镜像,parity 测试锁定)
 function dailyWindowMatches(condition, date) {
   const from = toMinutesOfDay(condition.from)
   const to = toMinutesOfDay(condition.to)
   if (Number.isNaN(from) || Number.isNaN(to)) return false
   const m = minutesOfDay(date)
-  if (from < to) return m >= from && m < to
-  if (from > to) return m >= from || m < to
-  return false
+  if (from <= to) return m >= from && m <= to
+  return m >= from || m <= to
 }
 
 // days 空数组不成立;0=周日,取 getDay()
@@ -1090,23 +1089,22 @@ function weekdaysMatches(condition, date) {
   return Array.isArray(days) && days.length > 0 && days.includes(date.getDay())
 }
 
-// 号段左闭右开;from>to 跨月环绕;to 允许 32 表达"到月末";日号必须整数,2 月无 31 号自然不触发
+// 号段双侧包含;from>to 跨月环绕;from===to 单日,2 月无 31 号自然不触发
 function monthDaysMatches(condition, date) {
   const { from, to } = condition
   if (!Number.isInteger(from) || !Number.isInteger(to)) return false
-  if (from === to) return false
   const d = date.getDate()
-  return from < to ? d >= from && d < to : d >= from || d < to
+  return from <= to ? d >= from && d <= to : d >= from || d <= to
 }
 
-// 零填充 YYYY-MM-DD 字典序左闭右开;from>=to 空区间不成立
+// 零填充 YYYY-MM-DD 字典序双侧包含;from>to 配置错误不成立(编辑器校验拦截)
 const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 function dateRangeMatches(condition, date) {
   const { from, to } = condition
   if (typeof from !== 'string' || typeof to !== 'string') return false
-  if (!ISO_DAY_PATTERN.test(from) || !ISO_DAY_PATTERN.test(to) || from >= to) return false
+  if (!ISO_DAY_PATTERN.test(from) || !ISO_DAY_PATTERN.test(to) || from > to) return false
   const iso = formatDate(date)
-  return iso >= from && iso < to
+  return iso >= from && iso <= to
 }
 
 const CONDITION_MATCHERS = {
@@ -1339,17 +1337,14 @@ function turnCostTitleText(t, tokenUsage) {
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
 const ISO_DAY_PATTERN_CLIENT = /^\d{4}-\d{2}-\d{2}$/
-// 时刻分量界:小时含头不含尾,分钟双闭
+// 时刻分量界:小时/分钟均双闭
 const HOUR_MAX = 23
-const HOUR_END_MAX = 24
 const MINUTE_MAX = 59
 const WEEKDAY_MIN = 0
 const WEEKDAY_MAX = 6
 const MONTH_DAY_MIN = 1
 const MONTH_DAY_MAX = 31
-// 左闭右开下 to 可取上界开边界:时段到 24:00、号段到 32,表达"到边界"
-const MONTH_DAY_END_MAX = 32
-const FULL_DAY_WINDOW = { from: '00:00', to: '24:00' }
+const FULL_DAY_WINDOW = { from: '00:00', to: '23:59' }
 const CONDITION_KIND_OPTIONS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const CONDITION_KIND_LABEL_KEYS = {
   dailyWindow: 'condDailyWindow',
@@ -1359,36 +1354,30 @@ const CONDITION_KIND_LABEL_KEYS = {
 }
 const WEEKDAY_COUNT = 7
 
-// from 严格域 00:00~23:59;to 走开边界域 00:00~24:00(24:00 仅整点)
-const parseHHMM = (value, { endOfDay = false } = {}) => {
+const parseHHMM = (value) => {
   if (typeof value !== 'string' || !HHMM_PATTERN.test(value)) return null
   const [hours, minutes] = value.split(':').map(Number)
-  const hourMax = endOfDay ? HOUR_END_MAX : HOUR_MAX
-  const minuteMax = endOfDay && hours === HOUR_END_MAX ? 0 : MINUTE_MAX
-  return hours >= 0 && hours <= hourMax && minutes >= 0 && minutes <= minuteMax ? value : null
+  return hours >= 0 && hours <= HOUR_MAX && minutes >= 0 && minutes <= MINUTE_MAX ? value : null
 }
 
 const isValidMonthDay = (value) => Number.isInteger(value) && value >= MONTH_DAY_MIN && value <= MONTH_DAY_MAX
 
-const isValidMonthDayEnd = (value) => Number.isInteger(value) && value >= MONTH_DAY_MIN && value <= MONTH_DAY_END_MAX
-
 const isValidWeekday = (value) => Number.isInteger(value) && value >= WEEKDAY_MIN && value <= WEEKDAY_MAX
 
-// 各条件类型合法默认即填即用:时段全天、周几空、号段全月(1~32 左闭右开)、日期段当天~次日
+// 各条件类型合法默认即填即用:时段全天、周几空、号段全月、日期段当天单日
 const defaultCondition = (kind, now = new Date()) => {
   const today = formatDate(now)
-  const tomorrow = formatDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1))
   const defaults = {
     dailyWindow: { kind: 'dailyWindow', ...FULL_DAY_WINDOW },
     weekdays: { kind: 'weekdays', days: [] },
-    monthDays: { kind: 'monthDays', from: MONTH_DAY_MIN, to: MONTH_DAY_END_MAX },
-    dateRange: { kind: 'dateRange', from: today, to: tomorrow },
+    monthDays: { kind: 'monthDays', from: MONTH_DAY_MIN, to: MONTH_DAY_MAX },
+    dateRange: { kind: 'dateRange', from: today, to: today },
   }
   return defaults[kind] ? { ...defaults[kind] } : null
 }
 
 // 条件字段级校验:路径前缀 + 键 → 错误键;时段/号段倒序为跨午夜/跨月语义;
-// 所有范围左闭右开,from===to 为空区间,校验拒绝(condRange)
+// 所有范围双侧包含,from===to 单点/单日合法;仅日期段倒序属配置错误(condRange)
 const validateCondition = (condition, path, errors) => {
   if (!condition || typeof condition !== 'object') {
     errors.set(path, 'required')
@@ -1396,10 +1385,9 @@ const validateCondition = (condition, path, errors) => {
   }
   if (condition.kind === 'dailyWindow') {
     const from = parseHHMM(condition.from)
-    const to = parseHHMM(condition.to, { endOfDay: true })
+    const to = parseHHMM(condition.to)
     if (from === null) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condTime')
     if (to === null) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condTime')
-    if (from !== null && to !== null && toMinutesOfDay(from) === toMinutesOfDay(to)) errors.set(path, 'condRange')
     return
   }
   if (condition.kind === 'weekdays') {
@@ -1407,18 +1395,15 @@ const validateCondition = (condition, path, errors) => {
     return
   }
   if (condition.kind === 'monthDays') {
-    const fromValid = isValidMonthDay(condition.from)
-    const toValid = isValidMonthDayEnd(condition.to)
-    if (!fromValid) errors.set(`${path}.from`, 'condMonthDay')
-    if (!toValid) errors.set(`${path}.to`, 'condMonthDay')
-    if (fromValid && toValid && condition.from === condition.to) errors.set(path, 'condRange')
+    if (!isValidMonthDay(condition.from)) errors.set(`${path}.from`, 'condMonthDay')
+    if (!isValidMonthDay(condition.to)) errors.set(`${path}.to`, 'condMonthDay')
     return
   }
   if (condition.kind === 'dateRange') {
     if (typeof condition.from !== 'string' || !ISO_DAY_PATTERN_CLIENT.test(condition.from)) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condDate')
     if (typeof condition.to !== 'string' || !ISO_DAY_PATTERN_CLIENT.test(condition.to)) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condDate')
     if (errors.has(`${path}.from`) || errors.has(`${path}.to`)) return
-    if (condition.from >= condition.to) errors.set(path, 'condRange')
+    if (condition.from > condition.to) errors.set(path, 'condRange')
   }
 }
 
@@ -2483,12 +2468,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),
           errorTextOf(`${condPath}.${field}`))
-        // 号段 from/to 域不同(to 含开边界 32),按字段取各自上限
+        // 号段 from/to 同域 1~31(双闭),统一上限
         const numberInput = (field, labelKey) => h('label', { key: field, className: 'ud-field' },
           h('span', { className: 'ud-field-label' }, t(labelKey)),
           h('input', {
             type: 'number', className: 'ud-input', min: MONTH_DAY_MIN,
-            max: field === 'to' ? MONTH_DAY_END_MAX : MONTH_DAY_MAX, step: 1,
+            max: MONTH_DAY_MAX, step: 1,
             value: condition[field] ?? '',
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),

@@ -30,15 +30,14 @@ const toMinutesOfDay = (hhmm) => {
   return Number.isFinite(h) && Number.isFinite(m) ? h * MINUTES_PER_HOUR + m : Number.NaN
 }
 
-// 所有范围条件统一左闭右开;from>to 跨午夜/跨月环绕;from===to 空区间不成立
+// 所有范围条件统一双侧包含;from>to 跨午夜/跨月环绕;from===to 单点/单日
 const dailyWindowMatches = (condition, date) => {
   const from = toMinutesOfDay(condition.from)
   const to = toMinutesOfDay(condition.to)
   if (Number.isNaN(from) || Number.isNaN(to)) return false
   const m = minutesOfDay(date)
-  if (from < to) return m >= from && m < to
-  if (from > to) return m >= from || m < to
-  return false
+  if (from <= to) return m >= from && m <= to
+  return m >= from || m <= to
 }
 
 // days 空数组不成立;0=周日,取 getDay()
@@ -47,22 +46,21 @@ const weekdaysMatches = (condition, date) => {
   return Array.isArray(days) && days.length > 0 && days.includes(date.getDay())
 }
 
-// 号段左闭右开;from>to 跨月环绕(账单周期);to 允许 32 表达"到月末";日号必须整数,2 月无 31 号自然不触发
+// 号段双侧包含;from>to 跨月环绕(账单周期);from===to 单日,2 月无 31 号自然不触发
 const monthDaysMatches = (condition, date) => {
   const { from, to } = condition
   if (!Number.isInteger(from) || !Number.isInteger(to)) return false
-  if (from === to) return false
   const d = date.getDate()
-  return from < to ? d >= from && d < to : d >= from || d < to
+  return from <= to ? d >= from && d <= to : d >= from || d <= to
 }
 
-// 零填充 YYYY-MM-DD 字典序左闭右开;from>=to 空区间不成立
+// 零填充 YYYY-MM-DD 字典序双侧包含;from>to 配置错误不成立(编辑器校验拦截)
 const dateRangeMatches = (condition, date) => {
   const { from, to } = condition
   if (typeof from !== 'string' || typeof to !== 'string') return false
-  if (!ISO_DAY_PATTERN.test(from) || !ISO_DAY_PATTERN.test(to) || from >= to) return false
+  if (!ISO_DAY_PATTERN.test(from) || !ISO_DAY_PATTERN.test(to) || from > to) return false
   const iso = formatDate(date)
-  return iso >= from && iso < to
+  return iso >= from && iso <= to
 }
 
 const CONDITION_MATCHERS = {

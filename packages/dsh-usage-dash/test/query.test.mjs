@@ -393,6 +393,7 @@ test('attachCosts M 行 unpriced 按父 H 桶去重', () => {
 })
 
 test('attachCosts D 端点按 H 行桶起点计价折叠到日槽', () => {
+  // 双闭:两日期段不相邻不重叠,22/23 桶起点 01-01 落段一,00 桶起点 01-02 落段二
   const costRows = [
     makeRow({ bucket: '2020-01-01T22', model: 'm1', inputTokens: 1000000 }),
     makeRow({ bucket: '2020-01-01T23', model: 'm1', inputTokens: 1000000 }),
@@ -403,7 +404,7 @@ test('attachCosts D 端点按 H 行桶起点计价折叠到日槽', () => {
     makeRow({ bucket: '2020-01-02', model: 'm1', inputTokens: 1000000 }),
   ]
   const rules = [
-    ruleOf({ price: inputPrice(1), conditions: [{ kind: 'dateRange', from: '2020-01-01', to: '2020-01-02' }] }),
+    ruleOf({ price: inputPrice(1), conditions: [{ kind: 'dateRange', from: '2020-01-01', to: '2020-01-01' }] }),
     ruleOf({ price: inputPrice(3), conditions: [{ kind: 'dateRange', from: '2020-01-02', to: '2020-01-03' }] }),
   ]
   const result = aggregateRange(aggregateRows, 'D', '2020-01-01', '2020-01-02')
