@@ -752,7 +752,7 @@ function heatLevel(tokens, max) {
   return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
 }
 
-// ChartTip 定位:锚定格子矩形,边界内 clamp,下方优先放不下翻上方
+// ChartTip 定位:锚定区装得下贴内顶(趋势图悬停区即绘图区,悬浮窗留在图表内),装不下上翻、再下翻、末了钳边界顶
 const TIP_GAP_PX = 8
 const TIP_MARGIN_PX = 8
 
@@ -764,11 +764,13 @@ function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX)
   const maxX = bounds.right - margin
   const maxY = bounds.bottom - margin
   const left = Math.max(minX, Math.min((anchor.left + anchor.right) / 2 - tip.width / 2, maxX - tip.width))
-  const below = anchor.bottom + gap
+  const inside = anchor.top + gap
   const above = anchor.top - gap - tip.height
+  const below = anchor.bottom + gap
   let top
-  if (below + tip.height <= maxY) top = below
+  if (inside + tip.height <= anchor.bottom) top = inside
   else if (above >= minY) top = above
+  else if (below + tip.height <= maxY) top = below
   else top = minY
   return { left, top }
 }

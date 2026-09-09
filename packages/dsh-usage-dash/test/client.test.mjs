@@ -470,8 +470,24 @@ const TIP_ANCHOR = { left: 100, top: 100, right: 140, bottom: 114 }
 const TIP_SIZE = { width: 80, height: 40 }
 const TIP_BOUNDS = { left: 0, top: 0, right: 800, bottom: 600 }
 
-test('tipPlace 默认锚点下方水平居中', () => {
-  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 80, top: 122 })
+test('tipPlace 小锚点默认翻上方水平居中', () => {
+  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 80, top: 52 })
+})
+
+test('tipPlace 锚定区装得下提示框贴内顶', () => {
+  const anchor = { left: 100, top: 100, right: 240, bottom: 460 }
+  assert.deepEqual(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS), { left: 130, top: 108 })
+})
+
+test('tipPlace 上方不足翻下方', () => {
+  const anchor = { left: 100, top: 20, right: 140, bottom: 60 }
+  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).top, 68)
+})
+
+test('tipPlace 候选边界等号归属', () => {
+  assert.deepEqual(tipPlace({ left: 100, top: 100, right: 240, bottom: 148 }, TIP_SIZE, TIP_BOUNDS), { left: 130, top: 108 })
+  assert.equal(tipPlace({ left: 100, top: 56, right: 140, bottom: 96 }, TIP_SIZE, TIP_BOUNDS).top, 8)
+  assert.equal(tipPlace({ left: 100, top: 8, right: 140, bottom: 48 }, TIP_SIZE, { left: 0, top: 0, right: 800, bottom: 104 }).top, 56)
 })
 
 test('tipPlace 下方放不下翻转上方', () => {
