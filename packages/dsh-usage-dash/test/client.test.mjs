@@ -341,15 +341,21 @@ test('trendLayout 零值槽无分段,无可见数据时刻度为空表', () => {
   assert.deepEqual(layout.ticks, [])
 })
 
-test('trendLayout 堆叠分段自底向上且高度求和等于绘图高', () => {
+test('trendLayout 堆叠分段自底向上,轴上限为数据峰乘留白系数', () => {
   const layout = trendLayout([{ day: 'd', total: 50, byModel: { a: 30, b: 20 } }], ['a', 'b'], 720, 46)
   const [segA, segB] = layout.bars[0].segments
   assert.deepEqual(segA.model, 'a')
   assert.deepEqual(segB.model, 'b')
-  approx(segA.height, (30 / 50) * 184)
-  approx(segB.height, (20 / 50) * 184)
-  approx(segA.height + segB.height, 184)
+  approx(segA.height, (30 / (50 * 1.1)) * 184)
+  approx(segB.height, (20 / (50 * 1.1)) * 184)
+  approx(segA.height + segB.height, (50 / (50 * 1.1)) * 184)
   approx(segB.y + segB.height, segA.y)
+})
+
+test('trendLayout 数据峰不顶满绘图区,留白系数 1.1', () => {
+  const layout = trendLayout([{ day: 'd', total: 30, byModel: { a: 30 } }], ['a'], 720, 46)
+  const [segA] = layout.bars[0].segments
+  approx(segA.height + CHART_PAD.top, CHART_PAD.top + (1 / 1.1) * 184)
 })
 
 test('trendLayout 可见模型无数据时左轴刻度为空表', () => {

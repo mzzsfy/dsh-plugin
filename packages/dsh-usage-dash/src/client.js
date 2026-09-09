@@ -496,6 +496,8 @@ const BAR_MAX_WIDTH = 30
 const AXIS_TICK_COUNT = 4
 // 速度刻度上限钳底:全零或无速度防除零(速度不设轴,读数走 tooltip)
 const SPEED_SCALE_FLOOR = 1
+// 轴上限留白系数:数据峰不顶满绘图区,顶部留出标注空间
+const AXIS_SCALE_HEADROOM = 1.1
 // 图例键:折线项与模型项共处同一显隐集合
 const LEGEND_KEY_RATE = 'rate'
 const LEGEND_KEY_SPEED = 'speed'
@@ -544,6 +546,8 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
   const barWidth = Math.max(BAR_MIN_WIDTH, Math.min(BAR_MAX_WIDTH, step * BAR_WIDTH_RATIO))
   const slotVisibleTotal = (slot) => modelOrder.reduce((sum, model) => sum + (slot.byModel[model] ?? 0), 0)
   const maxTotal = Math.max(1, ...slots.map(slotVisibleTotal))
+  // 轴上限 = 数据峰 × 留白系数,柱高分母与左轴刻度分母同源
+  const scaleMax = maxTotal * AXIS_SCALE_HEADROOM
   // 可见模型无任何数据时左轴无标定对象,空刻度防钳底值漏成假刻度
   const visibleTotal = slots.reduce((sum, slot) => sum + slotVisibleTotal(slot), 0)
   const bars = slots.map((slot, index) => {
@@ -553,7 +557,7 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
     for (const model of modelOrder) {
       const tokens = slot.byModel[model] ?? 0
       if (tokens === 0) continue
-      const height = (tokens / maxTotal) * plotHeight
+      const height = (tokens / scaleMax) * plotHeight
       yBottom -= height
       segments.push({ model, y: yBottom, height })
     }
@@ -566,6 +570,7 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
     step,
     barWidth,
     maxTotal,
+    scaleMax,
     ticks: visibleTotal === 0 ? [] : niceTicks(maxTotal, AXIS_TICK_COUNT),
     labelEvery: Math.max(1, Math.ceil(labelMinPitch / step)),
     bars,
@@ -1820,10 +1825,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
-      const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedMax) : []
+      const speedAxisMax = speedMax * AXIS_SCALE_HEADROOM
+      const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedAxisMax) : []
       // 左轴标定:可见柱有数据标 token;无柱数据且速度线可见标速度(tok/s);否则空
       const speedAxisTicks = layout.ticks.length === 0 && showSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []
-      const yTicks = leftAxisTicks(layout.ticks, layout.maxTotal, speedAxisTicks, speedMax)
+      const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax)
       const hoverSlot = hover ? slots[hover.index] : null
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
@@ -1848,7 +1854,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, tick.label))
             }),
             speedAxisTicks.length > 0
-              ? h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: CHART_PAD.top - AXIS_LABEL_GAP, textAnchor: 'end' }, 'tok/s')
+              ? h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: CHART_PAD.top + AXIS_LABEL_BASELINE, textAnchor: 'end' }, 'tok/s')
               : null,
             (showRate ? rateAxisTicks() : []).map((tick) => {
               const y = CHART_PAD.top + layout.plotHeight - (tick / PERCENT_SCALE) * layout.plotHeight
