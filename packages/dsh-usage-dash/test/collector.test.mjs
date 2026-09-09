@@ -104,9 +104,11 @@ function fakeHostPersistence(definitions = []) {
         header: { id },
         inheritedEventCount: def.inheritedEventCount ?? 0,
         access,
-        async read() {
+        async read(offset, length) {
           if (def.fail) throw new Error(def.fail)
-          return { eventState: 'detached', events: def.events ?? [] }
+          const all = def.events ?? []
+          const start = typeof offset === 'number' && offset > 0 ? offset : 0
+          return { eventState: 'detached', events: all.slice(start, typeof length === 'number' ? start + length : undefined) }
         },
         async close() {},
       }
@@ -275,6 +277,67 @@ test('四桶全零 usage 为噪声不产样本', async () => {
   }))
   await tick()
   assert.equal(store.samples.length, 0)
+})
+
+test('V3 日志兼容:V3 专有事件与新字段被折叠忽略不炸', async () => {
+  const { ctx, store } = liveCollector()
+  const t = local(2026, 8, 2, 10, 0)
+  // V3 新增事件(SESSION_FORMAT_VERSION 3):统计不消费,折叠必须安全忽略
+  ctx.emit('session/event', session('s1'), ev('system/message', 1, t, { turn: 0, step: 0, message: { role: 'system', content: 'sys' } }))
+  ctx.emit('session/event', session('s1'), ev('assistant/attempt', 2, t, { turn: 0, step: 0, stream: [] }))
+  ctx.emit('session/event', session('s1'), ev('request/header', 3, t, { header: { config: {} }, reason: 'initial' }))
+  ctx.emit('session/event', session('s1'), ev('user/message', 4, t, { role: 'user', content: 'hi' }, ))
+  ctx.emit('session/event', session('s1'), ev('tool/call', 5, t, { turn: 0, step: 0, callId: 'c1', name: 'n', arguments: '{}' }))
+  ctx.emit('session/event', session('s1'), ev('tool/result', 6, t, { turn: 0, step: 0, message: { role: 'toolResult', content: 'r' } }))
+  ctx.emit('session/event', session('s1'), ev('session/end-seed', 7, t, {}))
+  ctx.emit('session/event', session('s1'), ev('step/end', 8, t, { turn: 0, step: 0 }))
+  ctx.emit('session/event', session('s1'), ev('turn/start', 9, t, { turn: 1 }))
+  // V3 assistant/message 携带 stream/surfaceOp/interrupted 等新字段:usage 折叠不受影响
+  ctx.emit('session/event', session('s1'), ev('assistant/message', 10, t, {
+    turn: 1,
+    step: 0,
+    usage: usage({ inputTokens: 5 }),
+    message: { role: 'assistant', source: { provider: 'p', model: 'm' } },
+    stream: [{ type: 'text-delta', text: 'x' }],
+    surfaceOp: 'append',
+    interrupted: true,
+  }))
+  await tick()
+  assert.equal(store.samples.length, 1)
+  assert.equal(store.samples[0].inputTokens, 5)
+  assert.equal(store.samples[0].model, 'p/m')
+})
+
+test('V3 日志兼容:回扫重放 V3 事件流,样本与游标正确', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([{
+    id: 'v3session',
+    events: [
+      ev('request/header', 0, t, { header: { config: {} }, reason: 'resume' }),
+      ev('system/message', 1, t, { turn: 0, step: 0, message: { role: 'system', content: 'sys' } }),
+      ev('user/message', 2, t, { role: 'user', content: 'q' }),
+      ev('step/start', 3, t, { turn: 0, step: 0 }),
+      ev('assistant/attempt', 4, t, { turn: 0, step: 0, stream: [] }),
+      ev('assistant/message', 5, t, {
+        turn: 0,
+        step: 0,
+        usage: usage({ inputTokens: 7 }),
+        message: { role: 'assistant', source: { provider: 'p', model: 'm' } },
+        stream: [],
+      }),
+      ev('step/end', 6, t, { turn: 0, step: 0 }),
+      ev('turn/end', 7, t, { turn: 0, reason: { kind: 'completed' } }),
+    ],
+  }])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.deepEqual(store.samples.map((sample) => [sample.request ?? sample.turn ?? false, sample.inputTokens]), [
+    [true, 0],
+    [false, 7],
+    [true, 0],
+  ])
+  assert.deepEqual([...store.state.backfilledSessions], ['v3session'])
 })
 
 test('纯缓存调用(仅缓存桶非零)仍产样本', async () => {
