@@ -42,7 +42,7 @@ import {
   selectArchiveCandidates,
   updatedAtOf,
 } from './core.mjs'
-import { ensureCacheDir, listWorkspaceCaches, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
+import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
 import { trashPath } from './trash.mjs'
 
 export const name = 'dsh-session-manager'
@@ -605,7 +605,8 @@ export function apply(ctx, config) {
       return { inputs: mine, aligned: cached !== null }
     }
     if (scope === 'global') {
-      const caches = await listWorkspaceCaches(cacheDir)
+      // 浮层轮询路径:stat 指纹缓存,产物未变的文件不再重复读盘
+      const caches = await listWorkspaceCachesCached(cacheDir)
       for (const cache of caches) alignWorkspace(cache.cwd)
       return { inputs: aggregateInputs(caches.flatMap((cache) => cache.entries), aggregateOptions), aligned: true }
     }

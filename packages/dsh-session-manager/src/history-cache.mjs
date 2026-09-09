@@ -6,8 +6,8 @@
 // 文件名 = 工作区路径末段(可辨认)+ 路径哈希前缀(防不同目录同名冲突)
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, writeFile, rename } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, readdir, stat, writeFile, rename } from 'node:fs/promises'
+import { dirname, join, sep } from 'node:path'
 
 function workspaceFile(dir, cwd) {
   const leaf = cwd.split(/[\\/]/).filter(Boolean).pop() || 'root'
@@ -45,24 +45,57 @@ export async function writeWorkspaceCache(dir, cwd, cache) {
   await rename(tmp, target)
 }
 
-export async function listWorkspaceCaches(dir) {
+// global 浮层轮询用指纹缓存:每 3s 轮询都全量读取并 JSON.parse 所有工作区缓存文件,
+// 单文件 entries 可达数百条,持续打开浮层时是秒级重复大 IO+CPU。以 (mtimeMs,size)
+// 指纹复用上次解析结果,产物未变的文件不再读盘;写入侧经临时文件改名,mtime 必变,
+// 指纹天然失效。模块级 Map 以全路径为键(防多目录同名文件串扰),条目数有界。
+const globalCachePollState = new Map()
+
+export async function listWorkspaceCachesCached(dir) {
   let names
   try {
     names = await readdir(dir)
   } catch {
+    // 目录缺失/不可读:仅清本目录条目(分隔符锚定,防误清兄弟目录),条目自愈
+    for (const key of globalCachePollState.keys()) {
+      if (key.startsWith(dir + sep)) globalCachePollState.delete(key)
+    }
     return []
   }
+  const live = new Set()
   const caches = await Promise.all(names
     .filter((name) => name.endsWith('.json') && name !== PROMPTS_FILE)
     .map(async (name) => {
+      const file = join(dir, name)
+      live.add(file)
+      let fingerprint
       try {
-        const parsed = JSON.parse(await readFile(join(dir, name), 'utf8'))
-        if (!parsed || typeof parsed.cwd !== 'string' || !Array.isArray(parsed.entries)) return null
+        const info = await stat(file)
+        fingerprint = { mtimeMs: info.mtimeMs, size: info.size }
+      } catch {
+        globalCachePollState.delete(file)
+        return null
+      }
+      const hit = globalCachePollState.get(file)
+      if (hit !== undefined && hit.fp.mtimeMs === fingerprint.mtimeMs && hit.fp.size === fingerprint.size) {
+        return hit.parsed
+      }
+      try {
+        const parsed = JSON.parse(await readFile(file, 'utf8'))
+        if (!parsed || typeof parsed.cwd !== 'string' || !Array.isArray(parsed.entries)) {
+          globalCachePollState.delete(file)
+          return null
+        }
+        globalCachePollState.set(file, { fp: fingerprint, parsed })
         return parsed
       } catch {
+        globalCachePollState.delete(file)
         return null
       }
     }))
+  for (const key of globalCachePollState.keys()) {
+    if (!live.has(key)) globalCachePollState.delete(key)
+  }
   return caches.filter((cache) => cache && typeof cache.cwd === 'string' && Array.isArray(cache.entries))
 }
 
