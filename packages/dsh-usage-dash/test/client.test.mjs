@@ -87,6 +87,7 @@ const {
   speedTipText,
   speedScaleMax,
   legendToggle,
+  leftAxisTicks,
   validatePricingRules,
 } = core
 
@@ -356,6 +357,16 @@ test('trendLayout 可见模型无数据时左轴刻度为空表', () => {
   assert.deepEqual(trendLayout(slots, [], 720, 46).ticks, [])
   assert.deepEqual(trendLayout(slots, ['b'], 720, 46).ticks, [])
   assert.ok(trendLayout(slots, ['a'], 720, 46).ticks.length > 0)
+})
+
+test('leftAxisTicks 速度模式标定速度刻度,否则标定 token 刻度', () => {
+  const tokenTicks = leftAxisTicks([100, 200], 200, [], 1)
+  assert.deepEqual(tokenTicks.map((tick) => tick.label), ['100', '200'])
+  approx(tokenTicks[0].ratio, 0.5)
+  const speedTicks = leftAxisTicks([], 1, [0.5, 1], 1)
+  assert.deepEqual(speedTicks.map((tick) => tick.label), ['0.5', '1'])
+  approx(speedTicks[0].ratio, 0.5)
+  approx(speedTicks[1].ratio, 1)
 })
 
 test('trendLayout 标签密度随列距收敛', () => {

@@ -524,6 +524,16 @@ function legendToggle(current, key, ctrl) {
   return solo ? null : new Set([key])
 }
 
+// 左轴刻度:速度刻度存在时左轴标定速度(tok/s),否则标定 token;
+// 刻度值统一换算为绘图区高度占比
+function leftAxisTicks(tokenTicks, tokenMax, speedTicks, speedMax) {
+  const useSpeed = speedTicks.length > 0
+  return (useSpeed ? speedTicks : tokenTicks).map((tick) => ({
+    label: formatCompact(tick),
+    ratio: tick / (useSpeed ? speedMax : tokenMax),
+  }))
+}
+
 // 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度;
 // maxTotal 按可见模型求和,单选模型时刻度跟随归一
 function trendLayout(slots, modelOrder, avail, labelMinPitch) {
@@ -1811,6 +1821,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
       const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedMax) : []
+      // 左轴标定:可见柱有数据标 token;无柱数据且速度线可见标速度(tok/s);否则空
+      const speedAxisTicks = layout.ticks.length === 0 && showSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []
+      const yTicks = leftAxisTicks(layout.ticks, layout.maxTotal, speedAxisTicks, speedMax)
       const hoverSlot = hover ? slots[hover.index] : null
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
@@ -1828,12 +1841,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             className: 'ud-chart', viewBox: `0 0 ${avail} ${CHART_HEIGHT}`, width: '100%', role: 'img',
             'aria-label': title, onMouseLeave: clear,
           },
-            layout.ticks.map((tick) => {
-              const y = CHART_PAD.top + layout.plotHeight - (tick / layout.maxTotal) * layout.plotHeight
-              return h('g', { key: tick },
+            yTicks.map((tick) => {
+              const y = CHART_PAD.top + layout.plotHeight - tick.ratio * layout.plotHeight
+              return h('g', { key: tick.label },
                 h('line', { className: 'ud-grid', x1: CHART_PAD.left, x2: plotRight, y1: y, y2: y }),
-                h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, formatCompact(tick)))
+                h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, tick.label))
             }),
+            speedAxisTicks.length > 0
+              ? h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: CHART_PAD.top - AXIS_LABEL_GAP, textAnchor: 'end' }, 'tok/s')
+              : null,
             (showRate ? rateAxisTicks() : []).map((tick) => {
               const y = CHART_PAD.top + layout.plotHeight - (tick / PERCENT_SCALE) * layout.plotHeight
               return h('text', {
