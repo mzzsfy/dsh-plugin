@@ -619,6 +619,7 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
 const PERCENT_SCALE = 100
 const RATE_AXIS_STEPS = 4
 const TREND_LINE_WIDTH = 2
+const TREND_LINE_GAP_SLOTS = 1.5
 const TREND_DOT_RADIUS = 4
 const TREND_DOT_RING = 2
 const AXIS_RATE_GAP = 8
@@ -669,8 +670,8 @@ function trendTtftPoints(slots, bars, plotHeight, scaleMax) {
   return points
 }
 
-// Catmull-Rom 转三次贝塞尔:控制点取邻点差六分之一,端点折返
-function smoothPath(points) {
+// Catmull-Rom 转三次贝塞尔:控制点取邻点差六分之一,端点折返;相邻点间距超 maxGap 折线断开成新段(稀疏槽防长弧跨越)
+function smoothPath(points, maxGap = Number.POSITIVE_INFINITY) {
   if (points.length === 0) return ''
   if (points.length === 1) return `M ${points[0].x} ${points[0].y}`
   let d = `M ${points[0].x} ${points[0].y}`
@@ -679,6 +680,10 @@ function smoothPath(points) {
     const p1 = points[i]
     const p2 = points[i + 1]
     const p3 = points[i + 2] ?? p2
+    if (p2.x - p1.x > maxGap) {
+      d += ` M ${p2.x} ${p2.y}`
+      continue
+    }
     const c1x = p1.x + (p2.x - p0.x) / 6
     const c1y = p1.y + (p2.y - p0.y) / 6
     const c2x = p2.x - (p3.x - p1.x) / 6
@@ -748,10 +753,18 @@ function ttftTipText(ttft, t) {
   return ttft === undefined ? TOOLTIP_MISSING : formatDuration(ttft, t)
 }
 
-// 模型首 token 延迟文本:图例标签 + 官方时长口径;无 ttft(无配对数据)为空串
-function modelTtftText(ttft, t) {
+// 语言中立短时长:60 秒内一位小数秒,以上整秒折分秒(模型列表第二行用,禁本地化)
+function formatDurationShort(ms) {
+  const seconds = ms / MS_PER_SECOND
+  if (seconds < DURATION_MINUTE_SECONDS) return `${Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL}s`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / SECONDS_PER_MINUTE)}m${whole % SECONDS_PER_MINUTE}s`
+}
+
+// 模型首 token 延迟短文本:语言中立;无 ttft(无配对数据)为空串
+function modelTtftText(ttft) {
   if (ttft === undefined) return ''
-  return `${t('ttftLegend')} ${formatDuration(ttft, t)}`
+  return `TTFT ${formatDurationShort(ttft)}`
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -2090,15 +2103,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               ? h('text', { key: slot.day, className: 'ud-axis', x: layout.bars[index].x, y: CHART_HEIGHT - X_LABEL_OFFSET, textAnchor: 'middle' }, labelFor(slot.day))
               : null),
             showRate ? h('path', {
-              className: 'ud-trend', d: smoothPath(ratePoints),
+              className: 'ud-trend', d: smoothPath(ratePoints, layout.step * TREND_LINE_GAP_SLOTS),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
             showSpeed ? h('path', {
-              className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints),
+              className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints, layout.step * TREND_LINE_GAP_SLOTS),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
             showTtft ? h('path', {
-              className: cx('ud-trend', 'ud-trend--ttft'), d: smoothPath(ttftPoints),
+              className: cx('ud-trend', 'ud-trend--ttft'), d: smoothPath(ttftPoints, layout.step * TREND_LINE_GAP_SLOTS),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
             hoverRatePoint
@@ -2293,7 +2306,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             models.map((item) => {
               const isOther = item.model === OTHER_MODEL
               const speedText = modelSpeedText(item.speed)
-              const ttftText = modelTtftText(item.ttft, t)
+              const ttftText = modelTtftText(item.ttft)
+              const metaParts = [
+                item.cost !== undefined ? `≈ ${formatCost(item.cost, costCurrency)}` : null,
+                ttftText,
+                speedText,
+              ].filter(Boolean)
               return h(React.Fragment, { key: item.model },
                 h('div', {
                   className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
@@ -2315,12 +2333,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                       }, '›')
                     : null,
                   h('div', { className: 'ud-model-values' },
-                    h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
-                    h('span', { className: 'ud-model-pct' },
-                      item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
-                      formatPercent((item.tokens / total) * PERCENT_SCALE),
-                      speedText ? ` · ${speedText}` : null,
-                      ttftText ? ` · ${ttftText}` : null))),
+                    h('span', { className: 'ud-model-tokens' },
+                      `${formatTokens(item.tokens)} (${formatPercent((item.tokens / total) * PERCENT_SCALE)})`),
+                    h('span', { className: 'ud-model-pct' }, metaParts.join(' · ')))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },

@@ -520,7 +520,7 @@ function CapabilityCard(props) {
         patch({ phase: 'readonly', reason: 'remote.settings 服务面缺失,无法读写模型声明' })
         return
       }
-      const value = unwrapResult(await settings.describe())
+      const value = await settings.describe()
       if (value.writable !== true) {
         patch({ phase: 'readonly', reason: 'settings 当前只读,模型能力编辑不可用' })
         return
@@ -559,7 +559,7 @@ function CapabilityCard(props) {
     patch({ route: nextRoute, phase: 'ready' })
     void (async () => {
       try {
-        const value = unwrapResult(await props.settings.describe())
+        const value = await props.settings.describe()
         if (seq !== routeSeqRef.current) return
         const ns = findNsEntry(value)
         if (ns === undefined) {
@@ -610,7 +610,7 @@ function CapabilityCard(props) {
         ? '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
         : '已保存并写回 settings.yaml', droppedDraftIds.length > 0 ? 'error' : 'ok')
       try {
-        const value = unwrapResult(await props.settings.describe())
+        const value = await props.settings.describe()
         const ns = findNsEntry(value)
         if (ns === undefined) {
           // 保存后命名空间被他方移除:明确告知刷新,不再裸抛
@@ -736,7 +736,7 @@ function RowEditor(props) {
           patch({ phase: 'error', notice: 'remote.settings 服务面缺失,无法读写模型声明' })
           return
         }
-        const value = unwrapResult(await settings.describe())
+        const value = await settings.describe()
         const ns = findNsEntry(value)
         if (!alive) return
         if (ns === undefined) { patch({ phase: 'hidden' }); return }
@@ -762,13 +762,13 @@ function RowEditor(props) {
       // S3:官方行内 ID 输入是活动状态,改名已落盘则以新 ID 为目标,否则回落原 ID
       const el = props.idInputEl
       const liveId = el && el.isConnected ? el.value : modelId
-      const first = unwrapResult(await settings.describe())
+      const first = await settings.describe()
       const nsFirst = findNsEntry(first)
       const baselineIds = new Set(nsFirst !== undefined ? modelsOf(nsFirst.value, route).map((entry) => String(entry.id)) : [])
       const targetId = resolveTargetId(liveId, modelId, baselineIds)
       const { models: written, droppedDraftIds } = await saveModels(settings, route, new Map([[targetId, state.draft]]))
       // S4:保存后重读重建草稿,基线新鲜,保留他方词汇表外档位
-      const second = unwrapResult(await settings.describe())
+      const second = await settings.describe()
       const nsSecond = findNsEntry(second)
       const latest = nsSecond !== undefined
         ? modelsOf(nsSecond.value, route).find((entry) => String(entry.id) === String(targetId))
@@ -979,7 +979,7 @@ function RowEditor(props) {
           }
           void (async () => {
             try {
-              const value = unwrapResult(await settings.describe())
+              const value = await settings.describe()
               if (disposed || seq !== reconcileSeq) return
               const ns = findNsEntry(value)
               if (ns === undefined) return

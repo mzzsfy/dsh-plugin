@@ -654,6 +654,14 @@ test('smoothPath 三点后段取真实邻点', () => {
   assert.equal(d, 'M 0 0 C 10 5, 40 30, 60 30 C 80 30, 110 5, 120 0')
 })
 
+test('smoothPath 相邻点间距超 maxGap 折线断开成新段', () => {
+  const points = [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 300, y: 0 }, { x: 360, y: 0 }]
+  const d = smoothPath(points, 90)
+  assert.equal(d, 'M 0 0 C 10 0, 10 0, 60 0 M 300 0 C 350 0, 350 0, 360 0')
+  // 无 maxGap 时不分段,行为与旧签名一致
+  assert.equal(smoothPath(points).includes('M 300'), false)
+})
+
 // —— S8 模型 donut 与列表 ——
 
 test('donut 常量锁定视口与环几何', () => {
@@ -729,13 +737,11 @@ test('模型速度文本:官方吞吐口径格式化,无速度为空串', () => 
   assert.equal(modelSpeedText(undefined), '')
 })
 
-test('模型首字文本:图例标签 + 官方时长口径,无 ttft 为空串', () => {
-  const zhT = createTranslator(MESSAGES_ZH)
-  const enT = createTranslator(MESSAGES_EN)
-  assert.equal(modelTtftText(200, zhT), '首 token 延迟 0.2秒')
-  assert.equal(modelTtftText(162000, enT), 'First-token latency 2m42s')
-  assert.equal(modelTtftText(0, zhT), '首 token 延迟 0秒')
-  assert.equal(modelTtftText(undefined, zhT), '')
+test('模型首字文本:语言中立短时长,无 ttft 为空串', () => {
+  assert.equal(modelTtftText(200), 'TTFT 0.2s')
+  assert.equal(modelTtftText(162000), 'TTFT 2m42s')
+  assert.equal(modelTtftText(0), 'TTFT 0s')
+  assert.equal(modelTtftText(undefined), '')
 })
 
 // —— S14 费用格式化与展示辅助(镜像函数核心语义见 pricing-parity.test.mjs) ——
