@@ -80,6 +80,9 @@ const {
   trimSlots,
   trendLayout,
   trendRatePoints,
+  trendSpeedPoints,
+  speedTipText,
+  speedScaleMax,
   validatePricingRules,
 } = core
 
@@ -471,6 +474,36 @@ test('trendRatePoints 点映射列中心与百分比高度且零数据日跳过'
   assert.equal(points[1].day, 'd2')
   assert.equal(points[1].x, 30)
   approx(points[1].y, CHART_PAD.top + plotHeight - 0.5 * plotHeight)
+})
+
+test('trendSpeedPoints 点映射列中心与刻度上限比例高度且无速度槽跳过', () => {
+  const slots = [
+    { day: 'd0', speed: 50 },
+    { day: 'd1', total: 10 },
+    { day: 'd2', speed: 25 },
+  ]
+  const bars = [{ x: 10 }, { x: 20 }, { x: 30 }]
+  const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
+  const points = trendSpeedPoints(slots, bars, plotHeight, 100)
+  assert.equal(points.length, 2)
+  assert.equal(points[0].day, 'd0')
+  assert.equal(points[0].x, 10)
+  approx(points[0].y, CHART_PAD.top + plotHeight - 0.5 * plotHeight)
+  assert.equal(points[1].day, 'd2')
+  assert.equal(points[1].x, 30)
+  approx(points[1].y, CHART_PAD.top + plotHeight - 0.25 * plotHeight)
+})
+
+test('speedTipText 无速度为占位符有速度为官方吞吐口径', () => {
+  assert.equal(speedTipText(undefined), '—')
+  assert.equal(speedTipText(5.5556), '5.6 tok/s')
+  assert.equal(speedTipText(12.34), '12 tok/s')
+})
+
+test('speedScaleMax 全零或空槽钳底防除零,混合取最大速度', () => {
+  assert.equal(speedScaleMax([]), 1)
+  assert.equal(speedScaleMax([{ day: 'd0' }, { day: 'd1', speed: 0 }]), 1)
+  assert.equal(speedScaleMax([{ day: 'd0', speed: 30 }, { day: 'd1', speed: 12.5 }]), 30)
 })
 
 test('smoothPath 空点集为空串单点为移动命令', () => {
