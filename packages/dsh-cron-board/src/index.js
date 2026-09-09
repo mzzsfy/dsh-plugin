@@ -67,6 +67,7 @@ export function apply(ctx, config) {
           readMaxConcurrent,
           readLogKeep: () => readNumber('logKeepPerJob', DEFAULT_LOG_KEEP_PER_JOB),
           readMaskEnvInPrompt: () => readBoolean('maskEnvInPrompt', false),
+          logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
         })
         const scheduler = createScheduler({ store, executor, readTickMs })
         schedulerRef.current = scheduler
@@ -162,5 +163,5 @@ export function apply(ctx, config) {
   )
 
   // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
-  ctx.effect(() => () => schedulerRef.dispose(), 'cron-board scheduler lifecycle')
+  ctx.effect(() => () => schedulerRef.current.dispose(), 'cron-board scheduler lifecycle')
 }
