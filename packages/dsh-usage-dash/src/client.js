@@ -196,7 +196,6 @@ const MESSAGES_ZH = {
   priceOutput: '输出',
   priceCacheRead: '缓存读',
   priceCacheWrite: '缓存写',
-  noCondition: '无条件 = 兜底价(恒生效)',
   addCondition: '添加条件',
   deleteCondition: '删除条件',
   condKind: '条件类型',
@@ -218,14 +217,16 @@ const MESSAGES_ZH = {
   condMonthDay: '需 1-31 整数',
   condDate: '需 YYYY-MM-DD',
   condRange: '区间不能为空,起始须早于结束(左闭右开)',
-  ruleOrderHint: '同一模型内计费规则从上到下匹配,首个命中生效;末尾放无条件规则兜底',
+  ruleOrderHint: '附加计费规则从上到下匹配,首个命中生效;全不命中落默认价',
   moveUp: '上移',
   moveDown: '下移',
   addGroup: '添加模型',
   addRule: '添加额外计费规则',
+  addDefaultPrice: '添加默认价',
   deleteGroup: '删除模型及其全部计费规则',
   deleteRule: '删除计费规则',
   addCondition: '添加条件',
+  defaultPriceHint: '默认价:附加规则全不命中时生效,不设条件',
   save: '保存',
   saved: '已保存',
   required: '必填',
@@ -328,7 +329,6 @@ const MESSAGES_EN = {
   priceOutput: 'Output',
   priceCacheRead: 'Cache read',
   priceCacheWrite: 'Cache write',
-  noCondition: 'No condition = fallback price (always applies)',
   addCondition: 'Add condition',
   deleteCondition: 'Remove condition',
   condKind: 'Condition kind',
@@ -350,14 +350,16 @@ const MESSAGES_EN = {
   condMonthDay: 'Requires integer 1-31',
   condDate: 'Requires YYYY-MM-DD',
   condRange: 'Range must not be empty: from must be before to (end-exclusive)',
-  ruleOrderHint: 'Within a model, pricing rules match top-down and the first hit wins; keep a condition-less rule last as the fallback',
+  ruleOrderHint: '附加计费规则从上到下匹配,首个命中生效;全不命中落默认价',
   moveUp: 'Move up',
   moveDown: 'Move down',
   addGroup: 'Add model',
   addRule: 'Add extra pricing rule',
+  addDefaultPrice: 'Add default price',
   deleteGroup: 'Delete model and all its pricing rules',
   deleteRule: 'Remove pricing rule',
   addCondition: 'Add condition',
+  defaultPriceHint: 'Default price: applies when no extra rule above matches; no conditions',
   save: 'Save',
   saved: 'Saved',
   required: 'Required',
@@ -1464,6 +1466,17 @@ function groupRulesOf(rules) {
   return [...groups.values()]
 }
 
+// 组内划分:末条无条件规则即该模型的默认价(恒兜底,UI 禁条件/排序/删除),其余为附加计费规则。
+// 全条件组默认价为 null(UI 提供"添加默认价"入口);多条无条件时末条为默认价,存量数据自然收敛
+function partitionGroupOf(group) {
+  const last = group.slots[group.slots.length - 1]
+  const isDefault = last !== undefined && (last.rule.conditions ?? []).length === 0
+  return {
+    defaultSlot: isDefault ? last : null,
+    extras: isDefault ? group.slots.slice(0, -1) : group.slots,
+  }
+}
+
 // 槽位跨位移动(splice 语义):同位或越界返回原引用
 function moveRuleTo(rules, fromIndex, toIndex) {
   if (!Array.isArray(rules) || fromIndex === toIndex) return rules
@@ -1774,6 +1787,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-group-head .ud-field{flex:1}
 .ud-rule-group-slots{display:flex;flex-direction:column;gap:8px}
 .ud-rule-group-slots .ud-rule{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 40%,transparent)}
+.ud-rule-default{border-style:dashed}
 .ud-slot-head{display:flex;align-items:flex-end;gap:8px}
 .ud-slot-head .ud-price-grid{flex:1}
 .ud-rule-head{display:flex;align-items:flex-end;gap:8px}
@@ -2356,9 +2370,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
-    // 槽位卡(模型组内的一条定价):头行 = 价格四桶 + 上移/下移/删除;下方为任意条件组合区。
-    // 组内从上到下首个命中槽位生效,无条件槽位恒生效即兜底
-    function PricingSlotCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
+    // 价格四桶 grid:默认价槽与附加规则卡共用;错误路径按规则平面索引寻址
+    function PricingPriceGrid({ rule, currency, errors, pathPrefix, t, onPricePatch }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
@@ -2370,9 +2383,23 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('input', {
             type: 'number', className: 'ud-input', min: 0, step: 'any',
             value: rule.price?.[key] ?? '',
-            onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
+            onChange: (event) => onPricePatch({ price: { ...rule.price, [key]: event.target.value } }),
           })),
         errorTextOf(`${pathPrefix}price.${key}`))
+      return h('div', { className: 'ud-price-grid' },
+        priceField('input', 'priceInput'),
+        priceField('output', 'priceOutput'),
+        priceField('cacheRead', 'priceCacheRead'),
+        priceField('cacheWrite', 'priceCacheWrite'))
+    }
+
+    // 附加计费规则卡:头行 = 价格四桶 + 上移/下移/删除;下方为条件组合区(组内从上到下首个命中者生效)。
+    // 默认价在组内独立成槽,附加规则不再承担兜底语义
+    function PricingExtraRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
+      const errorTextOf = (path) => {
+        const key = errors.get(path)
+        return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
+      }
       const patchConditions = (conditions) => onPatch({ conditions })
       const patchConditionAt = (conditionIndex, patch) => patchConditions(patchItemAt(rule.conditions, conditionIndex, patch))
       const removeConditionAt = (conditionIndex) => patchConditions(rule.conditions.filter((_, i) => i !== conditionIndex))
@@ -2429,11 +2456,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }
       return h('div', { className: 'ud-rule' },
         h('div', { className: 'ud-slot-head' },
-          h('div', { className: 'ud-price-grid' },
-            priceField('input', 'priceInput'),
-            priceField('output', 'priceOutput'),
-            priceField('cacheRead', 'priceCacheRead'),
-            priceField('cacheWrite', 'priceCacheWrite')),
+          h(PricingPriceGrid, {
+            rule, currency, errors, pathPrefix, t,
+            onPricePatch: (part) => onPatch(part),
+          }),
           canMoveUp ? h('button', {
             className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(-1),
             'aria-label': t('moveUp'), title: t('moveUp'),
@@ -2447,7 +2473,6 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             'aria-label': t('deleteRule'), title: t('deleteRule'),
           }, '×')),
         h('div', { className: 'ud-rule-conds' },
-          (rule.conditions ?? []).length === 0 ? h('span', { className: 'ud-rule-cond' }, t('noCondition')) : null,
           (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
           h('div', { className: 'ud-cond-add' },
             h('button', {
@@ -2456,11 +2481,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             }, `+${t('addCondition')}`))))
     }
 
-    // 模型组卡:组头 = 模型键输入(整组一次改名)+ 删除;组内槽位从上到下匹配,末尾无条件槽位兜底。
+    // 模型组卡:组头 = 模型键输入(整组一次改名)+ 删除整组;组内 = 默认价槽(禁条件/排序/删除,恒兜底)
+    // + 附加计费规则列表(从上到下首个命中生效,全不命中落默认价)。
     // 组件 key 由调用方锚定首槽位平面索引,改名引发的重新聚合不会丢焦点
     function PricingModelGroup({ group, currency, errors, t, onModelChange, onGroupRemove, onSlotPatch, onSlotRemove, onSlotMove, onSlotAdd }) {
       const modelError = group.slots.map((slot) => errors.get(`${slot.index}.model`)).find(Boolean)
-      const lastIndex = group.slots[group.slots.length - 1].index
+      const { defaultSlot, extras } = partitionGroupOf(group)
+      // 新附加规则插到默认价平面位之前(无默认价则组末),保证默认价恒居组末
+      const insertPosition = defaultSlot ? defaultSlot.index - 1 : group.slots[group.slots.length - 1].index
       return h('div', { className: 'ud-rule-group' },
         h('div', { className: 'ud-rule-group-head' },
           h('label', { className: 'ud-field' },
@@ -2476,7 +2504,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             'aria-label': t('deleteGroup'), title: t('deleteGroup'),
           }, '×')),
         h('div', { className: 'ud-rule-group-slots' },
-          group.slots.map((slot, position) => h(PricingSlotCard, {
+          defaultSlot ? h('div', { className: 'ud-rule ud-rule-default' },
+            h('div', { className: 'ud-slot-head' },
+              h(PricingPriceGrid, {
+                rule: defaultSlot.rule, currency, errors,
+                pathPrefix: `${defaultSlot.index}.`, t,
+                onPricePatch: (part) => onSlotPatch(defaultSlot.index, part),
+              })),
+            h('span', { className: 'ud-rule-cond' }, t('defaultPriceHint'))) : null,
+          extras.map((slot, position) => h(PricingExtraRuleCard, {
             key: slot.index,
             rule: slot.rule,
             currency,
@@ -2485,14 +2521,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             t,
             onPatch: (part) => onSlotPatch(slot.index, part),
             onRemove: () => onSlotRemove(slot.index),
-            onMove: (delta) => onSlotMove(slot.index, group.slots[position + delta].index),
+            onMove: (delta) => onSlotMove(slot.index, extras[position + delta].index),
             canMoveUp: position > 0,
-            canMoveDown: position < group.slots.length - 1,
+            canMoveDown: position < extras.length - 1,
           }))),
         h('button', {
           className: 'ud-rule-add', type: 'button',
-          onClick: () => onSlotAdd(lastIndex),
-        }, t('addRule')))
+          onClick: () => onSlotAdd(insertPosition, group.model),
+        }, defaultSlot ? t('addRule') : t('addDefaultPrice')))
     }
 
     function PricingEditor({ t = defaultT }) {
@@ -2588,7 +2624,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           onSlotPatch: (index, part) => setRules((prev) => patchItemAt(prev, index, part)),
           onSlotRemove: (index) => setRules((prev) => prev.filter((_, i) => i !== index)),
           onSlotMove: (fromIndex, toIndex) => setRules((prev) => moveRuleTo(prev, fromIndex, toIndex)),
-          onSlotAdd: (position) => setRules((prev) => insertRuleAt(prev, position, { ...defaultPricingRule(currency), model: group.model })),
+          onSlotAdd: (position, model) => setRules((prev) => insertRuleAt(prev, position, {
+            ...defaultPricingRule(currency),
+            model,
+            // 附加规则默认带全天时段条件:默认价已独立成槽,附加规则应以可编辑条件呈现
+            conditions: [defaultCondition(CONDITION_KIND_OPTIONS[0])],
+          })),
         })),
         h('button', {
           className: 'ud-rule-add', type: 'button',

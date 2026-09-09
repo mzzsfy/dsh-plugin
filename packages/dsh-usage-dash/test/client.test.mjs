@@ -74,6 +74,7 @@ const {
   niceTicks,
   otherDetailItems,
   parseEnvelope,
+  partitionGroupOf,
   providerOf,
   rateAxisTicks,
   removeRulesAt,
@@ -865,7 +866,7 @@ test('coercePricingRules 连带规整条件', () => {
   assert.deepEqual(coerced[0].price, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
 })
 
-// —— 定价编辑器分组视图:模型组 + 组内槽位,组内从上到下匹配,末尾无条件槽位兜底 ——
+// —— 定价编辑器分组视图:模型组 = 默认价(组末无条件规则投影,禁条件) + 附加计费规则(带条件) ——
 
 test('groupRulesOf 按模型聚合,组序为首次出现序,槽位保序带平面索引', () => {
   // Given 平面规则 [a1, b1, a2] When 分组 Then a 组槽位 [0,2]、b 组槽位 [1],组顺序按首次出现
@@ -879,6 +880,41 @@ test('groupRulesOf 按模型聚合,组序为首次出现序,槽位保序带平�
 
 test('groupRulesOf 空表返回空组列表', () => {
   assert.deepEqual(groupRulesOf([]), [])
+})
+
+test('partitionGroupOf 组末无条件规则为默认价,其余为附加规则且保序', () => {
+  // Given 组槽位 [条件0, 条件1, 无条件2] When 划分 Then 默认价=索引2,附加=[0,1]
+  const cond = { kind: 'dailyWindow', from: '00:00', to: '08:00' }
+  const group = { model: 'a/1', slots: [
+    { rule: { model: 'a/1', conditions: [cond] }, index: 0 },
+    { rule: { model: 'a/1', conditions: [{ kind: 'weekdays', days: [1] }] }, index: 1 },
+    { rule: { model: 'a/1', conditions: [] }, index: 2 },
+  ] }
+  const { defaultSlot, extras } = partitionGroupOf(group)
+  assert.equal(defaultSlot.index, 2)
+  assert.deepEqual(extras.map((slot) => slot.index), [0, 1])
+})
+
+test('partitionGroupOf 全条件规则组无默认价', () => {
+  // Given 组内全部带条件 When 划分 Then defaultSlot 为 null,附加=全部槽位
+  const group = { model: 'a/1', slots: [
+    { rule: { model: 'a/1', conditions: [{ kind: 'weekdays', days: [1] }] }, index: 0 },
+    { rule: { model: 'a/1', conditions: [{ kind: 'weekdays', days: [2] }] }, index: 1 },
+  ] }
+  const { defaultSlot, extras } = partitionGroupOf(group)
+  assert.equal(defaultSlot, null)
+  assert.deepEqual(extras.map((slot) => slot.index), [0, 1])
+})
+
+test('partitionGroupOf 多条无条件规则时末条为默认价,前条按附加规则显示', () => {
+  // Given 组槽位 [无条件0, 无条件1] When 划分 Then 默认价=索引1,附加=[0](存量数据自然收敛)
+  const group = { model: 'a/1', slots: [
+    { rule: { model: 'a/1', conditions: [] }, index: 0 },
+    { rule: { model: 'a/1', conditions: [] }, index: 1 },
+  ] }
+  const { defaultSlot, extras } = partitionGroupOf(group)
+  assert.equal(defaultSlot.index, 1)
+  assert.deepEqual(extras.map((slot) => slot.index), [0])
 })
 
 test('moveRuleTo 跨位移动返回新数组且不动原数组', () => {
