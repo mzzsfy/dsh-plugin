@@ -496,6 +496,9 @@ const BAR_MAX_WIDTH = 30
 const AXIS_TICK_COUNT = 4
 // 速度刻度上限钳底:全零或无速度防除零(速度不设轴,读数走 tooltip)
 const SPEED_SCALE_FLOOR = 1
+// 图例键:折线项与模型项共处同一显隐集合
+const LEGEND_KEY_RATE = 'rate'
+const LEGEND_KEY_SPEED = 'speed'
 
 function niceTicks(max, count) {
   if (max <= 0 || count <= 0) return []
@@ -508,14 +511,29 @@ function niceTicks(max, count) {
   return ticks
 }
 
-// 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度
+// 图例显隐切换:current 为 null 表示全部可见;普通点击单选/再点恢复,
+// ctrl 单项切换,隐藏最后一项为无操作(返回原引用)
+function legendToggle(current, key, ctrl) {
+  if (ctrl) {
+    const next = new Set(current ?? [])
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    return next.size === 0 ? current : next
+  }
+  const solo = current !== null && current.size === 1 && current.has(key)
+  return solo ? null : new Set([key])
+}
+
+// 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度;
+// maxTotal 按可见模型求和,单选模型时刻度跟随归一
 function trendLayout(slots, modelOrder, avail, labelMinPitch) {
   const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
   const innerWidth = Math.max(1, avail - CHART_PAD.left - CHART_PAD.right)
   const count = slots.length
   const step = count > 1 ? innerWidth / (count - 1) : innerWidth
   const barWidth = Math.max(BAR_MIN_WIDTH, Math.min(BAR_MAX_WIDTH, step * BAR_WIDTH_RATIO))
-  const maxTotal = Math.max(1, ...slots.map((slot) => slot.total))
+  const slotVisibleTotal = (slot) => modelOrder.reduce((sum, model) => sum + (slot.byModel[model] ?? 0), 0)
+  const maxTotal = Math.max(1, ...slots.map(slotVisibleTotal))
   const bars = slots.map((slot, index) => {
     const centerX = CHART_PAD.left + barWidth / 2 + index * step
     let yBottom = CHART_PAD.top + plotHeight
@@ -1567,7 +1585,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-grid{stroke:var(--dsw-alias-border-l1);stroke-width:1}
 .ud-axis{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums}
 .ud-legend{display:flex;flex-wrap:wrap;gap:4px 12px}
-.ud-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0}
+.ud-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0;user-select:none;cursor:pointer}
+.ud-legend-item--off{opacity:.35}
 .ud-legend-item span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-legend-swatch{width:8px;height:8px;border-radius:2px;flex:none}
 .ud-heat-wrap{width:100%;min-width:0;overflow:hidden}
@@ -1736,15 +1755,20 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h(FitText, null, String(stats.activeDays))))
     }
 
-    function Legend({ models, colorFor, speedEnabled = false, t = defaultT }) {
+    function Legend({ models, colorFor, speedEnabled = false, isVisible, onItem, t = defaultT }) {
+      const itemProps = (key) => ({
+        className: cx('ud-legend-item', isVisible && !isVisible(key) && 'ud-legend-item--off'),
+        onClick: onItem ? (event) => onItem(key, event.ctrlKey || event.metaKey) : undefined,
+        role: onItem ? 'button' : undefined,
+      })
       return h('div', { className: 'ud-legend' },
-        models.map((item) => h('span', { key: item.model, className: 'ud-legend-item', title: item.model === OTHER_MODEL ? t('other') : item.model },
+        models.map((item) => h('span', { key: item.model, title: item.model === OTHER_MODEL ? t('other') : item.model, ...itemProps(item.model) },
           h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
           h('span', null, item.model === OTHER_MODEL ? t('other') : item.model))),
-        h('span', { key: 'hit-rate', className: 'ud-legend-item', title: t('hitRateLegend') },
+        h('span', { key: 'hit-rate', title: t('hitRateLegend'), ...itemProps(LEGEND_KEY_RATE) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line' }),
           h('span', null, t('hitRateLegend'))),
-        speedEnabled ? h('span', { key: 'speed', className: 'ud-legend-item', title: t('speedLegend') },
+        speedEnabled ? h('span', { key: 'speed', title: t('speedLegend'), ...itemProps(LEGEND_KEY_SPEED) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--speed' }),
           h('span', null, t('speedLegend'))) : null)
     }
@@ -1760,6 +1784,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
+      // 图例显隐:null = 全部可见;键集 = 模型项与折线项(rate/speed)
+      const [visibleKeys, setVisibleKeys] = useState(null)
       // prefs 仅用于 hover tooltip 的费用显隐,经 ref 读取:开关切换不触发本组件重渲染,
       // 避免宿主设置弹窗滚动锚定被重渲染扰动而跳变
       const prefsRef = useRef(statsLineState.get())
@@ -1774,13 +1800,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         return () => observer.disconnect()
       }, [])
       const hasSpeed = slots.some((slot) => slot.speed !== undefined)
-      const layout = trendLayout(slots, modelOrder, avail, labelMinPitch)
+      const visibleSet = visibleKeys ?? new Set([...modelOrder, LEGEND_KEY_RATE, ...(hasSpeed ? [LEGEND_KEY_SPEED] : [])])
+      const visibleModels = modelOrder.filter((model) => visibleSet.has(model))
+      const showRate = visibleSet.has(LEGEND_KEY_RATE)
+      const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
+      const layout = trendLayout(slots, visibleModels, avail, labelMinPitch)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
-      const speedPoints = hasSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedMax) : []
+      const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedMax) : []
       const hoverSlot = hover ? slots[hover.index] : null
-      const hoverRatePoint = hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
+      const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
       const clear = () => setHover(null)
@@ -1802,7 +1832,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('line', { className: 'ud-grid', x1: CHART_PAD.left, x2: plotRight, y1: y, y2: y }),
                 h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, formatCompact(tick)))
             }),
-            rateAxisTicks().map((tick) => {
+            (showRate ? rateAxisTicks() : []).map((tick) => {
               const y = CHART_PAD.top + layout.plotHeight - (tick / PERCENT_SCALE) * layout.plotHeight
               return h('text', {
                 key: `rate-${tick}`, className: 'ud-axis-rate',
@@ -1820,11 +1850,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             slots.map((slot, index) => (index % layout.labelEvery === 0 || index === slots.length - 1)
               ? h('text', { key: slot.day, className: 'ud-axis', x: layout.bars[index].x, y: CHART_HEIGHT - X_LABEL_OFFSET, textAnchor: 'middle' }, labelFor(slot.day))
               : null),
-            h('path', {
+            showRate ? h('path', {
               className: 'ud-trend', d: smoothPath(ratePoints),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
-            }),
-            hasSpeed ? h('path', {
+            }) : null,
+            showSpeed ? h('path', {
               className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
@@ -1839,19 +1869,23 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               x: layout.bars[index].x - layout.step / 2, y: CHART_PAD.top, width: layout.step, height: layout.plotHeight,
               onMouseEnter: pick(index), onFocus: pick(index), onMouseLeave: clear, onBlur: clear,
             })))),
-        h(Legend, { models: legendModels, colorFor, speedEnabled: hasSpeed }),
+        h(Legend, {
+          models: legendModels, colorFor, speedEnabled: hasSpeed,
+          isVisible: (key) => visibleSet.has(key),
+          onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
+        }),
         h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
           hoverSlot
             ? [
                 h('div', { key: 'title', className: 'ud-tip-title' }, hoverSlot.day),
                 h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
-                ...legendModels.map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
+                ...legendModels.filter((item) => visibleSet.has(item.model)).map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
                   h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
                   `${item.model === OTHER_MODEL ? t('other') : item.model}: ${formatTokens(hoverSlot.byModel[item.model] ?? 0)}`)),
-                ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${formatTokens(tokens)}`)),
-                h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`),
-                hasSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
+                ...(visibleSet.has(OTHER_MODEL) ? otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
+                  `${model}: ${formatTokens(tokens)}`)) : []),
+                showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
+                showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,

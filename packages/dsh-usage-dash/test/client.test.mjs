@@ -83,6 +83,7 @@ const {
   trendSpeedPoints,
   speedTipText,
   speedScaleMax,
+  legendToggle,
   validatePricingRules,
 } = core
 
@@ -498,6 +499,31 @@ test('speedTipText 无速度为占位符有速度为官方吞吐口径', () => {
   assert.equal(speedTipText(undefined), '—')
   assert.equal(speedTipText(5.5556), '5.6 tok/s')
   assert.equal(speedTipText(12.34), '12 tok/s')
+})
+
+test('legendToggle 普通点击单选,再点恢复全部,ctrl 多选且禁全藏', () => {
+  // null 表示全部可见
+  assert.deepEqual(legendToggle(null, 'a', false), new Set(['a']))
+  // 单选态再点同项恢复全部(null)
+  assert.equal(legendToggle(new Set(['a']), 'a', false), null)
+  // 单选态点他项 → 切换单选目标
+  assert.deepEqual(legendToggle(new Set(['a']), 'b', false), new Set(['b']))
+  // ctrl 切换单项:加入与移除
+  assert.deepEqual(legendToggle(new Set(['a']), 'b', true), new Set(['a', 'b']))
+  assert.deepEqual(legendToggle(new Set(['a', 'b']), 'b', true), new Set(['a']))
+  // ctrl 隐藏最后一项:无操作,保持原态
+  const solo = new Set(['a'])
+  assert.equal(legendToggle(solo, 'a', true), solo)
+})
+
+test('trendLayout 刻度跟随可见模型:单模型刻度按该槽内合计归一', () => {
+  const slots = [
+    { day: 'd0', total: 50, byModel: { a: 30, b: 20 } },
+    { day: 'd1', total: 90, byModel: { a: 40, b: 50 } },
+  ]
+  assert.equal(trendLayout(slots, ['a', 'b'], 720, 46).maxTotal, 90)
+  assert.equal(trendLayout(slots, ['a'], 720, 46).maxTotal, 40)
+  assert.equal(trendLayout(slots, [], 720, 46).maxTotal, 1)
 })
 
 test('speedScaleMax 全零或空槽钳底防除零,混合取最大速度', () => {
