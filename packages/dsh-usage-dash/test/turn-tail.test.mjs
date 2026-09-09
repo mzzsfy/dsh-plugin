@@ -13,6 +13,7 @@ const {
   buildTurnCostChipText,
   createTranslator,
   matchPrice,
+  turnCostAmountOf,
   turnCostTitleText,
   turnModelOf,
   turnTokenUsageOfMessage,
@@ -49,6 +50,14 @@ test('反查:非命中 kind 与 messageId 不误收', () => {
 test('反查:tokenUsage 缺失返回 null', () => {
   assert.equal(turnTokenUsageOfMessage([{ kind: 'turn-tail', data: { closing: { finalNode: { messageId: 'm-1' } } } }], 'm-1'), null)
   assert.equal(turnTokenUsageOfMessage([tailNode('m-1', null)], 'm-1'), null)
+})
+
+test('反查:closing.usage 采样回退为聚合形态,可选桶带上', () => {
+  const sampled = { inputTokens: 100, outputTokens: 20, totalTokens: 130, cacheReadTokens: 10 }
+  const node = { kind: 'turn-tail', data: { closing: { finalNode: { seq: 1, messageId: 'm-1' }, usage: sampled } } }
+  assert.deepEqual(turnTokenUsageOfMessage([node], 'm-1'), { uncachedInputTokens: 100, outputTokens: 20, totalTokens: 130, cacheReadTokens: 10 })
+  const bare = { kind: 'turn-tail', data: { closing: { finalNode: { seq: 2, messageId: 'm-2' }, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } } } }
+  assert.deepEqual(turnTokenUsageOfMessage([bare], 'm-2'), { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 })
 })
 
 test('反查:非数组与空列表返回 null', () => {
@@ -101,19 +110,26 @@ test('芯片文本四桶全带:prompt 三桶入费用分母按价计', () => {
     cacheReadTokens: 1000, cacheWriteTokens: 0, routes: [{ provider: 'p', model: 'm' }],
   }
   const price = { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }
-  assert.equal(buildTurnCostChipText(zhT, tokenUsage, price, '¥'), '费用 ≈ ¥0.01')
+  assert.equal(buildTurnCostChipText(zhT, tokenUsage, price, '¥'), '¥0.01')
 })
 
 test('芯片文本可选桶缺失按 0 计入费用', () => {
   const tokenUsage = { uncachedInputTokens: 8000, outputTokens: 1000, totalTokens: 9000 }
   const price = { input: 1, output: 2, cacheRead: 5, cacheWrite: 5 }
-  assert.equal(buildTurnCostChipText(zhT, tokenUsage, price, '¥'), '费用 ≈ ¥0.01')
+  assert.equal(buildTurnCostChipText(zhT, tokenUsage, price, '¥'), '¥0.01')
+})
+
+test('计费额 0 元为 null,正额保留', () => {
+  const tokenUsage = { uncachedInputTokens: 8000, outputTokens: 1000, totalTokens: 9000 }
+  assert.equal(turnCostAmountOf(tokenUsage, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), null)
+  assert.equal(turnCostAmountOf(tokenUsage, null), null)
+  assert.equal(turnCostAmountOf(tokenUsage, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }), 0.008)
 })
 
 test('芯片文本取不到价为占位符', () => {
   const tokenUsage = { uncachedInputTokens: 8000, outputTokens: 1000, totalTokens: 9000 }
-  assert.equal(buildTurnCostChipText(zhT, tokenUsage, null, ''), '费用 ≈ —')
-  assert.equal(buildTurnCostChipText(enT, tokenUsage, null, ''), 'Cost ≈ —')
+  assert.equal(buildTurnCostChipText(zhT, tokenUsage, null, ''), '—')
+  assert.equal(buildTurnCostChipText(enT, tokenUsage, null, ''), '—')
 })
 
 test('title 含 token 摘要与估算口径,可选桶未上报追加标注', () => {
@@ -127,6 +143,8 @@ test('title 含 token 摘要与估算口径,可选桶未上报追加标注', () 
 test('注入点B 文案键 zh/en 值锁定,独立行旧键已删', () => {
   assert.equal(MESSAGES_ZH['stats.cost'], '费用 ≈ {cost}')
   assert.equal(MESSAGES_EN['stats.cost'], 'Cost ≈ {cost}')
+  assert.equal(MESSAGES_ZH['turnCostChip'], '{cost}')
+  assert.equal(MESSAGES_EN['turnCostChip'], '{cost}')
   assert.equal(MESSAGES_ZH['stats.turnCost'], undefined)
   assert.equal(MESSAGES_EN['stats.turnCost'], undefined)
   assert.equal(MESSAGES_ZH.turnCostTitle, '单轮用量按当前费率估算')

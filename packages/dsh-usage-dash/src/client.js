@@ -173,6 +173,7 @@ const MESSAGES_ZH = {
   'stats.tokensPerSecond': '{throughput} tok/s',
   'stats.cacheHit': '缓存命中 {percent}%',
   'stats.tokens': '输入 {input} tok · 输出 {output} tok',
+  'turnCostChip': '{cost}',
   'stats.tokensDetail': '总 {total} tok · 输入 {input} tok · 命中缓存 {hit} tok · 未命中缓存 {miss} tok · 输出 {output} tok',
   cachePrecision: '精确缓存命中率',
   cachePrecisionDesc: '在会话底部信息栏以两位小数显示缓存命中率。',
@@ -306,6 +307,7 @@ const MESSAGES_EN = {
   'stats.tokensPerSecond': '{throughput} tok/s',
   'stats.cacheHit': 'Cache hit {percent}%',
   'stats.tokens': 'Input {input} tok · Output {output} tok',
+  'turnCostChip': '{cost}',
   'stats.tokensDetail': 'Total {total} tok · Input {input} tok · Cache hit {hit} tok · Cache miss {miss} tok · Output {output} tok',
   cachePrecision: 'Precise cache-hit rate',
   cachePrecisionDesc: 'Show the cache-hit rate with two decimals in the session stats line.',
@@ -767,6 +769,9 @@ function heatLevel(tokens, max) {
 // ChartTip 定位:锚定区装得下贴内顶(趋势图悬停区即绘图区,悬浮窗留在图表内),装不下上翻、再下翻、末了钳边界顶
 const TIP_GAP_PX = 8
 const TIP_MARGIN_PX = 8
+
+// 回合费用芯片与前置官方芯片(结束时钟)的间距
+const TURN_COST_GAP_PX = 8
 
 function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX) {
   if (!tip || tip.width <= 0 || tip.height <= 0) return null
@@ -1249,8 +1254,8 @@ function costTitleText(t, unpriced) {
 const TURN_COST_CHIP_ORDER = 20 + 10
 
 // messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
-// 视图节点 data 只带 closing,全量回合数据(含 tokenUsage)在回合位置数据(location.turn.data.get('turn-tail')),
-// 位置数据缺失(旧宿主形状差异)时回退视图节点本体字段
+// 回合级用量优先取回合位置数据(location.turn.data.get('turn-tail')).tokenUsage(官方 tokenUsage 聚合,
+// 分页窗口缺 turn/start 时缺席),回退视图节点 data.closing.usage(末步用量采样,输入侧已含缓存,计费口径同源)
 function turnTokenUsageOfMessage(nodes, messageId) {
   const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
   if (!Array.isArray(list)) return null
@@ -1260,7 +1265,18 @@ function turnTokenUsageOfMessage(nodes, messageId) {
       if (node.data?.closing?.finalNode?.messageId !== messageId) continue
       const turnData = node.location?.turn?.data
       const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
-      return tail?.tokenUsage ?? node.data.tokenUsage ?? null
+      if (tail?.tokenUsage) return tail.tokenUsage
+      if (node.data.tokenUsage) return node.data.tokenUsage
+      const sampled = node.data?.closing?.usage
+      if (!sampled) return null
+      return {
+        uncachedInputTokens: sampled.inputTokens,
+        outputTokens: sampled.outputTokens,
+        totalTokens: sampled.totalTokens,
+        ...sampled.cacheReadTokens === undefined ? {} : { cacheReadTokens: sampled.cacheReadTokens },
+        ...sampled.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: sampled.cacheWriteTokens },
+        ...sampled.reasoningTokens === undefined ? {} : { reasoningTokens: sampled.reasoningTokens },
+      }
     } catch { /* 单节点形状残缺跳过,扫描继续 */ }
   }
   return null
@@ -1291,10 +1307,17 @@ function turnOptionalUnreported(tokenUsage) {
   return tokenUsage?.cacheReadTokens === undefined || tokenUsage?.cacheWriteTokens === undefined
 }
 
-// 芯片文本:仅费用(官方用量芯片弹窗已有 token 明细);价未命中为占位符
+// 芯片计费额:价命中才算,0 元(全零价或全零桶)返回 null 由调用方决定不渲染;价未命中同 null
+function turnCostAmountOf(tokenUsage, price) {
+  if (!price) return null
+  const cost = costOf(price, pricingBucketsOf(tokenUsage))
+  return cost > 0 ? cost : null
+}
+
+// 芯片文本:仅金额,不带货币前缀文字(官方用量芯片弹窗已有 token 明细)
 function buildTurnCostChipText(t, tokenUsage, price, currency) {
-  const cost = price ? formatCost(costOf(price, pricingBucketsOf(tokenUsage)), currency) : COST_PLACEHOLDER
-  return t('stats.cost', { cost })
+  const cost = turnCostAmountOf(tokenUsage, price)
+  return t('turnCostChip', { cost: cost === null ? COST_PLACEHOLDER : formatCost(cost, currency) })
 }
 
 // 芯片 title:token 摘要 + 估算口径,可选桶未上报时追加标注
@@ -1815,8 +1838,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
 .ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
-/* 芯片在官方动作行 div 内部,历史轮悬停/焦点显隐随父级 data-actions-reveal,无需自绘规则 */
-.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
+/* 芯片 portal 至动作行末尾,历史轮悬停/焦点显隐随父级 data-actions-reveal,无需自绘规则 */
+.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap;margin-left:${TURN_COST_GAP_PX}px}
 `
 
     function ensureStyle(document) {
@@ -2305,6 +2328,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
     // 注入点B 组件:回合费用芯片,官方动作行内渲染(复制与分支图标之间,赞踩/上下文跳转同排);
     // 受费用显示开关;价格异步首帧未回不渲染,回包后补渲染;显隐节奏随官方 data-actions-reveal
+    // 官方槽容器固定在用量/用时芯片之前,末位排布由 SlotTailPortal 移交实现
     const CostChip = React.memo(function CostChip({ messageId, useChat, t = defaultT }) {
       if (typeof useChat !== 'function') return null
       const chatNodes = useChat((state) => (state && typeof state === 'object') ? state.nodes : undefined)
@@ -2321,11 +2345,29 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const matched = typeof messageId === 'string' && messageId !== ''
         ? turnTokenUsageOfMessage(chatNodes, messageId)
         : null
-      if (!matched || !prefs.costDisplay || pricingRules === null) return null
-      const price = matchPrice(pricingRules, turnModelOf(matched), new Date())
-      return h('span', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
-        buildTurnCostChipText(t, matched, price, aggregateCurrencyOf(pricingRules)))
+      const price = matched && prefs.costDisplay && pricingRules !== null
+        ? matchPrice(pricingRules, turnModelOf(matched), new Date())
+        : null
+      // 0 元(全零价/全零桶)与价未命中同不渲染,无占位符
+      const cost = matched && price ? turnCostAmountOf(matched, price) : null
+      const chip = cost === null ? null : h('span', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
+        t('turnCostChip', { cost: formatCost(cost, aggregateCurrencyOf(pricingRules)) }))
+      return h(SlotTailPortal, null, chip)
     })
+
+    // 槽内容末位移交:锚点藏于槽容器内,portal 目标取槽容器(display:contents)的父级即官方动作行 div,
+    // portal 子树 append 到动作行末尾(官方用量/用时芯片与结束时钟之后);portal 缺席降级锚点原位
+    function SlotTailPortal({ children }) {
+      const anchorRef = useRef(null)
+      const [container, setContainer] = useState(null)
+      useEffect(() => {
+        const anchor = anchorRef.current
+        const slotHost = anchor?.closest('[data-slot="conversation.chat.assistant-actions"]') ?? anchor?.parentElement
+        setContainer(slotHost?.parentElement ?? null)
+      }, [])
+      const ported = container && createPortal ? createPortal(children, container) : null
+      return h('span', { ref: anchorRef, style: ported ? { display: 'none' } : undefined }, ported ?? children)
+    }
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
     function StatsLineOptionRow({ labelKey, descKey, checked, onToggle, t = defaultT }) {
