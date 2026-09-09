@@ -32,7 +32,7 @@ dependencies 行的真实职责只有一条:**让 pnpm 装它**。该职责由�
 |---|---|---|
 | 安装声明 | 五个消费插件 dependencies 声明(session-manager 权威,余者可选消费) | npm 标准语义 |
 | 物理安装 | pnpm hoisted:传递依赖实体落顶层 | pnpm 标准逻辑 |
-| 开发热更 | dev-link junction 覆盖同一路径 → 仓库工作副本 | 开发态基础设施(全 11 包共用) |
+| 开发热更 | dev-link junction 覆盖同一路径 → 仓库工作副本 | 开发态基础设施(全仓包共用) |
 | 兜底补链 | dsh 启动 `healProfileModuleFallback` 沿 bundles 依赖闭包补链顶层缺失的包 | dsh 本体内置,零操作 |
 | 浏览器装载 | session-manager cordis.patch.yml 代挂宿主占位条目(id 带前缀,name 为包解析键) | 既有机制,占位全仓唯一 |
 | 模块物化 | dsh client-modules 按 name 解析包 → 读 `dsh.client` 声明 → client.js 进模块表 | 既有机制,未变 |
