@@ -36,9 +36,11 @@ const SUNDAY_0900 = [2026, 2, 15, 9, 0]
 const SUNDAY_2330 = [2026, 2, 15, 23, 30]
 const SUNDAY_0300 = [2026, 2, 15, 3, 0]
 const SUNDAY_1200 = [2026, 2, 15, 12, 0]
+const MON_JAN01 = [2026, 0, 1, 12, 0]
 const MON_JAN15 = [2026, 0, 15, 12, 0]
 const MON_JAN16 = [2026, 0, 16, 12, 0]
 const MON_JAN26 = [2026, 0, 26, 12, 0]
+const MON_JAN31 = [2026, 0, 31, 12, 0]
 const MON_JAN03 = [2026, 0, 3, 12, 0]
 const FEB_30_ROLLS_TO_MAR02 = [2026, 1, 30, 12, 0]
 
@@ -49,19 +51,25 @@ const CONDITION_VECTORS = [
   { name: 'dailyWindow 跨午夜夜段命中', condition: { kind: 'dailyWindow', from: '22:00', to: '06:00' }, date: SUNDAY_2330, expected: true },
   { name: 'dailyWindow 跨午夜凌晨命中', condition: { kind: 'dailyWindow', from: '22:00', to: '06:00' }, date: SUNDAY_0300, expected: true },
   { name: 'dailyWindow 跨午夜日间不命中', condition: { kind: 'dailyWindow', from: '22:00', to: '06:00' }, date: SUNDAY_1200, expected: false },
-  { name: 'dailyWindow from===to 全天', condition: { kind: 'dailyWindow', from: '00:00', to: '00:00' }, date: SUNDAY_1200, expected: true },
+  { name: 'dailyWindow from===to 空区间不成立', condition: { kind: 'dailyWindow', from: '00:00', to: '00:00' }, date: SUNDAY_1200, expected: false },
+  { name: 'dailyWindow to=24:00 全天含尾前一刻', condition: { kind: 'dailyWindow', from: '00:00', to: '24:00' }, date: SUNDAY_2330, expected: true },
   { name: 'dailyWindow 非法格式', condition: { kind: 'dailyWindow', from: 'abc', to: '06:00' }, date: SUNDAY_1200, expected: false },
   { name: 'weekdays 命中周日', condition: { kind: 'weekdays', days: [0] }, date: SUNDAY_0930, expected: true },
   { name: 'weekdays 空 days 不成立', condition: { kind: 'weekdays', days: [] }, date: SUNDAY_0930, expected: false },
   { name: 'weekdays 未命中', condition: { kind: 'weekdays', days: [1] }, date: SUNDAY_0930, expected: false },
   { name: 'weekdays days 非数组', condition: { kind: 'weekdays', days: 'x' }, date: SUNDAY_0930, expected: false },
-  { name: 'monthDays 双闭含端', condition: { kind: 'monthDays', from: 1, to: 15 }, date: MON_JAN15, expected: true },
+  { name: 'monthDays 左闭右开不含 to 端点', condition: { kind: 'monthDays', from: 1, to: 15 }, date: MON_JAN15, expected: false },
+  { name: 'monthDays 左闭右开含首日', condition: { kind: 'monthDays', from: 1, to: 15 }, date: MON_JAN01, expected: true },
   { name: 'monthDays 界外', condition: { kind: 'monthDays', from: 1, to: 15 }, date: MON_JAN16, expected: false },
+  { name: 'monthDays to=32 表达到月末', condition: { kind: 'monthDays', from: 1, to: 32 }, date: MON_JAN31, expected: true },
+  { name: 'monthDays from===to 空区间', condition: { kind: 'monthDays', from: 5, to: 5 }, date: MON_JAN15, expected: false },
   { name: 'monthDays 环绕起点命中', condition: { kind: 'monthDays', from: 26, to: 5 }, date: MON_JAN26, expected: true },
   { name: 'monthDays 环绕中段不命中', condition: { kind: 'monthDays', from: 26, to: 5 }, date: MON_JAN15, expected: false },
-  { name: 'monthDays 环绕终点命中', condition: { kind: 'monthDays', from: 26, to: 5 }, date: MON_JAN03, expected: true },
+  { name: 'monthDays 环绕终点前命中', condition: { kind: 'monthDays', from: 26, to: 5 }, date: MON_JAN03, expected: true },
   { name: 'monthDays 非整数不成立', condition: { kind: 'monthDays', from: 1.5, to: 5 }, date: MON_JAN15, expected: false },
   { name: 'dateRange 命中', condition: { kind: 'dateRange', from: '2026-01-01', to: '2026-01-31' }, date: MON_JAN15, expected: true },
+  { name: 'dateRange to 端点开边界不命中', condition: { kind: 'dateRange', from: '2026-01-01', to: '2026-01-31' }, date: MON_JAN31, expected: false },
+  { name: 'dateRange from===to 空区间', condition: { kind: 'dateRange', from: '2026-01-15', to: '2026-01-15' }, date: MON_JAN15, expected: false },
   { name: 'dateRange 倒序不成立', condition: { kind: 'dateRange', from: '2026-01-31', to: '2026-01-01' }, date: MON_JAN15, expected: false },
   { name: 'dateRange 非零填充不成立', condition: { kind: 'dateRange', from: '2026-1-1', to: '2026-1-31' }, date: MON_JAN15, expected: false },
   { name: 'dateRange 2 月 30 号滚月后不命中', condition: { kind: 'dateRange', from: '2026-02-01', to: '2026-02-28' }, date: FEB_30_ROLLS_TO_MAR02, expected: false },

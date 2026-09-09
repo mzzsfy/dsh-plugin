@@ -766,51 +766,72 @@ test('costTitleText 未计价计数后缀', () => {
 })
 
 test('defaultCondition 各类型默认值即填即用', () => {
-  // Given 四种条件类型 When 取默认 Then 时段全天/周几空/号段全月/日期段当天
-  assert.deepEqual(defaultCondition('dailyWindow'), { kind: 'dailyWindow', from: '00:00', to: '00:00' })
+  // Given 四种条件类型 When 取默认 Then 时段全天(00:00~24:00)/周几空/号段全月(1~32)/日期段当天~次日
+  assert.deepEqual(defaultCondition('dailyWindow'), { kind: 'dailyWindow', from: '00:00', to: '24:00' })
   assert.deepEqual(defaultCondition('weekdays'), { kind: 'weekdays', days: [] })
-  assert.deepEqual(defaultCondition('monthDays'), { kind: 'monthDays', from: 1, to: 31 })
-  assert.deepEqual(defaultCondition('dateRange', new Date(2026, 2, 15)), { kind: 'dateRange', from: '2026-03-15', to: '2026-03-15' })
+  assert.deepEqual(defaultCondition('monthDays'), { kind: 'monthDays', from: 1, to: 32 })
+  assert.deepEqual(defaultCondition('dateRange', new Date(2026, 2, 15)), { kind: 'dateRange', from: '2026-03-15', to: '2026-03-16' })
 })
 
 test('validatePricingRules 拒绝非法时刻与时刻字段缺失', () => {
-  // Given dailyWindow 时刻超界或缺失 When 校验 Then 标 condTime/required
+  // Given dailyWindow 时刻超界或缺失 When 校验 Then 标 condTime/required;to=24:00 合法,from=24:00 超界
   const rules = [
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '99:99', to: '08:00' }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '', to: '08:00' }] },
-    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '23:59', to: '24:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '24:00', to: '24:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '08:00', to: '24:30' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '00:00', to: '24:00' }] },
   ]
   const errors = validatePricingRules(rules)
   assert.equal(errors.get('0.conditions.0.from'), 'condTime')
   assert.equal(errors.get('1.conditions.0.from'), 'required')
-  assert.equal(errors.get('2.conditions.0.to'), 'condTime')
+  assert.equal(errors.get('2.conditions.0.from'), 'condTime')
+  assert.equal(errors.get('3.conditions.0.to'), 'condTime')
+  assert.equal(errors.has('4.conditions.0'), false)
+})
+
+test('validatePricingRules 拒绝左闭右开空区间', () => {
+  // Given 时段/号段 from===to(空区间) When 校验 Then 标 condRange;号段 5~6 单日写法合法
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '10:00', to: '10:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 5, to: 5 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 5, to: 6 }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.get('0.conditions.0'), 'condRange')
+  assert.equal(errors.get('1.conditions.0'), 'condRange')
+  assert.equal(errors.has('2.conditions.0'), false)
 })
 
 test('validatePricingRules 校验周几与月号段边界', () => {
-  // Given weekdays 含 7、monthDays 含 0 或 32 When 校验 Then 标 condWeekday/condMonthDay
+  // Given weekdays 含 7、monthDays 含 0/33 或 from=32 When 校验 Then 标 condWeekday/condMonthDay;to=32 合法
   const rules = [
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'weekdays', days: [0, 7] }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 0, to: 31 }] },
-    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 1, to: 32 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 32, to: 32 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 1, to: 33 }] },
   ]
   const errors = validatePricingRules(rules)
   assert.equal(errors.get('0.conditions.0.days'), 'condWeekday')
   assert.equal(errors.get('1.conditions.0.from'), 'condMonthDay')
-  assert.equal(errors.get('2.conditions.0.to'), 'condMonthDay')
+  assert.equal(errors.get('2.conditions.0.from'), 'condMonthDay')
+  assert.equal(errors.get('3.conditions.0.to'), 'condMonthDay')
 })
 
-test('validatePricingRules 校验日期段格式与倒序', () => {
-  // Given dateRange 非规范日期或倒序 When 校验 Then 标 condDate/condRange
+test('validatePricingRules 校验日期段格式与空区间', () => {
+  // Given dateRange 非规范日期、倒序或同日(左闭右开空区间)When 校验 Then 标 condDate/condRange
   const rules = [
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-3-5', to: '2026-03-08' }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-08', to: '2026-03-05' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-05' }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-08' }] },
   ]
   const errors = validatePricingRules(rules)
   assert.equal(errors.get('0.conditions.0.from'), 'condDate')
   assert.equal(errors.get('1.conditions.0'), 'condRange')
-  assert.equal(errors.has('2.conditions.0'), false)
-  assert.equal(errors.has('2.conditions.0.from'), false)
+  assert.equal(errors.get('2.conditions.0'), 'condRange')
+  assert.equal(errors.has('3.conditions.0'), false)
+  assert.equal(errors.has('3.conditions.0.from'), false)
 })
 
 test('coerceConditions 规整数字字段且不改其余字段', () => {

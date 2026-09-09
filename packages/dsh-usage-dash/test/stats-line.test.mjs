@@ -35,12 +35,12 @@ const PREFS_COST_ON = { cachePrecision: false, tokenDetail: false, costDisplay: 
 const zhT = createTranslator(MESSAGES_ZH)
 const enT = createTranslator(MESSAGES_EN)
 
-// 费用组装配输入:精确规则在前、全通配规则兜底,通配仅全天时段生效
+// 费用组装配输入:精确规则在前、全通配规则兜底,通配仅全天时段(00:00~24:00 左闭右开)生效
 const COST_RULES = [
   { model: 'p/m', currency: '¥', price: { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [] },
   {
     model: '*/*', currency: '', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
-    conditions: [{ kind: 'dailyWindow', from: '00:00', to: '00:00' }],
+    conditions: [{ kind: 'dailyWindow', from: '00:00', to: '24:00' }],
   },
 ]
 const COST_USAGE = { uncachedInputTokens: 500000, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
@@ -358,11 +358,11 @@ test('buildCostItem routes 首个 model 精确规则优先于通配', () => {
   assert.equal(buildCostItem(routed, wildcardFirst, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ ¥1.00')
 })
 
-test('buildCostItem 时间条件按传入时刻评估:窗口外通配不生效', () => {
-  // 通配规则 00:00~00:00 from===to 全天生效;08:00~09:00 与固定时刻不交
-  const midnight = [{ ...COST_RULES[1], conditions: [{ kind: 'dailyWindow', from: '00:00', to: '00:00' }] }]
+test('buildCostItem 时间条件按传入时刻评估:空区间与窗口外均不生效', () => {
+  // 通配规则 00:00~00:00 左闭右开空区间恒不生效;08:00~09:00 与固定时刻不交
+  const emptyRange = [{ ...COST_RULES[1], conditions: [{ kind: 'dailyWindow', from: '00:00', to: '00:00' }] }]
   const daytime = [{ ...COST_RULES[1], conditions: [{ kind: 'dailyWindow', from: '08:00', to: '09:00' }] }]
-  assert.equal(buildCostItem(COST_USAGE, midnight, PREFS_COST_ON, zhT, COST_NOW), '费用 ≈ 0.50')
+  assert.equal(buildCostItem(COST_USAGE, emptyRange, PREFS_COST_ON, zhT, COST_NOW), '—')
   assert.equal(buildCostItem(COST_USAGE, daytime, PREFS_COST_ON, zhT, COST_NOW), '—')
 })
 

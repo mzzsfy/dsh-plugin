@@ -403,8 +403,8 @@ test('attachCosts D 端点按 H 行桶起点计价折叠到日槽', () => {
     makeRow({ bucket: '2020-01-02', model: 'm1', inputTokens: 1000000 }),
   ]
   const rules = [
-    ruleOf({ price: inputPrice(1), conditions: [{ kind: 'dateRange', from: '2020-01-01', to: '2020-01-01' }] }),
-    ruleOf({ price: inputPrice(3), conditions: [{ kind: 'dateRange', from: '2020-01-02', to: '2020-01-02' }] }),
+    ruleOf({ price: inputPrice(1), conditions: [{ kind: 'dateRange', from: '2020-01-01', to: '2020-01-02' }] }),
+    ruleOf({ price: inputPrice(3), conditions: [{ kind: 'dateRange', from: '2020-01-02', to: '2020-01-03' }] }),
   ]
   const result = aggregateRange(aggregateRows, 'D', '2020-01-01', '2020-01-02')
   const out = attachCosts(result, costRows, 'D', rules)

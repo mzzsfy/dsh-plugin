@@ -245,11 +245,17 @@ test('dailyWindow 跨午夜窗口按本地分量命中', () => {
   assert.equal(conditionMatches(condition, localTime(6, 12)), false)
 })
 
-test('dailyWindow from===to 全天生效', () => {
-  // Given 10:00~10:00 When 判定 00:00/10:00/23:59 Then 全部命中
+test('dailyWindow from===to 为空区间不命中', () => {
+  // Given 10:00~10:00 左闭右开空区间 When 判定任意时刻 Then 不命中,全天用 00:00~24:00 表达
   const condition = { kind: 'dailyWindow', from: '10:00', to: '10:00' }
+  assert.equal(conditionMatches(condition, localTime(6, 10)), false)
+  assert.equal(conditionMatches(condition, localTime(6, 23, 59)), false)
+})
+
+test('dailyWindow to=24:00 表达含全天', () => {
+  // Given 00:00~24:00 When 判定 00:00 与 23:59 Then 全部命中,24:00 整为开边界
+  const condition = { kind: 'dailyWindow', from: '00:00', to: '24:00' }
   assert.equal(conditionMatches(condition, localTime(6, 0)), true)
-  assert.equal(conditionMatches(condition, localTime(6, 10)), true)
   assert.equal(conditionMatches(condition, localTime(6, 23, 59)), true)
 })
 
@@ -273,53 +279,75 @@ test('weekdays 空数组条件不成立', () => {
   assert.equal(conditionMatches({ kind: 'weekdays', days: [] }, SUNDAY), false)
 })
 
-test('monthDays 正向段双闭含单日', () => {
-  // Given 1~15 When 判定 1/15/16 号 Then 双闭;Given 5~5 When 判定 5/6 号 Then 单日
+test('monthDays 正向段左闭右开,单日为 from~to+1', () => {
+  // Given 1~15 When 判定 1/14/15/16 号 Then 含 1 不含 15;Given 5~6 When 判定 5/6 号 Then 仅 5 命中
   const span = { kind: 'monthDays', from: 1, to: 15 }
   assert.equal(conditionMatches(span, new Date(2026, 8, 1)), true)
-  assert.equal(conditionMatches(span, new Date(2026, 8, 15)), true)
+  assert.equal(conditionMatches(span, new Date(2026, 8, 14)), true)
+  assert.equal(conditionMatches(span, new Date(2026, 8, 15)), false)
   assert.equal(conditionMatches(span, new Date(2026, 8, 16)), false)
-  const single = { kind: 'monthDays', from: 5, to: 5 }
+  const single = { kind: 'monthDays', from: 5, to: 6 }
   assert.equal(conditionMatches(single, new Date(2026, 8, 5)), true)
   assert.equal(conditionMatches(single, new Date(2026, 8, 6)), false)
 })
 
-test('monthDays 单日 31 号在 2 月自然不触发', () => {
-  // Given 31~31 When 判定 1 月 31 号与 2 月末 Then 前者命中;2 月无 31 号,该月任意日不命中
-  const condition = { kind: 'monthDays', from: 31, to: 31 }
+test('monthDays to=32 表达到月末,from===to 为空区间', () => {
+  // Given 1~32 When 判定 1/31 号 Then 全月命中;Given 5~5 空区间 When 判定 5 号 Then 不命中
+  const month = { kind: 'monthDays', from: 1, to: 32 }
+  assert.equal(conditionMatches(month, new Date(2026, 8, 1)), true)
+  assert.equal(conditionMatches(month, new Date(2026, 8, 30)), true)
+  const empty = { kind: 'monthDays', from: 5, to: 5 }
+  assert.equal(conditionMatches(empty, new Date(2026, 8, 5)), false)
+})
+
+test('monthDays 单日 31 号用 31~32 表达', () => {
+  // Given 31~32 When 判定 1 月 31 号与 2 月末 Then 仅大月 31 号命中,2 月无 31 号自然不触发
+  const condition = { kind: 'monthDays', from: 31, to: 32 }
   assert.equal(conditionMatches(condition, new Date(2026, 0, 31)), true)
   assert.equal(conditionMatches(condition, new Date(2026, 1, 28)), false)
 })
 
-test('monthDays 26~25 跨月环绕覆盖全月', () => {
-  // Given 26~25 账单周期 When 判定 26/31/1/25/15 号 Then 26..31 并 1..25 覆盖全月,含 15
+test('monthDays 26~25 跨月环绕为 26 起至次月 25 前', () => {
+  // Given 26~25 账单周期左闭右开 When 判定 26/31/1/24/25/15 号 Then 26..31 并 1..24 命中,25 不命中
   const condition = { kind: 'monthDays', from: 26, to: 25 }
   assert.equal(conditionMatches(condition, new Date(2026, 0, 26)), true)
   assert.equal(conditionMatches(condition, new Date(2026, 0, 31)), true)
   assert.equal(conditionMatches(condition, new Date(2026, 1, 1)), true)
-  assert.equal(conditionMatches(condition, new Date(2026, 1, 25)), true)
+  assert.equal(conditionMatches(condition, new Date(2026, 1, 24)), true)
+  assert.equal(conditionMatches(condition, new Date(2026, 1, 25)), false)
   assert.equal(conditionMatches(condition, new Date(2026, 0, 15)), true)
 })
 
 test('monthDays 27~10 环绕存在不命中间隙', () => {
-  // Given 27~10 When 判定 27/31/1/10 与 15/26 号 Then 前四命中,间隙内不命中
+  // Given 27~10 左闭右开 When 判定 27/31/1/9 与 10/15/26 号 Then 前四命中,10 起间隙内不命中
   const condition = { kind: 'monthDays', from: 27, to: 10 }
   assert.equal(conditionMatches(condition, new Date(2026, 0, 27)), true)
   assert.equal(conditionMatches(condition, new Date(2026, 0, 31)), true)
   assert.equal(conditionMatches(condition, new Date(2026, 1, 1)), true)
-  assert.equal(conditionMatches(condition, new Date(2026, 1, 10)), true)
+  assert.equal(conditionMatches(condition, new Date(2026, 1, 9)), true)
+  assert.equal(conditionMatches(condition, new Date(2026, 1, 10)), false)
   assert.equal(conditionMatches(condition, new Date(2026, 0, 15)), false)
   assert.equal(conditionMatches(condition, new Date(2026, 0, 26)), false)
 })
 
-test('dateRange 双闭区间', () => {
-  // Given 2026-01-01~2026-01-31 When 判定首末日与界外 Then 端点命中,两侧不命中
+test('dateRange 左闭右开', () => {
+  // Given 2026-01-01~2026-01-31 When 判定首日/中间/末日/界外 Then 首日与中间命中,末日与两侧不命中
   const condition = { kind: 'dateRange', from: '2026-01-01', to: '2026-01-31' }
   assert.equal(conditionMatches(condition, new Date(2026, 0, 1)), true)
   assert.equal(conditionMatches(condition, new Date(2026, 0, 15)), true)
-  assert.equal(conditionMatches(condition, new Date(2026, 0, 31)), true)
+  assert.equal(conditionMatches(condition, new Date(2026, 0, 30)), true)
+  assert.equal(conditionMatches(condition, new Date(2026, 0, 31)), false)
   assert.equal(conditionMatches(condition, new Date(2025, 11, 31)), false)
   assert.equal(conditionMatches(condition, new Date(2026, 1, 1)), false)
+})
+
+test('dateRange from===to 为空区间不命中,单日为当天~次日', () => {
+  // Given 同日区间 When 判定该日 Then 不命中;Given 当天~次日 When 判定当天 Then 命中
+  const empty = { kind: 'dateRange', from: '2026-01-15', to: '2026-01-15' }
+  assert.equal(conditionMatches(empty, new Date(2026, 0, 15)), false)
+  const single = { kind: 'dateRange', from: '2026-01-15', to: '2026-01-16' }
+  assert.equal(conditionMatches(single, new Date(2026, 0, 15)), true)
+  assert.equal(conditionMatches(single, new Date(2026, 0, 16)), false)
 })
 
 test('dateRange 倒序属配置错误不成立', () => {
