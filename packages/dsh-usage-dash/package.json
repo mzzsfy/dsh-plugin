@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-usage-dash",
   "description": "用量统计面板:天/小时/分钟三粒度 token 与请求统计,26 周活跃热力图,会话底栏信息接管与官方动作行回合费用芯片,多条件分时段定价规则与费用估算;复刻自 github.com/HaoyueQin/dsh-usage-statistics-panel,感谢原作者 HaoyueQin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
