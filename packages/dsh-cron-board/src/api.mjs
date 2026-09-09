@@ -17,6 +17,10 @@ export const MESSAGES = {
   jobNameRequired: '任务名称不能为空',
   commandRequired: '任务命令不能为空',
   badKind: '任务类型不合法',
+  badSessionMode: '会话模式仅支持 fresh 或 pinned',
+  badOnMiss: '窗口外策略仅支持 skip 或 defer',
+  windowPairRequired: '窗口起止时间必须成对填写',
+  badWindowFormat: '窗口时间格式须为 HH:mm',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
   systemError: '操作失败(系统级错误,详见服务端日志)',
@@ -99,6 +103,29 @@ export function parseEnvText(text) {
 }
 
 // 任务字段校验与规范化:非法即业务错误;返回可落库字段集
+const WINDOW_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
+
+// 会话任务专有字段(设计 §3.2 job.session 子对象);窗口 start/end 须成对且为 HH:mm
+function normalizeSession(body) {
+  if (body.kind !== 'session') return undefined
+  const raw = body.session && typeof body.session === 'object' ? body.session : {}
+  if (raw.mode !== undefined && raw.mode !== 'fresh' && raw.mode !== 'pinned') throw new Error(MESSAGES.badSessionMode)
+  if (raw.onMiss !== undefined && raw.onMiss !== 'skip' && raw.onMiss !== 'defer') throw new Error(MESSAGES.badOnMiss)
+  const windowStart = raw.windowStart ? String(raw.windowStart).trim() : ''
+  const windowEnd = raw.windowEnd ? String(raw.windowEnd).trim() : ''
+  if (windowStart === '' !== (windowEnd === '')) throw new Error(MESSAGES.windowPairRequired)
+  for (const window of [windowStart, windowEnd]) {
+    if (window !== '' && !WINDOW_PATTERN.test(window)) throw new Error(MESSAGES.badWindowFormat)
+  }
+  return {
+    mode: raw.mode === 'pinned' ? 'pinned' : 'fresh',
+    pinnedSessionId: typeof raw.pinnedSessionId === 'string' ? raw.pinnedSessionId.trim() : '',
+    windowStart,
+    windowEnd,
+    onMiss: raw.onMiss === 'defer' ? 'defer' : 'skip',
+  }
+}
+
 function normalizeJob(body) {
   const name = typeof body.name === 'string' ? body.name.trim() : ''
   if (name === '') throw new Error(MESSAGES.jobNameRequired)
@@ -109,11 +136,7 @@ function normalizeJob(body) {
   const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
   assertValidSchedule(schedule)
   const timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
-  // nextRunAt:调用方可显式指定(导入任务保留原状态 / 测试注入到期时刻),缺省按 schedule 计算
-  const nextRunAt = typeof body.nextRunAt === 'number' && Number.isFinite(body.nextRunAt)
-    ? body.nextRunAt
-    : nextRunAtOf(schedule)
-  return {
+  const normalized = {
     name,
     kind,
     command,
@@ -123,8 +146,14 @@ function normalizeJob(body) {
     schedule,
     timeoutMs,
     enabled: body.enabled !== false,
-    nextRunAt,
+    session: normalizeSession(body),
   }
+  if (normalized.session === undefined) delete normalized.session
+  // nextRunAt:调用方可显式指定(导入任务保留原状态 / 测试注入到期时刻),缺省按 schedule 计算
+  normalized.nextRunAt = typeof body.nextRunAt === 'number' && Number.isFinite(body.nextRunAt)
+    ? body.nextRunAt
+    : nextRunAtOf(schedule)
+  return normalized
 }
 
 export function createApi({ store, logger, executor, scheduler, periodic, logSystem }) {

@@ -6,7 +6,12 @@ import { DEFAULT_MAX_EXPANSION } from './config.mjs'
 import { expandEnvMatrix } from './env-expand.mjs'
 import { createShellRunner } from './shell-runner.mjs'
 
-export function createExecutor({ store, logger, runner, sessionRunner, maxExpansion = DEFAULT_MAX_EXPANSION, readMaxConcurrent, readLogKeep }) {
+// 会话执行通道缺失时的兜底:记录 fail 而非让执行链崩溃
+const SESSION_UNAVAILABLE = {
+  run: async () => ({ status: 'fail', message: '会话服务不可用' }),
+}
+
+export function createExecutor({ store, logger, runner, sessionRunner, maxExpansion = DEFAULT_MAX_EXPANSION, readMaxConcurrent, readLogKeep, readMaskEnvInPrompt }) {
   const shellRunner = runner || createShellRunner({ workdirFallback: process.cwd() })
   // 队列与活跃计数:许可数 = min(全局上限, 任务级收紧值);全局上限经 readMaxConcurrent 动态读
   const queue = []
@@ -46,14 +51,23 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       const outcome = await runnerFor(job).run({
         job,
         env,
+        mask: readMaskEnvInPrompt ? readMaskEnvInPrompt() : false,
         logSink: { append: (chunk) => logger.append(job.id, record.runId, chunk) },
+        updateRecord: (patch) => store.runs.update(record.runId, patch),
       })
-      await store.runs.update(record.runId, {
+      // 终态补记:session 附带 message/sessionId,pinned 自愈时回写新会话 id
+      const patch = {
         status: outcome.status,
         endedAt: Date.now(),
         durationMs: Date.now() - startedAt,
-        exitCode: outcome.exitCode,
-      })
+      }
+      if (outcome.exitCode !== undefined) patch.exitCode = outcome.exitCode
+      if (outcome.message !== undefined) patch.message = outcome.message
+      if (outcome.sessionId !== undefined) patch.sessionId = outcome.sessionId
+      await store.runs.update(record.runId, patch)
+      if (outcome.pinnedNewId !== undefined) {
+        await store.jobs.update(job.id, { pinnedSessionId: outcome.pinnedNewId })
+      }
     } finally {
       activeTotal--
       activeByJob.set(job.id, activeOf(job.id) - 1)
@@ -71,7 +85,7 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       const combinations = job.kind === 'session'
         ? [{}]
         : expandEnvMatrix({ envs: store.envs.list(), maxExpansion }).combinations
-      const runnerFor = job.kind === 'session' ? () => sessionRunner : () => shellRunner
+      const runnerFor = job.kind === 'session' ? () => (sessionRunner || SESSION_UNAVAILABLE) : () => shellRunner
       const records = []
       for (let i = 0; i < combinations.length; i++) {
         const record = await store.runs.create({ jobId: job.id, trigger, status: 'queued', logFile: joinLog(job.id) })

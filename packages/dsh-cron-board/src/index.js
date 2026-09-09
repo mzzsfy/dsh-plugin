@@ -13,6 +13,7 @@ import { DEFAULT_MAX_CONCURRENT, DEFAULT_TICK_MS, MIN_TICK_MS } from './config.m
 import { createExecutor } from './executor.mjs'
 import { createLogger } from './logger.mjs'
 import { createScheduler } from './scheduler.mjs'
+import { createSessionDriver } from './session-driver.mjs'
 import { createStore } from './store.mjs'
 
 export const name = 'dsh-cron-board'
@@ -26,11 +27,12 @@ const SETTINGS_NS = 'cron-board'
 const TIMER_UNAVAILABLE_REASON = '宿主定时服务不可用,自动调度已停用'
 const DEFAULT_LOG_KEEP_PER_JOB = 200
 
-// 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数
+// 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数 / 会话投递变量掩码
 const SETTINGS_SCHEMA = schemastery.object({
   tickSeconds: schemastery.number().min(MIN_TICK_MS / 1000).step(1).default(DEFAULT_TICK_MS / 1000),
   maxConcurrent: schemastery.number().min(1).step(1).default(DEFAULT_MAX_CONCURRENT),
   logKeepPerJob: schemastery.number().min(1).step(1).default(200),
+  maskEnvInPrompt: schemastery.boolean().default(false).description('会话任务投递文本中环境变量打码'),
 })
 
 export function resolveDataDir(env = process.env) {
@@ -40,6 +42,12 @@ export function resolveDataDir(env = process.env) {
 }
 
 export function apply(ctx, config) {
+  // 会话任务依赖宿主会话服务;缺失即整体干净禁用(规约唯一降级形态,不维护双路径)
+  const sessionController = typeof ctx.get === 'function' ? ctx.get('sessionController') : undefined
+  if (sessionController === undefined) {
+    if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] 宿主会话服务缺失,插件停用')
+    return
+  }
   const dataDir = resolveDataDir()
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
   let runtimePromise = null
@@ -48,11 +56,18 @@ export function apply(ctx, config) {
       runtimePromise = (async () => {
         const store = await createStore({ dir: dataDir })
         const logger = createLogger({ rootDir: join(dataDir, 'logs') })
+        const sessionDriver = createSessionDriver({
+          sessionController,
+          agents: ctx.get('agents'),
+          sessionQuery: ctx.get('sessionQuery'),
+        })
         const executor = createExecutor({
           store,
           logger,
+          sessionRunner: sessionDriver,
           readMaxConcurrent,
           readLogKeep: () => readNumber('logKeepPerJob', DEFAULT_LOG_KEEP_PER_JOB),
+          readMaskEnvInPrompt: () => readBoolean('maskEnvInPrompt', false),
         })
         const scheduler = createScheduler({ store, executor, readTickMs })
         await scheduler.recover()
@@ -78,6 +93,10 @@ export function apply(ctx, config) {
   function readNumber(name, fallback) {
     const value = readSettingValue(name)
     return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  }
+  function readBoolean(name, fallback) {
+    const value = readSettingValue(name)
+    return typeof value === 'boolean' ? value : fallback
   }
   function readSettingValue(name) {
     const settings = ctx.get('settings')

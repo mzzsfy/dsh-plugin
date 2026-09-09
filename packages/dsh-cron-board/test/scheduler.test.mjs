@@ -208,6 +208,75 @@ test('scheduler:status 报告活跃与队列深度', async (t) => {
   assert.deepEqual(scheduler.status(), { active: 0, queued: 0 })
 })
 
+test('scheduler:窗口内正常发起,窗口外 skip 记录且节奏不变', async (t) => {
+  // Given 会话任务窗口 09:00-23:00,onMiss=skip,注入会话 runner 桩
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-win-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const store = await createStore({ dir })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const sessionRuns = []
+  const sessionRunner = { run: async () => { sessionRuns.push(1); return { status: 'success' } } }
+  const executor = createExecutor({ store, logger, sessionRunner, readMaxConcurrent: () => 2 })
+  // 虚拟时钟锚定今日 08:00(窗口外)
+  const base = new Date(); base.setHours(8, 0, 0, 0)
+  let nowMs = base.getTime()
+  const scheduler = createScheduler({ store, executor, readTickMs: () => TICK_MS, now: () => nowMs })
+  const job = await store.jobs.create({
+    name: 'w', kind: 'session', prompt: '早报', schedule: '0 8 * * *', enabled: true,
+    timeoutMs: 60 * 1000, session: { mode: 'fresh', windowStart: '09:00', windowEnd: '23:00', onMiss: 'skip' },
+  })
+  await store.jobs.update(job.id, { nextRunAt: nowMs })
+  // When tick(触发点 08:00,窗口外)
+  await scheduler.tick()
+  // Then skipped(窗口外跳过),未发起,节奏正常推进(明日 08:00)
+  const rows = store.runs.list(job.id)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].status, 'skipped')
+  assert.equal(rows[0].message, '窗口外跳过')
+  assert.equal(sessionRuns.length, 0)
+  const tomorrow8 = new Date(base); tomorrow8.setDate(tomorrow8.getDate() + 1)
+  assert.equal(store.jobs.get(job.id).nextRunAt, tomorrow8.getTime())
+})
+
+test('scheduler:窗口外 defer 挂起至窗口起点后发起', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-defer-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const store = await createStore({ dir })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const sessionRuns = []
+  const sessionRunner = { run: async () => { sessionRuns.push(1); return { status: 'success' } } }
+  const executor = createExecutor({ store, logger, sessionRunner, readMaxConcurrent: () => 2 })
+  // defer 定时桩:捕获 (at, fn),测试手动放行
+  const deferred = []
+  const base = new Date(); base.setHours(8, 0, 0, 0)
+  let nowMs = base.getTime()
+  const scheduler = createScheduler({
+    store, executor, readTickMs: () => TICK_MS, now: () => nowMs,
+    scheduleAt: (at, fn) => { deferred.push({ at, fn }) },
+  })
+  const job = await store.jobs.create({
+    name: 'w', kind: 'session', prompt: '早报', schedule: '0 8 * * *', enabled: true,
+    timeoutMs: 60 * 1000, session: { mode: 'fresh', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer' },
+  })
+  await store.jobs.update(job.id, { nextRunAt: nowMs })
+  // When tick(窗口外 defer)
+  await scheduler.tick()
+  // Then 立即不发起,挂起点 = 今日 09:00
+  assert.equal(sessionRuns.length, 0)
+  assert.equal(deferred.length, 1)
+  const at = new Date(deferred[0].at)
+  assert.equal(at.getHours(), 9)
+  assert.equal(at.getMinutes(), 0)
+  // When 挂起到点放行
+  deferred[0].fn()
+  await tickMillis(50)
+  // Then 发起会话
+  assert.equal(sessionRuns.length, 1)
+  // 且 cron 节奏不变(明日 08:00)
+  const tomorrow8 = new Date(base); tomorrow8.setDate(tomorrow8.getDate() + 1)
+  assert.equal(store.jobs.get(job.id).nextRunAt, tomorrow8.getTime())
+})
+
 async function tickMillis(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }

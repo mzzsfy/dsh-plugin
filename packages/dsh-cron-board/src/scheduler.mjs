@@ -3,11 +3,13 @@
 // tick 周期即视为停机期间错过,不补跑,记 skipped 并推进(轻量取舍,设计 §4.1)。
 
 import { nextRunAtOf } from './cron.mjs'
+import { hasWindow, inWindow, nextWindowStart } from './session-window.mjs'
 
 const SKIPPED_MISFIRE_MESSAGE = '停机期间错过'
+const SKIPPED_WINDOW_MESSAGE = '窗口外跳过'
 const INTERRUPTED_MESSAGE = 'dsh 重启中断'
 
-export function createScheduler({ store, executor, readTickMs, now = () => Date.now() }) {
+export function createScheduler({ store, executor, readTickMs, now = () => Date.now(), scheduleAt = (at, fn) => setTimeout(fn, Math.max(0, at - now())) }) {
   // 重启孤儿收尾:上次进程遗留的 queued/running 统一标 interrupted,不误标失败
   async function recover() {
     for (const run of [...store.runs.rows]) {
@@ -31,6 +33,17 @@ export function createScheduler({ store, executor, readTickMs, now = () => Date.
       await store.jobs.update(job.id, { nextRunAt: nextAt, lastRunAt: nowMs })
       if (misfired) {
         await store.runs.create({ jobId: job.id, trigger: 'cron', status: 'skipped', message: SKIPPED_MISFIRE_MESSAGE })
+        continue
+      }
+      // 会话任务窗口:窗口外按 onMiss 跳过或顺延至窗口起点(defer 挂起不持久化,重启按 skip)
+      if (job.kind === 'session' && hasWindow(job.session) && !inWindow(job.session, new Date(nowMs))) {
+        if (job.session.onMiss === 'defer') {
+          scheduleAt(nextWindowStart(job.session, new Date(nowMs)).getTime(), () => {
+            void executor.dispatch(job, 'cron').catch(() => {})
+          })
+        } else {
+          await store.runs.create({ jobId: job.id, trigger: 'cron', status: 'skipped', message: SKIPPED_WINDOW_MESSAGE })
+        }
         continue
       }
       await executor.dispatch(job, 'cron')

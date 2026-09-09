@@ -18,13 +18,17 @@ test('index:数据目录默认 ~/.dsh/cron-board,env 可覆盖', () => {
 })
 
 test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () => {
-  // Given webServer 桩:收集注册路由(inject 缺失时插件应可照常装配路由)
+  // Given webServer 桩:收集注册路由(get 返回会话服务桩满足启用前提)
   const routes = new Map()
   const ctx = {
     effect(fn) {
       fn()
     },
     inject() {},
+    get(name) {
+      if (name === 'sessionController') return { create: async () => ({ sessionId: 's-x' }), prompt: async () => ({ accepted: true }) }
+      return undefined
+    },
     webServer: {
       register(route) {
         routes.set(route.path, route.handler)
@@ -47,7 +51,7 @@ test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () =
   assert.ok(res.payload.error)
 })
 
-// 装配桩:webServer + settings + timer 三服务,记录注册与 interval 形态
+// 装配桩:webServer + settings + timer + 会话服务,记录注册与 interval 形态
 function makeFullCtx({ timerAvailable = true } = {}) {
   const routes = new Map()
   const registered = []
@@ -59,6 +63,22 @@ function makeFullCtx({ timerAvailable = true } = {}) {
     },
     get: () => value,
   }
+  const sessions = new Map()
+  let nextId = 0
+  const sessionController = {
+    async create() {
+      const sessionId = 's-' + (++nextId)
+      sessions.set(sessionId, { id: sessionId, status: 'running' })
+      return { sessionId }
+    },
+    async prompt(args) {
+      queueMicrotask(() => {
+        const entry = sessions.get(args.sessionId)
+        if (entry) entry.status = 'idle'
+      })
+      return { accepted: true }
+    },
+  }
   const intervals = []
   const ctx = {
     effect(fn) {
@@ -66,6 +86,9 @@ function makeFullCtx({ timerAvailable = true } = {}) {
     },
     get(name) {
       if (name === 'settings') return settingsService
+      if (name === 'sessionController') return sessionController
+      if (name === 'agents') return { get: (id) => sessions.get(id) }
+      if (name === 'sessionQuery') return { listSessions: async () => [...sessions.values()].map((entry) => ({ id: entry.id })) }
       return undefined
     },
     inject(deps, fn) {
@@ -88,8 +111,33 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       },
     },
   }
-  return { ctx, routes, registered, intervals, settingsService }
+  return { ctx, routes, registered, intervals, settingsService, sessions }
 }
+
+test('index:sessionController 缺失时整体干净禁用(不注册路由)', () => {
+  // Given 无会话服务的 ctx
+  const routes = new Map()
+  const warns = []
+  const ctx = {
+    effect(fn) {
+      fn()
+    },
+    inject() {},
+    get: () => undefined,
+    logger: { warn: (line) => warns.push(line) },
+    webServer: {
+      register(route) {
+        routes.set(route.path, route.handler)
+        return () => {}
+      },
+    },
+  }
+  // When apply
+  apply(ctx)
+  // Then 不注册任何路由且有告警
+  assert.equal(routes.size, 0)
+  assert.equal(warns.length, 1)
+})
 
 test('index:settings 注册 cron-board 命名空间且 timer 承载默认周期 tick', async () => {
   // Given 全服务桩
@@ -133,10 +181,11 @@ test('index:tick 到期任务被调度执行(端到端装配)', async (t) => {
     const req = new EventEmitter()
     req.method = 'POST'
     req.url = 'http://localhost' + path
-    process.nextTick(() => {
+    // 装配层初始化后才挂读体监听:桩事件须延后发射(真实 http 流自带缓冲,无此问题)
+    setTimeout(() => {
       req.emit('data', Buffer.from(JSON.stringify(body)))
       req.emit('end')
-    })
+    }, 80)
     return handler(req, res).then(() => res)
   }
   await post('/api/cron-board/jobs', {

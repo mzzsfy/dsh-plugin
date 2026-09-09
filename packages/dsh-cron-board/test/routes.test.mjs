@@ -214,6 +214,49 @@ test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', asyn
   assert.equal(res.payload.timerReason, '宿主定时服务不可用')
 })
 
+test('jobs 路由:会话任务字段校验与默认值', async (t) => {
+  const { store, api } = await makeApi(t)
+  // When 建 pinned 会话任务
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '日报', kind: 'session', prompt: '写日报',
+    schedule: '0 9 * * *', enabled: true, timeoutMs: 60 * 1000,
+    session: { mode: 'pinned', pinnedSessionId: ' s-9 ', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer' },
+  })
+  // Then 会话子对象落库,id 已裁剪,默认值正确
+  assert.equal(created.status, 200)
+  assert.deepEqual(created.payload.session, {
+    mode: 'pinned', pinnedSessionId: 's-9', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer',
+  })
+  // When shell 任务不带 session 字段
+  const shellJob = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's1', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
+  })
+  // Then session 字段缺省
+  assert.equal(shellJob.payload.session, undefined)
+  // When 窗口只给一端
+  const half = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
+    session: { windowStart: '09:00' },
+  })
+  // Then 400(窗口须成对)
+  assert.equal(half.status, 400)
+  assert.match(half.payload.error, /窗口/)
+  // When 非法窗口格式
+  const badWindow = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's3', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
+    session: { windowStart: '9:0', windowEnd: '23:00' },
+  })
+  // Then 400
+  assert.equal(badWindow.status, 400)
+  // When 非法 onMiss
+  const badMiss = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's4', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
+    session: { onMiss: 'retry' },
+  })
+  // Then 400
+  assert.equal(badMiss.status, 400)
+})
+
 test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {
   // Given 两个任务各有一条运行记录
   const { store, api } = await makeApi(t)
