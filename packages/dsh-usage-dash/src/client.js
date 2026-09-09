@@ -494,10 +494,7 @@ const BAR_WIDTH_RATIO = 0.62
 const BAR_MIN_WIDTH = 3
 const BAR_MAX_WIDTH = 30
 const AXIS_TICK_COUNT = 4
-// 速度轴右轴双列:速度刻度列与命中率列的间距及右侧留白增量(命中率轴固定 0-100,速度轴动态刻度)
-// 留白增量预算:列偏移 30 + 标签宽上界约 28('12.0k' 5 字符)≈ 58 ≤ 增量 + 命中率轴余量 − barWidth 上界
-const SPEED_AXIS_COLUMN_OFFSET = 30
-const SPEED_AXIS_PAD_EXTRA = 32
+// 速度刻度上限钳底:全零或无速度防除零(速度不设轴,读数走 tooltip)
 const SPEED_SCALE_FLOOR = 1
 
 function niceTicks(max, count) {
@@ -511,11 +508,10 @@ function niceTicks(max, count) {
   return ticks
 }
 
-// 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度;
-// padRight 由调用方按是否绘制速度轴传入,缺省单轴留白
-function trendLayout(slots, modelOrder, avail, labelMinPitch, padRight = CHART_PAD.right) {
+// 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度
+function trendLayout(slots, modelOrder, avail, labelMinPitch) {
   const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
-  const innerWidth = Math.max(1, avail - CHART_PAD.left - padRight)
+  const innerWidth = Math.max(1, avail - CHART_PAD.left - CHART_PAD.right)
   const count = slots.length
   const step = count > 1 ? innerWidth / (count - 1) : innerWidth
   const barWidth = Math.max(BAR_MIN_WIDTH, Math.min(BAR_MAX_WIDTH, step * BAR_WIDTH_RATIO))
@@ -1778,7 +1774,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         return () => observer.disconnect()
       }, [])
       const hasSpeed = slots.some((slot) => slot.speed !== undefined)
-      const layout = trendLayout(slots, modelOrder, avail, labelMinPitch, CHART_PAD.right + (hasSpeed ? SPEED_AXIS_PAD_EXTRA : 0))
+      const layout = trendLayout(slots, modelOrder, avail, labelMinPitch)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
@@ -1812,13 +1808,6 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 key: `rate-${tick}`, className: 'ud-axis-rate',
                 x: plotRight + AXIS_RATE_GAP, y: y + AXIS_LABEL_BASELINE,
               }, String(tick))
-            }),
-            (hasSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []).map((tick) => {
-              const y = CHART_PAD.top + layout.plotHeight - (tick / speedMax) * layout.plotHeight
-              return h('text', {
-                key: `speed-${tick}`, className: 'ud-axis-rate',
-                x: plotRight + AXIS_RATE_GAP + SPEED_AXIS_COLUMN_OFFSET, y: y + AXIS_LABEL_BASELINE,
-              }, formatCompact(tick))
             }),
             layout.bars.flatMap((bar, barIndex) => bar.segments.map((segment) => h('rect', {
               key: `${bar.key}/${segment.model}`, className: 'ud-bar',
