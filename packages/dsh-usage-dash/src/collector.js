@@ -5,6 +5,8 @@
 // 游标(liveFirstSeq 分区 + backfilledSessions)保证。采集是观测性的:一切
 // store 失败计入 recordFailures,绝不成为逃逸拒绝。
 
+import { createArchiveReader } from './archive-reader.js'
+
 const UNKNOWN_SESSION_ID = '(unknown-session)'
 const SEQ_UNKNOWN = -1
 const DEFAULT_BACKFILL_CONCURRENCY = 4
@@ -240,7 +242,9 @@ export class UsageCollector {
     const controller = new AbortController()
     this.scanController = controller
     await this.store.readyPromise()
-    await this.backfill(this.ctx.sessionPersistence, this.ctx.sessions, controller.signal)
+    // 适配发生在宿主服务边界:回扫主体只面向 ArchiveReader 内部契约
+    const reader = createArchiveReader(this.ctx.sessionPersistence)
+    await this.backfill(reader, this.ctx.sessions, controller.signal)
   }
 
   abort() {
@@ -272,16 +276,21 @@ export class UsageCollector {
     return this.resetInFlight
   }
 
-  // 回扫:persistence.list 驱动,逐会话全新 fold 重放;seen 独自决定是否重扫,
-  // liveFirstSeq 边界划走实时已拥区间,liveness 复查防陈旧快照放大重放范围,
-  // inheritedCut 跳过 fork 继承前缀。只有干净重放完的会话进游标,失败下轮重试
-  async backfill(persistence, sessions, signal) {
+  // 回扫:ArchiveReader 契约驱动(宿主 persistence 多版本适配见 archive-reader),
+  // 逐会话全新 fold 重放;seen 独自决定是否重扫,liveFirstSeq 边界划走实时
+  // 已拥区间,liveness 复查防陈旧快照放大重放范围,inheritedCut 跳过 fork
+  // 继承前缀。只有干净重放完的会话进游标,失败下轮重试
+  async backfill(reader, sessions, signal) {
     if (this.#state.running) return
     if (signal?.aborted) return
     this.#state.running = true
     this.#state.error = undefined
     try {
-      const headers = await persistence.list(signal)
+      const headers = await reader.list(signal).catch((error) => {
+        // 枚举失败(含宿主 API 未识别)按采集器自身故障呈现,面板可见
+        this.#state.error = error instanceof Error ? error.message : String(error)
+        throw error
+      })
       const seen = await this.store.seenSessions()
       const liveSeq = await this.store.liveSequences()
       const targets = headers.filter((header) => !seen.has(header.id))
@@ -322,7 +331,7 @@ export class UsageCollector {
           const fold = new UsageFold()
           let route = ''
           try {
-            const inspection = await persistence.inspect(header.id, signal)
+            const inspection = await reader.readLog(header.id, signal)
             const inheritedCut = inspection.inheritedEventCount
             for (const event of inspection.events) {
               if (signal?.aborted) return

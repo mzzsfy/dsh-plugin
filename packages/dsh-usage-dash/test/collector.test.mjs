@@ -72,17 +72,44 @@ function fakeSessions(handles = []) {
 }
 
 // definitions: [{ id, events?, inheritedEventCount?, fail? }]
+// 内部统一契约形状(list → [{id}],readLog → {inheritedEventCount, events}),
+// 宿主 persistence 的多版本映射由 archive-reader 测试单独覆盖
 function fakePersistence(definitions = []) {
   const byId = new Map(definitions.map((def) => [def.id, def]))
   return {
     async list() {
       return definitions.map((def) => ({ id: def.id }))
     },
-    async inspect(id) {
+    async readLog(id) {
       const def = byId.get(id)
       if (!def) throw new Error(`session "${id}" not found`)
       if (def.fail) throw new Error(def.fail)
-      return { meta: { id }, inheritedEventCount: def.inheritedEventCount ?? 0, events: def.events ?? [] }
+      return { inheritedEventCount: def.inheritedEventCount ?? 0, events: def.events ?? [] }
+    },
+  }
+}
+
+// 宿主 handle 代形状(list 返回 snapshot,open/read/close 读体),供走
+// rescan → 工厂分派 → backfill 的装配路径测试使用
+function fakeHostPersistence(definitions = []) {
+  const byId = new Map(definitions.map((def) => [def.id, def]))
+  return {
+    async list() {
+      return definitions.map((def) => ({ header: { id: def.id }, revision: {} }))
+    },
+    async open(id, access) {
+      const def = byId.get(id)
+      if (!def) throw new Error(`session "${id}" not found`)
+      return {
+        header: { id },
+        inheritedEventCount: def.inheritedEventCount ?? 0,
+        access,
+        async read() {
+          if (def.fail) throw new Error(def.fail)
+          return { eventState: 'detached', events: def.events ?? [] }
+        },
+        async close() {},
+      }
     },
   }
 }
@@ -578,6 +605,24 @@ test('回扫:record 失败使会话失败并保留游标重试机会', async () 
   assert.equal(collector.status().done, 1)
 })
 
+test('回扫:list 失败记入 error 并向上传播,running 复位', async () => {
+  const failure = new Error('sessionPersistence API 未识别')
+  const persistence = {
+    async list() {
+      throw failure
+    },
+    async readLog() {
+      throw new Error('not reached')
+    },
+  }
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await assert.rejects(collector.backfill(persistence, fakeSessions()), (error) => error === failure)
+  assert.equal(collector.status().error, failure.message)
+  assert.equal(collector.status().running, false)
+  assert.equal(store.samples.length, 0)
+})
+
 test('abort:已中止 signal 直接返回不进入扫描', async () => {
   const persistence = fakePersistence([{ id: 's1', events: [] }])
   const store = fakeStore()
@@ -597,9 +642,9 @@ test('abort:扫描中中断停止处理且不写游标', async () => {
     async list() {
       return [{ id: 's1' }]
     },
-    async inspect(id) {
+    async readLog() {
       controller.abort()
-      return { meta: { id }, inheritedEventCount: 0, events: [ev('turn/end', 0, t)] }
+      return { inheritedEventCount: 0, events: [ev('turn/end', 0, t)] }
     },
   }
   const store = fakeStore()
@@ -625,14 +670,14 @@ test('回扫并发受默认并发 4 约束', async () => {
     async list() {
       return defs.map((def) => ({ id: def.id }))
     },
-    async inspect(id) {
+    async readLog(id) {
       inFlight += 1
       peak = Math.max(peak, inFlight)
       if (inFlight >= EXPECTED_CONCURRENCY) release()
       await Promise.race([gate, new Promise((resolve) => setTimeout(resolve, GATE_TIMEOUT_MS))])
       inFlight -= 1
       const def = defs.find((candidate) => candidate.id === id)
-      return { meta: { id }, inheritedEventCount: 0, events: def.events }
+      return { inheritedEventCount: 0, events: def.events }
     },
   }
   const store = fakeStore()
@@ -645,7 +690,7 @@ test('回扫并发受默认并发 4 约束', async () => {
 test('resetAndRescan 以 wipe 时刻日志长度为活跃会话边界并重扫', async () => {
   const t = local(2026, 8, 2, 9, 0)
   const events = Array.from({ length: 13 }, (_, seq) => ev('turn/end', seq, t))
-  const persistence = fakePersistence([{ id: 'live-a', events }])
+  const persistence = fakeHostPersistence([{ id: 'live-a', events }])
   const sessions = fakeSessions([{ id: 'live-a', seq: 10 }, { id: 'live-b' }])
   const store = fakeStore()
   store.state.liveFirstSeq.set('live-a', 3)
@@ -661,7 +706,7 @@ test('resetAndRescan 以 wipe 时刻日志长度为活跃会话边界并重扫',
 
 test('并发 resetAndRescan 合并为一次重建', async () => {
   const store = fakeStore()
-  const collector = new UsageCollector(fakeCtx(), store)
+  const collector = new UsageCollector(fakeCtx({ persistence: fakeHostPersistence() }), store)
   const first = collector.resetAndRescan()
   const second = collector.resetAndRescan()
   await Promise.all([first, second])
