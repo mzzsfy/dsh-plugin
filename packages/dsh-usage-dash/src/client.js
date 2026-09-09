@@ -1312,29 +1312,51 @@ const TURN_COST_CHIP_ORDER = 20 + 10
 // messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
 // 回合级用量优先取回合位置数据(location.turn.data.get('turn-tail')).tokenUsage(官方 tokenUsage 聚合,
 // 分页窗口缺 turn/start 时缺席),回退视图节点 data.closing.usage(末步用量采样,输入侧已含缓存,计费口径同源)
-function turnTokenUsageOfMessage(nodes, messageId) {
+// 索引缓存:每份节点表快照只全量扫描一次建 messageId→turn-tail 索引(WeakMap 随快照释放),
+// 长会话流式期间多芯片各自全量扫描是 O(消息数×节点数) 放大,索引后单快照 O(节点数)
+const TURN_USAGE_INDEX_CACHE = new WeakMap()
+
+function turnUsageIndexOf(nodes) {
+  let index = TURN_USAGE_INDEX_CACHE.get(nodes)
+  if (index !== undefined) return index
+  index = new Map()
   const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
-  if (!Array.isArray(list)) return null
-  for (const node of list) {
-    try {
-      if (node?.kind !== 'turn-tail') continue
-      if (node.data?.closing?.finalNode?.messageId !== messageId) continue
-      const turnData = node.location?.turn?.data
-      const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
-      if (tail?.tokenUsage) return tail.tokenUsage
-      if (node.data.tokenUsage) return node.data.tokenUsage
-      const sampled = node.data?.closing?.usage
-      if (!sampled) return null
-      return {
-        uncachedInputTokens: sampled.inputTokens,
-        outputTokens: sampled.outputTokens,
-        totalTokens: sampled.totalTokens,
-        ...sampled.cacheReadTokens === undefined ? {} : { cacheReadTokens: sampled.cacheReadTokens },
-        ...sampled.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: sampled.cacheWriteTokens },
-        ...sampled.reasoningTokens === undefined ? {} : { reasoningTokens: sampled.reasoningTokens },
-      }
-    } catch { /* 单节点形状残缺跳过,扫描继续 */ }
+  if (Array.isArray(list)) {
+    for (const node of list) {
+      try {
+        if (node?.kind !== 'turn-tail') continue
+        const messageId = node.data?.closing?.finalNode?.messageId
+        if (typeof messageId !== 'string' || index.has(messageId)) continue
+        index.set(messageId, node)
+      } catch { /* 单节点形状残缺跳过 */ }
+    }
   }
+  TURN_USAGE_INDEX_CACHE.set(nodes, index)
+  return index
+}
+
+function turnTokenUsageOfMessage(nodes, messageId) {
+  // 非对象(含 null/undefined)直接 null:WeakMap 键要求对象,展开校验收进索引构建,
+  // 每快照只物化一次节点序列
+  if (nodes === null || typeof nodes !== 'object') return null
+  const node = turnUsageIndexOf(nodes).get(messageId)
+  if (node === undefined) return null
+  try {
+    const turnData = node.location?.turn?.data
+    const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
+    if (tail?.tokenUsage) return tail.tokenUsage
+    if (node.data.tokenUsage) return node.data.tokenUsage
+    const sampled = node.data?.closing?.usage
+    if (!sampled) return null
+    return {
+      uncachedInputTokens: sampled.inputTokens,
+      outputTokens: sampled.outputTokens,
+      totalTokens: sampled.totalTokens,
+      ...sampled.cacheReadTokens === undefined ? {} : { cacheReadTokens: sampled.cacheReadTokens },
+      ...sampled.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: sampled.cacheWriteTokens },
+      ...sampled.reasoningTokens === undefined ? {} : { reasoningTokens: sampled.reasoningTokens },
+    }
+  } catch { /* 单节点形状残缺跳过,语义同扫描容错 */ }
   return null
 }
 

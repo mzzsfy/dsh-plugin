@@ -85,6 +85,31 @@ test('反查:单节点形状残缺跳过不抛,后续命中不受阻', () => {
   assert.equal(turnTokenUsageOfMessage([null, 'x', 42], 'm-1'), null)
 })
 
+test('反查:同一容器重复调用命中索引,结果一致', () => {
+  const tokenUsage = { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 }
+  const nodes = [tailNode('m-1', tokenUsage)]
+  // Given 同一容器连续两次反查(首次建索引,二次命中缓存)
+  const first = turnTokenUsageOfMessage(nodes, 'm-1')
+  const second = turnTokenUsageOfMessage(nodes, 'm-1')
+  // Then 结果一致且均为 tokenUsage 本体
+  assert.equal(first, tokenUsage)
+  assert.equal(second, tokenUsage)
+  // 未命中的 messageId 二次查询仍为 null(索引缓存不放大误命中)
+  assert.equal(turnTokenUsageOfMessage(nodes, 'm-2'), null)
+})
+
+test('反查:容器换引用(快照更替)后新节点可见', () => {
+  const oldUsage = { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 }
+  const oldNodes = [tailNode('m-1', oldUsage)]
+  assert.equal(turnTokenUsageOfMessage(oldNodes, 'm-1'), oldUsage)
+  // Given 节点表内容变化以新容器表达(官方 store 快照语义),新增回合节点
+  const newUsage = { uncachedInputTokens: 7, outputTokens: 7, totalTokens: 14 }
+  const newNodes = [...oldNodes, tailNode('m-2', newUsage)]
+  // Then 新容器首查即可见新节点,旧容器结果不受影响
+  assert.equal(turnTokenUsageOfMessage(newNodes, 'm-2'), newUsage)
+  assert.equal(turnTokenUsageOfMessage(oldNodes, 'm-1'), oldUsage)
+})
+
 test('计价模型键:双全拼两段,仅 model 用裸名,双缺回退全通配键', () => {
   assert.equal(turnModelOf({ routes: [{ provider: 'p', model: 'm' }] }), 'p/m')
   assert.equal(turnModelOf({ routes: [{ model: 'm' }] }), 'm')
