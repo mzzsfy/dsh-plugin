@@ -68,6 +68,18 @@ async function readJsonBody(req) {
   return body && typeof body === 'object' ? body : {}
 }
 
+// 多值归一:values 数组(客户端契约)按行折叠进 value 存储形态(单行 + multi 标志,
+// 展开时拆行);数组缺失或非多值回退原 value 字符串语义
+function normalizeEnvValue(body, multi) {
+  if (multi && Array.isArray(body.values)) {
+    return body.values
+      .map((item) => String(item).trim())
+      .filter((line) => line !== '')
+      .join('\n')
+  }
+  return typeof body.value === 'string' ? body.value : ''
+}
+
 // 导入文本解析:每行 NAME=value 或 NAME=value #备注;空行跳过,无 = 记非法
 export function parseEnvText(text) {
   const rows = []
@@ -190,11 +202,13 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
         const body = await readJsonBody(req)
         const name = typeof body.name === 'string' ? body.name.trim() : ''
         if (name === '') throw new Error(MESSAGES.nameRequired)
+        const multi = body.multi === true
         const row = await store.envs.create({
           name,
-          value: typeof body.value === 'string' ? body.value : '',
+          value: normalizeEnvValue(body, multi),
           remarks: typeof body.remarks === 'string' ? body.remarks : '',
           enabled: body.enabled !== false,
+          multi,
         })
         sendJson(res, 200, row)
       },
@@ -214,6 +228,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
           if (body[field] !== undefined) patch[field] = String(body[field])
         }
         if (body.enabled !== undefined) patch.enabled = Boolean(body.enabled)
+        if (body.multi !== undefined) patch.multi = body.multi === true
+        // values 数组折叠与 POST 同前提:仅 multi===true 时采纳(client 契约恒带 multi)
+        if (body.multi === true && Array.isArray(body.values)) patch.value = normalizeEnvValue(body, true)
         const row = await store.envs.update(params.id, patch)
         if (!row) throw new Error('变量不存在:' + params.id)
         sendJson(res, 200, row)

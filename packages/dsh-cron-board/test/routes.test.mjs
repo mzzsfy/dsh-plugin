@@ -123,6 +123,34 @@ test('envs 路由:导出默认仅启用行,备注折叠为行尾注释', async (
   assert.equal(res.payload.text, 'ON=1 #note\n')
 })
 
+test('envs 路由:multi 新建折叠 values 数组为换行存储(client 契约)', async (t) => {
+  // Given 客户端 multi 提交形态:name+values 数组
+  const { store, api } = await makeApi(t)
+  // When 新建
+  const created = await call(api, 'POST', '/api/cron-board/envs', { name: 'TOKEN', values: ['a', ' b ', '', 'c'], multi: true })
+  // Then 单行存储 + multi 标志,值按行折叠,空白行剔除
+  assert.equal(created.status, 200)
+  const row = store.envs.get(created.payload.id)
+  assert.equal(row.multi, true)
+  assert.equal(row.value, 'a\nb\nc')
+})
+
+test('envs 路由:multi PATCH 折叠 values,非 multi 保留 value 语义', async (t) => {
+  const { store, api } = await makeApi(t)
+  const multiRow = await store.envs.create({ name: 'M', value: 'x', multi: true, enabled: true })
+  const plainRow = await store.envs.create({ name: 'P', value: 'y', enabled: true })
+  // When 多值行 PATCH values 数组;普通行 PATCH value 字符串
+  const patchedMulti = await call(api, 'PATCH', '/api/cron-board/envs/' + multiRow.id, { values: ['u', 'v'], multi: true })
+  const patchedPlain = await call(api, 'PATCH', '/api/cron-board/envs/' + plainRow.id, { value: 'z' })
+  // Then 各按各自形态落库
+  assert.equal(patchedMulti.status, 200)
+  assert.equal(patchedPlain.status, 200)
+  assert.equal(store.envs.get(multiRow.id).value, 'u\nv')
+  assert.equal(store.envs.get(multiRow.id).multi, true)
+  assert.equal(store.envs.get(plainRow.id).value, 'z')
+  assert.equal(store.envs.get(plainRow.id).multi, undefined)
+})
+
 test('jobs 路由:缺必填字段报中文业务错误', async (t) => {
   const { api } = await makeApi(t)
   // When 缺 name 新建任务

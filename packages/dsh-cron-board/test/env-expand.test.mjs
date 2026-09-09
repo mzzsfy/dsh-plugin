@@ -71,3 +71,31 @@ test('env-expand:大组合限量生成,不物化指数级全量', () => {
     assert.ok(row.A !== undefined && row.B !== undefined)
   }
 })
+
+test('env-expand:multi 行按换行拆值,空行与首尾空白剔除', () => {
+  // Given 单行 multi 存储形态(客户端 values 数组经 API 折叠为换行拼接)
+  const envs = [
+    { name: 'TOKEN', value: 'aaa\n\n bbb \n', multi: true, enabled: true },
+    { name: 'MODE', value: 'run', enabled: true },
+  ]
+  // When 展开
+  const { combinations, truncated } = expandEnvMatrix({ envs, maxExpansion: 20 })
+  // Then 拆出两值,单值名称每组携带
+  assert.equal(truncated, false)
+  assert.deepEqual(combinations, [
+    { TOKEN: 'aaa', MODE: 'run' },
+    { TOKEN: 'bbb', MODE: 'run' },
+  ])
+})
+
+test('env-expand:multi 行与同名单行合并贡献组合', () => {
+  // Given multi 行两值 + 同名单行一值
+  const envs = [
+    { name: 'A', value: '1\n2', multi: true, enabled: true },
+    { name: 'A', value: '3', enabled: true },
+  ]
+  // When 展开
+  const { combinations } = expandEnvMatrix({ envs, maxExpansion: 20 })
+  // Then 三组按序
+  assert.deepEqual(combinations.map((row) => row.A), ['1', '2', '3'])
+})
