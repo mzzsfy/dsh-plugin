@@ -163,6 +163,7 @@ const MESSAGES_ZH = {
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
   skippedSessions: '跳过 {n} 个无法读取的会话',
+  skipBreakdown: '宿主拒读 {d} / 存档损坏 {c} / 旧格式 {l} / 其他 {o}——宿主修复后下轮回扫自动补齐',
   anomalyLog: '扫描异常日志',
   logKindSkipped: '跳过会话',
   logKindRecord: '写入失败',
@@ -298,6 +299,7 @@ const MESSAGES_EN = {
   trendTruncated: 'Too much data, showing only the latest part',
   recordFailures: '{n} records failed to write',
   skippedSessions: '{n} unreadable sessions skipped',
+  skipBreakdown: 'host-refused {d} / corrupt {c} / legacy format {l} / other {o} — auto-retried once the host can read them',
   anomalyLog: 'Scan anomaly log',
   logKindSkipped: 'skipped',
   logKindRecord: 'write failed',
@@ -2714,14 +2716,22 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         status.error ? h('span', { className: 'ud-status-err' }, status.error) : null)
     }
 
-    // 展开后的异常日志块:汇总计数即明细条数(单一事实源),逐条展示(时间/类型/内容)
+    // 展开后的异常日志块:汇总计数即明细条数(单一事实源),逐条展示(时间/类型/内容);
+    // skipped 细分归因(宿主拒读/损坏/旧格式)挂在汇总行 title,供跨宿主边界诊断
     function AnomalyLog({ status, t = defaultT }) {
       const lines = status.log ?? []
       if (lines.length === 0) return null
+      const breakdown = status.skippedBreakdown ?? {}
+      const breakdownText = t('skipBreakdown', {
+        d: breakdown.descriptor ?? 0,
+        c: breakdown.corrupt ?? 0,
+        l: breakdown.legacy ?? 0,
+        o: breakdown.other ?? 0,
+      })
       return h('div', { className: 'ud-log' },
         h('div', { className: 'ud-log-summary' },
           (status.skippedSessions ?? 0) > 0
-            ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+            ? h('span', { title: breakdownText }, t('skippedSessions', { n: status.skippedSessions }))
             : null,
           (status.recordFailures ?? 0) > 0
             ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))

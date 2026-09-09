@@ -6,6 +6,10 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 
 import { createArchiveReader } from '../src/archive-reader.js'
 
@@ -34,27 +38,29 @@ test('工厂:两代形状都不匹配分派到 unknown 恒抛适配器', async (
   await assert.rejects(reader.readLog('s1'), /sessionPersistence/)
 })
 
-test('handle 代:list 归一 snapshot 为 {id},signal 包裹透传,畸形行丢弃', async () => {
-  const seen = []
-  const persistence = {
-    async list(options) {
-      seen.push(options)
-      return [
-        { header: { id: 'a' }, revision: 'r1', sizeBytes: 10 },
-        { header: { id: 'b' }, revision: 'r2' },
-        { revision: 'no-header' },
-        null,
-        { header: { id: '' } },
-      ]
-    },
-    async open() {
-      throw new Error('not reached')
-    },
-  }
-  const signal = new AbortController().signal
-  const reader = createArchiveReader(persistence)
-  assert.deepEqual(await reader.list(signal), [{ id: 'a' }, { id: 'b' }])
-  assert.deepEqual(seen, [{ signal }])
+test('handle 代:list 归一 snapshot 为 {id},signal 包裹透传,畸形行丢弃', () => {
+  return withDirectRoot(async () => {
+    const seen = []
+    const persistence = {
+      async list(options) {
+        seen.push(options)
+        return [
+          { header: { id: 'a' }, revision: 'r1', sizeBytes: 10 },
+          { header: { id: 'b' }, revision: 'r2' },
+          { revision: 'no-header' },
+          null,
+          { header: { id: '' } },
+        ]
+      },
+      async open() {
+        throw new Error('not reached')
+      },
+    }
+    const signal = new AbortController().signal
+    const reader = createArchiveReader(persistence)
+    assert.deepEqual(await reader.list(signal), [{ id: 'a' }, { id: 'b' }])
+    assert.deepEqual(seen, [{ signal }])
+  })
 })
 
 test('handle 代:readLog 分页循环直到空页,handle 元数据透出', async () => {
@@ -206,21 +212,23 @@ test('handle 代:open 抛错直接传播,不触发 close', async () => {
   await assert.rejects(reader.readLog('s1'), (error) => error === failure)
 })
 
-test('inspect 代:list 归一 header 数组为 {id},signal 直传,畸形行丢弃', async () => {
-  const seen = []
-  const persistence = {
-    async list(arg) {
-      seen.push(arg)
-      return [{ id: 'a', createdAt: 1 }, { id: 'b', createdAt: 2 }, null, {}]
-    },
-    async inspect() {
-      throw new Error('not reached')
-    },
-  }
-  const signal = new AbortController().signal
-  const reader = createArchiveReader(persistence)
-  assert.deepEqual(await reader.list(signal), [{ id: 'a' }, { id: 'b' }])
-  assert.deepEqual(seen, [signal])
+test('inspect 代:list 归一 header 数组为 {id},signal 直传,畸形行丢弃', () => {
+  return withDirectRoot(async () => {
+    const seen = []
+    const persistence = {
+      async list(arg) {
+        seen.push(arg)
+        return [{ id: 'a', createdAt: 1 }, { id: 'b', createdAt: 2 }, null, {}]
+      },
+      async inspect() {
+        throw new Error('not reached')
+      },
+    }
+    const signal = new AbortController().signal
+    const reader = createArchiveReader(persistence)
+    assert.deepEqual(await reader.list(signal), [{ id: 'a' }, { id: 'b' }])
+    assert.deepEqual(seen, [signal])
+  })
 })
 
 test('inspect 代:readLog 经 inspect 整读,signal 直传', async () => {
@@ -239,4 +247,119 @@ test('inspect 代:readLog 经 inspect 整读,signal 直传', async () => {
     { inheritedEventCount: 2, events },
   )
   assert.deepEqual(seen, [['s1', signal]])
+})
+
+// 降级直读的测试桩:DSH_HOME 指向临时根,档案落 sessions/<bucket>/<id>/
+function withDirectRoot(run) {
+  const root = mkdtempSync(join(tmpdir(), 'ud-fallback-'))
+  process.env.DSH_HOME = root
+  return Promise.resolve(run(root)).finally(() => {
+    delete process.env.DSH_HOME
+    rmSync(root, { recursive: true, force: true })
+  })
+}
+
+function seedArtifact(root, id, events) {
+  const text = [
+    JSON.stringify({ type: 'session/header', id }),
+    ...events.map((event) => JSON.stringify(event)),
+  ].join('\n')
+  const dir = join(root, 'sessions', 'bucket-x', id)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'session.v3.jsonl.zstd'), zstdCompressSync(Buffer.from(text)))
+}
+
+test('handle 代:宿主拒读(descriptor)降级文件直读', () => {
+  return withDirectRoot(async (root) => {
+    seedArtifact(root, 'refused', [ev(0), ev(1)])
+    const persistence = {
+      async open() {
+        return {
+          inheritedEventCount: 0,
+          async read() {
+            throw new Error('subagent session "refused" uses unsupported descriptor version 2')
+          },
+          async close() {},
+        }
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    const result = await reader.readLog('refused')
+    assert.equal(result.inheritedEventCount, 0)
+    assert.equal(result.events.length, 2)
+  })
+})
+
+test('handle 代:open 阶段拒读(descriptor 校验)同样降级直读', () => {
+  return withDirectRoot(async (root) => {
+    seedArtifact(root, 'open-refused', [ev(3)])
+    const persistence = {
+      async open() {
+        throw new Error('session "open-refused" header uses unsupported descriptor version 2')
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    const result = await reader.readLog('open-refused')
+    assert.equal(result.events.length, 1)
+  })
+})
+
+test('handle 代:open 拒读且直读失败时,原错误传播', () => {
+  return withDirectRoot(async () => {
+    const persistence = {
+      async open() {
+        throw new Error('session "absent" header uses unsupported descriptor version 2')
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    await assert.rejects(reader.readLog('absent'), /descriptor version 2/)
+  })
+})
+
+test('handle 代:非拒读错误不触发直读,原错误传播', () => {
+  return withDirectRoot((root) => {
+    seedArtifact(root, 'gone', [ev(0)])
+    const persistence = {
+      async open() {
+        throw new Error('session "gone" not found')
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    return assert.rejects(reader.readLog('gone'), /not found/)
+  })
+})
+
+test('handle 代:拒读且直读也失败时,原错误传播', () => {
+  return withDirectRoot(async (root) => {
+    const persistence = {
+      async open() {
+        return {
+          inheritedEventCount: 0,
+          async read() {
+            throw new Error('stored log is corrupt: SessionFormatError: seq gap')
+          },
+          async close() {},
+        }
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    await assert.rejects(reader.readLog('absent'), /corrupt/)
+  })
+})
+
+test('handle 代:list 并集补齐宿主不可见的磁盘档案', () => {
+  return withDirectRoot(async (root) => {
+    seedArtifact(root, 'v3-only', [ev(0)])
+    const persistence = {
+      async list() {
+        return [{ header: { id: 'host-known' } }]
+      },
+      async open() {
+        throw new Error('not reached')
+      },
+    }
+    const reader = createArchiveReader(persistence)
+    const ids = (await reader.list()).map((row) => row.id).sort()
+    assert.deepEqual(ids, ['host-known', 'v3-only'])
+  })
 })

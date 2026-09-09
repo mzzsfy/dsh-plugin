@@ -9,9 +9,19 @@
 //   list(signal)             → Promise<readonly { id }[]>            枚举全部已存会话
 //   readLog(id, signal)      → Promise<{ inheritedEventCount, events }> 整读单会话全部事件
 
+import { listSessionIdsDirect, readSessionLogDirect } from './direct-log-reader.js'
+
 const READER_HINT = 'sessionPersistence API 未识别(宿主再次升级?),请反馈补充适配器'
-// 句柄分页读的页长:大会话不全量驻留单次 read,内存平稳;竞品同值
 const HANDLE_READ_PAGE = 500
+
+// 宿主 fail-closed 拒读的原因词型:descriptor 元数据校验、格式代际校验、
+// seq 完整性校验。命中即降级文件直读(档案数据本身完好,只是校验不放行);
+// 词型必须精确,任意读失败(网络/权限/不存在)不得误判
+const HOST_REFUSAL_PATTERN = /unsupported descriptor version|stored log is corrupt|SessionFormatError|format v\d|unexpected member|seq gap/i
+
+function isHostRefusal(error) {
+  return HOST_REFUSAL_PATTERN.test(error instanceof Error ? error.message : String(error))
+}
 
 // 现役宿主:list 返回 snapshot(id 在 .header),整读走 read 句柄分页循环。
 // 信号包裹为 options 对象;read 失败仍保证 close。close 失败吞掉:句柄
@@ -25,16 +35,23 @@ class HandleArchiveReader {
 
   async list(signal) {
     const snapshots = await this.persistence.list(signal === undefined ? undefined : { signal })
-    // 畸形行(无有效 header.id)丢弃不炸,单个坏行不放大为整轮失败
-    return snapshots
-      .filter((snapshot) => typeof snapshot?.header?.id === 'string' && snapshot.header.id !== '')
-      .map((snapshot) => ({ id: snapshot.header.id }))
+    // 畸形行(无有效 header.id)丢弃不炸,单个坏行不放大为整轮失败;
+    // 宿主 list 不枚举的磁盘档案(旧宿主不见新代文件名)由直读侧补齐
+    const ids = new Set(
+      snapshots
+        .filter((snapshot) => typeof snapshot?.header?.id === 'string' && snapshot.header.id !== '')
+        .map((snapshot) => snapshot.header.id),
+    )
+    for (const id of listSessionIdsDirect()) ids.add(id)
+    return [...ids].map((id) => ({ id }))
   }
 
   async readLog(id, signal) {
     const options = signal === undefined ? undefined : { signal }
-    const handle = await this.persistence.open(id, 'read', options)
+    // descriptor 元数据校验在 open 阶段拒读,open 必须同在降级范围内
+    let handle
     try {
+      handle = await this.persistence.open(id, 'read', options)
       const inherited = handle.inheritedEventCount
       const inheritedEventCount = typeof inherited === 'number' && Number.isSafeInteger(inherited) && inherited >= 0 ? inherited : 0
       const events = []
@@ -48,8 +65,19 @@ class HandleArchiveReader {
         offset += page.length
       }
       return { inheritedEventCount, events }
+    } catch (error) {
+      // 宿主校验拒读而档案数据完好:降级文件直读恢复统计;直读失败
+      // (档案缺失等)回抛原拒读错误,降级是尽力而为,不掩盖原状态
+      if (isHostRefusal(error)) {
+        try {
+          return { inheritedEventCount: 0, events: readSessionLogDirect(id) }
+        } catch {
+          throw error
+        }
+      }
+      throw error
     } finally {
-      await handle.close().catch(() => {})
+      await handle?.close().catch(() => {})
     }
   }
 }
@@ -62,16 +90,32 @@ class InspectArchiveReader {
 
   async list(signal) {
     const headers = await this.persistence.list(signal)
-    return headers
-      .filter((header) => typeof header?.id === 'string' && header.id !== '')
-      .map((header) => ({ id: header.id }))
+    const ids = new Set(
+      headers
+        .filter((header) => typeof header?.id === 'string' && header.id !== '')
+        .map((header) => header.id),
+    )
+    for (const id of listSessionIdsDirect()) ids.add(id)
+    return [...ids].map((id) => ({ id }))
   }
 
   async readLog(id, signal) {
-    const inspection = await this.persistence.inspect(id, signal)
-    const inherited = inspection.inheritedEventCount
-    const inheritedEventCount = typeof inherited === 'number' && Number.isSafeInteger(inherited) && inherited >= 0 ? inherited : 0
-    return { inheritedEventCount, events: inspection.events ?? [] }
+    try {
+      const inspection = await this.persistence.inspect(id, signal)
+      const inherited = inspection.inheritedEventCount
+      const inheritedEventCount = typeof inherited === 'number' && Number.isSafeInteger(inherited) && inherited >= 0 ? inherited : 0
+      return { inheritedEventCount, events: inspection.events ?? [] }
+    } catch (error) {
+      // 宿主校验拒读而档案数据完好:降级文件直读恢复统计;直读失败回抛原错
+      if (isHostRefusal(error)) {
+        try {
+          return { inheritedEventCount: 0, events: readSessionLogDirect(id) }
+        } catch {
+          throw error
+        }
+      }
+      throw error
+    }
   }
 }
 

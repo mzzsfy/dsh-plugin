@@ -668,6 +668,38 @@ test('回扫:record 失败使会话失败并保留游标重试机会', async () 
   assert.equal(collector.status().done, 1)
 })
 
+test('回扫:skipped 计数独立累加,超过日志上限不漂移', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const defs = Array.from({ length: 210 }, (_, i) => ({ id: `bad${i}`, fail: 'uses unsupported descriptor version 2' }))
+  const persistence = fakePersistence(defs)
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.equal(collector.status().skippedSessions, 210)
+  assert.equal(collector.status().log.length, 200)
+  assert.deepEqual(collector.status().skippedBreakdown, { descriptor: 210, corrupt: 0, legacy: 0, other: 0 })
+})
+
+test('回扫:skipped 按 detail 归因分类,次轮扫描计数复位', async () => {
+  const t = local(2026, 8, 2, 14, 0)
+  const persistence = fakePersistence([
+    { id: 'a', fail: 'uses unsupported descriptor version 2; source v0 artifact remains unchanged' },
+    { id: 'b', fail: 'stored log is corrupt: SessionFormatError: seq gap' },
+    { id: 'c', fail: 'format v0 contains unknown member "editor"' },
+    { id: 'd', fail: 'mystery failure' },
+    { id: 'ok', events: [ev('turn/end', 0, t)] },
+  ])
+  const store = fakeStore()
+  const collector = new UsageCollector(fakeCtx({ persistence }), store)
+  await collector.backfill(persistence, fakeSessions())
+  assert.deepEqual(collector.status().skippedBreakdown, { descriptor: 1, corrupt: 1, legacy: 1, other: 1 })
+  assert.equal(collector.status().skippedSessions, 4)
+  // 次轮:失败档不进游标会重现,但本轮从空游标重扫,计数从头累计且包含上一轮成功档
+  await collector.backfill(persistence, fakeSessions())
+  assert.equal(collector.status().skippedSessions, 4)
+  assert.deepEqual(collector.status().skippedBreakdown, { descriptor: 1, corrupt: 1, legacy: 1, other: 1 })
+})
+
 test('回扫:list 失败记入 error 并向上传播,running 复位', async () => {
   const failure = new Error('sessionPersistence API 未识别')
   const persistence = {
@@ -790,8 +822,12 @@ test('status() 返回快照,外部修改不影响内部状态', async () => {
     error: undefined,
     recordFailures: 0,
     skippedSessions: 0,
+    skippedBreakdown: { descriptor: 0, corrupt: 0, legacy: 0, other: 0 },
     log: [],
   })
+  const before = collector.status().skippedBreakdown
+  before.descriptor = 99
+  assert.equal(collector.status().skippedBreakdown.descriptor, 0)
   await collector.backfill(persistence, fakeSessions())
   const snapshot = collector.status()
   assert.equal(snapshot.running, false)
