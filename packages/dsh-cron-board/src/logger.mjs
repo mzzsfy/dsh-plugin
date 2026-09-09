@@ -1,7 +1,7 @@
 // logger:每次运行一个日志文件,按任务分目录 logs/<jobId>/<runId>.log;
 // 裁剪按文件数(与运行记录元数据同生命周期语义),删除任务连带整目录。
 
-import { mkdir, open, readdir, readFile, rm, truncate, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rm, stat, truncate, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const LOG_EXT = '.log'
@@ -54,7 +54,7 @@ export function createLogger({ rootDir }) {
         if (!(error && error.code === 'ENOENT')) throw error
       })
     },
-    // 按文件名(即 runId 时间序近似)保留最新 keep 份
+    // 按文件修改时间保留最新 keep 份(runId 为随机 UUID 与时间无关,禁用名字典序)
     async prune(jobId, keep) {
       const dir = join(rootDir, jobId)
       let names
@@ -64,10 +64,15 @@ export function createLogger({ rootDir }) {
         if (error && error.code === 'ENOENT') return
         throw error
       }
-      const logs = names.filter((name) => name.endsWith(LOG_EXT)).sort()
-      const stale = logs.slice(0, Math.max(0, logs.length - keep))
-      for (const name of stale) {
-        await rm(join(dir, name), { force: true })
+      const logs = names.filter((name) => name.endsWith(LOG_EXT))
+      const withTime = await Promise.all(logs.map(async (name) => {
+        const info = await stat(join(dir, name)).catch(() => null)
+        return { name, mtimeMs: info ? info.mtimeMs : 0 }
+      }))
+      withTime.sort((a, b) => a.mtimeMs - b.mtimeMs)
+      const stale = withTime.slice(0, Math.max(0, withTime.length - keep))
+      for (const item of stale) {
+        await rm(join(dir, item.name), { force: true })
       }
     },
     async removeJob(jobId) {

@@ -62,3 +62,11 @@ test('parity:statusMeta 未知状态回退 mute', () => {
   assert.equal(client.statusMeta('whatever').tone, 'mute')
   assert.equal(client.statusMeta(undefined).label, '-')
 })
+
+test('parity:maskValue 同源——client LOGIC 段不存在独立实现(API 列表与 prompt 折叠共用 core)', () => {
+  // client.js 打码仅经服务端列表返回的已打码值呈现,LOGIC 段不得再出现本地 maskValue 实现
+  const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  const begin = source.indexOf('/* LOGIC-BEGIN */')
+  const end = source.indexOf('/* LOGIC-END */')
+  assert.doesNotMatch(source.slice(begin, end), /maskValue/, 'LOGIC 段出现独立打码实现,违反双实现同源')
+})

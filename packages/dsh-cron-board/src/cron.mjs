@@ -34,9 +34,10 @@ export function summarizeCron(schedule) {
   if (parts.length !== 5) return schedule
   const [minute, hour, day, month, weekday] = parts
   const clock = (h, m) => PAD2(h) + ':' + PAD2(m)
-  if (/^\*\/\d+$/.test(hour) && minute === '0') return '每 ' + hour.slice(2) + ' 小时'
-  if (hour.startsWith('*/')) return '每 ' + hour.slice(2) + ' 小时(第 ' + minute + ' 分)'
-  if (/^\*\/\d+$/.test(minute) && hour === '*') return '每 ' + minute.slice(2) + ' 分钟'
+  const dayFree = day === '*' && month === '*' && weekday === '*'
+  if (dayFree && /^\*\/\d+$/.test(hour) && minute === '0') return '每 ' + hour.slice(2) + ' 小时'
+  if (dayFree && hour.startsWith('*/')) return '每 ' + hour.slice(2) + ' 小时(第 ' + minute + ' 分)'
+  if (dayFree && /^\*\/\d+$/.test(minute) && hour === '*') return '每 ' + minute.slice(2) + ' 分钟'
   if (!/^\d+$/.test(minute) || !/^\d+$/.test(hour)) return schedule
   if (month !== '*' || day !== '*') {
     if (/^\d+$/.test(day) && month === '*') return '每月 ' + day + ' 日 ' + clock(hour, minute)

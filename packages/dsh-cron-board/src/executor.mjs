@@ -65,9 +65,10 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       if (outcome.message !== undefined) patch.message = outcome.message
       if (outcome.sessionId !== undefined) patch.sessionId = outcome.sessionId
       await store.runs.update(record.runId, patch)
-      if (outcome.pinnedNewId !== undefined) {
-        await store.jobs.update(job.id, { pinnedSessionId: outcome.pinnedNewId })
-      }
+      // 任务卡状态回填:看板状态点/耗时直接读任务行(手动与 cron 同源更新)
+      const jobPatch = { lastStatus: outcome.status, lastDurationMs: patch.durationMs }
+      if (outcome.pinnedNewId !== undefined) jobPatch.pinnedSessionId = outcome.pinnedNewId
+      await store.jobs.update(job.id, jobPatch)
     } finally {
       activeTotal--
       activeByJob.set(job.id, activeOf(job.id) - 1)
@@ -82,14 +83,19 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
   return {
     // 预占记录并按闸门调度执行;返回 runIds 同步可得(执行在后台按许可推进)
     async dispatch(job, trigger) {
-      const combinations = job.kind === 'session'
-        ? [{}]
-        : expandEnvMatrix({ envs: store.envs.list(), maxExpansion }).combinations
+      const expansion = job.kind === 'session'
+        ? { combinations: [{}], truncated: false }
+        : expandEnvMatrix({ envs: store.envs.list(), maxExpansion })
+      const combinations = expansion.combinations
       const runnerFor = job.kind === 'session' ? () => (sessionRunner || SESSION_UNAVAILABLE) : () => shellRunner
       const records = []
       for (let i = 0; i < combinations.length; i++) {
         const record = await store.runs.create({ jobId: job.id, trigger, status: 'queued', logFile: joinLog(job.id) })
         await store.runs.update(record.runId, { logFile: joinLog(job.id, record.runId) })
+        // 截断不静默:受影响运行记录直接带告警文案
+        if (expansion.truncated) {
+          await store.runs.update(record.runId, { message: '环境变量组合超出上限已截断' })
+        }
         records.push(record)
         queue.push({ job, record, env: combinations[i], runnerFor })
       }

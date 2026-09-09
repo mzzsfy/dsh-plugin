@@ -4,6 +4,7 @@
 
 import { assertValidSchedule, nextRunAtOf, nextRunsOf, summarizeCron } from './cron.mjs'
 import { DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS } from './config.mjs'
+import { maskValue } from './env-text.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
 const BODY_MAX_BYTES = 64 * 1024
@@ -65,12 +66,6 @@ async function readJsonBody(req) {
     throw new Error(MESSAGES.badJsonBody)
   }
   return body && typeof body === 'object' ? body : {}
-}
-
-// 值打码:前 2 后 2 中间 ***;长度不足 4 时无中间可保留,全打码
-export function maskValue(value) {
-  if (value.length <= 4) return '***'
-  return value.slice(0, 2) + '***' + value.slice(-2)
 }
 
 // 导入文本解析:每行 NAME=value 或 NAME=value #备注;空行跳过,无 = 记非法
@@ -141,7 +136,6 @@ function normalizeJob(body) {
     kind,
     command,
     prompt: typeof body.prompt === 'string' ? body.prompt : '',
-    scriptPath: typeof body.scriptPath === 'string' ? body.scriptPath : '',
     workdir: typeof body.workdir === 'string' ? body.workdir.trim() : '',
     schedule,
     timeoutMs,
@@ -149,6 +143,8 @@ function normalizeJob(body) {
     session: normalizeSession(body),
   }
   if (normalized.session === undefined) delete normalized.session
+  // 任务级并发上限:合法正整数才落库,缺省走全局闸门(executor min 规则)
+  if (Number.isInteger(body.concurrency) && body.concurrency > 0) normalized.concurrency = body.concurrency
   // nextRunAt:调用方可显式指定(导入任务保留原状态 / 测试注入到期时刻),缺省按 schedule 计算
   normalized.nextRunAt = typeof body.nextRunAt === 'number' && Number.isFinite(body.nextRunAt)
     ? body.nextRunAt
@@ -233,17 +229,18 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
       },
     },
     {
+      // 环境变量文本导入:apply!==true 即预览(返回解析行数组),apply=true 落库
+      // overwrite=true 先清空再导入,缺省追加;与 client ImportForm 契约一一对应
       method: 'POST',
-      segments: ['import'],
-      handler: async ({ req, res, url }) => {
+      segments: ['envs', 'import'],
+      handler: async ({ req, res }) => {
         const body = await readJsonBody(req)
         const { rows, invalid } = parseEnvText(body.text)
-        if (url.searchParams.get('preview') === '1') {
-          const names = new Set(rows.map((row) => row.name))
-          sendJson(res, 200, { parsed: rows.length, invalid, nameGroups: names.size })
+        if (body.apply !== true) {
+          sendJson(res, 200, { parsed: rows, invalid })
           return
         }
-        const mode = body.mode === 'overwrite' ? 'overwrite' : 'append'
+        const mode = body.overwrite === true ? 'overwrite' : 'append'
         if (mode === 'overwrite') {
           for (const row of [...store.envs.list()]) {
             await store.envs.remove(row.id)

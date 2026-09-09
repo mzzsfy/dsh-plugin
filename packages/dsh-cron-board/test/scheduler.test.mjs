@@ -267,7 +267,8 @@ test('scheduler:窗口外 defer 挂起至窗口起点后发起', async (t) => {
   const at = new Date(deferred[0].at)
   assert.equal(at.getHours(), 9)
   assert.equal(at.getMinutes(), 0)
-  // When 挂起到点放行
+  // When 挂起到点放行(真实时钟推进到窗口起点,重读后窗口内才发起)
+  nowMs = at.getTime()
   deferred[0].fn()
   await tickMillis(50)
   // Then 发起会话
@@ -275,6 +276,85 @@ test('scheduler:窗口外 defer 挂起至窗口起点后发起', async (t) => {
   // 且 cron 节奏不变(明日 08:00)
   const tomorrow8 = new Date(base); tomorrow8.setDate(tomorrow8.getDate() + 1)
   assert.equal(store.jobs.get(job.id).nextRunAt, tomorrow8.getTime())
+})
+
+test('scheduler:窗口外 defer 到点重读任务——已禁用任务放弃发起(不吃旧快照)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-defer2-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const store = await createStore({ dir })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const sessionRuns = []
+  const sessionRunner = { run: async () => { sessionRuns.push(1); return { status: 'success' } } }
+  const executor = createExecutor({ store, logger, sessionRunner, readMaxConcurrent: () => 2 })
+  const deferred = []
+  const base = new Date(); base.setHours(8, 0, 0, 0)
+  let nowMs = base.getTime()
+  const scheduler = createScheduler({
+    store, executor, readTickMs: () => TICK_MS, now: () => nowMs,
+    scheduleAt: (at, fn) => { deferred.push({ at, fn }); return () => {} },
+  })
+  const job = await store.jobs.create({
+    name: 'w', kind: 'session', prompt: '早报', schedule: '0 8 * * *', enabled: true,
+    timeoutMs: 60 * 1000, session: { mode: 'fresh', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer' },
+  })
+  await store.jobs.update(job.id, { nextRunAt: nowMs })
+  await scheduler.tick()
+  assert.equal(deferred.length, 1)
+  // When 挂起期间任务被禁用,到点放行
+  await store.jobs.update(job.id, { enabled: false })
+  deferred[0].fn()
+  await tickMillis(50)
+  // Then 不发起
+  assert.equal(sessionRuns.length, 0)
+})
+
+test('scheduler:dispose 清除未到点的 defer 挂起(生命周期外零触发)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-defer3-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const store = await createStore({ dir })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const sessionRuns = []
+  const sessionRunner = { run: async () => { sessionRuns.push(1); return { status: 'success' } } }
+  const executor = createExecutor({ store, logger, sessionRunner, readMaxConcurrent: () => 2 })
+  const deferred = []
+  const cancels = []
+  const base = new Date(); base.setHours(8, 0, 0, 0)
+  let nowMs = base.getTime()
+  const scheduler = createScheduler({
+    store, executor, readTickMs: () => TICK_MS, now: () => nowMs,
+    scheduleAt: (at, fn) => { deferred.push({ at, fn }); cancels.push(0); return () => { cancels[cancels.length - 1] = 1 } },
+  })
+  const job = await store.jobs.create({
+    name: 'w', kind: 'session', prompt: '早报', schedule: '0 8 * * *', enabled: true,
+    timeoutMs: 60 * 1000, session: { mode: 'fresh', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer' },
+  })
+  await store.jobs.update(job.id, { nextRunAt: nowMs })
+  await scheduler.tick()
+  // When dispose 后再放行挂起回调
+  scheduler.dispose()
+  assert.equal(cancels[0], 1)
+  deferred[0].fn()
+  await tickMillis(50)
+  // Then 不发起
+  assert.equal(sessionRuns.length, 0)
+})
+
+test('scheduler:tick 重入闸门——上一轮未完成时下一轮直接跳过(防同点双触发)', async (t) => {
+  const { store, runner, scheduler, advance } = await makeScheduler(t)
+  await store.jobs.create({
+    name: '单发', kind: 'shell', command: 'echo hi', schedule: '*/5 * * * *',
+    enabled: true, timeoutMs: 60 * 1000, nextRunAt: Date.now() + TICK_MS,
+  })
+  advance(TICK_MS + 1000)
+  // When 同一 tick 未完成时并发发起第二次 tick(store 写链让首 tick 至少跨越一个微任务)
+  const first = scheduler.tick()
+  const second = scheduler.tick()
+  await Promise.all([first, second])
+  // Then 仅预占一条运行记录
+  const rows = store.runs.list()
+  assert.equal(rows.length, 1)
+  await waitFor(() => (runner.pending.length > 0 ? true : null))
+  runner.releaseAll()
 })
 
 async function tickMillis(ms) {

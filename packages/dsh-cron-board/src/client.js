@@ -56,9 +56,9 @@ function statusMeta(status) {
 const API_PREFIX = '/api/cron-board/'
 const REFRESH_INTERVAL_MS = 30 * SECOND_MS
 const TABS = [
-  { id: 'jobs', label: '看板' },
-  { id: 'envs', label: '环境变量' },
-  { id: 'logs', label: '日志' },
+  { value: 'jobs', label: '看板' },
+  { value: 'envs', label: '环境变量' },
+  { value: 'logs', label: '日志' },
 ]
 const CRON_PRESETS = [
   { label: '每天 08:30', value: '30 8 * * *' },
@@ -206,7 +206,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         kind: job ? job.kind : 'shell',
         command: job ? job.command : '',
         prompt: job ? job.prompt : '',
-        scriptPath: job ? job.scriptPath : '',
         workdir: job ? job.workdir : '',
         schedule: job ? job.schedule : '0 9 * * *',
         timeoutMs: job ? job.timeoutMs : 60 * 60 * 1000,
@@ -262,9 +261,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           form.kind === 'session'
             ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
                 h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
-            : null,
-          form.kind === 'session'
-            ? h(Field, { label: '脚本路径(可空)' }, h('input', { type: 'text', value: form.scriptPath, onChange: (e) => set({ scriptPath: e.target.value }) }))
             : null,
           form.kind === 'session'
             ? h(Field, { label: '会话模式' }, h(PillGroup, {
@@ -382,6 +378,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // —— 环境变量 Tab ——
+    // —— 环境变量表单(新建/编辑)——
+    // 编辑经明文单条接口回填:列表接口的 value 已打码,直接回填保存会覆盖真实值
     function EnvForm({ row, onDone }) {
       const editing = Boolean(row && row.id)
       const [form, setForm] = useState(() => ({
@@ -392,6 +390,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         enabled: row ? row.enabled : true,
       }))
       const [error, setError] = useState(null)
+      useEffect(() => {
+        if (!editing) return
+        let alive = true
+        request('GET', 'envs/' + row.id).then((outcome) => {
+          if (!alive) return
+          if (outcome.ok) setForm((prev) => ({ ...prev, value: outcome.data.value }))
+          else setError('读取变量明文失败:' + outcome.error)
+        })
+        return () => { alive = false }
+      }, [editing, row && row.id])
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const submit = async () => {
         setError(null)
@@ -593,7 +601,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         ensureStyle(document)
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'cron-board', order: 46 },
+            { name: 'settings.section', id: 'cron-board', order: 46, label: '定时任务' },
             CronBoardPanel,
           ))
       },

@@ -53,6 +53,22 @@ test('logger:清空单条日志后读回为空', async (t) => {
   assert.equal(await logger.read('j1', 'r1'), '')
 })
 
+test('logger:prune 按文件修改时间裁剪,字典序倒挂不误删(runId 为随机 UUID 与时间无关)', async (t) => {
+  // Given 三份日志按时间序写入,名字典序与写入序刻意相反;写入间隔保证 mtime 可分
+  const { logger } = await makeLogger(t)
+  await logger.append('j1', 'z-oldest', 'z-oldest\n')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await logger.append('j1', 'a-middle', 'a-middle\n')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await logger.append('j1', 'm-newest', 'm-newest\n')
+  // When 保留最新 2 份
+  await logger.prune('j1', 2)
+  // Then 最早写入的 z-oldest 被裁,名字典序最小的 a-middle 保留(旧字典序实现会反着删)
+  assert.equal(await logger.read('j1', 'z-oldest'), '')
+  assert.equal(await logger.read('j1', 'a-middle'), 'a-middle\n')
+  assert.equal(await logger.read('j1', 'm-newest'), 'm-newest\n')
+})
+
 test('logger:超出保留数裁掉最旧日志文件', async (t) => {
   // Given 同任务 3 份日志,保留上限 2
   const { logger } = await makeLogger(t)

@@ -81,20 +81,21 @@ test('envs 路由:PATCH 更新与 DELETE 删除', async (t) => {
   assert.match(missing.payload.error, /不存在/)
 })
 
-test('envs 路由:导入预览不落盘,确认导入追加', async (t) => {
+test('envs 路由:导入预览不落盘,确认导入追加(client 契约形态)', async (t) => {
   // Given 已有一条 A=old
   const { store, api } = await makeApi(t)
   await store.envs.create({ name: 'A', value: 'old', remarks: '', enabled: true })
   const text = 'A=1 #备注一\nB=2\n坏行\n'
-  // When 预览(preview=1)
-  const preview = await call(api, 'POST', '/api/cron-board/import?preview=1', { text })
-  // Then 解析统计正确且未落盘
+  // When 预览(body.apply 缺省,契约:parsed 为解析行数组)
+  const preview = await call(api, 'POST', '/api/cron-board/envs/import', { text })
+  // Then 解析行数组与非法计数正确且未落盘
   assert.equal(preview.status, 200)
-  assert.equal(preview.payload.parsed, 2)
+  assert.equal(preview.payload.parsed.length, 2)
+  assert.deepEqual(preview.payload.parsed.map((row) => row.name), ['A', 'B'])
   assert.equal(preview.payload.invalid, 1)
   assert.equal(store.envs.list().length, 1)
-  // When 确认导入(追加)
-  const committed = await call(api, 'POST', '/api/cron-board/import', { text, mode: 'append' })
+  // When 确认导入(body.apply=true 且 overwrite 缺省 = 追加)
+  const committed = await call(api, 'POST', '/api/cron-board/envs/import', { text, apply: true })
   // Then 追加两条,A 有新旧两条(同名多值)
   assert.equal(committed.status, 200)
   const rows = store.envs.list()
@@ -102,11 +103,11 @@ test('envs 路由:导入预览不落盘,确认导入追加', async (t) => {
   assert.equal(rows.filter((row) => row.name === 'A').length, 2)
 })
 
-test('envs 路由:覆盖导入清空原集合再落盘', async (t) => {
+test('envs 路由:覆盖导入清空原集合再落盘(client 契约 overwrite 字段)', async (t) => {
   const { store, api } = await makeApi(t)
   await store.envs.create({ name: 'OLD', value: 'x', remarks: '', enabled: true })
   // When 覆盖导入
-  const committed = await call(api, 'POST', '/api/cron-board/import', { text: 'N=1\n', mode: 'overwrite' })
+  const committed = await call(api, 'POST', '/api/cron-board/envs/import', { text: 'N=1\n', apply: true, overwrite: true })
   // Then 原集合清空,仅剩新行
   assert.equal(committed.status, 200)
   assert.deepEqual(store.envs.list().map((row) => row.name), ['N'])
@@ -129,6 +130,24 @@ test('jobs 路由:缺必填字段报中文业务错误', async (t) => {
   // Then 400 且中文文案
   assert.equal(res.status, 400)
   assert.match(res.payload.error, /名称/)
+})
+
+test('jobs 路由:concurrency 合法正整数透传落库(client 契约)', async (t) => {
+  const { store, api } = await makeApi(t)
+  // When 带并发上限新建
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '限流', kind: 'shell', command: 'x', schedule: '* * * * *', concurrency: 3,
+  })
+  // Then 落库透传,任务级闸门可读
+  assert.equal(created.status, 200)
+  assert.equal(created.payload.concurrency, 3)
+  // When 非法值(0/负数/非整数)不落库
+  const bad = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '不限', kind: 'shell', command: 'x', schedule: '* * * * *', concurrency: 0,
+  })
+  assert.equal(bad.status, 200)
+  assert.equal(bad.payload.concurrency, undefined)
+  assert.equal(store.jobs.list().filter((job) => job.name === '限流')[0].concurrency, 3)
 })
 
 test('jobs 路由:非法 cron 表达式被拒', async (t) => {

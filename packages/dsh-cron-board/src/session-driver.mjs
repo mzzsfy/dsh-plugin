@@ -9,7 +9,6 @@ import { buildPromptText } from './env-text.mjs'
 const BUSY_MESSAGE = '上一轮仍在进行'
 const RECREATED_MESSAGE = '原会话丢失已重建'
 const REJECTED_MESSAGE = '会话输入投递被拒绝'
-const MISSING_MESSAGE = '会话已丢失'
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
 
@@ -79,11 +78,5 @@ export function createSessionDriver({ sessionController, agents, sessionQuery, p
 
   return {
     run,
-    async ping(sessionId) {
-      if (!sessionId) return false
-      if (pinnedExists && !(await pinnedExists(sessionId))) return false
-      return true
-    },
-    MISSING_MESSAGE,
   }
 }

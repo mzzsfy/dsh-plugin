@@ -18,7 +18,9 @@ import { createStore } from './store.mjs'
 
 export const name = 'dsh-cron-board'
 
-export const inject = ['webServer']
+// 会话任务与路由/定时同为本体能力:sessionController 硬依赖声明交 cordis 门控,
+// 服务未就绪/缺失时 fiber 不激活即整体干净禁用(apply 内同步软探测会撞异步挂载时序,mce 同款事故)
+export const inject = ['webServer', 'sessionController']
 
 // 数据目录 env 覆盖:测试注入临时目录(对齐 dsh-usage-panel 先例)
 const DATA_DIR_ENV = 'DSH_CRON_BOARD_DATA_DIR'
@@ -42,15 +44,12 @@ export function resolveDataDir(env = process.env) {
 }
 
 export function apply(ctx, config) {
-  // 会话任务依赖宿主会话服务;缺失即整体干净禁用(规约唯一降级形态,不维护双路径)
-  const sessionController = typeof ctx.get === 'function' ? ctx.get('sessionController') : undefined
-  if (sessionController === undefined) {
-    if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] 宿主会话服务缺失,插件停用')
-    return
-  }
+  const sessionController = ctx.sessionController
   const dataDir = resolveDataDir()
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
   let runtimePromise = null
+  // 生命周期解绑引用:惰性装配完成前给安全空实现,装配后指向真实 scheduler
+  const schedulerRef = { current: { dispose() {} } }
   const getRuntime = () => {
     if (runtimePromise === null) {
       runtimePromise = (async () => {
@@ -70,6 +69,7 @@ export function apply(ctx, config) {
           readMaskEnvInPrompt: () => readBoolean('maskEnvInPrompt', false),
         })
         const scheduler = createScheduler({ store, executor, readTickMs })
+        schedulerRef.current = scheduler
         await scheduler.recover()
         const api = createApi({
           store,
@@ -160,4 +160,7 @@ export function apply(ctx, config) {
     }),
     'cron-board api',
   )
+
+  // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
+  ctx.effect(() => () => schedulerRef.dispose(), 'cron-board scheduler lifecycle')
 }

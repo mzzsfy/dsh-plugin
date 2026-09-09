@@ -39,9 +39,9 @@ function isMissing(error) {
   return Boolean(error) && error.code === 'ENOENT'
 }
 
-// 单集合持久化:加载/读缓存/互斥链写。所有集合共享一条写链,保证跨文件写序与进程内串行;
-// 损坏标记集合级隔离:单文件损坏只禁该集合写,其余集合不受连坐
-function createCollection({ file, chain, idKey }) {
+// 单集合持久化:加载/读缓存/互斥链写。所有集合经 link 容器共享一条写链(link.chain 重绑),
+// 保证跨文件写序与进程内串行;损坏标记集合级隔离:单文件损坏只禁该集合写,其余集合不受连坐
+function createCollection({ file, link, idKey }) {
   let rows = []
   let loaded = false
   let broken = false
@@ -87,12 +87,12 @@ function createCollection({ file, chain, idKey }) {
     // 读改写经共享互斥链串行化;链上失败不传播到后续写,调用方 await 本次结果感知单次失败
     mutate(fn) {
       assertUsable()
-      const result = chain.then(async () => {
+      const result = link.chain.then(async () => {
         const outcome = await fn(rows)
         if (outcome !== false) await persistLocked()
         return outcome
       })
-      chain = result.catch(() => {})
+      link.chain = result.catch(() => {})
       return result
     },
     async create(data) {
@@ -132,12 +132,12 @@ function createCollection({ file, chain, idKey }) {
 }
 
 export async function createStore({ dir }) {
-  const chain = Promise.resolve()
+  const link = { chain: Promise.resolve() }
   const makeFile = (name) => join(dir, name)
 
-  const envs = createCollection({ file: makeFile('envs.json'), chain, idKey: 'id' })
-  const jobsBase = createCollection({ file: makeFile('jobs.json'), chain, idKey: 'id' })
-  const runs = createCollection({ file: makeFile('runs.json'), chain, idKey: 'runId' })
+  const envs = createCollection({ file: makeFile('envs.json'), link, idKey: 'id' })
+  const jobsBase = createCollection({ file: makeFile('jobs.json'), link, idKey: 'id' })
+  const runs = createCollection({ file: makeFile('runs.json'), link, idKey: 'runId' })
   await Promise.all([envs.load(), jobsBase.load(), runs.load()])
 
   // 任务删除连带清除其运行记录(日志目录由调用方连带清理)

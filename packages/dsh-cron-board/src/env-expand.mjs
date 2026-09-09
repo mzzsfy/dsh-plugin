@@ -1,5 +1,6 @@
 // 环境变量同名多值展开:某名称 N 个启用值贡献 N 次,组合数 = 各多值名称值的笛卡尔积;
-// 超全局上限截断(防误导入海量变量打爆机器),截断以 truncated 标志交由调用方告警。
+// DFS 按需产出前 maxExpansion 个完整组合(绝不物化指数级全量,每个产出组含全部变量),
+// 截断以 truncated 标志交由调用方告警。
 
 export function expandEnvMatrix({ envs, maxExpansion }) {
   const enabled = envs.filter((row) => row.enabled)
@@ -9,22 +10,31 @@ export function expandEnvMatrix({ envs, maxExpansion }) {
     values.push(row.value)
     byName.set(row.name, values)
   }
+  const names = [...byName.keys()]
 
-  // 单值名称直接并入每组;多值名称逐层扩展笛卡尔积
-  let combinations = [{}]
-  for (const [name, values] of byName) {
-    const expanded = []
-    for (const base of combinations) {
-      for (const value of values) {
-        expanded.push({ ...base, [name]: value })
-      }
+  // 深度优先按字典序产出;count 达上限即整枝剪断
+  const combinations = []
+  let truncated = false
+  function walk(index, current) {
+    if (combinations.length >= maxExpansion) {
+      truncated = true
+      return
     }
-    combinations = expanded
+    if (index === names.length) {
+      combinations.push({ ...current })
+      return
+    }
+    for (const value of byName.get(names[index])) {
+      if (combinations.length >= maxExpansion) {
+        truncated = true
+        return
+      }
+      current[names[index]] = value
+      walk(index + 1, current)
+      delete current[names[index]]
+    }
   }
+  walk(0, {})
 
-  const truncated = combinations.length > maxExpansion
-  return {
-    combinations: truncated ? combinations.slice(0, maxExpansion) : combinations,
-    truncated,
-  }
+  return { combinations, truncated }
 }

@@ -55,3 +55,19 @@ test('env-expand:组合数超上限截断并标记', () => {
   assert.equal(combinations.length, 20)
   assert.equal(truncated, true)
 })
+
+test('env-expand:大组合限量生成,不物化指数级全量', () => {
+  // Given 两个名称各 30 值 = 900 组,上限 10
+  const envs = []
+  for (const name of ['A', 'B']) {
+    for (let i = 1; i <= 30; i++) envs.push({ name, value: String(i), enabled: true })
+  }
+  // When 展开
+  const { combinations, truncated } = expandEnvMatrix({ envs, maxExpansion: 10 })
+  // Then 恰好 10 组且每组结构完整(前缀组合,而非部分展开的残缺组)
+  assert.equal(truncated, true)
+  assert.equal(combinations.length, 10)
+  for (const row of combinations) {
+    assert.ok(row.A !== undefined && row.B !== undefined)
+  }
+})
