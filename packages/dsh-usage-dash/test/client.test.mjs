@@ -334,10 +334,10 @@ test('trendLayout 单槽列距铺满且柱宽取上限', () => {
   assert.equal(layout.maxTotal, 50)
 })
 
-test('trendLayout 零值槽无分段但保留刻度', () => {
+test('trendLayout 零值槽无分段,无可见数据时刻度为空表', () => {
   const layout = trendLayout([{ day: '2026-03-15', total: 0, byModel: {} }], [], 720, 46)
   assert.deepEqual(layout.bars[0].segments, [])
-  assert.deepEqual(layout.ticks, [0.5, 1])
+  assert.deepEqual(layout.ticks, [])
 })
 
 test('trendLayout 堆叠分段自底向上且高度求和等于绘图高', () => {
@@ -349,6 +349,13 @@ test('trendLayout 堆叠分段自底向上且高度求和等于绘图高', () =>
   approx(segB.height, (20 / 50) * 184)
   approx(segA.height + segB.height, 184)
   approx(segB.y + segB.height, segA.y)
+})
+
+test('trendLayout 可见模型无数据时左轴刻度为空表', () => {
+  const slots = [{ day: 'd', total: 50, byModel: { a: 50 } }]
+  assert.deepEqual(trendLayout(slots, [], 720, 46).ticks, [])
+  assert.deepEqual(trendLayout(slots, ['b'], 720, 46).ticks, [])
+  assert.ok(trendLayout(slots, ['a'], 720, 46).ticks.length > 0)
 })
 
 test('trendLayout 标签密度随列距收敛', () => {

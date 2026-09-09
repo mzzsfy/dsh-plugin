@@ -534,6 +534,8 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
   const barWidth = Math.max(BAR_MIN_WIDTH, Math.min(BAR_MAX_WIDTH, step * BAR_WIDTH_RATIO))
   const slotVisibleTotal = (slot) => modelOrder.reduce((sum, model) => sum + (slot.byModel[model] ?? 0), 0)
   const maxTotal = Math.max(1, ...slots.map(slotVisibleTotal))
+  // 可见模型无任何数据时左轴无标定对象,空刻度防钳底值漏成假刻度
+  const visibleTotal = slots.reduce((sum, slot) => sum + slotVisibleTotal(slot), 0)
   const bars = slots.map((slot, index) => {
     const centerX = CHART_PAD.left + barWidth / 2 + index * step
     let yBottom = CHART_PAD.top + plotHeight
@@ -554,7 +556,7 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
     step,
     barWidth,
     maxTotal,
-    ticks: niceTicks(maxTotal, AXIS_TICK_COUNT),
+    ticks: visibleTotal === 0 ? [] : niceTicks(maxTotal, AXIS_TICK_COUNT),
     labelEvery: Math.max(1, Math.ceil(labelMinPitch / step)),
     bars,
   }
