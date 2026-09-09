@@ -30,6 +30,7 @@ dsh-plugin/
 | @mzzsfy/dsh-model-capability-editor | 模型能力编辑器:可视化编辑各模型的思考档位与图片输入(多模态)声明 | 读取官方 describe 拿当前声明,表单编辑后整组写回 settings.yaml(未编辑条目保留,冲突字段级重放不静默覆盖);官方模型行内直接挂编辑块,锚点破坏时浮动入口兜底 | DSH 纯前端插件(模型页行内注入 + 浮动回退) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
 | @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host 并把 web 默认绑定翻转为 0.0.0.0:泛域名等无法枚举的入口免改启动命令,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由(回溯 + 遮蔽注册方法)把 Host 头实时注册进 webRuntime.trustedHosts,闸门每请求实时读数组;容量 maxHosts 默认 100,按最久未访问(LRU)淘汰,行级 config 配置无 GUI;启动横幅与注册/淘汰 console 直出;webRuntime 走服务事件延迟激活,卸载经 disposer 断开注册 | DSH host 端插件(bundle patch 覆盖 + 路由包装) |
+| @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾,错过的触发不补跑;web 路由供看板/环境变量/日志三面板;会话任务经 sessionController 投递,支持允许时段与忙时跳过 | DSH 双端插件(web 路由 + settings 槽位) |
 
 ## 安装与更新:缩短 pnpm 宽限期
 
@@ -46,7 +47,7 @@ pnpm config set --global minimumReleaseAge 360
 要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20,dsh-rs-workflow 未声明 engines)。
 
 - 仓库级测试:根目录执行 `node --test tests/engine.test.mjs` 与 `node --test tests/workflow-parity.test.mjs`(前者 rs-workflow engine.js 编排脚本验收,后者 rs-workflow 模板 slot 三处镜像(lib schema / slots.json5 / SKILL.md)与发布物边界 parity 验收)
-- 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 11 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test script,其 test/preset-sync.test.mjs 由 CI 的包自动发现直接执行,另有下面的冒烟脚本
+- 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 12 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test script,其 test/preset-sync.test.mjs 由 CI 的包自动发现直接执行,另有下面的冒烟脚本
 - @mzzsfy/dsh-rs-workflow 冒烟:`node .\scripts\test-workflow-plugin.mjs`(默认测已安装副本,传入包目录路径可测任意构建;仓库内副本解析不了 peer 依赖,需先安装再测)
 - CI(`.github/workflows/test.yml`):提交推送与每 3 天定时触发,amd64/arm64 双架构并行,各自全量跑 10 轮(smoke-load + 仓库级测试 + 全部含 test/ 目录的包自动发现;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
 
