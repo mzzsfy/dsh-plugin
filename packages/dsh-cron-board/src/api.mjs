@@ -2,19 +2,11 @@
 // 本插件注册一条 prefix,handler 内按 method + 路径段表驱动分发(:id 路径段捕获);
 // 错误语义对齐仓内惯例:业务错误中文透传,系统级错误收敛固定文案并落服务端日志。
 
-import { join } from 'node:path'
-
 import { assertValidSchedule, nextRunAtOf } from './cron.mjs'
-import { expandEnvMatrix } from './env-expand.mjs'
-import { createShellRunner } from './shell-runner.mjs'
+import { DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS } from './config.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
 const BODY_MAX_BYTES = 64 * 1024
-
-// 环境变量默认超时:青龙同语义的兜底运行时长
-export const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
-// 同名多值组合数全局上限:超限截断防打爆机器(设计 §4.2)
-export const DEFAULT_MAX_EXPANSION = 20
 
 export const MESSAGES = {
   notFound: '接口不存在',
@@ -117,7 +109,10 @@ function normalizeJob(body) {
   const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
   assertValidSchedule(schedule)
   const timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
-  const nextRunAt = nextRunAtOf(schedule)
+  // nextRunAt:调用方可显式指定(导入任务保留原状态 / 测试注入到期时刻),缺省按 schedule 计算
+  const nextRunAt = typeof body.nextRunAt === 'number' && Number.isFinite(body.nextRunAt)
+    ? body.nextRunAt
+    : nextRunAtOf(schedule)
   return {
     name,
     kind,
@@ -132,57 +127,7 @@ function normalizeJob(body) {
   }
 }
 
-export function createApi({ store, logger, runner, maxExpansion = DEFAULT_MAX_EXPANSION, logSystem }) {
-  const shellRunner = runner || createShellRunner({ workdirFallback: process.cwd() })
-
-  // 预占一条运行记录(queued),runId 同步可得,路由可立即返回
-  async function reserveRun(job, trigger) {
-    const record = await store.runs.create({ jobId: job.id, trigger, status: 'queued', logFile: join(job.id, 'pending') })
-    const logFile = join(job.id, record.runId + '.log')
-    await store.runs.update(record.runId, { logFile })
-    return record
-  }
-
-  // 单次执行:预占记录从 queued 走到终态,输出即执行现场写日志
-  async function performRun(job, record, env) {
-    const startedAt = Date.now()
-    await store.runs.update(record.runId, { status: 'running', startedAt })
-    const outcome = await shellRunner.run({
-      job,
-      env,
-      logSink: { append: (chunk) => logger.append(job.id, record.runId, chunk) },
-    })
-    await store.runs.update(record.runId, {
-      status: outcome.status,
-      endedAt: Date.now(),
-      durationMs: Date.now() - startedAt,
-      exitCode: outcome.exitCode,
-    })
-    return record
-  }
-
-  // 手动运行:同名多值展开,记录全部同步预占(路由立即返回 runIds),执行逐组串行后台进行
-  async function runJobNow(job, trigger) {
-    const envs = store.envs.list()
-    const { combinations, truncated } = expandEnvMatrix({ envs, maxExpansion })
-    const records = []
-    for (let i = 0; i < combinations.length; i++) {
-      records.push(await reserveRun(job, trigger))
-    }
-    void (async () => {
-      try {
-        for (let i = 0; i < records.length; i++) {
-          await performRun(job, records[i], combinations[i])
-        }
-        if (truncated) {
-          await logger.append(job.id, 'warnings', '[cron-board] 环境变量组合数超过上限 ' + maxExpansion + ',已截断执行\n')
-        }
-      } catch (error) {
-        await logger.append(job.id, 'warnings', '[cron-board] 运行执行链失败: ' + String(error && error.stack || error) + '\n')
-      }
-    })()
-    return records.map((record) => record.runId)
-  }
+export function createApi({ store, logger, executor, scheduler, periodic, logSystem }) {
 
   const routes = [
     {
@@ -283,6 +228,18 @@ export function createApi({ store, logger, runner, maxExpansion = DEFAULT_MAX_EX
     },
     {
       method: 'GET',
+      segments: ['status'],
+      handler: async ({ res }) => {
+        sendJson(res, 200, {
+          timerRunning: Boolean(periodic && periodic.running),
+          timerReason: periodic && periodic.reason ? periodic.reason : null,
+          scheduler: scheduler ? scheduler.status() : { active: 0, queued: 0 },
+          nextAt: scheduler && scheduler.nextRunAt ? scheduler.nextRunAt() : null,
+        })
+      },
+    },
+    {
+      method: 'GET',
       segments: ['jobs'],
       handler: async ({ res }) => {
         sendJson(res, 200, { items: store.jobs.list() })
@@ -326,7 +283,8 @@ export function createApi({ store, logger, runner, maxExpansion = DEFAULT_MAX_EX
       handler: async ({ res, params }) => {
         const job = store.jobs.get(params.id)
         if (!job) throw new Error(MESSAGES.jobNotFound)
-        const runIds = await runJobNow(job, 'manual')
+        // 预占记录同步返回 runIds,执行经执行链闸门后台推进(结果经运行记录与日志呈现)
+        const runIds = await executor.dispatch(job, 'manual')
         sendJson(res, 200, { runIds })
       },
     },

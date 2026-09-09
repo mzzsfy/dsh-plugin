@@ -10,6 +10,7 @@ import { join } from 'node:path'
 
 import { createStore } from '../src/store.mjs'
 import { createLogger } from '../src/logger.mjs'
+import { createExecutor } from '../src/executor.mjs'
 import { createApi } from '../src/api.mjs'
 
 async function makeApi(t, overrides = {}) {
@@ -17,10 +18,10 @@ async function makeApi(t, overrides = {}) {
   t.after(() => rm(dir, { recursive: true, force: true }))
   const store = await createStore({ dir: join(dir, 'data') })
   const logger = createLogger({ rootDir: join(dir, 'logs') })
-  const api = createApi({ store, logger, ...overrides })
+  const executor = createExecutor({ store, logger, readMaxConcurrent: () => 2 })
+  const api = createApi({ store, logger, executor, ...overrides })
   return { store, api }
 }
-
 function makeReq(method, body) {
   const req = new EventEmitter()
   req.method = method
@@ -189,6 +190,48 @@ test('jobs 路由:同名多值展开为多条 RunRecord 与多次运行', async 
     logs.add(logRes.payload.text.match(/V=(\w+)/)[1])
   }
   assert.deepEqual([...logs].sort(), ['one', 'two'])
+})
+
+test('status 路由:报告调度器与 timer 可用性', async (t) => {
+  // Given scheduler 桩与 timer 运行标记
+  const { api } = await makeApi(t, {
+    scheduler: { status: () => ({ active: 1, queued: 2 }), nextRunAt: () => 1750000000000 },
+    periodic: { running: true, reason: null },
+  })
+  // When GET /status
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  // Then 状态齐备
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.timerRunning, true)
+  assert.deepEqual(res.payload.scheduler, { active: 1, queued: 2 })
+  assert.equal(res.payload.nextAt, 1750000000000)
+})
+
+test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', async (t) => {
+  const { api } = await makeApi(t, { periodic: { running: false, reason: '宿主定时服务不可用' } })
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  assert.equal(res.payload.timerRunning, false)
+  assert.equal(res.payload.timerReason, '宿主定时服务不可用')
+})
+
+test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {
+  // Given 两个任务各有一条运行记录
+  const { store, api } = await makeApi(t)
+  const j1 = await store.jobs.create({ name: 'j1', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  const j2 = await store.jobs.create({ name: 'j2', kind: 'shell', command: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000 })
+  await store.runs.create({ jobId: j1.id, trigger: 'cron', status: 'success' })
+  await store.runs.create({ jobId: j2.id, trigger: 'manual', status: 'success' })
+  // When 无参数查全量
+  const all = await call(api, 'GET', '/api/cron-board/runs')
+  // Then 两条齐全(新记录在前)
+  assert.equal(all.status, 200)
+  assert.equal(all.payload.items.length, 2)
+  assert.equal(all.payload.items[0].trigger, 'manual')
+  // When 带 jobId 过滤
+  const mine = await call(api, 'GET', '/api/cron-board/runs?jobId=' + j1.id)
+  // Then 仅该任务记录
+  assert.equal(mine.payload.items.length, 1)
+  assert.equal(mine.payload.items[0].jobId, j1.id)
 })
 
 // 轮询等待:超时抛错(测试内时间敏感操作统一出口)

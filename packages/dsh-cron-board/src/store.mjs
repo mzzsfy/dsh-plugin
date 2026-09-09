@@ -8,6 +8,30 @@ import { dirname, join } from 'node:path'
 const BAK_SUFFIX = '.bak'
 const TMP_SUFFIX = '.tmp'
 
+// Windows 下对刚写入目标的替换 rename 会报瞬态 EACCES/EBUSY/EPERM(Defender/索引器短暂锁定),
+// 有界重试消解;节奏镜像官方 dsh-atomic-write 的同名处理
+const RETRY_INITIAL_MS = 20
+const RETRY_MAX_MS = 200
+const RETRY_LIMIT = 8
+
+function isTransientRenameError(error) {
+  return process.platform === 'win32' && ['EACCES', 'EBUSY', 'EPERM'].includes(error && error.code)
+}
+
+async function renameWithRetry(temp, file) {
+  let delay = RETRY_INITIAL_MS
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(temp, file)
+      return
+    } catch (error) {
+      if (!isTransientRenameError(error) || attempt >= RETRY_LIMIT) throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay))
+    delay = Math.min(delay * 2, RETRY_MAX_MS)
+  }
+}
+
 // 每任务运行记录元数据保留上限:超限裁最旧,防 runs.json 无界增长
 export const RUNS_KEEP_PER_JOB = 200
 
@@ -30,7 +54,7 @@ function createCollection({ file, chain, idKey }) {
     await mkdir(dirname(file), { recursive: true })
     const tmp = file + TMP_SUFFIX
     await writeFile(tmp, JSON.stringify(rows), 'utf8')
-    await rename(tmp, file)
+    await renameWithRetry(tmp, file)
   }
 
   return {
@@ -52,10 +76,13 @@ function createCollection({ file, chain, idKey }) {
       }
     },
     list(filter) {
-      return filter ? rows.filter(filter) : rows
+      const source = filter ? rows.filter(filter) : rows
+      // 对外浅拷贝:防调用方原地修改污染内存态(mutate 以 Object.assign 原地生效)
+      return source.map((row) => ({ ...row }))
     },
     get(id) {
-      return rows.find((row) => row[idKey] === id)
+      const row = rows.find((item) => item[idKey] === id)
+      return row ? { ...row } : undefined
     },
     // 读改写经共享互斥链串行化;链上失败不传播到后续写,调用方 await 本次结果感知单次失败
     mutate(fn) {
@@ -158,7 +185,7 @@ export async function createStore({ dir }) {
       get rows() {
         return runs.rows
       },
-      list: (jobId) => runs.list((row) => row.jobId === jobId),
+      list: (jobId) => (jobId ? runs.list((row) => row.jobId === jobId) : runs.list()),
       get: (runId) => runs.get(runId),
       create: createRun,
       update: (runId, patch) => runs.update(runId, patch),
