@@ -1818,7 +1818,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-rule-conds{display:flex;flex-direction:column;gap:6px}
 .ud-cond{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap}
-.ud-cond-kind{width:auto;min-width:88px}
+/* specificity 须高于 .ud-input 的 width:100%,否则类型下拉撑满整行把字段区挤到下一行 */
+.ud-cond .ud-cond-kind{width:auto;min-width:88px;flex:0 0 auto}
 .ud-cond-fields{display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
 .ud-cond-fields .ud-field{flex:0 1 auto}
 .ud-cond-fields .ud-input{width:auto}
