@@ -81,7 +81,9 @@ function fakeDomain({ failUpdate = () => null } = {}) {
   }
 }
 
-const facilityOf = (domain) => ({ open: async () => domain })
+const facilityOf = (domain, backupDomain) => ({
+  open: async (definition) => (definition?.name === 'usage_stats_backup' ? (backupDomain ?? domain) : domain),
+})
 
 const tokenSample = (time, extra = {}) => ({
   time,
@@ -435,6 +437,61 @@ test('启动时游标非空则既有行保留', async () => {
   const store = new UsageStore(facilityOf(domain))
   await store.readyPromise()
   assert.equal(domain.rows.size, 1)
+})
+
+test('reset 前自动快照,restore 整体回退到快照态', async () => {
+  const domain = fakeDomain()
+  const backup = fakeDomain()
+  const store = new UsageStore(facilityOf(domain, backup))
+  await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
+  await store.markSeenSessions(['s1', 's2'])
+  assert.equal(store.backupInfo().available, false)
+  await store.reset()
+  assert.equal(domain.rows.size, 0)
+  assert.deepEqual([...(await store.seenSessions())], [])
+  // 快照在清空前生成:行与游标都可回退
+  const info = store.backupInfo()
+  assert.equal(info.available, true)
+  assert.equal(info.rows, 3)
+  assert.equal(info.sessions, 2)
+  const restored = await store.restoreFromBackup()
+  assert.equal(restored.rows, 3)
+  assert.equal(domain.rows.size, 3)
+  assert.deepEqual([...(await store.seenSessions())].sort(), ['s1', 's2'])
+})
+
+test('restore 前先快照当前态:回退动作自身可再回退', async () => {
+  const domain = fakeDomain()
+  const backup = fakeDomain()
+  const store = new UsageStore(facilityOf(domain, backup))
+  await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
+  await store.reset()
+  await store.record(tokenSample(local(2026, 8, 3, 14, 0), { inputTokens: 99 }))
+  await store.flushNow()
+  // 第一轮回退到重建前(有 8/2 数据)
+  await store.restoreFromBackup()
+  const dayRows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
+  assert.equal(dayRows.length, 1)
+  // 第二次回退回到"重建后"(8/3 数据),回退链不断
+  await store.restoreFromBackup()
+  const after = await store.rangeRows('D', '2026-08-03', '2026-08-03')
+  assert.equal(after.length, 1)
+})
+
+test('备份域不可用:重建照常,backupInfo 标记不可用,restore 报错', async () => {
+  const domain = fakeDomain()
+  const facility = {
+    open: async (definition) => {
+      if (definition?.name === 'usage_stats_backup') throw new Error('backup domain unavailable')
+      return domain
+    },
+  }
+  const store = new UsageStore(facility)
+  await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
+  await store.reset()
+  assert.equal(domain.rows.size, 0)
+  assert.equal(store.backupInfo().available, false)
+  await assert.rejects(store.restoreFromBackup(), /backup domain unavailable/)
 })
 
 test('域打开失败进入降级:ready 可等待,操作按调用失败', async () => {

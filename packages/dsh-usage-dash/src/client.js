@@ -18,7 +18,7 @@ const DEFAULT_MINUTE_PRESET = '24h'
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
 const API_PREFIX = '/api/usage-dash/'
-const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', pricing: 'pricing' }
+const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', restore: 'restore', pricing: 'pricing' }
 
 // 宿主语义 token 之外的插件本地模型色板容量与哨兵
 const GROUP_TOP_COUNT = 5
@@ -148,6 +148,9 @@ const MESSAGES_ZH = {
   'status.running': '回扫中 {done}/{total}',
   rebuild: '重建',
   rebuildConfirm: '确认重建',
+  restore: '回退数据',
+  restoreConfirm: '确认回退',
+  restoreMissing: '无可用回退点(重建时自动生成)',
   hourTrend: '按小时 Token 趋势',
   minuteTrend: '按分钟 Token 趋势',
   'hourPreset.24h': '24 小时',
@@ -284,6 +287,9 @@ const MESSAGES_EN = {
   'status.running': 'Rescanning {done}/{total}',
   rebuild: 'Rebuild',
   rebuildConfirm: 'Confirm rebuild',
+  restore: 'Restore data',
+  restoreConfirm: 'Confirm restore',
+  restoreMissing: 'No restore point (created automatically on rebuild)',
   hourTrend: 'Hourly token trend',
   minuteTrend: 'Per-minute token trend',
   'hourPreset.24h': '24 hours',
@@ -2770,6 +2776,40 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         armed ? t('rebuildConfirm') : t('rebuild'))
     }
 
+    // 回退按钮:仅当存在重建快照(status.backup.available)时可点;
+    // 恢复动作本身也会被重新快照覆盖,回退链不断
+    function RestoreButton({ machineRef, busy, backup, onError, t = defaultT }) {
+      const [armed, setArmed] = useState(false)
+      const armedTimerRef = useRef(null)
+
+      useEffect(() => () => {
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+      }, [])
+
+      if (!backup?.available) {
+        return h('button', { className: 'ud-btn ud-btn--text', disabled: true, title: t('restoreMissing') },
+          t('restore'))
+      }
+
+      const restore = async () => {
+        if (!armed) {
+          setArmed(true)
+          armedTimerRef.current = setTimeout(() => setArmed(false), REBUILD_CONFIRM_MS)
+          return
+        }
+        setArmed(false)
+        const result = await requestPost(ENDPOINTS.restore)
+        if (!result.ok) {
+          onError(result.message)
+          return
+        }
+        machineRef.current?.restart()
+      }
+
+      return h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: restore },
+        armed ? t('restoreConfirm') : t('restore'))
+    }
+
     const viewLabel = (t, id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
     const trendTitle = (t, id) => (id === 'day' ? t('dailyTrend') : id === 'hour' ? t('hourTrend') : t('minuteTrend'))
     const trendLimitedText = (t, id, count) => (id === 'day'
@@ -3016,7 +3056,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           ? h('div', { className: 'ud-detail' },
               h(AnomalyLog, { status, t }),
               h('div', { className: 'ud-detail-foot' },
-                h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })))
+                h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t }),
+                h(RestoreButton, { machineRef: statusMachineRef, busy: status?.running === true, backup: status?.backup, onError: setError, t })))
           : null,
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,

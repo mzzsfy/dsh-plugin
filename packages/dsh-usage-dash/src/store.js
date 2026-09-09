@@ -104,6 +104,24 @@ export const usageStatsDomain = defineDomain({
   },
 })
 
+// 重建回退备份域:与主域同构表,global 多记 takenAt(快照时刻)。
+// 独立域而非主域内备份表——reset 清主域数据,同域备份会陪葬
+export const usageBackupDomain = defineDomain({
+  name: `${DOMAIN_NAME}_backup`,
+  version: 1,
+  tables: {
+    [TABLE_BUCKETS]: domainTable(usageRowSchema),
+  },
+  global: {
+    schema: z.object({
+      backfilledSessions: z.array(z.string()),
+      liveFirstSeq: z.record(z.string(), z.number()).optional(),
+      takenAt: z.number().optional(),
+    }),
+    initial: { backfilledSessions: [], liveFirstSeq: {}, takenAt: undefined },
+  },
+})
+
 export function rowKey(g, bucket, provider, model) {
   return `${g}|${bucket}|${provider}|${model}`
 }
@@ -171,6 +189,8 @@ export class UsageStore {
     this.onFlushError = options.onFlushError
     this.table = null
     this.domain = null
+    this.backupDomain = undefined
+    this.backupTable = undefined
     this.openError = undefined
     this.lastPruneDay = ''
     this.markChain = Promise.resolve()
@@ -191,6 +211,9 @@ export class UsageStore {
     if ((cursor?.backfilledSessions?.length ?? 0) === 0 && !this.table.keys().next().done) {
       for (const key of [...this.table.keys()]) await this.table.delete(key)
     }
+    // 备份域打开失败仅禁用回退能力,不拖垮主采集(openError 只覆盖主域)
+    this.backupDomain = await facility.open(usageBackupDomain).catch(() => undefined)
+    this.backupTable = this.backupDomain?.table(TABLE_BUCKETS)
   }
 
   get degradation() {
@@ -375,6 +398,9 @@ export class UsageStore {
   reset(boundaries) {
     return this.enqueueGlobalWrite(async () => {
       await this.flushBatch()
+      // 清空前快照到备份域:重建丢数据(规则缺陷/中断/口径变化)可整体回退;
+      // 备份不可用视为 reset 失败——回退安全带是重建的前置条件
+      await this.snapshotToBackup()
       const table = this.requireTable()
       for (const key of [...table.keys()]) await table.delete(key)
       const liveFirstSeq = {}
@@ -383,11 +409,53 @@ export class UsageStore {
     })
   }
 
-  // global 只有整值覆写:全部游标写挂同一链,读改写不再交错
+  // 当前全量(表行 + 游标 + 时刻)写入备份域,覆盖旧备份:恢复点恒为最近一次清空/恢复前;
+  // 备份域不可用时跳过(重建不被卡死,仅失去回退点,backupInfo 透明展示)
+  async snapshotToBackup() {
+    if (this.backupTable === undefined) return
+    const cursor = this.readCursor() ?? {}
+    for (const key of [...this.backupTable.keys()]) await this.backupTable.delete(key)
+    for (const [key, row] of this.requireTable().entries()) await this.backupTable.put(key, row)
+    await this.backupDomain.global.set({
+      backfilledSessions: cursor.backfilledSessions ?? [],
+      liveFirstSeq: cursor.liveFirstSeq ?? {},
+      takenAt: this.now(),
+    })
+  }
+
+  // 备份写回主域;当前态先入备份(恢复动作自身可回退),故必须先取备份内容
+  // 再覆盖备份域;返回快照时刻与回写行数
+  async restoreFromBackup() {
+    if (this.backupTable === undefined) throw new Error('usage backup domain unavailable')
+    return this.enqueueGlobalWrite(async () => {
+      await this.flushBatch()
+      const savedRows = [...this.backupTable.entries()]
+      const saved = this.backupDomain.global.get()
+      await this.snapshotToBackup()
+      for (const key of [...this.requireTable().keys()]) await this.table.delete(key)
+      for (const [key, row] of savedRows) await this.table.put(key, row)
+      await this.writeGlobal(saved?.backfilledSessions ?? [], saved?.liveFirstSeq ?? {})
+      return { takenAt: saved?.takenAt, rows: savedRows.length }
+    })
+  }
+
+  // 备份元信息:available=false 表示无回退点(从未重建/备份域不可用)
+  backupInfo() {
+    if (this.backupTable === undefined) return { available: false }
+    const saved = this.backupDomain.global.get()
+    return {
+      available: typeof saved?.takenAt === 'number',
+      takenAt: saved?.takenAt,
+      rows: [...this.backupTable.keys()].length,
+      sessions: saved?.backfilledSessions?.length ?? 0,
+    }
+  }
+
+  // global 只有整值覆写:全部游标写挂同一链,读改写不再交错;write 返回值透传
   enqueueGlobalWrite(write) {
     const pending = this.markChain.then(async () => {
       await this.ready
-      await write()
+      return write()
     })
     this.markChain = pending.then(() => {}, () => {})
     return pending
