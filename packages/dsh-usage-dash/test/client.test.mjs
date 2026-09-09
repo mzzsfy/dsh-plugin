@@ -61,6 +61,8 @@ const {
   hourTickLabel,
   indexOfDay,
   isEmptyRange,
+  groupRulesOf,
+  insertRuleAt,
   logTimeOf,
   matchPrice,
   maxSlotsFor,
@@ -68,12 +70,14 @@ const {
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
-  moveRuleAt,
+  moveRuleTo,
   niceTicks,
   otherDetailItems,
   parseEnvelope,
   providerOf,
   rateAxisTicks,
+  removeRulesAt,
+  renameRulesAt,
   resolveDayRange,
   resolveHourRange,
   resolveMinuteRange,
@@ -861,29 +865,67 @@ test('coercePricingRules 连带规整条件', () => {
   assert.deepEqual(coerced[0].price, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
 })
 
-// —— 定价规则排序:同模型多规则从上到下匹配,顺序即优先级 ——
+// —— 定价编辑器分组视图:模型组 + 组内槽位,组内从上到下匹配,末尾无条件槽位兜底 ——
 
-test('moveRuleAt 相邻交换返回新数组且不动原数组', () => {
-  // Given 三条规则 When 第 2 条上移一格 Then 新序 [B,A,C],原数组保持 [A,B,C]
-  const rules = [{ model: 'a/1' }, { model: 'a/2' }, { model: 'a/3' }]
-  const moved = moveRuleAt(rules, 1, -1)
-  assert.deepEqual(moved.map((rule) => rule.model), ['a/2', 'a/1', 'a/3'])
-  assert.deepEqual(rules.map((rule) => rule.model), ['a/1', 'a/2', 'a/3'])
+test('groupRulesOf 按模型聚合,组序为首次出现序,槽位保序带平面索引', () => {
+  // Given 平面规则 [a1, b1, a2] When 分组 Then a 组槽位 [0,2]、b 组槽位 [1],组顺序按首次出现
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const groups = groupRulesOf(rules)
+  assert.deepEqual(groups.map((group) => group.model), ['a/1', 'b/1'])
+  assert.deepEqual(groups[0].slots.map((slot) => slot.index), [0, 2])
+  assert.deepEqual(groups[1].slots.map((slot) => slot.index), [1])
+  groups[0].slots.forEach((slot, i) => assert.equal(slot.rule, rules[[0, 2][i]]))
+})
+
+test('groupRulesOf 空表返回空组列表', () => {
+  assert.deepEqual(groupRulesOf([]), [])
+})
+
+test('moveRuleTo 跨位移动返回新数组且不动原数组', () => {
+  // Given [A,B,C] When 索引 2 移到索引 0 Then [C,A,B],原数组不变
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/2' }]
+  const moved = moveRuleTo(rules, 2, 0)
+  assert.deepEqual(moved.map((rule) => rule.model), ['a/2', 'a/1', 'b/1'])
+  assert.deepEqual(rules.map((rule) => rule.model), ['a/1', 'b/1', 'a/2'])
   assert.notEqual(moved, rules)
 })
 
-test('moveRuleAt 下移一格', () => {
-  // Given 三条规则 When 首条下移一格 Then 新序 [B,A,C]
-  const rules = [{ model: 'a/1' }, { model: 'a/2' }, { model: 'a/3' }]
-  assert.deepEqual(moveRuleAt(rules, 0, 1).map((rule) => rule.model), ['a/2', 'a/1', 'a/3'])
+test('moveRuleTo 组内上移等价于移到组内前一槽位平面位', () => {
+  // Given [a1,b1,a2] When a2 移到 a1 平面位 0 Then [a2,a1,b1],a 组内序为 a2,a1
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  assert.deepEqual(moveRuleTo(rules, 2, 0).map((rule) => rule.model), ['a/1', 'a/1', 'b/1'])
 })
 
-test('moveRuleAt 越界或零步长返回原数组引用', () => {
-  // Given 首条上移/末条下移/零步长 When 移动 Then 恒返回原引用,UI 无操作
+test('moveRuleTo 同位或越界返回原数组引用', () => {
+  // Given 同源同目标/越界 When 移动 Then 恒返回原引用,UI 无操作
   const rules = [{ model: 'a/1' }, { model: 'a/2' }]
-  assert.equal(moveRuleAt(rules, 0, -1), rules)
-  assert.equal(moveRuleAt(rules, rules.length - 1, 1), rules)
-  assert.equal(moveRuleAt(rules, 0, 0), rules)
-  assert.equal(moveRuleAt(rules, -1, 1), rules)
-  assert.equal(moveRuleAt(rules, rules.length, -1), rules)
+  assert.equal(moveRuleTo(rules, 0, 0), rules)
+  assert.equal(moveRuleTo(rules, -1, 1), rules)
+  assert.equal(moveRuleTo(rules, 0, rules.length), rules)
+  assert.equal(moveRuleTo(rules, rules.length, 0), rules)
+})
+
+test('renameRulesAt 批量改组内模型键,其余规则不动', () => {
+  // Given 索引 [0,2] 改名 x/y When 应用 Then 仅这两条 model 变 x/y
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const renamed = renameRulesAt(rules, [0, 2], 'x/y')
+  assert.deepEqual(renamed.map((rule) => rule.model), ['x/y', 'b/1', 'x/y'])
+  assert.notEqual(renamed[0], rules[0])
+  assert.equal(renamed[1], rules[1])
+  assert.notEqual(renamed[2], rules[2])
+})
+test('insertRuleAt 插入到目标位之后', () => {
+  // Given 组内末槽位平面索引 2 When 插入新槽位 Then 落在索引 3,后续元素后移
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const next = insertRuleAt(rules, 2, { model: 'a/1' })
+  assert.equal(next.length, 4)
+  assert.equal(next[3].model, 'a/1')
+  assert.equal(next[1].model, 'b/1')
+})
+
+test('removeRulesAt 批量移除组内槽位', () => {
+  // Given 索引 [0,2] When 删除 Then 仅剩 b 组
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const rest = removeRulesAt(rules, [0, 2])
+  assert.deepEqual(rest.map((rule) => rule.model), ['b/1'])
 })

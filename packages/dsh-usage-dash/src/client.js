@@ -196,7 +196,7 @@ const MESSAGES_ZH = {
   priceOutput: '输出',
   priceCacheRead: '缓存读',
   priceCacheWrite: '缓存写',
-  noCondition: '无条件 = 恒生效',
+  noCondition: '无条件 = 兜底价(恒生效)',
   addCondition: '添加条件',
   deleteCondition: '删除条件',
   condKind: '条件类型',
@@ -218,11 +218,14 @@ const MESSAGES_ZH = {
   condMonthDay: '需 1-31 整数',
   condDate: '需 YYYY-MM-DD',
   condRange: '区间不能为空,起始须早于结束(左闭右开)',
-  deleteRule: '删除规则',
-  addRule: '添加规则',
-  ruleOrderHint: '规则从上到下匹配,首个命中生效;建议无条件规则放末尾兜底',
+  ruleOrderHint: '同一模型内计费规则从上到下匹配,首个命中生效;末尾放无条件规则兜底',
   moveUp: '上移',
   moveDown: '下移',
+  addGroup: '添加模型',
+  addRule: '添加额外计费规则',
+  deleteGroup: '删除模型及其全部计费规则',
+  deleteRule: '删除计费规则',
+  addCondition: '添加条件',
   save: '保存',
   saved: '已保存',
   required: '必填',
@@ -325,7 +328,7 @@ const MESSAGES_EN = {
   priceOutput: 'Output',
   priceCacheRead: 'Cache read',
   priceCacheWrite: 'Cache write',
-  noCondition: 'No condition = always applies',
+  noCondition: 'No condition = fallback price (always applies)',
   addCondition: 'Add condition',
   deleteCondition: 'Remove condition',
   condKind: 'Condition kind',
@@ -347,11 +350,14 @@ const MESSAGES_EN = {
   condMonthDay: 'Requires integer 1-31',
   condDate: 'Requires YYYY-MM-DD',
   condRange: 'Range must not be empty: from must be before to (end-exclusive)',
-  deleteRule: 'Remove rule',
-  addRule: 'Add rule',
-  ruleOrderHint: 'Rules match top-down; the first hit wins. Put the condition-less rule last as the fallback',
+  ruleOrderHint: 'Within a model, pricing rules match top-down and the first hit wins; keep a condition-less rule last as the fallback',
   moveUp: 'Move up',
   moveDown: 'Move down',
+  addGroup: 'Add model',
+  addRule: 'Add extra pricing rule',
+  deleteGroup: 'Delete model and all its pricing rules',
+  deleteRule: 'Remove pricing rule',
+  addCondition: 'Add condition',
   save: 'Save',
   saved: 'Saved',
   required: 'Required',
@@ -1444,14 +1450,45 @@ const defaultPricingRule = (currency = CURRENCIES[0]) => ({
 
 const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
 
-// 规则排序纯函数:与相邻项交换;越界/零步长返回原引用(UI 侧按钮按位置隐藏,双保险)
-function moveRuleAt(rules, index, delta) {
-  const target = index + delta
-  if (!Array.isArray(rules) || delta === 0 || index < 0 || index >= rules.length || target < 0 || target >= rules.length) return rules
+// 编辑器分组视图纯函数:wire 契约(平面数组)不变,组/槽位仅是展示层投影。
+// 槽位移动/增删均落回平面数组的对应位置变换,组内相对顺序即匹配优先序。
+
+// 按模型键聚合:组序为首次出现序,槽位保序并携带平面索引(错误路径与移动操作的寻址键)
+function groupRulesOf(rules) {
+  const groups = new Map()
+  ;(rules ?? []).forEach((rule, index) => {
+    const key = rule.model
+    if (!groups.has(key)) groups.set(key, { model: key, slots: [] })
+    groups.get(key).slots.push({ rule, index })
+  })
+  return [...groups.values()]
+}
+
+// 槽位跨位移动(splice 语义):同位或越界返回原引用
+function moveRuleTo(rules, fromIndex, toIndex) {
+  if (!Array.isArray(rules) || fromIndex === toIndex) return rules
+  if (fromIndex < 0 || fromIndex >= rules.length || toIndex < 0 || toIndex >= rules.length) return rules
   const moved = [...rules]
-  const [item] = moved.splice(index, 1)
-  moved.splice(target, 0, item)
+  const [item] = moved.splice(fromIndex, 1)
+  moved.splice(toIndex, 0, item)
   return moved
+}
+
+// 组级改名:仅命中索引集的规则变更 model,其余保持引用不变
+function renameRulesAt(rules, indexes, model) {
+  const hit = new Set(indexes)
+  return rules.map((rule, i) => (hit.has(i) ? { ...rule, model } : rule))
+}
+
+// 插入到目标平面位之后(组内添加槽位 = 组内末槽位索引 + 1)
+function insertRuleAt(rules, position, rule) {
+  return [...rules.slice(0, position + 1), rule, ...rules.slice(position + 1)]
+}
+
+// 批量移除(组删除)
+function removeRulesAt(rules, indexes) {
+  const hit = new Set(indexes)
+  return rules.filter((_, i) => !hit.has(i))
 }
 
 
@@ -1732,6 +1769,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
 .ud-pref-desc{font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .ud-rule{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:10px 12px}
+.ud-rule-group{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px}
+.ud-rule-group-head{display:flex;align-items:flex-end;gap:8px}
+.ud-rule-group-head .ud-field{flex:1}
+.ud-rule-group-slots{display:flex;flex-direction:column;gap:8px}
+.ud-rule-group-slots .ud-rule{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 40%,transparent)}
+.ud-slot-head{display:flex;align-items:flex-end;gap:8px}
+.ud-slot-head .ud-price-grid{flex:1}
 .ud-rule-head{display:flex;align-items:flex-end;gap:8px}
 .ud-rule-head .ud-field{flex:1}
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
@@ -2312,9 +2356,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
-    // 条件行:类型下拉 + 按类型字段区 + 删除;类型切换重置为该类型默认值(字段结构互不相通)
-    // 规则卡头部右上:上移/下移(顺序即匹配优先级,首条无上移、末条无下移)+ 删除
-    function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
+    // 槽位卡(模型组内的一条定价):头行 = 价格四桶 + 上移/下移/删除;下方为任意条件组合区。
+    // 组内从上到下首个命中槽位生效,无条件槽位恒生效即兜底
+    function PricingSlotCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
@@ -2384,15 +2428,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           }, '×'))
       }
       return h('div', { className: 'ud-rule' },
-        h('div', { className: 'ud-rule-head' },
-          h('label', { className: 'ud-field' },
-            h('span', { className: 'ud-field-label' }, t('pricingModel')),
-            h('input', {
-              type: 'text', className: 'ud-input', value: rule.model,
-              placeholder: t('pricingModelPlaceholder'),
-              onChange: (event) => onPatch({ model: event.target.value }),
-            }),
-            errorTextOf(`${pathPrefix}model`)),
+        h('div', { className: 'ud-slot-head' },
+          h('div', { className: 'ud-price-grid' },
+            priceField('input', 'priceInput'),
+            priceField('output', 'priceOutput'),
+            priceField('cacheRead', 'priceCacheRead'),
+            priceField('cacheWrite', 'priceCacheWrite')),
           canMoveUp ? h('button', {
             className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(-1),
             'aria-label': t('moveUp'), title: t('moveUp'),
@@ -2405,19 +2446,53 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
             'aria-label': t('deleteRule'), title: t('deleteRule'),
           }, '×')),
-        h('div', { className: 'ud-price-grid' },
-          priceField('input', 'priceInput'),
-          priceField('output', 'priceOutput'),
-          priceField('cacheRead', 'priceCacheRead'),
-          priceField('cacheWrite', 'priceCacheWrite')),
         h('div', { className: 'ud-rule-conds' },
           (rule.conditions ?? []).length === 0 ? h('span', { className: 'ud-rule-cond' }, t('noCondition')) : null,
           (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
           h('div', { className: 'ud-cond-add' },
-            CONDITION_KIND_OPTIONS.map((kind) => h('button', {
-              key: kind, type: 'button', className: 'ud-btn ud-btn--text',
-              onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(kind)]),
-            }, `+${t(CONDITION_KIND_LABEL_KEYS[kind])}`)))))
+            h('button', {
+              type: 'button', className: 'ud-btn ud-btn--text',
+              onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(CONDITION_KIND_OPTIONS[0])]),
+            }, `+${t('addCondition')}`))))
+    }
+
+    // 模型组卡:组头 = 模型键输入(整组一次改名)+ 删除;组内槽位从上到下匹配,末尾无条件槽位兜底。
+    // 组件 key 由调用方锚定首槽位平面索引,改名引发的重新聚合不会丢焦点
+    function PricingModelGroup({ group, currency, errors, t, onModelChange, onGroupRemove, onSlotPatch, onSlotRemove, onSlotMove, onSlotAdd }) {
+      const modelError = group.slots.map((slot) => errors.get(`${slot.index}.model`)).find(Boolean)
+      const lastIndex = group.slots[group.slots.length - 1].index
+      return h('div', { className: 'ud-rule-group' },
+        h('div', { className: 'ud-rule-group-head' },
+          h('label', { className: 'ud-field' },
+            h('span', { className: 'ud-field-label' }, t('pricingModel')),
+            h('input', {
+              type: 'text', className: 'ud-input', value: group.model,
+              placeholder: t('pricingModelPlaceholder'),
+              onChange: (event) => onModelChange(event.target.value),
+            }),
+            modelError ? h('span', { className: 'ud-field-error' }, t(modelError)) : null),
+          h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: onGroupRemove,
+            'aria-label': t('deleteGroup'), title: t('deleteGroup'),
+          }, '×')),
+        h('div', { className: 'ud-rule-group-slots' },
+          group.slots.map((slot, position) => h(PricingSlotCard, {
+            key: slot.index,
+            rule: slot.rule,
+            currency,
+            errors,
+            pathPrefix: `${slot.index}.`,
+            t,
+            onPatch: (part) => onSlotPatch(slot.index, part),
+            onRemove: () => onSlotRemove(slot.index),
+            onMove: (delta) => onSlotMove(slot.index, group.slots[position + delta].index),
+            canMoveUp: position > 0,
+            canMoveDown: position < group.slots.length - 1,
+          }))),
+        h('button', {
+          className: 'ud-rule-add', type: 'button',
+          onClick: () => onSlotAdd(lastIndex),
+        }, t('addRule')))
     }
 
     function PricingEditor({ t = defaultT }) {
@@ -2501,23 +2576,24 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
         h('span', { className: 'ud-rule-cond' }, t('ruleOrderHint')),
-        rules.map((rule, index) => h(PricingRuleCard, {
-          key: index,
-          rule,
+        groupRulesOf(rules).map((group) => h(PricingModelGroup, {
+          // key 锚定首槽位平面索引:改名重聚合不重建组件,输入焦点不丢
+          key: String(group.slots[0].index),
+          group,
           currency,
           errors,
-          pathPrefix: `${index}.`,
           t,
-          onPatch: (part) => setRules((prev) => patchItemAt(prev, index, part)),
-          onRemove: () => setRules((prev) => prev.filter((_, i) => i !== index)),
-          onMove: (delta) => setRules((prev) => moveRuleAt(prev, index, delta)),
-          canMoveUp: index > 0,
-          canMoveDown: index < rules.length - 1,
+          onModelChange: (model) => setRules((prev) => renameRulesAt(prev, group.slots.map((slot) => slot.index), model)),
+          onGroupRemove: () => setRules((prev) => removeRulesAt(prev, group.slots.map((slot) => slot.index))),
+          onSlotPatch: (index, part) => setRules((prev) => patchItemAt(prev, index, part)),
+          onSlotRemove: (index) => setRules((prev) => prev.filter((_, i) => i !== index)),
+          onSlotMove: (fromIndex, toIndex) => setRules((prev) => moveRuleTo(prev, fromIndex, toIndex)),
+          onSlotAdd: (position) => setRules((prev) => insertRuleAt(prev, position, { ...defaultPricingRule(currency), model: group.model })),
         })),
         h('button', {
           className: 'ud-rule-add', type: 'button',
           onClick: () => setRules((prev) => [...prev, defaultPricingRule(currency)]),
-        }, t('addRule')))
+        }, t('addGroup')))
     }
 
     // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示
