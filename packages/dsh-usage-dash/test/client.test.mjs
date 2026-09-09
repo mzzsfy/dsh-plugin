@@ -377,9 +377,9 @@ test('leftAxisTicks 速度模式标定速度刻度,否则标定 token 刻度', (
   approx(speedTicks[1].ratio, 1)
 })
 
-test('hour/minute 悬浮窗槽标签:T 换空格,小时带时,分钟保 HH:MM', () => {
-  assert.equal(hourSlotLabel('2026-03-15T14'), '2026-03-15 14时')
-  assert.equal(hourSlotLabel('2026-03-15T00'), '2026-03-15 00时')
+test('hour/minute 悬浮窗槽标签:T 换空格,小时带 h 后缀,分钟保 HH:MM', () => {
+  assert.equal(hourSlotLabel('2026-03-15T14'), '2026-03-15 14h')
+  assert.equal(hourSlotLabel('2026-03-15T00'), '2026-03-15 00h')
   assert.equal(minuteSlotLabel('2026-03-15T14:30'), '2026-03-15 14:30')
   assert.equal(minuteSlotLabel('2026-03-15T00:00'), '2026-03-15 00:00')
 })

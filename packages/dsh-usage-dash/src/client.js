@@ -423,9 +423,9 @@ function minuteTickLabel(key) {
   return time === MIDNIGHT_TIME ? `${shortDay(key.slice(0, DAY_KEY_LENGTH))} ${time}` : time
 }
 
-// 悬浮窗槽标签:完整日期去 T 分隔,小时带"时"后缀,分钟保留 HH:MM
+// 悬浮窗槽标签:完整日期去 T 分隔,小时以 h 后缀标定(避免 i18n 单位问题),分钟保留 HH:MM
 function hourSlotLabel(key) {
-  return `${key.slice(0, DAY_KEY_LENGTH)} ${key.slice(DAY_KEY_LENGTH + 1)}时`
+  return `${key.slice(0, DAY_KEY_LENGTH)} ${key.slice(DAY_KEY_LENGTH + 1)}h`
 }
 
 function minuteSlotLabel(key) {
