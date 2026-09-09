@@ -11,7 +11,7 @@ const SESSION_UNAVAILABLE = {
   run: async () => ({ status: 'fail', message: '会话服务不可用' }),
 }
 
-export function createExecutor({ store, logger, runner, sessionRunner, maxExpansion = DEFAULT_MAX_EXPANSION, readMaxConcurrent, readLogKeep, readMaskEnvInPrompt }) {
+export function createExecutor({ store, logger, runner, sessionRunner, maxExpansion = DEFAULT_MAX_EXPANSION, readMaxConcurrent, readLogKeep, readMaskEnvInPrompt, logSystem }) {
   const shellRunner = runner || createShellRunner({ workdirFallback: process.cwd() })
   // 队列与活跃计数:许可数 = min(全局上限, 任务级收紧值);全局上限经 readMaxConcurrent 动态读
   const queue = []
@@ -69,6 +69,31 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       const jobPatch = { lastStatus: outcome.status, lastDurationMs: patch.durationMs }
       if (outcome.pinnedNewId !== undefined) jobPatch.pinnedSessionId = outcome.pinnedNewId
       await store.jobs.update(job.id, jobPatch)
+    } catch (error) {
+      // runner 拒绝(会话服务异常等)也必须有终态,否则运行记录永久停留 running;
+      // 先读当前态:try 侧已落库终态(部分写成功,如任务卡回填失败)不得覆写,
+      // 任务卡回填改报实际终态;补写失败经 logSystem 留痕(store 损坏时文件日志仍可观测)
+      const detail = error && error.message ? error.message : String(error)
+      const current = store.runs.get(record.runId)
+      const persisted = current !== undefined && current.status !== 'queued' && current.status !== 'running'
+      try {
+        if (!persisted) {
+          await store.runs.update(record.runId, {
+            status: 'fail',
+            endedAt: Date.now(),
+            message: detail,
+          })
+        }
+        await store.jobs.update(job.id, { lastStatus: persisted ? current.status : 'fail' })
+      } catch (persistError) {
+        // 两条路径都留痕(可观测性):未落库=数据面缺口须知晓;已落库=任务卡回填缺口
+        const persistDetail = persistError && persistError.message ? persistError.message : String(persistError)
+        if (persisted) {
+          logSystem?.('cron-board 运行已终态但任务卡回填失败 run=' + record.runId + ' 错误=' + persistDetail)
+        } else {
+          logSystem?.('cron-board 运行终态补写失败 run=' + record.runId + ' 原始错误=' + detail + ' 补写错误=' + persistDetail)
+        }
+      }
     } finally {
       activeTotal--
       activeByJob.set(job.id, activeOf(job.id) - 1)
