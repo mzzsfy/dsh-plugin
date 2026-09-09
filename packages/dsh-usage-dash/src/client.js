@@ -13,7 +13,7 @@ const MINUTE_PRESET_MINUTES = { '3h': 3 * 60, '24h': 24 * 60, '3d': 3 * 24 * 60,
 
 const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
-const DEFAULT_MINUTE_PRESET = '60m'
+const DEFAULT_MINUTE_PRESET = '24h'
 
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180

@@ -15,6 +15,9 @@ const {
   CHART_PAD,
   DAY_MAX_SLOTS,
   DAY_PRESETS,
+  DEFAULT_HOUR_PRESET,
+  DEFAULT_MINUTE_PRESET,
+  DEFAULT_RANGE,
   DONUT_CENTER_XY,
   DONUT_CIRCUMFERENCE,
   DONUT_OUTER_RADIUS,
@@ -131,6 +134,13 @@ test('预设定义表覆盖三视图', () => {
   assert.deepEqual(DAY_PRESETS, ['7', '30', '90'])
   assert.deepEqual(HOUR_PRESETS, ['24h', '3d', '7d', '15d'])
   assert.deepEqual(MINUTE_PRESETS, ['3h', '24h', '3d', '7d'])
+})
+
+test('默认挡位均在其挡位列表内,分钟窗口可解析', () => {
+  assert.ok(DAY_PRESETS.includes(DEFAULT_RANGE))
+  assert.ok(HOUR_PRESETS.includes(DEFAULT_HOUR_PRESET))
+  assert.ok(MINUTE_PRESETS.includes(DEFAULT_MINUTE_PRESET))
+  assert.notEqual(resolveMinuteRange(DEFAULT_MINUTE_PRESET, NOW), null)
 })
 
 test('时/分挡位文案键逐挡齐备,含跨表同 id 挡位', () => {
