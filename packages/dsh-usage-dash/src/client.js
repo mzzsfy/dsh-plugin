@@ -179,12 +179,11 @@ const MESSAGES_ZH = {
   tokenDetail: '会话 Token 明细',
   tokenDetailDesc: '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。',
   costDisplay: '费用显示',
-  costDisplayDesc: '在信息栏与趋势悬浮中显示按当前费率估算的费用。',
+  costDisplayDesc: '在信息栏、趋势悬浮与回合费用芯片中显示按当前费率估算的费用。',
   costTitle: '按当前费率对历史用量估算,精度为小时级',
   costUnpriced: '{n} 个小时桶未计价',
   statsCostTitle: '按当前费率对会话累计 token 估算',
   'stats.cost': '费用 ≈ {cost}',
-  'stats.turnCost': '{summary} · 费用 ≈ {cost}',
   turnCostTitle: '单轮用量按当前费率估算',
   turnTokensUnreported: '该提供商未上报此桶',
   pricing: '定价规则',
@@ -306,12 +305,11 @@ const MESSAGES_EN = {
   tokenDetail: 'Session token detail',
   tokenDetailDesc: 'Show total, cache hit/miss and output tokens in the session stats line.',
   costDisplay: 'Cost display',
-  costDisplayDesc: 'Show costs estimated at current rates in the stats line and trend tooltips.',
+  costDisplayDesc: 'Show costs estimated at current rates in the stats line, trend tooltips and the turn cost chip.',
   costTitle: 'Estimated at current rates over historical usage, hourly precision',
   costUnpriced: '{n} hour buckets unpriced',
   statsCostTitle: 'Estimated at current rates over session token totals',
   'stats.cost': 'Cost ≈ {cost}',
-  'stats.turnCost': '{summary} · Cost ≈ {cost}',
   turnCostTitle: 'Per-turn usage estimated at current rates',
   turnTokensUnreported: 'Not reported by this provider',
   pricing: 'Pricing rules',
@@ -1231,18 +1229,22 @@ function costTitleText(t, unpriced) {
   return unpriced > 0 ? `${base},${t('costUnpriced', { n: unpriced })}` : base
 }
 
-// ===== 注入点B:turnTail 单轮用量行(chain 条目,官方 TurnTailNodeView 容器内渲染) =====
-// chain 尝试顺序 = priority 升序:deliverables 产物行(默认 0)先试,本条目后试让位
-const TURN_TAIL_DATA_KEY = 'turn-tail'
-const TURN_TAIL_PRIORITY = 1
+// ===== 注入点B:回合费用芯片(官方动作行 assistant-actions 槽条目,赞踩/上下文跳转同排) =====
+// 排序取上下文插件条目(20)之后,贴近尾部用量/用时芯片一侧
+const TURN_COST_CHIP_ORDER = 20 + 10
 const TURN_COST_REVEAL_MS = 80
-const TURN_TAIL_ACTIONS_INSET_PX = -6
 
-// Turn 位置数据读取:owner 形状残缺一律 null 不抛;tokenUsage 缺失(证据不完整)即放弃渲染
-function selectTurnTokenUsage(owner) {
-  return owner?.turn?.data?.get
-    ? (owner.turn.data.get(TURN_TAIL_DATA_KEY)?.tokenUsage ?? null)
-    : null
+// messageId 反查:turn-tail 视图节点 data.closing.finalNode.messageId 即该轮收尾消息,单次扫描命中
+function turnTokenUsageOfMessage(nodes, messageId) {
+  if (!Array.isArray(nodes)) return null
+  for (const node of nodes) {
+    try {
+      if (node?.kind !== 'turn-tail') continue
+      if (node.data?.closing?.finalNode?.messageId !== messageId) continue
+      return node.data.tokenUsage ?? null
+    } catch { /* 单节点形状残缺跳过,扫描继续 */ }
+  }
+  return null
 }
 
 // 计价模型键:routes 首个 route.model,缺席回退全通配键(与注入点A 同款)
@@ -1263,20 +1265,23 @@ function turnOptionalUnreported(tokenUsage) {
   return tokenUsage?.cacheReadTokens === undefined || tokenUsage?.cacheWriteTokens === undefined
 }
 
-// 单轮行文本:摘要 + 费用;token 复用官方 compact 族,价未命中为占位符
-function buildTurnCostLine(t, tokenUsage, price, currency) {
-  const summary = t('stats.tokens', {
-    input: formatTokensCompact(turnBilledInputTokens(tokenUsage), t),
-    output: formatTokensCompact(tokenUsage.outputTokens, t),
-  })
+// 芯片文本:仅费用(官方用量芯片弹窗已有 token 明细);价未命中为占位符
+function buildTurnCostChipText(t, tokenUsage, price, currency) {
   const cost = price ? formatCost(costOf(price, pricingBucketsOf(tokenUsage)), currency) : COST_PLACEHOLDER
-  return t('stats.turnCost', { summary, cost })
+  return t('stats.cost', { cost })
 }
 
-// 行 title:估算口径说明,可选桶未上报时追加标注
+// 芯片 title:token 摘要 + 估算口径,可选桶未上报时追加标注
 function turnCostTitleText(t, tokenUsage) {
-  const base = t('turnCostTitle')
-  return turnOptionalUnreported(tokenUsage) ? `${base},${t('turnTokensUnreported')}` : base
+  const notes = [
+    t('stats.tokens', {
+      input: formatTokensCompact(turnBilledInputTokens(tokenUsage), t),
+      output: formatTokensCompact(tokenUsage.outputTokens, t),
+    }),
+    t('turnCostTitle'),
+  ]
+  if (turnOptionalUnreported(tokenUsage)) notes.push(t('turnTokensUnreported'))
+  return notes.join(',')
 }
 
 // ===== 定价编辑器纯函数(校验/规整/默认值) =====
@@ -1707,7 +1712,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
 .ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
-.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);margin-left:${TURN_TAIL_ACTIONS_INSET_PX}px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
 @media (hover:hover){[data-actions-reveal=hover] .ud-turn-cost{opacity:0;transition:opacity ${TURN_COST_REVEAL_MS}ms}[data-actions-reveal=hover]:hover .ud-turn-cost,[data-actions-reveal=hover]:focus-within .ud-turn-cost{opacity:1}}
 `
 
@@ -2195,10 +2200,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         entry.title ? h('span', { title: entry.title }, entry.text) : entry.text)))
     })
 
-    // 注入点B 组件:Turn 尾部单轮用量行,chain matched 即 TurnTokenUsage,渲染于动作行之前;
-    // 无独立费用开关(plan 决策),显隐随容器 data-actions-reveal;价格未载期间费用为占位符
-    const CostTail = React.memo(function CostTail({ matched, useChat, t = defaultT }) {
-      if (!matched || typeof useChat !== 'function') return null
+    // 注入点B 组件:回合费用芯片,官方动作行内渲染(复制与分支图标之间,赞踩/上下文跳转同排);
+    // 受费用显示开关;价格异步首帧未回不渲染,回包后补渲染;显隐节奏随官方 data-actions-reveal
+    const CostChip = React.memo(function CostChip({ messageId, useChat, t = defaultT }) {
+      if (typeof useChat !== 'function') return null
+      const legacy = useChat((state) => (state && typeof state === 'object') ? state.legacy : undefined)
+      const [prefs, setPrefs] = useState(() => statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const [pricingRules, setPricingRules] = useState(null)
       useEffect(() => {
         let alive = true
@@ -2207,12 +2215,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         })
         return () => { alive = false }
       }, [])
-      const model = turnModelOf(matched)
-      const now = new Date()
-      const price = pricingRules ? matchPrice(pricingRules, model, now) : null
-      const currency = pricingRules ? aggregateCurrencyOf(pricingRules) : ''
-      return h('div', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
-        buildTurnCostLine(t, matched, price, currency))
+      const matched = typeof messageId === 'string' && messageId !== ''
+        ? turnTokenUsageOfMessage(legacy?.nodes, messageId)
+        : null
+      if (!matched || !prefs.costDisplay || pricingRules === null) return null
+      const price = matchPrice(pricingRules, turnModelOf(matched), new Date())
+      return h('span', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
+        buildTurnCostChipText(t, matched, price, aggregateCurrencyOf(pricingRules)))
     })
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
@@ -2259,7 +2268,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
     // 条件行:类型下拉 + 按类型字段区 + 删除;类型切换重置为该类型默认值(字段结构互不相通)
-    function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove }) {
+    // 规则卡头部右上:上移/下移(顺序即匹配优先级,首条无上移、末条无下移)+ 删除
+    function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
@@ -2825,15 +2835,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         } catch (error) {
           console.warn('[usage-dash] 底部信息栏未注册(宿主无 conversation.composer.dock 插槽)', error)
         }
-        // 注入点B:turnTail chain 条目,同款两段式与降级;旧宿主无该插槽仅告警禁用
+        // 注入点B:回合费用芯片走官方动作行槽,回合结束随 messageId 出现;旧宿主无该插槽仅告警禁用
         try {
-          ctx.slots.inject('conversation.chat.turnTail', () =>
+          ctx.slots.inject('conversation.chat.assistant-actions', () =>
             ctx.slots.register(
-              { name: 'conversation.chat.turnTail', select: selectTurnTokenUsage, priority: TURN_TAIL_PRIORITY, locale: LOCALE_NS },
-              CostTail,
+              { name: 'conversation.chat.assistant-actions', id: 'usage-dash-turn-cost', order: TURN_COST_CHIP_ORDER, locale: LOCALE_NS },
+              CostChip,
             ))
         } catch (error) {
-          console.warn('[usage-dash] 会话尾部用量行未注册(宿主无 conversation.chat.turnTail 插槽)', error)
+          console.warn('[usage-dash] 回合费用芯片未注册(宿主无 conversation.chat.assistant-actions 插槽)', error)
         }
         // 跨实例同步:其他实例写开关经 storage 事件触发重读(同实例写入不触发该事件)
         window.addEventListener('storage', (event) => {
