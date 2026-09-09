@@ -274,7 +274,10 @@ const pricingHandler = (deps) => async (req, res) => {
 }
 
 const statusHandler = (deps) => async (req, res) => {
-  writeJson(res, { ok: true, value: deps.collector.status() })
+  writeJson(res, {
+    ok: true,
+    value: { ...deps.collector.status(), backup: deps.store.backupInfo() },
+  })
 }
 
 // 409 只拒 boot 期扫描;reset 自身引发的重扫同样 running 为真,经 rebuilding 放行
@@ -286,6 +289,15 @@ const resetHandler = (deps) => async (req, res) => {
   writeJson(res, { ok: true, value: deps.collector.status() })
 }
 
+// 回退到最近一次重建(或恢复)前的快照;扫描进行中同样拒绝,避免写交错
+const restoreHandler = (deps) => async (req, res) => {
+  if (deps.collector.running) {
+    throw usageError(HTTP_STATUS_CONFLICT, MESSAGE_BACKFILL_RUNNING)
+  }
+  const result = await deps.store.restoreFromBackup()
+  writeJson(res, { ok: true, value: result })
+}
+
 const STANDARD_GUARDS = [rejectWrongMethod, rejectCrossOrigin, rejectNonJson]
 const PRICING_GUARDS = [rejectPricingMethod, rejectCrossOrigin]
 
@@ -295,6 +307,7 @@ const ENDPOINTS = [
   { path: `${ROUTE_PREFIX}/minutes`, mount: minuteHandler },
   { path: `${ROUTE_PREFIX}/status`, mount: statusHandler },
   { path: `${ROUTE_PREFIX}/reset`, mount: resetHandler },
+  { path: `${ROUTE_PREFIX}/restore`, mount: restoreHandler },
   { path: `${ROUTE_PREFIX}/pricing`, mount: pricingHandler, guards: PRICING_GUARDS },
 ]
 

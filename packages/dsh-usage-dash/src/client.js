@@ -18,7 +18,7 @@ const DEFAULT_MINUTE_PRESET = '24h'
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
 const API_PREFIX = '/api/usage-dash/'
-const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', pricing: 'pricing' }
+const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', restore: 'restore', pricing: 'pricing' }
 
 // 宿主语义 token 之外的插件本地模型色板容量与哨兵
 const GROUP_TOP_COUNT = 5
@@ -148,6 +148,9 @@ const MESSAGES_ZH = {
   'status.running': '回扫中 {done}/{total}',
   rebuild: '重建',
   rebuildConfirm: '确认重建',
+  restore: '回退数据',
+  restoreConfirm: '确认回退',
+  restoreMissing: '无可用回退点(重建时自动生成)',
   hourTrend: '按小时 Token 趋势',
   minuteTrend: '按分钟 Token 趋势',
   'hourPreset.24h': '24 小时',
@@ -163,6 +166,7 @@ const MESSAGES_ZH = {
   trendTruncated: '数据量过大,仅显示最近部分',
   recordFailures: '{n} 条记录写入失败',
   skippedSessions: '跳过 {n} 个无法读取的会话',
+  skipBreakdown: '宿主拒读 {d} / 存档损坏 {c} / 旧格式 {l} / 其他 {o}——宿主修复后下轮回扫自动补齐',
   anomalyLog: '扫描异常日志',
   logKindSkipped: '跳过会话',
   logKindRecord: '写入失败',
@@ -173,18 +177,18 @@ const MESSAGES_ZH = {
   'stats.tokensPerSecond': '{throughput} tok/s',
   'stats.cacheHit': '缓存命中 {percent}%',
   'stats.tokens': '输入 {input} tok · 输出 {output} tok',
+  'turnCostChip': '{cost}',
   'stats.tokensDetail': '总 {total} tok · 输入 {input} tok · 命中缓存 {hit} tok · 未命中缓存 {miss} tok · 输出 {output} tok',
   cachePrecision: '精确缓存命中率',
   cachePrecisionDesc: '在会话底部信息栏以两位小数显示缓存命中率。',
   tokenDetail: '会话 Token 明细',
   tokenDetailDesc: '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。',
   costDisplay: '费用显示',
-  costDisplayDesc: '在信息栏与趋势悬浮中显示按当前费率估算的费用。',
+  costDisplayDesc: '在信息栏、趋势悬浮与回合费用芯片中显示按当前费率估算的费用。',
   costTitle: '按当前费率对历史用量估算,精度为小时级',
   costUnpriced: '{n} 个小时桶未计价',
   statsCostTitle: '按当前费率对会话累计 token 估算',
   'stats.cost': '费用 ≈ {cost}',
-  'stats.turnCost': '{summary} · 费用 ≈ {cost}',
   turnCostTitle: '单轮用量按当前费率估算',
   turnTokensUnreported: '该提供商未上报此桶',
   pricing: '定价规则',
@@ -197,8 +201,8 @@ const MESSAGES_ZH = {
   priceOutput: '输出',
   priceCacheRead: '缓存读',
   priceCacheWrite: '缓存写',
-  noCondition: '无条件 = 恒生效',
   addCondition: '添加条件',
+  confirmDelete: '确认删除',
   deleteCondition: '删除条件',
   condKind: '条件类型',
   condDailyWindow: '每日时段',
@@ -218,9 +222,17 @@ const MESSAGES_ZH = {
   condWeekday: '需 0-6 整数',
   condMonthDay: '需 1-31 整数',
   condDate: '需 YYYY-MM-DD',
-  condRange: '起始不得晚于结束',
-  deleteRule: '删除规则',
-  addRule: '添加规则',
+  condRange: '结束不得早于起始(两端均含)',
+  ruleOrderHint: '附加计费规则从上到下匹配,首个命中生效;全不命中落默认价',
+  moveUp: '上移',
+  moveDown: '下移',
+  addGroup: '添加模型',
+  addRule: '添加额外计费规则',
+  addDefaultPrice: '添加默认价',
+  deleteGroup: '删除模型及其全部计费规则',
+  deleteRule: '删除计费规则',
+  addCondition: '添加条件',
+  defaultPriceHint: '默认价:附加规则全不命中时生效,不设条件',
   save: '保存',
   saved: '已保存',
   required: '必填',
@@ -275,6 +287,9 @@ const MESSAGES_EN = {
   'status.running': 'Rescanning {done}/{total}',
   rebuild: 'Rebuild',
   rebuildConfirm: 'Confirm rebuild',
+  restore: 'Restore data',
+  restoreConfirm: 'Confirm restore',
+  restoreMissing: 'No restore point (created automatically on rebuild)',
   hourTrend: 'Hourly token trend',
   minuteTrend: 'Per-minute token trend',
   'hourPreset.24h': '24 hours',
@@ -290,6 +305,7 @@ const MESSAGES_EN = {
   trendTruncated: 'Too much data, showing only the latest part',
   recordFailures: '{n} records failed to write',
   skippedSessions: '{n} unreadable sessions skipped',
+  skipBreakdown: 'host-refused {d} / corrupt {c} / legacy format {l} / other {o} — auto-retried once the host can read them',
   anomalyLog: 'Scan anomaly log',
   logKindSkipped: 'skipped',
   logKindRecord: 'write failed',
@@ -300,18 +316,18 @@ const MESSAGES_EN = {
   'stats.tokensPerSecond': '{throughput} tok/s',
   'stats.cacheHit': 'Cache hit {percent}%',
   'stats.tokens': 'Input {input} tok · Output {output} tok',
+  'turnCostChip': '{cost}',
   'stats.tokensDetail': 'Total {total} tok · Input {input} tok · Cache hit {hit} tok · Cache miss {miss} tok · Output {output} tok',
   cachePrecision: 'Precise cache-hit rate',
   cachePrecisionDesc: 'Show the cache-hit rate with two decimals in the session stats line.',
   tokenDetail: 'Session token detail',
   tokenDetailDesc: 'Show total, cache hit/miss and output tokens in the session stats line.',
   costDisplay: 'Cost display',
-  costDisplayDesc: 'Show costs estimated at current rates in the stats line and trend tooltips.',
+  costDisplayDesc: 'Show costs estimated at current rates in the stats line, trend tooltips and the turn cost chip.',
   costTitle: 'Estimated at current rates over historical usage, hourly precision',
   costUnpriced: '{n} hour buckets unpriced',
   statsCostTitle: 'Estimated at current rates over session token totals',
   'stats.cost': 'Cost ≈ {cost}',
-  'stats.turnCost': '{summary} · Cost ≈ {cost}',
   turnCostTitle: 'Per-turn usage estimated at current rates',
   turnTokensUnreported: 'Not reported by this provider',
   pricing: 'Pricing rules',
@@ -324,8 +340,8 @@ const MESSAGES_EN = {
   priceOutput: 'Output',
   priceCacheRead: 'Cache read',
   priceCacheWrite: 'Cache write',
-  noCondition: 'No condition = always applies',
   addCondition: 'Add condition',
+  confirmDelete: 'Confirm delete',
   deleteCondition: 'Remove condition',
   condKind: 'Condition kind',
   condDailyWindow: 'Daily window',
@@ -345,9 +361,17 @@ const MESSAGES_EN = {
   condWeekday: 'Requires integer 0-6',
   condMonthDay: 'Requires integer 1-31',
   condDate: 'Requires YYYY-MM-DD',
-  condRange: 'From must not be after to',
-  deleteRule: 'Remove rule',
-  addRule: 'Add rule',
+  condRange: 'End must not be before start (both ends inclusive)',
+  ruleOrderHint: '附加计费规则从上到下匹配,首个命中生效;全不命中落默认价',
+  moveUp: 'Move up',
+  moveDown: 'Move down',
+  addGroup: 'Add model',
+  addRule: 'Add extra pricing rule',
+  addDefaultPrice: 'Add default price',
+  deleteGroup: 'Delete model and all its pricing rules',
+  deleteRule: 'Remove pricing rule',
+  addCondition: 'Add condition',
+  defaultPriceHint: 'Default price: applies when no extra rule above matches; no conditions',
   save: 'Save',
   saved: 'Saved',
   required: 'Required',
@@ -752,9 +776,12 @@ function heatLevel(tokens, max) {
   return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
 }
 
-// ChartTip 定位:锚定格子矩形,边界内 clamp,下方优先放不下翻上方
+// ChartTip 定位:锚定区装得下贴内顶(趋势图悬停区即绘图区,悬浮窗留在图表内),装不下上翻、再下翻、末了钳边界顶
 const TIP_GAP_PX = 8
 const TIP_MARGIN_PX = 8
+
+// 回合费用芯片与前置官方芯片(结束时钟)的间距
+const TURN_COST_GAP_PX = 8
 
 function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX) {
   if (!tip || tip.width <= 0 || tip.height <= 0) return null
@@ -764,11 +791,13 @@ function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX)
   const maxX = bounds.right - margin
   const maxY = bounds.bottom - margin
   const left = Math.max(minX, Math.min((anchor.left + anchor.right) / 2 - tip.width / 2, maxX - tip.width))
-  const below = anchor.bottom + gap
+  const inside = anchor.top + gap
   const above = anchor.top - gap - tip.height
+  const below = anchor.bottom + gap
   let top
-  if (below + tip.height <= maxY) top = below
+  if (inside + tip.height <= anchor.bottom) top = inside
   else if (above >= minY) top = above
+  else if (below + tip.height <= maxY) top = below
   else top = minY
   return { left, top }
 }
@@ -1052,15 +1081,14 @@ const toMinutesOfDay = (hhmm) => {
   return Number.isFinite(h) && Number.isFinite(m) ? h * MINUTES_PER_HOUR + m : Number.NaN
 }
 
-// from<to 含头不含尾;from>to 跨午夜;from===to 全天生效
+// 所有范围条件统一双侧包含;from>to 跨午夜/跨月环绕;from===to 单点/单日(与宿主 pricing.js 镜像,parity 测试锁定)
 function dailyWindowMatches(condition, date) {
   const from = toMinutesOfDay(condition.from)
   const to = toMinutesOfDay(condition.to)
   if (Number.isNaN(from) || Number.isNaN(to)) return false
   const m = minutesOfDay(date)
-  if (from < to) return m >= from && m < to
-  if (from > to) return m >= from || m < to
-  return true
+  if (from <= to) return m >= from && m <= to
+  return m >= from || m <= to
 }
 
 // days 空数组不成立;0=周日,取 getDay()
@@ -1069,7 +1097,7 @@ function weekdaysMatches(condition, date) {
   return Array.isArray(days) && days.length > 0 && days.includes(date.getDay())
 }
 
-// 号段双闭;from>to 跨月环绕;日号必须整数,2 月无 31 号自然不触发
+// 号段双侧包含;from>to 跨月环绕;from===to 单日,2 月无 31 号自然不触发
 function monthDaysMatches(condition, date) {
   const { from, to } = condition
   if (!Number.isInteger(from) || !Number.isInteger(to)) return false
@@ -1077,7 +1105,7 @@ function monthDaysMatches(condition, date) {
   return from <= to ? d >= from && d <= to : d >= from || d <= to
 }
 
-// 要求零填充 YYYY-MM-DD 字典序双闭;from>to 属配置错误不成立,非规范串同样不成立
+// 零填充 YYYY-MM-DD 字典序双侧包含;from>to 配置错误不成立(编辑器校验拦截)
 const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 function dateRangeMatches(condition, date) {
   const { from, to } = condition
@@ -1229,29 +1257,55 @@ function costTitleText(t, unpriced) {
   return unpriced > 0 ? `${base},${t('costUnpriced', { n: unpriced })}` : base
 }
 
-// ===== 注入点B:turnTail 单轮用量行(chain 条目,官方 TurnTailNodeView 容器内渲染) =====
-// chain 尝试顺序 = priority 升序:deliverables 产物行(默认 0)先试,本条目后试让位
-const TURN_TAIL_DATA_KEY = 'turn-tail'
-const TURN_TAIL_PRIORITY = 1
-const TURN_COST_REVEAL_MS = 80
-const TURN_TAIL_ACTIONS_INSET_PX = -6
+// ===== 注入点B:回合费用芯片(官方动作行 assistant-actions 槽条目,赞踩/上下文跳转同排) =====
+// 排序取上下文插件条目(20)之后,贴近尾部用量/用时芯片一侧
+const TURN_COST_CHIP_ORDER = 20 + 10
 
-// Turn 位置数据读取:owner 形状残缺一律 null 不抛;tokenUsage 缺失(证据不完整)即放弃渲染
-function selectTurnTokenUsage(owner) {
-  return owner?.turn?.data?.get
-    ? (owner.turn.data.get(TURN_TAIL_DATA_KEY)?.tokenUsage ?? null)
-    : null
+// messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
+// 回合级用量优先取回合位置数据(location.turn.data.get('turn-tail')).tokenUsage(官方 tokenUsage 聚合,
+// 分页窗口缺 turn/start 时缺席),回退视图节点 data.closing.usage(末步用量采样,输入侧已含缓存,计费口径同源)
+function turnTokenUsageOfMessage(nodes, messageId) {
+  const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
+  if (!Array.isArray(list)) return null
+  for (const node of list) {
+    try {
+      if (node?.kind !== 'turn-tail') continue
+      if (node.data?.closing?.finalNode?.messageId !== messageId) continue
+      const turnData = node.location?.turn?.data
+      const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
+      if (tail?.tokenUsage) return tail.tokenUsage
+      if (node.data.tokenUsage) return node.data.tokenUsage
+      const sampled = node.data?.closing?.usage
+      if (!sampled) return null
+      return {
+        uncachedInputTokens: sampled.inputTokens,
+        outputTokens: sampled.outputTokens,
+        totalTokens: sampled.totalTokens,
+        ...sampled.cacheReadTokens === undefined ? {} : { cacheReadTokens: sampled.cacheReadTokens },
+        ...sampled.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: sampled.cacheWriteTokens },
+        ...sampled.reasoningTokens === undefined ? {} : { reasoningTokens: sampled.reasoningTokens },
+      }
+    } catch { /* 单节点形状残缺跳过,扫描继续 */ }
+  }
+  return null
 }
 
-// 计价模型键:routes 首个 route.model,缺席回退全通配键(与注入点A 同款)
-const turnModelOf = (tokenUsage) => tokenUsage?.routes?.[0]?.model ?? MODEL_UNROUTED
+// 计价模型键:routes 首条按官方 messageRoute 分离字段拼两段键,与采集器 refOf 双实现同源
+// (官方 source.provider/model 是分离字段,routes[].model 是裸模型名,展示侧才拼 provider),
+// 仅 model 用裸名命中 */model 档,双缺回退全通配键;多 route 取首条(单轮估算口径)
+const turnModelOf = (tokenUsage) => {
+  const route = tokenUsage?.routes?.[0]
+  if (!route) return MODEL_UNROUTED
+  if (route.provider && route.model) return `${route.provider}/${route.model}`
+  return route.model || MODEL_UNROUTED
+}
 
 // 可选桶(cacheRead/cacheWrite)仅部分 provider 上报,缺失按 0 计入摘要与费用
 const turnReportedBucket = (value) => (value ?? 0)
 
-// 摘要计费输入 = prompt 侧三桶(官方 billing 分母口径)
+// 摘要计费输入 = prompt 侧三桶(官方 billing 分母口径),核心桶缺省同按 0 保证降级形态对称
 function turnBilledInputTokens(tokenUsage) {
-  return tokenUsage.uncachedInputTokens
+  return turnReportedBucket(tokenUsage.uncachedInputTokens)
     + turnReportedBucket(tokenUsage.cacheReadTokens)
     + turnReportedBucket(tokenUsage.cacheWriteTokens)
 }
@@ -1261,33 +1315,44 @@ function turnOptionalUnreported(tokenUsage) {
   return tokenUsage?.cacheReadTokens === undefined || tokenUsage?.cacheWriteTokens === undefined
 }
 
-// 单轮行文本:摘要 + 费用;token 复用官方 compact 族,价未命中为占位符
-function buildTurnCostLine(t, tokenUsage, price, currency) {
-  const summary = t('stats.tokens', {
-    input: formatTokensCompact(turnBilledInputTokens(tokenUsage), t),
-    output: formatTokensCompact(tokenUsage.outputTokens, t),
-  })
-  const cost = price ? formatCost(costOf(price, pricingBucketsOf(tokenUsage)), currency) : COST_PLACEHOLDER
-  return t('stats.turnCost', { summary, cost })
+// 芯片计费额:价命中才算,0 元(全零价或全零桶)返回 null 由调用方决定不渲染;价未命中同 null
+function turnCostAmountOf(tokenUsage, price) {
+  if (!price) return null
+  const cost = costOf(price, pricingBucketsOf(tokenUsage))
+  return cost > 0 ? cost : null
 }
 
-// 行 title:估算口径说明,可选桶未上报时追加标注
+// 芯片文本:仅金额,不带货币前缀文字(官方用量芯片弹窗已有 token 明细)
+function buildTurnCostChipText(t, tokenUsage, price, currency) {
+  const cost = turnCostAmountOf(tokenUsage, price)
+  return t('turnCostChip', { cost: cost === null ? COST_PLACEHOLDER : formatCost(cost, currency) })
+}
+
+// 芯片 title:token 摘要 + 估算口径,可选桶未上报时追加标注
 function turnCostTitleText(t, tokenUsage) {
-  const base = t('turnCostTitle')
-  return turnOptionalUnreported(tokenUsage) ? `${base},${t('turnTokensUnreported')}` : base
+  const notes = [
+    t('stats.tokens', {
+      input: formatTokensCompact(turnBilledInputTokens(tokenUsage), t),
+      output: formatTokensCompact(turnReportedBucket(tokenUsage.outputTokens), t),
+    }),
+    t('turnCostTitle'),
+  ]
+  if (turnOptionalUnreported(tokenUsage)) notes.push(t('turnTokensUnreported'))
+  return notes.join(',')
 }
 
 // ===== 定价编辑器纯函数(校验/规整/默认值) =====
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
 const ISO_DAY_PATTERN_CLIENT = /^\d{4}-\d{2}-\d{2}$/
-// 时刻分量界:小时含头不含尾,分钟双闭
-const HOUR_MAX = 24
+// 时刻分量界:小时/分钟均双闭
+const HOUR_MAX = 23
 const MINUTE_MAX = 59
 const WEEKDAY_MIN = 0
 const WEEKDAY_MAX = 6
 const MONTH_DAY_MIN = 1
 const MONTH_DAY_MAX = 31
+const FULL_DAY_WINDOW = { from: '00:00', to: '23:59' }
 const CONDITION_KIND_OPTIONS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const CONDITION_KIND_LABEL_KEYS = {
   dailyWindow: 'condDailyWindow',
@@ -1300,18 +1365,18 @@ const WEEKDAY_COUNT = 7
 const parseHHMM = (value) => {
   if (typeof value !== 'string' || !HHMM_PATTERN.test(value)) return null
   const [hours, minutes] = value.split(':').map(Number)
-  return hours >= 0 && hours < HOUR_MAX && minutes >= 0 && minutes <= MINUTE_MAX ? value : null
+  return hours >= 0 && hours <= HOUR_MAX && minutes >= 0 && minutes <= MINUTE_MAX ? value : null
 }
 
 const isValidMonthDay = (value) => Number.isInteger(value) && value >= MONTH_DAY_MIN && value <= MONTH_DAY_MAX
 
 const isValidWeekday = (value) => Number.isInteger(value) && value >= WEEKDAY_MIN && value <= WEEKDAY_MAX
 
-// 各条件类型合法默认:时段全天(from===to)、周几空、号段全月(短月高位号自然不触发)、日期段当天
+// 各条件类型合法默认即填即用:时段全天、周几空、号段全月、日期段当天单日
 const defaultCondition = (kind, now = new Date()) => {
   const today = formatDate(now)
   const defaults = {
-    dailyWindow: { kind: 'dailyWindow', from: '00:00', to: '00:00' },
+    dailyWindow: { kind: 'dailyWindow', ...FULL_DAY_WINDOW },
     weekdays: { kind: 'weekdays', days: [] },
     monthDays: { kind: 'monthDays', from: MONTH_DAY_MIN, to: MONTH_DAY_MAX },
     dateRange: { kind: 'dateRange', from: today, to: today },
@@ -1319,15 +1384,18 @@ const defaultCondition = (kind, now = new Date()) => {
   return defaults[kind] ? { ...defaults[kind] } : null
 }
 
-// 条件字段级校验:路径前缀 + 键 → 错误键;倒序仅 dateRange 非法(时段/号段倒序为跨午夜/跨月语义)
+// 条件字段级校验:路径前缀 + 键 → 错误键;时段/号段倒序为跨午夜/跨月语义;
+// 所有范围双侧包含,from===to 单点/单日合法;仅日期段倒序属配置错误(condRange)
 const validateCondition = (condition, path, errors) => {
   if (!condition || typeof condition !== 'object') {
     errors.set(path, 'required')
     return
   }
   if (condition.kind === 'dailyWindow') {
-    if (parseHHMM(condition.from) === null) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condTime')
-    if (parseHHMM(condition.to) === null) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condTime')
+    const from = parseHHMM(condition.from)
+    const to = parseHHMM(condition.to)
+    if (from === null) errors.set(`${path}.from`, condition.from === '' || condition.from == null ? 'required' : 'condTime')
+    if (to === null) errors.set(`${path}.to`, condition.to === '' || condition.to == null ? 'required' : 'condTime')
     return
   }
   if (condition.kind === 'weekdays') {
@@ -1401,6 +1469,58 @@ const defaultPricingRule = (currency = CURRENCIES[0]) => ({
 })
 
 const patchItemAt = (array, index, patch) => array.map((item, i) => (i === index ? { ...item, ...patch } : item))
+
+// 编辑器分组视图纯函数:wire 契约(平面数组)不变,组/槽位仅是展示层投影。
+// 槽位移动/增删均落回平面数组的对应位置变换,组内相对顺序即匹配优先序。
+
+// 按模型键聚合:组序为首次出现序,槽位保序并携带平面索引(错误路径与移动操作的寻址键)
+function groupRulesOf(rules) {
+  const groups = new Map()
+  ;(rules ?? []).forEach((rule, index) => {
+    const key = rule.model
+    if (!groups.has(key)) groups.set(key, { model: key, slots: [] })
+    groups.get(key).slots.push({ rule, index })
+  })
+  return [...groups.values()]
+}
+
+// 组内划分:末条无条件规则即该模型的默认价(恒兜底,UI 禁条件/排序/删除),其余为附加计费规则。
+// 全条件组默认价为 null(UI 提供"添加默认价"入口);多条无条件时末条为默认价,存量数据自然收敛
+function partitionGroupOf(group) {
+  const last = group.slots[group.slots.length - 1]
+  const isDefault = last !== undefined && (last.rule.conditions ?? []).length === 0
+  return {
+    defaultSlot: isDefault ? last : null,
+    extras: isDefault ? group.slots.slice(0, -1) : group.slots,
+  }
+}
+
+// 槽位跨位移动(splice 语义):同位或越界返回原引用
+function moveRuleTo(rules, fromIndex, toIndex) {
+  if (!Array.isArray(rules) || fromIndex === toIndex) return rules
+  if (fromIndex < 0 || fromIndex >= rules.length || toIndex < 0 || toIndex >= rules.length) return rules
+  const moved = [...rules]
+  const [item] = moved.splice(fromIndex, 1)
+  moved.splice(toIndex, 0, item)
+  return moved
+}
+
+// 组级改名:仅命中索引集的规则变更 model,其余保持引用不变
+function renameRulesAt(rules, indexes, model) {
+  const hit = new Set(indexes)
+  return rules.map((rule, i) => (hit.has(i) ? { ...rule, model } : rule))
+}
+
+// 插入到目标平面位之后(组内添加槽位 = 组内末槽位索引 + 1)
+function insertRuleAt(rules, position, rule) {
+  return [...rules.slice(0, position + 1), rule, ...rules.slice(position + 1)]
+}
+
+// 批量移除(组删除)
+function removeRulesAt(rules, indexes) {
+  const hit = new Set(indexes)
+  return rules.filter((_, i) => !hit.has(i))
+}
 
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
@@ -1536,6 +1656,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       model: ['M5 5h14v14H5Z', 'M9 9h6v6H9Z', 'M9 2v3', 'M15 2v3', 'M9 19v3', 'M15 19v3', 'M2 9h3', 'M2 15h3', 'M19 9h3', 'M19 15h3'],
       rate: ['M22 12h-4l-3 9L9 3l-3 9H2'],
       days: ['M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z', 'M16 3v4', 'M8 3v4', 'M3 11h18'],
+      trash: ['M3 6h18', 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6', 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', 'M10 11v6', 'M14 11v6'],
     }
 
     function Icon({ paths }) {
@@ -1544,6 +1665,29 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         stroke: 'currentColor', strokeWidth: ICON_STROKE_WIDTH,
         strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
       }, paths.map((d, index) => h('path', { key: index, d })))
+    }
+
+    // 危险删除按钮:首点进武装态(垃圾桶变"确认删除"文字),再点才执行,超时自动解除
+    function DeleteArmedButton({ labelKey, confirmKey, onConfirm, t = defaultT }) {
+      const [armed, setArmed] = useState(false)
+      const armedTimerRef = useRef(null)
+      useEffect(() => () => {
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+      }, [])
+      const click = () => {
+        if (!armed) {
+          setArmed(true)
+          armedTimerRef.current = setTimeout(() => setArmed(false), REBUILD_CONFIRM_MS)
+          return
+        }
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+        setArmed(false)
+        onConfirm()
+      }
+      return h('button', {
+        className: cx('ud-btn ud-btn--text', armed && 'ud-delete-armed'), type: 'button', onClick: click,
+        'aria-label': t(labelKey), title: t(labelKey),
+      }, armed ? t(confirmKey) : h(Icon, { paths: ICONS.trash }))
     }
 
     const STYLE_CSS = `
@@ -1569,6 +1713,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-icon-btn{padding:0 12px}
 .ud-icon{display:inline-flex;align-items:center;justify-content:center}
 .ud-btn--text{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);padding:2px 4px}
+.ud-delete-armed{color:var(--dsw-alias-state-error-primary);font-size:12px;white-space:nowrap}
 .ud-error{border:1px solid var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 12%,transparent);color:var(--dsw-alias-state-warn-label);border-radius:8px;padding:8px 12px;font-size:12px}
 .ud-loading{color:var(--dsw-alias-label-tertiary);text-align:center;padding:32px 0}
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
@@ -1680,14 +1825,23 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-pref-title{font-size:13px;color:var(--dsw-alias-label-primary)}
 .ud-pref-desc{font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .ud-rule{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:10px 12px}
+.ud-rule-group{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:10px 12px}
+.ud-rule-group-head{display:flex;align-items:flex-end;gap:8px}
+.ud-rule-group-head .ud-field{flex:1}
+.ud-rule-group-slots{display:flex;flex-direction:column;gap:8px}
+.ud-rule-group-slots .ud-rule{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 40%,transparent)}
+.ud-rule-default{border-style:dashed}
+.ud-slot-head{display:flex;align-items:flex-end;gap:8px}
+.ud-slot-head .ud-price-grid{flex:1}
 .ud-rule-head{display:flex;align-items:flex-end;gap:8px}
 .ud-rule-head .ud-field{flex:1}
 .ud-rule-cond{font-size:11px;color:var(--dsw-alias-label-tertiary)}
 .ud-rule-conds{display:flex;flex-direction:column;gap:6px}
-.ud-cond{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap}
-.ud-cond-kind{width:auto;min-width:88px}
-.ud-cond-fields{display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
-.ud-cond-fields .ud-field{flex:0 1 auto}
+.ud-cond{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+/* specificity 须高于 .ud-input 的 width:100%,否则类型下拉撑满整行把字段区挤到下一行 */
+.ud-cond .ud-cond-kind{width:auto;min-width:88px;flex:0 0 auto}
+.ud-cond-fields{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
+.ud-cond-fields .ud-field{flex-direction:row;align-items:center;gap:4px;flex:0 1 auto}
 .ud-cond-fields .ud-input{width:auto}
 .ud-cond-add{display:flex;gap:6px;flex-wrap:wrap}
 .ud-field{display:flex;flex-direction:column;gap:3px;min-width:0}
@@ -1705,8 +1859,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-rule-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .ud-statsline-root{text-align:center;max-width:var(--dsh-chat-content-width);box-sizing:border-box;width:100%;padding:4px calc(var(--dsh-composer-side-clearance) + 16px) 0px;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));color:var(--dsw-alias-label-tertiary);white-space:nowrap;text-overflow:ellipsis;margin:0 auto;display:block;overflow:hidden}
 .ud-statsline-sep{color:var(--dsw-alias-separator-primary);margin:0 10px}
-.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);margin-left:${TURN_TAIL_ACTIONS_INSET_PX}px;font-variant-numeric:tabular-nums;white-space:nowrap}
-@media (hover:hover){[data-actions-reveal=hover] .ud-turn-cost{opacity:0;transition:opacity ${TURN_COST_REVEAL_MS}ms}[data-actions-reveal=hover]:hover .ud-turn-cost,[data-actions-reveal=hover]:focus-within .ud-turn-cost{opacity:1}}
+/* 芯片 portal 至动作行末尾,历史轮悬停/焦点显隐随父级 data-actions-reveal,无需自绘规则 */
+.ud-turn-cost{font-size:var(--dsh-content-font-size-secondary,13px);color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap;margin-left:${TURN_COST_GAP_PX}px}
 `
 
     function ensureStyle(document) {
@@ -2193,10 +2347,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         entry.title ? h('span', { title: entry.title }, entry.text) : entry.text)))
     })
 
-    // 注入点B 组件:Turn 尾部单轮用量行,chain matched 即 TurnTokenUsage,渲染于动作行之前;
-    // 无独立费用开关(plan 决策),显隐随容器 data-actions-reveal;价格未载期间费用为占位符
-    const CostTail = React.memo(function CostTail({ matched, useChat, t = defaultT }) {
-      if (!matched || typeof useChat !== 'function') return null
+    // 注入点B 组件:回合费用芯片,官方动作行内渲染(复制与分支图标之间,赞踩/上下文跳转同排);
+    // 受费用显示开关;价格异步首帧未回不渲染,回包后补渲染;显隐节奏随官方 data-actions-reveal
+    // 官方槽容器固定在用量/用时芯片之前,末位排布由 SlotTailPortal 移交实现
+    const CostChip = React.memo(function CostChip({ messageId, useChat, t = defaultT }) {
+      if (typeof useChat !== 'function') return null
+      const chatNodes = useChat((state) => (state && typeof state === 'object') ? state.nodes : undefined)
+      const [prefs, setPrefs] = useState(() => statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const [pricingRules, setPricingRules] = useState(null)
       useEffect(() => {
         let alive = true
@@ -2205,13 +2363,32 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         })
         return () => { alive = false }
       }, [])
-      const model = turnModelOf(matched)
-      const now = new Date()
-      const price = pricingRules ? matchPrice(pricingRules, model, now) : null
-      const currency = pricingRules ? aggregateCurrencyOf(pricingRules) : ''
-      return h('div', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
-        buildTurnCostLine(t, matched, price, currency))
+      const matched = typeof messageId === 'string' && messageId !== ''
+        ? turnTokenUsageOfMessage(chatNodes, messageId)
+        : null
+      const price = matched && prefs.costDisplay && pricingRules !== null
+        ? matchPrice(pricingRules, turnModelOf(matched), new Date())
+        : null
+      // 0 元(全零价/全零桶)与价未命中同不渲染,无占位符
+      const cost = matched && price ? turnCostAmountOf(matched, price) : null
+      const chip = cost === null ? null : h('span', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
+        t('turnCostChip', { cost: formatCost(cost, aggregateCurrencyOf(pricingRules)) }))
+      return h(SlotTailPortal, null, chip)
     })
+
+    // 槽内容末位移交:锚点藏于槽容器内,portal 目标取槽容器(display:contents)的父级即官方动作行 div,
+    // portal 子树 append 到动作行末尾(官方用量/用时芯片与结束时钟之后);portal 缺席降级锚点原位
+    function SlotTailPortal({ children }) {
+      const anchorRef = useRef(null)
+      const [container, setContainer] = useState(null)
+      useEffect(() => {
+        const anchor = anchorRef.current
+        const slotHost = anchor?.closest('[data-slot="conversation.chat.assistant-actions"]') ?? anchor?.parentElement
+        setContainer(slotHost?.parentElement ?? null)
+      }, [])
+      const ported = container && createPortal ? createPortal(children, container) : null
+      return h('span', { ref: anchorRef, style: ported ? { display: 'none' } : undefined }, ported ?? children)
+    }
 
     // 偏好卡行:说明文案承担 aria-describedby 目标
     function StatsLineOptionRow({ labelKey, descKey, checked, onToggle, t = defaultT }) {
@@ -2256,8 +2433,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const PRICING_STATE_READY = 'ready'
     const PRICING_STATE_UNAVAILABLE = 'unavailable'
 
-    // 条件行:类型下拉 + 按类型字段区 + 删除;类型切换重置为该类型默认值(字段结构互不相通)
-    function PricingRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove }) {
+    // 价格四桶 grid:默认价槽与附加规则卡共用;错误路径按规则平面索引寻址
+    function PricingPriceGrid({ rule, currency, errors, pathPrefix, t, onPricePatch }) {
       const errorTextOf = (path) => {
         const key = errors.get(path)
         return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
@@ -2269,9 +2446,23 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('input', {
             type: 'number', className: 'ud-input', min: 0, step: 'any',
             value: rule.price?.[key] ?? '',
-            onChange: (event) => onPatch({ price: { ...rule.price, [key]: event.target.value } }),
+            onChange: (event) => onPricePatch({ price: { ...rule.price, [key]: event.target.value } }),
           })),
         errorTextOf(`${pathPrefix}price.${key}`))
+      return h('div', { className: 'ud-price-grid' },
+        priceField('input', 'priceInput'),
+        priceField('output', 'priceOutput'),
+        priceField('cacheRead', 'priceCacheRead'),
+        priceField('cacheWrite', 'priceCacheWrite'))
+    }
+
+    // 附加计费规则卡:头行 = 价格四桶 + 上移/下移/删除;下方为条件组合区(组内从上到下首个命中者生效)。
+    // 默认价在组内独立成槽,附加规则不再承担兜底语义
+    function PricingExtraRuleCard({ rule, currency, errors, pathPrefix, t, onPatch, onRemove, onMove, canMoveUp, canMoveDown }) {
+      const errorTextOf = (path) => {
+        const key = errors.get(path)
+        return key ? h('span', { className: 'ud-field-error' }, t(key)) : null
+      }
       const patchConditions = (conditions) => onPatch({ conditions })
       const patchConditionAt = (conditionIndex, patch) => patchConditions(patchItemAt(rule.conditions, conditionIndex, patch))
       const removeConditionAt = (conditionIndex) => patchConditions(rule.conditions.filter((_, i) => i !== conditionIndex))
@@ -2285,10 +2476,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),
           errorTextOf(`${condPath}.${field}`))
+        // 号段 from/to 同域 1~31(双闭),统一上限
         const numberInput = (field, labelKey) => h('label', { key: field, className: 'ud-field' },
           h('span', { className: 'ud-field-label' }, t(labelKey)),
           h('input', {
-            type: 'number', className: 'ud-input', min: MONTH_DAY_MIN, max: MONTH_DAY_MAX, step: 1,
+            type: 'number', className: 'ud-input', min: MONTH_DAY_MIN,
+            max: MONTH_DAY_MAX, step: 1,
             value: condition[field] ?? '',
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),
@@ -2325,32 +2518,74 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           }, '×'))
       }
       return h('div', { className: 'ud-rule' },
-        h('div', { className: 'ud-rule-head' },
+        h('div', { className: 'ud-slot-head' },
+          h(PricingPriceGrid, {
+            rule, currency, errors, pathPrefix, t,
+            onPricePatch: (part) => onPatch(part),
+          }),
+          canMoveUp ? h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(-1),
+            'aria-label': t('moveUp'), title: t('moveUp'),
+          }, '↑') : null,
+          canMoveDown ? h('button', {
+            className: 'ud-btn ud-btn--text', type: 'button', onClick: () => onMove(1),
+            'aria-label': t('moveDown'), title: t('moveDown'),
+          }, '↓') : null,
+          h(DeleteArmedButton, { labelKey: 'deleteRule', confirmKey: 'confirmDelete', onConfirm: onRemove, t })),
+        h('div', { className: 'ud-rule-conds' },
+          (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
+          h('div', { className: 'ud-cond-add' },
+            h('button', {
+              type: 'button', className: 'ud-btn ud-btn--text',
+              onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(CONDITION_KIND_OPTIONS[0])]),
+            }, `+${t('addCondition')}`))))
+    }
+
+    // 模型组卡:组头 = 模型键输入(整组一次改名)+ 删除整组;组内 = 默认价槽(禁条件/排序/删除,恒兜底)
+    // + 附加计费规则列表(从上到下首个命中生效,全不命中落默认价)。
+    // 组件 key 由调用方锚定首槽位平面索引,改名引发的重新聚合不会丢焦点
+    function PricingModelGroup({ group, currency, errors, t, onModelChange, onGroupRemove, onSlotPatch, onSlotRemove, onSlotMove, onSlotAdd }) {
+      const modelError = group.slots.map((slot) => errors.get(`${slot.index}.model`)).find(Boolean)
+      const { defaultSlot, extras } = partitionGroupOf(group)
+      // 新附加规则插到默认价平面位之前(无默认价则组末),保证默认价恒居组末
+      const insertPosition = defaultSlot ? defaultSlot.index - 1 : group.slots[group.slots.length - 1].index
+      return h('div', { className: 'ud-rule-group' },
+        h('div', { className: 'ud-rule-group-head' },
           h('label', { className: 'ud-field' },
             h('span', { className: 'ud-field-label' }, t('pricingModel')),
             h('input', {
-              type: 'text', className: 'ud-input', value: rule.model,
+              type: 'text', className: 'ud-input', value: group.model,
               placeholder: t('pricingModelPlaceholder'),
-              onChange: (event) => onPatch({ model: event.target.value }),
+              onChange: (event) => onModelChange(event.target.value),
             }),
-            errorTextOf(`${pathPrefix}model`)),
-          h('button', {
-            className: 'ud-btn ud-btn--text', type: 'button', onClick: onRemove,
-            'aria-label': t('deleteRule'), title: t('deleteRule'),
-          }, '×')),
-        h('div', { className: 'ud-price-grid' },
-          priceField('input', 'priceInput'),
-          priceField('output', 'priceOutput'),
-          priceField('cacheRead', 'priceCacheRead'),
-          priceField('cacheWrite', 'priceCacheWrite')),
-        h('div', { className: 'ud-rule-conds' },
-          (rule.conditions ?? []).length === 0 ? h('span', { className: 'ud-rule-cond' }, t('noCondition')) : null,
-          (rule.conditions ?? []).map((condition, conditionIndex) => conditionRow(condition, conditionIndex)),
-          h('div', { className: 'ud-cond-add' },
-            CONDITION_KIND_OPTIONS.map((kind) => h('button', {
-              key: kind, type: 'button', className: 'ud-btn ud-btn--text',
-              onClick: () => patchConditions([...(rule.conditions ?? []), defaultCondition(kind)]),
-            }, `+${t(CONDITION_KIND_LABEL_KEYS[kind])}`)))))
+            modelError ? h('span', { className: 'ud-field-error' }, t(modelError)) : null),
+          h(DeleteArmedButton, { labelKey: 'deleteGroup', confirmKey: 'confirmDelete', onConfirm: onGroupRemove, t })),
+        h('div', { className: 'ud-rule-group-slots' },
+          defaultSlot ? h('div', { className: 'ud-rule ud-rule-default' },
+            h('div', { className: 'ud-slot-head' },
+              h(PricingPriceGrid, {
+                rule: defaultSlot.rule, currency, errors,
+                pathPrefix: `${defaultSlot.index}.`, t,
+                onPricePatch: (part) => onSlotPatch(defaultSlot.index, part),
+              })),
+            h('span', { className: 'ud-rule-cond' }, t('defaultPriceHint'))) : null,
+          extras.map((slot, position) => h(PricingExtraRuleCard, {
+            key: slot.index,
+            rule: slot.rule,
+            currency,
+            errors,
+            pathPrefix: `${slot.index}.`,
+            t,
+            onPatch: (part) => onSlotPatch(slot.index, part),
+            onRemove: () => onSlotRemove(slot.index),
+            onMove: (delta) => onSlotMove(slot.index, extras[position + delta].index),
+            canMoveUp: position > 0,
+            canMoveDown: position < extras.length - 1,
+          }))),
+        h('button', {
+          className: 'ud-rule-add', type: 'button',
+          onClick: () => onSlotAdd(insertPosition, group.model),
+        }, defaultSlot ? t('addRule') : t('addDefaultPrice')))
     }
 
     function PricingEditor({ t = defaultT }) {
@@ -2433,20 +2668,30 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               }, symbol))),
             h('button', { className: 'ud-btn', type: 'button', disabled: saving, onClick: save }, t('save')))),
         saveError ? h('div', { className: 'ud-error' }, saveError) : null,
-        rules.map((rule, index) => h(PricingRuleCard, {
-          key: index,
-          rule,
+        h('span', { className: 'ud-rule-cond' }, t('ruleOrderHint')),
+        groupRulesOf(rules).map((group) => h(PricingModelGroup, {
+          // key 锚定首槽位平面索引:改名重聚合不重建组件,输入焦点不丢
+          key: String(group.slots[0].index),
+          group,
           currency,
           errors,
-          pathPrefix: `${index}.`,
           t,
-          onPatch: (part) => setRules((prev) => patchItemAt(prev, index, part)),
-          onRemove: () => setRules((prev) => prev.filter((_, i) => i !== index)),
+          onModelChange: (model) => setRules((prev) => renameRulesAt(prev, group.slots.map((slot) => slot.index), model)),
+          onGroupRemove: () => setRules((prev) => removeRulesAt(prev, group.slots.map((slot) => slot.index))),
+          onSlotPatch: (index, part) => setRules((prev) => patchItemAt(prev, index, part)),
+          onSlotRemove: (index) => setRules((prev) => prev.filter((_, i) => i !== index)),
+          onSlotMove: (fromIndex, toIndex) => setRules((prev) => moveRuleTo(prev, fromIndex, toIndex)),
+          onSlotAdd: (position, model) => setRules((prev) => insertRuleAt(prev, position, {
+            ...defaultPricingRule(currency),
+            model,
+            // 附加规则默认带全天时段条件:默认价已独立成槽,附加规则应以可编辑条件呈现
+            conditions: [defaultCondition(CONDITION_KIND_OPTIONS[0])],
+          })),
         })),
         h('button', {
           className: 'ud-rule-add', type: 'button',
           onClick: () => setRules((prev) => [...prev, defaultPricingRule(currency)]),
-        }, t('addRule')))
+        }, t('addGroup')))
     }
 
     // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示
@@ -2477,14 +2722,22 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         status.error ? h('span', { className: 'ud-status-err' }, status.error) : null)
     }
 
-    // 展开后的异常日志块:汇总计数即明细条数(单一事实源),逐条展示(时间/类型/内容)
+    // 展开后的异常日志块:汇总计数即明细条数(单一事实源),逐条展示(时间/类型/内容);
+    // skipped 细分归因(宿主拒读/损坏/旧格式)挂在汇总行 title,供跨宿主边界诊断
     function AnomalyLog({ status, t = defaultT }) {
       const lines = status.log ?? []
       if (lines.length === 0) return null
+      const breakdown = status.skippedBreakdown ?? {}
+      const breakdownText = t('skipBreakdown', {
+        d: breakdown.descriptor ?? 0,
+        c: breakdown.corrupt ?? 0,
+        l: breakdown.legacy ?? 0,
+        o: breakdown.other ?? 0,
+      })
       return h('div', { className: 'ud-log' },
         h('div', { className: 'ud-log-summary' },
           (status.skippedSessions ?? 0) > 0
-            ? h('span', null, t('skippedSessions', { n: status.skippedSessions }))
+            ? h('span', { title: breakdownText }, t('skippedSessions', { n: status.skippedSessions }))
             : null,
           (status.recordFailures ?? 0) > 0
             ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
@@ -2521,6 +2774,40 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
       return h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: rebuild },
         armed ? t('rebuildConfirm') : t('rebuild'))
+    }
+
+    // 回退按钮:仅当存在重建快照(status.backup.available)时可点;
+    // 恢复动作本身也会被重新快照覆盖,回退链不断
+    function RestoreButton({ machineRef, busy, backup, onError, t = defaultT }) {
+      const [armed, setArmed] = useState(false)
+      const armedTimerRef = useRef(null)
+
+      useEffect(() => () => {
+        if (armedTimerRef.current) clearTimeout(armedTimerRef.current)
+      }, [])
+
+      if (!backup?.available) {
+        return h('button', { className: 'ud-btn ud-btn--text', disabled: true, title: t('restoreMissing') },
+          t('restore'))
+      }
+
+      const restore = async () => {
+        if (!armed) {
+          setArmed(true)
+          armedTimerRef.current = setTimeout(() => setArmed(false), REBUILD_CONFIRM_MS)
+          return
+        }
+        setArmed(false)
+        const result = await requestPost(ENDPOINTS.restore)
+        if (!result.ok) {
+          onError(result.message)
+          return
+        }
+        machineRef.current?.restart()
+      }
+
+      return h('button', { className: 'ud-btn ud-btn--text', disabled: busy, onClick: restore },
+        armed ? t('restoreConfirm') : t('restore'))
     }
 
     const viewLabel = (t, id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
@@ -2769,7 +3056,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           ? h('div', { className: 'ud-detail' },
               h(AnomalyLog, { status, t }),
               h('div', { className: 'ud-detail-foot' },
-                h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t })))
+                h(RebuildButton, { machineRef: statusMachineRef, busy: status?.running === true, onError: setError, t }),
+                h(RestoreButton, { machineRef: statusMachineRef, busy: status?.running === true, backup: status?.backup, onError: setError, t })))
           : null,
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
@@ -2823,15 +3111,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         } catch (error) {
           console.warn('[usage-dash] 底部信息栏未注册(宿主无 conversation.composer.dock 插槽)', error)
         }
-        // 注入点B:turnTail chain 条目,同款两段式与降级;旧宿主无该插槽仅告警禁用
+        // 注入点B:回合费用芯片走官方动作行槽,回合结束随 messageId 出现;旧宿主无该插槽仅告警禁用
         try {
-          ctx.slots.inject('conversation.chat.turnTail', () =>
+          ctx.slots.inject('conversation.chat.assistant-actions', () =>
             ctx.slots.register(
-              { name: 'conversation.chat.turnTail', select: selectTurnTokenUsage, priority: TURN_TAIL_PRIORITY, locale: LOCALE_NS },
-              CostTail,
+              { name: 'conversation.chat.assistant-actions', id: 'usage-dash-turn-cost', order: TURN_COST_CHIP_ORDER, locale: LOCALE_NS },
+              CostChip,
             ))
         } catch (error) {
-          console.warn('[usage-dash] 会话尾部用量行未注册(宿主无 conversation.chat.turnTail 插槽)', error)
+          console.warn('[usage-dash] 回合费用芯片未注册(宿主无 conversation.chat.assistant-actions 插槽)', error)
         }
         // 跨实例同步:其他实例写开关经 storage 事件触发重读(同实例写入不触发该事件)
         window.addEventListener('storage', (event) => {

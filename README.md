@@ -19,7 +19,7 @@ dsh-plugin/
 | 名称 | 功能 | 简单原理 | 类型 |
 | --- | --- | --- | --- |
 | @mzzsfy/dsh-usage-panel | 多平台 LLM 账号余额与额度面板:配置 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点,定期自动查询并画趋势图,用量/余额阈值与窗口重置多通道通知 | 定时调用各平台查询接口并存快照(分频 + 指数退避防风控),面板用自绘 SVG 画余额/额度趋势,快照分档留存;阈值与重置事件经通知通道推送 | DSH 双端插件(settings 槽位 + web 路由) |
-| @mzzsfy/dsh-usage-dash | 用量统计面板:天/小时/分钟三粒度 token 与请求统计、活跃热力图、会话底栏信息接管与回合级用量注入、多条件分时段定价费用估算;复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),致谢原作者 | host 端订阅会话事件采集用量落存储域,web 路由供面板查询;client 端设置面板 + 底栏/回合双注入点;定价规则按精确/通配与时段/星期/号段多条件匹配 | DSH 双端插件(storage 域 + web 路由 + 槽位注入) |
+| @mzzsfy/dsh-usage-dash | 用量统计面板:天/小时/分钟三粒度 token 与请求统计、活跃热力图、会话底栏信息接管与回合费用芯片、多条件分时段定价费用估算;复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),致谢原作者 | host 端订阅会话事件采集用量落存储域,web 路由供面板查询;client 端设置面板 + 底栏接管与官方动作行回合费用芯片;定价规则按精确/通配与时段/星期/号段多条件匹配 | DSH 双端插件(storage 域 + web 路由 + 槽位注入) |
 | @mzzsfy/dsh-maintain | 版本与运维一体化:自动发现新版本、一键升级、安全重启,重启后页面自动恢复 | 监测 npm dist-tag 发现新版本;升级即执行自定义命令(`{tag}` 占位符);重启走优雅退出(5 秒兜底),页面轮询检测宿主恢复后自动刷新 | DSH 双端插件(settings 槽位 + web 路由) |
 | @mzzsfy/dsh-think-expand | 流式思考自动展开:始终显示最新一条思考,手动操作优先,打开会话仅展开最后一条,卸载无残留 | 纯前端观察流式渲染,新思考出现即收起上一条;无设置项,安装即自动生效 | DSH 纯前端插件(client 模块,DOM 观察) |
 | @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM 五通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;同浏览器多窗口按 localStorage 认领保证唯一发声;非回环 HTTP 访问降级 toast + 标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |

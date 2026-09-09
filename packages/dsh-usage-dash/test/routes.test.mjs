@@ -69,6 +69,13 @@ function makeStore({ rows = [], fail } = {}) {
   const calls = { rangeRows: 0 }
   return {
     calls,
+    backupInfo() {
+      return { available: false }
+    },
+    async restoreFromBackup() {
+      calls.restoreFromBackup = (calls.restoreFromBackup ?? 0) + 1
+      return { takenAt: 0, rows: 0 }
+    },
     async rangeRows(g, from, to) {
       calls.rangeRows += 1
       if (fail) throw fail
@@ -301,7 +308,7 @@ test('range 合法请求回 UsageStatsRange 信封', async () => {
   assert.equal(store.calls.rangeRows, 1)
 })
 
-test('status 回采集快照', async () => {
+test('status 回采集快照并附带回退点元信息', async () => {
   const collector = makeCollector({
     stateOverrides: { running: true, total: 5, done: 2, scannedSessions: 7, lastSessionId: 's1', error: 'boom', recordFailures: 1 },
   })
@@ -310,7 +317,7 @@ test('status 回采集快照', async () => {
   const parsed = JSON.parse(res.body)
   assert.equal(res.statusCode, 200)
   assert.equal(parsed.ok, true)
-  assert.deepEqual(parsed.value, collector.status())
+  assert.deepEqual(parsed.value, { ...collector.status(), backup: { available: false } })
 })
 
 test('minutes 超出保留窗口标注 coveredFrom/coveredTo', async () => {

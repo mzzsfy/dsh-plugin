@@ -5,11 +5,35 @@
 // 游标(liveFirstSeq 分区 + backfilledSessions)保证。采集是观测性的:一切
 // store 失败计入 recordFailures,绝不成为逃逸拒绝。
 
+import { createArchiveReader } from './archive-reader.js'
+
 const UNKNOWN_SESSION_ID = '(unknown-session)'
 const SEQ_UNKNOWN = -1
 const DEFAULT_BACKFILL_CONCURRENCY = 4
 const MARK_BATCH = 32
 const SCAN_LOG_MAX_ENTRIES = 200
+
+// 不可读会话分类:宿主可见性/可读性边界的三代实测形态(见 README 存档兼容)
+const SKIP_KINDS = { descriptor: 'descriptor', corrupt: 'corrupt', legacy: 'legacy', other: 'other' }
+const SKIP_PATTERNS = [
+  // 宿主新校验拒读历史档(0.1.5 descriptor v2),宿主修复后自动补扫
+  [SKIP_KINDS.descriptor, /unsupported descriptor version/i],
+  // 存档损坏(seq gap 等 fail-closed 拒绝),宿主 repair 后自动补扫
+  [SKIP_KINDS.corrupt, /corrupt|seq gap|SessionFormatError/i],
+  // 超旧格式词汇(v0 时代字段),宿主迁移链覆盖后自动补扫
+  [SKIP_KINDS.legacy, /format v0|unexpected member|does not provide|not a function/i],
+]
+
+function classifySkip(detail) {
+  for (const [kind, pattern] of SKIP_PATTERNS) {
+    if (pattern.test(detail)) return kind
+  }
+  return SKIP_KINDS.other
+}
+
+function emptySkipCounts() {
+  return { [SKIP_KINDS.descriptor]: 0, [SKIP_KINDS.corrupt]: 0, [SKIP_KINDS.legacy]: 0, [SKIP_KINDS.other]: 0 }
+}
 
 // 会话内单 pass 折叠:跟踪每个 (turn,step) 槽的最新报告,只把首次发射交 store
 export class UsageFold {
@@ -95,8 +119,9 @@ function sessionIdOf(target) {
   return typeof id === 'string' && id !== '' ? id : UNKNOWN_SESSION_ID
 }
 
-// 规范 provider/model 引用:双全拼引用,仅 model 用裸名
-function refOf(route) {
+// 规范 provider/model 引用:双全拼引用,仅 model 用裸名;
+// 与 client 侧注入点B turnModelOf 双实现同源(routes[].model 是裸模型名,展示侧才拼 provider),改一侧必须同步 parity
+export function refOf(route) {
   if (!route) return undefined
   if (route.provider && route.model) return `${route.provider}/${route.model}`
   return route.model || undefined
@@ -126,6 +151,10 @@ export class UsageCollector {
       lastSessionId: undefined,
       error: undefined,
       log: [],
+      // 计数独立累加,不受日志截断影响;skipped 细分供面板归因
+      skippedTotal: 0,
+      recordTotal: 0,
+      skipCounts: emptySkipCounts(),
     }
     // error 保留给采集器自身故障;单会话读取失败走日志 skipped 条目,计数由日志派生
   }
@@ -141,17 +170,24 @@ export class UsageCollector {
       scannedSessions: this.#state.scannedSessions,
       lastSessionId: this.#state.lastSessionId,
       error: this.#state.error,
-      skippedSessions: log.filter((entry) => entry.kind === 'skipped').length,
-      recordFailures: log.filter((entry) => entry.kind === 'record').length,
+      skippedSessions: this.#state.skippedTotal,
+      recordFailures: this.#state.recordTotal,
+      skippedBreakdown: { ...this.#state.skipCounts },
       log,
     }
   }
 
-  // 扫描异常日志:供面板明细展示,超上限丢最旧
+  // 扫描异常日志:供面板明细展示,超上限丢最旧;计数独立累加不随截断漂移
   pushLog(kind, detail) {
     const log = this.#state.log
     log.push({ time: Date.now(), kind, detail })
     if (log.length > SCAN_LOG_MAX_ENTRIES) log.splice(0, log.length - SCAN_LOG_MAX_ENTRIES)
+    if (kind === 'skipped') {
+      this.#state.skippedTotal += 1
+      this.#state.skipCounts[classifySkip(detail)] += 1
+    } else if (kind === 'record') {
+      this.#state.recordTotal += 1
+    }
   }
 
   get running() {
@@ -239,7 +275,9 @@ export class UsageCollector {
     const controller = new AbortController()
     this.scanController = controller
     await this.store.readyPromise()
-    await this.backfill(this.ctx.sessionPersistence, this.ctx.sessions, controller.signal)
+    // 适配发生在宿主服务边界:回扫主体只面向 ArchiveReader 内部契约
+    const reader = createArchiveReader(this.ctx.sessionPersistence)
+    await this.backfill(reader, this.ctx.sessions, controller.signal)
   }
 
   abort() {
@@ -271,22 +309,30 @@ export class UsageCollector {
     return this.resetInFlight
   }
 
-  // 回扫:persistence.list 驱动,逐会话全新 fold 重放;seen 独自决定是否重扫,
-  // liveFirstSeq 边界划走实时已拥区间,liveness 复查防陈旧快照放大重放范围,
-  // inheritedCut 跳过 fork 继承前缀。只有干净重放完的会话进游标,失败下轮重试
-  async backfill(persistence, sessions, signal) {
+  // 回扫:ArchiveReader 契约驱动(宿主 persistence 多版本适配见 archive-reader),
+  // 逐会话全新 fold 重放;seen 独自决定是否重扫,liveFirstSeq 边界划走实时
+  // 已拥区间,liveness 复查防陈旧快照放大重放范围,inheritedCut 跳过 fork
+  // 继承前缀。只有干净重放完的会话进游标,失败下轮重试
+  async backfill(reader, sessions, signal) {
     if (this.#state.running) return
     if (signal?.aborted) return
     this.#state.running = true
     this.#state.error = undefined
     try {
-      const headers = await persistence.list(signal)
+      const headers = await reader.list(signal).catch((error) => {
+        // 枚举失败(含宿主 API 未识别)按采集器自身故障呈现,面板可见
+        this.#state.error = error instanceof Error ? error.message : String(error)
+        throw error
+      })
       const seen = await this.store.seenSessions()
       const liveSeq = await this.store.liveSequences()
       const targets = headers.filter((header) => !seen.has(header.id))
       this.#state.total = targets.length
       this.#state.done = 0
       this.#state.log = []
+      this.#state.skippedTotal = 0
+      this.#state.recordTotal = 0
+      this.#state.skipCounts = emptySkipCounts()
       const workerCount = Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
       let next = 0
       const completed = []
@@ -321,7 +367,7 @@ export class UsageCollector {
           const fold = new UsageFold()
           let route = ''
           try {
-            const inspection = await persistence.inspect(header.id, signal)
+            const inspection = await reader.readLog(header.id, signal)
             const inheritedCut = inspection.inheritedEventCount
             for (const event of inspection.events) {
               if (signal?.aborted) return

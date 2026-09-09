@@ -61,6 +61,8 @@ const {
   hourTickLabel,
   indexOfDay,
   isEmptyRange,
+  groupRulesOf,
+  insertRuleAt,
   logTimeOf,
   matchPrice,
   maxSlotsFor,
@@ -68,11 +70,15 @@ const {
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
+  moveRuleTo,
   niceTicks,
   otherDetailItems,
   parseEnvelope,
+  partitionGroupOf,
   providerOf,
   rateAxisTicks,
+  removeRulesAt,
+  renameRulesAt,
   resolveDayRange,
   resolveHourRange,
   resolveMinuteRange,
@@ -470,8 +476,24 @@ const TIP_ANCHOR = { left: 100, top: 100, right: 140, bottom: 114 }
 const TIP_SIZE = { width: 80, height: 40 }
 const TIP_BOUNDS = { left: 0, top: 0, right: 800, bottom: 600 }
 
-test('tipPlace 默认锚点下方水平居中', () => {
-  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 80, top: 122 })
+test('tipPlace 小锚点默认翻上方水平居中', () => {
+  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 80, top: 52 })
+})
+
+test('tipPlace 锚定区装得下提示框贴内顶', () => {
+  const anchor = { left: 100, top: 100, right: 240, bottom: 460 }
+  assert.deepEqual(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS), { left: 130, top: 108 })
+})
+
+test('tipPlace 上方不足翻下方', () => {
+  const anchor = { left: 100, top: 20, right: 140, bottom: 60 }
+  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).top, 68)
+})
+
+test('tipPlace 候选边界等号归属', () => {
+  assert.deepEqual(tipPlace({ left: 100, top: 100, right: 240, bottom: 148 }, TIP_SIZE, TIP_BOUNDS), { left: 130, top: 108 })
+  assert.equal(tipPlace({ left: 100, top: 56, right: 140, bottom: 96 }, TIP_SIZE, TIP_BOUNDS).top, 8)
+  assert.equal(tipPlace({ left: 100, top: 8, right: 140, bottom: 48 }, TIP_SIZE, { left: 0, top: 0, right: 800, bottom: 104 }).top, 56)
 })
 
 test('tipPlace 下方放不下翻转上方', () => {
@@ -749,51 +771,70 @@ test('costTitleText 未计价计数后缀', () => {
 })
 
 test('defaultCondition 各类型默认值即填即用', () => {
-  // Given 四种条件类型 When 取默认 Then 时段全天/周几空/号段全月/日期段当天
-  assert.deepEqual(defaultCondition('dailyWindow'), { kind: 'dailyWindow', from: '00:00', to: '00:00' })
+  // Given 四种条件类型 When 取默认 Then 时段全天(00:00~23:59)/周几空/号段全月(1~31)/日期段当天单日
+  assert.deepEqual(defaultCondition('dailyWindow'), { kind: 'dailyWindow', from: '00:00', to: '23:59' })
   assert.deepEqual(defaultCondition('weekdays'), { kind: 'weekdays', days: [] })
   assert.deepEqual(defaultCondition('monthDays'), { kind: 'monthDays', from: 1, to: 31 })
   assert.deepEqual(defaultCondition('dateRange', new Date(2026, 2, 15)), { kind: 'dateRange', from: '2026-03-15', to: '2026-03-15' })
 })
 
 test('validatePricingRules 拒绝非法时刻与时刻字段缺失', () => {
-  // Given dailyWindow 时刻超界或缺失 When 校验 Then 标 condTime/required
+  // Given dailyWindow 时刻超界或缺失 When 校验 Then 标 condTime/required;双闭域 00:00~23:59,24:00 超界
   const rules = [
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '99:99', to: '08:00' }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '', to: '08:00' }] },
-    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '23:59', to: '24:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '24:00', to: '24:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '08:00', to: '24:30' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '00:00', to: '23:59' }] },
   ]
   const errors = validatePricingRules(rules)
   assert.equal(errors.get('0.conditions.0.from'), 'condTime')
   assert.equal(errors.get('1.conditions.0.from'), 'required')
-  assert.equal(errors.get('2.conditions.0.to'), 'condTime')
+  assert.equal(errors.get('2.conditions.0.from'), 'condTime')
+  assert.equal(errors.get('3.conditions.0.to'), 'condTime')
+  assert.equal(errors.has('4.conditions.0'), false)
+})
+
+test('validatePricingRules 接受 from===to 单点与单日', () => {
+  // Given 双闭下时段/号段/日期段 from===to When 校验 Then 全部合法
+  const rules = [
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dailyWindow', from: '10:00', to: '10:00' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 5, to: 5 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-05' }] },
+  ]
+  const errors = validatePricingRules(rules)
+  assert.equal(errors.size, 0)
 })
 
 test('validatePricingRules 校验周几与月号段边界', () => {
-  // Given weekdays 含 7、monthDays 含 0 或 32 When 校验 Then 标 condWeekday/condMonthDay
+  // Given weekdays 含 7、monthDays 含 0/32/33 When 校验 Then 标 condWeekday/condMonthDay;31 为合法上界
   const rules = [
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'weekdays', days: [0, 7] }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 0, to: 31 }] },
-    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 1, to: 32 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 32, to: 32 }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'monthDays', from: 1, to: 33 }] },
   ]
   const errors = validatePricingRules(rules)
   assert.equal(errors.get('0.conditions.0.days'), 'condWeekday')
   assert.equal(errors.get('1.conditions.0.from'), 'condMonthDay')
-  assert.equal(errors.get('2.conditions.0.to'), 'condMonthDay')
+  assert.equal(errors.get('2.conditions.0.from'), 'condMonthDay')
+  assert.equal(errors.get('3.conditions.0.to'), 'condMonthDay')
 })
 
 test('validatePricingRules 校验日期段格式与倒序', () => {
-  // Given dateRange 非规范日期或倒序 When 校验 Then 标 condDate/condRange
+  // Given dateRange 非规范日期或倒序(双闭下同日合法)When 校验 Then 标 condDate/condRange
   const rules = [
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-3-5', to: '2026-03-08' }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-08', to: '2026-03-05' }] },
+    { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-05' }] },
     { model: 'a/b', currency: '¥', price: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 }, conditions: [{ kind: 'dateRange', from: '2026-03-05', to: '2026-03-08' }] },
   ]
   const errors = validatePricingRules(rules)
   assert.equal(errors.get('0.conditions.0.from'), 'condDate')
   assert.equal(errors.get('1.conditions.0'), 'condRange')
   assert.equal(errors.has('2.conditions.0'), false)
-  assert.equal(errors.has('2.conditions.0.from'), false)
+  assert.equal(errors.has('3.conditions.0'), false)
+  assert.equal(errors.has('3.conditions.0.from'), false)
 })
 
 test('coerceConditions 规整数字字段且不改其余字段', () => {
@@ -821,4 +862,104 @@ test('coercePricingRules 连带规整条件', () => {
   const coerced = coercePricingRules(rules)
   assert.deepEqual(coerced[0].conditions, [{ kind: 'weekdays', days: [1] }, { kind: 'monthDays', from: 1, to: 31 }])
   assert.deepEqual(coerced[0].price, { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 })
+})
+
+// —— 定价编辑器分组视图:模型组 = 默认价(组末无条件规则投影,禁条件) + 附加计费规则(带条件) ——
+
+test('groupRulesOf 按模型聚合,组序为首次出现序,槽位保序带平面索引', () => {
+  // Given 平面规则 [a1, b1, a2] When 分组 Then a 组槽位 [0,2]、b 组槽位 [1],组顺序按首次出现
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const groups = groupRulesOf(rules)
+  assert.deepEqual(groups.map((group) => group.model), ['a/1', 'b/1'])
+  assert.deepEqual(groups[0].slots.map((slot) => slot.index), [0, 2])
+  assert.deepEqual(groups[1].slots.map((slot) => slot.index), [1])
+  groups[0].slots.forEach((slot, i) => assert.equal(slot.rule, rules[[0, 2][i]]))
+})
+
+test('groupRulesOf 空表返回空组列表', () => {
+  assert.deepEqual(groupRulesOf([]), [])
+})
+
+test('partitionGroupOf 组末无条件规则为默认价,其余为附加规则且保序', () => {
+  // Given 组槽位 [条件0, 条件1, 无条件2] When 划分 Then 默认价=索引2,附加=[0,1]
+  const cond = { kind: 'dailyWindow', from: '00:00', to: '08:00' }
+  const group = { model: 'a/1', slots: [
+    { rule: { model: 'a/1', conditions: [cond] }, index: 0 },
+    { rule: { model: 'a/1', conditions: [{ kind: 'weekdays', days: [1] }] }, index: 1 },
+    { rule: { model: 'a/1', conditions: [] }, index: 2 },
+  ] }
+  const { defaultSlot, extras } = partitionGroupOf(group)
+  assert.equal(defaultSlot.index, 2)
+  assert.deepEqual(extras.map((slot) => slot.index), [0, 1])
+})
+
+test('partitionGroupOf 全条件规则组无默认价', () => {
+  // Given 组内全部带条件 When 划分 Then defaultSlot 为 null,附加=全部槽位
+  const group = { model: 'a/1', slots: [
+    { rule: { model: 'a/1', conditions: [{ kind: 'weekdays', days: [1] }] }, index: 0 },
+    { rule: { model: 'a/1', conditions: [{ kind: 'weekdays', days: [2] }] }, index: 1 },
+  ] }
+  const { defaultSlot, extras } = partitionGroupOf(group)
+  assert.equal(defaultSlot, null)
+  assert.deepEqual(extras.map((slot) => slot.index), [0, 1])
+})
+
+test('partitionGroupOf 多条无条件规则时末条为默认价,前条按附加规则显示', () => {
+  // Given 组槽位 [无条件0, 无条件1] When 划分 Then 默认价=索引1,附加=[0](存量数据自然收敛)
+  const group = { model: 'a/1', slots: [
+    { rule: { model: 'a/1', conditions: [] }, index: 0 },
+    { rule: { model: 'a/1', conditions: [] }, index: 1 },
+  ] }
+  const { defaultSlot, extras } = partitionGroupOf(group)
+  assert.equal(defaultSlot.index, 1)
+  assert.deepEqual(extras.map((slot) => slot.index), [0])
+})
+
+test('moveRuleTo 跨位移动返回新数组且不动原数组', () => {
+  // Given [A,B,C] When 索引 2 移到索引 0 Then [C,A,B],原数组不变
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/2' }]
+  const moved = moveRuleTo(rules, 2, 0)
+  assert.deepEqual(moved.map((rule) => rule.model), ['a/2', 'a/1', 'b/1'])
+  assert.deepEqual(rules.map((rule) => rule.model), ['a/1', 'b/1', 'a/2'])
+  assert.notEqual(moved, rules)
+})
+
+test('moveRuleTo 组内上移等价于移到组内前一槽位平面位', () => {
+  // Given [a1,b1,a2] When a2 移到 a1 平面位 0 Then [a2,a1,b1],a 组内序为 a2,a1
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  assert.deepEqual(moveRuleTo(rules, 2, 0).map((rule) => rule.model), ['a/1', 'a/1', 'b/1'])
+})
+
+test('moveRuleTo 同位或越界返回原数组引用', () => {
+  // Given 同源同目标/越界 When 移动 Then 恒返回原引用,UI 无操作
+  const rules = [{ model: 'a/1' }, { model: 'a/2' }]
+  assert.equal(moveRuleTo(rules, 0, 0), rules)
+  assert.equal(moveRuleTo(rules, -1, 1), rules)
+  assert.equal(moveRuleTo(rules, 0, rules.length), rules)
+  assert.equal(moveRuleTo(rules, rules.length, 0), rules)
+})
+
+test('renameRulesAt 批量改组内模型键,其余规则不动', () => {
+  // Given 索引 [0,2] 改名 x/y When 应用 Then 仅这两条 model 变 x/y
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const renamed = renameRulesAt(rules, [0, 2], 'x/y')
+  assert.deepEqual(renamed.map((rule) => rule.model), ['x/y', 'b/1', 'x/y'])
+  assert.notEqual(renamed[0], rules[0])
+  assert.equal(renamed[1], rules[1])
+  assert.notEqual(renamed[2], rules[2])
+})
+test('insertRuleAt 插入到目标位之后', () => {
+  // Given 组内末槽位平面索引 2 When 插入新槽位 Then 落在索引 3,后续元素后移
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const next = insertRuleAt(rules, 2, { model: 'a/1' })
+  assert.equal(next.length, 4)
+  assert.equal(next[3].model, 'a/1')
+  assert.equal(next[1].model, 'b/1')
+})
+
+test('removeRulesAt 批量移除组内槽位', () => {
+  // Given 索引 [0,2] When 删除 Then 仅剩 b 组
+  const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
+  const rest = removeRulesAt(rules, [0, 2])
+  assert.deepEqual(rest.map((rule) => rule.model), ['b/1'])
 })
