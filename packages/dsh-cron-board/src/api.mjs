@@ -2,7 +2,7 @@
 // 本插件注册一条 prefix,handler 内按 method + 路径段表驱动分发(:id 路径段捕获);
 // 错误语义对齐仓内惯例:业务错误中文透传,系统级错误收敛固定文案并落服务端日志。
 
-import { assertValidSchedule, nextRunAtOf } from './cron.mjs'
+import { assertValidSchedule, nextRunAtOf, nextRunsOf, summarizeCron } from './cron.mjs'
 import { DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS } from './config.mjs'
 
 const ROUTE_PREFIX = '/api/cron-board'
@@ -268,10 +268,23 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
       },
     },
     {
+      // 编辑表单实时预览:croner 服务端解析,前端不引解析依赖(定案 §6.2)
+      method: 'POST',
+      segments: ['cron', 'preview'],
+      handler: async ({ req, res }) => {
+        const body = await readJsonBody(req)
+        const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
+        assertValidSchedule(schedule)
+        sendJson(res, 200, { summary: summarizeCron(schedule), nextAt: nextRunsOf(schedule, 3) })
+      },
+    },
+    {
       method: 'GET',
       segments: ['jobs'],
       handler: async ({ res }) => {
-        sendJson(res, 200, { items: store.jobs.list() })
+        // summary 人话摘要随行返回,前端不引解析依赖
+        const items = store.jobs.list().map((job) => ({ ...job, summary: summarizeCron(job.schedule) }))
+        sendJson(res, 200, { items })
       },
     },
     {

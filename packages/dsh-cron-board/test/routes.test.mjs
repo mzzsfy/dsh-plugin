@@ -257,6 +257,22 @@ test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   assert.equal(badMiss.status, 400)
 })
 
+test('cron preview 路由:人话摘要与下三次触发', async (t) => {
+  const { api } = await makeApi(t)
+  // When 预览「每天 08:30」
+  const ok = await call(api, 'POST', '/api/cron-board/cron/preview', { schedule: '30 8 * * *' })
+  // Then 摘要含每天与时刻,三次触发时间戳齐备
+  assert.equal(ok.status, 200)
+  assert.equal(ok.payload.summary, '每天 08:30')
+  assert.equal(ok.payload.nextAt.length, 3)
+  assert.ok(ok.payload.nextAt.every((value) => typeof value === 'number' && value > Date.now()))
+  // When 非法表达式
+  const bad = await call(api, 'POST', '/api/cron-board/cron/preview', { schedule: 'not-cron' })
+  // Then 400 中文报错
+  assert.equal(bad.status, 400)
+  assert.match(bad.payload.error, /cron/i)
+})
+
 test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {
   // Given 两个任务各有一条运行记录
   const { store, api } = await makeApi(t)
