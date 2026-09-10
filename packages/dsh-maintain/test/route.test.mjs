@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
+import { apply, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
 import { rmSync, readFileSync } from 'node:fs'
 
 // 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
@@ -128,13 +128,26 @@ async function call(routes, path, req) {
 const post = (routes, path, body, headers) => call(routes, path, makeReq({ method: 'POST', body, headers }))
 const get = (routes, path) => call(routes, path, makeReq({ method: 'GET' }))
 
-test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
+// 升级集成用例的版本探针读序:启动期 2 次(运行版本缓存 + 启动检查)+ 升级触发前
+// 快照 1 次读旧版,升级后复读起读通道最新版(触发前排空启动链,读序确定)
+const PROBE_STALE_READS = 3
+// 排空微任务链(setImmediate 为宏任务,先于其执行的全部微任务此后必已完成)
+const drainMicrotasks = () => new Promise((resolve) => setImmediate(resolve))
+// 真实时间等待:mock timers 域内 setTimeout 不再真实计时,以 setImmediate 自旋让出事件循环
+const realSleep = (ms) => new Promise((resolve) => {
+  const start = Date.now()
+  const spin = () => { if (Date.now() - start >= ms) resolve(); else setImmediate(spin) }
+  setImmediate(spin)
+})
+
+test('挂载:9 条路由注册,启动检查后快照就绪', async () => {
   const { ctx, routes } = makeCtx()
   apply(ctx)
-  assert.equal(routes.size, 8)
+  assert.equal(routes.size, 9)
   assert.deepEqual(
     [...routes.keys()].sort(),
     [
+      '/api/maintain/auto-restart',
       '/api/maintain/channel',
       '/api/maintain/poll-interval',
       '/api/maintain/refresh',
@@ -493,6 +506,109 @@ test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {
   const huge = await post(routes, '/api/maintain/poll-interval', { seconds: 1e308 })
   assert.equal(huge.status, 400)
   assert.equal(store.pollIntervalSec, undefined, '超上界值不得落盘')
+})
+
+test('auto-restart:非 boolean 400;boolean 持久化且 status 回显', async () => {
+  const store = {}
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  apply(ctx)
+  const stringInput = await post(routes, '/api/maintain/auto-restart', { enabled: 'true' })
+  assert.equal(stringInput.status, 400, '字符串宽转必须拒绝,防静默翻转开关')
+  const missing = await post(routes, '/api/maintain/auto-restart', {})
+  assert.equal(missing.status, 400)
+  assert.equal(store.autoRestart, undefined, '非法输入不得落盘')
+  const off = await post(routes, '/api/maintain/auto-restart', { enabled: false })
+  assert.equal(off.status, 200)
+  assert.equal(store.autoRestart, false)
+  assert.equal(off.payload.autoRestartEnabled, false, 'status 必须回显当前生效值')
+  const on = await post(routes, '/api/maintain/auto-restart', { enabled: true })
+  assert.equal(on.status, 200)
+  assert.equal(store.autoRestart, true)
+  assert.equal(on.payload.autoRestartEnabled, true)
+})
+
+test('auto-restart:关闭后升级成功落定(非 stale)不调度宿主退出', async (t) => {
+  let probeCalls = 0
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const exits = []
+  const { ctx, routes } = makeCtx({
+    settingsStore: store,
+    appExit: (code) => exits.push(code),
+    services: {
+      hostVersionProbe: () => {
+        probeCalls += 1
+        return Promise.resolve(probeCalls <= PROBE_STALE_READS ? '1.0.0' : '9.9.9')
+      },
+    },
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  apply(ctx)
+  // 排空启动期微任务链:此后探针读序确定(见 PROBE_STALE_READS 注释)
+  await drainMicrotasks()
+  const off = await post(routes, '/api/maintain/auto-restart', { enabled: false })
+  assert.equal(off.status, 200)
+  await post(routes, '/api/maintain/upgrade')
+  let settled = null
+  try {
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(30)
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.upgrade.last.ok, true)
+    // 非 stale 是本用例关键前置:否则 stale 分支先于 enabled 分支短路,断言与开关无关
+    assert.equal(settled.upgrade.last.stale, false, '前置:版本前进非 stale,使关闭开关成为唯一抑制因素')
+    assert.equal(settled.autoRestartEnabled, false)
+    assert.equal(settled.autoRestartScheduled, false, '关闭设置后不得置调度标记')
+    assert.equal(settled.upgrade.last.requiresManualRestart, undefined, '托管环境关闭设置不标手动指引')
+    // 推过完整调度延迟:若误调度,延迟窗口内 exit 必被调用
+    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [], '关闭设置时禁止调度任何宿主退出')
+  } finally {
+    rmSync(UPGRADE_LOCK_PATH, { force: true })
+  }
+})
+
+test('upgrade:开启设置+版本前进落定,延迟窗口后调度宿主退出', async (t) => {
+  // 探针读序见 PROBE_STALE_READS 注释:排空启动链后,触发前快照读旧版,
+  // 升级后复读读通道最新版,非 stale 使 enabled 判定成为唯一变量
+  let probeCalls = 0
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const exits = []
+  const { ctx, routes } = makeCtx({
+    settingsStore: store,
+    appExit: (code) => exits.push(code),
+    services: {
+      hostVersionProbe: () => {
+        probeCalls += 1
+        return Promise.resolve(probeCalls <= PROBE_STALE_READS ? '1.0.0' : '9.9.9')
+      },
+    },
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  apply(ctx)
+  await drainMicrotasks()
+  const trigger = await post(routes, '/api/maintain/upgrade')
+  assert.equal(trigger.status, 200)
+  let settled = null
+  try {
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(30)
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.upgrade.last.stale, false, '前置:复读版本达通道目标,不得标 stale')
+    // 落定可见与调度置位之间隔 runtimeEnvReady 的 await:await 一次 status 让微任务链走完再断言
+    const scheduled = await get(routes, '/api/maintain/status').then((r) => r.payload)
+    assert.equal(scheduled.autoRestartScheduled, true, '默认开启时升级成功必须调度自动重启')
+    assert.deepEqual(exits, [], '调度延迟窗口内不得提前退出')
+    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [0], '延迟窗口过后必须调度宿主退出')
+  } finally {
+    rmSync(UPGRADE_LOCK_PATH, { force: true })
+  }
 })
 
 test('registry-base:带 query 或 hash 的输入 400', async () => {

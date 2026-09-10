@@ -67,6 +67,20 @@ const CSS = [
   '.dm-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
   '.dm-pre { margin:0; font-family:ui-monospace, Consolas, monospace; font-size:11px; line-height:1.6; white-space:pre-wrap;',
   '  word-break:break-all; color:var(--dsw-alias-label-secondary); max-height:120px; overflow:auto; }',
+  // ---- 布尔开关:规约形态(track 胶囊 + thumb 圆点,状态锚定 input) ----
+  '.dm-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }',
+  '.dm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
+  '.dm-switch__track { width:30px; height:16px; border-radius:999px; flex:none; position:relative;',
+  '  background:var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); transition:background 0.15s ease; }',
+  '.dm-switch__thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%;',
+  '  background:#fff; transition:left 0.15s ease; }',
+  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track { background:var(--dsw-alias-state-success-primary, #1a9e55); }',
+  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track .dm-switch__thumb { left:16px; }',
+  '.dm-switch input[type="checkbox"]:focus-visible + .dm-switch__track { outline:2px solid var(--dsw-alias-brand-primary, #4d6bfe); outline-offset:2px; }',
+  '.dm-switch input[type="checkbox"]:disabled + .dm-switch__track { opacity:0.45; cursor:default; }',
+  '.dm-switch:hover { opacity:0.85; }',
+  // 文字标签在 DOM 中排 track 之后(保 input+track 紧邻兄弟,状态选择器才生效),视觉以 order 提前
+  '.dm-switch .dm-row__label { order:-1; }',
 ].join('\n')
 
 const STATUS_URL = '/api/maintain/status'
@@ -77,6 +91,7 @@ const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
 const REGISTRY_BASE_URL = '/api/maintain/registry-base'
 const UPGRADE_URL = '/api/maintain/upgrade'
 const RESTART_URL = '/api/maintain/restart'
+const AUTO_RESTART_URL = '/api/maintain/auto-restart'
 const UPGRADE_POLL_MS = 2 * 1000
 // 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
 const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
@@ -363,6 +378,21 @@ function EditRow(props) {
   )
 }
 
+// 布尔开关:原生 checkbox 保可访问性,视觉为 track 胶囊 + thumb 圆点(规约形态);
+// input 与 track 必须保持紧邻兄弟(状态选择器为紧邻组合器),文字标签排最后,视觉经 order 提前
+function Switch(props) {
+  return h('label', { className: 'dm-switch', title: props.title },
+    h('input', {
+      type: 'checkbox',
+      checked: props.checked === true,
+      disabled: props.disabled === true,
+      onChange: (e) => props.onChange(e.target.checked),
+    }),
+    h('span', { className: 'dm-switch__track' }, h('span', { className: 'dm-switch__thumb' })),
+    props.label ? h('span', { className: 'dm-row__label' }, props.label) : null,
+  )
+}
+
 // 版本区:当前版本、通道切换、通道最新版、结论、检查时间与错误、刷新与升级、升级命令编辑。
 function VersionCard(props) {
   const status = props.status
@@ -449,6 +479,18 @@ function SettingsCard(props) {
       onSave: props.onRegistryBase,
       hint: '默认以灰字提示,清空保存即恢复默认;官方源不可达时改为镜像',
     }),
+    h('div', { className: 'dm-row' },
+      h(Switch, {
+        label: '自动重启',
+        checked: status.autoRestartEnabled === true,
+        disabled: props.restarting || props.busy.autoRestart === true,
+        title: '升级成功后自动重启宿主以生效(需托管环境);关闭后升级完成仅提示,需手动重启',
+        onChange: props.onAutoRestart,
+      }),
+      h('span', { className: 'dm-meta' }, status.autoRestartEnabled === true
+        ? '升级成功后自动重启宿主(手动直跑环境仍需手动重启)'
+        : '升级完成后仅提示,需在面板手动重启'),
+    ),
   )
 }
 
@@ -742,6 +784,10 @@ function MaintainApp() {
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
+  function onAutoRestart(enabled) {
+    submitEdit(AUTO_RESTART_URL, { enabled: enabled === true }, 'autoRestart', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
+  }
+
   function onUpgrade() {
     if (!upgradeArmed) {
       setUpgradeArmed(true)
@@ -865,6 +911,7 @@ function MaintainApp() {
       restarting,
       onPollInterval,
       onRegistryBase,
+      onAutoRestart,
     }),
     h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
     h(OpsCard, { status, armed: restartArmed, restarting, activeWorkTotal, onRestart }),

@@ -129,6 +129,7 @@ test('parity: client API 路径常量与 host 路由清单逐条一致', () => {
     REGISTRY_BASE: 'REGISTRY_BASE_URL',
     UPGRADE: 'UPGRADE_URL',
     RESTART: 'RESTART_URL',
+    AUTO_RESTART: 'AUTO_RESTART_URL',
   }
   for (const [hostKey, hostPath] of Object.entries(API_PATHS)) {
     assert.equal(extractConst(CLIENT_KEY_BY_HOST_KEY[hostKey]), hostPath, 'API 路径漂移: ' + hostKey)

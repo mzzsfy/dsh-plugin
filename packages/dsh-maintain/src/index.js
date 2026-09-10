@@ -202,12 +202,14 @@ export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT
   return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: null }
 }
 
-// 升级后自动重启守卫:四条件缺一不可——成功、非 stale、非手动直跑、appExit 可用。
-// 手动直跑(双 TTY)进程退出后无人拉起,只标 requiresManualRestart 交面板指引
-export function judgeAutoRestart({ ok, stale, runtimeKind, hasExit }) {
+// 升级后自动重启守卫:五条件缺一不可——成功、非 stale、非手动直跑、设置启用、appExit 可用。
+// 手动直跑(双 TTY)进程退出后无人拉起,只标 requiresManualRestart 交面板指引,
+// 该指引是环境约束事实,不受设置影响;enabled 仅显式 false 关闭,其余视为开启
+export function judgeAutoRestart({ ok, stale, runtimeKind, hasExit, enabled }) {
   if (ok !== true) return { schedule: false, requiresManualRestart: false }
   if (stale === true) return { schedule: false, requiresManualRestart: false }
   if (runtimeKind === RUNTIME_KINDS.MANUAL_START) return { schedule: false, requiresManualRestart: true }
+  if (enabled === false) return { schedule: false, requiresManualRestart: false }
   if (hasExit !== true) return { schedule: false, requiresManualRestart: false }
   return { schedule: true, requiresManualRestart: false }
 }
@@ -222,6 +224,7 @@ export const API_PATHS = Object.freeze({
   REGISTRY_BASE: '/api/maintain/registry-base',
   UPGRADE: '/api/maintain/upgrade',
   RESTART: '/api/maintain/restart',
+  AUTO_RESTART: '/api/maintain/auto-restart',
 })
 
 // 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
@@ -258,6 +261,7 @@ const SETTINGS_SCHEMA = z.object({
   pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('轮询间隔秒数,仅正数启用周期检查'),
   upgradeCommandTemplate: z.string().default(DEFAULT_UPGRADE_TEMPLATE).description('升级命令模板,{tag} 执行时替换为追踪通道,可整体自改为任意命令'),
   registryBase: z.string().default(DEFAULT_REGISTRY_BASE).description('npm registry 基地址,官方源不可达时改为镜像地址'),
+  autoRestart: z.boolean().default(true).description('升级成功后自动重启宿主(托管环境);关闭后升级完成仅提示,需在面板手动重启'),
 })
 
 function sendJson(res, status, payload) {
@@ -337,6 +341,8 @@ function readSettings(ctx) {
       value && typeof value.registryBase === 'string' && value.registryBase.trim().length > 0
         ? value.registryBase.trim()
         : DEFAULT_REGISTRY_BASE,
+    // 仅显式 false 关闭:缺省/null/非 boolean 一律保持开启,旧数据与脏数据不得误关现行为
+    autoRestart: value ? value.autoRestart !== false : true,
   }
 }
 
@@ -466,6 +472,7 @@ export function apply(ctx) {
       upgradeTemplate: config.upgradeCommandTemplate,
       pollIntervalSec: config.pollIntervalSec,
       registryBase: config.registryBase,
+      autoRestartEnabled: config.autoRestart,
       tags: snapshot.tags,
       channelLatest: judged.channelLatest,
       verdict: judged.verdict,
@@ -580,9 +587,9 @@ export function apply(ctx) {
         + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
       audit('upgrade', last.ok === true ? 'ok' : 'failed',
         'durationMs=' + (last.finishedAt - last.startedAt) + ' code=' + last.code + ' kind=' + singleLine(last.kind))
-      // 自动重启守卫:等环境检测落定后按四条件分流(手动直跑只标指引,不退出)
+      // 自动重启守卫:等环境检测落定后按五条件分流(手动直跑只标指引,不退出)
       await runtimeEnvReady
-      const decision = judgeAutoRestart({ ok: last.ok === true, stale: last.stale === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function' })
+      const decision = judgeAutoRestart({ ok: last.ok === true, stale: last.stale === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function', enabled: readSettings(ctx).autoRestart })
       if (decision.requiresManualRestart === true) last.requiresManualRestart = true
       if (decision.schedule === true) {
         // last 镜像调度标记:浮条终态文案按其分流(与 status.autoRestartScheduled 同值)
@@ -781,6 +788,25 @@ export function apply(ctx) {
         // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
         // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
         setTimeout(() => exit(0), RESTART_DELAY_MS)
+      }),
+    },
+    {
+      path: API_PATHS.AUTO_RESTART,
+      handler: route('POST', WRITE, async (req, res) => {
+        const body = JSON.parse(await readBody(req))
+        // 严格 boolean:字符串 'false' 等宽转静默翻转破坏性开关,一律拒绝
+        if (body === null || typeof body !== 'object' || typeof body.enabled !== 'boolean') {
+          sendJson(res, 400, { error: 'enabled 必须是 boolean' })
+          return
+        }
+        const settings = ctx.get('settings')
+        if (!settings) {
+          sendJson(res, 500, { error: 'settings 服务不可用' })
+          return
+        }
+        await settings.update(NAMESPACE, { autoRestart: body.enabled })
+        audit('auto-restart', 'updated', 'enabled=' + body.enabled)
+        sendJson(res, 200, await currentStatus())
       }),
     },
   ]

@@ -219,7 +219,7 @@ test('重试:假命令真实进程 文件锁失败后重试成功', async () => 
   }
 })
 
-test('自动重启:四条件守卫(成功/非 stale/非手动直跑/appExit 可用)', () => {
+test('自动重启:五条件守卫(成功/非 stale/非手动直跑/enabled/appExit 可用)', () => {
   // 成功+托管(含 unknown)→ 调度
   assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true }), { schedule: true, requiresManualRestart: false })
   assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.DECLARED_MANAGED, hasExit: true }), { schedule: true, requiresManualRestart: false })
@@ -234,4 +234,19 @@ test('自动重启:四条件守卫(成功/非 stale/非手动直跑/appExit 可�
   assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: false }), { schedule: false, requiresManualRestart: false })
   // 手动直跑与 appExit 缺失并存 → 仍以手动指引标记(指引面板,与退出能力无关)
   assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: false }), { schedule: false, requiresManualRestart: true })
+})
+
+test('自动重启:enabled 关闭仅抑制托管调度,手动直跑指引保留', () => {
+  // 显式 false:托管(含 unknown)不调度、不标手动指引
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.DECLARED_MANAGED, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: false })
+  // 手动直跑指引是环境约束事实,不受偏好设置影响
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: true })
+  // 缺省与非 boolean 一律视为开启(宽松默认:旧数据/脏数据不得误关现行为)
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: undefined }), { schedule: true, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: null }), { schedule: true, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: 'false' }), { schedule: true, requiresManualRestart: false }, '字符串含字面 false 一律视为开启')
+  // 失败与 stale 优先于设置:关闭时同样零调度零指引
+  assert.deepEqual(judgeAutoRestart({ ok: false, stale: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, stale: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: false })
 })
