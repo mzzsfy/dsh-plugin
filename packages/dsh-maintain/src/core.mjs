@@ -241,6 +241,15 @@ export async function fetchDistTags({ registryBase, fetchImpl = fetch, timeoutMs
   return tags
 }
 
+// 运行版本事实源:运行进程 argv[1] 指向运行宿主自己的 bin.js(<包根>/lib/bin.js),
+// dirname 后上一级即包根,其 package.json 就是运行宿主清单。多副本共存时全局布局
+// 候选与 createRequire 解析都会命中其他副本(全局 0.1.5 + 副本跑旧版实测),只有
+// argv[1] 与运行进程绑定,列为最高优先级候选。
+export function runningHostCandidate({ argv1, pathImpl = win32 }) {
+  if (!argv1 || typeof argv1 !== 'string') return null
+  return pathImpl.join(pathImpl.dirname(argv1), '..', 'package.json')
+}
+
 // npm 全局布局下宿主包清单位置的候选序列;win 与 posix 目录结构不同,按声明平台选实现,与宿主 OS 解耦。
 export function hostPackageCandidates({ execPath, platform }) {
   const pathImpl = platform === 'win32' ? win32 : posix
@@ -251,17 +260,20 @@ export function hostPackageCandidates({ execPath, platform }) {
   return [pathImpl.join(globalDir, '@deepseek-ai', 'dsh', 'package.json')]
 }
 
-// 宿主实际安装版本:先按全局布局候选读文件,再退 createRequire 解析(插件可能随宿主树部署)。
-// 全部失败返回 null,面板显示未知,不影响宿主。
-export async function resolveHostVersion({ execPath, platform, readFileImpl = readFile, resolveImpl }) {
+// 宿主实际安装版本:运行宿主候选(argv[1] 推导)优先,再按全局布局候选,最后退
+// createRequire 解析(插件可能随宿主树部署)。全部失败返回 null,面板显示未知,不影响宿主。
+export async function resolveHostVersion({ execPath, platform, argv1, readFileImpl = readFile, resolveImpl }) {
+  const pathImpl = platform === 'win32' ? win32 : posix
+  const running = runningHostCandidate({ argv1, pathImpl })
   const candidates = hostPackageCandidates({ execPath, platform })
+  const ordered = running ? [running].concat(candidates) : candidates
   let requireResolved = null
   try {
     requireResolved = resolveImpl ? resolveImpl(TARGET_PACKAGE + '/package.json') : createRequire(import.meta.url)(TARGET_PACKAGE + '/package.json')
   } catch {
     requireResolved = null
   }
-  for (const candidate of requireResolved ? candidates.concat(requireResolved) : candidates) {
+  for (const candidate of requireResolved ? ordered.concat(requireResolved) : ordered) {
     try {
       const parsed = JSON.parse(await readFileImpl(candidate, 'utf8'))
       if (parsed && typeof parsed.version === 'string' && parsed.version.length > 0) return parsed.version

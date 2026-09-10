@@ -363,6 +363,7 @@ export function apply(ctx) {
     return resolveHostVersion({
       execPath: process.execPath,
       platform: process.platform,
+      argv1: process.argv[1],
       readFileImpl: readFile,
       resolveImpl: undefined,
     })
