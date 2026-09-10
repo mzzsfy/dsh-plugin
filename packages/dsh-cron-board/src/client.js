@@ -895,9 +895,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
         const wsService = ctx.get('workspaces')
         const wsModel = wsService && wsService.list && typeof wsService.list.getSnapshot === 'function' ? wsService.list : null
-        // 已装 better-sidebar:tab 注册常驻;当前会话页签不在打开态(未开/被关/被禁)即主界面形态接管,打开页签即拆除
-        const sidebar = ctx.get('betterSidebar')
-        if (sidebar !== undefined) {
+        // 扩展槽接入:tab 注册常驻 + 页签联动;直挂与服务晚注册两条路径共用
+        const attachBoardTab = (sidebar) => {
           registerBoardTab(ctx, sidebar, wsModel)
           const tabActive = () => {
             // 页签开着(哪怕类型被禁,better-sidebar 仍渲染已开页签)即扩展槽形态;没开(未开/被关/被禁)即主界面形态
@@ -927,15 +926,21 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           const LATE_SYNC_MS = 2 * 1000
           const lateSync = setTimeout(syncFallback, LATE_SYNC_MS)
           ctx.effect(() => () => clearTimeout(lateSync), 'cron-board late sync')
+        }
+        // 路径一:apply 时服务已在,直接接入
+        const sidebar = ctx.get('betterSidebar')
+        if (sidebar !== undefined) {
+          attachBoardTab(sidebar)
           return
         }
+        // 路径二:服务缺席先落主界面形态,服务就绪后拆主界面、接扩展槽(含页签联动)
         let standalone = mountStandaloneBoard(wsModel)
         let upgraded = false
         ctx.effect(() => () => { if (!upgraded) standalone() }, 'cron-board standalone board')
         ctx.inject(['betterSidebar'], (bsCtx) => {
           upgraded = true
           standalone()
-          registerBoardTab(ctx, bsCtx.betterSidebar, wsModel)
+          attachBoardTab(bsCtx.betterSidebar)
         })
       },
     }
