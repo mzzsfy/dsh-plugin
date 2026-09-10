@@ -40,10 +40,19 @@ jobs:
       # 镜像开发态 junction 桥);--no-save --no-package-lock 保证不产生任何入库文件
       - name: 安装宿主 peer(仓库根解析桥)
         run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4
-      # 该包 devDependencies 钉住宿主包版本,自身安装后其测试的宿主 import 就地解析
-      - name: 安装 dsh-llm-pi-gateway 依赖
-        working-directory: packages/dsh-llm-pi-gateway
-        run: npm install --no-save --no-package-lock --no-audit --no-fund
+      # 含外部依赖的包自动发现并安装(node ESM 逐级向上解析命中包内 node_modules);
+      # dependencies/devDependencies 全为 @mzzsfy 自依赖、为空或缺失的包跳过——
+      # 自依赖统一走符号链接桥,禁止经 registry 解析
+      - name: 安装含外部依赖的包
+        run: |
+          for dir in packages/*/; do
+            [ -f "${dir}package.json" ] || continue
+            needs=$(node -e "const p=require(process.argv[1]); const f=k=>Object.keys(p[k]||{}).some(n=>!n.startsWith('@mzzsfy/')); process.stdout.write(f('dependencies')||f('devDependencies')?'yes':'no')" "$(pwd)/${dir}package.json")
+            [ "$needs" = "yes" ] || continue
+            echo "::group::安装包依赖 ${dir}"
+            (cd "$dir" && npm install --omit=peer --no-save --no-package-lock --no-audit --no-fund) || exit 1
+            echo "::endgroup::"
+          done
       # 包间依赖禁止经 npm registry 解析(不自依赖):@mzzsfy 全量符号链接到本地工作副本,
       # 必须在全部 npm install 之后执行,防止被安装过程清理
       - name: 自依赖全走本地(@mzzsfy 符号链接桥)
