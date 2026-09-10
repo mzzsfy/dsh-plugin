@@ -176,22 +176,22 @@ test('评估接线: custom 账号 extract 规则驱动 balance 读数全链路(�
   }
 })
 
-test('notify-config: GET 不回显 webhookUrl 原文, 仅回是否已配置', async () => {
+test('notify-config: GET 回显 webhookUrl 原文', async () => {
   // Given 已配置 webhook 的 settings
   const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true, webhookUrl: 'https://hooks.example.com/private' } } })
   apply(ctx)
   // When 读取通知配置
   const res = await call(routes, '/api/usage-panel/notify-config', makeReq('GET'))
-  // Then 原文不出主机
+  // Then 原文随响应回显, webhookConfigured 已移除
   assert.equal(res.status, 200)
-  assert.equal(res.payload.notify.webhookUrl, undefined)
-  assert.equal(res.payload.notify.webhookConfigured, true)
+  assert.equal(res.payload.notify.webhookUrl, 'https://hooks.example.com/private')
+  assert.equal('webhookConfigured' in res.payload.notify, false)
   assert.equal(res.payload.imAvailable, false)
 })
 
 test('notify-config: 非法补丁 400, 合法补丁合并生效', async () => {
-  // Given 合法 ctx
-  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true } } })
+  // Given 合法 ctx,已配置 webhook
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: true, webhookUrl: 'https://hooks.example.com/keep' } } })
   apply(ctx)
   // When 提交越界阈值
   const bad = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { quotaThresholdPct: 0 }))
@@ -199,12 +199,13 @@ test('notify-config: 非法补丁 400, 合法补丁合并生效', async () => {
   assert.equal(bad.status, 400)
   // When 提交合法补丁(仅改阈值与余额阈值)
   const good = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { quotaThresholdPct: 80, balanceThreshold: 20 }))
-  // Then 生效且未提供的键保持原值
+  // Then 生效且未提供的键保持原值(部分补丁不得清掉已存 webhook)
   assert.equal(good.status, 200)
   const view = await call(routes, '/api/usage-panel/notify-config', makeReq('GET'))
   assert.equal(view.payload.notify.quotaThresholdPct, 80)
   assert.equal(view.payload.notify.balanceThreshold, 20)
   assert.equal(view.payload.notify.enabled, true)
+  assert.equal(view.payload.notify.webhookUrl, 'https://hooks.example.com/keep')
 })
 
 test('test-webhook: 返回真实投递结果而非谎报成功', async () => {

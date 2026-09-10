@@ -992,6 +992,7 @@ function NotifyConfigCard() {
       .then((res) => {
         if (!alive) return
         setConfig(res && res.notify ? res.notify : {})
+        setWebhookUrl(res && res.notify && typeof res.notify.webhookUrl === 'string' ? res.notify.webhookUrl : '')
         setImAvailable(res ? res.imAvailable === true : false)
       })
       .catch((err) => { if (alive) setError('读取通知配置失败:' + (err && err.message ? err.message : String(err))) })
@@ -1097,6 +1098,9 @@ function NotifyConfigCard() {
   }
   const targets = Array.isArray(config.imTargets) ? config.imTargets : []
   const boundBots = imBoundBotIds(targets)
+  // 已配置态与测试/保存分流均由 webhookUrl 派生;草稿编辑中不被其他 patch 回执重置
+  const savedWebhookUrl = typeof config.webhookUrl === 'string' ? config.webhookUrl.trim() : ''
+  const webhookDirty = webhookUrl.trim() !== savedWebhookUrl
   // 通知配置一次即久,默认折叠:summary 摘要行常显状态,展开才是完整配置
   return h('details', { className: 'up-card up-fold' },
     h('summary', { className: 'up-fold__summary' },
@@ -1104,7 +1108,7 @@ function NotifyConfigCard() {
       h('span', { className: 'up-dot' + (config.enabled === true ? '' : ' up-dot--off') }),
       h('span', { className: 'up-meta' }, config.enabled === true ? '已启用' : '已关闭'),
       targets.length > 0 ? h('span', { className: 'up-meta' }, targets.length + ' 个 IM 目标') : null,
-      config.webhookConfigured === true ? h('span', { className: 'up-meta' }, 'webhook 已配置') : null,
+      savedWebhookUrl.length > 0 ? h('span', { className: 'up-meta' }, 'webhook 已配置') : null,
     ),
     h('div', { className: 'up-card__row' },
       h(Switch, {
@@ -1156,29 +1160,37 @@ function NotifyConfigCard() {
         onChange: (checked) => patch({ toast: checked }),
       }),
       h('div', { className: 'up-card__row' },
-        h('span', { className: 'up-field__label', title: 'host 直发的 Slack 兼容 JSON 通知;填新地址保存后自动发送测试' }, 'Webhook'),
-        config.webhookConfigured === true ? h('span', { className: 'up-dot', title: '已配置' }) : null,
+        h('span', { className: 'up-field__label', title: 'host 直发的 Slack 兼容 JSON 通知;URL 原文回显,改动保存后自动发送测试' }, 'Webhook'),
+        savedWebhookUrl.length > 0 ? h('span', { className: 'up-dot', title: '已配置' }) : null,
         h('span', { className: 'up-field' },
           h('input', {
-            type: 'password', style: { width: '260px' },
+            type: 'text', style: { width: '260px' },
             value: webhookUrl,
             onChange: (e) => setWebhookUrl(e.target.value),
-            placeholder: config.webhookConfigured === true ? '已配置,留空保持不变' : 'https://hooks.example.com/…',
+            placeholder: 'https://hooks.example.com/…',
           })),
         h('button', {
           className: 'up-btn',
           onClick: () => {
-            if (webhookUrl.trim().length === 0) {
-              if (config.webhookConfigured !== true) { notify('请先填写 webhook URL', 'error'); return }
+            if (!webhookDirty) {
+              if (savedWebhookUrl.length === 0) { notify('请先填写 webhook URL', 'error'); return }
               testWebhook()
               return
             }
-            const part = { webhookUrl: webhookUrl.trim() }
-            api('/api/usage-panel/notify-config', { method: 'POST', body: JSON.stringify(part) })
-              .then((res) => { apply(res); setWebhookUrl(''); testWebhook() })
+            // 草稿与已保存值不同即保存(含清空=禁用);清空保存后通道关闭,不再自动测试误导报错
+            const disabling = webhookUrl.trim().length === 0
+            api('/api/usage-panel/notify-config', { method: 'POST', body: JSON.stringify({ webhookUrl: webhookUrl.trim() }) })
+              .then((res) => {
+                if (res && res.notify) {
+                  setConfig(res.notify)
+                  setWebhookUrl(typeof res.notify.webhookUrl === 'string' ? res.notify.webhookUrl : '')
+                }
+                notify(disabling ? 'webhook 已禁用' : '通知配置已保存', 'ok')
+                if (!disabling) testWebhook()
+              })
               .catch(fail)
           },
-        }, webhookUrl.trim().length > 0 ? '保存并测试' : '测试'),
+        }, webhookDirty ? '保存并测试' : '测试'),
       ),
       // IM 通道:目标来自 dsh-im 已保存目录,勾选即自动保存;新建与平台测试在 dsh-im 设置页完成
       imAvailable ? null : h('span', { className: 'up-meta' }, 'dsh-im 未安装,IM 通道不可用'),

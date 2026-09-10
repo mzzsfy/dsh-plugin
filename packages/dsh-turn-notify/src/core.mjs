@@ -664,7 +664,7 @@ export function resolvedConfig(settings) {
   }
 }
 
-// 面板可见配置:webhookUrl 属凭据不出主机,仅回是否已配置。
+// 面板可见配置:webhookUrl 原文随响应回显,面板所见即所存。
 export function publicConfig(settings) {
   const resolved = resolvedConfig(settings)
   return {
@@ -675,6 +675,6 @@ export function publicConfig(settings) {
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,
     kindRoutes: resolved.kindRoutes,
-    webhookConfigured: resolved.webhookUrl.trim().length > 0,
+    webhookUrl: resolved.webhookUrl,
   }
 }

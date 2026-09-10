@@ -78,7 +78,7 @@ turn-notify:
 
 ## webhook 推送
 
-在面板填入 webhook URL 即启用。host 直发,标签页全关也送达;payload 为 Slack 兼容 JSON(text 字段承载通知文本,summary 字段承载通知小结),另附 event/category/status/session/workspace/durationMs/tokens/ts 结构化字段;超时 10 秒,不重试。凭据只写不回显,测试按钮返回真实投递结果。
+在面板填入 webhook URL 即启用。host 直发,标签页全关也送达;payload 为 Slack 兼容 JSON(text 字段承载通知文本,summary 字段承载通知小结),另附 event/category/status/session/workspace/durationMs/tokens/ts 结构化字段;超时 10 秒,不重试。URL 原文随配置响应回显、保存即提交输入框内容(清空并保存即禁用),测试按钮返回真实投递结果。
 
 ## IM 推送
 
@@ -106,7 +106,7 @@ turn-notify:
 
 ## settings.yaml 参考
 
-面板与 settings.yaml 读写同一命名空间,两边改动互通、保存即生效。webhookUrl 属凭据,面板只写不回显,yaml 直改仍可。
+面板与 settings.yaml 读写同一命名空间,两边改动互通、保存即生效。webhookUrl 随面板配置响应回显,yaml 直改同样可见。
 
 ```yaml
 turn-notify:
@@ -155,7 +155,7 @@ turn-notify:
 ## 安全
 
 - 配置写入类接口(config / mapping / upload / 音效改名与删除 / 测试)带同源守卫:Origin 与 Host 不符即 403,JSON 写入另校验 content-type,阻断跨站页面 drive-by 改写配置。
-- webhookUrl 标记为 secret,任何接口不回传原文。
+- webhookUrl 在 settings 层标记为 secret(导出与日志脱敏);面板配置接口原文回显,本机同源可读写。
 - 音效上传双重校验扩展名与真实音频内容;音效读取接口拒绝音频扩展名以外的文件。
 - 已知边界:同源守卫不防 DNS rebinding(Origin 与 Host 相等即放行)。该暴露面属 host webserver 全部 /api 路由的存量问题,应在 host 层统一解决而非逐插件补丁。
 

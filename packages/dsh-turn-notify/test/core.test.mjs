@@ -679,7 +679,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
 })
 
-test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
+test('面板可见配置:webhookUrl 原文回显', () => {
   assert.deepEqual(
     publicConfig({ webhookUrl: 'https://hook.example/service/xxx', enabled: { completed: false }, soundMapping: { completed: 'snd-1' }, kindRoutes: { ask: ['im'] } }),
     {
@@ -690,12 +690,13 @@ test('面板可见配置:webhookUrl 不出主机,仅回是否已配置', () => {
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
       kindRoutes: { ask: ['im'] },
-      webhookConfigured: true,
+      webhookUrl: 'https://hook.example/service/xxx',
     },
   )
-  assert.equal(publicConfig({}).webhookConfigured, false)
-  assert.equal(publicConfig({ webhookUrl: '   ' }).webhookConfigured, false)
-  assert.equal('webhookUrl' in publicConfig({ webhookUrl: 'https://hook.example' }), false)
+  assert.equal(publicConfig({}).webhookUrl, '')
+  // 空白串原样回显,不静默归一
+  assert.equal(publicConfig({ webhookUrl: '   ' }).webhookUrl, '   ')
+  assert.equal('webhookConfigured' in publicConfig({ webhookUrl: 'https://hook.example' }), false)
 })
 
 test('会话事件有界累积:标题提取后封账为字符串,内存不再增长', () => {
