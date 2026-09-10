@@ -71,60 +71,108 @@ const CRON_PRESETS = [
 ]
 
 const STYLE = `
-.cb-panel{display:flex;flex-direction:column;gap:12px;min-width:0}
-.cb-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.cb-tabs{display:flex;gap:4px}
-.cb-pill{border:1px solid var(--dsh-border,rgba(128,128,128,.35));border-radius:999px;padding:3px 12px;font-size:13px;background:transparent;color:inherit;cursor:pointer}
-.cb-pill--on{background:var(--dsh-accent,#3b82f6);border-color:transparent;color:#fff}
+/* 组件令牌层:宿主 dsw-alias 语义令牌 → cb- 组件令牌(缺省回退保证裸宿主可用) */
+:root{
+--cb-bg:var(--dsw-alias-bg-layer-1,#1e1f24);
+--cb-bg-sub:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08));
+--cb-border:var(--dsw-alias-border-l2,rgba(127,127,127,.32));
+--cb-border-strong:var(--dsw-alias-border-l3,rgba(127,127,127,.5));
+--cb-text:var(--dsw-alias-label-primary,inherit);
+--cb-text-sub:var(--dsw-alias-label-secondary,rgba(127,127,127,.9));
+--cb-text-dim:var(--dsw-alias-label-tertiary,rgba(127,127,127,.7));
+--cb-accent:var(--dsw-alias-brand-primary,#3b82f6);
+--cb-accent-hover:var(--dsw-alias-button-primary-hover,#2f6fe0);
+--cb-accent-text:var(--dsw-alias-brand-primary-invert,#ffffff);
+--cb-danger:var(--dsw-alias-state-error-primary,#e5484d);
+--cb-danger-hover:var(--dsw-alias-state-error-secondary,#c73737);
+--cb-ok:var(--dsw-alias-state-success-primary,#2f9e44);
+--cb-hover:var(--dsw-alias-button-tool-bar-hover,rgba(127,127,127,.14));
+--cb-mask:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.5));
+--cb-radius-sm:4px;--cb-radius-md:6px;--cb-radius-lg:10px;
+--cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:10px;--cb-space-5:12px;--cb-space-6:16px;
+--cb-font-xs:11px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
+}
+.cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;color:var(--cb-text)}
+.cb-toolbar{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
+.cb-tabs{display:flex;gap:var(--cb-space-1)}
+.cb-pill{border:1px solid var(--cb-border);border-radius:999px;padding:3px 12px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;transition:color .15s,border-color .15s,background .15s}
+.cb-pill:hover{color:var(--cb-text);border-color:var(--cb-border-strong)}
+.cb-pill--on{background:var(--cb-accent);border-color:transparent;color:var(--cb-accent-text)}
+.cb-pill--on:hover{color:var(--cb-accent-text);border-color:transparent}
 .cb-spacer{flex:1}
-.cb-button{border:1px solid var(--dsh-border,rgba(128,128,128,.35));border-radius:6px;padding:4px 10px;font-size:13px;background:transparent;color:inherit;cursor:pointer}
-.cb-button:hover{border-color:var(--dsh-accent,#3b82f6)}
-.cb-button--primary{background:var(--dsh-accent,#3b82f6);border-color:transparent;color:#fff}
-.cb-button--danger{color:#e5484d}
-.cb-cards{display:flex;flex-direction:column;gap:8px}
-.cb-card{position:relative;display:flex;flex-direction:column;gap:6px;border:1px solid var(--dsh-border,rgba(128,128,128,.35));border-radius:8px;padding:10px 12px;cursor:pointer;overflow:hidden}
-.cb-card:hover{border-color:var(--dsh-accent,#3b82f6)}
+.cb-button{border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:4px 12px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+.cb-button:hover:not(:disabled){border-color:var(--cb-accent);color:var(--cb-accent)}
+.cb-button:disabled{opacity:.45;cursor:not-allowed}
+.cb-button--primary{background:var(--cb-accent);border-color:transparent;color:var(--cb-accent-text)}
+.cb-button--primary:hover:not(:disabled){background:var(--cb-accent-hover);border-color:transparent;color:var(--cb-accent-text)}
+.cb-button--danger{color:var(--cb-danger)}
+.cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:var(--cb-accent-text)}
+.cb-button--sm{padding:2px 10px;font-size:var(--cb-font-sm)}
+.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible,.cb-entry:focus-visible{outline:2px solid var(--cb-accent);outline-offset:2px}
+.cb-button:active:not(:disabled){transform:translateY(1px)}
+.cb-cards{display:flex;flex-direction:column;gap:var(--cb-space-3)}
+.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg-sub);transition:border-color .15s,background .15s}
+.cb-card:hover{border-color:var(--cb-accent);background:var(--cb-hover)}
 .cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3.5px;background:var(--cb-status,#8b8d98)}
-.cb-card-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.cb-name{font-size:14px;font-weight:600}
-.cb-badge{font-size:11px;border:1px solid var(--dsh-border,rgba(128,128,128,.35));border-radius:4px;padding:1px 6px;color:var(--dsh-text-secondary,inherit)}
+.cb-card-row{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
+.cb-name{font-size:14px;font-weight:600;color:var(--cb-text)}
+.cb-badge{font-size:var(--cb-font-xs);border:1px solid var(--cb-border);border-radius:var(--cb-radius-sm);padding:1px 6px;color:var(--cb-text-sub)}
 .cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status,#8b8d98);flex:none}
-.cb-meta{font-size:12px;color:var(--dsh-text-secondary,rgba(128,128,128,.9))}
-.cb-actions{display:flex;align-items:center;gap:6px;margin-left:auto}
-.cb-icon{border:none;background:transparent;color:inherit;cursor:pointer;font-size:12px;padding:2px 6px;border-radius:4px}
-.cb-icon:hover{background:rgba(128,128,128,.15)}
-.cb-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:6px}
+.cb-meta{font-size:var(--cb-font-sm);color:var(--cb-text-sub)}
+.cb-actions{display:flex;align-items:center;gap:var(--cb-space-2);margin-left:auto}
+.cb-icon{border:none;background:transparent;color:var(--cb-text-sub);cursor:pointer;font-size:var(--cb-font-sm);padding:2px 8px;border-radius:var(--cb-radius-sm);transition:background .15s,color .15s}
+.cb-icon:hover{background:var(--cb-hover);color:var(--cb-text)}
+.cb-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--cb-space-2)}
 .cb-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
-.cb-switch__track{width:30px;height:17px;border-radius:999px;background:rgba(128,128,128,.4);position:relative;transition:background .15s;flex:none}
+.cb-switch__track{width:30px;height:17px;border-radius:999px;background:var(--cb-border-strong);position:relative;transition:background .15s;flex:none}
 .cb-switch__thumb{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
-.cb-switch input[type="checkbox"]:checked + .cb-switch__track{background:var(--dsh-accent,#3b82f6)}
+.cb-switch input[type="checkbox"]:checked + .cb-switch__track{background:var(--cb-accent)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track .cb-switch__thumb{left:15px}
-.cb-switch input[type="checkbox"]:focus-visible + .cb-switch__track{outline:2px solid var(--dsh-accent,#3b82f6);outline-offset:1px}
+.cb-switch input[type="checkbox"]:focus-visible + .cb-switch__track{outline:2px solid var(--cb-accent);outline-offset:1px}
 .cb-switch input[type="checkbox"]:disabled + .cb-switch__track{opacity:.4;cursor:not-allowed}
-.cb-switch:not(:has(input[type="checkbox"]:disabled)):hover .cb-switch__track{background:rgba(128,128,128,.6)}
-.cb-switch input[type="checkbox"]:checked:not(:disabled) + .cb-switch__track:hover{background:var(--dsh-accent,#3b82f6)}
-.cb-table{display:flex;flex-direction:column;gap:4px;font-size:13px}
-.cb-row{display:flex;align-items:center;gap:8px;border:1px solid var(--dsh-border,rgba(128,128,128,.3));border-radius:6px;padding:6px 10px;flex-wrap:wrap}
-.cb-code{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
-.cb-mask{color:var(--dsh-text-secondary,rgba(128,128,128,.9))}
-.cb-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60}
-.cb-modal{background:var(--dsh-bg,#1e1f24);color:inherit;border-radius:10px;padding:16px;max-width:720px;width:min(720px,92vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
-.cb-modal-title{font-size:15px;font-weight:600}
-.cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
-.cb-field{display:flex;flex-direction:column;gap:4px;font-size:12px;min-width:0}
+.cb-switch:not(:has(input[type="checkbox"]:disabled)):hover .cb-switch__track{background:var(--cb-border-strong);filter:brightness(1.15)}
+.cb-switch input[type="checkbox"]:checked:not(:disabled) + .cb-switch__track:hover{background:var(--cb-accent-hover)}
+.cb-table{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-md)}
+.cb-row{display:flex;align-items:center;gap:var(--cb-space-3);border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-4);flex-wrap:wrap;transition:background .15s,border-color .15s}
+.cb-row:hover{background:var(--cb-hover);border-color:var(--cb-border-strong)}
+.cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.cb-mask{color:var(--cb-text-sub)}
+.cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
+.cb-modal{background:var(--cb-bg);color:var(--cb-text);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:720px;width:min(720px,92vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:var(--cb-space-4);box-shadow:0 8px 32px rgba(0,0,0,.28);animation:cb-pop-in .2s ease-out}
+@keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
+@keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track{transition:none}}
+.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3)}
+.cb-modal-title{font-size:var(--cb-font-lg);font-weight:600}
+.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4)}
+.cb-section{display:flex;flex-direction:column;gap:var(--cb-space-3)}
+.cb-section-title{font-size:var(--cb-font-xs);font-weight:600;letter-spacing:.05em;color:var(--cb-text-dim);text-transform:uppercase;border-bottom:1px solid var(--cb-border);padding-bottom:var(--cb-space-2)}
+.cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--cb-space-3) var(--cb-space-5)}
+.cb-field{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-sm);min-width:0;color:var(--cb-text-sub)}
 .cb-field--wide{grid-column:1 / -1}
-.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{border:1px solid var(--dsh-border,rgba(128,128,128,.4));border-radius:6px;padding:5px 8px;font-size:13px;background:transparent;color:inherit;min-width:0}
-.cb-field textarea{min-height:64px;resize:vertical}
-.cb-hint{font-size:11px;color:var(--dsh-text-secondary,rgba(128,128,128,.9))}
-.cb-preview{font-size:12px;border:1px dashed var(--dsh-border,rgba(128,128,128,.4));border-radius:6px;padding:6px 8px}
-.cb-log{font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;background:rgba(128,128,128,.08);border-radius:6px;padding:8px;max-height:320px;overflow:auto}
-.cb-empty{font-size:13px;color:var(--dsh-text-secondary,rgba(128,128,128,.9));padding:12px 0;text-align:center}
-.cb-select{border:1px solid var(--dsh-border,rgba(128,128,128,.4));border-radius:6px;padding:4px 8px;font-size:13px;background:transparent;color:inherit}
-.cb-entry{display:flex;align-items:center;gap:8px;width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:6px 10px;border-radius:8px;font-size:13px;text-align:left}
-.cb-entry:hover{background:rgba(128,128,128,.12)}
-.cb-entry[data-active="true"]{background:rgba(128,128,128,.2)}
+.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:5px 8px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text);min-width:0;transition:border-color .15s}
+.cb-field input:focus,.cb-field textarea:focus,.cb-field select:focus{outline:none;border-color:var(--cb-accent)}
+.cb-field textarea{min-height:64px;resize:vertical;font-family:inherit}
+.cb-hint{font-size:var(--cb-font-xs);color:var(--cb-text-sub)}
+.cb-error{font-size:var(--cb-font-sm);color:var(--cb-danger);background:var(--cb-bg-sub);border-left:3px solid var(--cb-danger);border-radius:var(--cb-radius-sm);padding:var(--cb-space-2) var(--cb-space-3)}
+.cb-preview{font-size:var(--cb-font-sm);border:1px dashed var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-3);color:var(--cb-text-sub)}
+.cb-log{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);white-space:pre-wrap;word-break:break-all;background:var(--cb-bg-sub);border-radius:var(--cb-radius-md);padding:var(--cb-space-3);max-height:320px;overflow:auto}
+.cb-empty{font-size:var(--cb-font-md);color:var(--cb-text-dim);padding:var(--cb-space-6) 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:var(--cb-space-3)}
+.cb-select{border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 8px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text)}
+.cb-confirm-text{font-size:var(--cb-font-md);color:var(--cb-text);line-height:1.5}
+.cb-log::-webkit-scrollbar,.cb-modal::-webkit-scrollbar{width:8px;height:8px}
+.cb-log::-webkit-scrollbar-thumb,.cb-modal::-webkit-scrollbar-thumb{background:var(--cb-border-strong);border-radius:999px}
+.cb-log::-webkit-scrollbar-track,.cb-modal::-webkit-scrollbar-track{background:transparent}
+@media (max-width: 560px){
+.cb-grid{grid-template-columns:1fr}
+.cb-card-row .cb-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
+.cb-view{padding:var(--cb-space-4)}
+}
+.cb-entry{display:flex;align-items:center;gap:var(--cb-space-3);width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--cb-space-2) var(--cb-space-4);border-radius:var(--cb-radius-lg);font-size:var(--cb-font-md);text-align:left}
+.cb-entry:hover{background:var(--cb-hover)}
+.cb-entry[data-active="true"]{background:var(--cb-accent);color:var(--cb-accent-text)}
 .cb-entry-icon{display:inline-flex;flex:none}
-.cb-view{display:none;flex:1;min-height:0;flex-direction:column;padding:12px 16px;overflow:auto;background:var(--dsw-alias-bg-layer-1,var(--dsh-bg,#1e1f24))}
+.cb-view{display:none;flex:1;min-height:0;flex-direction:column;padding:var(--cb-space-5) var(--cb-space-6);overflow:auto;background:var(--cb-bg)}
 html[data-cb-board-active] [data-cb-view]{display:flex}
 html[data-cb-board-active] [data-pane="conversation"] > :not([data-cb-view]){display:none !important}
 html[data-cb-board-active] [class*="centerCol"] > :not([data-cb-view]){display:none !important}
@@ -202,11 +250,28 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         hint ? h('span', { className: 'cb-hint' }, hint) : null)
     }
 
-    function Modal({ title, onClose, children }) {
+    function Modal({ title, onClose, children, width }) {
+      const bodyRef = useRef(null)
+      useEffect(() => {
+        const onKey = (event) => { if (event.key === 'Escape') onClose() }
+        document.addEventListener('keydown', onKey)
+        const first = bodyRef.current && bodyRef.current.querySelector('input, textarea, select')
+        if (first) first.focus()
+        return () => document.removeEventListener('keydown', onKey)
+      }, [])
       return h('div', { className: 'cb-modal-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
-        h('div', { className: 'cb-modal' },
-          h('div', { className: 'cb-modal-title' }, title),
-          children))
+        h('div', { className: 'cb-modal', style: width ? { width: 'min(' + width + 'px, 92vw)' } : null },
+          h('div', { className: 'cb-modal-head' },
+            h('span', { className: 'cb-modal-title' }, title),
+            h('button', { className: 'cb-icon', 'aria-label': '关闭', onClick: onClose }, '✕')),
+          h('div', { className: 'cb-modal-body', ref: bodyRef }, children)))
+    }
+
+    // 节标题:表单分区渐进披露(基础/执行/调度)
+    function Section({ title, children }) {
+      return h('div', { className: 'cb-section' },
+        h('div', { className: 'cb-section-title' }, title),
+        children)
     }
 
     // —— 任务表单(新建/编辑)——
@@ -232,6 +297,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }))
       const [preview, setPreview] = useState(null)
       const [error, setError] = useState(null)
+      const [saving, setSaving] = useState(false)
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const setSession = (patch) => setForm((prev) => ({ ...prev, session: { ...prev.session, ...patch } }))
 
@@ -245,79 +311,86 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, [form.schedule])
 
       const submit = async () => {
+        if (saving) return
+        setSaving(true)
         setError(null)
         const payload = { ...form }
         payload.concurrency = form.concurrency === '' ? undefined : Number(form.concurrency)
         payload.session = form.kind === 'session' ? form.session : undefined
         const outcome = await request(editing ? 'PATCH' : 'POST', editing ? 'jobs/' + job.id : 'jobs', payload)
+        setSaving(false)
         if (outcome.ok) onDone()
         else setError(outcome.error)
       }
 
-      return h(Modal, { title: editing ? '编辑任务' : '新建任务', onClose: onDone },
-        h('div', { className: 'cb-grid' },
-          h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
-          h(Field, { label: '类型' }, h(PillGroup, {
-            options: [{ value: 'shell', label: KIND_LABELS.shell }, { value: 'session', label: KIND_LABELS.session }],
-            value: form.kind,
-            onChange: (kind) => set({ kind }),
-          })),
-          form.kind === 'shell'
-            ? h(Field, { label: '命令', wide: true, hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
-                h('input', { type: 'text', value: form.command, onChange: (e) => set({ command: e.target.value }) }))
-            : null,
-          form.kind === 'shell'
-            ? h(Field, { label: '工作目录(可空)' }, h('input', { type: 'text', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))
-            : null,
-          form.kind === 'session'
-            ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
-                h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
-            : null,
-          form.kind === 'session'
-            ? h(Field, { label: '会话模式' }, h(PillGroup, {
-                options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
-                value: form.session.mode,
-                onChange: (mode) => setSession({ mode }),
-              }))
-            : null,
-          form.kind === 'session' && form.session.mode === 'pinned'
-            ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },
-                h('input', { type: 'text', value: form.session.pinnedSessionId, onChange: (e) => setSession({ pinnedSessionId: e.target.value }) }))
-            : null,
-          form.kind === 'session'
-            ? h(Field, { label: '允许时段起(可空)' }, h('input', { type: 'text', placeholder: '09:00', value: form.session.windowStart, onChange: (e) => setSession({ windowStart: e.target.value }) }))
-            : null,
-          form.kind === 'session'
-            ? h(Field, { label: '允许时段止(可空)' }, h('input', { type: 'text', placeholder: '23:00', value: form.session.windowEnd, onChange: (e) => setSession({ windowEnd: e.target.value }) }))
-            : null,
-          form.kind === 'session'
-            ? h(Field, { label: '窗口外策略' }, h(PillGroup, {
-                options: [{ value: 'skip', label: ONMISS_LABELS.skip }, { value: 'defer', label: ONMISS_LABELS.defer }],
-                value: form.session.onMiss,
-                onChange: (onMiss) => setSession({ onMiss }),
-              }))
-            : null,
-          h(Field, { label: 'cron 表达式(分 时 日 月 周)' },
-            h('div', { style: { display: 'flex', gap: 6 } },
-              h('input', { type: 'text', value: form.schedule, onChange: (e) => set({ schedule: e.target.value }) }),
-              h('select', {
-                className: 'cb-select',
-                value: '',
-                onChange: (e) => { if (e.target.value) set({ schedule: e.target.value }) },
-              },
-                h('option', { value: '' }, '预设'),
-                CRON_PRESETS.map((preset) => h('option', { key: preset.value, value: preset.value }, preset.label)))),
-            preview ? h('span', { className: 'cb-preview' },
-              preview.summary + ';接下来 ' + preview.nextAt.map((at) => formatDateTime(at)).join(' / ')) : null),
-          h(Field, { label: '超时(毫秒)' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) })),
-          h(Field, { label: '并发上限(可空)' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) })),
-        ),
-        error ? h('div', { className: 'cb-hint', style: { color: '#e5484d' } }, error) : null,
+      return h(Modal, { title: editing ? '编辑任务' : '新建任务', onClose: onDone, width: 720 },
+        h(Section, { title: '基础信息' },
+          h('div', { className: 'cb-grid' },
+            h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
+            h(Field, { label: '类型' }, h(PillGroup, {
+              options: [{ value: 'shell', label: KIND_LABELS.shell }, { value: 'session', label: KIND_LABELS.session }],
+              value: form.kind,
+              onChange: (kind) => set({ kind }),
+            })))),
+        h(Section, { title: form.kind === 'shell' ? '执行配置(shell)' : '执行配置(会话)' },
+          h('div', { className: 'cb-grid' },
+            form.kind === 'shell'
+              ? h(Field, { label: '命令', wide: true, hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
+                  h('input', { type: 'text', value: form.command, onChange: (e) => set({ command: e.target.value }) }))
+              : null,
+            form.kind === 'shell'
+              ? h(Field, { label: '工作目录(可空)' }, h('input', { type: 'text', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
+                  h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '会话模式' }, h(PillGroup, {
+                  options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
+                  value: form.session.mode,
+                  onChange: (mode) => setSession({ mode }),
+                }))
+              : null,
+            form.kind === 'session' && form.session.mode === 'pinned'
+              ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },
+                  h('input', { type: 'text', value: form.session.pinnedSessionId, onChange: (e) => setSession({ pinnedSessionId: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '允许时段起(可空)' }, h('input', { type: 'text', placeholder: '09:00', value: form.session.windowStart, onChange: (e) => setSession({ windowStart: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '允许时段止(可空)' }, h('input', { type: 'text', placeholder: '23:00', value: form.session.windowEnd, onChange: (e) => setSession({ windowEnd: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '窗口外策略' }, h(PillGroup, {
+                  options: [{ value: 'skip', label: ONMISS_LABELS.skip }, { value: 'defer', label: ONMISS_LABELS.defer }],
+                  value: form.session.onMiss,
+                  onChange: (onMiss) => setSession({ onMiss }),
+                }))
+              : null)),
+        h(Section, { title: '调度计划' },
+          h('div', { className: 'cb-grid' },
+            h(Field, { label: 'cron 表达式(分 时 日 月 周)' },
+              h('div', { style: { display: 'flex', gap: 6 } },
+                h('input', { type: 'text', value: form.schedule, onChange: (e) => set({ schedule: e.target.value }) }),
+                h('select', {
+                  className: 'cb-select',
+                  value: '',
+                  onChange: (e) => { if (e.target.value) set({ schedule: e.target.value }) },
+                },
+                  h('option', { value: '' }, '预设'),
+                  CRON_PRESETS.map((preset) => h('option', { key: preset.value, value: preset.value }, preset.label)))),
+              preview ? h('span', { className: 'cb-preview' },
+                preview.summary + ';接下来 ' + preview.nextAt.map((at) => formatDateTime(at)).join(' / ')) : null),
+            h(Field, { label: '超时(毫秒)' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) })),
+            h(Field, { label: '并发上限(可空)' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) })))),
+        error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
           switchToggle({ checked: form.enabled, onChange: (e) => set({ enabled: e.target.checked }), label: '启用' }),
-          h('button', { className: 'cb-button cb-button--primary', onClick: submit }, '保存')))
+          h('button', { className: 'cb-button cb-button--primary', disabled: saving, onClick: submit }, saving ? '保存中…' : '保存')))
     }
 
     function JobCard({ job, now, onToggle, onRun, onEdit, onDelete }) {
@@ -325,29 +398,40 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const style = { '--cb-status': STATUS_TONE_COLOR[meta.tone] }
       return h('div', { className: 'cb-card', style, role: 'button', tabIndex: 0, onClick: onEdit },
         h('div', { className: 'cb-card-row' },
+          h('span', { className: 'cb-dot' }),
           h('span', { className: 'cb-name' }, job.name),
           h('span', { className: 'cb-badge' }, KIND_LABELS[job.kind] || job.kind),
           job.kind === 'session' && job.session ? h('span', { className: 'cb-badge' }, MODE_LABELS[job.session.mode]) : null,
           job.kind === 'session' && job.session && job.session.windowStart
             ? h('span', { className: 'cb-badge' }, job.session.windowStart + '-' + job.session.windowEnd) : null,
-          h('span', { className: 'cb-dot' }),
-          h('span', { className: 'cb-meta' }, job.lastStatus ? meta.label : '未运行'),
           h('div', { className: 'cb-actions', onClick: (event) => event.stopPropagation() },
             switchToggle({ checked: Boolean(job.enabled), onChange: onToggle }),
-            h('button', { className: 'cb-icon', title: '立即运行', onClick: onRun }, '▶ 运行'),
+            h('button', { className: 'cb-button cb-button--primary cb-button--sm', disabled: !job.enabled, title: job.enabled ? '立即运行' : '已停用', onClick: onRun }, '运行'),
             h('button', { className: 'cb-icon', title: '编辑', onClick: onEdit }, '编辑'),
             h('button', { className: 'cb-icon cb-button--danger', title: '删除', onClick: onDelete }, '删除'))),
         h('div', { className: 'cb-card-row' },
+          h('span', { className: 'cb-meta' }, job.lastStatus ? meta.label : '未运行'),
           h('span', { className: 'cb-meta' }, job.summary || job.schedule),
           typeof job.nextRunAt === 'number' && job.enabled ? h('span', { className: 'cb-meta' }, '下次 ' + relativeTime(job.nextRunAt, now)) : null,
-          typeof job.lastDurationMs === 'number' ? h('span', { className: 'cb-meta' }, '上次耗时 ' + formatDuration(job.lastDurationMs)) : null),
+          typeof job.lastDurationMs === 'number' ? h('span', { className: 'cb-meta' }, '耗时 ' + formatDuration(job.lastDurationMs)) : null),
         h('div', { className: 'cb-code' }, job.kind === 'session' ? job.prompt : job.command))
+    }
+
+    // 应用内删除确认(替换 window.confirm:风格统一 + ESC 可取消)
+    function ConfirmDialog({ message, onConfirm, onCancel }) {
+      return h(Modal, { title: '删除确认', onClose: onCancel, width: 420 },
+        h('div', { className: 'cb-confirm-text' }, message),
+        h('div', { className: 'cb-toolbar' },
+          h('div', { className: 'cb-spacer' }),
+          h('button', { className: 'cb-button', onClick: onCancel }, '取消'),
+          h('button', { className: 'cb-button cb-button--danger', onClick: onConfirm }, '删除')))
     }
 
     function JobsTab({ jobs, status, now, reload }) {
       const [formJob, setFormJob] = useState(null)
       const [notice, setNotice] = useState(null)
       const [kindFilter, setKindFilter] = useState('all')
+      const [pendingDelete, setPendingDelete] = useState(null)
 
       const runJob = async (job) => {
         const outcome = await request('POST', 'jobs/' + job.id + '/run')
@@ -359,12 +443,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         reload()
       }
       const deleteJob = async (job) => {
-        if (!window.confirm('删除任务「' + job.name + '」?运行记录与日志一并清除')) return
         await request('DELETE', 'jobs/' + job.id)
+        setPendingDelete(null)
+        setNotice('已删除「' + job.name + '」')
         reload()
       }
 
       const visible = jobs.filter((job) => kindFilter === 'all' || job.kind === kindFilter)
+        .sort((a, b) => (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0))
       return h('div', { className: 'cb-panel' },
         h('div', { className: 'cb-toolbar' },
           h(PillGroup, {
@@ -373,18 +459,26 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             onChange: setKindFilter,
           }),
           h('div', { className: 'cb-spacer' }),
-          status && !status.timerRunning ? h('span', { className: 'cb-badge', style: { color: '#e5484d' } }, status.timerReason || '调度停用') : null,
+          status && !status.timerRunning ? h('span', { className: 'cb-badge', style: { color: 'var(--cb-danger)' } }, status.timerReason || '调度停用') : null,
           h('button', { className: 'cb-button cb-button--primary', onClick: () => setFormJob({}) }, '新建任务')),
         notice ? h('div', { className: 'cb-hint' }, notice) : null,
-        visible.length === 0 ? h('div', { className: 'cb-empty' }, '暂无任务,点击右上角新建') :
-          h('div', { className: 'cb-cards' },
-            visible.map((job) => h(JobCard, {
-              key: job.id, job, now,
-              onToggle: () => toggleJob(job),
-              onRun: () => runJob(job),
-              onEdit: () => setFormJob(job),
-              onDelete: () => deleteJob(job),
-            }))),
+        visible.length === 0
+          ? h('div', { className: 'cb-empty' },
+              h('div', null, kindFilter === 'all' ? '还没有定时任务' : '该类型下暂无任务'),
+              h('button', { className: 'cb-button', onClick: () => setFormJob({}) }, '新建任务'))
+          : h('div', { className: 'cb-cards' },
+              visible.map((job) => h(JobCard, {
+                key: job.id, job, now,
+                onToggle: () => toggleJob(job),
+                onRun: () => runJob(job),
+                onEdit: () => setFormJob(job),
+                onDelete: () => setPendingDelete(job),
+              }))),
+        pendingDelete ? h(ConfirmDialog, {
+          message: '删除任务「' + pendingDelete.name + '」?运行记录与日志一并清除,操作不可撤销。',
+          onConfirm: () => deleteJob(pendingDelete),
+          onCancel: () => setPendingDelete(null),
+        }) : null,
         formJob ? h(JobForm, { job: formJob.id ? formJob : null, onDone: () => { setFormJob(null); reload() } }) : null)
     }
 
@@ -420,7 +514,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (outcome.ok) onDone()
         else setError(outcome.error)
       }
-      return h(Modal, { title: editing ? '编辑变量' : '新建变量', onClose: onDone },
+      return h(Modal, { title: editing ? '编辑变量' : '新建变量', onClose: onDone, width: 520 },
         h('div', { className: 'cb-grid' },
           h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
           h(Field, { label: '备注(可空)' }, h('input', { type: 'text', value: form.remarks, onChange: (e) => set({ remarks: e.target.value }) })),
@@ -430,7 +524,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               : h('input', { type: 'text', value: form.value, onChange: (e) => set({ value: e.target.value }) })),
           h('div', { className: 'cb-field' }, switchToggle({ checked: form.multi, onChange: (e) => set({ multi: e.target.checked }), label: '多值' })),
         ),
-        error ? h('div', { className: 'cb-hint', style: { color: '#e5484d' } }, error) : null,
+        error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
@@ -451,12 +545,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         const outcome = await request('POST', 'envs/import', { text, apply: true, overwrite })
         if (outcome.ok) { onDone(); reload() } else setError(outcome.error)
       }
-      return h(Modal, { title: '导入环境变量', onClose: onDone },
+      return h(Modal, { title: '导入环境变量', onClose: onDone, width: 560 },
         h('div', { className: 'cb-field cb-field--wide' },
           h('textarea', { style: { minHeight: '120px' }, placeholder: 'NAME=value #备注', value: text, onChange: (e) => setText(e.target.value) })),
         preview ? h('div', { className: 'cb-preview' },
           '解析 ' + preview.parsed.length + ' 条,非法 ' + preview.invalid + ' 条') : null,
-        error ? h('div', { className: 'cb-hint', style: { color: '#e5484d' } }, error) : null,
+        error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
@@ -559,7 +653,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   h('button', { className: 'cb-icon', onClick: () => openLog(run) }, '日志'),
                   h('button', { className: 'cb-icon cb-button--danger', onClick: () => clearLog(run) }, '清空')))
             })),
-        logText !== null ? h(Modal, { title: '运行日志', onClose: () => setLogText(null) },
+        logText !== null ? h(Modal, { title: '运行日志', onClose: () => setLogText(null), width: 640 },
           h('div', { className: 'cb-log' }, logText || '(空)'),
           h('div', { className: 'cb-toolbar' },
             h('div', { className: 'cb-spacer' }),
