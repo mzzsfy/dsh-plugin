@@ -31,8 +31,8 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       # CI 无 dsh 本体:按测试静态 import 闭包在仓库根装宿主 peer 与 zod
