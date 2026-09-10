@@ -6,8 +6,9 @@
 // conversation.input.dock 插槽(行数据由 host /api/session-manager/inputs 聚合),
 // 回填走宿主公共契约 inputActions.setDraft。浏览器半区经 webServer
 // 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
-// require;与 src/core.mjs 镜像的纯函数(projectArchiveRows / archiveToastStep /
-// archiveToastText / projectDeletedRows)修改需两处同步。
+// require;与 src/core.mjs 镜像的纯函数(projectRows / archiveToastStep /
+// archiveToastText / projectDeletedRows / pageArchiveRows /
+// groupArchiveRowsByWorkspace / filterArchiveRows)修改需两处同步。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
@@ -71,6 +72,28 @@ const CSS = [
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
+  // 归档库二级视图:工具行(搜索)与工作区分组、分页展开按钮
+  '.sm-lib { display:flex; flex-direction:column; gap:8px; }',
+  '.sm-libbar { display:flex; align-items:center; gap:8px; }',
+  '.sm-libbar__search { flex:1; min-width:0; padding:4px 10px; border-radius:8px; color-scheme:light dark;',
+  '  border:1px solid var(--dsw-alias-border-l3); background:transparent; color:inherit; font:var(--dsw-font-s-14); }',
+  '.sm-libbar__search:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-1px; }',
+  '.sm-libbar__count { flex:none; font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption); font-variant-numeric:tabular-nums; }',
+  '.sm-group { display:flex; flex-direction:column; }',
+  '.sm-group__head { display:flex; align-items:center; gap:8px; width:100%; border:0; background:transparent; cursor:pointer;',
+  '  padding:8px 10px; border-radius:8px; text-align:left; color:inherit; font:var(--dsw-font-s-strong-14); }',
+  '.sm-group__head:hover { background:var(--dsw-alias-interactive-bg-hover); }',
+  '.sm-group__head:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-1px; }',
+  '.sm-group__chev { flex:none; color:var(--dsw-alias-label-caption); transition:transform .15s ease; }',
+  '.sm-group__head--on .sm-group__chev { transform:rotate(90deg); }',
+  '.sm-group__name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }',
+  '.sm-group__count { margin-left:auto; flex:none; font:12px/18px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption); font-variant-numeric:tabular-nums; }',
+  '.sm-group__body { padding-bottom:4px; }',
+  '.sm-more { display:block; width:100%; border:0; background:transparent; cursor:pointer; padding:8px;',
+  '  text-align:center; border-radius:8px; font:var(--dsw-font-xxs-strong-12); color:var(--dsw-alias-label-caption); }',
+  '.sm-more:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
+  '.sm-more:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-1px; }',
+  '@media (prefers-reduced-motion: reduce) { .sm-group__chev { transition:none; } }',
   '.sm-histsw { display:inline-flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer;',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
   '.sm-histsw input[type="checkbox"] { position:absolute; width:1px; height:1px; margin:-1px; opacity:0; }',
@@ -309,6 +332,44 @@ function archiveToastText(addedIds, rows) {
   return '有 ' + names.length + ' 个会话已归档:' + listed.join('、') + (names.length > TOAST_MAX_TITLES ? ' 等' : '')
 }
 
+// 归档库主列表默认展开行数与手动展开步长(镜像 core.mjs 同名常量)
+const ARCHIVE_PAGE_SIZE = 100
+
+// 归档列表分页:取前 visibleCount 条并报告剩余量,非有限或非正可见数按 0 处理
+// (镜像 core.mjs pageArchiveRows,修改需两处同步)
+function pageArchiveRows(rows, visibleCount) {
+  const list = Array.isArray(rows) ? rows : []
+  const count = Number.isFinite(visibleCount) && visibleCount > 0 ? visibleCount : 0
+  const visible = list.slice(0, count)
+  return { visible, remaining: list.length - visible.length }
+}
+
+// 归档列表按工作区分组:workspace 假值并桶为未分组(null),组内保持输入序,
+// 组间按组内最新 updatedAt 倒序(镜像 core.mjs groupArchiveRowsByWorkspace,修改需两处同步)
+function groupArchiveRowsByWorkspace(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const byKey = new Map()
+  for (const row of list) {
+    const title = row.workspace ? String(row.workspace) : ''
+    if (!byKey.has(title)) byKey.set(title, { workspace: title === '' ? null : title, latest: row.updatedAt, rows: [] })
+    const group = byKey.get(title)
+    group.rows.push(row)
+    if (row.updatedAt > group.latest) group.latest = row.updatedAt
+  }
+  return [...byKey.values()]
+    .sort((left, right) => right.latest - left.latest)
+    .map(({ workspace, rows: groupRows }) => ({ workspace, rows: groupRows }))
+}
+
+// 归档列表标题搜索:查询词去首尾空白后按不区分大小写子串匹配标题,空查询原样
+// 返回全量(镜像 core.mjs filterArchiveRows,修改需两处同步)
+function filterArchiveRows(rows, query) {
+  const list = Array.isArray(rows) ? rows : []
+  const needle = String(query ?? '').trim().toLowerCase()
+  if (needle === '') return list
+  return list.filter((row) => String(row.title ?? '').toLowerCase().includes(needle))
+}
+
 function ArchiveRow(props) {
   const row = props.row
   const armed = props.armed
@@ -389,6 +450,27 @@ function SessionManagerApp(props) {
   const [confirms, setConfirms] = useState({})
   const [deleted, setDeleted] = useState([])
   const [periodic, setPeriodic] = useState(null)
+  // 归档库视图状态:recent 为时间倒序主列表(分页手动展开),library 为工作区分组
+  // 浏览 + 标题搜索;分组默认收起,展开即见首页,组内沿用同一分页机制
+  const [view, setView] = useState('recent')
+  const [recentCount, setRecentCount] = useState(ARCHIVE_PAGE_SIZE)
+  const [query, setQuery] = useState('')
+  const [libraryCount, setLibraryCount] = useState(ARCHIVE_PAGE_SIZE)
+  const [openGroups, setOpenGroups] = useState(() => new Set())
+  const [groupCounts, setGroupCounts] = useState({})
+
+  function toggleGroup(key) {
+    setOpenGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function expandGroup(key) {
+    setGroupCounts((prev) => ({ ...prev, [key]: (prev[key] || ARCHIVE_PAGE_SIZE) + ARCHIVE_PAGE_SIZE }))
+  }
 
   function refreshDeleted() {
     api(DELETED_URL)
@@ -451,34 +533,113 @@ function SessionManagerApp(props) {
       .then(refreshDeleted)
   }
 
+  const renderArchiveRow = (row) => h(ArchiveRow, {
+    key: row.id,
+    row,
+    armed: armedId === row.id,
+    busy: busyId === row.id,
+    confirm: confirms[row.id],
+    onUnarchive: () => {
+      void run(row.id, () => api(UNARCHIVE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
+    },
+    onDelete: () => onDelete(row),
+    onConfirm: () => onDelete(row),
+    onDisarm: () => { setArmedId(null); setConfirms({}) },
+  })
+
+  // 分页展开按钮:无余量不渲染(React 忽略 null 子节点);key 恒定,
+  // 免得数组子节点内无 key 元素随页扩位触发不必要的卸载重挂
+  const expandMore = (remaining, onMore) => remaining <= 0
+    ? null
+    : h('button', { key: 'more', className: 'sm-more', onClick: onMore }, '展开更多(剩 ' + remaining + ' 条)')
+
+  // 主列表(最近归档):默认首页,余量手动分页展开
+  const recentPage = pageArchiveRows(rows, recentCount)
+  const recentTray = h('div', { className: 'sm-tray' },
+    rows.length === 0
+      ? h('div', { className: 'sm-empty' },
+          h('div', null, '还没有归档的会话'),
+          h('div', { className: 'sm-empty__hint' }, '会话归档后集中显示在这里'))
+      : [...recentPage.visible.map(renderArchiveRow),
+        expandMore(recentPage.remaining, () => setRecentCount((count) => count + ARCHIVE_PAGE_SIZE))],
+  )
+
+  // 归档库区域:有搜索词时命中平铺(分页),无搜索词按工作区分组(默认收起);
+  // 仅二级视图构建,recent 视图不做分组与搜索投影,防大集合重渲染放大
+  function renderLibrary() {
+    const searching = query.trim() !== ''
+    const matchedRows = filterArchiveRows(rows, query)
+    const searchPage = pageArchiveRows(matchedRows, libraryCount)
+    const tray = rows.length === 0
+      ? h('div', { className: 'sm-empty' }, '还没有归档的会话')
+      : searching
+        ? (matchedRows.length === 0
+            ? h('div', { className: 'sm-empty' }, '没有匹配的归档会话')
+            : h('div', { className: 'sm-tray' },
+                [...searchPage.visible.map(renderArchiveRow),
+                  expandMore(searchPage.remaining, () => setLibraryCount((count) => count + ARCHIVE_PAGE_SIZE))]))
+        : h('div', { className: 'sm-tray' },
+            groupArchiveRowsByWorkspace(rows).map((group) => {
+              // 未分组桶键为空串,空串本身是合法 React key,直接用桶键防与用户标题撞车
+              const key = group.workspace || ''
+              const open = openGroups.has(key)
+              const page = pageArchiveRows(group.rows, groupCounts[key] || ARCHIVE_PAGE_SIZE)
+              return h('div', { className: 'sm-group', key },
+                h('button', {
+                  className: 'sm-group__head' + (open ? ' sm-group__head--on' : ''),
+                  'aria-expanded': open,
+                  onClick: () => toggleGroup(key),
+                },
+                  h('span', { className: 'sm-group__chev', 'aria-hidden': 'true' }, '▸'),
+                  h('span', { className: 'sm-group__name' }, group.workspace || '未分组'),
+                  h('span', { className: 'sm-group__count' }, group.rows.length + ' 条'),
+                ),
+                open
+                  ? h('div', { className: 'sm-group__body' },
+                      page.visible.map(renderArchiveRow),
+                      expandMore(page.remaining, () => expandGroup(key)))
+                  : null,
+              )
+            }))
+    return h('div', { className: 'sm-lib' },
+      h('div', { className: 'sm-libbar' },
+        h('input', {
+          className: 'sm-libbar__search',
+          type: 'search',
+          placeholder: '搜索会话标题',
+          'aria-label': '搜索会话标题',
+          value: query,
+          // 搜索词变化即重置平铺分页:命中集变小后旧可见数无意义
+          onChange: (event) => { setQuery(event.target.value); setLibraryCount(ARCHIVE_PAGE_SIZE) },
+        }),
+        searching ? h('span', { className: 'sm-libbar__count' }, matchedRows.length + ' 条匹配') : null,
+      ),
+      tray,
+    )
+  }
+
+  const archiveRegion = view === 'recent' ? recentTray : renderLibrary()
+
   return h('div', { className: 'sm-panel' },
-    h('div', { className: 'sm-head' },
-      h('span', { className: 'sm-head__title' }, '会话归档'),
-      rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
-    ),
+    view === 'recent'
+      ? h('div', { className: 'sm-head' },
+          h('span', { className: 'sm-head__title' }, '会话归档'),
+          rows.length > 0 ? h('span', { className: 'sm-head__count' }, rows.length + ' 条') : null,
+          rows.length > 0
+            ? h('button', { className: 'sm-btn', onClick: () => setView('library') }, '按工作区浏览 ›')
+            : null,
+        )
+      : h('div', { className: 'sm-head' },
+          h('button', { className: 'sm-btn', onClick: () => setView('recent') }, '‹ 返回'),
+          h('span', { className: 'sm-head__title' }, '按工作区浏览'),
+          h('span', { className: 'sm-head__count' }, rows.length + ' 条'),
+        ),
     h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原后重新挂载。'),
     periodic && periodic.running === false
       ? h('div', { className: 'sm-head__hint' },
           '周期评估未运行(' + (periodic.reason || '宿主定时服务不可用') + ');自动归档仍在新会话创建与启动时生效。')
       : null,
-    h('div', { className: 'sm-tray' },
-      rows.length === 0
-        ? h('div', { className: 'sm-empty' },
-            h('div', null, '还没有归档的会话'),
-            h('div', { className: 'sm-empty__hint' }, '会话归档后集中显示在这里'))
-        : rows.map((row) => h(ArchiveRow, {
-            key: row.id,
-            row,
-            armed: armedId === row.id,
-            busy: busyId === row.id,
-            confirm: confirms[row.id],
-            onUnarchive: () => {
-              void run(row.id, () => api(UNARCHIVE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }))
-            },
-            onDelete: () => onDelete(row),
-            onConfirm: () => onDelete(row),
-            onDisarm: () => { setArmedId(null); setConfirms({}) },
-          }))),
+    archiveRegion,
     h(DeletedSection, {
       rows: projectDeletedRows(deleted, listState),
       busyId,
