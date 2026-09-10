@@ -71,108 +71,116 @@ const CRON_PRESETS = [
 ]
 
 const STYLE = `
-/* 组件令牌层:宿主 dsw-alias 语义令牌 → cb- 组件令牌(缺省回退保证裸宿主可用) */
-:root{
---cb-bg:var(--dsw-alias-bg-layer-1,#1e1f24);
---cb-bg-sub:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08));
---cb-border:var(--dsw-alias-border-l2,rgba(127,127,127,.32));
---cb-border-strong:var(--dsw-alias-border-l3,rgba(127,127,127,.5));
---cb-text:var(--dsw-alias-label-primary,inherit);
---cb-text-sub:var(--dsw-alias-label-secondary,rgba(127,127,127,.9));
---cb-text-dim:var(--dsw-alias-label-tertiary,rgba(127,127,127,.7));
---cb-accent:var(--dsw-alias-brand-primary,#3b82f6);
---cb-accent-hover:var(--dsw-alias-button-primary-hover,#2f6fe0);
---cb-accent-text:var(--dsw-alias-brand-primary-invert,#ffffff);
---cb-danger:var(--dsw-alias-state-error-primary,#e5484d);
---cb-danger-hover:var(--dsw-alias-state-error-secondary,#c73737);
---cb-ok:var(--dsw-alias-state-success-primary,#2f9e44);
---cb-hover:var(--dsw-alias-button-tool-bar-hover,rgba(127,127,127,.14));
---cb-mask:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.5));
---cb-radius-sm:4px;--cb-radius-md:6px;--cb-radius-lg:10px;
---cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:10px;--cb-space-5:12px;--cb-space-6:16px;
---cb-font-xs:11px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
+/* 组件令牌层(形制对齐 dsh-im):宿主 dsw-alias 定义在 body 作用域,cb- 令牌必须在 body 声明才能解析到主题值;
+   fallback 取浅色中性(dsh-im 同款),深色主题由令牌接管,fallback 只兜裸宿主 */
+body{
+--cb-bg:var(--dsw-alias-bg-layer-1,#ffffff);
+--cb-bg-sub:var(--dsw-alias-bg-layer-2,#f7f8fa);
+--cb-bg-muted:var(--dsw-alias-bg-module-platform,#f2f3f5);
+--cb-border:var(--dsw-alias-border-l2,#e5e6eb);
+--cb-border-strong:var(--dsw-alias-border-l3,#dfe1e5);
+--cb-text:var(--dsw-alias-label-primary,#1f2329);
+--cb-text-sub:var(--dsw-alias-label-secondary,#646a73);
+--cb-text-dim:var(--dsw-alias-label-tertiary,#8f959e);
+--cb-accent:#1677ff;
+--cb-accent-deep:#0958d9;
+--cb-accent-wash:#eaf3ff;
+--cb-danger:var(--dsw-alias-state-error-primary,#d54941);
+--cb-ok:var(--dsw-alias-state-success-primary,#20a162);
+--cb-warn:var(--dsw-alias-state-warn-primary,#d97706);
+--cb-hover:var(--dsw-alias-interactive-bg-hover,#f7f8fa);
+--cb-mask:var(--dsw-alias-bg-mask-1,rgba(31,35,41,.5));
+--cb-shadow:0 1px 2px rgb(31 35 41 / 4%);
+--cb-radius-sm:6px;--cb-radius-md:8px;--cb-radius-lg:14px;
+--cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:12px;--cb-space-5:16px;--cb-space-6:24px;
+--cb-font-xs:12px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
+--cb-control-h:34px;
 }
-.cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;color:var(--cb-text)}
+.cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;max-width:880px;color:var(--cb-text);container-type:inline-size}
 .cb-toolbar{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
-.cb-tabs{display:flex;gap:var(--cb-space-1)}
-.cb-pill{border:1px solid var(--cb-border);border-radius:999px;padding:3px 12px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;transition:color .15s,border-color .15s,background .15s}
-.cb-pill:hover{color:var(--cb-text);border-color:var(--cb-border-strong)}
-.cb-pill--on{background:var(--cb-accent);border-color:transparent;color:var(--cb-accent-text)}
-.cb-pill--on:hover{color:var(--cb-accent-text);border-color:transparent}
+.cb-tabs{display:flex;gap:var(--cb-space-1);background:var(--cb-bg-muted);border-radius:999px;padding:3px}
+.cb-pill{border:none;border-radius:999px;padding:5px 14px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;font-weight:560;transition:color .15s,background .15s}
+.cb-pill:hover{color:var(--cb-text)}
+.cb-pill--on{background:var(--cb-bg);color:var(--cb-text);box-shadow:var(--cb-shadow)}
+.cb-pill--on:hover{color:var(--cb-text)}
 .cb-spacer{flex:1}
-.cb-button{border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:4px 12px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
-.cb-button:hover:not(:disabled){border-color:var(--cb-accent);color:var(--cb-accent)}
-.cb-button:disabled{opacity:.45;cursor:not-allowed}
-.cb-button--primary{background:var(--cb-accent);border-color:transparent;color:var(--cb-accent-text)}
-.cb-button--primary:hover:not(:disabled){background:var(--cb-accent-hover);border-color:transparent;color:var(--cb-accent-text)}
+.cb-button{min-height:var(--cb-control-h);display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:0 13px;font:inherit;font-size:var(--cb-font-md);font-weight:560;background:var(--cb-bg);color:var(--cb-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+.cb-button:hover:not(:disabled){border-color:#aeb3bb;background:var(--cb-hover)}
+.cb-button:disabled{cursor:not-allowed;opacity:.55}
+.cb-button--primary{background:var(--cb-accent);border-color:var(--cb-accent);color:#fff}
+.cb-button--primary:hover:not(:disabled){background:var(--cb-accent-deep);border-color:var(--cb-accent-deep)}
 .cb-button--danger{color:var(--cb-danger)}
-.cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:var(--cb-accent-text)}
-.cb-button--sm{padding:2px 10px;font-size:var(--cb-font-sm)}
-.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible,.cb-entry:focus-visible{outline:2px solid var(--cb-accent);outline-offset:2px}
+.cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:#fff}
+.cb-button--sm{min-height:28px;padding:0 10px;font-size:var(--cb-font-sm)}
+.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible,.cb-entry:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:2px}
 .cb-button:active:not(:disabled){transform:translateY(1px)}
 .cb-cards{display:flex;flex-direction:column;gap:var(--cb-space-3)}
-.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg-sub);transition:border-color .15s,background .15s}
-.cb-card:hover{border-color:var(--cb-accent);background:var(--cb-hover)}
-.cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3.5px;background:var(--cb-status,#8b8d98)}
+.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg);box-shadow:var(--cb-shadow);transition:border-color .15s,box-shadow .15s}
+.cb-card:hover{border-color:var(--cb-accent);box-shadow:0 2px 8px rgb(31 35 41 / 8%)}
+.cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3.5px;background:var(--cb-status,#aeb3bb)}
 .cb-card-row{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-name{font-size:14px;font-weight:600;color:var(--cb-text)}
-.cb-badge{font-size:var(--cb-font-xs);border:1px solid var(--cb-border);border-radius:var(--cb-radius-sm);padding:1px 6px;color:var(--cb-text-sub)}
-.cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status,#8b8d98);flex:none}
+.cb-badge{min-height:22px;display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;color:var(--cb-text-sub);background:var(--cb-bg-muted);font-size:var(--cb-font-sm);white-space:nowrap}
+.cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status,#aeb3bb);flex:none}
 .cb-meta{font-size:var(--cb-font-sm);color:var(--cb-text-sub)}
 .cb-actions{display:flex;align-items:center;gap:var(--cb-space-2);margin-left:auto}
-.cb-icon{border:none;background:transparent;color:var(--cb-text-sub);cursor:pointer;font-size:var(--cb-font-sm);padding:2px 8px;border-radius:var(--cb-radius-sm);transition:background .15s,color .15s}
+.cb-icon{min-height:28px;border:none;background:transparent;color:var(--cb-text-sub);cursor:pointer;font-size:var(--cb-font-sm);padding:0 8px;border-radius:var(--cb-radius-sm);transition:background .15s,color .15s}
 .cb-icon:hover{background:var(--cb-hover);color:var(--cb-text)}
 .cb-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--cb-space-2)}
 .cb-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
-.cb-switch__track{width:30px;height:17px;border-radius:999px;background:var(--cb-border-strong);position:relative;transition:background .15s;flex:none}
+.cb-switch__track{width:30px;height:17px;border-radius:999px;background:#aeb3bb;position:relative;transition:background .15s;flex:none}
 .cb-switch__thumb{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track{background:var(--cb-accent)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track .cb-switch__thumb{left:15px}
-.cb-switch input[type="checkbox"]:focus-visible + .cb-switch__track{outline:2px solid var(--cb-accent);outline-offset:1px}
+.cb-switch input[type="checkbox"]:focus-visible + .cb-switch__track{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:1px}
 .cb-switch input[type="checkbox"]:disabled + .cb-switch__track{opacity:.4;cursor:not-allowed}
-.cb-switch:not(:has(input[type="checkbox"]:disabled)):hover .cb-switch__track{background:var(--cb-border-strong);filter:brightness(1.15)}
-.cb-switch input[type="checkbox"]:checked:not(:disabled) + .cb-switch__track:hover{background:var(--cb-accent-hover)}
+.cb-switch:not(:has(input[type="checkbox"]:disabled)):hover .cb-switch__track{background:var(--cb-accent-deep);opacity:.85}
+.cb-switch input[type="checkbox"]:checked:not(:disabled) + .cb-switch__track:hover{background:var(--cb-accent-deep)}
 .cb-table{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-md)}
 .cb-row{display:flex;align-items:center;gap:var(--cb-space-3);border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-4);flex-wrap:wrap;transition:background .15s,border-color .15s}
-.cb-row:hover{background:var(--cb-hover);border-color:var(--cb-border-strong)}
+.cb-row:hover{background:var(--cb-hover)}
 .cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cb-mask{color:var(--cb-text-sub)}
 .cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
-.cb-modal{background:var(--cb-bg);color:var(--cb-text);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:720px;width:min(720px,92vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:var(--cb-space-4);box-shadow:0 8px 32px rgba(0,0,0,.28);animation:cb-pop-in .2s ease-out}
+.cb-modal{background:var(--cb-bg);color:var(--cb-text);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:720px;width:min(720px,92vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:var(--cb-space-4);box-shadow:0 12px 40px rgb(31 35 41 / 18%);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track{transition:none}}
-.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3)}
-.cb-modal-title{font-size:var(--cb-font-lg);font-weight:600}
-.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4)}
+.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-3);border-bottom:1px solid var(--cb-border)}
+.cb-modal-title{font-size:16px;font-weight:600}
+.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-5)}
 .cb-section{display:flex;flex-direction:column;gap:var(--cb-space-3)}
-.cb-section-title{font-size:var(--cb-font-xs);font-weight:600;letter-spacing:.05em;color:var(--cb-text-dim);text-transform:uppercase;border-bottom:1px solid var(--cb-border);padding-bottom:var(--cb-space-2)}
-.cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--cb-space-3) var(--cb-space-5)}
-.cb-field{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-sm);min-width:0;color:var(--cb-text-sub)}
+.cb-section-title{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:flex;align-items:center;gap:var(--cb-space-2)}
+.cb-section-title::before{content:'';width:3px;height:12px;border-radius:2px;background:var(--cb-accent)}
+.cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--cb-space-4) var(--cb-space-5)}
+.cb-field{display:flex;flex-direction:column;gap:var(--cb-space-2);font-size:var(--cb-font-sm);min-width:0;color:var(--cb-text-sub)}
 .cb-field--wide{grid-column:1 / -1}
-.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:5px 8px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text);min-width:0;transition:border-color .15s}
-.cb-field input:focus,.cb-field textarea:focus,.cb-field select:focus{outline:none;border-color:var(--cb-accent)}
-.cb-field textarea{min-height:64px;resize:vertical;font-family:inherit}
-.cb-hint{font-size:var(--cb-font-xs);color:var(--cb-text-sub)}
+.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:5px 10px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text);min-width:0;transition:border-color .15s,box-shadow .15s}
+.cb-field input:focus,.cb-field textarea:focus,.cb-field select:focus{outline:none;border-color:var(--cb-accent);box-shadow:0 0 0 3px var(--cb-accent-wash)}
+.cb-field textarea{min-height:72px;resize:vertical;font-family:inherit}
+.cb-hint{font-size:var(--cb-font-xs);color:var(--cb-text-dim)}
 .cb-error{font-size:var(--cb-font-sm);color:var(--cb-danger);background:var(--cb-bg-sub);border-left:3px solid var(--cb-danger);border-radius:var(--cb-radius-sm);padding:var(--cb-space-2) var(--cb-space-3)}
-.cb-preview{font-size:var(--cb-font-sm);border:1px dashed var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-3);color:var(--cb-text-sub)}
+.cb-preview{font-size:var(--cb-font-sm);border:1px dashed var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-3);color:var(--cb-text-sub);background:var(--cb-accent-wash);border-color:color-mix(in srgb, var(--cb-accent) 35%, transparent);color:var(--cb-text)}
 .cb-log{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);white-space:pre-wrap;word-break:break-all;background:var(--cb-bg-sub);border-radius:var(--cb-radius-md);padding:var(--cb-space-3);max-height:320px;overflow:auto}
 .cb-empty{font-size:var(--cb-font-md);color:var(--cb-text-dim);padding:var(--cb-space-6) 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:var(--cb-space-3)}
-.cb-select{border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 8px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text)}
+.cb-select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 8px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text)}
 .cb-confirm-text{font-size:var(--cb-font-md);color:var(--cb-text);line-height:1.5}
 .cb-log::-webkit-scrollbar,.cb-modal::-webkit-scrollbar{width:8px;height:8px}
 .cb-log::-webkit-scrollbar-thumb,.cb-modal::-webkit-scrollbar-thumb{background:var(--cb-border-strong);border-radius:999px}
 .cb-log::-webkit-scrollbar-track,.cb-modal::-webkit-scrollbar-track{background:transparent}
-@media (max-width: 560px){
+/* 容器查询:better-sidebar tab 与主视图宽度差异大,跟随面板自身宽度而非视口 */
+@container (max-width: 560px){
 .cb-grid{grid-template-columns:1fr}
 .cb-card-row .cb-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
 .cb-view{padding:var(--cb-space-4)}
+.cb-panel{gap:var(--cb-space-4)}
 }
-.cb-entry{display:flex;align-items:center;gap:var(--cb-space-3);width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--cb-space-2) var(--cb-space-4);border-radius:var(--cb-radius-lg);font-size:var(--cb-font-md);text-align:left}
+.cb-entry{display:flex;align-items:center;gap:var(--cb-space-3);width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--cb-space-2) var(--cb-space-4);border-radius:var(--cb-radius-md);font-size:var(--cb-font-md);text-align:left}
 .cb-entry:hover{background:var(--cb-hover)}
-.cb-entry[data-active="true"]{background:var(--cb-accent);color:var(--cb-accent-text)}
+.cb-entry[data-active="true"]{background:var(--cb-accent);color:#fff}
 .cb-entry-icon{display:inline-flex;flex:none}
-.cb-view{display:none;flex:1;min-height:0;flex-direction:column;padding:var(--cb-space-5) var(--cb-space-6);overflow:auto;background:var(--cb-bg)}
+.cb-view{display:none;flex:1;min-height:0;flex-direction:column;padding:var(--cb-space-6);overflow:auto;background:var(--dsw-alias-bg-base,var(--cb-bg))}
+.cb-view > .cb-panel{margin:0 auto;width:100%}
 html[data-cb-board-active] [data-cb-view]{display:flex}
 html[data-cb-board-active] [data-pane="conversation"] > :not([data-cb-view]){display:none !important}
 html[data-cb-board-active] [class*="centerCol"] > :not([data-cb-view]){display:none !important}
@@ -275,7 +283,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // —— 任务表单(新建/编辑)——
-    function JobForm({ job, onDone }) {
+    function JobForm({ job, onDone, wsModel }) {
+      // 工作区清单:订阅 model 快照(服务缺失或形态不符即空表,仅保留手输)
+      const [wsItems, setWsItems] = useState(() => (wsModel ? wsModel.getSnapshot().items || [] : []))
+      useEffect(() => {
+        if (!wsModel) return undefined
+        const update = () => setWsItems(wsModel.getSnapshot().items || [])
+        update()
+        return wsModel.subscribe(update)
+      }, [wsModel])
       const editing = Boolean(job && job.id)
       const [form, setForm] = useState(() => ({
         name: job ? job.name : '',
@@ -340,6 +356,23 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               : null,
             form.kind === 'shell'
               ? h(Field, { label: '工作目录(可空)' }, h('input', { type: 'text', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, {
+                  label: '工作区(会话 cwd,可空)',
+                  hint: wsItems.length > 0 ? '从宿主工作区选择,或留空使用默认目录' : '留空使用宿主默认目录;填入路径则会话在该目录下创建',
+                },
+                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                    wsItems.length > 0
+                      ? h('select', {
+                          className: 'cb-select',
+                          value: wsItems.some((w) => w.path === form.workdir) ? form.workdir : '',
+                          onChange: (e) => set({ workdir: e.target.value }),
+                        },
+                          h('option', { value: '' }, '默认目录'),
+                          wsItems.map((w) => h('option', { key: w.path || w.workspaceId, value: w.path }, w.title || w.path)))
+                      : null,
+                    h('input', { type: 'text', placeholder: '/path/to/workspace', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) })))
               : null,
             form.kind === 'session'
               ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
@@ -427,7 +460,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { className: 'cb-button cb-button--danger', onClick: onConfirm }, '删除')))
     }
 
-    function JobsTab({ jobs, status, now, reload }) {
+    function JobsTab({ jobs, status, now, reload, wsModel }) {
       const [formJob, setFormJob] = useState(null)
       const [notice, setNotice] = useState(null)
       const [kindFilter, setKindFilter] = useState('all')
@@ -479,7 +512,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           onConfirm: () => deleteJob(pendingDelete),
           onCancel: () => setPendingDelete(null),
         }) : null,
-        formJob ? h(JobForm, { job: formJob.id ? formJob : null, onDone: () => { setFormJob(null); reload() } }) : null)
+        formJob ? h(JobForm, { job: formJob.id ? formJob : null, wsModel, onDone: () => { setFormJob(null); reload() } }) : null)
     }
 
     // —— 环境变量 Tab ——
@@ -660,7 +693,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('button', { className: 'cb-button', onClick: () => setLogText(null) }, '关闭'))) : null)
     }
 
-    function CronBoardPanel({ visible } = {}) {
+    function CronBoardPanel({ visible, wsModel } = {}) {
       const active = visible !== false
       const [tab, setTab] = useState('jobs')
       const [jobs, setJobs] = useState([])
@@ -697,7 +730,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           status ? h('span', { className: 'cb-meta' },
             '运行中 ' + status.scheduler.active + ' · 队列 ' + status.scheduler.queued +
             (status.nextAt ? ' · 下次 ' + relativeTime(status.nextAt, now) : '')) : null),
-        tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload }) : null,
+        tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload, wsModel }) : null,
         tab === 'envs' ? h(EnvsTab, { key: 'envs', envs, reload }) : null,
         tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag }) : null)
     }
@@ -720,8 +753,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const OTHER_PANEL_ACTIVE_ATTRS = ['data-dsh-atb-active', 'data-dsh-taskboard-active', 'data-dsh-ssh-active']
     const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
 
-    // better-sidebar tab:注册即单实例(single),visible 门控轮询
-    function registerBoardTab(ctx, service) {
+    // better-sidebar tab:注册即单实例(single),visible 门控轮询;wsModel 供会话任务选工作区
+    function registerBoardTab(ctx, service, wsModel) {
       return ctx.effect(() => service.registerTab({
         id: TAB_ID,
         title: '定时任务',
@@ -731,7 +764,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('path', { d: 'M6 2v12M10 2v12' })),
         order: 46,
         single: true,
-        component: (props) => h(CronBoardPanel, { visible: props.visible }),
+        component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel }),
       }), 'cron-board sidebar tab')
     }
 
@@ -765,7 +798,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // 主界面形态:入口行 + 中心列容器 + html 属性显隐 + 面板互斥;返回幂等 disposer
-    function mountStandaloneBoard() {
+    function mountStandaloneBoard(wsModel) {
       let disposed = false
       let entry = null
       let rootEl = undefined
@@ -807,7 +840,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         viewEl.className = 'cb-view'
         column.appendChild(viewEl)
         viewRoot = ReactDOMClient.createRoot(viewEl)
-        viewRoot.render(React.createElement(CronBoardPanel, { visible: true }))
+        viewRoot.render(React.createElement(CronBoardPanel, { visible: true, wsModel }))
         return true
       }
 
@@ -855,22 +888,54 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     return {
-      inject: [],
+      // workspaces 由宿主 client 常驻提供;声明注入保证 apply 时已就绪(缺失则 fiber 未激活,即干净禁用)
+      inject: ['workspaces'],
       apply(ctx) {
         ensureStyle(document)
-        // 已装 better-sidebar:直接走扩展槽;未装(或晚装载):先落主界面形态,服务就绪后升级并拆除
+        // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
+        const wsService = ctx.get('workspaces')
+        const wsModel = wsService && wsService.list && typeof wsService.list.getSnapshot === 'function' ? wsService.list : null
+        // 已装 better-sidebar:tab 注册常驻;当前会话页签不在打开态(未开/被关/被禁)即主界面形态接管,打开页签即拆除
         const sidebar = ctx.get('betterSidebar')
         if (sidebar !== undefined) {
-          registerBoardTab(ctx, sidebar)
+          registerBoardTab(ctx, sidebar, wsModel)
+          const tabActive = () => {
+            // 页签开着(哪怕类型被禁,better-sidebar 仍渲染已开页签)即扩展槽形态;没开(未开/被关/被禁)即主界面形态
+            const snap = typeof sidebar.getSnapshot === 'function' ? sidebar.getSnapshot() : null
+            const openTabs = snap && snap.state && Array.isArray(snap.state.openTabs) ? snap.state.openTabs : null
+            if (openTabs) return openTabs.some((tab) => tab.type === TAB_ID)
+            // 快照未就绪(会话未激活)的保守兜底:类型被禁视作主界面
+            if (typeof sidebar.isTabEnabled === 'function') return sidebar.isTabEnabled(TAB_ID)
+            return true
+          }
+          let fallback = null
+          const syncFallback = () => {
+            const active = tabActive()
+            if (!active && !fallback) {
+              fallback = mountStandaloneBoard(wsModel)
+              ctx.effect(() => () => { if (fallback) { fallback(); fallback = null } }, 'cron-board tab-closed fallback')
+            } else if (active && fallback) {
+              fallback()
+              fallback = null
+            }
+          }
+          syncFallback()
+          if (typeof sidebar.subscribeState === 'function') {
+            ctx.effect(() => sidebar.subscribeState(syncFallback), 'cron-board tab-open watch')
+          }
+          // 快照晚载入兜底:页签持久化恢复可能落在订阅注册之前且不再发事件,延迟重查一次纠正双形态并存
+          const LATE_SYNC_MS = 2 * 1000
+          const lateSync = setTimeout(syncFallback, LATE_SYNC_MS)
+          ctx.effect(() => () => clearTimeout(lateSync), 'cron-board late sync')
           return
         }
-        let standalone = mountStandaloneBoard()
+        let standalone = mountStandaloneBoard(wsModel)
         let upgraded = false
         ctx.effect(() => () => { if (!upgraded) standalone() }, 'cron-board standalone board')
         ctx.inject(['betterSidebar'], (bsCtx) => {
           upgraded = true
           standalone()
-          registerBoardTab(ctx, bsCtx.betterSidebar)
+          registerBoardTab(ctx, bsCtx.betterSidebar, wsModel)
         })
       },
     }
