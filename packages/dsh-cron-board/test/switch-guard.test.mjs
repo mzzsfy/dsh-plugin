@@ -48,8 +48,16 @@ test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {
   assert.ok(trimmed.endsWith('})()'), '必须以 IIFE 书挡结尾')
 })
 
-test('client.js 必含 settings.section 槽注册与空 apply 返回形态', () => {
-  assert.match(source, /inject: \['slots'\]/)
-  assert.match(source, /ctx\.slots\.inject\('settings\.section'/)
+test('client.js 主页面双形态挂载契约(better-sidebar 优先/主界面回退)', () => {
+  // Given 用户要求:面板入口迁主页面,优先 dsh-better-sidebar 扩展槽(单实例),未装回退主界面(taskboard 形态)
+  // Then 静态锁定:模块注册形态、服务软探测、tab 单实例、主界面容器与互斥事件
   assert.match(source, /window\.__ModuleLoader__\.load\(\{ id: '@mzzsfy\/dsh-cron-board', factory \}\)/)
+  assert.match(source, /ctx\.get\('betterSidebar'\)/)
+  assert.match(source, /single: true/)
+  assert.match(source, /ctx\.inject\(\['betterSidebar'\]/)
+  assert.match(source, /data-cb-board-active/)
+  assert.match(source, /dsh-panel-activate/)
+  assert.match(source, /function mountStandaloneBoard/)
+  // 不再挂设置页分区(入口唯一)
+  assert.doesNotMatch(source, /settings\.section/)
 })

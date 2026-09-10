@@ -120,6 +120,15 @@ const STYLE = `
 .cb-log{font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;background:rgba(128,128,128,.08);border-radius:6px;padding:8px;max-height:320px;overflow:auto}
 .cb-empty{font-size:13px;color:var(--dsh-text-secondary,rgba(128,128,128,.9));padding:12px 0;text-align:center}
 .cb-select{border:1px solid var(--dsh-border,rgba(128,128,128,.4));border-radius:6px;padding:4px 8px;font-size:13px;background:transparent;color:inherit}
+.cb-entry{display:flex;align-items:center;gap:8px;width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:6px 10px;border-radius:8px;font-size:13px;text-align:left}
+.cb-entry:hover{background:rgba(128,128,128,.12)}
+.cb-entry[data-active="true"]{background:rgba(128,128,128,.2)}
+.cb-entry-icon{display:inline-flex;flex:none}
+.cb-view{display:none;flex:1;min-height:0;flex-direction:column;padding:12px 16px;overflow:auto;background:var(--dsw-alias-bg-layer-1,var(--dsh-bg,#1e1f24))}
+html[data-cb-board-active] [data-cb-view]{display:flex}
+html[data-cb-board-active] [data-pane="conversation"] > :not([data-cb-view]){display:none !important}
+html[data-cb-board-active] [class*="centerCol"] > :not([data-cb-view]){display:none !important}
+html[data-cb-board-active] .dshDesktopConversationSurface > :not([data-cb-view]){display:none !important}
 `
 
 // 空模块兜底:react 缺席即整面板禁用(宿主必有 react,防御性)
@@ -132,8 +141,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
   function factory(require) {
     let React = null
+    let ReactDOMClient = null
     try {
       React = require('react')
+      ReactDOMClient = require('react-dom/client')
     } catch {
       return noopFactory()
     }
@@ -555,7 +566,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('button', { className: 'cb-button', onClick: () => setLogText(null) }, '关闭'))) : null)
     }
 
-    function CronBoardPanel() {
+    function CronBoardPanel({ visible } = {}) {
+      const active = visible !== false
       const [tab, setTab] = useState('jobs')
       const [jobs, setJobs] = useState([])
       const [envs, setEnvs] = useState([])
@@ -565,6 +577,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const reload = useCallback(() => setReloadFlag((value) => value + 1), [])
 
       useEffect(() => {
+        if (!active) return undefined
         let alive = true
         const load = async () => {
           const [jobsOutcome, envsOutcome, statusOutcome] = await Promise.all([
@@ -581,7 +594,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         load()
         const timer = setInterval(load, REFRESH_INTERVAL_MS)
         return () => { alive = false; clearInterval(timer) }
-      }, [reloadFlag])
+      }, [reloadFlag, active])
 
       return h('div', { className: 'cb-panel' },
         h('div', { className: 'cb-toolbar' },
@@ -595,15 +608,176 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag }) : null)
     }
 
+    // —— 主页面挂载(形态对齐 dsh-taskboard,cb- 属性命名空间)——
+    // 优先 better-sidebar 扩展槽(单实例 tab);未装回退主界面:侧栏入口行 + 中心列看板容器。
+
+    const TAB_ID = 'cron-board:board'
+    const ENTRY_ATTR = 'data-cb-entry'
+    const VIEW_ATTR = 'data-cb-view'
+    const BOARD_ACTIVE_ATTR = 'data-cb-board-active'
+    const PANEL_ACTIVATE_EVENT = 'dsh-panel-activate'
+    const PANEL_NAME = 'dsh-cron-board'
+    const ENTRY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 2v12M10 2v12"/></svg>'
+    // 三代布局壳兼容:dev data-pane / 官方 CSS-Module centerCol / DSH Desktop 扩展面
+    const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"], .dshDesktopConversationSurface'
+    const SIDEBAR_ROOT_SELECTOR = '[data-pane="sidebar"], [class*="sidebarCol"], .dshDesktopUpstreamSidebar, .dshDesktopSidebarSurface'
+    // 家族面板入口条目(taskboard 系),插入时排其前,避免重渲染后顺序漂移
+    const FAMILY_ENTRY_SELECTOR = '[data-dsh-atb-entry], [data-dsh-taskboard-entry], [data-dsh-ssh-entry], [' + ENTRY_ATTR + ']'
+    const OTHER_PANEL_ACTIVE_ATTRS = ['data-dsh-atb-active', 'data-dsh-taskboard-active', 'data-dsh-ssh-active']
+    const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
+
+    // better-sidebar tab:注册即单实例(single),visible 门控轮询
+    function registerBoardTab(ctx, service) {
+      return ctx.effect(() => service.registerTab({
+        id: TAB_ID,
+        title: '定时任务',
+        icon: (size) => h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
+          stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
+          h('rect', { x: 2, y: 2, width: 12, height: 12, rx: 2 }),
+          h('path', { d: 'M6 2v12M10 2v12' })),
+        order: 46,
+        single: true,
+        component: (props) => h(CronBoardPanel, { visible: props.visible }),
+      }), 'cron-board sidebar tab')
+    }
+
+    function sidebarRoot() {
+      const column = document.querySelector(SIDEBAR_ROOT_SELECTOR)
+      if (!column) return undefined
+      const logoOwner = column.querySelector('[class*="logoRow"]')
+      return (logoOwner && logoOwner.parentElement) || column.firstElementChild || undefined
+    }
+
+    function newSessionButton(root) {
+      const nested = root.querySelector('button[class*="newSession"]')
+      if (nested) return nested
+      for (const child of root.children) {
+        if (child instanceof HTMLButtonElement && !child.matches('[' + ENTRY_ATTR + ']')) return child
+      }
+      return root.querySelector('button[aria-label="新建会话"], button[aria-label*="新会话"], button[aria-label*="new session" i]') || undefined
+    }
+
+    function placeEntry(root, entry) {
+      const button = newSessionButton(root)
+      if (!button) return false
+      if (entry.parentElement !== root) {
+        const row = button.closest('[class*="logoRow"]')
+        const base = (row && row.parentElement === root) ? row : button
+        const family = Array.from(root.children).filter((el) => el.matches(FAMILY_ENTRY_SELECTOR))
+        const anchor = family.length > 0 ? family[0] : (base.nextElementSibling || null)
+        root.insertBefore(entry, anchor)
+      }
+      return true
+    }
+
+    // 主界面形态:入口行 + 中心列容器 + html 属性显隐 + 面板互斥;返回幂等 disposer
+    function mountStandaloneBoard() {
+      let disposed = false
+      let entry = null
+      let rootEl = undefined
+      let placed = false
+      let rootObserver = null
+      let viewRoot = null
+      let viewEl = null
+
+      const setOpen = (open) => {
+        if (open) {
+          for (const attr of OTHER_PANEL_ACTIVE_ATTRS) document.documentElement.removeAttribute(attr)
+          document.documentElement.setAttribute(BOARD_ACTIVE_ATTR, '')
+          document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }))
+          entry.dataset.active = 'true'
+        } else {
+          document.documentElement.removeAttribute(BOARD_ACTIVE_ATTR)
+          entry.dataset.active = 'false'
+        }
+      }
+      const isOpen = () => document.documentElement.hasAttribute(BOARD_ACTIVE_ATTR)
+
+      const ensureEntry = () => {
+        if (rootEl !== undefined && !rootEl.isConnected) { placed = false; rootEl = undefined }
+        if (placed && document.body.contains(entry)) return true
+        placed = false
+        rootEl = sidebarRoot()
+        if (!rootEl) return false
+        placed = placeEntry(rootEl, entry)
+        if (placed && rootObserver) rootObserver.observe(rootEl, { childList: true, subtree: true })
+        return placed
+      }
+
+      const ensureView = () => {
+        if (viewEl && viewEl.isConnected) return true
+        const column = document.querySelector(CONVERSATION_COLUMN_SELECTOR)
+        if (!column) return false
+        viewEl = document.createElement('div')
+        viewEl.setAttribute(VIEW_ATTR, '')
+        viewEl.className = 'cb-view'
+        column.appendChild(viewEl)
+        viewRoot = ReactDOMClient.createRoot(viewEl)
+        viewRoot.render(React.createElement(CronBoardPanel, { visible: true }))
+        return true
+      }
+
+      const onClickDocument = (event) => {
+        if (!isOpen()) return
+        const target = event.target
+        if (target && target.closest && target.closest('[' + ENTRY_ATTR + ']')) return
+        if (target && target.closest && target.closest(SIDEBAR_ROW_SELECTOR)) setOpen(false)
+      }
+      const onOtherActivate = (event) => {
+        if (event.detail !== PANEL_NAME && isOpen()) setOpen(false)
+      }
+      entry = document.createElement('button')
+      entry.type = 'button'
+      entry.setAttribute(ENTRY_ATTR, '')
+      entry.className = 'cb-entry'
+      entry.setAttribute('aria-label', '定时任务')
+      entry.innerHTML = '<span class="cb-entry-icon">' + ENTRY_ICON + '</span><span>定时任务</span>'
+      entry.addEventListener('click', () => setOpen(!isOpen()))
+      document.addEventListener('click', onClickDocument, true)
+      document.addEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate)
+      const waitObserver = new MutationObserver(() => { ensureEntry(); ensureView() })
+      waitObserver.observe(document.body, { childList: true, subtree: true })
+      rootObserver = new MutationObserver(() => {
+        if (rootEl === undefined || !rootEl.isConnected) { ensureEntry(); return }
+        if (!rootEl.contains(entry)) placeEntry(rootEl, entry)
+      })
+      const retry = setInterval(() => { ensureEntry(); ensureView() }, 2000)
+      ensureEntry()
+      ensureView()
+
+      return () => {
+        if (disposed) return
+        disposed = true
+        clearInterval(retry)
+        waitObserver.disconnect()
+        if (rootObserver) rootObserver.disconnect()
+        document.removeEventListener('click', onClickDocument, true)
+        document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate)
+        document.documentElement.removeAttribute(BOARD_ACTIVE_ATTR)
+        entry.remove()
+        if (viewRoot) viewRoot.unmount()
+        if (viewEl) viewEl.remove()
+      }
+    }
+
     return {
-      inject: ['slots'],
+      inject: [],
       apply(ctx) {
         ensureStyle(document)
-        ctx.slots.inject('settings.section', () =>
-          ctx.slots.register(
-            { name: 'settings.section', id: 'cron-board', order: 46, label: '定时任务' },
-            CronBoardPanel,
-          ))
+        // 已装 better-sidebar:直接走扩展槽;未装(或晚装载):先落主界面形态,服务就绪后升级并拆除
+        const sidebar = ctx.get('betterSidebar')
+        if (sidebar !== undefined) {
+          registerBoardTab(ctx, sidebar)
+          return
+        }
+        let standalone = mountStandaloneBoard()
+        let upgraded = false
+        ctx.effect(() => () => { if (!upgraded) standalone() }, 'cron-board standalone board')
+        ctx.inject(['betterSidebar'], (bsCtx) => {
+          upgraded = true
+          standalone()
+          registerBoardTab(ctx, bsCtx.betterSidebar)
+        })
       },
     }
   }
