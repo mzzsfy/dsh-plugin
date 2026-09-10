@@ -24,7 +24,7 @@ function clientLogic() {
       + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
       + ' invalidReasoningLevels, fillDrafts,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
-      + ' anchorsBroken, resolveTargetId, unwrapResult, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
+      + ' anchorsBroken, resolveTargetId, unwrapEnvelope, rejectRpc, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
       + ' writeModels, saveModels, draftsFromModels };',
   )
   return factory()
@@ -282,14 +282,14 @@ test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
 })
 
-// 保存流双副本守卫:client.js 的 unwrapResult/makeSettingsFace/describeNs/modelsOf/
-// writeModels/saveModels/draftsFromModels 全段与 logic.mjs 必须逐字符一致(单文件
-// 格式无法 require,靠此测试防漂移;client 终点 LOGIC-END,logic 侧到文件尾)。
-// 锚点为 `function unwrapResult`:它是全部 RPC 解包路径的唯一入口,副本在旧锚点
-// '// dsh 0.1.2 remote.settings' 之前,不纳入守卫会让解包漂移无任何测试兜底。
+// 保存流双副本守卫:client.js 的 unwrapEnvelope/rejectRpc/makeSettingsFace/describeNs/
+// modelsOf/writeModels/saveModels/draftsFromModels 全段与 logic.mjs 必须逐字符一致
+// (单文件格式无法 require,靠此测试防漂移;client 终点 LOGIC-END,logic 侧到文件尾)。
+// 锚点即 `function unwrapEnvelope` 本身:它是全部 RPC 信封解包路径的唯一入口;
+// 旧锚点 `function unwrapResult` 已随函数重命名废止。
 test('client.js wire 适配与保存流段与 logic.mjs 同源', () => {
   const sectionOf = (source, label) => {
-    const begin = source.indexOf('function unwrapResult')
+    const begin = source.indexOf('function unwrapEnvelope')
     assert.ok(begin >= 0, label + ' 缺少守卫段起点')
     // 终点:client 侧守卫段以 LOGIC-END 收束;logic 侧守卫段即文件尾
     const end = source.indexOf('/* LOGIC-END */')

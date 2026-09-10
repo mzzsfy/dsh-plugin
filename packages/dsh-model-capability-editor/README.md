@@ -40,7 +40,12 @@ dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 
 ## 前置:dsh 本体版本
 
-需要 dsh 本体 0.1.2 及以上(读写经 `remote.settings` 服务面,该面由 0.1.2 引入的 host 侧 `dsh-api-settings-controller` 提供)。更旧的本体上无此服务面,client 半区因注入声明 `remote.settings` 未满足而保持未激活(无 UI、无告警、不影响 web 启动与其他插件);请先升级 dsh,或改用插件 0.1.2(旧 settings 面,已停止维护)。
+支持 dsh 0.1.1-rc.2 / 0.1.2-rc.1 / 0.1.5-alpha.2(实测)。settings 传输按宿主代际自适应:
+
+- 0.1.2+(boot wire 带 `batches` 批次调度):`remote.settings` 以点分 inject 声明交由 cordis 门控,fiber 等 namespace `$mount` 完成才激活,激活即就绪。宿主 `parseBootManifest` 将 `batches` 校验为必填数组(缺失即整页拒绝启动),判据被上游 schema 钉死;宿主未来若移除该字段,本插件退化为 api 面或恒定禁用,不阻塞 boot。
+- 0.1.1(旧 boot wire,无该 namespace):点分声明会永远 pending 拖垮整页 web boot,故声明两代基座 `remote` + `connection`,settings 传输在 apply 内异步定面轮询:从 `connection.api` 面起等,面在首拍即定型;缺失持续满等待窗(1s)则恒定禁用并告警,不影响 web 启动。
+
+注意 0.1.1 本体的 `llm-pi-ai` schema 不认识 0.1.5 引入的 `compat.chatTemplateArgs` 字段,settings.yaml 中该字段会让 0.1.1 的 `llm-pi-ai` settings 注册整体失败(host 侧行为),编辑器随之无数据;从 yaml 删除该字段即恢复。
 
 ## 前置:移除 dsh-better-reasoning-effort
 
