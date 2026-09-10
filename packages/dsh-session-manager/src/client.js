@@ -450,10 +450,9 @@ function SessionManagerApp(props) {
   const [confirms, setConfirms] = useState({})
   const [deleted, setDeleted] = useState([])
   const [periodic, setPeriodic] = useState(null)
-  // 归档库视图状态:recent 为时间倒序主列表(分页手动展开),library 为工作区分组
-  // 浏览 + 标题搜索;分组默认收起,展开即见首页,组内沿用同一分页机制
+  // 归档库视图状态:recent 为主列表固定首页,library 为工作区分组浏览 + 标题
+  // 搜索;分组默认收起,展开即见首页,组内沿用同一分页机制
   const [view, setView] = useState('recent')
-  const [recentCount, setRecentCount] = useState(ARCHIVE_PAGE_SIZE)
   const [query, setQuery] = useState('')
   const [libraryCount, setLibraryCount] = useState(ARCHIVE_PAGE_SIZE)
   const [openGroups, setOpenGroups] = useState(() => new Set())
@@ -553,15 +552,17 @@ function SessionManagerApp(props) {
     ? null
     : h('button', { key: 'more', className: 'sm-more', onClick: onMore }, '展开更多(剩 ' + remaining + ' 条)')
 
-  // 主列表(最近归档):默认首页,余量手动分页展开
-  const recentPage = pageArchiveRows(rows, recentCount)
+  // 主列表(最近归档):固定首页不翻页,尾部「按工作区浏览」入口跳转二级视图看全部
+  const recentPage = pageArchiveRows(rows, ARCHIVE_PAGE_SIZE)
   const recentTray = h('div', { className: 'sm-tray' },
     rows.length === 0
       ? h('div', { className: 'sm-empty' },
           h('div', null, '还没有归档的会话'),
           h('div', { className: 'sm-empty__hint' }, '会话归档后集中显示在这里'))
       : [...recentPage.visible.map(renderArchiveRow),
-        expandMore(recentPage.remaining, () => setRecentCount((count) => count + ARCHIVE_PAGE_SIZE))],
+        recentPage.remaining > 0
+          ? h('button', { key: 'more', className: 'sm-more', onClick: () => setView('library') }, '按工作区浏览')
+          : null],
   )
 
   // 归档库区域:有搜索词时命中平铺(分页),无搜索词按工作区分组(默认收起);
