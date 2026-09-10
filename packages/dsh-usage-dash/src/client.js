@@ -1346,18 +1346,40 @@ function turnTokenUsageOfMessage(nodes, messageId) {
     const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
     if (tail?.tokenUsage) return tail.tokenUsage
     if (node.data.tokenUsage) return node.data.tokenUsage
-    const sampled = node.data?.closing?.usage
-    if (!sampled) return null
-    return {
-      uncachedInputTokens: sampled.inputTokens,
-      outputTokens: sampled.outputTokens,
-      totalTokens: sampled.totalTokens,
-      ...sampled.cacheReadTokens === undefined ? {} : { cacheReadTokens: sampled.cacheReadTokens },
-      ...sampled.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: sampled.cacheWriteTokens },
-      ...sampled.reasoningTokens === undefined ? {} : { reasoningTokens: sampled.reasoningTokens },
-    }
+    return usageSourceBuckets(node.data?.closing?.usage ?? null)
   } catch { /* 单节点形状残缺跳过,语义同扫描容错 */ }
   return null
+}
+
+// messageId 反查用量源:返回仓库内既有引用(官方聚合 tokenUsage → 视图节点 tokenUsage → closing.usage 采样),
+// 引用恒定直至该回合数据被替换;全缺返回 null。供 useChat selector 使用 ——
+// selector 必须返回稳定引用(useSyncExternalStore 以 Object.is 比对快照),返回新建对象会造成无限渲染;
+// 采样形态(字段名差异)由 usageSourceBuckets 在渲染层归一
+function turnUsageSourceOfMessage(nodes, messageId) {
+  if (nodes === null || typeof nodes !== 'object') return null
+  const node = turnUsageIndexOf(nodes).get(messageId)
+  if (node === undefined) return null
+  try {
+    const turnData = node.location?.turn?.data
+    const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
+    return tail?.tokenUsage ?? node.data.tokenUsage ?? node.data?.closing?.usage ?? null
+  } catch { /* 单节点形状残缺跳过,语义同扫描容错 */ }
+  return null
+}
+
+// 用量源 → 聚合桶形态:closing.usage 采样字段名不同(inputTokens 即 uncached 口径,实测 total-input=output 恒等),
+// 聚合形态(已带 uncachedInputTokens)原样直通保持引用
+function usageSourceBuckets(source) {
+  if (!source || source.uncachedInputTokens !== undefined) return source
+  if (source.inputTokens === undefined) return null
+  return {
+    uncachedInputTokens: source.inputTokens,
+    outputTokens: source.outputTokens,
+    totalTokens: source.totalTokens,
+    ...source.cacheReadTokens === undefined ? {} : { cacheReadTokens: source.cacheReadTokens },
+    ...source.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: source.cacheWriteTokens },
+    ...source.reasoningTokens === undefined ? {} : { reasoningTokens: source.reasoningTokens },
+  }
 }
 
 // 计价模型键:routes 首条按官方 messageRoute 分离字段拼两段键,与采集器 refOf 双实现同源
@@ -2449,9 +2471,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     // 注入点B 组件:回合费用芯片,官方动作行内渲染(复制与分支图标之间,赞踩/上下文跳转同排);
     // 受费用显示开关;价格异步首帧未回不渲染,回包后补渲染;显隐节奏随官方 data-actions-reveal
     // 官方槽容器固定在用量/用时芯片之前,末位排布由 SlotTailPortal 移交实现
+    // 响应性:useChat selector 返回用量源稳定引用(null→引用 / 引用→引用),回合结束数据发布即触发重渲染;
+    // 返回仓库本体则引用恒定,快照比对恒等,新回合永不重渲染(刷新才出现的根因)
     const CostChip = React.memo(function CostChip({ messageId, useChat, t = defaultT }) {
       if (typeof useChat !== 'function') return null
-      const chatNodes = useChat((state) => (state && typeof state === 'object') ? state.nodes : undefined)
+      const usageSource = typeof messageId === 'string' && messageId !== ''
+        ? useChat((state) => turnUsageSourceOfMessage(state?.nodes, messageId))
+        : null
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const [pricingRules, setPricingRules] = useState(null)
@@ -2462,9 +2488,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         })
         return () => { alive = false }
       }, [])
-      const matched = typeof messageId === 'string' && messageId !== ''
-        ? turnTokenUsageOfMessage(chatNodes, messageId)
-        : null
+      const matched = usageSourceBuckets(usageSource)
       const price = matched && prefs.costDisplay && pricingRules !== null
         ? matchPrice(pricingRules, turnModelOf(matched), new Date())
         : null
