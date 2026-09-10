@@ -41,7 +41,7 @@ export const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
 // 导出仅供测试计算延迟窗口等待时长
 export const RESTART_DELAY_MS = 2 * 1000
-// 升级成功后自动重启的延迟:给 runCheck 与浮条终态一拍时间,观察器轮询可赶上;
+// 升级成功后自动重启的延迟:给浮条终态与观察器接管一拍时间,观察器轮询可赶上;
 // 导出仅供测试计算延迟窗口等待时长
 export const AUTO_RESTART_DELAY_MS = 3 * 1000
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
@@ -202,14 +202,14 @@ export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT
   return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: null }
 }
 
-// 升级后自动重启守卫:五条件缺一不可——成功、非 stale、非手动直跑、设置启用、appExit 可用。
+// 升级后自动重启守卫:四条件缺一不可——成功、非手动直跑、本次勾选 enabled、appExit 可用。
 // 手动直跑(双 TTY)进程退出后无人拉起,只标 requiresManualRestart 交面板指引,
-// 该指引是环境约束事实,不受设置影响;enabled 仅显式 false 关闭,其余视为开启
-export function judgeAutoRestart({ ok, stale, runtimeKind, hasExit, enabled }) {
+// 该指引是环境约束事实,不受勾选影响;enabled 由升级路由严格 boolean 校验保证
+// 无 stale 条件:版本复读属升级后磁盘读取,关机路径禁止;版本是否前进由重启后的启动检查呈现
+export function judgeAutoRestart({ ok, runtimeKind, hasExit, enabled }) {
   if (ok !== true) return { schedule: false, requiresManualRestart: false }
-  if (stale === true) return { schedule: false, requiresManualRestart: false }
   if (runtimeKind === RUNTIME_KINDS.MANUAL_START) return { schedule: false, requiresManualRestart: true }
-  if (enabled === false) return { schedule: false, requiresManualRestart: false }
+  if (enabled !== true) return { schedule: false, requiresManualRestart: false }
   if (hasExit !== true) return { schedule: false, requiresManualRestart: false }
   return { schedule: true, requiresManualRestart: false }
 }
@@ -224,7 +224,6 @@ export const API_PATHS = Object.freeze({
   REGISTRY_BASE: '/api/maintain/registry-base',
   UPGRADE: '/api/maintain/upgrade',
   RESTART: '/api/maintain/restart',
-  AUTO_RESTART: '/api/maintain/auto-restart',
 })
 
 // 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
@@ -261,7 +260,6 @@ const SETTINGS_SCHEMA = z.object({
   pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('轮询间隔秒数,仅正数启用周期检查'),
   upgradeCommandTemplate: z.string().default(DEFAULT_UPGRADE_TEMPLATE).description('升级命令模板,{tag} 执行时替换为追踪通道,可整体自改为任意命令'),
   registryBase: z.string().default(DEFAULT_REGISTRY_BASE).description('npm registry 基地址,官方源不可达时改为镜像地址'),
-  autoRestart: z.boolean().default(true).description('升级成功后自动重启宿主(托管环境);关闭后升级完成仅提示,需在面板手动重启'),
 })
 
 function sendJson(res, status, payload) {
@@ -341,8 +339,6 @@ function readSettings(ctx) {
       value && typeof value.registryBase === 'string' && value.registryBase.trim().length > 0
         ? value.registryBase.trim()
         : DEFAULT_REGISTRY_BASE,
-    // 仅显式 false 关闭:缺省/null/非 boolean 一律保持开启,旧数据与脏数据不得误关现行为
-    autoRestart: value ? value.autoRestart !== false : true,
   }
 }
 
@@ -440,7 +436,8 @@ export function apply(ctx) {
       return
     }
     const dispose = timerCtx.interval(() => {
-      if (checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
+      // restartScheduled 窗口内不再发起检查:关机延迟期间的网络请求与磁盘读取都是半写状态风险
+      if (restartScheduled || checkInFlight !== null || nextDueAt === null || Date.now() < nextDueAt) return
       runCheck().then(scheduleNext, scheduleNext)
     }, TICK_MS)
     ctx.effect(() => dispose, 'dsh-maintain poll interval')
@@ -472,7 +469,6 @@ export function apply(ctx) {
       upgradeTemplate: config.upgradeCommandTemplate,
       pollIntervalSec: config.pollIntervalSec,
       registryBase: config.registryBase,
-      autoRestartEnabled: config.autoRestart,
       tags: snapshot.tags,
       channelLatest: judged.channelLatest,
       verdict: judged.verdict,
@@ -487,7 +483,7 @@ export function apply(ctx) {
     }
   }
 
-  function triggerUpgrade() {
+  function triggerUpgrade(autoRestart) {
     const config = readSettings(ctx)
     // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
     const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
@@ -512,8 +508,8 @@ export function apply(ctx) {
     // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
     upgrade = { running: true, last }
     writeUpgradeLock(last.startedAt)
-    audit('upgrade', 'triggered', 'command=' + singleLine(command))
-    void performUpgrade(command, last, config.channel)
+    audit('upgrade', 'triggered', 'command=' + singleLine(command) + ' autoRestart=' + (autoRestart === true))
+    void performUpgrade(command, last, config.channel, autoRestart === true)
   }
 
   // 升级锁文件只在此写入:首次与每次重试覆写,startedAt 取当前尝试开始时刻,
@@ -524,20 +520,24 @@ export function apply(ctx) {
     } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
   }
 
-  // 自动重启与手动重启共用 restartScheduled 互斥:调度窗口内到达的升级被 409,
-  // 手动重启端点幂等;autoRestartScheduled 单独给 status/client 分流终态文案
-  function scheduleAutoRestart() {
+  // 宿主退出调度唯一入口:手动重启(HTTP 入口)与升级落定(内部入口)共用,
+  // 置双向互斥标记、留审计、延迟 exit(0)。调度窗口内升级被 409,手动重启幂等
+  function scheduleHostExit({ detail, autoRestart = false, delayMs }) {
     restartScheduled = true
-    autoRestartScheduled = true
-    audit('restart', 'scheduled', 'reason=upgrade-ok delayMs=' + AUTO_RESTART_DELAY_MS)
-    setTimeout(() => exit(0), AUTO_RESTART_DELAY_MS)
+    if (autoRestart === true) autoRestartScheduled = true
+    audit('restart', autoRestart === true ? 'scheduled' : 'triggered', detail + ' delayMs=' + delayMs)
+    // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
+    // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
+    setTimeout(() => exit(0), delayMs)
   }
 
-  async function performUpgrade(command, last, channel) {
+  async function performUpgrade(command, last, channel, autoRestart) {
+    // settle 声明在 try 外:继续运行路径的版本复读在 finally 中消费它
+    let settle = null
     try {
-      // 触发前快照磁盘版本,成功落定后复读对比,版本未前进或未达目标即标 stale
+      // 触发前快照磁盘版本,继续运行路径复读时以此为对比基线
       last.previousVersion = await resolveCurrentHostVersion()
-      const settle = await runUpgradeWithRetry({
+      settle = await runUpgradeWithRetry({
         command,
         onAttemptStart: () => writeUpgradeLock(Date.now()),
       })
@@ -554,20 +554,11 @@ export function apply(ctx) {
         stdoutTail: settle.stdoutTail,
         stderrTail: settle.stderrTail,
       })
-      if (settle.ok) {
-        last.installedVersion = await resolveCurrentHostVersion()
-        const tags = snapshot.tags
-        const freshness = judgeUpgradeFreshness({
-          previousVersion: last.previousVersion,
-          installedVersion: last.installedVersion,
-          channelLatest: tags !== null && Object.prototype.hasOwnProperty.call(tags, channel) ? tags[channel] : null,
-        })
-        last.stale = freshness.stale
-        last.reason = freshness.reason
-      }
     } catch (error) {
       last.error = error && error.message ? error.message : String(error)
     } finally {
+      // 关机路径经 return 提前离场会吞掉 finally 内新抛异常:本块各消费点已 try/catch
+      // 防御(删锁/复读/runCheck),后续修改必须保持该契约,勿在此块新增可抛调用
       if (last.finishedAt === null) last.finishedAt = Date.now()
       upgrade = { running: false, last }
       // stillRunning(强杀后进程树疑似仍在写全局目录)时保留锁文件,由过期机制收敛,
@@ -587,14 +578,33 @@ export function apply(ctx) {
         + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
       audit('upgrade', last.ok === true ? 'ok' : 'failed',
         'durationMs=' + (last.finishedAt - last.startedAt) + ' code=' + last.code + ' kind=' + singleLine(last.kind))
-      // 自动重启守卫:等环境检测落定后按五条件分流(手动直跑只标指引,不退出)
+      // 关机前置判定只取内存输入(启动期缓存的运行环境 + 本次会话勾选):升级命令刚
+      // 替换过宿主磁盘文件,落定钩子发起网络请求或读取磁盘都是半写状态下的故障源
       await runtimeEnvReady
-      const decision = judgeAutoRestart({ ok: last.ok === true, stale: last.stale === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function', enabled: readSettings(ctx).autoRestart })
+      const decision = judgeAutoRestart({ ok: last.ok === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function', enabled: autoRestart === true })
       if (decision.requiresManualRestart === true) last.requiresManualRestart = true
       if (decision.schedule === true) {
+        // 关机路径零收尾:与确认重启同一内部动作,直接进入延迟退出
         // last 镜像调度标记:浮条终态文案按其分流(与 status.autoRestartScheduled 同值)
         last.autoRestartScheduled = true
-        scheduleAutoRestart()
+        scheduleHostExit({ detail: 'reason=upgrade-ok', autoRestart: true, delayMs: AUTO_RESTART_DELAY_MS })
+        return
+      }
+      // 继续运行路径(失败/手动直跑/本次未勾选自动重启):复读磁盘版本标 stale,版本未前进提示保留
+      if (settle !== null && settle.ok) {
+        // 复读属磁盘消费点,拒绝不得以 unhandledRejection 形式逃逸(void 触发即崩宿主):
+        // 失败时放弃 stale 判定,保留已装版本 null 由启动检查兜底呈现
+        try {
+          last.installedVersion = await resolveCurrentHostVersion()
+          const tags = snapshot.tags
+          const freshness = judgeUpgradeFreshness({
+            previousVersion: last.previousVersion,
+            installedVersion: last.installedVersion,
+            channelLatest: tags !== null && Object.prototype.hasOwnProperty.call(tags, channel) ? tags[channel] : null,
+          })
+          last.stale = freshness.stale
+          last.reason = freshness.reason
+        } catch { /* 复读失败仅损失 stale 提示,不覆盖升级成功结果 */ }
       }
       // 升级结束后自动重新检查版本并重排轮询(命令可能改了本地版本)
       runCheck().then(scheduleNext, scheduleNext)
@@ -613,6 +623,10 @@ export function apply(ctx) {
     {
       path: API_PATHS.REFRESH,
       handler: route('POST', WRITE, async (req, res) => {
+        if (restartScheduled) {
+          sendJson(res, 409, { error: '重启已调度,禁止检查更新' })
+          return
+        }
         await drainInFlightThenCheck()
         scheduleNext()
         sendJson(res, 200, await currentStatus())
@@ -705,6 +719,11 @@ export function apply(ctx) {
           return
         }
         await settings.update(NAMESPACE, { registryBase: base })
+        if (restartScheduled) {
+          // 保存生效但不发起检查:关机窗口内网络请求与磁盘读取都是半写状态风险
+          sendJson(res, 200, await currentStatus())
+          return
+        }
         await drainInFlightThenCheck()
         scheduleNext()
         sendJson(res, 200, await currentStatus())
@@ -713,6 +732,15 @@ export function apply(ctx) {
     {
       path: API_PATHS.UPGRADE,
       handler: route('POST', WRITE, async (req, res) => {
+        // body 校验必须在全部门控之前:门控到 triggerUpgrade 置位之间不得插入 await,
+        // 否则并发请求双双通过 409 门控,两个升级进程并发写全局目录
+        // 自动重启为确认弹窗的会话级勾选,严格 boolean:缺失/宽转一律拒绝,防静默翻转关机行为
+        const rawBody = await readBody(req)
+        const requestBody = rawBody ? (JSON.parse(rawBody) || {}) : {}
+        if (typeof requestBody.autoRestart !== 'boolean') {
+          sendJson(res, 400, { error: 'autoRestart 必须是 boolean' })
+          return
+        }
         // 与重启调度双向互斥:restartScheduled 置位到 exit(0) 执行的窗口内触发升级,
         // detached 孤儿会与新宿主交错
         if (upgrade.running || restartScheduled) {
@@ -744,13 +772,18 @@ export function apply(ctx) {
           })
           return
         }
-        triggerUpgrade()
+        triggerUpgrade(requestBody.autoRestart)
         sendJson(res, 200, await currentStatus())
       }),
     },
     {
       path: API_PATHS.RESTART,
       handler: route('POST', WRITE, async (req, res) => {
+        // body 读取必须在全部门控之前:幂等检查到 scheduleHostExit 置位之间不得插入
+        // await,否则并发请求双双越过幂等门,双重调度 exit
+        const rawBody = await readBody(req)
+        // 'null' 字面量解析为 null:按空体处理,防 null.force 形态的内部错误外泄
+        const requestBody = rawBody ? (JSON.parse(rawBody) || {}) : {}
         // 与升级门闩互斥:升级子进程经 detached+unref 存活于宿主死后,
         // 重启后新宿主门闩归零会放行第二次升级,双 npm install 并发写全局目录
         if (upgrade.running) {
@@ -769,9 +802,6 @@ export function apply(ctx) {
         }
         // 活跃工作门控:重启可被 force 越过(升级后自动重启链路无法等待人工确认,
         // 对齐 dsh-service:升级不可越/重启 force 可越)
-        const rawBody = await readBody(req)
-        // 'null' 字面量解析为 null:按空体处理,防 null.force 形态的内部错误外泄
-        const requestBody = rawBody ? (JSON.parse(rawBody) || {}) : {}
         const activeWork = collectActiveWork(ctx)
         if (activeWork.total > 0 && requestBody.force !== true) {
           audit('restart', 'rejected', 'reason=active-work total=' + activeWork.total)
@@ -782,31 +812,9 @@ export function apply(ctx) {
           })
           return
         }
-        restartScheduled = true
-        audit('restart', 'triggered', requestBody.force === true ? 'forced=true' : 'forced=false')
+        // 响应先发,退出调度经统一入口(与升级落定关机同一条链)
         sendJson(res, 200, { ok: true, restarting: true })
-        // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
-        // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
-        setTimeout(() => exit(0), RESTART_DELAY_MS)
-      }),
-    },
-    {
-      path: API_PATHS.AUTO_RESTART,
-      handler: route('POST', WRITE, async (req, res) => {
-        const body = JSON.parse(await readBody(req))
-        // 严格 boolean:字符串 'false' 等宽转静默翻转破坏性开关,一律拒绝
-        if (body === null || typeof body !== 'object' || typeof body.enabled !== 'boolean') {
-          sendJson(res, 400, { error: 'enabled 必须是 boolean' })
-          return
-        }
-        const settings = ctx.get('settings')
-        if (!settings) {
-          sendJson(res, 500, { error: 'settings 服务不可用' })
-          return
-        }
-        await settings.update(NAMESPACE, { autoRestart: body.enabled })
-        audit('auto-restart', 'updated', 'enabled=' + body.enabled)
-        sendJson(res, 200, await currentStatus())
+        scheduleHostExit({ detail: 'forced=' + (requestBody.force === true), delayMs: RESTART_DELAY_MS })
       }),
     },
   ]

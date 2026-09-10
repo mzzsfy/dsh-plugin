@@ -81,6 +81,15 @@ const CSS = [
   '.dm-switch:hover { opacity:0.85; }',
   // 文字标签在 DOM 中排 track 之后(保 input+track 紧邻兄弟,状态选择器才生效),视觉以 order 提前
   '.dm-switch .dm-row__label { order:-1; }',
+  // ---- 升级确认弹窗:遮罩 + 居中窗体 ----
+  '.dm-dialog__mask { position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:9999;',
+  '  display:flex; align-items:center; justify-content:center; padding:16px; }',
+  '.dm-dialog { background:var(--dsw-alias-bg-layer-1, #fff); color:inherit; border-radius:12px; padding:16px;',
+  '  width:480px; max-width:100%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:10px;',
+  '  box-shadow:0 8px 32px rgba(0,0,0,0.25); }',
+  '.dm-dialog__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
+  '.dm-dialog__section { display:flex; flex-direction:column; gap:6px; padding:8px 0; border-top:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
+  '.dm-dialog__outcome { color:var(--dsw-alias-label-secondary); font-size:12px; line-height:1.6; }',
 ].join('\n')
 
 const STATUS_URL = '/api/maintain/status'
@@ -91,7 +100,6 @@ const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
 const REGISTRY_BASE_URL = '/api/maintain/registry-base'
 const UPGRADE_URL = '/api/maintain/upgrade'
 const RESTART_URL = '/api/maintain/restart'
-const AUTO_RESTART_URL = '/api/maintain/auto-restart'
 const UPGRADE_POLL_MS = 2 * 1000
 // 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
 const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
@@ -143,6 +151,10 @@ function restartPostLost(error) {
 // test/parity.test.mjs 按 const 名正则提取对拍,修改任一侧必须同步。
 const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
+// 与 host runtime.mjs RUNTIME_KINDS.MANUAL_START 镜像(parity 对拍,单侧改名即测试失败)
+const RUNTIME_KIND_MANUAL = 'manual-start-likely'
+// 与 host AUTO_RESTART_DELAY_MS 镜像(parity 对拍):弹窗文案引用,勿手抄数字
+const AUTO_RESTART_DELAY_SEC = 3
 const VERDICT_UNKNOWN = 'unknown'
 
 // 非 2xx 应答抛带 status 与完整 payload 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
@@ -419,7 +431,7 @@ function VersionCard(props) {
           || status.verdict === VERDICT_UP_TO_DATE,
         title: status.verdict === VERDICT_UP_TO_DATE ? '当前已是通道最新版,无需升级;重装请走命令行' : undefined,
         onClick: props.onUpgrade,
-      }, props.upgradeArmed ? '确认升级' : '升级'),
+      }, '升级'),
     ),
     status.restartPending === true
       ? h('div', { className: 'dm-notice dm-notice--warn' },
@@ -479,18 +491,6 @@ function SettingsCard(props) {
       onSave: props.onRegistryBase,
       hint: '默认以灰字提示,清空保存即恢复默认;官方源不可达时改为镜像',
     }),
-    h('div', { className: 'dm-row' },
-      h(Switch, {
-        label: '自动重启',
-        checked: status.autoRestartEnabled === true,
-        disabled: props.restarting || props.busy.autoRestart === true,
-        title: '升级成功后自动重启宿主以生效(需托管环境);关闭后升级完成仅提示,需手动重启',
-        onChange: props.onAutoRestart,
-      }),
-      h('span', { className: 'dm-meta' }, status.autoRestartEnabled === true
-        ? '升级成功后自动重启宿主(手动直跑环境仍需手动重启)'
-        : '升级完成后仅提示,需在面板手动重启'),
-    ),
   )
 }
 
@@ -564,11 +564,51 @@ function OpsCard(props) {
   )
 }
 
+// 升级确认弹窗:展示将执行的命令({tag} 已替换为追踪通道)与自动重启勾选,确认才触发。
+// 自动重启是会话级选择(不持久化),勾/不勾的后果在窗内明示:
+// 勾选=命令成功后宿主延迟 3 秒退出,由进程管理器拉起新版本,页面随宿主恢复自动刷新;
+// 不勾选=宿主继续运行旧版本,面板提示"重启宿主后生效",需手动点重启按钮
+function UpgradeDialog(props) {
+  // 每次打开都重新挂载(MaintainApp 条件渲染),默认勾选随挂载重置
+  const [autoRestart, setAutoRestart] = useState(true)
+  const status = props.status
+  const template = typeof status.upgradeTemplate === 'string' && status.upgradeTemplate.length > 0
+    ? status.upgradeTemplate
+    : DEFAULT_UPGRADE_TEMPLATE
+  const command = template.split('{tag}').join(status.channel)
+  return h('div', { className: 'dm-dialog__mask', onClick: props.onCancel },
+    h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
+      h('div', { className: 'dm-card__title' }, '确认升级'),
+      h('div', { className: 'dm-dialog__hint' }, '将执行以下命令(升级期间页面可离开,进度由右下角浮条提示):'),
+      h('pre', { className: 'dm-pre' }, command),
+      h('div', { className: 'dm-dialog__section' },
+        h(Switch, {
+          label: '升级完成后自动重启宿主',
+          checked: autoRestart,
+          onChange: setAutoRestart,
+        }),
+        h('div', { className: 'dm-dialog__outcome' },
+          autoRestart
+            ? '已勾选:升级命令执行成功后,宿主将在 ' + AUTO_RESTART_DELAY_SEC + ' 秒后自动退出,由你的进程管理器(docker / pm2 / systemd 等)拉起新版本,本页随宿主恢复自动刷新。升级落定后宿主不再执行任何网络请求与磁盘读取。'
+            : '未勾选:升级完成后宿主继续运行当前版本,面板提示「重启宿主后生效」,需要你手动点击重启按钮才切换到新版本。'),
+        status.runtimeEnv && status.runtimeEnv.kind === RUNTIME_KIND_MANUAL
+          ? h('div', { className: 'dm-dialog__outcome dm-warn' }, '当前为手动终端直跑环境:没有进程管理器拉起宿主,勾选自动重启也不会自动退出,完成后仍需手动重启。')
+          : null,
+      ),
+      h('div', { className: 'dm-row' },
+        h('span', { className: 'dm-spacer' }),
+        h('button', { className: 'dm-btn', onClick: props.onCancel }, '取消'),
+        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(autoRestart) }, '开始升级'),
+      ),
+    ),
+  )
+}
+
 function MaintainApp() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState({})
-  const [upgradeArmed, setUpgradeArmed] = useState(false)
+  const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false)
   const [restartArmed, setRestartArmed] = useState(false)
   const [restarting, setRestarting] = useState(false)
   // 重启探测的跨拍状态快照 {lost,pid,bootAt,readyStreak}:lost 与 readyStreak 随拍更新,
@@ -784,19 +824,10 @@ function MaintainApp() {
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
-  function onAutoRestart(enabled) {
-    submitEdit(AUTO_RESTART_URL, { enabled: enabled === true }, 'autoRestart', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
-  }
-
-  function onUpgrade() {
-    if (!upgradeArmed) {
-      setUpgradeArmed(true)
-      setRestartArmed(false)
-      return
-    }
-    setUpgradeArmed(false)
+  function onUpgrade(autoRestart) {
+    setUpgradeDialogOpen(false)
     markBusy('upgrade', true)
-    post(UPGRADE_URL)
+    post(UPGRADE_URL, { autoRestart: autoRestart === true })
       .then((next) => {
         setStatus(next); setError(null)
         // 升级转后台执行:观察器接管状态跟踪与完成提示,页面可离开
@@ -810,7 +841,6 @@ function MaintainApp() {
     if (restartPendingRef.current) return
     if (!restartArmed) {
       setRestartArmed(true)
-      setUpgradeArmed(false)
       return
     }
     setRestartArmed(false)
@@ -872,13 +902,13 @@ function MaintainApp() {
       error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null)
   }
 
-  // 升级入口不可用即解除两段式待发:渲染时派生,不引入 effect。
+  // 升级入口不可用即关闭确认弹窗:渲染时派生,不引入 effect。
   // 不可用与 VersionCard 按钮 disabled 条件同源(升级进行中/残留锁/已最新/重启中)
   const upgradeUnavailable = restarting
     || (status !== null && ((status.upgrade && status.upgrade.running === true)
       || status.upgradeLockHeld === true
       || status.verdict === VERDICT_UP_TO_DATE))
-  const upgradeArmedLive = upgradeArmed && !upgradeUnavailable
+  const upgradeDialogOpenLive = upgradeDialogOpen && !upgradeUnavailable
   // 活跃工作计数:重启确认态显示计数并发 force 越过门控
   const activeWorkTotal = status !== null && status.activeWork ? status.activeWork.total : 0
 
@@ -896,13 +926,12 @@ function MaintainApp() {
     h(VersionCard, {
       status,
       busy,
-      upgradeArmed: upgradeArmedLive,
       restartArmed,
       restarting,
       onRefresh,
       onChannel,
       onTemplateSave,
-      onUpgrade,
+      onUpgrade: () => { setRestartArmed(false); setUpgradeDialogOpen(true) },
       onRestart,
     }),
     h(SettingsCard, {
@@ -911,10 +940,14 @@ function MaintainApp() {
       restarting,
       onPollInterval,
       onRegistryBase,
-      onAutoRestart,
     }),
     h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
     h(OpsCard, { status, armed: restartArmed, restarting, activeWorkTotal, onRestart }),
+    upgradeDialogOpenLive ? h(UpgradeDialog, {
+      status,
+      onCancel: () => setUpgradeDialogOpen(false),
+      onConfirm: onUpgrade,
+    }) : null,
   )
 }
 
