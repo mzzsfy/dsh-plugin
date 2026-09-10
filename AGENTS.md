@@ -26,6 +26,7 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ```
 
 - 单包模式用于只想调试某一个包的场景(线上 404 的未发布包不会卡住 `all`:其依赖行自动写 file 协议,归一继续)。`all` 仍是日常默认,单包后其余包的终态不随之校验
+- 包内外部依赖(dependencies/devDependencies 含非 @mzzsfy,如 croner / pi-ai)由脚本自动 `npm install --omit=peer`(与 CI test.yml 同源,已装跳过幂等):工作副本经 junction realpath 解析,host 运行时外部依赖须物理存在于包内 node_modules,profile 安装态则由依赖声明经 pnpm 承载,两态都覆盖
 - 依赖行变化触发 `pnpm install` 重建 node_modules 时,脚本会重挂所有**有依赖声明**的包与**公共依赖包**,保住既有链接
 - `--unlink` 对公共依赖包:卸链后顶层不留实体,不恢复 registry 版本(无依赖行可恢复),dsh 启动 fallback 补链接管
 
