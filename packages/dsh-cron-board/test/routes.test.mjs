@@ -15,8 +15,13 @@ import { createApi } from '../src/api.mjs'
 
 async function makeApi(t, overrides = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-api-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
   const store = await createStore({ dir: join(dir, 'data') })
+  // 清理前等写链排空:终态只保证内存可见,收尾写(任务卡回填、日志裁剪)提交晚于 flush,
+  // rmdir 与其赛跑会 ENOTEMPTY;retries 吸收(镜像 executor/scheduler 测试同款参数)
+  t.after(async () => {
+    await store.flush()
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
   const logger = createLogger({ rootDir: join(dir, 'logs') })
   const executor = createExecutor({ store, logger, readMaxConcurrent: () => 2 })
   const api = createApi({ store, logger, executor, ...overrides })
@@ -237,6 +242,27 @@ test('jobs 路由:同名多值展开为多条 RunRecord 与多次运行', async 
     logs.add(logRes.payload.text.match(/V=(\w+)/)[1])
   }
   assert.deepEqual([...logs].sort(), ['one', 'two'])
+})
+
+test('jobs 路由:慢盘下运行终态后清理不与收尾写赛跑(ENOTEMPTY 回归)', async (t) => {
+  // Given 持久化注入慢盘延迟(放大终态内存可见与收尾写落盘的窗口)
+  const { store, api } = await makeApi(t)
+  const rawUpdate = store.runs.update.bind(store.runs)
+  store.runs.update = (runId, patch) => new Promise((resolve) => {
+    setTimeout(() => rawUpdate(runId, patch).then(resolve, resolve), 25)
+  })
+  const job = await store.jobs.create({
+    name: 'slowdisk', kind: 'shell',
+    command: `${process.execPath} -e ""`,
+    schedule: '* * * * *', enabled: true, timeoutMs: 10 * 1000,
+  })
+  // When 手动运行到终态后测试即结束(清理走 makeApi 的 flush+retries)
+  const runRes = await call(api, 'POST', '/api/cron-board/jobs/' + job.id + '/run')
+  const { runIds } = runRes.payload
+  await waitFor(() => {
+    const row = store.runs.get(runIds[0])
+    return row && row.status !== 'queued' && row.status !== 'running' ? row : null
+  })
 })
 
 test('status 路由:报告调度器与 timer 可用性', async (t) => {
