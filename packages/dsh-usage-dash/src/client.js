@@ -891,29 +891,33 @@ function heatLevel(tokens, max) {
   return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
 }
 
-// ChartTip 定位:锚定区装得下贴内顶(趋势图悬停区即绘图区,悬浮窗留在图表内),装不下上翻、再下翻、末了钳边界顶
+// ChartTip 定位:进入命中区时锚定指针,先放指针右下,右侧或下方越界翻对侧,仍越界钳进边界
 const TIP_GAP_PX = 8
 const TIP_MARGIN_PX = 8
+
+// 悬停锚点:指针事件取指针坐标;焦点事件无坐标,回退目标矩形中心保键盘可访问
+const pointerAt = (event) => {
+  if (event.clientX != null && event.clientY != null) return { x: event.clientX, y: event.clientY }
+  const rect = event.currentTarget.getBoundingClientRect()
+  return { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }
+}
 
 // 回合费用芯片与前置官方芯片(结束时钟)的间距
 const TURN_COST_GAP_PX = 8
 
 function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX) {
   if (!tip || tip.width <= 0 || tip.height <= 0) return null
-  if (!anchor || (anchor.left === 0 && anchor.top === 0 && anchor.right === 0 && anchor.bottom === 0)) return null
+  if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return null
   const minX = bounds.left + margin
   const minY = bounds.top + margin
-  const maxX = bounds.right - margin
-  const maxY = bounds.bottom - margin
-  const left = Math.max(minX, Math.min((anchor.left + anchor.right) / 2 - tip.width / 2, maxX - tip.width))
-  const inside = anchor.top + gap
-  const above = anchor.top - gap - tip.height
-  const below = anchor.bottom + gap
-  let top
-  if (inside + tip.height <= anchor.bottom) top = inside
-  else if (above >= minY) top = above
-  else if (below + tip.height <= maxY) top = below
-  else top = minY
+  const maxLeft = bounds.right - margin - tip.width
+  const maxTop = bounds.bottom - margin - tip.height
+  const left = anchor.x + gap + tip.width <= bounds.right - margin
+    ? anchor.x + gap
+    : Math.max(minX, Math.min(anchor.x - gap - tip.width, maxLeft))
+  const top = anchor.y + gap + tip.height <= bounds.bottom - margin
+    ? anchor.y + gap
+    : Math.max(minY, Math.min(anchor.y - gap - tip.height, maxTop))
   return { left, top }
 }
 
@@ -2172,7 +2176,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
-      const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
+      const pick = (index) => (event) => setHover({ index, anchor: pointerAt(event) })
       const clear = () => setHover(null)
       const otherEntries = hoverSlot
         ? Object.entries(hoverSlot.otherByModel ?? {}).sort((a, b) => b[1] - a[1])
@@ -2276,7 +2280,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           ? panel.getBoundingClientRect()
           : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
         const next = tipPlace(
-          anchor ? anchor.getBoundingClientRect() : null,
+          anchor,
           { width: tip.offsetWidth, height: tip.offsetHeight },
           bounds,
         )
@@ -2328,7 +2332,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const display = geom ? heatDisplayDays(days, geom.cols) : null
       const grid = display ? heatGrid(display, geom.size) : null
       const peak = display ? Math.max(1, ...display.map((slot) => slot.tokens)) : 1
-      const pick = (cell) => (event) => setHover({ ...cell, anchor: event.currentTarget })
+      const pick = (cell) => (event) => setHover({ ...cell, anchor: pointerAt(event) })
       const clear = () => setHover(null)
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
@@ -2377,7 +2381,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const displayName = (model) => (model === OTHER_MODEL ? t('other') : model)
       const pick = (model) => (event) => {
         setHover(model)
-        setTip({ model, anchor: event.currentTarget })
+        setTip({ model, anchor: pointerAt(event) })
       }
       const clear = () => {
         setHover(null)
