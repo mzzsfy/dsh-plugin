@@ -42,7 +42,7 @@
 ## 依赖
 
 - `croner`:cron 表达式解析与触发点计算
-- 宿主服务:settings / timer(软依赖)、webServer、sessionController(硬依赖,cordis 门控——缺失时插件整体不激活,含脚本任务)
+- 宿主服务:settings / timer(软依赖)、webServer;sessionController 在 apply 内探测(缺失时打日志干净禁用,插件整体不激活,含脚本任务;0.1.1-rc.2 及更早版本无此服务)
 
 ## 开发
 

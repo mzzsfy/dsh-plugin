@@ -18,15 +18,18 @@ import { createStore } from './store.mjs'
 
 export const name = 'dsh-cron-board'
 
-// 会话任务与路由/定时同为本体能力:sessionController 硬依赖声明交 cordis 门控,
-// 服务未就绪/缺失时 fiber 不激活即整体干净禁用(apply 内同步软探测会撞异步挂载时序,mce 同款事故)
-export const inject = ['webServer', 'sessionController']
+// 会话任务依赖的 sessionController 由 dsh-web-app 的 session-controller 条目挂载
+// (0.1.1-rc.2 无此服务,inject 声明会让 fiber 永久 pending,旧版 boot 对 pending
+// 条目抛错杀掉整个进程,连带已监听的 web 一起退出);host 服务为同步注册,apply 内
+// 探测无时序竞态:缺失即打日志干净禁用,整体不激活(含脚本任务)的语义不变
+export const inject = ['webServer']
 
 // 数据目录 env 覆盖:测试注入临时目录(对齐 dsh-usage-panel 先例)
 const DATA_DIR_ENV = 'DSH_CRON_BOARD_DATA_DIR'
 const API_PREFIX = '/api/cron-board'
 const SETTINGS_NS = 'cron-board'
 const TIMER_UNAVAILABLE_REASON = '宿主定时服务不可用,自动调度已停用'
+const SESSION_UNAVAILABLE_REASON = '宿主会话服务 sessionController 不可用(需 dsh-web-app 挂载 session-controller,0.1.1-rc.2 及更早版本缺失),插件整体禁用'
 const DEFAULT_LOG_KEEP_PER_JOB = 200
 
 // 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数 / 会话投递变量掩码
@@ -44,7 +47,12 @@ export function resolveDataDir(env = process.env) {
 }
 
 export function apply(ctx, config) {
-  const sessionController = ctx.sessionController
+  // ctx.get 不受 inject 门控(cordis 明文契约:缺失返回 undefined),属性访问会被拦截抛错
+  const sessionController = ctx.get('sessionController')
+  if (!sessionController) {
+    if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + SESSION_UNAVAILABLE_REASON)
+    return
+  }
   const dataDir = resolveDataDir()
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
   let runtimePromise = null
