@@ -65,19 +65,37 @@ jobs:
         run: |
           total=10
           failures=0
+          failed_units=""
+          run_unit() {
+            local name="$1"; shift
+            if "$@"; then
+              echo "OK   ${name}"
+            else
+              echo "FAIL ${name}"
+              failed_units="${failed_units} ${name}"
+              failures=$((failures+1))
+            fi
+          }
           for i in $(seq 1 "$total"); do
             echo "::group::第 ${i}/${total} 轮"
             round_start=$failures
-            node scripts/smoke-load.mjs || failures=$((failures+1))
-            node --test tests/engine.test.mjs || failures=$((failures+1))
-            node --test tests/workflow-parity.test.mjs || failures=$((failures+1))
+            run_unit smoke-load node scripts/smoke-load.mjs
+            run_unit engine node --test tests/engine.test.mjs
+            run_unit workflow-parity node --test tests/workflow-parity.test.mjs
             # 包自动发现:凡含 test/ 目录的包全量执行,新增包无需改本文件
             for dir in packages/*/; do
               [ -d "${dir}test" ] || continue
-              (cd "$dir" && node --test "test/*.test.mjs") || failures=$((failures+1))
+              run_unit "$(basename "$dir")" bash -c "cd '$dir' && node --test \"test/*.test.mjs\""
             done
             echo "本轮失败单元数: $((failures-round_start))"
             echo "::endgroup::"
           done
           echo "汇总: ${total} 轮, 失败单元累计 ${failures}"
+          if [ -n "$failed_units" ]; then
+            echo "失败单元清单(次数=失败轮数):"
+            printf '%s\n' ${failed_units} | sort | uniq -c | while read -r count name; do
+              echo "  ${count}x ${name}"
+              echo "::error::单元失败 ${count}/${total} 轮: ${name}"
+            done
+          fi
           [ "$failures" -eq 0 ]
