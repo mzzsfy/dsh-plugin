@@ -77,9 +77,76 @@ function resolveMinuteRange(presetId, now = new Date()) {
   return { from, to: minuteBucket(now) }
 }
 
+// 自定义挡 id 与时/分自定义跨度上限(与数据保留期一致:小时桶固定 15 天,分钟桶上限 7 天)
+const CUSTOM_RANGE_ID = 'custom'
+const HOUR_CUSTOM_MAX_HOURS = 15 * 24
+const MINUTE_CUSTOM_MAX_MINUTES = 7 * 24 * 60
+// 选中自定义挡且无历史输入时的预填窗口
+const POINT_CUSTOM_DEFAULT_HOURS = 24
+
+const DATETIME_INPUT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+
+// datetime-local 输入值解析为本地时刻,形态或日历非法(13 月/2 月 30 日/回卷)返回 null
+function parseLocalDateTime(value) {
+  if (typeof value !== 'string') return null
+  const match = DATETIME_INPUT_PATTERN.exec(value)
+  if (!match) return null
+  const [year, month, day, hour, minute, second] = match.slice(1)
+  const parts = [Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second ?? 0)]
+  const date = new Date(...parts)
+  const components = [date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes()]
+  // 数字分量构造对超界值静默回卷,逐分量回读比对拦截
+  const legal = parts.slice(0, 5).every((part, index) => components[index] === part)
+  return legal ? date : null
+}
+
+const formatDateTimeInput = (date) => `${formatDate(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+
+// 小时自定义范围:两端归一到所在小时桶(闭区间),跨度超保留期钳起点
+function resolveHourCustomRange(fromValue, toValue) {
+  const from = parseLocalDateTime(fromValue)
+  const to = parseLocalDateTime(toValue)
+  if (!from || !to || from > to) return null
+  const clampedFrom = new Date(Math.max(from.getTime(), to.getTime() - HOUR_CUSTOM_MAX_HOURS * MS_PER_HOUR))
+  return { from: hourBucket(clampedFrom), to: hourBucket(to) }
+}
+
+// 分钟自定义范围:from 对齐 10 分钟桶边界,to 保持原始分钟(闭区间上界),跨度超保留期钳起点
+function resolveMinuteCustomRange(fromValue, toValue) {
+  const from = parseLocalDateTime(fromValue)
+  const to = parseLocalDateTime(toValue)
+  if (!from || !to || from > to) return null
+  const clampedFrom = Math.max(
+    minuteBucketFloor(from.getTime()),
+    minuteBucketFloor(to.getTime()) - MINUTE_CUSTOM_MAX_MINUTES * MS_PER_MINUTE,
+  )
+  return { from: minuteBucket(new Date(clampedFrom)), to: minuteBucket(to) }
+}
+
+// 时/分查询请求与缓存键:预设挡键为挡位 id,自定义挡键含归一后桶串(范围变化即换键防误命中)
+function resolvePointQuery(view, preset, customFrom, customTo, now = new Date()) {
+  if (view === 'hour') {
+    if (preset === CUSTOM_RANGE_ID) {
+      const range = resolveHourCustomRange(customFrom, customTo)
+      return range ? { request: range, key: `${CUSTOM_RANGE_ID}:${range.from}:${range.to}` } : null
+    }
+    return { request: resolveHourRange(preset, now), key: preset }
+  }
+  if (view === 'minute') {
+    if (preset === CUSTOM_RANGE_ID) {
+      const range = resolveMinuteCustomRange(customFrom, customTo)
+      return range ? { request: range, key: `${CUSTOM_RANGE_ID}:${range.from}:${range.to}` } : null
+    }
+    return { request: resolveMinuteRange(preset, now), key: preset }
+  }
+  return null
+}
+
 function maxSlotsFor(view, presetId) {
-  if (view === 'hour') return hourValueOf(presetId) + 1
-  if (view === 'minute') return minuteValueOf(presetId) / MINUTE_BUCKET_SPAN_MINUTES + 1
+  if (view === 'hour') return (presetId === CUSTOM_RANGE_ID ? HOUR_CUSTOM_MAX_HOURS : hourValueOf(presetId)) + 1
+  if (view === 'minute') {
+    return (presetId === CUSTOM_RANGE_ID ? MINUTE_CUSTOM_MAX_MINUTES : minuteValueOf(presetId)) / MINUTE_BUCKET_SPAN_MINUTES + 1
+  }
   return DAY_MAX_SLOTS
 }
 
@@ -113,8 +180,8 @@ const MESSAGES_ZH = {
   'rangePreset.30': '30 天',
   'rangePreset.90': '90 天',
   rangeCustom: '自定义',
-  from: '开始日期',
-  to: '结束日期',
+  from: '开始',
+  to: '结束',
   refresh: '刷新',
   loading: '正在扫描历史会话。安装插件后首次会全量回扫,数据量大时耗时较久,期间尽量减少操作以免服务变卡',
   tokens: 'Tokens 用量',
@@ -824,29 +891,33 @@ function heatLevel(tokens, max) {
   return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
 }
 
-// ChartTip 定位:锚定区装得下贴内顶(趋势图悬停区即绘图区,悬浮窗留在图表内),装不下上翻、再下翻、末了钳边界顶
+// ChartTip 定位:进入命中区时锚定指针,先放指针右下,右侧或下方越界翻对侧,仍越界钳进边界
 const TIP_GAP_PX = 8
 const TIP_MARGIN_PX = 8
+
+// 悬停锚点:指针事件取指针坐标;焦点事件无坐标,回退目标矩形中心保键盘可访问
+const pointerAt = (event) => {
+  if (event.clientX != null && event.clientY != null) return { x: event.clientX, y: event.clientY }
+  const rect = event.currentTarget.getBoundingClientRect()
+  return { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }
+}
 
 // 回合费用芯片与前置官方芯片(结束时钟)的间距
 const TURN_COST_GAP_PX = 8
 
 function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX) {
   if (!tip || tip.width <= 0 || tip.height <= 0) return null
-  if (!anchor || (anchor.left === 0 && anchor.top === 0 && anchor.right === 0 && anchor.bottom === 0)) return null
+  if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return null
   const minX = bounds.left + margin
   const minY = bounds.top + margin
-  const maxX = bounds.right - margin
-  const maxY = bounds.bottom - margin
-  const left = Math.max(minX, Math.min((anchor.left + anchor.right) / 2 - tip.width / 2, maxX - tip.width))
-  const inside = anchor.top + gap
-  const above = anchor.top - gap - tip.height
-  const below = anchor.bottom + gap
-  let top
-  if (inside + tip.height <= anchor.bottom) top = inside
-  else if (above >= minY) top = above
-  else if (below + tip.height <= maxY) top = below
-  else top = minY
+  const maxLeft = bounds.right - margin - tip.width
+  const maxTop = bounds.bottom - margin - tip.height
+  const left = anchor.x + gap + tip.width <= bounds.right - margin
+    ? anchor.x + gap
+    : Math.max(minX, Math.min(anchor.x - gap - tip.width, maxLeft))
+  const top = anchor.y + gap + tip.height <= bounds.bottom - margin
+    ? anchor.y + gap
+    : Math.max(minY, Math.min(anchor.y - gap - tip.height, maxTop))
   return { left, top }
 }
 
@@ -2105,7 +2176,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
-      const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
+      const pick = (index) => (event) => setHover({ index, anchor: pointerAt(event) })
       const clear = () => setHover(null)
       const otherEntries = hoverSlot
         ? Object.entries(hoverSlot.otherByModel ?? {}).sort((a, b) => b[1] - a[1])
@@ -2209,7 +2280,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           ? panel.getBoundingClientRect()
           : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
         const next = tipPlace(
-          anchor ? anchor.getBoundingClientRect() : null,
+          anchor,
           { width: tip.offsetWidth, height: tip.offsetHeight },
           bounds,
         )
@@ -2261,7 +2332,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const display = geom ? heatDisplayDays(days, geom.cols) : null
       const grid = display ? heatGrid(display, geom.size) : null
       const peak = display ? Math.max(1, ...display.map((slot) => slot.tokens)) : 1
-      const pick = (cell) => (event) => setHover({ ...cell, anchor: event.currentTarget })
+      const pick = (cell) => (event) => setHover({ ...cell, anchor: pointerAt(event) })
       const clear = () => setHover(null)
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
@@ -2310,7 +2381,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const displayName = (model) => (model === OTHER_MODEL ? t('other') : model)
       const pick = (model) => (event) => {
         setHover(model)
-        setTip({ model, anchor: event.currentTarget })
+        setTip({ model, anchor: pointerAt(event) })
       }
       const clear = () => {
         setHover(null)
@@ -2952,6 +3023,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const [error, setError] = useState('')
       const [hourPreset, setHourPreset] = useState(DEFAULT_HOUR_PRESET)
       const [minutePreset, setMinutePreset] = useState(DEFAULT_MINUTE_PRESET)
+      // 自定义挡 datetime 输入,时/分视图共享一对,各视图按桶粒度分别归一
+      const [pointCustomFrom, setPointCustomFrom] = useState('')
+      const [pointCustomTo, setPointCustomTo] = useState('')
       const [pointStats, setPointStats] = useState(null)
       const [pointStatus, setPointStatus] = useState('idle')
       const [fetchTick, setFetchTick] = useState(0)
@@ -3018,17 +3092,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         load()
       }, [load])
 
-      const presetId = view === 'hour' ? hourPreset : view === 'minute' ? minutePreset : null
+      const rawPreset = view === 'hour' ? hourPreset : view === 'minute' ? minutePreset : null
+      // 自定义挡输入不完整时 query 为 null:不发请求,已取数据留存缓存,输入恢复即按键命中
+      const activeQuery = view === 'day' ? null : resolvePointQuery(view, rawPreset, pointCustomFrom, pointCustomTo)
 
       useEffect(() => {
-        if (view === 'day') return
-        if (pointStatsMatches(pointStats, view, presetId)) return
-        const request = view === 'hour'
-          ? resolveHourRange(presetId, new Date())
-          : resolveMinuteRange(presetId, new Date())
+        if (!activeQuery) return
+        if (pointStatsMatches(pointStats, view, activeQuery.key)) return
         const generation = ++pointGenerationRef.current
         setPointStatus('loading')
-        requestPost(view === 'hour' ? ENDPOINTS.hours : ENDPOINTS.minutes, request).then((result) => {
+        requestPost(view === 'hour' ? ENDPOINTS.hours : ENDPOINTS.minutes, activeQuery.request).then((result) => {
           if (pointGenerationRef.current !== generation) return
           if (!result.ok) {
             setPointStatus('error')
@@ -3037,9 +3110,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           }
           setError('')
           setPointStatus('ok')
-          setPointStats({ view, preset: presetId, value: result.value })
+          setPointStats({ view, preset: activeQuery.key, value: result.value })
         })
-      }, [view, presetId, fetchTick])
+      }, [view, rawPreset, pointCustomFrom, pointCustomTo, fetchTick])
 
       const refreshPoints = useCallback(() => {
         setPointStats(null)
@@ -3059,6 +3132,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       useEffect(() => () => {
         if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
       }, [])
+
+      // 切换时/分挡位;切到自定义挡且无历史输入时预填最近窗口,即点即用
+      const selectPointPreset = (id) => {
+        if (id === CUSTOM_RANGE_ID && !pointCustomFrom && !pointCustomTo) {
+          setPointCustomFrom(formatDateTimeInput(new Date(Date.now() - POINT_CUSTOM_DEFAULT_HOURS * MS_PER_HOUR)))
+          setPointCustomTo(formatDateTimeInput(new Date()))
+        }
+        if (view === 'hour') setHourPreset(id)
+        else setMinutePreset(id)
+      }
 
       const refresh = () => {
         setError('')
@@ -3105,7 +3188,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }, [])
 
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
-      const pointView = pointStatsMatches(pointStats, view, presetId) ? pointStats.value : null
+      const pointView = activeQuery && pointStatsMatches(pointStats, view, activeQuery.key) ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
       const colorFor = useMemo(() => colorForModel(stats ? stats.models : []), [stats])
 
@@ -3113,7 +3196,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const trendSource = pointActive
         ? (pointGrouped ? { slots: pointGrouped.daily, models: pointGrouped.models, value: pointView } : null)
         : (grouped ? { slots: grouped.daily, models: grouped.models, value: stats } : null)
-      const maxSlots = pointActive ? maxSlotsFor(view, presetId) : DAY_MAX_SLOTS
+      const maxSlots = pointActive ? maxSlotsFor(view, rawPreset) : DAY_MAX_SLOTS
       const trimmedSlots = trendSource ? trimSlots(trendSource.slots, maxSlots) : null
       const notes = []
       if (trendSource && trendSource.slots.length > trimmedSlots.length) notes.push(trendLimitedText(t, view, trimmedSlots.length))
@@ -3134,13 +3217,33 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 onClick: () => setView(tab.id),
               }, viewLabel(t, tab.id)))),
             pointActive
-              ? h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
-                  (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
-                    key: id,
-                    className: cx('ud-seg-item', presetId === id && 'ud-seg-item--on'),
-                    'aria-pressed': presetId === id,
-                    onClick: () => (view === 'hour' ? setHourPreset(id) : setMinutePreset(id)),
-                  }, presetLabel(t, view, id))))
+              ? h(React.Fragment, null,
+                  h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
+                    (view === 'hour' ? HOUR_PRESETS : MINUTE_PRESETS).map((id) => h('button', {
+                      key: id,
+                      className: cx('ud-seg-item', rawPreset === id && 'ud-seg-item--on'),
+                      'aria-pressed': rawPreset === id,
+                      onClick: () => selectPointPreset(id),
+                    }, presetLabel(t, view, id))),
+                    h('button', {
+                      className: cx('ud-seg-item', rawPreset === CUSTOM_RANGE_ID && 'ud-seg-item--on'),
+                      'aria-pressed': rawPreset === CUSTOM_RANGE_ID,
+                      onClick: () => selectPointPreset(CUSTOM_RANGE_ID),
+                    }, t('rangeCustom'))),
+                  rawPreset === CUSTOM_RANGE_ID
+                    ? h('div', { className: 'ud-custom-range' },
+                        h('input', {
+                          type: 'datetime-local', className: 'ud-date-input', 'aria-label': t('from'),
+                          value: pointCustomFrom, max: pointCustomTo || undefined,
+                          onChange: (event) => setPointCustomFrom(event.target.value),
+                        }),
+                        h('span', { className: 'ud-custom-sep' }, '–'),
+                        h('input', {
+                          type: 'datetime-local', className: 'ud-date-input', 'aria-label': t('to'),
+                          value: pointCustomTo, min: pointCustomFrom || undefined, max: formatDateTimeInput(new Date()),
+                          onChange: (event) => setPointCustomTo(event.target.value),
+                        }))
+                    : null)
               : h(React.Fragment, null,
                   h('div', { className: 'ud-group', role: 'group', 'aria-label': t('range') },
                     DAY_PRESETS.map((id) => h('button', {

@@ -19,15 +19,18 @@ test('index:数据目录默认 ~/.dsh/cron-board,env 可覆盖', () => {
 })
 
 test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () => {
-  // Given webServer 桩:收集注册路由(sessionController 属性桩满足 inject 门控后环境)
+  // Given webServer 桩:收集注册路由(sessionController 经 get 桩供给,对齐 ctx.get 探测路径)
   const routes = new Map()
+  const sessionController = { create: async () => ({ sessionId: 's-x' }), prompt: async () => ({ accepted: true }) }
   const ctx = {
     effect(fn) {
       fn()
     },
     inject() {},
-    sessionController: { create: async () => ({ sessionId: 's-x' }), prompt: async () => ({ accepted: true }) },
-    get: () => undefined,
+    get(name) {
+      if (name === 'sessionController') return sessionController
+      return undefined
+    },
     webServer: {
       register(route) {
         routes.set(route.path, route.handler)
@@ -114,10 +117,39 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   return { ctx, routes, registered, intervals, settingsService, sessions }
 }
 
-test('index:inject 声明 webServer+sessionController(cordis 门控整体禁用的唯一形态)', async () => {
-  // Given 宿主会话服务走 cordis 硬依赖门控:缺失时 fiber 不激活,apply 不执行
-  // Then 静态锁定 inject 声明(修复 mce 同款「apply 内同步探测误判缺失」事故形态)
-  assert.deepEqual(mod.inject, ['webServer', 'sessionController'])
+test('index:inject 仅声明 webServer(sessionController 走 apply 内探测)', async () => {
+  // Given sessionController 在旧版宿主(0.1.1-rc.2)不存在,inject 声明会让 fiber 永久
+  // pending,旧版 boot 对 pending 条目抛错杀掉整个进程;host 服务同步注册,探测无竞态
+  // Then 静态锁定 inject 声明
+  assert.deepEqual(mod.inject, ['webServer'])
+})
+
+test('index:sessionController 缺失时干净禁用(不注册路由与设置)', async () => {
+  // Given 无 sessionController 的宿主上下文
+  const routes = new Map()
+  const registered = []
+  const warnings = []
+  const ctx = {
+    effect(fn) {
+      fn()
+    },
+    inject() {},
+    logger: { warn: (line) => warnings.push(line) },
+    get: () => undefined,
+    webServer: {
+      register(route) {
+        routes.set(route.path, route.handler)
+        return () => {}
+      },
+    },
+  }
+  // When apply
+  apply(ctx)
+  // Then 无路由注册、无设置注册,且打日志说明原因
+  assert.equal(routes.size, 0)
+  assert.deepEqual(registered, [])
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('sessionController'))
 })
 
 test('index:settings 注册 cron-board 命名空间且 timer 承载默认周期 tick', async () => {

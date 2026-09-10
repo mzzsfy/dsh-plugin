@@ -181,6 +181,8 @@ export async function createStore({ dir }) {
   return {
     envs,
     jobs,
+    // 写链排空:等待已提交 mutate 全部结束(不报告写失败);测试清理数据目录前调用以缩小与删除的竞态面
+    flush: () => link.chain.catch(() => {}),
     runs: {
       get rows() {
         return runs.rows

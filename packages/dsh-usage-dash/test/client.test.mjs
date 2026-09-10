@@ -75,6 +75,7 @@ const {
   otherDetailItems,
   parseEnvelope,
   partitionGroupOf,
+  pointerAt,
   providerOf,
   rateAxisTicks,
   removeRulesAt,
@@ -82,6 +83,11 @@ const {
   resolveDayRange,
   resolveHourRange,
   resolveMinuteRange,
+  resolveHourCustomRange,
+  resolveMinuteCustomRange,
+  resolvePointQuery,
+  formatDateTimeInput,
+  parseLocalDateTime,
   shortDay,
   smoothPath,
   tipPlace,
@@ -175,6 +181,112 @@ test('pointStats 缓存命中须视图与挡位双匹配', () => {
   assert.equal(pointStatsMatches(cached, 'minute', '24h'), false)
   assert.equal(pointStatsMatches(cached, 'hour', '3d'), false)
   assert.equal(pointStatsMatches(null, 'hour', '24h'), false)
+})
+
+// —— 时/分自定义时间范围:归一语义与预设挡一致(小时 floor 整点桶,分钟 from 对齐 10 分钟桶、to 保原分钟) ——
+
+const CUSTOM_FROM = '2026-03-14T09:45'
+const CUSTOM_TO = '2026-03-15T14:10'
+
+test('hour 自定义范围两端 floor 到所在小时桶', () => {
+  // Given datetime 输入含分钟偏移 When 解析 Then 两端均取所在小时桶起点(闭区间)
+  assert.deepEqual(resolveHourCustomRange(CUSTOM_FROM, CUSTOM_TO), { from: '2026-03-14T09', to: '2026-03-15T14' })
+  assert.deepEqual(resolveHourCustomRange('2026-03-14T09:00', '2026-03-15T14:59'), { from: '2026-03-14T09', to: '2026-03-15T14' })
+})
+
+test('hour 自定义跨度超保留期钳起点,临界窗经 floor 与原窗输出等价', () => {
+  // Given 跨度 16 天 When 解析 Then 起点钳到终点前 15 天整点;15 天余零头的窗钳后 floor 输出不变
+  assert.deepEqual(
+    resolveHourCustomRange('2026-02-27T00:00', '2026-03-15T14:10'),
+    { from: '2026-02-28T14', to: '2026-03-15T14' },
+  )
+  assert.deepEqual(
+    resolveHourCustomRange('2026-02-28T14:00', '2026-03-15T14:10'),
+    { from: '2026-02-28T14', to: '2026-03-15T14' },
+  )
+})
+
+test('hour 自定义非法输入返回 null', () => {
+  // Given 空值/垃圾串/from 晚于 to When 解析 Then 恒 null,不发请求
+  assert.equal(resolveHourCustomRange('', CUSTOM_TO), null)
+  assert.equal(resolveHourCustomRange(CUSTOM_FROM, ''), null)
+  assert.equal(resolveHourCustomRange('junk', CUSTOM_TO), null)
+  assert.equal(resolveHourCustomRange('2026-13-40T09:00', CUSTOM_TO), null)
+  assert.equal(resolveHourCustomRange(CUSTOM_TO, CUSTOM_FROM), null)
+})
+
+test('parseLocalDateTime 拒绝数字分量回卷的日历非法值', () => {
+  // Given 超界分量(13 月/2 月 30 日/25 时)在 Date 构造下静默回卷 When 解析 Then 逐分量回读拦截为 null
+  assert.equal(parseLocalDateTime('2026-13-01T00:00'), null)
+  assert.equal(parseLocalDateTime('2026-02-30T10:00'), null)
+  assert.equal(parseLocalDateTime('2026-03-14T25:00'), null)
+  assert.deepEqual(parseLocalDateTime('2026-03-14T09:45'), new Date(2026, 2, 14, 9, 45))
+})
+
+test('hour 自定义拒绝回卷后仍保序的非法日历输入', () => {
+  // Given 13 月回卷为次年 1 月且整体仍早于 to When 解析 Then 恒 null,不静默改写查询时段
+  assert.equal(resolveHourCustomRange('2026-13-01T00:00', '2027-06-01T00:00'), null)
+})
+
+test('minute 自定义 from 对齐 10 分钟桶,to 保持原始分钟', () => {
+  // Given from 含非对齐分钟 When 解析 Then from floor 到桶边界,to 原值保留(闭区间上界)
+  assert.deepEqual(resolveMinuteCustomRange(CUSTOM_FROM, CUSTOM_TO), { from: '2026-03-14T09:40', to: '2026-03-15T14:10' })
+  assert.deepEqual(resolveMinuteCustomRange('2026-03-14T09:40', '2026-03-15T14:17'), { from: '2026-03-14T09:40', to: '2026-03-15T14:17' })
+})
+
+test('minute 自定义跨度超保留期钳起点', () => {
+  // Given 跨度 8 天 When 解析 Then 起点钳到终点前 7 天的 10 分钟桶边界
+  assert.deepEqual(
+    resolveMinuteCustomRange('2026-03-06T00:00', '2026-03-15T14:10'),
+    { from: '2026-03-08T14:10', to: '2026-03-15T14:10' },
+  )
+})
+
+test('minute 自定义非法输入返回 null', () => {
+  assert.equal(resolveMinuteCustomRange('', CUSTOM_TO), null)
+  assert.equal(resolveMinuteCustomRange('junk', CUSTOM_TO), null)
+  assert.equal(resolveMinuteCustomRange(CUSTOM_TO, CUSTOM_FROM), null)
+})
+
+test('resolvePointQuery 预设挡返回挡位键与滚动窗口请求', () => {
+  // Given 时/分预设挡 When 解析查询 Then 键为挡位 id,请求与既有 resolve 同构
+  const hour = resolvePointQuery('hour', '24h', '', '', NOW)
+  assert.equal(hour.key, '24h')
+  assert.deepEqual(hour.request, resolveHourRange('24h', NOW))
+  const minute = resolvePointQuery('minute', '3h', '', '', NOW)
+  assert.equal(minute.key, '3h')
+  assert.deepEqual(minute.request, resolveMinuteRange('3h', NOW))
+})
+
+test('resolvePointQuery 自定义挡键含归一范围且随范围变化', () => {
+  // Given 同视图同挡不同范围 When 解析查询 Then 键互异;同范围键稳定(缓存可命中)
+  const first = resolvePointQuery('hour', 'custom', CUSTOM_FROM, CUSTOM_TO, NOW)
+  assert.deepEqual(first.request, { from: '2026-03-14T09', to: '2026-03-15T14' })
+  assert.equal(first.key, 'custom:2026-03-14T09:2026-03-15T14')
+  const again = resolvePointQuery('hour', 'custom', CUSTOM_FROM, CUSTOM_TO, NOW)
+  assert.equal(again.key, first.key)
+  const shifted = resolvePointQuery('hour', 'custom', '2026-03-14T10:45', CUSTOM_TO, NOW)
+  assert.notEqual(shifted.key, first.key)
+  const minute = resolvePointQuery('minute', 'custom', CUSTOM_FROM, CUSTOM_TO, NOW)
+  assert.deepEqual(minute.request, { from: '2026-03-14T09:40', to: '2026-03-15T14:10' })
+  assert.notEqual(minute.key, first.key)
+})
+
+test('resolvePointQuery 自定义输入不完整返回 null', () => {
+  // Given 任一端为空 When 解析查询 Then null,面板不发请求不误清缓存
+  assert.equal(resolvePointQuery('hour', 'custom', '', CUSTOM_TO, NOW), null)
+  assert.equal(resolvePointQuery('minute', 'custom', CUSTOM_FROM, '', NOW), null)
+})
+
+test('maxSlotsFor custom 挡取保留期桶数上限', () => {
+  // Given 自定义挡受保留期钳制 When 取渲染上限 Then 小时为 15 天小时桶数,分钟为 7 天 10 分钟桶数
+  assert.equal(maxSlotsFor('hour', 'custom'), 15 * 24 + 1)
+  assert.equal(maxSlotsFor('minute', 'custom'), (7 * 24 * 60) / 10 + 1)
+})
+
+test('formatDateTimeInput 产出 datetime-local 分钟粒度值', () => {
+  assert.equal(formatDateTimeInput(new Date(2026, 2, 15, 9, 5)), '2026-03-15T09:05')
+  assert.equal(formatDateTimeInput(NOW), '2026-03-15T14:30')
 })
 
 test('每视图渲染上限等于闭区间桶数', () => {
@@ -476,50 +588,57 @@ test('heatLevel 零值为空档其余按峰值四分位', () => {
   assert.equal(heatLevel(1, 1), 5)
 })
 
-const TIP_ANCHOR = { left: 100, top: 100, right: 140, bottom: 114 }
+const TIP_ANCHOR = { x: 100, y: 100 }
 const TIP_SIZE = { width: 80, height: 40 }
 const TIP_BOUNDS = { left: 0, top: 0, right: 800, bottom: 600 }
 
-test('tipPlace 小锚点默认翻上方水平居中', () => {
-  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 80, top: 52 })
+test('tipPlace 指针右下空位放右下', () => {
+  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 108, top: 108 })
 })
 
-test('tipPlace 锚定区装得下提示框贴内顶', () => {
-  const anchor = { left: 100, top: 100, right: 240, bottom: 460 }
-  assert.deepEqual(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS), { left: 130, top: 108 })
+test('tipPlace 右侧越界翻左侧', () => {
+  assert.deepEqual(tipPlace({ x: 730, y: 100 }, TIP_SIZE, TIP_BOUNDS), { left: 642, top: 108 })
 })
 
-test('tipPlace 上方不足翻下方', () => {
-  const anchor = { left: 100, top: 20, right: 140, bottom: 60 }
-  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).top, 68)
+test('tipPlace 下方越界翻上方', () => {
+  assert.deepEqual(tipPlace({ x: 100, y: 570 }, TIP_SIZE, TIP_BOUNDS), { left: 108, top: 522 })
 })
 
-test('tipPlace 候选边界等号归属', () => {
-  assert.deepEqual(tipPlace({ left: 100, top: 100, right: 240, bottom: 148 }, TIP_SIZE, TIP_BOUNDS), { left: 130, top: 108 })
-  assert.equal(tipPlace({ left: 100, top: 56, right: 140, bottom: 96 }, TIP_SIZE, TIP_BOUNDS).top, 8)
-  assert.equal(tipPlace({ left: 100, top: 8, right: 140, bottom: 48 }, TIP_SIZE, { left: 0, top: 0, right: 800, bottom: 104 }).top, 56)
+test('tipPlace 右下均越界双翻', () => {
+  assert.deepEqual(tipPlace({ x: 730, y: 570 }, TIP_SIZE, TIP_BOUNDS), { left: 642, top: 522 })
 })
 
-test('tipPlace 下方放不下翻转上方', () => {
-  const anchor = { ...TIP_ANCHOR, top: 540, bottom: 580 }
-  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).top, 492)
+test('tipPlace 双翻后仍越界钳进边界', () => {
+  assert.deepEqual(tipPlace({ x: 798, y: 598 }, TIP_SIZE, TIP_BOUNDS), { left: 710, top: 550 })
 })
 
-test('tipPlace 两侧均放不下钳到边界顶', () => {
-  const bounds = { left: 0, top: 0, right: 800, bottom: 50 }
-  const anchor = { left: 100, top: 20, right: 140, bottom: 50 }
-  assert.equal(tipPlace(anchor, TIP_SIZE, bounds).top, 8)
+test('tipPlace 恰贴右缘等号归属放右侧', () => {
+  assert.deepEqual(tipPlace({ x: 704, y: 100 }, TIP_SIZE, TIP_BOUNDS), { left: 712, top: 108 })
 })
 
-test('tipPlace 水平越界钳到边界左缘', () => {
-  const anchor = { left: 2, top: 100, right: 10, bottom: 114 }
-  assert.equal(tipPlace(anchor, TIP_SIZE, TIP_BOUNDS).left, 8)
+test('tipPlace 左上角指针放右下不翻转', () => {
+  assert.deepEqual(tipPlace({ x: 2, y: 2 }, TIP_SIZE, TIP_BOUNDS), { left: 10, top: 10 })
 })
 
-test('tipPlace 零尺寸或全零锚定矩形返回隐藏', () => {
+test('tipPlace 提示框宽于边界钳贴左缘', () => {
+  assert.equal(tipPlace({ x: 400, y: 100 }, { width: 900, height: 40 }, TIP_BOUNDS).left, 8)
+})
+
+test('pointerAt 指针事件取指针坐标', () => {
+  assert.deepEqual(pointerAt({ clientX: 12, clientY: 34 }), { x: 12, y: 34 })
+})
+
+test('pointerAt 焦点事件回退目标矩形中心', () => {
+  const event = {
+    currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 20, right: 30, bottom: 60 }) },
+  }
+  assert.deepEqual(pointerAt(event), { x: 20, y: 40 })
+})
+
+test('tipPlace 零尺寸或非法锚点返回隐藏', () => {
   assert.equal(tipPlace(TIP_ANCHOR, { width: 0, height: 0 }, TIP_BOUNDS), null)
-  assert.equal(tipPlace({ left: 0, top: 0, right: 0, bottom: 0 }, TIP_SIZE, TIP_BOUNDS), null)
   assert.equal(tipPlace(null, TIP_SIZE, TIP_BOUNDS), null)
+  assert.equal(tipPlace({ x: Number.NaN, y: 100 }, TIP_SIZE, TIP_BOUNDS), null)
 })
 
 // —— S8 命中率曲线 ——

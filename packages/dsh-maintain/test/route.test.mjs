@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
+import { apply, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
 import { rmSync, readFileSync } from 'node:fs'
 
 // 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
@@ -127,6 +127,15 @@ async function call(routes, path, req) {
 
 const post = (routes, path, body, headers) => call(routes, path, makeReq({ method: 'POST', body, headers }))
 const get = (routes, path) => call(routes, path, makeReq({ method: 'GET' }))
+
+// 排空微任务链(setImmediate 为宏任务,先于其执行的全部微任务此后必已完成)
+const drainMicrotasks = () => new Promise((resolve) => setImmediate(resolve))
+// 真实时间等待:mock timers 域内 setTimeout 不再真实计时,以 setImmediate 自旋让出事件循环
+const realSleep = (ms) => new Promise((resolve) => {
+  const start = Date.now()
+  const spin = () => { if (Date.now() - start >= ms) resolve(); else setImmediate(spin) }
+  setImmediate(spin)
+})
 
 test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
   const { ctx, routes } = makeCtx()
@@ -302,7 +311,7 @@ test('upgrade:运行版本已是通道最新 409 拒绝(防降级),unknown 放�
     const refreshed = await post(routes, '/api/maintain/refresh')
     assert.equal(refreshed.status, 200)
     assert.equal(refreshed.payload.verdict, 'up-to-date', '前置:注入运行版本应高于 0.0.1 假目标')
-    const denied = await post(routes, '/api/maintain/upgrade')
+    const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
     assert.equal(denied.status, 409)
     assert.match(denied.payload.error, /已是通道最新版/)
     assert.equal(store.upgradeCommandTemplate, 'node -e "process.exit(0)"', '拒绝路径不得触发升级')
@@ -328,7 +337,7 @@ test('upgrade:verdict unknown 放行(tags 未就绪不得 409 误拒)', async ()
     assert.ok(snapshot, '启动检查 5 秒内未完成')
     assert.equal(snapshot.tags, null, '前置:registry 不可达,tags 未就绪')
     assert.equal(snapshot.verdict, 'unknown', '前置:verdict 应为 unknown')
-    const allowed = await post(routes, '/api/maintain/upgrade')
+    const allowed = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
     assert.equal(allowed.status, 200, 'verdict unknown 必须放行,不得 409 误拒')
     assert.equal(allowed.payload.upgrade.running, true)
     // 等假命令落定:防残留升级锁毒化后续用例
@@ -357,11 +366,11 @@ test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', 
   const { ctx, routes } = makeCtx({ settingsStore: store })
   apply(ctx)
   const baseline = await get(routes, '/api/maintain/status').then((r) => r.payload)
-  const first = await post(routes, '/api/maintain/upgrade')
+  const first = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(first.status, 200)
   assert.equal(first.payload.upgrade.running, true)
   assert.equal(first.payload.upgradeLockHeld, true, '升级期间锁文件持有效力')
-  const second = await post(routes, '/api/maintain/upgrade')
+  const second = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(second.status, 409)
   // 等挂起命令自然退出(轮询而非固定 sleep,兼做落定状态显式断言)
   let settled = null
@@ -377,47 +386,55 @@ test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', 
   assert.ok(settled.checkedAt !== null)
 })
 
-test('upgrade:落定后复读磁盘版本,假命令未升级版本时标 stale', async () => {
+test('upgrade:托管+勾选自动重启,命令成功即调度关机且落定钩子零网络零读盘', async (t) => {
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
   const exits = []
-  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-  apply(ctx)
-  const first = await post(routes, '/api/maintain/upgrade')
-  assert.equal(first.status, 200)
-  let settled = null
-  for (let i = 0; i < 50 && settled === null; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+  let fetchCalls = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (...args) => {
+    fetchCalls += 1
+    return originalFetch(...args)
   }
-  assert.ok(settled, '升级应在假命令退出后落定')
-  assert.equal(settled.upgrade.last.ok, true)
-  assert.ok('previousVersion' in settled.upgrade.last, '触发前磁盘版本快照必须进 status')
-  assert.equal(settled.upgrade.last.installedVersion, settled.upgrade.last.previousVersion, '假命令不改磁盘,复读版本应与快照一致')
-  assert.equal(settled.upgrade.last.stale, true, '版本未前进必须标 stale(镜像滞后/静默未升)')
-  assert.ok(typeof settled.upgrade.last.reason === 'string' && settled.upgrade.last.reason.length > 0)
-  // stale 抑制自动重启:不调度退出、不标手动指引;重启互斥同步释放
-  assert.equal(settled.autoRestartScheduled, false)
-  assert.equal(settled.upgrade.last.requiresManualRestart, undefined)
-  assert.ok(typeof settled.runtimeEnv === 'object' && typeof settled.runtimeEnv.kind === 'string', 'runtimeEnv 必须进 status')
-  const restart = await post(routes, '/api/maintain/restart')
-  assert.equal(restart.status, 200, 'stale 落定后重启互斥必须已释放')
-})
-
-test('upgrade:stale 落定不调度自动重启(宿主退出零触发)', async () => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const exits = []
-  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-  apply(ctx)
-  await post(routes, '/api/maintain/upgrade')
-  for (let i = 0; i < 50; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) break
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
+    apply(ctx)
+    // 等启动检查落定,固定网络请求基线(mock timers 域内以 realSleep 自旋让出事件循环)
+    let baseline = null
+    for (let waited = 0; waited < 5000 && baseline === null; waited += 25) {
+      const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (poll && poll.checkedAt !== null) baseline = fetchCalls
+      else await realSleep(25)
+    }
+    assert.ok(baseline !== null, '启动检查 5 秒内未完成')
+    const first = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+    assert.equal(first.status, 200)
+    let settled = null
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(30)
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.upgrade.last.ok, true)
+    // 关机路径零复读:版本复读属升级后磁盘读取,是明确的故障源,砍掉
+    assert.equal(settled.upgrade.last.installedVersion, null, '关机路径禁止复读磁盘版本')
+    assert.equal(settled.upgrade.last.stale, null, '关机路径无 stale 判定')
+    assert.equal(settled.upgrade.last.requiresManualRestart, undefined)
+    assert.equal(settled.autoRestartScheduled, true, '命令成功即调度关机(stale 不再抑制)')
+    assert.equal(settled.upgradeLockHeld, false, '升级结束后锁文件应删除')
+    assert.ok(typeof settled.runtimeEnv === 'object' && typeof settled.runtimeEnv.kind === 'string', 'runtimeEnv 必须进 status')
+    // 落定钩子零网络:观察窗口内 fetch 计数不得增长(runCheck 已随关机路径移除)
+    await realSleep(300)
+    assert.equal(fetchCalls, baseline, '落定钩子禁止网络请求')
+    // 关机动作与确认重启同源:延迟窗口后 exit(0),窗口内不得提前
+    assert.deepEqual(exits, [], '延迟窗口内不得提前退出')
+    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [0], '延迟窗口过后必须调度宿主退出')
+  } finally {
+    globalThis.fetch = originalFetch
+    rmSync(UPGRADE_LOCK_PATH, { force: true })
   }
-  // 观察窗口覆盖自动重启延迟:若误调度,延迟窗口内 exit 会被调用
-  await new Promise((resolve) => setTimeout(resolve, 200))
-  assert.deepEqual(exits, [], 'stale 时禁止调度任何宿主退出')
 })
 
 test('restart:升级进行中 409 拒绝且不调度退出', async () => {
@@ -425,7 +442,7 @@ test('restart:升级进行中 409 拒绝且不调度退出', async () => {
   const exits = []
   const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
   apply(ctx)
-  const upgrade = await post(routes, '/api/maintain/upgrade')
+  const upgrade = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(upgrade.status, 200)
   const denied = await post(routes, '/api/maintain/restart')
   assert.equal(denied.status, 409)
@@ -447,11 +464,48 @@ test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
   apply(ctx)
   const restart = await post(routes, '/api/maintain/restart')
   assert.equal(restart.status, 200)
-  const denied = await post(routes, '/api/maintain/upgrade')
+  const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /重启已调度/)
   t.mock.timers.tick(RESTART_DELAY_MS + 1)
   assert.deepEqual(exits, [0])
+})
+
+test('upgrade:重启调度窗口内 refresh 409,registry-base 保存但不发起检查', async (t) => {
+  // 关机延迟窗口内网络请求与磁盘读取都是半写状态风险:refresh 全拒,registry-base 只落盘
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const store = { registryBase: 'https://registry.npmjs.org' }
+  let fetchCalls = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (...args) => {
+    fetchCalls += 1
+    return originalFetch(...args)
+  }
+  try {
+    const exits = []
+    const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
+    apply(ctx)
+    let baseline = null
+    for (let waited = 0; waited < 5000 && baseline === null; waited += 25) {
+      const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (poll && poll.checkedAt !== null) baseline = fetchCalls
+      else await realSleep(25)
+    }
+    assert.ok(baseline !== null, '启动检查 5 秒内未完成')
+    const restart = await post(routes, '/api/maintain/restart')
+    assert.equal(restart.status, 200)
+    const refresh = await post(routes, '/api/maintain/refresh')
+    assert.equal(refresh.status, 409, '关机窗口内检查更新必须拒绝')
+    const saved = await post(routes, '/api/maintain/registry-base', { base: 'https://mirror.example.org' })
+    assert.equal(saved.status, 200, '镜像地址保存照常落盘')
+    assert.equal(store.registryBase, 'https://mirror.example.org')
+    assert.equal(saved.payload.registryBase, 'https://mirror.example.org', 'status 回显新地址')
+    assert.equal(fetchCalls, baseline, '关机窗口内不得发起任何网络检查')
+    t.mock.timers.tick(RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [0])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('status:快照携带 bootAt 实例代际', async () => {
@@ -493,6 +547,103 @@ test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {
   const huge = await post(routes, '/api/maintain/poll-interval', { seconds: 1e308 })
   assert.equal(huge.status, 400)
   assert.equal(store.pollIntervalSec, undefined, '超上界值不得落盘')
+})
+
+test('upgrade:未勾选自动重启,升级成功落定继续运行并标 stale', async (t) => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const exits = []
+  const { ctx, routes } = makeCtx({
+    settingsStore: store,
+    appExit: (code) => exits.push(code),
+    // 探针恒读旧版:模拟假命令不改磁盘,复读版本与触发前快照一致即 stale
+    services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  apply(ctx)
+  // 排空启动期微任务链,探针读序此后稳定
+  await drainMicrotasks()
+  const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: false })
+  assert.equal(trigger.status, 200)
+  let settled = null
+  try {
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(30)
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.upgrade.last.ok, true)
+    // 假命令不改磁盘,复读版本与触发前快照一致 → stale
+    assert.equal(settled.upgrade.last.stale, true, '继续运行路径必须复读并标注 stale')
+    assert.ok(typeof settled.upgrade.last.reason === 'string' && settled.upgrade.last.reason.length > 0, 'stale 必须带原因')
+    assert.equal(settled.autoRestartScheduled, false, '未勾选不得置调度标记')
+    assert.equal(settled.upgrade.last.requiresManualRestart, undefined, '托管环境未勾选不标手动指引')
+    // 推过完整调度延迟:若误调度,延迟窗口内 exit 必被调用
+    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [], '未勾选自动重启时禁止调度任何宿主退出')
+  } finally {
+    rmSync(UPGRADE_LOCK_PATH, { force: true })
+  }
+})
+
+test('upgrade:勾选自动重启+落定,延迟窗口后调度宿主退出', async (t) => {
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const exits = []
+  const { ctx, routes } = makeCtx({
+    settingsStore: store,
+    appExit: (code) => exits.push(code),
+    // 关机路径零读盘:探针返回值不影响断言,恒读旧版即可
+    services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  apply(ctx)
+  await drainMicrotasks()
+  const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+  assert.equal(trigger.status, 200)
+  let settled = null
+  try {
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(30)
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.upgrade.last.ok, true)
+    assert.equal(settled.upgrade.last.stale, null, '关机路径零复读,stale 不再判定')
+    // 落定可见与调度置位之间隔 runtimeEnvReady 的 await:await 一次 status 让微任务链走完再断言
+    const scheduled = await get(routes, '/api/maintain/status').then((r) => r.payload)
+    assert.equal(scheduled.autoRestartScheduled, true, '勾选自动重启时升级成功必须调度')
+    assert.deepEqual(exits, [], '调度延迟窗口内不得提前退出')
+    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [0], '延迟窗口过后必须调度宿主退出')
+  } finally {
+    rmSync(UPGRADE_LOCK_PATH, { force: true })
+  }
+})
+
+test('upgrade:autoRestart 缺失或非 boolean 一律 400', async () => {
+  // 假命令兜底:本用例期待 400,但若校验意外放行,真实默认模板会当场触发 npm install
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  apply(ctx)
+  const missing = await post(routes, '/api/maintain/upgrade')
+  assert.equal(missing.status, 400, '缺失 autoRestart 必须拒绝,防静默翻转关机行为')
+  const stringInput = await post(routes, '/api/maintain/upgrade', { autoRestart: 'true' })
+  assert.equal(stringInput.status, 400, '字符串宽转必须拒绝')
+  const status = await get(routes, '/api/maintain/status').then((r) => r.payload)
+  assert.equal(status.upgrade.running, false, '非法输入不得触发升级')
+  assert.equal(status.upgrade.last, null, '非法输入不得产生升级记录')
+})
+
+test('upgrade:body 校验先于门控,门控命中时非法 body 仍 400', async (t) => {
+  // 锁定 handler 顺序:readBody 在全部门控之前,门控到置位之间零 await
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: () => {} })
+  apply(ctx)
+  await post(routes, '/api/maintain/restart')
+  const denied = await post(routes, '/api/maintain/upgrade')
+  assert.equal(denied.status, 400, 'body 非法时即使门控(重启已调度)命中也必须 400')
 })
 
 test('registry-base:带 query 或 hash 的输入 400', async () => {
@@ -596,7 +747,7 @@ test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {
   const terminals = { list: () => [] }
   const { ctx, routes } = makeCtx({ settingsStore: store, services: { agents, jobs, terminals } })
   apply(ctx)
-  const denied = await post(routes, '/api/maintain/upgrade')
+  const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /活跃工作/)
   assert.equal(denied.payload.items.agents, 1)
@@ -649,7 +800,7 @@ test('自动重启接线:落定链消费运行环境并分流调度与手动指�
   assert.ok(settle, '落定链缺少 judgeAutoRestart 判定')
   assert.match(settle[1], /runtimeKind: runtimeEnv\.kind/, '落定判定必须消费运行环境检测结果')
   assert.match(source, /if \(decision\.requiresManualRestart === true\) last\.requiresManualRestart = true/, '手动直跑指引必须回写 last')
-  assert.match(source, /if \(decision\.schedule === true\) \{[\s\S]*?last\.autoRestartScheduled = true[\s\S]*?scheduleAutoRestart\(\)/, '调度链必须置位标记并调用 scheduleAutoRestart')
+  assert.match(source, /if \(decision\.schedule === true\) \{[\s\S]*?last\.autoRestartScheduled = true[\s\S]*?scheduleHostExit\(\{ detail: 'reason=upgrade-ok', autoRestart: true/, '调度链必须置位标记并经统一退出入口关机')
 })
 
 test('upgrade:env 注入手动直跑环境,落定链保守分流零退出', async () => {
@@ -659,7 +810,7 @@ test('upgrade:env 注入手动直跑环境,落定链保守分流零退出', asyn
     const exits = []
     const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
     apply(ctx)
-    await post(routes, '/api/maintain/upgrade')
+    await post(routes, '/api/maintain/upgrade', { autoRestart: true })
     let settled = null
     for (let i = 0; i < 50 && settled === null; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100))
@@ -670,8 +821,8 @@ test('upgrade:env 注入手动直跑环境,落定链保守分流零退出', asyn
     assert.equal(settled.runtimeEnv.kind, 'manual-start-likely', 'env 注入必须经 apply 检测进 status')
     assert.equal(settled.autoRestartScheduled, false, '手动直跑禁止调度自动重启')
     assert.deepEqual(exits, [], '手动直跑禁止任何宿主退出')
-    // stale 优先:版本未前进时不引导手动重启(重启无意义)
-    assert.equal(settled.upgrade.last.requiresManualRestart, undefined)
+    // 手动直跑标环境指引:命令成功即提示手动重启(指引不再被 stale 抑制)
+    assert.equal(settled.upgrade.last.requiresManualRestart, true, '手动直跑必须标手动重启指引')
   } finally {
     delete process.env.DSH_MAINTAIN_RUNTIME_ENV
   }
@@ -687,7 +838,7 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
     const agents = { list: () => [{ id: 'a1', status: 'running' }] }
     const { ctx, routes } = makeCtx({ services: { agents }, appExit: () => {} })
     apply(ctx)
-    await post(routes, '/api/maintain/upgrade')
+    await post(routes, '/api/maintain/upgrade', { autoRestart: true })
     assert.equal(warns.some((text) => text.includes('audit endpoint=upgrade outcome=rejected reason=active-work')), true, '门控拒绝须留审计行')
     await post(routes, '/api/maintain/restart')
     assert.equal(warns.some((text) => text.includes('audit endpoint=restart outcome=rejected reason=active-work')), true, '重启门控拒绝须留审计行')
@@ -702,7 +853,7 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   console.warn = (text) => plainWarns.push(String(text))
   try {
     apply(plainCtx.ctx)
-    await post(plainCtx.routes, '/api/maintain/upgrade')
+    await post(plainCtx.routes, '/api/maintain/upgrade', { autoRestart: true })
     for (let i = 0; i < 50; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100))
       const status = await get(plainCtx.routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)

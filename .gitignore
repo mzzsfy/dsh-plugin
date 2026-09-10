@@ -11,9 +11,6 @@ node_modules/
 *.log
 package-lock.json
 
-# rs 运行时缓存
-.rs-tui/
-
 .worktrees/
-.evo/
 /docs
+/.dsh-versions

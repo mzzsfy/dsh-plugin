@@ -77,9 +77,17 @@ export function missingHostExports(dshLlm) {
  *   静态 import 命名导出缺失即加载崩溃,违反干净禁用规约)
  */
 export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai')) {
-  // 宿主兼容探测:HOST_REQUIRED_EXPORTS 为 dsh 0.1.2 引入的 dsh-llm 导出,
-  // 静态 import 命名导出缺失即加载崩溃,故动态探测;
-  // 旧本体缺失时禁用插件,不注册 adapter 与 settings 节,boot 保持干净。
+  // 宿主兼容探测,两项独立:
+  // 1) settings 服务面:installSection 为 0.1.2-alpha.2+ 引入(与 peerDependencies
+  //    对齐);旧宿主缺失即禁用。此探测直接读运行宿主注入的服务对象,不受插件
+  //    解析链影响——import 解析链会命中 dev 工作副本仓库根的宿主包副本,与运行
+  //    宿主版本脱钩,不能作为旧宿主判据(rc.2 实测教训)。
+  // 2) dsh-llm 导出:HOST_REQUIRED_EXPORTS 为 dsh 0.1.2 引入,动态探测防静态
+  //    import 命名导出缺失即加载崩溃;旧本体缺失时同样禁用,boot 保持干净。
+  if (typeof ctx.settings?.installSection !== 'function') {
+    ctx.logger.warn('llm-pi-gateway: 宿主 settings 服务缺少 installSection(需要 dsh 本体 0.1.2+),插件禁用')
+    return undefined
+  }
   const dshLlm = await import('@deepseek-ai/dsh-llm')
   const missing = missingHostExports(dshLlm)
   if (missing.length > 0) {

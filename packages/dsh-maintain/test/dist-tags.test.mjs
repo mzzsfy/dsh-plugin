@@ -191,6 +191,42 @@ test('场景:全部途径失败返回 null 不抛错', async () => {
   assert.equal(version, null)
 })
 
+test('场景:运行宿主候选(argv1 推导)优先于全局布局', async () => {
+  // 多副本共存:全局是 0.1.5,实际运行的是副本树内 0.1.1-rc.2,运行版本必须取 argv1 推导的包根
+  const files = {
+    'C:\\deploy\\.dsh-versions\\0.1.1-rc.2\\node_modules\\@deepseek-ai\\dsh\\package.json': JSON.stringify({ version: '0.1.1-rc.2' }),
+    'C:\\nvm\\v24\\node_modules\\@deepseek-ai\\dsh\\package.json': JSON.stringify({ version: '0.1.5-rc.1' }),
+  }
+  const version = await resolveHostVersion({
+    execPath: 'C:\\nvm\\v24\\node.exe',
+    platform: 'win32',
+    argv1: 'C:\\deploy\\.dsh-versions\\0.1.1-rc.2\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js',
+    readFileImpl: async (path) => {
+      if (!Object.prototype.hasOwnProperty.call(files, path)) throw new Error('ENOENT')
+      return files[path]
+    },
+    resolveImpl: () => { throw new Error('MODULE_NOT_FOUND') },
+  })
+  assert.equal(version, '0.1.1-rc.2')
+})
+
+test('场景:argv1 缺失或不可读时回退全局布局候选', async () => {
+  const files = {
+    '/prefix/lib/node_modules/@deepseek-ai/dsh/package.json': JSON.stringify({ version: '1.0.0' }),
+  }
+  const readFileFor = (files) => async (path) => {
+    if (!Object.prototype.hasOwnProperty.call(files, path)) throw new Error('ENOENT')
+    return files[path]
+  }
+  const common = { execPath: '/prefix/bin/node', platform: 'linux', resolveImpl: () => { throw new Error('MODULE_NOT_FOUND') } }
+  // argv1 为空
+  const v1 = await resolveHostVersion({ ...common, argv1: undefined, readFileImpl: readFileFor(files) })
+  assert.equal(v1, '1.0.0')
+  // argv1 指向的包根不可读,回退
+  const v2 = await resolveHostVersion({ ...common, argv1: '/nowhere/lib/bin.js', readFileImpl: readFileFor(files) })
+  assert.equal(v2, '1.0.0')
+})
+
 test('场景:候选文件可读但 version 非法时静默换下一候选', async () => {
   const files = {
     '/prefix/lib/node_modules/@deepseek-ai/dsh/package.json': JSON.stringify({ name: 'x' }),

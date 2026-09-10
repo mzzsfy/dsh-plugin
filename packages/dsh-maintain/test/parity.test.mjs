@@ -92,6 +92,17 @@ test('parity: VERDICT 三常量 client 与 core 一致', () => {
   assert.equal(extractConst('VERDICT_UNKNOWN'), VERDICT_UNKNOWN)
 })
 
+// host 侧锚点直接 import runtime.mjs 实现,防测试内手抄字面量漂移假绿
+import { RUNTIME_KINDS } from '../src/runtime.mjs'
+
+test('parity: 手动直跑运行环境常量 client 与 host 一致', () => {
+  assert.equal(extractConst('RUNTIME_KIND_MANUAL'), RUNTIME_KINDS.MANUAL_START)
+})
+
+test('parity: 弹窗文案自动重启延迟秒与 host AUTO_RESTART_DELAY_MS 换算一致', () => {
+  assert.equal(extractNumberConst('AUTO_RESTART_DELAY_SEC'), AUTO_RESTART_DELAY_MS / 1000)
+})
+
 // host 侧锚点直接 import index.js 实现,防测试内手抄字面量漂移假绿
 import {
   DEFAULT_UPGRADE_TEMPLATE,
