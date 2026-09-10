@@ -128,6 +128,7 @@ const MESSAGES_ZH = {
   hitRateLegend: '缓存命中率',
   avgSpeed: '平均生成速度',
   speedLegend: '平均生成速度',
+  ttftLegend: '首 token 延迟',
   topModel: '最常用模型',
   topModelHint: '按 token 用量排序,非调用次数',
   heatmap: '活跃热力图',
@@ -267,6 +268,7 @@ const MESSAGES_EN = {
   hitRateLegend: 'Cache-hit rate',
   avgSpeed: 'Avg speed',
   speedLegend: 'Avg speed',
+  ttftLegend: 'First-token latency',
   topModel: 'Top model',
   topModelHint: 'Ranked by token usage, not call count',
   heatmap: 'Activity heatmap',
@@ -529,11 +531,14 @@ const BAR_MAX_WIDTH = 30
 const AXIS_TICK_COUNT = 4
 // 速度刻度上限钳底:全零或无速度防除零(速度不设轴,读数走 tooltip)
 const SPEED_SCALE_FLOOR = 1
+// 首 token 延迟刻度上限钳底(毫秒):全零或无数据防除零(不设轴,读数走 tooltip)
+const TTFT_SCALE_FLOOR = 1
 // 轴上限留白系数:数据峰不顶满绘图区,顶部留出标注空间
 const AXIS_SCALE_HEADROOM = 1.1
 // 图例键:折线项与模型项共处同一显隐集合
 const LEGEND_KEY_RATE = 'rate'
 const LEGEND_KEY_SPEED = 'speed'
+const LEGEND_KEY_TTFT = 'ttft'
 
 function niceTicks(max, count) {
   if (max <= 0 || count <= 0) return []
@@ -614,6 +619,7 @@ function trendLayout(slots, modelOrder, avail, labelMinPitch) {
 const PERCENT_SCALE = 100
 const RATE_AXIS_STEPS = 4
 const TREND_LINE_WIDTH = 2
+const TREND_LINE_GAP_SLOTS = 1.5
 const TREND_DOT_RADIUS = 4
 const TREND_DOT_RING = 2
 const AXIS_RATE_GAP = 8
@@ -650,8 +656,22 @@ function trendSpeedPoints(slots, bars, plotHeight, scaleMax) {
   return points
 }
 
-// Catmull-Rom 转三次贝塞尔:控制点取邻点差六分之一,端点折返
-function smoothPath(points) {
+// 首 token 延迟曲线点:仅带 ttft 槽产出,高度按刻度上限归一(毫秒域独立归一)
+function trendTtftPoints(slots, bars, plotHeight, scaleMax) {
+  const points = []
+  slots.forEach((slot, index) => {
+    if (slot.ttft === undefined) return
+    points.push({
+      day: slot.day,
+      x: bars[index].x,
+      y: CHART_PAD.top + plotHeight - (slot.ttft / scaleMax) * plotHeight,
+    })
+  })
+  return points
+}
+
+// Catmull-Rom 转三次贝塞尔:控制点取邻点差六分之一,端点折返;相邻点间距超 maxGap 折线断开成新段(稀疏槽防长弧跨越)
+function smoothPath(points, maxGap = Number.POSITIVE_INFINITY) {
   if (points.length === 0) return ''
   if (points.length === 1) return `M ${points[0].x} ${points[0].y}`
   let d = `M ${points[0].x} ${points[0].y}`
@@ -660,6 +680,10 @@ function smoothPath(points) {
     const p1 = points[i]
     const p2 = points[i + 1]
     const p3 = points[i + 2] ?? p2
+    if (p2.x - p1.x > maxGap) {
+      d += ` M ${p2.x} ${p2.y}`
+      continue
+    }
     const c1x = p1.x + (p2.x - p0.x) / 6
     const c1y = p1.y + (p2.y - p0.y) / 6
     const c2x = p2.x - (p3.x - p1.x) / 6
@@ -717,6 +741,30 @@ function speedTipText(speed) {
 // 速度刻度上限:全零或无速度钳底,防除零
 function speedScaleMax(slots) {
   return Math.max(SPEED_SCALE_FLOOR, ...slots.map((slot) => slot.speed ?? 0))
+}
+
+// 首 token 延迟刻度上限(毫秒):全零或无数据钳底防除零
+function ttftScaleMax(slots) {
+  return Math.max(TTFT_SCALE_FLOOR, ...slots.map((slot) => slot.ttft ?? 0))
+}
+
+// tooltip 首 token 延迟行文本:无 ttft 与命中率同款占位符,有则为官方时长口径
+function ttftTipText(ttft, t) {
+  return ttft === undefined ? TOOLTIP_MISSING : formatDuration(ttft, t)
+}
+
+// 语言中立短时长:60 秒内一位小数秒,以上整秒折分秒(模型列表第二行用,禁本地化)
+function formatDurationShort(ms) {
+  const seconds = ms / MS_PER_SECOND
+  if (seconds < DURATION_MINUTE_SECONDS) return `${Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL}s`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / SECONDS_PER_MINUTE)}m${whole % SECONDS_PER_MINUTE}s`
+}
+
+// 模型首 token 延迟短文本:语言中立;无 ttft(无配对数据)为空串
+function modelTtftText(ttft) {
+  if (ttft === undefined) return ''
+  return `TTFT ${formatDurationShort(ttft)}`
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -1264,30 +1312,74 @@ const TURN_COST_CHIP_ORDER = 20 + 10
 // messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
 // 回合级用量优先取回合位置数据(location.turn.data.get('turn-tail')).tokenUsage(官方 tokenUsage 聚合,
 // 分页窗口缺 turn/start 时缺席),回退视图节点 data.closing.usage(末步用量采样,输入侧已含缓存,计费口径同源)
-function turnTokenUsageOfMessage(nodes, messageId) {
+// 索引缓存:每份节点表快照只全量扫描一次建 messageId→turn-tail 索引(WeakMap 随快照释放),
+// 长会话流式期间多芯片各自全量扫描是 O(消息数×节点数) 放大,索引后单快照 O(节点数)
+const TURN_USAGE_INDEX_CACHE = new WeakMap()
+
+function turnUsageIndexOf(nodes) {
+  let index = TURN_USAGE_INDEX_CACHE.get(nodes)
+  if (index !== undefined) return index
+  index = new Map()
   const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
-  if (!Array.isArray(list)) return null
-  for (const node of list) {
-    try {
-      if (node?.kind !== 'turn-tail') continue
-      if (node.data?.closing?.finalNode?.messageId !== messageId) continue
-      const turnData = node.location?.turn?.data
-      const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
-      if (tail?.tokenUsage) return tail.tokenUsage
-      if (node.data.tokenUsage) return node.data.tokenUsage
-      const sampled = node.data?.closing?.usage
-      if (!sampled) return null
-      return {
-        uncachedInputTokens: sampled.inputTokens,
-        outputTokens: sampled.outputTokens,
-        totalTokens: sampled.totalTokens,
-        ...sampled.cacheReadTokens === undefined ? {} : { cacheReadTokens: sampled.cacheReadTokens },
-        ...sampled.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: sampled.cacheWriteTokens },
-        ...sampled.reasoningTokens === undefined ? {} : { reasoningTokens: sampled.reasoningTokens },
-      }
-    } catch { /* 单节点形状残缺跳过,扫描继续 */ }
+  if (Array.isArray(list)) {
+    for (const node of list) {
+      try {
+        if (node?.kind !== 'turn-tail') continue
+        const messageId = node.data?.closing?.finalNode?.messageId
+        if (typeof messageId !== 'string' || index.has(messageId)) continue
+        index.set(messageId, node)
+      } catch { /* 单节点形状残缺跳过 */ }
+    }
   }
+  TURN_USAGE_INDEX_CACHE.set(nodes, index)
+  return index
+}
+
+function turnTokenUsageOfMessage(nodes, messageId) {
+  // 非对象(含 null/undefined)直接 null:WeakMap 键要求对象,展开校验收进索引构建,
+  // 每快照只物化一次节点序列
+  if (nodes === null || typeof nodes !== 'object') return null
+  const node = turnUsageIndexOf(nodes).get(messageId)
+  if (node === undefined) return null
+  try {
+    const turnData = node.location?.turn?.data
+    const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
+    if (tail?.tokenUsage) return tail.tokenUsage
+    if (node.data.tokenUsage) return node.data.tokenUsage
+    return usageSourceBuckets(node.data?.closing?.usage ?? null)
+  } catch { /* 单节点形状残缺跳过,语义同扫描容错 */ }
   return null
+}
+
+// messageId 反查用量源:返回仓库内既有引用(官方聚合 tokenUsage → 视图节点 tokenUsage → closing.usage 采样),
+// 引用恒定直至该回合数据被替换;全缺返回 null。供 useChat selector 使用 ——
+// selector 必须返回稳定引用(useSyncExternalStore 以 Object.is 比对快照),返回新建对象会造成无限渲染;
+// 采样形态(字段名差异)由 usageSourceBuckets 在渲染层归一
+function turnUsageSourceOfMessage(nodes, messageId) {
+  if (nodes === null || typeof nodes !== 'object') return null
+  const node = turnUsageIndexOf(nodes).get(messageId)
+  if (node === undefined) return null
+  try {
+    const turnData = node.location?.turn?.data
+    const tail = turnData && typeof turnData.get === 'function' ? turnData.get('turn-tail') : null
+    return tail?.tokenUsage ?? node.data.tokenUsage ?? node.data?.closing?.usage ?? null
+  } catch { /* 单节点形状残缺跳过,语义同扫描容错 */ }
+  return null
+}
+
+// 用量源 → 聚合桶形态:closing.usage 采样字段名不同(inputTokens 即 uncached 口径,实测 total-input=output 恒等),
+// 聚合形态(已带 uncachedInputTokens)原样直通保持引用
+function usageSourceBuckets(source) {
+  if (!source || source.uncachedInputTokens !== undefined) return source
+  if (source.inputTokens === undefined) return null
+  return {
+    uncachedInputTokens: source.inputTokens,
+    outputTokens: source.outputTokens,
+    totalTokens: source.totalTokens,
+    ...source.cacheReadTokens === undefined ? {} : { cacheReadTokens: source.cacheReadTokens },
+    ...source.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: source.cacheWriteTokens },
+    ...source.reasoningTokens === undefined ? {} : { reasoningTokens: source.reasoningTokens },
+  }
 }
 
 // 计价模型键:routes 首条按官方 messageRoute 分离字段拼两段键,与采集器 refOf 双实现同源
@@ -1693,9 +1785,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const STYLE_CSS = `
 .ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
---dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff;--ud-trend-speed:#0ca678}
+--dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff;--ud-trend-speed:#0ca678;--ud-trend-ttft:#e8590c}
 body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
---dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe;--ud-trend-speed:#2fbf8f}
+--dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe;--ud-trend-speed:#2fbf8f;--ud-trend-ttft:#ffa94d}
 .ud-toolbar{display:flex;align-items:flex-start;gap:8px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
@@ -1781,10 +1873,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-bar-hit{fill:transparent;pointer-events:all}
 .ud-trend{stroke:var(--ud-trend-line);opacity:.9;fill:none;pointer-events:none}
 .ud-trend--speed{stroke:var(--ud-trend-speed)}
+.ud-trend--ttft{stroke:var(--ud-trend-ttft)}
 .ud-trend-dot{fill:var(--ud-trend-line);stroke:var(--dsw-alias-bg-layer-1);stroke-width:${TREND_DOT_RING}px;pointer-events:none}
 .ud-trend-dot--speed{fill:var(--ud-trend-speed)}
+.ud-trend-dot--ttft{fill:var(--ud-trend-ttft)}
 .ud-legend-swatch--line{height:2px;border-radius:1px;background:var(--ud-trend-line)}
 .ud-legend-swatch--line--speed{background:var(--ud-trend-speed)}
+.ud-legend-swatch--line--ttft{background:var(--ud-trend-ttft)}
 .ud-model-usage{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px}
 .ud-donut-wrap{flex:0 0 auto}
 .ud-donut-seg{cursor:pointer;outline:none;transition:stroke-width .12s ease}
@@ -1935,7 +2030,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h(FitText, null, String(stats.activeDays))))
     }
 
-    function Legend({ models, colorFor, speedEnabled = false, isVisible, onItem, t = defaultT }) {
+    function Legend({ models, colorFor, speedEnabled = false, ttftEnabled = false, isVisible, onItem, t = defaultT }) {
       const itemProps = (key) => ({
         className: cx('ud-legend-item', isVisible && !isVisible(key) && 'ud-legend-item--off'),
         onClick: onItem ? (event) => onItem(key, event.ctrlKey || event.metaKey) : undefined,
@@ -1950,7 +2045,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           h('span', null, t('hitRateLegend'))),
         speedEnabled ? h('span', { key: 'speed', title: t('speedLegend'), ...itemProps(LEGEND_KEY_SPEED) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--speed' }),
-          h('span', null, t('speedLegend'))) : null)
+          h('span', null, t('speedLegend'))) : null,
+        ttftEnabled ? h('span', { key: 'ttft', title: t('ttftLegend'), ...itemProps(LEGEND_KEY_TTFT) },
+          h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--ttft' }),
+          h('span', null, t('ttftLegend'))) : null)
     }
 
     const colorForModel = (models) => (model) => {
@@ -1980,22 +2078,33 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         return () => observer.disconnect()
       }, [])
       const hasSpeed = slots.some((slot) => slot.speed !== undefined)
-      const visibleSet = visibleKeys ?? new Set([...modelOrder, LEGEND_KEY_RATE, ...(hasSpeed ? [LEGEND_KEY_SPEED] : [])])
+      const hasTtft = slots.some((slot) => slot.ttft !== undefined)
+      const visibleSet = visibleKeys ?? new Set([
+        ...modelOrder, LEGEND_KEY_RATE,
+        ...(hasSpeed ? [LEGEND_KEY_SPEED] : []),
+        ...(hasTtft ? [LEGEND_KEY_TTFT] : []),
+      ])
       const visibleModels = modelOrder.filter((model) => visibleSet.has(model))
       const showRate = visibleSet.has(LEGEND_KEY_RATE)
       const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
+      const showTtft = hasTtft && visibleSet.has(LEGEND_KEY_TTFT)
       const layout = trendLayout(slots, visibleModels, avail, labelMinPitch)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
       const speedAxisMax = speedMax * AXIS_SCALE_HEADROOM
       const speedPoints = showSpeed ? trendSpeedPoints(slots, layout.bars, layout.plotHeight, speedAxisMax) : []
+      const ttftMax = ttftScaleMax(slots)
+      const ttftAxisMax = ttftMax * AXIS_SCALE_HEADROOM
+      const ttftPoints = showTtft ? trendTtftPoints(slots, layout.bars, layout.plotHeight, ttftAxisMax) : []
       // 左轴标定:可见柱有数据标 token;无柱数据且速度线可见标速度(tok/s);否则空
+      // (ttft 不设轴,读数走 tooltip,毫秒域与速度轴不同单位不混轴)
       const speedAxisTicks = layout.ticks.length === 0 && showSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []
       const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax)
       const hoverSlot = hover ? slots[hover.index] : null
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
+      const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
       const pick = (index) => (event) => setHover({ index, anchor: event.currentTarget })
       const clear = () => setHover(null)
       const otherEntries = hoverSlot
@@ -2038,11 +2147,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               ? h('text', { key: slot.day, className: 'ud-axis', x: layout.bars[index].x, y: CHART_HEIGHT - X_LABEL_OFFSET, textAnchor: 'middle' }, labelFor(slot.day))
               : null),
             showRate ? h('path', {
-              className: 'ud-trend', d: smoothPath(ratePoints),
+              className: 'ud-trend', d: smoothPath(ratePoints, layout.step * TREND_LINE_GAP_SLOTS),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
             showSpeed ? h('path', {
-              className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints),
+              className: cx('ud-trend', 'ud-trend--speed'), d: smoothPath(speedPoints, layout.step * TREND_LINE_GAP_SLOTS),
+              strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
+            }) : null,
+            showTtft ? h('path', {
+              className: cx('ud-trend', 'ud-trend--ttft'), d: smoothPath(ttftPoints, layout.step * TREND_LINE_GAP_SLOTS),
               strokeWidth: TREND_LINE_WIDTH, strokeLinejoin: 'round', strokeLinecap: 'round',
             }) : null,
             hoverRatePoint
@@ -2051,13 +2164,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             hoverSpeedPoint
               ? h('circle', { className: cx('ud-trend-dot', 'ud-trend-dot--speed'), cx: hoverSpeedPoint.x, cy: hoverSpeedPoint.y, r: TREND_DOT_RADIUS })
               : null,
+            hoverTtftPoint
+              ? h('circle', { className: cx('ud-trend-dot', 'ud-trend-dot--ttft'), cx: hoverTtftPoint.x, cy: hoverTtftPoint.y, r: TREND_DOT_RADIUS })
+              : null,
             slots.map((slot, index) => h('rect', {
               key: `hit-${slot.day}`, className: 'ud-bar-hit',
               x: layout.bars[index].x - layout.step / 2, y: CHART_PAD.top, width: layout.step, height: layout.plotHeight,
               onMouseEnter: pick(index), onFocus: pick(index), onMouseLeave: clear, onBlur: clear,
             })))),
         h(Legend, {
-          models: legendModels, colorFor, speedEnabled: hasSpeed,
+          models: legendModels, colorFor, speedEnabled: hasSpeed, ttftEnabled: hasTtft,
           isVisible: (key) => visibleSet.has(key),
           onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
         }),
@@ -2073,6 +2189,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                   `${model}: ${formatTokens(tokens)}`)) : []),
                 showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
+                showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
                 costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,
@@ -2233,6 +2350,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             models.map((item) => {
               const isOther = item.model === OTHER_MODEL
               const speedText = modelSpeedText(item.speed)
+              const ttftText = modelTtftText(item.ttft)
+              const metaParts = [
+                item.cost !== undefined ? `≈ ${formatCost(item.cost, costCurrency)}` : null,
+                ttftText,
+                speedText,
+              ].filter(Boolean)
               return h(React.Fragment, { key: item.model },
                 h('div', {
                   className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
@@ -2254,11 +2377,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                       }, '›')
                     : null,
                   h('div', { className: 'ud-model-values' },
-                    h('span', { className: 'ud-model-tokens' }, formatTokens(item.tokens)),
-                    h('span', { className: 'ud-model-pct' },
-                      item.cost !== undefined ? h('span', { className: 'ud-model-cost' }, `≈ ${formatCost(item.cost, costCurrency)} · `) : null,
-                      formatPercent((item.tokens / total) * PERCENT_SCALE),
-                      speedText ? ` · ${speedText}` : null))),
+                    h('span', { className: 'ud-model-tokens' },
+                      `${formatTokens(item.tokens)} (${formatPercent((item.tokens / total) * PERCENT_SCALE)})`),
+                    h('span', { className: 'ud-model-pct' }, metaParts.join(' · ')))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },
@@ -2350,9 +2471,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     // 注入点B 组件:回合费用芯片,官方动作行内渲染(复制与分支图标之间,赞踩/上下文跳转同排);
     // 受费用显示开关;价格异步首帧未回不渲染,回包后补渲染;显隐节奏随官方 data-actions-reveal
     // 官方槽容器固定在用量/用时芯片之前,末位排布由 SlotTailPortal 移交实现
+    // 响应性:useChat selector 返回用量源稳定引用(null→引用 / 引用→引用),回合结束数据发布即触发重渲染;
+    // 返回仓库本体则引用恒定,快照比对恒等,新回合永不重渲染(刷新才出现的根因)
     const CostChip = React.memo(function CostChip({ messageId, useChat, t = defaultT }) {
       if (typeof useChat !== 'function') return null
-      const chatNodes = useChat((state) => (state && typeof state === 'object') ? state.nodes : undefined)
+      const usageSource = typeof messageId === 'string' && messageId !== ''
+        ? useChat((state) => turnUsageSourceOfMessage(state?.nodes, messageId))
+        : null
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const [pricingRules, setPricingRules] = useState(null)
@@ -2363,9 +2488,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         })
         return () => { alive = false }
       }, [])
-      const matched = typeof messageId === 'string' && messageId !== ''
-        ? turnTokenUsageOfMessage(chatNodes, messageId)
-        : null
+      const matched = usageSourceBuckets(usageSource)
       const price = matched && prefs.costDisplay && pricingRules !== null
         ? matchPrice(pricingRules, turnModelOf(matched), new Date())
         : null

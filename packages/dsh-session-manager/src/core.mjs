@@ -200,6 +200,53 @@ export function projectDeletedRows(deleted, sessionsById) {
     }))
 }
 
+// ── 归档库投影:主列表分页 / 工作区分组 / 标题搜索 ──
+
+/** 归档库主列表默认展开行数与手动展开步长。 */
+export const ARCHIVE_PAGE_SIZE = 100
+
+/**
+ * 归档列表分页:取前 visibleCount 条并报告剩余量,非有限或非正可见数按 0 处理。
+ * client.js 有镜像实现(单文件自包含无法跨文件 require),修改需两处同步。
+ */
+export function pageArchiveRows(rows, visibleCount) {
+  const list = Array.isArray(rows) ? rows : []
+  const count = Number.isFinite(visibleCount) && visibleCount > 0 ? visibleCount : 0
+  const visible = list.slice(0, count)
+  return { visible, remaining: list.length - visible.length }
+}
+
+/**
+ * 归档列表按工作区分组:workspace 假值并桶为未分组(null),组内保持输入序
+ * (调用方输入恒为时间倒序投影),组间按组内最新 updatedAt 倒序。
+ * client.js 有镜像实现(单文件自包含无法跨文件 require),修改需两处同步。
+ */
+export function groupArchiveRowsByWorkspace(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const byKey = new Map()
+  for (const row of list) {
+    const title = row.workspace ? String(row.workspace) : ''
+    if (!byKey.has(title)) byKey.set(title, { workspace: title === '' ? null : title, latest: row.updatedAt, rows: [] })
+    const group = byKey.get(title)
+    group.rows.push(row)
+    if (row.updatedAt > group.latest) group.latest = row.updatedAt
+  }
+  return [...byKey.values()]
+    .sort((left, right) => right.latest - left.latest)
+    .map(({ workspace, rows: groupRows }) => ({ workspace, rows: groupRows }))
+}
+
+/**
+ * 归档列表标题搜索:查询词去首尾空白后按不区分大小写子串匹配标题,
+ * 空查询原样返回全量。client.js 有镜像实现(单文件自包含无法跨文件 require),修改需两处同步。
+ */
+export function filterArchiveRows(rows, query) {
+  const list = Array.isArray(rows) ? rows : []
+  const needle = String(query ?? '').trim().toLowerCase()
+  if (needle === '') return list
+  return list.filter((row) => String(row.title ?? '').toLowerCase().includes(needle))
+}
+
 // 历史输入回溯参数:host 聚合路由使用(client 单文件自包含不经此,展示侧另行内联)。
 // 范围按 ←/→ 切换序排列:索引 0 为常用提示词(个人收藏),索引 1 为当前会话
 // (浮层默认落点),→ 向更大范围,← 返回收藏

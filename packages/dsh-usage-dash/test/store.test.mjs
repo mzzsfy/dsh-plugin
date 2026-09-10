@@ -219,6 +219,64 @@ test('老行缺 durationMs 字段:增量求和不产 NaN', async () => {
   assert.equal(seen.outputTokens, 40)
 })
 
+test('decode 配对与首字样本落三粒度累加,timing 样本不重复计 token', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  // chunk 先发 token 样本:只有 token 桶
+  await store.record(tokenSample(at, { durationMs: undefined }))
+  // message 补发纯 timing 增量:零桶 + decodeTokens + durationMs + ttftMs
+  await store.record(tokenSample(at + 1000, {
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    decodeTokens: 20, durationMs: 30000, ttftMs: 10000,
+  }))
+  await store.flushNow()
+  const key = 'D|2026-08-02|deepseek|deepseek/deepseek-chat'
+  const daily = domain.rows.get(key)
+  assert.equal(daily.outputTokens, 20)
+  assert.equal(daily.decodeTokens, 20)
+  assert.equal(daily.durationMs, 30000)
+  assert.equal(daily.ttftMs, 10000)
+  assert.equal(daily.ttftSteps, 1)
+  const minute = domain.rows.get('M|2026-08-02T14:30|deepseek|deepseek/deepseek-chat')
+  assert.equal(minute.decodeTokens, 20)
+  assert.equal(minute.ttftMs, 10000)
+})
+
+test('timing 缺失样本:decodeTokens 与 ttft 字段按零累计', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  await store.record(tokenSample(at))
+  await store.flushNow()
+  const seen = domain.rows.get('D|2026-08-02|deepseek|deepseek/deepseek-chat')
+  assert.equal(seen.decodeTokens, 0)
+  assert.equal(seen.durationMs, 0)
+  assert.equal(seen.ttftMs, 0)
+  assert.equal(seen.ttftSteps, 0)
+})
+
+test('老行缺 decode/ttft 字段:增量求和不产 NaN', async () => {
+  const domain = fakeDomain()
+  const store = new UsageStore(facilityOf(domain))
+  const at = local(2026, 8, 2, 14, 37)
+  const key = 'D|2026-08-02|deepseek|deepseek/deepseek-chat'
+  await store.record(tokenSample(at))
+  await store.flushNow()
+  // 模拟存量旧格式行:回写去掉新增字段
+  const stored = domain.rows.get(key)
+  delete stored.decodeTokens
+  delete stored.ttftMs
+  delete stored.ttftSteps
+  await store.record(tokenSample(at + 1000, { decodeTokens: 20, durationMs: 3000, ttftMs: 500 }))
+  await store.flushNow()
+  const seen = domain.rows.get(key)
+  assert.equal(seen.decodeTokens, 20)
+  assert.equal(seen.durationMs, 3000)
+  assert.equal(seen.ttftMs, 500)
+  assert.equal(seen.ttftSteps, 1)
+})
+
 test('missing-record 首写竞态:put 种子后重试写入真值', async () => {
   const domain = fakeDomain()
   const store = new UsageStore(facilityOf(domain))

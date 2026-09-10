@@ -58,3 +58,16 @@ export function isDue({ lastQuerySec, nowSec, intervalSec }) {
   if (lastQuerySec === null) return true
   return nowSec - lastQuerySec >= intervalSec
 }
+
+// 受限并发执行:worker 池共享游标逐项取号(取号同步完成,无交错),单任务
+// 失败/慢速只占用一个 worker 位,不拖满整轮;每任务结果经 task 感知,失败由
+// 调用方在 task 内消化(本函数恒 resolve)
+export async function runLimited(items, limit, task) {
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < items.length) {
+      await task(items[cursor++])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+}

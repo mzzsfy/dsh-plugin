@@ -282,7 +282,8 @@ function verifyAll(packages, latests, unlink, scope) {
         continue
       }
       const installed = JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, '')).version
-      if (installed !== latest) failures.push(`${key}: 安装版本 ${installed} 应为线上 ${latest}`)
+      // 未发布包(latest=null)无线上版本可比:依赖行已按 file 协议校验,安装版本不比对
+      if (latest !== null && installed !== latest) failures.push(`${key}: 安装版本 ${installed} 应为线上 ${latest}`)
       continue
     }
     const target = existsSync(phys) ? readJunctionTarget(phys) : null

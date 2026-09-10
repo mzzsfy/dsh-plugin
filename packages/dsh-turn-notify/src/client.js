@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-turn-notify',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect } = React
+    const { useState, useEffect, useRef } = React
 
     // 通知出口:公共依赖 @mzzsfy/dsh-toast,可选消费——共享依赖包的模块表注入
     // 全仓收敛到唯一权威消费方(session-manager),本插件不再代挂占位条目;
@@ -827,13 +827,28 @@ window.__ModuleLoader__.load({
 
     // 宿主重渲染会重建行节点抹掉高亮类,观察器在同一帧内补齐;
     // applySessionHighlights 幂等(类齐不写 DOM),观察器链自然收敛;
-    // 令牌承载 observer:HMR 重建闭包后先断开旧代再挂新代,旧闭包不滞留
+    // 令牌承载 observer 与 pending 帧:HMR 重建闭包后先断开旧代 observer、
+    // cancel 旧代 pending 帧(帧回调持有旧代高亮 Map,不取消会写幽灵高亮),
+    // 旧闭包不滞留;rAF 合批:流式期间 DOM 变更批远高于帧率,同帧多批合并
+    // 为一次重应用(同帧补齐语义不变),无高亮条目时不排帧
     const KEY_HL_OBSERVER = 'turn-notify:hl-observer'
+    const KEY_HL_FRAME = 'turn-notify:hl-frame'
     function ensureHighlightObserver() {
       if (typeof document === 'undefined' || typeof document.body === 'undefined' || typeof MutationObserver === 'undefined') return
       if (window[KEY_HL_OBSERVER] !== undefined && typeof window[KEY_HL_OBSERVER].disconnect === 'function') window[KEY_HL_OBSERVER].disconnect()
+      if (typeof window[KEY_HL_FRAME] === 'number') {
+        cancelAnimationFrame(window[KEY_HL_FRAME])
+      }
+      // 哨兵 0 = 无在途帧(规范 rAF 句柄自 1 起,cancel 0 为 no-op);新代显式归零,
+      // 防 undefined 初始态使在途判定恒真、帧永不排程
+      window[KEY_HL_FRAME] = 0
       const observer = new MutationObserver(() => {
-        if (sessionHighlightEnabled && sessionHighlights.size > 0) applySessionHighlights()
+        if (!sessionHighlightEnabled || sessionHighlights.size === 0) return
+        if (window[KEY_HL_FRAME] !== 0) return
+        window[KEY_HL_FRAME] = requestAnimationFrame(() => {
+          window[KEY_HL_FRAME] = 0
+          if (sessionHighlightEnabled && sessionHighlights.size > 0) applySessionHighlights()
+        })
       })
       observer.observe(document.body, { childList: true, subtree: true })
       window[KEY_HL_OBSERVER] = observer
@@ -1484,14 +1499,16 @@ window.__ModuleLoader__.load({
       // 已绑 bot chips 由 imBoundBotIds 去重(见 LOGIC 段同源函数)
       const imBoundBots = imBoundBotIds(config.imTargets)
 
-      // 勾选即存:与分类开关同模式,列表整体替换,连续操作以最新一次请求为准
-      let imPersistSeq = 0
+      // 勾选即存:与分类开关同模式,列表整体替换,连续操作以最新一次请求为准;
+      // seq 守卫须跨渲染存活(useRef),组件体内 let 声明每次渲染重置使守卫失效
+      const imPersistSeqRef = useRef(0)
       async function persistImTargets(next, okMessage) {
-        const seq = ++imPersistSeq
+        imPersistSeqRef.current += 1
+        const seq = imPersistSeqRef.current
         setConfig({ ...config, imTargets: next })
         try {
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ imTargets: next }) })
-          if (seq === imPersistSeq) {
+          if (seq === imPersistSeqRef.current) {
             setConfig({ ...DEFAULT_CONFIG, ...res })
             if (res.soundMapping) setMappingState(res.soundMapping)
             if (okMessage !== undefined) patch(okMessage)

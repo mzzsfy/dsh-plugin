@@ -23,7 +23,7 @@ DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方�
   | off 勾选拼写填值 | 对象形态 `off: "拼写"` |
 
 - input 四态:未声明(删除字段)/ 仅文本(`["text"]`)/ 文本+图像(`["text", "image"]`)/ 仅图片(`["image"]`,纯视觉网关不收文本输入)。
-- 保存前本地校验:非 off 档勾选但拼写空白时拒绝保存并提示具体模型与档位(空白拼写会静默以档位名作线上值,易被误当作已填;off 档留空有专门语义,不参与校验)。卡片与行内编辑块均拦截。
+- 保存前本地校验:非 off 档勾选但拼写空白时拒绝保存并提示具体模型与档位(空白拼写会静默以档位名作线上值,易被误当作已填;off 档留空有专门语义,不参与校验)。卡片与行内编辑块均拦截。保存与校验反馈经全站浮出通知(`@mzzsfy/dsh-toast` 可选依赖,缺失时降级 console)。
 - 一键草稿填充:卡片底部「填充草稿」对当前 provider 内未声明任何档位的模型填入七档全勾、拼写留空(线上值=档位名)的草稿;只改内存草稿,不触碰 inputMode,已声明档位的模型不受影响,写回仍需手动保存。
 - 保存 = mutate set `providers.<route>.models` 整个数组:以 describe 读到的数组为基线,未编辑条目原样保留,settings 未声明的(自动发现的)模型不被删除;providers 缺失或 models 非数组时拒绝保存(防静默覆写为空数组)。
 - 修订冲突:重读 describe 取新 revision,按字段级 diff 仅重放本次修改(仅用户改过的模型条目的 `reasoningEfforts` / `input` 两字段,其余字段保留最新文档值),重试一次;再冲突报错终止并保留用户输入,绝不静默覆盖。"本次修改"以草稿加载时点冻结的种子为参照:加载后他方对基线的修改,不会被零编辑或仅改单一字段的保存静默回滚(该保证覆盖保存开始后的并发写,revision 乐观锁语义)。
@@ -40,7 +40,12 @@ dsh plugin --profile web add @mzzsfy/dsh-model-capability-editor
 
 ## 前置:dsh 本体版本
 
-需要 dsh 本体 0.1.2 及以上(读写经 `remote.settings` 服务面,该面由 0.1.2 引入的 host 侧 `dsh-api-settings-controller` 提供)。更旧的本体上无此服务面,client 半区因注入声明 `remote.settings` 未满足而保持未激活(无 UI、无告警、不影响 web 启动与其他插件);请先升级 dsh,或改用插件 0.1.2(旧 settings 面,已停止维护)。
+支持 dsh 0.1.1-rc.2 / 0.1.2-rc.1 / 0.1.5-alpha.2(实测)。settings 传输按宿主代际自适应:
+
+- 0.1.2+(boot wire 带 `batches` 批次调度):`remote.settings` 以点分 inject 声明交由 cordis 门控,fiber 等 namespace `$mount` 完成才激活,激活即就绪。宿主 `parseBootManifest` 将 `batches` 校验为必填数组(缺失即整页拒绝启动),判据被上游 schema 钉死;宿主未来若移除该字段,本插件退化为 api 面或恒定禁用,不阻塞 boot。
+- 0.1.1(旧 boot wire,无该 namespace):点分声明会永远 pending 拖垮整页 web boot,故声明两代基座 `remote` + `connection`,settings 传输在 apply 内异步定面轮询:从 `connection.api` 面起等,面在首拍即定型;缺失持续满等待窗(1s)则恒定禁用并告警,不影响 web 启动。
+
+注意 0.1.1 本体的 `llm-pi-ai` schema 不认识 0.1.5 引入的 `compat.chatTemplateArgs` 字段,settings.yaml 中该字段会让 0.1.1 的 `llm-pi-ai` settings 注册整体失败(host 侧行为),编辑器随之无数据;从 yaml 删除该字段即恢复。
 
 ## 前置:移除 dsh-better-reasoning-effort
 

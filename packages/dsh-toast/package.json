@@ -33,6 +33,7 @@
   "files": [
     "src",
     "test",
-    "README.md"
+    "README.md",
+    "MECHANISM.md"
   ]
 }

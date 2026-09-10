@@ -9,8 +9,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  ARCHIVE_PAGE_SIZE,
   archiveToastStep as coreArchiveToastStep,
   archiveToastText as coreArchiveToastText,
+  filterArchiveRows,
+  groupArchiveRowsByWorkspace,
+  pageArchiveRows,
   projectArchiveRows,
   projectDeletedRows,
 } from '../src/core.mjs'
@@ -28,7 +32,7 @@ assert.ok(MIRROR_START >= 0 && MIRROR_END > MIRROR_START, 'client.js 镜像函�
 
 const mirror = new Function(
   CLIENT_SRC.slice(MIRROR_START, MIRROR_END)
-  + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep, archiveToastText: archiveToastText }',
+  + '; return { projectRows: projectRows, projectDeletedRows: projectDeletedRows, archiveToastStep: archiveToastStep, archiveToastText: archiveToastText, pageArchiveRows: pageArchiveRows, groupArchiveRowsByWorkspace: groupArchiveRowsByWorkspace, filterArchiveRows: filterArchiveRows }',
 )()
 
 // client 侧输入形态 byId 字典,core 侧 rows 数组:按 title/cwd 约定构造等价输入
@@ -170,6 +174,41 @@ test('parity Toast 差分:大集合增量性能形态一致性(n=5000)', () => {
     { phase: 'ready', archivedSessionIds: [] },
     { phase: 'ready', archivedSessionIds: big },
   ])
+})
+
+// ── 归档库投影 parity:分页 / 分组 / 搜索 ──
+
+const PAGE_ROWS = Array.from({ length: 250 }, (_, i) => ({
+  id: 's' + i,
+  title: '标题' + i,
+  updatedAt: 1000 - i,
+  workspace: i % 2 ? 'alpha' : null,
+}))
+
+test('parity 归档库分页:页界与剩余量同输入同输出', () => {
+  for (const count of [ARCHIVE_PAGE_SIZE, 200, 250, 300, 0, Number.NaN, -1]) {
+    assert.deepEqual(mirror.pageArchiveRows(PAGE_ROWS, count), pageArchiveRows(PAGE_ROWS, count))
+  }
+  assert.deepEqual(mirror.pageArchiveRows(undefined, ARCHIVE_PAGE_SIZE), pageArchiveRows(undefined, ARCHIVE_PAGE_SIZE))
+})
+
+test('parity 归档库分组:分桶/未分组并桶/组间倒序同输入同输出', () => {
+  assert.deepEqual(mirror.groupArchiveRowsByWorkspace(PAGE_ROWS), groupArchiveRowsByWorkspace(PAGE_ROWS))
+  assert.deepEqual(mirror.groupArchiveRowsByWorkspace([]), groupArchiveRowsByWorkspace([]))
+  assert.deepEqual(mirror.groupArchiveRowsByWorkspace(undefined), groupArchiveRowsByWorkspace(undefined))
+})
+
+test('parity 归档库搜索:子串/空白/空查询同输入同输出', () => {
+  for (const query of ['标题1', '标题250', '  ', '', '不存在']) {
+    assert.deepEqual(mirror.filterArchiveRows(PAGE_ROWS, query), filterArchiveRows(PAGE_ROWS, query))
+  }
+  assert.deepEqual(mirror.filterArchiveRows(undefined, '标题'), filterArchiveRows(undefined, '标题'))
+})
+
+test('源码契约:client 分页粒度常量与 core ARCHIVE_PAGE_SIZE 同值', () => {
+  // 词边界锚定:纯 includes 对 1000 等以 100 为前缀的值恒真,漂移会静默通过
+  const guard = new RegExp('const ARCHIVE_PAGE_SIZE = ' + ARCHIVE_PAGE_SIZE + '\\b')
+  assert.ok(guard.test(CLIENT_SRC), 'client 分页粒度常量与 core 漂移')
 })
 
 test('源码契约:client fetchInputs 必须解包 host 响应信封 { inputs }', () => {

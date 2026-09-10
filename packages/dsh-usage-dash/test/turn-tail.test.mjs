@@ -17,6 +17,8 @@ const {
   turnCostTitleText,
   turnModelOf,
   turnTokenUsageOfMessage,
+  turnUsageSourceOfMessage,
+  usageSourceBuckets,
 } = core
 
 const zhT = createTranslator(MESSAGES_ZH)
@@ -83,6 +85,70 @@ test('反查:单节点形状残缺跳过不抛,后续命中不受阻', () => {
   assert.equal(turnTokenUsageOfMessage([hostile, tailNode('m-1', tokenUsage)], 'm-1'), tokenUsage)
   assert.equal(turnTokenUsageOfMessage([{ kind: 'turn-tail', get data() { throw new Error('boom') } }], 'm-1'), null)
   assert.equal(turnTokenUsageOfMessage([null, 'x', 42], 'm-1'), null)
+})
+
+test('反查:同一容器重复调用命中索引,结果一致', () => {
+  const tokenUsage = { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 }
+  const nodes = [tailNode('m-1', tokenUsage)]
+  // Given 同一容器连续两次反查(首次建索引,二次命中缓存)
+  const first = turnTokenUsageOfMessage(nodes, 'm-1')
+  const second = turnTokenUsageOfMessage(nodes, 'm-1')
+  // Then 结果一致且均为 tokenUsage 本体
+  assert.equal(first, tokenUsage)
+  assert.equal(second, tokenUsage)
+  // 未命中的 messageId 二次查询仍为 null(索引缓存不放大误命中)
+  assert.equal(turnTokenUsageOfMessage(nodes, 'm-2'), null)
+})
+
+test('反查源:命中返回仓库内原始引用,采样形态不归一(归一属渲染层)', () => {
+  const tokenUsage = { uncachedInputTokens: 10, outputTokens: 5, totalTokens: 15 }
+  assert.equal(turnUsageSourceOfMessage([tailNode('m-1', tokenUsage)], 'm-1'), tokenUsage)
+  // 视图节点直挂 tokenUsage 次选
+  const directNode = { kind: 'turn-tail', data: { closing: { finalNode: { seq: 1, messageId: 'm-2' } }, tokenUsage } }
+  assert.equal(turnUsageSourceOfMessage([directNode], 'm-2'), tokenUsage)
+  // 采样 usage 原样返回(引用稳定,useSyncExternalStore 快照可比对)
+  const sampled = { inputTokens: 100, outputTokens: 20, totalTokens: 130, cacheReadTokens: 10 }
+  const sampledNode = { kind: 'turn-tail', data: { closing: { finalNode: { seq: 2, messageId: 'm-3' }, usage: sampled } } }
+  assert.equal(turnUsageSourceOfMessage([sampledNode], 'm-3'), sampled)
+  // 三级全缺返回 null(稳定值)
+  assert.equal(turnUsageSourceOfMessage([{ kind: 'turn-tail', data: { closing: { finalNode: { seq: 3, messageId: 'm-4' } } } }], 'm-4'), null)
+  assert.equal(turnUsageSourceOfMessage([], 'm-1'), null)
+  assert.equal(turnUsageSourceOfMessage(null, 'm-1'), null)
+  // 仓库两态
+  assert.equal(turnUsageSourceOfMessage(new Map([['k', tailNode('m-1', tokenUsage)]]), 'm-1'), tokenUsage)
+})
+
+test('反查源:节点数据更新后同容器引用随之更替', () => {
+  // Given 命中节点无用量源 When 位置数据补上 tokenUsage(同一容器对象,仓库可变语义)
+  const node = { kind: 'turn-tail', data: { closing: { finalNode: { seq: 1, messageId: 'm-1' } } } }
+  const nodes = [node]
+  assert.equal(turnUsageSourceOfMessage(nodes, 'm-1'), null)
+  const tokenUsage = { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 }
+  node.data.tokenUsage = tokenUsage
+  // Then 反查读到新引用 —— selector 快照由恒等(null)变为新引用,驱动重渲染
+  assert.equal(turnUsageSourceOfMessage(nodes, 'm-1'), tokenUsage)
+})
+
+test('归一:采样形态转聚合桶,聚合形态原样直通', () => {
+  assert.deepEqual(
+    usageSourceBuckets({ inputTokens: 100, outputTokens: 20, totalTokens: 130, cacheReadTokens: 10 }),
+    { uncachedInputTokens: 100, outputTokens: 20, totalTokens: 130, cacheReadTokens: 10 },
+  )
+  const aggregated = { uncachedInputTokens: 8, outputTokens: 2, totalTokens: 10, routes: [{ provider: 'p', model: 'm' }] }
+  assert.equal(usageSourceBuckets(aggregated), aggregated)
+  assert.equal(usageSourceBuckets(null), null)
+})
+
+test('反查:容器换引用(快照更替)后新节点可见', () => {
+  const oldUsage = { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 }
+  const oldNodes = [tailNode('m-1', oldUsage)]
+  assert.equal(turnTokenUsageOfMessage(oldNodes, 'm-1'), oldUsage)
+  // Given 节点表内容变化以新容器表达(官方 store 快照语义),新增回合节点
+  const newUsage = { uncachedInputTokens: 7, outputTokens: 7, totalTokens: 14 }
+  const newNodes = [...oldNodes, tailNode('m-2', newUsage)]
+  // Then 新容器首查即可见新节点,旧容器结果不受影响
+  assert.equal(turnTokenUsageOfMessage(newNodes, 'm-2'), newUsage)
+  assert.equal(turnTokenUsageOfMessage(oldNodes, 'm-1'), oldUsage)
 })
 
 test('计价模型键:双全拼两段,仅 model 用裸名,双缺回退全通配键', () => {

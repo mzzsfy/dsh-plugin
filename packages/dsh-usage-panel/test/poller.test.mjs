@@ -12,6 +12,7 @@ import {
   lastQuerySecOf,
   isDue,
   isShortWindowTier,
+  runLimited,
 } from '../src/poller.mjs'
 
 test('场景: 失败退避指数增长并封顶', () => {
@@ -85,4 +86,51 @@ test('场景: 短窗口档判定,从未成功(含最近失败)按短档,失败�
   assert.equal(isShortWindowTier({ ok: true, reading: {} }, false), false, '成功且仅长窗口按长档')
   assert.equal(isShortWindowTier({ ok: false, reading: null }, readingHasShort), true, '失败不塌缩:含短窗账号保持短档节奏')
   assert.equal(isShortWindowTier({ ok: false, reading: null }, false), true, '失败的长窗账号也归短档:10 分钟节奏 + 退避压制重试')
+})
+
+test('场景: 受限并发执行——全项被处理,慢任务不阻塞其他 worker', async () => {
+  // Given 6 项任务,并发 2:每个任务挂起直到放行;并发内慢任务(后放行)只占 1 个 worker 位
+  const processed = []
+  const release = []
+  const task = async (item) => {
+    await new Promise((resolve) => release.push(resolve))
+    processed.push(item)
+  }
+  const done = runLimited([1, 2, 3, 4, 5, 6], 2, task)
+  // When 恰有 2 个任务在途(worker 数 = 并发上限)
+  assert.equal(release.length, 2, '并发上限决定在途任务数')
+  // 放行在途任务使其完成并取号下一项
+  release.splice(0).forEach((resolve) => resolve())
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(release.length, 2, '完成后立即补位')
+  release.splice(0).forEach((resolve) => resolve())
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  release.splice(0).forEach((resolve) => resolve())
+  await done
+  // Then 全部 6 项被处理,无重复无遗漏
+  assert.equal(processed.length, 6)
+  assert.deepEqual([...processed].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6])
+})
+
+test('场景: 受限并发执行——单任务失败不中断其余任务(失败由 task 内消化)', async () => {
+  // Given task 对偶数项抛错但就地消化(生产用法:runQuery().catch 口径),runLimited 恒 resolve
+  const processed = []
+  const task = async (item) => {
+    try {
+      if (item % 2 === 0) throw new Error('boom-' + item)
+      processed.push(item)
+    } catch { /* 单项失败只占自己的 worker 位 */ }
+  }
+  // When 5 项、并发 2
+  await runLimited([1, 2, 3, 4, 5], 2, task)
+  // Then 奇数项全被处理
+  assert.deepEqual([...processed].sort((a, b) => a - b), [1, 3, 5])
+})
+
+test('场景: 受限并发执行——空列表与并发大于任务数', async () => {
+  const processed = []
+  await runLimited([], 4, async (item) => processed.push(item))
+  assert.deepEqual(processed, [])
+  await runLimited([1, 2], 8, async (item) => processed.push(item))
+  assert.deepEqual(processed, [1, 2])
 })

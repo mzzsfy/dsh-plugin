@@ -16,7 +16,7 @@ import {
 } from './parsers.mjs'
 import { readingToSnapshots, appendPoint, buildMonthSequence, newSequenceStore } from './history.mjs'
 import { createHistoryStore } from './historyStore.mjs'
-import { createBackoff, isShortWindowTier, tierIntervalSec, lastQuerySecOf, isDue } from './poller.mjs'
+import { createBackoff, isShortWindowTier, tierIntervalSec, lastQuerySecOf, isDue, runLimited } from './poller.mjs'
 import {
   DEFAULT_QUOTA_THRESHOLD_PCT,
   WEBHOOK_TIMEOUT_MS,
@@ -39,6 +39,9 @@ import {
 const FETCH_TIMEOUT_MS = 20 * 1000
 const BODY_MAX_BYTES = 256 * 1024
 const MAX_ACCOUNTS = 20
+// 单轮轮询的受限并发:串行执行时单账号 20s 超时即可拖满整轮(pollInFlight 互斥
+// 使后续 tick 全部跳过,轮询事实停摆),并发上限同时压住上游瞬时压力
+const POLL_CONCURRENCY = 4
 // 通知长轮询服务端挂起上限,与 turn-notify 同值;客户端超时须大于此值
 const LONG_POLL_WAIT_MS = 25 * 1000
 // 数据目录支持 env 注入(测试隔离);缺省落 ~/.dsh/dsh-usage-panel
@@ -756,10 +759,8 @@ export function apply(ctx) {
       pollInFlight = true
       ensureHistory()
         .then(async () => {
-          for (const account of due) {
-            // 单账号失败不中止本轮其余账号(broken 等持久态下尤为关键)
-            await runQuery(account).catch(() => {})
-          }
+          // 受限并发执行:单账号失败/超时不拖满整轮,后续 tick 不因互斥停摆
+          await runLimited(due, POLL_CONCURRENCY, (account) => runQuery(account).catch(() => {}))
           await persistConfig().catch(() => {})
         })
         .catch(() => {})

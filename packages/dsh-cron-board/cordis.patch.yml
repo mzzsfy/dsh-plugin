@@ -1,0 +1,5 @@
+# dsh-cron-board 打包补丁:将定时任务面板插件以单条目注入 profile 根。由 `dsh plugin add @mzzsfy/dsh-cron-board` 应用;
+# 条目 id 指向本插件宿主半区,/api/cron-board/* 路由由此宿主条目 provide,client 半区随宿主条目进入客户端模块表。
+- insert:
+    - id: cron-board
+      name: '@mzzsfy/dsh-cron-board'

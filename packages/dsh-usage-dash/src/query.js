@@ -98,6 +98,10 @@ const percentOf = (part, total) => (total === 0 ? 0 : (part / total) * PERCENT_S
 
 const rowTokens = (row) => row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens
 
+// 速度配对分子:decode 口径取 decodeTokens;存量旧格式行(带时长无 decodeTokens)
+// 回落 outputTokens,聚合随新数据自然收敛
+const speedTokensOf = (row) => (row.durationMs ? row.decodeTokens ?? row.outputTokens : 0)
+
 export function aggregateRange(rows, g, from, to) {
   const form = BUCKET_FORMS[g]
   const slots = enumerateBucketKeys(form)(from, to).map((key) => emptySlot(key))
@@ -105,43 +109,59 @@ export function aggregateRange(rows, g, from, to) {
   const modelTotals = new Map()
   const providerTotals = new Map()
   const activeBuckets = new Set()
-  // 槽级速度配对:桶串 → {outputTokens, durationMs},与模型级同口径(仅带时长行)
+  // 槽级配对:桶串 → 速度对 {decodeTokens, durationMs} 与首字对 {ttftMs, ttftSteps},
+  // 与模型级同口径(仅带配对数据的行计入)
   const slotSpeeds = new Map()
+  const slotTtfts = new Map()
   for (const row of rows) {
     const slot = slotByKey.get(row.bucket)
     // 桶串未落在枚举序列(如改粒度前的历史残行)不可归属,跳过防崩
     if (!slot) continue
     const tokens = rowTokens(row)
     addRowToSlot(slot, row, tokens)
-    if (tokens === 0) continue
-    activeBuckets.add(row.bucket)
-    slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
-    slot.byProvider[row.provider] = (slot.byProvider[row.provider] ?? 0) + tokens
+    // 纯 timing 行(零 token 桶 + decode 配对)不参与归因,但仍进配对聚合
+    if (tokens > 0) {
+      activeBuckets.add(row.bucket)
+      slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
+      slot.byProvider[row.provider] = (slot.byProvider[row.provider] ?? 0) + tokens
+    }
     if (row.durationMs) {
-      const pair = slotSpeeds.get(row.bucket) ?? { outputTokens: 0, durationMs: 0 }
-      pair.outputTokens += row.outputTokens
+      const pair = slotSpeeds.get(row.bucket) ?? { decodeTokens: 0, durationMs: 0 }
+      pair.decodeTokens += speedTokensOf(row)
       pair.durationMs += row.durationMs
       slotSpeeds.set(row.bucket, pair)
+    }
+    if (row.ttftSteps > 0) {
+      const pair = slotTtfts.get(row.bucket) ?? { ttftMs: 0, ttftSteps: 0 }
+      pair.ttftMs += row.ttftMs ?? 0
+      pair.ttftSteps += row.ttftSteps
+      slotTtfts.set(row.bucket, pair)
     }
     const modelTotal = modelTotals.get(row.model)
     if (modelTotal) {
       modelTotal.tokens += tokens
       modelTotal.speedDurationMs += row.durationMs ?? 0
-      modelTotal.speedOutputTokens += row.durationMs ? row.outputTokens : 0
+      modelTotal.speedOutputTokens += speedTokensOf(row)
+      modelTotal.ttftMs += row.ttftMs ?? 0
+      modelTotal.ttftSteps += row.ttftSteps ?? 0
     } else {
       modelTotals.set(row.model, {
         provider: row.provider,
         tokens,
         speedDurationMs: row.durationMs ?? 0,
-        speedOutputTokens: row.durationMs ? row.outputTokens : 0,
+        speedOutputTokens: speedTokensOf(row),
+        ttftMs: row.ttftMs ?? 0,
+        ttftSteps: row.ttftSteps ?? 0,
       })
     }
     providerTotals.set(row.provider, (providerTotals.get(row.provider) ?? 0) + tokens)
   }
-  // 槽级 speed 条件挂:无时长数据的槽不挂字段(存量槽形契约不变)
+  // 槽级 speed/ttft 条件挂:无配对数据的槽不挂字段(存量槽形契约不变)
   for (const slot of slots) {
-    const pair = slotSpeeds.get(slot.day)
-    if (pair && pair.durationMs > 0) slot.speed = pair.outputTokens / (pair.durationMs / MS_PER_SECOND)
+    const speedPair = slotSpeeds.get(slot.day)
+    if (speedPair && speedPair.durationMs > 0) slot.speed = speedPair.decodeTokens / (speedPair.durationMs / MS_PER_SECOND)
+    const ttftPair = slotTtfts.get(slot.day)
+    if (ttftPair && ttftPair.ttftSteps > 0) slot.ttft = ttftPair.ttftMs / ttftPair.ttftSteps
   }
   const totals = { tokens: 0, requests: 0, turns: 0, cacheHit: 0, cacheMiss: 0 }
   for (const slot of slots) {
@@ -151,18 +171,22 @@ export function aggregateRange(rows, g, from, to) {
     totals.cacheHit += slot.cacheHit
     totals.cacheMiss += slot.cacheMiss
   }
-  // speed = 配对口径的输出 token ÷ 模型时长秒;仅时长>0 的行计入分子分母,
-  // 存量旧格式行只进 tokens 不进分母,无时长数据条目不挂 speed 字段
+  // speed = decode 配对口径(decodeTokens ÷ 时长秒);ttft = 首 token 延迟
+  // 加权平均(毫秒);仅配对数据存在的条目挂字段,无数据条目不挂;
+  // 纯 timing 行可能产生 0-token 条目,列表保持只含 token 行(存量契约)
   const models = [...modelTotals.entries()]
+    .filter(([, agg]) => agg.tokens > 0)
     .map(([model, agg]) => ({
       model,
       provider: agg.provider,
       tokens: agg.tokens,
       percent: percentOf(agg.tokens, totals.tokens),
       ...(agg.speedDurationMs > 0 ? { speed: agg.speedOutputTokens / (agg.speedDurationMs / MS_PER_SECOND) } : {}),
+      ...(agg.ttftSteps > 0 ? { ttft: agg.ttftMs / agg.ttftSteps } : {}),
     }))
     .sort((a, b) => b.tokens - a.tokens)
   const providers = [...providerTotals.entries()]
+    .filter(([, tokens]) => tokens > 0)
     .map(([provider, tokens]) => ({ provider, tokens, percent: percentOf(tokens, totals.tokens) }))
     .sort((a, b) => b.tokens - a.tokens)
   const truncated = slots.length > MAX_SLOTS

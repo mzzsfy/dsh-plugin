@@ -208,23 +208,50 @@ export function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
   return titleMatched === true && hasEditor === true && modelIdInputCount === 0
 }
 
-function unwrapResult(result) {
-  if (result !== null && typeof result === 'object' && result.ok === true) return result.value
-  const error = new Error(result && result.error && result.error.message
-    ? result.error.message
-    : 'settings RPC 调用失败')
-  error.code = result && result.error ? result.error.code : undefined
-  throw error
+// settings 传输 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
+// 两种宿主传输形态,能力面在 0.1.1 即存在:
+// - typed remote 面(dsh 0.1.2+):方法直返 RemoteResult 信封 {ok,value|error};
+// - connection.api 面(dsh 0.1.1+):settings.describe() 无参,settings.mutate({ns,ops,...})
+//   单对象参数,返回 {rpcId,result:{ok,value|error}} 信封。
+// 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
+function unwrapEnvelope(envelope) {
+  if (envelope !== null && typeof envelope === 'object' && envelope.ok === true) return envelope.value
+  if (envelope !== null && typeof envelope === 'object' &&
+      envelope.result !== null && typeof envelope.result === 'object') {
+    if (envelope.result.ok === true) return envelope.result.value
+    return rejectRpc(envelope.result.error)
+  }
+  return rejectRpc(envelope && envelope.error)
 }
 
-// dsh 0.1.2 remote.settings 服务 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
-// remote 面缺失或形状不完整返回 null,由调用方降级呈现只读原因。
-export function makeSettingsFace(remote) {
-  if (remote === null || typeof remote !== 'object' ||
-      typeof remote.describe !== 'function' || typeof remote.mutate !== 'function') return null
+function rejectRpc(error) {
+  const rpcError = new Error(error && error.message ? error.message : 'settings RPC 调用失败')
+  rpcError.code = error ? error.code : undefined
+  throw rpcError
+}
+
+export function makeSettingsFace(transport) {
+  if (transport === null || typeof transport !== 'object') return null
+  const typed = typeof transport.describe === 'function' && typeof transport.mutate === 'function'
+  if (typed) {
+    return {
+      describe: async () => unwrapEnvelope(await transport.describe()),
+      mutate: async (ns, ops, expectedRevision) =>
+        unwrapEnvelope(await transport.mutate(ns, ops, expectedRevision)),
+    }
+  }
+  const api = transport.api
+  if (api === null || typeof api !== 'object' ||
+      api.settings === null || typeof api.settings !== 'object' ||
+      typeof api.settings.describe !== 'function' || typeof api.settings.mutate !== 'function') return null
   return {
-    describe: async () => unwrapResult(await remote.describe()),
-    mutate: async (ns, ops, expectedRevision) => unwrapResult(await remote.mutate(ns, ops, expectedRevision)),
+    describe: async () => unwrapEnvelope(await api.settings.describe({})),
+    mutate: async (ns, ops, expectedRevision) =>
+      unwrapEnvelope(await api.settings.mutate({
+        ns,
+        ops,
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      })),
   }
 }
 

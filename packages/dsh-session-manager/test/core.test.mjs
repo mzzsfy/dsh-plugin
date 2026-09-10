@@ -5,6 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  ARCHIVE_PAGE_SIZE,
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_MESSAGES,
@@ -17,8 +18,11 @@ import {
   deleteEligibility,
   diffArchived,
   extractUserInputs,
+  filterArchiveRows,
+  groupArchiveRowsByWorkspace,
   isSessionRunning,
   mergeDeletedEntry,
+  pageArchiveRows,
   projectArchiveRows,
   projectDeletedRows,
   removeDeletedEntry,
@@ -168,6 +172,95 @@ test('workspaceTitleForSession 直接边界:title 与 path 皆缺为 null,title 
   )
   assert.equal(workspaceTitleForSession({ workspaces: 'bad', sessionId: 'a' }), null)
   assert.equal(workspaceTitleForSession({ workspaces: [{ path: 'C:\\w\\a', sessionIds: ['a'] }], sessionId: 'a', cwd: undefined }), 'a')
+})
+
+// ── 归档库:主列表分页 / 工作区分组 / 标题搜索 ──
+
+test('归档库分页:页粒度常量', () => {
+  assert.equal(ARCHIVE_PAGE_SIZE, 100)
+})
+
+test('归档库分页:默认只取前 100 条,剩余数准确', () => {
+  const rows = Array.from({ length: 250 }, (_, i) => ({ id: 's' + i, title: 'T' + i, updatedAt: 1000 - i, workspace: null }))
+  const page = pageArchiveRows(rows, ARCHIVE_PAGE_SIZE)
+  assert.equal(page.visible.length, 100)
+  assert.equal(page.remaining, 150)
+  assert.equal(page.visible[0].id, 's0')
+  assert.equal(page.visible[99].id, 's99')
+})
+
+test('归档库分页:增量展开与全量边界', () => {
+  const rows = Array.from({ length: 250 }, (_, i) => ({ id: 's' + i, title: 'T' + i, updatedAt: i, workspace: null }))
+  assert.equal(pageArchiveRows(rows, 200).visible.length, 200)
+  assert.equal(pageArchiveRows(rows, 200).remaining, 50)
+  assert.deepEqual(pageArchiveRows(rows, rows.length), { visible: rows, remaining: 0 })
+  assert.equal(pageArchiveRows(rows, rows.length + 10).remaining, 0)
+})
+
+test('归档库分页:空列表与非有限可见数防御', () => {
+  assert.deepEqual(pageArchiveRows([], ARCHIVE_PAGE_SIZE), { visible: [], remaining: 0 })
+  const single = [{ id: 'a', title: 'A', updatedAt: 1, workspace: null }]
+  assert.deepEqual(pageArchiveRows(single, Number.NaN).visible, [])
+  assert.equal(pageArchiveRows(single, Number.NaN).remaining, 1)
+  assert.equal(pageArchiveRows(single, -5).remaining, 1)
+  assert.deepEqual(pageArchiveRows(single, Infinity).visible, [])
+  assert.equal(pageArchiveRows(single, Infinity).remaining, 1)
+})
+
+test('归档库分组:按工作区标题分桶,组内保持输入序,组间按最新活跃倒序', () => {
+  const rows = [
+    { id: 'a', title: 'A', updatedAt: 400, workspace: 'alpha' },
+    { id: 'b', title: 'B', updatedAt: 300, workspace: 'beta' },
+    { id: 'c', title: 'C', updatedAt: 200, workspace: 'alpha' },
+  ]
+  assert.deepEqual(groupArchiveRowsByWorkspace(rows), [
+    { workspace: 'alpha', rows: [rows[0], rows[2]] },
+    { workspace: 'beta', rows: [rows[1]] },
+  ])
+})
+
+test('归档库分组:workspace 假值并桶为未分组(null)', () => {
+  const rows = [
+    { id: 'u1', title: 'U1', updatedAt: 100, workspace: null },
+    { id: 'g', title: 'G', updatedAt: 350, workspace: 'gamma' },
+    { id: 'u2', title: 'U2', updatedAt: 500, workspace: '' },
+    { id: 'u3', title: 'U3', updatedAt: 50, workspace: null },
+  ]
+  assert.deepEqual(groupArchiveRowsByWorkspace(rows), [
+    { workspace: null, rows: [rows[0], rows[2], rows[3]] },
+    { workspace: 'gamma', rows: [rows[1]] },
+  ])
+})
+
+test('归档库分组:空输入与非数组防御', () => {
+  assert.deepEqual(groupArchiveRowsByWorkspace([]), [])
+  assert.deepEqual(groupArchiveRowsByWorkspace(undefined), [])
+})
+
+test('归档库搜索:标题不区分大小写子串匹配,空查询返回全量', () => {
+  const rows = [
+    { id: 'a', title: '修复登录页', updatedAt: 3, workspace: null },
+    { id: 'b', title: 'Refactor API', updatedAt: 2, workspace: null },
+    { id: 'c', title: '登录超时排查', updatedAt: 1, workspace: null },
+  ]
+  assert.deepEqual(filterArchiveRows(rows, '登录'), [rows[0], rows[2]])
+  assert.deepEqual(filterArchiveRows(rows, 'REFACT'), [rows[1]])
+  assert.deepEqual(filterArchiveRows(rows, '不存在'), [])
+})
+
+test('归档库搜索:空查询与空白查询原样返回全量,非数组防御', () => {
+  const rows = [{ id: 'a', title: 'A', updatedAt: 1, workspace: null }]
+  assert.deepEqual(filterArchiveRows(rows, ''), rows)
+  assert.deepEqual(filterArchiveRows(rows, '  '), rows)
+  assert.deepEqual(filterArchiveRows(undefined, 'A'), [])
+})
+
+test('归档库搜索:标题缺失经投影回退会话 id 后可被命中(与投影组合)', () => {
+  const projected = projectArchiveRows({
+    rows: [{ id: 'abc-123', title: '', updatedAt: 1 }],
+    archivedIds: ['abc-123'],
+  })
+  assert.deepEqual(filterArchiveRows(projected, 'ABC-'), projected)
 })
 
 test('归档集合差分只报新增,首帧基线不提示', () => {
