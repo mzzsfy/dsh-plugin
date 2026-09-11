@@ -740,6 +740,33 @@ test('collectActiveWork:服务缺失或异常 fail-open 降级', () => {
   assert.equal(realmOnly.detectionAvailable, true)
 })
 
+test('collectActiveWork:无 agent 时 terminals 服务面不可见属常态,不降级', () => {
+  const warns = []
+  const originalWarn = console.warn
+  console.warn = (text) => warns.push(String(text))
+  try {
+    const agents = { list: () => [] }
+    const jobs = { list: () => [] }
+    const result = collectActiveWork({ get: (n) => (n === 'agents' ? agents : n === 'jobs' ? jobs : undefined) })
+    assert.deepEqual([result.agents, result.jobs, result.terminals], [0, 0, 0])
+    assert.equal(result.detectionAvailable, true)
+    // 告警断言受模块级去重影响恒真,防线是上一行 detectionAvailable 断言
+    assert.equal(warns.some((text) => text.includes('活跃工作检测降级')), false, '常态空窗不得打降级告警')
+  } finally {
+    console.warn = originalWarn
+  }
+})
+
+test('collectActiveWork:有 agent 而服务面缺失(可探或不可探),仍降级', () => {
+  const probeless = { id: 'a1', status: 'idle' }
+  const blindProbe = { id: 'a2', status: 'idle', ctx: { get: () => undefined } }
+  const probelessResult = collectActiveWork({ get: (n) => (n === 'agents' ? { list: () => [probeless] } : n === 'jobs' ? { list: () => [] } : undefined) })
+  assert.equal(probelessResult.detectionAvailable, false)
+  const blindResult = collectActiveWork({ get: (n) => (n === 'agents' ? { list: () => [blindProbe] } : n === 'jobs' ? { list: () => [] } : undefined) })
+  assert.equal(blindResult.detectionAvailable, false)
+  assert.equal(blindResult.terminals, 0)
+})
+
 test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
   const agents = { list: () => [{ id: 'a1', status: 'running' }] }
