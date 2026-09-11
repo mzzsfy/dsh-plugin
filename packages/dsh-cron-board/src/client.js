@@ -136,8 +136,23 @@ body{
 .cb-switch input[type="checkbox"]:disabled + .cb-switch__track{opacity:.4;cursor:not-allowed}
 .cb-switch:not(:has(input[type="checkbox"]:disabled)):hover .cb-switch__track{background:var(--cb-accent-deep);opacity:.85}
 .cb-switch input[type="checkbox"]:checked:not(:disabled) + .cb-switch__track:hover{background:var(--cb-accent-deep)}
-.cb-settings{display:flex;flex-direction:column;gap:var(--cb-space-2);padding:var(--cb-space-2) 0}
-.cb-settings__hint{font-size:var(--cb-font-sm);color:var(--cb-text-dim)}
+/* 设置>插件页卡片(cb-pc):镜像官方 PluginCard/SubagentModelSelectionCard 形制,数值与令牌直取官方 CSS Module;
+   官方壳未导出,slot 契约声明卡片外观归插件自持,同页同 dsw-alias 令牌即同观感(含深色主题) */
+.cb-pc{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;list-style:none;transition:border-color .16s,background .16s}
+.cb-pc:hover{border-color:var(--dsw-alias-label-dimmed)}
+.cb-pc--open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}
+.cb-pc__head{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}
+.cb-pc__head:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
+.cb-pc__text{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}
+.cb-pc__name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}
+.cb-pc__desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}
+.cb-pc__chevron{color:var(--dsw-alias-label-tertiary);flex:none;display:inline-flex;transition:transform .16s}
+.cb-pc--open .cb-pc__chevron{transform:rotate(180deg)}
+.cb-pc__body{border-top:.5px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}
+.cb-pc__row{gap:6px;padding:12px 0;display:grid}
+.cb-pc__rowLine{color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:flex-start;gap:16px;font-size:13px;line-height:1.5;display:flex}
+.cb-pc__rowLabel{flex:1;min-width:0}
+.cb-pc__hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .cb-table{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-md)}
 .cb-row{display:flex;align-items:center;gap:var(--cb-space-3);border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-4);flex-wrap:wrap;transition:background .15s,border-color .15s}
 .cb-row:hover{background:var(--cb-hover)}
@@ -147,7 +162,7 @@ body{
 .cb-modal{background:var(--cb-bg);color:var(--cb-text);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:720px;width:min(720px,92vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:var(--cb-space-4);box-shadow:0 12px 40px rgb(31 35 41 / 18%);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
-@media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track{transition:none}}
+@media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
 .cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-3);border-bottom:1px solid var(--cb-border)}
 .cb-modal-title{font-size:16px;font-weight:600}
 .cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-5)}
@@ -239,7 +254,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // 规约 switch:input 锚定状态选择器,视觉由 track+thumb 呈现
     function switchToggle(props) {
       return h('label', { className: 'cb-switch' },
-        h('input', { type: 'checkbox', checked: props.checked, disabled: props.disabled, onChange: props.onChange }),
+        h('input', { type: 'checkbox', checked: props.checked, disabled: props.disabled, onChange: props.onChange,
+          'aria-label': props.ariaLabel }),
         h('span', { className: 'cb-switch__track' }, h('span', { className: 'cb-switch__thumb' })),
         props.label ? h('span', { className: 'cb-meta' }, props.label) : null)
     }
@@ -755,15 +771,25 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const OTHER_PANEL_ACTIVE_ATTRS = ['data-dsh-atb-active', 'data-dsh-taskboard-active', 'data-dsh-ssh-active']
     const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
 
-    // 设置>插件页卡片:sidebarTab 选项;better-sidebar 在场可切换,否则仅展示禁用态
+    // 设置>插件页卡片:官方 PluginCard 形制(名称/描述头部 + chevron 折叠 + 行内开关);better-sidebar 在场可切换,否则仅展示禁用态
+    const CARD_TITLE = '定时任务'
+    const CARD_TOGGLE_LABEL = '看板移入 better-sidebar 侧边栏'
+    const readSidebarTabPref = (outcome) => outcome.ok && outcome.data &&
+      typeof outcome.data.ui === 'object' && outcome.data.ui !== null && outcome.data.ui.sidebarTab === true
+    const CHEVRON_DOWN = () => h('svg', { viewBox: '0 0 14 14', width: 14, height: 14, fill: 'none',
+      stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
+      h('path', { d: 'm3.5 5.5 3.5 3.5 3.5-3.5' }))
+
     function CronBoardPluginCard() {
       const [enabled, setEnabled] = useState(null)
       const [busy, setBusy] = useState(false)
-      const [sidebarReady, setSidebarReady] = useState(Boolean(document.querySelector(SIDEBAR_ROOT_SELECTOR)))
+      const [open, setOpen] = useState(false)
+      // 渲染时重探:侧栏面晚于设置页挂载时,enabled 到达的重渲染会自动纠正禁用态
+      const sidebarReady = Boolean(document.querySelector(SIDEBAR_ROOT_SELECTOR))
       useEffect(() => {
         let alive = true
         request('GET', 'status').then((outcome) => {
-          if (alive) setEnabled(outcome.ok && outcome.data && outcome.data.ui ? outcome.data.ui.sidebarTab === true : false)
+          if (alive) setEnabled(readSidebarTabPref(outcome))
         })
         return () => { alive = false }
       }, [])
@@ -774,16 +800,25 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (outcome.ok && outcome.data && outcome.data.ui) setEnabled(outcome.data.ui.sidebarTab === true)
         setBusy(false)
       }
-      return h('div', { className: 'cb-settings' },
-        switchToggle({
-          checked: enabled === true,
-          disabled: busy || enabled === null || !sidebarReady,
-          onChange: toggle,
-          label: '看板移入 better-sidebar 侧边栏',
-        }),
-        h('div', { className: 'cb-settings__hint' },
-          sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时始终使用主界面。' : '需安装 better-sidebar 后方可切换;未安装时看板始终使用主界面。'),
-      )
+      return h('li', { className: 'cb-pc' + (open ? ' cb-pc--open' : '') },
+        h('button', { type: 'button', className: 'cb-pc__head', 'aria-expanded': open,
+          'aria-label': (open ? '折叠' : '展开') + ': ' + CARD_TITLE, onClick: () => setOpen(!open) },
+          h('span', { className: 'cb-pc__text' },
+            h('span', { className: 'cb-pc__name' }, CARD_TITLE),
+            h('span', { className: 'cb-pc__desc' }, '计划任务看板、环境变量与执行日志')),
+          h('span', { className: 'cb-pc__chevron' }, h(CHEVRON_DOWN))),
+        open ? h('div', { className: 'cb-pc__body' },
+          h('div', { className: 'cb-pc__row' },
+            h('div', { className: 'cb-pc__rowLine' },
+              h('span', { className: 'cb-pc__rowLabel' }, CARD_TOGGLE_LABEL),
+              switchToggle({
+                checked: enabled === true,
+                disabled: busy || enabled === null || !sidebarReady,
+                onChange: toggle,
+                ariaLabel: CARD_TOGGLE_LABEL,
+              })),
+            h('p', { className: 'cb-pc__hint' },
+              sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时始终使用主界面。' : '需安装 better-sidebar 后方可切换;未安装时看板始终使用主界面。'))) : null)
     }
 
     // better-sidebar tab:注册即单实例(single);v0.19.0 起注册只入「可打开」目录,
@@ -958,12 +993,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         const prefWatch = setInterval(async () => {
           try {
             const outcome = await request('GET', 'status')
-            if (outcome.ok && outcome.data && typeof outcome.data.ui === 'object' && outcome.data.ui !== null) {
-              const next = outcome.data.ui.sidebarTab === true
-              if (next !== sidebarTabOn) {
-                sidebarTabOn = next
-                applyPref()
-              }
+            const next = readSidebarTabPref(outcome)
+            if (next !== sidebarTabOn) {
+              sidebarTabOn = next
+              applyPref()
             }
           } catch { /* 轮询失败保形态不变,下轮重试 */ }
         }, 5 * 1000)
