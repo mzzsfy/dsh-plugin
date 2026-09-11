@@ -21,7 +21,7 @@ function clientLogic() {
   const factory = new Function(
     '"use strict";'
       + section
-      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, needsReattach, SEEN_MAP_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow };',
+      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, needsReattach, SEEN_MAP_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore };',
   )
   return factory()
 }
@@ -37,7 +37,50 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP } = L
+  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore } = L
+
+  // 滚动度量构造:{ scrollHeight, scrollTop, clientHeight }
+  const metrics = (scrollHeight, scrollTop, clientHeight) => ({ scrollHeight, scrollTop, clientHeight })
+
+  test(prefix + '置底判定:距离不超过阈值视为置底', () => {
+    // 距离 = 800 - 0 - 600 = 200,远超阈值,非置底
+    assert.equal(isPinned(metrics(800, 0, 600)), false)
+    // 恰好触底(scrollTop = scrollHeight - clientHeight)
+    assert.equal(isPinned(metrics(800, 550, 600)), true)
+    // 距离等于阈值,边界内置底
+    assert.equal(isPinned(metrics(800, 800 - 600 - PIN_THRESHOLD_PX, 600)), true)
+    // 距离超出阈值一个像素,非置底
+    assert.equal(isPinned(metrics(800, 800 - 600 - PIN_THRESHOLD_PX - 1, 600)), false)
+  })
+
+  test(prefix + '置底回补判定:偏离可被高度变化解释才回补', () => {
+    // 展开:高度 +500,原置底,官方未自愈(偏离 500)→ 回补
+    const before = metrics(1000, 300, 700)
+    const afterExpand = metrics(1500, 300, 700)
+    assert.equal(shouldPinRestore(before, afterExpand), true)
+    // 官方已自愈(已在底部)→ 回补判定为真,写入为幂等无操作
+    assert.equal(shouldPinRestore(before, metrics(1500, 800, 700)), true)
+    // 用户落定窗口内主动滚开:偏离超出变化量 + 阈值 → 不回补
+    const userScrolled = metrics(1500, 800 - PIN_THRESHOLD_PX - 1 - 500, 700)
+    assert.equal(shouldPinRestore(before, userScrolled), false)
+    // 收起:高度 -300,无钳制无锚定(偏离 300)→ 回补
+    const afterCollapse = metrics(700, 300, 700)
+    assert.equal(shouldPinRestore(before, afterCollapse), true)
+    // 收起后浏览器已钳制回底部 → 幂等
+    assert.equal(shouldPinRestore(before, metrics(700, 0, 700)), true)
+    // 高度未变化(原点击未改变高度)且已在底 → 幂等回补
+    assert.equal(shouldPinRestore(before, metrics(1000, 300, 700)), true)
+  })
+
+  test(prefix + '置底回补阈值可显式覆盖', () => {
+    const before = metrics(1000, 300, 700)
+    // 阈值 0:偏离恰等于高度变化量(500)→ 回补;再多一像素 → 不回补
+    assert.equal(shouldPinRestore(before, metrics(1500, 300, 700), 0), true)
+    assert.equal(shouldPinRestore(before, metrics(1500, 299, 700), 0), false)
+    // 默认阈值下偏离变化量 + 25 以内 → 回补
+    assert.equal(shouldPinRestore(before, metrics(1500, 275, 700)), true)
+    assert.equal(shouldPinRestore(before, metrics(1500, 274, 700)), false)
+  })
 
   test(prefix + '流式思考自动展开', () => {
     const reg = createRegistry()
@@ -329,7 +372,7 @@ test('LOGIC 段与 logic.mjs 逐函数源码一致(归一化注释与空白,含�
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\s+/g, '')
-  for (const name of ['plan', 'planFinal', 'createRegistry', 'capMap', 'needsReattach', 'registerCurrent']) {
+  for (const name of ['plan', 'planFinal', 'createRegistry', 'capMap', 'needsReattach', 'registerCurrent', 'isPinned', 'shouldPinRestore']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(logic[name].toString()),
@@ -343,7 +386,7 @@ test('LOGIC 段与 logic.mjs 逐函数源码一致(归一化注释与空白,含�
       'LOGIC 段内部助手与 logic.mjs 漂移: ' + name,
     )
   }
-  for (const name of ['STATE_RUNNING', 'STATE_OK', 'SEEN_MAP_CAP']) {
+  for (const name of ['STATE_RUNNING', 'STATE_OK', 'SEEN_MAP_CAP', 'PIN_THRESHOLD_PX']) {
     assert.equal(client[name], logic[name], '常量漂移: ' + name)
   }
 })

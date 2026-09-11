@@ -7,6 +7,22 @@ export const STATE_OK = 'ok'
 // 已见文本 Map 容量上限,超出按插入序裁剪最旧条目(手动/已读标记增长有界)。
 export const SEEN_MAP_CAP = 10 * 20
 
+// 置底判定阈值:与官方滚动跟随的贴近底部语义一致,距离底部不超过该值视为置底。
+export const PIN_THRESHOLD_PX = 25
+
+// 置底判定:视口距底部不超过阈值;度量形态 { scrollHeight, scrollTop, clientHeight }。
+export function isPinned(metrics, threshold = PIN_THRESHOLD_PX) {
+  return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold
+}
+
+// 置底回补判定:动作后偏离底部的量可被本次高度变化解释(官方跟随失效或浏览器
+// 未补偿)才回补;用户在落定窗口内主动滚开的偏离超出该范围,不干预。
+export function shouldPinRestore(before, after, threshold = PIN_THRESHOLD_PX) {
+  const distance = after.scrollHeight - after.scrollTop - after.clientHeight
+  const heightDelta = after.scrollHeight - before.scrollHeight
+  return distance <= Math.abs(heightDelta) + threshold
+}
+
 // 前缀匹配:空串 seen 会命中任意行,视为无匹配。
 function prefixOf(seen, text) {
   return seen.length > 0 && text.length >= seen.length && text.startsWith(seen)
