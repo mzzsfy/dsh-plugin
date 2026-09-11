@@ -40,7 +40,11 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
 
 ### 禁用与还原
 
-宿主注册面(adapter/directory/discovery/settings 命名空间)全部排他,官方插件与本包无法共存,因此**官方行的禁用由本包 bundle patch 静态声明,不随本包行被禁用而失效**。要停用本包回到官方行为,必须在更高层 patch 层(profile 或 `~/.dsh/cordis.patch.yml`)**同时写两行**:
+宿主注册面(adapter/directory/discovery/settings 命名空间)全部排他,官方插件与本包无法共存,因此**官方行的禁用由本包 bundle patch 静态声明,不随本包行被禁用而失效**。
+
+**dsh-market 开关 / 单行禁用(普通用户)**:直接在 dsh-market 点禁用,或只写一行 `- id: llm-pi-gateway` + `disabled: true`。bundle patch 会同时插入一个哨兵行(`llm-pi-gateway/guard`,market 的行写入对其 id 拒绝,不会被连带禁用):两行同禁的窗口期(点禁用后到下次重启)内,哨兵动态挂载官方插件恢复服务,所有模型继续可用;重启后本包 patch 随 bundle 移出(market 对本包按 disable-carrier 处理),官方插件原生接管,哨兵自动退场。重新点启用则哨兵先卸载,本包无缝接管回来。market 路径每次开关会对哨兵行记一条「行 id 含特殊字符,不支持写入补丁层」警告,属预期噪音。手写单行禁用(不移出 bundles)时,哨兵的自愈在每次重启后重新生效,死态窗口由哨兵长期兜底。
+
+**补丁层两行禁用(高级用户,不重启即时生效)**:
 
 ```yaml
 - id: llm-pi-gateway
@@ -49,8 +53,7 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
   disabled: false
 ```
 
-- 只写第一行(仅禁用本包行)→ 官方行仍被 bundle patch 禁用 → 无插件服务 provider 路由,所有自定义模型不可用
-- 本包对官方行的复活做了让位守卫:上述两行写入后热重载时,本包在官方插件重新注册前自停让位,官方无缝接管,不出现注册冲突拖垮 patch 应用;反之删掉这两行恢复接管时,本包会等官方插件退场落定后再接管
+- 官方行复活让位守卫:上述两行写入后热重载时,本包在官方插件重新注册前自停让位,官方无缝接管,不出现注册冲突拖垮 patch 应用;反之删掉这两行恢复接管时,本包等官方插件退场落定后再接管
 - 完全卸载本包(`dsh plugin remove`)无需任何 patch 改动,patch 随 bundle 移除,官方行自动恢复
 - 两节 provider 同名重叠时的归属:官方在场(让位态)下官方插件先注册,本包自有节若声明了与官方节同名的 provider,整组路由注册被宿主排他检查拒绝,本包节路由(含不重叠的)整体不服务,仅日志披露——让位态请避免两节同名,或接受官方节优先
 - 官方行 `disabled` 写为 `!!js` 表达式且求值出错时,本包按未禁用让位(官方节归官方,不制造注册冲突);若官方行实际未启用,会出现双空闲(provider 路由无人服务),需修正表达式或改静态布尔

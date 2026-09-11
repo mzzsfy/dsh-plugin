@@ -8,11 +8,22 @@
 # enhanced routes. Uninstalling this bundle removes the patch, the official
 # row re-enables, and the official plugin serves the same profiles again.
 #
+# Dead-state self-heal: the second inserted row (`llm-pi-gateway/guard`) is
+# a sentinel. While BOTH the gateway row and the official row are disabled
+# (e.g. the dsh-market toggle disables the gateway row instantly while its
+# bundle removal only lands on the next boot), the sentinel dynamically
+# mounts the official plugin so models keep working. When the gateway row
+# comes back, the sentinel unmounts first and the gateway takes over with
+# zero registration conflicts. The sentinel id contains a "/", which the
+# dsh-market row writer refuses to persist, so the sentinel survives the
+# market toggle and is the only live self-heal executor in that window.
+#
 # Escape hatch: bundle patches load unconditionally while the bundle stays
-# listed, so disabling the gateway row ALONE leaves the official row
-# disabled with no plugin serving the provider profiles. To hand control
-# back, a later patch layer (profile cordis.patch.yml or --patch overlay)
-# must BOTH disable the gateway row and re-enable the official row:
+# listed, so disabling the gateway row ALONE would leave the official row
+# disabled — the sentinel covers that window, and a restart removes this
+# bundle's patch entirely (market uninstall or carrier toggle), restoring
+# the official plugin natively. To hand control back WITHOUT restarting,
+# also re-enable the official row:
 #
 #   - id: llm-pi-gateway
 #     disabled: true
@@ -29,3 +40,5 @@
 - insert:
     - id: llm-pi-gateway
       name: '@mzzsfy/dsh-llm-pi-gateway'
+    - id: llm-pi-gateway/guard
+      name: '@mzzsfy/dsh-llm-pi-gateway/guard'
