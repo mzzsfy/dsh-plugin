@@ -14,6 +14,11 @@ export const OFFICIAL_ENTRY_ID = 'llm-pi-ai'
 export const EXIT_POLL_INTERVAL_MS = 20
 export const EXIT_POLL_ROUNDS = 50
 
+// 行 id 解析候选前缀:宿主把 profile 行树经 cordis:include 行挂载(嵌套
+// 分隔符 EntryTree.sep = ":"),受控行的实际解析 id 带前缀;空串覆盖裸树
+// 形态。resolve 对缺失 id 抛错,调用方逐候选试解
+export const ROW_ID_PREFIXES = ['include:', '']
+
 const ABSENT = Object.freeze({ present: false, disabled: false, running: false, entry: undefined })
 
 // 宿主 Entry.disabled getter 语义:!!js 表达式求值 + 父链回溯 + 布尔宽化,
@@ -36,11 +41,18 @@ function effectiveDisabled(entry) {
 export function officialEntryState(loader) {
   if (loader?.resolve === undefined) return ABSENT
   let entry
-  try {
-    entry = loader.resolve(OFFICIAL_ENTRY_ID)
-  } catch {
-    return ABSENT
+  for (const prefix of ROW_ID_PREFIXES) {
+    try {
+      const candidate = loader.resolve(prefix + OFFICIAL_ENTRY_ID)
+      if (candidate) {
+        entry = candidate
+        break
+      }
+    } catch {
+      // 该命名空间无此行,试下一前缀
+    }
   }
+  if (!entry) return ABSENT
   return {
     present: true,
     disabled: effectiveDisabled(entry),

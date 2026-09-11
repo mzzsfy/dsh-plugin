@@ -15,6 +15,7 @@ import {
   awaitOfficialExit,
   installOfficialRevivalGuard,
 } from './takeover.mjs'
+import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from './apply-state.mjs'
 
 export const name = 'llm-pi-gateway'
 
@@ -83,6 +84,9 @@ export function missingHostExports(dshLlm) {
  *   静态 import 命名导出缺失即加载崩溃,违反干净禁用规约)
  */
 export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai')) {
+  // 生命周期旗标:guard 据此识别本行的功能性停摆(早退 = 假活,详见
+  // apply-state.mjs);中途崩溃旗标停留 undefined,guard 保守不代挂
+  beginGatewayApply()
   // 宿主兼容探测,两项独立:
   // 1) settings 服务面:installSection 为 0.1.2-alpha.2+ 引入(与 peerDependencies
   //    对齐);旧宿主缺失即禁用。此探测直接读运行宿主注入的服务对象,不受插件
@@ -92,12 +96,14 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   //    import 命名导出缺失即加载崩溃;旧本体缺失时同样禁用,boot 保持干净。
   if (typeof ctx.settings?.installSection !== 'function') {
     ctx.logger.warn('llm-pi-gateway: 宿主 settings 服务缺少 installSection(需要 dsh 本体 0.1.2+),插件禁用')
+    endGatewayApplyInactive()
     return undefined
   }
   const dshLlm = await import('@deepseek-ai/dsh-llm')
   const missing = missingHostExports(dshLlm)
   if (missing.length > 0) {
     ctx.logger.warn(`llm-pi-gateway: 宿主缺少 ${missing.join(', ')}(需要 dsh 本体 0.1.2+),插件禁用`)
+    endGatewayApplyInactive()
     return undefined
   }
   // 官方 Config 同样动态获取:官方包缺失(patch 未生效但包被移除/版本演进)时
@@ -231,4 +237,5 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // 启动 fail loud:组合后不可服务的配置在加载期失败(与官方一致)
   profiles()
   onSectionChange()
+  endGatewayApplyActive()
 }
