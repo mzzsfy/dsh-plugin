@@ -151,6 +151,22 @@ test('反查:容器换引用(快照更替)后新节点可见', () => {
   assert.equal(turnTokenUsageOfMessage(oldNodes, 'm-1'), oldUsage)
 })
 
+test('反查:仓库身份恒定而节点集更替时新增回合可见', () => {
+  // Given 官方 chat 仓库语义:store 实例身份跨回合恒定,values() 返回的节点集数组随 upsert 换新引用
+  const usage1 = { uncachedInputTokens: 1, outputTokens: 1, totalTokens: 2 }
+  const usage2 = { uncachedInputTokens: 7, outputTokens: 7, totalTokens: 14 }
+  let snapshot = [tailNode('m-1', usage1)]
+  const store = { values: () => snapshot }
+  assert.equal(turnUsageSourceOfMessage(store, 'm-1'), usage1)
+  // When 第二回合 turn-tail 节点入库(同一 store,节点集数组换引用)
+  snapshot = [...snapshot, tailNode('m-2', usage2)]
+  // Then 新回合反查命中,不依赖页面刷新重建索引
+  assert.equal(turnUsageSourceOfMessage(store, 'm-2'), usage2)
+  assert.equal(turnTokenUsageOfMessage(store, 'm-2'), usage2)
+  // 旧回合反查不受重建影响
+  assert.equal(turnUsageSourceOfMessage(store, 'm-1'), usage1)
+})
+
 test('计价模型键:双全拼两段,仅 model 用裸名,双缺回退全通配键', () => {
   assert.equal(turnModelOf({ routes: [{ provider: 'p', model: 'm' }] }), 'p/m')
   assert.equal(turnModelOf({ routes: [{ model: 'm' }] }), 'm')

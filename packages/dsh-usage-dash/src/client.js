@@ -1383,15 +1383,20 @@ const TURN_COST_CHIP_ORDER = 20 + 10
 // messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
 // 回合级用量优先取回合位置数据(location.turn.data.get('turn-tail')).tokenUsage(官方 tokenUsage 聚合,
 // 分页窗口缺 turn/start 时缺席),回退视图节点 data.closing.usage(末步用量采样,输入侧已含缓存,计费口径同源)
-// 索引缓存:每份节点表快照只全量扫描一次建 messageId→turn-tail 索引(WeakMap 随快照释放),
-// 长会话流式期间多芯片各自全量扫描是 O(消息数×节点数) 放大,索引后单快照 O(节点数)
+// 索引缓存:键取节点集数组身份 —— 官方 chat store 实例身份跨回合恒定,values() 返回的缓存数组
+// 随节点集更替换新引用:未变时全芯片共享一次扫描,新增回合节点经 values() 换引用自动失效重建
+// (按 store 实例为键会让新节点永远查不到旧索引,表现为回合费用芯片刷新后才出现);
+// Map/迭代器形态(测试兼容)仍按容器为键
 const TURN_USAGE_INDEX_CACHE = new WeakMap()
 
 function turnUsageIndexOf(nodes) {
-  let index = TURN_USAGE_INDEX_CACHE.get(nodes)
+  const source = nodes && typeof nodes.values === 'function' ? nodes.values() : nodes
+  const snapshotForm = Array.isArray(source)
+  const cacheKey = snapshotForm ? source : nodes
+  let index = TURN_USAGE_INDEX_CACHE.get(cacheKey)
   if (index !== undefined) return index
   index = new Map()
-  const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
+  const list = snapshotForm ? source : typeof source?.[Symbol.iterator] === 'function' ? [...source] : source
   if (Array.isArray(list)) {
     for (const node of list) {
       try {
@@ -1402,13 +1407,13 @@ function turnUsageIndexOf(nodes) {
       } catch { /* 单节点形状残缺跳过 */ }
     }
   }
-  TURN_USAGE_INDEX_CACHE.set(nodes, index)
+  TURN_USAGE_INDEX_CACHE.set(cacheKey, index)
   return index
 }
 
 function turnTokenUsageOfMessage(nodes, messageId) {
   // 非对象(含 null/undefined)直接 null:WeakMap 键要求对象,展开校验收进索引构建,
-  // 每快照只物化一次节点序列
+  // 每份节点集只物化一次节点序列
   if (nodes === null || typeof nodes !== 'object') return null
   const node = turnUsageIndexOf(nodes).get(messageId)
   if (node === undefined) return null
