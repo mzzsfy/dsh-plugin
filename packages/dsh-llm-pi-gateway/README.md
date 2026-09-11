@@ -1,13 +1,39 @@
 # @mzzsfy/dsh-llm-pi-gateway
 
-DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增强替换——为 newapi 等网关路由提供全协议会话标记(渠道亲和性)、compat 全控、metadata 模板透传与静态 headers,实现会话粘性负载,最大化上游 prompt cache 命中。
+把 DSH 会话的 sessionId 注入发往 newapi 等 LLM 网关的每个请求,供网关做请求亲和性(粘性会话路由):同一会话的请求稳定落到同一上游渠道,上游 prompt cache 命中是这种路由方式的结果。形态上是官方 `dsh-llm-pi-ai` 的零感知增强替换(装上即接管、卸载即还原),compat 全控、metadata 模板透传与静态 headers 兜底一并提供。
+
+## sessionId 注入通道
+
+核心能力:每条路由的每个上游请求自动携带会话标识,网关按任一载体做粘性键即可实现请求亲和性:
+
+| 通道 | 载体 | 值 | 生效条件 |
+| --- | --- | --- | --- |
+| 请求体标记 | anthropic-messages 写 `metadata.user_id`(同 Claude Code);openai-completions / openai-responses 写顶层 `prompt_cache_key`(同 Codex,无 `prompt_cache_retention` 副作用) | sessionId 单向派生的稳定标记 `dsh:<sha256 前 40 位>`,前缀可配 | 默认开启,每路由可关(`sessionMarker.enabled`);不受 `cacheRetention` 影响 |
+| 亲和头 | 按协议与 `sessionAffinityFormat`,精确映射见下 | 裸 sessionId 原样 | sessionId 在场且 `cacheRetention` ≠ `none`;anthropic-messages / openai-completions 另需 compat `sendSessionAffinityHeaders: true`,openai-responses 无需 compat |
+| metadata 模板 | anthropic `metadata` 任意键透传(openai 系路由声明 metadata 无效果) | 字符串值渲染 `{sessionId}` / `{marker}` 占位符 | 依赖标记通道:非 user_id 键经标记 onPayload 合入请求体,`sessionMarker.enabled=false` 时仅 user_id 键经 pi-ai 原生转发,其余键不上 wire;模板 `user_id` 键标记开启时恒被派生标记覆盖 |
+| 静态 headers | 任意网关约定的自定义头 | 固定值 | 声明即生效;与亲和头同名时静态头后写覆盖;请避开 attribution 保留头名 |
+
+亲和头精确映射(头集合随协议与 `sessionAffinityFormat` 不同,网关粘性键须按所选形态勾选):
+
+| 协议 | 头集合 |
+| --- | --- |
+| anthropic-messages | `x-session-affinity` |
+| openai-completions | format `openai`:`session_id` + `x-client-request-id` + `x-session-affinity`;format `openai-nosession`:`x-client-request-id` + `x-session-affinity`;format `openrouter`:`x-session-id` |
+| openai-responses | format `openai`:`session_id` + `x-client-request-id`;format `openai-nosession`:`x-client-request-id`;format `openrouter`:`x-session-id` |
+
+format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹配)或 baseUrl 含 `openrouter.ai` 判为 `openrouter`,否则 `openai`——newapi 类路由未声明即按 `openai` 头集合发射。
+
+- 标记经 pi-ai `onPayload`(请求体发出前最后一步)直写,不依赖 baseURL / retention 条件,上游原生发射的同名键以本包值覆盖;路由按显式 api 直注,形状判别仅为 api 缺失时的兜底,未知形状不注入。
+- 亲和头由 pi-ai 按路由 compat 与 `cacheRetention` 门控:`cacheRetention: none` 抑制全部亲和头(亲和头不再携带会话 id,请求体通道不受影响);`sessionAffinityFormat` 仅 openai 系 compat 名单内合法,取值 `openai` / `openai-nosession` / `openrouter`,声明其他值不报错但产生残缺头集合。
+- sessionId 缺省契约:标记关闭且模板不引用 `{sessionId}` 的路由允许请求缺省 sessionId(官方 wire 契约同构);接管路由标记默认开启,sessionId 因此默认必填。
+- 粘性生效前提:网关侧按对应键做亲和路由,粘性键勾选上述载体之一(`metadata.user_id` / `prompt_cache_key` / `x-session-affinity` / `x-client-request-id` / `session_id` / `x-session-id`,按路由协议与 format 取其一);本包只保证标识发出,网关行为不在边界内。
 
 ## 零感知接管(0.2.0 起)
 
 **装上即生效,用户无感**:插件通过 bundle patch 禁用官方 `dsh-llm-pi-ai` 行,并以**官方包自己的 Config schema** 接管 `llm-pi-ai:` 设置节——
 
 - 现有官方配置**原样保留、原样生效**,路由名不变:`agent-default-model`、quota 面板、Models 页面、历史会话全部无缝继续
-- 接管的路由自动获得会话标记(粘性默认开启),其余行为与官方逐项对表(见下节)
+- 接管的路由自动获得 sessionId 注入(请求体标记默认开启;亲和头 anthropic-messages / openai-completions 经 compat 开启,openai-responses 默认开启),其余行为与官方逐项对表(见下节)
 - `llm-pi-gateway:` 节仍可用:独立声明路由,或与官方节同名时整体覆盖(增强)
 - **卸载即还原**:patch 随 bundle 移除,官方插件恢复,同一份配置继续由官方服务
 - 防御:若 patch 失效(宿主升级等)官方插件仍在,本包接管官方节失败时降级为只服务 `llm-pi-gateway:` 节并记日志(命名空间注册冲突与一般失败区分文案),不阻塞启动;官方包本体不可用时同样降级并告警
@@ -61,13 +87,10 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 | 模型发现 | `INVALID_CREDENTIAL` | 发现请求凭据被上游拒绝 |
 | 模型发现 | `ABORTED` | 发现请求被调用方中止 |
 
-## 功能
+## 其他功能
 
 - **图片输入(多模态,官方管线同构)**:请求含图片且模型声明 `input: [text, image]` 时,经 attachments 服务读出为 base64 块(handle 文本 + `image` 块),预算策略 `maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes` 与官方同款(缺省 20MiB / 4Mi 像素 / 1MiB);非 user 角色图片、模型无 image 能力、attachments 服务缺失均按官方语义 `UNSUPPORTED_CONTENT`;纯文本路径零开销。
-- **全协议会话标记(默认开启,每路由可关)**:请求体自动携带由 sessionId 单向派生的稳定标记(`dsh:<sha256 前 40 位>`,前缀可配)——anthropic-messages 写 `metadata.user_id`(同 Claude Code),openai-completions / openai-responses 写顶层 `prompt_cache_key`(同 Codex,无 `prompt_cache_retention` 副作用);未知协议形状不注入。经 pi-ai `onPayload`(请求体发出前最后一步)直写,不依赖 baseURL / retention 条件,上游原生发射时以本包标记覆盖。
-- **compat 全控**:官方包 withhold 的粘性等字段全部开放(`sendSessionAffinityHeaders`、`sessionAffinityFormat`、`supportsDeveloperRole` 等),字段名按 pi-ai 0.84.4 各协议 compat 类型校验,值为 null 拒绝;模型级 compat 覆盖路由级。
-- **metadata 模板透传**:字符串值支持 `{sessionId}` / `{marker}` 占位符;标记注入与模板独立,模板 `user_id` 键被标记覆盖,其余键照常透传。
-- **静态 headers**:任意网关约定的兜底通道(请避开 attribution 保留头名)。
+- **compat 全控**:官方包(0.1.2-rc.1)withhold 的字段全部开放(`supportsDeveloperRole` 等;`sendSessionAffinityHeaders` / `sessionAffinityFormat` 即上表亲和头通道),字段名按 pi-ai 0.84.4 各协议 compat 类型校验,值为 null 拒绝;模型级 compat 覆盖路由级。
 - **多模型路由**:一条路由声明多个模型,按请求 model 字段分发,未命中返回 `UNKNOWN_MODEL`。
 
 ## 配置(settings.yaml 命名空间 `llm-pi-gateway`)
@@ -75,30 +98,28 @@ DeepSeek Harness pi-ai 透传网关插件:官方 `dsh-llm-pi-ai` 的零感知增
 ```yaml
 llm-pi-gateway:
   providers:
-    new-api:                        # 路由名 = LLM provider 名
-      displayName: New API          # 可选,配置面/选择器显示名
+    new-api-claude:                 # 路由名 = LLM provider 名
+      displayName: New API Claude   # 可选,配置面/选择器显示名
       api: anthropic-messages       # 或 openai-completions / openai-responses
       baseURL: https://newapi.example.com
       apiKeyEnv: NEW_API_API_KEY    # 凭据引用(credentials 服务或环境变量)
       reasoning: high               # 可选,路由级默认档位(模型需支持)
-      sessionMarker:                # 会话标记,默认开启
+      sessionMarker:                # 会话标记(请求体通道),默认开启
         enabled: true
         prefix: dsh                 # 派生标记前缀
-      metadata:                     # anthropic metadata 模板(可选)
-        user_id: '{"gateway":"newapi","session":"{sessionId}"}'
-      compat:                       # 路由级 compat 覆盖,无 withhold
-        sendSessionAffinityHeaders: true
-        sessionAffinityFormat: openai   # 仅 openai 系协议生效
+      metadata:                     # anthropic metadata 模板(可选);user_id 键由标记占用,勿在此声明
+        gateway: newapi
+        session: '{sessionId}'
+      compat:                       # 路由级 compat 覆盖,无 withhold;字段按协议名单校验
+        sendSessionAffinityHeaders: true   # 亲和头通道(anthropic 即 x-session-affinity)
       headers:                      # 静态自定义头(粘性兜底通道)
         x-gateway-group: pool-a
-      cacheRetention: short         # 可选:none / short / long
+      cacheRetention: short         # 可选:none / short / long(none 会抑制亲和头)
       defaultContextWindow: 262144  # 可选,模型未声明时的兜底
       retryPolicy:                  # 可选,注册捕获,进 runtime 重试
         mode: normal
         maxRetries: 2
       models:
-        - id: auto
-          contextWindow: 200000
         - id: claude-sonnet
           name: Claude Sonnet
           input: [text, image]
@@ -108,20 +129,23 @@ llm-pi-gateway:
           reasoningEfforts:
             off:
             low: low
+            high: high
             max: ultra
           compat:
             sendSessionAffinityHeaders: true
+    new-api-gpt:                    # openai 系协议示例(sessionAffinityFormat 仅在此类协议合法)
+      api: openai-responses         # 或 openai-completions
+      baseURL: https://newapi.example.com/v1
+      apiKeyEnv: NEW_API_API_KEY
+      compat:
+        sessionAffinityFormat: openai   # openai / openai-nosession / openrouter,头集合见注入通道表
+      models:
         - id: gpt-4o
-          compat:
-            sendSessionAffinityHeaders: true
-            sessionAffinityFormat: openai   # openai 三头 / openrouter 单头 x-session-id
 ```
 
+路由与模型的全量可配键以本包 settings schema 为准,示例未穷举。
+
 配置修改**即时生效**(无需重启);解析失败时保留上一份好配置。纯 host 端,无 GUI。
-
-## 粘性生效前提
-
-网关侧需按对应键路由:newapi 粘性键勾选 `metadata.user_id` / `x-session-affinity` / `x-session-id` / `prompt_cache_key` 之一。本包只保证标识发出,网关行为不在边界内。
 
 ## 安装
 
@@ -129,16 +153,16 @@ llm-pi-gateway:
 dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 ```
 
-重启 dsh 生效。**无需任何配置改动**:官方 `llm-pi-ai:` 节原样接管(官方 schema 消费),路由名不变,粘性自动开启。`llm-pi-gateway:` 节仅用于增强覆盖(同名整体优先)或独立路由。
+重启 dsh 生效。**无需任何配置改动**:官方 `llm-pi-ai:` 节原样接管(官方 schema 消费),路由名不变,sessionId 注入自动开启(请求体标记)。`llm-pi-gateway:` 节仅用于增强覆盖(同名整体优先)或独立路由。
 
 卸载插件 = 官方原样接管回来,同一份配置继续工作。
 
 ## 已知取舍
 
-- 事件流适配与 pi-ai 数据结构耦合,pi-ai 协议 payload 形状大改时标记器判别需跟随;未知形状不注入保证不误伤。
+- 事件流适配与 pi-ai 数据结构耦合;路由按显式 api 直注标记,形状判别仅为 api 缺失的兜底路径,未知形状不注入。
 - 无流空闲超时看门狗(官方 0.1.2-rc.1 经 `streamIdleTimeoutMs` 300 秒兜底;实现需进程内动态 import dsh-timeout,宿主可达性待实测后补齐,当前纯披露);pi-ai 依赖下界较官方收紧(官方 0.1.2-rc.1 为 ^0.84.2,本包因 compat 名单取材 0.84.4 抬至 ^0.84.4),官方升级范围时本包需跟随。
-- sessionMarker.enabled=false 不拦截 metadata 模板的静态 user_id 键透传(该键来自模板而非标记器,不含会话派生标识)。
-- `sessionId` 缺省契约:会话标记关闭且模板不引用 `{sessionId}` 的路由允许缺失(官方 wire 契约同构,缺省即省略该键);接管路由会话标记**默认开启**,sessionId 因此默认必填——官方节路由无法声明关闭该键,依赖 sessionId 的零感知承诺仅对显式关闭标记或模板不引用的路由兑现。
+- sessionMarker.enabled=false 不拦截 metadata 模板的静态 user_id 键透传(该键来自模板而非标记器,不含会话派生标识);模板其余键经标记 onPayload 合入,标记关闭时不上 wire。标记关闭时 openai 系的原生 `prompt_cache_key` 随之不再被覆盖,pi-ai 原生行为仍在:openai-responses 在 retention ≠ none(未配置默认 short)时携带截断裸 sessionId;openai-completions 在 baseUrl 含 api.openai.com、或 retention 为 long 且 compat 允许时同——依赖派生标记隐藏内部会话 id 的场景此时应改用其他载体做粘性键。
+- `sessionId` 缺省契约:会话标记关闭且模板不引用 `{sessionId}` 的路由允许缺失(官方 wire 契约同构,缺省即省略该键);接管路由会话标记**默认开启**,sessionId 因此默认必填——sessionId 缺省承诺仅对显式关闭标记且模板不引用 `{sessionId}` 的路由兑现。
 - 上游错误以文本分类(pi-ai 把捕获错误展平为 message 字符串),quota/超窗判定用官方同款判定器,其余分支与官方同序同构。
 - 本包未复用 dsh-llm 类(插件依赖以副本安装,class 身份不通;错误以 own `code` / `failure` 数据属性被 harness 错误边界识别),官方公共导出仅消费纯函数与 schema 对象。
 - `reasoningEfforts` → `thinkingLevelMap` 解析为平行实现(官方未导出该函数),以对表测试锚定语义。

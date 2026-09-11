@@ -1,6 +1,6 @@
 {
   "name": "@mzzsfy/dsh-llm-pi-gateway",
-  "description": "NewAPI 等 LLM 网关接入:跨协议会话粘性标记,提升网关侧 prompt 缓存命中,compat 全开放",
+  "description": "NewAPI 等 LLM 网关接入:向每个上游请求注入会话 sessionId(请求体派生标记 + 亲和头裸 sessionId),供网关做请求亲和性粘性路由,compat 全开放",
   "version": "0.2.7",
   "type": "module",
   "main": "src/index.js",
