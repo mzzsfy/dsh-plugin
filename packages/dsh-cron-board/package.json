@@ -1,6 +1,6 @@
 {
   "name": "@mzzsfy/dsh-cron-board",
-  "description": "轻量级青龙面板:环境变量集中管理与定时任务调度,执行体支持本地脚本与 dsh 会话任务",
+  "description": "轻量级定时任务看板:环境变量集中管理与定时任务调度,执行体支持本地脚本与 dsh 会话任务",
   "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",

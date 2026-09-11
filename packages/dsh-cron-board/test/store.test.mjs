@@ -70,7 +70,7 @@ test('store:同名环境变量多条合法', async (t) => {
   await store.envs.create({ name: 'WX_KEY', value: 'a', remarks: '', enabled: true })
   // When 再创建同名不同值
   await store.envs.create({ name: 'WX_KEY', value: 'b', remarks: '', enabled: true })
-  // Then 两条并存(青龙多账号语义)
+  // Then 两条并存(多账号语义)
   const same = store.envs.list().filter((row) => row.name === 'WX_KEY')
   assert.equal(same.length, 2)
 })

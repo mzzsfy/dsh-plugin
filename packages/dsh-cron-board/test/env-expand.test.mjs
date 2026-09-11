@@ -1,4 +1,4 @@
-// 环境变量同名多值展开测试(青龙多账号语义,设计 §4.2)。
+// 环境变量同名多值展开测试(多账号语义,设计 §4.2)。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

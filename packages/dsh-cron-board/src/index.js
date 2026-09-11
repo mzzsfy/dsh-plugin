@@ -1,4 +1,4 @@
-// dsh-cron-board Host 半区:轻量级青龙面板。环境变量集中管理 + 定时任务(cron)调度,
+// dsh-cron-board Host 半区:轻量级定时任务看板。环境变量集中管理 + 定时任务(cron)调度,
 // 执行体两类:本地脚本(宿主进程内 spawn)与 dsh 会话任务(定时向 dsh 会话投递任务文本)。
 // 模块分层:store(持久化)/ logger(日志)/ executor(执行链)/ scheduler(调度)/ api(路由)。
 // timer 为软依赖(嵌套注入,缺失降级只影响自动调度);settings 缺省时读默认常量。
