@@ -38,6 +38,23 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
 - **卸载即还原**:patch 随 bundle 移除,官方插件恢复,同一份配置继续由官方服务
 - 防御:若 patch 失效(宿主升级等)官方插件仍在,本包接管官方节失败时降级为只服务 `llm-pi-gateway:` 节并记日志(命名空间注册冲突与一般失败区分文案),不阻塞启动;官方包本体不可用时同样降级并告警
 
+### 禁用与还原
+
+宿主注册面(adapter/directory/discovery/settings 命名空间)全部排他,官方插件与本包无法共存,因此**官方行的禁用由本包 bundle patch 静态声明,不随本包行被禁用而失效**。要停用本包回到官方行为,必须在更高层 patch 层(profile 或 `~/.dsh/cordis.patch.yml`)**同时写两行**:
+
+```yaml
+- id: llm-pi-gateway
+  disabled: true
+- id: llm-pi-ai
+  disabled: false
+```
+
+- 只写第一行(仅禁用本包行)→ 官方行仍被 bundle patch 禁用 → 无插件服务 provider 路由,所有自定义模型不可用
+- 本包对官方行的复活做了让位守卫:上述两行写入后热重载时,本包在官方插件重新注册前自停让位,官方无缝接管,不出现注册冲突拖垮 patch 应用;反之删掉这两行恢复接管时,本包会等官方插件退场落定后再接管
+- 完全卸载本包(`dsh plugin remove`)无需任何 patch 改动,patch 随 bundle 移除,官方行自动恢复
+- 两节 provider 同名重叠时的归属:官方在场(让位态)下官方插件先注册,本包自有节若声明了与官方节同名的 provider,整组路由注册被宿主排他检查拒绝,本包节路由(含不重叠的)整体不服务,仅日志披露——让位态请避免两节同名,或接受官方节优先
+- 官方行 `disabled` 写为 `!!js` 表达式且求值出错时,本包按未禁用让位(官方节归官方,不制造注册冲突);若官方行实际未启用,会出现双空闲(provider 路由无人服务),需修正表达式或改静态布尔
+
 ## 官方兼容
 
 需要 dsh 本体 0.1.2 及以上:激活时动态探测 dsh-llm 的 `resolveImageAttachmentAccess` / `offloadedImageText`(0.1.2 引入),缺失即打日志禁用插件,不注册 adapter 与 settings 节,不影响宿主启动与其他插件。

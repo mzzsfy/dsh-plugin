@@ -7,10 +7,21 @@
 # marking; the `llm-pi-gateway` section stays available for standalone or
 # enhanced routes. Uninstalling this bundle removes the patch, the official
 # row re-enables, and the official plugin serves the same profiles again.
-# Escape hatch: a later patch layer (profile cordis.patch.yml or --patch
-# overlay) can re-enable the official row, in which case this plugin logs a
-# takeover failure and serves only its own section (same-name routes would
-# collide, so the official plugin keeps those it declares).
+#
+# Escape hatch: bundle patches load unconditionally while the bundle stays
+# listed, so disabling the gateway row ALONE leaves the official row
+# disabled with no plugin serving the provider profiles. To hand control
+# back, a later patch layer (profile cordis.patch.yml or --patch overlay)
+# must BOTH disable the gateway row and re-enable the official row:
+#
+#   - id: llm-pi-gateway
+#     disabled: true
+#   - id: llm-pi-ai
+#     disabled: false
+#
+# The gateway yields on its own before the official plugin re-registers
+# (revival guard), and re-takes-over only after the official plugin has
+# exited, so the switch over is live-reload safe in both directions.
 
 - id: llm-pi-ai
   disabled: true

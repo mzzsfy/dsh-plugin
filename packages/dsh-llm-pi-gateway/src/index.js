@@ -9,6 +9,12 @@ import { createCredentialResolver } from './credentials.mjs'
 import { createRouteManager } from './manager.mjs'
 import { discoverModels } from './discovery.mjs'
 import { takeoverFailureText } from './errors.mjs'
+import {
+  officialEntryState,
+  takeoverDecision,
+  awaitOfficialExit,
+  installOfficialRevivalGuard,
+} from './takeover.mjs'
 
 export const name = 'llm-pi-gateway'
 
@@ -100,6 +106,25 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   if (OfficialConfig === undefined) {
     ctx.logger.warn('llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节')
   }
+  // 官方 entry 生命周期决策:接管(官方行停稳/缺席)/等待退场/让位(用户层
+  // 启用官方)。宿主注册排他,官方在场时本包不得占用其任何注册;让位态不碰
+  // 官方 settings 节与官方 ns discovery,官方插件自行服务。servingOfficial
+  // 供复活守卫判定:仅正服务官方节时,官方行复活才需要自停让位。
+  let servingOfficial = false
+  const officialState = officialEntryState(ctx.loader)
+  const decision = takeoverDecision(officialState)
+  let takeover
+  if (decision === 'yield') {
+    ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 行未被禁用(用户层启用),本包降级为只服务 llm-pi-gateway 节')
+    takeover = false
+  } else if (decision === 'await-exit') {
+    ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 插件退场中,等待其完全卸载后接管')
+    takeover = await awaitOfficialExit(officialState.entry)
+    if (!takeover) ctx.logger.error('llm-pi-gateway: 官方 llm-pi-ai 插件退场超时,降级为只服务 llm-pi-gateway 节')
+  } else {
+    takeover = true
+  }
+  if (takeover) installOfficialRevivalGuard(ctx, () => servingOfficial)
   // 两节来源:官方节(官方 schema 消费,零感知接管)+ 本包节(独立/增强)。
   // 合并路由表按原始快照恒等记忆;任一节解析即抛,记忆保持旧值,
   // 调用方捕获后沿用上一份好配置(官方同款)。
@@ -150,11 +175,18 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     )
   }
   ctx.llm.registerModelDiscovery(NS, discoverFor)
-  try {
-    ctx.llm.registerModelDiscovery(OFFICIAL_NS, discoverFor)
-  } catch (error) {
-    ctx.logger.warn('llm-pi-gateway: 官方 discovery 注册冲突(官方 llm-pi-ai 插件仍在),由官方继续服务模型发现')
-    ctx.logger.warn(error)
+  // 官方 ns 补注册仅在接管态:让位态官方插件在场,会自行注册该 ns,本包
+  // 抢注册必令官方 init 撞 DUPLICATE_DISCOVERY 而拖垮整批 patch 应用。
+  // 注册成功即置 servingOfficial:持有任一官方注册就需要复活守卫,官方
+  // 复活撞本包在场 discovery 与撞 settings 节的后果相同
+  if (takeover) {
+    try {
+      ctx.llm.registerModelDiscovery(OFFICIAL_NS, discoverFor)
+      servingOfficial = true
+    } catch (error) {
+      ctx.logger.warn('llm-pi-gateway: 官方 discovery 注册冲突(官方 llm-pi-ai 插件仍在),由官方继续服务模型发现')
+      ctx.logger.warn(error)
+    }
   }
   const onSectionChange = () => {
     try {
@@ -170,11 +202,12 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
       ctx.logger.error(error)
     }
   }
-  // 官方节接管:官方插件被本包 patch 禁用后,其 settings 节由本包以官方
-  // schema 注册。若注册冲突(patch 失效、官方仍在),降级为只服务本包节。
-  // validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles 快照记忆。
-  // 官方包缺失时跳过接管(动态获取已告警)。
-  if (OfficialConfig !== undefined) {
+  // 官方节接管(仅接管态):官方插件被本包 patch 禁用后,其 settings 节由
+  // 本包以官方 schema 注册。若注册冲突(patch 失效、官方仍在),降级为只
+  // 服务本包节。validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles
+  // 快照记忆。官方包缺失时跳过接管(动态获取已告警)。servingOfficial 已在
+  // 官方 discovery 注册处置位,此处不再改写
+  if (OfficialConfig !== undefined && takeover) {
     try {
       ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
         validate: (section) => resolveRoutes(section.providers, readGateway()?.providers, onUnserviceable),
