@@ -895,53 +895,47 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
         const wsService = ctx.get('workspaces')
         const wsModel = wsService && wsService.list && typeof wsService.list.getSnapshot === 'function' ? wsService.list : null
-        // 扩展槽接入:tab 注册常驻 + 页签联动;直挂与服务晚注册两条路径共用
-        const attachBoardTab = (sidebar) => {
-          registerBoardTab(ctx, sidebar, wsModel)
-          const tabActive = () => {
-            // 页签开着(哪怕类型被禁,better-sidebar 仍渲染已开页签)即扩展槽形态;没开(未开/被关/被禁)即主界面形态
-            const snap = typeof sidebar.getSnapshot === 'function' ? sidebar.getSnapshot() : null
-            const openTabs = snap && snap.state && Array.isArray(snap.state.openTabs) ? snap.state.openTabs : null
-            if (openTabs) return openTabs.some((tab) => tab.type === TAB_ID)
-            // 快照未就绪(会话未激活)的保守兜底:类型被禁视作主界面
-            if (typeof sidebar.isTabEnabled === 'function') return sidebar.isTabEnabled(TAB_ID)
-            return true
-          }
-          let fallback = null
-          const syncFallback = () => {
-            const active = tabActive()
-            if (!active && !fallback) {
-              fallback = mountStandaloneBoard(wsModel)
-              ctx.effect(() => () => { if (fallback) { fallback(); fallback = null } }, 'cron-board tab-closed fallback')
-            } else if (active && fallback) {
-              fallback()
-              fallback = null
-            }
-          }
-          syncFallback()
-          if (typeof sidebar.subscribeState === 'function') {
-            ctx.effect(() => sidebar.subscribeState(syncFallback), 'cron-board tab-open watch')
-          }
-          // 快照晚载入兜底:页签持久化恢复可能落在订阅注册之前且不再发事件,延迟重查一次纠正双形态并存
-          const LATE_SYNC_MS = 2 * 1000
-          const lateSync = setTimeout(syncFallback, LATE_SYNC_MS)
-          ctx.effect(() => () => clearTimeout(lateSync), 'cron-board late sync')
-        }
-        // 路径一:apply 时服务已在,直接接入
-        const sidebar = ctx.get('betterSidebar')
-        if (sidebar !== undefined) {
-          attachBoardTab(sidebar)
-          return
-        }
-        // 路径二:服务缺席先落主界面形态,服务就绪后拆主界面、接扩展槽(含页签联动)
+        // 挂载权交给用户:默认永远主界面;设置 sidebarTab 开启且侧边栏服务在场才移入扩展槽,注册后不再自动回退
+        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel)
         let standalone = mountStandaloneBoard(wsModel)
-        let upgraded = false
-        ctx.effect(() => () => { if (!upgraded) standalone() }, 'cron-board standalone board')
+        let tabDisposer = null
+        let sidebarTabOn = false
+        // betterSidebar 服务软探测 + 晚注册追踪:出现/变化时按当前偏好重新决策
+        let currentSidebar = ctx.get('betterSidebar')
+        const applyPref = () => {
+          const wantTab = sidebarTabOn && currentSidebar !== undefined
+          if (wantTab && tabDisposer === null) {
+            standalone()
+            standalone = null
+            tabDisposer = attachBoardTab(currentSidebar)
+          } else if (!wantTab && tabDisposer !== null) {
+            tabDisposer()
+            tabDisposer = null
+          }
+          if (!wantTab && standalone === null) standalone = mountStandaloneBoard(wsModel)
+        }
+        const prefWatch = setInterval(async () => {
+          try {
+            const outcome = await request('GET', 'status')
+            if (outcome.ok && outcome.data && typeof outcome.data.ui === 'object' && outcome.data.ui !== null) {
+              const next = outcome.data.ui.sidebarTab === true
+              if (next !== sidebarTabOn) {
+                sidebarTabOn = next
+                applyPref()
+              }
+            }
+          } catch { /* 轮询失败保形态不变,下轮重试 */ }
+        }, 5 * 1000)
+        ctx.effect(() => () => {
+          clearInterval(prefWatch)
+          if (standalone) standalone()
+          if (tabDisposer) tabDisposer()
+        }, 'cron-board mount arbitration')
         ctx.inject(['betterSidebar'], (bsCtx) => {
-          upgraded = true
-          standalone()
-          attachBoardTab(bsCtx.betterSidebar)
+          currentSidebar = bsCtx.betterSidebar
+          applyPref()
         })
+        applyPref()
       },
     }
   }

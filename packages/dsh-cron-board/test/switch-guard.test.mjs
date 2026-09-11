@@ -48,9 +48,10 @@ test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {
   assert.ok(trimmed.endsWith('})()'), '必须以 IIFE 书挡结尾')
 })
 
-test('client.js 主页面双形态挂载契约(better-sidebar 优先/主界面回退)', () => {
-  // Given 用户要求:面板入口迁主页面,优先 dsh-better-sidebar 扩展槽(单实例),未装回退主界面(taskboard 形态)
-  // Then 静态锁定:模块注册形态、服务软探测、tab 单实例、主界面容器与互斥事件
+test('client.js 主页面双形态挂载契约(默认主界面;设置开关手动移入侧边栏;无自动回退)', () => {
+  // Given 用户要求:默认永远主界面;检测到 better-sidebar 提供设置项,由用户手动移入;
+  //        移入后页签关闭/禁用不再自动返回主界面(挂载权完全交给用户与侧边栏)
+  // Then 静态锁定:模块注册形态、服务软探测、tab 单实例、主界面容器与互斥事件、偏好驱动仲裁
   assert.match(source, /window\.__ModuleLoader__\.load\(\{ id: '@mzzsfy\/dsh-cron-board', factory \}\)/)
   assert.match(source, /ctx\.get\('betterSidebar'\)/)
   assert.match(source, /single: true/)
@@ -60,4 +61,11 @@ test('client.js 主页面双形态挂载契约(better-sidebar 优先/主界面�
   assert.match(source, /function mountStandaloneBoard/)
   // 不再挂设置页分区(入口唯一)
   assert.doesNotMatch(source, /settings\.section/)
+  // 挂载仲裁:apply 无条件先落主界面形态;偏好(status.ui.sidebarTab)驱动接入/退出
+  assert.match(source, /let standalone = mountStandaloneBoard\(wsModel\)/)
+  assert.match(source, /applyPref\(\)/)
+  assert.match(source, /ui\.sidebarTab/)
+  // 不再自动回退:attach 后不订阅页签状态,无 openTabs/subscribeState 联动
+  assert.doesNotMatch(source, /subscribeState/)
+  assert.doesNotMatch(source, /openTabs/)
 })

@@ -273,11 +273,21 @@ test('status 路由:报告调度器与 timer 可用性', async (t) => {
   })
   // When GET /status
   const res = await call(api, 'GET', '/api/cron-board/status')
-  // Then 状态齐备
+  // Then 状态齐备;ui 偏好缺省为关(默认主界面)
   assert.equal(res.status, 200)
   assert.equal(res.payload.timerRunning, true)
   assert.deepEqual(res.payload.scheduler, { active: 1, queued: 2 })
   assert.equal(res.payload.nextAt, 1750000000000)
+  assert.deepEqual(res.payload.ui, { sidebarTab: false })
+})
+
+test('status 路由:ui.sidebarTab 透出用户侧边栏移入偏好', async (t) => {
+  // Given readSidebarTab 桩返回开
+  const { api } = await makeApi(t, { readSidebarTab: () => true })
+  // When GET /status
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  // Then ui.sidebarTab=true(client 据此移入扩展槽)
+  assert.equal(res.payload.ui.sidebarTab, true)
 })
 
 test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', async (t) => {

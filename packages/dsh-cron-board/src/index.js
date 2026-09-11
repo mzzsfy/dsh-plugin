@@ -32,12 +32,13 @@ const TIMER_UNAVAILABLE_REASON = '宿主定时服务不可用,自动调度已停
 const SESSION_UNAVAILABLE_REASON = '宿主会话服务 sessionController 不可用(需 dsh-web-app 挂载 session-controller,0.1.1-rc.2 及更早版本缺失),插件整体禁用'
 const DEFAULT_LOG_KEEP_PER_JOB = 200
 
-// 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数 / 会话投递变量掩码
+// 设置 schema(schemastery 声明式):tick 周期 / 全局并发 / 日志与运行元数据保留份数 / 会话投递变量掩码 / 侧边栏移入偏好
 const SETTINGS_SCHEMA = schemastery.object({
   tickSeconds: schemastery.number().min(MIN_TICK_MS / 1000).step(1).default(DEFAULT_TICK_MS / 1000),
   maxConcurrent: schemastery.number().min(1).step(1).default(DEFAULT_MAX_CONCURRENT),
   logKeepPerJob: schemastery.number().min(1).step(1).default(200),
   maskEnvInPrompt: schemastery.boolean().default(false).description('会话任务投递文本中环境变量打码'),
+  sidebarTab: schemastery.boolean().default(false).description('看板移入 better-sidebar 侧边栏(需已安装;关闭时始终使用主界面)'),
 })
 
 export function resolveDataDir(env = process.env) {
@@ -86,6 +87,7 @@ export function apply(ctx, config) {
           executor,
           scheduler,
           periodic,
+          readSidebarTab: () => readBoolean('sidebarTab', false),
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
         })
         return { api, scheduler }

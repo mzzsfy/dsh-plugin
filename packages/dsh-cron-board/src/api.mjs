@@ -164,7 +164,7 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, logSystem }) {
+export function createApi({ store, logger, executor, scheduler, periodic, readSidebarTab, logSystem }) {
 
   const routes = [
     {
@@ -278,6 +278,7 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
           timerReason: periodic && periodic.reason ? periodic.reason : null,
           scheduler: scheduler ? scheduler.status() : { active: 0, queued: 0 },
           nextAt: scheduler && scheduler.nextRunAt ? scheduler.nextRunAt() : null,
+          ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false },
         })
       },
     },
