@@ -67,6 +67,7 @@ const {
   matchPrice,
   maxSlotsFor,
   minuteTickLabel,
+  modelIoText,
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
@@ -810,6 +811,34 @@ test('donutSegments 全零 total 回落下限防除零', () => {
   assert.equal(segments[0].percent, 0)
 })
 
+test('groupStats 哨兵折叠四桶求和,top 模型四桶透传', () => {
+  // Given 超 top 上限模型条目带四桶 When 分组 Then 哨兵四桶为 rest 求和,top 条目原字段保留
+  const stats = {
+    models: [
+      { model: 'p/m1', tokens: 500, inputTokens: 300, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      { model: 'p/m2', tokens: 400, inputTokens: 100, outputTokens: 300, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      { model: 'p/m3', tokens: 300, inputTokens: 0, outputTokens: 100, cacheReadTokens: 150, cacheWriteTokens: 50 },
+      { model: 'p/m4', tokens: 200, inputTokens: 80, outputTokens: 120, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      { model: 'p/m5', tokens: 100, inputTokens: 60, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      { model: 'p/m6', tokens: 50, inputTokens: 10, outputTokens: 30, cacheReadTokens: 5, cacheWriteTokens: 5 },
+    ],
+    daily: [],
+  }
+  const grouped = groupStats(stats)
+  assert.equal(grouped.models[0].inputTokens, 300)
+  assert.equal(grouped.models[0].outputTokens, 200)
+  assert.deepEqual(grouped.models[5], {
+    model: OTHER_MODEL,
+    tokens: 50,
+    inputTokens: 10,
+    outputTokens: 30,
+    cacheReadTokens: 5,
+    cacheWriteTokens: 5,
+    cost: 0,
+    items: [stats.models[5]],
+  })
+})
+
 test('groupStats 哨兵保留其他模型明细供展开与提示', () => {
   const stats = {
     models: [
@@ -824,6 +853,8 @@ test('groupStats 哨兵保留其他模型明细供展开与提示', () => {
   }
   const grouped = groupStats(stats)
   assert.deepEqual(grouped.models[5].items, [{ model: 'p/m6', tokens: 50 }])
+  // Given 旧形条目无四桶 When 折叠 Then 哨兵不合成零值四桶,与 top 条目降级形态一致
+  assert.equal('inputTokens' in grouped.models[5], false)
 })
 
 test('groupStats 逐日保留其他明细映射供 tooltip', () => {
@@ -854,6 +885,15 @@ test('模型速度文本:官方吞吐口径格式化,无速度为空串', () => 
   assert.equal(modelSpeedText(12.34), '12 tok/s')
   assert.equal(modelSpeedText(0), '0 tok/s')
   assert.equal(modelSpeedText(undefined), '')
+})
+
+test('模型输入输出文本:输入侧三桶合并紧凑格式,缺字段为空串', () => {
+  // Given 模型条目四桶 When 格式化 Then in 为未缓存输入+缓存读+缓存写,out 为输出,语言中立紧凑
+  assert.equal(modelIoText({ inputTokens: 900000, cacheReadTokens: 100000, cacheWriteTokens: 200000, outputTokens: 340000 }), 'in 1.2M · out 340.0k')
+  assert.equal(modelIoText({ inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }), 'in 0 · out 0')
+  assert.equal(modelIoText({ inputTokens: 0, outputTokens: 0 }), '')
+  assert.equal(modelIoText({ tokens: 100 }), '')
+  assert.equal(modelIoText(undefined), '')
 })
 
 test('模型首字文本:语言中立短时长,无 ttft 为空串', () => {

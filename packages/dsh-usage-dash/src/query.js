@@ -140,6 +140,10 @@ export function aggregateRange(rows, g, from, to) {
     const modelTotal = modelTotals.get(row.model)
     if (modelTotal) {
       modelTotal.tokens += tokens
+      modelTotal.inputTokens += row.inputTokens
+      modelTotal.outputTokens += row.outputTokens
+      modelTotal.cacheReadTokens += row.cacheReadTokens
+      modelTotal.cacheWriteTokens += row.cacheWriteTokens
       modelTotal.speedDurationMs += row.durationMs ?? 0
       modelTotal.speedOutputTokens += speedTokensOf(row)
       modelTotal.ttftMs += row.ttftMs ?? 0
@@ -148,6 +152,10 @@ export function aggregateRange(rows, g, from, to) {
       modelTotals.set(row.model, {
         provider: row.provider,
         tokens,
+        inputTokens: row.inputTokens,
+        outputTokens: row.outputTokens,
+        cacheReadTokens: row.cacheReadTokens,
+        cacheWriteTokens: row.cacheWriteTokens,
         speedDurationMs: row.durationMs ?? 0,
         speedOutputTokens: speedTokensOf(row),
         ttftMs: row.ttftMs ?? 0,
@@ -180,6 +188,10 @@ export function aggregateRange(rows, g, from, to) {
       model,
       provider: agg.provider,
       tokens: agg.tokens,
+      inputTokens: agg.inputTokens,
+      outputTokens: agg.outputTokens,
+      cacheReadTokens: agg.cacheReadTokens,
+      cacheWriteTokens: agg.cacheWriteTokens,
       percent: percentOf(agg.tokens, totals.tokens),
       ...(agg.speedDurationMs > 0 ? { speed: agg.speedOutputTokens / (agg.speedDurationMs / MS_PER_SECOND) } : {}),
       ...(agg.ttftSteps > 0 ? { ttft: agg.ttftMs / agg.ttftSteps } : {}),

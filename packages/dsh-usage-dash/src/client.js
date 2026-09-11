@@ -561,9 +561,11 @@ const topWithOther = (ranked) => {
   const models = ranked.slice(0, GROUP_TOP_COUNT)
   if (ranked.length > GROUP_TOP_COUNT) {
     const rest = ranked.slice(GROUP_TOP_COUNT)
+    // 四桶同源条件挂载:输入条目无四桶(旧形数据)时哨兵同样不带,防零值假数据
     models.push({
       model: OTHER_MODEL,
       tokens: rest.reduce((sum, item) => sum + item.tokens, 0),
+      ...(hasTokenBuckets(rest[0]) ? { ...bucketSumsOf(rest) } : {}),
       cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0),
       items: rest,
     })
@@ -832,6 +834,22 @@ function formatDurationShort(ms) {
 function modelTtftText(ttft) {
   if (ttft === undefined) return ''
   return `TTFT ${formatDurationShort(ttft)}`
+}
+
+// 模型条目四桶齐备判定:生产端同源恒齐,旧形数据缺桶即视为不可渲染
+const hasTokenBuckets = (item) => TOKEN_BUCKET_KEYS.every((key) => typeof item?.[key] === 'number')
+
+// 逐桶求和:按共享桶键列表产出四桶聚合形态
+const bucketSumsOf = (items) => Object.fromEntries(TOKEN_BUCKET_KEYS.map((key) => [
+  key,
+  items.reduce((sum, item) => sum + (item[key] ?? 0), 0),
+]))
+
+// 模型输入输出短文本:in 为输入侧三桶合计(与 token 总量算术自洽 in+out=total),
+// out 为输出;语言中立紧凑格式;四桶任一缺失(旧数据)为空串
+function modelIoText(item) {
+  if (!hasTokenBuckets(item)) return ''
+  return `in ${formatCompact(item.inputTokens + item.cacheReadTokens + item.cacheWriteTokens)} · out ${formatCompact(item.outputTokens)}`
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -1315,6 +1333,9 @@ const BUCKET_PRICE_KEYS = [
   { tokens: 'cacheReadTokens', price: 'cacheRead' },
   { tokens: 'cacheWriteTokens', price: 'cacheWrite' },
 ]
+
+// 展示侧四桶键单一来源:模型分组求和与齐备判定共用,禁止各处手工复制键名
+const TOKEN_BUCKET_KEYS = BUCKET_PRICE_KEYS.map(({ tokens }) => tokens)
 
 const toFiniteNumber = (value) => (Number.isFinite(value) ? value : 0)
 
@@ -2427,7 +2448,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               const isOther = item.model === OTHER_MODEL
               const speedText = modelSpeedText(item.speed)
               const ttftText = modelTtftText(item.ttft)
+              const ioText = modelIoText(item)
               const metaParts = [
+                ioText || null,
                 item.cost !== undefined ? `≈ ${formatCost(item.cost, costCurrency)}` : null,
                 ttftText,
                 speedText,
@@ -2474,6 +2497,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('div', { key: 'title', className: 'ud-tip-title' }, displayName(tipSegment.model)),
                 h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(tipSegment.tokens)}`),
                 h('div', { key: 'pct', className: 'ud-tip-row' }, `${t('percent')}: ${formatPercent(tipSegment.percent)}`),
+                hasTokenBuckets(tipSegment)
+                  ? [
+                      h('div', { key: 'input', className: 'ud-tip-row' }, `${t('priceInput')}: ${formatTokens(tipSegment.inputTokens)}`),
+                      h('div', { key: 'cacheRead', className: 'ud-tip-row' }, `${t('priceCacheRead')}: ${formatTokens(tipSegment.cacheReadTokens)}`),
+                      h('div', { key: 'cacheWrite', className: 'ud-tip-row' }, `${t('priceCacheWrite')}: ${formatTokens(tipSegment.cacheWriteTokens)}`),
+                      h('div', { key: 'output', className: 'ud-tip-row' }, `${t('priceOutput')}: ${formatTokens(tipSegment.outputTokens)}`),
+                    ]
+                  : null,
                 tipSegment.model === OTHER_MODEL && (tipSegment.items ?? []).length > 0
                   ? h('div', { key: 'breakdown', className: 'ud-tip-breakdown' },
                       tipSegment.items.map((detail) => h('div', { key: detail.model, className: 'ud-tip-row ud-tip-row--sub' },
