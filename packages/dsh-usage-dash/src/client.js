@@ -204,6 +204,9 @@ const MESSAGES_ZH = {
   dailyTrend: '按天 Token 趋势',
   trendLimited: '仅显示最近 {n} 天',
   modelUsage: '模型用量',
+  modelCache: '缓存',
+  modelInput: '输入',
+  modelOutput: '输出',
   other: '其他',
   total: '总用量',
   percent: '占比',
@@ -344,6 +347,9 @@ const MESSAGES_EN = {
   dailyTrend: 'Daily token trend',
   trendLimited: 'Showing only the last {n} days',
   modelUsage: 'Model usage',
+  modelCache: 'Cache',
+  modelInput: 'Input',
+  modelOutput: 'Output',
   other: 'Other',
   total: 'Total',
   percent: 'Share',
@@ -561,12 +567,12 @@ const topWithOther = (ranked) => {
   const models = ranked.slice(0, GROUP_TOP_COUNT)
   if (ranked.length > GROUP_TOP_COUNT) {
     const rest = ranked.slice(GROUP_TOP_COUNT)
-    // 四桶同源条件挂载:输入条目无四桶(旧形数据)时哨兵同样不带,防零值假数据
+    // 四桶与费用同源条件挂载:输入条目无该字段(旧形数据/未配价)时哨兵同样不带,防零值假数据
     models.push({
       model: OTHER_MODEL,
       tokens: rest.reduce((sum, item) => sum + item.tokens, 0),
-      ...(hasTokenBuckets(rest[0]) ? { ...bucketSumsOf(rest) } : {}),
-      cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0),
+      ...(rest.some(hasTokenBuckets) ? { ...bucketSumsOf(rest) } : {}),
+      ...(rest.some((item) => item.cost !== undefined) ? { cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0) } : {}),
       items: rest,
     })
   }
@@ -822,7 +828,7 @@ function ttftTipText(ttft, t) {
   return ttft === undefined ? TOOLTIP_MISSING : formatDuration(ttft, t)
 }
 
-// 语言中立短时长:60 秒内一位小数秒,以上整秒折分秒(模型列表第二行用,禁本地化)
+// 语言中立短时长:60 秒内一位小数秒,以上整秒折分秒(模型列表 meta 行用,禁本地化)
 function formatDurationShort(ms) {
   const seconds = ms / MS_PER_SECOND
   if (seconds < DURATION_MINUTE_SECONDS) return `${Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL}s`
@@ -845,11 +851,28 @@ const bucketSumsOf = (items) => Object.fromEntries(TOKEN_BUCKET_KEYS.map((key) =
   items.reduce((sum, item) => sum + (item[key] ?? 0), 0),
 ]))
 
-// 模型输入输出短文本:in 为输入侧三桶合计(与 token 总量算术自洽 in+out=total),
-// out 为输出;语言中立紧凑格式;四桶任一缺失(旧数据)为空串
-function modelIoText(item) {
-  if (!hasTokenBuckets(item)) return ''
-  return `in ${formatCompact(item.inputTokens + item.cacheReadTokens + item.cacheWriteTokens)} · out ${formatCompact(item.outputTokens)}`
+// 模型输入输出占比构成:缓存/输入/输出 三段各占该模型 token 总量百分比(缓存=读+写,
+// 三段合计恒 100%);四桶缺失(旧数据)或零总量为空串
+function modelIoPercentText(item, t) {
+  if (!hasTokenBuckets(item) || !(item.tokens > 0)) return ''
+  const share = (value) => formatPercent((value / item.tokens) * PERCENT_SCALE)
+  return `${t('modelCache')} ${share(item.cacheReadTokens + item.cacheWriteTokens)} · ${t('modelInput')} ${share(item.inputTokens)} · ${t('modelOutput')} ${share(item.outputTokens)}`
+}
+
+// 趋势 tooltip 内容门:全零槽(无任何用量)不渲染 tooltip
+const hasTipContent = (hoverSlot) => Boolean(hoverSlot) && hoverSlot.total > 0
+
+// 趋势 tooltip 模型行数据:主行 = 可见且当前时段有用量的模型;OTHER 子行 = OTHER 可见
+// 且当前时段有用量的其余模型明细,按 tokens 降序由本函数保证
+const tipModelEntries = (hoverSlot, visibleSet) => {
+  if (!hasTipContent(hoverSlot)) return { main: [], other: [] }
+  const main = Object.entries(hoverSlot.byModel)
+    .filter(([model, tokens]) => visibleSet.has(model) && tokens > 0)
+    .map(([model, tokens]) => ({ model, tokens }))
+  const other = visibleSet.has(OTHER_MODEL)
+    ? Object.entries(hoverSlot.otherByModel ?? {}).filter(([, tokens]) => tokens > 0).sort((a, b) => b[1] - a[1])
+    : []
+  return { main, other }
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -1960,11 +1983,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-heat-l5{fill:var(--dsw-heat-5);background:var(--dsw-heat-5)}
 .ud-heat-legend{display:inline-flex;align-items:center;gap:${HEAT_GAP}px;margin-left:auto;flex:none;font-size:11px;color:var(--dsw-alias-label-secondary)}
 .ud-heat-legend i{display:inline-block;width:${HEAT_BASE}px;height:${HEAT_BASE}px;border-radius:${HEAT_RX}px;flex:none}
-.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);box-shadow:0 4px 12px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:8px 10px}
-.ud-tip-title{font-weight:600}
-.ud-tip-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.ud-tip-row--sub{padding-left:12px;color:var(--dsw-alias-label-tertiary);font-size:11px}
-.ud-tip-breakdown{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--dsw-alias-border-l1);margin-top:6px;padding-top:6px}
+.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-overlay);box-shadow:0 1px 2px var(--dsw-alias-bg-mask-2),0 6px 20px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:10px 12px;font-variant-numeric:tabular-nums}
+.ud-tip-title{font-weight:600;margin-bottom:6px}
+.ud-tip-row{display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
+.ud-tip-row--sub{padding-left:14px;color:var(--dsw-alias-label-tertiary);font-size:11px}
+.ud-tip-breakdown{display:flex;flex-direction:column;gap:3px;border-top:1px solid var(--dsw-alias-border-l1);margin-top:8px;padding-top:8px}
 .ud-axis-rate{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums}
 .ud-bar{transform-box:fill-box;transform-origin:center}
 .ud-bar-hit{fill:transparent;pointer-events:all}
@@ -1984,17 +2007,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-donut-center{font-size:18px;font-weight:600;fill:var(--dsw-alias-label-primary)}
 .ud-donut-label{font-size:11px;fill:var(--dsw-alias-label-tertiary)}
 .ud-models{flex:1 1 260px;min-width:240px;display:flex;flex-direction:column}
-.ud-model-row{display:flex;align-items:center;gap:8px;min-height:44px;padding:2px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ud-model-row{display:flex;align-items:center;gap:8px;min-height:48px;padding:2px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .ud-model-row--expand{cursor:pointer}
 .ud-model-row--expand:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .ud-model-swatch{width:10px;height:10px;border-radius:2px;flex:none}
 .ud-model-id{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.ud-model-name{font-size:13px;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ud-model-provider{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-name{font-size:14px;font-weight:500;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ud-model-provider{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
 .ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
-.ud-model-cost{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.ud-model-io{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.ud-model-meta{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-model-toggle{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;transition:transform .2s ease}
 .ud-model-toggle[aria-expanded="true"]{transform:rotate(90deg)}
 .ud-model-toggle:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);border-radius:4px}
@@ -2204,9 +2227,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
       const pick = (index) => (event) => setHover({ index, anchor: pointerAt(event) })
       const clear = () => setHover(null)
-      const otherEntries = hoverSlot
-        ? Object.entries(hoverSlot.otherByModel ?? {}).sort((a, b) => b[1] - a[1])
-        : []
+      const tipEntries = hasTipContent(hoverSlot) ? tipModelEntries(hoverSlot, visibleSet) : null
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, title),
@@ -2275,15 +2296,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
         }),
         h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
-          hoverSlot
+          tipEntries
             ? [
                 h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
                 h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
-                ...legendModels.filter((item) => visibleSet.has(item.model)).map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
-                  h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
-                  `${item.model === OTHER_MODEL ? t('other') : item.model}: ${formatTokens(hoverSlot.byModel[item.model] ?? 0)}`)),
-                ...(visibleSet.has(OTHER_MODEL) ? otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${formatTokens(tokens)}`)) : []),
+                ...tipEntries.main.map((row) => h('div', { key: `m-${row.model}`, className: 'ud-tip-row' },
+                  h('i', { className: 'ud-legend-swatch', style: { background: colorFor(row.model) } }),
+                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${formatTokens(row.tokens)}`)),
+                ...tipEntries.other.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
+                  `${model}: ${formatTokens(tokens)}`)),
                 showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
@@ -2327,15 +2348,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           observer.disconnect()
         }
       }, [place])
+      // 空内容(无子节点或空数组)不显示悬浮盒,防零尺寸守卫下出现纯背景空壳
+      const show = Boolean(anchor && children != null && (!Array.isArray(children) || children.length > 0))
       const element = h('div', {
         className: 'ud-tip',
         ref: tipRef,
         style: {
           left: pos ? pos.left : 0,
           top: pos ? pos.top : 0,
-          visibility: pos && anchor ? 'visible' : 'hidden',
+          visibility: show && pos ? 'visible' : 'hidden',
         },
-      }, anchor ? children : null)
+      }, show ? children : null)
       return createPortal && typeof document !== 'undefined' && document.body
         ? createPortal(element, document.body)
         : element
@@ -2448,9 +2471,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               const isOther = item.model === OTHER_MODEL
               const speedText = modelSpeedText(item.speed)
               const ttftText = modelTtftText(item.ttft)
-              const ioText = modelIoText(item)
+              const ioText = modelIoPercentText(item, t)
               const metaParts = [
-                ioText || null,
                 item.cost !== undefined ? `≈ ${formatCost(item.cost, costCurrency)}` : null,
                 ttftText,
                 speedText,
@@ -2464,8 +2486,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 },
                   h('i', { className: 'ud-model-swatch', style: { background: colorFor(item.model) } }),
                   h('div', { className: 'ud-model-id' },
-                    h('span', { className: 'ud-model-name' }, displayName(item.model)),
-                    isOther ? null : h('span', { className: 'ud-model-provider' }, providerOf(item.model))),
+                    isOther
+                      ? h('span', { className: 'ud-model-name' }, displayName(item.model))
+                      : [
+                          h('span', { className: 'ud-model-provider' }, providerOf(item.model)),
+                          h('span', { className: 'ud-model-name' }, modelNameOf(item.model)),
+                        ]),
                   isOther
                     ? h('button', {
                         className: 'ud-model-toggle', 'aria-expanded': expandedOther, 'aria-label': t('other'),
@@ -2478,7 +2504,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                   h('div', { className: 'ud-model-values' },
                     h('span', { className: 'ud-model-tokens' },
                       `${formatTokens(item.tokens)} (${formatPercent((item.tokens / total) * PERCENT_SCALE)})`),
-                    h('span', { className: 'ud-model-pct' }, metaParts.join(' · ')))),
+                    ioText ? h('span', { className: 'ud-model-io' }, ioText) : null,
+                    h('span', { className: 'ud-model-meta' }, metaParts.join(' · ')))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },

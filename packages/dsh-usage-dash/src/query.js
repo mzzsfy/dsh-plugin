@@ -1,6 +1,3 @@
-// 用量聚合纯函数:store 行形状仅作数据约定,零宿主依赖。
-// 桶串本地时区推导,同粒度字典序即时间序;daily 零值槽全枚举,超槽数保最新丢最旧。
-
 import { costOf, matchPrice } from './pricing.js'
 
 export const MAX_SLOTS = 2000
@@ -17,7 +14,7 @@ const DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const HOUR_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}$/
 const MINUTE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
 
-// 桶串前缀宽:D 段定位日槽,M 行截取父 H 桶
+// 桶串前缀宽:D 段定位日桶,M 行截取父 H 桶
 const DAY_KEY_WIDTH = 'YYYY-MM-DD'.length
 const HOUR_KEY_WIDTH = 'YYYY-MM-DDTHH'.length
 
@@ -45,7 +42,7 @@ const nextMinute = (date) => {
 // 分钟桶粒度:枚举与桶键共用同一步长,from 必须对齐桶边界
 const MINUTE_STEP_MINUTES = 10
 
-// pattern 锚定桶串形态,suffix 补全为本地时区可解析日期串,format 回读校验分量合法性
+// pattern 锚定桶串外形,suffix 补全为本地时区可解析日期串,format 回读校验分量合法性
 const BUCKET_FORMS = {
   [GRANULARITY_DAILY]: { pattern: DAY_KEY_PATTERN, suffix: 'T00:00:00', format: formatDate, step: nextDay },
   [GRANULARITY_HOURLY]: { pattern: HOUR_KEY_PATTERN, suffix: ':00:00', format: formatHour, step: nextHour },
@@ -110,7 +107,6 @@ export function aggregateRange(rows, g, from, to) {
   const providerTotals = new Map()
   const activeBuckets = new Set()
   // 槽级配对:桶串 → 速度对 {decodeTokens, durationMs} 与首字对 {ttftMs, ttftSteps},
-  // 与模型级同口径(仅带配对数据的行计入)
   const slotSpeeds = new Map()
   const slotTtfts = new Map()
   for (const row of rows) {
@@ -119,7 +115,7 @@ export function aggregateRange(rows, g, from, to) {
     if (!slot) continue
     const tokens = rowTokens(row)
     addRowToSlot(slot, row, tokens)
-    // 纯 timing 行(零 token 桶 + decode 配对)不参与归因,但仍进配对聚合
+    // 纯 timing 行(零 token 桶 + decode 配对)不参与归属,但仍进配对聚合
     if (tokens > 0) {
       activeBuckets.add(row.bucket)
       slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
@@ -164,7 +160,6 @@ export function aggregateRange(rows, g, from, to) {
     }
     providerTotals.set(row.provider, (providerTotals.get(row.provider) ?? 0) + tokens)
   }
-  // 槽级 speed/ttft 条件挂:无配对数据的槽不挂字段(存量槽形契约不变)
   for (const slot of slots) {
     const speedPair = slotSpeeds.get(slot.day)
     if (speedPair && speedPair.durationMs > 0) slot.speed = speedPair.decodeTokens / (speedPair.durationMs / MS_PER_SECOND)
@@ -180,7 +175,7 @@ export function aggregateRange(rows, g, from, to) {
     totals.cacheMiss += slot.cacheMiss
   }
   // speed = decode 配对口径(decodeTokens ÷ 时长秒);ttft = 首 token 延迟
-  // 加权平均(毫秒);仅配对数据存在的条目挂字段,无数据条目不挂;
+  // 加权平均(毫秒);仅配对数据存在的条目挂字段,无数据条目不挂
   // 纯 timing 行可能产生 0-token 条目,列表保持只含 token 行(存量契约)
   const models = [...modelTotals.entries()]
     .filter(([, agg]) => agg.tokens > 0)
@@ -223,16 +218,14 @@ export function aggregateRange(rows, g, from, to) {
   return result
 }
 
-// 聚合计价的槽定位:D 折叠到日槽,H/M 即本槽;计价一律取行所属 H 桶起点
+// 聚合计价的槽定位:D 折叠到日槽,H/M 即本槽,计价一律取行所属 H 槽起点
 const COST_SLOT_KEYS = {
   [GRANULARITY_DAILY]: (bucket) => bucket.slice(0, DAY_KEY_WIDTH),
   [GRANULARITY_HOURLY]: (bucket) => bucket,
   [GRANULARITY_MINUTE]: (bucket) => bucket,
 }
 
-// 聚合计价:以可见槽为唯一口径,cost 行按 H 桶起点匹配价格后累加;
-// unpriced = 有 token 而未命中价的去重 H 桶数,被截断丢弃的行整体不参与。
-// 纯函数返回新 result,不修改入参;调用方不调用则响应无 cost/unpriced 字段
+// 聚合计价:以可见槽为唯一口径,cost 行按 H 槽起点匹配价格后累加;
 export function attachCosts(result, costRows, granularity, rules) {
   const slotKeyOf = COST_SLOT_KEYS[granularity]
   const slotOfDay = new Map(result.daily.map((slot) => [slot.day, slot]))

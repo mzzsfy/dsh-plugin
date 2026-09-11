@@ -67,7 +67,9 @@ const {
   matchPrice,
   maxSlotsFor,
   minuteTickLabel,
-  modelIoText,
+  modelIoPercentText,
+  hasTipContent,
+  tipModelEntries,
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
@@ -834,9 +836,31 @@ test('groupStats 哨兵折叠四桶求和,top 模型四桶透传', () => {
     outputTokens: 30,
     cacheReadTokens: 5,
     cacheWriteTokens: 5,
-    cost: 0,
     items: [stats.models[5]],
   })
+})
+
+test('groupStats 哨兵费用同源:无 cost 输入不挂 cost,有 cost 求和', () => {
+  // Given rest 条目无 cost When 折叠 Then 哨兵无 cost 字段;Given rest 带 cost When 折叠 Then 哨兵求和
+  const bare = groupStats({ models: [
+    { model: 'p/m1', tokens: 500 },
+    { model: 'p/m2', tokens: 400 },
+    { model: 'p/m3', tokens: 300 },
+    { model: 'p/m4', tokens: 200 },
+    { model: 'p/m5', tokens: 100 },
+    { model: 'p/m6', tokens: 50 },
+  ], daily: [] })
+  assert.equal('cost' in bare.models[5], false)
+  const priced = groupStats({ models: [
+    { model: 'p/m1', tokens: 500, cost: 1 },
+    { model: 'p/m2', tokens: 400, cost: 2 },
+    { model: 'p/m3', tokens: 300, cost: undefined },
+    { model: 'p/m4', tokens: 200, cost: 4 },
+    { model: 'p/m5', tokens: 100, cost: 8 },
+    { model: 'p/m6', tokens: 50, cost: 16 },
+    { model: 'p/m7', tokens: 25, cost: 32 },
+  ], daily: [] })
+  assert.equal(priced.models[5].cost, 16 + 32)
 })
 
 test('groupStats 哨兵保留其他模型明细供展开与提示', () => {
@@ -887,13 +911,43 @@ test('模型速度文本:官方吞吐口径格式化,无速度为空串', () => 
   assert.equal(modelSpeedText(undefined), '')
 })
 
-test('模型输入输出文本:输入侧三桶合并紧凑格式,缺字段为空串', () => {
-  // Given 模型条目四桶 When 格式化 Then in 为未缓存输入+缓存读+缓存写,out 为输出,语言中立紧凑
-  assert.equal(modelIoText({ inputTokens: 900000, cacheReadTokens: 100000, cacheWriteTokens: 200000, outputTokens: 340000 }), 'in 1.2M · out 340.0k')
-  assert.equal(modelIoText({ inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }), 'in 0 · out 0')
-  assert.equal(modelIoText({ inputTokens: 0, outputTokens: 0 }), '')
-  assert.equal(modelIoText({ tokens: 100 }), '')
-  assert.equal(modelIoText(undefined), '')
+test('模型输入输出占比构成:缓存/输入/输出 三段各占该模型 token 总量', () => {
+  // Given 四桶齐备的模型条目 When 格式化 Then 三段占比相对 tokens 总量,缓存=读+写,合计 100%,顺序缓存/输入/输出
+  const zhT = createTranslator(MESSAGES_ZH)
+  const enT = createTranslator(MESSAGES_EN)
+  const item = { tokens: 1000, inputTokens: 31, cacheReadTokens: 954, cacheWriteTokens: 10, outputTokens: 5 }
+  assert.equal(modelIoPercentText(item, zhT), '缓存 96.4% · 输入 3.1% · 输出 0.5%')
+  assert.equal(modelIoPercentText(item, enT), 'Cache 96.4% · Input 3.1% · Output 0.5%')
+})
+
+test('趋势 tooltip 模型行:仅含可见且当前时段有用量的模型', () => {
+  // Given 槽内 byModel 含零值与非零值,OTHER 明细含零值与无序多元素 When 取行数据 Then 主行与子行均过滤零用量,子行按 tokens 降序,OTHER 不可见时子行为空
+  const hoverSlot = {
+    total: 300,
+    byModel: { 'p/a': 200, 'p/b': 0, [OTHER_MODEL]: 100 },
+    otherByModel: { 'p/y': 0, 'p/x': 20, 'p/z': 50 },
+  }
+  const visible = new Set(['p/a', 'p/b', OTHER_MODEL])
+  const rows = tipModelEntries(hoverSlot, visible)
+  assert.deepEqual(rows.main, [{ model: 'p/a', tokens: 200 }, { model: OTHER_MODEL, tokens: 100 }])
+  assert.deepEqual(rows.other, [['p/z', 50], ['p/x', 20]])
+  const hiddenOther = tipModelEntries(hoverSlot, new Set(['p/a']))
+  assert.deepEqual(hiddenOther.main, [{ model: 'p/a', tokens: 200 }])
+  assert.deepEqual(hiddenOther.other, [])
+})
+
+test('趋势 tooltip 内容门:仅 total>0 的槽渲染', () => {
+  // Given 全零槽/常规槽 When 判定 Then 全零槽无内容,常规槽有内容,null 槽无内容
+  assert.equal(hasTipContent(null), false)
+  assert.equal(hasTipContent({ total: 0 }), false)
+  assert.equal(hasTipContent({ total: 5 }), true)
+})
+
+test('模型输入输出占比构成:缺四桶或零总量为空串', () => {
+  const zhT = createTranslator(MESSAGES_ZH)
+  assert.equal(modelIoPercentText({ tokens: 100 }, zhT), '')
+  assert.equal(modelIoPercentText(undefined, zhT), '')
+  assert.equal(modelIoPercentText({ tokens: 0, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }, zhT), '')
 })
 
 test('模型首字文本:语言中立短时长,无 ttft 为空串', () => {
