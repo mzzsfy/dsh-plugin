@@ -405,7 +405,7 @@ export function resolvedNotifySettings(raw) {
   }
 }
 
-// 面板可见配置:webhookUrl 属凭据不出主机,仅回是否已配置。
+// 面板可见配置:webhookUrl 原文随响应回显,面板所见即所存。
 export function publicNotify(resolved) {
   return {
     enabled: resolved.enabled,
@@ -414,7 +414,7 @@ export function publicNotify(resolved) {
     resetNotice: resolved.resetNotice,
     toast: resolved.toast,
     imTargets: resolved.imTargets,
-    webhookConfigured: resolved.webhookUrl.trim().length > 0,
+    webhookUrl: resolved.webhookUrl,
   }
 }
 

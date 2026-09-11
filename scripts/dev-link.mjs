@@ -17,6 +17,9 @@
  *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径(未发布包的
  *     file 行除外——它同时承担 pnpm 依赖解析)
  *   - 依赖行版本以 npm 线上 latest 为准,本地 manifest 未发布的版本不影响依赖行
+ *   - dsh.profile.bundles 由本脚本对账(镜像官方 plugin reconcilePlugins 语义):
+ *     清单内插件包且依赖行已声明 -> 入层;公共依赖包或无依赖行 -> 出层;
+ *     本仓清单外条目(官方内盒等)不动;装载层变化不走热重载,重启 dsh 后生效
  *   - pnpm-workspace.yaml 的 minimumReleaseAgeExclude 由本脚本全量重写为各包线上版本并集
  *     (pnpm 只认精确版本并集,^ ~ * 均拒绝),新发版本重跑即纳入,清单永不过期
  *   - 终态校验不过即退出码 1:已发布包依赖行必须等于 ^线上最新,未发布包必须等于
@@ -160,10 +163,10 @@ function syncDevHmr(enable) {
   console.log('FIX  已在 home 补丁层写入 dev 热更新块(hmr root -> 仓库 packages)')
 }
 
-/** 读包 manifest;dsh.bundle 缺失即公共依赖包(装载经消费方依赖声明 + dsh fallback 补链,不走表层依赖行) */
+/** 读包 manifest;无 dsh.bundle.patch 即公共依赖包(判定与官方 exportsPatch 同构),不走表层依赖行 */
 function isLibPackage(dir) {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', dir, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
-  return manifest.dsh?.bundle === undefined
+  return manifest.dsh?.bundle?.patch === undefined
 }
 
 /**
@@ -201,6 +204,36 @@ function normalizeDeps(packages) {
   }
   if (changed) writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
   return {changed, latests}
+}
+
+/**
+ * 对账 dsh.profile.bundles:镜像官方 dsh plugin reconcilePlugins 语义——依赖行解析到
+ * dsh.bundle 声明包即入层(尾部追加,层序与官方一致),失去声明或依赖行即出层。
+ * 本仓清单管理不到的条目(官方内盒等)不动。返回是否有变更。
+ */
+function normalizeBundles(packages) {
+  const manifest = readProfileManifest()
+  const declared = manifest.dependencies || {}
+  const plugins = [...(manifest.dsh?.profile?.bundles ?? [])]
+  let changed = false
+  for (const dir of packages) {
+    const key = SCOPE + dir
+    const shouldLoad = declared[key] !== undefined && !isLibPackage(dir)
+    if (shouldLoad === plugins.includes(key)) continue
+    const reason = shouldLoad ? '插件包且依赖行已声明' : declared[key] === undefined ? '无依赖行' : '公共依赖包不进装载层'
+    console.log(`FIX  ${key}: ${shouldLoad ? '加入' : '移出'} dsh.profile.bundles(${reason})`)
+    if (shouldLoad) plugins.push(key)
+    else plugins.splice(plugins.indexOf(key), 1)
+    changed = true
+  }
+  if (!changed) {
+    console.log(`OK   dsh.profile.bundles 与依赖行一致(检查 ${packages.length} 个清单包)`)
+    return false
+  }
+  manifest.dsh = {...manifest.dsh, profile: {...manifest.dsh?.profile, bundles: plugins}}
+  writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
+  console.log('FIX  dsh.profile.bundles 已对账,重启 dsh 后装载层生效')
+  return true
 }
 
 function pnpmInstall(allowFresh) {
@@ -278,6 +311,7 @@ function readJunctionTarget(linkPath) {
 /** 终态校验:依赖行、挂载指向、(卸链时的)安装版本逐项比对,任一不符即整体失败 */
 function verifyAll(packages, latests, unlink, scope) {
   const manifest = readProfileManifest()
+  const bundles = manifest.dsh?.profile?.bundles ?? []
   const failures = []
   for (const dir of packages) {
     const key = SCOPE + dir
@@ -286,6 +320,7 @@ function verifyAll(packages, latests, unlink, scope) {
     const phys = junctionPath(dir)
     if (isLibPackage(dir)) {
       // 公共依赖包无表层依赖行与版本语义:链接态只验 junction 指向仓库;卸链后顶层留空由 dsh fallback 启动接管
+      if (!unlink && bundles.includes(key)) failures.push(`${key}: 公共依赖包不应在 dsh.profile.bundles`)
       if (unlink) {
         if (readJunctionTarget(phys) !== null) failures.push(`${key}: 卸链后 node_modules 仍是链接`)
         continue
@@ -305,6 +340,7 @@ function verifyAll(packages, latests, unlink, scope) {
     const want = latest === null ? fileSpec(dir) : `^${latest}`
     const dep = manifest.dependencies[key]
     if (dep !== want) failures.push(`${key}: 依赖行 ${dep ?? '(缺声明)'} 应为 ${want}`)
+    if (!unlink && !bundles.includes(key)) failures.push(`${key}: 未在 dsh.profile.bundles,装而不载`)
 
     if (unlink) {
       if (readJunctionTarget(phys) !== null) {
@@ -337,7 +373,7 @@ function verifyAll(packages, latests, unlink, scope) {
     process.exitCode = 1
     return false
   }
-  console.log(`\n校验通过:${scope.length} 个包(插件包依赖行 = ^线上最新,公共依赖包仅验挂载),挂载/安装状态与声明一致`)
+  console.log(`\n校验通过:${scope.length} 个包(插件包依赖行 = ^线上最新且在装载层,公共依赖包验挂载且不入装载层),挂载/安装/装载层状态与声明一致`)
   return true
 }
 
@@ -369,6 +405,8 @@ if (!unlink) {
   const scope = target === 'all' ? packages : names
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
+  // 装载层对账依赖依赖行归一结果;成员关系不改依赖图,不触发安装
+  normalizeBundles(scope)
   // 豁免清单是全 profile 级策略,仅在 all 模式全量重写(只豁免各包线上最新版——
   // 历史版本早已过宽限期)
   const excludeChanged = target === 'all' ? syncReleaseAgeExclude(packages, latests) : false

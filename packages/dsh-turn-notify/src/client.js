@@ -1009,10 +1009,10 @@ window.__ModuleLoader__.load({
 
     const PERMISSION_LABELS = { granted: '已授权', denied: '已拒绝', default: '未授权' }
 
-    // 面板表单占位:GET config 返回前展示;webhookUrl 凭据不出主机,面板只见是否已配置;
+    // 面板表单占位:GET config 返回前展示;webhookUrl 原文随响应回显,表单所见即所存;
     // imAvailable 缺省为假,加载响应后 dsh-im 在场才渲染 IM 投递卡
     const DEFAULT_CONFIG = {
-      webhookConfigured: false,
+      webhookUrl: '',
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
       suppressSubagentWake: true,
@@ -1196,6 +1196,7 @@ window.__ModuleLoader__.load({
           .then((res) => {
             setConfig({ ...DEFAULT_CONFIG, ...res })
             setMappingState(res.soundMapping || {})
+            setUrlDraft(typeof res.webhookUrl === 'string' ? res.webhookUrl : '')
             setConfigLoaded(true)
           })
           .catch(() => {})
@@ -1366,14 +1367,12 @@ window.__ModuleLoader__.load({
             : String(config.minTurnDurationMs)
           if (raw.length === 0) throw new Error('最短回合时长不能为空')
           const trimmedUrl = urlDraft.trim()
-          // imTargets 由勾选单独即时保存,不随此入口提交;会话高亮为本机开关,不进 host 配置
-          const patchBody = { minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
-          // 只写语义:输入留空即保持现有 webhook 不变
-          if (trimmedUrl.length > 0) patchBody.webhookUrl = trimmedUrl
+          // 所见即所存:输入框即配置值,清空并保存即禁用 webhook 通道
+          const patchBody = { webhookUrl: trimmedUrl, minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
           if (res.soundMapping) setMappingState(res.soundMapping)
-          setUrlDraft('')
+          setUrlDraft(typeof res.webhookUrl === 'string' ? res.webhookUrl : '')
           patch('配置已保存,立即生效')
         } catch (error) {
           patch('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
@@ -1386,7 +1385,7 @@ window.__ModuleLoader__.load({
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ webhookUrl: '' }) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
           if (res.soundMapping) setMappingState(res.soundMapping)
-          setUrlDraft('')
+          setUrlDraft(typeof res.webhookUrl === 'string' ? res.webhookUrl : '')
           patch('webhook 已清除')
         } catch (error) {
           patch('清除失败:' + (error && error.message ? error.message : String(error)), 'error')
@@ -1467,8 +1466,9 @@ window.__ModuleLoader__.load({
       }
 
       async function testWebhook() {
-        if (urlDraft.trim().length > 0) {
-          patch('表单中的新 webhook URL 尚未保存,本次测试的是已保存配置;请先保存再测试', 'error')
+        // 草稿与已保存值不同即存在未保存改动,测试的只能是已保存配置
+        if (urlDraft.trim() !== String(config.webhookUrl || '').trim()) {
+          patch('表单中的 webhook URL 尚未保存,本次测试的是已保存配置;请先保存再测试', 'error')
           return
         }
         try {
@@ -1632,15 +1632,15 @@ window.__ModuleLoader__.load({
             field('webhook', [
               h('input', {
                 className: 'tn-input tn-fill', type: 'text',
-                title: '通知由 host 直接 POST 到该地址,标签页全关也送达;Slack 兼容 JSON 格式,超时 10 秒不重试,凭据不回显',
-                placeholder: config.webhookConfigured ? '已配置(输入新 URL 替换,留空保持不变)' : 'Slack-compatible URL,留空禁用',
+                title: '通知由 host 直接 POST 到该地址,标签页全关也送达;Slack 兼容 JSON 格式,超时 10 秒不重试',
+                placeholder: 'Slack-compatible URL,留空禁用',
                 value: urlDraft,
                 onChange: (e) => setUrlDraft(e.target.value),
               }),
-              config.webhookConfigured
+              String(config.webhookUrl || '').trim().length > 0
                 ? h('button', { className: 'tn-btn tn-btn--danger', disabled: busy, title: '清除已配置的 webhook,清除后该通道禁用', onClick: () => void clearWebhook() }, '清除')
                 : null,
-            ], 'URL 只写不回显'),
+            ], '保存即提交输入框内容,清空并保存即禁用;改动后先保存,测试按钮只测已保存配置'),
             field('最短回合时长', [
               h('input', {
                 className: 'tn-input', type: 'number', min: 0, step: 500, style: { width: '90px' },

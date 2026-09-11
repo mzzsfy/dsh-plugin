@@ -79,7 +79,7 @@ function makeCtx(extraServices) {
   return { ctx, routes }
 }
 
-test('config GET 返回解析后的默认配置,webhookUrl 凭据不出主机', async () => {
+test('config GET 返回解析后的默认配置,webhookUrl 原文回显', async () => {
   const { ctx, routes } = makeCtx()
   apply(ctx)
   const handler = routes.get('/api/turn-notify/config')
@@ -87,8 +87,8 @@ test('config GET 返回解析后的默认配置,webhookUrl 凭据不出主机', 
   const res = makeRes()
   await handler(makeReq('GET'), res)
   assert.equal(res.status, 200)
-  assert.equal(res.body.webhookConfigured, false)
-  assert.equal('webhookUrl' in res.body, false)
+  assert.equal(res.body.webhookUrl, '')
+  assert.equal('webhookConfigured' in res.body, false)
   assert.equal(res.body.minTurnDurationMs, MIN_TURN_MS)
   assert.equal(res.body.rootsOnly, true)
   assert.equal(res.body.enabled.completed, true)
@@ -105,12 +105,30 @@ test('config POST 非法补丁 400,合法补丁持久化且部分开关不覆盖
   const good = makeRes()
   await handler(makeReq('POST', { webhookUrl: 'https://hook.example', enabled: { completed: false } }, JSON_HEADERS), good)
   assert.equal(good.status, 200)
-  assert.equal(good.body.webhookConfigured, true)
+  assert.equal(good.body.webhookUrl, 'https://hook.example')
   assert.equal(good.body.enabled.completed, false)
   assert.equal(good.body.enabled.error, true)
   const readback = makeRes()
   await handler(makeReq('GET'), readback)
-  assert.equal(readback.body.webhookConfigured, true)
+  assert.equal(readback.body.webhookUrl, 'https://hook.example')
+})
+
+test('config POST 空串清空 webhookUrl:先存后清双向回环,清后通道禁用', async () => {
+  const { ctx, routes } = makeCtx()
+  apply(ctx)
+  const handler = routes.get('/api/turn-notify/config')
+  const save = makeRes()
+  await handler(makeReq('POST', { webhookUrl: 'https://hook.example/x' }, JSON_HEADERS), save)
+  assert.equal(save.status, 200)
+  assert.equal(save.body.webhookUrl, 'https://hook.example/x')
+  // 清空并保存=禁用:空串经校验落库,回读为空串而非回退旧值
+  const clear = makeRes()
+  await handler(makeReq('POST', { webhookUrl: '' }, JSON_HEADERS), clear)
+  assert.equal(clear.status, 200)
+  assert.equal(clear.body.webhookUrl, '')
+  const readback = makeRes()
+  await handler(makeReq('GET'), readback)
+  assert.equal(readback.body.webhookUrl, '')
 })
 
 test('config POST 负路径:跨源 403,非 JSON 400,畸形体 400,空补丁 200', async () => {
@@ -228,7 +246,7 @@ test('config POST 仅 imTargets 的部分补丁:不触碰其他配置项,响应�
   const res = makeRes()
   await handler(makeReq('POST', { imTargets: [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 'owner' }] }, JSON_HEADERS), res)
   assert.equal(res.status, 200)
-  assert.equal(res.body.webhookConfigured, true)
+  assert.equal(res.body.webhookUrl, 'https://hooks.example.com/x')
   assert.equal(res.body.enabled.completed, false)
   assert.deepEqual(res.body.imTargets, [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 'owner' }])
   // 取消注册:整列表替换为空,其余配置仍原样
@@ -236,7 +254,7 @@ test('config POST 仅 imTargets 的部分补丁:不触碰其他配置项,响应�
   await handler(makeReq('POST', { imTargets: [] }, JSON_HEADERS), clear)
   assert.equal(clear.status, 200)
   assert.deepEqual(clear.body.imTargets, [])
-  assert.equal(clear.body.webhookConfigured, true)
+  assert.equal(clear.body.webhookUrl, 'https://hooks.example.com/x')
   assert.equal(clear.body.enabled.completed, false)
 })
 

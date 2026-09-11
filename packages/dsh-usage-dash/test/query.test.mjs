@@ -117,8 +117,26 @@ test('D 粒度聚合总量排序与占比正确', () => {
   assert.equal(out.topModel, 'deepseek/deepseek-chat')
   assert.equal(out.topProvider, 'deepseek')
   assert.deepEqual(out.models, [
-    { model: 'deepseek/deepseek-chat', provider: 'deepseek', tokens: 350, percent: (350 / 410) * 100 },
-    { model: 'deepseek-chat', provider: 'default', tokens: 60, percent: (60 / 410) * 100 },
+    {
+      model: 'deepseek/deepseek-chat',
+      provider: 'deepseek',
+      tokens: 350,
+      percent: (350 / 410) * 100,
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 0,
+    },
+    {
+      model: 'deepseek-chat',
+      provider: 'default',
+      tokens: 60,
+      percent: (60 / 410) * 100,
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 30,
+    },
   ])
   assert.deepEqual(out.providers, [
     { provider: 'deepseek', tokens: 350, percent: (350 / 410) * 100 },
@@ -351,6 +369,38 @@ test('ttft 模型级聚合:加权平均,无 ttft 行不参与,无数据不挂字
   assert.equal('ttft' in m2, false)
 })
 
+test('模型级四桶聚合:models 条目带输入输出与缓存拆分,按该模型行累加', () => {
+  // Given 两模型多行四桶用量 When D 粒度聚合 Then models 每项四桶为该模型行累加,排序与占比不变
+  const rows = [
+    makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', inputTokens: 100, outputTokens: 50, cacheReadTokens: 200, cacheWriteTokens: 10 }),
+    makeRow({ bucket: '2020-01-02', model: 'm1', provider: 'p1', inputTokens: 30, outputTokens: 70 }),
+    makeRow({ bucket: '2020-01-01', model: 'm2', provider: 'p2', inputTokens: 5, outputTokens: 25, cacheWriteTokens: 8 }),
+  ]
+  const out = aggregateRange(rows, 'D', '2020-01-01', '2020-01-02')
+  assert.deepEqual(out.models, [
+    {
+      model: 'm1',
+      provider: 'p1',
+      tokens: 460,
+      percent: (460 / 498) * 100,
+      inputTokens: 130,
+      outputTokens: 120,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 10,
+    },
+    {
+      model: 'm2',
+      provider: 'p2',
+      tokens: 38,
+      percent: (38 / 498) * 100,
+      inputTokens: 5,
+      outputTokens: 25,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 8,
+    },
+  ])
+})
+
 test('槽级 ttft 聚合:同槽配对,无 ttft 槽不挂字段,attachCosts 保留', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01', model: 'm1', provider: 'p1', outputTokens: 20, ttftMs: 2000, ttftSteps: 1 }),
@@ -373,7 +423,7 @@ test('attachCosts H 槽按桶起点计价并归集 totals 与 models', () => {
   assert.equal(out.daily[1].cost, 2)
   assert.equal(out.cost, 2)
   assert.equal(out.unpriced, 0)
-  assert.deepEqual(out.models, [{ model: 'm1', provider: 'p1', tokens: 1500000, percent: 100, cost: 2 }])
+  assert.deepEqual(out.models, [{ model: 'm1', provider: 'p1', tokens: 1500000, inputTokens: 1000000, outputTokens: 500000, cacheReadTokens: 0, cacheWriteTokens: 0, percent: 100, cost: 2 }])
   assert.equal(out.from, '2020-01-01T00')
   assert.equal(out.tokens, 1500000)
   // 纯函数:入参 result 不被修改

@@ -35,6 +35,22 @@ window.__ModuleLoader__.load({
     // 已见文本 Map 容量上限,超出按插入序裁剪最旧条目(手动/已读标记增长有界)。
     const SEEN_MAP_CAP = 10 * 20
 
+    // 置底判定阈值:与官方滚动跟随的贴近底部语义一致,距离底部不超过该值视为置底。
+    const PIN_THRESHOLD_PX = 25
+
+    // 置底判定:视口距底部不超过阈值;度量形态 { scrollHeight, scrollTop, clientHeight }。
+    function isPinned(metrics, threshold = PIN_THRESHOLD_PX) {
+      return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold
+    }
+
+    // 置底回补判定:动作后偏离底部的量可被本次高度变化解释(官方跟随失效或浏览器
+    // 未补偿)才回补;用户在落定窗口内主动滚开的偏离超出该范围,不干预。
+    function shouldPinRestore(before, after, threshold = PIN_THRESHOLD_PX) {
+      const distance = after.scrollHeight - after.scrollTop - after.clientHeight
+      const heightDelta = after.scrollHeight - before.scrollHeight
+      return distance <= Math.abs(heightDelta) + threshold
+    }
+
     function capMap(map, cap = SEEN_MAP_CAP) {
       while (map.size > cap) {
         const oldest = map.keys().next()
@@ -249,19 +265,66 @@ window.__ModuleLoader__.load({
 
     const collectRows = (container) => Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
 
-    // 执行动作并返回被点击的行元素(未触发点击返回 null)
-    function applyAction(described, action) {
+    // 执行动作并返回被点击的行元素(未触发点击返回 null)。
+    // 动作改变内容高度会把置底视口推离底部,官方滚动跟随随即失联:
+    // 动作前处于置底态时,高度落定后回补置底。
+    function applyAction(container, described, action) {
       const row = described[action.index]
       if (!row || !row.headable) return null
       const head = row.el.querySelector(SELECTOR_HEAD)
       if (head === null) return null
       if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) {
+        const before = containerMetrics(container)
         if (action.kind === 'expand') pluginExpandedEls.add(row.el)
         else pluginExpandedEls.delete(row.el)
         head.click()
+        if (isPinned(before)) schedulePinRestore(container, before)
         return row.el
       }
       return null
+    }
+
+    // ---- 置底回补 ----
+
+    const containerMetrics = (container) => ({
+      scrollHeight: container.scrollHeight,
+      scrollTop: container.scrollTop,
+      clientHeight: container.clientHeight,
+    })
+
+    // 高度落定判定:高度变化后连续 SETTLE_FRAMES 帧不变即落定;
+    // 总帧数达上限按已落定兜底(渲染停滞环境不永久挂起)。
+    const PIN_SETTLE_FRAMES = 2
+    const PIN_SETTLE_MAX_FRAMES = 30
+
+    // 单一挂起回补任务(slot 代际槽):同批多动作时以最新前置度量重启,
+    // HMR 重评估经槽身份校验作废。
+    function schedulePinRestore(target, before) {
+      if (window[SLOT_KEY] !== slot) return
+      if (slot.pinFrame !== null) cancelAnimationFrame(slot.pinFrame)
+      let lastHeight = before.scrollHeight
+      let changed = false
+      let stableFrames = 0
+      let totalFrames = 0
+      const tick = () => {
+        slot.pinFrame = null
+        if (window[SLOT_KEY] !== slot || target !== observedContainer || !target.isConnected) return
+        const metrics = containerMetrics(target)
+        if (metrics.scrollHeight !== lastHeight) {
+          lastHeight = metrics.scrollHeight
+          changed = true
+          stableFrames = 0
+        } else {
+          stableFrames += 1
+        }
+        totalFrames += 1
+        if (totalFrames < PIN_SETTLE_MAX_FRAMES && (!changed || stableFrames < PIN_SETTLE_FRAMES)) {
+          slot.pinFrame = requestAnimationFrame(tick)
+          return
+        }
+        if (shouldPinRestore(before, metrics)) target.scrollTop = target.scrollHeight
+      }
+      slot.pinFrame = requestAnimationFrame(tick)
     }
 
     function scan() {
@@ -270,7 +333,7 @@ window.__ModuleLoader__.load({
       if (container === null || container !== observedContainer) return 0
       const described = collectRows(container)
       releaseLatchIfCollapsed(described)
-      for (const action of plan(registry, toLogicRows(described)).actions) applyAction(described, action)
+      for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
       return described.length
     }
 
@@ -313,7 +376,7 @@ window.__ModuleLoader__.load({
       if (!described.some((row) => row.headable)) return
       finalState.pending = false
       for (const action of planFinal(toLogicRows(described)).actions) {
-        const clicked = applyAction(described, action)
+        const clicked = applyAction(container, described, action)
         if (clicked !== null) {
           finalState.el = clicked
           finalState.awaitRegister = true
@@ -366,7 +429,7 @@ window.__ModuleLoader__.load({
       if (container === null) return 0
       const described = collectRows(container)
       const actions = plan(registry, toLogicRows(described), { suppressManual: true }).actions
-      for (const action of actions) applyAction(described, action)
+      for (const action of actions) applyAction(container, described, action)
       return described.length
     }
 
@@ -381,8 +444,9 @@ window.__ModuleLoader__.load({
         if (previous.bodySentinel !== null) previous.bodySentinel.disconnect()
         if (previous.containerObserver !== null) previous.containerObserver.disconnect()
         if (previous.debounceTimer !== null) clearTimeout(previous.debounceTimer)
+        if (previous.pinFrame !== null) cancelAnimationFrame(previous.pinFrame)
       }
-      slot = { bodySentinel: null, containerObserver: null, debounceTimer: null }
+      slot = { bodySentinel: null, containerObserver: null, debounceTimer: null, pinFrame: null }
       window[SLOT_KEY] = slot
       bodySentinel = new MutationObserver(ensureAttached)
       slot.bodySentinel = bodySentinel

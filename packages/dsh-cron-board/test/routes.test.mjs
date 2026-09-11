@@ -273,11 +273,47 @@ test('status 路由:报告调度器与 timer 可用性', async (t) => {
   })
   // When GET /status
   const res = await call(api, 'GET', '/api/cron-board/status')
-  // Then 状态齐备
+  // Then 状态齐备;ui 偏好缺省为关(默认主界面)
   assert.equal(res.status, 200)
   assert.equal(res.payload.timerRunning, true)
   assert.deepEqual(res.payload.scheduler, { active: 1, queued: 2 })
   assert.equal(res.payload.nextAt, 1750000000000)
+  assert.deepEqual(res.payload.ui, { sidebarTab: false })
+})
+
+test('status 路由:ui.sidebarTab 透出用户侧边栏移入偏好', async (t) => {
+  // Given readSidebarTab 桩返回开
+  const { api } = await makeApi(t, { readSidebarTab: () => true })
+  // When GET /status
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  // Then ui.sidebarTab=true(client 据此移入扩展槽)
+  assert.equal(res.payload.ui.sidebarTab, true)
+})
+
+test('ui-settings 路由:布尔补丁经 updateUiSettings 写入并回读', async (t) => {
+  // Given 写入桩记录补丁,读取桩翻转返回(模拟 settings.update 后生效)
+  let stored = false
+  const { api } = await makeApi(t, {
+    updateUiSettings: (patch) => { if (typeof patch.sidebarTab === 'boolean') stored = patch.sidebarTab },
+    readSidebarTab: () => stored,
+  })
+  // When POST 开关开
+  const res = await call(api, 'POST', '/api/cron-board/ui-settings', { sidebarTab: true })
+  // Then ok 且回读 true;写桩收到布尔补丁
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.ok, true)
+  assert.equal(res.payload.ui.sidebarTab, true)
+  assert.equal(stored, true)
+})
+
+test('ui-settings 路由:无效字段 400,服务缺失降级 ok=false', async (t) => {
+  const noHandler = await makeApi(t, { updateUiSettings: undefined })
+  const res1 = await call(noHandler.api, 'POST', '/api/cron-board/ui-settings', { sidebarTab: true })
+  assert.equal(res1.status, 200)
+  assert.equal(res1.payload.ok, false)
+  const { api } = await makeApi(t)
+  const res2 = await call(api, 'POST', '/api/cron-board/ui-settings', { other: 1 })
+  assert.equal(res2.status, 400)
 })
 
 test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', async (t) => {
@@ -328,6 +364,28 @@ test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   })
   // Then 400
   assert.equal(badMiss.status, 400)
+})
+
+test('jobs 路由:会话通道禁用时建会话任务 400,脚本任务不受限', async (t) => {
+  // Given sessionState.disabled(等价 0.1.1-rc.2 超时禁用态)
+  const sessionState = { ready: false, disabled: true }
+  const { api } = await makeApi(t, { sessionState })
+  const sess = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'sv', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(sess.status, 400)
+  assert.match(sess.payload.error, /会话任务通道已禁用/)
+  const shell = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'sh', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(shell.status, 200)
+})
+
+test('status 路由:透出会话通道就绪状态', async (t) => {
+  const sessionState = { ready: true, disabled: false }
+  const { api } = await makeApi(t, { sessionState })
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  assert.deepEqual(res.payload.session, { ready: true, disabled: false })
 })
 
 test('cron preview 路由:人话摘要与下三次触发', async (t) => {

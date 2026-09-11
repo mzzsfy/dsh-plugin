@@ -179,6 +179,11 @@ async function api(url, options) {
   return payload
 }
 
+// 状态预取:模块加载即页面加载时发起,首次进入面板不再与宿主的初始请求风暴
+// (会话树全量扫描等单请求秒级负载)排队;预取只服务首次挂载,消费即置空,
+// 后续挂载保持现拉,不因复用旧快照而退化
+let statusPrefetch = api(STATUS_URL).catch(() => null)
+
 function post(url, body) {
   return api(url, { method: 'POST', body: body === undefined ? '{}' : JSON.stringify(body) })
 }
@@ -623,7 +628,11 @@ function MaintainApp() {
   }
 
   function load() {
-    return api(STATUS_URL)
+    // 首次挂载消费预取快照(缺失/失败回退现拉),此后每次挂载现拉
+    const primed = statusPrefetch
+    statusPrefetch = null
+    const base = primed !== null ? primed.then((snap) => (snap !== null ? snap : api(STATUS_URL))) : api(STATUS_URL)
+    return base
       .then((next) => { setStatus(next); setError(null); return next })
       .catch((loadError) => { setError('读取状态失败:' + (loadError && loadError.message ? loadError.message : String(loadError))); return null })
   }

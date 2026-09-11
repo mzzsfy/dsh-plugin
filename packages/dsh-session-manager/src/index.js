@@ -19,7 +19,6 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-  HISTORY_ALIGN_MAX_ARTIFACT_BYTES,
   HISTORY_ALIGN_SLICE_MS,
   HISTORY_ALIGN_THROTTLE_MS,
   HISTORY_ALIGN_YIELD_MS,
@@ -36,7 +35,9 @@ import {
   artifactLooksBlank,
   deleteEligibility,
   extractUserInputs,
+  isLegacyDecompressHost,
   isSessionRunning,
+  maxArtifactBytesForHost,
   mergeDeletedEntry,
   removeDeletedEntry,
   selectArchiveCandidates,
@@ -44,6 +45,7 @@ import {
 } from './core.mjs'
 import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
 import { trashPath } from './trash.mjs'
+import { createRequire } from 'node:module'
 
 export const name = 'dsh-session-manager'
 
@@ -382,7 +384,7 @@ export function apply(ctx, config) {
   }
 
   // 历史输入:工作区粒度持久缓存(~/.dsh/historyPrompt/<工作区>-<hash>.json)。
-  // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内最近会话产物,
+  // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内会话产物,
   // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入)。
   // 解压不重复执行:每会话提取结果持久化在工作区缓存 extracts 段,附产物 stat 指纹
   // (mtimeMs+size),对齐时先 stat 比对,产物没变零解压——判断全部基于磁盘,跨重启生效。
@@ -391,6 +393,20 @@ export function apply(ctx, config) {
   // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
   const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
     || join(homedir(), '.dsh', 'historyPrompt')
+  // 巨产物跳过线按宿主版本黑名单取值:0.1.1/0.1.2 解压实现无周期让出从严 8MiB,
+  // 其余 16MiB。运行宿主清单经 require 链解析(插件随宿主树部署时必命中),
+  // 探测失败按黑名单保守回退旧线。激活时求值一次即冻结,热路径只读值;
+  // 宿主热升级后重启生效
+  let maxArtifactBytes = resolveMaxArtifactBytes()
+  function resolveMaxArtifactBytes() {
+    let version = null
+    try {
+      version = createRequire(import.meta.url)('@deepseek-ai/dsh/package.json').version
+    } catch {
+      version = null
+    }
+    return maxArtifactBytesForHost(version)
+  }
   const alignThrottle = new Map()
   const runtimeExtracts = new Map()
   const headerCache = new Map()
@@ -447,8 +463,8 @@ export function apply(ctx, config) {
 
   // 批量对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
   // 与缓存合并后原子写回,extracts 裁剪到完整扫描窗口。经批量队列入队。
-  // 超过 MAX_ARTIFACT 的巨产物直接跳过:单次 readSession 内部同步解压不可让出,
-  // 巨会话一解卡死主循环;其历史来自缓存 entries 的既有贡献
+  // 超过 MAX_ARTIFACT 的巨产物直接跳过:解压耗时与内存峰值随产物规模失控
+  // (宿主内部逐帧解压带周期让出,不阻塞主循环);其历史来自缓存 entries 的既有贡献
   function alignWorkspaceNow(cwd) {
     return enqueueBulkAlign(async () => {
       const agents = ctx.get('agents')
@@ -465,7 +481,7 @@ export function apply(ctx, config) {
         const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
         const located = persistence ? persistence.locate(recordItem.header) : undefined
         const fingerprint = located ? await safeStat(located.path) : null
-        if (fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES) continue
+        if (fingerprint !== null && fingerprint.size > resolveMaxArtifactBytes()) continue
         try {
           const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
           fresh.push(...entries.map((entry) => ({ ...entry, sid: recordItem.header.id })))
@@ -501,7 +517,7 @@ export function apply(ctx, config) {
       const persistence = ctx.get('sessionPersistence')
       const located = persistence ? persistence.locate(header) : undefined
       const fingerprint = located ? await safeStat(located.path) : null
-      if (fingerprint === null || fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES) return
+      if (fingerprint === null || fingerprint.size > resolveMaxArtifactBytes()) return
       const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
@@ -576,7 +592,7 @@ export function apply(ctx, config) {
       // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
       // 只解该会话并写回。路由有界等待本次对齐(首条 <3s 预算):正常会话单次
       // 请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,后续
-      // 轮询流式补齐。巨产物跳过聚焦(单次解压不可让出),维持 aligned=true
+      // 轮询流式补齐。巨产物跳过聚焦(解压耗时与内存峰值失控),维持 aligned=true
       const check = async (cached) => {
         const agents = ctx.get('agents')
         const running = isSessionRunning({ agents, sessionId })
@@ -585,7 +601,7 @@ export function apply(ctx, config) {
         const fingerprint = located ? await safeStat(located.path) : null
         return {
           stale: fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
-          oversize: fingerprint !== null && fingerprint.size > HISTORY_ALIGN_MAX_ARTIFACT_BYTES,
+          oversize: fingerprint !== null && fingerprint.size > resolveMaxArtifactBytes(),
         }
       }
       let { cached, mine } = await read()

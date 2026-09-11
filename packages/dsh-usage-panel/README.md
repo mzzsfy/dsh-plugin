@@ -73,7 +73,7 @@ usage-panel:
     balanceThreshold: null        # 余额阈值,null 为不启用
     resetNotice: true             # 窗口重置时通知上一窗口峰值
     toast: true                   # 页内 toast 通道
-    webhookUrl: ''                # 凭据,留空禁用;面板只写不回显
+    webhookUrl: ''                # webhook 目标 URL,留空禁用;面板原文回显
     imTargets: []                 # dsh-im 投递目标 [{botId, targetId}]
 ```
 
@@ -88,7 +88,7 @@ usage-panel:
 ### 通知接口
 
 - `GET /api/usage-panel/notifications`:通知投影长轮询;`cursor` 缺省=首拉立即返回全量,`cursor` 等于当前版本时挂起至事件或超时,落后或超前(宿主重启版本回退)立即返回全量,客户端以响应 version 重置游标自愈;响应 `{units, version}`
-- `GET|POST /api/usage-panel/notify-config`:全局通知规则;`webhookUrl` 属凭据任何响应不回传原文,仅 `webhookConfigured` 标志
+- `GET|POST /api/usage-panel/notify-config`:全局通知规则;`webhookUrl` 原文随响应回显
 - `POST /api/usage-panel/test-webhook` / `POST /api/usage-panel/test-im`:测试投递,返回真实结果
 - `GET /api/usage-panel/im-targets?botId=`:列出 dsh-im 该 bot 已保存投递目标
 

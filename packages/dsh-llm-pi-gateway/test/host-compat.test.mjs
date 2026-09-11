@@ -45,6 +45,9 @@ function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySetti
       error: (message) => logs.error.push(message),
     },
     get: () => undefined,
+    // 复活守卫注册面与自停面:loader 缺失 → 官方行缺席 → 接管态装守卫
+    on: () => {},
+    fiber: { dispose: async () => {} },
     llm: {
       registerAdapter: (providers) => {
         llmCalls.adapters.push(providers)

@@ -418,14 +418,14 @@ test('读侧归一: 残缺配置回退默认值', () => {
   assert.equal(resolved.webhookUrl, '')
 })
 
-test('凭据脱敏: publicNotify 不回显 webhookUrl 原文, 仅回是否已配置', () => {
+test('面板回显: publicNotify 返回 webhookUrl 原文', () => {
   // Given 已配置 webhook 的归一配置
   const resolved = resolvedNotifySettings({ webhookUrl: 'https://hooks.example.com/private' })
   // When 转面板可见形态
   const view = publicNotify(resolved)
-  // Then 原文不出主机, webhookConfigured 为 true
-  assert.equal(view.webhookUrl, undefined)
-  assert.equal(view.webhookConfigured, true)
+  // Then 原文随响应回显, webhookConfigured 已移除
+  assert.equal(view.webhookUrl, 'https://hooks.example.com/private')
+  assert.equal('webhookConfigured' in view, false)
   assert.equal(view.toast, true)
 })
 

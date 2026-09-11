@@ -74,8 +74,8 @@ const audit = (endpoint, outcome, extra) => {
 
 // 活跃工作检测:agents/jobs/terminals 全软依赖方法面守卫,缺失或异常即降级放行(fail-open,
 // 不因安全网缺失死锁重启)。terminals 主路径逐 agent 的 realm 作用域解析(PTY 注册表随
-// agent 挂载且 isolate,共享根作用域因 realm 隔离恒缺,仅兜底);sessions 不作活跃指标;
-// 禁止顶层 inject(阻塞装载)。导出仅供测试
+// agent 挂载且 isolate,共享根作用域因 realm 隔离恒缺,仅兜底;无 agent 时服务面
+// 不可见属常态,不计降级);sessions 不作活跃指标;禁止顶层 inject(阻塞装载)。导出仅供测试
 // 降级留痕按服务键进程首见一次:status 每拍重检,不限频会刷屏
 const degradedWarned = new Set()
 
@@ -145,7 +145,9 @@ export function collectActiveWork(ctx) {
     } catch (error) {
       degrade('terminals', '根探测异常: ' + (error && error.message ? error.message : String(error)))
     }
-    if (!sawTerminalsService) degrade('terminals', 'terminals 服务面不可用')
+    // 服务面随 agent realm 挂载:无 agent 时不可见属常态(无对象即无终端),不计降级;
+    // 有 agent 而探不到服务面(可探性缺失或面缺失)属异常,降级留痕
+    if (!sawTerminalsService && agentList.length > 0) degrade('terminals', 'terminals 服务面不可用')
   } catch (error) {
     degrade('terminals', error && error.message ? error.message : String(error))
   }

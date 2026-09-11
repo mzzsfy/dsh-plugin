@@ -24,6 +24,7 @@ export const MESSAGES = {
   badWindowFormat: '窗口时间格式须为 HH:mm',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
+  sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
   systemError: '操作失败(系统级错误,详见服务端日志)',
 }
 
@@ -164,7 +165,7 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, logSystem }) {
+export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, logSystem }) {
 
   const routes = [
     {
@@ -278,7 +279,25 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
           timerReason: periodic && periodic.reason ? periodic.reason : null,
           scheduler: scheduler ? scheduler.status() : { active: 0, queued: 0 },
           nextAt: scheduler && scheduler.nextRunAt ? scheduler.nextRunAt() : null,
+          session: sessionState
+            ? { ready: Boolean(sessionState.ready), disabled: Boolean(sessionState.disabled) }
+            : { ready: false, disabled: false },
+          ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false },
         })
+      },
+    },
+    {
+      // 界面偏好写入(sidebarTab 等):settings.update 服务端持久化,即时生效
+      method: 'POST',
+      segments: ['ui-settings'],
+      handler: async ({ req, res }) => {
+        const body = await readJsonBody(req)
+        const patch = {}
+        if (typeof body.sidebarTab === 'boolean') patch.sidebarTab = body.sidebarTab
+        if (!Object.keys(patch).length) return sendJson(res, 400, { error: '无有效字段' })
+        if (typeof updateUiSettings !== 'function') return sendJson(res, 200, { ok: false, error: '设置服务不可用' })
+        updateUiSettings(patch)
+        sendJson(res, 200, { ok: true, ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false } })
       },
     },
     {
@@ -307,6 +326,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, logSys
       handler: async ({ req, res }) => {
         const body = await readJsonBody(req)
         const fields = normalizeJob(body)
+        if (fields.kind === 'session' && sessionState && sessionState.disabled) {
+          return sendJson(res, 400, { error: MESSAGES.sessionDisabled })
+        }
         const row = await store.jobs.create(fields)
         sendJson(res, 200, row)
       },

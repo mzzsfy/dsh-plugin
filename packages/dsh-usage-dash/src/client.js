@@ -204,6 +204,9 @@ const MESSAGES_ZH = {
   dailyTrend: '按天 Token 趋势',
   trendLimited: '仅显示最近 {n} 天',
   modelUsage: '模型用量',
+  modelCache: '缓存',
+  modelInput: '输入',
+  modelOutput: '输出',
   other: '其他',
   total: '总用量',
   percent: '占比',
@@ -344,6 +347,9 @@ const MESSAGES_EN = {
   dailyTrend: 'Daily token trend',
   trendLimited: 'Showing only the last {n} days',
   modelUsage: 'Model usage',
+  modelCache: 'Cache',
+  modelInput: 'Input',
+  modelOutput: 'Output',
   other: 'Other',
   total: 'Total',
   percent: 'Share',
@@ -561,10 +567,12 @@ const topWithOther = (ranked) => {
   const models = ranked.slice(0, GROUP_TOP_COUNT)
   if (ranked.length > GROUP_TOP_COUNT) {
     const rest = ranked.slice(GROUP_TOP_COUNT)
+    // 四桶与费用同源条件挂载:输入条目无该字段(旧形数据/未配价)时哨兵同样不带,防零值假数据
     models.push({
       model: OTHER_MODEL,
       tokens: rest.reduce((sum, item) => sum + item.tokens, 0),
-      cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0),
+      ...(rest.some(hasTokenBuckets) ? { ...bucketSumsOf(rest) } : {}),
+      ...(rest.some((item) => item.cost !== undefined) ? { cost: rest.reduce((sum, item) => sum + (item.cost ?? 0), 0) } : {}),
       items: rest,
     })
   }
@@ -820,7 +828,7 @@ function ttftTipText(ttft, t) {
   return ttft === undefined ? TOOLTIP_MISSING : formatDuration(ttft, t)
 }
 
-// 语言中立短时长:60 秒内一位小数秒,以上整秒折分秒(模型列表第二行用,禁本地化)
+// 语言中立短时长:60 秒内一位小数秒,以上整秒折分秒(模型列表 meta 行用,禁本地化)
 function formatDurationShort(ms) {
   const seconds = ms / MS_PER_SECOND
   if (seconds < DURATION_MINUTE_SECONDS) return `${Math.round(seconds * NUMBER_ONE_DECIMAL) / NUMBER_ONE_DECIMAL}s`
@@ -832,6 +840,39 @@ function formatDurationShort(ms) {
 function modelTtftText(ttft) {
   if (ttft === undefined) return ''
   return `TTFT ${formatDurationShort(ttft)}`
+}
+
+// 模型条目四桶齐备判定:生产端同源恒齐,旧形数据缺桶即视为不可渲染
+const hasTokenBuckets = (item) => TOKEN_BUCKET_KEYS.every((key) => typeof item?.[key] === 'number')
+
+// 逐桶求和:按共享桶键列表产出四桶聚合形态
+const bucketSumsOf = (items) => Object.fromEntries(TOKEN_BUCKET_KEYS.map((key) => [
+  key,
+  items.reduce((sum, item) => sum + (item[key] ?? 0), 0),
+]))
+
+// 模型输入输出占比构成:缓存/输入/输出 三段各占该模型 token 总量百分比(缓存=读+写,
+// 三段合计恒 100%);四桶缺失(旧数据)或零总量为空串
+function modelIoPercentText(item, t) {
+  if (!hasTokenBuckets(item) || !(item.tokens > 0)) return ''
+  const share = (value) => formatPercent((value / item.tokens) * PERCENT_SCALE)
+  return `${t('modelCache')} ${share(item.cacheReadTokens + item.cacheWriteTokens)} · ${t('modelInput')} ${share(item.inputTokens)} · ${t('modelOutput')} ${share(item.outputTokens)}`
+}
+
+// 趋势 tooltip 内容门:全零槽(无任何用量)不渲染 tooltip
+const hasTipContent = (hoverSlot) => Boolean(hoverSlot) && hoverSlot.total > 0
+
+// 趋势 tooltip 模型行数据:主行 = 可见且当前时段有用量的模型;OTHER 子行 = OTHER 可见
+// 且当前时段有用量的其余模型明细,按 tokens 降序由本函数保证
+const tipModelEntries = (hoverSlot, visibleSet) => {
+  if (!hasTipContent(hoverSlot)) return { main: [], other: [] }
+  const main = Object.entries(hoverSlot.byModel)
+    .filter(([model, tokens]) => visibleSet.has(model) && tokens > 0)
+    .map(([model, tokens]) => ({ model, tokens }))
+  const other = visibleSet.has(OTHER_MODEL)
+    ? Object.entries(hoverSlot.otherByModel ?? {}).filter(([, tokens]) => tokens > 0).sort((a, b) => b[1] - a[1])
+    : []
+  return { main, other }
 }
 
 // 热力图:窗口固定 26 周,与所选范围无关
@@ -1316,6 +1357,9 @@ const BUCKET_PRICE_KEYS = [
   { tokens: 'cacheWriteTokens', price: 'cacheWrite' },
 ]
 
+// 展示侧四桶键单一来源:模型分组求和与齐备判定共用,禁止各处手工复制键名
+const TOKEN_BUCKET_KEYS = BUCKET_PRICE_KEYS.map(({ tokens }) => tokens)
+
 const toFiniteNumber = (value) => (Number.isFinite(value) ? value : 0)
 
 // 费用 = Σ(桶 token × 桶单价) / 每百万;缺桶或非法值按 0,原始浮点不圆整(展示层负责)
@@ -1383,15 +1427,20 @@ const TURN_COST_CHIP_ORDER = 20 + 10
 // messageId 反查:节点表为 chat 节点仓库(values() 可枚举,Map/仓库两态兼容);
 // 回合级用量优先取回合位置数据(location.turn.data.get('turn-tail')).tokenUsage(官方 tokenUsage 聚合,
 // 分页窗口缺 turn/start 时缺席),回退视图节点 data.closing.usage(末步用量采样,输入侧已含缓存,计费口径同源)
-// 索引缓存:每份节点表快照只全量扫描一次建 messageId→turn-tail 索引(WeakMap 随快照释放),
-// 长会话流式期间多芯片各自全量扫描是 O(消息数×节点数) 放大,索引后单快照 O(节点数)
+// 索引缓存:键取节点集数组身份 —— 官方 chat store 实例身份跨回合恒定,values() 返回的缓存数组
+// 随节点集更替换新引用:未变时全芯片共享一次扫描,新增回合节点经 values() 换引用自动失效重建
+// (按 store 实例为键会让新节点永远查不到旧索引,表现为回合费用芯片刷新后才出现);
+// Map/迭代器形态(测试兼容)仍按容器为键
 const TURN_USAGE_INDEX_CACHE = new WeakMap()
 
 function turnUsageIndexOf(nodes) {
-  let index = TURN_USAGE_INDEX_CACHE.get(nodes)
+  const source = nodes && typeof nodes.values === 'function' ? nodes.values() : nodes
+  const snapshotForm = Array.isArray(source)
+  const cacheKey = snapshotForm ? source : nodes
+  let index = TURN_USAGE_INDEX_CACHE.get(cacheKey)
   if (index !== undefined) return index
   index = new Map()
-  const list = nodes && typeof nodes.values === 'function' ? [...nodes.values()] : nodes
+  const list = snapshotForm ? source : typeof source?.[Symbol.iterator] === 'function' ? [...source] : source
   if (Array.isArray(list)) {
     for (const node of list) {
       try {
@@ -1402,13 +1451,13 @@ function turnUsageIndexOf(nodes) {
       } catch { /* 单节点形状残缺跳过 */ }
     }
   }
-  TURN_USAGE_INDEX_CACHE.set(nodes, index)
+  TURN_USAGE_INDEX_CACHE.set(cacheKey, index)
   return index
 }
 
 function turnTokenUsageOfMessage(nodes, messageId) {
   // 非对象(含 null/undefined)直接 null:WeakMap 键要求对象,展开校验收进索引构建,
-  // 每快照只物化一次节点序列
+  // 每份节点集只物化一次节点序列
   if (nodes === null || typeof nodes !== 'object') return null
   const node = turnUsageIndexOf(nodes).get(messageId)
   if (node === undefined) return null
@@ -1934,11 +1983,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-heat-l5{fill:var(--dsw-heat-5);background:var(--dsw-heat-5)}
 .ud-heat-legend{display:inline-flex;align-items:center;gap:${HEAT_GAP}px;margin-left:auto;flex:none;font-size:11px;color:var(--dsw-alias-label-secondary)}
 .ud-heat-legend i{display:inline-block;width:${HEAT_BASE}px;height:${HEAT_BASE}px;border-radius:${HEAT_RX}px;flex:none}
-.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-overlay);box-shadow:0 4px 12px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:8px 10px}
-.ud-tip-title{font-weight:600}
-.ud-tip-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.ud-tip-row--sub{padding-left:12px;color:var(--dsw-alias-label-tertiary);font-size:11px}
-.ud-tip-breakdown{display:flex;flex-direction:column;gap:2px;border-top:1px solid var(--dsw-alias-border-l1);margin-top:6px;padding-top:6px}
+.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-overlay);box-shadow:0 1px 2px var(--dsw-alias-bg-mask-2),0 6px 20px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:10px 12px;font-variant-numeric:tabular-nums}
+.ud-tip-title{font-weight:600;margin-bottom:6px}
+.ud-tip-row{display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
+.ud-tip-row--sub{padding-left:14px;color:var(--dsw-alias-label-tertiary);font-size:11px}
+.ud-tip-breakdown{display:flex;flex-direction:column;gap:3px;border-top:1px solid var(--dsw-alias-border-l1);margin-top:8px;padding-top:8px}
 .ud-axis-rate{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums}
 .ud-bar{transform-box:fill-box;transform-origin:center}
 .ud-bar-hit{fill:transparent;pointer-events:all}
@@ -1958,17 +2007,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-donut-center{font-size:18px;font-weight:600;fill:var(--dsw-alias-label-primary)}
 .ud-donut-label{font-size:11px;fill:var(--dsw-alias-label-tertiary)}
 .ud-models{flex:1 1 260px;min-width:240px;display:flex;flex-direction:column}
-.ud-model-row{display:flex;align-items:center;gap:8px;min-height:44px;padding:2px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ud-model-row{display:flex;align-items:center;gap:8px;min-height:48px;padding:2px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .ud-model-row--expand{cursor:pointer}
 .ud-model-row--expand:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .ud-model-swatch{width:10px;height:10px;border-radius:2px;flex:none}
 .ud-model-id{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.ud-model-name{font-size:13px;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ud-model-provider{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-model-name{font-size:14px;font-weight:500;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ud-model-provider{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
 .ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.ud-model-pct{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
-.ud-model-cost{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.ud-model-io{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.ud-model-meta{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .ud-model-toggle{border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;transition:transform .2s ease}
 .ud-model-toggle[aria-expanded="true"]{transform:rotate(90deg)}
 .ud-model-toggle:focus-visible{outline:1px solid var(--dsw-alias-state-business-primary);border-radius:4px}
@@ -2178,9 +2227,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
       const pick = (index) => (event) => setHover({ index, anchor: pointerAt(event) })
       const clear = () => setHover(null)
-      const otherEntries = hoverSlot
-        ? Object.entries(hoverSlot.otherByModel ?? {}).sort((a, b) => b[1] - a[1])
-        : []
+      const tipEntries = hasTipContent(hoverSlot) ? tipModelEntries(hoverSlot, visibleSet) : null
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, title),
@@ -2249,15 +2296,15 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
         }),
         h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
-          hoverSlot
+          tipEntries
             ? [
                 h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
                 h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
-                ...legendModels.filter((item) => visibleSet.has(item.model)).map((item) => h('div', { key: `m-${item.model}`, className: 'ud-tip-row' },
-                  h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
-                  `${item.model === OTHER_MODEL ? t('other') : item.model}: ${formatTokens(hoverSlot.byModel[item.model] ?? 0)}`)),
-                ...(visibleSet.has(OTHER_MODEL) ? otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${formatTokens(tokens)}`)) : []),
+                ...tipEntries.main.map((row) => h('div', { key: `m-${row.model}`, className: 'ud-tip-row' },
+                  h('i', { className: 'ud-legend-swatch', style: { background: colorFor(row.model) } }),
+                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${formatTokens(row.tokens)}`)),
+                ...tipEntries.other.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
+                  `${model}: ${formatTokens(tokens)}`)),
                 showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
@@ -2301,15 +2348,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           observer.disconnect()
         }
       }, [place])
+      // 空内容(无子节点或空数组)不显示悬浮盒,防零尺寸守卫下出现纯背景空壳
+      const show = Boolean(anchor && children != null && (!Array.isArray(children) || children.length > 0))
       const element = h('div', {
         className: 'ud-tip',
         ref: tipRef,
         style: {
           left: pos ? pos.left : 0,
           top: pos ? pos.top : 0,
-          visibility: pos && anchor ? 'visible' : 'hidden',
+          visibility: show && pos ? 'visible' : 'hidden',
         },
-      }, anchor ? children : null)
+      }, show ? children : null)
       return createPortal && typeof document !== 'undefined' && document.body
         ? createPortal(element, document.body)
         : element
@@ -2422,6 +2471,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               const isOther = item.model === OTHER_MODEL
               const speedText = modelSpeedText(item.speed)
               const ttftText = modelTtftText(item.ttft)
+              const ioText = modelIoPercentText(item, t)
               const metaParts = [
                 item.cost !== undefined ? `≈ ${formatCost(item.cost, costCurrency)}` : null,
                 ttftText,
@@ -2436,8 +2486,12 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 },
                   h('i', { className: 'ud-model-swatch', style: { background: colorFor(item.model) } }),
                   h('div', { className: 'ud-model-id' },
-                    h('span', { className: 'ud-model-name' }, displayName(item.model)),
-                    isOther ? null : h('span', { className: 'ud-model-provider' }, providerOf(item.model))),
+                    isOther
+                      ? h('span', { className: 'ud-model-name' }, displayName(item.model))
+                      : [
+                          h('span', { className: 'ud-model-provider' }, providerOf(item.model)),
+                          h('span', { className: 'ud-model-name' }, modelNameOf(item.model)),
+                        ]),
                   isOther
                     ? h('button', {
                         className: 'ud-model-toggle', 'aria-expanded': expandedOther, 'aria-label': t('other'),
@@ -2450,7 +2504,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                   h('div', { className: 'ud-model-values' },
                     h('span', { className: 'ud-model-tokens' },
                       `${formatTokens(item.tokens)} (${formatPercent((item.tokens / total) * PERCENT_SCALE)})`),
-                    h('span', { className: 'ud-model-pct' }, metaParts.join(' · ')))),
+                    ioText ? h('span', { className: 'ud-model-io' }, ioText) : null,
+                    h('span', { className: 'ud-model-meta' }, metaParts.join(' · ')))),
                 isOther
                   ? h('div', { className: cx('ud-model-other', expandedOther && 'ud-model-other--open') },
                       h('div', { className: 'ud-model-other-list' },
@@ -2469,6 +2524,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('div', { key: 'title', className: 'ud-tip-title' }, displayName(tipSegment.model)),
                 h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(tipSegment.tokens)}`),
                 h('div', { key: 'pct', className: 'ud-tip-row' }, `${t('percent')}: ${formatPercent(tipSegment.percent)}`),
+                hasTokenBuckets(tipSegment)
+                  ? [
+                      h('div', { key: 'input', className: 'ud-tip-row' }, `${t('priceInput')}: ${formatTokens(tipSegment.inputTokens)}`),
+                      h('div', { key: 'cacheRead', className: 'ud-tip-row' }, `${t('priceCacheRead')}: ${formatTokens(tipSegment.cacheReadTokens)}`),
+                      h('div', { key: 'cacheWrite', className: 'ud-tip-row' }, `${t('priceCacheWrite')}: ${formatTokens(tipSegment.cacheWriteTokens)}`),
+                      h('div', { key: 'output', className: 'ud-tip-row' }, `${t('priceOutput')}: ${formatTokens(tipSegment.outputTokens)}`),
+                    ]
+                  : null,
                 tipSegment.model === OTHER_MODEL && (tipSegment.items ?? []).length > 0
                   ? h('div', { key: 'breakdown', className: 'ud-tip-breakdown' },
                       tipSegment.items.map((detail) => h('div', { key: detail.model, className: 'ud-tip-row ud-tip-row--sub' },
