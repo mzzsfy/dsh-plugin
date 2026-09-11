@@ -366,6 +366,28 @@ test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   assert.equal(badMiss.status, 400)
 })
 
+test('jobs 路由:会话通道禁用时建会话任务 400,脚本任务不受限', async (t) => {
+  // Given sessionState.disabled(等价 0.1.1-rc.2 超时禁用态)
+  const sessionState = { ready: false, disabled: true }
+  const { api } = await makeApi(t, { sessionState })
+  const sess = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'sv', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(sess.status, 400)
+  assert.match(sess.payload.error, /会话任务通道已禁用/)
+  const shell = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'sh', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true,
+  })
+  assert.equal(shell.status, 200)
+})
+
+test('status 路由:透出会话通道就绪状态', async (t) => {
+  const sessionState = { ready: true, disabled: false }
+  const { api } = await makeApi(t, { sessionState })
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  assert.deepEqual(res.payload.session, { ready: true, disabled: false })
+})
+
 test('cron preview 路由:人话摘要与下三次触发', async (t) => {
   const { api } = await makeApi(t)
   // When 预览「每天 08:30」

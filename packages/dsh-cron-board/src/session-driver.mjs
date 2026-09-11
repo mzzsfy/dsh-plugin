@@ -12,7 +12,7 @@ const REJECTED_MESSAGE = '会话输入投递被拒绝'
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
 
-export function createSessionDriver({ sessionController, agents, sessionQuery, pollIntervalMs = 2 * 1000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() }) {
+export function createSessionDriver({ getSessionController, agents, sessionQuery, pollIntervalMs = 2 * 1000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表)
   async function pinnedExists(sessionId) {
     if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return Boolean(agents.get(sessionId))
@@ -21,6 +21,9 @@ export function createSessionDriver({ sessionController, agents, sessionQuery, p
   }
 
   async function run({ job, env, mask, updateRecord }) {
+    // 控制器运行时动态解析:装配可能先于宿主挂载 sessionController(异步就绪等待中)
+    const sessionController = getSessionController ? getSessionController() : undefined
+    if (!sessionController) return { status: 'fail', message: '会话服务不可用' }
     const session = job.session || {}
     const isPinned = session.mode === 'pinned'
     let sessionId = isPinned ? session.pinnedSessionId : null

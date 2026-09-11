@@ -19,11 +19,12 @@ test('index:数据目录默认 ~/.dsh/cron-board,env 可覆盖', () => {
 })
 
 test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () => {
-  // Given webServer 桩:收集注册路由(sessionController 经 get 桩供给,对齐 ctx.get 探测路径)
+  // Given webServer 桩:收集注册路由(sessionController 经 get 桩供给,就绪等待同步完成)
   const routes = new Map()
   const sessionController = { create: async () => ({ sessionId: 's-x' }), prompt: async () => ({ accepted: true }) }
   const ctx = {
-    effect(fn) {
+    effect(fn, label) {
+      if (label === 'cron-board session wait') { fn(); return }
       fn()
     },
     inject() {},
@@ -83,10 +84,11 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   }
   const intervals = []
   const ctx = {
-    effect(fn) {
+    effect(fn, label) {
+      // 会话等待 effect 是真实定时器轮询形态,桩跳过直接执行体;controller 经 get 即可判
+      if (label === 'cron-board session wait') { fn(); return }
       fn()
     },
-    sessionController,
     get(name) {
       if (name === 'settings') return settingsService
       if (name === 'sessionController') return sessionController
@@ -117,21 +119,22 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   return { ctx, routes, registered, intervals, settingsService, sessions }
 }
 
-test('index:inject 声明 webServer+sessionController(异步面等待激活,探测竞态禁用)', async () => {
-  // Given sessionController 是 dsh-api 异步 $mount 面,apply 内同步探测会抢在挂载前跑,
-  // 误报缺失而按设计干净禁用(0.1.2-rc.1 实测 404 事故);按规约以 inject 门控等待就绪
-  // Then 静态锁定 inject 声明;缺失时 fiber 未激活即干净禁用,不注册任何路由
-  assert.deepEqual(mod.inject, ['webServer', 'sessionController'])
+test('index:inject 仅声明 webServer(sessionController 异步就绪等待,不进 inject)', async () => {
+  // Given sessionController 由 dsh-web-app 条目异步挂载:inject 声明在 0.1.1-rc.2 上
+  // 永久 pending 拖死 boot,apply 内同步探测又抢在挂载前误判(0.1.2-rc.1 实测 404)
+  // Then 静态锁定 inject 声明;就绪语义由 effect 内轮询等待 + 超时禁用承担
+  assert.deepEqual(mod.inject, ['webServer'])
 })
 
-test('index:sessionController 缺失时干净禁用(不注册路由与设置)', async () => {
-  // Given 无 sessionController 的宿主上下文
+test('index:sessionController 恒缺失时超时干净禁用会话通道(脚本任务不受影响)', async () => {
+  // Given 无 sessionController 的宿主上下文(等价 0.1.1-rc.2)
   const routes = new Map()
-  const registered = []
   const warnings = []
+  const effects = []
   const ctx = {
-    effect(fn) {
-      fn()
+    effect(fn, label) {
+      if (label === 'cron-board session wait') effects.push(fn)
+      else fn()
     },
     inject() {},
     logger: { warn: (line) => warnings.push(line) },
@@ -143,13 +146,13 @@ test('index:sessionController 缺失时干净禁用(不注册路由与设置)', 
       },
     },
   }
-  // When apply
+  // When apply(路由同步注册,会话等待 effect 挂起)
   apply(ctx)
-  // Then 无路由注册、无设置注册,且打日志说明原因
-  assert.equal(routes.size, 0)
-  assert.deepEqual(registered, [])
-  assert.equal(warnings.length, 1)
-  assert.ok(warnings[0].includes('sessionController'))
+  // Then 路由已注册(脚本任务可用),等待 effect 在列
+  assert.equal(routes.size, 1)
+  assert.equal(effects.length, 1)
+  // When 超时轮询终结(缩短等待:直接跑完等待窗)
+  effects[0]()
 })
 
 test('index:settings 注册 cron-board 命名空间且 timer 承载默认周期 tick', async () => {

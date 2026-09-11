@@ -24,6 +24,7 @@ export const MESSAGES = {
   badWindowFormat: '窗口时间格式须为 HH:mm',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
+  sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
   systemError: '操作失败(系统级错误,详见服务端日志)',
 }
 
@@ -164,7 +165,7 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, readSidebarTab, updateUiSettings, logSystem }) {
+export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, logSystem }) {
 
   const routes = [
     {
@@ -278,6 +279,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, readSi
           timerReason: periodic && periodic.reason ? periodic.reason : null,
           scheduler: scheduler ? scheduler.status() : { active: 0, queued: 0 },
           nextAt: scheduler && scheduler.nextRunAt ? scheduler.nextRunAt() : null,
+          session: sessionState
+            ? { ready: Boolean(sessionState.ready), disabled: Boolean(sessionState.disabled) }
+            : { ready: false, disabled: false },
           ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false },
         })
       },
@@ -322,6 +326,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, readSi
       handler: async ({ req, res }) => {
         const body = await readJsonBody(req)
         const fields = normalizeJob(body)
+        if (fields.kind === 'session' && sessionState && sessionState.disabled) {
+          return sendJson(res, 400, { error: MESSAGES.sessionDisabled })
+        }
         const row = await store.jobs.create(fields)
         sendJson(res, 200, row)
       },

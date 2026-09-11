@@ -44,7 +44,7 @@ function makeStubs({ autoIdle = true } = {}) {
 
 function makeDriver(stubs, overrides = {}) {
   return createSessionDriver({
-    sessionController: stubs.sessionController,
+    getSessionController: () => stubs.sessionController,
     agents: stubs.agents,
     sessionQuery: stubs.sessionQuery,
     pollIntervalMs: 5,
