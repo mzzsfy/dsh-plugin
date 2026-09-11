@@ -41,6 +41,18 @@ test('checked/focus-visible/disabled 三态均以 checkbox 锚定', () => {
   assert.match(source, /\.cb-switch input\[type="checkbox"\]:disabled \+/)
 })
 
+test('插件页卡片为官方 PluginCard 形制:li 卡壳 + 头部折叠 + 令牌同源', () => {
+  // Given 官方插件卡片 = ul.cards > li.PluginCard(边框卡壳 + 名称/描述头部 + chevron 折叠)
+  // When 本插件卡片注册进同一列表(slot 契约:外观归插件自持,官方壳未导出)
+  // Then 静态锁定 cb-pc 镜像形制,防止退化回裸 div 平铺
+  assert.match(source, /h\('li', \{ className: 'cb-pc/, '卡片根元素必须是 li(官方列表 ul.cards 的合法子元素)')
+  assert.match(source, /\.cb-pc\{border:\.5px solid var\(--dsw-alias-border-l4\)/, '卡壳边框/底色令牌必须与官方 PluginCard 同源')
+  assert.match(source, /h\('button', \{ type: 'button', className: 'cb-pc__head'/, '缺少官方形制的头部按钮')
+  assert.match(source, /aria-expanded/, '头部必须可折叠并暴露 aria-expanded')
+  assert.match(source, /\.cb-pc__hint\{[^}]*var\(--dsw-alias-label-tertiary\)/, '提示文本令牌必须与官方 hint 同源')
+  assert.doesNotMatch(source, /'cb-settings'/, '旧裸 div 平铺形态已移除')
+})
+
 test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {
   // IIFE 书挡内允许任意声明;守卫确认整文件被书挡包裹
   const trimmed = source.trim()
