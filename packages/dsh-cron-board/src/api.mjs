@@ -164,7 +164,7 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, readSidebarTab, logSystem }) {
+export function createApi({ store, logger, executor, scheduler, periodic, readSidebarTab, updateUiSettings, logSystem }) {
 
   const routes = [
     {
@@ -280,6 +280,20 @@ export function createApi({ store, logger, executor, scheduler, periodic, readSi
           nextAt: scheduler && scheduler.nextRunAt ? scheduler.nextRunAt() : null,
           ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false },
         })
+      },
+    },
+    {
+      // 界面偏好写入(sidebarTab 等):settings.update 服务端持久化,即时生效
+      method: 'POST',
+      segments: ['ui-settings'],
+      handler: async ({ req, res }) => {
+        const body = await readJsonBody(req)
+        const patch = {}
+        if (typeof body.sidebarTab === 'boolean') patch.sidebarTab = body.sidebarTab
+        if (!Object.keys(patch).length) return sendJson(res, 400, { error: '无有效字段' })
+        if (typeof updateUiSettings !== 'function') return sendJson(res, 200, { ok: false, error: '设置服务不可用' })
+        updateUiSettings(patch)
+        sendJson(res, 200, { ok: true, ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false } })
       },
     },
     {

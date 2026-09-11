@@ -59,8 +59,12 @@ test('client.js 主页面双形态挂载契约(默认主界面;设置开关手�
   assert.match(source, /data-cb-board-active/)
   assert.match(source, /dsh-panel-activate/)
   assert.match(source, /function mountStandaloneBoard/)
-  // 不再挂设置页分区(入口唯一)
-  assert.doesNotMatch(source, /settings\.section/)
+  // 设置>插件页卡片(settings.plugin.item,key 配对 ns);better-sidebar 在场可切换,否则禁用仅展示
+  assert.match(source, /ctx\.slots\.inject\('settings\.plugin\.item'/)
+  assert.match(source, /key: 'cron-board', label: '定时任务'/)
+  assert.match(source, /function CronBoardPluginCard/)
+  assert.match(source, /'ui-settings'/)
+  assert.match(source, /sidebarReady/)
   // 挂载仲裁:apply 无条件先落主界面形态;偏好(status.ui.sidebarTab)驱动接入/退出
   assert.match(source, /let standalone = mountStandaloneBoard\(wsModel\)/)
   assert.match(source, /applyPref\(\)/)

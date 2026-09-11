@@ -290,6 +290,32 @@ test('status 路由:ui.sidebarTab 透出用户侧边栏移入偏好', async (t) 
   assert.equal(res.payload.ui.sidebarTab, true)
 })
 
+test('ui-settings 路由:布尔补丁经 updateUiSettings 写入并回读', async (t) => {
+  // Given 写入桩记录补丁,读取桩翻转返回(模拟 settings.update 后生效)
+  let stored = false
+  const { api } = await makeApi(t, {
+    updateUiSettings: (patch) => { if (typeof patch.sidebarTab === 'boolean') stored = patch.sidebarTab },
+    readSidebarTab: () => stored,
+  })
+  // When POST 开关开
+  const res = await call(api, 'POST', '/api/cron-board/ui-settings', { sidebarTab: true })
+  // Then ok 且回读 true;写桩收到布尔补丁
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.ok, true)
+  assert.equal(res.payload.ui.sidebarTab, true)
+  assert.equal(stored, true)
+})
+
+test('ui-settings 路由:无效字段 400,服务缺失降级 ok=false', async (t) => {
+  const noHandler = await makeApi(t, { updateUiSettings: undefined })
+  const res1 = await call(noHandler.api, 'POST', '/api/cron-board/ui-settings', { sidebarTab: true })
+  assert.equal(res1.status, 200)
+  assert.equal(res1.payload.ok, false)
+  const { api } = await makeApi(t)
+  const res2 = await call(api, 'POST', '/api/cron-board/ui-settings', { other: 1 })
+  assert.equal(res2.status, 400)
+})
+
 test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', async (t) => {
   const { api } = await makeApi(t, { periodic: { running: false, reason: '宿主定时服务不可用' } })
   const res = await call(api, 'GET', '/api/cron-board/status')

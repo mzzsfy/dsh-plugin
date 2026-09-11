@@ -117,11 +117,11 @@ function makeFullCtx({ timerAvailable = true } = {}) {
   return { ctx, routes, registered, intervals, settingsService, sessions }
 }
 
-test('index:inject 仅声明 webServer(sessionController 走 apply 内探测)', async () => {
-  // Given sessionController 在旧版宿主(0.1.1-rc.2)不存在,inject 声明会让 fiber 永久
-  // pending,旧版 boot 对 pending 条目抛错杀掉整个进程;host 服务同步注册,探测无竞态
-  // Then 静态锁定 inject 声明
-  assert.deepEqual(mod.inject, ['webServer'])
+test('index:inject 声明 webServer+sessionController(异步面等待激活,探测竞态禁用)', async () => {
+  // Given sessionController 是 dsh-api 异步 $mount 面,apply 内同步探测会抢在挂载前跑,
+  // 误报缺失而按设计干净禁用(0.1.2-rc.1 实测 404 事故);按规约以 inject 门控等待就绪
+  // Then 静态锁定 inject 声明;缺失时 fiber 未激活即干净禁用,不注册任何路由
+  assert.deepEqual(mod.inject, ['webServer', 'sessionController'])
 })
 
 test('index:sessionController 缺失时干净禁用(不注册路由与设置)', async () => {

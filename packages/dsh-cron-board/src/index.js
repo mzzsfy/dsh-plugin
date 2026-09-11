@@ -22,7 +22,7 @@ export const name = 'dsh-cron-board'
 // (0.1.1-rc.2 无此服务,inject 声明会让 fiber 永久 pending,旧版 boot 对 pending
 // 条目抛错杀掉整个进程,连带已监听的 web 一起退出);host 服务为同步注册,apply 内
 // 探测无时序竞态:缺失即打日志干净禁用,整体不激活(含脚本任务)的语义不变
-export const inject = ['webServer']
+export const inject = ['webServer', 'sessionController']
 
 // 数据目录 env 覆盖:测试注入临时目录(对齐 dsh-usage-panel 先例)
 const DATA_DIR_ENV = 'DSH_CRON_BOARD_DATA_DIR'
@@ -48,6 +48,17 @@ export function resolveDataDir(env = process.env) {
 }
 
 export function apply(ctx, config) {
+  process.stderr.write('[cron-board] apply ENTRY\n')
+  try {
+    return applyInner(ctx, config)
+  } catch (error) {
+    process.stderr.write('[cron-board] apply EXCEPTION: ' + String(error && error.stack || error) + '\n')
+    throw error
+  }
+}
+
+function applyInner(ctx, config) {
+  process.stderr.write('[cron-board] apply CALLED, sessionController=' + Boolean(ctx.get('sessionController')) + '\n')
   // ctx.get 不受 inject 门控(cordis 明文契约:缺失返回 undefined),属性访问会被拦截抛错
   const sessionController = ctx.get('sessionController')
   if (!sessionController) {
@@ -88,6 +99,7 @@ export function apply(ctx, config) {
           scheduler,
           periodic,
           readSidebarTab: () => readBoolean('sidebarTab', false),
+          updateUiSettings,
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
         })
         return { api, scheduler }
@@ -108,6 +120,13 @@ export function apply(ctx, config) {
   function readBoolean(name, fallback) {
     const value = readSettingValue(name)
     return typeof value === 'boolean' ? value : fallback
+  }
+  // 客户端设置面板写入通道:settings 服务在场时按命名空间合并补丁
+  function updateUiSettings(patch) {
+    const settings = ctx.get('settings')
+    if (!settings || typeof settings.update !== 'function') return false
+    settings.update(SETTINGS_NS, patch)
+    return true
   }
   function readSettingValue(name) {
     const settings = ctx.get('settings')
@@ -155,20 +174,27 @@ export function apply(ctx, config) {
   })
 
   ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'prefix',
-      path: API_PREFIX,
-      handler: async (req, res) => {
-        try {
-          const runtime = await getRuntime()
-          await runtime.api.handle(req, res)
-        } catch (error) {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: '操作失败(系统级错误,详见服务端日志)' }))
-          if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + String(error && error.stack || error))
-        }
-      },
-    }),
+    () => {
+      const disposeRoute = ctx.webServer.register({
+        kind: 'prefix',
+        path: API_PREFIX,
+        handler: async (req, res) => {
+          try {
+            const runtime = await getRuntime()
+            await runtime.api.handle(req, res)
+          } catch (error) {
+            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: '操作失败(系统级错误,详见服务端日志)' }))
+            if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + String(error && error.stack || error))
+          }
+        },
+      })
+      process.stderr.write('[cron-board] ROUTE REGISTERED\n')
+      return () => {
+        process.stderr.write('[cron-board] ROUTE DISPOSED\n')
+        disposeRoute()
+      }
+    },
     'cron-board api',
   )
 

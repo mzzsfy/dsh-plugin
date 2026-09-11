@@ -136,6 +136,8 @@ body{
 .cb-switch input[type="checkbox"]:disabled + .cb-switch__track{opacity:.4;cursor:not-allowed}
 .cb-switch:not(:has(input[type="checkbox"]:disabled)):hover .cb-switch__track{background:var(--cb-accent-deep);opacity:.85}
 .cb-switch input[type="checkbox"]:checked:not(:disabled) + .cb-switch__track:hover{background:var(--cb-accent-deep)}
+.cb-settings{display:flex;flex-direction:column;gap:var(--cb-space-2);padding:var(--cb-space-2) 0}
+.cb-settings__hint{font-size:var(--cb-font-sm);color:var(--cb-text-dim)}
 .cb-table{display:flex;flex-direction:column;gap:var(--cb-space-1);font-size:var(--cb-font-md)}
 .cb-row{display:flex;align-items:center;gap:var(--cb-space-3);border:1px solid var(--cb-border);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-4);flex-wrap:wrap;transition:background .15s,border-color .15s}
 .cb-row:hover{background:var(--cb-hover)}
@@ -753,19 +755,58 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const OTHER_PANEL_ACTIVE_ATTRS = ['data-dsh-atb-active', 'data-dsh-taskboard-active', 'data-dsh-ssh-active']
     const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
 
-    // better-sidebar tab:注册即单实例(single),visible 门控轮询;wsModel 供会话任务选工作区
+    // 设置>插件页卡片:sidebarTab 选项;better-sidebar 在场可切换,否则仅展示禁用态
+    function CronBoardPluginCard() {
+      const [enabled, setEnabled] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [sidebarReady, setSidebarReady] = useState(Boolean(document.querySelector(SIDEBAR_ROOT_SELECTOR)))
+      useEffect(() => {
+        let alive = true
+        request('GET', 'status').then((outcome) => {
+          if (alive) setEnabled(outcome.ok && outcome.data && outcome.data.ui ? outcome.data.ui.sidebarTab === true : false)
+        })
+        return () => { alive = false }
+      }, [])
+      const toggle = async () => {
+        if (busy || enabled === null || !sidebarReady) return
+        setBusy(true)
+        const outcome = await request('POST', 'ui-settings', { sidebarTab: !enabled })
+        if (outcome.ok && outcome.data && outcome.data.ui) setEnabled(outcome.data.ui.sidebarTab === true)
+        setBusy(false)
+      }
+      return h('div', { className: 'cb-settings' },
+        switchToggle({
+          checked: enabled === true,
+          disabled: busy || enabled === null || !sidebarReady,
+          onChange: toggle,
+          label: '看板移入 better-sidebar 侧边栏',
+        }),
+        h('div', { className: 'cb-settings__hint' },
+          sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时始终使用主界面。' : '需安装 better-sidebar 后方可切换;未安装时看板始终使用主界面。'),
+      )
+    }
+
+    // better-sidebar tab:注册即单实例(single);v0.19.0 起注册只入「可打开」目录,
+    // 须显式 openTab 落入底部工作台;wsModel 供会话任务选工作区
     function registerBoardTab(ctx, service, wsModel) {
-      return ctx.effect(() => service.registerTab({
-        id: TAB_ID,
-        title: '定时任务',
-        icon: (size) => h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
-          stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
-          h('rect', { x: 2, y: 2, width: 12, height: 12, rx: 2 }),
-          h('path', { d: 'M6 2v12M10 2v12' })),
-        order: 46,
-        single: true,
-        component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel }),
-      }), 'cron-board sidebar tab')
+      return ctx.effect(() => {
+        const disposeTab = service.registerTab({
+          id: TAB_ID,
+          title: '定时任务',
+          icon: (size) => h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
+            stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
+            h('rect', { x: 2, y: 2, width: 12, height: 12, rx: 2 }),
+            h('path', { d: 'M6 2v12M10 2v12' })),
+          order: 46,
+          single: true,
+          component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel }),
+        })
+        // 无会话时 openTab 静默不落,tab 仍注册在册(新建标签页菜单可见)
+        if (typeof service.openTab === 'function') {
+          try { service.openTab({ type: TAB_ID }) } catch { /* 打开失败不回滚注册 */ }
+        }
+        return disposeTab
+      }, 'cron-board sidebar tab')
     }
 
     function sidebarRoot() {
@@ -888,8 +929,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     return {
-      // workspaces 由宿主 client 常驻提供;声明注入保证 apply 时已就绪(缺失则 fiber 未激活,即干净禁用)
-      inject: ['workspaces'],
+      // workspaces 由宿主 client 常驻提供;slots 供设置页分区挂载(缺失则 fiber 未激活,即干净禁用)
+      inject: ['workspaces', 'slots'],
       apply(ctx) {
         ensureStyle(document)
         // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
@@ -931,6 +972,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           if (standalone) standalone()
           if (tabDisposer) tabDisposer()
         }, 'cron-board mount arbitration')
+        // 设置>插件页卡片:key 配对 ns,宿主按 describe 命名空间分发;effect 随 fiber 回收
+        ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
+          yield ctx.slots.register(
+            { name: 'settings.plugin.item', key: 'cron-board', label: '定时任务' },
+            CronBoardPluginCard,
+          )
+        }), 'cron-board settings card')
         ctx.inject(['betterSidebar'], (bsCtx) => {
           currentSidebar = bsCtx.betterSidebar
           applyPref()
