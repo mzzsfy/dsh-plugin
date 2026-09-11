@@ -54,12 +54,13 @@ pnpm config set --global minimumReleaseAge 360
 ## 开发态链接(dev-link)
 
 ```sh
-node scripts/dev-link.mjs all          # 归一 profile 依赖行(^线上最新)+ 挂工作副本 junction
+node scripts/dev-link.mjs all          # 归一 profile 依赖行(^线上最新)+ 对账 dsh.profile.bundles + 挂工作副本 junction
 node scripts/dev-link.mjs <包名>       # 单包模式
 node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ```
 
 - 开发态合法形态:已发布包依赖行 = `^线上最新`,未发布包(线上 404)依赖行 = `file:<仓库>/packages/<包>`(dev-link 自动写入,出版本后重跑自动归一);工作副本挂载一律 = junction;公共依赖包(如 dsh-toast)无表层依赖行(残留行由 dev-link 删除),由消费插件 dependencies 声明随装 + dsh fallback 补链兜底
+- `dsh.profile.bundles` 由 dev-link 对账(镜像官方 `dsh plugin` reconcilePlugins 语义):清单内插件包且依赖行已声明即入层,公共依赖包或无依赖行即出层;装载层变化不走热重载,重启 dsh 后生效
 - link 时在 home 补丁层(~/.dsh/cordis.patch.yml)维护 hmr 覆盖行:仓库 packages 保存即热重载(host 半区约 1 秒,client 半区刷新页面),卸链时移除
 
 dsh-usage-panel 的无 IO 纯逻辑层(`src/parsers.mjs`)由其 npm test 覆盖。包元数据:dsh-usage-panel peerDependencies 为 `@deepseek-ai/dsh-settings`(>=0.1.2-alpha.2)、`@deepseek-ai/schemastery`(>=3.18.0)与 `react`(^18.2.0);@mzzsfy/dsh-rs-workflow 为 `@deepseek-ai/dsh-settings`(>=0.1.2-alpha.2)、`@deepseek-ai/dsh-tools`(^0.1.1-rc.2)与 `@deepseek-ai/schemastery`(^3.18.1);@mzzsfy/dsh-maintain 为 `@deepseek-ai/dsh-settings`(>=0.1.2-alpha.2)、`@deepseek-ai/schemastery`(>=3.18.0)与 `react`(^18.2.0)。peer 不落盘(profile pnpm `autoInstallPeers: false`),开发态由目录逐级兜底解析到 dsh 本体全局安装目录,CI 无 dsh 本体时以钉版包装入仓库根 node_modules 作解析桥。
