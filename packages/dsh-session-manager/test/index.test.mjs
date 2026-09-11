@@ -1639,12 +1639,14 @@ test('历史输入路由:运行中会话参与对齐(实时追加),缓存上限�
       },
     })
     const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
-      (body) => body.aligned && body.inputs.length === HISTORY_INPUT_LIMIT)
+      (body) => body.aligned && body.inputs.length === HISTORY_INPUT_LIMIT + 1)
     const texts = res.body.inputs.map((item) => item.text)
-    assert.equal(texts.length, HISTORY_INPUT_LIMIT)
+    // 运行中会话输入量远超上限:limit 之外仅追加该会话去重后最早一条(s1 首条已在 limit 内)
+    assert.equal(texts.length, HISTORY_INPUT_LIMIT + 1)
     assert.ok(texts.includes('历史输入'), '最新既有输入保留')
     assert.ok(texts.includes('运行输入' + (HISTORY_INPUT_LIMIT + 49)), '次新运行输入保留')
-    assert.ok(!texts.includes('运行输入0'), '最旧输入被上限裁剪')
+    assert.ok(texts.includes('运行输入0'), '运行中会话最早输入受首条保护')
+    assert.ok(!texts.includes('运行输入1'), '首条之外的旧输入仍被上限裁剪')
     assert.ok(readCounts.get('running1') >= 1, '运行中会话被对齐解压')
     const sessionRes = await requestUntilAligned(handlers, '?sessionId=running1&scope=session')
     assert.ok(sessionRes.body.inputs.length > 0, 'session 范围可取运行中会话自身输入')

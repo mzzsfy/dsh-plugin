@@ -9,6 +9,8 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_MESSAGES,
+  HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES,
+  HISTORY_ALIGN_MODERN_MAX_ARTIFACT_BYTES,
   TOAST_MAX_TITLES,
   aggregateDeleteOutcome,
   aggregateInputs,
@@ -21,6 +23,7 @@ import {
   filterArchiveRows,
   groupArchiveRowsByWorkspace,
   isSessionRunning,
+  maxArtifactBytesForHost,
   mergeDeletedEntry,
   pageArchiveRows,
   projectArchiveRows,
@@ -514,4 +517,79 @@ test('历史输入聚合:limit 裁剪与单条截断', () => {
     { text: 'xy', at: 2 },
   ], { limit: 1, maxChars: 3 })
   assert.deepEqual(merged, [{ text: 'xy', at: 2 }])
+})
+
+// ── 历史输入:每会话首条保护(挤出不做永久丢弃)──
+
+test('历史输入聚合:超 limit 挤出时每个会话最早条目仍保留', () => {
+  const merged = aggregateInputs([
+    { text: '开场提示词', at: 1, sid: 's-old' },
+    { text: '继续', at: 2, sid: 's-old' },
+    { text: '新会话开场', at: 3, sid: 's-new' },
+    { text: '收尾', at: 4, sid: 's-new' },
+  ], { limit: 2, maxChars: 100 })
+  assert.deepEqual(merged, [
+    { text: '收尾', at: 4, sid: 's-new' },
+    { text: '新会话开场', at: 3, sid: 's-new' },
+    { text: '开场提示词', at: 1, sid: 's-old' },
+  ])
+})
+
+test('历史输入聚合:首条已在 limit 内不多余追加,结果仍为时间倒序', () => {
+  const merged = aggregateInputs([
+    { text: 'a', at: 1, sid: 's1' },
+    { text: 'b', at: 2, sid: 's2' },
+  ], { limit: 10, maxChars: 100 })
+  assert.deepEqual(merged, [{ text: 'b', at: 2, sid: 's2' }, { text: 'a', at: 1, sid: 's1' }])
+})
+
+test('历史输入聚合:首条保护在去重后集合上计算,与 limit 内文本重复不产生双条目', () => {
+  // s-old 的首条文本与 s-new 的某条相同:去重保留最新,归属 s-new,不再重复追加
+  const merged = aggregateInputs([
+    { text: '继续', at: 1, sid: 's-old' },
+    { text: '继续', at: 9, sid: 's-new' },
+    { text: '其他', at: 5, sid: 's-new' },
+  ], { limit: 1, maxChars: 100 })
+  assert.deepEqual(merged, [{ text: '继续', at: 9, sid: 's-new' }, { text: '其他', at: 5, sid: 's-new' }])
+})
+
+test('历史输入聚合:无 sid 条目不触发首条保护', () => {
+  const merged = aggregateInputs([
+    { text: 'old', at: 1 },
+    { text: 'new', at: 2 },
+  ], { limit: 1, maxChars: 100 })
+  assert.deepEqual(merged, [{ text: 'new', at: 2 }])
+})
+
+test('历史输入聚合:首条保护同样受 maxChars 截断', () => {
+  const merged = aggregateInputs([
+    { text: 'abcdef', at: 1, sid: 's1' },
+    { text: 'xy', at: 2, sid: 's2' },
+  ], { limit: 1, maxChars: 3 })
+  assert.deepEqual(merged, [{ text: 'xy', at: 2, sid: 's2' }, { text: 'abc', at: 1, sid: 's1' }])
+})
+
+// ── 巨产物跳过线:宿主版本黑名单 ──
+
+test('巨产物跳过线:0.1.1 与 0.1.2 系列(含 prerelease)按旧线', () => {
+  for (const version of ['0.1.1', '0.1.1-rc.2', '0.1.2', '0.1.2-rc.1', '0.1.2-alpha.2']) {
+    assert.equal(maxArtifactBytesForHost(version), HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES, version)
+  }
+})
+
+test('巨产物跳过线:0.1.3 起与未知未来版本按新线', () => {
+  for (const version of ['0.1.3', '0.1.5', '0.1.5-rc.1', '0.2.0', '1.0.0']) {
+    assert.equal(maxArtifactBytesForHost(version), HISTORY_ALIGN_MODERN_MAX_ARTIFACT_BYTES, version)
+  }
+})
+
+test('巨产物跳过线:版本缺失或非法保守回退旧线', () => {
+  for (const version of [null, undefined, '', 'garbage', '0.1']) {
+    assert.equal(maxArtifactBytesForHost(version), HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES, String(version))
+  }
+})
+
+test('巨产物跳过线:新旧线常量与实测依据自洽', () => {
+  assert.equal(HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES, 8 * 1024 * 1024)
+  assert.equal(HISTORY_ALIGN_MODERN_MAX_ARTIFACT_BYTES, 16 * 1024 * 1024)
 })
