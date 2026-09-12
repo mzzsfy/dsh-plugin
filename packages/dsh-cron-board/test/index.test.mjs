@@ -21,7 +21,14 @@ test('index:数据目录默认 ~/.dsh/cron-board,env 可覆盖', () => {
 test('index:apply 注册 prefix 路由且请求走通(列表接口)', async () => {
   // Given webServer 桩:收集注册路由(sessionController 经 get 桩供给,就绪等待同步完成)
   const routes = new Map()
-  const sessionController = { create: async () => ({ sessionId: 's-x' }), prompt: async () => ({ accepted: true }) }
+  const sessionController = {
+    create: async () => ({ sessionId: 's-x' }),
+    // 镜像宿主 facade 契约:prompt 准入首行非可选链校验 signal
+    prompt: async (args, signal) => {
+      signal.throwIfAborted()
+      return { accepted: true }
+    },
+  }
   const ctx = {
     effect(fn, label) {
       if (label === 'cron-board session wait') { fn(); return }
@@ -74,7 +81,9 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       sessions.set(sessionId, { id: sessionId, status: 'running' })
       return { sessionId }
     },
-    async prompt(args) {
+    async prompt(args, signal) {
+      // 镜像宿主 facade 契约:prompt 准入首行非可选链校验 signal
+      signal.throwIfAborted()
       queueMicrotask(() => {
         const entry = sessions.get(args.sessionId)
         if (entry) entry.status = 'idle'

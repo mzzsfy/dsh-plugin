@@ -12,6 +12,10 @@ const REJECTED_MESSAGE = '会话输入投递被拒绝'
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
 
+// 宿主 facade 的 prompt 准入首行非可选链校验 signal(浏览器侧由 transport 注入,进程内无取消来源),
+// 固定传永不中止的信号;宿主仅在准入期读一次不保留,共享单例安全
+const PROMPT_SIGNAL = new AbortController().signal
+
 export function createSessionDriver({ getSessionController, agents, sessionQuery, pollIntervalMs = 2 * 1000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表)
   async function pinnedExists(sessionId) {
@@ -50,7 +54,7 @@ export function createSessionDriver({ getSessionController, agents, sessionQuery
       sessionId,
       mode: 'queue',
       content: [{ type: 'text', text: buildPromptText({ prompt: job.prompt || '', env, mask }) }],
-    })
+    }, PROMPT_SIGNAL)
     if (!submission || submission.accepted !== true) {
       return { status: 'fail', message: REJECTED_MESSAGE, sessionId }
     }

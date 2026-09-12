@@ -20,7 +20,9 @@ function makeStubs({ autoIdle = true } = {}) {
       created.push({ sessionId, cwd })
       return { sessionId }
     },
-    async prompt(args) {
+    // 镜像宿主 facade 契约(dsh-api-session-controller):prompt 准入首行非可选链校验 signal
+    async prompt(args, signal) {
+      signal.throwIfAborted()
       prompts.push(args)
       if (autoIdle) {
         queueMicrotask(() => {
@@ -158,4 +160,25 @@ test('session-driver:prompt 携带变量折叠文本', async () => {
   const text = stubs.prompts[0].content[0].text
   assert.ok(text.includes('跑日报'))
   assert.ok(text.includes('CITY=hangzhou'))
+})
+
+test('session-driver:prompt 必须携带非中止 AbortSignal(宿主 facade 准入契约)', async () => {
+  const seen = []
+  const stubs = makeStubs()
+  stubs.sessionController.prompt = (args, signal) => {
+    seen.push(signal)
+    queueMicrotask(() => {
+      const entry = stubs.sessions.get(args.sessionId)
+      if (entry) entry.status = 'idle'
+    })
+    return Promise.resolve({ accepted: true })
+  }
+  const driver = makeDriver(stubs)
+  // When 正常发起
+  const outcome = await driver.run({ job: BASE_JOB, env: {} })
+  // Then 传入 AbortSignal 且非中止(宿主首行 throwIfAborted 可通过)
+  assert.equal(outcome.status, 'success')
+  assert.equal(seen.length, 1)
+  assert.ok(seen[0] instanceof AbortSignal)
+  assert.equal(seen[0].aborted, false)
 })
