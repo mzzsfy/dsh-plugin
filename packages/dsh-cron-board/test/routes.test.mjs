@@ -325,45 +325,30 @@ test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', asyn
 
 test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   const { store, api } = await makeApi(t)
-  // When 建 pinned 会话任务
+  // When 建 pinned 会话任务(携带已废弃的窗口字段)
   const created = await call(api, 'POST', '/api/cron-board/jobs', {
     name: '日报', kind: 'session', prompt: '写日报',
     schedule: '0 9 * * *', enabled: true, timeoutMs: 60 * 1000,
     session: { mode: 'pinned', pinnedSessionId: ' s-9 ', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer' },
   })
-  // Then 会话子对象落库,id 已裁剪,默认值正确
+  // Then 会话子对象仅落合法字段(窗口三字段已随功能删除,不再产出),id 已裁剪
   assert.equal(created.status, 200)
-  assert.deepEqual(created.payload.session, {
-    mode: 'pinned', pinnedSessionId: 's-9', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer',
-  })
+  assert.deepEqual(created.payload.session, { mode: 'pinned', pinnedSessionId: 's-9' })
+  assert.equal(created.payload.timeoutMs, undefined)
   // When shell 任务不带 session 字段
   const shellJob = await call(api, 'POST', '/api/cron-board/jobs', {
     name: 's1', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
   })
-  // Then session 字段缺省
+  // Then session 字段缺省,shell 保留显式超时
   assert.equal(shellJob.payload.session, undefined)
-  // When 窗口只给一端
-  const half = await call(api, 'POST', '/api/cron-board/jobs', {
-    name: 's2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
-    session: { windowStart: '09:00' },
-  })
-  // Then 400(窗口须成对)
-  assert.equal(half.status, 400)
-  assert.match(half.payload.error, /窗口/)
-  // When 非法窗口格式
-  const badWindow = await call(api, 'POST', '/api/cron-board/jobs', {
-    name: 's3', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
-    session: { windowStart: '9:0', windowEnd: '23:00' },
+  assert.equal(shellJob.payload.timeoutMs, 1000)
+  // When 非法会话模式
+  const badMode = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { mode: 'orphan' },
   })
   // Then 400
-  assert.equal(badWindow.status, 400)
-  // When 非法 onMiss
-  const badMiss = await call(api, 'POST', '/api/cron-board/jobs', {
-    name: 's4', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
-    session: { onMiss: 'retry' },
-  })
-  // Then 400
-  assert.equal(badMiss.status, 400)
+  assert.equal(badMode.status, 400)
 })
 
 test('jobs 路由:会话通道禁用时建会话任务 400,脚本任务不受限', async (t) => {

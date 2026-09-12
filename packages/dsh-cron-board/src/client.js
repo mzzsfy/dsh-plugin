@@ -15,7 +15,6 @@ const STATUS_META = {
 const TRIGGER_META = { cron: { label: '定时' }, manual: { label: '手动' } }
 const KIND_LABELS = { shell: '脚本', session: '会话' }
 const MODE_LABELS = { fresh: '每次新建', pinned: '固定会话' }
-const ONMISS_LABELS = { skip: '跳过', defer: '顺延' }
 const STATUS_TONE_COLOR = { ok: '#22a06b', bad: '#e5484d', warn: '#f5a524', mute: '#8b8d98', run: '#3b82f6' }
 const SECOND_MS = 1000
 const MINUTE_MS = 60 * SECOND_MS
@@ -324,9 +323,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         session: {
           mode: job && job.session ? job.session.mode : 'fresh',
           pinnedSessionId: job && job.session ? job.session.pinnedSessionId : '',
-          windowStart: job && job.session ? job.session.windowStart : '',
-          windowEnd: job && job.session ? job.session.windowEnd : '',
-          onMiss: job && job.session ? job.session.onMiss : 'skip',
         },
       }))
       const [preview, setPreview] = useState(null)
@@ -407,19 +403,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },
                   h('input', { type: 'text', value: form.session.pinnedSessionId, onChange: (e) => setSession({ pinnedSessionId: e.target.value }) }))
               : null,
-            form.kind === 'session'
-              ? h(Field, { label: '允许时段起(可空)' }, h('input', { type: 'text', placeholder: '09:00', value: form.session.windowStart, onChange: (e) => setSession({ windowStart: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '允许时段止(可空)' }, h('input', { type: 'text', placeholder: '23:00', value: form.session.windowEnd, onChange: (e) => setSession({ windowEnd: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '窗口外策略' }, h(PillGroup, {
-                  options: [{ value: 'skip', label: ONMISS_LABELS.skip }, { value: 'defer', label: ONMISS_LABELS.defer }],
-                  value: form.session.onMiss,
-                  onChange: (onMiss) => setSession({ onMiss }),
-                }))
-              : null)),
+          )),
         h(Section, { title: '调度计划' },
           h('div', { className: 'cb-grid' },
             h(Field, { label: 'cron 表达式(分 时 日 月 周)' },
@@ -434,7 +418,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   CRON_PRESETS.map((preset) => h('option', { key: preset.value, value: preset.value }, preset.label)))),
               preview ? h('span', { className: 'cb-preview' },
                 preview.summary + ';接下来 ' + preview.nextAt.map((at) => formatDateTime(at)).join(' / ')) : null),
-            h(Field, { label: '超时(毫秒)' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) })),
+            form.kind === 'shell'
+              ? h(Field, { label: '超时(毫秒)', hint: '会话任务投递即完成,无超时语义' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) }))
+              : null,
             h(Field, { label: '并发上限(可空)' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) })))),
         error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },
@@ -453,8 +439,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('span', { className: 'cb-name' }, job.name),
           h('span', { className: 'cb-badge' }, KIND_LABELS[job.kind] || job.kind),
           job.kind === 'session' && job.session ? h('span', { className: 'cb-badge' }, MODE_LABELS[job.session.mode]) : null,
-          job.kind === 'session' && job.session && job.session.windowStart
-            ? h('span', { className: 'cb-badge' }, job.session.windowStart + '-' + job.session.windowEnd) : null,
           h('div', { className: 'cb-actions', onClick: (event) => event.stopPropagation() },
             switchToggle({ checked: Boolean(job.enabled), onChange: onToggle }),
             h('button', { className: 'cb-button cb-button--primary cb-button--sm', disabled: !job.enabled, title: job.enabled ? '立即运行' : '已停用', onClick: onRun }, '运行'),

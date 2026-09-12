@@ -1,6 +1,7 @@
 // session-driver:HostApiDriver 会话编排(设计 §4.3,生产实现唯一)。
-// 发起 = 分组解析 + 新建/复用会话 + queue 投递;完成判定 = agents 状态脱离 running(轮询 + timeoutMs 收尾);
-// pinned 忙跳过、未绑定/丢失自愈(三态区分)、发起成功即写 RunRecord.sessionId。变量折叠与掩码由 env 文本构造承担。
+// 发起 = 分组解析 + 新建/复用会话 + queue 投递;投递成功即终态(crontab 语义:看板只管触发,
+// 执行状态归会话本身);pinned 忙跳过、未绑定/丢失自愈(三态区分)、发起成功即写 RunRecord.sessionId。
+// 变量折叠与掩码由 env 文本构造承担。
 
 import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
@@ -11,8 +12,7 @@ const BUSY_MESSAGE = '上一轮仍在进行'
 const REBOUND_MESSAGE = '首次运行已创建并绑定会话'
 const RECREATED_MESSAGE = '原会话丢失已重建'
 const REJECTED_MESSAGE = '会话输入投递被拒绝'
-
-const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
+const DELIVERED_MESSAGE = '已投递会话'
 
 // 宿主入口(prompt 准入 / listSessions 读取)逐版本形态有差异:prompt 各版本均非可选链校验
 // signal,listSessions 各版本为可选链;进程内调用无取消来源,统一传永不中止的信号,
@@ -37,7 +37,7 @@ async function resolveWorkspaceId(registry, workdir) {
   return created.id
 }
 
-export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery, pollIntervalMs = 2 * 1000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() }) {
+export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表)
   async function pinnedExists(sessionId) {
     if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return Boolean(agents.get(sessionId))
@@ -71,7 +71,7 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     let recreated = false
 
     if (isPinned) {
-      // pinned 串行:上轮未完成直接跳过(不排队)
+      // pinned 串行:上轮未完成直接跳过(不排队,agents 实时状态判定)
       const entry = agents ? agents.get(sessionId) : undefined
       if (entry && entry.status === 'running') {
         return { status: 'skipped', message: BUSY_MESSAGE }
@@ -100,25 +100,12 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     if (typeof updateRecord === 'function') {
       await updateRecord({ sessionId })
     }
-
-    // 完成等待:状态脱离 running 即结算,timeoutMs 到点收尾
-    const timeoutMs = Number.isInteger(job.timeoutMs) && job.timeoutMs > 0 ? job.timeoutMs : DEFAULT_TIMEOUT_MS
-    const deadline = now() + timeoutMs
-    while (now() < deadline) {
-      const entry = agents ? agents.get(sessionId) : undefined
-      if (!entry || entry.status !== 'running') {
-        return {
-          status: 'success',
-          sessionId,
-          ...(recreated ? { pinnedNewId: sessionId, message: recreatedMessage(recreated) } : {}),
-        }
-      }
-      await sleep(pollIntervalMs)
-    }
+    // 投递即终态:运行记录反映触发结果,执行进展在会话内查看
     return {
-      status: 'timeout',
+      status: 'success',
       sessionId,
-      ...(recreated ? { pinnedNewId: sessionId, message: recreatedMessage(recreated) + ';超时未完成' } : {}),
+      message: recreated ? recreatedMessage(recreated) : DELIVERED_MESSAGE,
+      ...(recreated ? { pinnedNewId: sessionId } : {}),
     }
   }
 

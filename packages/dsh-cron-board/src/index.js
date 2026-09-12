@@ -212,5 +212,6 @@ export function apply(ctx, config) {
   )
 
   // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
-  ctx.effect(() => () => schedulerRef.current.dispose(), 'cron-board scheduler lifecycle')
+  // 生命周期钩子:scheduler 无挂起资源时 dispose 可缺省,可选调用保持约定统一
+  ctx.effect(() => () => schedulerRef.current.dispose?.(), 'cron-board scheduler lifecycle')
 }

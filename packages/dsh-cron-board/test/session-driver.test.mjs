@@ -1,13 +1,15 @@
 // session-driver 测试:HostApiDriver 会话编排语义(设计 §4.3、§7 BDD 会话组)。
-// 桩替 sessionController/agents/sessionQuery,验证 fresh/pinned/忙跳过/丢失自愈/超时/完成判定。
+// 桩替 sessionController/agents/sessionQuery/workspaceRegistry,验证 fresh/pinned/忙跳过/未绑定与丢失自愈/投递即终态/分组挂载。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { setTimeout as delay } from 'node:timers/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createSessionDriver } from '../src/session-driver.mjs'
 
-// 可控桩:会话注册表 + 控制器(autoIdle 模拟宿主投递后处理完成转 idle;超时场景关掉)
+// 可控桩:会话注册表 + 控制器(autoIdle 模拟宿主投递后处理完成转 idle;投递即终态下仅影响忙判定)
 function makeStubs({ autoIdle = true } = {}) {
   const sessions = new Map()
   let nextId = 0
@@ -16,7 +18,7 @@ function makeStubs({ autoIdle = true } = {}) {
   const prompts = []
   const sessionController = {
     async create(request) {
-      const sessionId = 's-' + (++nextId)
+      const sessionId = 'sess-' + (++nextId)
       const cwd = request && request.cwd
       sessions.set(sessionId, { id: sessionId, cwd, status: 'running' })
       created.push({ sessionId, cwd })
@@ -67,18 +69,16 @@ function makeRegistry({ paths = {}, archived = [] } = {}) {
   }
 }
 
-function makeDriver(stubs, overrides = {}) {
+function makeDriver(stubs) {
   return createSessionDriver({
     getSessionController: () => stubs.sessionController,
     getWorkspaceRegistry: stubs.getWorkspaceRegistry,
     agents: stubs.agents,
     sessionQuery: stubs.sessionQuery,
-    pollIntervalMs: 5,
-    ...overrides,
   })
 }
 
-const BASE_JOB = { id: 'j1', kind: 'session', prompt: '跑日报', session: { mode: 'fresh' }, timeoutMs: 60 * 1000 }
+const BASE_JOB = { id: 'j1', kind: 'session', prompt: '跑日报', session: { mode: 'fresh' } }
 const PINNED_S1 = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 's-1' } }
 const PINNED_GONE = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'gone' } }
 
@@ -129,7 +129,7 @@ test('session-driver:pinned 会话丢失自愈:新建并回写', async () => {
   const outcome = await driver.run({ job: PINNED_GONE, env: {} })
   // Then 新建会话顶替,message 含「原会话丢失已重建」
   assert.equal(outcome.status, 'success')
-  assert.equal(outcome.pinnedNewId, 's-1')
+  assert.equal(outcome.pinnedNewId, outcome.sessionId)
   assert.ok(String(outcome.message).includes('原会话丢失已重建'))
   assert.equal(stubs.created.length, 1)
 })
@@ -153,26 +153,14 @@ test('session-driver:发起成功即写 RunRecord.sessionId', async () => {
   assert.ok(updates.some((patch) => typeof patch.sessionId === 'string' && patch.sessionId !== ''))
 })
 
-test('session-driver:会话 idle 即完成(success)', async () => {
-  const stubs = makeStubs()
-  const driver = makeDriver(stubs)
-  // When 发起后把会话置 idle(模拟完成)
-  const pending = driver.run({ job: BASE_JOB, env: {} })
-  await delay(30)
-  const sessionId = stubs.created[0].sessionId
-  stubs.sessions.get(sessionId).status = 'idle'
-  const outcome = await pending
-  // Then success 且 RunRecord.sessionId 已写
-  assert.equal(outcome.status, 'success')
-  assert.equal(outcome.sessionId, sessionId)
-})
-
-test('session-driver:timeoutMs 到点记 timeout', async () => {
-  // 会话持续 running(autoIdle 关),轮询到超时
+test('session-driver:投递即终态,会话持续 running 也不等待', async () => {
+  // 会话持续 running(autoIdle 关):投递成功立即返回,不等执行
   const stubs = makeStubs({ autoIdle: false })
-  const driver = makeDriver(stubs, { pollIntervalMs: 5 })
-  const outcome = await driver.run({ job: { ...BASE_JOB, timeoutMs: 40 }, env: {} })
-  assert.equal(outcome.status, 'timeout')
+  const driver = makeDriver(stubs)
+  const outcome = await driver.run({ job: BASE_JOB, env: {} })
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.message, '已投递会话')
+  assert.equal(stubs.prompts.length, 1)
 })
 
 test('session-driver:prompt 携带变量折叠文本', async () => {
@@ -254,12 +242,15 @@ test('session-driver:workdir 命中已有分组时以 workspaceId 建会话(dsh-
   assert.deepEqual(stubs.createRequests[0], { workspaceId: 'w-1' })
 })
 
-test('session-driver:workdir 未命中分组时建组再挂载', async () => {
+test('session-driver:workdir 未命中分组时建组再挂载', async (t) => {
+  // createCanonical 前有 realpath 校验,须用真实存在的目录
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-ws-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
   const stubs = makeStubs()
   stubs.getWorkspaceRegistry = () => makeRegistry()
   const driver = makeDriver(stubs)
-  // When 任务 workdir 无对应分组(realpath 需要真实目录,桩 registry 的 resolveByPath 对任意路径未命中即走 createCanonical)
-  const outcome = await driver.run({ job: { ...BASE_JOB, workdir: 'C:\\work\\fresh' }, env: {} })
+  // When 任务 workdir 无对应分组
+  const outcome = await driver.run({ job: { ...BASE_JOB, workdir: dir }, env: {} })
   // Then create 收到新建分组的 workspaceId
   assert.equal(outcome.status, 'success')
   assert.deepEqual(stubs.createRequests[0], { workspaceId: 'w-1' })

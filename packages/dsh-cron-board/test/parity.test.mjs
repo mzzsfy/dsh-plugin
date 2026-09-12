@@ -19,7 +19,7 @@ function clientLogic() {
   assert.ok(begin >= 0 && end > begin, 'client.js 缺少 LOGIC 标记段')
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
-    section + '; return { STATUS_META, TRIGGER_META, KIND_LABELS, MODE_LABELS, ONMISS_LABELS, relativeTime, formatDateTime, formatDuration, statusMeta };',
+    section + '; return { STATUS_META, TRIGGER_META, KIND_LABELS, MODE_LABELS, relativeTime, formatDateTime, formatDuration, statusMeta };',
   )
   return factory()
 }

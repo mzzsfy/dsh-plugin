@@ -19,9 +19,6 @@ export const MESSAGES = {
   commandRequired: '任务命令不能为空',
   badKind: '任务类型不合法',
   badSessionMode: '会话模式仅支持 fresh 或 pinned',
-  badOnMiss: '窗口外策略仅支持 skip 或 defer',
-  windowPairRequired: '窗口起止时间必须成对填写',
-  badWindowFormat: '窗口时间格式须为 HH:mm',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
   sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
@@ -111,26 +108,15 @@ export function parseEnvText(text) {
 }
 
 // 任务字段校验与规范化:非法即业务错误;返回可落库字段集
-const WINDOW_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 
-// 会话任务专有字段(设计 §3.2 job.session 子对象);窗口 start/end 须成对且为 HH:mm
+// 会话任务专有字段(设计 §3.2 job.session 子对象)
 function normalizeSession(body) {
   if (body.kind !== 'session') return undefined
   const raw = body.session && typeof body.session === 'object' ? body.session : {}
   if (raw.mode !== undefined && raw.mode !== 'fresh' && raw.mode !== 'pinned') throw new Error(MESSAGES.badSessionMode)
-  if (raw.onMiss !== undefined && raw.onMiss !== 'skip' && raw.onMiss !== 'defer') throw new Error(MESSAGES.badOnMiss)
-  const windowStart = raw.windowStart ? String(raw.windowStart).trim() : ''
-  const windowEnd = raw.windowEnd ? String(raw.windowEnd).trim() : ''
-  if (windowStart === '' !== (windowEnd === '')) throw new Error(MESSAGES.windowPairRequired)
-  for (const window of [windowStart, windowEnd]) {
-    if (window !== '' && !WINDOW_PATTERN.test(window)) throw new Error(MESSAGES.badWindowFormat)
-  }
   return {
     mode: raw.mode === 'pinned' ? 'pinned' : 'fresh',
     pinnedSessionId: typeof raw.pinnedSessionId === 'string' ? raw.pinnedSessionId.trim() : '',
-    windowStart,
-    windowEnd,
-    onMiss: raw.onMiss === 'defer' ? 'defer' : 'skip',
   }
 }
 
@@ -143,7 +129,6 @@ function normalizeJob(body) {
   if (kind === 'shell' && command === '') throw new Error(MESSAGES.commandRequired)
   const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
   assertValidSchedule(schedule)
-  const timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
   const normalized = {
     name,
     kind,
@@ -151,9 +136,13 @@ function normalizeJob(body) {
     prompt: typeof body.prompt === 'string' ? body.prompt : '',
     workdir: typeof body.workdir === 'string' ? body.workdir.trim() : '',
     schedule,
-    timeoutMs,
     enabled: body.enabled !== false,
     session: normalizeSession(body),
+  }
+  if (normalized.session === undefined) delete normalized.session
+  // 会话任务投递即终态无超时语义,timeoutMs 仅为 shell 真实执行保留
+  if (kind === 'shell') {
+    normalized.timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
   }
   if (normalized.session === undefined) delete normalized.session
   // 任务级并发上限:合法正整数才落库,缺省走全局闸门(executor min 规则)
