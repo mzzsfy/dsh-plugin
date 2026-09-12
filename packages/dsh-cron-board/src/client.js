@@ -184,12 +184,16 @@ body{
 .cb-log::-webkit-scrollbar,.cb-modal::-webkit-scrollbar{width:8px;height:8px}
 .cb-log::-webkit-scrollbar-thumb,.cb-modal::-webkit-scrollbar-thumb{background:var(--cb-border-strong);border-radius:999px}
 .cb-log::-webkit-scrollbar-track,.cb-modal::-webkit-scrollbar-track{background:transparent}
-/* 容器查询:better-sidebar tab 与主视图宽度差异大,跟随面板自身宽度而非视口 */
+/* 容器查询:better-sidebar tab 与主视图宽度差异大,跟随面板自身宽度而非视口。
+   模态不受面板容器宽度连累:mask 固定定位于视口,断点用视口媒体查询独立判定 */
 @container (max-width: 560px){
-.cb-grid{grid-template-columns:1fr}
 .cb-card-row .cb-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
 .cb-view{padding:var(--cb-space-4)}
 .cb-panel{gap:var(--cb-space-4)}
+}
+@media (max-width: 560px){
+.cb-grid{grid-template-columns:1fr}
+.cb-modal{max-height:92vh}
 }
 .cb-entry{display:flex;align-items:center;gap:var(--cb-space-3);width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--cb-space-2) var(--cb-space-4);border-radius:var(--cb-radius-md);font-size:var(--cb-font-md);text-align:left}
 .cb-entry:hover{background:var(--cb-hover)}
