@@ -12,12 +12,15 @@ function makeStubs({ autoIdle = true } = {}) {
   const sessions = new Map()
   let nextId = 0
   const created = []
+  const createRequests = []
   const prompts = []
   const sessionController = {
-    async create({ cwd } = {}) {
+    async create(request) {
       const sessionId = 's-' + (++nextId)
+      const cwd = request && request.cwd
       sessions.set(sessionId, { id: sessionId, cwd, status: 'running' })
       created.push({ sessionId, cwd })
+      createRequests.push(request)
       return { sessionId }
     },
     // 镜像宿主 facade 契约(dsh-api-session-controller):prompt 准入首行非可选链校验 signal
@@ -43,12 +46,31 @@ function makeStubs({ autoIdle = true } = {}) {
       return [...sessions.values()].map((entry) => ({ id: entry.id }))
     },
   }
-  return { sessions, created, prompts, sessionController, agents, sessionQuery }
+  return { sessions, created, createRequests, prompts, sessionController, agents, sessionQuery }
+}
+
+// workspaceRegistry 桩:resolveByPath 按规范化 path 命中,createCanonical 建新组
+function makeRegistry({ paths = {}, archived = [] } = {}) {
+  const workspaces = new Map(Object.entries(paths))
+  let nextId = 0
+  return {
+    archivedSessionIds: archived,
+    async resolveByPath(path) {
+      const id = workspaces.get(path)
+      return id ? { id, path } : undefined
+    },
+    async createCanonical(canonical) {
+      const id = 'w-' + (++nextId)
+      workspaces.set(canonical, id)
+      return { id, path: canonical }
+    },
+  }
 }
 
 function makeDriver(stubs, overrides = {}) {
   return createSessionDriver({
     getSessionController: () => stubs.sessionController,
+    getWorkspaceRegistry: stubs.getWorkspaceRegistry,
     agents: stubs.agents,
     sessionQuery: stubs.sessionQuery,
     pollIntervalMs: 5,
@@ -183,4 +205,72 @@ test('session-driver:prompt 必须携带非中止 AbortSignal(宿主 facade 准�
   assert.equal(seen.length, 1)
   assert.ok(seen[0] instanceof AbortSignal)
   assert.equal(seen[0].aborted, false)
+})
+
+test('session-driver:pinned 首跑未绑定报「已创建并绑定」而非丢失', async () => {
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  // When pinned 任务尚未绑定会话(pinnedSessionId 为空)
+  const job = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: '' } }
+  const outcome = await driver.run({ job, env: {} })
+  // Then 文案区分:首次绑定,非丢失重建;pinnedNewId 回写供 executor 落库
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.message, '首次运行已创建并绑定会话')
+  assert.equal(outcome.pinnedNewId, outcome.sessionId)
+})
+
+test('session-driver:pinned 会话已归档视为丢失,重建并回写', async () => {
+  const stubs = makeStubs()
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  stubs.getWorkspaceRegistry = () => makeRegistry({ archived: ['s-1'] })
+  const driver = makeDriver(stubs)
+  // When pinned 指向的会话存在于持久层但已归档
+  const outcome = await driver.run({ job: PINNED_S1, env: {} })
+  // Then 归档视同丢失:新建会话 + 丢失文案 + pinnedNewId 回写
+  assert.equal(outcome.status, 'success')
+  assert.notEqual(outcome.sessionId, 's-1')
+  assert.equal(outcome.message, '原会话丢失已重建')
+  assert.equal(outcome.pinnedNewId, outcome.sessionId)
+  assert.equal(stubs.created.length, 1)
+})
+
+test('session-driver:pinned 会话已删除视为丢失(既有语义守护)', async () => {
+  const stubs = makeStubs()
+  stubs.getWorkspaceRegistry = () => makeRegistry()
+  const driver = makeDriver(stubs)
+  const outcome = await driver.run({ job: PINNED_GONE, env: {} })
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.message, '原会话丢失已重建')
+})
+
+test('session-driver:workdir 命中已有分组时以 workspaceId 建会话(dsh-im 同构)', async () => {
+  const stubs = makeStubs()
+  stubs.getWorkspaceRegistry = () => makeRegistry({ paths: { 'C:\\work\\demo': 'w-1' } })
+  const driver = makeDriver(stubs)
+  // When 任务 workdir 与已有分组 path 一致
+  const outcome = await driver.run({ job: { ...BASE_JOB, workdir: 'C:\\work\\demo' }, env: {} })
+  // Then create 收到 workspaceId 而非 cwd
+  assert.equal(outcome.status, 'success')
+  assert.deepEqual(stubs.createRequests[0], { workspaceId: 'w-1' })
+})
+
+test('session-driver:workdir 未命中分组时建组再挂载', async () => {
+  const stubs = makeStubs()
+  stubs.getWorkspaceRegistry = () => makeRegistry()
+  const driver = makeDriver(stubs)
+  // When 任务 workdir 无对应分组(realpath 需要真实目录,桩 registry 的 resolveByPath 对任意路径未命中即走 createCanonical)
+  const outcome = await driver.run({ job: { ...BASE_JOB, workdir: 'C:\\work\\fresh' }, env: {} })
+  // Then create 收到新建分组的 workspaceId
+  assert.equal(outcome.status, 'success')
+  assert.deepEqual(stubs.createRequests[0], { workspaceId: 'w-1' })
+})
+
+test('session-driver:registry 缺失时降级 cwd 建会话', async () => {
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  // When 未注入 workspaceRegistry
+  const outcome = await driver.run({ job: { ...BASE_JOB, workdir: 'C:\\work\\x' }, env: {} })
+  // Then 回落 cwd 形态(旧行为),不影响可用性
+  assert.equal(outcome.status, 'success')
+  assert.deepEqual(stubs.createRequests[0], { cwd: 'C:\\work\\x' })
 })

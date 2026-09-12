@@ -102,6 +102,7 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       if (name === 'settings') return settingsService
       if (name === 'sessionController') return sessionController
       if (name === 'agents') return { get: (id) => sessions.get(id) }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
       if (name === 'sessionQuery') {
         return {
           // 镜像宿主最严准入契约:守护 driver 总是传信号(真实宿主各版本为可选链)

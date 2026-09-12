@@ -67,7 +67,12 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       await store.runs.update(record.runId, patch)
       // 任务卡状态回填:看板状态点/耗时直接读任务行(手动与 cron 同源更新)
       const jobPatch = { lastStatus: outcome.status, lastDurationMs: patch.durationMs }
-      if (outcome.pinnedNewId !== undefined) jobPatch.pinnedSessionId = outcome.pinnedNewId
+      if (outcome.pinnedNewId !== undefined) {
+        // pinned 绑定必须落 session 子对象(driver 读 job.session.pinnedSessionId),
+        // 浅合并保留 mode 等其余字段;顶层孤立字段以 undefined 覆盖,落盘时自然消失(历史数据自愈)
+        jobPatch.session = { ...job.session, pinnedSessionId: outcome.pinnedNewId }
+        jobPatch.pinnedSessionId = undefined
+      }
       await store.jobs.update(job.id, jobPatch)
     } catch (error) {
       // runner 拒绝(会话服务异常等)也必须有终态,否则运行记录永久停留 running;

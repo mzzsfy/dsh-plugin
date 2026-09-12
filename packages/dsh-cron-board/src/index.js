@@ -64,6 +64,8 @@ export function apply(ctx, config) {
         const logger = createLogger({ rootDir: join(dataDir, 'logs') })
         const sessionDriver = createSessionDriver({
           getSessionController: () => sessionControllerRef.current,
+          // 分组解析为可选增强:registry 缺失(旧宿主)时 driver 干净降级为 cwd-only
+          getWorkspaceRegistry: () => ctx.get('workspaceRegistry'),
           agents: ctx.get('agents'),
           sessionQuery: ctx.get('sessionQuery'),
         })
