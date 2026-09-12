@@ -828,8 +828,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时始终使用主界面。' : '需安装 better-sidebar 后方可切换;未安装时看板始终使用主界面。'))) : null)
     }
 
-    // better-sidebar tab:注册即单实例(single);v0.19.0 起注册只入「可打开」目录,
-    // 须显式 openTab 落入底部工作台;wsModel 供会话任务选工作区
+    // better-sidebar tab:注册即单实例(single);只注册不主动打开,
+    // 打开由用户从侧边栏目录手动进入(注册即 openTab 会在每次页面加载时抢占当前视图)
     function registerBoardTab(ctx, service, wsModel) {
       return ctx.effect(() => {
         const disposeTab = service.registerTab({
@@ -843,10 +843,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           single: true,
           component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel }),
         })
-        // 无会话时 openTab 静默不落,tab 仍注册在册(新建标签页菜单可见)
-        if (typeof service.openTab === 'function') {
-          try { service.openTab({ type: TAB_ID }) } catch { /* 打开失败不回滚注册 */ }
-        }
         return disposeTab
       }, 'cron-board sidebar tab')
     }
