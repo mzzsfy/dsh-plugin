@@ -272,9 +272,9 @@ body{
 .cb-run::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--cb-accent);flex:none}
 .cb-run + .cb-run::before{background:var(--cb-text-dim)}
 /* 紧凑行组:名称+类型 / 策略单行 */
-.cb-formrow{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.cb-formrow{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
 .cb-formrow > .cb-field{flex:1;min-width:180px}
-.cb-formrow > .cb-field--fit{flex:0 0 auto;min-width:0}
+.cb-formrow > .cb-field--fit{flex:0 0 auto;min-width:0;width:min(300px, 42%)}
 /* 运行策略单行:标题+开关+内联数字段同一行 */
 .cb-inline{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .cb-inlinesection{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:inline-flex;align-items:center;gap:6px}
@@ -598,16 +598,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                       : null,
                     h('input', { type: 'text', placeholder: '或手输路径', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))),
                 h(Field, { label: '会话模式', fit: true },
-                  h(Segmented, {
-                    options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
-                    value: form.session.mode,
-                    onChange: (mode) => setSession({ mode }),
-                    ariaLabel: '会话模式',
-                  })),
-                form.session.mode === 'pinned'
-                  ? h(Field, { label: '固定会话 ID(可空)', hint: '首跑自动绑定' },
-                      h('input', { type: 'text', value: form.session.pinnedSessionId, onChange: (e) => setSession({ pinnedSessionId: e.target.value }) }))
-                  : null),
+                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                    h(Segmented, {
+                      options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
+                      value: form.session.mode,
+                      onChange: (mode) => setSession({ mode }),
+                      ariaLabel: '会话模式',
+                    }),
+                    form.session.mode === 'pinned'
+                      ? h('input', {
+                          type: 'text',
+                          placeholder: '固定会话 ID(可空,首跑自动绑定)',
+                          title: '留空则首跑自动绑定;会话被删除或归档时自动重建并回写',
+                          value: form.session.pinnedSessionId,
+                          onChange: (e) => setSession({ pinnedSessionId: e.target.value }),
+                        })
+                      : null))),
               h(Field, { label: '执行预设', hint: '会话使用的 Agent Preset;跟随宿主默认时由宿主解析当前默认' },
                 h('select', {
                   className: 'cb-select',
