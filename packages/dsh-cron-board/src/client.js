@@ -405,6 +405,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                     h('input', { type: 'text', placeholder: '/path/to/workspace', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) })))
               : null,
             form.kind === 'session'
+              ? h(Field, { label: '会话模式' }, h('select', {
+                  className: 'cb-select',
+                  value: form.session.mode,
+                  onChange: (e) => setSession({ mode: e.target.value }),
+                },
+                  h('option', { value: 'fresh' }, MODE_LABELS.fresh),
+                  h('option', { value: 'pinned' }, MODE_LABELS.pinned)))
+              : null,
+            form.kind === 'session'
               ? h(Field, { label: '执行预设', hint: '会话使用的 Agent Preset;跟随宿主默认时由宿主解析当前默认' },
                   h('select', {
                     className: 'cb-select',
@@ -413,15 +422,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   },
                     h('option', { value: '' }, '跟随宿主默认'),
                     presetCatalog.items.map((item) => h('option', { key: item.id, value: item.id }, item.label))))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '会话模式' }, h('select', {
-                  className: 'cb-select',
-                  value: form.session.mode,
-                  onChange: (e) => setSession({ mode: e.target.value }),
-                },
-                  h('option', { value: 'fresh' }, MODE_LABELS.fresh),
-                  h('option', { value: 'pinned' }, MODE_LABELS.pinned)))
               : null,
             form.kind === 'session'
               ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
