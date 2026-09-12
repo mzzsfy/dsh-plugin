@@ -423,13 +423,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                     h('option', { value: '' }, '跟随宿主默认'),
                     presetCatalog.items.map((item) => h('option', { key: item.id, value: item.id }, item.label))))
               : null,
-            form.kind === 'session'
-              ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
-                  h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
-              : null,
             form.kind === 'session' && form.session.mode === 'pinned'
               ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },
                   h('input', { type: 'text', value: form.session.pinnedSessionId, onChange: (e) => setSession({ pinnedSessionId: e.target.value }) }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
+                  h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
               : null,
           )),
         h(Section, { title: '调度计划' },
