@@ -14,6 +14,9 @@ export const OFFICIAL_ENTRY_ID = 'llm-pi-ai'
 export const EXIT_POLL_INTERVAL_MS = 20
 export const EXIT_POLL_ROUNDS = 50
 
+// 延迟补接管轮询粒度:dispose 拖长(在途流)场景下,退场完成后的接管时延上界
+export const DEFERRED_EXIT_POLL_INTERVAL_MS = 500
+
 // 行 id 解析候选前缀:宿主把 profile 行树经 cordis:include 行挂载(嵌套
 // 分隔符 EntryTree.sep = ":"),受控行的实际解析 id 带前缀;空串覆盖裸树
 // 形态。resolve 对缺失 id 抛错,调用方逐候选试解
@@ -74,6 +77,12 @@ export function takeoverDecision(state) {
 
 const defaultDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// unref 延迟:延迟补接管为常驻轮询,不能凭 pending timer 阻止进程退出
+const unrefDelay = (ms) => new Promise((resolve) => {
+  const timer = setTimeout(resolve, ms)
+  timer.unref?.()
+})
+
 /**
  * 有界等待官方插件退场(fiber 消失)。dispose 为纯内存操作毫秒级完成,
  * 轮询上界仅防御异常宿主状态。fiber 清空后官方注册的撤销还在卸载收尾
@@ -93,6 +102,42 @@ export async function awaitOfficialExit(entry, {
   if (entry.fiber?.uid != null) return false
   await delay(intervalMs)
   return true
+}
+
+/**
+ * 延迟补接管:await-exit 快速窗耗尽只是决策推迟——官方行 dispose 受在途流拖长
+ * 时,退场晚于快速窗,若就此让位则永远无人补接管。本函数持续轮询官方行,
+ * 退场完成后执行 complete(复活守卫 + 官方 discovery/节 + 路由重算),把接管
+ * 从一次性决策补成最终一致。gateway 行先退场(被删/禁)则静默放弃,不在死
+ * context 上注册;退场完成后补一拍间隔,与快速路径的收尾落定语义一致。
+ * @param {import('@deepseek-ai/cordis').Context} ctx 本包 apply context
+ * @param {object} entry 官方 loader entry
+ * @param {() => void} complete 接管完成动作,在退场后的当前轮询序列上同步执行
+ * @param {{intervalMs?: number, delay?: (ms: number) => Promise<void>}} [options]
+ * @returns {() => void} 取消轮询(测试用)
+ * 轮询持有 entry 引用,依赖宿主 dispose 原地清 fiber 的既有契约(与
+ * awaitOfficialExit 同源);行删重建形态超出该契约,由下次重载重新 apply 兜底
+ */
+export function armDeferredTakeover(ctx, entry, complete, {
+  intervalMs = DEFERRED_EXIT_POLL_INTERVAL_MS,
+  delay = unrefDelay,
+} = {}) {
+  let cancelled = false
+  const poll = async () => {
+    while (!cancelled && entry.fiber?.uid != null && ctx.fiber?.uid != null) {
+      await delay(intervalMs)
+    }
+    if (cancelled || ctx.fiber?.uid == null) return
+    await delay(intervalMs)
+    if (cancelled || ctx.fiber?.uid == null) return
+    complete()
+  }
+  void poll().catch((error) => {
+    if (!cancelled) ctx.logger?.warn?.(`llm-pi-gateway: 延迟接管失败: ${error?.message ?? error}`)
+  })
+  return () => {
+    cancelled = true
+  }
 }
 
 /**

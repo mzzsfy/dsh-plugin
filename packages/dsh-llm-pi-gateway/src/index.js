@@ -14,6 +14,7 @@ import {
   takeoverDecision,
   awaitOfficialExit,
   installOfficialRevivalGuard,
+  armDeferredTakeover,
 } from './takeover.mjs'
 import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from './apply-state.mjs'
 
@@ -82,8 +83,11 @@ export function missingHostExports(dshLlm) {
  * @param {() => Promise<object>} [importOfficial] 官方包加载器,测试注入桩;
  *   默认动态 import(官方包缺失时仅降级本节接管,不拖垮本包加载——
  *   静态 import 命名导出缺失即加载崩溃,违反干净禁用规约)
+ * @param {{exitPoll?: object, deferredExit?: object}} [pollOptions] 轮询参数,
+ *   仅测试注入:exitPoll 透传快速退场窗(awaitOfficialExit),deferredExit
+ *   透传延迟补接管轮询(armDeferredTakeover);生产双双缺省
  */
-export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai')) {
+export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai'), { exitPoll = {}, deferredExit = {} } = {}) {
   // 生命周期旗标:guard 据此识别本行的功能性停摆(早退 = 假活,详见
   // apply-state.mjs);中途崩溃旗标停留 undefined,guard 保守不代挂
   beginGatewayApply()
@@ -120,13 +124,20 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   const officialState = officialEntryState(ctx.loader)
   const decision = takeoverDecision(officialState)
   let takeover
+  // 退场超时标记:arm 延迟到全部装配落定后执行,装配中途失败不留僵尸轮询
+  let exitTimedOut = false
   if (decision === 'yield') {
     ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 行未被禁用(用户层启用),本包降级为只服务 llm-pi-gateway 节')
     takeover = false
   } else if (decision === 'await-exit') {
     ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 插件退场中,等待其完全卸载后接管')
-    takeover = await awaitOfficialExit(officialState.entry)
-    if (!takeover) ctx.logger.error('llm-pi-gateway: 官方 llm-pi-ai 插件退场超时,降级为只服务 llm-pi-gateway 节')
+    takeover = await awaitOfficialExit(officialState.entry, exitPoll)
+    if (!takeover) {
+      // 退场受在途流拖长属常态(用户边用边装),快速窗耗尽只是接管推迟:
+      // 先服务本包节,官方退场后补完成接管,服务与标记注入最终一致
+      ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 退场超时(存在在途流),先服务本包节,官方退场后自动完成接管')
+      exitTimedOut = true
+    }
   } else {
     takeover = true
   }
@@ -184,8 +195,9 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // 官方 ns 补注册仅在接管态:让位态官方插件在场,会自行注册该 ns,本包
   // 抢注册必令官方 init 撞 DUPLICATE_DISCOVERY 而拖垮整批 patch 应用。
   // 注册成功即置 servingOfficial:持有任一官方注册就需要复活守卫,官方
-  // 复活撞本包在场 discovery 与撞 settings 节的后果相同
-  if (takeover) {
+  // 复活撞本包在场 discovery 与撞 settings 节的后果相同。
+  // 同步接管与延迟补接管共用同一装配,延迟路径在退场后的轮询序列上调用
+  const registerOfficialDiscovery = () => {
     try {
       ctx.llm.registerModelDiscovery(OFFICIAL_NS, discoverFor)
       servingOfficial = true
@@ -194,6 +206,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
       ctx.logger.warn(error)
     }
   }
+  if (takeover) registerOfficialDiscovery()
   const onSectionChange = () => {
     try {
       manager.ensureRegistration()
@@ -212,8 +225,10 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // 本包以官方 schema 注册。若注册冲突(patch 失效、官方仍在),降级为只
   // 服务本包节。validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles
   // 快照记忆。官方包缺失时跳过接管(动态获取已告警)。servingOfficial 已在
-  // 官方 discovery 注册处置位,此处不再改写
-  if (OfficialConfig !== undefined && takeover) {
+  // 官方 discovery 注册处置位,此处不再改写。
+  // 同步接管与延迟补接管共用同一装配
+  const installOfficialSection = () => {
+    if (OfficialConfig === undefined) return
     try {
       ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
         validate: (section) => resolveRoutes(section.providers, readGateway()?.providers, onUnserviceable),
@@ -227,6 +242,15 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
       ctx.logger.error(error)
     }
   }
+  // 延迟补接管装配:与同步接管同一套动作、同一顺序(守卫→discovery→节→
+  // 路由重算),在官方行退场后的轮询序列上执行
+  const completeOfficialTakeover = () => {
+    installOfficialRevivalGuard(ctx, () => servingOfficial)
+    registerOfficialDiscovery()
+    installOfficialSection()
+    onSectionChange()
+  }
+  if (takeover) installOfficialSection()
   ctx.settings.installSection(ctx, NS, Config, config, {
     validate: (section) => resolveRoutes(readOfficial()?.providers, section.providers, onUnserviceable),
     setSource: (source) => {
@@ -238,4 +262,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   profiles()
   onSectionChange()
   endGatewayApplyActive()
+  // 延迟补接管:全部装配落定后才武装;轮询在 apply 返回后的轮询序列上执行,
+  // completeOfficialTakeover 闭包至此全部就绪,装配中途失败不会留下僵尸轮询
+  if (exitTimedOut) armDeferredTakeover(ctx, officialState.entry, () => completeOfficialTakeover(), deferredExit)
 }
