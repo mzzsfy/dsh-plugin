@@ -401,10 +401,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                     h('input', { type: 'text', placeholder: '/path/to/workspace', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) })))
               : null,
             form.kind === 'session'
-              ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
-                  h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
-              : null,
-            form.kind === 'session'
               ? h(Field, { label: '会话模式' }, h(PillGroup, {
                   options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
                   value: form.session.mode,
@@ -420,6 +416,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   },
                     h('option', { value: '' }, '跟随宿主默认'),
                     presetCatalog.items.map((item) => h('option', { key: item.id, value: item.id }, item.label))))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
+                  h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
               : null,
             form.kind === 'session' && form.session.mode === 'pinned'
               ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },
