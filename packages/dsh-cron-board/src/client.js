@@ -444,7 +444,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               ? h(Field, { label: '超时(毫秒)', hint: '会话任务投递即完成,无超时语义' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) }))
               : null,
             h(Field, { label: '单次运行', hint: '运行一次后自动停用该任务' }, switchToggle({ checked: form.runOnce, onChange: (e) => set({ runOnce: e.target.checked }), label: '单次运行' })),
-            h(Field, { label: '并发上限(可空)' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) })))),
+            form.kind === 'shell'
+              ? h(Field, { label: '并发上限(可空)', hint: '限制该任务同时进行的执行数;会话任务投递即终态,无并发语义' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) }))
+              : null)),
         error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
