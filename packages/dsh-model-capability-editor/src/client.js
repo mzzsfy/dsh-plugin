@@ -187,20 +187,6 @@ function modeToInput(mode) {
   return undefined
 }
 
-// 保存前本地校验:非 off 档勾选但拼写为空白。空拼写会静默以档位名作线上值
-// (draftsToEfforts 语义),易被误当作"已填"。返回违规档位列表,空数组即通过;
-// off 档留空有专门语义(false / off:null),不参与此校验。
-function invalidReasoningLevels(draft) {
-  const invalid = []
-  for (const level of EFFORT_LEVELS) {
-    if (level === OFF_LEVEL) continue
-    if (draft.checked[level] === true && String(draft.spellings[level] || '').trim().length === 0) {
-      invalid.push(level)
-    }
-  }
-  return invalid
-}
-
 // 一键草稿填充:只动内存草稿,写回仍走显式保存。仅补"未勾选任何档位"的模型
 // (即 reasoningEfforts 未声明的手声明模型,本插件核心场景):七档全勾、拼写
 // 留空(线上值 = 档位名)。已编辑(有勾选)与 inputMode 一律不碰,防覆盖既有声明。
@@ -505,7 +491,7 @@ function ModelRow(props) {
   return h('div', { className: 'mce-model' },
     h('div', { className: 'mce-model__head' }, model.id, model.name && model.name !== model.id ? ' (' + model.name + ')' : ''),
     h('div', { className: 'mce-row' },
-      h('span', { className: 'mce-label' }, '推理档位(勾选 = 提供,输入 = 线上拼写):'),
+      h('span', { className: 'mce-label' }, '推理档位(勾选 = 提供,输入 = 线上拼写,留空 = 档位名):'),
       h(LevelEditor, { model, draft, disabled, onChange: changeDraft }),
     ),
     h('div', { className: 'mce-row' },
@@ -625,16 +611,6 @@ function CapabilityCard(props) {
   }
 
   async function save() {
-    // 保存前本地校验:非 off 档勾选但拼写空白,空格式的线上值易被误当作"已填"
-    const invalid = []
-    for (const [id, draft] of state.drafts) {
-      const levels = invalidReasoningLevels(draft)
-      if (levels.length > 0) invalid.push(id + ' (' + levels.join(', ') + ')')
-    }
-    if (invalid.length > 0) {
-      notify('以下模型的档位拼写为空,请填写线上值或取消勾选:' + invalid.join('; '), 'error')
-      return
-    }
     setSaving(true)
     try {
       const { models: written, droppedDraftIds } = await saveModels(props.settings, state.route, state.drafts)
@@ -784,12 +760,6 @@ function RowEditor(props) {
   }, [])
 
   async function apply() {
-    // 保存前本地校验:非 off 档勾选但拼写空白,空格式的线上值易被误当作"已填"
-    const invalidLevels = invalidReasoningLevels(state.draft)
-    if (invalidLevels.length > 0) {
-      notify('档位 ' + invalidLevels.join(', ') + ' 的拼写为空,请填写线上值或取消勾选', 'error')
-      return
-    }
     setSaving(true)
     try {
       // S3:官方行内 ID 输入是活动状态,改名已落盘则以新 ID 为目标,否则回落原 ID
