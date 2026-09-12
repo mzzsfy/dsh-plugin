@@ -66,6 +66,8 @@ export function apply(ctx, config) {
           getSessionController: () => sessionControllerRef.current,
           // 分组解析为可选增强:registry 缺失(旧宿主)时 driver 干净降级为 cwd-only
           getWorkspaceRegistry: () => ctx.get('workspaceRegistry'),
+          // 执行预设目录为可选增强:服务缺失时任务不带 preset,由宿主解析默认
+          getAgentPresets: () => ctx.get('agentPresets'),
           agents: ctx.get('agents'),
           sessionQuery: ctx.get('sessionQuery'),
         })
@@ -90,6 +92,7 @@ export function apply(ctx, config) {
           sessionState,
           readSidebarTab: () => readBoolean('sidebarTab', false),
           updateUiSettings,
+          getAgentPresets: () => ctx.get('agentPresets'),
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
         })
         return { api, scheduler }

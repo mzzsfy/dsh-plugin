@@ -323,13 +323,24 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         session: {
           mode: job && job.session ? job.session.mode : 'fresh',
           pinnedSessionId: job && job.session ? job.session.pinnedSessionId : '',
+          agentPreset: job && job.session ? job.session.agentPreset : '',
         },
       }))
       const [preview, setPreview] = useState(null)
       const [error, setError] = useState(null)
       const [saving, setSaving] = useState(false)
+      const [presetCatalog, setPresetCatalog] = useState({ defaultId: '', items: [] })
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const setSession = (patch) => setForm((prev) => ({ ...prev, session: { ...prev.session, ...patch } }))
+
+      // 执行预设目录:会话任务表单打开时拉取一次;服务缺失即空目录,仅「跟随宿主默认」可选
+      useEffect(() => {
+        let alive = true
+        request('GET', 'agent-presets').then((outcome) => {
+          if (alive && outcome.ok && outcome.data && Array.isArray(outcome.data.items)) setPresetCatalog(outcome.data)
+        })
+        return () => { alive = false }
+      }, [])
 
       useEffect(() => {
         let alive = true
@@ -398,6 +409,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   value: form.session.mode,
                   onChange: (mode) => setSession({ mode }),
                 }))
+              : null,
+            form.kind === 'session'
+              ? h(Field, { label: '执行预设', hint: '会话使用的 Agent Preset;跟随宿主默认时由宿主解析当前默认' },
+                  h('select', {
+                    className: 'cb-select',
+                    value: presetCatalog.items.some((item) => item.id === form.session.agentPreset) ? form.session.agentPreset : '',
+                    onChange: (e) => setSession({ agentPreset: e.target.value }),
+                  },
+                    h('option', { value: '' }, '跟随宿主默认'),
+                    presetCatalog.items.map((item) => h('option', { key: item.id, value: item.id }, item.label))))
               : null,
             form.kind === 'session' && form.session.mode === 'pinned'
               ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },

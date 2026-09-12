@@ -242,6 +242,36 @@ test('session-driver:workdir 命中已有分组时以 workspaceId 建会话(dsh-
   assert.deepEqual(stubs.createRequests[0], { workspaceId: 'w-1' })
 })
 
+test('session-driver:agentPreset 非空时并入 create 请求', async () => {
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  // When 任务配置了执行预设
+  await driver.run({ job: { ...BASE_JOB, session: { mode: 'fresh', agentPreset: 'coder' } }, env: {} })
+  // Then create 请求携带 agentPreset
+  assert.deepEqual(stubs.createRequests[0], { agentPreset: 'coder' })
+})
+
+test('session-driver:agentPreset 缺省时请求不带该字段(跟随宿主默认)', async () => {
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  // When 任务未配置执行预设
+  await driver.run({ job: BASE_JOB, env: {} })
+  // Then create 请求无 agentPreset 键(空载时请求体整体缺省)
+  const request = stubs.createRequests[0] || {}
+  assert.ok(!('agentPreset' in request))
+})
+
+test('session-driver:pinned 复用已有会话不触发 create(preset 不改写)', async () => {
+  const stubs = makeStubs()
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  const driver = makeDriver(stubs)
+  // When pinned 命中可用会话且配置了执行预设
+  await driver.run({ job: { ...PINNED_S1, session: { mode: 'pinned', pinnedSessionId: 's-1', agentPreset: 'coder' } }, env: {} })
+  // Then preset 是 create 语义,复用路径零 create
+  assert.equal(stubs.createRequests.length, 0)
+  assert.equal(stubs.prompts[0].sessionId, 's-1')
+})
+
 test('session-driver:workdir 未命中分组时建组再挂载', async (t) => {
   // createCanonical 前有 realpath 校验,须用真实存在的目录
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-ws-'))

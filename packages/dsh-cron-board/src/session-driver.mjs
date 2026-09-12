@@ -53,12 +53,18 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     return pinnedExists(sessionId)
   }
 
-  async function createSession(sessionController, workdir) {
-    if (!workdir) return sessionController.create(undefined)
-    const registry = getWorkspaceRegistry ? getWorkspaceRegistry() : undefined
-    const workspaceId = await resolveWorkspaceId(registry, workdir).catch(() => undefined)
-    if (workspaceId) return sessionController.create({ workspaceId })
-    return sessionController.create({ cwd: workdir })
+  // 建会话请求:分组按 workdir 挂载(dsh-im 同构);执行预设非空才带字段,
+  // 缺省时省略 agentPreset 由宿主解析当前默认
+  async function createSession(sessionController, workdir, agentPreset) {
+    const payload = {}
+    if (workdir) {
+      const registry = getWorkspaceRegistry ? getWorkspaceRegistry() : undefined
+      const workspaceId = await resolveWorkspaceId(registry, workdir).catch(() => undefined)
+      if (workspaceId) payload.workspaceId = workspaceId
+      else payload.cwd = workdir
+    }
+    if (agentPreset) payload.agentPreset = agentPreset
+    return sessionController.create(Object.keys(payload).length > 0 ? payload : undefined)
   }
 
   async function run({ job, env, mask, updateRecord }) {
@@ -84,7 +90,7 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     }
 
     if (recreated || !isPinned) {
-      const created = await createSession(sessionController, job.workdir)
+      const created = await createSession(sessionController, job.workdir, session.agentPreset)
       sessionId = created.sessionId
     }
 

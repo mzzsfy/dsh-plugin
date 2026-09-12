@@ -19,6 +19,7 @@ export const MESSAGES = {
   commandRequired: '任务命令不能为空',
   badKind: '任务类型不合法',
   badSessionMode: '会话模式仅支持 fresh 或 pinned',
+  badAgentPreset: '执行预设 ID 仅限小写字母、数字与连字符',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
   sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
@@ -109,14 +110,21 @@ export function parseEnvText(text) {
 
 // 任务字段校验与规范化:非法即业务错误;返回可落库字段集
 
+// 会话任务专有字段(设计 §3.2 job.session 子对象);agentPreset 形态对齐宿主预设目录 id(dsh-im 同款校验)
+const AGENT_PRESET_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+
 // 会话任务专有字段(设计 §3.2 job.session 子对象)
 function normalizeSession(body) {
   if (body.kind !== 'session') return undefined
   const raw = body.session && typeof body.session === 'object' ? body.session : {}
   if (raw.mode !== undefined && raw.mode !== 'fresh' && raw.mode !== 'pinned') throw new Error(MESSAGES.badSessionMode)
+  const agentPreset = typeof raw.agentPreset === 'string' ? raw.agentPreset.trim() : ''
+  if (agentPreset !== '' && !AGENT_PRESET_PATTERN.test(agentPreset)) throw new Error(MESSAGES.badAgentPreset)
   return {
     mode: raw.mode === 'pinned' ? 'pinned' : 'fresh',
     pinnedSessionId: typeof raw.pinnedSessionId === 'string' ? raw.pinnedSessionId.trim() : '',
+    // 空串 = 跟随宿主当前默认(driver 建会话时对空值省略字段)
+    agentPreset,
   }
 }
 
@@ -154,7 +162,7 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, logSystem }) {
+export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, getAgentPresets, logSystem }) {
 
   const routes = [
     {
@@ -298,6 +306,33 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
         const schedule = typeof body.schedule === 'string' ? body.schedule.trim() : ''
         assertValidSchedule(schedule)
         sendJson(res, 200, { summary: summarizeCron(schedule), nextAt: nextRunsOf(schedule, 3) })
+      },
+    },
+    {
+      method: 'GET',
+      segments: ['agent-presets'],
+      handler: async ({ res }) => {
+        // 目录来自宿主 agentPresets 服务(dsh-im 同构);服务缺失或异常回空目录,前端仅展示「跟随宿主默认」
+        const catalog = { defaultId: '', items: [] }
+        try {
+          const service = getAgentPresets ? getAgentPresets() : undefined
+          if (service && typeof service.list === 'function') {
+            const listed = await service.list()
+            const seen = new Set()
+            for (const entry of Array.isArray(listed) ? listed : []) {
+              const row = typeof entry === 'string' ? { id: entry } : entry
+              const id = row && typeof row.id === 'string' ? row.id.trim() : ''
+              if (id === '' || !AGENT_PRESET_PATTERN.test(id) || seen.has(id) || row.broken !== undefined) continue
+              seen.add(id)
+              const label = typeof row.name === 'string' && row.name.trim() ? row.name.trim().slice(0, 128) : id
+              catalog.items.push({ id, label })
+            }
+            if (typeof service.defaultId === 'string' && AGENT_PRESET_PATTERN.test(service.defaultId.trim())) {
+              catalog.defaultId = service.defaultId.trim()
+            }
+          }
+        } catch { /* 目录降级为空,不阻断任务表单 */ }
+        sendJson(res, 200, catalog)
       },
     },
     {
