@@ -73,20 +73,6 @@ export function modeToInput(mode) {
   return undefined
 }
 
-// 保存前本地校验:非 off 档勾选但拼写为空白。空拼写会静默以档位名作线上值
-// (draftsToEfforts 语义),易被误当作"已填"。返回违规档位列表,空数组即通过;
-// off 档留空有专门语义(false / off:null),不参与此校验。
-export function invalidReasoningLevels(draft) {
-  const invalid = []
-  for (const level of EFFORT_LEVELS) {
-    if (level === OFF_LEVEL) continue
-    if (draft.checked[level] === true && String(draft.spellings[level] || '').trim().length === 0) {
-      invalid.push(level)
-    }
-  }
-  return invalid
-}
-
 // 一键草稿填充:只动内存草稿,写回仍走显式保存。仅补"未勾选任何档位"的模型
 // (即 reasoningEfforts 未声明的手声明模型,本插件核心场景):七档全勾、拼写
 // 留空(线上值 = 档位名)。已编辑(有勾选)与 inputMode 一律不碰,防覆盖既有声明。

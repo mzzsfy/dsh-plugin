@@ -11,6 +11,7 @@ import {
   takeoverDecision,
   awaitOfficialExit,
   installOfficialRevivalGuard,
+  armDeferredTakeover,
 } from '../src/takeover.mjs'
 
 const ABSENT_LOADER = undefined
@@ -89,6 +90,78 @@ test('等待退场: 轮询期间退场返回 true', async () => {
 test('等待退场: 轮询耗尽仍在场返回 false', async () => {
   const polled = await awaitOfficialExit(entryOf({ running: true }), { rounds: 3, delay: async () => {} })
   assert.equal(polled, false)
+})
+
+// 延迟补接管:await-exit 快速窗超时只是"决策推迟",官方行退场完成后必须补完
+// 接管(复活守卫 + 官方 discovery/节),把接管从一次性决策补成最终一致。
+
+// 真实定时器微延迟:供轮询循环退场后的收尾等待;空转延迟(noop)的循环必须
+// 靠 cancel/清 fiber 退出,任何断言先失败都会挂死测试进程,收尾一律 try/finally
+const tickDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('延迟接管: 官方退场后执行 complete 恰好一次', async () => {
+  const entry = entryOf({ running: true })
+  const logs = { warn: [] }
+  const ctx = { logger: { warn: (m) => logs.warn.push(m) }, fiber: { uid: 1 } }
+  let completed = 0
+  let delayCalls = 0
+  const cancel = armDeferredTakeover(ctx, entry, () => { completed += 1 }, {
+    intervalMs: 1,
+    delay: async () => { delayCalls += 1 },
+  })
+  try {
+    assert.equal(completed, 0, '官方在场时不得提前接管')
+    entry.fiber = undefined
+    await tickDelay(10)
+    assert.equal(completed, 1, '退场完成后必须补接管')
+    assert.ok(delayCalls >= 2, '退场后必须补一拍收尾延迟再接管')
+  } finally {
+    cancel()
+  }
+})
+
+test('延迟接管: gateway 先退场则放弃,complete 不执行', async () => {
+  const entry = entryOf({ running: true })
+  const ctx = { logger: { warn: () => {} }, fiber: { uid: 1 } }
+  let completed = 0
+  const cancel = armDeferredTakeover(ctx, entry, () => { completed += 1 }, { intervalMs: 1, delay: async () => {} })
+  try {
+    ctx.fiber = undefined
+    entry.fiber = undefined
+    await tickDelay(10)
+    assert.equal(completed, 0, 'gateway 行已退场,补接管必须在死 context 前放弃')
+  } finally {
+    cancel()
+  }
+})
+
+test('延迟接管: cancel 句柄生效,complete 不再执行', async () => {
+  const entry = entryOf({ running: true })
+  const ctx = { logger: { warn: () => {} }, fiber: { uid: 1 } }
+  let completed = 0
+  const cancel = armDeferredTakeover(ctx, entry, () => { completed += 1 }, { intervalMs: 1, delay: async () => {} })
+  try {
+    cancel()
+    entry.fiber = undefined
+    await tickDelay(10)
+    assert.equal(completed, 0)
+  } finally {
+    cancel()
+  }
+})
+
+test('延迟接管: complete 抛错只告警,不产生未处理拒绝', async () => {
+  const entry = entryOf({ running: true })
+  const logs = { warn: [] }
+  const ctx = { logger: { warn: (m) => logs.warn.push(m) }, fiber: { uid: 1 } }
+  const cancel = armDeferredTakeover(ctx, entry, () => { throw new Error('boom') }, { intervalMs: 1, delay: async () => {} })
+  try {
+    entry.fiber = undefined
+    await tickDelay(10)
+    assert.match(logs.warn.join('\n'), /延迟接管失败/)
+  } finally {
+    cancel()
+  }
 })
 
 test('守卫: 以 global 监听注册 loader/patch-context', () => {
@@ -174,7 +247,8 @@ function integrationCtx({ officialEntry, officialDiscoveryPresent = false } = {}
     get: () => undefined,
     loader: officialEntry === undefined ? undefined : loaderOf(officialEntry),
     on: (name, callback, options) => guards.push({ name, callback, options }),
-    fiber: { dispose: async () => { disposed.value = true } },
+    // 真实 cordis 契约:活跃 fiber 带 uid,dispose 置 null(延迟补接管以此为退场判据)
+    fiber: { uid: 7, dispose: async () => { disposed.value = true } },
     llm: {
       registerAdapter: () => ({ replace: () => {} }),
       registerConfigurableProviders: () => ({ replace: () => {} }),
@@ -229,12 +303,19 @@ test('接线: 官方行禁用但仍在退场 → 等待退场后接管', async (
   assert.deepEqual(installed, [OFFICIAL_SETTINGS_NS, SETTINGS_NS], '退场完成后必须接管官方节')
 })
 
-test('接线: 官方行禁用但退场超时 → 降级,不安装官方节', async () => {
-  const { ctx, logs, installed, discovery } = integrationCtx({ officialEntry: entryOf({ disabled: true, running: true }) })
-  await apply(ctx, undefined, OFFICIAL_STUB)
-  assert.match(logs.error.join('\n'), /退场超时/)
-  assert.deepEqual(installed, [SETTINGS_NS])
-  assert.deepEqual(discovery, [SETTINGS_NS])
+test('接线: 官方行禁用但退场超时 → 降级为只服务本包节,武装延迟补接管', async () => {
+  const entry = entryOf({ disabled: true, running: true })
+  const { ctx, logs, installed, discovery } = integrationCtx({ officialEntry: entry })
+  try {
+    await apply(ctx, undefined, OFFICIAL_STUB, { exitPoll: { intervalMs: 1, rounds: 1 }, deferredExit: { intervalMs: 1, delay: async () => {} } })
+    assert.match(logs.warn.join('\n'), /退场超时/)
+    assert.deepEqual(installed, [SETTINGS_NS])
+    assert.deepEqual(discovery, [SETTINGS_NS])
+  } finally {
+    // 释放轮询循环,断言先失败也不得挂死测试进程
+    entry.fiber = undefined
+    await tickDelay(5)
+  }
 })
 
 test('接线: loader 缺失(官方行缺席)→ 接管态,行为与官方包缺失路径一致', async () => {
@@ -283,4 +364,45 @@ test('接线: 官方包缺失 + loader 缺失(双缺席)守卫在位,官方补�
   await guards[0].callback({ options: { id: OFFICIAL_ENTRY_ID }, fiber: undefined }, async () => { released = true })
   assert.equal(disposed.value, true, '官方 ns 补注册在本包手中,复活守卫必须生效')
   assert.equal(released, true)
+})
+
+test('接线: 退场超时先降级服务本包节,官方退场后自动补接管(守卫+discovery+节+路由重算)', async () => {
+  const entry = entryOf({ disabled: true, running: true })
+  const { ctx, logs, installed, discovery, guards, hooksByNs } = integrationCtx({ officialEntry: entry })
+  const pollOptions = { exitPoll: { intervalMs: 1, rounds: 1 }, deferredExit: { intervalMs: 1, delay: async () => {} } }
+  try {
+    await apply(ctx, undefined, OFFICIAL_STUB, pollOptions)
+    assert.match(logs.warn.join('\n'), /退场超时/)
+    assert.deepEqual(installed, [SETTINGS_NS], '超时窗口只服务本包节')
+    assert.deepEqual(discovery, [SETTINGS_NS])
+    assert.equal(guards.length, 0, '补接管前未持有官方注册,不装复活守卫')
+    // 官方行退场完成
+    entry.fiber = undefined
+    await tickDelay(30)
+    assert.deepEqual(installed, [SETTINGS_NS, OFFICIAL_SETTINGS_NS], '退场后必须补装官方节')
+    assert.deepEqual(discovery, [SETTINGS_NS, OFFICIAL_SETTINGS_NS], '退场后必须补注册官方 discovery')
+    assert.equal(guards.length, 1, '补接管完成即持有官方注册,复活守卫必须在位')
+    assert.equal(typeof hooksByNs[OFFICIAL_SETTINGS_NS].onChange, 'function')
+  } finally {
+    entry.fiber = undefined
+    await tickDelay(5)
+  }
+})
+
+test('接线: 退场超时后 gateway 先退场,官方退场不补接管(死 context 放弃)', async () => {
+  const entry = entryOf({ disabled: true, running: true })
+  const { ctx, logs, installed, discovery } = integrationCtx({ officialEntry: entry })
+  const pollOptions = { exitPoll: { intervalMs: 1, rounds: 1 }, deferredExit: { intervalMs: 1, delay: async () => {} } }
+  try {
+    await apply(ctx, undefined, OFFICIAL_STUB, pollOptions)
+    assert.match(logs.warn.join('\n'), /退场超时/)
+    ctx.fiber = { uid: null, dispose: async () => {} }
+    entry.fiber = undefined
+    await tickDelay(30)
+    assert.deepEqual(installed, [SETTINGS_NS], 'gateway 已退场,不得在死 context 上补装官方节')
+    assert.deepEqual(discovery, [SETTINGS_NS])
+  } finally {
+    entry.fiber = undefined
+    await tickDelay(5)
+  }
 })

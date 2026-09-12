@@ -22,7 +22,7 @@ function clientLogic() {
     section
       + '; return { NS, CONFLICT_CODE, EFFORT_LEVELS, OFF_LEVEL, INPUT_UNSET, INPUT_TEXT, INPUT_TEXT_IMAGE, INPUT_IMAGE, INPUT_MODES,'
       + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
-      + ' invalidReasoningLevels, fillDrafts,'
+      + ' fillDrafts,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
       + ' anchorsBroken, resolveTargetId, unwrapEnvelope, rejectRpc, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
       + ' writeModels, saveModels, draftsFromModels };',
@@ -46,7 +46,7 @@ test('parity: 共享常量双副本一致', () => {
 })
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId, invalidReasoningLevels, fillDrafts } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId, fillDrafts } = L
 
   test(prefix + '竞品痕迹:标记字段命中与非对象条目跳过', () => {
     assert.deepEqual(
@@ -145,26 +145,6 @@ function defineScenarios(prefix, L) {
     assert.deepEqual(modeToInput(INPUT_TEXT_IMAGE), ['text', 'image'])
     assert.deepEqual(modeToInput(INPUT_IMAGE), ['image'])
     assert.equal(modeToInput(INPUT_UNSET), undefined)
-  })
-
-  test(prefix + '保存前校验:非 off 勾选空拼写即违规,off 与未勾选不参与', () => {
-    const { invalidReasoningLevels } = L
-    assert.deepEqual(invalidReasoningLevels({ checked: {}, spellings: {} }), [])
-    assert.deepEqual(
-      invalidReasoningLevels({ checked: { low: true, high: true }, spellings: { low: 'u', high: '' } }),
-      ['high'],
-      '混合场景只报空拼写的档位',
-    )
-    assert.deepEqual(
-      invalidReasoningLevels({ checked: { low: true }, spellings: { low: '   ' } }),
-      ['low'],
-      '纯空白拼写按空处理',
-    )
-    assert.deepEqual(
-      invalidReasoningLevels({ checked: { off: true }, spellings: { off: '' } }),
-      [],
-      'off 留空有 false/off:null 语义,不参与校验',
-    )
   })
 
   test(prefix + '一键草稿填充:只补未声明模型,已声明模型与 inputMode 不动', () => {

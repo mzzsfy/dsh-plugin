@@ -64,6 +64,10 @@ export function apply(ctx, config) {
         const logger = createLogger({ rootDir: join(dataDir, 'logs') })
         const sessionDriver = createSessionDriver({
           getSessionController: () => sessionControllerRef.current,
+          // 分组解析为可选增强:registry 缺失(旧宿主)时 driver 干净降级为 cwd-only
+          getWorkspaceRegistry: () => ctx.get('workspaceRegistry'),
+          // 执行预设目录为可选增强:服务缺失时任务不带 preset,由宿主解析默认
+          getAgentPresets: () => ctx.get('agentPresets'),
           agents: ctx.get('agents'),
           sessionQuery: ctx.get('sessionQuery'),
         })
@@ -88,6 +92,7 @@ export function apply(ctx, config) {
           sessionState,
           readSidebarTab: () => readBoolean('sidebarTab', false),
           updateUiSettings,
+          getAgentPresets: () => ctx.get('agentPresets'),
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
         })
         return { api, scheduler }
@@ -210,5 +215,6 @@ export function apply(ctx, config) {
   )
 
   // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
-  ctx.effect(() => () => schedulerRef.current.dispose(), 'cron-board scheduler lifecycle')
+  // 生命周期钩子:scheduler 无挂起资源时 dispose 可缺省,可选调用保持约定统一
+  ctx.effect(() => () => schedulerRef.current.dispose?.(), 'cron-board scheduler lifecycle')
 }

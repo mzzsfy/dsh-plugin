@@ -24,7 +24,7 @@ async function makeApi(t, overrides = {}) {
   })
   const logger = createLogger({ rootDir: join(dir, 'logs') })
   const executor = createExecutor({ store, logger, readMaxConcurrent: () => 2 })
-  const api = createApi({ store, logger, executor, ...overrides })
+  const api = createApi({ store, logger, executor, getAgentPresets: () => null, ...overrides })
   return { store, api }
 }
 function makeReq(method, body) {
@@ -325,45 +325,85 @@ test('status 路由:timer 缺失降级时 timerRunning=false 且带原因', asyn
 
 test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   const { store, api } = await makeApi(t)
-  // When 建 pinned 会话任务
+  // When 建 pinned 会话任务(携带已废弃的窗口字段与执行预设)
   const created = await call(api, 'POST', '/api/cron-board/jobs', {
     name: '日报', kind: 'session', prompt: '写日报',
     schedule: '0 9 * * *', enabled: true, timeoutMs: 60 * 1000,
-    session: { mode: 'pinned', pinnedSessionId: ' s-9 ', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer' },
+    session: { mode: 'pinned', pinnedSessionId: ' s-9 ', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer', agentPreset: ' coder ' },
   })
-  // Then 会话子对象落库,id 已裁剪,默认值正确
+  // Then 会话子对象仅落合法字段(窗口三字段已随功能删除,不再产出),id 已裁剪
   assert.equal(created.status, 200)
-  assert.deepEqual(created.payload.session, {
-    mode: 'pinned', pinnedSessionId: 's-9', windowStart: '09:00', windowEnd: '23:00', onMiss: 'defer',
-  })
+  assert.deepEqual(created.payload.session, { mode: 'pinned', pinnedSessionId: 's-9', agentPreset: 'coder' })
+  assert.equal(created.payload.timeoutMs, undefined)
   // When shell 任务不带 session 字段
   const shellJob = await call(api, 'POST', '/api/cron-board/jobs', {
     name: 's1', kind: 'shell', command: 'echo x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
   })
-  // Then session 字段缺省
+  // Then session 字段缺省,shell 保留显式超时
   assert.equal(shellJob.payload.session, undefined)
-  // When 窗口只给一端
-  const half = await call(api, 'POST', '/api/cron-board/jobs', {
-    name: 's2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
-    session: { windowStart: '09:00' },
+  assert.equal(shellJob.payload.timeoutMs, 1000)
+  // When 单次运行开关
+  const once = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'once', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, runOnce: true,
+    session: { mode: 'fresh' },
   })
-  // Then 400(窗口须成对)
-  assert.equal(half.status, 400)
-  assert.match(half.payload.error, /窗口/)
-  // When 非法窗口格式
-  const badWindow = await call(api, 'POST', '/api/cron-board/jobs', {
-    name: 's3', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
-    session: { windowStart: '9:0', windowEnd: '23:00' },
-  })
-  // Then 400
-  assert.equal(badWindow.status, 400)
-  // When 非法 onMiss
-  const badMiss = await call(api, 'POST', '/api/cron-board/jobs', {
-    name: 's4', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, timeoutMs: 1000,
-    session: { onMiss: 'retry' },
+  // Then 落库 true;缺省 false
+  assert.equal(once.payload.runOnce, true)
+  assert.equal(shellJob.payload.runOnce, false)
+  // When 非法会话模式
+  const badMode = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { mode: 'orphan' },
   })
   // Then 400
-  assert.equal(badMiss.status, 400)
+  assert.equal(badMode.status, 400)
+  // When 非法执行预设 id(大写/下划线均不合目录 id 形态)
+  const badPreset = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 's3', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { agentPreset: 'Coder_X' },
+  })
+  // Then 400
+  assert.equal(badPreset.status, 400)
+})
+
+test('agent-presets 路由:目录来自宿主服务,缺失降级空目录', async (t) => {
+  // Given 宿主 agentPresets 服务返回混合形态列表
+  const service = {
+    defaultId: 'deepseek',
+    list: async () => [
+      { id: 'deepseek', name: 'DeepSeek 默认' },
+      { id: 'coder' },
+      'broken-str',
+      { id: 'Bad_Id' },
+      { id: 'dup' },
+      { id: 'dup', name: '重复项' },
+      { id: 'damaged', broken: true },
+    ],
+  }
+  const { api } = await makeApi(t, { getAgentPresets: () => service })
+  // When 拉取目录
+  const listed = await call(api, 'GET', '/api/cron-board/agent-presets')
+  // Then 非法形态/重复/损坏项剔除,字符串条目按 {id,label:id} 接受(dsh-im catalogItem 同构)
+  assert.equal(listed.status, 200)
+  assert.equal(listed.payload.defaultId, 'deepseek')
+  assert.deepEqual(listed.payload.items, [
+    { id: 'deepseek', label: 'DeepSeek 默认' },
+    { id: 'coder', label: 'coder' },
+    { id: 'broken-str', label: 'broken-str' },
+    { id: 'dup', label: 'dup' },
+  ])
+  // When 服务缺失
+  const bare = await makeApi(t, { getAgentPresets: () => null })
+  const empty = await call(bare.api, 'GET', '/api/cron-board/agent-presets')
+  // Then 空目录 200(前端仅「跟随宿主默认」)
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.payload, { defaultId: '', items: [] })
+  // When 服务异常
+  const throwing = await makeApi(t, { getAgentPresets: () => ({ list: async () => { throw new Error('boom') } }) })
+  const failed = await call(throwing.api, 'GET', '/api/cron-board/agent-presets')
+  // Then 仍空目录 200
+  assert.equal(failed.status, 200)
+  assert.deepEqual(failed.payload, { defaultId: '', items: [] })
 })
 
 test('jobs 路由:会话通道禁用时建会话任务 400,脚本任务不受限', async (t) => {

@@ -15,7 +15,6 @@ const STATUS_META = {
 const TRIGGER_META = { cron: { label: '定时' }, manual: { label: '手动' } }
 const KIND_LABELS = { shell: '脚本', session: '会话' }
 const MODE_LABELS = { fresh: '每次新建', pinned: '固定会话' }
-const ONMISS_LABELS = { skip: '跳过', defer: '顺延' }
 const STATUS_TONE_COLOR = { ok: '#22a06b', bad: '#e5484d', warn: '#f5a524', mute: '#8b8d98', run: '#3b82f6' }
 const SECOND_MS = 1000
 const MINUTE_MS = 60 * SECOND_MS
@@ -52,6 +51,78 @@ function statusMeta(status) {
   return STATUS_META[status] || { label: status || '-', tone: 'mute' }
 }
 /* LOGIC-END */
+
+/* SBUILD-BEGIN */
+// 调度构建器纯函数:与 src/schedule-builder.mjs 逐字镜像(parity 测试锁定),client 无模块系统只能内联。
+// 仅覆盖构建器可表达的形态,反解不出即 custom(表达式原样手输);触发点计算归 croner(经 cron/preview 接口)。
+const SB_FREQS = ['daily', 'weekly', 'weekdays', 'interval', 'custom']
+const SB_WEEKDAY_ORDER = ['1', '2', '3', '4', '5', '6', '0']
+const SB_WEEKDAY_LABELS = { '0': '日', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六' }
+const SB_MINUTE_MAX = 59
+const SB_HOUR_MAX = 23
+const SB_INTERVAL_MIN_MINUTES = 1
+
+function createScheduleState(expression) {
+  return {
+    freq: 'daily',
+    hour: 9,
+    minute: 0,
+    weekdays: ['1'],
+    intervalMinutes: 30,
+    expression,
+  }
+}
+
+const sbClampInt = (raw, min, max, fallback) => {
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < min || value > max) return fallback
+  return value
+}
+
+// cron(5 段)→ 构建器状态:匹配失败即 custom;非法数值一律归 custom,不猜
+function parseSchedule(expression) {
+  const raw = String(expression).trim()
+  const parts = raw.split(/\s+/)
+  const state = createScheduleState(raw)
+  if (parts.length !== 5) { state.freq = 'custom'; return state }
+  const [minute, hour, day, month, weekday] = parts
+  if (day !== '*' || month !== '*') { state.freq = 'custom'; return state }
+  if (minute === '*' && hour === '*') { state.freq = 'custom'; return state }
+  if (/^\*\/\d+$/.test(minute) && hour === '*') {
+    state.freq = 'interval'
+    state.intervalMinutes = sbClampInt(minute.slice(2), SB_INTERVAL_MIN_MINUTES, SB_MINUTE_MAX, 0)
+    if (state.intervalMinutes === 0) state.freq = 'custom'
+    return state
+  }
+  const hourNum = sbClampInt(hour, 0, SB_HOUR_MAX, NaN)
+  const minuteNum = sbClampInt(minute, 0, SB_MINUTE_MAX, NaN)
+  if (!Number.isInteger(hourNum) || !Number.isInteger(minuteNum)) { state.freq = 'custom'; return state }
+  state.hour = hourNum
+  state.minute = minuteNum
+  if (weekday === '*') { state.freq = 'daily'; return state }
+  if (weekday === '1-5') { state.freq = 'weekdays'; return state }
+  const days = weekday.split(',')
+  if (days.every((d) => /^\d$/.test(d) && d in SB_WEEKDAY_LABELS)) {
+    state.freq = 'weekly'
+    state.weekdays = SB_WEEKDAY_ORDER.filter((d) => days.includes(d))
+    return state
+  }
+  state.freq = 'custom'
+  return state
+}
+
+// 构建器状态 → cron;custom 直接返回手工表达式
+function buildSchedule(state) {
+  if (state.freq === 'custom') return String(state.expression).trim()
+  const minute = String(state.minute)
+  const hour = String(state.hour)
+  if (state.freq === 'daily') return minute + ' ' + hour + ' * * *'
+  if (state.freq === 'weekdays') return minute + ' ' + hour + ' * * 1-5'
+  if (state.freq === 'weekly') return minute + ' ' + hour + ' * * ' + [...state.weekdays].sort((a, b) => Number(a) - Number(b)).join(',')
+  if (state.freq === 'interval') return '*/' + state.intervalMinutes + ' * * * *'
+  return String(state.expression).trim()
+}
+/* SBUILD-END */
 
 const API_PREFIX = '/api/cron-board/'
 const REFRESH_INTERVAL_MS = 30 * SECOND_MS
@@ -92,9 +163,9 @@ body{
 --cb-mask:var(--dsw-alias-bg-mask-1,rgba(31,35,41,.5));
 --cb-shadow:0 1px 2px rgb(31 35 41 / 4%);
 --cb-radius-sm:6px;--cb-radius-md:8px;--cb-radius-lg:14px;
---cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:12px;--cb-space-5:16px;--cb-space-6:24px;
+--cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:10px;--cb-space-5:12px;--cb-space-6:18px;
 --cb-font-xs:12px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
---cb-control-h:34px;
+--cb-control-h:30px;
 }
 .cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;max-width:880px;color:var(--cb-text);container-type:inline-size}
 .cb-toolbar{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
@@ -159,38 +230,76 @@ body{
 .cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cb-mask{color:var(--cb-text-sub)}
 .cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
-.cb-modal{background:var(--cb-bg);color:var(--cb-text);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:720px;width:min(720px,92vw);max-height:84vh;overflow:auto;display:flex;flex-direction:column;gap:var(--cb-space-4);box-shadow:0 12px 40px rgb(31 35 41 / 18%);animation:cb-pop-in .2s ease-out}
+.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:auto;display:flex;flex-direction:column;gap:14px;box-shadow:0 12px 40px rgb(31 35 41 / 18%);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
-.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-3);border-bottom:1px solid var(--cb-border)}
+.cb-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--cb-space-3);padding-bottom:var(--cb-space-2);border-bottom:1px solid var(--cb-border)}
 .cb-modal-title{font-size:16px;font-weight:600}
-.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-5)}
-.cb-section{display:flex;flex-direction:column;gap:var(--cb-space-3)}
+.cb-modal-body{display:flex;flex-direction:column;gap:var(--cb-space-4)}
+.cb-section{display:flex;flex-direction:column;gap:var(--cb-space-2)}
 .cb-section-title{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:flex;align-items:center;gap:var(--cb-space-2)}
 .cb-section-title::before{content:'';width:3px;height:12px;border-radius:2px;background:var(--cb-accent)}
-.cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--cb-space-4) var(--cb-space-5)}
-.cb-field{display:flex;flex-direction:column;gap:var(--cb-space-2);font-size:var(--cb-font-sm);min-width:0;color:var(--cb-text-sub)}
+.cb-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--cb-space-3) var(--cb-space-4)}
+.cb-field{display:flex;flex-direction:column;gap:4px;font-size:var(--cb-font-sm);min-width:0;color:var(--cb-text-sub)}
 .cb-field--wide{grid-column:1 / -1}
-.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:5px 10px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text);min-width:0;transition:border-color .15s,box-shadow .15s}
+.cb-field input[type="text"],.cb-field input[type="number"],.cb-field textarea,.cb-field select{min-height:30px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 10px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text);min-width:0;transition:border-color .15s,box-shadow .15s}
 .cb-field input:focus,.cb-field textarea:focus,.cb-field select:focus{outline:none;border-color:var(--cb-accent);box-shadow:0 0 0 3px var(--cb-accent-wash)}
-.cb-field textarea{min-height:72px;resize:vertical;font-family:inherit}
+.cb-field textarea{min-height:64px;resize:vertical;font-family:inherit}
 .cb-hint{font-size:var(--cb-font-xs);color:var(--cb-text-dim)}
-.cb-error{font-size:var(--cb-font-sm);color:var(--cb-danger);background:var(--cb-bg-sub);border-left:3px solid var(--cb-danger);border-radius:var(--cb-radius-sm);padding:var(--cb-space-2) var(--cb-space-3)}
 .cb-preview{font-size:var(--cb-font-sm);border:1px dashed var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:var(--cb-space-2) var(--cb-space-3);color:var(--cb-text-sub);background:var(--cb-accent-wash);border-color:color-mix(in srgb, var(--cb-accent) 35%, transparent);color:var(--cb-text)}
+/* —— 表单 v2:统一分段组件 + 调度构建器(设计稿 .superdesign/shots/7、8 锁定形态)—— */
+/* seg:类型/会话模式/调度频率共用同一形态,禁止另起多套选择样式 */
+.cb-seg{display:inline-flex;gap:2px;background:var(--cb-bg-muted);border-radius:8px;padding:2px;width:fit-content}
+.cb-seg__opt{border:none;background:transparent;border-radius:6px;padding:5px 11px;font:inherit;font-size:var(--cb-font-sm);font-weight:520;color:var(--cb-text-sub);cursor:pointer;line-height:1.2;white-space:nowrap;transition:background .15s,color .15s}
+.cb-seg__opt:hover{color:var(--cb-text)}
+.cb-seg__opt--on{background:var(--cb-accent);color:#fff;font-weight:560}
+.cb-seg__opt--on:hover{color:#fff}
+.cb-seg__opt:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:1px}
+/* 调度构建器:极浅洗底面板,收纳频率/上下文/表达式/预览 */
+.cb-builder{background:var(--cb-bg-sub);border:1px solid var(--cb-border);border-radius:10px;padding:var(--cb-space-5);display:flex;flex-direction:column;gap:10px}
+.cb-bline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.cb-blabel{font-size:var(--cb-font-sm);color:var(--cb-text-sub);flex:none}
+.cb-time{width:44px;text-align:center;font-variant-numeric:tabular-nums}
+.cb-colon{color:var(--cb-text-dim);font-size:var(--cb-font-sm)}
+.cb-expr{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);background:var(--cb-bg);border:1px solid var(--cb-border);border-radius:6px;padding:4px 9px;color:var(--cb-text);display:inline-flex;align-items:center;min-width:0}
+.cb-expr input{border:none;background:transparent;font:inherit;color:var(--cb-text);padding:0;width:9em}
+.cb-expr input:focus{outline:none}
+.cb-linkbtn{border:none;background:transparent;color:var(--cb-accent);font:inherit;font-size:var(--cb-font-sm);font-weight:520;cursor:pointer;padding:0}
+.cb-linkbtn:hover{color:var(--cb-accent-deep)}
+.cb-runs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.cb-run{display:inline-flex;align-items:center;gap:5px;font-size:var(--cb-font-xs);color:var(--cb-text-sub);background:var(--cb-bg);border:1px solid var(--cb-border);border-radius:999px;padding:3px 9px;white-space:nowrap}
+.cb-run::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--cb-accent);flex:none}
+.cb-run + .cb-run::before{background:var(--cb-text-dim)}
+/* 紧凑行组:名称+类型 / 策略单行 */
+.cb-formrow{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+.cb-formrow > .cb-field{flex:1;min-width:180px}
+.cb-formrow > .cb-field--fit{flex:0 0 auto;min-width:0;width:min(300px, 42%)}
+/* 运行策略单行:标题+开关+内联数字段同一行 */
+.cb-inline{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.cb-inlinesection{font-size:var(--cb-font-sm);font-weight:600;color:var(--cb-text);display:inline-flex;align-items:center;gap:6px}
+.cb-inlinesection::before{content:'';width:3px;height:11px;border-radius:2px;background:var(--cb-accent)}
+.cb-if{display:inline-flex;align-items:center;gap:6px}
+.cb-if > .cb-field{flex-direction:row;align-items:center;gap:6px}
+.cb-if input[type="number"]{width:104px}
 .cb-log{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);white-space:pre-wrap;word-break:break-all;background:var(--cb-bg-sub);border-radius:var(--cb-radius-md);padding:var(--cb-space-3);max-height:320px;overflow:auto}
 .cb-empty{font-size:var(--cb-font-md);color:var(--cb-text-dim);padding:var(--cb-space-6) 0;text-align:center;display:flex;flex-direction:column;align-items:center;gap:var(--cb-space-3)}
-.cb-select{min-height:var(--cb-control-h);border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 8px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text)}
+.cb-select{min-height:30px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:4px 8px;font:inherit;font-size:var(--cb-font-md);background:var(--cb-bg);color:var(--cb-text)}
 .cb-confirm-text{font-size:var(--cb-font-md);color:var(--cb-text);line-height:1.5}
 .cb-log::-webkit-scrollbar,.cb-modal::-webkit-scrollbar{width:8px;height:8px}
 .cb-log::-webkit-scrollbar-thumb,.cb-modal::-webkit-scrollbar-thumb{background:var(--cb-border-strong);border-radius:999px}
 .cb-log::-webkit-scrollbar-track,.cb-modal::-webkit-scrollbar-track{background:transparent}
-/* 容器查询:better-sidebar tab 与主视图宽度差异大,跟随面板自身宽度而非视口 */
+.cb-error{font-size:var(--cb-font-sm);color:var(--cb-danger);background:var(--cb-bg-sub);border-left:3px solid var(--cb-danger);border-radius:var(--cb-radius-sm);padding:var(--cb-space-2) var(--cb-space-3)}
+/* 容器查询:better-sidebar tab 与主视图宽度差异大,跟随面板自身宽度而非视口。
+   模态不受面板容器宽度连累:mask 固定定位于视口,断点用视口媒体查询独立判定 */
 @container (max-width: 560px){
-.cb-grid{grid-template-columns:1fr}
 .cb-card-row .cb-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
 .cb-view{padding:var(--cb-space-4)}
 .cb-panel{gap:var(--cb-space-4)}
+}
+@media (max-width: 560px){
+.cb-grid{grid-template-columns:1fr}
+.cb-modal{max-height:92vh}
 }
 .cb-entry{display:flex;align-items:center;gap:var(--cb-space-3);width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--cb-space-2) var(--cb-space-4);border-radius:var(--cb-radius-md);font-size:var(--cb-font-md);text-align:left}
 .cb-entry:hover{background:var(--cb-hover)}
@@ -269,8 +378,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         }, option.label)))
     }
 
-    function Field({ label, hint, wide, children }) {
-      return h('div', { className: 'cb-field' + (wide ? ' cb-field--wide' : '') },
+    function Field({ label, hint, wide, fit, children }) {
+      return h('div', { className: 'cb-field' + (wide ? ' cb-field--wide' : '') + (fit ? ' cb-field--fit' : '') },
         h('span', null, label),
         children,
         hint ? h('span', { className: 'cb-hint' }, hint) : null)
@@ -301,6 +410,87 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // —— 任务表单(新建/编辑)——
+    // v2 布局(设计稿 shots/7、8 锁定):统一分段组件(cb-seg)承担类型/会话模式/调度频率切换;
+    // 调度构建器洗底面板:结构化频率生成表达式,反解不出即 custom 手输;触发点预览仍归后端 cron/preview。
+    function Segmented({ options, value, onChange, ariaLabel, multi, selected }) {
+      // multi:周几类多选切换;与单选共用同一 DOM/CSS 形态,仅选中判定不同
+      const isOn = (optionValue) => (multi ? selected.includes(optionValue) : optionValue === value)
+      return h('div', { className: 'cb-seg', role: 'group', 'aria-label': ariaLabel },
+        options.map((option) => h('button', {
+          key: option.value,
+          type: 'button',
+          'aria-pressed': multi ? isOn(option.value) : undefined,
+          className: 'cb-seg__opt' + (isOn(option.value) ? ' cb-seg__opt--on' : ''),
+          onClick: () => onChange(option.value),
+        }, option.label)))
+    }
+
+    const FREQ_OPTIONS = [
+      { value: 'daily', label: '每天' },
+      { value: 'weekly', label: '每周' },
+      { value: 'weekdays', label: '工作日' },
+      { value: 'interval', label: '固定间隔' },
+      { value: 'custom', label: '自定义' },
+    ]
+
+    // 调度构建器面板:频率分段 + 上下文选择器 + 表达式芯片 + 即将执行 chips
+    function ScheduleBuilder({ scheduleState, onStateChange, preview }) {
+      const state = scheduleState
+      const setFreq = (freq) => onStateChange({ ...state, freq })
+      const patchClock = (field, raw) => {
+        const value = Math.max(0, Math.min(field === 'hour' ? SB_HOUR_MAX : SB_MINUTE_MAX, Number(raw) || 0))
+        onStateChange({ ...state, [field]: value })
+      }
+      const toggleWeekday = (day) => {
+        const days = state.weekdays.includes(day)
+          ? state.weekdays.filter((d) => d !== day)
+          : SB_WEEKDAY_ORDER.filter((d) => state.weekdays.includes(d) || d === day)
+        if (days.length === 0) return
+        onStateChange({ ...state, weekdays: days })
+      }
+      const clockRow = (h('div', { className: 'cb-bline' },
+        h('span', { className: 'cb-blabel' }, '执行时间'),
+        h('input', { type: 'number', className: 'cb-time', min: 0, max: SB_HOUR_MAX, value: state.hour, onChange: (e) => patchClock('hour', e.target.value) }),
+        h('span', { className: 'cb-colon' }, ':'),
+        h('input', { type: 'number', className: 'cb-time', min: 0, max: SB_MINUTE_MAX, value: state.minute, onChange: (e) => patchClock('minute', e.target.value) }),
+        h('span', { className: 'cb-hint' }, state.freq === 'weekdays' ? '周一至周五在指定时刻运行' : state.freq === 'weekly' ? '所选星期在指定时刻运行' : '按天在指定时刻运行')))
+      const intervalRow = (h('div', { className: 'cb-bline' },
+        h('span', { className: 'cb-blabel' }, '间隔'),
+        h('input', { type: 'number', className: 'cb-time', min: SB_INTERVAL_MIN_MINUTES, max: SB_MINUTE_MAX, value: state.intervalMinutes, onChange: (e) => onStateChange({ ...state, intervalMinutes: Math.max(SB_INTERVAL_MIN_MINUTES, Number(e.target.value) || SB_INTERVAL_MIN_MINUTES) }) }),
+        h('span', { className: 'cb-hint' }, '分钟,每 N 分钟运行一次')))
+      const customRow = (h('div', { className: 'cb-bline' },
+        h('span', { className: 'cb-blabel' }, '表达式'),
+        h('input', { type: 'text', value: state.expression, placeholder: '分 时 日 月 周', onChange: (e) => onStateChange({ ...state, expression: e.target.value }) }),
+        h('span', { className: 'cb-hint' }, '分 时 日 月 周;预设: ' + CRON_PRESETS.slice(0, 3).map((p) => p.label + ' ' + p.value).join(' / '))))
+      return h('div', { className: 'cb-builder' },
+        h(Segmented, { options: FREQ_OPTIONS, value: state.freq, onChange: setFreq, ariaLabel: '调度频率' }),
+        state.freq === 'interval' ? intervalRow : null,
+        state.freq === 'custom' ? customRow : clockRow,
+        state.freq === 'weekly'
+          ? h('div', { className: 'cb-bline' },
+              h('span', { className: 'cb-blabel' }, '星期'),
+              h(Segmented, {
+                multi: true,
+                selected: state.weekdays,
+                options: SB_WEEKDAY_ORDER.map((d) => ({ value: d, label: SB_WEEKDAY_LABELS[d] })),
+                onChange: toggleWeekday,
+                ariaLabel: '星期',
+              }))
+          : null,
+        h('div', { className: 'cb-bline' },
+          h('span', { className: 'cb-blabel' }, '生成表达式'),
+          h('span', { className: 'cb-expr' }, buildSchedule(state)),
+          state.freq === 'custom'
+            ? null
+            : h('button', { type: 'button', className: 'cb-linkbtn', onClick: () => setFreq('custom') }, '自定义'),
+          state.freq === 'custom' ? null : h('span', { className: 'cb-hint' }, '由上方选择自动生成')),
+        h('div', { className: 'cb-bline' },
+          h('span', { className: 'cb-blabel' }, '即将执行'),
+          preview
+            ? h('span', { className: 'cb-runs' }, preview.nextAt.map((at) => h('span', { key: at, className: 'cb-run' }, formatDateTime(at))))
+            : h('span', { className: 'cb-hint' }, '表达式非法或计算中')))
+    }
+
     function JobForm({ job, onDone, wsModel }) {
       // 工作区清单:订阅 model 快照(服务缺失或形态不符即空表,仅保留手输)
       const [wsItems, setWsItems] = useState(() => (wsModel ? wsModel.getSnapshot().items || [] : []))
@@ -311,29 +501,45 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         return wsModel.subscribe(update)
       }, [wsModel])
       const editing = Boolean(job && job.id)
+      const initialSchedule = job ? job.schedule : '0 9 * * *'
       const [form, setForm] = useState(() => ({
         name: job ? job.name : '',
         kind: job ? job.kind : 'shell',
         command: job ? job.command : '',
         prompt: job ? job.prompt : '',
         workdir: job ? job.workdir : '',
-        schedule: job ? job.schedule : '0 9 * * *',
+        schedule: initialSchedule,
         timeoutMs: job ? job.timeoutMs : 60 * 60 * 1000,
+        runOnce: job ? job.runOnce === true : false,
         concurrency: job && job.concurrency ? String(job.concurrency) : '',
         enabled: job ? job.enabled : true,
         session: {
           mode: job && job.session ? job.session.mode : 'fresh',
           pinnedSessionId: job && job.session ? job.session.pinnedSessionId : '',
-          windowStart: job && job.session ? job.session.windowStart : '',
-          windowEnd: job && job.session ? job.session.windowEnd : '',
-          onMiss: job && job.session ? job.session.onMiss : 'skip',
+          agentPreset: job && job.session ? job.session.agentPreset : '',
         },
       }))
+      // 构建器状态:由既有表达式反解初始化;结构化变更写回 form.schedule
+      const [scheduleState, setScheduleState] = useState(() => parseSchedule(initialSchedule))
       const [preview, setPreview] = useState(null)
       const [error, setError] = useState(null)
       const [saving, setSaving] = useState(false)
+      const [presetCatalog, setPresetCatalog] = useState({ defaultId: '', items: [] })
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const setSession = (patch) => setForm((prev) => ({ ...prev, session: { ...prev.session, ...patch } }))
+      const applyScheduleState = (next) => {
+        setScheduleState(next)
+        set({ schedule: buildSchedule(next) })
+      }
+
+      // 执行预设目录:会话任务表单打开时拉取一次;服务缺失即空目录,仅「跟随宿主默认」可选
+      useEffect(() => {
+        let alive = true
+        request('GET', 'agent-presets').then((outcome) => {
+          if (alive && outcome.ok && outcome.data && Array.isArray(outcome.data.items)) setPresetCatalog(outcome.data)
+        })
+        return () => { alive = false }
+      }, [])
 
       useEffect(() => {
         let alive = true
@@ -357,26 +563,26 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         else setError(outcome.error)
       }
 
-      return h(Modal, { title: editing ? '编辑任务' : '新建任务', onClose: onDone, width: 720 },
-        h(Section, { title: '基础信息' },
-          h('div', { className: 'cb-grid' },
-            h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
-            h(Field, { label: '类型' }, h(PillGroup, {
-              options: [{ value: 'shell', label: KIND_LABELS.shell }, { value: 'session', label: KIND_LABELS.session }],
-              value: form.kind,
-              onChange: (kind) => set({ kind }),
-            })))),
-        h(Section, { title: form.kind === 'shell' ? '执行配置(shell)' : '执行配置(会话)' },
-          h('div', { className: 'cb-grid' },
-            form.kind === 'shell'
-              ? h(Field, { label: '命令', wide: true, hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
-                  h('input', { type: 'text', value: form.command, onChange: (e) => set({ command: e.target.value }) }))
-              : null,
-            form.kind === 'shell'
-              ? h(Field, { label: '工作目录(可空)' }, h('input', { type: 'text', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, {
+      return h(Modal, { title: editing ? '编辑任务' : '新建任务', onClose: onDone, width: 640 },
+        h('div', { className: 'cb-formrow' },
+          h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
+          h(Field, { label: '类型', fit: true }, h(Segmented, {
+            options: [{ value: 'shell', label: KIND_LABELS.shell }, { value: 'session', label: KIND_LABELS.session }],
+            value: form.kind,
+            onChange: (kind) => set({ kind }),
+            ariaLabel: '类型',
+          }))),
+        h(Section, { title: '调度计划' },
+          h(ScheduleBuilder, { scheduleState, onStateChange: applyScheduleState, preview })),
+        form.kind === 'shell'
+          ? h(Section, { title: '运行配置(shell)' },
+              h(Field, { label: '命令', hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
+                h('input', { type: 'text', value: form.command, onChange: (e) => set({ command: e.target.value }) })),
+              h('div', { className: 'cb-formrow' },
+                h(Field, { label: '工作目录(可空)' }, h('input', { type: 'text', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))))
+          : h(Section, { title: '运行配置(会话)' },
+              h('div', { className: 'cb-formrow' },
+                h(Field, {
                   label: '工作区(会话 cwd,可空)',
                   hint: wsItems.length > 0 ? '从宿主工作区选择,或留空使用默认目录' : '留空使用宿主默认目录;填入路径则会话在该目录下创建',
                 },
@@ -390,52 +596,49 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                           h('option', { value: '' }, '默认目录'),
                           wsItems.map((w) => h('option', { key: w.path || w.workspaceId, value: w.path }, w.title || w.path)))
                       : null,
-                    h('input', { type: 'text', placeholder: '/path/to/workspace', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) })))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '任务文本', wide: true, hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
-                  h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '会话模式' }, h(PillGroup, {
-                  options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
-                  value: form.session.mode,
-                  onChange: (mode) => setSession({ mode }),
-                }))
-              : null,
-            form.kind === 'session' && form.session.mode === 'pinned'
-              ? h(Field, { label: '固定会话 ID(可空,首跑自动绑定)' },
-                  h('input', { type: 'text', value: form.session.pinnedSessionId, onChange: (e) => setSession({ pinnedSessionId: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '允许时段起(可空)' }, h('input', { type: 'text', placeholder: '09:00', value: form.session.windowStart, onChange: (e) => setSession({ windowStart: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '允许时段止(可空)' }, h('input', { type: 'text', placeholder: '23:00', value: form.session.windowEnd, onChange: (e) => setSession({ windowEnd: e.target.value }) }))
-              : null,
-            form.kind === 'session'
-              ? h(Field, { label: '窗口外策略' }, h(PillGroup, {
-                  options: [{ value: 'skip', label: ONMISS_LABELS.skip }, { value: 'defer', label: ONMISS_LABELS.defer }],
-                  value: form.session.onMiss,
-                  onChange: (onMiss) => setSession({ onMiss }),
-                }))
-              : null)),
-        h(Section, { title: '调度计划' },
-          h('div', { className: 'cb-grid' },
-            h(Field, { label: 'cron 表达式(分 时 日 月 周)' },
-              h('div', { style: { display: 'flex', gap: 6 } },
-                h('input', { type: 'text', value: form.schedule, onChange: (e) => set({ schedule: e.target.value }) }),
+                    h('input', { type: 'text', placeholder: '或手输路径', value: form.workdir, onChange: (e) => set({ workdir: e.target.value }) }))),
+                h(Field, { label: '会话模式', fit: true },
+                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                    h(Segmented, {
+                      options: [{ value: 'fresh', label: MODE_LABELS.fresh }, { value: 'pinned', label: MODE_LABELS.pinned }],
+                      value: form.session.mode,
+                      onChange: (mode) => setSession({ mode }),
+                      ariaLabel: '会话模式',
+                    }),
+                    form.session.mode === 'pinned'
+                      ? h('input', {
+                          type: 'text',
+                          placeholder: '固定会话 ID(可空,首跑自动绑定)',
+                          title: '留空则首跑自动绑定;会话被删除或归档时自动重建并回写',
+                          value: form.session.pinnedSessionId,
+                          onChange: (e) => setSession({ pinnedSessionId: e.target.value }),
+                        })
+                      : null))),
+              h(Field, { label: '执行预设', hint: '会话使用的 Agent Preset;跟随宿主默认时由宿主解析当前默认' },
                 h('select', {
                   className: 'cb-select',
-                  value: '',
-                  onChange: (e) => { if (e.target.value) set({ schedule: e.target.value }) },
+                  value: presetCatalog.items.some((item) => item.id === form.session.agentPreset) ? form.session.agentPreset : '',
+                  onChange: (e) => setSession({ agentPreset: e.target.value }),
                 },
-                  h('option', { value: '' }, '预设'),
-                  CRON_PRESETS.map((preset) => h('option', { key: preset.value, value: preset.value }, preset.label)))),
-              preview ? h('span', { className: 'cb-preview' },
-                preview.summary + ';接下来 ' + preview.nextAt.map((at) => formatDateTime(at)).join(' / ')) : null),
-            h(Field, { label: '超时(毫秒)' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) })),
-            h(Field, { label: '并发上限(可空)' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) })))),
+                  h('option', { value: '' }, '跟随宿主默认'),
+                  presetCatalog.items.map((item) => h('option', { key: item.id, value: item.id }, item.label)))),
+              h(Field, { label: '任务文本', hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
+                h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))),
+        h('div', { className: 'cb-inline' },
+          h('span', { className: 'cb-inlinesection' }, '运行策略'),
+          switchToggle({ checked: form.runOnce, onChange: (e) => set({ runOnce: e.target.checked }), label: '单次运行' }),
+          form.kind === 'shell'
+            ? h('span', { className: 'cb-if' },
+                h('span', { className: 'cb-blabel' }, '超时'),
+                h('input', { type: 'number', value: form.timeoutMs, title: '毫秒,超时即中断并标记失败', onChange: (e) => set({ timeoutMs: Number(e.target.value) }) }),
+                h('span', { className: 'cb-hint' }, 'ms'))
+            : null,
+          form.kind === 'shell'
+            ? h('span', { className: 'cb-if' },
+                h('span', { className: 'cb-blabel' }, '并发上限'),
+                h('input', { type: 'number', value: form.concurrency, style: { width: 72 }, title: '限制该任务同时进行的执行数,可空', onChange: (e) => set({ concurrency: e.target.value }) }))
+            : null,
+          form.kind === 'session' ? h('span', { className: 'cb-hint' }, '会话任务投递即完成,无超时与并发语义') : null),
         error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
@@ -453,8 +656,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('span', { className: 'cb-name' }, job.name),
           h('span', { className: 'cb-badge' }, KIND_LABELS[job.kind] || job.kind),
           job.kind === 'session' && job.session ? h('span', { className: 'cb-badge' }, MODE_LABELS[job.session.mode]) : null,
-          job.kind === 'session' && job.session && job.session.windowStart
-            ? h('span', { className: 'cb-badge' }, job.session.windowStart + '-' + job.session.windowEnd) : null,
           h('div', { className: 'cb-actions', onClick: (event) => event.stopPropagation() },
             switchToggle({ checked: Boolean(job.enabled), onChange: onToggle }),
             h('button', { className: 'cb-button cb-button--primary cb-button--sm', disabled: !job.enabled, title: job.enabled ? '立即运行' : '已停用', onClick: onRun }, '运行'),
@@ -821,8 +1022,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时始终使用主界面。' : '需安装 better-sidebar 后方可切换;未安装时看板始终使用主界面。'))) : null)
     }
 
-    // better-sidebar tab:注册即单实例(single);v0.19.0 起注册只入「可打开」目录,
-    // 须显式 openTab 落入底部工作台;wsModel 供会话任务选工作区
+    // better-sidebar tab:注册即单实例(single);只注册不主动打开,
+    // 打开由用户从侧边栏目录手动进入(注册即 openTab 会在每次页面加载时抢占当前视图)
     function registerBoardTab(ctx, service, wsModel) {
       return ctx.effect(() => {
         const disposeTab = service.registerTab({
@@ -836,10 +1037,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           single: true,
           component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel }),
         })
-        // 无会话时 openTab 静默不落,tab 仍注册在册(新建标签页菜单可见)
-        if (typeof service.openTab === 'function') {
-          try { service.openTab({ type: TAB_ID }) } catch { /* 打开失败不回滚注册 */ }
-        }
         return disposeTab
       }, 'cron-board sidebar tab')
     }
