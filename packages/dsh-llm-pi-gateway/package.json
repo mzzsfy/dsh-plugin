@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-llm-pi-gateway",
   "description": "NewAPI 等 LLM 网关接入:向每个上游请求注入会话 sessionId(请求体派生标记 + 亲和头裸 sessionId),供网关做请求亲和性粘性路由,compat 全开放",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
