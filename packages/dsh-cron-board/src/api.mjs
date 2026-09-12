@@ -153,6 +153,8 @@ function normalizeJob(body) {
     normalized.timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
   }
   if (normalized.session === undefined) delete normalized.session
+  // 单次运行:真实运行入队即禁用(executor dispatch 承担),缺省关闭
+  normalized.runOnce = body.runOnce === true
   // 任务级并发上限:合法正整数才落库,缺省走全局闸门(executor min 规则)
   if (Number.isInteger(body.concurrency) && body.concurrency > 0) normalized.concurrency = body.concurrency
   // nextRunAt:调用方可显式指定(导入任务保留原状态 / 测试注入到期时刻),缺省按 schedule 计算

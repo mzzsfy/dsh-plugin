@@ -342,6 +342,14 @@ test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   // Then session 字段缺省,shell 保留显式超时
   assert.equal(shellJob.payload.session, undefined)
   assert.equal(shellJob.payload.timeoutMs, 1000)
+  // When 单次运行开关
+  const once = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'once', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true, runOnce: true,
+    session: { mode: 'fresh' },
+  })
+  // Then 落库 true;缺省 false
+  assert.equal(once.payload.runOnce, true)
+  assert.equal(shellJob.payload.runOnce, false)
   // When 非法会话模式
   const badMode = await call(api, 'POST', '/api/cron-board/jobs', {
     name: 's2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,

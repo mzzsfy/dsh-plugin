@@ -318,6 +318,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         workdir: job ? job.workdir : '',
         schedule: job ? job.schedule : '0 9 * * *',
         timeoutMs: job ? job.timeoutMs : 60 * 60 * 1000,
+        runOnce: job ? job.runOnce === true : false,
         concurrency: job && job.concurrency ? String(job.concurrency) : '',
         enabled: job ? job.enabled : true,
         session: {
@@ -442,6 +443,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             form.kind === 'shell'
               ? h(Field, { label: '超时(毫秒)', hint: '会话任务投递即完成,无超时语义' }, h('input', { type: 'number', value: form.timeoutMs, onChange: (e) => set({ timeoutMs: Number(e.target.value) }) }))
               : null,
+            h(Field, { label: '单次运行', hint: '运行一次后自动停用该任务' }, switchToggle({ checked: form.runOnce, onChange: (e) => set({ runOnce: e.target.checked }), label: '单次运行' })),
             h(Field, { label: '并发上限(可空)' }, h('input', { type: 'number', value: form.concurrency, onChange: (e) => set({ concurrency: e.target.value }) })))),
         error ? h('div', { className: 'cb-error' }, error) : null,
         h('div', { className: 'cb-toolbar' },

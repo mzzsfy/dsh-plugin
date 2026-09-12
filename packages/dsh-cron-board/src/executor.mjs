@@ -129,6 +129,10 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
         records.push(record)
         queue.push({ job, record, env: combinations[i], runnerFor })
       }
+      // 单次任务入队即禁用:先占运行再落禁用,封死 cron 连续 tick 的重复触发窗口
+      if (job.runOnce === true) {
+        await store.jobs.update(job.id, { enabled: false })
+      }
       pump()
       return records.map((record) => record.runId)
     },

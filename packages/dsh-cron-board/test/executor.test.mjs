@@ -55,6 +55,25 @@ test('executor:正常路径终态 success 且任务卡回填', async (t) => {
   assert.equal(store.jobs.get('j1').lastStatus, 'success')
 })
 
+test('executor:runOnce 任务入队即禁用', async (t) => {
+  const { store, executor } = await makeExecutor(t)
+  // Given 启用中的 runOnce 任务
+  await store.jobs.create({ ...JOB_BASE, id: 'j-once', runOnce: true })
+  // When dispatch(入队,不等终态)
+  await executor.dispatch({ ...JOB_BASE, id: 'j-once', runOnce: true }, 'manual')
+  // Then 任务立即禁用(封死 cron 连续触发的重复运行窗口)
+  assert.equal(store.jobs.get('j-once').enabled, false)
+  // 收尾:放行执行到终态,避免悬挂写与临时目录清理赛跑
+  await dispatchAndSettle(executor, store, 'j-once')
+})
+
+test('executor:非 runOnce 任务运行后保持启用', async (t) => {
+  const { store, executor } = await makeExecutor(t)
+  await store.jobs.create({ ...JOB_BASE, id: 'j-keep' })
+  await dispatchAndSettle(executor, store, 'j-keep')
+  assert.equal(store.jobs.get('j-keep').enabled, true)
+})
+
 test('executor:pinned 自愈回写 session.pinnedSessionId 且清除顶层孤立字段', async (t) => {
   const { store, executor } = await makeExecutor(t)
   // Given pinned 任务(session 子对象承载绑定),runner 返回 pinnedNewId 模拟自愈
