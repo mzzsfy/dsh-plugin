@@ -37,7 +37,9 @@ function makeStubs({ autoIdle = true } = {}) {
     get: (id) => sessions.get(id),
   }
   const sessionQuery = {
-    async listSessions() {
+    // 镜像宿主最严准入契约:守护 driver 总是传信号(真实宿主各版本为可选链,将来收紧不崩)
+    async listSessions(signal) {
+      signal.throwIfAborted()
       return [...sessions.values()].map((entry) => ({ id: entry.id }))
     },
   }

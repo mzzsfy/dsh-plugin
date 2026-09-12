@@ -12,15 +12,16 @@ const REJECTED_MESSAGE = '会话输入投递被拒绝'
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000
 
-// 宿主 facade 的 prompt 准入首行非可选链校验 signal(浏览器侧由 transport 注入,进程内无取消来源),
-// 固定传永不中止的信号;宿主仅在准入期读一次不保留,共享单例安全
-const PROMPT_SIGNAL = new AbortController().signal
+// 宿主入口(prompt 准入 / listSessions 读取)逐版本形态有差异:prompt 各版本均非可选链校验
+// signal,listSessions 各版本为可选链;进程内调用无取消来源,统一传永不中止的信号,
+// 宿主仅在入口读一次不保留,共享单例安全,宿主将来收紧为非可选链亦无需再改
+const ADMISSION_SIGNAL = new AbortController().signal
 
 export function createSessionDriver({ getSessionController, agents, sessionQuery, pollIntervalMs = 2 * 1000, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() }) {
   // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表)
   async function pinnedExists(sessionId) {
     if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return Boolean(agents.get(sessionId))
-    const records = await sessionQuery.listSessions()
+    const records = await sessionQuery.listSessions(ADMISSION_SIGNAL)
     return records.some((record) => record && record.id === sessionId)
   }
 
@@ -54,7 +55,7 @@ export function createSessionDriver({ getSessionController, agents, sessionQuery
       sessionId,
       mode: 'queue',
       content: [{ type: 'text', text: buildPromptText({ prompt: job.prompt || '', env, mask }) }],
-    }, PROMPT_SIGNAL)
+    }, ADMISSION_SIGNAL)
     if (!submission || submission.accepted !== true) {
       return { status: 'fail', message: REJECTED_MESSAGE, sessionId }
     }
