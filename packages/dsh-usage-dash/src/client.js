@@ -289,7 +289,7 @@ const MESSAGES_ZH = {
   'weekday.4': '四',
   'weekday.5': '五',
   'weekday.6': '六',
-  condTime: '需 HH:MM',
+  condTime: '需 24 小时制时刻 HH:MM(时:分,如 09:30)',
   condWeekday: '需 0-6 整数',
   condMonthDay: '需 1-31 整数',
   condDate: '需 YYYY-MM-DD',
@@ -432,7 +432,7 @@ const MESSAGES_EN = {
   'weekday.4': 'Th',
   'weekday.5': 'Fr',
   'weekday.6': 'Sa',
-  condTime: 'Requires HH:MM',
+  condTime: 'Requires 24-hour HH:MM time (hours:minutes, e.g. 09:30)',
   condWeekday: 'Requires integer 0-6',
   condMonthDay: 'Requires integer 1-31',
   condDate: 'Requires YYYY-MM-DD',
@@ -1556,6 +1556,7 @@ function turnCostTitleText(t, tokenUsage) {
 // ===== 定价编辑器纯函数(校验/规整/默认值) =====
 const PRICE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite']
 const HHMM_PATTERN = /^\d{1,2}:\d{2}$/
+const HHMM_PLACEHOLDER = 'HH:MM'
 const ISO_DAY_PATTERN_CLIENT = /^\d{4}-\d{2}-\d{2}$/
 // 时刻分量界:小时/分钟均双闭
 const HOUR_MAX = 23
@@ -1565,6 +1566,8 @@ const WEEKDAY_MAX = 6
 const MONTH_DAY_MIN = 1
 const MONTH_DAY_MAX = 31
 const FULL_DAY_WINDOW = { from: '00:00', to: '23:59' }
+// HH:MM 输入框内联宽(size 属性字符数):占位符容量 + 光标余量,配合 .ud-cond-fields 的 width:auto
+const HHMM_INPUT_SIZE = HHMM_PLACEHOLDER.length + 2
 const CONDITION_KIND_OPTIONS = ['dailyWindow', 'weekdays', 'monthDays', 'dateRange']
 const CONDITION_KIND_LABEL_KEYS = {
   dailyWindow: 'condDailyWindow',
@@ -1578,6 +1581,27 @@ const parseHHMM = (value) => {
   if (typeof value !== 'string' || !HHMM_PATTERN.test(value)) return null
   const [hours, minutes] = value.split(':').map(Number)
   return hours >= 0 && hours <= HOUR_MAX && minutes >= 0 && minutes <= MINUTE_MAX ? value : null
+}
+
+// HH:MM 输入净化:自绘文本框永不出现秒段。成型仅限两种形态——纯数字满四位补冒号(连续键入/纯数字秒串粘贴),
+// 带冒号三段时刻截取前两段(带秒串粘贴自愈);其余形态(中间插字/杂串)原样放行交保存校验显式报错,防静默重排出错误合法时刻
+const HHMM_INPUT_DIGITS = 4
+const HHMM_PURE_DIGITS_PATTERN = /^\d+$/
+const HHMM_SECONDS_TAIL_PATTERN = /:\d{2}$/
+const HHMM_THREE_SEGMENT_PATTERN = /^\d{1,2}:\d{2}:\d{2}$/
+const FULLWIDTH_DIGIT_PATTERN = /[０-９]/g
+const FULLWIDTH_COLON = '：'
+const FULLWIDTH_ZERO = '０'.codePointAt(0)
+const normalizeHHMMInput = (raw) => {
+  if (typeof raw !== 'string') return ''
+  const half = raw.replace(FULLWIDTH_DIGIT_PATTERN, (char) => String(char.codePointAt(0) - FULLWIDTH_ZERO)).replaceAll(FULLWIDTH_COLON, ':')
+  if (HHMM_PURE_DIGITS_PATTERN.test(half) && half.length >= HHMM_INPUT_DIGITS) {
+    return `${half.slice(0, 2)}:${half.slice(2, 4)}`
+  }
+  if (HHMM_THREE_SEGMENT_PATTERN.test(half)) {
+    return half.replace(HHMM_SECONDS_TAIL_PATTERN, '')
+  }
+  return half
 }
 
 const isValidMonthDay = (value) => Number.isInteger(value) && value >= MONTH_DAY_MIN && value <= MONTH_DAY_MAX
@@ -2733,6 +2757,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             onChange: (event) => patchCondition({ [field]: event.target.value }),
           }),
           errorTextOf(`${condPath}.${field}`))
+        // 时段自绘 HH:MM 输入:原生 time 控件段位由浏览器按 locale 决定,部分环境渲染秒段,产出带秒值被校验拒绝
+        const hhmmInput = (field, labelKey) => h('label', { key: field, className: 'ud-field' },
+          h('span', { className: 'ud-field-label' }, t(labelKey)),
+          h('input', {
+            type: 'text', className: 'ud-input', inputMode: 'numeric', autoComplete: 'off',
+            spellCheck: false, placeholder: HHMM_PLACEHOLDER,
+            size: HHMM_INPUT_SIZE,
+            value: condition[field] ?? '',
+            onChange: (event) => patchCondition({ [field]: normalizeHHMMInput(event.target.value) }),
+          }),
+          errorTextOf(`${condPath}.${field}`))
         // 号段 from/to 同域 1~31(双闭),统一上限
         const numberInput = (field, labelKey) => h('label', { key: field, className: 'ud-field' },
           h('span', { className: 'ud-field-label' }, t(labelKey)),
@@ -2757,7 +2792,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
             }, t(`weekday.${day}`))
           }))
         const fields = {
-          dailyWindow: [textInput('from', 'time', 'condFrom'), textInput('to', 'time', 'condTo')],
+          dailyWindow: [hhmmInput('from', 'condFrom'), hhmmInput('to', 'condTo')],
           weekdays: [weekdaysPills()],
           monthDays: [numberInput('from', 'condFrom'), numberInput('to', 'condTo')],
           dateRange: [textInput('from', 'date', 'condFrom'), textInput('to', 'date', 'condTo')],

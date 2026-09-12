@@ -91,6 +91,7 @@ const {
   resolvePointQuery,
   formatDateTimeInput,
   parseLocalDateTime,
+  normalizeHHMMInput,
   shortDay,
   smoothPath,
   tipPlace,
@@ -1063,6 +1064,40 @@ test('validatePricingRules 拒绝非法时刻与时刻字段缺失', () => {
   assert.equal(errors.get('2.conditions.0.from'), 'condTime')
   assert.equal(errors.get('3.conditions.0.to'), 'condTime')
   assert.equal(errors.has('4.conditions.0'), false)
+})
+
+test('normalizeHHMMInput 满四位纯数字补冒号成型', () => {
+  // Given 值为纯数字串且位数达四位 When 净化 Then 末两位前插冒号;纯数字秒串(140000)粘贴同路径自愈
+  assert.equal(normalizeHHMMInput('0830'), '08:30')
+  assert.equal(normalizeHHMMInput('140000'), '14:00')
+  assert.equal(normalizeHHMMInput('12345'), '12:34')
+})
+
+test('normalizeHHMMInput 三段时刻截取前两段', () => {
+  // Given 粘贴带秒串(HH:MM:SS)When 净化 Then 截取时:分两段自愈
+  assert.equal(normalizeHHMMInput('14:00:00'), '14:00')
+  assert.equal(normalizeHHMMInput('8:05:59'), '8:05')
+  assert.equal(normalizeHHMMInput('14:00:0'), '14:00:0')
+})
+
+test('normalizeHHMMInput 其余形态原样放行', () => {
+  // Given 中间插字重排(08:530)或杂串或未满四位 When 净化 Then 不插手,交保存校验显式报错而非静默重排
+  assert.equal(normalizeHHMMInput('08:530'), '08:530')
+  assert.equal(normalizeHHMMInput('2026-03-15 14:00'), '2026-03-15 14:00')
+  assert.equal(normalizeHHMMInput('083'), '083')
+  assert.equal(normalizeHHMMInput('8:3'), '8:3')
+  assert.equal(normalizeHHMMInput('14:00'), '14:00')
+  assert.equal(normalizeHHMMInput(''), '')
+  assert.equal(normalizeHHMMInput(null), '')
+  assert.equal(normalizeHHMMInput(undefined), '')
+})
+
+test('normalizeHHMMInput 全角数字折半角后走同规则', () => {
+  // Given IME 全角数字输入 When 净化 Then 先折半角再走成型规则,输出恒为半角
+  assert.equal(normalizeHHMMInput('１４：００'), '14:00')
+  assert.equal(normalizeHHMMInput('１４：００：００'), '14:00')
+  assert.equal(normalizeHHMMInput('１４００'), '14:00')
+  assert.equal(normalizeHHMMInput('０８３'), '083')
 })
 
 test('validatePricingRules 接受 from===to 单点与单日', () => {
