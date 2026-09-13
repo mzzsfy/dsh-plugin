@@ -13,8 +13,8 @@ description: 若水多模型协作工作流。非平凡编码需求（多步骤/
 
 1. 判定是否进入工作流；
 2. 调用 rs_workflow_config 工具读取工作位（slot）与工作流默认配置；
-3. 用 workflow 工具启动编排脚本；
-4. 向用户汇报结果。
+3. 用 rs_workflow_report 工具登记本次运行（取得 runId），再用 workflow 工具启动编排脚本；
+4. 向用户汇报结果，并用 rs_workflow_report 落定本次运行（看板可见）。
 
 执行、审批、规划全部由编排内的子代理完成。你不在工作流运行期间并行改动代码。
 
@@ -30,16 +30,19 @@ description: 若水多模型协作工作流。非平凡编码需求（多步骤/
 1. **读工作流配置**：调用 `rs_workflow_config` 工具，取回 `{ slots, workflow, budgets, source }`。它反映 GUI 设置页 rs-workflow 段的当前配置（3 基础+13 细分工作位模型绑定、默认模板、任务上限、预算）。工具不可用或 `source=fallback`（设置服务不可用）时，回退读本技能目录下的 `slots.json5`：JSON5 解析后**取其 `slots` 属性**作为下面的 `slots`（空字符串 = 未配置）；该后备文件只含 slots，此时 `defaultTemplate`/`limits`/`budgets` 一并省略，由引擎缺省值兜底。
 2. **勘察仓库（可选）**：把与需求相关的要点（目录结构、相关文件、构建/测试命令）写进 `contextNotes`，不超过 30 行；已经熟悉仓库可传空字符串。
 3. **读引擎脚本**：读本技能 Base directory 下 `references/engine.js` 的**全文**，作为 workflow 的 `script` 参数原样传入——不要改写、不要截断、不要"优化"。
-4. **调用 workflow 工具**，三个参数：
+4. **登记运行**：调用 `rs_workflow_report` 工具 `{ action: "start", request: <用户需求原话> }`，取回 `runId`。工具不可用时跳过本步与第 7 步，不影响工作流本身。
+5. **调用 workflow 工具**，三个参数：
    - `meta`：`{ name: "rs-workflow", description: "<一句话需求>", phases: [{title: "分诊与规划"}, {title: "执行与审批"}, {title: "升级重规划"}, {title: "汇总"}] }`
    - `script`：engine.js 全文
-   - `args`：`{ request: <用户需求原话>, contextNotes: <第2步要点或空串>, slots: <第1步 slots，16 键>, lockedTemplate: <见下>, defaultTemplate: <见下>, limits: <见下>, budgets: <见下>, prefix: <见下> }`
+   - `args`：`{ request: <用户需求原话>, contextNotes: <第2步要点或空串>, slots: <第1步 slots，16 键>, lockedTemplate: <见下>, defaultTemplate: <见下>, limits: <见下>, budgets: <见下>, prefix: <见下>, ui: { runId: <第4步 runId> } }`
      - `lockedTemplate`：仅用户点名了模板 → 传点名的；未点名省略，由引擎分诊定模板。
      - `defaultTemplate`：第 1 步 `workflow.defaultTemplate` 原值（`auto` 也照传，引擎自行兜底 multi-plan）。
      - `limits`：第 1 步 `workflow.maxTasks` 存在时传 `limits: { maxTasks: <值> }`。
      - `budgets`：第 1 步 `budgets` 原样透传（审批/重问预算，字段见 §6）。
+     - `ui.runId`：第 4 步的 runId；引擎据此在每个子代理提示里附一条可选的看板软上报说明（子代理节点完成时向看板上报，失败即弃不重试）。
      - 断点续跑（见 §4）：`prefix: <上轮已完成任务数组>`，元素取上轮返回 `tasks[]` 中 `status="done"` 且 `type="task"` 的 `{ id, description, output: <summary>, changedFiles }`（引擎返回的 tasks 字段名是 `summary`，映射为 prefix 元素的 `output`）；仅 lite / plan-final / step-review 生效，multi-plan 会忽略并记日志。
-5. 工作流在前台运行到结束才返回，等待期间不做其他改动。
+6. 工作流在前台运行到结束才返回，等待期间不做其他改动。
+7. **落定运行**：调用 `rs_workflow_report` 工具 `{ action: "finish", runId, ok: <返回 ok 值>, summary: <一句话结论>, result: <workflow 返回对象原样> }`；blocked 时附 `ok: false` 与 `blocked` 对象。上报失败不重试、不阻塞汇报。
 
 ## 3. 汇报（工作流返回后，必做）
 
@@ -51,7 +54,7 @@ description: 若水多模型协作工作流。非平凡编码需求（多步骤/
 - 变更文件清单；
 - 升级重规划次数、换模型重做情况（slot 配了候选数组/rotation 时）、本次是否以 prefix 续跑及续跑任务数；blocked 时原因与建议（锁定更重的模板重跑 / 缩小需求范围 / 补充信息）。
 
-汇报前运行一次仓库验证（构建/测试）确认工作区真实状态，再交用户验收。
+汇报前运行一次仓库验证（构建/测试）确认工作区真实状态，再交用户验收。汇报时可提示用户：GUI 设置页「若水工作流」分区可查看本次运行的历史与任务/审批明细。
 
 ## 4. 故障处置
 

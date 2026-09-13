@@ -23,6 +23,7 @@
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { presetDest, removePreset, syncPreset } from "./preset-sync.mjs";
+import { reportStore } from "./report-store.mjs";
 
 const name = "rs-workflow";
 
@@ -104,7 +105,7 @@ const SETTINGS_SCHEMA = z.object({
 
 /** 组合行 config schema（在 settings 之上多一个行角色字段）。 */
 const Config = z.object({
-	role: z.union(["settings", "preset-sync", "tool"]).required().description("行角色：settings = 注册 GUI 设置命名空间（host 层常驻）；preset-sync = 同步释放 agent preset 到用户预设根（host 层常驻）；tool = 注册 rs_workflow_config 模型工具（预设层）"),
+	role: z.union(["settings", "preset-sync", "tool", "report", "board"]).required().description("行角色：settings = 注册 GUI 设置命名空间（host 层常驻）；preset-sync = 同步释放 agent preset 到用户预设根（host 层常驻）；tool = 注册 rs_workflow_config 模型工具（预设层）；report = 注册 rs_workflow_report 运行上报工具（预设层）；board = 注册工作流看板 web 路由（host 层常驻）"),
 	slots: buildSlots(),
 	workflow: buildWorkflow(),
 	budgets: buildBudgets(),
@@ -113,6 +114,146 @@ const Config = z.object({
 /** 从（已解析的）行 config 里摘出 settings base 层。 */
 function baseOf(config) {
 	return { slots: config.slots, workflow: config.workflow, budgets: config.budgets };
+}
+
+// ── 看板 web 路由(host 层 board 角色) ────────────────────────────────────────
+// 读路由放行 GET(无 CSRF 面);写路由 POST 加跨源与 JSON 守卫(dsh-usage-panel 同构)。
+// 路由只做薄分发,数据权威态在 report-store 单例(与 report 工具共享)。
+
+function sendJson(res, status, payload) {
+	res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+	res.end(JSON.stringify(payload));
+}
+
+function rejectCrossOrigin(req, res) {
+	const origin = req.headers ? req.headers.origin : undefined;
+	if (!origin) return false;
+	let sameOrigin = false;
+	try {
+		sameOrigin = new URL(origin).host === req.headers.host;
+	} catch {
+		sameOrigin = false;
+	}
+	if (sameOrigin) return false;
+	sendJson(res, 403, { error: "跨源请求被拒绝" });
+	return true;
+}
+
+function rejectNonJson(req, res) {
+	const contentType = req.headers ? String(req.headers["content-type"] || "") : "";
+	if (contentType.indexOf("application/json") >= 0) return false;
+	sendJson(res, 400, { error: "content-type 须为 application/json" });
+	return true;
+}
+
+const guardedRoute = (handler) => async (req, res) => {
+	try {
+		if (req.method !== "GET" && req.method !== "POST") {
+			sendJson(res, 405, { error: "method not allowed" });
+			return;
+		}
+		if (req.method === "POST") {
+			if (rejectCrossOrigin(req, res)) return;
+			if (rejectNonJson(req, res)) return;
+		}
+		await handler(req, res);
+	} catch (error) {
+		sendJson(res, 400, { error: error && error.message ? error.message : String(error) });
+	}
+};
+
+// POST-only 变体供无读面的写路由使用:GET 放行会让跨站 <img src> 无守卫驱动改写
+guardedRoute.post = (handler) => async (req, res) => {
+	if (req.method !== "POST") {
+		sendJson(res, 405, { error: "method not allowed" });
+		return;
+	}
+	return guardedRoute(handler)(req, res);
+};
+
+function registerBoardRoutes(ctx) {
+	const store = reportStore();
+	ctx.effect(
+		() =>
+			ctx.webServer.register({
+				kind: "exact",
+				path: "/api/rs-workflow/runs",
+				handler: guardedRoute(async (req, res) => {
+					sendJson(res, 200, { runs: await store.list() });
+				}),
+			}),
+		"rs-workflow runs route",
+	);
+	ctx.effect(
+		() =>
+			ctx.webServer.register({
+				kind: "exact",
+				path: "/api/rs-workflow/run",
+				handler: guardedRoute(async (req, res) => {
+					const url = new URL(req.url, "http://localhost");
+					const runId = url.searchParams.get("id") || "";
+					const run = await store.get(runId);
+					if (!run) throw new Error("运行记录不存在:" + runId);
+					sendJson(res, 200, run);
+				}),
+			}),
+		"rs-workflow run detail route",
+	);
+	ctx.effect(
+		() =>
+			ctx.webServer.register({
+				kind: "exact",
+				path: "/api/rs-workflow/remove",
+				handler: guardedRoute.post(async (req, res) => {
+					const body = JSON.parse(await readJsonBody(req));
+					const runId = body && typeof body.runId === "string" ? body.runId : "";
+					await store.remove(runId);
+					sendJson(res, 200, { ok: true });
+				}),
+			}),
+		"rs-workflow remove route",
+	);
+}
+
+function readJsonBody(req) {
+	return new Promise((resolve, reject) => {
+		let size = 0;
+		const chunks = [];
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > BODY_MAX_BYTES) {
+				reject(new Error("请求体超过上限"));
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+		req.on("error", reject);
+	});
+}
+
+const BODY_MAX_BYTES = 256 * 1024;
+
+// ── 运行上报工具(预设层 report 角色) ────────────────────────────────────────
+// 实时通道 = leader 权威写(start/finish)+ 子代理节点级软上报(node, 失败即弃不影响编排)。
+// 工作区解析 best-effort:会话 id 反查 cwd(新宿主)→ 会话默认目录;解析失败不硬失败。
+
+const REPORT_ACTIONS = ["start", "node", "finish", "list", "get"];
+
+async function resolveWorkspace(tctx, exec) {
+	const sessionId = exec && exec.agent ? String(exec.agent.id || "") : "";
+	try {
+		const sessionQuery = tctx.get("sessionQuery");
+		if (sessionId && sessionQuery && typeof sessionQuery.listSessions === "function") {
+			const records = await sessionQuery.listSessions();
+			const hit = (records || []).find((item) => item && item.header && String(item.header.id) === sessionId);
+			if (hit && hit.header && typeof hit.header.cwd === "string" && hit.header.cwd !== "") return hit.header.cwd;
+		}
+	} catch {
+		// 会话服务缺失(旧宿主)/查询失败:回退会话默认目录
+	}
+	return process.cwd();
 }
 
 function apply(ctx, config) {
@@ -138,9 +279,18 @@ function apply(ctx, config) {
 		});
 		return;
 	}
-	// tools 以嵌套 inject 声明:服务缺失时仅 tool 角色保持未激活(干净禁用),
-	// settings/preset-sync 角色不再被模块级 inject 连坐(非 dsh-base 组合下旧形态
+	if (cfg.role === "board") {
+		registerBoardRoutes(ctx);
+		return;
+	}
+	// tools 以嵌套 inject 声明:服务缺失时仅 tool/report 角色保持未激活(干净禁用),
+	// settings/preset-sync/board 角色不再被模块级 inject 连坐(非 dsh-base 组合下旧形态
 	// 会因启动审计整树 fatal)
+	if (cfg.role === "report") {
+		registerReportTool(ctx);
+		return;
+	}
+	if (cfg.role !== "tool") return;
 	ctx.inject(["tools"], (tctx) => {
 		tctx.tools.register(defineTool({
 		name: "rs_workflow_config",
@@ -209,6 +359,77 @@ function apply(ctx, config) {
 		presentCall: () => ({ card: "generic", title: "读取若水工作流配置", kind: "other", rawInput: {} }),
 	}));
 	});
+
 }
 
-export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, TEMPLATES, apply, name, presetDest, removePreset, syncPreset };
+/** rs_workflow_report:leader 权威写(start/finish)与子代理节点软上报(node)共用通道。 */
+function registerReportTool(ctx) {
+	const store = reportStore();
+	ctx.inject(["tools"], (tctx) => {
+		tctx.tools.register(defineTool({
+			name: "rs_workflow_report",
+			description: [
+				"若水工作流运行看板的上报通道：把编排运行的状态写入工作流看板（GUI 设置页「若水工作流」分区可见）。",
+				"启动 workflow 编排前调用 {action:\"start\", request} 记录本次运行并取得 runId；",
+				"编排结束后调用 {action:\"finish\", runId, ok, summary, result}（result 原样传 workflow 工具的返回对象）；",
+				"子代理可在节点完成时调用 {action:\"node\", runId, nodeId, status, summary} 做节点级软上报（可选，失败即跳过，禁止重试）；",
+				"list 列出本工作区全部运行，get 按 runId 取单次运行详情。",
+			].join(""),
+			parameters: {
+				action: { type: "string", required: true, enum: REPORT_ACTIONS, description: "start=登记运行并取得 runId;node=节点级软上报;finish=落定运行结果;list=列出运行;get=取运行详情" },
+				runId: { type: "string", description: "运行标识（start 可省略自动生成;其余 action 必传）" },
+				request: { type: "string", description: "start:本次编排的用户需求原文" },
+				nodeId: { type: "string", description: "node:节点标识（如 t1/p1/xr1）" },
+				status: { type: "string", description: "node:节点状态（running/done/failed/rejected 等,自由文本）" },
+				summary: { type: "string", description: "node/finish:一句话进展或结论" },
+				ok: { type: "boolean", description: "finish:true=正常完成,false=blocked" },
+				blocked: { type: "object", additionalProperties: true, description: "finish:blocked 时的 {nodeId,reason} 对象" },
+				result: { type: "object", additionalProperties: true, description: "finish:workflow 工具的返回对象原样" },
+			},
+			output: {
+				schema: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						ok: { type: "boolean", required: true },
+						runId: { type: "string" },
+						runs: { type: "array", items: { type: "object", additionalProperties: true } },
+						run: { type: "object", additionalProperties: true },
+						error: { type: "string" },
+					},
+				},
+				render: (_args, value) => [{
+					type: "text",
+					text: JSON.stringify(value.run !== undefined ? { ok: value.ok, runId: value.run.runId, status: value.run.status }
+						: value.runs !== undefined ? { ok: value.ok, runs: value.runs.map((run) => ({ runId: run.runId, status: run.status, request: run.request, startedAt: run.startedAt })) }
+						: value, null, 2),
+				}],
+			},
+			async execute(args, exec) {
+				const workspace = await resolveWorkspace(tctx, exec);
+				if (args.action === "start") {
+					const run = await store.start({ runId: args.runId, workspace, request: args.request, templateId: "" });
+					return { ok: true, runId: run.runId, run };
+				}
+				if (args.action === "node") {
+					const run = await store.appendNode({ runId: args.runId, nodeId: args.nodeId, status: args.status, summary: args.summary });
+					return { ok: true, runId: run.runId, run };
+				}
+				if (args.action === "finish") {
+					const run = await store.finish({ runId: args.runId, ok: args.ok === true, result: args.result, summary: args.summary, blocked: args.blocked });
+					return { ok: true, runId: run.runId, run };
+				}
+				if (args.action === "list") {
+					const runs = (await store.list()).filter((run) => run.workspace === workspace);
+					return { ok: true, runs };
+				}
+				const run = await store.get(args.runId || "");
+				if (!run) return { ok: false, error: "运行记录不存在:" + (args.runId || "") };
+				return { ok: true, run };
+			},
+			presentCall: () => ({ card: "generic", title: "上报工作流运行状态", kind: "other", rawInput: {} }),
+		}));
+	});
+}
+
+export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, TEMPLATES, apply, name, presetDest, removePreset, reportStore, syncPreset };

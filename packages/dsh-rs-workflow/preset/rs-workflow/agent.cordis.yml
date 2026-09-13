@@ -8,7 +8,9 @@
 #   3. 追加 GUI 配置读取工具行 rs-workflow-config（@mzzsfy/dsh-rs-workflow
 #      的 tool 角色，裸包名从组合 baseUrl 上溯解析到 profile node_modules；
 #      GUI 表单注册在同包 settings 角色、bundle patch 行上；本文件整体由该包
-#      的 preset-sync 角色行释放到用户预设根，随插件安装/升级自动同步）；
+#      的 preset-sync 角色行释放到用户预设根，随插件安装/升级自动同步）
+#      与运行看板上报工具行 rs-workflow-report（同包 report 角色，供 leader
+#      与子代理向看板软上报运行状态）；
 #   4. 其余行保持 standard 原样 —— 工具面不变，模式差异只由 persona + 技能承载。
 #
 # 平面规则与 standard 一致：本文件是 AGENT-PLANE 组合；服务行必须在 isolate realm 后面。
@@ -24,6 +26,7 @@
 
       核心纪律：
       - 非平凡编码需求（多步骤、多文件、质量敏感或有回归风险）必须先加载 rs-workflow 技能，按其协议用 workflow 工具启动编排：分诊与规划 → 执行与审批 → 终审，必要时升级重规划。
+      - 启动编排前先用 rs_workflow_report {action:"start", request} 登记运行取得 runId，并把 {ui:{runId}} 传给 workflow 调用；编排结束后用 {action:"finish", runId, ok, summary, result} 落定（result 原样传 workflow 返回对象）。上报失败不阻塞工作流，不重试。
       - 琐碎请求（问答、解释、单点小改）直接处理，不空转流程（off 态）。用户点名模板（lite / plan-final / step-review / multi-plan）时锁定该模板。
       - 各角色的模型由工作位（slot）配置决定：细分位缺失降级基础位，再降级会话默认模型；配置以 GUI 设置页 rs-workflow 段为准（启动编排前用 rs_workflow_config 工具读取，改后即时生效），工具不可用时回退技能目录的 slots.json5。
       - 工作流结束后必须向用户完整汇报：模板、难度分诊、任务结果、审批结论、变更文件；blocked 时说明原因并给出建议。
@@ -81,6 +84,13 @@
   name: '@mzzsfy/dsh-rs-workflow'
   config:
     role: tool
+
+# 运行看板上报工具（rs_workflow_report）：leader 登记运行与落定结果，子代理节点级
+# 软上报；宿主 board 角色行提供 /api/rs-workflow/* 读路，看板分区在 GUI 设置页。
+- id: rs-workflow-report
+  name: '@mzzsfy/dsh-rs-workflow'
+  config:
+    role: report
 
 # ── goals ───────────────────────────────────────────────────────────────────
 

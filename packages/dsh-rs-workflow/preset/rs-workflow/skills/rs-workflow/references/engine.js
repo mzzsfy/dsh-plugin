@@ -167,6 +167,11 @@ const REVIEW_REPORT_CONTRACT = '裁决输出契约: 审查完成后在回复末�
 const PLAN_FIELD_REQUIREMENT = '计划 XML 之外的论述给简明实现计划(目标/方案要点/验证方式), 关键文件用精确路径列出(比论述抗截断)。'
 const REPLAN_HEAD = '此前工作流多次未通过审批或执行失败，需要升级重规划。'
 
+// ── 看板软上报: args.ui.runId 在场时给子代理一条可选上报提示(失败即弃, 不重试) ──
+const UI_NOTE = (node) => (!A.ui || !A.ui.runId ? '' : '看板软上报(可选, 不影响结算): 本节点 id=' + node.id
+  + '; 完成或失败后可调用一次 rs_workflow_report 工具, 参数 {"action":"node","runId":' + JSON.stringify(String(A.ui.runId))
+  + ',"nodeId":' + JSON.stringify(node.id) + ',"status":"done 或 failed","summary":"一句话结论"}; 工具不可用或调用失败直接跳过, 禁止重试。')
+
 // ── 工作位候选链: 细分位 → 同域基础位 → 会话默认模型 ─────────────────────────
 // 值支持 string('provider/model'|'model') | {provider,model} | {rotation:[...]} | array
 function parseBinding(b) {
@@ -847,6 +852,7 @@ function buildExecutorPrompt(node, nudge) {
   sections.push('[要求] ' + (TASK_TONE[templateId] || TASK_TONE_DEFAULT))
   if (parallelDescs.length) sections.push(PARALLEL_NOTE)
   sections.push(EXEC_REPORT_CONTRACT)
+  sections.push(UI_NOTE(node))
   if (nudge) sections.push(nudge)
   return sections.filter(Boolean).join('\n\n')
 }
@@ -896,6 +902,7 @@ function buildReviewPrompt(node) {
   }
   if (node.fixNote) sections.push('【上一轮驳回意见(检查是否已解决)】\n' + node.fixNote + '\n本轮只判定驳回点是否解决与是否引入新问题, 不扩大审查范围。')
   sections.push(REVIEW_REPORT_CONTRACT)
+  sections.push(UI_NOTE(node))
   return sections.filter(Boolean).join('\n\n')
 }
 
