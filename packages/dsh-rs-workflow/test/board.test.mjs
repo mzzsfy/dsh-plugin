@@ -24,7 +24,12 @@ function makeCtx() {
     get() { return undefined },
     effect(fn) { fn() },
     inject(deps, fn) {
-      fn({ settings: { register() {} }, tools: { register(def) { tools.push(def) } } })
+      fn({
+        settings: { register() {} },
+        tools: { register(def) { tools.push(def) } },
+        webServer: { register(route) { routes.set(route.path, route.handler) } },
+        effect(fn) { fn() },
+      })
     },
     webServer: { register(route) { routes.set(route.path, route.handler) } },
   }

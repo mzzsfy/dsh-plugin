@@ -173,46 +173,50 @@ guardedRoute.post = (handler) => async (req, res) => {
 
 function registerBoardRoutes(ctx) {
 	const store = reportStore();
-	ctx.effect(
-		() =>
-			ctx.webServer.register({
-				kind: "exact",
-				path: "/api/rs-workflow/runs",
-				handler: guardedRoute(async (req, res) => {
-					sendJson(res, 200, { runs: await store.list() });
+	// webServer 以嵌套 inject 声明:服务缺失时仅 board 角色保持未激活(干净禁用),
+	// 其余行角色不被模块级 inject 连坐(多角色包的模块级声明会整树 fatal)
+	ctx.inject(["webServer"], (wctx) => {
+		wctx.effect(
+			() =>
+				wctx.webServer.register({
+					kind: "exact",
+					path: "/api/rs-workflow/runs",
+					handler: guardedRoute(async (req, res) => {
+						sendJson(res, 200, { runs: await store.list() });
+					}),
 				}),
-			}),
-		"rs-workflow runs route",
-	);
-	ctx.effect(
-		() =>
-			ctx.webServer.register({
-				kind: "exact",
-				path: "/api/rs-workflow/run",
-				handler: guardedRoute(async (req, res) => {
-					const url = new URL(req.url, "http://localhost");
-					const runId = url.searchParams.get("id") || "";
-					const run = await store.get(runId);
-					if (!run) throw new Error("运行记录不存在:" + runId);
-					sendJson(res, 200, run);
+			"rs-workflow runs route",
+		);
+		wctx.effect(
+			() =>
+				wctx.webServer.register({
+					kind: "exact",
+					path: "/api/rs-workflow/run",
+					handler: guardedRoute(async (req, res) => {
+						const url = new URL(req.url, "http://localhost");
+						const runId = url.searchParams.get("id") || "";
+						const run = await store.get(runId);
+						if (!run) throw new Error("运行记录不存在:" + runId);
+						sendJson(res, 200, run);
+					}),
 				}),
-			}),
-		"rs-workflow run detail route",
-	);
-	ctx.effect(
-		() =>
-			ctx.webServer.register({
-				kind: "exact",
-				path: "/api/rs-workflow/remove",
-				handler: guardedRoute.post(async (req, res) => {
-					const body = JSON.parse(await readJsonBody(req));
-					const runId = body && typeof body.runId === "string" ? body.runId : "";
-					await store.remove(runId);
-					sendJson(res, 200, { ok: true });
+			"rs-workflow run detail route",
+		);
+		wctx.effect(
+			() =>
+				wctx.webServer.register({
+					kind: "exact",
+					path: "/api/rs-workflow/remove",
+					handler: guardedRoute.post(async (req, res) => {
+						const body = JSON.parse(await readJsonBody(req));
+						const runId = body && typeof body.runId === "string" ? body.runId : "";
+						await store.remove(runId);
+						sendJson(res, 200, { ok: true });
+					}),
 				}),
-			}),
-		"rs-workflow remove route",
-	);
+			"rs-workflow remove route",
+		);
+	});
 }
 
 function readJsonBody(req) {
