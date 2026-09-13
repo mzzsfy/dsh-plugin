@@ -1,16 +1,11 @@
 .*/
-# GitHub Actions 工作流入库
 !.github/
 /build/
 dist/
 node_modules/
-/docs/ref
-
-*.http
 .DS_Store
 *.log
 package-lock.json
 
 .worktrees/
 /docs
-/.dsh-versions
