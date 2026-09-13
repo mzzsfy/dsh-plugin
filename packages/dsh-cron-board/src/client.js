@@ -679,7 +679,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { className: 'cb-button cb-button--danger', onClick: onConfirm }, '删除')))
     }
 
-    function JobsTab({ jobs, status, now, reload, wsModel }) {
+    function JobsTab({ jobs, status, now, reload, applyJobPatch, wsModel }) {
       const [formJob, setFormJob] = useState(null)
       const [notice, setNotice] = useState(null)
       const [kindFilter, setKindFilter] = useState('all')
@@ -691,7 +691,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         setTimeout(reload, 300)
       }
       const toggleJob = async (job) => {
-        await request('PATCH', 'jobs/' + job.id, { enabled: !job.enabled })
+        // 乐观翻转:受控开关即时到位;失败回滚并提示,不静默
+        applyJobPatch(job.id, { enabled: !job.enabled })
+        const outcome = await request('PATCH', 'jobs/' + job.id, { enabled: !job.enabled })
+        if (!outcome.ok) {
+          applyJobPatch(job.id, { enabled: job.enabled })
+          setNotice('切换失败:' + outcome.error)
+        }
         reload()
       }
       const deleteJob = async (job) => {
@@ -811,14 +817,20 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { className: 'cb-button cb-button--danger', onClick: () => doApply(true) }, '覆盖导入')))
     }
 
-    function EnvsTab({ envs, reload }) {
+    function EnvsTab({ envs, reload, applyEnvPatch }) {
       const [formRow, setFormRow] = useState(null)
       const [importing, setImporting] = useState(false)
       const [exportText, setExportText] = useState(null)
       const [notice, setNotice] = useState(null)
 
       const toggleEnv = async (row) => {
-        await request('PATCH', 'envs/' + row.id, { enabled: !row.enabled })
+        // 乐观翻转:受控开关即时到位;失败回滚并提示,不静默
+        applyEnvPatch(row.id, { enabled: !row.enabled })
+        const outcome = await request('PATCH', 'envs/' + row.id, { enabled: !row.enabled })
+        if (!outcome.ok) {
+          applyEnvPatch(row.id, { enabled: row.enabled })
+          setNotice('切换失败:' + outcome.error)
+        }
         reload()
       }
       const deleteEnv = async (row) => {
@@ -921,6 +933,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [now, setNow] = useState(Date.now())
       const [reloadFlag, setReloadFlag] = useState(0)
       const reload = useCallback(() => setReloadFlag((value) => value + 1), [])
+      // 乐观更新:受控开关点击即时到位,PATCH 失败由调用方回滚;reload 拉权威态对账
+      const applyJobPatch = useCallback((id, patch) => {
+        setJobs((prev) => prev.map((job) => (job.id === id ? { ...job, ...patch } : job)))
+      }, [])
+      const applyEnvPatch = useCallback((id, patch) => {
+        setEnvs((prev) => prev.map((row) => (row.id === id ? { ...row, ...patch } : row)))
+      }, [])
 
       useEffect(() => {
         if (!active) return undefined
@@ -949,8 +968,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           status ? h('span', { className: 'cb-meta' },
             '运行中 ' + status.scheduler.active + ' · 队列 ' + status.scheduler.queued +
             (status.nextAt ? ' · 下次 ' + relativeTime(status.nextAt, now) : '')) : null),
-        tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload, wsModel }) : null,
-        tab === 'envs' ? h(EnvsTab, { key: 'envs', envs, reload }) : null,
+        tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload, applyJobPatch, wsModel }) : null,
+        tab === 'envs' ? h(EnvsTab, { key: 'envs', envs, reload, applyEnvPatch }) : null,
         tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag }) : null)
     }
 

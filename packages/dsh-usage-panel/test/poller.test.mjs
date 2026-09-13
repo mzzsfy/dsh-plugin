@@ -1,17 +1,16 @@
-// 轮询纯逻辑 BDD:时间驱动调度 / 失败退避 / 档位间隔。无外部依赖,定时器由调用方注入。
+// 轮询纯逻辑 BDD:时间驱动调度 / 失败退避 / 统一查询间隔。无外部依赖,定时器由调用方注入。
 // 历史:round 分频形态(shouldQueryThisRound/longWindowDivisor)已被时间驱动取代——
 // round 仅查询时递增使余额类账号死锁停摆,短窗账号每 tick 必查使用户间隔失效。
+// 档位间隔(短档 10 分钟/长档 1 小时)已被统一间隔取代——通知及时性要求余额类账号
+// 与短窗账号同节奏,两档常量相等后档位机制退化为恒同值死路径,整体移除。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   BACKOFF_CAP_MULTIPLE,
-  SHORT_TIER_INTERVAL_SEC,
-  LONG_TIER_INTERVAL_SEC,
+  POLL_INTERVAL_SEC,
   createBackoff,
-  tierIntervalSec,
   lastQuerySecOf,
   isDue,
-  isShortWindowTier,
   runLimited,
 } from '../src/poller.mjs'
 
@@ -45,11 +44,8 @@ test('场景: 退避期间被跳过,到期放行', () => {
   assert.equal(backoff.isBlocked(600), false)
 })
 
-test('场景: 档位间隔 = 序列快照粒度(短档 10 分钟,长档 1 小时)', () => {
-  assert.equal(SHORT_TIER_INTERVAL_SEC, 10 * 60)
-  assert.equal(LONG_TIER_INTERVAL_SEC, 60 * 60)
-  assert.equal(tierIntervalSec(true), SHORT_TIER_INTERVAL_SEC)
-  assert.equal(tierIntervalSec(false), LONG_TIER_INTERVAL_SEC)
+test('场景: 统一查询间隔 10 分钟,余额类账号与短窗账号同节奏', () => {
+  assert.equal(POLL_INTERVAL_SEC, 10 * 60)
 })
 
 test('场景: 上次尝试查询时刻换算,缺失或非法回 null 视为立即到点', () => {
@@ -65,27 +61,17 @@ test('场景: 时间驱动到点判定', () => {
   assert.equal(isDue({ lastQuerySec: null, nowSec: 1000, intervalSec: 600 }), true, '从未查询立即到点')
   assert.equal(isDue({ lastQuerySec: 500, nowSec: 1099, intervalSec: 600 }), false, '未满间隔')
   assert.equal(isDue({ lastQuerySec: 500, nowSec: 1100, intervalSec: 600 }), true, '恰满间隔到点')
-  assert.equal(isDue({ lastQuerySec: 0, nowSec: LONG_TIER_INTERVAL_SEC, intervalSec: LONG_TIER_INTERVAL_SEC }), true)
+  assert.equal(isDue({ lastQuerySec: 0, nowSec: POLL_INTERVAL_SEC, intervalSec: POLL_INTERVAL_SEC }), true)
 })
 
 test('场景: 退避与到点独立叠加,双过才查(时序推演锁定)', () => {
-  // 短窗账号失败:退避基期 = 档间隔 600;首次失败后 600s 内到点亦被退避压住
-  const backoff = createBackoff({ baseSec: SHORT_TIER_INTERVAL_SEC })
+  // 失败:退避基期 = 统一间隔;首次失败后一个周期内到点亦被退避压住
+  const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
   backoff.onFailure(1000)
   const dueAt = (lastQuerySec, nowSec) =>
-    !backoff.isBlocked(nowSec) && isDue({ lastQuerySec, nowSec, intervalSec: SHORT_TIER_INTERVAL_SEC })
+    !backoff.isBlocked(nowSec) && isDue({ lastQuerySec, nowSec, intervalSec: POLL_INTERVAL_SEC })
   assert.equal(dueAt(400, 1500), false, '退避未过(到 1600 才解),尽管 1000 已到点')
   assert.equal(dueAt(400, 1600), true, '退避与到点双过')
-})
-
-test('场景: 短窗口档判定,从未成功(含最近失败)按短档,失败不塌缩到长档', () => {
-  const readingHasShort = true
-  assert.equal(isShortWindowTier(null, readingHasShort), true, 'last 为空视为短窗口档')
-  assert.equal(isShortWindowTier(null, false), true, 'last 为空即使无短窗口读数也首轮即查')
-  assert.equal(isShortWindowTier({ ok: true, reading: {} }, readingHasShort), true)
-  assert.equal(isShortWindowTier({ ok: true, reading: {} }, false), false, '成功且仅长窗口按长档')
-  assert.equal(isShortWindowTier({ ok: false, reading: null }, readingHasShort), true, '失败不塌缩:含短窗账号保持短档节奏')
-  assert.equal(isShortWindowTier({ ok: false, reading: null }, false), true, '失败的长窗账号也归短档:10 分钟节奏 + 退避压制重试')
 })
 
 test('场景: 受限并发执行——全项被处理,慢任务不阻塞其他 worker', async () => {
