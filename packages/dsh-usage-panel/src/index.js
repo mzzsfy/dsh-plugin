@@ -16,7 +16,7 @@ import {
 } from './parsers.mjs'
 import { readingToSnapshots, appendPoint, buildMonthSequence, newSequenceStore } from './history.mjs'
 import { createHistoryStore } from './historyStore.mjs'
-import { createBackoff, isShortWindowTier, tierIntervalSec, lastQuerySecOf, isDue, runLimited } from './poller.mjs'
+import { createBackoff, lastQuerySecOf, isDue, runLimited, POLL_INTERVAL_SEC } from './poller.mjs'
 import {
   DEFAULT_QUOTA_THRESHOLD_PCT,
   WEBHOOK_TIMEOUT_MS,
@@ -51,7 +51,6 @@ const HISTORY_FILE = join(DATA_DIR, 'history.json')
 const BAK_SUFFIX = '.bak'
 const ACCOUNTS_BROKEN_MESSAGE = '账号配置文件已损坏已备份,已暂停写入以防数据丢失'
 const TICK_SEC = 30
-const SHORT_SUFFIX = '5h'
 
 const NAMESPACE = 'usage-panel'
 
@@ -334,9 +333,8 @@ export function apply(ctx) {
   let accountsBroken = false
   let historyStore = createHistoryStore({ file: HISTORY_FILE })
   let history = newSequenceStore()
-  // 账号级档位退避状态:基期随读数档位翻转重建;调度到点由 last.queriedAt + 档位间隔另行判定
-  const pollState = new Map()
-  // 通知投影(client 轮询展示)与事件序号
+  // 账号级退避状态:每账号失败计数独立,只管退避不管调度;调度到点由 last.queriedAt + 统一间隔另行判定
+  const pollState = new Map()  // 通知投影(client 轮询展示)与事件序号
   const projection = createProjection({})
   let notifySeq = 0
 
@@ -367,37 +365,28 @@ export function apply(ctx) {
     return persistHistory()
   }
 
-  // 账号级退避状态:基期 = 账号档位间隔(读数档位翻转时重建),只管退避不管调度
+  // 账号级退避状态:基期 = 统一查询间隔,每账号失败计数独立,只管退避不管调度
   function pollEntry(account) {
-    const baseSec = tierIntervalSec(hasShortWindow(account))
     const existing = pollState.get(account.id)
-    if (existing && existing.baseSec === baseSec) return existing
-    const state = { baseSec, backoff: createBackoff({ baseSec }) }
-    pollState.set(account.id, state)
-    return state
-  }
-
-  function hasShortWindow(account) {
-    return isShortWindowTier(
-      account.last,
-      account.last !== null && account.last.reading !== null &&
-        readingToSnapshots(account.last.reading).some((snap) => snap.suffix === SHORT_SUFFIX),
-    )
+    if (existing) return existing
+    const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
+    pollState.set(account.id, backoff)
+    return backoff
   }
 
   function runQuery(account) {
     const queriedAt = Date.now()
     return queryAccount(account).then((result) => {
-      const state = pollEntry(account)
+      const backoff = pollEntry(account)
       if (result.ok) {
-        state.backoff.onSuccess()
+        backoff.onSuccess()
         // 先评估后落盘:阈值穿越事件不因落盘失败丢失;落盘失败仅弃本轮快照
         evaluateAndDispatch(account, queriedAt)
         return recordSnapshots(account, account.last.reading, queriedAt)
           .catch(() => {})
           .then(() => result)
       }
-      state.backoff.onFailure(Math.floor(queriedAt / 1000))
+      backoff.onFailure(Math.floor(queriedAt / 1000))
       return result
     })
   }
@@ -538,7 +527,7 @@ export function apply(ctx) {
           const account = current.accounts.find((item) => item.id === id)
           requireOk(account !== undefined, '账号不存在: ' + id)
           // 面板打开触发的自动查询受退避约束,避免绕过退避轰炸上游;手动刷新不受限
-          if (auto && pollEntry(account).backoff.isBlocked(Math.floor(Date.now() / 1000))) {
+          if (auto && pollEntry(account).isBlocked(Math.floor(Date.now() / 1000))) {
             sendJson(res, 200, { ok: false, skipped: true, account: redactAccount(account) })
             return
           }
@@ -730,7 +719,7 @@ export function apply(ctx) {
   )
 
   // 定期轮询:固定短 tick,时间驱动调度——上次尝试查询时刻(account.last.queriedAt,
-  // 成功失败均记、随配置持久化)距今超过账号档位间隔即到点;退避独立叠加,二者皆过才查。
+  // 成功失败均记、随配置持久化)距今超过统一查询间隔即到点;退避独立叠加,二者皆过才查。
   // 旧 round 分频形态已废:round 仅查询时递增使余额类账号死锁停摆,短窗账号每 tick 必查
   // 使间隔设置失效。
   // timer 软依赖经嵌套 inject 等待:服务激活才武装轮询,缺失则自动轮询停用,
@@ -748,11 +737,11 @@ export function apply(ctx) {
       if (!current) return
       const nowSec = Math.floor(Date.now() / 1000)
       const due = current.accounts.filter((account) => {
-        if (pollEntry(account).backoff.isBlocked(nowSec)) return false
+        if (pollEntry(account).isBlocked(nowSec)) return false
         return isDue({
           lastQuerySec: lastQuerySecOf(account.last),
           nowSec,
-          intervalSec: tierIntervalSec(hasShortWindow(account)),
+          intervalSec: POLL_INTERVAL_SEC,
         })
       })
       if (due.length === 0) return
