@@ -58,6 +58,15 @@ window.__ModuleLoader__.load({
 .rsww-item{font-size:12px;line-height:1.5;display:flex;gap:6px;align-items:baseline}
 .rsww-id{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px;color:var(--dsw-alias-text-secondary,#9a9aa6);flex:none}
 .rsww-error{font-size:12px;color:#e5484d}
+.rsww-pc{border:.5px solid var(--dsw-alias-border-l4,#3c3c46);border-radius:10px;background:var(--dsw-alias-bg-l4,#1c1c24);padding:0;display:flex;flex-direction:column;list-style:none}
+.rsww-pc__head{display:flex;align-items:center;gap:10px;width:100%;border:none;background:transparent;color:inherit;font:inherit;text-align:left;padding:12px 14px;cursor:pointer}
+.rsww-pc__title{font-size:13px;font-weight:600;flex:none}
+.rsww-pc__hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#9a9aa6);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rsww-pc__chevron{flex:none;color:var(--dsw-alias-label-tertiary,#9a9aa6)}
+.rsww-pc__body{padding:4px 14px 12px;border-top:1px solid var(--dsw-alias-border-l4,#3c3c46);display:flex;flex-direction:column;gap:8px}
+.rsww-pc__row{display:flex;align-items:baseline;gap:10px}
+.rsww-pc__label{font-size:12px;color:var(--dsw-alias-label-tertiary,#9a9aa6);flex:none;width:150px}
+.rsww-pc__value{font-size:12px;font-variant-numeric:tabular-nums}
 `
 
     async function request(path) {
@@ -107,6 +116,60 @@ window.__ModuleLoader__.load({
         React.createElement('input', { type: 'checkbox', checked: props.checked, onChange: props.onChange, 'aria-label': props.ariaLabel }),
         React.createElement('span', { className: 'rsww-switch__track' }, React.createElement('span', { className: 'rsww-switch__thumb' })),
         React.createElement('span', { className: 'rsww-meta' }, props.label))
+    }
+
+    // 设置>插件页卡片:头部可折叠(aria-expanded);展开后经 settings 命名空间
+    // describe 拉 schema,渲染字段概览(编辑走「打开配置文件」,与宿主插件表单契约一致)
+    function RswwPluginCard() {
+      const [open, setOpen] = useState(false)
+      const [meta, setMeta] = useState(null)
+      useEffect(() => {
+        if (!open || meta) return
+        let alive = true
+        fetch('/api/settings/describe', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ type: 'client-request', rpcId: 'rsww-card', method: 'settings/describe', payload: { args: {} } }),
+        }).then((r) => r.json()).then((json) => {
+          const ns = json && json.result && json.result.value
+            ? json.result.value.namespaces.find((n) => n.ns === 'rs-workflow') : null
+          if (alive && ns) setMeta(ns.value)
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [open, meta])
+      return React.createElement('li', { className: 'rsww-pc' },
+        React.createElement('button', {
+          type: 'button', className: 'rsww-pc__head', 'aria-expanded': open,
+          onClick: () => setOpen((prev) => !prev),
+        },
+          React.createElement('span', { className: 'rsww-pc__title' }, '若水工作流'),
+          React.createElement('span', { className: 'rsww-pc__hint' },
+            '工作位模型绑定、默认模板、任务上限与预算;运行历史见左侧「若水工作流」分区'),
+          React.createElement('span', { className: 'rsww-pc__chevron' }, open ? '▾' : '▸')),
+        open ? React.createElement('div', { className: 'rsww-pc__body' },
+          meta ? React.createElement(React.Fragment, null,
+            React.createElement('div', { className: 'rsww-pc__row' },
+              React.createElement('span', { className: 'rsww-pc__label' }, '默认模板'),
+              React.createElement('span', { className: 'rsww-pc__value' },
+                meta.workflow ? meta.workflow.defaultTemplate : '-')),
+            React.createElement('div', { className: 'rsww-pc__row' },
+              React.createElement('span', { className: 'rsww-pc__label' }, '任务上限'),
+              React.createElement('span', { className: 'rsww-pc__value' },
+                meta.workflow && typeof meta.workflow.maxTasks === 'number' ? meta.workflow.maxTasks : '-')),
+            React.createElement('div', { className: 'rsww-pc__row' },
+              React.createElement('span', { className: 'rsww-pc__label' }, '预算(拒/计划拒/重问/追问)'),
+              React.createElement('span', { className: 'rsww-pc__value' },
+                meta.budgets ? [meta.budgets.reviewRejectBeforeEscalate, meta.budgets.planRejectBeforeBlocked,
+                  meta.budgets.emptyOutputRetryLimit, meta.budgets.reportNudgeLimit].join(' / ') : '-')),
+            React.createElement('div', { className: 'rsww-pc__row' },
+              React.createElement('span', { className: 'rsww-pc__label' }, '已配置工作位'),
+              React.createElement('span', { className: 'rsww-pc__value' }, Object.keys(meta.slots || {})
+                .filter((k) => meta.slots[k]).length + ' / 16')),
+
+          ) : React.createElement('span', { className: 'rsww-meta' }, '读取配置中...'),
+          React.createElement('div', { className: 'rsww-pc__row' },
+            React.createElement('span', { className: 'rsww-pc__hint' },
+              '修改配置:设置页右上「打开配置文件」编辑 settings.yaml 的 rs-workflow 段;GUI 表单由宿主按命名空间渲染。'))) : null)
     }
 
     function StatusDot({ status }) {
@@ -267,6 +330,8 @@ window.__ModuleLoader__.load({
                 : null)))))
     }
 
+    // 设置分区看板(id 配对 ns, 宿主 describe 后按命名空间渲染表单) + 插件页卡片
+    // (key 配对 ns;卡片壳语义对齐 cron-board settings.plugin.item)
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -275,6 +340,12 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },
             () => React.createElement(BoardApp),
           ))
+        ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
+          yield ctx.slots.register(
+            { name: 'settings.plugin.item', key: 'rs-workflow', label: '若水工作流' },
+            () => React.createElement(RswwPluginCard),
+          )
+        }), 'rs-workflow settings card')
       },
     }
   },
