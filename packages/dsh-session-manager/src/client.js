@@ -173,6 +173,19 @@ const CSS = [
   '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
   '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55));',
   '  background:light-dark(rgba(15,17,21,.04), rgba(255,255,255,.06)); }',
+  // 插话撤回条:输入框上方单行胶囊队列,与官方队列面板同区(colors 取宿主实测,
+  // dock 区 dsw alias 变量同历史浮层,不可依赖)
+  '.sm-steer { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:0 2px 6px; }',
+  '.sm-steer__label { flex:none; font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:rgba(127,127,127,.9); }',
+  '.sm-steer__row { display:inline-flex; align-items:center; gap:2px; min-width:0; max-width:100%;',
+  '  padding:1px 3px 1px 10px; border-radius:999px; background:rgba(127,127,127,.14); }',
+  '.sm-steer__text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
+  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:rgba(127,127,127,.85); }',
+  '.sm-steer__btn { flex:none; border:0; background:transparent; cursor:pointer; padding:2px 8px;',
+  '  border-radius:999px; font:12px/18px sans-serif; font-weight:600; color:#1677ff; }',
+  '.sm-steer__btn:hover:not(:disabled) { background:rgba(22,119,255,.12); }',
+  '.sm-steer__btn:disabled { cursor:default; color:rgba(127,127,127,.6); }',
+  '.sm-steer__btn:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -1097,6 +1110,79 @@ function HistoryDock({ session, inputActions }) {
   )
 }
 
+// 插话撤回投影:仅用户插话(宿主队列 placement=steering,已发出但未被 step 边界
+// claim 应用);queued 由官方队列面板呈现,context 为注入上下文非用户消息
+function steerRowsOf(queue) {
+  const rows = Array.isArray(queue) ? queue : []
+  return rows.filter((row) => row && row.placement === 'steering')
+}
+
+// 撤回失败文案:queue-item-not-found = 消息已被 step 边界 claim(应用),无法撤回;
+// 其余透传宿主错误消息
+function withdrawFailureText(result) {
+  const error = result && result.error
+  if (error && error.code === 'session/queue-item-not-found') return '插话已被应用,无法撤回'
+  return '撤回失败: ' + ((error && error.message) || '未知错误')
+}
+
+// 撤回动作:先宿主移除(inbox next-step 摘除,未应用即消失),成功才回填草稿,
+// 顺序保证「移除失败绝不覆盖输入框」;actions 注入便于测试与组件解耦
+async function withdrawSteer(row, actions) {
+  let result
+  try {
+    result = await actions.updateQueue(row.id, { kind: 'remove' })
+  } catch (error) {
+    actions.notify('撤回失败: ' + String(error && error.message || error), { kind: 'error' })
+    return false
+  }
+  if (!(result && result.ok)) {
+    actions.notify(withdrawFailureText(result), { kind: 'error' })
+    return false
+  }
+  try {
+    actions.setDraft(row.text)
+  } catch (error) {
+    // 摘除已成功,草稿回填失败(会话切换等竞态)时文本必须可达:通知兜底展示原文
+    actions.notify('草稿回填失败,原文: ' + row.text, { kind: 'error' })
+    return false
+  }
+  actions.notify('已撤回到输入框')
+  return true
+}
+
+// 插话撤回条:输入框上方零占位条目,存在未应用插话时才渲染;
+// 会话面(updateQueue)与草稿动作(inputActions.setDraft)任一缺失即禁用
+function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
+  const queue = useSession((state) => state.queue)
+  const queueMutable = useSession((state) => state.subagent === null || state.subagent.address.mode === 'continuable')
+  const [busy, setBusy] = useState(false)
+  if (session === undefined || inputActions === undefined || updateQueue === undefined) return null
+  if (!queueMutable) return null
+  const rows = steerRowsOf(queue)
+  if (rows.length === 0) return null
+  const withdraw = (row) => {
+    if (busy) return
+    setBusy(true)
+    void withdrawSteer(row, { updateQueue, setDraft: inputActions.setDraft, notify: toast })
+      .finally(() => setBusy(false))
+  }
+  return h('div', { className: 'sm-steer' },
+    h('span', { className: 'sm-steer__label' }, '插话待应用'),
+    rows.map((row) => {
+      const textOnly = row.text !== null
+      return h('div', { key: row.id, className: 'sm-steer__row' },
+        h('span', { className: 'sm-steer__text', title: row.preview }, row.preview),
+        h('button', {
+          className: 'sm-steer__btn',
+          disabled: busy || !textOnly,
+          title: textOnly ? '撤回到输入框重新编辑' : '含附件的插话不支持撤回',
+          onClick: () => withdraw(row),
+        }, '撤回编辑'),
+      )
+    }),
+  )
+}
+
     return {
       inject: ['slots', 'sessions', 'workspaces'],
       apply(ctx) {
@@ -1142,6 +1228,29 @@ function HistoryDock({ session, inputActions }) {
             ))
         } catch (error) {
           console.warn('[session-manager] 历史输入入口未注册(宿主无 conversation.input.dock 插槽)', error)
+        }
+
+        // 插话撤回入口:未应用的插话撤回到输入框重新编辑。RPC 走会话绑定面
+        // binding.session.updateQueue(RemoteResult 不抛错,与官方 conversation 服务
+        // 无耦合);会话面缺失或无 updateQueue(旧宿主)返回空 props,组件不渲染
+        try {
+          ctx.slots.inject('conversation.input.dock', () =>
+            ctx.slots.register(
+              {
+                name: 'conversation.input.dock',
+                id: 'session-manager-steer',
+                order: 25,
+                inject: (sessionId) => {
+                  const binding = sessions.binding(sessionId)
+                  const updateQueue = binding && binding.session && binding.session.updateQueue
+                  if (typeof updateQueue !== 'function') return {}
+                  return { updateQueue: (itemId, action) => binding.session.updateQueue(itemId, action) }
+                },
+              },
+              SteerRecallDock,
+            ))
+        } catch (error) {
+          console.warn('[session-manager] 插话撤回入口未注册(宿主无 conversation.input.dock 插槽)', error)
         }
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')
