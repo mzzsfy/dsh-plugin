@@ -40,12 +40,14 @@ const {
   coerceConditions,
   coercePricingRules,
   costOf,
+  costSlotsOf,
   costTitleText,
   createTranslator,
   daysInRange,
   defaultCondition,
   defaultPricingRule,
   donutSegments,
+  formatCostCompact,
   pointStatsMatches,
   formatCompact,
   formatCost,
@@ -68,6 +70,7 @@ const {
   maxSlotsFor,
   minuteTickLabel,
   modelIoPercentText,
+  moneyViewOf,
   hasTipContent,
   tipModelEntries,
   modelSegmentLabel,
@@ -1267,4 +1270,94 @@ test('removeRulesAt 批量移除组内槽位', () => {
   const rules = [{ model: 'a/1' }, { model: 'b/1' }, { model: 'a/1' }]
   const rest = removeRulesAt(rules, [0, 2])
   assert.deepEqual(rest.map((rule) => rule.model), ['b/1'])
+})
+
+test('groupStats 折叠金额双映射:top 模型费用透传,其余归哨兵并保留明细', () => {
+  // Given 逐槽 costByModel 含 top 与非 top 模型 When 折叠 Then byCostModel 归并哨兵,otherCostByModel 保留非 top 明细
+  const stats = {
+    models: [
+      { model: 'p/m1', tokens: 500 },
+      { model: 'p/m2', tokens: 400 },
+      { model: 'p/m3', tokens: 300 },
+      { model: 'p/m4', tokens: 200 },
+      { model: 'p/m5', tokens: 100 },
+      { model: 'p/m6', tokens: 50 },
+    ],
+    daily: [{
+      day: 'd',
+      total: 110,
+      byModel: { 'p/m1': 50, 'p/m2': 40, 'p/m6': 20 },
+      costByModel: { 'p/m1': 2, 'p/m2': 2, 'p/m6': 0.5 },
+    }],
+  }
+  const grouped = groupStats(stats)
+  assert.deepEqual(grouped.daily[0].byCostModel, { 'p/m1': 2, 'p/m2': 2, [OTHER_MODEL]: 0.5 })
+  assert.deepEqual(grouped.daily[0].otherCostByModel, { 'p/m6': 0.5 })
+})
+
+test('groupStats 无费用槽金额映射为空表', () => {
+  // Given 槽无 costByModel When 折叠 Then byCostModel/otherCostByModel 恒在场为空表
+  const stats = {
+    models: [{ model: 'p/m1', tokens: 500 }],
+    daily: [{ day: 'd', total: 10, byModel: { 'p/m1': 10 } }],
+  }
+  const grouped = groupStats(stats)
+  assert.deepEqual(grouped.daily[0].byCostModel, {})
+  assert.deepEqual(grouped.daily[0].otherCostByModel, {})
+})
+
+test('costSlotsOf 槽投影切金额口径:total/byModel/otherByModel 取费用字段', () => {
+  // Given 折叠后带费用字段的槽 When 投影 Then total=cost、byModel=byCostModel、otherByModel=otherCostByModel,其余字段保留
+  const slots = [
+    { day: 'd1', total: 100, cost: 2.5, byModel: { a: 60, b: 40 }, byCostModel: { a: 1.5, b: 1 }, otherByModel: {}, otherCostByModel: {} },
+    { day: 'd2', total: 10, cost: 0, byModel: { a: 10 }, byCostModel: {}, otherByModel: {}, otherCostByModel: {} },
+  ]
+  const out = costSlotsOf(slots)
+  assert.equal(out[0].total, 2.5)
+  assert.deepEqual(out[0].byModel, { a: 1.5, b: 1 })
+  assert.deepEqual(out[0].otherByModel, {})
+  assert.equal(out[0].day, 'd1')
+  assert.equal(out[1].total, 0)
+  assert.deepEqual(out[1].byModel, {})
+})
+
+test('moneyViewOf 门控:存在正计价槽才可用,关或不可用保持 token 口径', () => {
+  // Given 槽含正计价与零计价 When 开关开 Then 可用且切金额;Given 全零计价/开关关/无槽 When 派生 Then 不可用且不投影
+  const slots = [
+    { day: 'd1', total: 10, cost: 0.5, byModel: { a: 10 }, byCostModel: { a: 0.5 }, otherByModel: {}, otherCostByModel: {} },
+    { day: 'd2', total: 5, cost: 0, byModel: { a: 5 }, byCostModel: {}, otherByModel: {}, otherCostByModel: {} },
+  ]
+  const on = moneyViewOf(slots, true)
+  assert.equal(on.costReady, true)
+  assert.equal(on.money, true)
+  assert.equal(on.chartSlots[0].total, 0.5)
+  const zeroOnly = [slots[1]]
+  const allZero = moneyViewOf(zeroOnly, true)
+  assert.equal(allZero.costReady, false)
+  assert.equal(allZero.money, false)
+  assert.equal(allZero.chartSlots, zeroOnly)
+  assert.equal(allZero.chartSlots[0].total, 5)
+  const off = moneyViewOf(slots, false)
+  assert.equal(off.costReady, true)
+  assert.equal(off.money, false)
+  assert.equal(off.chartSlots, slots)
+  const none = moneyViewOf(null, true)
+  assert.deepEqual(none, { costReady: false, money: false, chartSlots: null })
+})
+
+test('formatCostCompact 金额轴紧凑读数:千以上 k/M 一位小数,分上两位内,分下四位', () => {
+  assert.equal(formatCostCompact(1234567, '¥'), '¥1.2M')
+  assert.equal(formatCostCompact(1234, '¥'), '¥1.2k')
+  assert.equal(formatCostCompact(12.345, '$'), '$12.35')
+  assert.equal(formatCostCompact(0.1, '¥'), '¥0.1')
+  assert.equal(formatCostCompact(0.005, '¥'), '¥0.005')
+  assert.equal(formatCostCompact(0, ''), '0')
+})
+
+test('leftAxisTicks 金额格式化:柱刻度走传入格式化,速度刻度仍紧凑 token', () => {
+  // Given 金额格式化器 When 柱刻度标定 Then 标签走金额格式;Given 速度刻度接管 Then 标签仍 token 紧凑
+  const money = leftAxisTicks([50, 100], 100, [], 0, (value) => `¥${value}`)
+  assert.deepEqual(money.map((tick) => tick.label), ['¥50', '¥100'])
+  const speed = leftAxisTicks([], 100, [5, 10], 10, (value) => `¥${value}`)
+  assert.deepEqual(speed.map((tick) => tick.label), ['5', '10'])
 })
