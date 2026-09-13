@@ -1,19 +1,26 @@
-// ── rs-workflow 若水工作流编排脚本 v2(原始 rs-tui 语义强制对齐) ─────────────
+// ── rs-workflow 若水工作流编排脚本 v3(弱模型友好文本协议) ───────────────────
 // 由主代理经 workflow 工具调用:
 //   script = 本文件全文(原样, 不改写)
-//   args   = { request, contextNotes?, slots?(16键), lockedTemplate?, defaultTemplate?, limits?, budgets?, prefix? }
+//   args   = { request, contextNotes?, slots?(16键), lockedTemplate?, defaultTemplate?, limits?, budgets?, prefix?, report? }
 //     slots 值支持 string|{provider,model}|{rotation:[...]}|array(候选依次故障转移);
 //     budgets 四阈值 clamp [1,10]; defaultTemplate 'auto'/缺省 → multi-plan 兜底;
 //     prefix 为断点续跑种子 [{id, description, output?, changedFiles?}], 仅
-//     lite / plan-final / step-review 生效, multi-plan 忽略并记日志。
+//     lite / plan-final / step-review 生效, multi-plan 忽略并记日志;
+//     report = { runId, url } UI 上报通道(可选), 缺省时子代理提示词不含上报协议。
 // 只用 agent / parallel / phase / log 钩子; 无 fs / network / timer / Node API。
-// 结构化输出全部经 schema 约束; agent 返回 null 视为该次调用失败。
+//
+// 协议要点(对齐原版 rs-tui 弱模型语义, planner-system/task-system/review-verdict 同构):
+//   全部子代理自由文本返回, 不用 schema 硬校验 —— 原版明确动机:
+//   "弱模型对结构化 JSON 参数支持差, 纯文本协议降低产出门槛"。
+//   - 分诊/规划/重规划: 回复末尾输出 <plan> XML, 引擎容错解析(parsePlanXml 同构移植)
+//   - 执行: 回复末尾输出 <rs-task-report> 报告块; 形态不完整不烧失败账, 走补救追问
+//   - 审批: 回复末尾输出 <rs-review-verdict> 裁决块; 裁决词中英归一化(normalizeVerdict 同构)
+//   - 解析失败: 附格式示例重问(教学重问), 预算耗尽才走失败/拒绝路径, 不静默降级
 // 语义要点: 模板四级兜底链(锁定→planner 声明→矩阵→defaultTemplate); 审批
-// fail-closed(审批者不可用视为拒绝+reviewerFault); APPROVED 必须附 evidence
-// (重问预算 emptyOutputRetryLimit); 拒绝计数挂被审对象, plan 型阈值
-// planRejectBeforeBlocked, 其余 reviewRejectBeforeEscalate, 达阈值升级重规划
+// fail-closed(审批者不可用视为拒绝+reviewerFault); 拒绝计数挂被审对象, plan 型
+// 阈值 planRejectBeforeBlocked, 其余 reviewRejectBeforeEscalate, 达阈值升级重规划
 // (ESCALATION_LIMIT 次后 blocked); pr 通过不清零升级账, 交付类通过清零;
-// 调度预算按图规模每轮现算。
+// 调度预算按图规模每轮现算; 蓝图节点 id 带代际后缀, 重规划不与旧图撞 id。
 
 const A = args || {}
 const REQ = String(A.request || '').trim()
@@ -95,15 +102,15 @@ const TASK_TONE = {
   'step-review': '每完成一个任务报告变更与自验结果供审',
   'multi-plan': '子计划内按细化方案执行，子计划完成输出交付清单',
 }
-const TASK_TONE_DEFAULT = '完成后按 schema 返回执行结果'
+const TASK_TONE_DEFAULT = '完成后在回复末尾输出任务报告块'
 
-// 审批契约固定文案: fail-closed 与证据门槛的对外理由
+// 审批契约固定文案: fail-closed 的对外理由
 const REVIEWER_UNAVAILABLE_REASON = '审批者不可用(视为拒绝), 可原样重交'
 const REVIEWER_UNAVAILABLE_PLAN_REASON = '审批者不可用(视为拒绝), 将带此原因重新规划'
-const EVIDENCE_REQUIRED_REASON = '审批缺少验证证据(视为拒绝), 补充证据后可原样重交'
-const EVIDENCE_REASK_NOTE = '\n(审批必须附验证证据: evidence 填实际执行的检查命令与结果要点, 否则视为驳回)'
-const REVIEW_RESEND_NOTE = '\n裁决重申: 审查完成后按 schema 返回裁决, verdict 取 APPROVED 或 REJECTED, reasons 写结论理由。'
-const REPORT_NUDGE_NOTE = '\n【回传补救】上一轮回传缺少有效任务报告(summary 为空白), 无法结算。请基于已有进度继续: 核对工作区实况, 剩余工作完成后按 schema 返回完整结果(status=completed|failed, summary=一句话结果, changedFiles=变更文件列表)。'
+// 教学重问附注(解析失败后附格式示例重发, 原版教学重问闭环同构)
+const PLAN_RESEND_NOTE = '\n【格式重申】上一轮未解析出有效计划。请在回复末尾原样输出 <plan> 根元素包裹的计划 XML, 形如:\n<plan template="step-review">\n  <signals complexity="high" risk="medium" scope="medium"/>\n  <task id="t1">任务描述</task>\n</plan>'
+const VERDICT_RESEND_NOTE = '\n【裁决格式重申】上一轮未解析出有效裁决。请在回复末尾原样输出裁决块:\n<rs-review-verdict verdict="APPROVED">\n  <reason>结论理由</reason>\n</rs-review-verdict>\nverdict 取 APPROVED 或 REJECTED(中文"通过/批准/拒绝/驳回"亦可识别)。'
+const REPORT_NUDGE_NOTE = '\n【回传补救】上一轮回传缺少有效任务报告, 无法结算。请基于已有进度继续: 核对工作区实况, 剩余工作完成后在回复末尾输出报告块:\n<rs-task-report completed="true">\n  <summary>一句话交接摘要(做了什么/验证结果/遗留注意)</summary>\n  <changed-files>变更文件相对路径, 逗号分隔</changed-files>\n</rs-task-report>'
 
 // 范围核查与各审批基准
 const SCOPE_RULE = '范围核查(强制规则): 以 git diff / git status 的实际变更为准; 实际变更命中【非本任务范围的申报文件】清单的, 是其他任务/已完成工作, 不算越界; 除此之外未在申报清单中出现且不在豁免清单中的文件 → verdict=REJECTED 并在 reasons 点名越界文件。'
@@ -155,9 +162,9 @@ const PLANNER_IDENTITY = [
   '- 只规划, 不执行编码, 不修改文件',
 ].join('\n')
 
-const EXEC_REPORT_CONTRACT = '完成后按 schema 返回: status=completed|failed; summary=给后续节点的交接摘要(做了什么/验证结果/遗留注意); changedFiles=你变更文件的相对路径清单。'
-const REVIEW_REPORT_CONTRACT = '按 schema 返回: verdict=APPROVED|REJECTED; severity=可选问题分级(critical/important/minor); reasons=驳回时必须给出具体、可执行的修改意见; summary=审批结论摘要(不确定的点写在这里); evidence=实际执行的检查命令与结果要点(APPROVED 必填, 空证据按驳回处理)。无法裁决时 REJECTED 并在 reasons 中说明疑问。'
-const PLAN_FIELD_REQUIREMENT = 'plan 字段: 简明实现计划(目标/方案要点/验证方式), 关键文件用精确路径列出(比论述抗截断)。'
+const EXEC_REPORT_CONTRACT = '报告输出契约: 完成后在回复末尾原样输出报告块\n<rs-task-report completed="true">\n  <summary>给后续节点的交接摘要(做了什么/验证结果/遗留注意)</summary>\n  <changed-files>变更文件相对路径, 逗号分隔</changed-files>\n</rs-task-report>\n无法完成时 completed 填 "false" 并在 summary 说明原因; 缺少报告块无法结算。'
+const REVIEW_REPORT_CONTRACT = '裁决输出契约: 审查完成后在回复末尾原样输出裁决块\n<rs-review-verdict verdict="APPROVED">\n  <reason>结论理由</reason>\n</rs-review-verdict>\nverdict 取 APPROVED 或 REJECTED(中文"通过/批准/拒绝/驳回"亦可); REJECTED 的 reason 列出具体、可执行的修改意见并引用证据(测试名/命令输出/file:line); 无法裁决时 REJECTED 并在 reason 说明疑问。'
+const PLAN_FIELD_REQUIREMENT = '计划 XML 之外的论述给简明实现计划(目标/方案要点/验证方式), 关键文件用精确路径列出(比论述抗截断)。'
 const REPLAN_HEAD = '此前工作流多次未通过审批或执行失败，需要升级重规划。'
 
 // ── 工作位候选链: 细分位 → 同域基础位 → 会话默认模型 ─────────────────────────
@@ -201,16 +208,17 @@ function slotOpts(slot) {
 }
 
 // 候选故障转移: 从游标位起依次试候选, 成功后游标指向下一候选(被拒重做/重问即换模型)
+// 自由文本协议: 不传 schema, 子代理返回最终文本, 由调用方容错解析
 async function callAgent(holder, candidates, spec) {
   const list = (candidates && candidates.length) ? candidates : [{}]
   const start = (holder.i || 0) % list.length
   for (let k = 0; k < list.length; k++) {
     const idx = (start + k) % list.length
     holder.lastTried = list[idx]
-    const r = await agent(spec.prompt, { label: spec.label, schema: spec.schema, ...(list[idx]) })
-    if (r) {
+    const r = await agent(spec.prompt, { label: spec.label, ...(list[idx]) })
+    if (r !== null && r !== undefined && String(r).trim()) {
       holder.i = (idx + 1) % list.length
-      return r
+      return String(r)
     }
     log(spec.label + ' 候选调用失败, 切换下一候选')
   }
@@ -229,7 +237,6 @@ async function callReplanAgent(holder, candidates, spec) {
   }
   return null
 }
-
 // 失败语境的真实最后尝试候选身份([上次失败模型] 段取值)
 function failedModelOf(holder) {
   const b = holder.lastTried
@@ -259,88 +266,220 @@ function compress(text, limit) {
   return s.length <= limit ? s : s.slice(0, limit - ELLIPSIS.length) + ELLIPSIS
 }
 
-// ── schema(仅用 type/properties/required/items/enum) ────────────────────────
-const TASK_ITEM = {
-  type: 'object',
-  properties: {
-    id: { type: 'string' },
-    description: { type: 'string' },
-    acceptance: { type: 'string' },
-    files: { type: 'array', items: { type: 'string' } },
-    after: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['id', 'description'],
+// ── 文本协议解析层(自由文本 + 容错解析, 原版同构移植) ───────────────────────
+// 动机(原版 planner-system): 弱模型对结构化 JSON 参数支持差, 纯文本协议降低产出门槛
+
+// plan 根元素(含属性与正文, 宽松空白)
+const PLAN_ROOT_PATTERN = /<plan\b([^>]*)>([\s\S]*?)<\/plan\s*>/i
+// signals 元素(自闭合或含正文, 正文不解析)
+const SIGNALS_PATTERN = /<signals\b([^>]*?)\/?>/i
+// task / subplan 条目(文档顺序捕获)
+const PLAN_ITEM_PATTERN = /<(task|subplan)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi
+// 属性键值对(双引号或单引号)
+const ATTR_PATTERN = /([a-zA-Z_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+// 显式 id 字符集(含逗号或空白的 id 会破坏 after 逗号分隔语义)
+const PLAN_ID_TEST = /^[A-Za-z0-9_-]+$/
+
+function parseAttrs(raw) {
+  const attrs = {}
+  for (const m of String(raw || '').matchAll(ATTR_PATTERN)) attrs[m[1].toLowerCase()] = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : '')
+  return attrs
 }
-const TASKS_FIELD = { type: 'array', items: TASK_ITEM }
-const SUBPLAN_ITEM = {
-  type: 'object',
-  properties: {
-    id: { type: 'string' },
-    title: { type: 'string' },
-    description: { type: 'string' },
-    after: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['title', 'description'],
+
+const SIGNAL_ENUMS = { complexity: LEVELS_LMH, risk: LEVELS_LMH, scope: LEVELS_SML }
+
+/**
+ * 解析蓝图 XML 计划文本(原版 parsePlanXml 同构):
+ * - <plan template="..."> 根元素; <signals complexity risk scope/> 缺省降级
+ * - <task id="..." after="..."> / <subplan title="..."> 按文档顺序进 items
+ * - after 语义: 省略=链式前一任务; ""=显式根; 逗号多值=汇合; 禁前向引用(天然无环)
+ * - id 省略自动编号(跳过占用值); 显式 id 查重与字符集校验
+ * - 容错: 宽松空白与属性顺序; 未知标签/属性忽略; 整体失败返回 null(教学重问, 不静默降级)
+ */
+function parsePlanXml(raw) {
+  if (typeof raw !== 'string') return null
+  const root = PLAN_ROOT_PATTERN.exec(raw)
+  if (!root) return null
+  const rootAttrs = parseAttrs(root[1])
+  const templateId = (rootAttrs.template || '').trim()
+  const signals = {}
+  const signalsMatched = SIGNALS_PATTERN.exec(root[2])
+  if (signalsMatched) {
+    const attrs = parseAttrs(signalsMatched[1])
+    for (const key in SIGNAL_ENUMS) {
+      if (attrs[key] === undefined) continue
+      if (SIGNAL_ENUMS[key].indexOf(attrs[key]) < 0) return null
+      signals[key] = attrs[key]
+    }
+  }
+  const items = []
+  for (const item of root[2].matchAll(PLAN_ITEM_PATTERN)) {
+    const tag = item[1].toLowerCase()
+    const body = item[3].trim()
+    const attrs = parseAttrs(item[2])
+    if (tag === 'subplan') {
+      const title = (attrs.title || '').trim()
+      const entry = title && body ? title + ': ' + body : (title || body)
+      if (entry) items.push({ id: (attrs.id || '').trim() || null, description: entry, afterRaw: attrs.after, subplan: true, acceptance: '', files: [] })
+      continue
+    }
+    if (body) {
+      // 可选子元素: 验收判据与申报文件(范围核查基线), 解析后从描述正文剥除
+      const acceptance = childText(item[3], 'acceptance', '')
+      const files = parseFileList(childText(item[3], 'files', ''))
+      const desc = item[3]
+        .replace(/<acceptance\b[^>]*>[\s\S]*?<\/acceptance\s*>/gi, ' ')
+        .replace(/<files\b[^>]*>[\s\S]*?<\/files\s*>/gi, ' ')
+        .trim()
+      if (desc) items.push({ id: (attrs.id || '').trim() || null, description: desc, afterRaw: attrs.after, subplan: false, acceptance: acceptance, files: files })
+    }
+  }
+  if (!items.length) return null
+  const usedIds = {}
+  for (const item of items) {
+    if (item.id === null) continue
+    if (!PLAN_ID_TEST.test(item.id)) return null
+    if (usedIds[item.id]) return null
+    usedIds[item.id] = true
+  }
+  const drafts = items.map(function (item) {
+    const base = { id: item.id, description: item.description, afterRaw: item.afterRaw, subplan: item.subplan, acceptance: item.acceptance || '', files: item.files || [] }
+    if (item.id !== null) return base
+    let seq = 0
+    let id
+    do { seq++; id = 't' + seq } while (usedIds[id])
+    usedIds[id] = true
+    base.id = id
+    return base
+  })
+  const idToIndex = {}
+  drafts.forEach(function (t, i) { idToIndex[t.id] = i })
+  const resolved = []
+  for (let i = 0; i < drafts.length; i++) {
+    const task = drafts[i]
+    let after
+    if (task.afterRaw === undefined) {
+      after = i === 0 ? [] : [drafts[i - 1].id]
+    } else if (task.afterRaw.trim() === '') {
+      after = []
+    } else {
+      after = task.afterRaw.split(',').map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
+      if (!after.length) return null
+      for (const ref of after) if (idToIndex[ref] === undefined || idToIndex[ref] >= i) return null
+    }
+    resolved.push({ id: task.id, description: task.description, after: after, subplan: task.subplan, acceptance: task.acceptance, files: task.files })
+  }
+  return { templateId: templateId, items: resolved, signals: signals }
 }
-const PLAN_SCHEMA = {
-  type: 'object',
-  properties: {
-    templateId: { type: 'string' },
-    complexity: { type: 'string', enum: LEVELS_LMH },
-    risk: { type: 'string', enum: LEVELS_LMH },
-    scope: { type: 'string', enum: LEVELS_SML },
-    reasoning: { type: 'string' },
-    plan: { type: 'string' },
-    tasks: TASKS_FIELD,
-    subplans: { type: 'array', items: SUBPLAN_ITEM },
-  },
-  required: ['plan', 'tasks'],
+
+// 从回复中取末一个闭合块(模型可能复述示例, 取末次出现 = 其产出)
+function lastBlock(text, tag) {
+  const re = new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?</' + tag + '\\s*>', 'gi')
+  let found = null
+  let m
+  while ((m = re.exec(String(text || ''))) !== null) found = m
+  return found
 }
-const EXEC_SCHEMA = {
-  type: 'object',
-  properties: {
-    status: { type: 'string', enum: ['completed', 'failed'] },
-    summary: { type: 'string' },
-    changedFiles: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['status', 'summary'],
+
+// 布尔属性归一: true/yes/1 → true; false/no/0 → false; 其余 null(不猜)
+function parseBoolAttr(raw) {
+  const v = String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase()
+  if (v === 'true' || v === 'yes' || v === '1') return true
+  if (v === 'false' || v === 'no' || v === '0') return false
+  return null
 }
-const REVIEW_SCHEMA = {
-  type: 'object',
-  properties: {
-    verdict: { type: 'string', enum: ['APPROVED', 'REJECTED'] },
-    severity: { type: 'string', enum: ['critical', 'important', 'minor'] },
-    reasons: { type: 'array', items: { type: 'string' } },
-    summary: { type: 'string' },
-    evidence: { type: 'string' },
-  },
-  required: ['verdict', 'summary', 'evidence'],
+
+// 块内子元素文本(缺失返回缺省值)
+function childText(blockBody, tag, dflt) {
+  const m = new RegExp('<' + tag + '\\b[^>]*>([\\s\\S]*?)</' + tag + '\\s*>', 'i').exec(blockBody)
+  return m ? m[1].trim() : dflt
 }
-const REPLAN_SCHEMA = {
-  type: 'object',
-  properties: {
-    analysis: { type: 'string' },
-    tasks: TASKS_FIELD,
-  },
-  required: ['tasks'],
+
+// 变更文件清单归一: 逗号/换行/分号分隔 → 去空去重
+function parseFileList(raw) {
+  const out = []
+  for (const part of String(raw || '').split(/[,;\n]/)) {
+    const f = part.trim()
+    if (f && out.indexOf(f) < 0) out.push(f)
+  }
+  return out
 }
-const PLAN_REPLAN_SCHEMA = {
-  type: 'object',
-  properties: {
-    analysis: { type: 'string' },
-    plan: { type: 'string' },
-    tasks: TASKS_FIELD,
-    subplans: { type: 'array', items: SUBPLAN_ITEM },
-  },
-  required: ['plan', 'tasks'],
+
+/**
+ * 执行报告解析(原版 rs_task_report 防御性归一化同构):
+ * 返回 { complete, failed, summary, changedFiles }。
+ * complete=false 表示形态不完整(缺块/缺 completed) —— 漏参不烧失败账, 走补救追问。
+ */
+function parseTaskReport(text) {
+  const m = lastBlock(text, 'rs-task-report')
+  if (!m) return { complete: false }
+  const body = m[0]
+  const openTag = /<rs-task-report\b([^>]*)>/i.exec(body)
+  const attrs = parseAttrs(openTag ? openTag[1] : '')
+  const completed = parseBoolAttr(attrs.completed)
+  if (completed === null) return { complete: false }
+  let summary = childText(body, 'summary', '')
+  if (!summary && attrs.summary !== undefined) summary = String(attrs.summary).trim()
+  const filesRaw = childText(body, 'changed-files', childText(body, 'changedfiles', ''))
+  let changedFiles = parseFileList(filesRaw)
+  if (!changedFiles.length && attrs['changed-files'] !== undefined) changedFiles = parseFileList(attrs['changed-files'])
+  return { complete: true, failed: !completed, summary: summary, changedFiles: changedFiles }
 }
-const SUBPLAN_GEN_SCHEMA = {
-  type: 'object',
-  properties: {
-    plan: { type: 'string' },
-    tasks: TASKS_FIELD,
-  },
-  required: ['plan', 'tasks'],
+
+// 英文裁决词(大小写归一后等值)
+const VERDICT_APPROVED_UPPER = ['APPROVED', 'APPROVE']
+const VERDICT_REJECTED_UPPER = ['REJECTED', 'REJECT']
+// 中文裁决词精选表(精确等值, 否定式「不同意」不落入通过组)
+const VERDICT_CN_APPROVED = ['已批准', '批准', '已同意', '同意', '通过', '已通过']
+const VERDICT_CN_REJECTED = ['已拒绝', '拒绝', '已驳回', '驳回', '不通过', '否决', '已否决']
+
+/** 裁决词归一化(原版 normalizeVerdict 同构): 无法识别返回 null(教学重问) */
+function normalizeVerdict(raw) {
+  if (typeof raw !== 'string') return null
+  const upper = raw.trim().toUpperCase()
+  if (VERDICT_APPROVED_UPPER.indexOf(upper) >= 0) return true
+  if (VERDICT_REJECTED_UPPER.indexOf(upper) >= 0) return false
+  const value = raw.trim()
+  if (VERDICT_CN_APPROVED.indexOf(value) >= 0) return true
+  if (VERDICT_CN_REJECTED.indexOf(value) >= 0) return false
+  return null
+}
+
+/**
+ * 审批裁决解析(原版 rs_review_verdict 同构):
+ * 裁决块属性优先; 块缺失时正文关键词兜底(取末次出现, 理由取同行余文)。
+ * 返回 { complete, approved, reason }; complete=false 走教学重问。
+ */
+function parseReviewVerdict(text) {
+  const text2 = String(text || '')
+  const m = lastBlock(text2, 'rs-review-verdict')
+  if (m) {
+    const openTag = /<rs-review-verdict\b([^>]*)>/i.exec(m[0])
+    const attrs = parseAttrs(openTag ? openTag[1] : '')
+    let approved = normalizeVerdict(attrs.verdict)
+    if (approved === null) approved = normalizeVerdict(childText(m[0], 'verdict', ''))
+    if (approved !== null) return { complete: true, approved: approved, reason: childText(m[0], 'reason', '') }
+  }
+  // 兜底: 正文关键词(末次出现), 英文词边界防误伤, 中文等值扫尾
+  const kw = /\b(APPROVED|APPROVE|REJECTED|REJECT)\b/gi
+  let last = null
+  let hit
+  while ((hit = kw.exec(text2)) !== null) last = hit
+  if (!last) {
+    for (const word of VERDICT_CN_APPROVED) { const i = text2.lastIndexOf(word); if (i >= 0) { last = { index: i, 1: word }; break } }
+    for (const word of VERDICT_CN_REJECTED) { const i = text2.lastIndexOf(word); if (i >= 0 && (!last || i > last.index)) last = { index: i, 1: word } }
+  }
+  if (!last) return { complete: false }
+  const approved = normalizeVerdict(last[1])
+  if (approved === null) return { complete: false }
+  const tail = text2.slice(last.index + String(last[1]).length)
+  const reason = tail.split('\n').map(function (s) { return s.trim() }).filter(Boolean)[0] || ''
+  return { complete: true, approved: approved, reason: reason }
+}
+
+// 计划 XML 产出契约行(各规划提示词共用; 教学示例在 plannerPrompt)
+function planXmlContract(subplanMode) {
+  return '计划输出契约: 先给出简短方案论述, 再在回复末尾原样输出 <plan> 根元素包裹的' + (subplanMode ? '子计划' : '') + '计划 XML, 引擎按 XML 结算, 无 XML 视为无效回复。'
 }
 
 // 拆解规则(cap = 当前可用任务预算)
@@ -348,7 +487,7 @@ function decompRules(cap) {
   return [
     '拆解规则: 每个任务是可独立验收的工作单元(自带必要的验证); 粒度均匀, 单任务应能在一个代理会话内完成; 有合并冲突风险的任务必须用 after 声明依赖串行 —— 无依赖关系的任务才会被并行执行, 并行候选必须文件互不相交。',
     '依赖声明: after 列出前置任务 id; 省略 after = 链式接续上一个任务。本规则同样适用于子计划内的任务: 文件互斥的任务可显式 after: [] 并行, 有冲突必须声明依赖。',
-    '每任务必须给 acceptance(可独立验证的完成判据)与 files(预期触达文件清单); 禁止 TBD、"适当处理"式占位描述。',
+    '每任务必须给验收判据(<acceptance> 子元素, 可独立验证的完成判据)与申报文件(<files> 子元素, 逗号分隔的预期触达文件); 禁止 TBD、"适当处理"式占位描述。',
     '任务数匹配变更量级, 禁止机械均分; 任务数不超过 ' + cap + ' 个, 超出说明粒度不对, 合并相近任务。',
   ].join('\n')
 }
@@ -464,7 +603,7 @@ function reviewNode(id, description, deps, subject, slot, kind) {
     id: id, type: 'review', description: description, deps: (deps || []).slice(), status: 'pending',
     output: '', kind: kind, subject: subject || '', slot: slot || '',
     rejectCount: 0, fixNote: '', reviewerFault: false,
-    verdict: '', reviewEvidence: '', warn: false, dead: false, cursor: { i: 0 },
+    verdict: '', warn: false, dead: false, cursor: { i: 0 },
   })
 }
 function planNode(id, description, deps, outlineIndex) {
@@ -620,7 +759,7 @@ function rejectionPrefix(reasons, reviewerFault) {
 }
 
 // ── 提示词构建 ──────────────────────────────────────────────────────────────
-// 首次分诊规划提示词(原始四步教学, 第四步改 schema 提交, XML 示例改同构 JSON)
+// 首次分诊规划提示词(原版四步教学全文对齐, 提交形态为回复末尾 <plan> XML)
 function plannerPrompt() {
   const parts = [
     PLANNER_IDENTITY,
@@ -631,7 +770,7 @@ function plannerPrompt() {
     '- complexity（复杂度）: low / medium / high',
     '- risk（风险）: low / medium / high',
     '- scope（变更范围）: small / medium / large',
-    '无法评估的信号留空不填, 引擎按低档处理。',
+    '无法评估的信号省略属性, 引擎按低档处理。',
     '',
     '第二步 选择工作流模板：',
     '- lite 单发终审: 简单明确，一眼能看完的活',
@@ -640,36 +779,46 @@ function plannerPrompt() {
     '- multi-plan 多计划交叉: 多功能大型，多计划多验证',
     '信号与模板的对应关系：高风险或大范围用 multi-plan；高复杂度用 step-review；中复杂度或中风险用 plan-final；低复杂低风险小范围用 lite。',
     '',
-    '第三步 按所选模板的档位形态写计划：',
-    '- lite: 恰 1 个任务，原文即任务描述，不拆步骤',
-    '- plan-final / step-review: 1..N 个任务',
-    '- multi-plan: K 个子计划(subplans, title+目标描述)表达子计划大纲，不直接列任务',
+    '第三步 按所选模板的档位形态写计划 XML：',
+    '- lite: 恰 1 个 <task>，原文即任务描述，不拆步骤',
+    '- plan-final / step-review: 1..N 个 <task>',
+    '- multi-plan: K 个 <subplan title="标题">目标描述</subplan> 表达子计划大纲，不直接列任务',
     '',
-    '任务依赖声明（id/after，均省略则链式）:',
-    '- 显式声明: {"id":"t1", ...}；省略 id 时自动编号',
-    '- 依赖前置: after:["t1"] 或多值 after:["t1","t2"]（汇合）',
-    '- 并行: 彼此独立的任务声明相同 after（如两个任务都 after:["t1"] 即并行）',
-    '- 无依赖根任务: after:[]；省略 after = 依赖前一任务（保守链式，忘标不意外并行）',
+    '任务依赖声明（id/after 属性，均省略则链式）:',
+    '- 显式声明: <task id="t1">…</task>；省略 id 时自动编号',
+    '- 依赖前置: after="t1" 或逗号多值 after="t1,t2"（汇合）',
+    '- 并行: 彼此独立的任务声明相同 after（如两个任务都 after="t1" 即并行）',
+    '- 无依赖根任务: after=""；省略 after = 依赖前一任务（保守链式，忘标不意外并行）',
     '- after 只能引用前面已声明的任务 id，禁止前向引用',
     '- 并行任务按模块/文件边界拆分，避免改同一文件相互冲突',
-    '- 并行任务 description 末尾声明主要涉及文件，如「实现 X（主要涉及 src/a.ts）」',
+    '- 并行任务正文末尾声明主要涉及文件，如「实现 X（主要涉及 src/a.ts）」',
     '',
-    '第四步 严格按 schema 返回提交计划。',
+    '第四步 输出计划: 先简短说明方案要点, 再在回复末尾原样输出 <plan> 根元素包裹的计划 XML 全文。',
     '',
     '示例（step-review 形态，t2/t3 并行依赖 t1）：',
-    '{"templateId":"step-review","complexity":"high","risk":"medium","scope":"medium","plan":"...","tasks":[{"id":"t1","description":"实现用户登录 API","acceptance":"接口返回预期结果","files":["src/a.ts"],"after":[]},{"id":"t2","description":"编写登录集成测试","after":["t1"]},{"id":"t3","description":"编写登录前端页面","after":["t1"]}]}',
+    '<plan template="step-review">',
+    '  <signals complexity="high" risk="medium" scope="medium"/>',
+    '  <task id="t1">实现用户登录 API（主要涉及 src/api/login.ts）</task>',
+    '  <task id="t2" after="t1">编写登录集成测试</task>',
+    '  <task id="t3" after="t1">编写登录前端页面</task>',
+    '</plan>',
     '',
     '示例（multi-plan 形态，子计划也可声明依赖，s2/s3 并行依赖 s1）：',
-    '{"templateId":"multi-plan","complexity":"high","scope":"large","plan":"...","subplans":[{"id":"s1","title":"认证模块","description":"实现登录注册与令牌管理","after":[]},{"id":"s2","title":"权限模块","description":"实现角色与资源级权限校验","after":["s1"]},{"id":"s3","title":"审计模块","description":"实现操作审计日志","after":["s1"]}]}',
+    '<plan template="multi-plan">',
+    '  <signals complexity="high" scope="large"/>',
+    '  <subplan title="认证模块" id="s1">实现登录注册与令牌管理</subplan>',
+    '  <subplan title="权限模块" id="s2" after="s1">实现角色与资源级权限校验</subplan>',
+    '  <subplan title="审计模块" id="s3" after="s1">实现操作审计日志</subplan>',
+    '</plan>',
     '',
     '需求: ' + compress(REQ, REQUEST_CHARS),
     CONTEXT_NOTES ? '【仓库上下文(主代理勘察所得)】\n' + CONTEXT_NOTES : '',
     prefixHandoff(),
-    LOCKED ? '【模板锁定】用户已指定模板: ' + LOCKED + '。templateId 按该值填写, 并按该模板形态拆解。' : '',
+    LOCKED ? '【模板锁定】用户已指定模板: ' + LOCKED + '。template 属性按该值填写, 并按该模板形态拆解。' : '',
     decompRules(MAX_TASKS),
     PLAN_FIELD_REQUIREMENT,
   ]
-  return parts.filter(function (x) { return x !== undefined && x !== null }).join('\n')
+  return parts.filter(function (x) { return x !== undefined && x !== null && x !== '' }).join('\n')
 }
 
 // executor 任务指令(buildTaskInstruction + §4.7 并行提示 + v1 纪律行)
@@ -758,17 +907,38 @@ PREFIX_ITEMS.forEach(function (p) { seedDescSet[p.description] = true })
 
 phase('分诊与规划')
 log('planner 正在分诊与拆解')
+// 分诊产出归一: { templateId, complexity, risk, scope, reasoning, planText, tasks, subplans }
+// tasks/subplans 由 parsePlanXml items 拆出; 解析失败返回 null 供教学重问
+function triageFromText(text) {
+  const parsed = parsePlanXml(text)
+  if (!parsed) return null
+  const tasks = parsed.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after, acceptance: t.acceptance, files: t.files } })
+  const subplans = parsed.items.filter(function (t) { return t.subplan }).map(function (t) { return { id: t.id, title: t.description.split(':')[0], description: t.description, after: t.after } })
+  const prose = String(text || '').replace(PLAN_ROOT_PATTERN, ' ').replace(SIGNALS_PATTERN, ' ').trim()
+  return {
+    templateId: parsed.templateId,
+    complexity: parsed.signals.complexity || '',
+    risk: parsed.signals.risk || '',
+    scope: parsed.signals.scope || '',
+    reasoning: compress(prose, 500),
+    planText: prose,
+    tasks: tasks,
+    subplans: subplans,
+  }
+}
 const triageCursor = { i: 0 }
 const triageCandidates = slotOpts('planner-triage')
 for (let attempt = 0; attempt < TRIAGE_ATTEMPTS && !triage; attempt++) {
-  triage = await callAgent(triageCursor, triageCandidates, { prompt: plannerPrompt(), label: 'planner:分诊', schema: PLAN_SCHEMA })
-  if (!triage) log('planner 第 ' + (attempt + 1) + ' 次调用失败' + (attempt === 0 ? ', 重试' : ''))
+  const prompt = plannerPrompt() + (attempt > 0 ? PLAN_RESEND_NOTE : '')
+  const text = await callAgent(triageCursor, triageCandidates, { prompt: prompt, label: 'planner:分诊' })
+  triage = triageFromText(text)
+  if (!triage) log('planner 第 ' + (attempt + 1) + ' 轮无可解析计划' + (attempt === 0 ? ', 附示例重问' : ''))
 }
 if (!triage) {
   log('planner 不可用, 无信号走 defaultTemplate 兜底: ' + DEFAULT_TEMPLATE)
-  triage = { complexity: '', risk: '', scope: '', reasoning: 'planner 不可用, 规则兜底', plan: '', tasks: [{ id: 't1', description: REQ }], subplans: [] }
+  triage = { complexity: '', risk: '', scope: '', reasoning: 'planner 不可用, 规则兜底', planText: '', tasks: [{ id: 't1', description: REQ, after: [] }], subplans: [] }
 }
-PLAN_TEXT = String(triage.plan || '')
+PLAN_TEXT = String(triage.planText || '')
 
 // 模板四级兜底链: 锁定 → planner 声明(合法才采纳) → 信号矩阵 → defaultTemplate
 const declaredTemplate = triage && TEMPLATES.indexOf(triage.templateId) >= 0 ? triage.templateId : ''
@@ -792,7 +962,7 @@ if (!LOCKED && templateId === 'lite' && rawTasks.length > 1) {
 // multi-plan 实例化前置检查: 缺大纲按剩余任务降档
 if (templateId === 'multi-plan') {
   OUTLINE = (Array.isArray(triage.subplans) ? triage.subplans : [])
-    .filter(function (s) { return s && typeof s.title === 'string' && typeof s.description === 'string' })
+    .filter(function (s) { return s && typeof s.title === 'string' && s.title.trim() && typeof s.description === 'string' && s.description.trim() })
   const rawTaskCount = rawTasks.length
   if (!OUTLINE.length && rawTaskCount) { log('multi-plan 缺子计划大纲, 降级为 step-review'); templateId = 'step-review' }
   else if (!OUTLINE.length) { log('multi-plan 缺子计划大纲且无任务, 降级为 lite'); templateId = 'lite' }
@@ -833,20 +1003,21 @@ function buildPlanFinalTasks(list) {
   reviewNode('fr', '终审: 整个需求交付质量', list.map(function (t) { return t.id }).concat(PREFIX_IDS), SUBJECT_OVERALL, 'reviewer-final', 'final')
 }
 // multi-plan 大纲单元: pr → 子计划单元(p → r-* → sr) → 交叉终审串行链
+// p/sr/xr 经 blueprintId 带代际后缀, 重规划重建不与幸存旧节点撞 id
 function buildOutlineUnits(rootId) {
   const outlineIds = OUTLINE.map(function (s, i) { return (typeof s.id === 'string' && s.id.trim()) ? s.id.trim() : 'p' + (i + 1) })
   OUTLINE.forEach(function (s, i) {
-    const pid = 'p' + (i + 1)
+    const pid = blueprintId('p' + (i + 1))
     const afterPids = Array.isArray(s.after)
-      ? s.after.map(function (x) { const j = outlineIds.indexOf(x); return j >= 0 ? 'p' + (j + 1) : null }).filter(Boolean)
-      : (i > 0 ? ['p' + i] : [])
+      ? s.after.map(function (x) { const j = outlineIds.indexOf(x); return j >= 0 ? blueprintId('p' + (j + 1)) : null }).filter(Boolean)
+      : (i > 0 ? [blueprintId('p' + i)] : [])
     const p = planNode(pid, '子计划[' + s.title + ']: ' + s.description, [rootId].concat(afterPids), i)
-    p.outlineDeps = afterPids.map(function (x) { return 'sr' + x.slice(1) })
-    reviewNode('sr' + (i + 1), '子计划审批[' + s.title + ']', [pid], pid, 'reviewer-subplan', 'subplan')
+    p.outlineDeps = afterPids.map(function (x) { return blueprintId('sr' + x.slice(1)) })
+    reviewNode(blueprintId('sr' + (i + 1)), '子计划审批[' + s.title + ']', [pid], pid, 'reviewer-subplan', 'subplan')
   })
-  const srIds = OUTLINE.map(function (s, i) { return 'sr' + (i + 1) })
-  reviewNode('xr1', '交叉终审(正确性)', srIds, SUBJECT_OVERALL, 'reviewer-cross', 'cross')
-  reviewNode('xr2', '交叉终审(边界与安全)', ['xr1'], SUBJECT_OVERALL, 'reviewer-cross', 'cross')
+  const srIds = OUTLINE.map(function (s, i) { return blueprintId('sr' + (i + 1)) })
+  reviewNode(blueprintId('xr1'), '交叉终审(正确性)', srIds, SUBJECT_OVERALL, 'reviewer-cross', 'cross')
+  reviewNode(blueprintId('xr2'), '交叉终审(边界与安全)', [blueprintId('xr1')], SUBJECT_OVERALL, 'reviewer-cross', 'cross')
 }
 
 if (templateId === 'lite') {
@@ -874,31 +1045,46 @@ if (templateId === 'multi-plan') {
 async function execTask(node) {
   const slot = TASK_SLOT_BY_REASON[node.enterReason] || 'executor-task'
   const candidates = slotOpts(slot)
-  let r = await callAgent(node.cursor, candidates, { prompt: buildExecutorPrompt(node, ''), label: 'executor:' + node.id, schema: EXEC_SCHEMA })
-  // completed 但 summary 空白 → 按 reportNudgeLimit 预算带补救指引重问
-  while (r && r.status === 'completed' && !String(r.summary || '').trim() && node.nudgeCount < BUDGET.reportNudgeLimit) {
+  // 文本报告协议: 形态不完整(缺块/缺 completed)不计失败, 按 reportNudgeLimit 预算带格式示例重问
+  // (原版 rs_task_report 漏参不烧账语义; completed=false 自报失败才走失败路径)
+  let report = null
+  for (let round = 0; round <= BUDGET.reportNudgeLimit; round++) {
+    const nudge = round === 0 ? '' : REPORT_NUDGE_NOTE
+    const text = await callAgent(node.cursor, candidates, { prompt: buildExecutorPrompt(node, nudge), label: round === 0 ? ('executor:' + node.id) : ('executor:' + node.id + ':报告追问' + round) })
+    if (text === null) {
+      node.failedModel = failedModelOf(node.cursor)
+      node.failCount++
+      node.output = 'executor 子代理调用失败'
+      return
+    }
+    report = parseTaskReport(text)
+    if (report.complete && report.summary) break
+    if (report.complete && !report.summary) {
+      node.nudgeCount++
+      if (node.nudgeCount > BUDGET.reportNudgeLimit) {
+        node.failedModel = failedModelOf(node.cursor)
+        node.failCount++
+        node.output = '报告摘要空白(补救追问预算耗尽)'
+        return
+      }
+      log('任务 ' + node.id + ' 报告摘要空白, 补救追问(' + node.nudgeCount + '/' + BUDGET.reportNudgeLimit + ')')
+      continue
+    }
     node.nudgeCount++
-    log('任务 ' + node.id + ' 报告摘要空白, 补救追问(' + node.nudgeCount + '/' + BUDGET.reportNudgeLimit + ')')
-    r = await callAgent(node.cursor, candidates, { prompt: buildExecutorPrompt(node, REPORT_NUDGE_NOTE), label: 'executor:' + node.id + ':报告追问', schema: EXEC_SCHEMA })
+    if (node.nudgeCount > BUDGET.reportNudgeLimit) {
+      node.failedModel = failedModelOf(node.cursor)
+      node.failCount++
+      node.output = '任务报告缺失(补救追问预算耗尽)'
+      return
+    }
+    log('任务 ' + node.id + ' 报告缺失/形态不完整, 补救追问(' + node.nudgeCount + '/' + BUDGET.reportNudgeLimit + ')')
   }
-  if (!r) {
-    node.failedModel = failedModelOf(node.cursor)
-    node.failCount++
-    node.output = 'executor 子代理调用失败'
-    return
-  }
-  node.changedFiles = Array.isArray(r.changedFiles) ? r.changedFiles.filter(function (x) { return typeof x === 'string' }) : []
-  node.output = String(r.summary || '')
-  if (r.status !== 'completed') {
+  node.changedFiles = report.changedFiles
+  node.output = report.summary
+  if (report.failed) {
     node.failedModel = failedModelOf(node.cursor)
     node.failCount++
     node.output = '任务自报失败: ' + node.output
-    return
-  }
-  if (!node.output.trim()) {
-    node.failedModel = failedModelOf(node.cursor)
-    node.failCount++
-    node.output = '报告摘要空白(补救追问预算耗尽)'
   }
 }
 
@@ -932,47 +1118,36 @@ async function runTaskWithRetry(node) {
   }
 }
 
-// 审批证据判定: evidence 必须是非空白字符串
-function hasEvidence(r) {
-  return r && typeof r.evidence === 'string' && !!r.evidence.trim()
-}
-
 // ── 审批执行与拒绝路由(契约 B7/B8) ──────────────────────────────────────────
 async function runReview(node) {
   node.status = 'active'
   const prompt = buildReviewPrompt(node)
   const candidates = slotOpts(node.slot)
-  let r = await callAgent(node.cursor, candidates, { prompt: prompt, label: 'reviewer:' + node.id, schema: REVIEW_SCHEMA })
-  if (!r) {
-    log('reviewer ' + node.id + ' 调用失败, 重试一次')
-    r = await callAgent(node.cursor, candidates, { prompt: prompt + REVIEW_RESEND_NOTE, label: 'reviewer:' + node.id + ':重试', schema: REVIEW_SCHEMA })
+  // 文本裁决协议: 解析失败按 emptyOutputRetryLimit 预算带格式示例重问(原版空输出重问语义),
+  // 耗尽 → 审批者故障 fail-closed 折算拒绝; 无 evidence 硬门槛(验证要求在身份规则, 原版无此门)
+  let verdict = null
+  let reviewerFault = false
+  for (let asks = 0; asks <= BUDGET.emptyOutputRetryLimit; asks++) {
+    const text = await callAgent(node.cursor, candidates, { prompt: asks === 0 ? prompt : (prompt + VERDICT_RESEND_NOTE), label: asks === 0 ? ('reviewer:' + node.id) : ('reviewer:' + node.id + ':裁决重问' + asks) })
+    if (text === null) break
+    const parsed = parseReviewVerdict(text)
+    if (parsed.complete) { verdict = parsed; break }
+    log(node.id + ' 裁决不可解析, 教学重问(' + (asks + 1) + '/' + BUDGET.emptyOutputRetryLimit + ')')
   }
-  if (!r) {
-    // fail-closed: 审批者不可用折算拒绝, 走既有驳回路由; plan/subplan 型走重规划路由, 不用"原样重交"口径
-    node.reviewerFault = true
+  if (!verdict) {
+    // fail-closed: 审批者不可用/输出无效折算拒绝, 走既有驳回路由; plan/subplan 型走重规划路由
+    reviewerFault = true
     const planTypeFail = node.kind === 'plan' || node.kind === 'subplan'
     const unavailable = planTypeFail ? REVIEWER_UNAVAILABLE_PLAN_REASON : REVIEWER_UNAVAILABLE_REASON
-    log('reviewer 不可用, ' + node.id + ' 视为拒绝')
-    r = { verdict: 'REJECTED', reasons: [unavailable], summary: unavailable, evidence: '', reviewerFault: true }
+    log('reviewer 不可用或输出无效, ' + node.id + ' 视为拒绝')
+    verdict = { approved: false, reason: unavailable }
   }
-  // 证据契约: APPROVED 空证据按 emptyOutputRetryLimit 预算重问, 耗尽折算拒绝
-  let asks = 0
-  while (r.verdict === 'APPROVED' && !hasEvidence(r) && asks < BUDGET.emptyOutputRetryLimit) {
-    asks++
-    log(node.id + ' 通过缺验证证据, 重问(' + asks + '/' + BUDGET.emptyOutputRetryLimit + ')')
-    const reask = await callAgent(node.cursor, candidates, { prompt: prompt + EVIDENCE_REASK_NOTE, label: 'reviewer:' + node.id + ':证据重问', schema: REVIEW_SCHEMA })
-    if (!reask) break
-    r = reask
-  }
-  if (r.verdict === 'APPROVED' && !hasEvidence(r)) {
-    log(node.id + ' 证据预算耗尽, 视为拒绝')
-    node.reviewerFault = true
-    r = { verdict: 'REJECTED', reasons: [EVIDENCE_REQUIRED_REASON], summary: EVIDENCE_REQUIRED_REASON, evidence: '', reviewerFault: true }
-  }
-  node.output = (r.verdict === 'APPROVED' ? 'APPROVED: ' : 'REJECTED: ') + String(r.summary || '')
-  node.reviewEvidence = String(r.evidence || '')
-  node.verdict = r.verdict
-  if (r.verdict === 'APPROVED') {
+  const approved = !reviewerFault && verdict.approved
+  node.output = (approved ? 'APPROVED: ' : 'REJECTED: ') + String(verdict.reason || '')
+  node.verdict = approved ? 'APPROVED' : 'REJECTED'
+  // 故障标记置位保留: 恢复通过不清除, 汇报层可见"曾故障折算"历史(v2 同语义)
+  if (reviewerFault) node.reviewerFault = true
+  if (approved) {
     node.status = 'done'
     const holder = reviewCountHolder(node)
     // approve 只清 rejectCount; 合并账中的 failCount 作为失败历史保留参与后续记账(有意设计, 防误判为遗漏)
@@ -984,12 +1159,12 @@ async function runReview(node) {
     }
     return
   }
-  await routeRejection(node, r)
+  await routeRejection(node, verdict)
 }
 
-async function routeRejection(node, r) {
+async function routeRejection(node, verdict) {
   node.status = 'pending'
-  const reasons = Array.isArray(r.reasons) && r.reasons.length ? r.reasons.map(String) : [String(r.summary || '')]
+  const reasons = [String(verdict.reason || '').trim()].filter(Boolean)
   const holder = reviewCountHolder(node)
   if (holder) holder.rejectCount++
   const threshold = planTypeReview(node) ? BUDGET.planRejectBeforeBlocked : BUDGET.reviewRejectBeforeEscalate
@@ -1011,7 +1186,7 @@ async function routeRejection(node, r) {
     node.fixNote = reasons.join('; ')
     return runPlanNode(holder, reasons)
   }
-  const prefix = rejectionPrefix(reasons, !!r.reviewerFault)
+  const prefix = rejectionPrefix(reasons, !!node.reviewerFault)
   if (holder && holder.type === 'task') {
     holder.status = 'pending'
     holder.enterReason = 'reject'
@@ -1062,18 +1237,28 @@ async function runPlanNode(node, rejectReasons) {
   if (rejectReasons) {
     parts.push('', '[未通过原因]', rejectReasons.filter(Boolean).join('; ') || '未提供', '', '[待重规划范围]', '本子计划的执行方案与任务段(重建后重审)。')
   }
-  parts.push('', decompRules(cap), '本子计划任务数不超过 ' + cap + '。', PLAN_FIELD_REQUIREMENT, '严格按 schema 返回: plan=执行方案; tasks=任务段(每任务给 acceptance 验收判据与 files 预期触达文件)。')
-  const r = await callAgent(node.cursor, slotOpts('planner-subplan'), { prompt: parts.join('\n'), label: 'planner:' + node.id, schema: SUBPLAN_GEN_SCHEMA })
-  let gen = r
-  if (!gen || !Array.isArray(gen.tasks) || !gen.tasks.length) {
+  parts.push('', decompRules(cap), '本子计划任务数不超过 ' + cap + '。', planXmlContract(true), '示例: <plan><task id="t1">任务描述</task><task id="t2" after="t1">依赖 t1 的任务</task></plan>')
+  // 文本 XML 协议: 解析失败按预算教学重问, 耗尽降级单任务(不静默吞掉)
+  let planText = null
+  for (let attempt = 0; attempt < TRIAGE_ATTEMPTS && planText === null; attempt++) {
+    const text = await callAgent(node.cursor, slotOpts('planner-subplan'), { prompt: parts.join('\n') + (attempt > 0 ? PLAN_RESEND_NOTE : ''), label: 'planner:' + node.id + (attempt > 0 ? ':重问' + attempt : '') })
+    if (text === null) break
+    planText = parsePlanXml(text)
+    if (!planText) log('子计划[' + sp.title + '] 计划 XML 不可解析, 教学重问(' + (attempt + 1) + '/' + TRIAGE_ATTEMPTS + ')')
+  }
+  let gen = null
+  if (planText) {
+    gen = { planText: planText, tasks: planText.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after } }) }
+  }
+  if (!gen || !gen.tasks.length) {
     log('子计划生成失败, 降级为单任务: ' + sp.title)
-    gen = { plan: sp.description, tasks: [{ id: 'st1', description: sp.title + ': ' + sp.description }] }
+    gen = { planText: null, tasks: [{ id: 'st1', description: sp.title + ': ' + sp.description, after: [] }] }
   }
   if (rejectReasons) {
     const removed = killSubplanSection(node.id)
     log('子计划[' + sp.title + ']任务段重建: 移除 [' + removed.join(', ') + ']')
   }
-  node.output = String(gen.plan || sp.description)
+  node.output = gen.planText ? compress(subplanProse(gen.planText), PLAN_EXCERPT_CHARS) || sp.description : sp.description
   node.status = 'done'
   const st = normalizeTasks(gen.tasks, node.id + '-', liveIds(), cap)
   st.forEach(function (t) {
@@ -1081,19 +1266,32 @@ async function runPlanNode(node, rejectReasons) {
     taskNode(t.id, t.description, deps, node.id, { acceptance: t.acceptance, plannedFiles: t.files })
     reviewNode('r-' + t.id, '审批[' + sp.title + ']: ' + t.description.slice(0, 50), [t.id], t.id, 'reviewer-task', 'task')
   })
-  const sr = subjOf('sr' + (node.outlineIndex + 1))
+  const sr = subjOf(blueprintId('sr' + (node.outlineIndex + 1)))
   if (sr && sr.kind === 'subplan') sr.deps = st.map(function (t) { return 'r-' + t.id })
   log('子计划[' + sp.title + '] 产出任务: ' + st.map(function (t) { return t.id }).join(', '))
 }
 
+// 子计划方案文本 = XML 块之外的论述部分(parsePlanXml 输入原文去块)
+function subplanProse(rawText) {
+  return String(rawText || '').replace(PLAN_ROOT_PATTERN, ' ').replace(SIGNALS_PATTERN, ' ').trim()
+}
+
 // ── 计划审批驳回重规划(planner-command 未达阈值 / planner-escalate 达阈值) ──
+// 重建清理: 非-done 节点照删; done 的 plan 节点(元数据)一并作废 —— 计划重写后旧方案文本已失真;
+// done 的 task(真实产出)与其审批记录保留, 由重规划提示词的[已完成工作]承接
 function rebuildBelowPlanReview(prNode) {
   const bad = reachableFrom(prNode.id)
   const removed = []
   for (const n of nodes) {
-    if (n.id !== prNode.id && bad[n.id] && n.status !== 'done') { n.dead = true; removed.push(n.id) }
+    if (n.id === prNode.id || !bad[n.id]) continue
+    if (n.status !== 'done' || n.type === 'plan') { n.dead = true; removed.push(n.id) }
   }
   return removed
+}
+
+// 蓝图节点 id 代际后缀: 重规划重建蓝图单元(p/sr/xr)时换新 id, 防 subjOf 命中幸存旧节点
+function blueprintId(base) {
+  return replanSeq > 0 ? base + 'g' + replanSeq : base
 }
 
 async function replanPlan(node, reasons, atThreshold) {
@@ -1134,21 +1332,21 @@ async function replanPlan(node, reasons, atThreshold) {
       '',
       prefixHandoff(),
       isMulti
-        ? '子计划大纲规则: subplans 每项含 id/title/description/after; after 引用其他子计划 id 表达依赖, 省略 after = 链式接续; 彼此独立的子计划声明相同 after 并行; 大纲表达子计划划分, 不直接列任务。'
+        ? '子计划大纲规则: <subplan title="标题" id="s1" after="s0">目标描述</subplan>; after 引用其他子计划 id 表达依赖, 省略 after = 链式接续; 彼此独立的子计划声明相同 after 并行; 大纲表达子计划划分, 不直接列任务。'
         : decompRules(Math.max(remainingTaskBudget(), 1)),
-      PLAN_FIELD_REQUIREMENT,
-      '请重新产出' + (isMulti ? '实施计划与子计划大纲' : '实施计划与任务段') + ', 按 schema 返回。可重排任务依赖: after 列出前置 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
+      '请重新产出' + (isMulti ? '实施计划与子计划大纲' : '实施计划与任务段') + '。可重排任务依赖: after 列出前置 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callReplanAgent(node.cursor, slotOpts(atThreshold ? 'planner-escalate' : 'planner-command'), { prompt: prompt, label: 'planner:计划重规划#' + replanSeq, schema: PLAN_REPLAN_SCHEMA })
+    const text = await callReplanAgent(node.cursor, slotOpts(atThreshold ? 'planner-escalate' : 'planner-command'), { prompt: prompt, label: 'planner:计划重规划#' + replanSeq })
+    const parsed = text ? parsePlanXml(text) : null
     const cap = Math.max(remainingTaskBudget(), 1)
-    const planText = r ? String(r.plan || '') : ''
+    const planText = text ? subplanProse(text) : ''
     if (isMulti) {
-      const ol = r && Array.isArray(r.subplans)
-        ? r.subplans.filter(function (s) { return s && typeof s.title === 'string' && typeof s.description === 'string' })
+      const ol = parsed
+        ? parsed.items.filter(function (t) { return t.subplan }).map(function (t) { return { id: t.id, title: t.description.split(':')[0], description: t.description, after: t.after } })
         : []
-      const hasTasks = r && Array.isArray(r.tasks) && r.tasks.length
-      if (!planText.trim() || (!ol.length && !hasTasks)) {
-        blocked = { nodeId: node.id, reason: '计划重规划无产出', detail: reasons.join('; ') }
+      const hasTasks = parsed && parsed.items.some(function (t) { return !t.subplan })
+      if (!parsed || (!ol.length && !hasTasks)) {
+        blocked = { nodeId: node.id, reason: '计划重规划无产出(计划 XML 不可解析)', detail: reasons.join('; ') }
         return
       }
       PLAN_TEXT = planText
@@ -1160,13 +1358,13 @@ async function replanPlan(node, reasons, atThreshold) {
       } else {
         templateId = 'step-review'
         log('重规划未产出子计划大纲, 降级 step-review 重建任务段')
-        buildStepReviewTasks(normalizeTasks(r.tasks, 'u' + replanSeq + '-', liveIds(), cap))
+        buildStepReviewTasks(normalizeTasks(parsed.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after, acceptance: t.acceptance, files: t.files } }), 'u' + replanSeq + '-', liveIds(), cap))
       }
       log('计划重规划#' + replanSeq + ': 移除 [' + removed.join(', ') + '], 大纲/任务段已重建, 待计划复审')
     } else {
-      const nt = (r && Array.isArray(r.tasks)) ? normalizeTasks(r.tasks, 'u' + replanSeq + '-', liveIds(), cap) : []
-      if (!planText.trim() || !nt.length) {
-        blocked = { nodeId: node.id, reason: '计划重规划无产出', detail: reasons.join('; ') }
+      const nt = parsed ? normalizeTasks(parsed.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after, acceptance: t.acceptance, files: t.files } }), 'u' + replanSeq + '-', liveIds(), cap) : []
+      if (!parsed || !nt.length) {
+        blocked = { nodeId: node.id, reason: '计划重规划无产出(计划 XML 不可解析)', detail: reasons.join('; ') }
         return
       }
       PLAN_TEXT = planText
@@ -1224,12 +1422,14 @@ async function escalateTask(node, reasons) {
       '[待重规划范围]',
       tailScopeText(node.id),
       '',
-      '请重新评估剩余工作, 按 schema 返回新任务。可重排任务依赖: after 列出前置任务 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
+      planXmlContract(false),
+      '请重新评估剩余工作。可重排任务依赖: after 列出前置任务 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callReplanAgent(node.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:重规划#' + escalations, schema: REPLAN_SCHEMA })
-    const nt = r && Array.isArray(r.tasks) ? normalizeTasks(r.tasks, 'e' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
+    const text = await callReplanAgent(node.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:重规划#' + escalations })
+    const parsed = text ? parsePlanXml(text) : null
+    const nt = parsed ? normalizeTasks(parsed.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after, acceptance: t.acceptance, files: t.files } }), 'e' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
     if (!nt.length) {
-      blocked = { nodeId: node.id, reason: '重规划无产出', detail: reasons.join('; ') }
+      blocked = { nodeId: node.id, reason: '重规划无产出(计划 XML 不可解析)', detail: reasons.join('; ') }
       return
     }
     replaceTail(node, nt)
@@ -1313,12 +1513,14 @@ async function escalateSubplan(pNode, reasons) {
       '[待重规划范围]',
       '子计划[' + sp.title + ']的任务段(重建, 该子计划在途产物作废)。',
       '',
-      '请重新评估该子计划的剩余工作, 按 schema 返回新任务。可重排任务依赖: after 列出前置任务 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
+      planXmlContract(false),
+      '请重新评估该子计划的剩余工作。可重排任务依赖: after 列出前置任务 id, 彼此独立的任务声明相同 after 并行执行, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callReplanAgent(pNode.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:子计划重规划#' + escalations, schema: REPLAN_SCHEMA })
-    const nt = r && Array.isArray(r.tasks) ? normalizeTasks(r.tasks, 'e' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
+    const text = await callReplanAgent(pNode.cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:子计划重规划#' + escalations })
+    const parsed = text ? parsePlanXml(text) : null
+    const nt = parsed ? normalizeTasks(parsed.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after, acceptance: t.acceptance, files: t.files } }), 'e' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
     if (!nt.length) {
-      blocked = { nodeId: pNode.id, reason: '子计划重规划无产出', detail: reasons.join('; ') }
+      blocked = { nodeId: pNode.id, reason: '子计划重规划无产出(计划 XML 不可解析)', detail: reasons.join('; ') }
       return
     }
     replaceTail(pNode, nt)
@@ -1359,12 +1561,14 @@ async function rework(reviewNodes, reasons) {
       '[待重规划范围]',
       '被驳回交付的问题修复(只追加返工任务, 不重复已完成工作)。',
       '',
-      '请重新评估, 按 schema 返回返工任务。可重排任务依赖: after 列出前置任务 id, 省略 after = 依赖前一任务。',
+      planXmlContract(false),
+      '请重新评估。可重排任务依赖: after 列出前置任务 id, 省略 after = 依赖前一任务。',
     ].join('\n')
-    const r = await callReplanAgent(reviewNodes[0].cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:返工#' + escalations, schema: REPLAN_SCHEMA })
-    const nt = r && Array.isArray(r.tasks) ? normalizeTasks(r.tasks, 'f' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
+    const text = await callReplanAgent(reviewNodes[0].cursor, slotOpts('planner-escalate'), { prompt: prompt, label: 'planner:返工#' + escalations })
+    const parsed = text ? parsePlanXml(text) : null
+    const nt = parsed ? normalizeTasks(parsed.items.filter(function (t) { return !t.subplan }).map(function (t) { return { id: t.id, description: t.description, after: t.after, acceptance: t.acceptance, files: t.files } }), 'f' + escalations + '-', liveIds(), Math.max(remainingTaskBudget(), 1)) : []
     if (!nt.length) {
-      blocked = { nodeId: label, reason: '返工重规划无产出', detail: reasons.join('; ') }
+      blocked = { nodeId: label, reason: '返工重规划无产出(计划 XML 不可解析)', detail: reasons.join('; ') }
       return
     }
     nt.forEach(function (t, i) { t.after = i > 0 ? [nt[i - 1].id] : [] })
@@ -1437,7 +1641,7 @@ return {
   reviews: live.filter(function (n) { return n.type === 'review' }).map(function (n) {
     // verdict 只取实审记录; blocked 时未运行到的评审标 UNREVIEWED, 不冒充 REJECTED
     const verdict = n.verdict || (blocked ? 'UNREVIEWED' : 'REJECTED')
-    return { id: n.id, description: n.description, verdict: verdict, warn: !!n.warn, reviewerFault: !!n.reviewerFault, summary: String(n.output || ''), evidence: String(n.reviewEvidence || '') }
+    return { id: n.id, description: n.description, verdict: verdict, warn: !!n.warn, reviewerFault: !!n.reviewerFault, summary: String(n.output || '') }
   }),
   tasks: live.filter(function (n) { return n.type !== 'review' }).map(function (n) {
     return { id: n.id, type: n.type, description: n.description, status: n.status, summary: String(n.output || ''), changedFiles: n.changedFiles || [] }

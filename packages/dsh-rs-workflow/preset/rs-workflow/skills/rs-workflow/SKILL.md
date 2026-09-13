@@ -91,11 +91,13 @@ description: 若水多模型协作工作流。非平凡编码需求（多步骤/
 | step-review | 计划审 + 逐步审：前置总计划（pr），每任务执行完即审，通过才放行下一步 |
 | multi-plan | 大纲审 + 子计划审 + 交叉终审链：总规划拆子计划大纲（pr 大纲审），子计划单元逐个细化执行（子计划内逐步审 + 子计划交付审），末尾交叉终审串行链 xr1（正确性）→ xr2（边界与安全） |
 
-阈值（budgets 四字段，GUI/slots.json5 可配，clamp [1,10]，缺省 2/2/3/3）：`reviewRejectBeforeEscalate`=2（交付型审批对象连续被拒或失败达此值 → 升级）、`planRejectBeforeBlocked`=2（计划型审批对象连续被拒达此值 → 升级）、`emptyOutputRetryLimit`=3（审批缺验证证据时的重问上限，超限视为拒绝）、`reportNudgeLimit`=3（executor 返回 completed 但交接摘要空白时的补救追问上限）；升级重规划累计 `ESCALATION_LIMIT`=**2** 次 → blocked（固定，不可配）。审批通过清零规则：交付类审批（逐步审/子计划审/终审/交叉终审）通过清零升级账，计划审批通过只放行不清零。审批 fail-closed：审批者不可用视为拒绝（交付型可原样重交，计划审/大纲审带此原因转计划重规划），APPROVED 必须附验证证据。
+阈值（budgets 四字段，GUI/slots.json5 可配，clamp [1,10]，缺省 2/2/3/3）：`reviewRejectBeforeEscalate`=2（交付型审批对象连续被拒或失败达此值 → 升级）、`planRejectBeforeBlocked`=2（计划型审批对象连续被拒达此值 → 升级）、`emptyOutputRetryLimit`=3（审批裁决块不可解析时的教学重问上限，超限视为审批者故障折算拒绝）、`reportNudgeLimit`=3（executor 报告块缺失/形态不完整时的补救追问上限）；升级重规划累计 `ESCALATION_LIMIT`=**2** 次 → blocked（固定，不可配）。审批通过清零规则：交付类审批（逐步审/子计划审/终审/交叉终审）通过清零升级账，计划审批通过只放行不清零。审批 fail-closed：审批者不可用或裁决持续不可解析视为拒绝（交付型可原样重交，计划审/大纲审带此原因转计划重规划）。
+
+提交协议（v3 文本协议）：全部子代理自由文本返回，不用 JSON schema 硬校验（弱模型友好，原版核心动机）——planner 在回复末尾原样输出 `<plan>` XML（`<signals/>` + `<task id="…" after="…">` / `<subplan title="…">`），executor 输出 `<rs-task-report>`（completed + summary + changed-files），reviewer 输出 `<rs-review-verdict verdict="APPROVED|REJECTED">`（中文"通过/拒绝"亦可识别）；解析失败按预算教学重问（附格式示例重发），无需结构化产出能力。
 
 分诊口径：缺失信号按 low/small 降级（planner 未标注的信号视为不存在）；三信号全缺 → 按 `defaultTemplate` 兜底（`auto`/缺省 → multi-plan）；planner 可在计划中声明模板，合法才采纳，非法仍落引擎矩阵兜底。
 
-拆解与审批基准：planner 拆解时每任务可带 acceptance（可独立验证的验收判据）与 files（预期触达文件，作范围核查申报基线），任务描述禁止占位措辞（TBD/"适当处理"/"同任务 N"式描述视为计划缺陷）；任务审批基准为可判定清单——只审本任务改动，每条判据须带可核证据（测试名/命令输出/file:line），不确定写明；审批结论可带 severity（critical/important/minor），仅丰富报告、不作通过门控（APPROVED/REJECTED + evidence 契约不变），critical 问题必须进 reasons；带 fixNote 的复审只判定驳回点是否解决与是否引入新问题，不扩大审查范围。
+拆解与审批基准：planner 拆解时每任务可带 `<acceptance>`（可独立验证的验收判据）与 `<files>`（预期触达文件，作范围核查申报基线）子元素，任务描述禁止占位措辞（TBD/"适当处理"/"同任务 N"式描述视为计划缺陷）；审批基准为可判定清单——只审本任务改动，每条问题须附可核证据（测试名/命令输出/file:line，纯叙述不算），REJECTED 的理由必须具体、可执行；带 fixNote 的复审只判定驳回点是否解决与是否引入新问题，不扩大审查范围。
 
 ## 7. 庞大需求分阶段编排
 

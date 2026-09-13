@@ -44,8 +44,8 @@ multi-plan    pr(大纲审) → s1: p1 → r-* → sr1              (子计划�
 |---|---|---|
 | reviewRejectBeforeEscalate | 2（budgets 可配，clamp [1,10]） | 交付型审批对象（task / 整体交付）连续被拒或失败达此值 → 升级重规划 |
 | planRejectBeforeBlocked | 2（budgets 可配，clamp [1,10]） | plan 型审批对象（pr 的计划 / sr 的子计划）连续被拒达此值 → 升级重规划 |
-| emptyOutputRetryLimit | 3（budgets 可配，clamp [1,10]） | 审批缺验证证据时的重问上限，超限视为拒绝 |
-| reportNudgeLimit | 3（budgets 可配，clamp [1,10]） | executor 返回 completed 但交接摘要（summary）空白时的补救追问上限 |
+| emptyOutputRetryLimit | 3（budgets 可配，clamp [1,10]） | 审批裁决块不可解析时的教学重问上限（附格式示例重发），超限视为审批者故障折算拒绝 |
+| reportNudgeLimit | 3（budgets 可配，clamp [1,10]） | executor 报告块缺失/形态不完整（含 completed 但摘要空白）时的补救追问上限 |
 | ESCALATION_LIMIT | 2（固定） | 升级重规划累计 2 次 → blocked 终态 |
 | FAIL_RETRY_FUSE | reviewRejectBeforeEscalate + 2（固定） | 任务原地重试保险丝，仅防合并记账判定被异常绕过后的死循环，非业务阈值 |
 | 调度预算 | 8 + (当前节点数 × (1 + reviewRejectBeforeEscalate) + 全程累计升级次数 × maxTasks × 3) × 3/轮 | 按当前图规模（节点项随任务拒绝阈值放大）与全程累计升级次数（不随审批通过清零）现算，大图与振荡兜底；每次升级增额 = maxTasks × 9 轮 |
@@ -59,11 +59,11 @@ budgets 四字段经 `args.budgets` 传入，GUI/slots.json5 配置，缺省 2/2
 - **达阈值 → 升级**：升级重规划由 `planner-escalate` 位执行，计入升级账；升级账达 `ESCALATION_LIMIT` → blocked。
 - **task 主体**（逐步审 r-*）：与原始一致，failCount/rejectCount 合并记账（被拒/自报失败/调用失败各计 1），达 `reviewRejectBeforeEscalate` → 尾段替换升级——从失败节点可达的未完成节点废弃，planner 重规划剩余任务接在前缀之后，**并按模板重建蓝图**：lite/plan-final 重建终审 fr（依赖含新任务段与 prefix 种子），step-review/multi-plan 新任务链式配对 r-\* 审批，multi-plan 被波及的子计划审 sr 与交叉终审 xr 随新任务段重建。
 - **approve 清零语义**：交付类审批（r-*/sr/fr/xr）通过清零升级账（同时清被审对象拒绝计数）；计划审批（pr）通过只放行计划文本，未经交付验证，**不清零升级账**（防升级重规划循环内 blocked 兜底永不触发）。
-- **审批证据契约**（v1 补偿控制）：APPROVED 必须附 `evidence`（实际执行的检查命令与结果要点）；空证据按 `emptyOutputRetryLimit` 预算重问，仍空 → 降级 REJECTED（可补证据后原样重交）。
-- **审批 fail-closed**（v1 补偿控制）：审批者子代理调用失败 → 候选轮换重试，仍失败**视为拒绝**（reviewerFault），走既有驳回路由；折算理由分两支——交付型审批（r-*/sr/fr/xr）"审批者不可用(视为拒绝), 可原样重交"，计划型审批（pr）"审批者不可用(视为拒绝), 将带此原因重新规划"；不存在"警告通过"。
+- **提交协议（v3 文本协议）**：全部子代理自由文本返回，协议块随回复末尾原样输出——planner 输出 `<plan template="…">` XML（`<signals/>` + `<task id="…" after="…">` / `<subplan title="…">`，任务可带 `<acceptance>`/`<files>` 子元素），executor 输出 `<rs-task-report completed="…">`（summary + changed-files），reviewer 输出 `<rs-review-verdict verdict="…">`（reason，中文"通过/拒绝"亦可识别）；解析容错 + 缺块教学重问，弱模型无需结构化 JSON 产出能力（原版核心动机）。
+- **审批 fail-closed**（v1 补偿控制）：审批者子代理调用失败或裁决块持续不可解析 → 折算**视为拒绝**（reviewerFault，置位保留），走既有驳回路由；折算理由分两支——交付型审批（r-*/sr/fr/xr）"审批者不可用(视为拒绝), 可原样重交"，计划型审批（pr）"审批者不可用(视为拒绝), 将带此原因重新规划"；不存在"警告通过"。
 - **范围核查**：reviewer/终审提示词含强制规则——实际变更（git diff/status）出现申报清单之外且不属于其他任务申报范围（豁免清单）的文件 → REJECTED 并点名越界文件；豁免清单仅 task 主体审批注入，终审无豁免、仍按各任务申报并集与全量变更比对。blocked 时未运行到的审批返回 `verdict=UNREVIEWED`（如实区分，不冒充 REJECTED）。
-- **审批基准可判定化**：planner 拆解时每任务可带 `acceptance`（可独立验证的验收判据）与 `files`（预期触达文件，与任务申报清单共同构成范围核查对照基线），任务描述禁止占位措辞（TBD/"适当处理"/"同任务 N"式描述视为计划缺陷）；任务审批基准为可判定清单——只审本任务改动，每条验收判据须带可核证据（测试名/命令输出/file:line，prose 不算证据），不确定写明而不是猜。
-- **severity 与复审限制**：审批输出可带 `severity`（critical/important/minor），仅作报告丰富、不作 APPROVED 机器门控（verdict+evidence 契约不变），critical 问题必须进 reasons；带 fixNote 的复审只判定驳回点是否解决与是否引入新问题，不扩大审查范围。
+- **审批基准可判定化**：planner 拆解时每任务可带 `<acceptance>`（可独立验证的验收判据）与 `<files>`（预期触达文件，与任务申报清单共同构成范围核查对照基线）子元素，任务描述禁止占位措辞（TBD/"适当处理"/"同任务 N"式描述视为计划缺陷）；任务审批基准为可判定清单——只审本任务改动，每条问题须附可核证据（测试名/命令输出/file:line，纯叙述不算），不确定写明而不是猜。
+- **复审限制**：REJECTED 的 reason 必须给出具体、可执行的修改意见并引用证据；带 fixNote 的复审只判定驳回点是否解决与是否引入新问题，不扩大审查范围。
 
 ## 4. 交接摘要（原版 HandoffSummary 格式）
 

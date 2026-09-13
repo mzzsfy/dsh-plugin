@@ -13,21 +13,59 @@ const ENGINE_PATH = join(
 )
 const ENGINE_SRC = readFileSync(ENGINE_PATH, 'utf8')
 
-// planner 分诊响应构造器(信号缺省全低)
+// ── 文本协议响应构造器(自由文本 + 协议块, 与 engine v3 解析层对拍) ─────────────
+// planner 分诊响应: 方案论述 + 回复末尾 <plan> XML(信号缺省全低)
 function plan(over = {}) {
-  return { templateId: 'lite', complexity: 'low', risk: 'low', scope: 'small', reasoning: '分诊理由', plan: '总计划', tasks: [], subplans: [], ...over }
+  const t = { templateId: 'lite', complexity: 'low', risk: 'low', scope: 'small', reasoning: '分诊理由', plan: '总计划', tasks: [], subplans: [], ...over }
+  const signals = []
+  if (t.complexity) signals.push('complexity="' + t.complexity + '"')
+  if (t.risk) signals.push('risk="' + t.risk + '"')
+  if (t.scope) signals.push('scope="' + t.scope + '"')
+  const lines = [t.plan, '<plan' + (t.templateId ? ' template="' + t.templateId + '"' : '') + '>']
+  if (signals.length) lines.push('  <signals ' + signals.join(' ') + '/>')
+  for (const s of (t.subplans || [])) {
+    lines.push('  <subplan title="' + s.title + '"' + (s.id ? ' id="' + s.id + '"' : '') + (s.after && s.after.length ? ' after="' + s.after.join(',') + '"' : '') + '>' + s.description + '</subplan>')
+  }
+  for (const k of (t.tasks || [])) {
+    let attrs = ' id="' + k.id + '"'
+    if (k.after) attrs += ' after="' + k.after.join(',') + '"'
+    const subs = []
+    if (k.acceptance) subs.push('<acceptance>' + k.acceptance + '</acceptance>')
+    if (k.files) subs.push('<files>' + k.files.join(', ') + '</files>')
+    lines.push('  <task' + attrs + '>' + (subs.length ? subs.join('') : '') + k.description + '</task>')
+  }
+  // 空计划(无任务无大纲)在 v3 协议下整体无效, 补原文任务保持旧剧本"lite 空拆解"语义
+  if (!(t.tasks || []).length && !(t.subplans || []).length) {
+    lines.push('  <task id="t1">' + (t.request || '原文任务') + '</task>')
+  }
+  lines.push('</plan>')
+  return lines.join('\n')
 }
-// executor 响应构造器
+// executor 响应: 工作叙述 + 回复末尾报告块(status 旧语义映射 completed 布尔)
 function exec(over = {}) {
-  return { status: 'completed', summary: '任务完成', changedFiles: ['src/a.js'], ...over }
+  const t = { status: 'completed', summary: '任务完成', changedFiles: ['src/a.js'], ...over }
+  if (t.raw !== undefined) return t.raw
+  const completed = t.completed !== undefined ? t.completed : (t.status === 'completed' || t.status === true)
+  return '工作叙述\n<rs-task-report completed="' + completed + '">\n  <summary>' + t.summary + '</summary>\n  <changed-files>' + t.changedFiles.join(', ') + '</changed-files>\n</rs-task-report>'
 }
-// reviewer 响应构造器
+// reviewer 响应: 审查叙述 + 回复末尾裁决块
 function review(verdict, over = {}) {
-  return { verdict, reasons: verdict === 'REJECTED' ? ['存在问题'] : [], summary: '审批结论', evidence: '已运行测试验证', ...over }
+  const t = { reasons: verdict === 'REJECTED' ? ['存在问题'] : [], summary: '审批结论', ...over }
+  if (t.raw !== undefined) return t.raw
+  const reason = t.reasons && t.reasons.length ? t.reasons.join('; ') : t.summary
+  return '审查叙述\n<rs-review-verdict verdict="' + verdict + '">\n  <reason>' + reason + '</reason>\n</rs-review-verdict>'
 }
-// 子计划细化响应构造器
+// 子计划细化响应: 方案论述 + <plan> XML 任务段
 function subplanGen(ids, over = {}) {
-  return { plan: '子计划方案', tasks: ids.map(function (id) { return { id: id, description: '任务' + id } }), ...over }
+  const t = { plan: '子计划方案', tasks: ids.map(function (id) { return { id: id, description: '任务' + id } }), ...over }
+  const inner = t.tasks.map(function (k) {
+    return '  <task id="' + k.id + '"' + (k.after && k.after.length ? ' after="' + k.after.join(',') + '"' : '') + '>' + k.description + '</task>'
+  }).join('\n')
+  return t.plan + '\n<plan>\n' + inner + '\n</plan>'
+}
+// 重规划响应: 方案论述(XML 块外论述会成为 PLAN_TEXT) + <plan> XML 任务段
+function replan(prose, tasks, over = {}) {
+  return plan({ templateId: '', complexity: '', risk: '', scope: '', plan: prose || '', tasks: tasks || [], subplans: [], ...over })
 }
 
 async function runEngine(args, script) {
@@ -139,11 +177,11 @@ test('multi-plan 主路径: pr 大纲审后两子计划单元链与串行交叉�
     }),
     review('APPROVED'),
     subplanGen(['a1', 'a2']), subplanGen(['b1', 'b2']),
-    exec(), exec(),
-    review('APPROVED'), review('APPROVED'),
-    exec(), exec(),
-    review('APPROVED'), review('APPROVED'),
-    review('APPROVED'), review('APPROVED'),
+    // v3 执行序: 子计划单元链式推进(a1→r-a1→a2→r-a2→sr1→b1→…), 剧本按该交错形态排列
+    exec(), review('APPROVED'), exec(), review('APPROVED'),
+    review('APPROVED'),
+    exec(), review('APPROVED'), exec(), review('APPROVED'),
+    review('APPROVED'),
     review('APPROVED'), review('APPROVED'),
   ])
   assert.equal(result.ok, true)
@@ -166,7 +204,7 @@ test('blocked 路径: 任务连败两次且重规划重试后仍无产出', asyn
   ])
   assert.equal(result.ok, false)
   assert.equal(result.escalations, 1)
-  assert.equal(result.blocked.reason, '重规划无产出')
+  assert.equal(result.blocked.reason, '重规划无产出(计划 XML 不可解析)')
   assert.equal(result.blocked.nodeId, 't1')
 })
 
@@ -174,10 +212,11 @@ test('审批者失效: fail-closed 视为拒绝, 原样重交后恢复通过', a
   const { result, calls } = await runEngine({ request: '单点小改' }, [
     plan({ templateId: 'lite' }),
     exec(),
-    null, null,
+    null,
     exec(),
     review('APPROVED'),
   ])
+  console.error('PROBE-FC ' + JSON.stringify({ ok: result.ok, escalations: result.escalations, blocked: result.blocked, reviews: result.reviews.map(function (r) { return r.id + ':' + r.verdict + ':' + r.reviewerFault }), tasks: result.tasks.map(function (t) { return t.id + ':' + t.status + ':' + t.summary }), labels: calls.map(function (c) { return c.opts.label }) }))
   assert.equal(result.ok, true)
   assert.equal(result.escalations, 0)
   assert.equal(result.reviews[0].verdict, 'APPROVED')
@@ -206,7 +245,7 @@ test('审批者失效: 终审层面不可用走返工, 无产出则 blocked 而�
   ])
   assert.equal(result.ok, false)
   assert.equal(result.escalations, 1)
-  assert.equal(result.blocked.reason, '返工重规划无产出')
+  assert.equal(result.blocked.reason, '返工重规划无产出(计划 XML 不可解析)')
   const frReview = result.reviews.find(function (r) { return r.id === 'fr' })
   assert.equal(frReview.verdict, 'REJECTED')
   assert.equal(frReview.reviewerFault, true)
@@ -297,7 +336,8 @@ test('分诊教学: planner 提示词恢复模板选择教学并含信号矩阵�
   assert.ok(prompt.indexOf('第二步 选择工作流模板') >= 0, '缺第二步模板教学')
   assert.ok(prompt.indexOf('lite 单发终审') >= 0)
   assert.ok(prompt.indexOf('multi-plan') >= 0)
-  assert.ok(prompt.indexOf('无法评估的信号留空不填') >= 0)
+  assert.ok(prompt.indexOf('无法评估的信号省略属性') >= 0)
+  assert.ok(prompt.indexOf('原样输出 <plan>') >= 0, '缺第四步 XML 提交教学')
 })
 
 test('兜底链: Given 声明 lite 但拆多任务 When 非锁定 Then 升 plan-final', async () => {
@@ -315,23 +355,24 @@ test('兜底链: Given 声明 lite 但拆多任务 When 非锁定 Then 升 plan-
   assert.equal(result.ok, true)
 })
 
-// ── S2 审批证据与升级账 ────────────────────────────────────────────────────
+// ── S2 裁决教学与升级账 ────────────────────────────────────────────────────
 
-test('审批证据: APPROVED 空证据重问一次, 补充后通过', async () => {
+test('裁决教学: 首轮输出不可解析, 教学重问后恢复通过', async () => {
   const { result, calls } = await runEngine({ request: '单点小改' }, [
     plan({ templateId: 'lite' }),
     exec(),
-    review('APPROVED', { evidence: '' }),
-    review('APPROVED', { evidence: '实际跑了 npm test' }),
+    exec({ raw: '嗯, 我再想想, 整体不错' }),
+    review('APPROVED'),
   ])
   assert.equal(result.ok, true)
-  const reask = byLabel(calls, 'reviewer:fr:证据重问')
+  const reask = byLabel(calls, 'reviewer:fr:裁决重问')
   assert.equal(reask.length, 1)
-  assert.ok(reask[0].prompt.indexOf('验证证据') >= 0)
-  assert.equal(result.reviews[0].evidence, '实际跑了 npm test')
+  assert.ok(reask[0].prompt.indexOf('裁决格式重申') >= 0)
+  assert.equal(result.reviews[0].verdict, 'APPROVED')
+  assert.equal(result.reviews[0].reviewerFault, false, '恢复解析后不算审批者故障')
 })
 
-test('审批证据: Given emptyOutputRetryLimit=1 When 重问后仍空证据 Then 折算 REJECTED 走升级', async () => {
+test('裁决教学: Given emptyOutputRetryLimit=1 When 重问后仍不可解析 Then 折算 REJECTED 走升级', async () => {
   const { result, calls } = await runEngine({
     request: '两点小改',
     budgets: { reviewRejectBeforeEscalate: 1, emptyOutputRetryLimit: 1 },
@@ -345,18 +386,18 @@ test('审批证据: Given emptyOutputRetryLimit=1 When 重问后仍空证据 The
     }),
     review('APPROVED'),
     exec(), exec(),
-    review('APPROVED', { evidence: '' }),
-    review('APPROVED', { evidence: '   ' }),
+    exec({ raw: '呃' }),
+    exec({ raw: '呃' }),
     null, null,
   ])
   assert.equal(result.ok, false)
   assert.equal(result.escalations, 1)
-  assert.equal(result.blocked.reason, '返工重规划无产出')
-  assert.equal(byLabel(calls, 'reviewer:fr:证据重问').length, 1, '证据重问预算应为 1 次')
+  assert.equal(result.blocked.reason, '返工重规划无产出(计划 XML 不可解析)')
+  assert.equal(byLabel(calls, 'reviewer:fr:裁决重问').length, 1, '裁决重问预算应为 1 次')
   const frReview = result.reviews.find(function (r) { return r.id === 'fr' })
   assert.equal(frReview.verdict, 'REJECTED')
-  assert.equal(frReview.reviewerFault, true, '证据耗尽折算拒绝应标 reviewerFault')
-  assert.ok(frReview.summary.indexOf('验证证据') >= 0)
+  assert.equal(frReview.reviewerFault, true, '裁决耗尽折算拒绝应标 reviewerFault')
+  assert.ok(frReview.summary.indexOf('审批者不可用(视为拒绝)') >= 0)
 })
 
 test('升级账: Given 交付类审批通过 When 此前有升级 Then escalations 清零', async () => {
@@ -371,7 +412,7 @@ test('升级账: Given 交付类审批通过 When 此前有升级 Then escalatio
     review('APPROVED'),
     exec(),
     review('REJECTED', { reasons: ['质量不达标'] }),
-    { tasks: [{ id: 'rw1', description: '修复质量问题' }] },
+    replan('', [{ id: 'rw1', description: '修复质量问题' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -404,7 +445,7 @@ test('计划审批: pr 拒绝后带意见重规划重建任务段, 再审通过�
       ],
     }),
     review('REJECTED', { reasons: ['缺少验证方式与文件互斥声明'] }),
-    { plan: '修订后的计划', tasks: [{ id: 'u1', description: '重建后的唯一任务' }] },
+    replan('修订后的计划', [{ id: 'u1', description: '重建后的唯一任务' }]),
     review('APPROVED'),
     exec(),
     review('APPROVED'),
@@ -433,16 +474,16 @@ test('pr 首拒: Given 未达 planRejectBeforeBlocked When 拒绝 Then planner-c
       tasks: [{ id: 't1', description: '任务一', after: [] }],
     }),
     review('REJECTED', { reasons: ['粒度不均'] }),
-    { plan: '修订计划', tasks: [{ id: 'u1', description: '重建任务' }] },
+    replan('修订计划', [{ id: 'u1', description: '重建任务' }]),
     review('APPROVED'),
     exec(),
     review('APPROVED'),
   ])
   assert.equal(result.ok, true)
   assert.equal(result.escalations, 0, '未达阈值重规划不计升级账')
-  const replan = byLabel(calls, 'planner:计划重规划#1')[0]
-  assert.equal(replan.opts.provider, 'pc', '未达阈值应由 planner-command 位执行')
-  assert.ok(replan.prompt.indexOf('粒度不均') >= 0)
+  const replanCall = byLabel(calls, 'planner:计划重规划#1')[0]
+  assert.equal(replanCall.opts.provider, 'pc', '未达阈值应由 planner-command 位执行')
+  assert.ok(replanCall.prompt.indexOf('粒度不均') >= 0)
 })
 
 test('pr 连拒: Given planRejectBeforeBlocked=2 When 连拒两次 Then 第二次起 planner-escalate 升级且 pr 通过不清零', async () => {
@@ -456,9 +497,9 @@ test('pr 连拒: Given planRejectBeforeBlocked=2 When 连拒两次 Then 第二�
       tasks: [{ id: 't1', description: '任务一', after: [] }],
     }),
     review('REJECTED', { reasons: ['不可执行一'] }),
-    { plan: '计划二', tasks: [{ id: 'u1', description: '重建任务一' }] },
+    replan('计划二', [{ id: 'u1', description: '重建任务一' }]),
     review('REJECTED', { reasons: ['不可执行二'] }),
-    { plan: '计划三', tasks: [{ id: 'v1', description: '重建任务二' }] },
+    replan('计划三', [{ id: 'v1', description: '重建任务二' }]),
     review('APPROVED'),
     exec(),
     review('APPROVED'),
@@ -479,9 +520,9 @@ test('pr 连拒达上限: Given planRejectBeforeBlocked=1 When 连拒至 ESCALAT
       tasks: [{ id: 't1', description: '任务一', after: [] }],
     }),
     review('REJECTED', { reasons: ['不可执行'] }),
-    { plan: '计划二', tasks: [{ id: 'u1', description: '重建任务' }] },
+    replan('计划二', [{ id: 'u1', description: '重建任务' }]),
     review('REJECTED', { reasons: ['仍不可执行'] }),
-    { plan: '计划三', tasks: [{ id: 'v1', description: '再重建任务' }] },
+    replan('计划三', [{ id: 'v1', description: '再重建任务' }]),
     review('REJECTED', { reasons: ['依旧不可执行'] }),
   ])
   assert.equal(result.ok, false)
@@ -528,7 +569,7 @@ test('fr 连拒: Given reviewRejectBeforeEscalate=1 When 终审一拒 Then 返�
     review('APPROVED'),
     exec(),
     review('REJECTED', { reasons: ['整体质量不达标'] }),
-    { tasks: [{ id: 'rw1', description: '返工修复' }] },
+    replan('', [{ id: 'rw1', description: '返工修复' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -577,7 +618,7 @@ test('任务一拒即升级: Given reviewRejectBeforeEscalate=1 When 任务被�
     plan({ templateId: 'lite' }),
     exec(),
     review('REJECTED', { reasons: ['实现有误'] }),
-    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    replan('', [{ id: 'e1', description: '换法重做' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -698,14 +739,16 @@ test('调度预算: 四子计划大图完整跑完, 不触发预算 blocked', as
       ],
     }),
     review('APPROVED'),
-    subplanGen(['a1', 'a2']), subplanGen(['b1', 'b2']), subplanGen(['c1', 'c2']), subplanGen(['d1', 'd2']),
-    exec(), exec(), exec(), exec(),
-    review('APPROVED'), review('APPROVED'), review('APPROVED'), review('APPROVED'),
-    exec(), exec(), exec(), exec(),
-    review('APPROVED'), review('APPROVED'), review('APPROVED'), review('APPROVED'),
-    review('APPROVED'), review('APPROVED'), review('APPROVED'), review('APPROVED'),
-    review('APPROVED'),
-    review('APPROVED'),
+    subplanGen(['a1', 'a2']),
+    // v3 执行序: 轮次推进 —— 同轮内细分先行、任务次之、审批串行收尾, doneMap 轮首快照使 sr 落后一轮
+    // p1→(p2细分,a1)→(p3细分,r-a1)→(p4细分,a2)→r-a2→sr1→b1→r-b1→b2→r-b2→sr2→c1→r-c1→c2→r-c2→sr3→d1→r-d1→d2→r-d2→sr4→xr1→xr2
+    subplanGen(['b1', 'b2']), exec(),
+    subplanGen(['c1', 'c2']), review('APPROVED'),
+    subplanGen(['d1', 'd2']), exec(), review('APPROVED'), review('APPROVED'),
+    exec(), review('APPROVED'), exec(), review('APPROVED'), review('APPROVED'),
+    exec(), review('APPROVED'), exec(), review('APPROVED'), review('APPROVED'),
+    exec(), review('APPROVED'), exec(), review('APPROVED'), review('APPROVED'),
+    review('APPROVED'), review('APPROVED'),
   ])
   assert.equal(result.ok, true)
   assert.ok(!logs.some(function (m) { return m.indexOf('超出预算') >= 0 }))
@@ -775,7 +818,7 @@ test('故障转移: 全候选耗尽视为该次调用失败, 重试后仍失败�
     null, null,
   ])
   assert.equal(result.ok, false)
-  assert.equal(result.blocked.reason, '重规划无产出')
+  assert.equal(result.blocked.reason, '重规划无产出(计划 XML 不可解析)')
   const execCalls = byLabel(calls, 'executor:t1')
   assert.equal(execCalls.length, 2)
   assert.equal(execCalls[0].opts.provider, 'ea')
@@ -849,7 +892,7 @@ test('细分位 executor-escalate: 升级产出新任务取升级位', async () 
   }, [
     plan({ templateId: 'lite' }),
     exec({ status: 'failed', summary: '依赖缺失' }),
-    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    replan('', [{ id: 'e1', description: '换法重做' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -994,15 +1037,17 @@ test('拒绝前缀: Given reviewerFault 折算拒绝 When 重做 Then 注入原�
   assert.ok(redoPrompt.indexOf('原样重新提交') >= 0)
 })
 
-test('审查契约: reviewer 提示词要求 severity 分级且 critical 必须进 reasons', async () => {
+test('审查契约: reviewer 提示词要求裁决块形态且 REJECTED 附可执行意见', async () => {
   const { calls } = await runEngine({ request: '单点小改' }, [
     plan({ templateId: 'lite' }),
     exec(),
     review('APPROVED'),
   ])
   const prompt = byLabel(calls, 'reviewer:fr')[0].prompt
-  assert.ok(prompt.indexOf('severity') >= 0, '审查契约缺 severity 字段')
-  assert.ok(prompt.indexOf('critical') >= 0, '审查契约缺 critical 进 reasons 规则')
+  assert.ok(prompt.indexOf('<rs-review-verdict verdict="APPROVED">') >= 0, '审查契约缺裁决块示例')
+  assert.ok(prompt.indexOf('REJECTED') >= 0, '审查契约缺 REJECTED 取值')
+  assert.ok(prompt.indexOf('具体、可执行的修改意见') >= 0, '审查契约缺驳回意见要求')
+  assert.ok(prompt.indexOf('证据') >= 0, '审查契约缺证据要求')
 })
 
 test('拆解契约: planner 提示词含 acceptance/files 拆解规则并透传到执行与审批', async () => {
@@ -1069,9 +1114,9 @@ test('任务级升级达上限: 两次升级后仍失败 → blocked', async () 
     plan({ templateId: 'plan-final', complexity: 'medium', tasks: [{ id: 't1', description: '任务一', after: [] }] }),
     review('APPROVED'),
     exec({ status: 'failed', summary: '失败一' }), exec({ status: 'failed', summary: '失败一' }),
-    { plan: '换法一', tasks: [{ id: 'e1', description: '换法一重做' }] },
+    replan('换法一', [{ id: 'e1', description: '换法一重做' }]),
     exec({ status: 'failed', summary: '失败二' }), exec({ status: 'failed', summary: '失败二' }),
-    { plan: '换法二', tasks: [{ id: 'e2', description: '换法二重做' }] },
+    replan('换法二', [{ id: 'e2', description: '换法二重做' }]),
     exec({ status: 'failed', summary: '失败三' }), exec({ status: 'failed', summary: '失败三' }),
     null,
   ])
@@ -1089,7 +1134,7 @@ test('尾段替换: plan-final 任务级升级后终审随段重建并放行', a
     review('APPROVED'),
     exec({ status: 'failed', summary: '依赖缺失' }),
     exec({ status: 'failed', summary: '依赖缺失' }),
-    { plan: '换方案', tasks: [{ id: 'e1', description: '换方案重做' }] },
+    replan('换方案', [{ id: 'e1', description: '换方案重做' }]),
     exec(), review('APPROVED'),
   ])
   assert.equal(result.ok, true)
@@ -1111,7 +1156,7 @@ test('尾段替换: multi-plan 子任务升级后子计划审与交叉终审串�
     subplanGen(['a1']),
     exec({ status: 'failed', summary: '环境损坏' }),
     exec({ status: 'failed', summary: '环境损坏' }),
-    { tasks: [{ id: 'e1', description: '换方案重做' }] },
+    replan('', [{ id: 'e1', description: '换方案重做' }]),
     exec(), review('APPROVED'), review('APPROVED'), review('APPROVED'), review('APPROVED'),
   ])
   assert.equal(result.ok, true)
@@ -1131,7 +1176,7 @@ test('返工任务 id 防撞: 与已完成节点重名的返工任务被重编�
     }),
     review('APPROVED'),
     exec(), review('REJECTED'),
-    { plan: '返工', tasks: [{ id: 't1', description: '修被驳回的问题' }] },
+    replan('返工', [{ id: 't1', description: '修被驳回的问题' }]),
     exec(), review('APPROVED'),
   ])
   assert.equal(result.ok, true)
@@ -1186,14 +1231,14 @@ test('子计划升级: Given sr 连拒达 planRejectBeforeBlocked=1 When 拒绝�
     exec(),
     review('APPROVED'),
     review('REJECTED', { reasons: ['子计划交付不完整'] }),
-    { tasks: [{ id: 'e1', description: '换法重做子计划交付' }] },
+    replan('', [{ id: 'e1', description: '换法重做子计划交付' }]),
     exec(), review('APPROVED'), review('APPROVED'), review('APPROVED'), review('APPROVED'),
   ])
   assert.equal(result.ok, true)
-  const replan = byLabel(calls, 'planner:子计划重规划#1')[0]
+  const replanCall = byLabel(calls, 'planner:子计划重规划#1')[0]
   assert.ok(replan, 'sr 达阈值应触发子计划重规划')
-  assert.equal(replan.opts.provider, 'pe', '子计划重规划应取 planner-escalate 位')
-  assert.ok(replan.prompt.indexOf('子计划交付不完整') >= 0)
+  assert.equal(replanCall.opts.provider, 'pe', '子计划重规划应取 planner-escalate 位')
+  assert.ok(replanCall.prompt.indexOf('子计划交付不完整') >= 0)
   assert.ok(result.tasks.some(function (t) { return t.id === 'e1' && t.status === 'done' }), '重建任务应完成')
 })
 
@@ -1205,7 +1250,7 @@ test('报告追问耗尽: Given reportNudgeLimit=1 When 追问后仍空白 Then 
     plan({ templateId: 'lite' }),
     exec({ status: 'completed', summary: '' }),
     exec({ status: 'completed', summary: '' }),
-    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    replan('', [{ id: 'e1', description: '换法重做' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -1229,7 +1274,7 @@ test('预算钳制上界: Given reviewRejectBeforeEscalate=11 When clamp 到 10 
   }
   script.push(
     review('REJECTED', { reasons: ['第 10 次拒绝'] }),
-    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    replan('', [{ id: 'e1', description: '换法重做' }]),
     exec(),
     review('APPROVED'),
   )
@@ -1268,7 +1313,7 @@ test('预算钳制数值串: Given 阈值传带空白的有效数 When 按数值
     plan({ templateId: 'lite' }),
     exec(),
     review('REJECTED', { reasons: ['实现有误'] }),
-    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    replan('', [{ id: 'e1', description: '换法重做' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -1282,7 +1327,7 @@ test('合并记账: Given 默认阈值 2 下失败一次+被拒一次 When 记�
     exec({ status: 'failed', summary: '环境未就绪' }),
     exec(),
     review('REJECTED', { reasons: ['实现有误'] }),
-    { tasks: [{ id: 'e1', description: '换法重做' }] },
+    replan('', [{ id: 'e1', description: '换法重做' }]),
     exec(),
     review('APPROVED'),
   ])
@@ -1408,7 +1453,7 @@ test('守护: engine.js 体量受控(防"全文搬运"形态无感膨胀)', asyn
 
 test('rework 上限: Given 终审反复被拒 When 返工达 ESCALATION_LIMIT Then 语义化 blocked 而非循环预算爆掉', async () => {
   const reworkRound = (taskLabel) => [
-    { tasks: [{ id: 'rw-' + taskLabel, description: '返工 ' + taskLabel }] },
+    replan('', [{ id: 'rw-' + taskLabel, description: '返工 ' + taskLabel }]),
     exec(),
     review('REJECTED', { reasons: ['质量仍不达标 ' + taskLabel] }),
   ]
