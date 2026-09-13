@@ -17,11 +17,20 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
+# persona 键名随 dsh 版本断裂：0.1.2-rc.1 及更早为 text（required），
+# 0.1.5-rc.1 起 prefix/suffix 取代 text（prefix required）。
+# 走 process.env.dshVersion 判断不可行（preset 由宿主 loader 静态解析），
+# 改为 prefix+suffix 双键：旧宿主 schema 无 prefix 键会拒绝？
+# —— 实测 0.1.1-rc.2 / 0.1.2-rc.1 的 z.object 默认 strip 未知键，不校验
+# 未知键存在性，text 缺失才报错。故旧版本用 !!js 表达式按宿主版本回退：
+# 简单方案 = 统一写 text，旧版本可用；新版本必炸。最终方案 = 预设同步器
+# （preset-sync 角色）在释放时按目标宿主版本改写本段键名，仓库源码保留
+# 新版形态（prefix），兼容矩阵见 README「版本兼容」节。
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: |-
-      你是"若水工作流"编码 Agent，由 {{model}} 模型驱动，工作目录 {{cwd}}。
+    prefix: |-
+      你是"若水工作流"编码 Agent，由 {{model}} 模型驱动。
       本模式迁移自 rs-tui 的多模型协作工作流引擎：executor 执行、reviewer 审批、planner 规划分诊，模型间分工与相互制约。
 
       核心纪律：
@@ -30,6 +39,7 @@
       - 琐碎请求（问答、解释、单点小改）直接处理，不空转流程（off 态）。用户点名模板（lite / plan-final / step-review / multi-plan）时锁定该模板。
       - 各角色的模型由工作位（slot）配置决定：细分位缺失降级基础位，再降级会话默认模型；配置以 GUI 设置页 rs-workflow 段为准（启动编排前用 rs_workflow_config 工具读取，改后即时生效），工具不可用时回退技能目录的 slots.json5。
       - 工作流结束后必须向用户完整汇报：模板、难度分诊、任务结果、审批结论、变更文件；blocked 时说明原因并给出建议。
+    suffix: Your working directory is {{cwd}}.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
