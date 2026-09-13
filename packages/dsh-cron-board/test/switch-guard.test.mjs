@@ -60,6 +60,24 @@ test('client.js 无顶层词法声明(经典 script 书挡内安全)', () => {
   assert.ok(trimmed.endsWith('})()'), '必须以 IIFE 书挡结尾')
 })
 
+test('启停开关乐观更新契约:即时翻转 + 失败回滚提示,禁止等待往返才反馈', () => {
+  // Given 受控 switch(checked 锁定 props)点击后无本地 state 变化不产生视觉反馈
+  // When toggleJob/toggleEnv 发起 PATCH
+  // Then 先乐观翻转,失败回滚并 notice,最后 reload 对账权威态(顺序锁定)
+  for (const fn of ['toggleJob', 'toggleEnv']) {
+    const start = source.indexOf('const ' + fn + ' = async')
+    assert.ok(start > 0, `缺少 ${fn}`)
+    const body = source.slice(start, source.indexOf('reload()', start))
+    assert.match(body, /apply(Job|Env)Patch\([^)]*, \{ enabled: !/m, `${fn} 必须先乐观翻转`)
+    assert.match(body, /if \(!outcome\.ok\)/m, `${fn} 必须检查 PATCH 结果`)
+    assert.match(body, /apply(Job|Env)Patch\([^)]*, \{ enabled: (job|row)\.enabled \}\)/m, `${fn} 失败必须回滚`)
+    assert.match(body, /切换失败:/m, `${fn} 失败必须提示,禁止静默`)
+  }
+  // 两个 Tab 均接收乐观更新通道(Board 下传)
+  assert.match(source, /applyJobPatch, wsModel/)
+  assert.match(source, /envs, reload, applyEnvPatch/)
+})
+
 test('client.js 主页面双形态挂载契约(默认主界面;设置开关手动移入侧边栏;无自动回退)', () => {
   // Given 用户要求:默认永远主界面;检测到 better-sidebar 提供设置项,由用户手动移入;
   //        移入后页签关闭/禁用不再自动返回主界面(挂载权完全交给用户与侧边栏)
