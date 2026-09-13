@@ -12,6 +12,7 @@ import { createStore } from '../src/store.mjs'
 import { createLogger } from '../src/logger.mjs'
 import { createExecutor } from '../src/executor.mjs'
 import { createApi } from '../src/api.mjs'
+import { nextRunAtOf } from '../src/cron.mjs'
 
 async function makeApi(t, overrides = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-api-'))
@@ -190,6 +191,38 @@ test('jobs 路由:非法 cron 表达式被拒', async (t) => {
   // Then 400 且文案含表达式
   assert.equal(res.status, 400)
   assert.match(res.payload.error, /cron/)
+})
+
+test('jobs 路由:编辑保存按当前 schedule 重算 nextRunAt', async (t) => {
+  const { api } = await makeApi(t)
+  // Given 任务按工作日 09:55 排期
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '改期', kind: 'shell', command: 'x', schedule: '55 9 * * 1-5',
+  })
+  assert.equal(created.status, 200)
+  const jobId = created.payload.id
+  const before = created.payload.nextRunAt
+  // When 编辑改为每天 09:00(表单契约:请求体不带 nextRunAt)
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + jobId, { schedule: '0 9 * * *', prompt: 'x' })
+  // Then 触发点随新表达式重算,不残留工作日旧值
+  assert.equal(patched.status, 200)
+  assert.notEqual(patched.payload.nextRunAt, before)
+  assert.equal(patched.payload.nextRunAt, nextRunAtOf('0 9 * * *'))
+})
+
+test('jobs 路由:PATCH 显式 nextRunAt 优先于重算(导入保留原状态契约)', async (t) => {
+  const { api } = await makeApi(t)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: '导入', kind: 'shell', command: 'x', schedule: '* * * * *',
+  })
+  assert.equal(created.status, 200)
+  // When 请求体显式携带 nextRunAt
+  const patched = await call(api, 'PATCH', '/api/cron-board/jobs/' + created.payload.id, {
+    schedule: '0 9 * * *', nextRunAt: 1750000000000,
+  })
+  // Then 显式值落库,不被重算覆盖
+  assert.equal(patched.status, 200)
+  assert.equal(patched.payload.nextRunAt, 1750000000000)
 })
 
 test('jobs 路由:手动运行端到端——RunRecord 产生、日志可读、状态终态', async (t) => {

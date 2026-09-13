@@ -11,11 +11,22 @@ export function createScheduler({ store, executor, readTickMs, now = () => Date.
   // 重入闸门:上一 tick 未完成(store 写链排队/慢盘)时跳过本轮,防同一触发点双触发
   let ticking = false
 
-  // 重启孤儿收尾:上次进程遗留的 queued/running 统一标 interrupted,不误标失败
+  // 历史版本编辑残留的自愈:nextRunAt 不在当前 schedule 的触发点上即重算,
+  // 防残留值到点误执行;合法触发点与空值(无未来触发点)不动,保留宽限执行与 misfire 语义
+  function isLegalTrigger(schedule, at) {
+    return nextRunAtOf(schedule, new Date(at - 1000)) === at
+  }
+
+  // 重启恢复:孤儿运行收尾 + 触发点残留自愈
   async function recover() {
     for (const run of [...store.runs.rows]) {
       if (run.status !== 'queued' && run.status !== 'running') continue
       await store.runs.update(run.runId, { status: 'interrupted', endedAt: now(), message: INTERRUPTED_MESSAGE })
+    }
+    for (const job of store.jobs.list()) {
+      if (typeof job.nextRunAt !== 'number' || Number.isNaN(job.nextRunAt)) continue
+      if (isLegalTrigger(job.schedule, job.nextRunAt)) continue
+      await store.jobs.update(job.id, { nextRunAt: nextRunAtOf(job.schedule, new Date(now())) })
     }
   }
 
