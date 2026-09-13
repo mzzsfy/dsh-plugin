@@ -11,6 +11,7 @@ import { createStore } from '../src/store.mjs'
 import { createLogger } from '../src/logger.mjs'
 import { createExecutor } from '../src/executor.mjs'
 import { createScheduler } from '../src/scheduler.mjs'
+import { nextRunAtOf } from '../src/cron.mjs'
 
 const TICK_MS = 30 * 1000
 
@@ -142,6 +143,52 @@ test('scheduler:recover 将遗留 queued/running 孤儿记录标 interrupted', a
   assert.equal(store.runs.get('r-queued').message, 'dsh 重启中断')
   assert.equal(store.runs.get('r-running').status, 'interrupted')
   assert.equal(store.runs.get('r-done').status, 'success')
+})
+
+test('scheduler:recover 自愈残留触发点——nextRunAt 非当前表达式触发点即重算', async (t) => {
+  // Given 旧版本编辑残留:工作日任务带着非工作日表达式的触发点(历史 bug 数据)
+  const { store, scheduler } = await makeScheduler(t)
+  const legal = nextRunAtOf('55 9 * * 1-5')
+  const stale = nextRunAtOf('0 9 * * *')
+  const jobStale = await store.jobs.create({
+    name: '残留', kind: 'shell', command: 'x', schedule: '55 9 * * 1-5',
+    enabled: true, timeoutMs: 1000, nextRunAt: stale,
+  })
+  const jobStaleDisabled = await store.jobs.create({
+    name: '残留禁用', kind: 'shell', command: 'x', schedule: '55 9 * * 1-5',
+    enabled: false, timeoutMs: 1000, nextRunAt: stale,
+  })
+  const jobLegal = await store.jobs.create({
+    name: '合法', kind: 'shell', command: 'x', schedule: '55 9 * * 1-5',
+    enabled: true, timeoutMs: 1000, nextRunAt: legal,
+  })
+  const jobNull = await store.jobs.create({
+    name: '空值', kind: 'shell', command: 'x', schedule: '0 0 30 2 *',
+    enabled: true, timeoutMs: 1000, nextRunAt: null,
+  })
+  // When 重启恢复
+  await scheduler.recover()
+  // Then 残留值(启用与禁用)按当前 schedule 重算为合法触发点;合法值与空值不动
+  assert.equal(store.jobs.get(jobStale.id).nextRunAt, legal)
+  assert.equal(store.jobs.get(jobStaleDisabled.id).nextRunAt, legal)
+  assert.equal(store.jobs.get(jobLegal.id).nextRunAt, legal)
+  assert.equal(store.jobs.get(jobNull.id).nextRunAt, null)
+})
+
+test('scheduler:recover 自愈幂等——修复后的数据再次恢复不再改写', async (t) => {
+  const { store, scheduler } = await makeScheduler(t)
+  const legal = nextRunAtOf('55 9 * * 1-5')
+  const job = await store.jobs.create({
+    name: '残留', kind: 'shell', command: 'x', schedule: '55 9 * * 1-5',
+    enabled: true, timeoutMs: 1000, nextRunAt: nextRunAtOf('0 9 * * *'),
+  })
+  await scheduler.recover()
+  assert.equal(store.jobs.get(job.id).nextRunAt, legal)
+  // When 时钟推进后再次恢复
+  await new Promise((resolve) => setTimeout(resolve, 1100))
+  await scheduler.recover()
+  // Then 已合法的触发点不被重算推迟
+  assert.equal(store.jobs.get(job.id).nextRunAt, legal)
 })
 
 test('scheduler:并发闸门——maxConcurrent=1 时第二个单元排队,首个完成后推进', async (t) => {
