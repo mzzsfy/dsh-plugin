@@ -367,6 +367,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
         const existing = store.jobs.get(params.id)
         if (!existing) throw new Error(MESSAGES.jobNotFound)
         const fields = normalizeJob({ ...existing, ...body })
+        // 编辑保存:请求未显式携带 nextRunAt 即按当前 schedule 重算。
+        // 合并旧任务行会把既有 nextRunAt 当作显式值透传,改期后残留旧触发点导致误执行
+        if (body.nextRunAt === undefined) fields.nextRunAt = nextRunAtOf(fields.schedule)
         const row = await store.jobs.update(params.id, fields)
         sendJson(res, 200, row)
       },
