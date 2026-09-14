@@ -106,10 +106,11 @@ function makeFullCtx({ timerAvailable = true } = {}) {
       if (name === 'agentPresets') return { defaultId: '', list: async () => [] }
       if (name === 'sessionQuery') {
         return {
-          // 镜像宿主最严准入契约:守护 driver 总是传信号(真实宿主各版本为可选链)
+          // 镜像宿主最严准入契约:守护 driver 总是传信号(真实宿主各版本为可选链);
+          // 记录形态镜像官方 SessionRecord(dsh-session-query):id 在 header.id
           listSessions: async (signal) => {
             signal.throwIfAborted()
-            return [...sessions.values()].map((entry) => ({ id: entry.id }))
+            return [...sessions.values()].map((entry) => ({ header: { id: entry.id }, live: true, persisted: false }))
           },
         }
       }

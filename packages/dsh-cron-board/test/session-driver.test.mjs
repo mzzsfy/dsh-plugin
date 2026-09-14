@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { createSessionDriver } from '../src/session-driver.mjs'
 
 // 可控桩:会话注册表 + 控制器(autoIdle 模拟宿主投递后处理完成转 idle;投递即终态下仅影响忙判定)
-function makeStubs({ autoIdle = true } = {}) {
+function makeStubs({ autoIdle = true, persisted = [] } = {}) {
   const sessions = new Map()
   let nextId = 0
   const created = []
@@ -42,10 +42,14 @@ function makeStubs({ autoIdle = true } = {}) {
     get: (id) => sessions.get(id),
   }
   const sessionQuery = {
-    // 镜像宿主最严准入契约:守护 driver 总是传信号(真实宿主各版本为可选链,将来收紧不崩)
+    // 镜像宿主最严准入契约:守护 driver 总是传信号(真实宿主各版本为可选链,将来收紧不崩);
+    // 记录形态镜像官方 SessionRecord(dsh-session-query):id 在 header.id
     async listSessions(signal) {
       signal.throwIfAborted()
-      return [...sessions.values()].map((entry) => ({ id: entry.id }))
+      return [
+        ...[...sessions.values()].map((entry) => ({ header: { id: entry.id }, live: true, persisted: false })),
+        ...persisted.map((id) => ({ header: { id }, live: false, persisted: true })),
+      ]
     },
   }
   return { sessions, created, createRequests, prompts, sessionController, agents, sessionQuery }
@@ -106,6 +110,18 @@ test('session-driver:pinned 复用同一会话,投递指向 S1', async () => {
   assert.equal(outcome.sessionId, 's-1')
   assert.equal(stubs.prompts[0].sessionId, 's-1')
   assert.equal(stubs.prompts[0].mode, 'queue')
+  assert.equal(stubs.created.length, 0)
+})
+
+test('session-driver:pinned 冷会话仅持久层可见时复用不重建', async () => {
+  const stubs = makeStubs({ persisted: ['cold-1'] })
+  const driver = makeDriver(stubs)
+  // When pinned 指向的会话不在 agents 注册表,仅持久层 headers 可见
+  const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'cold-1' } }, env: {} })
+  // Then 复用冷会话投递,不触发新建
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.sessionId, 'cold-1')
+  assert.equal(stubs.prompts[0].sessionId, 'cold-1')
   assert.equal(stubs.created.length, 0)
 })
 
