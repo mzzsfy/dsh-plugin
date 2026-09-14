@@ -261,8 +261,7 @@ test('SteerRecallDock 渲染:steering 行产出撤回条,纯文本按钮可用',
   const root = dock({})
   assert.equal(root.type, 'div')
   assert.equal(root.props.className, 'sm-steer')
-  assert.equal(root.children[0].children[0], '插话待应用')
-  const rows = root.children[1]
+  const rows = root.children[0]
   assert.equal(rows.length, 1, 'queued 与 context 行不得渲染')
   const row = rows[0]
   assert.equal(row.props.className, 'sm-steer__row')
@@ -270,13 +269,13 @@ test('SteerRecallDock 渲染:steering 行产出撤回条,纯文本按钮可用',
   assert.equal(button.type, 'button')
   assert.equal(button.props.disabled, false, '纯文本插话按钮应可用')
   assert.equal(button.props.title, '撤回到输入框重新编辑')
-  assert.equal(button.children[0], '撤回编辑')
+  assert.equal(button.children[0].type, 'svg', '按钮应承载撤回图标(svg),不使用文字')
 })
 
 test('SteerRecallDock 渲染:含附件行(text=null)按钮禁用并提示', () => {
   const rich = { id: 'm2', placement: 'steering', preview: '[图片]', text: null }
   const dock = dockWith({ queue: [rich], subagent: null })
-  const row = dock({}).children[1][0]
+  const row = dock({}).children[0][0]
   const button = row.children[1]
   assert.equal(button.props.disabled, true, '含附件插话按钮应禁用')
   assert.equal(button.props.title, '含附件的插话不支持撤回')

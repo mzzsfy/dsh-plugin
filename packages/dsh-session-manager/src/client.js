@@ -173,19 +173,21 @@ const CSS = [
   '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
   '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55));',
   '  background:light-dark(rgba(15,17,21,.04), rgba(255,255,255,.06)); }',
-  // 插话撤回条:输入框上方单行胶囊队列,与官方队列面板同区(colors 取宿主实测,
-  // dock 区 dsw alias 变量同历史浮层,不可依赖)
-  '.sm-steer { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:0 2px 6px; }',
-  '.sm-steer__label { flex:none; font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:rgba(127,127,127,.9); }',
+  // 插话撤回条:右对齐贴用户消息侧,预览胶囊 + 悬停浮现的撤回图标
+  // (与官方消息气泡下操作图标同观感;colors 取宿主实测,dock 区 alias 变量为空)
+  '.sm-steer { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; padding:0 2px 6px; }',
   '.sm-steer__row { display:inline-flex; align-items:center; gap:2px; min-width:0; max-width:100%;',
   '  padding:1px 3px 1px 10px; border-radius:999px; background:rgba(127,127,127,.14); }',
   '.sm-steer__text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:rgba(127,127,127,.85); }',
-  '.sm-steer__btn { flex:none; border:0; background:transparent; cursor:pointer; padding:2px 8px;',
-  '  border-radius:999px; font:12px/18px sans-serif; font-weight:600; color:#1677ff; }',
-  '.sm-steer__btn:hover:not(:disabled) { background:rgba(22,119,255,.12); }',
-  '.sm-steer__btn:disabled { cursor:default; color:rgba(127,127,127,.6); }',
+  '.sm-steer__btn { flex:none; display:inline-flex; align-items:center; justify-content:center;',
+  '  width:22px; height:22px; border:0; background:transparent; cursor:pointer; padding:0;',
+  '  border-radius:6px; color:rgba(127,127,127,.55); opacity:0; transition:opacity .12s, color .12s; }',
+  '.sm-steer__row:hover .sm-steer__btn, .sm-steer__btn:focus-visible, .sm-steer__btn:disabled { opacity:1; }',
+  '.sm-steer__btn:hover:not(:disabled) { color:#1677ff; background:rgba(22,119,255,.1); }',
+  '.sm-steer__btn:disabled { cursor:default; color:rgba(127,127,127,.35); }',
   '.sm-steer__btn:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
+  '@media (prefers-reduced-motion: reduce) { .sm-steer__btn { transition:none; } }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -1150,6 +1152,18 @@ async function withdrawSteer(row, actions) {
   return true
 }
 
+// 撤回图标(undo 弯箭头,stroke 继承 currentColor,与官方消息操作图标同观感)
+function SteerRecallIcon() {
+  return h('svg', {
+    viewBox: '0 0 16 16', width: 14, height: 14, fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+    'aria-hidden': true,
+  },
+    h('path', { d: 'M3 6.5h6.5a3.5 3.5 0 0 1 0 7H6' }),
+    h('path', { d: 'M6 3.5 3 6.5l3 3' }),
+  )
+}
+
 // 插话撤回条:输入框上方零占位条目,存在未应用插话时才渲染;
 // 会话面(updateQueue)与草稿动作(inputActions.setDraft)任一缺失即禁用
 function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
@@ -1167,7 +1181,6 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
       .finally(() => setBusy(false))
   }
   return h('div', { className: 'sm-steer' },
-    h('span', { className: 'sm-steer__label' }, '插话待应用'),
     rows.map((row) => {
       const textOnly = row.text !== null
       return h('div', { key: row.id, className: 'sm-steer__row' },
@@ -1176,8 +1189,9 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
           className: 'sm-steer__btn',
           disabled: busy || !textOnly,
           title: textOnly ? '撤回到输入框重新编辑' : '含附件的插话不支持撤回',
+          'aria-label': textOnly ? '撤回插话' : '含附件的插话不支持撤回',
           onClick: () => withdraw(row),
-        }, '撤回编辑'),
+        }, SteerRecallIcon()),
       )
     }),
   )
