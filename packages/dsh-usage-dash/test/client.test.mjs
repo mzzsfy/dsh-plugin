@@ -72,6 +72,7 @@ const {
   modelIoPercentText,
   moneyViewOf,
   hasTipContent,
+  hasAnomalyNews,
   tipModelEntries,
   modelSegmentLabel,
   modelSpeedText,
@@ -1360,4 +1361,15 @@ test('leftAxisTicks 金额格式化:柱刻度走传入格式化,速度刻度仍�
   assert.deepEqual(money.map((tick) => tick.label), ['¥50', '¥100'])
   const speed = leftAxisTicks([], 100, [5, 10], 10, (value) => `¥${value}`)
   assert.deepEqual(speed.map((tick) => tick.label), ['5', '10'])
+})
+
+test('hasAnomalyNews 折叠提醒判定:有异常日志或写入失败即提醒', () => {
+  // Given 日志有条目 When 判定 Then true;Given 仅写入失败计数 When 判定 Then true
+  assert.equal(hasAnomalyNews({ log: [{ time: 0, kind: 'record', detail: 'x' }] }), true)
+  assert.equal(hasAnomalyNews({ log: [], recordFailures: 1 }), true)
+  assert.equal(hasAnomalyNews({ log: [{ time: 0, kind: 'skipped', detail: 'y' }], recordFailures: 0 }), true)
+  // Given 全空/字段缺席/null When 判定 Then false
+  assert.equal(hasAnomalyNews({ log: [], recordFailures: 0 }), false)
+  assert.equal(hasAnomalyNews({}), false)
+  assert.equal(hasAnomalyNews(null), false)
 })

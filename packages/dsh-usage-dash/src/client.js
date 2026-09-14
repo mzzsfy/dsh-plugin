@@ -901,6 +901,10 @@ function modelIoPercentText(item, t) {
 // 趋势 tooltip 内容门:全零槽(无任何用量)不渲染 tooltip
 const hasTipContent = (hoverSlot) => Boolean(hoverSlot) && hoverSlot.total > 0
 
+// 折叠提醒判定:折叠层内有异常日志条目或写入失败即值得提醒
+const hasAnomalyNews = (status) => !!status
+  && ((status.log?.length ?? 0) > 0 || (status.recordFailures ?? 0) > 0)
+
 // 趋势 tooltip 模型行数据:主行 = 可见且当前时段有用量的模型;OTHER 子行 = OTHER 可见
 // 且当前时段有用量的其余模型明细,按 tokens 降序由本函数保证
 const tipModelEntries = (hoverSlot, visibleSet) => {
@@ -2011,10 +2015,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-status-fold{display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px}
+.ud-status-fold{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px}
 .ud-status-fold:hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}
 .ud-status-fold-caret{display:block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s ease}
 .ud-status-fold[aria-expanded="true"] .ud-status-fold-caret{transform:rotate(180deg)}
+.ud-status-fold-dot{position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-error-primary)}
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
@@ -3058,14 +3063,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addGroup')))
     }
 
-    // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示
-    function AnomalyChip({ open, onToggle, t = defaultT }) {
+    // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示;
+    // 折叠且有待读信息时箭头带小点,展开后消失
+    function AnomalyChip({ open, news, onToggle, t = defaultT }) {
       return h('button', {
         type: 'button', className: 'ud-status-fold', 'aria-expanded': open,
         'aria-label': t('anomalyLog'), title: t('anomalyLog'),
         onClick: onToggle,
       },
-      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }))
+      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }),
+      news && !open ? h('span', { className: 'ud-status-fold-dot', 'aria-hidden': 'true' }) : null)
     }
 
     // 回扫进度与采集错误是运行状态,常显;异常明细走日志块
@@ -3447,7 +3454,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                         }))
                     : null)),
           h('div', { className: 'ud-toolbar-side' },
-            h(AnomalyChip, { open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t }),
+            h(AnomalyChip, { open: detailsOpen, news: hasAnomalyNews(status), onToggle: () => setDetailsOpen((v) => !v), t }),
             h('button', {
               className: 'ud-btn ud-btn--text ud-icon-btn', 'aria-label': t('refresh'), title: t('refresh'),
               disabled: busy, onClick: refresh,
