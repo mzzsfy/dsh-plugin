@@ -90,6 +90,18 @@ test('settings:timer 服务激活时 pollArmed 为 true', async () => {
   assert.equal(res.payload.pollArmed, true)
 })
 
+// 启动即预载配置:tick 驱动自动查询的先决条件——懒加载形态下宿主重启后
+// 到首个面板请求之间 config 为 null,tick 空转,自动查询静默停摆
+test('settings:timer 激活即预载配置(tick 不因 config 空窗停摆)', async () => {
+  const { ctx, routes } = makeCtx({ timerAvailable: true })
+  apply(ctx)
+  // ensureConfig 异步读盘;await 一拍微任务让它完成
+  await new Promise((resolve) => setImmediate(resolve))
+  const res = await call(routes, '/api/usage-panel/accounts', makeReq('GET'))
+  assert.equal(res.status, 200)
+  assert.ok(Array.isArray(res.payload.accounts), '配置已载入内存,轮询具备调度对象')
+})
+
 test('settings:timer 服务缺失时 pollArmed 为 false(降级可见)', async () => {
   const { ctx, routes } = makeCtx({ timerAvailable: false })
   apply(ctx)
