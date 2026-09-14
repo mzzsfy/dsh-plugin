@@ -2453,10 +2453,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         : element
     }
 
-    function HeatSection({ days, panelRef, t = defaultT }) {
+    function HeatSection({ days, panelRef, costCurrency = '', t = defaultT }) {
       const wrapRef = useRef(null)
       const [width, setWidth] = useState(0)
       const [hover, setHover] = useState(null)
+      // 费用行显隐随「费用显示」偏好,经 ref 读取:开关切换不触发本组件重渲染
+      const prefsRef = useRef(statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => { prefsRef.current = statsLineState.get() }), [])
       useEffect(() => {
         const element = wrapRef.current
         const observer = new ResizeObserver((entries) => {
@@ -2505,6 +2508,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('tokens')}: ${formatTokens(hover.tokens)}`),
                 h('div', { key: 'requests', className: 'ud-tip-row' }, `${t('requests')}: ${hover.requests}`),
                 h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hover.cacheHit, hover.cacheMiss)}`),
+                prefsRef.current.costDisplay && hover.cost > 0
+                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, t('stats.cost', { cost: formatCost(hover.cost, costCurrency) }))
+                  : null,
               ]
             : null))
     }
@@ -3232,6 +3238,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               requests: slot ? slot.requests : 0,
               cacheHit: slot ? slot.cacheHit : 0,
               cacheMiss: slot ? slot.cacheMiss : 0,
+              cost: slot ? slot.cost : 0,
             }
           }))
         })
@@ -3457,7 +3464,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
         // 活跃热力图仅按天视图展示:热力图口径为日桶,时/分视图无对应语义
-        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }) : null,
+        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, costCurrency, t }) : null,
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',
