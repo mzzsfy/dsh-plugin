@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
-  "description": "若水工作流一体化:安装即得 rs-workflow agent 模式(协议技能、编排引擎、模式组合),含设置表单与工作流配置工具",
-  "version": "0.2.4",
+  "description": "若水工作流:通用强流程工作流编排工具。设置页配流程模板释放为模式,模式内引擎接管每轮(步骤产出契约/校验/重问/推进),支持分诊、嵌套子流程、循环与资源加载;内置协作编码模板(collab)",
+  "version": "0.3.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -28,10 +28,14 @@
   "files": [
     "lib",
     "src",
+    "engine",
     "preset",
     "cordis.patch.yml",
     "README.md"
   ],
+  "dependencies": {
+    "json5": "^2.2.3"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
     "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",

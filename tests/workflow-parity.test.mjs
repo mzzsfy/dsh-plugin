@@ -1,5 +1,6 @@
-// rs-workflow parity: slot 键集合在 lib schema / slots.json5 / SKILL.md 三处镜像,
-// 任一侧增删键而无同步, 本测试必失败(仓库规约: 双实现同源需 parity 覆盖)。
+// rs-workflow parity: 工作位键集合在 lib schema 与 collab 引擎两处镜像,任一侧增删
+// 键而无同步本测试必失败(仓库规约: 双实现同源需 parity 覆盖)。
+// 另钉: 通用流程解释器的资源注入上限与宿主 takeover 资源解析上限同源。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -9,51 +10,65 @@ import { dirname, join } from 'node:path'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PKG = join(ROOT, 'packages', 'dsh-rs-workflow')
 
-test('slot 键集合三处镜像一致(lib schema / slots.json5 / SKILL.md)', async () => {
+test('slot 键集合两处镜像一致(lib schema / collab 引擎)', async () => {
   const lib = await import('../packages/dsh-rs-workflow/lib/index.js')
   // 1) lib Config schema 的 slots 键(经 buildSlots 实例化后读取)
-  const cfg = lib.Config({ role: 'tool' })
+  const cfg = lib.Config({ role: 'settings' })
   const libKeys = Object.keys(cfg.slots).sort()
-  // 2) slots.json5 的 slots 键(用户后备配置文件, 键行形如 `planner:` 或 `"planner-triage":`)
-  const slotsSrc = readFileSync(join(PKG, 'preset', 'rs-workflow', 'skills', 'rs-workflow', 'slots.json5'), 'utf8')
-  const slotsSection = slotsSrc.slice(slotsSrc.indexOf('slots: {'), slotsSrc.lastIndexOf('}'))
-  const json5Keys = [...slotsSection.matchAll(/^\s{4}"?([a-z-]+)"?:/gm)].map((m) => m[1]).sort()
-  // 3) SKILL.md §5 表格行的工作位列(`| `planner-triage` | ...`,键带反引号;
-  //    表格含 13 细分位,3 基础位在表格上方的散文行)
-  const skillSrc = readFileSync(join(PKG, 'preset', 'rs-workflow', 'skills', 'rs-workflow', 'SKILL.md'), 'utf8')
-  const tableStart = skillSrc.indexOf('| 细分位 |')
-  const tableSlice = skillSrc.slice(tableStart, tableStart + 2000)
-  const skillSub = [...tableSlice.matchAll(/^\|\s*`([a-z-]+)`/gm)].map((m) => m[1]).sort()
-  const baseLine = skillSrc.indexOf('3 基础位：`planner` / `executor` / `reviewer`')
-  assert.ok(baseLine >= 0, 'SKILL.md §5 应含 3 基础位散文行')
-  const skillKeys = [...skillSub, ...['planner', 'executor', 'reviewer']].sort()
   assert.ok(libKeys.length >= 16, 'lib slots 应有 16 键, 实得 ' + libKeys.length)
-  assert.deepEqual(json5Keys, libKeys, 'slots.json5 键集合与 lib 不一致')
-  assert.deepEqual(skillKeys, libKeys, 'SKILL.md 工作位清单与 lib 不一致')
+  // 2) collab 引擎脚本内的槽位降级与工作位字面量(基础位键集合)
+  const engineSrc = readFileSync(join(PKG, 'engine', 'collab.js'), 'utf8')
+  for (const key of ['planner', 'executor', 'reviewer', 'planner-triage', 'reviewer-final', 'executor-escalate']) {
+    assert.ok(engineSrc.includes(key), 'collab 引擎应引用工作位 ' + key)
+  }
+  // 3) 流程解释器允许的槽位 = 同一 16 键集合(lib/flows.mjs SLOT_KEYS 导出对拍)
+  const flows = await import('../packages/dsh-rs-workflow/lib/flows.mjs')
+  assert.deepEqual(flows.SLOT_KEYS.sort(), libKeys, 'flows.mjs SLOT_KEYS 与 lib slots 键集合不一致')
 })
 
 test('lib 导出常量可从包外消费(发布物边界)', async () => {
   const lib = await import('../packages/dsh-rs-workflow/lib/index.js')
-  for (const key of ['BUDGET_DEFAULTS', 'BUDGET_MIN', 'BUDGET_MAX', 'MAX_TASKS_DEFAULT', 'MAX_TASKS_MIN', 'MAX_TASKS_MAX', 'SETTINGS_SCHEMA', 'Config', 'syncPreset', 'presetDest', 'removePreset']) {
+  for (const key of ['BUDGET_DEFAULTS', 'BUDGET_MIN', 'BUDGET_MAX', 'MAX_TASKS_DEFAULT', 'MAX_TASKS_MIN', 'MAX_TASKS_MAX', 'SETTINGS_SCHEMA', 'Config', 'syncPreset', 'presetDest', 'removePreset', 'flowPresetDest', 'unreleaseFlowTemplate', 'readTemplates']) {
     assert.ok(lib[key] !== undefined, 'lib 应导出 ' + key)
   }
-  // 模块级 inject 已废除(tool 角色改 apply 内嵌套 inject,settings/preset-sync 不再被连坐)
+  // 模块级 inject 已废除(角色改 apply 内嵌套 inject,settings/preset-sync 不再被连坐)
   assert.equal(lib.inject, undefined, 'inject 不应再从模块导出')
 })
 
-test('tool 输出 schema 工作位键集与 Config schema 同源', async () => {
+test('takeover 角色嵌套声明 workflowEngine 依赖(pre-step 拦截路径)', async () => {
   const lib = await import('../packages/dsh-rs-workflow/lib/index.js')
-  let tool = null
-  const nestingCtx = {
+  const depsSeen = []
+  const ctx = {
     inject(deps, cb) {
-      assert.deepEqual(deps, ['tools'], 'tool 角色应嵌套声明 tools 依赖')
-      cb({ tools: { register(t) { tool = t } }, get: () => undefined })
+      depsSeen.push(deps)
+      cb({ workflowEngine: { start() { throw new Error('不应在注册期启动') } } })
     },
+    effect(fn) { fn() },
+    on() { return () => {} },
+    get() { return undefined },
   }
-  lib.apply(nestingCtx, { role: 'tool' })
-  assert.ok(tool, 'apply 应注册工具')
-  const schemaSlotKeys = Object.keys(tool.output.schema.properties.slots.properties).sort()
-  const cfg = lib.Config({ role: 'tool' })
-  assert.deepEqual(schemaSlotKeys, Object.keys(cfg.slots).sort(), '工具宣告的 slots 形状与可配集合脱节')
-  assert.deepEqual(tool.output.schema.properties.workflow.properties.defaultTemplate.enum, lib.TEMPLATES)
+  lib.apply(ctx, { role: 'takeover', kind: 'collab' })
+  assert.ok(depsSeen.some((d) => d.includes('workflowEngine')), 'takeover 角色应嵌套声明 workflowEngine 依赖')
+})
+
+test('流程模板 spec 规范锚点与 DSL 校验实现同源', async () => {
+  const { SPEC_TEXT } = await import('../packages/dsh-rs-workflow/lib/spec.mjs')
+  const flows = await import('../packages/dsh-rs-workflow/lib/flows.mjs')
+  // spec 文档声明的工作位/资源 scheme/嵌套上限与实现一致(文档漂移即失败)
+  for (const key of flows.SLOT_KEYS.slice(0, 3)) {
+    assert.ok(SPEC_TEXT.includes('"' + key + '"'), 'spec 应包含基础工作位 ' + key)
+  }
+  for (const scheme of flows.LOAD_SCHEMES) {
+    assert.ok(SPEC_TEXT.includes('"' + scheme + ':'), 'spec 应包含资源 scheme ' + scheme + ':')
+  }
+  assert.ok(SPEC_TEXT.includes('嵌套深度上限 ' + flows.MAX_FLOW_DEPTH), 'spec 嵌套上限与实现不一致')
+  assert.ok(SPEC_TEXT.includes('16 * 1000') === false, 'spec 不应暴露实现常量字面量')
+})
+
+test('资源注入上限两处同源(宿主 takeover / 流程解释器)', async () => {
+  const takeover = await import('../packages/dsh-rs-workflow/lib/takeover.mjs')
+  const flowSrc = readFileSync(join(PKG, 'engine', 'flow.js'), 'utf8')
+  // 双侧同用 16 * 1000 表达式(仓库规约:无魔法数值字面量)
+  assert.ok(flowSrc.includes('const RESOURCE_CHARS = 16 * 1000'), 'flow.js 资源截断常量形态')
+  assert.equal(takeover.RESOURCE_MAX_CHARS, 16 * 1000, 'takeover 资源上限语义值')
 })

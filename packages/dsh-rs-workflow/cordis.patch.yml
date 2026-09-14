@@ -2,14 +2,14 @@
 # all-in-one plugin into the profile root. Applied by
 # `dsh plugin add @mzzsfy/dsh-rs-workflow`:
 #   - rs-workflow / role settings: mounts the GUI settings form under the
-#     `rs-workflow` namespace in the settings page.
-#   - rs-workflow-preset-sync / role preset-sync: syncs the bundled preset
-#     (preset.yml + agent.cordis.yml + skills) into the user preset root on
-#     every boot, so the picker entry "若水工作流" ships with the plugin and
-#     follows plugin upgrades.
-# The tool-plane rows (rs_workflow_config / rs_workflow_report model tools) live in
-# the released preset composition, not here: model-facing tools belong to the
-# preset plane.
+#     `rs-workflow` namespace (slots / collab defaults / budgets / templates).
+#   - rs-workflow-preset-sync / role preset-sync: syncs the bundled collab preset
+#     (preset.yml + agent.cordis.yml) into the user preset root on every boot.
+#   - rs-workflow-board / role board: mounts /api/rs-workflow/* routes (runs board
+#     + flow template management/release).
+# The preset-plane rows (rs_workflow_template / rs_workflow_report model tools and
+# the takeover interceptor) live in released preset compositions, not here:
+# model-facing tools and agent-scoped events belong to the preset plane.
 
 - insert:
     - id: rs-workflow

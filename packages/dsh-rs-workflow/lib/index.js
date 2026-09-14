@@ -1,34 +1,30 @@
 /**
- * dsh-rs-workflow — 若水工作流 (rs-workflow) 一体化插件。
+ * dsh-rs-workflow — 若水工作流:通用强流程工作流编排工具。
  *
- * 一个包，三种行角色（由组合行的 config.role 决定，加载前经 Config 校验）：
- *   - "settings"：注册 settings 命名空间 "rs-workflow"，GUI 设置页出现配置表单
- *     （3 基础工作位 + 13 细分工作位 + 工作流默认项 + 预算，语义对齐 rs-tui 原始配置）。
- *     放在 profile 的 cordis.patch.yml（host 平面，常驻；裸包名从 profile
- *     node_modules 解析）。
- *   - "preset-sync"：把包内 preset/rs-workflow（preset.yml + agent.cordis.yml +
- *     skills 协议技能与编排引擎）幂等同步到 <dsh-home>/.agent-presets/rs-workflow，
- *     模式选择器即出现"若水工作流"。同为 host 平面行；升级包后重启即更新 preset。
- *     卸载时 pnpm 不执行依赖的 preuninstall（实验证实），残留 preset 因 tool 行
- *     import 失败在选择器显示 broken，手动清理命令见 README。
- *   - "tool"：注册模型工具 rs_workflow_config，主代理启动工作流编排前读取当前
- *     配置。放在释放出的 preset 组合（agent 平面，仅该模式可见；预设行的
- *     裸包名经 PresetTree.import 以组合 baseUrl 锚定 profile 目录、上溯
- *     node_modules 解析，直接命中 dsh plugin add 安装的本包）。
+ * 一个包,多种行角色(由组合行 config.role 决定,加载前经 Config 校验):
+ *   - "settings":注册 settings 命名空间 "rs-workflow"(host 层,profile patch 行)。
+ *     16 工作位模型绑定 + collab 工作流默认项 + 预算 + 流程模板数组(templates)。
+ *   - "preset-sync":启动时幂等释放 collab 内置模式到用户预设根(host 层)。
+ *   - "board":注册 /api/rs-workflow/* 读路 + 模板管理/释放写路(host 层)。
+ *   - "template-tool":注册 rs_workflow_template 模型工具(AI 编辑入口,预设层)。
+ *   - "report":注册 rs_workflow_report 模型工具(运行上报,预设层)。
+ *   - "takeover":pre-step 引擎接管 + workflowEngine 编程启动(预设层,delegation 组内)。
  *
- * 三个角色读写同一 settings 命名空间：settings 行负责注册与默认值（组合 config 即
- * base 层），tool 行只在执行时经 ctx.get("settings") 读取宿主进程里的同一
- * 实例，不注册、不产生第二个实例。
+ * 强流程语义:模式内用户消息被 pre-step 拦截(主模型零参与),编排由插件自带脚本
+ * (engine/flow.js 通用解释器 | engine/collab.js 协作模板)驱动,每步产出契约强制校验。
  */
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { presetDest, removePreset, syncPreset } from "./preset-sync.mjs";
+import JSON5 from "json5";
+import { presetDest, removePreset, syncPreset, releaseFlowTemplate, unreleaseFlowTemplate, flowPresetDest } from "./preset-sync.mjs";
 import { reportStore } from "./report-store.mjs";
+import { registerTakeover } from "./takeover.mjs";
+import { createTemplateTool } from "./template-tool.mjs";
+import { validateFlow } from "./flows.mjs";
+import { SPEC_TEXT } from "./spec.mjs";
 
 const name = "rs-workflow";
-
 const NAMESPACE = "rs-workflow";
-
 const TEMPLATES = ["auto", "lite", "plan-final", "step-review", "multi-plan"];
 
 // tool 输出 schema 的工作位键集,与 buildSlots 互为镜像(非派生):
@@ -40,7 +36,7 @@ const SLOT_KEYS = [
 	"executor-task", "executor-enhance", "executor-retry", "executor-escalate",
 ];
 
-// 预算字段与默认值对齐 rs-tui budgets(config.ts:290-299),clamp 边界同 node-tree BUDGET_MIN/MAX
+// 预算字段与默认值对齐 rs-tui budgets(config.ts:290-299),clamp 边界同引擎 BUDGET_MIN/MAX
 const BUDGET_DEFAULTS = {
 	reviewRejectBeforeEscalate: 2,
 	planRejectBeforeBlocked: 2,
@@ -49,76 +45,90 @@ const BUDGET_DEFAULTS = {
 };
 const BUDGET_MIN = 1;
 const BUDGET_MAX = 10;
+const MAX_TASKS_MIN = 1;
+const MAX_TASKS_MAX = 64;
+const MAX_TASKS_DEFAULT = 8;
 
 /** 预算数值子 schema;clamp 在引擎侧执行,schema 只声明合法域。 */
 function buildBudgets() {
 	const budget = (def, description) => z.number().default(def).min(BUDGET_MIN).max(BUDGET_MAX).description(description);
 	return z.object({
-		reviewRejectBeforeEscalate: budget(BUDGET_DEFAULTS.reviewRejectBeforeEscalate, "任务连续被拒/失败达此值触发升级重规划(含自报失败与调用失败)"),
-		planRejectBeforeBlocked: budget(BUDGET_DEFAULTS.planRejectBeforeBlocked, "计划/子计划连续被拒达此值触发升级重规划"),
-		emptyOutputRetryLimit: budget(BUDGET_DEFAULTS.emptyOutputRetryLimit, "审批缺验证证据时重问上限,超限视为拒绝"),
-		reportNudgeLimit: budget(BUDGET_DEFAULTS.reportNudgeLimit, "执行完成但未给出交接摘要时追问上限"),
+		reviewRejectBeforeEscalate: budget(BUDGET_DEFAULTS.reviewRejectBeforeEscalate, "步骤/审批对象连续被拒或失败达此值触发升级(流程步为失败重试上限)"),
+		planRejectBeforeBlocked: budget(BUDGET_DEFAULTS.planRejectBeforeBlocked, "计划/子计划连续被拒达此值触发升级重规划(collab)"),
+		emptyOutputRetryLimit: budget(BUDGET_DEFAULTS.emptyOutputRetryLimit, "产出块/裁决块缺失时的教学重问上限,超限折算失败"),
+		reportNudgeLimit: budget(BUDGET_DEFAULTS.reportNudgeLimit, "执行完成但未给出交接摘要时追问上限(collab)"),
 	});
 }
 
-/** 工作位（slot）子 schema；细分位场景文案对齐 rs-tui SLOT_SCENES。string/array/{rotation} 三态：array 与 rotation 数组等价（候选依次轮换，被拒重做/重问换模型）。工厂函数保证 Config 与 SETTINGS_SCHEMA 各持独立实例。 */
+/** 工作位(slot)子 schema;细分位场景文案对齐 rs-tui SLOT_SCENES。string/array/{rotation} 三态。 */
 function buildSlots() {
 	const slot = (description) => z.union([z.string(), z.array(z.string()), z.object({ rotation: z.array(z.string()) })]).default("").description(description);
 	return z.object({
-		planner: slot("planner 基础位（规划域兜底）。格式 provider/model、候选数组或 {rotation:[...]}，留空 = 会话默认模型"),
-		executor: slot("executor 基础位（执行域兜底）；候选依次轮换，被拒重做/重试换模型"),
-		reviewer: slot("reviewer 基础位（审批域兜底）；候选依次轮换"),
-		"planner-triage": slot("细分位：首次分诊，分析需求选模板拆任务；缺省降级 planner"),
-		"planner-command": slot("细分位：总规划，计划重写与大纲修订；缺省降级 planner"),
-		"planner-subplan": slot("细分位：子计划细化，子计划内任务拆解；缺省降级 planner"),
-		"planner-escalate": slot("细分位：升级重规划，连续拒绝超阈后的尾段重拆；缺省降级 planner"),
-		"reviewer-plan": slot("细分位：计划审批，审批计划文本与大纲；缺省降级 reviewer"),
-		"reviewer-task": slot("细分位：任务审批，审批单个任务执行结果；缺省降级 reviewer"),
-		"reviewer-subplan": slot("细分位：子计划交付审批，审批整个子计划交付；缺省降级 reviewer"),
-		"reviewer-final": slot("细分位：单终审，末尾终审全部交付；缺省降级 reviewer，建议配更强的模型"),
-		"reviewer-cross": slot("细分位：交叉终审，多视角交叉终审链；缺省降级 reviewer，建议配更强的模型"),
-		"executor-task": slot("细分位：任务首次执行；缺省降级 executor"),
-		"executor-enhance": slot("细分位：被拒重做，携带 REJECTED 理由修改重交；缺省降级 executor"),
-		"executor-retry": slot("细分位：失败重试，自报失败/无产出后的重试；缺省降级 executor"),
-		"executor-escalate": slot("细分位：升级后执行，升级重规划产出的新任务；缺省降级 executor"),
+		planner: slot("planner 基础位(规划域兜底)。格式 provider/model、候选数组或 {rotation:[...]},留空 = 会话默认模型"),
+		executor: slot("executor 基础位(执行域兜底);候选依次轮换,失败重试换模型"),
+		reviewer: slot("reviewer 基础位(审批域兜底);候选依次轮换"),
+		"planner-triage": slot("细分位:分诊(需求分析/模板选择/流程路由);缺省降级 planner"),
+		"planner-command": slot("细分位:总规划与计划重写(collab);缺省降级 planner"),
+		"planner-subplan": slot("细分位:子计划细化(collab);缺省降级 planner"),
+		"planner-escalate": slot("细分位:升级重规划(collab);缺省降级 planner"),
+		"reviewer-plan": slot("细分位:计划审批(collab);缺省降级 reviewer"),
+		"reviewer-task": slot("细分位:任务审批(collab/流程步骤审);缺省降级 reviewer"),
+		"reviewer-subplan": slot("细分位:子计划审批(collab);缺省降级 reviewer"),
+		"reviewer-final": slot("细分位:终审(collab/流程末审);缺省降级 reviewer"),
+		"reviewer-cross": slot("细分位:交叉终审(collab multi-plan);缺省降级 reviewer"),
+		"executor-task": slot("细分位:常规执行步;缺省降级 executor"),
+		"executor-enhance": slot("细分位:被拒返工步;缺省降级 executor"),
+		"executor-retry": slot("细分位:失败重试步;缺省降级 executor"),
+		"executor-escalate": slot("细分位:升级重做步;缺省降级 executor"),
 	});
 }
 
-/** 工作流默认项子 schema。maxTasks 为 DSH 原生任务预算（rs-tui 无数量上限），约束全部任务实例化；
- *  引擎侧对 <=0/非数值另有自保回落(见 engine.js),此处 schema 声明合法域挡住非法值。 */
-const MAX_TASKS_DEFAULT = 8;
-const MAX_TASKS_MIN = 1;
-const MAX_TASKS_MAX = 64;
 function buildWorkflow() {
 	return z.object({
-		defaultTemplate: z.union(TEMPLATES).default("auto").description("默认模板：auto = planner 分诊自动选型（无信号时兜底 multi-plan）；其余 = 无信号时兜底该模板，planner 声明与分诊矩阵仍优先生效"),
-		maxTasks: z.number().default(MAX_TASKS_DEFAULT).min(MAX_TASKS_MIN).max(MAX_TASKS_MAX).description("单轮任务拆解数上限（含子计划运行时任务的全局预算）"),
+		defaultTemplate: z.union(TEMPLATES).default("auto").description("collab 无信号兜底模板(auto=multi-plan)"),
+		maxTasks: z.number().default(MAX_TASKS_DEFAULT).min(MAX_TASKS_MIN).max(MAX_TASKS_MAX).description("collab 全局任务预算"),
 	});
 }
 
-/** settings 命名空间 schema（GUI 表单渲染的就是它，不含行角色字段）。 */
+/** 流程模板数组子 schema:GUI/工具共同读写;释放动作在看板按钮或工具 release 参数。 */
+function buildTemplates() {
+	const item = () => z.object({
+		id: z.string().required().description("流程 id(^[a-z][a-z0-9-]*$);释放模式 = rs-<id>"),
+		label: z.string().default("").description("显示名"),
+		description: z.string().default("").description("适用场景(分诊目录展示)"),
+		enabled: z.boolean().default(true).description("禁用后不再释放/分诊不可见"),
+		json5: z.string().default("").description("流程定义 JSON5 全文(规范见 rs_workflow_template 工具 spec)"),
+	});
+	return z.array(item()).default([]).description("流程模板集:每项可经看板「释放为模式」或工具 save(release:true) 释放为独立模式");
+}
+
+/** 设置 schema(GUI 表单)。模板数组在 GUI 为高级字段,日常经工具/看板编辑。 */
 const SETTINGS_SCHEMA = z.object({
 	slots: buildSlots(),
 	workflow: buildWorkflow(),
 	budgets: buildBudgets(),
+	templates: buildTemplates(),
 });
 
-/** 组合行 config schema（在 settings 之上多一个行角色字段）。 */
+/** 组合行 config schema(在 settings 之上多一个行角色字段)。 */
 const Config = z.object({
-	role: z.union(["settings", "preset-sync", "tool", "report", "board"]).required().description("行角色：settings = 注册 GUI 设置命名空间（host 层常驻）；preset-sync = 同步释放 agent preset 到用户预设根（host 层常驻）；tool = 注册 rs_workflow_config 模型工具（预设层）；report = 注册 rs_workflow_report 运行上报工具（预设层）；board = 注册工作流看板 web 路由（host 层常驻）"),
+	role: z.union(["settings", "preset-sync", "board", "template-tool", "report", "takeover"]).required(),
 	slots: buildSlots(),
 	workflow: buildWorkflow(),
 	budgets: buildBudgets(),
+	templates: buildTemplates(),
+	kind: z.string().description("takeover:collab | flow"),
+	flowFile: z.string().description("takeover(kind=flow):flow.json5 绝对路径(组合 baseUrl 锚定)"),
 });
 
-/** 从（已解析的）行 config 里摘出 settings base 层。 */
+/** 从(已解析的)行 config 里摘出 settings base 层。 */
 function baseOf(config) {
-	return { slots: config.slots, workflow: config.workflow, budgets: config.budgets };
+	return { slots: config.slots, workflow: config.workflow, budgets: config.budgets, templates: config.templates };
 }
 
 // ── 看板 web 路由(host 层 board 角色) ────────────────────────────────────────
 // 读路由放行 GET(无 CSRF 面);写路由 POST 加跨源与 JSON 守卫(dsh-usage-panel 同构)。
-// 路由只做薄分发,数据权威态在 report-store 单例(与 report 工具共享)。
+// 路由只做薄分发,数据权威态在 report-store 单例与 settings 命名空间。
 
 function sendJson(res, status, payload) {
 	res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
@@ -171,54 +181,6 @@ guardedRoute.post = (handler) => async (req, res) => {
 	return guardedRoute(handler)(req, res);
 };
 
-function registerBoardRoutes(ctx) {
-	const store = reportStore();
-	// webServer 以嵌套 inject 声明:服务缺失时仅 board 角色保持未激活(干净禁用),
-	// 其余行角色不被模块级 inject 连坐(多角色包的模块级声明会整树 fatal)
-	ctx.inject(["webServer"], (wctx) => {
-		wctx.effect(
-			() =>
-				wctx.webServer.register({
-					kind: "exact",
-					path: "/api/rs-workflow/runs",
-					handler: guardedRoute(async (req, res) => {
-						sendJson(res, 200, { runs: await store.list() });
-					}),
-				}),
-			"rs-workflow runs route",
-		);
-		wctx.effect(
-			() =>
-				wctx.webServer.register({
-					kind: "exact",
-					path: "/api/rs-workflow/run",
-					handler: guardedRoute(async (req, res) => {
-						const url = new URL(req.url, "http://localhost");
-						const runId = url.searchParams.get("id") || "";
-						const run = await store.get(runId);
-						if (!run) throw new Error("运行记录不存在:" + runId);
-						sendJson(res, 200, run);
-					}),
-				}),
-			"rs-workflow run detail route",
-		);
-		wctx.effect(
-			() =>
-				wctx.webServer.register({
-					kind: "exact",
-					path: "/api/rs-workflow/remove",
-					handler: guardedRoute.post(async (req, res) => {
-						const body = JSON.parse(await readJsonBody(req));
-						const runId = body && typeof body.runId === "string" ? body.runId : "";
-						await store.remove(runId);
-						sendJson(res, 200, { ok: true });
-					}),
-				}),
-			"rs-workflow remove route",
-		);
-	});
-}
-
 function readJsonBody(req) {
 	return new Promise((resolve, reject) => {
 		let size = 0;
@@ -239,11 +201,102 @@ function readJsonBody(req) {
 
 const BODY_MAX_BYTES = 256 * 1024;
 
-// ── 运行上报工具(预设层 report 角色) ────────────────────────────────────────
-// 实时通道 = leader 权威写(start/finish)+ 子代理节点级软上报(node, 失败即弃不影响编排)。
-// 工作区解析 best-effort:会话 id 反查 cwd(新宿主)→ 会话默认目录;解析失败不硬失败。
+function registerBoardRoutes(ctx) {
+	const store = reportStore();
+	// webServer 以嵌套 inject 声明:服务缺失时仅 board 角色保持未激活(干净禁用),
+	// 其余行角色不被模块级 inject 连坐(多角色包的模块级声明会整树 fatal)
+	ctx.inject(["webServer"], (wctx) => {
+		const route = (path, handler, name) =>
+			wctx.effect(() => wctx.webServer.register({ kind: "exact", path, handler }), name);
+		route("/api/rs-workflow/runs", guardedRoute(async (req, res) => {
+			sendJson(res, 200, { runs: await store.list() });
+		}), "rs-workflow runs route");
+		route("/api/rs-workflow/run", guardedRoute(async (req, res) => {
+			const url = new URL(req.url, "http://localhost");
+			const runId = url.searchParams.get("id") || "";
+			const run = await store.get(runId);
+			if (!run) throw new Error("运行记录不存在:" + runId);
+			sendJson(res, 200, run);
+		}), "rs-workflow run detail route");
+		route("/api/rs-workflow/remove", guardedRoute.post(async (req, res) => {
+			const body = JSON.parse(await readJsonBody(req));
+			const runId = body && typeof body.runId === "string" ? body.runId : "";
+			await store.remove(runId);
+			sendJson(res, 200, { ok: true });
+		}), "rs-workflow remove route");
+		// 模板管理:列表/规范(读) + 释放/撤下/保存/删除(写)
+		route("/api/rs-workflow/templates", guardedRoute(async (req, res) => {
+			sendJson(res, 200, { templates: readTemplates(ctx) });
+		}), "rs-workflow templates route");
+		route("/api/rs-workflow/spec", guardedRoute(async (req, res) => {
+			sendJson(res, 200, { spec: SPEC_TEXT });
+		}), "rs-workflow spec route");
+		route("/api/rs-workflow/release", guardedRoute.post(async (req, res) => {
+			const body = JSON.parse(await readJsonBody(req));
+			const id = body && typeof body.id === "string" ? body.id.trim() : "";
+			const entry = readTemplates(ctx).find((t) => t.id === id);
+			if (!entry) throw new Error("模板不存在: " + id);
+			if (entry.enabled === false) throw new Error("模板已禁用,先在设置中启用: " + id);
+			const outcome = releaseFlowTemplate(entry);
+			sendJson(res, 200, { ok: true, outcome, presetId: "rs-" + id });
+		}), "rs-workflow release route");
+		route("/api/rs-workflow/unrelease", guardedRoute.post(async (req, res) => {
+			const body = JSON.parse(await readJsonBody(req));
+			const id = body && typeof body.id === "string" ? body.id.trim() : "";
+			const outcome = unreleaseFlowTemplate(id);
+			sendJson(res, 200, { ok: true, outcome });
+		}), "rs-workflow unrelease route");
+		route("/api/rs-workflow/template-save", guardedRoute.post(async (req, res) => {
+			const body = JSON.parse(await readJsonBody(req));
+			const id = body && typeof body.id === "string" ? body.id.trim() : "";
+			const json5 = body && typeof body.json5 === "string" ? body.json5 : "";
+			const parsed = JSON5.parse(json5);
+			const errors = validateFlow(parsed);
+			if (errors.length > 0) throw new Error("流程模板校验失败:\n- " + errors.join("\n- "));
+			if (parsed && typeof parsed.id === "string" && parsed.id !== id) throw new Error(`id 不一致: 模板 "${id}" vs 定义 "${parsed.id}"`);
+			const templates = readTemplates(ctx).filter((t) => t.id !== id);
+			templates.push({
+				id,
+				label: typeof body.label === "string" && body.label.trim() !== "" ? body.label.trim() : parsed.label || id,
+				description: typeof body.description === "string" && body.description.trim() !== "" ? body.description.trim() : parsed.description || "",
+				enabled: body.enabled !== false,
+				json5,
+			});
+			await writeTemplates(ctx, templates);
+			sendJson(res, 200, { ok: true, templates });
+		}), "rs-workflow template save route");
+		route("/api/rs-workflow/template-remove", guardedRoute.post(async (req, res) => {
+			const body = JSON.parse(await readJsonBody(req));
+			const id = body && typeof body.id === "string" ? body.id.trim() : "";
+			const templates = readTemplates(ctx);
+			const next = templates.filter((t) => t.id !== id);
+			if (next.length === templates.length) throw new Error("模板不存在: " + id);
+			await writeTemplates(ctx, next);
+			unreleaseFlowTemplate(id);
+			sendJson(res, 200, { ok: true, templates: next });
+		}), "rs-workflow template remove route");
+	});
+}
 
-const REPORT_ACTIONS = ["start", "node", "finish", "list", "get"];
+function readTemplates(ctx) {
+	try {
+		const settings = ctx.get("settings");
+		const value = settings ? settings.get(NAMESPACE) : undefined;
+		if (value && Array.isArray(value.templates)) return value.templates;
+	} catch { /* 设置服务缺失/损坏:空表 */ }
+	return [];
+}
+
+async function writeTemplates(ctx, templates) {
+	const settings = ctx.get("settings");
+	if (!settings) throw new Error("设置服务不可用,无法保存模板");
+	await settings.update(NAMESPACE, { templates });
+}
+
+// ── 运行上报工具(预设层 report 角色) ────────────────────────────────────────
+// 权威落定 = takeover 行(编排 start/finish);本工具是子代理节点级软上报通道(可选)。
+
+const REPORT_ACTIONS = ["node", "list", "get"];
 
 async function resolveWorkspace(tctx, exec) {
 	const sessionId = exec && exec.agent ? String(exec.agent.id || "") : "";
@@ -287,108 +340,49 @@ function apply(ctx, config) {
 		registerBoardRoutes(ctx);
 		return;
 	}
-	// tools 以嵌套 inject 声明:服务缺失时仅 tool/report 角色保持未激活(干净禁用),
-	// settings/preset-sync/board 角色不再被模块级 inject 连坐(非 dsh-base 组合下旧形态
-	// 会因启动审计整树 fatal)
+	if (cfg.role === "takeover") {
+		registerTakeover(ctx, { kind: cfg.kind, flowFile: cfg.flowFile });
+		return;
+	}
+	// tools 以嵌套 inject 声明:服务缺失时仅 tool/report 角色保持未激活(干净禁用)
 	if (cfg.role === "report") {
 		registerReportTool(ctx);
 		return;
 	}
-	if (cfg.role !== "tool") return;
-	ctx.inject(["tools"], (tctx) => {
-		tctx.tools.register(defineTool({
-		name: "rs_workflow_config",
-		description: "读取若水工作流 (rs-workflow) 的当前配置：各角色的模型工作位 (slots)、工作流默认项 (workflow) 与预算 (budgets)。启动 workflow 编排前必须先调用本工具：slots 原样作为 workflow 调用 args.slots；workflow.defaultTemplate 作为 args.defaultTemplate（auto = 无信号时兜底 multi-plan，其余值 = 无信号时兜底该值；planner 声明与分诊矩阵始终优先）；workflow.maxTasks 作为 args.limits.maxTasks；budgets 原样作为 args.budgets。",
-		parameters: {},
-		output: {
-			schema: {
-				type: "object",
-				additionalProperties: false,
-				properties: {
-					slots: {
-						type: "object",
-						required: true,
-						additionalProperties: true,
-						properties: Object.fromEntries(SLOT_KEYS.map((k) => [k, {
-							oneOf: [
-								{ type: "string" },
-								{ type: "array", items: { type: "string" } },
-								{ type: "object", additionalProperties: false, properties: { rotation: { type: "array", items: { type: "string" } } } },
-							],
-						}])),
-					},
-					workflow: {
-						type: "object",
-						required: true,
-						additionalProperties: false,
-						properties: {
-							defaultTemplate: { type: "string", enum: TEMPLATES },
-							maxTasks: { type: "number" },
-						},
-					},
-					budgets: {
-						type: "object",
-						required: true,
-						additionalProperties: false,
-						properties: {
-							reviewRejectBeforeEscalate: { type: "number" },
-							planRejectBeforeBlocked: { type: "number" },
-							emptyOutputRetryLimit: { type: "number" },
-							reportNudgeLimit: { type: "number" },
-						},
-					},
-					source: { type: "string", required: true, enum: ["settings", "fallback"] },
-				},
-			},
-			render: (_args, value) => [{
-				type: "text",
-				text: JSON.stringify({ slots: value.slots, workflow: value.workflow, budgets: value.budgets }, null, 2)
-					+ (value.source === "fallback" ? "\n(设置服务不可用：返回的是组合默认值，GUI 修改不在此生效)" : ""),
-			}],
-		},
-		execute() {
-			const settings = tctx.get("settings");
-			let value;
-			try {
-				value = settings ? settings.get(NAMESPACE) : undefined;
-			} catch (error) {
-				// settings 服务在但读取失败(命名空间被移除/配置损坏)时走组合默认值,工具永不硬失败
-				ctx.logger?.warn?.(`rs-workflow settings 读取失败,回退组合默认值: ${error?.message ?? error}`);
-			}
-			if (value) {
-				return Promise.resolve({ slots: value.slots, workflow: value.workflow, budgets: value.budgets, source: "settings" });
-			}
-			return Promise.resolve({ slots: cfg.slots, workflow: cfg.workflow, budgets: cfg.budgets, source: "fallback" });
-		},
-		presentCall: () => ({ card: "generic", title: "读取若水工作流配置", kind: "other", rawInput: {} }),
-	}));
-	});
-
+	if (cfg.role !== "template-tool") return;
+	registerTemplateTool(ctx);
 }
 
-/** rs_workflow_report:leader 权威写(start/finish)与子代理节点软上报(node)共用通道。 */
+/** rs_workflow_template:AI 流程模板编辑入口(spec/list/save/remove)。 */
+function registerTemplateTool(ctx) {
+	ctx.inject(["tools"], (tctx) => {
+		tctx.effect(() => tctx.tools.register(createTemplateTool({
+			getTemplates: async () => readTemplates(ctx),
+			setTemplates: (templates) => writeTemplates(ctx, templates),
+			releaseTemplate: (entry) => releaseFlowTemplate(entry) !== "foreign",
+			unreleaseTemplate: (id) => unreleaseFlowTemplate(id),
+			logger: ctx.logger,
+		})), "rs-workflow template tool");
+	});
+}
+
+/** rs_workflow_report:子代理节点软上报(node)与运行查询(list/get)。 */
 function registerReportTool(ctx) {
 	const store = reportStore();
 	ctx.inject(["tools"], (tctx) => {
 		tctx.tools.register(defineTool({
 			name: "rs_workflow_report",
 			description: [
-				"若水工作流运行看板的上报通道：把编排运行的状态写入工作流看板（GUI 设置页「若水工作流」分区可见）。",
-				"启动 workflow 编排前调用 {action:\"start\", request} 记录本次运行并取得 runId；",
-				"编排结束后调用 {action:\"finish\", runId, ok, summary, result}（result 原样传 workflow 工具的返回对象）；",
-				"子代理可在节点完成时调用 {action:\"node\", runId, nodeId, status, summary} 做节点级软上报（可选，失败即跳过，禁止重试）；",
-				"list 列出本工作区全部运行，get 按 runId 取单次运行详情。",
+				"若水工作流运行看板的上报通道(可选软上报,失败即跳过,禁止重试):",
+				"{action:\"node\", runId, nodeId, status, summary} 在节点完成时向看板报告进展;",
+				"{action:\"list\"} 列出本工作区运行,{action:\"get\", runId} 取运行详情。",
 			].join(""),
 			parameters: {
-				action: { type: "string", required: true, enum: REPORT_ACTIONS, description: "start=登记运行并取得 runId;node=节点级软上报;finish=落定运行结果;list=列出运行;get=取运行详情" },
-				runId: { type: "string", description: "运行标识（start 可省略自动生成;其余 action 必传）" },
-				request: { type: "string", description: "start:本次编排的用户需求原文" },
-				nodeId: { type: "string", description: "node:节点标识（如 t1/p1/xr1）" },
-				status: { type: "string", description: "node:节点状态（running/done/failed/rejected 等,自由文本）" },
-				summary: { type: "string", description: "node/finish:一句话进展或结论" },
-				ok: { type: "boolean", description: "finish:true=正常完成,false=blocked" },
-				blocked: { type: "object", additionalProperties: true, description: "finish:blocked 时的 {nodeId,reason} 对象" },
-				result: { type: "object", additionalProperties: true, description: "finish:workflow 工具的返回对象原样" },
+				action: { type: "string", required: true, enum: REPORT_ACTIONS, description: "node=节点级软上报;list=列出运行;get=取运行详情" },
+				runId: { type: "string", description: "node/get 必传:运行标识" },
+				nodeId: { type: "string", description: "node:节点标识" },
+				status: { type: "string", description: "node:节点状态(running/done/failed 等,自由文本)" },
+				summary: { type: "string", description: "node:一句话进展" },
 			},
 			output: {
 				schema: {
@@ -411,17 +405,9 @@ function registerReportTool(ctx) {
 			},
 			async execute(args, exec) {
 				const workspace = await resolveWorkspace(tctx, exec);
-				if (args.action === "start") {
-					const run = await store.start({ runId: args.runId, workspace, request: args.request, templateId: "" });
-					return { ok: true, runId: run.runId, run };
-				}
 				if (args.action === "node") {
 					const run = await store.appendNode({ runId: args.runId, nodeId: args.nodeId, status: args.status, summary: args.summary });
-					return { ok: true, runId: run.runId, run };
-				}
-				if (args.action === "finish") {
-					const run = await store.finish({ runId: args.runId, ok: args.ok === true, result: args.result, summary: args.summary, blocked: args.blocked });
-					return { ok: true, runId: run.runId, run };
+					return { ok: true, runId: run.runId };
 				}
 				if (args.action === "list") {
 					const runs = (await store.list()).filter((run) => run.workspace === workspace);
@@ -436,4 +422,4 @@ function registerReportTool(ctx) {
 	});
 }
 
-export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, TEMPLATES, apply, name, presetDest, removePreset, reportStore, syncPreset };
+export { BUDGET_DEFAULTS, BUDGET_MAX, BUDGET_MIN, Config, MAX_TASKS_DEFAULT, MAX_TASKS_MAX, MAX_TASKS_MIN, NAMESPACE, SETTINGS_SCHEMA, TEMPLATES, apply, flowPresetDest, name, presetDest, readTemplates, releaseFlowTemplate, removePreset, reportStore, syncPreset, unreleaseFlowTemplate };

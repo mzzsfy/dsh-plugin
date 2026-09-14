@@ -1,5 +1,5 @@
-// rs-workflow engine.js 编排脚本验收测试(原始 rs-tui 语义对齐版)
-// 驱动方式: new Function 把 engine.js 全文包成 async 函数体, 注入 agent/parallel/phase/log 钩子
+// rs-workflow collab.js 编排脚本验收测试(原始 rs-tui 语义对齐版)
+// 驱动方式: new Function 把 collab.js 全文包成 async 函数体, 注入 agent/parallel/phase/log 钩子
 // 剧本式 agent: 按调用次序弹出响应对象(结构化返回)或 null(调用失败); 每次调用的 prompt/opts 留存供断言
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 
 const ENGINE_PATH = join(
   dirname(fileURLToPath(import.meta.url)), '..',
-  'packages', 'dsh-rs-workflow', 'preset', 'rs-workflow', 'skills', 'rs-workflow', 'references', 'engine.js',
+  'packages', 'dsh-rs-workflow', 'engine', 'collab.js',
 )
 const ENGINE_SRC = readFileSync(ENGINE_PATH, 'utf8')
 
@@ -1428,11 +1428,11 @@ test('parity: 引擎 budget 常量与 lib schema 边界/缺省一致; maxTasks �
   // engine 侧对非法/缺省值兜底 multi-plan,见 TEMPLATES.indexOf 兜底表达式)
   const engineTemplates = parse(/const TEMPLATES = \[([^\]]+)\]/)[1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
   assert.deepEqual(engineTemplates, lib.TEMPLATES.filter((t) => t !== 'auto'))
-  // 升级上限与 SKILL.md 文案双侧钉住(固定不可配,改值须同步三处)
+  // 升级上限与 spec 规范文案双侧钉住(固定不可配,改值须同步两处)
   const escalation = parse(/const ESCALATION_LIMIT = (\d+)/)[1]
   assert.equal(escalation, '2')
-  const skillSrc = readFileSync(ENGINE_PATH.replace(/references[\\/]engine\.js$/, join('SKILL.md')), 'utf8')
-  assert.ok(skillSrc.includes('`ESCALATION_LIMIT`=**' + escalation), 'SKILL.md 升级上限文案与 engine 常量失同步')
+  const { SPEC_TEXT } = await import('../packages/dsh-rs-workflow/lib/spec.mjs')
+  assert.ok(SPEC_TEXT.includes('嵌套深度上限 ' + 3), 'spec 嵌套上限文案与引擎常量失同步')
   // lib schema 行为对拍: 缺省值与边界拒绝
   const workflow = lib.SETTINGS_SCHEMA.dict.workflow
   const resolved = workflow({ defaultTemplate: 'auto', maxTasks: undefined })

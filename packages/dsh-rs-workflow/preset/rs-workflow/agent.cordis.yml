@@ -1,45 +1,33 @@
-# The `rs-workflow` agent preset: 若水工作流。
+# The `rs-workflow` agent preset: 若水协作编码流程(collab 内置模板)。
 #
-# 迁移自 rs-tui (C:\Users\yuanhao\Desktop\jzjy\rscli) 的 rs-workflow 多模型协作工作流引擎。
-# 基底是 `standard` 全功能编码代理（本文件行集与出厂 standard 保持同构），
-# 差异有四处：
-#   1. persona 换成若水工作流纪律（交付类请求一律走 workflow 编排，off 态仅限纯问答/明说直办）；
-#   2. skill-filesystem 追加预设自带技能目录 skills/（rs-workflow 协议技能随预设分发）；
-#   3. 追加 GUI 配置读取工具行 rs-workflow-config（@mzzsfy/dsh-rs-workflow
-#      的 tool 角色，裸包名从组合 baseUrl 上溯解析到 profile node_modules；
-#      GUI 表单注册在同包 settings 角色、bundle patch 行上；本文件整体由该包
-#      的 preset-sync 角色行释放到用户预设根，随插件安装/升级自动同步）
-#      与运行看板上报工具行 rs-workflow-report（同包 report 角色，供 leader
-#      与子代理向看板软上报运行状态）；
-#   4. 其余行保持 standard 原样 —— 工具面不变，模式差异只由 persona + 技能承载。
+# 迁移自 rs-tui (../rscli) 的 rs-workflow 多模型协作工作流引擎,形态为"引擎接管":
+# 本组合的 takeover 行(agent/pre-step)拦截一切用户消息,经 workflowEngine 启动
+# 协作编排(插件自带 engine/collab.js 脚本),主会话模型零参与;每个节点的
+# planner/executor/reviewer 由编排内子代理承担,子代理继承本组合全部工具行。
 #
-# 平面规则与 standard 一致：本文件是 AGENT-PLANE 组合；服务行必须在 isolate realm 后面。
+# 基底是 `standard` 全功能编码代理(行集与出厂 standard 保持同构),差异有两处:
+#   1. persona 换成流程模式纪律(会话代理只在运行期答疑,不执行交付);
+#   2. delegation 组内追加 takeover 行(role: takeover, kind: collab),并保留
+#      report 行(子代理节点软上报);plan-mode 组移除(规划发生在编排内部)。
+#
+# 本文件整体由该包的 preset-sync 角色行释放到用户预设根,随插件安装/升级自动同步。
+#
+# 平面规则与 standard 一致:本文件是 AGENT-PLANE 组合;服务行必须在 isolate realm 后面。
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# persona 键名随 dsh 版本断裂：0.1.2-rc.1 及更早为 text（required），
-# 0.1.5-rc.1 起 prefix/suffix 取代 text（prefix required）。
-# 走 process.env.dshVersion 判断不可行（preset 由宿主 loader 静态解析），
-# 改为 prefix+suffix 双键：旧宿主 schema 无 prefix 键会拒绝？
-# —— 实测 0.1.1-rc.2 / 0.1.2-rc.1 的 z.object 默认 strip 未知键，不校验
-# 未知键存在性，text 缺失才报错。故旧版本用 !!js 表达式按宿主版本回退：
-# 简单方案 = 统一写 text，旧版本可用；新版本必炸。最终方案 = 预设同步器
-# （preset-sync 角色）在释放时按目标宿主版本改写本段键名，仓库源码保留
-# 新版形态（prefix），兼容矩阵见 README「版本兼容」节。
+# persona 键名随 dsh 版本断裂(0.1.5-rc.1 起 text → prefix/suffix,prefix required)。
+# 仓库源码恒为新版形态;旧宿主由 preset-sync 在释放时按目标宿主版本回退改写,
+# 兼容矩阵见包 README「版本兼容」节。
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     prefix: |-
-      你是"若水工作流"编码 Agent，由 {{model}} 模型驱动。
-      本模式迁移自 rs-tui 的多模型协作工作流引擎：executor 执行、reviewer 审批、planner 规划分诊，模型间分工与相互制约。
-
-      核心纪律：
-      - 一切要产出交付物的请求（编码、新建/修改文件、创作内容、改配置）必须先加载 rs-workflow 技能，按其协议用 workflow 工具启动编排：分诊与规划 → 执行与审批 → 终审，必要时升级重规划。只有纯问答/解释可直接回答。
-      - off 态（不进编排）仅限：纯问答/解释，或用户明说"直接做"；判为 off 态时回复第一行写「[直办] <一句话理由>」，用户回"走工作流"即改判进入编排。吃不准算不算琐碎 → 按进工作流处理。
-      - 启动编排前先用 rs_workflow_report {action:"start", request} 登记运行取得 runId，并把 {ui:{runId}} 传给 workflow 调用；编排结束后用 {action:"finish", runId, ok, summary, result} 落定（result 原样传 workflow 返回对象）。上报失败不阻塞工作流，不重试。
-      - 用户点名模板（lite / plan-final / step-review / multi-plan）时锁定该模板；未点名由分诊定。
-      - 各角色的模型由工作位（slot）配置决定：细分位缺失降级基础位，再降级会话默认模型；配置以 GUI 设置页 rs-workflow 段为准（启动编排前用 rs_workflow_config 工具读取，改后即时生效），工具不可用时回退技能目录的 slots.json5。
-      - 工作流结束后必须向用户完整汇报：模板、难度分诊、任务结果、审批结论、变更文件；blocked 时说明原因并给出建议。
+      你是"若水工作流"协作编码模式会话代理,由 {{model}} 模型驱动。
+      本模式的一切用户请求都由若水流程引擎接管执行(pre-step 拦截,你收不到任务原文):
+      planner 分诊规划、executor 执行、reviewer 审批,全部由编排内子代理承担。
+      你唯一可能被调用的场景:流程运行期间用户追加消息。此时只做简短答疑,
+      不执行任何交付操作,不尝试启动或修改工作流,回答完即止。
     suffix: Your working directory is {{cwd}}.
 
 - id: agent-instructions
@@ -49,7 +37,7 @@
 
 # ── shell ───────────────────────────────────────────────────────────────────
 
-# 与 standard 相同：两个 shell 工具消费 HOST 侧注册表，执行器也在 host 平面。
+# 与 standard 相同:两个 shell 工具消费 HOST 侧注册表,执行器也在 host 平面。
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
   disabled: !!js process.platform === 'win32'
@@ -75,67 +63,23 @@
 
 # ── skills ──────────────────────────────────────────────────────────────────
 
-# 与 cordis 出厂预设相同的手法：customSkillDirs 指向预设自己的 skills/ 目录，
-# baseUrl 即预设目录本身，因此 rs-workflow 协议技能随预设安装、复制、迁移。
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
-  config:
-    customSkillDirs:
-      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
 
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
 
-# 若水工作流的 GUI 配置读取工具（rs_workflow_config）：主代理启动编排前调用。
-# 包本体由 `dsh plugin add @mzzsfy/dsh-rs-workflow` 安装进 profile node_modules；
-# 本 preset 文件由同包的 preset-sync 角色行在宿主启动时释放/同步到用户预设根。
-# 预设行的裸包名从组合 baseUrl（profile 目录）上溯解析；settings 表单的注册
-# 在同包 bundle patch 行上（见包内 cordis.patch.yml）。
-- id: rs-workflow-config
-  name: '@mzzsfy/dsh-rs-workflow'
+# ── web ─────────────────────────────────────────────────────────────────────
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
   config:
-    role: tool
-
-# 运行看板上报工具（rs_workflow_report）：leader 登记运行与落定结果，子代理节点级
-# 软上报；宿主 board 角色行提供 /api/rs-workflow/* 读路，看板分区在 GUI 设置页。
-- id: rs-workflow-report
-  name: '@mzzsfy/dsh-rs-workflow'
-  config:
-    role: report
-
-# ── goals ───────────────────────────────────────────────────────────────────
-
-- id: tool-goal
-  name: '@deepseek-ai/dsh-tool-goal'
-
-# ── plan mode ───────────────────────────────────────────────────────────────
-
-# 保留 standard 的计划模式：用户仍可把会话切到 plan 模式做前置规划，
-# 与工作流不冲突（工作流自身的规划发生在编排内部）。
-- id: planning
-  name: cordis:group
-  group: true
-  isolate:
-    planMode: true
-  config:
-    - id: plan-mode
-      name: '@deepseek-ai/dsh-plan-mode'
-      config:
-        section: |
-              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
-
-              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
-
-              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
-
-              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
-
-              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
-
-              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+    fetch: false
+    searchTimeoutMs: 60000
 
 # ── compaction ──────────────────────────────────────────────────────────────
 
+# 编排子代理上下文较长,保留 standard 的压缩组。
 - id: compaction
   name: cordis:group
   group: true
@@ -158,8 +102,9 @@
 
 # ── delegation and workflows ────────────────────────────────────────────────
 
-# 与 standard 相同：subagents 注册表留在 HOST；workflowEngine 是预设私有服务，
-# 所有触达它的行共享一个 entry-local realm。
+# 与 standard 相同:subagents 注册表留在 HOST;workflowEngine 是预设私有服务,
+# 所有触达它的行共享一个 entry-local realm。takeover 行也在组内:
+# pre-step 拦截用户消息并经 workflowEngine 启动协作编排。
 - id: delegation
   name: cordis:group
   group: true
@@ -200,6 +145,13 @@
         subagentProvider: spawn
         maxRounds: 64
 
+    # 引擎接管行:collab 内置模板(脚本 = 包内 engine/collab.js)
+    - id: rs-workflow-takeover
+      name: '@mzzsfy/dsh-rs-workflow'
+      config:
+        role: takeover
+        kind: collab
+
 # ── remaining model-facing rows ─────────────────────────────────────────────
 
 - id: tool-ask-user
@@ -210,8 +162,8 @@
   config:
     allowParallelInProgress: true
 
-- id: tool-web
-  name: '@deepseek-ai/dsh-tool-web'
+# 运行看板上报工具(rs_workflow_report):编排子代理节点级软上报(可选,失败即弃)
+- id: rs-workflow-report
+  name: '@mzzsfy/dsh-rs-workflow'
   config:
-    fetch: false
-    searchTimeoutMs: 60000
+    role: report

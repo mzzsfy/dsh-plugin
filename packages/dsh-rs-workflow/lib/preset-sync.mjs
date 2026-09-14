@@ -1,41 +1,31 @@
 /**
- * preset-sync — 把包内 preset/rs-workflow 幂等同步到用户 preset 根。
+ * preset-sync — 释放与移除 agent preset(两类释放物,同一权威):
  *
- * 职责:
- *   - sync:递归拷贝包内 preset/rs-workflow → <dsh-home>/.agent-presets/rs-workflow,
- *     并写入来源标记(marker),供排查"选择器里 broken 的 preset 来自哪个包"。
- *   - 所有权防线:目标目录存在但 marker 缺失或归属他人时拒绝覆盖(可能是用户手工
- *     安装或本地定制的同名 preset),告警后原样保留。
- *   - 仅在插件 apply 时运行:dsh 每次启动同步一次,升级包后重启即更新。
- *     卸载场景受 pnpm 限制(依赖的 preuninstall 脚本一律不执行,实验证实),
- *     无法自动删除,残留 preset 因 tool 行 import 失败在选择器显示 broken;
- *     手动清理命令见包 README。
+ *   1. collab 内置协作模式:包内 preset/rs-workflow → <dsh-home>/.agent-presets/rs-workflow
+ *      (syncPreset,启动时幂等同步)。
+ *   2. 用户流程模板模式:设置中的模板经 releaseFlowTemplate 释放为 rs-<flowId>
+ *      (看板「释放为模式」按钮 / rs_workflow_template save release:true 触发),
+ *      产物 = preset.yml + agent.cordis.yml(生成) + flow.json5 + 来源标记。
+ *
+ * 所有权防线:目标目录存在但 marker 缺失或归属他人时拒绝覆盖。换入式原子替换:
+ * 旧目录先 rename 备份,新目录入位成功才删备份,失败尽力还原(还原也失败改 orphan
+ * 前缀保留待人工处置),绝不静默销毁。
  */
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { personaKeysFor, parseVersion as parseVersionCompat } from './persona-compat.mjs'
+import { validateFlow } from './flows.mjs'
+import JSON5 from 'json5'
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PRESET_SRC = join(PKG_ROOT, 'preset', 'rs-workflow')
 const USER_PRESET_DIR = '.agent-presets'
 const PRESET_ID = 'rs-workflow'
+const FLOW_PRESET_PREFIX = 'rs-'
 const MARKER_NAME = '.dsh-rs-workflow-source.json'
 const PACKAGE_NAME = '@mzzsfy/dsh-rs-workflow'
-// slots.json5 是文档引导的用户后备编辑点:rewrite 前若其内容异于包内模板,
-// 备份到 home 根的该文件名,重写后恢复,升级不再静默吞掉手工定制
-const SLOTS_REL = join('skills', 'rs-workflow', 'slots.json5')
-const USER_SLOTS_BACKUP = 'rs-workflow.slots.user.json5'
-// 完整性清单:任一缺失即视为残缺,走重写自愈(与 PRESET_SRC 产物对齐)
-const MANAGED_FILES = [
-  'preset.yml',
-  'agent.cordis.yml',
-  join('skills', 'rs-workflow', 'SKILL.md'),
-  SLOTS_REL,
-  join('skills', 'rs-workflow', 'references', 'engine.js'),
-  join('skills', 'rs-workflow', 'references', 'templates.md'),
-]
 
 /** dsh home:CLI 配置层可显式指定,插件环境只见 $DSH_HOME;空串视同未设 */
 function dshHome() {
@@ -46,6 +36,11 @@ function dshHome() {
 /** 释放目标绝对路径(诊断用:home 错位时可直接从日志/测试定位) */
 export function presetDest() {
   return join(dshHome(), USER_PRESET_DIR, PRESET_ID)
+}
+
+/** 流程模板模式的释放目录 */
+export function flowPresetDest(flowId) {
+  return join(dshHome(), USER_PRESET_DIR, FLOW_PRESET_PREFIX + flowId)
 }
 
 // 版本读取容错:package.json 恰逢包管理器替换窗口或损坏时不让包整体加载失败,
@@ -114,12 +109,13 @@ function releaseFingerprint() {
   return `${sourceFingerprint()}#dsh:${hostVersion()}`
 }
 
-/** 完整性校验:受管文件任一缺失即残缺 */
-function isComplete(dest) {
-  return MANAGED_FILES.every((rel) => existsSync(join(dest, rel)))
-}
+/** collab 内置完整性清单:任一缺失即视为残缺,走重写自愈(与 PRESET_SRC 产物对齐) */
+const MANAGED_FILES = [
+  'preset.yml',
+  'agent.cordis.yml',
+]
 
-/** 同步释放;返回 'created' | 'updated' | 'unchanged' | 'skipped-foreign' */
+/** 同步释放 collab 模式;返回 'created' | 'updated' | 'unchanged' | 'skipped-foreign' */
 export function syncPreset() {
   if (!existsSync(PRESET_SRC)) throw new Error(`包内 preset 缺失: ${PRESET_SRC}`)
   const dest = presetDest()
@@ -139,29 +135,46 @@ export function syncPreset() {
   return rewrite(dest, true)
 }
 
+/** 完整性校验:受管文件任一缺失即残缺 */
+function isComplete(dest) {
+  return MANAGED_FILES.every((rel) => existsSync(join(dest, rel)))
+}
+
 /** 已确认归属本包后的重写。换入式原子替换:旧目录先 rename 到备份名,新目录
  *  rename 入位成功后才删备份;换入失败时尽力还原,还原也失败则把旧副本改名为
  *  orphan 前缀(不匹配清理规则,永不被自动删除)并告警,绝不静默销毁。 */
 function rewrite(dest, existed) {
-  mkdirSync(dirname(dest), { recursive: true })
-  const staging = mkdtempSync(join(dirname(dest), '.rs-workflow-staging-'))
-  const backup = join(dirname(dest), `.rs-workflow-old-${Date.now()}`)
-  let orphan = null
-  try {
-    cpSync(PRESET_SRC, join(staging, 'out'), { recursive: true })
-    rewritePersonaKeys(join(staging, 'out', 'agent.cordis.yml'))
-    writeFileSync(join(staging, 'out', MARKER_NAME), JSON.stringify({
+  return atomicReplace(dest, existed, join(stagingOf(dest), 'out'), (out) => {
+    cpSync(PRESET_SRC, out, { recursive: true })
+    rewritePersonaKeys(join(out, 'agent.cordis.yml'))
+    writeFileSync(join(out, MARKER_NAME), JSON.stringify({
       package: PACKAGE_NAME,
+      kind: 'collab',
       version: PKG_VERSION,
       root: PKG_ROOT,
       fingerprint: releaseFingerprint(),
     }, null, 2) + '\n')
-    backupUserSlots(dest)
-    restoreUserSlots(join(staging, 'out'))
+  })
+}
+
+function stagingOf(dest) {
+  const parent = dirname(dest)
+  // mkdtemp 只创建末级目录,父链先建好(首次释放时 .agent-presets 可能不存在)
+  mkdirSync(parent, { recursive: true })
+  return mkdtempSync(join(parent, '.rs-workflow-staging-'))
+}
+
+/** 原子换入公共体:build(out) 组装 staging 目录,换入失败尽力还原 */
+function atomicReplace(dest, existed, staging, build) {
+  mkdirSync(staging, { recursive: true })
+  const backup = join(dirname(dest), `.rs-workflow-old-${Date.now()}`)
+  let orphan = null
+  try {
+    build(staging)
     const hasDest = existsSync(dest)
     if (hasDest) renameSync(dest, backup)
     try {
-      renameSync(join(staging, 'out'), dest)
+      renameSync(staging, dest)
     } catch (error) {
       if (hasDest) {
         try {
@@ -180,65 +193,20 @@ function rewrite(dest, existed) {
       throw error
     }
   } finally {
-    rmSync(staging, { recursive: true, force: true })
+    rmSync(dirname(staging), { recursive: true, force: true })
     if (orphan === null) rmSync(backup, { recursive: true, force: true })
   }
   return existed ? 'updated' : 'created'
 }
 
 /** persona 行键名按宿主版本改写(见 persona-compat.mjs):仓库源码恒为新版
- *  prefix/suffix 形态,旧宿主(text required)释放时回退改写,并重算指纹 */
+ *  prefix/suffix 形态,旧宿主(text required)释放时回退改写 */
 function rewritePersonaKeys(agentYamlPath) {
   if (!existsSync(agentYamlPath)) return
   const raw = readFileSync(agentYamlPath, 'utf8')
   const converted = personaKeysFor(hostVersion(), raw)
   if (converted !== raw) {
     writeFileSync(agentYamlPath, converted)
-  }
-}
-
-/** 用户改过的 slots.json5 在重写前备份;已回退到模板内容时清除旧备份,防陈旧定制复活 */
-function backupUserSlots(dest) {
-  const userSlots = join(dest, SLOTS_REL)
-  const template = join(PRESET_SRC, SLOTS_REL)
-  const backupPath = join(dshHome(), USER_SLOTS_BACKUP)
-  if (!existsSync(userSlots)) return
-  let userText
-  try {
-    userText = readFileSync(userSlots, 'utf8')
-  } catch {
-    return
-  }
-  let templateText = ''
-  try {
-    templateText = readFileSync(template, 'utf8')
-  } catch { /* 模板不可读视同定制, 保留现有备份 */ }
-  if (userText === templateText && templateText !== '') {
-    rmSync(backupPath, { force: true })
-    return
-  }
-  writeFileSync(backupPath, userText)
-}
-
-/** 待换入目录的 slots 若为模板内容且 home 有备份,写入用户定制;
- *  恢复随换入原子完成,dest 不再出现"模板+待恢复"中间态(崩溃窗口与复活窗口同消) */
-function restoreUserSlots(stagingOut) {
-  const backupPath = join(dshHome(), USER_SLOTS_BACKUP)
-  if (!existsSync(backupPath)) return
-  const userSlots = join(stagingOut, SLOTS_REL)
-  if (!existsSync(userSlots)) return
-  let userText
-  try {
-    userText = readFileSync(userSlots, 'utf8')
-  } catch {
-    return
-  }
-  let templateText = ''
-  try {
-    templateText = readFileSync(join(PRESET_SRC, SLOTS_REL), 'utf8')
-  } catch { /* 模板不可读时无法判定, 不动作 */ }
-  if (templateText !== '' && userText === templateText) {
-    writeFileSync(userSlots, readFileSync(backupPath, 'utf8'))
   }
 }
 
@@ -257,7 +225,7 @@ function cleanStaleStaging(parentDir) {
   }
 }
 
-/** 删除本包释放的 preset(仅供维护脚本/手工调用,插件生命周期内不触发)。
+/** 删除 collab 内置释放 preset(仅供维护脚本/手工调用,插件生命周期内不触发)。
  *  返回三态:'removed' 已删 | 'missing' 目录不存在 | 'foreign' 外来目录拒绝删除 */
 export function removePreset() {
   const dest = presetDest()
@@ -267,4 +235,201 @@ export function removePreset() {
   rmSync(dest, { recursive: true, force: true })
   cleanStaleStaging(dirname(dest))
   return 'removed'
+}
+
+// ── 流程模板模式释放(设置模板 → rs-<id> 模式目录) ────────────────────────────
+
+/** 生成的流程模式组合。takeover 行在 delegation 组内(与 workflowEngine 同 isolate
+ *  realm);flowFile 经组合 baseUrl 锚定到释放目录内的 flow.json5。 */
+function flowAgentYaml() {
+  return `# 由 @mzzsfy/dsh-rs-workflow 释放的流程工作流模式(勿手改:重新释放即覆盖)。
+# 形态 = standard 工具行集 + takeover 行(pre-step 引擎接管,见包 lib/takeover.mjs)。
+# 子代理(每步执行者)继承本组合全部工具行。
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: |-
+      你是"若水工作流"流程模式会话代理,由 {{model}} 模型驱动。
+      本模式的一切用户请求都由若水流程引擎接管执行(pre-step 拦截,你收不到任务原文)。
+      你唯一可能被调用working的场景:流程运行期间用户追加消息。此时只做简短答疑,
+      不执行任何交付操作,不尝试启动或修改工作流,回答完即止。
+    suffix: Your working directory is {{cwd}}.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── web ─────────────────────────────────────────────────────────────────────
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+# workflowEngine 是预设私有服务,所有触达它的行共享一个 entry-local realm。
+# takeover 行也在组内:pre-step 拦截用户消息并经 workflowEngine 启动编排。
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: continuable
+
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+
+    - id: rs-workflow-takeover
+      name: '@mzzsfy/dsh-rs-workflow'
+      config:
+        role: takeover
+        kind: flow
+        flowFile: !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('flow.json5', baseUrl))"
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# 运行看板上报工具:流程步骤子代理可选软上报(失败即弃,不影响编排)
+- id: rs-workflow-report
+  name: '@mzzsfy/dsh-rs-workflow'
+  config:
+    role: report
+`
+}
+
+/** 释放流程模板为模式。传 entry = {id,label,description,json5};
+ *  校验失败抛错(调用方 toast 给用户)。返回 'created' | 'updated'。 */
+export function releaseFlowTemplate(entry) {
+  const flowId = typeof entry?.id === 'string' ? entry.id.trim() : ''
+  if (!/^[a-z][a-z0-9-]*$/.test(flowId)) throw new Error(`流程 id 非法: ${flowId}`)
+  // 释放前重新校验定义(设置里可能被外部改坏)
+  const flow = JSON5.parse(entry.json5)
+  const errors = validateFlow(flow)
+  if (errors.length > 0) throw new Error('流程模板校验失败:\n- ' + errors.join('\n- '))
+  const dest = flowPresetDest(flowId)
+  cleanStaleStaging(dirname(dest))
+  const existed = existsSync(dest)
+  if (existed) {
+    const marker = readMarker(dest)
+    if (marker === null || marker.package !== PACKAGE_NAME) throw new Error(`目标目录归属他人,拒绝覆盖: ${dest}`)
+  }
+  return atomicReplace(dest, existed, join(stagingOf(dest), 'out'), (out) => {
+    writeFileSync(join(out, 'flow.json5'), entry.json5, 'utf8')
+    writeFileSync(join(out, 'preset.yml'), `name: 若水·${entry.label || flowId}\ndescription: >-\n  ${String(entry.description || '').replace(/\s*\n\s*/g, ' ').slice(0, 200) || '流程工作流模板'}\n`, 'utf8')
+    writeFileSync(join(out, 'agent.cordis.yml'), flowAgentYaml(), 'utf8')
+    writeFileSync(join(out, MARKER_NAME), JSON.stringify({
+      package: PACKAGE_NAME,
+      kind: 'flow',
+      flowId,
+      version: PKG_VERSION,
+      root: PKG_ROOT,
+      fingerprint: templateFingerprint(entry.json5),
+    }, null, 2) + '\n')
+  })
+}
+
+/** 撤下流程模板模式。返回 'removed' | 'missing' | 'foreign' */
+export function unreleaseFlowTemplate(flowId) {
+  const dest = flowPresetDest(String(flowId || '').trim())
+  if (!existsSync(dest)) return 'missing'
+  const marker = readMarker(dest)
+  if (marker === null || marker.package !== PACKAGE_NAME) return 'foreign'
+  rmSync(dest, { recursive: true, force: true })
+  cleanStaleStaging(dirname(dest))
+  return 'removed'
+}
+
+/** 模板内容指纹:同 id 重释放时内容不变即无实质更新(原子换入照常,幂等) */
+function templateFingerprint(json5Text) {
+  return `flow#${Buffer.byteLength(json5Text, 'utf8')}#dsh:${hostVersion()}`
 }

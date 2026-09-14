@@ -1,5 +1,5 @@
 /**
- * dsh-rs-workflow 独立冒烟测试：不启动 dsh，用最小 mock ctx 跑通三个行角色。
+ * dsh-rs-workflow 独立冒烟测试：不启动 dsh，用最小 mock ctx 跑通全部行角色。
  *
  * 用法:
  *   node scripts/test-workflow-plugin.mjs [包目录]
@@ -8,14 +8,16 @@
  * 从安装位置向上才找得到 profiles\node_modules），先安装再测，或自备 node_modules。
  *
  * 覆盖点：
- *   - 三个角色 + 非法 config 的 Config 校验（$.role required、maxTasks/budgets 边界、非法 role）
- *   - preset-sync 角色：syncPreset 被调用、created/updated 区分、幂等、同版本内容漂移重写、
- *     用户定制 slots 备份恢复、残缺自愈、外来目录防线
- *   - settings 角色：register 的命名空间/schema/base、schema 解析（默认值、base、user 层）、toJSON 可序列化
- *   - tool 角色：工具注册、execute 的 settings/fallback/异常三条路径、presentCall、output.render
+ *   - 六个角色 + 非法 config 的 Config 校验（$.role required、maxTasks/budgets 边界、非法 role）
+ *   - settings 角色：register 命名空间/schema/base、schema 解析、toJSON
+ *   - preset-sync 角色：collab 释放幂等/自愈/外来防线；流程模板释放产物与所有权防线
+ *   - board 角色：runs/templates/spec 路由注册
+ *   - template-tool 角色：spec/list/save(+release)/remove 全链
+ *   - report 角色：工具注册与 node 软上报
+ *   - takeover 角色：pre-step 拦截注册（workflowEngine 注入依赖声明）
  */
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
 const argDir = process.argv[2];
@@ -45,12 +47,12 @@ function mergeLayers(under, over) {
 
 // ── 1. Config 校验 ──────────────────────────────────────────────────────────
 console.log(`testing ${pkgDir}`);
-const toolCfg = mod.Config({ role: "tool" });
-check("Config({role:'tool'}) 通过", toolCfg.role === "tool");
-check("Config 默认值：workflow.defaultTemplate=auto", toolCfg.workflow.defaultTemplate === "auto");
-check("Config 默认值：workflow.maxTasks=8", toolCfg.workflow.maxTasks === 8);
-check("Config 默认值：16 个 slot 全空串", Object.values(toolCfg.slots).every((v) => v === "") && Object.keys(toolCfg.slots).length === 16);
-check("Config 默认值：budgets 四阈值 2/2/3/3", toolCfg.budgets.reviewRejectBeforeEscalate === 2 && toolCfg.budgets.planRejectBeforeBlocked === 2 && toolCfg.budgets.emptyOutputRetryLimit === 3 && toolCfg.budgets.reportNudgeLimit === 3);
+const cfg = mod.Config({ role: "settings" });
+check("Config 默认值：workflow.defaultTemplate=auto", cfg.workflow.defaultTemplate === "auto");
+check("Config 默认值：workflow.maxTasks=8", cfg.workflow.maxTasks === 8);
+check("Config 默认值：16 个 slot 全空串", Object.values(cfg.slots).every((v) => v === "") && Object.keys(cfg.slots).length === 16);
+check("Config 默认值：budgets 四阈值 2/2/3/3", cfg.budgets.reviewRejectBeforeEscalate === 2 && cfg.budgets.planRejectBeforeBlocked === 2 && cfg.budgets.emptyOutputRetryLimit === 3 && cfg.budgets.reportNudgeLimit === 3);
+check("Config 默认值：templates 空数组", Array.isArray(cfg.templates) && cfg.templates.length === 0);
 let threw = false;
 try { mod.Config({}); } catch { threw = true; }
 check("Config 缺 role 抛错", threw);
@@ -89,17 +91,24 @@ check("schema 解析：未覆盖位仍取 base", resolved.slots.reviewer === "")
 check("schema 解析：workflow 覆盖", resolved.workflow.defaultTemplate === "lite");
 check("toJSON 可序列化（GUI describe 依赖）", typeof regArgs.schema.toJSON() === "object");
 
-// ── 3. preset-sync 角色 ─────────────────────────────────────────────────────
-// 用隔离的临时 DSH_HOME 走真实 syncPreset（写盘），验证幂等、created/updated 区分与外来目录防线。
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// ── 3. preset-sync 角色(collab + 流程模板释放) ───────────────────────────────
+// 用隔离的临时 DSH_HOME 走真实 syncPreset/releaseFlowTemplate(写盘)。
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 const simHome = mkdtempSync(resolve(tmpdir(), "rs-workflow-smoke-"));
 const savedDshHome = process.env.DSH_HOME;
 process.env.DSH_HOME = simHome;
+const NEWS_FLOW = `{
+  id: "news", label: "新闻生产", description: "收集信息交叉核对后成稿",
+  steps: [
+    { id: "plan", prompt: "定计划", outputs: { keywords: "关键词" } },
+    { id: "write", prompt: "成稿 {plan.keywords}", outputs: { article: "稿件" } },
+  ],
+}`;
 try {
   const dest = resolve(simHome, ".agent-presets/rs-workflow");
   mod.apply({}, { role: "preset-sync" });
-  check("preset-sync：首跑释放（created 路径生效）", existsSync(resolve(dest, "agent.cordis.yml")) && existsSync(resolve(dest, "skills/rs-workflow/references/engine.js")));
+  check("preset-sync：首跑释放(产物=collab 组合,无技能目录)", existsSync(resolve(dest, "agent.cordis.yml")) && !existsSync(resolve(dest, "skills")));
   check("preset-sync：marker 写入", existsSync(resolve(dest, ".dsh-rs-workflow-source.json")));
 
   // 幂等(非自证):重跑前埋哨兵文件,rewrite 会删掉它;unchanged 时哨兵必须仍在
@@ -108,53 +117,13 @@ try {
   mod.apply({}, { role: "preset-sync" });
   check("preset-sync：二次同步幂等（unchanged,哨兵存活）", readFileSync(resolve(dest, ".dsh-rs-workflow-source.json")).equals(markerBefore) && existsSync(resolve(dest, "__sentinel__")));
 
-  // 同版本内容漂移:改包内 preset 源(junction 下即仓库文件),指纹应感知并重写释放副本
-  // (开发态改 preset 不 bump version 的日常场景);测试自带 try/finally 恢复源文件
-  const srcTemplates = resolve(pkgDir, "preset/rs-workflow/skills/rs-workflow/references/templates.md");
-  const srcOriginal = readFileSync(srcTemplates, "utf8");
-  const destTemplates = resolve(dest, "skills/rs-workflow/references/templates.md");
+  // 残缺自愈:删掉任一受管文件后应自动修复(updated 路径)
   rmSync(resolve(dest, "__sentinel__"), { force: true });
-  try {
-    writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift -->");
-    const driftLogs = [];
-    mod.apply({ logger: { info(m) { driftLogs.push(m); }, warn(m) { driftLogs.push(m); } } }, { role: "preset-sync" });
-    check("preset-sync：同版本源漂移触发重写", driftLogs.join(" ").includes("已同步更新"));
-    check("preset-sync：漂移已释放到副本", readFileSync(destTemplates, "utf8").includes("drift"));
-
-    // 源漂移触发的 rewrite 路径中,用户定制 slots.json5 应被备份到 home 并在重写后恢复;
-    // 上一次 rewrite 已消化 drift,再追加一处源变化制造新的 rewrite 触发
-    const userSlotsPath = resolve(dest, "skills/rs-workflow/slots.json5");
-    const homeBackupPath = resolve(simHome, "rs-workflow.slots.user.json5");
-    writeFileSync(userSlotsPath, readFileSync(userSlotsPath, "utf8").replace('planner: ""', 'planner: "u/m"'));
-    writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift2 -->");
-    mod.apply({}, { role: "preset-sync" });
-    check("preset-sync：用户定制 slots 重写后恢复", readFileSync(userSlotsPath, "utf8").includes('planner: "u/m"'));
-    check("preset-sync：定制备份落盘", existsSync(homeBackupPath));
-
-    // 用户回退定制:重写路径判定"未定制"时须清除旧备份,防陈旧定制被后续重写复活
-    writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift3 -->");
-    writeFileSync(userSlotsPath, readFileSync(userSlotsPath, "utf8").replace('planner: "u/m"', 'planner: ""'));
-    mod.apply({}, { role: "preset-sync" });
-    check("preset-sync：回退定制后备份被清除", !existsSync(homeBackupPath));
-
-    // 回退后再定制:新一轮 rewrite 备份/恢复链路应重新建立
-    writeFileSync(userSlotsPath, readFileSync(userSlotsPath, "utf8").replace('planner: ""', 'planner: "u/m2"'));
-    writeFileSync(srcTemplates, srcOriginal + "\n<!-- drift4 -->");
-    mod.apply({}, { role: "preset-sync" });
-    check("preset-sync：二轮定制恢复", readFileSync(userSlotsPath, "utf8").includes('planner: "u/m2"'));
-    check("preset-sync：二轮备份重建", existsSync(homeBackupPath));
-  } finally {
-    writeFileSync(srcTemplates, srcOriginal);
-    mod.apply({}, { role: "preset-sync" });
-  }
-  check("preset-sync：源恢复后副本回正", !readFileSync(destTemplates, "utf8").includes("drift"));
-
-  // 快路径完整性：删掉释放物任一受管文件后应自动修复（updated 路径）
   rmSync(resolve(dest, "agent.cordis.yml"));
   mod.apply({}, { role: "preset-sync" });
   check("preset-sync：残缺自愈（updated）", existsSync(resolve(dest, "agent.cordis.yml")));
 
-  // 所有权防线：无 marker 的外来目录必须原样保留
+  // 所有权防线:无 marker 的外来目录必须原样保留
   rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
   writeFileSync(resolve(dest, "agent.cordis.yml"), "# user custom\n");
@@ -163,53 +132,99 @@ try {
   mod.apply(foreignCtx, { role: "preset-sync" });
   check("preset-sync：外来目录拒绝覆盖", readFileSync(resolve(dest, "agent.cordis.yml"), "utf8") === "# user custom\n");
   check("preset-sync：外来目录有告警", warns.length === 1);
+
+  // 流程模板释放:releaseFlowTemplate 产物 + takeover/report 行 + 所有权防线
+  mod.releaseFlowTemplate({ id: "news", label: "新闻生产", description: "收集成稿", json5: NEWS_FLOW });
+  const flowDest = resolve(simHome, ".agent-presets/rs-news");
+  const flowYaml = readFileSync(resolve(flowDest, "agent.cordis.yml"), "utf8");
+  check("release：产物齐全", existsSync(resolve(flowDest, "flow.json5")) && existsSync(resolve(flowDest, "preset.yml")));
+  check("release：组合含 takeover+report 行", flowYaml.includes("role: takeover") && flowYaml.includes("role: report"));
+  check("release：flow.json5 经 baseUrl 锚定", flowYaml.includes("flowFile:"));
+  check("release：delegation 组 isolate workflowEngine", flowYaml.includes("workflowEngine: true"));
+  let threwRelease = false;
+  try { mod.releaseFlowTemplate({ id: "news", label: "n", json5: "{ not json5:" }); } catch { threwRelease = true; }
+  check("release：非法定义拒绝", threwRelease);
+  check("unrelease：撤下", mod.unreleaseFlowTemplate("news") === "removed");
 } finally {
   if (savedDshHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = savedDshHome;
   rmSync(simHome, { recursive: true, force: true });
 }
 
-// ── 4. tool 角色 ────────────────────────────────────────────────────────────
-let registered = null;
-const resolvedValue = {
-  slots: { planner: "x/y", executor: "", reviewer: "", "planner-triage": "", "reviewer-final": "", "executor-retry": "" },
-  workflow: { defaultTemplate: "auto", maxTasks: 8 },
-};
-const toolCtx = {
-  inject(deps, cb) {
-    check("tool 角色 inject 依赖", JSON.stringify(deps) === JSON.stringify(["tools"]));
-    cb({
-      tools: { register(t) { registered = t; } },
-      get(name) { return name === "settings" ? { get: () => resolvedValue } : undefined; },
-    });
-  },
-};
-mod.apply(toolCtx, { role: "tool" });
-check("工具已注册", registered?.name === "rs_workflow_config");
-check("presentCall 形状", registered.presentCall({}).card === "generic" && registered.presentCall({}).kind === "other");
-const viaSettings = await registered.execute({});
-check("execute：settings 路径", viaSettings.source === "settings" && viaSettings.slots.planner === "x/y");
-check("output.render（settings）", JSON.stringify(registered.output.render({}, viaSettings)).includes("planner"));
+// ── 4. board 角色 ───────────────────────────────────────────────────────────
+{
+  const routes = new Set();
+  mod.apply({ inject(deps, cb) { cb({ webServer: { register(r) { routes.add(r.path); } }, effect(fn) { fn(); } }); }, effect(fn) { fn(); } }, { role: "board" });
+  check("board：runs/run/remove 路由", ["runs", "run", "remove"].every((p) => routes.has(`/api/rs-workflow/${p}`)));
+  check("board：templates/spec/release/unrelease/template-save/template-remove 路由", ["templates", "spec", "release", "unrelease", "template-save", "template-remove"].every((p) => routes.has(`/api/rs-workflow/${p}`)));
+}
 
-// settings.get 抛异常: 工具必须走 fallback 而非硬失败(R3 收紧)
-const throwingCtx = {
-  inject(deps, cb) {
-    cb({ tools: { register(t) { registered = t; } }, logger: { warn() {} }, get() { return { get() { throw new Error("ns broken"); } }; } });
-  },
-};
-mod.apply(throwingCtx, { role: "tool" });
-const viaThrow = await registered.execute({});
-check("execute：settings 抛异常走 fallback", viaThrow.source === "fallback" && viaThrow.workflow.defaultTemplate === "auto");
+// ── 5. template-tool 角色 ───────────────────────────────────────────────────
+{
+  const simHome2 = mkdtempSync(resolve(tmpdir(), "rs-workflow-smoke2-"));
+  const savedHome2 = process.env.DSH_HOME;
+  process.env.DSH_HOME = simHome2;
+  try {
+    const settingsValue = { templates: [] };
+    let registeredTool = null;
+    const toolCtx = {
+      get(name) { return name === "settings" ? { get: () => settingsValue, update(ns, patch) { Object.assign(settingsValue, patch); return Promise.resolve(); } } : undefined; },
+      inject(deps, cb) {
+        check("template-tool 角色 inject 依赖", JSON.stringify(deps) === JSON.stringify(["tools"]));
+        cb({
+          effect(fn) { fn(); },
+          tools: { register(t) { registeredTool = t; } },
+        });
+      },
+    };
+    mod.apply(toolCtx, { role: "template-tool" });
+    check("template-tool：工具已注册", registeredTool?.name === "rs_workflow_template");
+    check("presentCall 形状", registeredTool.presentCall({ action: "spec" }).card === "generic" && registeredTool.presentCall({ action: "spec" }).kind === "other");
+    const spec = await registeredTool.execute({ action: "spec" });
+    check("spec：返回规范全文", spec.ok === true && spec.spec.includes("产出契约"));
+    const saved = await registeredTool.execute({ action: "save", release: true, template: { id: "news", label: "新闻", json5: NEWS_FLOW } });
+    check("save：保存并释放", saved.ok === true && saved.released === true && settingsValue.templates.length === 1);
+    check("save：释放目录落盘", existsSync(join(simHome2, ".agent-presets", "rs-news", "flow.json5")));
+    const removed = await registeredTool.execute({ action: "remove", id: "news" });
+    check("remove：删除并撤下", removed.ok === true && settingsValue.templates.length === 0 && !existsSync(join(simHome2, ".agent-presets", "rs-news")));
+  } finally {
+    if (savedHome2 === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = savedHome2;
+    rmSync(simHome2, { recursive: true, force: true });
+  }
+}
 
-const fallbackCtx = {
-  inject(deps, cb) {
-    cb({ tools: { register(t) { registered = t; } }, get: () => undefined });
-  },
-};
-mod.apply(fallbackCtx, { role: "tool" });
-const viaFallback = await registered.execute({});
-check("execute：fallback 路径", viaFallback.source === "fallback" && viaFallback.workflow.defaultTemplate === "auto");
-check("output.render（fallback 附提示）", registered.output.render({}, viaFallback)[0].text.includes("设置服务不可用"));
+// ── 6. report 角色 ──────────────────────────────────────────────────────────
+{
+  let registeredReport = null;
+  const reportCtx = {
+    inject(deps, cb) {
+      cb({ tools: { register(t) { registeredReport = t; } }, get: () => undefined });
+    },
+  };
+  mod.apply(reportCtx, { role: "report" });
+  check("report：工具已注册", registeredReport?.name === "rs_workflow_report");
+  const listed = await registeredReport.execute({ action: "list" }, {});
+  check("report：list 可用", listed.ok === true && Array.isArray(listed.runs));
+}
+
+// ── 7. takeover 角色(pre-step 拦截注册) ──────────────────────────────────────
+{
+  let engineDepsDeclared = false;
+  let preStepRegistered = false;
+  const takeoverCtx = {
+    get: () => undefined,
+    effect(fn) { fn(); },
+    on(name) { if (name === "agent/pre-step") preStepRegistered = true; return () => {}; },
+    inject(deps, cb) {
+      if (deps.includes("workflowEngine")) engineDepsDeclared = true;
+      cb({ workflowEngine: { start() { throw new Error("注册期不应启动"); } } });
+    },
+  };
+  mod.apply(takeoverCtx, { role: "takeover", kind: "collab" });
+  check("takeover：workflowEngine inject 依赖声明", engineDepsDeclared);
+  check("takeover：agent/pre-step 拦截已注册", preStepRegistered);
+}
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

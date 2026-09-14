@@ -74,6 +74,11 @@ window.__ModuleLoader__.load({
 .rsww-pc__row{display:flex;align-items:baseline;gap:10px}
 .rsww-pc__label{font-size:12px;color:var(--dsw-alias-label-tertiary,#9a9aa6);flex:none;width:150px}
 .rsww-pc__value{font-size:12px;font-variant-numeric:tabular-nums}
+.rsww-input{border:1px solid var(--dsw-alias-border-secondary,#3c3c46);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 8px;min-width:120px}
+.rsww-input:focus{outline:none;border-color:var(--dsw-alias-border-primary,#5a5a66)}
+.rsww-input--wide{flex:1;min-width:200px}
+.rsww-textarea{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-secondary,#3c3c46);border-radius:6px;background:transparent;color:inherit;font-size:12px;line-height:1.5;padding:8px;resize:vertical;white-space:pre;overflow-x:auto}
+.rsww-textarea:focus{outline:none;border-color:var(--dsw-alias-border-primary,#5a5a66)}
 `
 
     async function request(path) {
@@ -310,7 +315,7 @@ window.__ModuleLoader__.load({
       return React.createElement('div', { className: 'rsww-panel' },
           React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
           React.createElement('div', { className: 'rsww-head' },
-            React.createElement('span', { className: 'rsww-title' }, '若水工作流'),
+            React.createElement('span', { className: 'rsww-title' }, '运行历史'),
             React.createElement('span', { className: 'rsww-spacer' }),
             React.createElement(Switch, { checked: autoRefresh, onChange: (e) => {
               const next = e.target.checked
@@ -320,7 +325,7 @@ window.__ModuleLoader__.load({
             React.createElement('button', { className: 'rsww-btn', onClick: reload }, '刷新'),
             React.createElement('button', { className: 'rsww-btn', disabled: !runs || runs.length === 0, onClick: clearAll }, '清空')),
           error ? React.createElement('span', { className: 'rsww-error' }, error) : null,
-          runs && runs.length === 0 ? React.createElement('span', { className: 'rsww-empty' }, '还没有运行记录:以若水工作流模式启动一次编排后,这里会出现运行历史。') : null,
+          runs && runs.length === 0 ? React.createElement('span', { className: 'rsww-empty' }, '还没有运行记录:选中任一若水模式发一条需求,这里会出现运行历史。') : null,
           groups.map((ws) => React.createElement('div', { className: 'rsww-group', key: ws },
             ws ? React.createElement('span', { className: 'rsww-grouphead' }, workspaceLabel(ws)) : null,
             byWorkspace[ws].map((run) => React.createElement(React.Fragment, { key: run.runId },
@@ -337,8 +342,127 @@ window.__ModuleLoader__.load({
                 : null)))))
     }
 
-    // 设置分区看板(id 配对 ns, 宿主 describe 后按命名空间渲染表单) + 插件页卡片
-    // (key 配对 ns;卡片壳语义对齐 cron-board settings.plugin.item)
+    // ── 流程模板管理:列表 + JSON5 编辑 + 保存/释放为模式/撤下/删除 ─────────────
+    // 模板是强流程定义(每步产出契约),AI 编辑入口 = rs_workflow_template 工具;
+    // 本页是人工编辑与「更新到 dsh」释放按钮的落点。
+
+    const TEMPLATE_ID_TEST = /^[a-z][a-z0-9-]*$/
+
+    function TemplateEditor({ draft, setDraft, onSave, saving, error }) {
+      return React.createElement('div', { className: 'rsww-detail' },
+        React.createElement('div', { className: 'rsww-row' },
+          React.createElement('input', {
+            className: 'rsww-input rsww-mono', placeholder: '流程 id(如 news)', value: draft.id || '',
+            onChange: (e) => setDraft({ ...draft, id: e.target.value }), 'aria-label': '流程 id',
+          }),
+          React.createElement('input', {
+            className: 'rsww-input', placeholder: '显示名(如 新闻生产)', value: draft.label || '',
+            onChange: (e) => setDraft({ ...draft, label: e.target.value }), 'aria-label': '显示名',
+          }),
+          React.createElement('input', {
+            className: 'rsww-input rsww-input--wide', placeholder: '适用场景一句话', value: draft.description || '',
+            onChange: (e) => setDraft({ ...draft, description: e.target.value }), 'aria-label': '适用场景',
+          })),
+        React.createElement('textarea', {
+          className: 'rsww-textarea rsww-mono', rows: 18, spellCheck: false,
+          placeholder: '流程定义 JSON5(规范见「模板规范」分区,或让 AI 经 rs_workflow_template 工具生成)',
+          value: draft.json5 || '',
+          onChange: (e) => setDraft({ ...draft, json5: e.target.value }),
+          'aria-label': '流程定义 JSON5',
+        }),
+        error ? React.createElement('span', { className: 'rsww-error rsww-text', style: { whiteSpace: 'pre-wrap' } }, error) : null,
+        React.createElement('div', { className: 'rsww-row' },
+          React.createElement('button', { className: 'rsww-btn', disabled: saving, onClick: onSave }, saving ? '保存中...' : '保存'),
+          React.createElement('span', { className: 'rsww-meta' }, '保存仅写入设置;点列表里的「释放为模式」才生成可选模式')))
+    }
+
+    function TemplatesApp() {
+      const [templates, setTemplates] = useState(null)
+      const [error, setError] = useState('')
+      const [editing, setEditing] = useState(null) // null | {id?, label?, description?, json5}
+      const [saving, setSaving] = useState(false)
+      const [editError, setEditError] = useState('')
+      const [specOpen, setSpecOpen] = useState(false)
+      const [specText, setSpecText] = useState('')
+
+      const reload = useCallback(async () => {
+        const outcome = await request('templates')
+        if (outcome.ok) { setTemplates(outcome.data.templates || []); setError('') }
+        else setError(outcome.error)
+      }, [])
+      useEffect(() => { reload() }, [reload])
+
+      const loadSpec = async () => {
+        if (specText) { setSpecOpen((v) => !v); return }
+        const outcome = await request('spec')
+        if (outcome.ok) { setSpecText(outcome.data.spec || ''); setSpecOpen(true) }
+        else setError(outcome.error)
+      }
+
+      const save = async () => {
+        if (!editing) return
+        setSaving(true)
+        setEditError('')
+        const outcome = await post('template-save', editing)
+        setSaving(false)
+        if (!outcome.ok) { setEditError(outcome.error || '校验失败'); return }
+        setEditing(null)
+        reload()
+      }
+
+      const release = async (id) => {
+        setError('')
+        const outcome = await post('release', { id })
+        if (!outcome.ok) { setError(outcome.error); return }
+        reload()
+      }
+
+      const unrelease = async (id) => {
+        setError('')
+        const outcome = await post('unrelease', { id })
+        if (!outcome.ok) { setError(outcome.error); return }
+        reload()
+      }
+
+      const remove = async (id) => {
+        setError('')
+        const outcome = await post('template-remove', { id })
+        if (!outcome.ok) { setError(outcome.error); return }
+        if (editing && editing.id === id) setEditing(null)
+        reload()
+      }
+
+      return React.createElement('div', { className: 'rsww-panel' },
+        React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+        React.createElement('div', { className: 'rsww-head' },
+          React.createElement('span', { className: 'rsww-title' }, '流程模板'),
+          React.createElement('span', { className: 'rsww-spacer' }),
+          React.createElement('button', { className: 'rsww-btn', onClick: () => setEditing({ id: '', label: '', description: '', json5: '' }) }, '新建'),
+          React.createElement('button', { className: 'rsww-btn', onClick: loadSpec }, specOpen ? '收起规范' : '模板规范')),
+        error ? React.createElement('span', { className: 'rsww-error' }, error) : null,
+        templates === null && !error ? React.createElement('span', { className: 'rsww-meta' }, '加载中...') : null,
+        templates !== null && templates.length === 0 && !editing
+          ? React.createElement('span', { className: 'rsww-empty' }, '还没有流程模板:点「新建」手写,或在任意会话让 AI 经 rs_workflow_template 工具生成。') : null,
+        specOpen ? React.createElement('div', { className: 'rsww-detail' },
+          React.createElement('span', { className: 'rsww-text rsww-mono' }, specText || '加载中...')) : null,
+        editing ? React.createElement(TemplateEditor, {
+          draft: editing, setDraft: setEditing, onSave: save, saving, error: editError,
+        }) : null,
+        (templates || []).map((t) => React.createElement('div', { className: 'rsww-card', key: t.id },
+          React.createElement('div', { className: 'rsww-row' },
+            React.createElement('span', { className: 'rsww-req', title: t.description }, (t.label || t.id) + (t.label ? ' (' + t.id + ')' : '')),
+            React.createElement('span', { className: 'rsww-tags' },
+              React.createElement('span', { className: 'rsww-tag' }, '模式 rs-' + t.id)),
+            React.createElement('span', { className: 'rsww-spacer' }),
+            React.createElement('button', { className: 'rsww-btn', onClick: () => setEditing({ ...t }) }, '编辑'),
+            React.createElement('button', { className: 'rsww-btn', onClick: () => release(t.id) }, '更新到 dsh'),
+            React.createElement('button', { className: 'rsww-btn', onClick: () => unrelease(t.id) }, '撤下模式'),
+            React.createElement('button', { className: 'rsww-btn', onClick: () => remove(t.id) }, '删除')),
+          React.createElement('span', { className: 'rsww-meta' }, t.description || ''))))
+    }
+
+    // 设置分区:运行历史 + 流程模板(两个独立 section,看板导航各占一项)
+    // + 插件页卡片(key 配对 ns;卡片壳语义对齐 cron-board settings.plugin.item)
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -346,6 +470,11 @@ window.__ModuleLoader__.load({
           ctx.slots.register(
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },
             () => React.createElement(BoardApp),
+          ))
+        ctx.slots.inject('settings.section', () =>
+          ctx.slots.register(
+            { name: 'settings.section', id: 'rs-workflow-templates', order: 46, label: '若水·流程模板' },
+            () => React.createElement(TemplatesApp),
           ))
         ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
           yield ctx.slots.register(
