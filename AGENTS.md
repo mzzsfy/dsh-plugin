@@ -40,7 +40,7 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ## 日常开发循环
 
 1. 改代码在仓库 `packages/<包>/` 内进行,直接改工作副本
-2. 测试:`node --test "test/*.test.mjs"`(在包目录内);仓库级:rs-workflow 引擎测试 `node --test tests/engine.test.mjs` 与 rs-workflow 模板 slot 三处镜像 parity `node --test tests/workflow-parity.test.mjs`(均在仓库根);rs-workflow 插件冒烟在仓库根 `node scripts/test-workflow-plugin.mjs`(默认测 profile 安装副本,传包目录可测任意构建)
+2. 测试:`node --test "test/*.test.mjs"`(在包目录内);仓库级:rs-workflow 引擎测试 `node --test tests/engine.test.mjs`、流程解释器 BDD `node --test tests/flow.test.mjs` 与 parity `node --test tests/workflow-parity.test.mjs`(均在仓库根);rs-workflow 插件冒烟在仓库根 `node scripts/test-workflow-plugin.mjs`(默认测 profile 安装副本,传包目录可测任意构建)
 3. 验证效果:确保 dev-link 已挂。**host 半区改动自动热重载**(dev-link 在 home 补丁层 `~/.dsh/cordis.patch.yml` 维护 hmr 覆盖行,watch 仓库 packages,保存后约 1 秒重载对应插件;测试/文档/依赖目录不触发);**client 半区改动刷新页面即生效**(client bundle 从磁盘按请求现读)。改完代码不要求重启 dsh,也不要建议用户重启
 4. 提交:语义化中文提交信息,一事一提交,禁止把无关改动混入
 
@@ -69,6 +69,21 @@ client.js 与 core 之间存在镜像逻辑的(如 turn-notify 的 chooseChannel
 - 实现模式:原生 checkbox 保留(`input[type="checkbox"]`,保可访问性与表单语义)但视觉隐藏,相邻兄弟节点 `track`(圆角胶囊 `<span>`)+ 其子节点 `thumb`(圆点 `<span>`)用 CSS 过渡呈现选中态;结构为 `label.<前缀>-switch > input[type="checkbox"] + .<前缀>-switch__track > .<前缀>-switch__thumb`,label 内允许其余子节点(文字标签、同 label 的文本 input)
 - 各包样式类名必须带包前缀(前缀取包名缩写,须在 packages/ 全清单内唯一,如 `tn-switch` / `mce-switch`),因插件 style 均为全局注入;开关的 `:checked` / `:focus-visible` / `:disabled` 状态选择器必须以 `input[type="checkbox"]` 锚定,防止组合进含其他 input 的 label 时误伤;`:hover` 例外地锚定 label(视觉隐藏的 input 无法成为指针目标)
 - 参考实现:`dsh-model-capability-editor` 的 `.mce-switch`(状态最全,含 disabled);`dsh-turn-notify` 的 `.tn-switch` 为同款。新包仿制并复制对应 switch-guard 守卫测试,不抽共享 UI 包
+
+## 导航图标声明规约
+
+插件需要设置导航分区图标或 dsh-market 卡片图标时,唯一合法方式是经 `dsh-settings-nav-icons` 的声明机制在 client 半区注册,禁止自行改写官方 svg 或另行注入图标:
+
+```js
+const NAV_ICON = { '<分区显示文本或插件名>': '<glyph 名或 svg>' }
+if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+else window.__navicIconQueue = [NAV_ICON]
+```
+
+- 键为设置分区显示文本或插件名;值为内置 glyph 名或完整 16×16 `<svg>` 字符串(经安全门),合法 glyph 名与安全门规则见 `packages/dsh-settings-nav-icons/README.md`
+- 生产者样板由 `dsh-settings-nav-icons` 契约测试锁定,改样板须同步全部生产者包
+- 取图优先级:用户覆盖 > 插件声明 > 内置映射 > 关键词 > 哈希;同键重复注册幂等
 
 ## 公共 client 依赖包规约
 

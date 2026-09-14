@@ -25,7 +25,7 @@ dsh-plugin/
 | @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM 五通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;同浏览器多窗口按 localStorage 认领保证唯一发声;非回环 HTTP 访问降级 toast + 标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
 | @mzzsfy/dsh-session-manager | 会话管理三合一:超期会话自动归档(阈值可配)、归档面板(取消归档 / 两段式删除 / 回收站还原)、归档推送提示 | host 启动补扫、每日周期轮与新会话创建三路触发同一幂等归档评估(阈值与周期均可配,timer 软依赖缺失自动降级);删除移入系统回收站可恢复,面板维护已删台账并支持一键重新挂载 | DSH 双端插件(host 自动归档 + client 面板) |
 | @mzzsfy/dsh-toast | 全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻确认两种生命周期,供各插件发送操作反馈与事件通知 | 普通 npm 依赖(非 dsh 插件,不声明 dsh.bundle.patch),不进 profile 表层 manifest(市场不显示);经消费插件 dependencies 声明随装,作为传递依赖实体落入顶层 node_modules(hoisted),dsh 启动 fallback 补链兜底,dev-link junction 保开发热更;消费插件 cordis.patch.yml 代挂其宿主占位条目使 client 进入模块表,经 dsh.client.external require 使用;容器直挂 body 顶部居中,样式全取宿主令牌 | DSH 公共 client 依赖库(external require) |
-| @mzzsfy/dsh-rs-workflow | 若水工作流一体化:安装即得 rs-workflow agent 模式(协议技能 + 编排引擎 + 模式组合),带工作流设置表单与配置工具 | 一个包三种行角色:settings 行注册设置页表单,preset-sync 行把 agent 预设自释放到用户预设根,tool 行注册 rs_workflow_config 模型工具 | DSH 插件(settings + preset-sync + tool 三角色) |
+| @mzzsfy/dsh-rs-workflow | 若水工作流:通用强流程工作流编排工具,每轮强制 AI 产出契约、不达标不放行;内置 collab 协作模板(rs-tui 移植,四模板分诊/审批/升级)+ 用户流程模板(JSON5 DSL,循环/嵌套/动态路由/资源加载),每套模板一键释放为一个模式 | 六种行角色:settings(表单+模板数组)/preset-sync(释放 collab 与流程模式)/board(看板+模板管理路由)/template-tool(AI 模板编辑入口)/report(节点软上报)/takeover(pre-step 拦截进编排,主模型零参与);设计原理见 docs/DESIGN.md | DSH 插件(host 三角色 + 预设层三角色) |
 | @mzzsfy/dsh-llm-pi-gateway | 把会话 sessionId 注入发往 newapi 等 LLM 网关的每个请求,供网关做请求亲和性粘性路由(prompt cache 命中是结果);装上即零感知接管官方 pi-ai 路由,卸载即还原 | 请求体按协议写入 sessionId 派生标记(anthropic metadata.user_id / openai prompt_cache_key);亲和头携带裸 sessionId(anthropic / openai-completions 经 compat sendSessionAffinityHeaders 开启);metadata 模板透传、静态 headers 兜底;bundle patch 以官方 schema 接管路由 | DSH host 端插件(pi-ai 透传 adapter) |
 | @mzzsfy/dsh-model-capability-editor | 模型能力编辑器:可视化编辑各模型的思考档位与图片输入(多模态)声明 | 读取官方 describe 拿当前声明,表单编辑后整组写回 settings.yaml(未编辑条目保留,冲突字段级重放不静默覆盖);官方模型行内直接挂编辑块,锚点破坏时浮动入口兜底 | DSH 纯前端插件(模型页行内注入 + 浮动回退) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
@@ -46,8 +46,8 @@ pnpm config set --global minimumReleaseAge 360
 
 要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20,dsh-rs-workflow 未声明 engines)。
 
-- 仓库级测试:根目录执行 `node --test tests/engine.test.mjs` 与 `node --test tests/workflow-parity.test.mjs`(前者 rs-workflow engine.js 编排脚本验收,后者 rs-workflow 模板 slot 三处镜像(lib schema / slots.json5 / SKILL.md)与发布物边界 parity 验收)
-- 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 12 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test script,其 test/preset-sync.test.mjs 由 CI 的包自动发现直接执行,另有下面的冒烟脚本
+- 仓库级测试:根目录执行 `node --test tests/engine.test.mjs`、`node --test tests/flow.test.mjs` 与 `node --test tests/workflow-parity.test.mjs`(collab 引擎验收 / 流程解释器 BDD 验收 / 工作位键集与 spec 锚点 parity)
+- 包内测试:除 @mzzsfy/dsh-rs-workflow 外的 12 个包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 无 npm test script,其 test/*.test.mjs(flows/preset-sync/board/persona-compat/report-store)由 CI 的包自动发现直接执行,另有下面的冒烟脚本
 - @mzzsfy/dsh-rs-workflow 冒烟:`node .\scripts\test-workflow-plugin.mjs`(默认测已安装副本,传入包目录路径可测任意构建;仓库内副本解析不了 peer 依赖,需先安装再测)
 - CI(`.github/workflows/test.yml`):提交推送与每 3 天定时触发,amd64/arm64 双架构并行,各自全量跑 10 轮(smoke-load + 仓库级测试 + 全部含 test/ 目录的包自动发现;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
 
