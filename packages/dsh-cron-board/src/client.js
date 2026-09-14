@@ -321,6 +321,13 @@ function noopFactory() {
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-cron-board', factory })
 
+  // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;键 = 市场短名(发现页
+  // 收录显示形态);该插件未就绪时入队,由其启动时排空
+  const NAV_ICON = { 'dsh-cron-board': 'plan' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+
   function factory(require) {
     let React = null
     let ReactDOMClient = null
