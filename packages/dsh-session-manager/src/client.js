@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useSyncExternalStore } = React
+    const { useState, useEffect, useRef, useSyncExternalStore } = React
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → archive);
     // 该插件未就绪时入队,由其启动时排空
@@ -173,17 +173,9 @@ const CSS = [
   '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
   '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55));',
   '  background:light-dark(rgba(15,17,21,.04), rgba(255,255,255,.06)); }',
-  // 插话撤回图标:原生 MessageIconActions 图标按钮同款形态(alias 令牌 + 28px
-  // 圆形 + 同 hover 态,官方同构),右对齐贴用户消息侧,无文本无预览不重复内容
-  '.sm-steer { display:flex; justify-content:flex-end; gap:4px; padding:0 2px; }',
-  '.sm-steer__action { width:28px; height:28px; color:var(--dsw-alias-label-tertiary); cursor:pointer;',
-  '  background:0 0; border:none; border-radius:28px; justify-content:center; align-items:center; padding:6px; display:inline-flex; }',
-  '.sm-steer__action svg { width:15px; height:15px; }',
-  '.sm-steer__action:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-secondary); }',
-  '.sm-steer__action[data-unavailable] { cursor:default; opacity:.4; }',
-  '.sm-steer__action[data-unavailable]:hover { color:var(--dsw-alias-label-tertiary); background:0 0; }',
-  '.sm-steer__action:disabled { cursor:default; opacity:.4; }',
-  '.sm-steer__action:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
+  // 插话撤回图标:注入原生 pending steering 气泡的操作图标排,样式经克隆官方
+  // 按钮类名原生同款;dock 本体零 DOM,仅承载注入逻辑
+  '.sm-steer-host { display:none; }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -1178,55 +1170,116 @@ async function withdrawSteer(row, actions) {
   return true
 }
 
-// 撤回图标(undo 弯箭头,stroke 继承 currentColor,与官方消息操作图标同观感)
-function SteerRecallIcon() {
-  return h('svg', {
-    viewBox: '0 0 16 16', fill: 'none',
-    stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
-    'aria-hidden': true,
-  },
-    h('path', { d: 'M3 6.5h6.5a3.5 3.5 0 0 1 0 7H6' }),
-    h('path', { d: 'M6 3.5 3 6.5l3 3' }),
-  )
+// 撤回图标 svg(undo 弯箭头,stroke 继承 currentColor,尺寸由所克隆的官方按钮类控制)
+function steerRecallSvg() {
+  const namespace = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(namespace, 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.5')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  const paths = ['M3 6.5h6.5a3.5 3.5 0 0 1 0 7H6', 'M6 3.5 3 6.5l3 3']
+  for (const d of paths) {
+    const path = document.createElementNS(namespace, 'path')
+    path.setAttribute('d', d)
+    svg.appendChild(path)
+  }
+  return svg
 }
 
-// 插话撤回图标:输入框上方零占位条目,存在未应用插话时才渲染,每个插话一枚
-// 原生同款图标(tooltip 携带预览区分);设置停用或会话面/草稿动作缺失即不渲染
+// 注入按钮标记:识别自家节点与官方按钮,防止重复注入与误删官方节点
+const STEER_BTN_FLAG = 'data-sm-steer-recall'
+// 官方 pending steering 气泡的语义标记(官方同构:UserStyleBubble data 属性)与
+// 其操作图标排的 CSS module 类名后缀(哈希前缀随构建漂移,后缀稳定)
+const STEER_BUBBLE_SELECTOR = '[data-pending-steering]'
+const STEER_ACTIONS_SUFFIX = '[class$="_actions"]'
+
+// 插话撤回:注入原生 pending steering 气泡的操作图标排(复制图标旁),样式经克隆
+// 官方按钮 className 完全原生;气泡被应用后整棵卸载,注入按钮随之消失。
+// dock 本体 display:none 零占位,仅承载观察与注入;官方 DOM 结构漂移时注入静默
+// 跳过(不报错),干净禁用精神
 function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
   const queue = useSession((state) => state.queue)
   const queueMutable = useSession((state) => state.subagent === null || state.subagent.address.mode === 'continuable')
   const [busy, setBusy] = useState(false)
-  // 启停开关(设置页):挂载拉取一次,停用即整体不渲染;拉取失败按启用兜底
+  // 启停开关(设置页):挂载拉取一次,停用即不注入并移除已注入按钮;失败按启用兜底
   const [enabled, setEnabled] = useState(true)
   useEffect(() => {
     api(STEER_ENABLED_URL)
       .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
       .catch(() => {})
   }, [])
+  // 观察回调经由 ref 读最新状态,观察器只挂一次不随渲染重挂
+  const rowsRef = useRef([])
+  const mutableRef = useRef(true)
+  const busyRef = useRef(false)
+  const actionsRef = useRef(null)
+  rowsRef.current = steerRowsOf(queue)
+  mutableRef.current = queueMutable
+  busyRef.current = busy
+  actionsRef.current = { updateQueue, setDraft: inputActions ? inputActions.setDraft : undefined }
+  const scanRef = useRef(null)
+  useEffect(() => {
+    function withdraw(row) {
+      const actions = actionsRef.current
+      if (busyRef.current || !actions || typeof actions.updateQueue !== 'function') return
+      setBusy(true)
+      void withdrawSteer(row, { updateQueue: actions.updateQueue, setDraft: actions.setDraft, notify: toast })
+        .finally(() => setBusy(false))
+    }
+    function syncButton(button, row) {
+      const textOnly = row.text !== null
+      button.disabled = busyRef.current || !textOnly
+      button.title = textOnly ? '撤回到输入框: ' + row.preview : '含附件的插话不支持撤回'
+    }
+    function scan() {
+      const bubbles = document.querySelectorAll(STEER_BUBBLE_SELECTOR)
+      const rows = mutableRef.current ? rowsRef.current : []
+      bubbles.forEach((bubble, index) => {
+        const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
+        if (!actionsRow) return
+        let button = actionsRow.querySelector('[' + STEER_BTN_FLAG + ']')
+        const row = rows[index]
+        if (!row) {
+          // 气泡尚存但行已被应用/撤回(帧差瞬态):按钮随气泡卸载,先禁用防误触
+          if (button) button.disabled = true
+          return
+        }
+        if (!button) {
+          const official = actionsRow.querySelector('button:not([' + STEER_BTN_FLAG + '])')
+          if (!official) return
+          button = document.createElement('button')
+          button.type = 'button'
+          button.setAttribute(STEER_BTN_FLAG, '')
+          // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
+          button.className = official.className
+          button.addEventListener('click', () => withdraw(row))
+          button.appendChild(steerRecallSvg())
+          actionsRow.appendChild(button)
+        }
+        syncButton(button, row)
+      })
+    }
+    scanRef.current = scan
+    const observer = new MutationObserver(scan)
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+    scan()
+    return () => {
+      scanRef.current = null
+      observer.disconnect()
+      document.querySelectorAll('[' + STEER_BTN_FLAG + ']').forEach((button) => button.remove())
+    }
+  }, [])
+  // 行集/开关/忙碌变化即时重扫(观察器只覆盖 DOM 变更,状态变化需主动对账)
+  useEffect(() => {
+    if (scanRef.current) scanRef.current()
+  }, [queue, enabled, busy, queueMutable])
   if (session === undefined || inputActions === undefined || updateQueue === undefined) return null
   if (!enabled || !queueMutable) return null
-  const rows = steerRowsOf(queue)
-  if (rows.length === 0) return null
-  const withdraw = (row) => {
-    if (busy) return
-    setBusy(true)
-    void withdrawSteer(row, { updateQueue, setDraft: inputActions.setDraft, notify: toast })
-      .finally(() => setBusy(false))
-  }
-  return h('div', { className: 'sm-steer' },
-    rows.map((row) => {
-      const textOnly = row.text !== null
-      return h('button', {
-        key: row.id,
-        className: 'sm-steer__action',
-        disabled: busy || !textOnly,
-        'data-unavailable': textOnly ? undefined : true,
-        title: textOnly ? '撤回到输入框: ' + row.preview : '含附件的插话不支持撤回',
-        'aria-label': textOnly ? '撤回插话' : '含附件的插话不支持撤回',
-        onClick: () => withdraw(row),
-      }, SteerRecallIcon())
-    }),
-  )
+  return h('div', { className: 'sm-steer-host' })
 }
 
     return {

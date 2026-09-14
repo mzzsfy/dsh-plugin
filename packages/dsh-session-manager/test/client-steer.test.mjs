@@ -247,36 +247,20 @@ test('SteerRecallDock 干净禁用:依赖任一缺失即返回 null', () => {
   assert.equal(dock({ updateQueue: undefined }), null, 'updateQueue 缺失应不渲染')
 })
 
-test('SteerRecallDock 干净禁用:subagent 非 continuable 与空队列即返回 null', () => {
+test('SteerRecallDock 干净禁用:subagent 非 continuable 即返回 null,启用时零占位宿主', () => {
   const locked = dockWith({ queue: [STEERING_ROW], subagent: { address: { mode: 'prompt' } } })
   assert.equal(locked({}), null, 'queueMutable 为假应不渲染')
-  const empty = dockWith({ queue: [], subagent: null })
-  assert.equal(empty({}), null, '空队列应不渲染')
-  const absent = dockWith({ queue: undefined, subagent: null })
-  assert.equal(absent({}), null, '队列快照缺省应不渲染')
+  const host = dockWith({ queue: [], subagent: null })({})
+  assert.equal(host.type, 'div')
+  assert.equal(host.props.className, 'sm-steer-host', '启用时应渲染 display:none 宿主承载注入逻辑')
 })
 
-test('SteerRecallDock 渲染:steering 行产出原生同款撤回图标,纯文本可用', () => {
-  const dock = dockWith({ queue: [{ id: 'q1', placement: 'queued' }, STEERING_ROW, { id: 'c1', placement: 'context' }], subagent: null })
-  const root = dock({})
-  assert.equal(root.type, 'div')
-  assert.equal(root.props.className, 'sm-steer')
-  const buttons = root.children[0]
-  assert.equal(buttons.length, 1, 'queued 与 context 行不得渲染')
-  const button = buttons[0]
-  assert.equal(button.type, 'button')
-  assert.equal(button.props.className, 'sm-steer__action')
-  assert.equal(button.props.disabled, false, '纯文本插话按钮应可用')
-  assert.equal(button.props['data-unavailable'], undefined)
-  assert.equal(button.props.title, '撤回到输入框: ' + STEERING_ROW.preview)
-  assert.equal(button.children[0].type, 'svg', '按钮应承载撤回图标(svg),不使用文字')
-})
-
-test('SteerRecallDock 渲染:含附件行(text=null)图标禁用(data-unavailable)并提示', () => {
-  const rich = { id: 'm2', placement: 'steering', preview: '[图片]', text: null }
-  const dock = dockWith({ queue: [rich], subagent: null })
-  const button = dock({}).children[0][0]
-  assert.equal(button.props.disabled, true, '含附件插话按钮应禁用')
-  assert.equal(button.props['data-unavailable'], true, '禁用态应标记 data-unavailable(原生同款弱化)')
-  assert.equal(button.props.title, '含附件的插话不支持撤回')
+// 注入契约(源码级守卫):选择器/标记/清理必须存在,官方 DOM 结构漂移时静默降级
+test('SteerRecallDock 注入契约:语义标记选择器、按钮标记与卸载清理齐备', () => {
+  assert.ok(CLIENT_SRC.includes('[data-pending-steering]'), '应定位官方气泡语义标记')
+  assert.ok(CLIENT_SRC.includes('[class$="_actions"]'), '应按 CSS module 类名后缀定位官方图标排')
+  assert.ok(CLIENT_SRC.includes("data-sm-steer-recall"), '应有自家按钮标记防重复注入')
+  assert.ok(CLIENT_SRC.includes('new MutationObserver'), '应经 MutationObserver 跟随气泡出现')
+  assert.ok(CLIENT_SRC.includes('official.className'), '应克隆官方按钮类名保证样式原生')
+  assert.ok(CLIENT_SRC.includes('observer.disconnect()'), '卸载应断开观察')
 })
