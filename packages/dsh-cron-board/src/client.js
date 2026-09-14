@@ -167,7 +167,9 @@ body{
 --cb-font-xs:12px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
 --cb-control-h:30px;
 }
-.cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;max-width:880px;color:var(--cb-text);container-type:inline-size}
+.cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;max-width:880px;margin:0 auto;width:100%;color:var(--cb-text);container-type:inline-size}
+/* 全局面板壳:占满宿主中央区,滚动自持(main keyed 条目根) */
+.cb-main{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:var(--cb-space-6);background:var(--dsw-alias-bg-base,var(--cb-bg))}
 .cb-toolbar{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-tabs{display:flex;gap:var(--cb-space-1);background:var(--cb-bg-muted);border-radius:999px;padding:3px}
 .cb-pill{border:none;border-radius:999px;padding:5px 14px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;font-weight:560;transition:color .15s,background .15s}
@@ -183,7 +185,7 @@ body{
 .cb-button--danger{color:var(--cb-danger)}
 .cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:#fff}
 .cb-button--sm{min-height:28px;padding:0 10px;font-size:var(--cb-font-sm)}
-.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible,.cb-entry:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:2px}
+.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:2px}
 .cb-button:active:not(:disabled){transform:translateY(1px)}
 .cb-cards{display:flex;flex-direction:column;gap:var(--cb-space-3)}
 .cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg);box-shadow:var(--cb-shadow);transition:border-color .15s,box-shadow .15s}
@@ -290,27 +292,17 @@ body{
 .cb-log::-webkit-scrollbar-thumb,.cb-modal::-webkit-scrollbar-thumb{background:var(--cb-border-strong);border-radius:999px}
 .cb-log::-webkit-scrollbar-track,.cb-modal::-webkit-scrollbar-track{background:transparent}
 .cb-error{font-size:var(--cb-font-sm);color:var(--cb-danger);background:var(--cb-bg-sub);border-left:3px solid var(--cb-danger);border-radius:var(--cb-radius-sm);padding:var(--cb-space-2) var(--cb-space-3)}
-/* 容器查询:better-sidebar tab 与主视图宽度差异大,跟随面板自身宽度而非视口。
+/* 容器查询:会话视图区与 better-sidebar tab 宽度差异大,跟随面板自身宽度而非视口。
    模态不受面板容器宽度连累:mask 固定定位于视口,断点用视口媒体查询独立判定 */
 @container (max-width: 560px){
 .cb-card-row .cb-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
-.cb-view{padding:var(--cb-space-4)}
 .cb-panel{gap:var(--cb-space-4)}
 }
 @media (max-width: 560px){
 .cb-grid{grid-template-columns:1fr}
 .cb-modal{max-height:92vh}
+.cb-main{padding:var(--cb-space-4)}
 }
-.cb-entry{display:flex;align-items:center;gap:var(--cb-space-3);width:100%;border:none;background:transparent;color:inherit;cursor:pointer;padding:var(--cb-space-2) var(--cb-space-4);border-radius:var(--cb-radius-md);font-size:var(--cb-font-md);text-align:left}
-.cb-entry:hover{background:var(--cb-hover)}
-.cb-entry[data-active="true"]{background:var(--cb-accent);color:#fff}
-.cb-entry-icon{display:inline-flex;flex:none}
-.cb-view{display:none;flex:1;min-height:0;flex-direction:column;padding:var(--cb-space-6);overflow:auto;background:var(--dsw-alias-bg-base,var(--cb-bg))}
-.cb-view > .cb-panel{margin:0 auto;width:100%}
-html[data-cb-board-active] [data-cb-view]{display:flex}
-html[data-cb-board-active] [data-pane="conversation"] > :not([data-cb-view]){display:none !important}
-html[data-cb-board-active] [class*="centerCol"] > :not([data-cb-view]){display:none !important}
-html[data-cb-board-active] .dshDesktopConversationSurface > :not([data-cb-view]){display:none !important}
 `
 
 // 空模块兜底:react 缺席即整面板禁用(宿主必有 react,防御性)
@@ -980,23 +972,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag }) : null)
     }
 
-    // —— 主页面挂载(形态对齐 dsh-taskboard,cb- 属性命名空间)——
-    // 优先 better-sidebar 扩展槽(单实例 tab);未装回退主界面:侧栏入口行 + 中心列看板容器。
+    // —— 主页面挂载:宿主官方全局面板契约(main keyed 插槽 + sidebar.panellist 侧栏入口)——
+    // 侧栏行与中央面板均由宿主渲染:点击入口行宿主调 layout.selectPanel 切换,会话保持不动;
+    // 切回会话走官方路径(会话行/新会话 openSession → selectPanel(null))。禁 DOM 刮取。
+    // better-sidebar 偏好开启时改注册其扩展槽 tab(服务契约,同样非 DOM 刮取),两形态互斥。
 
     const TAB_ID = 'cron-board:board'
-    const ENTRY_ATTR = 'data-cb-entry'
-    const VIEW_ATTR = 'data-cb-view'
-    const BOARD_ACTIVE_ATTR = 'data-cb-board-active'
-    const PANEL_ACTIVATE_EVENT = 'dsh-panel-activate'
-    const PANEL_NAME = 'dsh-cron-board'
-    const ENTRY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 2v12M10 2v12"/></svg>'
-    // 三代布局壳兼容:dev data-pane / 官方 CSS-Module centerCol / DSH Desktop 扩展面
-    const CONVERSATION_COLUMN_SELECTOR = '[data-pane="conversation"], [class*="centerCol"], .dshDesktopConversationSurface'
-    const SIDEBAR_ROOT_SELECTOR = '[data-pane="sidebar"], [class*="sidebarCol"], .dshDesktopUpstreamSidebar, .dshDesktopSidebarSurface'
-    // 家族面板入口条目(taskboard 系),插入时排其前,避免重渲染后顺序漂移
-    const FAMILY_ENTRY_SELECTOR = '[data-dsh-atb-entry], [data-dsh-taskboard-entry], [data-dsh-ssh-entry], [' + ENTRY_ATTR + ']'
-    const OTHER_PANEL_ACTIVE_ATTRS = ['data-dsh-atb-active', 'data-dsh-taskboard-active', 'data-dsh-ssh-active']
-    const SIDEBAR_ROW_SELECTOR = '[class*="sessionRow"], [class*="projectRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [class*="newSession"]'
+    const PANEL_ID = 'cron-board'
+    const PANEL_LABEL = '定时任务'
 
     // 设置>插件页卡片:官方 PluginCard 形制(名称/描述头部 + chevron 折叠 + 行内开关);better-sidebar 在场可切换,否则仅展示禁用态
     const CARD_TITLE = '定时任务'
@@ -1007,12 +990,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
       h('path', { d: 'm3.5 5.5 3.5 3.5 3.5-3.5' }))
 
-    function CronBoardPluginCard() {
+    function CronBoardPluginCard({ ctx }) {
       const [enabled, setEnabled] = useState(null)
       const [busy, setBusy] = useState(false)
       const [open, setOpen] = useState(false)
-      // 渲染时重探:侧栏面晚于设置页挂载时,enabled 到达的重渲染会自动纠正禁用态
-      const sidebarReady = Boolean(document.querySelector(SIDEBAR_ROOT_SELECTOR))
+      // 渲染时重探服务在场:better-sidebar 晚于设置页装载时,重渲染自动纠正禁用态
+      const sidebarReady = ctx.get('betterSidebar') !== undefined
       useEffect(() => {
         let alive = true
         request('GET', 'status').then((outcome) => {
@@ -1045,7 +1028,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 ariaLabel: CARD_TOGGLE_LABEL,
               })),
             h('p', { className: 'cb-pc__hint' },
-              sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时始终使用主界面。' : '需安装 better-sidebar 后方可切换;未安装时看板始终使用主界面。'))) : null)
+              sidebarReady ? '开启后看板以侧边栏页签呈现,关闭时使用全局面板。' : '需已装载 better-sidebar 后方可切换;未装载时看板始终使用全局面板。'))) : null)
     }
 
     // better-sidebar tab:注册即单实例(single);只注册不主动打开,
@@ -1054,7 +1037,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return ctx.effect(() => {
         const disposeTab = service.registerTab({
           id: TAB_ID,
-          title: '定时任务',
+          title: PANEL_LABEL,
           icon: (size) => h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
             stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
             h('rect', { x: 2, y: 2, width: 12, height: 12, rx: 2 }),
@@ -1067,123 +1050,30 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, 'cron-board sidebar tab')
     }
 
-    function sidebarRoot() {
-      const column = document.querySelector(SIDEBAR_ROOT_SELECTOR)
-      if (!column) return undefined
-      const logoOwner = column.querySelector('[class*="logoRow"]')
-      return (logoOwner && logoOwner.parentElement) || column.firstElementChild || undefined
+    // 面板图标:panellist 渲染契约组件,宿主传 { size, active }
+    function PanelIcon({ size }) {
+      return h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
+        stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
+        h('rect', { x: 2, y: 2, width: 12, height: 12, rx: 2 }),
+        h('path', { d: 'M6 2v12M10 2v12' }))
     }
 
-    function newSessionButton(root) {
-      const nested = root.querySelector('button[class*="newSession"]')
-      if (nested) return nested
-      for (const child of root.children) {
-        if (child instanceof HTMLButtonElement && !child.matches('[' + ENTRY_ATTR + ']')) return child
-      }
-      return root.querySelector('button[aria-label="新建会话"], button[aria-label*="新会话"], button[aria-label*="new session" i]') || undefined
-    }
-
-    function placeEntry(root, entry) {
-      const button = newSessionButton(root)
-      if (!button) return false
-      if (entry.parentElement !== root) {
-        const row = button.closest('[class*="logoRow"]')
-        const base = (row && row.parentElement === root) ? row : button
-        const family = Array.from(root.children).filter((el) => el.matches(FAMILY_ENTRY_SELECTOR))
-        const anchor = family.length > 0 ? family[0] : (base.nextElementSibling || null)
-        root.insertBefore(entry, anchor)
-      }
-      return true
-    }
-
-    // 主界面形态:入口行 + 中心列容器 + html 属性显隐 + 面板互斥;返回幂等 disposer
-    function mountStandaloneBoard(wsModel) {
-      let disposed = false
-      let entry = null
-      let rootEl = undefined
-      let placed = false
-      let rootObserver = null
-      let viewRoot = null
-      let viewEl = null
-
-      const setOpen = (open) => {
-        if (open) {
-          for (const attr of OTHER_PANEL_ACTIVE_ATTRS) document.documentElement.removeAttribute(attr)
-          document.documentElement.setAttribute(BOARD_ACTIVE_ATTR, '')
-          document.dispatchEvent(new CustomEvent(PANEL_ACTIVATE_EVENT, { detail: PANEL_NAME }))
-          entry.dataset.active = 'true'
-        } else {
-          document.documentElement.removeAttribute(BOARD_ACTIVE_ATTR)
-          entry.dataset.active = 'false'
-        }
-      }
-      const isOpen = () => document.documentElement.hasAttribute(BOARD_ACTIVE_ATTR)
-
-      const ensureEntry = () => {
-        if (rootEl !== undefined && !rootEl.isConnected) { placed = false; rootEl = undefined }
-        if (placed && document.body.contains(entry)) return true
-        placed = false
-        rootEl = sidebarRoot()
-        if (!rootEl) return false
-        placed = placeEntry(rootEl, entry)
-        if (placed && rootObserver) rootObserver.observe(rootEl, { childList: true, subtree: true })
-        return placed
-      }
-
-      const ensureView = () => {
-        if (viewEl && viewEl.isConnected) return true
-        const column = document.querySelector(CONVERSATION_COLUMN_SELECTOR)
-        if (!column) return false
-        viewEl = document.createElement('div')
-        viewEl.setAttribute(VIEW_ATTR, '')
-        viewEl.className = 'cb-view'
-        column.appendChild(viewEl)
-        viewRoot = ReactDOMClient.createRoot(viewEl)
-        viewRoot.render(React.createElement(CronBoardPanel, { visible: true, wsModel }))
-        return true
-      }
-
-      const onClickDocument = (event) => {
-        if (!isOpen()) return
-        const target = event.target
-        if (target && target.closest && target.closest('[' + ENTRY_ATTR + ']')) return
-        if (target && target.closest && target.closest(SIDEBAR_ROW_SELECTOR)) setOpen(false)
-      }
-      const onOtherActivate = (event) => {
-        if (event.detail !== PANEL_NAME && isOpen()) setOpen(false)
-      }
-      entry = document.createElement('button')
-      entry.type = 'button'
-      entry.setAttribute(ENTRY_ATTR, '')
-      entry.className = 'cb-entry'
-      entry.setAttribute('aria-label', '定时任务')
-      entry.innerHTML = '<span class="cb-entry-icon">' + ENTRY_ICON + '</span><span>定时任务</span>'
-      entry.addEventListener('click', () => setOpen(!isOpen()))
-      document.addEventListener('click', onClickDocument, true)
-      document.addEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate)
-      const waitObserver = new MutationObserver(() => { ensureEntry(); ensureView() })
-      waitObserver.observe(document.body, { childList: true, subtree: true })
-      rootObserver = new MutationObserver(() => {
-        if (rootEl === undefined || !rootEl.isConnected) { ensureEntry(); return }
-        if (!rootEl.contains(entry)) placeEntry(rootEl, entry)
-      })
-      const retry = setInterval(() => { ensureEntry(); ensureView() }, 2000)
-      ensureEntry()
-      ensureView()
-
-      return () => {
-        if (disposed) return
-        disposed = true
-        clearInterval(retry)
-        waitObserver.disconnect()
-        if (rootObserver) rootObserver.disconnect()
-        document.removeEventListener('click', onClickDocument, true)
-        document.removeEventListener(PANEL_ACTIVATE_EVENT, onOtherActivate)
-        document.documentElement.removeAttribute(BOARD_ACTIVE_ATTR)
-        entry.remove()
-        if (viewRoot) viewRoot.unmount()
-        if (viewEl) viewEl.remove()
-      }
+    // 全局面板形态:main keyed 条目(中央面板)+ sidebar.panellist 条目(侧栏入口行),同 id 配对;
+    // 页签点击切换、激活高亮均由宿主管;effect 工厂必须交付组合清理,否则互斥仲裁拆不掉条目
+    function registerMainPanel(ctx, wsModel) {
+      return ctx.effect(() => {
+        const injectDisposers = []
+        injectDisposers.push(ctx.slots.inject('main', () => ctx.slots.register({
+          name: 'main',
+          key: PANEL_ID,
+        }, () => h('div', { className: 'cb-main' }, h(CronBoardPanel, { wsModel })))))
+        injectDisposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+          name: 'sidebar.panellist',
+          id: PANEL_ID,
+          label: PANEL_LABEL,
+        }, (iconProps) => h(PanelIcon, iconProps))))
+        return () => { for (const dispose of injectDisposers) dispose() }
+      }, 'cron-board main panel')
     }
 
     return {
@@ -1194,45 +1084,50 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
         const wsService = ctx.get('workspaces')
         const wsModel = wsService && wsService.list && typeof wsService.list.getSnapshot === 'function' ? wsService.list : null
-        // 挂载权交给用户:默认永远主界面;设置 sidebarTab 开启且侧边栏服务在场才移入扩展槽,注册后不再自动回退
-        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel)
-        let standalone = mountStandaloneBoard(wsModel)
-        let tabDisposer = null
-        let sidebarTabOn = false
-        // betterSidebar 服务软探测 + 晚注册追踪:出现/变化时按当前偏好重新决策
+        // 挂载权交给用户:默认注册全局面板;设置 sidebarTab 开启且侧边栏服务在场才移入扩展槽,注册后不再自动回退
         let currentSidebar = ctx.get('betterSidebar')
+        let sidebarTabOn = false
+        let tabDisposer = null
+        let panelDisposer = null
+        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel)
         const applyPref = () => {
           const wantTab = sidebarTabOn && currentSidebar !== undefined
           if (wantTab && tabDisposer === null) {
-            standalone()
-            standalone = null
+            if (panelDisposer) { panelDisposer(); panelDisposer = null }
             tabDisposer = attachBoardTab(currentSidebar)
           } else if (!wantTab && tabDisposer !== null) {
             tabDisposer()
             tabDisposer = null
           }
-          if (!wantTab && standalone === null) standalone = mountStandaloneBoard(wsModel)
+          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, wsModel)
         }
         const prefWatch = setInterval(async () => {
           try {
             const outcome = await request('GET', 'status')
             const next = readSidebarTabPref(outcome)
             if (next !== sidebarTabOn) {
+              const previous = sidebarTabOn
               sidebarTabOn = next
-              applyPref()
+              try {
+                applyPref()
+              } catch (error) {
+                // 形态切换失败回滚偏好,下轮轮询重试,避免入口消失后卡死
+                sidebarTabOn = previous
+                console.warn('[cron-board] 看板形态切换失败:', error)
+              }
             }
           } catch { /* 轮询失败保形态不变,下轮重试 */ }
         }, 5 * 1000)
         ctx.effect(() => () => {
           clearInterval(prefWatch)
-          if (standalone) standalone()
           if (tabDisposer) tabDisposer()
+          if (panelDisposer) panelDisposer()
         }, 'cron-board mount arbitration')
         // 设置>插件页卡片:key 配对 ns,宿主按 describe 命名空间分发;effect 随 fiber 回收
         ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
           yield ctx.slots.register(
-            { name: 'settings.plugin.item', key: 'cron-board', label: '定时任务' },
-            CronBoardPluginCard,
+            { name: 'settings.plugin.item', key: PANEL_ID, label: PANEL_LABEL },
+            () => h(CronBoardPluginCard, { ctx }),
           )
         }), 'cron-board settings card')
         ctx.inject(['betterSidebar'], (bsCtx) => {
