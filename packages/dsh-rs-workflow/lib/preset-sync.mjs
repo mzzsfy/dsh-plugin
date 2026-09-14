@@ -15,7 +15,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { personaKeysFor } from './persona-compat.mjs'
+import { personaKeysFor, parseVersion as parseVersionCompat } from './persona-compat.mjs'
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PRESET_SRC = join(PKG_ROOT, 'preset', 'rs-workflow')
@@ -84,10 +84,34 @@ function readMarker(dest) {
   }
 }
 
+/** 宿主版本解析:env 优先,其次从宿主入口 argv[1] 向上找 @deepseek-ai/dsh
+ *  的 package.json。真实宿主进程不设 dshVersion 环境变量(0.1.5-rc.1 实测
+ *  marker 恒 unknown),argv 回退是旧宿主兼容唯一可靠来源;找不到归 unknown */
+export function hostVersion(argv1 = process.argv[1]) {
+  const fromEnv = process.env.dshVersion
+  if (fromEnv && parseVersionCompat(fromEnv) !== null) return fromEnv
+  try {
+    let dir = argv1 ? dirname(argv1) : ''
+    for (let i = 0; i < 6 && dir; i++) {
+      const pkgPath = join(dir, 'package.json')
+      if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+          if (pkg.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string') return pkg.version
+        } catch { /* 损坏的 package.json 继续向上 */ }
+      }
+      const parent = dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+  } catch { /* argv 异常归 unknown */ }
+  return 'unknown'
+}
+
 /** 释放产物形态指纹:源内容 + 宿主版本档(persona 键名随之变化)。
  *  版本档变化即触发重写,跨版本切换宿主后释放目录随之改写。 */
 function releaseFingerprint() {
-  return `${sourceFingerprint()}#dsh:${process.env.dshVersion || 'unknown'}`
+  return `${sourceFingerprint()}#dsh:${hostVersion()}`
 }
 
 /** 完整性校验:受管文件任一缺失即残缺 */
@@ -167,7 +191,7 @@ function rewrite(dest, existed) {
 function rewritePersonaKeys(agentYamlPath) {
   if (!existsSync(agentYamlPath)) return
   const raw = readFileSync(agentYamlPath, 'utf8')
-  const converted = personaKeysFor(process.env.dshVersion, raw)
+  const converted = personaKeysFor(hostVersion(), raw)
   if (converted !== raw) {
     writeFileSync(agentYamlPath, converted)
   }

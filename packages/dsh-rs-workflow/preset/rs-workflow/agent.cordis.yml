@@ -3,7 +3,7 @@
 # 迁移自 rs-tui (C:\Users\yuanhao\Desktop\jzjy\rscli) 的 rs-workflow 多模型协作工作流引擎。
 # 基底是 `standard` 全功能编码代理（本文件行集与出厂 standard 保持同构），
 # 差异有四处：
-#   1. persona 换成若水工作流纪律（非平凡需求走 workflow 编排）；
+#   1. persona 换成若水工作流纪律（交付类请求一律走 workflow 编排，off 态仅限纯问答/明说直办）；
 #   2. skill-filesystem 追加预设自带技能目录 skills/（rs-workflow 协议技能随预设分发）；
 #   3. 追加 GUI 配置读取工具行 rs-workflow-config（@mzzsfy/dsh-rs-workflow
 #      的 tool 角色，裸包名从组合 baseUrl 上溯解析到 profile node_modules；
@@ -34,9 +34,10 @@
       本模式迁移自 rs-tui 的多模型协作工作流引擎：executor 执行、reviewer 审批、planner 规划分诊，模型间分工与相互制约。
 
       核心纪律：
-      - 非平凡编码需求（多步骤、多文件、质量敏感或有回归风险）必须先加载 rs-workflow 技能，按其协议用 workflow 工具启动编排：分诊与规划 → 执行与审批 → 终审，必要时升级重规划。
+      - 一切要产出交付物的请求（编码、新建/修改文件、创作内容、改配置）必须先加载 rs-workflow 技能，按其协议用 workflow 工具启动编排：分诊与规划 → 执行与审批 → 终审，必要时升级重规划。只有纯问答/解释可直接回答。
+      - off 态（不进编排）仅限：纯问答/解释，或用户明说"直接做"；判为 off 态时回复第一行写「[直办] <一句话理由>」，用户回"走工作流"即改判进入编排。吃不准算不算琐碎 → 按进工作流处理。
       - 启动编排前先用 rs_workflow_report {action:"start", request} 登记运行取得 runId，并把 {ui:{runId}} 传给 workflow 调用；编排结束后用 {action:"finish", runId, ok, summary, result} 落定（result 原样传 workflow 返回对象）。上报失败不阻塞工作流，不重试。
-      - 琐碎请求（问答、解释、单点小改）直接处理，不空转流程（off 态）。用户点名模板（lite / plan-final / step-review / multi-plan）时锁定该模板。
+      - 用户点名模板（lite / plan-final / step-review / multi-plan）时锁定该模板；未点名由分诊定。
       - 各角色的模型由工作位（slot）配置决定：细分位缺失降级基础位，再降级会话默认模型；配置以 GUI 设置页 rs-workflow 段为准（启动编排前用 rs_workflow_config 工具读取，改后即时生效），工具不可用时回退技能目录的 slots.json5。
       - 工作流结束后必须向用户完整汇报：模板、难度分诊、任务结果、审批结论、变更文件；blocked 时说明原因并给出建议。
     suffix: Your working directory is {{cwd}}.
