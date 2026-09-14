@@ -173,21 +173,17 @@ const CSS = [
   '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
   '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55));',
   '  background:light-dark(rgba(15,17,21,.04), rgba(255,255,255,.06)); }',
-  // 插话撤回条:右对齐贴用户消息侧,预览胶囊 + 悬停浮现的撤回图标
-  // (与官方消息气泡下操作图标同观感;colors 取宿主实测,dock 区 alias 变量为空)
-  '.sm-steer { display:flex; justify-content:flex-end; gap:8px; flex-wrap:wrap; padding:0 2px 6px; }',
-  '.sm-steer__row { display:inline-flex; align-items:center; gap:2px; min-width:0; max-width:100%;',
-  '  padding:1px 3px 1px 10px; border-radius:999px; background:rgba(127,127,127,.14); }',
-  '.sm-steer__text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
-  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:rgba(127,127,127,.85); }',
-  '.sm-steer__btn { flex:none; display:inline-flex; align-items:center; justify-content:center;',
-  '  width:22px; height:22px; border:0; background:transparent; cursor:pointer; padding:0;',
-  '  border-radius:6px; color:rgba(127,127,127,.55); opacity:0; transition:opacity .12s, color .12s; }',
-  '.sm-steer__row:hover .sm-steer__btn, .sm-steer__btn:focus-visible, .sm-steer__btn:disabled { opacity:1; }',
-  '.sm-steer__btn:hover:not(:disabled) { color:#1677ff; background:rgba(22,119,255,.1); }',
-  '.sm-steer__btn:disabled { cursor:default; color:rgba(127,127,127,.35); }',
-  '.sm-steer__btn:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
-  '@media (prefers-reduced-motion: reduce) { .sm-steer__btn { transition:none; } }',
+  // 插话撤回图标:原生 MessageIconActions 图标按钮同款形态(alias 令牌 + 28px
+  // 圆形 + 同 hover 态,官方同构),右对齐贴用户消息侧,无文本无预览不重复内容
+  '.sm-steer { display:flex; justify-content:flex-end; gap:4px; padding:0 2px; }',
+  '.sm-steer__action { width:28px; height:28px; color:var(--dsw-alias-label-tertiary); cursor:pointer;',
+  '  background:0 0; border:none; border-radius:28px; justify-content:center; align-items:center; padding:6px; display:inline-flex; }',
+  '.sm-steer__action svg { width:15px; height:15px; }',
+  '.sm-steer__action:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-secondary); }',
+  '.sm-steer__action[data-unavailable] { cursor:default; opacity:.4; }',
+  '.sm-steer__action[data-unavailable]:hover { color:var(--dsw-alias-label-tertiary); background:0 0; }',
+  '.sm-steer__action:disabled { cursor:default; opacity:.4; }',
+  '.sm-steer__action:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -664,6 +660,7 @@ function SessionManagerApp(props) {
     }),
     h(AutoArchiveConfig, null),
     h(HistorySwitchRow, null),
+    h(SteerSwitchRow, null),
   )
 }
 
@@ -694,6 +691,34 @@ function HistorySwitchRow() {
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '历史输入浮层(Alt+↑)'),
+  )
+}
+
+// 插话撤回启停开关:与历史浮层开关同构,复用同款 switch 形态与样式(同前缀);
+// 值存宿主 settings,切换经本插件路由中转,变更刷新页面生效
+function SteerSwitchRow() {
+  const [enabled, setEnabled] = useState(null)
+  useEffect(() => {
+    api(STEER_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => setEnabled(true))
+  }, [])
+  const flip = (event) => {
+    const next = event.target.checked
+    setEnabled(next)
+    api(STEER_ENABLED_URL, { method: 'POST', body: JSON.stringify({ enabled: next }) })
+      .then((payload) => {
+        toast('插话撤回已' + (payload && payload.enabled !== false ? '启用' : '停用') + ',刷新页面后生效')
+      })
+      .catch(() => {
+        setEnabled(!next)
+        toast('切换失败', { kind: 'error' })
+      })
+  }
+  return h('label', { className: 'sm-histsw' },
+    h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
+    h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
+    h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '插话撤回图标'),
   )
 }
 
@@ -791,6 +816,7 @@ const HISTORY_SCOPE_DEFAULT = HISTORY_SCOPES.indexOf('session')
 const HISTORY_REPULL_MS = 3 * 1000
 const PROMPTS_TOGGLE_URL = '/api/session-manager/prompts/toggle'
 const HISTORY_ENABLED_URL = '/api/session-manager/history-enabled'
+const STEER_ENABLED_URL = '/api/session-manager/steer-recall-enabled'
 
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
@@ -1155,7 +1181,7 @@ async function withdrawSteer(row, actions) {
 // 撤回图标(undo 弯箭头,stroke 继承 currentColor,与官方消息操作图标同观感)
 function SteerRecallIcon() {
   return h('svg', {
-    viewBox: '0 0 16 16', width: 14, height: 14, fill: 'none',
+    viewBox: '0 0 16 16', fill: 'none',
     stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
     'aria-hidden': true,
   },
@@ -1164,14 +1190,21 @@ function SteerRecallIcon() {
   )
 }
 
-// 插话撤回条:输入框上方零占位条目,存在未应用插话时才渲染;
-// 会话面(updateQueue)与草稿动作(inputActions.setDraft)任一缺失即禁用
+// 插话撤回图标:输入框上方零占位条目,存在未应用插话时才渲染,每个插话一枚
+// 原生同款图标(tooltip 携带预览区分);设置停用或会话面/草稿动作缺失即不渲染
 function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
   const queue = useSession((state) => state.queue)
   const queueMutable = useSession((state) => state.subagent === null || state.subagent.address.mode === 'continuable')
   const [busy, setBusy] = useState(false)
+  // 启停开关(设置页):挂载拉取一次,停用即整体不渲染;拉取失败按启用兜底
+  const [enabled, setEnabled] = useState(true)
+  useEffect(() => {
+    api(STEER_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => {})
+  }, [])
   if (session === undefined || inputActions === undefined || updateQueue === undefined) return null
-  if (!queueMutable) return null
+  if (!enabled || !queueMutable) return null
   const rows = steerRowsOf(queue)
   if (rows.length === 0) return null
   const withdraw = (row) => {
@@ -1183,16 +1216,15 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
   return h('div', { className: 'sm-steer' },
     rows.map((row) => {
       const textOnly = row.text !== null
-      return h('div', { key: row.id, className: 'sm-steer__row' },
-        h('span', { className: 'sm-steer__text', title: row.preview }, row.preview),
-        h('button', {
-          className: 'sm-steer__btn',
-          disabled: busy || !textOnly,
-          title: textOnly ? '撤回到输入框重新编辑' : '含附件的插话不支持撤回',
-          'aria-label': textOnly ? '撤回插话' : '含附件的插话不支持撤回',
-          onClick: () => withdraw(row),
-        }, SteerRecallIcon()),
-      )
+      return h('button', {
+        key: row.id,
+        className: 'sm-steer__action',
+        disabled: busy || !textOnly,
+        'data-unavailable': textOnly ? undefined : true,
+        title: textOnly ? '撤回到输入框: ' + row.preview : '含附件的插话不支持撤回',
+        'aria-label': textOnly ? '撤回插话' : '含附件的插话不支持撤回',
+        onClick: () => withdraw(row),
+      }, SteerRecallIcon())
     }),
   )
 }
