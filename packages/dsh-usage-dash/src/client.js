@@ -1815,6 +1815,12 @@ function removeRulesAt(rules, indexes) {
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
 
+  // 导航分区图标:表盘(dash 概念);键覆盖中英分区名,语言切换下声明不漂移
+  const NAV_ICON = { '使用统计': 'gauge', 'Usage': 'gauge' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+
   function factory(require) {
     let React = null
     try {
