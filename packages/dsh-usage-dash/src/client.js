@@ -1435,9 +1435,6 @@ function formatCostCompact(value, currency) {
   return `${currency}${Math.round(value * COST_MICRO_SCALE) / COST_MICRO_SCALE}`
 }
 
-// tooltip 金额行文本:估算标注 + 全精度货币读数(轴刻度才走紧凑)
-const moneyTipText = (value, currency) => `≈ ${formatCost(value, currency)}`
-
 // 全局显示货币:规则表首个非空 currency,所有费用显示点统一取此值(全局价格定位);
 // 无则空串即不带符号。数值仍按命中规则单价计算,符号不随命中规则变化
 function aggregateCurrencyOf(rules) {
@@ -2263,7 +2260,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, money = false, costAvailable = false, onMetricToggle, t = defaultT }) {
+    function TrendChart({ title, notes, slots, tipSlots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, money = false, costAvailable = false, onMetricToggle, t = defaultT }) {
       const metricId = React.useId()
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
@@ -2309,7 +2306,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       // 金额视图左轴走紧凑金额读数,速度接管时仍为 tok/s 紧凑读数
       const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax,
         money ? (value) => formatCostCompact(value, costCurrency) : formatCompact)
-      const hoverSlot = hover ? slots[hover.index] : null
+      // 悬浮明细恒用 token 槽渲染:金额模式只切柱几何与左轴,悬浮文本不随口径变化
+      const hoverSlot = hover ? (tipSlots ?? slots)[hover.index] : null
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
@@ -2390,18 +2388,17 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           tipEntries
             ? [
                 h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
-                h('div', { key: 'total', className: 'ud-tip-row' },
-                  money ? moneyTipText(hoverSlot.total, costCurrency) : `${t('total')}: ${formatTokens(hoverSlot.total)}`),
+                h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
                 ...tipEntries.main.map((row) => h('div', { key: `m-${row.model}`, className: 'ud-tip-row' },
                   h('i', { className: 'ud-legend-swatch', style: { background: colorFor(row.model) } }),
-                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${money ? moneyTipText(row.tokens, costCurrency) : formatTokens(row.tokens)}`)),
+                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${formatTokens(row.tokens)}`)),
                 ...tipEntries.other.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${money ? moneyTipText(tokens, costCurrency) : formatTokens(tokens)}`)),
+                  `${model}: ${formatTokens(tokens)}`)),
                 showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
-                !money && costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
-                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, moneyTipText(hoverSlot.cost, costCurrency))
+                costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
+                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
                   : null,
               ]
             : null))
@@ -3467,6 +3464,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               title: money ? trendCostTitle(t, view) : trendTitle(t, view),
               notes,
               slots: chartSlots,
+              tipSlots: trimmedSlots,
               modelOrder: trendSource.models.map((item) => item.model),
               colorFor,
               labelFor: tickLabelFor(view),
