@@ -7,11 +7,15 @@
   "exports": {
     ".": "./src/index.js",
     "./guard": "./src/guard.js",
+    "./client": "./src/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {

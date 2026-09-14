@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-rs-workflow
 
-若水工作流 (rs-workflow) 一体化插件：GUI 配置、模型工具与 agent preset（工作流协议技能、编排引擎、模式组合）全部在一个包里。
+若水工作流 (rs-workflow) 一体化插件：GUI 配置、模型工具、工作流看板与 agent preset（工作流协议技能、编排引擎、模式组合）全部在一个包里。协议对齐 rs-tui 原版：全部子代理自由文本返回 + 协议块容错解析 + 缺块教学重问，弱模型也能经多模型协作出活。
 
 ## 行角色
 
@@ -8,7 +8,9 @@
 |---|---|---|---|
 | `settings` | host | 包内 bundle patch（cordis.patch.yml） | 注册 settings 命名空间 `rs-workflow` → GUI 设置页出现表单（3 基础+13 细分工作位、默认模板、任务上限、预算（对齐 rs-tui 原始配置语义）），持久化于 `~/.dsh/settings.yaml` |
 | `preset-sync` | host | 同上 | 每次 dsh 启动把包内 `preset/rs-workflow` 幂等同步到用户预设根 → 模式选择器出现"若水工作流"，升级包后重启即更新 |
+| `board` | host | 同上 | 注册 `/api/rs-workflow/*` 读路（运行列表/详情/删除）→ GUI 设置页「若水工作流」分区展示运行看板（运行历史、状态、任务/审批明细、节点上报时间线） |
 | `tool` | agent | 释放出的 preset 组合（agent.cordis.yml） | 注册模型工具 `rs_workflow_config` → 主代理启动工作流编排前读取当前配置；skills/rs-workflow 协议技能（SKILL.md + engine.js 编排引擎 + slots.json5 后备配置）随 preset 一起分发 |
+| `report` | agent | 同上 | 注册模型工具 `rs_workflow_report` → leader 登记运行（start/finish，权威写）+ 子代理节点级软上报（node，可选），数据落 `~/.dsh/dsh-rs-workflow/runs.json` 供看板展示 |
 
 ## 安装
 
@@ -16,7 +18,7 @@
 dsh plugin --profile web add @mzzsfy/dsh-rs-workflow
 ```
 
-重启 dsh 后三件事自动发生：设置页出现 rs-workflow 表单；preset 释放到 `<dsh-home>/.agent-presets/rs-workflow`（含来源标记 `.dsh-rs-workflow-source.json`）；模式选择器出现"若水工作流"。无需手动编辑 cordis.patch.yml，无需手动拷贝 preset。
+重启 dsh 后四件事自动发生：设置页出现 rs-workflow 表单与「若水工作流」看板分区；preset 释放到 `<dsh-home>/.agent-presets/rs-workflow`（含来源标记 `.dsh-rs-workflow-source.json`）；模式选择器出现"若水工作流"。无需手动编辑 cordis.patch.yml，无需手动拷贝 preset。
 
 preset 内 tool 行以裸包名引用本包（从 profile 目录上溯解析到 profile node_modules），包与 preset 始终由本包同时交付，不存在顺序问题。
 
@@ -31,7 +33,7 @@ dsh plugin --profile web remove @mzzsfy/dsh-rs-workflow   # 或 pnpm remove（pr
 rm -r ~/.dsh/.agent-presets/rs-workflow
 ```
 
-pnpm 不执行依赖的卸载脚本（preuninstall，pnpm 11 实测含 onlyBuiltDependencies 白名单均不放行），插件无法在自身被移除后自动清理，preset 残留会在模式选择器显示为 broken——按上面第二条命令手动删除即可。包内亦提供编程接口（从包根导入，exports 只开放 `.` 单一入口）：
+pnpm 不执行依赖的卸载脚本（preuninstall，pnpm 11 实测含 onlyBuiltDependencies 白名单均不放行），插件无法在自身被移除后自动清理，preset 残留会在模式选择器显示为 broken——按上面第二条命令手动删除即可。包内亦提供编程接口（从包根导入）：
 
 ```js
 import { presetDest, removePreset, syncPreset } from '@mzzsfy/dsh-rs-workflow'
@@ -46,7 +48,15 @@ import { presetDest, removePreset, syncPreset } from '@mzzsfy/dsh-rs-workflow'
 node scripts/test-workflow-plugin.mjs
 ```
 
-默认测已安装副本，传入包目录路径可测任意构建；仓库内副本解析不了 peer 依赖（@deepseek-ai/* 从安装位置向上才找得到），需自备 node_modules。覆盖三个行角色：preset-sync（临时 DSH_HOME 内真实写盘 + 幂等）、settings（分层解析）、tool（执行路径）。
+默认测已安装副本，传入包目录路径可测任意构建；仓库内副本解析不了 peer 依赖（@deepseek-ai/* 从安装位置向上才找得到），需自备 node_modules。覆盖五个行角色：preset-sync（临时 DSH_HOME 内真实写盘 + 幂等）、settings（分层解析）、tool（执行路径）、board（路由守卫）、report（运行上报全链）。
+
+## 运行看板
+
+设置页「若水工作流」分区（数据目录 `~/.dsh/dsh-rs-workflow/`，env `DSH_RS_WORKFLOW_DATA_DIR` 可覆盖）：
+
+- 以若水工作流模式启动编排后，leader 经 `rs_workflow_report` 登记运行（start）并落定结果（finish），子代理在节点完成时做节点级软上报（可选，失败即弃）；
+- 看板按工作区分组展示运行历史：状态（运行中/已完成/受阻）、模板、分诊信号、任务与审批明细、变更文件、节点上报时间线；
+- 仅 host 进程内读写（report 工具与 board 路由共享同一存储单例），浏览器只经 `/api/rs-workflow/*` 只读 + 删除。
 
 ## 行引用方式说明
 

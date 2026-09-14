@@ -3,6 +3,15 @@
 // 纯逻辑段在 LOGIC 标记之间,与 src/logic.mjs 保持同源,由 parity 测试(含逐函数
 // 源码文本对比)保证;容器观察器句柄挂 window 代际槽,HMR 重评估先拆上一代。
 
+// 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;键 = 市场短名(发现页
+// 收录显示形态);该插件未就绪时入队,由其启动时排空
+if (typeof window !== 'undefined') {
+  const NAV_ICON = { 'dsh-think-expand': 'spark' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+}
+
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-think-expand',
   factory(require) {

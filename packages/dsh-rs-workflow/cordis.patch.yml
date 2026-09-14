@@ -7,8 +7,9 @@
 #     (preset.yml + agent.cordis.yml + skills) into the user preset root on
 #     every boot, so the picker entry "若水工作流" ships with the plugin and
 #     follows plugin upgrades.
-# The tool-plane row (rs_workflow_config model tool) lives in the released
-# preset composition, not here: model-facing tools belong to the preset plane.
+# The tool-plane rows (rs_workflow_config / rs_workflow_report model tools) live in
+# the released preset composition, not here: model-facing tools belong to the
+# preset plane.
 
 - insert:
     - id: rs-workflow
@@ -19,3 +20,7 @@
       name: '@mzzsfy/dsh-rs-workflow'
       config:
         role: preset-sync
+    - id: rs-workflow-board
+      name: '@mzzsfy/dsh-rs-workflow'
+      config:
+        role: board

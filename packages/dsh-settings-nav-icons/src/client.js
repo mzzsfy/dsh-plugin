@@ -3,6 +3,14 @@
 // 背景见 README「实现边界」:settings.* 子槽声明权被原版条目占用,
 // 接管 Shell 不可行,DOM 观察是唯一不依赖官方契约变更的路径。
 
+// 本插件市场短名自画像:经同一套声明机制注册(先于 load,渲染端同文件就绪)
+if (typeof window !== 'undefined') {
+  const NAV_ICON = { 'dsh-settings-nav-icons': 'tune' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+}
+
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-settings-nav-icons',
   factory(require) {
@@ -387,6 +395,13 @@ window.__ModuleLoader__.load({
       rectOf('2.5', '3', '11', '10', '1.2') +
       circleOf('5.9', '6.1', '1') + pathOf('m3.6 12 3-3 2.3 2.3 1.7-1.7 1.9 1.9'))
     const ZAP = svgOf(pathOf('M8.9 1.8 3.8 8.9h3.5L7 14.2l5.2-7.1H8.6z'))
+    const WALLET = svgOf(
+      rectOf('2.5', '3.5', '11', '9.5', '1.5') +
+      pathOf('M13.5 7.4h-2.1a1.6 1.6 0 0 0 0 3.2h2.1'))
+    const GAUGE = svgOf(
+      pathOf('M2.5 12a5.5 5.5 0 1 1 11 0') +
+      pathOf('M8 12 10.8 9.2') +
+      pathOf('M2.5 12h11'))
     const FALLBACK = [SPARK, LAYERS, TAG, GRID]
 
     // 内置 glyph 名称表:声明值可用名称引用内置图形,避免跨插件复制 svg。
@@ -396,6 +411,7 @@ window.__ModuleLoader__.load({
       archive: ARCHIVE, spark: SPARK, layers: LAYERS, tag: TAG, grid: GRID,
       git: GIT, search: SEARCH, term: TERM, chart: CHART, code: CODE, doc: DOC,
       db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
+      wallet: WALLET, gauge: GAUGE,
     }
 
     // 声明值解析与安全门:svg 须完整开标签(大小写不敏感)且单根闭合(首个 </svg>
@@ -437,7 +453,9 @@ window.__ModuleLoader__.load({
       ['doc|note|file|markdown|wiki', DOC],
       ['database|sqlite|redis|cache|db', DB],
       ['session|archive|history', ARCHIVE],
+      ['dash|dashboard|gauge', GAUGE],
       ['usage|stat|meter|monitor|radar|metric', CHART],
+      ['wallet|balance|money|coin|fund', WALLET],
       ['flow|workflow|pipeline|task|job|queue', FLOW],
       ['auth|login|pass|secret|token|lock|guard|crypt', SHIELD],
       ['mcp', MCP],

@@ -574,3 +574,53 @@ test('attachCosts 计价时间恒为 H 桶起点(非分钟/日起点)', () => {
   const dayOut = attachCosts(dayResult, hourRows, 'D', [dayWindow, ruleOf({ price: inputPrice(3) })])
   assert.deepEqual(dayOut.daily.map((slot) => slot.cost), [1, 3])
 })
+
+test('attachCosts 槽级 costByModel 按模型拆分费用', () => {
+  // Given 同桶两模型不同单价 When H 槽计价 Then 槽 costByModel 为逐模型费用,合计等于槽 cost
+  const rows = [
+    makeRow({ bucket: '2020-01-01T01', model: 'm1', inputTokens: 1000000 }),
+    makeRow({ bucket: '2020-01-01T01', model: 'm2', inputTokens: 1000000 }),
+  ]
+  const result = aggregateRange(rows, 'H', '2020-01-01T00', '2020-01-01T01')
+  const out = attachCosts(result, rows, 'H', [ruleOf({ price: inputPrice(1) })])
+  assert.deepEqual(out.daily[1].costByModel, { m1: 1, m2: 1 })
+  assert.equal(out.daily[1].cost, 2)
+  // 纯函数:入参 result 不被修改
+  assert.equal('costByModel' in result.daily[1], false)
+})
+
+test('attachCosts D 折叠按日归集 costByModel', () => {
+  // Given 同模型 H 行落同日多桶 When D 计价 Then 日槽 costByModel 为该模型桶累加
+  const costRows = [
+    makeRow({ bucket: '2020-01-01T22', model: 'm1', inputTokens: 1000000 }),
+    makeRow({ bucket: '2020-01-01T23', model: 'm1', inputTokens: 500000 }),
+  ]
+  const aggregateRows = [makeRow({ bucket: '2020-01-01', model: 'm1', inputTokens: 1500000 })]
+  const result = aggregateRange(aggregateRows, 'D', '2020-01-01', '2020-01-01')
+  const out = attachCosts(result, costRows, 'D', [ruleOf({ price: inputPrice(2) })])
+  assert.deepEqual(out.daily[0].costByModel, { m1: 3 })
+})
+
+test('attachCosts 无规则或无费用槽 costByModel 为空表', () => {
+  // Given 无命中规则 When 计价 Then 全部槽挂空表,unpriced 照常计数
+  const rows = [
+    makeRow({ bucket: '2020-01-01T01', model: 'm1', inputTokens: 5 }),
+    makeRow({ bucket: '2020-01-01T02', model: 'm1', inputTokens: 5 }),
+  ]
+  const result = aggregateRange(rows, 'H', '2020-01-01T00', '2020-01-01T02')
+  const out = attachCosts(result, rows, 'H', [])
+  assert.deepEqual(out.daily.map((slot) => slot.costByModel), [{}, {}, {}])
+  assert.equal(out.unpriced, 2)
+})
+
+test('attachCosts M 槽 costByModel 按模型拆分', () => {
+  // Given 同分钟桶两模型 When M 计价 Then 分钟槽 costByModel 为逐模型费用
+  const rows = [
+    makeRow({ bucket: '2020-01-01T01:10', model: 'm1', inputTokens: 500000 }),
+    makeRow({ bucket: '2020-01-01T01:10', model: 'm2', inputTokens: 500000 }),
+  ]
+  const result = aggregateRange(rows, 'M', '2020-01-01T01:10', '2020-01-01T01:10')
+  const out = attachCosts(result, rows, 'M', [ruleOf({ price: inputPrice(1) })])
+  assert.deepEqual(out.daily[0].costByModel, { m1: 0.5, m2: 0.5 })
+  assert.equal(out.daily[0].cost, 1)
+})

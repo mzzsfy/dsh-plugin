@@ -15,6 +15,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { personaKeysFor, parseVersion as parseVersionCompat } from './persona-compat.mjs'
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PRESET_SRC = join(PKG_ROOT, 'preset', 'rs-workflow')
@@ -83,6 +84,36 @@ function readMarker(dest) {
   }
 }
 
+/** 宿主版本解析:env 优先,其次从宿主入口 argv[1] 向上找 @deepseek-ai/dsh
+ *  的 package.json。真实宿主进程不设 dshVersion 环境变量(0.1.5-rc.1 实测
+ *  marker 恒 unknown),argv 回退是旧宿主兼容唯一可靠来源;找不到归 unknown */
+export function hostVersion(argv1 = process.argv[1]) {
+  const fromEnv = process.env.dshVersion
+  if (fromEnv && parseVersionCompat(fromEnv) !== null) return fromEnv
+  try {
+    let dir = argv1 ? dirname(argv1) : ''
+    for (let i = 0; i < 6 && dir; i++) {
+      const pkgPath = join(dir, 'package.json')
+      if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+          if (pkg.name === '@deepseek-ai/dsh' && typeof pkg.version === 'string') return pkg.version
+        } catch { /* 损坏的 package.json 继续向上 */ }
+      }
+      const parent = dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+  } catch { /* argv 异常归 unknown */ }
+  return 'unknown'
+}
+
+/** 释放产物形态指纹:源内容 + 宿主版本档(persona 键名随之变化)。
+ *  版本档变化即触发重写,跨版本切换宿主后释放目录随之改写。 */
+function releaseFingerprint() {
+  return `${sourceFingerprint()}#dsh:${hostVersion()}`
+}
+
 /** 完整性校验:受管文件任一缺失即残缺 */
 function isComplete(dest) {
   return MANAGED_FILES.every((rel) => existsSync(join(dest, rel)))
@@ -97,9 +128,9 @@ export function syncPreset() {
   if (!existsSync(dest)) return rewrite(dest, false)
   const marker = readMarker(dest)
   if (marker === null || marker.package !== PACKAGE_NAME) return 'skipped-foreign'
-  // 内容指纹一致即视为最新:双副本 root 交替不再触发整目录重写,
-  // 仅 marker.root 归属不同时原地改写 marker 一个文件
-  if (marker.fingerprint === sourceFingerprint() && isComplete(dest)) {
+  // 释放产物形态指纹一致即视为最新(源内容 + 宿主版本档):
+  // 双副本 root 交替不再触发整目录重写,仅 marker.root 归属不同时原地改写 marker
+  if (marker.fingerprint === releaseFingerprint() && isComplete(dest)) {
     if (marker.root !== PKG_ROOT) {
       writeFileSync(join(dest, MARKER_NAME), JSON.stringify({ ...marker, root: PKG_ROOT }, null, 2) + '\n')
     }
@@ -118,11 +149,12 @@ function rewrite(dest, existed) {
   let orphan = null
   try {
     cpSync(PRESET_SRC, join(staging, 'out'), { recursive: true })
+    rewritePersonaKeys(join(staging, 'out', 'agent.cordis.yml'))
     writeFileSync(join(staging, 'out', MARKER_NAME), JSON.stringify({
       package: PACKAGE_NAME,
       version: PKG_VERSION,
       root: PKG_ROOT,
-      fingerprint: sourceFingerprint(),
+      fingerprint: releaseFingerprint(),
     }, null, 2) + '\n')
     backupUserSlots(dest)
     restoreUserSlots(join(staging, 'out'))
@@ -152,6 +184,17 @@ function rewrite(dest, existed) {
     if (orphan === null) rmSync(backup, { recursive: true, force: true })
   }
   return existed ? 'updated' : 'created'
+}
+
+/** persona 行键名按宿主版本改写(见 persona-compat.mjs):仓库源码恒为新版
+ *  prefix/suffix 形态,旧宿主(text required)释放时回退改写,并重算指纹 */
+function rewritePersonaKeys(agentYamlPath) {
+  if (!existsSync(agentYamlPath)) return
+  const raw = readFileSync(agentYamlPath, 'utf8')
+  const converted = personaKeysFor(hostVersion(), raw)
+  if (converted !== raw) {
+    writeFileSync(agentYamlPath, converted)
+  }
 }
 
 /** 用户改过的 slots.json5 在重写前备份;已回退到模板内容时清除旧备份,防陈旧定制复活 */

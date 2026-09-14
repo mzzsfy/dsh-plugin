@@ -203,6 +203,10 @@ const MESSAGES_ZH = {
   heatMore: '较多',
   dailyTrend: '按天 Token 趋势',
   trendLimited: '仅显示最近 {n} 天',
+  dailyCostTrend: '按天金额趋势',
+  hourCostTrend: '按小时金额趋势',
+  minuteCostTrend: '按分钟金额趋势',
+  costTrend: '金额',
   modelUsage: '模型用量',
   modelCache: '缓存',
   modelInput: '输入',
@@ -346,6 +350,10 @@ const MESSAGES_EN = {
   heatMore: 'More',
   dailyTrend: 'Daily token trend',
   trendLimited: 'Showing only the last {n} days',
+  dailyCostTrend: 'Daily cost trend',
+  hourCostTrend: 'Hourly cost trend',
+  minuteCostTrend: 'Per-minute cost trend',
+  costTrend: 'Cost',
   modelUsage: 'Model usage',
   modelCache: 'Cache',
   modelInput: 'Input',
@@ -545,22 +553,51 @@ function logTimeOf(ms) {
 const toRankedModels = (totals) =>
   [...totals.entries()].map(([model, tokens]) => ({ model, tokens })).sort((a, b) => b.tokens - a.tokens)
 
-// 逐槽 byModel 把非 top 模型并入哨兵桶,原明细留 otherByModel 供 tooltip;模型顺序 = 图例序(哨兵恒最后)
+// 逐槽把非 top 模型并入哨兵桶,token 与费用双度量同折,原明细留 otherByModel/otherCostByModel 供
+// tooltip;模型顺序 = 图例序(哨兵恒最后)
+const foldMetricByTop = (entries, top) => {
+  const kept = {}
+  const other = {}
+  for (const [model, value] of Object.entries(entries)) {
+    if (top.has(model)) {
+      kept[model] = (kept[model] ?? 0) + value
+      continue
+    }
+    kept[OTHER_MODEL] = (kept[OTHER_MODEL] ?? 0) + value
+    other[model] = (other[model] ?? 0) + value
+  }
+  return { kept, other }
+}
+
 const foldSlotsByTop = (slots, topModels) => {
   const top = new Set(topModels)
   return slots.map((slot) => {
-    const byModel = {}
-    const otherByModel = {}
-    for (const [model, tokens] of Object.entries(slot.byModel)) {
-      if (top.has(model)) {
-        byModel[model] = (byModel[model] ?? 0) + tokens
-        continue
-      }
-      byModel[OTHER_MODEL] = (byModel[OTHER_MODEL] ?? 0) + tokens
-      otherByModel[model] = (otherByModel[model] ?? 0) + tokens
+    const tokens = foldMetricByTop(slot.byModel, top)
+    const costs = foldMetricByTop(slot.costByModel ?? {}, top)
+    return {
+      ...slot,
+      byModel: tokens.kept,
+      otherByModel: tokens.other,
+      byCostModel: costs.kept,
+      otherCostByModel: costs.other,
     }
-    return { ...slot, byModel, otherByModel }
   })
+}
+
+// 金额槽投影:total/byModel/otherByModel 切换为费用口径(调用方保证费用字段在场)
+const costSlotsOf = (slots) => slots.map((slot) => ({
+  ...slot,
+  total: slot.cost,
+  byModel: slot.byCostModel,
+  otherByModel: slot.otherCostByModel,
+}))
+
+// 金额视图派生:存在正计价槽才可用(零计价规则/未配价的金额图全零有误导),
+// 开关开且可用才投影金额口径,否则原槽透传(引用不变)
+const moneyViewOf = (slots, costView) => {
+  const costReady = !!slots && slots.some((slot) => slot.cost > 0)
+  const money = costView && costReady
+  return { costReady, money, chartSlots: money ? costSlotsOf(slots) : slots }
 }
 
 const topWithOther = (ranked) => {
@@ -610,6 +647,8 @@ const SPEED_SCALE_FLOOR = 1
 const TTFT_SCALE_FLOOR = 1
 // 轴上限留白系数:数据峰不顶满绘图区,顶部留出标注空间
 const AXIS_SCALE_HEADROOM = 1.1
+// 金额刻度下限:仅防零值退化,亚分峰值不参与轴标定失真
+const COST_TOTAL_FLOOR = 0.0001
 // 图例键:折线项与模型项共处同一显隐集合
 const LEGEND_KEY_RATE = 'rate'
 const LEGEND_KEY_SPEED = 'speed'
@@ -639,26 +678,26 @@ function legendToggle(current, key, ctrl) {
   return solo ? null : new Set([key])
 }
 
-// 左轴刻度:速度刻度存在时左轴标定速度(tok/s),否则标定 token;
+// 左轴刻度:速度刻度存在时左轴标定速度(tok/s),否则标定柱度量(token 或金额,格式化由调用方注入);
 // 刻度值统一换算为绘图区高度占比
-function leftAxisTicks(tokenTicks, tokenMax, speedTicks, speedMax) {
+function leftAxisTicks(tokenTicks, tokenMax, speedTicks, speedMax, format = formatCompact) {
   const useSpeed = speedTicks.length > 0
   return (useSpeed ? speedTicks : tokenTicks).map((tick) => ({
-    label: formatCompact(tick),
+    label: (useSpeed ? formatCompact : format)(tick),
     ratio: tick / (useSpeed ? speedMax : tokenMax),
   }))
 }
 
 // 堆叠柱几何:模型序即堆叠序(哨兵最后画柱顶),输出槽分段与左轴刻度;
-// maxTotal 按可见模型求和,单选模型时刻度跟随归一
-function trendLayout(slots, modelOrder, avail, labelMinPitch) {
+// maxTotal 按可见模型求和,单选模型时刻度跟随归一;totalFloor 为量纲下限(token 个位数/金额亚分)
+function trendLayout(slots, modelOrder, avail, labelMinPitch, totalFloor = 1) {
   const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom
   const innerWidth = Math.max(1, avail - CHART_PAD.left - CHART_PAD.right)
   const count = slots.length
   const step = count > 1 ? innerWidth / (count - 1) : innerWidth
   const barWidth = Math.max(BAR_MIN_WIDTH, Math.min(BAR_MAX_WIDTH, step * BAR_WIDTH_RATIO))
   const slotVisibleTotal = (slot) => modelOrder.reduce((sum, model) => sum + (slot.byModel[model] ?? 0), 0)
-  const maxTotal = Math.max(1, ...slots.map(slotVisibleTotal))
+  const maxTotal = Math.max(totalFloor, ...slots.map(slotVisibleTotal))
   // 轴上限 = 数据峰 × 留白系数,柱高分母与左轴刻度分母同源
   const scaleMax = maxTotal * AXIS_SCALE_HEADROOM
   // 可见模型无任何数据时左轴无标定对象,空刻度防钳底值漏成假刻度
@@ -861,6 +900,10 @@ function modelIoPercentText(item, t) {
 
 // 趋势 tooltip 内容门:全零槽(无任何用量)不渲染 tooltip
 const hasTipContent = (hoverSlot) => Boolean(hoverSlot) && hoverSlot.total > 0
+
+// 折叠提醒判定:折叠层内有异常日志条目或写入失败即值得提醒
+const hasAnomalyNews = (status) => !!status
+  && ((status.log?.length ?? 0) > 0 || (status.recordFailures ?? 0) > 0)
 
 // 趋势 tooltip 模型行数据:主行 = 可见且当前时段有用量的模型;OTHER 子行 = OTHER 可见
 // 且当前时段有用量的其余模型明细,按 tokens 降序由本函数保证
@@ -1385,6 +1428,17 @@ function formatCost(value, currency) {
   return `${currency}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
 }
 
+const COST_CENT_SCALE = 100
+const COST_MICRO_SCALE = COST_CENT_SCALE * COST_CENT_SCALE
+
+// 金额轴紧凑读数:千以上 k/M 一位小数,分上取两位内,分下四位(微观阈值与 formatCost 同源)
+function formatCostCompact(value, currency) {
+  if (value >= COMPACT_BASE ** 2) return `${currency}${(value / COMPACT_BASE ** 2).toFixed(DECIMAL_DIGITS)}M`
+  if (value >= COMPACT_BASE) return `${currency}${(value / COMPACT_BASE).toFixed(DECIMAL_DIGITS)}k`
+  if (value >= COST_MICRO_THRESHOLD) return `${currency}${Math.round(value * COST_CENT_SCALE) / COST_CENT_SCALE}`
+  return `${currency}${Math.round(value * COST_MICRO_SCALE) / COST_MICRO_SCALE}`
+}
+
 // 全局显示货币:规则表首个非空 currency,所有费用显示点统一取此值(全局价格定位);
 // 无则空串即不带符号。数值仍按命中规则单价计算,符号不随命中规则变化
 function aggregateCurrencyOf(rules) {
@@ -1762,6 +1816,12 @@ function removeRulesAt(rules, indexes) {
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   window.__ModuleLoader__.load({ id: '@mzzsfy/dsh-usage-dash', factory })
 
+  // 导航分区图标:表盘(dash 概念);键覆盖中英分区名 + 市场短名,语言切换下声明不漂移
+  const NAV_ICON = { '使用统计': 'gauge', 'Usage': 'gauge', 'dsh-usage-dash': 'gauge' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+
   function factory(require) {
     let React = null
     try {
@@ -1955,10 +2015,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);text-align:center;padding:24px 16px;font-size:12px}
 .ud-foot{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .ud-status{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.ud-status-fold{display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px}
+.ud-status-fold{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:100%;min-height:28px;border:none;background:none;padding:0;font:inherit;font-size:12px;line-height:1;color:var(--dsw-alias-label-tertiary);cursor:pointer;border-radius:6px}
 .ud-status-fold:hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}
 .ud-status-fold-caret{display:block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s ease}
 .ud-status-fold[aria-expanded="true"] .ud-status-fold-caret{transform:rotate(180deg)}
+.ud-status-fold-dot{position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-error-primary)}
 .ud-status-track{display:inline-block;width:120px;height:2px;border-radius:1px;background:var(--dsw-alias-border-l1);overflow:hidden}
 .ud-status-fill{display:block;height:100%;background:var(--dsw-alias-state-business-primary)}
 .ud-status-err{color:var(--dsw-alias-state-error-primary)}
@@ -1987,6 +2048,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-section-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .ud-section-title{font-size:15px;font-weight:600}
 .ud-trend-note{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ud-trend-metric{display:inline-flex;align-items:center;gap:6px;margin-left:auto}
+.ud-trend-metric-label{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .ud-chart-wrap{width:100%;min-width:0}
 .ud-chart{display:block;width:100%}
 .ud-grid{stroke:var(--dsw-alias-border-l1);stroke-width:1}
@@ -2202,7 +2265,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, t = defaultT }) {
+    function TrendChart({ title, notes, slots, tipSlots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, money = false, costAvailable = false, onMetricToggle, t = defaultT }) {
+      const metricId = React.useId()
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
@@ -2232,7 +2296,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const showRate = visibleSet.has(LEGEND_KEY_RATE)
       const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
       const showTtft = hasTtft && visibleSet.has(LEGEND_KEY_TTFT)
-      const layout = trendLayout(slots, visibleModels, avail, labelMinPitch)
+      const layout = trendLayout(slots, visibleModels, avail, labelMinPitch, money ? COST_TOTAL_FLOOR : 1)
       const plotRight = CHART_PAD.left + (slots.length - 1) * layout.step + layout.barWidth
       const ratePoints = trendRatePoints(slots, layout.bars, layout.plotHeight)
       const speedMax = speedScaleMax(slots)
@@ -2244,8 +2308,11 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       // 左轴标定:可见柱有数据标 token;无柱数据且速度线可见标速度(tok/s);否则空
       // (ttft 不设轴,读数走 tooltip,毫秒域与速度轴不同单位不混轴)
       const speedAxisTicks = layout.ticks.length === 0 && showSpeed ? niceTicks(speedMax, AXIS_TICK_COUNT) : []
-      const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax)
-      const hoverSlot = hover ? slots[hover.index] : null
+      // 金额视图左轴走紧凑金额读数,速度接管时仍为 tok/s 紧凑读数
+      const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax,
+        money ? (value) => formatCostCompact(value, costCurrency) : formatCompact)
+      // 悬浮明细恒用 token 槽渲染:金额模式只切柱几何与左轴,悬浮文本不随口径变化
+      const hoverSlot = hover ? (tipSlots ?? slots)[hover.index] : null
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
@@ -2255,15 +2322,18 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, title),
-          notes.length > 0 ? h('span', { className: 'ud-trend-note' }, notes.join(NOTE_SEPARATOR)) : null),
+          notes.length > 0 ? h('span', { className: 'ud-trend-note' }, notes.join(NOTE_SEPARATOR)) : null,
+          costAvailable ? h('span', { className: 'ud-trend-metric' },
+            h('span', { className: 'ud-trend-metric-label', id: metricId }, t('costTrend')),
+            h(Switch, { checked: money, onChange: onMetricToggle, describedbyId: metricId, labelledById: metricId })) : null),
         h('div', { className: 'ud-chart-wrap', ref: wrapRef, style: busy ? { opacity: CHART_BUSY_OPACITY } : undefined },
           h('svg', {
             className: 'ud-chart', viewBox: `0 0 ${avail} ${CHART_HEIGHT}`, width: '100%', role: 'img',
             'aria-label': title, onMouseLeave: clear,
           },
-            yTicks.map((tick) => {
+            yTicks.map((tick, tickIndex) => {
               const y = CHART_PAD.top + layout.plotHeight - tick.ratio * layout.plotHeight
-              return h('g', { key: tick.label },
+              return h('g', { key: tickIndex },
                 h('line', { className: 'ud-grid', x1: CHART_PAD.left, x2: plotRight, y1: y, y2: y }),
                 h('text', { className: 'ud-axis', x: CHART_PAD.left - AXIS_LABEL_GAP, y: y + AXIS_LABEL_BASELINE, textAnchor: 'end' }, tick.label))
             }),
@@ -2388,10 +2458,13 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         : element
     }
 
-    function HeatSection({ days, panelRef, t = defaultT }) {
+    function HeatSection({ days, panelRef, costCurrency = '', t = defaultT }) {
       const wrapRef = useRef(null)
       const [width, setWidth] = useState(0)
       const [hover, setHover] = useState(null)
+      // 费用行显隐随「费用显示」偏好,经 ref 读取:开关切换不触发本组件重渲染
+      const prefsRef = useRef(statsLineState.get())
+      useEffect(() => statsLineState.subscribe(() => { prefsRef.current = statsLineState.get() }), [])
       useEffect(() => {
         const element = wrapRef.current
         const observer = new ResizeObserver((entries) => {
@@ -2440,6 +2513,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('tokens')}: ${formatTokens(hover.tokens)}`),
                 h('div', { key: 'requests', className: 'ud-tip-row' }, `${t('requests')}: ${hover.requests}`),
                 h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hover.cacheHit, hover.cacheMiss)}`),
+                prefsRef.current.costDisplay && hover.cost > 0
+                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, t('stats.cost', { cost: formatCost(hover.cost, costCurrency) }))
+                  : null,
               ]
             : null))
     }
@@ -2567,13 +2643,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     }
 
     // 规约形态开关:原生 checkbox 保语义并视觉隐藏,track/thumb 呈现选中态
-    function Switch({ checked, onChange, disabled, describedbyId }) {
+    function Switch({ checked, onChange, disabled, describedbyId, labelledById }) {
       return h('label', { className: 'ud-switch' },
         h('input', {
           type: 'checkbox',
           checked,
           disabled,
           'aria-describedby': describedbyId,
+          'aria-labelledby': labelledById,
           onChange: (event) => onChange(event.target.checked),
         }),
         h('span', { className: 'ud-switch__track' },
@@ -2986,14 +3063,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         }, t('addGroup')))
     }
 
-    // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示
-    function AnomalyChip({ open, onToggle, t = defaultT }) {
+    // 扫描异常日志入口:仅箭头标识,明细在展开的日志块中展示;
+    // 折叠且有待读信息时箭头带小点,展开后消失
+    function AnomalyChip({ open, news, onToggle, t = defaultT }) {
       return h('button', {
         type: 'button', className: 'ud-status-fold', 'aria-expanded': open,
         'aria-label': t('anomalyLog'), title: t('anomalyLog'),
         onClick: onToggle,
       },
-      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }))
+      h('span', { className: 'ud-status-fold-caret', 'aria-hidden': 'true' }),
+      news && !open ? h('span', { className: 'ud-status-fold-dot', 'aria-hidden': 'true' }) : null)
     }
 
     // 回扫进度与采集错误是运行状态,常显;异常明细走日志块
@@ -3104,6 +3183,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
     const viewLabel = (t, id) => (id === 'day' ? t('viewDay') : id === 'hour' ? t('viewHour') : t('viewMinute'))
     const trendTitle = (t, id) => (id === 'day' ? t('dailyTrend') : id === 'hour' ? t('hourTrend') : t('minuteTrend'))
+    const trendCostTitle = (t, id) => (id === 'day' ? t('dailyCostTrend') : id === 'hour' ? t('hourCostTrend') : t('minuteCostTrend'))
     const trendLimitedText = (t, id, count) => (id === 'day'
       ? t('trendLimited', { n: count })
       : id === 'hour' ? t('trendLimitedHour', { n: count }) : t('trendLimitedMinute', { n: count }))
@@ -3113,6 +3193,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 
     function UsageDashPanel({ t = defaultT }) {
       const [view, setView] = useState('day')
+      // 趋势图金额口径开关:会话态,与视图/挡位同为面板内临时状态
+      const [costView, setCostView] = useState(false)
       const [range, setRange] = useState(DEFAULT_RANGE)
       const [customFrom, setCustomFrom] = useState('')
       const [customTo, setCustomTo] = useState('')
@@ -3163,6 +3245,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               requests: slot ? slot.requests : 0,
               cacheHit: slot ? slot.cacheHit : 0,
               cacheMiss: slot ? slot.cacheMiss : 0,
+              cost: slot ? slot.cost : 0,
             }
           }))
         })
@@ -3296,6 +3379,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         : (grouped ? { slots: grouped.daily, models: grouped.models, value: stats } : null)
       const maxSlots = pointActive ? maxSlotsFor(view, rawPreset) : DAY_MAX_SLOTS
       const trimmedSlots = trendSource ? trimSlots(trendSource.slots, maxSlots) : null
+      const { costReady, money, chartSlots } = moneyViewOf(trimmedSlots, costView)
       const notes = []
       if (trendSource && trendSource.slots.length > trimmedSlots.length) notes.push(trendLimitedText(t, view, trimmedSlots.length))
       if (trendSource?.value?.truncated) notes.push(t('trendTruncated'))
@@ -3370,7 +3454,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                         }))
                     : null)),
           h('div', { className: 'ud-toolbar-side' },
-            h(AnomalyChip, { open: detailsOpen, onToggle: () => setDetailsOpen((v) => !v), t }),
+            h(AnomalyChip, { open: detailsOpen, news: hasAnomalyNews(status), onToggle: () => setDetailsOpen((v) => !v), t }),
             h('button', {
               className: 'ud-btn ud-btn--text ud-icon-btn', 'aria-label': t('refresh'), title: t('refresh'),
               disabled: busy, onClick: refresh,
@@ -3387,13 +3471,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
         // 活跃热力图仅按天视图展示:热力图口径为日桶,时/分视图无对应语义
-        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, t }) : null,
+        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, costCurrency, t }) : null,
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',
-              title: trendTitle(t, view),
+              title: money ? trendCostTitle(t, view) : trendTitle(t, view),
               notes,
-              slots: trimmedSlots,
+              slots: chartSlots,
+              tipSlots: trimmedSlots,
               modelOrder: trendSource.models.map((item) => item.model),
               colorFor,
               labelFor: tickLabelFor(view),
@@ -3404,6 +3489,9 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               panelRef,
               costCurrency,
               costEnabled: view === 'day',
+              money,
+              costAvailable: costReady,
+              onMetricToggle: setCostView,
               t,
             })
           : null,

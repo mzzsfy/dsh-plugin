@@ -6,11 +6,15 @@
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./src/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {
@@ -23,6 +27,7 @@
   },
   "files": [
     "lib",
+    "src",
     "preset",
     "cordis.patch.yml",
     "README.md"

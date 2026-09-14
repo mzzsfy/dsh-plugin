@@ -14,11 +14,11 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-session-manager',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useSyncExternalStore } = React
+    const { useState, useEffect, useRef, useSyncExternalStore } = React
 
-    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → archive);
-    // 该插件未就绪时入队,由其启动时排空
-    const NAV_ICON = { '会话归档': 'archive' }
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场
+    // 短名(发现页收录显示形态);该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '会话归档': 'archive', 'dsh-session-manager': 'archive' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
@@ -173,6 +173,9 @@ const CSS = [
   '.sm-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
   '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55));',
   '  background:light-dark(rgba(15,17,21,.04), rgba(255,255,255,.06)); }',
+  // 插话撤回图标:注入原生 pending steering 气泡的操作图标排,样式经克隆官方
+  // 按钮类名原生同款;dock 本体零 DOM,仅承载注入逻辑
+  '.sm-steer-host { display:none; }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -649,6 +652,7 @@ function SessionManagerApp(props) {
     }),
     h(AutoArchiveConfig, null),
     h(HistorySwitchRow, null),
+    h(SteerSwitchRow, null),
   )
 }
 
@@ -679,6 +683,34 @@ function HistorySwitchRow() {
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '历史输入浮层(Alt+↑)'),
+  )
+}
+
+// 插话撤回启停开关:与历史浮层开关同构,复用同款 switch 形态与样式(同前缀);
+// 值存宿主 settings,切换经本插件路由中转,变更刷新页面生效
+function SteerSwitchRow() {
+  const [enabled, setEnabled] = useState(null)
+  useEffect(() => {
+    api(STEER_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => setEnabled(true))
+  }, [])
+  const flip = (event) => {
+    const next = event.target.checked
+    setEnabled(next)
+    api(STEER_ENABLED_URL, { method: 'POST', body: JSON.stringify({ enabled: next }) })
+      .then((payload) => {
+        toast('插话撤回已' + (payload && payload.enabled !== false ? '启用' : '停用') + ',刷新页面后生效')
+      })
+      .catch(() => {
+        setEnabled(!next)
+        toast('切换失败', { kind: 'error' })
+      })
+  }
+  return h('label', { className: 'sm-histsw' },
+    h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
+    h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
+    h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '插话撤回图标'),
   )
 }
 
@@ -776,6 +808,7 @@ const HISTORY_SCOPE_DEFAULT = HISTORY_SCOPES.indexOf('session')
 const HISTORY_REPULL_MS = 3 * 1000
 const PROMPTS_TOGGLE_URL = '/api/session-manager/prompts/toggle'
 const HISTORY_ENABLED_URL = '/api/session-manager/history-enabled'
+const STEER_ENABLED_URL = '/api/session-manager/steer-recall-enabled'
 
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
@@ -1097,6 +1130,158 @@ function HistoryDock({ session, inputActions }) {
   )
 }
 
+// 插话撤回投影:仅用户插话(宿主队列 placement=steering,已发出但未被 step 边界
+// claim 应用);queued 由官方队列面板呈现,context 为注入上下文非用户消息
+function steerRowsOf(queue) {
+  const rows = Array.isArray(queue) ? queue : []
+  return rows.filter((row) => row && row.placement === 'steering')
+}
+
+// 撤回失败文案:queue-item-not-found = 消息已被 step 边界 claim(应用),无法撤回;
+// 其余透传宿主错误消息
+function withdrawFailureText(result) {
+  const error = result && result.error
+  if (error && error.code === 'session/queue-item-not-found') return '插话已被应用,无法撤回'
+  return '撤回失败: ' + ((error && error.message) || '未知错误')
+}
+
+// 撤回动作:先宿主移除(inbox next-step 摘除,未应用即消失),成功才回填草稿,
+// 顺序保证「移除失败绝不覆盖输入框」;actions 注入便于测试与组件解耦
+async function withdrawSteer(row, actions) {
+  let result
+  try {
+    result = await actions.updateQueue(row.id, { kind: 'remove' })
+  } catch (error) {
+    actions.notify('撤回失败: ' + String(error && error.message || error), { kind: 'error' })
+    return false
+  }
+  if (!(result && result.ok)) {
+    actions.notify(withdrawFailureText(result), { kind: 'error' })
+    return false
+  }
+  try {
+    actions.setDraft(row.text)
+  } catch (error) {
+    // 摘除已成功,草稿回填失败(会话切换等竞态)时文本必须可达:通知兜底展示原文
+    actions.notify('草稿回填失败,原文: ' + row.text, { kind: 'error' })
+    return false
+  }
+  actions.notify('已撤回到输入框')
+  return true
+}
+
+// 撤回图标 svg(undo 弯箭头,stroke 继承 currentColor,尺寸由所克隆的官方按钮类控制)
+function steerRecallSvg() {
+  const namespace = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(namespace, 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.5')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  const paths = ['M3 6.5h6.5a3.5 3.5 0 0 1 0 7H6', 'M6 3.5 3 6.5l3 3']
+  for (const d of paths) {
+    const path = document.createElementNS(namespace, 'path')
+    path.setAttribute('d', d)
+    svg.appendChild(path)
+  }
+  return svg
+}
+
+// 注入按钮标记:识别自家节点与官方按钮,防止重复注入与误删官方节点
+const STEER_BTN_FLAG = 'data-sm-steer-recall'
+// 官方 pending steering 气泡的语义标记(官方同构:UserStyleBubble data 属性)与
+// 其操作图标排的 CSS module 类名后缀(哈希前缀随构建漂移,后缀稳定)
+const STEER_BUBBLE_SELECTOR = '[data-pending-steering]'
+const STEER_ACTIONS_SUFFIX = '[class$="_actions"]'
+
+// 插话撤回:注入原生 pending steering 气泡的操作图标排(复制图标旁),样式经克隆
+// 官方按钮 className 完全原生;气泡被应用后整棵卸载,注入按钮随之消失。
+// dock 本体 display:none 零占位,仅承载观察与注入;官方 DOM 结构漂移时注入静默
+// 跳过(不报错),干净禁用精神
+function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
+  const queue = useSession((state) => state.queue)
+  const queueMutable = useSession((state) => state.subagent === null || state.subagent.address.mode === 'continuable')
+  const [busy, setBusy] = useState(false)
+  // 启停开关(设置页):挂载拉取一次,停用即不注入并移除已注入按钮;失败按启用兜底
+  const [enabled, setEnabled] = useState(true)
+  useEffect(() => {
+    api(STEER_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => {})
+  }, [])
+  // 观察回调经由 ref 读最新状态,观察器只挂一次不随渲染重挂
+  const rowsRef = useRef([])
+  const mutableRef = useRef(true)
+  const busyRef = useRef(false)
+  const actionsRef = useRef(null)
+  rowsRef.current = steerRowsOf(queue)
+  mutableRef.current = queueMutable
+  busyRef.current = busy
+  actionsRef.current = { updateQueue, setDraft: inputActions ? inputActions.setDraft : undefined }
+  const scanRef = useRef(null)
+  useEffect(() => {
+    function withdraw(row) {
+      const actions = actionsRef.current
+      if (busyRef.current || !actions || typeof actions.updateQueue !== 'function') return
+      setBusy(true)
+      void withdrawSteer(row, { updateQueue: actions.updateQueue, setDraft: actions.setDraft, notify: toast })
+        .finally(() => setBusy(false))
+    }
+    function syncButton(button, row) {
+      const textOnly = row.text !== null
+      button.disabled = busyRef.current || !textOnly
+      button.title = textOnly ? '撤回到输入框: ' + row.preview : '含附件的插话不支持撤回'
+    }
+    function scan() {
+      const bubbles = document.querySelectorAll(STEER_BUBBLE_SELECTOR)
+      const rows = mutableRef.current ? rowsRef.current : []
+      bubbles.forEach((bubble, index) => {
+        const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
+        if (!actionsRow) return
+        let button = actionsRow.querySelector('[' + STEER_BTN_FLAG + ']')
+        const row = rows[index]
+        if (!row) {
+          // 气泡尚存但行已被应用/撤回(帧差瞬态):按钮随气泡卸载,先禁用防误触
+          if (button) button.disabled = true
+          return
+        }
+        if (!button) {
+          const official = actionsRow.querySelector('button:not([' + STEER_BTN_FLAG + '])')
+          if (!official) return
+          button = document.createElement('button')
+          button.type = 'button'
+          button.setAttribute(STEER_BTN_FLAG, '')
+          // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
+          button.className = official.className
+          button.addEventListener('click', () => withdraw(row))
+          button.appendChild(steerRecallSvg())
+          actionsRow.appendChild(button)
+        }
+        syncButton(button, row)
+      })
+    }
+    scanRef.current = scan
+    const observer = new MutationObserver(scan)
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+    scan()
+    return () => {
+      scanRef.current = null
+      observer.disconnect()
+      document.querySelectorAll('[' + STEER_BTN_FLAG + ']').forEach((button) => button.remove())
+    }
+  }, [])
+  // 行集/开关/忙碌变化即时重扫(观察器只覆盖 DOM 变更,状态变化需主动对账)
+  useEffect(() => {
+    if (scanRef.current) scanRef.current()
+  }, [queue, enabled, busy, queueMutable])
+  if (session === undefined || inputActions === undefined || updateQueue === undefined) return null
+  if (!enabled || !queueMutable) return null
+  return h('div', { className: 'sm-steer-host' })
+}
+
     return {
       inject: ['slots', 'sessions', 'workspaces'],
       apply(ctx) {
@@ -1142,6 +1327,29 @@ function HistoryDock({ session, inputActions }) {
             ))
         } catch (error) {
           console.warn('[session-manager] 历史输入入口未注册(宿主无 conversation.input.dock 插槽)', error)
+        }
+
+        // 插话撤回入口:未应用的插话撤回到输入框重新编辑。RPC 走会话绑定面
+        // binding.session.updateQueue(RemoteResult 不抛错,与官方 conversation 服务
+        // 无耦合);会话面缺失或无 updateQueue(旧宿主)返回空 props,组件不渲染
+        try {
+          ctx.slots.inject('conversation.input.dock', () =>
+            ctx.slots.register(
+              {
+                name: 'conversation.input.dock',
+                id: 'session-manager-steer',
+                order: 25,
+                inject: (sessionId) => {
+                  const binding = sessions.binding(sessionId)
+                  const updateQueue = binding && binding.session && binding.session.updateQueue
+                  if (typeof updateQueue !== 'function') return {}
+                  return { updateQueue: (itemId, action) => binding.session.updateQueue(itemId, action) }
+                },
+              },
+              SteerRecallDock,
+            ))
+        } catch (error) {
+          console.warn('[session-manager] 插话撤回入口未注册(宿主无 conversation.input.dock 插槽)', error)
         }
 
         ctx.effect(() => unsubscribe, 'session-manager archived diff')

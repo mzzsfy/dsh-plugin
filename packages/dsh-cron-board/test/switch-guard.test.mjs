@@ -78,28 +78,49 @@ test('启停开关乐观更新契约:即时翻转 + 失败回滚提示,禁止等
   assert.match(source, /envs, reload, applyEnvPatch/)
 })
 
-test('client.js 主页面双形态挂载契约(默认主界面;设置开关手动移入侧边栏;无自动回退)', () => {
-  // Given 用户要求:默认永远主界面;检测到 better-sidebar 提供设置项,由用户手动移入;
-  //        移入后页签关闭/禁用不再自动返回主界面(挂载权完全交给用户与侧边栏)
-  // Then 静态锁定:模块注册形态、服务软探测、tab 单实例、主界面容器与互斥事件、偏好驱动仲裁
+test('client.js 主页面双形态挂载契约(默认宿主全局面板;设置开关手动移入侧边栏;无自动回退)', () => {
+  // Given 定时任务是全局工具,入口必须不依赖会话:main 为 keyed 全局中央面板插槽,
+  //        sidebar.panellist 为侧栏面板行,点击切换由宿主 layout.selectPanel 承载
+  // When 插件以同 id 注册 main 条目 + panellist 条目;sidebarTab 偏好开启且服务在场时改注册 better-sidebar 扩展槽 tab
+  // Then 静态锁定:双条目注册形态、服务软探测、tab 单实例、偏好驱动仲裁、设置卡片;
+  //        DOM 刮取挂载与会话内页签形态(conversation.view)禁止回流
   assert.match(source, /window\.__ModuleLoader__\.load\(\{ id: '@mzzsfy\/dsh-cron-board', factory \}\)/)
+  assert.match(source, /ctx\.slots\.inject\('main'/)
+  assert.match(source, /name: 'main'/)
+  assert.match(source, /key: PANEL_ID/)
+  assert.match(source, /const PANEL_ID = 'cron-board'/)
+  assert.match(source, /const PANEL_LABEL = '定时任务'/)
+  assert.match(source, /ctx\.slots\.inject\('sidebar\.panellist'/)
+  assert.match(source, /name: 'sidebar\.panellist'/)
+  assert.match(source, /id: PANEL_ID/)
+  assert.match(source, /function registerMainPanel/)
+  assert.match(source, /cb-main/)
+  // 面板贡献必须可拆除:effect 工厂收集 inject disposer 并交付组合清理,
+  // 否则互斥仲裁拆不掉 main/panellist 条目,开关往返累积注册(审查阻断项)
+  assert.match(source, /injectDisposers\.push\(ctx\.slots\.inject\('main'/)
+  assert.match(source, /injectDisposers\.push\(ctx\.slots\.inject\('sidebar\.panellist'/)
+  assert.match(source, /return \(\) => \{ for \(const dispose of injectDisposers\) dispose\(\) \}/)
   assert.match(source, /ctx\.get\('betterSidebar'\)/)
   assert.match(source, /single: true/)
   assert.match(source, /ctx\.inject\(\['betterSidebar'\]/)
-  assert.match(source, /data-cb-board-active/)
-  assert.match(source, /dsh-panel-activate/)
-  assert.match(source, /function mountStandaloneBoard/)
-  // 设置>插件页卡片(settings.plugin.item,key 配对 ns);better-sidebar 在场可切换,否则禁用仅展示
+  // 设置>插件页卡片(settings.plugin.item,key 配对 ns);better-sidebar 服务在场可切换,否则禁用仅展示
   assert.match(source, /ctx\.slots\.inject\('settings\.plugin\.item'/)
-  assert.match(source, /key: 'cron-board', label: '定时任务'/)
+  assert.match(source, /key: PANEL_ID, label: PANEL_LABEL/)
   assert.match(source, /function CronBoardPluginCard/)
   assert.match(source, /'ui-settings'/)
   assert.match(source, /sidebarReady/)
-  // 挂载仲裁:apply 无条件先落主界面形态;偏好(status.ui.sidebarTab)驱动接入/退出
-  assert.match(source, /let standalone = mountStandaloneBoard\(wsModel\)/)
+  // 挂载仲裁:偏好(status.ui.sidebarTab)驱动全局面板/扩展槽互斥
   assert.match(source, /applyPref\(\)/)
   assert.match(source, /ui\.sidebarTab/)
   // 不再自动回退:attach 后不订阅页签状态,无 openTabs/subscribeState 联动
   assert.doesNotMatch(source, /subscribeState/)
   assert.doesNotMatch(source, /openTabs/)
+  assert.doesNotMatch(source, /mountStandaloneBoard/)
+  assert.doesNotMatch(source, /data-cb-board-active/)
+  assert.doesNotMatch(source, /dsh-panel-activate/)
+  assert.doesNotMatch(source, /data-pane="conversation"/)
+  assert.doesNotMatch(source, /centerCol/)
+  assert.doesNotMatch(source, /dshDesktop/)
+  assert.doesNotMatch(source, /MutationObserver/)
+  assert.doesNotMatch(source, /conversation\.view/)
 })

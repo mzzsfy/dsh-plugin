@@ -13,6 +13,10 @@ import {
   isDue,
   runLimited,
 } from '../src/poller.mjs'
+import { evaluateAccount, createNotifyState } from '../src/notify.mjs'
+
+// 宿主 tick 周期(index.js TICK_SEC=30s)的测试替身:语义=tick 远小于轮询间隔
+const TICK_SEC = 30
 
 test('场景: 失败退避指数增长并封顶', () => {
   const backoff = createBackoff({ baseSec: 600 })
@@ -119,4 +123,51 @@ test('场景: 受限并发执行——空列表与并发大于任务数', async 
   assert.deepEqual(processed, [])
   await runLimited([1, 2], 8, async (item) => processed.push(item))
   assert.deepEqual(processed, [1, 2])
+})
+
+// 端到端时钟推演:自动轮询 tick 驱动(无任何手动刷新)下,读数新越阈值即产出通知。
+// Given tick 周期远小于轮询间隔,阈值 91%,上游 utilization 按轮次爬升。
+// When 宿主 tick 循环按 isDue 判定到点轮次并执行查询 + 沿触发评估。
+// Then 通知在越线轮次由自动路径产出,armed 解除后不重发。
+test('场景: 自动轮询 tick 驱动下阈值穿越产出通知(无手动刷新)', () => {
+  let nowSec = 0
+  const utilizationByRound = [40, 55, 70, 93, 95, 60]
+  let round = 0
+  const account = { id: 'acct-sim', name: '模拟账号', last: null, notifyState: createNotifyState() }
+  const backoff = createBackoff({ baseSec: POLL_INTERVAL_SEC })
+  const events = []
+  for (; round < utilizationByRound.length && nowSec <= POLL_INTERVAL_SEC * utilizationByRound.length + TICK_SEC; nowSec += TICK_SEC) {
+    const due = !backoff.isBlocked(nowSec) && isDue({
+      lastQuerySec: lastQuerySecOf(account.last),
+      nowSec,
+      intervalSec: POLL_INTERVAL_SEC,
+    })
+    if (!due) continue
+    // runQuery 成功路径:落读数记 queriedAt(成功失败均记),退避恢复
+    const queriedAt = nowSec * 1000
+    account.last = {
+      ok: true,
+      reading: {
+        kind: 'quota',
+        windows: [{ label: '5小时', utilization: utilizationByRound[round++], remaining: null, limit: null, resetsAt: '2026-01-01T00:00:00Z' }],
+      },
+      error: null,
+      queriedAt,
+    }
+    backoff.onSuccess()
+    // evaluateAndDispatch 评估段:通知开,阈值 91%
+    const outcome = evaluateAccount({
+      account,
+      rule: { quotaThresholdPct: 91, balanceThreshold: null, resetNotice: true },
+      state: account.notifyState,
+      seq: events.length,
+      ts: queriedAt,
+    })
+    account.notifyState = outcome.state
+    events.push(...outcome.events)
+  }
+  assert.equal(round, utilizationByRound.length, '每轮到点均被 tick 驱动查询')
+  assert.equal(events.length, 1, '自动路径恰好产出一次阈值通知')
+  assert.equal(events[0].detail.value, 93, '通知发生在越线轮次')
+  assert.equal(account.notifyState.windows['5小时'].armed, false, '越线后武装解除')
 })

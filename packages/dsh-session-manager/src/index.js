@@ -111,6 +111,8 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
   historyEnabled: schemastery.boolean().default(true)
     .description('历史输入浮层(Alt+↑),低频功能,关闭后输入框锚点与快捷键整体不渲染;变更刷新页面生效'),
+  steerRecallEnabled: schemastery.boolean().default(true)
+    .description('插话撤回图标(输入框上方),低频功能,关闭后撤回图标整体不渲染;变更刷新页面生效'),
 })
 
 function sendJson(res, status, payload) {
@@ -138,6 +140,7 @@ function readSettings(ctx) {
     days: Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS,
     intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
     historyEnabled: !value || value.historyEnabled !== false,
+    steerRecallEnabled: !value || value.steerRecallEnabled !== false,
   }
 }
 
@@ -909,6 +912,32 @@ export function apply(ctx, config) {
           // update 异步落盘后才提交新值:await 保证持久化完成后再读回
           await settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 插话撤回启停:与历史浮层开关同构,读走 settings,写经 settings.update
+      path: '/api/session-manager/steer-recall-enabled',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const settings = ctx.get('settings')
+          if (!settings) throw new Error('宿主设置服务不可用')
+          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
+          await settings.update(NAMESPACE, { steerRecallEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }

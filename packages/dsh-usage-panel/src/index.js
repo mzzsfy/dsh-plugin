@@ -731,6 +731,9 @@ export function apply(ctx) {
   let pollArmed = false
   ctx.inject(['timer'], (timerCtx) => {
     if (typeof timerCtx.interval !== 'function') return
+    // 配置预载:启动即读盘,消除懒加载空窗——否则宿主重启后直到首个面板请求前,
+    // tick 回调因 config 为 null 空转,自动查询静默停摆,通知全部缺席
+    void ensureConfig()
     const dispose = timerCtx.interval(() => {
       if (pollInFlight) return
       const current = config
