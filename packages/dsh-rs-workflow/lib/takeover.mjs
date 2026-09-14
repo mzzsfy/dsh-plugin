@@ -150,7 +150,7 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 	function note(agent, turn, step, text) {
 		const safeTurn = Number.isInteger(turn) && turn > 0 ? turn : lastTurn.get(agent.id);
 		if (!Number.isInteger(safeTurn) || safeTurn <= 0) {
-			ctx.logger?.warn?.("rs-workflow 会话提示缺少有效 turn,跳过会话流写入");
+			ctx.logger?.warn?.(`rs-workflow 会话提示缺少有效 turn(收到 turn=${JSON.stringify(turn ?? null)}),跳过会话流写入`);
 			return;
 		}
 		try {

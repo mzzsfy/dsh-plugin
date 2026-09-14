@@ -32,7 +32,7 @@ function normalizeTemplates(value) {
 		.filter((t) => t.id !== "");
 }
 
-export function createTemplateTool({ getTemplates, setTemplates, releaseTemplate, unreleaseTemplate, logger }) {
+export function createTemplateTool({ getTemplates, setTemplates, removeTemplate, releaseTemplate, unreleaseTemplate, logger }) {
 	return defineTool({
 		name: "rs_workflow_template",
 		description: [
@@ -128,6 +128,12 @@ export function createTemplateTool({ getTemplates, setTemplates, releaseTemplate
 			if (action === "remove") {
 				const id = typeof args.id === "string" ? args.id.trim() : "";
 				if (id === "") return { ok: false, action, error: "缺少 id" };
+				// 共享删除语义(内置项落 disabled 用户记录);未注入时回退数组过滤
+				if (typeof removeTemplate === "function") {
+					const outcome = await removeTemplate(id);
+					if (!outcome.ok) return { ok: false, action, error: outcome.error };
+					return { ok: true, action, presetId: "rs-" + id, templates: outcome.templates };
+				}
 				const templates = normalizeTemplates(await getTemplates());
 				const next = templates.filter((item) => item.id !== id);
 				if (next.length === templates.length) return { ok: false, action, error: "模板不存在: " + id };

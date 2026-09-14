@@ -147,7 +147,10 @@ test('template-tool:spec 返回规范全文,list/save 校验失败逐条报错,s
 
     const listed = await tool.execute({ action: 'list' })
     assert.equal(listed.ok, true)
-    assert.deepEqual(listed.templates, [])
+    // list 是合并视图:内置模板(default/news/novel)始终可见
+    assert.ok(listed.templates.some((t) => t.id === 'default'), 'list 应含内置 default')
+    assert.ok(listed.templates.some((t) => t.id === 'news'), 'list 应含内置 news')
+    assert.ok(listed.templates.some((t) => t.id === 'novel'), 'list 应含内置 novel')
 
     const bad = await tool.execute({ action: 'save', template: { id: 'bad', json5: '{ id: "bad", steps: [{ id: "s1", outputs: { x: "X" }, for_each: "nope.nope" }] }' } })
     assert.equal(bad.ok, false)
@@ -168,7 +171,10 @@ test('template-tool:spec 返回规范全文,list/save 校验失败逐条报错,s
 
     const removed = await tool.execute({ action: 'remove', id: 'news' })
     assert.equal(removed.ok, true)
-    assert.equal(settingsValue.templates.length, 0)
+    // news 是内置模板:remove 落用户态 enabled:false 记录(防合并复活),且撤下已释放模式
+    assert.equal(settingsValue.templates.length, 1)
+    assert.equal(settingsValue.templates[0].id, 'news')
+    assert.equal(settingsValue.templates[0].enabled, false)
     assert.equal(existsSync(join(home, '.agent-presets', 'rs-news')), false, 'remove 应撤下已释放模式')
   } finally {
     if (realHome === undefined) delete process.env.DSH_HOME
@@ -216,7 +222,10 @@ test('模板路由:template-save 校验→保存;release 释放;template-remove 
     url: '/api/rs-workflow/template-remove', origin: 'http://localhost:3000', contentType: 'application/json', body: { id: 'news' },
   }))
   assert.equal(removed.status, 200)
-  assert.equal(settingsValue.templates.length, 0)
+  // news 是内置模板:remove 落 enabled:false 用户记录(防合并复活)而非直接删除
+  assert.equal(settingsValue.templates.length, 1)
+  assert.equal(settingsValue.templates[0].id, 'news')
+  assert.equal(settingsValue.templates[0].enabled, false)
 })
 
 test('看板路由:runs/run/remove 全链 + 写守卫(跨源/非 JSON/405)', async () => {

@@ -52,7 +52,7 @@ check("Config 默认值：workflow.defaultTemplate=auto", cfg.workflow.defaultTe
 check("Config 默认值：workflow.maxTasks=8", cfg.workflow.maxTasks === 8);
 check("Config 默认值：16 个 slot 全空串", Object.values(cfg.slots).every((v) => v === "") && Object.keys(cfg.slots).length === 16);
 check("Config 默认值：budgets 四阈值 2/2/3/3", cfg.budgets.reviewRejectBeforeEscalate === 2 && cfg.budgets.planRejectBeforeBlocked === 2 && cfg.budgets.emptyOutputRetryLimit === 3 && cfg.budgets.reportNudgeLimit === 3);
-check("Config 默认值：templates 空数组", Array.isArray(cfg.templates) && cfg.templates.length === 0);
+check("Config 默认值：templates 含内置三模板", Array.isArray(cfg.templates) && ["default", "news", "novel"].every((id) => cfg.templates.some((t) => t.id === id)));
 let threw = false;
 try { mod.Config({}); } catch { threw = true; }
 check("Config 缺 role 抛错", threw);
@@ -186,7 +186,11 @@ try {
     check("save：保存并释放", saved.ok === true && saved.released === true && settingsValue.templates.length === 1);
     check("save：释放目录落盘", existsSync(join(simHome2, ".agent-presets", "rs-news", "flow.json5")));
     const removed = await registeredTool.execute({ action: "remove", id: "news" });
-    check("remove：删除并撤下", removed.ok === true && settingsValue.templates.length === 0 && !existsSync(join(simHome2, ".agent-presets", "rs-news")));
+    check("remove：删除并撤下", removed.ok === true
+      && settingsValue.templates.length === 1
+      && settingsValue.templates[0].id === "news"
+      && settingsValue.templates[0].enabled === false
+      && !existsSync(join(simHome2, ".agent-presets", "rs-news")));
   } finally {
     if (savedHome2 === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = savedHome2;

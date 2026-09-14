@@ -4,6 +4,7 @@
 
 - **内置协作模板(collab)**:rs-tui 工作流引擎的忠实移植,planner/executor/reviewer 三角色子代理分工,难度分诊四模板(lite / plan-final / step-review / multi-plan),审批循环、升级重规划、工作位模型降级链。
 - **用户流程模板(flow)**:一份 JSON5 声明的强流程。每步安排 AI 产出什么(`<output>` 契约),引擎强制校验后推进;支持 for_each 循环、嵌套子流程、分诊动态路由、技能/文档强制加载。设置中配置多套模板,每套点「更新到 dsh」释放为一个模式。
+- **内置流程模板**:包内 `flows/*.json5`(novel 小说写作 / news 新闻生产 / default 通用默认)作为模板数组开箱默认值,开箱即可在「若水·流程模板」释放为模式;与用户模板同源管理——用户可修改覆盖、删除(内置项删除落禁用记录防止合并复活)。
 
 选中任一模式后,会话内一切用户消息被 pre-step 拦截进编排,主会话模型零参与——弱模型也能被流程兜住出活。设计原理、BDD 验收场景与 rscli 映射见仓库根 `docs/DESIGN.md`;模板 DSL 规范的唯一真相源是包内 `lib/spec.mjs`(工具 `spec` 动作与看板「模板规范」分区同源输出)。
 
@@ -75,7 +76,7 @@ import { presetDest, removePreset, syncPreset, releaseFlowTemplate, unreleaseFlo
 ## 开发与测试
 
 ```sh
-node --test "test/*.test.mjs"                                # 包内单测(flows/preset-sync/board/persona-compat/report-store)
+node --test "test/*.test.mjs"                                # 包内单测(flows/preset-sync/board/persona-compat/report-store/builtin-templates)
 node --test tests/engine.test.mjs                            # 仓库根:collab 引擎验收(76 场景)
 node --test tests/flow.test.mjs                              # 仓库根:流程解释器验收(13 BDD 场景)
 node --test tests/workflow-parity.test.mjs                   # 仓库根:工作位键集/spec 锚点/资源上限 parity

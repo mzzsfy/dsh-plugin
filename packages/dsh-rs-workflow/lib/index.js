@@ -22,6 +22,7 @@ import { registerTakeover } from "./takeover.mjs";
 import { createTemplateTool } from "./template-tool.mjs";
 import { validateFlow } from "./flows.mjs";
 import { SPEC_TEXT } from "./spec.mjs";
+import { builtinTemplates } from "./builtin-templates.mjs";
 
 const name = "rs-workflow";
 const NAMESPACE = "rs-workflow";
@@ -90,7 +91,8 @@ function buildWorkflow() {
 	});
 }
 
-/** 流程模板数组子 schema:GUI/工具共同读写;释放动作在看板按钮或工具 release 参数。 */
+/** 流程模板数组子 schema:GUI/工具共同读写;释放动作在看板按钮或工具 save(release:true) 参数。
+ *  默认值 = 包内内置模板(flows/*.json5);用户改过 templates 后以用户态为准。 */
 function buildTemplates() {
 	const item = () => z.object({
 		id: z.string().required().description("流程 id(^[a-z][a-z0-9-]*$);释放模式 = rs-<id>"),
@@ -99,7 +101,7 @@ function buildTemplates() {
 		enabled: z.boolean().default(true).description("禁用后不再释放/分诊不可见"),
 		json5: z.string().default("").description("流程定义 JSON5 全文(规范见 rs_workflow_template 工具 spec)"),
 	});
-	return z.array(item()).default([]).description("流程模板集:每项可经看板「释放为模式」或工具 save(release:true) 释放为独立模式");
+	return z.array(item()).default(builtinTemplates()).description("流程模板集:每项可经看板「释放为模式」或工具 save(release:true) 释放为独立模式");
 }
 
 /** 设置 schema(GUI 表单)。模板数组在 GUI 为高级字段,日常经工具/看板编辑。 */
@@ -254,7 +256,8 @@ function registerBoardRoutes(ctx) {
 			const errors = validateFlow(parsed);
 			if (errors.length > 0) throw new Error("流程模板校验失败:\n- " + errors.join("\n- "));
 			if (parsed && typeof parsed.id === "string" && parsed.id !== id) throw new Error(`id 不一致: 模板 "${id}" vs 定义 "${parsed.id}"`);
-			const templates = readTemplates(ctx).filter((t) => t.id !== id);
+			// 只改用户态条目(readTemplates 是合并内置后的展示视图,写回会固化内置副本)
+			const templates = rawTemplates(ctx).filter((t) => t.id !== id);
 			templates.push({
 				id,
 				label: typeof body.label === "string" && body.label.trim() !== "" ? body.label.trim() : parsed.label || id,
@@ -268,12 +271,9 @@ function registerBoardRoutes(ctx) {
 		route("/api/rs-workflow/template-remove", guardedRoute.post(async (req, res) => {
 			const body = JSON.parse(await readJsonBody(req));
 			const id = body && typeof body.id === "string" ? body.id.trim() : "";
-			const templates = readTemplates(ctx);
-			const next = templates.filter((t) => t.id !== id);
-			if (next.length === templates.length) throw new Error("模板不存在: " + id);
-			await writeTemplates(ctx, next);
-			unreleaseFlowTemplate(id);
-			sendJson(res, 200, { ok: true, templates: next });
+			const outcome = await removeTemplateById(ctx, id);
+			if (!outcome.ok) throw new Error(outcome.error);
+			sendJson(res, 200, { ok: true, templates: outcome.templates });
 		}), "rs-workflow template remove route");
 	});
 }
@@ -282,15 +282,58 @@ function readTemplates(ctx) {
 	try {
 		const settings = ctx.get("settings");
 		const value = settings ? settings.get(NAMESPACE) : undefined;
-		if (value && Array.isArray(value.templates)) return value.templates;
-	} catch { /* 设置服务缺失/损坏:空表 */ }
-	return [];
+		if (value && Array.isArray(value.templates)) return mergeBuiltin(value.templates);
+	} catch { /* 设置服务缺失/损坏:仅内置表 */ }
+	return builtinTemplates();
+}
+
+/** 用户模板与内置模板合并:同 id 用户项优先(可整体覆盖内置),未覆盖的内置项附加;
+ *  内置项禁用态由 remove 落的用户记录(enabled:false)表达。 */
+function mergeBuiltin(userTemplates) {
+	const byId = new Map(userTemplates.map((t) => [t.id, t]));
+	const merged = [...userTemplates];
+	for (const builtin of builtinTemplates()) {
+		if (byId.has(builtin.id)) continue;
+		merged.push(builtin);
+	}
+	return merged;
+}
+
+/** settings 用户态原始模板数组(未合并内置;写回路径专用)。 */
+function rawTemplates(ctx) {
+	try {
+		const settings = ctx.get("settings");
+		const value = settings ? settings.get(NAMESPACE) : undefined;
+		return value && Array.isArray(value.templates) ? value.templates : [];
+	} catch { return []; }
+}
+
+/** 删除模板(board 路由与模型工具共用):用户项直接删;内置项落 enabled:false
+ *  用户记录(防合并复活)。同时撤下已释放模式。 */
+async function removeTemplateById(ctx, id) {
+	const raw = rawTemplates(ctx);
+	const next = raw.filter((t) => t.id !== id);
+	const builtin = builtinTemplates().find((t) => t.id === id);
+	if (builtin) {
+		next.push({ ...builtin, enabled: false });
+	} else if (next.length === raw.length) {
+		return { ok: false, error: "模板不存在: " + id };
+	}
+	await writeTemplates(ctx, next);
+	const outcome = unreleaseFlowTemplate(id);
+	return { ok: true, templates: mergeBuiltin(next), outcome };
 }
 
 async function writeTemplates(ctx, templates) {
 	const settings = ctx.get("settings");
 	if (!settings) throw new Error("设置服务不可用,无法保存模板");
-	await settings.update(NAMESPACE, { templates });
+	// 与内置定义完全一致的条目不落用户态(未定制即随内置走,免固化副本)
+	const builtins = builtinTemplates();
+	const userEntries = templates.filter((t) => {
+		const builtin = builtins.find((b) => b.id === t.id);
+		return !(builtin && t.enabled === builtin.enabled && t.label === builtin.label && t.description === builtin.description && t.json5 === builtin.json5);
+	});
+	await settings.update(NAMESPACE, { templates: userEntries });
 }
 
 // ── 运行上报工具(预设层 report 角色) ────────────────────────────────────────
@@ -359,6 +402,7 @@ function registerTemplateTool(ctx) {
 		tctx.effect(() => tctx.tools.register(createTemplateTool({
 			getTemplates: async () => readTemplates(ctx),
 			setTemplates: (templates) => writeTemplates(ctx, templates),
+			removeTemplate: (id) => removeTemplateById(ctx, id),
 			releaseTemplate: (entry) => releaseFlowTemplate(entry) !== "foreign",
 			unreleaseTemplate: (id) => unreleaseFlowTemplate(id),
 			logger: ctx.logger,
