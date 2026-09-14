@@ -38,7 +38,7 @@ DeepSeek Harness 纯前端插件:设置弹窗左侧导航与 dsh-market 插件�
 
 - **外部声明**:其他插件运行时注册自己的 label/插件名 → 图标,优先级最高(见下节)。
 - **内置映射**:官方分区与无法改源的第三方分区。
-- **关键词**:插件名/分区名整词命中语义关键词得主题图(git→分支、im→机器人、search→放大镜、usage→图表等 19 组规则);整词边界匹配,`im` 不误伤 `important`。
+- **关键词**:插件名/分区名整词命中语义关键词得主题图(git→分支、im→机器人、search→放大镜、usage→图表、wallet→钱包等 20 组规则);整词边界匹配,`im` 不误伤 `important`。
 - **备用池**:星芒/层叠/标签/网格四个中性图形,按名称稳定哈希取一个——同一名称永远同一图形,重渲染不闪动。dsh-market 目录内全部插件(含下载量前 1000)至此都有图标。
 
 ## 图标声明机制(其他插件接入)
@@ -54,12 +54,12 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 ```
 
 - 键:分区显示文本(设置导航)或插件名(dsh-market 卡片)。两域共用一张表,同名时以先命中者生效,键请取不易与官方分区撞名的插件名。官方双语分区按等价组解析:任一语言 label 作键,两种语言下均命中(消除语言切换的声明键漂移)。
-- 值:内置 glyph 名(`tune/theme/bot/market/cube/mcp/shield/cards/plan/bell/wrench/archive/spark/layers/tag/grid/git/search/term/chart/code/doc/db/flow/globe/lock/image/zap`)或完整 16×16 `<svg>` 字符串。svg 字符串过安全门:完整开标签(大小写不敏感,拒绝 `<svgx` 残串)且单根闭合(首个 `</svg>` 后不得再有内容,堵尾缀活动 HTML);不带 `on*` 事件属性(`\b` 前界堵斜杠分隔绕过)、不带 `<script>`/`<style>`(内联样式全文档生效且 @import 可外联)/`<foreignObject>`/SMIL 动画(`<animate>`/`<set>` 等)载体;不带 `href`/`xlink:href` 及 `attributeName="href"` 注入(16×16 静态图标无合法引用/动画场景,外联请求一并封死);不带 `javascript:`(纵深);长度 ≤4096 字符;glyph 名查表经 `typeof` 收口,原型链成员不可能被注入。
+- 值:内置 glyph 名(`tune/theme/bot/market/cube/mcp/shield/cards/plan/bell/wrench/archive/spark/layers/tag/grid/git/search/term/chart/code/doc/db/flow/globe/lock/image/zap/wallet`)或完整 16×16 `<svg>` 字符串。svg 字符串过安全门:完整开标签(大小写不敏感,拒绝 `<svgx` 残串)且单根闭合(首个 `</svg>` 后不得再有内容,堵尾缀活动 HTML);不带 `on*` 事件属性(`\b` 前界堵斜杠分隔绕过)、不带 `<script>`/`<style>`(内联样式全文档生效且 @import 可外联)/`<foreignObject>`/SMIL 动画(`<animate>`/`<set>` 等)载体;不带 `href`/`xlink:href` 及 `attributeName="href"` 注入(16×16 静态图标无合法引用/动画场景,外联请求一并封死);不带 `javascript:`(纵深);长度 ≤4096 字符;glyph 名查表经 `typeof` 收口,原型链成员不可能被注入。
 - 声明值经归一化后写入注册表;同值重复注册幂等短路;非法值(未知 glyph/被安全门拒绝/非字符串)撤销该键声明,该分区回到内置映射或关键词/哈希默认管线,已改写的 nav svg 内容就地重写。
 - 声明持久化在 `window.__navicIconDeclarations`:本插件 client 半区热重载会重跑工厂而生产者不重发注册,持久层让重装实例恢复声明,页面刷新随 window 释放。
 - 污染面收敛在 `window.__navicIcons` 单一命名空间,插件卸载时移除 API、取消已排定的重绘、队列恢复数组形态——卸载后生产者按上方「方式二」入队等待下一实例,不再驱动 DOM 改写;重载页面后全部还原为官方图标。
 
-本仓库自有插件的分区图标即全部走此机制:usage-panel(账号余额 → plan)、turn-notify(消息通知 → bell)、maintain(版本与运维 → wrench)、session-manager(会话归档 → archive)、rs-workflow(若水工作流 → flow);五包的注册样板由本包测试做契约锁定。
+本仓库自有插件的分区图标即全部走此机制:usage-panel(账号余额 → wallet)、turn-notify(消息通知 → bell)、maintain(版本与运维 → wrench)、session-manager(会话归档 → archive)、rs-workflow(若水工作流 → flow);五包的注册样板由本包测试做契约锁定。
 
 ## 内置映射表
 

@@ -274,7 +274,7 @@ function defineScenarios(prefix, L) {
   })
 
   test(prefix + '关键词规则整词边界与跨规则优先级', () => {
-    const { themedIcon, FALLBACK } = L
+    const { themedIcon, FALLBACK, GLYPHS } = L
     assert.equal(themedIcon('important'), FALLBACK[poolIndexOf('important')], 'im 不命中 important')
     assert.equal(themedIcon('dbtool'), FALLBACK[poolIndexOf('dbtool')], 'db 不命中 dbtool')
     assert.equal(themedIcon('my db tool'), themedIcon('db'), '独立词 db 命中')
@@ -283,6 +283,10 @@ function defineScenarios(prefix, L) {
     // 顺序即优先级,具体语义在前:双规则同打名取靠前者
     assert.equal(themedIcon('search-bot'), themedIcon('search'), 'search 先于 bot')
     assert.equal(themedIcon('git-notify'), themedIcon('git'), 'git 先于 notify')
+    // 余额语义:wallet 系关键词命中钱包图,plan 系关键词仍命中时钟
+    assert.equal(themedIcon('account-balance'), GLYPHS.wallet, 'balance 命中钱包')
+    assert.equal(themedIcon('my-wallet-tool'), GLYPHS.wallet, 'wallet 命中钱包')
+    assert.equal(themedIcon('cron-board'), GLYPHS.plan, 'cron 仍命中时钟')
   })
 
   test(prefix + '别名等价:双语分区任一语言键命中,组外键不受影响', () => {
@@ -419,8 +423,8 @@ test('两份实现 NAME_RULES 全量同源(含标志位)', () => {
 
 test('README 契约数量锁定', () => {
   // README 声明的内置表规模,扩表须同步改 README
-  assert.equal(Object.keys(logic.GLYPHS).length, 28)
-  assert.equal(logic.NAME_RULES.length, 19)
+  assert.equal(Object.keys(logic.GLYPHS).length, 29)
+  assert.equal(logic.NAME_RULES.length, 20)
 })
 
 test('LOGIC 段与 logic.mjs 决策函数逐函数源码一致(归一化注释与空白)', () => {

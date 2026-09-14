@@ -387,6 +387,9 @@ window.__ModuleLoader__.load({
       rectOf('2.5', '3', '11', '10', '1.2') +
       circleOf('5.9', '6.1', '1') + pathOf('m3.6 12 3-3 2.3 2.3 1.7-1.7 1.9 1.9'))
     const ZAP = svgOf(pathOf('M8.9 1.8 3.8 8.9h3.5L7 14.2l5.2-7.1H8.6z'))
+    const WALLET = svgOf(
+      rectOf('2.5', '3.5', '11', '9.5', '1.5') +
+      pathOf('M13.5 7.4h-2.1a1.6 1.6 0 0 0 0 3.2h2.1'))
     const FALLBACK = [SPARK, LAYERS, TAG, GRID]
 
     // 内置 glyph 名称表:声明值可用名称引用内置图形,避免跨插件复制 svg。
@@ -396,6 +399,7 @@ window.__ModuleLoader__.load({
       archive: ARCHIVE, spark: SPARK, layers: LAYERS, tag: TAG, grid: GRID,
       git: GIT, search: SEARCH, term: TERM, chart: CHART, code: CODE, doc: DOC,
       db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
+      wallet: WALLET,
     }
 
     // 声明值解析与安全门:svg 须完整开标签(大小写不敏感)且单根闭合(首个 </svg>
@@ -438,6 +442,7 @@ window.__ModuleLoader__.load({
       ['database|sqlite|redis|cache|db', DB],
       ['session|archive|history', ARCHIVE],
       ['usage|stat|meter|monitor|radar|metric', CHART],
+      ['wallet|balance|money|coin|fund', WALLET],
       ['flow|workflow|pipeline|task|job|queue', FLOW],
       ['auth|login|pass|secret|token|lock|guard|crypt', SHIELD],
       ['mcp', MCP],
