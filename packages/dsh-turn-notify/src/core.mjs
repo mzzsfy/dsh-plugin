@@ -283,8 +283,8 @@ export function decideClaim({ stored, done, now, windowId, lockTtlMs = CLAIM_LOC
 export const USER_IDLE_AWAY_MS = 5 * 60 * 1000
 
 // 呈现通道名单:事件→通道路由(kindRoutes)的合法取值;host 直发通道
-// (webhook/im)由 host 侧过滤,投影单元携带 routes 供浏览器侧过滤呈现通道。
-export const CHANNELS = ['sound', 'system', 'toast', 'blink', 'webhook', 'im']
+// (webhook/im/host)由 host 侧过滤,投影单元携带 routes 供浏览器侧过滤呈现通道。
+export const CHANNELS = ['sound', 'system', 'toast', 'blink', 'webhook', 'im', 'host']
 
 // 发声通道判定:页内提示、提示音与系统弹窗各自独立开关,聚焦静默仅压声音与系统弹窗;
 // 提示音另受分类配置约束:soundCategories 中该分类显式 false 即静音,缺省键与空分类放行。
@@ -496,6 +496,100 @@ export async function sendWebhook({ url, payload, fetchImpl = fetch }) {
 
 const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 
+// 宿主桌面通知 spawn 超时:与 webhook 同语义,超时强杀不重试
+export const HOST_NOTIFY_TIMEOUT_MS = 10 * 1000
+
+// 回环判定:IPv6 环回、IPv4 环回与 IPv4 映射形态的 IPv4 环回;空与非法为假。
+// 回环来源的浏览器窗口即与宿主同机,是本机去重的判定依据
+export function isLoopbackAddress(address) {
+  if (typeof address !== 'string' || address.length === 0) return false
+  return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.')
+}
+
+// 宿主通知决策:总开关与回退开关共用同一让位判定——本机(回环)浏览器窗口在
+// 在场窗口内轮询过即视为在线,宿主让位给浏览器呈现(同机去重);本机浏览器
+// 不在线(全关或仅远程浏览器)时宿主弹。两开关均关不弹。
+export function hostNotifyWanted({ hostNotify, hostNotifyFallback, localClientSeenAt, now, windowMs }) {
+  if (hostNotify !== true && hostNotifyFallback !== true) return false
+  const localPresent = typeof localClientSeenAt === 'number' && localClientSeenAt > 0 && now - localClientSeenAt <= windowMs
+  return !localPresent
+}
+
+// 本机浏览器轮询判定:回环来源 + 长轮询续传形态(带 cursor)+ fetch 请求形态
+// + Origin 对账。投影为无守卫 GET,记账须排除可伪造在场的形态:no-cors(img
+// 跨站探活)、无 cursor 的手工探测、跨源 fetch(同机恶意网页,sec-fetch-mode
+// 同为 cors 无法区分,凭 Origin 与 Host 不符识别;同源 GET fetch 不带 Origin,
+// 无 Origin 放行,旧浏览器同样覆盖)
+export function isLocalBrowserPoll({ remoteAddress, hasCursor, secFetchMode, origin, host }) {
+  if (!isLoopbackAddress(remoteAddress)) return false
+  if (hasCursor !== true) return false
+  if (secFetchMode !== undefined && secFetchMode !== 'cors') return false
+  if (typeof origin === 'string' && origin.length > 0) {
+    try {
+      if (new URL(origin).host !== host) return false
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+// 文本规整:换行压平为空格,防命令行参数与通知文案中的换行歧义
+const flattenNotifyText = (text) => String(text).replace(/[\r\n]+/g, ' ')
+
+// AppleScript 字符串字面量:反斜杠与双引号转义
+const appleScriptQuote = (text) => '"' + flattenNotifyText(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+
+// PowerShell 单引号字符串字面量:单引号加倍
+const powerShellQuote = (text) => "'" + flattenNotifyText(text).replace(/'/g, "''") + "'"
+
+// Windows toast 的调用方标识:未打包进程借用系统 PowerShell 的 AppUserModelId,
+// 缺此注册标识 toast 不展示
+const WINDOWS_POWERSHELL_AUMID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+// 平台命令构造:零依赖 spawn 所需的可执行文件与参数;未知平台返回 null。
+// darwin 走 AppleScript 通知,linux 走 libnotify,win32 走 WinRT toast 双行模板
+export function hostNotifyCommand(platform, title, body) {
+  if (platform === 'darwin') {
+    return { file: 'osascript', args: ['-e', 'display notification ' + appleScriptQuote(body) + ' with title ' + appleScriptQuote(title)] }
+  }
+  if (platform === 'linux') {
+    // '--' 终结选项解析:正文(回答前缀)以 '-' 开头时防被 getopt 误作选项簇
+    return { file: 'notify-send', args: ['--', flattenNotifyText(title), flattenNotifyText(body)] }
+  }
+  if (platform === 'win32') {
+    const script = [
+      '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+      '$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)',
+      "$e = $t.GetElementsByTagName('text')",
+      '$e.Item(0).AppendChild($t.CreateTextNode(' + powerShellQuote(title) + ')) | Out-Null',
+      '$e.Item(1).AppendChild($t.CreateTextNode(' + powerShellQuote(body) + ')) | Out-Null',
+      '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(' + powerShellQuote(WINDOWS_POWERSHELL_AUMID) + ').Show([Windows.UI.Notifications.ToastNotification]::new($t))',
+    ].join('; ')
+    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', script] }
+  }
+  return null
+}
+
+// 宿主桌面通知:spawn 平台命令并等待退出,真实结果返回;超时强杀,失败即弃
+// 不重试(fire-and-forget,与 webhook 同语义)。execFileImpl 须为注入的
+// node:child_process execFile,保持纯逻辑层可测。
+export async function sendHostNotify({ title, body, platform, execFileImpl }) {
+  const command = hostNotifyCommand(platform, title, body)
+  if (command === null) return { ok: false, detail: '不支持的平台: ' + String(platform) }
+  try {
+    await new Promise((resolve, reject) => {
+      execFileImpl(command.file, command.args, { timeout: HOST_NOTIFY_TIMEOUT_MS, windowsHide: true }, (error) => {
+        if (error) reject(error)
+        else resolve()
+      })
+    })
+    return { ok: true, detail: '已触发宿主通知' }
+  } catch (error) {
+    return { ok: false, detail: error && error.message ? error.message : String(error) }
+  }
+}
+
 // imTargets 读侧归一化:非数组回空,剔除形态非法项,仅保留两字段
 export function normalizeImTargets(raw) {
   if (!Array.isArray(raw)) return []
@@ -541,7 +635,7 @@ export function imBoundBotIds(list) {
 // 返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'kindRoutes']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'kindRoutes', 'hostNotify', 'hostNotifyFallback']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -593,6 +687,14 @@ export function validateConfigPatch(patch) {
   if ('suppressSubagentWake' in patch) {
     if (typeof patch.suppressSubagentWake !== 'boolean') return { ok: false, reason: 'suppressSubagentWake 须为布尔' }
     next.suppressSubagentWake = patch.suppressSubagentWake
+  }
+  if ('hostNotify' in patch) {
+    if (typeof patch.hostNotify !== 'boolean') return { ok: false, reason: 'hostNotify 须为布尔' }
+    next.hostNotify = patch.hostNotify
+  }
+  if ('hostNotifyFallback' in patch) {
+    if (typeof patch.hostNotifyFallback !== 'boolean') return { ok: false, reason: 'hostNotifyFallback 须为布尔' }
+    next.hostNotifyFallback = patch.hostNotifyFallback
   }
   if ('enabled' in patch) {
     const enabled = patch.enabled
@@ -657,6 +759,8 @@ export function resolvedConfig(settings) {
     minTurnDurationMs: duration,
     rootsOnly: source.rootsOnly !== false,
     suppressSubagentWake: source.suppressSubagentWake !== false,
+    hostNotify: source.hostNotify === true,
+    hostNotifyFallback: source.hostNotifyFallback === true,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
@@ -671,6 +775,8 @@ export function publicConfig(settings) {
     minTurnDurationMs: resolved.minTurnDurationMs,
     rootsOnly: resolved.rootsOnly,
     suppressSubagentWake: resolved.suppressSubagentWake,
+    hostNotify: resolved.hostNotify,
+    hostNotifyFallback: resolved.hostNotifyFallback,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,

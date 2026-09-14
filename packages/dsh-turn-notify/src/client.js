@@ -1016,6 +1016,8 @@ window.__ModuleLoader__.load({
       minTurnDurationMs: 5 * 1000,
       rootsOnly: true,
       suppressSubagentWake: true,
+      hostNotify: false,
+      hostNotifyFallback: false,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
       imTargets: [],
     }
@@ -1368,7 +1370,7 @@ window.__ModuleLoader__.load({
           if (raw.length === 0) throw new Error('最短回合时长不能为空')
           const trimmedUrl = urlDraft.trim()
           // 所见即所存:输入框即配置值,清空并保存即禁用 webhook 通道
-          const patchBody = { webhookUrl: trimmedUrl, minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake }
+          const patchBody = { webhookUrl: trimmedUrl, minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, hostNotify: config.hostNotify, hostNotifyFallback: config.hostNotifyFallback }
           const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
           if (res.soundMapping) setMappingState(res.soundMapping)
@@ -1463,6 +1465,16 @@ window.__ModuleLoader__.load({
             patch('未收到浏览器显示回执:请检查 Windows 设置 > 通知 中浏览器的通知权限,以及专注助手 / 勿扰是否拦截', 'error')
           }, SYSTEM_SHOW_TIMEOUT_MS)
         }, SYSTEM_TEST_DELAY_MS)
+      }
+
+      // 宿主桌面通知通道单独测试:等待 spawn 结束,真实结果随响应返回
+      async function testHostNotify() {
+        try {
+          const result = await api('/api/turn-notify/test-host', { method: 'POST' })
+          patch(result.ok ? '宿主通知已触发(' + result.detail + ')' : '宿主通知失败:' + result.detail, result.ok ? 'ok' : 'error')
+        } catch (error) {
+          patch('发送失败:' + (error && error.message ? error.message : String(error)), 'error')
+        }
       }
 
       async function testWebhook() {
@@ -1611,7 +1623,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'tn-panel' },
         h('div', { className: 'tn-head' },
           h('span', { className: 'tn-head__title' }, '消息通知'),
-          h('span', { className: 'tn-head__hint' }, '保存即生效;标签页全关时仅 webhook 与 IM 送达'),
+          h('span', { className: 'tn-head__hint' }, '保存即生效;标签页全关时仅 webhook、IM 与宿主通知(如开启)送达'),
         ),
         h('div', { className: 'tn-tabs', role: 'tablist' },
           tabs.map((item) => h('button', {
@@ -1664,6 +1676,20 @@ window.__ModuleLoader__.load({
                 }),
                 ' 后台委托未收尾或收尾唤醒的回合不通知(仅完成类)'),
             ]),
+            field('宿主通知', [
+              h('label', { className: 'tn-meta tn-switch', title: '通知触发时由宿主进程弹系统级桌面通知(osascript/notify-send/PowerShell toast),不依赖浏览器;与本机浏览器去重:与本机同机的浏览器窗口在线时让位给浏览器呈现,本机浏览器全关或仅远程浏览器在线时才弹' },
+                ...switchToggle({
+                  checked: config.hostNotify,
+                  onChange: (e) => setConfig({ ...config, hostNotify: e.target.checked }),
+                }),
+                ' 宿主机弹桌面通知(本机浏览器在线时让位)'),
+              h('label', { className: 'tn-meta tn-switch', title: '仅当本机没有任何浏览器窗口在线接收通知时,宿主进程才弹桌面通知;总开关开启时本开关冗余' },
+                ...switchToggle({
+                  checked: config.hostNotifyFallback,
+                  onChange: (e) => setConfig({ ...config, hostNotifyFallback: e.target.checked }),
+                }),
+                ' 仅当本机无浏览器接收时补位'),
+            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器窗口以回环地址访问宿主即视为本机,远程浏览器的通知弹在远程设备,不与本机重复。需点保存生效,测试页可逐条点火验证。'),
             field('事件分类', h('div', { className: 'tn-pills' },
               CATEGORIES.map((category) => h('span', {
                 className: 'tn-pill' + (config.enabled[category] ? ' tn-pill--on' : ''),
@@ -1964,6 +1990,7 @@ window.__ModuleLoader__.load({
               }, '测试声音'),
               h('button', { className: 'tn-btn', title: '弹出一条页内卡片;页内提示音已开启时随卡片补一声(点火测试,不经分类静音约束)', onClick: testPageNotification }, '测试页内通知'),
               h('button', { className: 'tn-btn', title: '弹一条系统通知验证授权与送达;未授权会先引导授权', onClick: testSystemNotification }, '测试系统通知'),
+              h('button', { className: 'tn-btn', title: '由宿主进程弹一条系统级桌面通知(osascript/notify-send/PowerShell toast),验证宿主通道可用性;弹在宿主所在机器', onClick: () => void testHostNotify() }, '测试宿主通知'),
               h('button', { className: 'tn-btn', title: '向已配置的 webhook 发送真实测试事件,回执显示投递结果;未配置时提示失败', onClick: () => void testWebhook() }, '测试 webhook'),
               config.imAvailable ? h('button', { className: 'tn-btn', disabled: busy, title: '向全部已配置目标发送真实测试事件,逐目标显示结果', onClick: () => void testIm() }, '测试 IM 通知') : null,
             ),
