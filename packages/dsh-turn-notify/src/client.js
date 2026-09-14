@@ -35,9 +35,9 @@ window.__ModuleLoader__.load({
     // 显示回执等待上限:超时未回执按环境层拦截给出诊断
     const SYSTEM_SHOW_TIMEOUT_MS = 3 * 1000
 
-    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → bell);
-    // 该插件未就绪时入队,由其启动时排空
-    const NAV_ICON = { '消息通知': 'bell' }
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场
+    // 短名(发现页收录显示形态);该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '消息通知': 'bell', 'dsh-turn-notify': 'bell' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
@@ -277,7 +277,8 @@ window.__ModuleLoader__.load({
     // 放入 LOGIC 段由 parity 测试保证双实现不漂移
     const IDLE_AWAY_MS = 5 * 60 * 1000
 
-    // routes 为事件→通道路由放行名单(null=未配置全放行),语义与 core 同源
+    // routes 为事件→通道路由放行名单(null=未配置全放行),语义与 core 同源。
+    // 宿主通知去重由浏览器优先模型承载:本机浏览器在场时宿主让位,本窗口照常弹系统通知
     function chooseChannels(hasFocus, permission, idleMs, soundCategories, category, routes) {
       const idleAway = typeof idleMs === 'number' && idleMs >= IDLE_AWAY_MS
       const quiet = hasFocus && localGet(KEY_DND) !== '0' && !idleAway
@@ -1677,19 +1678,19 @@ window.__ModuleLoader__.load({
                 ' 后台委托未收尾或收尾唤醒的回合不通知(仅完成类)'),
             ]),
             field('宿主通知', [
-              h('label', { className: 'tn-meta tn-switch', title: '通知触发时由宿主进程弹系统级桌面通知(osascript/notify-send/PowerShell toast),不依赖浏览器;与本机浏览器去重:与本机同机的浏览器窗口在线时让位给浏览器呈现,本机浏览器全关或仅远程浏览器在线时才弹' },
+              h('label', { className: 'tn-meta tn-switch', title: '通知触发时由宿主进程弹系统级桌面通知(osascript/notify-send/PowerShell toast);浏览器优先:本机有浏览器窗口在线(2 秒内有在途长轮询)时由浏览器呈现,宿主不重复弹;本机无浏览器(标签页全关或仅远程浏览器)时宿主弹' },
                 ...switchToggle({
                   checked: config.hostNotify,
                   onChange: (e) => setConfig({ ...config, hostNotify: e.target.checked }),
                 }),
-                ' 宿主机弹桌面通知(本机浏览器在线时让位)'),
-              h('label', { className: 'tn-meta tn-switch', title: '仅当本机没有任何浏览器窗口在线接收通知时,宿主进程才弹桌面通知;总开关开启时本开关冗余' },
+                ' 宿主机弹桌面通知'),
+              h('label', { className: 'tn-meta tn-switch', title: '本机浏览器在场(2 秒内有在途长轮询)时由浏览器呈现,离场时宿主补位桌面通知;与总开关判定一致,任一开启即生效' },
                 ...switchToggle({
                   checked: config.hostNotifyFallback,
                   onChange: (e) => setConfig({ ...config, hostNotifyFallback: e.target.checked }),
                 }),
                 ' 仅当本机无浏览器接收时补位'),
-            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器窗口以回环地址访问宿主即视为本机,远程浏览器的通知弹在远程设备,不与本机重复。需点保存生效,测试页可逐条点火验证。'),
+            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器优先——本机浏览器在线时由浏览器呈现,宿主不重复弹,离场(2 秒内无在途长轮询)时宿主补位,边界情况(窗口边界与网络抖动)宁重复不漏。需点保存生效,测试页可逐条点火验证。'),
             field('事件分类', h('div', { className: 'tn-pills' },
               CATEGORIES.map((category) => h('span', {
                 className: 'tn-pill' + (config.enabled[category] ? ' tn-pill--on' : ''),
