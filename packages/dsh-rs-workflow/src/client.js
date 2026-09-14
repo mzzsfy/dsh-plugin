@@ -15,6 +15,13 @@ window.__ModuleLoader__.load({
     const TEXT_PREVIEW_CHARS = 300
     const AUTO_REFRESH_KEY = 'rsww:auto-refresh'
 
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → flow);
+    // 该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '若水工作流': 'flow' }
+    if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+    else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+    else window.__navicIconQueue = [NAV_ICON]
+
     const STATUS_META = {
       running: { label: '运行中', tone: 'run' },
       done: { label: '已完成', tone: 'ok' },

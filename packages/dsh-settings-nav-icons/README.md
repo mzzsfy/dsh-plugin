@@ -59,7 +59,7 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 - 声明持久化在 `window.__navicIconDeclarations`:本插件 client 半区热重载会重跑工厂而生产者不重发注册,持久层让重装实例恢复声明,页面刷新随 window 释放。
 - 污染面收敛在 `window.__navicIcons` 单一命名空间,插件卸载时移除 API、取消已排定的重绘、队列恢复数组形态——卸载后生产者按上方「方式二」入队等待下一实例,不再驱动 DOM 改写;重载页面后全部还原为官方图标。
 
-本仓库自有插件的分区图标即全部走此机制:usage-panel(账号余额 → plan)、turn-notify(消息通知 → bell)、maintain(版本与运维 → wrench)、session-manager(会话归档 → archive);四包的注册样板由本包测试做契约锁定。
+本仓库自有插件的分区图标即全部走此机制:usage-panel(账号余额 → plan)、turn-notify(消息通知 → bell)、maintain(版本与运维 → wrench)、session-manager(会话归档 → archive)、rs-workflow(若水工作流 → flow);五包的注册样板由本包测试做契约锁定。
 
 ## 内置映射表
 

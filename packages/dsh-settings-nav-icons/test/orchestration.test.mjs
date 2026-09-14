@@ -740,10 +740,10 @@ test('用户覆盖:非 nav 单元格右键不弹浮层', () => {
   }
 })
 
-// 声明侧契约:四个生产者包的注册样板(先探测入口、数组态入队),改契约须同步五处。
+// 声明侧契约:五个生产者包的注册样板(先探测入口、数组态入队),改契约须同步六处。
 // 包脱离 monorepo 布局(发布态)时跳过:无兄弟包源码可读。
-test('生产者样板契约:四包注册走 __navicIcons/__navicIconQueue', () => {
-  const producers = ['dsh-session-manager', 'dsh-usage-panel', 'dsh-turn-notify', 'dsh-maintain']
+test('生产者样板契约:五包注册走 __navicIcons/__navicIconQueue', () => {
+  const producers = ['dsh-session-manager', 'dsh-usage-panel', 'dsh-turn-notify', 'dsh-maintain', 'dsh-rs-workflow']
   let checked = 0
   for (const pkg of producers) {
     const clientPath = join(PKG_ROOT, '..', pkg, 'src', 'client.js')
