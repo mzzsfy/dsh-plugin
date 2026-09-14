@@ -16,9 +16,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useRef, useSyncExternalStore } = React
 
-    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → archive);
-    // 该插件未就绪时入队,由其启动时排空
-    const NAV_ICON = { '会话归档': 'archive' }
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场
+    // 短名(发现页收录显示形态);该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '会话归档': 'archive', 'dsh-session-manager': 'archive' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
