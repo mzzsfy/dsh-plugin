@@ -3,6 +3,14 @@
 // 背景见 README「实现边界」:settings.* 子槽声明权被原版条目占用,
 // 接管 Shell 不可行,DOM 观察是唯一不依赖官方契约变更的路径。
 
+// 本插件市场短名自画像:经同一套声明机制注册(先于 load,渲染端同文件就绪)
+if (typeof window !== 'undefined') {
+  const NAV_ICON = { 'dsh-settings-nav-icons': 'tune' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+}
+
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-settings-nav-icons',
   factory(require) {

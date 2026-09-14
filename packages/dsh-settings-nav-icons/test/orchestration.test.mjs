@@ -300,11 +300,12 @@ test('启动样式代际:HMR 不卸载重评估由新实例代拆,旧形槽跨�
 test('registerIcons 输入校验:数组与空值拒收', () => {
   const { win, doc, raf } = loadClient()
   const unload = boot(win.__loaded, doc)
+  raf.flush() // 排空启动期自声明的重贴,后续断言只看本次入参的增量
   try {
     win.__navicIcons.register(['bell'])
     win.__navicIcons.register(null)
     win.__navicIcons.register('bell')
-    assert.deepEqual(Object.keys(win.__navicIconDeclarations ?? {}), [], '非法入参不写入注册表')
+    assert.deepEqual(Object.keys(win.__navicIconDeclarations ?? {}), ['dsh-settings-nav-icons'], '非法入参不写入注册表(仅启动期自声明在场)')
     assert.equal(raf.size(), 0, '非法入参不触发重贴')
     assert.equal(doc.marked.length, 0)
   } finally {
@@ -402,6 +403,7 @@ test('队列时序:畸形条目不中断排空,同键后者覆盖,排空先于�
 test('卸载:__navicIcons 删除,rAF 取消,异常不外抛', () => {
   const { win, doc, raf } = loadClient()
   const unload = boot(win.__loaded, doc)
+  raf.flush() // 排空启动期自声明的重贴,断言只看本次注册的增量
   win.__navicIcons.register({ bell: 'bell' })
   assert.equal(raf.size(), 1, '重贴已排定')
   unload()
@@ -536,6 +538,7 @@ test('头像槽换名:重贴清行内旧注入(父容器范围),外来兄弟不�
 test('rAF 合批:同一帧内多次 register 只排一帧,flush 后重新排定', () => {
   const { win, doc, raf } = loadClient()
   const unload = boot(win.__loaded, doc)
+  raf.flush() // 排空启动期自声明的重贴,断言只看本次注册的增量
   try {
     win.__navicIcons.register({ a: 'bell' })
     win.__navicIcons.register({ b: 'wrench' })
@@ -567,6 +570,7 @@ test('replacePass 逐项异常隔离:单项失败不中断其余', () => {
 test('onMutations 过滤:元素级变更唤醒,文本节点与域外文本不唤醒', () => {
   const { win, doc, raf, observers } = loadClient()
   const unload = boot(win.__loaded, doc)
+  raf.flush() // 排空启动期自声明的重贴,断言只看本次变更的增量
   try {
     const observer = observers[observers.length - 1]
     const inCellText = { parentElement: { closest(sel) { return sel.includes('navCell') ? {} : null } } }
@@ -740,10 +744,12 @@ test('用户覆盖:非 nav 单元格右键不弹浮层', () => {
   }
 })
 
-// 声明侧契约:五个生产者包的注册样板(先探测入口、数组态入队),改契约须同步六处。
+// 声明侧契约:全部生产者包的注册样板(先探测入口、数组态入队),改契约须同步全部生产者。
 // 包脱离 monorepo 布局(发布态)时跳过:无兄弟包源码可读。
-test('生产者样板契约:五包注册走 __navicIcons/__navicIconQueue', () => {
-  const producers = ['dsh-session-manager', 'dsh-usage-panel', 'dsh-turn-notify', 'dsh-maintain', 'dsh-rs-workflow']
+test('生产者样板契约:全包注册走 __navicIcons/__navicIconQueue', () => {
+  const producers = ['dsh-session-manager', 'dsh-usage-panel', 'dsh-turn-notify', 'dsh-maintain', 'dsh-rs-workflow',
+    'dsh-usage-dash', 'dsh-cron-board', 'dsh-think-expand', 'dsh-model-capability-editor', 'dsh-settings-nav-icons',
+    'dsh-auto-trust-all', 'dsh-llm-pi-gateway']
   let checked = 0
   for (const pkg of producers) {
     const clientPath = join(PKG_ROOT, '..', pkg, 'src', 'client.js')

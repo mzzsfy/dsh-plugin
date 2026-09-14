@@ -59,7 +59,7 @@ window.__navicIcons.register({ '消息通知': 'bell' })
 - 声明持久化在 `window.__navicIconDeclarations`:本插件 client 半区热重载会重跑工厂而生产者不重发注册,持久层让重装实例恢复声明,页面刷新随 window 释放。
 - 污染面收敛在 `window.__navicIcons` 单一命名空间,插件卸载时移除 API、取消已排定的重绘、队列恢复数组形态——卸载后生产者按上方「方式二」入队等待下一实例,不再驱动 DOM 改写;重载页面后全部还原为官方图标。
 
-本仓库自有插件的分区图标即全部走此机制:usage-panel(账号余额 → wallet)、usage-dash(使用统计/Usage → gauge)、turn-notify(消息通知 → bell)、maintain(版本与运维 → wrench)、session-manager(会话归档 → archive)、rs-workflow(若水工作流 → flow);各包的注册样板由本包测试做契约锁定。
+本仓库全部插件包(含本包自画像与仅 host 半区的包)都走此机制显式声明,不依赖关键词/哈希推导;键为「分区 label + 市场短名」双形态:usage-panel(账号余额、dsh-usage-panel → wallet)、usage-dash(使用统计/Usage、dsh-usage-dash → gauge)、turn-notify(消息通知、dsh-turn-notify → bell)、maintain(版本与运维、dsh-maintain → wrench)、session-manager(会话归档、dsh-session-manager → archive)、rs-workflow(若水工作流、dsh-rs-workflow → flow)、cron-board(dsh-cron-board → plan)、think-expand(dsh-think-expand → spark)、model-capability-editor(dsh-model-capability-editor → cube)、auto-trust-all(dsh-auto-trust-all → shield)、llm-pi-gateway(dsh-llm-pi-gateway → globe)、settings-nav-icons(dsh-settings-nav-icons → tune);仅 host 半区的 auto-trust-all 与 llm-pi-gateway 为声明专设最小 client 半区。注册样板由本包测试做契约锁定。
 
 ## 内置映射表
 
