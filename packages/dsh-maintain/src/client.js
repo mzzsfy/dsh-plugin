@@ -23,9 +23,9 @@ window.__ModuleLoader__.load({
       else console.warn('[dsh-maintain] ' + text)
     }
 
-    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染(本插件分区 → wrench);
-    // 该插件未就绪时入队,由其启动时排空
-    const NAV_ICON = { '版本与运维': 'wrench' }
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场
+    // 短名(发现页收录显示形态);该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { '版本与运维': 'wrench', 'dsh-maintain': 'wrench' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
