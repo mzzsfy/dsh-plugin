@@ -12,6 +12,7 @@
  * 拒绝决策本身同步返回,不阻塞消息面。
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
@@ -140,7 +141,33 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 		if (errors.length > 0) throw new Error("flow.json5 校验失败:\n- " + errors.join("\n- "));
 	}
 	// 在飞编排账本:同一会话同一时刻至多一个 run(pre-step 串行化依赖单线程语义)
-	const active = new Map(); // agent.id → runId
+	const active = new Map(); // agent.id → { runId, turn }
+	/** 会话流坐标(持久化校验 turn/step 必须为正数,0 或缺省会导致回合落盘失败) */
+	const lastTurn = new Map(); // agent.id → 最后一次拦截见到的 turn
+
+	/** 向会话流写一条用户可见的系统消息。pre-step reject 不产生任何模型记录,
+	 *  没有它被拦截会话在 GUI 里完全空白(消息石沉大海)。失败只降级不影响拦截。 */
+	function note(agent, turn, step, text) {
+		const safeTurn = Number.isInteger(turn) && turn > 0 ? turn : lastTurn.get(agent.id);
+		if (!Number.isInteger(safeTurn) || safeTurn <= 0) {
+			ctx.logger?.warn?.("rs-workflow 会话提示缺少有效 turn,跳过会话流写入");
+			return;
+		}
+		try {
+			agent.session.append("system/message", {
+				turn: safeTurn,
+				step: Number.isInteger(step) && step > 0 ? step : 1,
+				message: {
+					id: randomUUID(),
+					role: "system",
+					source: { kind: "plugin", plugin: "@mzzsfy/dsh-rs-workflow" },
+					content: [{ type: "text", text }],
+				},
+			}, { surfaceOp: "append" });
+		} catch (error) {
+			ctx.logger?.warn?.(`rs-workflow 会话提示写入失败: ${error?.message ?? error}`);
+		}
+	}
 
 	// pre-step 拦截:行激活于 agent realm,事件自动 scoped 到本会话 agent。
 	// 只拦截主会话 agent(会话头无 parentSession);子代理(planner/executor/reviewer)
@@ -170,18 +197,21 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 				.join("\n");
 			if (text === "") return next();
 			if (active.has(agent.id)) {
-				const runId = active.get(agent.id);
-				store.appendNode({ runId, nodeId: "inbox", status: "ignored", summary: "运行期间追加消息已忽略: " + text.slice(0, 80) }).catch(() => {});
+				const entry = active.get(agent.id);
+				store.appendNode({ runId: entry.runId, nodeId: "inbox", status: "ignored", summary: "运行期间追加消息已忽略: " + text.slice(0, 80) }).catch(() => {});
+				note(agent, payload.turn, payload.step, "若水编排进行中,该消息已忽略(完成后可继续提交)。");
 				return { kind: "reject" };
 			}
-			startRun(agent, text).catch((error) => {
+			startRun(agent, text, payload.turn).catch((error) => {
 				ctx.logger?.error?.(`rs-workflow 编排启动失败: ${error?.stack ?? error?.message ?? error}`);
+				note(agent, payload.turn, payload.step, "若水编排启动失败: " + String(error?.message ?? error).slice(0, 200));
 			});
+			note(agent, payload.turn, payload.step, "若水编排已接管本请求(模式: " + (kind === "flow" ? flow?.id || "flow" : "协作编码") + "),进度见工作流看板。");
 			return { kind: "reject" };
 		}), "rs-workflow takeover pre-step");
 	});
 
-	async function startRun(agent, request) {
+	async function startRun(agent, request, turn) {
 		const settings = readSettings(ctx);
 		const flows = kind === "flow" ? discoverFlowRegistry(home) : {};
 		if (kind === "flow" && flow) flows[flow.id] = flow;
@@ -204,7 +234,8 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 			subagentProvider: "spawn",
 		});
 		const runId = String(run.id);
-		active.set(agent.id, runId);
+		active.set(agent.id, { runId, turn });
+		lastTurn.set(agent.id, turn);
 		const storeRun = await store.start({ runId, workspace, request, templateId: kind === "flow" ? "flow:" + flow.id : "collab" });
 		run.result.then((result) => {
 			active.delete(agent.id);
@@ -213,10 +244,12 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 				? summarizeFlowResult(result.value)
 				: String((result && result.error) || "编排异常结束").slice(0, 300);
 			store.finish({ runId, ok, result: (result && result.value) || null, summary, blocked: ok ? null : { reason: summary } }).catch(() => {});
+			note(agent, turn, null, ok ? "若水编排完成: " + summary : "若水编排未完成: " + summary);
 		}).catch((error) => {
 			active.delete(agent.id);
 			const reason = "编排异常: " + String(error?.message ?? error).slice(0, 300);
 			store.finish({ runId, ok: false, summary: reason, blocked: { reason } }).catch(() => {});
+			note(agent, turn, null, "若水编排失败: " + reason);
 		});
 		return storeRun;
 	}
