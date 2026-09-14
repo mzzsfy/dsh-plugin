@@ -20,19 +20,20 @@ const soundsDir = join(homeRoot, '.dsh', 'dsh-turn-notify', 'sounds')
 const JSON_HEADERS = { 'content-type': 'application/json' }
 const WAV_BYTES = Buffer.from([1, 2, 3, 4])
 
+// res 桩带事件能力:投影处理器挂 close 事件感知断连,桩须支持 once
 function makeRes() {
-  return {
-    status: null,
-    body: null,
-    raw: null,
-    headers: null,
-    writeHead(status, headers) { this.status = status; this.headers = headers },
-    end(body) {
-      if (Buffer.isBuffer(body)) this.raw = body
-      else if (typeof body === 'string' && (this.headers ? String(this.headers['content-type']) : '').includes('json')) this.body = JSON.parse(body)
-      else this.raw = body
-    },
+  const res = new EventEmitter()
+  res.status = null
+  res.body = null
+  res.raw = null
+  res.headers = null
+  res.writeHead = (status, headers) => { res.status = status; res.headers = headers }
+  res.end = (body) => {
+    if (Buffer.isBuffer(body)) res.raw = body
+    else if (typeof body === 'string' && (res.headers ? String(res.headers['content-type']) : '').includes('json')) res.body = JSON.parse(body)
+    else res.raw = body
   }
+  return res
 }
 
 function makeReq(method, payload, headers, url) {

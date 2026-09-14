@@ -6,13 +6,14 @@ import { EventEmitter } from 'node:events'
 
 import { apply } from '../src/index.js'
 
+// res 桩带事件能力:投影处理器挂 close 事件感知断连,桩须支持 once
 function makeRes() {
-  return {
-    status: null,
-    body: null,
-    writeHead(status) { this.status = status },
-    end(body) { this.body = JSON.parse(body) },
-  }
+  const res = new EventEmitter()
+  res.status = null
+  res.body = null
+  res.writeHead = (status) => { res.status = status }
+  res.end = (body) => { res.body = JSON.parse(body) }
+  return res
 }
 
 function makeReq(method, payload, headers) {

@@ -11,6 +11,7 @@ import {
   hostNotifyCommand,
   hostNotifyWanted,
   isLocalBrowserPoll,
+  isLocalBrowserPresent,
   isLoopbackAddress,
   publicConfig,
   resolvedConfig,
@@ -58,33 +59,41 @@ test('Given Origin 缺席或与 Host 一致 When 判定 Then 为真;跨源或畸
   assert.equal(isLocalBrowserPoll({ ...base, origin: 'not a url', host: '127.0.0.1:3080' }), false, '畸形 Origin 不放行')
 })
 
-// ---- hostNotifyWanted:去重让位 + 回退,判定粒度为宿主本机 ----
+// ---- hostNotifyWanted:浏览器优先,在场让位、离场补位;重复只发生在边界情况 ----
 
 const NOW = 1000 * 1000
-const WINDOW_MS = 30 * 1000
+const WINDOW_MS = 2 * 1000
 
-test('Given 总开关开且本机浏览器在窗口内在线 When 决策 Then 不弹(去重让位)', () => {
-  assert.equal(hostNotifyWanted({ hostNotify: true, localClientSeenAt: NOW - 10 * 1000, now: NOW, windowMs: WINDOW_MS }), false)
+test('Given 任一开关开且本机浏览器不在场 When 决策 Then 弹', () => {
+  assert.equal(hostNotifyWanted({ hostNotify: true, localBrowserPresent: false }), true)
+  assert.equal(hostNotifyWanted({ hostNotifyFallback: true, localBrowserPresent: false }), true)
+  assert.equal(hostNotifyWanted({ hostNotify: true, hostNotifyFallback: true, localBrowserPresent: false }), true)
 })
 
-test('Given 总开关开且本机浏览器超窗或从未在场 When 决策 Then 弹', () => {
-  assert.equal(hostNotifyWanted({ hostNotify: true, localClientSeenAt: NOW - WINDOW_MS - 1, now: NOW, windowMs: WINDOW_MS }), true)
-  assert.equal(hostNotifyWanted({ hostNotify: true, localClientSeenAt: 0, now: NOW, windowMs: WINDOW_MS }), true)
-  assert.equal(hostNotifyWanted({ hostNotify: true, localClientSeenAt: undefined, now: NOW, windowMs: WINDOW_MS }), true)
-})
-
-test('Given 回退开关开 When 本机浏览器在场 Then 不弹;不在场 Then 弹', () => {
-  assert.equal(hostNotifyWanted({ hostNotifyFallback: true, localClientSeenAt: NOW - 10 * 1000, now: NOW, windowMs: WINDOW_MS }), false)
-  assert.equal(hostNotifyWanted({ hostNotifyFallback: true, localClientSeenAt: 0, now: NOW, windowMs: WINDOW_MS }), true)
+test('Given 任一开关开且本机浏览器在场 When 决策 Then 让位不弹(浏览器优先,正常路径零重复)', () => {
+  assert.equal(hostNotifyWanted({ hostNotify: true, localBrowserPresent: true }), false)
+  assert.equal(hostNotifyWanted({ hostNotifyFallback: true, localBrowserPresent: true }), false)
+  assert.equal(hostNotifyWanted({ hostNotify: true, hostNotifyFallback: true, localBrowserPresent: true }), false)
 })
 
 test('Given 两开关均关 When 决策 Then 恒不弹', () => {
-  assert.equal(hostNotifyWanted({ localClientSeenAt: 0, now: NOW, windowMs: WINDOW_MS }), false)
-  assert.equal(hostNotifyWanted({ hostNotify: false, hostNotifyFallback: false, localClientSeenAt: 0, now: NOW, windowMs: WINDOW_MS }), false)
+  assert.equal(hostNotifyWanted({ localBrowserPresent: false }), false)
+  assert.equal(hostNotifyWanted({ hostNotify: false, hostNotifyFallback: false, localBrowserPresent: false }), false)
 })
 
-test('Given 两开关均开且本机浏览器在场 When 决策 Then 让位不弹', () => {
-  assert.equal(hostNotifyWanted({ hostNotify: true, hostNotifyFallback: true, localClientSeenAt: NOW - 10 * 1000, now: NOW, windowMs: WINDOW_MS }), false)
+// ---- isLocalBrowserPresent:在场 = 有在途长轮询,或宽限窗口内有活动 ----
+
+test('Given 在途长轮询存在 When 判定在场 Then 为真(时间戳过期不影响)', () => {
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 1, lastSeenAt: NOW - WINDOW_MS - 1, now: NOW, windowMs: WINDOW_MS }), true)
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 3, lastSeenAt: 0, now: NOW, windowMs: WINDOW_MS }), true)
+})
+
+test('Given 无在途 When 判定在场 Then 最近活动在窗口内为真,超窗或从未为假', () => {
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 0, lastSeenAt: NOW - 1, now: NOW, windowMs: WINDOW_MS }), true)
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 0, lastSeenAt: NOW - WINDOW_MS, now: NOW, windowMs: WINDOW_MS }), true)
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 0, lastSeenAt: NOW - WINDOW_MS - 1, now: NOW, windowMs: WINDOW_MS }), false)
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 0, lastSeenAt: 0, now: NOW, windowMs: WINDOW_MS }), false)
+  assert.equal(isLocalBrowserPresent({ inFlightPolls: 0, lastSeenAt: undefined, now: NOW, windowMs: WINDOW_MS }), false)
 })
 
 // ---- hostNotifyCommand:平台命令构造与文本转义 ----
@@ -202,13 +211,15 @@ test('Given 缺省配置 When 解析 Then 两键回 false;CHANNELS 含 host', ()
 
 // ---- host 接线集成:stub spawn 观测派发,presence 经投影路由的来源地址注入 ----
 
+// res 桩带事件能力:投影处理器挂 close 事件感知断连,桩须支持 once/emit;
+// end 不自动触发 close,断连时机由测试显式 emit 模拟
 function makeRes() {
-  return {
-    status: null,
-    body: null,
-    writeHead(status) { this.status = status },
-    end(body) { this.body = JSON.parse(body) },
-  }
+  const res = new EventEmitter()
+  res.status = null
+  res.body = null
+  res.writeHead = (status) => { res.status = status }
+  res.end = (body) => { res.body = JSON.parse(body) }
+  return res
 }
 
 function makeReq(method, payload, headers) {
@@ -318,21 +329,123 @@ async function emitCompletedTurn(handlers) {
   await flushMicrotasks()
 }
 
-test('Given 总开关开且本机浏览器在线 When 回合完成 Then 宿主让位不弹且投影照常', async () => {
+// 挂起中的长轮询:cursor 等于当前版本(配置 POST 后为 1),服务端挂起等待,
+// 模拟真实客户端的在途请求;返回 pending 承诺与 res 桩(供断连模拟与唤醒等待)
+function hangingPoll(routes, remoteAddress) {
+  const req = makeReq('GET', undefined, { 'sec-fetch-mode': 'cors' })
+  req.url = '/api/turn-notify/projection?cursor=1'
+  req.socket = { remoteAddress }
+  const res = makeRes()
+  const pending = routes.get('/api/turn-notify/projection')(req, res)
+  return { pending, res }
+}
+
+test('Given 总开关开且本机长轮询在途 When 回合完成 Then 宿主让位;离场超窗后接管', async () => {
   await withStubSpawn(async (spawns) => {
     const { ctx, routes, handlers } = makeCtx()
     apply(ctx)
     const saved = await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
     assert.equal(saved.body.hostNotify, true)
-    await browserPoll(routes, '127.0.0.1')
+    const { pending, res } = hangingPoll(routes, '127.0.0.1')
+    await flushMicrotasks()
+    // 在途请求即在场信号:浏览器优先,宿主让位,正常路径零重复
     await emitCompletedTurn(handlers)
-    assert.equal(spawns.length, 0, '同机浏览器在线应去重让位')
+    assert.equal(spawns.length, 0, '本机长轮询在途,宿主让位')
+    // 在途请求被回合事件唤醒完成,宽限窗口内仍算在场
+    await pending
+    await emitCompletedTurn(handlers)
+    assert.equal(spawns.length, 0, '长轮询刚完成,宽限窗口内仍由浏览器呈现')
+    // 推进时钟越过宽限窗口:本机视为离场,宿主接管(宁可重复不可漏)
+    const realNow = Date.now
+    Date.now = () => realNow() + CLIENT_PRESENCE_WINDOW_MS + 1
+    try {
+      await emitCompletedTurn(handlers)
+    } finally { Date.now = realNow }
+    assert.equal(spawns.length, 1, '离场超窗,宿主接管')
     const projection = await pollProjection(routes, undefined)
-    assert.equal(projection.body.units.length, 1, '浏览器呈现通道不受让位影响')
+    assert.equal(projection.body.units.length, 3, '浏览器呈现通道不受让位影响')
   })
 })
 
-test('Given 总开关开且仅远程浏览器在线 When 回合完成 Then 宿主弹(不同设备不去重)', async () => {
+test('Given 总开关开且本机长轮询断连 When 回合完成 Then 认可窗口内让位,超窗接管', async () => {
+  await withStubSpawn(async (spawns) => {
+    const { ctx, routes, handlers } = makeCtx()
+    apply(ctx)
+    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
+    const { pending, res } = hangingPoll(routes, '127.0.0.1')
+    await flushMicrotasks()
+    // 浏览器关闭中止请求:close 事件即时出账,最近活动定格于断连时刻
+    res.emit('close')
+    await emitCompletedTurn(handlers)
+    assert.equal(spawns.length, 0, '断连后认可窗口内仍算在场(边界情况宁可不弹)')
+    // 推进时钟越过认可窗口:宿主接管
+    const realNow = Date.now
+    Date.now = () => realNow() + CLIENT_PRESENCE_WINDOW_MS + 1
+    try {
+      await emitCompletedTurn(handlers)
+    } finally { Date.now = realNow }
+    assert.equal(spawns.length, 1, '断连超窗,宿主接管')
+    // 唤醒挂起的等待事务,防测试尾部悬挂 25 秒定时器
+    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
+    await pending
+  })
+})
+
+test('Given 记账轮询正常完成后再触发 close When 时钟推进越过认可窗 Then 出账幂等不双计', async () => {
+  await withStubSpawn(async (spawns) => {
+    const { ctx, routes, handlers } = makeCtx()
+    apply(ctx)
+    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
+    // 全程虚拟时钟:消解真实间隔,配平断言只依赖显式推进
+    const realNow = Date.now
+    let fake = 1000 * 1000
+    Date.now = () => fake
+    try {
+      const first = await browserPoll(routes, '127.0.0.1')
+      // 生产正常完成路径:finally 已出账,响应完成后的 close 再触发须被幂等消化;
+      // 若双出账致计数走负,时钟推进后本应让位的在途轮询将误弹
+      first.emit('close')
+      const second = hangingPoll(routes, '127.0.0.1')
+      await flushMicrotasks()
+      fake += CLIENT_PRESENCE_WINDOW_MS + 1
+      await emitCompletedTurn(handlers)
+      assert.equal(spawns.length, 0, '计数未被双出账破坏,在途轮询仍正常让位')
+      await second.pending
+      fake += CLIENT_PRESENCE_WINDOW_MS + 1
+      await emitCompletedTurn(handlers)
+      assert.equal(spawns.length, 1, '出账配平正确,超窗接管不受影响')
+    } finally { Date.now = realNow }
+  })
+})
+
+test('Given 双 tab 并发挂起其一断连 When 时钟推进越过认可窗 Then 在途方仍让位,全部出账后接管', async () => {
+  await withStubSpawn(async (spawns) => {
+    const { ctx, routes, handlers } = makeCtx()
+    apply(ctx)
+    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
+    const realNow = Date.now
+    let fake = 1000 * 1000
+    Date.now = () => fake
+    try {
+      const tabA = hangingPoll(routes, '127.0.0.1')
+      const tabB = hangingPoll(routes, '::1')
+      await flushMicrotasks()
+      // tabA 断连即时出账,tabB 独力承载在途信号
+      tabA.res.emit('close')
+      await flushMicrotasks()
+      fake += CLIENT_PRESENCE_WINDOW_MS + 1
+      await emitCompletedTurn(handlers)
+      assert.equal(spawns.length, 0, 'tabA 断连出账,tabB 在途,整体在场')
+      // 回合事件唤醒两个挂起轮询,出账后计数归零
+      await Promise.all([tabA.pending, tabB.pending])
+      fake += CLIENT_PRESENCE_WINDOW_MS + 1
+      await emitCompletedTurn(handlers)
+      assert.equal(spawns.length, 1, '全部出账,计数归零,超窗接管')
+    } finally { Date.now = realNow }
+  })
+})
+
+test('Given 总开关开且仅远程浏览器在线 When 回合完成 Then 宿主弹', async () => {
   await withStubSpawn(async (spawns) => {
     const { ctx, routes, handlers } = makeCtx()
     apply(ctx)
@@ -364,14 +477,17 @@ test('Given kindRoutes 名单不含 host When 总开关开 Then 不弹', async (
   })
 })
 
-test('Given 回退开关开 When 本机浏览器在线 Then 不弹;仅远程在线 Then 弹', async () => {
+test('Given 回退开关开 When 本机长轮询在途 Then 不弹;仅远程在线 Then 弹', async () => {
   await withStubSpawn(async (spawns) => {
     const local = makeCtx()
     apply(local.ctx)
     await postConfig(local.routes, { hostNotifyFallback: true, minTurnDurationMs: 0 })
-    await browserPoll(local.routes, '::1')
+    const localPoll = hangingPoll(local.routes, '::1')
+    await flushMicrotasks()
     await emitCompletedTurn(local.handlers)
-    assert.equal(spawns.length, 0, '本机浏览器在线,回退不触发')
+    assert.equal(spawns.length, 0, '本机浏览器在途,回退不触发')
+    await postConfig(local.routes, { hostNotifyFallback: true, minTurnDurationMs: 0 })
+    await localPoll.pending
     // 独立实例:本机从未有浏览器,仅远程浏览器轮询过
     const remote = makeCtx()
     apply(remote.ctx)
@@ -382,11 +498,11 @@ test('Given 回退开关开 When 本机浏览器在线 Then 不弹;仅远程在�
   })
 })
 
-test('Given 裸 GET 形态(无 cursor 或 no-cors 或跨源)When 回合完成 Then 不记账宿主照常弹', async () => {
+test('Given 裸 GET 形态(无 cursor 或 no-cors 或跨源)When 回合完成 Then 回退不触发(伪造在场不入账)', async () => {
   await withStubSpawn(async (spawns) => {
     const { ctx, routes, handlers } = makeCtx()
     apply(ctx)
-    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
+    await postConfig(routes, { hostNotifyFallback: true, minTurnDurationMs: 0 })
     // 回环来源但缺 cursor:手工探测形态
     await rawShapePoll(routes, '127.0.0.1', 'cors', false)
     // 回环来源带 cursor 但 no-cors:同机网页 img 探活形态
@@ -394,23 +510,7 @@ test('Given 裸 GET 形态(无 cursor 或 no-cors 或跨源)When 回合完成 Th
     // 回环来源带 cursor 且 cors 但跨源 Origin:同机恶意网页标准 fetch 形态
     await rawShapePoll(routes, '127.0.0.1', 'cors', true, 'https://evil.example')
     await emitCompletedTurn(handlers)
-    assert.equal(spawns.length, 1, '伪造在场不入账,宿主不因探测或跨源请求被压制')
-  })
-})
-
-test('Given 本机浏览器在场随后超窗 When 回合完成 Then 恢复弹出', async () => {
-  await withStubSpawn(async (spawns) => {
-    const { ctx, routes, handlers } = makeCtx()
-    apply(ctx)
-    await postConfig(routes, { hostNotify: true, minTurnDurationMs: 0 })
-    await browserPoll(routes, '127.0.0.1')
-    // 推进时钟越过在场窗口:派发链路与记账共用 Date.now,整体平移自洽
-    const realNow = Date.now
-    Date.now = () => realNow() + CLIENT_PRESENCE_WINDOW_MS + 1000
-    try {
-      await emitCompletedTurn(handlers)
-    } finally { Date.now = realNow }
-    assert.equal(spawns.length, 1, '超窗后本机视为离线,宿主恢复弹出')
+    assert.equal(spawns.length, 1, '伪造在场不入账,本机无真实浏览器时回退照常触发')
   })
 })
 

@@ -28,6 +28,7 @@ import {
   isValidImBotId,
   hostNotifyWanted,
   isLocalBrowserPoll,
+  isLocalBrowserPresent,
   mapEventToCategory,
   mimeOf,
   normalizeImTargets,
@@ -61,9 +62,9 @@ const SOUNDS_DIR = join(homedir(), '.dsh', 'dsh-turn-notify', 'sounds')
 const REQUEST_BODY_MAX_BYTES = 64 * 1024
 // 长轮询挂起上限:低于客户端请求超时,保证客户端总在服务端放弃后才超时
 const LONG_POLL_WAIT_MS = 25 * 1000
-// 本机浏览器在场窗口:存活客户端两次投影请求的间隔上界为服务端挂起上限,加少量余量;
-// 超窗即视为本机无浏览器接收,宿主通知通道据此去重让位或回退补位
-export const CLIENT_PRESENCE_WINDOW_MS = LONG_POLL_WAIT_MS + 5 * 1000
+// 本机浏览器在场认可窗口:在途长轮询出账后的宽限时长,浏览器优先去重的时间边界;
+// 窗口内事件仍视为浏览器呈现,超窗即宿主补位(宁可重复不可漏)
+export const CLIENT_PRESENCE_WINDOW_MS = 2 * 1000
 
 // dsh-im 投递错误码到 HTTP 状态的映射,未收录错误按网关失败处理
 const IM_ERROR_STATUS = { 'bad-request': 400, 'unknown-bot': 404, 'bot-not-connected': 503 }
@@ -91,8 +92,8 @@ const SETTINGS_SCHEMA = z.object({
   minTurnDurationMs: z.number().default(MIN_TURN_DURATION_MS).description('最短回合时长(毫秒),回合结束类通知短于此不送达;AI 提问与审批请求即时送达'),
   rootsOnly: z.boolean().default(true).description('子代理会话不通知'),
   suppressSubagentWake: z.boolean().default(true).description('子代理相关回合不通知(仅任务完成类):后台委托未收尾的回合与收尾唤醒的回合'),
-  hostNotify: z.boolean().default(false).description('宿主机桌面通知:通知触发时由宿主进程弹系统级通知(osascript/notify-send/PowerShell toast);与本机浏览器去重,本机浏览器在线时让位给浏览器呈现'),
-  hostNotifyFallback: z.boolean().default(false).description('宿主通知回退:仅当本机没有浏览器窗口在线接收时才弹宿主桌面通知;总开关开启时本开关冗余'),
+  hostNotify: z.boolean().default(false).description('宿主机桌面通知:通知触发时由宿主进程弹系统级通知(osascript/notify-send/PowerShell toast);浏览器优先,本机浏览器在场(2 秒内有在途长轮询)时由浏览器呈现宿主不重复弹,离场时宿主补位'),
+  hostNotifyFallback: z.boolean().default(false).description('宿主通知回退:本机浏览器在场时由浏览器呈现,离场(2 秒内无在途长轮询)时宿主补位;与总开关判定一致,任一开启即生效'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
   imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 推送目标列表,空数组禁用 IM 通道'),
@@ -206,7 +207,9 @@ export function apply(ctx) {
   const titledSessions = new Set()
   // 回合尾部统计:assistant/message 的 tokens 累加与回答前缀,回合结束随通知消费即清
   const assistantTails = new Map()
-  // 本机(回环来源)浏览器最近轮询时刻:在场判定的唯一信号,宿主通知去重与回退共用
+  // 本机(回环来源)浏览器在场信号:在途长轮询计数与最近活动时刻,
+  // 在场 = 有在途请求或认可窗口内有活动,宿主通知的浏览器优先去重据此判定
+  let inFlightLocalPolls = 0
   let lastLocalClientSeenAt = 0
   let seq = 0
   // 音效库写互斥:展示名索引读改写与落盘非原子,串行化防并发交错
@@ -270,16 +273,19 @@ export function apply(ctx) {
     if (routes === null || routes.indexOf('host') >= 0) deliverHostNotify(unit, settings)
   }
 
-  // 宿主桌面通知:总开关或回退开关命中即 spawn;本机浏览器在线时宿主让位
-  // (同机去重,浏览器负责本机呈现),本机无浏览器(全关或仅远程浏览器)才弹;
-  // fire-and-forget,spawn 失败不影响其余通道
+  // 宿主桌面通知:浏览器优先,本机浏览器在场由浏览器呈现,宿主让位(正常路径
+  // 零重复);离场(无在途长轮询且超认可窗口)由宿主补位;fire-and-forget,
+  // spawn 失败不影响其余通道
   function deliverHostNotify(unit, settings) {
     const wanted = hostNotifyWanted({
       hostNotify: settings.hostNotify,
       hostNotifyFallback: settings.hostNotifyFallback,
-      localClientSeenAt: lastLocalClientSeenAt,
-      now: Date.now(),
-      windowMs: CLIENT_PRESENCE_WINDOW_MS,
+      localBrowserPresent: isLocalBrowserPresent({
+        inFlightPolls: inFlightLocalPolls,
+        lastSeenAt: lastLocalClientSeenAt,
+        now: Date.now(),
+        windowMs: CLIENT_PRESENCE_WINDOW_MS,
+      }),
     })
     if (!wanted) return
     void sendHostNotify({ title: unit.text, body: unit.summary ?? '', platform: process.platform, execFileImpl: __hostSpawn.impl })
@@ -434,22 +440,39 @@ export function apply(ctx) {
       path: '/api/turn-notify/projection',
       handler: route('GET', {}, async (req, res) => {
         const query = new URL(req.url, 'http://localhost').searchParams
-        // 回环来源的浏览器长轮询即本机在场信号,宿主通知的去重让位与回退据此判定;
-        // 记账形态收紧防伪造:裸 GET(img 探活/监控探测)与跨源 fetch 不入账
+        // 回环来源的浏览器长轮询即本机在场信号,宿主通知的浏览器优先去重据此判定;
+        // 记账形态收紧防伪造:裸 GET(img 探活/监控探测)与跨源 fetch 不入账。
+        // 记账期间计入在途,断连(浏览器关闭/中止)经 res close 事件即时出账,
+        // 离场盲区收敛到认可窗口
+        let releaseLocalPoll = null
         if (isLocalBrowserPoll({
           remoteAddress: req.socket && req.socket.remoteAddress,
           hasCursor: query.has('cursor'),
           secFetchMode: req.headers ? req.headers['sec-fetch-mode'] : undefined,
           origin: req.headers ? req.headers.origin : undefined,
           host: req.headers ? req.headers.host : undefined,
-        })) lastLocalClientSeenAt = Date.now()
-        const rawCursor = Number(query.get('cursor'))
-        const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
-        if (query.has('cursor') && projection.version() === cursor) {
-          await projection.wait(cursor, LONG_POLL_WAIT_MS)
+        })) {
+          inFlightLocalPolls += 1
+          let settled = false
+          releaseLocalPoll = () => {
+            if (settled) return
+            settled = true
+            inFlightLocalPolls -= 1
+            lastLocalClientSeenAt = Date.now()
+          }
+          res.once('close', releaseLocalPoll)
         }
-        const settings = readSettings(ctx)
-        sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
+        try {
+          const rawCursor = Number(query.get('cursor'))
+          const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
+          if (query.has('cursor') && projection.version() === cursor) {
+            await projection.wait(cursor, LONG_POLL_WAIT_MS)
+          }
+          const settings = readSettings(ctx)
+          sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
+        } finally {
+          if (releaseLocalPoll !== null) releaseLocalPoll()
+        }
       }),
     })
     return () => projection.dispose()

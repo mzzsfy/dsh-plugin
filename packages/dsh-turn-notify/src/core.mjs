@@ -506,13 +506,19 @@ export function isLoopbackAddress(address) {
   return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.')
 }
 
-// 宿主通知决策:总开关与回退开关共用同一让位判定——本机(回环)浏览器窗口在
-// 在场窗口内轮询过即视为在线,宿主让位给浏览器呈现(同机去重);本机浏览器
-// 不在线(全关或仅远程浏览器)时宿主弹。两开关均关不弹。
-export function hostNotifyWanted({ hostNotify, hostNotifyFallback, localClientSeenAt, now, windowMs }) {
+// 宿主通知决策:浏览器优先——本机浏览器在场由浏览器呈现,宿主让位(正常路径
+// 零重复);离场由宿主补位。重复只发生在在场判定的边界情况(认可窗口边界与
+// 网络抖动),宁可重复不可漏。两开关均关不弹,任一开启即启用该通道。
+export function hostNotifyWanted({ hostNotify, hostNotifyFallback, localBrowserPresent }) {
   if (hostNotify !== true && hostNotifyFallback !== true) return false
-  const localPresent = typeof localClientSeenAt === 'number' && localClientSeenAt > 0 && now - localClientSeenAt <= windowMs
-  return !localPresent
+  return localBrowserPresent !== true
+}
+
+// 本机浏览器在场判定:有在途长轮询即在场信号(无论时间戳新旧);无在途时,
+// 最近活动在认可窗口内(长轮询刚完成、断连刚出账)仍算在场,超窗或从未在场为假
+export function isLocalBrowserPresent({ inFlightPolls, lastSeenAt, now, windowMs }) {
+  if (typeof inFlightPolls === 'number' && inFlightPolls > 0) return true
+  return typeof lastSeenAt === 'number' && lastSeenAt > 0 && now - lastSeenAt <= windowMs
 }
 
 // 本机浏览器轮询判定:回环来源 + 长轮询续传形态(带 cursor)+ fetch 请求形态
