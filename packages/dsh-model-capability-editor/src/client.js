@@ -7,6 +7,15 @@
 // 判定逻辑与 src/logic.mjs 为同一份(单文件自包含格式无法跨文件 require),
 // 修改须两处同步。
 
+// 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;键 = 市场短名(发现页
+// 收录显示形态);该插件未就绪时入队,由其启动时排空
+if (typeof window !== 'undefined') {
+  const NAV_ICON = { 'dsh-model-capability-editor': 'cube' }
+  if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+  else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+  else window.__navicIconQueue = [NAV_ICON]
+}
+
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-model-capability-editor',
   factory(require) {
