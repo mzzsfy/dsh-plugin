@@ -38,11 +38,12 @@ async function resolveWorkspaceId(registry, workdir) {
 }
 
 export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery }) {
-  // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表)
+  // pinned 会话存在性:持久层 headers 比对(冷会话不在 agents 注册表);
+  // 记录形态为官方 SessionRecord(dsh-session-query),id 在 header.id
   async function pinnedExists(sessionId) {
     if (!sessionQuery || typeof sessionQuery.listSessions !== 'function') return Boolean(agents.get(sessionId))
     const records = await sessionQuery.listSessions(ADMISSION_SIGNAL)
-    return records.some((record) => record && record.id === sessionId)
+    return records.some((record) => record && record.header && record.header.id === sessionId)
   }
 
   // pinned 可用性:已删除(不在持久层)或已归档(从所有分组视图隐藏)均视为丢失,触发重建
