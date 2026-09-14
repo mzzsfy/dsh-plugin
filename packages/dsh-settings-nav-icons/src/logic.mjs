@@ -112,6 +112,10 @@ export const ZAP = svgOf(pathOf('M8.9 1.8 3.8 8.9h3.5L7 14.2l5.2-7.1H8.6z'))
 export const WALLET = svgOf(
   rectOf('2.5', '3.5', '11', '9.5', '1.5') +
   pathOf('M13.5 7.4h-2.1a1.6 1.6 0 0 0 0 3.2h2.1'))
+export const GAUGE = svgOf(
+  pathOf('M2.5 12a5.5 5.5 0 1 1 11 0') +
+  pathOf('M8 12 10.8 9.2') +
+  pathOf('M2.5 12h11'))
 
 export const FALLBACK = [SPARK, LAYERS, TAG, GRID]
 
@@ -122,7 +126,7 @@ export const GLYPHS = {
   archive: ARCHIVE, spark: SPARK, layers: LAYERS, tag: TAG, grid: GRID,
   git: GIT, search: SEARCH, term: TERM, chart: CHART, code: CODE, doc: DOC,
   db: DB, flow: FLOW, globe: GLOBE, lock: LOCK, image: IMAGE, zap: ZAP,
-  wallet: WALLET,
+  wallet: WALLET, gauge: GAUGE,
 }
 
 // 声明值解析与安全门:svg 须完整开标签(大小写不敏感)且单根闭合(首个 </svg>
@@ -187,6 +191,7 @@ export const NAME_RULES = [
   ['doc|note|file|markdown|wiki', DOC],
   ['database|sqlite|redis|cache|db', DB],
   ['session|archive|history', ARCHIVE],
+  ['dash|dashboard|gauge', GAUGE],
   ['usage|stat|meter|monitor|radar|metric', CHART],
   ['wallet|balance|money|coin|fund', WALLET],
   ['flow|workflow|pipeline|task|job|queue', FLOW],

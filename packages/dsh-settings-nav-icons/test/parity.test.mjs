@@ -287,6 +287,9 @@ function defineScenarios(prefix, L) {
     assert.equal(themedIcon('account-balance'), GLYPHS.wallet, 'balance 命中钱包')
     assert.equal(themedIcon('my-wallet-tool'), GLYPHS.wallet, 'wallet 命中钱包')
     assert.equal(themedIcon('cron-board'), GLYPHS.plan, 'cron 仍命中时钟')
+    // 仪表盘语义:dash 系关键词命中表盘图
+    assert.equal(themedIcon('usage-dash'), GLYPHS.gauge, 'dash 命中表盘')
+    assert.equal(themedIcon('my-dashboard'), GLYPHS.gauge, 'dashboard 命中表盘')
   })
 
   test(prefix + '别名等价:双语分区任一语言键命中,组外键不受影响', () => {
@@ -423,8 +426,8 @@ test('两份实现 NAME_RULES 全量同源(含标志位)', () => {
 
 test('README 契约数量锁定', () => {
   // README 声明的内置表规模,扩表须同步改 README
-  assert.equal(Object.keys(logic.GLYPHS).length, 29)
-  assert.equal(logic.NAME_RULES.length, 20)
+  assert.equal(Object.keys(logic.GLYPHS).length, 30)
+  assert.equal(logic.NAME_RULES.length, 21)
 })
 
 test('LOGIC 段与 logic.mjs 决策函数逐函数源码一致(归一化注释与空白)', () => {
