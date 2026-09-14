@@ -12,6 +12,8 @@ const SEQ_UNKNOWN = -1
 const DEFAULT_BACKFILL_CONCURRENCY = 4
 const MARK_BATCH = 32
 const SCAN_LOG_MAX_ENTRIES = 200
+// 单条日志 detail 上限:flush 底层行错误拼接的截断保护
+const LOG_DETAIL_MAX_CHARS = 500
 
 // 不可读会话分类:宿主可见性/可读性边界的三代实测形态(见 README 存档兼容)
 const SKIP_KINDS = { descriptor: 'descriptor', corrupt: 'corrupt', legacy: 'legacy', other: 'other' }
@@ -29,6 +31,15 @@ function classifySkip(detail) {
     if (pattern.test(detail)) return kind
   }
   return SKIP_KINDS.other
+}
+
+// flush 失败日志文本:包装文案在前,聚合的底层行错误逐条展开,超长截断
+function flushErrorText(error) {
+  const head = error instanceof Error ? error.message : String(error)
+  if (!(error instanceof AggregateError) || error.errors.length === 0) return head
+  const detail = error.errors.map((err) => (err instanceof Error ? err.message : String(err))).join('; ')
+  const text = `${head}: ${detail}`
+  return text.length > LOG_DETAIL_MAX_CHARS ? `${text.slice(0, LOG_DETAIL_MAX_CHARS)}…` : text
 }
 
 function emptySkipCounts() {
@@ -231,9 +242,10 @@ export class UsageCollector {
   constructor(ctx, store) {
     this.ctx = ctx
     this.store = store
-    // store 写合并周期落盘的失败行接入扫描异常日志,面板可观测
+    // store 写合并周期落盘的失败行接入扫描异常日志,面板可观测;
+    // AggregateError 展开底层行错误,只记包装文案无法归因
     store.onFlushError = (error) => {
-      this.pushLog('record', error instanceof Error ? error.message : String(error))
+      this.pushLog('record', flushErrorText(error))
     }
     this.folds = new Map()
     this.routes = new Map()

@@ -766,6 +766,30 @@ test('采集侧 store 失败计入 recordFailures 且不抛断采集', async () 
   assert.equal(store.samples.length, 0)
 })
 
+test('flush 聚合失败日志展开底层行错误,不只剩包装文案', async () => {
+  const { store, collector } = liveCollector()
+  // Given store 上抛含两行底层失败的 AggregateError When 接入日志 Then detail 展开各原因
+  store.onFlushError(new AggregateError(
+    [new Error('boom A'), new Error('boom B')],
+    'usage store flush failed',
+  ))
+  const entry = collector.status().log.at(-1)
+  assert.equal(entry.kind, 'record')
+  assert.equal(entry.detail, 'usage store flush failed: boom A; boom B')
+  assert.equal(collector.status().recordFailures, 1)
+})
+
+test('flush 聚合失败日志截断保护:超长底层错误不撑爆日志行', async () => {
+  const { store, collector } = liveCollector()
+  store.onFlushError(new AggregateError(
+    [new Error('x'.repeat(2000))],
+    'usage store flush failed',
+  ))
+  const entry = collector.status().log.at(-1)
+  assert.ok(entry.detail.length <= 600)
+  assert.ok(entry.detail.startsWith('usage store flush failed'))
+})
+
 test('session/disposed 后该会话去重状态重置', async () => {
   const { ctx, store } = liveCollector()
   const t = local(2026, 8, 2, 10, 0)
