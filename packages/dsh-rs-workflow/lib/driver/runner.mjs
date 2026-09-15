@@ -88,7 +88,12 @@ export async function runBatch({ state, template, batch, ctx }) {
     const run = engine.start({
       script: FLOW_EXEC_SOURCE,
       args: { calls },
-      meta: { name: `rsww-batch-${runId}-${batchNo}`, phases: calls.map((c) => c.label) },
+      // 宿主 meta 契约:description 必填非空;phases 必须为 {title} 对象数组(dsh-workflow-worker-thread meta 校验)
+      meta: {
+        name: `rsww-batch-${runId}-${batchNo}`,
+        description: calls.map((c) => c.label).join(' / '),
+        phases: calls.map((c) => ({ title: c.label })),
+      },
       parent,
       signal,
     })

@@ -176,23 +176,24 @@ window.__ModuleLoader__.load({
         open ? React.createElement('div', { className: 'rsww-full', style: tone === 'error' ? { color: 'var(--dsw-alias-state-error-primary,#ec1313)' } : null }, text) : null)
     }
 
-    // 步骤事件账行:按 store.step 落盘顺序渲染全量 body
+    // 步骤事件账行:按 store.step 落盘顺序渲染全量 body;body 判空兜底(空账/异常事件不崩页签)
     function StreamRow({ stepId, instance, event, body }) {
+      const safeBody = body || {}
       const tag = stepId + (instance && instance !== '-' ? '#' + instance : '')
       const kind = EVENT_LABELS[event] || event
       let summary = ''
-      if (event === 'dispatch') summary = body.callLabel ? String(body.callLabel) : '→ ' + tag
+      if (event === 'dispatch') summary = safeBody.callLabel ? String(safeBody.callLabel) : '→ ' + tag
       else if (event === 'submit') summary = '产出已提交'
-      else if (event === 'fail') summary = body.error || '失败'
-      else if (event === 'control') summary = (body.kind === 'message' ? (body.inject ? '[纠偏注入] ' : '[排队] ') : '[' + body.kind + '] ') + (body.text || '')
-      else summary = body.reason || ''
+      else if (event === 'fail') summary = safeBody.error || '失败'
+      else if (event === 'control') summary = (safeBody.kind === 'message' ? (safeBody.inject ? '[纠偏注入] ' : '[排队] ') : '[' + safeBody.kind + '] ') + (safeBody.text || '')
+      else summary = safeBody.reason || ''
       return React.createElement('li', { className: 'rsww-step' + (event === 'fail' ? ' rsww-step--fail' : '') },
         React.createElement('span', { className: 'rsww-step__node' }, tag + ' · ' + kind),
         React.createElement('span', { className: 'rsww-step__sum' },
           summary,
-          event === 'dispatch' && body.prompt ? React.createElement(OutputFullText, { label: '指令全文', text: body.prompt }) : null,
-          event === 'submit' && body.outputs ? React.createElement(OutputFullText, { label: '产出全文', text: JSON.stringify(body.outputs, null, 2) }) : null,
-          event === 'fail' ? React.createElement(OutputFullText, { label: '错误详情', text: body.error || '' }) : null))
+          event === 'dispatch' && safeBody.prompt ? React.createElement(OutputFullText, { label: '指令全文', text: safeBody.prompt }) : null,
+          event === 'submit' && safeBody.outputs ? React.createElement(OutputFullText, { label: '产出全文', text: JSON.stringify(safeBody.outputs, null, 2) }) : null,
+          event === 'fail' ? React.createElement(OutputFullText, { label: '错误详情', text: safeBody.error || '' }) : null))
     }
 
     // 控制条:按状态显隐按钮 + 末端消息输入行(勾选「纠偏注入」)
@@ -334,6 +335,7 @@ window.__ModuleLoader__.load({
     // ── 设置页共享件:pill 组/行编辑/钳制(gui-center/gui-editor/gui-config 同源) ──
     const h = React.createElement
     const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
+    const BUDGET_KEYS = ['maxStepFail', 'approveRounds', 'escalateLimit']
     const BUDGET_MIN = 1
     const BUDGET_MAX = 10
 
