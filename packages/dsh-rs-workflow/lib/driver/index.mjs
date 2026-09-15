@@ -86,19 +86,24 @@ export class RunDriver {
   }
 
   pause() {
+    if (this.finished) return
     this.paused = true
     this.state.status = 'paused'
+    this.onNotice?.('若水编排已暂停,页签可恢复')
   }
 
   resume() {
+    if (this.finished) return
     this.paused = false
     this.pauseResolve?.()
     this.pauseResolve = null
+    this.onNotice?.('若水编排已恢复运行')
   }
 
   cancel() {
     if (this.finished) return
     this.controller.abort()
+    this.onNotice?.('若水编排已取消,已完成步骤保留,可在运行中心续跑')
   }
 
   // 控制队列受理面(post 入口):message 落控制事件账+回显队列;即时通道由 pause/resume/cancel 方法承载
@@ -109,6 +114,7 @@ export class RunDriver {
     this.store.step({ runId: this.runId, event: 'control', body: { kind: 'message', text: event.text, inject: !!event.inject } })
     const record = this.store.get(this.runId)
     this.store.update({ runId: this.runId, queued: [...(record.queued ?? []), event.text] })
+    if (event.inject === true) this.onNotice?.('若水编排已收到注入消息,下一批次生效')
     return true
   }
 

@@ -126,6 +126,8 @@ export function registerTakeover(ctx, config, { dshHome, store: storeInject } = 
       sessionId: agent?.session ? String(agent.session.id || agent.id || '') : '',
       store: storeInject,
     })
+    // 控制命令的会话可见反馈(board → 队列单例 → driver → 本模块转写 notice)
+    driver.onNotice = (text) => note(agent, text)
     const origFinish = driver.finish.bind(driver)
     driver.finish = (status, summary) => {
       origFinish(status, summary)
