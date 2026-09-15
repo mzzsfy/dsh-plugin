@@ -96,6 +96,22 @@ window.__ModuleLoader__.load({
 .rsww-switch input[type="checkbox"]:checked + .rsww-switch__track{background:var(--dsw-alias-state-business-primary,#4176e6)}
 .rsww-switch input[type="checkbox"]:checked + .rsww-switch__track .rsww-switch__thumb{transform:translateX(13px)}
 .rsww-switch input[type="checkbox"]:focus-visible + .rsww-switch__track{outline:2px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 70%,white);outline-offset:1px}
+/* 会话页签与 header 胶囊 */
+.rsww-flow{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:14px;color:var(--dsw-alias-label-primary,#0f1115);padding-top:10px}
+.rsww-chip{position:relative;display:inline-flex;align-items:center;gap:5px;border:none;background:transparent;color:var(--dsw-alias-label-secondary,#61666b);font:500 var(--dsw-font-xs-13,13px/20px sans-serif);border-radius:6px;padding:3px 2px;cursor:pointer;white-space:nowrap}
+.rsww-chip:hover,.rsww-chip:focus-visible{color:var(--dsw-alias-label-primary,#0f1115)}
+.rsww-chip--live{color:var(--dsw-alias-state-business-primary,#4176e6)}
+.rsww-chip__dot{width:6px;height:6px;border-radius:50%;flex:none;background:currentColor;animation:rsww-pulse 1.2s ease-in-out infinite}
+@keyframes rsww-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.rsww-float{z-index:100;box-sizing:border-box;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-elevation-prominent);border-radius:20px;width:340px;max-width:min(400px,100vw - 32px);max-height:min(420px,100vh - 140px);display:flex;flex-direction:column;gap:1px;padding:4px;position:absolute;top:calc(100% + 5px);right:0;overflow:auto}
+.rsww-float__item{box-sizing:border-box;width:100%;min-height:32px;color:var(--dsw-alias-label-primary,#0f1115);border-radius:8px;align-items:center;gap:8px;padding:6px 8px;font:400 var(--dsw-font-xs-13,13px/20px sans-serif);display:flex;background:transparent;border:0;cursor:default;text-align:left}
+.rsww-float__req{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.rsww-float__time{color:var(--dsw-alias-label-tertiary,#81858c);flex:none;font-size:11px;font-variant-numeric:tabular-nums}
+.rsww-steps{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.rsww-step{display:flex;align-items:baseline;gap:8px;font:400 var(--dsw-font-xs-13,13px/20px sans-serif);line-height:1.55;padding:4px 6px;border-radius:6px}
+.rsww-step:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(38,49,72,.06))}
+.rsww-step__node{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,monospace);font-size:11px;color:var(--dsw-alias-label-tertiary,#81858c);flex:none;min-width:72px}
+.rsww-step__sum{color:var(--dsw-alias-label-primary,#0f1115);word-break:break-word}
 `
 
     async function request(path) {
@@ -524,6 +540,122 @@ window.__ModuleLoader__.load({
         active.render())
     }
 
+    // ── 会话页签「若水编排」:进度实时视图 ─────────────────────────────────────
+    // 条件注入:仅在轮询器发现运行中的编排后才注册页签(无条件常驻页签对无编排
+    // 会话是噪音)。run 落定后页签保留,可回看最终结果。
+
+    const VIEW_ID = 'rsww-flow'
+    const CHIP_ID = 'rsww-flow-chip'
+
+    function FlowRunCard({ run }) {
+      const [detail, setDetail] = useState(null)
+      const updates = (detail && Array.isArray(detail.updates) ? detail.updates : null)
+        || (Array.isArray(run.updates) ? run.updates : [])
+      useEffect(() => {
+        let alive = true
+        request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
+          if (alive && outcome.ok) setDetail(outcome.data)
+        })
+        return () => { alive = false }
+      }, [run.runId, run.updatedAt])
+      // 需求正文去掉系统注入段(system-reminder 等标签块),只留用户实际输入
+      const requestText = String(run.request || '')
+        .split(/<\/?system-reminder>/i)[0].trim() || '(见完整记录)'
+      return React.createElement('div', { className: 'rsww-card' },
+        React.createElement('div', { className: 'rsww-row' },
+          React.createElement(StatusBadge, { status: run.status }),
+          run.templateId ? React.createElement(Badge, { tone: 'mute' }, run.templateId) : null,
+          React.createElement('span', { className: 'rsww-req', title: run.request }, requestText),
+          React.createElement('span', { className: 'rsww-spacer' }),
+          React.createElement('span', { className: 'rsww-text' }, relativeTime(run.updatedAt || run.startedAt))),
+        run.summary ? React.createElement('div', { className: 'rsww-section' },
+          React.createElement('span', { className: 'rsww-label' }, '结论'),
+          React.createElement('span', { className: 'rsww-text' }, run.summary)) : null,
+        updates.length ? React.createElement('div', { className: 'rsww-section' },
+          React.createElement('span', { className: 'rsww-label' }, '节点进度'),
+          React.createElement('ul', { className: 'rsww-steps' }, updates.slice().reverse().map((u, i) =>
+            React.createElement('li', { className: 'rsww-step', key: i },
+              React.createElement('span', { className: 'rsww-step__node' }, u.nodeId || '-'),
+              React.createElement('span', { className: 'rsww-step__sum' },
+                (u.status ? '[' + u.status + '] ' : '') + (u.summary || '')))))) : null)
+    }
+
+    function FlowView() {
+      const [runs, setRuns] = useState(null)
+      const [error, setError] = useState('')
+      const reload = useCallback(async () => {
+        const outcome = await request('runs')
+        if (outcome.ok) { setRuns(outcome.data.runs || []); setError('') } else setError(outcome.error)
+      }, [])
+      useEffect(() => {
+        reload()
+        const timer = setInterval(reload, REFRESH_MS)
+        return () => clearInterval(timer)
+      }, [reload])
+      if (error) return React.createElement('div', { className: 'rsww-flow' }, React.createElement('span', { className: 'rsww-error' }, error))
+      const list = runs || []
+      const running = list.filter((r) => r.status === 'running')
+      const settled = list.filter((r) => r.status !== 'running').slice(0, 8)
+      return React.createElement('div', { className: 'rsww-flow' },
+        React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+        list.length === 0 ? React.createElement(EmptyState, {
+          icon: FLOW_GLYPH, title: '本进程还没有若水编排',
+          hint: '选中任一若水模式发送需求后,编排进度会实时出现在这里。',
+        }) : null,
+        running.length ? React.createElement('div', { className: 'rsww-group' },
+          React.createElement('div', { className: 'rsww-group__head' },
+            React.createElement('span', { className: 'rsww-group__title' }, '运行中'),
+            React.createElement('span', { className: 'rsww-group__count' }, running.length + ' 次')),
+          running.map((run) => React.createElement(FlowRunCard, { key: run.runId, run }))) : null,
+        settled.length ? React.createElement('div', { className: 'rsww-group' },
+          React.createElement('div', { className: 'rsww-group__head' },
+            React.createElement('span', { className: 'rsww-group__title' }, '最近完成'),
+            React.createElement('span', { className: 'rsww-group__count' }, '近 ' + settled.length + ' 次')),
+          settled.map((run) => React.createElement(FlowRunCard, { key: run.runId, run }))) : null)
+    }
+
+    // header 状态胶囊:编排运行中时在会话头部常驻可见(对话页签下也能感知进度),
+    // 点击展开小面板列出运行中的编排;这是"程序化切换页签无公开 API"下的降级形态。
+    function FlowChip({ sessionId }) {
+      const [runs, setRuns] = useState([])
+      const [open, setOpen] = useState(false)
+      const rootRef = useRef(null)
+      const reload = useCallback(async () => {
+        const outcome = await request('runs')
+        if (outcome.ok) setRuns(outcome.data.runs || [])
+      }, [])
+      useEffect(() => {
+        reload()
+        const timer = setInterval(reload, REFRESH_MS)
+        return () => clearInterval(timer)
+      }, [reload])
+      const live = runs.filter((r) => r.status === 'running')
+      useEffect(() => { if (live.length === 0) setOpen(false) }, [live.length])
+      const closeOnOutside = useCallback((e) => {
+        if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
+      }, [])
+      useEffect(() => {
+        if (!open) return undefined
+        document.addEventListener('mousedown', closeOnOutside)
+        return () => document.removeEventListener('mousedown', closeOnOutside)
+      }, [open, closeOnOutside])
+      if (live.length === 0) return null
+      return React.createElement('div', { ref: rootRef, style: { position: 'relative' } },
+        React.createElement('button', {
+          className: 'rsww-chip rsww-chip--live', 'aria-expanded': open,
+          onClick: () => setOpen((v) => !v),
+        },
+          React.createElement('span', { className: 'rsww-chip__dot' }),
+          '若水编排 ' + live.length + ' 运行中'),
+        open ? React.createElement('div', { className: 'rsww-float' },
+          live.map((run) => React.createElement('div', { className: 'rsww-float__item', key: run.runId },
+            React.createElement(StatusBadge, { status: run.status }),
+            React.createElement('span', { className: 'rsww-float__req', title: run.request }, run.request || '(无需求描述)'),
+            React.createElement('span', { className: 'rsww-float__time' }, relativeTime(run.startedAt)))),
+          React.createElement('div', { className: 'rsww-float__item' },
+            React.createElement('span', { className: 'rsww-float__time' }, '进度详情见「若水编排」页签'))) : null)
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -532,6 +664,42 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },
             () => React.createElement(RswwApp),
           ))
+        // 条件注入编排页签:轮询器发现首个运行中的 run 后注册会话页签与 header
+        // 胶囊;两者同生共死于同一个 fiber effect,插件停用即整体清理。
+        ctx.effect(() => {
+          let disposed = false
+          let timer = null
+          let registered = false
+          const registerUi = () => {
+            if (disposed || registered) return
+            registered = true
+            ctx.slots.inject('conversation.view', () =>
+              ctx.slots.register(
+                { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
+                () => React.createElement(FlowView),
+              ))
+            ctx.slots.inject('conversation.session.header.actions', () =>
+              ctx.slots.register(
+                { name: 'conversation.session.header.actions', id: CHIP_ID, order: 15 },
+                (props) => React.createElement(FlowChip, props),
+              ))
+          }
+          const poll = async () => {
+            try {
+              const res = await fetch(API + 'runs')
+              if (!res.ok) return
+              const json = await res.json()
+              const live = (json && Array.isArray(json.runs) ? json.runs : []).some((r) => r.status === 'running')
+              if (live) { registerUi(); if (timer) { clearInterval(timer); timer = null } }
+            } catch { /* host 未就绪:下轮重试 */ }
+          }
+          timer = setInterval(poll, REFRESH_MS)
+          poll()
+          return () => {
+            disposed = true
+            if (timer) clearInterval(timer)
+          }
+        }, 'rs-workflow: conditional flow view')
       },
     }
   },
