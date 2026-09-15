@@ -541,23 +541,28 @@ window.__ModuleLoader__.load({
     }
 
     // ── 会话页签「若水编排」:进度实时视图 ─────────────────────────────────────
-    // 条件注入:仅在轮询器发现运行中的编排后才注册页签(无条件常驻页签对无编排
-    // 会话是噪音)。run 落定后页签保留,可回看最终结果。
+    // 条件注入:页签随"当前会话存在 rs 运行记录"注册/注销(会话切换即重判)。
+    // 实时细节来自 host 侧 workflow/* 事件上报(runs.json updates),卡片运行中自轮询。
 
     const VIEW_ID = 'rsww-flow'
     const CHIP_ID = 'rsww-flow-chip'
+    const LIVE_REFRESH_MS = 2 * 1000
 
     function FlowRunCard({ run }) {
       const [detail, setDetail] = useState(null)
       const updates = (detail && Array.isArray(detail.updates) ? detail.updates : null)
         || (Array.isArray(run.updates) ? run.updates : [])
+      const live = run.status === 'running'
       useEffect(() => {
         let alive = true
-        request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
+        const reload = () => request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
           if (alive && outcome.ok) setDetail(outcome.data)
         })
-        return () => { alive = false }
-      }, [run.runId, run.updatedAt])
+        reload()
+        // 运行中自轮询细节(2s);落定后由父级 updatedAt 变化触发一次即可
+        const timer = live ? setInterval(reload, LIVE_REFRESH_MS) : null
+        return () => { alive = false; if (timer) clearInterval(timer) }
+      }, [run.runId, run.updatedAt, live])
       // 需求正文去掉系统注入段(system-reminder 等标签块),只留用户实际输入
       const requestText = String(run.request || '')
         .split(/<\/?system-reminder>/i)[0].trim() || '(见完整记录)'
@@ -580,7 +585,7 @@ window.__ModuleLoader__.load({
                 (u.status ? '[' + u.status + '] ' : '') + (u.summary || '')))))) : null)
     }
 
-    function FlowView() {
+    function FlowView({ sessionId }) {
       const [runs, setRuns] = useState(null)
       const [error, setError] = useState('')
       const reload = useCallback(async () => {
@@ -593,29 +598,27 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer)
       }, [reload])
       if (error) return React.createElement('div', { className: 'rsww-flow' }, React.createElement('span', { className: 'rsww-error' }, error))
-      const list = runs || []
-      const running = list.filter((r) => r.status === 'running')
-      const settled = list.filter((r) => r.status !== 'running').slice(0, 8)
+      // 只看本会话:页签是当前会话的编排概览,跨会话历史与本页无关
+      const mine = (runs || []).filter((r) => r.sessionId === sessionId)
+      const running = mine.filter((r) => r.status === 'running')
+      const settled = mine.filter((r) => r.status !== 'running').slice(0, 8)
+      const group = (title, count, items) => React.createElement('div', { className: 'rsww-group' },
+        React.createElement('div', { className: 'rsww-group__head' },
+          React.createElement('span', { className: 'rsww-group__title' }, title),
+          React.createElement('span', { className: 'rsww-group__count' }, count)),
+        items.map((run) => React.createElement(FlowRunCard, { key: run.runId, run })))
       return React.createElement('div', { className: 'rsww-flow' },
         React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
-        list.length === 0 ? React.createElement(EmptyState, {
-          icon: FLOW_GLYPH, title: '本进程还没有若水编排',
+        mine.length === 0 ? React.createElement(EmptyState, {
+          icon: FLOW_GLYPH, title: '本会话还没有若水编排',
           hint: '选中任一若水模式发送需求后,编排进度会实时出现在这里。',
         }) : null,
-        running.length ? React.createElement('div', { className: 'rsww-group' },
-          React.createElement('div', { className: 'rsww-group__head' },
-            React.createElement('span', { className: 'rsww-group__title' }, '运行中'),
-            React.createElement('span', { className: 'rsww-group__count' }, running.length + ' 次')),
-          running.map((run) => React.createElement(FlowRunCard, { key: run.runId, run }))) : null,
-        settled.length ? React.createElement('div', { className: 'rsww-group' },
-          React.createElement('div', { className: 'rsww-group__head' },
-            React.createElement('span', { className: 'rsww-group__title' }, '最近完成'),
-            React.createElement('span', { className: 'rsww-group__count' }, '近 ' + settled.length + ' 次')),
-          settled.map((run) => React.createElement(FlowRunCard, { key: run.runId, run }))) : null)
+        running.length ? group('运行中', running.length + ' 次', running) : null,
+        settled.length ? group('已完成', '近 ' + settled.length + ' 次', settled) : null)
     }
 
-    // header 状态胶囊:编排运行中时在会话头部常驻可见(对话页签下也能感知进度),
-    // 点击展开小面板列出运行中的编排;这是"程序化切换页签无公开 API"下的降级形态。
+    // header 状态胶囊:本会话编排运行中时在会话头部常驻可见(对话页签下也能感知
+    // 进度),点击展开小面板列出运行中的编排。
     function FlowChip({ sessionId }) {
       const [runs, setRuns] = useState([])
       const [open, setOpen] = useState(false)
@@ -629,7 +632,7 @@ window.__ModuleLoader__.load({
         const timer = setInterval(reload, REFRESH_MS)
         return () => clearInterval(timer)
       }, [reload])
-      const live = runs.filter((r) => r.status === 'running')
+      const live = runs.filter((r) => r.status === 'running' && r.sessionId === sessionId)
       useEffect(() => { if (live.length === 0) setOpen(false) }, [live.length])
       const closeOnOutside = useCallback((e) => {
         if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false)
@@ -657,49 +660,67 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'sessions'],
       apply(ctx) {
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },
             () => React.createElement(RswwApp),
           ))
-        // 条件注入编排页签:轮询器发现首个运行中的 run 后注册会话页签与 header
-        // 胶囊;两者同生共死于同一个 fiber effect,插件停用即整体清理。
+        // 会话感知条件注入:「若水编排」页签只在当前会话确实是 rs 工作流会话
+        // (runs 记录里存在该会话的运行)时注册,切到普通会话即注销——tab 栏由
+        // slots.entries 实时投影,注册/注销即时增删页签。重判时机 = 会话切换
+        // (sessions.list 订阅)+ runs 数据轮询;run 的 sessionId 由 host 记录。
         ctx.effect(() => {
           let disposed = false
           let timer = null
-          let registered = false
-          const registerUi = () => {
-            if (disposed || registered) return
-            registered = true
-            ctx.slots.inject('conversation.view', () =>
-              ctx.slots.register(
-                { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
-                () => React.createElement(FlowView),
-              ))
-            ctx.slots.inject('conversation.session.header.actions', () =>
-              ctx.slots.register(
-                { name: 'conversation.session.header.actions', id: CHIP_ID, order: 15 },
-                (props) => React.createElement(FlowChip, props),
-              ))
+          let disposeView = null
+          let disposeChip = null
+          let cache = { sessionId: undefined, isRs: false }
+          const ensure = (isRs) => {
+            if (disposed) return
+            if (isRs && !disposeView) {
+              disposeView = ctx.slots.inject('conversation.view', () =>
+                ctx.slots.register(
+                  { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
+                  (props) => React.createElement(FlowView, props),
+                ))
+              disposeChip = ctx.slots.inject('conversation.session.header.actions', () =>
+                ctx.slots.register(
+                  { name: 'conversation.session.header.actions', id: CHIP_ID, order: 15 },
+                  (props) => React.createElement(FlowChip, props),
+                ))
+            } else if (!isRs && disposeView) {
+              disposeView(); disposeView = null
+              disposeChip(); disposeChip = null
+            }
           }
-          const poll = async () => {
+          const judge = async () => {
+            const sessionId = ctx.sessions?.list?.getSnapshot?.().current
+            if (sessionId === undefined) { ensure(false); return }
+            if (cache.sessionId === sessionId && cache.fetched) { ensure(cache.isRs); return }
             try {
               const res = await fetch(API + 'runs')
               if (!res.ok) return
               const json = await res.json()
-              const live = (json && Array.isArray(json.runs) ? json.runs : []).some((r) => r.status === 'running')
-              if (live) { registerUi(); if (timer) { clearInterval(timer); timer = null } }
+              if (disposed) return
+              const isRs = (json && Array.isArray(json.runs) ? json.runs : []).some((r) => r.sessionId === sessionId)
+              cache = { sessionId, isRs, fetched: true }
+              ensure(isRs)
             } catch { /* host 未就绪:下轮重试 */ }
           }
-          timer = setInterval(poll, REFRESH_MS)
-          poll()
+          // 会话切换立即重判;轮询兜底 runs 数据与当前会话的变化
+          const unsubscribe = ctx.sessions.list.subscribe(() => { cache = { sessionId: undefined, isRs: false }; judge() })
+          timer = setInterval(judge, REFRESH_MS)
+          judge()
           return () => {
             disposed = true
+            unsubscribe()
             if (timer) clearInterval(timer)
+            if (disposeView) disposeView()
+            if (disposeChip) disposeChip()
           }
-        }, 'rs-workflow: conditional flow view')
+        }, 'rs-workflow: session-aware flow view')
       },
     }
   },

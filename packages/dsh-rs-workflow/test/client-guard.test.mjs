@@ -42,9 +42,16 @@ test('类名前缀 rsww- 全量约束(全局注入防跨包冲突)', () => {
 })
 
 test('宿主注册形态:slots 点分注入 settings.section(旧宿主 fiber 未激活即干净禁用)', () => {
-  assert.match(source, /inject: \['slots'\]/)
+  assert.match(source, /inject: \['slots', 'sessions'\]/)
   assert.match(source, /ctx\.slots\.inject\('settings\.section'/)
   assert.match(source, /id: 'rs-workflow-board'/)
+})
+
+test('会话页签条件注入:页签注册由当前会话的 rs 运行记录驱动,非 rs 会话不注册', () => {
+  assert.match(source, /sessions\.list\.subscribe/, '必须订阅会话切换以重判注册')
+  assert.match(source, /r\.sessionId === sessionId/, '必须按当前会话过滤 runs 判定')
+  assert.match(source, /name: 'conversation\.view'/, '页签经 conversation.view slot 注入')
+  assert.match(source, /conversation\.session\.header\.actions/, '状态胶囊挂会话头部动作位')
 })
 
 test('数据通道契约:仅经 /api/rs-workflow/* 读写,无直连存储', () => {
