@@ -2,7 +2,7 @@
 import JSON5 from 'json5'
 import { existsSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { reportStore } from './store.mjs'
+import { reportStore, ACTIVE_STATES } from './store.mjs'
 import { RunDriver, buildSeed } from './driver/index.mjs'
 import { registry, post } from './driver/control.mjs'
 import { validateTemplate } from './template-v4.mjs'
@@ -145,6 +145,9 @@ function dshHome() {
 // ── v4 新增:control / resume-from / config ────────────────────────────────
 const CONTROL_KINDS = ['message', 'cancel', 'pause', 'resume']
 
+// 活跃判定:registry 有在跑 driver 或记录处于 running/paused(不变量:同会话同一时刻至多一个 run)
+const isRunActive = (runId, record) => registry.drivers.has(runId) || ACTIVE_STATES.has(record.status)
+
 function handleControl(body) {
   const runId = typeof body.runId === 'string' ? body.runId : ''
   const kind = typeof body.kind === 'string' ? body.kind : ''
@@ -254,6 +257,7 @@ export function registerBoardRoutes(ctx) {
       const runId = typeof body.runId === 'string' ? body.runId : ''
       const record = store.get(runId)
       if (!record) throw new Error('运行记录不存在:' + runId)
+      if (isRunActive(runId, record)) throw new Error('运行进行中,不可续跑')
       const template = readTemplates(ctx).find((t) => t.id === record.templateId && t.enabled !== false)
       if (!template) throw new Error('模板不存在或已禁用:' + record.templateId)
       const initiator = registry.initiators.get(record.sessionId)
@@ -268,6 +272,8 @@ export function registerBoardRoutes(ctx) {
     route('/api/rsww/run-remove', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))
       const runId = typeof body.runId === 'string' ? body.runId : ''
+      const record = store.has(runId) ? store.get(runId) : undefined
+      if (record && isRunActive(runId, record)) throw new Error('运行进行中,不可删除')
       store.remove(runId)
       sendJson(res, 200, { ok: true })
     }), 'rsww run-remove route')

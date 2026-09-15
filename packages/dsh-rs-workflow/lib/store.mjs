@@ -35,6 +35,15 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
     renameSync(tmp, path)
   }
 
+  // 归档名冲突改用递增后缀:legacy 只改名不删除,失败保留待下轮启动重试
+  const archivePathOf = () => {
+    for (let suffix = 0; ; suffix++) {
+      const tail = suffix === 0 ? '' : `-${suffix}`
+      const candidate = join(dir, `runs.json.archived-${Date.now()}${tail}`)
+      if (!existsSync(candidate)) return candidate
+    }
+  }
+
   const persistRun = (record) => writeAtomic(join(runsDir, `${record.runId}.json`), JSON.stringify(record, null, 2))
   const persistIndex = () => writeAtomic(indexPath, JSON.stringify({ runs: index }, null, 2))
 
@@ -74,13 +83,10 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
     mkdirSync(runsDir, { recursive: true })
     const legacy = join(dir, 'runs.json')
     if (existsSync(legacy)) {
-      const archive = join(dir, `runs.json.archived-${Date.now()}`)
       try {
-        if (existsSync(archive)) rmSync(legacy, { force: true })
-        else renameSync(legacy, archive)
+        renameSync(legacy, archivePathOf())
       } catch (e) {
         warn(`v3 runs.json 归档失败:${e.message}`)
-        rmSync(legacy, { force: true })
       }
     }
     let indexValid = false
@@ -108,7 +114,22 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
         warn(`运行记录 ${name} 读取失败,跳过:${e.message}`)
       }
     }
-    if (!indexValid) {
+    // 对账:runs/ 文件集合为权威修齐 index(缺行补、幽灵行删),仅内存修正
+    let repaired = false
+    const fileIds = new Set(records.keys())
+    for (const record of records.values()) {
+      if (!index.some((e) => e.runId === record.runId)) {
+        index.push(indexEntryOf(record))
+        repaired = true
+      }
+    }
+    for (let i = index.length - 1; i >= 0; i--) {
+      if (!fileIds.has(index[i].runId)) {
+        index.splice(i, 1)
+        repaired = true
+      }
+    }
+    if (!indexValid || repaired) {
       index.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
       persistIndex()
     }
@@ -121,11 +142,14 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
   const evictOverCapacity = () => {
     const finished = index.filter((e) => !ACTIVE_STATES.has(e.status)).sort((a, b) => String(a.finishedAt || a.createdAt).localeCompare(String(b.finishedAt || b.createdAt)))
     let excess = finished.length - keepRuns
+    let evicted = false
     for (const entry of finished) {
       if (excess <= 0) break
       excess--
       removeInternal(entry.runId)
+      evicted = true
     }
+    if (evicted) persistIndex()
   }
 
   const store = {
@@ -169,7 +193,8 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       ensureLoaded()
       assertRunId(runId)
       const record = records.get(runId)
-      if (!record) throw new Error(`运行记录不存在:${runId}`)
+      // 记录已被移除(run-remove)时丢弃 dangling 写,保 driver 收尾链走完注销
+      if (!record) return undefined
       if (state !== undefined) record.state = state
       if (status !== undefined) record.status = status
       if (summary !== undefined) record.summary = summary
@@ -183,7 +208,8 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       ensureLoaded()
       assertRunId(runId)
       const record = records.get(runId)
-      if (!record) throw new Error(`运行记录不存在:${runId}`)
+      // 同 update:记录缺失即收尾目标已达成,幂等无害丢弃
+      if (!record) return undefined
       record.status = status
       record.finishedAt = new Date().toISOString()
       record.summary = summary ?? ''

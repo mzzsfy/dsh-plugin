@@ -12,8 +12,8 @@ export function defaultTemplatesDir() {
   return join(PKG_ROOT, FLOWS_DIR_NAME)
 }
 
-// 纯加载器:目录缺失返回空数组,残缺文件跳过,不缓存不抛错
-export function builtinTemplates(dir) {
+// 纯加载器:目录缺失返回空数组,残缺文件跳过,不缓存不抛错;无参调用兜底包内内置目录
+export function builtinTemplates(dir = defaultTemplatesDir()) {
   let names
   try {
     names = readdirSync(dir).sort()

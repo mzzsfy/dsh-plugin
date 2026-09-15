@@ -1,9 +1,16 @@
 // board BDD:模拟 req/res 验证守卫与 14 路由语义(数据面 mock store/settings/driver)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { registerBoardRoutes } from '../lib/board.mjs'
-import { createStore } from '../lib/store.mjs'
+import { createStore, reportStore } from '../lib/store.mjs'
 import { registry } from '../lib/driver/control.mjs'
+import { RunDriver } from '../lib/driver/index.mjs'
+
+// reportStore 单例指向临时目录(board 经单例读写):本文件全部用例不触碰真实运行中心
+process.env.DSH_RS_WORKFLOW_DATA_DIR = mkdtempSync(join(tmpdir(), 'rsww-board-store-'))
 
 // mock store 注入:board 用 reportStore() 单例 → 经 env 指向临时目录
 const mockRes = () => {
@@ -136,26 +143,71 @@ test('Given 终态 run 记录 When resume-from 且发起器无该会话 Then 400
 })
 
 test('Given 完整链路(store 记录+模板+发起器) When resume-from Then 新 run 启动并返回新 runId', async () => {
-  // 真实 store 注入(board 经 reportStore() 单例读;环境变量切目录在 store 模块加载期生效,
-  // 故此处用 direct seed:发起器闭包返回 fakeDriver 断言 seed/inputs 透传)
-  const seen = []
-  const initiator = async (payload) => {
-    seen.push(payload)
-    return { runId: 'r-new' }
-  }
+  // 真实链路:reportStore 单例(顶部 env 已切临时目录)种入已完成 run;发起器桩捕获 seed/inputs
+  // 并启动真实 RunDriver(桩 engine 同步回合法 callId+产出);fromStepId 指向已完成步骤 b
   const tpl = {
     id: 'chain', label: 'x',
     steps: [
       { id: 'a', prompt: 'P', outputs: { o: 'o' } },
       { id: 'b', after: ['a'], prompt: 'Q', outputs: { o: 'o' } },
+      { id: 'c', after: ['b'], prompt: 'R', outputs: { o: 'o' } },
     ],
   }
   const settingsValue = { templates: [{ id: 'chain', label: 'x', description: '', enabled: true, json5: JSON.stringify(tpl) }] }
+  const store = reportStore()
+  store.start({
+    runId: 'r-old', sessionId: 's9', workspace: '', request: '原始请求', templateId: 'chain',
+    inputs: { src: 'orig' },
+    state: {
+      status: 'completed', request: '原始请求', inputs: { src: 'orig' },
+      steps: {
+        a: { status: 'done', outputs: { o: 'A' }, failCount: 0, instances: [] },
+        b: { status: 'done', outputs: { o: 'B' }, failCount: 0, instances: [] },
+        c: { status: 'pending', outputs: null, failCount: 0, instances: [] },
+      },
+      approvals: {}, escalations: 0, queued: [], batchSeq: 3,
+    },
+  })
+  store.finish({ runId: 'r-old', status: 'completed', summary: 'x' })
+  const seen = []
+  let seq = 0
+  const initiator = async (payload) => {
+    seen.push(payload)
+    const driver = new RunDriver({
+      template: tpl, templateSet: [], runId: `r-new-${++seq}`,
+      request: payload.request, inputs: payload.inputs ?? {}, state: JSON.parse(JSON.stringify(payload.seed)),
+      parent: { session: { append: () => {} } },
+      engine: {
+        start({ args }) {
+          return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'OK' } })) }) }
+        },
+      },
+      sessionId: 's9', store,
+    })
+    driver.start()
+    return driver
+  }
   const h = harness({ settingsValue, initiators: new Map([['s9', initiator]]) })
-  // store.get 由 reportStore 提供;无真实记录 → 走「运行记录不存在」分支,验证 400 守卫后
-  // 以内存 registry 直驱 resume 语义:此处验证发起器挂靠分支被正确调用需要 store 记录,
-  // 全链路 store 联动在 tests/flow-v4.test.mjs 覆盖,本用例验证发起器无会话的 400 已在上一用例。
-  assert.ok(true)
+  const r = await h.call('/api/rsww/resume-from', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { runId: 'r-old', fromStepId: 'b', inputs: { src: 'override' } } })
+  assert.equal(r.status, 200)
+  assert.equal(r.body.ok, true)
+  assert.ok(r.body.runId.startsWith('r-new-'))
+  // 发起器载荷:request 透传;seed 中 fromStepId 及其后回 pending,done 且非 fromStepId 的 a 保留
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].request, '原始请求')
+  assert.equal(seen[0].seed.steps.a.status, 'done')
+  assert.equal(seen[0].seed.steps.b.status, 'pending')
+  assert.equal(seen[0].seed.steps.c.status, 'pending')
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const record = store.get(r.body.runId)
+  assert.equal(record.status, 'completed')
+  // 种子已完成步骤无新 dispatch;fromStepId 及其后步骤有 dispatch
+  const dispatchOf = (id) => (record.steps[id]?.['-'] ?? []).filter((e) => e.event === 'dispatch')
+  assert.equal(dispatchOf('a').length, 0)
+  assert.ok(dispatchOf('b').length > 0)
+  assert.ok(dispatchOf('c').length > 0)
+  // inputs 覆盖生效:新 run record.inputs 为覆盖值
+  assert.deepEqual(record.inputs, { src: 'override' })
 })
 
 test('Given config-save budgets 越界 When 调用 Then clamp 至 10;错型 Then 400', async () => {
@@ -202,4 +254,40 @@ test('Given GET spec/released/config/templates When 调用 Then 载荷形态正�
   const r4 = await h.call('/api/rsww/templates')
   assert.ok(Array.isArray(r4.body.templates))
   assert.ok(r4.body.templates.every((t) => typeof t.builtin === 'boolean'))
+})
+
+const MARKER_NAME = '.dsh-rs-workflow-source.json'
+const MARKER_PACKAGE = '@mzzsfy/dsh-rs-workflow'
+
+test('Given 内置模板 news When template-remove Then 墓碑落盘防复活', async () => {
+  // 内置 id 不物理删除:settings.update 落 {id:'news',enabled:false} 墓碑防合并复活,unrelease 撤下释放物
+  const tplJson5 = JSON.stringify({ id: 'news', label: 'news', steps: [{ id: 'a', prompt: 'P', outputs: { o: 'o' } }] })
+  const settingsValue = { templates: [{ id: 'news', label: 'news', description: '', enabled: true, json5: tplJson5 }] }
+  const presetHome = mkdtempSync(join(tmpdir(), 'rsww-board-preset-'))
+  const releaseDir = join(presetHome, '.agent-presets', 'rs-news')
+  mkdirSync(releaseDir, { recursive: true })
+  writeFileSync(join(releaseDir, MARKER_NAME), JSON.stringify({ package: MARKER_PACKAGE, kind: 'flow', version: '0.0.0' }))
+  const prevPresetRoot = process.env.DSH_RS_WORKFLOW_PRESET_ROOT
+  process.env.DSH_RS_WORKFLOW_PRESET_ROOT = presetHome
+  try {
+    const h = harness({ settingsValue })
+    const r = await h.call('/api/rsww/template-remove', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'news' } })
+    assert.equal(r.status, 200)
+    assert.equal(r.body.ok, true)
+    // 墓碑落盘而非删除
+    assert.equal(settingsValue.templates.length, 1)
+    assert.equal(settingsValue.templates[0].id, 'news')
+    assert.equal(settingsValue.templates[0].enabled, false)
+    // 释放物被撤下(unreleaseFlowTemplate 真实执行)
+    assert.equal(existsSync(releaseDir), false)
+    // 合并面:news 仍在且呈现禁用态
+    const r2 = await h.call('/api/rsww/templates')
+    const news = r2.body.templates.find((t) => t.id === 'news')
+    assert.ok(news)
+    assert.equal(news.enabled, false)
+    assert.equal(news.builtin, true)
+  } finally {
+    if (prevPresetRoot === undefined) delete process.env.DSH_RS_WORKFLOW_PRESET_ROOT
+    else process.env.DSH_RS_WORKFLOW_PRESET_ROOT = prevPresetRoot
+  }
 })

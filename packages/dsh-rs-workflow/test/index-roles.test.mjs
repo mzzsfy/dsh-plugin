@@ -1,6 +1,9 @@
 // index 行分发 BDD:五角色的激活路径与干净禁用;template-tool 四 action
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { apply, Config, registerTemplateTool, SETTINGS_SCHEMA, SPEC_TEXT } from '../lib/index.js'
 import { createTemplateTool } from '../lib/template-tool.mjs'
 import { SETTINGS_SCHEMA as SETTINGS_SCHEMA_DIRECT, NAMESPACE, normalizeConfig } from '../lib/settings-schema.mjs'
@@ -144,4 +147,41 @@ test('Given id 不一致 When save Then errors 提示;Given remove 存在 id The
   assert.deepEqual(h.unreleased, ['t1'])
   const r3 = await h.tool.execute({ action: 'remove', id: 'nope' })
   assert.equal(r3.ok, false)
+})
+
+test('Given takeover 行且 workflowEngine 缺失 When apply Then 干净禁用:inject 声明存在但门控未回调', () => {
+  const home = mkdtempSync(join(tmpdir(), 'rsww-roles-takeover-'))
+  const flowFile = join(home, 'flow.json5')
+  writeFileSync(flowFile, JSON.stringify({ id: 't-role', label: 'x', steps: [{ id: 'a', prompt: 'p', outputs: { o: 'o' } }] }))
+  const ctx = makeCtx({})
+  // 服务缺失:不抛错,engine 挂接与 agent/pre-step 注册均未发生(门控语义:fn 未执行)
+  assert.doesNotThrow(() => apply(ctx, { role: 'takeover', kind: 'flow', flowFile }))
+  assert.deepEqual(ctx.injected, [['workflowEngine']])
+})
+
+test('Given release 行且存在旧版释放物 When apply Then logger.info 播报移除清单;sweep 空则不播报', () => {
+  const home = mkdtempSync(join(tmpdir(), 'rsww-sweep-'))
+  // sweepLegacyReleases 播报裸 id(目录 rs-legacy-x → id legacy-x)
+  mkdirSync(join(home, '.agent-presets', 'rs-legacy-x'), { recursive: true })
+  writeFileSync(join(home, '.agent-presets', 'rs-legacy-x', '.dsh-rs-workflow-source.json'), JSON.stringify({ package: '@mzzsfy/dsh-rs-workflow', kind: 'flow', version: '0.9.0' }))
+  const empty = mkdtempSync(join(tmpdir(), 'rsww-sweep-empty-'))
+  const prev = process.env.DSH_RS_WORKFLOW_PRESET_ROOT
+  const infos = []
+  const logger = { info: (m) => infos.push(m), warn: () => {} }
+  try {
+    // sweep.removed 非空:播报且消息含移除清单条目
+    process.env.DSH_RS_WORKFLOW_PRESET_ROOT = home
+    apply(makeCtx({ logger }), { role: 'release' })
+    assert.equal(infos.length, 1)
+    assert.ok(infos[0].includes('移除'))
+    assert.ok(infos[0].includes('legacy-x'))
+    assert.ok(infos[0].includes('移除'))
+    // sweep.removed 为空:钉住 removed.length 判定,不播报
+    process.env.DSH_RS_WORKFLOW_PRESET_ROOT = empty
+    apply(makeCtx({ logger }), { role: 'release' })
+    assert.equal(infos.length, 1)
+  } finally {
+    if (prev === undefined) delete process.env.DSH_RS_WORKFLOW_PRESET_ROOT
+    else process.env.DSH_RS_WORKFLOW_PRESET_ROOT = prev
+  }
 })

@@ -6,6 +6,8 @@ const TOP_FIELDS = new Set(['id', 'label', 'description', 'inputs', 'steps'])
 const STEP_FIELDS = new Set(['id', 'label', 'slot', 'prompt', 'load', 'outputs', 'listOutputs', 'after', 'maxFail', 'for_each', 'mode', 'type', 'flow', 'input', 'target', 'rounds', 'onExhausted'])
 const ID_RE = /^[a-z][a-z0-9-]*$/
 const INPUT_NAME_RE = /^[a-z][a-zA-Z0-9]*$/
+// 保留步骤 id:{input.x} 占位符以入参命名空间优先解析,同 id 步骤产出会被遮蔽
+const RESERVED_STEP_IDS = new Set(['input'])
 const PLACEHOLDER_RE = /\{([^{}]+)\}/g
 const LOAD_PREFIX_RE = /^(skill|doc):/
 const MAX_ROUND = 10
@@ -87,6 +89,7 @@ export function validateTemplate(t) {
       continue
     }
     const target = `step:${s.id}`
+    if (RESERVED_STEP_IDS.has(s.id)) errors.push(err(target, `步骤 id ${s.id} 为保留字,与子流程入参命名空间冲突`))
     for (const k of Object.keys(s)) if (!STEP_FIELDS.has(k)) errors.push(err(target, `未知步骤字段 ${k}`))
     const type = s.type === undefined ? 'ai' : s.type
     if (!['ai', 'flow', 'approve'].includes(type)) errors.push(err(target, `type 仅支持 ai/flow/approve,得到 ${type}`))
@@ -165,6 +168,7 @@ export function validateTemplate(t) {
       if (s.outputs !== undefined || s.listOutputs !== undefined) errors.push(err(target, 'flow 步骤产出由子流程扁平挂载,不可声明 outputs/listOutputs'))
       if (s.load !== undefined || s.for_each !== undefined || s.mode !== undefined) errors.push(err(target, 'flow 步骤不支持 load/for_each/mode'))
       if (typeof s.flow !== 'string' || s.flow.trim() === '') errors.push(err(target, 'flow 步骤 flow 必填(模板 id 或 "{步骤id.产出名}" 动态路由)'))
+      else if (s.flow.trim() === t.id) errors.push(err(target, '子流程路由不可指向自身'))
       if (s.input !== undefined) {
         if (!isObj(s.input)) errors.push(err(target, 'input 须为对象'))
         else for (const [k, v] of Object.entries(s.input)) {
