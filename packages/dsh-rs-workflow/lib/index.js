@@ -49,7 +49,7 @@ export function apply(ctx, config) {
 function releaseRole(ctx) {
   try {
     const sweep = sweepLegacyReleases()
-    if (sweep.removed > 0) ctx.logger?.info?.(`rs-workflow 旧版释放物自清理: 移除 ${sweep.removed} 个目录`)
+    if (sweep.removed.length > 0) ctx.logger?.info?.(`rs-workflow 旧版释放物自清理: 移除 ${sweep.removed.join(', ')}`)
   } catch (error) {
     ctx.logger?.warn?.(`rs-workflow 旧版释放物清理失败: ${error?.message ?? error}`)
   }

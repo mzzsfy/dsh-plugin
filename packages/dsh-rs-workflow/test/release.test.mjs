@@ -61,6 +61,13 @@ test('Given 显式 dshHome When 求预设根与释放目标 Then 返回 .agent-p
   assert.equal(flowPresetDest('novel', home), join(home, PRESET_DIR, RS_PREFIX + 'novel'))
 })
 
+// O4 锚定:包内 preset/rs-workflow/agent.cordis.yml 即释放骨架,flowFile 锚定串必须恰一处
+test('Given 包内主组合骨架 When 检查 flowFile 锚定串 Then 恰出现一处(骨架单源守卫)', () => {
+  const skeleton = readFileSync(join(PKG_ROOT, 'preset', 'rs-workflow', AGENT_YAML), 'utf8')
+  const anchor = "new URL('flows/default.json5', baseUrl)"
+  assert.equal(skeleton.split(anchor).length - 1, 1)
+})
+
 test('Given 预设根 rs-novel(v0.3.0 本包 flow)与 rs-default(v4.0.0) When sweepLegacyReleases Then 前者删后者留且清单含两者', (t) => {
   const home = tempHome(t)
   writeMarker(home, 'novel', FLOW_MARKER(LEGACY_VERSION))
