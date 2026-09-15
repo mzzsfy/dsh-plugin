@@ -16,6 +16,9 @@ const DEFAULT_SLOT = {
   approve: 'reviewer-approve',
 }
 
+// 失败账缺省上限:step.maxFail 与 budgets.maxStepFail 均缺省时兜底,防无限重试
+const DEFAULT_MAX_STEP_FAIL = 2
+
 // 步骤槽位类别:常规/循环/重做/升级/审批(显式 slot 优先,审批不可覆盖)
 export function slotCategoryOf(step, { isRedo = false, isEscalate = false } = {}) {
   if (stepTypeOf(step) === 'approve') return 'approve'
@@ -118,7 +121,7 @@ export async function runBatch({ state, template, batch, ctx }) {
       const failTarget = meta.item.instance ? s.instances.find((x) => x.key === meta.item.instance.key) : s
       if (failTarget) {
         failTarget.failCount++
-        const limit = meta.step.maxFail ?? ctx.budgets.maxStepFail
+        const limit = meta.step.maxFail ?? ctx.budgets.maxStepFail ?? DEFAULT_MAX_STEP_FAIL
         if (failTarget.failCount >= limit) {
           failTarget.status = 'failed'
           failTarget.error = result.error

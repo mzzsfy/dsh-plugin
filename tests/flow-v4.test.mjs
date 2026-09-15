@@ -33,6 +33,31 @@ const APPROVE_REDO_TPL = {
   ],
 }
 
+const FLOW_ENTRY_TPL = {
+  id: 'entry', label: '入口',
+  steps: [
+    { id: 'triage', prompt: '分诊 {request}', outputs: { route: '路由', topic: '主题' } },
+    { id: 'fs', type: 'flow', after: ['triage'], flow: '{triage.route}', input: { topic: '{triage.topic}' } },
+    { id: 'final', after: ['fs'], prompt: '汇总 {fs.work.result}', outputs: { o: '产出' } },
+  ],
+}
+
+const FLOW_SUB_TPL = {
+  id: 'sub-a', label: '子流程A', inputs: { topic: '主题' },
+  steps: [
+    { id: 'work', prompt: '处理主题 {input.topic}', outputs: { result: '结果' } },
+  ],
+}
+
+const FOREACH_REDO_TPL = {
+  id: 'fer', label: '审批重做for_each',
+  steps: [
+    { id: 'plan', prompt: '列清单 {request}', outputs: { items: '条目' }, listOutputs: ['items'] },
+    { id: 'exec', after: ['plan'], for_each: 'plan.items', mode: 'parallel', prompt: '处理 {item}', outputs: { r: '结果' } },
+    { id: 'review', type: 'approve', after: ['exec'], target: 'plan', rounds: 2, onExhausted: 'blocked', prompt: '审 {request}' },
+  ],
+}
+
 const ESCALATE_TPL = {
   id: 'esc', label: '升级',
   steps: [
@@ -70,10 +95,10 @@ const harness = () => {
     }
     driver.start()
   })
-  const run = async ({ template, engineMap, runId, budgets = { maxStepFail: 2, approveRounds: 2, escalateLimit: 2 }, slots = {} }) => {
+  const run = async ({ template, templateSet = [], engineMap, runId, budgets = { maxStepFail: 2, approveRounds: 2, escalateLimit: 2 }, slots = {} }) => {
     const engine = stubEngine(engineMap, { promptIndex })
     const driver = new RunDriver({
-      template, runId: runId ?? `r-test-${Math.random().toString(36).slice(2, 8)}`, request: '需求R',
+      template, templateSet, runId: runId ?? `r-test-${Math.random().toString(36).slice(2, 8)}`, request: '需求R',
       parent: {}, engine, slots, budgets, store,
     })
     return await runToDone(driver)
@@ -282,4 +307,135 @@ test('Given 孤儿 running 记录 When 新 store 加载 Then 收敛 cancelled;re
   assert.equal(seed.steps.b.status, 'done')
   assert.equal(seed.steps.c.status, 'pending')
   assert.equal(seed.steps.a.outputs.o, 'A')
+})
+
+test('Given 批次在飞时 pause When 挂起批次收敛并补充消息后 resume Then 暂停期不派发且收敛照常落账,恢复批 prompt 含[用户补充],run completed', async () => {
+  const h = harness()
+  let batchSeq = 0
+  let releaseFirst = null
+  const engine = {
+    start({ args }) {
+      batchSeq++
+      const calls = args.calls
+      h.promptIndex.push(...calls.map((c) => c.prompt))
+      if (batchSeq === 1) {
+        return { result: new Promise((resolve) => { releaseFirst = () => resolve({ results: calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: '首批产出' } })) }) }) }
+      }
+      return { result: Promise.resolve({ results: calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: '后续产出' } })) }) }
+    },
+  }
+  const driver = new RunDriver({
+    template: CHAIN, runId: 'r-pause', request: '需求R', parent: {}, engine,
+    budgets: { maxStepFail: 2, approveRounds: 2, escalateLimit: 2 }, store: h.store,
+  })
+  const doneP = h.runToDone(driver)
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(h.promptIndex.length, 1)
+  driver.pause()
+  releaseFirst()
+  await new Promise((r) => setTimeout(r, 20))
+  // 已挂起批次收敛结果照常落账
+  const record = h.store.get('r-pause')
+  const submit = record.steps.a['-'].find((e) => e.event === 'submit')
+  assert.equal(submit.outputs.o, '首批产出')
+  assert.equal(driver.state.steps.a.status, 'done')
+  // paused 状态 dispatch 停止
+  assert.equal(h.promptIndex.length, 1)
+  // 补充消息受理:queued 增长,control 事件账落一条
+  assert.equal(driver.handlePost({ kind: 'message', text: '补充' }), true)
+  assert.deepEqual(record.queued, ['补充'])
+  assert.equal(record.controls.filter((c) => c.kind === 'message').length, 1)
+  driver.resume()
+  const { status } = await doneP
+  assert.equal(status, 'completed')
+  const resumed = h.promptIndex.find((p) => p.includes('[用户补充]'))
+  assert.ok(resumed && resumed.includes('补充'))
+  assert.deepEqual(record.queued, [])
+  assert.equal(record.controls.length, 1)
+})
+
+test('Given 双模板集 When flow 步按分诊输出路由 Then 子流程 input 传参生效且产出按子键扁平挂载;空路由 done 且 outputs 空;未知路由 failed 下游 skipped run failed', async () => {
+  const h = harness()
+  let subPrompt = ''
+  const main = await h.run({
+    template: FLOW_ENTRY_TPL, templateSet: [FLOW_SUB_TPL],
+    engineMap: (call) => {
+      if (call.prompt.includes('处理主题')) { subPrompt = call.prompt; return { result: '子产出S' } }
+      if (call.prompt.includes('汇总')) return { o: 'F' }
+      return { route: 'sub-a', topic: '话题T' }
+    },
+  })
+  assert.equal(main.status, 'completed')
+  assert.ok(subPrompt.includes('话题T'))
+  assert.equal(main.driver.state.steps.fs.status, 'done')
+  assert.deepEqual(main.driver.state.steps.fs.outputs, { 'work.result': '子产出S' })
+  const finalPrompt = h.promptIndex.find((p) => p.includes('汇总'))
+  assert.ok(finalPrompt.includes('子产出S'))
+
+  const emptyRoute = await h.run({
+    template: FLOW_ENTRY_TPL, templateSet: [FLOW_SUB_TPL],
+    engineMap: (call) => (call.prompt.includes('汇总') ? { o: 'F' } : { route: '', topic: 'x' }),
+  })
+  assert.equal(emptyRoute.status, 'completed')
+  assert.equal(emptyRoute.driver.state.steps.fs.status, 'done')
+  assert.deepEqual(emptyRoute.driver.state.steps.fs.outputs, {})
+
+  const badRoute = await h.run({
+    template: FLOW_ENTRY_TPL, templateSet: [FLOW_SUB_TPL],
+    engineMap: (call) => (call.prompt.includes('汇总') ? { o: 'F' } : { route: 'ghost', topic: 'x' }),
+  })
+  assert.equal(badRoute.status, 'failed')
+  assert.equal(badRoute.driver.state.steps.fs.status, 'failed')
+  assert.ok(badRoute.driver.state.steps.fs.error.includes('子流程模板不存在'))
+  assert.equal(badRoute.driver.state.steps.final.status, 'skipped')
+})
+
+test('Given 审批驳回列表源(target 产出新列表) When 重做 Then for_each 按新列表重展开,旧实例事件流保留,新实例产出覆盖,run completed', async () => {
+  const h = harness()
+  let execSeq = 0
+  let reviewSeq = 0
+  const { status, driver } = await h.run({
+    template: FOREACH_REDO_TPL,
+    engineMap: (call) => {
+      if (call.prompt.includes('[重做说明]')) return { items: ['a', 'b', 'c'] }
+      if (call.prompt.includes('列清单')) return { items: ['x', 'y'] }
+      if (call.prompt.includes('处理')) { execSeq++; return { r: `R${execSeq}` } }
+      reviewSeq++
+      return reviewSeq === 1 ? { verdict: 'REJECTED', comments: '重列清单' } : { verdict: 'APPROVED', comments: '通过' }
+    },
+  })
+  assert.equal(status, 'completed')
+  assert.equal(driver.state.approvals.review.rounds, 1)
+  const redoPrompt = h.promptIndex.find((p) => p.includes('[重做说明]'))
+  assert.ok(redoPrompt.includes('重列清单'))
+  // 按新列表重展开,实例数 2→3
+  assert.deepEqual(driver.state.steps.exec.instances.map((i) => i.key), ['#1', '#2', '#3'])
+  // 新实例产出覆盖实例级挂载
+  assert.equal(driver.state.steps.exec.instances[0].outputs.r, 'R3')
+  // 旧实例事件流按 key 保留,新事件追加,末位 submit 为新产出
+  const record = h.store.get(driver.runId)
+  const ev1 = record.steps.exec['#1']
+  assert.equal(ev1.length, 4)
+  assert.equal(ev1[1].outputs.r, 'R1')
+  assert.equal(ev1[3].outputs.r, 'R3')
+})
+
+test('Given budgets.maxStepFail=1 When 步骤失败 Then 一次即 failed;默认对照两次重试,dispatch 次数随值变化', async () => {
+  const h = harness()
+  const strict = await h.run({
+    template: CHAIN, engineMap: () => null, runId: 'r-budget1',
+    budgets: { maxStepFail: 1, approveRounds: 2, escalateLimit: 2 },
+  })
+  assert.equal(strict.status, 'failed')
+  assert.equal(strict.driver.state.steps.a.failCount, 1)
+  assert.equal(strict.driver.state.steps.b.status, 'skipped')
+  const lenient = await h.run({
+    template: CHAIN, engineMap: () => null, runId: 'r-budget2',
+  })
+  assert.equal(lenient.status, 'failed')
+  assert.equal(lenient.driver.state.steps.a.failCount, 2)
+  const d1 = h.store.get('r-budget1').steps.a['-'].filter((e) => e.event === 'dispatch').length
+  const d2 = h.store.get('r-budget2').steps.a['-'].filter((e) => e.event === 'dispatch').length
+  assert.equal(d1, 1)
+  assert.equal(d2, 2)
 })

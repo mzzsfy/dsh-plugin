@@ -7,6 +7,12 @@ import { registerDriver, unregisterDriver, registry } from './control.mjs'
 
 const TERMINAL_STATES = new Set(['completed', 'cancelled', 'failed', 'blocked'])
 
+const CANCELLED_SUMMARY = '用户取消,已完成步骤保留,可在运行中心续跑'
+
+// 批次间宏任务让步时长:防止失败重试微任务级联饿死宿主同进程定时器/HTTP
+const BATCH_YIELD_MS = 0
+const yieldToLoop = () => new Promise((resolve) => setTimeout(resolve, BATCH_YIELD_MS))
+
 function initState(template, request, inputs) {
   const state = {
     status: 'running', request, inputs: inputs ?? {},
@@ -52,7 +58,7 @@ export function buildSeed(record, template, fromStepId, inputs) {
 }
 
 export class RunDriver {
-  constructor({ template, templateSet = [], runId, request, inputs, state, parent, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal }) {
+  constructor({ template, templateSet = [], runId, request, inputs, state, parent, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false }) {
     this.template = template
     this.templateSet = templateSet
     this.runId = runId
@@ -71,6 +77,8 @@ export class RunDriver {
     this.pauseResolve = null
     this.paused = false
     this.finished = false
+    // 嵌套子流程:记账由父 driver 汇总,终态不落 store、不注销父注册
+    this.subordinate = subordinate
   }
 
   start() {
@@ -103,6 +111,8 @@ export class RunDriver {
   cancel() {
     if (this.finished) return
     this.controller.abort()
+    this.pauseResolve?.()
+    this.pauseResolve = null
     this.onNotice?.('若水编排已取消,已完成步骤保留,可在运行中心续跑')
   }
 
@@ -150,6 +160,8 @@ export class RunDriver {
     if (this.finished) return
     this.finished = true
     this.state.status = status
+    if (this.subordinate) return
+    this.store.update({ runId: this.runId, queued: [] })
     this.store.finish({ runId: this.runId, status, summary: summary ?? '' })
     unregisterDriver(this.runId)
   }
@@ -157,15 +169,24 @@ export class RunDriver {
   async loop() {
     for (;;) {
       await this.gate()
-      if (this.signal.aborted) break
+      if (this.signal.aborted) {
+        this.finish('cancelled', CANCELLED_SUMMARY)
+        return
+      }
+      await yieldToLoop()
       const { inject, queued } = this.drainControls()
       const batch = nextBatch(this.state, this.template, this.budgets)
       if (batch.kind === 'terminal') {
-        this.judgeTerminal()
+        // 升级账/审批耗尽置账后,blocked 终态先于 pending 残留判定
+        if (this.state.terminalBlocked) {
+          this.finish('blocked', this.state.terminalBlocked)
+        } else {
+          this.judgeTerminal()
+        }
         return
       }
       if (batch.kind === 'blocked') {
-        this.finish('blocked', batch.reason)
+        this.finish('blocked', this.state.terminalBlocked ?? batch.reason)
         return
       }
       if (batch.kind === 'idle') {
@@ -193,7 +214,7 @@ export class RunDriver {
       // 重做说明只服务紧邻的重做批次,派发后即清
       this.state.redoInfo = {}
       if (outcome.cancelled) {
-        this.finish('cancelled', '用户取消,已完成步骤保留,可在运行中心续跑')
+        this.finish('cancelled', CANCELLED_SUMMARY)
         return
       }
       // 审批路由:批次中若含 approve 步已完成,走裁决
@@ -208,14 +229,6 @@ export class RunDriver {
             this.finish('blocked', this.state.terminalBlocked)
             return
           }
-        }
-      }
-      if (this.state.terminalBlocked) {
-        // 升级账达上限:升级步若已派发完成则 blocked
-        const escalatePending = Object.entries(this.state.steps).some(([id, s]) => s.status === 'pending' || s.status === 'running')
-        if (!escalatePending) {
-          this.finish('blocked', this.state.terminalBlocked)
-          return
         }
       }
       this.persistState()
@@ -252,7 +265,7 @@ export class RunDriver {
       template: sub, templateSet: this.templateSet, runId: this.runId, request: this.request,
       inputs: subState.inputs, state: subState, parent: this.parent, engine: this.engine,
       slots: this.slots, budgets: this.budgets, sessionId: this.sessionId, workspace: this.workspace,
-      store: this.store, signal: this.signal,
+      store: this.store, signal: this.signal, subordinate: true,
     })
     this.store.step({ runId: this.runId, stepId: step.id, event: 'dispatch', body: { prompt: `[嵌套子流程] ${route}`, callLabel: route } })
     await subDriver.loop()

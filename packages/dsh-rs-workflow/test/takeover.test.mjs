@@ -145,6 +145,8 @@ test('Given 在飞时第二条消息 When pre-step Then 入队+notice+reject,批
   const agent = makeAgent('s2', notices)
   await h.firePreStep(msgPayload(agent, '第一条'))
   const runId = h.store.list()[0].runId
+  // 批次间宏任务让步后派发非同步,等首批挂起进入在飞窗口
+  while (pending.length === 0) await new Promise((r) => setTimeout(r, 5))
   // 在飞窗口内第二条:入队
   const second = await h.firePreStep(msgPayload(agent, '补充要求'))
   assert.equal(second.result.kind, 'reject')
@@ -189,4 +191,72 @@ test('Given 发起器注册 When resume 经 initiatorOf Then 同会话再起 run
   await new Promise((r) => setTimeout(r, 80))
   const records = h.store.list()
   assert.equal(records.length, 2)
+})
+
+test('Given 在飞 run When 控制命令与注入消息 Then notice 转写控制文案且为扁平原生形态', async () => {
+  // 可控引擎:首批次挂起,driver 停在 runBatch await,gate 未进入,pause/resume/cancel 的 onNotice 同步触发
+  const pending = []
+  const engine = {
+    start: ({ args }) => {
+      const promise = new Promise((res) => {
+        pending.push(() => res({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'X' } })) }))
+      })
+      return { result: promise }
+    },
+  }
+  const h = setup(null, null, engine)
+  const notices = []
+  const agent = makeAgent('s-ctrl', notices)
+  await h.firePreStep(msgPayload(agent, '控制请求'))
+  await new Promise((r) => setTimeout(r, 80))
+  const runId = h.store.list()[0].runId
+  const driver = registry.drivers.get(runId)
+  assert.ok(driver)
+  // 控制命令与注入消息经 driver 即时通道触发 onNotice → 会话 notice
+  driver.pause()
+  driver.resume()
+  assert.equal(driver.handlePost({ kind: 'message', text: '注入内容', inject: true }), true)
+  driver.cancel()
+  const textOf = (n) => n.data.content[0].text
+  assert.ok(notices.some((n) => textOf(n).includes('已暂停')))
+  assert.ok(notices.some((n) => textOf(n).includes('已恢复运行')))
+  assert.ok(notices.some((n) => textOf(n).includes('已收到注入消息')))
+  assert.ok(notices.some((n) => textOf(n).includes('已取消')))
+  // 扁平原生形态:user/message + role user + source.form notice + 单段 text
+  const notice = notices.find((n) => textOf(n).includes('已暂停'))
+  assert.equal(notice.kind, 'user/message')
+  assert.equal(notice.data.role, 'user')
+  assert.equal(notice.data.source.form, 'notice')
+  assert.equal(notice.data.content[0].type, 'text')
+  // 收尾:放行挂起批次,abort 语义走 finish('cancelled') 收敛
+  pending[0]()
+  await new Promise((r) => setTimeout(r, 60))
+})
+
+test('Given notice 写入抛错 When pre-step 首消息 Then 仍 reject 且 run 启动且 logger.warn 降级', async () => {
+  const h = setup()
+  const warns = []
+  h.ctx.logger = { warn: (m) => warns.push(m), error: () => {} }
+  let appendCalls = 0
+  const agent = {
+    id: 'agent-err',
+    session: {
+      id: 's-err',
+      header: {},
+      append: () => {
+        appendCalls++
+        throw new Error('会话通道损坏')
+      },
+    },
+  }
+  const { result, nextCalled } = await h.firePreStep(msgPayload(agent, '首消息'))
+  assert.equal(nextCalled, false)
+  assert.equal(result.kind, 'reject')
+  await new Promise((r) => setTimeout(r, 100))
+  // 写入失败不阻断接管与编排:run 正常落 store 并完成,接管与终态两次 notice 均降级为 warn
+  assert.equal(h.store.list().length, 1)
+  assert.equal(h.store.list()[0].status, 'completed')
+  assert.ok(appendCalls >= 2)
+  assert.ok(warns.length >= 2)
+  assert.ok(warns.every((m) => m.includes('会话提示写入失败')))
 })
