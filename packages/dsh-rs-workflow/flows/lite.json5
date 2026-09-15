@@ -1,0 +1,11 @@
+{
+  id: "lite", label: "轻量直办",
+  description: "单一任务直达:提炼任务卡即执行,终审把关,僵局升级兜底。适合边界清晰的小型交付。",
+  inputs: { brief: "需求简报;经协作分诊路由时由上游注入,独立运行时留空" },
+  steps: [
+    { id: "task", label: "任务提炼", slot: "planner", prompt: "把需求提炼为单一任务卡:目标、边界(不做什么)、验收口径。发现多交付物/多阶段迹象时显式收窄到最核心一件。需求:{request}\n简报:{input.brief}(为空则以需求原文为准)", outputs: { task: "任务卡:目标/边界/验收口径" } },
+    { id: "execute", label: "执行", after: ["task"], prompt: "按任务卡完成交付,逐条对齐验收口径。需求:{request}\n任务卡:{task.task}", outputs: { result: "执行结果:交付物与产物/变更清单" } },
+    { id: "final-approve", label: "终审", type: "approve", slot: "reviewer-approve", after: ["execute"], target: "execute", rounds: 2, onExhausted: "escalate", prompt: "对照任务卡验收口径终审执行结果:达标放行;不达标驳回并写明逐条修正要求。需求:{request}" },
+    { id: "escalate", label: "升级兜底", slot: "executor-escalate", prompt: "终审多轮未过,放弃原方案:以最保守方式直接完成核心验收项,产出降级交付与遗留清单,不再重试。需求:{request}\n任务卡:{task.task}", outputs: { fallback: "降级交付:保守产出+遗留清单" } },
+  ],
+}

@@ -1,0 +1,9 @@
+{
+  id: "multi-plan", label: "协作分诊",
+  description: "不确定用哪个协作模板时的自动分诊入口:分析需求信号,路由到 lite / plan-final / step-review 之一。",
+  steps: [
+    { id: "triage", label: "分诊", slot: "planner", prompt: "分析需求信号(任务数、阶段数、依赖强度、风险),从目录选择唯一子流程。目录:lite=单一任务直达;plan-final=多任务需先审计划;step-review=强依赖任务链整批审定。需求:{request}", outputs: { route: "选中的子流程 id,必须是 lite/plan-final/step-review 之一", brief: "子流程需求简报:目标+边界+验收口径" } },
+    { id: "run", label: "展开子流程", type: "flow", after: ["triage"], flow: "{triage.route}", input: { brief: "{triage.brief}" } },
+    { id: "deliver", label: "汇总交付", after: ["run"], prompt: "汇总子流程产出为交付说明:走了哪条路径、做了什么、产物清单、遗留事项;子流程未选中任何路径时说明原因并给出建议入口。需求:{request}", outputs: { report: "交付说明(Markdown)" } },
+  ],
+}
