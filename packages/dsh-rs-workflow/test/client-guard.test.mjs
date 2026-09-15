@@ -1,4 +1,5 @@
-// 体量守卫:每源文件 ≤ 600 行;client 半区关键契约(模块注册/守卫类名/别名 token)钉住
+// 体量守卫:lib/engine 每源文件 ≤ 600 行;client 单文件预算 ≤ 1500 行(平台单入口约束);
+// client 半区关键契约(模块注册/守卫类名/别名 token)钉住
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -7,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const MAX_LINES = 600
+const CLIENT_MAX_LINES = 1500
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -17,17 +19,21 @@ function walk(dir, out = []) {
   return out
 }
 
-test('Given 全部源文件 When 统计行数 Then 每文件 ≤ 600 行', () => {
+test('Given 全部 lib/engine 源文件 When 统计行数 Then 每文件 ≤ 600 行', () => {
   const files = [
     ...walk(join(PKG_ROOT, 'lib')),
     ...walk(join(PKG_ROOT, 'engine')),
-    join(PKG_ROOT, 'src', 'client.js'),
   ]
   assert.ok(files.length >= 15)
   for (const file of files) {
     const lines = readFileSync(file, 'utf8').split('\n').length
     assert.ok(lines <= MAX_LINES, `${file} 行数 ${lines} 超限 ${MAX_LINES}`)
   }
+})
+
+test('Given client.js When 统计行数 Then ≤ 1500 行(平台单入口,分区 banner 预算)', () => {
+  const lines = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8').split('\n').length
+  assert.ok(lines <= CLIENT_MAX_LINES, `client.js 行数 ${lines} 超预算 ${CLIENT_MAX_LINES}`)
 })
 
 test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/类名前缀/别名 token 齐备', () => {
