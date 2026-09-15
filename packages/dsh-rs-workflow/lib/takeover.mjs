@@ -142,27 +142,30 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 	}
 	// 在飞编排账本:同一会话同一时刻至多一个 run(pre-step 串行化依赖单线程语义)
 	const active = new Map(); // agent.id → { runId, turn }
-	/** 会话流坐标(持久化校验 turn/step 必须为正数,0 或缺省会导致回合落盘失败) */
-	const lastTurn = new Map(); // agent.id → 最后一次拦截见到的 turn
 
-	/** 向会话流写一条用户可见的系统消息。pre-step reject 不产生任何模型记录,
-	 *  没有它被拦截会话在 GUI 里完全空白(消息石沉大海)。失败只降级不影响拦截。 */
-	function note(agent, turn, step, text) {
-		const safeTurn = Number.isInteger(turn) && turn > 0 ? turn : lastTurn.get(agent.id);
-		if (!Number.isInteger(safeTurn) || safeTurn <= 0) {
-			ctx.logger?.warn?.(`rs-workflow 会话提示缺少有效 turn(收到 turn=${JSON.stringify(turn ?? null)}),跳过会话流写入`);
-			return;
-		}
+	/** 向会话流写一条用户可见的编排提示。pre-step reject 不产生任何模型记录,
+	 *  没有它被拦截会话在 GUI 对话区完全空白(用户不知道后台发生了什么)。
+	 *  形态必须是 user/message 的 data 扁平原生形状(id/role/source/content 在顶层):
+	 *  - system/message 被模型侧 SystemPromptProjection 强占为系统提示词投影,
+	 *    非提示词内容会在下一次请求被 replace 清洗,且 GUI 渲染为提示词卡(错位);
+	 *  - user/message 带 turn/step 或嵌套 message 包装会使会话标题投影
+	 *    (sessionTitleUserMessageOf 读 data.source)读到 undefined 崩溃,
+	 *    连带 collab 子代理 spawn 与 auto-continue 全链失败(实测)。
+	 *  kind:'plugin'+form:'notice' 即官方合成上下文注入形态(GUI 渲染 context 行),
+	 *  会进入模型历史:接管后主模型零参与,失败回退时模型可借此知晓编排经过。
+	 *  失败只降级不影响拦截。 */
+	function note(agent, text) {
 		try {
-			agent.session.append("system/message", {
-				turn: safeTurn,
-				step: Number.isInteger(step) && step > 0 ? step : 1,
-				message: {
-					id: randomUUID(),
-					role: "system",
-					source: { kind: "plugin", plugin: "@mzzsfy/dsh-rs-workflow" },
-					content: [{ type: "text", text }],
+			agent.session.append("user/message", {
+				id: randomUUID(),
+				role: "user",
+				source: {
+					kind: "plugin",
+					plugin: "@mzzsfy/dsh-rs-workflow",
+					form: "notice",
+					summary: text.split("\n")[0].slice(0, 120),
 				},
+				content: [{ type: "text", text }],
 			}, { surfaceOp: "append" });
 		} catch (error) {
 			ctx.logger?.warn?.(`rs-workflow 会话提示写入失败: ${error?.message ?? error}`);
@@ -199,19 +202,22 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 			if (active.has(agent.id)) {
 				const entry = active.get(agent.id);
 				store.appendNode({ runId: entry.runId, nodeId: "inbox", status: "ignored", summary: "运行期间追加消息已忽略: " + text.slice(0, 80) }).catch(() => {});
-				note(agent, payload.turn, payload.step, "若水编排进行中,该消息已忽略(完成后可继续提交)。");
+				note(agent, "若水编排进行中,该消息已忽略(完成后可继续提交)。");
 				return { kind: "reject" };
 			}
-			startRun(agent, text, payload.turn).catch((error) => {
+			// 记录形态的 request 剔除系统注入段(system-reminder 等标签块):
+			// payload.messages 是拼装后的模型请求,看板/页签展示用户原始输入
+			const userText = text.split(/<\/?system-reminder>/i)[0].trim();
+			startRun(agent, userText === "" ? text : userText).catch((error) => {
 				ctx.logger?.error?.(`rs-workflow 编排启动失败: ${error?.stack ?? error?.message ?? error}`);
-				note(agent, payload.turn, payload.step, "若水编排启动失败: " + String(error?.message ?? error).slice(0, 200));
+				note(agent, "若水编排启动失败: " + String(error?.message ?? error).slice(0, 200));
 			});
-			note(agent, payload.turn, payload.step, "若水编排已接管本请求(模式: " + (kind === "flow" ? flow?.id || "flow" : "协作编码") + "),进度见工作流看板。");
+			note(agent, "若水编排已接管本请求(模式: " + (kind === "flow" ? flow?.id || "flow" : "协作编码") + "),进度见工作流看板。");
 			return { kind: "reject" };
 		}), "rs-workflow takeover pre-step");
 	});
 
-	async function startRun(agent, request, turn) {
+	async function startRun(agent, request) {
 		const settings = readSettings(ctx);
 		const flows = kind === "flow" ? discoverFlowRegistry(home) : {};
 		if (kind === "flow" && flow) flows[flow.id] = flow;
@@ -234,9 +240,9 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 			subagentProvider: "spawn",
 		});
 		const runId = String(run.id);
-		active.set(agent.id, { runId, turn });
-		lastTurn.set(agent.id, turn);
-		const storeRun = await store.start({ runId, workspace, request, templateId: kind === "flow" ? "flow:" + flow.id : "collab" });
+		active.set(agent.id, { runId });
+		const sessionId = agent && agent.session ? String(agent.session.id || agent.id || "") : "";
+		const storeRun = await store.start({ runId, workspace, request, templateId: kind === "flow" ? "flow:" + flow.id : "collab", sessionId });
 		run.result.then((result) => {
 			active.delete(agent.id);
 			const ok = !!(result && result.stopReason === "completed");
@@ -244,12 +250,12 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 				? summarizeFlowResult(result.value)
 				: String((result && result.error) || "编排异常结束").slice(0, 300);
 			store.finish({ runId, ok, result: (result && result.value) || null, summary, blocked: ok ? null : { reason: summary } }).catch(() => {});
-			note(agent, turn, null, ok ? "若水编排完成: " + summary : "若水编排未完成: " + summary);
+			note(agent, ok ? "若水编排完成: " + summary : "若水编排未完成: " + summary);
 		}).catch((error) => {
 			active.delete(agent.id);
 			const reason = "编排异常: " + String(error?.message ?? error).slice(0, 300);
 			store.finish({ runId, ok: false, summary: reason, blocked: { reason } }).catch(() => {});
-			note(agent, turn, null, "若水编排失败: " + reason);
+			note(agent, "若水编排失败: " + reason);
 		});
 		return storeRun;
 	}

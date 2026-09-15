@@ -28,9 +28,10 @@ test('数据目录:env 覆盖优先,缺省落在 ~/.dsh/dsh-rs-workflow', () => 
 
 test('start 生成 runId 并落盘;list 新到旧;get 按 id 取', async (t) => {
   const { dir, store } = await makeStore(t)
-  const first = await store.start({ request: '需求一', workspace: 'C:/ws/a' })
+  const first = await store.start({ request: '需求一', workspace: 'C:/ws/a', sessionId: 's-1' })
   assert.ok(first.runId.startsWith('r-'), 'runId 自动生成')
   assert.equal(first.status, 'running')
+  assert.equal(first.sessionId, 's-1', 'sessionId 落记录(会话页签按其过滤)')
   const second = await store.start({ request: '需求二', workspace: 'C:/ws/a' })
   const list = await store.list()
   assert.deepEqual(list.map((r) => r.runId), [second.runId, first.runId], '新到旧')
@@ -39,8 +40,11 @@ test('start 生成 runId 并落盘;list 新到旧;get 按 id 取', async (t) => 
   assert.equal(list[0].updates, undefined)
   const full = await store.get(first.runId)
   assert.equal(full.request, '需求一')
-  // 落盘验证:重开实例读到同数据
+  // 落盘验证:重开实例读到同数据(sessionId 含在内)
   const reopened = createStore({ dir })
+  const refetched = await reopened.get(first.runId)
+  assert.equal(refetched.request, '需求一')
+  assert.equal(refetched.sessionId, 's-1', 'sessionId 持久化')
   assert.equal((await reopened.get(second.runId)).request, '需求二')
 })
 

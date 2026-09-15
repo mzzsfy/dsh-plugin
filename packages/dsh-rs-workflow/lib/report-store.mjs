@@ -34,6 +34,7 @@ function normalizeRun(input) {
   const body = input && typeof input === "object" ? input : {};
   return {
     runId: typeof body.runId === "string" && body.runId.trim() !== "" ? body.runId.trim() : "",
+    sessionId: typeof body.sessionId === "string" ? body.sessionId : "",
     workspace: typeof body.workspace === "string" ? body.workspace : "",
     request: typeof body.request === "string" ? body.request.slice(0, 2000) : "",
     templateId: typeof body.templateId === "string" ? body.templateId : "",
@@ -121,10 +122,10 @@ export function createStore({ dir }) {
       await ensureLoaded();
       return runs.find((run) => run.runId === runId) || null;
     },
-    async start({ runId, workspace, request, templateId }) {
+    async start({ runId, workspace, request, templateId, sessionId }) {
       await ensureLoaded();
       const id = typeof runId === "string" && runId.trim() !== "" ? runId.trim() : "r-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-      const run = normalizeRun({ runId: id, workspace, request, templateId, startedAt: Date.now(), status: "running" });
+      const run = normalizeRun({ runId: id, workspace, request, templateId, sessionId, startedAt: Date.now(), status: "running" });
       upsert(run);
       await persist();
       return run;
