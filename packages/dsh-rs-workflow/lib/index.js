@@ -1,5 +1,7 @@
 /**
- * dsh-rs-workflow — 若水工作流:通用强流程工作流编排工具。
+ * dsh-rs-workflow — 若水工作流:强规则驱动工作流编排工具。
+ * 目标:把 AI 自驱的工作流变成强规则驱动——控制权从模型手里收回到引擎手里:
+ * 弱 AI 在规则兜底下可用(产出不达标不放行),强 AI 行为被规则约束(每步只回答被问的问题)。
  *
  * 一个包,多种行角色(由组合行 config.role 决定,加载前经 Config 校验):
  *   - "settings":注册 settings 命名空间 "rs-workflow"(host 层,profile patch 行)。
@@ -10,7 +12,7 @@
  *   - "report":注册 rs_workflow_report 模型工具(运行上报,预设层)。
  *   - "takeover":pre-step 引擎接管 + workflowEngine 编程启动(预设层,delegation 组内)。
  *
- * 强流程语义:模式内用户消息被 pre-step 拦截(主模型零参与),编排由插件自带脚本
+ * 强规则语义:模式内用户消息被 pre-step 拦截(主模型零参与),编排由插件自带脚本
  * (engine/flow.js 通用解释器 | engine/collab.js 协作模板)驱动,每步产出契约强制校验。
  */
 import z from "@deepseek-ai/schemastery";

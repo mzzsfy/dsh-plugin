@@ -13,7 +13,7 @@
 //   }
 // 只用 agent / parallel / phase / log 钩子;无 fs / network / timer / Node API。
 //
-// 强流程语义(弱模型补偿,提示词口径对齐原版 rs-tui):
+// 强规则语义(控制权全在引擎,模型只产出内容;弱模型兜底可用,强模型行为可预期):
 //   - 每步一条自包含指令(指令模板 + 资源全文 + 上游产出注入),子代理回复末尾必须
 //     携带 <output name="..."> 产出块;缺块 → 附格式示例教学重问(不烧失败账),
 //     重问预算耗尽 → 步骤失败;调用失败 → 烧失败账,原地重试换模型(候选游标轮换),
@@ -247,7 +247,8 @@ async function runFlow(flow, runArgs) {
     }
   }
 
-  // 单实例执行:一轮循环内同时计失败账(调用失败)与重问账(产出缺失),双预算封顶
+  // 单实例执行:重问账(产出缺失)与失败账(调用失败)各自独立计数,
+  // 轮次上限 = 两者之和(有界确定性终点);任一账超限本步骤即失败
   async function runInstance(step, ctxInst, labelSuffix) {
     const contract = Object.keys(step.outputs || {})
     const maxFail = step.maxFail || STEP_FAIL_RETRY

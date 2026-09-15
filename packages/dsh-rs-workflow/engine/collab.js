@@ -12,6 +12,8 @@
 // 协议要点(对齐原版 rs-tui 弱模型语义, planner-system/task-system/review-verdict 同构):
 //   全部子代理自由文本返回, 不用 schema 硬校验 —— 原版明确动机:
 //   "弱模型对结构化 JSON 参数支持差, 纯文本协议降低产出门槛"。
+//   自由文本只是产出门槛的妥协, 规则外壳不变: 协议块缺失/不完整 = 未达标不放行,
+//   重问与预算全部在引擎, 模型没有任何流程决定权(强规则目标见 docs/DESIGN.md §1)。
 //   - 分诊/规划/重规划: 回复末尾输出 <plan> XML, 引擎容错解析(parsePlanXml 同构移植)
 //   - 执行: 回复末尾输出 <rs-task-report> 报告块; 形态不完整不烧失败账, 走补救追问
 //   - 审批: 回复末尾输出 <rs-review-verdict> 裁决块; 裁决词中英归一化(normalizeVerdict 同构)
@@ -97,7 +99,7 @@ const TASK_SLOT_BY_REASON = {
 
 // 各模板执行语气(原始 TASK_TONE)
 const TASK_TONE = {
-  lite: '改动自行运行验证，报告需包含验证结果，终审只兜底',
+  lite: '改动必须运行验证，报告需包含验证命令与结果，终审全量核查',
   'plan-final': '严格按计划顺序执行，每完成一个任务报告进度',
   'step-review': '每完成一个任务报告变更与自验结果供审',
   'multi-plan': '子计划内按细化方案执行，子计划完成输出交付清单',
