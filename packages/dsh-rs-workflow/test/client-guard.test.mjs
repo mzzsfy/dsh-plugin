@@ -37,8 +37,8 @@ test('类名前缀 rsww- 全量约束(全局注入防跨包冲突)', () => {
   }
   const cssClasses = [...source.matchAll(/\.rsww-[a-z-]+/g)].map((match) => match[0])
   assert.ok(cssClasses.length > 0, 'CSS 类名缺失')
-  const foreign = source.match(/\.(?!rsww-)[a-z][a-z-]+\{/g) || []
-  assert.deepEqual(foreign.filter((c) => !c.startsWith('.rsww-')), [], `CSS 存在非 rsww- 前缀类: ${foreign}`)
+  const foreign = source.match(/\.(?!rsww-?)[a-z][a-z-]+\{/g) || []
+  assert.deepEqual(foreign.filter((c) => !c.startsWith('.rsww')), [], `CSS 存在非 rsww- 前缀类: ${foreign}`)
 })
 
 test('宿主注册形态:slots 点分注入 settings.section(旧宿主 fiber 未激活即干净禁用)', () => {

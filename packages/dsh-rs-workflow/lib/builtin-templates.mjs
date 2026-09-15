@@ -43,3 +43,8 @@ export function builtinTemplates() {
 	cached = items;
 	return items;
 }
+
+/** id 是否命中内置模板(UI 分组「内置/自定义」的判定源)。 */
+export function isBuiltinTemplate(id) {
+	return builtinTemplates().some((t) => t.id === id);
+}

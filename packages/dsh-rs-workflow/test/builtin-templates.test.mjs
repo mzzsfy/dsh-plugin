@@ -11,7 +11,7 @@ const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const FLOWS_DIR = join(PKG_ROOT, 'flows')
 
 const { validateFlow, parseFlowJson5 } = await import('../lib/flows.mjs')
-const { builtinTemplates } = await import('../lib/builtin-templates.mjs')
+const { builtinTemplates, isBuiltinTemplate } = await import('../lib/builtin-templates.mjs')
 const { SETTINGS_SCHEMA, releaseFlowTemplate, unreleaseFlowTemplate } = await import('../lib/index.js')
 
 test('U1 三份内置模板 JSON5 解析 + validateFlow 零错误', () => {
@@ -35,6 +35,19 @@ test('U3 settings 默认 templates 恰含三个内置 id', () => {
 	const value = SETTINGS_SCHEMA({})
 	const ids = (value.templates || []).map((t) => t.id).sort()
 	assert.deepEqual(ids, ['default', 'news', 'novel'])
+})
+
+test('U9 isBuiltinTemplate:内置 id 命中,自定义 id 不命中', () => {
+	assert.equal(isBuiltinTemplate('novel'), true)
+	assert.equal(isBuiltinTemplate('news'), true)
+	assert.equal(isBuiltinTemplate('default'), true)
+	assert.equal(isBuiltinTemplate('my-flow'), false)
+	assert.equal(isBuiltinTemplate(''), false)
+	assert.equal(isBuiltinTemplate(undefined), false)
+})
+
+test('U3b 默认模板条目字段完整', () => {
+	const value = SETTINGS_SCHEMA({})
 	for (const entry of value.templates) {
 		assert.equal(entry.enabled, true)
 		assert.ok(entry.json5.includes(`id: "${entry.id}"`), `${entry.id} 的 json5 应内嵌定义全文`)

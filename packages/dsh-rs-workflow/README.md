@@ -14,7 +14,7 @@
 |---|---|---|---|
 | `settings` | host | 包内 bundle patch(cordis.patch.yml) | 注册 settings 命名空间 `rs-workflow`:16 工作位(3 基础+13 细分)、collab 默认项、预算、**流程模板数组(templates)**,持久化于 `~/.dsh/settings.yaml` |
 | `preset-sync` | host | 同上 | 启动时把包内 `preset/rs-workflow`(collab 模式)幂等释放到用户预设根;并提供 `releaseFlowTemplate`/`unreleaseFlowTemplate` 供模板释放为 `rs-<id>` 模式 |
-| `board` | host | 同上 | 注册 `/api/rs-workflow/*`:运行看板读路(run/runs/remove)+ 模板管理写路(templates/spec/release/unrelease/template-save/template-remove)→ GUI 设置页「若水工作流」「若水·流程模板」分区 |
+| `board` | host | 同上 | 注册 `/api/rs-workflow/*`:运行看板读路(run/runs/remove)+ 模板读写路(templates/spec/released/release/unrelease/template-save/template-remove)→ GUI 设置页唯一「若水工作流」分区(子页:运行历史/流程模板/配置) |
 | `template-tool` | agent | 释放出的 preset 组合(agent.cordis.yml) | 注册模型工具 `rs_workflow_template`(spec/list/save/remove):AI 友好的模板编辑入口,用户口述流程逻辑,AI 按规范写模板并 release 释放为模式 |
 | `report` | agent | 同上 | 注册模型工具 `rs_workflow_report`:子代理节点级软上报(可选,失败即弃),数据落 `~/.dsh/dsh-rs-workflow/runs.json` 供看板展示 |
 | `takeover` | agent | 同上(delegation 组内) | `agent/pre-step` 拦截用户消息,经 `workflowEngine.start` 以插件自有脚本启动编排(collab=engine/collab.js,flow=engine/flow.js),监听运行生命周期写 report-store |
@@ -25,7 +25,7 @@
 dsh plugin --profile web add @mzzsfy/dsh-rs-workflow
 ```
 
-重启 dsh 后自动发生:设置页出现「若水工作流」(运行历史)与「若水·流程模板」分区;collab 模式释放到 `<dsh-home>/.agent-presets/rs-workflow`;模式选择器出现「若水·协作编码」。
+重启 dsh 后自动发生:设置页出现唯一「若水工作流」分区(子页:运行历史 / 流程模板 / 配置);collab 模式释放到 `<dsh-home>/.agent-presets/rs-workflow`;模式选择器出现「若水·协作编码」。
 
 preset 内行以裸包名引用本包(从 profile 目录上溯解析),包与 preset 始终由本包同时交付,不存在顺序问题。
 

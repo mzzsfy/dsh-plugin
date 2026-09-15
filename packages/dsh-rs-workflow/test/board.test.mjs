@@ -81,7 +81,7 @@ test('角色分发:board 注册全部路由;settings 注册命名空间;template
   apply(board.ctx, { role: 'board' })
   assert.deepEqual([...board.routes.keys()].sort(), [
     '/api/rs-workflow/runs', '/api/rs-workflow/run', '/api/rs-workflow/remove',
-    '/api/rs-workflow/templates', '/api/rs-workflow/spec',
+    '/api/rs-workflow/templates', '/api/rs-workflow/spec', '/api/rs-workflow/released',
     '/api/rs-workflow/release', '/api/rs-workflow/unrelease',
     '/api/rs-workflow/template-save', '/api/rs-workflow/template-remove',
   ].sort())

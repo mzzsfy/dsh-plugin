@@ -16,13 +16,15 @@
 import z from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import JSON5 from "json5";
+import { existsSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { presetDest, removePreset, syncPreset, releaseFlowTemplate, unreleaseFlowTemplate, flowPresetDest } from "./preset-sync.mjs";
 import { reportStore } from "./report-store.mjs";
 import { registerTakeover } from "./takeover.mjs";
 import { createTemplateTool } from "./template-tool.mjs";
 import { validateFlow } from "./flows.mjs";
 import { SPEC_TEXT } from "./spec.mjs";
-import { builtinTemplates } from "./builtin-templates.mjs";
+import { builtinTemplates, isBuiltinTemplate } from "./builtin-templates.mjs";
 
 const name = "rs-workflow";
 const NAMESPACE = "rs-workflow";
@@ -226,10 +228,14 @@ function registerBoardRoutes(ctx) {
 			await store.remove(runId);
 			sendJson(res, 200, { ok: true });
 		}), "rs-workflow remove route");
-		// 模板管理:列表/规范(读) + 释放/撤下/保存/删除(写)
+		// 模板管理:列表/规范/释放状态(读) + 释放/撤下/保存/删除(写)
 		route("/api/rs-workflow/templates", guardedRoute(async (req, res) => {
-			sendJson(res, 200, { templates: readTemplates(ctx) });
+			const templates = readTemplates(ctx).map((t) => ({ ...t, builtin: isBuiltinTemplate(t.id) }));
+			sendJson(res, 200, { templates });
 		}), "rs-workflow templates route");
+		route("/api/rs-workflow/released", guardedRoute(async (req, res) => {
+			sendJson(res, 200, { ids: releasedTemplateIds() });
+		}), "rs-workflow released route");
 		route("/api/rs-workflow/spec", guardedRoute(async (req, res) => {
 			sendJson(res, 200, { spec: SPEC_TEXT });
 		}), "rs-workflow spec route");
@@ -306,6 +312,19 @@ function rawTemplates(ctx) {
 		const value = settings ? settings.get(NAMESPACE) : undefined;
 		return value && Array.isArray(value.templates) ? value.templates : [];
 	} catch { return []; }
+}
+
+/** 已释放为模式的模板 id:预设根下 rs-* 且带本包来源标记的目录。扫描失败视为空。 */
+function releasedTemplateIds() {
+	const ids = [];
+	try {
+		const root = dirname(flowPresetDest(""));
+		for (const name of readdirSync(root)) {
+			if (!name.startsWith("rs-") || name === "rs-workflow") continue;
+			if (existsSync(join(root, name, ".dsh-rs-workflow-source.json"))) ids.push(name.slice("rs-".length));
+		}
+	} catch { /* 预设根缺失 = 无释放 */ }
+	return ids;
 }
 
 /** 删除模板(board 路由与模型工具共用):用户项直接删;内置项落 enabled:false
