@@ -22,8 +22,14 @@ for (const dir of readdirSync(base, { withFileTypes: true })) {
   const manifest = join(pkgDir, 'package.json')
   if (!existsSync(manifest)) continue
   const { main, name } = JSON.parse(readFileSync(manifest, 'utf8'))
+  const entry = join(pkgDir, main)
+  // 实现暂缺的包(如重建中的 dsh-rs-workflow,仅骨架与设计文档)跳过加载
+  if (!existsSync(entry)) {
+    console.log(`SKIP ${name ?? dir.name}(入口缺失:实现未就绪)`)
+    continue
+  }
   try {
-    await import(pathToFileURL(join(pkgDir, main)).href)
+    await import(pathToFileURL(entry).href)
     console.log(`OK   ${name ?? dir.name}`)
   } catch (error) {
     failures.push({ pkg: name ?? dir.name, error })

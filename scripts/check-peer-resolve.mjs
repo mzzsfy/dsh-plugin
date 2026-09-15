@@ -5,7 +5,6 @@ import { existsSync } from 'node:fs'
 
 const repo = 'C:/Users/yuanhao/Desktop/jzjy/dsh-plugin'
 const pkgs = {
-  'dsh-rs-workflow': ['@deepseek-ai/schemastery', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-settings'],
   'dsh-usage-panel': ['@deepseek-ai/dsh-settings', '@deepseek-ai/schemastery'],
   'dsh-maintain': ['@deepseek-ai/dsh-settings', '@deepseek-ai/schemastery'],
   'dsh-turn-notify': ['@deepseek-ai/dsh-settings', '@deepseek-ai/schemastery'],

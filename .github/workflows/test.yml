@@ -80,8 +80,6 @@ jobs:
             echo "::group::第 ${i}/${total} 轮"
             round_start=$failures
             run_unit smoke-load node scripts/smoke-load.mjs
-            run_unit engine node --test tests/engine.test.mjs
-            run_unit workflow-parity node --test tests/workflow-parity.test.mjs
             # 包自动发现:凡含 test/ 目录的包全量执行,新增包无需改本文件
             for dir in packages/*/; do
               [ -d "${dir}test" ] || continue

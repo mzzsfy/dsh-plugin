@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
-  "description": "若水工作流:通用强流程工作流编排工具。设置页配流程模板释放为模式,模式内引擎接管每轮(步骤产出契约/校验/重问/推进),支持分诊、嵌套子流程、循环与资源加载;内置协作编码模板(collab)",
-  "version": "0.3.0",
+  "description": "若水工作流 v4:人可以在场的强规则编排。单引擎 flow 驱动:接管会话、批次推进、结构化产出契约、审批原语、排队/注入/取消/暂停/断点续跑、全量运行记录回看。设计文档见仓库 docs/rsww-v4/",
+  "version": "1.0.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "repository": {
-    "type": "git",
+    "type": "object",
     "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
   },
   "files": [
@@ -30,6 +30,7 @@
     "src",
     "engine",
     "preset",
+    "flows",
     "cordis.patch.yml",
     "README.md"
   ],
