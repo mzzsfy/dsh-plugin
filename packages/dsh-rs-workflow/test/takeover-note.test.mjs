@@ -38,3 +38,11 @@ test('note 失败降级不阻断拦截(catch 包裹)', () => {
 	assert.ok(noteBody.includes('try {'), 'note 必须 try 包裹')
 	assert.ok(noteBody.includes('} catch'), 'note 必须 catch 降级')
 })
+
+test('workflow/* 生命周期事件实时上报 runs.json(页签实时细节来源)', () => {
+	for (const eventName of ['workflow/phase', 'workflow/log', 'workflow/agent-start', 'workflow/agent-end']) {
+		assert.ok(src.includes(`trace("${eventName}"`), `必须监听 ${eventName}`)
+	}
+	assert.ok(src.includes('appendNode({ runId: String(info.id)'), '上报必须用事件 info.id 对位 store.runId')
+	assert.ok(src.includes('.catch(() => {})'), '未接管 run 的上报失败必须静默弃')
+})

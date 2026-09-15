@@ -179,6 +179,19 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 	let engine;
 	ctx.inject(["workflowEngine"], (engineCtx) => {
 		engine = engineCtx.workflowEngine;
+		// workflow/* 生命周期事件 → runs.json 实时节点上报(页签的实时细节来源):
+		// phase=阶段推进,log=引擎叙述,agent-start/end=子代理调用启停,end=落定。
+		// 事件里的 info.id 即 start() 返回的 run.id,与 store.runId 一致;
+		// 未接管的 run(tool-workflow 直接发起)store 无记录,appendNode 抛错即弃。
+		const trace = (eventName, format) => {
+			ctx.effect(() => ctx.on(eventName, (info, payload) => {
+				store.appendNode({ runId: String(info.id), nodeId: eventName.replace("workflow/", ""), ...format(payload) }).catch(() => {});
+			}), "rs-workflow trace " + eventName);
+		};
+		trace("workflow/phase", (title) => ({ status: "phase", summary: String(title) }));
+		trace("workflow/log", (message) => ({ status: "log", summary: trimText(String(message), 300) }));
+		trace("workflow/agent-start", (agentInfo) => ({ status: "start", summary: "#" + agentInfo.seq + " " + String(agentInfo.label || "") }));
+		trace("workflow/agent-end", (agentInfo) => ({ status: String(agentInfo.outcome || "end"), summary: "#" + agentInfo.seq + " " + String(agentInfo.label || "") }));
 		ctx.effect(() => ctx.on("agent/pre-step", (payload, next) => {
 			const agent = payload.agent;
 			if (agent?.session?.header?.parentSession !== undefined) return next();
@@ -232,6 +245,9 @@ export function registerTakeover(ctx, config, { dshHome } = {}) {
 		});
 		const script = kind === "collab" ? scripts().collab : scripts().flow;
 		const runArgs = buildArgs({ kind, flow, flows, resources, request, settings });
+		// 孤儿运行收敛:进程重启后 status 仍为 running 的历史记录已无监听主体,
+		// 全部落定(无 result 即 blocked,主会话可从页签分辨),防止页签永久"运行中"。
+		await orphansSweep(store);
 		const run = engine.start({
 			script,
 			meta: metaFor(kind, flow, request),
@@ -265,6 +281,25 @@ function summarizeFlowResult(value) {
 	const steps = Array.isArray(value.steps) ? value.steps : [];
 	const done = steps.filter((s) => s && s.status === "done").length;
 	return `流程 ${value.flowId || ""} 完成: ${done}/${steps.length} 步骤 done`;
+}
+
+/** 上报摘要截断(节点历史上限 500 由 store 把关,这里防长叙述占满) */
+function trimText(text, max) {
+	const value = typeof text === "string" ? text : "";
+	return value.length > max ? value.slice(0, max) : value;
+}
+
+/** 孤儿运行落定:上次进程遗留的 running 记录统一收尾(无监听主体即视为被中断) */
+async function orphansSweep(store) {
+	try {
+		const runs = await store.list({ withBody: false });
+		for (const run of runs) {
+			if (run.status !== "running") continue;
+			await store.finish({ runId: run.runId, ok: false, summary: "进程重启,编排被中断", blocked: { reason: "进程重启,编排被中断" } });
+		}
+	} catch {
+		// 收敛失败不阻断新编排启动
+	}
 }
 
 function readSettings(ctx) {
