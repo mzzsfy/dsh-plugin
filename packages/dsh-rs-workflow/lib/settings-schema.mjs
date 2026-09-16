@@ -15,7 +15,7 @@ export const KEEP_RUNS = 200
 
 const BUDGET_MIN = 1
 const BUDGET_MAX = 10
-const SLOT_FORM = '取值形态:string(单模型)或 string[](候选依次轮换),缺省空串'
+const SLOT_FORM = '取值形态:string[](候选依次轮换;兼容历史 string 单模型存储),缺省空数组'
 const BUDGET_FORM = `取值形态:整数,clamp [${BUDGET_MIN},${BUDGET_MAX}]`
 
 // 文案三要素:绑定对象/缺省降级链/取值形态(末段经 FORM 常量拼接);文案不参与校验,校验口径以键集与 clamp 常量为准
@@ -34,7 +34,7 @@ const BUDGET_DESCRIPTIONS = {
 }
 
 function buildSlots() {
-  const slot = (description) => z.union([z.string(), z.array(z.string())]).default('').description(`${description};${SLOT_FORM}`)
+  const slot = (description) => z.union([z.string(), z.array(z.string())]).default([]).description(`${description};${SLOT_FORM}`)
   return z.object(Object.fromEntries(SLOT_KEYS.map((key) => [key, slot(SLOT_DESCRIPTIONS[key])])))
 }
 
@@ -60,10 +60,11 @@ export const SETTINGS_SCHEMA = z.object({ slots: buildSlots(), budgets: buildBud
 const isEntry = (value) => value !== null && typeof value === 'object'
 const clampBudget = (value) => Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, value))
 
+// 归一恒为数组形态:历史 string 单模型存储升为单元素数组(读侧兼容,写侧不再产出 string)
 function normalizeSlot(value) {
-  if (typeof value === 'string') return value
   if (Array.isArray(value)) return value.filter((item) => typeof item === 'string')
-  return ''
+  if (typeof value === 'string' && value !== '') return [value]
+  return []
 }
 
 function normalizeSlots(value) {

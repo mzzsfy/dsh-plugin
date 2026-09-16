@@ -796,7 +796,7 @@ window.__ModuleLoader__.load({
           setNote('已按 host 解析结果载入结构表单;保存以「应用」后的文本为准。')
         })
         return () => { live = false }
-      }, [entry.id])
+      }, [isNew, entry && entry.id])
       // 未回填(文本模式)时表单编辑不重写文本,json5 正文始终权威
       const update = (fn) => {
         if (!synced) { setModel((prev) => fn(prev)); return }
@@ -1079,7 +1079,7 @@ window.__ModuleLoader__.load({
 
     function normSlotValue(v) {
       if (Array.isArray(v)) return v.filter((x) => typeof x === 'string' && x.trim() !== '')
-      return typeof v === 'string' && v.trim() !== '' ? v : undefined
+      return typeof v === 'string' && v.trim() !== '' ? [v] : undefined
     }
 
     function slotsNorm(slots) {
@@ -1097,26 +1097,14 @@ window.__ModuleLoader__.load({
       return out
     }
 
-    // 形态切换保值:数组→单取首;单→数组包一
+    // 工作位绑定恒为数组形态(单绑定与数组无区别,引擎候选依次轮换)
     function SlotRow({ info, value, onChange }) {
-      const isArr = Array.isArray(value)
+      const items = Array.isArray(value) ? value : (typeof value === 'string' && value !== '' ? [value] : [])
       return h('div', { className: 'rsww-card' },
         h('div', { className: 'rsww-row' },
-          h('span', { className: 'rsww-text', style: { fontWeight: 600 } }, info.name),
-          h(PillGroup, {
-            value: isArr ? 'array' : 'single',
-            options: [{ key: 'single', label: '单绑定' }, { key: 'array', label: '候选数组' }],
-            onChange: (k) => {
-              if (k === 'array' && !isArr) onChange([typeof value === 'string' ? value : ''])
-              else if (k === 'single' && isArr) onChange(value[0] || '')
-            },
-            ariaLabel: info.name + ' 取值形态',
-          })),
+          h('span', { className: 'rsww-text', style: { fontWeight: 600 } }, info.name)),
         h('span', { className: 'rsww-note' }, info.desc),
-        isArr && value.length > 1 ? h('span', { className: 'rsww-note' }, '切回单绑定将仅保留首个候选') : null,
-        !isArr
-          ? h('input', { className: 'rsww-input rsww-input--wide', value: typeof value === 'string' ? value : '', placeholder: 'provider/model 或模型名,留空=缺省链', onChange: (e) => onChange(e.target.value) })
-          : h(StrRows, { items: value, onChange, ph: 'provider/model 或模型名', min: 1 }))
+        h(StrRows, { items, onChange, ph: 'provider/model 或模型名,留空=缺省链', min: 1 }))
     }
 
     function BudgetsForm({ budgets, onChange }) {

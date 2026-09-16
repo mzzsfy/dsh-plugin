@@ -26,7 +26,7 @@ const LEGACY_SLOT_KEYS = [
 ]
 const LEGACY_BUDGET_KEYS = ['reviewRejectBeforeEscalate', 'planRejectBeforeBlocked', 'emptyOutputRetryLimit', 'reportNudgeLimit']
 
-const emptySlots = () => Object.fromEntries(SLOT_KEYS.map((key) => [key, '']))
+const emptySlots = () => Object.fromEntries(SLOT_KEYS.map((key) => [key, []]))
 const defaultBudgets = () => ({ ...DEFAULT_BUDGETS })
 
 test('Given 全新归一空值 When normalizeConfig({}) Then 六空位/三默认预算/templates 空数组', () => {
@@ -60,7 +60,7 @@ test('Given v3 残留键(16 位 slots/旧预算/workflow 节) When normalizeConf
     workflow: { defaultTemplate: 'auto', maxTasks: 8 },
   })
   assert.deepEqual(Object.keys(value.slots), SLOT_KEYS)
-  assert.deepEqual(value.slots, { ...emptySlots(), planner: 'p/m', executor: 'e/m', reviewer: 'r/m', 'executor-escalate': 'x/m' })
+  assert.deepEqual(value.slots, { ...emptySlots(), planner: ['p/m'], executor: ['e/m'], reviewer: ['r/m'], 'executor-escalate': ['x/m'] })
   for (const key of LEGACY_SLOT_KEYS) assert.ok(!(key in value.slots), key)
   assert.deepEqual(Object.keys(value.budgets), BUDGET_KEYS)
   assert.deepEqual(value.budgets, { maxStepFail: 4, approveRounds: 5, escalateLimit: 6 })
@@ -157,7 +157,7 @@ test('Given SETTINGS_SCHEMA When 解析部分配置 Then 缺省补全且键集�
   assert.equal(parsed.budgets.maxStepFail, 7)
   assert.equal(parsed.budgets.approveRounds, DEFAULT_BUDGETS.approveRounds)
   assert.deepEqual(Object.keys(parsed.slots), SLOT_KEYS)
-  assert.equal(parsed.slots.executor, '')
+  assert.deepEqual(parsed.slots.executor, [])
   assert.ok(Array.isArray(parsed.templates))
 })
 
