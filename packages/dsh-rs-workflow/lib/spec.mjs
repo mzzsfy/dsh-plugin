@@ -1,8 +1,8 @@
-// spec — 流程模板 DSL v4 规范全文(模板编辑规则的唯一真相源)
+// spec — 流程模板 DSL v5 规范全文(模板编辑规则的唯一真相源)
 // 消费:设置页「模板规范」折叠页渲染。
 // 验收契约:含 type:"approve" 与 inputs 章节;不含「教学重问」与「<output」字样。
 
-export const SPEC_TEXT = `# 若水工作流流程模板 DSL 规范(v4)
+export const SPEC_TEXT = `# 若水工作流流程模板 DSL 规范(v5)
 
 流程模板 = 一份严格 JSON 文本,声明一个强流程:每一步安排 AI 产出什么,引擎强制校验后推进。
 在设置页「若水工作流 → 流程模板」新建或编辑模板,保存前经 host 权威校验(dryRun)。
@@ -15,11 +15,13 @@ export const SPEC_TEXT = `# 若水工作流流程模板 DSL 规范(v4)
   "label": "小说写作",
   "description": "...",
   "inputs": { "chapterCount": "章节数说明" },
+  "autoApprove": false,
   "steps": [ ... ]
 }
 
 字段含义:id 必填 ^[a-z][a-z0-9-]*$;label 必填,模板显示名;description 必填,一句话适用场景
-(分诊目录展示给引擎);inputs 可选,运行时入参声明(见 §7);steps 必填非空,按文档顺序缺省链式依赖。
+(分诊目录展示给引擎);inputs 可选,运行时入参声明(见 §7);autoApprove 可选布尔(缺省 false,
+true = 审批由主循环代审,不再转呈页签,见 §4);steps 必填非空,按文档顺序缺省链式依赖。
 
 未知字段一律拒绝(拼写错误防静默失效);校验不合法会逐条报错(target 定位到 step:<id> 或 top:<field>)。
 
@@ -70,13 +72,16 @@ additionalProperties:false;listOutputs 产出类型为 string 数组。
 
 ## 4. 审批步骤(type:"approve")
 
-审批步骤安排一次审校,裁决契约固定:{ verdict: "APPROVED" | "REJECTED", comments }。
+审批步骤安排一次审校。被审 target 完成且依赖就绪后,流程进入外部裁决(waiting_approval):
+本段暂停并出账待裁决摘要(target 产出、审批口径、上轮意见),裁决经页签或主循环回写——
 
 - APPROVED:被审 target 链放行,流程继续;
-- REJECTED(未耗尽):target 置回待办并重做,重做指令自动附 [重做说明] 节(审批意见 comments + 被审步骤
-  原产出);审批步自身也回到待办等待再审;重审次数计账,达 rounds 上限即耗尽;
+- REJECTED(未耗尽):target 置回待办并重做,重做指令自动附 [重做说明] 节(裁决意见 comments +
+  被审步骤原产出);审批步自身也回到待办等待再审;重审次数计账,达 rounds 上限即耗尽;
 - 耗尽:onExhausted="blocked" → 流程终局 blocked(等用户介入);onExhausted=<升级步 id> → 触发升级步骤。
-- 审批步骤独占批次:不与其他步骤并行派发。
+
+裁决来源由顶层 autoApprove 决定:false(缺省)转呈页签,用户点击裁决,主循环亦可代审(by=main-agent,
+意见必填);true 直接由主循环代审。页签与主循环先到先得,幂等。审批步骤不派发子代理。
 
 升级账:每次走升级出口 escalations+1,达预算 escalateLimit(默认 2)流程终局 blocked。
 

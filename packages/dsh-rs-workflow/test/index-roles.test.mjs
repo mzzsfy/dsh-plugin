@@ -9,10 +9,12 @@ test('Given Config When 非法 role Then 抛错;board Then 通过', () => {
   assert.doesNotThrow(() => Config({ role: 'board' }))
 })
 
-test('Given SPEC_TEXT 导出 When 检查契约 Then v4 契约与 JSON 口径齐备', () => {
+test('Given SPEC_TEXT 导出 When 检查契约 Then v5 契约与 JSON 口径齐备', () => {
   assert.ok(SPEC_TEXT.includes('"type": "approve"'))
   assert.ok(SPEC_TEXT.includes('inputs'))
   assert.ok(SPEC_TEXT.includes('严格 JSON'))
+  assert.ok(SPEC_TEXT.includes('autoApprove'))
+  assert.ok(SPEC_TEXT.includes('(v5)'))
   assert.equal(SPEC_TEXT.includes('<output'), false)
   assert.equal(SPEC_TEXT.includes('教学重问'), false)
   assert.equal(SPEC_TEXT.includes('json5'), false)
