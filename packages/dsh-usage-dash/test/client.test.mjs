@@ -76,6 +76,8 @@ const {
   hasTipContent,
   hasAnomalyNews,
   tipModelEntries,
+  tipAvgPriceText,
+  trendDefaultVisibleKeys,
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
@@ -113,6 +115,9 @@ const {
   speedTipText,
   speedScaleMax,
   legendToggle,
+  LEGEND_KEY_RATE,
+  LEGEND_KEY_SPEED,
+  LEGEND_KEY_TTFT,
   leftAxisTicks,
   hourSlotLabel,
   minuteSlotLabel,
@@ -730,7 +735,7 @@ test('speedTipText 无速度为占位符有速度为官方吞吐口径', () => {
 })
 
 test('legendToggle 普通点击单选,再点恢复全部,ctrl 多选且禁全藏', () => {
-  // null 表示全部可见
+  // null 输入(仅 historic 契约面):普通点击得单键集
   assert.deepEqual(legendToggle(null, 'a', false), new Set(['a']))
   // 单选态再点同项恢复全部(null)
   assert.equal(legendToggle(new Set(['a']), 'a', false), null)
@@ -1009,15 +1014,41 @@ test('formatCost 微观值四位小数', () => {
 })
 
 test('avgPriceText 费用折每百万 token 均价', () => {
-  assert.equal(avgPriceText(3357.85, 6232901270, '¥'), '¥0.54/M')
-  assert.equal(avgPriceText(2, 1000 * 1000, '$'), '$2.00/M')
-  assert.equal(avgPriceText(0.5, 1000 * 1000, ''), '0.50/M')
+  assert.equal(avgPriceText(3357.85, 6232901270, '¥'), '¥0.539/M')
+  assert.equal(avgPriceText(2, 1000 * 1000, '$'), '$2.000/M')
+  assert.equal(avgPriceText(0.5, 1000 * 1000, ''), '0.500/M')
+  assert.equal(avgPriceText(0.0004, 1000 * 1000, '¥'), '¥0.00040/M')
 })
 
 test('avgPriceText 无费用或零 token 不显示', () => {
   assert.equal(avgPriceText(undefined, 6232901270, '¥'), '')
   assert.equal(avgPriceText(0, 6232901270, '¥'), '')
   assert.equal(avgPriceText(3357.85, 0, '¥'), '')
+})
+
+test('tipAvgPriceText 槽费用折每百万 token 均价,无费用或零槽为 null', () => {
+  assert.equal(tipAvgPriceText({ total: 6232901270, cost: 3357.85 }, '¥'), '¥0.539/M')
+  assert.equal(tipAvgPriceText({ total: 6232901270, cost: 0 }, '¥'), null)
+  assert.equal(tipAvgPriceText({ total: 6232901270 }, '¥'), null)
+  assert.equal(tipAvgPriceText({ total: 0, cost: 3357.85 }, '¥'), null)
+})
+
+test('trendDefaultVisibleKeys 默认集含模型与速度线,不含缓存命中率与首 token 延迟', () => {
+  const keys = trendDefaultVisibleKeys(['m1', 'm2'], true)
+  assert.deepEqual([...keys], ['m1', 'm2', 'speed'])
+  assert.deepEqual([...trendDefaultVisibleKeys(['m1'], false)], ['m1'])
+  assert.deepEqual([...trendDefaultVisibleKeys([], false)], [])
+})
+
+test('图例默认态点击以实际生效集为基线,ctrl 恢复隐藏线不坍缩', () => {
+  const base = trendDefaultVisibleKeys(['m1', 'm2'], true)
+  // ctrl 点击默认隐藏的缓存命中率:默认集其余项保持,仅追加该线;再点回默认集
+  const withRate = legendToggle(base, LEGEND_KEY_RATE, true)
+  assert.deepEqual([...withRate].sort(), ['m1', 'm2', LEGEND_KEY_SPEED, LEGEND_KEY_RATE].sort())
+  assert.deepEqual([...legendToggle(withRate, LEGEND_KEY_RATE, true)].sort(), ['m1', 'm2', LEGEND_KEY_SPEED].sort())
+  // 普通点击单选隐藏线,再点回 null 由调用方 ?? 默认集承接
+  assert.deepEqual([...legendToggle(base, LEGEND_KEY_TTFT, false)], [LEGEND_KEY_TTFT])
+  assert.equal(legendToggle(new Set([LEGEND_KEY_TTFT]), LEGEND_KEY_TTFT, false), null)
 })
 
 test('镜像函数基本行为:非法输入 null 与命中计价', () => {

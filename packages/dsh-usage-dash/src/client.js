@@ -196,6 +196,7 @@ const MESSAGES_ZH = {
   avgSpeed: '平均生成速度',
   speedLegend: '平均生成速度',
   ttftLegend: '首 token 延迟',
+  avgPrice: '均价',
   topModel: '最常用模型',
   topModelHint: '按 token 用量排序,非调用次数',
   heatmap: '活跃热力图',
@@ -343,6 +344,7 @@ const MESSAGES_EN = {
   avgSpeed: 'Avg speed',
   speedLegend: 'Avg speed',
   ttftLegend: 'First-token latency',
+  avgPrice: 'Avg price',
   topModel: 'Top model',
   topModelHint: 'Ranked by token usage, not call count',
   heatmap: 'Activity heatmap',
@@ -674,7 +676,7 @@ function niceTicks(max, count) {
   return ticks
 }
 
-// 图例显隐切换:current 为 null 表示全部可见;普通点击单选/再点恢复,
+// 图例显隐切换:current 为当前实际生效集;普通点击单选/再点恢复,
 // ctrl 单项切换,隐藏最后一项为无操作(返回原引用)
 function legendToggle(current, key, ctrl) {
   if (ctrl) {
@@ -914,6 +916,13 @@ const hasTipContent = (hoverSlot) => Boolean(hoverSlot) && hoverSlot.total > 0
 const hasAnomalyNews = (status) => !!status
   && ((status.log?.length ?? 0) > 0 || (status.recordFailures ?? 0) > 0)
 
+// 趋势折线默认显隐集:模型全显 + 速度线(有数据时);缓存命中率与首 token 延迟默认隐藏,
+// 图例切换后以组件内键集接管(不持久化)
+const trendDefaultVisibleKeys = (modelOrder, hasSpeed) => new Set([
+  ...modelOrder,
+  ...(hasSpeed ? [LEGEND_KEY_SPEED] : []),
+])
+
 // 趋势 tooltip 模型行数据:主行 = 可见且当前时段有用量的模型;OTHER 子行 = OTHER 可见
 // 且当前时段有用量的其余模型明细,按 tokens 降序由本函数保证
 const tipModelEntries = (hoverSlot, visibleSet) => {
@@ -926,6 +935,11 @@ const tipModelEntries = (hoverSlot, visibleSet) => {
     : []
   return { main, other }
 }
+
+// 趋势 tooltip 槽级均价:槽费用折每百万 token 单价;无槽或无有效费用(含零值)为 null
+const tipAvgPriceText = (hoverSlot, currency) => (
+  hoverSlot ? avgPriceText(hoverSlot.cost, hoverSlot.total, currency) || null : null
+)
 
 // 热力图:窗口固定 26 周,与所选范围无关
 const HEAT_WEEKS = 26
@@ -1430,10 +1444,11 @@ const COST_MICRO_THRESHOLD = 0.01
 const COST_PLACEHOLDER = '—'
 const THOUSANDS_PATTERN = /(\d)(?=(\d{3})+(?!\d))/g
 
-// 千分位 + 至少两位小数,正值小于 0.01 时四位;货币空串不加符号,「≈」前缀由调用方拼
-function formatCost(value, currency) {
-  const decimals = value > 0 && value < COST_MICRO_THRESHOLD ? COST_MICRO_DECIMALS : COST_DECIMALS
-  const [whole, fraction] = value.toFixed(decimals).split('.')
+// 千分位 + 至少 decimals 位小数,正值小于 10^-decimals 时小数位 +2;货币空串不加符号,「≈」前缀由调用方拼
+function formatCost(value, currency, decimals = COST_DECIMALS) {
+  const microThreshold = 10 ** -decimals
+  const used = value > 0 && value < microThreshold ? decimals + (COST_MICRO_DECIMALS - COST_DECIMALS) : decimals
+  const [whole, fraction] = value.toFixed(used).split('.')
   return `${currency}${whole.replace(THOUSANDS_PATTERN, '$1,')}.${fraction}`
 }
 
@@ -1449,9 +1464,10 @@ function formatCostCompact(value, currency) {
 }
 
 // 模型均价:费用折算每百万 token 单价;无费用(cost 恒正数才有效,0 视为未配价)或零 token 无均价
+const AVG_PRICE_DECIMALS = 3
 function avgPriceText(cost, tokens, currency) {
   if (!(cost > 0) || !(tokens > 0)) return ''
-  return `${formatCost(cost / (tokens / TOKENS_PER_MILLION), currency)}/M`
+  return `${formatCost(cost / (tokens / TOKENS_PER_MILLION), currency, AVG_PRICE_DECIMALS)}/M`
 }
 
 // 全局显示货币:规则表首个非空 currency,所有费用显示点统一取此值(全局价格定位);
@@ -2285,7 +2301,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
       const [hover, setHover] = useState(null)
-      // 图例显隐:null = 全部可见;键集 = 模型项与折线项(rate/speed)
+      // 图例显隐:null = 默认集(trendDefaultVisibleKeys);切换以实际生效集为基线展开为键集
       const [visibleKeys, setVisibleKeys] = useState(null)
       // prefs 仅用于 hover tooltip 的费用显隐,经 ref 读取:开关切换不触发本组件重渲染,
       // 避免宿主设置弹窗滚动锚定被重渲染扰动而跳变
@@ -2302,11 +2318,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       }, [])
       const hasSpeed = slots.some((slot) => slot.speed !== undefined)
       const hasTtft = slots.some((slot) => slot.ttft !== undefined)
-      const visibleSet = visibleKeys ?? new Set([
-        ...modelOrder, LEGEND_KEY_RATE,
-        ...(hasSpeed ? [LEGEND_KEY_SPEED] : []),
-        ...(hasTtft ? [LEGEND_KEY_TTFT] : []),
-      ])
+      const visibleSet = visibleKeys ?? trendDefaultVisibleKeys(modelOrder, hasSpeed)
       const visibleModels = modelOrder.filter((model) => visibleSet.has(model))
       const showRate = visibleSet.has(LEGEND_KEY_RATE)
       const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
@@ -2334,6 +2346,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const pick = (index) => (event) => setHover({ index, anchor: pointerAt(event) })
       const clear = () => setHover(null)
       const tipEntries = hasTipContent(hoverSlot) ? tipModelEntries(hoverSlot, visibleSet) : null
+      const avgPrice = tipAvgPriceText(hoverSlot, costCurrency)
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, title),
@@ -2402,7 +2415,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
         h(Legend, {
           models: legendModels, colorFor, speedEnabled: hasSpeed, ttftEnabled: hasTtft,
           isVisible: (key) => visibleSet.has(key),
-          onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleKeys, key, ctrl)),
+          onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleSet, key, ctrl)),
         }),
         h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
           tipEntries
@@ -2418,7 +2431,10 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
                 costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
-                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`)
+                  ? [
+                      h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`),
+                      avgPrice ? h('div', { key: 'avg-price', className: 'ud-tip-row' }, `${t('avgPrice')}: ${avgPrice}`) : null,
+                    ]
                   : null,
               ]
             : null))
