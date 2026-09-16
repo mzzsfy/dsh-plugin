@@ -1,8 +1,11 @@
-// 回收站:跨平台把文件或目录移入系统回收站,不做直接删除降级。
-// 执行器可注入以便测试;失败按原样抛出,由调用方按失败矩阵处理。
+// 处置:跨平台把文件或目录移入系统回收站;系统回收站不可用的环境(容器无
+// gio / dbus 等)降级为插件回收区(rename 搬移,跨设备回退复制),保持可还原。
+// 执行器与 fs 可注入以便测试;失败按原样抛出,由调用方按失败矩阵处理。
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { cp, mkdir, rename, rm } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 
 const TRASH_TIMEOUT_MS = 60 * 1000
 const execFilep = promisify(execFile)
@@ -46,4 +49,39 @@ export async function trashPath(path, options = {}) {
   const command = trashCommandFor(platform, path)
   const env = command.env ? { ...process.env, ...command.env } : undefined
   await run(command.file, command.args, { timeout: timeoutMs, env })
+}
+
+// 同一文件系统内 rename 即搬移;跨设备(容器卷挂载等)EXDEV 时复制后删除原路径
+async function movePath(from, to, fsImpl) {
+  try {
+    await fsImpl.rename(from, to)
+  } catch (error) {
+    if (!error || error.code !== 'EXDEV') throw error
+    await fsImpl.cp(from, to, { recursive: true })
+    await fsImpl.rm(from, { recursive: true, force: true })
+  }
+}
+
+const REAL_FS = { rename, cp, rm, mkdir }
+
+/**
+ * 把目录搬入插件回收区,返回暂存路径;同名基名经时间戳保证唯一。
+ * @param options.fs - 注入的 fs 操作(rename/cp/rm/mkdir),默认真实实现
+ * @param options.now - 注入的时钟,默认 Date.now
+ */
+export async function moveToQuarantine(path, quarantineDir, options = {}) {
+  const { fs: fsImpl = REAL_FS, now = Date.now } = options
+  await fsImpl.mkdir(quarantineDir, { recursive: true })
+  const heldPath = join(quarantineDir, basename(path) + '-' + now())
+  await movePath(path, heldPath, fsImpl)
+  return heldPath
+}
+
+/**
+ * 把回收区暂存的目录移回原位置;原位置已被占用时失败上抛,由调用方响应。
+ * @param options.fs - 注入的 fs 操作(rename/cp/rm/mkdir),默认真实实现
+ */
+export async function restoreFromQuarantine(heldPath, originalPath, options = {}) {
+  const { fs: fsImpl = REAL_FS } = options
+  await movePath(heldPath, originalPath, fsImpl)
 }

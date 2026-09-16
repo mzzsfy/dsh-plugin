@@ -141,11 +141,20 @@ export function isSessionRunning({ agents, sessionId }) {
   return Boolean(entry && entry.status === 'running')
 }
 
-// 删除半失败聚合文案:trash 成功后各收尾失败点的主文案与后缀,host 响应逐键消费
+// 删除半失败聚合文案:trash 成功后各收尾失败点的主文案与后缀,host 响应逐键消费。
+// 基础前缀按处置模式区分(系统回收站 / 插件回收区):两种模式找回路径不同
+export function deleteOutcomeMessages(quarantined) {
+  const base = quarantined ? '已移入插件回收区' : '已移入回收站'
+  return {
+    partial: base + ',但移除列表记录失败',
+    archiveCleanup: base + ',但移除归档记录失败',
+    ledgerFailed: base + ',但重挂载记录失败',
+  }
+}
+
+// OS 回收站模式文案:保留常量导出供既有测试与文案对照
 export const DELETE_MESSAGES = {
-  partial: '已移入回收站,但移除列表记录失败',
-  archiveCleanup: '已移入回收站,但移除归档记录失败',
-  ledgerFailed: '已移入回收站,但重挂载记录失败',
+  ...deleteOutcomeMessages(false),
   ledgerSuffix: ',且重挂载记录失败',
   runningDuringTrash: '警告:回收期间会话恢复运行,产物已移入回收站;建议检查会话状态',
 }
@@ -154,13 +163,15 @@ export const DELETE_MESSAGES = {
  * 删除收尾半失败聚合:trash 成功后的失败矩阵折叠为单一响应体。
  * 主文案优先级 detach → 归档清理 → 台账,台账失败以后缀并入前两者,运行中翻转
  * 以警告后缀并入一切形态。三形态逐键一致:{ok} / {ok,message} / {ok,partial,message}。
+ * quarantined 为处置模式:系统回收站失败降级插件回收区时置真,基础前缀随之切换。
  */
-export function aggregateDeleteOutcome({ detachFailed = false, archiveCleanupFailed = false, ledgerFailed = false, runningDuringTrash = false }) {
+export function aggregateDeleteOutcome({ detachFailed = false, archiveCleanupFailed = false, ledgerFailed = false, runningDuringTrash = false, quarantined = false }) {
+  const M = deleteOutcomeMessages(quarantined)
   const warningSuffix = runningDuringTrash ? ';' + DELETE_MESSAGES.runningDuringTrash : ''
   const ledgerSuffix = ledgerFailed ? DELETE_MESSAGES.ledgerSuffix : ''
-  if (detachFailed) return { ok: true, partial: true, message: DELETE_MESSAGES.partial + ledgerSuffix + warningSuffix }
-  if (archiveCleanupFailed) return { ok: true, partial: true, message: DELETE_MESSAGES.archiveCleanup + ledgerSuffix + warningSuffix }
-  if (ledgerFailed) return { ok: true, partial: true, message: DELETE_MESSAGES.ledgerFailed + warningSuffix }
+  if (detachFailed) return { ok: true, partial: true, message: M.partial + ledgerSuffix + warningSuffix }
+  if (archiveCleanupFailed) return { ok: true, partial: true, message: M.archiveCleanup + ledgerSuffix + warningSuffix }
+  if (ledgerFailed) return { ok: true, partial: true, message: M.ledgerFailed + warningSuffix }
   return runningDuringTrash
     ? { ok: true, message: DELETE_MESSAGES.runningDuringTrash }
     : { ok: true }

@@ -44,7 +44,7 @@ import {
   updatedAtOf,
 } from './core.mjs'
 import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
-import { trashPath } from './trash.mjs'
+import { moveToQuarantine, restoreFromQuarantine, trashPath } from './trash.mjs'
 import { createRequire } from 'node:module'
 
 export const name = 'dsh-session-manager'
@@ -54,7 +54,8 @@ export const inject = ['webServer', 'workspaceRegistry', 'sessionQuery', 'storag
 const NAMESPACE = 'session-manager'
 const WORKSPACE_DOMAIN_NAME = 'workspace'
 
-// 已删除台账域:global 单列表,条目为回收站还原后重挂载所需的最小信息
+// 已删除台账域:global 单列表,条目为回收站还原后重挂载所需的最小信息;
+// heldPath 仅回收区降级条目携带(暂存路径,重挂载时移回 path 原位置)
 const LEDGER_SPEC = defineDomain({
   name: 'session_manager',
   version: 1,
@@ -64,6 +65,7 @@ const LEDGER_SPEC = defineDomain({
       deleted: z.array(z.object({
         sessionId: z.string(),
         path: z.string(),
+        heldPath: z.string().optional(),
         deletedAt: z.number(),
       })),
     }),
@@ -99,10 +101,12 @@ export const MESSAGES = {
   inFlight: '该会话正在删除中,请稍后重试',
   badJsonBody: '请求体不是合法 JSON',
   systemError: '操作失败(系统级错误,详见服务端日志)',
+  heldMissing: '回收区暂存已缺失,原位置亦无产物,无法找回',
+  restoreFailed: '回收区还原失败',
 }
 
-// trash 执行器出口:进程级唯一 OS 副作用注入点,测试经此桩替
-export const executor = { trashPath }
+// trash 执行器出口:进程级唯一 OS 副作用注入点(回收站/回收区搬移/移回),测试经此桩替
+export const executor = { trashPath, moveToQuarantine, restoreFromQuarantine }
 
 const SETTINGS_SCHEMA = schemastery.object({
   autoArchiveDays: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_DAYS)
@@ -360,11 +364,12 @@ export function apply(ctx, config) {
     return run
   }
 
-  async function recordDeletedEntry(sessionId, path) {
+  async function recordDeletedEntry(sessionId, path, heldPath) {
     return withLedgerLock(async () => {
       const ledger = await ledgerReady
       const current = ledger.global.get()
-      const merged = mergeDeletedEntry(current.deleted, { sessionId, path, deletedAt: Date.now() })
+      const entry = { sessionId, path, deletedAt: Date.now(), ...(heldPath !== undefined ? { heldPath } : {}) }
+      const merged = mergeDeletedEntry(current.deleted, entry)
       await ledger.global.set({ ...current, deleted: merged.slice(0, LEDGER_MAX_ENTRIES) })
     })
   }
@@ -389,6 +394,16 @@ export function apply(ctx, config) {
     }
   }
 
+  // 台账条目读取:重挂载移回依据;域不可用或未命中均按无条目
+  async function ledgerEntryFor(sessionId) {
+    try {
+      const ledger = await ledgerReady
+      return ledger.global.get().deleted.find((item) => item.sessionId === sessionId)
+    } catch {
+      return undefined
+    }
+  }
+
   // 历史输入:工作区粒度持久缓存(~/.dsh/historyPrompt/<工作区>-<hash>.json)。
   // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内会话产物,
   // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入)。
@@ -399,6 +414,10 @@ export function apply(ctx, config) {
   // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
   const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
     || join(homedir(), '.dsh', 'historyPrompt')
+  // 插件回收区:系统回收站不可用环境的删除降级暂存地,重挂载时移回原位置。
+  // 测试经 env DSH_QUARANTINE_DIR 注入临时目录
+  const quarantineDir = process.env.DSH_QUARANTINE_DIR
+    || join(homedir(), '.dsh', 'trash', 'session-manager')
   // 巨产物跳过线按宿主版本黑名单取值:0.1.1/0.1.2 解压实现无周期让出从严 8MiB,
   // 其余 16MiB。运行宿主清单经 require 链解析(插件随宿主树部署时必命中),
   // 探测失败按黑名单保守回退旧线。激活时求值一次即冻结,热路径只读值;
@@ -655,6 +674,28 @@ export function apply(ctx, config) {
     return suffix
   }
 
+  // 重挂载前把回收区暂存产物移回原位置:回收区条目的找回动作就是重挂载本身,
+  // 不要求用户手工搬移。原位置已有产物(已自行还原)或暂存缺失时不动
+  async function restoreHeldArtifact(sessionId) {
+    const entry = await ledgerEntryFor(sessionId)
+    if (entry === undefined || entry.heldPath === undefined) return
+    const originalGone = await stat(entry.path).then(() => false, (error) => {
+      if (error && error.code === 'ENOENT') return true
+      throw error
+    })
+    if (!originalGone) return
+    const heldExists = await stat(entry.heldPath).then(() => true, (error) => {
+      if (error && error.code === 'ENOENT') return false
+      throw error
+    })
+    if (!heldExists) throw new Error(MESSAGES.heldMissing)
+    try {
+      await executor.restoreFromQuarantine(entry.heldPath, entry.path)
+    } catch (error) {
+      throw new Error(MESSAGES.restoreFailed + ': ' + String(error && error.message || error))
+    }
+  }
+
   const routes = [
     {
       path: '/api/session-manager/unarchive',
@@ -775,27 +816,31 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.running })
             return
           }
-          let trashError
+          // 处置:优先系统回收站;不可用(容器无 gio/dbus 等)降级插件回收区
+          // rename 搬移,仍可经重挂载移回原位置。双失败才会话保留并拒绝
+          let heldPath
           try {
             await executor.trashPath(artifactDir)
-          } catch (error) {
-            trashError = error
+          } catch {
+            try {
+              heldPath = await executor.moveToQuarantine(artifactDir, quarantineDir)
+            } catch (heldError) {
+              sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(heldError && heldError.message || heldError) })
+              return
+            }
           }
-          if (trashError !== undefined) {
-            sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(trashError) })
-            return
-          }
+          const quarantined = heldPath !== undefined
           // 执行期翻转检测:OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行。
           // 产物已移走,中断只会更糟,照常完成收尾,但把不变量破坏变为可观测事件
           const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
           if (runningDuringTrash) {
             ctx.logger && ctx.logger.warn('session-manager 删除执行期间会话恢复运行: ' + sessionId)
           }
-          // 台账在 trash 成功后立即记录:产物已进回收站,后续任何半失败都不影响还原资格;
+          // 台账在处置成功后立即记录:产物已离开原位置,后续任何半失败都不影响还原资格;
           // 台账失败只降级重挂载便利,不回滚删除
           let ledgerError
           try {
-            await recordDeletedEntry(sessionId, artifactDir)
+            await recordDeletedEntry(sessionId, artifactDir, heldPath)
           } catch (error) {
             ledgerError = error
             ctx.logger && ctx.logger.warn('session-manager 台账记录失败(' + sessionId + '): ' + String(error && error.stack || error))
@@ -815,12 +860,16 @@ export function apply(ctx, config) {
               ctx.logger && ctx.logger.warn('session-manager 归档清理失败(' + sessionId + '): ' + String(error && error.stack || error))
             }
           }
-          sendJson(res, 200, aggregateDeleteOutcome({
-            detachFailed: detachError !== undefined,
-            archiveCleanupFailed,
-            ledgerFailed: ledgerError !== undefined,
-            runningDuringTrash,
-          }))
+          sendJson(res, 200, {
+            ...aggregateDeleteOutcome({
+              detachFailed: detachError !== undefined,
+              archiveCleanupFailed,
+              ledgerFailed: ledgerError !== undefined,
+              runningDuringTrash,
+              quarantined,
+            }),
+            mode: quarantined ? 'quarantine' : 'os',
+          })
         } catch (error) {
           respondError(ctx, res, error)
         } finally {
@@ -1020,6 +1069,9 @@ export function apply(ctx, config) {
         if (!rejectMethod(req, res, 'POST')) return
         try {
           const sessionId = await requireSessionId(req)
+          // 回收区暂存的产物先移回原位置(host 按产物现状列会话,移回后 header 可见);
+          // OS 回收站条目无 heldPath,此调用为空操作
+          await restoreHeldArtifact(sessionId)
           // 产物还原的判定即持久层能重新读到 header:未还原时在此拒绝
           const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {

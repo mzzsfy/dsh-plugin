@@ -5,7 +5,7 @@
 import test, { mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, writeFile, utimes, mkdir, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, writeFile, utimes, mkdir, rm, readFile, access } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -29,7 +29,13 @@ const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cac
 // 防止夹具工作区经默认路径(~/.dsh/historyPrompt)泄漏进真实用户目录
 const sharedCacheDir = mkdtempSync(path.join(tmpdir(), 'sm-hist-shared-'))
 process.env.DSH_HISTORY_CACHE_DIR = sharedCacheDir
-test.after(() => { rmSync(sharedCacheDir, { recursive: true, force: true }) })
+// 回收区目录统一隔离:删除降级路径把产物搬进该目录,防泄漏真实用户目录
+const sharedQuarantineDir = mkdtempSync(path.join(tmpdir(), 'sm-quarantine-shared-'))
+process.env.DSH_QUARANTINE_DIR = sharedQuarantineDir
+test.after(() => {
+  rmSync(sharedCacheDir, { recursive: true, force: true })
+  rmSync(sharedQuarantineDir, { recursive: true, force: true })
+})
 // 台账/重挂载夹具路径仅作数据,不落盘;形态与实现一致(会话目录)
 const LEDGER_FIXTURE_PATH = 'C:\\store\\s1'
 // 幽灵产物夹具:tmpdir 下未创建的路径,跨平台 stat 必 ENOENT
@@ -142,15 +148,22 @@ function makeCtx({
     return () => clearInterval(timer)
   }
   // readSession 桩:sessionId → 事件数组(工厂形态则调用后抛错);reads 记录实际读取次数供缓存断言
+  // headers 支持同步或异步函数形态:每次列会话现求值,模拟宿主按产物现状动态列会话;
+  // 数组形态在调用点同步快照(门闩时序测试依赖该语义,禁入 await 链)
   const readCounts = new Map()
   const sessionQuery = {
-    listSessions: async () => headers.map((header) => ({ header })),
+    listSessions: async () => {
+      if (typeof headers !== 'function') return headers.map((header) => ({ header }))
+      const list = await headers()
+      return list.map((header) => ({ header }))
+    },
     readSession: async (sessionId) => {
       readCounts.set(sessionId, (readCounts.get(sessionId) || 0) + 1)
       const events = readSessions ? readSessions[sessionId] : undefined
       if (typeof events === 'function') throw events()
       if (events === undefined) throw new Error('桩未配置该会话产物')
-      return { session: headers.find((header) => header.id === sessionId), events }
+      const list = typeof headers !== 'function' ? headers : await headers()
+      return { session: list.find((header) => header.id === sessionId), events }
     },
   }
   const services = {
@@ -943,15 +956,22 @@ test('周期评估:到期 tick 恰逢门闩占用时保持到期态,下个 tick 
   }
 })
 
-// 执行器桩替:trash 为进程级唯一 OS 副作用出口,经 executor 注册表注入(README 已知测试缺口的基建扩展)
-async function withTrashStub(stub, run) {
-  const original = indexModule.executor.trashPath
-  indexModule.executor.trashPath = stub
+// 执行器桩替:trash 与回收区搬移为进程级 OS 副作用出口,经 executor 注册表注入
+async function withExecutorStub(stubs, run) {
+  const originals = {}
+  for (const [name, stub] of Object.entries(stubs)) {
+    originals[name] = indexModule.executor[name]
+    indexModule.executor[name] = stub
+  }
   try {
     await run()
   } finally {
-    indexModule.executor.trashPath = original
+    for (const [name, original] of Object.entries(originals)) indexModule.executor[name] = original
   }
+}
+
+async function withTrashStub(stub, run) {
+  await withExecutorStub({ trashPath: stub }, run)
 }
 
 const IDLE_S1 = new Map([['s1', { status: 'idle' }]])
@@ -989,7 +1009,7 @@ test('删除成功:trash 目标为会话目录,台账记录目录路径', skipMi
       await handlers.get('/api/session-manager/delete')(request('s1'), res)
     })
     assert.equal(res.status, 200)
-    assert.deepEqual(res.body, { ok: true })
+    assert.deepEqual(res.body, { ok: true, mode: 'os' })
     // locate 给的是日志文件,trash 必须上移到会话目录,否则残留空目录
     assert.deepEqual(trashed, [artifact.locatedDir])
     assert.equal(ledger.state.deleted.length, 1)
@@ -1018,9 +1038,68 @@ test('删除成功:同 id 残留台账被替换,无重复条目', skipMissingDep
       await handlers.get('/api/session-manager/delete')(request('s1'), res)
     })
     assert.equal(res.status, 200)
-    assert.deepEqual(res.body, { ok: true })
+    assert.deepEqual(res.body, { ok: true, mode: 'os' })
     assert.deepEqual(ledger.state.deleted.map((item) => item.sessionId), ['s1'])
     assert.equal(ledger.state.deleted[0].path, artifact.locatedDir)
+  } finally {
+    await artifact.cleanup()
+  }
+})
+
+// Given 系统回收站不可用(trash 抛错), When 删除, Then 产物降级搬入插件回收区,
+// 台账记录暂存路径 heldPath,响应 mode=quarantine
+test('删除:系统回收站不可用时降级搬入插件回收区,台账记录暂存路径', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents: IDLE_S1,
+      domain: makeDomain(['s1']),
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+    })
+    const res = response()
+    await withExecutorStub({ trashPath: async () => { throw new Error('gio: not found') } }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.ok, true)
+    assert.equal(res.body.mode, 'quarantine')
+    const entry = ledger.state.deleted[0]
+    assert.equal(entry.sessionId, 's1')
+    assert.equal(entry.path, artifact.locatedDir, '台账 path 仍为原位置,移回时使用')
+    assert.ok(entry.heldPath && entry.heldPath.startsWith(process.env.DSH_QUARANTINE_DIR), '台账记录回收区暂存路径')
+    await assert.rejects(access(artifact.locatedDir), '原位置产物应已搬走')
+    const held = await readFile(path.join(entry.heldPath, 'session.jsonl.zstd'), 'utf8')
+    assert.equal(held, 'log-bytes')
+  } finally {
+    await artifact.cleanup()
+  }
+})
+
+// Given 回收站与回收区均不可用, When 删除, Then 400 且台账不写(会话未被删除)
+test('删除:回收站与回收区均失败时拒绝且台账不写', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    const { handlers, ledger } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents: IDLE_S1,
+      domain: makeDomain(['s1']),
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+    })
+    const res = response()
+    await withExecutorStub({
+      trashPath: async () => { throw new Error('gio: not found') },
+      moveToQuarantine: async () => { throw new Error('read-only volume') },
+    }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    })
+    assert.equal(res.status, 400)
+    assert.match(res.body.error, /均不可用|移入回收站失败/)
+    assert.deepEqual(ledger.state.deleted, [])
+    // 双失败产物原地保留
+    await access(artifact.locatedDir)
   } finally {
     await artifact.cleanup()
   }
@@ -1112,6 +1191,7 @@ test('删除:产物已缺失且清理半失败时聚合失败点', skipMissingDe
   assert.ok(logger.warns.some((message) => message.includes('s1') && message.includes('detach boom')), '幽灵 detach 失败应落日志')
 })
 
+// Given 回收窗口内会话恢复运行(runningDuringTrash), When 聚合, Then 警告形态且无 partial 键
 test('删除:回收窗口内会话恢复运行,响应警告形态且无 partial 键', skipMissingDeps, async () => {
   const artifact = await makeLocatedArtifact()
   try {
@@ -1129,8 +1209,8 @@ test('删除:回收窗口内会话恢复运行,响应警告形态且无 partial 
       await handlers.get('/api/session-manager/delete')(request('s1'), res)
     })
     assert.equal(res.status, 200)
-    // 全成功警告态:{ok,message} 形态,无 partial 键
-    assert.deepEqual(res.body, { ok: true, message: DELETE_MESSAGES.runningDuringTrash })
+    // 全成功警告态:{ok,message,mode} 形态,无 partial 键
+    assert.deepEqual(res.body, { ok: true, mode: 'os', message: DELETE_MESSAGES.runningDuringTrash })
   } finally {
     await artifact.cleanup()
   }
@@ -1215,27 +1295,8 @@ test('删除:detach 与台账同时失败时,partial 消息聚合两个失败点
   }
 })
 
-test('trash 失败:整体中止,台账不写', skipMissingDeps, async () => {
-  const artifact = await makeLocatedArtifact()
-  try {
-    const { handlers, ledger } = makeCtx({
-      archivedIds: ['s1'],
-      headers: [HEADER],
-      agents: IDLE_S1,
-      domain: makeDomain(['s1']),
-      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
-    })
-    const res = response()
-    await withTrashStub(async () => { throw new Error('no trash') }, async () => {
-      await handlers.get('/api/session-manager/delete')(request('s1'), res)
-    })
-    assert.equal(res.status, 400)
-    assert.deepEqual(ledger.state.deleted, [])
-    assert.equal(ledger.writes, 0)
-  } finally {
-    await artifact.cleanup()
-  }
-})
+// (旧「trash 失败整体中止」语义已被回收区降级取代:单 trash 失败见降级用例,
+// 双失败中止见「回收站与回收区均失败时拒绝且台账不写」)
 
 test('台账域打开失败:删除其余成功仍响应 partial', skipMissingDeps, async () => {
   const artifact = await makeLocatedArtifact()
@@ -1355,6 +1416,58 @@ test('重挂载:产物未还原(持久层无 header)拒绝', skipMissingDeps, as
   assert.equal(res.status, 400)
   assert.equal(res.body.error, '会话产物不在持久层,请先到系统回收站还原后重试')
   // 拒绝路径不动台账
+  assert.equal(ledger.writes, 0)
+})
+
+// Given 回收区暂存条目(heldPath)且产物在暂存处, When 重挂载, Then 先移回原位置再挂载,
+// 会话列表随产物回位而可见(动态 headers 模拟宿主按产物现状列会话),台账清除
+test('重挂载:回收区暂存条目自动移回原位置后挂载成功', skipMissingDeps, async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'sm-held-'))
+  const originalDir = path.join(base, 's1')
+  const locatedPath = path.join(originalDir, 'session.jsonl.zstd')
+  const workspace = makeWorkspace('C:\\x', [])
+  try {
+    await mkdir(originalDir, { recursive: true })
+    await writeFile(locatedPath, 'log-bytes')
+    const { moveToQuarantine } = await import('../src/trash.mjs')
+    const heldPath = await moveToQuarantine(originalDir, path.join(base, 'held'))
+    await access(originalDir).then(() => { throw new Error('夹具前置失败:原位置应已空') }, () => {})
+    const { handlers, ledger } = makeCtx({
+      archivedIds: [],
+      // 宿主按产物现状列会话:移回前不可见,移回后可见
+      headers: async () => ((await access(locatedPath).then(() => true, () => false)) ? [HEADER] : []),
+      agents: new Map(),
+      workspaces: [workspace],
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: locatedPath } : undefined },
+      ledger: makeLedgerDomain([{ sessionId: 's1', path: originalDir, heldPath, deletedAt: 1 }]),
+    })
+    const res = response()
+    await handlers.get('/api/session-manager/remount')(request('s1'), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { ok: true })
+    assert.deepEqual(workspace.attachCalls, ['s1'])
+    assert.deepEqual(ledger.state.deleted, [])
+    // 产物已回到原位置,暂存消失
+    const restored = await readFile(locatedPath, 'utf8')
+    assert.equal(restored, 'log-bytes')
+    await assert.rejects(access(heldPath))
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+// Given 回收区暂存条目但暂存已缺失(原位置同样缺失), When 重挂载, Then 专属文案拒绝
+test('重挂载:回收区暂存缺失时拒绝且不动台账', skipMissingDeps, async () => {
+  const { handlers, ledger } = makeCtx({
+    archivedIds: [],
+    headers: [],
+    agents: new Map(),
+    ledger: makeLedgerDomain([{ sessionId: 's1', path: path.join(tmpdir(), 'sm-gone-original', 's1'), heldPath: path.join(tmpdir(), 'sm-gone-held', 's1-1'), deletedAt: 1 }]),
+  })
+  const res = response()
+  await handlers.get('/api/session-manager/remount')(request('s1'), res)
+  assert.equal(res.status, 400)
+  assert.equal(res.body.error, MESSAGES.heldMissing)
   assert.equal(ledger.writes, 0)
 })
 

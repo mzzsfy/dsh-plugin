@@ -9,6 +9,7 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DELETE_MESSAGES,
+  deleteOutcomeMessages,
   HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES,
   HISTORY_ALIGN_MODERN_MAX_ARTIFACT_BYTES,
   TOAST_MAX_TITLES,
@@ -390,6 +391,27 @@ test('删除收尾聚合:失败矩阵折叠为三形态响应体', () => {
   )
   // 全成功警告态:非 partial 形态(ok+message,无 partial 键)
   assert.deepEqual(aggregateDeleteOutcome({ runningDuringTrash: true }), { ok: true, message: R })
+})
+
+// Given 回收区降级处置(quarantined), When 聚合, Then 基础前缀区分两种模式且形态不变
+test('删除收尾聚合:回收区模式前缀为插件回收区', () => {
+  const R = DELETE_MESSAGES.runningDuringTrash
+  const M = deleteOutcomeMessages(true)
+  assert.ok(M.partial.startsWith('已移入插件回收区'), '回收区模式 partial 前缀')
+  assert.ok(M.archiveCleanup.startsWith('已移入插件回收区'), '回收区模式归档清理前缀')
+  assert.ok(M.ledgerFailed.startsWith('已移入插件回收区'), '回收区模式台账前缀')
+  const os = deleteOutcomeMessages(false)
+  assert.ok(os.partial.startsWith('已移入回收站'), 'OS 模式 partial 前缀')
+  assert.deepEqual(
+    aggregateDeleteOutcome({ detachFailed: true, quarantined: true }),
+    { ok: true, partial: true, message: M.partial },
+  )
+  assert.deepEqual(
+    aggregateDeleteOutcome({ ledgerFailed: true, runningDuringTrash: true, quarantined: true }),
+    { ok: true, partial: true, message: M.ledgerFailed + ';' + R },
+  )
+  // 回收区全成功警告态与非警告态形态同 OS 模式
+  assert.deepEqual(aggregateDeleteOutcome({ quarantined: true }), { ok: true })
 })
 
 test('运行中判定:agent status running 即运行中,注册表缺失视为非运行', () => {
