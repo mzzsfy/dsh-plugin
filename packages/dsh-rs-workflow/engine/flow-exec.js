@@ -8,12 +8,14 @@ const settle = (callId, outputs) => outputs === null
   : { callId, ok: true, outputs }
 
 const { calls } = args
-const dispatches = calls.map((call) => agent(call.prompt, {
+// v5 引擎 parallel 契约:零参 thunk 数组(每个 thunk 失败→null),不再是 promise 数组;
+// agent() options 键存在则值必须是 JSON(undefined 不行),缺省键须整键省略
+const dispatches = calls.map((call) => () => agent(call.prompt, {
   label: call.label,
   phase: BATCH_PHASE,
-  schema: call.schema,
-  provider: call.provider,
-  model: call.model,
+  ...call.schema !== undefined ? { schema: call.schema } : {},
+  ...call.provider !== undefined ? { provider: call.provider } : {},
+  ...call.model !== undefined ? { model: call.model } : {},
 }).then((outputs) => settle(call.callId, outputs))
   .catch((error) => ({ callId: call.callId, ok: false, error: errorText(error) })))
 

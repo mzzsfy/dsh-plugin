@@ -10,7 +10,7 @@ const LINE_LIMIT = 200
 const source = await readFile(new URL('../engine/flow-exec.js', import.meta.url), 'utf8')
 const wrapped = new vm.Script(`(async () => {\n${source}\n})()`, { filename: 'flow-exec.vm.js' })
 
-// 构造裸 vm context,注入桩 globals;parallel 桩即 Promise.all,并发为真实并行
+// 构造裸 vm context,注入桩 globals;parallel 桩对齐 v5 引擎契约(thunk 数组,失败→null)
 const makeStub = (handler, calls) => {
   const observed = { agentCalls: [], parallelBatches: [] }
   const context = vm.createContext({
@@ -19,7 +19,7 @@ const makeStub = (handler, calls) => {
     log: () => {},
     parallel: (dispatches) => {
       observed.parallelBatches.push(dispatches)
-      return Promise.all(dispatches)
+      return Promise.all(dispatches.map((thunk) => thunk()))
     },
     agent: (prompt, options) => {
       observed.agentCalls.push({ prompt, options })

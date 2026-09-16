@@ -142,6 +142,7 @@ export function registerOrchestrator(ctx, config) {
             request: args.request, inputs: args.inputs ?? {},
             engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
             sessionId: agentIdOf(agent), workspace: process.cwd(),
+            parent: agent,
           })
           rejectCounts.delete(agentIdOf(agent))
           activeRuns.set(agentIdOf(agent), driver.runId)

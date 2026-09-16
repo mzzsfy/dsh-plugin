@@ -5,6 +5,7 @@ import { nextBatch, scriptViewOf } from './scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from './approve.mjs'
 import { runBatch } from './runner.mjs'
 import { registerDriver, unregisterDriver } from './control.mjs'
+import { dbg } from './debug.mjs'
 
 const TERMINAL_STATES = new Set(['completed', 'cancelled', 'failed', 'blocked'])
 
@@ -62,7 +63,7 @@ export function buildSeed(record, plan, fromStepId, inputs) {
 }
 
 export class RunDriver {
-  constructor({ template, templateSet = [], plan, warnings = [], runId, request, inputs, state, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false }) {
+  constructor({ template, templateSet = [], plan, warnings = [], runId, request, inputs, state, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false, parent = undefined }) {
     this.template = template
     this.templateSet = templateSet
     this.plan = plan
@@ -85,6 +86,8 @@ export class RunDriver {
     this.finished = false
     this.active = false
     this.subordinate = subordinate
+    // 编排子代理的挂载父 agent(与 workflow 工具链对齐;undefined 时引擎派发行为未定义)
+    this.parent = parent
   }
 
   // 段推进唯一入口:跑到下一个段边界(审批到达/暂停/终态)返回 settle 负载;orchestrator 包装为 continuable job
@@ -133,6 +136,7 @@ export class RunDriver {
 
   cancel() {
     if (this.finished) return
+    dbg(`cancel() invoked status=${this.state.status} active=${this.active} stack=${new Error().stack?.split('\n').slice(1, 4).join(' | ')}`)
     if (this.state.status === 'waiting_approval' && !this.active) {
       // 取消优先:审批等待期无活跃段,即时终态
       this.finish('cancelled', CANCELLED_SUMMARY)
@@ -381,11 +385,11 @@ export class RunDriver {
 }
 
 // 发起入口(v5):创建 driver 并落盘注册,不启动段;首段由 orchestrator 包装 continuable job 调 runSegment
-export function startRun({ template, templateSet = [], plan, warnings = [], runId, request, inputs, engine, slots, budgets, sessionId, workspace, state }) {
+export function startRun({ template, templateSet = [], plan, warnings = [], runId, request, inputs, engine, slots, budgets, sessionId, workspace, state, parent }) {
   const store = reportStore()
   RunDriver.seq = (RunDriver.seq ?? 0) + 1
   const id = runId ?? `r-${Date.now().toString(36)}-${RunDriver.seq}`
-  const driver = new RunDriver({ template, templateSet, plan, warnings, runId: id, request, inputs, engine, slots, budgets, sessionId, workspace, store, state })
+  const driver = new RunDriver({ template, templateSet, plan, warnings, runId: id, request, inputs, engine, slots, budgets, sessionId, workspace, store, state, parent })
   driver.startPersist()
   return driver
 }

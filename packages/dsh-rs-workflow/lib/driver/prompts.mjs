@@ -79,6 +79,7 @@ export function buildPrompt(ctx) {
     item: inst?.item, index: inst?.index, carry: inst?.carry, selfId: step.id,
   }
   const lines = [`[任务]`, resolvePlaceholders(step.prompt, phCtx)]
+  lines.push('[角色边界]', '你是若水编排的步骤执行者,不是主控:禁止调用 rs_workflow_* 工具、禁止再发起编排或工作流;直接完成本任务并按产出要求提交。')
   if (typeof planStep?.note === 'string' && planStep.note.trim() !== '') {
     lines.push('[任务要点]', planStep.note)
   }
