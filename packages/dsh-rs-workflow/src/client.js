@@ -774,6 +774,29 @@ window.__ModuleLoader__.load({
       const [saveErrors, setSaveErrors] = useState([])
       const [saving, setSaving] = useState(false)
       const [note, setNote] = useState('')
+      const [filling, setFilling] = useState(false)
+      // 文本含 JSON5 扩展语法时 client 不解析(解析权威在 host):经 template 只读路由取 host 解析结果回填表单
+      useEffect(() => {
+        if (init.synced || isNew) return
+        let live = true
+        setFilling(true)
+        request('template?id=' + encodeURIComponent(entry.id)).then((o) => {
+          if (!live) return
+          setFilling(false)
+          const parsed = o.ok && o.data && o.data.parsed
+          if (!parsed || typeof parsed !== 'object') { setNote('结构表单不可用:host 解析失败,可在文本视图编辑并「应用」。'); return }
+          const m = {
+            id: asStr(parsed.id) || entry.id || '',
+            label: asStr(parsed.label), description: asStr(parsed.description),
+            enabled: entry.enabled !== false,
+            inputs: objToRows(parsed.inputs),
+            steps: asArr(parsed.steps).map(normalizeStep),
+          }
+          setModel(m); setSynced(true); setView('struct')
+          setNote('已按 host 解析结果载入结构表单;保存以「应用」后的文本为准。')
+        })
+        return () => { live = false }
+      }, [entry.id])
       // 未回填(文本模式)时表单编辑不重写文本,json5 正文始终权威
       const update = (fn) => {
         if (!synced) { setModel((prev) => fn(prev)); return }
