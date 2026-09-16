@@ -59,7 +59,9 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       persistRun(record)
       const entry = index.find((e) => e.runId === record.runId)
       if (entry) Object.assign(entry, indexEntryOf(record))
+      return true
     }
+    return false
   }
 
   const removeInternal = (runId) => {
@@ -91,15 +93,16 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
     } catch (e) {
       warn(`runs 目录扫描失败:${e.message}`)
     }
+    let settledCount = 0
     for (const name of files) {
       try {
-        loadFileRecord(join(runsDir, name), !indexValid)
+        if (loadFileRecord(join(runsDir, name), !indexValid)) settledCount++
       } catch (e) {
         warn(`运行记录 ${name} 读取失败,跳过:${e.message}`)
       }
     }
-    // 对账:runs/ 文件集合为权威修齐 index(缺行补、幽灵行删),仅内存修正
-    let repaired = false
+    // 对账:runs/ 文件集合为权威修齐 index(缺行补、幽灵行删、收敛改写行落盘),仅内存修正
+    let repaired = settledCount > 0
     const fileIds = new Set(records.keys())
     for (const record of records.values()) {
       if (!index.some((e) => e.runId === record.runId)) {

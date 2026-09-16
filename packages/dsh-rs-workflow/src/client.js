@@ -289,7 +289,7 @@ window.__ModuleLoader__.load({
     function RunCard({ run, onChanged }) {
       const [detail, setDetail] = useState(null)
       const [fetchError, setFetchError] = useState(false)
-      const live = run.status === 'running' || run.status === 'paused'
+      const live = run.status === 'running' || run.status === 'paused' || run.status === 'waiting_approval'
       const reload = useCallback(() => request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
         if (outcome.ok) { setDetail(outcome.data); setFetchError(false) } else setFetchError(true)
       }), [run.runId])
@@ -304,7 +304,7 @@ window.__ModuleLoader__.load({
       const queued = Array.isArray(view.queued) ? view.queued : []
       const warnings = Array.isArray(view.warnings) ? view.warnings : []
       const stepEvents = []
-      const steps = view.steps || {}
+      const steps = view.stepsTrace || {}
       for (const [stepId, byInstance] of Object.entries(steps)) {
         for (const [instance, events] of Object.entries(byInstance || {})) {
           for (const e of events || []) stepEvents.push({ stepId, instance, ...e })
