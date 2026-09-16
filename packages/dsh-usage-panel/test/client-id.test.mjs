@@ -14,3 +14,12 @@ test('client.js 注册 id 为完整包名', () => {
   assert.ok(match, 'client.js 缺少 __ModuleLoader__.load 注册')
   assert.equal(match[1], name)
 })
+
+test('client.js 样式渲染自带 data-plugin', () => {
+  const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  // 渲染点计数用 ('style', { 精确命中 React 形态,排除 DOM 形态的 createElement('style')
+  const renders = source.split("('style', {").length - 1
+  assert.ok(renders > 0, 'client.js 无样式渲染点')
+  const marked = source.split("('style', { 'data-plugin'").length - 1
+  assert.equal(marked, renders, '每个样式渲染点都必须携带 data-plugin(值=注册包名),防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
+})

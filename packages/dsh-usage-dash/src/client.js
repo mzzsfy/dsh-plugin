@@ -1906,7 +1906,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const ICON_STROKE_WIDTH = 2
     const NOTE_SEPARATOR = ' · '
     const TIP_Z_INDEX = 1100
-    const STYLE_ID = 'dsh-usage-dash'
+    // 与注册 id 同源:既作样式查重键,又作 data-plugin 标记值,短名会使自身 rebuilt 删不到旧样式
+    const STYLE_ID = '@mzzsfy/dsh-usage-dash'
     // 开关视觉常量(规约形态:隐藏 checkbox + track 胶囊 + thumb 圆点)
     const SWITCH_TRACK_WIDTH = 40
     const SWITCH_TRACK_HEIGHT = 22

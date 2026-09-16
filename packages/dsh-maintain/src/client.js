@@ -993,7 +993,7 @@ function MaintainApp() {
 
   if (status === null) {
     return h('div', { className: 'dm-panel' },
-      h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+      h('style', { 'data-plugin': '@mzzsfy/dsh-maintain', dangerouslySetInnerHTML: { __html: CSS } }),
       h('span', { className: 'dm-meta' }, error !== null ? '读取失败' : '加载中…'),
       error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null)
   }
@@ -1010,7 +1010,7 @@ function MaintainApp() {
   const notesOpenLive = notesVersion !== null && !restarting
 
   return h('div', { className: 'dm-panel' },
-    h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+    h('style', { 'data-plugin': '@mzzsfy/dsh-maintain', dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'dm-head' },
       h('span', { className: 'dm-head__title' }, '版本与运维'),
       h('span', { className: 'dm-head__hint' }, '追踪 npm 新版本,一键升级,安全重启'),

@@ -339,7 +339,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'rsww-group__count' }, count)),
         items.map((run) => React.createElement(RunCard, { key: run.runId, run, onChanged: reload })))
       return React.createElement('div', { className: 'rsww-flow' },
-        React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+        React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-rs-workflow', dangerouslySetInnerHTML: { __html: CSS } }),
         error ? React.createElement('span', { className: 'rsww-error' }, error) : null,
         mine.length === 0 ? EmptyState({ title: '本会话还没有运行记录', hint: '在若水模式下发送需求后,编排进度会实时出现在这里。' }) : null,
         running.length ? group('进行中', running.length + ' 次', running) : null,
@@ -1167,7 +1167,7 @@ window.__ModuleLoader__.load({
       const [page, setPage] = useState('templates')
       const pages = [{ key: 'templates', label: '流程模板' }, { key: 'config', label: '配置' }]
       return h('div', { className: 'rsww-root' },
-        React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+        React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-rs-workflow', dangerouslySetInnerHTML: { __html: CSS } }),
         React.createElement('div', { className: 'rsww-head' },
           React.createElement('span', { className: 'rsww-head__title' }, '若水工作流'),
           React.createElement('span', { className: 'rsww-head__caption' },
