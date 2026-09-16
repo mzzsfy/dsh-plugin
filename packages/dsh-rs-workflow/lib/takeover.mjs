@@ -117,6 +117,23 @@ export function registerTakeover(ctx, config, { dshHome, store: storeInject } = 
     }
   }
 
+  // 被拦截消息落盘:reject 路径宿主不落 user/message(会话日志只见 notice,上下文生态全盲),按宿主同形补落
+  function commitClaimed(agent, messages) {
+    for (const message of messages || []) {
+      if (!message || message.source?.kind !== 'user') continue
+      try {
+        agent.session.append('user/message', {
+          id: randomUUID(),
+          role: 'user',
+          source: message.source,
+          content: message.content,
+        }, { surfaceOp: 'append' })
+      } catch (error) {
+        ctx.logger?.warn?.(`rs-workflow 请求落盘失败: ${error?.message ?? error}`)
+      }
+    }
+  }
+
   function launch(agent, request, inputs, seed) {
     const settings = readSettingsValue(ctx)
     const runId = `r-${Date.now().toString(36)}-${(launch.seq = (launch.seq ?? 0) + 1)}`
@@ -168,6 +185,7 @@ export function registerTakeover(ctx, config, { dshHome, store: storeInject } = 
         const entry = active.get(agent.id)
         const accepted = post(entry.runId, { kind: 'message', text, inject: false })
         if (accepted) {
+          commitClaimed(agent, payload.messages)
           note(agent, '若水编排进行中,该消息已排队,将在下一步骤边界进入编排')
           return { kind: 'reject' }
         }
@@ -176,6 +194,7 @@ export function registerTakeover(ctx, config, { dshHome, store: storeInject } = 
       }
       const userText = text.split(/<\/?system-reminder>/i)[0].trim()
       const request = userText === '' ? text : userText
+      commitClaimed(agent, payload.messages)
       startRun(agent, request).catch((error) => {
         ctx.logger?.error?.(`rs-workflow 编排启动失败: ${error?.stack ?? error?.message ?? error}`)
         note(agent, '若水编排启动失败: ' + String(error?.message ?? error).slice(0, 200))

@@ -93,7 +93,7 @@ const setup = (engineOutputs = { o: 'X' }, flowText = JSON.stringify(FLOW, null,
   return { ...h, takeover, store, home, flowFile }
 }
 
-const msgPayload = (agent, text) => ({ agent, messages: [{ role: 'user', content: text }] })
+const msgPayload = (agent, text, source) => ({ agent, messages: [{ role: 'user', content: [{ type: 'text', text }], ...(source ? { source } : { source: { kind: 'user', rpcId: 'rpc-' + text } }) }] })
 
 test('Given 激活时 flowFile 校验失败 When registerTakeover Then 抛错且不注册', () => {
   const home = mkdtempSync(join(tmpdir(), 'rsww-takeover-bad-'))
@@ -103,15 +103,21 @@ test('Given 激活时 flowFile 校验失败 When registerTakeover Then 抛错且
   assert.throws(() => registerTakeover(h.ctx, { kind: 'flow', flowFile }, { dshHome: home, store: createStore({ dir: join(home, 'd') }) }), /校验失败/)
 })
 
-test('Given 主会话首条消息 When pre-step Then reject,notice 写入,run 落 store 并 completed', async () => {
+test('Given 主会话首条消息 When pre-step Then reject,请求按宿主同形落盘+notice 写入,run 落 store 并 completed', async () => {
   const h = setup({ o: 'OUT' })
   const notices = []
   const agent = makeAgent('s1', notices)
   const { result, nextCalled } = await h.firePreStep(msgPayload(agent, '帮我做需求'))
   assert.equal(nextCalled, false)
   assert.equal(result.kind, 'reject')
-  assert.equal(notices.length, 1)
-  assert.ok(notices[0].data.content[0].text.includes('已接管'))
+  assert.equal(notices.length, 2)
+  const mirrored = notices[0]
+  assert.equal(mirrored.kind, 'user/message')
+  assert.equal(mirrored.data.source.kind, 'user')
+  assert.ok(mirrored.data.source.rpcId)
+  assert.equal(mirrored.data.role, 'user')
+  assert.equal(mirrored.data.content[0].text, '帮我做需求')
+  assert.ok(notices[1].data.content[0].text.includes('已接管'))
   await new Promise((r) => setTimeout(r, 80))
   const records = h.store.list()
   assert.equal(records.length, 1)
@@ -151,6 +157,9 @@ test('Given 在飞时第二条消息 When pre-step Then 入队+notice+reject,批
   const second = await h.firePreStep(msgPayload(agent, '补充要求'))
   assert.equal(second.result.kind, 'reject')
   assert.ok(notices.some((n) => n.data.content[0].text.includes('已排队')))
+  const queuedMirror = notices.filter((n) => n.kind === 'user/message' && n.data.source.kind === 'user')
+  assert.equal(queuedMirror.length, 2)
+  assert.equal(queuedMirror[1].data.content[0].text, '补充要求')
   assert.deepEqual(h.store.get(runId).queued, ['补充要求'])
   // 放行两批:第一批挂起的 a,第二批 b 消费排队消息
   pending[0]()
@@ -163,10 +172,12 @@ test('Given 在飞时第二条消息 When pre-step Then 入队+notice+reject,批
   assert.ok(bDispatch.prompt.includes('[用户补充]'))
   assert.ok(bDispatch.prompt.includes('补充要求'))
   assert.deepEqual(record.queued, [])
-  // 终态后 active 残账构造 post=false 分支:放行进主模型
+  // 终态后 active 残账构造 post=false 分支:放行进主模型,宿主自行落盘,本行不镜像
   h.takeover.active.set(agent.id, { runId: 'r-gone', agent })
+  const beforeThird = notices.length
   const third = await h.firePreStep(msgPayload(agent, '新请求'))
   assert.equal(third.nextCalled, true)
+  assert.equal(notices.length, beforeThird)
 })
 
 test('Given run 落定 When 收敛 Then driver 注销注册表,active 清空', async () => {
@@ -253,10 +264,10 @@ test('Given notice 写入抛错 When pre-step 首消息 Then 仍 reject 且 run 
   assert.equal(nextCalled, false)
   assert.equal(result.kind, 'reject')
   await new Promise((r) => setTimeout(r, 100))
-  // 写入失败不阻断接管与编排:run 正常落 store 并完成,接管与终态两次 notice 均降级为 warn
+  // 写入失败不阻断接管与编排:run 正常落 store 并完成,请求落盘与接管/终态 notice 均降级为 warn
   assert.equal(h.store.list().length, 1)
   assert.equal(h.store.list()[0].status, 'completed')
-  assert.ok(appendCalls >= 2)
-  assert.ok(warns.length >= 2)
-  assert.ok(warns.every((m) => m.includes('会话提示写入失败')))
+  assert.ok(appendCalls >= 3)
+  assert.ok(warns.length >= 3)
+  assert.ok(warns.every((m) => m.includes('失败') && m.includes('rs-workflow')))
 })
