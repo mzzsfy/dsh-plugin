@@ -40,5 +40,4 @@ React.createElement('style', { 'data-plugin': '@mzzsfy/<包名>', dangerouslySet
 - 自带标记后三路径全通:他插件材质化 claimStyles 只收无标记节点(不误收);他插件 rebuilt 删不到本插件样式;自身 rebuilt 先删旧标记样式,fiber refresh 重跑 apply/挂载/渲染路径幂等重注(自愈)
 - 原位复用路径(按 id 找到在位节点仅改 textContent)必须幂等补 `setAttribute('data-plugin', ...)`,防修复前旧代残留的缺标记节点跨代延续(参考 `dsh-toast` 的 ensureStyle stale 分支)
 - 标记值禁止另起短名(如省略 @mzzsfy 前缀的包短名):值 != 注册 id 时自身 rebuilt 删不到旧样式,重注被幂等守卫跳过,刷新页面前 CSS 停留在旧版
-- 契约守卫测试:包内测试断言 client.js 每个样式注入点都伴随 data-plugin 标记——head 注入断言 `createElement('style')` 与 `setAttribute('data-plugin', '<包名>')` 计数相等(守卫形态参考 `dsh-cron-board/test/client-id.test.mjs`);React 渲染形态断言 `createElement('style'` 出现处均携带 `data-plugin` prop;DOM 桩测试的假元素须实现 `setAttribute` 并记录属性供断言(参考 `dsh-toast/test/mount.test.mjs` 的 attrs 桩)
-- 已知待归一:`dsh-usage-dash` 的 STYLE_ID 当前为包短名(`dsh-usage-dash`),不满足值=注册 id,自身 rebuilt 后样式不刷新;`dsh-rs-workflow` 两处 React 渲染 style(src/client.js:342,1170)无 data-plugin 标记,属标准受害形态且无守卫。两包待单独修复
+- 契约守卫测试:包内测试断言 client.js 每个样式注入点都伴随 data-plugin 标记——head 注入断言 `createElement('style')` 与 `setAttribute('data-plugin', '<包名>')` 计数相等(守卫形态参考 `dsh-cron-board/test/client-id.test.mjs`);React 渲染形态以 `('style', {` 计数渲染点、以 `('style', { 'data-plugin'` 计数已标记点并断言相等,混合形态包两模式并存(守卫参考 `dsh-maintain/test/client-id.test.mjs`);DOM 桩测试的假元素须实现 `setAttribute` 并记录属性供断言(参考 `dsh-toast/test/mount.test.mjs` 的 attrs 桩)
