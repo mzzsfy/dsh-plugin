@@ -2,7 +2,8 @@
 # (`dsh plugin add @mzzsfy/dsh-rs-workflow` 应用):
 #   - rs-workflow-board / role board:挂载 /api/rsww/* 路由(设置页模板管理 + 配置)。
 # 模板与配置存自有文件 ~/.dsh/dsh-rs-workflow/v5/,不经宿主 settings 服务,不写 settings.yaml。
-# 编排运行时已随 v4 清理移除,按 v5 设计(docs/rsww-v5/)另行实现。
+# 编排运行时只存在于模式组合(preset/rs-workflow 骨架经 release 生成 rs-<id> 组合),
+# 宿主根不注册 orchestrator 行——编排属于会话,不属于全局。
 
 - insert:
     - id: rs-workflow-board
