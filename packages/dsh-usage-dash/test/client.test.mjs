@@ -36,6 +36,7 @@ const {
   OTHER_MODEL,
   aggregateCurrencyOf,
   applyCurrencyToRules,
+  avgPriceText,
   cacheRateText,
   cardsStatsOf,
   coerceConditions,
@@ -1005,6 +1006,18 @@ test('formatCost 千分位与两位小数', () => {
 test('formatCost 微观值四位小数', () => {
   assert.equal(formatCost(0.001, ''), '0.0010')
   assert.equal(formatCost(0.009999, '$'), '$0.0100')
+})
+
+test('avgPriceText 费用折每百万 token 均价', () => {
+  assert.equal(avgPriceText(3357.85, 6232901270, '¥'), '¥0.54/M')
+  assert.equal(avgPriceText(2, 1000 * 1000, '$'), '$2.00/M')
+  assert.equal(avgPriceText(0.5, 1000 * 1000, ''), '0.50/M')
+})
+
+test('avgPriceText 无费用或零 token 不显示', () => {
+  assert.equal(avgPriceText(undefined, 6232901270, '¥'), '')
+  assert.equal(avgPriceText(0, 6232901270, '¥'), '')
+  assert.equal(avgPriceText(3357.85, 0, '¥'), '')
 })
 
 test('镜像函数基本行为:非法输入 null 与命中计价', () => {

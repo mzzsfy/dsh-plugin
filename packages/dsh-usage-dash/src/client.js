@@ -1448,10 +1448,15 @@ function formatCostCompact(value, currency) {
   return `${currency}${Math.round(value * COST_MICRO_SCALE) / COST_MICRO_SCALE}`
 }
 
+// 模型均价:费用折算每百万 token 单价;无费用(cost 恒正数才有效,0 视为未配价)或零 token 无均价
+function avgPriceText(cost, tokens, currency) {
+  if (!(cost > 0) || !(tokens > 0)) return ''
+  return `${formatCost(cost / (tokens / TOKENS_PER_MILLION), currency)}/M`
+}
+
 // 全局显示货币:规则表首个非空 currency,所有费用显示点统一取此值(全局价格定位);
 // 无则空串即不带符号。数值仍按命中规则单价计算,符号不随命中规则变化
-function aggregateCurrencyOf(rules) {
-  if (!Array.isArray(rules)) return ''
+function aggregateCurrencyOf(rules) {  if (!Array.isArray(rules)) return ''
   const found = rules.find((rule) => typeof rule?.currency === 'string' && rule.currency !== '')
   return found ? found.currency : ''
 }
@@ -2582,6 +2587,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               const speedText = modelSpeedText(item.speed)
               const ttftText = modelTtftText(item.ttft)
               const ioText = modelIoPercentText(item, t)
+              const avgText = avgPriceText(item.cost, item.tokens, costCurrency)
+              const tokensText = `${formatTokens(item.tokens)} (${formatPercent((item.tokens / total) * PERCENT_SCALE)})`
               const metaParts = [
                 item.cost !== undefined ? `≈ ${formatCost(item.cost, costCurrency)}` : null,
                 ttftText,
@@ -2612,8 +2619,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                       }, '›')
                     : null,
                   h('div', { className: 'ud-model-values' },
-                    h('span', { className: 'ud-model-tokens' },
-                      `${formatTokens(item.tokens)} (${formatPercent((item.tokens / total) * PERCENT_SCALE)})`),
+                    h('span', { className: 'ud-model-tokens' }, avgText ? `${tokensText} · ${avgText}` : tokensText),
                     ioText ? h('span', { className: 'ud-model-io' }, ioText) : null,
                     h('span', { className: 'ud-model-meta' }, metaParts.join(' · ')))),
                 isOther
