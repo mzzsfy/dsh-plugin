@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, writeFile, utimes, mkdir, rm, readFile, access } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -1973,7 +1974,7 @@ test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老�
   })
 })
 
-test('历史输入路由:窗口排除 subagent 会话——不解压、条目不入缓存、不占槽位', skipMissingDeps, async () => {
+test('历史输入路由:窗口排除 subagent 会话——不解压、条目不入浮层', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     // subagent 会话在宿主列表中更新更近(排最前):若不排除将挤占窗口并收录其输入
     const headers = [
@@ -2009,6 +2010,53 @@ test('历史输入路由:窗口放宽后最近 SCAN 个主会话全部参与对�
       (body) => body.aligned && body.inputs.some((item) => item.text === '输入' + (total - HISTORY_SESSION_SCAN_LIMIT)))
     assert.ok(readCounts.get(boundary) >= 1, '窗口边界会话被解压')
     assert.equal(readCounts.get('s0'), undefined, '窗口外最老会话不解压')
+  })
+})
+
+test('历史输入路由:既往误收录的 subagent 条目在对齐时自愈清除', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (dir) => {
+    // 预置被旧版本污染的缓存:subagent 条目已在 entries 中
+    const cacheFile = path.join(dir, 'x-' + createHash('sha1').update('C:\\x').digest('hex').slice(0, 8) + '.json')
+    await writeFile(cacheFile, JSON.stringify({
+      cwd: 'C:\\x',
+      entries: [
+        { text: '子代理任务提示', at: 100, sid: 'sub1' },
+        { text: '人类输入', at: 200, sid: 's1' },
+      ],
+      extracts: {},
+    }), 'utf8')
+    const headers = [
+      { id: 'sub1', cwd: 'C:\\x', createdAt: 0, origin: 'subagent' },
+      { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+    ]
+    const { handlers } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      readSessions: { s1: [userMessageEvent('人类输入', 200)] },
+    })
+    // 对齐完成前请求直接返回预置缓存(aligned 且含目标文本):必须等到污染条目消失
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '人类输入')
+        && !body.inputs.some((item) => item.text === '子代理任务提示'))
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['人类输入'])
+  })
+})
+
+test('历史输入路由:subagent 排最前不挤占窗口——第 SCAN 个主会话仍被解压', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    // 锁定 filter 先于 slice:若先 slice 再 filter,sub1 占一槽后 s1(第 SCAN 个主会话)落窗外
+    const headers = [
+      { id: 'sub1', cwd: 'C:\\x', createdAt: 0, origin: 'subagent' },
+      ...Array.from({ length: HISTORY_SESSION_SCAN_LIMIT }, (_, i) => ({ id: 's' + (HISTORY_SESSION_SCAN_LIMIT - i), cwd: 'C:\\x', createdAt: 0 })),
+    ]
+    const readSessions = {}
+    for (let i = 1; i <= HISTORY_SESSION_SCAN_LIMIT; i++) readSessions['s' + i] = [userMessageEvent('输入' + i, 1000 + i)]
+    const { handlers, readCounts } = makeCtx({ archivedIds: [], headers, agents: new Map(), readSessions })
+    await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '输入1'))
+    assert.ok(readCounts.get('s1') >= 1, '第 SCAN 个主会话在窗内被解压')
+    assert.equal(readCounts.get('sub1'), undefined, 'subagent 仍不被解压')
   })
 })
 

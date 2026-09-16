@@ -501,6 +501,8 @@ export function apply(ctx, config) {
         .filter((recordItem) => recordItem.header.origin !== 'subagent'
           && recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
+      // 该 cwd 无主会话(纯 subagent 派生或已清空):无可对齐内容,缓存读写一并跳过
+      if (window.length === 0) return
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
       const fresh = []
@@ -528,8 +530,15 @@ export function apply(ctx, config) {
       for (const [sessionId, record] of Object.entries(extracts)) {
         if (windowIds.has(sessionId) && !isSessionRunning({ agents, sessionId })) prunedExtracts[sessionId] = record
       }
+      // 既往污染自愈:旧版本窗口未排除 subagent,其条目已混入缓存 entries——
+      // 合并前按列表 origin 识别清除;会话已删除的条目无法识别,随时间被挤出
+      const subagentIds = new Set(records
+        .filter((recordItem) => recordItem.header.origin === 'subagent')
+        .map((recordItem) => recordItem.header.id))
+      const legacyEntries = subagentIds.size === 0 ? (cached ? cached.entries : [])
+        : (cached ? cached.entries : []).filter((entry) => entry.sid === undefined || !subagentIds.has(entry.sid))
       const merged = aggregateInputs(
-        (cached ? cached.entries : []).concat(fresh),
+        legacyEntries.concat(fresh),
         { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
       )
       await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts: prunedExtracts })
@@ -541,6 +550,8 @@ export function apply(ctx, config) {
   // 只新增/更新目标会话指纹
   function alignSessionFocus(cwd, header) {
     return enqueueFocusAlign(async () => {
+      // 与批量窗口同一不变式:缓存只收主会话输入(正常 UI 不可达,防直调路由)
+      if (header.origin === 'subagent') return
       const sessionId = header.id
       const persistence = ctx.get('sessionPersistence')
       const located = persistence ? persistence.locate(header) : undefined
@@ -579,10 +590,13 @@ export function apply(ctx, config) {
         await ensureCacheDir(cacheDir)
         const records = await ctx.sessionQuery.listSessions()
         const workspaces = []
-        // subagent 会话不参与归纳:纯 subagent 的 cwd 无人类输入,不值得建缓存
-        for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
+        // subagent 会话不参与归纳:纯 subagent 的 cwd 无人类输入,不值得建缓存;
+        // 过滤先行再取最近 STARTUP_SCAN 条,subagent 密集派生时不挤占归纳窗口
+        for (const recordItem of records
+          .filter((item) => item.header.origin !== 'subagent')
+          .slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
           const recordCwd = recordItem.header.cwd
-          if (recordItem.header.origin === 'subagent' || recordCwd === undefined) continue
+          if (recordCwd === undefined) continue
           if (workspaces.some((known) => samePath(known, recordCwd))) continue
           workspaces.push(recordCwd)
         }
