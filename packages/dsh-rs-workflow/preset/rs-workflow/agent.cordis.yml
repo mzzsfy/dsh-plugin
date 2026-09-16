@@ -98,8 +98,9 @@
 
 # ── delegation and workflows ────────────────────────────────────────────────
 
-# workflowEngine 是预设私有服务,所有触达它的行共享一个 entry-local realm。
-# orchestrator 行在此组:注册 rs_workflow_* 五工具并经 jobs 服务拉起分段 continuable job;
+# workflowEngine 是预设私有服务(preset 组合发布全局服务会被宿主拒绝 mount),
+# 所有触达它的行共享一个 entry-local isolate realm。
+# orchestrator 行注册 rs_workflow_* 五工具并经 jobs 服务拉起分段 continuable job;
 # 控制队列与 store 为普通模块单例,host/agent 行经同一 realpath 解析共享实例。
 - id: delegation
   name: cordis:group
