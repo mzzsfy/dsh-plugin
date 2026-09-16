@@ -1,5 +1,5 @@
-// release notes 纯逻辑测试:标签构建、API 地址构建、GitHub release 拉取与响应校验。
-// 数据源:https://api.github.com/repos/deepseek-ai/deepseek-harness/releases/tags/dsh-v<版本>
+// release notes 纯逻辑测试:标签构建、发布页地址构建、页面拉取与正文提取。
+// 数据源:https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v<版本>(页面正文,规避 api.github.com 未认证限流)
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,7 +8,7 @@ import {
   buildReleaseTag,
   buildReleaseNotesUrl,
   fetchReleaseNotes,
-  parseReleaseNotes,
+  extractReleaseNotesFromHtml,
   RELEASE_REPO,
 } from '../src/core.mjs'
 
@@ -30,17 +30,36 @@ function fakeFetch(body, { ok = true, status = 200 } = {}) {
   }
 }
 
-const RELEASE_JSON = {
-  html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.1',
-  published_at: '2026-09-10T03:09:00Z',
-  body: '## 更新内容\n\n- 修复若干问题',
+function makeReleaseHtml(inner, { datetime = '2026-09-10T03:09:00Z' } = {}) {
+  return '<!doctype html><html><body>'
+    + (datetime ? '<relative-time datetime="' + datetime + '"></relative-time>' : '')
+    + '<div data-test-selector="body-content" class="markdown-body">' + inner + '</div>'
+    + '</body></html>'
 }
 
-test('场景:合法版本构建发布标签与 API 地址', () => {
+const RELEASE_INNER = '<h3 id="user-content-note">更新内容</h3>'
+  + '<ul>'
+  + '<li>新增 A 功能 &amp; B 修复</li>'
+  + '<li>支持 <code>fast</code> 模式 &#39;引号&#39; 与 &lt;标签&gt;</li>'
+  + '</ul>'
+  + '<div class="markdown-body-inner"><p>嵌套段落保持在外层容器内</p></div>'
+  + '<p>详情见发布页。</p>'
+const RELEASE_BODY = [
+  '### 更新内容',
+  '- 新增 A 功能 & B 修复',
+  '- 支持 fast 模式 \'引号\' 与 <标签>',
+  '',
+  '嵌套段落保持在外层容器内',
+  '',
+  '详情见发布页。',
+].join('\n')
+const RELEASE_HTML = makeReleaseHtml(RELEASE_INNER)
+
+test('场景:合法版本构建发布标签与发布页地址', () => {
   assert.equal(buildReleaseTag('0.1.5-rc.1'), 'dsh-v0.1.5-rc.1')
   assert.equal(
     buildReleaseNotesUrl('0.1.5-rc.1'),
-    'https://api.github.com/repos/deepseek-ai/deepseek-harness/releases/tags/dsh-v0.1.5-rc.1',
+    'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.1',
   )
   assert.equal(RELEASE_REPO, 'deepseek-ai/deepseek-harness')
 })
@@ -52,7 +71,7 @@ test('场景:非法版本拒绝构建标签,空白版本归一后放行', () => 
   assert.equal(buildReleaseTag(' 0.1.5-rc.1 '), 'dsh-v0.1.5-rc.1', '首尾空白归一,防拼接出残缺标签')
 })
 
-test('场景:拉取成功返回发布说明,请求形态与上游纪律一致', async () => {
+test('场景:拉取成功提取正文与发布时间,请求形态与上游纪律一致', async () => {
   let requestedUrl = null
   let capturedOptions = null
   const notes = await fetchReleaseNotes({
@@ -60,76 +79,51 @@ test('场景:拉取成功返回发布说明,请求形态与上游纪律一致', 
     fetchImpl: async (url, options) => {
       requestedUrl = url
       capturedOptions = options
-      return { ok: true, status: 200, body: streamBody(JSON.stringify(RELEASE_JSON)) }
+      return { ok: true, status: 200, body: streamBody(RELEASE_HTML) }
     },
     timeoutMs: 1000,
   })
   assert.deepEqual(notes, {
-    url: RELEASE_JSON.html_url,
-    publishedAt: RELEASE_JSON.published_at,
-    body: RELEASE_JSON.body,
+    url: buildReleaseNotesUrl('0.1.5-rc.1'),
+    publishedAt: '2026-09-10T03:09:00Z',
+    body: RELEASE_BODY,
   })
   assert.equal(requestedUrl, buildReleaseNotesUrl('0.1.5-rc.1'))
   // 选项透传断言:redirect:'error' 的实际拒跟行为由平台 fetch 保证,mock 只验证参数到达
   assert.equal(capturedOptions.redirect, 'error')
   assert.ok(capturedOptions.signal instanceof AbortSignal)
-  assert.match(String(capturedOptions.headers.accept), /json/)
-  assert.ok(capturedOptions.headers['user-agent'], 'GitHub API 要求显式 User-Agent')
+  assert.match(String(capturedOptions.headers.accept), /html/)
+  assert.ok(capturedOptions.headers['user-agent'], '页面拉取须带显式 User-Agent')
 })
 
-test('场景:HTTP 404 报未找到发布说明,403 报限流指引,其余非 2xx 报状态码', async () => {
+test('场景:HTTP 404 报未找到发布说明,其余非 2xx 报状态码', async () => {
   await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch({}, { ok: false, status: 404 }), timeoutMs: 1000 }),
+    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch('<html></html>', { ok: false, status: 404 }), timeoutMs: 1000 }),
     /未找到/,
   )
   await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch({}, { ok: false, status: 403 }), timeoutMs: 1000 }),
-    /限流/,
-  )
-  await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch({}, { ok: false, status: 502 }), timeoutMs: 1000 }),
+    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch('<html></html>', { ok: false, status: 502 }), timeoutMs: 1000 }),
     /502/,
   )
 })
 
-test('场景:响应不是 JSON 或不是对象抛错', async () => {
-  await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch('not-json'), timeoutMs: 1000 }),
-    /JSON/,
-  )
-  await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch('[]'), timeoutMs: 1000 }),
-    /对象/,
-  )
+test('场景:页面缺 markdown-body 锚点或容器未闭合报结构解析失败', () => {
+  assert.throws(() => extractReleaseNotesFromHtml('<html><body><p>没有正文容器</p></body></html>'), /结构无法解析/)
+  assert.throws(() => extractReleaseNotesFromHtml('<div class="markdown-body"><p>容器未闭合</p>'), /结构无法解析/)
+  assert.throws(() => extractReleaseNotesFromHtml(null), /结构无法解析/)
 })
 
-test('场景:body 为 null 视为空说明,html_url 缺失为 null', async () => {
+test('场景:空正文容器返回空说明,缺发布时间为 null', async () => {
   const notes = await fetchReleaseNotes({
     version: '9.9.9',
-    fetchImpl: fakeFetch({ tag_name: 'dsh-v9.9.9' }),
+    fetchImpl: fakeFetch(makeReleaseHtml('   ', { datetime: '' })),
     timeoutMs: 1000,
   })
-  assert.deepEqual(notes, { url: null, publishedAt: null, body: '' })
-})
-
-test('场景:html_url 白名单,仅官方仓库 releases 路径放行', () => {
-  const base = { published_at: null, body: '' }
-  // 回流为 <a href> 的远端字段:scheme/域/路径三重白名单,不匹配一律 null 交客户端隐藏
-  assert.equal(parseReleaseNotes({ ...base, html_url: 'javascript:alert(1)' }).url, null, '伪协议必须拦截')
-  assert.equal(parseReleaseNotes({ ...base, html_url: 'data:text/html,<script>' }).url, null)
-  assert.equal(parseReleaseNotes({ ...base, html_url: 'http://github.com/deepseek-ai/deepseek-harness/releases/tag/x' }).url, null, '明文 http 必须拦截')
-  assert.equal(parseReleaseNotes({ ...base, html_url: 'https://evil.example/deepseek-ai/deepseek-harness/releases/tag/x' }).url, null, '异域必须拦截')
-  assert.equal(parseReleaseNotes({ ...base, html_url: 'https://github.com/evil/repo/releases/tag/x' }).url, null, '他仓库路径必须拦截')
-  assert.equal(parseReleaseNotes({ ...base, html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases-evil/x' }).url, null, '路径前缀必须含分隔符边界')
-  assert.equal(
-    parseReleaseNotes({ ...base, html_url: 'https://GITHUB.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v9.9.9' }).url,
-    'https://GITHUB.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v9.9.9',
-    'host 大小写经 URL 归一后放行',
-  )
-  assert.equal(
-    parseReleaseNotes({ ...base, html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases' }).url,
-    'https://github.com/deepseek-ai/deepseek-harness/releases',
-  )
+  assert.deepEqual(notes, {
+    url: buildReleaseNotesUrl('9.9.9'),
+    publishedAt: null,
+    body: '',
+  })
 })
 
 test('场景:上游网络异常原样抛出由调用方归一', async () => {
@@ -140,7 +134,7 @@ test('场景:上游网络异常原样抛出由调用方归一', async () => {
 })
 
 test('场景:超限响应体中途断开,不整量入内存', async () => {
-  const chunk = 'x'.repeat(64 * 1024)
+  const chunk = 'x'.repeat(128 * 1024)
   let cancelled = false
   const oversized = {
     ok: true,
@@ -161,11 +155,11 @@ test('场景:超限响应体中途断开,不整量入内存', async () => {
 
 test('场景:timeoutMs 缺失或非正数拒绝', async () => {
   await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch(RELEASE_JSON) }),
+    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch(RELEASE_HTML) }),
     /timeoutMs/,
   )
   await assert.rejects(
-    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch(RELEASE_JSON), timeoutMs: 0 }),
+    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch(RELEASE_HTML), timeoutMs: 0 }),
     /timeoutMs/,
   )
 })

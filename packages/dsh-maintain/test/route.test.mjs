@@ -933,33 +933,36 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
 // ---- release notes 路由 ----
 
 const RELEASE_PATH = '/api/maintain/release-notes'
-const RELEASE_JSON = {
-  html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v9.9.9',
-  published_at: '2026-09-10T03:09:00Z',
-  body: '## 更新内容\n\n- 新功能',
+// 发布页 fixture:与真实页面同构(relative-time + markdown-body 正文容器),正文映射由 core 提取器完成
+const RELEASE_HTML = '<!doctype html><html><body>'
+  + '<relative-time datetime="2026-09-10T03:09:00Z"></relative-time>'
+  + '<div data-test-selector="body-content" class="markdown-body">'
+  + '<h3>更新内容</h3>'
+  + '<ul><li>新功能</li><li>问题修复</li></ul>'
+  + '<p>详情见发布页。</p>'
+  + '</div></body></html>'
+const RELEASE_URL = 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v9.9.9'
+const RELEASE_BODY = ['### 更新内容', '- 新功能', '- 问题修复', '', '详情见发布页。'].join('\n')
+
+function releaseHtmlBody() {
+  const chunks = [new TextEncoder().encode(RELEASE_HTML)]
+  return {
+    getReader: () => ({
+      read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true, value: undefined }),
+      cancel: async () => {},
+    }),
+  }
 }
 
-// dist-tags 与 GitHub release 双上游分流:registry 路径回 tags 形态,GitHub 路径回 release 形态
-function installDualUpstream({ releasePayload, requestedUrls, releaseThrows }) {
+// dist-tags 与 GitHub 发布页双上游分流:registry 路径回 tags 形态,GitHub 路径回页面形态
+function installDualUpstream({ requestedUrls, releaseThrows }) {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
     const text = String(url)
-    if (text.includes('api.github.com')) {
+    if (text.includes('/releases/tag/')) {
       requestedUrls.push(text)
       if (releaseThrows) throw new Error(releaseThrows)
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          getReader: () => {
-            const chunks = [new TextEncoder().encode(JSON.stringify(releasePayload))]
-            return {
-              read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true, value: undefined }),
-              cancel: async () => {},
-            }
-          },
-        },
-      }
+      return { ok: true, status: 200, body: releaseHtmlBody() }
     }
     void options
     return tagsBody(MOCK_TAGS)
@@ -978,7 +981,7 @@ async function waitSnapshotReady(routes) {
 
 test('release-notes:默认取通道最新版,200 返回发布说明', async () => {
   const requestedUrls = []
-  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls })
+  const restore = installDualUpstream({ requestedUrls })
   try {
     const { ctx, routes } = makeCtx({ services: { hostVersionProbe: () => Promise.resolve('5.4.3') } })
     apply(ctx)
@@ -987,12 +990,12 @@ test('release-notes:默认取通道最新版,200 返回发布说明', async () =
     assert.equal(res.status, 200)
     assert.deepEqual(res.payload, {
       version: '9.9.9',
-      url: RELEASE_JSON.html_url,
-      publishedAt: RELEASE_JSON.published_at,
-      body: RELEASE_JSON.body,
+      url: RELEASE_URL,
+      publishedAt: '2026-09-10T03:09:00Z',
+      body: RELEASE_BODY,
     })
     assert.equal(requestedUrls.length, 1)
-    assert.ok(requestedUrls[0].endsWith('/releases/tags/dsh-v9.9.9'), '默认版本必须取通道 latest 的目标')
+    assert.ok(requestedUrls[0].endsWith('/releases/tag/dsh-v9.9.9'), '默认版本必须取通道 latest 的目标')
   } finally {
     restore()
   }
@@ -1000,7 +1003,7 @@ test('release-notes:默认取通道最新版,200 返回发布说明', async () =
 
 test('release-notes:缓存生效,切通道后按新通道版本拉取', async () => {
   const requestedUrls = []
-  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls })
+  const restore = installDualUpstream({ requestedUrls })
   try {
     const { ctx, routes } = makeCtx()
     apply(ctx)
@@ -1008,7 +1011,7 @@ test('release-notes:缓存生效,切通道后按新通道版本拉取', async ()
     const first = await get(routes, RELEASE_PATH)
     assert.equal(first.status, 200)
     assert.equal(first.payload.version, '9.9.9')
-    assert.ok(requestedUrls[0].endsWith('/releases/tags/dsh-v9.9.9'))
+    assert.ok(requestedUrls[0].endsWith('/releases/tag/dsh-v9.9.9'))
     const again = await get(routes, RELEASE_PATH)
     assert.equal(again.status, 200)
     assert.equal(requestedUrls.length, 1, '同版本两次调用必须命中缓存,上游仅一次')
@@ -1019,7 +1022,7 @@ test('release-notes:缓存生效,切通道后按新通道版本拉取', async ()
     assert.equal(after.status, 200)
     assert.equal(after.payload.version, '10.0.0')
     assert.equal(requestedUrls.length, 2, '通道版本变化必须重新拉取')
-    assert.ok(requestedUrls[1].endsWith('/releases/tags/dsh-v10.0.0'))
+    assert.ok(requestedUrls[1].endsWith('/releases/tag/dsh-v10.0.0'))
   } finally {
     restore()
   }
@@ -1045,9 +1048,9 @@ test('release-notes:通道标签非 semver,构建上游标签前归一 400', asy
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
     const text = String(url)
-    if (text.includes('api.github.com')) {
+    if (text.includes('/releases/tag/')) {
       requestedUrls.push(text)
-      return { ok: true, status: 200, body: tagsBody(RELEASE_JSON).body }
+      return { ok: true, status: 200, body: releaseHtmlBody() }
     }
     return tagsBody({ latest: 'banana' })
   }
@@ -1067,7 +1070,7 @@ test('release-notes:通道标签非 semver,构建上游标签前归一 400', asy
 test('release-notes:重启调度窗口内 409,不发起上游请求', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const requestedUrls = []
-  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls })
+  const restore = installDualUpstream({ requestedUrls })
   try {
     const { ctx, routes } = makeCtx({ appExit: () => {} })
     apply(ctx)
@@ -1091,9 +1094,9 @@ test('release-notes:缓存超限 FIFO 淘汰,最早键被逐出', async () => {
   const requestedUrls = []
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url) => {
-    if (String(url).includes('api.github.com')) {
+    if (String(url).includes('/releases/tag/')) {
       requestedUrls.push(String(url))
-      return tagsBody(RELEASE_JSON)
+      return { ok: true, status: 200, body: releaseHtmlBody() }
     }
     return tagsBody(channels)
   }
@@ -1126,7 +1129,7 @@ test('release-notes:缓存超限 FIFO 淘汰,最早键被逐出', async () => {
 
 test('release-notes:上游失败 400 带错误信息', async () => {
   const requestedUrls = []
-  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls, releaseThrows: 'ECONNRESET' })
+  const restore = installDualUpstream({ requestedUrls, releaseThrows: 'ECONNRESET' })
   try {
     const { ctx, routes } = makeCtx()
     apply(ctx)
