@@ -1,0 +1,45 @@
+{
+  "name": "@mzzsfy/dsh-context-manager",
+  "description": "会话上下文管理:历史输入浮层(范围导航/搜索/subagent排除)、常用提示词收藏、插话撤回、对话 fork",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-toast/client"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@mzzsfy/dsh-toast": "^0.1.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "react": "^18.2.0"
+  },
+  "files": [
+    "src",
+    "test",
+    "README.md"
+  ]
+}
