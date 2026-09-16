@@ -62,8 +62,9 @@ export function buildSeed(record, plan, fromStepId, inputs) {
 }
 
 export class RunDriver {
-  constructor({ template, plan, warnings = [], runId, request, inputs, state, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false }) {
+  constructor({ template, templateSet = [], plan, warnings = [], runId, request, inputs, state, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false }) {
     this.template = template
+    this.templateSet = templateSet
     this.plan = plan
     this.warnings = warnings
     this.script = scriptViewOf(template, plan)
@@ -380,11 +381,11 @@ export class RunDriver {
 }
 
 // 发起入口(v5):创建 driver 并落盘注册,不启动段;首段由 orchestrator 包装 continuable job 调 runSegment
-export function startRun({ template, plan, warnings = [], runId, request, inputs, engine, slots, budgets, sessionId, workspace, state }) {
+export function startRun({ template, templateSet = [], plan, warnings = [], runId, request, inputs, engine, slots, budgets, sessionId, workspace, state }) {
   const store = reportStore()
   RunDriver.seq = (RunDriver.seq ?? 0) + 1
   const id = runId ?? `r-${Date.now().toString(36)}-${RunDriver.seq}`
-  const driver = new RunDriver({ template, plan, warnings, runId: id, request, inputs, engine, slots, budgets, sessionId, workspace, store, state })
+  const driver = new RunDriver({ template, templateSet, plan, warnings, runId: id, request, inputs, engine, slots, budgets, sessionId, workspace, store, state })
   driver.startPersist()
   return driver
 }
