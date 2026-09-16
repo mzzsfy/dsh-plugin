@@ -16,6 +16,8 @@ window.__ModuleLoader__.load({
   factory(require) {
     // ---- 官方 DOM 字面量标识(设置弹窗导航,CSS Modules 哈希前缀稳定) ----
 
+    // 注册 id 单点定义:样式 data-plugin 标记与装载归属同源,防字面量双写漂移
+    const PLUGIN_ID = '@mzzsfy/dsh-settings-nav-icons'
     const SELECTOR_CELL = 'button.VOzbGW_navCell'
     const SELECTOR_LABEL = '.VOzbGW_navLabel'
     const ATTR_MARK = 'data-navic'
@@ -268,6 +270,8 @@ window.__ModuleLoader__.load({
 
     function installOverlayStyle() {
       overlayStyle = document.createElement('style')
+      // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
+      overlayStyle.setAttribute('data-plugin', PLUGIN_ID)
       overlayStyle.textContent = OVERLAY_CSS
       document.head.appendChild(overlayStyle)
       if (slot !== null) slot.overlayStyle = overlayStyle
@@ -825,6 +829,8 @@ window.__ModuleLoader__.load({
 
     function installScrollStyle() {
       scrollStyle = document.createElement('style')
+      // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
+      scrollStyle.setAttribute('data-plugin', PLUGIN_ID)
       scrollStyle.textContent = NAVLIST_SCROLL_CSS
       document.head.appendChild(scrollStyle)
       if (slot !== null) slot.scrollStyle = scrollStyle

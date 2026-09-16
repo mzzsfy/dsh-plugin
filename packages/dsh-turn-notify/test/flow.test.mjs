@@ -45,14 +45,15 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     listeners: windowListeners,
     localStorage: storage,
   }
+  const styleTags = []
   const documentStub = {
     hasFocus: () => true,
     // 默认桩:聚焦窗口恒可见(浏览器不变式);聚焦静默判定为可见+焦点双条件
     hidden: false,
     title: 'dsh',
-    createElement: () => ({ style: {}, remove() {} }),
+    createElement: () => ({ style: {}, attrs: {}, setAttribute(name, value) { this.attrs[name] = value }, remove() {} }),
     body: { appendChild: () => {} },
-    head: { appendChild: () => {} },
+    head: { appendChild: (node) => { styleTags.push(node) } },
     ...documentOverride,
   }
   const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {}, useSyncExternalStore: () => [] }
@@ -85,7 +86,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   )
   assert.equal(modules.length, 1, 'client.js 模块未被捕获')
   // load({id, factory}) 结构:再调 factory(require) 得到真正的模块对象
-  return { mod: modules[0].factory(requireStub), shown, window: windowStub, document: documentStub }
+  return { mod: modules[0].factory(requireStub), shown, window: windowStub, document: documentStub, styleTags }
 }
 
 const units = [
@@ -718,7 +719,7 @@ test('Given 页内映射存储损坏或死链 When 解析 Then 容错回落且�
 
 test('激活即启动轮询:apply 注册设置分区且 start 已执行', async () => {
   const fetched = []
-  const { mod } = loadClient({
+  const { mod, styleTags } = loadClient({
     storage: new FakeStorage(),
     payload: { units: [], soundMapping: {}, version: 1 },
     onFetch: (path) => { fetched.push(path) },
@@ -730,6 +731,7 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
     effect: (fn) => { effects.push(fn()) },
   })
   assert.equal(effects.length, 1, '文档级样式未挂载')
+  assert.equal(styleTags[0].attrs['data-plugin'], '@mzzsfy/dsh-turn-notify', '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
   assert.deepEqual(injected.map(([name]) => name), ['settings.section'], '页内通知展示已移交 dsh-toast,不再注入 shell.overlay')
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
   await new Promise((resolve) => { setTimeout(resolve, 0) })

@@ -2006,6 +2006,8 @@ window.__ModuleLoader__.load({
         // 样式挂载宿主文档级:通知栈在面板未打开时也要有完整样式
         ctx.effect(() => {
           const style = document.createElement('style')
+          // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
+          style.setAttribute('data-plugin', '@mzzsfy/dsh-turn-notify')
           style.textContent = CSS
           document.head.appendChild(style)
           return () => style.remove()

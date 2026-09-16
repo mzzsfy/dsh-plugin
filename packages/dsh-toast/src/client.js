@@ -120,15 +120,19 @@ window.__ModuleLoader__.load({
 
     // ---- 渲染:容器直挂 body,不依赖宿主生命周期 ----
 
-    // 样式内容原位比对:一致跳过,不一致(HMR 新代 CSS 变化)原位替换
+    // 样式内容原位比对:一致跳过,不一致(HMR 新代 CSS 变化)原位替换;
+    // 在位节点无论新旧一律幂等补 data-plugin,防历史代残留缺标记被宿主 claimStyles 误归属
     function ensureStyle() {
       const stale = document.getElementById(STYLE_ID)
       if (stale !== null) {
         if (stale.textContent !== CSS) stale.textContent = CSS
+        stale.setAttribute('data-plugin', '@mzzsfy/dsh-toast')
         return
       }
       const style = document.createElement('style')
       style.id = STYLE_ID
+      // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
+      style.setAttribute('data-plugin', '@mzzsfy/dsh-toast')
       style.textContent = CSS
       document.head.appendChild(style)
     }
