@@ -23,7 +23,12 @@ export function templateDeps(parsed) {
     let d
     if (Array.isArray(s.after)) d = s.after
     else if (escalateOnly.has(s.id) || i === 0) d = []
-    else d = [order[i - 1]]
+    else {
+      // 缺省边依赖文档序最近的前一个常规步骤:升级步仅审批耗尽可达,常规步不得依赖它
+      let j = i - 1
+      while (j >= 0 && escalateOnly.has(order[j])) j--
+      d = j >= 0 ? [order[j]] : []
+    }
     deps.set(s.id, d.filter((x) => byId.has(x) && x !== s.id))
   })
   return { deps, byId, order, escalateOnly }

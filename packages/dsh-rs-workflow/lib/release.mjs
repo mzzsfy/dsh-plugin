@@ -57,12 +57,6 @@ function readMarker(dir) {
 
 const ownedByUs = (marker) => marker !== null && marker.package === PACKAGE_NAME
 
-// 现役产物:本包 + kind flow + 非 v4 形态(v4 目录以 flow.json5 为标志,v5 为 flow.json)
-function isCurrent(marker, dir) {
-  if (!ownedByUs(marker) || marker.kind !== MARKER_KIND_FLOW) return false
-  return !existsSync(join(dir, 'flow.json5'))
-}
-
 const markerJson = () => JSON.stringify({ package: PACKAGE_NAME, kind: MARKER_KIND_FLOW, version: PKG_VERSION }, null, 2) + '\n'
 
 // 创建骨架:包内唯一源逐字保留,仅改写 orchestrator 行 templateId 锚定(必须恰一处)
@@ -75,7 +69,9 @@ function releaseAgentYaml(flowId) {
 // preset.yml 由骨架元数据 + 模板条目生成(组合名已含模板语义,描述取模板条目)
 function presetYaml(entry, flowId) {
   const desc = String(entry.description ?? '').replace(/\s*\n\s*/g, ' ').slice(0, DESC_MAX_CHARS) || DESC_FALLBACK
-  return `name: ${PRESET_NAME_PREFIX}${entry.label || flowId}\ndescription: >-\n  ${desc}\n`
+  // name 用双引号纯量防 YAML 结构字符(: 与换行)破坏生成物
+  const name = `${PRESET_NAME_PREFIX}${entry.label || flowId}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\s*\n\s*/g, ' ')
+  return `name: "${name}"\ndescription: >-\n  ${desc}\n`
 }
 
 // 硬崩溃残留的 staging/备份目录清理(前缀本包独占,直接删安全;orphan 前缀永不自动删)
@@ -184,44 +180,4 @@ export function releasedTemplateIds(dshHome) {
     if (ownedByUs(marker) && marker.kind === MARKER_KIND_FLOW) ids.push(name.slice(FLOW_PRESET_PREFIX.length))
   }
   return ids
-}
-
-// v3 遗留自清理:只删能证明归属本包且非现役 v4 的创建物;缺失/损坏/外来一律不动
-export function sweepLegacyReleases(dshHome) {
-  const root = presetRoot(dshHome)
-  const removed = []
-  const kept = []
-  let entries
-  try {
-    entries = readdirSync(root)
-  } catch {
-    return { removed, kept }
-  }
-  cleanStaleStaging(root)
-  for (const name of entries) {
-    if (!isReleaseDir(root, name)) continue
-    const dir = join(root, name)
-    const marker = readMarker(dir)
-    if (!ownedByUs(marker)) continue
-    const id = name.slice(FLOW_PRESET_PREFIX.length)
-    if (isCurrent(marker, dir)) {
-      kept.push(id)
-      continue
-    }
-    try {
-      rmSync(dir, { recursive: true, force: true })
-      removed.push(id)
-    } catch (error) {
-      console.warn(`[rs-workflow] 遗留模式清理失败: ${name} (${error.message})`)
-    }
-  }
-  return { removed, kept }
-}
-
-// 出厂创建:目标缺失或 marker 非现役 v4 时重放,已是现役即幂等跳过
-export function ensureMainReleased(defaultEntry, dshHome) {
-  const dest = flowPresetDest(defaultEntry.id, dshHome)
-  cleanStaleStaging(dirname(dest))
-  if (existsSync(dest) && isCurrent(readMarker(dest), dest)) return 'current'
-  return releaseFlowTemplate(defaultEntry, dshHome)
 }

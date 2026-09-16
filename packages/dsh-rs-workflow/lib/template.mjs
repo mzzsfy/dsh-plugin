@@ -40,7 +40,7 @@ export function validateTemplate(t) {
   for (const k of Object.keys(t)) if (!TOP_FIELDS.has(k)) errors.push(err(`top:${k}`, `未知顶层字段 ${k}`))
   if (typeof t.id !== 'string' || !ID_RE.test(t.id)) errors.push(err('top:id', 'id 必填且须匹配 ^[a-z][a-z0-9-]*$'))
   if (typeof t.label !== 'string' || t.label.trim() === '') errors.push(err('top:label', 'label 必填且为非空字符串'))
-  if (t.description !== undefined && typeof t.description !== 'string') errors.push(err('top:description', 'description 须为字符串'))
+  if (typeof t.description !== 'string' || t.description.trim() === '') errors.push(err('top:description', 'description 必填且为非空字符串(分诊目录/保底 brief 依据)'))
   if (t.autoApprove !== undefined && typeof t.autoApprove !== 'boolean') errors.push(err('top:autoApprove', 'autoApprove 须为布尔(缺省 false;true = 审批由主循环代审)'))
 
   const declaredInputs = new Set()
@@ -143,7 +143,10 @@ export function validateTemplate(t) {
       if (!['sequential', 'parallel'].includes(s.mode)) errors.push(err(target, 'mode 仅支持 sequential/parallel'))
       if (s.for_each === undefined) errors.push(err(target, 'mode 仅在声明 for_each 时有效'))
     }
-    if (s.for_each !== undefined && s.mode === undefined) errors.push(err(target, 'for_each 步骤必须显式声明 mode'))
+    if (s.for_each !== undefined && s.mode === undefined) {
+      // sequential 为缺省(spec §8),不必显式声明
+      s.mode = 'sequential'
+    }
 
     if (type === 'ai') {
       if (typeof s.prompt !== 'string' || s.prompt.trim() === '') errors.push(err(target, '普通步骤 prompt 必填'))
@@ -303,7 +306,8 @@ export function validateTemplateSet(list) {
     if (outs.size > 0) tmplEdges.set(t.id, outs)
   }
   const depthOf = (id, seen) => {
-    if (seen.has(id)) return 0
+    // 环即拒绝:深度无穷,不限于此路径是否重复经过
+    if (seen.has(id)) return Infinity
     seen.add(id)
     let d = 1
     for (const n of tmplEdges.get(id) ?? []) d = Math.max(d, 1 + depthOf(n, seen))

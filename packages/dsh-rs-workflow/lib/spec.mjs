@@ -48,7 +48,7 @@ true = 审批由主循环代审,不再转呈页签,见 §4);steps 必填非空,�
   "input": { "brief": "{triage.brief}" }
 }
 
-字段含义:id 必填,步骤内唯一,^[a-zA-Z][a-zA-Z0-9_-]*$;label 可选,看板显示名;slot 可选,模型
+字段含义:id 必填,步骤内唯一,^[a-z][a-z0-9-]*$(小写字母开头,仅小写字母/数字/连字符);label 可选,看板显示名;slot 可选,模型
 工作位(仅常规步骤可自定义),六键全集:"planner" "executor" "reviewer" "executor-loop"(循环/重做)
 "reviewer-approve"(审批) "executor-escalate"(升级);prompt 必填,指令模板,写清做什么、按什么材料
 做、做到什么程度——产出要求由引擎自动附加 [产出要求] 节,不要在 prompt 里写格式要求;load 可选,

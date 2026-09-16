@@ -11,8 +11,6 @@ import {
   releaseFlowTemplate,
   unreleaseFlowTemplate,
   releasedTemplateIds,
-  sweepLegacyReleases,
-  ensureMainReleased,
 } from '../lib/release.mjs'
 
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -35,7 +33,7 @@ const ENTRY = {
   id: 'novel',
   label: '小说',
   description: '小说创作流程\n从大纲到成稿的编排',
-  json: JSON.stringify({ id: 'novel', label: '小说', steps: [{ id: 'a', prompt: '{request}', outputs: { o: 'o' } }] }),
+  json: JSON.stringify({ id: 'novel', label: '小说', description: '小说创作流程', steps: [{ id: 'a', prompt: '{request}', outputs: { o: 'o' } }] }),
 }
 
 function tempHome(t) {
@@ -72,41 +70,6 @@ test('Given 包内主组合骨架 When 检查 templateId 锚定串 Then 恰出�
   assert.equal(skeleton.includes('flowFile'), false)
 })
 
-test('Given v4 形态目录(flow.json5)与 v5 形态目录(flow.json) When sweepLegacyReleases Then 前者删后者留', (t) => {
-  const home = tempHome(t)
-  writeMarker(home, 'novel', FLOW_MARKER(LEGACY_VERSION))
-  putFile(home, 'novel', 'flow.json5', '{ id:"novel" }')
-  writeMarker(home, 'default', FLOW_MARKER(PKG_VERSION))
-  putFile(home, 'default', 'flow.json', '{}')
-  const result = sweepLegacyReleases(home)
-  assert.equal(existsSync(flowDirOf(home, 'novel')), false)
-  assert.equal(existsSync(flowDirOf(home, 'default')), true)
-  assert.ok(result.removed.includes('novel'))
-  assert.ok(result.kept.includes('default'))
-})
-
-test('Given rs-workflow(collab 本包 marker)与 rs-mydir(外来 marker) When sweep Then 前者删后者原样保留', (t) => {
-  const home = tempHome(t)
-  writeMarker(home, 'workflow', { package: PACKAGE_NAME, kind: KIND_COLLAB, version: LEGACY_VERSION })
-  putFile(home, 'mydir', 'user-file.txt', 'keep')
-  writeMarker(home, 'mydir', { package: FOREIGN_PACKAGE, kind: KIND_FLOW, version: PKG_VERSION })
-  const result = sweepLegacyReleases(home)
-  assert.equal(existsSync(flowDirOf(home, 'workflow')), false)
-  assert.equal(existsSync(flowDirOf(home, 'mydir')), true)
-  assert.equal(readFileSync(join(flowDirOf(home, 'mydir'), 'user-file.txt'), 'utf8'), 'keep')
-  assert.equal(readMarkerOf(home, 'mydir').package, FOREIGN_PACKAGE)
-  assert.ok(result.removed.includes('workflow'))
-  assert.ok(!result.removed.includes('mydir'))
-})
-
-test('Given marker 文件损坏的 rs-x When sweep Then 目录不动且不进清单', (t) => {
-  const home = tempHome(t)
-  putFile(home, 'x', MARKER_NAME, '{{{ not json')
-  const result = sweepLegacyReleases(home)
-  assert.equal(existsSync(flowDirOf(home, 'x')), true)
-  assert.ok(!result.removed.includes('x'))
-  assert.ok(!result.kept.includes('x'))
-})
 
 test('Given 合法模板 entry When releaseFlowTemplate Then created 且四文件产物符合契约', (t) => {
   const home = tempHome(t)
@@ -130,7 +93,7 @@ test('Given 合法模板 entry When releaseFlowTemplate Then created 且四文�
   assert.equal(marker.kind, KIND_FLOW)
   assert.equal(marker.version, PKG_VERSION)
   const preset = readFileSync(join(dir, PRESET_YML), 'utf8')
-  assert.ok(preset.includes(`name: 若水·${ENTRY.label}`))
+  assert.ok(preset.includes(`name: "若水·${ENTRY.label}"`))
   assert.ok(preset.includes('description: >-'))
   assert.ok(preset.includes('小说创作流程 从大纲到成稿的编排'))
 })
@@ -143,7 +106,7 @@ test('Given 已创建 When 同 entry 再 release Then updated;改 label 再 rele
   assert.equal(releaseFlowTemplate(ENTRY, home), 'updated')
   assert.equal(readFileSync(join(dir, AGENT_YAML), 'utf8'), agentV1)
   assert.equal(releaseFlowTemplate({ ...ENTRY, label: '小说家' }, home), 'updated')
-  assert.ok(readFileSync(join(dir, PRESET_YML), 'utf8').includes('name: 若水·小说家'))
+  assert.ok(readFileSync(join(dir, PRESET_YML), 'utf8').includes('name: "若水·小说家"'))
   assert.equal(readFileSync(join(dir, AGENT_YAML), 'utf8'), agentV1)
 })
 
@@ -192,19 +155,3 @@ test('Given rs-default 与 rs-novel 均本包 flow、rs-collab 为 collab When r
   assert.deepEqual(releasedTemplateIds(home).sort(), ['default', 'novel'])
 })
 
-test('Given ensureMainReleased When 首次 Then 创建成功;再次同 entry Then current;v4 形态目录 Then 重写为 v5', (t) => {
-  const home = tempHome(t)
-  const entry = { ...ENTRY, id: 'default', label: '通用默认' }
-  assert.equal(ensureMainReleased(entry, home), 'created')
-  const markerPath = join(flowDirOf(home, 'default'), MARKER_NAME)
-  assert.equal(readMarkerOf(home, 'default').version, PKG_VERSION)
-  assert.equal(ensureMainReleased(entry, home), 'current')
-  assert.equal(readFileSync(markerPath, 'utf8'), JSON.stringify(FLOW_MARKER(PKG_VERSION), null, 2) + '\n')
-  writeMarker(home, 'default', FLOW_MARKER(LEGACY_VERSION))
-  putFile(home, 'default', 'flow.json5', '{ id:"default" }')
-  assert.equal(ensureMainReleased(entry, home), 'updated')
-  assert.equal(statSync(markerPath).isFile(), true)
-  assert.equal(readMarkerOf(home, 'default').version, PKG_VERSION)
-  assert.equal(existsSync(join(flowDirOf(home, 'default'), 'flow.json5')), false)
-  assert.equal(existsSync(join(flowDirOf(home, 'default'), 'flow.json')), true)
-})

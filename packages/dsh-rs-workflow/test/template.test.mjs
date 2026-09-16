@@ -1,4 +1,4 @@
-// template 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
+﻿// template 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseTemplate, parseErrorLine, validateTemplate, validateTemplateSet, buildSchema } from '../lib/template.mjs'
@@ -110,7 +110,7 @@ test('Given {item} 出现在非 for_each 步骤 When 校验 Then 占位符错误
 
 test('Given 自引用产出且为 sequential 循环 When 校验 Then 通过(首实例空串豁免)', () => {
   const t = {
-    id: 'novel', label: '小说',
+    id: 'novel', label: '小说', description: '测试模板说明',
     steps: [
       { id: 'outline', slot: 'planner', prompt: '大纲:{request}', outputs: { chapters: '章节' }, listOutputs: ['chapters'] },
       { id: 'write', for_each: 'outline.chapters', mode: 'sequential', prompt: '上一章:{write.summary} 需求:{request}', outputs: { summary: '梗概' } },
@@ -162,16 +162,15 @@ test('Given for_each 数据源未声明 listOutputs When 校验 Then 数据源�
   assert.ok(hasMsg(errors, 'listOutputs'))
 })
 
-test('Given for_each 步缺 mode When 校验 Then 要求显式声明 mode', () => {
+test('Given for_each 步省略 mode When 校验 Then 通过(sequential 缺省,spec §8)', () => {
   const t = {
-    id: 'x', label: 'x',
+    id: 'x', label: 'x', description: '测试模板说明',
     steps: [
       { id: 'a', slot: 'planner', prompt: '{request}', outputs: { items: '列表' }, listOutputs: ['items'] },
       { id: 'b', for_each: 'a.items', prompt: '{item}', outputs: { r: '结果' } },
     ],
   }
-  const errors = validateTemplate(t)
-  assert.ok(hasMsg(errors, 'mode'))
+  assert.deepEqual(validateTemplate(t), [])
 })
 
 test('Given load 资源无 skill:/doc: 前缀 When 校验 Then 前缀错误', () => {
@@ -190,7 +189,7 @@ test('Given after 引用不存在步骤 When 校验 Then 引用错误', () => {
 
 test('Given 依赖环(b 显式依赖 c,c 缺省依赖 b) When 校验 Then 环错误', () => {
   const t = {
-    id: 'cyc', label: 'cyc',
+    id: 'cyc', label: 'cyc', description: '测试模板说明',
     steps: [
       { id: 'a', slot: 'planner', prompt: '{request}', outputs: { o: 'o' } },
       { id: 'b', prompt: '{request}', outputs: { o: 'o' }, after: ['c'] },
@@ -238,7 +237,7 @@ test('Given approve 步声明 outputs When 校验 Then 拒绝(裁决契约引擎
 
 test('Given flow 步动态路由且路由占位符合法 When 校验 Then 通过', () => {
   const t = {
-    id: 'multi', label: '分诊',
+    id: 'multi', label: '分诊', description: '测试模板说明',
     steps: [
       { id: 'triage', slot: 'planner', prompt: '分诊:{request}', outputs: { route: '路由', brief: '简报' } },
       { id: 'run', type: 'flow', after: ['triage'], flow: '{triage.route}', input: { brief: '{triage.brief}' } },
@@ -250,7 +249,7 @@ test('Given flow 步动态路由且路由占位符合法 When 校验 Then 通过
 
 test('Given flow 步声明 prompt When 校验 Then 拒绝', () => {
   const t = {
-    id: 'multi', label: '分诊',
+    id: 'multi', label: '分诊', description: '测试模板说明',
     steps: [
       { id: 'run', type: 'flow', flow: 'lite', prompt: '不该有', },
     ],
@@ -261,7 +260,7 @@ test('Given flow 步声明 prompt When 校验 Then 拒绝', () => {
 
 test('Given input 值非单占位符 When 校验 Then 格式错误', () => {
   const t = {
-    id: 'multi', label: '分诊',
+    id: 'multi', label: '分诊', description: '测试模板说明',
     steps: [
       { id: 'run', type: 'flow', flow: 'lite', input: { brief: '硬编码' } },
     ],
@@ -285,12 +284,12 @@ test('Given rounds 越界 When 校验 Then 范围错误', () => {
 })
 
 test('Given steps 为空数组 When 校验 Then top:steps 错误', () => {
-  const errors = validateTemplate({ id: 'x', label: 'x', steps: [] })
+  const errors = validateTemplate({ id: 'x', label: 'x', description: '测试模板说明', steps: [] })
   assert.ok(targets(errors).includes('top:steps'))
 })
 
 test('Given JSON 文本合法 When parseTemplate Then 得到对象', () => {
-  const parsed = parse(JSON.stringify({ id: 'x', label: 'X', steps: [{ id: 'a', prompt: '{request}', outputs: { o: 'o' } }] }))
+  const parsed = parse(JSON.stringify({ id: 'x', label: 'X', description: '测试模板说明', steps: [{ id: 'a', prompt: '{request}', outputs: { o: 'o' } }] }))
   assert.equal(parsed.id, 'x')
 })
 
@@ -304,19 +303,19 @@ test('Given JSON 语法错误 When parseTemplate 抛错 Then parseErrorLine 提�
 
 test('Given 模板集合字面 flow 引用存在 When validateTemplateSet Then 零错误', () => {
   const errors = validateTemplateSet([structuredClone(LITE_TPL), {
-    id: 'entry', label: '入口',
+    id: 'entry', label: '入口', description: '测试模板说明',
     steps: [{ id: 'run', type: 'flow', flow: 'lite' }],
   }])
   assert.deepEqual(errors, [])
 })
 
 test('Given 字面 flow 引用不存在集合 When validateTemplateSet Then 存在性错误', () => {
-  const errors = validateTemplateSet([{ id: 'entry', label: '入口', steps: [{ id: 'run', type: 'flow', flow: 'ghost' }] }])
+  const errors = validateTemplateSet([{ id: 'entry', label: '入口', description: '测试模板说明', steps: [{ id: 'run', type: 'flow', flow: 'ghost' }] }])
   assert.ok(hasMsg(errors, '不存在于模板集合'))
 })
 
 test('Given 集合嵌套深度超 3 When validateTemplateSet Then 深度错误', () => {
-  const mk = (id, flow) => ({ id, label: id, steps: [{ id: 'run', type: 'flow', flow }] })
+  const mk = (id, flow) => ({ id, label: id, description: '测试模板说明', steps: [{ id: 'run', type: 'flow', flow }] })
   const errors = validateTemplateSet([mk('a', 'b'), mk('b', 'c'), mk('c', 'd'), mk('d', 'lite'), structuredClone(LITE_TPL)])
   assert.ok(hasMsg(errors, '嵌套深度'))
 })
@@ -343,12 +342,12 @@ test('Given approve 步 When buildSchema Then 固定裁决契约(verdict 枚举+
 })
 
 test('Given 顶层 autoApprove 布尔 When validateTemplate Then 通过(v5 新增键)', () => {
-  const t = { id: 'x', label: 'X', autoApprove: true, steps: [{ id: 'a', prompt: 'p', outputs: { o: '说明' } }] }
+  const t = { id: 'x', label: 'X', description: '测试模板说明', autoApprove: true, steps: [{ id: 'a', prompt: 'p', outputs: { o: '说明' } }] }
   assert.deepEqual(validateTemplate(t), [])
 })
 
 test('Given 顶层 autoApprove 非布尔 When validateTemplate Then 拒 top:autoApprove', () => {
-  const t = { id: 'x', label: 'X', autoApprove: 'yes', steps: [{ id: 'a', prompt: 'p', outputs: { o: '说明' } }] }
+  const t = { id: 'x', label: 'X', description: '测试模板说明', autoApprove: 'yes', steps: [{ id: 'a', prompt: 'p', outputs: { o: '说明' } }] }
   const errs = validateTemplate(t)
   assert.ok(errs.some((e) => e.target === 'top:autoApprove' && e.message.includes('布尔')), JSON.stringify(errs))
 })
