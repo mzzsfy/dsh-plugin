@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import {
   filterHistoryInputs as coreFilterHistoryInputs,
   forkFailureText as coreForkFailureText,
+  forkRetryText as coreForkRetryText,
   HISTORY_SCOPES,
 } from '../src/core.mjs'
 
@@ -26,7 +27,7 @@ assert.ok(MIRROR_START >= 0 && MIRROR_END > MIRROR_START, 'client.js 镜像函�
 
 const mirror = new Function(
   CLIENT_SRC.slice(MIRROR_START, MIRROR_END)
-  + '; return { filterHistoryInputs: filterHistoryInputs, forkFailureText: forkFailureText, HISTORY_SCOPES: HISTORY_SCOPES }',
+  + '; return { filterHistoryInputs: filterHistoryInputs, forkFailureText: forkFailureText, forkRetryText: forkRetryText, HISTORY_SCOPES: HISTORY_SCOPES }',
 )()
 
 test('parity 历史搜索:子串/空白/空查询/非数组同输入同输出', () => {
@@ -44,6 +45,21 @@ test('parity 历史搜索:子串/空白/空查询/非数组同输入同输出', 
 test('parity fork 错误文案:未知码/挂载失败/未完成轮同输入同输出', () => {
   for (const code of ['session/fork-unavailable', 'session/workspace-attach-failed', 'gateway/internal', undefined, '']) {
     assert.equal(mirror.forkFailureText(code), coreForkFailureText(code))
+  }
+})
+
+test('parity fork 重试文本:用户/插件注入/空白/纯图/畸形同输入同输出', () => {
+  const samples = [
+    undefined,
+    {},
+    { source: { kind: 'user' }, content: [{ type: 'text', text: '第一行' }, { type: 'text', text: '第二行' }] },
+    { source: { kind: 'user' }, content: [{ type: 'image', attachment: {} }] },
+    { source: { kind: 'user' }, content: [{ type: 'text', text: '  ' }] },
+    { source: { kind: 'plugin', plugin: 'x' }, content: [{ type: 'text', text: '注入' }] },
+    { source: { kind: 'user' } },
+  ]
+  for (const data of samples) {
+    assert.equal(mirror.forkRetryText(data), coreForkRetryText(data), JSON.stringify(data)?.slice(0, 40))
   }
 })
 

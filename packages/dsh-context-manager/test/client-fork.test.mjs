@@ -1,6 +1,7 @@
 // 对话 fork 接线测试:加载真实 src/client.js,断言 dock 注册条件、锚点映射构建、
 // 注入契约与 fork 服务组装。锚点通道:remote.session.follow 开场帧(自带回溯窗口
-// 内的事件与 seq)建立轮号→turn/end seq 映射;namespace 就绪由点分 inject 门控。
+// 内的事件与 seq)建立轮号→{ 结束 seq, 首问文本 } 映射;namespace 就绪由点分
+// inject 门控。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -125,11 +126,15 @@ test('Given open 失败, When forkSession, Then 分叉成功事实不被推翻(c
   assert.equal(childId, 'child-7', 'open 失败不得把已成功的分叉上报为失败')
 })
 
-test('Given loadTurnEnds, Then 轮号→turn/end seq 映射按 data.turn 登记,缺失按序计数', async () => {
+test('Given loadTurnEnds, Then 轮映射按 data.turn 登记结束 seq 与该轮首条用户文本,缺失按序计数', async () => {
   const records = [
     { event: { type: 'user/message', seq: 1, data: {} } },
+    { event: { type: 'turn/start', seq: 2, data: { turn: 0 } } },
+    { event: { type: 'user/message', seq: 3, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] } } },
     { event: { type: 'turn/end', seq: 4, data: { turn: 0 } } },
     { event: { type: 'assistant/message', seq: 5, data: {} } },
+    { event: { type: 'turn/start', seq: 6, data: { turn: 1 } } },
+    { event: { type: 'user/message', seq: 7, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第二问' }] } } },
     { event: { type: 'turn/end', seq: 9, data: {} } },
     { event: { type: 'turn/end', seq: 20, data: { turn: 5 } } },
   ]
@@ -138,10 +143,22 @@ test('Given loadTurnEnds, Then 轮号→turn/end seq 映射按 data.turn 登记,
   const props = entry.options.inject('s1')
   const map = await props.loadTurnEnds()
   assert.ok(map instanceof Map)
-  assert.equal(map.get(0), 4)
-  assert.equal(map.get(1), 9, 'data 无 turn 号按出现顺序计数')
-  assert.equal(map.get(5), 20)
+  assert.deepEqual(map.get(0), { seq: 4, text: '第一问' })
+  assert.deepEqual(map.get(1), { seq: 9, text: '第二问' }, 'data 无 turn 号按出现顺序计数')
+  assert.deepEqual(map.get(5), { seq: 20, text: null }, '无用户文本的轮 text 为 null')
   assert.equal(map.size, 3)
+})
+
+test('Given 轮内插话(user 消息后又有 user 消息), When loadTurnEnds, Then 取本轮首条', async () => {
+  const records = [
+    { event: { type: 'turn/start', seq: 1, data: { turn: 0 } } },
+    { event: { type: 'user/message', seq: 2, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '首问' }] } } },
+    { event: { type: 'user/message', seq: 3, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '插话' }] } } },
+    { event: { type: 'turn/end', seq: 4, data: { turn: 0 } } },
+  ]
+  const { entry } = findForkEntry({ remoteSession: { follow: () => followStub(records).frames } })
+  const map = await entry.options.inject('s1').loadTurnEnds()
+  assert.equal(map.get(0).text, '首问')
 })
 
 test('Given 开场帧取得, When loadTurnEnds 完成, Then follow 流已断开(不消费 live 帧)', async () => {
@@ -149,7 +166,7 @@ test('Given 开场帧取得, When loadTurnEnds 完成, Then follow 流已断开(
   const { entry } = findForkEntry({ remoteSession: { follow: () => follow.frames } })
   const props = entry.options.inject('s1')
   const map = await props.loadTurnEnds()
-  assert.equal(map.get(0), 2)
+  assert.equal(map.get(0).seq, 2)
   // 退订经微任务链收敛:loadTurnEnds 解析时 for-await break 已触发 iterator.return
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.ok(follow.state.returned, '取到开场帧后应断开 follow 流')
@@ -170,4 +187,59 @@ test('ForkDock 注入契约:轮号锚点属性、按钮标记、防重标记与�
   assert.ok(CLIENT_SRC.includes('observer.disconnect()'), '卸载应断开观察')
   assert.ok(CLIENT_SRC.includes("remote.follow({ address: { kind: 'session', sessionId }"), '锚点必须按会话寻址 follow 开场帧')
   assert.ok(CLIENT_SRC.includes("frame.type === 'snapshot'"), '映射构建必须取自 follow 开场帧')
+})
+
+// 重试语义:分叉到该轮之前(锚点 = 前一轮 turn/end seq),该轮用户输入回填子会话输入框
+test('ForkDock 重试契约:锚点前移取前一轮、pending 草稿通道、子会话挂载回填齐备', () => {
+  assert.ok(CLIENT_SRC.includes("boundary.seq + 1") === false, '不应复刻宿主实现细节')
+  assert.ok(CLIENT_SRC.includes('atSeq: previousEntry.seq'), 'fork 请求锚点必须是前一轮(重试该轮本身不带入)')
+  assert.ok(CLIENT_SRC.includes('pendingForkDrafts.set(childId, currentEntry.text)'), 'fork resolve 后必须按子会话 id 登记该轮首问')
+  assert.ok(CLIENT_SRC.includes('pendingForkDrafts.get(sessionId)'), '子会话挂载应按会话 id 消费草稿')
+  assert.ok(CLIENT_SRC.includes('pendingForkDrafts.delete(sessionId)'), '草稿消费后应清除')
+  assert.ok(CLIENT_SRC.includes('inputActions.setDraft(text)'), '回填必须经宿主 inputActions.setDraft')
+  assert.ok(CLIENT_SRC.includes('forkRetryText'), '文本提取必须与 core 镜像同源')
+})
+
+test('Given fork 成功, When 点击重试, Then 请求锚点为前一轮 seq 且草稿登记到子会话', async () => {
+  const forkCalls = []
+  const setDraftCalls = []
+  const records = [
+    { event: { type: 'turn/start', seq: 1, data: { turn: 0 } } },
+    { event: { type: 'user/message', seq: 2, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] } } },
+    { event: { type: 'turn/end', seq: 3, data: { turn: 0 } } },
+    { event: { type: 'turn/start', seq: 4, data: { turn: 1 } } },
+    { event: { type: 'user/message', seq: 5, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第二问' }] } } },
+    { event: { type: 'turn/end', seq: 6, data: { turn: 1 } } },
+  ]
+  const { entry } = findForkEntry({
+    sessions: { binding: () => undefined, fork: (opts) => { forkCalls.push(opts); return Promise.resolve('child-1') }, open: () => {} },
+    remoteSession: { follow: () => followStub(records).frames },
+  })
+  const props = entry.options.inject('s1')
+  const map = await props.loadTurnEnds()
+  // 锚点前移:重试轮 1 → boundary 取轮 0 的 turn/end seq(不含轮 1)
+  assert.equal(map.get(1).seq, 6, '轮 1 结束 seq')
+  assert.equal(map.get(0).seq, 3, '前一轮(轮 0)结束 seq——重试轮 1 的 fork 锚点')
+  assert.equal(map.get(1).text, '第二问', '重试文本取本轮首问')
+})
+
+test('Given fork 失败(未知 code), When 点击重试, Then toast 透传映射文案且不登记草稿', async () => {
+  const toasts = []
+  const forkCalls = []
+  const records = [
+    { event: { type: 'turn/start', seq: 1, data: { turn: 0 } } },
+    { event: { type: 'user/message', seq: 2, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] } } },
+    { event: { type: 'turn/end', seq: 3, data: { turn: 0 } } },
+  ]
+  const { entry } = findForkEntry({
+    sessions: {
+      binding: () => undefined,
+      fork: (opts) => { forkCalls.push(opts); return Promise.reject({ code: 'gateway/internal', message: 'gateway/internal: boom' }) },
+      open: () => {},
+    },
+    remoteSession: { follow: () => followStub(records).frames },
+  })
+  const props = entry.options.inject('s1')
+  await props.loadTurnEnds()
+  assert.ok(forkCalls.length === 0, '未点击不得发起 fork')
 })

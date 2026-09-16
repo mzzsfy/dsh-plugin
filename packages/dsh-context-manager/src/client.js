@@ -2,10 +2,12 @@
 // + 历史输入浮层(Alt+↑ 唤起,范围导航/搜索/收藏回填) + 插话撤回 + 对话 fork。
 // 历史输入挂官方 conversation.input.dock 插槽(渲染为零高度锚点),回填走宿主公共
 // 契约 inputActions.setDraft;插话撤回注入官方 pending steering 气泡操作图标排;
-// fork 注入消息气泡操作排,RPC 走宿主 sessions 服务面(fork+open),锚点经
-// remote.session.page 建立轮号→turn/end seq 映射。浏览器半区经 webServer 路由
+// fork 注入消息气泡操作排,分叉到该轮之前并把该轮用户输入回填子会话输入框(重试
+// 语义),RPC 走宿主 sessions 服务面(fork+open),锚点经 remote.session.follow
+// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射。浏览器半区经 webServer 路由
 // ('/api/context/*')访问 Host。打包为单文件自包含格式,无法跨文件 require;
-// 与 src/core.mjs 镜像的纯函数(filterHistoryInputs/forkFailureText)修改需两处同步。
+// 与 src/core.mjs 镜像的纯函数(filterHistoryInputs/forkFailureText/forkRetryText)
+// 修改需两处同步。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-context-manager',
@@ -187,6 +189,18 @@ function forkFailureText(code) {
   if (code === 'session/fork-unavailable') return '该轮尚未完成,不可分叉'
   if (code === 'session/workspace-attach-failed') return '分叉成功,但挂载到工作区失败'
   return '分叉失败: ' + String(code ?? '未知错误')
+}
+
+// fork 重试文本提取镜像(与 core.mjs forkRetryText 同步维护):
+// 仅用户本人消息,文本块按行拼接;空白/纯图返回 null——无法重试的轮不注入按钮
+function forkRetryText(data) {
+  const message = data && typeof data === 'object' ? data : {}
+  if (!message.source || message.source.kind !== 'user') return null
+  const text = (Array.isArray(message.content) ? message.content : [])
+    .filter((block) => block && block.type === 'text' && block.text !== '')
+    .map((block) => block.text)
+    .join('\n')
+  return text.trim() === '' ? null : text
 }
 
 function HistoryDock({ session, inputActions }) {
@@ -671,6 +685,10 @@ const TURN_ATTR = 'data-chat-turn'
 // 窗口覆盖不到的更早轮与进行中的轮不注入分叉按钮,新近轮——fork 的主要目标——总在覆盖内)
 const FORK_PAGE_MAX_MESSAGES = 2000
 
+// 重试草稿通道:分叉成功后子会话尚未挂载,原输入先按子会话 id 暂存,
+// 子会话的 dock 挂载(inputActions 就绪)时消费回填并清除
+const pendingForkDrafts = new Map()
+
 // 取 follow 开场帧(回溯窗口内的事件快照,自带 seq)后立即断开:
 // for-await break 触发 iterator.return,流即关闭,不消费 live 帧
 async function followOpening(remote, sessionId) {
@@ -775,12 +793,14 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
   return h('div', { className: 'cx-steer-host' })
 }
 
-// 对话 fork:从任意消息处分叉出新会话(含该轮及之前的完整历史)并打开。
-// 锚点通道:消息气泡 DOM 携带官方轮号标记 data-chat-turn,轮号 → turn/end seq
-// 映射经 remote.session.page 一次拉取建立(点分门控,旧宿主缺失即整体不注册);
-// 轮号无映射 = 该轮未完成,点击报专用文案;官方结构漂移(无轮号标记)整体不注入。
+// 对话 fork:重写式分叉——从消息气泡处分叉到该轮之前(该轮不带入子会话消息流),
+// 该轮用户输入回填子会话输入框供编辑重发(与插话撤回同构,作用于 fork 场景,不动原会话)。
+// 锚点通道:消息气泡 DOM 携带官方轮号标记 data-chat-turn,轮号 → { 结束 seq, 首问文本 }
+// 映射经 remote.session.follow 开场帧一次拉取(点分门控,旧宿主缺失即整体不注册);
+// 轮号无映射 = 该轮未完成,首问无文本(纯图等)= 无法重试,均不注入;
+// 首轮无前锚(宿主 fork 边界必须落在 turn/end 上,复制零事件不可表达),也不注入。
 // 分叉动作经宿主 sessions 服务面 fork+open(与官方 chat 同构),成功 toast 并切换
-function ForkDockWithBootstrap({ session, forkSession, loadTurnEnds }) {
+function ForkDockWithBootstrap({ session, inputActions, forkSession, loadTurnEnds }) {
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
@@ -804,6 +824,15 @@ function ForkDockWithBootstrap({ session, forkSession, loadTurnEnds }) {
       })
     return () => { disposed = true }
   }, [sessionId])
+  // 重试草稿消费:open 切到子会话后本 dock 随之挂载,inputActions 绑定子会话,
+  // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现
+  useEffect(() => {
+    if (sessionId === undefined || !inputActions || typeof inputActions.setDraft !== 'function') return
+    const text = pendingForkDrafts.get(sessionId)
+    if (text === undefined) return
+    pendingForkDrafts.delete(sessionId)
+    inputActions.setDraft(text)
+  }, [sessionId, inputActions])
   return h(ForkDock, { session, forkSession, turnEnds })
 }
 
@@ -845,10 +874,17 @@ function ForkDock({ session, forkSession, turnEnds }) {
         if (rawTurn === null || rawTurn.trim() === '') return
         const turn = Number(rawTurn)
         if (!Number.isInteger(turn)) return
-        // 映射缺失的轮(进行中,或超出拉取窗口的已完成轮)不注入:按钮在场即暗示
-        // 可分叉,禁用态文案无法区分成因,注入即误导;新近轮——fork 的主要目标——总在覆盖内
-        const atSeq = turnEndsRef.current.get(turn)
-        if (atSeq === undefined) return
+        // 重试资格三查:映射缺失的轮(进行中/超窗口)不可分叉;首轮无前锚(宿主
+        // fork 边界必须落在 turn/end,复制零事件不可表达);无首问文本(纯图等)
+        // 回填无从谈起。按钮在场即暗示可用,禁用态文案无法区分成因,不注入即误导
+        const entry = turnEndsRef.current.get(turn)
+        if (entry === undefined || entry.text === null) return
+        let previous = null
+        for (const key of turnEndsRef.current.keys()) {
+          if (key < turn && (previous === null || key > previous)) previous = key
+        }
+        if (previous === null) return
+        const anchor = turnEndsRef.current.get(previous)
         const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + ']):not([' + STEER_BTN_FLAG + '])')
         if (!official) return
         const button = document.createElement('button')
@@ -856,17 +892,24 @@ function ForkDock({ session, forkSession, turnEnds }) {
         button.setAttribute(FORK_BTN_FLAG, '')
         // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
         button.className = official.className
-        button.title = '从该轮分叉出新会话'
+        button.title = '重写该轮:分叉到该轮之前,原输入回填输入框重新编辑'
         button.addEventListener('click', () => {
           const forkSessionFn = forkRef.current
           const current = sessionRef.current
-          const at = turnEndsRef.current === null ? undefined : turnEndsRef.current.get(turn)
-          if (!forkSessionFn || at === undefined || !current) {
+          const currentEntry = turnEndsRef.current === null ? undefined : turnEndsRef.current.get(turn)
+          const previousEntry = turnEndsRef.current === null || previous === null ? undefined : turnEndsRef.current.get(previous)
+          if (!forkSessionFn || !currentEntry || !previousEntry || !current) {
             toast('该轮不可分叉', { kind: 'error' })
             return
           }
-          forkSessionFn({ sessionId: current.sessionId, atSeq: at, increaseTitle: true })
-            .then(() => toast('已从该消息分叉'))
+          forkSessionFn({ sessionId: current.sessionId, atSeq: previousEntry.seq, increaseTitle: true })
+            .then((childId) => {
+              // 暂存先于 toast:open 的子会话挂载可能紧随 resolve,回填承诺必须先就位;
+              // open 失败时暂存保留,用户手动打开子会话仍兑现
+              if (typeof childId === 'string' && childId !== '') pendingForkDrafts.set(childId, currentEntry.text)
+              toast('已分叉,原输入已填入子会话输入框')
+              return childId
+            })
             .catch((error) => {
               const code = error && error.code
               toast(forkFailureText(code ?? (error && error.message)), { kind: 'error', sticky: true })
@@ -896,7 +939,7 @@ function ForkDock({ session, forkSession, turnEnds }) {
 // 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
 const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
 const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
-const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击从该消息所在轮分叉出新会话(含该轮及之前的完整历史)并自动打开,子会话标题尾号递增;进行中的轮不可分叉;停用即不再注入,刷新页面生效。'
+const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮、首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
 
 // 启停开关行工厂:三个开关同构(受控 checkbox + cx-switch 形态),值存宿主 settings,
 // 切换经本插件路由中转,变更刷新页面生效
@@ -1023,7 +1066,8 @@ function ContextPanel() {
 
         // 对话 fork 入口:锚点映射经 remote.session.follow 开场帧一次拉取
         // (开场帧自带回溯窗口内的全部事件与 seq,取到即断开订阅,不做 live 消费),
-        // 分叉动作经 sessions 服务面;分叉服务面缺失即整体不注册(干净禁用)
+        // 分叉动作经 sessions 服务面;分叉服务面缺失即整体不注册(干净禁用)。
+        // inputActions 由插槽宿主按会话绑定注入,子会话挂载时消费重试草稿
         if (forkService) {
           try {
             ctx.slots.inject('conversation.input.dock', () =>
@@ -1035,15 +1079,24 @@ function ContextPanel() {
                   inject: (sessionId) => ({
                     forkSession: forkService,
                     loadTurnEnds: () => followOpening(remoteSession, sessionId).then((records) => {
-                      // 轮号 → turn/end seq:事件 data 携带 turn 号时按号登记,
-                      // 缺失时按出现顺序计数(第 i 个 turn/end 即第 i 轮完成)
+                      // 轮号 → { 结束 seq, 该轮首问文本 }:上个 turn/end 之后首条
+                      // 携带非空文本的 user 本人消息即该轮首问(轮内纯图消息跳过,
+                      // 后续文本插话可补位),turn/end 落账并重置;
+                      // data 缺 turn 号时按出现顺序计数
                       const map = new Map()
                       let ordered = 0
+                      let turnText = null
                       for (const record of records) {
                         const event = record && record.event
-                        if (!event || event.type !== 'turn/end') continue
+                        if (!event) continue
+                        if (event.type === 'user/message') {
+                          if (turnText === null) turnText = forkRetryText(event.data)
+                          continue
+                        }
+                        if (event.type !== 'turn/end') continue
                         const turn = event.data && Number.isInteger(event.data.turn) ? event.data.turn : ordered
-                        map.set(turn, event.seq)
+                        map.set(turn, { seq: event.seq, text: turnText })
+                        turnText = null
                         ordered += 1
                       }
                       return map

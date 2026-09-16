@@ -128,3 +128,19 @@ export function forkFailureText(code) {
   if (code === 'session/workspace-attach-failed') return '分叉成功,但挂载到工作区失败'
   return '分叉失败: ' + String(code ?? '未知错误')
 }
+
+/**
+ * 从一条 user/message 事件提取重试文本:仅来源为用户本人,文本块按行拼接;
+ * 空白或无文本块(纯图片等)返回 null——无法回填重试的轮不提供分叉按钮。
+ * client.js 有镜像实现(单文件自包含无法跨文件 require),修改需两处同步。
+ * @param data - user/message 事件 data(UserMessage 形状)
+ */
+export function forkRetryText(data) {
+  const message = data && typeof data === 'object' ? data : {}
+  if (!message.source || message.source.kind !== 'user') return null
+  const text = (Array.isArray(message.content) ? message.content : [])
+    .filter((block) => block && block.type === 'text' && block.text !== '')
+    .map((block) => block.text)
+    .join('\n')
+  return text.trim() === '' ? null : text
+}

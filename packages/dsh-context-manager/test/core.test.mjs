@@ -8,7 +8,7 @@ const {
   aggregateInputs,
   filterHistoryInputs,
   forkFailureText,
-  forkAvailable,
+  forkRetryText,
   maxArtifactBytesForHost,
   HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES,
   HISTORY_ALIGN_MODERN_MAX_ARTIFACT_BYTES,
@@ -165,6 +165,29 @@ test('fork 错误文案:未完成轮/挂载失败/未知码分通道', () => {
   assert.equal(forkFailureText('session/workspace-attach-failed'), '分叉成功,但挂载到工作区失败')
   assert.equal(forkFailureText('gateway/internal'), '分叉失败: gateway/internal')
   assert.equal(forkFailureText(undefined), '分叉失败: 未知错误')
+})
+
+// ── fork 重试文本提取 ──
+
+test('Given 用户本人多文本块消息, When forkRetryText, Then 文本块按行拼接', () => {
+  const data = {
+    source: { kind: 'user' },
+    content: [{ type: 'text', text: '第一行' }, { type: 'image', attachment: {} }, { type: 'text', text: '第二行' }],
+  }
+  assert.equal(forkRetryText(data), '第一行\n第二行')
+})
+
+test('Given 插件注入/空白/纯图片消息, When forkRetryText, Then 返回 null 不提供重试', () => {
+  assert.equal(forkRetryText({ source: { kind: 'plugin', plugin: 'x' }, content: [{ type: 'text', text: '注入' }] }), null)
+  assert.equal(forkRetryText({ source: { kind: 'user' }, content: [] }), null)
+  assert.equal(forkRetryText({ source: { kind: 'user' }, content: [{ type: 'text', text: '   ' }] }), null)
+  assert.equal(forkRetryText({ source: { kind: 'user' }, content: [{ type: 'image', attachment: {} }] }), null)
+})
+
+test('Given 非对象或畸形 data, When forkRetryText, Then 返回 null 不抛错', () => {
+  assert.equal(forkRetryText(undefined), null)
+  assert.equal(forkRetryText({}), null)
+  assert.equal(forkRetryText({ source: { kind: 'user' } }), null)
 })
 
 // ── 巨产物跳过线:宿主版本黑名单 ──
