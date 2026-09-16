@@ -77,10 +77,14 @@ test('场景:拉取成功返回发布说明,请求形态与上游纪律一致', 
   assert.ok(capturedOptions.headers['user-agent'], 'GitHub API 要求显式 User-Agent')
 })
 
-test('场景:HTTP 404 报未找到发布说明,其余非 2xx 报状态码', async () => {
+test('场景:HTTP 404 报未找到发布说明,403 报限流指引,其余非 2xx 报状态码', async () => {
   await assert.rejects(
     () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch({}, { ok: false, status: 404 }), timeoutMs: 1000 }),
     /未找到/,
+  )
+  await assert.rejects(
+    () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch({}, { ok: false, status: 403 }), timeoutMs: 1000 }),
+    /限流/,
   )
   await assert.rejects(
     () => fetchReleaseNotes({ version: '9.9.9', fetchImpl: fakeFetch({}, { ok: false, status: 502 }), timeoutMs: 1000 }),

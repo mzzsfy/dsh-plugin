@@ -368,7 +368,9 @@ export async function fetchReleaseNotes({ version, fetchImpl = fetch, timeoutMs 
   if (!response.ok) {
     throw new Error(response.status === 404
       ? '未找到该版本的发布说明(该版本可能未发布 Release)'
-      : 'GitHub HTTP ' + response.status)
+      : response.status === 403
+        ? 'GitHub 拒绝访问(通常是未认证限流:60 次/小时/IP),请稍后重试或用下方链接'
+        : 'GitHub HTTP ' + response.status)
   }
   const text = await readBodyTextLimited(response)
   let body
