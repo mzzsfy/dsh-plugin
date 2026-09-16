@@ -459,3 +459,80 @@ test('Given waiting_approval(无活跃段) When cancel Then 即时终态 cancell
   assert.equal(driver.state.status, 'cancelled')
   assert.equal(driver.finished, true)
 })
+
+// ── 纠偏注入边界链(v5):handlePost 记账 → 段边界 drainControls → 下段 prompt 注入 ──
+// 段边界 = 审批到达/暂停/终态;纠偏在下一段 runSegment 的 drainControls 生效。
+// 可观测的下段 = REJECTED 后的重做段(通过时无重做,审批链即收敛终态)。
+
+test('Given waiting 段收到 inject 纠偏 When REJECTED 后下段重做 Then 重做 prompt 含[运行中用户消息]', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const promptsSeen = []
+  const driver = new RunDriver({
+    template: APPROVE_TPL, plan, runId: 'r-inject-2', request: '需求',
+    engine: {
+      start({ args }) {
+        promptsSeen.push(...args.calls.map((c) => ({ label: c.label, prompt: c.prompt })))
+        return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'OUT' } })) }) }
+      },
+    },
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  assert.equal(driver.state.status, 'waiting_approval')
+  // waiting 期间用户纠偏(注入式)
+  const accepted = driver.handlePost({ kind: 'message', text: '口径改为一行', inject: true })
+  assert.equal(accepted, true)
+  driver.handlePost({ kind: 'reject', by: 'user', reason: '口径未达' })
+  const payload = await driver.runSegment()
+  assert.equal(payload.kind, 'waiting')
+  const redoA = promptsSeen.filter((p) => p.label.startsWith('a'))[1]
+  assert.ok(redoA, JSON.stringify(promptsSeen.map((p) => p.label)))
+  assert.ok(redoA.prompt.includes('[运行中用户消息]'), redoA.prompt)
+  assert.ok(redoA.prompt.includes('口径改为一行'))
+  assert.equal(redoA.prompt.includes('[用户补充]'), false)
+})
+
+test('Given 非注入纠偏 When REJECTED 后下段重做 Then 重做 prompt 含[用户补充]且不含[运行中用户消息]', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const promptsSeen = []
+  const driver = new RunDriver({
+    template: APPROVE_TPL, plan, runId: 'r-queue-1', request: '需求',
+    engine: {
+      start({ args }) {
+        promptsSeen.push(...args.calls.map((c) => ({ label: c.label, prompt: c.prompt })))
+        return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'OUT' } })) }) }
+      },
+    },
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  driver.handlePost({ kind: 'message', text: '补充一点', inject: false })
+  driver.handlePost({ kind: 'reject', by: 'user', reason: '口径未达' })
+  await driver.runSegment()
+  const redoA = promptsSeen.filter((p) => p.label.startsWith('a'))[1]
+  assert.ok(redoA.prompt.includes('[用户补充]'), redoA.prompt)
+  assert.ok(redoA.prompt.includes('补充一点'))
+  assert.equal(redoA.prompt.includes('[运行中用户消息]'), false)
+})
+
+test('Given 终态 run When handlePost message Then 不受理', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const driver = new RunDriver({
+    template: APPROVE_TPL, plan, runId: 'r-final-1', request: '需求',
+    engine: {
+      start({ args }) {
+        return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'OUT' } })) }) }
+      },
+    },
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  driver.handlePost({ kind: 'approve', by: 'user' })
+  const payload = await driver.runSegment()
+  assert.equal(payload.kind, 'terminal')
+  const accepted = driver.handlePost({ kind: 'message', text: '晚了', inject: true })
+  assert.equal(accepted, false)
+})

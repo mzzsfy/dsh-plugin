@@ -141,7 +141,8 @@ export function registerOrchestrator(ctx, config) {
             plan: outcome.planScript, warnings: outcome.warnings ?? [],
             request: args.request, inputs: args.inputs ?? {},
             engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
-            sessionId: agentIdOf(agent), workspace: process.cwd(),
+            // 会话工作区取自会话 header(子代理继承同源);宿主 cwd 仅兜底
+            sessionId: agentIdOf(agent), workspace: agent.session?.header?.cwd ?? process.cwd(),
             parent: agent,
           })
           rejectCounts.delete(agentIdOf(agent))
