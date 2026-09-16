@@ -70,6 +70,16 @@ test('Given 包内主组合骨架 When 检查 templateId 锚定串 Then 恰出�
   assert.equal(skeleton.includes('flowFile'), false)
 })
 
+// 双实现同源(preset-combo.md):对拍行清单——生成器产出的组合行与骨架行逐行声明一致
+test('Given releaseFlowTemplate 产物 When 对拍组合行清单 Then 与骨架行集逐行一致(id/role/isolate)', (t) => {
+  const skeleton = readFileSync(join(PKG_ROOT, 'preset', 'rs-workflow', AGENT_YAML), 'utf8')
+  const lineDecls = (text) => text.split('\n').filter((l) => l.includes('templateId:') || l.includes('role:') || l.includes('isolate'))
+  const home = tempHome(t)
+  assert.equal(releaseFlowTemplate(ENTRY, home), 'created')
+  const generated = readFileSync(join(flowDirOf(home, 'novel'), AGENT_YAML), 'utf8').replace(TEMPLATE_ANCHOR, 'novel')
+  assert.deepEqual(lineDecls(generated), lineDecls(skeleton.replace(TEMPLATE_ANCHOR, 'novel')))
+})
+
 
 test('Given 合法模板 entry When releaseFlowTemplate Then created 且四文件产物符合契约', (t) => {
   const home = tempHome(t)
