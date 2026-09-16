@@ -1,4 +1,4 @@
-﻿// store BDD(v5;契约源 docs/rsww-v5/data-design.md 存储布局与 run 记录)
+// store BDD(v5;契约源 docs/rsww-v5/data-design.md 存储布局与 run 记录)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'

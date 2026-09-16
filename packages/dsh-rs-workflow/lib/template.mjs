@@ -1,4 +1,4 @@
-// 模板静态校验器:DSL v5 唯一权威(board 保存校验唯一入口);v5 新增顶层 autoApprove 键
+﻿// 模板静态校验器:DSL v5 唯一权威(board 保存校验唯一入口);v5 新增顶层 autoApprove 键
 
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
 const TOP_FIELDS = new Set(['id', 'label', 'description', 'inputs', 'steps', 'autoApprove'])
@@ -147,10 +147,7 @@ export function validateTemplate(t) {
       if (!['sequential', 'parallel'].includes(s.mode)) errors.push(err(target, 'mode 仅支持 sequential/parallel'))
       if (s.for_each === undefined) errors.push(err(target, 'mode 仅在声明 for_each 时有效'))
     }
-    if (s.for_each !== undefined && s.mode === undefined) {
-      // sequential 为缺省(spec §8),不必显式声明
-      s.mode = 'sequential'
-    }
+    // sequential 为缺省(spec §8),不必显式声明;校验器无副作用,仅接受缺省
 
     if (type === 'ai') {
       if (typeof s.prompt !== 'string' || s.prompt.trim() === '') errors.push(err(target, '普通步骤 prompt 必填'))
@@ -297,6 +294,7 @@ export function validateTemplateSet(list) {
     if (es.length === 0) ok.push(t)
   }
   const ids = new Set(ok.map((t) => t.id))
+  const parsedById = new Map(ok.map((t) => [t.id, t]))
   const tmplEdges = new Map()
   for (const t of ok) {
     const outs = new Set()
@@ -304,8 +302,14 @@ export function validateTemplateSet(list) {
       if (s.type !== 'flow' || typeof s.flow !== 'string') continue
       const literal = s.flow.trim()
       if (/^\{[^{}]+\}$/.test(literal)) continue
-      if (!ids.has(literal)) errors.push(err(`step:${s.id}`, `子流程 ${literal} 不存在于模板集合`))
-      else if (literal !== t.id) outs.add(literal)
+      // 归属本模板(top:id 前缀):释放权威点按 id 过滤集合校验错误
+      if (!ids.has(literal)) errors.push(err('top:id', `${t.id} 步骤 ${s.id} 的子流程 ${literal} 不存在于模板集合`))
+      else {
+        if (literal !== t.id) outs.add(literal)
+        // 审批只在顶层可达:子模板含审批步则任何 flow 引用它的模板无法完成该子流程
+        const sub = parsedById.get(literal)
+        if (sub?.steps?.some((x) => x.type === 'approve')) errors.push(err('top:id', `${t.id} 引用的子流程 ${literal} 含审批步:审批仅支持顶层剧本`))
+      }
     }
     if (outs.size > 0) tmplEdges.set(t.id, outs)
   }

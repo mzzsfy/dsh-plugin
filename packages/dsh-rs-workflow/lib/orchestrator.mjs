@@ -46,7 +46,9 @@ export function registerOrchestrator(ctx, config) {
     const currentRunId = (agent) => {
       const runId = activeRuns.get(agentIdOf(agent))
       if (runId === undefined) return undefined
-      const record = reportStore().get(runId)
+      // run 可能已被页签删除:get 抛异常须自愈清位,不能让编排入口变砖
+      let record
+      try { record = reportStore().get(runId) } catch { record = undefined }
       if (record === undefined || record.finishedAt !== undefined) {
         activeRuns.delete(agentIdOf(agent))
         return undefined
@@ -74,6 +76,9 @@ export function registerOrchestrator(ctx, config) {
       const templates = enabledTemplates()
       const template = templates.find((t) => t.entry.id === record.templateId)
       if (template === undefined) return { ok: false, error: `模板不存在或已禁用: ${record.templateId}` }
+      // 单活跃约束:种子 run 与 start 工具同守卫;主循环成为其推进者(activeRuns 注册,补拉/守卫生效)
+      const current = currentRunId(agent)
+      if (current !== undefined) return { ok: false, error: `本会话已有进行中的编排 ${current},不可续跑` }
       const seed = buildSeed(record, record.plan, fromStepId, inputs)
       const driver = startRun({
         template: template.parsed, templateSet: templates.map((t) => t.parsed),
@@ -83,6 +88,7 @@ export function registerOrchestrator(ctx, config) {
         engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
         parent: agent,
       })
+      activeRuns.set(agentIdOf(agent), driver.runId)
       return { ok: true, runId: driver.runId }
     }
 
@@ -185,7 +191,8 @@ export function registerOrchestrator(ctx, config) {
           const store = reportStore()
           const runId = typeof args.runId === 'string' && args.runId !== '' ? args.runId : currentRunId(exec.agent)
           if (runId === undefined) return { ok: false, error: '本会话无现役 run(编排未启动)' }
-          const record = store.get(runId)
+          let record
+          try { record = store.get(runId) } catch { record = undefined }
           if (record === undefined) return { ok: false, error: '运行记录不存在:' + runId }
           const driver = registry.drivers.get(runId)
           const steps = {}
@@ -198,12 +205,15 @@ export function registerOrchestrator(ctx, config) {
             const planStep = (record.plan?.steps ?? []).find((p) => p.ref === stepId)
             waiting.push({ stepId, note: planStep?.note ?? '', done: planStep?.done ?? '' })
           }
+          // paused+已入队裁决:主循环据 pendingVerdicts 可知 resume 拉段后裁决将生效
+          const pendingVerdicts = (record.state?.pendingApprovals ?? []).length
           return {
             ok: true, runId, status: record.status,
             awaitingResume: record.status === 'paused' && driver?.awaitingResume === true,
             steps,
             // 宿主校验工具输出须为纯 JSON:undefined 值键会被判无效输出
             ...(waiting.length > 0 ? { waiting } : {}),
+            ...(pendingVerdicts > 0 ? { pendingVerdicts } : {}),
             summary: record.summary ?? '',
           }
         },
@@ -223,7 +233,8 @@ export function registerOrchestrator(ctx, config) {
         },
         async execute(args, exec) {
           const store = reportStore()
-          const record = store.get(args.runId)
+          let record
+          try { record = store.get(args.runId) } catch { record = undefined }
           if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
           if (record.finishedAt !== undefined) {
             finishRun(exec.agent, args.runId)
@@ -260,7 +271,8 @@ export function registerOrchestrator(ctx, config) {
         },
         async execute(args, exec) {
           const store = reportStore()
-          const record = store.get(args.runId)
+          let record
+          try { record = store.get(args.runId) } catch { record = undefined }
           if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
           if (record.finishedAt !== undefined) {
             finishRun(exec.agent, args.runId)
@@ -272,11 +284,13 @@ export function registerOrchestrator(ctx, config) {
           const hint = '已完成步骤保留,可在会话页签断点续跑'
           if (driver.active) {
             await driver.runSegment().catch(() => {})
-            const after = store.get(args.runId)
+            let after
+            try { after = store.get(args.runId) } catch { after = undefined }
             finishRun(exec.agent, args.runId)
             return { ok: true, runId: args.runId, status: after?.status ?? 'cancelled', summary: after?.summary ?? '', hint }
           }
-          const after = store.get(args.runId)
+          let after
+          try { after = store.get(args.runId) } catch { after = undefined }
           finishRun(exec.agent, args.runId)
           return { ok: true, runId: args.runId, status: after?.status ?? 'cancelled', hint }
         },
@@ -300,8 +314,50 @@ export function registerOrchestrator(ctx, config) {
           return accepted ? { ok: true } : { ok: false, error: 'run 已终态,消息不予受理' }
         },
       }),
+      defineTool({
+        name: 'rs_workflow_verdict',
+        description: [
+          '回写若水编排裁决(主循环裁决通道,与页签先到先得):run 处于 waiting_approval 时受理。',
+          '模板 autoApprove=true 时代审直接调用;ask_user 转呈真人后按其选择调用。裁决后 rs_workflow_resume 拉起下一段。',
+        ].join(''),
+        parameters: {
+          runId: { type: 'string', required: true, description: '要裁决的 run' },
+          verdict: { type: 'string', required: true, description: 'approve = 通过;reject = 驳回(重做)' },
+          reason: { type: 'string', description: '驳回必填:重做意见(进入重做指令);通过可选' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          if (args.verdict !== 'approve' && args.verdict !== 'reject') {
+            return { ok: false, error: 'verdict 须为 approve|reject' }
+          }
+          if (args.verdict === 'reject' && (typeof args.reason !== 'string' || args.reason.trim() === '')) {
+            return { ok: false, error: '驳回必填 reason(重做意见)' }
+          }
+          const runId = typeof args.runId === 'string' && args.runId !== '' ? args.runId : currentRunId(exec.agent)
+          if (runId === undefined) return { ok: false, error: '本会话无现役 run(编排未启动)' }
+          const driver = registry.drivers.get(runId)
+          if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
+          const accepted = driver.handlePost({ kind: args.verdict, by: 'main-agent', reason: typeof args.reason === 'string' ? args.reason : '' })
+          const record = reportStore().get(runId)
+          return accepted
+            ? { ok: true, runId, status: record?.status, hint: '裁决已受理;rs_workflow_resume 拉起下一段' }
+            : { ok: false, error: '裁决未受理(状态不符或已被页签先裁)' }
+        },
+      }),
     ]
     for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'rs-workflow orchestrator: ' + tool.name)
+    // 会话 scope dispose:清本会话 initiator/activeRuns,防 stale 闭包续跑与入口变砖
+    tctx.effect(() => {
+      const agentId = agentIdOf(tctx.agent)
+      if (agentId === '') return undefined
+      return () => {
+        registry.initiators.delete(agentId)
+        activeRuns.delete(agentId)
+      }
+    }, 'rs-workflow orchestrator: initiator dispose')
   })
   return { rejectCounts, activeRuns }
 }

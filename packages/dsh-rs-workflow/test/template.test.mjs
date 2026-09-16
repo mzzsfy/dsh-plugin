@@ -1,4 +1,4 @@
-﻿// template 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
+// template 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseTemplate, parseErrorLine, validateTemplate, validateTemplateSet, buildSchema } from '../lib/template.mjs'
@@ -302,11 +302,20 @@ test('Given JSON 语法错误 When parseTemplate 抛错 Then parseErrorLine 提�
 })
 
 test('Given 模板集合字面 flow 引用存在 When validateTemplateSet Then 零错误', () => {
+  const mini = { id: 'mini', label: 'mini', description: '无审批子流程', steps: [{ id: 's1', prompt: 'p', outputs: { o: 'o' } }] }
+  const errors = validateTemplateSet([structuredClone(LITE_TPL), mini, {
+    id: 'entry', label: '入口', description: '测试模板说明',
+    steps: [{ id: 'run', type: 'flow', flow: 'mini' }],
+  }])
+  assert.deepEqual(errors, [])
+})
+
+test('Given flow 引用含审批步的子模板 When validateTemplateSet Then 拒(审批仅顶层可达)', () => {
   const errors = validateTemplateSet([structuredClone(LITE_TPL), {
     id: 'entry', label: '入口', description: '测试模板说明',
     steps: [{ id: 'run', type: 'flow', flow: 'lite' }],
   }])
-  assert.deepEqual(errors, [])
+  assert.ok(errors.some((e) => e.message.includes('审批仅支持顶层剧本')), JSON.stringify(errors))
 })
 
 test('Given 字面 flow 引用不存在集合 When validateTemplateSet Then 存在性错误', () => {

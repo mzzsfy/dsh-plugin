@@ -580,3 +580,39 @@ test('Given 批次运行期纠偏随后到审批边界 When reject 后重做批 
   assert.ok(redoA.prompt.includes('[运行中用户消息]'), redoA.prompt)
   assert.ok(redoA.prompt.includes('运行期纠偏'))
 })
+
+test('Given 超过120字注入纠偏 When 消费 Then prompt 含全文(queued 为权威,controls 只留摘要)', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const longText = '长'.repeat(300) + 'END'
+  const promptsSeen = []
+  let driver
+  driver = new RunDriver({
+    template: APPROVE_TPL, plan, runId: 'r-inject-4', request: '需求',
+    engine: {
+      start({ args }) {
+        promptsSeen.push(...args.calls.map((c) => ({ label: c.label, prompt: c.prompt })))
+        driver.handlePost({ kind: 'message', text: longText, inject: true })
+        return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'OUT' } })) }) }
+      },
+    },
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  driver.handlePost({ kind: 'reject', by: 'user', reason: '口径未达' })
+  await driver.runSegment()
+  const redoA = promptsSeen.filter((p) => p.label.startsWith('a'))[1]
+  assert.ok(redoA.prompt.includes(longText), '注入内容须为全文')
+})
+
+test('Given paused 期间同一审批步两次裁决 When resume Then 第二条不受理(先到先得)', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const driver = makeDriver({ template: APPROVE_TPL, plan, engineResults: (c) => ({ callId: c.callId, ok: true, outputs: { o: 'OUT' } }) })
+  driver.startPersist()
+  await driver.runSegment()
+  driver.pause()
+  driver.handlePost({ kind: 'reject', by: 'user', reason: '第一次' })
+  const second = driver.handlePost({ kind: 'approve', by: 'main-agent' })
+  assert.equal(second, false)
+  assert.equal(driver.state.pendingApprovals.length, 1)
+})

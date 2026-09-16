@@ -1,4 +1,4 @@
-﻿// dsh-rs-workflow — 若水工作流 v5:人机协作的强规则编排。
+// dsh-rs-workflow — 若水工作流 v5:人机协作的强规则编排。
 // 主循环(人机接口+规划者)+ 分段 continuable job 编排;配置/模板存自有文件(~/.dsh/dsh-rs-workflow/v5/),
 // 不经宿主 settings 服务,不写 settings.yaml。本文件只做行角色分发,业务在 lib/ 各模块。
 import z from '@deepseek-ai/schemastery'

@@ -179,8 +179,11 @@ export class RunDriver {
   applyVerdictPost(event) {
     const verdict = event.kind === 'approve' ? 'APPROVED' : 'REJECTED'
     if (this.state.status === 'paused') {
+      // 先到先得:同一步已有入队裁决则后到不受理(防 rounds 虚增/已 done 步被重开)
       this.state.pendingApprovals ??= []
-      this.state.pendingApprovals.push({ stepId: this.state.waitingApproval, verdict, comments: event.reason ?? '', by: event.by })
+      const stepId = this.state.waitingApproval
+      if (this.state.pendingApprovals.some((p) => p.stepId === stepId)) return false
+      this.state.pendingApprovals.push({ stepId, verdict, comments: event.reason ?? '', by: event.by })
       // 受理即记账(与 waiting 分支对称):页签裁决来源回显不因 paused 入队丢失
       this.store.step({ runId: this.runId, event: 'control', body: { kind: event.kind, by: event.by, reason: event.reason } })
       this.persistState()
@@ -225,12 +228,15 @@ export class RunDriver {
   drainControls() {
     const record = this.store.get(this.runId)
     const pending = (record.controls ?? []).slice(this.state.controlSeq ?? 0)
+    // 全文以 queued 为准(controls[].text 是 ≤120 字审计摘要);按消息顺序与队列对齐
+    const fullTexts = [...(record.queued ?? [])]
     const inject = []
     const queued = []
     for (const c of pending) {
       if (c.kind !== 'message') continue
-      if (c.inject) inject.push(c.text)
-      else queued.push(c.text)
+      const text = fullTexts.shift() ?? c.text
+      if (c.inject) inject.push(text)
+      else queued.push(text)
     }
     this.state.controlSeq = (record.controls ?? []).length
     this.store.update({ runId: this.runId, queued: [] })
@@ -246,7 +252,8 @@ export class RunDriver {
     this.finished = true
     this.state.status = status
     if (this.subordinate) return
-    this.store.update({ runId: this.runId, queued: [] })
+    // waiting 摘要随终态清除,防终态卡残留「待审批」区块
+    this.store.update({ runId: this.runId, queued: [], waiting: null })
     this.store.finish({ runId: this.runId, status, summary: summary ?? '' })
     unregisterDriver(this.runId)
   }
@@ -276,11 +283,14 @@ export class RunDriver {
       }
       await yieldToLoop()
       const batch = nextBatch(this.state, this.script, this.budgets)
-      // skipped 落账:页签步骤轨迹补 skip 行(调度器纯函数置态,记账在此)
+      // skipped 落账:页签步骤轨迹补 skip 行;以 stepsTrace 幂等(重启续跑不重复记账)
       for (const step of this.script.steps) {
-        if (this.state.steps[step.id]?.status !== 'skipped' || this.skipRecorded.has(step.id)) continue
+        const s = this.state.steps[step.id]
+        if (s?.status !== 'skipped' || this.skipRecorded.has(step.id)) continue
+        const events = this.store.get(this.runId)?.stepsTrace?.[step.id]?.['-'] ?? []
+        if (events.some((e) => e.event === 'skip')) { this.skipRecorded.add(step.id); continue }
         this.skipRecorded.add(step.id)
-        this.store.step({ runId: this.runId, stepId: step.id, event: 'skip', body: { reason: this.state.steps[step.id].skipReason ?? '' } })
+        this.store.step({ runId: this.runId, stepId: step.id, event: 'skip', body: { reason: s.skipReason ?? '' } })
       }
       if (batch.kind === 'terminal') {
         // 升级账/审批耗尽置账后,blocked 终态先于 pending 残留判定

@@ -1,4 +1,4 @@
-// board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
+﻿// board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
 // 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
 import { reportStore, ACTIVE_STATES } from './store.mjs'
@@ -245,7 +245,8 @@ export function registerBoardRoutes(ctx) {
       const inputs = body.inputs && typeof body.inputs === 'object' ? body.inputs : undefined
       const outcome = start(record, fromStepId, inputs)
       if (!outcome.ok) throw new Error(outcome.error)
-      sendJson(res, 200, { ok: true, runId: outcome.runId })
+      // 纠偏消息不跨 run:旧 run 受理未消费的纠偏不带入种子(controls 属旧 run 审计)
+      sendJson(res, 200, { ok: true, runId: outcome.runId, hint: '旧 run 未消费的纠偏消息不带入新 run' })
     }), 'rsww resume-from route')
     route('/api/rsww/run-remove', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))

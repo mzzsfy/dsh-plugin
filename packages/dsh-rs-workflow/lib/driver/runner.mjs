@@ -153,16 +153,27 @@ export async function runBatch({ state, script, template, batch, ctx }) {
     }
     settled.push({ item: meta.item, result })
   }
-  // 看门狗:引擎契约要求结果逐 callId 返回;缺失即引擎侧异常,记失败防调用永滞 running
+  // 看门狗:引擎契约要求结果逐 callId 返回;缺失即引擎侧异常,按标准失败路径记账(failCount+上限)
   const seenIds = new Set(results.map((r) => r.callId))
   for (const call of calls) {
     if (seenIds.has(call.callId)) continue
     const meta = callMeta.get(call.callId)
     const s = state.steps[meta.item.stepId]
     const failTarget = meta.item.instance ? s.instances.find((x) => x.key === meta.item.instance.key) : s
-    if (failTarget) failTarget.status = 'pending'
-    store.step({ runId, stepId: meta.item.stepId, instance: meta.item.instance?.key, event: 'fail', body: { error: '引擎结果缺失该调用', candidate: meta.slotKey } })
-    settled.push({ item: meta.item, result: { callId: call.callId, ok: false, error: '引擎结果缺失该调用' } })
+    const error = '引擎结果缺失该调用'
+    if (failTarget) {
+      failTarget.failCount++
+      const limit = meta.step.maxFail ?? ctx.budgets.maxStepFail ?? DEFAULT_MAX_STEP_FAIL
+      if (failTarget.failCount >= limit) {
+        failTarget.status = 'failed'
+        failTarget.error = error
+      } else {
+        failTarget.status = 'pending'
+        rotateCursor(state, meta.cursorKey)
+      }
+    }
+    store.step({ runId, stepId: meta.item.stepId, instance: meta.item.instance?.key, event: 'fail', body: { error, candidate: meta.slotKey } })
+    settled.push({ item: meta.item, result: { callId: call.callId, ok: false, error } })
   }
   return { settled }
 }

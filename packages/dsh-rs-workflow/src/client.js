@@ -368,7 +368,7 @@ window.__ModuleLoader__.load({
       if (error && !runs) return React.createElement('div', { className: 'rsww-flow' }, React.createElement('span', { className: 'rsww-error' }, error))
       // 只呈现本会话的 run:页签语义=本会话编排在场;跨会话检索交给宿主会话搜索
       const mine = (runs || []).filter((r) => r.sessionId === getSessionId())
-      const running = mine.filter((r) => r.status === 'running' || r.status === 'paused')
+      const running = mine.filter((r) => r.status === 'running' || r.status === 'paused' || r.status === 'waiting_approval')
       const settled = mine.filter((r) => !running.includes(r)).slice(0, SETTLED_COUNT)
       const group = (title, count, items) => React.createElement('div', { className: 'rsww-group' },
         React.createElement('div', { className: 'rsww-group__head' },
