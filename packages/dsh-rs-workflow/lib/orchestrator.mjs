@@ -1,4 +1,4 @@
-﻿// orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message 五件套
+// orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message 五件套
 // 编排以分段 continuable job 推进:每段 = jobs.start 包装 driver.runSegment,settle 负载经 tool-jobs
 // 完成通知唤醒主循环;推进责任唯一在 rs_workflow_resume(页签 control 仅清 paused/裁决)
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -106,6 +106,7 @@ export function registerOrchestrator(ctx, config) {
           render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
         },
         async execute(args, exec) {
+          const agent = exec.agent
           // 工具参数扁平:gate 入参 = 顶层三字段 + plan(steps/brief)组装(见 feat/orchestrator.md)
           const gatePlan = {
             request: args.request, templateId: args.templateId, inputs: args.inputs,

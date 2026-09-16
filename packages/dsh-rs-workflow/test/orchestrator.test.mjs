@@ -1,4 +1,4 @@
-﻿// orchestrator 工具行 BDD(v5):start 受理/拒单计数/status/resume 拉段/cancel 幂等/message 受理
+// orchestrator 工具行 BDD(v5):start 受理/拒单计数/status/resume 拉段/cancel 幂等/message 受理
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -38,7 +38,7 @@ async function waitStatus(runId, expect, ms = 5000) {
 
 const fakeEngine = () => ({
   start({ args }) {
-    return { result: Promise.resolve({ results: args.calls.map(() => ({ callId: 'c', ok: true, outputs: { brief: 'b', result: 'r', report: 'p' } })) }) }
+    return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { brief: 'b', result: 'r', report: 'p' } })) }) }
   },
 })
 
