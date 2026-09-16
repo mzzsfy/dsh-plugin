@@ -1,6 +1,7 @@
 // RunDriver 聚合(v5):剧本驱动;runSegment 分段推进(审批到达/暂停/终态即返回 settle 负载);
 // 外部裁决回写(waiting_approval 即时应用,paused 入队 resume 生效);取消优先;推进责任在主循环 resume
 import { reportStore } from '../store.mjs'
+import { templateDeps } from '../planner-gate.mjs'
 import { nextBatch, scriptViewOf } from './scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from './approve.mjs'
 import { runBatch } from './runner.mjs'
@@ -58,6 +59,10 @@ export function buildSeed(record, plan, fromStepId, inputs) {
     }
   }
   state.pendingApprovals = []
+  // 终态污染标志清零:续跑后旧账不得再次收口(blocked)或无耗尽即派发升级步
+  state.terminalBlocked = false
+  state.escalateReady = []
+  state.escalateLimitReached = false
   state.controlSeq = record.controls?.length ?? 0
   return state
 }
@@ -255,7 +260,6 @@ export class RunDriver {
         return { kind: 'paused', runId: this.runId, status: 'paused' }
       }
       await yieldToLoop()
-      const { inject, queued } = this.drainControls()
       const batch = nextBatch(this.state, this.script, this.budgets)
       if (batch.kind === 'terminal') {
         // 升级账/审批耗尽置账后,blocked 终态先于 pending 残留判定
@@ -289,6 +293,8 @@ export class RunDriver {
         this.persistState()
         return waitingPayload({ runId: this.runId, state: this.state, script: this.script, planStepOf: this.planStepOf, approveStep: step })
       }
+      // 派发时才消费控制消息:approve/flow/idle/terminal 边界不丢不耗,留给真正组装 prompt 的批次
+      const { inject, queued } = this.drainControls()
       const outcome = await runBatch({
         state: this.state, script: this.script, template: this.template,
         batch: batch.calls,
@@ -334,12 +340,13 @@ export class RunDriver {
       s.error = `子流程模板不存在:${route}`
       return
     }
-    const subScript = scriptViewOf(sub, { steps: sub.steps.map((x) => ({ ref: x.id })), deps: {} })
+    const { deps: subDeps } = templateDeps(sub)
+    const subScript = scriptViewOf(sub, { steps: sub.steps.map((x) => ({ ref: x.id })), deps: subDeps })
     const subState = initState(subScript, this.request, this.resolveFlowInputs(step))
     const subDriver = new RunDriver({
-      template: sub, plan: { source: 'fallback', brief: '', steps: sub.steps.map((x) => ({ ref: x.id, note: '', done: '' })), deps: {} },
+      template: sub, plan: { source: 'fallback', brief: '', steps: sub.steps.map((x) => ({ ref: x.id, note: '', done: '' })), deps: subDeps },
       runId: this.runId, request: this.request,
-      inputs: subState.inputs, state: subState, engine: this.engine,
+      inputs: subState.inputs, state: subState, engine: this.engine, parent: this.parent,
       slots: this.slots, budgets: this.budgets, sessionId: this.sessionId, workspace: this.workspace,
       store: this.store, signal: this.signal, subordinate: true,
     })

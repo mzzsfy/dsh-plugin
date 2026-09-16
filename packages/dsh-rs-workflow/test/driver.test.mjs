@@ -547,3 +547,30 @@ test('Given 终态 run When handlePost message Then 不受理', async () => {
   const accepted = driver.handlePost({ kind: 'message', text: '晚了', inject: true })
   assert.equal(accepted, false)
 })
+
+test('Given 批次运行期纠偏随后到审批边界 When reject 后重做批 Then prompt 含[运行中用户消息](边界不丢)', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const promptsSeen = []
+  let driver
+  driver = new RunDriver({
+    template: APPROVE_TPL, plan, runId: 'r-inject-3', request: '需求',
+    engine: {
+      start({ args }) {
+        promptsSeen.push(...args.calls.map((c) => ({ label: c.label, prompt: c.prompt })))
+        // 首批(a+down)运行期用户纠偏:游标未消费,须穿过 approve 边界存活
+        driver.handlePost({ kind: 'message', text: '运行期纠偏', inject: true })
+        return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { o: 'OUT' } })) }) }
+      },
+    },
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  assert.equal(driver.state.status, 'waiting_approval')
+  driver.handlePost({ kind: 'reject', by: 'user', reason: '口径未达' })
+  await driver.runSegment()
+  const redoA = promptsSeen.filter((p) => p.label.startsWith('a'))[1]
+  assert.ok(redoA, JSON.stringify(promptsSeen.map((p) => p.label)))
+  assert.ok(redoA.prompt.includes('[运行中用户消息]'), redoA.prompt)
+  assert.ok(redoA.prompt.includes('运行期纠偏'))
+})
