@@ -351,15 +351,10 @@ export function registerOrchestrator(ctx, config) {
       }),
     ]
     for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'rs-workflow orchestrator: ' + tool.name)
-    // 会话 scope dispose:清本会话 initiator/activeRuns,防 stale 闭包续跑与入口变砖
-    tctx.effect(() => {
-      const agentId = agentIdOf(tctx.agent)
-      if (agentId === '') return undefined
-      return () => {
-        registry.initiators.delete(agentId)
-        activeRuns.delete(agentId)
-      }
-    }, 'rs-workflow orchestrator: initiator dispose')
+    // 行上下文(tool context)无 agent 属性,effect 回调在此返回 undefined 触发宿主 dispose 契约异常,
+    // 导致整个 inject 回调失败、六工具全部未注册(43267fc 引入,实机定位);清理由既有路径承担:
+    // run 终态 finishRun/unregisterInitiator 与 cancel 的 finishRun 清 activeRuns;行销毁后的
+    // stale initiator 表项在下次 start 受理时被覆盖,不产生跨会话续跑。
   })
   return { rejectCounts, activeRuns }
 }

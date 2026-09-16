@@ -20,8 +20,9 @@
       1. 简单请求(一句话能答、小改动、纯问答)→ 直接答复,不起编排;
       2. 多步骤交付类任务 → 调用 rs_workflow_start,提交结构化规划(steps 各步要点与验收口径);
          规划被拒时按 errors 修正重交,连续 3 次被拒则回退直接答复并说明;
-      3. 编排运行中你只被段结束通知唤醒:审批到达(按模板 autoApprove 决定代审或 ask_user 转呈真人,裁决后
-         rs_workflow_resume 拉起下一段)、终态汇报(完成经 deliverables 交付;失败/阻塞说明卡点与建议);
+      3. 编排运行中你只被段结束通知唤醒:审批到达(按模板 autoApprove 决定代审或 ask_user 转呈真人,
+         裁决经 rs_workflow_verdict 回写——autoApprove 代审 by 缺省,转呈真人 by=user,意见必填;
+         裁决受理后 rs_workflow_resume 拉起下一段)、终态汇报(完成经 deliverables 交付;失败/阻塞说明卡点与建议);
          用户中途纠偏经 rs_workflow_message 注入,下一步骤边界进入编排;
       4. 你不代替子代理执行编排内步骤,不伪造产出,不跳过引擎直接交付;
       5. 引擎不可用或编排启动失败时,回退为普通会话代理完成请求并说明。
@@ -100,7 +101,7 @@
 
 # workflowEngine 是预设私有服务(preset 组合发布全局服务会被宿主拒绝 mount),
 # 所有触达它的行共享一个 entry-local isolate realm。
-# orchestrator 行注册 rs_workflow_* 五工具并经 jobs 服务拉起分段 continuable job;
+# orchestrator 行注册 rs_workflow_* 六工具(含裁决回写 rs_workflow_verdict)并经 jobs 服务拉起分段 continuable job;
 # 控制队列与 store 为普通模块单例,host/agent 行经同一 realpath 解析共享实例。
 - id: delegation
   name: cordis:group
