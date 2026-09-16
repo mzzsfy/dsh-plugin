@@ -475,7 +475,7 @@ test('历史输入路由:产物未变的会话跨对齐零解压(磁盘 extracts
       assert.deepEqual(second.body.inputs.map((item) => item.text), ['工作区输入'])
       // 触发一次对齐(绕过节流:新 ctx 节流 Map 为空,请求即触发)
       await new Promise((resolve) => setTimeout(resolve, 300))
-      assert.equal(readCounts2.get('s1') === undefined, true, '产物未变,重启后对齐零解压')
+      assert.equal(readCounts2.get('s1'), undefined, '产物未变,重启后对齐零解压')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
