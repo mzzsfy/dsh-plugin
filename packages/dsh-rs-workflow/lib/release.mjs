@@ -24,23 +24,11 @@ const FLOW_ID_RE = /^[a-z][a-z0-9-]*$/
 const DESC_MAX_CHARS = 200
 const DESC_FALLBACK = '流程工作流模板'
 const PRESET_NAME_PREFIX = '若水·'
-// v5 时代起点主版本:包版本不可解析时现役判定退化到此(见 PKG_MAJOR)
-const V5_BASE_MAJOR = 1
-
 let PKG_VERSION = 'unknown'
 try {
   const parsed = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8')).version
   if (typeof parsed === 'string' && parsed.length > 0) PKG_VERSION = parsed
 } catch { /* 读包失败归 unknown */ }
-
-// 语义化三元组主版本解析;缺失/不可解析返回 null
-function parseMajor(version) {
-  const m = typeof version === 'string' ? /^(\d+)(?:\.|$)/.exec(version.trim()) : null
-  return m ? Number(m[1]) : null
-}
-
-// 现役判定基线 = 当前包主版本:marker 主版本不低于它即 v5 时代产物。
-const PKG_MAJOR = parseMajor(PKG_VERSION) ?? V5_BASE_MAJOR
 
 const nonEmpty = (v) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : null)
 
@@ -69,11 +57,10 @@ function readMarker(dir) {
 
 const ownedByUs = (marker) => marker !== null && marker.package === PACKAGE_NAME
 
-// 现役 v4 产物:本包 + kind flow + 主版本不低于当前包主版本(其余本包 marker 均判过时)
-function isCurrentV4(marker) {
+// 现役产物:本包 + kind flow + 非 v4 形态(v4 目录以 flow.json5 为标志,v5 为 flow.json)
+function isCurrent(marker, dir) {
   if (!ownedByUs(marker) || marker.kind !== MARKER_KIND_FLOW) return false
-  const major = parseMajor(marker.version)
-  return major !== null && major >= PKG_MAJOR
+  return !existsSync(join(dir, 'flow.json5'))
 }
 
 const markerJson = () => JSON.stringify({ package: PACKAGE_NAME, kind: MARKER_KIND_FLOW, version: PKG_VERSION }, null, 2) + '\n'
@@ -217,7 +204,7 @@ export function sweepLegacyReleases(dshHome) {
     const marker = readMarker(dir)
     if (!ownedByUs(marker)) continue
     const id = name.slice(FLOW_PRESET_PREFIX.length)
-    if (isCurrentV4(marker)) {
+    if (isCurrent(marker, dir)) {
       kept.push(id)
       continue
     }
@@ -235,6 +222,6 @@ export function sweepLegacyReleases(dshHome) {
 export function ensureMainReleased(defaultEntry, dshHome) {
   const dest = flowPresetDest(defaultEntry.id, dshHome)
   cleanStaleStaging(dirname(dest))
-  if (existsSync(dest) && isCurrentV4(readMarker(dest))) return 'current'
+  if (existsSync(dest) && isCurrent(readMarker(dest), dest)) return 'current'
   return releaseFlowTemplate(defaultEntry, dshHome)
 }

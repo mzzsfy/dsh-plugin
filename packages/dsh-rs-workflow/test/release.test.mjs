@@ -72,10 +72,12 @@ test('Given 包内主组合骨架 When 检查 templateId 锚定串 Then 恰出�
   assert.equal(skeleton.includes('flowFile'), false)
 })
 
-test('Given marker 主版本低于包主版本(0.3.0)与不低于 When sweepLegacyReleases Then 前者删后者留', (t) => {
+test('Given v4 形态目录(flow.json5)与 v5 形态目录(flow.json) When sweepLegacyReleases Then 前者删后者留', (t) => {
   const home = tempHome(t)
   writeMarker(home, 'novel', FLOW_MARKER(LEGACY_VERSION))
+  putFile(home, 'novel', 'flow.json5', '{ id:"novel" }')
   writeMarker(home, 'default', FLOW_MARKER(PKG_VERSION))
+  putFile(home, 'default', 'flow.json', '{}')
   const result = sweepLegacyReleases(home)
   assert.equal(existsSync(flowDirOf(home, 'novel')), false)
   assert.equal(existsSync(flowDirOf(home, 'default')), true)
@@ -190,7 +192,7 @@ test('Given rs-default 与 rs-novel 均本包 flow、rs-collab 为 collab When r
   assert.deepEqual(releasedTemplateIds(home).sort(), ['default', 'novel'])
 })
 
-test('Given ensureMainReleased When 首次 Then 创建成功;再次同 entry Then current;marker 过时(v0.3.0) Then 重写', (t) => {
+test('Given ensureMainReleased When 首次 Then 创建成功;再次同 entry Then current;v4 形态目录 Then 重写为 v5', (t) => {
   const home = tempHome(t)
   const entry = { ...ENTRY, id: 'default', label: '通用默认' }
   assert.equal(ensureMainReleased(entry, home), 'created')
@@ -199,7 +201,10 @@ test('Given ensureMainReleased When 首次 Then 创建成功;再次同 entry The
   assert.equal(ensureMainReleased(entry, home), 'current')
   assert.equal(readFileSync(markerPath, 'utf8'), JSON.stringify(FLOW_MARKER(PKG_VERSION), null, 2) + '\n')
   writeMarker(home, 'default', FLOW_MARKER(LEGACY_VERSION))
+  putFile(home, 'default', 'flow.json5', '{ id:"default" }')
   assert.equal(ensureMainReleased(entry, home), 'updated')
   assert.equal(statSync(markerPath).isFile(), true)
   assert.equal(readMarkerOf(home, 'default').version, PKG_VERSION)
+  assert.equal(existsSync(join(flowDirOf(home, 'default'), 'flow.json5')), false)
+  assert.equal(existsSync(join(flowDirOf(home, 'default'), 'flow.json')), true)
 })
