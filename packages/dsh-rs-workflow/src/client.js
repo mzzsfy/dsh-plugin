@@ -142,14 +142,16 @@ window.__ModuleLoader__.load({
       return Math.round(abs / DAY) + ' 天' + suffix
     }
 
-    function Badge({ tone, children, dot }) {
-      return React.createElement('span', { className: 'rsww-badge rsww-badge--' + tone },
+    function Badge({ tone, children, dot, title }) {
+      return React.createElement('span', { className: 'rsww-badge rsww-badge--' + tone, title },
         dot ? React.createElement('span', { className: 'rsww-dot' }) : null, children)
     }
 
     function StatusBadge({ status }) {
       const meta = statusMeta(status)
-      return React.createElement(Badge, { tone: meta.tone, dot: true }, meta.label)
+      // 待审批以裁决图标提示段边界等待裁决(gui-session 修订 2)
+      const icon = status === 'waiting_approval' ? '⚖ ' : ''
+      return React.createElement(Badge, { tone: meta.tone, dot: true }, icon + meta.label)
     }
 
     function EmptyState({ title, hint }) {
@@ -221,7 +223,7 @@ window.__ModuleLoader__.load({
       else summary = safeBody.reason || ''
       return React.createElement('li', { className: 'rsww-step' + (event === 'fail' ? ' rsww-step--fail' : '') },
         React.createElement('span', { className: 'rsww-step__node' }, tag + ' · ' + kind),
-        isVerdict ? React.createElement(Badge, { tone: safeBody.by === 'main-agent' ? 'business' : 'warn' },
+        isVerdict ? React.createElement(Badge, { tone: safeBody.by === 'main-agent' ? 'business' : 'warn', title: safeBody.reason || undefined },
           safeBody.by === 'main-agent' ? '代审' : '真人') : null,
         React.createElement('span', { className: 'rsww-step__sum' },
           isVerdict ? (safeBody.kind === 'approve' ? '通过' : '驳回') + (safeBody.reason || '') : summary,
@@ -249,6 +251,7 @@ window.__ModuleLoader__.load({
         setError('')
         const outcome = await post('control', { runId: run.runId, kind, ...(extra || {}) })
         if (!outcome.ok) { setError(outcome.error); return }
+        if (outcome.data && outcome.data.ok === false) { setError('未受理(状态已变化或已被处理)'); return }
         if (kind === 'resume') setResumed(true)
       }
       const send = async () => {
@@ -256,6 +259,7 @@ window.__ModuleLoader__.load({
         setError('')
         const outcome = await post('control', { runId: run.runId, kind: 'message', text: text.trim(), inject })
         if (!outcome.ok) { setError(outcome.error); return }
+        if (outcome.data && outcome.data.ok === false) { setError('未受理(状态已变化或已被处理)'); return }
         setText('')
       }
       const verdictButtons = run.status === 'waiting_approval'
@@ -310,7 +314,7 @@ window.__ModuleLoader__.load({
           for (const e of events || []) stepEvents.push({ stepId, instance, ...e })
         }
       }
-      stepEvents.sort((a, b) => (a.at || '').localeCompare(b.at || ''))
+      stepEvents.sort((a, b) => (a.at || 0) - (b.at || 0))
       const requestText = String(view.request || '').split(/<\/?system-reminder>/i)[0].trim() || '(见完整记录)'
       const settled = TERMINAL_STATES.includes(view.status)
       // v5:待审批摘要(waiting 负载:审批步/目标/要点口径/轮次);plan.source 规划标识;warnings 徽标悬浮全文

@@ -142,6 +142,13 @@ export function gate(plan, template, expected) {
         warnings.push(err('steps', `审批步 ${id} 的耗尽出口 ${s.onExhausted} 不在剧本,耗尽兜底降级为 blocked`))
       }
     }
+
+    // 僵尸升级步:保留升级步但其审批步被裁——永不就绪且 run 会误判 completed
+    for (const id of kept) {
+      if (!escalateOnly.has(id)) continue
+      const guarded = [...kept].some((k) => { const st = byId.get(k); return st?.type === 'approve' && st.onExhausted === id })
+      if (!guarded) errors.push(err('steps', `升级步 ${id} 保留但其审批步不在剧本:升级步须与审批步同裁同留`))
+    }
   }
 
   if (explicit && stepsIn.length > 0) {
@@ -157,7 +164,7 @@ export function gate(plan, template, expected) {
   // #7 inputs 键 ⊆ 模板声明,值必须为字符串
   const declared = isObj(parsed.inputs) ? parsed.inputs : {}
   for (const [k, v] of Object.entries(inputs)) {
-    if (!(k in declared)) errors.push(err(`inputs.${k}`, `未声明的入参: ${k}`))
+    if (!Object.hasOwn(declared, k)) errors.push(err(`inputs.${k}`, `未声明的入参: ${k}`))
     else if (typeof v !== 'string') errors.push(err(`inputs.${k}`, `入参必须为字符串: ${k}`))
   }
 

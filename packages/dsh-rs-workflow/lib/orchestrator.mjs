@@ -149,7 +149,8 @@ export function registerOrchestrator(ctx, config) {
           const templates = enabledTemplates()
           const template = templates.find((t) => t.entry.id === args.templateId)
           if (template === undefined) {
-            return rejected([{ target: 'templateId', message: `模板不存在或未启用: ${args.templateId}` }])
+            // 组合/环境错误而非规划错误:不计连续拒单,hint 指向组合而非 plan
+            return { ok: false, errors: [{ target: 'templateId', message: `模板不存在或未启用: ${args.templateId}` }], hint: '本组合未启用该模板:检查组合锚定与模板启用状态,勿修改 plan' }
           }
           const outcome = gate(gatePlan, template, { expectedTemplateId })
           if (!outcome.ok) return rejected(outcome.errors)

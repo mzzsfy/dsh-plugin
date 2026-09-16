@@ -44,10 +44,19 @@ export function buildSeed(record, plan, fromStepId, inputs) {
   }
   if (fromStepId && state.steps[fromStepId]) {
     resetStep(fromStepId)
-    const idx = scriptIds.indexOf(fromStepId)
-    for (let i = idx + 1; i < scriptIds.length; i++) {
-      const s = state.steps[scriptIds[i]]
-      if (s && s.status !== 'done') resetStep(scriptIds[i])
+    // 重置集合 = fromStepId 在 plan.deps 上的全部依赖闭包(后代),非剧本数组序
+    const dependents = new Map(scriptIds.map((id) => [id, []]))
+    for (const [id, ds] of Object.entries(plan?.deps ?? {})) {
+      for (const d of Array.isArray(ds) ? ds : []) dependents.get(d)?.push(id)
+    }
+    const descendants = new Set([fromStepId])
+    for (const q = [fromStepId]; q.length > 0;) {
+      for (const next of dependents.get(q.shift()) ?? []) {
+        if (!descendants.has(next)) { descendants.add(next); q.push(next) }
+      }
+    }
+    for (const id of scriptIds) {
+      if (descendants.has(id) && state.steps[id] && state.steps[id].status !== 'done') resetStep(id)
     }
   }
   for (const id of scriptIds) {
@@ -87,6 +96,7 @@ export class RunDriver {
     this.store = store
     this.controller = new AbortController()
     this.signal = signal ?? this.controller.signal
+    this.skipRecorded = new Set()
     this.awaitingResume = false
     this.finished = false
     this.active = false
@@ -158,7 +168,8 @@ export class RunDriver {
     }
     if (event.kind !== 'message') return false
     if (typeof event.text !== 'string' || event.text === '') return false
-    this.store.step({ runId: this.runId, event: 'control', body: { kind: 'message', text: event.text, inject: !!event.inject } })
+    // controls 记摘要(≤120 字),全文进 queued(data-design controls[].text 契约)
+    this.store.step({ runId: this.runId, event: 'control', body: { kind: 'message', text: event.text.slice(0, 120), inject: !!event.inject } })
     const record = this.store.get(this.runId)
     this.store.update({ runId: this.runId, queued: [...(record.queued ?? []), event.text] })
     return true
@@ -265,6 +276,12 @@ export class RunDriver {
       }
       await yieldToLoop()
       const batch = nextBatch(this.state, this.script, this.budgets)
+      // skipped 落账:页签步骤轨迹补 skip 行(调度器纯函数置态,记账在此)
+      for (const step of this.script.steps) {
+        if (this.state.steps[step.id]?.status !== 'skipped' || this.skipRecorded.has(step.id)) continue
+        this.skipRecorded.add(step.id)
+        this.store.step({ runId: this.runId, stepId: step.id, event: 'skip', body: { reason: this.state.steps[step.id].skipReason ?? '' } })
+      }
       if (batch.kind === 'terminal') {
         // 升级账/审批耗尽置账后,blocked 终态先于 pending 残留判定
         if (this.state.terminalBlocked) {

@@ -1,4 +1,4 @@
-// store BDD(v5;契约源 docs/rsww-v5/data-design.md 存储布局与 run 记录)
+﻿// store BDD(v5;契约源 docs/rsww-v5/data-design.md 存储布局与 run 记录)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
@@ -99,7 +99,7 @@ test('Given runId 含非法字符 When start/step/get Then 抛错且无文件触
   assert.throws(() => store.start({ runId: '../evil' }), /runId 非法/)
   assert.throws(() => store.start({ runId: 'UPPER' }), /runId 非法/)
   assert.throws(() => store.get('../evil'), /runId 非法/)
-  assert.equal(readdirSync(join(dir, 'runs')).length, 0)
+  assert.equal(readdirSync(join(dir, 'runs')).filter((f) => f !== 'index.json').length, 0)
 })
 
 test('Given 不存在 runId When step/get Then 抛「运行记录不存在」', () => {

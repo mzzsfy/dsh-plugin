@@ -3,7 +3,7 @@
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
 import { reportStore, ACTIVE_STATES } from './store.mjs'
 import { registry, post, initiatorOf } from './driver/control.mjs'
-import { validateTemplate } from './template.mjs'
+import { validateTemplate, validateTemplateSet } from './template.mjs'
 import { releaseFlowTemplate, unreleaseFlowTemplate, releasedTemplateIds } from './release.mjs'
 import { SPEC_TEXT } from './spec.mjs'
 import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
@@ -199,9 +199,18 @@ function handleControl(body) {
   }
   const driver = registry.drivers.get(runId)
   if (!driver) return { ok: false }
-  if (kind === 'cancel') driver.cancel()
-  if (kind === 'pause') driver.pause()
-  if (kind === 'resume') driver.tabResume()
+  if (kind === 'cancel') {
+    store.step({ runId, event: 'control', body: { kind: 'cancel', by: 'user' } })
+    driver.cancel()
+  }
+  if (kind === 'pause') {
+    store.step({ runId, event: 'control', body: { kind: 'pause', by: 'user' } })
+    driver.pause()
+  }
+  if (kind === 'resume') {
+    driver.tabResume()
+    // resume 记账由 tabResume 落(含受理前提),此处不重复
+  }
   return { ok: true }
 }
 
@@ -297,9 +306,16 @@ export function registerBoardRoutes(ctx) {
     route('/api/rsww/release', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
-      const entry = readTemplates().find((t) => t.id === id)
+      const entries = readTemplates()
+      const entry = entries.find((t) => t.id === id)
       if (!entry) throw new Error('模板不存在:' + id)
       if (entry.enabled === false) throw new Error('模板已禁用,不可释放:' + id)
+      // 跨流程校验(spec §9):flow 引用存在性+环/深度在释放权威点执行
+      const parsedSet = entries.map((t) => {
+        try { return JSON.parse(t.json) } catch { return null }
+      }).filter((t) => t !== null)
+      const setErrors = validateTemplateSet(parsedSet).filter((e) => e.target === 'top:id' && e.message.startsWith(id + ' '))
+      if (setErrors.length > 0) throw new Error('模板集合校验失败:' + setErrors.map((e) => e.message).join(';'))
       const outcome = releaseFlowTemplate(entry)
       sendJson(res, 200, { ok: true, outcome })
     }), 'rsww release route')
@@ -316,7 +332,9 @@ export function registerBoardRoutes(ctx) {
       const body = JSON.parse(await readJsonBody(req))
       const patch = configSavePatch(body ?? {})
       const current = normalizeConfig(loadJson('config.json', undefined))
-      saveJson('config.json', { ...current, ...patch })
+      // config.json 权威节集 = slots/budgets(data-design);templates 属 templates.json 独立存储
+      const { templates: _drop, ...persistable } = current
+      saveJson('config.json', { ...persistable, ...patch })
       sendJson(res, 200, { ok: true })
     }), 'rsww config-save route')
   })

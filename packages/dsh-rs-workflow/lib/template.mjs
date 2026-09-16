@@ -29,7 +29,11 @@ export function parseTemplate(text) {
 }
 
 export function parseErrorLine(message) {
-  const m = String(message).match(/(?:^|\s)(\d+):(\d+)(?:\s|$|\))/)
+  const text = String(message)
+  // V8 JSON.parse 形态 "(line 1 column 3)" 与 "3:5" 位置形态双兼容
+  const v8 = text.match(/\bline (\d+)\b/)
+  if (v8) return Number(v8[1])
+  const m = text.match(/(?:^|\s)(\d+):(\d+)(?:\s|$|\))/)
   return m ? Number(m[1]) : null
 }
 

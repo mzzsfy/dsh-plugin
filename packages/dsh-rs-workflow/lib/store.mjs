@@ -23,7 +23,7 @@ const emptyState = () => ({ status: 'running', steps: {}, approvals: {}, escalat
 
 export function createStore({ dir = defaultDataDir(), logger = console, keepRuns = KEEP_RUNS } = {}) {
   const runsDir = join(dir, 'runs')
-  const indexPath = join(dir, 'index.json')
+  const indexPath = join(runsDir, 'index.json')
   const records = new Map()
   const index = []
   let loaded = false
@@ -51,7 +51,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
     records.set(record.runId, record)
     if (collectIndex) index.push(indexEntryOf(record))
     if (ACTIVE_STATES.has(record.status)) {
-      const at = new Date().toISOString()
+      const at = Date.now()
       record.status = 'cancelled'
       record.finishedAt = at
       if (!record.summary) record.summary = '进程重启,运行中断,可在会话页签断点续跑'
@@ -89,7 +89,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
     }
     const files = []
     try {
-      for (const name of readdirSync(runsDir)) if (name.endsWith('.json')) files.push(name)
+      for (const name of readdirSync(runsDir)) if (name.endsWith('.json') && name !== 'index.json') files.push(name)
     } catch (e) {
       warn(`runs 目录扫描失败:${e.message}`)
     }
@@ -117,7 +117,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       }
     }
     if (!indexValid || repaired) {
-      index.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      index.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
       persistIndex()
     }
   }
@@ -127,7 +127,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
   }
 
   const evictOverCapacity = () => {
-    const finished = index.filter((e) => !ACTIVE_STATES.has(e.status)).sort((a, b) => String(a.finishedAt || a.createdAt).localeCompare(String(b.finishedAt || b.createdAt)))
+    const finished = index.filter((e) => !ACTIVE_STATES.has(e.status)).sort((a, b) => (a.finishedAt ?? a.createdAt ?? 0) - (b.finishedAt ?? b.createdAt ?? 0))
     let excess = finished.length - keepRuns
     let evicted = false
     for (const entry of finished) {
@@ -145,7 +145,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       const id = runId === undefined || runId === null || runId === '' ? genRunId() : runId
       assertRunId(id)
       if (records.has(id)) throw new Error(`runId 已存在:${id}`)
-      const at = new Date().toISOString()
+      const at = Date.now()
       const record = {
         runId: id, templateId: templateId ?? '', sessionId: sessionId ?? '', workspace: workspace ?? '',
         request: request ?? '', inputs: inputs ?? {}, status: 'running', createdAt: at,
@@ -165,10 +165,10 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       assertRunId(runId)
       const record = records.get(runId)
       if (!record) throw new Error(`运行记录不存在:${runId}`)
-      const at = new Date().toISOString()
+      const at = Date.now()
       if (CONTROL_EVENTS.has(event)) {
         // controls 裁决/控制记账:v5 增 by(裁决来源)与 reason(代审必填)
-        record.controls.push({ at, kind: body?.kind, by: body?.by, reason: body?.reason, text: body?.text, inject: body?.inject })
+        record.controls.push({ seq: record.controls.length + 1, at, kind: body?.kind, by: body?.by, reason: body?.reason, text: body?.text, inject: body?.inject })
       } else {
         const key = instance ?? '-'
         const stepEvents = (record.stepsTrace[stepId] ??= {})
@@ -207,7 +207,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       // 同 update:记录缺失即收尾目标已达成,幂等无害丢弃
       if (!record) return undefined
       record.status = status
-      record.finishedAt = new Date().toISOString()
+      record.finishedAt = Date.now()
       record.summary = summary ?? ''
       persistRun(record)
       const entry = index.find((e) => e.runId === runId)

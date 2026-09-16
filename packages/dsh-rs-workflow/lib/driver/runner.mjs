@@ -31,8 +31,9 @@ export function slotCategoryOf(step, { isRedo = false, isEscalate = false } = {}
 }
 
 // 槽位解析:候选数组按 run 级游标轮换;失败换下一候选(游标+1)
+// 显式 slot 不限类别(settings-schema:缺省绑定仅在未声明 slot 时生效)
 export function resolveSlot(step, category, slots, state) {
-  const key = step.slot && category === 'normal' ? step.slot : DEFAULT_SLOT[category]
+  const key = step.slot ?? DEFAULT_SLOT[category]
   const binding = slots?.[key]
   if (binding === undefined || binding === '' || binding === null) return { slotKey: key, provider: undefined, model: undefined }
   if (!Array.isArray(binding)) return { slotKey: key, provider: binding, model: undefined }
@@ -151,6 +152,17 @@ export async function runBatch({ state, script, template, batch, ctx }) {
       store.step({ runId, stepId: meta.item.stepId, instance: meta.item.instance?.key, event: 'fail', body: { error: result.error, candidate: meta.slotKey } })
     }
     settled.push({ item: meta.item, result })
+  }
+  // 看门狗:引擎契约要求结果逐 callId 返回;缺失即引擎侧异常,记失败防调用永滞 running
+  const seenIds = new Set(results.map((r) => r.callId))
+  for (const call of calls) {
+    if (seenIds.has(call.callId)) continue
+    const meta = callMeta.get(call.callId)
+    const s = state.steps[meta.item.stepId]
+    const failTarget = meta.item.instance ? s.instances.find((x) => x.key === meta.item.instance.key) : s
+    if (failTarget) failTarget.status = 'pending'
+    store.step({ runId, stepId: meta.item.stepId, instance: meta.item.instance?.key, event: 'fail', body: { error: '引擎结果缺失该调用', candidate: meta.slotKey } })
+    settled.push({ item: meta.item, result: { callId: call.callId, ok: false, error: '引擎结果缺失该调用' } })
   }
   return { settled }
 }
