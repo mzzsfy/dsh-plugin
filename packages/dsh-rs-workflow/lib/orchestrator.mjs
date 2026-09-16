@@ -4,8 +4,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { gate } from './planner-gate.mjs'
 import { validateTemplate } from './template.mjs'
-import { startRun } from './driver/index.mjs'
-import { registry } from './driver/control.mjs'
+import { startRun, buildSeed } from './driver/index.mjs'
+import { registry, registerInitiator, unregisterInitiator } from './driver/control.mjs'
 import { reportStore } from './store.mjs'
 import { loadJson } from './storage.mjs'
 import { normalizeConfig } from './settings-schema.mjs'
@@ -67,6 +67,23 @@ export function registerOrchestrator(ctx, config) {
           done: promise.then((payload) => ({ status: 'completed', output: JSON.stringify(payload) })),
         }),
       })
+    }
+
+    // 断点续跑挂靠:board resume-from 经此回调在原会话重建种子 run(engine/parent 闭包自本域)
+    function startSeedRun(agent, record, fromStepId, inputs) {
+      const templates = enabledTemplates()
+      const template = templates.find((t) => t.entry.id === record.templateId)
+      if (template === undefined) return { ok: false, error: `模板不存在或已禁用: ${record.templateId}` }
+      const seed = buildSeed(record, record.plan, fromStepId, inputs)
+      const driver = startRun({
+        template: template.parsed, templateSet: templates.map((t) => t.parsed),
+        plan: record.plan, warnings: record.warnings ?? [],
+        request: record.request, inputs: seed.inputs, state: seed,
+        sessionId: agentIdOf(agent), workspace: agent.session?.header?.cwd ?? process.cwd(),
+        engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
+        parent: agent,
+      })
+      return { ok: true, runId: driver.runId }
     }
 
     function finishRun(agent, runId) {
@@ -147,6 +164,8 @@ export function registerOrchestrator(ctx, config) {
           })
           rejectCounts.delete(agentIdOf(agent))
           activeRuns.set(agentIdOf(agent), driver.runId)
+          // 断点续跑挂靠:本会话 agent 成为推进器,board resume-from 据此重建种子 run
+          registerInitiator(agentIdOf(agent), (record, fromStepId, inputs) => startSeedRun(agent, record, fromStepId, inputs))
           startSegmentJob(agent, driver)
           return { ok: true, runId: driver.runId, status: driver.state.status }
         },
@@ -224,6 +243,7 @@ export function registerOrchestrator(ctx, config) {
             return { ok: true, runId: args.runId, status: record.status, skipped: true, hint: '先裁决(control approve/reject 或经会话页签),再 resume 拉起下一段' }
           }
           startSegmentJob(exec.agent, driver)
+          registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
           return { ok: true, runId: args.runId, status: record.status }
         },
       }),

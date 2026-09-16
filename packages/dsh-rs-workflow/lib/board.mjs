@@ -2,8 +2,7 @@
 // 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
 import { reportStore, ACTIVE_STATES } from './store.mjs'
-import { startRun, buildSeed } from './driver/index.mjs'
-import { registry, post } from './driver/control.mjs'
+import { registry, post, initiatorOf } from './driver/control.mjs'
 import { validateTemplate } from './template.mjs'
 import { releaseFlowTemplate, unreleaseFlowTemplate, releasedTemplateIds } from './release.mjs'
 import { SPEC_TEXT } from './spec.mjs'
@@ -230,21 +229,14 @@ export function registerBoardRoutes(ctx) {
       const record = store.get(runId)
       if (!record) throw new Error('运行记录不存在:' + runId)
       if (isRunActive(runId, record)) throw new Error('运行进行中,不可续跑')
-      // 挂靠守卫同 v4:新 run 须挂靠原会话存活的推进器(orchestrator 行实例注册)
-      if (!registry.initiators.has(record.sessionId)) throw new Error('请先打开对应模式会话再重跑')
-      const entry = readTemplates().find((t) => t.id === record.templateId && t.enabled !== false)
-      if (!entry) throw new Error('模板不存在或已禁用:' + record.templateId)
-      const parsed = JSON.parse(entry.json)
+      // 挂靠守卫:新 run 由原会话的推进器(orchestrator 行注册的 initiator)重建,engine/parent 闭包在其域内
+      const start = initiatorOf(record.sessionId)
+      if (!start) throw new Error('请先打开对应模式会话再重跑')
       const fromStepId = typeof body.fromStepId === 'string' && body.fromStepId !== '' ? body.fromStepId : undefined
       const inputs = body.inputs && typeof body.inputs === 'object' ? body.inputs : undefined
-      // v5:创建 driver 但不拉段(推进责任唯一在主循环);plan 沿用原 run 记录
-      const seed = buildSeed(record, record.plan, fromStepId, inputs)
-      const driver = startRun({
-        template: parsed, plan: record.plan, warnings: record.warnings ?? [],
-        request: record.request, inputs: seed.inputs, state: seed,
-        sessionId: record.sessionId, workspace: record.workspace,
-      })
-      sendJson(res, 200, { ok: true, runId: driver.runId })
+      const outcome = start(record, fromStepId, inputs)
+      if (!outcome.ok) throw new Error(outcome.error)
+      sendJson(res, 200, { ok: true, runId: outcome.runId })
     }), 'rsww resume-from route')
     route('/api/rsww/run-remove', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))

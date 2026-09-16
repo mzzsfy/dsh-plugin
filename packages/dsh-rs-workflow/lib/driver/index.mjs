@@ -136,9 +136,9 @@ export class RunDriver {
 
   cancel() {
     if (this.finished) return
-    dbg(`cancel() invoked status=${this.state.status} active=${this.active} stack=${new Error().stack?.split('\n').slice(1, 4).join(' | ')}`)
-    if (this.state.status === 'waiting_approval' && !this.active) {
-      // 取消优先:审批等待期无活跃段,即时终态
+    dbg(`cancel() invoked status=${this.state.status} active=${this.active}`)
+    if (!this.active) {
+      // 取消优先:无活跃段(审批等待/暂停/裁决窗口)即时终态,不依赖 abort 传播
       this.finish('cancelled', CANCELLED_SUMMARY)
       return
     }

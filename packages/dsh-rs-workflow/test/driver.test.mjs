@@ -460,6 +460,17 @@ test('Given waiting_approval(无活跃段) When cancel Then 即时终态 cancell
   assert.equal(driver.finished, true)
 })
 
+test('Given paused(无活跃段) When cancel Then 即时终态 cancelled 而非滞留', () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const driver = makeDriver({ template: APPROVE_TPL, plan, engineResults: () => ({ callId: 'x', ok: true, outputs: {} }) })
+  driver.startPersist()
+  driver.state.status = 'paused'
+  driver.cancel()
+  assert.equal(driver.state.status, 'cancelled')
+  assert.equal(driver.finished, true)
+  assert.equal(driver.controller.signal.aborted, false)
+})
+
 // ── 纠偏注入边界链(v5):handlePost 记账 → 段边界 drainControls → 下段 prompt 注入 ──
 // 段边界 = 审批到达/暂停/终态;纠偏在下一段 runSegment 的 drainControls 生效。
 // 可观测的下段 = REJECTED 后的重做段(通过时无重做,审批链即收敛终态)。

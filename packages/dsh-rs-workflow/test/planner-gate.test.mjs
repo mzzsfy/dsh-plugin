@@ -104,6 +104,8 @@ test('Given plan 缺省 When gate Then ok 保底全序 note/done 空 brief=模�
   assert.equal(r.planScript.brief, '评估需求后拆解执行、审查修正、交付汇总的通用流程。')
   assert.deepEqual(r.planScript.steps.map((s) => s.ref), ['triage', 'execute', 'review', 'deliver'])
   assert.ok(r.planScript.steps.every((s) => s.note === '' && s.done === ''))
+  // 保底全序的依赖压缩闭包=剧本全集:链式模板 deps 必须保持链式,不得全空
+  assert.deepEqual(r.planScript.deps, { triage: [], execute: ['triage'], review: ['execute'], deliver: ['review'] })
 })
 
 test('Given 保底 × autoApprove=true When gate Then ok 且 warnings 含 w2', () => {

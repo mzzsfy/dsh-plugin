@@ -165,6 +165,8 @@ export function gate(plan, template, expected) {
   const scriptSteps = explicit
     ? stepsIn.map((entry) => ({ ref: entry.ref, note: typeof entry.note === 'string' ? entry.note : '', done: typeof entry.done === 'string' ? entry.done : '' }))
     : parsed.steps.filter((s) => isObj(s) && typeof s.id === 'string').map((s) => ({ ref: s.id, note: '', done: '' }))
+  // 保底路径全序保留:压缩闭包 = 剧本全集(explicit 时 kept 已是剧本)
+  if (!explicit) for (const s of scriptSteps) kept.add(s.ref)
   const deps = {}
   for (const s of scriptSteps) {
     deps[s.ref] = dedup((depsOf.get(s.ref) ?? []).flatMap((d) => compressed(depsOf, d, kept))).filter((d) => d !== s.ref)
