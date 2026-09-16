@@ -1,6 +1,11 @@
-// board — /api/rsww/* 路由薄分发(设置子域):数据权威态在自有文件存储(v5/{templates,config}.json),路由无业务状态
-// 运行时路由(runs/run/control/resume-from/run-remove)随 v4 运行时移除,仅保留设置页所需
+// board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
+// 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
+// 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
+import { reportStore, ACTIVE_STATES } from './store.mjs'
+import { startRun, buildSeed } from './driver/index.mjs'
+import { registry, post } from './driver/control.mjs'
 import { validateTemplate } from './template.mjs'
+import { releaseFlowTemplate, unreleaseFlowTemplate, releasedTemplateIds } from './release.mjs'
 import { SPEC_TEXT } from './spec.mjs'
 import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
 import { loadJson, saveJson } from './storage.mjs'
@@ -96,11 +101,12 @@ function removeTemplateById(id) {
   const next = raw.filter((t) => t.id !== id)
   if (next.length === raw.length) return { ok: false, error: '模板不存在: ' + id }
   writeTemplates(next)
-  return { ok: true }
+  // 撤下释放物(v4 同语义):删除模板即移除对应释放目录(外来目录返回 foreign 不动)
+  const outcome = unreleaseFlowTemplate(id)
+  return { ok: true, outcome }
 }
 
-function parseTemplateEntry(id, body) {
-  const json = typeof body.json === 'string' ? body.json : ''
+function parseTemplateEntry(id, body) {  const json = typeof body.json === 'string' ? body.json : ''
   let parsed
   try {
     parsed = JSON.parse(json)
@@ -168,9 +174,86 @@ function configSavePatch(body) {
   return patch
 }
 
+// ── 运行时控制(v5) ─────────────────────────────────────────────────────────
+const CONTROL_KINDS = ['message', 'cancel', 'pause', 'resume', 'approve', 'reject']
+const VERDICT_KINDS = new Set(['approve', 'reject'])
+const CONTROL_BY = new Set(['user', 'main-agent'])
+
+// 活跃判定:注册表在册或记录未终态(waiting_approval 属活跃)
+const isRunActive = (runId, record) => registry.drivers.has(runId) || (record && ACTIVE_STATES.has(record.status))
+
+function handleControl(body) {
+  const runId = typeof body.runId === 'string' ? body.runId : ''
+  const kind = typeof body.kind === 'string' ? body.kind : ''
+  if (!CONTROL_KINDS.includes(kind)) throw new Error('kind 须为 ' + CONTROL_KINDS.join('|'))
+  if (kind === 'message') {
+    if (typeof body.text !== 'string' || body.text.trim() === '') throw new Error('message 须携带非空 text')
+    const accepted = post(runId, { kind: 'message', text: body.text, inject: body.inject === true })
+    return { ok: accepted }
+  }
+  if (VERDICT_KINDS.has(kind)) {
+    // 外部裁决通道:by 必填(user|main-agent),代审(main-agent)须给出非空 reason
+    if (!CONTROL_BY.has(body.by)) throw new Error('裁决须携带 by(user|main-agent)')
+    if (body.by === 'main-agent' && (typeof body.reason !== 'string' || body.reason.trim() === '')) throw new Error('代审(main-agent)须携带非空 reason')
+    const accepted = post(runId, { kind, by: body.by, reason: typeof body.reason === 'string' ? body.reason : '' })
+    return { ok: accepted }
+  }
+  const driver = registry.drivers.get(runId)
+  if (!driver) return { ok: false }
+  if (kind === 'cancel') driver.cancel()
+  if (kind === 'pause') driver.pause()
+  if (kind === 'resume') driver.tabResume()
+  return { ok: true }
+}
+
 export function registerBoardRoutes(ctx) {
+  const store = reportStore()
   ctx.inject(['webServer'], (wctx) => {
     const route = (path, handler, name) => wctx.effect(() => wctx.webServer.register({ kind: 'exact', path, handler }), name)
+    route('/api/rsww/runs', guardedRoute(async (req, res) => {
+      sendJson(res, 200, { runs: store.list() })
+    }), 'rsww runs route')
+    route('/api/rsww/run', guardedRoute(async (req, res) => {
+      const url = new URL(req.url, 'http://localhost')
+      const runId = url.searchParams.get('id') || ''
+      const run = store.get(runId)
+      if (!run) throw new Error('运行记录不存在:' + runId)
+      sendJson(res, 200, run)
+    }), 'rsww run detail route')
+    route('/api/rsww/control', guardedRoute.post(async (req, res) => {
+      const body = JSON.parse(await readJsonBody(req))
+      sendJson(res, 200, handleControl(body ?? {}))
+    }), 'rsww control route')
+    route('/api/rsww/resume-from', guardedRoute.post(async (req, res) => {
+      const body = JSON.parse(await readJsonBody(req))
+      const runId = typeof body.runId === 'string' ? body.runId : ''
+      const record = store.get(runId)
+      if (!record) throw new Error('运行记录不存在:' + runId)
+      if (isRunActive(runId, record)) throw new Error('运行进行中,不可续跑')
+      // 挂靠守卫同 v4:新 run 须挂靠原会话存活的推进器(orchestrator 行实例注册)
+      if (!registry.initiators.has(record.sessionId)) throw new Error('请先打开对应模式会话再重跑')
+      const entry = readTemplates().find((t) => t.id === record.templateId && t.enabled !== false)
+      if (!entry) throw new Error('模板不存在或已禁用:' + record.templateId)
+      const parsed = JSON.parse(entry.json)
+      const fromStepId = typeof body.fromStepId === 'string' && body.fromStepId !== '' ? body.fromStepId : undefined
+      const inputs = body.inputs && typeof body.inputs === 'object' ? body.inputs : undefined
+      // v5:创建 driver 但不拉段(推进责任唯一在主循环);plan 沿用原 run 记录
+      const seed = buildSeed(record, record.plan, fromStepId, inputs)
+      const driver = startRun({
+        template: parsed, plan: record.plan, warnings: record.warnings ?? [],
+        request: record.request, inputs: seed.inputs, state: seed,
+        sessionId: record.sessionId, workspace: record.workspace,
+      })
+      sendJson(res, 200, { ok: true, runId: driver.runId })
+    }), 'rsww resume-from route')
+    route('/api/rsww/run-remove', guardedRoute.post(async (req, res) => {
+      const body = JSON.parse(await readJsonBody(req))
+      const runId = typeof body.runId === 'string' ? body.runId : ''
+      const record = store.has(runId) ? store.get(runId) : undefined
+      if (record && isRunActive(runId, record)) throw new Error('运行进行中,不可删除')
+      store.remove(runId)
+      sendJson(res, 200, { ok: true })
+    }), 'rsww run-remove route')
     route('/api/rsww/templates', guardedRoute(async (req, res) => {
       sendJson(res, 200, { templates: readTemplates() })
     }), 'rsww templates route')
@@ -187,6 +270,9 @@ export function registerBoardRoutes(ctx) {
       }
       sendJson(res, 200, { entry, parsed })
     }), 'rsww template detail route')
+    route('/api/rsww/released', guardedRoute(async (req, res) => {
+      sendJson(res, 200, { ids: releasedTemplateIds() })
+    }), 'rsww released route')
     route('/api/rsww/spec', guardedRoute(async (req, res) => {
       sendJson(res, 200, { spec: SPEC_TEXT })
     }), 'rsww spec route')
@@ -216,6 +302,21 @@ export function registerBoardRoutes(ctx) {
       if (!outcome.ok) throw new Error(outcome.error)
       sendJson(res, 200, { ok: true })
     }), 'rsww template-remove route')
+    route('/api/rsww/release', guardedRoute.post(async (req, res) => {
+      const body = JSON.parse(await readJsonBody(req))
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      const entry = readTemplates().find((t) => t.id === id)
+      if (!entry) throw new Error('模板不存在:' + id)
+      if (entry.enabled === false) throw new Error('模板已禁用,不可释放:' + id)
+      const outcome = releaseFlowTemplate(entry)
+      sendJson(res, 200, { ok: true, outcome })
+    }), 'rsww release route')
+    route('/api/rsww/unrelease', guardedRoute.post(async (req, res) => {
+      const body = JSON.parse(await readJsonBody(req))
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      const outcome = unreleaseFlowTemplate(id)
+      sendJson(res, 200, { ok: true, outcome })
+    }), 'rsww unrelease route')
     route('/api/rsww/config', guardedRoute(async (req, res) => {
       sendJson(res, 200, { config: normalizeConfig(loadJson('config.json', undefined)) })
     }), 'rsww config route')
