@@ -94,6 +94,7 @@ const SETTINGS_SCHEMA = z.object({
   suppressSubagentWake: z.boolean().default(true).description('子代理相关回合不通知(仅任务完成类):后台委托未收尾的回合与收尾唤醒的回合'),
   hostNotify: z.boolean().default(false).description('宿主机桌面通知:通知触发时由宿主进程弹系统级通知(osascript/notify-send/PowerShell toast);浏览器优先,本机浏览器在场(2 秒内有在途长轮询)时由浏览器呈现宿主不重复弹,离场时宿主补位'),
   hostNotifyFallback: z.boolean().default(false).description('宿主通知回退:本机浏览器在场时由浏览器呈现,离场(2 秒内无在途长轮询)时宿主补位;与总开关判定一致,任一开启即生效'),
+  folderRunningEnabled: z.boolean().default(true).description('工作区文件夹运行标记:侧边栏分组模式下,有运行中会话的文件夹组头显示运行点并给图标着色;关闭后标记整体不渲染,变更刷新页面生效'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
   imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 推送目标列表,空数组禁用 IM 通道'),

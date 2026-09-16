@@ -726,11 +726,15 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
   })
   const injected = []
   const effects = []
+  // sessions/workspaces 服务桩:文件夹运行标记的注入面(订阅桩不做任何事;
+  // 本测试 document 桩无 querySelectorAll,fold effect 装配即干净退出)
+  const serviceStub = { list: { subscribe: () => () => {}, getSnapshot: () => ({}) } }
   mod.apply({
+    get: (name) => (name === 'sessions' || name === 'workspaces' ? serviceStub : undefined),
     slots: { inject: (name, fn) => { injected.push([name, fn]) } },
     effect: (fn) => { effects.push(fn()) },
   })
-  assert.equal(effects.length, 1, '文档级样式未挂载')
+  assert.equal(effects.length, 2, '文档级样式与文件夹运行标记两个 effect 均已挂载')
   assert.equal(styleTags[0].attrs['data-plugin'], '@mzzsfy/dsh-turn-notify', '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
   assert.deepEqual(injected.map(([name]) => name), ['settings.section'], '页内通知展示已移交 dsh-toast,不再注入 shell.overlay')
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
@@ -801,7 +805,11 @@ test('分类通知开关提交失败:报错并以权威配置纠偏', async () =
 })
 
 function activate(mod) {
+  // sessions/workspaces 桩:apply 的注入面声明;fold effect 在无 querySelectorAll
+  // 的 document 桩上装配即退出,不触碰订阅
+  const serviceStub = { list: { subscribe: () => () => {}, getSnapshot: () => ({}) } }
   mod.apply({
+    get: (name) => (name === 'sessions' || name === 'workspaces' ? serviceStub : undefined),
     slots: { inject: () => {} },
     effect: (fn) => { fn() },
   })

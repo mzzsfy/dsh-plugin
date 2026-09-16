@@ -864,6 +864,55 @@ window.__ModuleLoader__.load({
       row.className = row.className.split(' ').filter((name) => name !== SESSION_HL_CLASS && name.indexOf(SESSION_HL_CLASS + '--') !== 0).join(' ')
     }
 
+    // ---- 工作区文件夹运行标记 ----
+
+    // 官方组容器 CSS module 类名后缀(哈希前缀随构建漂移,后缀稳定)与自家标记属性;
+    // 扫描合并窗口覆盖聊天流式输出的高频 DOM mutation
+    const FOLD_SECTION_SELECTOR = 'div[class$="_groupSection"]'
+    const FOLD_RUNNING_FLAG = 'data-tn-folder-running'
+    const FOLD_SCAN_DELAY_MS = 50
+
+    // 运行标记状态:官方 dsh-client-ui-workspace 分组语义的投影——
+    // 归属走 workspace 账本 sessionIds 一级映射(官方 owningGroupKey 同构,无 cwd 回退),
+    // 游离会话入末位未分组桶;可见性镜像官方 sessionVisible(subagent / 已归档 /
+    // 空白且非当前排除),组内任一可见会话 running 即该工作区运行中。
+    // ids 保工作区登记序(官方组渲染序 = 快照 items 序),供 DOM 组容器按下标对位
+    function folderRunningState(sessionsState, workspacesState) {
+      const byId = (sessionsState && sessionsState.byId) || {}
+      const ids = (sessionsState && sessionsState.ids) || []
+      const current = sessionsState ? sessionsState.current : undefined
+      const workspaces = workspacesState && Array.isArray(workspacesState.items) ? workspacesState.items : []
+      const archived = new Set((workspacesState && workspacesState.archivedSessionIds) || [])
+      const visible = (row) => Boolean(row)
+        && row.origin !== 'subagent'
+        && !archived.has(row.id)
+        && (!row.blank || row.id === current)
+      const running = new Set()
+      const accounted = new Set()
+      const workspaceIds = []
+      for (const workspace of workspaces) {
+        // 主键不做防御过滤,与官方 groupByWorkspace 同构:items 长度即组容器对位基准,
+        // 过滤会让 ids 短于容器数,恰差一时错位成「末位未分组桶」对位
+        workspaceIds.push(workspace.workspaceId)
+        const sessionIds = Array.isArray(workspace.sessionIds) ? workspace.sessionIds : []
+        for (const sessionId of sessionIds) {
+          const row = byId[sessionId]
+          if (!row) continue
+          accounted.add(sessionId)
+          if (row.running && visible(row)) running.add(workspace.workspaceId)
+        }
+      }
+      let ungrouped = false
+      for (const sessionId of ids) {
+        if (accounted.has(sessionId)) continue
+        const row = byId[sessionId]
+        if (row && row.running && visible(row)) ungrouped = true
+      }
+      return { ids: workspaceIds, running, ungrouped }
+    }
+
+    const FOLD_SWITCH_TITLE = '侧边栏会话列表按工作区分组时,有运行中会话的文件夹组头显示运行点并给文件夹图标着色,文件夹折叠与展开同样生效;游离会话所在的「未分组」组同样标记;单列表模式下无此标记。停用即全部隐藏,刷新页面生效。'
+
     // ---- 点击直达会话:页内卡片与系统弹窗共用 ----
 
     // 按通知单元激活会话:聚焦窗口并模拟点击侧边栏会话行(官方行点击即切换会话);
@@ -1019,6 +1068,7 @@ window.__ModuleLoader__.load({
       suppressSubagentWake: true,
       hostNotify: false,
       hostNotifyFallback: false,
+      folderRunningEnabled: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
       imTargets: [],
     }
@@ -1136,6 +1186,18 @@ window.__ModuleLoader__.load({
       '@media (prefers-reduced-motion: reduce) {',
       '  .tn-sess-hl { animation:none; background-color:color-mix(in srgb, var(--tn-sess-color, #4c8dff) 50%, var(--dsw-alias-bg-base, #202020) 50%); }',
       '}',
+      // 工作区文件夹运行标记:官方组容器自带 position:relative,运行点绝对定位于
+      // 组容器左缘、垂直对齐组头行中线(行高 34px 之半即 top 17px,落于组头行左内边距
+      // 区),零布局位移;图标着色让位官方 folderActive(展开含当前)态;色值取官方
+      // ongoing 运行点的实际色值(--dsh-state-ongoing 在官方仅定义于其状态点组件局部,
+      // 组容器上下文读不到,直接引用其回退源)
+      'div[class$="_groupSection"][data-tn-folder-running] { --tn-fold-running-color: var(--dsw-static-deepseek-450); }',
+      'div[class$="_groupSection"][data-tn-folder-running]::before { content:""; position:absolute; left:0; top:17px; width:5px; height:5px;',
+      '  margin-top:-2.5px; border-radius:999px; background:var(--tn-fold-running-color);',
+      '  animation:tn-fold-running-pulse 1.2s ease-in-out infinite; }',
+      'div[class$="_groupSection"][data-tn-folder-running] span[class$="_folder"]:not([class$="_folderActive"]) { color:var(--tn-fold-running-color); }',
+      '@keyframes tn-fold-running-pulse { 0%, 100% { opacity:1; } 50% { opacity:.35; } }',
+      '@media (prefers-reduced-motion: reduce) { div[class$="_groupSection"][data-tn-folder-running]::before { animation:none; } }',
     ].join('\n')
 
     function h(type, props) {
@@ -1406,6 +1468,21 @@ window.__ModuleLoader__.load({
           },
           onError: (text) => patch(text, 'error'),
         })
+      }
+
+      // 文件夹运行标记开关:乐观回填,服务端失败回滚;变更刷新页面生效(标记
+      // 注入在插件激活时按配置装配)
+      async function toggleFolderRunning(checked) {
+        const previous = config.folderRunningEnabled
+        setConfig({ ...config, folderRunningEnabled: checked })
+        try {
+          const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ folderRunningEnabled: checked }) })
+          setConfig({ ...DEFAULT_CONFIG, ...res })
+          patch('工作区文件夹运行标记已' + (res.folderRunningEnabled !== false ? '启用' : '停用') + ',刷新页面后生效')
+        } catch (error) {
+          setConfig((prev) => ({ ...prev, folderRunningEnabled: previous }))
+          patch('切换失败:' + (error && error.message ? error.message : String(error)), 'error')
+        }
       }
 
       async function requestPermission() {
@@ -1794,6 +1871,20 @@ window.__ModuleLoader__.load({
                 ' 弹窗不可用时以标题闪烁替代'),
             ]),
           ) : null,
+          activeTab === '偏好' ? h('div', { className: 'tn-card' },
+            h('div', { className: 'tn-card__head' },
+              h('span', { className: 'tn-card__title' }, '会话列表'),
+              h('span', { className: 'tn-card__sub' }, '存宿主配置,各浏览器共用'),
+            ),
+            field('运行标记', [
+              h('label', { className: 'tn-meta tn-switch', title: FOLD_SWITCH_TITLE },
+                ...switchToggle({
+                  checked: config.folderRunningEnabled !== false,
+                  onChange: (e) => void toggleFolderRunning(e.target.checked),
+                }),
+                ' 有运行中会话的文件夹显示运行点'),
+            ], '侧边栏按工作区分组时,运行中的文件夹组头显示脉冲运行点并给图标着色,折叠与展开同样生效;变更刷新页面生效。'),
+          ) : null,
           activeTab === '音效' ? [
             h('div', { className: 'tn-card' },
               h('div', { className: 'tn-card__head' },
@@ -2001,8 +2092,10 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'sessions', 'workspaces'],
       apply(ctx) {
+        const sessions = ctx.get('sessions')
+        const workspaces = ctx.get('workspaces')
         // 样式挂载宿主文档级:通知栈在面板未打开时也要有完整样式
         ctx.effect(() => {
           const style = document.createElement('style')
@@ -2014,6 +2107,80 @@ window.__ModuleLoader__.load({
         }, 'turn-notify styles')
         // 激活即轮询:通知链路不依赖设置面板是否打开过
         start()
+        // 工作区文件夹运行标记:服务快照投影 + DOM 组容器下标对位,状态变化经
+        // 订阅与 DOM 变更(合并窗口)双通道驱动;开关读宿主配置,变更刷新页面生效
+        let foldEnabled = null
+        ctx.effect(() => {
+          if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return
+          let disposed = false
+          let timer = null
+          function clearAll() {
+            document.querySelectorAll('[' + FOLD_RUNNING_FLAG + ']').forEach((section) => {
+              section.removeAttribute(FOLD_RUNNING_FLAG)
+            })
+          }
+          function scan() {
+            const sections = document.querySelectorAll(FOLD_SECTION_SELECTOR)
+            if (sections.length === 0) {
+              clearAll()
+              return
+            }
+            // 开关未决时仅清除:终态正确且停用用户刷新页面不闪现标记
+            if (foldEnabled === null) {
+              clearAll()
+              return
+            }
+            const state = foldEnabled
+              ? folderRunningState(sessions.list.getSnapshot(), workspaces.list.getSnapshot())
+              : { ids: [], running: new Set(), ungrouped: false }
+            const expected = state.ids.length
+            // 数量不变量:组容器数 = 工作区数 或 工作区数+1(末位未分组桶);
+            // 漂移(单列表模式 / 搜索态 / 官方结构变更)即清除标记,不误标
+            const ungroupedLast = sections.length === expected + 1
+            if (sections.length !== expected && !ungroupedLast) {
+              clearAll()
+              return
+            }
+            sections.forEach((section, index) => {
+              const running = index < expected ? state.running.has(state.ids[index]) : ungroupedLast && state.ungrouped
+              // 同值跳过:流式输出期间扫描高频,重复写属性触发无谓的 CSS 重匹配
+              if (running === section.hasAttribute(FOLD_RUNNING_FLAG)) return
+              if (running) section.setAttribute(FOLD_RUNNING_FLAG, '')
+              else section.removeAttribute(FOLD_RUNNING_FLAG)
+            })
+          }
+          let scheduled = false
+          const schedule = () => {
+            if (disposed || scheduled) return
+            scheduled = true
+            timer = setTimeout(() => {
+              scheduled = false
+              timer = null
+              if (!disposed) scan()
+            }, FOLD_SCAN_DELAY_MS)
+          }
+          api('/api/turn-notify/config')
+            .then((payload) => {
+              foldEnabled = payload ? payload.folderRunningEnabled !== false : true
+            })
+            .catch(() => {
+              foldEnabled = true
+            })
+            .finally(schedule)
+          const unsubscribeSessions = sessions.list.subscribe(schedule)
+          const unsubscribeWorkspaces = workspaces.list.subscribe(schedule)
+          const observer = new MutationObserver(schedule)
+          observer.observe(document.documentElement, { childList: true, subtree: true })
+          schedule()
+          return () => {
+            disposed = true
+            if (timer !== null) clearTimeout(timer)
+            observer.disconnect()
+            unsubscribeSessions()
+            unsubscribeWorkspaces()
+            clearAll()
+          }
+        }, 'turn-notify folder running mark')
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'turn-notify', order: 41, label: '消息通知' },
