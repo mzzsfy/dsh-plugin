@@ -1,6 +1,6 @@
 // board — /api/rsww/* 路由薄分发(设置子域):数据权威态在自有文件存储(v5/{templates,config}.json),路由无业务状态
 // 运行时路由(runs/run/control/resume-from/run-remove)随 v4 运行时移除,仅保留设置页所需
-import { validateTemplate } from './template-v4.mjs'
+import { validateTemplate } from './template.mjs'
 import { SPEC_TEXT } from './spec.mjs'
 import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
 import { loadJson, saveJson } from './storage.mjs'

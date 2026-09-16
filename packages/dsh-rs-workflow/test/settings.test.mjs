@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SLOT_KEYS as TEMPLATE_V4_SLOT_KEYS } from '../lib/template-v4.mjs'
+import { SLOT_KEYS as TEMPLATE_V4_SLOT_KEYS } from '../lib/template.mjs'
 import {
   BUDGET_KEYS,
   DEFAULT_BUDGETS,
@@ -94,7 +94,7 @@ test('Given 临时数据目录 When saveJson+loadJson Then 往返一致;缺失�
   }
 })
 
-test('Given settings 与 template-v4 两侧工作位键集 When 对拍 Then 一致(镜像钉住)', () => {
+test('Given settings 与 template 两侧工作位键集 When 对拍 Then 一致(镜像钉住)', () => {
   assert.deepEqual(SLOT_KEYS, TEMPLATE_V4_SLOT_KEYS)
 })
 

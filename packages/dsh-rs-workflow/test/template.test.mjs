@@ -1,7 +1,7 @@
-// template-v4 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
+// template 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseTemplate, parseErrorLine, validateTemplate, validateTemplateSet, buildSchema } from '../lib/template-v4.mjs'
+import { parseTemplate, parseErrorLine, validateTemplate, validateTemplateSet, buildSchema } from '../lib/template.mjs'
 
 const parse = (text) => { try { return parseTemplate(text) } catch (e) { return { __parseError: e.message } } }
 const targets = (errors) => errors.map((e) => e.target)
@@ -340,4 +340,15 @@ test('Given approve 步 When buildSchema Then 固定裁决契约(verdict 枚举+
   const schema = buildSchema({ type: 'approve' })
   assert.deepEqual(schema.properties.verdict, { type: 'string', enum: ['APPROVED', 'REJECTED'] })
   assert.deepEqual(schema.required, ['verdict', 'comments'])
+})
+
+test('Given 顶层 autoApprove 布尔 When validateTemplate Then 通过(v5 新增键)', () => {
+  const t = { id: 'x', label: 'X', autoApprove: true, steps: [{ id: 'a', prompt: 'p', outputs: { o: '说明' } }] }
+  assert.deepEqual(validateTemplate(t), [])
+})
+
+test('Given 顶层 autoApprove 非布尔 When validateTemplate Then 拒 top:autoApprove', () => {
+  const t = { id: 'x', label: 'X', autoApprove: 'yes', steps: [{ id: 'a', prompt: 'p', outputs: { o: '说明' } }] }
+  const errs = validateTemplate(t)
+  assert.ok(errs.some((e) => e.target === 'top:autoApprove' && e.message.includes('布尔')), JSON.stringify(errs))
 })

@@ -2,7 +2,7 @@
 // 契约源 docs/rsww-v5/data-design.md 存储布局节;board config-save 校验口径同源
 import z from '@deepseek-ai/schemastery'
 
-// 工作位键集与 lib/template-v4.mjs 的 SLOT_KEYS 互为镜像(非派生),test/settings.test.mjs 对拍钉住
+// 工作位键集与 lib/template.mjs 的 SLOT_KEYS 互为镜像(非派生),test/settings.test.mjs 对拍钉住
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
 export const BUDGET_KEYS = ['maxStepFail', 'approveRounds', 'escalateLimit']
 export const DEFAULT_BUDGETS = { maxStepFail: 2, approveRounds: 2, escalateLimit: 2 }

@@ -1,7 +1,7 @@
-// 模板静态校验器:DSL v4 唯一权威(board 保存校验唯一入口)
+// 模板静态校验器:DSL v5 唯一权威(board 保存校验唯一入口);v5 新增顶层 autoApprove 键
 
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
-const TOP_FIELDS = new Set(['id', 'label', 'description', 'inputs', 'steps'])
+const TOP_FIELDS = new Set(['id', 'label', 'description', 'inputs', 'steps', 'autoApprove'])
 const STEP_FIELDS = new Set(['id', 'label', 'slot', 'prompt', 'load', 'outputs', 'listOutputs', 'after', 'maxFail', 'for_each', 'mode', 'type', 'flow', 'input', 'target', 'rounds', 'onExhausted'])
 const ID_RE = /^[a-z][a-z0-9-]*$/
 const INPUT_NAME_RE = /^[a-z][a-zA-Z0-9]*$/
@@ -41,6 +41,7 @@ export function validateTemplate(t) {
   if (typeof t.id !== 'string' || !ID_RE.test(t.id)) errors.push(err('top:id', 'id 必填且须匹配 ^[a-z][a-z0-9-]*$'))
   if (typeof t.label !== 'string' || t.label.trim() === '') errors.push(err('top:label', 'label 必填且为非空字符串'))
   if (t.description !== undefined && typeof t.description !== 'string') errors.push(err('top:description', 'description 须为字符串'))
+  if (t.autoApprove !== undefined && typeof t.autoApprove !== 'boolean') errors.push(err('top:autoApprove', 'autoApprove 须为布尔(缺省 false;true = 审批由主循环代审)'))
 
   const declaredInputs = new Set()
   if (t.inputs !== undefined) {
