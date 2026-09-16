@@ -1,4 +1,4 @@
-// RunDriver 聚合(v5):剧本驱动;runSegment 分段推进(审批到达/暂停/终态即返回 settle 负载);
+﻿// RunDriver 聚合(v5):剧本驱动;runSegment 分段推进(审批到达/暂停/终态即返回 settle 负载);
 // 外部裁决回写(waiting_approval 即时应用,paused 入队 resume 生效);取消优先;推进责任在主循环 resume
 import { reportStore } from '../store.mjs'
 import { templateDeps } from '../planner-gate.mjs'
@@ -56,7 +56,8 @@ export function buildSeed(record, plan, fromStepId, inputs) {
       }
     }
     for (const id of scriptIds) {
-      if (descendants.has(id) && state.steps[id] && state.steps[id].status !== 'done') resetStep(id)
+      // 后代全重置(含 done):与 redo 路径语义一致——上游重跑后旧产出一律作废
+      if (descendants.has(id)) resetStep(id)
     }
   }
   for (const id of scriptIds) {
@@ -144,8 +145,9 @@ export class RunDriver {
 
   // 页签 control resume:仅标记恢复意图(不翻状态不拉段);主循环 rs_workflow_resume 执行翻转与推进
   tabResume() {
-    if (this.finished || this.state.status !== 'paused') return
+    if (this.finished || this.state.status !== 'paused') return false
     this.awaitingResume = true
+    return true
     this.store.step({ runId: this.runId, event: 'control', body: { kind: 'resume' } })
   }
 

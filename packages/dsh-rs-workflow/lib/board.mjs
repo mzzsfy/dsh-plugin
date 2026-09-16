@@ -1,4 +1,4 @@
-﻿// board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
+// board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
 // 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
 import { reportStore, ACTIVE_STATES } from './store.mjs'
@@ -208,8 +208,9 @@ function handleControl(body) {
     driver.pause()
   }
   if (kind === 'resume') {
-    driver.tabResume()
-    // resume 记账由 tabResume 落(含受理前提),此处不重复
+    // 仅 paused 受理;其余状态回状态不符(先到先得口径)
+    const accepted = driver.tabResume()
+    if (!accepted) return { ok: false, error: '状态不符:resume 仅受理 paused' }
   }
   return { ok: true }
 }
@@ -242,6 +243,10 @@ export function registerBoardRoutes(ctx) {
       const start = initiatorOf(record.sessionId)
       if (!start) throw new Error('请先打开对应模式会话再重跑')
       const fromStepId = typeof body.fromStepId === 'string' && body.fromStepId !== '' ? body.fromStepId : undefined
+      // 非法 fromStepId 显式报错(不静默退化为纯断点续跑)
+      if (fromStepId !== undefined && record.plan?.steps?.some((p) => p.ref === fromStepId) !== true) {
+        throw new Error('fromStepId 不在剧本中:' + fromStepId)
+      }
       const inputs = body.inputs && typeof body.inputs === 'object' ? body.inputs : undefined
       const outcome = start(record, fromStepId, inputs)
       if (!outcome.ok) throw new Error(outcome.error)
