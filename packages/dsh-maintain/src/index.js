@@ -14,6 +14,7 @@ import {
   buildUpgradeCommand,
   classifyUpgradeFailure,
   fetchDistTags,
+  fetchReleaseNotes,
   isValidChannelName,
   isValidRegistryBase,
   isVersionPendingRestart,
@@ -36,6 +37,9 @@ export const inject = ['webServer']
 const NAMESPACE = 'maintain'
 
 const CHECK_TIMEOUT_MS = 20 * 1000
+// 版本更新内容缓存上限:长期运行中通道切换持续产生新键,无上限则缓存无界;
+// 超限删最旧(Map 迭代序即插入序,命中不重插);导出仅供测试
+export const RELEASE_NOTES_CACHE_MAX = 20
 // 升级命令超时:client 浮条观察上限与此对拍(parity 锁定),强杀宽限另计
 export const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
@@ -226,6 +230,7 @@ export const API_PATHS = Object.freeze({
   REGISTRY_BASE: '/api/maintain/registry-base',
   UPGRADE: '/api/maintain/upgrade',
   RESTART: '/api/maintain/restart',
+  RELEASE_NOTES: '/api/maintain/release-notes',
 })
 
 // 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
@@ -396,6 +401,8 @@ export function apply(ctx) {
   let nextDueAt = null
   let restartScheduled = false
   let autoRestartScheduled = false
+  // 版本更新内容缓存:键为通道最新版原始值(未归一),值为 {url,publishedAt,body};仅成功结果入缓存
+  const releaseNotesCache = new Map()
 
   function runCheck() {
     if (checkInFlight) return checkInFlight
@@ -818,6 +825,33 @@ export function apply(ctx) {
         // 响应先发,退出调度经统一入口(与升级落定关机同一条链)
         sendJson(res, 200, { ok: true, restarting: true })
         scheduleHostExit({ detail: 'forced=' + (requestBody.force === true), delayMs: RESTART_DELAY_MS })
+      }),
+    },
+    {
+      path: API_PATHS.RELEASE_NOTES,
+      handler: route('GET', {}, async (req, res) => {
+        // 关机窗口内不发上游请求:退出延迟 2 秒小于上游超时,与 refresh 同纪律
+        if (restartScheduled) {
+          sendJson(res, 409, { error: '重启已调度,禁止查询更新内容' })
+          return
+        }
+        // 缺省恒取追踪通道最新版;上游标签值非 semver 时 buildReleaseTag 抛错归一 400
+        const version = judgeNow().channelLatest
+        if (!version) {
+          sendJson(res, 400, { error: '通道最新版未知,请先检查更新' })
+          return
+        }
+        const cached = releaseNotesCache.get(version)
+        if (cached) {
+          sendJson(res, 200, { version, url: cached.url, publishedAt: cached.publishedAt, body: cached.body })
+          return
+        }
+        const notes = await fetchReleaseNotes({ version, timeoutMs: CHECK_TIMEOUT_MS })
+        releaseNotesCache.set(version, notes)
+        while (releaseNotesCache.size > RELEASE_NOTES_CACHE_MAX) {
+          releaseNotesCache.delete(releaseNotesCache.keys().next().value)
+        }
+        sendJson(res, 200, { version, url: notes.url, publishedAt: notes.publishedAt, body: notes.body })
       }),
     },
   ]

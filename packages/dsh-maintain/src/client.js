@@ -90,6 +90,11 @@ const CSS = [
   '.dm-dialog__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
   '.dm-dialog__section { display:flex; flex-direction:column; gap:6px; padding:8px 0; border-top:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); }',
   '.dm-dialog__outcome { color:var(--dsw-alias-label-secondary); font-size:12px; line-height:1.6; }',
+  // ---- 更新内容弹窗:markdown+HTML 混排正文的轻量行渲染 ----
+  '.dm-notes { font-size:12px; line-height:1.7; white-space:pre-wrap; word-break:break-word; color:inherit; }',
+  '.dm-notes__h { font-weight:600; margin-top:8px; }',
+  '.dm-notes__li { padding-left:12px; }',
+  '.dm-notes__gap { height:6px; }',
 ].join('\n')
 
 const STATUS_URL = '/api/maintain/status'
@@ -100,6 +105,7 @@ const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
 const REGISTRY_BASE_URL = '/api/maintain/registry-base'
 const UPGRADE_URL = '/api/maintain/upgrade'
 const RESTART_URL = '/api/maintain/restart'
+const RELEASE_NOTES_URL = '/api/maintain/release-notes'
 const UPGRADE_POLL_MS = 2 * 1000
 // 升级提示浮条挂 body,脱离 React 组件树,SPA 切页不消失
 const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
@@ -122,6 +128,8 @@ const RESTART_SETTLE_DELAY_MS = 1 * 1000
 // 页面就绪探测目标:与整页刷新后浏览器实际请求的主文档同资源
 const INDEX_URL = '/'
 const NPM_VERSIONS_URL = 'https://www.npmjs.com/package/@deepseek-ai/dsh?activeTab=versions'
+// 更新内容事实源(release 上游失败时的兜底入口);host 侧 RELEASE_REPO 与此同源(parity 对拍)
+const RELEASES_PAGE_URL = 'https://github.com/deepseek-ai/deepseek-harness/releases'
 
 // abort-aware 睡眠:轮询顺序循环的拍间间隔,中止即提前唤醒
 function restartSleep(ms, controller) {
@@ -421,6 +429,13 @@ function VersionCard(props) {
       h('span', { className: 'dm-row__label' }, '版本'),
       h('span', null, '运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h(VerdictBadge, { status }),
+      // 更新内容入口:通道最新版未知(tags 未就绪)时禁用
+      h('button', {
+        className: 'dm-btn',
+        disabled: !status.channelLatest || props.restarting,
+        title: '查看 ' + (status.channelLatest || '') + ' 的更新内容',
+        onClick: props.onReleaseNotes,
+      }, '更新内容'),
       h('span', { className: 'dm-spacer' }),
       h('button', {
         className: 'dm-btn',
@@ -609,6 +624,74 @@ function UpgradeDialog(props) {
   )
 }
 
+// release 正文为 markdown+HTML 混排,轻量行渲染:剥 HTML 标签,标题加粗,列表缩进。
+// 全部经 React 文本节点输出(自动转义),外部数据不进 innerHTML;key 用行序号,静态一次性渲染
+function renderNotesBody(body) {
+  const nodes = []
+  let index = 0
+  for (const rawLine of String(body || '').split('\n')) {
+    const line = rawLine.replace(/<[^>]*>/g, '').replace(/\r$/, '')
+    const base = line.trim()
+    const key = 'n' + (index++)
+    if (base.length === 0) {
+      nodes.push(h('div', { className: 'dm-notes__gap', key }))
+    } else if (/^#{1,6}\s+/.test(base)) {
+      nodes.push(h('div', { className: 'dm-notes__h', key }, base.replace(/^#{1,6}\s+/, '')))
+    } else if (/^[-*]\s+/.test(base)) {
+      nodes.push(h('div', { className: 'dm-notes__li', key }, '• ' + base.replace(/^[-*]\s+/, '')))
+    } else {
+      nodes.push(h('div', { key }, line))
+    }
+  }
+  return nodes
+}
+
+// 更新内容弹窗:按版本拉取 GitHub release 说明,展示版本、发布时间、正文与源站链接;
+// 每次打开重新挂载(MaintainApp 条件渲染),拉取失败在窗内展示错误并提供重试与 releases 页兜底
+function ReleaseNotesDialog(props) {
+  const [state, setState] = useState({ phase: 'loading', data: null, error: null })
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let active = true
+    setState({ phase: 'loading', data: null, error: null })
+    api(RELEASE_NOTES_URL)
+      .then((data) => { if (active) setState({ phase: 'ok', data, error: null }) })
+      .catch((error) => { if (active) setState({ phase: 'error', data: null, error }) })
+    return () => { active = false }
+  }, [props.version, attempt])
+  const data = state.phase === 'ok' ? state.data : null
+  return h('div', { className: 'dm-dialog__mask', onClick: props.onClose },
+    h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
+      h('div', { className: 'dm-card__title' }, '更新内容(' + (data ? data.version : props.version) + ')'),
+      state.phase === 'loading' ? h('div', { className: 'dm-meta' }, '加载中…') : null,
+      state.phase === 'error'
+        ? h('div', { className: 'dm-notice dm-notice--error' },
+            '拉取失败:' + (state.error && state.error.message ? state.error.message : String(state.error)))
+        : null,
+      state.phase === 'error'
+        ? h('div', { className: 'dm-row' },
+            h('button', { className: 'dm-btn', onClick: () => setAttempt(attempt + 1) }, '重试'),
+            h('a', { className: 'dm-link', href: RELEASES_PAGE_URL, target: '_blank', rel: 'noreferrer' }, 'GitHub 全部版本说明'))
+        : null,
+      data
+        ? h('div', { className: 'dm-row' },
+            h('span', { className: 'dm-meta' }, '发布于 ' + (fmtTime(Date.parse(data.publishedAt)) || '未知时间')),
+            data.url ? h('a', { className: 'dm-link', href: data.url, target: '_blank', rel: 'noreferrer' }, '在 GitHub 查看') : null,
+          )
+        : null,
+      data
+        ? (data.body.length > 0
+            ? h('div', { className: 'dm-notes' }, renderNotesBody(data.body))
+            : h('div', { className: 'dm-meta' }, '该版本无发布说明'))
+        : null,
+      h('div', { className: 'dm-row' },
+        h('span', { className: 'dm-spacer' }),
+        h('button', { className: 'dm-btn', onClick: props.onClose }, '关闭'),
+      ),
+    ),
+  )
+}
+
 function MaintainApp() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
@@ -616,6 +699,8 @@ function MaintainApp() {
   const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false)
   const [restartArmed, setRestartArmed] = useState(false)
   const [restarting, setRestarting] = useState(false)
+  // 更新内容弹窗的版本:非 null 即打开;重启等待态随 upgradeDialogOpenLive 同款派生关闭
+  const [notesVersion, setNotesVersion] = useState(null)
   // 重启探测的跨拍状态快照 {lost,pid,bootAt,readyStreak}:lost 与 readyStreak 随拍更新,
   // pid/bootAt 保持确认时刻基线不可被拍结果覆盖,否则重启判定恒 false;null=未在等待态
   const restartPrevRef = useRef(null)
@@ -920,6 +1005,7 @@ function MaintainApp() {
   const upgradeDialogOpenLive = upgradeDialogOpen && !upgradeUnavailable
   // 活跃工作计数:重启确认态显示计数并发 force 越过门控
   const activeWorkTotal = status !== null && status.activeWork ? status.activeWork.total : 0
+  const notesOpenLive = notesVersion !== null && !restarting
 
   return h('div', { className: 'dm-panel' },
     h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
@@ -941,6 +1027,7 @@ function MaintainApp() {
       onChannel,
       onTemplateSave,
       onUpgrade: () => { setRestartArmed(false); setUpgradeDialogOpen(true) },
+      onReleaseNotes: () => { setRestartArmed(false); setNotesVersion(status.channelLatest) },
       onRestart,
     }),
     h(SettingsCard, {
@@ -956,6 +1043,10 @@ function MaintainApp() {
       status,
       onCancel: () => setUpgradeDialogOpen(false),
       onConfirm: onUpgrade,
+    }) : null,
+    notesOpenLive ? h(ReleaseNotesDialog, {
+      version: notesVersion,
+      onClose: () => setNotesVersion(null),
     }) : null,
   )
 }

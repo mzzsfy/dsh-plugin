@@ -188,8 +188,34 @@ export function isValidRegistryBase(base) {
   }
 }
 
-// dist-tags 响应体上限:正常响应远小于此;流式累计读取,超限即断
-const DIST_TAGS_MAX_BYTES = 64 * 1024
+// 上游响应体上限:正常响应远小于此;流式累计读取,超限即断(dist-tags 与 release 共用)
+const UPSTREAM_BODY_MAX_BYTES = 64 * 1024
+
+// 上游响应体流式限量读取:恶意/异常源的超大响应体在传输中途即被断开,不整量入内存。
+// json() 对 BOM 有容忍;text 路径显式剥除保持等价
+async function readBodyTextLimited(response) {
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > UPSTREAM_BODY_MAX_BYTES) throw new Error('响应超过上限')
+      chunks.push(value)
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(merged).replace(/^\uFEFF/, '')
+}
 
 // 拉取 dist-tags 轻量端点;fetchImpl 注入便于单测,错误一律抛出由调用方决定保留上次结果。
 // redirect 拒绝跟随:镜像 302 跳内网/他源属配置外行为,直接失败交调用方展示。
@@ -203,29 +229,7 @@ export async function fetchDistTags({ registryBase, fetchImpl = fetch, timeoutMs
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!response.ok) throw new Error('registry HTTP ' + response.status)
-  // 流式累计限量:恶意/异常源的超大响应体在传输中途即被断开,不整量入内存
-  const reader = response.body.getReader()
-  const chunks = []
-  let total = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > DIST_TAGS_MAX_BYTES) throw new Error('dist-tags 响应超过上限')
-      chunks.push(value)
-    }
-  } finally {
-    await reader.cancel().catch(() => {})
-  }
-  const merged = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    merged.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  // json() 对 BOM 有容忍;text 路径显式剥除保持等价
-  const text = new TextDecoder().decode(merged).replace(/^\uFEFF/, '')
+  const text = await readBodyTextLimited(response)
   let body
   try {
     body = JSON.parse(text)
@@ -282,4 +286,68 @@ export async function resolveHostVersion({ execPath, platform, argv1, readFileIm
     }
   }
   return null
+}
+
+// 版本更新内容事实源:npm 清单无 readme 字段(实测),官方 GitHub Releases 承载,
+// tag 命名 dsh-v<版本> 与 TARGET_PACKAGE 同为该包的固定事实,随包常量维护。
+export const RELEASE_API_BASE = 'https://api.github.com'
+export const RELEASE_REPO = 'deepseek-ai/deepseek-harness'
+export const RELEASE_TAG_PREFIX = 'dsh-v'
+
+// 发布标签构建:版本必须为合法 semver(远端数据回流 URL 前的白名单校验),首尾空白归一
+export function buildReleaseTag(version) {
+  const text = typeof version === 'string' ? version.trim() : ''
+  if (!parseSemver(text)) throw new Error('版本不是合法 semver: ' + version)
+  return RELEASE_TAG_PREFIX + text
+}
+
+export function buildReleaseNotesUrl(version) {
+  return RELEASE_API_BASE + '/repos/' + RELEASE_REPO + '/releases/tags/' + encodeURIComponent(buildReleaseTag(version))
+}
+
+// html_url 白名单:远端字段回流为 <a href> 前单点拦截,scheme/域/路径三重校验。
+// host 大小写经 URL 归一;路径须为 /<repo>/releases 或其子路径(含分隔符边界,防 /releases-evil 绕过)
+function isOfficialReleaseUrl(value) {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'https:' || parsed.host !== 'github.com') return false
+    const prefix = '/' + RELEASE_REPO + '/releases'
+    return parsed.pathname === prefix || parsed.pathname.startsWith(prefix + '/')
+  } catch {
+    return false
+  }
+}
+
+// release 响应校验:正文是核心,链接与发布时间为辅助,缺失或未过白名单降级 null 交调用方隐藏入口
+export function parseReleaseNotes(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('release 响应不是 JSON 对象')
+  return {
+    url: typeof payload.html_url === 'string' && isOfficialReleaseUrl(payload.html_url) ? payload.html_url : null,
+    publishedAt: typeof payload.published_at === 'string' && payload.published_at.length > 0 ? payload.published_at : null,
+    body: typeof payload.body === 'string' ? payload.body : '',
+  }
+}
+
+// 按版本拉取 GitHub release 更新内容;fetchImpl 注入便于单测,错误一律抛出由调用方归一。
+// GitHub API 要求显式 User-Agent;redirect 拒绝跟随与 fetchDistTags 同纪律
+export async function fetchReleaseNotes({ version, fetchImpl = fetch, timeoutMs }) {
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('timeoutMs 必须为正数')
+  const response = await fetchImpl(buildReleaseNotesUrl(version), {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-maintain' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) {
+    throw new Error(response.status === 404
+      ? '未找到该版本的发布说明(该版本可能未发布 Release)'
+      : 'GitHub HTTP ' + response.status)
+  }
+  const text = await readBodyTextLimited(response)
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    throw new Error('release 响应不是合法 JSON')
+  }
+  return parseReleaseNotes(body)
 }

@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, collectActiveWork } from '../src/index.js'
+import { apply, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, RELEASE_NOTES_CACHE_MAX, collectActiveWork } from '../src/index.js'
 import { rmSync, readFileSync } from 'node:fs'
 
 // 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
@@ -137,10 +137,10 @@ const realSleep = (ms) => new Promise((resolve) => {
   setImmediate(spin)
 })
 
-test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
+test('挂载:9 条路由注册,启动检查后快照就绪', async () => {
   const { ctx, routes } = makeCtx()
   apply(ctx)
-  assert.equal(routes.size, 8)
+  assert.equal(routes.size, 9)
   assert.deepEqual(
     [...routes.keys()].sort(),
     [
@@ -148,6 +148,7 @@ test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
       '/api/maintain/poll-interval',
       '/api/maintain/refresh',
       '/api/maintain/registry-base',
+      '/api/maintain/release-notes',
       '/api/maintain/restart',
       '/api/maintain/status',
       '/api/maintain/upgrade',
@@ -156,16 +157,7 @@ test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
   )
   // 启动检查是异步链(mock fetch 微任务 + resolveHostVersion 真实文件读),
   // 轮询等快照落定后再断言
-  let snapshotReady = false
-  for (let waited = 0; waited < 5000; waited += 25) {
-    const poll = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
-    if (poll.payload.checkedAt !== null) {
-      snapshotReady = true
-      break
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  assert.ok(snapshotReady, '启动检查 5 秒内未完成')
+  assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
   const res = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
   assert.equal(res.status, 200)
   assert.equal(res.payload.packageName, '@deepseek-ai/dsh')
@@ -209,8 +201,10 @@ test('interval dispose 回归:fiber 停用后轮询 tick 失效(防双 interval 
 test('方法守卫:全部路由错误方法一律 405', async () => {
   const { ctx, routes } = makeCtx()
   apply(ctx)
+  // GET 端点(status/release-notes)以 POST 拒绝,其余以 GET 拒绝
+  const readPaths = ['/api/maintain/status', '/api/maintain/release-notes']
   for (const path of routes.keys()) {
-    const expected = path === '/api/maintain/status' ? 'POST' : 'GET'
+    const expected = readPaths.indexOf(path) >= 0 ? 'POST' : 'GET'
     const res = await call(routes, path, makeReq({ method: expected }))
     assert.equal(res.status, 405, path + ' 应拒绝 ' + expected)
   }
@@ -891,4 +885,213 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   }
   assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=triggered/.test(text)), true, '升级触发须留审计行')
   assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=(ok|failed) durationMs=[0-9]+ code=/.test(text)), true, '升级落定须留审计行')
+})
+
+// ---- release notes 路由 ----
+
+const RELEASE_PATH = '/api/maintain/release-notes'
+const RELEASE_JSON = {
+  html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v9.9.9',
+  published_at: '2026-09-10T03:09:00Z',
+  body: '## 更新内容\n\n- 新功能',
+}
+
+// dist-tags 与 GitHub release 双上游分流:registry 路径回 tags 形态,GitHub 路径回 release 形态
+function installDualUpstream({ releasePayload, requestedUrls, releaseThrows }) {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    const text = String(url)
+    if (text.includes('api.github.com')) {
+      requestedUrls.push(text)
+      if (releaseThrows) throw new Error(releaseThrows)
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => {
+            const chunks = [new TextEncoder().encode(JSON.stringify(releasePayload))]
+            return {
+              read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true, value: undefined }),
+              cancel: async () => {},
+            }
+          },
+        },
+      }
+    }
+    void options
+    return tagsBody(MOCK_TAGS)
+  }
+  return () => { globalThis.fetch = originalFetch }
+}
+
+async function waitSnapshotReady(routes) {
+  for (let waited = 0; waited < 5000; waited += 25) {
+    const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (poll && poll.checkedAt !== null) return poll
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return null
+}
+
+test('release-notes:默认取通道最新版,200 返回发布说明', async () => {
+  const requestedUrls = []
+  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls })
+  try {
+    const { ctx, routes } = makeCtx({ services: { hostVersionProbe: () => Promise.resolve('5.4.3') } })
+    apply(ctx)
+    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+    const res = await get(routes, RELEASE_PATH)
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.payload, {
+      version: '9.9.9',
+      url: RELEASE_JSON.html_url,
+      publishedAt: RELEASE_JSON.published_at,
+      body: RELEASE_JSON.body,
+    })
+    assert.equal(requestedUrls.length, 1)
+    assert.ok(requestedUrls[0].endsWith('/releases/tags/dsh-v9.9.9'), '默认版本必须取通道 latest 的目标')
+  } finally {
+    restore()
+  }
+})
+
+test('release-notes:缓存生效,切通道后按新通道版本拉取', async () => {
+  const requestedUrls = []
+  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls })
+  try {
+    const { ctx, routes } = makeCtx()
+    apply(ctx)
+    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+    const first = await get(routes, RELEASE_PATH)
+    assert.equal(first.status, 200)
+    assert.equal(first.payload.version, '9.9.9')
+    assert.ok(requestedUrls[0].endsWith('/releases/tags/dsh-v9.9.9'))
+    const again = await get(routes, RELEASE_PATH)
+    assert.equal(again.status, 200)
+    assert.equal(requestedUrls.length, 1, '同版本两次调用必须命中缓存,上游仅一次')
+    const switched = await post(routes, '/api/maintain/channel', { channel: 'next' })
+    assert.equal(switched.status, 200)
+    assert.equal(switched.payload.channelLatest, '10.0.0')
+    const after = await get(routes, RELEASE_PATH)
+    assert.equal(after.status, 200)
+    assert.equal(after.payload.version, '10.0.0')
+    assert.equal(requestedUrls.length, 2, '通道版本变化必须重新拉取')
+    assert.ok(requestedUrls[1].endsWith('/releases/tags/dsh-v10.0.0'))
+  } finally {
+    restore()
+  }
+})
+
+test('release-notes:tags 未就绪且无 version 400 提示先检查更新', async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
+  try {
+    const { ctx, routes } = makeCtx()
+    apply(ctx)
+    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+    const res = await get(routes, RELEASE_PATH)
+    assert.equal(res.status, 400)
+    assert.match(res.payload.error, /检查更新/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('release-notes:通道标签非 semver,构建上游标签前归一 400', async () => {
+  const requestedUrls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    const text = String(url)
+    if (text.includes('api.github.com')) {
+      requestedUrls.push(text)
+      return { ok: true, status: 200, body: tagsBody(RELEASE_JSON).body }
+    }
+    return tagsBody({ latest: 'banana' })
+  }
+  try {
+    const { ctx, routes } = makeCtx()
+    apply(ctx)
+    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+    const res = await get(routes, RELEASE_PATH)
+    assert.equal(res.status, 400)
+    assert.match(res.payload.error, /semver/, '病理标签必须在触达上游前被 semver 白名单拦截')
+    assert.equal(requestedUrls.length, 0, '拒绝路径不得触达上游')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('release-notes:重启调度窗口内 409,不发起上游请求', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const requestedUrls = []
+  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls })
+  try {
+    const { ctx, routes } = makeCtx({ appExit: () => {} })
+    apply(ctx)
+    const restart = await post(routes, '/api/maintain/restart')
+    assert.equal(restart.status, 200)
+    const res = await get(routes, RELEASE_PATH)
+    assert.equal(res.status, 409, '关机窗口内查询更新内容必须拒绝')
+    assert.match(res.payload.error, /重启已调度/)
+    assert.equal(requestedUrls.length, 0, '关机窗口内不得发起上游请求')
+    t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  } finally {
+    restore()
+  }
+})
+
+test('release-notes:缓存超限 FIFO 淘汰,最早键被逐出', async () => {
+  // N+1 个通道各配独立版本:逐个切换并查看,第 N+1 键入缓存时第 1 键必被淘汰;
+  // 回访第 1 通道触发重新拉取,回访末位通道命中缓存不再拉取
+  const channels = {}
+  for (let i = 1; i <= RELEASE_NOTES_CACHE_MAX + 1; i += 1) channels['c' + i] = '1.0.' + i
+  const requestedUrls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('api.github.com')) {
+      requestedUrls.push(String(url))
+      return tagsBody(RELEASE_JSON)
+    }
+    return tagsBody(channels)
+  }
+  try {
+    const { ctx, routes } = makeCtx()
+    apply(ctx)
+    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+    for (const [name, version] of Object.entries(channels)) {
+      const switched = await post(routes, '/api/maintain/channel', { channel: name })
+      assert.equal(switched.status, 200)
+      const res = await get(routes, RELEASE_PATH)
+      assert.equal(res.status, 200)
+      assert.equal(res.payload.version, version)
+    }
+    assert.equal(requestedUrls.length, RELEASE_NOTES_CACHE_MAX + 1, '每通道版本独立,各拉取一次')
+    const first = Object.keys(channels)[0]
+    const last = Object.keys(channels)[RELEASE_NOTES_CACHE_MAX]
+    const backToFirst = await post(routes, '/api/maintain/channel', { channel: first })
+    assert.equal(backToFirst.status, 200)
+    await get(routes, RELEASE_PATH)
+    assert.equal(requestedUrls.length, RELEASE_NOTES_CACHE_MAX + 2, '最早键已被淘汰,回访必须重新拉取')
+    const backToLast = await post(routes, '/api/maintain/channel', { channel: last })
+    assert.equal(backToLast.status, 200)
+    await get(routes, RELEASE_PATH)
+    assert.equal(requestedUrls.length, RELEASE_NOTES_CACHE_MAX + 2, '未淘汰键回访必须命中缓存')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('release-notes:上游失败 400 带错误信息', async () => {
+  const requestedUrls = []
+  const restore = installDualUpstream({ releasePayload: RELEASE_JSON, requestedUrls, releaseThrows: 'ECONNRESET' })
+  try {
+    const { ctx, routes } = makeCtx()
+    apply(ctx)
+    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+    const res = await get(routes, RELEASE_PATH)
+    assert.equal(res.status, 400)
+    assert.match(res.payload.error, /ECONNRESET/)
+  } finally {
+    restore()
+  }
 })

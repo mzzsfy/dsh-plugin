@@ -140,6 +140,7 @@ test('parity: client API 路径常量与 host 路由清单逐条一致', () => {
     REGISTRY_BASE: 'REGISTRY_BASE_URL',
     UPGRADE: 'UPGRADE_URL',
     RESTART: 'RESTART_URL',
+    RELEASE_NOTES: 'RELEASE_NOTES_URL',
   }
   for (const [hostKey, hostPath] of Object.entries(API_PATHS)) {
     assert.equal(extractConst(CLIENT_KEY_BY_HOST_KEY[hostKey]), hostPath, 'API 路径漂移: ' + hostKey)
@@ -168,6 +169,13 @@ test('parity: 升级观察上限覆盖宿主重试链上限(防抢跑转状态�
 
 test('parity: npm 版本页链接与追踪包名同源', () => {
   assert.ok(extractConst('NPM_VERSIONS_URL').includes(TARGET_PACKAGE), 'NPM_VERSIONS_URL 应包含 TARGET_PACKAGE 字面量')
+})
+
+// release 更新内容事实源在 GitHub Releases:client 兜底链接与 host 拉取仓库必须同源
+import { RELEASE_REPO } from '../src/core.mjs'
+
+test('parity: GitHub releases 兜底链接与 host 拉取仓库同源', () => {
+  assert.equal(extractConst('RELEASES_PAGE_URL'), 'https://github.com/' + RELEASE_REPO + '/releases')
 })
 
 test('parity: 落定补查宽限覆盖宿主自动重启调度延迟', () => {
