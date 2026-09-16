@@ -158,23 +158,13 @@ test('历史搜索:条目缺 text 按空串参与匹配,仅命中空查询', () 
   assert.deepEqual(filterHistoryInputs(entries, 'a'), [entries[1]])
 })
 
-// ── fork 错误文案与可用性 ──
+// ── fork 错误文案 ──
 
 test('fork 错误文案:未完成轮/挂载失败/未知码分通道', () => {
   assert.equal(forkFailureText('session/fork-unavailable'), '该轮尚未完成,不可分叉')
   assert.equal(forkFailureText('session/workspace-attach-failed'), '分叉成功,但挂载到工作区失败')
   assert.equal(forkFailureText('gateway/internal'), '分叉失败: gateway/internal')
   assert.equal(forkFailureText(undefined), '分叉失败: 未知错误')
-})
-
-test('fork 可用轮集合:仅收集存在 turn/end 的轮号', () => {
-  assert.deepEqual(forkAvailable([
-    { turn: 0, endSeq: 4 },
-    { turn: 1, endSeq: 9 },
-    { turn: 3, endSeq: 20 },
-  ]), [0, 1, 3])
-  assert.deepEqual(forkAvailable([]), [])
-  assert.deepEqual(forkAvailable(undefined), [])
 })
 
 // ── 巨产物跳过线:宿主版本黑名单 ──

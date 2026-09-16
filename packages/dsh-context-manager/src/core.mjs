@@ -128,18 +128,3 @@ export function forkFailureText(code) {
   if (code === 'session/workspace-attach-failed') return '分叉成功,但挂载到工作区失败'
   return '分叉失败: ' + String(code ?? '未知错误')
 }
-
-/**
- * 可分叉轮号集合:从 turn/end 记录列表提取轮号(升序去重)。
- * 空列表 = 会话无可分叉点(宿主 fork 要求至少一个已完成的 turn)。
- * @param turnEnds - { turn, endSeq } 记录列表,形态由消息投影归一化
- */
-export function forkAvailable(turnEnds) {
-  const list = Array.isArray(turnEnds) ? turnEnds : []
-  const turns = new Set()
-  for (const item of list) {
-    const turn = item && item.turn
-    if (Number.isInteger(turn)) turns.add(turn)
-  }
-  return [...turns].sort((a, b) => a - b)
-}

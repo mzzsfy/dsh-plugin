@@ -82,3 +82,54 @@ test('过滤:损坏文件与 prompts.json 不进结果', async (t) => {
   assert.equal(caches.length, 1)
   assert.equal(caches[0].cwd, 'C:\\ok')
 })
+
+// ── 文件名卫生与常用提示词读写 ──
+
+const { readWorkspaceCache, writeWorkspaceCache, readPrompts, writePrompts } = await import('../src/history-cache.mjs')
+
+test('盘根工作区:C:\\ 读写不抛且文件名不含冒号(win32 非法字符)', async (t) => {
+  const dir = await makeDir(t)
+  await writeWorkspaceCache(dir, 'C:\\', { entries: [{ sid: 's1', text: '盘根输入' }], extracts: {} })
+  const names = await readdir(dir)
+  assert.equal(names.length, 1)
+  assert.equal(names[0].includes(':'), false, '盘根 leaf 不得携带冒号')
+  const back = await readWorkspaceCache(dir, 'C:\\')
+  assert.equal(back.entries[0].text, '盘根输入')
+})
+
+test('root 回退:纯符号工作区路径的缓存文件落 root-<hash>.json', async (t) => {
+  const dir = await makeDir(t)
+  await writeWorkspaceCache(dir, '?#?', { entries: [], extracts: {} })
+  const names = await readdir(dir)
+  assert.equal(names.length, 1)
+  assert.match(names[0], /^root-[0-9a-f]{8}\.json$/)
+})
+
+test('readPrompts 归一化:非法形状回退空数组,非字符串 text 与缺 at 条目被清洗', async (t) => {
+  const dir = await makeDir(t)
+  // 文件缺失 → 空数组
+  assert.deepEqual(await readPrompts(dir), [])
+  // 损坏 JSON → 空数组
+  await writeFile(join(dir, 'prompts.json'), '{nope', 'utf8')
+  assert.deepEqual(await readPrompts(dir), [])
+  // 非数组 items → 空数组
+  await writeFile(join(dir, 'prompts.json'), JSON.stringify({ items: 'bogus' }), 'utf8')
+  assert.deepEqual(await readPrompts(dir), [])
+  // 条目清洗:非字符串/空 text 剔除,at 非数归 0
+  await writeFile(join(dir, 'prompts.json'), JSON.stringify({
+    items: [
+      { text: '保留', at: 7 },
+      { text: 42, at: 8 },
+      { text: '', at: 9 },
+      null,
+      { text: '缺时间' },
+    ],
+  }), 'utf8')
+  assert.deepEqual(await readPrompts(dir), [
+    { text: '保留', at: 7 },
+    { text: '缺时间', at: 0 },
+  ])
+  // writePrompts 落盘后回读同值
+  await writePrompts(dir, [{ text: '落盘', at: 3 }])
+  assert.deepEqual(await readPrompts(dir), [{ text: '落盘', at: 3 }])
+})

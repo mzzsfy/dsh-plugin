@@ -10,7 +10,8 @@ import { mkdir, readFile, readdir, stat, writeFile, rename } from 'node:fs/promi
 import { dirname, join, sep } from 'node:path'
 
 function workspaceFile(dir, cwd) {
-  const leaf = cwd.split(/[\\/]/).filter(Boolean).pop() || 'root'
+  // 末段取字母数字段(冒号等非法文件名字符剔除):盘根 C:\ 末段 'C:' 直出即非法文件名
+  const leaf = (cwd.match(/[A-Za-z0-9\u4e00-\u9fa5]+/g) || []).pop() || 'root'
   const hash = createHash('sha1').update(cwd).digest('hex').slice(0, 8)
   return join(dir, `${leaf}-${hash}.json`)
 }

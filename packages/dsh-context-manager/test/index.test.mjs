@@ -20,6 +20,7 @@ const indexModule = await import('../src/index.js').catch((error) => {
 })
 const apply = indexModule.apply
 const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : []
+const MESSAGES = indexModule.MESSAGES
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const {
@@ -36,7 +37,13 @@ const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cac
 // 防止夹具工作区经默认路径(~/.dsh/historyPrompt)泄漏进真实用户目录
 const sharedCacheDir = mkdtempSync(path.join(tmpdir(), 'cx-hist-shared-'))
 process.env.DSH_HISTORY_CACHE_DIR = sharedCacheDir
+// 各 makeCtx 的 effect disposer 统一卸载:启动对齐定时器不可清理则套件尾部
+// 固定多等 30s(事件循环被 timer 拖住)
+const effectDisposers = []
 test.after(() => {
+  for (const disposer of effectDisposers) {
+    try { disposer() } catch { /* 逐个卸载,单个失败不阻断其余清理 */ }
+  }
   rmSync(sharedCacheDir, { recursive: true, force: true })
 })
 
@@ -45,13 +52,18 @@ function makeCtx({
   agents,
   sessionPersistence,
   settingsValue,
+  settingsGetError,
   readSessions,
 }) {
   const routes = []
   const pendingInjects = []
   const settingsState = { value: settingsValue }
   const settingsService = {
-    get: () => settingsState.value,
+    // settingsGetError 注入读取期故障:验证 respondError 的系统级错误收敛分支
+    get: () => {
+      if (settingsGetError) throw settingsGetError
+      return settingsState.value
+    },
     register: () => ({ resolved: undefined }),
     // 宿主 update 为异步串行:合并进微任务队列后生效,读旧值发生在 flush 前
     update: (ns, patch) => new Promise((resolve) => queueMicrotask(() => {
@@ -76,7 +88,12 @@ function makeCtx({
     sessionQuery,
   }
   const base = {
-    effect: (fn) => fn(),
+    // disposer 收集进全局清单,test.after 统一执行:启动对齐的 30s 延迟定时器
+    // 不清理则套件尾部固定多等 30s(无 force-exit 时事件循环被 timer 拖住)
+    effect: (fn) => {
+      const disposer = fn()
+      if (typeof disposer === 'function') effectDisposers.push(disposer)
+    },
     inject: (_deps, fn) => { pendingInjects.push(fn) },
     get: (name) => ({ agents, sessionPersistence, settings: settingsService }[name]),
     logger: { warns: [], warn(message) { this.warns.push(message) }, infos: [], info(message) { this.infos.push(message) } },
@@ -186,6 +203,19 @@ async function postJson(handlers, routePath, body) {
   const res = response()
   const done = handlers.get(routePath)(req, res)
   req.emit('data', Buffer.from(JSON.stringify(body), 'utf8'))
+  req.emit('end')
+  await done
+  return res
+}
+
+// POST 原始体夹具:发非法 JSON 用
+async function postRaw(handlers, routePath, raw) {
+  const req = new EventEmitter()
+  req.method = 'POST'
+  req.url = routePath
+  const res = response()
+  const done = handlers.get(routePath)(req, res)
+  req.emit('data', Buffer.from(raw, 'utf8'))
   req.emit('end')
   await done
   return res
@@ -626,6 +656,77 @@ test('常用提示词:超长截断、上限裁剪、空 text 拒绝', skipMissin
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+// ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
+
+test('横切守卫:5 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+    const getOnly = '/api/context/inputs'
+    const postOnly = '/api/context/prompts/toggle'
+    const dualMethods = ['/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled']
+    // GET-only 路由:POST 拒绝
+    const inputsPost = response()
+    await handlers.get(getOnly)(request('s1'), inputsPost)
+    assert.equal(inputsPost.status, 405)
+    // POST-only 路由:GET 拒绝
+    const toggleGet = response()
+    await handlers.get(postOnly)(getRequest2(postOnly, 'GET'), toggleGet)
+    assert.equal(toggleGet.status, 405)
+    // 双方法路由(GET+POST):白名单外方法拒绝
+    for (const routePath of dualMethods) {
+      const res = response()
+      await handlers.get(routePath)(getRequest2(routePath, 'PUT'), res)
+      assert.equal(res.status, 405, routePath + ' 应拒绝 PUT')
+    }
+  })
+})
+
+test('横切守卫:4 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled']
+    for (const routePath of postPaths) {
+      const res = await postRaw(handlers, routePath, '{oops')
+      assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')
+      assert.equal(res.body.error, MESSAGES.badJsonBody)
+    }
+  })
+})
+
+test('横切守卫:带错误码的系统级错误收敛为固定文案并进服务端日志', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const settingsGetError = new Error("EACCES: permission denied, open 'C:\\secrets\\settings.json'")
+    settingsGetError.code = 'EACCES'
+    const { handlers, logger } = makeCtx({
+      headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+      agents: new Map(),
+      settingsGetError,
+    })
+    const res = response()
+    await handlers.get('/api/context/history-enabled')(getRequest2('/api/context/history-enabled', 'GET'), res)
+    assert.equal(res.status, 400)
+    assert.equal(res.body.error, MESSAGES.systemError, '系统级错误文案必须收敛,不得内嵌绝对路径')
+    assert.ok(logger.warns.some((line) => line.includes('EACCES')), '原始错误应仅进服务端日志')
+  })
+})
+
+test('常用提示词:非字符串 text 一律拒绝;超长文本二次 toggle 幂等(按截断后文本查重)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+    for (const body of [{ text: 123 }, { text: null }, {}]) {
+      const res = await postJson(handlers, '/api/context/prompts/toggle', body)
+      assert.equal(res.status, 400, JSON.stringify(body) + ' 应拒绝')
+      assert.equal(res.body.error, 'text 不能为空')
+    }
+    // 超长文本收藏后再次原样 toggle = 取消(查重基于截断后文本,直调不产生重复收藏)
+    const truncated = '长'.repeat(HISTORY_INPUT_MAX_CHARS)
+    const first = await postJson(handlers, '/api/context/prompts/toggle', { text: truncated + '超出部分' })
+    assert.equal(first.body.collected, true)
+    const second = await postJson(handlers, '/api/context/prompts/toggle', { text: truncated })
+    assert.equal(second.body.collected, false, '原样超长文本 toggle 应命中截断后文本并取消')
   })
 })
 

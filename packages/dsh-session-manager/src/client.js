@@ -1,11 +1,8 @@
-// dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知
-// + 历史输入浮层(Alt+↑ 唤起,列表浏览与点选回填)。
+// dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知。
 // 归档快照来自官方 workspace.follow 客户端模型(ctx.get('workspaces')),会话行来自
 // ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),通知由 archived
-// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。历史输入挂官方
-// conversation.input.dock 插槽(行数据由 host /api/session-manager/inputs 聚合),
-// 回填走宿主公共契约 inputActions.setDraft。浏览器半区经 webServer
-// 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
+// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。
+// 浏览器半区经 webServer 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
 // require;与 src/core.mjs 镜像的纯函数(projectRows / archiveToastStep /
 // archiveToastText / projectDeletedRows / pageArchiveRows /
 // groupArchiveRowsByWorkspace / filterArchiveRows)修改需两处同步。

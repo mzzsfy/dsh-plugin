@@ -120,7 +120,7 @@ export function apply(ctx, config) {
   // 其余 16MiB。运行宿主清单经 require 链解析(插件随宿主树部署时必命中),
   // 探测失败按黑名单保守回退旧线。激活时求值一次即冻结,热路径只读值;
   // 宿主热升级后重启生效
-  let maxArtifactBytes = resolveMaxArtifactBytes()
+  const maxArtifactBytes = resolveMaxArtifactBytes()
   function resolveMaxArtifactBytes() {
     let version = null
     try {
@@ -209,7 +209,7 @@ export function apply(ctx, config) {
         const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
         const located = persistence ? persistence.locate(recordItem.header) : undefined
         const fingerprint = located ? await safeStat(located.path) : null
-        if (fingerprint !== null && fingerprint.size > resolveMaxArtifactBytes()) continue
+        if (fingerprint !== null && fingerprint.size > maxArtifactBytes) continue
         try {
           const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
           fresh.push(...entries.map((entry) => ({ ...entry, sid: recordItem.header.id })))
@@ -254,7 +254,7 @@ export function apply(ctx, config) {
       const persistence = ctx.get('sessionPersistence')
       const located = persistence ? persistence.locate(header) : undefined
       const fingerprint = located ? await safeStat(located.path) : null
-      if (fingerprint === null || fingerprint.size > resolveMaxArtifactBytes()) return
+      if (fingerprint === null || fingerprint.size > maxArtifactBytes) return
       const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
@@ -343,7 +343,7 @@ export function apply(ctx, config) {
         const fingerprint = located ? await safeStat(located.path) : null
         return {
           stale: fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
-          oversize: fingerprint !== null && fingerprint.size > resolveMaxArtifactBytes(),
+          oversize: fingerprint !== null && fingerprint.size > maxArtifactBytes,
         }
       }
       let { cached, mine } = await read()
@@ -412,7 +412,7 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const text = typeof body.text === 'string' ? body.text.trim() : ''
+          const text = typeof body.text === 'string' ? body.text.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
           if (text === '') throw new Error('text 不能为空')
           const items = await readPrompts(cacheDir)
           const at = items.findIndex((item) => item.text === text)
@@ -421,7 +421,7 @@ export function apply(ctx, config) {
             items.splice(at, 1)
             collected = false
           } else {
-            items.unshift({ text: text.slice(0, HISTORY_INPUT_MAX_CHARS), at: Date.now() })
+            items.unshift({ text, at: Date.now() })
             if (items.length > HISTORY_PROMPTS_MAX) items.length = HISTORY_PROMPTS_MAX
             collected = true
           }

@@ -23,7 +23,10 @@ test('源码契约:三项设置的悬停说明齐备且挂到对应控件', () =
     { constant: 'FORK_SWITCH_TITLE', text: "'对话 fork'", label: TITLES.FORK_SWITCH_TITLE },
   ]
   for (const { constant, text, label } of rowAnchors) {
-    const mounted = new RegExp('switchRow\\([^\\n]*' + text.replace(/[+↑()]/g, '\\$&') + '[^\\n]*' + constant).test(CLIENT_SRC)
+    // 限定长度的跨行窗口而非单行 [^\n]*:合法的多行格式化(prettier)不误报,
+    // 常量与行文本漂移出同一调用(>200 字符)仍会被检出
+    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const mounted = new RegExp('switchRow\\([\\s\\S]{0,200}' + escaped + '[\\s\\S]{0,200}' + constant).test(CLIENT_SRC)
     assert.ok(mounted, label + ' 未挂对应悬停说明(常量与行文本不在同一工厂调用内)')
   }
 })

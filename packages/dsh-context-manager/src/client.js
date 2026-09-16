@@ -21,11 +21,11 @@ window.__ModuleLoader__.load({
     else window.__navicIconQueue = [NAV_ICON]
 
     // 通知出口:公共依赖 @mzzsfy/dsh-toast 可选消费(占位条目全仓唯一,由
-    // dsh-session-manager 代挂;模块表缺失即通知通道禁用,不报错)
+    // dsh-session-manager 代挂;模块表缺失或导出缺 show 即通知通道置空)
     let toast = () => {}
     try {
-      toast = require('@mzzsfy/dsh-toast/client').show
-    } catch (error) {
+      toast = require('@mzzsfy/dsh-toast/client').show || (() => {})
+    } catch {
       toast = () => {}
     }
 
@@ -384,6 +384,15 @@ function HistoryDock({ session, inputActions }) {
         }
         return
       }
+      // 编辑态输入(重命名/新增行)聚焦时导航键留给输入本身,仅保留 Esc 关闭;
+      // 搜索框不豁免:过滤后 ↑/↓ 选中与 Enter 回填正是搜索态的主路径
+      const root = rootRef.current
+      const searchEl = root && root.querySelector('.cx-hist__search')
+      const active = document.activeElement
+      if (root && active && active !== searchEl && root.contains(active)
+        && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
+        if (event.key !== 'Escape') return
+      }
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
         event.stopPropagation()
@@ -403,12 +412,12 @@ function HistoryDock({ session, inputActions }) {
         return
       }
       if (event.key === 'Enter') {
-        // 搜索框聚焦时 Enter 留给搜索(选中条目仍回填)
-        if (view.items !== null && view.cursor >= 0 && view.cursor < view.items.length && document.activeElement !== rootRef.current.querySelector('.cx-hist__search')) {
+        // 有选中条目即回填,搜索框聚焦同样成立(IME 组合已在函数头放行,
+        // 搜索词过滤后 ↑/↓ 选中 → Enter 是搜索态的主要回填路径)
+        if (view.items !== null && view.cursor >= 0 && view.cursor < view.items.length) {
           event.preventDefault()
           event.stopPropagation()
           fill(view.items[view.cursor].text)
-          return
         }
         return
       }
@@ -472,9 +481,10 @@ function HistoryDock({ session, inputActions }) {
     h('span', { className: 'cx-hist__time' }, fmtTime(item.at)),
     !inPrompts ? starButton(item) : null,
   )
-  // 编辑态行:文本可改(行内 input,回车/失焦保存)+ 删除
+  // 编辑态行:key 用文本而非索引——常用范围内文本唯一,过滤后索引漂移不再重建
+  // 行节点(重建会让编辑中的 input 卸载,未保存的修改静默丢失)
   const editRow = (item, index) => h('div', {
-    key: index + ':' + item.at,
+    key: item.text,
     className: 'cx-hist__editrow',
   },
     h('input', {
@@ -656,9 +666,20 @@ const FORK_BTN_FLAG = 'data-cx-fork'
 const STEER_BUBBLE_SELECTOR = '[data-pending-steering]'
 const STEER_ACTIONS_SUFFIX = '[class$="_actions"]'
 const TURN_ATTR = 'data-chat-turn'
-// fork 锚点映射上限:page 拉取的事件数上限(长会话全量拉取的内存/耗时护栏;
-// 覆盖不到的更早轮不注入分叉按钮,新近轮——fork 的主要目标——总在覆盖内)
+// fork 锚点窗口:follow 开场帧回溯的事件数上限(长会话全量回溯的内存/耗时护栏;
+// 窗口覆盖不到的更早轮与进行中的轮不注入分叉按钮,新近轮——fork 的主要目标——总在覆盖内)
 const FORK_PAGE_MAX_MESSAGES = 2000
+
+// 取 follow 开场帧(回溯窗口内的事件快照,自带 seq)后立即断开:
+// for-await break 触发 iterator.return,流即关闭,不消费 live 帧
+async function followOpening(remote, sessionId) {
+  const frames = remote.follow({ address: { kind: 'session', sessionId }, maxMessages: FORK_PAGE_MAX_MESSAGES })
+  for await (const frame of frames) {
+    if (frame && frame.type === 'snapshot') return Array.isArray(frame.records) ? frame.records : []
+    return []
+  }
+  return []
+}
 
 // 插话撤回:注入原生 pending steering 气泡的操作图标排(复制图标旁),样式经克隆
 // 官方按钮 className 完全原生;气泡被应用后整棵卸载,注入按钮随之消失。
@@ -670,11 +691,14 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
   const [busy, setBusy] = useState(false)
   // 启停开关(设置页):挂载拉取一次,停用即不注入并移除已注入按钮;失败按启用兜底
   const [enabled, setEnabled] = useState(true)
+  const enabledRef = useRef(true)
   useEffect(() => {
     api(STEER_ENABLED_URL)
       .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
       .catch(() => {})
   }, [])
+  // 条件 return 之前同步:停用路径也要让 scan 门控看到最新值
+  enabledRef.current = enabled
   // 观察回调经由 ref 读最新状态,观察器只挂一次不随渲染重挂
   const rowsRef = useRef([])
   const mutableRef = useRef(true)
@@ -699,6 +723,11 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
       button.title = textOnly ? '撤回到输入框: ' + row.preview : '含附件的插话不支持撤回'
     }
     function scan() {
+      // 停用即不注入并移除已注入按钮(开关可在挂载后才到达停用值)
+      if (!enabledRef.current) {
+        document.querySelectorAll('[' + STEER_BTN_FLAG + ']').forEach((button) => button.remove())
+        return
+      }
       const bubbles = document.querySelectorAll(STEER_BUBBLE_SELECTOR)
       const rows = mutableRef.current ? rowsRef.current : []
       bubbles.forEach((bubble, index) => {
@@ -751,15 +780,21 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
 // 轮号无映射 = 该轮未完成,点击报专用文案;官方结构漂移(无轮号标记)整体不注入。
 // 分叉动作经宿主 sessions 服务面 fork+open(与官方 chat 同构),成功 toast 并切换
 function ForkDockWithBootstrap({ session, forkSession, loadTurnEnds }) {
-  const mapRef = useRef(null)
-  const [ready, setReady] = useState(false)
+  // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
+  // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
+  const sessionId = session && session.sessionId
+  const loadRef = useRef(loadTurnEnds)
+  loadRef.current = loadTurnEnds
+  const [turnEnds, setTurnEnds] = useState(null)
   useEffect(() => {
+    if (sessionId === undefined) return undefined
     let disposed = false
-    loadTurnEnds()
+    // 拉取前置空:会话切换后旧会话的映射不得继续服务新会话——轮号跨会话重叠,
+    // 旧 seq 会让分叉锚点错位;置空期间 ForkDock 以 null 短路,不注入按钮
+    setTurnEnds(null)
+    loadRef.current()
       .then((map) => {
-        if (disposed) return
-        mapRef.current = map
-        setReady(true)
+        if (!disposed) setTurnEnds(map)
       })
       .catch((error) => {
         // 映射拉取失败(网络/宿主繁忙):fork 无锚点可用,保持禁用不注入;
@@ -767,60 +802,77 @@ function ForkDockWithBootstrap({ session, forkSession, loadTurnEnds }) {
         console.warn('[context-manager] fork 轮号映射拉取失败', error)
       })
     return () => { disposed = true }
-  }, [loadTurnEnds])
-  return h(ForkDock, { session, forkSession, turnEnds: ready ? mapRef.current : null })
+  }, [sessionId])
+  return h(ForkDock, { session, forkSession, turnEnds })
 }
 
 function ForkDock({ session, forkSession, turnEnds }) {
   const [enabled, setEnabled] = useState(true)
   const turnEndsRef = useRef(null)
   const forkRef = useRef(null)
+  const sessionRef = useRef(null)
+  const enabledRef = useRef(true)
   useEffect(() => {
     api(FORK_ENABLED_URL)
       .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
       .catch(() => {})
   }, [])
+  // 条件 return 之前同步全部 ref:停用与映射置空窗口内 scan 门控也要看到最新值,
+  // 否则旧会话的映射会继续服务新 DOM(轮号跨会话重叠,锚点错位)
+  enabledRef.current = enabled
+  turnEndsRef.current = turnEnds
+  forkRef.current = forkSession
+  sessionRef.current = session
   useEffect(() => {
-    function syncButton(button, turn) {
-      const known = turnEndsRef.current !== null && turnEndsRef.current.has(turn)
-      button.disabled = !known
-      button.title = known ? '从该轮分叉出新会话' : '该轮尚未完成,不可分叉'
+    function removeAll() {
+      document.querySelectorAll('[' + FORK_BTN_FLAG + ']').forEach((button) => button.remove())
     }
     function scan() {
+      // 停用即不注入并移除已注入按钮(开关可在挂载后才到达停用值)
+      if (!enabledRef.current) {
+        removeAll()
+        return
+      }
       if (turnEndsRef.current === null) return
       const bubbles = document.querySelectorAll('[' + TURN_ATTR + ']')
       bubbles.forEach((bubble) => {
         const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
         if (!actionsRow) return
-        const turn = Number(bubble.getAttribute(TURN_ATTR))
+        if (actionsRow.querySelector('[' + FORK_BTN_FLAG + ']')) return
+        // 空属性串 Number('') = 0,会把无轮号气泡误判为第 0 轮,先判空
+        const rawTurn = bubble.getAttribute(TURN_ATTR)
+        if (rawTurn === null || rawTurn.trim() === '') return
+        const turn = Number(rawTurn)
         if (!Number.isInteger(turn)) return
-        let button = actionsRow.querySelector('[' + FORK_BTN_FLAG + ']')
-        if (!button) {
-          const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + ']):not([' + STEER_BTN_FLAG + '])')
-          if (!official) return
-          button = document.createElement('button')
-          button.type = 'button'
-          button.setAttribute(FORK_BTN_FLAG, '')
-          // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
-          button.className = official.className
-          button.addEventListener('click', () => {
-            const forkSessionFn = forkRef.current
-            const atSeq = turnEndsRef.current === null ? undefined : turnEndsRef.current.get(turn)
-            if (!forkSessionFn || atSeq === undefined) {
-              toast('该轮尚未完成,不可分叉', { kind: 'error' })
-              return
-            }
-            forkSessionFn({ sessionId: session.sessionId, atSeq, increaseTitle: true })
-              .then(() => toast('已从该消息分叉'))
-              .catch((error) => {
-                const code = error && error.code
-                toast(forkFailureText(code ?? (error && error.message)), { kind: 'error', sticky: true })
-              })
-          })
-          button.appendChild(forkSvg())
-          actionsRow.appendChild(button)
-        }
-        syncButton(button, turn)
+        // 映射缺失的轮(进行中,或超出拉取窗口的已完成轮)不注入:按钮在场即暗示
+        // 可分叉,禁用态文案无法区分成因,注入即误导;新近轮——fork 的主要目标——总在覆盖内
+        const atSeq = turnEndsRef.current.get(turn)
+        if (atSeq === undefined) return
+        const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + ']):not([' + STEER_BTN_FLAG + '])')
+        if (!official) return
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.setAttribute(FORK_BTN_FLAG, '')
+        // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
+        button.className = official.className
+        button.title = '从该轮分叉出新会话'
+        button.addEventListener('click', () => {
+          const forkSessionFn = forkRef.current
+          const current = sessionRef.current
+          const at = turnEndsRef.current === null ? undefined : turnEndsRef.current.get(turn)
+          if (!forkSessionFn || at === undefined || !current) {
+            toast('该轮不可分叉', { kind: 'error' })
+            return
+          }
+          forkSessionFn({ sessionId: current.sessionId, atSeq: at, increaseTitle: true })
+            .then(() => toast('已从该消息分叉'))
+            .catch((error) => {
+              const code = error && error.code
+              toast(forkFailureText(code ?? (error && error.message)), { kind: 'error', sticky: true })
+            })
+        })
+        button.appendChild(forkSvg())
+        actionsRow.appendChild(button)
       })
     }
     if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return undefined
@@ -831,13 +883,11 @@ function ForkDock({ session, forkSession, turnEnds }) {
     return () => {
       scanRef.current = null
       observer.disconnect()
-      document.querySelectorAll('[' + FORK_BTN_FLAG + ']').forEach((button) => button.remove())
+      removeAll()
     }
-  }, [turnEnds, session])
+  }, [turnEnds])
   if (session === undefined || turnEnds === null) return null
   if (!enabled) return null
-  turnEndsRef.current = turnEnds
-  forkRef.current = forkSession
   return h('div', { className: 'cx-fork-host' })
 }
 
@@ -895,20 +945,27 @@ function ContextPanel() {
 }
 
     return {
-      inject: ['slots', 'sessions', 'remote'],
+      // remote.session 点分声明交 cordis 门控(规约禁 apply 内同步探测该面):
+      // namespace 由宿主异步 $mount,fiber 等其就绪才激活,旧宿主无此 namespace
+      // 即整体未激活(干净禁用,不阻塞 web 启动)
+      inject: ['slots', 'sessions', 'workspaces', 'remote', 'remote.session'],
       apply(ctx) {
         const sessions = ctx.get('sessions')
-        // fork 锚点与服务通道:remotes 点分面(remote.session.page)与 sessions 服务面
-        // (fork/open)任一缺失即 fork 功能整体不注册——旧宿主干净禁用,不阻塞其余能力。
-        // remotes 面由宿主异步挂载,经 ctx.remote 点分读取在 inject 生效后可用
-        let remoteSession = null
-        try {
-          remoteSession = ctx.remote.session
-        } catch (error) {
-          remoteSession = null
-        }
+        const workspaces = ctx.get('workspaces')
+        const remoteSession = ctx.remote.session
+        // 分叉动作通道:fork 成功即打开子会话;open 失败不影响分叉成功的事实,
+        // 单独吞掉(警告日志),点击处不再误报「分叉失败」
         const forkService = (sessions && typeof sessions.fork === 'function' && typeof sessions.open === 'function')
-          ? (opts) => sessions.fork(opts).then((childId) => { sessions.open(childId); return childId })
+          ? (opts) => sessions.fork(opts).then((childId) => {
+            try {
+              Promise.resolve(sessions.open(childId)).catch((error) => {
+                console.warn('[context-manager] 分叉子会话已创建,但打开失败', error)
+              })
+            } catch (error) {
+              console.warn('[context-manager] 分叉子会话已创建,但打开失败', error)
+            }
+            return childId
+          })
           : null
 
         // 样式挂载在宿主文档级:设置页未打开时面板不存在,
@@ -963,9 +1020,10 @@ function ContextPanel() {
           console.warn('[context-manager] 插话撤回入口未注册(宿主无 conversation.input.dock 插槽)', error)
         }
 
-        // 对话 fork 入口:锚点映射经 remote.session.page 一次拉取(轮号 → turn/end seq),
-        // 分叉动作经 sessions 服务面;两通道任一缺失即整体不注册(干净禁用)
-        if (remoteSession && forkService && typeof remoteSession.page === 'function') {
+        // 对话 fork 入口:锚点映射经 remote.session.follow 开场帧一次拉取
+        // (开场帧自带回溯窗口内的全部事件与 seq,取到即断开订阅,不做 live 消费),
+        // 分叉动作经 sessions 服务面;分叉服务面缺失即整体不注册(干净禁用)
+        if (forkService) {
           try {
             ctx.slots.inject('conversation.input.dock', () =>
               ctx.slots.register(
@@ -975,13 +1033,9 @@ function ContextPanel() {
                   order: 24,
                   inject: (sessionId) => ({
                     forkSession: forkService,
-                    loadTurnEnds: () => remoteSession.page({
-                      address: { kind: 'session', sessionId },
-                      maxMessages: FORK_PAGE_MAX_MESSAGES,
-                    }).then((result) => {
+                    loadTurnEnds: () => followOpening(remoteSession, sessionId).then((records) => {
                       // 轮号 → turn/end seq:事件 data 携带 turn 号时按号登记,
                       // 缺失时按出现顺序计数(第 i 个 turn/end 即第 i 轮完成)
-                      const records = result && Array.isArray(result.records) ? result.records : []
                       const map = new Map()
                       let ordered = 0
                       for (const record of records) {

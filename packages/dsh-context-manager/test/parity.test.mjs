@@ -57,7 +57,12 @@ test('源码契约:client fetchInputs 必须解包 host 响应信封 { inputs, a
   const guard = /Array\.isArray\((\w+)\.inputs\)/
   assert.ok(guard.test('Array.isArray(payload.inputs)'), '守卫正则必须命中合规样本')
   const fetchStart = CLIENT_SRC.indexOf('function fetchInputs(')
-  const fetchBody = fetchStart >= 0 ? CLIENT_SRC.slice(fetchStart, CLIENT_SRC.indexOf('\n  }', fetchStart)) : ''
+  assert.ok(fetchStart >= 0, '未找到 fetchInputs 函数')
+  // 切片终点锚必须有效且切片远小于全文件:锚失效退化为全文件检查时契约空转
+  const fetchEnd = CLIENT_SRC.indexOf('\n  }', fetchStart)
+  assert.ok(fetchEnd > fetchStart, 'fetchInputs 切片终点锚失效(实现缩进形态漂移)')
+  const fetchBody = CLIENT_SRC.slice(fetchStart, fetchEnd)
+  assert.ok(fetchBody.length < 2 * 1000, 'fetchInputs 切片异常膨胀,契约失去定位精度')
   assert.ok(fetchBody.includes('api(INPUTS_URL'), '未找到 fetchInputs 的 host 请求')
   assert.ok(guard.test(fetchBody), 'fetchInputs 缺少 payload.inputs 数组解包')
   assert.ok(fetchBody.includes('payload.aligned'), 'fetchInputs 缺少 aligned 字段解包')
