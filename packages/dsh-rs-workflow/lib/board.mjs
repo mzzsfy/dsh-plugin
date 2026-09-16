@@ -1,11 +1,9 @@
-// board — /api/rsww/* 路由薄分发(设置子域):数据权威态在 settings,路由无业务状态
+// board — /api/rsww/* 路由薄分发(设置子域):数据权威态在自有文件存储(v5/{templates,config}.json),路由无业务状态
 // 运行时路由(runs/run/control/resume-from/run-remove)随 v4 运行时移除,仅保留设置页所需
-import JSON5 from 'json5'
-import { join } from 'node:path'
 import { validateTemplate } from './template-v4.mjs'
 import { SPEC_TEXT } from './spec.mjs'
-import { builtinTemplates } from './builtin-templates.mjs'
-import { NAMESPACE, normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
+import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
+import { loadJson, saveJson } from './storage.mjs'
 
 const BODY_MAX_BYTES = 256 * 1024
 
@@ -80,65 +78,34 @@ function readJsonBody(req) {
   })
 }
 
-// ── settings 模板读写(与 v3 合并/防固化语义一致) ──────────────────────────
-function readTemplates(ctx) {
-  try {
-    const settings = ctx.get('settings')
-    const value = settings ? settings.get(NAMESPACE) : undefined
-    if (value && Array.isArray(value.templates)) return mergeBuiltin(value.templates)
-  } catch { /* 设置服务缺失/损坏:仅内置表 */ }
-  return builtinTemplates()
+// ── 模板读写(自有文件存储) ──────────────────────────────────────────────────
+function rawTemplates() {
+  return loadJson('templates.json', [])
 }
 
-function mergeBuiltin(userTemplates) {
-  const byId = new Map(userTemplates.map((t) => [t.id, t]))
-  const merged = [...userTemplates]
-  for (const builtin of builtinTemplates()) {
-    if (byId.has(builtin.id)) continue
-    merged.push(builtin)
-  }
-  return merged
+function readTemplates() {
+  return rawTemplates()
 }
 
-function rawTemplates(ctx) {
-  try {
-    const settings = ctx.get('settings')
-    const value = settings ? settings.get(NAMESPACE) : undefined
-    return value && Array.isArray(value.templates) ? value.templates : []
-  } catch { return [] }
+function writeTemplates(templates) {
+  saveJson('templates.json', templates)
 }
 
-async function writeTemplates(ctx, templates) {
-  const settings = ctx.get('settings')
-  if (!settings) throw new Error('设置服务不可用,无法保存模板')
-  const builtins = builtinTemplates()
-  const userEntries = templates.filter((t) => {
-    const builtin = builtins.find((b) => b.id === t.id)
-    return !(builtin && t.enabled === builtin.enabled && t.label === builtin.label && t.description === builtin.description && t.json5 === builtin.json5)
-  })
-  await settings.update(NAMESPACE, { templates: userEntries })
-}
-
-async function removeTemplateById(ctx, id) {
-  const raw = rawTemplates(ctx)
+function removeTemplateById(id) {
+  const raw = rawTemplates()
   const next = raw.filter((t) => t.id !== id)
-  const builtin = builtinTemplates().find((t) => t.id === id)
-  if (builtin) {
-    next.push({ ...builtin, enabled: false })
-  } else if (next.length === raw.length) {
-    return { ok: false, error: '模板不存在: ' + id }
-  }
-  await writeTemplates(ctx, next)
-  return { ok: true, templates: mergeBuiltin(next) }
+  if (next.length === raw.length) return { ok: false, error: '模板不存在: ' + id }
+  writeTemplates(next)
+  return { ok: true }
 }
 
 function parseTemplateEntry(id, body) {
-  const json5 = typeof body.json5 === 'string' ? body.json5 : ''
+  const json = typeof body.json === 'string' ? body.json : ''
   let parsed
   try {
-    parsed = JSON5.parse(json5)
+    parsed = JSON.parse(json)
   } catch (error) {
-    const err = new Error('JSON5 解析失败:' + (error?.message ?? error))
+    const err = new Error('模板 JSON 解析失败:' + (error?.message ?? error))
     err.errors = [{ target: 'json', message: String(error?.message ?? error) }]
     throw err
   }
@@ -149,7 +116,7 @@ function parseTemplateEntry(id, body) {
     throw err
   }
   if (parsed && typeof parsed.id === 'string' && parsed.id !== id) throw new Error(`id 不一致: 模板 "${id}" vs 定义 "${parsed.id}"`)
-  return { parsed, json5 }
+  return { parsed, json }
 }
 
 function configSavePatch(body) {
@@ -205,17 +172,16 @@ export function registerBoardRoutes(ctx) {
   ctx.inject(['webServer'], (wctx) => {
     const route = (path, handler, name) => wctx.effect(() => wctx.webServer.register({ kind: 'exact', path, handler }), name)
     route('/api/rsww/templates', guardedRoute(async (req, res) => {
-      const templates = readTemplates(ctx).map((t) => ({ ...t, builtin: !!builtinTemplates().find((b) => b.id === t.id) }))
-      sendJson(res, 200, { templates })
+      sendJson(res, 200, { templates: readTemplates() })
     }), 'rsww templates route')
     route('/api/rsww/template', guardedRoute(async (req, res) => {
       const url = new URL(req.url, 'http://localhost')
       const id = url.searchParams.get('id') || ''
-      const entry = readTemplates(ctx).find((t) => t.id === id)
+      const entry = readTemplates().find((t) => t.id === id)
       if (!entry) throw new Error('模板不存在:' + id)
       let parsed
       try {
-        parsed = JSON5.parse(entry.json5)
+        parsed = JSON.parse(entry.json)
       } catch (e) {
         throw new Error('模板文本解析失败:' + e.message)
       }
@@ -227,40 +193,37 @@ export function registerBoardRoutes(ctx) {
     route('/api/rsww/template-save', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
-      const { parsed, json5 } = parseTemplateEntry(id, body)
+      const { parsed, json } = parseTemplateEntry(id, body)
       if (body.dryRun === true) {
         sendJson(res, 200, { ok: true, dryRun: true })
         return
       }
-      const templates = rawTemplates(ctx).filter((t) => t.id !== id)
+      const templates = rawTemplates().filter((t) => t.id !== id)
       templates.push({
         id,
         label: typeof body.label === 'string' && body.label.trim() !== '' ? body.label.trim() : parsed.label || id,
         description: typeof body.description === 'string' && body.description.trim() !== '' ? body.description.trim() : parsed.description || '',
         enabled: body.enabled !== false,
-        json5,
+        json,
       })
-      await writeTemplates(ctx, templates)
+      writeTemplates(templates)
       sendJson(res, 200, { ok: true })
     }), 'rsww template-save route')
     route('/api/rsww/template-remove', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
-      const outcome = await removeTemplateById(ctx, id)
+      const outcome = removeTemplateById(id)
       if (!outcome.ok) throw new Error(outcome.error)
       sendJson(res, 200, { ok: true })
     }), 'rsww template-remove route')
     route('/api/rsww/config', guardedRoute(async (req, res) => {
-      const settings = ctx.get('settings')
-      const value = settings ? settings.get(NAMESPACE) : undefined
-      sendJson(res, 200, { config: normalizeConfig(value) })
+      sendJson(res, 200, { config: normalizeConfig(loadJson('config.json', undefined)) })
     }), 'rsww config route')
     route('/api/rsww/config-save', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req))
       const patch = configSavePatch(body ?? {})
-      const settings = ctx.get('settings')
-      if (!settings) throw new Error('设置服务不可用')
-      await settings.update(NAMESPACE, patch)
+      const current = normalizeConfig(loadJson('config.json', undefined))
+      saveJson('config.json', { ...current, ...patch })
       sendJson(res, 200, { ok: true })
     }), 'rsww config-save route')
   })

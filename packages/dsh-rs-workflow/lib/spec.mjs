@@ -4,20 +4,22 @@
 
 export const SPEC_TEXT = `# 若水工作流流程模板 DSL 规范(v4)
 
-流程模板 = 一份 JSON5 文本,声明一个强流程:每一步安排 AI 产出什么,引擎强制校验后推进。
+流程模板 = 一份严格 JSON 文本,声明一个强流程:每一步安排 AI 产出什么,引擎强制校验后推进。
 在设置页「若水工作流 → 流程模板」新建或编辑模板,保存前经 host 权威校验(dryRun)。
+文本必须是合法 JSON(键双引号、无注释、无尾逗号);本规范示例中的行尾注释仅为说明字段含义,写入模板时不要携带。
 
 ## 1. 顶层结构
 
 {
-  id: "novel",          // 必填,^[a-z][a-z0-9-]*$
-  label: "小说写作",     // 必填,模板显示名
-  description: "...",   // 必填,一句话适用场景(分诊目录展示给引擎)
-  inputs: {             // 可选,运行时入参声明(见 §8)
-    chapterCount: "章节数说明",
-  },
-  steps: [ ... ],       // 必填,非空;步骤按文档顺序缺省链式依赖
+  "id": "novel",
+  "label": "小说写作",
+  "description": "...",
+  "inputs": { "chapterCount": "章节数说明" },
+  "steps": [ ... ]
 }
+
+字段含义:id 必填 ^[a-z][a-z0-9-]*$;label 必填,模板显示名;description 必填,一句话适用场景
+(分诊目录展示给引擎);inputs 可选,运行时入参声明(见 §7);steps 必填非空,按文档顺序缺省链式依赖。
 
 未知字段一律拒绝(拼写错误防静默失效);校验不合法会逐条报错(target 定位到 step:<id> 或 top:<field>)。
 
@@ -25,30 +27,37 @@ export const SPEC_TEXT = `# 若水工作流流程模板 DSL 规范(v4)
 
 每个步骤:
 {
-  id: "outline",        // 必填,步骤内唯一,^[a-zA-Z][a-zA-Z0-9_-]*$
-  label: "生成大纲",     // 可选,看板显示名
-  slot: "executor-loop", // 可选,模型工作位(仅常规步骤可自定义);六键全集:
-                        // "planner" "executor" "reviewer"
-                        // "executor-loop"(循环/重做) "reviewer-approve"(审批)
-                        // "executor-escalate"(升级)
-  prompt: "...",        // 必填,指令模板。写清:做什么、按什么材料做、做到什么程度。
-                        // 产出要求由引擎自动附加 [产出要求] 节,不要在 prompt 里写格式要求
-  load: ["skill:x", "doc:docs/spec.md"], // 可选,强制加载资源(见 §7)
-  outputs: {            // 可选,产出契约(见 §3)
-    outline: "章节大纲:每行一条 'N. 章节标题——梗概',共 N 章",
-  },
-  listOutputs: ["outline"], // 可选,声明哪些产出按 string 数组解析(for_each 数据源必须是 list 产出)
-  after: ["collect"],   // 可选,依赖步骤 id 数组;缺省 = 文档序前一个常规步骤(见 §5);禁止环
-  maxFail: 3,           // 可选,失败重试上限 1..10(缺省取预算 maxStepFail=2)
-  for_each: "outline.outline", // 可选,循环(见 §6)
-  mode: "sequential",   // 循环推进:sequential(默认,串行携带) | parallel(并行)
-  type: "ai",           // 默认 "ai";"approve" = 人工审批(见 §4);"flow" = 嵌套子流程(见 §9)
-  target: "draft",      // type=approve 必填:被审步骤 id
-  rounds: 2,            // type=approve 可选:重审轮次上限(缺省预算 approveRounds=2)
-  onExhausted: "blocked",   // type=approve 必填语义:"blocked" 终局阻塞 | 其他步骤 id = 升级出口
-  flow: "{triage.route}",   // type=flow 必填:子流程 id,支持 {step.output} 动态路由
-  input: { brief: "{triage.brief}" }, // type=flow 可选:传参(值须为单占位符 {step.output})
+  "id": "outline",
+  "label": "生成大纲",
+  "slot": "executor-loop",
+  "prompt": "...",
+  "load": ["skill:x", "doc:docs/spec.md"],
+  "outputs": { "outline": "章节大纲:每行一条 'N. 章节标题——梗概',共 N 章" },
+  "listOutputs": ["outline"],
+  "after": ["collect"],
+  "maxFail": 3,
+  "for_each": "outline.outline",
+  "mode": "sequential",
+  "type": "ai",
+  "target": "draft",
+  "rounds": 2,
+  "onExhausted": "blocked",
+  "flow": "{triage.route}",
+  "input": { "brief": "{triage.brief}" }
 }
+
+字段含义:id 必填,步骤内唯一,^[a-zA-Z][a-zA-Z0-9_-]*$;label 可选,看板显示名;slot 可选,模型
+工作位(仅常规步骤可自定义),六键全集:"planner" "executor" "reviewer" "executor-loop"(循环/重做)
+"reviewer-approve"(审批) "executor-escalate"(升级);prompt 必填,指令模板,写清做什么、按什么材料
+做、做到什么程度——产出要求由引擎自动附加 [产出要求] 节,不要在 prompt 里写格式要求;load 可选,
+强制加载资源(见 §7);outputs 可选,产出契约(见 §3);listOutputs 可选,声明哪些产出按 string
+数组解析(for_each 数据源必须是 list 产出);after 可选,依赖步骤 id 数组,缺省 = 文档序前一个常规
+步骤(见 §5),禁止环;maxFail 可选,失败重试上限 1..10(缺省取预算 maxStepFail=2);for_each 可选,
+循环(见 §6);mode 循环推进:sequential(默认,串行携带)| parallel(并行);type 默认 "ai",
+"approve" = 人工审批(见 §4),"flow" = 嵌套子流程(见 §9);target 为 type=approve 必填,被审步骤
+id;rounds 为 type=approve 可选,重审轮次上限(缺省预算 approveRounds=2);onExhausted 为
+type=approve 必填语义:"blocked" 终局阻塞,其他步骤 id = 升级出口;flow 为 type=flow 必填,子流程
+id,支持 {step.output} 动态路由;input 为 type=flow 可选传参(值须为单占位符 {step.output})。
 
 ## 3. 产出契约(强流程核心)
 
@@ -105,31 +114,31 @@ for_each: "<stepId>.<listOutput>"——数据源必须是上游步骤的 listOut
 ## 10. 分诊惯例
 
 多入口模板标准开头:一个 triage 步骤,outputs 声明 route(候选模板 id)与 brief(交接摘要),
-listOutputs:["route"];后接 type:"flow" 步骤 flow:"{triage.route}" input:{ brief:"{triage.brief}" }。
+"listOutputs":["route"];后接 "type":"flow" 步骤 "flow":"{triage.route}"、"input":{"brief":"{triage.brief}"}。
 route 为空 = 无候选命中,该步骤按空路由 done 收口(流程结束)。
 
 ## 11. 完整示例
 
-// 示例 A:inputs + 审批闭环 + 循环
+示例 A(inputs + 审批闭环 + 循环):
 {
-  id: "novel", label: "小说写作", description: "按章节数要求写小说初稿并终审",
-  inputs: { chapterCount: "章节数,正整数" },
-  steps: [
-    { id: "outline", prompt: "按 {input.chapterCount} 章要求生成大纲;需求:{request}",
-      outputs: { outline: "每行 'N. 章节标题——梗概'" }, listOutputs: ["outline"] },
-    { id: "write-chapter", for_each: "outline.outline", mode: "sequential",
-      prompt: "写第 {item.index} 章《{item}》,衔接上一章成稿:{write-chapter.draft}",
-      outputs: { draft: "本章正文" } },
-    { id: "review", type: "approve", after: ["write-chapter"], target: "write-chapter",
-      rounds: 2, onExhausted: "polish", prompt: "审校全书一致性;需求:{request}" },
-    { id: "polish", prompt: "按 {request} 产出保守修订清单,不重写正文",
-      outputs: { fixes: "修订建议清单" } },
-  ],
+  "id": "novel", "label": "小说写作", "description": "按章节数要求写小说初稿并终审",
+  "inputs": { "chapterCount": "章节数,正整数" },
+  "steps": [
+    { "id": "outline", "prompt": "按 {input.chapterCount} 章要求生成大纲;需求:{request}",
+      "outputs": { "outline": "每行 'N. 章节标题——梗概'" }, "listOutputs": ["outline"] },
+    { "id": "write-chapter", "for_each": "outline.outline", "mode": "sequential",
+      "prompt": "写第 {item.index} 章《{item}》,衔接上一章成稿:{write-chapter.draft}",
+      "outputs": { "draft": "本章正文" } },
+    { "id": "review", "type": "approve", "after": ["write-chapter"], "target": "write-chapter",
+      "rounds": 2, "onExhausted": "polish", "prompt": "审校全书一致性;需求:{request}" },
+    { "id": "polish", "prompt": "按 {request} 产出保守修订清单,不重写正文",
+      "outputs": { "fixes": "修订建议清单" } }
+  ]
 }
 
-// 示例 B:分诊动态路由(节选)
-{ id: "triage", prompt: "分析需求选流程;候选与适用见模板描述", outputs: { route: "模板 id", brief: "交接摘要" }, listOutputs: ["route"] },
-{ id: "run", type: "flow", flow: "{triage.route}", input: { brief: "{triage.brief}" } },
+示例 B(分诊动态路由,节选):
+{ "id": "triage", "prompt": "分析需求选流程;候选与适用见模板描述", "outputs": { "route": "模板 id", "brief": "交接摘要" }, "listOutputs": ["route"] },
+{ "id": "run", "type": "flow", "flow": "{triage.route}", "input": { "brief": "{triage.brief}" } }
 
 ## 12. 编写守则(AI 必读)
 

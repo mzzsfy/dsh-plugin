@@ -1,5 +1,4 @@
 // 模板静态校验器:DSL v4 唯一权威(board 保存校验唯一入口)
-import JSON5 from 'json5'
 
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
 const TOP_FIELDS = new Set(['id', 'label', 'description', 'inputs', 'steps'])
@@ -24,9 +23,9 @@ const err = (target, message) => ({ target, message })
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 const placeholdersOf = (text) => [...String(text).matchAll(PLACEHOLDER_RE)].map((m) => m[1])
 
-// JSON5 解析;失败抛错,调用方经 parseErrorLine 提取行号
+// JSON 解析;失败抛错,调用方经 parseErrorLine 提取行号
 export function parseTemplate(text) {
-  return JSON5.parse(text)
+  return JSON.parse(text)
 }
 
 export function parseErrorLine(message) {

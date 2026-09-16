@@ -31,11 +31,7 @@
     "cordis.patch.yml",
     "README.md"
   ],
-  "dependencies": {
-    "json5": "^2.2.3"
-  },
   "peerDependencies": {
-    "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   }
 }

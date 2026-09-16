@@ -256,10 +256,10 @@ window.__ModuleLoader__.load({
     // 副本条目(id 空)仅继承结构,meta(id/label/description)由用户重填,防覆盖原模板
     function modelFromEntry(entry) {
       let parsed = null
-      try { parsed = JSON.parse(entry.json5) } catch { parsed = null }
+      try { parsed = JSON.parse(entry.json) } catch { parsed = null }
       const meta = { id: entry.id || '', label: asStr(entry.label) || entry.id || '', description: asStr(entry.description), enabled: entry.enabled !== false }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return { model: { ...meta, inputs: [], steps: [] }, text: entry.json5, synced: false }
+        return { model: { ...meta, inputs: [], steps: [] }, text: entry.json, synced: false }
       }
       const model = {
         id: meta.id !== '' ? (asStr(parsed.id) || meta.id) : '',
@@ -309,7 +309,7 @@ window.__ModuleLoader__.load({
         field('显示名', 'label', false, false),
         field('说明', 'description', false, false),
         h(Switch, { checked: model.enabled, onChange: (e) => update((m) => ({ ...m, enabled: e.target.checked })), label: '启用(禁用后不可创建、重跑不可选)', ariaLabel: '启用模板' }),
-        synced ? null : h('span', { className: 'rsww-note' }, '此模板文本含 JSON5 扩展语法,结构表单锁定:请在文本视图点「应用」,经 host 校验通过后回填。'))
+        synced ? null : h('span', { className: 'rsww-note' }, '此模板文本不是合法 JSON,结构表单锁定:请在文本视图修复后点「应用」。'))
     }
 
     function InputsForm({ model, update, topErr }) {
@@ -444,7 +444,7 @@ window.__ModuleLoader__.load({
         h('button', { className: 'rsww-btn', type: 'button', onClick: () => setSteps(model.steps.concat(newStep())) }, '添加步骤'))
     }
 
-    function Json5Pane({ text, setText, onApply, onValidate, jsonErrs, saving }) {
+    function JsonPane({ text, setText, onApply, onValidate, jsonErrs, saving }) {
       return h('div', { className: 'rsww-stack' },
         h('textarea', { className: 'rsww-textarea', value: text, rows: 18, spellCheck: false, onChange: (e) => setText(e.target.value) }),
         h('div', { className: 'rsww-row' },
@@ -465,30 +465,7 @@ window.__ModuleLoader__.load({
       const [saveErrors, setSaveErrors] = useState([])
       const [saving, setSaving] = useState(false)
       const [note, setNote] = useState('')
-      const [filling, setFilling] = useState(false)
-      // 文本含 JSON5 扩展语法时 client 不解析(解析权威在 host):经 template 只读路由取 host 解析结果回填表单
-      useEffect(() => {
-        if (init.synced || isNew) return
-        let live = true
-        setFilling(true)
-        request('template?id=' + encodeURIComponent(entry.id)).then((o) => {
-          if (!live) return
-          setFilling(false)
-          const parsed = o.ok && o.data && o.data.parsed
-          if (!parsed || typeof parsed !== 'object') { setNote('结构表单不可用:host 解析失败,可在文本视图编辑并「应用」。'); return }
-          const m = {
-            id: asStr(parsed.id) || entry.id || '',
-            label: asStr(parsed.label), description: asStr(parsed.description),
-            enabled: entry.enabled !== false,
-            inputs: objToRows(parsed.inputs),
-            steps: asArr(parsed.steps).map(normalizeStep),
-          }
-          setModel(m); setSynced(true); setView('struct')
-          setNote('已按 host 解析结果载入结构表单;保存以「应用」后的文本为准。')
-        })
-        return () => { live = false }
-      }, [isNew, entry && entry.id])
-      // 未回填(文本模式)时表单编辑不重写文本,json5 正文始终权威
+      // 未回填(文本不可解析)时表单编辑不重写文本,json 正文始终权威
       const update = (fn) => {
         if (!synced) { setModel((prev) => fn(prev)); return }
         setModel((prev) => {
@@ -504,7 +481,7 @@ window.__ModuleLoader__.load({
       const flatErrs = allErrors.filter((e) => e.target === 'step:')
       const dryRun = async () => {
         setSaving(true); setNote(''); setSaveErrors([])
-        const o = await post('template-save', { id: model.id, label: model.label, description: model.description, enabled: model.enabled, json5: text, dryRun: true })
+        const o = await post('template-save', { id: model.id, label: model.label, description: model.description, enabled: model.enabled, json: text, dryRun: true })
         setSaving(false)
         if (!o.ok) { setSaveErrors(errsOf(o)); return null }
         return true
@@ -514,7 +491,7 @@ window.__ModuleLoader__.load({
         let parsed = null
         try { parsed = JSON.parse(text) } catch { parsed = null }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          setNote('校验通过;文本含 JSON5 扩展语法,表单未回填(保存仍以文本为准)')
+          setNote('校验通过;文本不可解析为对象,表单未回填(保存仍以文本为准)')
           return
         }
         const m = {
@@ -535,7 +512,7 @@ window.__ModuleLoader__.load({
         const local = synced ? clientErrors(model) : []
         if (local.length > 0) { setSaveErrors(local); return }
         setSaving(true)
-        const o = await post('template-save', { id: model.id, label: model.label, description: model.description, enabled: model.enabled, json5: text })
+        const o = await post('template-save', { id: model.id, label: model.label, description: model.description, enabled: model.enabled, json: text })
         setSaving(false)
         if (!o.ok) { setSaveErrors(errsOf(o)); setNote('保存被拒绝'); return }
         onSaved('')
@@ -544,35 +521,31 @@ window.__ModuleLoader__.load({
         h('datalist', { id: 'rsww-tmpl-ids' }, templates.map((t) => h('option', { key: t.id, value: t.id }))),
         h(MetaForm, { model, update, synced, topErr }),
         synced ? h(InputsForm, { model, update, topErr }) : null,
-        h(PillGroup, { tab: true, ariaLabel: '视图', value: view, options: [{ key: 'struct', label: '结构' }, { key: 'json', label: 'JSON5' }], onChange: setView }),
+        h(PillGroup, { tab: true, ariaLabel: '视图', value: view, options: [{ key: 'struct', label: '结构' }, { key: 'json', label: 'JSON' }], onChange: setView }),
         view === 'struct'
-          ? (synced ? h(StepsForm, { model, update, allErrors }) : h('span', { className: 'rsww-note' }, '结构表单已锁定:先在 JSON5 视图点「应用」回填。'))
-          : h(Json5Pane, { text, setText, onApply: applyText, onValidate: validateText, jsonErrs, saving }),
+          ? (synced ? h(StepsForm, { model, update, allErrors }) : h('span', { className: 'rsww-note' }, '结构表单已锁定:先在 JSON 视图点「应用」回填。'))
+          : h(JsonPane, { text, setText, onApply: applyText, onValidate: validateText, jsonErrs, saving }),
         flatErrs.map((e, i) => h('span', { className: 'rsww-error', key: 'flat' + i }, e.message)),
         h('div', { className: 'rsww-row' },
           h('button', { className: 'rsww-btn', type: 'button', onClick: doSave, disabled: saving }, '保存'),
           note ? h('span', { className: 'rsww-note' }, note) : null))
     }
 
-    function TemplateCard({ t, busy, onView, onEdit, onCopy, onDelete }) {
-      const builtin = t.builtin === true
+    function TemplateCard({ t, busy, onView, onEdit, onDelete }) {
       const disabled = t.enabled === false
       return h('div', { className: 'rsww-card' },
         h('div', { className: 'rsww-row' },
           h('span', { className: 'rsww-text', style: { fontWeight: 600 } }, t.label || t.id),
           h('span', { className: 'rsww-mono rsww-note' }, t.id),
-          builtin ? h(Badge, { tone: 'business' }, '内置') : null,
           disabled ? h(Badge, { tone: 'mute' }, '已禁用') : null),
         t.description ? h('span', { className: 'rsww-note' }, t.description) : null,
         h('div', { className: 'rsww-row' },
           h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onView }, '详情'),
-          builtin
-            ? h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onCopy }, '另存为副本')
-            : h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onEdit }, '编辑'),
-          h(ArmedButton, { label: builtin ? '禁用' : '删除', confirmLabel: builtin ? '确认禁用' : '确认删除', disabled: busy, onConfirm: onDelete })))
+          h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onEdit }, '编辑'),
+          h(ArmedButton, { label: '删除', confirmLabel: '确认删除', disabled: busy, onConfirm: onDelete })))
     }
 
-    // ── 只读详情弹窗:所有模板可点开;结构视图(JSON.parse 可达时)+JSON5 原文+一键检验 ──
+    // ── 只读详情弹窗:所有模板可点开;结构视图(JSON.parse 可达时)+JSON 原文+一键检验 ──
     function Modal({ title, onClose, children }) {
       return h('div', { className: 'rsww-modal', onClick: (e) => { if (e.target === e.currentTarget) onClose() } },
         h('div', { className: 'rsww-modal__panel', role: 'dialog', 'aria-label': title },
@@ -633,7 +606,7 @@ window.__ModuleLoader__.load({
       useEffect(() => { reload() }, [reload])
       const validate = async () => {
         setChecking(true); setCheckNote(''); setCheckErrs([])
-        const o = await post('template-save', { id: entry.id, label: entry.label, description: entry.description, enabled: entry.enabled !== false, json5: entry.json5, dryRun: true })
+        const o = await post('template-save', { id: entry.id, label: entry.label, description: entry.description, enabled: entry.enabled !== false, json: entry.json, dryRun: true })
         setChecking(false)
         if (o.ok) { setCheckNote('校验通过(未落盘)'); return }
         setCheckErrs(o.data && Array.isArray(o.data.errors) && o.data.errors.length > 0 ? o.data.errors : [{ target: 'json', message: o.error }])
@@ -644,7 +617,6 @@ window.__ModuleLoader__.load({
       return h(Modal, { title: '模板详情', onClose },
         h('div', { className: 'rsww-row' },
           h('span', { className: 'rsww-mono rsww-note' }, entry.id),
-          entry.builtin === true ? badge('business', '内置') : null,
           entry.enabled === false ? badge('mute', '已禁用') : null,
           h('span', { style: { flex: 1 } }),
           h('button', { className: 'rsww-btn', type: 'button', onClick: validate, disabled: checking }, checking ? '检验中' : '一键检验'),
@@ -665,9 +637,9 @@ window.__ModuleLoader__.load({
           model.steps.map((s, i) => h(ViewerStep, { key: i, step: s }))) : null,
         h('div', { className: 'rsww-section' },
           h('div', { className: 'rsww-row' },
-            h('button', { className: 'rsww-btn', type: 'button', onClick: () => setShowJson(!showJson) }, showJson ? '收起 JSON5' : 'JSON5 全文'),
-            showJson ? h(CopyButton, { text: entry.json5 || '' }) : null),
-          showJson ? h('div', { className: 'rsww-full', style: { maxHeight: 300 } }, entry.json5 || '(空)') : null))
+            h('button', { className: 'rsww-btn', type: 'button', onClick: () => setShowJson(!showJson) }, showJson ? '收起 JSON' : 'JSON 全文'),
+            showJson ? h(CopyButton, { text: entry.json || '' }) : null),
+          showJson ? h('div', { className: 'rsww-full', style: { maxHeight: 300 } }, entry.json || '(空)') : null))
     }
 
     function TemplatesPage() {
@@ -708,7 +680,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'rsww-error' }, error || '加载中...'),
           h('button', { className: 'rsww-btn', type: 'button', onClick: reload }, '重试'))
       }
-      const groups = [['内置模板', templates.filter((t) => t.builtin === true)], ['自定义模板', templates.filter((t) => t.builtin !== true)]]
+      const groups = [['全部模板', templates]]
       return h('div', { className: 'rsww-stack' },
         h('div', { className: 'rsww-toolbar' },
           h('button', { className: 'rsww-btn', type: 'button', onClick: () => setEditing({ entry: null, isNew: true }) }, '新建模板'),
@@ -733,7 +705,6 @@ window.__ModuleLoader__.load({
             key: t.id, t, busy: busyId === t.id,
             onView: () => setViewing(t),
             onEdit: () => setEditing({ entry: t, isNew: false }),
-            onCopy: () => setEditing({ entry: { id: '', label: (t.label || t.id) + ' 副本', description: t.description || '', enabled: true, json5: t.json5, copyOf: t.id }, isNew: false }),
             onDelete: () => write('template-remove', { id: t.id }),
           })))))
     }

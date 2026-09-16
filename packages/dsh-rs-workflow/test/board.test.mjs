@@ -1,12 +1,13 @@
-// board BDD:模拟 req/res 验证守卫与设置子域路由语义(数据面 mock settings)
+// board BDD:模拟 req/res 验证守卫与设置子域路由语义(数据面为自有文件存储,经 env 指向临时目录)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerBoardRoutes } from '../lib/board.mjs'
+import { loadJson, saveJson } from '../lib/storage.mjs'
 
-// board 不再依赖运行时单例;保留临时目录隔离惯例
+// 存储隔离:全部用例读写临时目录,不触碰真实数据
 process.env.DSH_RS_WORKFLOW_DATA_DIR = mkdtempSync(join(tmpdir(), 'rsww-board-store-'))
 
 const mockRes = () => {
@@ -48,10 +49,10 @@ const mockReq = ({ method = 'GET', url = '/', headers = {}, body = null } = {}) 
   return req
 }
 
-const harness = ({ settingsValue = {} } = {}) => {
+const harness = () => {
   const routes = new Map()
   const ctx = {
-    get: (name) => (name === 'settings' ? { get: () => settingsValue, update: async (ns, patch) => Object.assign(settingsValue, patch) } : undefined),
+    get: () => undefined,
     inject: (names, fn) => {
       fn({
         effect: (reg) => reg(),
@@ -73,16 +74,21 @@ const harness = ({ settingsValue = {} } = {}) => {
   return { routes, call, ctx }
 }
 
-test('Given 设置子域 8 路由声明 When 激活 board Then 全部注册', () => {
+const seedTemplate = (entry) => {
+  const list = loadJson('templates.json', []).filter((t) => t.id !== entry.id)
+  list.push(entry)
+  saveJson('templates.json', list)
+}
+
+test('Given 设置子域 7 路由声明 When 激活 board Then 全部注册', () => {
   const h = harness()
   const expect = ['/api/rsww/templates', '/api/rsww/template', '/api/rsww/spec', '/api/rsww/template-save', '/api/rsww/template-remove', '/api/rsww/config', '/api/rsww/config-save']
   for (const p of expect) assert.ok(h.routes.has(p), p)
 })
 
-test('Given 既有模板 id When GET template Then 返回 entry+JSON5 解析结果;Given 不存在 id Then 400 错误载荷', async () => {
-  const tplJson5 = JSON.stringify({ id: 'user-1', label: 'u', steps: [{ id: 'a', prompt: 'P', outputs: { o: 'o' } }] })
-  const settingsValue = { templates: [{ id: 'user-1', label: 'u', description: '', enabled: true, json5: tplJson5 }] }
-  const h = harness({ settingsValue })
+test('Given 既有模板 id When GET template Then 返回 entry+JSON 解析结果;Given 不存在 id Then 400 错误载荷', async () => {
+  seedTemplate({ id: 'user-1', label: 'u', description: '', enabled: true, json: JSON.stringify({ id: 'user-1', label: 'u', steps: [{ id: 'a', prompt: 'P', outputs: { o: 'o' } }] }) })
+  const h = harness()
   const ok = await h.call('/api/rsww/template', { method: 'GET', url: '/api/rsww/template?id=user-1' })
   assert.equal(ok.status, 200)
   assert.equal(ok.body.entry.id, 'user-1')
@@ -97,19 +103,18 @@ test('Given PUT 方法 When 调 templates Then 405;Given 跨源 POST template-sa
   const h = harness()
   const r1 = await h.call('/api/rsww/templates', { method: 'PUT' })
   assert.equal(r1.status, 405)
-  const r2 = await h.call('/api/rsww/template-save', { method: 'POST', headers: { origin: 'http://evil.example' }, body: { id: 'x', json5: '{}' } })
+  const r2 = await h.call('/api/rsww/template-save', { method: 'POST', headers: { origin: 'http://evil.example' }, body: { id: 'x', json: '{}' } })
   assert.equal(r2.status, 403)
   assert.ok(r2.body.error)
-  const r3 = await h.call('/api/rsww/template-save', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: { id: 'x', json5: '{}' } })
+  const r3 = await h.call('/api/rsww/template-save', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: { id: 'x', json: '{}' } })
   assert.equal(r3.status, 400)
 })
 
 test('Given config-save budgets 越界 When 调用 Then clamp 至 10;错型 Then 400', async () => {
-  const settingsValue = {}
-  const h = harness({ settingsValue })
+  const h = harness()
   const r1 = await h.call('/api/rsww/config-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { budgets: { maxStepFail: 99 } } })
   assert.equal(r1.status, 200)
-  assert.equal(settingsValue.budgets.maxStepFail, 10)
+  assert.equal(loadJson('config.json', {}).budgets.maxStepFail, 10)
   const r2 = await h.call('/api/rsww/config-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { budgets: { maxStepFail: 'fast' } } })
   assert.equal(r2.status, 400)
   const r3 = await h.call('/api/rsww/config-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { slots: { ghost: 'x' } } })
@@ -117,29 +122,29 @@ test('Given config-save budgets 越界 When 调用 Then clamp 至 10;错型 Then
 })
 
 test('Given template-save 携带未知步骤字段 When 调用 Then 400 且 errors 逐条', async () => {
-  const settingsValue = {}
-  const h = harness({ settingsValue })
+  const h = harness()
+  const before = loadJson('templates.json', [])
   const tpl = { id: 'x', label: 'x', steps: [{ id: 'a', unknownField: 1, prompt: 'p', outputs: { o: 'o' } }] }
-  const r = await h.call('/api/rsww/template-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'x', json5: JSON.stringify(tpl) } })
+  const r = await h.call('/api/rsww/template-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'x', json: JSON.stringify(tpl) } })
   assert.equal(r.status, 400)
-  assert.equal(settingsValue.templates, undefined)
+  assert.deepEqual(loadJson('templates.json', []), before)
 })
 
 test('Given dryRun When template-save Then 仅校验返回 ok 不落盘', async () => {
-  const settingsValue = {}
-  const h = harness({ settingsValue })
+  const h = harness()
+  const before = loadJson('templates.json', [])
   const tpl = { id: 'x', label: 'x', steps: [{ id: 'a', prompt: 'p', outputs: { o: 'o' } }] }
-  const r = await h.call('/api/rsww/template-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'x', json5: JSON.stringify(tpl), dryRun: true } })
+  const r = await h.call('/api/rsww/template-save', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'x', json: JSON.stringify(tpl), dryRun: true } })
   assert.equal(r.status, 200)
   assert.deepEqual(r.body, { ok: true, dryRun: true })
-  assert.equal(settingsValue.templates, undefined)
+  assert.deepEqual(loadJson('templates.json', []), before)
 })
 
 test('Given GET spec/config/templates When 调用 Then 载荷形态正确', async () => {
   const h = harness()
   const r1 = await h.call('/api/rsww/spec')
   assert.equal(r1.status, 200)
-  assert.ok(r1.body.spec.includes('type: "approve"'))
+  assert.ok(r1.body.spec.includes('"type": "approve"'))
   assert.equal(r1.body.spec.includes('教学重问'), false)
   const r3 = await h.call('/api/rsww/config')
   assert.ok(r3.body.config.slots)
@@ -147,14 +152,13 @@ test('Given GET spec/config/templates When 调用 Then 载荷形态正确', asyn
   assert.ok(Array.isArray(r4.body.templates))
 })
 
-test('Given 用户模板 When template-remove Then 物理删除;Given 内置语义 id 不在用户表 Then 400', async () => {
-  const tplJson5 = JSON.stringify({ id: 'user-1', label: 'u', steps: [{ id: 'a', prompt: 'P', outputs: { o: 'o' } }] })
-  const settingsValue = { templates: [{ id: 'user-1', label: 'u', description: '', enabled: true, json5: tplJson5 }] }
-  const h = harness({ settingsValue })
+test('Given 用户模板 When template-remove Then 物理删除;Given 不存在 id Then 400', async () => {
+  seedTemplate({ id: 'user-1', label: 'u', description: '', enabled: true, json: JSON.stringify({ id: 'user-1', label: 'u', steps: [{ id: 'a', prompt: 'P', outputs: { o: 'o' } }] }) })
+  const h = harness()
   const r = await h.call('/api/rsww/template-remove', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'user-1' } })
   assert.equal(r.status, 200)
   assert.equal(r.body.ok, true)
-  assert.equal(settingsValue.templates.length, 0)
+  assert.deepEqual(loadJson('templates.json', []), [])
   const r2 = await h.call('/api/rsww/template-remove', { method: 'POST', headers: { 'content-type': 'application/json' }, body: { id: 'ghost' } })
   assert.equal(r2.status, 400)
 })

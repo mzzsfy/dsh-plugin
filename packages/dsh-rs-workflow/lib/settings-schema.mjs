@@ -1,8 +1,6 @@
-// settings schema:「rs-workflow」命名空间三节(契约源 docs/rsww-v4/feat/settings.md;board config-save 校验口径同源)
+// config 形态 schema:「rs-workflow」三节(slots/budgets/templates),自有文件存储(config.json)
+// 契约源 docs/rsww-v5/data-design.md 存储布局节;board config-save 校验口径同源
 import z from '@deepseek-ai/schemastery'
-import { builtinTemplates, defaultTemplatesDir } from './builtin-templates.mjs'
-
-export const NAMESPACE = 'rs-workflow'
 
 // 工作位键集与 lib/template-v4.mjs 的 SLOT_KEYS 互为镜像(非派生),test/settings.test.mjs 对拍钉住
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
@@ -46,16 +44,17 @@ function buildBudgets() {
 
 function buildTemplates() {
   const item = z.object({
-    id: z.string().required().description('流程 id(^[a-z][a-z0-9-]*$);创建模式 = rs-<id>'),
+    id: z.string().required().description('流程 id(^[a-z][a-z0-9-]*$)'),
     label: z.string().default('').description('显示名'),
     description: z.string().default('').description('适用场景'),
     enabled: z.boolean().default(true).description('禁用后不可创建、重跑不可选'),
-    json5: z.string().default('').description('流程定义 JSON5 全文(规范见 rs_workflow_template 工具 spec)'),
+    json: z.string().default('').description('流程定义 JSON 全文(规范见设置页模板规范)'),
   })
-  return z.array(item).default(builtinTemplates(defaultTemplatesDir())).description('流程模板集:数组默认值 = 包内内置模板集(collab 分诊/审批/升级语义以内置模板承载)')
+  return z.array(item).default([]).description('流程模板集:自有文件存储 templates.json 全量')
 }
 
-export const SETTINGS_SCHEMA = z.object({ slots: buildSlots(), budgets: buildBudgets(), templates: buildTemplates() })
+// 存储形态 schema(config.json 载入面归一;载入走 normalizeConfig,此 schema 供工具化校验)
+export const CONFIG_SCHEMA = z.object({ slots: buildSlots(), budgets: buildBudgets(), templates: buildTemplates() })
 
 const isEntry = (value) => value !== null && typeof value === 'object'
 const clampBudget = (value) => Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, value))
@@ -84,7 +83,7 @@ function normalizeTemplateEntry(entry) {
     label: typeof entry.label === 'string' ? entry.label : '',
     description: typeof entry.description === 'string' ? entry.description : '',
     enabled: typeof entry.enabled === 'boolean' ? entry.enabled : true,
-    json5: typeof entry.json5 === 'string' ? entry.json5 : '',
+    json: typeof entry.json === 'string' ? entry.json : '',
   }
 }
 
@@ -100,14 +99,4 @@ function normalizeTemplates(value) {
 export function normalizeConfig(value) {
   const source = isEntry(value) ? value : {}
   return { slots: normalizeSlots(source.slots), budgets: normalizeBudgets(source.budgets), templates: normalizeTemplates(source.templates) }
-}
-
-// 行 config → settings base 三节;templates 缺省取包内内置模板集
-export function baseOf(config) {
-  const source = isEntry(config) ? config : {}
-  return normalizeConfig({
-    slots: source.slots,
-    budgets: source.budgets,
-    templates: source.templates === undefined ? builtinTemplates(defaultTemplatesDir()) : source.templates,
-  })
 }

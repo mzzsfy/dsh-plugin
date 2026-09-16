@@ -289,14 +289,14 @@ test('Given steps 为空数组 When 校验 Then top:steps 错误', () => {
   assert.ok(targets(errors).includes('top:steps'))
 })
 
-test('Given JSON5 文本合法 When parseTemplate Then 得到对象', () => {
-  const parsed = parse(`{ id: 'x', label: 'X', steps: [ { id: 'a', prompt: '{request}', outputs: { o: 'o' } } ] }`)
+test('Given JSON 文本合法 When parseTemplate Then 得到对象', () => {
+  const parsed = parse(JSON.stringify({ id: 'x', label: 'X', steps: [{ id: 'a', prompt: '{request}', outputs: { o: 'o' } }] }))
   assert.equal(parsed.id, 'x')
 })
 
-test('Given JSON5 语法错误 When parseTemplate 抛错 Then parseErrorLine 提取行号', () => {
+test('Given JSON 语法错误 When parseTemplate 抛错 Then parseErrorLine 提取行号', () => {
   let msg = ''
-  try { parseTemplate('{ id: "x" } extra }') } catch (e) { msg = e.message }
+  try { parseTemplate('{"id":"x"} extra }') } catch (e) { msg = e.message }
   assert.ok(msg)
   const line = parseErrorLine('Unexpected token at 3:5')
   assert.equal(line, 3)
