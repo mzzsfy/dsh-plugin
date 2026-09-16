@@ -495,8 +495,11 @@ export function apply(ctx, config) {
       const agents = ctx.get('agents')
       const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
+      // subagent 会话不在主列表(官方 sessionVisible 以 origin 排除):其输入是
+      // 任务提示与注入文本而非人类输入,且会以更近的产物时间挤占扫描窗口,必须排除
       const window = records
-        .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
+        .filter((recordItem) => recordItem.header.origin !== 'subagent'
+          && recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
         .slice(0, HISTORY_SESSION_SCAN_LIMIT)
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
@@ -576,9 +579,11 @@ export function apply(ctx, config) {
         await ensureCacheDir(cacheDir)
         const records = await ctx.sessionQuery.listSessions()
         const workspaces = []
+        // subagent 会话不参与归纳:纯 subagent 的 cwd 无人类输入,不值得建缓存
         for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
           const recordCwd = recordItem.header.cwd
-          if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
+          if (recordItem.header.origin === 'subagent' || recordCwd === undefined) continue
+          if (workspaces.some((known) => samePath(known, recordCwd))) continue
           workspaces.push(recordCwd)
         }
         for (const workspaceCwd of workspaces) alignWorkspace(workspaceCwd)

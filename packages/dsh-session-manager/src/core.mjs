@@ -269,7 +269,9 @@ export function filterArchiveRows(rows, query) {
 // 上限防的是解压耗时与事件对象内存峰值失控,非阻塞主循环;跳过线按宿主版本
 // 黑名单取值(见 isLegacyDecompressHost),对齐中连续解压占用超 SLICE 即让出 YIELD。
 // 运行中会话(当前会话)提取结果只保留内存不落盘——产物持续变化,落盘指纹立即失效
-export const HISTORY_SESSION_SCAN_LIMIT = 20
+// 扫描窗口按主会话计(subagent 已排除):放宽到与启动回溯一致——extracts 指纹
+// 缓存使扩大窗口的持续成本仅限新会话的一次性解压,产物未变的会话零解压
+export const HISTORY_SESSION_SCAN_LIMIT = 100
 export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
 export const HISTORY_SCOPES = ['prompts', 'session', 'workspace', 'global']

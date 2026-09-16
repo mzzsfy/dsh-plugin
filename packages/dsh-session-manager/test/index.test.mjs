@@ -22,7 +22,7 @@ const declaredInject = Array.isArray(indexModule.inject) ? indexModule.inject : 
 const dependencyReady = typeof apply === 'function'
 const skipMissingDeps = { skip: dependencyReady ? false : 'peer 依赖未安装,路由层测试跳过' }
 const MESSAGES = indexModule.MESSAGES
-const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_STARTUP_SCAN_LIMIT, HISTORY_INPUT_MAX_CHARS, HISTORY_PROMPTS_MAX, HISTORY_SCOPES, DEFAULT_AUTO_ARCHIVE_DAYS, DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
+const { DELETE_MESSAGES, HISTORY_INPUT_LIMIT, HISTORY_SESSION_SCAN_LIMIT, HISTORY_STARTUP_SCAN_LIMIT, HISTORY_INPUT_MAX_CHARS, HISTORY_PROMPTS_MAX, HISTORY_SCOPES, DEFAULT_AUTO_ARCHIVE_DAYS, DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS } = await import('../src/core.mjs').catch(() => ({ DELETE_MESSAGES: {} }))
 const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cache.mjs')
 
 // 插件激活即跑历史缓存启动对齐:所有测试统一隔离缓存目录,
@@ -1970,6 +1970,45 @@ test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老�
       (body) => body.aligned && body.inputs.length > 0)
     assert.equal(readCounts.get('s0'), undefined, '窗口外最老会话不被启动对齐解压')
     assert.ok(readCounts.get('s' + (total - 1)) >= 1, '窗口内最新会话被解压')
+  })
+})
+
+test('历史输入路由:窗口排除 subagent 会话——不解压、条目不入缓存、不占槽位', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    // subagent 会话在宿主列表中更新更近(排最前):若不排除将挤占窗口并收录其输入
+    const headers = [
+      { id: 'sub1', cwd: 'C:\\x', createdAt: 0, origin: 'subagent' },
+      { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+    ]
+    const { handlers, readCounts } = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      readSessions: {
+        sub1: [userMessageEvent('子代理任务提示', 100)],
+        s1: [userMessageEvent('人类输入', 200)],
+      },
+    })
+    const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '人类输入'))
+    assert.equal(res.body.inputs.some((item) => item.text === '子代理任务提示'), false, 'subagent 输入不入浮层')
+    assert.equal(readCounts.get('sub1'), undefined, 'subagent 产物不被解压')
+  })
+})
+
+test('历史输入路由:窗口放宽后最近 SCAN 个主会话全部参与对齐(超过旧 20 窗口)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const total = HISTORY_SESSION_SCAN_LIMIT + 10
+    const headers = Array.from({ length: total }, (_, i) => ({ id: 's' + (total - 1 - i), cwd: 'C:\\x', createdAt: 0 }))
+    const readSessions = {}
+    for (let i = 0; i < total; i++) readSessions['s' + i] = [userMessageEvent('输入' + i, 1000 + i)]
+    const { handlers, readCounts } = makeCtx({ archivedIds: [], headers, agents: new Map(), readSessions })
+    // 第 SCAN 个会话(旧窗口外)的输入必须可入浮层
+    const boundary = 's' + (total - HISTORY_SESSION_SCAN_LIMIT)
+    await requestUntil(handlers, '?sessionId=' + boundary + '&scope=workspace',
+      (body) => body.aligned && body.inputs.some((item) => item.text === '输入' + (total - HISTORY_SESSION_SCAN_LIMIT)))
+    assert.ok(readCounts.get(boundary) >= 1, '窗口边界会话被解压')
+    assert.equal(readCounts.get('s0'), undefined, '窗口外最老会话不解压')
   })
 })
 
