@@ -431,13 +431,6 @@ function VersionCard(props) {
       h('span', { className: 'dm-row__label' }, '版本'),
       h('span', null, '运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h(VerdictBadge, { status }),
-      // 更新内容入口:通道最新版未知(tags 未就绪)时禁用
-      h('button', {
-        className: 'dm-btn',
-        disabled: !status.channelLatest || props.restarting,
-        title: '查看 ' + (status.channelLatest || '') + ' 的更新内容',
-        onClick: props.onReleaseNotes,
-      }, '更新内容'),
       h('span', { className: 'dm-spacer' }),
       h('button', {
         className: 'dm-btn',
@@ -477,6 +470,13 @@ function VersionCard(props) {
       checked ? h('span', { className: 'dm-meta' }, '上次检查 ' + checked) : null,
       status.checkError ? h('span', { className: 'dm-error' }, status.checkError) : null,
       h('a', { className: 'dm-link', href: NPM_VERSIONS_URL, target: '_blank', rel: 'noreferrer' }, 'npm 版本页'),
+      // 更新内容入口:通道最新版未知(tags 未就绪)时禁用
+      h('button', {
+        className: 'dm-btn',
+        disabled: !status.channelLatest || props.restarting,
+        title: '查看 ' + (status.channelLatest || '') + ' 的更新内容',
+        onClick: props.onReleaseNotes,
+      }, '更新内容'),
     ),
     h(EditRow, {
       label: '升级命令',
