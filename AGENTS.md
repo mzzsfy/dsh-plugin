@@ -85,6 +85,27 @@ else window.__navicIconQueue = [NAV_ICON]
 - 生产者样板由 `dsh-settings-nav-icons` 契约测试锁定,改样板须同步全部生产者包
 - 取图优先级:用户覆盖 > 插件声明 > 内置映射 > 关键词 > 哈希;同键重复注册幂等
 
+## 插件 client 样式注入规约
+
+插件 client 半区向文档注入或渲染 `<style>` 时(document.head 注入、组件树内 React 渲染或其他容器一律适用),创建节点必须自带 `data-plugin="<npm 包名>"`,值与 `__ModuleLoader__.load({id})` 注册 id(即 npm 包名)逐字一致,无论注入时机(材质化 / apply / 运行时挂载):
+
+```js
+// head 注入形态
+const style = document.createElement('style')
+style.setAttribute('data-plugin', '@mzzsfy/<包名>')
+style.textContent = CSS
+document.head.appendChild(style)
+// 组件树内 React 渲染形态(h 别名等价,但守卫文本断言以全名匹配,示例与守卫对齐)
+React.createElement('style', { 'data-plugin': '@mzzsfy/<包名>', dangerouslySetInnerHTML: { __html: CSS } })
+```
+
+- 机制背景:宿主 client-modules 在任意插件材质化时运行 `claimStyles`,把**文档中所有**无 `data-plugin` 的 style(不限 head,含组件树内渲染节点)归属给该材质化插件;该插件 HMR rebuilt 时 `dsh-client-hmr` 的 `removeOwnedStyles` 按 `data-plugin` 逐字匹配整批删除。无标记样式会被后续材质化的插件误收,随其 rebuilt 连带删除,受害插件无新的材质化/挂载触发前不重注,页面裸样式直至刷新——表现为"启动后多次点击后某插件页面偶发丢失 CSS"。机制对齐版本:dsh 0.1.5-rc.1 实测(dsh-client-modules / dsh-client-hmr 的 lib/client.js)
+- 自带标记后三路径全通:他插件材质化 claimStyles 只收无标记节点(不误收);他插件 rebuilt 删不到本插件样式;自身 rebuilt 先删旧标记样式,fiber refresh 重跑 apply/挂载/渲染路径幂等重注(自愈)
+- 原位复用路径(按 id 找到在位节点仅改 textContent)必须幂等补 `setAttribute('data-plugin', ...)`,防修复前旧代残留的缺标记节点跨代延续(参考 `dsh-toast` 的 ensureStyle stale 分支)
+- 标记值禁止另起短名(如省略 @mzzsfy 前缀的包短名):值 != 注册 id 时自身 rebuilt 删不到旧样式,重注被幂等守卫跳过,刷新页面前 CSS 停留在旧版
+- 契约守卫测试:包内测试断言 client.js 每个样式注入点都伴随 data-plugin 标记——head 注入断言 `createElement('style')` 与 `setAttribute('data-plugin', '<包名>')` 计数相等(守卫形态参考 `dsh-cron-board/test/client-id.test.mjs`);React 渲染形态断言 `createElement('style'` 出现处均携带 `data-plugin` prop;DOM 桩测试的假元素须实现 `setAttribute` 并记录属性供断言(参考 `dsh-toast/test/mount.test.mjs` 的 attrs 桩)
+- 已知待归一:`dsh-usage-dash` 的 STYLE_ID 当前为包短名(`dsh-usage-dash`),不满足值=注册 id,自身 rebuilt 后样式不刷新;`dsh-rs-workflow` 两处 React 渲染 style(src/client.js:342,1170)无 data-plugin 标记,属标准受害形态且无守卫。两包待单独修复
+
 ## 公共 client 依赖包规约
 
 跨插件共享的 client 能力(如 `dsh-toast` 的浮出通知)按**普通 npm 依赖**形态发布,禁止做成 dsh 插件(不声明 `dsh.bundle.patch`、不自带 cordis.patch.yml、无需 plugin add):
