@@ -170,6 +170,8 @@ export class RunDriver {
     if (this.state.status === 'paused') {
       this.state.pendingApprovals ??= []
       this.state.pendingApprovals.push({ stepId: this.state.waitingApproval, verdict, comments: event.reason ?? '', by: event.by })
+      // 受理即记账(与 waiting 分支对称):页签裁决来源回显不因 paused 入队丢失
+      this.store.step({ runId: this.runId, event: 'control', body: { kind: event.kind, by: event.by, reason: event.reason } })
       this.persistState()
       return true
     }
@@ -183,6 +185,7 @@ export class RunDriver {
       if (route.verdict === 'REJECTED' && !route.exhausted) {
         this.state.redoInfo = { [route.redoTarget]: { comments: route.comments, prevOutputs: route.prevOutputs } }
       }
+      this.store.update({ runId: this.runId, waiting: null })
       this.persistState()
     }
     return applied
@@ -204,6 +207,7 @@ export class RunDriver {
         this.state.redoInfo = { [route.redoTarget]: { comments: route.comments, prevOutputs: route.prevOutputs } }
       }
     }
+    this.store.update({ runId: this.runId, waiting: null })
   }
 
   // 边界通道 drain:消费 controls 中未消费的 message 事件
@@ -291,7 +295,10 @@ export class RunDriver {
         this.state.status = 'waiting_approval'
         this.state.waitingApproval = step.id
         this.persistState()
-        return waitingPayload({ runId: this.runId, state: this.state, script: this.script, planStepOf: this.planStepOf, approveStep: step })
+        const payload = waitingPayload({ runId: this.runId, state: this.state, script: this.script, planStepOf: this.planStepOf, approveStep: step })
+        // 待裁决摘要落盘:页签 /run 路由据此渲染审批上下文
+        this.store.update({ runId: this.runId, waiting: payload.waiting })
+        return payload
       }
       // 派发时才消费控制消息:approve/flow/idle/terminal 边界不丢不耗,留给真正组装 prompt 的批次
       const { inject, queued } = this.drainControls()

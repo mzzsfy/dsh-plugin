@@ -175,7 +175,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       return record
     },
 
-    update({ runId, state, status, summary, finishedAt, queued }) {
+    update({ runId, state, status, summary, finishedAt, queued, waiting }) {
       ensureLoaded()
       assertRunId(runId)
       const record = records.get(runId)
@@ -186,6 +186,13 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       if (summary !== undefined) record.summary = summary
       if (finishedAt !== undefined) record.finishedAt = finishedAt
       if (queued !== undefined) record.queued = queued
+      if (waiting !== undefined) record.waiting = waiting ?? undefined
+      if (status !== undefined) {
+        // 状态迁移同步 index 行:waiting_approval/paused 期间列表分组/轮询不基于失真状态
+        const entry = index.find((e) => e.runId === runId)
+        if (entry) Object.assign(entry, indexEntryOf(record))
+        persistIndex()
+      }
       persistRun(record)
       return record
     },

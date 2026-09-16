@@ -345,11 +345,12 @@ const memoryStore = () => {
         ;(rec.stepsTrace[stepId]['-'] ??= []).push({ event, ...body })
       }
     },
-    update: ({ runId, state, status, queued }) => {
+    update: ({ runId, state, status, queued, waiting }) => {
       const rec = records.get(runId)
       if (state !== undefined) rec.state = state
       if (status !== undefined) rec.status = status
       if (queued !== undefined) rec.queued = queued
+      if (waiting !== undefined) rec.waiting = waiting ?? undefined
     },
     finish: ({ runId, status, summary }) => { const rec = records.get(runId); rec.status = status; rec.summary = summary },
     get: (runId) => records.get(runId),
@@ -382,6 +383,11 @@ test('Given 含审批步剧本 When runSegment Then 段以 waiting settle 且状
   assert.equal(payload.kind, 'waiting')
   assert.equal(payload.waiting.stepId, 'rev')
   assert.equal(driver.state.status, 'waiting_approval')
+  // 待裁决摘要落盘:页签 /run 路由据此渲染
+  assert.deepEqual(driver.store.get('r-test-1').waiting, payload.waiting)
+  // 裁决应用后摘要清除
+  driver.handlePost({ kind: 'approve', by: 'user' })
+  assert.equal(driver.store.get('r-test-1').waiting, undefined)
 })
 
 test('Given waiting_approval When 裁决回写 APPROVED 再 runSegment Then 推进至终态', async () => {
