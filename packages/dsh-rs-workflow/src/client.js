@@ -163,13 +163,44 @@ window.__ModuleLoader__.load({
     }
 
     // 产出/指令/错误全文展开(痛点 7/18:零截断,默认折叠)
+    // 剪贴板写入:clipboard API 优先;非安全上下文(LAN HTTP)退化 execCommand
+    const copyText = async (text) => {
+      if (navigator.clipboard?.writeText) {
+        try { await navigator.clipboard.writeText(text); return true } catch { /* 权限拒绝时走兜底 */ }
+      }
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        const done = document.execCommand('copy')
+        ta.remove()
+        return done
+      } catch { return false }
+    }
+
+    function CopyButton({ text, label = '复制' }) {
+      const [done, setDone] = useState(false)
+      useEffect(() => {
+        if (!done) return undefined
+        const t = setTimeout(() => setDone(false), ARMED_TIMEOUT_MS)
+        return () => clearTimeout(t)
+      }, [done])
+      return React.createElement('button', { className: 'rsww-btn', style: { padding: '2px 8px' }, type: 'button',
+        onClick: async () => { if (await copyText(text)) setDone(true) } },
+        done ? '已复制' : label)
+    }
+
     function OutputFullText({ label, text, tone }) {
       const [open, setOpen] = useState(false)
       if (!text) return null
       return React.createElement('div', {},
         React.createElement('button', { className: 'rsww-btn', style: { padding: '2px 8px' }, onClick: () => setOpen((v) => !v) },
           (open ? '收起 ' : '展开 ') + label),
-        open ? React.createElement('div', { className: 'rsww-full', style: tone === 'error' ? { color: 'var(--dsw-alias-state-error-primary,#ec1313)' } : null }, text) : null)
+        open ? React.createElement('div', { className: 'rsww-full', style: tone === 'error' ? { color: 'var(--dsw-alias-state-error-primary,#ec1313)' } : null }, text) : null,
+        open ? React.createElement(CopyButton, { text }) : null)
     }
 
     // 步骤事件账行:按 store.step 落盘顺序渲染全量 body;body 判空兜底(空账/异常事件不崩页签)
@@ -313,7 +344,9 @@ window.__ModuleLoader__.load({
         settled.length ? group('已落定', '近 ' + settled.length + ' 次', settled) : null)
     }
 
-    function FlowChip() {
+    // 页签切换:宿主 selectView face 未下发 header.actions 子槽(实测),官方 face 到位即走;
+    // 兜底=按 a11y role 精确匹配宿主页签按钮,不可达静默
+    function FlowChip({ selectView }) {
       const [runs, setRuns] = useState([])
       const reload = useCallback(async () => {
         const outcome = await request('runs')
@@ -326,7 +359,14 @@ window.__ModuleLoader__.load({
       }, [reload])
       const live = runs.filter((r) => r.status === 'running')
       if (live.length === 0) return null
-      return React.createElement('button', { className: 'rsww-chip rsww-chip--live', onClick: () => { window.dispatchEvent(new CustomEvent('rsww:open-flow-view')) } },
+      const open = () => {
+        if (selectView) { selectView(VIEW_ID); return }
+        try {
+          const tab = [...document.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '若水编排')
+          if (tab) tab.click()
+        } catch { /* 页签不可达:静默 */ }
+      }
+      return React.createElement('button', { className: 'rsww-chip rsww-chip--live', onClick: open, title: '查看若水编排' },
         React.createElement('span', { className: 'rsww-chip__dot' }),
         '若水编排 ' + live.length + ' 运行中')
     }
@@ -875,7 +915,9 @@ window.__ModuleLoader__.load({
         error ? h('span', { className: 'rsww-error' }, error) : null,
         releasedErr ? h('span', { className: 'rsww-note' }, releasedErr) : null,
         specOpen ? h('div', { className: 'rsww-card' },
-          h('span', { className: 'rsww-label' }, '模板规范'),
+          h('div', { className: 'rsww-row' },
+            h('span', { className: 'rsww-label' }, '模板规范'),
+            specText !== '' && !/^规范拉取失败/.test(specText) ? h(CopyButton, { text: specText }) : null),
           h('div', { className: 'rsww-full', style: { maxHeight: 320 } }, specText !== '' ? specText : '加载中...')) : null,
         editing ? h(TemplateEditor, {
           entry: editing.entry, isNew: editing.isNew, templates,
@@ -1052,12 +1094,12 @@ window.__ModuleLoader__.load({
               disposeView = ctx.slots.inject('conversation.view', () =>
                 ctx.slots.register(
                   { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
-                  () => React.createElement(FlowView, { getSessionId: () => currentSessionId }),
+                  (props) => React.createElement(FlowView, { getSessionId: () => currentSessionId, ...props }),
                 ))
               disposeChip = ctx.slots.inject('conversation.session.header.actions', () =>
                 ctx.slots.register(
                   { name: 'conversation.session.header.actions', id: CHIP_ID, order: 15 },
-                  () => React.createElement(FlowChip),
+                  (props) => React.createElement(FlowChip, props),
                 ))
             } else if (!isRs && disposeView) {
               disposeView(); disposeView = null

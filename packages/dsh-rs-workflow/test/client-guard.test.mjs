@@ -61,6 +61,20 @@ test('Given client.js When 检查视图职责 Then 运行记录唯一视图=会�
   assert.ok(text.includes("'resume-from'") && text.includes("'run-remove'"), '续跑/删除路由消费保留')
 })
 
+test('Given client.js When 检查胶囊点击 Then 不得派发无监听的 window 自定义事件(死代码防回归)', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(!text.includes('dispatchEvent'), '禁止 window.dispatchEvent 死通道')
+  assert.ok(text.includes('if (selectView) { selectView(VIEW_ID)'), '官方 face 优先')
+  assert.ok(text.includes('[role="tab"]'), 'DOM 桥接兜底须按 role 精确匹配')
+})
+
+test('Given client.js When 检查复制能力 Then 规范面板与全文展开须挂复制按钮(双通道写入)', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(text.includes('navigator.clipboard?.writeText'), 'clipboard API 优先')
+  assert.ok(text.includes("execCommand('copy')"), '非安全上下文 execCommand 兜底')
+  assert.ok(text.includes('h(CopyButton, { text: specText })'), '模板规范面板挂复制')
+})
+
 test('Given client.js When 检查 color 值 Then 不使用裸 hex(仅 alias token 或 fallback)', () => {
   const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const cssMatch = text.match(/const CSS = `([\s\S]*?)`/)
