@@ -12,6 +12,7 @@ import {
   TARGET_PACKAGE,
   TAG_PLACEHOLDER,
   buildUpgradeCommand,
+  extractPinnedVersion,
   classifyUpgradeFailure,
   fetchDistTags,
   fetchReleaseNotes,
@@ -23,7 +24,6 @@ import {
   resolveHostVersion,
   UPGRADE_FAIL_FILE_LOCKED,
   UPGRADE_FAIL_TRANSIENT_NETWORK,
-  VERDICT_UP_TO_DATE,
 } from './core.mjs'
 import { runUpgrade } from './upgrade.mjs'
 import { detectRuntimeEnv, RUNTIME_KINDS } from './runtime.mjs'
@@ -497,8 +497,12 @@ export function apply(ctx) {
     const config = readSettings(ctx)
     // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
     const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
+    // 通道名恰为 semver 形态时 {tag} 展开产物会被误读为钉定:与通道名重合即非钉定
+    const pinnedVersion = extractPinnedVersion(command)
     const last = {
       command,
+      // 钉定版本随命令定格:落定复读按安装意图(钉定/通道)判定 stale
+      pinnedVersion: pinnedVersion === config.channel ? null : pinnedVersion,
       startedAt: Date.now(),
       ok: false,
       finishedAt: null,
@@ -611,6 +615,7 @@ export function apply(ctx) {
             previousVersion: last.previousVersion,
             installedVersion: last.installedVersion,
             channelLatest: tags !== null && Object.prototype.hasOwnProperty.call(tags, channel) ? tags[channel] : null,
+            pinnedVersion: last.pinnedVersion,
           })
           last.stale = freshness.stale
           last.reason = freshness.reason
@@ -761,14 +766,6 @@ export function apply(ctx) {
         if (upgradeLockStale(readUpgradeLock()) === false) {
           audit('upgrade', 'rejected', 'reason=lock')
           sendJson(res, 409, { error: '存在未过期的升级锁(可能有残留升级子进程),等待锁过期或删除 ' + UPGRADE_LOCK_PATH })
-          return
-        }
-        // 防降级:运行版本已达通道最新时拒绝(重装旧版即降级,对齐 no-newer-version);
-        // 信息不足(verdict unknown)放行,宽松不误拒
-        const judged = judgeNow()
-        if (judged.verdict === VERDICT_UP_TO_DATE) {
-          audit('upgrade', 'rejected', 'reason=up-to-date')
-          sendJson(res, 409, { error: '当前已是通道最新版,无需升级;重装请走命令行' })
           return
         }
         // 活跃工作门控:升级不可越(agent 会话/job 在跑时强行升级会被中断)

@@ -91,11 +91,39 @@ export function isVersionPendingRestart({ runningVersion, installedVersion }) {
   return Boolean(parseSemver(runningVersion) && parseSemver(installedVersion) && gtSemver(installedVersion, runningVersion))
 }
 
-// 升级后磁盘版本复读判定:stale=版本未前进(镜像滞后/静默未升)或未达通道目标。
+// 从已解析安装命令提取钉定版本(形如 @x.y.z[-pre][+build] 的精确版本 token),
+// 取最后一个合法者(包说明符通常在命令尾部);token 只在 semver 字符集内截取,
+// shell 粘连(&&、;、>)不参与;通道名/@latest/非法形态不命中,无钉定返回 null。
+// 约束:semver 形态的通道名({tag} 展开产物)不属钉定,调用方须排除与通道名重合的 token
+const PINNED_TOKEN_PATTERN = /@([0-9A-Za-z][0-9A-Za-z.+-]*)/g
+export function extractPinnedVersion(command) {
+  const text = typeof command === 'string' ? command : ''
+  let pinned = null
+  for (const match of text.matchAll(PINNED_TOKEN_PATTERN)) {
+    if (parseSemver(match[1]) !== null) pinned = match[1]
+  }
+  return pinned
+}
+
+// 升级后磁盘版本复读判定:stale=结果与安装意图不符。意图优先级:
+// 钉定版本(命令含 @x.y.z)→ 恰装到该版本才算达成,通道目标不参与对拍;
+// 通道语义:目标>来版=升级(未前进/未达皆 stale);目标<=来版=重装或回退,
+// 恰落到通道目标即达成(重装版本不变是预期,回退方向不套"未前进"口径)。
 // previous 未知只豁免"未前进"分支;目标缺失时无法证明未达标,宽松判 fresh 不误报。
-export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest }) {
+export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest, pinnedVersion }) {
   if (!parseSemver(installedVersion)) {
     return { stale: true, reason: '升级后磁盘版本解析失败' + (installedVersion ? ': ' + installedVersion : '(读取失败)') }
+  }
+  if (parseSemver(pinnedVersion)) {
+    return compareSemver(installedVersion, pinnedVersion) === 0
+      ? { stale: false, reason: null }
+      : { stale: true, reason: '未安装到指定版本: ' + installedVersion + '(命令钉定 ' + pinnedVersion + ')' }
+  }
+  if (parseSemver(previousVersion) !== null && parseSemver(channelLatest) !== null
+    && compareSemver(channelLatest, previousVersion) <= 0) {
+    return compareSemver(installedVersion, channelLatest) === 0
+      ? { stale: false, reason: null }
+      : { stale: true, reason: '未落到通道目标: ' + installedVersion + '(通道目标 ' + channelLatest + ')' }
   }
   if (parseSemver(previousVersion) && !gtSemver(installedVersion, previousVersion)) {
     return { stale: true, reason: '磁盘版本未前进,升级可能静默失败或镜像滞后: ' + installedVersion }

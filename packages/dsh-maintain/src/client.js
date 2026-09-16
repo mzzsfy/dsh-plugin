@@ -159,11 +159,11 @@ function restartPostLost(error) {
 // test/parity.test.mjs 按 const 名正则提取对拍,修改任一侧必须同步。
 const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
+const VERDICT_UNKNOWN = 'unknown'
 // 与 host runtime.mjs RUNTIME_KINDS.MANUAL_START 镜像(parity 对拍,单侧改名即测试失败)
 const RUNTIME_KIND_MANUAL = 'manual-start-likely'
 // 与 host AUTO_RESTART_DELAY_MS 镜像(parity 对拍):弹窗文案引用,勿手抄数字
 const AUTO_RESTART_DELAY_SEC = 3
-const VERDICT_UNKNOWN = 'unknown'
 
 // 非 2xx 应答抛带 status 与完整 payload 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
 // 与"网络失联"(fetch reject TypeError/abort DOMException,无 status);payload 供活跃工作
@@ -305,12 +305,67 @@ function ensureUpgradeFloatStyle() {
 // 其后按宿主是否自动重启分流指引
 // LOGIC-BEGIN upgradeFinalText
 function upgradeFinalText(state) {
-  if (state.stale === true) return '升级命令执行完成,但磁盘版本未前进或未达目标,详情见版本与运维页'
+  if (state.stale === true) return '升级命令执行完成,但结果与安装意图不符,详情见版本与运维页'
   if (state.requiresManualRestart === true) return '升级完成,当前为手动直跑环境,请手动重启宿主后生效'
   if (state.autoRestartScheduled === true) return '升级完成,宿主将自动重启,页面恢复后可直接使用'
   return '升级完成,重启宿主后生效(版本与运维页可重启)'
 }
 // LOGIC-END upgradeFinalText
+
+// 从已解析安装命令提取钉定版本(@x.y.z 精确版本 token,取最后合法者)。
+// 与 core extractPinnedVersion 镜像(parity 对拍):客户端无 parseSemver,
+// token 合法性以内嵌 semver 语法判定,规则与 host SEMVER_PATTERN 同源
+// LOGIC-BEGIN extractPinnedVersion
+function extractPinnedVersion(command) {
+  const text = typeof command === 'string' ? command : ''
+  const pattern = /@([0-9A-Za-z][0-9A-Za-z.+-]*)/g
+  const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
+  let pinned = null
+  for (const match of text.matchAll(pattern)) {
+    if (semverPattern.test(match[1])) pinned = match[1]
+  }
+  return pinned
+}
+// LOGIC-END extractPinnedVersion
+
+// 安装确认弹窗的版本变更说明:钉定版本最优先(意图=精确版本,附改回 {tag} 指引);
+// 通道语义按 未知/重装(含已装将被替换提示)/升级/无法判定/回退 分支,
+// 回退表述不断言方向(semver 等值但字面不同时同样成立),判等只用字符串相等
+// LOGIC-BEGIN buildInstallChangeLine
+function buildInstallChangeLine(status, command) {
+  // 与通道名重合的 token 是 {tag} 展开产物(通道名可为 semver 形态),不属钉定
+  const detected = extractPinnedVersion(command)
+  const pinned = detected !== null && detected !== status.channel ? detected : null
+  if (pinned !== null) {
+    return '将安装指定版本 ' + pinned + '(当前运行 ' + (status.runningVersion || '未知')
+      + ');回退或修复完成后,请把命令模板改回含 {tag} 的原形态,否则后续安装持续钉在该版本。'
+  }
+  const target = status.channelLatest
+  const running = status.runningVersion
+  if (!target) {
+    return '通道最新版未知,将安装通道「' + status.channel + '」当前指向的版本。'
+  }
+  if (target === running) {
+    const pending = status.installedVersion && status.installedVersion !== running
+      ? ',磁盘已装 ' + status.installedVersion + ' 将被替换' : ''
+    return '将重装 ' + target + ':运行版本不变' + pending + ',用于修复被破坏的本体或异常安装。'
+  }
+  if (status.verdict === VERDICT_OUTDATED) {
+    return '将升级:运行 ' + (running || '未知') + ' → ' + target + '。'
+  }
+  if (status.verdict === VERDICT_UNKNOWN) {
+    return '将安装到 ' + target + '(运行/目标版本无法比较,无法判定升降级)。'
+  }
+  return '通道目标 ' + target + ' 不高于当前运行 ' + (running || '未知') + ',宿主将回退/对齐到通道版本。'
+}
+// LOGIC-END buildInstallChangeLine
+
+// 弹窗的当前版本行:运行/已装任一缺失回退"未知"
+// LOGIC-BEGIN buildInstallVersionHint
+function buildInstallVersionHint(status) {
+  return '版本变更:当前 运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')
+}
+// LOGIC-END buildInstallVersionHint
 
 // state:null=进行中;对象=升级结果(last,ok 区分成败);'unknown'=观察超限状态未知
 function showUpgradeFloat(state) {
@@ -439,14 +494,11 @@ function VersionCard(props) {
       }, props.busy.refresh ? '检查中…' : '刷新'),
       h('button', {
         className: 'dm-btn',
-        // upgradeLockHeld 为 host 权威信号(锁文件时效化):升级进行中或残留锁未过期时禁用;
-        // 运行版本已是通道最新时同样禁用(host 侧同步 409 拒绝,防重装降级)
-        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running)
-          || status.upgradeLockHeld === true
-          || status.verdict === VERDICT_UP_TO_DATE,
-        title: status.verdict === VERDICT_UP_TO_DATE ? '当前已是通道最新版,无需升级;重装请走命令行' : undefined,
+        // 安装入口全版本状态可点(重装修复/回退是显式意图):仅瞬态禁用(请求在途/升级进行中/重启等待);
+        // 残留锁与互斥保护在提交时由 host 409 拒绝,原因经 toast 提示
+        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running),
         onClick: props.onUpgrade,
-      }, '升级'),
+      }, '安装'),
     ),
     status.restartPending === true
       ? h('div', { className: 'dm-notice dm-notice--warn' },
@@ -535,7 +587,7 @@ function UpgradeCard(props) {
           // stale(执行成功但版本未前进/未达目标)时成功行降格为中性表述,不引导重启,
           // 与下方 stale 警告行自洽
           last.ok ? h('span', { className: last.stale === true ? 'dm-warn' : 'dm-ok' },
-              last.stale === true ? '升级命令执行完成,但版本未前进或未达目标' : '升级完成,重启宿主后生效')
+              last.stale === true ? '升级命令执行完成,但结果与安装意图不符' : '升级完成,重启宿主后生效')
             : h('span', { className: 'dm-error' }, '升级失败'
                 + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '')
                 + (Array.isArray(last.attempts) && last.attempts.length > 1 ? '(已尝试 ' + last.attempts.length + ' 次)' : '')
@@ -551,7 +603,7 @@ function UpgradeCard(props) {
       : null,
     !upgrade.running && last && last.ok === true && last.stale === true
       ? h('div', { className: 'dm-row' },
-          h('span', { className: 'dm-warn' }, '磁盘版本未前进或未达目标: ' + (last.reason || '镜像可能滞后')))
+          h('span', { className: 'dm-warn' }, '安装结果与意图不符: ' + (last.reason || '镜像可能滞后')))
       : null,
     !upgrade.running && last && !last.ok && last.stderrTail
       ? h('pre', { className: 'dm-pre' }, last.stderrTail)
@@ -586,10 +638,8 @@ function OpsCard(props) {
   )
 }
 
-// 升级确认弹窗:展示将执行的命令({tag} 已替换为追踪通道)与自动重启勾选,确认才触发。
-// 自动重启是会话级选择(不持久化),勾/不勾的后果在窗内明示:
-// 勾选=命令成功后宿主延迟 3 秒退出,由进程管理器拉起新版本,页面随宿主恢复自动刷新;
-// 不勾选=宿主继续运行旧版本,面板提示"重启宿主后生效",需手动点重启按钮
+// 安装确认弹窗:展示版本变更(从→到)、将执行的命令({tag} 已替换为追踪通道)与自动重启勾选。
+// 重装修复(目标==运行版本)与回退(目标低于运行版本)是面板显式意图,窗内分类说明
 function UpgradeDialog(props) {
   // 每次打开都重新挂载(MaintainApp 条件渲染),默认勾选随挂载重置
   const [autoRestart, setAutoRestart] = useState(true)
@@ -598,21 +648,24 @@ function UpgradeDialog(props) {
     ? status.upgradeTemplate
     : DEFAULT_UPGRADE_TEMPLATE
   const command = template.split('{tag}').join(status.channel)
+  const changeLine = buildInstallChangeLine(status, command)
   return h('div', { className: 'dm-dialog__mask', onClick: props.onCancel },
     h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
-      h('div', { className: 'dm-card__title' }, '确认升级'),
-      h('div', { className: 'dm-dialog__hint' }, '将执行以下命令(升级期间页面可离开,进度由右下角浮条提示):'),
+      h('div', { className: 'dm-card__title' }, '确认安装'),
+      h('div', { className: 'dm-dialog__hint' }, buildInstallVersionHint(status)),
+      h('div', { className: 'dm-dialog__hint dm-warn' }, changeLine),
+      h('div', { className: 'dm-dialog__hint' }, '将执行以下命令(安装期间页面可离开,进度由右下角浮条提示):'),
       h('pre', { className: 'dm-pre' }, command),
       h('div', { className: 'dm-dialog__section' },
         h(Switch, {
-          label: '升级完成后自动重启宿主',
+          label: '安装完成后自动重启宿主',
           checked: autoRestart,
           onChange: setAutoRestart,
         }),
         h('div', { className: 'dm-dialog__outcome' },
           autoRestart
-            ? '已勾选:升级命令执行成功后,宿主将在 ' + AUTO_RESTART_DELAY_SEC + ' 秒后自动退出,由你的进程管理器(docker / pm2 / systemd 等)拉起新版本,本页随宿主恢复自动刷新。升级落定后宿主不再执行任何网络请求与磁盘读取。'
-            : '未勾选:升级完成后宿主继续运行当前版本,面板提示「重启宿主后生效」,需要你手动点击重启按钮才切换到新版本。'),
+            ? '已勾选:安装命令执行成功后,宿主将在 ' + AUTO_RESTART_DELAY_SEC + ' 秒后自动退出,由你的进程管理器(docker / pm2 / systemd 等)拉起,本页随宿主恢复自动刷新。安装落定后宿主不再执行任何网络请求与磁盘读取。'
+            : '未勾选:安装完成后宿主继续运行当前版本,面板提示「重启宿主后生效」,需要你手动点击重启按钮才切换到目标版本。'),
         status.runtimeEnv && status.runtimeEnv.kind === RUNTIME_KIND_MANUAL
           ? h('div', { className: 'dm-dialog__outcome dm-warn' }, '当前为手动终端直跑环境:没有进程管理器拉起宿主,勾选自动重启也不会自动退出,完成后仍需手动重启。')
           : null,
@@ -620,7 +673,7 @@ function UpgradeDialog(props) {
       h('div', { className: 'dm-row' },
         h('span', { className: 'dm-spacer' }),
         h('button', { className: 'dm-btn', onClick: props.onCancel }, '取消'),
-        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(autoRestart) }, '开始升级'),
+        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(autoRestart) }, '开始安装'),
       ),
     ),
   )
@@ -999,11 +1052,10 @@ function MaintainApp() {
   }
 
   // 升级入口不可用即关闭确认弹窗:渲染时派生,不引入 effect。
-  // 不可用与 VersionCard 按钮 disabled 条件同源(升级进行中/残留锁/已最新/重启中)
+  // 仅瞬态门(升级进行中/重启中);版本状态与残留锁全放行(重装/回退场景),
+  // 提交时 host 的互斥/锁/活跃工作门控照常工作,拒绝原因经 toast 提示
   const upgradeUnavailable = restarting
-    || (status !== null && ((status.upgrade && status.upgrade.running === true)
-      || status.upgradeLockHeld === true
-      || status.verdict === VERDICT_UP_TO_DATE))
+    || (status !== null && status.upgrade && status.upgrade.running === true)
   const upgradeDialogOpenLive = upgradeDialogOpen && !upgradeUnavailable
   // 活跃工作计数:重启确认态显示计数并发 force 越过门控
   const activeWorkTotal = status !== null && status.activeWork ? status.activeWork.total : 0

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import {
   shouldReloadAfterRestart as coreShouldReload,
   isValidRegistryBase as coreIsValidRegistryBase,
+  extractPinnedVersion as coreExtractPinnedVersion,
   VERDICT_OUTDATED,
   VERDICT_UP_TO_DATE,
   VERDICT_UNKNOWN,
@@ -40,6 +41,113 @@ function extractNumberConst(name) {
 
 const clientShouldReload = extractLogic('shouldReloadAfterRestart')
 const clientIsValidRegistryBase = extractLogic('isValidRegistryBase')
+const clientExtractPinnedVersion = extractLogic('extractPinnedVersion')
+// 弹窗文案分支依赖钉定检测:直接注 core 实现,顺带证明两侧检测可互换
+const clientBuildInstallChangeLine = extractLogic('buildInstallChangeLine', {
+  extractPinnedVersion: coreExtractPinnedVersion,
+  VERDICT_OUTDATED,
+  VERDICT_UNKNOWN,
+})
+const clientBuildInstallVersionHint = extractLogic('buildInstallVersionHint')
+
+// 命令钉定 token 提取:双实现对拍 + 语义锚(尾部取最后合法者/通道名与 @latest 不命中/shell 粘连截断)
+const PINNED_CASES = [
+  { command: 'npm install -g @deepseek-ai/dsh@0.1.4', expected: '0.1.4' },
+  { command: 'npm install -g @deepseek-ai/dsh@0.1.4 --silent', expected: '0.1.4' },
+  { command: 'npm i -g @deepseek-ai/dsh@0.1.4 && echo ok', expected: '0.1.4' },
+  { command: '@scope/pkg@1.2.3-rc.1', expected: '1.2.3-rc.1' },
+  { command: 'pkg@1.2.3+build.7', expected: '1.2.3+build.7' },
+  { command: 'a@1.0.0 b@2.0.0', expected: '2.0.0' },
+  { command: 'npm install -g @deepseek-ai/dsh@{tag}', expected: null },
+  { command: 'npm install -g @deepseek-ai/dsh@latest', expected: null },
+  { command: 'node -e "process.exit(0)"', expected: null },
+  { command: 'pkg@0.1.4beta', expected: null },
+  { command: 'pkg@01.2.3', expected: null },
+  { command: '@@1.0.0', expected: '1.0.0' },
+  { command: '', expected: null },
+  { command: null, expected: null },
+]
+
+test('parity: extractPinnedVersion 双实现全场景一致', () => {
+  for (const { command, expected } of PINNED_CASES) {
+    assert.equal(coreExtractPinnedVersion(command), expected, 'core ' + JSON.stringify(command))
+    assert.equal(clientExtractPinnedVersion(command), expected, 'client ' + JSON.stringify(command))
+  }
+})
+
+// 弹窗版本变更行:钉定优先(含改回 {tag} 指引),通道语义按 未知/重装/升级/无法判定/回退 分支
+test('parity: buildInstallChangeLine 分支行为', () => {
+  const base = { channel: 'latest', channelLatest: null, runningVersion: null, installedVersion: null, verdict: VERDICT_UNKNOWN }
+  // 钉定:模板含 @x.y.z 即按指定版本表述,并提示改回 {tag}
+  const pinned = clientBuildInstallChangeLine(
+    { ...base, channelLatest: '0.1.5', runningVersion: '0.1.5' },
+    'npm install -g @deepseek-ai/dsh@0.1.4')
+  assert.ok(pinned.includes('0.1.4'), pinned)
+  assert.ok(pinned.includes('指定版本'), pinned)
+  assert.ok(pinned.includes('{tag}'), pinned)
+  // 通道目标未知
+  assert.ok(clientBuildInstallChangeLine({ ...base }, 'npm install -g @deepseek-ai/dsh@latest').includes('未知'))
+  // 重装:目标==运行;已装领先(待生效)时提示将被替换
+  const reinstall = clientBuildInstallChangeLine(
+    { ...base, channelLatest: '0.1.5', runningVersion: '0.1.5', installedVersion: '0.2.0-rc.1', verdict: VERDICT_UP_TO_DATE },
+    'npm install -g @deepseek-ai/dsh@latest')
+  assert.ok(reinstall.includes('重装'), reinstall)
+  assert.ok(reinstall.includes('0.2.0-rc.1'), reinstall)
+  const reinstallClean = clientBuildInstallChangeLine(
+    { ...base, channelLatest: '0.1.5', runningVersion: '0.1.5', installedVersion: '0.1.5', verdict: VERDICT_UP_TO_DATE },
+    'npm install -g @deepseek-ai/dsh@latest')
+  assert.ok(!reinstallClean.includes('替换'), reinstallClean)
+  // 升级
+  const upgrade = clientBuildInstallChangeLine(
+    { ...base, channelLatest: '0.2.0', runningVersion: '0.1.5', verdict: VERDICT_OUTDATED },
+    'npm install -g @deepseek-ai/dsh@latest')
+  assert.ok(upgrade.includes('升级') && upgrade.includes('0.2.0'), upgrade)
+  // 无法判定:unknown 且目标非空,归因中性(目标非法/运行非法两种来源)
+  const undetermined = clientBuildInstallChangeLine(
+    { ...base, channelLatest: '0.2.0', runningVersion: 'dev-main', verdict: VERDICT_UNKNOWN },
+    'npm install -g @deepseek-ai/dsh@latest')
+  assert.ok(undetermined.includes('无法判定'), undetermined)
+  // 回退:up-to-date 且目标!=运行,表述不断言方向(semver 等值字面不同时同样成立)
+  const rollback = clientBuildInstallChangeLine(
+    { ...base, channelLatest: '0.1.5', runningVersion: '0.2.0-rc.1', verdict: VERDICT_UP_TO_DATE },
+    'npm install -g @deepseek-ai/dsh@latest')
+  assert.ok(rollback.includes('不高于'), rollback)
+  assert.ok(rollback.includes('0.1.5'), rollback)
+  // semver 形态通道名:命令中的 @1.0.0 是 {tag} 展开产物,按通道语义(重装)而非钉定表述
+  const semverChannel = clientBuildInstallChangeLine(
+    { ...base, channel: '1.0.0', channelLatest: '1.0.0', runningVersion: '1.0.0', installedVersion: '1.0.0', verdict: VERDICT_UP_TO_DATE },
+    'npm install -g @deepseek-ai/dsh@1.0.0')
+  assert.ok(!semverChannel.includes('指定版本'), semverChannel)
+  assert.ok(semverChannel.includes('重装'), semverChannel)
+})
+
+// 弹窗当前版本行:缺失回退"未知"(渲染级防回归——该行曾在组件内联,作用域变量删除后渲染即崩)
+test('parity: buildInstallVersionHint 缺失回退未知', () => {
+  assert.equal(clientBuildInstallVersionHint({ runningVersion: '0.1.5', installedVersion: '0.1.5' }), '版本变更:当前 运行 0.1.5 / 已装 0.1.5')
+  assert.equal(clientBuildInstallVersionHint({ installedVersion: '0.1.5' }), '版本变更:当前 运行 未知 / 已装 0.1.5')
+  assert.equal(clientBuildInstallVersionHint({}), '版本变更:当前 运行 未知 / 已装 未知')
+})
+
+// 弹窗渲染冒烟:整函数工厂化执行,自由变量全桩注入,断言不抛错且关键行在树中。
+// 动态文案(版本行/变更行)已抽 LOGIC 段,此测试兜住组件体对桩外符号的引用回归
+test('渲染冒烟: UpgradeDialog 工厂化执行不抛错且含版本变更行', () => {
+  const match = CLIENT_SOURCE.match(/function UpgradeDialog\(props\) \{[\s\S]*?\n\}/)
+  assert.ok(match, 'client.js 缺少 UpgradeDialog')
+  const calls = []
+  const h = (type, propsArg, ...children) => { calls.push(String(type)); return { type, propsArg, children } }
+  const useState = (init) => [init, () => {}]
+  const Switch = (propsArg) => h('label', propsArg)
+  const dialog = new Function('h', 'useState', 'Switch', 'DEFAULT_UPGRADE_TEMPLATE', 'AUTO_RESTART_DELAY_SEC',
+    'RUNTIME_KIND_MANUAL', 'buildInstallChangeLine', 'buildInstallVersionHint',
+    'return (' + match[0] + ')')(
+    h, useState, Switch, 'npm install -g @deepseek-ai/dsh@{tag}', 3, 'manual-start-likely',
+    (status, command) => '变更:' + command, (status) => '提示:' + status.runningVersion)
+  const status = { channel: 'latest', upgradeTemplate: '', runningVersion: '0.1.5', installedVersion: '0.1.5', runtimeEnv: null }
+  const tree = dialog({ status, onCancel: () => {}, onConfirm: () => {} })
+  assert.equal(tree.type, 'div', '弹窗根为遮罩 div')
+  assert.ok(calls.some((type) => type === 'pre'), '命令 pre 节点应在树中')
+  assert.deepEqual(dialog({ status, onCancel: () => {}, onConfirm: () => {} }).type, 'div', '二次渲染稳定')
+})
 
 // prev/next 为 {lost,pid,bootAt} 快照;lost 强信号优先;bootAt 双侧齐备时以其为唯一
 // 实例证据(自洽数据:不同进程 bootAt 必不同),pid 比对是 bootAt 缺失时的退化路径
@@ -192,4 +300,16 @@ test('源码契约: 重启轮询与升级观察器不得回退 setInterval 重�
   assert.ok(!/setInterval\(/.test(CLIENT_SOURCE), 'client.js 禁止 setInterval(拍自调度取代)')
   assert.ok(CLIENT_SOURCE.includes('AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS)'), '升级观察拍必须带请求超时')
   assert.ok(CLIENT_SOURCE.includes('upgradeWatch.generation !== generation'), '升级观察拍 settle 后必须验代际')
+})
+
+test('源码契约: 安装入口全版本状态可点,verdict 不得回归为禁用门', () => {
+  // 重装修复与回退是面板显式意图:按钮与弹窗派生门控不得含 verdict 比较;
+  // VERDICT_UP_TO_DATE 仅允许出现两次(常量声明 + 结论徽章展示)
+  const occurrences = CLIENT_SOURCE.split('VERDICT_UP_TO_DATE').length - 1
+  assert.equal(occurrences, 2, 'VERDICT_UP_TO_DATE 只允许声明与徽章展示两处,禁用门回归即超限')
+  assert.ok(CLIENT_SOURCE.includes("}, '安装'),"), '升级按钮文案必须为「安装」')
+  assert.ok(CLIENT_SOURCE.includes("'确认安装'"), '弹窗标题必须为「确认安装」')
+  assert.ok(CLIENT_SOURCE.includes("'开始安装'"), '弹窗确认按钮必须为「开始安装」')
+  assert.ok(CLIENT_SOURCE.includes('重装'), '弹窗必须说明重装(修复)场景')
+  assert.ok(CLIENT_SOURCE.includes('回退'), '弹窗必须说明回退场景')
 })

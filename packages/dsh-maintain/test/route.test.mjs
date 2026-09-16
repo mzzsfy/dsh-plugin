@@ -289,28 +289,38 @@ test('registry-base:非法 scheme 400;合法值持久化', async () => {
   assert.equal(store.registryBase, 'https://mirror.example')
 })
 
-test('upgrade:运行版本已是通道最新 409 拒绝(防降级),unknown 放行', async () => {
+test('upgrade:运行版本已是通道最新放行(重装/回退场景),不再 409 拒绝', async () => {
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
   // 版本探测注入受控值:CI 无 dsh 本体,真实盘读回 null 会把 verdict 打成 unknown,
-  // 防降级门控(核心断言)在 CI 恒不触发
+  // 重装放行断言(本用例核心)在 CI 恒不触发
   const { ctx, routes } = makeCtx({
     settingsStore: store,
     services: { hostVersionProbe: () => Promise.resolve('5.4.3') },
   })
   apply(ctx)
-  // 注入运行版本远低于假目标版本:verdict 应转 up-to-date,升级入口拒绝
+  // 注入运行版本远高于假目标版本:verdict 应转 up-to-date,安装入口照常放行
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => tagsBody({ latest: '0.0.1', next: '0.0.2' })
+  const warns = []
+  const originalWarn = console.warn
+  console.warn = (text) => warns.push(String(text))
   try {
     const refreshed = await post(routes, '/api/maintain/refresh')
     assert.equal(refreshed.status, 200)
     assert.equal(refreshed.payload.verdict, 'up-to-date', '前置:注入运行版本应高于 0.0.1 假目标')
-    const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-    assert.equal(denied.status, 409)
-    assert.match(denied.payload.error, /已是通道最新版/)
-    assert.equal(store.upgradeCommandTemplate, 'node -e "process.exit(0)"', '拒绝路径不得触发升级')
+    const accepted = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+    assert.equal(accepted.status, 200, '已是通道最新必须放行:重装修复与回退是显式用户意图')
+    assert.equal(accepted.payload.upgrade.running, true)
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) break
+    }
+    assert.equal(store.upgradeCommandTemplate, 'node -e "process.exit(0)"', '放行路径命令模板不得被改动')
+    assert.ok(warns.some((text) => /audit endpoint=upgrade outcome=triggered/.test(text)), '放行安装须留审计行')
   } finally {
     globalThis.fetch = originalFetch
+    console.warn = originalWarn
   }
 })
 
@@ -575,6 +585,39 @@ test('upgrade:未勾选自动重启,升级成功落定继续运行并标 stale',
     // 推过完整调度延迟:若误调度,延迟窗口内 exit 必被调用
     t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
     assert.deepEqual(exits, [], '未勾选自动重启时禁止调度任何宿主退出')
+  } finally {
+    rmSync(UPGRADE_LOCK_PATH, { force: true })
+  }
+})
+
+test('upgrade:模板钉定版本时按钉定意图判 fresh(通道目标不参与对拍)', async (t) => {
+  // 假命令携带钉定 token(参数位),语义等同 `npm i -g pkg@1.0.0` 但不真装
+  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)" @deepseek-ai/dsh@1.0.0' }
+  const exits = []
+  const { ctx, routes } = makeCtx({
+    settingsStore: store,
+    appExit: (code) => exits.push(code),
+    // 探针恒读 1.0.0:钉定 1.0.0 时"磁盘未变"即达成,不得按通道目标误报 stale
+    services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
+  })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  apply(ctx)
+  await drainMicrotasks()
+  const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: false })
+  assert.equal(trigger.status, 200)
+  let settled = null
+  try {
+    for (let i = 0; i < 50 && settled === null; i += 1) {
+      await realSleep(30)
+      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+    }
+    assert.ok(settled, '升级应在假命令退出后落定')
+    assert.equal(settled.upgrade.last.ok, true)
+    assert.equal(settled.upgrade.last.stale, false, '钉定版本装到位即达成')
+    assert.equal(settled.upgrade.last.reason, null)
+    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [])
   } finally {
     rmSync(UPGRADE_LOCK_PATH, { force: true })
   }
