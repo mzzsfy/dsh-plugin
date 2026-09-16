@@ -44,14 +44,19 @@ test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/
   assert.ok(text.includes('.rsww-switch input[type="checkbox"]:checked + .rsww-switch__track'))
 })
 
-test('Given client.js When 检查视图职责 Then 仅设置页分区,无运行时视图与控制通道残留', () => {
+test('Given client.js When 检查视图职责 Then 会话页签(v5 恢复)+设置页分区并存,无 v4 运行时残留', () => {
   const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
-  // 会话页签/胶囊/运行时控制已随 v4 运行时移除(v5 另行实现)
-  assert.ok(!text.includes('conversation.view'), '不得挂会话页签视图')
-  assert.ok(!text.includes('conversation.session.header.actions'), '不得挂会话胶囊')
-  for (const route of ['runs', 'run?id=', "'control'", 'resume-from', 'run-remove', "'release'"]) {
-    assert.ok(!text.includes(route), `运行时路由残留:${route}`)
-  }
+  // v5:会话页签恢复(FlowView/FlowChip 经会话感知条件注入)
+  assert.ok(text.includes("'conversation.view'"), 'v5 会话页签必须在场')
+  assert.ok(text.includes("'conversation.session.header.actions'"), 'v5 会话胶囊必须在场')
+  // v5 修订四处:裁决来源徽标/waiting_approval 态/plan.source/warnings 徽标
+  assert.ok(text.includes("waiting_approval: { label: '待审批'"), '状态表须含 waiting_approval')
+  assert.ok(text.includes("'代审'") && text.includes("'真人'"), '裁决来源徽标(代审/真人)')
+  assert.ok(text.includes("'模型规划'") && text.includes("'模板全序'"), 'plan.source 标识')
+  assert.ok(text.includes("React.createElement(Badge, { tone: 'warn' }, '警告 ' + warnings.length)"), 'warnings 徽标')
+  assert.ok(text.includes("by: 'user'"), '页签裁决提交带 by:user')
+  // 设置页不承载运行记录(会话页签唯一视图)
+  assert.equal(text.includes("{ key: 'runs'"), false, '设置页不得有运行记录子页')
 })
 
 test('Given client.js When 检查死通道 Then 不得派发无监听的 window 自定义事件', () => {
