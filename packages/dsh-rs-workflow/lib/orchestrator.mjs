@@ -181,8 +181,10 @@ export function registerOrchestrator(ctx, config) {
           return {
             ok: true, runId, status: record.status,
             awaitingResume: record.status === 'paused' && driver?.awaitingResume === true,
-            steps, waiting: waiting.length > 0 ? waiting : undefined,
-            summary: record.summary,
+            steps,
+            // 宿主校验工具输出须为纯 JSON:undefined 值键会被判无效输出
+            ...(waiting.length > 0 ? { waiting } : {}),
+            summary: record.summary ?? '',
           }
         },
       }),

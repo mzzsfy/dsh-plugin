@@ -145,8 +145,8 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       const at = new Date().toISOString()
       const record = {
         runId: id, templateId: templateId ?? '', sessionId: sessionId ?? '', workspace: workspace ?? '',
-        request: request ?? '', inputs: inputs ?? {}, status: 'running', createdAt: at, finishedAt: undefined,
-        summary: undefined, plan: plan ?? null, warnings: warnings ?? [],
+        request: request ?? '', inputs: inputs ?? {}, status: 'running', createdAt: at,
+        summary: '', plan: plan ?? null, warnings: warnings ?? [],
         state: state ?? emptyState(), controls: [], stepsTrace: {}, queued: [],
       }
       records.set(id, record)
