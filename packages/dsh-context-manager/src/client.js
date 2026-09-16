@@ -51,7 +51,8 @@ const CSS = [
   // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
   // 色值取自宿主实测(白底卡片/墨色文字/蓝色强调):dsw alias 变量在宿主为空,不可依赖
   '.cx-hist { position:relative; height:0; }',
-  '.cx-hist__pop { position:absolute; left:0; right:0; bottom:10px; z-index:50;',
+  // z-index 须高于同插槽兄弟浮层(sm-hist 同为 50,DOM 序靠前时会被其盖住)
+  '.cx-hist__pop { position:absolute; left:0; right:0; bottom:10px; z-index:' + (50 + 1) + ';',
   '  max-height:min(420px, 46vh); display:flex; flex-direction:column; overflow:hidden;',
   '  color-scheme:light dark; color:light-dark(#0f1115, #e8eaed);',
   '  background:light-dark(#fff, #1e1f22); border-radius:14px;',

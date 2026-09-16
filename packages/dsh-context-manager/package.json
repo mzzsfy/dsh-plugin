@@ -10,6 +10,9 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "external": [
@@ -40,6 +43,7 @@
   "files": [
     "src",
     "test",
-    "README.md"
+    "README.md",
+    "cordis.patch.yml"
   ]
 }
