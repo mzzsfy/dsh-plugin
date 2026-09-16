@@ -817,15 +817,17 @@ export function apply(ctx, config) {
             return
           }
           // 处置:优先系统回收站;不可用(容器无 gio/dbus 等)降级插件回收区
-          // rename 搬移,仍可经重挂载移回原位置。双失败才会话保留并拒绝
+          // rename 搬移,仍可经重挂载移回原位置。双失败才会话保留并拒绝,
+          // 原始回收站错误落日志(降级环境的诊断依据),拒绝响应携回收区错误
           let heldPath
           try {
             await executor.trashPath(artifactDir)
-          } catch {
+          } catch (trashError) {
+            ctx.logger && ctx.logger.warn('session-manager 系统回收站不可用(' + sessionId + '),尝试回收区降级: ' + String(trashError))
             try {
               heldPath = await executor.moveToQuarantine(artifactDir, quarantineDir)
             } catch (heldError) {
-              sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(heldError && heldError.message || heldError) })
+              sendJson(res, 400, { error: MESSAGES.trashFailed + '(系统回收站与插件回收区均不可用): ' + String(heldError && heldError.message || heldError) })
               return
             }
           }
@@ -1069,6 +1071,14 @@ export function apply(ctx, config) {
         if (!rejectMethod(req, res, 'POST')) return
         try {
           const sessionId = await requireSessionId(req)
+          // 移回依据是台账条目,台账域不可用时整个重挂载拒绝:
+          // 静默按无条目处理会让回收区产物永远找不回,还误导用户去系统回收站
+          try {
+            await ledgerReady
+          } catch {
+            sendJson(res, 400, { error: MESSAGES.systemError })
+            return
+          }
           // 回收区暂存的产物先移回原位置(host 按产物现状列会话,移回后 header 可见);
           // OS 回收站条目无 heldPath,此调用为空操作
           await restoreHeldArtifact(sessionId)

@@ -70,6 +70,23 @@ const CSS = [
   '.sm-btn:disabled { opacity:.45; cursor:default; background:transparent; color:var(--dsw-alias-label-tertiary); }',
   '.sm-btn--confirm:disabled { color:var(--dsw-alias-state-error-primary); }',
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
+  // 删除确认弹窗:遮罩 + 居中卡片;高 z-index 压过设置面板层,点击遮罩不关闭(强制显式选择)
+  '.sm-dialog { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;',
+  '  background:rgba(0,0,0,.45); }',
+  '.sm-dialog__card { width:min(420px, calc(100vw - 48px)); border-radius:12px; padding:20px;',
+  '  background:var(--dsw-alias-surface-primary, light-dark(#fff, #1f2126)); color:inherit;',
+  '  box-shadow:0 12px 40px rgba(0,0,0,.3); }',
+  '.sm-dialog__title { font:var(--dsw-font-m-strong-16, 600 16px/24px sans-serif);',
+  '  color:var(--dsw-alias-state-error-primary); margin:0 0 10px; }',
+  '.sm-dialog__body { font:var(--dsw-font-s-14, 14px/22px sans-serif); color:var(--dsw-alias-label-secondary); margin:0 0 8px; }',
+  '.sm-dialog__warn { font:var(--dsw-font-s-14, 14px/22px sans-serif); color:var(--dsw-alias-state-error-primary); margin:0 0 16px; }',
+  '.sm-dialog__actions { display:flex; justify-content:flex-end; gap:8px; }',
+  '.sm-dialog__btn { border:1px solid var(--dsw-alias-border-l3); background:transparent; cursor:pointer;',
+  '  padding:6px 16px; border-radius:8px; font:var(--dsw-font-s-strong-14); color:var(--dsw-alias-label-secondary); }',
+  '.sm-dialog__btn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
+  '.sm-dialog__btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
+  '.sm-dialog__btn--confirm { border-color:var(--dsw-alias-state-error-primary); color:var(--dsw-alias-state-error-primary); }',
+  '.sm-dialog__btn--confirm:hover { background:var(--dsw-alias-interactive-bg-hover-danger); color:var(--dsw-alias-state-error-primary); }',
   '.sm-empty { padding:24px 12px; text-align:center; color:var(--dsw-alias-label-caption); }',
   '.sm-empty__hint { font:var(--dsw-font-xxs-12); margin-top:2px; }',
   // 归档库二级视图:工具行(搜索)与工作区分组、分页展开按钮
@@ -198,6 +215,16 @@ const REMOUNT_URL = '/api/session-manager/remount'
 const FORGET_URL = '/api/session-manager/forget'
 const STATUS_URL = '/api/session-manager/status'
 const INPUTS_URL = '/api/session-manager/inputs'
+
+// 删除确认链文案:两击行内确认后弹窗强提示,弹窗内确认才发请求。
+// 删除产物不可再生,其他插件(用量统计等)依赖会话产物,删后其会话级数据一并消失
+const DELETE_BUTTON_TITLE = '删除会话产物会影响其他插件的工作(用量统计等依赖会话产物);若无特殊需求,请不要删除。删除需再次行内确认与弹窗确认。'
+const DELETE_DIALOG_TITLE = '确认删除该会话?'
+const DELETE_DIALOG_BODY_PREFIX = '即将删除会话「'
+const DELETE_DIALOG_BODY_SUFFIX = '」。'
+const DELETE_DIALOG_WARN = '删除会影响其他插件的工作,若无特殊需求,请不要删除;删除后请到「已删除」区查看找回方式。'
+const DELETE_TOAST_OS = '已移入系统回收站;还原后可在「已删除」区重新挂载'
+const DELETE_TOAST_QUARANTINE = '环境无系统回收站,已移入插件回收区;可在「已删除」区直接重新挂载找回'
 
 // 请求默认超时:host 被批量解压等同步任务阻塞时路由会迟滞数秒,
 // 无超时则浮层停在「正在读取…」假死;超时按错误抛出,由调用方兜底,
@@ -447,7 +474,7 @@ function ArchiveRow(props) {
       ]
     : [
         h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onUnarchive }, '恢复'),
-        h('button', { key: 'delete', className: 'sm-btn sm-btn--danger', disabled: busy, onClick: props.onDelete }, '删除'),
+        h('button', { key: 'delete', className: 'sm-btn sm-btn--danger', disabled: busy, title: DELETE_BUTTON_TITLE, onClick: props.onDelete }, '删除'),
       ]
   return h('div', {
     className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
@@ -463,6 +490,35 @@ function ArchiveRow(props) {
     ),
     h('div', { className: 'sm-row__actions' }, actions),
     confirm && confirm.error ? h('span', { className: 'sm-row__error' }, confirm.error) : null,
+  )
+}
+
+// 删除确认弹窗:确认链最后一环,行内两击确认之后仍需在此显式确认才发请求。
+// 无确认前不发任何请求;遮罩不响应点击,取消与确认按钮是仅有的出口。
+// 初始焦点落「取消」(安全默认出口),Escape 等价取消;不做焦点圈闭
+// (tab 可离开弹窗但不会误触发删除,圈闭实现成本不成比例)
+function DeleteDialog(props) {
+  const row = props.row
+  const busy = props.busy
+  const cancelRef = useRef(null)
+  useEffect(() => {
+    if (cancelRef.current) cancelRef.current.focus()
+    const onKey = (event) => {
+      if (event.key === 'Escape' && !busy) props.onCancel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  return h('div', { className: 'sm-dialog', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'sm-dialog-title', 'aria-describedby': 'sm-dialog-body' },
+    h('div', { className: 'sm-dialog__card' },
+      h('p', { id: 'sm-dialog-title', className: 'sm-dialog__title' }, DELETE_DIALOG_TITLE),
+      h('p', { id: 'sm-dialog-body', className: 'sm-dialog__body' }, DELETE_DIALOG_BODY_PREFIX + (row.title || row.id) + DELETE_DIALOG_BODY_SUFFIX),
+      h('p', { className: 'sm-dialog__warn' }, DELETE_DIALOG_WARN),
+      h('div', { className: 'sm-dialog__actions' },
+        h('button', { ref: cancelRef, className: 'sm-dialog__btn', disabled: busy, onClick: props.onCancel }, '取消'),
+        h('button', { className: 'sm-dialog__btn sm-dialog__btn--confirm', disabled: busy, onClick: props.onConfirm }, '确认删除'),
+      ),
+    ),
   )
 }
 
@@ -490,7 +546,7 @@ function DeletedSection(props) {
       h('span', { className: 'sm-head__count' }, rows.length + ' 条'),
     ),
     h('div', { className: 'sm-head__hint' },
-      '到系统回收站将会话文件夹还原到原位置,再点「重新挂载」找回;清空回收站后无法找回。'),
+      '到系统回收站将会话文件夹还原到原位置,再点「重新挂载」找回;回收区暂存的会话直接点「重新挂载」即可找回;清空回收站后无法找回。'),
     h('div', { className: 'sm-tray' },
       rows.map((row) => h(DeletedRow, {
         key: row.sessionId,
@@ -508,6 +564,8 @@ function SessionManagerApp(props) {
   const [busyId, setBusyId] = useState(null)
   const [armedId, setArmedId] = useState(null)
   const [confirms, setConfirms] = useState({})
+  // 删除弹窗受控状态:非 null 即弹窗展示中,确认后才真正发删除请求
+  const [pendingDelete, setPendingDelete] = useState(null)
   const [deleted, setDeleted] = useState([])
   const [periodic, setPeriodic] = useState(null)
   // 归档库视图状态:recent 为主列表固定首页,library 为工作区分组浏览 + 标题
@@ -563,10 +621,11 @@ function SessionManagerApp(props) {
       .then(() => setBusyId(null))
   }
 
+  // 删除确认链:击删除(拉体积)→ 行内确认 → 弹窗确认,弹窗内确认才发请求
   function onDelete(row) {
     if (armedId !== row.id) {
       setArmedId(row.id)
-      // 两段式确认:首段拉取标题 / 时间 / 体积;产物已缺失(missing)仍可确认,删除仅清理列表
+      // 首段拉取标题 / 时间 / 体积;产物已缺失(missing)仍可确认,删除仅清理列表
       if (confirms[row.id] === undefined) {
         api(INFO_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) })
           .then((info) => setConfirms((prev) => ({ ...prev, [row.id]: info.supported
@@ -576,9 +635,21 @@ function SessionManagerApp(props) {
       }
       return
     }
-    void run(row.id, () => api(DELETE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) }),
-      '已移入系统回收站;还原后可在「已删除」区重新挂载')
-      .then(refreshDeleted)
+    setPendingDelete(row)
+  }
+
+  // 弹窗确认:处置模式区分成功文案——两种模式找回路径不同
+  function onDialogConfirm() {
+    const row = pendingDelete
+    if (row === null) return
+    void run(row.id, async () => {
+      const body = await api(DELETE_URL, { method: 'POST', body: JSON.stringify({ sessionId: row.id }) })
+      if (body && body.ok && !body.message) {
+        return { ...body, message: body.mode === 'quarantine' ? DELETE_TOAST_QUARANTINE : DELETE_TOAST_OS }
+      }
+      return body
+    }, DELETE_TOAST_OS).then(refreshDeleted)
+    setPendingDelete(null)
   }
 
   function onRemount(row) {
@@ -695,7 +766,7 @@ function SessionManagerApp(props) {
           h('span', { className: 'sm-head__title' }, '按工作区浏览'),
           h('span', { className: 'sm-head__count' }, rows.length + ' 条'),
         ),
-    h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站,可还原后重新挂载。'),
+    h('div', { className: 'sm-head__hint' }, '恢复放回会话列表;删除移入系统回收站(无回收站环境移入插件回收区),可经「已删除」区找回。'),
     periodic && periodic.running === false
       ? h('div', { className: 'sm-head__hint' },
           '周期评估未运行(' + (periodic.reason || '宿主定时服务不可用') + ');自动归档仍在新会话创建与启动时生效。')
@@ -711,6 +782,14 @@ function SessionManagerApp(props) {
     h(HistorySwitchRow, null),
     h(SteerSwitchRow, null),
     h(FolderRunningSwitchRow, null),
+    pendingDelete !== null
+      ? h(DeleteDialog, {
+          row: pendingDelete,
+          busy: busyId === pendingDelete.id,
+          onCancel: () => setPendingDelete(null),
+          onConfirm: onDialogConfirm,
+        })
+      : null,
   )
 }
 

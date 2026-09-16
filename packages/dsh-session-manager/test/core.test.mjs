@@ -367,41 +367,44 @@ test('非归档会话拒绝删除', () => {
 })
 
 test('删除收尾聚合:失败矩阵折叠为三形态响应体', () => {
-  const R = DELETE_MESSAGES.runningDuringTrash
+  const M = deleteOutcomeMessages(false)
+  const R = M.runningDuringTrash
   // 全成功无警告:无多余键(index.test deepEqual 锁定同形态)
   assert.deepEqual(aggregateDeleteOutcome({}), { ok: true })
   // 单一失败:主文案优先级 detach → 归档清理 → 台账
-  assert.deepEqual(aggregateDeleteOutcome({ detachFailed: true }), { ok: true, partial: true, message: DELETE_MESSAGES.partial })
-  assert.deepEqual(aggregateDeleteOutcome({ archiveCleanupFailed: true }), { ok: true, partial: true, message: DELETE_MESSAGES.archiveCleanup })
-  assert.deepEqual(aggregateDeleteOutcome({ ledgerFailed: true }), { ok: true, partial: true, message: DELETE_MESSAGES.ledgerFailed })
+  assert.deepEqual(aggregateDeleteOutcome({ detachFailed: true }), { ok: true, partial: true, message: M.partial })
+  assert.deepEqual(aggregateDeleteOutcome({ archiveCleanupFailed: true }), { ok: true, partial: true, message: M.archiveCleanup })
+  assert.deepEqual(aggregateDeleteOutcome({ ledgerFailed: true }), { ok: true, partial: true, message: M.ledgerFailed })
   // 双失败:高优先级主文案 + 台账后缀
   assert.deepEqual(
     aggregateDeleteOutcome({ detachFailed: true, ledgerFailed: true }),
-    { ok: true, partial: true, message: DELETE_MESSAGES.partial + DELETE_MESSAGES.ledgerSuffix },
+    { ok: true, partial: true, message: M.partial + DELETE_MESSAGES.ledgerSuffix },
   )
   // 运行中翻转警告后缀并入一切形态
   assert.deepEqual(
     aggregateDeleteOutcome({ detachFailed: true, ledgerFailed: true, runningDuringTrash: true }),
-    { ok: true, partial: true, message: DELETE_MESSAGES.partial + DELETE_MESSAGES.ledgerSuffix + ';' + R },
+    { ok: true, partial: true, message: M.partial + DELETE_MESSAGES.ledgerSuffix + ';' + R },
   )
   // 全失败
   assert.deepEqual(
     aggregateDeleteOutcome({ detachFailed: true, archiveCleanupFailed: true, ledgerFailed: true, runningDuringTrash: true }),
-    { ok: true, partial: true, message: DELETE_MESSAGES.partial + DELETE_MESSAGES.ledgerSuffix + ';' + R },
+    { ok: true, partial: true, message: M.partial + DELETE_MESSAGES.ledgerSuffix + ';' + R },
   )
   // 全成功警告态:非 partial 形态(ok+message,无 partial 键)
   assert.deepEqual(aggregateDeleteOutcome({ runningDuringTrash: true }), { ok: true, message: R })
 })
 
-// Given 回收区降级处置(quarantined), When 聚合, Then 基础前缀区分两种模式且形态不变
-test('删除收尾聚合:回收区模式前缀为插件回收区', () => {
-  const R = DELETE_MESSAGES.runningDuringTrash
+// Given 回收区降级处置(quarantined), When 聚合, Then 基础前缀与警告措辞均区分两种模式且形态不变
+test('删除收尾聚合:回收区模式前缀与警告措辞均为插件回收区', () => {
   const M = deleteOutcomeMessages(true)
+  const R = M.runningDuringTrash
   assert.ok(M.partial.startsWith('已移入插件回收区'), '回收区模式 partial 前缀')
   assert.ok(M.archiveCleanup.startsWith('已移入插件回收区'), '回收区模式归档清理前缀')
   assert.ok(M.ledgerFailed.startsWith('已移入插件回收区'), '回收区模式台账前缀')
+  assert.ok(R.includes('已移入插件回收区') && !R.includes('系统回收站'), '回收区模式警告不指向系统回收站')
   const os = deleteOutcomeMessages(false)
   assert.ok(os.partial.startsWith('已移入回收站'), 'OS 模式 partial 前缀')
+  assert.ok(os.runningDuringTrash.includes('产物已移入回收站'), 'OS 模式警告措辞')
   assert.deepEqual(
     aggregateDeleteOutcome({ detachFailed: true, quarantined: true }),
     { ok: true, partial: true, message: M.partial },
@@ -412,6 +415,10 @@ test('删除收尾聚合:回收区模式前缀为插件回收区', () => {
   )
   // 回收区全成功警告态与非警告态形态同 OS 模式
   assert.deepEqual(aggregateDeleteOutcome({ quarantined: true }), { ok: true })
+  assert.deepEqual(
+    aggregateDeleteOutcome({ runningDuringTrash: true, quarantined: true }),
+    { ok: true, message: R },
+  )
 })
 
 test('运行中判定:agent status running 即运行中,注册表缺失视为非运行', () => {

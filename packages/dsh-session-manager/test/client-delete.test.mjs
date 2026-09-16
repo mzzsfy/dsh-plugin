@@ -22,6 +22,11 @@ test('源码契约:删除弹窗强提示与受控挂载齐备', () => {
   assert.ok(CLIENT_SRC.includes("h(DeleteDialog"), '弹窗组件未在应用内挂载')
   assert.ok(CLIENT_SRC.includes('pendingDelete'), '缺待删会话受控状态')
   assert.ok(/pendingDelete[\s\S]{0,80}setPendingDelete\(null\)/.test(CLIENT_SRC), '弹窗取消未清空待删状态')
+  // 可达性:aria 关联 + 初始焦点落取消 + Escape 出口
+  assert.ok(CLIENT_SRC.includes("'aria-labelledby'"), '弹窗缺 aria-labelledby')
+  assert.ok(CLIENT_SRC.includes("'aria-describedby'"), '弹窗缺 aria-describedby')
+  assert.ok(/cancelRef\.current\.focus\(\)/.test(CLIENT_SRC), '弹窗初始焦点未落取消键')
+  assert.ok(/key === 'Escape'/.test(CLIENT_SRC), '弹窗缺 Escape 取消出口')
 })
 
 // Given 弹窗确认, When 确认删除, Then 才发删除请求;成功文案按处置模式区分
@@ -31,7 +36,7 @@ test('源码契约:弹窗确认触发请求且成功文案区分处置模式', (
   assert.ok(CLIENT_SRC.includes("mode === 'quarantine'"), '成功文案未按响应 mode 区分')
   assert.ok(CLIENT_SRC.includes('DELETE_URL'), '缺删除请求地址')
   // 弹窗确认函数与删除请求联动:确认键处理体内发出 DELETE 请求
-  assert.ok(/const onDialogConfirm[\s\S]{0,400}DELETE_URL/.test(CLIENT_SRC), '弹窗确认未触发删除请求')
+  assert.ok(/function onDialogConfirm[\s\S]{0,700}DELETE_URL/.test(CLIENT_SRC), '弹窗确认未触发删除请求')
 })
 
 // Given 已删除区, When 渲染提示, Then 两种找回路径(OS 还原 / 回收区直接重挂载)均有说明

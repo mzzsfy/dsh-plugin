@@ -1096,7 +1096,7 @@ test('删除:回收站与回收区均失败时拒绝且台账不写', skipMissin
       await handlers.get('/api/session-manager/delete')(request('s1'), res)
     })
     assert.equal(res.status, 400)
-    assert.match(res.body.error, /均不可用|移入回收站失败/)
+    assert.ok(res.body.error.startsWith(MESSAGES.trashFailed) && res.body.error.includes('均不可用'), '双失败文案区分两级')
     assert.deepEqual(ledger.state.deleted, [])
     // 双失败产物原地保留
     await access(artifact.locatedDir)
@@ -1468,6 +1468,81 @@ test('重挂载:回收区暂存缺失时拒绝且不动台账', skipMissingDeps,
   await handlers.get('/api/session-manager/remount')(request('s1'), res)
   assert.equal(res.status, 400)
   assert.equal(res.body.error, MESSAGES.heldMissing)
+  assert.equal(ledger.writes, 0)
+})
+
+// Given 回收区暂存条目且原位置产物已被手工还原, When 重挂载, Then 跳过移回直接挂载,暂存保留
+test('重挂载:原位置已有产物时跳过移回(手工还原场景)', skipMissingDeps, async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'sm-skip-held-'))
+  const originalDir = path.join(base, 's1')
+  const locatedPath = path.join(originalDir, 'session.jsonl.zstd')
+  try {
+    await mkdir(originalDir, { recursive: true })
+    await writeFile(locatedPath, 'restored-by-hand')
+    const heldPath = path.join(base, 'held', 's1-123')
+    await mkdir(heldPath, { recursive: true })
+    await writeFile(path.join(heldPath, 'session.jsonl.zstd'), 'held-copy')
+    const workspace = makeWorkspace('C:\\x', [])
+    const { handlers, ledger } = makeCtx({
+      archivedIds: [],
+      headers: [HEADER],
+      agents: new Map(),
+      workspaces: [workspace],
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: locatedPath } : undefined },
+      ledger: makeLedgerDomain([{ sessionId: 's1', path: originalDir, heldPath, deletedAt: 1 }]),
+    })
+    const res = response()
+    await handlers.get('/api/session-manager/remount')(request('s1'), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { ok: true })
+    assert.deepEqual(workspace.attachCalls, ['s1'])
+    assert.deepEqual(ledger.state.deleted, [])
+    // 原位置内容未被覆盖,暂存目录按已知取舍保留(孤儿清理不做)
+    assert.equal(await readFile(locatedPath, 'utf8'), 'restored-by-hand')
+    await access(heldPath)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+// Given quarantine 降级成功但 detach 失败, When 删除, Then partial 主文案为回收区前缀且 mode=quarantine
+test('删除:回收区降级加 detach 失败聚合为回收区前缀 partial', skipMissingDeps, async () => {
+  const artifact = await makeLocatedArtifact()
+  try {
+    const workspace = makeWorkspace('C:\\x', ['s1'], { detachError: new Error('detach 失败') })
+    const { handlers } = makeCtx({
+      archivedIds: ['s1'],
+      headers: [HEADER],
+      agents: IDLE_S1,
+      domain: makeDomain(['s1']),
+      workspaces: [workspace],
+      sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
+    })
+    const res = response()
+    await withExecutorStub({ trashPath: async () => { throw new Error('gio: not found') } }, async () => {
+      await handlers.get('/api/session-manager/delete')(request('s1'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.partial, true)
+    assert.equal(res.body.mode, 'quarantine')
+    assert.ok(res.body.message.startsWith('已移入插件回收区'), 'partial 主文案为回收区前缀')
+  } finally {
+    await artifact.cleanup()
+  }
+})
+
+// Given 台账域打开失败, When 重挂载, Then 入口即拒绝(移回依据不可得,不做静默跳过)
+test('重挂载:台账域打开失败时入口拒绝', skipMissingDeps, async () => {
+  const { handlers, ledger } = makeCtx({
+    archivedIds: [],
+    headers: [HEADER],
+    agents: new Map(),
+    openRejected: new Error('ledger down'),
+  })
+  const res = response()
+  await handlers.get('/api/session-manager/remount')(request('s1'), res)
+  assert.equal(res.status, 400)
+  assert.equal(res.body.error, MESSAGES.systemError)
   assert.equal(ledger.writes, 0)
 })
 
