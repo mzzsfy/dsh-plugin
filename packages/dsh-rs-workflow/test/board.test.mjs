@@ -98,10 +98,22 @@ const fakeDriver = (runId, status = 'running') => ({
   },
 })
 
-test('Given 14 路由声明 When 激活 board Then 全部注册', () => {
+test('Given 15 路由声明 When 激活 board Then 全部注册', () => {
   const h = harness()
-  const expect = ['/api/rsww/runs', '/api/rsww/run', '/api/rsww/control', '/api/rsww/resume-from', '/api/rsww/run-remove', '/api/rsww/templates', '/api/rsww/released', '/api/rsww/spec', '/api/rsww/template-save', '/api/rsww/template-remove', '/api/rsww/release', '/api/rsww/unrelease', '/api/rsww/config', '/api/rsww/config-save']
+  const expect = ['/api/rsww/runs', '/api/rsww/run', '/api/rsww/control', '/api/rsww/resume-from', '/api/rsww/run-remove', '/api/rsww/templates', '/api/rsww/template', '/api/rsww/released', '/api/rsww/spec', '/api/rsww/template-save', '/api/rsww/template-remove', '/api/rsww/release', '/api/rsww/unrelease', '/api/rsww/config', '/api/rsww/config-save']
   for (const p of expect) assert.ok(h.routes.has(p), p)
+})
+
+test('Given 既有模板 id When GET template Then 返回 entry+JSON5 解析结果;Given 不存在 id Then 400 错误载荷', async () => {
+  const h = harness()
+  const ok = await h.call('/api/rsww/template', { method: 'GET', url: '/api/rsww/template?id=default' })
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.entry.id, 'default')
+  assert.equal(ok.body.parsed.id, 'default')
+  assert.ok(Array.isArray(ok.body.parsed.steps))
+  const miss = await h.call('/api/rsww/template', { method: 'GET', url: '/api/rsww/template?id=nope' })
+  assert.equal(miss.status, 400)
+  assert.ok(miss.body.error)
 })
 
 test('Given PUT 方法 When 调 runs Then 405;Given 跨源 POST control When 异源 Origin Then 403', async () => {

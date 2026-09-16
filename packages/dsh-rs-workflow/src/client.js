@@ -92,6 +92,8 @@ window.__ModuleLoader__.load({
 .rsww-pill--on{background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#0f1115);box-shadow:0 1px 3px rgba(0,0,0,.1)}
 .rsww-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .rsww-detail{border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:10px;background:var(--dsw-alias-bg-base,#fff);padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.rsww-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-start;justify-content:center;background:color-mix(in srgb,var(--dsw-alias-label-primary,#0f1115) 40%,transparent);padding:40px 16px;overflow:auto}
+.rsww-modal__panel{width:100%;max-width:860px;background:var(--dsw-alias-bg-base,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 40px color-mix(in srgb,var(--dsw-alias-label-primary,#0f1115) 18%,transparent)}
 .rsww-card--err{border-color:var(--dsw-alias-state-error-primary,#ec1313)}
 .rsww-input--err{border-color:var(--dsw-alias-state-error-primary,#ec1313)}
 .rsww-tree__row{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;font:400 var(--dsw-font-xs-13,13px/20px sans-serif)}
@@ -846,7 +848,7 @@ window.__ModuleLoader__.load({
           note ? h('span', { className: 'rsww-note' }, note) : null))
     }
 
-    function TemplateCard({ t, released, busy, onEdit, onCopy, onRelease, onUnrelease, onDelete }) {
+    function TemplateCard({ t, released, busy, onView, onEdit, onCopy, onRelease, onUnrelease, onDelete }) {
       const builtin = t.builtin === true
       const disabled = t.enabled === false
       return h('div', { className: 'rsww-card' },
@@ -858,6 +860,7 @@ window.__ModuleLoader__.load({
           released.includes(t.id) ? h(Badge, { tone: 'success' }, '已释放') : null),
         t.description ? h('span', { className: 'rsww-note' }, t.description) : null,
         h('div', { className: 'rsww-row' },
+          h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onView }, '详情'),
           builtin
             ? h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onCopy }, '另存为副本')
             : h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onEdit }, '编辑'),
@@ -867,12 +870,111 @@ window.__ModuleLoader__.load({
           h(ArmedButton, { label: builtin ? '禁用' : '删除', confirmLabel: builtin ? '确认禁用' : '确认删除', disabled: busy, onConfirm: onDelete })))
     }
 
+    // ── 只读详情弹窗:所有模板可点开;结构视图(JSON.parse 可达时)+JSON5 原文+一键检验 ──
+    function Modal({ title, onClose, children }) {
+      return h('div', { className: 'rsww-modal', onClick: (e) => { if (e.target === e.currentTarget) onClose() } },
+        h('div', { className: 'rsww-modal__panel', role: 'dialog', 'aria-label': title },
+          h('div', { className: 'rsww-row' },
+            h('span', { className: 'rsww-head__title' }, title),
+            h('span', { style: { flex: 1 } }),
+            h('button', { className: 'rsww-btn', type: 'button', onClick: onClose }, '关闭')),
+          children))
+    }
+
+    function ViewerStep({ step }) {
+      const [open, setOpen] = useState(false)
+      const typeName = (TYPE_OPTIONS.find((t) => t.key === step.type) || TYPE_OPTIONS[0]).label
+      const row = (label, text) => (text !== '' && text != null) ? h('div', { className: 'rsww-kv__row' },
+        h('span', { className: 'rsww-label', style: { width: 84, flex: 'none' } }, label),
+        h('span', { className: 'rsww-text', style: { whiteSpace: 'pre-wrap' } }, String(text))) : null
+      const kvRows = (rows) => h('div', { className: 'rsww-kv' },
+        rows.map((kv, i) => h('div', { className: 'rsww-kv__row', key: i },
+          h('span', { className: 'rsww-mono' }, kv.k),
+          kv.v ? h('span', { className: 'rsww-note' }, kv.v) : null)))
+      return h('div', { className: 'rsww-card' },
+        h('div', { className: 'rsww-row' },
+          h('button', { className: 'rsww-btn', type: 'button', style: { padding: '2px 8px' }, onClick: () => setOpen(!open) },
+            (open ? '收起 ' : '展开 ') + (step.id !== '' ? step.id : '#')),
+          h(Badge, { tone: 'mute' }, typeName),
+          step.type === 'ai' && outNamesOf(step).length > 0 ? h('span', { className: 'rsww-note' }, outNamesOf(step).join('/')) : null),
+        !open ? null : h('div', { className: 'rsww-stack' },
+          row('显示名', step.label),
+          row('slot', step.slot),
+          step.type !== 'flow' ? row('prompt', step.prompt) : null,
+          step.type === 'ai' && step.outputs.length > 0 ? h('div', { className: 'rsww-section' },
+            h('span', { className: 'rsww-label' }, 'outputs 产出契约'),
+            kvRows(step.outputs),
+            step.listOutputs.length > 0 ? h('span', { className: 'rsww-note' }, 'listOutputs: ' + step.listOutputs.join(', ')) : null) : null,
+          step.type === 'approve' ? h('div', { className: 'rsww-stack' },
+            row('target', step.target), row('rounds', step.rounds), row('onExhausted', step.onExhausted || '(缺省 blocked)')) : null,
+          step.type === 'flow' ? h('div', { className: 'rsww-stack' },
+            row('flow', step.flow),
+            step.input.length > 0 ? h('div', { className: 'rsww-section' },
+              h('span', { className: 'rsww-label' }, 'input(子流程入参)'), kvRows(step.input)) : null) : null,
+          step.after.length > 0 ? row('after', step.after.join(', ')) : null,
+          step.for_each !== '' ? h('div', { className: 'rsww-stack' },
+            row('for_each', step.for_each), row('mode', step.mode === 'parallel' ? 'parallel' : 'sequential')) : null,
+          step.load.length > 0 ? row('load', step.load.join(', ')) : null,
+          step.maxFail !== '' ? row('maxFail', step.maxFail) : null))
+    }
+
+    function TemplateViewer({ entry, onClose }) {
+      const [data, setData] = useState(null)
+      const [loadErr, setLoadErr] = useState('')
+      const [showJson, setShowJson] = useState(false)
+      const [checking, setChecking] = useState(false)
+      const [checkNote, setCheckNote] = useState('')
+      const [checkErrs, setCheckErrs] = useState([])
+      const reload = useCallback(() => request('template?id=' + encodeURIComponent(entry.id)).then((o) => {
+        if (o.ok) { setData(o.data); setLoadErr('') } else setLoadErr(o.error)
+      }), [entry.id])
+      useEffect(() => { reload() }, [reload])
+      const validate = async () => {
+        setChecking(true); setCheckNote(''); setCheckErrs([])
+        const o = await post('template-save', { id: entry.id, label: entry.label, description: entry.description, enabled: entry.enabled !== false, json5: entry.json5, dryRun: true })
+        setChecking(false)
+        if (o.ok) { setCheckNote('校验通过(未落盘)'); return }
+        setCheckErrs(o.data && Array.isArray(o.data.errors) && o.data.errors.length > 0 ? o.data.errors : [{ target: 'json', message: o.error }])
+      }
+      const parsed = data && data.parsed
+      const model = parsed ? { steps: asArr(parsed.steps).map(normalizeStep), inputs: objToRows(parsed.inputs) } : null
+      const badge = (tone, text) => h(Badge, { tone }, text)
+      return h(Modal, { title: '模板详情', onClose },
+        h('div', { className: 'rsww-row' },
+          h('span', { className: 'rsww-mono rsww-note' }, entry.id),
+          entry.builtin === true ? badge('business', '内置') : null,
+          entry.enabled === false ? badge('mute', '已禁用') : null,
+          h('span', { style: { flex: 1 } }),
+          h('button', { className: 'rsww-btn', type: 'button', onClick: validate, disabled: checking }, checking ? '检验中' : '一键检验'),
+          checkNote ? badge('success', checkNote) : null),
+        entry.description ? h('span', { className: 'rsww-note' }, entry.description) : null,
+        loadErr ? h('span', { className: 'rsww-error' }, loadErr) : null,
+        !data && !loadErr ? h('span', { className: 'rsww-note' }, '加载中...') : null,
+        checkErrs.map((e, i) => h('span', { className: 'rsww-error', key: i }, (e.target ? e.target + ': ' : '') + e.message)),
+        data && !parsed ? h('span', { className: 'rsww-note' }, '模板文本解析失败,仅展示原文与一键检验。') : null,
+        model && model.inputs.length > 0 ? h('div', { className: 'rsww-section' },
+          h('span', { className: 'rsww-label' }, '顶层 inputs'),
+          h('div', { className: 'rsww-kv' },
+            model.inputs.map((kv, i) => h('div', { className: 'rsww-kv__row', key: i },
+              h('span', { className: 'rsww-mono' }, kv.k),
+              kv.v ? h('span', { className: 'rsww-note' }, kv.v) : null)))) : null,
+        model ? h('div', { className: 'rsww-section' },
+          h('span', { className: 'rsww-label' }, '步骤(' + model.steps.length + ')'),
+          model.steps.map((s, i) => h(ViewerStep, { key: i, step: s }))) : null,
+        h('div', { className: 'rsww-section' },
+          h('div', { className: 'rsww-row' },
+            h('button', { className: 'rsww-btn', type: 'button', onClick: () => setShowJson(!showJson) }, showJson ? '收起 JSON5' : 'JSON5 全文'),
+            showJson ? h(CopyButton, { text: entry.json5 || '' }) : null),
+          showJson ? h('div', { className: 'rsww-full', style: { maxHeight: 300 } }, entry.json5 || '(空)') : null))
+    }
+
     function TemplatesPage() {
       const [templates, setTemplates] = useState(null)
       const [released, setReleased] = useState([])
       const [releasedErr, setReleasedErr] = useState('')
       const [error, setError] = useState('')
       const [editing, setEditing] = useState(null)
+      const [viewing, setViewing] = useState(null)
       const [busyId, setBusyId] = useState('')
       const [specOpen, setSpecOpen] = useState(false)
       const [specText, setSpecText] = useState('')
@@ -924,12 +1026,14 @@ window.__ModuleLoader__.load({
           onClose: () => setEditing(null),
           onSaved: (err2) => { setEditing(null); reload(); if (err2) setError(err2) },
         }) : null,
+        viewing ? h(TemplateViewer, { entry: viewing, onClose: () => setViewing(null) }) : null,
         groups.map(([title, list]) => h('div', { className: 'rsww-group', key: title },
           h('div', { className: 'rsww-group__head' },
             h('span', { className: 'rsww-group__title' }, title),
             h('span', { className: 'rsww-group__count' }, list.length + ' 个')),
           list.map((t) => h(TemplateCard, {
             key: t.id, t, released, busy: busyId === t.id,
+            onView: () => setViewing(t),
             onEdit: () => setEditing({ entry: t, isNew: false }),
             onCopy: () => setEditing({ entry: { id: '', label: (t.label || t.id) + ' 副本', description: t.description || '', enabled: true, json5: t.json5, copyOf: t.id }, isNew: false }),
             onRelease: () => write('release', { id: t.id }),

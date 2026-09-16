@@ -75,6 +75,15 @@ test('Given client.js When 检查复制能力 Then 规范面板与全文展开�
   assert.ok(text.includes('h(CopyButton, { text: specText })'), '模板规范面板挂复制')
 })
 
+test('Given client.js When 检查模板详情 Then 只读弹窗+一键检验覆盖所有模板卡', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(text.includes("'template?id='"), '详情数据经 host 解析路由')
+  assert.ok(text.includes('h(TemplateViewer, { entry: viewing'), '查看态接线')
+  assert.ok(text.includes("onClick: onView }, '详情'"), '所有模板卡带详情入口')
+  assert.ok(text.includes("dryRun: true }"), '一键检验走 dryRun 不落盘')
+  assert.ok(text.includes('rsww-modal'), '悬浮弹窗壳')
+})
+
 test('Given client.js When 检查 color 值 Then 不使用裸 hex(仅 alias token 或 fallback)', () => {
   const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const cssMatch = text.match(/const CSS = `([\s\S]*?)`/)

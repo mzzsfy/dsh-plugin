@@ -281,6 +281,19 @@ export function registerBoardRoutes(ctx) {
       const templates = readTemplates(ctx).map((t) => ({ ...t, builtin: !!builtinTemplates().find((b) => b.id === t.id) }))
       sendJson(res, 200, { templates })
     }), 'rsww templates route')
+    route('/api/rsww/template', guardedRoute(async (req, res) => {
+      const url = new URL(req.url, 'http://localhost')
+      const id = url.searchParams.get('id') || ''
+      const entry = readTemplates(ctx).find((t) => t.id === id)
+      if (!entry) throw new Error('模板不存在:' + id)
+      let parsed
+      try {
+        parsed = JSON5.parse(entry.json5)
+      } catch (e) {
+        throw new Error('模板文本解析失败:' + e.message)
+      }
+      sendJson(res, 200, { entry, parsed })
+    }), 'rsww template detail route')
     route('/api/rsww/released', guardedRoute(async (req, res) => {
       sendJson(res, 200, { ids: releasedTemplateIds() })
     }), 'rsww released route')
