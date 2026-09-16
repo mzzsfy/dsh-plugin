@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-rs-workflow',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useCallback } = React
+    const { useState, useEffect, useCallback, useRef } = React
 
     const API = '/api/rsww/'
     const REFRESH_MS = 5 * 1000
@@ -1002,6 +1002,13 @@ window.__ModuleLoader__.load({
       const [specOpen, setSpecOpen] = useState(false)
       const [specText, setSpecText] = useState('')
       const [specLoaded, setSpecLoaded] = useState(false)
+      const detailRef = useRef(null)
+      // 编辑器/弹窗插入在列表上方,滚动容器停在底部时新内容在视口外(点击"无响应"的实态);切换后拉回可见区
+      useEffect(() => {
+        const el = detailRef.current
+        if (!el) return
+        el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      }, [editing, viewing])
       const reload = useCallback(async () => {
         const [t, r] = await Promise.all([request('templates'), request('released')])
         if (!t.ok) { setError(t.error); return }
@@ -1044,6 +1051,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'rsww-label' }, '模板规范'),
             specText !== '' && !/^规范拉取失败/.test(specText) ? h(CopyButton, { text: specText }) : null),
           h('div', { className: 'rsww-full', style: { maxHeight: 320 } }, specText !== '' ? specText : '加载中...')) : null,
+        h('div', { ref: detailRef }),
         editing ? h(TemplateEditor, {
           entry: editing.entry, isNew: editing.isNew, templates,
           onClose: () => setEditing(null),
