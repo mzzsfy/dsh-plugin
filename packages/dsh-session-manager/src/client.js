@@ -737,7 +737,7 @@ function HistorySwitchRow() {
         toast('切换失败', { kind: 'error' })
       })
   }
-  return h('label', { className: 'sm-histsw' },
+  return h('label', { className: 'sm-histsw', title: HISTORY_SWITCH_TITLE },
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '历史输入浮层(Alt+↑)'),
@@ -765,12 +765,21 @@ function SteerSwitchRow() {
         toast('切换失败', { kind: 'error' })
       })
   }
-  return h('label', { className: 'sm-histsw' },
+  return h('label', { className: 'sm-histsw', title: STEER_SWITCH_TITLE },
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '插话撤回图标'),
   )
 }
+
+// 面板设置项悬停说明:原生 title(设置侧栏为滚动容器,CSS 气泡会被 overflow
+// 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
+const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围(常用 / 当前会话 / 本工作区 / 全部工作区),行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
+const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
+const FOLD_SWITCH_TITLE = '侧边栏会话列表按工作区分组时,有运行中会话的文件夹组头显示运行点并给文件夹图标着色,文件夹折叠与展开同样生效;游离会话所在的「未分组」组同样标记;单列表模式下无此标记。停用即全部隐藏,刷新页面生效。'
+const ARCHIVE_OVERVIEW_TITLE = '超过阈值天数未活跃的会话自动移入归档;触发时机为新会话创建、插件启动与周期检查;归档会话在本面板管理,可恢复或删除。'
+const ARCHIVE_DAYS_TITLE = '会话超过该天数未活跃(产物无更新)即自动归档,空白(无消息)会话不参与归档;0 = 关闭自动归档。仅对产物可读的会话评估,产物不可读的跳过以免误归档,已归档的会话不会重复处理。'
+const ARCHIVE_INTERVAL_TITLE = '周期检查的间隔小时数,到期会话在下一轮检查时归档;0 = 关闭周期检查(新会话创建与插件启动时的检查不受影响);调小最迟等新间隔即可提前触发,调大自下一轮排期起生效。'
 
 // 工作区文件夹运行标记启停开关:与插话撤回开关同构,复用同款 switch 形态与样式;
 // 值存宿主 settings,切换经本插件路由中转,变更刷新页面生效
@@ -793,7 +802,7 @@ function FolderRunningSwitchRow() {
         toast('切换失败', { kind: 'error' })
       })
   }
-  return h('label', { className: 'sm-histsw' },
+  return h('label', { className: 'sm-histsw', title: FOLD_SWITCH_TITLE },
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '工作区文件夹运行标记'),
@@ -875,9 +884,9 @@ function AutoArchiveConfig() {
     onBlur: (event) => commit(field, event.target.value),
   })
   return h('div', { className: 'sm-cfg' },
-    h('span', null, '自动归档'),
-    h('label', { className: 'sm-cfg__field' }, '阈值', numberInput('days'), '天未活跃(0 关闭)'),
-    h('label', { className: 'sm-cfg__field' }, '检查周期', numberInput('intervalHours'), '小时(0 关闭)'),
+    h('span', { title: ARCHIVE_OVERVIEW_TITLE }, '自动归档'),
+    h('label', { className: 'sm-cfg__field', title: ARCHIVE_DAYS_TITLE }, '阈值', numberInput('days'), '天未活跃(0 关闭)'),
+    h('label', { className: 'sm-cfg__field', title: ARCHIVE_INTERVAL_TITLE }, '检查周期', numberInput('intervalHours'), '小时(0 关闭)'),
   )
 }
 
