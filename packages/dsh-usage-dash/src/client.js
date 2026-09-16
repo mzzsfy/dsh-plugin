@@ -634,6 +634,15 @@ function groupPointSlots(slots) {
   return { models, daily: foldSlotsByTop(slots, topModels) }
 }
 
+// 聚合展示区(统计卡/模型用量/统计截至)数据源:随视图联动——天视图用 range 聚合,时/分视图
+// (预设与自定义挡)用点端点聚合,字段同形;点数据未回为 null,调用方判空不渲染
+const cardsStatsOf = (view, stats, pointView) => (view === 'day' ? stats : pointView)
+
+// 模型用量列表:天视图用预折叠分组,时/分视图折叠点窗口模型(top5+other),点数据未回为 null
+const usageModelsOf = (view, grouped, pointView) => (
+  view === 'day' ? grouped?.models ?? null : pointView ? topWithOther(pointView.models) : null
+)
+
 // 趋势图视口常量
 const CHART_HEIGHT = 220
 const CHART_PAD = { left: 46, right: 65, top: 10, bottom: 26 }
@@ -3372,12 +3381,16 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       const grouped = useMemo(() => (stats ? groupStats(stats) : null), [stats])
       const pointView = activeQuery && pointStatsMatches(pointStats, view, activeQuery.key) ? pointStats.value : null
       const pointGrouped = useMemo(() => (pointView ? groupPointSlots(pointView.daily) : null), [pointView])
-      const colorFor = useMemo(() => colorForModel(stats ? stats.models : []), [stats])
 
       const pointActive = view !== 'day'
       const trendSource = pointActive
         ? (pointGrouped ? { slots: pointGrouped.daily, models: pointGrouped.models, value: pointView } : null)
         : (grouped ? { slots: grouped.daily, models: grouped.models, value: stats } : null)
+      // 聚合展示区(统计卡/模型用量/统计截至)与趋势图同源,随视图联动;点数据未回为 null 不渲染
+      const cardsStats = cardsStatsOf(view, stats, pointView)
+      const usageModels = usageModelsOf(view, grouped, pointView)
+      // 模型配色取当期窗口模型排名,防跨窗口取色错位
+      const colorFor = useMemo(() => colorForModel(cardsStats ? cardsStats.models : []), [cardsStats])
       const maxSlots = pointActive ? maxSlotsFor(view, rawPreset) : DAY_MAX_SLOTS
       const trimmedSlots = trendSource ? trimSlots(trendSource.slots, maxSlots) : null
       const { costReady, money, chartSlots } = moneyViewOf(trimmedSlots, costView)
@@ -3470,7 +3483,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
           : null,
         error ? h('div', { className: 'ud-error' }, error) : null,
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
-        stats ? h(StatCards, { key: 'cards', stats, costCurrency, t }) : null,
+        cardsStats ? h(StatCards, { key: 'cards', stats: cardsStats, costCurrency, t }) : null,
         // 活跃热力图仅按天视图展示:热力图口径为日桶,时/分视图无对应语义
         view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, costCurrency, t }) : null,
         trimmedSlots
@@ -3496,8 +3509,8 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               t,
             })
           : null,
-        grouped ? h(ModelUsage, { key: 'models', models: grouped.models, colorFor, panelRef, costCurrency, t }) : null,
-        stats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${stats.to}`) : null,
+        usageModels ? h(ModelUsage, { key: 'models', models: usageModels, colorFor, panelRef, costCurrency, t }) : null,
+        cardsStats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${slotLabelFor(view)(cardsStats.to)}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
         h(StatsLineOptions, { key: 'prefs', t }),
         h(PricingEditor, { key: 'pricing', t }))

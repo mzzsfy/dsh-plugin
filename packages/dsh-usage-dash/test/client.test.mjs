@@ -37,6 +37,7 @@ const {
   aggregateCurrencyOf,
   applyCurrencyToRules,
   cacheRateText,
+  cardsStatsOf,
   coerceConditions,
   coercePricingRules,
   costOf,
@@ -114,6 +115,7 @@ const {
   leftAxisTicks,
   hourSlotLabel,
   minuteSlotLabel,
+  usageModelsOf,
   validatePricingRules,
 } = core
 
@@ -452,6 +454,35 @@ test('groupPointSlots 窗口模型超上限折叠其他', () => {
   assert.equal(grouped.models.at(-1).model, OTHER_MODEL)
   assert.equal(grouped.models.at(-1).tokens, 1)
   assert.deepEqual(grouped.daily[0].byModel, { m1: 1, m2: 1, m3: 1, m4: 1, m6: 1, [OTHER_MODEL]: 1 })
+})
+
+test('cardsStatsOf 天视图用 range 聚合,时/分视图用点聚合,点未回为 null', () => {
+  const stats = { tokens: 1 }
+  const pointView = { tokens: 2 }
+  assert.equal(cardsStatsOf('day', stats, pointView), stats)
+  assert.equal(cardsStatsOf('hour', stats, pointView), pointView)
+  assert.equal(cardsStatsOf('minute', stats, null), null)
+})
+
+test('usageModelsOf 天视图用预折叠分组,时/分视图折叠点窗口模型,点未回为 null', () => {
+  const grouped = { models: [{ model: 'p/m1', tokens: 1 }] }
+  assert.equal(usageModelsOf('day', grouped, null), grouped.models)
+  assert.equal(usageModelsOf('day', null, null), null)
+  const ranked = [
+    { model: 'p/m1', tokens: 3 },
+    { model: 'p/m2', tokens: 2 },
+    { model: 'p/m3', tokens: 1 },
+    { model: 'p/m4', tokens: 1 },
+    { model: 'p/m5', tokens: 1 },
+    { model: 'p/m6', tokens: 1 },
+  ]
+  const folded = usageModelsOf('hour', null, { models: ranked })
+  assert.equal(folded.length, 6)
+  assert.equal(folded.at(-1).model, OTHER_MODEL)
+  assert.equal(folded.at(-1).tokens, 1)
+  // 空窗口契约:返回空数组渲染空环(与天视图空数据行为一致),非 null 隐藏
+  assert.deepEqual(usageModelsOf('minute', null, { models: [] }), [])
+  assert.equal(usageModelsOf('minute', null, null), null)
 })
 
 test('niceTicks 产生 1/2/5 序列且零上限为空', () => {

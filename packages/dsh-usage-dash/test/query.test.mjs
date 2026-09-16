@@ -183,6 +183,23 @@ test('H 粒度零值槽全枚举含无数据槽', () => {
   assert.equal(out.activeDays, 1)
 })
 
+test('H/M 粒度活跃天数为有用量自然日数,同日多桶计 1', () => {
+  const hourRows = [
+    makeRow({ bucket: '2020-01-01T01', model: 'm1', provider: 'p1', inputTokens: 5 }),
+    makeRow({ bucket: '2020-01-01T05', model: 'm1', provider: 'p1', inputTokens: 5 }),
+    makeRow({ bucket: '2020-01-02T01', model: 'm1', provider: 'p1', inputTokens: 5 }),
+  ]
+  const hourOut = aggregateRange(hourRows, 'H', '2020-01-01T00', '2020-01-02T23')
+  assert.equal(hourOut.activeDays, 2)
+  const minuteRows = [
+    makeRow({ bucket: '2020-01-01T00:00', model: 'm1', provider: 'p1', inputTokens: 5 }),
+    makeRow({ bucket: '2020-01-01T00:10', model: 'm1', provider: 'p1', inputTokens: 5 }),
+    makeRow({ bucket: '2020-01-01T00:20', model: 'm1', provider: 'p1', inputTokens: 5 }),
+  ]
+  const minuteOut = aggregateRange(minuteRows, 'M', '2020-01-01T00:00', '2020-01-01T23:50')
+  assert.equal(minuteOut.activeDays, 1)
+})
+
 test('M 粒度纯计数行不计入模型与活跃桶,未对齐残行跳过', () => {
   const rows = [
     makeRow({ bucket: '2020-01-01T00:00', model: '(turns)', provider: 'default', turns: 1 }),
