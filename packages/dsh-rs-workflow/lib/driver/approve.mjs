@@ -65,7 +65,8 @@ export function applyApproveResult(state, script, approveStep, result, budgets) 
   s.status = 'done'
   s.outputs = result.outputs
   s.verdictExhausted = true
-  if (approveStep.onExhausted === 'blocked') {
+  if (approveStep.onExhausted === 'blocked' || approveStep.onExhausted === undefined) {
+    // 缺省 blocked(spec §4 口径,与客户端提示一致):无出口即终止
     state.terminalBlocked = `审批轮次耗尽:${approveStep.label ?? approveStep.id}(target=${approveStep.target},rounds=${ledger.rounds})`
     return { verdict: 'REJECTED', exhausted: true, routedTo: 'blocked' }
   }

@@ -1,4 +1,4 @@
-﻿// spec — 流程模板 DSL v5 规范全文(模板编辑规则的唯一真相源)
+// spec — 流程模板 DSL v5 规范全文(模板编辑规则的唯一真相源)
 // 消费:设置页「模板规范」折叠页渲染。
 // 验收契约:含 type:"approve" 与 inputs 章节;不含「教学重问」与「<output」字样。
 
@@ -56,9 +56,9 @@ true = 审批由主循环代审,不再转呈页签,见 §4);steps 必填非空,�
 数组解析(for_each 数据源必须是 list 产出);after 可选,依赖步骤 id 数组,缺省 = 文档序前一个常规
 步骤(见 §5),禁止环;maxFail 可选,失败重试上限 1..10(缺省取预算 maxStepFail=2);for_each 可选,
 循环(见 §6);mode 循环推进:sequential(默认,串行携带)| parallel(并行);type 默认 "ai",
-"approve" = 人工审批(见 §4),"flow" = 嵌套子流程(见 §9);target 为 type=approve 必填,被审步骤
+"approve" = 人工审批(见 §4),"flow" = 嵌套子流程(见 §8);target 为 type=approve 必填,被审步骤
 id;rounds 为 type=approve 可选,重审轮次上限(缺省预算 approveRounds=2);onExhausted 为
-type=approve 必填语义:"blocked" 终局阻塞,其他步骤 id = 升级出口;flow 为 type=flow 必填,子流程
+type=approve 可选,缺省 "blocked"(终局阻塞),其他步骤 id = 升级出口;flow 为 type=flow 必填,子流程
 id,支持 {step.output} 动态路由;input 为 type=flow 可选传参(值须为单占位符 {step.output})。
 
 ## 3. 产出契约(强流程核心)
@@ -78,7 +78,7 @@ additionalProperties:false;listOutputs 产出类型为 string 数组。
 - APPROVED:被审 target 链放行,流程继续;
 - REJECTED(未耗尽):target 置回待办并重做,重做指令自动附 [重做说明] 节(裁决意见 comments +
   被审步骤原产出);审批步自身也回到待办等待再审;重审次数计账,达 rounds 上限即耗尽;
-- 耗尽:onExhausted="blocked" → 流程终局 blocked(等用户介入);onExhausted=<升级步 id> → 触发升级步骤。
+- 耗尽:onExhausted 缺省或 ="blocked" → 流程终局 blocked(等用户介入);onExhausted=<升级步 id> → 触发升级步骤。
 
 裁决来源由顶层 autoApprove 决定:false(缺省)转呈页签,用户点击裁决,主循环亦可代审(by=main-agent,
 意见必填);true 直接由主循环代审。页签与主循环先到先得,幂等。审批步骤不派发子代理。
@@ -114,7 +114,8 @@ for_each: "<stepId>.<listOutput>"——数据源必须是上游步骤的 listOut
 - flow: "子模板id" 字面路由,或 "{stepId.outputName}" 动态路由(分诊);
 - input: { name: "{stepId.outputName}" } 传参,子流程内以 {input.name} 引用;
 - 子流程复用当前 run 记录(步骤前缀区分),产出按子步骤扁平挂载到本步骤产出;
-- 嵌套深度上限 3;动态路由目标必须存在于模板集(跨流程校验)。
+- 嵌套深度上限 3;动态路由目标必须存在于模板集(跨流程校验);
+- 审批仅顶层可达:子模板含 approve 步时,引用它的模板集合校验拒绝(模板集校验与释放权威点)。
 
 ## 10. 分诊惯例
 

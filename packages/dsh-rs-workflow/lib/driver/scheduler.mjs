@@ -112,11 +112,13 @@ export function nextBatch(state, script, { concurrency = DEFAULT_CONCURRENCY } =
         continue
       }
       let prev = null
+      // sequential 缺省(spec §8):仅显式 parallel 才并行,防缺省 mode 翻转语义
+      const sequential = step.mode !== 'parallel'
       for (const inst of s.instances) {
-        const ready = step.mode === 'sequential'
+        const ready = sequential
           ? inst.status === 'pending' && (prev === null || prev.status === 'done')
           : inst.status === 'pending'
-        if (ready && step.mode === 'sequential' && prev) inst.carry = prev.outputs
+        if (ready && sequential && prev) inst.carry = prev.outputs
         prev = inst
         if (!ready) continue
         calls.push({ stepId: step.id, instance: { key: inst.key, index: inst.index, item: inst.item, carry: inst.carry } })

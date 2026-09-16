@@ -181,7 +181,7 @@ const CONTROL_BY = new Set(['user', 'main-agent'])
 // 活跃判定:注册表在册或记录未终态(waiting_approval 属活跃)
 const isRunActive = (runId, record) => registry.drivers.has(runId) || (record && ACTIVE_STATES.has(record.status))
 
-function handleControl(body) {
+export function handleControl(body) {
   const runId = typeof body.runId === 'string' ? body.runId : ''
   const kind = typeof body.kind === 'string' ? body.kind : ''
   if (!CONTROL_KINDS.includes(kind)) throw new Error('kind 须为 ' + CONTROL_KINDS.join('|'))
@@ -197,6 +197,7 @@ function handleControl(body) {
     const accepted = post(runId, { kind, by: body.by, reason: typeof body.reason === 'string' ? body.reason : '' })
     return { ok: accepted }
   }
+  const store = reportStore()
   const driver = registry.drivers.get(runId)
   if (!driver) return { ok: false }
   if (kind === 'cancel') {

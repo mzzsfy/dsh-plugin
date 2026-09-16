@@ -1,4 +1,4 @@
-﻿// RunDriver 聚合(v5):剧本驱动;runSegment 分段推进(审批到达/暂停/终态即返回 settle 负载);
+// RunDriver 聚合(v5):剧本驱动;runSegment 分段推进(审批到达/暂停/终态即返回 settle 负载);
 // 外部裁决回写(waiting_approval 即时应用,paused 入队 resume 生效);取消优先;推进责任在主循环 resume
 import { reportStore } from '../store.mjs'
 import { templateDeps } from '../planner-gate.mjs'
@@ -28,7 +28,7 @@ function initState(script, request, inputs) {
   return state
 }
 
-// 续跑种子:快照直读;fromStepId 及其后代(剧本序兜底)回 pending,已完成不重派
+// 续跑种子:快照直读;fromStepId 及其 deps 后代全重置(含 done,旧产出作废,与 redo 语义一致)
 export function buildSeed(record, plan, fromStepId, inputs) {
   const state = JSON.parse(JSON.stringify(record.state ?? {}))
   state.status = 'running'
@@ -147,8 +147,8 @@ export class RunDriver {
   tabResume() {
     if (this.finished || this.state.status !== 'paused') return false
     this.awaitingResume = true
-    return true
     this.store.step({ runId: this.runId, event: 'control', body: { kind: 'resume' } })
+    return true
   }
 
   cancel() {
@@ -181,6 +181,8 @@ export class RunDriver {
   applyVerdictPost(event) {
     const verdict = event.kind === 'approve' ? 'APPROVED' : 'REJECTED'
     if (this.state.status === 'paused') {
+      // 无审批窗口(paused 非审批转入)裁决无处挂靠,不受理
+      if (this.state.waitingApproval === undefined) return false
       // 先到先得:同一步已有入队裁决则后到不受理(防 rounds 虚增/已 done 步被重开)
       this.state.pendingApprovals ??= []
       const stepId = this.state.waitingApproval

@@ -70,7 +70,7 @@ function setup() {
   const tool = (name) => registered.find((t) => t.name === name)
   const agent = { id: `agent-${setup.seq = (setup.seq ?? 0) + 1}` }
   const exec = { agent, signal: { throwIfAborted: () => {}, aborted: false } }
-  return { start: tool('rs_workflow_start'), status: tool('rs_workflow_status'), resume: tool('rs_workflow_resume'), cancel: tool('rs_workflow_cancel'), message: tool('rs_workflow_message'), agent, exec }
+  return { start: tool('rs_workflow_start'), status: tool('rs_workflow_status'), resume: tool('rs_workflow_resume'), cancel: tool('rs_workflow_cancel'), message: tool('rs_workflow_message'), verdict: tool('rs_workflow_verdict'), agent, exec }
 }
 
 const fullPlan = (brief = '口径', refs = ['triage', 'execute', 'review', 'deliver']) => ({
@@ -191,3 +191,43 @@ test.afterEach((t) => { if (t.result?.status === 'failed') __orchTestFailed = tr
 after(() => process.exit(__orchTestFailed ? 1 : 0))
 
 
+
+test('Given verdict When approve 缺 reason Then 拒(审计必填)', async () => {
+  const { start, verdict, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  const runId = r0.runId
+  await waitStatus(runId, new Set(['waiting_approval', 'completed']))
+  const v = await verdict.execute({ runId, verdict: 'approve', reason: '  ' }, exec)
+  assert.equal(v.ok, false)
+  assert.ok(v.error.includes('reason'))
+})
+
+test('Given waiting run When verdict reject(by=user) Then 受理且 redoInfo 生效', async () => {
+  const { start, verdict, resume, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  const runId = r0.runId
+  const record = await waitStatus(runId, new Set(['waiting_approval']))
+  assert.equal(record.status, 'waiting_approval')
+  const v = await verdict.execute({ runId, verdict: 'reject', reason: '口径未达', by: 'user' }, exec)
+  assert.equal(v.ok, true)
+  await resume.execute({ runId }, exec)
+  const after = reportStore().get(runId)
+  assert.equal(after.controls.some((c) => c.kind === 'reject' && c.by === 'user' && c.reason === '口径未达'), true)
+})
+
+test('Given 页签先裁 When verdict 后到 Then 未受理', async () => {
+  const { start, verdict, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  const runId = r0.runId
+  await waitStatus(runId, new Set(['waiting_approval']))
+  registry.get(runId).handlePost({ kind: 'approve', by: 'user' })
+  const v = await verdict.execute({ runId, verdict: 'approve', reason: '后到' }, exec)
+  assert.equal(v.ok, false)
+  assert.ok(v.error.includes('未受理'))
+})
+
+test('Given verdict When verdict 非法枚举 Then 拒', async () => {
+  const { verdict, exec } = setup()
+  const v = await verdict.execute({ runId: 'r-x', verdict: 'maybe', reason: 'r' }, exec)
+  assert.equal(v.ok, false)
+})

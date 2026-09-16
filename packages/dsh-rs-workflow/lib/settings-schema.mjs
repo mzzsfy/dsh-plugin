@@ -1,4 +1,5 @@
-// config 形态 schema:「rs-workflow」三节(slots/budgets/templates),自有文件存储(config.json)
+// config 形态 schema:slots/budgets 两节(模板存 templates.json,不入 config),自有文件存储
+// (头注释口径对齐 data-design.md;历史三节形态已删,config.json 只承载 slots/budgets)
 // 契约源 docs/rsww-v5/data-design.md 存储布局节;board config-save 校验口径同源
 import z from '@deepseek-ai/schemastery'
 
@@ -42,19 +43,8 @@ function buildBudgets() {
   return z.object(Object.fromEntries(BUDGET_KEYS.map((key) => [key, budget(key)])))
 }
 
-function buildTemplates() {
-  const item = z.object({
-    id: z.string().required().description('流程 id(^[a-z][a-z0-9-]*$)'),
-    label: z.string().default('').description('显示名'),
-    description: z.string().default('').description('适用场景'),
-    enabled: z.boolean().default(true).description('禁用后不可创建、重跑不可选'),
-    json: z.string().default('').description('流程定义 JSON 全文(规范见设置页模板规范)'),
-  })
-  return z.array(item).default([]).description('流程模板集:自有文件存储 templates.json 全量')
-}
-
 // 存储形态 schema(config.json 载入面归一;载入走 normalizeConfig,此 schema 供工具化校验)
-export const CONFIG_SCHEMA = z.object({ slots: buildSlots(), budgets: buildBudgets(), templates: buildTemplates() })
+export const CONFIG_SCHEMA = z.object({ slots: buildSlots(), budgets: buildBudgets() })
 
 const isEntry = (value) => value !== null && typeof value === 'object'
 const clampBudget = (value) => Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, value))
@@ -76,27 +66,8 @@ function normalizeBudgets(value) {
   return Object.fromEntries(BUDGET_KEYS.map((key) => [key, Number.isInteger(source[key]) ? clampBudget(source[key]) : DEFAULT_BUDGETS[key]]))
 }
 
-function normalizeTemplateEntry(entry) {
-  if (!isEntry(entry) || typeof entry.id !== 'string') return null
-  return {
-    id: entry.id,
-    label: typeof entry.label === 'string' ? entry.label : '',
-    description: typeof entry.description === 'string' ? entry.description : '',
-    enabled: typeof entry.enabled === 'boolean' ? entry.enabled : true,
-    json: typeof entry.json === 'string' ? entry.json : '',
-  }
-}
-
-function normalizeTemplates(value) {
-  if (!Array.isArray(value)) return []
-  return value.flatMap((entry) => {
-    const item = normalizeTemplateEntry(entry)
-    return item ? [item] : []
-  })
-}
-
 // 旧值自清理归一:未声明键剔除、缺省键补默认;返回新对象不改入参
 export function normalizeConfig(value) {
   const source = isEntry(value) ? value : {}
-  return { slots: normalizeSlots(source.slots), budgets: normalizeBudgets(source.budgets), templates: normalizeTemplates(source.templates) }
+  return { slots: normalizeSlots(source.slots), budgets: normalizeBudgets(source.budgets) }
 }

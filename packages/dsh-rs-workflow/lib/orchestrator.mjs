@@ -318,12 +318,13 @@ export function registerOrchestrator(ctx, config) {
         name: 'rs_workflow_verdict',
         description: [
           '回写若水编排裁决(主循环裁决通道,与页签先到先得):run 处于 waiting_approval 时受理。',
-          '模板 autoApprove=true 时代审直接调用;ask_user 转呈真人后按其选择调用。裁决后 rs_workflow_resume 拉起下一段。',
+          'autoApprove=true 代审:by=main-agent + 代审意见;ask_user 转呈真人:by=user + 用户意见。裁决后 rs_workflow_resume 拉起下一段。',
         ].join(''),
         parameters: {
-          runId: { type: 'string', required: true, description: '要裁决的 run' },
+          runId: { type: 'string', description: '要裁决的 run(缺省 = 本会话现役 run)' },
           verdict: { type: 'string', required: true, description: 'approve = 通过;reject = 驳回(重做)' },
-          reason: { type: 'string', description: '驳回必填:重做意见(进入重做指令);通过可选' },
+          reason: { type: 'string', required: true, description: '裁决意见(审计必填):驳回=重做口径,通过=放行依据' },
+          by: { type: 'string', description: '裁决来源:main-agent=代审(缺省);user=真人转呈后的用户裁决' },
         },
         output: {
           schema: { type: 'object', additionalProperties: true },
@@ -333,14 +334,15 @@ export function registerOrchestrator(ctx, config) {
           if (args.verdict !== 'approve' && args.verdict !== 'reject') {
             return { ok: false, error: 'verdict 须为 approve|reject' }
           }
-          if (args.verdict === 'reject' && (typeof args.reason !== 'string' || args.reason.trim() === '')) {
-            return { ok: false, error: '驳回必填 reason(重做意见)' }
+          if (typeof args.reason !== 'string' || args.reason.trim() === '') {
+            return { ok: false, error: 'reason 必填(审计口径与页签一致)' }
           }
+          const by = args.by === 'user' ? 'user' : 'main-agent'
           const runId = typeof args.runId === 'string' && args.runId !== '' ? args.runId : currentRunId(exec.agent)
           if (runId === undefined) return { ok: false, error: '本会话无现役 run(编排未启动)' }
           const driver = registry.drivers.get(runId)
           if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
-          const accepted = driver.handlePost({ kind: args.verdict, by: 'main-agent', reason: typeof args.reason === 'string' ? args.reason : '' })
+          const accepted = driver.handlePost({ kind: args.verdict, by, reason: args.reason })
           const record = reportStore().get(runId)
           return accepted
             ? { ok: true, runId, status: record?.status, hint: '裁决已受理;rs_workflow_resume 拉起下一段' }

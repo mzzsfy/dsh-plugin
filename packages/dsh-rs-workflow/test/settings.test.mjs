@@ -26,12 +26,12 @@ const LEGACY_BUDGET_KEYS = ['reviewRejectBeforeEscalate', 'planRejectBeforeBlock
 const emptySlots = () => Object.fromEntries(SLOT_KEYS.map((key) => [key, []]))
 const defaultBudgets = () => ({ ...DEFAULT_BUDGETS })
 
-test('Given 全新归一空值 When normalizeConfig({}) Then 六空位/三默认预算/templates 空数组', () => {
+test('Given 全新归一空值 When normalizeConfig({}) Then 六空位/三默认预算(无 templates 节)', () => {
   const value = normalizeConfig({})
   assert.deepEqual(Object.keys(value.slots), SLOT_KEYS)
   assert.deepEqual(value.slots, emptySlots())
   assert.deepEqual(value.budgets, defaultBudgets())
-  assert.deepEqual(value.templates, [])
+  assert.equal('templates' in value, false)
   assert.deepEqual(normalizeConfig(undefined), value)
   assert.deepEqual(normalizeConfig(null), value)
   assert.deepEqual(normalizeConfig('junk'), value)
@@ -69,11 +69,9 @@ test('Given budgets 越界/下界/负值/非整数/错型 When normalizeConfig T
   assert.deepEqual(Object.keys(value.budgets), BUDGET_KEYS)
 })
 
-test('Given 模板条目缺 enabled 与 id 非字符串条目 When normalizeConfig Then enabled 补 true 且坏条目剔除', () => {
+test('Given config 带 templates 节 When normalizeConfig Then 剥离(模板不入 config)', () => {
   const value = normalizeConfig({ templates: [{ id: 't1' }, { label: 'x' }, null] })
-  assert.deepEqual(value.templates, [
-    { id: 't1', label: '', description: '', enabled: true, json: '' },
-  ])
+  assert.equal('templates' in value, false)
 })
 
 test('Given 存储目录 When dataDir Then 默认 ~/.dsh/dsh-rs-workflow;DSH_RS_WORKFLOW_DATA_DIR 覆写生效', () => {
