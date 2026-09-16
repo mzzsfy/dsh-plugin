@@ -1292,6 +1292,8 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
         // 样式若随面板注入则面板裸样式渲染
         ctx.effect(() => {
           const style = document.createElement('style')
+          // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
+          style.setAttribute('data-plugin', '@mzzsfy/dsh-session-manager')
           style.textContent = CSS
           document.head.appendChild(style)
           return () => style.remove()
