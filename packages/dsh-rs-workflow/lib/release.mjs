@@ -1,4 +1,4 @@
-// release — 流程模板释放/撤下/自清理(契约:docs/rsww-v4/feat/release.md)
+// release — 流程模板创建/移除/自清理(契约:docs/rsww-v4/feat/release.md)
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -18,7 +18,7 @@ const FLOW_PRESET_PREFIX = 'rs-'
 const STAGING_PREFIX = '.rs-workflow-staging-'
 const OLD_PREFIX = '.rs-workflow-old-'
 const ORPHAN_PREFIX = '.rs-workflow-orphan-'
-// 骨架唯一源中的主组合 flows 锚定;释放产物一律改写为目录内 flow.json5(恰一处)
+// 骨架唯一源中的主组合 flows 锚定;创建产物一律改写为目录内 flow.json5(恰一处)
 const FLOW_ANCHOR_MAIN = "new URL('flows/default.json5', baseUrl)"
 const FLOW_ANCHOR_RELEASE = "new URL('flow.json5', baseUrl)"
 const FLOW_ID_RE = /^[a-z][a-z0-9-]*$/
@@ -41,7 +41,7 @@ function parseMajor(version) {
 }
 
 // 现役判定基线 = 当前包主版本:marker 主版本不低于它即 v4 时代产物。
-// 契约判定表「主版本 ≥ 4 保留」的落地形态(包版本 1.0.0 起步,写死 4 会误删 v4 自产释放物)
+// 契约判定表「主版本 ≥ 4 保留」的落地形态(包版本 1.0.0 起步,写死 4 会误删 v4 自产创建物)
 const PKG_MAJOR = parseMajor(PKG_VERSION) ?? V4_BASE_MAJOR
 
 const nonEmpty = (v) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : null)
@@ -80,10 +80,10 @@ function isCurrentV4(marker) {
 
 const markerJson = () => JSON.stringify({ package: PACKAGE_NAME, kind: MARKER_KIND_FLOW, version: PKG_VERSION }, null, 2) + '\n'
 
-// 释放骨架:包内唯一源逐字保留,仅改写 flowFile 锚定(必须恰一处)
+// 创建骨架:包内唯一源逐字保留,仅改写 flowFile 锚定(必须恰一处)
 function releaseAgentYaml() {
   const parts = readFileSync(PRESET_SKELETON, 'utf8').split(FLOW_ANCHOR_MAIN)
-  if (parts.length !== 2) throw new Error(`释放骨架 flowFile 锚定串异常(期望恰一处): ${PRESET_SKELETON}`)
+  if (parts.length !== 2) throw new Error(`创建骨架 flowFile 锚定串异常(期望恰一处): ${PRESET_SKELETON}`)
   return parts.join(FLOW_ANCHOR_RELEASE)
 }
 
@@ -134,7 +134,7 @@ function atomicReplace(dest, existed, build) {
           } catch {
             orphan = backup
           }
-          console.warn(`[rs-workflow] 释放换入失败且还原失败,旧目录保留在 ${orphan}(不会被自动清理,需人工处置)`)
+          console.warn(`[rs-workflow] 创建换入失败且还原失败,旧目录保留在 ${orphan}(不会被自动清理,需人工处置)`)
         }
       }
       throw error
@@ -149,7 +149,7 @@ function atomicReplace(dest, existed, build) {
 export function releaseFlowTemplate(entry, dshHome) {
   const flowId = typeof entry?.id === 'string' ? entry.id.trim() : ''
   if (!FLOW_ID_RE.test(flowId)) throw new Error(`流程 id 非法: ${JSON.stringify(entry?.id)}(须匹配 ${FLOW_ID_RE.source})`)
-  // 释放前重校验(设置里可能被外部改坏)
+  // 创建前重校验(设置里可能被外部改坏)
   let parsed
   try {
     parsed = parseTemplate(entry.json5)
@@ -200,7 +200,7 @@ export function releasedTemplateIds(dshHome) {
   return ids
 }
 
-// v3 遗留自清理:只删能证明归属本包且非现役 v4 的释放物;缺失/损坏/外来一律不动
+// v3 遗留自清理:只删能证明归属本包且非现役 v4 的创建物;缺失/损坏/外来一律不动
 export function sweepLegacyReleases(dshHome) {
   const root = presetRoot(dshHome)
   const removed = []
@@ -226,13 +226,13 @@ export function sweepLegacyReleases(dshHome) {
       rmSync(dir, { recursive: true, force: true })
       removed.push(id)
     } catch (error) {
-      console.warn(`[rs-workflow] 遗留释放清理失败: ${name} (${error.message})`)
+      console.warn(`[rs-workflow] 遗留模式清理失败: ${name} (${error.message})`)
     }
   }
   return { removed, kept }
 }
 
-// 出厂释放:目标缺失或 marker 非现役 v4 时重放,已是现役即幂等跳过
+// 出厂创建:目标缺失或 marker 非现役 v4 时重放,已是现役即幂等跳过
 export function ensureMainReleased(defaultEntry, dshHome) {
   const dest = flowPresetDest(defaultEntry.id, dshHome)
   cleanStaleStaging(dirname(dest))

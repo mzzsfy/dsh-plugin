@@ -55,13 +55,13 @@ const writeMarker = (home, id, marker) => putFile(home, id, MARKER_NAME, JSON.st
 
 const readMarkerOf = (home, id) => JSON.parse(readFileSync(join(flowDirOf(home, id), MARKER_NAME), 'utf8'))
 
-test('Given 显式 dshHome When 求预设根与释放目标 Then 返回 .agent-presets 下 rs- 前缀路径', (t) => {
+test('Given 显式 dshHome When 求预设根与创建目标 Then 返回 .agent-presets 下 rs- 前缀路径', (t) => {
   const home = tempHome(t)
   assert.equal(presetRoot(home), join(home, PRESET_DIR))
   assert.equal(flowPresetDest('novel', home), join(home, PRESET_DIR, RS_PREFIX + 'novel'))
 })
 
-// O4 锚定:包内 preset/rs-workflow/agent.cordis.yml 即释放骨架,flowFile 锚定串必须恰一处
+// O4 锚定:包内 preset/rs-workflow/agent.cordis.yml 即创建骨架,flowFile 锚定串必须恰一处
 test('Given 包内主组合骨架 When 检查 flowFile 锚定串 Then 恰出现一处(骨架单源守卫)', () => {
   const skeleton = readFileSync(join(PKG_ROOT, 'preset', 'rs-workflow', AGENT_YAML), 'utf8')
   const anchor = "new URL('flows/default.json5', baseUrl)"
@@ -128,7 +128,7 @@ test('Given 合法模板 entry When releaseFlowTemplate Then created 且四文�
   assert.ok(preset.includes('小说创作流程 从大纲到成稿的编排'))
 })
 
-test('Given 已释放 When 同 entry 再 release Then updated;改 label 再 release Then agent 等价且 preset.yml name 更新', (t) => {
+test('Given 已创建 When 同 entry 再 release Then updated;改 label 再 release Then agent 等价且 preset.yml name 更新', (t) => {
   const home = tempHome(t)
   releaseFlowTemplate(ENTRY, home)
   const dir = flowDirOf(home, 'novel')
@@ -166,7 +166,7 @@ test('Given 目标目录存在但 marker 缺失 When release Then throw 归属�
   assert.equal(readFileSync(join(flowDirOf(home, 'novel'), 'user-file.txt'), 'utf8'), 'no marker')
 })
 
-test('Given 已释放 When unrelease Then removed 且目录消失;再 unrelease Then missing;外来目录 Then foreign 不删', (t) => {
+test('Given 已创建 When unrelease Then removed 且目录消失;再 unrelease Then missing;外来目录 Then foreign 不删', (t) => {
   const home = tempHome(t)
   releaseFlowTemplate(ENTRY, home)
   assert.equal(unreleaseFlowTemplate('novel', home), 'removed')
@@ -185,7 +185,7 @@ test('Given rs-default 与 rs-novel 均本包 flow、rs-collab 为 collab When r
   assert.deepEqual(releasedTemplateIds(home).sort(), ['default', 'novel'])
 })
 
-test('Given ensureMainReleased When 首次 Then 释放成功;再次同 entry Then current;marker 过时(v0.3.0) Then 重写为 v4', (t) => {
+test('Given ensureMainReleased When 首次 Then 创建成功;再次同 entry Then current;marker 过时(v0.3.0) Then 重写为 v4', (t) => {
   const home = tempHome(t)
   const entry = { ...ENTRY, id: 'default', label: '通用默认' }
   assert.equal(ensureMainReleased(entry, home), 'created')

@@ -118,7 +118,7 @@ test('Given template-tool When spec Then 返回 v4 规范原文;When list Then �
 
 const tplIds = (h) => (h.value().templates ?? []).map((t) => t.id)
 
-test('Given 合法模板 When save release:true Then 落盘并释放;dryRun:true Then 不落盘', async () => {
+test('Given 合法模板 When save release:true Then 落盘并创建;dryRun:true Then 不落盘', async () => {
   const h = toolHarness()
   const r1 = await h.tool.execute({ action: 'save', template: { id: 't1', json5: JSON.stringify(GOOD_TPL) }, dryRun: true })
   assert.equal(r1.ok, true)
@@ -138,7 +138,7 @@ test('Given 模板含未知字段 When save Then errors 逐条且不落盘', asy
   assert.equal(tplIds(h).includes('t1'), false)
 })
 
-test('Given id 不一致 When save Then errors 提示;Given remove 存在 id Then 删除并撤下', async () => {
+test('Given id 不一致 When save Then errors 提示;Given remove 存在 id Then 删除并移除模式', async () => {
   const h = toolHarness({ templates: [{ id: 't1', json5: JSON.stringify(GOOD_TPL) }] })
   const r1 = await h.tool.execute({ action: 'save', template: { id: 'other', json5: JSON.stringify(GOOD_TPL) } })
   assert.equal(r1.ok, false)
@@ -159,7 +159,7 @@ test('Given takeover 行且 workflowEngine 缺失 When apply Then 干净禁用:i
   assert.deepEqual(ctx.injected, [['workflowEngine']])
 })
 
-test('Given release 行且存在旧版释放物 When apply Then logger.info 播报移除清单;sweep 空则不播报', () => {
+test('Given release 行且存在旧版遗留模式 When apply Then logger.info 播报移除清单;sweep 空则不播报', () => {
   const home = mkdtempSync(join(tmpdir(), 'rsww-sweep-'))
   // sweepLegacyReleases 播报裸 id(目录 rs-legacy-x → id legacy-x)
   mkdirSync(join(home, '.agent-presets', 'rs-legacy-x'), { recursive: true })

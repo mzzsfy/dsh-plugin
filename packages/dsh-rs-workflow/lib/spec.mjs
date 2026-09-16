@@ -5,12 +5,12 @@
 export const SPEC_TEXT = `# 若水工作流流程模板 DSL 规范(v4)
 
 流程模板 = 一份 JSON5 文本,声明一个强流程:每一步安排 AI 产出什么,引擎强制校验后推进。
-你(AI)根据用户口述的逻辑写模板;写完调 rs_workflow_template {action:"save", release:true} 保存并释放为可选模式。
+你(AI)根据用户口述的逻辑写模板;写完调 rs_workflow_template {action:"save", release:true} 保存并创建为可选模式。
 
 ## 1. 顶层结构
 
 {
-  id: "novel",          // 必填,^[a-z][a-z0-9-]*$;释放的模式 id = rs-<id>
+  id: "novel",          // 必填,^[a-z][a-z0-9-]*$;创建的模式 id = rs-<id>
   label: "小说写作",     // 必填,模式显示名
   description: "...",   // 必填,一句话适用场景(分诊目录展示给引擎)
   inputs: {             // 可选,运行时入参声明(见 §8)

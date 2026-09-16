@@ -272,7 +272,7 @@ const MARKER_NAME = '.dsh-rs-workflow-source.json'
 const MARKER_PACKAGE = '@mzzsfy/dsh-rs-workflow'
 
 test('Given 内置模板 news When template-remove Then 墓碑落盘防复活', async () => {
-  // 内置 id 不物理删除:settings.update 落 {id:'news',enabled:false} 墓碑防合并复活,unrelease 撤下释放物
+  // 内置 id 不物理删除:settings.update 落 {id:'news',enabled:false} 墓碑防合并复活,unrelease 移除已创建模式
   const tplJson5 = JSON.stringify({ id: 'news', label: 'news', steps: [{ id: 'a', prompt: 'P', outputs: { o: 'o' } }] })
   const settingsValue = { templates: [{ id: 'news', label: 'news', description: '', enabled: true, json5: tplJson5 }] }
   const presetHome = mkdtempSync(join(tmpdir(), 'rsww-board-preset-'))
@@ -290,7 +290,7 @@ test('Given 内置模板 news When template-remove Then 墓碑落盘防复活', 
     assert.equal(settingsValue.templates.length, 1)
     assert.equal(settingsValue.templates[0].id, 'news')
     assert.equal(settingsValue.templates[0].enabled, false)
-    // 释放物被撤下(unreleaseFlowTemplate 真实执行)
+    // 已创建模式被移除(unreleaseFlowTemplate 真实执行)
     assert.equal(existsSync(releaseDir), false)
     // 合并面:news 仍在且呈现禁用态
     const r2 = await h.call('/api/rsww/templates')

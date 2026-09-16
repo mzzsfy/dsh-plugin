@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-rs-workflow',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useCallback, useRef } = React
+    const { useState, useEffect, useCallback } = React
 
     const API = '/api/rsww/'
     const REFRESH_MS = 5 * 1000
@@ -617,7 +617,7 @@ window.__ModuleLoader__.load({
         idErrs.map((e, i) => h('span', { className: 'rsww-error', key: i }, e.message)),
         field('显示名', 'label', false, false),
         field('说明', 'description', false, false),
-        h(Switch, { checked: model.enabled, onChange: (e) => update((m) => ({ ...m, enabled: e.target.checked })), label: '启用(禁用后不可释放、重跑不可选)', ariaLabel: '启用模板' }),
+        h(Switch, { checked: model.enabled, onChange: (e) => update((m) => ({ ...m, enabled: e.target.checked })), label: '启用(禁用后不可创建、重跑不可选)', ariaLabel: '启用模板' }),
         synced ? null : h('span', { className: 'rsww-note' }, '此模板文本含 JSON5 扩展语法,结构表单锁定:请在文本视图点「应用」,经 host 校验通过后回填。'))
     }
 
@@ -849,14 +849,9 @@ window.__ModuleLoader__.load({
         if (!andRelease) { setSaving(false); onSaved(''); return }
         const r = await post('release', { id: model.id })
         setSaving(false)
-        onSaved(r.ok ? '' : '已保存;释放失败:' + r.error)
+        onSaved(r.ok ? '' : '已保存;创建失败:' + r.error)
       }
-      return h('div', { className: 'rsww-detail' },
-        h('div', { className: 'rsww-row' },
-          h('span', { className: 'rsww-label' }, isNew ? '新建模板' : '编辑模板'),
-          h('span', { className: 'rsww-mono' }, isNew ? '(未保存)' : entry.id || '(副本:待定 id)'),
-          h('span', { style: { flex: 1 } }),
-          h('button', { className: 'rsww-btn', type: 'button', onClick: onClose }, '关闭')),
+      return h(Modal, { title: (isNew ? '新建模板' : '编辑模板 · ' + (entry.id || '(副本:待定 id)')), onClose },
         h('datalist', { id: 'rsww-tmpl-ids' }, templates.map((t) => h('option', { key: t.id, value: t.id }))),
         h(MetaForm, { model, update, synced, topErr }),
         synced ? h(InputsForm, { model, update, topErr }) : null,
@@ -867,7 +862,7 @@ window.__ModuleLoader__.load({
         flatErrs.map((e, i) => h('span', { className: 'rsww-error', key: 'flat' + i }, e.message)),
         h('div', { className: 'rsww-row' },
           h('button', { className: 'rsww-btn', type: 'button', onClick: () => doSave(false), disabled: saving }, '保存'),
-          h('button', { className: 'rsww-btn', type: 'button', onClick: () => doSave(true), disabled: saving }, '保存并释放'),
+          h('button', { className: 'rsww-btn', type: 'button', onClick: () => doSave(true), disabled: saving }, '保存并创建'),
           note ? h('span', { className: 'rsww-note' }, note) : null))
     }
 
@@ -880,17 +875,16 @@ window.__ModuleLoader__.load({
           h('span', { className: 'rsww-mono rsww-note' }, t.id),
           builtin ? h(Badge, { tone: 'business' }, '内置') : null,
           disabled ? h(Badge, { tone: 'mute' }, '已禁用') : null,
-          released.includes(t.id) ? h(Badge, { tone: 'success' }, '已释放') : null),
+          released.includes(t.id) ? h(Badge, { tone: 'success' }, '已创建') : null),
         t.description ? h('span', { className: 'rsww-note' }, t.description) : null,
         h('div', { className: 'rsww-row' },
           h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onView }, '详情'),
           builtin
             ? h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onCopy }, '另存为副本')
             : h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onEdit }, '编辑'),
-          !builtin && !disabled ? (released.includes(t.id)
-            ? h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onUnrelease }, '撤下模式')
-            : h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onRelease }, '更新到 dsh')) : null,
-          h(ArmedButton, { label: builtin ? '禁用' : '删除', confirmLabel: builtin ? '确认禁用' : '确认删除', disabled: busy, onConfirm: onDelete })))
+          h(ArmedButton, { label: builtin ? '禁用' : '删除', confirmLabel: builtin ? '确认禁用' : '确认删除', disabled: busy, onConfirm: onDelete }),
+          !disabled && released.includes(t.id) ? h(ArmedButton, { label: '移除模式', confirmLabel: '确认移除', disabled: busy, onConfirm: onUnrelease }) : null,
+          !disabled && !released.includes(t.id) ? h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onRelease }, '创建到 dsh') : null))
     }
 
     // ── 只读详情弹窗:所有模板可点开;结构视图(JSON.parse 可达时)+JSON5 原文+一键检验 ──
@@ -1002,19 +996,12 @@ window.__ModuleLoader__.load({
       const [specOpen, setSpecOpen] = useState(false)
       const [specText, setSpecText] = useState('')
       const [specLoaded, setSpecLoaded] = useState(false)
-      const detailRef = useRef(null)
-      // 编辑器/弹窗插入在列表上方,滚动容器停在底部时新内容在视口外(点击"无响应"的实态);切换后拉回可见区
-      useEffect(() => {
-        const el = detailRef.current
-        if (!el) return
-        el.scrollIntoView({ block: 'start', behavior: 'smooth' })
-      }, [editing, viewing])
       const reload = useCallback(async () => {
         const [t, r] = await Promise.all([request('templates'), request('released')])
         if (!t.ok) { setError(t.error); return }
         setTemplates(t.data.templates || [])
         setError('')
-        if (r.ok) { setReleased(r.data.ids || []); setReleasedErr('') } else setReleasedErr('已释放列表拉取失败,释放按钮按未释放态渲染')
+        if (r.ok) { setReleased(r.data.ids || []); setReleasedErr('') } else setReleasedErr('已创建列表拉取失败,创建按钮按未创建态渲染')
       }, [])
       useEffect(() => { reload() }, [reload])
       const toggleSpec = async () => {
@@ -1051,7 +1038,6 @@ window.__ModuleLoader__.load({
             h('span', { className: 'rsww-label' }, '模板规范'),
             specText !== '' && !/^规范拉取失败/.test(specText) ? h(CopyButton, { text: specText }) : null),
           h('div', { className: 'rsww-full', style: { maxHeight: 320 } }, specText !== '' ? specText : '加载中...')) : null,
-        h('div', { ref: detailRef }),
         editing ? h(TemplateEditor, {
           entry: editing.entry, isNew: editing.isNew, templates,
           onClose: () => setEditing(null),

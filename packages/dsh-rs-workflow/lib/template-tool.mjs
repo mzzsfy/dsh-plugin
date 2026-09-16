@@ -1,5 +1,5 @@
 // template-tool — rs_workflow_template 模型工具:AI 按用户口述逻辑生成/修改流程模板
-// 激活于释放组合行(template-tool 行);落盘统一走 settings 与 release 模块,不直接触碰预设目录
+// 激活于已创建组合行(template-tool 行);落盘统一走 settings 与 release 模块,不直接触碰预设目录
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import JSON5 from 'json5'
 import { validateTemplate, validateTemplateSet } from './template-v4.mjs'
@@ -26,20 +26,20 @@ export function createTemplateTool({ getTemplates, setTemplates, removeTemplate,
     name: 'rs_workflow_template',
     description: [
       '若水工作流流程模板的 AI 编辑入口:用户口述流程逻辑,你据此生成/修改流程模板(JSON5)。',
-      '先调 {action:"spec"} 获取 DSL v4 规范与示例,再 {action:"save", template:{...}, release:true} 保存并释放为可选模式。',
+      '先调 {action:"spec"} 获取 DSL v4 规范与示例,再 {action:"save", template:{...}, release:true} 保存并创建为可选模式。',
       'list 列出现有模板;remove 按 id 移除并撤下其模式。',
       '每步以 outputs 声明结构化产出契约(子代理以结构化工具提交,引擎强制校验);人工审校用 type:"approve" 原语;',
       '流程入参用 inputs;禁止把「希望模型怎么做」写成口头约定。',
     ].join(''),
     parameters: {
-      action: { type: 'string', required: true, enum: ACTIONS, description: 'spec=获取 DSL 规范;list=列模板;save=保存模板(可同时释放);remove=移除模板' },
+      action: { type: 'string', required: true, enum: ACTIONS, description: 'spec=获取 DSL 规范;list=列模板;save=保存模板(可同时创建);remove=移除模板' },
       template: {
         type: 'object',
         additionalProperties: true,
         description: 'save:模板对象 {id,label,description,enabled,json5};json5 为流程定义 JSON5 文本(先调 spec 按规范写)',
       },
       id: { type: 'string', description: 'remove:要移除的模板 id' },
-      release: { type: 'boolean', description: 'save:true=保存后立即释放为可选模式(rs-<id>)' },
+      release: { type: 'boolean', description: 'save:true=保存后立即创建为可选模式(rs-<id>)' },
       dryRun: { type: 'boolean', description: 'save:true=仅校验不落盘(编辑器「校验」同源通道)' },
     },
     output: {
@@ -115,7 +115,7 @@ export function createTemplateTool({ getTemplates, setTemplates, removeTemplate,
           released = (await releaseTemplate(entry)) === true
           presetId = 'rs-' + id
         }
-        logger?.info?.(`rs-workflow 模板已保存: ${id}${released ? `(已释放为模式 ${presetId})` : ''}`)
+        logger?.info?.(`rs-workflow 模板已保存: ${id}${released ? `(已创建为模式 ${presetId})` : ''}`)
         return { ok: true, action, released, presetId, templates: normalizeTemplates([...others, entry]) }
       }
       if (action === 'remove') {

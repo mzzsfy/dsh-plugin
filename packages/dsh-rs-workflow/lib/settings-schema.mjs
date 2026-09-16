@@ -46,10 +46,10 @@ function buildBudgets() {
 
 function buildTemplates() {
   const item = z.object({
-    id: z.string().required().description('流程 id(^[a-z][a-z0-9-]*$);释放模式 = rs-<id>'),
+    id: z.string().required().description('流程 id(^[a-z][a-z0-9-]*$);创建模式 = rs-<id>'),
     label: z.string().default('').description('显示名'),
     description: z.string().default('').description('适用场景'),
-    enabled: z.boolean().default(true).description('禁用后不可释放、重跑不可选'),
+    enabled: z.boolean().default(true).description('禁用后不可创建、重跑不可选'),
     json5: z.string().default('').description('流程定义 JSON5 全文(规范见 rs_workflow_template 工具 spec)'),
   })
   return z.array(item).default(builtinTemplates(defaultTemplatesDir())).description('流程模板集:数组默认值 = 包内内置模板集(collab 分诊/审批/升级语义以内置模板承载)')

@@ -59,7 +59,7 @@ function readDocFile(workspace, path) {
   return readFileSync(full, 'utf8')
 }
 
-// 释放模式集合(rs-* 目录 flow.json5):嵌套子流程动态路由候选
+// 已创建模式集合(rs-* 目录 flow.json5):嵌套子流程动态路由候选
 export function discoverFlowRegistry(dshHome) {
   const root = join(dshHome, PRESET_ROOT_NAME)
   const registry = {}
