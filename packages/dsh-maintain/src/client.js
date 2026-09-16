@@ -289,6 +289,8 @@ function ensureUpgradeFloatStyle() {
   if (document.getElementById(UPGRADE_FLOAT_STYLE_ID) !== null) return
   const style = document.createElement('style')
   style.id = UPGRADE_FLOAT_STYLE_ID
+  // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
+  style.setAttribute('data-plugin', '@mzzsfy/dsh-maintain')
   style.textContent = [
     '#' + UPGRADE_FLOAT_ID + ' { position:fixed; right:20px; bottom:20px; z-index:9999; display:flex; align-items:center; gap:10px;',
     '  max-width:340px; padding:10px 14px; border-radius:10px; border:1px solid rgba(128,128,128,0.35);',
