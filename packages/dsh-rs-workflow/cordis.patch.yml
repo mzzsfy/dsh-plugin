@@ -1,22 +1,15 @@
-# rs-workflow v4 bundle patch:把本包 host 平面行注册进 profile 根
+# rs-workflow bundle patch:把本包 host 平面行注册进 profile 根
 # (`dsh plugin add @mzzsfy/dsh-rs-workflow` 应用):
 #   - rs-workflow / role settings:注册 settings 命名空间 `rs-workflow`
 #     (6 工作位 / 3 预算 / templates 模板数组)。
-#   - rs-workflow-release / role release:释放/撤下/同步(v4 marker 自清理 v3 目录)。
-#   - rs-workflow-board / role board:挂载 /api/rsww/* 路由(会话页签运行记录 + 模板管理 + 配置)。
-# preset 平面行(rs_workflow_template 工具与 takeover 拦截器)位于释放出的
-# preset 组合,不在本文件:模型工具与 agent 作用域事件属于 preset 平面。
-# 设计契约:docs/rsww-v4/architecture.md 与 feat/ 各模块文档。
+#   - rs-workflow-board / role board:挂载 /api/rsww/* 路由(设置页模板管理 + 配置)。
+# 编排运行时已随 v4 清理移除,按 v5 设计(docs/rsww-v5/)另行实现。
 
 - insert:
     - id: rs-workflow
       name: '@mzzsfy/dsh-rs-workflow'
       config:
         role: settings
-    - id: rs-workflow-release
-      name: '@mzzsfy/dsh-rs-workflow'
-      config:
-        role: release
     - id: rs-workflow-board
       name: '@mzzsfy/dsh-rs-workflow'
       config:

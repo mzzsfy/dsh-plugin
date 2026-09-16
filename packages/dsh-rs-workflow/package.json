@@ -1,6 +1,6 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
-  "description": "若水工作流 v4:人可以在场的强规则编排。单引擎 flow 驱动:接管会话、批次推进、结构化产出契约、审批原语、排队/注入/取消/暂停/断点续跑、全量运行记录回看。设计文档见仓库 docs/rsww-v4/",
+  "description": "若水工作流设置面:流程模板管理与工作位/预算配置(模板编辑/校验/配置读写)。编排运行时按 v5 设计(docs/rsww-v5/)另行实现。",
   "version": "1.0.0",
   "type": "module",
   "main": "lib/index.js",
@@ -28,9 +28,6 @@
   "files": [
     "lib",
     "src",
-    "engine",
-    "preset",
-    "flows",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -39,7 +36,6 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   }
 }

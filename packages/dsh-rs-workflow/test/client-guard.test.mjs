@@ -1,5 +1,5 @@
-// 体量守卫:lib/engine 每源文件 ≤ 600 行;client 单文件预算 ≤ 1500 行(平台单入口约束);
-// client 半区关键契约(模块注册/守卫类名/别名 token)钉住
+// 体量守卫:lib 每源文件 ≤ 600 行;client 单文件预算 ≤ 1500 行(平台单入口约束);
+// client 设置页关键契约(模块注册/守卫类名/别名 token)钉住
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -19,12 +19,9 @@ function walk(dir, out = []) {
   return out
 }
 
-test('Given 全部 lib/engine 源文件 When 统计行数 Then 每文件 ≤ 600 行', () => {
-  const files = [
-    ...walk(join(PKG_ROOT, 'lib')),
-    ...walk(join(PKG_ROOT, 'engine')),
-  ]
-  assert.ok(files.length >= 15)
+test('Given 全部 lib 源文件 When 统计行数 Then 每文件 ≤ 600 行', () => {
+  const files = walk(join(PKG_ROOT, 'lib'))
+  assert.ok(files.length >= 5)
   for (const file of files) {
     const lines = readFileSync(file, 'utf8').split('\n').length
     assert.ok(lines <= MAX_LINES, `${file} 行数 ${lines} 超限 ${MAX_LINES}`)
@@ -45,27 +42,21 @@ test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/
   assert.ok(text.includes('--dsw-alias-'))
   // 开关规约:checkbox 锚定 + track/thumb 结构
   assert.ok(text.includes('.rsww-switch input[type="checkbox"]:checked + .rsww-switch__track'))
-  // 控制通道契约:cancel/pause/resume/message 四 kind
-  for (const kind of ['cancel', 'pause', 'resume', 'message']) {
-    assert.ok(text.includes(`'${kind}'`), kind)
+})
+
+test('Given client.js When 检查视图职责 Then 仅设置页分区,无运行时视图与控制通道残留', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  // 会话页签/胶囊/运行时控制已随 v4 运行时移除(v5 另行实现)
+  assert.ok(!text.includes('conversation.view'), '不得挂会话页签视图')
+  assert.ok(!text.includes('conversation.session.header.actions'), '不得挂会话胶囊')
+  for (const route of ['runs', 'run?id=', "'control'", 'resume-from', 'run-remove', "'release'"]) {
+    assert.ok(!text.includes(route), `运行时路由残留:${route}`)
   }
 })
 
-test('Given client.js When 检查视图职责 Then 运行记录唯一视图=会话页签,设置页无全局运行列表', () => {
-  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
-  // 运行中心已砍(设计决议:run 寄生会话,跨会话检索交给宿主会话搜索)
-  assert.ok(!text.includes('运行中心'), '设置页不得再出现运行中心子页')
-  assert.ok(!text.includes("key: 'runs'"), '设置页子页不得含 runs 键')
-  // 页签按本会话过滤,终态卡内嵌重跑/续跑/删除
-  assert.ok(text.includes('r.sessionId === getSessionId()'), 'FlowView 须按当前会话过滤')
-  assert.ok(text.includes("'resume-from'") && text.includes("'run-remove'"), '续跑/删除路由消费保留')
-})
-
-test('Given client.js When 检查胶囊点击 Then 不得派发无监听的 window 自定义事件(死代码防回归)', () => {
+test('Given client.js When 检查死通道 Then 不得派发无监听的 window 自定义事件', () => {
   const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   assert.ok(!text.includes('dispatchEvent'), '禁止 window.dispatchEvent 死通道')
-  assert.ok(text.includes('if (selectView) { selectView(VIEW_ID)'), '官方 face 优先')
-  assert.ok(text.includes('[role="tab"]'), 'DOM 桥接兜底须按 role 精确匹配')
 })
 
 test('Given client.js When 检查复制能力 Then 规范面板与全文展开须挂复制按钮(双通道写入)', () => {

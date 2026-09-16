@@ -1,4 +1,4 @@
-// 模板静态校验器:DSL v4 唯一权威(board 保存/release 创建/takeover 行激活三入口同源)
+// 模板静态校验器:DSL v4 唯一权威(board 保存校验唯一入口)
 import JSON5 from 'json5'
 
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
