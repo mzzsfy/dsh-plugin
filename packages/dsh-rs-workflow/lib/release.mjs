@@ -1,4 +1,4 @@
-﻿// release — 流程模板创建/移除/自清理(契约:docs/rsww-v4/feat/release.md)
+// release — 流程模板创建/移除/自清理(v5:模板 id 由组合名承载,orchestrator 行 templateId 锚定改写)
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -8,7 +8,7 @@ import { validateTemplate } from './template.mjs'
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const AGENT_YAML = 'agent.cordis.yml'
 const PRESET_YML = 'preset.yml'
-const FLOW_FILE = 'flow.json5'
+const FLOW_FILE = 'flow.json'
 const MARKER_NAME = '.dsh-rs-workflow-source.json'
 const PACKAGE_NAME = '@mzzsfy/dsh-rs-workflow'
 const MARKER_KIND_FLOW = 'flow'
@@ -18,15 +18,14 @@ const FLOW_PRESET_PREFIX = 'rs-'
 const STAGING_PREFIX = '.rs-workflow-staging-'
 const OLD_PREFIX = '.rs-workflow-old-'
 const ORPHAN_PREFIX = '.rs-workflow-orphan-'
-// 骨架唯一源中的主组合 flows 锚定;创建产物一律改写为目录内 flow.json5(恰一处)
-const FLOW_ANCHOR_MAIN = "new URL('flows/default.json5', baseUrl)"
-const FLOW_ANCHOR_RELEASE = "new URL('flow.json5', baseUrl)"
+// 骨架唯一源中的 orchestrator 行 templateId 锚定;创建产物一律改写为组合承载的模板 id(恰一处)
+const TEMPLATE_ANCHOR_MAIN = 'TPL_ANCHOR'
 const FLOW_ID_RE = /^[a-z][a-z0-9-]*$/
 const DESC_MAX_CHARS = 200
 const DESC_FALLBACK = '流程工作流模板'
 const PRESET_NAME_PREFIX = '若水·'
-// v4 时代起点主版本:包版本不可解析时现役判定退化到此(见 PKG_MAJOR)
-const V4_BASE_MAJOR = 1
+// v5 时代起点主版本:包版本不可解析时现役判定退化到此(见 PKG_MAJOR)
+const V5_BASE_MAJOR = 1
 
 let PKG_VERSION = 'unknown'
 try {
@@ -40,9 +39,8 @@ function parseMajor(version) {
   return m ? Number(m[1]) : null
 }
 
-// 现役判定基线 = 当前包主版本:marker 主版本不低于它即 v4 时代产物。
-// 契约判定表「主版本 ≥ 4 保留」的落地形态(包版本 1.0.0 起步,写死 4 会误删 v4 自产创建物)
-const PKG_MAJOR = parseMajor(PKG_VERSION) ?? V4_BASE_MAJOR
+// 现役判定基线 = 当前包主版本:marker 主版本不低于它即 v5 时代产物。
+const PKG_MAJOR = parseMajor(PKG_VERSION) ?? V5_BASE_MAJOR
 
 const nonEmpty = (v) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : null)
 
@@ -80,13 +78,14 @@ function isCurrentV4(marker) {
 
 const markerJson = () => JSON.stringify({ package: PACKAGE_NAME, kind: MARKER_KIND_FLOW, version: PKG_VERSION }, null, 2) + '\n'
 
-// 创建骨架:包内唯一源逐字保留,仅改写 flowFile 锚定(必须恰一处)
-function releaseAgentYaml() {
-  const parts = readFileSync(PRESET_SKELETON, 'utf8').split(FLOW_ANCHOR_MAIN)
-  if (parts.length !== 2) throw new Error(`创建骨架 flowFile 锚定串异常(期望恰一处): ${PRESET_SKELETON}`)
-  return parts.join(FLOW_ANCHOR_RELEASE)
+// 创建骨架:包内唯一源逐字保留,仅改写 orchestrator 行 templateId 锚定(必须恰一处)
+function releaseAgentYaml(flowId) {
+  const parts = readFileSync(PRESET_SKELETON, 'utf8').split(TEMPLATE_ANCHOR_MAIN)
+  if (parts.length !== 2) throw new Error(`创建骨架 templateId 锚定串异常(期望恰一处): ${PRESET_SKELETON}`)
+  return parts.join(flowId)
 }
 
+// preset.yml 由骨架元数据 + 模板条目生成(组合名已含模板语义,描述取模板条目)
 function presetYaml(entry, flowId) {
   const desc = String(entry.description ?? '').replace(/\s*\n\s*/g, ' ').slice(0, DESC_MAX_CHARS) || DESC_FALLBACK
   return `name: ${PRESET_NAME_PREFIX}${entry.label || flowId}\ndescription: >-\n  ${desc}\n`
@@ -165,7 +164,7 @@ export function releaseFlowTemplate(entry, dshHome) {
   return atomicReplace(dest, existed, (out) => {
     writeFileSync(join(out, FLOW_FILE), entry.json, 'utf8')
     writeFileSync(join(out, PRESET_YML), presetYaml(entry, flowId), 'utf8')
-    writeFileSync(join(out, AGENT_YAML), releaseAgentYaml(), 'utf8')
+    writeFileSync(join(out, AGENT_YAML), releaseAgentYaml(flowId), 'utf8')
     writeFileSync(join(out, MARKER_NAME), markerJson(), 'utf8')
   })
 }

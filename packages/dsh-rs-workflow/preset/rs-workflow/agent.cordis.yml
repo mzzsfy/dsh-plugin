@@ -1,12 +1,12 @@
-# The `rs-workflow` agent preset: 若水流程编排(v4,单引擎 flow)。
+# The `rs-workflow` agent preset: 若水工作流(v5,主循环协作编排)。
 #
-# 本文件是释放骨架源:release 角色行把它作为唯一源生成 rs-<id> 模式组合
-# (运行时读取本文件并重写 takeover 行的 flowFile 锚定),不在包内被宿主装载。
+# 本文件是释放骨架源:release 生成器把它作为唯一源生成 rs-<id> 模式组合
+# (运行时仅改写 orchestrator 行的 templateId 锚定),不在包内被宿主装载。
 #
 # 基底是 `standard` 全功能编码代理行集,差异:
-#   1. persona 换成流程模式纪律 v4(主模型零参与,运行期答疑,回退判据);
-#   2. delegation 组内 takeover 行(kind: flow)与 template-tool 行;
-#   3. 无 report 行(trace 事件 + run-store 取代软上报);plan-mode 组移除。
+#   1. persona 换成流程模式纪律 v5(人机接口+受约束规划者,任务交付由编排子代理承担);
+#   2. delegation 组内 rs-workflow-orchestrator 工具行(v4 takeover 行删除)与 template-tool 行;
+#   3. 无 report 行(trace 事件 + run-store 取代);plan-mode 组移除(规划在编排内)。
 
 # ── identity ────────────────────────────────────────────────────────────────
 
@@ -14,15 +14,17 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     prefix: |-
-      你是"若水工作流"流程模式会话代理,由 {{model}} 模型驱动。
-      本模式由若水流程引擎接管:用户请求被 pre-step 拦截并启动流程编排,规划、执行、
-      审查全部由编排内子代理承担,你(主会话模型)零参与,收不到任务原文,不做任何交付。
-      判据:会话流中出现"若水编排已接管"等编排提示,即引擎在管;整段会话没有任何编排
-      提示(引擎缺失或接管失败)时,你回退为普通会话代理,正常完成用户请求。
-      引擎在管期间:用户运行中追加的消息不会丢失,将排队并在下一步骤边界投递进编排,
-      纠偏类消息会被注入后续指令,无需重发;取消即时生效,暂停续跑即恢复,产出与
-      重跑/续跑在会话「若水编排」页签全量可查。此时你只可能被调用于答疑:简短说明流程语义、进度查看
-      方式与控制手段,不执行交付操作,不尝试启动、修改工作流或代替子代理产出。
+      你是"若水工作流"会话代理,由 {{model}} 模型驱动。你负责人机协作与编排调度;
+      任务交付由流程引擎接管下的子代理完成,你不直接产出交付物。
+      职责判据:
+      1. 简单请求(一句话能答、小改动、纯问答)→ 直接答复,不起编排;
+      2. 多步骤交付类任务 → 调用 rs_workflow_start,提交结构化规划(steps 各步要点与验收口径);
+         规划被拒时按 errors 修正重交,连续 3 次被拒则回退直接答复并说明;
+      3. 编排运行中你只被段结束通知唤醒:审批到达(按模板 autoApprove 决定代审或 ask_user 转呈真人,裁决后
+         rs_workflow_resume 拉起下一段)、终态汇报(完成经 deliverables 交付;失败/阻塞说明卡点与建议);
+         用户中途纠偏经 rs_workflow_message 注入,下一步骤边界进入编排;
+      4. 你不代替子代理执行编排内步骤,不伪造产出,不跳过引擎直接交付;
+      5. 引擎不可用或编排启动失败时,回退为普通会话代理完成请求并说明。
     suffix: Your working directory is {{cwd}}.
 
 - id: agent-instructions
@@ -97,7 +99,7 @@
 # ── delegation and workflows ────────────────────────────────────────────────
 
 # workflowEngine 是预设私有服务,所有触达它的行共享一个 entry-local realm。
-# takeover 行也在组内:pre-step 拦截用户消息并经 workflowEngine 启动编排。
+# orchestrator 行在此组:注册 rs_workflow_* 五工具并经 jobs 服务拉起分段 continuable job;
 # 控制队列与 store 为普通模块单例,host/agent 行经同一 realpath 解析共享实例。
 - id: delegation
   name: cordis:group
@@ -139,13 +141,12 @@
         subagentProvider: spawn
         maxRounds: 64
 
-    # 引擎接管行:流程模板由释放目录/包内 flows 锚定(flowFile 由 release 重写)
-    - id: rs-workflow-takeover
+    # orchestrator 工具行:模板 id 由组合名承载(rs-<id> → <id>),释放生成器按组合名写入
+    - id: rs-workflow-orchestrator
       name: '@mzzsfy/dsh-rs-workflow'
       config:
-        role: takeover
-        kind: flow
-        flowFile: !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('flows/default.json5', baseUrl))"
+        role: orchestrator
+        templateId: TPL_ANCHOR
 
     # 模板编辑工具行:rs_workflow_template(AI 按口述逻辑生成/修改流程模板)
     - id: rs-workflow-template-tool
