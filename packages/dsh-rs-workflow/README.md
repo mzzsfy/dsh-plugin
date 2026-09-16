@@ -9,7 +9,7 @@
 - `docs/rsww-v4/architecture.md` — 宿主执行模型约束、模块图、接口契约(settings/board 路由/DSL v4)
 - `docs/rsww-v4/feat/driver/design.md` — 驱动器详设(状态机/批次算法/审批路由/终态判定/控制时序)
 - `docs/rsww-v4/feat/` — 13 份模块设计(store/takeover/board/settings/release/template-tool/preset-combo/builtin-templates/gui-*)
-- `docs/rsww-v4/steps/` — 五步里程碑(MVP → 运行中心 → 编辑器配置 → 审批模板集 → 清理收尾)
+- `docs/rsww-v4/steps/` — 五步里程碑(MVP → 运行历史/记录中心 → 编辑器配置 → 审批模板集 → 清理收尾)
 - `docs/rsww-v4/review-findings.md` — 双审核结论与处置记录
 - `docs/rsww-v4/overview.md` — 目标与关键决策
 
@@ -19,7 +19,7 @@
 |---|---|
 | `settings` | 注册 settings 命名空间 `rs-workflow`(6 工作位/3 预算/templates) |
 | `release` | 模板释放/撤下/同步(marker v4 三字段;v3 释放目录自清理) |
-| `board` | `/api/rsww/*` 路由(运行中心/模板管理/配置读写) |
+| `board` | `/api/rsww/*` 路由(会话页签运行记录/模板管理/配置读写) |
 | `takeover`(preset 平面) | `agent/pre-step` 拦截,经 workflowEngine 启动 RunDriver 编排 |
 | `template-tool`(preset 平面) | 模型工具 `rs_workflow_template`(spec/list/save/remove) |
 

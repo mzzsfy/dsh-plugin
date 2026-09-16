@@ -1,5 +1,5 @@
-// rs-workflow v4 client 半区:会话页签「若水编排」(gui-session)+
-// 设置页分区「若水工作流」三分区:运行中心(gui-center)/流程模板(gui-editor)/配置(gui-config)。
+// rs-workflow v4 client 半区:会话页签「若水编排」(gui-session,唯一运行记录视图)+
+// 设置页分区「若水工作流」:流程模板(gui-editor)/配置(gui-config)。
 // 自注册 __ModuleLoader__.load(对齐 v3);数据经 /api/rsww/* 读写。
 // 类名前缀 rsww-;颜色仅取官方 alias token;开关遵循仓库规约(track+thumb,锚定 checkbox)。
 
@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-rs-workflow',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useRef, useCallback } = React
+    const { useState, useEffect, useCallback } = React
 
     const API = '/api/rsww/'
     const REFRESH_MS = 5 * 1000
@@ -92,13 +92,9 @@ window.__ModuleLoader__.load({
 .rsww-pill--on{background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#0f1115);box-shadow:0 1px 3px rgba(0,0,0,.1)}
 .rsww-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .rsww-detail{border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:10px;background:var(--dsw-alias-bg-base,#fff);padding:12px 14px;display:flex;flex-direction:column;gap:10px}
-.rsww-card--open{border-color:var(--dsw-alias-state-business-primary,#4176e6)}
 .rsww-card--err{border-color:var(--dsw-alias-state-error-primary,#ec1313)}
 .rsww-input--err{border-color:var(--dsw-alias-state-error-primary,#ec1313)}
-.rsww-tree{display:flex;flex-direction:column;gap:4px}
 .rsww-tree__row{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;font:400 var(--dsw-font-xs-13,13px/20px sans-serif)}
-.rsww-tree__kids{display:flex;flex-direction:column;gap:4px;margin-top:4px}
-.rsww-tree__cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .rsww-note{font:400 var(--dsw-font-xxs-12,12px/18px sans-serif);color:var(--dsw-alias-label-caption,#adb2b8)}
 .rsww-kv{display:flex;flex-direction:column;gap:6px}
 .rsww-kv__row{display:flex;gap:6px;align-items:center;min-width:0}
@@ -239,21 +235,21 @@ window.__ModuleLoader__.load({
         error ? React.createElement('span', { className: 'rsww-error' }, error) : null)
     }
 
-    // 单 run 卡片:详情自轮询(运行中 2s;落定仅挂载一次)
-    function RunCard({ run }) {
+    // 单 run 卡片:详情自轮询(运行中 2s;落定仅挂载一次);终态卡内嵌重跑/续跑/删除操作
+    function RunCard({ run, onChanged }) {
       const [detail, setDetail] = useState(null)
       const [fetchError, setFetchError] = useState(false)
       const live = run.status === 'running' || run.status === 'paused'
+      const reload = useCallback(() => request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
+        if (outcome.ok) { setDetail(outcome.data); setFetchError(false) } else setFetchError(true)
+      }), [run.runId])
       useEffect(() => {
         let alive = true
-        const reload = () => request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
-          if (!alive) return
-          if (outcome.ok) { setDetail(outcome.data); setFetchError(false) } else setFetchError(true)
-        })
-        reload()
-        const timer = live ? setInterval(reload, LIVE_REFRESH_MS) : null
+        const load = () => reload().then(() => { if (!alive) return })
+        load()
+        const timer = live ? setInterval(load, LIVE_REFRESH_MS) : null
         return () => { alive = false; if (timer) clearInterval(timer) }
-      }, [run.runId, run.status, live])
+      }, [reload, live])
       const view = detail || run
       const queued = Array.isArray(view.queued) ? view.queued : []
       const stepEvents = []
@@ -265,6 +261,7 @@ window.__ModuleLoader__.load({
       }
       stepEvents.sort((a, b) => (a.at || '').localeCompare(b.at || ''))
       const requestText = String(view.request || '').split(/<\/?system-reminder>/i)[0].trim() || '(见完整记录)'
+      const settled = TERMINAL_STATES.includes(view.status)
       return React.createElement('div', { className: 'rsww-card' },
         React.createElement('div', { className: 'rsww-row' },
           React.createElement(StatusBadge, { status: view.status }),
@@ -279,13 +276,14 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'rsww-label' }, '批次节点流'),
           React.createElement('ul', { className: 'rsww-steps' },
             stepEvents.map((e, i) => React.createElement(StreamRow, { key: i, ...e })))) : null,
-        TERMINAL_STATES.includes(view.status) && view.summary ? React.createElement('div', { className: 'rsww-section' },
+        settled && view.summary ? React.createElement('div', { className: 'rsww-section' },
           React.createElement('span', { className: 'rsww-label' }, '结论'),
           React.createElement('span', { className: 'rsww-text' }, view.summary)) : null,
+        settled && detail ? React.createElement(DetailActions, { detail, onReload: reload, onRemoved: onChanged }) : null,
         fetchError ? React.createElement('span', { className: 'rsww-error' }, '详情拉取失败,下轮自动重试') : null)
     }
 
-    function FlowView() {
+    function FlowView({ getSessionId }) {
       const [runs, setRuns] = useState(null)
       const [error, setError] = useState('')
       const reload = useCallback(async () => {
@@ -298,18 +296,19 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer)
       }, [reload])
       if (error && !runs) return React.createElement('div', { className: 'rsww-flow' }, React.createElement('span', { className: 'rsww-error' }, error))
-      const mine = runs || []
+      // 只呈现本会话的 run:页签语义=本会话编排在场;跨会话检索交给宿主会话搜索
+      const mine = (runs || []).filter((r) => r.sessionId === getSessionId())
       const running = mine.filter((r) => r.status === 'running' || r.status === 'paused')
       const settled = mine.filter((r) => !running.includes(r)).slice(0, SETTLED_COUNT)
       const group = (title, count, items) => React.createElement('div', { className: 'rsww-group' },
         React.createElement('div', { className: 'rsww-group__head' },
           React.createElement('span', { className: 'rsww-group__title' }, title),
           React.createElement('span', { className: 'rsww-group__count' }, count)),
-        items.map((run) => React.createElement(RunCard, { key: run.runId, run })))
+        items.map((run) => React.createElement(RunCard, { key: run.runId, run, onChanged: reload })))
       return React.createElement('div', { className: 'rsww-flow' },
         React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         error ? React.createElement('span', { className: 'rsww-error' }, error) : null,
-        mine.length === 0 ? EmptyState({ title: '还没有运行记录', hint: '选中任一若水模式发送需求后,编排进度会实时出现在这里。' }) : null,
+        mine.length === 0 ? EmptyState({ title: '本会话还没有运行记录', hint: '在若水模式下发送需求后,编排进度会实时出现在这里。' }) : null,
         running.length ? group('进行中', running.length + ' 次', running) : null,
         settled.length ? group('已落定', '近 ' + settled.length + ' 次', settled) : null)
     }
@@ -385,110 +384,14 @@ window.__ModuleLoader__.load({
         onClick: () => { if (armed) { setArmed(false); onConfirm() } else setArmed(true) } }, armed ? confirmLabel : label)
     }
 
-    // ── gui-center 运行中心:列表 5s 轮询(可关)/展开详情 2s 静默刷新/终态停 ──
-    const AUTO_KEY = 'rsww:auto-refresh'
-    const KIND_LABELS = { message: '消息', cancel: '取消', pause: '暂停', resume: '恢复' }
+    // ── run 终态操作与重跑/续跑选择器(gui-session 卡片内使用) ──
     const STEP_TONES = { pending: 'mute', running: 'business', done: 'success', failed: 'error', skipped: 'mute' }
     const STEP_STATUS_LABELS = { pending: '待执行', running: '执行中', done: '已完成', failed: '失败', skipped: '已跳过' }
-    const isLive = (status) => status === 'running' || status === 'paused'
 
     function StepBadge({ status }) {
       return h(Badge, { tone: STEP_TONES[status] || 'mute' }, STEP_STATUS_LABELS[status] || status || '-')
     }
 
-    function RunsToolbar({ auto, onAuto, onRefresh, busy }) {
-      return h('div', { className: 'rsww-toolbar' },
-        h(Switch, { checked: auto, onChange: (e) => onAuto(e.target.checked), label: '自动刷新', ariaLabel: '自动刷新' }),
-        h('button', { className: 'rsww-btn', type: 'button', onClick: onRefresh, disabled: busy }, '刷新'))
-    }
-
-    function RunRow({ run, expanded, onToggle }) {
-      const text = String(run.request || '').split(/<\/?system-reminder>/i)[0].trim() || '(见完整记录)'
-      return h('button', { className: 'rsww-card' + (expanded ? ' rsww-card--open' : ''), type: 'button',
-        style: { cursor: 'pointer', textAlign: 'left', gap: '4px' }, onClick: onToggle },
-        h('div', { className: 'rsww-row' },
-          h(StatusBadge, { status: run.status }),
-          run.templateId ? h(Badge, { tone: 'mute' }, run.templateId) : null,
-          h('span', { className: 'rsww-req', title: run.request }, text),
-          h('span', { className: 'rsww-text' }, relativeTime(Date.parse(run.createdAt)))))
-    }
-
-    function RunGroup({ title, runs, expandedId, onToggle, onReload, onClose }) {
-      return h('div', { className: 'rsww-group' },
-        h('div', { className: 'rsww-group__head' },
-          h('span', { className: 'rsww-group__title' }, title),
-          h('span', { className: 'rsww-group__count' }, runs.length + ' 次')),
-        runs.map((r) => h(React.Fragment, { key: r.runId },
-          h(RunRow, { run: r, expanded: expandedId === r.runId, onToggle: () => onToggle(r.runId) }),
-          expandedId === r.runId ? h(RunDetailPanel, { run: r, onReload, onClose }) : null)))
-    }
-
-    function InstanceNode({ inst, events }) {
-      const [open, setOpen] = useState(false)
-      const dispatch = (events || []).find((e) => e.event === 'dispatch')
-      return h('div', { style: { paddingLeft: 18 } },
-        h('div', { className: 'rsww-tree__row' },
-          h('button', { className: 'rsww-btn', type: 'button', style: { padding: '2px 8px' }, onClick: () => setOpen(!open) },
-            (open ? '收起 ' : '展开 ') + '#' + (inst.index != null ? inst.index : '-') + ' ' + inst.key),
-          h(StepBadge, { status: inst.status })),
-        open ? h('div', { className: 'rsww-tree__kids' },
-          dispatch ? h(OutputFullText, { label: '指令全文', text: dispatch.body && dispatch.body.prompt }) : null,
-          h(OutputFullText, { label: '产出全文', text: inst.outputs ? JSON.stringify(inst.outputs, null, 2) : '' }),
-          h(OutputFullText, { label: '错误详情', text: inst.error || '', tone: 'error' })) : null)
-    }
-
-    function StepNode({ stepId, macro, events, open, onToggle }) {
-      const own = events['-'] || []
-      const dispatches = own.filter((e) => e.event === 'dispatch')
-      const fails = own.filter((e) => e.event === 'fail')
-      const instances = (macro && macro.instances) || []
-      return h('div', {},
-        h('div', { className: 'rsww-tree__row' },
-          h('button', { className: 'rsww-btn', type: 'button', style: { padding: '2px 8px' }, onClick: onToggle },
-            (open ? '收起 ' : '展开 ') + stepId),
-          h(StepBadge, { status: macro && macro.status }),
-          instances.length > 0 ? h('span', { className: 'rsww-note' }, instances.length + ' 实例') : null,
-          macro && macro.failCount > 0 ? h('span', { className: 'rsww-note' }, '失败 ' + macro.failCount) : null),
-        open ? h('div', { className: 'rsww-tree__kids', style: { paddingLeft: 18 } },
-          dispatches.map((e, i) => h(OutputFullText, { key: i, label: '指令全文', text: e.body && e.body.prompt })),
-          instances.length > 0
-            ? instances.map((inst) => h(InstanceNode, { key: inst.key, inst, events: events[inst.key] || [] }))
-            : h(OutputFullText, { label: '产出全文', text: macro && macro.outputs ? JSON.stringify(macro.outputs, null, 2) : '' }),
-          fails.map((e, i) => h(OutputFullText, { key: 'f' + i, label: '错误详情', text: (e.body && e.body.error) || '', tone: 'error' }))) : null)
-    }
-
-    // 树:state.steps 为序(模板序),steps 账本补事件;展开集父级持有,轮询重渲不清空
-    function StepTree({ detail, expanded, onExpand }) {
-      const macroAll = (detail.state && detail.state.steps) || {}
-      const ledger = detail.steps || {}
-      const ids = Object.keys(macroAll)
-      for (const id of Object.keys(ledger)) if (!macroAll[id]) ids.push(id)
-      if (ids.length === 0) return h('span', { className: 'rsww-note' }, '暂无步骤记录')
-      return h('div', { className: 'rsww-tree' },
-        ids.map((id) => h(StepNode, {
-          key: id, stepId: id, macro: macroAll[id], events: ledger[id] || {},
-          open: expanded.has(id), onToggle: () => onExpand(id),
-        })))
-    }
-
-    function ControlTimeline({ detail }) {
-      const controls = Array.isArray(detail.controls) ? detail.controls : []
-      const approvals = Object.entries((detail.state && detail.state.approvals) || {})
-      return h('div', { className: 'rsww-section' },
-        h('span', { className: 'rsww-label' }, '控制时间线'),
-        controls.length > 0
-          ? controls.map((c, i) => h('div', { className: 'rsww-tree__row', key: i },
-            h('span', { className: 'rsww-mono', style: { flex: 'none' } }, relativeTime(Date.parse(c.at))),
-            h(Badge, { tone: c.kind === 'cancel' ? 'error' : c.kind === 'message' ? 'business' : 'warn' }, KIND_LABELS[c.kind] || c.kind || '控制'),
-            h('span', { className: 'rsww-tree__cell' },
-              (c.kind === 'message' ? (c.inject ? '[纠偏注入] ' : '[排队] ') : '') + (c.text || ''))))
-          : h('span', { className: 'rsww-note' }, '无控制事件'),
-        approvals.length > 0 ? h('div', { className: 'rsww-tree__row' },
-          h('span', { className: 'rsww-label' }, '审批账'),
-          approvals.map(([id, ledgerOf]) => h(Badge, { key: id, tone: 'mute' }, id + ' · 重审 ' + ((ledgerOf && ledgerOf.rounds) || 0) + ' 轮'))) : null)
-    }
-
-    // 首项「从头重跑」+ 全步骤 radio(done 亦可选=该步之后重做);inputs 留空不覆盖
     function ResumePicker({ detail, init, onClose, onResumed }) {
       const macroAll = (detail.state && detail.state.steps) || {}
       const ids = Object.keys(macroAll)
@@ -532,29 +435,15 @@ window.__ModuleLoader__.load({
           h('button', { className: 'rsww-btn', type: 'button', onClick: onClose }, '关闭')))
     }
 
-    function DetailHead({ detail }) {
-      const inputs = detail.inputs && Object.keys(detail.inputs).length > 0 ? JSON.stringify(detail.inputs) : '(无)'
-      return h('div', { className: 'rsww-stack' },
-        h('div', { className: 'rsww-row' },
-          h(StatusBadge, { status: detail.status }),
-          h('span', { className: 'rsww-mono' }, detail.runId),
-          detail.templateId ? h(Badge, { tone: 'mute' }, detail.templateId) : null,
-          h('span', { className: 'rsww-note' },
-            '起 ' + relativeTime(Date.parse(detail.createdAt))
-            + (detail.finishedAt ? ' · 止 ' + relativeTime(Date.parse(detail.finishedAt)) : ' · 进行中'))),
-        h('div', { className: 'rsww-tree__row' },
-          h('span', { className: 'rsww-label' }, 'inputs'),
-          h('span', { className: 'rsww-mono rsww-tree__cell', title: inputs }, inputs)))
-    }
-
-    function DetailActions({ detail, onReload, onClose }) {
+    // 终态操作行:重跑/断点续跑/删除(RunCard 落定卡内嵌;删除成功经 onRemoved 通知列表刷新)
+    function DetailActions({ detail, onReload, onRemoved }) {
       const [picker, setPicker] = useState('')
       const [error, setError] = useState('')
       const remove = async () => {
         setError('')
         const o = await post('run-remove', { runId: detail.runId })
         if (!o.ok) { setError(/404/.test(o.error) ? '宿主不支持删除路由(404),记录保留' : o.error); return }
-        onClose(); onReload()
+        onRemoved()
       }
       return h('div', { className: 'rsww-section' },
         h('div', { className: 'rsww-row' },
@@ -563,92 +452,6 @@ window.__ModuleLoader__.load({
           h(ArmedButton, { label: '删除', confirmLabel: '确认删除', onConfirm: remove })),
         error ? h('span', { className: 'rsww-error' }, error) : null,
         picker !== '' ? h(ResumePicker, { detail, init: picker, onClose: () => setPicker(''), onResumed: onReload }) : null)
-    }
-
-    function RunDetailPanel({ run, onReload, onClose }) {
-      const [detail, setDetail] = useState(null)
-      const [err, setErr] = useState('')
-      const [expanded, setExpanded] = useState(() => new Set())
-      const live = isLive(detail ? detail.status : run.status)
-      useEffect(() => {
-        let alive = true
-        const load = () => request('run?id=' + encodeURIComponent(run.runId)).then((o) => {
-          if (!alive) return
-          if (o.ok) { setDetail(o.data); setErr('') } else setErr(o.error)
-        })
-        load()
-        if (!live) return () => { alive = false }
-        const timer = setInterval(load, LIVE_REFRESH_MS)
-        return () => { alive = false; clearInterval(timer) }
-      }, [run.runId, live])
-      const toggleNode = (id) => setExpanded((prev) => {
-        const next = new Set(prev)
-        if (next.has(id)) next.delete(id)
-        else next.add(id)
-        return next
-      })
-      return h('div', { className: 'rsww-detail' },
-        !detail
-          ? (err ? h('span', { className: 'rsww-error' }, err) : h('span', { className: 'rsww-note' }, '加载中...'))
-          : h(React.Fragment, {},
-            h(DetailHead, { detail }),
-            detail.summary ? h('div', { className: 'rsww-section' },
-              h('span', { className: 'rsww-label' }, '结论'),
-              h('span', { className: 'rsww-text' }, detail.summary)) : null,
-            h('div', { className: 'rsww-section' },
-              h('span', { className: 'rsww-label' }, '步骤树'),
-              h(StepTree, { detail, expanded, onExpand: toggleNode })),
-            h(ControlTimeline, { detail }),
-            h(DetailActions, { detail, onReload, onClose }),
-            h('div', { className: 'rsww-row' },
-              h('button', { className: 'rsww-btn', type: 'button', onClick: onClose }, '收起详情'))),
-        detail && err ? h('span', { className: 'rsww-error' }, '详情刷新失败:' + err) : null)
-    }
-
-    function RunsPage() {
-      const [runs, setRuns] = useState(null)
-      const [error, setError] = useState('')
-      const [expandedId, setExpandedId] = useState(null)
-      const [busy, setBusy] = useState(false)
-      const [auto, setAuto] = useState(() => {
-        try { return localStorage.getItem(AUTO_KEY) !== '0' } catch { return true }
-      })
-      const reload = useCallback(async () => {
-        setBusy(true)
-        const o = await request('runs')
-        setBusy(false)
-        if (o.ok) { setRuns(o.data.runs || []); setError('') } else setError(o.error)
-      }, [])
-      useEffect(() => {
-        reload()
-        if (!auto) return undefined
-        const timer = setInterval(reload, REFRESH_MS)
-        return () => clearInterval(timer)
-      }, [auto, reload])
-      const onAuto = (v) => {
-        setAuto(v)
-        try { localStorage.setItem(AUTO_KEY, v ? '1' : '0') } catch { /* 忽略 */ }
-      }
-      const groups = []
-      if (runs) {
-        const byWs = new Map()
-        for (const r of runs) {
-          const key = r.workspace || '(默认工作区)'
-          if (!byWs.has(key)) byWs.set(key, [])
-          byWs.get(key).push(r)
-        }
-        for (const [k, list] of byWs) groups.push([k, list])
-      }
-      return h('div', { className: 'rsww-stack' },
-        h(RunsToolbar, { auto, onAuto, onRefresh: reload, busy }),
-        error ? h('span', { className: 'rsww-error' }, error) : null,
-        !runs ? h('span', { className: 'rsww-note' }, '加载中...')
-          : runs.length === 0 ? EmptyState({ title: '还没有运行记录', hint: '在任一若水模式发送需求后,运行记录会出现在这里。' })
-            : groups.map(([ws, list]) => h(RunGroup, {
-              key: ws, title: ws, runs: list, expandedId,
-              onToggle: (id) => setExpandedId((cur) => (cur === id ? null : id)),
-              onReload: reload, onClose: () => setExpandedId(null),
-            })))
     }
 
     // ── gui-editor 模板编辑器:权威态=编辑模型,文本派生+显式应用(host dryRun 权威校验) ──
@@ -1213,18 +1016,18 @@ window.__ModuleLoader__.load({
           error ? h('span', { className: 'rsww-error' }, error) : null))
     }
 
-    // ── section 壳:标题/说明/子页 pill(runs 默认) ─────────────────────────
+    // ── section 壳:标题/说明/子页 pill(模板默认;运行记录唯一视图=会话页签) ──
     function RswwApp() {
-      const [page, setPage] = useState('runs')
-      const pages = [{ key: 'runs', label: '运行中心' }, { key: 'templates', label: '流程模板' }, { key: 'config', label: '配置' }]
+      const [page, setPage] = useState('templates')
+      const pages = [{ key: 'templates', label: '流程模板' }, { key: 'config', label: '配置' }]
       return h('div', { className: 'rsww-root' },
         React.createElement('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         React.createElement('div', { className: 'rsww-head' },
           React.createElement('span', { className: 'rsww-head__title' }, '若水工作流'),
           React.createElement('span', { className: 'rsww-head__caption' },
-            '强规则编排:模式内消息被接管,批次推进,结构化产出强制校验;运行记录、流程模板与配置在此集中管理。')),
+            '强规则编排:模式内消息被接管,批次推进,结构化产出强制校验;流程模板与配置在此集中管理,运行记录在会话「若水编排」页签查看。')),
         h(PillGroup, { tab: true, ariaLabel: '子页', value: page, options: pages, onChange: setPage }),
-        page === 'runs' ? h(RunsPage) : page === 'templates' ? h(TemplatesPage) : h(ConfigPage))
+        page === 'templates' ? h(TemplatesPage) : h(ConfigPage))
     }
 
     return {
@@ -1242,13 +1045,14 @@ window.__ModuleLoader__.load({
           let disposeView = null
           let disposeChip = null
           let cache = { sessionId: undefined, isRs: false }
+          let currentSessionId
           const ensure = (isRs) => {
             if (disposed) return
             if (isRs && !disposeView) {
               disposeView = ctx.slots.inject('conversation.view', () =>
                 ctx.slots.register(
                   { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
-                  () => React.createElement(FlowView),
+                  () => React.createElement(FlowView, { getSessionId: () => currentSessionId }),
                 ))
               disposeChip = ctx.slots.inject('conversation.session.header.actions', () =>
                 ctx.slots.register(
@@ -1262,6 +1066,7 @@ window.__ModuleLoader__.load({
           }
           const judge = async () => {
             const sessionId = ctx.sessions?.list?.getSnapshot?.().current
+            currentSessionId = sessionId
             if (sessionId === undefined) { ensure(false); return }
             if (cache.sessionId === sessionId && cache.fetched) { ensure(cache.isRs); return }
             try {

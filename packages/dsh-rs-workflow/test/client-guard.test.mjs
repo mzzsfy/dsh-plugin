@@ -51,6 +51,16 @@ test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/
   }
 })
 
+test('Given client.js When 检查视图职责 Then 运行记录唯一视图=会话页签,设置页无全局运行列表', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  // 运行中心已砍(设计决议:run 寄生会话,跨会话检索交给宿主会话搜索)
+  assert.ok(!text.includes('运行中心'), '设置页不得再出现运行中心子页')
+  assert.ok(!text.includes("key: 'runs'"), '设置页子页不得含 runs 键')
+  // 页签按本会话过滤,终态卡内嵌重跑/续跑/删除
+  assert.ok(text.includes('r.sessionId === getSessionId()'), 'FlowView 须按当前会话过滤')
+  assert.ok(text.includes("'resume-from'") && text.includes("'run-remove'"), '续跑/删除路由消费保留')
+})
+
 test('Given client.js When 检查 color 值 Then 不使用裸 hex(仅 alias token 或 fallback)', () => {
   const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const cssMatch = text.match(/const CSS = `([\s\S]*?)`/)

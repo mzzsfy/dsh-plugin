@@ -3,7 +3,7 @@
 #   - rs-workflow / role settings:注册 settings 命名空间 `rs-workflow`
 #     (6 工作位 / 3 预算 / templates 模板数组)。
 #   - rs-workflow-release / role release:释放/撤下/同步(v4 marker 自清理 v3 目录)。
-#   - rs-workflow-board / role board:挂载 /api/rsww/* 路由(运行中心 + 模板管理 + 配置)。
+#   - rs-workflow-board / role board:挂载 /api/rsww/* 路由(会话页签运行记录 + 模板管理 + 配置)。
 # preset 平面行(rs_workflow_template 工具与 takeover 拦截器)位于释放出的
 # preset 组合,不在本文件:模型工具与 agent 作用域事件属于 preset 平面。
 # 设计契约:docs/rsww-v4/architecture.md 与 feat/ 各模块文档。

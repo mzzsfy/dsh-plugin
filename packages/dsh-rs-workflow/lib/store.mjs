@@ -62,7 +62,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       const at = new Date().toISOString()
       record.status = 'cancelled'
       record.finishedAt = at
-      if (!record.summary) record.summary = '进程重启,运行中断,可在运行中心续跑'
+      if (!record.summary) record.summary = '进程重启,运行中断,可在会话页签断点续跑'
       record.controls = [...(record.controls ?? []), { at, kind: 'cancel', text: '进程重启,自动收敛' }]
       persistRun(record)
       const entry = index.find((e) => e.runId === record.runId)

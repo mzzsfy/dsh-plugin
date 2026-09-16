@@ -7,7 +7,7 @@ import { registerDriver, unregisterDriver, registry } from './control.mjs'
 
 const TERMINAL_STATES = new Set(['completed', 'cancelled', 'failed', 'blocked'])
 
-const CANCELLED_SUMMARY = '用户取消,已完成步骤保留,可在运行中心续跑'
+const CANCELLED_SUMMARY = '用户取消,已完成步骤保留,可在会话页签断点续跑'
 
 // 批次间宏任务让步时长:防止失败重试微任务级联饿死宿主同进程定时器/HTTP
 const BATCH_YIELD_MS = 0
@@ -113,7 +113,7 @@ export class RunDriver {
     this.controller.abort()
     this.pauseResolve?.()
     this.pauseResolve = null
-    this.onNotice?.('若水编排已取消,已完成步骤保留,可在运行中心续跑')
+    this.onNotice?.('若水编排已取消,已完成步骤保留,可在会话页签断点续跑')
   }
 
   // 控制队列受理面(post 入口):message 落控制事件账+回显队列;即时通道由 pause/resume/cancel 方法承载
