@@ -66,18 +66,37 @@ jobs:
           total=10
           failures=0
           failed_units=""
+          # 失败单元的完整输出按 单元-轮次 落盘,收尾时提取失败明细;通过即删
+          log_dir=$(mktemp -d)
+          trap 'rm -rf "$log_dir"' EXIT
+          summary_file="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          # 提取失败用例名:删段头行,去缩进/✖ 字形/耗时,按执行序去重
+          names_from_logs() {
+            grep -hE '^[[:space:]]*✖' "$@" 2>/dev/null | sed -E '/✖ failing tests:/d; s/^[[:space:]]*✖[[:space:]]*//; s/ \([0-9.]+ms\)$//' | awk '!seen[$0]++'
+          }
+          unit_fail_count() {
+            grep -m1 '^ℹ fail' "$1" | awk '{print $3}' || true
+          }
           run_unit() {
             local name="$1"; shift
-            if "$@"; then
+            local log="${log_dir}/${name}-${round}.log"
+            if "$@" >"$log" 2>&1; then
               echo "OK   ${name}"
+              rm -f "$log"
             else
-              echo "FAIL ${name}"
+              local fail_count
+              fail_count=$(unit_fail_count "$log")
+              echo "FAIL ${name} (失败用例 ${fail_count:-?})"
               failed_units="${failed_units} ${name}"
+              # 精确路径追加进 per-unit 清单:天然按轮次序,且避免前缀包名 glob 串档
+              echo "$log" >> "${log_dir}/failed-${name}.list"
               failures=$((failures+1))
+              # 失败用例名预览(套件标记一并呈现)
+              names_from_logs "$log" | head -5 | sed 's/^/  ✖ /' || true
             fi
           }
-          for i in $(seq 1 "$total"); do
-            echo "::group::第 ${i}/${total} 轮"
+          for round in $(seq 1 "$total"); do
+            echo "::group::第 ${round}/${total} 轮"
             round_start=$failures
             run_unit smoke-load node scripts/smoke-load.mjs
             # 包自动发现:凡含 test/ 目录的包全量执行,新增包无需改本文件
@@ -93,7 +112,31 @@ jobs:
             echo "失败单元清单(次数=失败轮数):"
             printf '%s\n' ${failed_units} | sort | uniq -c | while read -r count name; do
               echo "  ${count}x ${name}"
-              echo "::error::单元失败 ${count}/${total} 轮: ${name}"
+              logs=$(cat "${log_dir}/failed-${name}.list" 2>/dev/null || true)
+              first_log=$(printf '%s\n' "$logs" | head -1 || true)
+              rounds_info=""
+              for lg in $logs; do
+                r=${lg##*/}; r=${r#"${name}-"}; r=${r%.log}
+                fc=$(unit_fail_count "$lg")
+                rounds_info+="第${r}轮(${fc:-?}) "
+              done
+              names=$(names_from_logs $logs | head -5 | paste -sd ';' - || true)
+              # 注解 message 段中 % 须转义,防止用例名含 %xx 被 runner 解码
+              names=${names//%/%25}
+              echo "::error::单元失败 ${count}/${total} 轮: ${name} | 失败轮次: ${rounds_info}| 用例: ${names:-无用例锚点,看失败明细}"
+              {
+                echo "### ${name}(失败 ${count}/${total} 轮: ${rounds_info})"
+                if [ -n "$first_log" ]; then
+                  # head 提前关管道会让 sed 吃 SIGPIPE,pipefail 下必须兜退出码,否则 set -e 中断汇总
+                  section=$(sed -n '/^✖ failing tests:/,$p' "$first_log" | head -200 || true)
+                  echo '<details><summary>失败明细(首轮错误与堆栈)</summary>'
+                  echo
+                  echo '```text'
+                  if [ -n "$section" ]; then printf '%s\n' "$section"; else tail -50 "$first_log"; fi
+                  echo '```'
+                  echo '</details>'
+                fi
+              } >> "$summary_file"
             done
           fi
           [ "$failures" -eq 0 ]
