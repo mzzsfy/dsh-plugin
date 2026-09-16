@@ -1888,6 +1888,23 @@ test('历史浮层启停:GET 默认启用,POST 切换经 settings 持久,GET 反
   assert.equal(restored.body.enabled, true)
 })
 
+test('工作区文件夹运行标记启停:GET 默认启用,POST 切换经 settings 持久,GET 反映新值', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const initial = response()
+  await handlers.get('/api/session-manager/folder-running-enabled')(getRequest2('/api/session-manager/folder-running-enabled', 'GET'), initial)
+  assert.equal(initial.body.enabled, true, '默认启用')
+  const off = await postJson(handlers, '/api/session-manager/folder-running-enabled', { enabled: false })
+  assert.equal(off.body.enabled, false)
+  // settings 持久:重读反映关闭态;POST 回 true 恢复
+  const reread = response()
+  await handlers.get('/api/session-manager/folder-running-enabled')(getRequest2('/api/session-manager/folder-running-enabled', 'GET'), reread)
+  assert.equal(reread.body.enabled, false, 'settings 持久化关闭态')
+  await postJson(handlers, '/api/session-manager/folder-running-enabled', { enabled: true })
+  const restored = response()
+  await handlers.get('/api/session-manager/folder-running-enabled')(getRequest2('/api/session-manager/folder-running-enabled', 'GET'), restored)
+  assert.equal(restored.body.enabled, true)
+})
+
 test('自动归档配置:GET 回显生效值(未配置回默认),POST 持久,GET 反映新值', skipMissingDeps, async () => {
   const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
   const initial = response()

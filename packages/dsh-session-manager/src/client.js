@@ -176,6 +176,18 @@ const CSS = [
   // 插话撤回图标:注入原生 pending steering 气泡的操作图标排,样式经克隆官方
   // 按钮类名原生同款;dock 本体零 DOM,仅承载注入逻辑
   '.sm-steer-host { display:none; }',
+  // 工作区文件夹运行标记:官方组容器自带 position:relative,运行点绝对定位于
+  // 组容器左缘、垂直对齐组头行中线(行高 34px 之半即 top 17px,落于组头行左内边距
+  // 区),零布局位移;图标着色让位官方 folderActive(展开含当前)态;色值取官方
+  // ongoing 运行点的实际色值(--dsh-state-ongoing 在官方仅定义于其状态点组件局部,
+  // 组容器上下文读不到,直接引用其回退源)
+  'div[class$="_groupSection"][data-sm-folder-running] { --sm-fold-running-color: var(--dsw-static-deepseek-450); }',
+  'div[class$="_groupSection"][data-sm-folder-running]::before { content:""; position:absolute; left:0; top:17px; width:5px; height:5px;',
+  '  margin-top:-2.5px; border-radius:999px; background:var(--sm-fold-running-color);',
+  '  animation:sm-fold-running-pulse 1.2s ease-in-out infinite; }',
+  'div[class$="_groupSection"][data-sm-folder-running] span[class$="_folder"]:not([class$="_folderActive"]) { color:var(--sm-fold-running-color); }',
+  '@keyframes sm-fold-running-pulse { 0%, 100% { opacity:1; } 50% { opacity:.35; } }',
+  '@media (prefers-reduced-motion: reduce) { div[class$="_groupSection"][data-sm-folder-running]::before { animation:none; } }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -300,6 +312,51 @@ function projectDeletedRows(deleted, listState) {
       deletedAt: item.deletedAt,
       title: (byId[item.sessionId] && byId[item.sessionId].displayTitle) || item.sessionId,
     }))
+}
+
+// 工作区文件夹运行标记:官方组容器 CSS module 类名后缀(哈希前缀随构建漂移,
+// 后缀稳定)与自家标记属性;扫描合并窗口覆盖聊天流式输出的高频 DOM mutation
+const FOLD_SECTION_SELECTOR = 'div[class$="_groupSection"]'
+const FOLD_RUNNING_FLAG = 'data-sm-folder-running'
+const FOLD_SCAN_DELAY_MS = 50
+
+// 工作区文件夹运行标记状态:官方 dsh-client-ui-workspace 分组语义的投影——
+// 归属走 workspace 账本 sessionIds 一级映射(官方 owningGroupKey 同构,无 cwd 回退),
+// 游离会话入末位未分组桶;可见性镜像官方 sessionVisible(subagent / 已归档 /
+// 空白且非当前排除),组内任一可见会话 running 即该工作区运行中。
+// ids 保工作区登记序(官方组渲染序 = 快照 items 序),供 DOM 组容器按下标对位
+function folderRunningState(sessionsState, workspacesState) {
+  const byId = (sessionsState && sessionsState.byId) || {}
+  const ids = (sessionsState && sessionsState.ids) || []
+  const current = sessionsState ? sessionsState.current : undefined
+  const workspaces = workspacesState && Array.isArray(workspacesState.items) ? workspacesState.items : []
+  const archived = new Set((workspacesState && workspacesState.archivedSessionIds) || [])
+  const visible = (row) => Boolean(row)
+    && row.origin !== 'subagent'
+    && !archived.has(row.id)
+    && (!row.blank || row.id === current)
+  const running = new Set()
+  const accounted = new Set()
+  const workspaceIds = []
+  for (const workspace of workspaces) {
+    // 主键不做防御过滤,与官方 groupByWorkspace 同构:items 长度即组容器对位基准,
+    // 过滤会让 ids 短于容器数,恰差一时错位成「末位未分组桶」对位
+    workspaceIds.push(workspace.workspaceId)
+    const sessionIds = Array.isArray(workspace.sessionIds) ? workspace.sessionIds : []
+    for (const sessionId of sessionIds) {
+      const row = byId[sessionId]
+      if (!row) continue
+      accounted.add(sessionId)
+      if (row.running && visible(row)) running.add(workspace.workspaceId)
+    }
+  }
+  let ungrouped = false
+  for (const sessionId of ids) {
+    if (accounted.has(sessionId)) continue
+    const row = byId[sessionId]
+    if (row && row.running && visible(row)) ungrouped = true
+  }
+  return { ids: workspaceIds, running, ungrouped }
 }
 
 // Toast 差分守卫:连续两个 ready 快照才计新增(镜像 core.mjs archiveToastStep)。
@@ -653,6 +710,7 @@ function SessionManagerApp(props) {
     h(AutoArchiveConfig, null),
     h(HistorySwitchRow, null),
     h(SteerSwitchRow, null),
+    h(FolderRunningSwitchRow, null),
   )
 }
 
@@ -711,6 +769,34 @@ function SteerSwitchRow() {
     h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
     h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
     h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '插话撤回图标'),
+  )
+}
+
+// 工作区文件夹运行标记启停开关:与插话撤回开关同构,复用同款 switch 形态与样式;
+// 值存宿主 settings,切换经本插件路由中转,变更刷新页面生效
+function FolderRunningSwitchRow() {
+  const [enabled, setEnabled] = useState(null)
+  useEffect(() => {
+    api(FOLD_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => setEnabled(true))
+  }, [])
+  const flip = (event) => {
+    const next = event.target.checked
+    setEnabled(next)
+    api(FOLD_ENABLED_URL, { method: 'POST', body: JSON.stringify({ enabled: next }) })
+      .then((payload) => {
+        toast('工作区文件夹运行标记已' + (payload && payload.enabled !== false ? '启用' : '停用') + ',刷新页面后生效')
+      })
+      .catch(() => {
+        setEnabled(!next)
+        toast('切换失败', { kind: 'error' })
+      })
+  }
+  return h('label', { className: 'sm-histsw' },
+    h('input', { type: 'checkbox', checked: enabled !== false, onChange: flip }),
+    h('span', { className: 'sm-histsw__track' }, h('span', { className: 'sm-histsw__thumb' })),
+    h('span', { className: 'sm-histsw__label', onClick: (event) => event.preventDefault() }, '工作区文件夹运行标记'),
   )
 }
 
@@ -809,6 +895,7 @@ const HISTORY_REPULL_MS = 3 * 1000
 const PROMPTS_TOGGLE_URL = '/api/session-manager/prompts/toggle'
 const HISTORY_ENABLED_URL = '/api/session-manager/history-enabled'
 const STEER_ENABLED_URL = '/api/session-manager/steer-recall-enabled'
+const FOLD_ENABLED_URL = '/api/session-manager/folder-running-enabled'
 
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
@@ -1312,6 +1399,85 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
             toast(archiveToastText(step.added, rows))
           }
         })
+
+        // 工作区文件夹运行标记:服务状态驱动的侧边栏组头标注——官方折叠组不渲染
+        // 会话行(deriveGroups 的 sessions 为空数组),DOM 扫描对折叠态失效,
+        // 归属与运行态一律取服务快照;DOM 仅按下标对位官方组容器(渲染序 = 快照
+        // items 序,未分组桶恒在末位)。开关拉取失败按启用兜底;拉取未决期间仅清除
+        // 不标记(停用用户刷新不闪现),缺 MutationObserver 或 querySelectorAll 的
+        // 环境(异常宿主)整体跳过,不阻塞其余能力
+        let foldEnabled = null
+        ctx.effect(() => {
+          if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return
+          let disposed = false
+          let timer = null
+          function clearAll() {
+            document.querySelectorAll('[' + FOLD_RUNNING_FLAG + ']').forEach((section) => {
+              section.removeAttribute(FOLD_RUNNING_FLAG)
+            })
+          }
+          function scan() {
+            const sections = document.querySelectorAll(FOLD_SECTION_SELECTOR)
+            if (sections.length === 0) {
+              clearAll()
+              return
+            }
+            // 开关未决时仅清除:终态正确且停用用户刷新页面不闪现标记
+            if (foldEnabled === null) {
+              clearAll()
+              return
+            }
+            const state = foldEnabled
+              ? folderRunningState(sessions.list.getSnapshot(), workspaces.list.getSnapshot())
+              : { ids: [], running: new Set(), ungrouped: false }
+            const expected = state.ids.length
+            // 数量不变量:组容器数 = 工作区数 或 工作区数+1(末位未分组桶);
+            // 漂移(单列表模式 / 搜索态 / 官方结构变更)即清除标记,不误标
+            const ungroupedLast = sections.length === expected + 1
+            if (sections.length !== expected && !ungroupedLast) {
+              clearAll()
+              return
+            }
+            sections.forEach((section, index) => {
+              const running = index < expected ? state.running.has(state.ids[index]) : ungroupedLast && state.ungrouped
+              // 同值跳过:流式输出期间扫描高频,重复写属性触发无谓的 CSS 重匹配
+              if (running === section.hasAttribute(FOLD_RUNNING_FLAG)) return
+              if (running) section.setAttribute(FOLD_RUNNING_FLAG, '')
+              else section.removeAttribute(FOLD_RUNNING_FLAG)
+            })
+          }
+          let scheduled = false
+          const schedule = () => {
+            if (disposed || scheduled) return
+            scheduled = true
+            timer = setTimeout(() => {
+              scheduled = false
+              timer = null
+              if (!disposed) scan()
+            }, FOLD_SCAN_DELAY_MS)
+          }
+          api(FOLD_ENABLED_URL)
+            .then((payload) => {
+              foldEnabled = payload ? payload.enabled !== false : true
+            })
+            .catch(() => {
+              foldEnabled = true
+            })
+            .finally(schedule)
+          const unsubscribeSessions = sessions.list.subscribe(schedule)
+          const unsubscribeWorkspaces = workspaces.list.subscribe(schedule)
+          const observer = new MutationObserver(schedule)
+          observer.observe(document.documentElement, { childList: true, subtree: true })
+          schedule()
+          return () => {
+            disposed = true
+            if (timer !== null) clearTimeout(timer)
+            observer.disconnect()
+            unsubscribeSessions()
+            unsubscribeWorkspaces()
+            clearAll()
+          }
+        }, 'session-manager folder running mark')
 
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(

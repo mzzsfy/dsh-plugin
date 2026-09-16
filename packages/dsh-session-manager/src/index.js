@@ -113,6 +113,8 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('历史输入浮层(Alt+↑),低频功能,关闭后输入框锚点与快捷键整体不渲染;变更刷新页面生效'),
   steerRecallEnabled: schemastery.boolean().default(true)
     .description('插话撤回图标(输入框上方),低频功能,关闭后撤回图标整体不渲染;变更刷新页面生效'),
+  folderRunningEnabled: schemastery.boolean().default(true)
+    .description('工作区文件夹运行标记:侧边栏按工作区分组时,有运行中会话的文件夹组头显示运行点与图标着色,折叠同样生效;关闭后标记整体不渲染;变更刷新页面生效'),
 })
 
 function sendJson(res, status, payload) {
@@ -141,6 +143,7 @@ function readSettings(ctx) {
     intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
     historyEnabled: !value || value.historyEnabled !== false,
     steerRecallEnabled: !value || value.steerRecallEnabled !== false,
+    folderRunningEnabled: !value || value.folderRunningEnabled !== false,
   }
 }
 
@@ -938,6 +941,32 @@ export function apply(ctx, config) {
           // update 异步落盘后才提交新值:await 保证持久化完成后再读回
           await settings.update(NAMESPACE, { steerRecallEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 工作区文件夹运行标记启停:与插话撤回开关同构,读走 settings,写经 settings.update
+      path: '/api/session-manager/folder-running-enabled',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { enabled: readSettings(ctx).folderRunningEnabled })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const settings = ctx.get('settings')
+          if (!settings) throw new Error('宿主设置服务不可用')
+          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
+          await settings.update(NAMESPACE, { folderRunningEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx).folderRunningEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }

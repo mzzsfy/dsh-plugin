@@ -112,7 +112,7 @@ test('apply:行数据缺标题时通知文案回退会话 id,单个报标题', (
   }
 })
 
-test('apply:effect 挂样式与差分退订两个副作用', () => {
+test('apply:effect 挂样式、文件夹运行标记与差分退订三个副作用', () => {
   const client = loadClient()
-  assert.deepEqual(client.effects, ['session-manager styles', 'session-manager archived diff'])
+  assert.deepEqual(client.effects, ['session-manager styles', 'session-manager folder running mark', 'session-manager archived diff'])
 })
