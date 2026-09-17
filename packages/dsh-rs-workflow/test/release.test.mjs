@@ -165,3 +165,16 @@ test('Given rs-default 与 rs-novel 均本包 flow、rs-collab 为 collab When r
   assert.deepEqual(releasedTemplateIds(home).sort(), ['default', 'novel'])
 })
 
+test('Given 骨架 persona 判据 When 审查 Then 文件产出锚定编排(防主循环裁量绕开)', () => {
+  const skeleton = readFileSync(join(PKG_ROOT, 'preset', 'rs-workflow', AGENT_YAML), 'utf8')
+  // 客观可判边界:不产生文件才直答;文件产出一律编排,堵「一句话能答/改动小」裁量出口
+  assert.ok(skeleton.includes('纯会话内请求(问答、解释、讨论,不产生文件)'), '直答判据须以「不产生文件」为界')
+  assert.ok(skeleton.includes('凡需新建或修改交付物文件'), '文件产出必须编排')
+  assert.ok(skeleton.includes('禁止以"一句话能答、'), '须显式封死裁量出口')
+  // 双源同文:preset-combo.md 的 persona 全文与骨架同步(双实现同源纪律)
+  const comboDoc = readFileSync(join(PKG_ROOT, '..', '..', 'docs', 'rsww-v5', 'feat', 'preset-combo.md'), 'utf8')
+  for (const anchor of ['纯会话内请求(问答、解释、讨论,不产生文件)', '凡需新建或修改交付物文件']) {
+    assert.ok(comboDoc.includes(anchor), `preset-combo.md 缺 persona 锚点: ${anchor}`)
+  }
+})
+
