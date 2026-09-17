@@ -194,6 +194,9 @@ export function registerOrchestrator(ctx, config) {
           let record
           try { record = store.get(runId) } catch { record = undefined }
           if (record === undefined) return { ok: false, error: '运行记录不存在:' + runId }
+          // 唤醒轮挂靠:主循环任一唤醒轮必先 status,借机注册断点续跑推进器(进程重启后表空,
+          // 页签 resume-from 恰是重启中断的唯一恢复路径,不能依赖 start/resume 才有挂靠)
+          registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
           const driver = registry.drivers.get(runId)
           const steps = {}
           for (const [id, s] of Object.entries(record.state?.steps ?? {})) {
