@@ -32,9 +32,11 @@ window.__ModuleLoader__.load({
     }
 
 const CSS = [
-  // 家族版本环:操作排内 ‹n/m›,按钮克隆官方类名自带尺寸,环容器只负责排版与留隙
-  '.cx-family-ring { display:inline-flex; align-items:center; gap:2px; margin:0 2px; opacity:.85; }',
-  '.cx-family-ring > span { font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); min-width:24px; text-align:center; }',
+  // 家族版本环:与官方 28px icon 按钮同高同隙,chevron 用官方线形 svg,
+  // label 小号 caption 色,不另起风格
+  '.cx-family-ring { display:inline-flex; align-items:center; gap:2px; }',
+  '.cx-family-ring .cx-family-ring__label { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption);',
+  '  min-width:24px; text-align:center; line-height:28px; }',
   // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
   '.cx-switch { display:inline-flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer;',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
@@ -1049,31 +1051,46 @@ function ForkDock({ session, forkSession, cancelSession, openSession, loadFamily
           if (!official) return
           const ringEl = document.createElement('span')
           ringEl.setAttribute(FAMILY_RING_FLAG, '')
-          ringEl.className = official.className + ' cx-family-ring'
-          ringEl.title = '家族版本:本会话在同源分叉家族中的序位,‹ › 在各版本间切换'
-          const prev = document.createElement('button')
-          prev.type = 'button'
-          prev.className = official.className
-          prev.setAttribute(FAMILY_RING_FLAG, '')
-          prev.textContent = '‹'
-          prev.title = '上一个家族版本'
-          prev.addEventListener('click', () => jumpFamilyMember(-1))
+          ringEl.className = 'cx-family-ring'
+          ringEl.title = '家族版本:本会话在同源分叉家族中的序位,箭头在各版本间切换'
+          const makeChevron = (direction, tip) => {
+            const chevron = document.createElement('button')
+            chevron.type = 'button'
+            chevron.className = official.className
+            chevron.setAttribute(FAMILY_RING_FLAG, '')
+            chevron.title = tip
+            chevron.setAttribute('aria-label', tip)
+            chevron.addEventListener('click', () => jumpFamilyMember(direction))
+            chevron.appendChild(familyChevronSvg(direction))
+            return chevron
+          }
           const label = document.createElement('span')
           label.setAttribute(FAMILY_RING_FLAG, '')
+          label.className = 'cx-family-ring__label'
           label.textContent = ring.index + '/' + ring.total
-          const next = document.createElement('button')
-          next.type = 'button'
-          next.className = official.className
-          next.setAttribute(FAMILY_RING_FLAG, '')
-          next.textContent = '›'
-          next.title = '下一个家族版本'
-          next.addEventListener('click', () => jumpFamilyMember(1))
-          ringEl.appendChild(prev)
+          ringEl.appendChild(makeChevron(-1, '上一个家族版本'))
           ringEl.appendChild(label)
-          ringEl.appendChild(next)
+          ringEl.appendChild(makeChevron(1, '下一个家族版本'))
           actionsRow.appendChild(ringEl)
         })
       }
+    }
+    // 家族环 chevron 图标:与官方 outline chevron 同款线形(12px 视窗)
+    function familyChevronSvg(direction) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      svg.setAttribute('width', '12')
+      svg.setAttribute('height', '12')
+      svg.setAttribute('viewBox', '0 0 14 14')
+      svg.setAttribute('fill', 'none')
+      svg.setAttribute('aria-hidden', 'true')
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      path.setAttribute('d', direction < 0 ? 'M8.75 3.5L5.25 7L8.75 10.5' : 'M5.25 3.5L8.75 7L5.25 10.5')
+      path.setAttribute('stroke', 'currentColor')
+      path.setAttribute('stroke-width', '1.2')
+      path.setAttribute('stroke-linecap', 'round')
+      path.setAttribute('stroke-linejoin', 'round')
+      svg.appendChild(path)
+      return svg
     }
     function jumpFamilyMember(offset) {
       const loadFamilyFn = familyRef.current
