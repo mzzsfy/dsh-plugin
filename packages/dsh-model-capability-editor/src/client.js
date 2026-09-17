@@ -236,8 +236,9 @@ function draftMapsEqual(a, b) {
 // 无 seed 的裸草稿回退写回时点投影,与旧语义一致。
 function applyDraft(model, draft) {
   const result = { ...model }
-  // 无 seed 兜底 = 写回时点全投影(efforts + inputMode),与旧判定语义一致
-  const seed = draft.seed !== undefined
+  // 无 seed 兜底 = 写回时点全投影(efforts + inputMode),与旧判定语义一致;
+  // null 视同无 seed(与 draftEdited 的无种子判定同形,防 seed 守卫不对称)
+  const seed = draft.seed !== undefined && draft.seed !== null
     ? draft.seed
     : { ...effortsToDrafts(model.reasoningEfforts), inputMode: inputToMode(model.input) }
   const effortsUntouched = draftMapsEqual(seed.checked, draft.checked) &&
@@ -293,14 +294,6 @@ function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
-// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘,
-// 原 id 已从基线消失),以新 id 为准;原 id 仍在基线视为撞名,回落原 id。
-function resolveTargetId(liveId, originalId, baselineIds) {
-  const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
-  const renamed = typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) && !ids.has(originalId)
-  return renamed ? liveId : originalId
-}
-
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
 function isModelsTitle(title) {
   return title === '模型' || title === 'Models'
@@ -317,6 +310,77 @@ function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
 // 行条目内除行头以外的子元素;收起时官方不渲染该子元素,返回 null。
 function advancedAreaChild(entryChildren, modelRow) {
   return entryChildren.find((child) => child !== modelRow) ?? null
+}
+
+// 保存随动:官方编辑卡「保存」按钮判定。EditorFooter 主按钮文案 zh=保存 / en=Apply,
+// 精确匹配(busy 态与取消等其他文案不命中;disabled 不派发点击)。
+const SAVE_BUTTON_LABELS = ['保存', 'Apply']
+// busy 态文案:仅出现在保存按钮上。点击「保存」时官方处理器同步置 busy,事件冒泡
+// 到文档级监听时 DOM 已被改写为 busy 文案,点击分类必须接受它才能识别保存点击。
+const SAVE_BUTTON_BUSY_LABELS = ['保存中…', 'Applying…']
+
+function isSaveButton(el) {
+  return el !== null && typeof el === 'object' && el.tagName === 'BUTTON' &&
+    SAVE_BUTTON_LABELS.indexOf(typeof el.textContent === 'string' ? el.textContent.trim() : '') >= 0
+}
+
+// 点击分类用的提交判定:空闲或 busy 态文案均视为保存按钮。
+function isSaveCommitButton(el) {
+  if (el === null || typeof el !== 'object' || el.tagName !== 'BUTTON') return false
+  const label = typeof el.textContent === 'string' ? el.textContent.trim() : ''
+  return SAVE_BUTTON_LABELS.indexOf(label) >= 0 || SAVE_BUTTON_BUSY_LABELS.indexOf(label) >= 0
+}
+
+// 草稿编辑判定:任一字段偏离冻结种子即已编辑;无种子的裸草稿保守按已编辑。
+// 未编辑草稿不进随动快照:零差异整组写回既抬修订又产生误导性成功反馈。
+function draftEdited(draft) {
+  if (draft === null || typeof draft !== 'object') return false
+  const seed = draft.seed
+  if (seed === null || typeof seed !== 'object') return true
+  return !draftMapsEqual(seed.checked, draft.checked) ||
+    !draftMapsEqual(seed.spellings, draft.spellings) ||
+    draft.inputMode !== seed.inputMode
+}
+
+// 保存随动快照:持久表条目({route, modelId, draft})→ 按路由分组的已编辑草稿表。
+// 未编辑草稿与非对象条目剔除;草稿生命周期在注入器持久表,与行内块死活无关。
+function collectSaveFollowDrafts(items) {
+  const grouped = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    if (item === null || typeof item !== 'object' || !draftEdited(item.draft)) continue
+    const draftsById = grouped.get(item.route)
+    if (draftsById === undefined) grouped.set(item.route, new Map([[String(item.modelId), item.draft]]))
+    else draftsById.set(String(item.modelId), item.draft)
+  }
+  return grouped
+}
+
+// 补写就绪判定:已武装且全部武装卡已脱离文档。官方编辑卡保存成功必然卸载
+// (applyOnce 成功即 onClose),卡卸载即"官方写入已落盘"信号;行收起不卸载卡,
+// 官方校验失败/修订冲突时卡保持打开,均不补写。
+function saveFollowReady(armed, isCardConnected) {
+  if (armed === null || typeof armed !== 'object' || !Array.isArray(armed.cards)) return false
+  return armed.cards.length > 0 && armed.cards.every((card) => isCardConnected(card) === false)
+}
+
+// 点击分类:仅"在册卡内的保存按钮"是武装性点击;其余一切点击(取消/编辑切换/
+// 行收起/普通输入)都是解除性点击。这是"取消不写"契约的执行核心:官方保存失败
+// (卡未关)后武装残留,必须靠失败后的下一次非保存点击解除,防取消/换卡被误判
+// 为保存成功而补写。提交判定用 isSaveCommitButton:点击瞬间官方已同步置 busy,
+// 冒泡到文档级时按钮文案已是「保存中…」。
+function saveFollowArms(entries, button) {
+  if (!isSaveCommitButton(button)) return false
+  return (Array.isArray(entries) ? entries : []).some((entry) =>
+    entry !== null && typeof entry === 'object' && entry.cardEl !== null &&
+    typeof entry.cardEl === 'object' && typeof entry.cardEl.contains === 'function' &&
+    entry.cardEl.contains(button))
+}
+
+// 解除允许判定:已武装且全部武装卡仍在文档。卡已全部卸载(保存流程已终局)后
+// 的点击不得撤销待补写——保存成功关闭后用户的快速后续点击不丢写。
+function saveFollowDismissible(armed, isCardConnected) {
+  if (armed === null || typeof armed !== 'object' || !Array.isArray(armed.cards)) return false
+  return armed.cards.length > 0 && armed.cards.every((card) => isCardConnected(card) === true)
 }
 
 // settings 传输 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
@@ -738,20 +802,18 @@ function FallbackPanel(props) {
 }
 
 // 行内编辑块:单个模型的档位与模态编辑,挂在官方模型行箭头点开的展开区内
-// (官方条件渲染块,收起即随官方卸载)。
-// 复用整组合并保存流,草稿只含本模型一条,其余模型原样保留。
+// (官方条件渲染块,收起即随官方卸载)。无独立写入按钮,编辑随官方「保存」
+// 一并写入(保存随动);官方保存按钮锚点失效时整块告警停用,防编辑后无法落盘。
 function RowEditor(props) {
   const settings = props.settings
   const route = props.route
   const modelId = props.modelId
-  const aliveRef = React.useRef(false)
   const [state, setState] = useState({ phase: 'loading', draft: null, notice: null })
-  const [saving, setSaving] = useState(false)
-  // 存活标记标准写法:setup 置 true、cleanup 置 false,StrictMode 双挂载后仍为 true
-  useEffect(() => {
-    aliveRef.current = true
-    return () => { aliveRef.current = false }
-  }, [])
+
+  // 保存随动:卡锚注册(armed 快照的卡元素来源);草稿生命周期在注入器持久表,
+  // 每次编辑同步上报,行内块被官方重建后编辑不丢,重展开经 lookup 回显未落盘编辑
+  const saveFollow = props.saveFollow
+  useEffect(() => (saveFollow !== null ? saveFollow.watch() : undefined), [])
 
   function patch(part) { setState((prev) => ({ ...prev, ...part })) }
 
@@ -770,7 +832,12 @@ function RowEditor(props) {
         if (ns === undefined) { patch({ phase: 'hidden' }); return }
         const model = modelsOf(ns.value, route).find((entry) => String(entry.id) === String(modelId))
         if (model === undefined) { patch({ phase: 'hidden' }); return }
-        patch({ phase: 'ready', draft: draftsFromModels([model]).get(String(modelId)) })
+        // 持久表里有本模型未落盘的编辑(块曾被官方重建)→ 回显之,防编辑静默丢失
+        const persisted = saveFollow !== null ? saveFollow.lookup() : undefined
+        const draft = persisted !== undefined
+          ? persisted
+          : draftsFromModels([model]).get(String(modelId))
+        patch({ phase: 'ready', draft })
       } catch (error) {
         if (alive) patch({ phase: 'error', notice: error && error.message ? error.message : String(error) })
       }
@@ -778,57 +845,30 @@ function RowEditor(props) {
     return () => { alive = false }
   }, [])
 
-  async function apply() {
-    setSaving(true)
-    try {
-      // S3:官方行内 ID 输入是活动状态,改名已落盘则以新 ID 为目标,否则回落原 ID
-      const el = props.idInputEl
-      const liveId = el && el.isConnected ? el.value : modelId
-      const first = await settings.describe()
-      const nsFirst = findNsEntry(first)
-      const baselineIds = new Set(nsFirst !== undefined ? modelsOf(nsFirst.value, route).map((entry) => String(entry.id)) : [])
-      const targetId = resolveTargetId(liveId, modelId, baselineIds)
-      const { models: written, droppedDraftIds } = await saveModels(settings, route, new Map([[targetId, state.draft]]))
-      // S4:保存后重读重建草稿,基线新鲜,保留他方词汇表外档位
-      const second = await settings.describe()
-      const nsSecond = findNsEntry(second)
-      const latest = nsSecond !== undefined
-        ? modelsOf(nsSecond.value, route).find((entry) => String(entry.id) === String(targetId))
-        : undefined
-      if (aliveRef.current) {
-        // 孤儿草稿(模型被他方删除)时 written 不含目标条目,兜底保留当前草稿防渲染崩溃
-        const freshDraft = (latest !== undefined ? draftsFromModels([latest]).get(String(targetId)) : undefined)
-          || draftsFromModels(written).get(String(targetId))
-          || state.draft
-        patch({ draft: freshDraft })
-        // 孤儿草稿:草稿对应模型已被他方删除,编辑未落盘,必须告警而非报成功
-        notify(droppedDraftIds.length > 0
-          ? '已保存,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
-          : '已保存', droppedDraftIds.length > 0 ? 'error' : 'ok')
-      }
-    } catch (error) {
-      if (aliveRef.current) notify(error && error.message ? error.message : String(error), 'error')
-    } finally {
-      if (aliveRef.current) setSaving(false)
-    }
+  if (state.phase === 'hidden') return null
+  if (saveFollow === null) {
+    return h('div', { className: 'mce-inline' },
+      h('div', { className: 'mce-notice mce-notice--warn' },
+        '未识别官方「保存」按钮(宿主界面可能已变更),行内编辑停用以免无法写入;可点右侧浮动「模型能力」卡编辑。'))
   }
-
   if (state.phase === 'loading') {
     return h('div', { className: 'mce-inline' }, h('span', { className: 'mce-label' }, '正在读取模型声明…'))
   }
   if (state.phase === 'error') {
     return h('div', { className: 'mce-inline' }, h('span', { className: 'mce-notice mce-notice--error' }, state.notice))
   }
-  if (state.phase === 'hidden') return null
   const draft = state.draft
-  const editDraft = (part) => patch({ draft: { ...draft, ...part } })
+  const editDraft = (part) => {
+    const next = { ...draft, ...part }
+    if (saveFollow !== null) saveFollow.report(next)
+    patch({ draft: next })
+  }
   return h('div', { className: 'mce-inline' },
     h('div', { className: 'mce-inline__title' }, '模型能力(思考档位 / 输入模态)'),
     h('div', { className: 'mce-inline__grid' },
       EFFORT_LEVELS.map((level) => h('div', { className: 'mce-inline__field', key: level },
         h('label', { className: 'mce-switch' },
           ...switchToggle({
-            disabled: saving,
             checked: draft.checked[level] === true,
             onChange: () => editDraft({ checked: { ...draft.checked, [level]: draft.checked[level] !== true } }),
           }),
@@ -837,7 +877,7 @@ function RowEditor(props) {
         h('input', {
           type: 'text',
           className: 'mce-text',
-          disabled: saving || draft.checked[level] !== true,
+          disabled: draft.checked[level] !== true,
           value: draft.spellings[level] || '',
           placeholder: level === OFF_LEVEL ? '留空=不发送' : level,
           title: '发往网关的线上值',
@@ -849,13 +889,9 @@ function RowEditor(props) {
       h('span', { className: 'mce-label' }, '输入模态:'),
       h('select', {
         className: 'mce-select',
-        disabled: saving,
         value: draft.inputMode,
         onChange: (event) => editDraft({ inputMode: event.target.value }),
       }, INPUT_MODES.map((mode) => h('option', { key: mode, value: mode }, INPUT_MODE_LABELS[mode]))),
-    ),
-    h('div', { className: 'mce-inline__foot' },
-      h('button', { className: 'mce-btn mce-btn--primary', disabled: saving, onClick: apply }, saving ? '保存中…' : '应用'),
     ),
   )
 }
@@ -962,6 +998,82 @@ function RowEditor(props) {
           return advancedAreaChild([...modelRow.parentElement.children], modelRow)
         }
 
+        // 保存随动:官方「保存」点击武装(冻结已编辑草稿快照),编辑卡卸载后补写。
+        // 官方 applyOnce 成功必然 onClose 卸载编辑卡,卡卸载即官方写入已落盘信号,
+        // 插件在其新基线上字段级合并补写——官方先写、插件后写,混合编辑不撞修订锁。
+        // 草稿生命周期在注入器持久表而非行内组件:官方会随时重建高级区,行内块随
+        // 之生死,组件内存草稿活不到保存点击;每次编辑同步上报持久表,块死不丢。
+        // 保存失败(校验/冲突)卡不关,武装残留由文档级点击分类解除:失败后的
+        // 取消/换卡点击先解除武装并清持久表,卡再卸载就不满足补写就绪,"取消不写"
+        // 由此保证。
+        let saveFollowArmed = null
+        const saveFollowEntries = new Set()
+        const saveFollowDrafts = new Map()
+
+        function reportSaveFollowDraft(route, modelId, draft) {
+          saveFollowDrafts.set(route + '\n' + String(modelId), { route, modelId: String(modelId), draft })
+        }
+
+        function armSaveFollow() {
+          const routes = collectSaveFollowDrafts([...saveFollowDrafts.values()])
+          // 空快照 = 表内已无任何未落盘编辑(用户编辑后手动改回原状等),清表防陈旧条目滞留
+          saveFollowArmed = null
+          if (routes.size === 0) {
+            saveFollowDrafts.clear()
+            return
+          }
+          saveFollowArmed = { cards: [...saveFollowEntries].map((entry) => entry.cardEl), routes }
+        }
+
+        function fireSaveFollow() {
+          const armed = saveFollowArmed
+          if (armed === null) return
+          saveFollowArmed = null
+          void (async () => {
+            for (const [route, draftsById] of armed.routes) {
+              // 实例终止(禁用/热重载)后不得继续补写 RPC
+              if (disposed) return
+              try {
+                const { droppedDraftIds } = await saveModels(settings, route, draftsById)
+                for (const modelId of draftsById.keys()) saveFollowDrafts.delete(route + '\n' + modelId)
+                notify(droppedDraftIds.length > 0
+                  ? '已随「保存」写入,但模型 ' + droppedDraftIds.join(', ') + ' 已被其他写者删除,对应修改未写入'
+                  : '已随「保存」一并写入模型能力声明', droppedDraftIds.length > 0 ? 'error' : 'ok')
+              } catch (error) {
+                notify('随「保存」写入模型能力失败:' + (error && error.message ? error.message : String(error)), 'error')
+              }
+            }
+          })()
+        }
+
+        // 行条目随动注册:向上定位承载官方「保存」按钮的编辑卡元素作为该行的
+        // 武装锚,点击分类由文档级监听统一裁决。定位接受 busy 态文案(官方保存
+        // 进行中时高级区仍可能被重建重挂),并排除插件自有按钮防锚点漂移到回退
+        // 面板;锚点失效(定位不到官方提交键)时返回 null,行内块告警停用,防编
+        // 辑后无法落盘
+        function rowSaveFollow(container, route, modelId) {
+          const isOfficialCommit = (button) => isSaveCommitButton(button) &&
+            button.closest('.mce-fallback-root, .mce-card') === null
+          let cardEl = container.parentElement
+          while (cardEl !== null && cardEl !== document.body &&
+            !Array.prototype.some.call(cardEl.querySelectorAll('button'), isOfficialCommit)) {
+            cardEl = cardEl.parentElement
+          }
+          if (cardEl === null || cardEl === document.body) return null
+          const entry = { cardEl }
+          return {
+            // 卡锚注册:armed 快照的卡元素来源,编辑卡卸载即注销
+            watch() {
+              saveFollowEntries.add(entry)
+              return () => { saveFollowEntries.delete(entry) }
+            },
+            // 编辑上报:草稿写入注入器持久表,行内块被官方重建后编辑不丢
+            report(draft) { reportSaveFollowDraft(route, modelId, draft) },
+            // 回显:重展开行时若持久表还有未落盘的本模型编辑,以其为初值而非基线
+            lookup() { return saveFollowDrafts.get(route + '\n' + String(modelId))?.draft },
+          }
+        }
+
         function mountRow(face, idInput) {
           const details = idInput.closest('details')
           const editor = details !== null ? details.parentElement : null
@@ -978,7 +1090,12 @@ function RowEditor(props) {
           container.className = 'mce-inline-root'
           advanced.appendChild(container)
           const root = createRoot(container)
-          root.render(React.createElement(RowEditor, { settings: face, route, modelId, idInputEl: idInput }))
+          root.render(React.createElement(RowEditor, {
+            settings: face,
+            route,
+            modelId,
+            saveFollow: rowSaveFollow(container, route, modelId),
+          }))
           roots.set(container, root)
           return true
         }
@@ -1098,16 +1215,48 @@ function RowEditor(props) {
           scanPending = true
           scanTimer = setTimeout(() => {
             scanPending = false
+            // 保存随动补写先于分区门:官方保存成功关闭编辑卡(乃至整个设置分区)
+            // 本身就是 mutation,武装卡此刻已全部脱离文档,补写不得被门挡住
+            if (saveFollowReady(saveFollowArmed, (card) => card.isConnected)) fireSaveFollow()
             // 以 outlet 存在为门,不假设设置页形态(对话框/抽屉/路由页都覆盖)
             if (document.querySelector('[data-slot="settings.section"]') !== null) reconcile()
+            else if (saveFollowArmed === null && saveFollowDrafts.size > 0) saveFollowDrafts.clear()
           }, RECONCILE_DEBOUNCE_MS)
         }
 
         ctx.effect(() => {
           const observer = new MutationObserver(scheduleScan)
           observer.observe(document.body, { childList: true, subtree: true })
+          // 保存随动点击分类:武装性点击(在册卡内的保存按钮)武装;其余点击在
+          // 武装卡仍在文档时解除武装(取消/换卡不写)。卡已全部卸载后的点击不
+          // 解除——保存成功关闭后的快速后续点击不丢写
+          const onDocClick = (event) => {
+            const button = event.target instanceof Element ? event.target.closest('button') : null
+            if (saveFollowArms([...saveFollowEntries], button)) armSaveFollow()
+            else if (saveFollowDismissible(saveFollowArmed, (card) => card.isConnected)) {
+              // 解除即放弃:取消/换卡点击同时丢弃持久表草稿(取消不写)
+              saveFollowArmed = null
+              saveFollowDrafts.clear()
+            }
+          }
+          // Escape 关设置面板不派发 click(宿主 SettingsPanel 的 document 级 keydown
+          // 直连 onClose),必须同路解除,否则"保存失败后按 ESC"会被误判为保存成功
+          const onDocKeyDown = (event) => {
+            if (event.key !== 'Escape') return
+            if (saveFollowDismissible(saveFollowArmed, (card) => card.isConnected)) {
+              saveFollowArmed = null
+              saveFollowDrafts.clear()
+            }
+          }
+          document.addEventListener('click', onDocClick)
+          document.addEventListener('keydown', onDocKeyDown)
           return () => {
             disposed = true
+            // 随动武装与持久草稿随实例终止:禁用/热重载后不得再发起补写 RPC
+            saveFollowArmed = null
+            saveFollowDrafts.clear()
+            document.removeEventListener('click', onDocClick)
+            document.removeEventListener('keydown', onDocKeyDown)
             if (scanTimer !== null) clearTimeout(scanTimer)
             observer.disconnect()
             for (const [container, root] of roots) {

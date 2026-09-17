@@ -24,8 +24,10 @@ function clientLogic() {
       + ' COMPETITOR_MARKERS, effortsToDrafts, draftsToEfforts, isExpressibleEfforts, inputToMode, modeToInput,'
       + ' fillDrafts,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
-      + ' anchorsBroken, resolveTargetId, unwrapEnvelope, rejectRpc, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
-      + ' advancedAreaChild, writeModels, saveModels, draftsFromModels };',
+      + ' anchorsBroken, unwrapEnvelope, rejectRpc, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
+      + ' advancedAreaChild, writeModels, saveModels, draftsFromModels,'
+      + ' SAVE_BUTTON_LABELS, SAVE_BUTTON_BUSY_LABELS, isSaveButton, isSaveCommitButton, draftEdited, collectSaveFollowDrafts, saveFollowReady,'
+      + ' saveFollowArms, saveFollowDismissible };',
   )
   return factory()
 }
@@ -46,7 +48,83 @@ test('parity: 共享常量双副本一致', () => {
 })
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId, fillDrafts, advancedAreaChild } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, fillDrafts, advancedAreaChild, SAVE_BUTTON_LABELS, SAVE_BUTTON_BUSY_LABELS, isSaveButton, isSaveCommitButton, draftEdited, collectSaveFollowDrafts, saveFollowReady, saveFollowArms, saveFollowDismissible } = L
+
+  test(prefix + '保存随动:保存按钮判定与文案表', () => {
+    assert.deepEqual(SAVE_BUTTON_LABELS, ['保存', 'Apply'])
+    assert.deepEqual(SAVE_BUTTON_BUSY_LABELS, ['保存中…', 'Applying…'])
+    assert.equal(isSaveButton({ tagName: 'BUTTON', textContent: '保存' }), true)
+    assert.equal(isSaveButton({ tagName: 'BUTTON', textContent: ' Apply ' }), true)
+    assert.equal(isSaveButton({ tagName: 'BUTTON', textContent: '保存中…' }), false)
+    assert.equal(isSaveButton({ tagName: 'BUTTON', textContent: '取消' }), false)
+    assert.equal(isSaveButton({ tagName: 'DIV', textContent: '保存' }), false)
+    assert.equal(isSaveButton(null), false)
+    assert.equal(isSaveCommitButton({ tagName: 'BUTTON', textContent: '保存' }), true)
+    assert.equal(isSaveCommitButton({ tagName: 'BUTTON', textContent: '保存中…' }), true)
+    assert.equal(isSaveCommitButton({ tagName: 'BUTTON', textContent: '取消' }), false)
+    assert.equal(isSaveCommitButton(null), false)
+  })
+
+  test(prefix + '保存随动:编辑判定以冻结种子为参照,无种子保守按已编辑', () => {
+    const seed = { checked: { low: true }, spellings: { low: 'low' }, inputMode: 'text' }
+    assert.equal(draftEdited({ ...seed, seed }), false)
+    assert.equal(draftEdited({ checked: { low: true, high: true }, spellings: { low: 'low' }, inputMode: 'text', seed }), true)
+    assert.equal(draftEdited({ checked: { low: true }, spellings: { low: 'x' }, inputMode: 'text', seed }), true)
+    assert.equal(draftEdited({ checked: { low: true }, spellings: { low: 'low' }, inputMode: 'text-image', seed }), true)
+    assert.equal(draftEdited({ checked: {}, spellings: {}, inputMode: 'unset' }), true, '无种子裸草稿')
+    assert.equal(draftEdited({ ...seed, seed: null }), true, 'seed 显式 null 与无 seed 同形')
+    assert.equal(draftEdited(null), false)
+  })
+
+  test(prefix + '保存随动:快照仅收已编辑草稿并按路由分组,id String 归一', () => {
+    const seed = { checked: {}, spellings: {}, inputMode: 'unset' }
+    const edited = { checked: { high: true }, spellings: {}, inputMode: 'unset' }
+    const routes = collectSaveFollowDrafts([
+      { route: 'a', modelId: 'm1', draft: edited },
+      { route: 'a', modelId: 7, draft: edited },
+      { route: 'a', modelId: 'untouched', draft: { ...seed, seed } },
+      { route: 'a', modelId: 'loading', draft: null },
+      { route: 'b', modelId: 'm9', draft: edited },
+      null,
+    ])
+    assert.equal(routes.size, 2)
+    assert.deepEqual([...routes.get('a').keys()], ['m1', '7'])
+    assert.deepEqual([...routes.get('b').keys()], ['m9'])
+    assert.equal(collectSaveFollowDrafts([{ route: 'a', modelId: 'm', draft: { ...seed, seed } }]).size, 0)
+  })
+
+  test(prefix + '保存随动:补写就绪 = 已武装且全部武装卡脱离文档', () => {
+    const armed = { cards: ['cardA', 'cardB'], routes: new Map() }
+    assert.equal(saveFollowReady(armed, () => false), true)
+    assert.equal(saveFollowReady(armed, (card) => card === 'cardA'), false, '任一卡仍在文档不补写')
+    assert.equal(saveFollowReady(armed, () => true), false)
+    assert.equal(saveFollowReady(null, () => false), false)
+    assert.equal(saveFollowReady({ cards: [], routes: new Map() }, () => false), false)
+    assert.equal(saveFollowReady({ routes: new Map() }, () => false), false)
+  })
+
+  test(prefix + '保存随动:武装性点击仅限在册卡内的保存按钮', () => {
+    const saveBtn = { tagName: 'BUTTON', textContent: '保存' }
+    const busyBtn = { tagName: 'BUTTON', textContent: '保存中…' }
+    const card = { contains(button) { return button === saveBtn || button === busyBtn } }
+    assert.equal(saveFollowArms([{ cardEl: card }], saveBtn), true, '在册卡内保存按钮 → 武装')
+    assert.equal(saveFollowArms([{ cardEl: card }], busyBtn), true, 'busy 态冒泡改写 → 仍武装')
+    assert.equal(saveFollowArms([{ cardEl: card }], { tagName: 'BUTTON', textContent: '取消' }), false, '取消按钮 → 解除')
+    assert.equal(saveFollowArms([{ cardEl: card }], { tagName: 'BUTTON', textContent: 'Apply' }), false, '保存按钮但在册卡外 → 解除')
+    assert.equal(saveFollowArms([{ cardEl: card }], null), false, '点非按钮 → 解除')
+    assert.equal(saveFollowArms([], saveBtn), false, '无在册行 → 解除')
+    assert.equal(saveFollowArms([{ cardEl: null }], saveBtn), false)
+    assert.equal(saveFollowArms([null, 'junk'], saveBtn), false)
+    assert.equal(saveFollowArms(undefined, saveBtn), false)
+  })
+
+  test(prefix + '保存随动:解除允许 = 已武装且武装卡全部在文档(卸载后点击不撤销)', () => {
+    const armed = { cards: ['cardA'], routes: new Map() }
+    assert.equal(saveFollowDismissible(armed, (card) => card === 'cardA'), true, '卡仍在文档 → 可解除(取消/换卡路径)')
+    assert.equal(saveFollowDismissible(armed, () => false), false, '卡已卸载 = 保存已终局,点击不得撤销待补写')
+    assert.equal(saveFollowDismissible(null, () => true), false)
+    assert.equal(saveFollowDismissible({ cards: [], routes: new Map() }, () => true), false)
+  })
 
   test(prefix + '竞品痕迹:标记字段命中与非对象条目跳过', () => {
     assert.deepEqual(
@@ -87,14 +165,12 @@ function defineScenarios(prefix, L) {
       { checked: { low: true }, spellings: { low: 'low' }, inputMode: 'text' },
     )
     assert.deepEqual(bareUntouched.reasoningEfforts, { low: 'low' }, '裸草稿与投影全一致即未触及')
-  })
-
-  test(prefix + '目标模型解析:改名落盘(原 id 消失)采信新 ID;撞名兄弟 id 回落原 ID', () => {
-    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto-v2'])), 'auto-v2', '原 id 已从基线消失 = 改名已落盘')
-    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto', 'auto-v2'])), 'auto', '原 id 仍在基线 = 撞名,回落')
-    assert.equal(resolveTargetId('auto-v2', 'auto', new Set(['auto'])), 'auto')
-    assert.equal(resolveTargetId('auto', 'auto', new Set(['auto'])), 'auto', '未改名零风险路径')
-    assert.equal(resolveTargetId('', 'auto', new Set(['auto'])), 'auto')
+    // seed 显式 null 与无 seed 同形(防 draftEdited 已编辑判定与 applyDraft 守卫不对称)
+    const nullSeed = applyDraft(
+      { id: 'm', reasoningEfforts: { low: 'low' }, input: ['text'] },
+      { checked: { low: true }, spellings: { low: 'v2' }, inputMode: 'text', seed: null },
+    )
+    assert.deepEqual(nullSeed.reasoningEfforts, { low: 'v2' }, 'null seed 走写回时点投影,不崩且参与判定')
   })
 
   test(prefix + '标题标记与锚点破坏判定', () => {

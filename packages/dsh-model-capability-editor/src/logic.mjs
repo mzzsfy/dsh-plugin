@@ -115,8 +115,9 @@ function draftMapsEqual(a, b) {
 // 他方并发新增的外档位不丢;基线为不可表达形态(字符串/数组)时跳过该字段防误删。
 export function applyDraft(model, draft) {
   const result = { ...model }
-  // 无 seed 兜底 = 写回时点全投影(efforts + inputMode),与旧判定语义一致
-  const seed = draft.seed !== undefined
+  // 无 seed 兜底 = 写回时点全投影(efforts + inputMode),与旧判定语义一致;
+  // null 视同无 seed(与 draftEdited 的无种子判定同形,防 seed 守卫不对称)
+  const seed = draft.seed !== undefined && draft.seed !== null
     ? draft.seed
     : { ...effortsToDrafts(model.reasoningEfforts), inputMode: inputToMode(model.input) }
   const effortsUntouched = draftMapsEqual(seed.checked, draft.checked) &&
@@ -175,14 +176,6 @@ export function restoreDrafts(buckets, route) {
   return drafts === undefined ? null : drafts
 }
 
-// 行内应用的目标模型解析:官方行内 ID 输入若已改为基线中存在的新 id(改名已落盘,
-// 原 id 已从基线消失),以新 id 为准;原 id 仍在基线视为撞名,回落原 id。
-export function resolveTargetId(liveId, originalId, baselineIds) {
-  const ids = baselineIds instanceof Set ? baselineIds : new Set(baselineIds)
-  const renamed = typeof liveId === 'string' && liveId.length > 0 && ids.has(liveId) && !ids.has(originalId)
-  return renamed ? liveId : originalId
-}
-
 // 官方模型页标题标记(zh/en);精确匹配,防止误中本插件回退菜单的「模型能力」。
 export function isModelsTitle(title) {
   return title === '模型' || title === 'Models'
@@ -199,6 +192,77 @@ export function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
 // 行条目内除行头以外的子元素;收起时官方不渲染该子元素,返回 null。
 export function advancedAreaChild(entryChildren, modelRow) {
   return entryChildren.find((child) => child !== modelRow) ?? null
+}
+
+// 保存随动:官方编辑卡「保存」按钮判定。EditorFooter 主按钮文案 zh=保存 / en=Apply,
+// 精确匹配(busy 态与取消等其他文案不命中;disabled 不派发点击)。
+export const SAVE_BUTTON_LABELS = ['保存', 'Apply']
+// busy 态文案:仅出现在保存按钮上。点击「保存」时官方处理器同步置 busy,事件冒泡
+// 到文档级监听时 DOM 已被改写为 busy 文案,点击分类必须接受它才能识别保存点击。
+export const SAVE_BUTTON_BUSY_LABELS = ['保存中…', 'Applying…']
+
+export function isSaveButton(el) {
+  return el !== null && typeof el === 'object' && el.tagName === 'BUTTON' &&
+    SAVE_BUTTON_LABELS.indexOf(typeof el.textContent === 'string' ? el.textContent.trim() : '') >= 0
+}
+
+// 点击分类用的提交判定:空闲或 busy 态文案均视为保存按钮。
+export function isSaveCommitButton(el) {
+  if (el === null || typeof el !== 'object' || el.tagName !== 'BUTTON') return false
+  const label = typeof el.textContent === 'string' ? el.textContent.trim() : ''
+  return SAVE_BUTTON_LABELS.indexOf(label) >= 0 || SAVE_BUTTON_BUSY_LABELS.indexOf(label) >= 0
+}
+
+// 草稿编辑判定:任一字段偏离冻结种子即已编辑;无种子的裸草稿保守按已编辑。
+// 未编辑草稿不进随动快照:零差异整组写回既抬修订又产生误导性成功反馈。
+export function draftEdited(draft) {
+  if (draft === null || typeof draft !== 'object') return false
+  const seed = draft.seed
+  if (seed === null || typeof seed !== 'object') return true
+  return !draftMapsEqual(seed.checked, draft.checked) ||
+    !draftMapsEqual(seed.spellings, draft.spellings) ||
+    draft.inputMode !== seed.inputMode
+}
+
+// 保存随动快照:持久表条目({route, modelId, draft})→ 按路由分组的已编辑草稿表。
+// 未编辑草稿与非对象条目剔除;草稿生命周期在注入器持久表,与行内块死活无关。
+export function collectSaveFollowDrafts(items) {
+  const grouped = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    if (item === null || typeof item !== 'object' || !draftEdited(item.draft)) continue
+    const draftsById = grouped.get(item.route)
+    if (draftsById === undefined) grouped.set(item.route, new Map([[String(item.modelId), item.draft]]))
+    else draftsById.set(String(item.modelId), item.draft)
+  }
+  return grouped
+}
+
+// 补写就绪判定:已武装且全部武装卡已脱离文档。官方编辑卡保存成功必然卸载
+// (applyOnce 成功即 onClose),卡卸载即"官方写入已落盘"信号;行收起不卸载卡,
+// 官方校验失败/修订冲突时卡保持打开,均不补写。
+export function saveFollowReady(armed, isCardConnected) {
+  if (armed === null || typeof armed !== 'object' || !Array.isArray(armed.cards)) return false
+  return armed.cards.length > 0 && armed.cards.every((card) => isCardConnected(card) === false)
+}
+
+// 点击分类:仅"在册卡内的保存按钮"是武装性点击;其余一切点击(取消/编辑切换/
+// 行收起/普通输入)都是解除性点击。这是"取消不写"契约的执行核心:官方保存失败
+// (卡未关)后武装残留,必须靠失败后的下一次非保存点击解除,防取消/换卡被误判
+// 为保存成功而补写。提交判定用 isSaveCommitButton:点击瞬间官方已同步置 busy,
+// 冒泡到文档级时按钮文案已是「保存中…」。
+export function saveFollowArms(entries, button) {
+  if (!isSaveCommitButton(button)) return false
+  return (Array.isArray(entries) ? entries : []).some((entry) =>
+    entry !== null && typeof entry === 'object' && entry.cardEl !== null &&
+    typeof entry.cardEl === 'object' && typeof entry.cardEl.contains === 'function' &&
+    entry.cardEl.contains(button))
+}
+
+// 解除允许判定:已武装且全部武装卡仍在文档。卡已全部卸载(保存流程已终局)后
+// 的点击不得撤销待补写——保存成功关闭后用户的快速后续点击不丢写。
+export function saveFollowDismissible(armed, isCardConnected) {
+  if (armed === null || typeof armed !== 'object' || !Array.isArray(armed.cards)) return false
+  return armed.cards.length > 0 && armed.cards.every((card) => isCardConnected(card) === true)
 }
 
 // settings 传输 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
