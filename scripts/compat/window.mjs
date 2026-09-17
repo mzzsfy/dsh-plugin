@@ -2,8 +2,10 @@
 // 活跃线判定(对齐 docs/兼容性测试/测试与隔离方法.md 固定版本窗口策略):
 //   线内最大预发布的标签为 beta/rc → 活跃(线仍在收敛);
 //   纯 alpha 线仅当它是最新线时活跃(占前瞻槽,首发即入窗口);
-//   最老的 3 条活跃线构成窗口,按执行序输出 基线 → 主测 → 前瞻,
+//   最新的 3 条活跃线构成窗口,按执行序输出 基线 → 主测 → 前瞻,
 //   前瞻槽失败只告警不阻塞(升级预警),基线/主测失败阻塞。
+// 局限:预发布过滤器丢弃正式版——当前 dsh 全量预发布实践与窗口策略定稿(2026-09-13)下正确;
+// 若未来发布正式版,需扩展规则把最新正式线纳入窗口。
 // 显式覆盖:环境变量 DSH_COMPAT_VERSIONS=逗号清单,条目尾缀 ~ 表示非阻塞。
 // 用法:node scripts/compat/window.mjs [--self-test]
 // 输出:JSON 数组 [{version, slot, blocking}](slot: baseline|current|preview)
@@ -12,16 +14,30 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 export const WINDOW_SIZE = 3
+// 槽位单一事实源:执行序(基线 → 主测 → 前瞻)与展示名
+export const EXEC_SLOTS = ['baseline', 'current', 'preview']
+export const SLOT_LABELS = { baseline: '基线', current: '主测', preview: '前瞻' }
+
+const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
+
+export function isSemver(v) {
+  return SEMVER_RE.test(v)
+}
+
+// 语义化版本解析:预发布以首个 - 截断;连字符标识符(如 alpha-1)整体作为一个预发布段
+function parseSemver(v) {
+  if (!isSemver(v)) throw new Error(`非语义化版本: ${v}`)
+  const dash = v.indexOf('-')
+  const core = dash < 0 ? v : v.slice(0, dash)
+  const pre = dash < 0 ? '' : v.slice(dash + 1)
+  const [major, minor, patch] = core.split('.').map(Number)
+  return { core, major, minor, patch, pre: pre ? pre.split('.') : [] }
+}
 
 // 语义化版本比较:预发布版本 < 正式版;数值段按数值,标识符按 ASCII,数值段 < 字母段
 export function compareSemver(a, b) {
-  const parse = (v) => {
-    const [core, pre] = v.split('-')
-    const [major, minor, patch] = core.split('.').map(Number)
-    return { major, minor, patch, pre: pre ? pre.split('.') : [] }
-  }
-  const pa = parse(a)
-  const pb = parse(b)
+  const pa = parseSemver(a)
+  const pb = parseSemver(b)
   for (const key of ['major', 'minor', 'patch']) {
     if (pa[key] !== pb[key]) return pa[key] - pb[key]
   }
@@ -52,20 +68,19 @@ export function resolveWindow(versions) {
   const prereleases = versions.filter((v) => v.includes('-'))
   const groups = new Map()
   for (const v of prereleases) {
-    const line = v.split('-')[0]
+    const line = parseSemver(v).core
     const cur = groups.get(line)
     if (!cur || compareSemver(v, cur) > 0) groups.set(line, v)
   }
   const lines = [...groups.entries()].sort((a, b) => compareSemver(b[1], a[1]))
-  const active = lines.filter(([line, max], idx) => {
-    const label = max.split('-')[1].split('.')[0]
+  const active = lines.filter(([, max], idx) => {
+    const label = parseSemver(max).pre[0]
     return activeLine(label, idx === 0)
   })
   const picked = active.slice(0, WINDOW_SIZE).map(([, max]) => max)
-  // 执行序:基线(最老)在前,前瞻(最新)在后
-  const slots = ['preview', 'current', 'baseline']
+  // picked 最新在前:最新线占前瞻槽,倒序对齐执行序后翻转(基线在前)
   return picked
-    .map((version, idx) => ({ version, slot: slots[idx], blocking: idx !== 0 }))
+    .map((version, idx) => ({ version, slot: EXEC_SLOTS[WINDOW_SIZE - 1 - idx], blocking: idx !== 0 }))
     .reverse()
 }
 
@@ -74,10 +89,11 @@ export function parseExplicit(spec) {
   if (entries.length === 0 || entries.length > WINDOW_SIZE) {
     throw new Error(`DSH_COMPAT_VERSIONS 需 1~${WINDOW_SIZE} 个条目: ${spec}`)
   }
-  const slots = ['baseline', 'current', 'preview']
   return entries.map((raw, idx) => {
     const blocking = !raw.endsWith('~')
-    return { version: blocking ? raw : raw.slice(0, -1), slot: slots[idx], blocking }
+    const version = blocking ? raw : raw.slice(0, -1)
+    if (!isSemver(version)) throw new Error(`非法版本号: ${version}`)
+    return { version, slot: EXEC_SLOTS[idx], blocking }
   })
 }
 
@@ -110,6 +126,7 @@ function selfTest() {
   }
   const order = ['1.0.0-alpha.1', '1.0.0-alpha.2', '1.0.0-beta.1', '1.0.0-rc.1', '1.0.0-rc.2', '1.0.0']
   assertEq([...order].sort(compareSemver), order, '预发布排序')
+  assertEq(compareSemver('1.0.0-alpha-1', '1.0.0-alpha.1'), 1, '连字符标识符按 ASCII 与段数比较')
   assertEq(resolveWindow(FIXTURE_VERSIONS), [
     { version: '0.1.2-rc.1', slot: 'baseline', blocking: true },
     { version: '0.1.5-rc.2', slot: 'current', blocking: true },

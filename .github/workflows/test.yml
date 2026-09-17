@@ -160,7 +160,7 @@ jobs:
       - name: 安装 pnpm(宿主与隔离 profile 安装依赖)
         run: npm install -g pnpm@11
       - name: 解析版本窗口
-        run: mkdir -p .compat && node scripts/compat/window.mjs > .compat/window.json && cat .compat/window.json
+        run: mkdir -p .compat && node scripts/compat/window.mjs --self-test && node scripts/compat/window.mjs > .compat/window.json && cat .compat/window.json
       - name: 取 pnpm store 路径
         id: pnpm-store
         run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
@@ -181,4 +181,4 @@ jobs:
       - name: 安装仓库根解析桥(宿主 peer 与 zod)+ playwright
         run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4 playwright@${{ env.PLAYWRIGHT_PIN }}
       - name: 兼容性测试(逐版本全家桶 boot)
-        run: node scripts/compat/ci.mjs
+        run: node scripts/compat/ci.mjs --window-file .compat/window.json
