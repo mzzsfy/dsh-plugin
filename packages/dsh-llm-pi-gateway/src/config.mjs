@@ -37,11 +37,12 @@ export const PROTOCOL_MODULES = {
   'openai-responses': '@earendil-works/pi-ai/api/openai-responses',
 }
 
-// compat 字段名单取自 pi-ai@0.84.4 各协议 compat 类型声明(类型即边界),
-// 与官方 dsh-llm-pi-ai@0.1.2-rc.1 声明的 pi-ai 范围及宿主实装版本一致;
-// 名单含 0.84.4 才引入的 allowedFallbackModels/thinkingTokenBudgetField,
-// 依赖下界(^0.84.4)与名单取材版本必须同步;
-// 升级 pi-ai 依赖时必须同步核对本名单,新增/移除字段需同步。
+// compat 字段名单取自 pi-ai@0.85.1 各协议 compat 类型声明(类型即边界),
+// 与官方 dsh-llm-pi-ai@0.1.5-rc.2 声明的 pi-ai 范围一致,且按「compat 全开放」
+// 定位保留官方配置面 withhold 的字段(supportsMidConvoEffort/allowedFallbackModels,
+// 官方目录面内部管控,本包交用户配置);
+// 名单与依赖下界(^0.85.1)与值枚举校验(COMPAT_VALUE_CHECKS,取材 pi-ai
+// types.d.ts union/enum 声明)必须同步,升级 pi-ai 时三者一并核对。
 const ANTHROPIC_COMPAT_FIELDS = [
   'supportsEagerToolInputStreaming',
   'supportsLongCacheRetention',
@@ -51,6 +52,7 @@ const ANTHROPIC_COMPAT_FIELDS = [
   'forceAdaptiveThinking',
   'allowEmptySignature',
   'supportsStrictTools',
+  'supportsMidConvoEffort',
   'supportsToolReferences',
   'allowedFallbackModels',
 ]
@@ -81,6 +83,7 @@ const OPENAI_COMPLETIONS_COMPAT_FIELDS = [
   'sendSessionAffinityHeaders',
   'deferredToolsMode',
   'sessionAffinityFormat',
+  'vllmPriority',
 ]
 
 const OPENAI_RESPONSES_COMPAT_FIELDS = [
@@ -92,12 +95,35 @@ const OPENAI_RESPONSES_COMPAT_FIELDS = [
   'supportsAdditionalTools',
   'supportsToolSearch',
   'supportsExplicitPromptCacheMode',
+  'supportsMaxOutputTokens',
 ]
 
 const COMPAT_FIELDS_BY_PROTOCOL = {
   'anthropic-messages': ANTHROPIC_COMPAT_FIELDS,
   'openai-completions': OPENAI_COMPLETIONS_COMPAT_FIELDS,
   'openai-responses': OPENAI_RESPONSES_COMPAT_FIELDS,
+}
+
+// 值枚举校验(合法值全集取自 pi-ai@0.85.1 types.d.ts 对应 union/enum 声明):
+// pi-ai 对未知拼写静默按缺省处理,配置看似生效实则无效,配置期拒绝;
+// 仅收 union/enum 类字段,布尔/数字/对象字段交 pi-ai 运行期自然处理
+const THINKING_TOKEN_BUDGET_FIELDS = ['thinking_token_budget', 'thinking_budget', 'thinking_budget_tokens']
+const CACHE_CONTROL_FORMATS = ['anthropic']
+const MAX_TOKENS_FIELDS = ['max_completion_tokens', 'max_tokens']
+const THINKING_FORMATS = [
+  'openai', 'openrouter', 'deepseek', 'together', 'baseten', 'zai',
+  'qwen', 'chat-template', 'qwen-chat-template', 'string-thinking', 'ant-ling',
+]
+const DEFERRED_TOOLS_MODES = ['kimi']
+const SESSION_AFFINITY_FORMATS = ['openai', 'openai-nosession', 'openrouter']
+
+const COMPAT_VALUE_CHECKS = {
+  thinkingTokenBudgetField: THINKING_TOKEN_BUDGET_FIELDS,
+  cacheControlFormat: CACHE_CONTROL_FORMATS,
+  maxTokensField: MAX_TOKENS_FIELDS,
+  thinkingFormat: THINKING_FORMATS,
+  deferredToolsMode: DEFERRED_TOOLS_MODES,
+  sessionAffinityFormat: SESSION_AFFINITY_FORMATS,
 }
 
 const MODALITIES = ['text', 'image']
@@ -185,6 +211,13 @@ export function validateCompat(protocol, compat, where) {
     if (value === null || value === undefined) {
       throw new GatewayError(`${where}: compat 字段 "${key}" 的值不可为空`, 'INVALID_CONFIG')
     }
+    const allowedValues = COMPAT_VALUE_CHECKS[key]
+    if (allowedValues !== undefined && !allowedValues.includes(value)) {
+      throw new GatewayError(
+        `${where}: compat 字段 "${key}" 的值 "${value}" 不在合法值域内,可用值: ${allowedValues.join(', ')}`,
+        'INVALID_CONFIG',
+      )
+    }
   }
   return { ...compat }
 }
@@ -195,13 +228,13 @@ export function mergeCompat(routeCompat, modelCompat) {
 }
 
 /**
- * 解析整张路由表:官方节 ∪ 本包节(mergeProviderSections 合并),每条
- * 路由经 resolveRoute 全量校验。本包节路由不可服务即抛(fail loud,手写
- * 配置必须修好);官方节 catalog 形态路由(无协议/端点/模型目录的凭据级
- * 声明)经 onUnserviceable 上报后跳过,不影响同节其余路由——硬拒会把整节
- * 拖成全失服。跳过即失服:官方行已被 patch 禁用,无人服务该路由(本包
- * 未复刻官方目录物化),如实告知需改写为手写路由。
- * @param {(provider: string, reason: string) => void} [onUnserviceable] 官方节不可服务路由上报
+ * 路由表:官方节 ∪ 本包节(mergeProviderSections 合并),每条路由经
+ * resolveRoute 全量校验。本包节路由不可服务即抛(fail loud,手写
+ * 配置必须修好);官方节 catalog 形态路由与非空 modelOverrides(官方
+ * schema 合法产物,本包无法落地)经 onUnserviceable 上报后跳过,不影响
+ * 同节其余路由——硬拒会把整节拖成全失服。跳过即失服:官方行已被 patch
+ * 禁用,无人服务该路由(本包未复刻官方目录物化),如实告知需改写为手写路由。
+ * @param {(provider: string, reason: string, source: string) => void} [onUnserviceable] 官方节不可服务路由上报(附声明来源节)
  */
 export function resolveRoutes(officialProviders, gatewayProviders, onUnserviceable) {
   if (Array.isArray(officialProviders) || Array.isArray(gatewayProviders)) {
@@ -211,10 +244,11 @@ export function resolveRoutes(officialProviders, gatewayProviders, onUnserviceab
   const routes = new Map()
   for (const [provider, profile] of merged) {
     const officialSourced = profile !== null && typeof profile === 'object' && profile.source === OFFICIAL_SETTINGS_NS
-    if (officialSourced && !routeServable(profile)) {
+    if (officialSourced && !officialRouteServable(profile)) {
       onUnserviceable?.(
         provider,
-        `路由 "${provider}" 为官方目录形态(凭据级声明,缺协议/端点/模型目录),接管期间不被任何 adapter 服务,请求与配置面拉取模型都会失败;需要该路由请改写为手写完整路由或卸载本包`,
+        officialUnserviceableReason(provider, profile),
+        OFFICIAL_SETTINGS_NS,
       )
       continue
     }
@@ -223,11 +257,33 @@ export function resolveRoutes(officialProviders, gatewayProviders, onUnserviceab
   return routes
 }
 
-/** 官方节路由可服务判定:有协议、有端点、有非空模型目录。 */
-function routeServable(profile) {
-  return typeof profile.api === 'string' && profile.api.length > 0
+/** 非空 modelOverrides 判定(官方目录改写通道在用的形态)。 */
+function hasModelOverrides(profile) {
+  const overrides = profile.modelOverrides
+  return overrides !== undefined && overrides !== null
+    && typeof overrides === 'object' && !Array.isArray(overrides)
+    && Object.keys(overrides).length > 0
+}
+
+/**
+ * 官方节路由可服务判定:有协议、有端点、有非空模型目录,且无本包无法
+ * 落地的目录通道改写(非空 modelOverrides)。catalog 形态与 modelOverrides
+ * 均为官方 schema 合法产物,skip + 诊断而非硬拒——硬拒会把整节拖失服
+ * (官方 0.1.5 deferred 校验同语义:目录级漂移保留诊断不阻塞其余路由)。
+ */
+function officialRouteServable(profile) {
+  const hasModels = typeof profile.api === 'string' && profile.api.length > 0
     && typeof profile.baseURL === 'string' && profile.baseURL.length > 0
     && Array.isArray(profile.models) && profile.models.length > 0
+  return hasModels && !hasModelOverrides(profile)
+}
+
+/** 官方节不可服务路由的具体原因:catalog 形态与 modelOverrides 通道各说各的。 */
+function officialUnserviceableReason(provider, profile) {
+  if (hasModelOverrides(profile)) {
+    return `路由 "${provider}" 声明非空 modelOverrides(官方目录改写通道),本包无模型目录无法落地该改写,接管期间不被任何 adapter 服务;需要该路由请改写为手写完整路由或卸载本包`
+  }
+  return `路由 "${provider}" 为官方目录形态(凭据级声明,缺协议/端点/模型目录),接管期间不被任何 adapter 服务,请求与配置面拉取模型都会失败;需要该路由请改写为手写完整路由或卸载本包`
 }
 
 /**
@@ -244,9 +300,9 @@ export function resolveRoute(provider, profile) {
   // 官方节路由的形状由官方 schema 担保(含其规范化产物,如目录 compat),
   // 不适用本包对手写配置的字段级拒绝
   const officialSourced = profile.source === OFFICIAL_SETTINGS_NS
-  // modelOverrides 官方同款硬拒:本包无模型目录改写通道,静默丢弃会让
-  // 「配置看似生效实则无效」;official schema 不产生该键,出现即显式拒绝
-  if (profile.modelOverrides !== undefined && profile.modelOverrides !== null
+  // modelOverrides 硬拒仅达 gateway 节(手写配置 fail loud):官方节的合法
+  // modelOverrides 产物已在 resolveRoutes skip + 诊断,不走此路径
+  if (!officialSourced && profile.modelOverrides !== undefined && profile.modelOverrides !== null
     && typeof profile.modelOverrides === 'object' && Object.keys(profile.modelOverrides).length > 0) {
     throw new GatewayError(`${where}: model overrides are not supported`, 'INVALID_CONFIG')
   }
