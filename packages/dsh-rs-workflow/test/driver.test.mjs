@@ -287,7 +287,7 @@ test('Given 剧本 note/done When 组装 Then [任务要点] 在任务后且 don
   assert.ok(prompt.trim().endsWith('本任务口径:清单覆盖全部条目'))
 })
 
-test('Given fallback 剧本(无 planStep) When 组装 Then 无注入节(v4 字节级一致)', () => {
+test('Given fallback 剧本(无 planStep) When 组装 Then 无注入节', () => {
   const step = { id: 'a', prompt: '做:{request}', outputs: { o: '产出说明' } }
   const prompt = buildPrompt({ state: { steps: {} }, request: 'R', inputs: {}, step })
   assert.equal(prompt.includes('[任务要点]'), false)

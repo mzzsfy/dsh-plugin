@@ -1,4 +1,4 @@
-// template 校验器 BDD(场景名即 Given/When/Then;契约源 docs/rsww-v4/feat/*.md)
+// template 校验器 BDD(场景名即 Given/When/Then;契约源 lib/spec.mjs)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseTemplate, parseErrorLine, validateTemplate, validateTemplateSet, buildSchema } from '../lib/template.mjs'
@@ -7,7 +7,7 @@ const parse = (text) => { try { return parseTemplate(text) } catch (e) { return 
 const targets = (errors) => errors.map((e) => e.target)
 const hasMsg = (errors, frag) => errors.some((e) => e.message.includes(frag))
 
-// 基准合法模板(default v4 形态,含审批 blocked 出口)
+// 基准合法模板(default 形态,含审批 blocked 出口)
 const DEFAULT_TPL = {
   id: 'default', label: '通用默认',
   description: '评估需求后拆解执行、审查修正、交付汇总的通用流程。',
@@ -19,7 +19,7 @@ const DEFAULT_TPL = {
   ],
 }
 
-// 基准合法模板(lite v4 形态,含升级步出口:审批对象上游可引用)
+// 基准合法模板(lite 形态,含升级步出口:审批对象上游可引用)
 const LITE_TPL = {
   id: 'lite', label: '轻量直办',
   description: '单一任务直达,终审把关,僵局升级兜底。',

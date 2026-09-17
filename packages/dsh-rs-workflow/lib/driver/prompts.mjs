@@ -1,5 +1,5 @@
 // 指令组装:节顺序固定 [任务][任务要点][产出要求][参考资料][用户补充][运行中用户消息][重做说明]
-// v5:剧本 note/done 注入([任务要点] 节与产出要求末尾"本任务口径:");fallback 剧本不注入(与 v4 字节级一致)
+// 剧本 note/done 注入([任务要点] 节与产出要求末尾"本任务口径:");fallback 剧本不注入
 import { buildSchema } from '../template.mjs'
 import { stepTypeOf } from './scheduler.mjs'
 

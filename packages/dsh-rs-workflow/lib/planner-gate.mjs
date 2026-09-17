@@ -6,7 +6,7 @@ const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 const nonEmpty = (v) => typeof v === 'string' && v.trim() !== ''
 const PLACEHOLDER_RE = /\{([^{}]+)\}/g
 
-// 模板直接依赖表:显式 after;缺省 = 文档序前一步;升级步(onExhausted 目标)脱离常规图无缺省边(v4 语义平移)
+// 模板直接依赖表:显式 after;缺省 = 文档序前一步;升级步(onExhausted 目标)脱离常规图无缺省边
 export function templateDeps(parsed) {
   const steps = Array.isArray(parsed?.steps) ? parsed.steps : []
   const byId = new Map(steps.filter((s) => isObj(s) && typeof s.id === 'string').map((s) => [s.id, s]))

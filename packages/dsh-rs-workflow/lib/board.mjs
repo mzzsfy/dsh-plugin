@@ -103,7 +103,7 @@ function removeTemplateById(id) {
   const next = raw.filter((t) => t.id !== id)
   if (next.length === raw.length) return { ok: false, error: '模板不存在: ' + id }
   writeTemplates(next)
-  // 撤下释放物(v4 同语义):删除模板即移除对应释放目录(外来目录返回 foreign 不动)
+  // 撤下释放物:删除模板即移除对应释放目录(外来目录返回 foreign 不动)
   const outcome = unreleaseFlowTemplate(id)
   return { ok: true, outcome }
 }

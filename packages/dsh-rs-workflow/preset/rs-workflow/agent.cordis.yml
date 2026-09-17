@@ -5,7 +5,7 @@
 #
 # 基底是 `standard` 全功能编码代理行集,差异:
 #   1. persona 换成流程模式纪律 v5(人机接口+受约束规划者,任务交付由编排子代理承担);
-#   2. delegation 组内 rs-workflow-orchestrator 工具行(v4 takeover 行删除)与 template-tool 行;
+#   2. delegation 组内 rs-workflow-orchestrator 工具行与 template-tool 行;
 #   3. 无 report 行(trace 事件 + run-store 取代);plan-mode 组移除(规划在编排内)。
 
 # ── identity ────────────────────────────────────────────────────────────────

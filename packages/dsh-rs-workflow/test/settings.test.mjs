@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SLOT_KEYS as TEMPLATE_V4_SLOT_KEYS } from '../lib/template.mjs'
+import { SLOT_KEYS as TEMPLATE_SLOT_KEYS } from '../lib/template.mjs'
 import {
   BUDGET_KEYS,
   DEFAULT_BUDGETS,
@@ -15,7 +15,7 @@ import {
 } from '../lib/settings-schema.mjs'
 import { dataDir, loadJson, saveJson } from '../lib/storage.mjs'
 
-// v3 删除的 12 个细分位(v3 16 位 = 3 基础 + 13 细分,其中 executor-escalate 被 v4 重定义保留)
+// 旧版删除的 12 个细分位(旧版 16 位 = 3 基础 + 13 细分,executor-escalate 保留归一)
 const LEGACY_SLOT_KEYS = [
   'planner-triage', 'planner-command', 'planner-subplan', 'planner-escalate',
   'reviewer-plan', 'reviewer-task', 'reviewer-subplan', 'reviewer-final', 'reviewer-cross',
@@ -46,7 +46,7 @@ test('Given 任意输入对象 When normalizeConfig Then 返回新对象且入�
   assert.deepEqual(input, snapshot)
 })
 
-test('Given v3 残留键(16 位 slots/旧预算/workflow 节) When normalizeConfig Then v3 键全部不存在且 v4 键为归一后值', () => {
+test('Given 旧版残留键(细分 slots/旧预算/workflow 节) When normalizeConfig Then 遗留键全部不存在且现行键为归一后值', () => {
   const slots = Object.fromEntries(LEGACY_SLOT_KEYS.map((k) => [k, 'm1']))
   slots.planner = 'm0'
   const budgets = Object.fromEntries(LEGACY_BUDGET_KEYS.map((k) => [k, 3]))
@@ -93,7 +93,7 @@ test('Given 临时数据目录 When saveJson+loadJson Then 往返一致;缺失�
 })
 
 test('Given settings 与 template 两侧工作位键集 When 对拍 Then 一致(镜像钉住)', () => {
-  assert.deepEqual(SLOT_KEYS, TEMPLATE_V4_SLOT_KEYS)
+  assert.deepEqual(SLOT_KEYS, TEMPLATE_SLOT_KEYS)
 })
 
 test('Given 模块常量 When 读取 Then 口径钉住', () => {

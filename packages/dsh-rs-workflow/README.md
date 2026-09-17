@@ -2,7 +2,7 @@
 
 若水工作流 dsh 插件——设置面:流程模板管理与工作位/预算配置。模板编辑(host dryRun 权威校验)、只读详情、模板规范、六工作位与三预算配置读写。
 
-**编排运行时(takeover/driver/store/flow-exec/释放链)已随 v4 清理移除,按 v5 设计(`docs/rsww-v5/`)另行实现。** 本包当前只承载设置页能力;历史 UI 截图存档见 `docs/rsww-v4/ui-snapshot/`。
+**编排运行时(driver/store/flow-exec/释放链)按 v5 设计(`docs/rsww-v5/`)实现。**
 
 模板文本为**严格 JSON**(有 GUI 编辑器,无 JSON5 需求);配置与模板存自有文件 `~/.dsh/dsh-rs-workflow/v5/`,**不经宿主 settings 服务,不写 settings.yaml**。
 

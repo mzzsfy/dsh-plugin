@@ -1,4 +1,4 @@
-// rs-workflow v4 client 半区:会话页签「若水编排」(gui-session,唯一运行记录视图)+
+// rs-workflow client 半区:会话页签「若水编排」(gui-session,唯一运行记录视图)+
 // 设置页分区「若水工作流」:流程模板(gui-editor)/配置(gui-config)。
 // 自注册 __ModuleLoader__.load(对齐 v3);数据经 /api/rsww/* 读写。
 // 类名前缀 rsww-;颜色仅取官方 alias token;开关遵循仓库规约(track+thumb,锚定 checkbox)。

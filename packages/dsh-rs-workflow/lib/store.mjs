@@ -1,5 +1,5 @@
 // run-store(v5):每 run 全量 JSON + index.json 索引;LRU 容量收敛;零截断
-// namespace 子目录 v5/(与 v4 旧数据物理隔离,零兼容);record 增 plan/warnings/controls[].by(见 data-design.md)
+// namespace 子目录 v5/(旧数据物理隔离);record 增 plan/warnings/controls[].by(见 data-design.md)
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'

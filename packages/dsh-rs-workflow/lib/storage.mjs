@@ -1,5 +1,5 @@
 // storage — rs-workflow 自有文件存储(不经宿主 settings 服务,settings.yaml 不承载本插件配置)
-// 布局:<dataDir>/v5/{templates,config}.json;dataDir 惯例与 v4 运行时一致(DSH_RS_WORKFLOW_DATA_DIR 覆写)
+// 布局:<dataDir>/v5/{templates,config}.json;dataDir(DSH_RS_WORKFLOW_DATA_DIR 覆写)
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
