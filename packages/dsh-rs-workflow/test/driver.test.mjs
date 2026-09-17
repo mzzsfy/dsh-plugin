@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { nextBatch, scriptViewOf } from '../lib/driver/scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from '../lib/driver/approve.mjs'
 import { buildPrompt, schemaOf, resolvePlaceholders } from '../lib/driver/prompts.mjs'
-import { RunDriver } from '../lib/driver/index.mjs'
+import { RunDriver, collectSubOutputs } from '../lib/driver/index.mjs'
 
 const init = (template, plan, { request = '需求', inputs = {} } = {}) => {
   const view = scriptViewOf(template, plan)
@@ -615,4 +615,32 @@ test('Given paused 期间同一审批步两次裁决 When resume Then 第二条�
   const second = driver.handlePost({ kind: 'approve', by: 'main-agent' })
   assert.equal(second, false)
   assert.equal(driver.state.pendingApprovals.length, 1)
+})
+
+test('Given 子流程状态 When collectSubOutputs Then 普通步取首产出,for_each 步收编实例数组', () => {
+  const sub = {
+    id: 'sub', label: 'sub',
+    steps: [
+      { id: 'plan', prompt: 'P', outputs: { items: '列表' }, listOutputs: ['items'] },
+      { id: 'write', for_each: 'plan.items', prompt: '{item}', outputs: { line: '行' } },
+      { id: 'void', prompt: 'V', outputs: { x: 'x' } },
+    ],
+  }
+  const subState = {
+    steps: {
+      plan: { status: 'done', outputs: { items: ['甲', '乙'] }, instances: [] },
+      write: {
+        status: 'done', outputs: null,
+        instances: [
+          { key: '#1', status: 'done', outputs: { line: '甲行' } },
+          { key: '#2', status: 'done', outputs: { line: '乙行' } },
+        ],
+      },
+      void: { status: 'skipped', outputs: null, instances: [] },
+    },
+  }
+  const out = collectSubOutputs(sub, subState)
+  assert.deepEqual(out['plan.items'], ['甲', '乙'])
+  assert.deepEqual(out['write.line'], ['甲行', '乙行'])
+  assert.equal('void.x' in out, false)
 })

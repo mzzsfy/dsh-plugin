@@ -28,6 +28,26 @@ function initState(script, request, inputs) {
   return state
 }
 
+// 子流程产出收编(spec §9:按子步骤扁平挂载;for_each 子步按实例序收编同名字段数组)
+export function collectSubOutputs(subTemplate, subState) {
+  const outputs = {}
+  for (const child of subTemplate.steps) {
+    const cs = subState.steps[child.id]
+    if (!cs) continue
+    if (cs.outputs) {
+      outputs[`${child.id}.${Object.keys(cs.outputs)[0] ?? 'out'}`] = Object.values(cs.outputs)[0]
+      continue
+    }
+    // for_each 子步:步骤级 outputs 恒空,产出在实例上
+    const doneInstances = (cs.instances ?? []).filter((i) => i.status === 'done' && i.outputs)
+    if (doneInstances.length > 0) {
+      outputs[`${child.id}.${Object.keys(doneInstances[0].outputs)[0] ?? 'out'}`] =
+        doneInstances.map((i) => Object.values(i.outputs)[0])
+    }
+  }
+  return outputs
+}
+
 // 续跑种子:快照直读;fromStepId 及其 deps 后代全重置(含 done,旧产出作废,与 redo 语义一致)
 export function buildSeed(record, plan, fromStepId, inputs) {
   const state = JSON.parse(JSON.stringify(record.state ?? {}))
@@ -393,11 +413,7 @@ export class RunDriver {
     if (this.signal.aborted) return
     if (subState.status === 'completed') {
       s.status = 'done'
-      s.outputs = {}
-      for (const child of sub.steps) {
-        const cs = subState.steps[child.id]
-        if (cs?.outputs) s.outputs[`${child.id}.${Object.keys(cs.outputs)[0] ?? 'out'}`] = Object.values(cs.outputs)[0]
-      }
+      s.outputs = collectSubOutputs(sub, subState)
       this.store.step({ runId: this.runId, stepId: step.id, event: 'submit', body: { outputs: s.outputs } })
     } else {
       s.status = 'failed'
