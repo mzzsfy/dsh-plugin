@@ -228,12 +228,15 @@ window.__ModuleLoader__.load({
     }
 
     // 控制条:按状态显隐按钮 + 审批裁决行(waiting_approval,提交带 by:user)+ 末端消息输入行(勾选「纠偏注入」)
-    // v5:waiting_approval 双入口提示(页签裁决与主循环裁决先到先得);paused 恢复后提示待代理推进
+    // v5:waiting_approval 双入口提示(页签裁决与主循环裁决先到先得);paused 恢复后提示待代理推进;
+    // 驳回两步(先填审批意见再确认,意见入 redo.comments 服务重做说明),意见可空
     function ControlBar({ run }) {
       const [text, setText] = useState('')
       const [inject, setInject] = useState(false)
       const [armed, setArmed] = useState(false)
       const [resumed, setResumed] = useState(false)
+      const [rejecting, setRejecting] = useState(false)
+      const [rejectText, setRejectText] = useState('')
       const [error, setError] = useState('')
       const live = run.status === 'running' || run.status === 'paused' || run.status === 'waiting_approval'
       useEffect(() => {
@@ -241,13 +244,17 @@ window.__ModuleLoader__.load({
         const timer = setTimeout(() => setArmed(false), ARMED_TIMEOUT_MS)
         return () => clearTimeout(timer)
       }, [armed])
+      useEffect(() => {
+        if (run.status !== 'waiting_approval') { setRejecting(false); setRejectText('') }
+      }, [run.status])
       if (!live) return null
       const control = async (kind, extra) => {
         setError('')
         const outcome = await post('control', { runId: run.runId, kind, ...(extra || {}) })
-        if (!outcome.ok) { setError(outcome.error); return }
-        if (outcome.data && outcome.data.ok === false) { setError('未受理(状态已变化或已被处理)'); return }
+        if (!outcome.ok) { setError(outcome.error); return false }
+        if (outcome.data && outcome.data.ok === false) { setError('未受理(状态已变化或已被处理)'); return false }
         if (kind === 'resume') setResumed(true)
+        return true
       }
       const send = async () => {
         if (!text.trim()) return
@@ -257,11 +264,28 @@ window.__ModuleLoader__.load({
         if (outcome.data && outcome.data.ok === false) { setError('未受理(状态已变化或已被处理)'); return }
         setText('')
       }
+      const confirmReject = async () => {
+        const accepted = await control('reject', { by: 'user', reason: rejectText.trim() })
+        if (accepted) { setRejecting(false); setRejectText('') }
+      }
       const verdictButtons = run.status === 'waiting_approval'
-        ? React.createElement('div', { className: 'rsww-row' },
-            React.createElement('span', { className: 'rsww-note' }, '页签裁决与主循环裁决(代审或 ask_user 转呈)先到先得'),
-            React.createElement('button', { className: 'rsww-btn', onClick: () => control('approve', { by: 'user' }) }, '通过'),
-            React.createElement('button', { className: 'rsww-btn rsww-btn--danger', onClick: () => control('reject', { by: 'user' }) }, '驳回'))
+        ? React.createElement('div', { className: 'rsww-section' },
+            React.createElement('div', { className: 'rsww-row' },
+              React.createElement('span', { className: 'rsww-note' }, '页签裁决与主循环裁决(代审或 ask_user 转呈)先到先得'),
+              React.createElement('button', { className: 'rsww-btn', onClick: () => control('approve', { by: 'user' }) }, '通过'),
+              rejecting
+                ? null
+                : React.createElement('button', { className: 'rsww-btn rsww-btn--danger', onClick: () => setRejecting(true) }, '驳回')),
+            rejecting ? React.createElement('div', { className: 'rsww-row' },
+              React.createElement('input', {
+                className: 'rsww-input rsww-input--wide', value: rejectText,
+                placeholder: '驳回意见(可空;将作为审批意见注入重做批次)',
+                autoFocus: true,
+                onChange: (e) => setRejectText(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter') confirmReject() },
+              }),
+              React.createElement('button', { className: 'rsww-btn rsww-btn--danger', onClick: confirmReject }, '确认驳回'),
+              React.createElement('button', { className: 'rsww-btn', onClick: () => { setRejecting(false); setRejectText('') } }, '取消')) : null)
         : null
       return React.createElement('div', { className: 'rsww-section' },
         React.createElement('div', { className: 'rsww-row' },

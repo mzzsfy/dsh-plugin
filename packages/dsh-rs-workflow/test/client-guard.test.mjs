@@ -56,6 +56,9 @@ test('Given client.js When 检查视图职责 Then 会话页签+设置页分区�
   assert.ok(text.includes("'模型规划'") && text.includes("'模板全序'"), 'plan.source 标识')
   assert.ok(text.includes("React.createElement(Badge, { tone: 'warn' }, '警告 ' + warnings.length)"), 'warnings 徽标')
   assert.ok(text.includes("by: 'user'"), '页签裁决提交带 by:user')
+  // 驳回两步:先填意见再确认,意见作 redo.comments 注入重做批次
+  assert.ok(text.includes('确认驳回') && text.includes('rejectText'), '驳回须展开意见输入行(两步提交)')
+  assert.ok(text.includes("control('reject', { by: 'user', reason: rejectText.trim() })"), '驳回提交携带 reason')
   // 设置页不承载运行记录(会话页签唯一视图)
   assert.equal(text.includes("{ key: 'runs'"), false, '设置页不得有运行记录子页')
 })
