@@ -69,11 +69,11 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
 - **reasoning 声明与校验**:`resolveModel` 经 pi-ai `getSupportedThinkingLevels` 声明可选档位与 `defaultEffort`;请求路径 `options.reasoningEffort ?? profile.reasoning` 校验,不支持即 `UNSUPPORTED_REASONING_EFFORT`,`off` = 省略 reasoning 参数;描述路径宽松(不可描述省略,不藏路由)。
 - **请求选项对齐**:`maxRetries: 0` 恒传(重试归 runtime retry policy,不与 pi-ai SDK 内部重试叠加),`transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `thinkingBudgets` 透传;不支持请求选项(`stop`)显式 `UNSUPPORTED_OPTION` 拒绝。
 - **凭据链**:`credentials` 服务在场即唯一来源(未命中即 `MISSING_CREDENTIAL`,不回落启动环境——防已删除凭据被过期环境变量静默复活);服务缺席才走启动环境;官方 `assertUsableApiKey` 校验。
-- **模型发现**:两节命名空间各注册同一 discovery(官方节接管后官方注册随之消失,不补则官方配置面拉取模型必失败);宿主取消 signal 透传探测请求;探测请求合入路由自定义 `headers`(网关分组头等生效),`accept` / `authorization` / attribution 保留头后写覆盖。
+- **模型发现**:两节命名空间各注册同一 discovery(官方节接管后官方注册随之消失,不补则官方配置面拉取模型必失败);宿主取消 signal 透传探测请求;openai 系走 `GET {baseURL}/models` + bearer,anthropic-messages 走原生 `GET {root}/v1/models`(base 以 `/v1` 结尾不重复追加,单页 `limit=1000` 不跟随 `has_more`) + `anthropic-version` / `x-api-key`;探测请求合入路由自定义 `headers`(网关分组头等生效),`accept` / 探测认证头 / attribution 保留头后写覆盖。
 - **attribution 头**:每请求携带官方 `user-agent`;用户撞名头大小写不敏感剥除。
 - **错误分类对齐**:quota 判定(`QUOTA`,经 dsh-llm `QUOTA_EXCEEDED_CODE`)、超窗双通道(pi-ai usage 判定器 + dsh-llm 文本判定器 → `CONTEXT_WINDOW_EXCEEDED`);调用方取消时流出界兜底归因 `ABORTED`(带根因 cause),不落 `UNKNOWN`。
 - **热更新**:改配置即生效(settings 服务 `installSection` 模式)——写入时校验拒绝坏配置,路由集/重试策略/显示名变化原地 `replace`,解析失败保旧路由;无路由时休眠,不注册 adapter。`prepareCall` 解析结果快照冻结,热更换表不产生目录信息与请求路由代际错配。
-- **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系协议可"拉取模型",anthropic 等明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册);adapter 挂 `LlmAdapter` 原型继承基类默认方法(含 `imageRequestPricing`,声明无 provider 侧图片定价,计量回退中性估算),宿主接口演进新增默认实现时自动跟随。
+- **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系与 anthropic-messages 协议可"拉取模型",解析标准 `data` 数组与网关富集 `models` map;其余协议明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册);adapter 挂 `LlmAdapter` 原型继承基类默认方法(含 `imageRequestPricing`,声明无 provider 侧图片定价,计量回退中性估算),宿主接口演进新增默认实现时自动跟随。
 - **pi-ai 同栈**:依赖下界较官方收紧(官方 dsh-llm-pi-ai 0.1.2-rc.1 为 ^0.84.2;本包 compat 名单含 0.84.4 才引入的字段,下界抬至 ^0.84.4),协议行为与官方路由同一版本保证;compat 字段名单按 pi-ai 0.84.4 各协议类型声明校验。
 
 ## 错误码
@@ -102,7 +102,7 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
 | 历史回放 | `INVALID_REPLAY_STATE` | 持久化 replay 信封格式或版本不可回放 |
 | 流边界 | `STREAM_CLOSED` | pi-ai 事件流在 done/error 前即关闭 |
 | 流边界 | `ABORTED` | 调用方取消使流式请求按 aborted 终态送达 |
-| 模型发现 | `DISCOVERY_FAILED` | 模型列表拉取失败(不可达、超限、非 JSON、无 data 数组等) |
+| 模型发现 | `DISCOVERY_FAILED` | 模型列表拉取失败(不可达、超限、非 JSON、无 data 数组或 models 对象等) |
 | 模型发现 | `DISCOVERY_UNSUPPORTED` | 协议在本 build 内无模型列表能力,回退手录 |
 | 模型发现 | `INVALID_CREDENTIAL` | 发现请求凭据被上游拒绝 |
 | 模型发现 | `ABORTED` | 发现请求被调用方中止 |
