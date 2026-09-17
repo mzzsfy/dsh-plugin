@@ -31,6 +31,7 @@ dsh-plugin/
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
 | @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host 并把 web 默认绑定翻转为 0.0.0.0:泛域名等无法枚举的入口免改启动命令,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由(回溯 + 遮蔽注册方法)把 Host 头实时注册进 webRuntime.trustedHosts,闸门每请求实时读数组;容量 maxHosts 默认 100,按最久未访问(LRU)淘汰,行级 config 配置无 GUI;启动横幅与注册/淘汰 console 直出;webRuntime 走服务事件延迟激活,卸载经 disposer 断开注册 | DSH host 端插件(bundle patch 覆盖 + 路由包装) |
 | @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾,错过的触发不补跑;web 路由供看板/环境变量/日志三面板;会话任务经 sessionController 投递,支持允许时段与忙时跳过 | DSH 双端插件(web 路由 + settings 槽位) |
+| @mzzsfy/dsh-context-manager | 对话增强:历史输入浮层(`Alt+↑` 唤起,workspace/session/global/prompts 四范围导航与即时搜索,常用提示词收藏)、插话撤回(未应用插话撤回输入框重编辑)、对话分叉(重写式 fork:该轮不带入子会话,原输入自动回填供编辑重发,支持进行中轮分叉与分叉后自动重发)、家族版本环(`‹ n/m ›` 同源分叉家族序位与直接跳转);dsh-session-manager 历史输入功能的独立延续包 | Host 聚合工作区历史缓存(`~/.dsh/historyPrompt/`,解压 + stat 指纹增量对齐)经 `/api/context/*` 路由供浮层查询;分叉走宿主 sessions 服务面 fork+open(follow 开场帧建轮锚点),成功自动打开子会话并回填草稿;家族环由 sessions.list 快照 parentSessionId 建链投影,零新 RPC | DSH 双端插件(host 路由 + client 注入) |
 
 ## 安装与更新:缩短 pnpm 宽限期
 
@@ -46,7 +47,7 @@ pnpm config set --global minimumReleaseAge 360
 
 要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20,dsh-rs-workflow 未声明 engines)。
 
-- 包内测试:13 个含 test/ 目录的包目录执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 已按 docs/rsww-v5/ 实现,包内 `node --test "test/*.test.mjs"` 全绿
+- 包内测试:14 个含 test/ 目录的包执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 未声明 test 脚本,以 `node --test "test/*.test.mjs"` 直接运行,已按 docs/rsww-v5/ 实现,全绿
 - CI(`.github/workflows/test.yml`):提交推送与每 3 天定时触发,amd64/arm64 双架构并行,各自全量跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
 
 ## 开发态链接(dev-link)
