@@ -171,10 +171,12 @@ test('预设定义表覆盖三视图', () => {
   assert.deepEqual(MINUTE_PRESETS, ['3h', '24h', '3d', '7d'])
 })
 
-test('默认挡位均在其挡位列表内,分钟窗口可解析', () => {
+test('默认挡位均在其挡位列表内,分钟默认挡为最短窗口 3 小时,分钟窗口可解析', () => {
   assert.ok(DAY_PRESETS.includes(DEFAULT_RANGE))
   assert.ok(HOUR_PRESETS.includes(DEFAULT_HOUR_PRESET))
   assert.ok(MINUTE_PRESETS.includes(DEFAULT_MINUTE_PRESET))
+  // Given 分钟视图初始挂载 When 取默认挡 Then 为 3 小时(分钟粒度下 24 小时过粗,近端细节优先)
+  assert.equal(DEFAULT_MINUTE_PRESET, '3h')
   assert.notEqual(resolveMinuteRange(DEFAULT_MINUTE_PRESET, NOW), null)
 })
 

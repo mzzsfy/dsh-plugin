@@ -13,7 +13,7 @@ const MINUTE_PRESET_MINUTES = { '3h': 3 * 60, '24h': 24 * 60, '3d': 3 * 24 * 60,
 
 const DEFAULT_RANGE = '30'
 const DEFAULT_HOUR_PRESET = '24h'
-const DEFAULT_MINUTE_PRESET = '24h'
+const DEFAULT_MINUTE_PRESET = '3h'
 
 // 天视图渲染上限;时/分上限 = 闭区间桶数(hour N+1 槽,minute N/10+1 槽)
 const DAY_MAX_SLOTS = 180
@@ -2296,7 +2296,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, tipSlots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', costEnabled = false, money = false, costAvailable = false, onMetricToggle, t = defaultT }) {
+    function TrendChart({ title, notes, slots, tipSlots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', money = false, costAvailable = false, onMetricToggle, t = defaultT }) {
       const metricId = React.useId()
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
@@ -2430,7 +2430,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
                 showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
                 showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
                 showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
-                costEnabled && prefsRef.current.costDisplay && hoverSlot.cost !== undefined
+                prefsRef.current.costDisplay && hoverSlot.cost !== undefined
                   ? [
                       h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`),
                       avgPrice ? h('div', { key: 'avg-price', className: 'ud-tip-row' }, `${t('avgPrice')}: ${avgPrice}`) : null,
@@ -3524,7 +3524,6 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
               legendModels: trendSource.models,
               panelRef,
               costCurrency,
-              costEnabled: view === 'day',
               money,
               costAvailable: costReady,
               onMetricToggle: setCostView,
