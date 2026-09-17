@@ -1,4 +1,4 @@
-// orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message/verdict 六工具
+// orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message/resume_from/verdict 七工具
 // 编排以分段 continuable job 推进:每段 = jobs.start 包装 driver.runSegment,settle 负载经 tool-jobs
 // 完成通知唤醒主循环;推进责任唯一在 rs_workflow_resume(页签 control 仅清 paused/裁决)
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -320,6 +320,48 @@ export function registerOrchestrator(ctx, config) {
         },
       }),
       defineTool({
+        name: 'rs_workflow_resume_from',
+        description: [
+          '断点续跑/从头重跑(主循环通道,与页签 ResumePicker 同能力):目标 run 须终态或已收敛。',
+          '经挂靠机制在原会话重建种子 run:done 步骤产出继承,fromStepId 及其后代闭包重置(缺省 = 从第一个未完成步续跑);',
+          'inputs 可选覆盖模板入参。旧 run 记录保留作审计,旧 run 未消费的纠偏消息不带入新 run。',
+        ].join(''),
+        parameters: {
+          runId: { type: 'string', required: true, description: '要续跑的 run(终态)' },
+          fromStepId: { type: 'string', description: '从该步骤重来(其后代全部重置);缺省 = 断点续跑' },
+          inputs: { type: 'object', additionalProperties: true, description: '覆盖模板顶层 inputs,值必须为字符串' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const store = reportStore()
+          let record
+          try { record = store.get(args.runId) } catch { record = undefined }
+          if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
+          // 活跃守卫:未终态(或 driver 仍在内存)不可续跑,与页签 resume-from 同口径
+          if (registry.drivers.has(args.runId) || record.finishedAt === undefined) {
+            return { ok: false, error: '运行进行中,不可续跑' }
+          }
+          // 会话归属守卫:仅原 run 所属会话的主循环可续跑,防跨会话接管他人 run
+          if (record.sessionId !== agentIdOf(exec.agent)) {
+            return { ok: false, error: '该 run 属于其他会话,本会话不可续跑' }
+          }
+          if (args.fromStepId !== undefined && (record.plan?.steps?.some((p) => p.ref === args.fromStepId)) !== true) {
+            return { ok: false, error: 'fromStepId 不在剧本中:' + args.fromStepId }
+          }
+          if (currentRunId(exec.agent) !== undefined) {
+            return { ok: false, error: `本会话已有进行中的编排 ${currentRunId(exec.agent)},不可续跑` }
+          }
+          // 唤醒轮挂靠兜底:重启后 initiator 表空,续跑前借本调用重注册(status/resume 同款)
+          registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          const outcome = startSeedRun(exec.agent, record, args.fromStepId, args.inputs)
+          if (!outcome.ok) return { ok: false, error: outcome.error }
+          return { ok: true, runId: outcome.runId, hint: '旧 run 未消费的纠偏消息不带入新 run;rs_workflow_status 跟踪推进' }
+        },
+      }),
+      defineTool({
         name: 'rs_workflow_verdict',
         description: [
           '回写若水编排裁决(主循环裁决通道,与页签先到先得):run 处于 waiting_approval 时受理。',
@@ -364,7 +406,7 @@ export function registerOrchestrator(ctx, config) {
     ]
     for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'rs-workflow orchestrator: ' + tool.name)
     // 行上下文(tool context)无 agent 属性,effect 回调在此返回 undefined 触发宿主 dispose 契约异常,
-    // 导致整个 inject 回调失败、六工具全部未注册(43267fc 引入,实机定位);清理由既有路径承担:
+    // 导致整个 inject 回调失败、七工具全部未注册(43267fc 引入,实机定位);清理由既有路径承担:
     // run 终态 finishRun/unregisterInitiator 与 cancel 的 finishRun 清 activeRuns;行销毁后的
     // stale initiator 表项在下次 start 受理时被覆盖,不产生跨会话续跑。
   })

@@ -13,7 +13,6 @@ window.__ModuleLoader__.load({
     const REFRESH_MS = 5 * 1000
     const LIVE_REFRESH_MS = 2 * 1000
     const VIEW_ID = 'rsww-flow'
-    const CHIP_ID = 'rsww-flow-chip'
     const SETTLED_COUNT = 8
     const ARMED_TIMEOUT_MS = 3 * 1000
 
@@ -84,10 +83,6 @@ window.__ModuleLoader__.load({
 .rsww-switch input[type="checkbox"]:checked + .rsww-switch__track{background:var(--dsw-alias-state-business-primary,#4176e6)}
 .rsww-switch input[type="checkbox"]:checked + .rsww-switch__track .rsww-switch__thumb{transform:translateX(13px)}
 .rsww-switch input[type="checkbox"]:focus-visible + .rsww-switch__track{outline:2px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 70%,white);outline-offset:1px}
-.rsww-chip{position:relative;display:inline-flex;align-items:center;gap:5px;border:none;background:transparent;color:var(--dsw-alias-label-secondary,#61666b);font:500 var(--dsw-font-xs-13,13px/20px sans-serif);border-radius:6px;padding:3px 2px;cursor:pointer;white-space:nowrap}
-.rsww-chip--live{color:var(--dsw-alias-state-business-primary,#4176e6)}
-.rsww-chip__dot{width:6px;height:6px;border-radius:50%;flex:none;background:currentColor;animation:rsww-pulse 1.2s ease-in-out infinite}
-@keyframes rsww-pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .rsww-pills{display:inline-flex;gap:4px;padding:3px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:9px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);width:max-content}
 .rsww-pill{border:none;background:transparent;color:var(--dsw-alias-label-secondary,#61666b);font:500 var(--dsw-font-xs-13,13px/20px sans-serif);border-radius:6px;padding:4px 12px;cursor:pointer;white-space:nowrap}
 .rsww-pill--on{background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#0f1115);box-shadow:0 1px 3px rgba(0,0,0,.1)}
@@ -381,33 +376,6 @@ window.__ModuleLoader__.load({
         mine.length === 0 ? EmptyState({ title: '本会话还没有运行记录', hint: '在若水模式下发送需求后,编排进度会实时出现在这里。' }) : null,
         running.length ? group('进行中', running.length + ' 次', running) : null,
         settled.length ? group('已落定', '近 ' + settled.length + ' 次', settled) : null)
-    }
-
-    // 页签切换:宿主 selectView face 未下发 header.actions 子槽(实测),官方 face 到位即走;
-    // 兜底=按 a11y role 精确匹配宿主页签按钮,不可达静默
-    function FlowChip({ selectView }) {
-      const [runs, setRuns] = useState([])
-      const reload = useCallback(async () => {
-        const outcome = await request('runs')
-        if (outcome.ok) setRuns(outcome.data.runs || [])
-      }, [])
-      useEffect(() => {
-        reload()
-        const timer = setInterval(reload, REFRESH_MS)
-        return () => clearInterval(timer)
-      }, [reload])
-      const live = runs.filter((r) => r.status === 'running')
-      if (live.length === 0) return null
-      const open = () => {
-        if (selectView) { selectView(VIEW_ID); return }
-        try {
-          const tab = [...document.querySelectorAll('[role="tab"]')].find((el) => el.textContent === '若水编排')
-          if (tab) tab.click()
-        } catch { /* 页签不可达:静默 */ }
-      }
-      return React.createElement('button', { className: 'rsww-chip rsww-chip--live', onClick: open, title: '查看若水编排' },
-        React.createElement('span', { className: 'rsww-chip__dot' }),
-        '若水编排 ' + live.length + ' 运行中')
     }
 
     // ── 设置页共享件:pill 组/行编辑/钳制(gui-center/gui-editor/gui-config 同源) ──
@@ -1226,12 +1194,11 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },
             () => React.createElement(RswwApp),
           ))
-        // 会话感知条件注入:当前会话存在 rs 运行记录才挂页签与胶囊(v3 ensure/judge 模式)
+        // 会话感知条件注入:当前会话存在 rs 运行记录才挂页签(v3 ensure/judge 模式)
         ctx.effect(() => {
           let disposed = false
           let timer = null
           let disposeView = null
-          let disposeChip = null
           let cache = { sessionId: undefined, isRs: false }
           let currentSessionId
           const ensure = (isRs) => {
@@ -1242,14 +1209,8 @@ window.__ModuleLoader__.load({
                   { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
                   (props) => React.createElement(FlowView, { getSessionId: () => currentSessionId, ...props }),
                 ))
-              disposeChip = ctx.slots.inject('conversation.session.header.actions', () =>
-                ctx.slots.register(
-                  { name: 'conversation.session.header.actions', id: CHIP_ID, order: 15 },
-                  (props) => React.createElement(FlowChip, props),
-                ))
             } else if (!isRs && disposeView) {
               disposeView(); disposeView = null
-              disposeChip(); disposeChip = null
             }
           }
           const judge = async () => {

@@ -70,7 +70,7 @@ function setup() {
   const tool = (name) => registered.find((t) => t.name === name)
   const agent = { id: `agent-${setup.seq = (setup.seq ?? 0) + 1}` }
   const exec = { agent, signal: { throwIfAborted: () => {}, aborted: false } }
-  return { start: tool('rs_workflow_start'), status: tool('rs_workflow_status'), resume: tool('rs_workflow_resume'), cancel: tool('rs_workflow_cancel'), message: tool('rs_workflow_message'), verdict: tool('rs_workflow_verdict'), agent, exec }
+  return { start: tool('rs_workflow_start'), status: tool('rs_workflow_status'), resume: tool('rs_workflow_resume'), cancel: tool('rs_workflow_cancel'), message: tool('rs_workflow_message'), verdict: tool('rs_workflow_verdict'), resumeFrom: tool('rs_workflow_resume_from'), agent, exec }
 }
 
 const fullPlan = (brief = '口径', refs = ['triage', 'execute', 'review', 'deliver']) => ({
@@ -215,19 +215,85 @@ test('Given waiting run When verdict reject(by=user) Then 受理且 redoInfo 生
   assert.equal(after.controls.some((c) => c.kind === 'reject' && c.by === 'user' && c.reason === '口径未达'), true)
 })
 
-test('Given 页签先裁 When verdict 后到 Then 未受理', async () => {
+test('Given 页签先裁 When verdict 后到 Then 不重复裁决且代拉下一段', async () => {
   const { start, verdict, exec } = setup()
   const r0 = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
   const runId = r0.runId
   await waitStatus(runId, new Set(['waiting_approval']))
-  registry.get(runId).handlePost({ kind: 'approve', by: 'user' })
+  registry.drivers.get(runId).handlePost({ kind: 'approve', by: 'user' })
   const v = await verdict.execute({ runId, verdict: 'approve', reason: '后到' }, exec)
-  assert.equal(v.ok, false)
-  assert.ok(v.error.includes('未受理'))
+  // 竞态契约(5d4e996):后到裁决不受理,但 run 已被页签翻 running 且无活跃段时,
+  // 主循环代拉下一段(推进责任唯一在主循环),返回 ok:true + hint 说明先到先得
+  assert.equal(v.ok, true)
+  assert.ok(String(v.hint).includes('先裁'))
+  assert.equal(v.status, 'running')
 })
 
 test('Given verdict When verdict 非法枚举 Then 拒', async () => {
   const { verdict, exec } = setup()
   const v = await verdict.execute({ runId: 'r-x', verdict: 'maybe', reason: 'r' }, exec)
   assert.equal(v.ok, false)
+})
+
+test('Given 终态 run When resume_from Then 种子新 run 继承 done 且首段拉起', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  await cancel.execute({ runId: r0.runId }, exec)
+  const before = reportStore().get(r0.runId)
+  assert.equal(before.status, 'cancelled')
+  assert.equal(before.state.steps.execute.status, 'done')
+  const rf = await resumeFrom.execute({ runId: r0.runId }, exec)
+  assert.equal(rf.ok, true)
+  assert.notEqual(rf.runId, r0.runId)
+  assert.equal(currentJobs.length > 1, true)
+  const seed = reportStore().get(rf.runId)
+  assert.equal(seed.status, 'running')
+  assert.equal(seed.state.steps.execute.status, 'done')
+  assert.equal(seed.state.steps.triage.status, 'done')
+  registry.drivers.get(rf.runId)?.cancel()
+})
+
+test('Given fromStepId When resume_from Then 该步及其后代重置', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  await cancel.execute({ runId: r0.runId }, exec)
+  const rf = await resumeFrom.execute({ runId: r0.runId, fromStepId: 'execute' }, exec)
+  assert.equal(rf.ok, true)
+  const seed = reportStore().get(rf.runId)
+  assert.equal(seed.state.steps.triage.status, 'done')
+  assert.equal(seed.state.steps.execute.status, 'pending')
+  assert.equal(seed.state.steps.review.status, 'pending')
+  registry.drivers.get(rf.runId)?.cancel()
+})
+
+test('Given 活跃 run When resume_from Then 拒', async () => {
+  const { start, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: 'x', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  const rf = await resumeFrom.execute({ runId: r0.runId }, exec)
+  assert.equal(rf.ok, false)
+  assert.ok(rf.error.includes('进行中'))
+  registry.drivers.get(r0.runId)?.cancel()
+})
+
+test('Given 非法 fromStepId When resume_from Then 拒且不建 run', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: 'x', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  await cancel.execute({ runId: r0.runId }, exec)
+  const rf = await resumeFrom.execute({ runId: r0.runId, fromStepId: 'ghost' }, exec)
+  assert.equal(rf.ok, false)
+  assert.ok(rf.error.includes('fromStepId'))
+})
+
+test('Given 跨会话 run When resume_from Then 拒', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: 'x', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  await cancel.execute({ runId: r0.runId }, exec)
+  const other = { agent: { id: 'agent-other-1' }, signal: { throwIfAborted: () => {}, aborted: false } }
+  const rf = await resumeFrom.execute({ runId: r0.runId }, other)
+  assert.equal(rf.ok, false)
+  assert.ok(rf.error.includes('其他会话'))
 })

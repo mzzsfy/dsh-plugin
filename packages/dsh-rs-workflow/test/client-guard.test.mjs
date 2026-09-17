@@ -46,9 +46,10 @@ test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/
 
 test('Given client.js When 检查视图职责 Then 会话页签(v5 恢复)+设置页分区并存,无 v4 运行时残留', () => {
   const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
-  // v5:会话页签恢复(FlowView/FlowChip 经会话感知条件注入)
+  // v5:会话页签(FlowView 经会话感知条件注入);v4 运行胶囊已删(v5 主循环复活后感知由主循环承担,
+  // 且胶囊计数不分会话形成跨会话污染——2026-09 决议:删胶囊留页签)
   assert.ok(text.includes("'conversation.view'"), 'v5 会话页签必须在场')
-  assert.ok(text.includes("'conversation.session.header.actions'"), 'v5 会话胶囊必须在场')
+  assert.ok(!text.includes("'conversation.session.header.actions'"), 'v4 运行胶囊必须不在场')
   // v5 修订四处:裁决来源徽标/waiting_approval 态/plan.source/warnings 徽标
   assert.ok(text.includes("waiting_approval: { label: '待审批'"), '状态表须含 waiting_approval')
   assert.ok(text.includes("'代审'") && text.includes("'真人'"), '裁决来源徽标(代审/真人)')
