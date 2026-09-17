@@ -183,10 +183,16 @@ test('ForkDock 注入契约:轮号锚点属性、按钮标记、防重标记与�
   assert.ok(CLIENT_SRC.includes("TURN_ATTR = 'data-chat-turn'"), 'fork 锚点必须使用官方轮号标记')
   assert.ok(CLIENT_SRC.includes('data-cx-fork'), '应有自家按钮标记防重复注入')
   assert.ok(CLIENT_SRC.includes("querySelectorAll('[' + TURN_ATTR + ']')"), '应按轮号标记扫描消息气泡')
+  assert.ok(CLIENT_SRC.includes("FLOW_KIND_ATTR = 'data-chat-flow-kind'"), '应识别官方气泡语义类型标记')
+  assert.ok(CLIENT_SRC.includes("getAttribute(FLOW_KIND_ATTR) !== 'user'"), '只注入用户输入气泡(官方分支按钮驻留轮尾,语义互补不重叠)')
   assert.ok(CLIENT_SRC.includes('increaseTitle: true'), 'fork 请求应递增子会话标题')
   assert.ok(CLIENT_SRC.includes('observer.disconnect()'), '卸载应断开观察')
   assert.ok(CLIENT_SRC.includes("remote.follow({ address: { kind: 'session', sessionId }"), '锚点必须按会话寻址 follow 开场帧')
   assert.ok(CLIENT_SRC.includes("frame.type === 'snapshot'"), '映射构建必须取自 follow 开场帧')
+  // 图标与官方同源:fill 细路径单 path 形态(官方 IconBranchOutline16)
+  const forkSvgSlice = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function forkSvg('), CLIENT_SRC.indexOf('// 注入按钮标记'))
+  assert.ok(forkSvgSlice.includes("path.setAttribute('fill-rule', 'evenodd')"), 'fork 图标应为官方 fill 细路径形态')
+  assert.ok(forkSvgSlice.includes("svg.setAttribute('stroke'") === false, 'fork 图标不应是自绘描边形态')
 })
 
 // 重试语义:分叉到该轮之前(锚点 = 前一轮 turn/end seq),该轮用户输入回填子会话输入框

@@ -646,29 +646,23 @@ function steerRecallSvg() {
   return svg
 }
 
-// fork 图标 svg(分支:主干 + 分叉枝 + 两个节点圆点,同款描边形态)
+// fork 图标 svg:与官方分支按钮(IconBranchOutline16)同源,fill 细路径形态;
+// path 数据采自官方运行时 DOM,官方图标升级时需同步
 function forkSvg() {
   const namespace = 'http://www.w3.org/2000/svg'
   const svg = document.createElementNS(namespace, 'svg')
+  svg.setAttribute('width', '16')
+  svg.setAttribute('height', '16')
   svg.setAttribute('viewBox', '0 0 16 16')
   svg.setAttribute('fill', 'none')
-  svg.setAttribute('stroke', 'currentColor')
-  svg.setAttribute('stroke-width', '1.5')
-  svg.setAttribute('stroke-linecap', 'round')
-  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
   svg.setAttribute('aria-hidden', 'true')
-  const paths = [
-    'M4.5 6.5v3a2.5 2.5 0 0 0 2.5 2.5h2',
-    'M11.5 5.5a2 2 0 1 0 0-.001',
-    'M4.5 5.5a2 2 0 1 0 0-.001',
-    'M11.5 9.5a2 2 0 1 0 0-.001',
-    'M11.5 9.5V9a3 3 0 0 0-3-3H9',
-  ]
-  for (const d of paths) {
-    const path = document.createElementNS(namespace, 'path')
-    path.setAttribute('d', d)
-    svg.appendChild(path)
-  }
+  const path = document.createElementNS(namespace, 'path')
+  path.setAttribute('fill-rule', 'evenodd')
+  path.setAttribute('clip-rule', 'evenodd')
+  path.setAttribute('fill', 'currentColor')
+  path.setAttribute('d', 'M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z')
+  svg.appendChild(path)
   return svg
 }
 
@@ -681,6 +675,8 @@ const FORK_BTN_FLAG = 'data-cx-fork'
 const STEER_BUBBLE_SELECTOR = '[data-pending-steering]'
 const STEER_ACTIONS_SUFFIX = '[class$="_actions"]'
 const TURN_ATTR = 'data-chat-turn'
+// 官方消息流气泡的语义类型标记:user=用户输入气泡(turn-tail=官方轮尾,官方分支按钮驻留处)
+const FLOW_KIND_ATTR = 'data-chat-flow-kind'
 // fork 锚点窗口:follow 开场帧回溯的事件数上限(长会话全量回溯的内存/耗时护栏;
 // 窗口覆盖不到的更早轮与进行中的轮不注入分叉按钮,新近轮——fork 的主要目标——总在覆盖内)
 const FORK_PAGE_MAX_MESSAGES = 2000
@@ -688,6 +684,9 @@ const FORK_PAGE_MAX_MESSAGES = 2000
 // 重试草稿通道:分叉成功后子会话尚未挂载,原输入先按子会话 id 暂存,
 // 子会话的 dock 挂载(inputActions 就绪)时消费回填并清除
 const pendingForkDrafts = new Map()
+// 草稿消费重查:覆盖 open 切换期间「挂载先于登记」的窗口(单次即可,上限留裕量)
+const FORK_DRAFT_POLL_MS = 400
+const FORK_DRAFT_POLLS = 3
 
 // 取 follow 开场帧(回溯窗口内的事件快照,自带 seq)后立即断开:
 // for-await break 触发 iterator.return,流即关闭,不消费 live 帧
@@ -825,14 +824,22 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, loadTurnEnd
     return () => { disposed = true }
   }, [sessionId])
   // 重试草稿消费:open 切到子会话后本 dock 随之挂载,inputActions 绑定子会话,
-  // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现
+  // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现。
+  // 宿主 open 可能先于点击处登记草稿完成子会话 dock 挂载(实测 ~400ms 切换),
+  // 挂载时草稿未到即空跑一次且依赖不再变化——安排有限次延迟重查兜底
+  const [draftPollTick, setDraftPollTick] = useState(0)
   useEffect(() => {
-    if (sessionId === undefined || !inputActions || typeof inputActions.setDraft !== 'function') return
+    if (sessionId === undefined || !inputActions || typeof inputActions.setDraft !== 'function') return undefined
     const text = pendingForkDrafts.get(sessionId)
-    if (text === undefined) return
+    if (text === undefined) {
+      if (draftPollTick >= FORK_DRAFT_POLLS) return undefined
+      const timer = setTimeout(() => setDraftPollTick(draftPollTick + 1), FORK_DRAFT_POLL_MS)
+      return () => clearTimeout(timer)
+    }
     pendingForkDrafts.delete(sessionId)
     inputActions.setDraft(text)
-  }, [sessionId, inputActions])
+    return undefined
+  }, [sessionId, inputActions, draftPollTick])
   return h(ForkDock, { session, forkSession, turnEnds })
 }
 
@@ -866,6 +873,9 @@ function ForkDock({ session, forkSession, turnEnds }) {
       if (turnEndsRef.current === null) return
       const bubbles = document.querySelectorAll('[' + TURN_ATTR + ']')
       bubbles.forEach((bubble) => {
+        // 只注入用户输入气泡:重写该轮改的是该轮的输入;官方分支按钮已驻留在
+        // 轮尾操作排(含该轮的完整分叉),两者语义互补,位置也不重叠
+        if (bubble.getAttribute(FLOW_KIND_ATTR) !== 'user') return
         const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
         if (!actionsRow) return
         if (actionsRow.querySelector('[' + FORK_BTN_FLAG + ']')) return
@@ -892,7 +902,7 @@ function ForkDock({ session, forkSession, turnEnds }) {
         button.setAttribute(FORK_BTN_FLAG, '')
         // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
         button.className = official.className
-        button.title = '重写该轮:分叉到该轮之前,原输入回填输入框重新编辑'
+        button.title = '重写该轮:分叉到该轮之前,原输入回填输入框重新编辑(官方「在新对话中分支」含该轮,两者互补)'
         button.addEventListener('click', () => {
           const forkSessionFn = forkRef.current
           const current = sessionRef.current
