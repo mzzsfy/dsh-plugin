@@ -50,7 +50,10 @@ function guardedRoute(handler) {
       }
       await handler(req, res)
     } catch (error) {
-      sendJson(res, 400, { error: error && error.message ? error.message : String(error) })
+      // errors 数组(逐条 target:message)随响应透传,GUI 编辑器据此逐条定位
+      const body = { error: error && error.message ? error.message : String(error) }
+      if (Array.isArray(error?.errors)) body.errors = error.errors
+      sendJson(res, 400, body)
     }
   }
 }
