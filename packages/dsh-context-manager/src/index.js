@@ -51,6 +51,8 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('插话撤回图标,低频功能,关闭后撤回图标整体不渲染;变更刷新页面生效'),
   forkEnabled: schemastery.boolean().default(true)
     .description('消息气泡操作排的分叉按钮,关闭后按钮整体不渲染;变更刷新页面生效'),
+  forkAutoResendEnabled: schemastery.boolean().default(false)
+    .description('分叉成功后自动把该轮原输入发送到子会话(重生成语义);关闭时仅回填子会话输入框供编辑重发'),
 })
 
 function sendJson(res, status, payload) {
@@ -76,6 +78,7 @@ function readSettings(ctx) {
     historyEnabled: !value || value.historyEnabled !== false,
     steerRecallEnabled: !value || value.steerRecallEnabled !== false,
     forkEnabled: !value || value.forkEnabled !== false,
+    forkAutoResendEnabled: Boolean(value && value.forkAutoResendEnabled === true),
   }
 }
 
@@ -506,6 +509,31 @@ export function apply(ctx, config) {
           // update 异步落盘后才提交新值:await 保证持久化完成后再读回
           await settings.update(NAMESPACE, { forkEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx).forkEnabled })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 分叉后自动重发启停:默认关(仅回填供编辑);读走 settings,写经 settings.update
+      path: '/api/context/fork-auto-resend-enabled',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { enabled: readSettings(ctx).forkAutoResendEnabled })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const settings = ctx.get('settings')
+          if (!settings) throw new Error('宿主设置服务不可用')
+          await settings.update(NAMESPACE, { forkAutoResendEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx).forkAutoResendEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }

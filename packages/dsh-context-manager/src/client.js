@@ -32,6 +32,9 @@ window.__ModuleLoader__.load({
     }
 
 const CSS = [
+  // 家族版本环:操作排内 ‹n/m›,按钮克隆官方类名自带尺寸,环容器只负责排版与留隙
+  '.cx-family-ring { display:inline-flex; align-items:center; gap:2px; margin:0 2px; opacity:.85; }',
+  '.cx-family-ring > span { font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); min-width:24px; text-align:center; }',
   // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
   '.cx-switch { display:inline-flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer;',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
@@ -125,6 +128,7 @@ const PROMPTS_TOGGLE_URL = '/api/context/prompts/toggle'
 const HISTORY_ENABLED_URL = '/api/context/history-enabled'
 const STEER_ENABLED_URL = '/api/context/steer-recall-enabled'
 const FORK_ENABLED_URL = '/api/context/fork-enabled'
+const FORK_AUTO_RESEND_URL = '/api/context/fork-auto-resend-enabled'
 
 // 请求默认超时:host 被批量解压等同步任务阻塞时路由会迟滞数秒,
 // 无超时则浮层停在「正在读取…」假死;超时按错误抛出,由调用方兜底,
@@ -201,6 +205,48 @@ function forkRetryText(data) {
     .map((block) => block.text)
     .join('\n')
   return text.trim() === '' ? null : text
+}
+
+// 家族谱系投影镜像(与 core.mjs sessionFamilyMap/familyRing 同步维护):
+// 快照行主键为 id、父引用为 parentId(与 RPC wire 的 sessionId/parentSessionId 不同名),
+// 断链视为独立根;环序按 updatedAt 升序
+function sessionFamilyMap(items) {
+  const byId = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = item && item.id
+    if (typeof id === 'string' && id !== '') byId.set(id, item)
+  }
+  const chains = new Map()
+  for (const id of byId.keys()) {
+    const chain = []
+    let cursor = id
+    let root = cursor
+    while (cursor !== undefined) {
+      chain.unshift(cursor)
+      root = cursor
+      const parent = byId.get(cursor)
+      cursor = parent && typeof parent.parentId === 'string' && byId.has(parent.parentId)
+        ? parent.parentId
+        : undefined
+      if (chain.includes(cursor)) break
+    }
+    chains.set(id, { root, chain, item: byId.get(id) })
+  }
+  return chains
+}
+
+function familyRing(chains, sessionId) {
+  const entry = chains instanceof Map ? chains.get(sessionId) : undefined
+  if (!entry) return null
+  const members = [...chains.entries()]
+    .filter(([, value]) => value.root === entry.root)
+    .sort((left, right) => {
+      const at = (record) => (record && record.item && typeof record.item.updatedAt === 'number' ? record.item.updatedAt : 0)
+      return at(left[1]) - at(right[1])
+    })
+    .map(([id]) => id)
+  if (members.length < 2) return null
+  return { index: members.indexOf(sessionId) + 1, total: members.length, members }
 }
 
 function HistoryDock({ session, inputActions }) {
@@ -669,6 +715,8 @@ function forkSvg() {
 // 注入按钮标记:识别自家节点与官方按钮,防止重复注入与误删官方节点
 const STEER_BTN_FLAG = 'data-cx-steer-recall'
 const FORK_BTN_FLAG = 'data-cx-fork'
+// 家族版本环标记:识别自家 ‹n/m› 计数器节点,防重复注入
+const FAMILY_RING_FLAG = 'data-cx-family-ring'
 // 官方 pending steering 气泡的语义标记(官方同构:UserStyleBubble data 属性)与
 // 其操作图标排的 CSS module 类名后缀(哈希前缀随构建漂移,后缀稳定);
 // 消息节点的轮号标记(fork 锚点输入)
@@ -799,12 +847,15 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
 // 轮号无映射 = 该轮未完成,首问无文本(纯图等)= 无法重试,均不注入;
 // 首轮无前锚(宿主 fork 边界必须落在 turn/end 上,复制零事件不可表达),也不注入。
 // 分叉动作经宿主 sessions 服务面 fork+open(与官方 chat 同构),成功 toast 并切换
-function ForkDockWithBootstrap({ session, inputActions, forkSession, loadTurnEnds }) {
+function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSession, openSession, loadFamily, submitPrompt, loadTurnEnds }) {
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
   const loadRef = useRef(loadTurnEnds)
   loadRef.current = loadTurnEnds
+  // 自动重发通道:宿主 prompt 调用经 apply 闭包注入(与 forkSession 同构),ref 取用
+  const submitRef = useRef(null)
+  submitRef.current = submitPrompt
   const [turnEnds, setTurnEnds] = useState(null)
   useEffect(() => {
     if (sessionId === undefined) return undefined
@@ -826,43 +877,65 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, loadTurnEnd
   // 重试草稿消费:open 切到子会话后本 dock 随之挂载,inputActions 绑定子会话,
   // 暂存文本此刻回填;消费即清除。open 失败时暂存保留,用户手动打开子会话仍兑现。
   // 宿主 open 可能先于点击处登记草稿完成子会话 dock 挂载(实测 ~400ms 切换),
-  // 挂载时草稿未到即空跑一次且依赖不再变化——安排有限次延迟重查兜底
+  // 挂载时草稿未到即空跑一次且依赖不再变化——安排有限次延迟重查兜底。
+  // 自动重发(开关开):草稿带 autoSubmit 标记,setDraft 后经 remote.session.prompt
+  // 立即提交原文(重生成语义);prompt 失败仅 toast——文本已在输入框,可手动发送
   const [draftPollTick, setDraftPollTick] = useState(0)
   useEffect(() => {
     if (sessionId === undefined || !inputActions || typeof inputActions.setDraft !== 'function') return undefined
-    const text = pendingForkDrafts.get(sessionId)
-    if (text === undefined) {
+    const draft = pendingForkDrafts.get(sessionId)
+    if (draft === undefined) {
       if (draftPollTick >= FORK_DRAFT_POLLS) return undefined
       const timer = setTimeout(() => setDraftPollTick(draftPollTick + 1), FORK_DRAFT_POLL_MS)
       return () => clearTimeout(timer)
     }
     pendingForkDrafts.delete(sessionId)
+    const text = draft && typeof draft === 'object' ? draft.text : draft
+    const autoSubmit = Boolean(draft && typeof draft === 'object' && draft.autoSubmit === true)
     inputActions.setDraft(text)
+    if (autoSubmit && submitRef.current) {
+      Promise.resolve(submitRef.current({ sessionId, text })).catch((error) => {
+        toast('自动重发失败,文本已在输入框可手动发送: ' + String(error && error.message || error), { kind: 'error' })
+      })
+    }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
-  return h(ForkDock, { session, forkSession, turnEnds })
+  return h(ForkDock, { session, forkSession, cancelSession, openSession, loadFamily, turnEnds })
 }
 
-function ForkDock({ session, forkSession, turnEnds }) {
+function ForkDock({ session, forkSession, cancelSession, openSession, loadFamily, turnEnds }) {
   const [enabled, setEnabled] = useState(true)
+  const [autoResend, setAutoResend] = useState(false)
   const turnEndsRef = useRef(null)
   const forkRef = useRef(null)
+  const cancelRef = useRef(null)
+  const familyRef = useRef(null)
+  const openRef = useRef(null)
   const sessionRef = useRef(null)
   const enabledRef = useRef(true)
+  const autoResendRef = useRef(false)
   useEffect(() => {
     api(FORK_ENABLED_URL)
       .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => {})
+    api(FORK_AUTO_RESEND_URL)
+      .then((payload) => setAutoResend(Boolean(payload && payload.enabled === true)))
       .catch(() => {})
   }, [])
   // 条件 return 之前同步全部 ref:停用与映射置空窗口内 scan 门控也要看到最新值,
   // 否则旧会话的映射会继续服务新 DOM(轮号跨会话重叠,锚点错位)
   enabledRef.current = enabled
+  autoResendRef.current = autoResend
   turnEndsRef.current = turnEnds
   forkRef.current = forkSession
+  cancelRef.current = cancelSession
+  familyRef.current = loadFamily
+  openRef.current = openSession
   sessionRef.current = session
   useEffect(() => {
     function removeAll() {
       document.querySelectorAll('[' + FORK_BTN_FLAG + ']').forEach((button) => button.remove())
+      document.querySelectorAll('[' + FAMILY_RING_FLAG + ']').forEach((node) => node.remove())
     }
     function scan() {
       // 停用即不注入并移除已注入按钮(开关可在挂载后才到达停用值)
@@ -884,14 +957,17 @@ function ForkDock({ session, forkSession, turnEnds }) {
         if (rawTurn === null || rawTurn.trim() === '') return
         const turn = Number(rawTurn)
         if (!Number.isInteger(turn)) return
-        // 重试资格三查:映射缺失的轮(进行中/超窗口)不可分叉;首轮无前锚(宿主
+        // 重试资格三查:映射缺失的轮(超窗口)不可分叉;首轮无前锚(宿主
         // fork 边界必须落在 turn/end,复制零事件不可表达);无首问文本(纯图等)
-        // 回填无从谈起。按钮在场即暗示可用,禁用态文案无法区分成因,不注入即误导
+        // 回填无从谈起。open=true 的进行中轮 turn/end 未落账,同样可分叉——
+        // 锚点取其前一个闭合轮,该轮未完成的回复分叉后停掉(见点击处理器)。
+        // 按钮在场即暗示可用,禁用态文案无法区分成因,不注入即误导
         const entry = turnEndsRef.current.get(turn)
         if (entry === undefined || entry.text === null) return
         let previous = null
         for (const key of turnEndsRef.current.keys()) {
-          if (key < turn && (previous === null || key > previous)) previous = key
+          const candidate = turnEndsRef.current.get(key)
+          if (key < turn && candidate && candidate.seq !== null && (previous === null || key > previous)) previous = key
         }
         if (previous === null) return
         const anchor = turnEndsRef.current.get(previous)
@@ -902,9 +978,13 @@ function ForkDock({ session, forkSession, turnEnds }) {
         button.setAttribute(FORK_BTN_FLAG, '')
         // 克隆官方按钮类名:尺寸/hover/悬停显隐(reveal)全部原生
         button.className = official.className
-        button.title = '重写该轮:分叉到该轮之前,原输入回填输入框重新编辑(官方「在新对话中分支」含该轮,两者互补)'
+        button.title = entry.open
+          ? '重写该轮(进行中):分叉到该轮之前,原输入回填输入框重新编辑;分叉后停止本会话该轮未完成的回复'
+          : '重写该轮:分叉到该轮之前,原输入回填输入框重新编辑(官方「在新对话中分支」含该轮,两者互补)'
         button.addEventListener('click', () => {
           const forkSessionFn = forkRef.current
+          const cancelSessionFn = cancelRef.current
+          const autoResendOn = autoResendRef.current
           const current = sessionRef.current
           const currentEntry = turnEndsRef.current === null ? undefined : turnEndsRef.current.get(turn)
           const previousEntry = turnEndsRef.current === null || previous === null ? undefined : turnEndsRef.current.get(previous)
@@ -915,8 +995,17 @@ function ForkDock({ session, forkSession, turnEnds }) {
           forkSessionFn({ sessionId: current.sessionId, atSeq: previousEntry.seq, increaseTitle: true })
             .then((childId) => {
               // 暂存先于 toast:open 的子会话挂载可能紧随 resolve,回填承诺必须先就位;
-              // open 失败时暂存保留,用户手动打开子会话仍兑现
-              if (typeof childId === 'string' && childId !== '') pendingForkDrafts.set(childId, currentEntry.text)
+              // open 失败时暂存保留,用户手动打开子会话仍兑现;
+              // 自动重发开关开:登记带标记草稿,子会话消费时回填后经 prompt 提交
+              if (typeof childId === 'string' && childId !== '') {
+                pendingForkDrafts.set(childId, { text: currentEntry.text, autoSubmit: autoResendOn })
+              }
+              // 进行中轮分叉后原会话该轮无人再读,停掉止损;失败不影响分叉成功事实
+              if (currentEntry.open === true && typeof cancelSessionFn === 'function') {
+                Promise.resolve(cancelSessionFn({ sessionId: current.sessionId })).catch((error) => {
+                  console.warn('[context-manager] 分叉后停止原会话进行中回复失败', error)
+                })
+              }
               toast('已分叉,原输入已填入子会话输入框')
               return childId
             })
@@ -928,6 +1017,58 @@ function ForkDock({ session, forkSession, turnEnds }) {
         button.appendChild(forkSvg())
         actionsRow.appendChild(button)
       })
+      // 家族版本环:每个用户气泡操作排的 ‹n/m›,箭头在家族成员间跳转;
+      // 单成员家族/快照面缺失不注入(与官方按钮并存,hover 显隐一致)
+      const loadFamilyFn = familyRef.current
+      const ring = (sessionRef.current && typeof loadFamilyFn === 'function')
+        ? loadFamilyFn(sessionRef.current.sessionId)
+        : null
+      if (ring && ring.total >= 2) {
+        bubbles.forEach((bubble) => {
+          if (bubble.getAttribute(FLOW_KIND_ATTR) !== 'user') return
+          const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
+          if (!actionsRow || actionsRow.querySelector('[' + FAMILY_RING_FLAG + ']')) return
+          const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + ']):not([' + STEER_BTN_FLAG + '])')
+          if (!official) return
+          const ringEl = document.createElement('span')
+          ringEl.setAttribute(FAMILY_RING_FLAG, '')
+          ringEl.className = official.className + ' cx-family-ring'
+          ringEl.title = '家族版本:本会话在同源分叉家族中的序位,‹ › 在各版本间切换'
+          const prev = document.createElement('button')
+          prev.type = 'button'
+          prev.className = official.className
+          prev.setAttribute(FAMILY_RING_FLAG, '')
+          prev.textContent = '‹'
+          prev.title = '上一个家族版本'
+          prev.addEventListener('click', () => jumpFamilyMember(-1))
+          const label = document.createElement('span')
+          label.setAttribute(FAMILY_RING_FLAG, '')
+          label.textContent = ring.index + '/' + ring.total
+          const next = document.createElement('button')
+          next.type = 'button'
+          next.className = official.className
+          next.setAttribute(FAMILY_RING_FLAG, '')
+          next.textContent = '›'
+          next.title = '下一个家族版本'
+          next.addEventListener('click', () => jumpFamilyMember(1))
+          ringEl.appendChild(prev)
+          ringEl.appendChild(label)
+          ringEl.appendChild(next)
+          actionsRow.appendChild(ringEl)
+        })
+      }
+    }
+    function jumpFamilyMember(offset) {
+      const loadFamilyFn = familyRef.current
+      const openFn = openRef.current
+      const current = sessionRef.current
+      if (!current || typeof loadFamilyFn !== 'function' || typeof openFn !== 'function') return
+      const ring = loadFamilyFn(current.sessionId)
+      if (!ring) return
+      const nextIndex = ring.index - 1 + offset
+      if (nextIndex < 0 || nextIndex >= ring.members.length) return
+      const target = ring.members[nextIndex]
+      if (target && target !== current.sessionId) openFn(target)
     }
     if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return undefined
     const scanRef = { current: scan }
@@ -949,7 +1090,8 @@ function ForkDock({ session, forkSession, turnEnds }) {
 // 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
 const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
 const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
-const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮、首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
+const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
+const FORK_AUTO_RESEND_SWITCH_TITLE = '分叉成功后自动把该轮原输入发送到子会话立即开跑(重生成语义,相当于原输入重跑一遍);关闭时分叉仅把原输入回填子会话输入框,由你编辑后再手动发送。'
 
 // 启停开关行工厂:三个开关同构(受控 checkbox + cx-switch 形态),值存宿主 settings,
 // 切换经本插件路由中转,变更刷新页面生效
@@ -987,14 +1129,16 @@ function switchRow(url, label, title, okText) {
 const HistorySwitchRow = switchRow(HISTORY_ENABLED_URL, '历史输入浮层(Alt+↑)', HISTORY_SWITCH_TITLE, '历史输入浮层')
 const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH_TITLE, '插话撤回')
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
+const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
 
-// 「会话上下文」设置分区:三个启停开关行
+// 「会话上下文」设置分区:四个启停开关行
 function ContextPanel() {
   return h('div', { className: 'cx-panel' },
     h('span', { className: 'cx-panel__hint' }, '历史输入、插话撤回与对话分叉的启停;变更刷新页面生效。'),
     h(HistorySwitchRow),
     h(SteerSwitchRow),
     h(ForkSwitchRow),
+    h(ForkAutoResendSwitchRow),
   )
 }
 
@@ -1006,7 +1150,7 @@ function ContextPanel() {
       apply(ctx) {
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
-        const remoteSession = ctx.remote.session
+        const remoteSession = ctx.remote ? ctx.remote.session : undefined
         // 分叉动作通道:fork 成功即打开子会话;open 失败不影响分叉成功的事实,
         // 单独吞掉(警告日志),点击处不再误报「分叉失败」
         const forkService = (sessions && typeof sessions.fork === 'function' && typeof sessions.open === 'function')
@@ -1020,6 +1164,32 @@ function ContextPanel() {
             }
             return childId
           })
+          : null
+
+        // 家族环通道:会话列表快照(parentSessionId 字段)投影为当前会话的 ‹n/m› 计数;
+        // 快照面缺失(旧宿主)时返回 null,计数器整体不注入
+        const loadFamily = (sessionId) => {
+          if (!sessions || !sessions.list || typeof sessions.list.getSnapshot !== 'function') return null
+          const snapshot = sessions.list.getSnapshot()
+          const rows = snapshot && snapshot.byId
+            ? (Array.isArray(snapshot.ids) ? snapshot.ids : []).map((id) => snapshot.byId[id]).filter(Boolean)
+            : (Array.isArray(snapshot) ? snapshot : [])
+          if (rows.length === 0) return null
+          return familyRing(sessionFamilyMap(rows), sessionId)
+        }
+
+        // 自动重发通道:开启开关时分叉后以该轮原输入 prompt 子会话;
+        // remote.session 缺失或缺 prompt(旧宿主/部分 stub)时返回 null,降级为仅回填;
+        // 请求形态与官方 client face 同源:content 为 text 分段数组(宿主 hasPromptContent
+        // 校验),mode=queue(无进行中轮即直接开跑),clientTimeZone 随本地时区
+        const submitPrompt = (remoteSession && typeof remoteSession.prompt === 'function')
+          ? ({ sessionId: targetId, text }) => remoteSession.prompt({
+              requestId: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()),
+              sessionId: targetId,
+              mode: 'queue',
+              content: [{ type: 'text', text }],
+              clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            })
           : null
 
         // 样式挂载在宿主文档级:设置页未打开时面板不存在,
@@ -1088,10 +1258,18 @@ function ContextPanel() {
                   order: 24,
                   inject: (sessionId) => ({
                     forkSession: forkService,
+                    cancelSession: (typeof remoteSession.cancel === 'function')
+                      ? (opts) => remoteSession.cancel(opts)
+                      : null,
+                    openSession: (sessions && typeof sessions.open === 'function') ? (id) => sessions.open(id) : null,
+                    loadFamily: () => loadFamily(sessionId),
+                    submitPrompt,
                     loadTurnEnds: () => followOpening(remoteSession, sessionId).then((records) => {
-                      // 轮号 → { 结束 seq, 该轮首问文本 }:上个 turn/end 之后首条
+                      // 轮号 → { 结束 seq, 该轮首问文本, open }:上个 turn/end 之后首条
                       // 携带非空文本的 user 本人消息即该轮首问(轮内纯图消息跳过,
-                      // 后续文本插话可补位),turn/end 落账并重置;
+                      // 后续文本插话可补位);turn/end 落账并重置;
+                      // 流末尾文本已累积而无 turn/end 的轮是进行中轮:seq=null +
+                      // open=true 登记(分叉锚点取其前一个闭合轮,分叉后可停原会话);
                       // data 缺 turn 号时按出现顺序计数
                       const map = new Map()
                       let ordered = 0
@@ -1105,9 +1283,13 @@ function ContextPanel() {
                         }
                         if (event.type !== 'turn/end') continue
                         const turn = event.data && Number.isInteger(event.data.turn) ? event.data.turn : ordered
-                        map.set(turn, { seq: event.seq, text: turnText })
+                        map.set(turn, { seq: event.seq, text: turnText, open: false })
                         turnText = null
                         ordered += 1
+                      }
+                      if (turnText !== null) {
+                        const turn = map.size > 0 ? Math.max(...map.keys()) + 1 : 0
+                        map.set(turn, { seq: null, text: turnText, open: true })
                       }
                       return map
                     }),

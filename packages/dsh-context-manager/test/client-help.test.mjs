@@ -13,6 +13,7 @@ test('源码契约:三项设置的悬停说明齐备且挂到对应控件', () =
     HISTORY_SWITCH_TITLE: '历史输入浮层开关',
     STEER_SWITCH_TITLE: '插话撤回开关',
     FORK_SWITCH_TITLE: '对话 fork 开关',
+    FORK_AUTO_RESEND_SWITCH_TITLE: '分叉后自动重发开关',
   }
   for (const [name, label] of Object.entries(TITLES)) {
     assert.ok(CLIENT_SRC.includes('const ' + name + ' ='), '缺悬停说明常量 ' + name)
@@ -21,6 +22,7 @@ test('源码契约:三项设置的悬停说明齐备且挂到对应控件', () =
     { constant: 'HISTORY_SWITCH_TITLE', text: "'历史输入浮层(Alt+↑)'", label: TITLES.HISTORY_SWITCH_TITLE },
     { constant: 'STEER_SWITCH_TITLE', text: "'插话撤回'", label: TITLES.STEER_SWITCH_TITLE },
     { constant: 'FORK_SWITCH_TITLE', text: "'对话 fork'", label: TITLES.FORK_SWITCH_TITLE },
+    { constant: 'FORK_AUTO_RESEND_SWITCH_TITLE', text: "'分叉后自动重发'", label: TITLES.FORK_AUTO_RESEND_SWITCH_TITLE },
   ]
   for (const { constant, text, label } of rowAnchors) {
     // 限定长度的跨行窗口而非单行 [^\n]*:合法的多行格式化(prettier)不误报,
@@ -36,10 +38,13 @@ test('源码契约:悬停说明覆盖各设置的关键行为语义', () => {
   assert.ok(CLIENT_SRC.includes('←/→ 切换范围'), '历史说明缺范围切换语义')
   assert.ok(CLIENT_SRC.includes('刷新页面生效'), '开关说明缺刷新生效提示')
   assert.ok(CLIENT_SRC.includes('含附件的插话不可撤回'), '撤回说明缺附件限制')
-  assert.ok(CLIENT_SRC.includes('进行中的轮、首轮'), 'fork 说明缺进行中轮与首轮限制')
+  assert.ok(CLIENT_SRC.includes('进行中的轮(回复尚未完成)'), 'fork 说明缺进行中轮可分叉语义')
+  assert.ok(CLIENT_SRC.includes('停止本会话该轮未完成的回复'), 'fork 说明缺进行中轮分叉后止损语义')
   assert.ok(CLIENT_SRC.includes('无文本输入的轮'), 'fork 说明缺纯图等无文本轮限制')
   assert.ok(CLIENT_SRC.includes('回填子会话输入框'), 'fork 说明缺重试回填语义')
   assert.ok(CLIENT_SRC.includes('尾号递增'), 'fork 说明缺标题递增语义')
+  assert.ok(CLIENT_SRC.includes('重生成语义'), '自动重发说明缺重生成语义')
+  assert.ok(CLIENT_SRC.includes('家族版本'), '计数器说明缺家族版本语义')
 })
 
 // 搜索功能源码契约:query 双写 + 组合输入守卫 + 命中计数 + 两级 Esc

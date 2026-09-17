@@ -144,3 +144,54 @@ export function forkRetryText(data) {
     .join('\n')
   return text.trim() === '' ? null : text
 }
+
+/**
+ * 家族谱系投影:按 parentSessionId 把会话行组装成「根 → 后代」链,
+ * parentSessionId 断链(引用的父不在集合内)的行视为独立根。
+ * @param items - sessions.list 行数组(至少含 sessionId/parentSessionId)
+ * @returns Map<sessionId, { root, chain: string[] }>——chain 为根到自身的 id 序列
+ */
+export function sessionFamilyMap(items) {
+  const byId = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = item && (item.sessionId ?? item.id)
+    if (typeof id === 'string' && id !== '') byId.set(id, item)
+  }
+  const chains = new Map()
+  for (const id of byId.keys()) {
+    const chain = []
+    let cursor = id
+    let root = cursor
+    while (cursor !== undefined) {
+      chain.unshift(cursor)
+      root = cursor
+      const parent = byId.get(cursor)
+      cursor = parent && typeof parent.parentSessionId === 'string' && byId.has(parent.parentSessionId)
+        ? parent.parentSessionId
+        : undefined
+      if (chain.includes(cursor)) break
+    }
+    chains.set(id, { root, chain, item: byId.get(id) })
+  }
+  return chains
+}
+
+/**
+ * 家族环计数:某会话在所属家族中的序位与成员数(按 updatedAt 升序,与分叉先后一致)。
+ * 单成员家族返回 null(不渲染计数器)。
+ * @param chains - sessionFamilyMap 的结果
+ * @param sessionId - 目标会话
+ */
+export function familyRing(chains, sessionId) {
+  const entry = chains instanceof Map ? chains.get(sessionId) : undefined
+  if (!entry) return null
+  const members = [...chains.entries()]
+    .filter(([, value]) => value.root === entry.root)
+    .sort((left, right) => {
+      const at = (record) => (record && record.item && typeof record.item.updatedAt === 'number' ? record.item.updatedAt : 0)
+      return at(left[1]) - at(right[1])
+    })
+    .map(([id]) => id)
+  if (members.length < 2) return null
+  return { index: members.indexOf(sessionId) + 1, total: members.length, members }
+}

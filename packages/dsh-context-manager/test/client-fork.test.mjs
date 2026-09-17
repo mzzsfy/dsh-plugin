@@ -143,9 +143,9 @@ test('Given loadTurnEnds, Then 轮映射按 data.turn 登记结束 seq 与该轮
   const props = entry.options.inject('s1')
   const map = await props.loadTurnEnds()
   assert.ok(map instanceof Map)
-  assert.deepEqual(map.get(0), { seq: 4, text: '第一问' })
-  assert.deepEqual(map.get(1), { seq: 9, text: '第二问' }, 'data 无 turn 号按出现顺序计数')
-  assert.deepEqual(map.get(5), { seq: 20, text: null }, '无用户文本的轮 text 为 null')
+  assert.deepEqual(map.get(0), { seq: 4, text: '第一问', open: false })
+  assert.deepEqual(map.get(1), { seq: 9, text: '第二问', open: false }, 'data 无 turn 号按出现顺序计数')
+  assert.deepEqual(map.get(5), { seq: 20, text: null, open: false }, '无用户文本的轮 text 为 null')
   assert.equal(map.size, 3)
 })
 
@@ -199,7 +199,7 @@ test('ForkDock 注入契约:轮号锚点属性、按钮标记、防重标记与�
 test('ForkDock 重试契约:锚点前移取前一轮、pending 草稿通道、子会话挂载回填齐备', () => {
   assert.ok(CLIENT_SRC.includes("boundary.seq + 1") === false, '不应复刻宿主实现细节')
   assert.ok(CLIENT_SRC.includes('atSeq: previousEntry.seq'), 'fork 请求锚点必须是前一轮(重试该轮本身不带入)')
-  assert.ok(CLIENT_SRC.includes('pendingForkDrafts.set(childId, currentEntry.text)'), 'fork resolve 后必须按子会话 id 登记该轮首问')
+  assert.ok(CLIENT_SRC.includes('pendingForkDrafts.set(childId, { text: currentEntry.text, autoSubmit: autoResendOn })'), 'fork resolve 后必须按子会话 id 登记该轮首问(autoSubmit 跟随开关)')
   assert.ok(CLIENT_SRC.includes('pendingForkDrafts.get(sessionId)'), '子会话挂载应按会话 id 消费草稿')
   assert.ok(CLIENT_SRC.includes('pendingForkDrafts.delete(sessionId)'), '草稿消费后应清除')
   assert.ok(CLIENT_SRC.includes('inputActions.setDraft(text)'), '回填必须经宿主 inputActions.setDraft')
