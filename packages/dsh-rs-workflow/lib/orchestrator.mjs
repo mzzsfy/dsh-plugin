@@ -5,7 +5,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { gate } from './planner-gate.mjs'
 import { validateTemplate } from './template.mjs'
 import { startRun, buildSeed } from './driver/index.mjs'
-import { registry, registerInitiator, unregisterInitiator } from './driver/control.mjs'
+import { registry, registerInitiator, unregisterInitiator, registerResumer } from './driver/control.mjs'
 import { reportStore } from './store.mjs'
 import { loadJson } from './storage.mjs'
 import { normalizeConfig } from './settings-schema.mjs'
@@ -98,6 +98,16 @@ export function registerOrchestrator(ctx, config) {
       if (currentRunId(agent) === runId) activeRuns.delete(agentIdOf(agent))
     }
 
+    // 段拉起挂靠:页签裁决受理后 board 经此回到本域拉下一段(幂等:活跃段不重拉);点位与 initiator 挂靠一致
+    function ensureResumer(agent) {
+      registerResumer(agentIdOf(agent), (runId) => {
+        const driver = registry.drivers.get(runId)
+        if (driver === undefined || driver.active) return false
+        startSegmentJob(agent, driver)
+        return true
+      })
+    }
+
     const tools = [
       defineTool({
         name: 'rs_workflow_start',
@@ -175,6 +185,7 @@ export function registerOrchestrator(ctx, config) {
           activeRuns.set(agentIdOf(agent), driver.runId)
           // 断点续跑挂靠:本会话 agent 成为推进器,board resume-from 据此重建种子 run
           registerInitiator(agentIdOf(agent), (record, fromStepId, inputs) => startSeedRun(agent, record, fromStepId, inputs))
+          ensureResumer(agent)
           startSegmentJob(agent, driver)
           return { ok: true, runId: driver.runId, status: driver.state.status }
         },
@@ -199,6 +210,7 @@ export function registerOrchestrator(ctx, config) {
           // 唤醒轮挂靠:主循环任一唤醒轮必先 status,借机注册断点续跑推进器(进程重启后表空,
           // 页签 resume-from 恰是重启中断的唯一恢复路径,不能依赖 start/resume 才有挂靠)
           registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          ensureResumer(exec.agent)
           const driver = registry.drivers.get(runId)
           const steps = {}
           for (const [id, s] of Object.entries(record.state?.steps ?? {})) {
@@ -261,6 +273,7 @@ export function registerOrchestrator(ctx, config) {
           }
           startSegmentJob(exec.agent, driver)
           registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          ensureResumer(exec.agent)
           return { ok: true, runId: args.runId, status: record.status }
         },
       }),
@@ -356,6 +369,7 @@ export function registerOrchestrator(ctx, config) {
           }
           // 唤醒轮挂靠兜底:重启后 initiator 表空,续跑前借本调用重注册(status/resume 同款)
           registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          ensureResumer(exec.agent)
           const outcome = startSeedRun(exec.agent, record, args.fromStepId, args.inputs)
           if (!outcome.ok) return { ok: false, error: outcome.error }
           return { ok: true, runId: outcome.runId, hint: '旧 run 未消费的纠偏消息不带入新 run;rs_workflow_status 跟踪推进' }

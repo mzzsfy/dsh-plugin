@@ -2,7 +2,7 @@
 // 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
 import { reportStore, ACTIVE_STATES } from './store.mjs'
-import { registry, post, initiatorOf } from './driver/control.mjs'
+import { registry, post, initiatorOf, resumerOf } from './driver/control.mjs'
 import { validateTemplate, validateTemplateSet } from './template.mjs'
 import { releaseFlowTemplate, unreleaseFlowTemplate, releasedTemplateIds } from './release.mjs'
 import { SPEC_TEXT } from './spec.mjs'
@@ -187,6 +187,7 @@ const isRunActive = (runId, record) => registry.drivers.has(runId) || (record &&
 export function handleControl(body) {
   const runId = typeof body.runId === 'string' ? body.runId : ''
   const kind = typeof body.kind === 'string' ? body.kind : ''
+  const store = reportStore()
   if (!CONTROL_KINDS.includes(kind)) throw new Error('kind 须为 ' + CONTROL_KINDS.join('|'))
   if (kind === 'message') {
     if (typeof body.text !== 'string' || body.text.trim() === '') throw new Error('message 须携带非空 text')
@@ -198,9 +199,12 @@ export function handleControl(body) {
     if (!CONTROL_BY.has(body.by)) throw new Error('裁决须携带 by(user|main-agent)')
     if (body.by === 'main-agent' && (typeof body.reason !== 'string' || body.reason.trim() === '')) throw new Error('代审(main-agent)须携带非空 reason')
     const accepted = post(runId, { kind, by: body.by, reason: typeof body.reason === 'string' ? body.reason : '' })
-    return { ok: accepted }
+    if (!accepted) return { ok: false }
+    // 裁决翻状态不推进:无活跃段时经会话挂靠拉下一段(页签先裁场景主循环无通知,须代为唤醒)
+    const record = store.get(runId)
+    const resumed = resumerOf(record?.sessionId)?.(runId) === true
+    return { ok: true, resumed }
   }
-  const store = reportStore()
   const driver = registry.drivers.get(runId)
   if (!driver) return { ok: false }
   if (kind === 'cancel') {

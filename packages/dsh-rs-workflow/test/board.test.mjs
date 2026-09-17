@@ -1,10 +1,18 @@
 // board 运行时路由 BDD(v5):control 裁决校验/UTF-8 全链路/守卫语义;薄 mock 宿主起真 HTTP 服务
-import { test } from 'node:test'
+// store 走真实单例(裁决分支读 sessionId),故全程 DSH_RS_WORKFLOW_DATA_DIR 指临时目录防污染
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { registerBoardRoutes } from '../lib/board.mjs'
-import { registry, unregisterDriver } from '../lib/driver/control.mjs'
+import { registry, unregisterDriver, registerResumer, unregisterResumer } from '../lib/driver/control.mjs'
+import { reportStore } from '../lib/store.mjs'
+
+process.env.DSH_RS_WORKFLOW_DATA_DIR = mkdtempSync(join(tmpdir(), 'rsww-board-'))
+const cleanDataDir = () => rmSync(process.env.DSH_RS_WORKFLOW_DATA_DIR, { recursive: true, force: true })
 
 // 薄 mock 宿主:ctx.inject 注入 webServer 依赖,webServer.register 收集 handler,effect 立即执行;真 http server 分发
 async function startBoard() {
@@ -28,9 +36,11 @@ const postJson = (base, path, body) => fetch(base + path, {
   body: JSON.stringify(body),
 })
 
-// 桩 driver:注册进 registry,handlePost 回显受理(control 裁决通路走 post(runId, event))
-function stubDriver(runId) {
+// 桩 driver:注册进 registry,handlePost 回显受理(control 裁决通路走 post(runId, event));
+// 同步向真实 store 注入 run 记录(handleControl 裁决分支要读 sessionId)
+function stubDriver(runId, sessionId = 'session-stub') {
   const received = []
+  reportStore().start({ runId, sessionId, request: 'R', templateId: 't' })
   registry.drivers.set(runId, {
     handlePost: (event) => { received.push(event); return true },
     cancel: () => {}, pause: () => {}, tabResume: () => false,
@@ -42,6 +52,8 @@ test('Given board/release 模块 When 加载 Then import 图完整无缺失依�
   assert.ok(true)
 })
 
+after(() => cleanDataDir())
+
 test('Given UTF-8 中文裁决(页签驳回带意见) When POST control Then 受理且 reason 全文无损', async () => {
   const board = await startBoard()
   const stub = stubDriver('r-board-1')
@@ -49,7 +61,7 @@ test('Given UTF-8 中文裁决(页签驳回带意见) When POST control Then 受
     const reason = '口径偏差:需含「验收口径」节——中文标点与引号"测试"'
     const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-1', kind: 'reject', by: 'user', reason })
     assert.equal(res.status, 200)
-    assert.deepEqual(await res.json(), { ok: true })
+    assert.deepEqual(await res.json(), { ok: true, resumed: false })
     assert.deepEqual(stub.received, [{ kind: 'reject', by: 'user', reason }])
   } finally {
     stub.dispose()
@@ -63,7 +75,7 @@ test('Given 页签裁决缺省 reason When POST control reject by=user Then 受�
   try {
     const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-2', kind: 'reject', by: 'user' })
     assert.equal(res.status, 200)
-    assert.deepEqual(await res.json(), { ok: true })
+    assert.deepEqual(await res.json(), { ok: true, resumed: false })
     assert.deepEqual(stub.received, [{ kind: 'reject', by: 'user', reason: '' }])
   } finally {
     stub.dispose()
@@ -79,6 +91,37 @@ test('Given 代审缺 reason When POST control Then 400 且错误可见', async 
     assert.equal(res.status, 400)
     const body = await res.json()
     assert.ok(body.error.includes('reason'))
+  } finally {
+    stub.dispose()
+    await board.close()
+  }
+})
+
+test('Given 页签裁决受理且无活跃段 When POST control Then 按会话挂靠拉起下一段(一次)', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-4', 'session-4')
+  const pulls = []
+  registry.drivers.get('r-board-4').active = false
+  registerResumer('session-4', (runId) => { pulls.push(runId); return true })
+  try {
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-4', kind: 'reject', by: 'user', reason: '重做' })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, resumed: true })
+    assert.deepEqual(pulls, ['r-board-4'])
+  } finally {
+    unregisterResumer('session-4')
+    stub.dispose()
+    await board.close()
+  }
+})
+
+test('Given 无会话挂靠(重启后) When 页签裁决 Then 受理但不拉段,响应 resumed:false', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-5')
+  try {
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-5', kind: 'approve', by: 'user' })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, resumed: false })
   } finally {
     stub.dispose()
     await board.close()
