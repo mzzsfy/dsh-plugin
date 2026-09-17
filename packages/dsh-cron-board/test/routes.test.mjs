@@ -465,9 +465,9 @@ test('cron preview 路由:人话摘要与下三次触发', async (t) => {
   const { api } = await makeApi(t)
   // When 预览「每天 08:30」
   const ok = await call(api, 'POST', '/api/cron-board/cron/preview', { schedule: '30 8 * * *' })
-  // Then 摘要含每天与时刻,三次触发时间戳齐备
+  // Then 摘要含每天与时刻并带宿主时区尾注,三次触发时间戳齐备
   assert.equal(ok.status, 200)
-  assert.equal(ok.payload.summary, '每天 08:30')
+  assert.match(ok.payload.summary, /^每天 08:30\(宿主 UTC[+-]\d/)
   assert.equal(ok.payload.nextAt.length, 3)
   assert.ok(ok.payload.nextAt.every((value) => typeof value === 'number' && value > Date.now()))
   // When 非法表达式
@@ -475,6 +475,33 @@ test('cron preview 路由:人话摘要与下三次触发', async (t) => {
   // Then 400 中文报错
   assert.equal(bad.status, 400)
   assert.match(bad.payload.error, /cron/i)
+})
+
+test('jobs 与 preview 路由:时区后缀表达式的调度与校验', async (t) => {
+  const { api } = await makeApi(t)
+  // Given 带 T+8 后缀的任务
+  const created = await call(api, 'POST', '/api/cron-board/jobs', { name: 'tz', kind: 'shell', command: 'x', schedule: '0 9 * * *T+8' })
+  assert.equal(created.status, 200)
+  // Then 默认触发点按东八区 9:00(01:00Z),与宿主自身时区无关
+  assert.equal(new Date(created.payload.nextRunAt).toISOString().slice(11, 16), '01:00')
+  // When 非法后缀创建任务
+  const bad = await call(api, 'POST', '/api/cron-board/jobs', { name: 'tz2', kind: 'shell', command: 'x', schedule: '0 9 * * *T+15' })
+  // Then 400 且报后缀不合法
+  assert.equal(bad.status, 400)
+  assert.match(bad.payload.error, /时区后缀不合法/)
+  // When 带后缀预览
+  const preview = await call(api, 'POST', '/api/cron-board/cron/preview', { schedule: '30 8 * * *T+8' })
+  // Then 摘要尾注与触发点均为东八区语义
+  assert.equal(preview.status, 200)
+  assert.equal(preview.payload.summary, '每天 08:30(UTC+8)')
+  assert.equal(new Date(preview.payload.nextAt[0]).toISOString().slice(11, 16), '00:30')
+})
+
+test('status 路由:暴露宿主时区偏移 serverTzOffset', async (t) => {
+  const { api } = await makeApi(t)
+  const res = await call(api, 'GET', '/api/cron-board/status')
+  assert.equal(res.status, 200)
+  assert.equal(typeof res.payload.serverTzOffset, 'number')
 })
 
 test('runs 路由:无参数查全量,带 jobId 查单任务', async (t) => {

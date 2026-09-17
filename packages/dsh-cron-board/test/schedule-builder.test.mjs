@@ -102,6 +102,54 @@ test('字段越界数值反解归 custom,不猜修正', () => {
   assert.equal(parseSchedule('* 9 * * *').freq, 'custom')
 })
 
+test('时区后缀:反解与回写 T+N', () => {
+  const state = parseSchedule('0 9 * * *T+8')
+  assert.equal(state.freq, 'daily')
+  assert.equal(state.hour, 9)
+  assert.equal(state.timezone, 8)
+  assert.equal(buildSchedule(state), '0 9 * * *T+8')
+})
+
+test('时区后缀:无后缀反解 timezone 为 null,回写不附加', () => {
+  const state = parseSchedule('30 8 * * *')
+  assert.equal(state.timezone, null)
+  assert.equal(buildSchedule(state), '30 8 * * *')
+})
+
+test('时区后缀:interval 与工作日形态同样携带', () => {
+  const interval = parseSchedule('*/30 * * * *T+0')
+  assert.equal(interval.freq, 'interval')
+  assert.equal(interval.timezone, 0)
+  assert.equal(buildSchedule(interval), '*/30 * * * *T+0')
+  const weekdays = parseSchedule('0 9 * * 1-5T-5')
+  assert.equal(weekdays.freq, 'weekdays')
+  assert.equal(weekdays.timezone, -5)
+  assert.equal(buildSchedule(weekdays), '0 9 * * 1-5T-5')
+})
+
+test('时区后缀:非法后缀反解 custom 且原文保留,不抛', () => {
+  const state = parseSchedule('0 9 * * *T+15')
+  assert.equal(state.freq, 'custom')
+  assert.equal(state.expression, '0 9 * * *T+15')
+  assert.equal(state.timezone, null)
+})
+
+test('时区后缀:custom 合法后缀剥离存储,回写统一附加', () => {
+  const state = parseSchedule('0 9 * * * 2026T+8')
+  assert.equal(state.freq, 'custom')
+  assert.equal(state.expression, '0 9 * * * 2026')
+  assert.equal(state.timezone, 8)
+  assert.equal(buildSchedule(state), '0 9 * * * 2026T+8')
+})
+
+test('时区后缀:createScheduleState 默认无后缀,置空回写不带后缀', () => {
+  const state = createScheduleState('')
+  assert.equal(state.timezone, null)
+  state.freq = 'daily'
+  state.hour = 2
+  assert.equal(buildSchedule(state), '0 2 * * *')
+})
+
 test('parity:client.js SBUILD 段与核心实现逐字镜像', () => {
   // Given client 半区无模块系统,构建器逻辑必须内联(经典 script)
   // When 从两侧源码提取函数体文本(SBUILD 标记段 vs schedule-builder.mjs 导出体)
@@ -115,7 +163,7 @@ test('parity:client.js SBUILD 段与核心实现逐字镜像', () => {
   const core = readFileSync(join(pkgRoot, 'src', 'schedule-builder.mjs'), 'utf8')
   // 逐函数对比:剥离 export 关键词后,核心源码的每个可执行行都应出现在 client 镜像段
   const coreLines = core.split('\n')
-    .map((line) => line.replace(/^export /, '').replace(/\bFREQS\b/g, 'SB_FREQS').replace(/\bWEEKDAY_ORDER\b/g, 'SB_WEEKDAY_ORDER').replace(/\bWEEKDAY_LABELS\b/g, 'SB_WEEKDAY_LABELS').replace(/\bMINUTE_MAX\b/g, 'SB_MINUTE_MAX').replace(/\bHOUR_MAX\b/g, 'SB_HOUR_MAX').replace(/\bINTERVAL_MIN_MINUTES\b/g, 'SB_INTERVAL_MIN_MINUTES').replace(/\bclampInt\b/g, 'sbClampInt').trim())
+    .map((line) => line.replace(/^export /, '').replace(/\bFREQS\b/g, 'SB_FREQS').replace(/\bWEEKDAY_ORDER\b/g, 'SB_WEEKDAY_ORDER').replace(/\bWEEKDAY_LABELS\b/g, 'SB_WEEKDAY_LABELS').replace(/\bMINUTE_MAX\b/g, 'SB_MINUTE_MAX').replace(/\bHOUR_MAX\b/g, 'SB_HOUR_MAX').replace(/\bINTERVAL_MIN_MINUTES\b/g, 'SB_INTERVAL_MIN_MINUTES').replace(/\bTZ_SUFFIX_MIN\b/g, 'SB_TZ_SUFFIX_MIN').replace(/\bTZ_SUFFIX_MAX\b/g, 'SB_TZ_SUFFIX_MAX').replace(/\bTZ_SUFFIX_PATTERN\b/g, 'SB_TZ_SUFFIX_PATTERN').replace(/\bsplitScheduleTz\b/g, 'sbSplitScheduleTz').replace(/\bformatTzOffset\b/g, 'sbFormatTzOffset').replace(/\bbuildBase\b/g, 'sbBuildBase').replace(/\bclampInt\b/g, 'sbClampInt').trim())
     .filter((line) => line !== '' && !line.startsWith('//'))
   for (const line of coreLines) {
     assert.ok(block.includes(line), 'client 镜像段缺少核心行: ' + line)

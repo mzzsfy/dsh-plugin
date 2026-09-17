@@ -281,6 +281,8 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
           session: sessionState
             ? { ready: Boolean(sessionState.ready), disabled: Boolean(sessionState.disabled) }
             : { ready: false, disabled: false },
+          // 宿主进程时区偏移小时数:无后缀任务的展示时区(调度与展示同源,与浏览器无关)
+          serverTzOffset: -new Date().getTimezoneOffset() / 60,
           ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false },
         })
       },
