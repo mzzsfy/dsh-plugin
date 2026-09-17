@@ -1,4 +1,4 @@
-// dsh-context-manager Client 半区:settings.section「会话上下文」面板
+// dsh-context-manager Client 半区:「插件」设置页可配置卡片(四启停开关)
 // + 历史输入浮层(Alt+↑ 唤起,范围导航/搜索/收藏回填) + 插话撤回 + 对话 fork。
 // 历史输入挂官方 conversation.input.dock 插槽(渲染为零高度锚点),回填走宿主公共
 // 契约 inputActions.setDraft;插话撤回注入官方 pending steering 气泡操作图标排;
@@ -15,9 +15,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useRef } = React
 
-    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场
-    // 短名(发现页收录显示形态);该插件未就绪时入队,由其启动时排空
-    const NAV_ICON = { '会话上下文': 'git', 'dsh-context-manager': 'git' }
+    // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;键 = 市场短名(发现页
+    // 收录显示形态);该插件未就绪时入队,由其启动时排空
+    const NAV_ICON = { 'dsh-context-manager': 'git' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
@@ -1131,7 +1131,7 @@ const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
 const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
 
-// 「会话上下文」设置分区:四个启停开关行
+// 「插件」设置页卡片:四个启停开关行
 function ContextPanel() {
   return h('div', { className: 'cx-panel' },
     h('span', { className: 'cx-panel__hint' }, '历史输入、插话撤回与对话分叉的启停;变更刷新页面生效。'),
@@ -1203,9 +1203,11 @@ function ContextPanel() {
           return () => style.remove()
         }, 'context-manager styles')
 
-        ctx.slots.inject('settings.section', () =>
+        // 设置卡片:注册进官方「插件」设置页的可配置插件区(keyed slot,
+        // key = 本插件 settings namespace),不占独立设置导航项
+        ctx.slots.inject('settings.plugin.item', () =>
           ctx.slots.register(
-            { name: 'settings.section', id: 'context', order: 47, label: '会话上下文' },
+            { name: 'settings.plugin.item', id: 'context', key: 'context' },
             () => React.createElement(ContextPanel),
           ))
 
