@@ -143,6 +143,8 @@ function fakeDocument() {
         value: '',
         placeholder: '',
         innerHTML: '',
+        attrs: {},
+        setAttribute(name, value) { el.attrs[name] = value },
         appendChild(child) { el.children.push(child) },
         focus() { el.focused = true },
         addEventListener(type, fn) { el.handlers[type] = fn },
@@ -250,6 +252,7 @@ test('启动样式:覆盖浮层样式与滚动样式注入 head,卸载移除,重
     assert.equal(doc.createdStyles.length, 2, '恰两次注入(浮层+滚动)')
     assert.ok(doc.createdStyles.some((el) => el.textContent.includes('sni-ov')), '浮层样式随启动注入')
     assert.ok(doc.createdStyles.some((el) => el.textContent === NAVLIST_SCROLL_CSS), '滚动规则与实现同源')
+    assert.ok(doc.createdStyles.every((el) => el.attrs['data-plugin'] === '@mzzsfy/dsh-settings-nav-icons'), '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
     assert.equal(doc.head.children.length, 2, '样式挂载在 head')
     assert.deepEqual(doc.events, ['style', 'style', 'observe'], '样式注入先于观察器挂载')
     unload()

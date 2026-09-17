@@ -36,7 +36,9 @@ const {
   OTHER_MODEL,
   aggregateCurrencyOf,
   applyCurrencyToRules,
+  avgPriceText,
   cacheRateText,
+  cardsStatsOf,
   coerceConditions,
   coercePricingRules,
   costOf,
@@ -74,6 +76,8 @@ const {
   hasTipContent,
   hasAnomalyNews,
   tipModelEntries,
+  tipAvgPriceText,
+  trendDefaultVisibleKeys,
   modelSegmentLabel,
   modelSpeedText,
   modelNameOf,
@@ -111,9 +115,13 @@ const {
   speedTipText,
   speedScaleMax,
   legendToggle,
+  LEGEND_KEY_RATE,
+  LEGEND_KEY_SPEED,
+  LEGEND_KEY_TTFT,
   leftAxisTicks,
   hourSlotLabel,
   minuteSlotLabel,
+  usageModelsOf,
   validatePricingRules,
 } = core
 
@@ -163,10 +171,12 @@ test('预设定义表覆盖三视图', () => {
   assert.deepEqual(MINUTE_PRESETS, ['3h', '24h', '3d', '7d'])
 })
 
-test('默认挡位均在其挡位列表内,分钟窗口可解析', () => {
+test('默认挡位均在其挡位列表内,分钟默认挡为最短窗口 3 小时,分钟窗口可解析', () => {
   assert.ok(DAY_PRESETS.includes(DEFAULT_RANGE))
   assert.ok(HOUR_PRESETS.includes(DEFAULT_HOUR_PRESET))
   assert.ok(MINUTE_PRESETS.includes(DEFAULT_MINUTE_PRESET))
+  // Given 分钟视图初始挂载 When 取默认挡 Then 为 3 小时(分钟粒度下 24 小时过粗,近端细节优先)
+  assert.equal(DEFAULT_MINUTE_PRESET, '3h')
   assert.notEqual(resolveMinuteRange(DEFAULT_MINUTE_PRESET, NOW), null)
 })
 
@@ -454,6 +464,35 @@ test('groupPointSlots 窗口模型超上限折叠其他', () => {
   assert.deepEqual(grouped.daily[0].byModel, { m1: 1, m2: 1, m3: 1, m4: 1, m6: 1, [OTHER_MODEL]: 1 })
 })
 
+test('cardsStatsOf 天视图用 range 聚合,时/分视图用点聚合,点未回为 null', () => {
+  const stats = { tokens: 1 }
+  const pointView = { tokens: 2 }
+  assert.equal(cardsStatsOf('day', stats, pointView), stats)
+  assert.equal(cardsStatsOf('hour', stats, pointView), pointView)
+  assert.equal(cardsStatsOf('minute', stats, null), null)
+})
+
+test('usageModelsOf 天视图用预折叠分组,时/分视图折叠点窗口模型,点未回为 null', () => {
+  const grouped = { models: [{ model: 'p/m1', tokens: 1 }] }
+  assert.equal(usageModelsOf('day', grouped, null), grouped.models)
+  assert.equal(usageModelsOf('day', null, null), null)
+  const ranked = [
+    { model: 'p/m1', tokens: 3 },
+    { model: 'p/m2', tokens: 2 },
+    { model: 'p/m3', tokens: 1 },
+    { model: 'p/m4', tokens: 1 },
+    { model: 'p/m5', tokens: 1 },
+    { model: 'p/m6', tokens: 1 },
+  ]
+  const folded = usageModelsOf('hour', null, { models: ranked })
+  assert.equal(folded.length, 6)
+  assert.equal(folded.at(-1).model, OTHER_MODEL)
+  assert.equal(folded.at(-1).tokens, 1)
+  // 空窗口契约:返回空数组渲染空环(与天视图空数据行为一致),非 null 隐藏
+  assert.deepEqual(usageModelsOf('minute', null, { models: [] }), [])
+  assert.equal(usageModelsOf('minute', null, null), null)
+})
+
 test('niceTicks 产生 1/2/5 序列且零上限为空', () => {
   assert.deepEqual(niceTicks(0, 4), [])
   assert.deepEqual(niceTicks(50, 4), [20, 40])
@@ -698,7 +737,7 @@ test('speedTipText 无速度为占位符有速度为官方吞吐口径', () => {
 })
 
 test('legendToggle 普通点击单选,再点恢复全部,ctrl 多选且禁全藏', () => {
-  // null 表示全部可见
+  // null 输入(仅 historic 契约面):普通点击得单键集
   assert.deepEqual(legendToggle(null, 'a', false), new Set(['a']))
   // 单选态再点同项恢复全部(null)
   assert.equal(legendToggle(new Set(['a']), 'a', false), null)
@@ -974,6 +1013,44 @@ test('formatCost 千分位与两位小数', () => {
 test('formatCost 微观值四位小数', () => {
   assert.equal(formatCost(0.001, ''), '0.0010')
   assert.equal(formatCost(0.009999, '$'), '$0.0100')
+})
+
+test('avgPriceText 费用折每百万 token 均价', () => {
+  assert.equal(avgPriceText(3357.85, 6232901270, '¥'), '¥0.539/M')
+  assert.equal(avgPriceText(2, 1000 * 1000, '$'), '$2.000/M')
+  assert.equal(avgPriceText(0.5, 1000 * 1000, ''), '0.500/M')
+  assert.equal(avgPriceText(0.0004, 1000 * 1000, '¥'), '¥0.00040/M')
+})
+
+test('avgPriceText 无费用或零 token 不显示', () => {
+  assert.equal(avgPriceText(undefined, 6232901270, '¥'), '')
+  assert.equal(avgPriceText(0, 6232901270, '¥'), '')
+  assert.equal(avgPriceText(3357.85, 0, '¥'), '')
+})
+
+test('tipAvgPriceText 槽费用折每百万 token 均价,无费用或零槽为 null', () => {
+  assert.equal(tipAvgPriceText({ total: 6232901270, cost: 3357.85 }, '¥'), '¥0.539/M')
+  assert.equal(tipAvgPriceText({ total: 6232901270, cost: 0 }, '¥'), null)
+  assert.equal(tipAvgPriceText({ total: 6232901270 }, '¥'), null)
+  assert.equal(tipAvgPriceText({ total: 0, cost: 3357.85 }, '¥'), null)
+})
+
+test('trendDefaultVisibleKeys 默认集含模型与速度线,不含缓存命中率与首 token 延迟', () => {
+  const keys = trendDefaultVisibleKeys(['m1', 'm2'], true)
+  assert.deepEqual([...keys], ['m1', 'm2', 'speed'])
+  assert.deepEqual([...trendDefaultVisibleKeys(['m1'], false)], ['m1'])
+  assert.deepEqual([...trendDefaultVisibleKeys([], false)], [])
+})
+
+test('图例默认态点击以实际生效集为基线,ctrl 恢复隐藏线不坍缩', () => {
+  const base = trendDefaultVisibleKeys(['m1', 'm2'], true)
+  // ctrl 点击默认隐藏的缓存命中率:默认集其余项保持,仅追加该线;再点回默认集
+  const withRate = legendToggle(base, LEGEND_KEY_RATE, true)
+  assert.deepEqual([...withRate].sort(), ['m1', 'm2', LEGEND_KEY_SPEED, LEGEND_KEY_RATE].sort())
+  assert.deepEqual([...legendToggle(withRate, LEGEND_KEY_RATE, true)].sort(), ['m1', 'm2', LEGEND_KEY_SPEED].sort())
+  // 普通点击单选隐藏线,再点回 null 由调用方 ?? 默认集承接
+  assert.deepEqual([...legendToggle(base, LEGEND_KEY_TTFT, false)], [LEGEND_KEY_TTFT])
+  assert.equal(legendToggle(new Set([LEGEND_KEY_TTFT]), LEGEND_KEY_TTFT, false), null)
 })
 
 test('镜像函数基本行为:非法输入 null 与命中计价', () => {

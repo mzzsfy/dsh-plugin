@@ -6,6 +6,7 @@ import {
   gtSemver,
   judgeVersion,
   judgeUpgradeFreshness,
+  extractPinnedVersion,
   isVersionPendingRestart,
   classifyUpgradeFailure,
   buildUpgradeCommand,
@@ -263,6 +264,25 @@ test('分类:输入字段缺省容忍不抛错', () => {
   assert.ok(typeof result.reason === 'string')
 })
 
+// 钉定版本提取:取命令中最后一个合法 semver token(包说明符通常在尾部);
+// 通道名/@latest/无版本形态天然不命中;shell 粘连(&&、;、>)在 token 边界截断
+test('钉定版本:提取命令中的 @x.y.z token,取最后合法者', () => {
+  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@0.1.4'), '0.1.4')
+  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@0.1.4 --silent'), '0.1.4')
+  assert.equal(extractPinnedVersion('npm i -g @deepseek-ai/dsh@0.1.4 && echo ok'), '0.1.4')
+  assert.equal(extractPinnedVersion('@scope/pkg@1.2.3-rc.1'), '1.2.3-rc.1')
+  assert.equal(extractPinnedVersion('pkg@1.2.3+build.7'), '1.2.3+build.7')
+  assert.equal(extractPinnedVersion('a@1.0.0 b@2.0.0'), '2.0.0')
+  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@{tag}'), null)
+  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@latest'), null)
+  assert.equal(extractPinnedVersion('node -e "process.exit(0)"'), null)
+  assert.equal(extractPinnedVersion('pkg@0.1.4beta'), null)
+  assert.equal(extractPinnedVersion('pkg@01.2.3'), null)
+  assert.equal(extractPinnedVersion('@@1.0.0'), '1.0.0')
+  assert.equal(extractPinnedVersion(''), null)
+  assert.equal(extractPinnedVersion(null), null)
+})
+
 // 升级后磁盘版本复读判定:stale=版本未前进或未达通道目标;信息缺失宽松不误报。
 test('复读:版本前进且达通道目标判 fresh', () => {
   assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
@@ -276,6 +296,37 @@ test('复读:磁盘版本未前进或回退判 stale', () => {
   assert.match(same.reason, /未前进/)
   const rollback = judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '1.9.0', channelLatest: '2.0.0' })
   assert.equal(rollback.stale, true)
+  // 目标==来版属重装/回退意图:失败原因按"未落到通道目标"口径,不得走"未前进"文案
+  assert.match(rollback.reason, /通道目标/)
+})
+
+// 重装场景(通道目标与来版相同):版本不前进是预期结果,不得误报 stale
+test('复读:重装(目标==来版)版本不变判 fresh', () => {
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '1.0.0' }), { stale: false, reason: null })
+})
+
+test('复读:重装场景装出更低版本判 stale(未落到通道目标)', () => {
+  const result = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '0.9.0', channelLatest: '1.0.0' })
+  assert.equal(result.stale, true)
+  assert.match(result.reason, /通道目标/)
+})
+
+// 切通道回退(目标<来版):恰落到通道目标即达成;静默未动(磁盘仍是来版)必须拦下
+test('复读:回退落到通道目标判 fresh,静默未动判 stale', () => {
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '0.2.0-rc.1', installedVersion: '0.1.5', channelLatest: '0.1.5' }), { stale: false, reason: null })
+  const silent = judgeUpgradeFreshness({ previousVersion: '0.2.0-rc.1', installedVersion: '0.2.0-rc.1', channelLatest: '0.1.5' })
+  assert.equal(silent.stale, true)
+  assert.match(silent.reason, /通道目标/)
+})
+
+// 钉定版本(命令含 @x.y.z):意图=精确版本,装到位即达成,通道目标不参与对拍
+test('复读:钉定版本装到位判 fresh,装偏判 stale', () => {
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '0.1.5', installedVersion: '0.1.4', channelLatest: '0.1.5', pinnedVersion: '0.1.4' }), { stale: false, reason: null })
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '2.0.0', pinnedVersion: '1.0.0' }), { stale: false, reason: null })
+  const missed = judgeUpgradeFreshness({ previousVersion: '0.1.5', installedVersion: '0.1.5', channelLatest: '0.1.5', pinnedVersion: '0.1.4' })
+  assert.equal(missed.stale, true)
+  assert.match(missed.reason, /指定版本/)
+  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.2.3-rc.1', channelLatest: '2.0.0', pinnedVersion: '1.2.3-rc.1' }), { stale: false, reason: null })
 })
 
 test('复读:前进但未达通道目标判 stale', () => {

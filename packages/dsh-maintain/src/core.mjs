@@ -91,11 +91,39 @@ export function isVersionPendingRestart({ runningVersion, installedVersion }) {
   return Boolean(parseSemver(runningVersion) && parseSemver(installedVersion) && gtSemver(installedVersion, runningVersion))
 }
 
-// 升级后磁盘版本复读判定:stale=版本未前进(镜像滞后/静默未升)或未达通道目标。
+// 从已解析安装命令提取钉定版本(形如 @x.y.z[-pre][+build] 的精确版本 token),
+// 取最后一个合法者(包说明符通常在命令尾部);token 只在 semver 字符集内截取,
+// shell 粘连(&&、;、>)不参与;通道名/@latest/非法形态不命中,无钉定返回 null。
+// 约束:semver 形态的通道名({tag} 展开产物)不属钉定,调用方须排除与通道名重合的 token
+const PINNED_TOKEN_PATTERN = /@([0-9A-Za-z][0-9A-Za-z.+-]*)/g
+export function extractPinnedVersion(command) {
+  const text = typeof command === 'string' ? command : ''
+  let pinned = null
+  for (const match of text.matchAll(PINNED_TOKEN_PATTERN)) {
+    if (parseSemver(match[1]) !== null) pinned = match[1]
+  }
+  return pinned
+}
+
+// 升级后磁盘版本复读判定:stale=结果与安装意图不符。意图优先级:
+// 钉定版本(命令含 @x.y.z)→ 恰装到该版本才算达成,通道目标不参与对拍;
+// 通道语义:目标>来版=升级(未前进/未达皆 stale);目标<=来版=重装或回退,
+// 恰落到通道目标即达成(重装版本不变是预期,回退方向不套"未前进"口径)。
 // previous 未知只豁免"未前进"分支;目标缺失时无法证明未达标,宽松判 fresh 不误报。
-export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest }) {
+export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest, pinnedVersion }) {
   if (!parseSemver(installedVersion)) {
     return { stale: true, reason: '升级后磁盘版本解析失败' + (installedVersion ? ': ' + installedVersion : '(读取失败)') }
+  }
+  if (parseSemver(pinnedVersion)) {
+    return compareSemver(installedVersion, pinnedVersion) === 0
+      ? { stale: false, reason: null }
+      : { stale: true, reason: '未安装到指定版本: ' + installedVersion + '(命令钉定 ' + pinnedVersion + ')' }
+  }
+  if (parseSemver(previousVersion) !== null && parseSemver(channelLatest) !== null
+    && compareSemver(channelLatest, previousVersion) <= 0) {
+    return compareSemver(installedVersion, channelLatest) === 0
+      ? { stale: false, reason: null }
+      : { stale: true, reason: '未落到通道目标: ' + installedVersion + '(通道目标 ' + channelLatest + ')' }
   }
   if (parseSemver(previousVersion) && !gtSemver(installedVersion, previousVersion)) {
     return { stale: true, reason: '磁盘版本未前进,升级可能静默失败或镜像滞后: ' + installedVersion }
@@ -188,8 +216,34 @@ export function isValidRegistryBase(base) {
   }
 }
 
-// dist-tags 响应体上限:正常响应远小于此;流式累计读取,超限即断
-const DIST_TAGS_MAX_BYTES = 64 * 1024
+// 上游响应体上限:dist-tags 正常响应远小于此;流式累计读取,超限即断
+const UPSTREAM_BODY_MAX_BYTES = 64 * 1024
+
+// 上游响应体流式限量读取:恶意/异常源的超大响应体在传输中途即被断开,不整量入内存。
+// json() 对 BOM 有容忍;text 路径显式剥除保持等价;maxBytes 按数据源传入(发布页更大)
+async function readBodyTextLimited(response, maxBytes = UPSTREAM_BODY_MAX_BYTES) {
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) throw new Error('响应超过上限')
+      chunks.push(value)
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(merged).replace(/^\uFEFF/, '')
+}
 
 // 拉取 dist-tags 轻量端点;fetchImpl 注入便于单测,错误一律抛出由调用方决定保留上次结果。
 // redirect 拒绝跟随:镜像 302 跳内网/他源属配置外行为,直接失败交调用方展示。
@@ -203,29 +257,7 @@ export async function fetchDistTags({ registryBase, fetchImpl = fetch, timeoutMs
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!response.ok) throw new Error('registry HTTP ' + response.status)
-  // 流式累计限量:恶意/异常源的超大响应体在传输中途即被断开,不整量入内存
-  const reader = response.body.getReader()
-  const chunks = []
-  let total = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > DIST_TAGS_MAX_BYTES) throw new Error('dist-tags 响应超过上限')
-      chunks.push(value)
-    }
-  } finally {
-    await reader.cancel().catch(() => {})
-  }
-  const merged = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    merged.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  // json() 对 BOM 有容忍;text 路径显式剥除保持等价
-  const text = new TextDecoder().decode(merged).replace(/^\uFEFF/, '')
+  const text = await readBodyTextLimited(response)
   let body
   try {
     body = JSON.parse(text)
@@ -282,4 +314,92 @@ export async function resolveHostVersion({ execPath, platform, argv1, readFileIm
     }
   }
   return null
+}
+
+// 版本更新内容事实源:npm 清单无 readme 字段(实测),官方 GitHub Releases 承载,
+// tag 命名 dsh-v<版本> 与 TARGET_PACKAGE 同为该包的固定事实,随包常量维护。
+// 数据源为 releases 页面而非 api.github.com:未认证 API 限流 60 次/小时/IP 且按 IP 共享,
+// 页面限流实际宽松(实测同机 API 403 时页面 200);页面 URL 自建,无需远端 URL 白名单。
+export const RELEASE_SITE_BASE = 'https://github.com'
+export const RELEASE_REPO = 'deepseek-ai/deepseek-harness'
+export const RELEASE_TAG_PREFIX = 'dsh-v'
+// 发布页响应体上限:实测页面约 256KB,留余量;流式截断纪律与 dist-tags 一致
+const RELEASE_PAGE_MAX_BYTES = 512 * 1024
+
+// 发布标签构建:版本必须为合法 semver(远端数据回流 URL 前的白名单校验),首尾空白归一
+export function buildReleaseTag(version) {
+  const text = typeof version === 'string' ? version.trim() : ''
+  if (!parseSemver(text)) throw new Error('版本不是合法 semver: ' + version)
+  return RELEASE_TAG_PREFIX + text
+}
+
+export function buildReleaseNotesUrl(version) {
+  return RELEASE_SITE_BASE + '/' + RELEASE_REPO + '/releases/tag/' + encodeURIComponent(buildReleaseTag(version))
+}
+
+// 发布页正文提取:markdown-body 容器为锚点(GitHub 官方 test-selector,实测恰一处),
+// div 令牌深度配对取完整内层,渲染后 HTML 映射回行结构文本(标题→# 前缀、列表→- 前缀、
+// 块级闭合→换行、实体解码);标签剥离先于实体解码,解码产物只能是文本节点,经 React 转义无注入面
+const RELEASE_TIME_PATTERN = /<relative-time[^>]*\bdatetime="([^"]+)"/
+
+export function extractReleaseNotesFromHtml(html) {
+  const text = typeof html === 'string' ? html : ''
+  const time = RELEASE_TIME_PATTERN.exec(text)
+  const anchor = text.indexOf('markdown-body')
+  const openStart = anchor < 0 ? -1 : text.lastIndexOf('<div', anchor)
+  if (openStart < 0) throw new Error('release 页面结构无法解析')
+  const token = /<\/?div\b[^>]*>/g
+  token.lastIndex = openStart
+  let depth = 0
+  let end = -1
+  for (let m; (m = token.exec(text)) !== null;) {
+    depth += m[0][1] === '/' ? -1 : 1
+    if (depth === 0) {
+      end = m.index + m[0].length
+      break
+    }
+  }
+  if (end < 0) throw new Error('release 页面结构无法解析')
+  return { publishedAt: time ? time[1] : null, body: mapReleaseHtmlToText(text.slice(openStart, end)) }
+}
+
+function mapReleaseHtmlToText(inner) {
+  return inner
+    .replace(/>\s+</g, '><')
+    .replace(/<h([1-6])[^>]*>/g, (m, level) => '\n' + '#'.repeat(Number(level)) + ' ')
+    .replace(/<\/h[1-6]>/g, '\n')
+    .replace(/<li[^>]*>/g, '- ')
+    .replace(/<\/(p|li|ul|ol|pre|blockquote|tr|div)>/g, '\n')
+    .replace(/<br[^>]*>/g, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (m, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&amp;/g, '&')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+// 按版本拉取 releases 页面更新内容;fetchImpl 注入便于单测,错误一律抛出由调用方归一。
+// 显式 User-Agent 与 redirect 拒绝跟随同 fetchDistTags 纪律
+export async function fetchReleaseNotes({ version, fetchImpl = fetch, timeoutMs }) {
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) throw new Error('timeoutMs 必须为正数')
+  const url = buildReleaseNotesUrl(version)
+  const response = await fetchImpl(url, {
+    headers: { accept: 'text/html', 'user-agent': 'dsh-maintain' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) {
+    throw new Error(response.status === 404
+      ? '未找到该版本的发布说明(该版本可能未发布 Release)'
+      : 'GitHub HTTP ' + response.status)
+  }
+  const text = await readBodyTextLimited(response, RELEASE_PAGE_MAX_BYTES)
+  const { publishedAt, body } = extractReleaseNotesFromHtml(text)
+  return { url, publishedAt, body }
 }

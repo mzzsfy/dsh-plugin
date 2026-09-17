@@ -12,8 +12,10 @@ import {
   TARGET_PACKAGE,
   TAG_PLACEHOLDER,
   buildUpgradeCommand,
+  extractPinnedVersion,
   classifyUpgradeFailure,
   fetchDistTags,
+  fetchReleaseNotes,
   isValidChannelName,
   isValidRegistryBase,
   isVersionPendingRestart,
@@ -22,7 +24,6 @@ import {
   resolveHostVersion,
   UPGRADE_FAIL_FILE_LOCKED,
   UPGRADE_FAIL_TRANSIENT_NETWORK,
-  VERDICT_UP_TO_DATE,
 } from './core.mjs'
 import { runUpgrade } from './upgrade.mjs'
 import { detectRuntimeEnv, RUNTIME_KINDS } from './runtime.mjs'
@@ -36,6 +37,9 @@ export const inject = ['webServer']
 const NAMESPACE = 'maintain'
 
 const CHECK_TIMEOUT_MS = 20 * 1000
+// 版本更新内容缓存上限:长期运行中通道切换持续产生新键,无上限则缓存无界;
+// 超限删最旧(Map 迭代序即插入序,命中不重插);导出仅供测试
+export const RELEASE_NOTES_CACHE_MAX = 20
 // 升级命令超时:client 浮条观察上限与此对拍(parity 锁定),强杀宽限另计
 export const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
@@ -226,6 +230,7 @@ export const API_PATHS = Object.freeze({
   REGISTRY_BASE: '/api/maintain/registry-base',
   UPGRADE: '/api/maintain/upgrade',
   RESTART: '/api/maintain/restart',
+  RELEASE_NOTES: '/api/maintain/release-notes',
 })
 
 // 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
@@ -396,6 +401,8 @@ export function apply(ctx) {
   let nextDueAt = null
   let restartScheduled = false
   let autoRestartScheduled = false
+  // 版本更新内容缓存:键为通道最新版原始值(未归一),值为 {url,publishedAt,body};仅成功结果入缓存
+  const releaseNotesCache = new Map()
 
   function runCheck() {
     if (checkInFlight) return checkInFlight
@@ -490,8 +497,12 @@ export function apply(ctx) {
     const config = readSettings(ctx)
     // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
     const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
+    // 通道名恰为 semver 形态时 {tag} 展开产物会被误读为钉定:与通道名重合即非钉定
+    const pinnedVersion = extractPinnedVersion(command)
     const last = {
       command,
+      // 钉定版本随命令定格:落定复读按安装意图(钉定/通道)判定 stale
+      pinnedVersion: pinnedVersion === config.channel ? null : pinnedVersion,
       startedAt: Date.now(),
       ok: false,
       finishedAt: null,
@@ -604,6 +615,7 @@ export function apply(ctx) {
             previousVersion: last.previousVersion,
             installedVersion: last.installedVersion,
             channelLatest: tags !== null && Object.prototype.hasOwnProperty.call(tags, channel) ? tags[channel] : null,
+            pinnedVersion: last.pinnedVersion,
           })
           last.stale = freshness.stale
           last.reason = freshness.reason
@@ -756,14 +768,6 @@ export function apply(ctx) {
           sendJson(res, 409, { error: '存在未过期的升级锁(可能有残留升级子进程),等待锁过期或删除 ' + UPGRADE_LOCK_PATH })
           return
         }
-        // 防降级:运行版本已达通道最新时拒绝(重装旧版即降级,对齐 no-newer-version);
-        // 信息不足(verdict unknown)放行,宽松不误拒
-        const judged = judgeNow()
-        if (judged.verdict === VERDICT_UP_TO_DATE) {
-          audit('upgrade', 'rejected', 'reason=up-to-date')
-          sendJson(res, 409, { error: '当前已是通道最新版,无需升级;重装请走命令行' })
-          return
-        }
         // 活跃工作门控:升级不可越(agent 会话/job 在跑时强行升级会被中断)
         const activeWork = collectActiveWork(ctx)
         if (activeWork.total > 0) {
@@ -818,6 +822,33 @@ export function apply(ctx) {
         // 响应先发,退出调度经统一入口(与升级落定关机同一条链)
         sendJson(res, 200, { ok: true, restarting: true })
         scheduleHostExit({ detail: 'forced=' + (requestBody.force === true), delayMs: RESTART_DELAY_MS })
+      }),
+    },
+    {
+      path: API_PATHS.RELEASE_NOTES,
+      handler: route('GET', {}, async (req, res) => {
+        // 关机窗口内不发上游请求:退出延迟 2 秒小于上游超时,与 refresh 同纪律
+        if (restartScheduled) {
+          sendJson(res, 409, { error: '重启已调度,禁止查询更新内容' })
+          return
+        }
+        // 缺省恒取追踪通道最新版;上游标签值非 semver 时 buildReleaseTag 抛错归一 400
+        const version = judgeNow().channelLatest
+        if (!version) {
+          sendJson(res, 400, { error: '通道最新版未知,请先检查更新' })
+          return
+        }
+        const cached = releaseNotesCache.get(version)
+        if (cached) {
+          sendJson(res, 200, { version, url: cached.url, publishedAt: cached.publishedAt, body: cached.body })
+          return
+        }
+        const notes = await fetchReleaseNotes({ version, timeoutMs: CHECK_TIMEOUT_MS })
+        releaseNotesCache.set(version, notes)
+        while (releaseNotesCache.size > RELEASE_NOTES_CACHE_MAX) {
+          releaseNotesCache.delete(releaseNotesCache.keys().next().value)
+        }
+        sendJson(res, 200, { version, url: notes.url, publishedAt: notes.publishedAt, body: notes.body })
       }),
     },
   ]

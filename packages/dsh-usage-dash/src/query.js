@@ -105,7 +105,8 @@ export function aggregateRange(rows, g, from, to) {
   const slotByKey = new Map(slots.map((slot) => [slot.day, slot]))
   const modelTotals = new Map()
   const providerTotals = new Map()
-  const activeBuckets = new Set()
+  // 活跃天 = 有 token 产出的自然日(桶键按日去重,跨粒度统一口径)
+  const activeDays = new Set()
   // 妲界骇閰嶅:妗朵覆 鈫?閫熷害瀵?{decodeTokens, durationMs} 涓庨瀛楀 {ttftMs, ttftSteps},
   const slotSpeeds = new Map()
   const slotTtfts = new Map()
@@ -117,7 +118,7 @@ export function aggregateRange(rows, g, from, to) {
     addRowToSlot(slot, row, tokens)
     // 绾?timing 琛?闆?token 妗?+ decode 閰嶅)涓嶅弬涓庡綊灞?浣嗕粛杩涢厤瀵硅仛鍚?
     if (tokens > 0) {
-      activeBuckets.add(row.bucket)
+      activeDays.add(row.bucket.slice(0, DAY_KEY_WIDTH))
       slot.byModel[row.model] = (slot.byModel[row.model] ?? 0) + tokens
       slot.byProvider[row.provider] = (slot.byProvider[row.provider] ?? 0) + tokens
     }
@@ -207,7 +208,7 @@ export function aggregateRange(rows, g, from, to) {
     turns: totals.turns,
     cacheHit: totals.cacheHit,
     cacheMiss: totals.cacheMiss,
-    activeDays: activeBuckets.size,
+    activeDays: activeDays.size,
     topModel: top?.model ?? '',
     topProvider: top?.provider ?? '',
     daily,

@@ -22,7 +22,7 @@ function makeState() {
 function makeDocument(state) {
   const byId = state.byId
   const createElement = (tag) => {
-    const node = { tag, id: '', style: {}, writes: 0, remove() { byId.delete(this.id) } }
+    const node = { tag, id: '', style: {}, writes: 0, attrs: {}, setAttribute(name, value) { this.attrs[name] = value }, remove() { byId.delete(this.id) } }
     Object.defineProperty(node, 'textContent', {
       get() { return node._text || '' },
       set(value) { node._text = value; node.writes += 1 },
@@ -94,6 +94,8 @@ test('首次 show 惰性挂载:容器挂 body、样式挂 head', () => {
   assert.notEqual(state.byId.get(HOST_ID), undefined)
   assert.equal(state.headChildren.some((node) => node.id === STYLE_ID), true, '样式挂宿主文档级')
   assert.equal(state.bodyChildren.some((node) => node.id === HOST_ID), true, '容器直挂 body')
+  const styleNode = state.headChildren.find((node) => node.id === STYLE_ID)
+  assert.equal(styleNode.attrs['data-plugin'], '@mzzsfy/dsh-toast', '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
 })
 
 test('重复 show 幂等:容器只创建一次,样式一致零写入', () => {
@@ -260,10 +262,13 @@ test('样式内容不一致原位替换:节点不重建,内容与写入计数还
   // 模拟 HMR 期间 CSS 变更或旧代残留:在位样式内容与本代不一致
   // (直写 _text 绕过写入计数,只统计实现侧的写入)
   styleNode._text = '/* 残留的旧代样式 */'
+  // 模拟修复前旧代注入的无标记残留:原位替换须幂等补标记
+  delete styleNode.attrs['data-plugin']
   mod.show('触发替换')
   assert.equal(state.byId.get(STYLE_ID), styleNode, '样式节点原位保留')
   assert.equal(styleNode.writes, 2, '替换恰新增一次写入')
   assert.equal(styleNode.textContent, currentCss, '内容还原为当前 CSS')
+  assert.equal(styleNode.attrs['data-plugin'], '@mzzsfy/dsh-toast', '原位替换路径幂等补 data-plugin')
 })
 
 test('CSS 内容齐备:选择器、变体、动画与减弱动态块', () => {

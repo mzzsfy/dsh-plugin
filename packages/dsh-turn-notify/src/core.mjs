@@ -641,7 +641,7 @@ export function imBoundBotIds(list) {
 // 返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'kindRoutes', 'hostNotify', 'hostNotifyFallback']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'kindRoutes', 'hostNotify', 'hostNotifyFallback', 'folderRunningEnabled']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -701,6 +701,10 @@ export function validateConfigPatch(patch) {
   if ('hostNotifyFallback' in patch) {
     if (typeof patch.hostNotifyFallback !== 'boolean') return { ok: false, reason: 'hostNotifyFallback 须为布尔' }
     next.hostNotifyFallback = patch.hostNotifyFallback
+  }
+  if ('folderRunningEnabled' in patch) {
+    if (typeof patch.folderRunningEnabled !== 'boolean') return { ok: false, reason: 'folderRunningEnabled 须为布尔' }
+    next.folderRunningEnabled = patch.folderRunningEnabled
   }
   if ('enabled' in patch) {
     const enabled = patch.enabled
@@ -767,6 +771,7 @@ export function resolvedConfig(settings) {
     suppressSubagentWake: source.suppressSubagentWake !== false,
     hostNotify: source.hostNotify === true,
     hostNotifyFallback: source.hostNotifyFallback === true,
+    folderRunningEnabled: source.folderRunningEnabled !== false,
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
@@ -783,6 +788,7 @@ export function publicConfig(settings) {
     suppressSubagentWake: resolved.suppressSubagentWake,
     hostNotify: resolved.hostNotify,
     hostNotifyFallback: resolved.hostNotifyFallback,
+    folderRunningEnabled: resolved.folderRunningEnabled,
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,

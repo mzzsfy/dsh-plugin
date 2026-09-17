@@ -1,0 +1,428 @@
+// orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message/resume_from/verdict 七工具
+// 编排以分段 continuable job 推进:每段 = jobs.start 包装 driver.runSegment,settle 负载经 tool-jobs
+// 完成通知唤醒主循环;推进责任唯一在 rs_workflow_resume(页签 control 仅清 paused/裁决)
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { gate } from './planner-gate.mjs'
+import { validateTemplate } from './template.mjs'
+import { startRun, buildSeed } from './driver/index.mjs'
+import { registry, registerInitiator, unregisterInitiator, registerResumer } from './driver/control.mjs'
+import { reportStore } from './store.mjs'
+import { loadJson } from './storage.mjs'
+import { normalizeConfig } from './settings-schema.mjs'
+
+const MAX_REJECTS = 3
+const SEGMENT_KIND = 'rsww-segment'
+const SETTLE_OUTPUT_LIMIT = 64 * 1024
+
+// 已启用模板表(自有存储 → {entry, parsed};gate/驱动共用此形态)
+export function enabledTemplates() {
+  const out = []
+  for (const entry of loadJson('templates.json', [])) {
+    if (entry.enabled === false || typeof entry.json !== 'string') continue
+    try {
+      const parsed = JSON.parse(entry.json)
+      if (validateTemplate(parsed).length === 0) out.push({ entry, parsed })
+    } catch { /* 损坏模板不进候选 */ }
+  }
+  return out
+}
+
+/** 模式行激活入口(config: { role:'orchestrator', templateId });宿主服务缺一目工具即报错 */
+export function registerOrchestrator(ctx, config) {
+  const expectedTemplateId = config.templateId
+  // 连续拒单计数与现役 run:行实例内存态,进程重启清零
+  const rejectCounts = new Map()
+  const activeRuns = new Map()
+
+  const registered = ctx.inject(['tools', 'workflowEngine', 'jobs'], (tctx) => {
+    const engine = tctx.workflowEngine
+    const jobs = tctx.jobs
+
+    const configOf = () => normalizeConfig(loadJson('config.json', undefined))
+
+    const agentIdOf = (agent) => String(agent?.id ?? '')
+
+    // 会话现役 run:同会话同一时刻至多一个未终态 run
+    const currentRunId = (agent) => {
+      const runId = activeRuns.get(agentIdOf(agent))
+      if (runId === undefined) return undefined
+      // run 可能已被页签删除:get 抛异常须自愈清位,不能让编排入口变砖
+      let record
+      try { record = reportStore().get(runId) } catch { record = undefined }
+      if (record === undefined || record.finishedAt !== undefined) {
+        activeRuns.delete(agentIdOf(agent))
+        return undefined
+      }
+      return runId
+    }
+
+    // 段 job:jobs.start 包装 runSegment;settle 负载进 output,经 tool-jobs 完成通知唤醒主循环
+    function startSegmentJob(agent, driver) {
+      const promise = driver.runSegment()
+      return jobs.start({
+        kind: SEGMENT_KIND,
+        label: `若水编排段推进 ${driver.runId}`,
+        outputLimitBytes: SETTLE_OUTPUT_LIMIT,
+        owner: agent,
+        run: () => ({
+          cancel: () => driver.cancel(),
+          done: promise.then((payload) => ({ status: 'completed', output: JSON.stringify(payload) })),
+        }),
+      })
+    }
+
+    // 断点续跑挂靠:board resume-from 经此回调在原会话重建种子 run(engine/parent 闭包自本域)
+    function startSeedRun(agent, record, fromStepId, inputs) {
+      const templates = enabledTemplates()
+      const template = templates.find((t) => t.entry.id === record.templateId)
+      if (template === undefined) return { ok: false, error: `模板不存在或已禁用: ${record.templateId}` }
+      // 单活跃约束:种子 run 与 start 工具同守卫;主循环成为其推进者(activeRuns 注册,补拉/守卫生效)
+      const current = currentRunId(agent)
+      if (current !== undefined) return { ok: false, error: `本会话已有进行中的编排 ${current},不可续跑` }
+      const seed = buildSeed(record, record.plan, fromStepId, inputs)
+      const driver = startRun({
+        template: template.parsed, templateSet: templates.map((t) => t.parsed),
+        plan: record.plan, warnings: record.warnings ?? [],
+        request: record.request, inputs: seed.inputs, state: seed,
+        sessionId: agentIdOf(agent), workspace: agent.session?.header?.cwd ?? process.cwd(),
+        engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
+        parent: agent,
+      })
+      activeRuns.set(agentIdOf(agent), driver.runId)
+      // 种子 run 首段拉起:与 start 工具同责,缺此则续跑 run 停在 running 无活跃段
+      startSegmentJob(agent, driver)
+      return { ok: true, runId: driver.runId }
+    }
+
+    function finishRun(agent, runId) {
+      if (currentRunId(agent) === runId) activeRuns.delete(agentIdOf(agent))
+    }
+
+    // 段拉起挂靠:页签裁决受理后 board 经此回到本域拉下一段(幂等:活跃段不重拉);点位与 initiator 挂靠一致
+    function ensureResumer(agent) {
+      registerResumer(agentIdOf(agent), (runId) => {
+        const driver = registry.drivers.get(runId)
+        if (driver === undefined || driver.active) return false
+        startSegmentJob(agent, driver)
+        return true
+      })
+    }
+
+    const tools = [
+      defineTool({
+        name: 'rs_workflow_start',
+        description: [
+          '启动若水工作流编排:提交用户请求原文与结构化规划,受理后引擎分段推进。',
+          '受理返回 { ok, runId, status };规划被拒返回 { ok:false, errors }(按 errors 修正重交;连续 3 次被拒须回退直接答复并说明)。',
+          'templateId 必须等于本组合锚定的模板 id;plan 缺省 = 保底全序(不推荐,多步骤任务应提交 steps/brief)。',
+        ].join(''),
+        parameters: {
+          request: { type: 'string', required: true, description: '用户请求原文(逐字,不转写)' },
+          templateId: { type: 'string', required: true, description: '本组合锚定的模板 id' },
+          inputs: { type: 'object', additionalProperties: true, description: '模板顶层 inputs 的键值,值必须为字符串' },
+          plan: {
+            type: 'object',
+            additionalProperties: true,
+            description: '结构化规划 { steps: [{ref, note?, done?}], brief? }:steps 各步要点(note)与验收口径(done);缺省 = 保底全序',
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              runId: { type: 'string' },
+              status: { type: 'string' },
+              errors: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              hint: { type: 'string' },
+            },
+          },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const agent = exec.agent
+          // 工具参数扁平:gate 入参 = 顶层三字段 + plan(steps/brief)组装(见 feat/orchestrator.md)
+          const gatePlan = {
+            request: args.request, templateId: args.templateId, inputs: args.inputs,
+            brief: args.plan?.brief, steps: args.plan?.steps,
+          }
+          const rejects = (id) => {
+            const next = (rejectCounts.get(id) ?? 0) + 1
+            rejectCounts.set(id, next)
+            return next
+          }
+          const rejected = (errors) => {
+            const count = rejects(agentIdOf(agent))
+            if (count >= MAX_REJECTS) return { ok: false, errors, hint: `已连续 ${MAX_REJECTS} 次规划被拒,本会话编排入口关闭:回退直接答复并向用户说明` }
+            return { ok: false, errors, hint: '修正 plan 后重新调用;连续 3 次失败将回退直接答复' }
+          }
+          // 连续拒单达上限:本会话工具恒失败
+          if ((rejectCounts.get(agentIdOf(agent)) ?? 0) >= MAX_REJECTS) {
+            return { ok: false, errors: [], hint: `已连续 ${MAX_REJECTS} 次规划被拒,本会话编排入口关闭:回退直接答复并向用户说明` }
+          }
+          if (currentRunId(agent) !== undefined) {
+            return { ok: false, errors: [], hint: `本会话已有进行中的编排 ${currentRunId(agent)},先等待终态或取消` }
+          }
+          const templates = enabledTemplates()
+          const template = templates.find((t) => t.entry.id === args.templateId)
+          if (template === undefined) {
+            // 组合/环境错误而非规划错误:不计连续拒单,hint 指向组合而非 plan
+            return { ok: false, errors: [{ target: 'templateId', message: `模板不存在或未启用: ${args.templateId}` }], hint: '本组合未启用该模板:检查组合锚定与模板启用状态,勿修改 plan' }
+          }
+          const outcome = gate(gatePlan, template, { expectedTemplateId })
+          if (!outcome.ok) return rejected(outcome.errors)
+          const driver = startRun({
+            template: template.parsed, templateSet: templates.map((t) => t.parsed),
+            plan: outcome.planScript, warnings: outcome.warnings ?? [],
+            request: args.request, inputs: args.inputs ?? {},
+            engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
+            // 会话工作区取自会话 header(子代理继承同源);宿主 cwd 仅兜底
+            sessionId: agentIdOf(agent), workspace: agent.session?.header?.cwd ?? process.cwd(),
+            parent: agent,
+          })
+          rejectCounts.delete(agentIdOf(agent))
+          activeRuns.set(agentIdOf(agent), driver.runId)
+          // 断点续跑挂靠:本会话 agent 成为推进器,board resume-from 据此重建种子 run
+          registerInitiator(agentIdOf(agent), (record, fromStepId, inputs) => startSeedRun(agent, record, fromStepId, inputs))
+          ensureResumer(agent)
+          startSegmentJob(agent, driver)
+          return { ok: true, runId: driver.runId, status: driver.state.status }
+        },
+      }),
+      defineTool({
+        name: 'rs_workflow_status',
+        description: '查询若水编排状态:runId 缺省 = 本会话现役 run。返回 status/awaitingResume(补拉判定信号)/steps 账目/waiting 待裁决摘要。',
+        parameters: {
+          runId: { type: 'string', description: '缺省 = 本会话现役 run' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const store = reportStore()
+          const runId = typeof args.runId === 'string' && args.runId !== '' ? args.runId : currentRunId(exec.agent)
+          if (runId === undefined) return { ok: false, error: '本会话无现役 run(编排未启动)' }
+          let record
+          try { record = store.get(runId) } catch { record = undefined }
+          if (record === undefined) return { ok: false, error: '运行记录不存在:' + runId }
+          // 唤醒轮挂靠:主循环任一唤醒轮必先 status,借机注册断点续跑推进器(进程重启后表空,
+          // 页签 resume-from 恰是重启中断的唯一恢复路径,不能依赖 start/resume 才有挂靠)
+          registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          ensureResumer(exec.agent)
+          const driver = registry.drivers.get(runId)
+          const steps = {}
+          for (const [id, s] of Object.entries(record.state?.steps ?? {})) {
+            steps[id] = { status: s.status, failCount: s.failCount ?? 0 }
+          }
+          const waiting = []
+          if (record.status === 'waiting_approval') {
+            const stepId = record.state?.waitingApproval
+            const planStep = (record.plan?.steps ?? []).find((p) => p.ref === stepId)
+            waiting.push({ stepId, note: planStep?.note ?? '', done: planStep?.done ?? '' })
+          }
+          // paused+已入队裁决:主循环据 pendingVerdicts 可知 resume 拉段后裁决将生效
+          const pendingVerdicts = (record.state?.pendingApprovals ?? []).length
+          return {
+            ok: true, runId, status: record.status,
+            awaitingResume: record.status === 'paused' && driver?.awaitingResume === true,
+            steps,
+            // 宿主校验工具输出须为纯 JSON:undefined 值键会被判无效输出
+            ...(waiting.length > 0 ? { waiting } : {}),
+            ...(pendingVerdicts > 0 ? { pendingVerdicts } : {}),
+            summary: record.summary ?? '',
+          }
+        },
+      }),
+      defineTool({
+        name: 'rs_workflow_resume',
+        description: [
+          '拉起若水编排下一段(推进责任唯一在此):paused 拉起时同步置 running;已推进/终态返回 skipped。',
+          '裁决回写后、页签恢复后、running 无活跃段(待拉起)时调用。',
+        ].join(''),
+        parameters: {
+          runId: { type: 'string', required: true, description: '要推进的 run' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const store = reportStore()
+          let record
+          try { record = store.get(args.runId) } catch { record = undefined }
+          if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
+          if (record.finishedAt !== undefined) {
+            finishRun(exec.agent, args.runId)
+            return { ok: true, runId: args.runId, status: record.status, summary: record.summary }
+          }
+          const driver = registry.drivers.get(args.runId)
+          if (driver === undefined) {
+            return { ok: false, error: '编排驱动器未注册(进程重启后 run 已收敛为终态,请 rs_workflow_status 确认)' }
+          }
+          // 页签已推进(有活跃段):不重复拉起
+          if (driver.active) return { ok: true, runId: args.runId, status: record.status, skipped: true }
+          if (record.status === 'paused') {
+            driver.state.status = 'running'
+            driver.awaitingResume = false
+            driver.persistState()
+          }
+          if (record.status === 'waiting_approval') {
+            return { ok: true, runId: args.runId, status: record.status, skipped: true, hint: '先裁决(control approve/reject 或经会话页签),再 resume 拉起下一段' }
+          }
+          startSegmentJob(exec.agent, driver)
+          registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          ensureResumer(exec.agent)
+          return { ok: true, runId: args.runId, status: record.status }
+        },
+      }),
+      defineTool({
+        name: 'rs_workflow_cancel',
+        description: '取消若水编排(幂等):running 有活跃段则 abort 收敛;waiting_approval/paused 即时终态;已终态返回摘要无副作用。',
+        parameters: {
+          runId: { type: 'string', required: true, description: '要取消的 run' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const store = reportStore()
+          let record
+          try { record = store.get(args.runId) } catch { record = undefined }
+          if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
+          if (record.finishedAt !== undefined) {
+            finishRun(exec.agent, args.runId)
+            return { ok: true, runId: args.runId, status: record.status, summary: record.summary }
+          }
+          const driver = registry.drivers.get(args.runId)
+          if (driver === undefined) return { ok: false, error: '编排驱动器未注册' }
+          driver.cancel()
+          const hint = '已完成步骤保留,可在会话页签断点续跑'
+          if (driver.active) {
+            await driver.runSegment().catch(() => {})
+            let after
+            try { after = store.get(args.runId) } catch { after = undefined }
+            finishRun(exec.agent, args.runId)
+            return { ok: true, runId: args.runId, status: after?.status ?? 'cancelled', summary: after?.summary ?? '', hint }
+          }
+          let after
+          try { after = store.get(args.runId) } catch { after = undefined }
+          finishRun(exec.agent, args.runId)
+          return { ok: true, runId: args.runId, status: after?.status ?? 'cancelled', hint }
+        },
+      }),
+      defineTool({
+        name: 'rs_workflow_message',
+        description: '向进行中的若水编排转达用户纠偏:下一步骤边界进入编排(纠偏类经主循环转译后 inject 注入后续指令)。',
+        parameters: {
+          runId: { type: 'string', required: true, description: '目标 run' },
+          text: { type: 'string', required: true, description: '用户纠偏内容(转译后)' },
+          inject: { type: 'boolean', description: 'true = 注入后续指令;缺省 false 排队' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args) {
+          const driver = registry.drivers.get(args.runId)
+          if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
+          const accepted = driver.handlePost({ kind: 'message', text: args.text, inject: args.inject === true })
+          return accepted ? { ok: true } : { ok: false, error: 'run 已终态,消息不予受理' }
+        },
+      }),
+      defineTool({
+        name: 'rs_workflow_resume_from',
+        description: [
+          '断点续跑/从头重跑(主循环通道,与页签 ResumePicker 同能力):目标 run 须终态或已收敛。',
+          '经挂靠机制在原会话重建种子 run:done 步骤产出继承,fromStepId 及其后代闭包重置(缺省 = 从第一个未完成步续跑);',
+          'inputs 可选覆盖模板入参。旧 run 记录保留作审计,旧 run 未消费的纠偏消息不带入新 run。',
+        ].join(''),
+        parameters: {
+          runId: { type: 'string', required: true, description: '要续跑的 run(终态)' },
+          fromStepId: { type: 'string', description: '从该步骤重来(其后代全部重置);缺省 = 断点续跑' },
+          inputs: { type: 'object', additionalProperties: true, description: '覆盖模板顶层 inputs,值必须为字符串' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const store = reportStore()
+          let record
+          try { record = store.get(args.runId) } catch { record = undefined }
+          if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
+          // 活跃守卫:未终态(或 driver 仍在内存)不可续跑,与页签 resume-from 同口径
+          if (registry.drivers.has(args.runId) || record.finishedAt === undefined) {
+            return { ok: false, error: '运行进行中,不可续跑' }
+          }
+          // 会话归属守卫:仅原 run 所属会话的主循环可续跑,防跨会话接管他人 run
+          if (record.sessionId !== agentIdOf(exec.agent)) {
+            return { ok: false, error: '该 run 属于其他会话,本会话不可续跑' }
+          }
+          if (args.fromStepId !== undefined && (record.plan?.steps?.some((p) => p.ref === args.fromStepId)) !== true) {
+            return { ok: false, error: 'fromStepId 不在剧本中:' + args.fromStepId }
+          }
+          if (currentRunId(exec.agent) !== undefined) {
+            return { ok: false, error: `本会话已有进行中的编排 ${currentRunId(exec.agent)},不可续跑` }
+          }
+          // 唤醒轮挂靠兜底:重启后 initiator 表空,续跑前借本调用重注册(status/resume 同款)
+          registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
+          ensureResumer(exec.agent)
+          const outcome = startSeedRun(exec.agent, record, args.fromStepId, args.inputs)
+          if (!outcome.ok) return { ok: false, error: outcome.error }
+          return { ok: true, runId: outcome.runId, hint: '旧 run 未消费的纠偏消息不带入新 run;rs_workflow_status 跟踪推进' }
+        },
+      }),
+      defineTool({
+        name: 'rs_workflow_verdict',
+        description: [
+          '回写若水编排裁决(主循环裁决通道,与页签先到先得):run 处于 waiting_approval 时受理。',
+          'autoApprove=true 代审:by=main-agent + 代审意见;ask_user 转呈真人:by=user + 用户意见。裁决后 rs_workflow_resume 拉起下一段。',
+        ].join(''),
+        parameters: {
+          runId: { type: 'string', description: '要裁决的 run(缺省 = 本会话现役 run)' },
+          verdict: { type: 'string', required: true, description: 'approve = 通过;reject = 驳回(重做)' },
+          reason: { type: 'string', required: true, description: '裁决意见(审计必填):驳回=重做口径,通过=放行依据' },
+          by: { type: 'string', description: '裁决来源:main-agent=代审(缺省);user=真人转呈后的用户裁决' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          if (args.verdict !== 'approve' && args.verdict !== 'reject') {
+            return { ok: false, error: 'verdict 须为 approve|reject' }
+          }
+          if (typeof args.reason !== 'string' || args.reason.trim() === '') {
+            return { ok: false, error: 'reason 必填(审计口径与页签一致)' }
+          }
+          const by = args.by === 'user' ? 'user' : 'main-agent'
+          const runId = typeof args.runId === 'string' && args.runId !== '' ? args.runId : currentRunId(exec.agent)
+          if (runId === undefined) return { ok: false, error: '本会话无现役 run(编排未启动)' }
+          const driver = registry.drivers.get(runId)
+          if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
+          const accepted = driver.handlePost({ kind: args.verdict, by, reason: args.reason })
+          const record = reportStore().get(runId)
+          if (accepted) {
+            return { ok: true, runId, status: record?.status, hint: '裁决已受理;rs_workflow_resume 拉起下一段' }
+          }
+          // 竞态口径:页签先裁时后到方不受理,但 run 可能已翻 running 且无活跃段(等 resume 拉起),
+          // 主循环须继续承担推进责任,否则 run 挂死在 running 无段状态
+          if (!driver.active && record?.status === 'running') {
+            startSegmentJob(exec.agent, driver)
+            return { ok: true, runId, status: record.status, hint: '裁决已被页签先裁(先到先得);已代为拉起下一段' }
+          }
+          return { ok: false, error: '裁决未受理(状态不符或已被页签先裁)' }
+        },
+      }),
+    ]
+    for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'rs-workflow orchestrator: ' + tool.name)
+    // 行上下文(tool context)无 agent 属性,effect 回调在此返回 undefined 触发宿主 dispose 契约异常,
+    // 导致整个 inject 回调失败、七工具全部未注册(43267fc 引入,实机定位);清理由既有路径承担:
+    // run 终态 finishRun/unregisterInitiator 与 cancel 的 finishRun 清 activeRuns;行销毁后的
+    // stale initiator 表项在下次 start 受理时被覆盖,不产生跨会话续跑。
+  })
+  return { rejectCounts, activeRuns }
+}

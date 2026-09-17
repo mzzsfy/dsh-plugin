@@ -1,6 +1,6 @@
 # dsh-toast 装载机制原理
 
-本文记录公共 client 依赖包(dsh-toast 为参考实现)不进 profile 表层 manifest 却能被安装、解析、装载的完整原理。规约条目见 AGENTS.md「公共 client 依赖包规约」与「profile 链接」第 4 条;本文是其推导与实证依据。
+本文记录公共 client 依赖包(dsh-toast 为参考实现)不进 profile 表层 manifest 却能被安装、解析、装载的完整原理。规约条目见 `DEVELOPMENT/client-dependency.md` 与 `DEVELOPMENT/profile-link.md` 第 4 条;本文是其推导与实证依据。
 
 ## 问题:市场为什么曾显示它
 

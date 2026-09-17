@@ -205,7 +205,8 @@ const clientRestartConfirmLabel = extractLogic('restartConfirmLabel')
 
 test('upgradeFinalText: stale 优先于两种重启指引,不得引导重启', () => {
   const text = clientUpgradeFinalText({ ok: true, stale: true, requiresManualRestart: true, autoRestartScheduled: true })
-  assert.match(text, /未前进|未达目标/)
+  // stale 口径泛化:未前进/未达目标/未落到目标/未装到指定版本统称与安装意图不符
+  assert.match(text, /意图不符/)
   assert.doesNotMatch(text, /重启/)
 })
 

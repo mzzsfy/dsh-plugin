@@ -1369,7 +1369,7 @@ function UsagePanelApp() {
 
   if (accounts === null) {
     return h('div', { className: 'up-panel' },
-      h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+      h('style', { 'data-plugin': '@mzzsfy/dsh-usage-panel', dangerouslySetInnerHTML: { __html: CSS } }),
       h('span', { className: 'up-meta' }, notice !== null ? '读取失败' : '加载中…'),
       notice !== null ? h('div', { className: 'up-notice up-notice--error' }, notice) : null)
   }
@@ -1395,7 +1395,7 @@ function UsagePanelApp() {
   const anyBusy = Object.keys(busy).some((id) => busy[id] === true)
 
   return h('div', { className: 'up-panel' },
-    h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
+    h('style', { 'data-plugin': '@mzzsfy/dsh-usage-panel', dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'up-head' },
       h('span', { className: 'up-head__title' }, '账号详情'),
       h('span', { className: 'up-spacer' }),

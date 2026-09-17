@@ -1,53 +1,95 @@
-// client 守卫:注册 id / 开关形制 / 类名前缀 / 宿主 slot 注册形态。
-import { readFileSync } from 'node:fs'
+// 体量守卫:lib 每源文件 ≤ 600 行;client 单文件预算 ≤ 1500 行(平台单入口约束);
+// client 设置页关键契约(模块注册/守卫类名/别名 token)钉住
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import test from 'node:test'
-import assert from 'node:assert/strict'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { name } = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
-const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+const MAX_LINES = 600
+const CLIENT_MAX_LINES = 1500
 
-test('client.js 注册 id 为完整包名', () => {
-  const match = source.match(/__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/)
-  assert.ok(match, 'client.js 缺少 __ModuleLoader__.load 注册')
-  assert.equal(match[1], name)
-})
-
-test('开关形制:track+thumb 视觉开关,状态选择器以 input[type=checkbox] 锚定', () => {
-  // 裸 checkbox 禁止直出:checkbox 字面量仅允许出现在 Switch 工厂内
-  const occurrences = [...source.matchAll(/type: 'checkbox'/g)].map((match) => match.index)
-  assert.equal(occurrences.length, 1, `checkbox 字面量出现 ${occurrences.length} 次`)
-  const factoryStart = source.indexOf('function Switch(')
-  assert.ok(occurrences[0] > factoryStart, 'checkbox 字面量必须位于 Switch 工厂内')
-  // 三态均以 checkbox 锚定,禁止裸 input 状态选择器
-  assert.match(source, /\.rsww-switch input\[type="checkbox"\]:checked \+/)
-  assert.match(source, /\.rsww-switch input\[type="checkbox"\]:focus-visible \+/)
-  const bare = source.match(/\.rsww-switch input:(?!\[type)[a-z-]+/g)
-  assert.equal(bare, null, `裸 input 状态选择器: ${bare}`)
-})
-
-test('类名前缀 rsww- 全量约束(全局注入防跨包冲突)', () => {
-  const classNames = [...source.matchAll(/className: '([^']+)'/g)].map((match) => match[1]).filter(Boolean)
-  for (const cls of classNames) {
-    for (const part of cls.split(' ')) {
-      assert.match(part, /^rsww-/, `类名 ${part} 未带 rsww- 前缀`)
-    }
+function walk(dir, out = []) {
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name)
+    if (statSync(full).isDirectory()) walk(full, out)
+    else if (/\.(mjs|js)$/.test(name) && !name.endsWith('.test.mjs')) out.push(full)
   }
-  const cssClasses = [...source.matchAll(/\.rsww-[a-z-]+/g)].map((match) => match[0])
-  assert.ok(cssClasses.length > 0, 'CSS 类名缺失')
-  const foreign = source.match(/\.(?!rsww-)[a-z][a-z-]+\{/g) || []
-  assert.deepEqual(foreign.filter((c) => !c.startsWith('.rsww-')), [], `CSS 存在非 rsww- 前缀类: ${foreign}`)
+  return out
+}
+
+test('Given 全部 lib 源文件 When 统计行数 Then 每文件 ≤ 600 行', () => {
+  const files = walk(join(PKG_ROOT, 'lib'))
+  assert.ok(files.length >= 5)
+  for (const file of files) {
+    const lines = readFileSync(file, 'utf8').split('\n').length
+    assert.ok(lines <= MAX_LINES, `${file} 行数 ${lines} 超限 ${MAX_LINES}`)
+  }
 })
 
-test('宿主注册形态:slots 点分注入 settings.section(旧宿主 fiber 未激活即干净禁用)', () => {
-  assert.match(source, /inject: \['slots'\]/)
-  assert.match(source, /ctx\.slots\.inject\('settings\.section'/)
-  assert.match(source, /id: 'rs-workflow-board'/)
+test('Given client.js When 统计行数 Then ≤ 1500 行(平台单入口,分区 banner 预算)', () => {
+  const lines = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8').split('\n').length
+  assert.ok(lines <= CLIENT_MAX_LINES, `client.js 行数 ${lines} 超预算 ${CLIENT_MAX_LINES}`)
 })
 
-test('数据通道契约:仅经 /api/rs-workflow/* 读写,无直连存储', () => {
-  assert.match(source, /'\/api\/rs-workflow\/'/)
-  assert.doesNotMatch(source, /node:|fs\.|require\('node/)
+test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/类名前缀/别名 token 齐备', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(text.includes('__ModuleLoader__.load'))
+  assert.ok(text.includes("id: '@mzzsfy/dsh-rs-workflow'"))
+  assert.ok(text.includes('/api/rsww/'))
+  assert.ok(!text.includes('/api/rs-workflow/'))
+  assert.ok(text.includes('--dsw-alias-'))
+  // 开关规约:checkbox 锚定 + track/thumb 结构
+  assert.ok(text.includes('.rsww-switch input[type="checkbox"]:checked + .rsww-switch__track'))
+})
+
+test('Given client.js When 检查视图职责 Then 会话页签+设置页分区并存,无运行时残留', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  // 会话页签(FlowView 经会话感知条件注入);运行胶囊已删(主循环复活后感知由主循环承担,
+  // 且胶囊计数不分会话形成跨会话污染——2026-09 决议:删胶囊留页签)
+  assert.ok(text.includes("'conversation.view'"), '会话页签必须在场')
+  assert.ok(!text.includes("'conversation.session.header.actions'"), '运行胶囊必须不在场')
+  // v5 修订四处:裁决来源徽标/waiting_approval 态/plan.source/warnings 徽标
+  assert.ok(text.includes("waiting_approval: { label: '待审批'"), '状态表须含 waiting_approval')
+  assert.ok(text.includes("'代审'") && text.includes("'真人'"), '裁决来源徽标(代审/真人)')
+  assert.ok(text.includes("'模型规划'") && text.includes("'模板全序'"), 'plan.source 标识')
+  assert.ok(text.includes("React.createElement(Badge, { tone: 'warn' }, '警告 ' + warnings.length)"), 'warnings 徽标')
+  assert.ok(text.includes("by: 'user'"), '页签裁决提交带 by:user')
+  // 驳回两步:先填意见再确认,意见作 redo.comments 注入重做批次
+  assert.ok(text.includes('确认驳回') && text.includes('rejectText'), '驳回须展开意见输入行(两步提交)')
+  assert.ok(text.includes("control('reject', { by: 'user', reason: rejectText.trim() })"), '驳回提交携带 reason')
+  // 设置页不承载运行记录(会话页签唯一视图)
+  assert.equal(text.includes("{ key: 'runs'"), false, '设置页不得有运行记录子页')
+})
+
+test('Given client.js When 检查死通道 Then 不得派发无监听的 window 自定义事件', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(!text.includes('dispatchEvent'), '禁止 window.dispatchEvent 死通道')
+})
+
+test('Given client.js When 检查复制能力 Then 规范面板与全文展开须挂复制按钮(双通道写入)', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(text.includes('navigator.clipboard?.writeText'), 'clipboard API 优先')
+  assert.ok(text.includes("execCommand('copy')"), '非安全上下文 execCommand 兜底')
+  assert.ok(text.includes('h(CopyButton, { text: specText })'), '模板规范面板挂复制')
+})
+
+test('Given client.js When 检查模板详情 Then 只读弹窗+一键检验覆盖所有模板卡', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(text.includes("'template?id='"), '详情数据经 host 解析路由')
+  assert.ok(text.includes('h(TemplateViewer, { entry: viewing'), '查看态接线')
+  assert.ok(text.includes("onClick: onView }, '详情'"), '所有模板卡带详情入口')
+  assert.ok(text.includes("dryRun: true }"), '一键检验走 dryRun 不落盘')
+  assert.ok(text.includes('rsww-modal'), '悬浮弹窗壳')
+})
+
+test('Given client.js When 检查 color 值 Then 不使用裸 hex(仅 alias token 或 fallback)', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  const cssMatch = text.match(/const CSS = `([\s\S]*?)`/)
+  assert.ok(cssMatch)
+  const css = cssMatch[1]
+  // 允许 rgba fallback 与 color-mix;裸 hex 色值不允许(别名 token 主导,fallback 允许)
+  const bareHex = css.match(/(?<![-#])[0-9a-fA-F]{6}\b/g) || []
+  assert.deepEqual(bareHex, [])
 })

@@ -355,6 +355,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       if (existing) return
       const style = document.createElement('style')
       style.id = 'dsh-cron-board-style'
+      // 官方契约:插件自注样式必须自带 data-plugin,否则任意后续插件材质化时
+      // claimStyles 会把它归属给该插件,其 HMR 重建即整批误删本插件样式
+      style.setAttribute('data-plugin', '@mzzsfy/dsh-cron-board')
       style.textContent = STYLE
       document.head.appendChild(style)
     }

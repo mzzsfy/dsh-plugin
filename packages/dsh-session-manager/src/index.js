@@ -19,33 +19,16 @@ import {
   DAY_MS,
   DEFAULT_AUTO_ARCHIVE_DAYS,
   DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-  HISTORY_ALIGN_SLICE_MS,
-  HISTORY_ALIGN_THROTTLE_MS,
-  HISTORY_ALIGN_YIELD_MS,
-  HISTORY_FOCUS_WAIT_MS,
-  HISTORY_INPUT_LIMIT,
-  HISTORY_INPUT_MAX_CHARS,
-  HISTORY_SCOPES,
-  HISTORY_SESSION_SCAN_LIMIT,
-  HISTORY_PROMPTS_MAX,
-  HISTORY_STARTUP_DELAY_MS,
-  HISTORY_STARTUP_SCAN_LIMIT,
   aggregateDeleteOutcome,
-  aggregateInputs,
   artifactLooksBlank,
   deleteEligibility,
-  extractUserInputs,
-  isLegacyDecompressHost,
   isSessionRunning,
-  maxArtifactBytesForHost,
   mergeDeletedEntry,
   removeDeletedEntry,
   selectArchiveCandidates,
   updatedAtOf,
 } from './core.mjs'
-import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
-import { trashPath } from './trash.mjs'
-import { createRequire } from 'node:module'
+import { moveToQuarantine, restoreFromQuarantine, trashPath } from './trash.mjs'
 
 export const name = 'dsh-session-manager'
 
@@ -54,7 +37,8 @@ export const inject = ['webServer', 'workspaceRegistry', 'sessionQuery', 'storag
 const NAMESPACE = 'session-manager'
 const WORKSPACE_DOMAIN_NAME = 'workspace'
 
-// 已删除台账域:global 单列表,条目为回收站还原后重挂载所需的最小信息
+// 已删除台账域:global 单列表,条目为回收站还原后重挂载所需的最小信息;
+// heldPath 仅回收区降级条目携带(暂存路径,重挂载时移回 path 原位置)
 const LEDGER_SPEC = defineDomain({
   name: 'session_manager',
   version: 1,
@@ -64,6 +48,7 @@ const LEDGER_SPEC = defineDomain({
       deleted: z.array(z.object({
         sessionId: z.string(),
         path: z.string(),
+        heldPath: z.string().optional(),
         deletedAt: z.number(),
       })),
     }),
@@ -99,20 +84,18 @@ export const MESSAGES = {
   inFlight: '该会话正在删除中,请稍后重试',
   badJsonBody: '请求体不是合法 JSON',
   systemError: '操作失败(系统级错误,详见服务端日志)',
+  heldMissing: '回收区暂存已缺失,原位置亦无产物,无法找回',
+  restoreFailed: '回收区还原失败',
 }
 
-// trash 执行器出口:进程级唯一 OS 副作用注入点,测试经此桩替
-export const executor = { trashPath }
+// trash 执行器出口:进程级唯一 OS 副作用注入点(回收站/回收区搬移/移回),测试经此桩替
+export const executor = { trashPath, moveToQuarantine, restoreFromQuarantine }
 
 const SETTINGS_SCHEMA = schemastery.object({
   autoArchiveDays: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_DAYS)
     .description('自动归档阈值天数,0 表示关闭;新会话创建、启动与周期评估时生效'),
   autoArchiveIntervalHours: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS)
     .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
-  historyEnabled: schemastery.boolean().default(true)
-    .description('历史输入浮层(Alt+↑),低频功能,关闭后输入框锚点与快捷键整体不渲染;变更刷新页面生效'),
-  steerRecallEnabled: schemastery.boolean().default(true)
-    .description('插话撤回图标(输入框上方),低频功能,关闭后撤回图标整体不渲染;变更刷新页面生效'),
 })
 
 function sendJson(res, status, payload) {
@@ -139,8 +122,6 @@ function readSettings(ctx) {
   return {
     days: Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS,
     intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
-    historyEnabled: !value || value.historyEnabled !== false,
-    steerRecallEnabled: !value || value.steerRecallEnabled !== false,
   }
 }
 
@@ -220,6 +201,15 @@ export function apply(ctx, config) {
   let evaluating = false
   // 删除路由同 id 并发去重(进程内)
   const inFlightDeletes = new Set()
+
+  // 插件回收区:系统回收站不可用环境的删除降级暂存地,重挂载时移回原位置。
+  // 测试经 env DSH_QUARANTINE_DIR 注入临时目录
+  const quarantineDir = process.env.DSH_QUARANTINE_DIR
+    || join(homedir(), '.dsh', 'trash', 'session-manager')
+
+  // header 查找缓存:归档/删除/重挂载路由共用(inputs 浮层已迁 dsh-context-manager)
+  const headerCache = new Map()
+  ctx.effect(() => () => headerCache.clear(), 'session-manager header cache')
 
   // 台账域:应用装载即打开,路由内 await;打开失败由路由响应,此处仅防未处理拒绝
   const ledgerReady = ctx.storageDomain.open(LEDGER_SPEC)
@@ -357,11 +347,12 @@ export function apply(ctx, config) {
     return run
   }
 
-  async function recordDeletedEntry(sessionId, path) {
+  async function recordDeletedEntry(sessionId, path, heldPath) {
     return withLedgerLock(async () => {
       const ledger = await ledgerReady
       const current = ledger.global.get()
-      const merged = mergeDeletedEntry(current.deleted, { sessionId, path, deletedAt: Date.now() })
+      const entry = { sessionId, path, deletedAt: Date.now(), ...(heldPath !== undefined ? { heldPath } : {}) }
+      const merged = mergeDeletedEntry(current.deleted, entry)
       await ledger.global.set({ ...current, deleted: merged.slice(0, LEDGER_MAX_ENTRIES) })
     })
   }
@@ -386,252 +377,14 @@ export function apply(ctx, config) {
     }
   }
 
-  // 历史输入:工作区粒度持久缓存(~/.dsh/historyPrompt/<工作区>-<hash>.json)。
-  // 浮层请求直接读缓存文件立即返回(毫秒级);对齐在后台解压范围内会话产物,
-  // 与缓存合并去重后写回——运行中会话也参与(实时追加其新输入)。
-  // 解压不重复执行:每会话提取结果持久化在工作区缓存 extracts 段,附产物 stat 指纹
-  // (mtimeMs+size),对齐时先 stat 比对,产物没变零解压——判断全部基于磁盘,跨重启生效。
-  // 运行中会话(当前会话)提取结果只保留内存不落盘(产物持续变化,落盘指纹立即失效)。
-  // 解压是同步 CPU 操作:对齐中连续占用超 SLICE 即让出 YIELD,启动对齐延迟
-  // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
-  const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
-    || join(homedir(), '.dsh', 'historyPrompt')
-  // 巨产物跳过线按宿主版本黑名单取值:0.1.1/0.1.2 解压实现无周期让出从严 8MiB,
-  // 其余 16MiB。运行宿主清单经 require 链解析(插件随宿主树部署时必命中),
-  // 探测失败按黑名单保守回退旧线。激活时求值一次即冻结,热路径只读值;
-  // 宿主热升级后重启生效
-  let maxArtifactBytes = resolveMaxArtifactBytes()
-  function resolveMaxArtifactBytes() {
-    let version = null
+  // 台账条目读取:重挂载移回依据;域不可用或未命中均按无条目
+  async function ledgerEntryFor(sessionId) {
     try {
-      version = createRequire(import.meta.url)('@deepseek-ai/dsh/package.json').version
+      const ledger = await ledgerReady
+      return ledger.global.get().deleted.find((item) => item.sessionId === sessionId)
     } catch {
-      version = null
+      return undefined
     }
-    return maxArtifactBytesForHost(version)
-  }
-  const alignThrottle = new Map()
-  const runtimeExtracts = new Map()
-  const headerCache = new Map()
-  ctx.effect(() => () => { alignThrottle.clear(); runtimeExtracts.clear(); headerCache.clear() }, 'session-manager history align state')
-
-  // 双车道对齐队列:批量车道(启动/请求触发,一次解一整个窗口)与焦点车道
-  // (单会话实时追加,延时敏感)各自串行、互不等待——焦点车道不被冷启动
-  // 批量任务的分钟级解压堵死。两车道并发写同一工作区缓存时,最坏丢一次
-  // 更新,但批量窗口必含活跃会话(其自身重读即收敛),下轮指纹失配自愈
-  function makeLane() {
-    const tasks = []
-    let draining = false
-    return (body) => new Promise((resolve) => {
-      tasks.push(() => body().then(resolve, resolve))
-      if (draining) return
-      draining = true
-      void (async () => {
-        while (tasks.length > 0) await tasks.shift()()
-        draining = false
-      })()
-    })
-  }
-  const enqueueBulkAlign = makeLane()
-  const enqueueFocusAlign = makeLane()
-
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms))
-  }
-
-  async function safeStat(path) {
-    try {
-      const info = await stat(path)
-      return { mtimeMs: info.mtimeMs, size: info.size }
-    } catch {
-      return null
-    }
-  }
-
-  // 单会话提取:产物 stat 指纹与缓存一致即复用(零解压);否则解压并更新缓存。
-  // 运行中会话走内存指纹(runtimeExtracts),其余走磁盘 extracts
-  async function extractSession(recordItem, fingerprint, extracts, isRunning) {
-    const sessionId = recordItem.header.id
-    const known = isRunning ? runtimeExtracts.get(sessionId) : extracts[sessionId]
-    if (fingerprint !== null && known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size) {
-      return known.entries
-    }
-    const snapshot = await ctx.sessionQuery.readSession(sessionId)
-    const entries = extractUserInputs(snapshot.events)
-    const record = { mtimeMs: fingerprint === null ? 0 : fingerprint.mtimeMs, size: fingerprint === null ? 0 : fingerprint.size, entries }
-    if (isRunning) runtimeExtracts.set(sessionId, record)
-    else if (fingerprint !== null) extracts[sessionId] = record
-    return entries
-  }
-
-  // 批量对齐执行体:列出范围会话,逐个按指纹增量提取(磁盘 extracts 复用),
-  // 与缓存合并后原子写回,extracts 裁剪到完整扫描窗口。经批量队列入队。
-  // 超过 MAX_ARTIFACT 的巨产物直接跳过:解压耗时与内存峰值随产物规模失控
-  // (宿主内部逐帧解压带周期让出,不阻塞主循环);其历史来自缓存 entries 的既有贡献
-  function alignWorkspaceNow(cwd) {
-    return enqueueBulkAlign(async () => {
-      const agents = ctx.get('agents')
-      const persistence = ctx.get('sessionPersistence')
-      const records = await ctx.sessionQuery.listSessions()
-      const window = records
-        .filter((recordItem) => recordItem.header.cwd !== undefined && samePath(recordItem.header.cwd, cwd))
-        .slice(0, HISTORY_SESSION_SCAN_LIMIT)
-      const cached = await readWorkspaceCache(cacheDir, cwd)
-      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
-      const fresh = []
-      let sliceStart = Date.now()
-      for (const recordItem of window) {
-        const isRunning = isSessionRunning({ agents, sessionId: recordItem.header.id })
-        const located = persistence ? persistence.locate(recordItem.header) : undefined
-        const fingerprint = located ? await safeStat(located.path) : null
-        if (fingerprint !== null && fingerprint.size > resolveMaxArtifactBytes()) continue
-        try {
-          const entries = await extractSession(recordItem, fingerprint, extracts, isRunning)
-          fresh.push(...entries.map((entry) => ({ ...entry, sid: recordItem.header.id })))
-        } catch (error) {
-          ctx.logger && ctx.logger.warn('session-manager 历史输入对齐失败(' + recordItem.header.id + '): ' + String(error && error.stack || error))
-        }
-        // 解压(可能命中缓存跳过)后检查连续占用:超 SLICE 让出 YIELD 不霸占主循环
-        if (Date.now() - sliceStart > HISTORY_ALIGN_SLICE_MS) {
-          await sleep(HISTORY_ALIGN_YIELD_MS)
-          sliceStart = Date.now()
-        }
-      }
-      // extracts 裁剪:仅保留窗口内非运行会话(运行中走内存,窗口外已淘汰)
-      const windowIds = new Set(window.map((recordItem) => recordItem.header.id))
-      const prunedExtracts = {}
-      for (const [sessionId, record] of Object.entries(extracts)) {
-        if (windowIds.has(sessionId) && !isSessionRunning({ agents, sessionId })) prunedExtracts[sessionId] = record
-      }
-      const merged = aggregateInputs(
-        (cached ? cached.entries : []).concat(fresh),
-        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
-      )
-      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts: prunedExtracts })
-    })
-  }
-
-  // 焦点对齐执行体:只解目标会话并写回(实时追加路径),走独立焦点车道,
-  // 不被批量车道的分钟级解压堵死。不裁剪 extracts(裁剪由批量对齐负责),
-  // 只新增/更新目标会话指纹
-  function alignSessionFocus(cwd, header) {
-    return enqueueFocusAlign(async () => {
-      const sessionId = header.id
-      const persistence = ctx.get('sessionPersistence')
-      const located = persistence ? persistence.locate(header) : undefined
-      const fingerprint = located ? await safeStat(located.path) : null
-      if (fingerprint === null || fingerprint.size > resolveMaxArtifactBytes()) return
-      const isRunning = isSessionRunning({ agents: ctx.get('agents'), sessionId })
-      const cached = await readWorkspaceCache(cacheDir, cwd)
-      const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
-      const entries = await extractSession({ header }, fingerprint, extracts, isRunning)
-      const merged = aggregateInputs(
-        (cached ? cached.entries : []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))),
-        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
-      )
-      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts })
-    })
-  }
-
-  // 节流壳:请求触发的后台对齐入口,30s 内同工作区只排队一次
-  function alignWorkspace(cwd) {
-    const now = Date.now()
-    const last = alignThrottle.get(cwd)
-    if (last !== undefined && now - last < HISTORY_ALIGN_THROTTLE_MS) return
-    alignThrottle.set(cwd, now)
-    void alignWorkspaceNow(cwd)
-  }
-
-  // 启动:只确保目录存在,**零解压**——历史直接读磁盘缓存(重启前的输入本就在
-  // entries 里),宿主启动零负担;全量对齐延迟 STARTUP_DELAY 再跑(只解产物变过
-  // 的会话)。定时器随插件销毁清理
-  const startupTimers = []
-  ctx.effect(() => () => { for (const timer of startupTimers) clearTimeout(timer) }, 'session-manager history startup timers')
-
-  function scheduleStartupAlign() {
-    startupTimers.push(setTimeout(() => {
-      void (async () => {
-        await ensureCacheDir(cacheDir)
-        const records = await ctx.sessionQuery.listSessions()
-        const workspaces = []
-        for (const recordItem of records.slice(0, HISTORY_STARTUP_SCAN_LIMIT)) {
-          const recordCwd = recordItem.header.cwd
-          if (recordCwd === undefined || workspaces.some((known) => samePath(known, recordCwd))) continue
-          workspaces.push(recordCwd)
-        }
-        for (const workspaceCwd of workspaces) alignWorkspace(workspaceCwd)
-      })().catch((error) => {
-        ctx.logger && ctx.logger.warn('session-manager 历史缓存启动对齐失败: ' + String(error && error.stack || error))
-      })
-    }, HISTORY_STARTUP_DELAY_MS))
-  }
-  scheduleStartupAlign()
-
-  // 聚焦对齐去重:同会话在队列/执行中不重复入队(轮询重入须挡住风暴)。
-  // 值为在途 promise,路由据此有界等待同一次对齐
-  const pendingFocus = new Map()
-  ctx.effect(() => () => pendingFocus.clear(), 'session-manager history pending focus')
-
-  // 按范围读取历史:全部直接读持久缓存(毫秒级)立即返回,对齐由后台进行;
-  // aligned=false 表示数据未就绪(首次无缓存,或请求会话产物已变而缓存未跟上),
-  // client 据此提示等待并静默重拉
-  async function collectInputs(scope, sessionId, header) {
-    const aggregateOptions = { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }
-    const cwd = header.cwd
-    if (scope === 'prompts') {
-      const items = await readPrompts(cacheDir)
-      return { inputs: aggregateInputs(items, aggregateOptions), aligned: true }
-    }
-    if (scope === 'session') {
-      if (cwd === undefined) return { inputs: [], aligned: true }
-      alignWorkspace(cwd)
-      const read = async () => {
-        const cached = await readWorkspaceCache(cacheDir, cwd)
-        return {
-          cached,
-          mine: aggregateInputs(cached ? cached.entries.filter((entry) => entry.sid === sessionId) : [], aggregateOptions),
-        }
-      }
-      // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
-      // 只解该会话并写回。路由有界等待本次对齐(首条 <3s 预算):正常会话单次
-      // 请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,后续
-      // 轮询流式补齐。巨产物跳过聚焦(解压耗时与内存峰值失控),维持 aligned=true
-      const check = async (cached) => {
-        const agents = ctx.get('agents')
-        const running = isSessionRunning({ agents, sessionId })
-        const known = running ? runtimeExtracts.get(sessionId) : cached && cached.extracts ? cached.extracts[sessionId] : undefined
-        const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
-        const fingerprint = located ? await safeStat(located.path) : null
-        return {
-          stale: fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
-          oversize: fingerprint !== null && fingerprint.size > resolveMaxArtifactBytes(),
-        }
-      }
-      let { cached, mine } = await read()
-      let { stale, oversize } = await check(cached)
-      if (stale && !oversize) {
-        let focus = pendingFocus.get(sessionId)
-        if (!focus) {
-          focus = alignSessionFocus(cwd, header).finally(() => pendingFocus.delete(sessionId))
-          pendingFocus.set(sessionId, focus)
-        }
-        const done = await Promise.race([focus.then(() => true), sleep(HISTORY_FOCUS_WAIT_MS).then(() => false)])
-        ;({ cached, mine } = await read())
-        ;({ stale } = await check(cached))
-        if (!done || stale) return { inputs: mine, aligned: false }
-        return { inputs: mine, aligned: true }
-      }
-      return { inputs: mine, aligned: cached !== null }
-    }
-    if (scope === 'global') {
-      // 浮层轮询路径:stat 指纹缓存,产物未变的文件不再重复读盘
-      const caches = await listWorkspaceCachesCached(cacheDir)
-      for (const cache of caches) alignWorkspace(cache.cwd)
-      return { inputs: aggregateInputs(caches.flatMap((cache) => cache.entries), aggregateOptions), aligned: true }
-    }
-    const cached = await readWorkspaceCache(cacheDir, cwd)
-    if (cwd !== undefined) alignWorkspace(cwd)
-    return { inputs: aggregateInputs(cached ? cached.entries : [], aggregateOptions), aligned: cached !== null }
   }
 
   // 幽灵残留清理:产物已缺失的会话仅解除列表可见性(detach + 归档清理),
@@ -650,6 +403,28 @@ export function apply(ctx, config) {
       suffix += MESSAGES.ghostArchiveSuffix
     }
     return suffix
+  }
+
+  // 重挂载前把回收区暂存产物移回原位置:回收区条目的找回动作就是重挂载本身,
+  // 不要求用户手工搬移。原位置已有产物(已自行还原)或暂存缺失时不动
+  async function restoreHeldArtifact(sessionId) {
+    const entry = await ledgerEntryFor(sessionId)
+    if (entry === undefined || entry.heldPath === undefined) return
+    const originalGone = await stat(entry.path).then(() => false, (error) => {
+      if (error && error.code === 'ENOENT') return true
+      throw error
+    })
+    if (!originalGone) return
+    const heldExists = await stat(entry.heldPath).then(() => true, (error) => {
+      if (error && error.code === 'ENOENT') return false
+      throw error
+    })
+    if (!heldExists) throw new Error(MESSAGES.heldMissing)
+    try {
+      await executor.restoreFromQuarantine(entry.heldPath, entry.path)
+    } catch (error) {
+      throw new Error(MESSAGES.restoreFailed + ': ' + String(error && error.message || error))
+    }
   }
 
   const routes = [
@@ -772,27 +547,33 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.running })
             return
           }
-          let trashError
+          // 处置:优先系统回收站;不可用(容器无 gio/dbus 等)降级插件回收区
+          // rename 搬移,仍可经重挂载移回原位置。双失败才会话保留并拒绝,
+          // 原始回收站错误落日志(降级环境的诊断依据),拒绝响应携回收区错误
+          let heldPath
           try {
             await executor.trashPath(artifactDir)
-          } catch (error) {
-            trashError = error
+          } catch (trashError) {
+            ctx.logger && ctx.logger.warn('session-manager 系统回收站不可用(' + sessionId + '),尝试回收区降级: ' + String(trashError))
+            try {
+              heldPath = await executor.moveToQuarantine(artifactDir, quarantineDir)
+            } catch (heldError) {
+              sendJson(res, 400, { error: MESSAGES.trashFailed + '(系统回收站与插件回收区均不可用): ' + String(heldError && heldError.message || heldError) })
+              return
+            }
           }
-          if (trashError !== undefined) {
-            sendJson(res, 400, { error: MESSAGES.trashFailed + ': ' + String(trashError) })
-            return
-          }
+          const quarantined = heldPath !== undefined
           // 执行期翻转检测:OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行。
           // 产物已移走,中断只会更糟,照常完成收尾,但把不变量破坏变为可观测事件
           const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
           if (runningDuringTrash) {
             ctx.logger && ctx.logger.warn('session-manager 删除执行期间会话恢复运行: ' + sessionId)
           }
-          // 台账在 trash 成功后立即记录:产物已进回收站,后续任何半失败都不影响还原资格;
+          // 台账在处置成功后立即记录:产物已离开原位置,后续任何半失败都不影响还原资格;
           // 台账失败只降级重挂载便利,不回滚删除
           let ledgerError
           try {
-            await recordDeletedEntry(sessionId, artifactDir)
+            await recordDeletedEntry(sessionId, artifactDir, heldPath)
           } catch (error) {
             ledgerError = error
             ctx.logger && ctx.logger.warn('session-manager 台账记录失败(' + sessionId + '): ' + String(error && error.stack || error))
@@ -812,12 +593,16 @@ export function apply(ctx, config) {
               ctx.logger && ctx.logger.warn('session-manager 归档清理失败(' + sessionId + '): ' + String(error && error.stack || error))
             }
           }
-          sendJson(res, 200, aggregateDeleteOutcome({
-            detachFailed: detachError !== undefined,
-            archiveCleanupFailed,
-            ledgerFailed: ledgerError !== undefined,
-            runningDuringTrash,
-          }))
+          sendJson(res, 200, {
+            ...aggregateDeleteOutcome({
+              detachFailed: detachError !== undefined,
+              archiveCleanupFailed,
+              ledgerFailed: ledgerError !== undefined,
+              runningDuringTrash,
+              quarantined,
+            }),
+            mode: quarantined ? 'quarantine' : 'os',
+          })
         } catch (error) {
           respondError(ctx, res, error)
         } finally {
@@ -830,117 +615,6 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'GET')) return
         sendJson(res, 200, { periodic: { ...periodic } })
-      },
-    },
-    {
-      path: '/api/session-manager/inputs',
-      handler: async (req, res) => {
-        if (!rejectMethod(req, res, 'GET')) return
-        try {
-          const url = new URL(req.url, 'http://localhost')
-          const sessionId = (url.searchParams.get('sessionId') || '').trim()
-          if (sessionId === '') throw new Error('sessionId 不能为空')
-          const scopeRaw = url.searchParams.get('scope') || 'session'
-          const scope = HISTORY_SCOPES.includes(scopeRaw) ? scopeRaw : 'session'
-          const header = await findHeader(ctx, sessionId, headerCache)
-          if (header === undefined) {
-            sendJson(res, 400, { error: MESSAGES.unknownSession })
-            return
-          }
-          // workspace 范围依赖 cwd 归属;无 cwd 会话在 session 范围无从定位工作区缓存,
-          // global 不依赖 cwd 照常聚合
-          const result = scope === 'workspace' && header.cwd === undefined
-            ? { inputs: [], aligned: true }
-            : await collectInputs(scope, sessionId, header)
-          sendJson(res, 200, result)
-        } catch (error) {
-          respondError(ctx, res, error)
-        }
-      },
-    },
-    {
-      // 常用提示词收藏切换:text 已收藏则移除,否则收藏(截断与上限同历史输入)
-      path: '/api/session-manager/prompts/toggle',
-      handler: async (req, res) => {
-        if (!rejectMethod(req, res, 'POST')) return
-        try {
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
-          const text = typeof body.text === 'string' ? body.text.trim() : ''
-          if (text === '') throw new Error('text 不能为空')
-          const items = await readPrompts(cacheDir)
-          const at = items.findIndex((item) => item.text === text)
-          let collected
-          if (at >= 0) {
-            items.splice(at, 1)
-            collected = false
-          } else {
-            items.unshift({ text: text.slice(0, HISTORY_INPUT_MAX_CHARS), at: Date.now() })
-            if (items.length > HISTORY_PROMPTS_MAX) items.length = HISTORY_PROMPTS_MAX
-            collected = true
-          }
-          await writePrompts(cacheDir, items)
-          sendJson(res, 200, { collected })
-        } catch (error) {
-          respondError(ctx, res, error)
-        }
-      },
-    },
-    {
-      // 历史浮层启停:读走 settings(原生设置页与本面板开关同一存储),
-      // 写经 settings.update,原生设置页与本面板即时同值
-      path: '/api/session-manager/history-enabled',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
-            return
-          }
-          if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
-          await settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
-        } catch (error) {
-          respondError(ctx, res, error)
-        }
-      },
-    },
-    {
-      // 插话撤回启停:与历史浮层开关同构,读走 settings,写经 settings.update
-      path: '/api/session-manager/steer-recall-enabled',
-      handler: async (req, res) => {
-        try {
-          if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
-            return
-          }
-          if (!rejectMethod(req, res, 'POST')) return
-          let body
-          try {
-            body = JSON.parse(await readBody(req))
-          } catch {
-            throw new Error(MESSAGES.badJsonBody)
-          }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
-          await settings.update(NAMESPACE, { steerRecallEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
-        } catch (error) {
-          respondError(ctx, res, error)
-        }
       },
     },
     {
@@ -991,6 +665,17 @@ export function apply(ctx, config) {
         if (!rejectMethod(req, res, 'POST')) return
         try {
           const sessionId = await requireSessionId(req)
+          // 移回依据是台账条目,台账域不可用时整个重挂载拒绝:
+          // 静默按无条目处理会让回收区产物永远找不回,还误导用户去系统回收站
+          try {
+            await ledgerReady
+          } catch {
+            sendJson(res, 400, { error: MESSAGES.systemError })
+            return
+          }
+          // 回收区暂存的产物先移回原位置(host 按产物现状列会话,移回后 header 可见);
+          // OS 回收站条目无 heldPath,此调用为空操作
+          await restoreHeldArtifact(sessionId)
           // 产物还原的判定即持久层能重新读到 header:未还原时在此拒绝
           const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {

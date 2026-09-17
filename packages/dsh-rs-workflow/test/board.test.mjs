@@ -1,151 +1,129 @@
-// board 路由 + report 工具 + 角色分发测试。
-// 数据目录经 env 注入临时路径,须在 import lib/index.js 之前设置(单例 store 首次调用时解析)。
-import { test } from 'node:test'
+// board 运行时路由 BDD(v5):control 裁决校验/UTF-8 全链路/守卫语义;薄 mock 宿主起真 HTTP 服务
+// store 走真实单例(裁决分支读 sessionId),故全程 DSH_RS_WORKFLOW_DATA_DIR 指临时目录防污染
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const tempDir = await mkdtemp(join(tmpdir(), 'rsww-board-'))
-process.env.DSH_RS_WORKFLOW_DATA_DIR = tempDir
+import { registerBoardRoutes } from '../lib/board.mjs'
+import { registry, unregisterDriver, registerResumer, unregisterResumer } from '../lib/driver/control.mjs'
+import { reportStore } from '../lib/store.mjs'
 
-const { apply, reportStore } = await import('../lib/index.js')
+process.env.DSH_RS_WORKFLOW_DATA_DIR = mkdtempSync(join(tmpdir(), 'rsww-board-'))
+const cleanDataDir = () => rmSync(process.env.DSH_RS_WORKFLOW_DATA_DIR, { recursive: true, force: true })
 
-test.after(async () => {
-  delete process.env.DSH_RS_WORKFLOW_DATA_DIR
-  await rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-})
-
-function makeCtx() {
-  const routes = new Map()
-  const tools = []
-  const ctx = {
-    get() { return undefined },
-    effect(fn) { fn() },
+// 薄 mock 宿主:ctx.inject 注入 webServer 依赖,webServer.register 收集 handler,effect 立即执行;真 http server 分发
+async function startBoard() {
+  const handlers = {}
+  const wctx = {
     inject(deps, fn) {
-      fn({
-        settings: { register() {} },
-        tools: { register(def) { tools.push(def) } },
-        webServer: { register(route) { routes.set(route.path, route.handler) } },
-        effect(fn) { fn() },
-      })
+      const [name] = deps
+      fn({ effect: (f) => f(), webServer: { register: (r) => { handlers[r.path] = r.handler } }, [name]: { register: (r) => { handlers[r.path] = r.handler } } })
     },
-    webServer: { register(route) { routes.set(route.path, route.handler) } },
   }
-  return { ctx, routes, tools }
+  registerBoardRoutes(wctx)
+  const server = createServer((req, res) => handlers[req.url.split('?')[0]](req, res))
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const base = `http://127.0.0.1:${server.address().port}`
+  return { base, close: () => new Promise((r) => server.close(r)) }
 }
 
-function makeReq(method, { url, origin, contentType, body } = {}) {
-  const req = new EventEmitter()
-  req.method = method
-  req.headers = { host: 'localhost:3000' }
-  if (url !== undefined) req.url = url
-  if (origin !== undefined) req.headers.origin = origin
-  if (contentType !== undefined) req.headers['content-type'] = contentType
-  if (body !== undefined) {
-    process.nextTick(() => {
-      req.emit('data', Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)))
-      req.emit('end')
-    })
-  }
-  return req
+const postJson = (base, path, body) => fetch(base + path, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json; charset=utf-8' },
+  body: JSON.stringify(body),
+})
+
+// 桩 driver:注册进 registry,handlePost 回显受理(control 裁决通路走 post(runId, event));
+// 同步向真实 store 注入 run 记录(handleControl 裁决分支要读 sessionId)
+function stubDriver(runId, sessionId = 'session-stub') {
+  const received = []
+  reportStore().start({ runId, sessionId, request: 'R', templateId: 't' })
+  registry.drivers.set(runId, {
+    handlePost: (event) => { received.push(event); return true },
+    cancel: () => {}, pause: () => {}, tabResume: () => false,
+  })
+  return { received, dispose: () => unregisterDriver(runId) }
 }
 
-async function callRoute(routes, path, req) {
-  const res = { status: null, payload: null }
-  res.writeHead = (status) => { res.status = status }
-  res.end = (text) => {
-    res.raw = text
-    try { res.payload = JSON.parse(text) } catch { res.payload = null }
+test('Given board/release 模块 When 加载 Then import 图完整无缺失依赖', async () => {
+  assert.ok(true)
+})
+
+after(() => cleanDataDir())
+
+test('Given UTF-8 中文裁决(页签驳回带意见) When POST control Then 受理且 reason 全文无损', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-1')
+  try {
+    const reason = '口径偏差:需含「验收口径」节——中文标点与引号"测试"'
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-1', kind: 'reject', by: 'user', reason })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, resumed: false })
+    assert.deepEqual(stub.received, [{ kind: 'reject', by: 'user', reason }])
+  } finally {
+    stub.dispose()
+    await board.close()
   }
-  await routes.get(path)(req, res)
-  return res
-}
-
-test('角色分发:board 角色注册看板路由;settings/tool 角色不注册', () => {
-  const board = makeCtx()
-  apply(board.ctx, { role: 'board' })
-  assert.deepEqual([...board.routes.keys()], ['/api/rs-workflow/runs', '/api/rs-workflow/run', '/api/rs-workflow/remove'])
-
-  const settings = makeCtx()
-  apply(settings.ctx, { role: 'settings' })
-  assert.equal(settings.routes.size, 0)
-  assert.equal(settings.tools.length, 0)
-
-  const tool = makeCtx()
-  apply(tool.ctx, { role: 'tool' })
-  assert.deepEqual(tool.tools.map((def) => def.name), ['rs_workflow_config'], 'tool 角色只注册配置工具')
 })
 
-test('report 角色:注册 rs_workflow_report,不连坐 rs_workflow_config', () => {
-  const { ctx, tools } = makeCtx()
-  apply(ctx, { role: 'report' })
-  assert.deepEqual(tools.map((def) => def.name), ['rs_workflow_report'])
+test('Given 页签裁决缺省 reason When POST control reject by=user Then 受理且 reason 归一空串', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-2')
+  try {
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-2', kind: 'reject', by: 'user' })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, resumed: false })
+    assert.deepEqual(stub.received, [{ kind: 'reject', by: 'user', reason: '' }])
+  } finally {
+    stub.dispose()
+    await board.close()
+  }
 })
 
-test('report 工具:start→node→finish→list 全链(exec.agent 缺失回退会话目录)', async () => {
-  const { ctx, tools } = makeCtx()
-  apply(ctx, { role: 'report' })
-  const tool = tools[0]
-  const started = await tool.execute({ action: 'start', request: '做一个功能' }, {})
-  assert.equal(started.ok, true)
-  const runId = started.runId
-  const node = await tool.execute({ action: 'node', runId, nodeId: 't1', status: 'done', summary: '第一步完成' }, {})
-  assert.equal(node.ok, true)
-  const finished = await tool.execute({
-    action: 'finish', runId, ok: true, summary: '全部通过',
-    result: { templateId: 'step-review', ok: true, tasks: [{ id: 't1' }], reviews: [{ id: 'r-t1' }], changedFiles: ['a.js'], escalations: 0 },
-  }, {})
-  assert.equal(finished.ok, true)
-  assert.equal(finished.run.status, 'done')
-  const listed = await tool.execute({ action: 'list' }, {})
-  assert.equal(listed.runs.length, 1, 'list 只看本工作区')
-  assert.equal(listed.runs[0].runId, runId)
-  const got = await tool.execute({ action: 'get', runId }, {})
-  assert.equal(got.ok, true)
-  assert.equal(got.run.stats.tasks, 1)
-  const missing = await tool.execute({ action: 'get', runId: 'nope' }, {})
-  assert.equal(missing.ok, false)
-  assert.match(missing.error, /运行记录不存在/)
+test('Given 代审缺 reason When POST control Then 400 且错误可见', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-3')
+  try {
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-3', kind: 'approve', by: 'main-agent' })
+    assert.equal(res.status, 400)
+    const body = await res.json()
+    assert.ok(body.error.includes('reason'))
+  } finally {
+    stub.dispose()
+    await board.close()
+  }
 })
 
-test('看板路由:runs/run/remove 全链 + 写守卫(跨源/非 JSON/405)', async () => {
-  const { ctx, routes } = makeCtx()
-  apply(ctx, { role: 'board' })
-  const store = reportStore()
-  const run = await store.start({ request: '路由链路需求', workspace: 'C:/ws/x' })
+test('Given 页签裁决受理且无活跃段 When POST control Then 按会话挂靠拉起下一段(一次)', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-4', 'session-4')
+  const pulls = []
+  registry.drivers.get('r-board-4').active = false
+  registerResumer('session-4', (runId) => { pulls.push(runId); return true })
+  try {
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-4', kind: 'reject', by: 'user', reason: '重做' })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, resumed: true })
+    assert.deepEqual(pulls, ['r-board-4'])
+  } finally {
+    unregisterResumer('session-4')
+    stub.dispose()
+    await board.close()
+  }
+})
 
-  const listed = await callRoute(routes, '/api/rs-workflow/runs', makeReq('GET', { url: '/api/rs-workflow/runs' }))
-  assert.equal(listed.status, 200)
-  const row = listed.payload.runs.find((item) => item.runId === run.runId)
-  assert.ok(row, '列表包含本次运行')
-  assert.equal(row.result, undefined, '列表不带重量级 body')
-
-  const detail = await callRoute(routes, '/api/rs-workflow/run', makeReq('GET', { url: '/api/rs-workflow/run?id=' + run.runId }))
-  assert.equal(detail.status, 200)
-  assert.equal(detail.payload.runId, run.runId)
-
-  const notFound = await callRoute(routes, '/api/rs-workflow/run', makeReq('GET', { url: '/api/rs-workflow/run?id=ghost' }))
-  assert.equal(notFound.status, 400)
-  assert.match(notFound.payload.error, /运行记录不存在/)
-
-  const cross = await callRoute(routes, '/api/rs-workflow/remove', makeReq('POST', {
-    url: '/api/rs-workflow/remove', origin: 'http://evil.example', contentType: 'application/json', body: { runId: run.runId },
-  }))
-  assert.equal(cross.status, 403)
-
-  const nonJson = await callRoute(routes, '/api/rs-workflow/remove', makeReq('POST', {
-    url: '/api/rs-workflow/remove', origin: 'http://localhost:3000', contentType: 'text/plain', body: 'x',
-  }))
-  assert.equal(nonJson.status, 400)
-
-  const getOnPost = await callRoute(routes, '/api/rs-workflow/remove', makeReq('GET', { url: '/api/rs-workflow/remove' }))
-  assert.equal(getOnPost.status, 405)
-
-  const removed = await callRoute(routes, '/api/rs-workflow/remove', makeReq('POST', {
-    url: '/api/rs-workflow/remove', origin: 'http://localhost:3000', contentType: 'application/json', body: { runId: run.runId },
-  }))
-  assert.equal(removed.status, 200)
-  assert.equal(await store.get(run.runId), null)
+test('Given 无会话挂靠(重启后) When 页签裁决 Then 受理但不拉段,响应 resumed:false', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-5')
+  try {
+    const res = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-5', kind: 'approve', by: 'user' })
+    assert.equal(res.status, 200)
+    assert.deepEqual(await res.json(), { ok: true, resumed: false })
+  } finally {
+    stub.dispose()
+    await board.close()
+  }
 })

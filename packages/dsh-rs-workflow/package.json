@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
-  "description": "若水工作流一体化:安装即得 rs-workflow agent 模式(协议技能、编排引擎、模式组合),含设置表单与工作流配置工具",
-  "version": "0.2.4",
+  "description": "若水工作流设置面:流程模板管理与工作位/预算配置(模板编辑/校验/配置读写)。编排运行时按 v5 设计(docs/rsww-v5/)另行实现。",
+  "version": "1.0.0",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -22,19 +22,16 @@
   },
   "license": "MIT",
   "repository": {
-    "type": "git",
+    "type": "object",
     "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
   },
   "files": [
     "lib",
     "src",
-    "preset",
     "cordis.patch.yml",
     "README.md"
   ],
   "peerDependencies": {
-    "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1"
   }
 }
