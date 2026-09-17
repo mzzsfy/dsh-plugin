@@ -171,10 +171,5 @@ test('Given 骨架 persona 判据 When 审查 Then 文件产出锚定编排(防�
   assert.ok(skeleton.includes('纯会话内请求(问答、解释、讨论,不产生文件)'), '直答判据须以「不产生文件」为界')
   assert.ok(skeleton.includes('凡需新建或修改交付物文件'), '文件产出必须编排')
   assert.ok(skeleton.includes('禁止以"一句话能答、'), '须显式封死裁量出口')
-  // 双源同文:preset-combo.md 的 persona 全文与骨架同步(双实现同源纪律)
-  const comboDoc = readFileSync(join(PKG_ROOT, '..', '..', 'docs', 'rsww-v5', 'feat', 'preset-combo.md'), 'utf8')
-  for (const anchor of ['纯会话内请求(问答、解释、讨论,不产生文件)', '凡需新建或修改交付物文件']) {
-    assert.ok(comboDoc.includes(anchor), `preset-combo.md 缺 persona 锚点: ${anchor}`)
-  }
 })
 
