@@ -36,14 +36,21 @@ async function makeExecutor(t, { jobsBroken = false, logLines = [] } = {}) {
 
 const JOB_BASE = { name: 't', kind: 'shell', command: 'echo hi', schedule: '* * * * *', enabled: true, timeoutMs: 60 * 1000 }
 
-async function dispatchAndSettle(executor, store, jobId) {
-  const [runId] = await executor.dispatch({ ...JOB_BASE, id: jobId }, 'manual')
-  // 等执行链收尾:pump 后单元在后台,轮询至终态或超时
-  for (let i = 0; i < 200; i++) {
-    const row = store.runs.get(runId)
-    if (row && row.status !== 'queued' && row.status !== 'running') return runId
+// 轮询至断言目标状态可见:执行链在 runs 终态后仍有任务卡回填/留痕等后台落定动作,单次读取存在竞态窗口
+async function waitFor(predicate, timeoutMs = 2 * 1000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) throw new Error('waitFor 超时')
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+}
+
+async function dispatchAndSettle(executor, store, jobId) {
+  const [runId] = await executor.dispatch({ ...JOB_BASE, id: jobId }, 'manual')
+  // 等执行链完整落定:runs 终态内存生效早于写链持久化,任务卡回填在其后才可见,以回填为收尾信号
+  // 信号为任务级(同名任务任一单元回填即满足),非特定 run 级;当前调用点无依赖特定 run 落定的断言
+  await waitFor(() => store.jobs.get(jobId)?.lastStatus !== undefined)
   return runId
 }
 
@@ -87,12 +94,8 @@ test('executor:pinned 自愈回写 session.pinnedSessionId 且清除顶层孤立
     readMaxConcurrent: () => 2,
   })
   const [runId] = await executorWithPinned.dispatch({ ...JOB_BASE, kind: 'session', session: { mode: 'pinned', pinnedSessionId: '' }, id: 'j-pin' }, 'manual')
-  for (let i = 0; i < 200; i++) {
-    const row = store.runs.get(runId)
-    if (row && row.status !== 'queued' && row.status !== 'running') break
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-  // Then 绑定写入 session 子对象,顶层无孤立残留
+  // Then 绑定写入 session 子对象,顶层无孤立残留;回填晚于 runs 终态,以回填可见为落定信号
+  await waitFor(() => store.jobs.get('j-pin')?.session?.pinnedSessionId === 's-new')
   const job = store.jobs.get('j-pin')
   assert.equal(job.session.pinnedSessionId, 's-new')
   assert.equal(job.pinnedSessionId, undefined)
@@ -114,11 +117,8 @@ test('executor:runner 拒绝时补写 fail 终态', async (t) => {
   })
   await store.jobs.create({ ...JOB_BASE, id: 'j2' })
   const [runId] = await executor.dispatch({ ...JOB_BASE, id: 'j2' }, 'manual')
-  for (let i = 0; i < 200; i++) {
-    const row = store.runs.get(runId)
-    if (row && row.status === 'fail') break
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
+  // catch 路径先补 runs 终态再回填任务卡,以回填可见为收尾信号
+  await waitFor(() => store.jobs.get('j2')?.lastStatus === 'fail')
   const row = store.runs.get(runId)
   assert.equal(row.status, 'fail')
   assert.match(row.message, /会话服务爆炸/)
@@ -129,7 +129,9 @@ test('executor:runner 拒绝时补写 fail 终态', async (t) => {
 test('executor:运行终态已落库而任务卡回填失败,历史不被覆写', async (t) => {
   const { store, executor, logLines } = await makeExecutor(t, { jobsBroken: true })
   await store.jobs.create({ ...JOB_BASE, id: 'j3' })
-  const runId = await dispatchAndSettle(executor, store, 'j3')
+  const [runId] = await executor.dispatch({ ...JOB_BASE, id: 'j3' }, 'manual')
+  // 任务卡回填被拒必留痕:留痕集合即 catch 路径收尾信号(此场景 lastStatus 永不可见)
+  await waitFor(() => logLines.length === 1)
   // Then 事实成功保留,不被 catch 覆写为 fail;回填缺口留痕可观测
   assert.equal(store.runs.get(runId).status, 'success')
   assert.equal(logLines.length, 1)
@@ -143,7 +145,8 @@ test('executor:运行终态补写失败经 logSystem 留痕', async (t) => {
   const [runId] = await executor.dispatch({ ...JOB_BASE, id: 'j4' }, 'manual')
   // dispatch 完成(记录已落库、runUnit 已入队)后再让 runs 集合损坏:终态写入必失败
   store.runs.update = async () => { throw new Error('数据文件已损坏已备份,已暂停写入以防数据丢失') }
-  await new Promise((resolve) => setTimeout(resolve, 200))
+  // 补写失败必留痕:以留痕可见替代固定等待,消除时序脆弱
+  await waitFor(() => logLines.length === 1)
   // Then 补写失败恰留痕一次,含 runId 与原始错误
   assert.equal(logLines.length, 1)
   assert.ok(logLines[0].includes(runId))

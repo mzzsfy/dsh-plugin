@@ -203,7 +203,8 @@ test('index:tick 到期任务被调度执行(端到端装配)', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-idx-'))
   t.after(async () => {
     delete process.env.DSH_CRON_BOARD_DATA_DIR
-    await rm(dir, { recursive: true, force: true })
+    // 运行终态可见后执行链仍有后台落盘(任务卡回填/日志写),与目录删除竞态,有界重试消解
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
   process.env.DSH_CRON_BOARD_DATA_DIR = dir
   const { ctx, routes, intervals } = makeFullCtx()
