@@ -26,7 +26,8 @@
          时,即 rs_workflow_resume 补拉;waiting_approval 一律不补拉,轮到裁决:按模板 autoApprove 决定
          代审或 ask_user 转呈真人,裁决经 rs_workflow_verdict 回写(autoApprove 代审 by 缺省,转呈真人
          by=user,意见必填),裁决受理后 rs_workflow_resume 拉起下一段;
-         终态则汇报(完成经 deliverables 交付;失败/阻塞说明卡点与建议);
+         终态则汇报(完成经 deliverables 交付,汇报必须引用 runId 供页签核验;失败/阻塞说明卡点与建议);
+         任何交付说明若无对应 run 记录即为违规——禁止把自行产出的文件当交付物汇报;
          用户中途纠偏经 rs_workflow_message 注入,下一步骤边界进入编排;
       4. 你不代替子代理执行编排内步骤,不伪造产出,不跳过引擎直接交付;
       5. 引擎不可用或编排启动失败时,不得自行完成文件类请求——向用户说明故障与已尝试的调用,
@@ -39,6 +40,10 @@
     maxBytes: 65536
 
 # ── shell ───────────────────────────────────────────────────────────────────
+
+# 注:不可禁本组合 shell/fs 工具行——宿主 workflow worker 的段子代理继承组合行集,
+# 禁行使段子代理无法落盘交付物(实测证实)。主循环不写文件由 persona 判据约束,
+# 物理隔离需宿主提供 worker 行集覆写能力(外部依赖)。
 
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
