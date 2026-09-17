@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-llm-pi-gateway
 
-把 DSH 会话的 sessionId 注入发往 newapi 等 LLM 网关的每个请求,供网关做请求亲和性(粘性会话路由):同一会话的请求稳定落到同一上游渠道,上游 prompt cache 命中是这种路由方式的结果。形态上是官方 `dsh-llm-pi-ai` 的零感知增强替换(装上即接管、卸载即还原),compat 全控、metadata 模板透传与静态 headers 兜底一并提供。
+把 DSH 会话的 sessionId 注入发往 newapi 等 LLM 网关的每个请求,供网关做请求亲和性(粘性会话路由):同一会话的请求稳定落到同一上游渠道,上游 prompt cache 命中是这种路由方式的结果。形态上是官方 `dsh-llm-pi-ai` 的零感知增强替换(装上即接管、卸载即还原),compat 全控、metadata 模板透传与静态 headers 兜底一并提供。镜像对表锚:官方 `dsh-llm-pi-ai@0.1.5-rc.2` / pi-ai `^0.85.1`。
 
 ## sessionId 注入通道
 
@@ -62,19 +62,22 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
 
 需要 dsh 本体 0.1.2 及以上:激活时动态探测 dsh-llm 的 `resolveImageAttachmentAccess` / `offloadedImageText`(0.1.2 引入),缺失即打日志禁用插件,不注册 adapter 与 settings 节,不影响宿主启动与其他插件。
 
-配置语义、请求装配、错误分类、生态声明口逐项对表官方 `dsh-llm-pi-ai@0.1.2-rc.1`,官方公共导出能复用的一律复用(仅 resolveModelReasoning 因官方未导出而平行实现):
+配置语义、请求装配、错误分类、生态声明口逐项对表官方 `dsh-llm-pi-ai@0.1.5-rc.2`,官方公共导出能复用的一律复用(仅 resolveModelReasoning 因官方未导出而平行实现):
 
-- **profile 字段对齐**:官方 schema 全集可原样复制(`displayName` / `reasoning` / `thinkingBudgets` / `cacheRetention` / `transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `retryPolicy` / `defaultContextWindow` / `defaultMaxTokens` / `defaultInput` / 模型级 `reasoningEfforts`);`reasoningEfforts` → `thinkingLevelMap`(未声明档位钉 null、off 无值缺席)与官方逐行同构。无模型目录,`modelOverrides` 明确拒绝(官方对无目录路由同语义)。
-- **官方节 catalog 形态路由**:官方 Config 允许 provider 仅声明 `apiKeyEnv`(无协议/端点/模型目录)。接管期间该形态路由**不被任何 adapter 服务**(官方行已被 patch 禁用,本包未复刻官方目录物化),请求与配置面拉取模型都会失败,仅以日志披露;需要该路由请改写为手写完整路由(`api`/`baseURL`/`models`)或卸载本包。跳过不硬拒是为保住同节其余路由;本包节手写配置出现 catalog 形态则硬拒(fail loud)。
+- **profile 字段对齐**:官方 schema 全集可原样复制(`displayName` / `reasoning` / `thinkingBudgets` / `cacheRetention` / `transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `retryPolicy` / `defaultContextWindow` / `defaultMaxTokens` / `defaultInput` / 模型级 `reasoningEfforts`);`reasoningEfforts` → `thinkingLevelMap`(未声明档位钉 null、off 无值缺席)与官方逐行同构。无模型目录:`modelOverrides` 在 `llm-pi-gateway:` 节明确拒绝(fail loud);官方节出现的非空 `modelOverrides`(官方 schema 合法产物)同 catalog 形态处理——skip + 日志 + 配置面 error 条目,不硬拒整节。
+- **官方节 catalog 形态路由**:官方 Config 允许 provider 仅声明 `apiKeyEnv`(无协议/端点/模型目录)。接管期间该形态路由**不被任何 adapter 服务**(官方行已被 patch 禁用,本包未复刻官方目录物化),请求与配置面拉取模型都会失败,以日志披露并进配置面 error 条目(官方 0.1.5 目录诊断同构);需要该路由请改写为手写完整路由(`api`/`baseURL`/`models`)或卸载本包。跳过不硬拒是为保住同节其余路由;本包节手写配置出现 catalog 形态则硬拒(fail loud)。
+- **settings 写入校验 changed-only**(官方 `assertServiceable` 同构):validate 只校验相对存量发生变化的 provider,存量 provider 的既有漂移不再阻塞其他路由的配置写入;注册期无存量,自然全量校验。
+- **system prompt 折叠**(官方 0.1.5 `splitSystemPrompt` 同构):无请求级 `system` 时,leading system 消息文本折叠为 `systemPrompt` 并移出历史(空文本不发 prompt);带请求级 `system` 时其值胜出,leading system 消息仍投影为 user;非 leading system 消息恒投影 user。旧版本(对表 0.1.2-rc.1)的 leading system 一律投影 user 行为已被替换。
+- **replay 信封对表 0.1.5**:成功响应信封记录请求路由模型(`model`)与 anthropic 原生响应模型(`responseModel`,路由名 ≠ 原生名时),`providerThinkingLevel` 透传;回放时 anthropic 按原生模型重建请求(保 thinking 签名有效),信封读侧类型校验(签名/`redacted`/可选键)拒畸形降级。0.1.2 形态信封仍可读(未记录的键缺省)。
 - **reasoning 声明与校验**:`resolveModel` 经 pi-ai `getSupportedThinkingLevels` 声明可选档位与 `defaultEffort`;请求路径 `options.reasoningEffort ?? profile.reasoning` 校验,不支持即 `UNSUPPORTED_REASONING_EFFORT`,`off` = 省略 reasoning 参数;描述路径宽松(不可描述省略,不藏路由)。
 - **请求选项对齐**:`maxRetries: 0` 恒传(重试归 runtime retry policy,不与 pi-ai SDK 内部重试叠加),`transport` / `timeoutMs` / `websocketConnectTimeoutMs` / `thinkingBudgets` 透传;不支持请求选项(`stop`)显式 `UNSUPPORTED_OPTION` 拒绝。
 - **凭据链**:`credentials` 服务在场即唯一来源(未命中即 `MISSING_CREDENTIAL`,不回落启动环境——防已删除凭据被过期环境变量静默复活);服务缺席才走启动环境;官方 `assertUsableApiKey` 校验。
 - **模型发现**:两节命名空间各注册同一 discovery(官方节接管后官方注册随之消失,不补则官方配置面拉取模型必失败);宿主取消 signal 透传探测请求;openai 系走 `GET {baseURL}/models` + bearer,anthropic-messages 走原生 `GET {root}/v1/models`(base 以 `/v1` 结尾不重复追加,单页 `limit=1000` 不跟随 `has_more`) + `anthropic-version` / `x-api-key`;探测请求合入路由自定义 `headers`(网关分组头等生效),`accept` / 探测认证头 / attribution 保留头后写覆盖。
 - **attribution 头**:每请求携带官方 `user-agent`;用户撞名头大小写不敏感剥除。
 - **错误分类对齐**:quota 判定(`QUOTA`,经 dsh-llm `QUOTA_EXCEEDED_CODE`)、超窗双通道(pi-ai usage 判定器 + dsh-llm 文本判定器 → `CONTEXT_WINDOW_EXCEEDED`);调用方取消时流出界兜底归因 `ABORTED`(带根因 cause),不落 `UNKNOWN`。
-- **热更新**:改配置即生效(settings 服务 `installSection` 模式)——写入时校验拒绝坏配置,路由集/重试策略/显示名变化原地 `replace`,解析失败保旧路由;无路由时休眠,不注册 adapter。`prepareCall` 解析结果快照冻结,热更换表不产生目录信息与请求路由代际错配。
-- **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址)+ `registerModelDiscovery`(openai 系与 anthropic-messages 协议可"拉取模型",解析标准 `data` 数组与网关富集 `models` map;其余协议明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册);adapter 挂 `LlmAdapter` 原型继承基类默认方法(含 `imageRequestPricing`,声明无 provider 侧图片定价,计量回退中性估算),宿主接口演进新增默认实现时自动跟随。
-- **pi-ai 同栈**:依赖下界较官方收紧(官方 dsh-llm-pi-ai 0.1.2-rc.1 为 ^0.84.2;本包 compat 名单含 0.84.4 才引入的字段,下界抬至 ^0.84.4),协议行为与官方路由同一版本保证;compat 字段名单按 pi-ai 0.84.4 各协议类型声明校验。
+- **热更新**:改配置即生效(settings 服务 `installSection` 模式)——写入时校验(changed-only)拒绝坏配置,路由集/重试策略/显示名变化原地 `replace`,解析失败保旧路由;无路由时休眠,不注册 adapter。`prepareCall` 解析结果快照冻结,热更换表不产生目录信息与请求路由代际错配。
+- **生态声明口**:`registerConfigurableProviders`(配置面可见可寻址,失服路由带 `error` 条目)+ `registerModelDiscovery`(openai 系与 anthropic-messages 协议可"拉取模型",解析标准 `data` 数组与网关富集 `models` map;其余协议明确 `DISCOVERY_UNSUPPORTED` 回退手录)+ `providerRetryPolicy`(路由级 `retryPolicy` 进注册);adapter 挂 `LlmAdapter` 原型继承基类默认方法(含 `imageRequestPricing`,声明无 provider 侧图片定价,计量回退中性估算),宿主接口演进新增默认实现时自动跟随。
+- **pi-ai 同栈**:依赖下界与官方一致(pi-ai ^0.85.1),协议行为与官方路由同一版本保证;compat 字段名单按 pi-ai 0.85.1 各协议类型声明校验,枚举类字段(即 `thinkingTokenBudgetField` / `cacheControlFormat` / `maxTokensField` / `thinkingFormat` / `deferredToolsMode` / `sessionAffinityFormat`)的非法取值配置期拒绝——pi-ai 对未知拼写静默按缺省处理,本包提前到配置期暴露。
 
 ## 错误码
 
@@ -110,7 +113,7 @@ format 未声明时由 pi-ai 自动检测:provider 名为 `openrouter`(精确匹
 ## 其他功能
 
 - **图片输入(多模态,官方管线同构)**:请求含图片且模型声明 `input: [text, image]` 时,经 attachments 服务读出为 base64 块(handle 文本 + `image` 块),预算策略 `maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes` 与官方同款(缺省 20MiB / 4Mi 像素 / 1MiB);非 user 角色图片、模型无 image 能力、attachments 服务缺失均按官方语义 `UNSUPPORTED_CONTENT`;纯文本路径零开销。
-- **compat 全控**:官方包(0.1.2-rc.1)withhold 的字段全部开放(`supportsDeveloperRole` 等;`sendSessionAffinityHeaders` / `sessionAffinityFormat` 即上表亲和头通道),字段名按 pi-ai 0.84.4 各协议 compat 类型校验,值为 null 拒绝;模型级 compat 覆盖路由级。
+- **compat 全控**:官方包 withhold 的字段全部开放(`supportsDeveloperRole` 等,含 0.85 功能性字段 `supportsMidConvoEffort` / `allowedFallbackModels` / `vllmPriority` / `supportsMaxOutputTokens`;`sendSessionAffinityHeaders` / `sessionAffinityFormat` 即上表亲和头通道),字段名按 pi-ai 0.85.1 各协议 compat 类型校验,值为 null 拒绝,枚举字段非法取值拒绝;模型级 compat 覆盖路由级。
 - **多模型路由**:一条路由声明多个模型,按请求 model 字段分发,未命中返回 `UNKNOWN_MODEL`。
 
 ## 配置(settings.yaml 命名空间 `llm-pi-gateway`)
@@ -180,7 +183,7 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 ## 已知取舍
 
 - 事件流适配与 pi-ai 数据结构耦合;路由按显式 api 直注标记,形状判别仅为 api 缺失的兜底路径,未知形状不注入。
-- 无流空闲超时看门狗(官方 0.1.2-rc.1 经 `streamIdleTimeoutMs` 300 秒兜底;实现需进程内动态 import dsh-timeout,宿主可达性待实测后补齐,当前纯披露);pi-ai 依赖下界较官方收紧(官方 0.1.2-rc.1 为 ^0.84.2,本包因 compat 名单取材 0.84.4 抬至 ^0.84.4),官方升级范围时本包需跟随。
+- 无流空闲超时看门狗(官方经 `streamIdleTimeoutMs` 300 秒兜底;实现需进程内动态 import dsh-timeout,宿主可达性待实测后补齐,当前纯披露);pi-ai 依赖下界与官方一致(^0.85.1),官方升级范围时本包需跟随名单与值枚举核对。
 - sessionMarker.enabled=false 不拦截 metadata 模板的静态 user_id 键透传(该键来自模板而非标记器,不含会话派生标识);模板其余键经标记 onPayload 合入,标记关闭时不上 wire。标记关闭时 openai 系的原生 `prompt_cache_key` 随之不再被覆盖,pi-ai 原生行为仍在:openai-responses 在 retention ≠ none(未配置默认 short)时携带截断裸 sessionId;openai-completions 在 baseUrl 含 api.openai.com、或 retention 为 long 且 compat 允许时同——依赖派生标记隐藏内部会话 id 的场景此时应改用其他载体做粘性键。
 - `sessionId` 缺省契约:会话标记关闭且模板不引用 `{sessionId}` 的路由允许缺失(官方 wire 契约同构,缺省即省略该键);接管路由会话标记**默认开启**,sessionId 因此默认必填——sessionId 缺省承诺仅对显式关闭标记且模板不引用 `{sessionId}` 的路由兑现。
 - 上游错误以文本分类(pi-ai 把捕获错误展平为 message 字符串),quota/超窗判定用官方同款判定器,其余分支与官方同序同构。

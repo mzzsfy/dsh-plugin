@@ -5,7 +5,7 @@
 import { SETTINGS_NS } from './config.mjs'
 
 /** 深比较 JSON 可序列化数据:数组按元素序、普通对象按键集合,NaN、undefined 与缺失键一律视为不等。 */
-function deepEqualJson(left, right) {
+export function deepEqualJson(left, right) {
   if (left === right) return true
   if (typeof left !== typeof right) return false
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -32,25 +32,44 @@ export function registrationFacts(routes) {
     .sort((left, right) => left.provider.localeCompare(right.provider))
 }
 
-/** 配置面目录条目:每个声明路由按来源节寻址(官方节路由指向官方节)。 */
-export function directoryEntries(routes) {
-  return [...routes.entries()].map(([provider, route]) => ({
+/**
+ * 配置面目录条目:每个声明路由按来源节寻址(官方节路由指向官方节);
+ * unserviceable(provider → {reason, source})中的失服路由以 error 条目
+ * 出现(官方 0.1.5 directoryEntries error 字段同构),配置面可见可修。
+ * error 条目 declared:true 系对官方的有意偏离:官方 catalog 路由 declared:false
+ * (非用户声明),镜像条目必指向 settings 实际存储的声明,declared 恒真。
+ */
+export function directoryEntries(routes, unserviceable = new Map()) {
+  const entries = [...routes.entries()].map(([provider, route]) => ({
     provider,
     displayName: route.displayName,
     settingsNs: route.source ?? SETTINGS_NS,
     settingsPath: ['providers', provider],
     declared: true,
   }))
+  for (const [provider, diagnostic] of unserviceable) {
+    if (routes.has(provider)) continue
+    entries.push({
+      provider,
+      displayName: provider,
+      settingsNs: diagnostic.source ?? SETTINGS_NS,
+      settingsPath: ['providers', provider],
+      declared: true,
+      error: diagnostic.reason,
+    })
+  }
+  return entries
 }
 
 /**
  * @param {object} hooks
  * @param {() => Map<string, object>} routes 当前配置解析出的路由表(可抛)
+ * @param {() => Map<string, {reason: string, source: string}>} [directoryErrors] 失服路由诊断表 getter
  * @param {(providers: string[], adapter: object) => {replace: (next: string[]) => void}} registerAdapter
  * @param {(entries: object[]) => {replace: (next: object[]) => void}} registerDirectory
  * @param {object} adapter 注册到 llm 的 adapter 实例
  */
-export function createRouteManager({ routes, registerAdapter, registerDirectory, adapter }) {
+export function createRouteManager({ routes, directoryErrors = () => new Map(), registerAdapter, registerDirectory, adapter }) {
   let registration
   let registeredFacts
   let directory
@@ -71,7 +90,7 @@ export function createRouteManager({ routes, registerAdapter, registerDirectory,
     registeredFacts = facts
   }
   const ensureDirectory = () => {
-    const entries = directoryEntries(routes())
+    const entries = directoryEntries(routes(), directoryErrors())
     if (deepEqualJson(entries, directoryFacts)) return
     if (directory === undefined) {
       if (entries.length === 0) {

@@ -167,6 +167,28 @@ test('toStreamChunks:done 携带 usage 时产出 usage 块', async () => {
   assert.equal(chunks.length, 2)
 })
 
+test('toStreamChunks:requestedModel 记入 replay 信封请求身份,anthropic 原生模型记 responseModel', async () => {
+  async function* events() {
+    yield { type: 'done', message: piMessage({ model: 'claude-native-x' }) }
+  }
+  const chunks = []
+  for await (const chunk of toStreamChunks(events(), 1000, undefined, 'auto')) chunks.push(chunk)
+  const response = chunks.at(-1).replayState.response
+  assert.equal(response.model, 'auto')
+  assert.equal(response.responseModel, 'claude-native-x')
+})
+
+test('toStreamChunks:无 requestedModel 时信封 model 取原生模型(缺省同官方)', async () => {
+  async function* events() {
+    yield { type: 'done', message: piMessage({ model: 'm1' }) }
+  }
+  const chunks = []
+  for await (const chunk of toStreamChunks(events(), 1000)) chunks.push(chunk)
+  const response = chunks.at(-1).replayState.response
+  assert.equal(response.model, 'm1')
+  assert.equal('responseModel' in response, false)
+})
+
 test('toStreamChunks:error 终态按 finish 送达', async () => {
   async function* events() {
     yield { type: 'error', error: piMessage({ stopReason: 'error', errorMessage: 'socket hung up' }) }

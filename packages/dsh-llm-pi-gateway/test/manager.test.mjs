@@ -10,11 +10,12 @@ function routesOf(profiles) {
   return new Map(Object.entries(profiles).map(([name, profile]) => [name, resolveRoute(name, profile)]))
 }
 
-function harness() {
+function harness({ directoryErrors } = {}) {
   const calls = { adapter: [], adapterReplaces: [], directory: [], directoryReplaces: [] }
   const registry = { adapter: null, directory: null }
   const manager = createRouteManager({
     routes: () => routesOf(harness.current),
+    directoryErrors,
     registerAdapter: (providers, adapter) => {
       calls.adapter.push(providers)
       registry.adapter = adapter
@@ -163,4 +164,28 @@ test('场景: 换表但 provider 集纯重排,排序事实相同不触发重放'
   manager.ensureRegistration()
   assert.equal(counts.adapters, 1)
   assert.equal(counts.adapterReplaces, 0, '纯重排不构成注册事实变化')
+})
+
+test('场景: 失服路由进目录 error 条目(官方 directoryEntries error 字段对表);修复后条目消失', () => {
+  const diagnostics = new Map([
+    ['drift', { reason: '路由 "drift" 声明非空 modelOverrides', source: 'llm-pi-ai' }],
+  ])
+  const { manager, calls } = harness({ directoryErrors: () => diagnostics })
+  harness.current = { a: profile() }
+  manager.ensureDirectory()
+  assert.deepEqual(
+    calls.directory[0].map(({ provider, error }) => ({ provider, error })),
+    [
+      { provider: 'a', error: undefined },
+      { provider: 'drift', error: '路由 "drift" 声明非空 modelOverrides' },
+    ],
+  )
+  const driftEntry = calls.directory[0].find((entry) => entry.provider === 'drift')
+  assert.equal(driftEntry.settingsNs, 'llm-pi-ai')
+  assert.equal(driftEntry.declared, true)
+  // 修复后重解析:诊断表清空,目录 replace 移除 error 条目
+  diagnostics.clear()
+  harness.current = { a: profile() }
+  manager.ensureDirectory()
+  assert.deepEqual(calls.directoryReplaces.at(-1).map((entry) => entry.provider), ['a'])
 })

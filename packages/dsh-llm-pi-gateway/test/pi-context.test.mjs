@@ -141,6 +141,73 @@ test('toPiReplayState 到 toPiAssistant round-trip:签名保留、类型对齐',
   assert.equal(assistant.responseId, 'resp-1')
 })
 
+test('toPiReplayState:anthropic 原生模型 ≠ 请求模型时记 responseModel,requestedModel 为请求身份', () => {
+  const replayState = toPiReplayState(
+    { api: 'anthropic-messages', provider: 'gw', model: 'claude-native', content: [{ type: 'text', text: 'x' }], stopReason: 'stop' },
+    'auto',
+  )
+  assert.equal(replayState.response.model, 'auto')
+  assert.equal(replayState.response.responseModel, 'claude-native')
+})
+
+test('toPiReplayState:非 anthropic 协议模型名差异不产生 responseModel(官方挪移仅 anthropic)', () => {
+  const replayState = toPiReplayState(
+    { api: 'openai-completions', provider: 'gw', model: 'native', content: [{ type: 'text', text: 'x' }], stopReason: 'stop' },
+    'auto',
+  )
+  assert.equal(replayState.response.model, 'auto')
+  assert.equal('responseModel' in replayState.response, false)
+})
+
+test('toPiReplayState:providerThinkingLevel 透传进信封', () => {
+  const replayState = toPiReplayState({
+    api: 'anthropic-messages', provider: 'gw', model: 'm', providerThinkingLevel: 'high',
+    content: [{ type: 'text', text: 'x' }], stopReason: 'stop',
+  })
+  assert.equal(replayState.response.providerThinkingLevel, 'high')
+})
+
+test('toPiAssistant:anthropic replay 经 responseModel 还原原生模型;providerThinkingLevel 透传', () => {
+  const message = harnessAssistant()
+  // source.model = 请求路由模型(宿主 assistant source 记 request.model,agent-loop 实证)
+  message.source.model = 'auto'
+  message.source.replayState.response.model = 'auto'
+  message.source.replayState.response.responseModel = 'claude-native'
+  message.source.replayState.response.providerThinkingLevel = 'low'
+  const assistant = toPiAssistant(message)
+  assert.equal(assistant.model, 'claude-native')
+  assert.equal(assistant.providerThinkingLevel, 'low')
+})
+
+test('toPiAssistant:非 anthropic replay 模型不还原 responseModel', () => {
+  const message = harnessAssistant()
+  message.source.api = 'openai-completions'
+  message.source.model = 'auto'
+  message.source.replayState.response.api = 'openai-completions'
+  message.source.replayState.response.model = 'auto'
+  message.source.replayState.response.responseModel = 'native'
+  const assistant = toPiAssistant(message)
+  assert.equal(assistant.model, 'auto')
+})
+
+test('toPiAssistant:新键类型损坏(responseModel/providerThinkingLevel/签名/redacted 非合法类型)即降级', () => {
+  const base = { kind: 'pi-ai', version: 2, api: 'a', provider: 'p', model: 'm', stopReason: 'stop' }
+  const cases = [
+    { response: { ...base, responseModel: 7 }, blocks: [] },
+    { response: { ...base, responseId: 9 }, blocks: [] },
+    { response: { ...base, providerThinkingLevel: true }, blocks: [] },
+    { response: base, blocks: [{ type: 'text', textSignature: 3 }] },
+    { response: base, blocks: [{ type: 'reasoning', thinkingSignature: null }] },
+    { response: base, blocks: [{ type: 'tool-call', thoughtSignature: {} }] },
+    { response: base, blocks: [{ type: 'reasoning', redacted: 'yes' }] },
+  ]
+  for (const replayState of cases) {
+    const { assistant, reasons } = degradedReason(harnessAssistant({ source: { ...harnessAssistant().source, replayState } }))
+    assert.equal(assistant.api, 'dsh-foreign', JSON.stringify(replayState))
+    assert.equal(reasons.length, 1)
+  }
+})
+
 test('toPiReplayState:未知块类型产出空洞槽位(官方 map 无 default 同语义)', () => {
   const replayState = toPiReplayState({
     api: 'a', provider: 'p', model: 'm',
@@ -165,16 +232,54 @@ test('toPiContext:tool result 名从前置 assistant tool-call 恢复,孤儿归 
   assert.equal(context.messages[2].toolName, 'unknown')
 })
 
-test('toPiContext:system 消息投影为 user;纯工具回合不产生空 user 消息', () => {
+test('toPiContext:无 options.system 时 leading system 折叠为 systemPrompt,移出历史(0.1.5 splitSystemPrompt 对表)', () => {
   const context = toPiContext({
     messages: [
+      { role: 'system', content: [{ type: 'text', text: 'rules' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ],
+  })
+  assert.equal(context.systemPrompt, 'rules')
+  assert.equal(context.messages.length, 1)
+  assert.equal(context.messages[0].role, 'user')
+})
+
+test('toPiContext:options.system 定义即胜出,leading system 仍投影 user(历史原样)', () => {
+  const context = toPiContext({
+    system: 'global',
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'rules' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ],
+  })
+  assert.equal(context.systemPrompt, 'global')
+  assert.equal(context.messages.length, 2)
+  assert.deepEqual(context.messages[0], { role: 'user', content: 'rules', timestamp: 0 })
+})
+
+test('toPiContext:leading system 文本为空,无 systemPrompt 键且消息移除', () => {
+  const context = toPiContext({
+    messages: [
+      { role: 'system', content: [] },
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ],
+  })
+  assert.equal('systemPrompt' in context, false)
+  assert.equal(context.messages.length, 1)
+})
+
+test('toPiContext:非 leading system 仍投影 user;纯工具回合不产生空 user 消息', () => {
+  const context = toPiContext({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
       { role: 'system', content: [{ type: 'text', text: 'rules' }] },
       { role: 'toolResult', content: [{ type: 'tool-result', toolCallId: 't1', content: [{ type: 'text', text: 'out' }] }] },
     ],
   })
-  assert.deepEqual(context.messages[0], { role: 'user', content: 'rules', timestamp: 0 })
-  assert.equal(context.messages.length, 2)
-  assert.equal(context.messages[1].role, 'toolResult')
+  assert.equal('systemPrompt' in context, false)
+  assert.deepEqual(context.messages[1], { role: 'user', content: 'rules', timestamp: 0 })
+  assert.equal(context.messages.length, 3)
+  assert.equal(context.messages[2].role, 'toolResult')
 })
 
 test('toPiContext:空 content 的 tool-result 输出归并为占位文本', () => {

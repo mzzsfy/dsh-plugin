@@ -6,7 +6,7 @@ import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import { resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
 import { createGatewayAdapter } from './adapter.mjs'
 import { createCredentialResolver } from './credentials.mjs'
-import { createRouteManager } from './manager.mjs'
+import { createRouteManager, deepEqualJson } from './manager.mjs'
 import { discoverModels } from './discovery.mjs'
 import { takeoverFailureText } from './errors.mjs'
 import {
@@ -149,11 +149,19 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   let readGateway = () => config
   let lastSnapshot
   let memoized
-  // 官方节 catalog 形态路由 skip 上报:按 provider 去重,防 onChange 重放刷屏
+  // 官方节 catalog 形态/modelOverrides 路由 skip 上报:按 provider 去重防
+  // onChange 重放刷屏;诊断随重解析失效,并进目录 error 条目(配置面可见可修)。
+  // 诊断只承载已提交解析:profiles() 真解析先清空再写入;validate 路径用
+  // 本地收集器,写入被拒时不留幻影条目
   const unserviceableReported = new Set()
-  const onUnserviceable = (provider, reason) => {
+  const unserviceableDiagnostics = new Map()
+  const unserviceableCollector = (sink) => (provider, reason, source) => {
+    sink.set(provider, { reason, source })
+  }
+  const onUnserviceable = (provider, reason, source) => {
     if (unserviceableReported.has(provider)) return
     unserviceableReported.add(provider)
+    unserviceableDiagnostics.set(provider, { reason, source })
     ctx.logger.warn(`llm-pi-gateway: ${reason}`)
   }
   const snapshot = () => [readOfficial(), readGateway()]
@@ -163,6 +171,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
       && current[0] === lastSnapshot[0] && current[1] === lastSnapshot[1]) return memoized
     // 去重按配置代失效:真解析(重跑)才重报,记忆命中不重放;修复后再次劣化能再次告警
     unserviceableReported.clear()
+    unserviceableDiagnostics.clear()
     const next = resolveRoutes(current[0]?.providers, current[1]?.providers, onUnserviceable)
     lastSnapshot = current
     memoized = next
@@ -175,6 +184,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   }, (attachments, ref) => dshLlm.resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref), dshLlm.offloadedImageText)
   const manager = createRouteManager({
     routes: profiles,
+    directoryErrors: () => unserviceableDiagnostics,
     adapter,
     registerAdapter: (providers, registered) => ctx.llm.registerAdapter(providers, registered),
     registerDirectory: (entries) => ctx.llm.registerConfigurableProviders(entries),
@@ -223,15 +233,33 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   }
   // 官方节接管(仅接管态):官方插件被本包 patch 禁用后,其 settings 节由
   // 本包以官方 schema 注册。若注册冲突(patch 失效、官方仍在),降级为只
-  // 服务本包节。validate 拒绝组合后不可解析的官方节,防坏配置穿透 profiles
-  // 快照记忆。官方包缺失时跳过接管(动态获取已告警)。servingOfficial 已在
-  // 官方 discovery 注册处置位,此处不再改写。
-  // 同步接管与延迟补接管共用同一装配
+  // 服务本包节。validate 只验被写节相对存量变化的 provider(官方
+  // assertServiceable 同构):存量 provider 的既有漂移不得阻塞无关写入。
+  // 与官方 registering 旗标语义的差异:镜像注册期不强制全量 deferred 校验,
+  // 坏存量由 apply 末尾 profiles() 启动 fail-loud 统一拦截(官方注册期仅
+  // deferred 校验,同样放行 catalog 漂移,实际拦截面等价)。官方包缺失时
+  // 跳过接管(动态获取已告警)。servingOfficial 已在官方 discovery 注册
+  // 处置位,此处不再改写。同步接管与延迟补接管共用同一装配
+  /** changed-only 校验:被写节中与存量深比较不同的 provider 才重新校验;
+   *  失服诊断入临时收集器,validate 拒绝/未提交即弃,不污染共享诊断。 */
+  const validateSection = (section, previous, side) => {
+    const providers = section?.providers ?? {}
+    const previousProviders = previous?.providers ?? {}
+    const changed = Object.fromEntries(Object.entries(providers)
+      .filter(([provider, profile]) => !deepEqualJson(profile, previousProviders[provider])))
+    const diagnostics = new Map()
+    const collect = unserviceableCollector(diagnostics)
+    resolveRoutes(
+      side === OFFICIAL_NS ? changed : undefined,
+      side === OFFICIAL_NS ? undefined : changed,
+      collect,
+    )
+  }
   const installOfficialSection = () => {
     if (OfficialConfig === undefined) return
     try {
       ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
-        validate: (section) => resolveRoutes(section.providers, readGateway()?.providers, onUnserviceable),
+        validate: (section) => validateSection(section, readOfficial(), OFFICIAL_NS),
         setSource: (source) => {
           readOfficial = source
         },
@@ -252,7 +280,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   }
   if (takeover) installOfficialSection()
   ctx.settings.installSection(ctx, NS, Config, config, {
-    validate: (section) => resolveRoutes(readOfficial()?.providers, section.providers, onUnserviceable),
+    validate: (section) => validateSection(section, readGateway(), NS),
     setSource: (source) => {
       readGateway = source
     },
