@@ -89,6 +89,8 @@ export function registerOrchestrator(ctx, config) {
         parent: agent,
       })
       activeRuns.set(agentIdOf(agent), driver.runId)
+      // 种子 run 首段拉起:与 start 工具同责,缺此则续跑 run 停在 running 无活跃段
+      startSegmentJob(agent, driver)
       return { ok: true, runId: driver.runId }
     }
 
