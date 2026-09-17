@@ -51,8 +51,24 @@ const CSS = [
   // 设置分区容器
   '.cx-panel { display:flex; flex-direction:column; gap:2px; align-items:flex-start; min-width:0;',
   '  color:var(--dsw-alias-label-primary); font:var(--dsw-font-s-14); }',
-  '.cx-panel__title { margin:0 0 2px; font:var(--dsw-font-m-16, 600 16px/24px sans-serif); font-weight:600; }',
-  '.cx-panel__hint { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); margin-bottom:4px; }',
+  '.cx-panel__hint { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); margin:10px 0 4px; }',
+  // 插件页折叠卡:视觉值与官方 PluginCard 同源实测(border/bg/radius/间距),
+  // open 态换底层色并加深边框,chevron 随开合旋转
+  '.cx-card { border:.5px solid var(--dsw-alias-border-l4); background:var(--dsw-alias-bg-layer-3);',
+  '  border-radius:16px; list-style:none; transition:border-color .16s, background .16s; width:100%; }',
+  '.cx-card:hover { border-color:var(--dsw-alias-label-dimmed); }',
+  '.cx-card--open { background:var(--dsw-alias-bg-layer-2); border-color:var(--dsw-alias-label-dimmed); }',
+  '.cx-card__header { appearance:none; width:100%; font:inherit; color:inherit; text-align:left; cursor:pointer;',
+  '  background:none; border:0; border-radius:12px; align-items:center; gap:12px; padding:14px 16px; display:flex; }',
+  '.cx-card__header:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:-2px; }',
+  '.cx-card__head-text { display:flex; flex-direction:column; flex:1 1 0%; gap:4px; min-width:0; }',
+  '.cx-card__name { color:var(--dsw-alias-label-primary); font-size:15px; font-weight:600; line-height:1.4; }',
+  '.cx-card__description { color:var(--dsw-alias-label-tertiary); font-size:13px; line-height:1.5; }',
+  '.cx-card__chevron { color:var(--dsw-alias-label-tertiary); flex:0 0 auto; transition:transform .16s; display:inline-flex; }',
+  '.cx-card--open .cx-card__chevron { transform:rotate(180deg); }',
+  '.cx-card__body { border-top:.5px solid var(--dsw-alias-border-l2); margin:0 16px; padding:0 0 8px;',
+  '  display:flex; flex-direction:column; align-items:flex-start; gap:8px; }',
+  '.cx-card__body .cx-panel__hint { margin:10px 0 0; }',
   // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,
   // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
   // 色值取自宿主实测(白底卡片/墨色文字/蓝色强调):dsw alias 变量在宿主为空,不可依赖
@@ -1132,15 +1148,29 @@ const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
 const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
 
-// 「插件」设置页卡片:标题 + 四启停开关行
+// 「插件」设置页卡片:与官方 PluginCard 同款折叠卡(header 展开/收起 + body),
+// 视觉值取自宿主实测(见 CSS 注释),组件因缺宿主 i18n/表单状态而自绘
 function ContextPanel() {
-  return h('div', { className: 'cx-panel' },
-    h('h3', { className: 'cx-panel__title' }, '对话增强'),
-    h('span', { className: 'cx-panel__hint' }, '历史输入、插话撤回与对话分叉的启停;变更刷新页面生效。'),
-    h(HistorySwitchRow),
-    h(SteerSwitchRow),
-    h(ForkSwitchRow),
-    h(ForkAutoResendSwitchRow),
+  const [open, setOpen] = useState(false)
+  return h('div', { className: 'cx-card' + (open ? ' cx-card--open' : '') },
+    h('button', { type: 'button', className: 'cx-card__header', 'aria-expanded': open, onClick: () => setOpen(!open) },
+      h('span', { className: 'cx-card__head-text' },
+        h('span', { className: 'cx-card__name' }, '对话增强'),
+        h('span', { className: 'cx-card__description' }, '历史输入、插话撤回与对话分叉的启停'),
+      ),
+      h('span', { className: 'cx-card__chevron', 'aria-hidden': 'true' },
+        h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none' },
+          h('path', { d: 'M3.5 5.25L7 8.75L10.5 5.25', stroke: 'currentColor', 'stroke-width': '1.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }),
+        ),
+      ),
+    ),
+    open && h('div', { className: 'cx-card__body' },
+      h('span', { className: 'cx-panel__hint' }, '变更刷新页面生效。'),
+      h(HistorySwitchRow),
+      h(SteerSwitchRow),
+      h(ForkSwitchRow),
+      h(ForkAutoResendSwitchRow),
+    ),
   )
 }
 
