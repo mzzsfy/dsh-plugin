@@ -98,7 +98,9 @@ const OPENAI_RESPONSES_COMPAT_FIELDS = [
   'supportsMaxOutputTokens',
 ]
 
-const COMPAT_FIELDS_BY_PROTOCOL = {
+// compat 名单/值域守卫见 test/pi-ai-parity.test.mjs:名单与值域随装机 pi-ai
+// 的 types.d.ts 机械比对,官方加/删字段或加值即测试红
+export const COMPAT_FIELDS_BY_PROTOCOL = {
   'anthropic-messages': ANTHROPIC_COMPAT_FIELDS,
   'openai-completions': OPENAI_COMPLETIONS_COMPAT_FIELDS,
   'openai-responses': OPENAI_RESPONSES_COMPAT_FIELDS,
@@ -125,6 +127,7 @@ const COMPAT_VALUE_CHECKS = {
   deferredToolsMode: DEFERRED_TOOLS_MODES,
   sessionAffinityFormat: SESSION_AFFINITY_FORMATS,
 }
+export { COMPAT_VALUE_CHECKS }
 
 const MODALITIES = ['text', 'image']
 
