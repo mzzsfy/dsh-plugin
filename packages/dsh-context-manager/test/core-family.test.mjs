@@ -76,6 +76,22 @@ test('Given 循环引用, When sessionFamilyMap, Then 不死循环', () => {
   assert.ok(chains.get('p').chain.length <= 2)
 })
 
+test('Given 编排派生会话(origin=subagent)挂在根下, When sessionFamilyMap, Then subagent 行剔除且不计数', () => {
+  const chains = sessionFamilyMap([
+    { sessionId: 'root', updatedAt: 30 },
+    { sessionId: 'task', parentSessionId: 'root', origin: 'subagent', updatedAt: 20 },
+    { sessionId: 'fork', parentSessionId: 'root', updatedAt: 10 },
+  ])
+  assert.equal(chains.has('task'), false)
+  const ring = familyRing(chains, 'root')
+  assert.deepEqual(ring, { index: 2, total: 2, members: ['fork', 'root'] })
+})
+
+test('Given 整链均为 subagent, When familyRing, Then 单成员返回 null', () => {
+  const chains = sessionFamilyMap([{ sessionId: 'task', origin: 'subagent' }])
+  assert.equal(familyRing(chains, 'task'), null)
+})
+
 // ── 家族环计数 ──
 
 test('Given 家族 3 成员, When familyRing(中间 updatedAt), Then index=2 total=3 members 按 updatedAt 升序', () => {

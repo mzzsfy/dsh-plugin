@@ -227,11 +227,13 @@ function forkRetryText(data) {
 }
 
 // 家族谱系投影镜像(与 core.mjs sessionFamilyMap/familyRing 同步维护):
-// 快照行主键为 id、父引用为 parentId(与 RPC wire 的 sessionId/parentSessionId 不同名),
+// 客户端快照行主键为 id、父引用为 parentId(与 RPC wire 的 sessionId/parentSessionId 不同名),
+// 编排派生会话(origin === 'subagent')剔除——家族只统计用户的 fork 分支;
 // 断链视为独立根;环序按 updatedAt 升序
 function sessionFamilyMap(items) {
   const byId = new Map()
   for (const item of Array.isArray(items) ? items : []) {
+    if (item && item.origin === 'subagent') continue
     const id = item && item.id
     if (typeof id === 'string' && id !== '') byId.set(id, item)
   }

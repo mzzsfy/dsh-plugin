@@ -148,12 +148,15 @@ export function forkRetryText(data) {
 /**
  * 家族谱系投影:按 parentSessionId 把会话行组装成「根 → 后代」链,
  * parentSessionId 断链(引用的父不在集合内)的行视为独立根。
+ * 编排派生会话(origin === 'subagent')不是用户的 fork 版本,整行剔除,
+ * 其后代随之断链成独立根——家族只统计用户可跳转的对话分支。
  * @param items - sessions.list 行数组(至少含 sessionId/parentSessionId)
  * @returns Map<sessionId, { root, chain: string[] }>——chain 为根到自身的 id 序列
  */
 export function sessionFamilyMap(items) {
   const byId = new Map()
   for (const item of Array.isArray(items) ? items : []) {
+    if (item && item.origin === 'subagent') continue
     const id = item && (item.sessionId ?? item.id)
     if (typeof id === 'string' && id !== '') byId.set(id, item)
   }

@@ -21,6 +21,11 @@ test('源码契约:快照行主键为 id(与服务 wire 字段名不同源)', ()
   assert.ok(slice.includes('item.id'), '快照行主键应取 id')
 })
 
+test('源码契约:编排派生会话(subagent)剔除出家族投影', () => {
+  const slice = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function sessionFamilyMap'), CLIENT_SRC.indexOf('function familyRing'))
+  assert.ok(slice.includes("item.origin === 'subagent'"), 'subagent 会话不是用户的 fork 版本,应整行剔除')
+})
+
 test('源码契约:单成员家族与快照缺失不注入计数器', () => {
   const slice = CLIENT_SRC.slice(CLIENT_SRC.indexOf('// 家族版本环'), CLIENT_SRC.indexOf('function jumpFamilyMember'))
   assert.ok(slice.includes('ring && ring.total >= 2'), '成员不足 2 不注入')
