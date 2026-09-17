@@ -195,3 +195,7 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 ```sh
 npm test        # node --test test/*.test.mjs,纯逻辑层;devDependencies 提供官方包对表实现
 ```
+
+## dsh 版本兼容
+
+0.1.2-rc.1 / 0.1.5-rc.2 通过(基础面+echo 实证);0.1.6-alpha.1 基础面通过(激活 live、本包节路由注册、header 三通道注入实证、cacheRetention 门控、热更新)。已知限制见包内 兼容性测试.md「0.1.6 兼容性备注」。

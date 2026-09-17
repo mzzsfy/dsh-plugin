@@ -189,3 +189,6 @@ node scripts/dev-link.mjs dsh-turn-notify   # 仓库根执行:归一 profile 依
 
 工作副本以 junction 挂进 profile,host 半区改动保存约 1 秒热重载,client 半区改动刷新页面即生效,无需发版;规约与全仓归一见 `node scripts/dev-link.mjs all`。
 
+## dsh 版本兼容
+
+三版本全部通过:通知开关与播报形态、激活 live。0.1.6 控件数 13→19 属宿主演进,不构成不兼容。

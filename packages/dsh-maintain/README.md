@@ -57,3 +57,7 @@ maintain:
 ```
 cd packages/dsh-maintain && npm test
 ```
+
+## dsh 版本兼容
+
+三版本全部通过:版本与运维页控件完整、检查/升级/重启入口可用、激活 live。

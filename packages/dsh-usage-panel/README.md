@@ -130,3 +130,7 @@ node scripts/dev-link.mjs dsh-usage-panel   # 仓库根执行:归一 profile 依
 ```
 
 工作副本以 junction 挂进 profile,改代码保存即热重载(host 半区)或刷新页面生效(client 半区),无需发版;规约与全仓归一见仓库根 `node scripts/dev-link.mjs all`。
+
+## dsh 版本兼容
+
+三版本全部通过:用量面板渲染、激活 live。

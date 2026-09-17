@@ -69,3 +69,7 @@
 | `/api/context/copy-sid-enabled` | GET/POST | 标题栏复制 sessionId 启停 |
 
 设计文档:仓库根 `docs/上下文管理插件设计.md`
+
+## dsh 版本兼容
+
+三版本全部通过:样式注入 data-plugin 契约、Alt+↑ 历史浮层、对话 fork、设置「插件」页对话增强卡四开关、host 半区 API(history-enabled / fork-enabled)。0.1.6 设置分区卡片位于「插件」页,非独立导航项。

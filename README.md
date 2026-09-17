@@ -9,7 +9,7 @@ dsh-plugin/
 ├── packages/         # DSH 插件包
 ├── scripts/          # 发版脚本、全包加载冒烟
 ├── tests/            # 仓库级测试(dev-link)
-└── docs/             # 本地资料(dsh 本地不入库;rsww-v5 设计文档所在)
+└── docs/             # 本地资料(dsh 本地不入库)
 ```
 
 > npm 发行的包统一使用`@mzzsfy/*`格式

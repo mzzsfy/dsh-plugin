@@ -52,3 +52,7 @@ node --test "test/*.test.mjs"              # 测试
 ```
 
 注意:插件新增进入 profile bundles(`dsh plugin add`)后需 dsh 重启一次完成首装载;此后工作副本改动经 dev-link HMR 热重载。
+
+## dsh 版本兼容
+
+三版本全部通过:cron 看板渲染与启停、与侧边栏联动(侧栏标签页形态)、激活 live。0.1.6 新侧栏标签页系统下联动开关双态均验证通过。

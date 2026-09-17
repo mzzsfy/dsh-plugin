@@ -83,3 +83,7 @@ node scripts/dev-link.mjs dsh-model-capability-editor   # 仓库根执行:归一
 ```
 
 工作副本以 junction 挂进 profile,client 半区改动刷新页面即生效,无需发版;规约与全仓归一见仓库根 `node scripts/dev-link.mjs all`。
+
+## dsh 版本兼容
+
+三版本全部通过:模型页行内能力面板注入。注入前提=模型行「容量 N」箭头展开高级设置区(0.1.5+/0.1.6 官方行为);0.1.6 插件 client 装载为聚合 URL 形态。激活 live、双 live findings 0。

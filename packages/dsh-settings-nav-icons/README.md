@@ -124,3 +124,7 @@ node --test packages/dsh-settings-nav-icons/test/*.test.mjs
 ## License
 
 MIT
+
+## dsh 版本兼容
+
+三版本全部通过:导航图标接管。0.1.6 设置导航 5→6 标签(新增会话归档)属宿主演进,不构成不兼容。
