@@ -55,6 +55,17 @@ test('Given 超容量完结 run When 再完结溢出个 Then 最旧完结被删�
   assert.equal(rows.find((r) => r.runId === 'r-live').status, 'running')
 })
 
+test('Given 完结时间同毫秒并列 When 超容量收敛 Then 按创建序删最旧(时序无关回归)', (t) => {
+  t.mock.timers.enable({ apis: ['Date'] })
+  const dir = fresh()
+  const store = createStore({ dir, keepRuns: 2 })
+  for (const id of ['r-tie-a', 'r-tie-b', 'r-tie-c']) store.start({ runId: id })
+  for (const id of ['r-tie-a', 'r-tie-b', 'r-tie-c']) store.finish({ runId: id, status: 'completed', summary: '' })
+  assert.equal(existsSync(join(dir, 'runs', 'r-tie-a.json')), false)
+  assert.equal(existsSync(join(dir, 'runs', 'r-tie-b.json')), true)
+  assert.equal(existsSync(join(dir, 'runs', 'r-tie-c.json')), true)
+})
+
 test('Given list 按 workspace 过滤 When 多工作区 Then 仅返回该工作区且不含事件流', () => {
   const dir = fresh()
   const store = createStore({ dir })

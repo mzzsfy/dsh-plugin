@@ -127,7 +127,8 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
   }
 
   const evictOverCapacity = () => {
-    const finished = index.filter((e) => !ACTIVE_STATES.has(e.status)).sort((a, b) => (a.finishedAt ?? a.createdAt ?? 0) - (b.finishedAt ?? b.createdAt ?? 0))
+    // index 恒新在前;同毫秒 finishedAt 并列时稳定排序保持原序,先反转使并列按旧在前
+    const finished = index.filter((e) => !ACTIVE_STATES.has(e.status)).reverse().sort((a, b) => (a.finishedAt ?? a.createdAt ?? 0) - (b.finishedAt ?? b.createdAt ?? 0))
     let excess = finished.length - keepRuns
     let evicted = false
     for (const entry of finished) {
