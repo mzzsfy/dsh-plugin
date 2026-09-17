@@ -6,7 +6,6 @@ import { nextBatch, scriptViewOf } from './scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from './approve.mjs'
 import { runBatch } from './runner.mjs'
 import { registerDriver, unregisterDriver } from './control.mjs'
-import { dbg } from './debug.mjs'
 
 const TERMINAL_STATES = new Set(['completed', 'cancelled', 'failed', 'blocked'])
 
@@ -173,7 +172,6 @@ export class RunDriver {
 
   cancel() {
     if (this.finished) return
-    dbg(`cancel() invoked status=${this.state.status} active=${this.active}`)
     if (!this.active) {
       // 取消优先:无活跃段(审批等待/暂停/裁决窗口)即时终态,不依赖 abort 传播
       this.finish('cancelled', CANCELLED_SUMMARY)

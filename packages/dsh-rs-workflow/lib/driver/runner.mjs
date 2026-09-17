@@ -8,7 +8,6 @@ import { stepTypeOf } from './scheduler.mjs'
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const FLOW_EXEC_SOURCE = readFileSync(join(PKG_ROOT, 'engine', 'flow-exec.js'), 'utf8')
 
-import { dbg } from './debug.mjs'
 
 const DEFAULT_SLOT = {
   normal: 'executor',
@@ -89,7 +88,6 @@ export async function runBatch({ state, script, template, batch, ctx }) {
 
   let outcome
   try {
-    dbg(`batch#${batchNo} engine.start parent=${parent ? parent.id : 'UNDEFINED'} calls=${calls.length}`)
     const run = engine.start({
       script: FLOW_EXEC_SOURCE,
       args: { calls },
@@ -102,15 +100,11 @@ export async function runBatch({ state, script, template, batch, ctx }) {
       parent,
       signal,
     })
-    dbg(`batch#${batchNo} engine.start returned, awaiting result`)
     outcome = await (run.result ?? run)
-    dbg(`batch#${batchNo} engine settled: ${JSON.stringify(outcome)?.slice(0, 400)}`)
   } catch (e) {
-    dbg(`batch#${batchNo} engine threw: ${String(e?.message ?? e)}`)
     if (signal?.aborted) return { cancelled: true }
     outcome = { results: calls.map((c) => ({ callId: c.callId, ok: false, error: String(e?.message ?? e) })) }
   }
-  dbg(`batch#${batchNo} post-settle signal.aborted=${signal?.aborted} outcome.stopReason=${outcome?.stopReason}`)
   if (signal?.aborted) return { cancelled: true }
   // 引擎 run.result 契约:{ value(脚本返回值), stopReason, error?, agentsStarted }
   // stopReason 非 completed(如 cancelled/error)时 value 不可信,全部调用按失败记账
