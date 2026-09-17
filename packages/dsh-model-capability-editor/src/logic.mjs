@@ -194,6 +194,13 @@ export function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
   return titleMatched === true && hasEditor === true && modelIdInputCount === 0
 }
 
+// 官方模型行展开区定位:官方把每行高级设置(上下文窗口/最大输出)渲染为行条目
+// 内的条件块——行尾箭头(模型高级)点开才存在,收起即被官方整体移除。展开块 =
+// 行条目内除行头以外的子元素;收起时官方不渲染该子元素,返回 null。
+export function advancedAreaChild(entryChildren, modelRow) {
+  return entryChildren.find((child) => child !== modelRow) ?? null
+}
+
 // settings 传输 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
 // 两种宿主传输形态,能力面在 0.1.1 即存在:
 // - typed remote 面(dsh 0.1.2+):方法直返 RemoteResult 信封 {ok,value|error};

@@ -25,7 +25,7 @@ function clientLogic() {
       + ' fillDrafts,'
       + ' applyDraft, mergeBaselineModels, detectCompetitorTraces, stashDrafts, restoreDrafts, isModelsTitle,'
       + ' anchorsBroken, resolveTargetId, unwrapEnvelope, rejectRpc, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
-      + ' writeModels, saveModels, draftsFromModels };',
+      + ' advancedAreaChild, writeModels, saveModels, draftsFromModels };',
   )
   return factory()
 }
@@ -46,7 +46,7 @@ test('parity: 共享常量双副本一致', () => {
 })
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId, fillDrafts } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, resolveTargetId, fillDrafts, advancedAreaChild } = L
 
   test(prefix + '竞品痕迹:标记字段命中与非对象条目跳过', () => {
     assert.deepEqual(
@@ -252,6 +252,16 @@ function defineScenarios(prefix, L) {
     assert.equal(buckets.has(null), false)
     assert.equal(restoreDrafts(buckets, 'provider-a'), draftsA)
     assert.equal(restoreDrafts(buckets, 'provider-b'), draftsB)
+  })
+
+  test(prefix + '行展开区定位:行头外首个子元素为展开区,收起(无该子元素)为 null', () => {
+    const row = { id: 'row' }
+    const advanced = { id: 'advanced' }
+    assert.equal(advancedAreaChild([row, advanced], row), advanced, '箭头点开:行头后有展开块')
+    assert.equal(advancedAreaChild([row], row), null, '箭头收起:官方条件渲染移除展开块')
+    assert.equal(advancedAreaChild([], row), null)
+    assert.equal(advancedAreaChild([row, advanced, { id: 'other' }], row), advanced, '多子元素取首个非行头')
+    assert.equal(advancedAreaChild([advanced, row], row), advanced, '子元素顺序变化时仍按非行头判定')
   })
 }
 

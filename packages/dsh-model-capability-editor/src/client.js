@@ -98,6 +98,8 @@ const CSS = [
   '.mce-inline__field input[type=text] { flex:1; min-width:0; width:auto; }',
   '.mce-inline select { flex:1; min-width:0; }',
   '.mce-inline__foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+  // 官方展开区是 auto-fit 网格:注入容器必须占满整行,不挤成单列
+  '.mce-inline-root { grid-column: 1 / -1; }',
   '.mce-fallback-btn { position:fixed; right:16px; top:50%; transform:translateY(-50%); z-index:60;',
   '  box-shadow:0 2px 8px rgba(0,0,0,0.18); }',
   '.mce-fallback-card { position:fixed; right:16px; top:12px; bottom:12px; width:420px; max-width:calc(100vw - 32px);',
@@ -308,6 +310,13 @@ function isModelsTitle(title) {
 // 说明官方 DOM 结构已变,行内注入失效,应回退独立菜单。
 function anchorsBroken({ titleMatched, hasEditor, modelIdInputCount }) {
   return titleMatched === true && hasEditor === true && modelIdInputCount === 0
+}
+
+// 官方模型行展开区定位:官方把每行高级设置(上下文窗口/最大输出)渲染为行条目
+// 内的条件块——行尾箭头(模型高级)点开才存在,收起即被官方整体移除。展开块 =
+// 行条目内除行头以外的子元素;收起时官方不渲染该子元素,返回 null。
+function advancedAreaChild(entryChildren, modelRow) {
+  return entryChildren.find((child) => child !== modelRow) ?? null
 }
 
 // settings 传输 → 插件内部 settings 面(describe() / mutate(ns, ops, revision))。
@@ -728,7 +737,8 @@ function FallbackPanel(props) {
   )
 }
 
-// 行内编辑块:单个模型的档位与模态编辑,挂在官方模型行的展开区内。
+// 行内编辑块:单个模型的档位与模态编辑,挂在官方模型行箭头点开的展开区内
+// (官方条件渲染块,收起即随官方卸载)。
 // 复用整组合并保存流,草稿只含本模型一条,其余模型原样保留。
 function RowEditor(props) {
   const settings = props.settings
@@ -861,9 +871,10 @@ function RowEditor(props) {
       apply(ctx) {
         let settings = null
 
-        // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑块
-        // 挂进已展开的模型行;官方结构变化导致锚点全失时,在模型页右侧注入
-        // 浮动入口承载完整编辑卡,不再注册独立设置分区。
+        // 行内注入器:MutationObserver 监听官方设置页,reconcile 把编辑块挂进
+        // 已展开模型行的官方高级设置区(箭头点开的条件渲染块,收起即随官方卸载);
+        // 官方结构变化导致锚点全失时,在模型页右侧注入浮动入口承载完整编辑卡,
+        // 不再注册独立设置分区。
         const roots = new Map()
         let piAiModelIds = new Set()
         let piAiRoutes = new Set()
@@ -934,14 +945,24 @@ function RowEditor(props) {
           return { outlet, titleMatched, hasEditor: details !== null, idInputs }
         }
 
+        function modelRowOf(idInput) {
+          return idInput.closest('div')
+        }
+
         function entryOf(idInput) {
-          const modelRow = idInput.closest('div')
+          const modelRow = modelRowOf(idInput)
           return modelRow !== null ? modelRow.parentElement : null
         }
 
+        // 官方行展开区(高级设置)解析:行头(模型 ID 所在行)的父容器即行条目,
+        // 展开块是行条目内除行头外的子元素,仅在箭头点开后存在于 DOM。
+        function advancedAreaOf(idInput) {
+          const modelRow = modelRowOf(idInput)
+          if (modelRow === null) return null
+          return advancedAreaChild([...modelRow.parentElement.children], modelRow)
+        }
+
         function mountRow(face, idInput) {
-          const entry = entryOf(idInput)
-          if (entry === null || entry.querySelector(':scope > .mce-inline-root') !== null) return false
           const details = idInput.closest('details')
           const editor = details !== null ? details.parentElement : null
           if (editor === null) return false
@@ -949,9 +970,13 @@ function RowEditor(props) {
           const modelId = idInput.value
           if (route === null || modelId.length === 0) return false
           if (!piAiRoutes.has(route) || !piAiModelIds.has(modelId)) return false
+          // 面板只挂官方展开区:箭头未点开时官方 DOM 无展开块,不注入;展开块随
+          // 箭头收起被官方整体移除,面板由 reconcile 的孤儿清理随之释放,无从常驻
+          const advanced = advancedAreaOf(idInput)
+          if (advanced === null || advanced.querySelector(':scope > .mce-inline-root') !== null) return false
           const container = document.createElement('div')
           container.className = 'mce-inline-root'
-          entry.appendChild(container)
+          advanced.appendChild(container)
           const root = createRoot(container)
           root.render(React.createElement(RowEditor, { settings: face, route, modelId, idInputEl: idInput }))
           roots.set(container, root)
@@ -1015,11 +1040,15 @@ function RowEditor(props) {
           // 代际先行:任何一轮判定(含同步早退/闩锁)都作废在途 describe 续体,
           // 防 stale 续体以旧 DOM 快照 mountRow 或清掉新近判定的闩锁
           const seq = ++reconcileSeq
-          // S5:全部行均已挂载时零 RPC 早退,消灭注入容器自身触发的自激励扫描;
-          // 全挂载即注入健康,必须复位闩锁并移除回退面板,否则恢复永远无法解除闩锁
+          // S5:每行都处于与箭头一致的正确挂载态时零 RPC 早退,消灭注入容器自身
+          // 触发的自激励扫描;正确态 = 行展开(官方展开块在场)须已挂面板、行收起
+          // (展开块已被官方移除)须零残留,结构异常不视为健康(fail-closed)。
+          // 正确即注入健康,必须复位闩锁并移除回退面板,否则恢复永远无法解除闩锁
           if (info.idInputs.length > 0 && info.idInputs.every((input) => {
+            const advanced = advancedAreaOf(input)
+            if (advanced !== null) return advanced.querySelector(':scope > .mce-inline-root') !== null
             const entry = entryOf(input)
-            return entry !== null && entry.querySelector(':scope > .mce-inline-root') !== null
+            return entry !== null && entry.querySelector('.mce-inline-root') === null
           })) {
             anchorsLatched = false
             hidePanel()
