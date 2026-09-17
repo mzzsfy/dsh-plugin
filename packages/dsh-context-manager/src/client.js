@@ -1,10 +1,12 @@
-// dsh-context-manager Client 半区:「插件」设置页可配置卡片(四启停开关)
-// + 历史输入浮层(Alt+↑ 唤起,范围导航/搜索/收藏回填) + 插话撤回 + 对话 fork。
+// dsh-context-manager Client 半区:「插件」设置页可配置卡片(五启停开关)
+// + 历史输入浮层(Alt+↑ 唤起,范围导航/搜索/收藏回填) + 插话撤回 + 对话 fork
+// + 标题栏复制 sessionId(悬停显隐)。
 // 历史输入挂官方 conversation.input.dock 插槽(渲染为零高度锚点),回填走宿主公共
 // 契约 inputActions.setDraft;插话撤回注入官方 pending steering 气泡操作图标排;
 // fork 注入消息气泡操作排,分叉到该轮之前并把该轮用户输入回填子会话输入框(重试
 // 语义),RPC 走宿主 sessions 服务面(fork+open),锚点经 remote.session.follow
-// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射。浏览器半区经 webServer 路由
+// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射;复制 sessionId 挂官方
+// conversation.session.header.actions 插槽。浏览器半区经 webServer 路由
 // ('/api/context/*')访问 Host。打包为单文件自包含格式,无法跨文件 require;
 // 与 src/core.mjs 镜像的纯函数(filterHistoryInputs/forkFailureText/forkRetryText)
 // 修改需两处同步。
@@ -140,6 +142,18 @@ const CSS = [
   // dock 本体零 DOM,仅承载注入逻辑
   '.cx-steer-host { display:none; }',
   '.cx-fork-host { display:none; }',
+  // 标题栏复制 sessionId:与官方 icon 按钮同尺寸,默认隐藏(opacity 保占位,
+  // 隐形盒自身仍可悬停/聚焦),悬停标题栏任一位置或按钮自身/键盘聚焦时显示;
+  // 宿主 CSS module 类名带哈希前缀但名称后缀稳定,子串选择器跨构建匹配,
+  // :has 不可用时自身悬停兜底
+  '.cx-sid { appearance:none; border:0; background:transparent; cursor:pointer; flex:none;',
+  '  display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; padding:0;',
+  '  border-radius:6px; color:var(--dsw-alias-label-tertiary, rgba(127,127,127,.9));',
+  '  opacity:0; transition:opacity .15s, color .15s; }',
+  '.cx-sid:hover, .cx-sid:focus-visible { opacity:1; color:var(--dsw-alias-label-primary, inherit); }',
+  '.cx-sid:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
+  '[class*="_header"]:has(.cx-sid):hover .cx-sid, [class*="_header"]:has(.cx-sid):focus-within .cx-sid { opacity:1; }',
+  '@media (prefers-reduced-motion: reduce) { .cx-sid { transition:none; } }',
 ].join('\n')
 
 const INPUTS_URL = '/api/context/inputs'
@@ -148,6 +162,7 @@ const HISTORY_ENABLED_URL = '/api/context/history-enabled'
 const STEER_ENABLED_URL = '/api/context/steer-recall-enabled'
 const FORK_ENABLED_URL = '/api/context/fork-enabled'
 const FORK_AUTO_RESEND_URL = '/api/context/fork-auto-resend-enabled'
+const COPY_SID_ENABLED_URL = '/api/context/copy-sid-enabled'
 
 // 请求默认超时:host 被批量解压等同步任务阻塞时路由会迟滞数秒,
 // 无超时则浮层停在「正在读取…」假死;超时按错误抛出,由调用方兜底,
@@ -1128,6 +1143,62 @@ const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,�
 const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
 const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
 const FORK_AUTO_RESEND_SWITCH_TITLE = '分叉成功后自动把该轮原输入发送到子会话立即开跑(重生成语义,相当于原输入重跑一遍);关闭时分叉仅把原输入回填子会话输入框,由你编辑后再手动发送。'
+const COPY_SID_SWITCH_TITLE = '会话标题栏显示复制 sessionId 按钮,平时隐藏,鼠标移到标题栏任意位置时显示,点击复制当前会话 id 到剪贴板(便于粘贴给他人排查或脚本引用);关闭后按钮整体不渲染,刷新页面生效。'
+
+// 复制动作(纯函数,剪贴板与文档依赖注入):clipboard.writeText 优先,缺失或
+// 抛错(LAN http 非安全上下文无 navigator.clipboard)回退隐藏文本域 execCommand;
+// 全部失败返回 false,由调用方 toast 反馈
+async function copySidText(text, clipboard, doc) {
+  if (clipboard && typeof clipboard.writeText === 'function') {
+    try {
+      await clipboard.writeText(text)
+      return true
+    } catch {
+      // 非安全上下文拒绝等,落回退路径
+    }
+  }
+  try {
+    const area = doc.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    doc.body.appendChild(area)
+    try {
+      area.select()
+      return doc.execCommand('copy') === true
+    } finally {
+      // 含会话 id 的临时节点必须无条件清理,异常路径不得残留 DOM
+      area.remove()
+    }
+  } catch {
+    return false
+  }
+}
+
+// 标题栏复制 sessionId 按钮:挂官方 conversation.session.header.actions 插槽
+// (标准模式标签右侧,sessionId 由插槽 standardProps 下发),开关停用即整体
+// 不渲染;启停读取失败按启用兜底(与 HistoryDock/switchRow 一致)
+function CopySidButton({ sessionId }) {
+  const [enabled, setEnabled] = useState(true)
+  useEffect(() => {
+    api(COPY_SID_ENABLED_URL)
+      .then((payload) => setEnabled(payload ? payload.enabled !== false : true))
+      .catch(() => {})
+  }, [])
+  if (!sessionId || !enabled) return null
+  // copySidText 为 async 函数(内部全路径吞异常),必 resolve,失败以 false 表达
+  const copy = () => {
+    copySidText(sessionId, navigator.clipboard, document)
+      .then((ok) => toast(ok ? '已复制 sessionId' : '复制失败', ok ? undefined : { kind: 'error' }))
+  }
+  return h('button', { type: 'button', className: 'cx-sid', title: '复制 sessionId', 'aria-label': '复制 sessionId', onClick: copy },
+    h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+      h('rect', { x: 5.75, y: 5.75, width: 7.5, height: 7.5, rx: 1.5, stroke: 'currentColor', 'stroke-width': '1.2' }),
+      h('path', { d: 'M10.25 3.25H4.25a1.5 1.5 0 0 0-1.5 1.5v6', stroke: 'currentColor', 'stroke-width': '1.2', 'stroke-linecap': 'round' }),
+    ),
+  )
+}
 
 // 启停开关行工厂:三个开关同构(受控 checkbox + cx-switch 形态),值存宿主 settings,
 // 切换经本插件路由中转,变更刷新页面生效
@@ -1166,6 +1237,7 @@ const HistorySwitchRow = switchRow(HISTORY_ENABLED_URL, '历史输入浮层(Alt+
 const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH_TITLE, '插话撤回')
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
 const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
+const CopySidSwitchRow = switchRow(COPY_SID_ENABLED_URL, '标题栏复制 sessionId', COPY_SID_SWITCH_TITLE, '标题栏复制 sessionId')
 
 // 「插件」设置页卡片:与官方 PluginCard 同款折叠卡(header 展开/收起 + body),
 // 视觉值取自宿主实测(见 CSS 注释),组件因缺宿主 i18n/表单状态而自绘
@@ -1189,6 +1261,7 @@ function ContextPanel() {
       h(SteerSwitchRow),
       h(ForkSwitchRow),
       h(ForkAutoResendSwitchRow),
+      h(CopySidSwitchRow),
     ),
   )
 }
@@ -1353,6 +1426,20 @@ function ContextPanel() {
           } catch (error) {
             console.warn('[context-manager] 对话 fork 入口未注册(宿主无 conversation.input.dock 插槽)', error)
           }
+        }
+
+        // 标题栏复制 sessionId 入口:官方 conversation.session.header.actions 插槽
+        // (list,order -9 紧随官方 agent-preset 标签 -10,即「标准模式」右侧);
+        // sessionId 由该插槽 standardProps 自动下发(与官方 agent-preset 标签同源),
+        // 组件缺失时自行判空不渲染。宿主缺该插槽时仅禁用本功能,不阻塞其余能力
+        try {
+          ctx.slots.inject('conversation.session.header.actions', () =>
+            ctx.slots.register(
+              { name: 'conversation.session.header.actions', id: 'context-manager-copy-sid', order: -9 },
+              CopySidButton,
+            ))
+        } catch (error) {
+          console.warn('[context-manager] 复制 sessionId 入口未注册(宿主无 conversation.session.header.actions 插槽)', error)
         }
       },
     }
