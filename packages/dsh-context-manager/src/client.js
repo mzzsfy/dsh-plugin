@@ -51,6 +51,7 @@ const CSS = [
   // 设置分区容器
   '.cx-panel { display:flex; flex-direction:column; gap:2px; align-items:flex-start; min-width:0;',
   '  color:var(--dsw-alias-label-primary); font:var(--dsw-font-s-14); }',
+  '.cx-panel__title { margin:0 0 2px; font:var(--dsw-font-m-16, 600 16px/24px sans-serif); font-weight:600; }',
   '.cx-panel__hint { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption); margin-bottom:4px; }',
   // 历史输入:零高度锚点容器 + 浮层(Alt+↑ 唤起);浮层与输入框同宽对齐,
   // 不透明实底 + 宿主同款卡片投影,与消息流明确区隔。
@@ -1131,9 +1132,10 @@ const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
 const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
 
-// 「插件」设置页卡片:四个启停开关行
+// 「插件」设置页卡片:标题 + 四启停开关行
 function ContextPanel() {
   return h('div', { className: 'cx-panel' },
+    h('h3', { className: 'cx-panel__title' }, '对话增强'),
     h('span', { className: 'cx-panel__hint' }, '历史输入、插话撤回与对话分叉的启停;变更刷新页面生效。'),
     h(HistorySwitchRow),
     h(SteerSwitchRow),
