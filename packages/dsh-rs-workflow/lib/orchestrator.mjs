@@ -344,9 +344,16 @@ export function registerOrchestrator(ctx, config) {
           if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
           const accepted = driver.handlePost({ kind: args.verdict, by, reason: args.reason })
           const record = reportStore().get(runId)
-          return accepted
-            ? { ok: true, runId, status: record?.status, hint: '裁决已受理;rs_workflow_resume 拉起下一段' }
-            : { ok: false, error: '裁决未受理(状态不符或已被页签先裁)' }
+          if (accepted) {
+            return { ok: true, runId, status: record?.status, hint: '裁决已受理;rs_workflow_resume 拉起下一段' }
+          }
+          // 竞态口径:页签先裁时后到方不受理,但 run 可能已翻 running 且无活跃段(等 resume 拉起),
+          // 主循环须继续承担推进责任,否则 run 挂死在 running 无段状态
+          if (!driver.active && record?.status === 'running') {
+            startSegmentJob(exec.agent, driver)
+            return { ok: true, runId, status: record.status, hint: '裁决已被页签先裁(先到先得);已代为拉起下一段' }
+          }
+          return { ok: false, error: '裁决未受理(状态不符或已被页签先裁)' }
         },
       }),
     ]
