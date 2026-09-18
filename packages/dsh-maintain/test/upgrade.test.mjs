@@ -12,7 +12,6 @@ import {
   UPGRADE_FAIL_NPM_MISSING,
   UPGRADE_FAIL_TIMEOUT,
 } from '../src/core.mjs'
-import { RUNTIME_KINDS } from '../src/runtime.mjs'
 
 // 脚本体一律单引号:Windows shell 化 spawn 经 cmd.exe,双层双引号会被截断。
 const NODE = 'node'
@@ -219,29 +218,20 @@ test('重试:假命令真实进程 文件锁失败后重试成功', async () => 
   }
 })
 
-test('自动重启:四条件守卫(成功/非手动直跑/enabled/appExit 可用)', () => {
-  // 成功+托管(含 unknown)+enabled=true → 调度
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: true }), { schedule: true, requiresManualRestart: false })
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.DECLARED_MANAGED, hasExit: true, enabled: true }), { schedule: true, requiresManualRestart: false })
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.PM2, hasExit: true, enabled: true }), { schedule: true, requiresManualRestart: false })
+test('自动重启:三条件守卫(成功/enabled/appExit 可用),运行环境不参与判定', () => {
+  // 成功+enabled → 调度:宿主退出动作与重启按钮同一入口,拉起责任在启动方式
+  assert.deepEqual(judgeAutoRestart({ ok: true, hasExit: true, enabled: true }), { schedule: true })
   // 失败不调度
-  assert.deepEqual(judgeAutoRestart({ ok: false, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: true }), { schedule: false, requiresManualRestart: false })
-  // 手动直跑 → 手动指引,不调度
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: true, enabled: true }), { schedule: false, requiresManualRestart: true })
+  assert.deepEqual(judgeAutoRestart({ ok: false, hasExit: true, enabled: true }), { schedule: false })
   // appExit 缺失不调度
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: false, enabled: true }), { schedule: false, requiresManualRestart: false })
-  // 手动直跑与 appExit 缺失并存 → 仍以手动指引标记(指引面板,与退出能力无关)
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: false, enabled: true }), { schedule: false, requiresManualRestart: true })
+  assert.deepEqual(judgeAutoRestart({ ok: true, hasExit: false, enabled: true }), { schedule: false })
 })
 
 test('自动重启:enabled 严格 boolean,仅 true 调度', () => {
-  // 显式 false:托管(含 unknown)不调度、不标手动指引
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: false })
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.DECLARED_MANAGED, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: false })
-  // 手动直跑指引是环境约束事实,不受勾选影响
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.MANUAL_START, hasExit: true, enabled: false }), { schedule: false, requiresManualRestart: true })
+  // 显式 false 不调度
+  assert.deepEqual(judgeAutoRestart({ ok: true, hasExit: true, enabled: false }), { schedule: false })
   // 非 true 一律不调度:调用点经升级路由严格 boolean 校验,此处锁定纯函数自身契约
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: undefined }), { schedule: false, requiresManualRestart: false })
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: null }), { schedule: false, requiresManualRestart: false })
-  assert.deepEqual(judgeAutoRestart({ ok: true, runtimeKind: RUNTIME_KINDS.UNKNOWN, hasExit: true, enabled: 'true' }), { schedule: false, requiresManualRestart: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, hasExit: true, enabled: undefined }), { schedule: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, hasExit: true, enabled: null }), { schedule: false })
+  assert.deepEqual(judgeAutoRestart({ ok: true, hasExit: true, enabled: 'true' }), { schedule: false })
 })

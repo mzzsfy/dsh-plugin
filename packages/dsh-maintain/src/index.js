@@ -26,7 +26,6 @@ import {
   UPGRADE_FAIL_TRANSIENT_NETWORK,
 } from './core.mjs'
 import { runUpgrade } from './upgrade.mjs'
-import { detectRuntimeEnv, RUNTIME_KINDS } from './runtime.mjs'
 
 export const name = 'dsh-maintain'
 
@@ -208,16 +207,15 @@ export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT
   return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: null }
 }
 
-// 升级后自动重启守卫:四条件缺一不可——成功、非手动直跑、本次勾选 enabled、appExit 可用。
-// 手动直跑(双 TTY)进程退出后无人拉起,只标 requiresManualRestart 交面板指引,
-// 该指引是环境约束事实,不受勾选影响;enabled 由升级路由严格 boolean 校验保证
+// 升级后自动重启守卫:三条件缺一不可——成功、本次勾选 enabled、appExit 可用。
+// 宿主退出动作与面板"确认重启"完全同一调度入口,拉起责任归启动方式:
+// 托管环境由进程管理器拉起,手动直跑等同点了重启按钮后自行再启动
 // 无 stale 条件:版本复读属升级后磁盘读取,关机路径禁止;版本是否前进由重启后的启动检查呈现
-export function judgeAutoRestart({ ok, runtimeKind, hasExit, enabled }) {
-  if (ok !== true) return { schedule: false, requiresManualRestart: false }
-  if (runtimeKind === RUNTIME_KINDS.MANUAL_START) return { schedule: false, requiresManualRestart: true }
-  if (enabled !== true) return { schedule: false, requiresManualRestart: false }
-  if (hasExit !== true) return { schedule: false, requiresManualRestart: false }
-  return { schedule: true, requiresManualRestart: false }
+export function judgeAutoRestart({ ok, hasExit, enabled }) {
+  if (ok !== true) return { schedule: false }
+  if (enabled !== true) return { schedule: false }
+  if (hasExit !== true) return { schedule: false }
+  return { schedule: true }
 }
 
 // 浏览器半区调用的 API 路径清单:client.js 同名常量与之对拍(parity),防单侧改路径生产 404
@@ -386,16 +384,6 @@ export function apply(ctx) {
   const runningVersionReady = resolveCurrentHostVersion()
     .then((version) => { runningVersion = version })
     .catch(() => {})
-
-  // 运行环境:apply 时一次检测;探测异步,以 ready 链收口,异常回退 unknown(维持自动重启)
-  let runtimeEnv = { kind: RUNTIME_KINDS.UNKNOWN, declared: false }
-  const runtimeEnvReady = detectRuntimeEnv({
-    env: process.env,
-    platform: process.platform,
-    isTTY: { stdin: process.stdin.isTTY === true, stdout: process.stdout.isTTY === true },
-  })
-    .then((env) => { runtimeEnv = env })
-    .catch(() => {})
   let upgrade = { running: false, last: null }
   let checkInFlight = null
   let nextDueAt = null
@@ -460,8 +448,8 @@ export function apply(ctx) {
   }
 
   async function currentStatus() {
-    // 等运行版本首读与运行环境检测落定:apply 即发起,此处仅吸收启动窗口的微小延迟
-    await Promise.all([runningVersionReady, runtimeEnvReady])
+    // 等运行版本首读落定:apply 即发起,此处仅吸收启动窗口的微小延迟
+    await runningVersionReady
     const config = readSettings(ctx)
     const judged = judgeNow()
     // running 即视为持锁:省一次盘读,且窗口期语义与 upgrade 路由的门闩一致
@@ -486,7 +474,6 @@ export function apply(ctx) {
       checkedAt: snapshot.checkedAt,
       checkError: snapshot.error,
       upgrade,
-      runtimeEnv,
       autoRestartScheduled,
       activeWork: collectActiveWork(ctx),
       canRestart: typeof exit === 'function',
@@ -592,11 +579,9 @@ export function apply(ctx) {
         + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
       audit('upgrade', last.ok === true ? 'ok' : 'failed',
         'durationMs=' + (last.finishedAt - last.startedAt) + ' code=' + last.code + ' kind=' + singleLine(last.kind))
-      // 关机前置判定只取内存输入(启动期缓存的运行环境 + 本次会话勾选):升级命令刚
+      // 关机前置判定只取内存输入(本次会话勾选 + 启动器退出能力):升级命令刚
       // 替换过宿主磁盘文件,落定钩子发起网络请求或读取磁盘都是半写状态下的故障源
-      await runtimeEnvReady
-      const decision = judgeAutoRestart({ ok: last.ok === true, runtimeKind: runtimeEnv.kind, hasExit: typeof exit === 'function', enabled: autoRestart === true })
-      if (decision.requiresManualRestart === true) last.requiresManualRestart = true
+      const decision = judgeAutoRestart({ ok: last.ok === true, hasExit: typeof exit === 'function', enabled: autoRestart === true })
       if (decision.schedule === true) {
         // 关机路径零收尾:与确认重启同一内部动作,直接进入延迟退出
         // last 镜像调度标记:浮条终态文案按其分流(与 status.autoRestartScheduled 同值)
@@ -604,7 +589,7 @@ export function apply(ctx) {
         scheduleHostExit({ detail: 'reason=upgrade-ok', autoRestart: true, delayMs: AUTO_RESTART_DELAY_MS })
         return
       }
-      // 继续运行路径(失败/手动直跑/本次未勾选自动重启):复读磁盘版本标 stale,版本未前进提示保留
+      // 继续运行路径(失败/本次未勾选自动重启/appExit 缺失):复读磁盘版本标 stale,版本未前进提示保留
       if (settle !== null && settle.ok) {
         // 复读属磁盘消费点,拒绝不得以 unhandledRejection 形式逃逸(void 触发即崩宿主):
         // 失败时放弃 stale 判定,保留已装版本 null 由启动检查兜底呈现

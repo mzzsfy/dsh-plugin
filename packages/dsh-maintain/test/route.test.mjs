@@ -424,10 +424,8 @@ test('upgrade:托管+勾选自动重启,命令成功即调度关机且落定钩�
     // 关机路径零复读:版本复读属升级后磁盘读取,是明确的故障源,砍掉
     assert.equal(settled.upgrade.last.installedVersion, null, '关机路径禁止复读磁盘版本')
     assert.equal(settled.upgrade.last.stale, null, '关机路径无 stale 判定')
-    assert.equal(settled.upgrade.last.requiresManualRestart, undefined)
     assert.equal(settled.autoRestartScheduled, true, '命令成功即调度关机(stale 不再抑制)')
     assert.equal(settled.upgradeLockHeld, false, '升级结束后锁文件应删除')
-    assert.ok(typeof settled.runtimeEnv === 'object' && typeof settled.runtimeEnv.kind === 'string', 'runtimeEnv 必须进 status')
     // 落定钩子零网络:观察窗口内 fetch 计数不得增长(runCheck 已随关机路径移除)
     await realSleep(300)
     assert.equal(fetchCalls, baseline, '落定钩子禁止网络请求')
@@ -581,7 +579,6 @@ test('upgrade:未勾选自动重启,升级成功落定继续运行并标 stale',
     assert.equal(settled.upgrade.last.stale, true, '继续运行路径必须复读并标注 stale')
     assert.ok(typeof settled.upgrade.last.reason === 'string' && settled.upgrade.last.reason.length > 0, 'stale 必须带原因')
     assert.equal(settled.autoRestartScheduled, false, '未勾选不得置调度标记')
-    assert.equal(settled.upgrade.last.requiresManualRestart, undefined, '托管环境未勾选不标手动指引')
     // 推过完整调度延迟:若误调度,延迟窗口内 exit 必被调用
     t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
     assert.deepEqual(exits, [], '未勾选自动重启时禁止调度任何宿主退出')
@@ -647,9 +644,8 @@ test('upgrade:勾选自动重启+落定,延迟窗口后调度宿主退出', asyn
     assert.ok(settled, '升级应在假命令退出后落定')
     assert.equal(settled.upgrade.last.ok, true)
     assert.equal(settled.upgrade.last.stale, null, '关机路径零复读,stale 不再判定')
-    // 落定可见与调度置位之间隔 runtimeEnvReady 的 await:await 一次 status 让微任务链走完再断言
-    const scheduled = await get(routes, '/api/maintain/status').then((r) => r.payload)
-    assert.equal(scheduled.autoRestartScheduled, true, '勾选自动重启时升级成功必须调度')
+    // 调度标记与 running=false 同拍置位,落定快照直接可断言
+    assert.equal(settled.autoRestartScheduled, true, '勾选自动重启时升级成功必须调度')
     assert.deepEqual(exits, [], '调度延迟窗口内不得提前退出')
     t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
     assert.deepEqual(exits, [0], '延迟窗口过后必须调度宿主退出')
@@ -858,16 +854,17 @@ test('restart:null 体按空体处理,内部形态不泄漏', async (t) => {
   assert.deepEqual(exits, [0], 'null 体等价空体:正常调度退出')
 })
 
-test('自动重启接线:落定链消费运行环境并分流调度与手动指引(源码形态锁定)', () => {
+test('自动重启接线:落定链只取内存输入并直接分流调度(源码形态锁定)', () => {
   const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
   const settle = source.match(/const decision = judgeAutoRestart\(\{([\s\S]*?)\}\)/)
   assert.ok(settle, '落定链缺少 judgeAutoRestart 判定')
-  assert.match(settle[1], /runtimeKind: runtimeEnv\.kind/, '落定判定必须消费运行环境检测结果')
-  assert.match(source, /if \(decision\.requiresManualRestart === true\) last\.requiresManualRestart = true/, '手动直跑指引必须回写 last')
+  assert.doesNotMatch(settle[1], /runtimeKind|runtimeEnv/, '落定判定禁止消费运行环境:升级即调度与启动形态无关')
+  assert.doesNotMatch(source, /requiresManualRestart/, '手动直跑指引链必须整体移除,不得残留回写')
   assert.match(source, /if \(decision\.schedule === true\) \{[\s\S]*?last\.autoRestartScheduled = true[\s\S]*?scheduleHostExit\(\{ detail: 'reason=upgrade-ok', autoRestart: true/, '调度链必须置位标记并经统一退出入口关机')
 })
 
-test('upgrade:env 注入手动直跑环境,落定链保守分流零退出', async () => {
+test('upgrade:运行环境不参与自动重启判定(env 注入 manual 仍调度关机)', async () => {
+  // DSH_MAINTAIN_RUNTIME_ENV 已无消费者:注入历史值证明判定与运行环境彻底解耦
   process.env.DSH_MAINTAIN_RUNTIME_ENV = 'manual'
   try {
     const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
@@ -882,11 +879,9 @@ test('upgrade:env 注入手动直跑环境,落定链保守分流零退出', asyn
       if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
     }
     assert.ok(settled, '升级应在假命令退出后落定')
-    assert.equal(settled.runtimeEnv.kind, 'manual-start-likely', 'env 注入必须经 apply 检测进 status')
-    assert.equal(settled.autoRestartScheduled, false, '手动直跑禁止调度自动重启')
-    assert.deepEqual(exits, [], '手动直跑禁止任何宿主退出')
-    // 手动直跑标环境指引:命令成功即提示手动重启(指引不再被 stale 抑制)
-    assert.equal(settled.upgrade.last.requiresManualRestart, true, '手动直跑必须标手动重启指引')
+    assert.equal(settled.autoRestartScheduled, true, '升级成功勾选即调度,运行环境不得抑制')
+    assert.equal(settled.upgrade.last.requiresManualRestart, undefined, '手动指引链已移除')
+    assert.deepEqual(exits, [], '调度延迟窗口内不得提前退出')
   } finally {
     delete process.env.DSH_MAINTAIN_RUNTIME_ENV
   }
