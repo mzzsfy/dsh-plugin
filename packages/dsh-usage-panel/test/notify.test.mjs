@@ -23,6 +23,7 @@ import {
   KIND_QUOTA,
   KIND_BALANCE,
   KIND_RESET,
+  RESET_DRIFT_TOLERANCE_MS,
 } from '../src/notify.mjs'
 
 test('规则合并: 账号覆盖键生效, 其余继承全局', () => {
@@ -104,6 +105,50 @@ test('窗口重置: resetsAt 轮转产生 reset 事件报上一窗口峰值并�
   // Then 再次产生 quota 事件(重置后 re-arm 生效)
   assert.equal(again.events.length, 1)
   assert.equal(again.events[0].kind, KIND_QUOTA)
+})
+
+test('窗口重置: 毫秒级服务端抖动视为同窗口不发事件且峰值保留', () => {
+  // Given 阈值 90, 首轮 utilization 40 以 ISO 时刻建立基线
+  const rule = { quotaThresholdPct: 90, balanceThreshold: null, resetNotice: true }
+  let state = createNotifyState()
+  state = evaluateAccount({ account: quotaAccount(quotaReading(40, '2026-10-17T09:10:04.999Z')), rule, state, seq: 1, ts: 1000 }).state
+  // When 次轮 resetsAt 仅漂移 1ms(智谱 TIME_LIMIT 实测抖动), utilization 回落
+  const next = evaluateAccount({ account: quotaAccount(quotaReading(30, '2026-10-17T09:10:04.998Z')), rule, state, seq: 2, ts: 2000 })
+  // Then 无事件, 峰值保留 40 不误报, 基线静默跟随新值
+  assert.equal(next.events.length, 0)
+  assert.equal(next.state.windows['5小时'].peak, 40)
+  assert.equal(next.state.windows['5小时'].resetsAt, '2026-10-17T09:10:04.998Z')
+})
+
+test('窗口重置: 超容差的 resetsAt 变化仍判定为轮转', () => {
+  // Given 阈值 90, 首轮 92 建立基线
+  const rule = { quotaThresholdPct: 90, balanceThreshold: null, resetNotice: true }
+  let state = createNotifyState()
+  state = evaluateAccount({ account: quotaAccount(quotaReading(92, '2026-10-17T09:10:04.999Z')), rule, state, seq: 1, ts: 1000 }).state
+  // When resetsAt 前移 1 小时(真实轮转)
+  const next = evaluateAccount({ account: quotaAccount(quotaReading(5, '2026-10-17T10:10:04.999Z')), rule, state, seq: 2, ts: 2000 })
+  // Then 产生 reset 事件报上一窗口峰值 92
+  assert.equal(next.events.length, 1)
+  assert.equal(next.events[0].kind, KIND_RESET)
+  assert.equal(next.events[0].text, '[dsh] 账号A 5小时窗口已重置,上一窗口峰值用量 92%')
+})
+
+test('窗口重置: 漂移恰好容差内静默, 达到容差即轮转', () => {
+  // Given 阈值 90, 基线 resetsAt 为固定时刻
+  const rule = { quotaThresholdPct: 90, balanceThreshold: null, resetNotice: true }
+  const baseMs = Date.parse('2026-10-17T09:10:04.999Z')
+  const isoOf = (ms) => new Date(ms).toISOString()
+  const baselineState = evaluateAccount({ account: quotaAccount(quotaReading(40, isoOf(baseMs))), rule, state: createNotifyState(), seq: 1, ts: 1000 }).state
+  // When 漂移为容差减 1ms(容差内)
+  const inside = evaluateAccount({ account: quotaAccount(quotaReading(40, isoOf(baseMs + RESET_DRIFT_TOLERANCE_MS - 1))), rule, state: baselineState, seq: 2, ts: 2000 })
+  // Then 无事件, 基线跟随
+  assert.equal(inside.events.length, 0)
+  assert.equal(inside.state.windows['5小时'].resetsAt, isoOf(baseMs + RESET_DRIFT_TOLERANCE_MS - 1))
+  // When 漂移恰好等于容差(边界,严格小于判定不吸收,独立从原始基线评估)
+  const boundary = evaluateAccount({ account: quotaAccount(quotaReading(40, isoOf(baseMs + RESET_DRIFT_TOLERANCE_MS))), rule, state: baselineState, seq: 3, ts: 3000 })
+  // Then 判定轮转产生 reset 事件
+  assert.equal(boundary.events.length, 1)
+  assert.equal(boundary.events[0].kind, KIND_RESET)
 })
 
 test('窗口重置: resetNotice 关闭时不产生 reset 事件但仍重建基线并重新武装', () => {

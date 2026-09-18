@@ -6,6 +6,9 @@ export const PROJECTION_CAPACITY = 20
 export const PROJECTION_TTL_MS = 60 * 1000
 export const CLAIM_LOCK_TTL_MS = 30 * 1000
 export const WEBHOOK_TIMEOUT_MS = 10 * 1000
+// 轮转判定容差:远小于最短真实窗口量级,远大于服务端毫秒级抖动;
+// 容差内视为同窗口静默跟随
+export const RESET_DRIFT_TOLERANCE_MS = 60 * 1000
 
 export const KIND_QUOTA = 'quota'
 export const KIND_BALANCE = 'balance'
@@ -63,6 +66,13 @@ export function normalizeNotifyState(raw) {
 
 const PERCENT_BASE = 100
 
+// 窗口轮转判定:resetsAt 数值差超容差才算轮转;parse 失败无法证伪,保守按轮转。
+// 容差内静默跟随,峰值与武装状态不重建
+function windowRotated(prevResetsAt, resetsAt) {
+  const driftMs = Math.abs(Date.parse(resetsAt) - Date.parse(prevResetsAt))
+  return !(Number.isFinite(driftMs) && driftMs < RESET_DRIFT_TOLERANCE_MS)
+}
+
 // 沿触发评估:刷新读数越过逻辑点(阈值穿越/窗口重置)时产出事件,返回新状态不改入参。
 // 仅在 last.ok 时由 host 调用;reading 缺失按无读数处理。
 export function evaluateAccount({ account, rule, state, seq, ts }) {
@@ -88,8 +98,9 @@ function evaluateQuota({ account, rule, state, reading, events, next }) {
     const prev = state.windows[label] || null
     let armed = prev === null ? true : prev.armed !== false
     let peak = prev === null ? null : prev.peak
-    // 窗口轮转:两侧 resetsAt 均有效且值不同;上一窗口峰值随 reset 事件上报
-    if (prev !== null && resetsAt !== null && prev.resetsAt !== null && prev.resetsAt !== resetsAt) {
+    // 窗口轮转:两侧 resetsAt 均有效、字符串不等且数值差超容差;上一窗口峰值随 reset 事件上报
+    if (prev !== null && resetsAt !== null && prev.resetsAt !== null && prev.resetsAt !== resetsAt
+      && windowRotated(prev.resetsAt, resetsAt)) {
       if (rule.resetNotice !== false && prev.peak !== null) {
         events.push({
           kind: KIND_RESET,
