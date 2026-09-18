@@ -197,24 +197,23 @@ test('restartTick 调用点实参完整性:轮询 effect 必须传 readyStreak=p
   assert.match(callSite[1], /readyStreak:\s*prev\.readyStreak/, 'restartTick 调用点缺少 readyStreak: prev.readyStreak 实参')
 })
 
-// 升级浮条终态文案:ok 落定后 stale / 手动直跑 / 自动重启三条终态分流,失败与未知不在此列
+// 升级浮条终态文案:ok 落定后 stale / 自动重启两条终态分流,失败与未知不在此列
 const clientUpgradeFinalText = extractLogic('upgradeFinalText')
 
 // 重启确认态文案:armed 且有活跃计数时改「仍要重启」
 const clientRestartConfirmLabel = extractLogic('restartConfirmLabel')
 
-test('upgradeFinalText: stale 优先于两种重启指引,不得引导重启', () => {
-  const text = clientUpgradeFinalText({ ok: true, stale: true, requiresManualRestart: true, autoRestartScheduled: true })
+test('upgradeFinalText: stale 优先于重启指引,不得引导重启', () => {
+  const text = clientUpgradeFinalText({ ok: true, stale: true, autoRestartScheduled: true })
   // stale 口径泛化:未前进/未达目标/未落到目标/未装到指定版本统称与安装意图不符
   assert.match(text, /意图不符/)
   assert.doesNotMatch(text, /重启/)
 })
 
-test('upgradeFinalText: 手动直跑终态指向手动重启,自动重启终态指向页面自恢复', () => {
-  assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: true, autoRestartScheduled: false }), /手动重启/)
-  assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: false, autoRestartScheduled: true }), /自动重启/)
+test('upgradeFinalText: 自动重启终态指向页面自恢复,默认终态指向手动重启', () => {
+  assert.match(clientUpgradeFinalText({ ok: true, stale: false, autoRestartScheduled: true }), /自动重启/)
   // 默认成功终态
-  assert.match(clientUpgradeFinalText({ ok: true, stale: false, requiresManualRestart: false, autoRestartScheduled: false }), /重启宿主/)
+  assert.match(clientUpgradeFinalText({ ok: true, stale: false, autoRestartScheduled: false }), /重启宿主/)
 })
 
 test('restartConfirmLabel: armed 且活跃计数>0 才显示仍要重启文案', () => {
@@ -240,7 +239,7 @@ test('client 自动重启接管:单一守卫函数,订阅回调与初始加载�
 
 test('client 落定补查:未见自动重启标记时延迟宽限补查一拍再终判', () => {
   const source = clientSource()
-  // 落定拍 running 翻转与宿主置调度标记之间存在 await 窗口:未见标记不得立即终判
+  // 落定拍可见时继续运行路径的 stale 复读可能尚未完成:未见调度标记不得立即终判
   assert.match(source, /setTimeout\(\(\)\s*=>\s*\{[\s\S]*?recheckUpgradeSettle\(/, '落定拍未见标记必须延迟补查')
   assert.match(source, /async function recheckUpgradeSettle\([\s\S]*?broadcastUpgradeStatus\(final\)/, '补查必须广播以驱动接管守卫')
   assert.match(source, /upgradeWatch\.generation !== null\) return[\s\S]*?recheckUpgradeSettle|recheckUpgradeSettle\([\s\S]*?upgradeWatch\.generation !== null\) return/, '补查前后必须验让位新观察')

@@ -1,5 +1,6 @@
-// 模型发现 BDD(官方 discoverModels 减 catalog 分支):openai 系可探测,
-// 其余协议明确不支持,坏端点/坏响应归类,探测键与 attribution 头携带。
+// 模型发现 BDD(官方 discoverModels 减 catalog 分支):openai 系与
+// anthropic-messages 可探测,其余协议明确不支持,坏端点/坏响应归类,
+// 探测键与 attribution 头携带。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -55,7 +56,7 @@ test('openai-completions 草稿探测:listing 行解析,bearer + attribution 头
   )
   assert.deepEqual(models, [
     { id: 'm1', name: 'Model One', contextWindow: 1000, maxTokens: 100 },
-    { id: 'm2' },
+    { id: 'm2', name: 'm2' },
   ])
   assert.equal(fetchOk.captured.url, 'https://gw.example/v1/models')
   assert.equal(fetchOk.captured.init.headers.get('authorization'), 'Bearer sk-x')
@@ -81,17 +82,62 @@ test('路由自定义头先行,保留头后写覆盖;signal 透传探测请求',
   assert.equal(fetchOk.captured.init.signal, controller.signal, '宿主取消信号透传')
 })
 
-test('openai-responses 可探测;anthropic-messages 报 DISCOVERY_UNSUPPORTED', async () => {
+test('openai-responses 可探测;anthropic-messages 走原生 /v1/models 探测', async () => {
   assert.equal(await codeOf(discoverModels(
     { api: 'openai-responses', baseURL: 'https://gw.example' },
     async () => undefined,
     fetchOk({ data: [] }),
   )), undefined)
-  assert.equal(await codeOf(discoverModels(
-    { api: 'anthropic-messages', baseURL: 'https://gw.example' },
+  const impl = fetchOk({ data: [{ id: 'claude-x', display_name: 'Claude X' }] })
+  const models = await discoverModels(
+    { api: 'anthropic-messages', baseURL: 'https://api.example.com/v1', apiKey: ' sk-ant ' },
     async () => undefined,
-    fetchOk({ data: [] }),
-  )), 'DISCOVERY_UNSUPPORTED')
+    impl,
+  )
+  assert.deepEqual(models, [{ id: 'claude-x', name: 'Claude X' }])
+  assert.equal(fetchOk.captured.url, 'https://api.example.com/v1/models?limit=1000', '以 /v1 结尾的 base 不重复追加')
+  assert.equal(fetchOk.captured.init.headers.get('anthropic-version'), '2023-06-01')
+  assert.equal(fetchOk.captured.init.headers.get('x-api-key'), 'sk-ant')
+  assert.equal(fetchOk.captured.init.headers.get('authorization'), null, 'anthropic 探测不带 bearer 头')
+  await discoverModels(
+    { api: 'anthropic-messages', baseURL: 'https://gw.example///', apiKey: 'sk-ant' },
+    async () => undefined,
+    impl,
+  )
+  assert.equal(fetchOk.captured.url, 'https://gw.example/v1/models?limit=1000', '无 /v1 的 base 补原生路径,尾斜杠归一')
+})
+
+test('models map 富集解析:data 优先,键为 id,原始值忽略,capacity 富集,name 回退 id', async () => {
+  const models = await discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    fetchOk({ models: {
+      'gw/claude': { display_name: 'Claude', contextWindow: 200000, limit: { output: 8192 } },
+      'gw/gpt': { name: 'GPT', context_length: 128000, max_output_tokens: 4096 },
+      'gw/limit': { displayName: 'Lim', max_input_tokens: 1000, limit: { context: 2000 }, top_provider: { max_completion_tokens: 300 } },
+      'gw/empty': {},
+      'gw/bad': 'primitive',
+      '': { id: 'canonical-fallback', name: 'Canon' },
+    } }),
+  )
+  assert.deepEqual(models, [
+    { id: 'gw/claude', name: 'Claude', contextWindow: 200000, maxTokens: 8192 },
+    { id: 'gw/gpt', name: 'GPT', contextWindow: 128000, maxTokens: 4096 },
+    { id: 'gw/limit', name: 'Lim', contextWindow: 1000, maxTokens: 300 },
+    { id: 'gw/empty', name: 'gw/empty' },
+    { id: 'canonical-fallback', name: 'Canon' },
+  ])
+  const preferData = await discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    fetchOk({ data: [{ id: 'from-data', name: 'Data' }], models: { 'from-models': {} } }),
+  )
+  assert.deepEqual(preferData, [{ id: 'from-data', name: 'Data' }])
+  assert.equal(await codeOf(discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    fetchOk({ models: [] }),
+  )), 'DISCOVERY_FAILED', '数组形状不算 models map')
 })
 
 test('无 baseURL 报 DISCOVERY_FAILED;非 2xx 报 DISCOVERY_FAILED', async () => {
@@ -118,6 +164,37 @@ test('非 JSON 响应报 DISCOVERY_FAILED;缺 data 数组报 DISCOVERY_FAILED', 
     async () => undefined,
     fetchOk({ nope: true }),
   )), 'DISCOVERY_FAILED')
+})
+
+test('坏清单形状信息含两种形状名;anthropic 存量凭据落 x-api-key;baseURL 缺失先报', async () => {
+  const error = await discoverModels(
+    { api: 'openai-completions', baseURL: 'https://gw.example' },
+    async () => undefined,
+    fetchOk({ nope: true }),
+  ).then(() => undefined, (thrown) => thrown)
+  assert.equal(error.code, 'DISCOVERY_FAILED')
+  assert.match(error.message, /neither a "data" array nor a "models" object/)
+  const impl = fetchOk({ data: [] })
+  await discoverModels(
+    { api: 'anthropic-messages', baseURL: 'https://gw.example' },
+    async () => 'sk-stored',
+    impl,
+  )
+  assert.equal(fetchOk.captured.init.headers.get('x-api-key'), 'sk-stored')
+  assert.equal(fetchOk.captured.init.headers.get('authorization'), null, 'anthropic 探测不改写 bearer')
+  assert.equal(await codeOf(discoverModels(
+    { api: 'anthropic-messages' },
+    async () => undefined,
+    impl,
+  )), 'DISCOVERY_FAILED', '无 baseURL 先报 baseURL 缺失,不误报协议不支持')
+})
+
+test('白名单外协议报 DISCOVERY_UNSUPPORTED', async () => {
+  assert.equal(await codeOf(discoverModels(
+    { api: 'azure', baseURL: 'https://gw.example' },
+    async () => undefined,
+    fetchOk({ data: [] }),
+  )), 'DISCOVERY_UNSUPPORTED')
 })
 
 test('声明超限 content-length 直接拒收', async () => {
@@ -203,7 +280,7 @@ test('body 为 null 返回空串落 JSON 解析失败;无 reader 兜底限量读
       body: { async text() { return JSON.stringify({ data: [{ id: 'm1' }] }) } },
     }),
   )
-  assert.deepEqual(listed, [{ id: 'm1' }])
+  assert.deepEqual(listed, [{ id: 'm1', name: 'm1' }])
 })
 
 test('探测请求被中断且 signal 已取消时归 ABORTED', async () => {

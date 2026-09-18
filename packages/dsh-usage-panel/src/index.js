@@ -269,7 +269,7 @@ function normalizeAccounts(input) {
             ? lastSource.reading
             : null,
           error: typeof lastSource.error === 'string' ? lastSource.error : null,
-          queriedAt: Number.isFinite(Number(lastSource.queriedAt)) ? Number(lastSource.queriedAt) : null,
+          queriedAt: typeof lastSource.queriedAt === 'number' && Number.isFinite(lastSource.queriedAt) ? lastSource.queriedAt : null,
         }
       : null
     const id = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : 'acct-' + String(index)

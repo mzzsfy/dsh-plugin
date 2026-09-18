@@ -499,35 +499,29 @@ const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 // 宿主桌面通知 spawn 超时:与 webhook 同语义,超时强杀不重试
 export const HOST_NOTIFY_TIMEOUT_MS = 10 * 1000
 
-// 回环判定:IPv6 环回、IPv4 环回与 IPv4 映射形态的 IPv4 环回;空与非法为假。
-// 回环来源的浏览器窗口即与宿主同机,是本机去重的判定依据
-export function isLoopbackAddress(address) {
-  if (typeof address !== 'string' || address.length === 0) return false
-  return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.')
-}
-
-// 宿主通知决策:浏览器优先——本机浏览器在场由浏览器呈现,宿主让位(正常路径
+// 宿主通知决策:浏览器优先——浏览器在场由浏览器呈现,宿主让位(正常路径
 // 零重复);离场由宿主补位。重复只发生在在场判定的边界情况(认可窗口边界与
 // 网络抖动),宁可重复不可漏。两开关均关不弹,任一开启即启用该通道。
-export function hostNotifyWanted({ hostNotify, hostNotifyFallback, localBrowserPresent }) {
+export function hostNotifyWanted({ hostNotify, hostNotifyFallback, browserPresent }) {
   if (hostNotify !== true && hostNotifyFallback !== true) return false
-  return localBrowserPresent !== true
+  return browserPresent !== true
 }
 
-// 本机浏览器在场判定:有在途长轮询即在场信号(无论时间戳新旧);无在途时,
+// 浏览器在场判定:有在途长轮询即在场信号(无论时间戳新旧);无在途时,
 // 最近活动在认可窗口内(长轮询刚完成、断连刚出账)仍算在场,超窗或从未在场为假
-export function isLocalBrowserPresent({ inFlightPolls, lastSeenAt, now, windowMs }) {
+export function isBrowserPresent({ inFlightPolls, lastSeenAt, now, windowMs }) {
   if (typeof inFlightPolls === 'number' && inFlightPolls > 0) return true
   return typeof lastSeenAt === 'number' && lastSeenAt > 0 && now - lastSeenAt <= windowMs
 }
 
-// 本机浏览器轮询判定:回环来源 + 长轮询续传形态(带 cursor)+ fetch 请求形态
-// + Origin 对账。投影为无守卫 GET,记账须排除可伪造在场的形态:no-cors(img
-// 跨站探活)、无 cursor 的手工探测、跨源 fetch(同机恶意网页,sec-fetch-mode
-// 同为 cors 无法区分,凭 Origin 与 Host 不符识别;同源 GET fetch 不带 Origin,
-// 无 Origin 放行,旧浏览器同样覆盖)
-export function isLocalBrowserPoll({ remoteAddress, hasCursor, secFetchMode, origin, host }) {
-  if (!isLoopbackAddress(remoteAddress)) return false
+// 浏览器轮询判定:长轮询续传形态(带 cursor)+ fetch 请求形态 + Origin 对账。
+// 来源不限地址:浏览器可在任意机器访问 dsh(局域网部署),在场信号看的是
+// "有无 dsh 页面在轮询",与浏览器同不同机无关。投影为无守卫 GET,记账须排除
+// 可伪造在场的形态:no-cors(img 跨站探活)、无 cursor 的手工探测、跨源 fetch
+// (恶意网页,sec-fetch-mode 同为 cors 无法区分,凭 Origin 与 Host 不符识别;
+// 同源 GET fetch 不带 Origin,无 Origin 放行,旧浏览器同样覆盖)——只有 dsh
+// 同源页面自身能发出合格形态,伪造面与来源地址无关
+export function isBrowserPoll({ hasCursor, secFetchMode, origin, host }) {
   if (hasCursor !== true) return false
   if (secFetchMode !== undefined && secFetchMode !== 'cors') return false
   if (typeof origin === 'string' && origin.length > 0) {

@@ -22,3 +22,7 @@
 node scripts/dev-link.mjs all      # 挂 junction 开发态
 node --test "test/*.test.mjs"      # 包内测试(在 packages/dsh-rs-workflow 下)
 ```
+
+## dsh 版本兼容
+
+三版本全部通过:preset 释放、Agent 预设页若水工作流卡、rs_workflow_ 工具可列出、激活 live。

@@ -49,8 +49,14 @@ function loadFactory() {
 }
 
 // apply 的定面轮询(settle→scheduleScan)会在测试结束后的一拍触达 document;
-// 桩 querySelector 恒 null,扫描回调即静默返回,异步尾巴不抛错
-globalThis.document ??= { querySelector: () => null, getElementById: () => null }
+// 桩 querySelector 恒 null,扫描回调即静默返回,异步尾巴不抛错。
+// 保存随动的文档级点击分类监听在 effect 注册/清理,桩记录监听器增删
+globalThis.document ??= {
+  querySelector: () => null,
+  getElementById: () => null,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+}
 // applyTracked 真实执行 effect fn(其中 new MutationObserver),桩不派发变更
 globalThis.MutationObserver ??= class { observe() {} disconnect() {} }
 

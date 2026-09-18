@@ -90,3 +90,7 @@ dsh --profile <profile> --no-open --port 9191
 装载本插件需要它在 `dsh.profile.bundles`(`dsh plugin --profile web add @mzzsfy/dsh-usage-dash`);bundles 表变化不支持热重载,需重启 dsh 生效。之后代码改动:宿主半区经 dev-link 自动热重载,client 半区刷新页面即生效。
 
 双语能力经宿主 `locale` 服务声明装载(与官方插件同构);极端旧宿主无该服务时插件整体未激活(cordis 门控,升级宿主即自愈)。
+
+## dsh 版本兼容
+
+三版本全部通过:用量仪表盘渲染、激活 live。

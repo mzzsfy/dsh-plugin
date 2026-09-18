@@ -36,11 +36,12 @@ function loaderOf({ gateway, official } = {}) {
 function ctxFixture({ loader, officialModule = OFFICIAL_STUB } = {}) {
   const state = { plugged: 0, unplugged: 0, logs: { warn: [], error: [] } }
   const callbacks = []
+  const settingsFaces = []
   let mountedFiber = null
   const ctx = {
     loader,
     // 注入 API:服务已就绪形态,回调同步执行并携带 settings 服务面
-    inject: (names, callback) => { if (names.includes('settings')) callback({ settings: { get: (ns) => (ns === 'llm-pi-ai' ? { providers: {} } : undefined) } }) },
+    inject: (names, callback) => { if (names.includes('settings')) callback({ settings: { get: (ns) => { settingsFaces.push({ ns }); return (ns === 'llm-pi-ai' ? { providers: {} } : undefined) } } }) },
     logger: {
       warn: (message) => state.logs.warn.push(message),
       error: (message) => state.logs.error.push(message),
@@ -65,7 +66,7 @@ function ctxFixture({ loader, officialModule = OFFICIAL_STUB } = {}) {
     if (officialModule === null) throw new Error('official package missing')
     return officialModule
   }
-  return { ctx, state, callbacks, mountImport, currentMount: () => mountedFiber }
+  return { ctx, state, callbacks, settingsFaces, mountImport, currentMount: () => mountedFiber }
 }
 
 // installGuard 的树就绪等待在测试注入 noop delay,避免真实 5s 上限
@@ -256,6 +257,66 @@ test('兼容剥离: 首挂因 compat 键被拒 → 剥键重挂通过,行配置�
   assert.notEqual(last, SECTION, '剥键必须作用在副本上')
   assert.equal(last.providers.p.models[0].compat.chatTemplateArgs, undefined, '被拒键剥离')
   assert.equal(JSON.stringify(last.providers.p.models[0].compat.chatTemplateKwargs), '{}', '未被拒键保留')
+})
+
+test('兼容剥离: route 级 compat 被拒同样剥键,不止 model 级', async () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  const { ctx, state, callbacks } = ctxFixture({ loader })
+  // rc.1 实测形态:拒绝文本是 route 级("route sets compat"),不是 model 级
+  const REFUSED = 'llm-pi-ai: provider "newapi" route sets compat "sendSessionAffinityHeaders", which is not configurable here: pi-ai\'s installed catalog sets it for the vendors that need it, so name that provider as the route instead'
+  const SECTION = {
+    providers: {
+      newapi: {
+        compat: { sendSessionAffinityHeaders: true },
+        models: [{ id: 'auto' }],
+      },
+    },
+  }
+  let attempts = 0
+  const mountConfigs = []
+  ctx.plugin = (module, config) => {
+    attempts += 1
+    mountConfigs.push(config)
+    state.plugged += 1
+    if (attempts === 1) {
+      return { dispose: async () => {}, then: (_ok, fail) => fail(new Error(REFUSED)) }
+    }
+    return { dispose: async () => {} }
+  }
+  await installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    rowConfig: async () => SECTION,
+    delay: NO_DELAY,
+  })
+  const disposeEvent = callbacks.find(cb => cb.name === 'loader/partial-dispose').callback
+  await disposeEvent(loader.resolve('llm-pi-gateway'), undefined, true)
+  assert.ok(attempts >= 2, '首挂被拒后必须重试')
+  const last = mountConfigs[mountConfigs.length - 1]
+  assert.equal(last.providers.newapi.compat?.sendSessionAffinityHeaders, undefined, 'route 级被拒键剥离')
+  assert.equal(last.providers.newapi.models.length, 1, '其余配置保留')
+})
+
+test('兼容剥离: route 级被拒键在 settings 面现值回灌场景下持续剥离', async () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  const { ctx, callbacks } = ctxFixture({ loader })
+  const REFUSED = 'llm-pi-ai: provider "newapi" route sets compat "sendSessionAffinityHeaders", which is not configurable here: pi-ai\'s installed catalog sets it for the vendors that need it, so name that provider as the route instead'
+  const RAW = { providers: { newapi: { compat: { sendSessionAffinityHeaders: true }, models: [{ id: 'auto' }] } } }
+  let attempts = 0
+  ctx.plugin = (_module, config) => {
+    attempts += 1
+    if (attempts > 1) assert.equal(config.providers.newapi.compat?.sendSessionAffinityHeaders, undefined, '每次重挂配置都已剥键')
+    return attempts === 1
+      ? { dispose: async () => {}, then: (_ok, fail) => fail(new Error(REFUSED)) }
+      : { dispose: async () => {} }
+  }
+  await installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    rowConfig: async () => RAW,
+    delay: NO_DELAY,
+  })
+  const disposeEvent = callbacks.find(cb => cb.name === 'loader/partial-dispose').callback
+  await disposeEvent(loader.resolve('llm-pi-gateway'), undefined, true)
+  assert.ok(attempts >= 2, '死态复判以剥键后的配置重挂')
 })
 
 test('导出: guard 行 id 含 "/"(market 行写入对其拒绝,窗口内不被禁)', () => {

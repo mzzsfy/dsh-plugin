@@ -205,15 +205,22 @@ export async function installGuard(ctx, {
     }
   }
 
-  // 跨版本 compat 键差异:旧宿主的 wire protocol 不声明新键即拒整节,
-  // 行配置随之失效。拒绝信息机器可读,记录被拒键并在后续构造时剥离,
-  // 收敛后行配置即通过本宿主校验;仅影响代挂首注册,settings 接线后
-  // 以 settings 面为准
+  // 跨版本 compat 键差异:旧宿主的 pi-ai 不提供新 compat 键即拒整节
+  // (route 级 "route sets compat" 或 model 级 "model \"x\" sets compat",
+  // 以及无 wire protocol 声明的旧消息形态),行配置随之失效。拒绝信息
+  // 机器可读,记录被拒键并在后续构造时剥离,收敛后行配置即通过本宿主
+  // 校验;仅影响代挂首注册,settings 接线后以 settings 面为准
   const refusedCompatKeys = new Set()
-  const REFUSED_COMPAT_RE = /sets compat "([^"]+)", which no wire protocol declares/g
+  const REFUSED_COMPAT_RE = [
+    /route sets compat "([^"]+)"/g,
+    /model "[^"]*" sets compat "([^"]+)"/g,
+    /sets compat "([^"]+)", which no wire protocol declares/g,
+  ]
   function recordRefusedCompatKeys(message) {
-    for (const match of String(message ?? '').matchAll(REFUSED_COMPAT_RE)) {
-      refusedCompatKeys.add(match[1])
+    for (const re of REFUSED_COMPAT_RE) {
+      for (const match of String(message ?? '').matchAll(re)) {
+        refusedCompatKeys.add(match[1])
+      }
     }
   }
   function stripRefusedCompatKeys(section) {
@@ -222,6 +229,9 @@ export async function installGuard(ctx, {
     if (typeof providers !== 'object' || providers === null) return section
     const cleaned = structuredClone(section)
     for (const provider of Object.values(cleaned.providers)) {
+      if (typeof provider?.compat === 'object' && provider.compat !== null) {
+        for (const key of refusedCompatKeys) delete provider.compat[key]
+      }
       for (const model of provider?.models ?? []) {
         if (typeof model?.compat === 'object' && model.compat !== null) {
           for (const key of refusedCompatKeys) delete model.compat[key]
@@ -240,7 +250,8 @@ export async function installGuard(ctx, {
     mounting = (async () => {
       try {
         const section = await (rowConfig?.() ?? officialRowConfig())
-        const fiber = ctx.plugin(officialModule, stripRefusedCompatKeys(section))
+        const stripped = stripRefusedCompatKeys(section)
+        const fiber = ctx.plugin(officialModule, stripped)
         await fiber
         mounted = fiber
         ctx.logger.warn('llm-pi-gateway/guard: 检测到 gateway 与官方行同时停用,已代挂官方插件恢复服务;重启后由宿主组合自然归位')

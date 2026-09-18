@@ -160,8 +160,6 @@ function restartPostLost(error) {
 const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
 const VERDICT_UNKNOWN = 'unknown'
-// 与 host runtime.mjs RUNTIME_KINDS.MANUAL_START 镜像(parity 对拍,单侧改名即测试失败)
-const RUNTIME_KIND_MANUAL = 'manual-start-likely'
 // 与 host AUTO_RESTART_DELAY_MS 镜像(parity 对拍):弹窗文案引用,勿手抄数字
 const AUTO_RESTART_DELAY_SEC = 3
 
@@ -227,8 +225,9 @@ async function recheckUpgradeSettle(previousLast) {
   if (upgradeWatch.generation !== null) return
   if (final !== null) broadcastUpgradeStatus(final)
   const last = final !== null && final.upgrade ? final.upgrade.last : null
-  if (last !== null && (last.autoRestartScheduled === true || last.requiresManualRestart === true)) showUpgradeFloat(last)
-  else showUpgradeFloat(previousLast)
+  if (last !== null && last.autoRestartScheduled === true) showUpgradeFloat(last)
+  // 补查仍无落定结果(观察窗错过且宿主已换代):转状态未知,不再停留进行中文案
+  else showUpgradeFloat(previousLast !== null ? previousLast : 'unknown')
 }
 
 function subscribeUpgradeStatus(listener) {
@@ -258,16 +257,22 @@ function ensureUpgradeWatch() {
       const upgrade = next ? next.upgrade : null
       if (!upgrade || upgrade.running !== true) {
         upgradeWatch.generation = null
-        // 快照归零(last 为空)不做失败渲染,保持进行中文案,由重启流程接管
+        // 落定拍(last 在)但未见调度标记不立即终判:继续运行路径的 stale 复读在
+        // 落定后异步完成,延迟宽限补查一拍再取终态;快照归零(last 空,宿主已换代)
+        // 同样补查,仍无结果即转状态未知,不留永久"进行中"
         if (upgrade && upgrade.last) {
-          // 落定拍可能早于宿主置调度标记:未见标记不立即终判,延迟宽限后补查一拍
-          if (upgrade.last.autoRestartScheduled === true || upgrade.last.requiresManualRestart === true) {
+          if (upgrade.last.autoRestartScheduled === true) {
             showUpgradeFloat(upgrade.last)
             return
           }
           setTimeout(() => {
             if (upgradeWatch.generation !== null) return
             void recheckUpgradeSettle(upgrade.last)
+          }, UPGRADE_AUTO_RESTART_GRACE_MS)
+        } else if (upgrade) {
+          setTimeout(() => {
+            if (upgradeWatch.generation !== null) return
+            void recheckUpgradeSettle(null)
           }, UPGRADE_AUTO_RESTART_GRACE_MS)
         }
         return
@@ -306,7 +311,6 @@ function ensureUpgradeFloatStyle() {
 // LOGIC-BEGIN upgradeFinalText
 function upgradeFinalText(state) {
   if (state.stale === true) return '升级命令执行完成,但结果与安装意图不符,详情见版本与运维页'
-  if (state.requiresManualRestart === true) return '升级完成,当前为手动直跑环境,请手动重启宿主后生效'
   if (state.autoRestartScheduled === true) return '升级完成,宿主将自动重启,页面恢复后可直接使用'
   return '升级完成,重启宿主后生效(版本与运维页可重启)'
 }
@@ -661,14 +665,14 @@ function UpgradeDialog(props) {
           label: '安装完成后自动重启宿主',
           checked: autoRestart,
           onChange: setAutoRestart,
+          disabled: status.canRestart !== true,
         }),
         h('div', { className: 'dm-dialog__outcome' },
-          autoRestart
-            ? '已勾选:安装命令执行成功后,宿主将在 ' + AUTO_RESTART_DELAY_SEC + ' 秒后自动退出,由你的进程管理器(docker / pm2 / systemd 等)拉起,本页随宿主恢复自动刷新。安装落定后宿主不再执行任何网络请求与磁盘读取。'
-            : '未勾选:安装完成后宿主继续运行当前版本,面板提示「重启宿主后生效」,需要你手动点击重启按钮才切换到目标版本。'),
-        status.runtimeEnv && status.runtimeEnv.kind === RUNTIME_KIND_MANUAL
-          ? h('div', { className: 'dm-dialog__outcome dm-warn' }, '当前为手动终端直跑环境:没有进程管理器拉起宿主,勾选自动重启也不会自动退出,完成后仍需手动重启。')
-          : null,
+          status.canRestart !== true
+            ? '当前启动方式不支持就地退出:无论是否勾选,安装完成后都需在宿主侧重启生效。'
+            : autoRestart
+              ? '已勾选:安装命令执行成功后,宿主将在 ' + AUTO_RESTART_DELAY_SEC + ' 秒后自动退出——等同点击重启按钮:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;本页随宿主恢复自动刷新。安装落定后宿主不再执行任何网络请求与磁盘读取。'
+              : '未勾选:安装完成后宿主继续运行当前版本,面板提示「重启宿主后生效」,需要你手动点击重启按钮才切换到目标版本。'),
       ),
       h('div', { className: 'dm-row' },
         h('span', { className: 'dm-spacer' }),

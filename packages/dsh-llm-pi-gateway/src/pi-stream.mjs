@@ -102,8 +102,9 @@ export function mapStopReason(message, contextWindow, callerAborted = false) {
  * @param {AsyncIterable<object>} events pi-ai 事件流
  * @param {number} contextWindow 解析出的目录容量,usage 超窗判定用
  * @param {AbortSignal} [callerSignal] 调用方取消信号
+ * @param {string} [requestedModel] 请求路由模型,replay 信封记录请求身份(官方 0.1.5 同构)
  */
-export async function* toStreamChunks(events, contextWindow, callerSignal) {
+export async function* toStreamChunks(events, contextWindow, callerSignal, requestedModel) {
   const toolIds = new Map()
   for await (const event of events) {
     switch (event.type) {
@@ -160,7 +161,7 @@ export async function* toStreamChunks(events, contextWindow, callerSignal) {
         break
       case 'done':
         if (event.message.usage != null) yield { type: 'usage', usage: mapUsage(event.message.usage) }
-        yield { type: 'finish', reason: mapStopReason(event.message, contextWindow), replayState: toPiReplayState(event.message) }
+        yield { type: 'finish', reason: mapStopReason(event.message, contextWindow), replayState: toPiReplayState(event.message, requestedModel) }
         return
       case 'error':
         if (event.error.usage != null) yield { type: 'usage', usage: mapUsage(event.error.usage) }

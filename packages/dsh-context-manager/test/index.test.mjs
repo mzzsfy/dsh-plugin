@@ -661,12 +661,12 @@ test('常用提示词:超长截断、上限裁剪、空 text 拒绝', skipMissin
 
 // ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
 
-test('横切守卫:5 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+test('横切守卫:6 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
     const getOnly = '/api/context/inputs'
     const postOnly = '/api/context/prompts/toggle'
-    const dualMethods = ['/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled']
+    const dualMethods = ['/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/copy-sid-enabled']
     // GET-only 路由:POST 拒绝
     const inputsPost = response()
     await handlers.get(getOnly)(request('s1'), inputsPost)
@@ -684,10 +684,10 @@ test('横切守卫:5 条路由方法白名单,白名单外一律 405', skipMissi
   })
 })
 
-test('横切守卫:4 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+test('横切守卫:5 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
-    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled']
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/copy-sid-enabled']
     for (const routePath of postPaths) {
       const res = await postRaw(handlers, routePath, '{oops')
       assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')
@@ -786,5 +786,21 @@ test('fork 启停:GET 默认启用,POST 切换经 settings 持久,GET 反映新�
   await postJson(handlers, '/api/context/fork-enabled', { enabled: true })
   const restored = response()
   await handlers.get('/api/context/fork-enabled')(getRequest2('/api/context/fork-enabled', 'GET'), restored)
+  assert.equal(restored.body.enabled, true)
+})
+
+test('标题栏复制 sessionId 启停:GET 默认启用,POST 切换经 settings 持久,GET 反映新值', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const initial = response()
+  await handlers.get('/api/context/copy-sid-enabled')(getRequest2('/api/context/copy-sid-enabled', 'GET'), initial)
+  assert.equal(initial.body.enabled, true, '默认启用')
+  const off = await postJson(handlers, '/api/context/copy-sid-enabled', { enabled: false })
+  assert.equal(off.body.enabled, false)
+  const reread = response()
+  await handlers.get('/api/context/copy-sid-enabled')(getRequest2('/api/context/copy-sid-enabled', 'GET'), reread)
+  assert.equal(reread.body.enabled, false, 'settings 持久化关闭态')
+  await postJson(handlers, '/api/context/copy-sid-enabled', { enabled: true })
+  const restored = response()
+  await handlers.get('/api/context/copy-sid-enabled')(getRequest2('/api/context/copy-sid-enabled', 'GET'), restored)
   assert.equal(restored.body.enabled, true)
 })

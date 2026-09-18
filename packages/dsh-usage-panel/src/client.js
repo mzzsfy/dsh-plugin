@@ -565,6 +565,9 @@ function AccountCard(props) {
   const armed = props.deleteArmed === true
   const reading = account.last && account.last.ok ? account.last.reading : null
   const level = reading && (reading.level || reading.membership) ? levelLabel(reading.level || reading.membership) : null
+  const queriedAt = account.last && typeof account.last.queriedAt === 'number' && Number.isFinite(account.last.queriedAt)
+    ? account.last.queriedAt
+    : null
 
   return h('div', { className: 'up-card' },
     h('div', { className: 'up-card__row' },
@@ -572,6 +575,7 @@ function AccountCard(props) {
       h('span', { className: 'up-badge', 'data-type': account.type }, TYPE_LABELS[account.type] || account.type),
       level ? h('span', { className: 'up-badge', 'data-type': 'custom' }, level) : null,
       h('span', { className: 'up-spacer' }),
+      queriedAt !== null ? h('span', { className: 'up-meta', title: fmtTimeFull(queriedAt) }, '上次更新 ' + fmtTime(queriedAt)) : null,
       h('button', { className: 'up-btn', disabled: busy, onClick: props.onRefresh }, busy ? '查询中…' : '刷新'),
       h('button', { className: 'up-btn', disabled: busy, onClick: props.onEdit }, '编辑'),
       h('button', {

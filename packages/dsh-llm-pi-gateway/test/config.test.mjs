@@ -159,10 +159,11 @@ test('场景: headers 值为数字,resolveRoute 拒绝;字符串值合法通过'
   assert.equal(route.headers['x-group'], 'pool-a')
 })
 
-test('场景: modelOverrides 非空对象,resolveRoute 抛 INVALID_CONFIG 且文案同官方;空对象放行', () => {
+test('场景: modelOverrides 非空对象,gateway 节硬拒 INVALID_CONFIG 且文案同官方;空对象放行', () => {
+  const gatewayProfile = { ...BASE_PROFILE, source: 'llm-pi-gateway' }
   const rejected = (() => {
     try {
-      resolveRoute('p', { ...BASE_PROFILE, modelOverrides: { auto: { contextWindow: 1 } } })
+      resolveRoute('p', { ...gatewayProfile, modelOverrides: { auto: { contextWindow: 1 } } })
       return undefined
     } catch (error) {
       return error
@@ -170,24 +171,82 @@ test('场景: modelOverrides 非空对象,resolveRoute 抛 INVALID_CONFIG 且文
   })()
   assert.equal(rejected.code, 'INVALID_CONFIG')
   assert.match(rejected.message, /model overrides are not supported/)
-  const route = resolveRoute('p', { ...BASE_PROFILE, modelOverrides: {} })
+  const route = resolveRoute('p', { ...gatewayProfile, modelOverrides: {} })
   assert.ok(route.models.has('auto'))
 })
 
-test('场景: compat 名单 0.84 新字段在对应协议路由合法通过', () => {
+test('场景: 官方节非空 modelOverrides(官方 schema 合法产物)→ resolveRoutes skip + 上报,不硬拒', () => {
+  const unserviceable = []
+  const officialProfile = {
+    ...BASE_PROFILE,
+    source: 'llm-pi-ai',
+    modelOverrides: { auto: { contextWindow: 1 } },
+  }
+  const routes = resolveRoutes({ p: officialProfile }, undefined, (provider, reason, source) => {
+    unserviceable.push([provider, reason, source])
+  })
+  assert.equal(routes.has('p'), false, '本包无模型目录通道,该路由不被服务')
+  assert.match(unserviceable[0][1], /modelOverrides/)
+  assert.equal(unserviceable[0][2], 'llm-pi-ai')
+})
+
+test('场景: compat 名单 0.85 新字段在对应协议路由合法通过', () => {
   const completions = resolveRoute('p', {
     ...BASE_PROFILE,
     api: 'openai-completions',
     compat: {
       supportsFinishReason: true,
       chatTemplateArgs: { stop: 'END' },
-      thinkingTokenBudgetField: 'reasoning_tokens',
+      thinkingTokenBudgetField: 'thinking_budget_tokens',
       supportsThinkingTokenBudget: true,
+      vllmPriority: 1,
     },
   })
   assert.equal(completions.api, 'openai-completions')
-  const anthropic = resolveRoute('p', { ...BASE_PROFILE, compat: { allowedFallbackModels: ['backup'] } })
-  assert.deepEqual(anthropic.models.get('auto').compat.allowedFallbackModels, ['backup'])
+  const anthropic = resolveRoute('p', {
+    ...BASE_PROFILE,
+    compat: {
+      allowedFallbackModels: [{ model: 'backup' }],
+      supportsMidConvoEffort: true,
+    },
+  })
+  assert.deepEqual(anthropic.models.get('auto').compat.allowedFallbackModels, [{ model: 'backup' }])
+  assert.equal(anthropic.models.get('auto').compat.supportsMidConvoEffort, true)
+  const responses = resolveRoute('p', {
+    ...BASE_PROFILE,
+    api: 'openai-responses',
+    compat: { supportsMaxOutputTokens: false },
+  })
+  assert.equal(responses.models.get('auto').compat.supportsMaxOutputTokens, false)
+})
+
+test('场景: compat 枚举字段非法值拒绝,合法值放行(pi-ai 对未知拼写静默缺省,配置期拒绝)', () => {
+  const cases = [
+    ['openai-completions', 'thinkingTokenBudgetField', 'reasoning_tokens'],
+    ['openai-completions', 'cacheControlFormat', 'claude'],
+    ['openai-completions', 'maxTokensField', 'max_output_tokens'],
+    ['openai-completions', 'thinkingFormat', 'silent'],
+    ['openai-completions', 'deferredToolsMode', 'queue'],
+    ['openai-completions', 'sessionAffinityFormat', 'sticky'],
+    ['openai-responses', 'sessionAffinityFormat', 'sticky'],
+  ]
+  for (const [api, field, value] of cases) {
+    const error = codeOf(() => resolveRoute('p', { ...BASE_PROFILE, api, compat: { [field]: value } }))
+    assert.equal(error, 'INVALID_CONFIG', `${field}=${value}`)
+  }
+  const legal = resolveRoute('p', {
+    ...BASE_PROFILE,
+    api: 'openai-completions',
+    compat: {
+      thinkingTokenBudgetField: 'thinking_budget',
+      cacheControlFormat: 'anthropic',
+      maxTokensField: 'max_tokens',
+      thinkingFormat: 'deepseek',
+      deferredToolsMode: 'kimi',
+      sessionAffinityFormat: 'openrouter',
+    },
+  })
+  assert.equal(legal.models.get('auto').compat.thinkingFormat, 'deepseek')
 })
 
 test('场景: 凭据服务在场但返回 undefined,抛 MISSING_CREDENTIAL,不回落启动环境', async () => {

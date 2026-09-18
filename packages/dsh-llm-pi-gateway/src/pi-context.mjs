@@ -2,7 +2,9 @@
 // 文本路径与图片路径与官方逐项对表:图片管线复用 dsh-llm 公共导出
 // (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText),
 // offloadedImageText 为 0.1.2 新增导出,经 images.offloadedText 注入以兼容旧宿主,
-// 图片仅 user 角色可表示,读出经 attachments 服务转 base64 块。
+// 图片仅 user 角色可表示,读出经 attachments 服务转 base64 块;
+// systemPrompt 择取同官方 0.1.5 splitSystemPrompt:leading system 折叠为
+// systemPrompt(非 leading system 仍投影为 user)。
 // finish 块产出官方同构 replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
 
 import { contentHasImage, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
@@ -95,10 +97,21 @@ function readReplayState(value) {
   if (!['stop', 'length', 'toolUse', 'error', 'aborted'].includes(response.stopReason)) {
     throw invalid('unknown stopReason')
   }
+  for (const key of ['responseModel', 'responseId', 'providerThinkingLevel']) {
+    if (response[key] !== undefined && typeof response[key] !== 'string') throw invalid(`${key} must be a string`)
+  }
   if (!Array.isArray(value.blocks)) throw invalid('blocks must be an array')
   for (const block of value.blocks) {
     if (typeof block !== 'object' || block === null) throw invalid('block must be an object')
     if (!['text', 'reasoning', 'tool-call'].includes(block.type)) throw invalid('block has an unknown type')
+    for (const signature of ['textSignature', 'thinkingSignature', 'thoughtSignature']) {
+      if (block[signature] !== undefined && typeof block[signature] !== 'string') {
+        throw invalid(`${signature} must be a string`)
+      }
+    }
+    if (block.redacted !== undefined && typeof block.redacted !== 'boolean') {
+      throw invalid('redacted must be boolean')
+    }
   }
   return value
 }
@@ -143,9 +156,14 @@ function replayedAssistant(message, source, rawState) {
     content,
     api: state.response.api,
     provider: state.response.provider,
-    model: state.response.model,
+    // anthropic 路由名 ≠ 原生响应模型:发请求按原生模型(responseModel 挪移,官方 0.1.5 同构)
+    model: state.response.api === 'anthropic-messages'
+      ? state.response.responseModel ?? state.response.model
+      : state.response.model,
     ...(state.response.responseModel !== undefined ? { responseModel: state.response.responseModel } : {}),
     ...(state.response.responseId !== undefined ? { responseId: state.response.responseId } : {}),
+    ...(state.response.providerThinkingLevel !== undefined
+      ? { providerThinkingLevel: state.response.providerThinkingLevel } : {}),
     usage: emptyPiUsage(),
     stopReason: state.response.stopReason,
     timestamp: TIMESTAMP_ZERO,
@@ -171,18 +189,25 @@ export function toPiAssistant(message, onDegrade) {
 }
 
 /** 成功响应投影为版本化 replay 信封,块序与流序一致。
+ *  requestedModel 为请求路由模型(缺省取原生 model);anthropic 原生模型 ≠ 请求模型时
+ *  记入 responseModel(官方 0.1.5 挪移同构),重建历史时还原原生模型发请求。
  *  未知块类型产出空洞槽位(官方 map 无 default 同语义):持久化序列化为 null,
  *  读侧形状校验拒整信封,降级 provider 中性历史,而非误标类型造成错位。 */
-export function toPiReplayState(message) {
+export function toPiReplayState(message, requestedModel = message.model) {
+  const responseModel = message.api === 'anthropic-messages' && message.model !== requestedModel
+    ? message.model
+    : message.responseModel
   return {
     response: {
       kind: REPLAY_KIND,
       version: REPLAY_VERSION,
       api: message.api,
       provider: message.provider,
-      model: message.model,
-      ...(message.responseModel !== undefined ? { responseModel: message.responseModel } : {}),
+      model: requestedModel,
+      ...(responseModel !== undefined ? { responseModel } : {}),
       ...(message.responseId !== undefined ? { responseId: message.responseId } : {}),
+      ...(message.providerThinkingLevel !== undefined
+        ? { providerThinkingLevel: message.providerThinkingLevel } : {}),
       stopReason: message.stopReason,
     },
     blocks: message.content.map((block) => {
@@ -207,15 +232,32 @@ export function toPiReplayState(message) {
   }
 }
 
+/**
+ * systemPrompt 来源择取(官方 0.1.5 splitSystemPrompt 同构,两转换路径共用):
+ * options.system 定义即胜出,历史原样(含 leading system,其仍投 user);
+ * 否则 leading system 消息文本升为 systemPrompt 并移出历史,空文本不发 prompt。
+ */
+function splitSystemPrompt(options) {
+  if (options.system !== undefined) {
+    return { systemPrompt: options.system, messages: options.messages }
+  }
+  const [first, ...rest] = options.messages
+  if (first?.role !== 'system') {
+    return { systemPrompt: undefined, messages: options.messages }
+  }
+  const text = flattenText(first)
+  return { systemPrompt: text.length > 0 ? text : undefined, messages: rest }
+}
+
 /** 组装请求级 pi-ai context 信封。 */
-function piContext(options, messages) {
+function piContext(systemPrompt, options, messages) {
   const tools = options.tools?.map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
   }))
   return {
-    ...(options.system !== undefined ? { systemPrompt: options.system } : {}),
+    ...(systemPrompt !== undefined ? { systemPrompt } : {}),
     messages,
     ...(tools !== undefined && tools.length > 0 ? { tools } : {}),
   }
@@ -233,9 +275,10 @@ export function toPiContext(options, onDegrade) {
       throw new GatewayError('pi-ai image conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
   }
+  const split = splitSystemPrompt(options)
   const toolNames = new Map()
   const messages = []
-  for (const message of options.messages) {
+  for (const message of split.messages) {
     if (message.role === 'system') {
       messages.push({ role: 'user', content: flattenText(message), timestamp: TIMESTAMP_ZERO })
       continue
@@ -264,7 +307,7 @@ export function toPiContext(options, onDegrade) {
       })
     }
   }
-  return piContext(options, messages)
+  return piContext(split.systemPrompt, options, messages)
 }
 
 /** 图片仅 user 角色可表示(官方 assertSupportedImageRoles 同语义)。 */
@@ -339,7 +382,8 @@ export async function toPiContextWithImages(options, images, onDegrade) {
     maxBytes: DEFAULT_IMAGE_MAX_BYTES,
   }
   assertSupportedImageRoles(options.messages)
-  const requestMessages = offloadRequestImagesWithPolicy(options.messages, {
+  const split = splitSystemPrompt(options)
+  const requestMessages = offloadRequestImagesWithPolicy(split.messages, {
     representation: 'base64',
     ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
     byteQuantum: 1,
@@ -388,5 +432,5 @@ export async function toPiContextWithImages(options, images, onDegrade) {
       })
     }
   }
-  return piContext(options, messages)
+  return piContext(split.systemPrompt, options, messages)
 }

@@ -72,3 +72,7 @@ node --test "test/*.test.mjs"
 ```
 
 宿主半区改动经 dev-link junction 热重载,保存约 1 秒重载;冒烟验证:dsh web 启动后以非常见 Host 头请求任一路由,响应正常且 console 出现 registered 前缀日志。
+
+## dsh 版本兼容
+
+三版本(0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.6-alpha.1)全部通过:0.0.0.0 动态信任、伪造 Host 200、LAN 访问、激活 live、diagnostics 0 findings。

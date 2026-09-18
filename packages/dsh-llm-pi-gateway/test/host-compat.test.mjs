@@ -148,6 +148,32 @@ test('场景: onChange 后配置不可解析,logger 报保留先前注册且 app
   assert.equal(llmCalls.adapters.length, 1, '坏配置不得触发重复注册')
 })
 
+test('场景: validate changed-only——存量 provider 不再校验,变更 provider 坏值仍拒绝(官方 assertServiceable 对表)', async () => {
+  const { ctx, hooksByNs, sectionValues } = makeCtx()
+  await apply(ctx, gatewayConfig(), OFFICIAL_MISSING)
+  const hooks = hooksByNs[SETTINGS_NS]
+  // 区分新旧实现的判据:存量含坏值 provider,写入只动另一个 provider——
+  // 旧全量校验在此拒绝(坏值重验),changed-only 必须放行
+  sectionValues[SETTINGS_NS] = {
+    providers: {
+      bad: { api: 'no-such-protocol', baseURL: 'https://gw.example.com', models: [{ id: 'auto' }] },
+      good: { api: 'anthropic-messages', baseURL: 'https://gw.example.com', models: [{ id: 'auto' }] },
+    },
+  }
+  hooks.setSource(() => sectionValues[SETTINGS_NS])
+  assert.doesNotThrow(
+    () => hooks.validate({ providers: { good: sectionValues[SETTINGS_NS].providers.good } }),
+    '存量坏值 provider 不得阻塞无关写入',
+  )
+  // 变更 provider 携带坏值 → 仍然拒绝
+  assert.throws(
+    () => hooks.validate({ providers: { good: { api: 'no-such-protocol', baseURL: 'https://gw.example.com', models: [{ id: 'auto' }] } } }),
+    (error) => error.code === 'INVALID_CONFIG',
+  )
+  // 存量坏值 provider 原样写入(未变更)→ 同样放行
+  assert.doesNotThrow(() => hooks.validate({ providers: { bad: sectionValues[SETTINGS_NS].providers.bad } }))
+})
+
 test('场景: 官方包缺失,discovery 双 ns 注册为 [本包节, 官方节]', async () => {
   const { ctx, llmCalls } = makeCtx()
   await apply(ctx, undefined, OFFICIAL_MISSING)

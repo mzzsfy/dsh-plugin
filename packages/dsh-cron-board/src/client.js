@@ -34,10 +34,18 @@ function relativeTime(timestamp, now) {
   return Math.round(abs / DAY_MS) + ' 天' + suffix
 }
 
-function formatDateTime(timestamp) {
+function formatDateTime(timestamp, timezoneOffset) {
   if (typeof timestamp !== 'number' || !(timestamp > 0)) return '-'
-  const date = new Date(timestamp)
-  return date.getFullYear() + '-' + PAD2(date.getMonth() + 1) + '-' + PAD2(date.getDate()) + ' ' + PAD2(date.getHours()) + ':' + PAD2(date.getMinutes())
+  // 按调度所用时区(任务显式后缀或宿主默认)平移后取 UTC 分量,与浏览器时区无关;
+  // 偏移缺失(状态未加载)瞬态回退浏览器时区
+  const offset = typeof timezoneOffset === 'number' ? timezoneOffset : -new Date().getTimezoneOffset() / 60
+  const shifted = new Date(timestamp + offset * HOUR_MS)
+  return shifted.getUTCFullYear() + '-' + PAD2(shifted.getUTCMonth() + 1) + '-' + PAD2(shifted.getUTCDate()) + ' ' + PAD2(shifted.getUTCHours()) + ':' + PAD2(shifted.getUTCMinutes())
+}
+
+// 浏览器所在设备的时区偏移(整小时就近取整):仅用于新建任务时固化初始时区后缀
+function deviceTzOffset() {
+  return Math.round(-new Date().getTimezoneOffset() / 60)
 }
 
 function formatDuration(ms) {
@@ -61,6 +69,9 @@ const SB_WEEKDAY_LABELS = { '0': '日', '1': '一', '2': '二', '3': '三', '4':
 const SB_MINUTE_MAX = 59
 const SB_HOUR_MAX = 23
 const SB_INTERVAL_MIN_MINUTES = 1
+const SB_TZ_SUFFIX_MIN = -12
+const SB_TZ_SUFFIX_MAX = 14
+const SB_TZ_SUFFIX_PATTERN = /\s*T([+-])(\d{1,2})$/i
 
 function createScheduleState(expression) {
   return {
@@ -70,6 +81,7 @@ function createScheduleState(expression) {
     weekdays: ['1'],
     intervalMinutes: 30,
     expression,
+    timezone: null,
   }
 }
 
@@ -79,11 +91,21 @@ const sbClampInt = (raw, min, max, fallback) => {
   return value
 }
 
-// cron(5 段)→ 构建器状态:匹配失败即 custom;非法数值一律归 custom,不猜
+// cron(5 段)→ 构建器状态:匹配失败即 custom;非法数值一律归 custom,不猜;
+// 非法时区后缀同样 custom 兜底(原样保留,合法性由校验通道业务报错)
 function parseSchedule(expression) {
   const raw = String(expression).trim()
-  const parts = raw.split(/\s+/)
-  const state = createScheduleState(raw)
+  let split
+  try {
+    split = sbSplitScheduleTz(raw)
+  } catch {
+    const state = createScheduleState(raw)
+    state.freq = 'custom'
+    return state
+  }
+  const state = createScheduleState(split.base)
+  state.timezone = split.timezoneOffset
+  const parts = split.base.split(/\s+/)
   if (parts.length !== 5) { state.freq = 'custom'; return state }
   const [minute, hour, day, month, weekday] = parts
   if (day !== '*' || month !== '*') { state.freq = 'custom'; return state }
@@ -111,8 +133,19 @@ function parseSchedule(expression) {
   return state
 }
 
-// 构建器状态 → cron;custom 直接返回手工表达式
+// 偏移小时数 → 后缀符号值:+8 / -5 / +0
+function sbFormatTzOffset(offset) {
+  return (offset >= 0 ? '+' : '') + offset
+}
+
+// 构建器状态 → cron;custom 透传剥离后手工表达式;显式时区统一附加 T±N 后缀
 function buildSchedule(state) {
+  const base = sbBuildBase(state)
+  if (state.timezone == null) return base
+  return base + 'T' + sbFormatTzOffset(state.timezone)
+}
+
+function sbBuildBase(state) {
   if (state.freq === 'custom') return String(state.expression).trim()
   const minute = String(state.minute)
   const hour = String(state.hour)
@@ -122,7 +155,29 @@ function buildSchedule(state) {
   if (state.freq === 'interval') return '*/' + state.intervalMinutes + ' * * * *'
   return String(state.expression).trim()
 }
+
+// 剥离时区后缀:返回 { base, timezoneOffset },无后缀时 timezoneOffset 为 null;
+// 后缀超出支持范围抛业务错误(校验与桥接共用,脏数据须暴露)
+function sbSplitScheduleTz(schedule) {
+  const text = String(schedule).trim()
+  const match = text.match(SB_TZ_SUFFIX_PATTERN)
+  if (!match) return { base: text, timezoneOffset: null }
+  const offset = Number(match[1] + match[2])
+  if (offset < SB_TZ_SUFFIX_MIN || offset > SB_TZ_SUFFIX_MAX) {
+    throw new Error('时区后缀不合法: T' + match[1] + match[2] + '(支持 T±N 整数小时 ' + SB_TZ_SUFFIX_MIN + ' 至 ' + SB_TZ_SUFFIX_MAX + ')')
+  }
+  return { base: text.slice(0, match.index).trim(), timezoneOffset: offset }
+}
 /* SBUILD-END */
+
+// 任务表达式的时区偏移(小时);无后缀返回 null;脏表达式(后缀非法)兜底 null 不炸渲染
+function scheduleTzOffset(schedule) {
+  try {
+    return sbSplitScheduleTz(schedule).timezoneOffset
+  } catch {
+    return null
+  }
+}
 
 const API_PREFIX = '/api/cron-board/'
 const REFRESH_INTERVAL_MS = 30 * SECOND_MS
@@ -435,8 +490,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       { value: 'custom', label: '自定义' },
     ]
 
-    // 调度构建器面板:频率分段 + 上下文选择器 + 表达式芯片 + 即将执行 chips
-    function ScheduleBuilder({ scheduleState, onStateChange, preview }) {
+    // 调度构建器面板:频率分段 + 上下文选择器 + 时区行 + 表达式芯片 + 即将执行 chips
+    function ScheduleBuilder({ scheduleState, onStateChange, preview, previewError, serverTzOffset }) {
       const state = scheduleState
       const setFreq = (freq) => onStateChange({ ...state, freq })
       const patchClock = (field, raw) => {
@@ -450,6 +505,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (days.length === 0) return
         onStateChange({ ...state, weekdays: days })
       }
+      const setTz = (raw) => onStateChange({ ...state, timezone: raw === 'host' ? null : Number(raw) })
+      const displayTzOffset = state.timezone == null ? serverTzOffset : state.timezone
       const clockRow = (h('div', { className: 'cb-bline' },
         h('span', { className: 'cb-blabel' }, '执行时间'),
         h('input', { type: 'number', className: 'cb-time', min: 0, max: SB_HOUR_MAX, value: state.hour, onChange: (e) => patchClock('hour', e.target.value) }),
@@ -487,13 +544,19 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             : h('button', { type: 'button', className: 'cb-linkbtn', onClick: () => setFreq('custom') }, '自定义'),
           state.freq === 'custom' ? null : h('span', { className: 'cb-hint' }, '由上方选择自动生成')),
         h('div', { className: 'cb-bline' },
+          h('span', { className: 'cb-blabel' }, '时区'),
+          h('select', { className: 'cb-select', value: state.timezone == null ? 'host' : String(state.timezone), onChange: (e) => setTz(e.target.value) },
+            h('option', { value: 'host' }, '宿主默认' + (typeof serverTzOffset === 'number' ? '(UTC' + sbFormatTzOffset(serverTzOffset) + ')' : '')),
+            Array.from({ length: SB_TZ_SUFFIX_MAX - SB_TZ_SUFFIX_MIN + 1 }, (_, i) => SB_TZ_SUFFIX_MIN + i).map((offset) => h('option', { key: offset, value: String(offset) }, 'UTC' + sbFormatTzOffset(offset)))),
+          h('span', { className: 'cb-hint' }, '固定偏移不随夏令时变化;写入表达式后缀 T±N')),
+        h('div', { className: 'cb-bline' },
           h('span', { className: 'cb-blabel' }, '即将执行'),
           preview
-            ? h('span', { className: 'cb-runs' }, preview.nextAt.map((at) => h('span', { key: at, className: 'cb-run' }, formatDateTime(at))))
-            : h('span', { className: 'cb-hint' }, '表达式非法或计算中')))
+            ? h('span', { className: 'cb-runs' }, preview.nextAt.map((at) => h('span', { key: at, className: 'cb-run' }, formatDateTime(at, displayTzOffset))))
+            : h('span', { className: 'cb-hint' }, previewError || '表达式非法或计算中')))
     }
 
-    function JobForm({ job, onDone, wsModel }) {
+    function JobForm({ job, onDone, wsModel, serverTzOffset }) {
       // 工作区清单:订阅 model 快照(服务缺失或形态不符即空表,仅保留手输)
       const [wsItems, setWsItems] = useState(() => (wsModel ? wsModel.getSnapshot().items || [] : []))
       useEffect(() => {
@@ -503,7 +566,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         return wsModel.subscribe(update)
       }, [wsModel])
       const editing = Boolean(job && job.id)
-      const initialSchedule = job ? job.schedule : '0 9 * * *'
+      // 构建器初始状态:新建任务把设备时区偏移固化为显式后缀,
+      // 宿主环境时区异常(如 UTC)时任务仍按设备预期时刻触发;编辑存量保持原表达式语义
+      const [scheduleState, setScheduleState] = useState(() => {
+        const parsed = parseSchedule(job ? job.schedule : '0 9 * * *')
+        if (!editing) parsed.timezone = deviceTzOffset()
+        return parsed
+      })
+      const initialSchedule = editing ? job.schedule : buildSchedule(scheduleState)
       const [form, setForm] = useState(() => ({
         name: job ? job.name : '',
         kind: job ? job.kind : 'shell',
@@ -521,15 +591,24 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           agentPreset: job && job.session ? job.session.agentPreset : '',
         },
       }))
-      // 构建器状态:由既有表达式反解初始化;结构化变更写回 form.schedule
-      const [scheduleState, setScheduleState] = useState(() => parseSchedule(initialSchedule))
       const [preview, setPreview] = useState(null)
+      const [previewError, setPreviewError] = useState(null)
       const [error, setError] = useState(null)
       const [saving, setSaving] = useState(false)
       const [presetCatalog, setPresetCatalog] = useState({ defaultId: '', items: [] })
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const setSession = (patch) => setForm((prev) => ({ ...prev, session: { ...prev.session, ...patch } }))
       const applyScheduleState = (next) => {
+        // custom 频率下表达式携带合法后缀时以表达式为准(剥离归一并回填时区);
+        // 无后缀保留调用方传入的时区(select 与频率切换不丢配置);非法后缀原文保留且时区置空
+        if (next.freq === 'custom') {
+          try {
+            const split = sbSplitScheduleTz(next.expression)
+            if (split.timezoneOffset != null) next = { ...next, expression: split.base, timezone: split.timezoneOffset }
+          } catch {
+            next = { ...next, timezone: null }
+          }
+        }
         setScheduleState(next)
         set({ schedule: buildSchedule(next) })
       }
@@ -545,9 +624,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
       useEffect(() => {
         let alive = true
+        // 表达式变更即清空旧错误:防抖窗口内不残留上一次失败文案
+        setPreviewError(null)
         const timer = setTimeout(async () => {
           const outcome = await request('POST', 'cron/preview', { schedule: form.schedule })
-          if (alive) setPreview(outcome.ok ? outcome.data : null)
+          if (!alive) return
+          setPreview(outcome.ok ? outcome.data : null)
+          setPreviewError(outcome.ok ? null : outcome.error)
         }, 300)
         return () => { alive = false; clearTimeout(timer) }
       }, [form.schedule])
@@ -575,7 +658,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             ariaLabel: '类型',
           }))),
         h(Section, { title: '调度计划' },
-          h(ScheduleBuilder, { scheduleState, onStateChange: applyScheduleState, preview })),
+          h(ScheduleBuilder, { scheduleState, onStateChange: applyScheduleState, preview, previewError, serverTzOffset })),
         form.kind === 'shell'
           ? h(Section, { title: '运行配置(shell)' },
               h(Field, { label: '命令', hint: '经由宿主 shell 执行,支持环境变量插值 $NAME' },
@@ -739,7 +822,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           onConfirm: () => deleteJob(pendingDelete),
           onCancel: () => setPendingDelete(null),
         }) : null,
-        formJob ? h(JobForm, { job: formJob.id ? formJob : null, wsModel, onDone: () => { setFormJob(null); reload() } }) : null)
+        formJob ? h(JobForm, { job: formJob.id ? formJob : null, wsModel, serverTzOffset: status ? status.serverTzOffset : undefined, onDone: () => { setFormJob(null); reload() } }) : null)
     }
 
     // —— 环境变量 Tab ——
@@ -874,11 +957,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     // —— 日志 Tab ——
-    function LogsTab({ jobs, reload, reloadFlag }) {
+    function LogsTab({ jobs, reload, reloadFlag, serverTzOffset }) {
       const [jobId, setJobId] = useState(jobs.length > 0 ? jobs[0].id : null)
       const [runs, setRuns] = useState([])
       const [logText, setLogText] = useState(null)
       const [logRunId, setLogRunId] = useState(null)
+      // 展示时区随所选任务:显式后缀用其偏移,无后缀用宿主默认(调度与展示同源)
+      const selectedJob = jobs.find((job) => job.id === jobId)
+      const displayTzOffset = scheduleTzOffset(selectedJob ? selectedJob.schedule : null) ?? (typeof serverTzOffset === 'number' ? serverTzOffset : undefined)
 
       useEffect(() => {
         let alive = true
@@ -912,7 +998,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 h('span', { className: 'cb-dot', style: { '--cb-status': STATUS_TONE_COLOR[meta.tone] } }),
                 h('span', { className: 'cb-meta' }, meta.label),
                 h('span', { className: 'cb-badge' }, TRIGGER_META[run.trigger] ? TRIGGER_META[run.trigger].label : run.trigger),
-                h('span', { className: 'cb-meta' }, formatDateTime(run.createdAt)),
+                h('span', { className: 'cb-meta' }, formatDateTime(run.createdAt, displayTzOffset)),
                 typeof run.durationMs === 'number' ? h('span', { className: 'cb-meta' }, formatDuration(run.durationMs)) : null,
                 run.message ? h('span', { className: 'cb-meta' }, run.message) : null,
                 h('div', { className: 'cb-actions' },
@@ -972,7 +1058,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             (status.nextAt ? ' · 下次 ' + relativeTime(status.nextAt, now) : '')) : null),
         tab === 'jobs' ? h(JobsTab, { key: 'jobs', jobs, status, now, reload, applyJobPatch, wsModel }) : null,
         tab === 'envs' ? h(EnvsTab, { key: 'envs', envs, reload, applyEnvPatch }) : null,
-        tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag }) : null)
+        tab === 'logs' ? h(LogsTab, { key: 'logs', jobs, reload, reloadFlag, serverTzOffset: status ? status.serverTzOffset : undefined }) : null)
     }
 
     // —— 主页面挂载:宿主官方全局面板契约(main keyed 插槽 + sidebar.panellist 侧栏入口)——

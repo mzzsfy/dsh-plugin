@@ -58,3 +58,7 @@ node --test packages/dsh-think-expand/test/*.test.mjs
 ## License
 
 MIT
+
+## dsh 版本兼容
+
+三版本全部通过:思考展开交互、激活 live。

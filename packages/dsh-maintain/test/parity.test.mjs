@@ -138,11 +138,11 @@ test('渲染冒烟: UpgradeDialog 工厂化执行不抛错且含版本变更行'
   const useState = (init) => [init, () => {}]
   const Switch = (propsArg) => h('label', propsArg)
   const dialog = new Function('h', 'useState', 'Switch', 'DEFAULT_UPGRADE_TEMPLATE', 'AUTO_RESTART_DELAY_SEC',
-    'RUNTIME_KIND_MANUAL', 'buildInstallChangeLine', 'buildInstallVersionHint',
+    'buildInstallChangeLine', 'buildInstallVersionHint',
     'return (' + match[0] + ')')(
-    h, useState, Switch, 'npm install -g @deepseek-ai/dsh@{tag}', 3, 'manual-start-likely',
+    h, useState, Switch, 'npm install -g @deepseek-ai/dsh@{tag}', 3,
     (status, command) => '变更:' + command, (status) => '提示:' + status.runningVersion)
-  const status = { channel: 'latest', upgradeTemplate: '', runningVersion: '0.1.5', installedVersion: '0.1.5', runtimeEnv: null }
+  const status = { channel: 'latest', upgradeTemplate: '', runningVersion: '0.1.5', installedVersion: '0.1.5' }
   const tree = dialog({ status, onCancel: () => {}, onConfirm: () => {} })
   assert.equal(tree.type, 'div', '弹窗根为遮罩 div')
   assert.ok(calls.some((type) => type === 'pre'), '命令 pre 节点应在树中')
@@ -200,13 +200,6 @@ test('parity: VERDICT 三常量 client 与 core 一致', () => {
   assert.equal(extractConst('VERDICT_UNKNOWN'), VERDICT_UNKNOWN)
 })
 
-// host 侧锚点直接 import runtime.mjs 实现,防测试内手抄字面量漂移假绿
-import { RUNTIME_KINDS } from '../src/runtime.mjs'
-
-test('parity: 手动直跑运行环境常量 client 与 host 一致', () => {
-  assert.equal(extractConst('RUNTIME_KIND_MANUAL'), RUNTIME_KINDS.MANUAL_START)
-})
-
 test('parity: 弹窗文案自动重启延迟秒与 host AUTO_RESTART_DELAY_MS 换算一致', () => {
   assert.equal(extractNumberConst('AUTO_RESTART_DELAY_SEC'), AUTO_RESTART_DELAY_MS / 1000)
 })
@@ -255,12 +248,13 @@ test('parity: client API 路径常量与 host 路由清单逐条一致', () => {
   }
 })
 
-// 窗口关系对拍:重启等待总时长必须大于宿主退出延迟,否则宿主还在延迟退出窗口内客户端已报超时
+// 窗口关系对拍:重启等待总时长必须大于任一退出延迟,否则宿主还在延迟退出窗口内客户端已报超时
 import { RESTART_DELAY_MS } from '../src/index.js'
 
-test('parity: 重启等待总时长大于宿主退出延迟', () => {
+test('parity: 重启等待总时长大于宿主退出延迟(按钮与自动重启取大)', () => {
   const restartTimeoutMs = extractNumberConst('RESTART_TIMEOUT_MS')
-  assert.ok(restartTimeoutMs > RESTART_DELAY_MS, 'RESTART_TIMEOUT_MS 必须大于 RESTART_DELAY_MS')
+  assert.ok(restartTimeoutMs > Math.max(RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS),
+    'RESTART_TIMEOUT_MS 必须大于 max(RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS)')
 })
 
 test('parity: 升级观察上限覆盖宿主重试链上限(防抢跑转状态未知)', () => {
@@ -286,13 +280,12 @@ test('parity: GitHub releases 兜底链接与 host 拉取仓库同源', () => {
   assert.equal(extractConst('RELEASES_PAGE_URL'), 'https://github.com/' + RELEASE_REPO + '/releases')
 })
 
-test('parity: 落定补查宽限覆盖宿主自动重启调度延迟', () => {
-  // 落定拍与调度置位之间存在宿主侧 await 窗口:client 补查宽限必须不小于调度延迟 + 观察裕量
+test('parity: 落定补查宽限不小于观察轮询拍间隔', () => {
+  // 关机路径调度标记与 running=false 同拍置位,宽限不再竞态调度延迟;现职责是
+  // 给继续运行路径的 stale 异步复读留余量,下限锁定为不小于轮询拍间隔(补查不早于一拍)
   const graceMs = extractNumberConst('UPGRADE_AUTO_RESTART_GRACE_MS')
-  assert.ok(
-    graceMs >= AUTO_RESTART_DELAY_MS + 1 * 1000,
-    'UPGRADE_AUTO_RESTART_GRACE_MS(' + graceMs + ') 必须不小于 AUTO_RESTART_DELAY_MS(' + AUTO_RESTART_DELAY_MS + ') 加观察裕量',
-  )
+  assert.ok(graceMs >= 2 * 1000,
+    'UPGRADE_AUTO_RESTART_GRACE_MS(' + graceMs + ') 必须不小于观察轮询拍间隔(2s)')
 })
 
 test('源码契约: 重启轮询与升级观察器不得回退 setInterval 重叠拍形态', () => {

@@ -173,7 +173,7 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
       }),
     })
     try {
-      yield* toStreamChunks(events, piModel.contextWindow, options.signal)
+      yield* toStreamChunks(events, piModel.contextWindow, options.signal, piModel.id)
     } catch (error) {
       // 源流在调用方已取消时的抛出形态不可控(上游网络栈各异),出口兜底归因 ABORTED,
       // 与官方「aborted 优先归因、不落 UNKNOWN」同构;唯一豁免是已是 ABORTED 的信封防双包

@@ -94,3 +94,19 @@ test('官方 schema 规范化产物(含 modelOverrides 键与目录 compat)经 r
   assert.ok(route.models.has('auto'))
   assert.equal('modelOverrides' in route, false, '本包路由对象不携带该键,但解析不得因它抛错')
 })
+
+test('场景: 官方 schema 非空 modelOverrides(真实规范化产物)→ resolveRoutes skip + 上报,同节其余路由照常', async () => {
+  const { resolveRoutes } = await import('../src/config.mjs')
+  const official = await import('@deepseek-ai/dsh-llm-pi-ai')
+  const parsed = official.Config({
+    providers: {
+      newapi: { ...OFFICIAL_ROUTE, modelOverrides: { auto: { contextWindow: 4096 } } },
+      plain: OFFICIAL_ROUTE,
+    },
+  })
+  const unserviceable = []
+  const routes = resolveRoutes(parsed.providers, undefined, (provider, reason) => unserviceable.push([provider, reason]))
+  assert.equal(routes.has('newapi'), false, '本包无目录通道,该路由不被服务')
+  assert.ok(routes.has('plain'), '同节其余路由不受 skip 影响')
+  assert.match(unserviceable[0][1], /modelOverrides/)
+})
