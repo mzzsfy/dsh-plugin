@@ -34,11 +34,6 @@ window.__ModuleLoader__.load({
     }
 
 const CSS = [
-  // 家族版本环:与官方 28px icon 按钮同高同隙,chevron 用官方线形 svg,
-  // label 小号 caption 色,不另起风格
-  '.cx-family-ring { display:inline-flex; align-items:center; gap:2px; }',
-  '.cx-family-ring .cx-family-ring__label { font:var(--dsw-font-xxs-12); color:var(--dsw-alias-label-caption);',
-  '  min-width:24px; text-align:center; line-height:28px; }',
   // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
   '.cx-switch { display:inline-flex; align-items:center; gap:8px; margin-top:10px; cursor:pointer;',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
@@ -239,50 +234,6 @@ function forkRetryText(data) {
     .map((block) => block.text)
     .join('\n')
   return text.trim() === '' ? null : text
-}
-
-// 家族谱系投影镜像(与 core.mjs sessionFamilyMap/familyRing 同步维护):
-// 客户端快照行主键为 id、父引用为 parentId(与 RPC wire 的 sessionId/parentSessionId 不同名),
-// 编排派生会话(origin === 'subagent')剔除——家族只统计用户的 fork 分支;
-// 断链视为独立根;环序按 updatedAt 升序
-function sessionFamilyMap(items) {
-  const byId = new Map()
-  for (const item of Array.isArray(items) ? items : []) {
-    if (item && item.origin === 'subagent') continue
-    const id = item && item.id
-    if (typeof id === 'string' && id !== '') byId.set(id, item)
-  }
-  const chains = new Map()
-  for (const id of byId.keys()) {
-    const chain = []
-    let cursor = id
-    let root = cursor
-    while (cursor !== undefined) {
-      chain.unshift(cursor)
-      root = cursor
-      const parent = byId.get(cursor)
-      cursor = parent && typeof parent.parentId === 'string' && byId.has(parent.parentId)
-        ? parent.parentId
-        : undefined
-      if (chain.includes(cursor)) break
-    }
-    chains.set(id, { root, chain, item: byId.get(id) })
-  }
-  return chains
-}
-
-function familyRing(chains, sessionId) {
-  const entry = chains instanceof Map ? chains.get(sessionId) : undefined
-  if (!entry) return null
-  const members = [...chains.entries()]
-    .filter(([, value]) => value.root === entry.root)
-    .sort((left, right) => {
-      const at = (record) => (record && record.item && typeof record.item.updatedAt === 'number' ? record.item.updatedAt : 0)
-      return at(left[1]) - at(right[1])
-    })
-    .map(([id]) => id)
-  if (members.length < 2) return null
-  return { index: members.indexOf(sessionId) + 1, total: members.length, members }
 }
 
 function HistoryDock({ session, inputActions }) {
@@ -751,8 +702,6 @@ function forkSvg() {
 // 注入按钮标记:识别自家节点与官方按钮,防止重复注入与误删官方节点
 const STEER_BTN_FLAG = 'data-cx-steer-recall'
 const FORK_BTN_FLAG = 'data-cx-fork'
-// 家族版本环标记:识别自家 ‹n/m› 计数器节点,防重复注入
-const FAMILY_RING_FLAG = 'data-cx-family-ring'
 // 官方 pending steering 气泡的语义标记(官方同构:UserStyleBubble data 属性)与
 // 其操作图标排的 CSS module 类名后缀(哈希前缀随构建漂移,后缀稳定);
 // 消息节点的轮号标记(fork 锚点输入)
@@ -883,7 +832,7 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
 // 轮号无映射 = 该轮未完成,首问无文本(纯图等)= 无法重试,均不注入;
 // 首轮无前锚(宿主 fork 边界必须落在 turn/end 上,复制零事件不可表达),也不注入。
 // 分叉动作经宿主 sessions 服务面 fork+open(与官方 chat 同构),成功 toast 并切换
-function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSession, openSession, loadFamily, submitPrompt, loadTurnEnds }) {
+function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSession, submitPrompt, loadTurnEnds }) {
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
@@ -936,17 +885,15 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSessi
     }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
-  return h(ForkDock, { session, forkSession, cancelSession, openSession, loadFamily, turnEnds })
+  return h(ForkDock, { session, forkSession, cancelSession, turnEnds })
 }
 
-function ForkDock({ session, forkSession, cancelSession, openSession, loadFamily, turnEnds }) {
+function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
   const [enabled, setEnabled] = useState(true)
   const [autoResend, setAutoResend] = useState(false)
   const turnEndsRef = useRef(null)
   const forkRef = useRef(null)
   const cancelRef = useRef(null)
-  const familyRef = useRef(null)
-  const openRef = useRef(null)
   const sessionRef = useRef(null)
   const enabledRef = useRef(true)
   const autoResendRef = useRef(false)
@@ -965,13 +912,10 @@ function ForkDock({ session, forkSession, cancelSession, openSession, loadFamily
   turnEndsRef.current = turnEnds
   forkRef.current = forkSession
   cancelRef.current = cancelSession
-  familyRef.current = loadFamily
-  openRef.current = openSession
   sessionRef.current = session
   useEffect(() => {
     function removeAll() {
       document.querySelectorAll('[' + FORK_BTN_FLAG + ']').forEach((button) => button.remove())
-      document.querySelectorAll('[' + FAMILY_RING_FLAG + ']').forEach((node) => node.remove())
     }
     function scan() {
       // 停用即不注入并移除已注入按钮(开关可在挂载后才到达停用值)
@@ -1053,73 +997,6 @@ function ForkDock({ session, forkSession, cancelSession, openSession, loadFamily
         button.appendChild(forkSvg())
         actionsRow.appendChild(button)
       })
-      // 家族版本环:每个用户气泡操作排的 ‹n/m›,箭头在家族成员间跳转;
-      // 单成员家族/快照面缺失不注入(与官方按钮并存,hover 显隐一致)
-      const loadFamilyFn = familyRef.current
-      const ring = (sessionRef.current && typeof loadFamilyFn === 'function')
-        ? loadFamilyFn(sessionRef.current.sessionId)
-        : null
-      if (ring && ring.total >= 2) {
-        bubbles.forEach((bubble) => {
-          if (bubble.getAttribute(FLOW_KIND_ATTR) !== 'user') return
-          const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
-          if (!actionsRow || actionsRow.querySelector('[' + FAMILY_RING_FLAG + ']')) return
-          const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + ']):not([' + STEER_BTN_FLAG + '])')
-          if (!official) return
-          const ringEl = document.createElement('span')
-          ringEl.setAttribute(FAMILY_RING_FLAG, '')
-          ringEl.className = 'cx-family-ring'
-          ringEl.title = '家族版本:本会话在同源分叉家族中的序位,箭头在各版本间切换'
-          const makeChevron = (direction, tip) => {
-            const chevron = document.createElement('button')
-            chevron.type = 'button'
-            chevron.className = official.className
-            chevron.setAttribute(FAMILY_RING_FLAG, '')
-            chevron.title = tip
-            chevron.setAttribute('aria-label', tip)
-            chevron.addEventListener('click', () => jumpFamilyMember(direction))
-            chevron.appendChild(familyChevronSvg(direction))
-            return chevron
-          }
-          const label = document.createElement('span')
-          label.setAttribute(FAMILY_RING_FLAG, '')
-          label.className = 'cx-family-ring__label'
-          label.textContent = ring.index + '/' + ring.total
-          ringEl.appendChild(makeChevron(-1, '上一个家族版本'))
-          ringEl.appendChild(label)
-          ringEl.appendChild(makeChevron(1, '下一个家族版本'))
-          actionsRow.appendChild(ringEl)
-        })
-      }
-    }
-    // 家族环 chevron 图标:与官方 outline chevron 同款线形(12px 视窗)
-    function familyChevronSvg(direction) {
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-      svg.setAttribute('width', '12')
-      svg.setAttribute('height', '12')
-      svg.setAttribute('viewBox', '0 0 14 14')
-      svg.setAttribute('fill', 'none')
-      svg.setAttribute('aria-hidden', 'true')
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-      path.setAttribute('d', direction < 0 ? 'M8.75 3.5L5.25 7L8.75 10.5' : 'M5.25 3.5L8.75 7L5.25 10.5')
-      path.setAttribute('stroke', 'currentColor')
-      path.setAttribute('stroke-width', '1.2')
-      path.setAttribute('stroke-linecap', 'round')
-      path.setAttribute('stroke-linejoin', 'round')
-      svg.appendChild(path)
-      return svg
-    }
-    function jumpFamilyMember(offset) {
-      const loadFamilyFn = familyRef.current
-      const openFn = openRef.current
-      const current = sessionRef.current
-      if (!current || typeof loadFamilyFn !== 'function' || typeof openFn !== 'function') return
-      const ring = loadFamilyFn(current.sessionId)
-      if (!ring) return
-      const nextIndex = ring.index - 1 + offset
-      if (nextIndex < 0 || nextIndex >= ring.members.length) return
-      const target = ring.members[nextIndex]
-      if (target && target !== current.sessionId) openFn(target)
     }
     if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return undefined
     const scanRef = { current: scan }
@@ -1290,18 +1167,6 @@ function ContextPanel() {
           })
           : null
 
-        // 家族环通道:会话列表快照(parentSessionId 字段)投影为当前会话的 ‹n/m› 计数;
-        // 快照面缺失(旧宿主)时返回 null,计数器整体不注入
-        const loadFamily = (sessionId) => {
-          if (!sessions || !sessions.list || typeof sessions.list.getSnapshot !== 'function') return null
-          const snapshot = sessions.list.getSnapshot()
-          const rows = snapshot && snapshot.byId
-            ? (Array.isArray(snapshot.ids) ? snapshot.ids : []).map((id) => snapshot.byId[id]).filter(Boolean)
-            : (Array.isArray(snapshot) ? snapshot : [])
-          if (rows.length === 0) return null
-          return familyRing(sessionFamilyMap(rows), sessionId)
-        }
-
         // 自动重发通道:开启开关时分叉后以该轮原输入 prompt 子会话;
         // remote.session 缺失或缺 prompt(旧宿主/部分 stub)时返回 null,降级为仅回填;
         // 请求形态与官方 client face 同源:content 为 text 分段数组(宿主 hasPromptContent
@@ -1387,8 +1252,6 @@ function ContextPanel() {
                     cancelSession: (typeof remoteSession.cancel === 'function')
                       ? (opts) => remoteSession.cancel(opts)
                       : null,
-                    openSession: (sessions && typeof sessions.open === 'function') ? (id) => sessions.open(id) : null,
-                    loadFamily: () => loadFamily(sessionId),
                     submitPrompt,
                     loadTurnEnds: () => followOpening(remoteSession, sessionId).then((records) => {
                       // 轮号 → { 结束 seq, 该轮首问文本, open }:上个 turn/end 之后首条

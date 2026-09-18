@@ -44,7 +44,6 @@ test('源码契约:悬停说明覆盖各设置的关键行为语义', () => {
   assert.ok(CLIENT_SRC.includes('回填子会话输入框'), 'fork 说明缺重试回填语义')
   assert.ok(CLIENT_SRC.includes('尾号递增'), 'fork 说明缺标题递增语义')
   assert.ok(CLIENT_SRC.includes('重生成语义'), '自动重发说明缺重生成语义')
-  assert.ok(CLIENT_SRC.includes('家族版本'), '计数器说明缺家族版本语义')
 })
 
 // 搜索功能源码契约:query 双写 + 组合输入守卫 + 命中计数 + 两级 Esc
