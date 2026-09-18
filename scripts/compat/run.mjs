@@ -8,7 +8,7 @@ import { createWriteStream, existsSync, writeFileSync, readFileSync, mkdirSync, 
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { join, resolve } from 'node:path'
-import { COMPAT_ROOT, DSH_PACKAGE, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
+import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
 import { buildProfile, installPackageExternals } from './profile.mjs'
 import { isSemver } from './window.mjs'
 
@@ -208,12 +208,22 @@ async function main() {
 
   // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录
   const binGuess = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  const groupPath = join(hostDir, 'node_modules', '@deepseek-ai', 'cordis-plugin-group')
   if (!existsSync(binGuess)) {
     mkdirSync(hostDir, { recursive: true })
-    writeFileSync(join(hostDir, 'package.json'), JSON.stringify({ name: 'dsh-compat-host', private: true }), 'utf8')
+    // 幽灵依赖补装(CORDIS_GROUP_PIN):与 dsh 同闭包声明,一条 pnpm add 装齐
+    writeFileSync(join(hostDir, 'package.json'), JSON.stringify({
+      name: 'dsh-compat-host',
+      private: true,
+      dependencies: { '@deepseek-ai/cordis-plugin-group': CORDIS_GROUP_PIN },
+    }), 'utf8')
     writeFileSync(join(hostDir, 'pnpm-workspace.yaml'), workspaceYaml(), 'utf8')
     log(`[${args.version}] pnpm add ${DSH_PACKAGE}@${args.version}`)
     await runCmd('pnpm', ['add', `${DSH_PACKAGE}@${args.version}`], { cwd: hostDir })
+  } else if (!existsSync(groupPath)) {
+    // 复用旧闭包路径:补齐缺失的幽灵依赖,防解析向上逃逸到仓库根产生跨机器不确定性
+    log(`[${args.version}] 复用宿主闭包,补装 @deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`)
+    await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
   log(`[${args.version}] 逐包外部依赖安装${args.skipExternals ? '(跳过)' : `: ${(await installPackageExternals()).length} 包`}`)

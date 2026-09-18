@@ -10,6 +10,10 @@ export const DSH_PACKAGE = '@deepseek-ai/dsh'
 // dshmarket 固定 pin:旧宿主全家桶可共启的前提;allowBuilds 与根桥 pin 的对照来源均为
 // docs/兼容性测试/测试与隔离方法.md 的 profile 章节与 CI test job,升级时同步复核
 export const DSHMARKET_PIN = '1.47.0'
+// 上游 dsh-app-boot 幽灵依赖 cordis-plugin-group(顶层 import 未声明,已考察宿主世代均缺),
+// nodeLinker: hoisted 下整树无人声明不安装,boot 必炸;宿主闭包显式补装,移除条件与
+// 手工流程对照见 docs/兼容性测试/测试与隔离方法.md 被测宿主安装节
+export const CORDIS_GROUP_PIN = '1.0.2'
 // compat 专用端口段起点,与人工隔离惯例的 9191 隔离,避免端口清理误杀开发者实例
 export const DEFAULT_PORT = 9291
 // pnpm 11 对未批准的依赖构建脚本按错误处理;清单 = 真实 profile 同款 + 宿主安装闭包(原生模块)
