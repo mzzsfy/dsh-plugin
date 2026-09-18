@@ -7,6 +7,7 @@ import {join} from 'node:path'
 
 /**
  * dev-link.mjs dsh.profile.bundles 对账
+ * 仅 Windows:dev-link 依赖 cmd mklink junction 与 pnpm/USERPROFILE,Linux(CI)跳过。
  *
  * BDD 场景:
  *   1. 清单内插件包(声明 dsh.bundle)且依赖行已声明 -> 链接后加入 bundles
