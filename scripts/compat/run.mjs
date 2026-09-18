@@ -217,7 +217,7 @@ async function main() {
       private: true,
       dependencies: { '@deepseek-ai/cordis-plugin-group': CORDIS_GROUP_PIN },
     }), 'utf8')
-    writeFileSync(join(hostDir, 'pnpm-workspace.yaml'), workspaceYaml(), 'utf8')
+    writeFileSync(join(hostDir, 'pnpm-workspace.yaml'), workspaceYaml(true), 'utf8')
     log(`[${args.version}] pnpm add ${DSH_PACKAGE}@${args.version}`)
     await runCmd('pnpm', ['add', `${DSH_PACKAGE}@${args.version}`], { cwd: hostDir })
   } else if (!existsSync(groupPath)) {

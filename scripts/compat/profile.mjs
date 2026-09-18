@@ -79,8 +79,9 @@ export async function buildProfile({ version, workRoot, hostDir }) {
   writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n', 'utf8')
   writeFileSync(join(profileDir, '.npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   // minimumReleaseAge: 0 覆盖全局宽限配置,隔离环境不拦刚发布版本(测试对象经 symlink 指向仓库副本);
-  // allowBuilds 与真实 profile 同款:pnpm 11 对未批准的依赖构建脚本按错误处理
-  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), workspaceYaml(), 'utf8')
+  // allowBuilds 与真实 profile 同款:pnpm 11 对未批准的依赖构建脚本按错误处理;
+  // autoInstallPeers false:registry 上 @mzzsfy 旧发布版的 peer range 不满足会炸自动安装(见 lib.mjs)
+  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), workspaceYaml(false), 'utf8')
 
   log(`[${version}] pnpm install(隔离 profile)`)
   await runCmd('pnpm', ['install'], { cwd: profileDir })

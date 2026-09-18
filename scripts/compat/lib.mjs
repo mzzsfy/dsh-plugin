@@ -28,10 +28,13 @@ export const ALLOW_BUILDS = [
   '"@deepseek-ai/dsh-subprocess-local"',
 ]
 
-export function workspaceYaml() {
+export function workspaceYaml(autoInstallPeers) {
   return [
     'packages:\n  - .\n',
-    `nodeLinker: hoisted\nautoInstallPeers: false\nminimumReleaseAge: 0\n`,
+    // autoInstallPeers 按闭包区分:宿主 true(官方实现包以 peer 声明核心接口包 dsh-settings/dsh-fs 等,
+    // 关掉则插件树全灭 boot 404);profile false(registry 上 @mzzsfy 旧发布版含永不满足的 peer range
+    // 如 dsh-session >=0.1.2 <0.2.0-0,自动装即炸;@mzzsfy 包的宿主 API 由包内 devDeps 解析,不靠本闭包)
+    `nodeLinker: hoisted\nautoInstallPeers: ${autoInstallPeers ? 'true' : 'false'}\nminimumReleaseAge: 0\n`,
     'allowBuilds:\n' + ALLOW_BUILDS.map((name) => `  ${name}: true\n`).join(''),
   ].join('')
 }
