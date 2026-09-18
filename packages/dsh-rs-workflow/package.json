@@ -28,6 +28,8 @@
   "files": [
     "lib",
     "src",
+    "engine",
+    "preset",
     "cordis.patch.yml",
     "README.md"
   ],
