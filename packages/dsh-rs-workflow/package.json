@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
   "description": "若水工作流设置面:流程模板管理与工作位/预算配置(模板编辑/校验/配置读写)。编排运行时按 v5 设计(docs/rsww-v5/)另行实现。",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
