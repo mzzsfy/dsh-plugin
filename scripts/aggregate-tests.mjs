@@ -1,8 +1,9 @@
-// CI 全量测试聚合:自动发现测试单元,重复多轮执行,失败单元按 单元-轮次 落盘日志,
-// 收尾聚合失败轮次与用例锚点(::error 注解 + GITHUB_STEP_SUMMARY 折叠明细)。
-// 从 test.yml 内嵌 bash 等价移植;--rounds 供本地验证降轮次,CI 维持默认值。
-// 用法:node scripts/aggregate-tests.mjs [--rounds N]
-import {spawn} from 'node:child_process'
+// CI 测试聚合:自动发现测试单元(按改动范围与平台过滤),重复多轮执行,失败单元按
+// 单元-轮次 落盘日志,收尾聚合失败轮次与用例锚点(::error 注解 + GITHUB_STEP_SUMMARY 折叠明细)。
+// 从 test.yml 内嵌 bash 等价移植;--rounds 供本地验证降轮次,CI 维持默认值;
+// --changed-since <sha> 限定 push 改动涉及的单包(缺省/解析失败回退全量,fail-open)。
+// 用法:node scripts/aggregate-tests.mjs [--rounds N] [--changed-since SHA]
+import {spawn, spawnSync} from 'node:child_process'
 import {mkdtempSync, readdirSync, existsSync, statSync, readFileSync, rmSync, appendFileSync, createWriteStream} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, basename} from 'node:path'
@@ -14,6 +15,13 @@ const PREVIEW_LIMIT = 5
 const DETAIL_LIMIT = 200
 const FALLBACK_TAIL_LIMIT = 50
 const FAILING_SECTION_ANCHOR = '✖ failing tests:'
+const PACKAGES_DIR = 'packages'
+const GENERIC_TEST_SUFFIX = '.test.mjs'
+// 平台专属测试文件后缀:通用 *.test.mjs 两平台都跑,专属文件仅对应平台跑(CI=linux)
+const PLATFORM_TEST_SUFFIXES = {
+  win32: '.win.test.mjs',
+  linux: '.linux.test.mjs',
+}
 
 // 失败用例名提取:删段头行,去缩进/✖ 字形/耗时,按执行序去重(对齐 bash names_from_logs)
 export function namesFromLogs(lines) {
@@ -33,26 +41,70 @@ export function unitFailCount(logText) {
   return line ? line.split(' ')[2] : null
 }
 
-// 单元发现:冒烟 + 含 test/ 的包(字典序,保轮次间顺序稳定)+ 仓库根 tests(补 CI 盲区)
-export function discoverUnits(repoRoot) {
-  const units = [{name: 'smoke-load', command: [process.execPath, 'scripts/smoke-load.mjs'], cwd: repoRoot}]
-  for (const dir of readdirSync(join(repoRoot, 'packages')).sort()) {
-    const testPath = join(repoRoot, 'packages', dir, 'test')
-    if (!existsSync(testPath) || !statSync(testPath).isDirectory()) continue
-    units.push({name: dir, command: [process.execPath, '--test', 'test/*.test.mjs'], cwd: join(repoRoot, 'packages', dir)})
+// 测试文件平台过滤:通用 + 当前平台专属;platform 参数供测试注入
+export function filterTestFiles(files, platform = process.platform) {
+  const platformSuffix = PLATFORM_TEST_SUFFIXES[platform]
+  const exclusiveSuffixes = Object.values(PLATFORM_TEST_SUFFIXES)
+  return files.filter(file => {
+    const exclusive = exclusiveSuffixes.some(suffix => file.endsWith(suffix))
+    if (exclusive) return platformSuffix !== undefined && file.endsWith(platformSuffix)
+    return file.endsWith(GENERIC_TEST_SUFFIX)
+  })
+}
+
+// 单个测试目录的适用文件(相对该目录),全平台不适用 -> 空数组
+export function applicableTestFiles(dir, testDir) {
+  return filterTestFiles(readdirSync(join(dir, testDir)).filter(f => f.endsWith(GENERIC_TEST_SUFFIX) || Object.values(PLATFORM_TEST_SUFFIXES).some(s => f.endsWith(s))).sort())
+    .map(f => join(testDir, f))
+}
+
+// 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号)
+export function parseChangedPackages(lines) {
+  const packages = new Set()
+  for (const line of lines) {
+    const segments = line.split('/')
+    if (segments[0] !== PACKAGES_DIR || segments[1] === undefined || segments[1] === '') return null
+    packages.add(segments[1])
   }
-  units.push({name: 'repo-tests', command: [process.execPath, '--test', 'tests/*.test.mjs'], cwd: repoRoot})
+  return packages.size > 0 ? packages : null
+}
+
+// git diff 改动清单;无法可靠取得(空/全零/force push/非祖先)-> null 回退全量(fail-open)
+export function changedFilesList(base) {
+  if (!base || /^0+$/.test(base)) return null
+  const result = spawnSync('git', ['diff', '--name-only', `${base}..HEAD`], {cwd: REPO_ROOT, encoding: 'utf8', windowsHide: true})
+  if (result.status !== 0 || typeof result.stdout !== 'string') return null
+  return result.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+}
+
+// 单元发现:冒烟 + 含适用测试文件的包(字典序,保轮次间顺序稳定)+ 仓库根 tests。
+// changedLines 传入 push 改动清单:全部落在 packages/<X>/ 时只保留 X(冒烟与仓库根测试保留),
+// 否则全量。测试文件按平台过滤(win32/linux 后缀约定)。
+export function discoverUnits(repoRoot, changedLines) {
+  const changed = changedLines === undefined ? undefined : parseChangedPackages(changedLines)
+  const units = [{name: 'smoke-load', command: [process.execPath, 'scripts/smoke-load.mjs'], cwd: repoRoot}]
+  for (const dir of readdirSync(join(repoRoot, PACKAGES_DIR)).sort()) {
+    const testPath = join(repoRoot, PACKAGES_DIR, dir, 'test')
+    if (!existsSync(testPath) || !statSync(testPath).isDirectory()) continue
+    if (changed && !changed.has(dir)) continue
+    const files = applicableTestFiles(join(repoRoot, PACKAGES_DIR, dir), 'test')
+    if (files.length === 0) continue
+    units.push({name: dir, command: [process.execPath, '--test', ...files], cwd: join(repoRoot, PACKAGES_DIR, dir)})
+  }
+  const repoFiles = applicableTestFiles(repoRoot, 'tests')
+  if (repoFiles.length > 0) units.push({name: 'repo-tests', command: [process.execPath, '--test', ...repoFiles], cwd: repoRoot})
   return units
 }
 
-export function parseRounds(argv) {
-  let rounds = TOTAL_ROUNDS
+export function parseArgs(argv) {
+  const args = {rounds: TOTAL_ROUNDS}
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--rounds') rounds = Number(argv[++i])
+    if (argv[i] === '--rounds') args.rounds = Number(argv[++i])
+    else if (argv[i] === '--changed-since') args.changedSince = argv[++i]
     else throw new Error(`未知参数: ${argv[i]}`)
   }
-  if (!Number.isInteger(rounds) || rounds < 1) throw new Error(`轮次非法: ${rounds}`)
-  return rounds
+  if (!Number.isInteger(args.rounds) || args.rounds < 1) throw new Error(`轮次非法: ${args.rounds}`)
+  return args
 }
 
 function runUnit(unit, logPath) {
@@ -136,10 +188,16 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
 }
 
 async function main() {
-  const rounds = parseRounds(process.argv.slice(2))
+  const {rounds, changedSince} = parseArgs(process.argv.slice(2))
+  const changedLines = changedSince === undefined ? undefined : changedFilesList(changedSince)
+  const units = discoverUnits(REPO_ROOT, changedLines)
+  const scoped = changedLines === undefined || changedLines === null
+    ? '全量'
+    : `范围收敛: ${units.length} 单元`
+  console.log(`测试范围: ${scoped}(单元 ${units.map(u => u.name).join(', ')})`)
   const logDir = mkdtempSync(join(tmpdir(), 'aggregate-tests-'))
   try {
-    return await runUnits({rounds, logDir, summaryPath: process.env.GITHUB_STEP_SUMMARY ?? null, units: discoverUnits(REPO_ROOT)})
+    return await runUnits({rounds, logDir, summaryPath: process.env.GITHUB_STEP_SUMMARY ?? null, units})
   } finally {
     rmSync(logDir, {recursive: true, force: true})
   }

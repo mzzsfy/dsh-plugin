@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseRounds} from '../scripts/aggregate-tests.mjs'
+import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles} from '../scripts/aggregate-tests.mjs'
 
 /**
  * aggregate-tests.mjs CI 全量测试聚合
@@ -123,11 +123,64 @@ test('discoverUnits_真实仓库_冒烟与仓库根测试在列且顺序稳定',
   for (const unit of units) assert.ok(unit.command.length > 0)
 })
 
-test('parseRounds_默认与显式轮次_非法值拒绝', () => {
-  assert.equal(parseRounds([]), 10)
-  assert.equal(parseRounds(['--rounds', '3']), 3)
-  assert.throws(() => parseRounds(['--unknown']))
-  assert.throws(() => parseRounds(['--rounds']))
-  assert.throws(() => parseRounds(['--rounds', '0']))
-  assert.throws(() => parseRounds(['--rounds', 'abc']))
+test('discoverUnits_单包改动清单_只保留该包', () => {
+  const units = discoverUnits(repo, ['packages/dsh-turn-notify/client.js', 'packages/dsh-turn-notify/package.json'])
+  assert.deepEqual(units.map(u => u.name), ['smoke-load', 'dsh-turn-notify', 'repo-tests'])
+  const turnNotify = units.find(u => u.name === 'dsh-turn-notify')
+  assert.ok(turnNotify.command.some(arg => arg.includes('test')))
+})
+
+test('discoverUnits_非包改动清单_全量回退', () => {
+  const full = discoverUnits(repo).map(u => u.name)
+  const scoped = discoverUnits(repo, ['scripts/smoke-load.mjs']).map(u => u.name)
+  assert.deepEqual(scoped, full)
+})
+
+test('parseArgs_默认与显式轮次_非法值拒绝', () => {
+  assert.deepEqual(parseArgs([]), {rounds: 10})
+  assert.deepEqual(parseArgs(['--rounds', '3']), {rounds: 3})
+  assert.deepEqual(parseArgs(['--changed-since', 'abc123']), {rounds: 10, changedSince: 'abc123'})
+  assert.deepEqual(parseArgs(['--rounds', '3', '--changed-since', 'abc123']), {rounds: 3, changedSince: 'abc123'})
+  assert.throws(() => parseArgs(['--unknown']))
+  assert.throws(() => parseArgs(['--rounds']))
+  assert.throws(() => parseArgs(['--rounds', '0']))
+  assert.throws(() => parseArgs(['--rounds', 'abc']))
+})
+
+test('filterTestFiles_linux_跑通用与linux专属', () => {
+  const files = ['a.test.mjs', 'b.win.test.mjs', 'c.linux.test.mjs']
+  assert.deepEqual(filterTestFiles(files, 'linux'), ['a.test.mjs', 'c.linux.test.mjs'])
+})
+
+test('filterTestFiles_win32_跑通用与win专属', () => {
+  const files = ['a.test.mjs', 'b.win.test.mjs', 'c.linux.test.mjs']
+  assert.deepEqual(filterTestFiles(files, 'win32'), ['a.test.mjs', 'b.win.test.mjs'])
+})
+
+test('filterTestFiles_其他平台_仅通用', () => {
+  const files = ['a.test.mjs', 'b.win.test.mjs', 'c.linux.test.mjs']
+  assert.deepEqual(filterTestFiles(files, 'darwin'), ['a.test.mjs'])
+})
+
+test('parseChangedPackages_单包改动_只报该包', () => {
+  assert.deepEqual(parseChangedPackages(['packages/dsh-toast/src/index.js', 'packages/dsh-toast/README.md']), new Set(['dsh-toast']))
+})
+
+test('parseChangedPackages_多包改动_全部上报', () => {
+  assert.deepEqual(parseChangedPackages(['packages/dsh-toast/src/index.js', 'packages/dsh-turn-notify/client.js']), new Set(['dsh-toast', 'dsh-turn-notify']))
+})
+
+test('parseChangedPackages_含非包路径_判全量', () => {
+  assert.equal(parseChangedPackages(['packages/dsh-toast/src/index.js', 'scripts/smoke-load.mjs']), null)
+  assert.equal(parseChangedPackages(['README.md']), null)
+  assert.equal(parseChangedPackages(['.github/workflows/test.yml']), null)
+})
+
+test('parseChangedPackages_无改动_判全量', () => {
+  assert.equal(parseChangedPackages([]), null)
+})
+
+test('parseChangedPackages_前缀相近目录_不串包', () => {
+  assert.deepEqual(parseChangedPackages(['packages/dsh-maintain/src/index.js']), new Set(['dsh-maintain']))
+  assert.deepEqual(parseChangedPackages(['packages/a/b/c.test.mjs']), new Set(['a']))
 })
