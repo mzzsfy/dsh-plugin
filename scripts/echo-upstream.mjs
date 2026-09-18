@@ -5,6 +5,7 @@
 //   node scripts/echo-upstream.mjs --log <文件>          # 指定留档 jsonl 路径
 // 留档逐行 JSON:at/method/path/headers(小写键)/body(解析后的请求体,解析失败为 null),
 // 供 header 注入与请求体标记断言;响应文本固定为 FIXED_CONTENT,不随请求变化。
+// 模型发现(GET /models)按客户端协议形状返回固定一个模型(anthropic-version 头在场即 anthropic 形状)。
 import { createServer } from 'node:http'
 import { appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,6 +13,7 @@ import { join } from 'node:path'
 
 const DEFAULT_PORT = 18123
 const HOST = '127.0.0.1'
+const MODEL_ID = 'echo-model'
 export const FIXED_CONTENT = 'echo-upstream-fixed'
 
 function parseArgs(argv) {
@@ -41,14 +43,24 @@ function openaiResponse(model) {
   }
 }
 
-function modelListResponse() {
-  return { object: 'list', data: [] }
+function modelListResponse(headers) {
+  // anthropic-messages 发现带 anthropic-version 头,按其列表形状返回;其余按 openai 形状
+  if (headers['anthropic-version'] !== undefined) {
+    return {
+      data: [{ id: MODEL_ID, type: 'model', display_name: MODEL_ID }],
+      has_more: false,
+    }
+  }
+  return {
+    object: 'list',
+    data: [{ id: MODEL_ID, object: 'model', created: 0, owned_by: 'echo-upstream' }],
+  }
 }
 
 // 协议判定:路径含 /models 的 GET 是模型发现;含 /messages 是 anthropic-messages;其余按 openai 形状
-function respondFor(method, path, parsedBody) {
+function respondFor(method, path, headers, parsedBody) {
   const model = parsedBody?.model ?? null
-  if (method === 'GET' && path.includes('/models')) return modelListResponse()
+  if (method === 'GET' && path.includes('/models')) return modelListResponse(headers)
   if (path.includes('/messages')) return anthropicResponse(model)
   return openaiResponse(model)
 }
@@ -69,7 +81,7 @@ const server = createServer((request, response) => {
       body: parsedBody,
     })}\n`)
     response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify(respondFor(request.method, request.url, parsedBody)))
+    response.end(JSON.stringify(respondFor(request.method, request.url, request.headers, parsedBody)))
   })
 })
 server.listen(port, HOST, () => {

@@ -110,14 +110,36 @@ test('请求留档_记录小写头与body提取字段', async () => {
   }
 })
 
-test('get_models_返回空列表', async () => {
+test('get_models_openai形状返回固定一个模型', async () => {
   const { child, port } = await startServer(['--port', '0'])
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/v1/models`)
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { authorization: 'Bearer any' },
+    })
     const json = await response.json()
     assert.equal(response.status, 200)
     assert.equal(json.object, 'list')
-    assert.deepEqual(json.data, [])
+    assert.equal(json.data.length, 1)
+    assert.equal(json.data[0].id, 'echo-model')
+    assert.equal(json.data[0].object, 'model')
+  } finally {
+    await stopServer(child)
+  }
+})
+
+test('get_models_anthropic形状返回固定一个模型', async () => {
+  const { child, port } = await startServer(['--port', '0'])
+  try {
+    // anthropic-messages 发现探测带 anthropic-version 头,以此区分协议形状
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { 'anthropic-version': '2023-06-01', 'x-api-key': 'any' },
+    })
+    const json = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(json.data.length, 1)
+    assert.equal(json.data[0].id, 'echo-model')
+    assert.equal(json.data[0].type, 'model')
+    assert.equal(json.has_more, false)
   } finally {
     await stopServer(child)
   }
