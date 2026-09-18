@@ -27,8 +27,8 @@ import {
   isSubagentWakeTurn,
   isValidImBotId,
   hostNotifyWanted,
-  isLocalBrowserPoll,
-  isLocalBrowserPresent,
+  isBrowserPoll,
+  isBrowserPresent,
   mapEventToCategory,
   mimeOf,
   normalizeImTargets,
@@ -62,7 +62,7 @@ const SOUNDS_DIR = join(homedir(), '.dsh', 'dsh-turn-notify', 'sounds')
 const REQUEST_BODY_MAX_BYTES = 64 * 1024
 // 长轮询挂起上限:低于客户端请求超时,保证客户端总在服务端放弃后才超时
 const LONG_POLL_WAIT_MS = 25 * 1000
-// 本机浏览器在场认可窗口:在途长轮询出账后的宽限时长,浏览器优先去重的时间边界;
+// 浏览器在场认可窗口:在途长轮询出账后的宽限时长,浏览器优先去重的时间边界;
 // 窗口内事件仍视为浏览器呈现,超窗即宿主补位(宁可重复不可漏)
 export const CLIENT_PRESENCE_WINDOW_MS = 2 * 1000
 
@@ -92,8 +92,8 @@ const SETTINGS_SCHEMA = z.object({
   minTurnDurationMs: z.number().default(MIN_TURN_DURATION_MS).description('最短回合时长(毫秒),回合结束类通知短于此不送达;AI 提问与审批请求即时送达'),
   rootsOnly: z.boolean().default(true).description('子代理会话不通知'),
   suppressSubagentWake: z.boolean().default(true).description('子代理相关回合不通知(仅任务完成类):后台委托未收尾的回合与收尾唤醒的回合'),
-  hostNotify: z.boolean().default(false).description('宿主机桌面通知:通知触发时由宿主进程弹系统级通知(osascript/notify-send/PowerShell toast);浏览器优先,本机浏览器在场(2 秒内有在途长轮询)时由浏览器呈现宿主不重复弹,离场时宿主补位'),
-  hostNotifyFallback: z.boolean().default(false).description('宿主通知回退:本机浏览器在场时由浏览器呈现,离场(2 秒内无在途长轮询)时宿主补位;与总开关判定一致,任一开启即生效'),
+  hostNotify: z.boolean().default(false).description('宿主机桌面通知:通知触发时由宿主进程弹系统级通知(osascript/notify-send/PowerShell toast);浏览器优先,浏览器在场(2 秒内有在途长轮询)时由浏览器呈现宿主不重复弹,离场时宿主补位'),
+  hostNotifyFallback: z.boolean().default(false).description('宿主通知回退:浏览器在场时由浏览器呈现,离场(2 秒内无在途长轮询)时宿主补位;与总开关判定一致,任一开启即生效'),
   folderRunningEnabled: z.boolean().default(true).description('工作区文件夹运行标记:侧边栏分组模式下,有运行中会话的文件夹组头显示运行点并给图标着色;关闭后标记整体不渲染,变更刷新页面生效'),
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
@@ -208,10 +208,10 @@ export function apply(ctx) {
   const titledSessions = new Set()
   // 回合尾部统计:assistant/message 的 tokens 累加与回答前缀,回合结束随通知消费即清
   const assistantTails = new Map()
-  // 本机(回环来源)浏览器在场信号:在途长轮询计数与最近活动时刻,
+  // 浏览器在场信号:在途长轮询计数与最近活动时刻,
   // 在场 = 有在途请求或认可窗口内有活动,宿主通知的浏览器优先去重据此判定
-  let inFlightLocalPolls = 0
-  let lastLocalClientSeenAt = 0
+  let inFlightBrowserPolls = 0
+  let lastBrowserSeenAt = 0
   let seq = 0
   // 音效库写互斥:展示名索引读改写与落盘非原子,串行化防并发交错
   let soundWriteQueue = Promise.resolve()
@@ -274,16 +274,16 @@ export function apply(ctx) {
     if (routes === null || routes.indexOf('host') >= 0) deliverHostNotify(unit, settings)
   }
 
-  // 宿主桌面通知:浏览器优先,本机浏览器在场由浏览器呈现,宿主让位(正常路径
+  // 宿主桌面通知:浏览器优先,浏览器在场由浏览器呈现,宿主让位(正常路径
   // 零重复);离场(无在途长轮询且超认可窗口)由宿主补位;fire-and-forget,
   // spawn 失败不影响其余通道
   function deliverHostNotify(unit, settings) {
     const wanted = hostNotifyWanted({
       hostNotify: settings.hostNotify,
       hostNotifyFallback: settings.hostNotifyFallback,
-      localBrowserPresent: isLocalBrowserPresent({
-        inFlightPolls: inFlightLocalPolls,
-        lastSeenAt: lastLocalClientSeenAt,
+      browserPresent: isBrowserPresent({
+        inFlightPolls: inFlightBrowserPolls,
+        lastSeenAt: lastBrowserSeenAt,
         now: Date.now(),
         windowMs: CLIENT_PRESENCE_WINDOW_MS,
       }),
@@ -441,27 +441,26 @@ export function apply(ctx) {
       path: '/api/turn-notify/projection',
       handler: route('GET', {}, async (req, res) => {
         const query = new URL(req.url, 'http://localhost').searchParams
-        // 回环来源的浏览器长轮询即本机在场信号,宿主通知的浏览器优先去重据此判定;
+        // 浏览器长轮询即在场信号,宿主通知的浏览器优先去重据此判定;
         // 记账形态收紧防伪造:裸 GET(img 探活/监控探测)与跨源 fetch 不入账。
         // 记账期间计入在途,断连(浏览器关闭/中止)经 res close 事件即时出账,
         // 离场盲区收敛到认可窗口
-        let releaseLocalPoll = null
-        if (isLocalBrowserPoll({
-          remoteAddress: req.socket && req.socket.remoteAddress,
+        let releaseBrowserPoll = null
+        if (isBrowserPoll({
           hasCursor: query.has('cursor'),
           secFetchMode: req.headers ? req.headers['sec-fetch-mode'] : undefined,
           origin: req.headers ? req.headers.origin : undefined,
           host: req.headers ? req.headers.host : undefined,
         })) {
-          inFlightLocalPolls += 1
+          inFlightBrowserPolls += 1
           let settled = false
-          releaseLocalPoll = () => {
+          releaseBrowserPoll = () => {
             if (settled) return
             settled = true
-            inFlightLocalPolls -= 1
-            lastLocalClientSeenAt = Date.now()
+            inFlightBrowserPolls -= 1
+            lastBrowserSeenAt = Date.now()
           }
-          res.once('close', releaseLocalPoll)
+          res.once('close', releaseBrowserPoll)
         }
         try {
           const rawCursor = Number(query.get('cursor'))
@@ -472,7 +471,7 @@ export function apply(ctx) {
           const settings = readSettings(ctx)
           sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
         } finally {
-          if (releaseLocalPoll !== null) releaseLocalPoll()
+          if (releaseBrowserPoll !== null) releaseBrowserPoll()
         }
       }),
     })

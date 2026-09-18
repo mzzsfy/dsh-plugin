@@ -278,7 +278,7 @@ window.__ModuleLoader__.load({
     const IDLE_AWAY_MS = 5 * 60 * 1000
 
     // routes 为事件→通道路由放行名单(null=未配置全放行),语义与 core 同源。
-    // 宿主通知去重由浏览器优先模型承载:本机浏览器在场时宿主让位,本窗口照常弹系统通知
+    // 宿主通知去重由浏览器优先模型承载:浏览器在场时宿主让位,本窗口照常弹系统通知
     function chooseChannels(hasFocus, permission, idleMs, soundCategories, category, routes) {
       const idleAway = typeof idleMs === 'number' && idleMs >= IDLE_AWAY_MS
       const quiet = hasFocus && localGet(KEY_DND) !== '0' && !idleAway
@@ -1755,19 +1755,19 @@ window.__ModuleLoader__.load({
                 ' 后台委托未收尾或收尾唤醒的回合不通知(仅完成类)'),
             ]),
             field('宿主通知', [
-              h('label', { className: 'tn-meta tn-switch', title: '通知触发时由宿主进程弹系统级桌面通知(osascript/notify-send/PowerShell toast);浏览器优先:本机有浏览器窗口在线(2 秒内有在途长轮询)时由浏览器呈现,宿主不重复弹;本机无浏览器(标签页全关或仅远程浏览器)时宿主弹' },
+              h('label', { className: 'tn-meta tn-switch', title: '通知触发时由宿主进程弹系统级桌面通知(osascript/notify-send/PowerShell toast);浏览器优先:有浏览器窗口在线(2 秒内有在途长轮询)时由浏览器呈现,宿主不重复弹;浏览器全关(标签页全关)时宿主弹' },
                 ...switchToggle({
                   checked: config.hostNotify,
                   onChange: (e) => setConfig({ ...config, hostNotify: e.target.checked }),
                 }),
                 ' 宿主机弹桌面通知'),
-              h('label', { className: 'tn-meta tn-switch', title: '本机浏览器在场(2 秒内有在途长轮询)时由浏览器呈现,离场时宿主补位桌面通知;与总开关判定一致,任一开启即生效' },
+              h('label', { className: 'tn-meta tn-switch', title: '浏览器在场(2 秒内有在途长轮询)时由浏览器呈现,离场时宿主补位桌面通知;与总开关判定一致,任一开启即生效' },
                 ...switchToggle({
                   checked: config.hostNotifyFallback,
                   onChange: (e) => setConfig({ ...config, hostNotifyFallback: e.target.checked }),
                 }),
-                ' 仅当本机无浏览器接收时补位'),
-            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器优先——本机浏览器在线时由浏览器呈现,宿主不重复弹,离场(2 秒内无在途长轮询)时宿主补位,边界情况(窗口边界与网络抖动)宁重复不漏。需点保存生效,测试页可逐条点火验证。'),
+                ' 仅当无浏览器接收时补位'),
+            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器优先——浏览器在线时由浏览器呈现,宿主不重复弹,离场(2 秒内无在途长轮询)时宿主补位,边界情况(窗口边界与网络抖动)宁重复不漏。需点保存生效,测试页可逐条点火验证。'),
             field('事件分类', h('div', { className: 'tn-pills' },
               CATEGORIES.map((category) => h('span', {
                 className: 'tn-pill' + (config.enabled[category] ? ' tn-pill--on' : ''),
