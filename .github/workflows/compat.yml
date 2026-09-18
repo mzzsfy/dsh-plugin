@@ -1,0 +1,60 @@
+name: dsh 兼容性测试
+
+on:
+  # UTC 03:00 = 北京 11:00;每 3 个日历日(按 day-of-month 取模,跨月间隔略有浮动)
+  # 改期须与 test.yml 的 schedule 同步
+  schedule:
+    - cron: '0 3 */3 * *'
+  # 手动触发:实机验证不依赖 push,随时可对任意 ref 执行
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 定时与手动独立分组,push 不再触发本工作流,45 分钟重跑不再被连环 push 反复取消
+concurrency:
+  group: ci-compat
+  cancel-in-progress: false
+
+jobs:
+  # 兼容性测试:真实 dsh 宿主 × 版本窗口(基线/主测槽阻塞,前瞻槽非阻塞预警)。
+  # 隔离 profile 装全部 bundle 包全家桶共启,断言统一底线:正常访问 + activation live +
+  # diagnostics findings 0 + 浏览器页面无 Failed to load plugins(方法论:
+  # docs/兼容性测试/测试与隔离方法.md,自动化实现 scripts/compat/)。
+  # 版本窗口策略见 scripts/compat/window.mjs;显式覆盖:DSH_COMPAT_VERSIONS=版本[,版本~]
+  compat:
+    name: dsh 兼容性测试(全家桶 boot)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PLAYWRIGHT_PIN: 1.63.0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: 安装 pnpm(宿主与隔离 profile 安装依赖)
+        run: npm install -g pnpm@11
+      - name: 解析版本窗口
+        run: mkdir -p .compat && node scripts/compat/window.mjs --self-test && node scripts/compat/window.mjs > .compat/window.json && cat .compat/window.json
+      - name: 取 pnpm store 路径
+        id: pnpm-store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - name: 缓存 pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: compat-pnpm-${{ hashFiles('.compat/window.json') }}
+          restore-keys: compat-pnpm-
+      - name: 缓存 chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: compat-pw-${{ env.PLAYWRIGHT_PIN }}
+      - name: 安装 chromium
+        run: npx -y playwright@${{ env.PLAYWRIGHT_PIN }} install --with-deps chromium
+      # 根解析桥与 playwright 必须同一条命令:--no-save 安装会清理请求之外的多余包
+      - name: 安装仓库根解析桥(宿主 peer 与 zod)+ playwright
+        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4 playwright@${{ env.PLAYWRIGHT_PIN }}
+      - name: 兼容性测试(逐版本全家桶 boot)
+        run: node scripts/compat/ci.mjs --window-file .compat/window.json

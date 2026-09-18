@@ -48,7 +48,8 @@ pnpm config set --global minimumReleaseAge 360
 要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20,dsh-rs-workflow 未声明 engines)。
 
 - 包内测试:14 个含 test/ 目录的包执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 未声明 test 脚本,以 `node --test "test/*.test.mjs"` 直接运行,已按 docs/rsww-v5/ 实现,全绿
-- CI(`.github/workflows/test.yml`):提交推送与每 3 天定时触发,amd64/arm64 双架构并行,各自全量跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
+- CI 全量测试(`.github/workflows/test.yml`):提交推送与每 3 天定时触发,amd64/arm64 双架构并行,各自全量跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现 + 仓库根 tests/;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
+- CI 兼容性测试(`.github/workflows/compat.yml`):每 3 天定时 + 手动触发,真实 dsh 宿主版本窗口逐版本全家桶 boot,断言统一底线;不被 push 触发,方法见 docs/兼容性测试/测试与隔离方法.md
 
 ## 开发态链接(dev-link)
 
