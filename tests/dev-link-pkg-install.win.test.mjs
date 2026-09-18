@@ -7,6 +7,7 @@ import {join} from 'node:path'
 
 /**
  * dev-link.mjs 包内外部依赖自动安装
+ * 仅 Windows:dev-link 依赖 cmd mklink junction 与 pnpm/USERPROFILE,Linux(CI)跳过。
  *
  * BDD 场景:
  *   1. dependencies 含非 @mzzsfy 外部依赖的包 -> 链接时包内 node_modules 被安装
