@@ -17,6 +17,7 @@ import {
   armDeferredTakeover,
 } from './takeover.mjs'
 import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from './apply-state.mjs'
+import { withTimeout, MODULE_LOAD_TIMEOUT_MS } from './guard-rail.mjs'
 
 export const name = 'llm-pi-gateway'
 
@@ -83,14 +84,17 @@ export function missingHostExports(dshLlm) {
  * @param {() => Promise<object>} [importOfficial] 官方包加载器,测试注入桩;
  *   默认动态 import(官方包缺失时仅降级本节接管,不拖垮本包加载——
  *   静态 import 命名导出缺失即加载崩溃,违反干净禁用规约)
- * @param {{exitPoll?: object, deferredExit?: object}} [pollOptions] 轮询参数,
+ * @param {{exitPoll?: object, deferredExit?: object, loadTimeoutMs?: number}} [pollOptions] 轮询参数,
  *   仅测试注入:exitPoll 透传快速退场窗(awaitOfficialExit),deferredExit
- *   透传延迟补接管轮询(armDeferredTakeover);生产双双缺省
+ *   透传延迟补接管轮询(armDeferredTakeover),loadTimeoutMs 覆盖官方包加载
+ *   护栏(仅测试注入);生产全部缺省
  */
-export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai'), { exitPoll = {}, deferredExit = {} } = {}) {
+export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai'), { exitPoll = {}, deferredExit = {}, loadTimeoutMs = MODULE_LOAD_TIMEOUT_MS } = {}) {
   // 生命周期旗标:guard 据此识别本行的功能性停摆(早退 = 假活,详见
   // apply-state.mjs);中途崩溃旗标停留 undefined,guard 保守不代挂
   beginGatewayApply()
+  // boot 诊断锚点:挂起形态(横幅不打印)时此日志是"树推进到本行"的标记
+  ctx.logger.info?.('llm-pi-gateway: apply 开始')
   // 宿主兼容探测,两项独立:
   // 1) settings 服务面:installSection 为 0.1.2-alpha.2+ 引入(与 peerDependencies
   //    对齐);旧宿主缺失即禁用。此探测直接读运行宿主注入的服务对象,不受插件
@@ -103,6 +107,9 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     endGatewayApplyInactive()
     return undefined
   }
+  // 宿主包读取:模块头部静态 import 已保证 dsh-llm 加载成功,此处动态
+  // import 为同模块缓存命中,瞬时返回无失败路径;dsh-llm 挂起形态发生在
+  // 模块加载期、先于本函数,由"apply 开始"锚点日志缺席定位
   const dshLlm = await import('@deepseek-ai/dsh-llm')
   const missing = missingHostExports(dshLlm)
   if (missing.length > 0) {
@@ -110,11 +117,18 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     endGatewayApplyInactive()
     return undefined
   }
-  // 官方 Config 同样动态获取:官方包缺失(patch 未生效但包被移除/版本演进)时
-  // 打日志并跳过官方节接管,本包节照常服务;Promise.resolve().then 消化注入加载器的同步抛错
-  const OfficialConfig = await Promise.resolve().then(importOfficial).catch(() => undefined).then((mod) => mod?.Config)
-  if (OfficialConfig === undefined) {
-    ctx.logger.warn('llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节')
+  // 官方 Config 同样动态获取:官方包缺失/加载超时/无 Config 导出(包被移除、
+  // 版本演进、损伤包树)时统一告警并跳过官方节接管,本包节照常服务
+  let OfficialConfig
+  try {
+    const officialModule = await withTimeout(importOfficial(), loadTimeoutMs, 'gateway 官方包加载')
+    OfficialConfig = officialModule?.Config
+    if (OfficialConfig === undefined) {
+      ctx.logger.warn('llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节')
+    }
+  } catch (error) {
+    ctx.logger.warn(`llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节(${error?.message ?? error})`)
+    OfficialConfig = undefined
   }
   // 官方 entry 生命周期决策:接管(官方行停稳/缺席)/等待退场/让位(用户层
   // 启用官方)。宿主注册排他,官方在场时本包不得占用其任何注册;让位态不碰
@@ -290,6 +304,8 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   profiles()
   onSectionChange()
   endGatewayApplyActive()
+  // boot 诊断锚点:本行全部装配落定,树收尾若仍卡死则卡点在本行之外
+  ctx.logger.info?.('llm-pi-gateway: apply 完成')
   // 延迟补接管:全部装配落定后才武装;轮询在 apply 返回后的轮询序列上执行,
   // completeOfficialTakeover 闭包至此全部就绪,装配中途失败不会留下僵尸轮询
   if (exitTimedOut) armDeferredTakeover(ctx, officialState.entry, () => completeOfficialTakeover(), deferredExit)

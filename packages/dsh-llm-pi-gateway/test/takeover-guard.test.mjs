@@ -406,3 +406,15 @@ test('接线: 退场超时后 gateway 先退场,官方退场不补接管(死 con
     await tickDelay(5)
   }
 })
+
+test('接线: 官方包加载挂起超时 → 降级只服务本包节,apply 不被拖死', async () => {
+  const { ctx, logs, installed, discovery } = integrationCtx({ officialEntry: entryOf({ disabled: true }) })
+  const never = () => new Promise(() => {})
+  const start = Date.now()
+  await apply(ctx, undefined, never, { loadTimeoutMs: 15 })
+  assert.ok(Date.now() - start < 5000, 'apply 在护栏上界附近返回而非无限等待')
+  assert.match(logs.warn.join('\n'), /官方 dsh-llm-pi-ai 不可用/)
+  assert.deepEqual(installed, [SETTINGS_NS], '官方节不接管')
+  // 官方 discovery 双 ns 注册为既有语义(不依赖官方包 Config),同 host-compat 用例
+  assert.deepEqual(discovery, [SETTINGS_NS, OFFICIAL_SETTINGS_NS])
+})

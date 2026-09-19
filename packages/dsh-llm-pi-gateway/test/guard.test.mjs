@@ -383,3 +383,160 @@ test('让位: 在途代挂(mounting)未完成时复活 → 等待落定后卸载
   assert.equal(state.unplugged, 1, '让位 = 落定后卸载')
   assert.equal(released, true)
 })
+
+// 护栏超时分支:代挂/dispose 卡死时降级放行,boot 不因等待卡死
+// timeouts 注入小上界;真实定时器,毫秒级用例
+
+test('护栏: 代挂激活挂起超时 → 降级且迟到完成后纳入跟踪,复活交接可卸载', async () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  const state = { plugged: 0, unplugged: 0, logs: { warn: [], error: [] } }
+  const callbacks = []
+  let lateSettle = () => {}
+  const pendingFiber = new Promise((resolve) => { lateSettle = resolve })
+  pendingFiber.dispose = async () => { state.unplugged += 1 }
+  const ctx = {
+    loader,
+    inject: (names, callback) => { if (names.includes('settings')) callback({ settings: { get: () => ({ providers: {} }) } }) },
+    logger: {
+      warn: (message) => state.logs.warn.push(message),
+      error: (message) => state.logs.error.push(message),
+    },
+    on: (name, callback, options) => callbacks.push({ name, callback, options }),
+    plugin: () => {
+      state.plugged += 1
+      return pendingFiber
+    },
+  }
+  const installing = installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    delay: NO_DELAY,
+    timeouts: { mount: 15, dispose: 15, load: 15 },
+  })
+  await installing
+  assert.match(state.logs.warn.join('\n'), /未在时限内就绪/, '超时降级留诊断日志')
+  assert.equal(state.unplugged, 0, '超时时点无卸载(fiber 未落定)')
+  // 迟到完成:官方注册真实在场,必须纳入跟踪
+  lateSettle()
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const guard = callbacks.find(cb => cb.name === 'loader/patch-context').callback
+  let released = false
+  await guard({ options: { id: 'llm-pi-gateway' }, fiber: undefined }, async () => { released = true })
+  assert.equal(state.unplugged, 1, '迟到完成的代挂被复活交接卸载,不留僵尸注册')
+  assert.equal(released, true)
+})
+
+test('护栏: 代挂永远不落定 → 超时降级,复活交接仍放行', async () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  const state = { plugged: 0, unplugged: 0, logs: { warn: [], error: [] } }
+  const callbacks = []
+  const ctx = {
+    loader,
+    inject: (names, callback) => { if (names.includes('settings')) callback({ settings: { get: () => ({ providers: {} }) } }) },
+    logger: {
+      warn: (message) => state.logs.warn.push(message),
+      error: (message) => state.logs.error.push(message),
+    },
+    on: (name, callback, options) => callbacks.push({ name, callback, options }),
+    plugin: () => {
+      state.plugged += 1
+      return new Promise(() => {})
+    },
+  }
+  await installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    delay: NO_DELAY,
+    timeouts: { mount: 15, dispose: 15, load: 15 },
+  })
+  const guard = callbacks.find(cb => cb.name === 'loader/patch-context').callback
+  let released = false
+  await guard({ options: { id: 'llm-pi-gateway' }, fiber: undefined }, async () => { released = true })
+  assert.equal(released, true, '代挂卡死不阻塞复活放行')
+  assert.equal(state.unplugged, 0, 'fiber 从未落定,无注册可卸')
+})
+
+test('护栏: 卸代挂 dispose 挂起超时 → 仍放行复活方(有意取舍:回滚优于树死)', async () => {
+  const { ctx, callbacks, currentMount, state } = ctxFixture({ loader: loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) }) })
+  const originalPlugin = ctx.plugin.bind(ctx)
+  let hungDispose = () => {}
+  ctx.plugin = (module, config) => {
+    const fiber = originalPlugin(module, config)
+    fiber.dispose = () => new Promise((resolve) => { hungDispose = resolve })
+    return fiber
+  }
+  await installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    delay: NO_DELAY,
+    timeouts: { mount: 15, dispose: 15, load: 15 },
+  })
+  assert.notEqual(currentMount(), null, '前置:死态已代挂')
+  let released = false
+  const start = Date.now()
+  await callbacks.find(cb => cb.name === 'loader/patch-context').callback(
+    { options: { id: OFFICIAL_ENTRY_ID }, fiber: undefined },
+    async () => { released = true },
+  )
+  assert.equal(released, true, 'dispose 卡死不阻塞放行')
+  assert.ok(Date.now() - start < 5000, '放行发生在护栏上界附近而非无限等待')
+})
+
+test('护栏: 行配置读取挂起超时 → 本周期放弃代挂(warn 级,非 error)', async () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  const state = { plugged: 0, unplugged: 0, logs: { warn: [], error: [] } }
+  const ctx = {
+    loader,
+    inject: (names, callback) => { if (names.includes('settings')) callback({ settings: { get: () => ({ providers: {} }) } }) },
+    logger: {
+      warn: (message) => state.logs.warn.push(message),
+      error: (message) => state.logs.error.push(message),
+    },
+    on: () => {},
+    plugin: () => {
+      state.plugged += 1
+      return Promise.resolve({ dispose: async () => { state.unplugged += 1 } })
+    },
+  }
+  await installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    rowConfig: () => new Promise(() => {}),
+    delay: NO_DELAY,
+    timeouts: { mount: 15, dispose: 15, load: 15 },
+  })
+  assert.equal(state.plugged, 0, '行配置未就绪不触达官方 apply')
+  assert.match(state.logs.warn.join('\n'), /行配置读取未在时限内完成/)
+  assert.equal(state.logs.error.length, 0, '超时降级为 warn,非真失败不打 error')
+})
+
+test('护栏: 超时代挂迟到失败 → mounted 保持空位且无异常抛出', async () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  const state = { plugged: 0, unplugged: 0, logs: { warn: [], error: [] } }
+  const callbacks = []
+  let lateFail = () => {}
+  const ctx = {
+    loader,
+    inject: (names, callback) => { if (names.includes('settings')) callback({ settings: { get: () => ({ providers: {} }) } }) },
+    logger: {
+      warn: (message) => state.logs.warn.push(message),
+      error: (message) => state.logs.error.push(message),
+    },
+    on: (name, callback, options) => callbacks.push({ name, callback, options }),
+    plugin: () => {
+      state.plugged += 1
+      return new Promise((_, reject) => { lateFail = () => reject(new Error('迟到挂载失败')) })
+    },
+  }
+  await installGuard(ctx, {
+    importOfficial: async () => OFFICIAL_STUB,
+    delay: NO_DELAY,
+    timeouts: { mount: 15, dispose: 15, load: 15 },
+  })
+  assert.match(state.logs.warn.join('\n'), /代挂未在时限内就绪/)
+  lateFail()
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.match(state.logs.warn.join('\n'), /迟到失败,无注册在场/)
+  // 复活交接:mounted 空位,mounting 已清,直接放行不触碰失效 fiber
+  const guard = callbacks.find(cb => cb.name === 'loader/patch-context').callback
+  let released = false
+  await guard({ options: { id: 'llm-pi-gateway' }, fiber: undefined }, async () => { released = true })
+  assert.equal(released, true)
+  assert.equal(state.unplugged, 0)
+})

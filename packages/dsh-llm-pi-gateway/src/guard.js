@@ -26,6 +26,7 @@ import {
   ROW_ID_PREFIXES,
 } from './takeover.mjs'
 import { gatewayApplyState } from './apply-state.mjs'
+import { withTimeout, isGuardRailTimeout, MODULE_LOAD_TIMEOUT_MS, DISPOSE_TIMEOUT_MS, MOUNT_TIMEOUT_MS } from './guard-rail.mjs'
 
 // 本包主行 id(cordis.patch.yml 的 insert 声明)
 const GATEWAY_ENTRY_ID = 'llm-pi-gateway'
@@ -147,18 +148,24 @@ async function resolveFromHostTree(packageName) {
  * 死态/复活边沿——死态时代挂官方,任一行复活先卸代挂。全部状态挂 guard
  * 自身 fiber,随其卸载自动清理。
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{importOfficial?: () => Promise<object>, rowConfig?: () => Promise<object>, delay?: (ms: number) => Promise<void>}} hooks
+ * @param {{importOfficial?: () => Promise<object>, rowConfig?: () => Promise<object>, delay?: (ms: number) => Promise<void>, timeouts?: {load?: number, mount?: number, dispose?: number}}} hooks
  *   测试注入桩;官方包默认取自宿主本体树,行配置默认读宿主 settings 文件,
- *   缺失即干净禁用
+ *   缺失即干净禁用;timeouts 覆盖护栏上界(仅测试注入,生产用常量缺省)
  */
 export async function installGuard(ctx, {
   importOfficial = importOfficialFromHost,
   rowConfig,
   delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  timeouts = {},
 } = {}) {
+  const loadTimeout = timeouts.load ?? MODULE_LOAD_TIMEOUT_MS
+  const mountTimeout = timeouts.mount ?? MOUNT_TIMEOUT_MS
+  const disposeTimeout = timeouts.dispose ?? DISPOSE_TIMEOUT_MS
   let officialModule
   try {
-    officialModule = await importOfficial()
+    // 护栏:官方包 import 命中损伤包树(宿主闭包/junction 异常)时不得无限
+    // 阻塞 guard apply——超时按官方不可用干净禁用,树照常完成
+    officialModule = await withTimeout(importOfficial(), loadTimeout, 'guard 官方包加载')
   } catch (error) {
     ctx.logger.warn(`llm-pi-gateway/guard: 官方 dsh-llm-pi-ai 不可用,死态自愈停用: ${error?.message ?? error}`)
     return undefined
@@ -244,20 +251,50 @@ export async function installGuard(ctx, {
   const settingsReady = () => settingsCtx !== null
 
   // 代挂官方插件:挂 guard 子 context,Config 校验与 settings 节全原生
-  // 语义;同一时刻至多一个代挂(mounting 去并发,mounted 去重入)
+  // 语义;同一时刻至多一个代挂(mounting 去并发,mounted 去重入)。
+  // 护栏:官方 apply 不得无限占用——boot 事务内代挂若卡死会拖死整树。
+  // 超时分支依赖两个外部不变量收敛:官方注册排他(迟到 fiber 与新轮代挂
+  // 撞注册时后到者必失败)与 cordis fiber 失败自回收,故迟到跟踪允许与
+  // sweep 重试并发
   async function mountOfficial() {
     if (mounted !== null || mounting !== null) return
     mounting = (async () => {
+      let fiber = null
       try {
-        const section = await (rowConfig?.() ?? officialRowConfig())
+        const section = await withTimeout(
+          rowConfig?.() ?? officialRowConfig(),
+          mountTimeout,
+          'guard 行配置读取',
+        )
         const stripped = stripRefusedCompatKeys(section)
-        const fiber = ctx.plugin(officialModule, stripped)
-        await fiber
+        // fiber 是 thenable 对象本身(settlement 值非 fiber),护栏只包等待,
+        // 引用必须取原始返回值
+        fiber = ctx.plugin(officialModule, stripped)
+        await withTimeout(Promise.resolve(fiber), mountTimeout, 'guard 代挂官方插件')
         mounted = fiber
         ctx.logger.warn('llm-pi-gateway/guard: 检测到 gateway 与官方行同时停用,已代挂官方插件恢复服务;重启后由宿主组合自然归位')
       } catch (error) {
-        recordRefusedCompatKeys(error?.message)
-        ctx.logger.error(`llm-pi-gateway/guard: 代挂官方插件失败: ${error?.message ?? error}`)
+        if (isGuardRailTimeout(error) && fiber !== null) {
+          // 挂载未在时限内就绪,但底层挂载仍在进行:迟到完成即真实注册在场,
+          // 空位时纳入跟踪待卸载,撞车(新轮代挂已占)则依赖排他不变量回收;
+          // 迟到失败则无注册在场,留日志即可
+          Promise.resolve(fiber).then(() => {
+            if (mounted === null) {
+              mounted = fiber
+              ctx.logger.warn('llm-pi-gateway/guard: 超时代挂迟到完成,已纳入卸载跟踪')
+            } else {
+              ctx.logger.warn('llm-pi-gateway/guard: 超时代挂迟到完成但代挂位已被占用,靠官方注册排他回收')
+            }
+          }, () => {
+            ctx.logger.warn('llm-pi-gateway/guard: 超时代挂迟到失败,无注册在场')
+          })
+          ctx.logger.warn(`llm-pi-gateway/guard: 代挂未在时限内就绪(${error?.message ?? error}),已纳入跟踪待迟到完成`)
+        } else if (isGuardRailTimeout(error)) {
+          ctx.logger.warn(`llm-pi-gateway/guard: 行配置读取未在时限内完成(${error?.message ?? error}),本周期放弃代挂`)
+        } else {
+          recordRefusedCompatKeys(error?.message)
+          ctx.logger.error(`llm-pi-gateway/guard: 代挂官方插件失败: ${error?.message ?? error}`)
+        }
       } finally {
         mounting = null
       }
@@ -265,17 +302,23 @@ export async function installGuard(ctx, {
     await mounting
   }
 
-  // 卸代挂:行复活的前置交接,必须完成后才放行其 apply。等待在途代挂
-  // 完成,防复活放行与代挂激活交错抢注册
+  // 卸代挂:行复活的前置交接,理想次序 = 卸载完成后才放行其 apply。
+  // 已知取舍:dispose 护栏超时时仍放行,本方官方注册可能残余在场,复活方
+  // (官方插件无冲突降级)init 会撞注册失败并整批回滚——挂死必然树死,
+  // 回滚尚可报错自愈,此残余风险为有意接受
   async function unmountOfficial() {
-    if (mounting !== null) await mounting
+    try {
+      if (mounting !== null) await withTimeout(mounting, mountTimeout, 'guard 卸代挂等在途代挂')
+    } catch (error) {
+      ctx.logger.warn(`llm-pi-gateway/guard: 在途代挂未在时限内落定(${error?.message ?? error}),按当前态继续交接`)
+    }
     if (mounted === null) return
     const fiber = mounted
     mounted = null
     try {
-      await fiber.dispose()
+      await withTimeout(fiber.dispose(), disposeTimeout, 'guard 卸代挂 dispose')
     } catch (error) {
-      ctx.logger.warn(`llm-pi-gateway/guard: 卸代挂失败(放行继续,接管方遇注册冲突会降级): ${error?.message ?? error}`)
+      ctx.logger.warn(`llm-pi-gateway/guard: 卸代挂失败(${error?.message ?? error});放行继续,复活方 init 可能撞残余注册失败回滚,属有意取舍`)
     }
   }
 
@@ -287,6 +330,8 @@ export async function installGuard(ctx, {
     ctx.logger.warn(`llm-pi-gateway/guard: ${id} 行复活,卸代挂让位`)
     try {
       await unmountOfficial()
+    } catch (error) {
+      ctx.logger.warn(`llm-pi-gateway/guard: 卸代挂交接异常(${error?.message ?? error}),仍放行复活方`)
     } finally {
       return next()
     }
@@ -333,7 +378,10 @@ export async function installGuard(ctx, {
   // PENDING 而空转。settings 服务已注入即就地自愈;否则交由事件通道与
   // sweep(同一门槛)兜底,官方目录首注册需要其现值
   await waitTreeReady(ctx.loader, delay)
-  if (detectDeadState(ctx.loader) === true && settingsReady()) await mountOfficial()
+  // boot 诊断锚点:guard 判定死态自愈只有两种可能入口,日志标注本次是否触发
+  const deadState = detectDeadState(ctx.loader)
+  ctx.logger.info?.(`llm-pi-gateway/guard: 初始判定 dead=${deadState} settingsReady=${settingsReady()}`)
+  if (deadState === true && settingsReady()) await mountOfficial()
 
   // 兜底轮询:guard 行 fiber 存续期间持续扫描。guard entry 被宿主移除
   // (随 bundle patch 退场)即整体退场;fiber dispose 后 sweep 空转无害

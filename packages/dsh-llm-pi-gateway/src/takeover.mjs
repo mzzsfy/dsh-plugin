@@ -6,6 +6,9 @@
 // (global 监听 loader/patch-context)在官方 apply 前自停让位,是两插件间
 // 唯一的原子交接点。
 
+// 护栏:有界等待工具(超时降级放行,防 boot 收尾树卡死)
+import { withTimeout, DISPOSE_TIMEOUT_MS } from './guard-rail.mjs'
+
 // 官方 bundle 行 id(dsh-base cordis.patch.yml 声明),与官方 settings
 // 命名空间同值但概念独立:此为 loader 行 id,彼为 settings ns
 export const OFFICIAL_ENTRY_ID = 'llm-pi-ai'
@@ -142,10 +145,12 @@ export function armDeferredTakeover(ctx, entry, complete, {
 
 /**
  * 安装官方复活守卫:官方行即将 init(无 fiber 的 patch-context 事件)且本包
- * 正服务官方节时,await 自停完全卸载本包全部注册后放行,官方 apply 无冲突。
+ * 正服务官方节时,自停卸载本包全部注册后放行,官方 apply 无冲突。
  * waterfall 保证放行发生在官方 apply 之前;监听器挂本包 fiber,随其卸载自动
  * 清理。dispose 后放行不得中断——不调 next 会否决整条 waterfall 链,令官方
- * init 永久挂起。
+ * init 永久挂起;dispose 也不得无限等待(自身卸载与 patch 事务互相等待是
+ * boot 挂死形态)。已知取舍:dispose 护栏超时即放行,本方注册可能残余在场,
+ * 官方 init 撞注册会失败回滚——挂死必然树死,回滚尚可报错自愈。
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {() => boolean} isActive 本包当前是否正服务官方节
  */
@@ -156,9 +161,9 @@ export function installOfficialRevivalGuard(ctx, isActive) {
     if (!isActive()) return next()
     ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 行即将启用,本包自停让位,避免注册冲突拖垮 patch 应用')
     try {
-      await ctx.fiber.dispose()
+      await withTimeout(ctx.fiber.dispose(), DISPOSE_TIMEOUT_MS, '让位自停 dispose')
     } catch (error) {
-      ctx.logger.warn(`llm-pi-gateway: 让位自停失败: ${error?.message ?? error}`)
+      ctx.logger.warn(`llm-pi-gateway: 让位自停异常(${error?.message ?? error});已放行,官方 init 可能撞残余注册失败回滚,属有意取舍`)
     }
     return next()
   }, { global: true })
