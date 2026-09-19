@@ -8,9 +8,10 @@ const CLIENT_SRC = readFileSync(fileURLToPath(new URL('../src/client.js', import
 // 设置项悬停说明契约:说明常量必须存在且逐项挂到对应开关(开关行工厂调用位)。
 // 断言以工厂调用为锚:行文本与说明常量必须出现在同一 switchRow(...) 调用内,
 // 防常量互换挂载或挂错行仍通过
-test('源码契约:三项设置的悬停说明齐备且挂到对应控件', () => {
+test('源码契约:六项设置的悬停说明齐备且挂到对应控件', () => {
   const TITLES = {
     HISTORY_SWITCH_TITLE: '历史输入浮层开关',
+    HISTORY_BUTTON_SWITCH_TITLE: '输入框历史按钮开关',
     STEER_SWITCH_TITLE: '插话撤回开关',
     FORK_SWITCH_TITLE: '对话 fork 开关',
     FORK_AUTO_RESEND_SWITCH_TITLE: '分叉后自动重发开关',
@@ -20,6 +21,7 @@ test('源码契约:三项设置的悬停说明齐备且挂到对应控件', () =
   }
   const rowAnchors = [
     { constant: 'HISTORY_SWITCH_TITLE', text: "'历史输入浮层(Alt+↑)'", label: TITLES.HISTORY_SWITCH_TITLE },
+    { constant: 'HISTORY_BUTTON_SWITCH_TITLE', text: "'输入框历史按钮'", label: TITLES.HISTORY_BUTTON_SWITCH_TITLE },
     { constant: 'STEER_SWITCH_TITLE', text: "'插话撤回'", label: TITLES.STEER_SWITCH_TITLE },
     { constant: 'FORK_SWITCH_TITLE', text: "'对话 fork'", label: TITLES.FORK_SWITCH_TITLE },
     { constant: 'FORK_AUTO_RESEND_SWITCH_TITLE', text: "'分叉后自动重发'", label: TITLES.FORK_AUTO_RESEND_SWITCH_TITLE },

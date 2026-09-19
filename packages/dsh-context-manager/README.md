@@ -1,12 +1,12 @@
 # dsh-context-manager
 
-对话增强插件:历史输入回溯、插话撤回、对话分叉(进行中轮分叉/自动重发)、标题栏复制 sessionId。dsh-session-manager 历史输入功能的独立延续包(原包已移除该功能)。
+对话增强插件:历史输入回溯(Alt+↑ 或输入框工具排按钮唤起)、插话撤回、对话分叉(进行中轮分叉/自动重发)、标题栏复制 sessionId。dsh-session-manager 历史输入功能的独立延续包(原包已移除该功能)。
 
 ## 功能
 
-### 历史输入浮层(Alt+↑)
+### 历史输入浮层(Alt+↑ 或输入框按钮)
 
-输入框按 `Alt+↑` 唤起历史输入浮层:
+输入框按 `Alt+↑`,或点击输入框下方工具排的历史按钮(指令/附件右侧,与 Alt+↑ 等效,再点关闭)唤起历史输入浮层:
 
 - 范围导航:`←/→` 按 常用(prompts)→ 当前会话(session)→ 本工作区(workspace)→ 全部工作区(global) 依次切换(边界停住),列表时间倒序
 - 搜索:输入即时过滤(IME 组合输入守卫,命中计数),`↑/↓` 选中、`Enter` 回填
@@ -40,7 +40,7 @@
 
 ## 启停
 
-设置页「插件」→「对话增强」卡片五开关(历史输入/插话撤回/对话分叉/分叉后自动重发/标题栏复制 sessionId),经宿主 settings 持久,变更刷新页面生效。
+设置页「插件」→「对话增强」卡片六开关(历史输入/输入框历史按钮/插话撤回/对话分叉/分叉后自动重发/标题栏复制 sessionId),经宿主 settings 持久,变更刷新页面生效。「输入框历史按钮」仅控制工具排按钮显隐,停用后 Alt+↑ 与浮层不受影响。
 
 ## 依赖与门控
 
@@ -55,6 +55,7 @@
 | `/api/context/inputs` | GET | 历史输入(`?sessionId=&scope=`) |
 | `/api/context/prompts/toggle` | POST | 收藏/取消收藏(按截断后文本查重) |
 | `/api/context/history-enabled` | GET/POST | 历史浮层启停 |
+| `/api/context/history-button-enabled` | GET/POST | 输入框历史按钮启停 |
 | `/api/context/steer-recall-enabled` | GET/POST | 插话撤回启停 |
 | `/api/context/fork-enabled` | GET/POST | 对话分叉启停 |
 | `/api/context/fork-auto-resend-enabled` | GET/POST | 分叉后自动重发启停 |
@@ -64,4 +65,4 @@
 
 ## dsh 版本兼容
 
-三版本全部通过:样式注入 data-plugin 契约、Alt+↑ 历史浮层、对话 fork、设置「插件」页对话增强卡四开关、host 半区 API(history-enabled / fork-enabled)。0.1.6 设置分区卡片位于「插件」页,非独立导航项。
+三版本全部通过:样式注入 data-plugin 契约、历史输入浮层(Alt+↑ 或输入框按钮)、对话 fork、设置「插件」页对话增强卡开关组、host 半区 API(八条 `/api/context/*`)。0.1.6 设置分区卡片位于「插件」页,非独立导航项。

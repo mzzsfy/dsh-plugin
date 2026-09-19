@@ -1,6 +1,6 @@
 // dsh-context-manager Host 半区:历史输入工作区缓存对齐 + 启停/数据路由
-// (inputs / prompts/toggle 与 history/steer-recall/fork/fork-auto-resend/copy-sid
-// 五条启停)。
+// (inputs / prompts/toggle 与 history/history-button/steer-recall/fork/fork-auto-resend/copy-sid
+// 六条启停)。
 // 浮层请求直接读缓存文件立即返回;对齐在后台解压范围内会话产物与缓存合并写回,
 // 运行中会话也参与(实时追加其新输入)。fork 分叉动作走 client 服务面,
 // host 侧只有其启停路由。
@@ -48,6 +48,8 @@ export const MESSAGES = {
 const SETTINGS_SCHEMA = schemastery.object({
   historyEnabled: schemastery.boolean().default(true)
     .description('历史输入浮层(Alt+↑),低频功能,关闭后输入框锚点与快捷键整体不渲染;变更刷新页面生效'),
+  historyButtonEnabled: schemastery.boolean().default(true)
+    .description('输入框工具排的历史输入按钮,点击开关浮层,与 Alt+↑ 等效;关闭仅隐藏按钮,快捷键与浮层不受影响;变更刷新页面生效'),
   steerRecallEnabled: schemastery.boolean().default(true)
     .description('插话撤回图标,低频功能,关闭后撤回图标整体不渲染;变更刷新页面生效'),
   forkEnabled: schemastery.boolean().default(true)
@@ -79,6 +81,7 @@ function readSettings(ctx) {
   const value = settings ? settings.get(NAMESPACE) : undefined
   return {
     historyEnabled: !value || value.historyEnabled !== false,
+    historyButtonEnabled: !value || value.historyButtonEnabled !== false,
     steerRecallEnabled: !value || value.steerRecallEnabled !== false,
     forkEnabled: !value || value.forkEnabled !== false,
     forkAutoResendEnabled: Boolean(value && value.forkAutoResendEnabled === true),
@@ -461,6 +464,32 @@ export function apply(ctx, config) {
           // update 异步落盘后才提交新值:await 保证持久化完成后再读回
           await settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
           sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 输入框历史按钮启停:与历史浮层开关同构,读走 settings,写经 settings.update
+      path: '/api/context/history-button-enabled',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { enabled: readSettings(ctx).historyButtonEnabled })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const settings = ctx.get('settings')
+          if (!settings) throw new Error('宿主设置服务不可用')
+          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
+          await settings.update(NAMESPACE, { historyButtonEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx).historyButtonEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
