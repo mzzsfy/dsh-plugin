@@ -6,7 +6,8 @@
 // 契约 inputActions.setDraft;插话撤回注入官方 pending steering 气泡操作图标排;
 // fork 注入消息气泡操作排,分叉到该轮之前并把该轮用户输入回填子会话输入框(重试
 // 语义),RPC 走宿主 sessions 服务面(fork+open),锚点经 remote.session.follow
-// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射;复制 sessionId 挂官方
+// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射;回填前经官方 input 快照(useInput)
+// 探测输入框占用,已被用户输入则不覆盖(权限高于回填);复制 sessionId 挂官方
 // conversation.session.header.actions 插槽。浏览器半区经 webServer 路由
 // ('/api/context/*')访问 Host。打包为单文件自包含格式,无法跨文件 require;
 // 与 src/core.mjs 镜像的纯函数(filterHistoryInputs/forkFailureText/forkRetryText)
@@ -831,6 +832,9 @@ const FORK_PAGE_MAX_MESSAGES = 2000
 // 重试草稿通道:分叉成功后子会话尚未挂载,原输入先按子会话 id 暂存,
 // 子会话的 dock 挂载(inputActions 就绪)时消费回填并清除
 const pendingForkDrafts = new Map()
+// 已消费会话:effect 依赖(inputActions 身份)变化会重跑,重跑时草稿已被 delete,
+// 若不做标记会落入「无草稿」路径并对输入框产生二次写入(空写即清空)
+const consumedForkDrafts = new Set()
 // 草稿消费重查:覆盖 open 切换期间「挂载先于登记」的窗口(单次即可,上限留裕量)
 const FORK_DRAFT_POLL_MS = 400
 const FORK_DRAFT_POLLS = 3
@@ -946,7 +950,7 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
 // 轮号无映射 = 该轮未完成,首问无文本(纯图等)= 无法重试,均不注入;
 // 首轮无前锚(宿主 fork 边界必须落在 turn/end 上,复制零事件不可表达),也不注入。
 // 分叉动作经宿主 sessions 服务面 fork+open(与官方 chat 同构),成功 toast 并切换
-function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSession, submitPrompt, loadTurnEnds }) {
+function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, cancelSession, submitPrompt, loadTurnEnds }) {
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
@@ -980,8 +984,14 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSessi
   // 自动重发(开关开):草稿带 autoSubmit 标记,setDraft 后经 remote.session.prompt
   // 立即提交原文(重生成语义);prompt 失败仅 toast——文本已在输入框,可手动发送
   const [draftPollTick, setDraftPollTick] = useState(0)
+  // 回填前探测输入框当前草稿:宿主输入快照(useInput)只在快照面可用,
+  // 缺失时按空草稿处理(旧宿主降级为原行为)
+  const liveDraft = typeof useInput === 'function' ? useInput((state) => state.draft) : ''
+  const liveDraftRef = useRef('')
+  liveDraftRef.current = typeof liveDraft === 'string' ? liveDraft : ''
   useEffect(() => {
     if (sessionId === undefined || !inputActions || typeof inputActions.setDraft !== 'function') return undefined
+    if (consumedForkDrafts.has(sessionId)) return undefined
     const draft = pendingForkDrafts.get(sessionId)
     if (draft === undefined) {
       if (draftPollTick >= FORK_DRAFT_POLLS) return undefined
@@ -989,13 +999,27 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSessi
       return () => clearTimeout(timer)
     }
     pendingForkDrafts.delete(sessionId)
+    consumedForkDrafts.add(sessionId)
     const text = draft && typeof draft === 'object' ? draft.text : draft
     const autoSubmit = Boolean(draft && typeof draft === 'object' && draft.autoSubmit === true)
-    inputActions.setDraft(text)
+    // 用户已开始输入:回填是破坏性整体替换(setDraft 清根重建),优先级低于用户输入;
+    // 放弃回填并提示,避免吞掉用户在 dock 挂载窗口内的击键
+    const draftOccupied = liveDraftRef.current.trim() !== ''
     if (autoSubmit && submitRef.current) {
+      // 提交即无草稿(官方发送语义):原文已发出,输入框不得残留,否则用户再发即重复消息;
+      // 提交失败才回填文本,供手动重发
+      if (draftOccupied) {
+        toast('子会话已有输入,原输入未自动发送')
+        return undefined
+      }
       Promise.resolve(submitRef.current({ sessionId, text })).catch((error) => {
-        toast('自动重发失败,文本已在输入框可手动发送: ' + String(error && error.message || error), { kind: 'error' })
+        if (typeof inputActions.setDraft === 'function') inputActions.setDraft(text)
+        toast('自动重发失败,文本已回填输入框可手动发送: ' + String(error && error.message || error), { kind: 'error' })
       })
+    } else if (draftOccupied) {
+      toast('子会话已有输入,原输入未回填')
+    } else {
+      inputActions.setDraft(text)
     }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
@@ -1090,9 +1114,10 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
             .then((childId) => {
               // 暂存先于 toast:open 的子会话挂载可能紧随 resolve,回填承诺必须先就位;
               // open 失败时暂存保留,用户手动打开子会话仍兑现;
-              // 自动重发开关开:登记带标记草稿,子会话消费时回填后经 prompt 提交
+              // 自动重发开关开:登记带标记草稿,子会话消费时直接提交(不留草稿)
               if (typeof childId === 'string' && childId !== '') {
                 pendingForkDrafts.set(childId, { text: currentEntry.text, autoSubmit: autoResendOn })
+                consumedForkDrafts.delete(childId)
               }
               // 进行中轮分叉后原会话该轮无人再读,停掉止损;失败不影响分叉成功事实
               if (currentEntry.open === true && typeof cancelSessionFn === 'function') {
@@ -1100,7 +1125,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
                   console.warn('[context-manager] 分叉后停止原会话进行中回复失败', error)
                 })
               }
-              toast('已分叉,原输入已填入子会话输入框')
+              toast(autoResendOn ? '已分叉,原输入已自动发送到子会话' : '已分叉,原输入已填入子会话输入框')
               return childId
             })
             .catch((error) => {
