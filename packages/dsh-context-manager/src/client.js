@@ -960,15 +960,39 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
   const submitRef = useRef(null)
   submitRef.current = submitPrompt
   const [turnEnds, setTurnEnds] = useState(null)
+  // 映射基线:重拉结果与基线比对,相同则不 setState——setState 会触发重渲染并再次
+  // 触发扫描,新轮在映射中缺失时形成 拉取→setState→扫描→拉取 的无限循环
+  const turnEndsRef = useRef(null)
+  // 在途门控:MutationObserver 在流式输出期间高频触发,无门控会造成请求风暴
+  const refreshPendingRef = useRef(false)
+  // 重拉入口装配到 ref 供扫描调用:新轮 turn/end 落在拉取窗口之后时映射里没有该轮,
+  // 注入资格判空即跳过,按钮永不出现(实测:必须刷新页面才恢复)。门控保证同时在途
+  // 最多一次;结果与基线相同则不 setState,避免 setState→扫描→拉取的循环
+  const refreshRef = useRef(null)
+  refreshRef.current = () => {
+    if (refreshPendingRef.current) return
+    refreshPendingRef.current = true
+    Promise.resolve(loadRef.current())
+      .then((map) => {
+        refreshPendingRef.current = false
+        if (turnEndsRef.current === map) return
+        turnEndsRef.current = map
+        setTurnEnds(map)
+      })
+      .catch(() => { refreshPendingRef.current = false })
+  }
   useEffect(() => {
     if (sessionId === undefined) return undefined
     let disposed = false
     // 拉取前置空:会话切换后旧会话的映射不得继续服务新会话——轮号跨会话重叠,
     // 旧 seq 会让分叉锚点错位;置空期间 ForkDock 以 null 短路,不注入按钮
     setTurnEnds(null)
+    turnEndsRef.current = null
     loadRef.current()
       .then((map) => {
-        if (!disposed) setTurnEnds(map)
+        if (disposed) return
+        turnEndsRef.current = map
+        setTurnEnds(map)
       })
       .catch((error) => {
         // 映射拉取失败(网络/宿主繁忙):fork 无锚点可用,保持禁用不注入;
@@ -1023,10 +1047,10 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
     }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
-  return h(ForkDock, { session, forkSession, cancelSession, turnEnds })
+  return h(ForkDock, { session, forkSession, cancelSession, turnEnds, refreshRef })
 }
 
-function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
+function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef }) {
   const [enabled, setEnabled] = useState(true)
   const [autoResend, setAutoResend] = useState(false)
   const turnEndsRef = useRef(null)
@@ -1075,13 +1099,18 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
         if (rawTurn === null || rawTurn.trim() === '') return
         const turn = Number(rawTurn)
         if (!Number.isInteger(turn)) return
-        // 重试资格三查:映射缺失的轮(超窗口)不可分叉;首轮无前锚(宿主
+        // 重试资格三查:映射缺失的轮(超窗口/新轮)不可分叉;首轮无前锚(宿主
         // fork 边界必须落在 turn/end,复制零事件不可表达);无首问文本(纯图等)
         // 回填无从谈起。open=true 的进行中轮 turn/end 未落账,同样可分叉——
         // 锚点取其前一个闭合轮,该轮未完成的回复分叉后停掉(见点击处理器)。
         // 按钮在场即暗示可用,禁用态文案无法区分成因,不注入即误导
         const entry = turnEndsRef.current.get(turn)
-        if (entry === undefined || entry.text === null) return
+        if (entry === undefined) {
+          // 新轮:映射是挂载时的一次快照,补拉后由 setState 触发重扫
+          if (refreshRef.current) refreshRef.current()
+          return
+        }
+        if (entry.text === null) return
         let previous = null
         for (const key of turnEndsRef.current.keys()) {
           const candidate = turnEndsRef.current.get(key)

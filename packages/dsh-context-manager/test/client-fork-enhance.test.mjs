@@ -89,6 +89,37 @@ test('源码契约:回填前经 useInput 快照探测输入框,非空不覆盖',
   assert.ok(consume.indexOf('draftOccupied') < consume.indexOf('inputActions.setDraft(text)'), '占用探测必须先于回填')
 })
 
+// F5 新轮注入 的客户端契约(实测 bug:轮号映射拉取一次即冻结,新轮 turn 不在映射中,
+// 注入资格判空后直接跳过,按钮永不出现,必须刷新页面重拉才恢复):
+// - 扫描发现「有轮号但映射无此轮」时必须重拉映射,而不是静默跳过
+// - 重拉必须有在途门控,避免 MutationObserver 高频触发造成请求风暴
+// - 重拉结果与在途基线对比,相同则不再 setState(否则 setState→重渲染→扫描无限循环)
+
+test('源码契约:映射缺失的轮触发重拉而非静默跳过', () => {
+  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {'), CLIENT_SRC.indexOf('if (typeof MutationObserver'))
+  assert.ok(scan.includes('entry === undefined'), '扫描应识别映射缺失的轮')
+  assert.ok(scan.includes('refreshRef.current()'), '映射缺失时应触发重拉')
+})
+
+test('源码契约:重拉有在途门控', () => {
+  const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
+  assert.ok(CLIENT_SRC.includes('refreshPendingRef'), '重拉必须有在途门控标志')
+  assert.ok(refresh.includes('if (refreshPendingRef.current) return'), '门控判断应位于重拉入口首位')
+  assert.ok(refresh.includes('refreshPendingRef.current = true'), '进入重拉即置在途')
+  assert.ok(refresh.includes('refreshPendingRef.current = false'), '重拉结束应清在途(含失败路径)')
+})
+
+test('源码契约:重拉结果与基线相同则不 setState(防扫描循环)', () => {
+  const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
+  assert.ok(refresh.includes('setTurnEnds'), '重拉应更新映射')
+  assert.ok(refresh.includes('if (turnEndsRef.current === map) return'), '同一映射引用应短路,避免 setState 触发扫描循环')
+})
+
+test('源码契约:重拉入口经 ref 跨组件传递(Bootstrap 装配,扫描处调用)', () => {
+  assert.ok(CLIENT_SRC.includes('const refreshRef = useRef(null)'), 'ForkDock 侧应有 refreshRef')
+  assert.ok(CLIENT_SRC.includes('refreshRef.current = () => {'), 'Bootstrap 应装配重拉入口')
+})
+
 test('源码契约:fork dock 订阅官方 input 快照取草稿', () => {
   assert.ok(CLIENT_SRC.includes('useInput'), 'dock 应订阅宿主注入的 useInput 快照')
 })
