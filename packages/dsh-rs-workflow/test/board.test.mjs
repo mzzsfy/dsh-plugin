@@ -2,7 +2,7 @@
 // store 走真实单例(裁决分支读 sessionId),故全程 DSH_RS_WORKFLOW_DATA_DIR 指临时目录防污染
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,6 +36,18 @@ const postJson = (base, path, body) => fetch(base + path, {
   body: JSON.stringify(body),
 })
 
+const postJsonHost = (base, path, body, host) => new Promise((resolve, reject) => {
+  // undici fetch 忽略手动 Host 头;node:http 可伪造(等价 rebinding 场景)
+  const url = new URL(base + path)
+  const req = httpRequest({ hostname: url.hostname, port: url.port, path, method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8', host } }, (res) => {
+    let raw = ''
+    res.on('data', (c) => { raw += c })
+    res.on('end', () => resolve({ status: res.statusCode, json: async () => JSON.parse(raw) }))
+  })
+  req.on('error', reject)
+  req.end(JSON.stringify(body))
+})
+
 // 桩 driver:注册进 registry,handlePost 回显受理(control 裁决通路走 post(runId, event));
 // 同步向真实 store 注入 run 记录(handleControl 裁决分支要读 sessionId)
 function stubDriver(runId, sessionId = 'session-stub') {
@@ -48,8 +60,21 @@ function stubDriver(runId, sessionId = 'session-stub') {
   return { received, dispose: () => unregisterDriver(runId) }
 }
 
-test('Given board/release 模块 When 加载 Then import 图完整无缺失依赖', async () => {
-  assert.ok(true)
+test('Given 伪造 Host(rebinding 形态) When POST control Then 403 拒绝(Host fence 自守)', async () => {
+  const board = await startBoard()
+  const stub = stubDriver('r-board-fence')
+  try {
+    // 插件 exact 路由早于宿主 /api 前缀路由命中,宿主 fence 拦不到,须自守
+    const res = await postJsonHost(board.base, '/api/rsww/control', { runId: 'r-board-fence', kind: 'approve', by: 'user', reason: 'x' }, 'evil.example.com')
+    assert.equal(res.status, 403)
+    assert.equal(stub.received.length, 0)
+    // 回环名照常放行
+    const ok = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-fence', kind: 'approve', by: 'user', reason: 'x' })
+    assert.equal(ok.status, 200)
+  } finally {
+    stub.dispose()
+    await board.close()
+  }
 })
 
 after(() => cleanDataDir())

@@ -67,6 +67,10 @@
 
 - id: tool-jobs
   name: '@deepseek-ai/dsh-tool-jobs'
+  # 缺省连续唤醒预算 3 次且仅用户消息重置:纯自主编排每段 settle 耗 1 次,第 4 段起降级 inject 不唤醒,
+  # 编排静默停滞;放宽到 64 段(覆盖 spec 建议的 3~12 步多实例流程上限)
+  config:
+    maxConsecutiveWakes: 64
 
 # ── skills ──────────────────────────────────────────────────────────────────
 

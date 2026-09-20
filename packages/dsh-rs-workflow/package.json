@@ -35,6 +35,7 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1"
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2"
   }
 }

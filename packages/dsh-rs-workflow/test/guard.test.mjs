@@ -54,8 +54,11 @@ test('触顶只在额度用满时成立(供调用方单次告警)', () => {
     gate.take('r-c')
     assert.equal(gate.exhausted('r-c'), i === MAX_NUDGE)
   }
-  // 超限后仍成立:不会重复告警的原因由调用方 take 失败分支只在首次进入
-  assert.equal(gate.exhausted('r-c'), true)
+  // 触顶后闩锁:多次调用只首次 true,调用方不再重复告警
+  assert.equal(gate.exhausted('r-c'), false)
+  // clear 重置闩锁与计数(新一轮欠动作周期重新告警)
+  gate.clear('r-c')
+  assert.equal(gate.exhausted('r-c'), false)
 })
 
 test('提醒文案带 runId / 状态 / 欠动作与应调工具', () => {

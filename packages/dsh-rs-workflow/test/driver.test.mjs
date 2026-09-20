@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { nextBatch, scriptViewOf } from '../lib/driver/scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from '../lib/driver/approve.mjs'
 import { buildPrompt, schemaOf, resolvePlaceholders } from '../lib/driver/prompts.mjs'
-import { RunDriver, collectSubOutputs } from '../lib/driver/index.mjs'
+import { RunDriver, collectSubOutputs, buildSeed } from '../lib/driver/index.mjs'
 
 const init = (template, plan, { request = '需求', inputs = {} } = {}) => {
   const view = scriptViewOf(template, plan)
@@ -660,4 +660,88 @@ test('Given 子流程状态 When collectSubOutputs Then 普通步取首产出,fo
   assert.deepEqual(out['plan.items'], ['甲', '乙'])
   assert.deepEqual(out['write.line'], ['甲行', '乙行'])
   assert.equal('void.x' in out, false)
+})
+
+// ── 审计回归:runner 记账 / dispose / buildSeed 对齐 / drain 收口 ─────────────
+
+test('Given stopReason 非 completed When runSegment Then 全批失败入账且 dispose 被调', async () => {
+  let disposed = 0
+  const plan = fullPlan(['only'])
+  const engine = {
+    start() {
+      return { result: Promise.resolve({ value: null, stopReason: 'error', error: '引擎炸了' }), dispose: async () => { disposed += 1 } }
+    },
+  }
+  const driver = new RunDriver({
+    template: SINGLE, plan, runId: 'r-stop-1', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  // stopReason 分支也须逐 call 记账(否则步骤滞留 running,调度 idle 死循环);
+  // 全批失败重试至上限(maxStepFail=2)后步骤 failed,run 收敛 failed;
+  // 每个批次(首跑+重试)结束都 dispose,无泄漏
+  assert.equal(disposed, 2)
+  assert.notEqual(driver.state.status, 'running')
+  assert.equal(driver.state.steps.only.failCount, 2)
+  assert.equal(driver.state.steps.only.status, 'failed')
+})
+
+test('Given engine.start 同步抛 When runSegment Then run 为空不崩,按引擎异常记账', async () => {
+  const engine = { start() { throw new Error('start 即抛') } }
+  const plan = fullPlan(['only'])
+  const driver = new RunDriver({
+    template: SINGLE, plan, runId: 'r-stop-2', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  assert.notEqual(driver.state.status, 'running')
+})
+
+test('Given 引擎无 dispose(桩缺省) When runSegment Then 不抛(可选链容忍)', async () => {
+  const engine = { start() { return { result: Promise.resolve({ results: [] }) } } }
+  const plan = fullPlan(['only'])
+  const driver = new RunDriver({
+    template: SINGLE, plan, runId: 'r-stop-3', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  const payload = await driver.runSegment()
+  assert.equal(payload.kind, 'terminal')
+})
+
+test('Given 有 controlSeq 与步级 escalateReady 的终态记录 When buildSeed Then 计数归零且逐步清标志', () => {
+  const record = {
+    runId: 'r-old', templateId: 't', request: '需求', inputs: { a: 'x' },
+    plan: { steps: [{ ref: 'only', note: '', done: '' }] },
+    state: {
+      status: 'blocked', controlSeq: 5, escalateLimitReached: true, terminalBlocked: true,
+      steps: { only: { status: 'done', outputs: { o: 'OUT' }, failCount: 0, escalateReady: true } },
+    },
+    controls: [{ seq: 1 }, { seq: 2 }],
+  }
+  const seed = buildSeed(record, record.plan, undefined, undefined)
+  // 续跑生成全新 store 记录(controls 空),沿用旧计数会吞掉新记录前缀消息
+  assert.equal(seed.controlSeq, 0)
+  // escalateReady 是步级标记,顶层清零无效
+  assert.equal(seed.steps.only.escalateReady, false)
+  assert.equal(seed.escalateLimitReached, false)
+})
+
+test('Given pause 期裁决已入队且 waitingApproval 残留 When drain Then 收口(防幽灵 redo)', () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const driver = makeDriver({
+    template: APPROVE_TPL, plan,
+    engineResults: (c) => ({ callId: c.callId, ok: true, outputs: { o: 'A' } }),
+  })
+  driver.startPersist()
+  // 构造残留现场:waitingApproval 指向已收口审批步 + 入队裁决
+  driver.state.status = 'running'
+  driver.state.waitingApproval = 'rev'
+  driver.state.pendingApprovals = [{ stepId: 'rev', verdict: 'REJECTED', comments: '重做' }]
+  driver.drainPendingApprovals()
+  // drain 应用后若残留 waitingApproval,下次 pause+裁决会对非等待步幽灵生效
+  assert.equal(driver.state.waitingApproval, undefined)
+  assert.equal(driver.state.pendingApprovals.length, 0)
 })

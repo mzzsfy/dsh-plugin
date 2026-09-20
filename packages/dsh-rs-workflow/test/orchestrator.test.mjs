@@ -294,6 +294,43 @@ test('Given 跨会话 run When resume_from Then 拒', async () => {
   assert.ok(rf.error.includes('其他会话'))
 })
 
+test('Given 跨会话 runId When verdict/cancel/resume/message Then 一律拒(凭 runId 不可操作他人 run)', async () => {
+  const { start, verdict, cancel, resume, message, exec } = setup()
+  const r0 = await start.execute({ request: 'x', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  const other = { agent: { id: 'agent-other-2' }, signal: { throwIfAborted: () => {}, aborted: false } }
+  const v = await verdict.execute({ runId: r0.runId, verdict: 'approve', reason: '代裁' }, other)
+  assert.equal(v.ok, false)
+  assert.ok(v.error.includes('其他会话'))
+  const c = await cancel.execute({ runId: r0.runId }, other)
+  assert.equal(c.ok, false)
+  const re = await resume.execute({ runId: r0.runId }, other)
+  assert.equal(re.ok, false)
+  const m = await message.execute({ runId: r0.runId, text: '注入' }, other)
+  assert.equal(m.ok, false)
+  // 本会话照常可裁(run 未被跨会话操作污染)
+  const own = await verdict.execute({ runId: r0.runId, verdict: 'approve', reason: '本人代审' }, exec)
+  assert.equal(own.ok, true)
+})
+
+test('Given message 空 text When execute Then 显式报错而非终态误报', async () => {
+  const { start, message, exec } = setup()
+  const r0 = await start.execute({ request: 'x', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  const m = await message.execute({ runId: r0.runId, text: '   ' }, exec)
+  assert.equal(m.ok, false)
+  assert.ok(m.error.includes('text'))
+})
+
+test('Given resume_from inputs 非字符串值 When execute Then 拒', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: 'x', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  await cancel.execute({ runId: r0.runId }, exec)
+  const rf = await resumeFrom.execute({ runId: r0.runId, inputs: { a: 123 } }, exec)
+  assert.equal(rf.ok, false)
+  assert.ok(rf.error.includes('inputs'))
+})
+
 // ── 会话守门(agent/turn-stopping)契约级验证 ─────────────────────────────────
 
 // 发送记录器:捕获守门 steer 的消息文本与来源标记

@@ -21,13 +21,18 @@ export function pendingOf(record, driver) {
   }
   const known = ACTION_OF_STATUS[record.status]
   if (known === undefined) return undefined
-  if (record.status === 'paused' && driver?.awaitingResume !== true) return undefined
+  if (record.status === 'paused' && driver?.awaitingResume !== true) {
+    // paused 且页签未发恢复:裁决已入队的 resume 拉段仍欠——段首生效前欠动作不变
+    if ((record.state?.pendingApprovals?.length ?? 0) > 0) return { need: 'resume', text: '已暂停(待生效裁决)' }
+    return undefined
+  }
   return known
 }
 
 /** 提醒计数闸:按欠动作周期独立计数,超上限返回 false(调用方改记告警,不再 steer) */
 export function createNudgeGate(maxNudge = MAX_NUDGE) {
   const counts = new Map()
+  const warned = new Set()
   return {
     take(runId) {
       const used = counts.get(runId) ?? 0
@@ -37,13 +42,17 @@ export function createNudgeGate(maxNudge = MAX_NUDGE) {
     },
     clear(runId) {
       counts.delete(runId)
+      warned.delete(runId)
     },
     used(runId) {
       return counts.get(runId) ?? 0
     },
-    /** 首次触顶返回 true(供调用方只告警一次,不必自行记状态) */
+    /** 首次触顶返回 true,此后false(告警只一次;clear 重置) */
     exhausted(runId) {
-      return (counts.get(runId) ?? 0) === maxNudge
+      if ((counts.get(runId) ?? 0) < maxNudge) return false
+      if (warned.has(runId)) return false
+      warned.add(runId)
+      return true
     },
   }
 }

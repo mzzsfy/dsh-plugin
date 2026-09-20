@@ -30,6 +30,20 @@ function rejectCrossOrigin(req, res) {
   return true
 }
 
+// Host fence:插件 exact 路由早于宿主 /api 前缀路由命中(webserver exact 优先),
+// 宿主的 DNS-rebinding 防线拦不到本组路由,须自守——Host 须为回环名或本机 IP 字面量
+const TRUSTED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+
+function rejectReboundHost(req, res) {
+  const authority = req.headers ? String(req.headers.host || '') : ''
+  if (authority === '') return false
+  const at = authority.lastIndexOf(':')
+  const hostname = at > authority.lastIndexOf(']') ? authority.slice(0, at) : authority
+  if (TRUSTED_HOSTNAMES.has(hostname.toLowerCase())) return false
+  sendJson(res, 403, { error: 'Host 不受信任(疑似 DNS rebinding)' })
+  return true
+}
+
 function rejectNonJson(req, res) {
   const contentType = req.headers ? String(req.headers['content-type'] || '') : ''
   if (contentType.includes('application/json')) return false
@@ -40,6 +54,7 @@ function rejectNonJson(req, res) {
 function guardedRoute(handler) {
   return async (req, res) => {
     try {
+      if (rejectReboundHost(req, res)) return
       if (req.method !== 'GET' && req.method !== 'POST') {
         sendJson(res, 405, { error: 'method not allowed' })
         return
@@ -67,21 +82,26 @@ guardedRoute.post = (handler) => async (req, res) => {
   return guardedRoute(handler)(req, res)
 }
 
-function readJsonBody(req) {
+function readJsonBody(req, res) {
   return new Promise((resolve, reject) => {
     let size = 0
     const chunks = []
+    let over = false
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > BODY_MAX_BYTES) {
+        // 只暂停流入并标记超限,不销毁 socket:连接毁了 guardedRoute 的 400 就送不出去
+        over = true
+        req.pause()
         reject(new Error('请求体超过上限'))
-        req.destroy()
         return
       }
-      chunks.push(chunk)
+      if (!over) chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks).toString('utf8')) })
+    req.on('error', () => { if (!over) reject(new Error('请求体读取失败')) })
+    // 超限后 end 不再流到(已暂停):挂 res 收尾销毁,防 socket 悬挂
+    res.on('finish', () => req.destroy())
   })
 }
 
@@ -238,11 +258,11 @@ export function registerBoardRoutes(ctx) {
       sendJson(res, 200, run)
     }), 'rsww run detail route')
     route('/api/rsww/control', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       sendJson(res, 200, handleControl(body ?? {}))
     }), 'rsww control route')
     route('/api/rsww/resume-from', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const runId = typeof body.runId === 'string' ? body.runId : ''
       const record = store.get(runId)
       if (!record) throw new Error('运行记录不存在:' + runId)
@@ -255,14 +275,21 @@ export function registerBoardRoutes(ctx) {
       if (fromStepId !== undefined && record.plan?.steps?.some((p) => p.ref === fromStepId) !== true) {
         throw new Error('fromStepId 不在剧本中:' + fromStepId)
       }
-      const inputs = body.inputs && typeof body.inputs === 'object' ? body.inputs : undefined
+      // inputs 须为字符串值对象:数组/嵌套值在种子展开中失真
+      let inputs
+      if (body.inputs !== undefined && body.inputs !== null) {
+        if (typeof body.inputs !== 'object' || Array.isArray(body.inputs) || Object.values(body.inputs).some((v) => typeof v !== 'string')) {
+          throw new Error('inputs 必须为字符串值对象(键→字符串)')
+        }
+        inputs = body.inputs
+      }
       const outcome = start(record, fromStepId, inputs)
       if (!outcome.ok) throw new Error(outcome.error)
       // 纠偏消息不跨 run:旧 run 受理未消费的纠偏不带入种子(controls 属旧 run 审计)
       sendJson(res, 200, { ok: true, runId: outcome.runId, hint: '旧 run 未消费的纠偏消息不带入新 run' })
     }), 'rsww resume-from route')
     route('/api/rsww/run-remove', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const runId = typeof body.runId === 'string' ? body.runId : ''
       const record = store.has(runId) ? store.get(runId) : undefined
       if (record && isRunActive(runId, record)) throw new Error('运行进行中,不可删除')
@@ -292,7 +319,7 @@ export function registerBoardRoutes(ctx) {
       sendJson(res, 200, { spec: SPEC_TEXT })
     }), 'rsww spec route')
     route('/api/rsww/template-save', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       const { parsed, json } = parseTemplateEntry(id, body)
       if (body.dryRun === true) {
@@ -311,14 +338,14 @@ export function registerBoardRoutes(ctx) {
       sendJson(res, 200, { ok: true })
     }), 'rsww template-save route')
     route('/api/rsww/template-remove', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       const outcome = removeTemplateById(id)
       if (!outcome.ok) throw new Error(outcome.error)
       sendJson(res, 200, { ok: true })
     }), 'rsww template-remove route')
     route('/api/rsww/release', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       const entries = readTemplates()
       const entry = entries.find((t) => t.id === id)
@@ -334,7 +361,7 @@ export function registerBoardRoutes(ctx) {
       sendJson(res, 200, { ok: true, outcome })
     }), 'rsww release route')
     route('/api/rsww/unrelease', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
       const outcome = unreleaseFlowTemplate(id)
       sendJson(res, 200, { ok: true, outcome })
@@ -343,7 +370,7 @@ export function registerBoardRoutes(ctx) {
       sendJson(res, 200, { config: normalizeConfig(loadJson('config.json', undefined)) })
     }), 'rsww config route')
     route('/api/rsww/config-save', guardedRoute.post(async (req, res) => {
-      const body = JSON.parse(await readJsonBody(req))
+      const body = JSON.parse(await readJsonBody(req, res))
       const patch = configSavePatch(body ?? {})
       const current = normalizeConfig(loadJson('config.json', undefined))
       // config.json 权威节集 = slots/budgets(data-design);templates 属 templates.json 独立存储

@@ -1,7 +1,7 @@
 // run-store(v5):每 run 全量 JSON + index.json 索引;LRU 容量收敛;零截断
 // namespace 子目录 v5/(旧数据物理隔离);record 增 plan/warnings/controls[].by(见 data-design.md)
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export const KEEP_RUNS = 200
@@ -31,9 +31,14 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
   const warn = (message) => logger.warn?.(`[rsww-store] ${message}`)
 
   const writeAtomic = (path, text) => {
-    const tmp = join(tmpdir(), `rsww-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-    writeFileSync(tmp, text, 'utf8')
-    renameSync(tmp, path)
+    // 临时文件落目标同目录:跨卷 tmpdir rename 触发 EXDEV;同盘保证原子性
+    const tmp = `${path}.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`
+    try {
+      writeFileSync(tmp, text, 'utf8')
+      renameSync(tmp, path)
+    } finally {
+      rmSync(tmp, { force: true })
+    }
   }
 
   const persistRun = (record) => writeAtomic(join(runsDir, `${record.runId}.json`), JSON.stringify(record, null, 2))
@@ -101,13 +106,17 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
         warn(`运行记录 ${name} 读取失败,跳过:${e.message}`)
       }
     }
-    // 对账:runs/ 文件集合为权威修齐 index(缺行补、幽灵行删、收敛改写行落盘),仅内存修正
+    // 对账:runs/ 文件集合为权威修齐 index(缺行补、幽灵行删、已存行内容刷新),仅内存修正
     let repaired = settledCount > 0
     const fileIds = new Set(records.keys())
     for (const record of records.values()) {
-      if (!index.some((e) => e.runId === record.runId)) {
+      const entry = index.find((e) => e.runId === record.runId)
+      if (entry === undefined) {
         index.push(indexEntryOf(record))
         repaired = true
+      } else {
+        // finish 先写 run 文件后写 index,中断会留旧行;以文件记录刷新,消除失真窗口
+        Object.assign(entry, indexEntryOf(record))
       }
     }
     for (let i = index.length - 1; i >= 0; i--) {
@@ -154,9 +163,18 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
         state: state ?? emptyState(), controls: [], stepsTrace: {}, queued: [],
       }
       records.set(id, record)
-      index.unshift(indexEntryOf(record))
-      persistRun(record)
-      persistIndex()
+      const entry = indexEntryOf(record)
+      index.unshift(entry)
+      try {
+        persistRun(record)
+        persistIndex()
+      } catch (e) {
+        // 落盘失败须回滚内存,否则同 id 重试恒撞"runId 已存在"且列表含幽灵行
+        records.delete(id)
+        const at = index.indexOf(entry)
+        if (at >= 0) index.splice(at, 1)
+        throw e
+      }
       evictOverCapacity()
       return record
     },

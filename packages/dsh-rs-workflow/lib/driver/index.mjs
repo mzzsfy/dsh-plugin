@@ -1,5 +1,7 @@
 // RunDriver 聚合(v5):剧本驱动;runSegment 分段推进(审批到达/暂停/终态即返回 settle 负载);
 // 外部裁决回写(waiting_approval 即时应用,paused 入队 resume 生效);取消优先;推进责任在主循环 resume
+import { readFileSync } from 'node:fs'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { reportStore } from '../store.mjs'
 import { templateDeps } from '../planner-gate.mjs'
 import { nextBatch, scriptViewOf } from './scheduler.mjs'
@@ -88,11 +90,13 @@ export function buildSeed(record, plan, fromStepId, inputs) {
     }
   }
   state.pendingApprovals = []
-  // 终态污染标志清零:续跑后旧账不得再次收口(blocked)或无耗尽即派发升级步
+  // 终态污染标志清零:续跑后旧账不得再次收口(blocked)或无耗尽即派发升级步;
+  // escalateReady 是步级标记(scheduler 消费),须逐步清零
   state.terminalBlocked = false
-  state.escalateReady = []
   state.escalateLimitReached = false
-  state.controlSeq = record.controls?.length ?? 0
+  for (const s of Object.values(state.steps)) s.escalateReady = false
+  // 控制序号对齐新记录:续跑生成全新 store 记录(controls 从空起),沿用旧计数会吞掉新记录前缀消息
+  state.controlSeq = 0
   return state
 }
 
@@ -123,27 +127,46 @@ export class RunDriver {
     this.subordinate = subordinate
     // 编排子代理的挂载父 agent(与 workflow 工具链对齐;undefined 时引擎派发行为未定义)
     this.parent = parent
+    // spec §8 doc:<相对路径>:读会话工作区文件,缺失不阻断(空串);resolve 限定在 workspace 内防路径逃逸
+    const base = resolve(workspace || process.cwd())
+    this.readDoc = (rel) => {
+      const target = resolve(base, rel)
+      if (!target.startsWith(base + sep) && target !== base) return ''
+      try { return readFileSync(target, 'utf8') } catch { return '' }
+    }
   }
 
   // 段推进唯一入口:跑到下一个段边界(审批到达/暂停/终态)返回 settle 负载;orchestrator 包装为 continuable job
   async runSegment() {
+    // 重入防护:在飞段由 settlePromise 承载(取消方 await 它收敛,而非重入第二个 loop)
+    if (this.active) return this.settlePromise ?? this.terminalPayload()
     if (this.finished || TERMINAL_STATES.has(this.state.status)) {
       return this.terminalPayload()
     }
     this.active = true
-    try {
-      this.drainPendingApprovals()
-      return await this.loop()
-    } catch (e) {
-      if (this.signal.aborted) {
-        this.finish('cancelled', CANCELLED_SUMMARY)
+    this.settlePromise = (async () => {
+      try {
+        this.drainPendingApprovals()
+        return await this.loop()
+      } catch (e) {
+        if (this.signal.aborted) {
+          this.finish('cancelled', CANCELLED_SUMMARY)
+          return this.terminalPayload()
+        }
+        this.finish('failed', `驱动器异常:${e?.message ?? e}`)
         return this.terminalPayload()
+      } finally {
+        this.active = false
+        this.settlePromise = undefined
       }
-      this.finish('failed', `驱动器异常:${e?.message ?? e}`)
-      return this.terminalPayload()
-    } finally {
-      this.active = false
-    }
+    })()
+    return this.settlePromise
+  }
+
+  /** 取消并等待在飞段收敛(无在飞段时即时收敛) */
+  async cancelAndSettle() {
+    this.cancel()
+    if (this.settlePromise !== undefined) await this.settlePromise.catch(() => {})
   }
 
   startPersist() {
@@ -245,6 +268,8 @@ export class RunDriver {
         this.state.redoInfo = { [route.redoTarget]: { comments: route.comments, prevOutputs: route.prevOutputs } }
       }
     }
+    // 与 waiting 直裁路径同款收口:残留 waitingApproval 会让后续 pause 期裁决对非等待步幽灵生效
+    this.state.waitingApproval = undefined
     this.store.update({ runId: this.runId, waiting: null })
   }
 
@@ -268,6 +293,9 @@ export class RunDriver {
   }
 
   persistState() {
+    // 嵌套子流程与父共享同 runId 记录:子状态落盘会覆盖父的全局 state,崩溃后续跑种子即失真;
+    // 子流程中间态不落盘,flow 步结束后由父 persistState 兜底
+    if (this.subordinate) return
     this.store.update({ runId: this.runId, state: this.state, status: this.state.status })
   }
 
@@ -345,8 +373,10 @@ export class RunDriver {
         const step = batch.step
         this.state.status = 'waiting_approval'
         this.state.waitingApproval = step.id
+        // 模板代审口径落 state:进程重启后 status 工具仍可透出
+        this.state.waitingAutoApprove = this.template?.autoApprove === true
         this.persistState()
-        const payload = waitingPayload({ runId: this.runId, state: this.state, script: this.script, planStepOf: this.planStepOf, approveStep: step })
+        const payload = waitingPayload({ runId: this.runId, state: this.state, script: this.script, planStepOf: this.planStepOf, approveStep: step, autoApprove: this.template?.autoApprove === true })
         // 待裁决摘要落盘:页签 /run 路由据此渲染审批上下文
         this.store.update({ runId: this.runId, waiting: payload.waiting })
         return payload

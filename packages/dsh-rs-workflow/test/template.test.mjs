@@ -329,6 +329,25 @@ test('Given 集合嵌套深度超 3 When validateTemplateSet Then 深度错误',
   assert.ok(hasMsg(errors, '嵌套深度'))
 })
 
+test('Given 菱形引用(两模板汇流同一子流程) When validateTemplateSet Then 不误报环', () => {
+  const mk = (id, flows) => ({
+    id, label: id, description: '测试模板说明',
+    steps: flows.map((flow, i) => ({ id: `run${i + 1}`, type: 'flow', flow })),
+  })
+  const mini = { id: 'mini', label: 'mini', description: '无审批子流程', steps: [{ id: 's1', prompt: 'p', outputs: { o: 'o' } }] }
+  // entry→(a,b);a→mini;b→mini:合法菱形 DAG(深 2),旧实现把第二路径重访误判为深度 Infinity
+  const errors = validateTemplateSet([
+    mk('entry', ['a', 'b']), mk('a', ['mini']), mk('b', ['mini']), mini,
+  ])
+  assert.deepEqual(errors, [])
+})
+
+test('Given 真环 When validateTemplateSet Then 仍拒绝(回溯不放过环)', () => {
+  const mk = (id, flow) => ({ id, label: id, description: '测试模板说明', steps: [{ id: 'run', type: 'flow', flow }] })
+  const errors = validateTemplateSet([mk('a', 'b'), mk('b', 'a')])
+  assert.ok(hasMsg(errors, '嵌套深度'))
+})
+
 test('Given 集合含损坏成员 When validateTemplateSet Then 其余成员照常校验(跳过不阻塞)', () => {
   const broken = { id: 'BROKEN', label: '坏' }
   const errors = validateTemplateSet([broken, structuredClone(LITE_TPL)])
