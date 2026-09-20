@@ -455,6 +455,23 @@ test('Given paused When tabResume+裁决入队 When resume 段首 Then 裁决生
   assert.equal(driver.state.status, 'completed')
 })
 
+test('Given 已标记恢复意图 When 再次 pause Then 撤销恢复意图(防陈旧标记催 resume)', async () => {
+  const plan = fullPlan(['a', 'down', 'rev', 'esc'])
+  const driver = makeDriver({
+    template: APPROVE_TPL, plan,
+    engineResults: (c) => ({ callId: c.callId, ok: true, outputs: { o: 'A' } }),
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  driver.pause()
+  driver.tabResume()
+  assert.equal(driver.awaitingResume, true)
+  // 用户改主意再暂停:恢复意图必须被撤销,否则守门按陈旧标记持续判欠 resume
+  driver.pause()
+  assert.equal(driver.state.status, 'paused')
+  assert.equal(driver.awaitingResume, false)
+})
+
 test('Given waiting_approval(无活跃段) When cancel Then 即时终态 cancelled', () => {
   const plan = fullPlan(['a', 'down', 'rev', 'esc'])
   const driver = makeDriver({ template: APPROVE_TPL, plan, engineResults: () => ({ callId: 'x', ok: true, outputs: {} }) })

@@ -159,6 +159,8 @@ export class RunDriver {
     if (this.finished || TERMINAL_STATES.has(this.state.status)) return
     // 统一转 paused(与 waiting_approval 互斥,paused 优先);活跃段在飞批次收敛后于段顶 settle
     this.state.status = 'paused'
+    // 暂停即撤销先前的恢复意图,否则陈旧标记会让守门持续催 resume
+    this.awaitingResume = false
     this.persistState()
   }
 

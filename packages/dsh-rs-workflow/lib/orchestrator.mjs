@@ -1,6 +1,7 @@
 // orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message/resume_from/verdict 七工具
 // 编排以分段 continuable job 推进:每段 = jobs.start 包装 driver.runSegment,settle 负载经 tool-jobs
 // 完成通知唤醒主循环;推进责任唯一在 rs_workflow_resume(页签 control 仅清 paused/裁决)
+// 另有会话守门:轮次将停时(agent/turn-stopping)判定欠动作并 steer 拉回,防弱模型提前退出
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { gate } from './planner-gate.mjs'
 import { validateTemplate } from './template.mjs'
@@ -9,6 +10,7 @@ import { registry, registerInitiator, unregisterInitiator, registerResumer } fro
 import { reportStore } from './store.mjs'
 import { loadJson } from './storage.mjs'
 import { normalizeConfig } from './settings-schema.mjs'
+import { pendingOf, createNudgeGate, nudgeText } from './guard.mjs'
 
 const MAX_REJECTS = 3
 const SEGMENT_KIND = 'rsww-segment'
@@ -34,27 +36,26 @@ export function registerOrchestrator(ctx, config) {
   const rejectCounts = new Map()
   const activeRuns = new Map()
 
+  // 会话现役 run:同会话同一时刻至多一个未终态 run(守门与工具同源,故在 inject 外共享)
+  const agentIdOf = (agent) => String(agent?.id ?? '')
+  const currentRunId = (agent) => {
+    const runId = activeRuns.get(agentIdOf(agent))
+    if (runId === undefined) return undefined
+    // run 可能已被页签删除:get 抛异常须自愈清位,不能让编排入口变砖
+    let record
+    try { record = reportStore().get(runId) } catch { record = undefined }
+    if (record === undefined || record.finishedAt !== undefined) {
+      activeRuns.delete(agentIdOf(agent))
+      return undefined
+    }
+    return runId
+  }
+
   const registered = ctx.inject(['tools', 'workflowEngine', 'jobs'], (tctx) => {
     const engine = tctx.workflowEngine
     const jobs = tctx.jobs
 
     const configOf = () => normalizeConfig(loadJson('config.json', undefined))
-
-    const agentIdOf = (agent) => String(agent?.id ?? '')
-
-    // 会话现役 run:同会话同一时刻至多一个未终态 run
-    const currentRunId = (agent) => {
-      const runId = activeRuns.get(agentIdOf(agent))
-      if (runId === undefined) return undefined
-      // run 可能已被页签删除:get 抛异常须自愈清位,不能让编排入口变砖
-      let record
-      try { record = reportStore().get(runId) } catch { record = undefined }
-      if (record === undefined || record.finishedAt !== undefined) {
-        activeRuns.delete(agentIdOf(agent))
-        return undefined
-      }
-      return runId
-    }
 
     // 段 job:jobs.start 包装 runSegment;settle 负载进 output,经 tool-jobs 完成通知唤醒主循环
     function startSegmentJob(agent, driver) {
@@ -424,5 +425,48 @@ export function registerOrchestrator(ctx, config) {
     // run 终态 finishRun/unregisterInitiator 与 cancel 的 finishRun 清 activeRuns;行销毁后的
     // stale initiator 表项在下次 start 受理时被覆盖,不产生跨会话续跑。
   })
+  registerTurnGuard(ctx, { currentRunId })
   return { rejectCounts, activeRuns }
+}
+
+// 会话守门注册:轮次将停时判定欠动作并 steer 拉回(宿主机器重读 inbox,有 steering 即续跑一步)。
+// 消息构造依赖宿主 llm 包,缺失即降级不守门(规约条款 1:编排能力不得被增强功能拖垮)。
+function registerTurnGuard(ctx, { currentRunId }) {
+  // 事件面缺失的上下文(旧宿主 / 精简组合)不注册守门——编排本身照常可用
+  if (typeof ctx.on !== 'function') return
+  const nudgeGate = createNudgeGate()
+  let createUserMessage
+  ctx.on('agent/turn-stopping', async ({ agent }) => {
+    const runId = currentRunId(agent)
+    if (runId === undefined) { return }
+    let record
+    try { record = reportStore().get(runId) } catch { return }
+    const pending = pendingOf(record, registry.drivers.get(runId))
+    if (pending === undefined) {
+      // 无欠动作(段在飞/终态):清计数并回收,防跨 run 累积
+      nudgeGate.clear(runId)
+      return
+    }
+    if (createUserMessage === undefined) {
+      // 消息构造器来自宿主 llm 包:解析失败即降级不守门,但须留痕(否则守门静默消失无从诊断)
+      try { ({ createUserMessage } = await import('@deepseek-ai/dsh-llm')) } catch (e) {
+        ctx.logger?.warn?.(`[rsww-guard] 消息构造器不可用,守门降级:${e?.message ?? e}`)
+        return
+      }
+    }
+    if (!nudgeGate.take(runId)) {
+      // 提醒额度耗尽仍未处置:留痕供诊断,不再 steer(防烧 token 死循环)
+      if (nudgeGate.exhausted(runId)) ctx.logger?.warn?.(`[rsww-guard] ${runId} 提醒已达上限仍未处置(欠${pending.need}),停止守门`)
+      return
+    }
+    try {
+      agent.steer(createUserMessage({
+        content: [{ type: 'text', text: nudgeText(runId, pending) }],
+        source: { kind: 'plugin', plugin: 'rs-workflow' },
+      }))
+    } catch (e) {
+      // 轮次已中止 / agent 已停:守门无从施加,不影响编排本体
+      ctx.logger?.warn?.(`[rsww-guard] ${runId} 守门提醒投递失败:${e?.message ?? e}`)
+    }
+  })
 }
