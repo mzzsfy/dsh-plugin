@@ -482,6 +482,84 @@ test('历史输入路由:产物未变的会话跨对齐零解压(磁盘 extracts
   })
 })
 
+test('历史输入路由:旧版本提取缓存自动重解压(命令历史自愈)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-ver-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { stat } = await import('node:fs/promises')
+      const info = await stat(artifactPath)
+      await ensureCacheDir(cacheDir)
+      // 预置旧版本提取器写下的缓存:指纹与产物一致但条目缺命令输入(无 v 字段)
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '旧输入', at: 100, sid: 's1' }],
+        extracts: {
+          s1: { mtimeMs: info.mtimeMs, size: info.size, entries: [{ text: '旧输入', at: 100 }] },
+        },
+      })
+      const commandEvent = {
+        type: 'command/run',
+        seq: 2,
+        time: 200,
+        data: { commandId: 'c1', name: 'goal', args: ' 收尾', source: { kind: 'user' } },
+      }
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('旧输入', 100), commandEvent] },
+      })
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '/goal 收尾'))
+      assert.ok(readCounts.get('s1') >= 1, '版本不符触发重解压')
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['/goal 收尾', '旧输入'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:session 范围版本不符判 stale,聚焦对齐首请求内补齐', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-ver2-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { stat } = await import('node:fs/promises')
+      const info = await stat(artifactPath)
+      await ensureCacheDir(cacheDir)
+      // 预置旧版本缓存:指纹与产物一致(不改条目则指纹校验判新鲜)但缺 v 字段
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '旧输入', at: 100, sid: 's1' }],
+        extracts: {
+          s1: { mtimeMs: info.mtimeMs, size: info.size, entries: [{ text: '旧输入', at: 100 }] },
+        },
+      })
+      const commandEvent = {
+        type: 'command/run',
+        seq: 2,
+        time: 200,
+        data: { commandId: 'c1', name: 'goal', args: ' 收尾', source: { kind: 'user' } },
+      }
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('旧输入', 100), commandEvent] },
+      })
+      // 首请求即 aligned:true 且含命令条目——版本不符走聚焦对齐,单次请求内补齐
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '/goal 收尾'))
+      assert.equal(res.body.aligned, true, '聚焦对齐快于等待时限,首请求即就绪')
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['/goal 收尾', '旧输入'])
+      assert.ok(readCounts.get('s1') >= 1, '版本不符触发聚焦重解压')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 // ── 历史输入路由:窗口与 subagent 排除 ──
 
 test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老会话不解压', skipMissingDeps, async () => {

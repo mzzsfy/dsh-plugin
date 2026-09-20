@@ -59,6 +59,56 @@ test('历史输入提取:多 text block 按行拼接为单条', () => {
   assert.deepEqual(extractUserInputs(events), [{ text: '第一段\n第二段', at: 300 }])
 })
 
+// ── 历史输入:斜杠命令提取(command/run)──
+
+test('历史输入提取:command/run 重组为完整命令行,args 为命令名后 verbatim rawInput', () => {
+  const events = [{
+    type: 'command/run',
+    seq: 2,
+    time: 600,
+    data: { commandId: 'c1', name: 'goal', args: ' 完成目标文档', source: { kind: 'user' } },
+  }]
+  assert.deepEqual(extractUserInputs(events), [{ text: '/goal 完成目标文档', at: 600 }])
+})
+
+test('历史输入提取:command/run 无 args(recordInput: false)产出裸命令名', () => {
+  const events = [{
+    type: 'command/run',
+    seq: 2,
+    time: 600,
+    data: { commandId: 'c1', name: 'think', source: { kind: 'user' } },
+  }]
+  assert.deepEqual(extractUserInputs(events), [{ text: '/think', at: 600 }])
+})
+
+test('历史输入提取:非用户来源的 command/run 不产出', () => {
+  const events = [{
+    type: 'command/run',
+    seq: 2,
+    time: 600,
+    data: { commandId: 'c1', name: 'goal', args: ' x', source: { kind: 'agent' } },
+  }]
+  assert.deepEqual(extractUserInputs(events), [])
+})
+
+test('历史输入提取:畸形 command/run(data 缺失/name 空串/args 非字符串)安全跳过或归一', () => {
+  const noData = { type: 'command/run', seq: 1, time: 100 }
+  const emptyName = { type: 'command/run', seq: 2, time: 200, data: { commandId: 'c1', name: '', source: { kind: 'user' } } }
+  const nonStringArgs = { type: 'command/run', seq: 3, time: 300, data: { commandId: 'c1', name: 'goal', args: 42, source: { kind: 'user' } } }
+  assert.deepEqual(extractUserInputs([noData, emptyName, nonStringArgs]), [{ text: '/goal', at: 300 }])
+})
+
+test('历史输入提取:普通输入与命令混合按事件序全部产出', () => {
+  const events = [
+    userEvent(null, '先看看日志', 100),
+    { type: 'command/run', seq: 2, time: 200, data: { commandId: 'c1', name: 'goal', args: ' 收尾', source: { kind: 'user' } } },
+  ]
+  assert.deepEqual(extractUserInputs(events), [
+    { text: '先看看日志', at: 100 },
+    { text: '/goal 收尾', at: 200 },
+  ])
+})
+
 // ── 历史输入:聚合(G4-G5)──
 
 test('历史输入聚合:同文本去重保留最新时间,按时间倒序', () => {

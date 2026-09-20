@@ -19,6 +19,7 @@ import {
   HISTORY_FOCUS_WAIT_MS,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
+  HISTORY_EXTRACT_VERSION,
   HISTORY_PROMPTS_MAX,
   HISTORY_SCOPES,
   HISTORY_SESSION_SCAN_LIMIT,
@@ -179,16 +180,18 @@ export function apply(ctx, config) {
   }
 
   // 单会话提取:产物 stat 指纹与缓存一致即复用(零解压);否则解压并更新缓存。
-  // 运行中会话走内存指纹(runtimeExtracts),其余走磁盘 extracts
+  // 运行中会话走内存指纹(runtimeExtracts),其余走磁盘 extracts。
+  // 指纹之外校验提取器版本:版本不符即重解压(升级后旧条目自动补齐新格式)
   async function extractSession(recordItem, fingerprint, extracts, isRunning) {
     const sessionId = recordItem.header.id
     const known = isRunning ? runtimeExtracts.get(sessionId) : extracts[sessionId]
-    if (fingerprint !== null && known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size) {
+    if (fingerprint !== null && known && known.v === HISTORY_EXTRACT_VERSION
+      && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size) {
       return known.entries
     }
     const snapshot = await ctx.sessionQuery.readSession(sessionId)
     const entries = extractUserInputs(snapshot.events)
-    const record = { mtimeMs: fingerprint === null ? 0 : fingerprint.mtimeMs, size: fingerprint === null ? 0 : fingerprint.size, entries }
+    const record = { v: HISTORY_EXTRACT_VERSION, mtimeMs: fingerprint === null ? 0 : fingerprint.mtimeMs, size: fingerprint === null ? 0 : fingerprint.size, entries }
     if (isRunning) runtimeExtracts.set(sessionId, record)
     else if (fingerprint !== null) extracts[sessionId] = record
     return entries
@@ -342,9 +345,10 @@ export function apply(ctx, config) {
         }
       }
       // 实时追加:产物 stat 与已知指纹不一致 = 会话有新输入未入缓存——聚焦对齐
-      // 只解该会话并写回。路由有界等待本次对齐(首条 <3s 预算):正常会话单次
-      // 请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,后续
-      // 轮询流式补齐。巨产物跳过聚焦(解压耗时与内存峰值失控),维持 aligned=true
+      // 只解该会话并写回。提取器版本不符同判 stale(升级后旧格式条目在首请求
+      // 内经聚焦对齐补齐,不等后台批量)。路由有界等待本次对齐(首条 <3s 预算):
+      // 正常会话单次请求内直接拿到新数据;超时(巨产物等)返回既有数据 aligned=false,
+      // 后续轮询流式补齐。巨产物跳过聚焦(解压耗时与内存峰值失控),维持 aligned=true
       const check = async (cached) => {
         const agents = ctx.get('agents')
         const running = isSessionRunning({ agents, sessionId })
@@ -352,7 +356,7 @@ export function apply(ctx, config) {
         const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
         const fingerprint = located ? await safeStat(located.path) : null
         return {
-          stale: fingerprint !== null && !(known && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
+          stale: fingerprint !== null && !(known && known.v === HISTORY_EXTRACT_VERSION && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
           oversize: fingerprint !== null && fingerprint.size > maxArtifactBytes,
         }
       }
