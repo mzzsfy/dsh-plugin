@@ -35,6 +35,13 @@ const PATH_EXECUTABLES = {
   bash: 'bash.exe',
 }
 
+// MSYS2 默认安装锚点:真实 bash.exe 优先。msys2.exe(Cygwin 控制台启动器)
+// 在管道 stdio 下 exit 0 且零输出——命令静默失败,任何情形不得进入候选
+const MSYS2_ANCHORS = [
+  'C:\\msys64\\usr\\bin\\bash.exe',
+  'C:\\msys64\\bin\\bash.exe',
+]
+
 /**
  * 一个 kind 的候选路径,按解析顺序。显式参数化(env)保证纯函数性。
  * @param {string} kind pwsh|bash|cmd|wsl
@@ -50,13 +57,21 @@ export function candidatePaths(kind, env) {
     .split(PATH_SEP)
     .map((entry) => entry.trim().replace(/^"|"$/g, ''))
     .filter((entry) => entry.length > 0)
+  // bash 的 PATH 探测排除 SystemRoot 下条目:System32\bash.exe 是 WSL forwarder,
+  // 误命中会让 git-bash 客户端实际跑 WSL bash(方言/路径全变)。
+  // 斜杠形态归一后比较,正斜杠 PATH 条目(手动配置)同样命中
+  const systemRoot = String(env.SystemRoot ?? 'C:\\WINDOWS').toLowerCase().replace(/\//g, '\\')
+  const pathEntriesForKind = (kind) => (kind === 'bash'
+    ? pathEntries.filter((entry) => !entry.toLowerCase().replace(/\//g, '\\').startsWith(`${systemRoot}\\`))
+    : pathEntries)
   const candidates = []
   for (const relative of PF_RELATIVE[kind] ?? []) candidates.push([programFiles, ...relative].join('\\'))
   for (const relative of PF_X86_RELATIVE[kind] ?? []) candidates.push([programFilesX86, ...relative].join('\\'))
   for (const relative of LAD_RELATIVE[kind] ?? []) {
     if (localAppData.length > 0) candidates.push([localAppData, ...relative].join('\\'))
   }
-  for (const entry of pathEntries) {
+  if (kind === 'bash') candidates.push(...MSYS2_ANCHORS)
+  for (const entry of pathEntriesForKind(kind)) {
     const executable = PATH_EXECUTABLES[kind]
     if (executable !== undefined) candidates.push(`${entry}\\${executable}`)
   }

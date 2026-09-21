@@ -19,6 +19,11 @@ const ENV = {
   PATH: 'C:\\one;C:\\two ;"C:\\three"',
 }
 
+const ENV_WITH_SYSTEM32_PATH = {
+  ...ENV,
+  PATH: 'C:\\WINDOWS\\System32;C:\\one',
+}
+
 test('pwsh 候选顺序:PowerShell 7 → PATH 各项 → System32 5.1', () => {
   const candidates = candidatePaths('pwsh', ENV)
   assert.deepEqual(candidates, [
@@ -30,16 +35,52 @@ test('pwsh 候选顺序:PowerShell 7 → PATH 各项 → System32 5.1', () => {
   ])
 })
 
-test('bash 候选顺序:Git 三常见位置 → PATH', () => {
+test('bash 候选顺序:Git 三常见位置 → msys2 真实 bash → PATH', () => {
   const candidates = candidatePaths('bash', ENV)
   assert.deepEqual(candidates, [
     'C:\\PF\\Git\\bin\\bash.exe',
     'C:\\PF86\\Git\\bin\\bash.exe',
     'C:\\LAD\\Programs\\Git\\bin\\bash.exe',
+    'C:\\msys64\\usr\\bin\\bash.exe',
+    'C:\\msys64\\bin\\bash.exe',
     'C:\\one\\bash.exe',
     'C:\\two\\bash.exe',
     'C:\\three\\bash.exe',
   ])
+})
+
+test('bash 候选排除 SystemRoot 下的 PATH 条目(WSL forwarder)', () => {
+  const candidates = candidatePaths('bash', ENV_WITH_SYSTEM32_PATH)
+  assert.deepEqual(candidates, [
+    'C:\\PF\\Git\\bin\\bash.exe',
+    'C:\\PF86\\Git\\bin\\bash.exe',
+    'C:\\LAD\\Programs\\Git\\bin\\bash.exe',
+    'C:\\msys64\\usr\\bin\\bash.exe',
+    'C:\\msys64\\bin\\bash.exe',
+    'C:\\one\\bash.exe',
+  ])
+})
+
+test('bash 候选排除 SystemRoot 下的正斜杠 PATH 条目', () => {
+  const env = { ...ENV, PATH: 'C:/WINDOWS/System32;C:\\one' }
+  const candidates = candidatePaths('bash', env)
+  assert.ok(!candidates.some((candidate) => candidate.toLowerCase().startsWith('c:\\windows')))
+  assert.ok(candidates.includes('C:\\one\\bash.exe'))
+})
+
+test('LocalAppData 缺省:LAD 锚位跳过,其余候选不受影响', () => {
+  const env = { ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LocalAppData: '', PATH: '' }
+  const candidates = candidatePaths('bash', env)
+  assert.ok(!candidates.some((candidate) => candidate.startsWith('\\\\')), 'LocalAppData 为空不得产出空根拼接候选')
+  assert.ok(!candidates.some((candidate) => candidate.startsWith('undefined')))
+  assert.ok(candidates.includes('C:\\PF\\Git\\bin\\bash.exe'))
+  assert.ok(candidates.includes('C:\\msys64\\usr\\bin\\bash.exe'))
+})
+
+test('bash 候选永不含 msys2.exe 启动器(管道下静默失败)', () => {
+  for (const candidate of candidatePaths('bash', ENV)) {
+    assert.ok(!candidate.toLowerCase().includes('msys2.exe'), candidate)
+  }
 })
 
 test('cmd/wsl 候选:仅 System32 单点', () => {
