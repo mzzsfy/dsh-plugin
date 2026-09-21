@@ -35,6 +35,29 @@ test('bash argv:-c 直传', () => {
   ])
 })
 
+test('bash argv:login 条目走 -lc 登录壳(profile 注入 PATH)', () => {
+  assert.deepEqual(buildArgv({ kind: 'bash', path: 'C:\\msys64\\usr\\bin\\bash.exe', login: true }, 'uname -a'), [
+    'C:\\msys64\\usr\\bin\\bash.exe', '-lc', 'uname -a',
+  ])
+})
+
+test('bash argv:login=false 与缺省等价(-c)', () => {
+  assert.deepEqual(buildArgv({ kind: 'bash', path: 'C:\\b.exe', login: false }, 'x'), ['C:\\b.exe', '-c', 'x'])
+})
+
+test('login 显式配置与自定义 args 模板互斥时模板优先', () => {
+  assert.deepEqual(buildArgv({ kind: 'bash', path: 'C:\\b.exe', login: true, args: ['-x'] }, 'hi'), ['C:\\b.exe', '-x', 'hi'])
+})
+
+test('schema 往返:login 布尔保留,旧配置缺省落 false', () => {
+  const applied = Config({ shells: [
+    { id: 'm', name: 'MSYS2', kind: 'bash', path: 'C:\\msys64\\usr\\bin\\bash.exe', login: true },
+    { id: 'g', name: 'Git Bash', kind: 'bash', path: '' },
+  ], default: 'm' })
+  assert.equal(applied.shells[0].login, true)
+  assert.equal(applied.shells[1].login, false)
+})
+
 test('cmd argv:/d /s /c 忽略 AutoRun', () => {
   assert.deepEqual(buildArgv({ kind: 'cmd', path: 'C:\\S32\\cmd.exe' }, 'dir'), [
     'C:\\S32\\cmd.exe', '/d', '/s', '/c', 'dir',

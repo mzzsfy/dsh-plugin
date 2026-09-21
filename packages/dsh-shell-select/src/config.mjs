@@ -33,6 +33,9 @@ const shellEntry = z.object({
   kind: z.union(KINDS).required(),
   path: z.string().default(RESOLVED_AUTO),
   args: z.array(z.string()).default([]),
+  login: z.boolean().default(false),
+  distro: z.string().default(''),
+  env: z.dict(z.string()).default({}),
 })
 
 export const Config = z.object({
@@ -96,9 +99,16 @@ export function buildArgv(entry, command) {
   }
   switch (entry.kind) {
     case 'pwsh': return [entry.path, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', PWSH_ENCODING_PREAMBLE + command]
-    case 'bash': return [entry.path, '-c', command]
+    // login:登录壳 source /etc/profile,把 /usr/bin 与 /mingw64/bin 注入 PATH
+    // (msys2 无此形态时 tr/sed/gcc 类工具 command not found);默认保持 -c:
+    // 官方 dsh-bash-local 同构,且不读 profile,输出无用户脚本副作用
+    case 'bash': return [entry.path, ...(entry.login === true ? ['-lc'] : ['-c']), command]
     case 'cmd': return [entry.path, '/d', '/s', '/c', command]
-    case 'wsl': return [entry.path, '--exec', 'bash', '-c', command]
+    // distro:发行版选择仅默认形生效;args 模板条目全权接管 argv,模板分支优先
+    case 'wsl': {
+      const distroPrefix = entry.distro ? ['-d', entry.distro] : []
+      return [entry.path, ...distroPrefix, '--exec', 'bash', '-c', command]
+    }
     default: throw new Error(`shell-select: unknown kind ${JSON.stringify(entry.kind)}`)
   }
 }
