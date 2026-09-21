@@ -27,3 +27,33 @@ test('settings.section 注册与 id', () => {
   assert.match(source, /settings\.section/)
   assert.match(source, /id: 'shell-select'/)
 })
+
+test('tool.call.toolview 注册:shell 族三 key + priority -1', () => {
+  assert.match(source, /'tool\.call\.toolview'/)
+  assert.match(source, /const TOOLVIEW_KEYS = \['shell', 'pwsh', 'bash'\]/)
+  assert.match(source, /key: toolKey, priority: -1/)
+})
+
+test('卡片数据链:官方同构派生(argsRaw + content 尾部退出标记)+ generic 回退', () => {
+  assert.match(source, /parseExitTail/)
+  assert.ok(source.includes("[exit code: ("), '缺少 exit 尾标解析')
+  assert.match(source, /kind: 'generic'/)
+})
+
+test('primitives 缺席时图标降级自绘(require 有 try/catch 兜底)', () => {
+  assert.match(source, /require\('@deepseek-ai\/dsh-client-ui-primitives'\)/)
+  assert.match(source, /catch \{\s*return null\s*\}/)
+})
+
+test('扩展字段守卫:login/distro/env 进设置页数据链(wholesale replace 防静默重置)', () => {
+  // toSection(保存)与 toEntries(加载)必须同时携带 login/distro;
+  // env 走 envText(K=V 每行)编辑态往返:保存侧 parseEnvText,加载侧 envText
+  for (const field of ['login', 'distro']) {
+    const writes = (source.match(new RegExp(`^\\s*${field}: .*$`, 'gm')) ?? []).length
+    assert.ok(writes >= 2, `toSection/toEntries 应各携带 ${field}(发现 ${writes} 处)`)
+  }
+  assert.match(source, /env: parseEnvText\(entry\.envText\)/)
+  assert.match(source, /envText: Object\.entries\(entry\.env \?\? \{\}\)/)
+  assert.match(source, /登录壳/)
+  assert.match(source, /发行版/)
+})
