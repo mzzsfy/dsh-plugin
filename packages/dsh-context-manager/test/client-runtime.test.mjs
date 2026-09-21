@@ -1,6 +1,5 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runInThisContext } from 'node:vm'
@@ -11,23 +10,15 @@ import { runInThisContext } from 'node:vm'
 // 已注册的插槽组件渲染一遍,让作用域/初始化类错误在测试阶段暴露。
 
 const CLIENT_SRC = readFileSync(fileURLToPath(new URL('../src/client.js', import.meta.url)), 'utf8')
-const nodeRequire = createRequire(import.meta.url)
 
-// React 由宿主 profile 提供(本包仅声明 peerDependency,不随包安装);
-// 组件函数体不渲染真实 DOM,只用 hooks 与 createElement,故不引入 react-dom
-const ReactStub = (() => {
-  const candidates = [
-    'react',
-    'C:/Users/yuanhao/.dsh/profiles/web/node_modules/react',
-  ]
-  for (const specifier of candidates) {
-    try {
-      const mod = nodeRequire(specifier)
-      if (mod && typeof mod.useState === 'function') return mod
-    } catch { /* 下一个候选 */ }
-  }
-  return null
-})()
+// 组件函数体不渲染真实 DOM,只消费 hooks(useState/useEffect/useRef)与 createElement:
+// 自造最小桩,零依赖全平台可跑(真 react 反而是环境耦合:CI 无宿主 profile)
+const ReactStub = {
+  createElement: (type, props, ...children) => ({ type, props, children }),
+  useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+  useEffect: () => {},
+  useRef: (value) => ({ current: value }),
+}
 
 const HOST_HOOK = (name) => () => { throw new Error('缺少 react,无法执行 ' + name) }
 
