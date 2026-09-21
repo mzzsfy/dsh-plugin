@@ -55,6 +55,12 @@ shell-select:
 
 env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `env` < 调用方环境(spec.env + 会话 `DSH_*` 事实)。wsl 形把条目 env 与调用方环境全部键(WSLENV 本身除外)追加进 WSLENV 白名单,过 WSL 边界不静默失效。
 
+### 命令黑白名单(deny/allow)
+
+- 配置节顶层 `deny` / `allow`:各为正则字符串数组,对模型提交的整条命令文本匹配(大小写不敏感)。命中 `deny` 即拒绝执行;命中 `allow` 的命令豁免检查(处理"禁 rm -rf 但放行清 node_modules"类需求)。两者皆空 = 不拦截(出厂默认)。
+- 拦截点在执行器 runFor/startFor 入口:经 `ctx.shell` 代理的官方 pwsh 工具同样受管。拒绝以模型可见标记返回:`[blocked by shell-select: matches deny pattern …]`,后台任务在启动前同步拒绝,不产生僵尸任务。
+- 定位是防误触护栏而非安全边界:整文本正则挡不住间接包装(编码/嵌套壳),真正的边界始终是访问模式与沙箱。坏正则条目容错跳过,不瘫执行链;设置页两个多行文本域编辑(每行一条正则),保存时校验正则合法性。
+
 ### bash 形探测与 msys2
 
 - 候选序:`Program Files\Git\bin` → `Program Files (x86)\Git\bin` → `LocalAppData\Programs\Git\bin` → `C:\msys64\usr\bin\bash.exe` → `C:\msys64\bin\bash.exe` → PATH 扫描。
