@@ -8,8 +8,8 @@
 // 2. 执行器预算与客户端清单同节('shell-select'),官方拆 'shell' 节 + 行内 Config。
 //
 // 兼容性:ShellExecutor 基类为官方文档级扩展缝(dsh-shell README 明示子类化);
-// dsh-tools/dsh-llm 动态 import + 特性检测(tool.mjs 内),缺失即对应面降级,
-// 禁止静态 import 版本脆弱导出(dsh-api-alignment 规约)。
+// dsh-llm 经 tool.mjs 动态 import + 特性检测(HarnessError 缺失即降级),
+// dsh-tools/dsh-sandbox 静态 import(官方组合必装,无降级面)。
 
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import { MAX_TIMER_DELAY_MS, clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
@@ -30,10 +30,46 @@ export const inject = SHELL_SELECT_INJECT
 export { Config }
 
 // 面向模型的终端环境覆盖(官方 dsh-pwsh-local 同构):禁色禁 pager
-const ENV_OVERRIDES = {
+export const ENV_OVERRIDES = {
   NO_COLOR: '1',
   PAGER: 'cat',
   GIT_PAGER: 'cat',
+}
+
+// WSLENV 分隔符:WSL 白名单变量表,VAR[:VAR...]
+const WSLENV_SEPARATOR = ':'
+
+/**
+ * spawn env 构造纯函数:内置覆盖集 + 条目 env + 调用方 env 三层并集
+ * (ENV_OVERRIDES < entryEnv < callerEnv,同键高右优先);
+ * wsl 形把条目与调用方全部键(WSLENV 本身除外)追加进 WSLENV——WSL 只放行
+ * 白名单变量,不追加则配置静默失效。追加在继承值之上(Windows Terminal 等
+ * 已写入条目,重建=静默丢弃),split/规范化去空段;调用方显式 WSLENV 优先于继承值。
+ * @param {string} kind 条目形态
+ * @param {Record<string,string>|undefined} callerEnv 调用方环境(spec.env+dshEnv)
+ * @param {Record<string,string>|undefined} entryEnv 条目配置环境(shells[].env)
+ * @param {{inheritedWslenv?: string}} [io] 继承 WSLENV(注入以便测试)
+ */
+export function buildClientEnv(kind, callerEnv, entryEnv, io = {}) {
+  const env = { ...ENV_OVERRIDES, ...entryEnv, ...callerEnv }
+  if (kind !== 'wsl') return env
+  const keys = [...Object.keys(entryEnv ?? {}), ...Object.keys(callerEnv ?? {})]
+    .filter((key) => key !== 'WSLENV')
+  const declared = Object.prototype.hasOwnProperty.call(callerEnv ?? {}, 'WSLENV')
+  const base = declared
+    ? env.WSLENV
+    : (typeof io.inheritedWslenv === 'string' && io.inheritedWslenv.length > 0 ? io.inheritedWslenv : env.WSLENV)
+  if (keys.length === 0) {
+    // 无追加键也透传继承值:spawn 可能整包替换子环境,缺键=继承条目丢失
+    if (typeof base === 'string' && base.length > 0) env.WSLENV = base
+    return env
+  }
+  const parts = typeof base === 'string' ? base.split(WSLENV_SEPARATOR) : []
+  env.WSLENV = [...parts, ...keys.flatMap((key) => key.split(WSLENV_SEPARATOR))]
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join(WSLENV_SEPARATOR)
+  return env
 }
 
 function assertPositiveFinite(name, value) {
@@ -102,7 +138,7 @@ async function loadSandboxUnavailable(ctx) {
   return FallbackSandboxUnavailableError
 }
 
-export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor {
+export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor {
   static inject = SHELL_SELECT_INJECT
 
   static Config = Config
@@ -169,7 +205,7 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
     return {
       default: current.default,
       shells: current.shells.map((entry) => {
-        const resolved = resolveEntryPath(entry, candidateExists)
+        const resolved = normalizeWin32Path(resolveEntryPath(entry, candidateExists))
         return {
           id: entry.id,
           name: entry.name,
@@ -177,6 +213,9 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
           args: entry.args,
           path: resolved,
           available: resolved !== undefined,
+          login: entry.login === true,
+          distro: entry.distro ?? '',
+          env: entry.env ?? {},
         }
       }),
     }
@@ -200,7 +239,7 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
     if (resolved === undefined || !candidateExists(resolved)) {
       throw new Error(`shell client "${entry.id}" (${entry.kind}) has no executable on this machine: set an explicit path in the shell-select settings section or reinstall the client`)
     }
-    return { id: entry.id, kind: entry.kind, path: resolved, args: entry.args }
+    return { id: entry.id, kind: entry.kind, path: resolved, args: entry.args, login: entry.login === true, distro: entry.distro ?? '', env: entry.env ?? {} }
   }
 
   /**
@@ -277,8 +316,8 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
     return this.startFor(this.entryFor(), spec)
   }
 
-  /** 组装一次 spawn 的完整规格(官方 spawnSpec 同构,argv 参数化)。 */
-  spawnSpec(spec, argv, stdoutMaxBytes, signal) {
+  /** 组装一次 spawn 的完整规格(官方 spawnSpec 同构,argv/条目参数化)。 */
+  spawnSpec(entry, spec, argv, stdoutMaxBytes, signal) {
     const current = this.config
     const collect = (maxBytes) => ({
       maxBytes,
@@ -294,11 +333,10 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
       },
       graceMs: current.graceMs,
       signal,
-      env: {
-        ...ENV_OVERRIDES,
+      env: buildClientEnv(entry.kind, {
         ...spec.env,
         ...spec.dshEnv,
-      },
+      }, entry.env, { inheritedWslenv: process.env.WSLENV }),
     }
   }
 
@@ -349,7 +387,7 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
     const argv = forcedArgv ?? this.argvFor(entry, spec)
     const d = deadline(spec.signal, spec.timeoutMs, 'SHELL_TIMEOUT')
     try {
-      const handle = this.ctx.subprocess.spawn(this.spawnSpec(spec, argv, spec.stdoutMaxBytes, d.signal))
+      const handle = this.ctx.subprocess.spawn(this.spawnSpec(entry, spec, argv, spec.stdoutMaxBytes, d.signal))
       const outcome = await handle.done
       const collected = ShellSelectExecutor.collected(handle)
       const timedOut = timeoutOf(d.signal, 'SHELL_TIMEOUT') !== undefined
@@ -399,7 +437,7 @@ export var ShellSelectExecutor = class ShellSelectExecutor extends ShellExecutor
   startArgv(entry, spec, forcedArgv) {
     const current = this.config
     const argv = forcedArgv ?? this.argvFor(entry, spec)
-    const running = this.ctx.subprocess.spawn(this.spawnSpec(spec, argv, current.maxOutputBytes, spec.signal))
+    const running = this.ctx.subprocess.spawn(this.spawnSpec(entry, spec, argv, current.maxOutputBytes, spec.signal))
     const collected = ShellSelectExecutor.collected(running)
     let providerFailureNote
     const consumeProviderFailure = () => {

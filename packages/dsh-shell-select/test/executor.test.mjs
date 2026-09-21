@@ -289,6 +289,23 @@ test('entryFor:双反斜杠污染路径被归一后仍可用', () => {
   assert.equal(entry.path, 'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
 })
 
+test('entryFor:login 布尔透传,argv 产出 -lc(配置→执行全链)', async () => {
+  const ctx2 = stubCtx()
+  const executor = new ShellSelectExecutor(ctx2.ctx, {
+    shells: [
+      { id: 'm', name: 'MSYS2', kind: 'bash', path: 'C:\\Program Files\\Git\\bin\\bash.exe', login: true },
+      { id: 'g', name: 'Git Bash', kind: 'bash', path: 'C:\\Program Files\\Git\\bin\\bash.exe' },
+    ],
+    default: 'm',
+  })
+  const loginEntry = executor.entryFor('m')
+  assert.equal(loginEntry.login, true)
+  assert.deepEqual(executor.argvFor(loginEntry, { command: 'uname -a' }).slice(0, 2), ['C:\\Program Files\\Git\\bin\\bash.exe', '-lc'])
+  const plainEntry = executor.entryFor('g')
+  assert.equal(plainEntry.login, false)
+  assert.deepEqual(executor.argvFor(plainEntry, { command: 'uname -a' }).slice(0, 2), ['C:\\Program Files\\Git\\bin\\bash.exe', '-c'])
+})
+
 function stubCtxAndBuild() {
   const { ctx, registered } = stubCtx()
   const executor = new ShellSelectExecutor(ctx, {})
