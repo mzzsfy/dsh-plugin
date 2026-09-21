@@ -82,20 +82,6 @@ export async function installGuard(ctx, {
   const mountTimeout = timeouts.mount ?? MOUNT_TIMEOUT_MS
   const importOne = importOfficialOverride ?? importOfficial
 
-  // 追踪日志:guard 判定与挂载节点落文件,宿主 logger 管道之外的可观测兜底
-  let traceAppend = null
-  try {
-    const { appendFile } = await import('node:fs/promises')
-    const tracePath = '.compat/guard-trace.log'
-    traceAppend = (line) => {
-      void appendFile(tracePath, `[${new Date().toISOString()}] ${line}\n`).catch(() => {})
-    }
-  } catch {
-    traceAppend = null
-  }
-  const trace = traceAppend
-  trace?.('installGuard 开始')
-
   // 官方模块预载并归一挂载形态:瞬时失败退避重试,耗尽才停用自愈
   // (HMR 重建风暴期 import 竞争易超时,单次放弃会让死态窗口无自愈)
   const modules = new Map()
@@ -113,18 +99,15 @@ export async function installGuard(ctx, {
       } catch (error) {
         lastError = error
         if (attempt < LOAD_RETRIES) {
-          trace?.(`预载重试 ${OFFICIAL_PACKAGES[id]} 第 ${attempt + 1} 次: ${error?.message}`)
           await delayOverride(LOAD_RETRY_DELAY_MS)
         }
       }
     }
     if (lastError !== null) {
-      trace?.(`预载失败 ${OFFICIAL_PACKAGES[id]}: ${lastError?.message}`)
       ctx.logger.warn(`shell-select/guard: 官方 ${OFFICIAL_PACKAGES[id]} 不可用,死态自愈停用: ${lastError?.message ?? lastError}`)
       return undefined
     }
   }
-  trace?.(`预载完成 ${[...modules.keys()].join(',')}`)
 
   // 代挂状态:id → fiber;mounting 去并发,卸载幂等
   let mounted = new Map()
@@ -155,10 +138,8 @@ export async function installGuard(ctx, {
           fibers.set(id, await withTimeout(fiberPromise, mountTimeout, `guard 代挂 ${id}`))
         }
         mounted = fibers
-        trace?.(`代挂成功 ${[...fibers.keys()].join(',')}`)
         ctx.logger.warn('shell-select/guard: 主行与官方 shell 链同时停用,已代挂官方工具恢复服务;重启后由宿主组合自然归位')
       } catch (error) {
-        trace?.(`代挂失败: ${error?.message ?? error}`)
         ctx.logger.error(`shell-select/guard: 代挂官方插件失败: ${error?.message ?? error}`)
         // 半挂态回收:已挂成的部分先卸,不留半套官方链
         for (const [id, fiber] of fibers) {
@@ -254,7 +235,6 @@ export async function installGuard(ctx, {
   ctx.on('loader/partial-dispose', partialDisposeGuard, { global: true })
 
   const initial = detectDeadState(ctx.loader, { applyState: shellSelectApplyState })
-  trace?.(`初始判定 dead=${initial} 行读数=${JSON.stringify([MAIN_ROW_ID, ...OFFICIAL_ROW_IDS].map((id) => ({ id, ...rowState(ctx.loader, id) })))}`)
   ctx.logger.info?.(`shell-select/guard: 初始判定 dead=${initial}`)
   if (initial === true) await mountOfficial()
 
