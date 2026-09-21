@@ -305,6 +305,8 @@ test('api POST config:await updateConfig,resolved 即新清单(async 修复)', a
 })
 
 test('updateConfig:入参 path 反斜杠归一(防 yaml 无引号落盘字面翻倍)', async () => {
+  // 归一是 Windows 宿主行为(linux 无反斜杠翻倍怪癖,源码层按平台守卫)
+  if (process.platform !== 'win32') return
   const { ctx, registered } = stubCtx()
   const written = []
   ctx.settings.replace = async (ns, section) => {
