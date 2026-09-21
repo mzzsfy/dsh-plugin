@@ -175,7 +175,7 @@ test('runFor danger 直跑:argv 按条目组装,不经 confine,stdout/stderr 回
 test('deny 拦截:runFor 命中 deny 抛 DenyError 不 spawn', async () => {
   const spawn = stubSpawn('ok', '')
   const { ctx } = stubCtx({ spawn })
-  const executor = new ShellSelectExecutor(ctx, { deny: ['format '] })
+  const executor = new ShellSelectExecutor(ctx, { ...baseConfig(), deny: ['format '] })
   const entry = executor.entryFor('git-bash')
   await assert.rejects(
     () => executor.runFor(entry, executor.resolve({ command: 'format c: /q', workdir: process.cwd() })),
@@ -188,7 +188,7 @@ test('deny 拦截:runFor 命中 deny 抛 DenyError 不 spawn', async () => {
 test('deny 拦截:startFor 同样拒绝(后台入口)', () => {
   const spawn = stubSpawn('', '', 0)
   const { ctx } = stubCtx({ spawn })
-  const executor = new ShellSelectExecutor(ctx, { deny: ['shutdown'] })
+  const executor = new ShellSelectExecutor(ctx, { ...baseConfig(), deny: ['shutdown'] })
   const entry = executor.entryFor('cmd')
   assert.throws(
     () => executor.startFor(entry, executor.resolve({ command: 'shutdown /r', workdir: process.cwd() })),
