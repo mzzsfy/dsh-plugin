@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-shell-select",
   "description": "Windows shell 接管:替换默认 pwsh 工具为可配置多客户端的 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "src/executor.mjs",
   "exports": {

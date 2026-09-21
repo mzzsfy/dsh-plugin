@@ -83,8 +83,10 @@ function assertPositiveFinite(name, value) {
 }
 
 // yaml 无引号标量会把 `\` 字面落盘,任何一层再转义都让路径翻倍(C:\\ 实测):
-// 入口统一归一,保证进 schema 的 path 就是干净值
+// 入口统一归一,保证进 schema 的 path 就是干净值。
+// 仅 Windows 宿主生效:posix 路径以 / 分隔,归一会把合法路径毁成反斜杠字面(CI linux 实测)
 function normalizeWin32Path(path) {
+  if (process.platform !== 'win32') return path
   if (typeof path !== 'string' || path.length === 0) return path
   return path.replace(/\\{2,}/g, '\\').replace(/\//g, '\\')
 }

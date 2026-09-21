@@ -31,7 +31,7 @@ test('S10 args 模板条目接管 argv,distro 不出现', () => {
 })
 
 test('S6 entryFor 透传 env 与 distro;spawnSpec env 含条目键', () => {
-  const cmdPath = `${process.env.SystemRoot ?? 'C:\\WINDOWS'}\\System32\\cmd.exe`
+  const cmdPath = process.execPath
   const config = Config({
     shells: [{ id: 'c', name: 'CMD', kind: 'cmd', path: cmdPath, env: { MSYSTEM: 'MINGW64' } }, { id: 'p', name: 'pwsh', kind: 'pwsh' }],
     default: 'c',

@@ -79,10 +79,25 @@ function shadow(executor) {
   return Object.create(executor)
 }
 
+
+// 跨平台显式 path:node 自身在所有平台存在,注入后 entryFor/listShells 不依赖真实 shell
+// (CI linux 无 pwsh/cmd/git-bash,出厂 auto 探测必失败)
+const NODE_EXE = process.execPath
+function baseConfig() {
+  return {
+    shells: [
+      { id: 'pwsh', name: 'PowerShell', kind: 'pwsh', path: NODE_EXE },
+      { id: 'git-bash', name: 'Git Bash', kind: 'bash', path: NODE_EXE },
+      { id: 'cmd', name: 'CMD', kind: 'cmd', path: NODE_EXE },
+    ],
+    default: 'pwsh',
+  }
+}
+
 test('官方 run seam:存在且走默认客户端,spec 已解析形态(danger 直跑)', async () => {
   const spawn = stubSpawn('seam-out', '')
   const { ctx } = stubCtx({ spawn })
-  const executor = new ShellSelectExecutor(ctx, {})
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
   assert.equal(typeof executor.run, 'function')
   const result = await executor.run(executor.resolve({ command: 'Get-Date', workdir: process.cwd() }))
   assert.equal(spawn.calls.length, 1)
@@ -94,7 +109,7 @@ test('官方 run seam:存在且走默认客户端,spec 已解析形态(danger �
 test('官方 start seam:存在且返回 ShellProcess 形态句柄', async () => {
   const spawn = stubSpawn('bg', '')
   const { ctx } = stubCtx({ spawn })
-  const executor = new ShellSelectExecutor(ctx, {})
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
   assert.equal(typeof executor.start, 'function')
   const proc = executor.start(executor.resolve({ command: 'sleep 1', workdir: process.cwd() }))
   assert.equal(proc.status, 'running')
@@ -104,7 +119,7 @@ test('官方 start seam:存在且返回 ShellProcess 形态句柄', async () => 
 
 test('cordis 阴影 receiver:公开面调用不触发私有品牌错误', () => {
   const { ctx } = stubCtx()
-  const executor = new ShellSelectExecutor(ctx, {})
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
   const mirrored = shadow(executor)
   // 官方 tool-pwsh 的调用面:resolve/run/start + apply 期 sandboxMode
   assert.doesNotThrow(() => mirrored.resolve({ command: 'x' }))
@@ -119,7 +134,7 @@ test('cordis 阴影 receiver:公开面调用不触发私有品牌错误', () => 
 test('cordis 阴影 receiver:受限模式 run 全链路(confine + 结果分类)', async () => {
   const spawn = stubSpawn('', 'file access denied here', 1)
   const { ctx } = stubCtx({ spawn, sandboxMode: 'read-only' })
-  const executor = new ShellSelectExecutor(ctx, {})
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
   const mirrored = shadow(executor)
   const result = await mirrored.run(mirrored.resolve({ command: 'dir', workdir: process.cwd() }))
   assert.equal(spawn.calls[0].argv[0], 'WRAPPED')
@@ -129,8 +144,8 @@ test('cordis 阴影 receiver:受限模式 run 全链路(confine + 结果分类)'
 
 test('sandboxMode:透出部署默认模式,策略缺席时 undefined', () => {
   const { ctx } = stubCtx({ sandboxMode: 'workspace-write' })
-  const executor = new ShellSelectExecutor(ctx, {})
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
   assert.equal(executor.sandboxMode, 'workspace-write')
-  const bare = new ShellSelectExecutor({ ...ctx, sandboxPolicy: undefined }, {})
+  const bare = new ShellSelectExecutor({ ...ctx, sandboxPolicy: undefined }, baseConfig())
   assert.equal(bare.sandboxMode, undefined)
 })
