@@ -17,6 +17,9 @@ export const HISTORY_INPUT_LIMIT = 200
 export const HISTORY_INPUT_MAX_CHARS = 20 * 1000
 export const HISTORY_SCOPES = ['prompts', 'session', 'workspace', 'global']
 export const HISTORY_PROMPTS_MAX = 100
+// 提取器输出格式版本:升级即令全部 extracts 指纹缓存失效重解压(自愈补齐新格式条目);
+// 已知边界——超 MAX_ARTIFACT 的巨产物会话对齐时直接跳过,其旧版条目不随升级补齐
+export const HISTORY_EXTRACT_VERSION = 2
 export const HISTORY_ALIGN_THROTTLE_MS = 30 * 1000
 export const HISTORY_STARTUP_DELAY_MS = 30 * 1000
 export const HISTORY_STARTUP_SCAN_LIMIT = 100
@@ -53,15 +56,24 @@ export function isSessionRunning({ agents, sessionId }) {
 }
 
 /**
- * 从会话事件流提取人类输入:仅 user/message 且来源为用户本人,
- * 文本块按行拼接;工具结果回填、插件注入与空白输入(纯图/空/纯空白)均不产出。
+ * 从会话事件流提取人类输入:user/message(来源为用户本人,文本块按行拼接)与
+ * command/run(斜杠命令,重组为 /name+args;args 是命令名后 verbatim rawInput,
+ * 含分隔空白,recordInput: false 的命令无 args 产出裸命令名)。
+ * 工具结果回填、插件注入与空白输入(纯图/空/纯空白)均不产出。
  * @param events - readSession 返回的原始事件数组
  * @returns 条目 { text, at },时间取事件时间
  */
 export function extractUserInputs(events) {
   const entries = []
   for (const event of events || []) {
-    if (!event || event.type !== 'user/message') continue
+    if (!event) continue
+    if (event.type === 'command/run') {
+      const data = event.data
+      if (!data || !data.source || data.source.kind !== 'user' || typeof data.name !== 'string' || data.name === '') continue
+      entries.push({ text: '/' + data.name + (typeof data.args === 'string' ? data.args : ''), at: event.time })
+      continue
+    }
+    if (event.type !== 'user/message') continue
     const message = event.data
     if (!message || !message.source || message.source.kind !== 'user') continue
     const text = (message.content || [])

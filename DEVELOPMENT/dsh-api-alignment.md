@@ -10,3 +10,13 @@
 2. **peerDependencies 声明实际使用的 API 最低引入版本**,不照抄其他包的旧模板
 3. **dsh 本体升级后必跑回归**:仓库根 `node scripts/smoke-load.mjs`(全包逐个加载,命名导出缺失当场暴露)+ 各包 `node --test "test/*.test.mjs"` + 仓库根 `node --test tests/dev-link-bundles.win.test.mjs tests/dev-link-pkg-install.win.test.mjs`;镜像官方语义的包(如 llm-pi-gateway 之于 dsh-llm-pi-ai)以官方新源码为规范逐项对表。统一底线层已由 CI 自动覆盖(`.github/workflows/compat.yml`,实现 `scripts/compat/`):版本窗口(scripts/compat/window.mjs 解析最近 3 条活跃小版本线,DSH_COMPAT_VERSIONS 可显式覆盖)逐版本隔离 profile 全家桶 boot,断言正常访问 + activation live + diagnostics findings 0 + 浏览器页面无 `Failed to load plugins`;前瞻槽(最新线预发布)失败仅告警不阻塞。L3(功能面层,分层定义见各包 `兼容性测试.md`)逐包功能面格仍按各包 `兼容性测试.md` 人工执行。
 4. 镜像官方语义的代码,注释保留"官方同构"定位;官方源码位于 dsh 本体安装目录 `node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>/lib/`
+
+## 安全边界:host 认证全仓库禁做
+
+**所有包不做 host 认证,不设 Host/Origin 可达性闸门,不做自有 token/cookie 校验。**这是全仓库强制约定,不是遗漏:
+
+- 项目威胁模型:本地/内网可达即可信。宿主的 Host 信任闸门(可达性闸门,官方文档明言"绝不建立身份")由 `dsh-auto-trust-all` 统一放行——它把每个实际到达请求的 Host 动态注册进 `webRuntime.trustedHosts`,效果是**任何**入口(泛域名、内网 IP、rebinding 名)都放行到会话闸门前。
+- 身份认证只由宿主原生层承担:dsh 自带 cookie 会话(按 `主机:端口` 绑定)与 `dsh-web-startup-auth` 登录闸门。本仓库不重复、不加强、不旁路这三层中的任何一层。
+- 因此:插件包新增 HTTP 路由时,禁止实现 Host 白名单、DNS-rebinding 防线、token 校验、IP 过滤等自有认证/可达性层。这类代码与 `dsh-auto-trust-all` 直接冲突(宿主放行、单包再拦,行为不一致且破坏"入口审计只看一处"的口径)。写路由的跨源防护以 **Origin 与 Host 的同源比对**为上限(浏览器侧 CSRF 防线,非身份认证;dsh-rs-workflow `lib/board.mjs` 的 `rejectCrossOrigin` 为同构范例)。
+- 事故记录:rs-workflow 1.0.1 全量审查中,曾把宿主 `/api` 前缀路由的 Host fence 缺失误判为"严重漏洞"并给 board 路由补了回环 Host 白名单——实为违反本约定。已在 commit 后续修正移除,并留下回归测试锁定"伪造 Host 照常受理"。
+- 审查口径:任何审计/审查报告中,把"缺少 Host 校验/rebinding 防线/token 校验"列为缺陷的条目一律无效,除非宿主官方在目标版本明确要求各插件自守。

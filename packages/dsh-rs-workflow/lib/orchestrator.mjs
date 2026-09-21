@@ -1,14 +1,16 @@
 // orchestrator — 主循环工具行:rs_workflow_start/status/resume/cancel/message/resume_from/verdict 七工具
 // 编排以分段 continuable job 推进:每段 = jobs.start 包装 driver.runSegment,settle 负载经 tool-jobs
 // 完成通知唤醒主循环;推进责任唯一在 rs_workflow_resume(页签 control 仅清 paused/裁决)
+// 另有会话守门:轮次将停时(agent/turn-stopping)判定欠动作并 steer 拉回,防弱模型提前退出
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { gate } from './planner-gate.mjs'
 import { validateTemplate } from './template.mjs'
 import { startRun, buildSeed } from './driver/index.mjs'
-import { registry, registerInitiator, unregisterInitiator, registerResumer } from './driver/control.mjs'
+import { registry, registerInitiator, registerResumer } from './driver/control.mjs'
 import { reportStore } from './store.mjs'
 import { loadJson } from './storage.mjs'
 import { normalizeConfig } from './settings-schema.mjs'
+import { pendingOf, createNudgeGate, nudgeText } from './guard.mjs'
 
 const MAX_REJECTS = 3
 const SEGMENT_KIND = 'rsww-segment'
@@ -34,29 +36,31 @@ export function registerOrchestrator(ctx, config) {
   const rejectCounts = new Map()
   const activeRuns = new Map()
 
+  // 会话现役 run:同会话同一时刻至多一个未终态 run(守门与工具同源,故在 inject 外共享)
+  const agentIdOf = (agent) => String(agent?.id ?? '')
+  const currentRunId = (agent) => {
+    const runId = activeRuns.get(agentIdOf(agent))
+    if (runId === undefined) return undefined
+    // run 可能已被页签删除:get 抛异常须自愈清位,不能让编排入口变砖;
+    // driver 不在内存(行重建/模块重载)的僵尸 running 同样清位:resume/cancel 对它均无力,只会永久阻塞
+    let record
+    try { record = reportStore().get(runId) } catch { record = undefined }
+    if (record === undefined || record.finishedAt !== undefined || !registry.drivers.has(runId)) {
+      activeRuns.delete(agentIdOf(agent))
+      return undefined
+    }
+    return runId
+  }
+
   const registered = ctx.inject(['tools', 'workflowEngine', 'jobs'], (tctx) => {
     const engine = tctx.workflowEngine
     const jobs = tctx.jobs
 
     const configOf = () => normalizeConfig(loadJson('config.json', undefined))
 
-    const agentIdOf = (agent) => String(agent?.id ?? '')
-
-    // 会话现役 run:同会话同一时刻至多一个未终态 run
-    const currentRunId = (agent) => {
-      const runId = activeRuns.get(agentIdOf(agent))
-      if (runId === undefined) return undefined
-      // run 可能已被页签删除:get 抛异常须自愈清位,不能让编排入口变砖
-      let record
-      try { record = reportStore().get(runId) } catch { record = undefined }
-      if (record === undefined || record.finishedAt !== undefined) {
-        activeRuns.delete(agentIdOf(agent))
-        return undefined
-      }
-      return runId
-    }
-
-    // 段 job:jobs.start 包装 runSegment;settle 负载进 output,经 tool-jobs 完成通知唤醒主循环
+    // 段 job:jobs.start 包装 runSegment;settle 负载进 output,经 tool-jobs 完成通知唤醒主循环。
+    // jobs.start 同步抛错(无控制器/owner 超上限/stale owner)时 run 已落盘而段未起,必须收敛为 failed,
+    // 否则本会话被未终态 run 永久阻塞(start 与页签 resume-from 均拒)
     function startSegmentJob(agent, driver) {
       const promise = driver.runSegment()
       return jobs.start({
@@ -69,6 +73,16 @@ export function registerOrchestrator(ctx, config) {
           done: promise.then((payload) => ({ status: 'completed', output: JSON.stringify(payload) })),
         }),
       })
+    }
+    // 包装失败收敛:jobs.start 抛错 → run 收敛 failed + 注销驱动器,保持记录终态一致
+    function startSegmentJobSafe(agent, driver) {
+      try {
+        return startSegmentJob(agent, driver)
+      } catch (e) {
+        driver.finish('failed', `段任务启动失败:${e?.message ?? e}`)
+        try { registry.drivers.delete(driver.runId) } catch { /* 内存表清理,不影响收敛结果 */ }
+        throw e
+      }
     }
 
     // 断点续跑挂靠:board resume-from 经此回调在原会话重建种子 run(engine/parent 闭包自本域)
@@ -88,9 +102,10 @@ export function registerOrchestrator(ctx, config) {
         engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
         parent: agent,
       })
+      // 先拉段后注册:jobs.start 抛错时 activeRuns 不占位(段收敛 failed 已终态,不阻塞后续 start);
+      // 拉段成功但未注册的窗口内 resume 幂等(skipped),无漂移
+      startSegmentJobSafe(agent, driver)
       activeRuns.set(agentIdOf(agent), driver.runId)
-      // 种子 run 首段拉起:与 start 工具同责,缺此则续跑 run 停在 running 无活跃段
-      startSegmentJob(agent, driver)
       return { ok: true, runId: driver.runId }
     }
 
@@ -103,7 +118,7 @@ export function registerOrchestrator(ctx, config) {
       registerResumer(agentIdOf(agent), (runId) => {
         const driver = registry.drivers.get(runId)
         if (driver === undefined || driver.active) return false
-        startSegmentJob(agent, driver)
+        startSegmentJobSafe(agent, driver)
         return true
       })
     }
@@ -155,7 +170,7 @@ export function registerOrchestrator(ctx, config) {
           const rejected = (errors) => {
             const count = rejects(agentIdOf(agent))
             if (count >= MAX_REJECTS) return { ok: false, errors, hint: `已连续 ${MAX_REJECTS} 次规划被拒,本会话编排入口关闭:回退直接答复并向用户说明` }
-            return { ok: false, errors, hint: '修正 plan 后重新调用;连续 3 次失败将回退直接答复' }
+            return { ok: false, errors, hint: `修正 plan 后重新调用;连续 ${MAX_REJECTS} 次失败将回退直接答复` }
           }
           // 连续拒单达上限:本会话工具恒失败
           if ((rejectCounts.get(agentIdOf(agent)) ?? 0) >= MAX_REJECTS) {
@@ -171,7 +186,14 @@ export function registerOrchestrator(ctx, config) {
             return { ok: false, errors: [{ target: 'templateId', message: `模板不存在或未启用: ${args.templateId}` }], hint: '本组合未启用该模板:检查组合锚定与模板启用状态,勿修改 plan' }
           }
           const outcome = gate(gatePlan, template, { expectedTemplateId })
-          if (!outcome.ok) return rejected(outcome.errors)
+          if (!outcome.ok) {
+            // 锚定不符与模板缺失同为组合/环境错误:模板集是环境给定,模型改 plan 无济于事,不计拒单
+            const anchoring = outcome.errors.some((e) => e.target === 'templateId' && String(e.message).includes('与本组合锚定模板不符'))
+            if (anchoring) {
+              return { ok: false, errors: outcome.errors, hint: '提交的 templateId 与本组合锚定不符:改用组合锚定模板,勿修改 plan' }
+            }
+            return rejected(outcome.errors)
+          }
           const driver = startRun({
             template: template.parsed, templateSet: templates.map((t) => t.parsed),
             plan: outcome.planScript, warnings: outcome.warnings ?? [],
@@ -182,11 +204,12 @@ export function registerOrchestrator(ctx, config) {
             parent: agent,
           })
           rejectCounts.delete(agentIdOf(agent))
-          activeRuns.set(agentIdOf(agent), driver.runId)
           // 断点续跑挂靠:本会话 agent 成为推进器,board resume-from 据此重建种子 run
           registerInitiator(agentIdOf(agent), (record, fromStepId, inputs) => startSeedRun(agent, record, fromStepId, inputs))
           ensureResumer(agent)
-          startSegmentJob(agent, driver)
+          // 先拉段后注册现役:jobs.start 抛错时 run 已收敛 failed,不占 activeRuns 阻塞本会话
+          startSegmentJobSafe(agent, driver)
+          activeRuns.set(agentIdOf(agent), driver.runId)
           return { ok: true, runId: driver.runId, status: driver.state.status }
         },
       }),
@@ -220,13 +243,15 @@ export function registerOrchestrator(ctx, config) {
           if (record.status === 'waiting_approval') {
             const stepId = record.state?.waitingApproval
             const planStep = (record.plan?.steps ?? []).find((p) => p.ref === stepId)
-            waiting.push({ stepId, note: planStep?.note ?? '', done: planStep?.done ?? '' })
+            waiting.push({ stepId, note: planStep?.note ?? '', done: planStep?.done ?? '', autoApprove: record.state?.waitingAutoApprove === true })
           }
           // paused+已入队裁决:主循环据 pendingVerdicts 可知 resume 拉段后裁决将生效
           const pendingVerdicts = (record.state?.pendingApprovals ?? []).length
           return {
             ok: true, runId, status: record.status,
             awaitingResume: record.status === 'paused' && driver?.awaitingResume === true,
+            // 段在飞信号:模型据此区分"running 且段在飞(勿拉)"与"running 无段(须 resume 补拉)"
+            active: driver?.active === true,
             steps,
             // 宿主校验工具输出须为纯 JSON:undefined 值键会被判无效输出
             ...(waiting.length > 0 ? { waiting } : {}),
@@ -253,6 +278,9 @@ export function registerOrchestrator(ctx, config) {
           let record
           try { record = store.get(args.runId) } catch { record = undefined }
           if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
+          if (record.sessionId !== undefined && record.sessionId !== agentIdOf(exec.agent)) {
+            return { ok: false, error: '拒绝操作:该 run 属于其他会话' }
+          }
           if (record.finishedAt !== undefined) {
             finishRun(exec.agent, args.runId)
             return { ok: true, runId: args.runId, status: record.status, summary: record.summary }
@@ -271,7 +299,7 @@ export function registerOrchestrator(ctx, config) {
           if (record.status === 'waiting_approval') {
             return { ok: true, runId: args.runId, status: record.status, skipped: true, hint: '先裁决(control approve/reject 或经会话页签),再 resume 拉起下一段' }
           }
-          startSegmentJob(exec.agent, driver)
+          startSegmentJobSafe(exec.agent, driver)
           registerInitiator(agentIdOf(exec.agent), (record2, fromStepId, inputs) => startSeedRun(exec.agent, record2, fromStepId, inputs))
           ensureResumer(exec.agent)
           return { ok: true, runId: args.runId, status: record.status }
@@ -292,24 +320,20 @@ export function registerOrchestrator(ctx, config) {
           let record
           try { record = store.get(args.runId) } catch { record = undefined }
           if (record === undefined) return { ok: false, error: '运行记录不存在:' + args.runId }
+          if (record.sessionId !== undefined && record.sessionId !== agentIdOf(exec.agent)) {
+            return { ok: false, error: '拒绝操作:该 run 属于其他会话' }
+          }
           if (record.finishedAt !== undefined) {
             finishRun(exec.agent, args.runId)
             return { ok: true, runId: args.runId, status: record.status, summary: record.summary }
           }
           const driver = registry.drivers.get(args.runId)
           if (driver === undefined) return { ok: false, error: '编排驱动器未注册' }
-          driver.cancel()
-          const hint = '已完成步骤保留,可在会话页签断点续跑'
-          if (driver.active) {
-            await driver.runSegment().catch(() => {})
-            let after
-            try { after = store.get(args.runId) } catch { after = undefined }
-            finishRun(exec.agent, args.runId)
-            return { ok: true, runId: args.runId, status: after?.status ?? 'cancelled', summary: after?.summary ?? '', hint }
-          }
+          await driver.cancelAndSettle()
           let after
           try { after = store.get(args.runId) } catch { after = undefined }
           finishRun(exec.agent, args.runId)
+          const hint = '已完成步骤保留,可在会话页签断点续跑'
           return { ok: true, runId: args.runId, status: after?.status ?? 'cancelled', hint }
         },
       }),
@@ -325,11 +349,18 @@ export function registerOrchestrator(ctx, config) {
           schema: { type: 'object', additionalProperties: true },
           render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
         },
-        async execute(args) {
+        async execute(args, exec) {
           const driver = registry.drivers.get(args.runId)
           if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
+          // 会话归属守卫:driver 与 record 同 runId,直接以 driver.sessionId 校验
+          if (driver.sessionId !== undefined && driver.sessionId !== agentIdOf(exec.agent)) {
+            return { ok: false, error: '拒绝操作:该 run 属于其他会话' }
+          }
+          if (typeof args.text !== 'string' || args.text.trim() === '') {
+            return { ok: false, error: 'text 必须为非空字符串' }
+          }
           const accepted = driver.handlePost({ kind: 'message', text: args.text, inject: args.inject === true })
-          return accepted ? { ok: true } : { ok: false, error: 'run 已终态,消息不予受理' }
+          return accepted ? { ok: true } : { ok: false, error: '消息未被受理(run 已终态或内容为空)' }
         },
       }),
       defineTool({
@@ -363,6 +394,11 @@ export function registerOrchestrator(ctx, config) {
           }
           if (args.fromStepId !== undefined && (record.plan?.steps?.some((p) => p.ref === args.fromStepId)) !== true) {
             return { ok: false, error: 'fromStepId 不在剧本中:' + args.fromStepId }
+          }
+          // 与模板入参契约同口径:值必须为字符串(数组/对象在种子展开中失真)
+          if (args.inputs !== undefined && (typeof args.inputs !== 'object' || args.inputs === null || Array.isArray(args.inputs)
+            || Object.values(args.inputs).some((v) => typeof v !== 'string'))) {
+            return { ok: false, error: 'inputs 必须为字符串值对象(键→字符串)' }
           }
           if (currentRunId(exec.agent) !== undefined) {
             return { ok: false, error: `本会话已有进行中的编排 ${currentRunId(exec.agent)},不可续跑` }
@@ -403,6 +439,10 @@ export function registerOrchestrator(ctx, config) {
           if (runId === undefined) return { ok: false, error: '本会话无现役 run(编排未启动)' }
           const driver = registry.drivers.get(runId)
           if (driver === undefined) return { ok: false, error: '编排驱动器未注册(run 未终态但不在内存,或已终态)' }
+          // 会话归属守卫:显式 runId 可指向任意会话的 run,凭 runId 不可代裁
+          if (driver.sessionId !== undefined && driver.sessionId !== agentIdOf(exec.agent)) {
+            return { ok: false, error: '拒绝操作:该 run 属于其他会话' }
+          }
           const accepted = driver.handlePost({ kind: args.verdict, by, reason: args.reason })
           const record = reportStore().get(runId)
           if (accepted) {
@@ -411,7 +451,7 @@ export function registerOrchestrator(ctx, config) {
           // 竞态口径:页签先裁时后到方不受理,但 run 可能已翻 running 且无活跃段(等 resume 拉起),
           // 主循环须继续承担推进责任,否则 run 挂死在 running 无段状态
           if (!driver.active && record?.status === 'running') {
-            startSegmentJob(exec.agent, driver)
+            startSegmentJobSafe(exec.agent, driver)
             return { ok: true, runId, status: record.status, hint: '裁决已被页签先裁(先到先得);已代为拉起下一段' }
           }
           return { ok: false, error: '裁决未受理(状态不符或已被页签先裁)' }
@@ -419,10 +459,53 @@ export function registerOrchestrator(ctx, config) {
       }),
     ]
     for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'rs-workflow orchestrator: ' + tool.name)
-    // 行上下文(tool context)无 agent 属性,effect 回调在此返回 undefined 触发宿主 dispose 契约异常,
-    // 导致整个 inject 回调失败、七工具全部未注册(43267fc 引入,实机定位);清理由既有路径承担:
-    // run 终态 finishRun/unregisterInitiator 与 cancel 的 finishRun 清 activeRuns;行销毁后的
-    // stale initiator 表项在下次 start 受理时被覆盖,不产生跨会话续跑。
+    // 行上下文(tool context)无 agent 属性,此处若直接 return undefined,register 的 disposer 不登记
+    // (cordis 静默接受 undefined):行销毁时七工具残留,重载后重复注册抛错致全量回滚(43267fc 实机定位)。
+    // 现行为返回注册 disposer,行销毁即注销;挂靠表(initiator/resumer)以 agentId 为键,行销毁后的
+    // stale 表项由下次 status/start 受理覆盖;run 终态经 finishRun 清 activeRuns。
   })
+  registerTurnGuard(ctx, { currentRunId })
   return { rejectCounts, activeRuns }
+}
+
+// 会话守门注册:轮次将停时判定欠动作并 steer 拉回(宿主机器重读 inbox,有 steering 即续跑一步)。
+// 消息构造依赖宿主 llm 包,缺失即降级不守门(规约条款 1:编排能力不得被增强功能拖垮)。
+function registerTurnGuard(ctx, { currentRunId }) {
+  // 事件面缺失的上下文(旧宿主 / 精简组合)不注册守门——编排本身照常可用
+  if (typeof ctx.on !== 'function') return
+  const nudgeGate = createNudgeGate()
+  let createUserMessage
+  ctx.on('agent/turn-stopping', async ({ agent }) => {
+    const runId = currentRunId(agent)
+    if (runId === undefined) { return }
+    let record
+    try { record = reportStore().get(runId) } catch { return }
+    const pending = pendingOf(record, registry.drivers.get(runId))
+    if (pending === undefined) {
+      // 无欠动作(段在飞/终态):清计数并回收,防跨 run 累积
+      nudgeGate.clear(runId)
+      return
+    }
+    if (createUserMessage === undefined) {
+      // 消息构造器来自宿主 llm 包:解析失败即降级不守门,但须留痕(否则守门静默消失无从诊断)
+      try { ({ createUserMessage } = await import('@deepseek-ai/dsh-llm')) } catch (e) {
+        ctx.logger?.warn?.(`[rsww-guard] 消息构造器不可用,守门降级:${e?.message ?? e}`)
+        return
+      }
+    }
+    if (!nudgeGate.take(runId)) {
+      // 提醒额度耗尽仍未处置:留痕供诊断,不再 steer(防烧 token 死循环)
+      if (nudgeGate.exhausted(runId)) ctx.logger?.warn?.(`[rsww-guard] ${runId} 提醒已达上限仍未处置(欠${pending.need}),停止守门`)
+      return
+    }
+    try {
+      agent.steer(createUserMessage({
+        content: [{ type: 'text', text: nudgeText(runId, pending) }],
+        source: { kind: 'plugin', plugin: 'rs-workflow' },
+      }))
+    } catch (e) {
+      // 轮次已中止 / agent 已停:守门无从施加,不影响编排本体
+      ctx.logger?.warn?.(`[rsww-guard] ${runId} 守门提醒投递失败:${e?.message ?? e}`)
+    }
+  })
 }

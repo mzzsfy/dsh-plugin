@@ -1,0 +1,30 @@
+# shell-select bundle patch:Windows shell 链零感知接管(同构 dsh-llm-pi-gateway)。
+# 官方 tool-pwsh 与 pwsh-sandbox 行按 id 禁用,本包主行提供 ctx.shell 执行器、
+# shell 工具、settings 节与浏览器半区路由;卸载本 bundle 即 patch 消失,官方行
+# 自动复位。POSIX 官方 bash 链(tool-bash/bash-sandbox)一律不碰。
+#
+# 平台门控:本包全部 insert 行在非 win32 停用(host 半区 apply 内另有平台早退,
+# 双重防护)。官方行禁用两平台皆写 true:POSIX 上这两行本就被 dsh-base 平台
+# 表达式停用,重复写 true 为幂等;绝不可写 false,否则会在 POSIX 强行启用。
+#
+# 死态窗口:市场 UI 开关只即时禁用主行(bundle 移出 bundles 仅下次 boot 生效),
+# 窗口内官方行仍被本 patch 禁用——guard 行(id 含 "/",市场行写入对其拒绝)
+# 探测死态后代挂官方插件自愈,任一方复活先卸代挂。
+#
+# 哨兵自愈与复活让位语义逐项同构 packages/dsh-llm-pi-gateway 的 guard/takeover,
+# 差异仅两处:官方代挂对象为 tool-pwsh + pwsh-sandbox 两行;行配置读官方
+# `shell` settings 节(pwsh-sandbox 经其 Config 消费,保持官方 pwshPath 配置)。
+
+- id: pwsh-sandbox
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- insert:
+    - id: shell-select
+      name: '@mzzsfy/dsh-shell-select'
+      disabled: !!js process.platform !== 'win32'
+    - id: shell-select/guard
+      name: '@mzzsfy/dsh-shell-select/guard'
+      disabled: !!js process.platform !== 'win32'

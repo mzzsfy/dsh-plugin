@@ -106,7 +106,7 @@ export function applyExternalVerdict(state, script, approveStep, { verdict, comm
 }
 
 // 段 settle 负载(waiting):待裁决摘要 + 口径上下文(feat/approve-bridge.md 字段集)
-export function waitingPayload({ runId, state, script, planStepOf, approveStep }) {
+export function waitingPayload({ runId, state, script, planStepOf, approveStep, autoApprove = false }) {
   const target = state.steps[approveStep.target]
   const planStep = planStepOf.get(approveStep.id)
   const brief = planStep?.done || planStep?.note || approveStep.prompt
@@ -121,6 +121,8 @@ export function waitingPayload({ runId, state, script, planStepOf, approveStep }
       brief,
       comments: ledger?.lastComments ?? '',
       rounds: ledger?.rounds ?? 0,
+      // 模板代审口径:主循环 persona 据此决定代审(by 缺省)或转呈真人(by=user)
+      autoApprove,
     },
   }
 }

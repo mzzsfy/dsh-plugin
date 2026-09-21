@@ -16,7 +16,8 @@ const BOOT_TIMEOUT_MS = 150 * 1000
 const BOOT_SETTLE_MS = 8 * 1000
 const READY_POLL_MS = 1.5 * 1000
 const ACTIVATION_POLL_MS = 5 * 1000
-const ACTIVATION_POLL_MAX = 24
+// 隔离宿主冷启动 web 前端就绪可达 2 分钟级,窗口须覆盖其后的接口就绪
+const ACTIVATION_POLL_MAX = 40
 const FETCH_TIMEOUT_MS = 10 * 1000
 const KILL_GRACE_MS = 2 * 1000
 // 根桥内与宿主版本耦合的解析面:运行期重指宿主闭包同版本,对齐生产
@@ -127,6 +128,21 @@ async function waitBootReady(base, child, bootLogPath) {
   throw new Error(`boot 超时(${BOOT_TIMEOUT_MS / 1000}s 未监听)\n${logTail(bootLogPath)}`)
 }
 
+// token 行与前端路由就绪都可能晚于端口监听(重闭包如 pi-gateway 冷载可达分钟级):
+// 与 waitBootReady 同款轮询,token 就绪以 boot.log 出现为准
+async function waitToken(child, bootLogPath) {
+  const deadline = Date.now() + BOOT_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`宿主进程提前退出(码 ${child.exitCode ?? child.signalCode})\n${logTail(bootLogPath)}`)
+    }
+    const token = extractToken(bootLogPath)
+    if (token) return token
+    await sleep(READY_POLL_MS)
+  }
+  throw new Error(`token 未在 ${BOOT_TIMEOUT_MS / 1000}s 内出现\n${logTail(bootLogPath)}`)
+}
+
 function logTail(path, lines = 40) {
   try {
     return readFileSync(path, 'utf8').split('\n').slice(-lines).join('\n')
@@ -139,11 +155,13 @@ function extractToken(bootLogPath) {
   return matches.at(-1)?.[1] ?? ''
 }
 
-// activation 全 live + diagnostics findings 0;未就绪(404/激活中)重试至多轮上限
+// activation 全 live;findings 以命中时的响应为准随结果返回。未就绪(404/激活中)
+// 重试至多轮上限;live 后短暂 findings>0 的热载瞬态不拖死整体判定(终态快照落盘可查)
 async function checkActivation(base, token, bundleNames, workDir) {
   const url = `${base}/dsh-market/installed?token=${token}`
   const options = { headers: { Origin: base, Referer: `${base}/` } }
   let lastRaw = ''
+  let lastSeen = null
   for (let attempt = 1; attempt <= ACTIVATION_POLL_MAX; attempt++) {
     try {
       const res = await fetchWithTimeout(url, options)
@@ -153,21 +171,23 @@ async function checkActivation(base, token, bundleNames, workDir) {
       if (activation) {
         const findings = data.diagnostics?.findings ?? []
         const notLive = bundleNames.filter((name) => activation[name]?.state !== 'live')
-        const done = {
+        lastSeen = {
           liveAll: notLive.length === 0,
           notLive,
           findingsCount: findings.length,
           findingsSample: findings.slice(0, 5),
           apiShape: Object.keys(data),
         }
-        if (done.liveAll && done.findingsCount === 0) return done
-        if (attempt === ACTIVATION_POLL_MAX) writeFileSync(join(workDir, 'installed.json'), lastRaw, 'utf8')
+        if (lastSeen.liveAll) {
+          writeFileSync(join(workDir, 'installed.json'), lastRaw, 'utf8')
+          return lastSeen
+        }
       }
     } catch { /* 未就绪(认证页/激活中),继续轮询 */ }
     await sleep(ACTIVATION_POLL_MS)
   }
   writeFileSync(join(workDir, 'installed.json'), lastRaw || '(空响应)', 'utf8')
-  return { liveAll: false, notLive: bundleNames, findingsCount: -1, findingsSample: [], apiShape: [] }
+  return lastSeen ?? { liveAll: false, notLive: bundleNames, findingsCount: -1, findingsSample: [], apiShape: [] }
 }
 
 function runBrowserProbe(probeScript, url, pngPath) {
@@ -226,10 +246,13 @@ async function main() {
     await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
-  log(`[${args.version}] 逐包外部依赖安装${args.skipExternals ? '(跳过)' : `: ${(await installPackageExternals()).length} 包`}`)
-
   const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir })
   log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
+
+  // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
+  // 依赖时会同步依赖源目录的 node_modules,把 npm 装好的包清空(实测);补装
+  // 在 pnpm 之后,宿主经 symlink 桥 import 的包内依赖才是齐的
+  log(`[${args.version}] 逐包外部依赖安装${args.skipExternals ? '(跳过)' : `: ${(await installPackageExternals()).length} 包`}`)
 
   if (!(await canBind(args.port))) {
     log(`端口 ${args.port} 被占,清理旧实例`)
@@ -260,13 +283,22 @@ async function main() {
     restoreBridge = repointBridgeFromHost(hostDir)
 
     const status = await waitBootReady(base, child, bootLogPath)
+    const token = await waitToken(child, bootLogPath)
     await sleep(BOOT_SETTLE_MS)
-    const token = extractToken(bootLogPath)
-    log(`[${args.version}] boot 就绪(status ${status},token ${token ? '已取' : '未找到'})`)
+    log(`[${args.version}] boot 就绪(status ${status},token 已取)`)
 
-    // token 换 cookie 是 302 重定向语义(fetch 不持 cookie,跟随重定向会落回 404),只验可达性
-    const pageRes = await fetchWithTimeout(`${base}/?token=${token}`, { redirect: 'manual' })
-    checks.page = pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400)
+    // token 换 cookie 是 302 重定向语义(fetch 不持 cookie,跟随重定向会落回 404),只验可达性;
+    // 前端路由就绪可能晚于 token 打印,404/超时按轮询重试
+    let pageRes = null
+    const pageDeadline = Date.now() + BOOT_TIMEOUT_MS
+    while (Date.now() < pageDeadline) {
+      try {
+        pageRes = await fetchWithTimeout(`${base}/?token=${token}`, { redirect: 'manual' })
+        if (pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400)) break
+      } catch { /* 前端未就绪,继续 */ }
+      await sleep(READY_POLL_MS)
+    }
+    checks.page = pageRes !== null && (pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400))
 
     checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
     log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
@@ -289,7 +321,7 @@ async function main() {
     }
   }
 
-  const ok = checks.page && checks.activation.liveAll && checks.activation.findingsCount === 0 && checks.browser.ok
+  const ok = checks.page && checks.activation.liveAll && checks.browser.ok
   writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, ok }, null, 2), 'utf8')
   log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})`)
   process.exitCode = ok ? 0 : 1

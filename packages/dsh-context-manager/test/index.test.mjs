@@ -482,6 +482,84 @@ test('历史输入路由:产物未变的会话跨对齐零解压(磁盘 extracts
   })
 })
 
+test('历史输入路由:旧版本提取缓存自动重解压(命令历史自愈)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-ver-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { stat } = await import('node:fs/promises')
+      const info = await stat(artifactPath)
+      await ensureCacheDir(cacheDir)
+      // 预置旧版本提取器写下的缓存:指纹与产物一致但条目缺命令输入(无 v 字段)
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '旧输入', at: 100, sid: 's1' }],
+        extracts: {
+          s1: { mtimeMs: info.mtimeMs, size: info.size, entries: [{ text: '旧输入', at: 100 }] },
+        },
+      })
+      const commandEvent = {
+        type: 'command/run',
+        seq: 2,
+        time: 200,
+        data: { commandId: 'c1', name: 'goal', args: ' 收尾', source: { kind: 'user' } },
+      }
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('旧输入', 100), commandEvent] },
+      })
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=workspace',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '/goal 收尾'))
+      assert.ok(readCounts.get('s1') >= 1, '版本不符触发重解压')
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['/goal 收尾', '旧输入'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:session 范围版本不符判 stale,聚焦对齐首请求内补齐', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-ver2-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { stat } = await import('node:fs/promises')
+      const info = await stat(artifactPath)
+      await ensureCacheDir(cacheDir)
+      // 预置旧版本缓存:指纹与产物一致(不改条目则指纹校验判新鲜)但缺 v 字段
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '旧输入', at: 100, sid: 's1' }],
+        extracts: {
+          s1: { mtimeMs: info.mtimeMs, size: info.size, entries: [{ text: '旧输入', at: 100 }] },
+        },
+      })
+      const commandEvent = {
+        type: 'command/run',
+        seq: 2,
+        time: 200,
+        data: { commandId: 'c1', name: 'goal', args: ' 收尾', source: { kind: 'user' } },
+      }
+      const { handlers, readCounts } = makeCtx({
+        headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactPath }) },
+        readSessions: { s1: [userMessageEvent('旧输入', 100), commandEvent] },
+      })
+      // 首请求即 aligned:true 且含命令条目——版本不符走聚焦对齐,单次请求内补齐
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '/goal 收尾'))
+      assert.equal(res.body.aligned, true, '聚焦对齐快于等待时限,首请求即就绪')
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['/goal 收尾', '旧输入'])
+      assert.ok(readCounts.get('s1') >= 1, '版本不符触发聚焦重解压')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 // ── 历史输入路由:窗口与 subagent 排除 ──
 
 test('历史输入路由:启动对齐只回溯最近 STARTUP_SCAN 个会话,老会话不解压', skipMissingDeps, async () => {
@@ -661,12 +739,12 @@ test('常用提示词:超长截断、上限裁剪、空 text 拒绝', skipMissin
 
 // ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
 
-test('横切守卫:6 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+test('横切守卫:8 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
     const getOnly = '/api/context/inputs'
     const postOnly = '/api/context/prompts/toggle'
-    const dualMethods = ['/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/copy-sid-enabled']
+    const dualMethods = ['/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled']
     // GET-only 路由:POST 拒绝
     const inputsPost = response()
     await handlers.get(getOnly)(request('s1'), inputsPost)
@@ -684,10 +762,10 @@ test('横切守卫:6 条路由方法白名单,白名单外一律 405', skipMissi
   })
 })
 
-test('横切守卫:5 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+test('横切守卫:7 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
-    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/copy-sid-enabled']
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled']
     for (const routePath of postPaths) {
       const res = await postRaw(handlers, routePath, '{oops')
       assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')
@@ -802,5 +880,22 @@ test('标题栏复制 sessionId 启停:GET 默认启用,POST 切换经 settings 
   await postJson(handlers, '/api/context/copy-sid-enabled', { enabled: true })
   const restored = response()
   await handlers.get('/api/context/copy-sid-enabled')(getRequest2('/api/context/copy-sid-enabled', 'GET'), restored)
+  assert.equal(restored.body.enabled, true)
+})
+
+test('输入框历史按钮启停:GET 默认启用,POST 切换经 settings 持久,GET 反映新值', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const initial = response()
+  await handlers.get('/api/context/history-button-enabled')(getRequest2('/api/context/history-button-enabled', 'GET'), initial)
+  assert.equal(initial.body.enabled, true, '默认启用')
+  const off = await postJson(handlers, '/api/context/history-button-enabled', { enabled: false })
+  assert.equal(off.body.enabled, false)
+  // settings 持久:重读反映关闭态;POST 回 true 恢复
+  const reread = response()
+  await handlers.get('/api/context/history-button-enabled')(getRequest2('/api/context/history-button-enabled', 'GET'), reread)
+  assert.equal(reread.body.enabled, false, 'settings 持久化关闭态')
+  await postJson(handlers, '/api/context/history-button-enabled', { enabled: true })
+  const restored = response()
+  await handlers.get('/api/context/history-button-enabled')(getRequest2('/api/context/history-button-enabled', 'GET'), restored)
   assert.equal(restored.body.enabled, true)
 })

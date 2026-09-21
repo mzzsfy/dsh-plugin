@@ -45,7 +45,8 @@ function expandForEach(state, step) {
   const list = sourceList(state, step)
   if (list === null) return
   s.instances = list.map((item, index) => ({
-    key: `#${index + 1}`, index, item, status: 'pending', outputs: null, failCount: 0, carry: null,
+    // index 1 基(与 key #N 及 spec {item.index} 序号口径一致)
+    key: `#${index + 1}`, index: index + 1, item, status: 'pending', outputs: null, failCount: 0, carry: null,
   }))
 }
 

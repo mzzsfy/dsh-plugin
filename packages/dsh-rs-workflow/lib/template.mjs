@@ -1,4 +1,4 @@
-﻿// 模板静态校验器:DSL v5 唯一权威(board 保存校验唯一入口);v5 新增顶层 autoApprove 键
+// 模板静态校验器:DSL v5 唯一权威(board 保存校验唯一入口);v5 新增顶层 autoApprove 键
 
 export const SLOT_KEYS = ['planner', 'executor', 'reviewer', 'executor-loop', 'reviewer-approve', 'executor-escalate']
 const TOP_FIELDS = new Set(['id', 'label', 'description', 'inputs', 'steps', 'autoApprove'])
@@ -313,12 +313,13 @@ export function validateTemplateSet(list) {
     }
     if (outs.size > 0) tmplEdges.set(t.id, outs)
   }
-  const depthOf = (id, seen) => {
-    // 环即拒绝:深度无穷,不限于此路径是否重复经过
-    if (seen.has(id)) return Infinity
-    seen.add(id)
+  const depthOf = (id, path) => {
+    // 仅同路径重访即环(深度无穷);菱形(不同路径汇合同一子流程)是合法 DAG,回溯时摘除路径标记
+    if (path.has(id)) return Infinity
+    path.add(id)
     let d = 1
-    for (const n of tmplEdges.get(id) ?? []) d = Math.max(d, 1 + depthOf(n, seen))
+    for (const n of tmplEdges.get(id) ?? []) d = Math.max(d, 1 + depthOf(n, path))
+    path.delete(id)
     return d
   }
   for (const id of tmplEdges.keys()) {

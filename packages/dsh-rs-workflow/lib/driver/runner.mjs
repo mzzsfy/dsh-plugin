@@ -48,7 +48,7 @@ function rotateCursor(state, slotKey) {
   state.slotCursor[slotKey] = (state.slotCursor[slotKey] ?? 0) + 1
 }
 
-// 单批次:组 Batch → engine.start → 收敛逐 call 记账。返回 {results, cancelled}
+// 单批次:组 Batch → engine.start → 收敛逐 call 记账。返回 {settled, cancelled}
 export async function runBatch({ state, script, template, batch, ctx }) {
   const { store, runId, engine, parent, signal } = ctx
   const calls = []
@@ -87,8 +87,9 @@ export async function runBatch({ state, script, template, batch, ctx }) {
   }
 
   let outcome
+  let run
   try {
-    const run = engine.start({
+    run = engine.start({
       script: FLOW_EXEC_SOURCE,
       args: { calls },
       // 宿主 meta 契约:description 必填非空;phases 必须为 {title} 对象数组(dsh-workflow-worker-thread meta 校验)
@@ -104,15 +105,20 @@ export async function runBatch({ state, script, template, batch, ctx }) {
   } catch (e) {
     if (signal?.aborted) return { cancelled: true }
     outcome = { results: calls.map((c) => ({ callId: c.callId, ok: false, error: String(e?.message ?? e) })) }
+  } finally {
+    // 宿主契约:caller must dispose every run(否则 worker 线程泄漏);engine.start 同步抛时 run 为空
+    await run?.dispose?.().catch?.(() => {})
   }
   if (signal?.aborted) return { cancelled: true }
   // 引擎 run.result 契约:{ value(脚本返回值), stopReason, error?, agentsStarted }
-  // stopReason 非 completed(如 cancelled/error)时 value 不可信,全部调用按失败记账
+  // stopReason 非 completed(如 error)时 value 不可信,全部调用统一按失败记账
+  let results
   if (outcome?.stopReason !== undefined && outcome?.stopReason !== 'completed') {
     const reason = String(outcome?.error ?? outcome?.stopReason)
-    return { results: calls.map((c) => ({ callId: c.callId, ok: false, error: reason })) }
+    results = calls.map((c) => ({ callId: c.callId, ok: false, error: reason }))
+  } else {
+    results = outcome?.value?.results ?? outcome?.results ?? []
   }
-  const results = outcome?.value?.results ?? outcome?.results ?? []
   const settled = []
   for (const result of results) {
     const meta = callMeta.get(result.callId)

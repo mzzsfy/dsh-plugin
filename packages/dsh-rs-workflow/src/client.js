@@ -1260,7 +1260,6 @@ window.__ModuleLoader__.load({
             unsubscribe()
             if (timer) clearInterval(timer)
             if (disposeView) disposeView()
-            if (disposeChip) disposeChip()
           }
         }, 'rs-workflow: session-aware flow view')
       },

@@ -1,11 +1,13 @@
-// dsh-context-manager Client 半区:「插件」设置页可配置卡片(五启停开关)
-// + 历史输入浮层(Alt+↑ 唤起,范围导航/搜索/收藏回填) + 插话撤回 + 对话 fork
+// dsh-context-manager Client 半区:「插件」设置页可配置卡片(六启停开关)
+// + 历史输入浮层(Alt+↑ 或输入框工具排按钮唤起,范围导航/搜索/收藏回填)
+// + 插话撤回 + 对话 fork
 // + 标题栏复制 sessionId(悬停显隐)。
 // 历史输入挂官方 conversation.input.dock 插槽(渲染为零高度锚点),回填走宿主公共
 // 契约 inputActions.setDraft;插话撤回注入官方 pending steering 气泡操作图标排;
 // fork 注入消息气泡操作排,分叉到该轮之前并把该轮用户输入回填子会话输入框(重试
 // 语义),RPC 走宿主 sessions 服务面(fork+open),锚点经 remote.session.follow
-// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射;复制 sessionId 挂官方
+// 开场帧建立轮号→{ 结束 seq, 首问文本 } 映射;回填前经官方 input 快照(useInput)
+// 探测输入框占用,已被用户输入则不覆盖(权限高于回填);复制 sessionId 挂官方
 // conversation.session.header.actions 插槽。浏览器半区经 webServer 路由
 // ('/api/context/*')访问 Host。打包为单文件自包含格式,无法跨文件 require;
 // 与 src/core.mjs 镜像的纯函数(filterHistoryInputs/forkFailureText/forkRetryText)
@@ -154,6 +156,7 @@ const CSS = [
 const INPUTS_URL = '/api/context/inputs'
 const PROMPTS_TOGGLE_URL = '/api/context/prompts/toggle'
 const HISTORY_ENABLED_URL = '/api/context/history-enabled'
+const HISTORY_BUTTON_ENABLED_URL = '/api/context/history-button-enabled'
 const STEER_ENABLED_URL = '/api/context/steer-recall-enabled'
 const FORK_ENABLED_URL = '/api/context/fork-enabled'
 const FORK_AUTO_RESEND_URL = '/api/context/fork-auto-resend-enabled'
@@ -236,6 +239,63 @@ function forkRetryText(data) {
   return text.trim() === '' ? null : text
 }
 
+// ── 输入框历史按钮:注入官方输入工具排,点击开关浮层(与 Alt+↑ 等效)──
+
+// 注入标记:识别自家节点,防重复注入;停用/卸载按标记全量移除
+const HISTORY_BTN_FLAG = 'data-cx-hist-trigger'
+// 官方输入工具排定位锚点:行类名后缀 + 官方 _add 图标按钮,双锚点一致才认;
+// 官方类名漂移时寻行返回 null,注入静默跳过(干净禁用)
+const TOOLS_ROW_SUFFIX = '_tools'
+// 按钮悬停说明:点击与 Alt+↑ 等效
+const HISTORY_BUTTON_TITLE = '历史输入(Alt+↑)'
+
+// 官方输入工具排寻行:遍历官方 _add 图标按钮取其所属行
+function findToolsRow(doc) {
+  for (const button of doc.querySelectorAll('button[class$="_add"]')) {
+    const row = button.parentElement
+    if (row && typeof row.className === 'string' && row.className.endsWith(TOOLS_ROW_SUFFIX)) return row
+  }
+  return null
+}
+
+// 历史图标 svg(时钟回拨):fill 继承 currentColor,视觉重量与官方 14px 图标一致
+function histButtonSvg(doc) {
+  const namespace = 'http://www.w3.org/2000/svg'
+  const svg = doc.createElementNS(namespace, 'svg')
+  svg.setAttribute('width', '14')
+  svg.setAttribute('height', '14')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('aria-hidden', 'true')
+  const path = doc.createElementNS(namespace, 'path')
+  path.setAttribute('fill', 'currentColor')
+  path.setAttribute('d', 'M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L8.85 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 16.99 10.51 18 13 18c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z')
+  svg.appendChild(path)
+  return svg
+}
+
+// 幂等注入:未注入时克隆官方 _add 类名创建按钮(尺寸/hover 全部原生),位置
+// 固定在最后一个官方 _add 之后(与指令/附件同簇);已注入原样返回。
+// doc 注入便于测试与宿主文档解耦
+function ensureHistoryButton(doc, row, onToggle) {
+  const existing = row.querySelector('[' + HISTORY_BTN_FLAG + ']')
+  if (existing) return existing
+  const official = row.querySelector('button[class$="_add"]')
+  if (!official) return null
+  const button = doc.createElement('button')
+  button.type = 'button'
+  button.setAttribute(HISTORY_BTN_FLAG, '')
+  button.className = official.className
+  button.title = HISTORY_BUTTON_TITLE
+  button.setAttribute('aria-label', '历史输入')
+  button.addEventListener('click', onToggle)
+  button.appendChild(histButtonSvg(doc))
+  const officialButtons = row.querySelectorAll('button[class$="_add"]')
+  const last = officialButtons[officialButtons.length - 1]
+  row.insertBefore(button, (last && last.nextSibling) || null)
+  return button
+}
+
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
@@ -262,8 +322,13 @@ function HistoryDock({ session, inputActions }) {
   // 历史浮层启停(设置开关):挂载拉取一次,停用即整体不渲染、键盘放行
   const enabledRef = React.useRef(true)
   const [historyEnabled, setHistoryEnabled] = useState(true)
+  // 输入框历史按钮启停(设置开关):false 仅隐藏按钮,快捷键与浮层不受影响
+  const buttonEnabledRef = React.useRef(true)
+  const [buttonEnabled, setButtonEnabled] = useState(true)
   sessionRef.current = session
   inputActionsRef.current = inputActions
+  // 条件 return 之前同步:停用路径的扫描守卫也要看到最新值(与 SteerRecallDock 同构)
+  buttonEnabledRef.current = buttonEnabled
   useEffect(() => {
     api(HISTORY_ENABLED_URL)
       .then((payload) => {
@@ -271,6 +336,9 @@ function HistoryDock({ session, inputActions }) {
         enabledRef.current = on
         setHistoryEnabled(on)
       })
+      .catch(() => {})
+    api(HISTORY_BUTTON_ENABLED_URL)
+      .then((payload) => setButtonEnabled(payload ? payload.enabled !== false : true))
       .catch(() => {})
   }, [])
 
@@ -493,11 +561,15 @@ function HistoryDock({ session, inputActions }) {
     if (row) row.scrollIntoView({ block: 'nearest' })
   }, [open, cursor, items])
 
-  // 浮层外点击关闭(双写:漏写 viewRef 会让键盘层误判浮层仍开,吞掉输入框方向键)
+  // 浮层外点击关闭(双写:漏写 viewRef 会让键盘层误判浮层仍开,吞掉输入框方向键)。
+  // 注入按钮在本容器外,closest 守卫跳过:否则 mousedown 先关、click 再开,
+  // 浮层开时点按钮等于常开,toggle 语义失效
   useEffect(() => {
     if (!open) return undefined
     function onPointerDown(event) {
-      if (rootRef.current && !rootRef.current.contains(event.target)) {
+      const target = event.target
+      if (target && typeof target.closest === 'function' && target.closest('[' + HISTORY_BTN_FLAG + ']')) return
+      if (rootRef.current && !rootRef.current.contains(target)) {
         syncView({ open: false })
         setOpen(false)
       }
@@ -505,6 +577,49 @@ function HistoryDock({ session, inputActions }) {
     document.addEventListener('mousedown', onPointerDown, true)
     return () => document.removeEventListener('mousedown', onPointerDown, true)
   }, [open])
+
+  // 注入按钮点击:开→关,关→唤起;经 ref 接线,挂载一次的监听器恒读最新闭包
+  function toggleFromButton() {
+    if (viewRef.current.open) {
+      syncView({ open: false })
+      setOpen(false)
+      return
+    }
+    openPopup()
+  }
+  const toggleRef = React.useRef(() => {})
+  toggleRef.current = toggleFromButton
+
+  // 输入框工具排按钮(设置开关):挂载后扫描官方工具排注入;官方工具排随布局
+  // 状态被 React 重建时经观察器补注,开关值异步到达(无 DOM 变更)经重扫对账。
+  // 启停读 ref(开关值挂载拉取后即时反映),停用/卸载按标记全量移除
+  const buttonScanRef = React.useRef(null)
+  useEffect(() => {
+    function removeAll() {
+      document.querySelectorAll('[' + HISTORY_BTN_FLAG + ']').forEach((button) => button.remove())
+    }
+    function sync() {
+      if (enabledRef.current === false || buttonEnabledRef.current === false) {
+        removeAll()
+        return
+      }
+      const row = findToolsRow(document)
+      if (row) ensureHistoryButton(document, row, () => toggleRef.current())
+    }
+    buttonScanRef.current = sync
+    const observer = new MutationObserver(sync)
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+    sync()
+    return () => {
+      buttonScanRef.current = null
+      observer.disconnect()
+      removeAll()
+    }
+  }, [])
+  // 开关状态/浮层启停变化即时重扫(观察器只覆盖 DOM 变更,状态变化需主动对账)
+  useEffect(() => {
+    if (buttonScanRef.current) buttonScanRef.current()
+  }, [historyEnabled, buttonEnabled])
 
   // 零高度锚点:平时不占任何界面空间,仅浮层打开时渲染;设置停用整体不渲染
   if (session === undefined || inputActions === undefined || historyEnabled === false) return null
@@ -717,6 +832,9 @@ const FORK_PAGE_MAX_MESSAGES = 2000
 // 重试草稿通道:分叉成功后子会话尚未挂载,原输入先按子会话 id 暂存,
 // 子会话的 dock 挂载(inputActions 就绪)时消费回填并清除
 const pendingForkDrafts = new Map()
+// 已消费会话:effect 依赖(inputActions 身份)变化会重跑,重跑时草稿已被 delete,
+// 若不做标记会落入「无草稿」路径并对输入框产生二次写入(空写即清空)
+const consumedForkDrafts = new Set()
 // 草稿消费重查:覆盖 open 切换期间「挂载先于登记」的窗口(单次即可,上限留裕量)
 const FORK_DRAFT_POLL_MS = 400
 const FORK_DRAFT_POLLS = 3
@@ -832,7 +950,7 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
 // 轮号无映射 = 该轮未完成,首问无文本(纯图等)= 无法重试,均不注入;
 // 首轮无前锚(宿主 fork 边界必须落在 turn/end 上,复制零事件不可表达),也不注入。
 // 分叉动作经宿主 sessions 服务面 fork+open(与官方 chat 同构),成功 toast 并切换
-function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSession, submitPrompt, loadTurnEnds }) {
+function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, cancelSession, submitPrompt, loadTurnEnds }) {
   // 依赖键 = 会话 id:session 快照身份随每次投影更新漂移,不能作 effect 依赖;
   // loadTurnEnds 闭包身份同样不稳定,经 ref 取用
   const sessionId = session && session.sessionId
@@ -842,15 +960,39 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSessi
   const submitRef = useRef(null)
   submitRef.current = submitPrompt
   const [turnEnds, setTurnEnds] = useState(null)
+  // 映射基线:重拉结果与基线比对,相同则不 setState——setState 会触发重渲染并再次
+  // 触发扫描,新轮在映射中缺失时形成 拉取→setState→扫描→拉取 的无限循环
+  const turnEndsRef = useRef(null)
+  // 在途门控:MutationObserver 在流式输出期间高频触发,无门控会造成请求风暴
+  const refreshPendingRef = useRef(false)
+  // 重拉入口装配到 ref 供扫描调用:新轮 turn/end 落在拉取窗口之后时映射里没有该轮,
+  // 注入资格判空即跳过,按钮永不出现(实测:必须刷新页面才恢复)。门控保证同时在途
+  // 最多一次;结果与基线相同则不 setState,避免 setState→扫描→拉取的循环
+  const refreshRef = useRef(null)
+  refreshRef.current = () => {
+    if (refreshPendingRef.current) return
+    refreshPendingRef.current = true
+    Promise.resolve(loadRef.current())
+      .then((map) => {
+        refreshPendingRef.current = false
+        if (turnEndsRef.current === map) return
+        turnEndsRef.current = map
+        setTurnEnds(map)
+      })
+      .catch(() => { refreshPendingRef.current = false })
+  }
   useEffect(() => {
     if (sessionId === undefined) return undefined
     let disposed = false
     // 拉取前置空:会话切换后旧会话的映射不得继续服务新会话——轮号跨会话重叠,
     // 旧 seq 会让分叉锚点错位;置空期间 ForkDock 以 null 短路,不注入按钮
     setTurnEnds(null)
+    turnEndsRef.current = null
     loadRef.current()
       .then((map) => {
-        if (!disposed) setTurnEnds(map)
+        if (disposed) return
+        turnEndsRef.current = map
+        setTurnEnds(map)
       })
       .catch((error) => {
         // 映射拉取失败(网络/宿主繁忙):fork 无锚点可用,保持禁用不注入;
@@ -866,8 +1008,14 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSessi
   // 自动重发(开关开):草稿带 autoSubmit 标记,setDraft 后经 remote.session.prompt
   // 立即提交原文(重生成语义);prompt 失败仅 toast——文本已在输入框,可手动发送
   const [draftPollTick, setDraftPollTick] = useState(0)
+  // 回填前探测输入框当前草稿:宿主输入快照(useInput)只在快照面可用,
+  // 缺失时按空草稿处理(旧宿主降级为原行为)
+  const liveDraft = typeof useInput === 'function' ? useInput((state) => state.draft) : ''
+  const liveDraftRef = useRef('')
+  liveDraftRef.current = typeof liveDraft === 'string' ? liveDraft : ''
   useEffect(() => {
     if (sessionId === undefined || !inputActions || typeof inputActions.setDraft !== 'function') return undefined
+    if (consumedForkDrafts.has(sessionId)) return undefined
     const draft = pendingForkDrafts.get(sessionId)
     if (draft === undefined) {
       if (draftPollTick >= FORK_DRAFT_POLLS) return undefined
@@ -875,20 +1023,34 @@ function ForkDockWithBootstrap({ session, inputActions, forkSession, cancelSessi
       return () => clearTimeout(timer)
     }
     pendingForkDrafts.delete(sessionId)
+    consumedForkDrafts.add(sessionId)
     const text = draft && typeof draft === 'object' ? draft.text : draft
     const autoSubmit = Boolean(draft && typeof draft === 'object' && draft.autoSubmit === true)
-    inputActions.setDraft(text)
+    // 用户已开始输入:回填是破坏性整体替换(setDraft 清根重建),优先级低于用户输入;
+    // 放弃回填并提示,避免吞掉用户在 dock 挂载窗口内的击键
+    const draftOccupied = liveDraftRef.current.trim() !== ''
     if (autoSubmit && submitRef.current) {
+      // 提交即无草稿(官方发送语义):原文已发出,输入框不得残留,否则用户再发即重复消息;
+      // 提交失败才回填文本,供手动重发
+      if (draftOccupied) {
+        toast('子会话已有输入,原输入未自动发送')
+        return undefined
+      }
       Promise.resolve(submitRef.current({ sessionId, text })).catch((error) => {
-        toast('自动重发失败,文本已在输入框可手动发送: ' + String(error && error.message || error), { kind: 'error' })
+        if (typeof inputActions.setDraft === 'function') inputActions.setDraft(text)
+        toast('自动重发失败,文本已回填输入框可手动发送: ' + String(error && error.message || error), { kind: 'error' })
       })
+    } else if (draftOccupied) {
+      toast('子会话已有输入,原输入未回填')
+    } else {
+      inputActions.setDraft(text)
     }
     return undefined
   }, [sessionId, inputActions, draftPollTick])
-  return h(ForkDock, { session, forkSession, cancelSession, turnEnds })
+  return h(ForkDock, { session, forkSession, cancelSession, turnEnds, refreshRef })
 }
 
-function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
+function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef }) {
   const [enabled, setEnabled] = useState(true)
   const [autoResend, setAutoResend] = useState(false)
   const turnEndsRef = useRef(null)
@@ -937,13 +1099,18 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
         if (rawTurn === null || rawTurn.trim() === '') return
         const turn = Number(rawTurn)
         if (!Number.isInteger(turn)) return
-        // 重试资格三查:映射缺失的轮(超窗口)不可分叉;首轮无前锚(宿主
+        // 重试资格三查:映射缺失的轮(超窗口/新轮)不可分叉;首轮无前锚(宿主
         // fork 边界必须落在 turn/end,复制零事件不可表达);无首问文本(纯图等)
         // 回填无从谈起。open=true 的进行中轮 turn/end 未落账,同样可分叉——
         // 锚点取其前一个闭合轮,该轮未完成的回复分叉后停掉(见点击处理器)。
         // 按钮在场即暗示可用,禁用态文案无法区分成因,不注入即误导
         const entry = turnEndsRef.current.get(turn)
-        if (entry === undefined || entry.text === null) return
+        if (entry === undefined) {
+          // 新轮:映射是挂载时的一次快照,补拉后由 setState 触发重扫
+          if (refreshRef.current) refreshRef.current()
+          return
+        }
+        if (entry.text === null) return
         let previous = null
         for (const key of turnEndsRef.current.keys()) {
           const candidate = turnEndsRef.current.get(key)
@@ -976,9 +1143,10 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
             .then((childId) => {
               // 暂存先于 toast:open 的子会话挂载可能紧随 resolve,回填承诺必须先就位;
               // open 失败时暂存保留,用户手动打开子会话仍兑现;
-              // 自动重发开关开:登记带标记草稿,子会话消费时回填后经 prompt 提交
+              // 自动重发开关开:登记带标记草稿,子会话消费时直接提交(不留草稿)
               if (typeof childId === 'string' && childId !== '') {
                 pendingForkDrafts.set(childId, { text: currentEntry.text, autoSubmit: autoResendOn })
+                consumedForkDrafts.delete(childId)
               }
               // 进行中轮分叉后原会话该轮无人再读,停掉止损;失败不影响分叉成功事实
               if (currentEntry.open === true && typeof cancelSessionFn === 'function') {
@@ -986,7 +1154,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
                   console.warn('[context-manager] 分叉后停止原会话进行中回复失败', error)
                 })
               }
-              toast('已分叉,原输入已填入子会话输入框')
+              toast(autoResendOn ? '已分叉,原输入已自动发送到子会话' : '已分叉,原输入已填入子会话输入框')
               return childId
             })
             .catch((error) => {
@@ -1017,6 +1185,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds }) {
 // 面板设置项悬停说明:原生 title(设置侧栏为滚动容器,CSS 气泡会被 overflow
 // 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
 const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
+const HISTORY_BUTTON_SWITCH_TITLE = '输入框下方工具排显示历史输入按钮,点击打开浮层,再点关闭,与 Alt+↑ 等效;停用仅隐藏按钮,快捷键与浮层不受影响;刷新页面生效。'
 const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
 const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
 const FORK_AUTO_RESEND_SWITCH_TITLE = '分叉成功后自动把该轮原输入发送到子会话立即开跑(重生成语义,相当于原输入重跑一遍);关闭时分叉仅把原输入回填子会话输入框,由你编辑后再手动发送。'
@@ -1111,6 +1280,7 @@ function switchRow(url, label, title, okText) {
 }
 
 const HistorySwitchRow = switchRow(HISTORY_ENABLED_URL, '历史输入浮层(Alt+↑)', HISTORY_SWITCH_TITLE, '历史输入浮层')
+const HistoryButtonSwitchRow = switchRow(HISTORY_BUTTON_ENABLED_URL, '输入框历史按钮', HISTORY_BUTTON_SWITCH_TITLE, '输入框历史按钮')
 const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH_TITLE, '插话撤回')
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
 const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
@@ -1135,6 +1305,7 @@ function ContextPanel() {
     open && h('div', { className: 'cx-card__body' },
       h('span', { className: 'cx-panel__hint' }, '变更刷新页面生效。'),
       h(HistorySwitchRow),
+      h(HistoryButtonSwitchRow),
       h(SteerSwitchRow),
       h(ForkSwitchRow),
       h(ForkAutoResendSwitchRow),
