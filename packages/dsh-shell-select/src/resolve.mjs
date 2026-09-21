@@ -59,8 +59,8 @@ export function candidatePaths(kind, env) {
     .filter((entry) => entry.length > 0)
   // bash 的 PATH 探测排除 SystemRoot 下条目:System32\bash.exe 是 WSL forwarder,
   // 误命中会让 git-bash 客户端实际跑 WSL bash(方言/路径全变)。
-  // 斜杠形态归一后比较,正斜杠 PATH 条目(手动配置)同样命中
-  const systemRoot = String(env.SystemRoot ?? 'C:\\WINDOWS').toLowerCase().replace(/\//g, '\\')
+  // 斜杠形态归一后比较,正斜杠 PATH 条目(手动配置)同样命中;剥尾分隔符防前缀永不匹配
+  const systemRoot = String(env.SystemRoot ?? 'C:\\WINDOWS').toLowerCase().replace(/\//g, '\\').replace(/[\\/]+$/, '')
   const pathEntriesForKind = (kind) => (kind === 'bash'
     ? pathEntries.filter((entry) => !entry.toLowerCase().replace(/\//g, '\\').startsWith(`${systemRoot}\\`))
     : pathEntries)

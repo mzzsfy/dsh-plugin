@@ -53,6 +53,16 @@ test('wsl 形:调用方显式 WSLENV 优先于继承值', () => {
   assert.equal(env.WSLENV, 'A:DSH_X')
 })
 
+test('条目显式 WSLENV 优先于继承值,追加键去重保留', () => {
+  const env = buildClientEnv('wsl', { DSH_X: '1' }, { WSLENV: 'E', MSYSTEM: 'MINGW64' }, { inheritedWslenv: 'WT_SESSION:MSYSTEM:' })
+  assert.equal(env.WSLENV, 'E:MSYSTEM:DSH_X')
+})
+
+test('继承值已含的追加键不产生重复段', () => {
+  const env = buildClientEnv('wsl', { DSH_X: '1' }, { MSYSTEM: 'MINGW64' }, { inheritedWslenv: 'WT:DSH_X:' })
+  assert.equal(env.WSLENV, 'WT:DSH_X:MSYSTEM')
+})
+
 test('wsl 形:无继承无显式时从空构建,无空条目', () => {
   const env = buildClientEnv('wsl', { DSH_X: '1' }, undefined, { inheritedWslenv: undefined })
   assert.equal(env.WSLENV, 'DSH_X')

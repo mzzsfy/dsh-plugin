@@ -68,6 +68,13 @@ test('bash 候选排除 SystemRoot 下的正斜杠 PATH 条目', () => {
   assert.ok(candidates.includes('C:\\one\\bash.exe'))
 })
 
+test('SystemRoot 带尾分隔符时排除规则仍命中', () => {
+  const env = { ...ENV, SystemRoot: 'C:\\WINDOWS\\', PATH: 'C:\\WINDOWS\\System32;C:\\one' }
+  const candidates = candidatePaths('bash', env)
+  assert.ok(!candidates.some((candidate) => candidate.toLowerCase().startsWith('c:\\windows')), '尾分隔符 SystemRoot 不得让 forwarder 入候选')
+  assert.ok(candidates.includes('C:\\one\\bash.exe'))
+})
+
 test('LocalAppData 缺省:LAD 锚位跳过,其余候选不受影响', () => {
   const env = { ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LocalAppData: '', PATH: '' }
   const candidates = candidatePaths('bash', env)

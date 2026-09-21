@@ -43,8 +43,9 @@ const WSLENV_SEPARATOR = ':'
  * spawn env 构造纯函数:内置覆盖集 + 条目 env + 调用方 env 三层并集
  * (ENV_OVERRIDES < entryEnv < callerEnv,同键高右优先);
  * wsl 形把条目与调用方全部键(WSLENV 本身除外)追加进 WSLENV——WSL 只放行
- * 白名单变量,不追加则配置静默失效。追加在继承值之上(Windows Terminal 等
- * 已写入条目,重建=静默丢弃),split/规范化去空段;调用方显式 WSLENV 优先于继承值。
+ * 白名单变量,不追加则配置静默失效。base 三级:调用方显式 > 条目显式 > 继承值;
+ * 追加在 base 之上(Windows Terminal 等已写入条目,重建=静默丢弃),
+ * 规范化去空段并去重;追加段无方向 flag,默认双向(Win32 回流可见同键)。
  * @param {string} kind 条目形态
  * @param {Record<string,string>|undefined} callerEnv 调用方环境(spec.env+dshEnv)
  * @param {Record<string,string>|undefined} entryEnv 条目配置环境(shells[].env)
@@ -55,17 +56,21 @@ export function buildClientEnv(kind, callerEnv, entryEnv, io = {}) {
   if (kind !== 'wsl') return env
   const keys = [...Object.keys(entryEnv ?? {}), ...Object.keys(callerEnv ?? {})]
     .filter((key) => key !== 'WSLENV')
-  const declared = Object.prototype.hasOwnProperty.call(callerEnv ?? {}, 'WSLENV')
-  const base = declared
+    .filter((key, index, all) => all.indexOf(key) === index)
+  const callerDeclared = Object.prototype.hasOwnProperty.call(callerEnv ?? {}, 'WSLENV')
+  const entryDeclared = Object.prototype.hasOwnProperty.call(entryEnv ?? {}, 'WSLENV')
+  const base = callerDeclared
     ? env.WSLENV
-    : (typeof io.inheritedWslenv === 'string' && io.inheritedWslenv.length > 0 ? io.inheritedWslenv : env.WSLENV)
+    : entryDeclared
+      ? entryEnv.WSLENV
+      : (typeof io.inheritedWslenv === 'string' && io.inheritedWslenv.length > 0 ? io.inheritedWslenv : env.WSLENV)
   if (keys.length === 0) {
-    // 无追加键也透传继承值:spawn 可能整包替换子环境,缺键=继承条目丢失
+    // 无追加键也透传 base:spawn 可能整包替换子环境,缺键=继承条目丢失
     if (typeof base === 'string' && base.length > 0) env.WSLENV = base
     return env
   }
   const parts = typeof base === 'string' ? base.split(WSLENV_SEPARATOR) : []
-  env.WSLENV = [...parts, ...keys.flatMap((key) => key.split(WSLENV_SEPARATOR))]
+  env.WSLENV = [...new Set([...parts, ...keys])]
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
     .join(WSLENV_SEPARATOR)

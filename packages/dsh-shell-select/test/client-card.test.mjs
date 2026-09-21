@@ -24,6 +24,14 @@ function cardModel() {
   return extractLogic('shellCardModel', { displayCwd, lastSegment, parseExitTail: extractLogic('parseExitTail'), hasSpillNotice: extractLogic('hasSpillNotice') })
 }
 
+function parseEnvText() {
+  return extractLogic('parseEnvText')
+}
+
+function invalidEnvLines() {
+  return extractLogic('invalidEnvLines')
+}
+
 // 运行中调用块(官方形态:无 kind 字段)
 function runningBlock(argsRaw) {
   return { callId: 'c1', name: 'shell', argsRaw }
@@ -46,6 +54,7 @@ const SESSION_CWD = 'C:\\repo'
 test('S11 running 且无 description(persistent 形)回退 generic', () => {
   const model = cardModel()(runningBlock(JSON.stringify({ command: 'interactive session' })), SESSION_CWD)
   assert.equal(model.kind, 'generic')
+  assert.equal(model.running, true)
 })
 
 test('S11b settled 无 description(persistent 结束)回退 generic', () => {
@@ -81,4 +90,17 @@ test('S12c 后台 ack 与 isError 仍走 generic(回归)', () => {
 test('S13 注册面:shell/pwsh/bash 三 key 且 priority -1(文本守卫)', () => {
   assert.match(source, /const TOOLVIEW_KEYS = \['shell', 'pwsh', 'bash'\]/)
   assert.match(source, /key: toolKey, priority: -1/)
+})
+
+test('K=V 往返:值含 = 与空格无损,空行忽略,重复键后行胜', () => {
+  const parse = parseEnvText()
+  assert.deepEqual(parse('A=1\nB=x=y z\n\nA=2'), { A: '2', B: 'x=y z' })
+  assert.deepEqual(parse(''), {})
+  assert.deepEqual(parse(undefined), {})
+})
+
+test('invalidEnvLines:缺 = 行报出,空行不报', () => {
+  const invalid = invalidEnvLines()
+  assert.deepEqual(invalid('A=1\nbroken\n\n  noSep  '), ['broken', 'noSep'])
+  assert.deepEqual(invalid('A=1'), [])
 })

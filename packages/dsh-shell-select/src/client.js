@@ -112,7 +112,29 @@ window.__ModuleLoader__.load({
       '.sls-tv__out { margin:0; padding:8px 10px; border-top:1px solid rgba(128,128,128,.18); font-family:var(--sls-mono, monospace); font-size:12.5px; white-space:pre; overflow-x:auto; max-height:320px; overflow-y:auto; }',
       '.sls-tv__inspect { display:flex; align-items:center; gap:4px; padding:4px 10px; border:none; border-top:1px solid rgba(128,128,128,.18); background:transparent; color:inherit; opacity:.6; cursor:pointer; font-size:12px; }',
       '.sls-tv__inspect:hover { opacity:1; }',
+      // 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现(仓库 client 规约)
+      '.sls-switch { display:inline-flex; align-items:center; cursor:pointer; }',
+      '.sls-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
+      '.sls-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
+      '  background:var(--sls-track, rgba(128,128,128,0.35));',
+      '  border:1px solid var(--sls-border, rgba(128,128,128,0.35));',
+      '  transition:background 0.15s, border-color 0.15s; }',
+      '.sls-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+      '  background:var(--sls-thumb, rgba(128,128,128,0.6));',
+      '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
+      '.sls-switch:hover .sls-switch__track { border-color:var(--sls-accent, #4b7bcc); }',
+      '.sls-switch input[type="checkbox"]:checked + .sls-switch__track { background:var(--sls-accent, #4b7bcc); border-color:var(--sls-accent, #4b7bcc); }',
+      '.sls-switch input[type="checkbox"]:checked + .sls-switch__track .sls-switch__thumb { left:17px; background:var(--sls-bg-base, #fff); }',
+      '.sls-switch input[type="checkbox"]:focus-visible + .sls-switch__track { outline:2px solid var(--sls-accent, #4b7bcc); outline-offset:1px; }',
     ].join('\n')
+
+    // 开关的 checkbox + 轨道对,checkbox 语义保留仅视觉隐藏
+    function switchToggle(props) {
+      return [
+        h('input', { type: 'checkbox', ...props }),
+        h('span', { className: 'sls-switch__track' }, h('span', { className: 'sls-switch__thumb' })),
+      ]
+    }
 
     function h(type, props) {
       const children = Array.prototype.slice.call(arguments, 2)
@@ -120,7 +142,7 @@ window.__ModuleLoader__.load({
     }
 
     // 保存负载:仅取设置 schema 字段,剥离探测态
-    function toSection(entries, defaultId) {
+    function toSection(entries, defaultId, denyText, allowText) {
       return {
         shells: entries.map((entry) => ({
           id: entry.id.trim(),
@@ -133,10 +155,20 @@ window.__ModuleLoader__.load({
           env: parseEnvText(entry.envText),
         })),
         default: defaultId,
+        deny: splitPatternLines(denyText),
+        allow: splitPatternLines(allowText),
       }
     }
 
-    // 环境文本(每行 K=V)→ 记录;空行与缺 = 的行忽略,值保留原样含空格与 =
+    // 名单文本(每行一正则)→ 数组;空行与纯空白行忽略
+    // LOGIC-BEGIN splitPatternLines
+    function splitPatternLines(text) {
+      return String(text ?? '').split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+    }
+    // LOGIC-END splitPatternLines
+
+    // 环境文本(每行 K=V)→ 记录;空行与缺 = 的行忽略,值保留原样含空格与 =。
+    // LOGIC-BEGIN parseEnvText
     function parseEnvText(text) {
       const env = {}
       for (const line of String(text ?? '').split('\n')) {
@@ -148,8 +180,19 @@ window.__ModuleLoader__.load({
       }
       return env
     }
+    // LOGIC-END parseEnvText
 
-    // 服务器清单 → 编辑态(argsText 汇成一串便于编辑;envText 每行 K=V)
+    // 环境文本中被忽略的行(空行以外):缺 = 的行在保存校验时报错,防静默丢数据
+    // LOGIC-BEGIN invalidEnvLines
+    function invalidEnvLines(text) {
+      return String(text ?? '').split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && line.indexOf('=') <= 0)
+    }
+    // LOGIC-END invalidEnvLines
+
+    // 服务器清单 → 编辑态(argsText 汇成一串便于编辑;envText 每行 K=V;
+    // denyText/allowText 每行一正则)
     function toEntries(section) {
       return section.shells.map((entry) => ({
         id: entry.id,
@@ -165,12 +208,19 @@ window.__ModuleLoader__.load({
       }))
     }
 
+    // 名单数组 → 每行一正则的编辑态文本
+    function patternText(list) {
+      return (Array.isArray(list) ? list : []).join('\n')
+    }
+
     function ShellSelectApp() {
       const [entries, setEntries] = useState(null)
       const [defaultId, setDefaultId] = useState('')
       const [dirty, setDirty] = useState(false)
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState(false)
+      const [denyText, setDenyText] = useState('')
+      const [allowText, setAllowText] = useState('')
 
       useEffect(() => {
         let disposed = false
@@ -178,6 +228,8 @@ window.__ModuleLoader__.load({
           if (disposed) return
           setEntries(toEntries(section))
           setDefaultId(section.default)
+          setDenyText(patternText(section.deny))
+          setAllowText(patternText(section.allow))
         }).catch((error) => {
           if (!disposed) setNotice('加载失败:' + error.message)
         })
@@ -207,14 +259,28 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setNotice(null)
         try {
-          const section = toSection(entries, defaultId)
+          const section = toSection(entries, defaultId, denyText, allowText)
           const ids = section.shells.map((entry) => entry.id)
           if (ids.some((id) => id.length === 0)) throw new Error('存在空 id 条目')
           if (new Set(ids).size !== ids.length) throw new Error('id 重复:' + ids.join(', '))
           if (!ids.includes(section.default)) throw new Error('默认客户端不在列表中')
+          const invalid = entries.map((entry) => ({ entry, lines: invalidEnvLines(entry.envText) }))
+            .find(({ lines }) => lines.length > 0)
+          if (invalid !== undefined) throw new Error(`环境变量行缺少 =(条目 ${invalid.entry.id || '(未命名)'}):${invalid.lines.join(' ; ')}`)
+          const badPatterns = [
+            ...section.deny.map((line) => ({ list: '拒绝名单', line })),
+            ...section.allow.map((line) => ({ list: '豁免名单', line })),
+          ].filter(({ line }) => {
+            try { new RegExp(line); return false } catch { return true }
+          })
+          if (badPatterns.length > 0) {
+            throw new Error(`名单正则非法(${badPatterns[0].list}):${badPatterns[0].line}`)
+          }
           const payload = await api(API.config, { method: 'POST', body: JSON.stringify(section) })
           setEntries(toEntries({ shells: payload.resolved.shells }))
           setDefaultId(payload.resolved.default)
+          setDenyText(patternText(payload.resolved.deny))
+          setAllowText(patternText(payload.resolved.allow))
           setDirty(false)
           setNotice('已保存,工具描述与默认客户端即时生效')
         } catch (error) {
@@ -342,13 +408,13 @@ window.__ModuleLoader__.load({
             }),
             ...(entry.kind === 'bash' ? [
               h('span', { className: 'sls-grid__label' }, '登录壳'),
-              h('label', { className: 'sls-row', style: { alignItems: 'center' } },
-                h('input', {
-                  type: 'checkbox',
+              h('label', { className: 'sls-row sls-switch', title: '-lc 登录壳拉起 /etc/profile(只注入 /usr/bin;/mingw64/bin 需在下方的环境里配 MSYSTEM=MINGW64)' },
+                ...switchToggle({
                   checked: entry.login === true,
                   onChange: (event) => patchEntry(index, { login: event.target.checked }),
                 }),
-                h('span', { className: 'sls-hint' }, '-lc 登录壳(msys2 需要它拉起 /etc/profile)')),
+                h('span', { className: 'sls-hint' }, '-lc 登录壳'),
+              ),
             ] : []),
             ...(entry.kind === 'wsl' ? [
               h('span', { className: 'sls-grid__label' }, '发行版'),
@@ -369,6 +435,24 @@ window.__ModuleLoader__.load({
             }),
           ),
         )),
+        h('div', { className: 'sls-grid' },
+          h('span', { className: 'sls-grid__label' }, '拒绝名单'),
+          h('textarea', {
+            className: 'sls-input sls-args',
+            rows: 3,
+            value: denyText,
+            placeholder: '每行一条正则,命中的命令拒绝执行,如 ^format\\s|shutdown /r',
+            onChange: (event) => { setDirty(true); setDenyText(event.target.value) },
+          }),
+          h('span', { className: 'sls-grid__label' }, '豁免名单'),
+          h('textarea', {
+            className: 'sls-input sls-args',
+            rows: 2,
+            value: allowText,
+            placeholder: '命中豁免的命令跳过拒绝检查,如 rm -rf .*node_modules',
+            onChange: (event) => { setDirty(true); setAllowText(event.target.value) },
+          }),
+        ),
         h('div', { className: 'sls-row' },
           h('button', { className: 'sls-btn', disabled: busy, onClick: addEntry }, '添加客户端'),
           h('span', { style: { flex: 1 } }),
@@ -476,7 +560,8 @@ window.__ModuleLoader__.load({
       if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null }
 
       if (!settled) {
-        if (description === undefined) return { kind: 'generic', command, summary: undefined, output: null }
+        // running persistent(进行中无描述):回退行但状态点用进行中灰,非 warning 黄
+        if (description === undefined) return { kind: 'generic', command, summary: undefined, output: null, running: true }
         return { kind: 'terminal', status: 'running', command, description, cwdDir, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined }
       }
 
@@ -491,10 +576,11 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END shellCardModel
 
-    // 官方 leadingFor 同构:失败红点,回退行黄点,其余工具图标
+    // 官方 leadingFor 同构:失败红点,回退行黄点,进行中灰点,其余工具图标
     function leadingOf(status, icons) {
       if (status === 'failed' || status === 'signaled') return icons.StateDot({ state: 'error' })
       if (status === 'generic-warn') return icons.StateDot({ state: 'warning' })
+      if (status === 'running') return icons.StateDot({ state: 'ongoing' })
       return icons.IconApi({ size: 14 })
     }
 
@@ -556,7 +642,7 @@ window.__ModuleLoader__.load({
           } : undefined,
         },
           h('span', { className: 'sls-tv__lead' },
-            leadingOf('generic-warn', TOOLVIEW_ICONS),
+            leadingOf(model.running === true ? 'running' : 'generic-warn', TOOLVIEW_ICONS),
             expandable ? h('span', { className: 'sls-tv__chev', 'data-open': open ? '1' : '0', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })) : null,
           ),
           h('span', { className: 'sls-tv__title' }, 'Shell'),

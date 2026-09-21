@@ -45,6 +45,10 @@ export const Config = z.object({
     { id: 'cmd', name: 'CMD', kind: 'cmd', path: RESOLVED_AUTO, args: [] },
   ]),
   default: z.string().default('pwsh'),
+  // 命令黑白名单(整文本正则,大小写不敏感):allow 豁免优先于 deny 拒绝;
+  // 空数组 = 不拦截。护栏防误触,非安全边界(真边界是沙箱与访问模式)
+  deny: z.array(z.string()).default([]),
+  allow: z.array(z.string()).default([]),
   cwd: z.string(),
   timeoutMs: z.number().default(EXECUTOR_DEFAULTS.timeoutMs),
   maxTimeoutMs: z.number().default(EXECUTOR_DEFAULTS.maxTimeoutMs),
