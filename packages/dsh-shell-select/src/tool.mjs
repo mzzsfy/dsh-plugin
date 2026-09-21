@@ -26,6 +26,16 @@ async function loadHarnessError(ctx) {
   }
 }
 
+/** DenyError 判定:跨层类型检查靠 code(动态 import 环境下 instanceof 不可靠)。 */
+function isDenyError(error) {
+  return error?.code === 'SHELL_COMMAND_BLOCKED'
+}
+
+/** 拒绝 → 模型可见标记文本(与沙箱拒绝标记同风格)。 */
+function blockedMarker(error) {
+  return `[blocked by shell-select: matches deny pattern ${error.pattern}]`
+}
+
 /** 显式 workdir 先行,相对者落会话工作区;否则用会话 cwd,执行器默认兜底(官方同构)。 */
 function resolveWorkdir(modelWorkdir, exec) {
   const headerCwd = exec.agent?.session.header.cwd
@@ -233,6 +243,12 @@ export function registerShellTool(ctx, { executor }) {
         const jobs = ctx.get('jobs')
         if (jobs === undefined) throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
         if (exec.signal.aborted) throw await abortError('tool call aborted')
+        try {
+          faces.executor.startFor(entry, faces.executor.resolve(request))
+        } catch (error) {
+          if (isDenyError(error)) return { kind: 'foreground', blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+          throw error
+        }
         return {
           kind: 'background',
           jobId: jobs.start({
@@ -250,10 +266,16 @@ export function registerShellTool(ctx, { executor }) {
           }),
         }
       }
-      const result = await faces.executor.runFor(entry, faces.executor.resolve({
-        ...request,
-        signal: exec.signal,
-      }))
+      let result
+      try {
+        result = await faces.executor.runFor(entry, faces.executor.resolve({
+          ...request,
+          signal: exec.signal,
+        }))
+      } catch (error) {
+        if (isDenyError(error)) return { kind: 'foreground', blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+        throw error
+      }
       if (result.aborted) throw await abortError('tool call aborted')
       return canonicalResult(result)
     },

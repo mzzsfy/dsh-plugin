@@ -57,3 +57,13 @@ test('扩展字段守卫:login/distro/env 进设置页数据链(wholesale replac
   assert.match(source, /登录壳/)
   assert.match(source, /发行版/)
 })
+
+test('deny/allow 名单进设置页数据链:state/toSection/校验/往返', () => {
+  assert.match(source, /denyText/)
+  assert.match(source, /allowText/)
+  assert.match(source, /deny: splitPatternLines\(denyText\)/)
+  assert.match(source, /allow: splitPatternLines\(allowText\)/)
+  assert.match(source, /名单正则非法/)
+  assert.match(source, /拒绝名单/)
+  assert.match(source, /豁免名单/)
+})

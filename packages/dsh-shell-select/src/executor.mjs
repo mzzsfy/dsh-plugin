@@ -14,6 +14,7 @@
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import { MAX_TIMER_DELAY_MS, clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { Config, KINDS, buildArgv, requireEntry } from './config.mjs'
+import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
 import { registerShellTool } from './tool.mjs'
@@ -199,6 +200,14 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return this.source()
   }
 
+  // 命令黑白名单检查(允许列表豁免优先;沙箱拦截前的内容级护栏)。
+  // 公有方法:经 ctx.shell 代理调用的 runFor/startFor 内触达,this 可能是
+  // cordis 阴影对象,# 私有会触发 V8 品牌检查错误(与字段同坑)
+  assertNotDenied(command) {
+    const current = this.config
+    matchDeny(command, current.deny, current.allow)
+  }
+
   /** 能力事实:挂载沙箱执行器语义,工具层据它公示升权面(官方同构)。 */
   get sandboxMode() {
     return this.ctx.sandboxPolicy?.resolve().mode
@@ -256,6 +265,8 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     const section = normalizeConfigPaths({
       shells: patch.shells ?? current.shells,
       default: patch.default ?? current.default,
+      deny: Array.isArray(patch.deny) ? patch.deny : current.deny,
+      allow: Array.isArray(patch.allow) ? patch.allow : current.allow,
     })
     assertServiceableConfig(Config(section))
     await this.ctx.settings.replace('shell-select', section)
@@ -358,6 +369,7 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
    * @param {object} spec resolve() 产物
    */
   async runFor(entry, spec) {
+    this.assertNotDenied(spec.command)
     const policy = spec.sandboxPolicy
     const { mode } = policy
     if (mode === 'danger-full-access') {
@@ -415,6 +427,7 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
    * @returns 官方 ShellProcess 形态句柄
    */
   startFor(entry, spec) {
+    this.assertNotDenied(spec.command)
     const policy = spec.sandboxPolicy
     const { mode } = policy
     if (mode === 'danger-full-access') return this.startArgv(entry, spec)
