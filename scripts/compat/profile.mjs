@@ -29,15 +29,39 @@ export function enumeratePackages() {
   return { bundles, all }
 }
 
-function profileManifest(bundleNames, allNames) {
+function profileManifest(bundleNames, allNames, unpublished) {
   const dependencies = { dshmarket: DSHMARKET_PIN }
-  for (const name of allNames) dependencies[name] = '*'
+  for (const name of allNames) {
+    if (unpublished.has(name)) {
+      // 未发布包走 link 协议绝对路径:pnpm 仅建链接不拷贝不接管源目录;
+      // 行必须在 dependencies 里,否则 dsh-market 的 installed/activation
+      // 记账看不到它(verifyActivation 按 dependencies 枚举)。装完的
+      // symlink 桥会统一覆盖为仓库工作副本
+      dependencies[name] = `link:${join(REPO_ROOT, 'packages', name.replace('@mzzsfy/', ''))}`
+    } else {
+      dependencies[name] = '*'
+    }
+  }
   return {
     name: 'dsh-compat-profile',
     private: true,
     dependencies,
     dsh: { profile: { bundles: [...HOST_BASE_BUNDLES, 'dshmarket', ...bundleNames], patchReload: 'live' } },
   }
+}
+
+// registry 探测:404 = 未发布;探测自身失败按已发布处理(保守维持旧行为)
+async function probeUnpublished(names) {
+  const unpublished = new Set()
+  await Promise.all(names.map(async (name) => {
+    try {
+      const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`)
+      if (response.status === 404) unpublished.add(name)
+    } catch {
+      // 网络异常:保守视为已发布
+    }
+  }))
+  return unpublished
 }
 
 // 逐包安装 deps+devDeps(--omit=peer,与 CI test job 同款):包内模块级 import 的
@@ -72,9 +96,10 @@ export async function buildProfile({ version, workRoot, hostDir }) {
   const homeDir = join(workRoot, version, 'home')
   const profileDir = join(homeDir, 'profiles', 'web')
   const { bundles, all } = enumeratePackages()
+  const unpublished = await probeUnpublished(all)
 
   mkdirSync(profileDir, { recursive: true })
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(profileManifest(bundles, all), null, 2) + '\n', 'utf8')
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(profileManifest(bundles, all, unpublished), null, 2) + '\n', 'utf8')
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n', 'utf8')
   writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n', 'utf8')
   writeFileSync(join(profileDir, '.npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
@@ -83,11 +108,20 @@ export async function buildProfile({ version, workRoot, hostDir }) {
   // autoInstallPeers false:registry 上 @mzzsfy 旧发布版的 peer range 不满足会炸自动安装(见 lib.mjs)
   writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), workspaceYaml(false), 'utf8')
 
+  // 上轮 run 留下的桥 junction 先拆:pnpm 的 hoisted 冲突清理对 junction 会跟随
+  // 删除目标内容(实测清空仓库包 node_modules),必须保证 pnpm 从不见桥
+  const linkBase = join(profileDir, PROFILE_PACKAGES_DIR)
+  if (existsSync(linkBase)) {
+    for (const name of all) {
+      const linkPath = join(linkBase, name.replace('@mzzsfy/', ''))
+      if (existsSync(linkPath)) rmSync(linkPath, { recursive: true, force: true })
+    }
+  }
+
   log(`[${version}] pnpm install(隔离 profile)`)
   await runCmd('pnpm', ['install'], { cwd: profileDir })
 
   // 工作副本桥:profile node_modules/@mzzsfy/* 指向仓库包(同人工隔离法 junction 挂载)
-  const linkBase = join(profileDir, PROFILE_PACKAGES_DIR)
   for (const name of all) {
     const shortName = name.replace('@mzzsfy/', '')
     const linkPath = join(linkBase, shortName)
