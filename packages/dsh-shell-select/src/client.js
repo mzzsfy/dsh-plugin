@@ -84,6 +84,18 @@ window.__ModuleLoader__.load({
       '.sls-hint { font-size:12px; opacity:.7; }',
       '.sls-error { font-size:12px; color:#c44; white-space:pre-wrap; }',
       '.sls-args { font-size:12px; font-family:var(--sls-mono, monospace); }',
+      // 命令黑名单:逐条规则编辑器(每条规则独立行,行级即时校验)
+      '.sls-rules { display:flex; flex-direction:column; gap:6px; padding:10px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); border-radius:8px; }',
+      '.sls-rules__head { display:flex; align-items:center; gap:8px; }',
+      '.sls-rules__title { font-weight:500; }',
+      '.sls-rules__note { font-size:12px; opacity:.7; }',
+      '.sls-rule { display:flex; align-items:center; gap:6px; }',
+      '.sls-rule__no { flex:none; width:18px; text-align:right; font-size:12px; opacity:.45; user-select:none; }',
+      '.sls-rule__input { flex:1; min-width:0; padding:4px 8px; border-radius:6px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); background:transparent; color:inherit; font-size:12px; font-family:var(--sls-mono, monospace); }',
+      '.sls-rule__input:focus { outline:none; border-color:var(--sls-accent, #4b7bcc); }',
+      '.sls-rule--bad .sls-rule__input { border-color:#c44; }',
+      '.sls-rule__err { flex:none; max-width:40%; font-size:11px; color:#c44; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }',
+      '.sls-rule__del { flex:none; padding:2px 8px; }',
       // tool.call.toolview 卡片(key 'shell'):官方 terminal 行同构 + 复制/折行增强
       '.sls-tv { font-size:13px; line-height:1.45; }',
       '.sls-tv__row { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:default; }',
@@ -142,7 +154,7 @@ window.__ModuleLoader__.load({
     }
 
     // 保存负载:仅取设置 schema 字段,剥离探测态
-    function toSection(entries, defaultId, denyText) {
+    function toSection(entries, defaultId, denyRules) {
       return {
         shells: entries.map((entry) => ({
           id: entry.id.trim(),
@@ -155,16 +167,25 @@ window.__ModuleLoader__.load({
           env: parseEnvText(entry.envText),
         })),
         default: defaultId,
-        deny: splitPatternLines(denyText),
+        deny: denyRules.filter((rule) => rule.length > 0),
       }
     }
 
-    // 名单文本(每行一正则)→ 数组;空行与纯空白行忽略
-    // LOGIC-BEGIN splitPatternLines
-    function splitPatternLines(text) {
-      return String(text ?? '').split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+    // 逐条规则的正则校验:返回非法条目 [{index, error}](index 为规则序,供行级标错与保存拦截复用)
+    // LOGIC-BEGIN denyPatternIssues
+    function denyPatternIssues(rules) {
+      const issues = []
+      for (let index = 0; index < rules.length; index += 1) {
+        if (rules[index].length === 0) continue
+        try {
+          new RegExp(rules[index])
+        } catch (error) {
+          issues.push({ index, error: String(error?.message ?? error) })
+        }
+      }
+      return issues
     }
-    // LOGIC-END splitPatternLines
+    // LOGIC-END denyPatternIssues
 
     // 环境文本(每行 K=V)→ 记录;空行与缺 = 的行忽略,值保留原样含空格与 =。
     // LOGIC-BEGIN parseEnvText
@@ -190,7 +211,7 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END invalidEnvLines
 
-    // 服务器清单 → 编辑态(argsText 汇成一串便于编辑;envText 每行 K=V;denyText 每行一正则)
+    // 服务器清单 → 编辑态(argsText 汇成一串便于编辑;envText 每行 K=V;deny 为逐条规则数组)
     function toEntries(section) {
       return section.shells.map((entry) => ({
         id: entry.id,
@@ -206,9 +227,9 @@ window.__ModuleLoader__.load({
       }))
     }
 
-    // 名单数组 → 每行一正则的编辑态文本
+    // 名单数组 → 编辑态数组(去空白行;加载侧解析)
     function patternText(list) {
-      return (Array.isArray(list) ? list : []).join('\n')
+      return (Array.isArray(list) ? list : []).map((rule) => String(rule).trim()).filter((rule) => rule.length > 0)
     }
 
     function ShellSelectApp() {
@@ -217,7 +238,7 @@ window.__ModuleLoader__.load({
       const [dirty, setDirty] = useState(false)
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState(false)
-      const [denyText, setDenyText] = useState('')
+      const [denyRules, setDenyRules] = useState([])
 
       useEffect(() => {
         let disposed = false
@@ -225,7 +246,7 @@ window.__ModuleLoader__.load({
           if (disposed) return
           setEntries(toEntries(section))
           setDefaultId(section.default)
-          setDenyText(patternText(section.deny))
+          setDenyRules(patternText(section.deny))
         }).catch((error) => {
           if (!disposed) setNotice('加载失败:' + error.message)
         })
@@ -251,11 +272,26 @@ window.__ModuleLoader__.load({
         if (defaultId === target.id) setDefaultId(entries.length > 1 ? entries[0].id : '')
       }
 
+      const patchRule = (index, value) => {
+        setDirty(true)
+        setDenyRules(denyRules.map((rule, at) => (at === index ? value : rule)))
+      }
+
+      const addRule = () => {
+        setDirty(true)
+        setDenyRules([...denyRules, ''])
+      }
+
+      const removeRule = (index) => {
+        setDirty(true)
+        setDenyRules(denyRules.filter((_, at) => at !== index))
+      }
+
       const save = async () => {
         setBusy(true)
         setNotice(null)
         try {
-          const section = toSection(entries, defaultId, denyText)
+          const section = toSection(entries, defaultId, denyRules)
           const ids = section.shells.map((entry) => entry.id)
           if (ids.some((id) => id.length === 0)) throw new Error('存在空 id 条目')
           if (new Set(ids).size !== ids.length) throw new Error('id 重复:' + ids.join(', '))
@@ -263,16 +299,14 @@ window.__ModuleLoader__.load({
           const invalid = entries.map((entry) => ({ entry, lines: invalidEnvLines(entry.envText) }))
             .find(({ lines }) => lines.length > 0)
           if (invalid !== undefined) throw new Error(`环境变量行缺少 =(条目 ${invalid.entry.id || '(未命名)'}):${invalid.lines.join(' ; ')}`)
-          const badPatterns = section.deny.filter((line) => {
-            try { new RegExp(line); return false } catch { return true }
-          })
-          if (badPatterns.length > 0) {
-            throw new Error(`拒绝名单正则非法:${badPatterns[0]}`)
+          const issue = denyPatternIssues(section.deny)[0]
+          if (issue !== undefined) {
+            throw new Error(`命令黑名单第 ${issue.index + 1} 条正则非法:${issue.error}`)
           }
           const payload = await api(API.config, { method: 'POST', body: JSON.stringify(section) })
           setEntries(toEntries({ shells: payload.resolved.shells }))
           setDefaultId(payload.resolved.default)
-          setDenyText(patternText(payload.resolved.deny))
+          setDenyRules(patternText(payload.resolved.deny))
           setDirty(false)
           setNotice('已保存,工具描述与默认客户端即时生效')
         } catch (error) {
@@ -427,15 +461,37 @@ window.__ModuleLoader__.load({
             }),
           ),
         )),
-        h('div', { className: 'sls-grid' },
-          h('span', { className: 'sls-grid__label' }, '拒绝名单'),
-          h('textarea', {
-            className: 'sls-input sls-args',
-            rows: 3,
-            value: denyText,
-            placeholder: '每行一条正则,命中的命令拒绝执行(绝对,无豁免);精细放行用前瞻,如 rm -rf\\s+(?!\\S*node_modules)',
-            onChange: (event) => { setDirty(true); setDenyText(event.target.value) },
-          }),
+        h('div', { className: 'sls-rules' },
+          h('div', { className: 'sls-rules__head' },
+            h('span', { className: 'sls-rules__title' }, '命令黑名单'),
+            h('span', { className: 'sls-badge' + (denyRules.length > 0 ? ' sls-badge--ok' : ' sls-badge--bad') },
+              denyRules.length > 0 ? denyRules.length + ' 条规则' : '未生效'),
+          ),
+          h('span', { className: 'sls-rules__note' },
+            '每条规则为一条正则,对整条命令全文匹配(大小写不敏感),命中即拒,无豁免;精细放行写在模式内用前瞻,如 rm -rf\\s+(?!\\S*node_modules)。'),
+          denyRules.length === 0
+            ? h('span', { className: 'sls-rules__note' }, '未配置,命中拦截不生效,模型可执行任意命令。')
+            : denyRules.map((rule, index) => {
+              const issue = denyPatternIssues([rule])[0]
+              return h('div', { className: 'sls-rule' + (issue !== undefined ? ' sls-rule--bad' : ''), key: index },
+                h('span', { className: 'sls-rule__no' }, index + 1),
+                h('input', {
+                  className: 'sls-rule__input',
+                  value: rule,
+                  placeholder: '正则,如 ^format\\s',
+                  onChange: (event) => patchRule(index, event.target.value),
+                }),
+                issue !== undefined ? h('span', { className: 'sls-rule__err', title: issue.error }, issue.error) : null,
+                h('button', {
+                  className: 'sls-btn sls-rule__del',
+                  title: '删除该条规则',
+                  onClick: () => removeRule(index),
+                }, '删除'),
+              )
+            }),
+          h('div', { className: 'sls-row' },
+            h('button', { className: 'sls-btn', onClick: addRule }, '添加规则'),
+          ),
         ),
         h('div', { className: 'sls-row' },
           h('button', { className: 'sls-btn', disabled: busy, onClick: addEntry }, '添加客户端'),
