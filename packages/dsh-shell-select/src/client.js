@@ -385,8 +385,8 @@ window.__ModuleLoader__.load({
 
     // ── tool.call.toolview 卡片(key 'shell')──────────────────────────────
     // 官方 BashRow/terminalCardModel 的 shellCall 白名单只认 bash|pwsh,无法复用,
-    // 模型派生自带:数据来自 presentCall/presentResult 持久化的 callView/resultView
-    // (card:'terminal'),非终端意图(后台 ack/isError/截断)回退简版原文行。
+    // 模型派生自带:数据自 argsRaw + 结果文本尾部退出标记派生(官方 block 无
+    // callView/resultView 结构化字段),非终端意图(后台 ack/isError/截断)回退简版原文行。
     // 增强面(shell-card-plus 同款):复制命令/复制输出、命令折行+行号、客户端名标注。
 
     function detectEnglish() {

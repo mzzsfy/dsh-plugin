@@ -22,7 +22,7 @@ Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配�
 注册 keyed slot `tool.call.toolview`(key `shell`/`pwsh`/`bash` 三支,priority -1)替换默认通用卡,官方 `terminalCardModel` 同构派生(argsRaw + 结果文本尾部退出标记)。`pwsh`/`bash` 两支覆盖官方工具名:死态窗口 guard 代挂官方 tool-pwsh 时,其调用行同样获得增强卡;persistent 形(无 description)与后台 ack、isError、溢出预览一样回退简版行,不误渲染:
 
 - 折叠行:状态点(失败红/中断黄/其余工具图标)+ `Shell` 标题 + 描述首行摘要,失败摘要红显。
-- 展开卡:状态点 + cwd 末段目录 + 客户端名徽标(模型传了 `shell` 参数时)+ 失败 pill(退出码/信号/错误码)+ 复制命令/复制输出按钮 + 命令折行带行号 + 输出区(横向滚动,竖向限高)。
+- 展开卡:状态点 + cwd 末段目录 + 客户端名徽标(模型传了 `shell` 参数时)+ 失败 pill(退出码/信号)+ 复制命令/复制输出按钮 + 命令折行带行号 + 输出区(横向滚动,竖向限高)。
 - 非终端意图回退简版行:摘要 + 可展开原文 + 检查按钮。
 - 图标取官方 `dsh-client-ui-primitives`(StateDot/IconApi/IconInspect/Chevron),模块表缺席时降级自绘。
 
@@ -52,14 +52,14 @@ shell-select:
 
 出厂默认即上述三客户端;浏览器「设置 → Shell 管理」页可增删改、探测路径、扫描本机、编辑发行版与环境变量(环境编辑态每行一条 `K=V`)。第三方实现:任意可执行文件 + 自定义 args 模板。
 
-env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `env` < 调用方环境(`DSH_*` 会话事实)。wsl 形把条目与 `DSH_*` 全部键追加进 WSLENV 白名单,过 WSL 边界不静默失效。
+env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `env` < 调用方环境(spec.env + 会话 `DSH_*` 事实)。wsl 形把条目 env 与调用方环境全部键(WSLENV 本身除外)追加进 WSLENV 白名单,过 WSL 边界不静默失效。
 
 ### bash 形探测与 msys2
 
 - 候选序:`Program Files\Git\bin` → `Program Files (x86)\Git\bin` → `LocalAppData\Programs\Git\bin` → `C:\msys64\usr\bin\bash.exe` → `C:\msys64\bin\bash.exe` → PATH 扫描。
 - `msys2.exe` 在管道 stdio 下静默失败(exit 0 零字节),永不入候选;System32\bash.exe 是 WSL 转发器,PATH 扫描一律排除 SystemRoot 下条目。
 - msys2 条目建议配 `login: true`(`-lc` 登录壳拉起 `/etc/profile`)与 `env: { MSYSTEM: MINGW64 }`(启用 /mingw64/bin 的 gcc/make);git-bash 无需 login(自带 PATH)。
-- wsl 形:`wsl [--exec | -d <distro> --exec] bash -c {command}`;`DSH_*` 与条目 env 键经 WSLENV 追加透传,继承的 WSLENV 条目保留、显式配置项优先。
+- wsl 形:`wsl [--exec | -d <distro> --exec] bash -c {command}`;条目 env 与调用方环境全部键(WSLENV 本身除外)经 WSLENV 追加透传,继承的 WSLENV 条目保留、显式配置项优先。
 
 ## 已知边界
 

@@ -99,9 +99,9 @@ export function buildArgv(entry, command) {
   }
   switch (entry.kind) {
     case 'pwsh': return [entry.path, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', PWSH_ENCODING_PREAMBLE + command]
-    // login:登录壳 source /etc/profile,把 /usr/bin 与 /mingw64/bin 注入 PATH
-    // (msys2 无此形态时 tr/sed/gcc 类工具 command not found);默认保持 -c:
-    // 官方 dsh-bash-local 同构,且不读 profile,输出无用户脚本副作用
+    // login:登录壳 source /etc/profile,只把 /usr/bin 注入 PATH;/mingw64/bin
+    // 需条目 env 配 MSYSTEM=MINGW64。默认保持 -c:官方 dsh-bash-local 同构,
+    // 且不读 profile,输出无用户脚本副作用
     case 'bash': return [entry.path, ...(entry.login === true ? ['-lc'] : ['-c']), command]
     case 'cmd': return [entry.path, '/d', '/s', '/c', command]
     // distro:发行版选择仅默认形生效;args 模板条目全权接管 argv,模板分支优先
