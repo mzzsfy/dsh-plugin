@@ -60,17 +60,14 @@ function stubDriver(runId, sessionId = 'session-stub') {
   return { received, dispose: () => unregisterDriver(runId) }
 }
 
-test('Given 伪造 Host(rebinding 形态) When POST control Then 403 拒绝(Host fence 自守)', async () => {
+test('Given 任意伪造 Host When POST control Then 照常受理(项目约定:不做 host 认证)', async () => {
   const board = await startBoard()
   const stub = stubDriver('r-board-fence')
   try {
-    // 插件 exact 路由早于宿主 /api 前缀路由命中,宿主 fence 拦不到,须自守
+    // 与仓库 dsh-auto-trust-all 同一口径:可达性不设防,写入面仅靠 Origin 比对
     const res = await postJsonHost(board.base, '/api/rsww/control', { runId: 'r-board-fence', kind: 'approve', by: 'user', reason: 'x' }, 'evil.example.com')
-    assert.equal(res.status, 403)
-    assert.equal(stub.received.length, 0)
-    // 回环名照常放行
-    const ok = await postJson(board.base, '/api/rsww/control', { runId: 'r-board-fence', kind: 'approve', by: 'user', reason: 'x' })
-    assert.equal(ok.status, 200)
+    assert.equal(res.status, 200)
+    assert.equal(stub.received.length, 1)
   } finally {
     stub.dispose()
     await board.close()

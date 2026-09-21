@@ -1,6 +1,8 @@
 // board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
 // 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
+// 安全边界(全仓库约定,AGENTS.md):不做 host 认证,无 Host 白名单/rebinding 防线/token 校验;
+// 认证由宿主原生 cookie/startup-auth 承担,写路由跨源防护以 Origin 同源比对为上限
 import { reportStore, ACTIVE_STATES } from './store.mjs'
 import { registry, post, initiatorOf, resumerOf } from './driver/control.mjs'
 import { validateTemplate, validateTemplateSet } from './template.mjs'
@@ -30,20 +32,6 @@ function rejectCrossOrigin(req, res) {
   return true
 }
 
-// Host fence:插件 exact 路由早于宿主 /api 前缀路由命中(webserver exact 优先),
-// 宿主的 DNS-rebinding 防线拦不到本组路由,须自守——Host 须为回环名或本机 IP 字面量
-const TRUSTED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
-
-function rejectReboundHost(req, res) {
-  const authority = req.headers ? String(req.headers.host || '') : ''
-  if (authority === '') return false
-  const at = authority.lastIndexOf(':')
-  const hostname = at > authority.lastIndexOf(']') ? authority.slice(0, at) : authority
-  if (TRUSTED_HOSTNAMES.has(hostname.toLowerCase())) return false
-  sendJson(res, 403, { error: 'Host 不受信任(疑似 DNS rebinding)' })
-  return true
-}
-
 function rejectNonJson(req, res) {
   const contentType = req.headers ? String(req.headers['content-type'] || '') : ''
   if (contentType.includes('application/json')) return false
@@ -54,7 +42,6 @@ function rejectNonJson(req, res) {
 function guardedRoute(handler) {
   return async (req, res) => {
     try {
-      if (rejectReboundHost(req, res)) return
       if (req.method !== 'GET' && req.method !== 'POST') {
         sendJson(res, 405, { error: 'method not allowed' })
         return
