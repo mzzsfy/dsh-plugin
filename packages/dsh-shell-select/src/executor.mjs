@@ -200,12 +200,12 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return this.source()
   }
 
-  // 命令黑白名单检查(允许列表豁免优先;沙箱拦截前的内容级护栏)。
+  // 命令黑名单检查(deny 绝对:命中即拒;沙箱拦截前的内容级护栏)。
   // 公有方法:经 ctx.shell 代理调用的 runFor/startFor 内触达,this 可能是
   // cordis 阴影对象,# 私有会触发 V8 品牌检查错误(与字段同坑)
   assertNotDenied(command) {
     const current = this.config
-    matchDeny(command, current.deny, current.allow)
+    matchDeny(command, current.deny)
   }
 
   /** 能力事实:挂载沙箱执行器语义,工具层据它公示升权面(官方同构)。 */
@@ -266,7 +266,6 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       shells: patch.shells ?? current.shells,
       default: patch.default ?? current.default,
       deny: Array.isArray(patch.deny) ? patch.deny : current.deny,
-      allow: Array.isArray(patch.allow) ? patch.allow : current.allow,
     })
     assertServiceableConfig(Config(section))
     await this.ctx.settings.replace('shell-select', section)

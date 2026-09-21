@@ -1,6 +1,6 @@
-// 命令黑白名单:防火墙语义——allow 豁免优先于 deny 拒绝。
-// 护栏定位:启发式防误触,非安全边界(整文本正则挡不住间接包装,
-// 真边界是沙箱模式与访问模式)。
+// 命令黑名单:deny 绝对——命中任一模式即拒,无豁免语义(精细放行在模式内
+// 用正则前瞻表达,如 rm -rf\s+(?!\S*node_modules))。
+// 护栏定位:启发式防误触,非安全边界(真边界是沙箱模式与访问模式)。
 
 /** 拒绝错误:工具层 catch 转模型可见标记。 */
 export class DenyError extends Error {
@@ -22,16 +22,13 @@ function compile(pattern) {
 }
 
 /**
- * 黑白名单匹配:命令命中 allow 任一条目则放行,否则命中 deny 任一条目即拒。
+ * 黑名单匹配:命令命中任一 deny 条目即拒。
  * @param {string} command 模型提交的整条命令文本
  * @param {string[]|undefined} deny 拒绝正则列表
- * @param {string[]|undefined} allow 豁免正则列表
- * @throws {DenyError} 命中 deny 且未被 allow 豁免
+ * @throws {DenyError} 命中 deny
  */
-export function matchDeny(command, deny, allow) {
-  const exemptions = (allow ?? []).map(compile).filter((re) => re !== undefined)
+export function matchDeny(command, deny) {
   const text = String(command ?? '')
-  if (exemptions.some((re) => re.test(text))) return
   for (const pattern of deny ?? []) {
     const re = compile(pattern)
     if (re !== undefined && re.test(text)) throw new DenyError(pattern, text)

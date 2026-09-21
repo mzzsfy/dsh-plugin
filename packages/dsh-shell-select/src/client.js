@@ -142,7 +142,7 @@ window.__ModuleLoader__.load({
     }
 
     // 保存负载:仅取设置 schema 字段,剥离探测态
-    function toSection(entries, defaultId, denyText, allowText) {
+    function toSection(entries, defaultId, denyText) {
       return {
         shells: entries.map((entry) => ({
           id: entry.id.trim(),
@@ -156,7 +156,6 @@ window.__ModuleLoader__.load({
         })),
         default: defaultId,
         deny: splitPatternLines(denyText),
-        allow: splitPatternLines(allowText),
       }
     }
 
@@ -191,8 +190,7 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END invalidEnvLines
 
-    // 服务器清单 → 编辑态(argsText 汇成一串便于编辑;envText 每行 K=V;
-    // denyText/allowText 每行一正则)
+    // 服务器清单 → 编辑态(argsText 汇成一串便于编辑;envText 每行 K=V;denyText 每行一正则)
     function toEntries(section) {
       return section.shells.map((entry) => ({
         id: entry.id,
@@ -220,7 +218,6 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState(false)
       const [denyText, setDenyText] = useState('')
-      const [allowText, setAllowText] = useState('')
 
       useEffect(() => {
         let disposed = false
@@ -229,7 +226,6 @@ window.__ModuleLoader__.load({
           setEntries(toEntries(section))
           setDefaultId(section.default)
           setDenyText(patternText(section.deny))
-          setAllowText(patternText(section.allow))
         }).catch((error) => {
           if (!disposed) setNotice('加载失败:' + error.message)
         })
@@ -259,7 +255,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setNotice(null)
         try {
-          const section = toSection(entries, defaultId, denyText, allowText)
+          const section = toSection(entries, defaultId, denyText)
           const ids = section.shells.map((entry) => entry.id)
           if (ids.some((id) => id.length === 0)) throw new Error('存在空 id 条目')
           if (new Set(ids).size !== ids.length) throw new Error('id 重复:' + ids.join(', '))
@@ -267,20 +263,16 @@ window.__ModuleLoader__.load({
           const invalid = entries.map((entry) => ({ entry, lines: invalidEnvLines(entry.envText) }))
             .find(({ lines }) => lines.length > 0)
           if (invalid !== undefined) throw new Error(`环境变量行缺少 =(条目 ${invalid.entry.id || '(未命名)'}):${invalid.lines.join(' ; ')}`)
-          const badPatterns = [
-            ...section.deny.map((line) => ({ list: '拒绝名单', line })),
-            ...section.allow.map((line) => ({ list: '豁免名单', line })),
-          ].filter(({ line }) => {
+          const badPatterns = section.deny.filter((line) => {
             try { new RegExp(line); return false } catch { return true }
           })
           if (badPatterns.length > 0) {
-            throw new Error(`名单正则非法(${badPatterns[0].list}):${badPatterns[0].line}`)
+            throw new Error(`拒绝名单正则非法:${badPatterns[0]}`)
           }
           const payload = await api(API.config, { method: 'POST', body: JSON.stringify(section) })
           setEntries(toEntries({ shells: payload.resolved.shells }))
           setDefaultId(payload.resolved.default)
           setDenyText(patternText(payload.resolved.deny))
-          setAllowText(patternText(payload.resolved.allow))
           setDirty(false)
           setNotice('已保存,工具描述与默认客户端即时生效')
         } catch (error) {
@@ -441,16 +433,8 @@ window.__ModuleLoader__.load({
             className: 'sls-input sls-args',
             rows: 3,
             value: denyText,
-            placeholder: '每行一条正则,命中的命令拒绝执行,如 ^format\\s|shutdown /r',
+            placeholder: '每行一条正则,命中的命令拒绝执行(绝对,无豁免);精细放行用前瞻,如 rm -rf\\s+(?!\\S*node_modules)',
             onChange: (event) => { setDirty(true); setDenyText(event.target.value) },
-          }),
-          h('span', { className: 'sls-grid__label' }, '豁免名单'),
-          h('textarea', {
-            className: 'sls-input sls-args',
-            rows: 2,
-            value: allowText,
-            placeholder: '命中豁免的命令跳过拒绝检查,如 rm -rf .*node_modules',
-            onChange: (event) => { setDirty(true); setAllowText(event.target.value) },
           }),
         ),
         h('div', { className: 'sls-row' },

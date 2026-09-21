@@ -158,18 +158,17 @@ test('runFor danger 直跑:argv 按条目组装,不经 confine,stdout/stderr 回
   assert.deepEqual(result.sandbox, { mode: 'danger-full-access', denied: false })
 })
 
-test('deny 拦截:runFor 命中 deny 抛 DenyError 不 spawn;allow 豁免放行', async () => {
+test('deny 拦截:runFor 命中 deny 抛 DenyError 不 spawn', async () => {
   const spawn = stubSpawn('ok', '')
   const { ctx } = stubCtx({ spawn })
-  const executor = new ShellSelectExecutor(ctx, { deny: ['format '], allow: ['rm -rf .*node_modules'] })
+  const executor = new ShellSelectExecutor(ctx, { deny: ['format '] })
   const entry = executor.entryFor('git-bash')
   await assert.rejects(
     () => executor.runFor(entry, executor.resolve({ command: 'format c: /q', workdir: process.cwd() })),
     (error) => error.code === 'SHELL_COMMAND_BLOCKED',
   )
-  await executor.runFor(entry, executor.resolve({ command: 'rm -rf ./node_modules', workdir: process.cwd() }))
   await executor.runFor(entry, executor.resolve({ command: 'git status', workdir: process.cwd() }))
-  assert.equal(spawn.calls.length, 2)
+  assert.equal(spawn.calls.length, 1)
 })
 
 test('deny 拦截:startFor 同样拒绝(后台入口)', () => {
