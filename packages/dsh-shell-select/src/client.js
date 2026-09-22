@@ -140,6 +140,7 @@ window.__ModuleLoader__.load({
       '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; }',
       '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; }',
       '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; }',
+      '.sls-tv__pill--bg { color:var(--dsw-alias-label-tertiary, inherit); }',
       '.sls-tv__sp { flex:1; }',
       '.sls-tv__copy { display:flex; align-items:center; gap:2px; flex:none; }',
       '.sls-tv__copyBtn { padding:2px 8px; border:1px solid rgba(128,128,128,.35); border-radius:6px; background:transparent; color:inherit; cursor:pointer; font-size:12px; }',
@@ -632,8 +633,13 @@ window.__ModuleLoader__.load({
       }
 
       const contentText = (block.content ?? []).map((part) => (part.type === 'text' ? part.text : '')).filter((text) => text !== '').join('\n')
+      // 后台 ack:独立卡呈现命令全文与任务号徽标,ack 原文作输出(不再落 generic 简版行)
+      if (args.run_in_background === true) {
+        const jobId = /started background job (\S+)/.exec(contentText)?.[1]
+        return { kind: 'background', status: 'background', command, description, cwdDir, cwdFull, shellName, output: contentText, jobId }
+      }
       // 空结果落 generic:官方 singleResultText 无文本即回通用卡,避免空输出伪 done 终端卡
-      if (contentText === '' || block.isError === true || block.error !== undefined || args.run_in_background === true || description === undefined || hasSpillNotice(contentText)) {
+      if (contentText === '' || block.isError === true || block.error !== undefined || description === undefined || hasSpillNotice(contentText)) {
         return { kind: 'generic', command, summary: description, output: contentText }
       }
       const tail = parseExitTail(contentText)
@@ -653,6 +659,7 @@ window.__ModuleLoader__.load({
     function statusTextOf(status, en) {
       switch (status) {
         case 'running': return en ? 'Running' : '运行中'
+        case 'background': return en ? 'Background' : '后台运行'
         case 'failed': case 'signaled': return en ? 'Failed' : '失败'
         default: return null
       }
@@ -661,6 +668,12 @@ window.__ModuleLoader__.load({
     function headMetaOf(model, en) {
       switch (model.status) {
         case 'running': return { dot: 'ongoing', label: en ? 'Running' : '运行中', pill: undefined }
+        case 'background': return {
+          dot: 'ongoing',
+          label: en ? 'Background' : '后台运行',
+          pill: model.jobId !== undefined ? (en ? `bg ${model.jobId}` : `后台 ${model.jobId}`) : undefined,
+          pillTone: 'bg',
+        }
         case 'done': return { dot: 'done', label: en ? 'Done' : '已完成', pill: undefined }
         case 'failed': return { dot: 'error', label: en ? 'Failed' : '失败', pill: en ? `exit ${model.exitCode}` : `退出码 ${model.exitCode}` }
         case 'signaled': return { dot: 'error', label: en ? 'Failed' : '失败', pill: en ? `signal ${model.signal}` : `信号 ${model.signal}` }
@@ -744,7 +757,7 @@ window.__ModuleLoader__.load({
           model.cwdDir !== undefined ? h('span', { className: 'sls-tv__cwd', title: 'pwd: ' + (model.cwdFull ?? model.cwdDir) }, model.cwdDir) : null,
           model.shellName !== undefined ? h('span', { className: 'sls-tv__badge', title: en ? 'Shell client' : 'Shell 客户端' }, model.shellName) : null,
           h('span', { className: 'sls-tv__sp' }),
-          meta.pill !== undefined ? h('span', { className: 'sls-tv__pill' }, meta.pill) : null,
+          meta.pill !== undefined ? h('span', { className: 'sls-tv__pill' + (meta.pillTone === 'bg' ? ' sls-tv__pill--bg' : '') }, meta.pill) : null,
           h('span', { className: 'sls-tv__copy' },
             h(CopyButton, {
               label: copyCommandLabel,
@@ -769,14 +782,15 @@ window.__ModuleLoader__.load({
     function ShellToolRow(props) {
       const { block, cwd, inspect } = props
       const en = detectEnglish()
-      const [open, setOpen] = useState(false)
+      const model = shellCardModel(block, cwd)
+      // 后台 ack 卡默认展开:内容即命令全文,收起只剩一行摘要失去可读性
+      const [open, setOpen] = useState(model.kind === 'background')
       const [, setCatalogReady] = useState(false)
       useEffect(() => {
         let disposed = false
         ensureClientCatalog().then(() => { if (!disposed) setCatalogReady(true) })
         return () => { disposed = true }
       }, [])
-      const model = shellCardModel(block, cwd)
       if (model.kind === 'generic') return h(GenericShellRow, { model, inspect, en })
       const expandable = true
       const srStatus = statusTextOf(model.status, en)
