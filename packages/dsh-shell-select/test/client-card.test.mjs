@@ -130,9 +130,12 @@ test('S17b 后台 ack 异常文本:仍 background,jobId 缺省不冒充', () => 
   assert.equal(model.jobId, undefined)
 })
 
-test('S17c 后台卡渲染面:状态文案与中性任务号徽标(渲染守卫)', () => {
+test('S17c 后台行默认收起,收起行携带任务号徽标(渲染守卫)', () => {
+  // BDD:Given 后台 ack 卡,When 行渲染,Then 默认收起与其余行一致,收起态可见 job id 徽标
   assert.match(source, /case 'background':/)
   assert.match(source, /sls-tv__pill--bg/)
+  assert.doesNotMatch(source, /useState\(model\.kind === 'background'\)/)
+  assert.match(source, /model\.status === 'background' && model\.jobId !== undefined/)
 })
 
 test('S12c isError 与空结果仍走 generic(回归)', () => {
