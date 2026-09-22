@@ -163,12 +163,14 @@ export function apply(ctx, config) {
     // 标记防重复包装:本插件重载后旧包装仍在路由表内,已标记的 handler 不再叠加,
     // 经共享载体继续服务
     const WRAPPED = 'autoTrustAllWrapped'
-    // 同步包装:注册是纯同步观察,无需 async 引入的额外 promise 与微任务
+    // 同步包装:注册是纯同步观察,无需 async 引入的额外 promise 与微任务。
+    // fiber 活性守卫:市场热禁用只转 fiber 状态不调 disposer(2026-09-23 L3 实测),
+    // 每请求读 ctx.fiber.state,非 ACTIVE 即跳过注册,禁用语义不滞后到重启
     const wrap = (handler) => {
       if (typeof handler !== 'function' || handler[WRAPPED]) return handler
       const wrapped = (...args) => {
         try {
-          webServer.autoTrustAllRegister(args[0])
+          if ((ctx.fiber?.state ?? 2) === 2) webServer.autoTrustAllRegister(args[0])
           registerWarned = false
         } catch (error) {
           // 注册是纯观察,失败不阻断请求;限频告警防风暴,注册恢复后自动复位再告警

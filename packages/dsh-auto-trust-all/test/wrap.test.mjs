@@ -707,3 +707,32 @@ test('场景34 重叠代撤销守卫: Given 新代 apply 先于旧代 dispose �
   assert.deepEqual(trustedHosts, ['x.test'])
   assert.deepEqual(fenceHosts, ['x.test'])
 })
+
+test('场景35 fiber 活性守卫: Given 已激活 When fiber 转非 ACTIVE(市场热禁用,disposer 不被调用) Then 后续请求注册自断,条目留存', async (t) => {
+  mockConsole(t)
+  // 真实宿主事故(2026-09-23 L3):market toggle 禁用只把 patch 行置 disabled,
+  // cordis 不触发本插件 disposer,旧代包装闭包继续注册 Host,禁用语义失效至重启。
+  // 修复:包装闭包每请求读 ctx.fiber.state,非 ACTIVE 即跳过注册(条目留存,重启即净)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  ctx.fiber = { state: 2 }
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'hot.test' } }, {})
+  assert.deepEqual(trustedHosts, ['hot.test'])
+
+  // 热禁用:disposer 未调用,fiber 状态转 DISPOSED(4)
+  ctx.fiber.state = 4
+  await route.handler({ headers: { host: 'after-disable.test' } }, {})
+  assert.deepEqual(trustedHosts, ['hot.test'], '非 ACTIVE 后不得新注册')
+
+  // 恢复启用(状态回 ACTIVE)后注册链路照常
+  ctx.fiber.state = 2
+  await route.handler({ headers: { host: 're-enabled.test' } }, {})
+  assert.deepEqual(trustedHosts, ['hot.test', 're-enabled.test'])
+
+  // disposer 路径不受守卫影响:仍撤销 owned 条目
+  dispose()
+  assert.deepEqual(trustedHosts, [])
+})
