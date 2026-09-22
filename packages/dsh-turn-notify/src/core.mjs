@@ -635,7 +635,7 @@ export function imBoundBotIds(list) {
 // 返回归一化后的补丁。
 export function validateConfigPatch(patch) {
   if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return { ok: false, reason: '补丁须为对象' }
-  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'kindRoutes', 'hostNotify', 'hostNotifyFallback', 'folderRunningEnabled']
+  const known = ['webhookUrl', 'minTurnDurationMs', 'rootsOnly', 'suppressSubagentWake', 'enabled', 'imTargets', 'imEnabled', 'kindRoutes', 'hostNotify', 'hostNotifyFallback', 'folderRunningEnabled']
   for (const key of Object.keys(patch)) {
     if (known.indexOf(key) < 0) return { ok: false, reason: '未知配置项: ' + key }
   }
@@ -674,6 +674,10 @@ export function validateConfigPatch(patch) {
       targets.push({ botId, targetId })
     }
     next.imTargets = targets
+  }
+  if ('imEnabled' in patch) {
+    if (typeof patch.imEnabled !== 'boolean') return { ok: false, reason: 'imEnabled 须为布尔' }
+    next.imEnabled = patch.imEnabled
   }
   if ('minTurnDurationMs' in patch) {
     const ms = patch.minTurnDurationMs
@@ -769,6 +773,8 @@ export function resolvedConfig(settings) {
     enabled: Object.fromEntries(CATEGORIES.map((key) => [key, enabled[key] !== false])),
     soundMapping,
     imTargets: normalizeImTargets(source.imTargets),
+    // 开关缺省回开:存量配置升级行为不变
+    imEnabled: source.imEnabled !== false,
     kindRoutes: routesVerdict.ok ? routesVerdict.routes : {},
   }
 }
@@ -786,6 +792,7 @@ export function publicConfig(settings) {
     enabled: resolved.enabled,
     soundMapping: resolved.soundMapping,
     imTargets: resolved.imTargets,
+    imEnabled: resolved.imEnabled,
     kindRoutes: resolved.kindRoutes,
     webhookUrl: resolved.webhookUrl,
   }

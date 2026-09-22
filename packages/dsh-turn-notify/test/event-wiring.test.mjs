@@ -377,6 +377,27 @@ test('Given dshIm 在场且已配多目标 When 回合完成 Then 逐目标投�
   assert.ok(sends.every((call) => String(call.text).startsWith('[dsh]')), 'IM 文本应与通知单元一致')
 })
 
+test('Given 已配目标且 imEnabled=false When 回合完成 Then 不投递且目标保留', async () => {
+  const sends = []
+  const { ctx, routes, handlers } = makeCtx({ dshIm: makeImDshIm(sends) })
+  apply(ctx)
+  await disableDurationFilter(routes)
+  await configureImTargets(routes, [{ botId: 'wx_a', targetId: 'owner' }, { botId: 'wx_b', targetId: 'group' }])
+  const offRes = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { imEnabled: false }, JSON_HEADERS), offRes)
+  assert.equal(offRes.status, 200)
+  assert.equal(offRes.body.imEnabled, false)
+  assert.equal(offRes.body.imTargets.length, 2, '开关关闭不应清空目标')
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, turnEnd('completed'))
+  await flushMicrotasks()
+  assert.equal(sends.length, 0, 'imEnabled=false 时不投递')
+  // 投影照常:开关只压制 IM 通道
+  const units = await projectionUnits(routes)
+  assert.equal(units.filter((unit) => unit.category === 'completed').length, 1)
+})
+
 test('Given send 拒绝 When 回合完成 Then 无未处理拒绝且投影照常', async () => {
   const rejections = []
   const onUnhandled = (reason) => rejections.push(reason)

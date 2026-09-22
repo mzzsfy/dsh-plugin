@@ -646,6 +646,10 @@ test('配置补丁校验:非法输入逐类拒绝', () => {
   assert.equal(validateConfigPatch({ minTurnDurationMs: 'fast' }).ok, false)
   assert.equal(validateConfigPatch({ rootsOnly: 'yes' }).ok, false)
   assert.equal(validateConfigPatch({ suppressSubagentWake: 'yes' }).ok, false)
+  // imEnabled:布尔放行,非布尔拒绝
+  assert.deepEqual(validateConfigPatch({ imEnabled: false }), { ok: true, patch: { imEnabled: false } })
+  assert.equal(validateConfigPatch({ imEnabled: 'yes' }).ok, false)
+  assert.equal(validateConfigPatch({ imEnabled: 1 }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { unknown: true } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: { completed: 'no' } }).ok, false)
   assert.equal(validateConfigPatch({ enabled: [true] }).ok, false)
@@ -665,6 +669,7 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
+      imEnabled: true,
       kindRoutes: { completed: ['webhook'] },
     },
   )
@@ -679,10 +684,14 @@ test('配置解析:enabled 缺省键按开补全,字段类型回退默认', () =
     enabled: Object.fromEntries(CATEGORIES.map((name) => [name, true])),
     soundMapping: {},
     imTargets: [],
+    imEnabled: true,
     kindRoutes: {},
   })
   assert.equal(resolvedConfig({ minTurnDurationMs: Number.NaN }).minTurnDurationMs, MIN_TURN_MS)
   assert.equal(resolvedConfig({ suppressSubagentWake: false }).suppressSubagentWake, false)
+  // imEnabled:显式 false 生效,缺省或类型异常回开(升级兼容)
+  assert.equal(resolvedConfig({ imEnabled: false }).imEnabled, false)
+  assert.equal(resolvedConfig({ imEnabled: 'no' }).imEnabled, true)
 })
 
 test('面板可见配置:webhookUrl 原文回显', () => {
@@ -698,6 +707,7 @@ test('面板可见配置:webhookUrl 原文回显', () => {
       enabled: { completed: false, error: true, interrupted: true, approval: true, ask: true, 'max-tokens': true },
       soundMapping: { completed: 'snd-1' },
       imTargets: [],
+      imEnabled: true,
       kindRoutes: { ask: ['im'] },
       webhookUrl: 'https://hook.example/service/xxx',
     },
