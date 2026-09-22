@@ -659,7 +659,7 @@ window.__ModuleLoader__.load({
     function statusTextOf(status, en) {
       switch (status) {
         case 'running': return en ? 'Running' : '运行中'
-        case 'background': return en ? 'Background' : '后台运行'
+        case 'background': return en ? 'Background' : '后台'
         case 'failed': case 'signaled': return en ? 'Failed' : '失败'
         default: return null
       }
@@ -668,9 +668,10 @@ window.__ModuleLoader__.load({
     function headMetaOf(model, en) {
       switch (model.status) {
         case 'running': return { dot: 'ongoing', label: en ? 'Running' : '运行中', pill: undefined }
+        // ack 块静态不反映 job 生命周期,状态点用中性工具图标,文案不带"运行中"
         case 'background': return {
-          dot: 'ongoing',
-          label: en ? 'Background' : '后台运行',
+          dot: 'none',
+          label: en ? 'Background' : '后台',
           pill: model.jobId !== undefined ? (en ? `bg ${model.jobId}` : `后台 ${model.jobId}`) : undefined,
           pillTone: 'bg',
         }
@@ -782,9 +783,7 @@ window.__ModuleLoader__.load({
     function ShellToolRow(props) {
       const { block, cwd, inspect } = props
       const en = detectEnglish()
-      const model = shellCardModel(block, cwd)
-      // 后台 ack 卡默认展开:内容即命令全文,收起只剩一行摘要失去可读性
-      const [open, setOpen] = useState(model.kind === 'background')
+      const [open, setOpen] = useState(false)
       const [, setCatalogReady] = useState(false)
       useEffect(() => {
         let disposed = false
@@ -819,6 +818,9 @@ window.__ModuleLoader__.load({
           h('span', { className: 'sls-tv__title' }, 'Shell'),
           h('span', { className: 'sls-tv__sep', 'aria-hidden': true }),
           h('span', { className: 'sls-tv__sum' + (failed ? ' sls-tv__sum--err' : '') }, summary),
+          model.status === 'background' && model.jobId !== undefined
+            ? h('span', { className: 'sls-tv__badge', title: en ? 'Background job' : '后台任务' }, en ? `bg ${model.jobId}` : `后台 ${model.jobId}`)
+            : null,
         ),
         open ? h(ShellCard, { model, inspect, en }) : null,
       )
