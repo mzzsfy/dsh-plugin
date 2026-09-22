@@ -96,18 +96,20 @@ window.__ModuleLoader__.load({
       '.sls-rule--bad .sls-rule__input { border-color:#c44; }',
       '.sls-rule__err { flex:none; max-width:40%; font-size:11px; color:#c44; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }',
       '.sls-rule__del { flex:none; padding:2px 8px; }',
-      // tool.call.toolview 卡片(key 'shell'):官方 terminal 行同构 + 复制/折行增强
-      '.sls-tv { font-size:13px; line-height:1.45; }',
+      // tool.call.toolview 卡片(key 'shell'):官方 terminal 行同构 + 复制/折行增强。
+      // 色彩对齐官方 ToolRow:标题 label-secondary、icon 盒 label-tertiary(实证自
+      // 官方行 computed style);token 缺失时回退 inherit 不致不可读
+      '.sls-tv { font-size:13px; line-height:1.45; color:var(--dsw-alias-label-secondary, inherit); }',
       '.sls-tv__row { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:default; }',
       '.sls-tv__row--exp { cursor:pointer; user-select:none; }',
-      '.sls-tv__lead { display:flex; align-items:center; gap:4px; color:inherit; }',
+      '.sls-tv__lead { display:flex; align-items:center; gap:4px; color:var(--dsw-alias-label-tertiary, inherit); }',
       '.sls-tv__chev { opacity:.45; transition:transform .15s ease; }',
       '.sls-tv__row[data-open="1"] .sls-tv__chev { transform:rotate(-90deg); }',
       '.sls-tv__sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }',
-      '.sls-tv__title { font-weight:500; }',
-      '.sls-tv__sep { width:3px; height:3px; border-radius:50%; background:currentColor; opacity:.35; flex:none; }',
-      '.sls-tv__sum { opacity:.6; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
-      '.sls-tv__sum--err { color:#d4553f; opacity:.95; }',
+      '.sls-tv__title { font-weight:400; }',
+      '.sls-tv__sep { width:2px; height:2px; border-radius:1px; background:var(--dsw-alias-label-caption, currentColor); opacity:.8; flex:none; }',
+      '.sls-tv__sum { color:var(--dsw-alias-label-tertiary, inherit); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+      '.sls-tv__sum--err { color:var(--dsw-alias-state-error-primary, #d4553f); }',
       '.sls-tv__body { margin:6px 0 4px; border:1px solid rgba(128,128,128,.28); border-radius:8px; overflow:hidden; }',
       '.sls-tv__head { display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid rgba(128,128,128,.18); background:rgba(128,128,128,.05); }',
       '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; }',
