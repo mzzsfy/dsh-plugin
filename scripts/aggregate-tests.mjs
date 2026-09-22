@@ -15,6 +15,8 @@ const PREVIEW_LIMIT = 5
 const DETAIL_LIMIT = 200
 const FALLBACK_TAIL_LIMIT = 50
 const FAILING_SECTION_ANCHOR = '✖ failing tests:'
+// 单元运行错误锚点:写入单元日志,供失败明细区分"没跑起来"与"跑了但失败"
+const UNIT_ERROR_ANCHOR = '[unit-error]'
 const PACKAGES_DIR = 'packages'
 const GENERIC_TEST_SUFFIX = '.test.mjs'
 // 平台专属测试文件后缀:通用 *.test.mjs 两平台都跑,专属文件仅对应平台跑(CI=linux)
@@ -110,9 +112,20 @@ export function parseArgs(argv) {
 function runUnit(unit, logPath) {
   return new Promise(resolve => {
     const out = createWriteStream(logPath)
+    out.on('error', error => {
+      // out 已不可写,留痕失败再降级控制台,防错误处理自身抛出
+      try {
+        appendFileSync(logPath, `${UNIT_ERROR_ANCHOR} 日志流: ${error}\n`)
+      } catch {
+        console.error(`${UNIT_ERROR_ANCHOR} 日志流留痕失败: ${error}`)
+      }
+    })
     const child = spawn(unit.command[0], unit.command.slice(1), {cwd: unit.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true})
-    child.stdout.pipe(out)
-    child.stderr.pipe(out)
+    // 经 out 写入保持与管道数据同一写入方,顺序一致
+    child.on('error', error => out.write(`${UNIT_ERROR_ANCHOR} spawn: ${error}\n`))
+    // 双源汇入同一文件流,end 统一由 close 收口,防源间 end 竞争
+    child.stdout.pipe(out, {end: false})
+    child.stderr.pipe(out, {end: false})
     child.on('close', code => {
       // 等落盘回调再返回,防下游读到未刷满的日志
       out.end(() => resolve(code === 0))

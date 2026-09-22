@@ -15,6 +15,7 @@ import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseC
  *   4. 单元失败 -> 失败数按轮累计,失败日志保留,汇总含轮次与用例锚点,summary 落失败明细
  *   5. 混合单元 -> 通过单元日志删,失败单元日志留
  *   6. 单元发现 -> 冒烟 + 仓库根测试 + 含 test 目录的包,顺序确定
+ *   7. spawn 失败 -> 仍按失败计数,日志留错误锚点,与"跑了但失败"可区分
  */
 
 const repo = join(import.meta.dirname, '..')
@@ -111,6 +112,38 @@ test('runUnits_混合单元_过删败留', async t => {
   assert.equal(result.failures, 1)
   const logs = readdirSync(logDir)
   assert.deepEqual(logs, ['bad-1.log'])
+})
+
+test('runUnits_spawn失败_失败计数且日志留错误锚点', async t => {
+  const logDir = tempDir(t, 'agg-spawn-')
+  const result = await runUnits({
+    rounds: 1,
+    logDir,
+    summaryPath: null,
+    units: [{name: 'missing', command: ['missing-executable-xyz'], cwd: repo}],
+  })
+  assert.equal(result.failures, 1)
+  assert.deepEqual(result.failedUnits[0].rounds, ['1'])
+  const logText = readFileSync(join(logDir, 'missing-1.log'), 'utf8')
+  assert.ok(logText.includes('[unit-error] spawn:'), '日志须留 spawn 错误锚点')
+  assert.ok(logText.includes('ENOENT'), '锚点须携带失败原因')
+})
+
+test('runUnits_双流输出_同一日志完整留痕', async t => {
+  const logDir = tempDir(t, 'agg-dual-')
+  await runUnits({
+    rounds: 1,
+    logDir,
+    summaryPath: null,
+    units: [{
+      name: 'dual',
+      command: [process.execPath, '-e', 'console.error("stderr-mark");console.log("stdout-mark");process.exit(1)'],
+      cwd: repo,
+    }],
+  })
+  const logText = readFileSync(join(logDir, 'dual-1.log'), 'utf8')
+  assert.ok(logText.includes('stderr-mark'), 'stderr 须进日志')
+  assert.ok(logText.includes('stdout-mark'), 'stdout 须进日志')
 })
 
 test('discoverUnits_真实仓库_冒烟与仓库根测试在列且顺序稳定', () => {
