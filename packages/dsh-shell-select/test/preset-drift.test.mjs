@@ -38,12 +38,14 @@ function locateHarnessDir() {
   return null
 }
 
-// yaml 能力与宿主解耦:js-yaml 为 devDep(CI 无宿主也可解析本包文件);
-// !!js 标签与 cordis-plugin-include 的 JsExpr Type 同形(construct 成 {__jsExpr}),
-// 宿主在场时改用官方 entryListSchema 求同(漂移守卫的对照面只在有宿主时跑)
+// yaml 能力与宿主解耦:js-yaml 为 devDep(CI 无宿主也可解析本包文件)。
+// !!js 标签本地同形 Type:tag 必须写完整 URI(tag:yaml.org,2002:js)——文档简写
+// !!js 展开后按完整 URI 匹配,字面 '!!js' 永不命中(unknown tag,CI 假绿教训)。
+// 形态场景恒走 LOCAL_SCHEMA(本机/CI 同路径);漂移守卫在场时改用官方
+// entryListSchema 求同(对照面只在有宿主时跑)
 import yamlStatic from 'js-yaml'
 
-const LOCAL_SCHEMA = yamlStatic.JSON_SCHEMA.extend(new yamlStatic.Type('!!js', {
+const LOCAL_SCHEMA = yamlStatic.JSON_SCHEMA.extend(new yamlStatic.Type('tag:yaml.org,2002:js', {
   kind: 'scalar',
   resolve: (data) => typeof data === 'string',
   construct: (data) => ({ __jsExpr: data }),
@@ -61,8 +63,7 @@ try {
   }
 } catch { /* 官方 schema 缺失按本地同形标签处理 */ }
 
-const yaml = yamlStatic
-const loadYaml = (text) => yaml.load(text, { schema: entryListSchema })
+const loadYaml = (text) => yamlStatic.load(text, { schema: entryListSchema })
 
 // 镜像 loader 的表达式求值形态(new Function + with(ctx),全局可用)
 const evalExpr = (expr, ctx) => new Function('ctx', `with (ctx) { return (${expr}) }`)(ctx)
@@ -92,7 +93,8 @@ test('预设形态:preset.yml 元数据在场', () => {
 })
 
 test('预设形态:agent.cordis.yml 可解析且无 tool-pwsh 行', () => {
-  const rows = loadYaml(presetText)
+  // 形态断言恒走本地同形 schema:本机与 CI 同一路径,官方 schema 在场与否不影响本场景
+  const rows = yamlStatic.load(presetText, { schema: LOCAL_SCHEMA })
   assert.ok(Array.isArray(rows), '预设组合必须是行数组')
   const ids = new Set()
   const walk = (list) => {
@@ -126,7 +128,7 @@ test('漂移守卫:与已安装 standard 逐行对表(缺失宿主则 skip)', (t
 })
 
 test('patch 形态:agent-presets 覆写带 name 防御且含 default 与 roots', () => {
-  const patch = loadYaml(patchText)
+  const patch = yamlStatic.load(patchText, { schema: LOCAL_SCHEMA })
   const row = patch.find((entry) => entry.id === 'agent-presets')
   assert.ok(row, 'patch 缺 agent-presets 覆写行')
   assert.equal(row.name, '@deepseek-ai/dsh-agent-presets', 'name 字段是官方行改名防御,必须钉住包名')
@@ -137,7 +139,7 @@ test('patch 形态:agent-presets 覆写带 name 防御且含 default 与 roots',
 })
 
 test('patch 表达式求值:default 按平台切换,roots 指向本包 presets 目录', () => {
-  const patch = loadYaml(patchText)
+  const patch = yamlStatic.load(patchText, { schema: LOCAL_SCHEMA })
   const config = patch.find((entry) => entry.id === 'agent-presets').config
   const expectedDefault = process.platform === 'win32' ? 'shell-select' : 'standard'
   assert.equal(evalExpr(config.default.__jsExpr, { baseUrl: 'file:///any/profile/dir/' }), expectedDefault)
