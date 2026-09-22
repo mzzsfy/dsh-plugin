@@ -18,10 +18,16 @@ function extractLogic(name, deps = {}) {
   return new Function(...keys, 'return (' + match[1].trim() + ')')(...keys.map((key) => deps[key]))
 }
 
-function cardModel() {
+function cardModel(catalog = null) {
   const lastSegment = extractLogic('lastSegment')
   const displayCwd = extractLogic('displayCwd', { lastSegment })
-  return extractLogic('shellCardModel', { displayCwd, lastSegment, parseExitTail: extractLogic('parseExitTail'), hasSpillNotice: extractLogic('hasSpillNotice') })
+  return extractLogic('shellCardModel', {
+    displayCwd,
+    lastSegment,
+    parseExitTail: extractLogic('parseExitTail'),
+    hasSpillNotice: extractLogic('hasSpillNotice'),
+    clientDisplayName: extractLogic('clientDisplayName', { clientCatalog: catalog }),
+  })
 }
 
 function parseEnvText() {
@@ -75,6 +81,29 @@ test('S12b running 完整参数:terminal running 卡', () => {
   const model = cardModel()(runningBlock(ARGS), SESSION_CWD)
   assert.equal(model.kind, 'terminal')
   assert.equal(model.status, 'running')
+})
+
+test('S15 shell 徽章命名:显式参数按 id 取用户命名,缺省落 default 客户端命名', () => {
+  const catalog = { default: 'git-bash', byId: { 'git-bash': 'Git Bash', pwsh: 'PowerShell' } }
+  const explicit = cardModel(catalog)(
+    settledBlock(JSON.stringify({ command: 'ls', description: 'list', shell: 'pwsh' }), 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(explicit.shellName, 'PowerShell')
+  const fallback = cardModel(catalog)(
+    settledBlock(ARGS, 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(fallback.shellName, 'Git Bash')
+  const unknown = cardModel(catalog)(
+    settledBlock(JSON.stringify({ command: 'ls', description: 'list', shell: 'ghost' }), 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(unknown.shellName, undefined)
+})
+
+test('S15b cwd 悬浮全路径:model 携带 cwdFull', () => {
+  const model = cardModel()(
+    settledBlock(JSON.stringify({ command: 'git status', description: 'Show working tree status', workdir: 'sub' }), 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(model.cwdDir, 'sub')
+  assert.equal(model.cwdFull, 'C:\\repo\\sub')
+  const noWorkdir = cardModel()(
+    settledBlock(JSON.stringify({ command: 'git status', description: 'Show working tree status' }), 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(noWorkdir.cwdFull, SESSION_CWD)
 })
 
 test('S12c 后台 ack 与 isError 仍走 generic(回归)', () => {

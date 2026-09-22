@@ -65,6 +65,31 @@ window.__ModuleLoader__.load({
       return payload
     }
 
+    // 工具卡客户端名册缓存:GET /config 单飞拉取,shell 徽章按 id→用户命名解析。
+    // 失败置 null(徽章不渲染),不重试——下次页面加载自然重取
+    let clientCatalog = null
+    let clientCatalogPromise = null
+    // LOGIC-BEGIN ensureClientCatalog
+    function ensureClientCatalog() {
+      if (clientCatalogPromise === null) {
+        clientCatalogPromise = api(API.config).then((section) => {
+          const byId = {}
+          for (const entry of section.resolved?.shells ?? []) byId[entry.id] = entry.name
+          clientCatalog = { default: section.resolved?.default, byId }
+        }).catch(() => { })
+      }
+      return clientCatalogPromise
+    }
+    // LOGIC-END ensureClientCatalog
+    // 显式 shell 参数按 id 取用户命名;缺省落 default 客户端的用户命名(配置即当前解析事实)
+    // LOGIC-BEGIN clientDisplayName
+    function clientDisplayName(requested) {
+      if (clientCatalog === null) return undefined
+      const id = requested !== undefined && requested !== '' ? requested : clientCatalog.default
+      return id !== undefined ? clientCatalog.byId[id] : undefined
+    }
+    // LOGIC-END clientDisplayName
+
     const CSS = [
       '.sls-card { display:flex; flex-direction:column; gap:10px; }',
       '.sls-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
@@ -594,17 +619,16 @@ window.__ModuleLoader__.load({
       } catch { /* 结构外形态走 generic */ }
       const command = typeof args?.command === 'string' && args.command.trim() !== '' ? args.command : ''
       const description = typeof args?.description === 'string' && args.description.trim() !== '' ? args.description : undefined
-      const cwdDir = (() => {
-        const dir = displayCwd(typeof args?.workdir === 'string' ? args.workdir : undefined, sessionCwd)
-        return dir !== undefined ? lastSegment(dir) : undefined
-      })()
-      const shellName = typeof args?.shell === 'string' && args.shell !== '' ? args.shell : undefined
+      const cwdFull = displayCwd(typeof args?.workdir === 'string' ? args.workdir : undefined, sessionCwd)
+      const cwdDir = cwdFull !== undefined ? lastSegment(cwdFull) : undefined
+      // shell 名 = 用户在配置页起的条目名;args.shell 缺省时按 default 客户端解析(配置当前读数)
+      const shellName = clientDisplayName(typeof args?.shell === 'string' ? args.shell : undefined)
       if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null }
 
       if (!settled) {
         // running persistent(进行中无描述):回退行但状态点用进行中灰,非 warning 黄
         if (description === undefined) return { kind: 'generic', command, summary: undefined, output: null, running: true }
-        return { kind: 'terminal', status: 'running', command, description, cwdDir, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined }
+        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined }
       }
 
       const contentText = (block.content ?? []).map((part) => (part.type === 'text' ? part.text : '')).filter((text) => text !== '').join('\n')
@@ -614,7 +638,7 @@ window.__ModuleLoader__.load({
       }
       const tail = parseExitTail(contentText)
       const status = tail.signal !== undefined ? 'signaled' : tail.exitCode !== 0 ? 'failed' : 'done'
-      return { kind: 'terminal', status, command, description, cwdDir, shellName, output: tail.output, exitCode: tail.exitCode, signal: tail.signal, code: undefined }
+      return { kind: 'terminal', status, command, description, cwdDir, cwdFull, shellName, output: tail.output, exitCode: tail.exitCode, signal: tail.signal, code: undefined }
     }
     // LOGIC-END shellCardModel
 
@@ -717,8 +741,8 @@ window.__ModuleLoader__.load({
             TOOLVIEW_ICONS.StateDot({ state: meta.dot }),
             h('span', { className: 'sls-tv__sr' }, meta.label),
           ),
-          model.cwdDir !== undefined ? h('span', { className: 'sls-tv__cwd' }, model.cwdDir) : null,
-          model.shellName !== undefined ? h('span', { className: 'sls-tv__badge' }, model.shellName) : null,
+          model.cwdDir !== undefined ? h('span', { className: 'sls-tv__cwd', title: model.cwdFull ?? model.cwdDir }, model.cwdDir) : null,
+          model.shellName !== undefined ? h('span', { className: 'sls-tv__badge', title: en ? 'Shell client' : 'Shell 客户端' }, model.shellName) : null,
           h('span', { className: 'sls-tv__sp' }),
           meta.pill !== undefined ? h('span', { className: 'sls-tv__pill' }, meta.pill) : null,
           h('span', { className: 'sls-tv__copy' },
@@ -746,6 +770,12 @@ window.__ModuleLoader__.load({
       const { block, cwd, inspect } = props
       const en = detectEnglish()
       const [open, setOpen] = useState(false)
+      const [, setCatalogReady] = useState(false)
+      useEffect(() => {
+        let disposed = false
+        ensureClientCatalog().then(() => { if (!disposed) setCatalogReady(true) })
+        return () => { disposed = true }
+      }, [])
       const model = shellCardModel(block, cwd)
       if (model.kind === 'generic') return h(GenericShellRow, { model, inspect, en })
       const expandable = true
