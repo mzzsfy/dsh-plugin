@@ -98,6 +98,7 @@ const SETTINGS_SCHEMA = z.object({
   enabled: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.boolean().default(true)]))).description('六类事件独立开关:完成/出错/被中断/等待审批/AI 提问/达到上限'),
   soundMapping: z.object(Object.fromEntries(CATEGORIES.map((key) => [key, z.string().default('')]))).description('每类事件的声音映射,空为内置默认,非空为内置音名或上传音效 id'),
   imTargets: z.array(z.object({ botId: z.string().default(''), targetId: z.string().default('') })).default([]).description('dsh-im 推送目标列表,空数组禁用 IM 通道'),
+  imEnabled: z.boolean().default(true).description('IM 推送总开关:关闭后不向已配目标投递,目标绑定保留'),
   kindRoutes: z.dict(z.array(z.string())).default({}).description('事件→通道路由:分类到放行通道名单(sound/system/toast/blink/webhook/im/host),未配置的分类全通道放行'),
 })
 
@@ -311,6 +312,8 @@ export function apply(ctx) {
   function deliverIm(unit, settings) {
     const dshIm = ctx.get('dshIm')
     if (dshIm === undefined) return
+    // 总开关关闭:目标绑定保留,仅不投递
+    if (settings.imEnabled === false) return
     for (const { botId, targetId } of normalizeImTargets(settings.imTargets)) {
       void Promise.resolve().then(() => dshIm.send(botId, targetId, unit.text, { signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS) })).catch(() => {})
     }
@@ -757,6 +760,7 @@ export function apply(ctx) {
           sendJson(res, 200, { ok: false, detail: '未配置投递目标' })
           return
         }
+        // 点火测试与开关无关:显式验证通道连通,不受投递总开关压制
         // 逐目标结算,真实结果随响应返回,与 test-webhook 的不谎报原则一致
         const results = await Promise.all(targets.map(async ({ botId, targetId }) => {
           try {

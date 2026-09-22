@@ -91,7 +91,7 @@ turn-notify:
 
 ## IM 推送
 
-安装 [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 后自动启用,可推送到微信等九种渠道。投递目标的新建与平台测试在 dsh-im 设置页完成,本插件只做选择:从已绑 bot 的目标目录勾选即保存,支持绑定多个 bot。触发逻辑与 webhook 一致,fire-and-forget 不重试;bot 离线时该次通知弃置不补发。
+安装 [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 后自动启用,可推送到微信等九种渠道。投递目标的新建与平台测试在 dsh-im 设置页完成,本插件只做选择:从已绑 bot 的目标目录勾选即保存,支持绑定多个 bot。IM 卡顶部有总开关,关闭后不向已配目标投递、目标绑定原样保留,临时停用不必逐个移除目标,再开即恢复。触发逻辑与 webhook 一致,fire-and-forget 不重试;bot 离线时该次通知弃置不补发。测试页的"测试 IM 通知"为显式点火,不受总开关影响。
 
 ## 会话行高亮
 
@@ -114,7 +114,7 @@ turn-notify:
 | 通知 | webhook 地址、最短回合时长、子代理过滤、宿主通知(总开关与回退)、六类事件开关;存 settings.yaml,事件开关点击即存,其余点保存后生效。事件→通道路由(kindRoutes)亦存此命名空间,经 yaml 配置 |
 | 偏好 | 本机浏览器记忆的设置:会话高亮(独立开关)、声音总开关与分类静音、音量、系统弹窗与授权、页内提示开关、页内提示音(总开关 + 分类独立开关)、聚焦静默、降级标题闪烁 |
 | 音效 | 音效上传/试听/重命名/删除,六类事件的音效映射与双作用域开关,页内提示音映射(本机,未配置沿用通知音效) |
-| IM | 绑定 dsh-im bot、勾选投递目标(仅装了 dsh-im 时显示) |
+| IM | IM 总开关(关闭保留目标)、绑定 dsh-im bot、勾选投递目标(仅装了 dsh-im 时显示) |
 | 测试 | 声音/页内/系统/宿主/webhook/IM 逐通道点火,回执即真实结果 |
 
 ## settings.yaml 参考
@@ -143,6 +143,7 @@ turn-notify:
   imTargets:                      # dsh-im 投递目标,空数组禁用
     - botId: wx_xxx
       targetId: owner
+  imEnabled: true                 # IM 推送总开关:关闭后不投递,目标绑定保留
 ```
 
 音量、聚焦静默、分类静音等本机偏好存浏览器 localStorage,不经 yaml。

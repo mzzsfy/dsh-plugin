@@ -48,7 +48,10 @@ jobs:
         run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4
       # 含外部依赖的包自动发现并安装(node ESM 逐级向上解析命中包内 node_modules);
       # dependencies/devDependencies 全为 @mzzsfy 自依赖、为空或缺失的包跳过——
-      # 自依赖统一走符号链接桥,禁止经 registry 解析
+      # 自依赖统一走符号链接桥,禁止经 registry 解析。
+      # --legacy-peer-deps:devDeps 钉宿主开发基准(rc.2),上游 rc.3 发布后其新包
+      # peer range 与钉版互踩(--omit=peer 下 npm 仍因顶层 devDeps 解析 peer 死),
+      # legacy 语义跳过 peer 仲裁,与"peer 不经 registry 落地"的既定形态一致
       - name: 安装含外部依赖的包
         run: |
           for dir in packages/*/; do
@@ -56,7 +59,7 @@ jobs:
             needs=$(node -e "const p=require(process.argv[1]); const f=k=>Object.keys(p[k]||{}).some(n=>!n.startsWith('@mzzsfy/')); process.stdout.write(f('dependencies')||f('devDependencies')?'yes':'no')" "$(pwd)/${dir}package.json")
             [ "$needs" = "yes" ] || continue
             echo "::group::安装包依赖 ${dir}"
-            (cd "$dir" && npm install --omit=peer --no-save --no-package-lock --no-audit --no-fund) || exit 1
+            (cd "$dir" && npm install --omit=peer --legacy-peer-deps --no-save --no-package-lock --no-audit --no-fund) || exit 1
             echo "::endgroup::"
           done
       # 包间依赖禁止经 npm registry 解析(不自依赖):@mzzsfy 全量符号链接到本地工作副本,

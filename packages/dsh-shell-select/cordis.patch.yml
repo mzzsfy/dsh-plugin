@@ -14,12 +14,30 @@
 # 哨兵自愈与复活让位语义逐项同构 packages/dsh-llm-pi-gateway 的 guard/takeover,
 # 差异仅两处:官方代挂对象为 tool-pwsh + pwsh-sandbox 两行;行配置读官方
 # `shell` settings 节(pwsh-sandbox 经其 Config 消费,保持官方 pwshPath 配置)。
+#
+# preset 面:web 面把 agent 平面后移到每会话 agent preset,内置 standard 预设
+# 在 win32 重新声明 tool-pwsh 行,bundle patch 对 preset 组合树不可达。收口方式:
+# 本包自带 preset(standard 全量副本 − tool-pwsh 行,见 presets/shell-select/),
+# 经 agent-presets 行覆写接入——roots 指向本包 presets 目录(default 'user' 承接
+# schema 缺省),default 在 win32 切到本包预设、POSIX 保持 standard(本包行在
+# POSIX 全停用,行为须与上游逐字一致)。路径表达式由 ctx.baseUrl(profile 目录)
+# 推 node_modules/@mzzsfy/dsh-shell-select/presets/:bundle 必经 profile node_modules
+# 解析(resolveBundleDir 顺序),本 patch 在执行即证目录在。default 仅为 settings
+# `agent-presets.default` 缺省(config.default 是其 base),用户显式选择恒优先;
+# 上游行更名/缺行时 patch 告警跳过,行为自然回落 standard。
 
 - id: pwsh-sandbox
   disabled: true
 
 - id: tool-pwsh
   disabled: true
+
+- id: agent-presets
+  name: '@deepseek-ai/dsh-agent-presets'
+  config:
+    default: !!js "process.platform === 'win32' ? 'shell-select' : 'standard'"
+    roots:
+      - path: !!js decodeURIComponent(new URL('node_modules/@mzzsfy/dsh-shell-select/presets/', ctx.baseUrl).pathname).replace(/^\/([A-Za-z]:)/, '$1')
 
 - insert:
     - id: shell-select

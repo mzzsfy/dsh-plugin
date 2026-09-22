@@ -1071,6 +1071,7 @@ window.__ModuleLoader__.load({
       folderRunningEnabled: true,
       enabled: Object.fromEntries(CATEGORIES.map((key) => [key, true])),
       imTargets: [],
+      imEnabled: true,
     }
 
     const CSS = [
@@ -1616,6 +1617,18 @@ window.__ModuleLoader__.load({
         void persistImTargets(removeImTargetFromList(config.imTargets, item.botId, item.targetId))
       }
 
+      // IM 总开关:目标绑定保留,关闭仅停投递;乐观回填,失败回滚
+      function toggleImEnabled(checked) {
+        setConfig((prev) => ({ ...prev, imEnabled: checked }))
+        api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify({ imEnabled: checked }) })
+          .then((res) => setConfig({ ...DEFAULT_CONFIG, ...res }))
+          .catch((error) => {
+            // 回滚到请求发出前的取值:两次异步 setConfig 闭包各自读到已更新的 prev
+            setConfig((prev) => ({ ...prev, imEnabled: !prev.imEnabled }))
+            patch('IM 开关切换失败:' + (error && error.message ? error.message : String(error)), 'error')
+          })
+      }
+
       // 取消注册:移除该 bot 全部目标;bot 在 dsh-im 已删除时借此清理残留绑定
       function unregisterImBot(botId) {
         void persistImTargets(
@@ -2002,6 +2015,14 @@ window.__ModuleLoader__.load({
               h('span', { className: 'tn-card__title' }, 'IM 投递(dsh-im)'),
               h('span', { className: 'tn-card__sub' }, '勾选目标即自动保存;支持绑定多个 bot,点 bot 名加载其目录,× 取消注册'),
             ),
+            field('IM 开关', [
+              h('label', { className: 'tn-meta tn-switch', title: '关闭后不再向已配目标投递 IM 通知,目标绑定保留;再次开启即恢复推送' },
+                ...switchToggle({
+                  checked: config.imEnabled,
+                  onChange: (e) => toggleImEnabled(e.target.checked),
+                }),
+                ' 启用 IM 推送'),
+            ], '关闭时通知不推送 IM,已勾选的目标与 bot 绑定原样保留,无需移除目标'),
             field('Bot ID', [
               h('input', {
                 className: 'tn-input tn-fill', type: 'text',
