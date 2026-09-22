@@ -118,6 +118,7 @@ function makeCtx({
   openRejected,
   workspaces,
   settingsValue,
+  settingsService: settingsServiceOverride,
   timerAvailable,
   readSessions,
 }) {
@@ -127,7 +128,7 @@ function makeCtx({
   const ledgerDomain = ledger === undefined ? makeLedgerDomain([]) : ledger
   const workspaceList = workspaces || []
   const settingsState = { value: settingsValue }
-  const settingsService = {
+  const settingsService = settingsServiceOverride ?? {
     get: () => settingsState.value,
     register: () => ({ resolved: undefined }),
     // 宿主 update 为异步串行:合并进微任务队列后生效,读旧值发生在 flush 前
@@ -806,6 +807,42 @@ test('周期评估:间隔设置运行时变更经 tick 对账(0 重启用 / 关�
     mock.timers.tick(TICK_MS)
     await waitFor(() => registry.archiveCalls.includes('s3'))
     assert.deepEqual(registry.archiveCalls, ['s1', 's2', 's3'])
+  } finally {
+    mock.timers.reset()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('settings 方法面缺失(0.1.7 SettingsForms 形态):tick 与 status 路由不抛错,配置回落默认', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-methodface-'))
+  // 宿主 0.1.7-alpha.1 将 settings 服务换形为 SettingsForms:缺 get/register,仅剩 update。
+  // 旧形态直接 settings.get 会在 timer 回调抛 TypeError 崩进程(实测事故),守卫后应回落默认值
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const TICK_MS = 60 * 1000
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  try {
+    const artifact = path.join(dir, 'a.jsonl')
+    await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(artifact, stale / 1000, stale / 1000)
+    const settingsForms = { update: async () => {} }
+    const { activateSettings, handlers, registry } = makeCtx({
+      archivedIds: [],
+      headers: [{ id: 'a', cwd: 'C:\\x', createdAt: stale }],
+      agents: new Map(),
+      settingsService: settingsForms,
+      sessionPersistence: { locate: () => ({ path: artifact }) },
+    })
+    activateSettings()
+    // 守卫生效:配置读不到回落默认(days=7,intervalHours=24),30 天超期夹具到期即按默认轮归档
+    mock.timers.tick(DAY_MS + TICK_MS)
+    await waitFor(() => registry.archiveCalls.includes('a'))
+    assert.deepEqual(registry.archiveCalls, ['a'], '配置缺失按默认间隔正常评估,不因服务形变停摆')
+    // status 路由读设置不抛:回默认 days/intervalHours
+    const statusHandler = handlers.get('/api/session-manager/status')
+    const res = response()
+    await statusHandler(request('s1', 'GET'), res)
+    assert.equal(res.status, 200)
   } finally {
     mock.timers.reset()
     await rm(dir, { recursive: true, force: true })

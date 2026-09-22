@@ -70,6 +70,9 @@ export function apply(ctx, config) {
   }
   ctx.inject(['settings'], (settingsCtx) => {
     const settings = settingsCtx.settings
+    // 方法面守卫:settings 服务在但缺 get/register(宿主升级变更面)时整体不挂载,
+    // 计量与路由随 fiber 未激活干净禁用,防 register 抛错
+    if (typeof settings.get !== 'function' || typeof settings.register !== 'function') return
     settings.register(SETTINGS_NAMESPACE, SETTINGS_SCHEMA, { base: config })
     // 每日本地日首次写入时按保留值清理分钟/小时桶;启动回扫前的触发在下方回扫入口
     store.retentionDays = () =>

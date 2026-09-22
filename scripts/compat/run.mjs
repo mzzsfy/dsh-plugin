@@ -4,10 +4,10 @@
 // 判定门槛 = 统一底线:activation live + findings 0 + 页面无 Failed to load plugins + 正常访问。
 // 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals]
 import { spawn, spawnSync } from 'node:child_process'
-import { createWriteStream, existsSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { createWriteStream, existsSync, lstatSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
 import { buildProfile, installPackageExternals } from './profile.mjs'
 import { isSemver } from './window.mjs'
@@ -52,13 +52,23 @@ function parseArgs(argv) {
   return args
 }
 
-// 根桥重指:dst 原位暂存为 .compat-bak;中途失败自动还原已重指部分
+// 根桥重指:dst 原位暂存为 .compat-bak;中途失败自动还原已重指部分。
+// 每次形态变迁落审计日志:桥包消失事故定位需要确切的变迁时刻与前后形态
 function repointBridgeFromHost(hostDir) {
   const backups = []
+  const shape = (p) => {
+    if (!existsSync(p)) return 'absent'
+    const st = lstatSync(p)
+    return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'dir' : 'other'
+  }
+  const audit = (phase, name, dst, backup) => log(
+    `[bridge] ${phase} ${name}: dst=${shape(dst)} bak=${shape(backup)}`,
+  )
   const restore = () => {
     for (const { dst, backup } of backups) {
       rmSync(dst, { recursive: true, force: true })
       if (existsSync(backup)) renameSync(backup, dst)
+      audit('restore', basename(dst), dst, backup)
     }
   }
   try {
@@ -67,6 +77,7 @@ function repointBridgeFromHost(hostDir) {
       const dst = join(REPO_ROOT, 'node_modules', name)
       if (!existsSync(src)) continue
       const backup = `${dst}.compat-bak`
+      audit('repoint-before', name, dst, backup)
       // 上次运行异常退出未还原(bak 残留):先恢复原桥,防止本次误删原件
       if (existsSync(backup)) {
         if (existsSync(dst)) rmSync(dst, { recursive: true, force: true })
@@ -75,6 +86,7 @@ function repointBridgeFromHost(hostDir) {
       if (existsSync(dst)) renameSync(dst, backup)
       symlinkDir(src, dst)
       backups.push({ dst, backup })
+      audit('repoint-after', name, dst, backup)
     }
   } catch (error) {
     restore()

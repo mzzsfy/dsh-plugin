@@ -1,0 +1,12 @@
+{
+  "name": "dsh-plugin-repo-root",
+  "private": true,
+  "description": "仓库根解析桥:宿主 peer 同源包与 playwright 仅供本地测试/CI 兼容探针使用,不发布",
+  "dependencies": {
+    "@deepseek-ai/dsh-storage-domain": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
+    "@deepseek-ai/schemastery": "3.18.2",
+    "playwright": "1.63.0",
+    "zod": "4.5.4"
+  }
+}

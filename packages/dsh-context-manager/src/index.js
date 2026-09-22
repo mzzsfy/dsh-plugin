@@ -79,7 +79,8 @@ function respondError(ctx, res, error) {
 
 function readSettings(ctx) {
   const settings = ctx.get('settings')
-  const value = settings ? settings.get(NAMESPACE) : undefined
+  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值,防路由 handler 抛错
+  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
   return {
     historyEnabled: !value || value.historyEnabled !== false,
     historyButtonEnabled: !value || value.historyButtonEnabled !== false,

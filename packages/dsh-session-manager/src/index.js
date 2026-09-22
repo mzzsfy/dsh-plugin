@@ -116,7 +116,8 @@ function respondError(ctx, res, error) {
 
 function readSettings(ctx) {
   const settings = ctx.get('settings')
-  const value = settings ? settings.get(NAMESPACE) : undefined
+  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值,防 timer 回调抛错崩进程
+  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
   const days = Number(value && value.autoArchiveDays)
   const hours = Number(value && value.autoArchiveIntervalHours)
   return {
@@ -769,6 +770,9 @@ export function apply(ctx, config) {
   })
 
   ctx.inject(['settings'], (settingsCtx) => {
+    // 方法面守卫:settings 服务在但缺 register(宿主升级变更面)时跳过注册,
+    // 周期轮与启动补扫按 readSettings 的默认值降级运行,不因服务形变炸 fiber
+    if (typeof settingsCtx.settings.register !== 'function') return
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
     // 启动补扫不依赖定时服务:settings 就绪即评估一轮,清掉停机期间积压的超期会话
     evaluateArchives()

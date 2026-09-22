@@ -105,7 +105,8 @@ const SETTINGS_SCHEMA = z.object({
 // 读侧归一交由 core 的 resolvedConfig:字段类型异常回退默认值,与写路径校验宽松度一致
 const readSettings = (ctx) => {
   const settings = ctx.get('settings')
-  return resolvedConfig(settings ? settings.get(NAMESPACE) : undefined)
+  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认配置,防路由 handler 抛错
+  return resolvedConfig(settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined)
 }
 
 function sendJson(res, status, payload) {
