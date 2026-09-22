@@ -38,19 +38,30 @@ function locateHarnessDir() {
   return null
 }
 
+// yaml 能力与宿主解耦:js-yaml 为 devDep(CI 无宿主也可解析本包文件);
+// !!js 标签与 cordis-plugin-include 的 JsExpr Type 同形(construct 成 {__jsExpr}),
+// 宿主在场时改用官方 entryListSchema 求同(漂移守卫的对照面只在有宿主时跑)
+import yamlStatic from 'js-yaml'
+
+const LOCAL_SCHEMA = yamlStatic.JSON_SCHEMA.extend(new yamlStatic.Type('!!js', {
+  kind: 'scalar',
+  resolve: (data) => typeof data === 'string',
+  construct: (data) => ({ __jsExpr: data }),
+  represent: (data) => data['__jsExpr'],
+}))
+
 let harness = null
-let yaml = null
-let entryListSchema = null
+let entryListSchema = LOCAL_SCHEMA
 try {
   harness = locateHarnessDir()
   if (harness !== null) {
     const req = createRequire(join(harness, 'package.json'))
     const toUrl = (specifier) => pathToFileURL(req.resolve(specifier)).href
-    yaml = (await import(toUrl('js-yaml'))).default
     entryListSchema = (await import(toUrl('@deepseek-ai/cordis-plugin-include'))).entryListSchema
   }
-} catch { /* 解析失败按宿主缺失处理 */ }
+} catch { /* 官方 schema 缺失按本地同形标签处理 */ }
 
+const yaml = yamlStatic
 const loadYaml = (text) => yaml.load(text, { schema: entryListSchema })
 
 // 镜像 loader 的表达式求值形态(new Function + with(ctx),全局可用)
@@ -96,7 +107,7 @@ test('预设形态:agent.cordis.yml 可解析且无 tool-pwsh 行', () => {
 })
 
 test('漂移守卫:与已安装 standard 逐行对表(缺失宿主则 skip)', (t) => {
-  if (yaml === null) return t.skip('未找到 dsh 本体安装,无对照源')
+  if (harness === null) return t.skip('未找到 dsh 本体安装,无对照源')
   const standardPath = join(harness, 'node_modules', '@deepseek-ai', 'dsh-agent-presets', 'presets', 'standard', 'agent.cordis.yml')
   if (!existsSync(standardPath)) return t.skip('dsh 安装位无 standard 预设,无对照源')
   const standard = flattenRows(loadYaml(readFileSync(standardPath, 'utf8')))
