@@ -12,6 +12,8 @@ import { installPackageExternals } from './profile.mjs'
 import { COMPAT_ROOT, DEFAULT_PORT, killPortOwner, log } from './lib.mjs'
 
 const PROBE_TIMEOUT_MS = 12 * 60 * 1000
+// 注解单条有长度上限,stderr 只留定位 boot 失败所需的尾部
+const STDERR_TAIL_BYTES = 700
 
 function runVersion(entry, port) {
   return new Promise((resolve) => {
@@ -20,7 +22,12 @@ function runVersion(entry, port) {
       '--version', entry.version,
       '--port', String(port),
       '--skip-externals',
-    ], { stdio: 'inherit', windowsHide: true })
+    ], { stdio: ['inherit', 'inherit', 'pipe'], windowsHide: true })
+    // boot 早退(无 result.json)时失败原因只在 stderr:收尾部进结果,失败注解就地可读
+    let stderrTail = ''
+    child.stderr.on('data', (chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_BYTES)
+    })
     const timer = setTimeout(() => {
       // SIGKILL 使 run.mjs 的 finally 清理失效,孤儿宿主仍握着端口,兜底回收
       child.kill('SIGKILL')
@@ -28,7 +35,7 @@ function runVersion(entry, port) {
     }, PROBE_TIMEOUT_MS)
     child.on('close', (code) => {
       clearTimeout(timer)
-      resolve({ ...entry, port, ok: code === 0, exitCode: code })
+      resolve({ ...entry, port, ok: code === 0, exitCode: code, stderrTail })
     })
   })
 }
@@ -53,11 +60,18 @@ function writeSummary(results) {
   appendFileSync(summaryPath, lines.join('\n'))
 }
 
-// FAIL 明细直达日志:runner 磁盘上的 result.json 在 GitHub 页面不可达,只有进日志才能就地排查
+// FAIL 明细直达日志与注解:result.json 与 run.mjs stderr 在 runner 磁盘/日志里,
+// 匿名日志 API 读不到,只有注解在 GitHub 页面就地可读;单条注解截到定长防超限
 function printFailureDetail(failed) {
+  const channel = failed.blocking ? '::error::' : '::warning::'
+  const clip = (text) => text.replace(/\s+/g, ' ').slice(0, STDERR_TAIL_BYTES)
   try {
-    console.log(readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8'))
-  } catch { /* 进程早退未落 result.json,判定过程已随 run.mjs stderr 进日志 */ }
+    const detail = readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8')
+    console.log(`${channel}兼容性明细 ${failed.version}: ${clip(detail)}`)
+  } catch {
+    // boot/判定早期退出未落 result.json:真因只在 run.mjs stderr,尾部直贴注解
+    console.log(`${channel}兼容性明细 ${failed.version}: 无 result.json;stderr 尾部: ${clip(failed.stderrTail || '(空)')}`)
+  }
 }
 
 function parseArgs(argv) {
