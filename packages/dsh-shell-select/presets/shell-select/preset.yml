@@ -1,0 +1,2 @@
+name: Shell Select
+description: 标准编码 Agent,shell 执行面由 dsh-shell-select 多客户端工具接管,不含官方 pwsh 工具。

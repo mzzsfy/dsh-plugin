@@ -6,7 +6,8 @@ Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配�
 
 - bundle 补丁按 id 禁用官方 `tool-pwsh`、`pwsh-sandbox` 两行,插入本包主行(`ctx.shell` 执行器 + `shell` 工具 + 设置节 + 浏览器设置页路由)与 guard 哨兵行;卸载本包即补丁消失,官方行自动复位。
 - client 半区 `dsh.client.inject` 声明(官方机制,dsh-client-file-upload 等官方包同款):保证 client 运行时模块表中 `primitives`/`slots` 面在场;primitives 另有 try/catch 降级自绘兜底。
-- 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(实例状态/方法全公有——cordis 服务代理会把经 `ctx.shell` 调用的方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误)。agent preset 注入的官方 `pwsh` 工具因此照常可用:经 `ctx.shell` 代理走默认客户端;`shell` 工具提供多客户端选择面。
+- 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(实例状态/方法全公有——cordis 服务代理会把经 `ctx.shell` 调用的方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误)。
+- preset 面收口:web 面把 agent 平面后移到每会话 agent preset,内置 standard 预设在 win32 重新声明官方 `pwsh` 工具行,bundle 补丁对 preset 组合树不可达。本包自带预设 `shell-select`(standard 全量副本 − tool-pwsh 行,`presets/shell-select/`),经补丁覆写 `agent-presets` 行接入:win32 默认预设切到本包预设(POSIX 保持 standard,行为与上游一致),`roots` 指向本包 presets 目录;`agent-presets.default` 的 settings 值恒优先于补丁缺省,用户显式选择不被劫持。上游预设漂移由 `test/preset-drift.test.mjs` 逐行守卫,升级后按官方实文对表。
 - 沙箱语义官方同构:`danger-full-access` 直跑;受限模式经 `ctx.sandbox.confine` 包装并按官方方言分类拒绝/runner 失败,权限模型不变。
 - 死态自愈:用户 patch 层禁用主行的窗口内,guard 哨兵(id 含 `/`,市场不写该层)代挂官方 `dsh-tool-pwsh` + `dsh-pwsh-sandbox` 恢复 host 面服务与 boot 组合(预载失败退避重试,至多 3 次),任一方复活先卸代挂。哨兵/复活让位语义逐项同构 `dsh-llm-pi-gateway`。边界:cordis 服务按 fiber 树解析,代挂对 agent preset 作用域不可见,死态窗口新会话的 preset tool-pwsh 行拒挂(报错清晰)属预期。
 - POSIX 上本包全部行停用,官方 bash 链不受影响。
@@ -59,7 +60,7 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
 
 - 配置节顶层 `deny`:正则字符串数组,对模型提交的整条命令文本匹配(大小写不敏感),命中即拒绝——**deny 绝对,无豁免语义**;空数组 = 不拦截(出厂默认)。
 - 精细放行在模式内用正则前瞻表达:`deny: ['rm -rf\\s+(?!\\S*node_modules)']` 禁 rm -rf 但放行清依赖目录;默认放行系统下独立 allow 列表的唯一语义就是覆盖 deny,与"deny 绝对"矛盾,故不设。
-- 拦截点在执行器 runFor/startFor 入口:经 `ctx.shell` 代理的官方 pwsh 工具同样受管。拒绝以模型可见标记返回:`[blocked by shell-select: matches deny pattern …]`,后台任务在启动前同步拒绝,不产生僵尸任务。
+- 拦截点在执行器 runFor/startFor 入口:经 `ctx.shell` 代理的消费方(如 hooks 桥)与 preset 预设切换前的官方 pwsh 工具同样受管。拒绝以模型可见标记返回:`[blocked by shell-select: matches deny pattern …]`,后台任务在启动前同步拒绝,不产生僵尸任务。
 - 定位是防误触护栏而非安全边界:整文本正则挡不住间接包装(编码/嵌套壳),真正的边界始终是访问模式与沙箱。坏正则条目容错跳过,不瘫执行链;设置页为逐条规则编辑器(每条规则独立行,行级即时校验并标错,保存时按行定位拦截非法正则)。
 
 ### bash 形探测与 msys2
