@@ -127,6 +127,19 @@ test('漂移守卫:与已安装 standard 逐行对表(缺失宿主则 skip)', (t
   }
 })
 
+test('schema 同构:本地 !!js Type 与官方 entryListSchema 产物 deepEqual(缺失宿主则 skip)', (t) => {
+  if (harness === null) return t.skip('未找到 dsh 本体安装,无官方 schema 对照')
+  // harness 命中时 entryListSchema 已是官方版:loadYaml=官方路径,与 LOCAL_SCHEMA 逐文本对照。
+  // 本地同形标签的语义漂移曾以 unknown tag 形态炸穿 CI,此处固化为机器断言
+  for (const [label, text] of [['预设组合', presetText], ['bundle patch', patchText]]) {
+    assert.deepEqual(
+      yamlStatic.load(text, { schema: LOCAL_SCHEMA }),
+      loadYaml(text),
+      `${label} 双 schema 产物漂移,本地 !!js Type 须与官方 JsExpr 同构`,
+    )
+  }
+})
+
 test('patch 形态:agent-presets 覆写带 name 防御且含 default 与 roots', () => {
   const patch = yamlStatic.load(patchText, { schema: LOCAL_SCHEMA })
   const row = patch.find((entry) => entry.id === 'agent-presets')
