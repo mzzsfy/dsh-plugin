@@ -112,14 +112,34 @@ test('S16 cwd 悬浮说明:可见文本为 basename,title 为 pwd: + 全路径(�
   assert.match(source, /\}, model\.cwdDir\)/)
 })
 
-test('S12c 后台 ack 与 isError 仍走 generic(回归)', () => {
-  const background = cardModel()(
-    settledBlock(JSON.stringify({ ...JSON.parse(ARGS), run_in_background: true }), 'started', { isError: false }),
-    SESSION_CWD,
-  )
-  assert.equal(background.kind, 'generic')
+test('S17 后台 ack:派生 background 卡,命令在场且解析出 jobId', () => {
+  // BDD:Given run_in_background 调用已定,When 派生卡片模型,Then kind=background,jobId 取自 ack 标记,命令与 ack 原文保留
+  const model = cardModel()(settledBlock(
+    JSON.stringify({ command: 'node server.js', description: 'Boot server', run_in_background: true }),
+    'started background job shell-11'), SESSION_CWD)
+  assert.equal(model.kind, 'background')
+  assert.equal(model.jobId, 'shell-11')
+  assert.equal(model.command, 'node server.js')
+  assert.equal(model.output, 'started background job shell-11')
+})
+
+test('S17b 后台 ack 异常文本:仍 background,jobId 缺省不冒充', () => {
+  const model = cardModel()(settledBlock(
+    JSON.stringify({ command: 'x', description: 'd', run_in_background: true }), 'other'), SESSION_CWD)
+  assert.equal(model.kind, 'background')
+  assert.equal(model.jobId, undefined)
+})
+
+test('S17c 后台卡渲染面:状态文案与中性任务号徽标(渲染守卫)', () => {
+  assert.match(source, /case 'background':/)
+  assert.match(source, /sls-tv__pill--bg/)
+})
+
+test('S12c isError 与空结果仍走 generic(回归)', () => {
   const errored = cardModel()(settledBlock(ARGS, 'boom', { isError: true }), SESSION_CWD)
   assert.equal(errored.kind, 'generic')
+  const empty = cardModel()(settledBlock(ARGS, ''), SESSION_CWD)
+  assert.equal(empty.kind, 'generic')
 })
 
 test('S13 注册面:shell/pwsh/bash 三 key 且 priority -1(文本守卫)', () => {
