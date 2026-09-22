@@ -55,8 +55,10 @@ const CSS = [
   '.sm-row__path { grid-column:2 / -1; font:12px/16px var(--ds-font-family-code, monospace); color:var(--dsw-alias-label-caption);',
   '  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
   '.sm-deleted { display:flex; flex-direction:column; gap:8px; min-width:0; }',
-  '.sm-row__actions { display:flex; gap:2px; justify-content:flex-end; opacity:0; transition:opacity 0.12s ease; }',
-  '.sm-row:hover .sm-row__actions, .sm-row:focus-within .sm-row__actions, .sm-row--armed .sm-row__actions { opacity:1; }',
+  // 归档行:恢复常显;已删除区保持整组操作悬停显现(删除按钮显隐规则在 .sm-btn 块后)
+  '.sm-row__actions { display:flex; gap:2px; justify-content:flex-end; }',
+  '.sm-deleted .sm-row__actions { opacity:0; transition:opacity 0.12s ease; }',
+  '.sm-deleted .sm-row:hover .sm-row__actions, .sm-deleted .sm-row:focus-within .sm-row__actions { opacity:1; }',
   '.sm-btn { border:0; background:transparent; cursor:pointer; padding:2px 8px; border-radius:6px;',
   '  font:var(--dsw-font-xxs-strong-12); color:var(--dsw-alias-label-tertiary); }',
   '.sm-btn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
@@ -67,6 +69,10 @@ const CSS = [
   '.sm-btn:disabled { opacity:.45; cursor:default; background:transparent; color:var(--dsw-alias-label-tertiary); }',
   '.sm-btn--confirm:disabled { color:var(--dsw-alias-state-error-primary); }',
   '.sm-btn:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:1px; }',
+  // 删除按钮显隐:隐藏规则必须位于 .sm-btn:disabled 之后——同特异度后出者胜,
+  // 否则 busy 禁用态被禁用半透明规则压过而幽灵显形;显现规则特异度更高,不受顺序约束
+  '.sm-btn--danger, .sm-btn--danger:disabled { opacity:0; transition:opacity 0.12s ease; }',
+  '.sm-row:hover .sm-btn--danger, .sm-row:focus-within .sm-btn--danger { opacity:1; }',
   // 删除确认弹窗:遮罩 + 居中卡片;高 z-index 压过设置面板层,点击遮罩不关闭(强制显式选择)
   '.sm-dialog { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;',
   '  background:rgba(0,0,0,.45); }',
@@ -108,7 +114,7 @@ const CSS = [
   '.sm-more:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
   '.sm-more:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-1px; }',
   '@media (prefers-reduced-motion: reduce) { .sm-group__chev { transition:none; } }',
-  '@media (prefers-reduced-motion: reduce) { .sm-row__actions { transition:none; } }',
+  '@media (prefers-reduced-motion: reduce) { .sm-btn--danger, .sm-deleted .sm-row__actions { transition:none; } }',
   // 自动归档配置行:数值输入内联呈现,窄面板可换行
   '.sm-cfg { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:10px;',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption, rgba(127,127,127,.9)); }',
@@ -340,8 +346,8 @@ function ArchiveRow(props) {
         h('button', { key: 'cancel', className: 'sm-btn', disabled: busy, onClick: props.onDisarm }, '取消'),
       ]
     : [
-        h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onUnarchive }, '恢复'),
         h('button', { key: 'delete', className: 'sm-btn sm-btn--danger', disabled: busy, title: DELETE_BUTTON_TITLE, onClick: props.onDelete }, '删除'),
+        h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onUnarchive }, '恢复'),
       ]
   return h('div', {
     className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
