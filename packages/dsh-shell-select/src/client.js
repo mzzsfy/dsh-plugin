@@ -659,7 +659,7 @@ window.__ModuleLoader__.load({
     function statusTextOf(status, en) {
       switch (status) {
         case 'running': return en ? 'Running' : '运行中'
-        case 'background': return en ? 'Background' : '后台运行'
+        case 'background': return en ? 'Background' : '后台'
         case 'failed': case 'signaled': return en ? 'Failed' : '失败'
         default: return null
       }
@@ -668,9 +668,10 @@ window.__ModuleLoader__.load({
     function headMetaOf(model, en) {
       switch (model.status) {
         case 'running': return { dot: 'ongoing', label: en ? 'Running' : '运行中', pill: undefined }
+        // ack 块静态不反映 job 生命周期,状态点用中性工具图标,文案不带"运行中"
         case 'background': return {
-          dot: 'ongoing',
-          label: en ? 'Background' : '后台运行',
+          dot: 'none',
+          label: en ? 'Background' : '后台',
           pill: model.jobId !== undefined ? (en ? `bg ${model.jobId}` : `后台 ${model.jobId}`) : undefined,
           pillTone: 'bg',
         }

@@ -138,6 +138,12 @@ test('S17c 后台行默认收起,收起行携带任务号徽标(渲染守卫)', 
   assert.match(source, /model\.status === 'background' && model\.jobId !== undefined/)
 })
 
+test('S17d 后台状态中性:不断言运行中,点为中性图标(渲染守卫)', () => {
+  // BDD:Given ack 块静态且不反映 job 生命周期,When 渲染后台状态,Then 文案与点均不断言 ongoing
+  assert.doesNotMatch(source, /case 'background':\s*\r?\n\s*dot: 'ongoing'/)
+  assert.doesNotMatch(source, /case 'background': return en \? 'Background' : '后台运行'/)
+})
+
 test('S12c isError 与空结果仍走 generic(回归)', () => {
   const errored = cardModel()(settledBlock(ARGS, 'boom', { isError: true }), SESSION_CWD)
   assert.equal(errored.kind, 'generic')
