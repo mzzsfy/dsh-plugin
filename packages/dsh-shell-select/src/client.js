@@ -741,7 +741,7 @@ window.__ModuleLoader__.load({
             TOOLVIEW_ICONS.StateDot({ state: meta.dot }),
             h('span', { className: 'sls-tv__sr' }, meta.label),
           ),
-          model.cwdDir !== undefined ? h('span', { className: 'sls-tv__cwd', title: model.cwdFull ?? model.cwdDir }, model.cwdDir) : null,
+          model.cwdDir !== undefined ? h('span', { className: 'sls-tv__cwd', title: 'pwd: ' + (model.cwdFull ?? model.cwdDir) }, model.cwdDir) : null,
           model.shellName !== undefined ? h('span', { className: 'sls-tv__badge', title: en ? 'Shell client' : 'Shell 客户端' }, model.shellName) : null,
           h('span', { className: 'sls-tv__sp' }),
           meta.pill !== undefined ? h('span', { className: 'sls-tv__pill' }, meta.pill) : null,

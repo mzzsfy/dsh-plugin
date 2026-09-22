@@ -106,6 +106,12 @@ test('S15b cwd 悬浮全路径:model 携带 cwdFull', () => {
   assert.equal(noWorkdir.cwdFull, SESSION_CWD)
 })
 
+test('S16 cwd 悬浮说明:可见文本为 basename,title 为 pwd: + 全路径(渲染守卫)', () => {
+  // BDD:Given shell 调用带 workdir,When 悬浮 cwd 元数据,Then 可见文本为 basename,title 为 'pwd: <全路径>' 单段说明
+  assert.match(source, /title: 'pwd: ' \+ \(model\.cwdFull \?\? model\.cwdDir\)/)
+  assert.match(source, /\}, model\.cwdDir\)/)
+})
+
 test('S12c 后台 ack 与 isError 仍走 generic(回归)', () => {
   const background = cardModel()(
     settledBlock(JSON.stringify({ ...JSON.parse(ARGS), run_in_background: true }), 'started', { isError: false }),
