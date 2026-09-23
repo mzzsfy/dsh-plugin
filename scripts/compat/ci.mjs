@@ -1,5 +1,5 @@
 // CI 兼容性测试入口:解析版本窗口 → 逐版本端到端验证 → 汇总 → 按阻塞槽位定退出码。
-// 前瞻槽(最新线预发布)失败只发 warning 不阻塞;基线/主测槽失败置退出码 1。
+// 前瞻槽(全通道最新)失败只发 warning 不阻塞;基线/主测槽失败置退出码 1。
 // 用法:node scripts/compat/ci.mjs [--window-file PATH]
 //   --window-file:读取已解析好的窗口 JSON(workflow 单次实算,避免与缓存键窗口漂移);
 //   缺省依次回退 DSH_COMPAT_VERSIONS 显式清单 / registry 实算
@@ -88,7 +88,7 @@ const window_ = args.windowFile
   ? JSON.parse(readFileSync(args.windowFile, 'utf8'))
   : process.env.DSH_COMPAT_VERSIONS
     ? parseExplicit(process.env.DSH_COMPAT_VERSIONS)
-    : resolveWindow(await fromRegistry())
+    : await fromRegistry().then(({ latest, versions }) => resolveWindow(versions, latest))
 log(`版本窗口: ${window_.map((w) => `${w.version}(${SLOT_LABELS[w.slot]}${w.blocking ? '' : ',非阻塞'})`).join(' → ')}`)
 
 // 逐包外部依赖与版本槽无关,全窗口只装一次
