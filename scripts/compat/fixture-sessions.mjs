@@ -1,7 +1,7 @@
 // ENV-003 夹具生成器: 在指定宿主 home 下伪造持久化会话(zstd 双帧) + 工作区挂接
 // 用法: node scripts/compat/fixture-sessions.mjs <homeDir> <cwd> <count>
 // 前置: 宿主已用该 home 启动过( storages/workspace.json 存在或由 workspace/create 生成 )
-import { sessionFormatCatalog } from 'file:///C:/Users/yuanhao/Desktop/jzjy/dsh-plugin/.compat/0.1.5-rc.3/dsh-host/node_modules/@deepseek-ai/dsh-session-format-catalog/lib/index.js'
+import { sessionFormatCatalog } from 'file:///C:/Users/yuanhao/Desktop/jzjy/dsh-plugin/.compat/0.1.7-rc.1/dsh-host/node_modules/@deepseek-ai/dsh-session-format-catalog/lib/index.js'
 import { zstdCompressSync } from 'node:zlib'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
