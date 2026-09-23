@@ -139,17 +139,25 @@ export function apply(ctx, config) {
     const value = readSettingValue(name)
     return typeof value === 'boolean' ? value : fallback
   }
-  // 客户端设置面板写入通道:settings 服务在场时按命名空间合并补丁
-  function updateUiSettings(patch) {
+  // 客户端设置面板写入通道:settings 服务在场时按命名空间合并补丁。
+  // 必须 await:宿主 settings.update 的写失败在异步段抛出(rc.1 "No configurable
+  // plugin entry" 实测打崩宿主),不 await 即成无人接管的 rejection → uncaughtException;
+  // await 后异常传播到 api.handle 的路由级 catch,降级为 400 响应,宿主存活
+  async function updateUiSettings(patch) {
     const settings = ctx.get('settings')
     if (!settings || typeof settings.update !== 'function') return false
-    settings.update(SETTINGS_NS, patch)
+    await settings.update(SETTINGS_NS, patch)
     return true
   }
   function readSettingValue(name) {
     const settings = ctx.get('settings')
-    const scope = settings && settings.get ? settings.get(SETTINGS_NS) : undefined
-    return scope ? scope[name] : undefined
+    try {
+      const scope = settings && settings.get ? settings.get(SETTINGS_NS) : undefined
+      return scope ? scope[name] : undefined
+    } catch {
+      // 与写入同防:宿主 settings 对未注册命名空间抛错时读面降级为缺省
+      return undefined
+    }
   }
   function readTickMs() {
     return Math.max(MIN_TICK_MS, readNumber('tickSeconds', DEFAULT_TICK_MS / 1000) * 1000)

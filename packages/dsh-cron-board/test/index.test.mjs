@@ -185,6 +185,36 @@ test('index:settings 注册 cron-board 命名空间且 timer 承载默认周期 
   assert.deepEqual(intervals.map((entry) => entry.ms), [30 * 1000])
 })
 
+test('index:settings.update 异步拒绝(镜像 rc.1 无命名空间条目)被路由级 catch 接住降级 400,不打崩进程', async () => {
+  // Given settings.update 返回 rejected promise 的宿主形态(0.1.7-rc.1 L3 实测:
+  // "No configurable plugin entry 'cron-board'" 在异步段抛出,不 await 时逃逸成
+  // uncaughtException 打崩宿主;await 后由 api.handle 路由级 catch 接住)
+  const { ctx, settingsService } = makeFullCtx()
+  settingsService.update = () => Promise.reject(new Error("No configurable plugin entry 'cron-board'"))
+  delete settingsService.get
+  const captured = []
+  const ctx2 = {
+    ...ctx,
+    get(name) {
+      if (name === 'settings') return settingsService
+      return ctx.get(name)
+    },
+    webServer: { register(route) { captured.push(route); return () => {} } },
+  }
+  apply(ctx2)
+  const route = captured[0]
+  assert.ok(route)
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => { res.payload = JSON.parse(text) }
+  const req = { method: 'POST', url: 'http://localhost/api/cron-board/ui-settings', headers: { 'content-type': 'application/json' } }
+  req.on = (event, fn) => { if (event === 'data') setImmediate(() => fn(Buffer.from(JSON.stringify({ sidebarTab: true })))); if (event === 'end') setImmediate(fn) }
+  await route.handler(req, res)
+  // Then 路由级 catch 接住,降级 400 系统级错误响应,进程存活(测试正常走完即证)
+  assert.equal(res.status, 400)
+  assert.ok(res.payload.error)
+})
+
 test('index:tickSeconds 设置变更经 watch 重建 interval', async () => {
   // Given 全服务桩,settings.register 的 watch 回调被捕获
   let watchFn = null

@@ -324,10 +324,11 @@ test('status 路由:ui.sidebarTab 透出用户侧边栏移入偏好', async (t) 
 })
 
 test('ui-settings 路由:布尔补丁经 updateUiSettings 写入并回读', async (t) => {
-  // Given 写入桩记录补丁,读取桩翻转返回(模拟 settings.update 后生效)
+  // Given 写入桩记录补丁,读取桩翻转返回(模拟 settings.update 后生效);
+  // 写入桩 async 返回 true 镜像持久化成功契约(宿主 update 为异步面)
   let stored = false
   const { api } = await makeApi(t, {
-    updateUiSettings: (patch) => { if (typeof patch.sidebarTab === 'boolean') stored = patch.sidebarTab },
+    updateUiSettings: async (patch) => { if (typeof patch.sidebarTab === 'boolean') { stored = patch.sidebarTab; return true } return false },
     readSidebarTab: () => stored,
   })
   // When POST 开关开
