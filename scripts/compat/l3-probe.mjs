@@ -7,7 +7,7 @@
 //   { name, eval: '<js 表达式>' }       页面上下文求值(可 await)
 //   { name, click: '<css 选择器>' }     真实鼠标点击(触发 React 合成事件)
 //   { name, http: {path, method?, body?, headers?} }  页面内同源 fetch
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, readFileSync } from 'node:fs'
 
 const RENDER_TIMEOUT_MS = 25 * 1000
 
@@ -25,7 +25,10 @@ async function launchBrowser(playwright) {
 }
 
 async function main() {
-  const { url, out, steps } = JSON.parse(process.argv[2])
+  // 步骤来源:argv[2] 内联 JSON,或 '@path/to/file.json' 文件引用(绕 shell 引号嵌套)
+  const arg = process.argv[2]
+  const payload = arg.startsWith('@') ? readFileSync(arg.slice(1), 'utf8') : arg
+  const { url, out, steps } = JSON.parse(payload)
   const playwright = await import('playwright')
   const browser = await launchBrowser(playwright)
   const results = []
