@@ -42,17 +42,41 @@ class MockWebServer {
   }
 }
 
-function createCtx(webServer, tools = undefined) {
+function createCtx(webServer, tools = undefined, settings = undefined) {
   const toolsService = tools ?? { registered: [], register(tool) { this.registered.push(tool); return () => {} } }
+  // effect 清理函数登记: 模拟宿主 fiber 回收语义, 停用回调统一触发
+  const effectDisposers = []
+  const runEffect = (fn) => {
+    const disposer = fn()
+    if (typeof disposer === 'function') effectDisposers.push(disposer)
+    return disposer
+  }
   const ctx = {
     webServer,
     get: () => undefined,
     on: () => () => {},
+    effect: runEffect,
     inject(names, cb) {
-      cb({ tools: toolsService, effect: (fn) => fn() })
+      cb({ tools: toolsService, settings, effect: runEffect })
     },
   }
-  return { ctx, toolsService }
+  return { ctx, toolsService, effectDisposers }
+}
+
+// mock settings 服务: 内存存储 + watch 回调登记, 测试手动触发模拟设置页写入
+function createSettingsService(initial = {}) {
+  const store = { tunnel: { ...initial } }
+  const watchers = []
+  return {
+    store,
+    watchers,
+    setTunnel(patch) { store.tunnel = { ...store.tunnel, ...patch }; for (const cb of watchers) cb() },
+    service: {
+      get: (ns) => store[ns],
+      update: (ns, patch) => { store[ns] = { ...(store[ns] ?? {}), ...patch } },
+      register: (ns) => ({ watch: (cb) => watchers.push(cb) }),
+    },
+  }
 }
 
 // 缺省 dataDir 逐场景独立, 统一登记, 进程退出一次清理(避免跨场景污染与目录泄漏)
@@ -68,7 +92,7 @@ process.on('exit', () => {
 
 async function applyPlugin(webServer, options = {}) {
   const { apply } = await import('../src/index.js')
-  const { ctx, toolsService } = createCtx(webServer)
+  const { ctx, toolsService, effectDisposers } = createCtx(webServer, undefined, options.settings)
   const dataDir = options.dataDir ?? defaultDataDir()
   const config = { connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT, dataDir }
   const warnings = []
@@ -81,7 +105,12 @@ async function applyPlugin(webServer, options = {}) {
     console.warn = origWarn
   }
   const tools = Object.fromEntries(toolsService.registered.map((tool) => [tool.name, tool]))
-  return { webServer, tools, dataDir, warnings, dispose, ctx }
+  // 宿主语义: 停用 = apply disposer + 各 effect 清理(逆序, fiber 回收)
+  const disposeAll = () => {
+    dispose()
+    for (const disposer of effectDisposers.reverse()) disposer()
+  }
+  return { webServer, tools, dataDir, warnings, dispose: disposeAll, ctx }
 }
 
 function toolOf(plugin, name) {
@@ -102,6 +131,11 @@ async function close(plugin, name) {
   return toolOf(plugin, 'tunnel_close').execute({ name })
 }
 
+// 隧道路由计数: /api/tunnel REST 面常驻注册, 计数语义只看 /p/ 前缀
+function tunnelPrefixCount(webServer) {
+  return [...webServer.prefixes.keys()].filter((path) => path.startsWith('/p/')).length
+}
+
 // 真实端到端: 外层服务器把请求交给本插件的路由 handler, 模拟官方 webServer 分发;
 // 用 http.request 而非 fetch(可控 Host 头, 不自动跟随重定向)
 async function requestVia(webServer, path, options = {}) {
@@ -117,6 +151,7 @@ async function requestVia(webServer, path, options = {}) {
     const res = await new Promise((resolve, reject) => {
       const req = http.request({ host: '127.0.0.1', port, path, method: options.method ?? 'GET', headers: options.headers }, resolve)
       req.on('error', reject)
+      if (options.body !== undefined) req.write(options.body)
       req.end()
     })
     const chunks = []
@@ -234,7 +269,7 @@ test('场景3 校验: Given 非法名或越界端口 Then 拒收且不注册不�
     assert.equal(outcome.ok, false, JSON.stringify(args))
     assert.equal(typeof outcome.error, 'string')
   }
-  assert.equal(plugin.webServer.prefixes.size, 0)
+  assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   assert.equal(storeCount(plugin.dataDir), 0)
 })
 
@@ -243,11 +278,11 @@ test('场景4 wsPaths: Given 白名单外项或非 / 开头项 Then 整体拒收
   for (const wsPaths of [['foo'], ['/x?'], ['/a', '/b ']]) {
     const outcome = await open(plugin, { name: 'app', targetPort: 80, wsPaths })
     assert.equal(outcome.ok, false, JSON.stringify(wsPaths))
-    assert.equal(plugin.webServer.prefixes.size, 0)
+    assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   }
   // 数组项类型违规由工具框架参数校验先行拦截
   await assert.rejects(open(plugin, { name: 'app', targetPort: 80, wsPaths: [5] }), /wsPaths/)
-  assert.equal(plugin.webServer.prefixes.size, 0)
+  assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   const outcome = await open(plugin, { name: 'app', targetPort: 80, wsPaths: ['/x/', '/x', '/y'] })
   assert.equal(outcome.ok, true)
   assert.deepEqual([...plugin.webServer.upgrades.keys()].sort(), ['/p/app/x', '/p/app/x/', '/p/app/y', '/p/app/y/'])
@@ -332,7 +367,7 @@ test('场景9 close: Given 已开隧道 Then 路由摘除条目删除且幂等',
   await open(plugin, { name: 'app', targetPort: 80 })
   const outcome = await close(plugin, 'app')
   assert.deepEqual(outcome, { ok: true, removed: true })
-  assert.equal(plugin.webServer.prefixes.size, 0)
+  assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   assert.equal(plugin.webServer.upgrades.size, 0)
   assert.equal(storeCount(plugin.dataDir), 0)
   const again = await close(plugin, 'app')
@@ -357,7 +392,7 @@ test('场景11 损坏文件: Given 非法 JSON Then 按空表处理告警且激�
   t.after(() => rmSync(dataDir, { recursive: true, force: true }))
   writeFileSync(join(dataDir, 'tunnels.json'), 'not-json')
   const plugin = await applyPlugin(new MockWebServer(), { dataDir })
-  assert.equal(plugin.webServer.prefixes.size, 0)
+  assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   assert.ok(plugin.warnings.some((line) => line.includes('dsh-tunnel')))
   const outcome = await list(plugin)
   assert.deepEqual(outcome.tunnels, [])
@@ -565,7 +600,7 @@ test('场景16 dispose: Given 已开隧道 Then dispose 摘除全部路由且持
   const plugin = await applyPlugin(new MockWebServer(), { dataDir })
   await open(plugin, { name: 'app', targetPort: 80 })
   plugin.dispose()
-  assert.equal(plugin.webServer.prefixes.size, 0)
+  assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   assert.equal(storeCount(plugin.dataDir), 1)
 })
 
@@ -601,7 +636,7 @@ test('场景22 子域名 HTTP: Given entry=subdomain Then 无路由注册且任�
     assert.equal(outcome.ok, true)
     assert.equal(outcome.entry, 'subdomain')
     assert.equal(outcome.host, 'app.localhost')
-    assert.equal(plugin.webServer.prefixes.size, 0, '子域名不注册 prefix 路由')
+    assert.equal(tunnelPrefixCount(plugin.webServer), 0, '子域名不注册 prefix 路由')
     assert.equal(plugin.webServer.upgrades.size, 0, '子域名不注册 upgrade 路由')
 
     const deep = await dispatchVia(plugin.webServer, { host: 'app.localhost:3080', path: '/deep/path?q=1' })
@@ -610,7 +645,11 @@ test('场景22 子域名 HTTP: Given entry=subdomain Then 无路由注册且任�
     assert.equal(seen[0].fwdHost, 'app.localhost:3080', 'x-forwarded-host 为入口 Host')
 
     const listed = await list(plugin)
-    assert.deepEqual(listed.tunnels, [{ name: 'app', entry: 'subdomain', access: 'app.*', targetPort: target.port, wsPaths: [] }])
+    assert.equal(listed.tunnels.length, 1)
+    const [row] = listed.tunnels
+    assert.deepEqual(
+      { name: row.name, entry: row.entry, access: row.access, targetPort: row.targetPort, wsPaths: row.wsPaths },
+      { name: 'app', entry: 'subdomain', access: 'app.*', targetPort: target.port, wsPaths: [] })
   } finally {
     await stopTarget(target)
   }
@@ -700,7 +739,7 @@ test('场景27 entry 校验: Given 非法或缺省 entry 与 subdomain 带 wsPat
   const bad = await open(plugin, { name: 'app', targetPort: 80, entry: 'host' })
   assert.equal(bad.ok, false)
   assert.match(bad.error, /entry/)
-  assert.equal(plugin.webServer.prefixes.size, 0)
+  assert.equal(tunnelPrefixCount(plugin.webServer), 0)
   const byDefault = await open(plugin, { name: 'app', targetPort: 80 })
   assert.equal(byDefault.entry, 'path')
   assert.ok(plugin.webServer.prefixes.has('/p/app'))
@@ -793,4 +832,90 @@ test('场景30 形状守卫: Given webServer 缺少分发面 Then 干净停用�
   assert.deepEqual(plugin.tools, {})
   assert.equal(typeof plugin.dispose, 'function')
   assert.match(plugin.warnings.join(''), /形状不匹配/)
+})
+
+test('场景33 超时热生效: Given 设置页改短超时 Then 既有两类隧道新请求按新值判 504', { timeout: 10 * 1000 }, async (t) => {
+  const webServer = new MockWebServer()
+  webServer.registerFallback((req, res) => { res.writeHead(200); res.end('fb') })
+  const settings = createSettingsService()
+  const sink = net.createServer(() => {})
+  const sinkConnections = new Set()
+  sink.on('connection', (conn) => {
+    sinkConnections.add(conn)
+    conn.on('close', () => sinkConnections.delete(conn))
+  })
+  await once(sink.listen(0), 'listening')
+  try {
+    const plugin = await applyPlugin(webServer, { settings: settings.service })
+    const sinkPort = sink.address().port
+    await open(plugin, { name: 'path-app', targetPort: sinkPort })
+    await open(plugin, { name: 'sub-app', targetPort: sinkPort, entry: 'subdomain' })
+    settings.setTunnel({ connectTimeoutMs: 100 })
+    const started = Date.now()
+    const viaPath = await requestVia(webServer, '/p/path-app/x')
+    const viaSub = await dispatchVia(webServer, { host: 'sub-app.localhost', path: '/x' })
+    const elapsed = Date.now() - started
+    assert.equal(viaPath.status, 504, '路径模式按新值判 504')
+    assert.equal(viaSub.status, 504, '子域名模式按新值判 504')
+    assert.ok(elapsed < 2000, `两类请求合计应在 2s 内超时(实际 ${elapsed}ms)`)
+  } finally {
+    for (const conn of sinkConnections) conn.destroy()
+    sink.close()
+  }
+})
+
+test('场景34 创建时间透出: Given 任意入口建隧道 Then list 行携带 createdAt', async (t) => {
+  const plugin = await applyPlugin(new MockWebServer())
+  await open(plugin, { name: 'app', targetPort: 80 })
+  const listed = await list(plugin)
+  const row = listed.tunnels[0]
+  assert.equal(typeof row.createdAt, 'string', 'createdAt 随行透出(ISO 形态, 与持久化同源)')
+  assert.ok(!Number.isNaN(Date.parse(row.createdAt)), 'createdAt 可解析')
+})
+
+test('场景35 超时激活同步: Given settings 预置持久化值 Then apply 后新请求按该值判 504', { timeout: 10 * 1000 }, async (t) => {
+  const webServer = new MockWebServer()
+  webServer.registerFallback((req, res) => { res.writeHead(200); res.end('fb') })
+  // register 合并持久化值的宿主语义: get 即返回预置值, watch 不触发(激活非 commit)
+  const settings = createSettingsService({ connectTimeoutMs: 100, sidebarTab: false })
+  const sink = net.createServer(() => {})
+  const sinkConnections = new Set()
+  sink.on('connection', (conn) => {
+    sinkConnections.add(conn)
+    conn.on('close', () => sinkConnections.delete(conn))
+  })
+  await once(sink.listen(0), 'listening')
+  try {
+    const plugin = await applyPlugin(webServer, { settings: settings.service })
+    await open(plugin, { name: 'app', targetPort: sink.address().port })
+    const started = Date.now()
+    const res = await requestVia(webServer, '/p/app/x')
+    const elapsed = Date.now() - started
+    assert.equal(res.status, 504, '激活期按 settings 持久化值判 504')
+    assert.ok(elapsed < 2000, `应按预置 100ms 而非 Config 默认判超时(实际 ${elapsed}ms)`)
+  } finally {
+    for (const conn of sinkConnections) conn.destroy()
+    sink.close()
+  }
+})
+
+test('场景36 REST 打穿: Given wrapHttp 包装后的 /api/tunnel Then GUI 通道与 ai 同表', async (t) => {
+  const plugin = await applyPlugin(new MockWebServer())
+  await open(plugin, { name: 'pre', targetPort: 80 })
+  const listed = await requestVia(plugin.webServer, '/api/tunnel/tunnels')
+  assert.equal(listed.status, 200)
+  const items = JSON.parse(listed.body).items
+  assert.ok(items.some((row) => row.name === 'pre'), 'REST 列表可见 ai 打开的隧道')
+  const created = await requestVia(plugin.webServer, '/api/tunnel/tunnels', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'via-rest', targetPort: 81, entry: 'subdomain' }),
+  })
+  assert.equal(created.status, 200)
+  assert.equal(JSON.parse(created.body).ok, true)
+  const listed2 = await list(plugin)
+  assert.ok(listed2.tunnels.some((row) => row.name === 'via-rest'), 'ai 列表可见 REST 创建的隧道')
+  const removed = await requestVia(plugin.webServer, '/api/tunnel/tunnels/via-rest', { method: 'DELETE' })
+  assert.equal(removed.status, 200)
+  assert.deepEqual(JSON.parse(removed.body), { ok: true, removed: true })
 })

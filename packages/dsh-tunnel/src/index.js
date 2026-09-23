@@ -12,6 +12,8 @@ import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
+import { createApi, MESSAGES, ROUTE_PREFIX as API_PREFIX } from './api.mjs'
+
 export const name = 'dsh-tunnel'
 
 export const inject = ['webServer']
@@ -32,6 +34,10 @@ const WARN_TAG = 'dsh-tunnel: '
 const ENTRY_PATH = 'path'
 const ENTRY_SUBDOMAIN = 'subdomain'
 const VALID_ENTRIES = new Set([ENTRY_PATH, ENTRY_SUBDOMAIN])
+// 设置命名空间与 UI 偏好: 设置页独立配置节 + 侧边栏注入开关(设计: docs/设计-隧道GUI.md)
+const SETTINGS_NS = 'tunnel'
+const SETTINGS_UNAVAILABLE = '设置服务不可用'
+const UI_FIELD_REQUIRED = 'sidebarTab 须为布尔'
 // 分流面标记: 防包装叠加/防重复 shadow/防 upgrades 表二次拦截
 const WRAPPED_PROP = 'dshTunnelWrapped'
 const SHADOWED_PROP = 'dshTunnelShadowed'
@@ -49,11 +55,23 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'up
 // 信任链头剥离: 入站伪造的代理链声明一律替换为本插件视角的真实值
 const FORWARDED_LIE_HEADERS = ['forwarded', 'via', 'x-real-ip']
 
+// 超时字段 Config 与 SETTINGS_SCHEMA 同名同约束双写, 单一工厂防漂移
+const TIMEOUT_MIN_MS = 1
+const TIMEOUT_MAX_MS = 60 * 1000
+const timeoutField = () => z.number().step(1).min(TIMEOUT_MIN_MS).max(TIMEOUT_MAX_MS).default(DEFAULT_CONNECT_TIMEOUT)
+  .description('等待目标响应头的超时, 头到即解除(SSE 等长流不受影响)')
+
 export const Config = z.object({
-  connectTimeoutMs: z.number().step(1).min(1).max(60 * 1000).default(DEFAULT_CONNECT_TIMEOUT)
-    .description('等待目标响应头的超时, 头到即解除(SSE 等长流不受影响)'),
+  connectTimeoutMs: timeoutField(),
   dataDir: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'dsh-tunnel'))
     .description('隧道表持久化目录'),
+})
+
+// 设置页独立配置节: sidebarTab 仅 UI 偏好, dataDir 属环境路径不进 UI
+export const SETTINGS_SCHEMA = z.object({
+  connectTimeoutMs: timeoutField(),
+  sidebarTab: z.boolean().default(false)
+    .description('看板移入 better-sidebar 侧边栏(需已安装; 关闭时始终使用主界面)'),
 })
 
 const normalizeWsPath = (value) => value.replace(/\/+$/, '')
@@ -265,7 +283,8 @@ export function apply(ctx, config) {
     return () => {}
   }
 
-  const connectTimeoutMs = config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT
+  // 可变绑定: 设置页改动经 settings watch 回写, 载体与各 handler 按请求期读到新值
+  let connectTimeoutMs = config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT
   const dataDir = config.dataDir
 
   // 活动隧道: name → 记录 + 本次激活注册的路由回收器(路径模式才有路由可回收)
@@ -342,12 +361,13 @@ export function apply(ctx, config) {
     list() {
       return {
         ok: true,
-        tunnels: [...tunnels.values()].map(({ entry, name, targetPort, wsPaths }) => ({
+        tunnels: [...tunnels.values()].map(({ createdAt, entry, name, targetPort, wsPaths }) => ({
           name,
           entry,
           access: entry === ENTRY_SUBDOMAIN ? `${name}.*` : PATH_PREFIX + name,
           targetPort,
           wsPaths,
+          createdAt,
         })),
       }
     },
@@ -546,6 +566,57 @@ export function apply(ctx, config) {
   ctx.inject(['tools'], (tctx) => {
     for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'dsh-tunnel: ' + tool.name)
   })
+
+  // 设置: schema 注册(设置页独立配置节) + 超时 watch 回写(读值经 settings.get,
+  // scope 仅作触发钩); 服务缺失时绑定保持 config 初值, 行为与无设置版一致
+  const settingsRef = { current: null }
+  const applyTimeoutFromSettings = () => {
+    const next = Number(settingsRef.current?.get(SETTINGS_NS)?.connectTimeoutMs)
+    if (Number.isInteger(next) && next >= TIMEOUT_MIN_MS && next <= TIMEOUT_MAX_MS) connectTimeoutMs = next
+  }
+  ctx.inject(['settings'], (sctx) => {
+    const svc = sctx.settings
+    if (typeof svc?.register !== 'function') return
+    settingsRef.current = svc
+    const scope = svc.register(SETTINGS_NS, SETTINGS_SCHEMA, { base: config })
+    // 激活期即同步一次: 宿主 register 已合并持久化值, watch 仅在后续改动时触发;
+    // 缺这一行, 重启后绑定回退 Config 初值而设置页仍显示持久化值
+    applyTimeoutFromSettings()
+    if (typeof scope?.watch === 'function') scope.watch(applyTimeoutFromSettings)
+  })
+
+  // GUI 偏好读写: 缺失降级读默认 false / 写返回 ok:false, 面板与形态仲裁照常工作
+  const readUi = () => ({ sidebarTab: Boolean(settingsRef.current?.get(SETTINGS_NS)?.sidebarTab) })
+  const updateUi = (body) => {
+    const svc = settingsRef.current
+    if (!svc) return { ok: false, error: SETTINGS_UNAVAILABLE }
+    if (typeof body?.sidebarTab !== 'boolean') throw new Error(UI_FIELD_REQUIRED)
+    svc.update(SETTINGS_NS, { sidebarTab: body.sidebarTab })
+    return { ok: true, ui: { sidebarTab: body.sidebarTab } }
+  }
+
+  const restApi = createApi({
+    tunnelsApi: api,
+    readUi,
+    updateUi,
+    logSystem: (line) => console.warn(`${WARN_TAG}${line}`),
+  })
+  ctx.effect(() => {
+    const disposeApiRoute = webServer.register({
+      kind: 'prefix',
+      path: API_PREFIX,
+      handler: async (req, res) => {
+        try {
+          await restApi.handle(req, res)
+        } catch (error) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: MESSAGES.systemError }))
+          console.warn(`${WARN_TAG}${String(error && error.stack || error)}`)
+        }
+      },
+    })
+    return disposeApiRoute
+  }, 'dsh-tunnel api')
 
   return () => {
     api.disposeAll()

@@ -23,13 +23,17 @@
 
 ## 使用
 
-会话内直接让 ai 开隧道: `tunnel_open`(name, targetPort, entry?, wsPaths?)。持久化 `~/.dsh/dsh-tunnel/tunnels.json`(随 `DSH_HOME`), 重启自动恢复; 目标拒连 502, 响应头等待超时(默认 10s, 头到即解除, SSE 不受影响)504。
+- ai 通道: 会话内直接让 ai 开隧道 `tunnel_open`(name, targetPort, entry?, wsPaths?) / `tunnel_list` / `tunnel_close`
+- GUI 通道: 侧边栏「穿透隧道」面板手动添加/删除/复制访问地址(与 ai 同表); 设置 > 插件页「穿透隧道」卡片可把看板移入 better-sidebar 侧边栏
+- 设置 > 隧道配置节: `connectTimeoutMs`(响应头等待超时, 改动即时生效, 无需重启)、`sidebarTab`(侧边栏注入开关)
+- 持久化 `~/.dsh/dsh-tunnel/tunnels.json`(随 `DSH_HOME`), 重启自动恢复; 目标拒连 502, 响应头等待超时(默认 10s, 头到即解除, SSE 不受影响)504
+- REST: `/api/tunnel/tunnels`(GET/POST/DELETE `/api/tunnel/tunnels/:name`) + `/api/tunnel/status` + `/api/tunnel/ui-settings`, 与 GUI/ai 同一入口
 
 ## 验证
 
-- `node --test "test/*.test.mjs"`: 29 场景(mock webServer + 真实 http/net 端到端)
+- `node --test "test/*.test.mjs"`: 36 场景 + 8 api 用例 + 11 守卫断言(mock webServer + 真实 http/net 端到端)
 - `node scripts/compat/tunnel-fullchain.mjs`: 隔离 dsh 实例全链路(真实激活/恢复/分发面七项探针)
 
 ## 设计文档
 
-`docs/调研-路径穿透插件.md`(「方案设计」两节为本包实施规格, 含已知限制)。
+`docs/调研-路径穿透插件.md`(「方案设计」两节为本包实施规格, 含已知限制); `docs/设计-隧道GUI.md`(GUI/设置/侧边栏注入实施规格)。

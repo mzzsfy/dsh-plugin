@@ -1,16 +1,20 @@
 {
   "name": "@mzzsfy/dsh-tunnel",
-  "description": "路径穿透隧道:在 dsh 宿主进程内把 /p/<name> 反向代理到本地 TCP 端口(HTTP strip 转发 + 声明式 WS upgrade + 3xx Location 单头改写),并向 ai 注册 tunnel_open/tunnel_list/tunnel_close 工具;代理逻辑全在插件进程内,不引入 nginx/caddy 等外部反代",
+  "description": "路径穿透隧道:在 dsh 宿主进程内把 /p/<name> 反向代理到本地 TCP 端口(HTTP strip 转发 + 声明式 WS upgrade + 3xx Location 单头改写),支持 <name>.* 子域名全路径透传(任意 WS 路径);GUI 看板手动管理隧道,设置页独立配置节与侧边栏注入开关;向 ai 注册 tunnel_open/tunnel_list/tunnel_close 工具;代理逻辑全在插件进程内,不引入 nginx/caddy 等外部反代",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./src/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {
