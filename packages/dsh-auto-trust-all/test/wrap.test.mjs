@@ -736,3 +736,57 @@ test('场景35 fiber 活性守卫: Given 已激活 When fiber 转非 ACTIVE(市�
   dispose()
   assert.deepEqual(trustedHosts, [])
 })
+
+test('场景36 代际令牌守卫: Given 热禁用后经 bundle patch 热加载换代(新 apply,旧闭包仍在岗) When 旧代包装处理请求 Then 换代后注册改道新代载体,恢复不滞后到重启', async (t) => {
+  mockConsole(t)
+  // 真实宿主回归(2026-09-23 0.1.7-rc.1 L3):恢复启用的宿主形态 = 新代 apply 重跑,
+  // 旧代闭包 fiber 恒 disposed;同代 fiber 守卫把它判死,注册静默失效至重启(P1)。
+  // 修复:守卫现取载体上的代际令牌,换代即放行改道新代载体
+  const { ctx, webServer, trustedHosts } = createCtx()
+  ctx.fiber = { state: 2 }
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'gen1.test' } }, {})
+  assert.deepEqual(trustedHosts, ['gen1.test'])
+
+  // 热禁用:同代令牌 + fiber DISPOSED → 注册自断
+  ctx.fiber.state = 4
+  await route.handler({ headers: { host: 'gen1-off.test' } }, {})
+  assert.deepEqual(trustedHosts, ['gen1.test'])
+
+  // 恢复启用(宿主形态):新代 apply 重跑——旧闭包仍在路由表(WRAPPED 短路回溯),
+  // 新代覆写载体与令牌;旧闭包现取令牌发现换代 → 放行并改道新代 registerHost
+  const fiber2 = { state: 2 }
+  const ctx2 = { ...ctx, fiber: fiber2, get: ctx.get }
+  apply(ctx2, { maxHosts: DEFAULT_MAX_HOSTS })
+  await route.handler({ headers: { host: 'gen2.test' } }, {})
+  assert.deepEqual(
+    trustedHosts,
+    ['gen1.test', 'gen2.test'],
+    '换代后旧包装必须改道新代载体恢复注册',
+  )
+
+  // 换代后再禁用(新代 fiber 转 DISPOSED):新代令牌同代判定生效,注册再度自断
+  fiber2.state = 4
+  await route.handler({ headers: { host: 'gen2-off.test' } }, {})
+  assert.deepEqual(trustedHosts, ['gen1.test', 'gen2.test'])
+})
+
+test('场景37 卸载后残余闭包: Given 卸载(令牌与载体同撤) When 旧闭包处理请求 Then 调用空载体无害且不再登记', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, trustedHosts } = createCtx()
+  ctx.fiber = { state: 2 }
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'alive.test' } }, {})
+  assert.deepEqual(trustedHosts, ['alive.test'])
+
+  dispose()
+  await route.handler({ headers: { host: 'after-dispose.test' } }, {})
+  assert.deepEqual(trustedHosts, [], '卸载即撤销本代放行,残余闭包不得新注册')
+  assert.equal(webServer.autoTrustAllGuard, null, '令牌须与载体同撤')
+})

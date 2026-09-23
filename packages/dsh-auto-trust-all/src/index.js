@@ -164,13 +164,18 @@ export function apply(ctx, config) {
     // 经共享载体继续服务
     const WRAPPED = 'autoTrustAllWrapped'
     // 同步包装:注册是纯同步观察,无需 async 引入的额外 promise 与微任务。
-    // fiber 活性守卫:市场热禁用只转 fiber 状态不调 disposer(2026-09-23 L3 实测),
-    // 每请求读 ctx.fiber.state,非 ACTIVE 即跳过注册,禁用语义不滞后到重启
+    // 代际活性守卫(2026-09-23 rc.1 L3 实测升级):每请求现取载体上的代际令牌,
+    // 令牌同代且本代 fiber 非 ACTIVE(市场热禁用,disposer 不被调用)即跳过注册;
+    // 令牌换代(市场重新启用触发 bundle patch 热加载,新代 activate 覆写令牌)则
+    // 放行并改道到最新代载体——旧包装以新代身份继续服务,恢复不滞后到重启
     const wrap = (handler) => {
       if (typeof handler !== 'function' || handler[WRAPPED]) return handler
       const wrapped = (...args) => {
         try {
-          if ((ctx.fiber?.state ?? 2) === 2) webServer.autoTrustAllRegister(args[0])
+          // 守卫真相 = 载体令牌上最新代 fiber 的活性:同代禁用(fiber DISPOSED)即停;
+          // 换代后看新代 fiber(新代禁用同样即停);令牌缺席(已卸载)即停
+          const guard = webServer.autoTrustAllGuard
+          if (!guard || (guard.fiber?.state ?? 2) === 2) webServer.autoTrustAllRegister(args[0])
           registerWarned = false
         } catch (error) {
           // 注册是纯观察,失败不阻断请求;限频告警防风暴,注册恢复后自动复位再告警
@@ -219,6 +224,9 @@ export function apply(ctx, config) {
 
     // 启动横幅:绑定、容量与既有信任条目一屏可见
     console.log('auto-trust-all: 动态信任已启用 (bind ' + webServer.host + ', 容量 ' + maxHosts + '), 既有信任 ' + initialHosts.length + ' 项: ' + (initialHosts.join(', ') || '无'))
+    // 代际令牌最后盖印:旧代包装闭包经现取对比发现换代,即改道本代载体继续注册
+    // (覆盖激活如行级 config 变更时令牌同代刷新,守卫语义不变)
+    webServer.autoTrustAllGuard = { fiber: ctx.fiber }
   }
 
   if (ready()) {
@@ -243,6 +251,8 @@ export function apply(ctx, config) {
     clearTimeout(noticeTimer)
     if (webServer.autoTrustAllRegister === registerHost) {
       webServer.autoTrustAllRegister = () => {}
+      // 令牌随载体同撤:旧包装现取不到本代令牌即永久跳过,防卸载后残余闭包借新令牌复活
+      webServer.autoTrustAllGuard = null
       for (const hostname of owned.keys()) {
         removeFromHosts(hostname)
         removeFromFence(hostname)
