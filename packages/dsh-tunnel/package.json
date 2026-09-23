@@ -1,0 +1,38 @@
+{
+  "name": "@mzzsfy/dsh-tunnel",
+  "description": "路径穿透隧道:在 dsh 宿主进程内把 /p/<name> 反向代理到本地 TCP 端口(HTTP strip 转发 + 声明式 WS upgrade + 3xx Location 单头改写),并向 ai 注册 tunnel_open/tunnel_list/tunnel_close 工具;代理逻辑全在插件进程内,不引入 nginx/caddy 等外部反代",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md"
+  ]
+}

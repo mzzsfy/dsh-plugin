@@ -1,0 +1,9 @@
+# dsh-tunnel bundle patch: 把本包 host 平面行注册进 profile 根
+# (`dsh plugin add @mzzsfy/dsh-tunnel` 应用):
+#   - 路径穿透隧道: /p/<name> 前缀路由 + 声明式 WS upgrade + ai 工具三件。
+# 隧道表存自有文件 ~/.dsh/dsh-tunnel/tunnels.json, 不经宿主 settings 服务。
+# v1 无 client 半区: 不声明 dsh.client, 装载器自动跳过 client 扫描。
+
+- insert:
+    - id: dsh-tunnel
+      name: '@mzzsfy/dsh-tunnel'
