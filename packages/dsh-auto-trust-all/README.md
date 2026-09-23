@@ -77,4 +77,4 @@ node --test "test/*.test.mjs"
 
 ## dsh 版本兼容
 
-三版本(0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.6-alpha.1)全部通过:0.0.0.0 动态信任、伪造 Host 200、LAN 访问、激活 live、diagnostics 0 findings。
+三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:0.0.0.0 动态信任、伪造 Host 200、IPv6 与 loopback 边界、激活 live、diagnostics 0 findings。0.1.5-rc.3 上修复市场热禁用后旧闭包继续注册的问题(fiber 活性守卫);0.1.7-rc.1 上进一步修复恢复启用后注册不重现的问题(载体代际令牌守卫,换代自动改道新载体),禁用/恢复双半程真机复验通过。
