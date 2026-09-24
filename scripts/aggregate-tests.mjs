@@ -95,6 +95,10 @@ export function discoverUnits(repoRoot, changedLines) {
   }
   const repoFiles = applicableTestFiles(repoRoot, 'tests')
   if (repoFiles.length > 0) units.push({name: 'repo-tests', command: [process.execPath, '--test', ...repoFiles], cwd: repoRoot})
+  // 公共 LLM 模拟器模块级测试:与 repo-tests 同保留策略(协议/流式/场景断言是 gateway 系包的夹具契约)
+  const simDir = join(repoRoot, 'scripts', 'echo-upstream')
+  const simFiles = existsSync(simDir) ? applicableTestFiles(simDir, 'test') : []
+  if (simFiles.length > 0) units.push({name: 'echo-upstream', command: [process.execPath, '--test', ...simFiles], cwd: simDir})
   return units
 }
 
