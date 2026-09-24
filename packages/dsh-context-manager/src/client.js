@@ -309,6 +309,8 @@ function HistoryDock({ session, inputActions }) {
   const [items, setItems] = useState(null)
   const [cursor, setCursor] = useState(-1)
   const [scopeIndex, setScopeIndex] = useState(HISTORY_SCOPE_DEFAULT)
+  // 范围标签展开态:默认单胶囊只显当前范围,点击展开 pill 组,选择后收起
+  const [scopeOpen, setScopeOpen] = useState(false)
   const [aligning, setAligning] = useState(false)
   const [loadError, setLoadError] = useState(false)
   // 收藏集合:浮层打开时并行拉一次,行悬停星标据此显示实/空心;
@@ -464,6 +466,7 @@ function HistoryDock({ session, inputActions }) {
     rawItemsRef.current = null
     queryRef.current = ''
     setQuery('')
+    setScopeOpen(false)
     syncView({ open: true, items: null, cursor: -1, scopeIndex: HISTORY_SCOPE_DEFAULT, aligning: false })
     setOpen(true)
     setScopeIndex(HISTORY_SCOPE_DEFAULT)
@@ -476,9 +479,10 @@ function HistoryDock({ session, inputActions }) {
     requestScope(HISTORY_SCOPE_DEFAULT)
   }
 
-  // 范围切换共用落点:清过滤与选择态后拉取目标范围;同范围重复点击不动
+  // 范围切换共用落点:清过滤与选择态后拉取目标范围;同范围不动,切换即收起展开态
   function selectScope(next) {
     if (next === viewRef.current.scopeIndex) return
+    setScopeOpen(false)
     rawItemsRef.current = null
     queryRef.current = ''
     setQuery('')
@@ -690,12 +694,18 @@ function HistoryDock({ session, inputActions }) {
     open && h('div', { className: 'cx-hist__pop' },
       h('div', { className: 'cx-hist__hint' },
         h('span', { className: 'cx-hist__scopebar' },
-          HISTORY_SCOPE_LABELS.map((label, idx) => h('button', {
-            key: label,
-            className: 'cx-hist__pill' + (idx === scopeIndex ? ' cx-hist__pill--on' : ''),
-            title: '切换到' + label,
-            onClick: () => selectScope(idx),
-          }, label)),
+          scopeOpen
+            ? HISTORY_SCOPE_LABELS.map((label, idx) => h('button', {
+                key: label,
+                className: 'cx-hist__pill' + (idx === scopeIndex ? ' cx-hist__pill--on' : ''),
+                title: idx === scopeIndex ? '收起' : '切换到' + label,
+                onClick: () => (idx === scopeIndex ? setScopeOpen(false) : selectScope(idx)),
+              }, label))
+            : h('button', {
+                className: 'cx-hist__pill cx-hist__pill--on',
+                title: '点击选择范围',
+                onClick: () => setScopeOpen(true),
+              }, HISTORY_SCOPE_LABELS[scopeIndex] + ' ▾'),
         ),
         inPrompts
           ? h('button', {
@@ -1205,7 +1215,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
 
 // 面板设置项悬停说明:原生 title(设置侧栏为滚动容器,CSS 气泡会被 overflow
 // 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
-const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围,点击顶栏范围标签直达(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
+const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围,点击顶栏范围标签展开选择(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
 const HISTORY_BUTTON_SWITCH_TITLE = '输入框下方工具排显示历史输入按钮,点击打开浮层,再点关闭,与 Alt+↑ 等效;停用仅隐藏按钮,快捷键与浮层不受影响;刷新页面生效。'
 const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
 const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
