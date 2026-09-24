@@ -227,6 +227,119 @@ function runBrowserProbe(probeScript, url, pngPath) {
   })
 }
 
+// 本地 LLM 模拟器(scripts/echo-upstream.mjs):兼容性测试的 LLM 夹具。
+// 全功能兼容性测试的 LLM 链路断言(provider 注册 → 宿主经 gateway 打到模拟器)必须走它,不依赖真实 API。
+const SIM_BOOT_TIMEOUT_MS = 15 * 1000
+
+function startSimulator(workDir) {
+  const logPath = join(workDir, 'llm-echo.jsonl')
+  const child = spawn(process.execPath, [
+    join(REPO_ROOT, 'scripts', 'echo-upstream.mjs'), '--port', '0', '--log', logPath,
+  ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: true })
+  return new Promise((resolve, reject) => {
+    let out = ''
+    const timer = setTimeout(() => reject(new Error(`模拟器启动超时: ${out}`)), SIM_BOOT_TIMEOUT_MS)
+    child.stdout.on('data', (chunk) => {
+      out += chunk
+      const match = out.match(/listening 127\.0\.0\.1:(\d+)/)
+      if (match) {
+        clearTimeout(timer)
+        resolve({ child, port: Number(match[1]), logPath })
+      }
+    })
+    child.on('exit', (code) => reject(new Error(`模拟器提前退出 code=${code}: ${out}`)))
+  })
+}
+
+// LLM 链路验证:经页面 RPC 注册 echo provider(baseURL 指模拟器)→ 触发模型目录 → 读留档。
+// 留档出现 /models 或对话路径请求 = 宿主 → gateway → 模拟器全链真实打通。
+const LLM_PROBE_TIMEOUT_MS = 120 * 1000
+
+async function runLlmVerification(base, token, simulatorPort, workDir) {
+  const providerPatch = {
+    type: 'client-request',
+    rpcId: `compat-llm-${Date.now()}`,
+    method: 'settings/update',
+    path: '/api/settings/update',
+    payload: {
+      args: {
+        ns: 'llm-pi-gateway',
+        patch: {
+          providers: {
+            'echo-openai': {
+              displayName: 'Echo OpenAI',
+              api: 'openai-completions',
+              baseURL: `http://127.0.0.1:${simulatorPort}`,
+              apiKeyEnv: 'ECHO_KEY',
+              defaultInput: ['text'],
+              models: [{ id: 'echo-model', name: 'Echo Model', input: ['text'] }],
+            },
+          },
+        },
+      },
+    },
+  }
+  const steps = [
+    { name: 'register-echo-provider', http: { path: '/api/settings/update', method: 'POST', body: providerPatch } },
+    { name: 'wait-hot-reload', wait: 4 * 1000 },
+    {
+      name: 'open-model-picker',
+      eval: `(() => {
+        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('选择模型'))
+        if (!hit) return 'model-picker-not-found'
+        hit.click()
+        return 'clicked'
+      })()`,
+    },
+    { name: 'wait-catalog', wait: 3 * 1000 },
+  ]
+  const payload = JSON.stringify({ url: `${base}/?token=${token}`, steps })
+  const probeResult = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [
+      fileURLToPath(new URL('./l3-probe.mjs', import.meta.url)),
+      '-',
+    ], { cwd: process.cwd(), windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    child.stdin.write(payload)
+    child.stdin.end()
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    const timer = setTimeout(() => killTree(child), LLM_PROBE_TIMEOUT_MS)
+    child.on('close', () => {
+      clearTimeout(timer)
+      const line = stdout.trim().split('\n').at(-1) ?? ''
+      try {
+        resolve(JSON.parse(line))
+      } catch {
+        resolve({ results: [], consoleErrors: [], error: `l3-probe 无输出: ${stderr.slice(-500) || line}` })
+      }
+    })
+  })
+  const stepByName = Object.fromEntries((probeResult.results ?? []).map((r) => [r.name, r]))
+  const registration = stepByName['register-echo-provider']?.value?.body
+  const providerRegistered = stepByName['register-echo-provider']?.ok === true
+    && registration !== null
+    && typeof registration === 'object'
+    && registration.error === undefined
+  // 留档证据:任一请求打到模拟器即链路通(发现探测 GET /models 或对话)
+  let upstreamSeen = false
+  let upstreamKinds = []
+  try {
+    const lines = readFileSync(join(workDir, 'llm-echo.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    upstreamKinds = [...new Set(lines.map((l) => l.path))]
+    upstreamSeen = lines.some((l) => l.path.includes('/models') || l.path.includes('/chat/completions') || l.path.includes('/messages'))
+  } catch { /* 无留档 = 零请求 */ }
+  return {
+    providerRegistered,
+    upstreamSeen,
+    upstreamKinds,
+    stepErrors: (probeResult.results ?? []).filter((r) => !r.ok).map((r) => `${r.name}: ${r.error ?? ''}`),
+    consoleErrors: (probeResult.consoleErrors ?? []).slice(0, 5),
+    probeError: probeResult.error,
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const workDir = join(args.workRoot, args.version)
@@ -236,7 +349,7 @@ async function main() {
   const bootLogPath = join(workDir, 'boot.log')
   const hostDir = args.hostDir ?? join(workDir, 'dsh-host')
   const base = `http://127.0.0.1:${args.port}`
-  const checks = { page: false, activation: null, browser: null }
+  const checks = { page: false, activation: null, browser: null, llm: null }
 
   // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录
   const binGuess = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -276,7 +389,11 @@ async function main() {
   const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
   let child = null
   let restoreBridge = null
+  let simulator = null
   try {
+    // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
+    simulator = await startSimulator(workDir)
+    log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
@@ -284,6 +401,7 @@ async function main() {
         ...process.env,
         DSH_HOME: profile.homeDir,
         DSH_CRON_BOARD_DATA_DIR: join(workDir, 'data'),
+        ECHO_KEY: 'echo-compat',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -321,8 +439,14 @@ async function main() {
       join(workDir, 'page.png'),
     )
     log(`[${args.version}] browser ok=${checks.browser.ok}`)
+
+    // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
+    // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
+    checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
+    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
   } finally {
     killTree(child)
+    simulator?.child.kill()
     await sleep(KILL_GRACE_MS)
     killTree(child, { force: true })
     await new Promise((done) => bootLog.end(done))
@@ -333,7 +457,8 @@ async function main() {
     }
   }
 
-  const ok = checks.page && checks.activation.liveAll && checks.browser.ok
+  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.upstreamSeen
+  const ok = checks.page && checks.activation.liveAll && checks.browser.ok && llmOk
   writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, ok }, null, 2), 'utf8')
   log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})`)
   process.exitCode = ok ? 0 : 1

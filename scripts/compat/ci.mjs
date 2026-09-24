@@ -40,15 +40,27 @@ function runVersion(entry, port) {
   })
 }
 
+// LLM 链路列:PASS = provider 注册 + 宿主经 gateway 打到模拟器(留档证据);
+// 模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
+function llmCell(result) {
+  try {
+    const llm = JSON.parse(readFileSync(join(COMPAT_ROOT, result.version, 'result.json'), 'utf8')).checks.llm
+    if (!llm) return 'N/A'
+    return llm.providerRegistered && llm.upstreamSeen ? 'PASS' : `FAIL(${llm.providerRegistered ? '注册✓' : '注册✗'}/${llm.upstreamSeen ? '上游✓' : '上游✗'})`
+  } catch {
+    return 'N/A'
+  }
+}
+
 function writeSummary(results) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY
   if (!summaryPath) return
   const lines = [
     '## dsh 兼容性测试(全家桶 boot + 统一底线)',
     '',
-    '| 槽位 | 版本 | 判定 | 端口 |',
-    '|------|------|------|------|',
-    ...results.map((r) => `| ${SLOT_LABELS[r.slot]} | ${r.version} | ${r.ok ? 'PASS' : 'FAIL'} | ${r.port} |`),
+    '| 槽位 | 版本 | 判定 | 端口 | LLM 链路 |',
+    '|------|------|------|------|----------|',
+    ...results.map((r) => `| ${SLOT_LABELS[r.slot]} | ${r.version} | ${r.ok ? 'PASS' : 'FAIL'} | ${r.port} | ${llmCell(r)} |`),
     '',
   ]
   const blocked = results.filter((r) => !r.ok && r.blocking)
@@ -66,8 +78,12 @@ function printFailureDetail(failed) {
   const channel = failed.blocking ? '::error::' : '::warning::'
   const clip = (text) => text.replace(/\s+/g, ' ').slice(0, STDERR_TAIL_BYTES)
   try {
-    const detail = readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8')
-    console.log(`${channel}兼容性明细 ${failed.version}: ${clip(detail)}`)
+    const detail = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8'))
+    const llm = detail.checks?.llm
+    const llmNote = llm && !(llm.providerRegistered && llm.upstreamSeen)
+      ? `;LLM 链路: 注册=${llm.providerRegistered} 上游=${llm.upstreamSeen} 路径=${(llm.upstreamKinds ?? []).join(',') || '无'} 步骤失败=${(llm.stepErrors ?? []).join(' / ') || '无'}`
+      : ''
+    console.log(`${channel}兼容性明细 ${failed.version}: ${clip(JSON.stringify(detail))}${llmNote}`)
   } catch {
     // boot/判定早期退出未落 result.json:真因只在 run.mjs stderr,尾部直贴注解
     console.log(`${channel}兼容性明细 ${failed.version}: 无 result.json;stderr 尾部: ${clip(failed.stderrTail || '(空)')}`)
