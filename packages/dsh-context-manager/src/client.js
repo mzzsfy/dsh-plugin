@@ -80,11 +80,19 @@ const CSS = [
   '  color-scheme:light dark; color:light-dark(#0f1115, #e8eaed);',
   '  background:light-dark(#fff, #1e1f22); border-radius:14px;',
   '  box-shadow:0 0 0 0.5px light-dark(rgba(15,17,21,.18), rgba(255,255,255,.14)), 0 4px 16px rgba(0,0,0,.08), 0 16px 48px rgba(0,0,0,.16); }',
-  '.cx-hist__hint { display:flex; align-items:center; gap:10px; padding:9px 14px; flex:none;',
+  '.cx-hist__hint { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:9px 14px; flex:none;',
   '  border-bottom:1px solid light-dark(rgba(15,17,21,.08), rgba(255,255,255,.1));',
   '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55)); }',
-  '.cx-hist__scope { padding:2px 10px; border-radius:999px; flex:none;',
-  '  background:#1677ff; color:#fff; font-weight:600; }',
+  // 范围 pill 组:点击直达切换,选中实底蓝,未选淡底
+  '.cx-hist__scopebar { display:flex; align-items:center; gap:4px; flex:none; }',
+  '.cx-hist__pill { appearance:none; border:0; cursor:pointer; flex:none; padding:2px 9px;',
+  '  border-radius:999px; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
+  '  color:light-dark(rgba(15,17,21,.6), rgba(232,234,237,.6));',
+  '  background:light-dark(rgba(15,17,21,.06), rgba(255,255,255,.08)); }',
+  '.cx-hist__pill:hover { color:light-dark(rgba(15,17,21,.85), rgba(232,234,237,.85));',
+  '  background:light-dark(rgba(15,17,21,.1), rgba(255,255,255,.14)); }',
+  '.cx-hist__pill--on, .cx-hist__pill--on:hover { background:#1677ff; color:#fff; font-weight:600; }',
+  '.cx-hist__pill:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
   '.cx-hist__search { flex:1; min-width:0; padding:3px 10px; border-radius:8px; color-scheme:light dark;',
   '  border:1px solid light-dark(rgba(15,17,21,.14), rgba(255,255,255,.18));',
   '  background:transparent; color:inherit; font:var(--dsw-font-xxs-12, 12px/18px sans-serif); }',
@@ -468,10 +476,9 @@ function HistoryDock({ session, inputActions }) {
     requestScope(HISTORY_SCOPE_DEFAULT)
   }
 
-  // 切换范围:→ 向大(工作区/全局),← 返回收藏;边界停住;搜索词清空后缓存直接返回
-  function switchScope(delta) {
-    const next = viewRef.current.scopeIndex + delta
-    if (next < 0 || next >= HISTORY_SCOPE_LABELS.length) return
+  // 范围切换共用落点:清过滤与选择态后拉取目标范围;同范围重复点击不动
+  function selectScope(next) {
+    if (next === viewRef.current.scopeIndex) return
     rawItemsRef.current = null
     queryRef.current = ''
     setQuery('')
@@ -483,6 +490,13 @@ function HistoryDock({ session, inputActions }) {
     setItems(null)
     setEditing(false)
     requestScope(next)
+  }
+
+  // ←/→ 相对切换:→ 向大(工作区/全局),← 返回收藏;边界停住
+  function switchScope(delta) {
+    const next = viewRef.current.scopeIndex + delta
+    if (next < 0 || next >= HISTORY_SCOPES.length) return
+    selectScope(next)
   }
 
   // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动。
@@ -675,7 +689,14 @@ function HistoryDock({ session, inputActions }) {
   return h('div', { className: 'cx-hist', ref: rootRef },
     open && h('div', { className: 'cx-hist__pop' },
       h('div', { className: 'cx-hist__hint' },
-        h('span', { className: 'cx-hist__scope' }, HISTORY_SCOPE_LABELS[scopeIndex]),
+        h('span', { className: 'cx-hist__scopebar' },
+          HISTORY_SCOPE_LABELS.map((label, idx) => h('button', {
+            key: label,
+            className: 'cx-hist__pill' + (idx === scopeIndex ? ' cx-hist__pill--on' : ''),
+            title: '切换到' + label,
+            onClick: () => selectScope(idx),
+          }, label)),
+        ),
         inPrompts
           ? h('button', {
               className: 'cx-hist__editbtn',
@@ -1184,7 +1205,7 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
 
 // 面板设置项悬停说明:原生 title(设置侧栏为滚动容器,CSS 气泡会被 overflow
 // 裁剪,JS 定位复杂度不成比例);文案与功能行为同源维护,由源码契约测试锁定
-const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
+const HISTORY_SWITCH_TITLE = '在输入框按 Alt+↑ 唤起历史输入浮层,浏览并回填历史输入;浮层内 ←/→ 切换范围,点击顶栏范围标签直达(常用 / 当前会话 / 本工作区 / 全部工作区),顶部搜索框过滤条目,行悬停星标可收藏常用提示词。停用后快捷键与浮层整体关闭,刷新页面生效。'
 const HISTORY_BUTTON_SWITCH_TITLE = '输入框下方工具排显示历史输入按钮,点击打开浮层,再点关闭,与 Alt+↑ 等效;停用仅隐藏按钮,快捷键与浮层不受影响;刷新页面生效。'
 const STEER_SWITCH_TITLE = '插话发送后、尚未被智能体应用期间,在该插话气泡的操作图标排显示撤回按钮,点击撤回并把原文填回输入框(覆盖输入框现有草稿);含附件的插话不可撤回;消息被应用后按钮随气泡消失,恰在应用瞬间点击会提示已应用且不动草稿。停用即不再注入,刷新页面生效。'
 const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
