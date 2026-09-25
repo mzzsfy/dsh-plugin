@@ -40,13 +40,14 @@ function runVersion(entry, port) {
   })
 }
 
-// LLM 链路列:PASS = provider 注册 + 宿主经 gateway 打到模拟器(留档证据);
+// LLM 链路列:PASS = provider 注册 + 真实对话驱动 + 宿主经 gateway 打到模拟器(留档证据);
 // 模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
 function llmCell(result) {
   try {
     const llm = JSON.parse(readFileSync(join(COMPAT_ROOT, result.version, 'result.json'), 'utf8')).checks.llm
     if (!llm) return 'N/A'
-    return llm.providerRegistered && llm.upstreamSeen ? 'PASS' : `FAIL(${llm.providerRegistered ? '注册✓' : '注册✗'}/${llm.upstreamSeen ? '上游✓' : '上游✗'})`
+    const flags = [llm.providerRegistered ? '注册✓' : '注册✗', llm.chatDriven ? '对话✓' : '对话✗', llm.upstreamSeen ? '上游✓' : '上游✗']
+    return llm.providerRegistered && llm.chatDriven && llm.upstreamSeen ? 'PASS' : `FAIL(${flags.join('/')})`
   } catch {
     return 'N/A'
   }
@@ -80,8 +81,8 @@ function printFailureDetail(failed) {
   try {
     const detail = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8'))
     const llm = detail.checks?.llm
-    const llmNote = llm && !(llm.providerRegistered && llm.upstreamSeen)
-      ? `;LLM 链路: 注册=${llm.providerRegistered} 上游=${llm.upstreamSeen} 路径=${(llm.upstreamKinds ?? []).join(',') || '无'} 步骤失败=${(llm.stepErrors ?? []).join(' / ') || '无'}`
+    const llmNote = llm && !(llm.providerRegistered && llm.chatDriven && llm.upstreamSeen)
+      ? `;LLM 链路: 注册=${llm.providerRegistered} 对话=${llm.chatDriven ?? 'n/a'} 上游=${llm.upstreamSeen} 路径=${(llm.upstreamKinds ?? []).join(',') || '无'} 步骤失败=${(llm.stepErrors ?? []).join(' / ') || '无'}`
       : ''
     console.log(`${channel}兼容性明细 ${failed.version}: ${clip(JSON.stringify(detail))}${llmNote}`)
   } catch {

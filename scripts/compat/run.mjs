@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
-import { buildProfile, installPackageExternals } from './profile.mjs'
+import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
 import { isSemver } from './window.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
@@ -38,6 +38,7 @@ function parseArgs(argv) {
       '--host-dir': () => { args.hostDir = argv[++i] },
       '--work-root': () => { args.workRoot = argv[++i] },
       '--skip-externals': () => { args.skipExternals = true },
+      '--seed-gateway': () => { args.seedGateway = true },
     }
     const handler = map[argv[i]]
     if (!handler) throw new Error(`未知参数: ${argv[i]}`)
@@ -251,8 +252,10 @@ function startSimulator(workDir) {
   })
 }
 
-// LLM 链路验证:经页面 RPC 注册 echo provider(baseURL 指模拟器)→ 触发模型目录 → 读留档。
-// 留档出现 /models 或对话路径请求 = 宿主 → gateway → 模拟器全链真实打通。
+// LLM 链路验证:经页面 RPC 注册 echo provider(baseURL 指模拟器)→ 新建会话选
+// echo 模型发真实消息 → 读留档。上游请求唯一触发面是会话补全(模型目录只走
+// 宿主本地快照),留档出现 /chat/completions 或 /messages = 宿主 → gateway →
+// 模拟器全链真实打通。
 const LLM_PROBE_TIMEOUT_MS = 120 * 1000
 
 async function runLlmVerification(base, token, simulatorPort, workDir) {
@@ -282,18 +285,81 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   const steps = [
     { name: 'register-echo-provider', http: { path: '/api/settings/update', method: 'POST', body: providerPatch } },
     { name: 'wait-hot-reload', wait: 4 * 1000 },
+    // 重载页面:UI 在挂载时拉一次模型目录,settings/update 的 live 生效不触发
+    // 前端刷新,不重载则目录里没有 echo,默认模型被判"不可用",composer 消失
+    { name: 'reload-page', goto: `${base}/?token=${token}` },
+    { name: 'wait-ui-settle', wait: 2500 },
+    // 真实对话驱动:默认模型已由 composition patch 指向 echo(provider 声明显式
+    // models 时模型目录只走宿主本地快照),上游请求唯一触发面是会话补全——
+    // 新建会话直接发消息
     {
-      name: 'open-model-picker',
+      // 内测声明模态每轮新 browser context 都会弹出,遮挡 composer 命中检测,
+      // 必须先点"继续"关掉
+      name: 'dismiss-intro',
       eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('选择模型'))
-        if (!hit) return 'model-picker-not-found'
+        const hit = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '继续')
+        if (!hit) return 'no-modal'
+        hit.click()
+        return 'dismissed'
+      })()`,
+    },
+    { name: 'wait-intro-gone', wait: 800 },
+    {
+      name: 'new-session',
+      eval: `(() => {
+        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
+        if (!hit) return 'new-session-not-found'
         hit.click()
         return 'clicked'
       })()`,
     },
-    { name: 'wait-catalog', wait: 3 * 1000 },
+    { name: 'wait-composer', wait: 2500 },
+    {
+      name: 'diag-catalog',
+      eval: `(async () => {
+        const call = async (endpoint) => {
+          const resp = await fetch('/api/' + endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'client-request', rpcId: 'diag-' + endpoint.replace('/', '-'), method: endpoint, path: '/api/' + endpoint, payload: { args: {} } }),
+          })
+          const text = await resp.text()
+          let body
+          try { body = JSON.parse(text) } catch { body = text.slice(0, 80) }
+          return { status: resp.status, body }
+        }
+        const catalog = await call('session/modelCatalog')
+        const providers = await call('llm/listProviders')
+        const catalogValue = catalog.body?.result?.value
+        return JSON.stringify({
+          catalogStatus: catalog.status,
+          routableProviders: catalogValue?.routableProviders,
+          groups: catalogValue?.groups?.map((g) => ({ id: g?.id, models: g?.models?.map((m) => m?.id) })),
+          failures: catalogValue?.failures ?? catalogValue?.modelErrors,
+          llmProviders: providers.body?.result?.value?.map((p) => p?.id),
+        })
+      })()`,
+    },
+    { name: 'type-message', type: { selector: '[contenteditable="true"]', text: '回复:ok' } },
+    { name: 'send', press: 'Enter' },
+    { name: 'wait-roundtrip', wait: 10 * 1000 },
+    {
+      name: 'post-send-state',
+      eval: `(() => {
+        const ce = document.querySelector('[contenteditable="true"]')
+        const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')]
+          .map((el) => el.textContent.trim().slice(0, 160))
+          .filter((t) => t.length > 0)
+          .slice(0, 5)
+        return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
+      })()`,
+    },
   ]
-  const payload = JSON.stringify({ url: `${base}/?token=${token}`, steps })
+  const payload = JSON.stringify({
+    url: `${base}/?token=${token}`,
+    out: join(workDir, 'l3-llm.json'),
+    steps,
+  })
   const probeResult = await new Promise((resolve) => {
     const child = spawn(process.execPath, [
       fileURLToPath(new URL('./l3-probe.mjs', import.meta.url)),
@@ -322,18 +388,24 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     && registration !== null
     && typeof registration === 'object'
     && registration.error === undefined
-  // 留档证据:任一请求打到模拟器即链路通(发现探测 GET /models 或对话)
+  const chatDriven = stepByName['new-session']?.value === 'clicked'
+    && stepByName['type-message']?.ok === true
+    && stepByName['send']?.ok === true
+  // 留档证据:任一对话请求打到模拟器即链路通(openai /chat/completions 或
+  // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)
   let upstreamSeen = false
   let upstreamKinds = []
   try {
     const lines = readFileSync(join(workDir, 'llm-echo.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
     upstreamKinds = [...new Set(lines.map((l) => l.path))]
-    upstreamSeen = lines.some((l) => l.path.includes('/models') || l.path.includes('/chat/completions') || l.path.includes('/messages'))
+    upstreamSeen = lines.some((l) => l.path.includes('/chat/completions') || l.path.includes('/messages'))
   } catch { /* 无留档 = 零请求 */ }
   return {
     providerRegistered,
+    chatDriven,
     upstreamSeen,
     upstreamKinds,
+    stepValues: Object.fromEntries(Object.entries(stepByName).map(([name, step]) => [name, step.value ?? (step.ok ? 'ok' : step.error)])),
     stepErrors: (probeResult.results ?? []).filter((r) => !r.ok).map((r) => `${r.name}: ${r.error ?? ''}`),
     consoleErrors: (probeResult.consoleErrors ?? []).slice(0, 5),
     probeError: probeResult.error,
@@ -371,7 +443,7 @@ async function main() {
     await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
-  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir })
+  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir, seedGateway: args.seedGateway === true })
   log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
 
   // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
@@ -432,7 +504,6 @@ async function main() {
 
     checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
     log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
-
     checks.browser = await runBrowserProbe(
       fileURLToPath(new URL('./browser-probe.mjs', import.meta.url)),
       `${base}/?token=${token}`,
@@ -443,7 +514,7 @@ async function main() {
     // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
     // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
     checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
-    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
   } finally {
     killTree(child)
     simulator?.child.kill()
@@ -457,10 +528,20 @@ async function main() {
     }
   }
 
-  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.upstreamSeen
-  const ok = checks.page && checks.activation.liveAll && checks.browser.ok && llmOk
-  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, ok }, null, 2), 'utf8')
-  log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})`)
+  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.chatDriven && checks.llm.upstreamSeen  // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
+  // boot(0.1.7-rc.1 实测 false-pass——主行 import 崩溃仅此一行 error,activation
+  // 仍 live)。本包任一行出现加载失败字样直接 FAIL,与 activation/llm 判定并联
+  let importFailures = []
+  try {
+    const names = enumeratePackages().all
+    const text = readFileSync(bootLogPath, 'utf8')
+    importFailures = text.split('\n').filter((line) =>
+      names.some((name) => line.includes(name)) && /failed to import|did not activate/.test(line))
+  } catch { /* 日志缺失按无失败处理,activation/llm 判定兜底 */ }
+
+  const ok = checks.page && checks.activation.liveAll && checks.browser.ok && llmOk && importFailures.length === 0
+  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, importFailures, ok }, null, 2), 'utf8')
+  log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1
 }
 

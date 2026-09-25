@@ -263,7 +263,7 @@ function installPackageDeps(name) {
     return true
   }
   console.log(`$ 包内依赖安装 ${name}(npm install --omit=dev --omit=peer)`)
-  const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund'], {
+  const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
     cwd: pkgDir, encoding: 'utf8', shell: true,
   })
   if (r.status !== 0) {

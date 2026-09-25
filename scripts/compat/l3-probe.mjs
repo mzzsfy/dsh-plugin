@@ -6,6 +6,8 @@
 //   { name, wait: ms }                  固定等待
 //   { name, eval: '<js 表达式>' }       页面上下文求值(可 await)
 //   { name, click: '<css 选择器>' }     真实鼠标点击(触发 React 合成事件)
+//   { name, type: {selector, text} }    聚焦并逐键输入(contenteditable/输入框)
+//   { name, press: '<键名>' }           键盘按键(如 Enter)
 //   { name, http: {path, method?, body?, headers?} }  页面内同源 fetch
 import { writeFileSync, readFileSync } from 'node:fs'
 
@@ -25,9 +27,12 @@ async function launchBrowser(playwright) {
 }
 
 async function main() {
-  // 步骤来源:argv[2] 内联 JSON,或 '@path/to/file.json' 文件引用(绕 shell 引号嵌套)
+  // 步骤来源:argv[2] 内联 JSON,'@path/to/file.json' 文件引用(绕 shell 引号嵌套),
+  // 或 '-' 从 stdin 读(run.mjs 以此传大 payload,防 Windows 命令行长度/转义问题)
   const arg = process.argv[2]
-  const payload = arg.startsWith('@') ? readFileSync(arg.slice(1), 'utf8') : arg
+  const payload = arg === '-'
+    ? readFileSync(0, 'utf8')
+    : arg.startsWith('@') ? readFileSync(arg.slice(1), 'utf8') : arg
   const { url, out, steps } = JSON.parse(payload)
   const playwright = await import('playwright')
   const browser = await launchBrowser(playwright)
@@ -60,6 +65,19 @@ async function main() {
           entry.ok = true
         } else if (step.click !== undefined) {
           await page.click(step.click, { timeout: 10 * 1000 })
+          entry.ok = true
+        } else if (step.type !== undefined) {
+          // 富文本 composer(contenteditable)驱动:先聚焦再逐键输入,真实键盘事件;
+          // hit-test 被占位层遮挡时 click 超时,focus 不做命中检测兜底
+          try {
+            await page.click(step.type.selector, { timeout: 10 * 1000 })
+          } catch {
+            await page.locator(step.type.selector).first().focus()
+          }
+          await page.type(step.type.selector, step.type.text, { delay: 20 })
+          entry.ok = true
+        } else if (step.press !== undefined) {
+          await page.keyboard.press(step.press)
           entry.ok = true
         } else if (step.wait !== undefined) {
           await page.waitForTimeout(step.wait)
