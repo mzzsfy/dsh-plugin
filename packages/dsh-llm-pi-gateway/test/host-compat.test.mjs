@@ -12,13 +12,22 @@ test('探测清单:宿主导出齐全返回空表', () => {
   assert.deepEqual(missingHostExports(realDshLlm), [])
 })
 
-test('场景: 宿主 settings 服务面缺 installSection(rc.2 形态),apply 干净禁用不注册', async () => {
-  const { ctx, logs, llmCalls, installed } = makeCtx({ legacySettings: true })
+test('场景: 宿主 settings 服务缺席,apply 干净禁用不注册', async () => {
+  const { ctx, logs, llmCalls, installed } = makeCtx({ noSettings: true })
   await apply(ctx, undefined, OFFICIAL_MISSING)
-  assert.match(logs.warn.join('\n'), /settings 服务缺少 installSection/)
+  assert.match(logs.warn.join('\n'), /settings 服务缺席/)
   assert.deepEqual(installed, [], '禁用态不得安装任何 settings 节')
   assert.deepEqual(llmCalls.adapters, [], '禁用态不得注册 adapter')
   assert.deepEqual(llmCalls.discovery, [], '禁用态不得注册 discovery')
+})
+
+test('场景: settings 无节安装面(0.1.7 形态),apply 走条目重载驱动,不装节但照常注册', async () => {
+  const { ctx, logs, llmCalls, installed } = makeCtx({ legacySettings: true })
+  await apply(ctx, gatewayConfig(), OFFICIAL_MISSING)
+  assert.match(logs.warn.join('\n'), /官方 dsh-llm-pi-ai 不可用/)
+  assert.deepEqual(installed, [], '0.1.7 形态不得调用节安装')
+  assert.deepEqual(llmCalls.adapters, [['new-api']], '0.1.7 形态照常注册 adapter')
+  assert.deepEqual(llmCalls.discovery, [SETTINGS_NS, OFFICIAL_SETTINGS_NS], '0.1.7 形态照常注册 discovery(接管态含官方 ns)')
 })
 
 test('探测清单:缺失任一必备导出即报告其名,双缺报告两名', () => {
@@ -31,7 +40,7 @@ test('探测清单:缺失任一必备导出即报告其名,双缺报告两名', 
 // 假宿主:settings 安装记录可注入接管失败形态,llm 注册与 logger 全程 spy。
 const CONFLICT_MESSAGE_FORM = (ns) => `settings namespace "${ns}" is already registered`
 
-function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySettings = false } = {}) {
+function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySettings = false, noSettings = false } = {}) {
   const logs = { warn: [], error: [] }
   const installed = []
   const hooksByNs = {}
@@ -66,18 +75,20 @@ function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySetti
         llmCalls.discovery.push(ns)
       },
     },
-    settings: legacySettings
-      ? {}
-      : {
-          installSection: (target, ns, schema, config, hooks) => {
-            if (ns === OFFICIAL_SETTINGS_NS && officialInstallFailure !== undefined) {
-              throw officialInstallFailure()
-            }
-            installed.push(ns)
-            hooksByNs[ns] = hooks
-            hooks.setSource(() => sectionValues[ns] ?? config)
+    settings: noSettings
+      ? undefined
+      : legacySettings
+        ? {}
+        : {
+            installSection: (target, ns, schema, config, hooks) => {
+              if (ns === OFFICIAL_SETTINGS_NS && officialInstallFailure !== undefined) {
+                throw officialInstallFailure()
+              }
+              installed.push(ns)
+              hooksByNs[ns] = hooks
+              hooks.setSource(() => sectionValues[ns] ?? config)
+            },
           },
-        },
   }
   return { ctx, logs, installed, hooksByNs, llmCalls, sectionValues }
 }

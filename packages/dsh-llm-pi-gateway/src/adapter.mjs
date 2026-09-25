@@ -60,8 +60,9 @@ function reasoningInfo(model, defaultLevel) {
  * @param {(reason: string) => void} [onDegrade] replay 降级诊断回调
  * @param {(attachments: object, ref: object) => object|undefined} [resolveImageAccess] 图片恢复路径解析:attachments 与引用解析为工具执行世界访问,无映射即 undefined
  * @param {(ref: object, access: object|undefined) => string} offloadedText 被预算裁掉的图片占位文本(dsh-llm offloadedImageText,0.1.2 起提供,宿主探测后必传;图片路径硬依赖)
+ * @param {object} imageOffload 图片卸载管线适配器(src/image-offload.mjs 特性检测产物,apply 探测后必传;图片路径硬依赖)
  */
-export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade, resolveImageAccess, offloadedText) {
+export function createGatewayAdapter(routes, loadProtocol, resolveCredential = createCredentialResolver({ get: () => undefined }), resolveAttachments = () => undefined, onDegrade, resolveImageAccess, offloadedText, imageOffload) {
   const routesOf = () => (typeof routes === 'function' ? routes() : routes)
   const load = loadProtocol ?? ((api) => import(PROTOCOL_MODULES[api]))
 
@@ -142,6 +143,7 @@ export function createGatewayAdapter(routes, loadProtocol, resolveCredential = c
         resolveImageAccess: (ref) => resolveImageAccess?.(attachments, ref),
         maxRequestImageBytes: route.maxRequestImageBytes,
         offloadedText,
+        offload: imageOffload,
         requestImagePolicy: {
           maxPixels: route.requestImagePixelBudget,
           maxBytes: route.requestImageMaxBytes,

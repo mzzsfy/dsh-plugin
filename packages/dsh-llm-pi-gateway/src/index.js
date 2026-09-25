@@ -17,6 +17,7 @@ import {
   armDeferredTakeover,
 } from './takeover.mjs'
 import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from './apply-state.mjs'
+import { imageOffloadAdapter } from './image-offload.mjs'
 import { withTimeout, MODULE_LOAD_TIMEOUT_MS } from './guard-rail.mjs'
 
 export const name = 'llm-pi-gateway'
@@ -69,9 +70,17 @@ const providerEntry = z.object({
   models: z.array(modelEntry),
 })
 
-export const Config = z.object({
+export const Config = volatileWrap(z.object({
   providers: z.dict(providerEntry).default({}),
-})
+}))
+
+// 宿主 settings 写路径的 volatile 表单门槛(0.1.7 settings/update 经
+// volatileForm(schema) 判定,无 volatile 字段即拒整节写);对表官方
+// 0.1.7 Config 的 providers .volatile()。旧宿主 schemastery 无 volatile
+// 方法,特性检测原样返回
+function volatileWrap(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
 
 /** 探测宿主 dsh-llm 缺失的必备导出,齐全返回空表。 */
 export function missingHostExports(dshLlm) {
@@ -96,21 +105,42 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // boot 诊断锚点:挂起形态(横幅不打印)时此日志是"树推进到本行"的标记
   ctx.logger.info?.('llm-pi-gateway: apply 开始')
   // 宿主兼容探测,两项独立:
-  // 1) settings 服务面:installSection 为 0.1.2-alpha.2+ 引入(与 peerDependencies
-  //    对齐);旧宿主缺失即禁用。此探测直接读运行宿主注入的服务对象,不受插件
-  //    解析链影响——import 解析链会命中 dev 工作副本仓库根的宿主包副本,与运行
-  //    宿主版本脱钩,不能作为旧宿主判据(rc.2 实测教训)。
+  // 1) settings 服务面:0.1.2–0.1.5 提供 installSection(本包节安装 +
+  //    validate/setSource/onChange);0.1.7 起该面移除,节表单由插件静态
+  //    Config 导出自动生成,配置变更经"写节 → Loader 重载条目 → 重跑 apply"
+  //    驱动,apply 入参 config 即最新值,重入即热更新。两种形态特性检测,
+  //    不做版本硬编码
   // 2) dsh-llm 导出:HOST_REQUIRED_EXPORTS 为 dsh 0.1.2 引入,动态探测防静态
   //    import 命名导出缺失即加载崩溃;旧本体缺失时同样禁用,boot 保持干净。
-  if (typeof ctx.settings?.installSection !== 'function') {
-    ctx.logger.warn('llm-pi-gateway: 宿主 settings 服务缺少 installSection(需要 dsh 本体 0.1.2+),插件禁用')
+  if (ctx.settings === undefined) {
+    ctx.logger.warn('llm-pi-gateway: 宿主 settings 服务缺席,插件禁用')
     endGatewayApplyInactive()
     return undefined
   }
-  // 宿主包读取:模块头部静态 import 已保证 dsh-llm 加载成功,此处动态
-  // import 为同模块缓存命中,瞬时返回无失败路径;dsh-llm 挂起形态发生在
-  // 模块加载期、先于本函数,由"apply 开始"锚点日志缺席定位
+  const legacySectionFace = typeof ctx.settings.installSection === 'function'
+  if (!legacySectionFace) {
+    ctx.logger.info?.('llm-pi-gateway: 宿主 settings 无节安装面(0.1.7 形态),配置变更经条目重载驱动')
+  }
+  // 宿主包读取:模块头部静态 import 只覆盖跨版本稳定符号(contentHasImage /
+  // requestImageHandleText 等,0.1.2 起在),图片卸载管线为版本换形面,经
+  // image-offload 特性检测;此处动态 import 为同模块缓存命中,瞬时返回无
+  // 失败路径;dsh-llm 挂起形态发生在模块加载期、先于本函数,由"apply 开始"
+  // 锚点日志缺席定位
   const dshLlm = await import('@deepseek-ai/dsh-llm')
+  // dsh-attachment 仅 routed 形态图片管线需要(requestImageDimensions);
+  // 旧宿主闭包可能无此包,加载失败按缺失处理,由适配器选择回落 transient
+  let dshAttachment
+  try {
+    dshAttachment = await import('@deepseek-ai/dsh-attachment')
+  } catch {
+    dshAttachment = undefined
+  }
+  const imageOffload = imageOffloadAdapter(dshLlm, dshAttachment)
+  if (imageOffload === null) {
+    ctx.logger.warn('llm-pi-gateway: 宿主 dsh-llm 缺少图片卸载管线(0.1.7 routed 或 0.1.2–0.1.5 transient 皆缺),插件禁用')
+    endGatewayApplyInactive()
+    return undefined
+  }
   const missing = missingHostExports(dshLlm)
   if (missing.length > 0) {
     ctx.logger.warn(`llm-pi-gateway: 宿主缺少 ${missing.join(', ')}(需要 dsh 本体 0.1.2+),插件禁用`)
@@ -159,8 +189,16 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // 两节来源:官方节(官方 schema 消费,零感知接管)+ 本包节(独立/增强)。
   // 合并路由表按原始快照恒等记忆;任一节解析即抛,记忆保持旧值,
   // 调用方捕获后沿用上一份好配置(官方同款)。
+  // 0.1.7 volatile 形态:apply 的 config 中 volatile 字段是响应式 ref(get 协议),
+  // 节写经 loader updateVolatile 就地换值并广播 volatile-update;读值必须动态解包
+  // (官方 plainOptions 同构),legacy 宿主 config 为普通对象原样透传
+  const unwrapVolatile = (value) => (typeof value?.get === 'function' ? value.get() : value)
+  const gatewaySection = () => {
+    const section = unwrapVolatile(config)
+    return { providers: unwrapVolatile(section?.providers) ?? {} }
+  }
   let readOfficial = () => undefined
-  let readGateway = () => config
+  let readGateway = gatewaySection
   let lastSnapshot
   let memoized
   // 官方节 catalog 形态/modelOverrides 路由 skip 上报:按 provider 去重防
@@ -195,7 +233,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   const resolveCredential = createCredentialResolver(ctx)
   const adapter = createGatewayAdapter(profiles, undefined, resolveCredential, () => ctx.get('attachments'), (reason) => {
     ctx.logger.warn('llm-pi-gateway: replay 降级为 provider 中性历史: ' + reason)
-  }, (attachments, ref) => dshLlm.resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref), dshLlm.offloadedImageText)
+  }, (attachments, ref) => dshLlm.resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref), dshLlm.offloadedImageText, imageOffload)
   const manager = createRouteManager({
     routes: profiles,
     directoryErrors: () => unserviceableDiagnostics,
@@ -270,6 +308,7 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     )
   }
   const installOfficialSection = () => {
+    if (!legacySectionFace) return
     if (OfficialConfig === undefined) return
     try {
       ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
@@ -293,13 +332,23 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     onSectionChange()
   }
   if (takeover) installOfficialSection()
-  ctx.settings.installSection(ctx, NS, Config, config, {
-    validate: (section) => validateSection(section, readGateway(), NS),
-    setSource: (source) => {
-      readGateway = source
-    },
-    onChange: () => onSectionChange(),
-  })
+  // 节安装面:legacy 宿主经 installSection 注册本包节(写校验 + 热更新钩子);
+  // 0.1.7 形态节由静态 Config 导出自动生成,写路径不经本包 —— 节写后宿主广播
+  // settings/document-updated,订阅该事件重读节值并重算路由
+  if (legacySectionFace) {
+    ctx.settings.installSection(ctx, NS, Config, config, {
+      validate: (section) => validateSection(section, readGateway(), NS),
+      setSource: (source) => {
+        readGateway = source
+      },
+      onChange: () => onSectionChange(),
+    })
+  } else {
+    // 0.1.7 节写路径:settings.write → loader entry.update 的 volatile-only 快速道,
+    // updateVolatile 就地换 ref 值并向本 fiber 广播 volatile-update,apply 不重跑;
+    // 读值走 gatewaySection 动态解包,事件驱动路由重算(官方 llm 插件同构)
+    ctx.on('loader/volatile-update', () => onSectionChange())
+  }
   // 启动 fail loud:组合后不可服务的配置在加载期失败(与官方一致)
   profiles()
   onSectionChange()

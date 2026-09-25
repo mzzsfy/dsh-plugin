@@ -5,6 +5,11 @@
 // 官方行的 disable-carrier)的 UI 开关写入即时生效的 user patch 行禁用,
 // 而其恢复机制(整包移出 bundles)只在下次 boot 生效,窗口内 composed
 // 自相矛盾;旧宿主(rc.2)则恒为假活形态。
+// import 崩死态 = 主行模块加载失败(fiber 未建,apply 从未运行,旗标持续
+// undefined;宿主 loader 无重试亦无 entry 级失败信号)。同一失效终点:
+// 官方行被 patch 禁用,全模型不可用。旗标 undefined 也是 apply 进行中的
+// 合法瞬态,经宽限期滤除后再代挂(0.1.7 宿主 dsh-llm 图片管线换形致
+// 静态 import 崩溃的实测教训)。
 // 自愈手段:动态挂载官方插件模块(ctx.plugin),settings 节与模型注册全
 // 原生语义,挂 guard 子 context 随 guard fiber 卸载。gateway 行或官方行
 // 任一复活时先卸代挂再放行。guard 行 id 含 "/",dsh-market 的行写入对其
@@ -36,10 +41,16 @@ export const GUARD_FOR_GATEWAY_ID = 'llm-pi-gateway/guard'
 const OFFICIAL_SETTINGS_NS = 'llm-pi-ai'
 
 // 轮询兜底周期:边沿事件缺失/丢失时的状态跟随精度,幂等不抖动
-const SWEEP_INTERVAL_MS = 3000
+export const SWEEP_INTERVAL_MS = 3000
 // boot 树就绪等待:兄弟行 update 事务完成的上限(超时按当前状态判定)
 const BOOT_SETTLE_ROUNDS = 50
 const BOOT_SETTLE_INTERVAL_MS = 100
+// import 崩自愈宽限:gateway 行启用停稳但 apply 旗标持续 undefined 即主行
+// 模块加载崩溃(fiber 未建,loader 无重试),无人服务 provider 路由而官方
+// 行仍被 patch 禁用——全模型不可用形态。旗标 undefined 也是 apply 正常进行
+// 中的合法瞬态(pi-ai 冷载分钟级),宽限必须覆盖之;超宽限后模块加载早已
+// 落定,持久 undefined 即确定性死亡
+export const IMPORT_CRASH_GRACE_MS = 90 * 1000
 
 // 无法解析该 id:boot 早期兄弟行未入树,或行确实不存在;两者对"是否
 // 死态"都不可判定,调用方应稍后重试
@@ -77,7 +88,8 @@ function settled(entry) {
 /**
  * 死态判定:gateway 行功能性停摆(禁用停稳,或 apply 声明未接管),且官方
  * 行禁用并已停稳。官方行未禁 = 官方自行服务。gateway apply 中途崩溃
- * (旗标 undefined)不在判定内:自愈执行者不越权重启他人。
+ * (旗标 undefined)不在判定内:自愈执行者不越权重启他人——该形态由
+ * installGuard 的 import 崩持久化追踪(宽限后确定性死亡)负责。
  * 返回 PENDING 表示行尚无法解析(树未就绪或行不存在),调用方应稍后
  * 重试——PENDING 不能当真值也不能当假值。
  * @param {object|undefined} loader
@@ -90,6 +102,23 @@ export function detectDeadState(loader) {
   const gatewayOff = (effectiveDisabled(gateway) && settled(gateway))
     || gatewayApplyState() === 'inactive'
   if (!gatewayOff) return false
+  return effectiveDisabled(official) && settled(official)
+}
+
+/**
+ * import 崩死态:gateway 行启用停稳且 apply 旗标持续 undefined。旗标
+ * undefined 的合法瞬态(apply 进行中,含模块冷载)由调用方宽限滤除;
+ * 持续超过宽限即模块加载已死, loader 对此无重试也无 entry 级失败信号
+ * (fiber 未建),只能按持久性判死。
+ * @param {object|undefined} loader
+ * @returns {boolean|PENDING}
+ */
+export function detectImportCrashState(loader) {
+  const gateway = resolveEntry(loader, GATEWAY_ENTRY_ID)
+  const official = resolveEntry(loader, OFFICIAL_ENTRY_ID)
+  if (gateway === PENDING || official === PENDING) return PENDING
+  if (effectiveDisabled(gateway) || !settled(gateway)) return false
+  if (gatewayApplyState() !== undefined) return false
   return effectiveDisabled(official) && settled(official)
 }
 
@@ -357,15 +386,28 @@ export async function installGuard(ctx, {
   // 复活→卸代挂的最终一致。与事件通道幂等并发:mount/unmount 各自去重,
   // 双通道同时触发不会叠加。PENDING 轮跳过,下轮再扫。mount 前置条件:
   // settings 服务已 provide——官方目录首注册需要 settings 现值作行配置,
-  // 且 boot 事务内 mount 会让官方插件的 settings 接线时序劣化
+  // 且 boot 事务内 mount 会让官方插件的 settings 接线时序劣化。
+  // import 崩死态(detectImportCrashState)单独记账:旗标 undefined 需先
+  // 持续满宽限期才视为死亡,起点为首次观测到该形态的 sweep 时刻
   let sweeping = false
+  let importCrashSince = null
   const sweep = async () => {
     if (sweeping) return
     sweeping = true
     try {
       const dead = detectDeadState(ctx.loader)
-      if (dead === true && settingsReady() && mounted === null && mounting === null) await mountOfficial()
-      else if (dead === false && (mounted !== null || mounting !== null)) await unmountOfficial()
+      const importCrash = importCrashSince !== null
+        && Date.now() - importCrashSince >= IMPORT_CRASH_GRACE_MS
+        && detectImportCrashState(ctx.loader) === true
+      if (importCrash) {
+        ctx.logger.warn(`llm-pi-gateway/guard: gateway 主行模块加载崩溃(${IMPORT_CRASH_GRACE_MS / 1000}s 内 apply 旗标持续缺席),官方行仍被 patch 禁用,代挂官方恢复模型服务`)
+      }
+      if ((dead === true || importCrash) && settingsReady() && mounted === null && mounting === null) await mountOfficial()
+      else if (dead === false && detectImportCrashState(ctx.loader) !== true && (mounted !== null || mounting !== null)) await unmountOfficial()
+      // 记账置尾:死亡形态消失(含复活)即重置宽限计时
+      importCrashSince = detectImportCrashState(ctx.loader) === true
+        ? (importCrashSince ?? Date.now())
+        : null
     } finally {
       sweeping = false
     }
@@ -381,6 +423,9 @@ export async function installGuard(ctx, {
   // boot 诊断锚点:guard 判定死态自愈只有两种可能入口,日志标注本次是否触发
   const deadState = detectDeadState(ctx.loader)
   ctx.logger.info?.(`llm-pi-gateway/guard: 初始判定 dead=${deadState} settingsReady=${settingsReady()}`)
+  // import 崩观测起点:初始判定即崩溃形态时,宽限自此刻起算——
+  // sweep 首轮只续账不判死,无此播种则宽限判定要跨两个轮询周期
+  if (detectImportCrashState(ctx.loader) === true) importCrashSince = Date.now()
   if (deadState === true && settingsReady()) await mountOfficial()
 
   // 兜底轮询:guard 行 fiber 存续期间持续扫描。guard entry 被宿主移除

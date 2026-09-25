@@ -3,10 +3,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { offloadedImageText } from '@deepseek-ai/dsh-llm'
+import { offloadedImageText, offloadRequestImagesWithPolicy } from '@deepseek-ai/dsh-llm'
+import { imageOffloadAdapter } from '../src/image-offload.mjs'
 import { toPiAssistant, toPiReplayState, toPiContext, toPiContextWithImages } from '../src/pi-context.mjs'
 
-const IMAGES_BASE = { offloadedText: offloadedImageText }
+const IMAGES_BASE = {
+  offloadedText: offloadedImageText,
+  offload: imageOffloadAdapter({ offloadRequestImagesWithPolicy }, undefined),
+}
 
 function harnessAssistant(overrides = {}) {
   return {
