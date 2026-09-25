@@ -33,7 +33,7 @@ node scripts/dev-link.mjs dsh-maintain   # 仓库根执行:归一 profile 依赖
 
 工作副本以 junction 挂进 profile,host 半区改动保存约 1 秒热重载,client 半区改动刷新页面即生效,无需发版;规约与全仓归一见 `node scripts/dev-link.mjs all`。勿用 `link:` 或裸相对路径手工挂载——realpath 后 peer 从仓库目录解析会失败(早期"必须手工拷贝部署"结论的成因,对 dev-link junction 不成立,junction 内 peer 沿 profile 解析)。
 
-## 设置(settings.yaml,热加载)
+## 设置(配置节,热加载)
 
 ```yaml
 maintain:
@@ -43,7 +43,7 @@ maintain:
   registryBase: https://registry.npmjs.org       # 官方源不可达时可改为镜像地址
 ```
 
-升级命令、轮询间隔、镜像地址三项亦可在设置面板"版本与运维"页直接编辑保存(等效 settings.yaml,热生效);升级后自动重启不在设置中,由升级确认弹窗内的勾选项逐次决定。
+配置落在 profile 条目 `maintain` 的 config 节(即上例 settings.yaml 的 `maintain:` 块,经 dsh 配置迁移后为 profile patch 内该条目的 config 键):dsh 0.1.7+ 以插件静态 `Config` 导出生成节表单,四个字段均为 volatile,面板保存经 configEditor 写回、仅 volatile 变化时 loader 原地热更(不重启插件);legacy 宿主(≤0.1.6)经 settings 服务 `register/get/update` 命名空间语义等价存取。升级命令、轮询间隔、镜像地址三项亦可在设置面板"版本与运维"页直接编辑保存(等效配置节,热生效);升级后自动重启不在设置中,由升级确认弹窗内的勾选项逐次决定。
 
 ## 重启须知
 
@@ -60,4 +60,4 @@ cd packages/dsh-maintain && npm test
 
 ## dsh 版本兼容
 
-三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:版本与运维页控件完整、检查/升级/重启入口可用、激活 live。0.1.7-rc.1 上 settings 方法面缺失时守卫降级(徽章「未就绪」/通道 fallback 文案),不阻塞页面。
+三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:版本与运维页控件完整、检查/升级/重启入口可用、激活 live。配置面双形态特性检测(照 dsh-llm-pi-gateway,不做版本硬编码):0.1.7-rc.1 走静态 Config 导出 + configEditor 写回 + volatile 原地热更,legacy(0.1.2–0.1.6)走 settings 命名空间 register/get/update;宿主 settings/configEditor 方法面缺失时对应能力守卫降级(面板提示),不阻塞页面。

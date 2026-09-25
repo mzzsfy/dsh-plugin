@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, RELEASE_NOTES_CACHE_MAX, collectActiveWork } from '../src/index.js'
+import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_UPGRADE_TEMPLATE, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, RELEASE_NOTES_CACHE_MAX, collectActiveWork } from '../src/index.js'
 import { rmSync, readFileSync } from 'node:fs'
 
 // 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
@@ -35,16 +35,46 @@ function tagsBody(tags) {
 
 globalThis.fetch = async () => tagsBody(MOCK_TAGS)
 
-function makeCtx({ appExit, settingsStore, timerAvailable = true, services = {} } = {}) {
+function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySettings = false, configEditorAvailable = true, timerAvailable = true, services = {} } = {}) {
   const routes = new Map()
   let tick = null
-  const store = settingsStore ?? {}
-  const calls = { exits: [], registered: [], disposers: [] }
+  // 条目配置桩:settingsStore 对象即 apply 入参 config(0.1.7 形态的宿主解析配置);
+  // configEditor 桩经 change 合并后原样写回,模拟 loader 仅 volatile 变化的原地热更。
+  // legacy 形态下 settingsStore 别名 settings 命名空间存储,config 为空对象
+  const config = legacySettings ? {} : (settingsStore ?? {})
+  const legacyStore = legacySettings ? (settingsStore ?? {}) : {}
+  const calls = { exits: [], registered: [], disposers: [], editCalls: [], configureCalls: [], registerCalls: [] }
+  const settingsService = {
+    configure(presentation, owner) {
+      calls.configureCalls.push({ presentation, owner })
+      return () => {}
+    },
+  }
+  if (legacySettings) {
+    // legacy(≤0.1.6)settings 服务方法面:register 声明命名空间,get/update 命名空间语义
+    settingsService.register = (ns, schema) => {
+      calls.registerCalls.push({ ns, schema })
+    }
+    settingsService.get = (ns) => legacyStore
+    settingsService.update = async (ns, patch) => {
+      Object.assign(legacyStore, patch)
+    }
+  }
+  const configEditor = {
+    async edit(entry, change) {
+      calls.editCalls.push(entry)
+      const next = change({ ...config }, {})
+      for (const [key, value] of Object.entries(next)) config[key] = value
+    },
+  }
   const ctx = {
     calls,
+    // fiber 桩:0.1.7 写路径经 fiber.entry 定位 profile 条目
+    fiber: { entry: { options: { id: 'maintain', name: '@mzzsfy/dsh-maintain' } } },
     get(name) {
       if (name === 'appExit') return appExit
-      if (name === 'settings') return settingsService
+      if (name === 'settings') return settingsAvailable ? settingsService : undefined
+      if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
       if (Object.prototype.hasOwnProperty.call(services, name)) return services[name]
       return undefined
     },
@@ -57,7 +87,11 @@ function makeCtx({ appExit, settingsStore, timerAvailable = true, services = {} 
       // timer 服务桩:模拟宿主 timer 激活后的 interval(返回 disposer 同官方契约);
       // timerAvailable=false 模拟服务缺失
       fn({
-        settings: settingsService,
+        settings: settingsAvailable ? settingsService : undefined,
+        effect(stubEffect) {
+          const disposer = stubEffect()
+          if (typeof disposer === 'function') calls.disposers.push(disposer)
+        },
         interval: timerAvailable
           ? (intervalFn) => {
               tick = intervalFn
@@ -79,16 +113,8 @@ function makeCtx({ appExit, settingsStore, timerAvailable = true, services = {} 
       for (const disposer of calls.disposers) disposer()
     },
   }
-  const settingsService = {
-    register() {},
-    get() {
-      return store
-    },
-    async update(ns, patch) {
-      Object.assign(store, patch)
-    },
-  }
-  return { ctx, routes }
+  apply(ctx, config)
+  return { ctx, routes, config }
 }
 
 function makeReq({ method = 'POST', body, headers = {} } = {}) {
@@ -139,7 +165,6 @@ const realSleep = (ms) => new Promise((resolve) => {
 
 test('挂载:9 条路由注册,启动检查后快照就绪', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   assert.equal(routes.size, 9)
   assert.deepEqual(
     [...routes.keys()].sort(),
@@ -168,9 +193,69 @@ test('挂载:9 条路由注册,启动检查后快照就绪', async () => {
   assert.equal(res.payload.pollRunning, true, 'timer 服务激活时自动轮询应武装')
 })
 
+test('Config 导出契约:根级 volatile 包装,validate 产出整节单 ref,默认值对拍 DEFAULT_* 常量', () => {
+  const resolved = Config['~standard'].validate({})
+  assert.equal(resolved.issues, undefined)
+  const value = resolved.value
+  assert.equal(typeof value?.get, 'function', '根级 volatile 须产出整节单 ref(get 协议)')
+  const section = value.get()
+  assert.equal(section.channel, DEFAULT_CHANNEL)
+  assert.equal(section.pollIntervalSec, DEFAULT_POLL_INTERVAL_SEC)
+  assert.equal(section.upgradeCommandTemplate, DEFAULT_UPGRADE_TEMPLATE)
+  assert.equal(section.registryBase, DEFAULT_REGISTRY_BASE)
+  const provided = Config['~standard'].validate({ channel: 'next' }).value.get()
+  assert.equal(provided.channel, 'next')
+})
+
+test('0.1.7 形态:configure 关闭原生自动页,owner 为本插件 fiber', () => {
+  const { ctx } = makeCtx()
+  assert.deepEqual(ctx.calls.configureCalls, [{ presentation: { auto: false }, owner: ctx.fiber }])
+})
+
+test('0.1.7 形态:通道切换经 configEditor.edit 定位 maintain 条目并合并写回', async () => {
+  const store = {}
+  const { ctx, routes } = makeCtx({ settingsStore: store })
+  const switched = await post(routes, '/api/maintain/channel', { channel: 'next' })
+  assert.equal(switched.status, 200)
+  assert.equal(ctx.calls.editCalls.length, 1)
+  assert.equal(ctx.calls.editCalls[0].options.id, 'maintain')
+  assert.equal(ctx.calls.editCalls[0].options.name, '@mzzsfy/dsh-maintain')
+  assert.equal(store.channel, 'next')
+})
+
+test('0.1.7 形态:settings 缺席干净降级——挂载照常、自动页策略缺席、写走 configEditor', async () => {
+  const store = {}
+  const { ctx, routes } = makeCtx({ settingsAvailable: false, settingsStore: store })
+  assert.deepEqual(ctx.calls.configureCalls, [])
+  const switched = await post(routes, '/api/maintain/channel', { channel: 'next' })
+  assert.equal(switched.status, 200)
+  assert.equal(store.channel, 'next')
+})
+
+test('0.1.7 形态:configEditor 缺失即 500,条目配置不被改动', async () => {
+  const store = {}
+  const { routes } = makeCtx({ configEditorAvailable: false, settingsStore: store })
+  const denied = await post(routes, '/api/maintain/channel', { channel: 'next' })
+  assert.equal(denied.status, 500)
+  assert.deepEqual(denied.payload, { error: 'configEditor 服务不可用' })
+  assert.equal(store.channel, undefined)
+})
+
+test('legacy 形态:register 注册 maintain 命名空间,get 读预设,写走 settings.update', async () => {
+  const store = { channel: 'next' }
+  const { ctx, routes } = makeCtx({ legacySettings: true, settingsStore: store })
+  assert.deepEqual(ctx.calls.registerCalls.map((row) => row.ns), ['maintain'])
+  assert.equal(ctx.calls.registerCalls[0].schema, Config, 'legacy register 须复用 Config 导出')
+  const status = await get(routes, '/api/maintain/status')
+  assert.equal(status.payload.channel, 'next', 'legacy 形态读 settings 命名空间')
+  const switched = await post(routes, '/api/maintain/channel', { channel: 'latest' })
+  assert.equal(switched.status, 200)
+  assert.equal(store.channel, 'latest')
+  assert.equal(ctx.calls.editCalls.length, 0, 'legacy 形态不得触碰 configEditor')
+})
+
 test('timer 服务缺失:自动轮询降级,面板状态照常响应', async () => {
   const { ctx, routes } = makeCtx({ timerAvailable: false })
-  apply(ctx)
   const res = await call(routes, '/api/maintain/status', makeReq({ method: 'GET' }))
   assert.equal(res.status, 200)
   assert.equal(res.payload.pollRunning, false)
@@ -182,7 +267,6 @@ test('timer 服务缺失:自动轮询降级,面板状态照常响应', async () 
 
 test('interval dispose 回归:fiber 停用后轮询 tick 失效(防双 interval 回归)', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   assert.equal(ctx.calls.disposers.length > 0, true, 'interval dispose 必须经 ctx.effect 挂回插件 fiber')
   // 等启动检查落定,排除其 checkedAt 变化对断言的干扰
   let baseline = null
@@ -200,7 +284,6 @@ test('interval dispose 回归:fiber 停用后轮询 tick 失效(防双 interval 
 
 test('方法守卫:全部路由错误方法一律 405', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   // GET 端点(status/release-notes)以 POST 拒绝,其余以 GET 拒绝
   const readPaths = ['/api/maintain/status', '/api/maintain/release-notes']
   for (const path of routes.keys()) {
@@ -212,7 +295,6 @@ test('方法守卫:全部路由错误方法一律 405', async () => {
 
 test('跨源守卫:Origin 与 Host 不符即 403;同源放行;Host 大小写归一', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   const evil = await post(routes, '/api/maintain/refresh', undefined, { origin: 'https://evil.example', host: 'localhost:3000' })
   assert.equal(evil.status, 403)
   const ok = await post(routes, '/api/maintain/refresh', undefined, { origin: 'http://localhost:3000' })
@@ -223,7 +305,6 @@ test('跨源守卫:Origin 与 Host 不符即 403;同源放行;Host 大小写归�
 
 test('refresh:触发检查并返回 200 快照', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   const res = await post(routes, '/api/maintain/refresh')
   assert.equal(res.status, 200)
   assert.ok(res.payload.checkedAt !== null)
@@ -232,7 +313,6 @@ test('refresh:触发检查并返回 200 快照', async () => {
 test('channel:空值 400;非法字符 400;不在 tags 400;合法通道走白名单放行', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
 
   const empty = await post(routes, '/api/maintain/channel', { channel: '  ' })
   assert.equal(empty.status, 400)
@@ -254,7 +334,6 @@ test('channel:空值 400;非法字符 400;不在 tags 400;合法通道走白名�
 test('upgrade-template:空值 400;合法值持久化', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const empty = await post(routes, '/api/maintain/upgrade-template', { template: '' })
   assert.equal(empty.status, 400)
   const blank = await post(routes, '/api/maintain/upgrade-template', { template: '   ' })
@@ -268,7 +347,6 @@ test('upgrade-template:空值 400;合法值持久化', async () => {
 test('poll-interval:负数 400;合法值持久化', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const bad = await post(routes, '/api/maintain/poll-interval', { seconds: -1 })
   assert.equal(bad.status, 400)
   const wide = await post(routes, '/api/maintain/poll-interval', { seconds: '60' })
@@ -281,7 +359,6 @@ test('poll-interval:负数 400;合法值持久化', async () => {
 test('registry-base:非法 scheme 400;合法值持久化', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const bad = await post(routes, '/api/maintain/registry-base', { base: 'ftp://mirror.example' })
   assert.equal(bad.status, 400)
   const ok = await post(routes, '/api/maintain/registry-base', { base: 'https://mirror.example' })
@@ -297,7 +374,6 @@ test('upgrade:运行版本已是通道最新放行(重装/回退场景),不再 4
     settingsStore: store,
     services: { hostVersionProbe: () => Promise.resolve('5.4.3') },
   })
-  apply(ctx)
   // 注入运行版本远高于假目标版本:verdict 应转 up-to-date,安装入口照常放行
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => tagsBody({ latest: '0.0.1', next: '0.0.2' })
@@ -331,8 +407,7 @@ test('upgrade:verdict unknown 放行(tags 未就绪不得 409 误拒)', async ()
   globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
   try {
     const { ctx, routes } = makeCtx({ settingsStore: store })
-    apply(ctx)
-    let snapshot = null
+      let snapshot = null
     for (let waited = 0; waited < 5000 && snapshot === null; waited += 25) {
       const poll = await get(routes, '/api/maintain/status').then((r) => r.payload)
       if (poll.checkedAt !== null) snapshot = poll
@@ -359,7 +434,6 @@ test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {  // 
   // 门闩语义由"真实挂起命令"用例覆盖,此处锁定保存侧空白拒绝
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const blank = await post(routes, '/api/maintain/upgrade-template', { template: '   ' })
   assert.equal(blank.status, 400)
   assert.equal(store.upgradeCommandTemplate, undefined)
@@ -368,7 +442,6 @@ test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {  // 
 test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', async () => {
   const store = { upgradeCommandTemplate: 'node -e "setTimeout(() => {}, 2000)"' }
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const baseline = await get(routes, '/api/maintain/status').then((r) => r.payload)
   const first = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(first.status, 200)
@@ -402,8 +475,7 @@ test('upgrade:托管+勾选自动重启,命令成功即调度关机且落定钩�
   t.mock.timers.enable({ apis: ['setTimeout'] })
   try {
     const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-    apply(ctx)
-    // 等启动检查落定,固定网络请求基线(mock timers 域内以 realSleep 自旋让出事件循环)
+      // 等启动检查落定,固定网络请求基线(mock timers 域内以 realSleep 自旋让出事件循环)
     let baseline = null
     for (let waited = 0; waited < 5000 && baseline === null; waited += 25) {
       const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
@@ -443,7 +515,6 @@ test('restart:升级进行中 409 拒绝且不调度退出', async () => {
   const store = { upgradeCommandTemplate: 'node -e "setTimeout(() => {}, 2000)"' }
   const exits = []
   const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-  apply(ctx)
   const upgrade = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(upgrade.status, 200)
   const denied = await post(routes, '/api/maintain/restart')
@@ -463,7 +534,6 @@ test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
-  apply(ctx)
   const restart = await post(routes, '/api/maintain/restart')
   assert.equal(restart.status, 200)
   const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
@@ -486,8 +556,7 @@ test('upgrade:重启调度窗口内 refresh 409,registry-base 保存但不发起
   try {
     const exits = []
     const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-    apply(ctx)
-    let baseline = null
+      let baseline = null
     for (let waited = 0; waited < 5000 && baseline === null; waited += 25) {
       const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
       if (poll && poll.checkedAt !== null) baseline = fetchCalls
@@ -512,7 +581,6 @@ test('upgrade:重启调度窗口内 refresh 409,registry-base 保存但不发起
 
 test('status:快照携带 bootAt 实例代际', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   const status = await get(routes, '/api/maintain/status')
   assert.equal(status.status, 200)
   assert.equal(typeof status.payload.bootAt, 'number')
@@ -521,7 +589,6 @@ test('status:快照携带 bootAt 实例代际', async () => {
 
 test('status:运行版本与已装版本双字段,verdict 以运行版本为准', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   // 等启动检查落定:installedVersion 由检查快照填充
   let ready = null
   for (let waited = 0; waited < 5000 && ready === null; waited += 25) {
@@ -545,7 +612,6 @@ test('status:运行版本与已装版本双字段,verdict 以运行版本为准'
 test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const huge = await post(routes, '/api/maintain/poll-interval', { seconds: 1e308 })
   assert.equal(huge.status, 400)
   assert.equal(store.pollIntervalSec, undefined, '超上界值不得落盘')
@@ -561,7 +627,6 @@ test('upgrade:未勾选自动重启,升级成功落定继续运行并标 stale',
     services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
   })
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  apply(ctx)
   // 排空启动期微任务链,探针读序此后稳定
   await drainMicrotasks()
   const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: false })
@@ -598,7 +663,6 @@ test('upgrade:模板钉定版本时按钉定意图判 fresh(通道目标不参�
     services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
   })
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  apply(ctx)
   await drainMicrotasks()
   const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: false })
   assert.equal(trigger.status, 200)
@@ -630,7 +694,6 @@ test('upgrade:勾选自动重启+落定,延迟窗口后调度宿主退出', asyn
     services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
   })
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  apply(ctx)
   await drainMicrotasks()
   const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(trigger.status, 200)
@@ -658,7 +721,6 @@ test('upgrade:autoRestart 缺失或非 boolean 一律 400', async () => {
   // 假命令兜底:本用例期待 400,但若校验意外放行,真实默认模板会当场触发 npm install
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const missing = await post(routes, '/api/maintain/upgrade')
   assert.equal(missing.status, 400, '缺失 autoRestart 必须拒绝,防静默翻转关机行为')
   const stringInput = await post(routes, '/api/maintain/upgrade', { autoRestart: 'true' })
@@ -673,7 +735,6 @@ test('upgrade:body 校验先于门控,门控命中时非法 body 仍 400', async
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
   const { ctx, routes } = makeCtx({ settingsStore: store, appExit: () => {} })
-  apply(ctx)
   await post(routes, '/api/maintain/restart')
   const denied = await post(routes, '/api/maintain/upgrade')
   assert.equal(denied.status, 400, 'body 非法时即使门控(重启已调度)命中也必须 400')
@@ -682,7 +743,6 @@ test('upgrade:body 校验先于门控,门控命中时非法 body 仍 400', async
 test('registry-base:带 query 或 hash 的输入 400', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
-  apply(ctx)
   const withQuery = await post(routes, '/api/maintain/registry-base', { base: 'https://example.com?mirror=1' })
   assert.equal(withQuery.status, 400)
   const withHash = await post(routes, '/api/maintain/registry-base', { base: 'https://example.com#frag' })
@@ -692,14 +752,12 @@ test('registry-base:带 query 或 hash 的输入 400', async () => {
 
 test('restart:缺失 appExit 500;响应立即返回,延迟退出', async (t) => {
   const withoutExit = makeCtx()
-  apply(withoutExit.ctx)
   const denied = await post(withoutExit.routes, '/api/maintain/restart')
   assert.equal(denied.status, 500)
 
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
-  apply(ctx)
   const ok = await post(routes, '/api/maintain/restart')
   assert.equal(ok.status, 200)
   assert.equal(ok.payload.restarting, true)
@@ -713,7 +771,6 @@ test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async (t)
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
-  apply(ctx)
   const first = await post(routes, '/api/maintain/restart')
   assert.equal(first.status, 200)
   const second = await post(routes, '/api/maintain/restart')
@@ -725,7 +782,6 @@ test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async (t)
 
 test('readBody 超限:路由归一 400', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   const req = makeReq({ method: 'POST' })
   const res = makeRes()
   const done = routes.get('/api/maintain/channel')(req, res)
@@ -806,7 +862,6 @@ test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {
   const jobs = { list: () => [] }
   const terminals = { list: () => [] }
   const { ctx, routes } = makeCtx({ settingsStore: store, services: { agents, jobs, terminals } })
-  apply(ctx)
   const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /活跃工作/)
@@ -822,7 +877,6 @@ test('restart:活跃工作 409,force 越过', async (t) => {
   const agents = { list: () => [{ id: 'a1', status: 'running' }] }
   const jobs = { list: () => [] }
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: { agents, jobs } })
-  apply(ctx)
   const denied = await post(routes, '/api/maintain/restart')
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /活跃工作/)
@@ -835,7 +889,6 @@ test('restart:活跃工作 409,force 越过', async (t) => {
 
 test('status:activeWork 概要进快照,服务缺失标 detectionAvailable=false', async () => {
   const { ctx, routes } = makeCtx()
-  apply(ctx)
   const status = await get(routes, '/api/maintain/status').then((r) => r.payload)
   assert.equal(status.activeWork.total, 0)
   assert.equal(status.activeWork.detectionAvailable, false)
@@ -847,7 +900,6 @@ test('restart:null 体按空体处理,内部形态不泄漏', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
-  apply(ctx)
   const ok = await post(routes, '/api/maintain/restart', 'null')
   assert.equal(ok.status, 200, 'null 体须按空体处理,不得以内部错误形态 400/500 泄漏')
   t.mock.timers.tick(RESTART_DELAY_MS + 1)
@@ -870,8 +922,7 @@ test('upgrade:运行环境不参与自动重启判定(env 注入 manual 仍调�
     const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
     const exits = []
     const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-    apply(ctx)
-    await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+      await post(routes, '/api/maintain/upgrade', { autoRestart: true })
     let settled = null
     for (let i = 0; i < 50 && settled === null; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100))
@@ -896,8 +947,7 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   try {
     const agents = { list: () => [{ id: 'a1', status: 'running' }] }
     const { ctx, routes } = makeCtx({ services: { agents }, appExit: () => {} })
-    apply(ctx)
-    await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+      await post(routes, '/api/maintain/upgrade', { autoRestart: true })
     assert.equal(warns.some((text) => text.includes('audit endpoint=upgrade outcome=rejected reason=active-work')), true, '门控拒绝须留审计行')
     await post(routes, '/api/maintain/restart')
     assert.equal(warns.some((text) => text.includes('audit endpoint=restart outcome=rejected reason=active-work')), true, '重启门控拒绝须留审计行')
@@ -911,7 +961,6 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   const plainCtx = makeCtx({ settingsStore: { upgradeCommandTemplate: 'node -e "process.exit(0)"' }, appExit: () => {} })
   console.warn = (text) => plainWarns.push(String(text))
   try {
-    apply(plainCtx.ctx)
     await post(plainCtx.routes, '/api/maintain/upgrade', { autoRestart: true })
     for (let i = 0; i < 50; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100))
@@ -979,8 +1028,7 @@ test('release-notes:默认取通道最新版,200 返回发布说明', async () =
   const restore = installDualUpstream({ requestedUrls })
   try {
     const { ctx, routes } = makeCtx({ services: { hostVersionProbe: () => Promise.resolve('5.4.3') } })
-    apply(ctx)
-    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+      assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
     const res = await get(routes, RELEASE_PATH)
     assert.equal(res.status, 200)
     assert.deepEqual(res.payload, {
@@ -1001,8 +1049,7 @@ test('release-notes:缓存生效,切通道后按新通道版本拉取', async ()
   const restore = installDualUpstream({ requestedUrls })
   try {
     const { ctx, routes } = makeCtx()
-    apply(ctx)
-    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+      assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
     const first = await get(routes, RELEASE_PATH)
     assert.equal(first.status, 200)
     assert.equal(first.payload.version, '9.9.9')
@@ -1028,8 +1075,7 @@ test('release-notes:tags 未就绪且无 version 400 提示先检查更新', asy
   globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
   try {
     const { ctx, routes } = makeCtx()
-    apply(ctx)
-    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+      assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
     const res = await get(routes, RELEASE_PATH)
     assert.equal(res.status, 400)
     assert.match(res.payload.error, /检查更新/)
@@ -1051,8 +1097,7 @@ test('release-notes:通道标签非 semver,构建上游标签前归一 400', asy
   }
   try {
     const { ctx, routes } = makeCtx()
-    apply(ctx)
-    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+      assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
     const res = await get(routes, RELEASE_PATH)
     assert.equal(res.status, 400)
     assert.match(res.payload.error, /semver/, '病理标签必须在触达上游前被 semver 白名单拦截')
@@ -1068,8 +1113,7 @@ test('release-notes:重启调度窗口内 409,不发起上游请求', async (t) 
   const restore = installDualUpstream({ requestedUrls })
   try {
     const { ctx, routes } = makeCtx({ appExit: () => {} })
-    apply(ctx)
-    const restart = await post(routes, '/api/maintain/restart')
+      const restart = await post(routes, '/api/maintain/restart')
     assert.equal(restart.status, 200)
     const res = await get(routes, RELEASE_PATH)
     assert.equal(res.status, 409, '关机窗口内查询更新内容必须拒绝')
@@ -1097,8 +1141,7 @@ test('release-notes:缓存超限 FIFO 淘汰,最早键被逐出', async () => {
   }
   try {
     const { ctx, routes } = makeCtx()
-    apply(ctx)
-    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+      assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
     for (const [name, version] of Object.entries(channels)) {
       const switched = await post(routes, '/api/maintain/channel', { channel: name })
       assert.equal(switched.status, 200)
@@ -1127,8 +1170,7 @@ test('release-notes:上游失败 400 带错误信息', async () => {
   const restore = installDualUpstream({ requestedUrls, releaseThrows: 'ECONNRESET' })
   try {
     const { ctx, routes } = makeCtx()
-    apply(ctx)
-    assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
+      assert.ok(await waitSnapshotReady(routes), '启动检查 5 秒内未完成')
     const res = await get(routes, RELEASE_PATH)
     assert.equal(res.status, 400)
     assert.match(res.payload.error, /ECONNRESET/)
