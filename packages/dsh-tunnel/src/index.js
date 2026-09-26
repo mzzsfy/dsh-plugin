@@ -1,8 +1,9 @@
 // dsh-tunnel Host 半区: /p/<name> 前缀路由 strip 转发与 <name>.* 子域名全路径
 // 透传(任意 WS 路径)双入口, tunnels.json 持久化与激活恢复; ai 工具三件
-// (tunnel_open/list/close)经 tools 服务注册。子域名分流用 wrap+shadow, 与
-// dsh-auto-trust-all 同构; 规格: docs/调研-路径穿透插件.md「方案设计」两节;
-// 干净禁用由 inject ['webServer'] 门控, 无任何自有认证层(仓库安全边界约定)。
+// (tunnel_open/list/close)经 tools 服务注册, 注册面随「允许 ai 使用」开关同步,
+// 关闭即注销。子域名分流用 wrap+shadow, 与 dsh-auto-trust-all 同构; 规格:
+// docs/调研-路径穿透插件.md「方案设计」两节; 干净禁用由 inject ['webServer']
+// 门控, 无任何自有认证层(仓库安全边界约定)。
 
 import http from 'node:http'
 import net from 'node:net'
@@ -37,7 +38,6 @@ const VALID_ENTRIES = new Set([ENTRY_PATH, ENTRY_SUBDOMAIN])
 // 设置命名空间与 UI 偏好: 设置页独立配置节 + 侧边栏注入开关(设计: docs/设计-隧道GUI.md)
 const SETTINGS_NS = 'tunnel'
 const SETTINGS_UNAVAILABLE = '设置服务不可用'
-const UI_FIELD_REQUIRED = 'sidebarTab 须为布尔'
 // 分流面标记: 防包装叠加/防重复 shadow/防 upgrades 表二次拦截
 const WRAPPED_PROP = 'dshTunnelWrapped'
 const SHADOWED_PROP = 'dshTunnelShadowed'
@@ -55,23 +55,34 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'up
 // 信任链头剥离: 入站伪造的代理链声明一律替换为本插件视角的真实值
 const FORWARDED_LIE_HEADERS = ['forwarded', 'via', 'x-real-ip']
 
-// 超时字段 Config 与 SETTINGS_SCHEMA 同名同约束双写, 单一工厂防漂移
+// 超时与偏好字段 Config 与 SETTINGS_SCHEMA 同名同约束双写, 单一工厂防漂移
 const TIMEOUT_MIN_MS = 1
 const TIMEOUT_MAX_MS = 60 * 1000
 const timeoutField = () => z.number().step(1).min(TIMEOUT_MIN_MS).max(TIMEOUT_MAX_MS).default(DEFAULT_CONNECT_TIMEOUT)
   .description('等待目标响应头的超时, 头到即解除(SSE 等长流不受影响)')
+const aiToolsField = () => z.boolean().default(true)
+  .description('允许 ai 调用隧道工具(tunnel_open/list/close), 关闭即向 ai 注销; 看板与 REST 管理不受影响')
+const sidebarTabField = () => z.boolean().default(false)
+  .description('看板移入 better-sidebar 侧边栏(需已安装; 关闭时始终使用主界面)')
+
+// 字段级 volatile 标记: 0.1.7+ 该字段进自动配置节并支持 loader 原地热更;
+// 旧宿主 schemastery 无 volatile 方法, 特性检测原样返回(dsh-maintain 同构)
+const volatileField = (schema) => (typeof schema.volatile === 'function' ? schema.volatile() : schema)
 
 export const Config = z.object({
-  connectTimeoutMs: timeoutField(),
+  connectTimeoutMs: volatileField(timeoutField()),
   dataDir: z.string().default(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'dsh-tunnel'))
     .description('隧道表持久化目录'),
+  aiTools: volatileField(aiToolsField()),
+  sidebarTab: volatileField(sidebarTabField()),
 })
 
-// 设置页独立配置节: sidebarTab 仅 UI 偏好, dataDir 属环境路径不进 UI
+// 设置页独立配置节(legacy 注册面): 偏好字段与 Config 单一工厂同源,
+// dataDir 属环境路径不进 UI
 export const SETTINGS_SCHEMA = z.object({
   connectTimeoutMs: timeoutField(),
-  sidebarTab: z.boolean().default(false)
-    .description('看板移入 better-sidebar 侧边栏(需已安装; 关闭时始终使用主界面)'),
+  aiTools: aiToolsField(),
+  sidebarTab: sidebarTabField(),
 })
 
 const normalizeWsPath = (value) => value.replace(/\/+$/, '')
@@ -283,9 +294,44 @@ export function apply(ctx, config) {
     return () => {}
   }
 
-  // 可变绑定: 设置页改动经 settings watch 回写, 载体与各 handler 按请求期读到新值
-  let connectTimeoutMs = config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT
+  // 可变绑定: 偏好改动经 legacy watch / 0.1.7+ volatile-update 回写, 载体与各
+  // handler 按请求期读到新值
+  let connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT
   const dataDir = config.dataDir
+
+  // 偏好面读值: legacy 设置节优先(register 时已合并持久值), 0.1.7+ 走 Config
+  // volatile ref(loader 原地热更, get 协议动态解包); 设置服务缺席回退 config 初值
+  const settingsRef = { current: null }
+  const unwrapRef = (value) => (typeof value?.get === 'function' ? value.get() : value)
+  const readPref = (key) => {
+    const fromSettings = settingsRef.current?.get(SETTINGS_NS)?.[key]
+    return fromSettings !== undefined ? fromSettings : unwrapRef(config?.[key])
+  }
+  const aiToolsNow = () => readPref('aiTools') !== false
+
+  // ai 工具三件注册开关: 关闭即注销(干净禁用), GUI/REST 同表不受影响;
+  // 注入等待期开关可能已翻转, 回调内以当下值复核, 防迟到注册
+  let disposeTools = null
+  const syncToolsRegistration = () => {
+    if (aiToolsNow() && disposeTools === null) {
+      ctx.inject(['tools'], (tctx) => {
+        if (disposeTools !== null || !aiToolsNow()) return
+        const disposers = tools.map((tool) => tctx.tools.register(tool))
+        disposeTools = () => { for (const dispose of disposers) dispose() }
+      })
+    } else if (!aiToolsNow() && disposeTools !== null) {
+      disposeTools()
+      disposeTools = null
+    }
+  }
+
+  // 偏好重读: 超时越界保持旧值, 工具注册面随开关同步; legacy watch 与
+  // 0.1.7+ volatile-update 两条变更通道共用
+  const applyPreferences = () => {
+    const timeout = Number(readPref('connectTimeoutMs'))
+    if (Number.isInteger(timeout) && timeout >= TIMEOUT_MIN_MS && timeout <= TIMEOUT_MAX_MS) connectTimeoutMs = timeout
+    syncToolsRegistration()
+  }
 
   // 活动隧道: name → 记录 + 本次激活注册的路由回收器(路径模式才有路由可回收)
   const tunnels = new Map()
@@ -563,17 +609,12 @@ export function apply(ctx, config) {
       },
     }),
   ]
-  ctx.inject(['tools'], (tctx) => {
-    for (const tool of tools) tctx.effect(() => tctx.tools.register(tool), 'dsh-tunnel: ' + tool.name)
-  })
+  // 初次偏好同步: ai 工具注册面随开关落位(0.1.7+ volatile ref 即持久值;
+  // legacy 待 settings 注入后以节值重同步)
+  applyPreferences()
 
-  // 设置: schema 注册(设置页独立配置节) + 超时 watch 回写(读值经 settings.get,
-  // scope 仅作触发钩); 服务缺失时绑定保持 config 初值, 行为与无设置版一致
-  const settingsRef = { current: null }
-  const applyTimeoutFromSettings = () => {
-    const next = Number(settingsRef.current?.get(SETTINGS_NS)?.connectTimeoutMs)
-    if (Number.isInteger(next) && next >= TIMEOUT_MIN_MS && next <= TIMEOUT_MAX_MS) connectTimeoutMs = next
-  }
+  // 设置: schema 注册(legacy 独立配置节) + 偏好 watch 回写; 服务缺失时绑定保持
+  // config 初值, 行为与无设置版一致
   ctx.inject(['settings'], (sctx) => {
     const svc = sctx.settings
     if (typeof svc?.register !== 'function') return
@@ -581,18 +622,41 @@ export function apply(ctx, config) {
     const scope = svc.register(SETTINGS_NS, SETTINGS_SCHEMA, { base: config })
     // 激活期即同步一次: 宿主 register 已合并持久化值, watch 仅在后续改动时触发;
     // 缺这一行, 重启后绑定回退 Config 初值而设置页仍显示持久化值
-    applyTimeoutFromSettings()
-    if (typeof scope?.watch === 'function') scope.watch(applyTimeoutFromSettings)
+    applyPreferences()
+    if (typeof scope?.watch === 'function') scope.watch(applyPreferences)
   })
+  // 0.1.7+ volatile 原地热更广播: 设置页原生表单或 REST 写后 ref 已换值, 事件驱动重读
+  ctx.on('loader/volatile-update', applyPreferences)
 
-  // GUI 偏好读写: 缺失降级读默认 false / 写返回 ok:false, 面板与形态仲裁照常工作
-  const readUi = () => ({ sidebarTab: Boolean(settingsRef.current?.get(SETTINGS_NS)?.sidebarTab) })
-  const updateUi = (body) => {
+  // GUI 偏好读写: PATCH 语义按字段校验布尔; 写路径双形态(照 dsh-maintain persistPatch,
+  // 特性检测延迟到使用点): legacy 设置节 update, 0.1.7+ volatile 字段落 profile 条目
+  // (loader 仅 volatile 变化时原地热更)。服务缺失降级 ok:false, 面板与形态仲裁照常工作
+  const UI_PREF_KEYS = ['aiTools', 'sidebarTab']
+  const uiBooleanError = (keys) => keys.join('/') + ' 须为布尔'
+  const readUi = () => ({ aiTools: aiToolsNow(), sidebarTab: readPref('sidebarTab') === true })
+  const persistPatch = async (patch) => {
     const svc = settingsRef.current
-    if (!svc) return { ok: false, error: SETTINGS_UNAVAILABLE }
-    if (typeof body?.sidebarTab !== 'boolean') throw new Error(UI_FIELD_REQUIRED)
-    svc.update(SETTINGS_NS, { sidebarTab: body.sidebarTab })
-    return { ok: true, ui: { sidebarTab: body.sidebarTab } }
+    if (svc) {
+      svc.update(SETTINGS_NS, patch)
+      return true
+    }
+    const editor = ctx.get('configEditor')
+    const entry = ctx.fiber?.entry
+    if (!editor || typeof editor.edit !== 'function' || !entry) return false
+    await editor.edit(entry, (current) => ({ ...current, ...patch }))
+    return true
+  }
+  const updateUi = async (body) => {
+    const patch = {}
+    for (const key of UI_PREF_KEYS) {
+      if (body?.[key] === undefined) continue
+      if (typeof body[key] !== 'boolean') throw new Error(uiBooleanError([key]))
+      patch[key] = body[key]
+    }
+    if (Object.keys(patch).length === 0) throw new Error(uiBooleanError(UI_PREF_KEYS))
+    if (!(await persistPatch(patch))) return { ok: false, error: SETTINGS_UNAVAILABLE }
+    applyPreferences()
+    return { ok: true, ui: readUi() }
   }
 
   const restApi = createApi({
@@ -619,6 +683,10 @@ export function apply(ctx, config) {
   }, 'dsh-tunnel api')
 
   return () => {
+    if (disposeTools) {
+      disposeTools()
+      disposeTools = null
+    }
     api.disposeAll()
     // 载体置空穿透: 包装器常驻(与 auto-trust-all 同款生命周期), 禁用后全体原路放行
     webServer[DISPATCH_PROP] = () => undefined

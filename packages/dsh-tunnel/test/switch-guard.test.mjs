@@ -64,3 +64,18 @@ test('类名前缀全量 tu-(插件样式全局注入, 跨包类名冲突即互�
   const foreign = classNames.filter((name) => !name.startsWith('tu-'))
   assert.deepEqual(foreign, [], `存在非 tu- 前缀类名: ${[...new Set(foreign)].join(', ')}`)
 })
+
+test('插件卡双代槽位并存注册(0.1.2-0.1.5 settings.plugin.item; 0.1.7-rc.1+ plugins.bundle.config)', () => {
+  // Given settings>插件 页可配置卡在 rc.1 被宿主移除, 插件管理页包详情配置槽为 rc.1 载体
+  // Then 两代注册面同在, 新代 key = 完整包名, 错误世代宿主惰性零成本
+  assert.match(source, /ctx\.slots\.inject\('settings\.plugin\.item'/)
+  assert.match(source, /key: PANEL_ID, label: PANEL_LABEL/)
+  assert.match(source, /ctx\.slots\.inject\('plugins\.bundle\.config'/)
+  assert.match(source, /name: 'plugins\.bundle\.config', key: '@mzzsfy\/dsh-tunnel'/)
+})
+
+test('设置卡提供 ai 使用开关: aiTools 读写面在场且经 ui-settings 提交', () => {
+  assert.match(source, /允许 ai 使用隧道工具/, '缺少 ai 使用开关行标签')
+  assert.match(source, /flip\('aiTools', aiOn\)/, 'ai 开关未接 flip 写通道')
+  assert.match(source, /outcome\.data\.ui\.aiTools/, '开关态未回读 aiTools')
+})

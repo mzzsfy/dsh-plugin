@@ -368,8 +368,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // 侧栏行与中央面板均由宿主渲染, 禁 DOM 刮取;仲裁仅由偏好驱动(设计 §3.2)
 
     const CARD_TITLE = '穿透隧道'
-    const CARD_DESC = '手动管理穿透隧道: 路径/子域名双入口, 列表与增删'
+    const CARD_DESC = '手动管理穿透隧道: 路径/子域名双入口, 列表与增删, ai 使用开关'
     const CARD_TOGGLE_LABEL = '看板移入 better-sidebar 侧边栏'
+    const CARD_AI_LABEL = '允许 ai 使用隧道工具'
+    const CARD_AI_HINT = '关闭后 ai 无法调用 tunnel_open/tunnel_list/tunnel_close, 看板与 REST 管理不受影响。'
     const CHEVRON_DOWN = () => h('svg', { viewBox: '0 0 14 14', width: 14, height: 14, fill: 'none',
       stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' },
       h('path', { d: 'm3.5 5.5 3.5 3.5 3.5-3.5' }))
@@ -415,25 +417,33 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // 设置>插件页卡片:官方 PluginCard 形制;better-sidebar 在场可切换, 否则仅展示禁用态
     function TunnelPluginCard({ ctx }) {
-      const [enabled, setEnabled] = useState(null)
-      const [busy, setBusy] = useState(false)
+      const [sidebarOn, setSidebarOn] = useState(null)
+      const [aiOn, setAiOn] = useState(null)
+      const [busyKey, setBusyKey] = useState('')
       const [open, setOpen] = useState(false)
       // 渲染时重探服务在场:better-sidebar 晚于设置页装载时, 重渲染自动纠正禁用态
       const sidebarReady = ctx.get('betterSidebar') !== undefined
       useEffect(() => {
         let alive = true
         request('GET', '/status').then((outcome) => {
-          if (alive) setEnabled(outcome.ok && outcome.data && outcome.data.ui ? outcome.data.ui.sidebarTab === true : false)
+          if (!alive || !outcome.ok || !outcome.data || !outcome.data.ui) return
+          setSidebarOn(outcome.data.ui.sidebarTab === true)
+          setAiOn(outcome.data.ui.aiTools !== false)
         })
         return () => { alive = false }
       }, [])
-      const toggle = async () => {
-        if (busy || enabled === null || !sidebarReady) return
-        setBusy(true)
-        const outcome = await request('POST', '/ui-settings', { sidebarTab: !enabled })
-        if (outcome.ok && outcome.data && outcome.data.ui) setEnabled(outcome.data.ui.sidebarTab === true)
-        else console.warn('[dsh-tunnel] 偏好写入失败: ' + ((outcome.data && outcome.data.error) || outcome.error || '未知'))
-        setBusy(false)
+      const flip = async (key, current) => {
+        if (busyKey !== '' || current === null) return
+        if (key === 'sidebarTab' && !sidebarReady) return
+        setBusyKey(key)
+        const outcome = await request('POST', '/ui-settings', { [key]: !current })
+        if (outcome.ok && outcome.data && outcome.data.ui) {
+          setSidebarOn(outcome.data.ui.sidebarTab === true)
+          setAiOn(outcome.data.ui.aiTools !== false)
+        } else {
+          console.warn('[dsh-tunnel] 偏好写入失败: ' + ((outcome.data && outcome.data.error) || outcome.error || '未知'))
+        }
+        setBusyKey('')
       }
       return h('li', { className: 'tu-pc' + (open ? ' tu-pc--open' : '') },
         h('button', { type: 'button', className: 'tu-pc__head', 'aria-expanded': open,
@@ -445,11 +455,21 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         open ? h('div', { className: 'tu-pc__body' },
           h('div', { className: 'tu-pc__row' },
             h('div', { className: 'tu-pc__rowLine' },
+              h('span', { className: 'tu-pc__rowLabel' }, CARD_AI_LABEL),
+              switchToggle({
+                checked: aiOn === true,
+                disabled: busyKey !== '' || aiOn === null,
+                onChange: () => flip('aiTools', aiOn),
+                ariaLabel: CARD_AI_LABEL,
+              })),
+            h('p', { className: 'tu-pc__hint' }, CARD_AI_HINT)),
+          h('div', { className: 'tu-pc__row' },
+            h('div', { className: 'tu-pc__rowLine' },
               h('span', { className: 'tu-pc__rowLabel' }, CARD_TOGGLE_LABEL),
               switchToggle({
-                checked: enabled === true,
-                disabled: busy || enabled === null || !sidebarReady,
-                onChange: toggle,
+                checked: sidebarOn === true,
+                disabled: busyKey !== '' || sidebarOn === null || !sidebarReady,
+                onChange: () => flip('sidebarTab', sidebarOn),
                 ariaLabel: CARD_TOGGLE_LABEL,
               })),
             h('p', { className: 'tu-pc__hint' },
@@ -500,13 +520,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           if (tabDisposer) tabDisposer()
           if (panelDisposer) panelDisposer()
         }, 'dsh-tunnel mount arbitration')
-        // 设置>插件页卡片:key 配对 ns, 宿主按 describe 命名空间分发;effect 随 fiber 回收
+        // 设置>插件页卡片:key 配对 ns, 宿主按 describe 命名空间分发;effect 随 fiber 回收。
+        // 0.1.7-rc.1+ 该槽被宿主移除, 卡片换形注册进插件管理页包详情配置槽(plugins.bundle.config,
+        // key = 包名);两代槽位并存注册:inject 是声明生命周期效应, 错误世代宿主永不声明该槽,
+        // 回调挂起不执行, 零成本
         ctx.effect(() => ctx.slots.inject('settings.plugin.item', function* () {
           yield ctx.slots.register(
             { name: 'settings.plugin.item', key: PANEL_ID, label: PANEL_LABEL },
             () => h(TunnelPluginCard, { ctx }),
           )
         }), 'dsh-tunnel settings card')
+        ctx.effect(() => ctx.slots.inject('plugins.bundle.config', function* () {
+          yield ctx.slots.register(
+            { name: 'plugins.bundle.config', key: '@mzzsfy/dsh-tunnel' },
+            () => h(TunnelPluginCard, { ctx }),
+          )
+        }), 'dsh-tunnel plugin manager card')
         ctx.inject(['betterSidebar'], (bsCtx) => {
           currentSidebar = bsCtx.betterSidebar
           applyPref()
