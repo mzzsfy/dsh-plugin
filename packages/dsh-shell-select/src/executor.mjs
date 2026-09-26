@@ -245,9 +245,160 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return buildArgv(entry, spec.command)
   }
 
-  /** 官方 run seam:已解析 spec 按默认客户端前台执行(dsh-pwsh-local run 同构)。 */
+  /** 官方 execute seam:已解析 spec 按默认客户端前台执行(dsh-pwsh-local run 同构)。 */
   async run(spec) {
     return this.runFor(this.entryFor(), spec)
+  }
+
+  /**
+   * 官方 ctx.shell 唯一执行契约(ShellExecutor 抽象方法,官方 tool-pwsh 与
+   * 进程内消费方共同依赖):解析 spec 后按默认客户端 spawn,返回 ShellExecution
+   * 句柄(done/readOutput/kill/observed/result)。前台与否是调用方 await 什么的
+   * 属性,不是 spawn 的属性。沙箱语义与 runFor 同源:danger 直跑,受限模式
+   * confine 包装,定案按 denial/runner-failure 规则附 sandbox 事实。
+   * @param {object} spec resolve() 产物(never 原始 request)
+   * @returns {Promise<object>} ShellExecution 句柄
+   */
+  async execute(spec) {
+    this.assertNotDenied(spec.command)
+    const entry = this.entryFor()
+    const policy = spec.sandboxPolicy
+    const { mode } = policy
+    if (mode === 'danger-full-access') {
+      return this.executionArgv(entry, spec)
+    }
+    const confined = this.ctx.sandbox.confine(this.argvFor(entry, spec), { ...policy, mode })
+    return this.executionArgv(entry, spec, confined.argv, {
+      mode,
+      enforcement: confined.enforcement,
+      denialSignatures: confined.denialSignatures,
+      runnerFailureRules: confined.runnerFailureRules,
+      runnerProgram: confined.argv[0],
+      workdir: spec.workdir,
+    })
+  }
+
+  /**
+   * 官方 executeArgv 同构(条目参数化):deadline 按 spec.onExpiry 武装
+   * ('kill' 到期杀,'none'/缺省只跟随调用方信号);done 永不 reject,provider
+   * spawn 失败定局 killed + stderr 注记,result() 携带同一 rejection;受限模式
+   * 定案事实经 processFacts/onProcessDone 单通道写 proc.sandbox(官方
+   * pwsh-sandbox 子类同构),unsandboxed 的 result() 无 sandbox 键。
+   */
+  executionArgv(entry, spec, forcedArgv, sandboxFacts) {
+    const argv = forcedArgv ?? this.argvFor(entry, spec)
+    const armDeadline = spec.onExpiry === 'kill'
+    const d = armDeadline ? deadline(spec.signal, spec.timeoutMs, 'SHELL_TIMEOUT') : undefined
+    const spawnSignal = d ? d.signal : spec.signal
+    const classifyState = () => {
+      if (d === undefined) return { timedOut: false, aborted: spec.signal?.aborted === true }
+      const timedOut = timeoutOf(d.signal, 'SHELL_TIMEOUT') !== undefined
+      return { timedOut, aborted: d.signal.aborted === true && !timedOut }
+    }
+    let running
+    let syncSpawnError
+    const prepareAborted = spawnSignal?.aborted === true
+    if (!prepareAborted) {
+      try {
+        running = this.ctx.subprocess.spawn(this.spawnSpec(entry, spec, argv, spec.stdoutMaxBytes, spawnSignal))
+      } catch (error) {
+        syncSpawnError = { error }
+      }
+    }
+    const emptyReader = { readFrom: () => ({ text: '', lossy: false, nextOffset: 0 }) }
+    const collected = running !== undefined ? ShellSelectExecutor.collected(running) : { stdout: emptyReader, stderr: emptyReader }
+    const spawnThrow = () => syncSpawnError.error
+    const spawned = prepareAborted
+      ? Promise.resolve({ exitCode: null, signal: null })
+      : running !== undefined ? running.done : Promise.reject(spawnThrow())
+    let providerFailure
+    const consumeProviderFailure = () => {
+      if (providerFailure === undefined || providerFailure.reported) return ''
+      providerFailure.reported = true
+      return providerFailure.note
+    }
+    let stdoutOffset = 0
+    let stderrOffset = 0
+    const readCollected = (offsets) => ({
+      out: collected.stdout.readFrom(offsets.stdout),
+      err: collected.stderr.readFrom(offsets.stderr),
+    })
+    const executor = this
+    let resultPromise
+    const proc = {
+      status: 'running',
+      exitCode: null,
+      signal: null,
+      observed: {
+        stdout: collected.stdout,
+        stderr: {
+          readFrom: (fromByte) => {
+            if (providerFailure === undefined) return collected.stderr.readFrom(fromByte)
+            const note = Buffer.from(providerFailure.note, 'utf8')
+            return { text: note.subarray(Math.min(fromByte, note.length)).toString('utf8'), nextOffset: note.length, lossy: false }
+          },
+        },
+      },
+      done: spawned.then((outcome) => {
+        if (proc.status === 'running') proc.status = spawnSignal?.aborted === true || outcome.signal !== null ? 'killed' : 'completed'
+        proc.exitCode = outcome.exitCode
+        proc.signal = outcome.signal
+        if (sandboxFacts !== undefined) executor.processFacts.set(proc, sandboxFacts)
+        executor.onProcessDone(proc, collected.stderr.readFrom(0).text, false)
+        d?.[Symbol.dispose]?.()
+      }, (error) => {
+        proc.status = 'killed'
+        let detail = 'unprintable provider failure'
+        try {
+          detail = String(error)
+        } catch {}
+        const isRunnerFailure = sandboxFacts !== undefined && isRunnerSpawnFailure(error, sandboxFacts.runnerProgram, sandboxFacts.workdir)
+        if (isRunnerFailure) {
+          providerFailure = { error: new executor.unavailableError(sandboxFacts.mode, String(error)), note: String(error), reported: false }
+        } else {
+          providerFailure = { error, note: `subprocess failed before reporting an outcome: ${detail}`, reported: false }
+        }
+        executor.onProcessDone(proc, providerFailure.note, true, error)
+        d?.[Symbol.dispose]?.()
+      }),
+      readOutput: () => {
+        const { out, err } = readCollected({ stdout: stdoutOffset, stderr: stderrOffset })
+        stdoutOffset = out.nextOffset
+        stderrOffset = err.nextOffset
+        const providerNote = consumeProviderFailure()
+        const failureSeparator = err.text.length > 0 && !err.text.endsWith('\n') ? '\n' : ''
+        const errText = err.text + (providerNote.length > 0 ? `${failureSeparator}${providerNote}` : '')
+        const separator = out.text.length > 0 && !out.text.endsWith('\n') ? '\n' : ''
+        return {
+          delta: out.text + (errText.length > 0 ? `${separator}[stderr]\n${errText}` : ''),
+          lossy: out.lossy || err.lossy,
+          ...out.spillPath !== undefined ? { stdoutSpillPath: out.spillPath } : {},
+          ...err.spillPath !== undefined ? { stderrSpillPath: err.spillPath } : {},
+        }
+      },
+      kill: () => {
+        if (proc.status !== 'running') return false
+        proc.status = 'killed'
+        running?.terminate()
+        return true
+      },
+      result: () => {
+        resultPromise ??= proc.done.then(() => {
+          if (providerFailure !== undefined) throw providerFailure.error
+          return {
+            exitCode: proc.exitCode,
+            signal: proc.signal,
+            ...classifyState(),
+            timeoutMs: spec.timeoutMs,
+            stdout: finalOutput(collected.stdout),
+            stderr: finalOutput(collected.stderr),
+            ...proc.sandbox !== undefined ? { sandbox: proc.sandbox } : {},
+          }
+        })
+        return resultPromise
+      },
+    }
+    return Promise.resolve(proc)
   }
 
   /** 官方 start seam:已解析 spec 按默认客户端后台启动(dsh-pwsh-local start 同构)。 */

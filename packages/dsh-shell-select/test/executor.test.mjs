@@ -1,4 +1,4 @@
-﻿// executor 集成(桩 ctx):BDD 场景见 docs/progress/shell-select-plan.md「executor」。
+// executor 集成(桩 ctx):BDD 场景见 docs/progress/shell-select-plan.md「executor」。
 // 桩 subprocess 用立即可收的假输出;桩 tools/systemPrompt/settings/webServer 记录注册。
 
 import { test } from 'node:test'
@@ -298,4 +298,80 @@ test('assertServiceableConfig:空 shells/default 不在列/重复 id 全拒', ()
     ],
     default: 'a',
   })), /duplicate/)
+})
+
+// --- execute 官方契约(ShellExecutor 抽象方法,官方 tool-pwsh 唯一执行入口)---
+
+test('execute 契约:danger 直跑,返回句柄形态,result() 前台投影无 sandbox 键', async () => {
+  const spawn = stubSpawn('exec-out', '', 0)
+  const { ctx } = stubCtx({ spawn })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const handle = await executor.execute(executor.resolve({ command: 'hi', workdir: process.cwd() }))
+  assert.ok(['running', 'completed'].includes(handle.status))
+  assert.equal(typeof handle.readOutput, 'function')
+  assert.equal(typeof handle.kill, 'function')
+  assert.equal(typeof handle.observed.stdout.readFrom, 'function')
+  const result = await handle.result()
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.timedOut, false)
+  assert.equal(result.aborted, false)
+  assert.equal(result.stdout.text, 'exec-out')
+  assert.equal(result.sandbox, undefined)
+  assert.equal(spawn.calls[0].argv[0], NODE_EXE)
+  assert.match(spawn.calls[0].argv.at(-1), /hi$/)
+})
+
+test('execute 契约:onExpiry none 不武装 deadline(后台注册形态)', async () => {
+  const spawn = stubSpawn('bg', '', 0)
+  const { ctx } = stubCtx({ spawn })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const handle = await executor.execute(executor.resolve({ command: 'x', workdir: process.cwd(), onExpiry: 'none' }))
+  const result = await handle.result()
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.timedOut, false)
+})
+
+test('execute 契约:provider spawn 失败,done 定局 killed 不 reject,result() 携带同一失败', async () => {
+  const spawn = { spawn: () => { throw new Error('spawn exploded') } }
+  const { ctx } = stubCtx({ spawn })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const handle = await executor.execute(executor.resolve({ command: 'x', workdir: process.cwd() }))
+  await handle.done
+  assert.equal(handle.status, 'killed')
+  const read = handle.readOutput()
+  assert.match(read.delta, /subprocess failed before reporting an outcome/)
+  await assert.rejects(() => handle.result(), /spawn exploded/)
+})
+
+test('execute 契约:受限模式经 confine,定案写 proc.sandbox 并入 result', async () => {
+  const spawn = stubSpawn('', 'file access denied under read-only', 1)
+  const { ctx } = stubCtx({ spawn, sandboxMode: 'read-only' })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const handle = await executor.execute(executor.resolve({ command: 'dir', workdir: process.cwd() }))
+  assert.equal(spawn.calls[0].argv[0], 'WRAPPED')
+  const result = await handle.result()
+  assert.equal(result.sandbox.mode, 'read-only')
+  assert.equal(result.sandbox.denied, true)
+  assert.equal(result.sandbox.enforcement, 'full')
+})
+
+test('execute 契约:deny 命中拒绝执行,不产生句柄', async () => {
+  const spawn = stubSpawn('', '', 0)
+  const { ctx } = stubCtx({ spawn })
+  const executor = new ShellSelectExecutor(ctx, { ...baseConfig(), deny: ['rm -rf'] })
+  await assert.rejects(
+    () => executor.execute(executor.resolve({ command: 'rm -rf /', workdir: process.cwd() })),
+    (error) => error.code === 'SHELL_COMMAND_BLOCKED',
+  )
+  assert.equal(spawn.calls.length, 0)
+})
+
+test('execute 契约:默认客户端解析,显式 onExpiry kill 正常完成', async () => {
+  const spawn = stubSpawn('ok', '', 0)
+  const { ctx } = stubCtx({ spawn })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const handle = await executor.execute(executor.resolve({ command: 'x', workdir: process.cwd(), onExpiry: 'kill', timeoutMs: 5000 }))
+  const result = await handle.result()
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.timeoutMs, 5000)
 })
