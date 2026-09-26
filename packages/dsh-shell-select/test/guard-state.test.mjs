@@ -101,6 +101,15 @@ test('主行禁用停稳时旗标不阻断判定(行确已停,残留旗标无意
   assert.equal(detectDeadState(rows, { applyState: () => 'pending' }), true)
 })
 
+test('运行时接管常态:主行崩(pending)且官方两行启用 → 非死态(官方自服务,guard 空闲)', () => {
+  const crashed = loader([
+    row({ id: MAIN }),
+    row({ id: OFF_TOOL }),
+    row({ id: OFF_EXEC }),
+  ])
+  assert.equal(detectDeadState(crashed, { applyState: () => 'pending' }), false)
+})
+
 test('officialRowConfig:读 settings.yaml shell 节,缺失返回空对象', async () => {
   const section = await officialRowConfig(async () => ({ shell: { pwshPath: 'C:\\x\\pwsh.exe' } }))
   assert.deepEqual(section, { pwshPath: 'C:\\x\\pwsh.exe' })

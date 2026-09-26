@@ -3,10 +3,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Config, defaultConfig, entryById, requireEntry, buildArgv, KINDS, RESOLVED_AUTO } from '../src/config.mjs'
+import { resolveConfig, defaultConfig, entryById, requireEntry, buildArgv, KINDS, RESOLVED_AUTO } from '../src/config.mjs'
 
 test('schema 应用出厂默认:三客户端 + 默认 pwsh', () => {
-  const applied = Config({})
+  const applied = resolveConfig({})
   assert.deepEqual(applied, defaultConfig())
   assert.equal(applied.default, 'pwsh')
   assert.deepEqual(applied.shells.map((entry) => entry.id), ['pwsh', 'git-bash', 'cmd'])
@@ -17,7 +17,34 @@ test('schema 应用出厂默认:三客户端 + 默认 pwsh', () => {
 })
 
 test('schema 拒绝未知 kind;default 跨字段一致性由 validate hook 与 requireEntry 兜底', () => {
-  assert.throws(() => Config({ shells: [{ id: 'x', name: 'X', kind: 'fish', path: '' }], default: 'x' }))
+  assert.throws(() => resolveConfig({ shells: [{ id: 'x', name: 'X', kind: 'fish', path: '' }], default: 'x' }))
+})
+
+test('落盘坏形态防御:volatile 字段被序列化成对象时降级默认,行构造不炸', () => {
+  // 事故:原生设置页/ref 序列化把 shells 落盘为 {},冷启动 Config 抛
+  // "expected array but got [object Object]" → 行死 → settings 无节 →
+  // 设置页 "no longer configurable" 死锁。类型不符的键必须降级默认。
+  const poisoned = {
+    shells: {},
+    deny: { 0: 'rm' },
+    default: 42,
+    timeoutMs: 'forever',
+    cwd: ['C:\\'],
+    good: 'ignored-by-schema',
+  }
+  const applied = resolveConfig(poisoned)
+  assert.deepEqual(applied, defaultConfig())
+  // 合法值原样保留,清洗不做过度剥离
+  const valid = resolveConfig({ shells: [{ id: 'pwsh', kind: 'pwsh' }], default: 'pwsh', deny: ['rm -rf'], cwd: 'C:\\tmp', timeoutMs: 5000 })
+  assert.equal(valid.shells.length, 1)
+  assert.equal(valid.default, 'pwsh')
+  assert.deepEqual(valid.deny, ['rm -rf'])
+  assert.equal(valid.cwd, 'C:\\tmp')
+  assert.equal(valid.timeoutMs, 5000)
+  // 非对象整体(null/数组/标量)= 无配置,出厂默认
+  for (const junk of [null, 'x', 42, ['shells']]) {
+    assert.deepEqual(resolveConfig(junk), defaultConfig())
+  }
 })
 
 test('pwsh argv:非交互形 + 编码前缀', () => {
@@ -50,7 +77,7 @@ test('login 显式配置与自定义 args 模板互斥时模板优先', () => {
 })
 
 test('schema 往返:login 布尔保留,旧配置缺省落 false', () => {
-  const applied = Config({ shells: [
+  const applied = resolveConfig({ shells: [
     { id: 'm', name: 'MSYS2', kind: 'bash', path: 'C:\\msys64\\usr\\bin\\bash.exe', login: true },
     { id: 'g', name: 'Git Bash', kind: 'bash', path: '' },
   ], default: 'm' })

@@ -1,10 +1,10 @@
-// executor 集成(桩 ctx):BDD 场景见 docs/progress/shell-select-plan.md「executor」。
+﻿// executor 集成(桩 ctx):BDD 场景见 docs/progress/shell-select-plan.md「executor」。
 // 桩 subprocess 用立即可收的假输出;桩 tools/systemPrompt/settings/webServer 记录注册。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import ShellSelectExecutor, { assertServiceableConfig } from '../src/executor.mjs'
-import { Config } from '../src/config.mjs'
+import ShellSelectExecutor from '../src/executor.mjs'
+import { resolveConfig, assertServiceableConfig } from '../src/config.mjs'
 
 // --- 桩具 ---
 
@@ -29,18 +29,14 @@ function stubSpawn(stdoutText = '', stderrText = '', exitCode = 0) {
 }
 
 function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spawn = stubSpawn() } = {}) {
-  const registered = { tools: [], sections: [], promptSections: [], routes: [] }
+  const registered = { tools: [], sections: [], promptSections: [], routes: [], policies: [] }
   const settingsImpl = {
-    installSection: (ctx, ns, schema, base, hooks) => {
-      registered.sections.push({ ns, schema, base, hooks })
-      settingsImpl._source = () => Config(base ?? {})
-    },
-    update: (ns, patch) => {
-      settingsImpl._patch = { ns, patch }
-      registered.sections[0].hooks.onChange()
+    configure: (presentation, fiber) => {
+      registered.policies.push({ presentation, fiber })
     },
   }
   const disposers = []
+  const childEffects = []
   const ctx = {
     // cordis Service 基类构造期要求 reflect.provide(登记服务实例),桩空转
     reflect: { provide: () => {} },
@@ -50,6 +46,18 @@ function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spaw
         return { register: (item) => registered.routes.push(item.path) }
       }
       return undefined
+    },
+    // 可选子级注入(设置页策略形态):子级立即执行,effect 收集待验
+    inject(services, fn) {
+      const child = {
+        settings: withSettings ? settingsImpl : undefined,
+        effect: (effectFn) => {
+          const disposer = effectFn()
+          childEffects.push(disposer)
+          return disposer
+        },
+      }
+      fn(child)
     },
     subprocess: spawn,
     sandbox: {
@@ -84,6 +92,7 @@ function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spaw
       disposers.push(disposer)
       return disposer
     },
+    _childEffects: childEffects,
   }
   return { ctx, registered, disposers }
 }
@@ -110,23 +119,31 @@ function build() {
 
 // --- 断言 ---
 
-test('构造:注册 shell 工具、systemPrompt 段、shell-select 设置节、三条路由(config 双方法单注册)', () => {
+test('构造:注册 shell 工具与 systemPrompt 段,路由不再由主行挂载', () => {
   const { registered } = build()
   assert.equal(registered.tools.length, 1)
   assert.equal(registered.tools[0].name, 'shell')
   assert.match(registered.tools[0].description, /git-bash/)
   assert.equal(registered.promptSections.length, 1)
-  assert.equal(registered.sections[0].ns, 'shell-select')
-  // exact 路由 path 为唯一键:config/probe/detect 三条,GET/POST 分流在 handler 内
-  const routePaths = registered.routes.filter((path) => path.startsWith('/api/shell-select/'))
-  assert.equal(routePaths.length, 3)
-  assert.equal(new Set(routePaths).size, 3)
+  // 数据通道迁至 web-routes 行:主行零路由
+  const routePaths = registered.routes.filter((path) => String(path).startsWith('/api/shell-select/'))
+  assert.equal(routePaths.length, 0)
 })
 
-test('settings 缺席:降级不 installSection,工具照常注册', () => {
+test('settings 在场:注册 auto:false 页面策略挂本行 fiber(自带设置页,官方同构)', () => {
+  const { ctx, registered } = stubCtx()
+  const fiber = { id: 'fiber-1' }
+  ctx.fiber = fiber
+  new ShellSelectExecutor(ctx, baseConfig())
+  assert.equal(registered.policies.length, 1)
+  assert.deepEqual(registered.policies[0].presentation, { auto: false })
+  assert.equal(registered.policies[0].fiber, fiber)
+})
+
+test('settings 缺席:策略静默跳过,工具照常注册(业务插件无 settings 也可运行)', () => {
   const { ctx, registered } = stubCtx({ withSettings: false })
   new ShellSelectExecutor(ctx, baseConfig())
-  assert.equal(registered.sections.length, 0)
+  assert.equal(registered.policies.length, 0)
   assert.equal(registered.tools.length, 1)
 })
 
@@ -223,102 +240,6 @@ test('runFor pwsh 条目:非交互形 + 编码前缀进 argv', async () => {
   assert.match(argv[5], /OutputEncoding/)
 })
 
-test('settings.update 触发 onChange:工具重注册且描述更新', () => {
-  const { executor, registered } = stubCtxAndBuild()
-  const before = registered.tools.length
-  assert.ok(before >= 1)
-  registered.sections[0].hooks.onChange()
-  assert.ok(registered.tools.length >= 1)
-})
-
-test('updateConfig:await settings.update 后读数即新值(setSource 接线)', async () => {
-  const { ctx, registered } = stubCtx()
-  // 桩 settings:installSection 后 setSource 接 scope;replace wholesale 后 setSource 到新值
-  const scope = { value: Config({}) }
-  registered.sectionsHook = null
-  ctx.settings.installSection = (ctx2, ns, schema, base, hooks) => {
-    registered.sections.push({ ns, schema, base, hooks })
-    scope.value = Config(base ?? {})
-    hooks.setSource(() => scope.value)
-    registered.sectionsHook = hooks
-  }
-  ctx.settings.replace = async (ns, section) => {
-    scope.value = Config(section)
-    registered.sectionsHook.onChange()
-  }
-  const executor = new ShellSelectExecutor(ctx, baseConfig())
-  assert.equal(executor.config.default, 'pwsh')
-  await executor.updateConfig({ default: 'git-bash' })
-  assert.equal(executor.config.default, 'git-bash')
-  assert.equal(executor.listShells().default, 'git-bash')
-})
-
-test('updateConfig:部分补丁归并当前节后 replace(单改 default 不丢 shells)', async () => {
-  const { ctx, registered } = stubCtx()
-  const written = []
-  ctx.settings.replace = async (ns, section) => {
-    written.push(section)
-  }
-  const executor = new ShellSelectExecutor(ctx, baseConfig())
-  await executor.updateConfig({ default: 'git-bash' })
-  assert.equal(written[0].shells.length, 3)
-  assert.equal(written[0].default, 'git-bash')
-})
-
-test('api POST config:await updateConfig,resolved 即新清单(async 修复)', async () => {
-  const { ctx, registered } = stubCtx()
-  ctx.get = (service) => {
-    if (service === 'webServer') {
-      const routes = []
-      ctx.__routes = routes
-      return { register: (item) => routes.push(item) }
-    }
-    return undefined
-  }
-  ctx.settings.replace = async (ns, section) => {
-    registered.sections[0].hooks.setSource(() => section)
-    registered.sections[0].hooks.onChange()
-  }
-  const executor = new ShellSelectExecutor(ctx, baseConfig())
-  const handler = ctx.__routes.find((r) => r.path === '/api/shell-select/config').handler
-  let captured = null
-  const fakeRes = {
-    writeHead: () => {},
-    end: (body) => {
-      captured = JSON.parse(body)
-    },
-  }
-  const body = JSON.stringify({ default: 'git-bash', shells: executor.config.shells })
-  const fakeReq = {
-    method: 'POST',
-    headers: { origin: 'http://127.0.0.1:9191', host: '127.0.0.1:9191' },
-    on(event, cb) {
-      if (event === 'data') setImmediate(() => cb(Buffer.from(body)))
-      if (event === 'end') setImmediate(cb)
-    },
-    destroy: () => {},
-  }
-  await handler(fakeReq, fakeRes)
-  assert.equal(captured.ok, true)
-  assert.equal(captured.resolved.default, 'git-bash')
-  assert.equal(captured.resolved.shells.length, 3)
-})
-
-test('updateConfig:入参 path 反斜杠归一(防 yaml 无引号落盘字面翻倍)', async () => {
-  // 归一是 Windows 宿主行为(linux 无反斜杠翻倍怪癖,源码层按平台守卫)
-  if (process.platform !== 'win32') return
-  const { ctx, registered } = stubCtx()
-  const written = []
-  ctx.settings.replace = async (ns, section) => {
-    written.push(section)
-  }
-  const executor = new ShellSelectExecutor(ctx, baseConfig())
-  await executor.updateConfig({
-    shells: [{ id: 'pwsh', name: 'PowerShell', kind: 'pwsh', path: 'C:\\\\WINDOWS\\\\System32\\\\powershell.exe' }],
-  })
-  assert.equal(written[0].shells[0].path, 'C:\\WINDOWS\\System32\\powershell.exe')
-})
-
 test('entryFor:双反斜杠污染路径被归一后仍可用', () => {
   const { executor } = stubCtxAndBuild()
   const ctx2 = stubCtx()
@@ -368,9 +289,9 @@ test('startFor danger:返回进程句柄,readOutput 增量与 done 定局', asyn
 })
 
 test('assertServiceableConfig:空 shells/default 不在列/重复 id 全拒', () => {
-  assert.throws(() => assertServiceableConfig(Config({ shells: [], default: 'x' })), /shells/)
-  assert.throws(() => assertServiceableConfig(Config({ shells: [{ id: 'a', name: 'A', kind: 'bash', path: '' }], default: 'b' })), /default/)
-  assert.throws(() => assertServiceableConfig(Config({
+  assert.throws(() => assertServiceableConfig(resolveConfig({ shells: [], default: 'x' })), /shells/)
+  assert.throws(() => assertServiceableConfig(resolveConfig({ shells: [{ id: 'a', name: 'A', kind: 'bash', path: '' }], default: 'b' })), /default/)
+  assert.throws(() => assertServiceableConfig(resolveConfig({
     shells: [
       { id: 'a', name: 'A', kind: 'bash', path: '' },
       { id: 'a', name: 'A2', kind: 'cmd', path: '' },

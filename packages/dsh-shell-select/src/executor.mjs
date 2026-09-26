@@ -1,34 +1,35 @@
 // shell-select 执行器:ctx.shell 提供者(官方 SandboxPwshExecutor 同构,进程机制
-// 继承 dsh-pwsh-local 形态),并把模型可见 shell 工具、systemPrompt 段、
-// shell-select 设置节与浏览器半区路由一并挂在本行 fiber 上。
+// 继承 dsh-pwsh-local 形态),并把模型可见 shell 工具与 systemPrompt 段挂在本行
+// fiber 上;设置页数据通道在 web-routes 行(声明式 webServer 门控),配置事实源
+// = 本行 Config(settings 面以行条目为存储,变更经 cordis 行重载活生效)。
 //
 // 与官方的两处结构差异(其余逐项同构):
 // 1. argv 由「本次调用选中的 shell 条目」决定(pwsh/bash/cmd/wsl 四形 + args 模板),
 //    confine 包的正是该条目 argv;
-// 2. 执行器预算与客户端清单同节('shell-select'),官方拆 'shell' 节 + 行内 Config。
+// 2. 执行器预算与客户端清单同行 Config,官方拆 'shell' 节 + 行内 Config。
 //
 // 兼容性:ShellExecutor 基类为官方文档级扩展缝(dsh-shell README 明示子类化);
 // dsh-llm 经 tool.mjs 动态 import + 特性检测(HarnessError 缺失即降级),
 // dsh-tools/dsh-sandbox 静态 import(官方组合必装,无降级面)。
 
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
-import { MAX_TIMER_DELAY_MS, clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { Config, KINDS, buildArgv, requireEntry } from './config.mjs'
+import { clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { Config, KINDS, buildArgv, requireEntry, resolveConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
 import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
 import { registerShellTool } from './tool.mjs'
-import { mountRoutes } from './api.mjs'
-import { beginShellSelectApply, endShellSelectApplyActive } from './apply-state.mjs'
 
 export const name = 'shell-select'
 
-// 单一事实源:loader 消费模块级 inject 导出,Service 类静态与它共用同一常量
-export const SHELL_SELECT_INJECT = ['subprocess', 'sandbox', 'sandboxPolicy', 'settings', 'tools', 'systemPrompt', 'shellEnv']
+// 单一事实源:loader 消费模块级 inject 导出,Service 类静态与它共用同一常量。
+// settings 不在列:配置事实源 = 行 Config(0.1.7 settings 面语义),页面策略经
+// apply 内可选子级注入注册,业务插件无 settings 服务也可运行(官方 README 同构)。
+export const SHELL_SELECT_INJECT = ['subprocess', 'sandbox', 'sandboxPolicy', 'tools', 'systemPrompt', 'shellEnv']
 
 export const inject = SHELL_SELECT_INJECT
 
-export { Config }
+export { Config } from './config.mjs'
 
 // 面向模型的终端环境覆盖(官方 dsh-pwsh-local 同构):禁色禁 pager
 export const ENV_OVERRIDES = {
@@ -82,41 +83,6 @@ function assertPositiveFinite(name, value) {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`shell-select: ${name} must be a positive finite number`)
 }
 
-// yaml 无引号标量会把 `\` 字面落盘,任何一层再转义都让路径翻倍(C:\\ 实测):
-// 入口统一归一,保证进 schema 的 path 就是干净值。
-// 仅 Windows 宿主生效:posix 路径以 / 分隔,归一会把合法路径毁成反斜杠字面(CI linux 实测)
-function normalizeWin32Path(path) {
-  if (process.platform !== 'win32') return path
-  if (typeof path !== 'string' || path.length === 0) return path
-  return path.replace(/\\{2,}/g, '\\').replace(/\//g, '\\')
-}
-
-// 更新负载深归一:shells[].path 与任意层字符串值只处理 path 键,避免误伤 args 模板
-function normalizeConfigPaths(patch) {
-  if (typeof patch !== 'object' || patch === null || !Array.isArray(patch.shells)) return patch
-  return {
-    ...patch,
-    shells: patch.shells.map((entry) => (typeof entry?.path === 'string' ? { ...entry, path: normalizeWin32Path(entry.path) } : entry)),
-  }
-}
-
-/** 拒绝无法运行的已解析配置节(schema 之外的正数/时限/清单约束,官方 assertServiceable 同构)。 */
-export function assertServiceableConfig(config) {
-  assertPositiveFinite('timeoutMs', config.timeoutMs)
-  assertPositiveFinite('maxTimeoutMs', config.maxTimeoutMs)
-  assertPositiveFinite('maxOutputBytes', config.maxOutputBytes)
-  assertPositiveFinite('maxSpillBytes', config.maxSpillBytes)
-  assertPositiveFinite('graceMs', config.graceMs)
-  if (config.graceMs > MAX_TIMER_DELAY_MS) throw new Error(`shell-select: graceMs must be no greater than ${MAX_TIMER_DELAY_MS}`)
-  if (!Array.isArray(config.shells) || config.shells.length === 0) throw new Error('shell-select: shells must not be empty')
-  const ids = new Set()
-  for (const entry of config.shells) {
-    if (ids.has(entry.id)) throw new Error(`shell-select: duplicate shell id "${entry.id}"`)
-    ids.add(entry.id)
-  }
-  if (!ids.has(config.default)) throw new Error(`shell-select: default "${config.default}" is not a configured shell id`)
-}
-
 /** 收集模式的 reader 投影成 CollectedOutput(官方同构)。 */
 function finalOutput(reader) {
   const read = reader.readFrom(0)
@@ -155,9 +121,9 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
   // (getTraceable/createShadowMethod)会把经 ctx.shell 访问的方法 this 重定向到
   // 阴影对象,#私有字段在阴影 receiver 下触发 V8 品牌检查错误(官方工具
   // tool-pwsh 正是经 ctx.shell 调用,实测复现)。
-  /** 当前权威配置来源:设置节(接线后)或行内配置。 */
+  /** 当前权威配置:行 Config(0.1.7 settings 面以行为存储,变更即行重载重建本实例)。 */
   source
-  /** 工具重注册句柄(onChange 先卸后挂;仅构造期闭包触达,this 恒为裸实例)。 */
+  /** 工具重注册句柄(仅构造期闭包触达,this 恒为裸实例)。 */
   #toolRegistration = null
   /** 托管进程的每进程 confinement 事实(官方同构)。 */
   processFacts = new Map()
@@ -166,36 +132,20 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
 
   constructor(ctx, config) {
     super(ctx)
-    beginShellSelectApply()
     void loadSandboxUnavailable(ctx).then((resolved) => {
       this.unavailableError = resolved
     })
-    // settings 为硬依赖(static inject 门控);面异常按降级处理,能力不损
-    const settingsOk = typeof ctx.settings?.installSection === 'function'
-    if (!settingsOk) ctx.logger?.warn?.('shell-select: 宿主 settings 服务缺 installSection,配置退化为行内 Config,无热更新')
-
     const entry = config ?? {}
-    assertServiceableConfig(Config(entry))
-    this.source = () => Config(entry)
-    if (settingsOk) {
-      ctx.settings.installSection(ctx, 'shell-select', Config, entry, {
-        validate: assertServiceableConfig,
-        setSource: (current) => {
-          this.source = current
-        },
-        onChange: () => this.#onConfigChange(),
-      })
-    }
+    assertServiceableConfig(resolveConfig(entry))
+    this.source = () => resolveConfig(entry)
+    // 自带设置页(客户端半区自定义卡):抑制宿主按 schema 自动生成的原生页
+    // (官方 README 同构:可选子级注入声明策略归属 fiber,服务迟加载也采纳)
+    ctx.inject?.(['settings'], (child) => {
+      if (typeof child.settings?.configure !== 'function') return
+      child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+    })
     this.#registerTool()
     this.#mountPromptSection()
-    mountRoutes(ctx, {
-      listShells: () => this.listShells(),
-      readConfig: () => this.source(),
-      updateConfig: (patch) => this.updateConfig(patch),
-      detect: (kinds) => this.detect(kinds),
-      probe: (candidatePath) => candidateExists(candidatePath),
-    })
-    endShellSelectApplyActive()
   }
 
   get config() {
@@ -224,7 +174,6 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
         const resolved = normalizeWin32Path(resolveEntryPath(entry, candidateExists))
         return {
           id: entry.id,
-          name: entry.name,
           kind: entry.kind,
           args: entry.args,
           path: resolved,
@@ -256,33 +205,6 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       throw new Error(`shell client "${entry.id}" (${entry.kind}) has no executable on this machine: set an explicit path in the shell-select settings section or reinstall the client`)
     }
     return { id: entry.id, kind: entry.kind, path: resolved, args: entry.args, login: entry.login === true, distro: entry.distro ?? '', env: entry.env ?? {} }
-  }
-
-  /**
-   * 客户端半区配置更新入口:wholesale replace(settings merge 对数组是整值
-   * 覆盖,部分清单会静默丢条目;设置页语义是保存完整清单);等写队列落定再回读。
-   */
-  async updateConfig(patch) {
-    const current = this.config
-    const section = normalizeConfigPaths({
-      shells: patch.shells ?? current.shells,
-      default: patch.default ?? current.default,
-      deny: Array.isArray(patch.deny) ? patch.deny : current.deny,
-    })
-    assertServiceableConfig(Config(section))
-    await this.ctx.settings.replace('shell-select', section)
-    return this.listShells()
-  }
-
-  #onConfigChange() {
-    try {
-      assertServiceableConfig(this.config)
-    } catch (error) {
-      // validate hook 已在写入路径拦截;此处兜底防御,保旧配置
-      this.ctx.logger?.warn?.(`shell-select: 新配置不可用,保留先前配置: ${error?.message ?? error}`)
-      return
-    }
-    this.#registerTool()
   }
 
   /** 注册/重注册 shell 工具(描述随客户端清单变化)。 */

@@ -34,6 +34,16 @@ function parseEnvText() {
   return extractLogic('parseEnvText')
 }
 
+test('运行时长格式:秒→m:ss,一小时以上→h:mm:ss,负值钳 0', () => {
+  const formatDuration = extractLogic('formatDuration')
+  assert.equal(formatDuration(0), '0:00')
+  assert.equal(formatDuration(42_000), '0:42')
+  assert.equal(formatDuration(61_000), '1:01')
+  assert.equal(formatDuration(3600_000), '1:00:00')
+  assert.equal(formatDuration(3661_000), '1:01:01')
+  assert.equal(formatDuration(-5), '0:00')
+})
+
 function invalidEnvLines() {
   return extractLogic('invalidEnvLines')
 }
@@ -57,10 +67,11 @@ function settledBlock(argsRaw, text, options = {}) {
 const ARGS = JSON.stringify({ command: 'git status', description: 'Show working tree status', workdir: 'sub' })
 const SESSION_CWD = 'C:\\repo'
 
-test('S11 running 且无 description(persistent 形)回退 generic', () => {
+test('S11 running 且无 description(persistent 形):全量卡不回退(阻塞时展开必有命令)', () => {
   const model = cardModel()(runningBlock(JSON.stringify({ command: 'interactive session' })), SESSION_CWD)
-  assert.equal(model.kind, 'generic')
-  assert.equal(model.running, true)
+  assert.equal(model.kind, 'terminal')
+  assert.equal(model.status, 'running')
+  assert.equal(model.description, undefined)
 })
 
 test('S11b settled 无 description(persistent 结束)回退 generic', () => {

@@ -8,7 +8,8 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect } = React
 
-    // 官方 primitives 图标/状态点(运行时模块表解析;dsh.client.inject 声明保证在场)
+    // 官方 primitives 图标/状态点(运行时模块表解析;dsh.client.inject 声明保证在场)。
+    // 0.1.7 起图标名带字重后缀(Regular/Medium),尺寸是 prop 不在名字里
     const primitives = (() => {
       try {
         return require('@deepseek-ai/dsh-client-ui-primitives')
@@ -16,31 +17,34 @@ window.__ModuleLoader__.load({
         return null
       }
     })()
-    const createElementOf = (name, fallback) => {
-      const Component = primitives !== null ? primitives[name] : undefined
-      return typeof Component === 'function' || typeof Component === 'object'
-        ? (props) => React.createElement(Component, props ?? null)
-        : fallback
+    const createElementOf = (names, fallback) => {
+      for (const name of names) {
+        const Component = primitives !== null ? primitives[name] : undefined
+        if (typeof Component === 'function' || typeof Component === 'object') {
+          return (props) => React.createElement(Component, props ?? null)
+        }
+      }
+      return fallback
     }
     const DOT_SVG = { done: '#2e9e5b', error: '#d4553f', warning: '#d9a13b', ongoing: '#7a7f8a' }
     // 降级自绘:模块表缺 primitives 时保持可见性(形态近似官方 StateDot/图标)
     const TOOLVIEW_ICONS = {
-      StateDot: createElementOf('StateDot', ({ state }) => h('span', {
+      StateDot: createElementOf(['StateDot'], ({ state }) => h('span', {
         style: {
           width: 8, height: 8, borderRadius: '50%', background: DOT_SVG[state] ?? DOT_SVG.ongoing,
           display: 'inline-block', flex: 'none',
         },
       })),
-      IconApi: createElementOf('IconApiOutline14', () => h('span', {
+      IconApi: createElementOf(['IconApiOutlineRegular', 'IconApiOutlineMedium', 'IconApiOutline14'], () => h('span', {
         style: {
           width: 12, height: 12, borderRadius: 3, border: '1.5px solid currentColor',
           opacity: .7, display: 'inline-block', flex: 'none',
         },
       })),
-      IconChevron: createElementOf('IconChevronDownOutline14', ({ size }) => h('span', {
+      IconChevron: createElementOf(['IconChevronDownOutlineRegular', 'IconChevronDownOutlineMedium', 'IconChevronDownOutline14'], ({ size }) => h('span', {
         style: { fontSize: (size ?? 14) - 3, lineHeight: 1, userSelect: 'none' },
       }, '▾')),
-      IconInspect: createElementOf('IconInspectOutline12', () => h('span', {
+      IconInspect: createElementOf(['IconInspectOutlineRegular', 'IconInspectOutlineMedium', 'IconInspectOutline12'], () => h('span', {
         style: { fontSize: 10, lineHeight: 1, opacity: .8 },
       }, 'ⓘ')),
     }
@@ -66,7 +70,7 @@ window.__ModuleLoader__.load({
     }
 
     // 工具卡客户端名册缓存:GET /config 单飞拉取,shell 徽章按 id→用户命名解析。
-    // 失败置 null(徽章不渲染),不重试——下次页面加载自然重取
+    // 失败复位单飞(宿主启动窗口路由未就绪的 404 在下次卡渲染自然重试)
     let clientCatalog = null
     let clientCatalogPromise = null
     // LOGIC-BEGIN ensureClientCatalog
@@ -74,9 +78,11 @@ window.__ModuleLoader__.load({
       if (clientCatalogPromise === null) {
         clientCatalogPromise = api(API.config).then((section) => {
           const byId = {}
-          for (const entry of section.resolved?.shells ?? []) byId[entry.id] = entry.name
+          for (const entry of section.resolved?.shells ?? []) byId[entry.id] = entry.id
           clientCatalog = { default: section.resolved?.default, byId }
-        }).catch(() => { })
+        }).catch(() => {
+          clientCatalogPromise = null
+        })
       }
       return clientCatalogPromise
     }
@@ -141,6 +147,7 @@ window.__ModuleLoader__.load({
       '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; }',
       '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; }',
       '.sls-tv__pill--bg { color:var(--dsw-alias-label-tertiary, inherit); }',
+      '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; font-variant-numeric:tabular-nums; }',
       '.sls-tv__sp { flex:1; }',
       '.sls-tv__copy { display:flex; align-items:center; gap:2px; flex:none; }',
       '.sls-tv__copyBtn { padding:2px 8px; border:1px solid rgba(128,128,128,.35); border-radius:6px; background:transparent; color:inherit; cursor:pointer; font-size:12px; }',
@@ -186,7 +193,6 @@ window.__ModuleLoader__.load({
       return {
         shells: entries.map((entry) => ({
           id: entry.id.trim(),
-          name: entry.name.trim(),
           kind: entry.kind,
           path: entry.path.trim(),
           args: entry.argsText.split(/\s+/).filter((item) => item.length > 0),
@@ -243,7 +249,6 @@ window.__ModuleLoader__.load({
     function toEntries(section) {
       return section.shells.map((entry) => ({
         id: entry.id,
-        name: entry.name,
         kind: entry.kind,
         path: entry.path,
         argsText: (entry.args ?? []).join(' '),
@@ -290,7 +295,7 @@ window.__ModuleLoader__.load({
 
       const addEntry = () => {
         setDirty(true)
-        setEntries([...entries, { id: '', name: '', kind: 'bash', path: '', argsText: '', login: false, distro: '', envText: '', available: undefined, resolved: undefined }])
+        setEntries([...entries, { id: '', kind: 'bash', path: '', argsText: '', login: false, distro: '', envText: '', available: undefined, resolved: undefined }])
       }
 
       const removeEntry = (index) => {
@@ -422,15 +427,8 @@ window.__ModuleLoader__.load({
             h('input', {
               className: 'sls-input',
               value: entry.id,
-              placeholder: 'pwsh / git-bash / …(模型看到的 shell 参数值)',
+              placeholder: 'pwsh / git-bash / …(模型看到的 shell 参数值,亦作显示名)',
               onChange: (event) => patchEntry(index, { id: event.target.value }),
-            }),
-            h('span', { className: 'sls-grid__label' }, '名称'),
-            h('input', {
-              className: 'sls-input',
-              value: entry.name,
-              placeholder: '显示名,如 Git Bash',
-              onChange: (event) => patchEntry(index, { name: event.target.value }),
             }),
             h('span', { className: 'sls-grid__label' }, '形态'),
             h('div', { className: 'sls-row' },
@@ -627,9 +625,9 @@ window.__ModuleLoader__.load({
       if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null }
 
       if (!settled) {
-        // running persistent(进行中无描述):回退行但状态点用进行中灰,非 warning 黄
-        if (description === undefined) return { kind: 'generic', command, summary: undefined, output: null, running: true }
-        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined }
+        const startedAt = typeof block.time === 'number' ? block.time : undefined
+        // 运行中一律全量卡:阻塞时展开即可见命令与时长,不落无命令的 generic 回退行
+        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined, startedAt }
       }
 
       const contentText = (block.content ?? []).map((part) => (part.type === 'text' ? part.text : '')).filter((text) => text !== '').join('\n')
@@ -656,6 +654,30 @@ window.__ModuleLoader__.load({
       return icons.IconApi({ size: 14 })
     }
 
+    // 时长格式:秒 → m:ss;超一小时 → h:mm:ss
+    // LOGIC-BEGIN formatDuration
+    function formatDuration(elapsedMs) {
+      const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+      const seconds = totalSeconds % 60
+      const minutes = Math.floor(totalSeconds / 60) % 60
+      const hours = Math.floor(totalSeconds / 3600)
+      const two = (value) => (value < 10 ? '0' + value : String(value))
+      return hours > 0 ? `${hours}:${two(minutes)}:${two(seconds)}` : `${minutes}:${two(seconds)}`
+    }
+    // LOGIC-END formatDuration
+
+    // 运行中实时时长:每秒 tick;秒级粒度对"阻塞了多久"足够
+    function RunningDuration({ startedAt, en }) {
+      const [, setTick] = useState(0)
+      useEffect(() => {
+        const timer = setInterval(() => setTick((value) => value + 1), 1000)
+        return () => clearInterval(timer)
+      }, [])
+      const elapsed = startedAt !== undefined ? Date.now() - startedAt : undefined
+      const text = elapsed !== undefined && elapsed >= 0 ? formatDuration(elapsed) : en ? 'running' : '运行中'
+      return h('span', { className: 'sls-tv__duration', title: en ? 'Elapsed' : '已运行' }, text)
+    }
+
     function statusTextOf(status, en) {
       switch (status) {
         case 'running': return en ? 'Running' : '运行中'
@@ -668,9 +690,9 @@ window.__ModuleLoader__.load({
     function headMetaOf(model, en) {
       switch (model.status) {
         case 'running': return { dot: 'ongoing', label: en ? 'Running' : '运行中', pill: undefined }
-        // ack 块静态不反映 job 生命周期,状态点用中性工具图标,文案不带"运行中"
+        // ack 块静态不反映 job 生命周期,状态点缺省(后台任务由 bg pill 标识)
         case 'background': return {
-          dot: 'none',
+          dot: undefined,
           label: en ? 'Background' : '后台',
           pill: model.jobId !== undefined ? (en ? `bg ${model.jobId}` : `后台 ${model.jobId}`) : undefined,
           pillTone: 'bg',
@@ -749,16 +771,20 @@ window.__ModuleLoader__.load({
       const meta = headMetaOf(model, en)
       const copyCommandLabel = en ? 'Copy command' : '复制命令'
       const copyOutputLabel = en ? 'Copy output' : '复制输出'
+      // 运行中头部 pill = 实时时长(组件,hook 内每秒自刷新)
+      const pill = model.status === 'running'
+        ? h(RunningDuration, { startedAt: model.startedAt, en })
+        : meta.pill
       return h('div', { className: 'sls-tv__body', 'data-status': model.status },
         h('div', { className: 'sls-tv__head' },
           h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
-            TOOLVIEW_ICONS.StateDot({ state: meta.dot }),
+            meta.dot !== undefined ? TOOLVIEW_ICONS.StateDot({ state: meta.dot }) : null,
             h('span', { className: 'sls-tv__sr' }, meta.label),
           ),
           model.cwdDir !== undefined ? h('span', { className: 'sls-tv__cwd', title: 'pwd: ' + (model.cwdFull ?? model.cwdDir) }, model.cwdDir) : null,
           model.shellName !== undefined ? h('span', { className: 'sls-tv__badge', title: en ? 'Shell client' : 'Shell 客户端' }, model.shellName) : null,
           h('span', { className: 'sls-tv__sp' }),
-          meta.pill !== undefined ? h('span', { className: 'sls-tv__pill' + (meta.pillTone === 'bg' ? ' sls-tv__pill--bg' : '') }, meta.pill) : null,
+          pill !== undefined ? h('span', { className: 'sls-tv__pill' + (meta.pillTone === 'bg' ? ' sls-tv__pill--bg' : '') }, pill) : null,
           h('span', { className: 'sls-tv__copy' },
             h(CopyButton, {
               label: copyCommandLabel,
@@ -783,6 +809,10 @@ window.__ModuleLoader__.load({
     function ShellToolRow(props) {
       const { block, cwd, inspect } = props
       const en = detectEnglish()
+      const model = shellCardModel(block, cwd)
+      // hooks 恒序:必须在任何提前 return 之前完整执行(真实 React 的 hooks
+      // 链表按调用序对位,generic 行与 terminal 行的提前 return 分叉会让
+      // 后续 hook 错位,行组件树被整棵卸载——卡片全消失事故根因)
       const [open, setOpen] = useState(false)
       const [, setCatalogReady] = useState(false)
       useEffect(() => {
@@ -818,6 +848,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'sls-tv__title' }, 'Shell'),
           h('span', { className: 'sls-tv__sep', 'aria-hidden': true }),
           h('span', { className: 'sls-tv__sum' + (failed ? ' sls-tv__sum--err' : '') }, summary),
+          model.status === 'running' ? h(RunningDuration, { startedAt: model.startedAt, en }) : null,
           model.status === 'background' && model.jobId !== undefined
             ? h('span', { className: 'sls-tv__badge', title: en ? 'Background job' : '后台任务' }, en ? `bg ${model.jobId}` : `后台 ${model.jobId}`)
             : null,

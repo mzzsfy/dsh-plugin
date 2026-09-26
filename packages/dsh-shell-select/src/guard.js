@@ -1,13 +1,15 @@
 // shell-select guard 哨兵行:死态自愈,守服务不抢权(逐项同构 dsh-llm-pi-gateway
 // guard,差异仅代挂对象为官方 tool-pwsh + pwsh-sandbox 两行,且无 compat 键处理)。
 // 死态 = 主行功能性停摆(市场开关即时禁用 / apply 旗标 inactive)且官方两行仍被
-// bundle patch 禁用停稳——无任何 shell 执行器与工具。代挂走 ctx.plugin,随 guard
-// fiber 卸载;主行或官方行任一复活先卸代挂。guard 行 id 含 "/",市场行写入对其
-// 拒绝,窗口内始终存活。
+// 主行 runtime-disable 禁用停稳(内存残留)——无任何 shell 执行器与工具。代挂走
+// ctx.plugin,随 guard fiber 卸载;主行或官方行任一复活先卸代挂。guard 行 id 含
+// "/",市场行写入对其拒绝,窗口内始终存活。运行时接管后官方行默认启用,主行
+// 包级损伤形态下官方自服务,guard 空闲;死窗仅剩「接管中主行被禁」。
 
 import { MAIN_ROW_ID, OFFICIAL_ROW_IDS, detectDeadState, rowState } from './guard-state.mjs'
 import { officialRowConfig, readSettingsDocument, resolveFromHostTree } from './guard-config.mjs'
-import { shellSelectApplyState } from './apply-state.mjs'
+import { officialRowState } from './takeover.mjs'
+import { shellSelectApplyState, shellSelectTakeoverTrace } from './apply-state.mjs'
 
 // 官方包 npm 名(与行 id 独立:行 id 是 dsh-base 组合行,包名才是模块解析键)
 const OFFICIAL_PACKAGES = {
@@ -211,15 +213,20 @@ export async function installGuard(ctx, {
     }
   }
 
-  // 可观测面:死态判定中间量与代挂状态只读暴露(排障与巡检共用)
+  // 可观测面:死态判定中间量、代挂状态与主行接管序列只读暴露(排障与巡检共用)
   const webServer = ctx.get?.('webServer')
   if (webServer !== undefined && typeof webServer.register === 'function') {
     const status = () => ({
       dead: detectDeadState(ctx.loader, { applyState: shellSelectApplyState }),
       applyState: shellSelectApplyState(),
+      takeover: shellSelectTakeoverTrace(),
       mounted: [...mounted.keys()],
       mounting: mounting !== null,
       rows: [MAIN_ROW_ID, ...OFFICIAL_ROW_IDS].map((id) => ({ id, ...rowState(ctx.loader, id) })),
+      officialRaw: Object.fromEntries(OFFICIAL_ROW_IDS.map((id) => {
+        const s = officialRowState(ctx.loader, id)
+        return [id, { rawType: typeof s.rawDisabled, disabled: s.disabled, running: s.running }]
+      })),
     })
     ctx.effect(() => webServer.register({
       kind: 'exact',

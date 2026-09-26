@@ -1,12 +1,12 @@
-// 条目级 env 与 wsl distro:schema 默认、argv 形、entryFor 透传。BDD 场景见 docs/feat-shell-select-optim/plan.md S5-S10。
+﻿// 条目级 env 与 wsl distro:schema 默认、argv 形、entryFor 透传。BDD 场景见 docs/feat-shell-select-optim/plan.md S5-S10。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import ShellSelectExecutor from '../src/executor.mjs'
-import { Config, buildArgv, defaultConfig } from '../src/config.mjs'
+import { resolveConfig, buildArgv, defaultConfig, entryById, requireEntry } from '../src/config.mjs'
 
 test('S5 schema 默认:条目 env 空对象、distro 空串,旧配置反序列化补默认', () => {
-  const config = Config({ shells: [{ id: 'w', name: 'WSL', kind: 'wsl' }], default: 'w' })
+  const config = resolveConfig({ shells: [{ id: 'w', name: 'WSL', kind: 'wsl' }], default: 'w' })
   const entry = config.shells[0]
   assert.deepEqual(entry.env, {})
   assert.equal(entry.distro, '')
@@ -32,7 +32,7 @@ test('S10 args 模板条目接管 argv,distro 不出现', () => {
 
 test('S6 entryFor 透传 env 与 distro;spawnSpec env 含条目键', () => {
   const cmdPath = process.execPath
-  const config = Config({
+  const config = resolveConfig({
     shells: [{ id: 'c', name: 'CMD', kind: 'cmd', path: cmdPath, env: { MSYSTEM: 'MINGW64' } }, { id: 'p', name: 'pwsh', kind: 'pwsh' }],
     default: 'c',
   })
@@ -45,19 +45,24 @@ test('S6 entryFor 透传 env 与 distro;spawnSpec env 含条目键', () => {
   assert.equal(spawned.env.NO_COLOR, '1')
 })
 
-test('S7 updateConfig 接受 env/distro 字段并落盘回读', async () => {
-  const section = Config({
+test('S7 web 行写路径接受 env/distro 字段并落盘', async () => {
+  const { SECTION_NS, buildFaces } = await import('../src/web-routes.mjs')
+  const section = resolveConfig({
     shells: [
       { id: 'p', name: 'pwsh', kind: 'pwsh' },
       { id: 'w', name: 'WSL', kind: 'wsl', distro: 'Debian', env: { LANG: 'C.UTF-8' } },
     ],
     default: 'p',
   })
-  const executor = new ShellSelectExecutor(stubCtxFor(section), section)
-  const next = await executor.updateConfig({})
+  const replaced = []
+  const ctx = { logger: { warn: () => {} } }
+  const settings = { describe: () => [{ ns: SECTION_NS, value: section }], replace: async (ns, next) => { replaced.push({ ns, next }) } }
+  const faces = buildFaces(ctx, settings)
+  const next = await faces.updateConfig({})
   const wsl = next.shells.find((entry) => entry.id === 'w')
   assert.equal(wsl.distro, 'Debian')
   assert.deepEqual(wsl.env, { LANG: 'C.UTF-8' })
+  assert.equal(replaced[0].ns, SECTION_NS)
 })
 
 function stubCtxFor(config) {
