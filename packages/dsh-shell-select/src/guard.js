@@ -6,7 +6,7 @@
 // "/",市场行写入对其拒绝,窗口内始终存活。运行时接管后官方行默认启用,主行
 // 包级损伤形态下官方自服务,guard 空闲;死窗仅剩「接管中主行被禁」。
 
-import { MAIN_ROW_ID, OFFICIAL_ROW_IDS, detectDeadState, rowState } from './guard-state.mjs'
+import { MAIN_ROW_ID, OFFICIAL_ROW_IDS, detectDeadState, rowState, rowScan } from './guard-state.mjs'
 import { officialRowConfig, readSettingsDocument, resolveFromHostTree } from './guard-config.mjs'
 import { officialRowState } from './takeover.mjs'
 import { shellSelectApplyState, shellSelectTakeoverTrace } from './apply-state.mjs'
@@ -227,6 +227,7 @@ export async function installGuard(ctx, {
         const s = officialRowState(ctx.loader, id)
         return [id, { rawType: typeof s.rawDisabled, disabled: s.disabled, running: s.running }]
       })),
+      rowScan: rowScan(ctx.loader),
     })
     ctx.effect(() => webServer.register({
       kind: 'exact',

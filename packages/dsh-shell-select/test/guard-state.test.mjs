@@ -2,7 +2,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { detectDeadState, rowState, effectiveDisabled, MAIN_ROW_ID, OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
+import { detectDeadState, rowState, rowScan, effectiveDisabled, MAIN_ROW_ID, OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
 import { officialRowConfig } from '../src/guard-config.mjs'
 
 // --- 桩 loader / 行 ---
@@ -108,6 +108,42 @@ test('运行时接管常态:主行崩(pending)且官方两行启用 → 非死�
     row({ id: OFF_EXEC }),
   ])
   assert.equal(detectDeadState(crashed, { applyState: () => 'pending' }), false)
+})
+
+test('rowScan:全树枚举 pwsh 行(声明态类型/求值禁用/fiber 存活),无 root 按空', () => {
+  assert.deepEqual(rowScan({}), [])
+  assert.deepEqual(rowScan(undefined), [])
+  const entryOf = (r) => ({
+    options: { id: r.id, name: r.name ?? `@x/${r.id}`, disabled: r.rawDisabled ?? r.disabled },
+    get disabled() {
+      if (r.disabled === 'throw') throw new Error('expr eval failed')
+      return r.disabled
+    },
+    fiber: r.running ? { uid: 'f1' } : undefined,
+  })
+  const treeLoader = (rows) => ({ root: { tree: { store: Object.fromEntries(rows.map((r) => [r.id, entryOf(r)])) } } })
+  const hits = rowScan(treeLoader([
+    { id: 'tool-pwsh', disabled: true },
+    { id: 'pwsh-sandbox', rawDisabled: { expr: true }, disabled: false, running: true },
+    { id: 'shell-select', disabled: false },
+  ]))
+  assert.deepEqual(hits, [
+    { id: 'tool-pwsh', rawType: 'boolean', evalDisabled: true, running: false },
+    { id: 'pwsh-sandbox', rawType: 'object', evalDisabled: false, running: true },
+  ])
+})
+
+test('rowScan:disabled getter 抛错按 throw 标记,不中断扫描', () => {
+  const entry = (r) => ({
+    options: { id: r.id, disabled: false },
+    get disabled() {
+      throw new Error('expr eval failed')
+    },
+    fiber: undefined,
+  })
+  const treeLoader = (rows) => ({ root: { tree: { store: Object.fromEntries(rows.map((r) => [r.id, entry(r)])) } } })
+  const hits = rowScan(treeLoader([{ id: 'pwsh-sandbox' }]))
+  assert.deepEqual(hits, [{ id: 'pwsh-sandbox', rawType: 'boolean', evalDisabled: 'throw', running: false }])
 })
 
 test('officialRowConfig:读 settings.yaml shell 节,缺失返回空对象', async () => {
