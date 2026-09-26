@@ -118,7 +118,8 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
       ].join('\n') + '\n'
     : ''
   // 预置 gateway 节:boot 期注册 echo provider(--seed-gateway)。区分"装载期注册"
-  // 与"运行期节写热更"两条回归面
+  // 与"运行期节写热更"两条回归面。anthropic 条目供 #3 body 标记/#5 亲和头专项:
+  // compat.sendSessionAffinityHeaders 开亲和头发射, anthropic 通道无 prompt_cache_key
   const seedGatewayEntry = seedGateway
     ? [
         '- id: llm-pi-gateway',
@@ -135,6 +136,20 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '        models:',
         '          - id: echo-model',
         '            name: Echo Model',
+        '            input:',
+        '              - text',
+        '      echo-anthropic:',
+        '        displayName: Echo Anthropic',
+        '        api: anthropic-messages',
+        '        baseURL: http://127.0.0.1:8578',
+        '        apiKeyEnv: ECHO_KEY',
+        '        defaultInput:',
+        '          - text',
+        '        compat:',
+        '          sendSessionAffinityHeaders: true',
+        '        models:',
+        '          - id: echo-a-model',
+        '            name: Echo A Model',
         '            input:',
         '              - text',
       ].join('\n') + '\n'

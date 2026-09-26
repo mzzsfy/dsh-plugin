@@ -39,6 +39,7 @@ function parseArgs(argv) {
       '--work-root': () => { args.workRoot = argv[++i] },
       '--skip-externals': () => { args.skipExternals = true },
       '--seed-gateway': () => { args.seedGateway = true },
+      '--keep': () => { args.keep = true },
     }
     const handler = map[argv[i]]
     if (!handler) throw new Error(`未知参数: ${argv[i]}`)
@@ -277,8 +278,33 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
               defaultInput: ['text'],
               models: [{ id: 'echo-model', name: 'Echo Model', input: ['text'] }],
             },
+            // anthropic 通道条目:#3 metadata.user_id 派生标记与 #5 亲和头发射
+            // 都从该路由的真实发话留档断言;compat 开 sendSessionAffinityHeaders
+            'echo-anthropic': {
+              displayName: 'Echo Anthropic',
+              api: 'anthropic-messages',
+              baseURL: `http://127.0.0.1:${simulatorPort}`,
+              apiKeyEnv: 'ECHO_KEY',
+              defaultInput: ['text'],
+              compat: { sendSessionAffinityHeaders: true },
+              models: [{ id: 'echo-a-model', name: 'Echo A Model', input: ['text'] }],
+            },
           },
         },
+      },
+    },
+  }
+  // #3/#5 第二段:默认模型切 echo-anthropic/echo-a-model 后新会话发话,上游即
+  // anthropic /messages 通道;留档 headers/body 断言亲和头与派生标记
+  const anthropicDefaultPatch = {
+    type: 'client-request',
+    rpcId: `compat-llm-anthropic-${Date.now()}`,
+    method: 'settings/update',
+    path: '/api/settings/update',
+    payload: {
+      args: {
+        ns: 'agent-default-model',
+        patch: { provider: 'echo-anthropic', model: 'echo-a-model' },
       },
     },
   }
@@ -354,6 +380,34 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
         return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
       })()`,
     },
+    // ---- #3/#5 anthropic 段:默认模型切 echo-anthropic 后再发一轮,上游走
+    // /v1/messages;亲和头与 metadata.user_id 从该轮留档断言
+    { name: 'switch-default-anthropic', http: { path: '/api/settings/update', method: 'POST', body: anthropicDefaultPatch } },
+    { name: 'wait-anthropic-switch', wait: 3 * 1000 },
+    {
+      name: 'new-session-anthropic',
+      eval: `(() => {
+        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
+        if (!hit) return 'new-session-not-found'
+        hit.click()
+        return 'clicked'
+      })()`,
+    },
+    { name: 'wait-composer-anthropic', wait: 2500 },
+    { name: 'type-message-anthropic', type: { selector: '[contenteditable="true"]', text: '回复:anth' } },
+    { name: 'send-anthropic', press: 'Enter' },
+    { name: 'wait-roundtrip-anthropic', wait: 10 * 1000 },
+    {
+      name: 'post-send-state-anthropic',
+      eval: `(() => {
+        const ce = document.querySelector('[contenteditable="true"]')
+        const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')]
+          .map((el) => el.textContent.trim().slice(0, 160))
+          .filter((t) => t.length > 0)
+          .slice(0, 5)
+        return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
+      })()`,
+    },
   ]
   const payload = JSON.stringify({
     url: `${base}/?token=${token}`,
@@ -391,18 +445,38 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   const chatDriven = stepByName['new-session']?.value === 'clicked'
     && stepByName['type-message']?.ok === true
     && stepByName['send']?.ok === true
+  // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
+  const anthropicDriven = stepByName['switch-default-anthropic']?.ok === true
+    && stepByName['new-session-anthropic']?.value === 'clicked'
+    && stepByName['type-message-anthropic']?.ok === true
+    && stepByName['send-anthropic']?.ok === true
   // 留档证据:任一对话请求打到模拟器即链路通(openai /chat/completions 或
-  // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)
+  // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)。
+  // anthropic 轮单独取证:#3 metadata.user_id 派生标记 + #5 亲和头发射
   let upstreamSeen = false
   let upstreamKinds = []
+  let anthropicUpstream = { seen: false, userId: null, affinityHeaders: [], headers: null }
   try {
     const lines = readFileSync(join(workDir, 'llm-echo.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
     upstreamKinds = [...new Set(lines.map((l) => l.path))]
     upstreamSeen = lines.some((l) => l.path.includes('/chat/completions') || l.path.includes('/messages'))
+    const anthropicTurns = lines.filter((l) => l.path.includes('/messages'))
+    const last = anthropicTurns.at(-1)
+    if (last !== undefined) {
+      const headerNames = Object.keys(last.headers ?? {}).map((k) => k.toLowerCase())
+      anthropicUpstream = {
+        seen: true,
+        userId: last.body?.metadata?.user_id ?? null,
+        affinityHeaders: headerNames.filter((k) => k.includes('affinity') || k.includes('request-id')),
+        headers: last.headers ?? {},
+      }
+    }
   } catch { /* 无留档 = 零请求 */ }
   return {
     providerRegistered,
     chatDriven,
+    anthropicDriven,
+    anthropicUpstream,
     upstreamSeen,
     upstreamKinds,
     stepValues: Object.fromEntries(Object.entries(stepByName).map(([name, step]) => [name, step.value ?? (step.ok ? 'ok' : step.error)])),
@@ -514,21 +588,31 @@ async function main() {
     // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
     // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
     checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
-    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    // --keep:宿主与模拟器存活导出(后续 l3-probe 接管跑 UI 专项);
+    // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出
+    if (args.keep === true) {
+      writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, pid: child.pid, logPath: simulator.logPath }, null, 2), 'utf8')
+      log(`[${args.version}] keep:宿主 :${args.port} token=${token} 模拟器 :${simulator.port}(live.json 已落,自行收尾用 scripts/compat/keep-stop.mjs)`)
+    }
+    if (args.keep === true) return
   } finally {
-    killTree(child)
-    simulator?.child.kill()
-    await sleep(KILL_GRACE_MS)
-    killTree(child, { force: true })
+    if (args.keep !== true) {
+      killTree(child)
+      simulator?.child.kill()
+      await sleep(KILL_GRACE_MS)
+      killTree(child, { force: true })
+    }
     await new Promise((done) => bootLog.end(done))
     restoreBridge?.()
-    if (!(await canBind(args.port))) {
+    if (args.keep !== true && !(await canBind(args.port))) {
       log(`端口 ${args.port} 残留监听,强制清理`)
       killPortOwner(args.port)
     }
   }
 
-  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.chatDriven && checks.llm.upstreamSeen  // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
+  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.chatDriven && checks.llm.upstreamSeen
+  // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
   // boot(0.1.7-rc.1 实测 false-pass——主行 import 崩溃仅此一行 error,activation
   // 仍 live)。本包任一行出现加载失败字样直接 FAIL,与 activation/llm 判定并联
   let importFailures = []
