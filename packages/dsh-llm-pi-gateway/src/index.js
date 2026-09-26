@@ -15,6 +15,7 @@ import {
   awaitOfficialExit,
   installOfficialRevivalGuard,
   armDeferredTakeover,
+  runtimeDisableOfficial,
 } from './takeover.mjs'
 import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from './apply-state.mjs'
 import { imageOffloadAdapter } from './image-offload.mjs'
@@ -160,9 +161,9 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     ctx.logger.warn(`llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节(${error?.message ?? error})`)
     OfficialConfig = undefined
   }
-  // 官方 entry 生命周期决策:接管(官方行停稳/缺席)/等待退场/让位(用户层
-  // 启用官方)。宿主注册排他,官方在场时本包不得占用其任何注册;让位态不碰
-  // 官方 settings 节与官方 ns discovery,官方插件自行服务。servingOfficial
+  // 官方 entry 生命周期决策:接管(官方行停稳/缺席)/等待退场/runtime-disable
+  // (行树默认启用态,apply 落定后运行时禁用再接管)/让位(用户显式启用官方,
+  // 永不强抢)。宿主注册排他,官方在场时本包不得占用其任何注册。servingOfficial
   // 供复活守卫判定:仅正服务官方节时,官方行复活才需要自停让位。
   let servingOfficial = false
   const officialState = officialEntryState(ctx.loader)
@@ -171,7 +172,13 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // 退场超时标记:arm 延迟到全部装配落定后执行,装配中途失败不留僵尸轮询
   let exitTimedOut = false
   if (decision === 'yield') {
-    ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 行未被禁用(用户层启用),本包降级为只服务 llm-pi-gateway 节')
+    ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 行被用户显式启用,本包降级为只服务 llm-pi-gateway 节')
+    takeover = false
+  } else if (decision === 'runtime-disable') {
+    // 行树默认启用态:官方插件本轮 boot 先服务(官方行不经静态 patch 禁用,
+    // 本包损伤时系统仍有官方可用);本包 apply 落定后运行时禁用官方行再接管。
+    // apply 期不占官方资源,禁用序列在落定后的异步链上执行
+    ctx.logger.info?.('llm-pi-gateway: 官方 llm-pi-ai 行为默认启用态,apply 落定后运行时禁用并接管')
     takeover = false
   } else if (decision === 'await-exit') {
     ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 插件退场中,等待其完全卸载后接管')
@@ -358,4 +365,29 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
   // 延迟补接管:全部装配落定后才武装;轮询在 apply 返回后的轮询序列上执行,
   // completeOfficialTakeover 闭包至此全部就绪,装配中途失败不会留下僵尸轮询
   if (exitTimedOut) armDeferredTakeover(ctx, officialState.entry, () => completeOfficialTakeover(), deferredExit)
+  // 运行时接管:apply 落定(=本包可服务的证明)之后才允许禁用官方行——
+  // 本包任意死法(模块加载崩/apply 中途崩/被禁/卸载)都到不了这里,官方行
+  // 保持启用,官方插件自服务,系统不出现全模型不可用。序列挂 apply 返回后
+  // 的异步链,不阻塞本 apply 生命周期;异常只告警降级,官方继续服务
+  if (decision === 'runtime-disable') {
+    const runtimeTakeover = async () => {
+      try {
+        await runtimeDisableOfficial(officialState.entry)
+      } catch (error) {
+        ctx.logger.warn(`llm-pi-gateway: 官方行运行时禁用失败,官方继续服务模型路由(${error?.message ?? error})`)
+        return
+      }
+      const exited = await awaitOfficialExit(officialState.entry, exitPoll)
+      if (!exited) {
+        ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 禁用后退场超时(存在在途流),退场后自动完成接管')
+        armDeferredTakeover(ctx, officialState.entry, () => completeOfficialTakeover(), deferredExit)
+        return
+      }
+      completeOfficialTakeover()
+    }
+    void runtimeTakeover().catch((error) => {
+      ctx.logger.warn(`llm-pi-gateway: 运行时接管序列失败,官方继续服务模型路由(${error?.message ?? error})`)
+    })
+  }
 }
+

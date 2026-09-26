@@ -1,29 +1,41 @@
 # The llm-pi-gateway bundle patch: zero-perception takeover of the official
-# pi-ai passthrough. The official dsh-llm-pi-ai row is disabled and this
-# plugin takes over BOTH settings namespaces: the official `llm-pi-ai`
+# pi-ai passthrough. The official `llm-pi-ai` row is NOT disabled here —
+# runtime takeover disabled the static row because a static disable lands at
+# compose time, before this plugin has proven it can load; if the gateway
+# package itself were broken, the official row would already be gone and the
+# host would have NO llm provider at all. Instead the official row stays
+# enabled at boot and the gateway disables it at runtime (entry.update, the
+# same call the dsh-market toggle uses) ONLY after its own apply has fully
+# completed — "only a healthy gateway may take the official row down". The
+# gateway then serves BOTH settings namespaces: the official `llm-pi-ai`
 # section is consumed through the official package's own Config schema, so
 # existing provider profiles keep their route names (agent-default-model,
 # quota panels and sessions continue unchanged) and gain session-affinity
 # marking; the `llm-pi-gateway` section stays available for standalone or
-# enhanced routes. Uninstalling this bundle removes the patch, the official
-# row re-enables, and the official plugin serves the same profiles again.
+# enhanced routes.
+#
+# Because the runtime disable is in-memory only, a restart naturally returns
+# the official row to its enabled default: the official plugin boots first
+# and serves, the gateway then applies, disables the official row and takes
+# over. Uninstalling this bundle removes the patch and the gateway simply
+# never comes back — the official plugin keeps serving natively.
 #
 # Dead-state self-heal: the second inserted row (`llm-pi-gateway/guard`) is
-# a sentinel. While BOTH the gateway row and the official row are disabled
-# (e.g. the dsh-market toggle disables the gateway row instantly while its
-# bundle removal only lands on the next boot), the sentinel dynamically
-# mounts the official plugin so models keep working. When the gateway row
-# comes back, the sentinel unmounts first and the gateway takes over with
-# zero registration conflicts. The sentinel id contains a "/", which the
-# dsh-market row writer refuses to persist, so the sentinel survives the
-# market toggle and is the only live self-heal executor in that window.
+# a sentinel. The one dead window left is "gateway disabled WHILE it was
+# serving the official namespace": the in-memory official-row disable then
+# outlives the gateway until process exit. In that window the sentinel
+# dynamically mounts the official plugin so models keep working; on restart
+# the official row is back to default-enabled and serves natively. When the
+# gateway row comes back, the sentinel unmounts first and the gateway takes
+# over with zero registration conflicts. The sentinel id contains a "/",
+# which the dsh-market row writer refuses to persist, so the sentinel
+# survives the market toggle and is the only live self-heal executor in
+# that window.
 #
-# Escape hatch: bundle patches load unconditionally while the bundle stays
-# listed, so disabling the gateway row ALONE would leave the official row
-# disabled — the sentinel covers that window, and a restart removes this
-# bundle's patch entirely (market uninstall or carrier toggle), restoring
-# the official plugin natively. To hand control back WITHOUT restarting,
-# also re-enable the official row:
+# Escape hatch: to hand control back to the official plugin, disable the
+# gateway row AND explicitly enable the official row (options.disabled
+# === false is treated as the user's explicit intent — the gateway yields
+# and never force-grabs it back):
 #
 #   - id: llm-pi-gateway
 #     disabled: true
@@ -33,9 +45,6 @@
 # The gateway yields on its own before the official plugin re-registers
 # (revival guard), and re-takes-over only after the official plugin has
 # exited, so the switch over is live-reload safe in both directions.
-
-- id: llm-pi-ai
-  disabled: true
 
 - insert:
     - id: llm-pi-gateway

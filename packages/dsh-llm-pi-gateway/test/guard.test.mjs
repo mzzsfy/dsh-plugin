@@ -1,24 +1,21 @@
 // guard 哨兵行 BDD:死态(gateway 行功能性停摆:行被禁停稳,或行活着但
-// apply 因宿主能力缺失干净早退;且官方行仍被 bundle patch 禁用停稳)时
-// 动态代挂官方插件恢复服务;gateway 行复活时先卸代挂再放行,零冲突交接。
-// 背景:dsh-market 对 carrier 包的禁用写即时生效的 user patch 行,而其恢复
-// 机制(整包移出 bundles)只在下次 boot 生效,窗口内 composed = 官方禁 +
-// gateway 停 = 全模型不可用;旧宿主(rc.2)上 gateway 行恒为假活形态。
+// apply 因宿主能力缺失干净早退;且官方行禁用停稳)时动态代挂官方插件恢复
+// 服务;gateway 行复活时先卸代挂再放行,零冲突交接。
+// 背景:运行时接管下官方行的禁用是 gateway apply 落定后的内存态;gateway
+// 接管中被停摆(market toggle/删行)时禁用残留,窗口内 composed = 官方禁 +
+// gateway 停 = 全模型不可用。官方行启用形态恒非死态(官方自服务)——gateway
+// 自身加载失败不再制造死态,guard 无需 import 崩判死机制。
 // guard 行 id 带 "/" 使 market 的行写入拒绝,窗口内始终存活,是死态唯一的
 // 自愈执行者。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { GUARD_FOR_GATEWAY_ID, detectDeadState, detectImportCrashState, installGuard, SWEEP_INTERVAL_MS, IMPORT_CRASH_GRACE_MS } from '../src/guard.js'
+import { GUARD_FOR_GATEWAY_ID, detectDeadState, installGuard, SWEEP_INTERVAL_MS } from '../src/guard.js'
 import { OFFICIAL_ENTRY_ID } from '../src/takeover.mjs'
 import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from '../src/apply-state.mjs'
 
-// import 崩测试的 sweep 等待:跨过一个轮询周期加调度余量
+// 死态边沿测试的 sweep 等待:跨过一个轮询周期加调度余量
 const SWEEP_TEST_WAIT_MS = SWEEP_INTERVAL_MS + 400
-// 加速时钟倍率:虚拟时间流速倍增,一个轮询周期即满宽限
-const CLOCK_SCALE = Math.ceil(IMPORT_CRASH_GRACE_MS / SWEEP_INTERVAL_MS)
-// 时钟加速:测试用真实定时器走一个轮询周期,虚拟时间即满宽限
-const acceleratedClock = (realNow) => () => realNow() * CLOCK_SCALE
 
 const OFFICIAL_STUB = { name: 'dsh-llm-pi-ai', apply() {}, Config: undefined }
 
@@ -118,23 +115,16 @@ test('死态判定: 接管态(gateway 启)/官方启用态/官方退场中/官�
   assert.equal(detectDeadState(loaderOf({ base, gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true, running: true }) })), false, '官方仍退场中,等它死透再判')
 })
 
-test('import 崩判定: gateway 启用停稳 + apply 旗标 undefined + 官方禁用停稳 → 崩溃形态', () => {
-  // 主行模块加载失败形态:fiber 未建(=停稳),行未被禁,apply 从未运行。
-  // 纯判定只报告形态;旗标 undefined 与"apply 进行中(冷载)"同形,
-  // 瞬态过滤由 sweep 宽限期承担,此处不判真伪
-  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
-  beginGatewayApply()
-  assert.equal(detectImportCrashState(loader), true, '旗标 undefined = 崩溃形态(瞬态由宽限滤除)')
-  endGatewayApplyActive()
-  assert.equal(detectImportCrashState(loader), false, '有效接管 = 非崩溃')
-  endGatewayApplyInactive()
-  assert.equal(detectImportCrashState(loader), false, '干净早退归 detectDeadState 管,不算崩溃')
-  // 行被禁或官方未禁形态下不报崩溃(经典死态 / 官方服务接管)
-  beginGatewayApply()
-  const disabledGateway = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
-  assert.equal(detectImportCrashState(disabledGateway), false, '行被禁归经典死态')
-  const officialAlive = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID }) })
-  assert.equal(detectImportCrashState(officialAlive), false, '官方行未禁归官方服务')
+test('判定: gateway 接管中停摆(禁用停稳)+ 官方禁用停稳 → 死态', () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  assert.equal(detectDeadState(loader), true, '双停摆 = 全模型不可用死态')
+})
+
+test('判定: gateway 主行损伤形态(行启用、fiber 未建、旗标缺席)+ 官方启用 → 非死态,官方自服务', () => {
+  // 运行时接管的核心收益:官方行默认启用,主行 import 崩不再制造死态,
+  // 官方插件 boot 即服务,guard 不判死不代挂
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID }) })
+  assert.equal(detectDeadState(loader), false, '官方启用恒非死态')
 })
 
 test('apply: 死态下代挂官方模块并等待其激活', async () => {
@@ -565,54 +555,4 @@ test('护栏: 超时代挂迟到失败 → mounted 保持空位且无异常抛�
   await guard({ options: { id: 'llm-pi-gateway' }, fiber: undefined }, async () => { released = true })
   assert.equal(released, true)
   assert.equal(state.unplugged, 0)
-})
-
-// ---- import 崩自愈:0.1.7 宿主 dsh-llm 图片管线换形致主行 import 崩溃的
-// 实测形态。旗标 undefined 无法与"apply 进行中(冷载)"区分,以宽限期滤除
-// 瞬态;宽限内复活由复活路径卸代挂,与经典死态共用同一交接语义。
-
-test('import 崩: 宽限满仍未运行 apply → 代挂官方恢复服务', async () => {
-  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
-  const { ctx, state, settingsFaces } = ctxFixture({ loader })
-  // 加速时钟:播种至首轮 sweep 的真实间隔(一个轮询周期)虚拟即满宽限
-  const realNow = Date.now
-  Date.now = acceleratedClock(realNow)
-  try {
-    await installGuard(ctx, { importOfficial: async () => OFFICIAL_STUB, delay: NO_DELAY })
-    assert.equal(state.plugged, 0, '初始判定只播种宽限起点,不立即代挂')
-    await new Promise((resolve) => setTimeout(resolve, SWEEP_TEST_WAIT_MS))
-    assert.equal(state.plugged, 1, '崩溃死态经宽限判死后自愈代挂')
-    assert.match(state.logs.warn.join('\n'), /模块加载崩溃/)
-    assert.ok(settingsFaces.length >= 0)
-  } finally {
-    Date.now = realNow
-  }
-})
-
-test('import 崩: 宽限内 apply 完成(冷载瞬态)→ 不代挂', async () => {
-  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
-  const { ctx, state } = ctxFixture({ loader })
-  // 时钟不快进:观测起点即当前时刻,宽限必然未满
-  await installGuard(ctx, { importOfficial: async () => OFFICIAL_STUB, delay: NO_DELAY })
-  assert.equal(state.plugged, 0, '旗标 undefined 未满宽限 = 可能是冷载瞬态,保守不代挂')
-})
-
-test('import 崩: 代挂后 gateway 复活(apply 完成)→ sweep 卸代挂让位', async () => {
-  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
-  const { ctx, state, currentMount } = ctxFixture({ loader })
-  const realNow = Date.now
-  Date.now = acceleratedClock(realNow)
-  try {
-    await installGuard(ctx, { importOfficial: async () => OFFICIAL_STUB, delay: NO_DELAY })
-    await new Promise((resolve) => setTimeout(resolve, SWEEP_TEST_WAIT_MS))
-    assert.equal(state.plugged, 1, '前置:崩溃死态已代挂')
-    // gateway 复活:行 init(接管完成),崩溃形态消失 → 下轮 sweep 卸代挂
-    endGatewayApplyActive()
-    await new Promise((resolve) => setTimeout(resolve, SWEEP_TEST_WAIT_MS))
-    assert.equal(state.unplugged, 1, '复活后必须卸代挂,注册零冲突')
-    assert.equal(currentMount(), null)
-  } finally {
-    Date.now = realNow
-    beginGatewayApply()
-  }
 })
