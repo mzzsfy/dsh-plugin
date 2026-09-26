@@ -16,7 +16,8 @@
     },
     "client": {
       "platform": "web"
-    }
+    },
+    "hostMin": "0.1.7-rc.1"
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",

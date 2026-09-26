@@ -84,6 +84,94 @@ function readProfileManifest() {
   return JSON.parse(readFileSync(profileManifest, 'utf8').replace(/^\uFEFF/, ''))
 }
 
+/**
+ * 实时宿主版本:dsh bin 包的 version。查找顺序:全局 bin 实体(dsh 命令宿主本体,
+ * nvm 布局 = <bin 目录>/node_modules/@deepseek-ai/dsh)→ profile node_modules →
+ * ~/.dsh/node_modules。全部读不到返回 null,hostMin 校验跳过(不阻塞主流程)。
+ */
+function hostVersion() {
+  const candidates = []
+  const which = spawnSync(process.platform === 'win32' ? 'where dsh' : 'which dsh', {encoding: 'utf8', shell: true})
+  if (which.status === 0) {
+    const binPath = which.stdout.trim().split(/\r?\n/)[0]
+    if (binPath) candidates.push(join(dirname(binPath), 'node_modules', '@deepseek-ai', 'dsh'))
+  }
+  candidates.push(
+    join(profileRoot, 'node_modules', '@deepseek-ai', 'dsh'),
+    join(process.env.USERPROFILE, '.dsh', 'node_modules', '@deepseek-ai', 'dsh'),
+  )
+  for (const base of candidates) {
+    try {
+      return JSON.parse(readFileSync(join(base, 'package.json'), 'utf8')).version
+    } catch { /* 下一候选 */ }
+  }
+  return null
+}
+
+/**
+ * prerelease 感知版本比较(-alpha/-rc 段低于同位正式版):a<b → -1,a>b → 1,等 → 0。
+ * 核心段允许 3-4 位(x.y.z 或 x.y.z.w,宿主出现过 4 位形态),prerelease 段按
+ * '.' 切分逐段比较(数字段数值比,标识段字典比,数字段 > 标识段,同 publish 规则)。
+ * 形态不符合返回 null,调用方按无法校验处理(不放行也不阻塞)。
+ */
+function compareVersion(a, b) {
+  const parse = (v) => {
+    const m = /^(\d+(?:\.\d+){2,3})(?:-([0-9A-Za-z.-]+))?$/.exec(v)
+    return m ? {core: m[1].split('.').map(Number), pre: m[2] ?? null} : null
+  }
+  const preKey = (t) => (/^\d+$/.test(t) ? [0, Number(t)] : [1, t])
+  const preCmp = (x, y) => {
+    const kx = preKey(x)
+    const ky = preKey(y)
+    return kx[0] !== ky[0] ? kx[0] - ky[0] : kx[1] < ky[1] ? -1 : kx[1] > ky[1] ? 1 : 0
+  }
+  const pa = parse(a)
+  const pb = parse(b)
+  if (!pa || !pb) return null
+  const width = Math.max(pa.core.length, pb.core.length)
+  for (let i = 0; i < width; i += 1) {
+    if ((pa.core[i] || 0) !== (pb.core[i] || 0)) return Math.sign((pa.core[i] || 0) - (pb.core[i] || 0))
+  }
+  if (pa.pre === pb.pre) return 0
+  if (pa.pre === null) return 1
+  if (pb.pre === null) return -1
+  const xs = pa.pre.split('.')
+  const ys = pb.pre.split('.')
+  for (let i = 0; i < Math.max(xs.length, ys.length); i += 1) {
+    if (xs[i] === undefined) return -1
+    if (ys[i] === undefined) return 1
+    const order = preCmp(xs[i], ys[i])
+    if (order !== 0) return order
+  }
+  return 0
+}
+
+/**
+ * 宿主版本底线:包 manifest 的 dsh.hostMin(语义 = 低于该宿主版本的 API 面未验证,
+ * 强链即复现 0.1.7-rc.2 时代的接管断裂)。宿主版本或 hostMin 任一缺失 → 校验跳过;
+ * 可比且宿主 < hostMin → 拒绝该包进流程(返回 false,调用方摘出,不写依赖行不挂载)。
+ */
+function meetsHostMin(dir) {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'packages', dir, 'package.json'), 'utf8'))
+  const hostMin = pkg.dsh?.hostMin
+  if (hostMin === undefined) return true
+  const host = hostVersion()
+  if (host === null) {
+    console.log(`SKIP ${dir}: 宿主版本不可读,hostMin(${hostMin})校验跳过`)
+    return true
+  }
+  const order = compareVersion(host, hostMin)
+  if (order === null) {
+    console.log(`SKIP ${dir}: 版本形态无法比较(宿主 ${host} / hostMin ${hostMin}),校验跳过`)
+    return true
+  }
+  if (order < 0) {
+    console.error(`FAIL ${dir}: 实时宿主 ${host} 低于 dsh.hostMin ${hostMin},拒绝 dev-link(升级宿主或下调 hostMin)`)
+    return false
+  }
+  return true
+}
+
 /** npm 线上 latest;网络故障等非 404 失败直接中止,防止被当成版本回退;404(未发布)返回 null */
 function onlineLatest(name) {
   const r = spawnSync([npmCmd(), 'view', name, 'version', '--registry', REGISTRY].join(' '), {
@@ -207,20 +295,39 @@ function normalizeDeps(packages) {
 }
 
 /**
+ * 市场禁用清单:~/.dsh/profiles/web/.dsh-market/state.json 的 disabled 数组。
+ * 市场禁用语义 = 该包从装载层出层(market carrier 同款行为);缺失/损坏按空表
+ * (市场未装或状态文件损坏时 dev-link 不否决任何包)。
+ */
+function marketDisabled() {
+  try {
+    const state = JSON.parse(readFileSync(join(profileRoot, '.dsh-market', 'state.json'), 'utf8'))
+    return Array.isArray(state.disabled) ? new Set(state.disabled) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+/**
  * 对账 dsh.profile.bundles:镜像官方 dsh plugin reconcilePlugins 语义——依赖行解析到
  * dsh.bundle 声明包即入层(尾部追加,层序与官方一致),失去声明或依赖行即出层。
+ * 市场禁用清单是额外否决:用户在市场里关掉的包绝不回填装载层(dev-link 强塞会与
+ * 市场开关互搏,启动期 kept-off 切换风暴,0.1.7-rc.2 实证事故)。
  * 本仓清单管理不到的条目(官方内盒等)不动。返回是否有变更。
  */
 function normalizeBundles(packages) {
   const manifest = readProfileManifest()
   const declared = manifest.dependencies || {}
+  const disabled = marketDisabled()
   const plugins = [...(manifest.dsh?.profile?.bundles ?? [])]
   let changed = false
   for (const dir of packages) {
     const key = SCOPE + dir
-    const shouldLoad = declared[key] !== undefined && !isLibPackage(dir)
+    const shouldLoad = declared[key] !== undefined && !isLibPackage(dir) && !disabled.has(key)
     if (shouldLoad === plugins.includes(key)) continue
-    const reason = shouldLoad ? '插件包且依赖行已声明' : declared[key] === undefined ? '无依赖行' : '公共依赖包不进装载层'
+    const reason = shouldLoad ? '插件包且依赖行已声明'
+      : disabled.has(key) ? '市场已禁用'
+      : declared[key] === undefined ? '无依赖行' : '公共依赖包不进装载层'
     console.log(`FIX  ${key}: ${shouldLoad ? '加入' : '移出'} dsh.profile.bundles(${reason})`)
     if (shouldLoad) plugins.push(key)
     else plugins.splice(plugins.indexOf(key), 1)
@@ -398,11 +505,18 @@ for (const name of names) {
     process.exit(1)
   }
 }
+// 宿主版本底线前置:不满足 dsh.hostMin 的包摘出本次范围(不写依赖行不挂载),
+// 其余包继续;全被摘出即无事可做
+const usable = names.filter((name) => meetsHostMin(name))
+if (usable.length === 0) {
+  console.error('所有目标包均未过 hostMin 校验,终止')
+  process.exit(1)
+}
 
 let latests = {}
 if (!unlink) {
   // 单包模式只归一指定包,不被清单内其他未发布包(线上查询 404)阻断;all 仍全量归一
-  const scope = target === 'all' ? packages : names
+  const scope = target === 'all' ? packages : usable
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
   // 装载层对账依赖依赖行归一结果;成员关系不改依赖图,不触发安装
@@ -440,7 +554,7 @@ if (unlink) {
 } else {
   syncDevHmr(true)
   let installFailures = 0
-  for (const name of names) {
+  for (const name of usable) {
     if (!installPackageDeps(name)) installFailures++
     mountJunction(name)
   }
@@ -450,5 +564,5 @@ if (unlink) {
   }
 }
 
-verifyAll(packages, latests, unlink, names)
+verifyAll(packages, latests, unlink, usable)
 console.log(`\n提醒: 依赖图变化的 pnpm install / dsh plugin add 之后须重跑本脚本;增量 install 不动 junction,重跑幂等。`)
