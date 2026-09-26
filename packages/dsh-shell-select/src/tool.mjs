@@ -3,6 +3,10 @@
 // 2. 描述动态含可用客户端清单与方言提示(settings onChange 重注册);
 // 3. 执行经 executor.entryFor/runFor/startFor 按条目 argv 运行。
 // 输出 schema、后台任务语义、升权流程、terminal 卡呈现与官方逐字同构。
+// 另注册 pwsh 名字工具(镜像官方定义,钉死 pwsh 客户端):旧会话 preset
+// 快照里的 pwsh 工具语义是"PowerShell 专用",缺省落 config.default 会随
+// 用户改默认客户端而炸方言;本注册给新会话提供同名工具保语义,模型点名
+// pwsh 时永远 PowerShell。
 
 import { TOOL_ABORTED, defineTool } from '@deepseek-ai/dsh-tools'
 import { ESCALATION_TARGETS, approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
@@ -135,8 +139,22 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
 }
 
+/** pwsh 工具描述:官方 dsh-tool-pwsh 同构(PowerShell 专用语义)。 */
+function pwshDescription({ backgroundEnabled, escalationModes }) {
+  const base = 'Execute a PowerShell command and return its stdout/stderr. '
+    + 'Each call runs in a fresh pwsh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
+    + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
+    + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
+    + (backgroundEnabled
+      ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
+      : 'Background execution is not available; long-running commands must finish within the timeout.')
+  if (escalationModes.length === 0) return base
+  return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
+}
+
 /**
- * 注册 shell 工具,返回卸载 disposer(重注册 = 先卸后挂)。
+ * 注册 shell + pwsh 双工具,返回卸载 disposer(重注册 = 先卸后挂)。
+ * pwsh 工具钉死 pwsh 客户端(config 删 pwsh 条目时 requireEntry 明确拒绝)。
  * @param {object} ctx cordis context(需 tools/shellEnv 服务在场)
  * @param {{executor: object}} faces 执行器实例
  */
@@ -166,24 +184,28 @@ export function registerShellTool(ctx, { executor }) {
     validateEscalationArgs(args.sandbox_permissions, args.justification)
   }
 
-  const definition = (faces) => defineTool({
-    name: 'shell',
-    description: shellDescription({ executor: faces.executor, backgroundEnabled, escalationModes }),
+  const makeDefinition = (toolName, pinned) => (faces) => defineTool({
+    name: toolName,
+    description: pinned === undefined
+      ? shellDescription({ executor: faces.executor, backgroundEnabled, escalationModes })
+      : pwshDescription({ backgroundEnabled, escalationModes }),
     parameters: {
       command: {
         type: 'string',
         required: true,
-        description: 'The command to execute, in the dialect of the selected shell client (default client when `shell` is omitted).',
+        description: pinned === undefined
+          ? 'The command to execute, in the dialect of the selected shell client (default client when `shell` is omitted).'
+          : 'The PowerShell command to execute.',
       },
       description: {
         type: 'string',
         required: true,
         description: 'Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI).',
       },
-      shell: {
+      ...pinned === undefined ? { shell: {
         type: 'string',
         description: 'Shell client id from the tool description list (e.g. pwsh, git-bash, cmd). Omit to use the configured default client.',
-      },
+      } } : {},
       timeoutMs: {
         type: 'number',
         description: 'Timeout in milliseconds. The executor applies its configured default and cap, and kills the command on expiry.',
@@ -227,11 +249,11 @@ export function registerShellTool(ctx, { executor }) {
       validateArgs(args)
       const standingPolicy = resolveStandingPolicy(exec)
       const approvedMode = args.sandbox_permissions !== undefined && args.justification !== undefined
-        ? await approveShellEscalation(args.sandbox_permissions, args.justification, exec, standingPolicy)
+        ? await approveShellEscalation(toolName, args.sandbox_permissions, args.justification, exec, standingPolicy)
         : undefined
       const policy = approvedMode === undefined ? standingPolicy : { ...standingPolicy, mode: approvedMode }
       const workdir = resolveWorkdir(args.workdir, exec)
-      const entry = faces.executor.entryFor(args.shell)
+      const entry = faces.executor.entryFor(pinned ?? args.shell)
       const request = {
         command: args.command,
         ...workdir !== undefined ? { workdir } : {},
@@ -323,7 +345,7 @@ export function registerShellTool(ctx, { executor }) {
   }
 
   /** 升权审批:先于执行,共享 fail-closed 序列交 approveEscalation(官方同构)。 */
-  function approveShellEscalation(mode, justification, exec, standingPolicy) {
+  function approveShellEscalation(toolName, mode, justification, exec, standingPolicy) {
     if (escalationModes.length === 0) throw new Error('sandbox_permissions is not available in this composition (no sandboxing executor to escalate)')
     const approver = ctx.get('approval')
     return approveEscalation({
@@ -335,16 +357,19 @@ export function registerShellTool(ctx, { executor }) {
       approver,
       agent: exec.agent,
       callId: exec.callId,
-      toolName: 'shell',
+      toolName,
       signal: exec.signal,
     })
   }
 
   const faces = { executor }
-  const disposer = ctx.tools.register(definition(faces))
+  const disposers = [
+    ctx.tools.register(makeDefinition('shell', undefined)(faces)),
+    ctx.tools.register(makeDefinition('pwsh', 'pwsh')(faces)),
+  ]
   return () => {
     if (disposed) return
     disposed = true
-    disposer()
+    for (const disposer of disposers) disposer()
   }
 }

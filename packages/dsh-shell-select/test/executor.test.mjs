@@ -119,11 +119,15 @@ function build() {
 
 // --- 断言 ---
 
-test('构造:注册 shell 工具与 systemPrompt 段,路由不再由主行挂载', () => {
+test('构造:注册 shell+pwsh 双工具与 systemPrompt 段,路由不再由主行挂载', () => {
   const { registered } = build()
-  assert.equal(registered.tools.length, 1)
-  assert.equal(registered.tools[0].name, 'shell')
-  assert.match(registered.tools[0].description, /git-bash/)
+  assert.deepEqual(registered.tools.map((tool) => tool.name).sort(), ['pwsh', 'shell'])
+  const shell = registered.tools.find((tool) => tool.name === 'shell')
+  const pwsh = registered.tools.find((tool) => tool.name === 'pwsh')
+  assert.match(shell.description, /git-bash/)
+  assert.match(pwsh.description, /PowerShell/)
+  assert.ok(!('shell' in pwsh.parameters.properties))
+  assert.ok('shell' in shell.parameters.properties)
   assert.equal(registered.promptSections.length, 1)
   // 数据通道迁至 web-routes 行:主行零路由
   const routePaths = registered.routes.filter((path) => String(path).startsWith('/api/shell-select/'))
@@ -140,11 +144,24 @@ test('settings 在场:注册 auto:false 页面策略挂本行 fiber(自带设置
   assert.equal(registered.policies[0].fiber, fiber)
 })
 
-test('settings 缺席:策略静默跳过,工具照常注册(业务插件无 settings 也可运行)', () => {
+test('settings 缺席:策略静默跳过,双工具照常注册(业务插件无 settings 也可运行)', () => {
   const { ctx, registered } = stubCtx({ withSettings: false })
   new ShellSelectExecutor(ctx, baseConfig())
   assert.equal(registered.policies.length, 0)
-  assert.equal(registered.tools.length, 1)
+  assert.equal(registered.tools.length, 2)
+})
+
+test('pwsh 工具钉死 pwsh 客户端:default 漂移不改变落点(旧会话语义保真)', async () => {
+  const spawn = stubSpawn('ok', '', 0)
+  const { ctx, registered } = stubCtx({ spawn })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const pwshTool = registered.tools.find((tool) => tool.name === 'pwsh')
+  // 模型无 shell 参数可传(pinned 工具),default 漂到 git-bash 也不影响
+  executor.refresh({ shells: baseConfig().shells, default: 'git-bash' })
+  await pwshTool.execute({ command: 'Get-Date', description: 'probe', workdir: process.cwd() }, { signal: new AbortController().signal })
+  assert.equal(spawn.calls[0].argv[0], NODE_EXE)
+  assert.match(spawn.calls[0].argv.at(-1), /Get-Date$/)
+  assert.deepEqual(spawn.calls[0].argv.slice(1, 5), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'])
 })
 
 test('listShells:出厂条目自动解析为真实路径(pwsh/cmd 必在本机)', () => {
