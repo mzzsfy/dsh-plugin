@@ -121,14 +121,14 @@ function foregroundOutputProperties() {
   }
 }
 
-/** 工具描述:客户端清单与方言随配置动态变化。开头引导模型优先用本工具。 */
+/** 工具描述:客户端清单与方言随配置动态变化。 */
 function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   const listing = executor.listShells()
   const lines = listing.shells
     .map((entry) => `${entry.id} (${entry.kind}${entry.available ? '' : ', executable not found'})`)
     .join(', ')
-  const base = 'Default shell tool for this environment: call it for EVERY command — PowerShell, POSIX, cmd, WSL alike — unless the session explicitly requires the legacy pwsh tool. '
-    + `Execute a command in one of the configured shell clients and return its stdout/stderr. Available clients: ${lines}. The default client is "${listing.default}"; pass \`shell\` only when this command needs a different client (dialects differ: pwsh = PowerShell, bash/wsl = POSIX, cmd = cmd.exe). `
+  const base = 'Execute a command in one of the configured shell clients and return its stdout/stderr. '
+    + `Available clients: ${lines}. The default client is "${listing.default}"; pass \`shell\` only when this command needs a different client (dialects differ: pwsh = PowerShell, bash/wsl = POSIX, cmd = cmd.exe). `
     + 'Each call runs in a fresh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
     + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
     + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
