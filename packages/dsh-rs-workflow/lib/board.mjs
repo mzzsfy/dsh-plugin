@@ -6,7 +6,17 @@
 import { reportStore, ACTIVE_STATES } from './store.mjs'
 import { registry, post, initiatorOf, resumerOf } from './driver/control.mjs'
 import { validateTemplate, validateTemplateSet } from './template.mjs'
-import { releaseFlowTemplate, unreleaseFlowTemplate, releasedTemplateIds } from './release.mjs'
+import { releasedTemplateIds } from './release.mjs'
+import {
+  currentAgentPresets,
+  disposeAllRegistered,
+  markReleased,
+  registryFormAvailable,
+  replayReleased,
+  setAgentPresets,
+  unreleaseTemplateVia,
+  releaseTemplateVia,
+} from './release-registry.mjs'
 import { SPEC_TEXT } from './spec.mjs'
 import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
 import { loadJson, saveJson } from './storage.mjs'
@@ -105,13 +115,25 @@ function writeTemplates(templates) {
   saveJson('templates.json', templates)
 }
 
-function removeTemplateById(id) {
+// ── 释放分派(注册形态 rc.1+ / 目录形态 0.1.2-0.1.5,见 计划-rs-workflow-preset-rc1.md)──
+// released 事实源随形态:注册形态 = templates.json released 标志(markReleased 落盘);
+// 目录形态 = 目录本身。服务当值经 release-registry 模块单例,template-tool 行同源消费
+const releaseDispatch = (entry) => releaseTemplateVia(currentAgentPresets(), entry)
+
+const unreleaseDispatch = (id) => unreleaseTemplateVia(currentAgentPresets(), id)
+
+function releasedIdsVia() {
+  if (!registryFormAvailable(currentAgentPresets())) return releasedTemplateIds()
+  return rawTemplates().filter((t) => t.released === true).map((t) => t.id)
+}
+
+async function removeTemplateById(id) {
   const raw = rawTemplates()
   const next = raw.filter((t) => t.id !== id)
   if (next.length === raw.length) return { ok: false, error: '模板不存在: ' + id }
   writeTemplates(next)
-  // 撤下释放物:删除模板即移除对应释放目录(外来目录返回 foreign 不动)
-  const outcome = unreleaseFlowTemplate(id)
+  // 撤下释放物:注册形态注销预设,目录形态移除释放目录(外来目录返回 foreign 不动)
+  const outcome = await unreleaseDispatch(id)
   return { ok: true, outcome }
 }
 
@@ -232,6 +254,19 @@ export function handleControl(body) {
 
 export function registerBoardRoutes(ctx) {
   const store = reportStore()
+  // 注册形态运行态:服务注入即设当值 + 重放已释放模板;行卸载清当值并注销全部
+  // 注册(热重载后随重放重建)。目录形态宿主(无 register)保持当值空缺
+  ctx.inject(['agentPresets'], (actx) => {
+    const service = actx.agentPresets
+    if (!registryFormAvailable(service)) return
+    setAgentPresets(service)
+    const released = rawTemplates().filter((t) => t.released === true && t.enabled !== false)
+    replayReleased(service, released).catch(() => {})
+    actx.effect(() => async () => {
+      setAgentPresets(undefined)
+      await disposeAllRegistered()
+    }, 'rs-workflow preset registrations')
+  })
   ctx.inject(['webServer'], (wctx) => {
     const route = (path, handler, name) => wctx.effect(() => wctx.webServer.register({ kind: 'exact', path, handler }), name)
     route('/api/rsww/runs', guardedRoute(async (req, res) => {
@@ -300,7 +335,7 @@ export function registerBoardRoutes(ctx) {
       sendJson(res, 200, { entry, parsed })
     }), 'rsww template detail route')
     route('/api/rsww/released', guardedRoute(async (req, res) => {
-      sendJson(res, 200, { ids: releasedTemplateIds() })
+      sendJson(res, 200, { ids: releasedIdsVia() })
     }), 'rsww released route')
     route('/api/rsww/spec', guardedRoute(async (req, res) => {
       sendJson(res, 200, { spec: SPEC_TEXT })
@@ -313,6 +348,7 @@ export function registerBoardRoutes(ctx) {
         sendJson(res, 200, { ok: true, dryRun: true })
         return
       }
+      const previous = rawTemplates().find((t) => t.id === id)
       const templates = rawTemplates().filter((t) => t.id !== id)
       templates.push({
         id,
@@ -320,6 +356,8 @@ export function registerBoardRoutes(ctx) {
         description: typeof body.description === 'string' && body.description.trim() !== '' ? body.description.trim() : parsed.description || '',
         enabled: body.enabled !== false,
         json,
+        // 已释放模板的编辑性重存不改变释放态(注销走 unrelease 显式动作)
+        ...(previous?.released === true ? { released: true } : {}),
       })
       writeTemplates(templates)
       sendJson(res, 200, { ok: true })
@@ -327,7 +365,7 @@ export function registerBoardRoutes(ctx) {
     route('/api/rsww/template-remove', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req, res))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
-      const outcome = removeTemplateById(id)
+      const outcome = await removeTemplateById(id)
       if (!outcome.ok) throw new Error(outcome.error)
       sendJson(res, 200, { ok: true })
     }), 'rsww template-remove route')
@@ -344,14 +382,17 @@ export function registerBoardRoutes(ctx) {
       }).filter((t) => t !== null)
       const setErrors = validateTemplateSet(parsedSet).filter((e) => e.target === 'top:id' && e.message.startsWith(id + ' '))
       if (setErrors.length > 0) throw new Error('模板集合校验失败:' + setErrors.map((e) => e.message).join(';'))
-      const outcome = releaseFlowTemplate(entry)
-      sendJson(res, 200, { ok: true, outcome })
+      const result = await releaseDispatch(entry)
+      if (result.outcome === 'failed') throw new Error(result.broken ?? '释放失败')
+      markReleased(id, true)
+      sendJson(res, 200, { ok: true, outcome: result.outcome, ...(result.broken === undefined ? {} : { broken: result.broken }) })
     }), 'rsww release route')
     route('/api/rsww/unrelease', guardedRoute.post(async (req, res) => {
       const body = JSON.parse(await readJsonBody(req, res))
       const id = typeof body.id === 'string' ? body.id.trim() : ''
-      const outcome = unreleaseFlowTemplate(id)
-      sendJson(res, 200, { ok: true, outcome })
+      const result = await unreleaseDispatch(id)
+      markReleased(id, false)
+      sendJson(res, 200, { ok: true, outcome: result.outcome })
     }), 'rsww unrelease route')
     route('/api/rsww/config', guardedRoute(async (req, res) => {
       sendJson(res, 200, { config: normalizeConfig(loadJson('config.json', undefined)) })

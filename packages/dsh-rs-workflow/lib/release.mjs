@@ -20,7 +20,7 @@ const OLD_PREFIX = '.rs-workflow-old-'
 const ORPHAN_PREFIX = '.rs-workflow-orphan-'
 // 骨架唯一源中的 orchestrator 行 templateId 锚定;创建产物一律改写为组合承载的模板 id(恰一处)
 const TEMPLATE_ANCHOR_MAIN = 'TPL_ANCHOR'
-const FLOW_ID_RE = /^[a-z][a-z0-9-]*$/
+export const FLOW_ID_RE = /^[a-z][a-z0-9-]*$/
 const DESC_MAX_CHARS = 200
 const DESC_FALLBACK = '流程工作流模板'
 const PRESET_NAME_PREFIX = '若水·'
@@ -67,11 +67,18 @@ function releaseAgentYaml(flowId) {
 }
 
 // preset.yml 由骨架元数据 + 模板条目生成(组合名已含模板语义,描述取模板条目)
-function presetYaml(entry, flowId) {
+// presetMeta:展示元数据的唯一权威(原始值,不转义);序列化方自行按载体转义
+export function presetMeta(entry, flowId) {
   const desc = String(entry.description ?? '').replace(/\s*\n\s*/g, ' ').slice(0, DESC_MAX_CHARS) || DESC_FALLBACK
+  const name = `${PRESET_NAME_PREFIX}${entry.label || flowId}`
+  return { name, description: desc }
+}
+
+function presetYaml(entry, flowId) {
+  const { name, description: desc } = presetMeta(entry, flowId)
   // name 用双引号纯量防 YAML 结构字符(: 与换行)破坏生成物
-  const name = `${PRESET_NAME_PREFIX}${entry.label || flowId}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\s*\n\s*/g, ' ')
-  return `name: "${name}"\ndescription: >-\n  ${desc}\n`
+  const escaped = name.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\s*\n\s*/g, ' ')
+  return `name: "${escaped}"\ndescription: >-\n  ${desc}\n`
 }
 
 // 硬崩溃残留的 staging/备份目录清理(前缀本包独占,直接删安全;orphan 前缀永不自动删)

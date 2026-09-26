@@ -464,17 +464,19 @@ export function registerOrchestrator(ctx, config) {
     // 现行为返回注册 disposer,行销毁即注销;挂靠表(initiator/resumer)以 agentId 为键,行销毁后的
     // stale 表项由下次 status/start 受理覆盖;run 终态经 finishRun 清 activeRuns。
   })
-  registerTurnGuard(ctx, { currentRunId })
+  registerTurnGuard(ctx, { currentRunId, createUserMessage: config.createUserMessage })
   return { rejectCounts, activeRuns }
 }
 
 // 会话守门注册:轮次将停时判定欠动作并 steer 拉回(宿主机器重读 inbox,有 steering 即续跑一步)。
-// 消息构造依赖宿主 llm 包,缺失即降级不守门(规约条款 1:编排能力不得被增强功能拖垮)。
-function registerTurnGuard(ctx, { currentRunId }) {
+// 消息构造依赖宿主 llm 包(peerDependency,仅宿主运行时可解析):config.createUserMessage
+// 供单元测试注入桩;生产缺省动态 import,解析失败即降级不守门(规约条款 1:编排能力不得被
+// 增强功能拖垮)。
+function registerTurnGuard(ctx, { currentRunId, createUserMessage: injectedCreateUserMessage }) {
   // 事件面缺失的上下文(旧宿主 / 精简组合)不注册守门——编排本身照常可用
   if (typeof ctx.on !== 'function') return
   const nudgeGate = createNudgeGate()
-  let createUserMessage
+  let createUserMessage = injectedCreateUserMessage
   ctx.on('agent/turn-stopping', async ({ agent }) => {
     const runId = currentRunId(agent)
     if (runId === undefined) { return }
