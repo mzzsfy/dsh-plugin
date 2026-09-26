@@ -1,4 +1,5 @@
-// 双协议非流式响应装配:路径含 /messages 走 anthropic message 形状,
+// 三协议非流式响应装配:路径含 /responses 走 openai responses 形状,
+// 含 /messages 走 anthropic message 形状,
 // GET /models 按客户端协议(anthropic-version 头)回双形态列表,其余回 openai chat.completion 形状。
 // 模型名回显请求 model;usage 为固定最小值,由场景层(--tokens)覆写。
 import { THINKING_TEXT } from './scenarios.mjs'
@@ -23,6 +24,14 @@ export function openaiResponse(model, usage = { prompt_tokens: 1, completion_tok
   }
 }
 
+export function responsesResponse(model, usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2 }) {
+  return {
+    id: 'resp_echo-upstream', object: 'response', created: 0, status: 'completed', model,
+    output: [{ type: 'message', id: 'msg_echo-upstream', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: FIXED_CONTENT, annotations: [] }] }],
+    usage,
+  }
+}
+
 export function modelListResponse(headers, models = [MODEL_ID]) {
   const list = models?.length ? models : [MODEL_ID]
   if (headers['anthropic-version'] !== undefined) {
@@ -37,6 +46,12 @@ export function respondFor(method, path, headers, parsedBody, options = {}) {
   if (method === 'GET' && path.includes('/models')) return modelListResponse(headers, options.models)
   const thinking = options.scenario === 'think'
   const [input = 1, output = 1] = options.tokens ?? []
+  if (path.includes('/responses')) {
+    const usage = { input_tokens: input, output_tokens: output, total_tokens: input + output }
+    return thinking
+      ? { ...responsesResponse(model, usage), output: [{ type: 'reasoning', id: 'rs_echo-upstream', summary: [] }, ...responsesResponse(model, usage).output] }
+      : responsesResponse(model, usage)
+  }
   if (path.includes('/messages')) {
     const content = thinking
       ? [{ type: 'thinking', thinking: THINKING_TEXT }, { type: 'text', text: FIXED_CONTENT }]

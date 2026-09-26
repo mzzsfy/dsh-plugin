@@ -54,3 +54,30 @@ test('anthropic 流式 event 序列含 message_start 与 usage', async () => {
   assert.equal(usage.usage.output_tokens, 1)
   assert.equal(JSON.parse(events[0].data).message.usage.input_tokens, 1)
 })
+
+test('responses 流式事件序列含 created/added/delta/completed 与 usage', async () => {
+  const res = await post('/v1/responses', { model: 'my-model', input: 'hi', stream: true })
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get('content-type'), /text\/event-stream/)
+  const events = parseSse(await res.text())
+  const payloads = events.map((e) => JSON.parse(e.data))
+  assert.deepEqual(payloads.map((p) => p.type), ['response.created', 'response.output_item.added', 'response.output_text.delta', 'response.output_text.done', 'response.completed'])
+  assert.equal(payloads[0].response.id, 'resp_echo-upstream')
+  assert.equal(payloads[1].output_index, 0)
+  assert.equal(payloads[2].delta, 'echo-upstream-fixed')
+  const done = payloads.at(-1).response
+  assert.equal(done.status, 'completed')
+  assert.equal(done.output[0].content[0].text, 'echo-upstream-fixed')
+  assert.deepEqual(done.usage, { input_tokens: 1, output_tokens: 1, total_tokens: 2 })
+})
+
+test('responses 非流式回 response 形状', async () => {
+  const res = await post('/v1/responses', { model: 'my-model', input: 'hi' })
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.equal(body.object, 'response')
+  assert.equal(body.status, 'completed')
+  assert.equal(body.output[0].content[0].type, 'output_text')
+  assert.equal(body.output[0].content[0].text, 'echo-upstream-fixed')
+  assert.equal(body.usage.total_tokens, 2)
+})
