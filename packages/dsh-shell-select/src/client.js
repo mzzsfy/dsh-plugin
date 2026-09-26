@@ -134,7 +134,16 @@ window.__ModuleLoader__.load({
       '.sls-tv__row { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:default; }',
       '.sls-tv__row--exp { cursor:pointer; user-select:none; }',
       '.sls-tv__lead { display:flex; align-items:center; gap:4px; color:var(--dsw-alias-label-tertiary, inherit); }',
-      '.sls-tv__chev { opacity:.45; transition:transform .15s ease; }',
+      // 官方 DisclosureRow 同构:icon 与 chevron 同 16px 槽,hover 交叉淡化;
+      // 错误/进行中状态点绝对定位覆盖 icon(红点掩盖 icon)
+      '.sls-tv__leadStack { position:relative; width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; flex:none; }',
+      '.sls-tv__iconIdle { display:inline-flex; opacity:1; transition:opacity 100ms ease; }',
+      '.sls-tv__stateCover { position:absolute; inset:0; margin:auto; display:inline-flex; align-items:center; justify-content:center; background:transparent; }',
+      '.sls-tv__stateCover::before { content:""; position:absolute; inset:-2px; border-radius:50%; background:var(--dsw-alias-bg-primary, #fff); }',
+      '.sls-tv__stateCover > span { position:relative; }',
+      '.sls-tv__row:hover .sls-tv__iconIdle { opacity:0; }',
+      '.sls-tv__chev { opacity:.45; transition:transform .15s ease, opacity .1s ease; }',
+      '.sls-tv__row:hover .sls-tv__chev { opacity:1; }',
       '.sls-tv__row[data-open="1"] .sls-tv__chev { transform:rotate(-90deg); }',
       '.sls-tv__sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }',
       '.sls-tv__title { font-weight:400; }',
@@ -646,11 +655,18 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END shellCardModel
 
-    // 官方 leadingFor 同构:失败红点,回退行黄点,进行中灰点,其余工具图标
-    function leadingOf(status, icons) {
-      if (status === 'failed' || status === 'signaled') return icons.StateDot({ state: 'error' })
-      if (status === 'generic-warn') return icons.StateDot({ state: 'warning' })
-      if (status === 'running') return icons.StateDot({ state: 'ongoing' })
+    // 官方 DisclosureRow leading 同构:16px 槽内 icon 与 chevron 同位,
+    // 收起时 chevron hover 才现(交叉淡化),展开时仅 chevron-up;错误态
+    // 红点叠 icon 之上(掩盖 icon,官方状态点语义)
+    function leadingStack({ status, icons }) {
+      const failed = status === 'failed' || status === 'signaled' || status === 'generic-error'
+      const dot = failed ? icons.StateDot({ state: 'error' }) : status === 'generic-warn' ? icons.StateDot({ state: 'warning' }) : status === 'running' ? icons.StateDot({ state: 'ongoing' }) : null
+      if (dot !== null) {
+        return h('span', { className: 'sls-tv__leadStack' },
+          h('span', { className: 'sls-tv__iconIdle' }, icons.IconApi({ size: 14 })),
+          h('span', { className: 'sls-tv__stateCover' }, dot),
+        )
+      }
       return icons.IconApi({ size: 14 })
     }
 
@@ -722,13 +738,15 @@ window.__ModuleLoader__.load({
       }, done ? (detectEnglish() ? 'Copied' : '已复制') : label)
     }
 
-    // 非终端意图回退行(后台 ack / isError / 截断):摘要 + 可展开原文
+    // 非终端意图回退行(后台 ack / isError / 截断):摘要 + 可展开原文。
+    // 错误行始终可展开(isError 块 output 常空,收起态看不到失败详情——
+    // 官方 genericBody 以 bodyRaw/output 任一非空判定,同理)
     function GenericShellRow({ model, inspect, en }) {
       const [open, setOpen] = useState(false)
       const summary = model.summary !== undefined && model.summary !== ''
         ? model.summary.split('\n')[0]
         : (model.output !== null && model.output !== '' ? model.output.split('\n')[0] : '')
-      const expandable = model.output !== null && model.output !== ''
+      const expandable = (model.output !== null && model.output !== '') || model.command !== ''
       return h('div', { className: 'sls-tv' },
         h('div', {
           className: 'sls-tv__row' + (expandable ? ' sls-tv__row--exp' : ''),
@@ -744,14 +762,14 @@ window.__ModuleLoader__.load({
           } : undefined,
         },
           h('span', { className: 'sls-tv__lead' },
-            leadingOf(model.running === true ? 'running' : 'generic-warn', TOOLVIEW_ICONS),
+            leadingStack({ status: model.running === true ? 'running' : 'generic-warn', icons: TOOLVIEW_ICONS }),
             expandable ? h('span', { className: 'sls-tv__chev', 'data-open': open ? '1' : '0', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })) : null,
           ),
           h('span', { className: 'sls-tv__title' }, 'Shell'),
           summary !== '' ? h('span', { className: 'sls-tv__sep', 'aria-hidden': true }) : null,
           summary !== '' ? h('span', { className: 'sls-tv__sum' }, summary) : null,
         ),
-        open && expandable ? h('pre', { className: 'sls-tv__out', style: { border: '1px solid rgba(128,128,128,.28)', borderRadius: 8 } }, model.output) : null,
+        open && expandable ? h('pre', { className: 'sls-tv__out', style: { border: '1px solid rgba(128,128,128,.28)', borderRadius: 8 } }, model.command + (model.output !== null && model.output !== '' ? `\n${model.output}` : '')) : null,
         inspect !== undefined ? h('button', { className: 'sls-tv__inspect', onClick: inspect }, TOOLVIEW_ICONS.IconInspect({}), en ? 'Inspect' : '检查') : null,
       )
     }
@@ -841,7 +859,7 @@ window.__ModuleLoader__.load({
           },
         },
           h('span', { className: 'sls-tv__lead' },
-            leadingOf(model.status, TOOLVIEW_ICONS),
+            leadingStack({ status: model.status, icons: TOOLVIEW_ICONS }),
             h('span', { className: 'sls-tv__chev', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })),
           ),
           srStatus !== null ? h('span', { className: 'sls-tv__sr' }, srStatus) : null,
