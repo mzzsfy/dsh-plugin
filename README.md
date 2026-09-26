@@ -57,7 +57,7 @@ pnpm config set --global minimumReleaseAge 360
 
 - **0.1.7-rc.2(完全兼容)**:宿主 SettingsForms 形态(settings 无 register/get)下,六包(context-manager/cron-board/session-manager/turn-notify/usage-dash/usage-panel)settings 读/写循环端到端可用——双形态适配:legacy 方法面(settings.register+update)与 0.1.7 静态 Config(volatile schema)+ configEditor.edit 写入并存,运行期以 `register && update` 双在检测分派。真机验收:六包 HTTP 写读闭环 + profile cordis.patch.yml 逐字段落盘 + Playwright UI 分区渲染(含 usage-dash 定价表格回读、turn-notify 深合并芯片态)。
 - **0.1.5-rc.3 / 0.1.2-rc.1(不崩溃底线,实测通过)**:同套代码 legacy 分支回归,六包写读经宿主 settings.yaml 命名空间段,行为与适配前一致(双形态检测在旧宿主恒走原路径,零行为漂移)。
-- 例外:dsh-shell-select 预设架构要求 ≥0.1.7-rc.1(`@deepseek-ai/dsh-agent-preset` 依赖),0.1.2-rc.1 上不可安装(peerDependencies 已声明门槛);其余包三版本全装。
+- 例外:dsh-shell-select 预设架构要求 ≥0.1.7-rc.1(`@deepseek-ai/dsh-agent-preset` 依赖),0.1.2-rc.1/0.1.5-rc.3 上不可安装(peerDependencies 已声明门槛;bundle patch 的 preset 行在旧宿主 import 失败会阻断 boot,隔离夹具以 `--only` 白名单排除该包);0.1.7-rc.2 全家桶全装。
 
 ## 开发态链接(dev-link)
 
