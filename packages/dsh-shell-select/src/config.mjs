@@ -64,10 +64,12 @@ export const Config = z.object({
 // volatile 字段,缺声明即 "has no volatile fields" 拒写),Config 产物字段为
 // boxed ref(读值须 .get(),官方 dsh-bash-local 同构)。统一在此解箱,消费者
 // (executor/web-routes/测试)一律拿普通对象。
-// structuredClone 深拷贝:schemastery resolve 会原地改写入参(填默认/键归一)
-// 并把产出对象置为不可扩展,二轮 resolve(快照回灌,web 写路径 current+patch
-// 合并常态)对不可扩展对象赋值即炸;clone 切断产物与 schema 的原地耦合,保证
-// resolveConfig 幂等。
+// structuredClone 深拷贝双向:输入侧(sanitize 产物)切断与调用方对象的耦合——
+// volatile ref .get() 产物是 cosmokit snapshot 深冻结对象,schemastery resolve
+// 原地改写入参,冻结 env 直接炸挂载;输出侧:schemastery resolve 会原地改写入参
+// (填默认/键归一)并把产出对象置为不可扩展,二轮 resolve(快照回灌,web 写路径
+// current+patch 合并常态)对不可扩展对象赋值即炸;clone 切断产物与 schema 的原地
+// 耦合,保证 resolveConfig 幂等且对输入不可变。
 export function unwrapConfig(value) {
   return Object.fromEntries(Object.entries(value).map(([key, field]) => {
     const raw = typeof field?.get === 'function' ? field.get() : field
@@ -75,9 +77,10 @@ export function unwrapConfig(value) {
   }))
 }
 
-/** schema 应用 + 解箱:全部消费者经此入口,不直接触 Config 产物。 */
+/** schema 应用 + 解箱 + 输入深拷:全部消费者经此入口,不直接触 Config 产物。 */
 export function resolveConfig(entry) {
-  return unwrapConfig(Config(sanitizeConfigEntry(entry ?? {})))
+  const sanitized = sanitizeConfigEntry(entry ?? {})
+  return unwrapConfig(Config(structuredClone(sanitized)))
 }
 
 // 落盘行 config 的类型防御:设置写路径(原生页/mutate)可能把 volatile 字段

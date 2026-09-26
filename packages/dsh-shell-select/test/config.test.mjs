@@ -47,6 +47,32 @@ test('落盘坏形态防御:volatile 字段被序列化成对象时降级默认,
   }
 })
 
+test('冻结输入防御:volatile ref 深冻结快照喂入不改写不抛(挂载路径)', () => {
+  // 事故:cosmokit createVolatile 的 snapshot 对 volatile 值逐层 Object.freeze,
+  // 行 Config ref .get() 产物是深冻结对象;sanitizeConfigEntry 引用透传,
+  // schemastery resolve 原地改写入参(填默认)撞冻结 env 抛
+  // "Cannot assign to read only property 'MSYSTEM'" → 执行器挂载失败,
+  // 每次启动回滚官方 pwsh 链,shell 工具永不注册。
+  // 契约:resolveConfig 对输入不可变(与 unwrapConfig 输出 clone 对称)。
+  const frozenSection = Object.freeze({
+    shells: Object.freeze([
+      Object.freeze({ id: 'pwsh', kind: 'pwsh', path: '', args: Object.freeze([]), env: Object.freeze({}) }),
+      Object.freeze({ id: 'git-bash', kind: 'bash', path: '', args: Object.freeze([]), login: true, distro: '', env: Object.freeze({ MSYSTEM: 'MINGW64' }) }),
+    ]),
+    default: 'git-bash',
+  })
+  const applied = resolveConfig(frozenSection)
+  assert.equal(applied.default, 'git-bash')
+  assert.deepEqual(applied.shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
+  assert.deepEqual(applied.shells[1].env, { MSYSTEM: 'MINGW64' })
+  // 二轮 resolve(行重载/快照回灌常态)同样幂等
+  const again = resolveConfig(frozenSection)
+  assert.deepEqual(again, applied)
+  // 输出与冻结输入脱耦:改输出不 affects 输入,反复解析结果稳定
+  applied.shells[1].env.MSYSTEM = 'TERM'
+  assert.deepEqual(resolveConfig(frozenSection).shells[1].env, { MSYSTEM: 'MINGW64' })
+})
+
 test('pwsh argv:非交互形 + 编码前缀', () => {
   const argv = buildArgv({ kind: 'pwsh', path: 'C:\\pf\\pwsh.exe' }, 'Get-Item .')
   assert.deepEqual(argv, [

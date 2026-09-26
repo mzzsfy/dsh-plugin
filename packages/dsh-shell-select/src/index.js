@@ -95,10 +95,16 @@ export async function apply(ctx, config) {
  * fiber 卸载自动清理)。行 config 的 volatile 字段(0.1.7 settings 面节值)
  * 是响应式 ref(get() 协议,官方 plainOptions 同构),挂载前动态解包,legacy
  * 普通对象原样透传——直接透传 ref 会令执行器 schema 校验撞对象形状炸。
+ * 解包产物必须 structuredClone:ref .get() 返回 cosmokit snapshot 深冻结对象,
+ * 而执行器 static Config 使 cordis 挂载管线对 section 再做一次原地 resolve,
+ * 冻结 env 会炸 "Cannot assign to read only property" 并触发接管回滚。
  */
 async function mountExecutor(ctx, config) {
-  const unwrapVolatile = (value) => (typeof value?.get === 'function' ? value.get() : value)
-  const section = { ...unwrapVolatile(config) }
+  const unwrapVolatile = (value) => {
+    const raw = typeof value?.get === 'function' ? value.get() : value
+    return raw !== null && typeof raw === 'object' ? structuredClone(raw) : raw
+  }
+  const section = { ...config }
   for (const key of Object.keys(section)) section[key] = unwrapVolatile(section[key])
   const fiber = await ctx.plugin(ShellSelectExecutor, section)
   // await 返回 ≠ 激活:executor inject 的宿主服务缺失时 fiber 静默 pending
