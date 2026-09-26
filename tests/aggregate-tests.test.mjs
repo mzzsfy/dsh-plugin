@@ -149,8 +149,9 @@ test('runUnits_双流输出_同一日志完整留痕', async t => {
 test('discoverUnits_真实仓库_冒烟与仓库根测试在列且顺序稳定', () => {
   const units = discoverUnits(repo)
   assert.equal(units[0].name, 'smoke-load')
-  assert.equal(units.at(-1).name, 'repo-tests')
   const names = units.map(u => u.name)
+  // echo-upstream 单元在 repo-tests 之后追加(模拟器夹具契约测试,协议面保留策略同源)
+  assert.ok(names.indexOf('repo-tests') < names.indexOf('echo-upstream'))
   assert.equal(new Set(names).size, names.length)
   assert.ok(names.includes('dsh-turn-notify'))
   for (const unit of units) assert.ok(unit.command.length > 0)
@@ -158,7 +159,7 @@ test('discoverUnits_真实仓库_冒烟与仓库根测试在列且顺序稳定',
 
 test('discoverUnits_单包改动清单_只保留该包', () => {
   const units = discoverUnits(repo, ['packages/dsh-turn-notify/client.js', 'packages/dsh-turn-notify/package.json'])
-  assert.deepEqual(units.map(u => u.name), ['smoke-load', 'dsh-turn-notify', 'repo-tests'])
+  assert.deepEqual(units.map(u => u.name), ['smoke-load', 'dsh-turn-notify', 'repo-tests', 'echo-upstream'])
   const turnNotify = units.find(u => u.name === 'dsh-turn-notify')
   assert.ok(turnNotify.command.some(arg => arg.includes('test')))
 })
