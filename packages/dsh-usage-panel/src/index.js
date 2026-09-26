@@ -66,6 +66,21 @@ const SETTINGS_SCHEMA = z.object({
   }).default({}),
 })
 
+// 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
+// settings.register 注册命名空间。根级 volatile 包装:整节 live 表单,节写经
+// loader 原地热更;旧宿主 schemastery 无 volatile 方法,特性检测原样返回
+export const Config = volatileWrap(SETTINGS_SCHEMA)
+
+function volatileWrap(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
+
+// volatile ref 动态解包(get 协议):0.1.7 下 apply 入参 config 为整节单 ref;
+// legacy 宿主 config 为普通对象原样透传
+function unwrapVolatile(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
 const TYPE_DEEPSEEK = 'deepseek'
 const TYPE_OPENROUTER = 'openrouter'
 const TYPE_KIMI = 'kimi'
@@ -326,7 +341,7 @@ async function queryAccount(account) {
 // timer 为软依赖:不进 inject 声明,服务缺失时仅停用自动轮询,面板手动查询不受影响
 export const inject = ['webServer']
 
-export function apply(ctx) {
+export function apply(ctx, configRef) {
   let config = null
   let loadPromise = null
   let writeChain = Promise.resolve()
@@ -340,8 +355,9 @@ export function apply(ctx) {
 
   function readNotifySettings() {
     const settings = ctx.get('settings')
-    // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值,防路由 handler 抛错
-    const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
+    // 双形读(maintain 同构):legacy settings 命名空间 get;0.1.7+ apply 入参
+    // config 整节解包。方法面守卫兼防:服务在但缺 get 时回落默认值,防路由 handler 抛错
+    const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : unwrapVolatile(configRef)
     return resolvedNotifySettings(value && typeof value === 'object' ? value.notify : undefined)
   }
 
@@ -631,11 +647,21 @@ export function apply(ctx) {
           const body = JSON.parse(await readBody(req))
           const check = validateNotifyPatch(body)
           requireOk(check.ok, check.reason)
-          // 读出当前值做浅合并后整体写回,不依赖 settings.update 的嵌套合并语义
+          // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
           const merged = { ...readNotifySettings(), ...check.patch }
+          // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+          // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+          // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
           const settings = ctx.get('settings')
           requireOk(settings !== undefined, 'settings 服务不可用')
-          await settings.update(NAMESPACE, { notify: merged })
+          if (typeof settings.register === 'function' && typeof settings.update === 'function') {
+            await settings.update(NAMESPACE, { notify: merged })
+          } else {
+            const editor = ctx.get('configEditor')
+            const entry = ctx.fiber?.entry
+            requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
+            await editor.edit(entry, (current) => ({ ...current, notify: merged }))
+          }
           sendJson(res, 200, { ok: true, notify: publicNotify(readNotifySettings()) })
         }),
       }),
@@ -766,6 +792,14 @@ export function apply(ctx) {
   })
 
   ctx.inject(['settings'], (settingsCtx) => {
+    // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支;
+    // 0.1.7 关闭原生自动设置页,设置面由本包自带分区承担(maintain 同构)
+    if (typeof settingsCtx.settings.register !== 'function') {
+      if (typeof settingsCtx.settings?.configure === 'function') {
+        settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
+      }
+      return
+    }
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA)
   })
 }

@@ -103,10 +103,51 @@ const SETTINGS_SCHEMA = z.object({
 })
 
 // 读侧归一交由 core 的 resolvedConfig:字段类型异常回退默认值,与写路径校验宽松度一致
-const readSettings = (ctx) => {
+const readSettings = (ctx, config) => {
   const settings = ctx.get('settings')
-  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认配置,防路由 handler 抛错
-  return resolvedConfig(settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined)
+  // 双形读(maintain 同构):legacy settings 命名空间 get;0.1.7+ apply 入参
+  // config 整节解包。方法面守卫兼防:服务在但缺 get 时回落默认配置,防路由 handler 抛错
+  return resolvedConfig(settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : unwrapVolatile(config))
+}
+
+// volatile ref 动态解包(get 协议):0.1.7 下 apply 入参 config 为整节单 ref;
+// legacy 宿主 config 为普通对象原样透传
+function unwrapVolatile(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
+// 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构)。根级 volatile
+// 包装:整节 live 表单,节写经 loader 原地热更;旧宿主 schemastery 无 volatile
+// 方法,特性检测原样返回
+export const Config = typeof SETTINGS_SCHEMA.volatile === 'function' ? SETTINGS_SCHEMA.volatile() : SETTINGS_SCHEMA
+
+// 0.1.7 写路径:configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)。
+// 嵌套补丁(enabled.{category}/soundMapping.{category})须深合并:浅展开会把未提交
+// 的兄弟分类键抹成 undefined;null 值原样落盘(清除语义,读侧 resolvedConfig 过滤)
+async function persistPatch(ctx, patch) {
+  const settings = ctx.get('settings')
+  // legacy 方法面以 register 为准(0.1.7 的 settings.update 名义在场但按命名
+  // 空间找条目必败,不可作判据)
+  if (typeof settings?.register === 'function' && typeof settings?.update === 'function') {
+    await settings.update(NAMESPACE, patch)
+    return
+  }
+  const editor = ctx.get('configEditor')
+  const entry = ctx.fiber?.entry
+  if (!editor || typeof editor.edit !== 'function' || !entry) throw new Error('settings 服务不可用')
+  await editor.edit(entry, (current) => deepMerge(current, patch))
+}
+
+function deepMerge(under, over) {
+  const out = { ...under }
+  for (const key of Object.keys(over)) {
+    const next = over[key]
+    const underValue = out[key]
+    const bothPlain = (next !== null && typeof next === 'object' && !Array.isArray(next))
+      && (underValue !== null && typeof underValue === 'object' && !Array.isArray(underValue))
+    out[key] = bothPlain ? deepMerge(underValue, next) : next
+  }
+  return out
 }
 
 function sendJson(res, status, payload) {
@@ -188,7 +229,7 @@ async function readSoundIndex() {
 const writeSoundIndex = (index) => writeFile(soundIndexPath, JSON.stringify(index))
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
-export function apply(ctx) {
+export function apply(ctx, config) {
   const projection = createProjection({})
   // 打开回合:按会话 id 记回合序号与起始时间,回合结束即清;序号严格递增,
   // 供子代理注册归属判定,同毫秒内多回合不受时钟精度歧义影响
@@ -242,7 +283,7 @@ export function apply(ctx) {
 
   // durationMs 与 wakeTurn / awaitingChildren 由调用方在清理状态前读取后传入,防先删后读
   function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false, awaitingChildren = false }) {
-    const settings = readSettings(ctx)
+    const settings = readSettings(ctx, config)
     const header = session.header || {}
     const sessionId = String(session.id ?? '')
     if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn, awaitingChildren })) return
@@ -420,6 +461,14 @@ export function apply(ctx) {
   ))
 
   ctx.inject(['settings'], (settingsCtx) => {
+    // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支;
+    // 0.1.7 关闭原生自动设置页,设置面由本包自带分区承担(maintain 同构)
+    if (typeof settingsCtx.settings.register !== 'function') {
+      if (typeof settingsCtx.settings?.configure === 'function') {
+        settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
+      }
+      return
+    }
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA)
   })
 
@@ -472,7 +521,7 @@ export function apply(ctx) {
           if (query.has('cursor') && projection.version() === cursor) {
             await projection.wait(cursor, LONG_POLL_WAIT_MS)
           }
-          const settings = readSettings(ctx)
+          const settings = readSettings(ctx, config)
           sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
         } finally {
           if (releaseBrowserPoll !== null) releaseBrowserPoll()
@@ -603,15 +652,14 @@ export function apply(ctx) {
         await writeSoundIndex(index)
       }
       // 被引用即回落:深合并语义下引用置 null 清除,resolveSound 兜底回内置默认
-      const settings = ctx.get('settings')
-      if (settings) {
-        const current = readSettings(ctx)
+      if (ctx.get('settings')) {
+        const current = readSettings(ctx, config)
         const patch = {}
         for (const key of Object.keys(current.soundMapping)) {
           if (current.soundMapping[key] === id) patch[key] = null
         }
         if (Object.keys(patch).length > 0) {
-          await settings.update(NAMESPACE, { soundMapping: patch })
+          await persistPatch(ctx, { soundMapping: patch })
           projection.bump()
         }
       }
@@ -637,15 +685,15 @@ export function apply(ctx) {
           return
         }
         // 校验到写回整段入互斥域:防与 DELETE 清引用并发时把已删音效的 id 写回映射;
-        // settings.update 深合并无法删键,清除以 null 表达,读侧 resolvedConfig 过滤
+        // 深合并无法删键,清除以 null 表达,读侧 resolvedConfig 过滤
         await serializedSoundWrite(async () => {
           if (!validateMappingId(id, (await listSounds()).map((sound) => sound.id))) {
             sendJson(res, 400, { error: '未知音效: ' + id })
             return
           }
-          await settings.update(NAMESPACE, { soundMapping: { [category]: id.length === 0 ? null : id } })
+          await persistPatch(ctx, { soundMapping: { [category]: id.length === 0 ? null : id } })
           projection.bump()
-          sendJson(res, 200, { ok: true, soundMapping: readSettings(ctx).soundMapping })
+          sendJson(res, 200, { ok: true, soundMapping: readSettings(ctx, config).soundMapping })
         })
       }),
     }), 'turn-notify mapping route')
@@ -658,7 +706,7 @@ export function apply(ctx) {
       handler: async (req, res) => {
         // imAvailable 不进 core 纯函数,config 响应处合流;实时判定,无装载时序假设
         if (req.method === 'GET') {
-          sendJson(res, 200, { ...publicConfig(readSettings(ctx)), imAvailable: imReady() })
+          sendJson(res, 200, { ...publicConfig(readSettings(ctx, config)), imAvailable: imReady() })
           return
         }
         if (req.method !== 'POST') {
@@ -672,14 +720,9 @@ export function apply(ctx) {
             sendJson(res, 400, { error: verdict.reason })
             return
           }
-          const settings = ctx.get('settings')
-          if (!settings) {
-            sendJson(res, 500, { error: 'settings 服务不可用' })
-            return
-          }
-          await settings.update(NAMESPACE, verdict.patch)
+          await persistPatch(ctx, verdict.patch)
           projection.bump()
-          sendJson(res, 200, { ...publicConfig(readSettings(ctx)), imAvailable: imReady() })
+          sendJson(res, 200, { ...publicConfig(readSettings(ctx, config)), imAvailable: imReady() })
         } catch (error) {
           sendError(res, error)
         }
@@ -692,7 +735,7 @@ export function apply(ctx) {
       path: '/api/turn-notify/test-webhook',
       handler: route('POST', { crossOrigin: true }, async (req, res) => {
         // 等待投递完成,真实结果随响应返回,测试按钮不再谎报
-        const result = await sendWebhook({ url: readSettings(ctx).webhookUrl, payload: buildWebhookPayload(buildTestUnit()) })
+        const result = await sendWebhook({ url: readSettings(ctx, config).webhookUrl, payload: buildWebhookPayload(buildTestUnit()) })
         sendJson(res, 200, result)
       }),
     }), 'turn-notify test-webhook route')
@@ -756,7 +799,7 @@ export function apply(ctx) {
           sendJson(res, 200, { ok: false, detail: 'dsh-im 未安装' })
           return
         }
-        const targets = normalizeImTargets(readSettings(ctx).imTargets)
+        const targets = normalizeImTargets(readSettings(ctx, config).imTargets)
         if (targets.length === 0) {
           sendJson(res, 200, { ok: false, detail: '未配置投递目标' })
           return

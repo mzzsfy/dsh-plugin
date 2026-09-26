@@ -294,7 +294,188 @@ function waitForRecord(poll, timeoutMs = 10 * 1000) {
         }
         setTimeout(tick, 50)
       }).catch(reject)
-    }
-    tick()
-  })
+     }
+     tick()
+   })
 }
+
+// --- 0.1.7 settings 面双形适配(maintain a913c2c 同构) ---
+
+// 0.1.7 形态装配桩:settings 无 register/get(宿主已移除),config 为整节单 ref 桩,
+// configEditor 桩经 change 合并后原样写回(模拟 loader 仅 volatile 变化的原地热更)
+function makeRc17Ctx({ configStore = {}, configEditorAvailable = true, configureAvailable = true } = {}) {
+  const routes = new Map()
+  const calls = { editCalls: [], configureCalls: [], registerCalls: [] }
+  const config = { get: () => ({ ...configStore }) }
+  const settingsService = {}
+  if (configureAvailable) {
+    settingsService.configure = (presentation, owner) => {
+      calls.configureCalls.push({ presentation, owner })
+      return () => {}
+    }
+  }
+  const configEditor = {
+    async edit(entry, change) {
+      calls.editCalls.push(entry)
+      const next = change({ ...configStore }, {})
+      for (const [key, value] of Object.entries(next)) configStore[key] = value
+    },
+  }
+  const effects = []
+  const ctx = {
+    calls,
+    fiber: { entry: { options: { id: 'cron-board', name: '@mzzsfy/dsh-cron-board' } } },
+    effect(fn, label) {
+      // 会话等待轮询为真实定时器形态:桩跳过(与 makeFullCtx 同款),其余同步执行
+      if (label === 'cron-board session wait') return
+      effects.push(fn)
+      fn()
+    },
+    get(name) {
+      if (name === 'settings') return settingsService
+      if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
+      if (name === 'agents') return { get: () => undefined }
+      if (name === 'sessionQuery') return { listSessions: async () => [] }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      if (name === 'agentPresets') return { defaultId: '', list: async () => [] }
+      return undefined
+    },
+    inject(deps, fn) {
+      if (deps[0] === 'timer') {
+        fn({ interval(intervalFn) { return () => {} } })
+      }
+      if (deps[0] === 'settings') {
+        fn({
+          settings: settingsService,
+          effect(stubEffect) {
+            const disposer = stubEffect()
+            if (typeof disposer === 'function') effects.push(disposer)
+          },
+        })
+      }
+    },
+    webServer: {
+      register(route) {
+        routes.set(route.path, route.handler)
+        return () => {}
+      },
+    },
+  }
+  return { ctx, routes, config, configStore, calls, effects }
+}
+
+// ui-settings 请求走 prefix 路由(api.handle 按 method+segments 分发);
+// 需真实数据目录(getRuntime 装配 store),env 注入临时目录
+async function callApi(routes, path, body) {
+  const handler = routes.get('/api/cron-board')
+  assert.ok(handler, 'prefix 路由未注册')
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => { res.payload = text ? JSON.parse(text) : null }
+  const req = new EventEmitter()
+  req.method = body === undefined ? 'GET' : 'POST'
+  req.url = 'http://localhost' + path
+  req.headers = { 'content-type': 'application/json' }
+  // 装配层初始化后才挂读体监听:桩事件须延后发射(与既有 post 桩同款)
+  setTimeout(() => {
+    if (body !== undefined) req.emit('data', Buffer.from(JSON.stringify(body)))
+    req.emit('end')
+  }, 80)
+  await handler(req, res)
+  return res
+}
+
+test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默认值对拍', () => {
+  // Given 静态 Config 导出(0.1.7 节表单事实源)
+  assert.ok(mod.Config, 'Config 导出必须在场')
+  // When 空配置校验
+  const resolved = mod.Config['~standard'].validate({})
+  // Then 产整节单 ref(get 协议),字段为 schema 默认值
+  assert.equal(resolved.issues, undefined)
+  const section = resolved.value.get()
+  assert.equal(section.tickSeconds, 30)
+  assert.equal(section.maxConcurrent, 2)
+  assert.equal(section.logKeepPerJob, 200)
+  assert.equal(section.maskEnvInPrompt, false)
+  assert.equal(section.sidebarTab, false)
+  // When 显式值校验
+  // Then 值透传
+  const provided = mod.Config['~standard'].validate({ sidebarTab: true }).value.get()
+  assert.equal(provided.sidebarTab, true)
+})
+
+test('0.1.7 形态:ui-settings GET 读 config 节值(ref 解包),非默认值', async (t) => {
+  // Given settings 无 register/get 的宿主 + config ref 携带用户值
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-rc17-'))
+  t.after(async () => {
+    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+  process.env.DSH_CRON_BOARD_DATA_DIR = dir
+  const { ctx, routes, config } = makeRc17Ctx({ configStore: { sidebarTab: true, tickSeconds: 60 } })
+  apply(ctx, config)
+  // When GET ui-settings
+  const res = await callApi(routes, '/api/cron-board/status')
+  // Then 返回 config 节值
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.ui.sidebarTab, true)
+})
+
+test('0.1.7 形态:ui-settings POST 经 configEditor.edit 落 fiber.entry 且持久合并', async (t) => {
+  // Given configEditor 桩记录 edit 调用
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-rc17-'))
+  t.after(async () => {
+    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+  process.env.DSH_CRON_BOARD_DATA_DIR = dir
+  const { ctx, routes, config, configStore, calls } = makeRc17Ctx({ configStore: { tickSeconds: 60 } })
+  apply(ctx, config)
+  // When POST 写 sidebarTab
+  const res = await callApi(routes, '/api/cron-board/ui-settings', { sidebarTab: true })
+  // Then edit 定位本条目,合并写回,响应 200 携新值
+  assert.equal(res.status, 200)
+  assert.equal(calls.editCalls.length, 1)
+  assert.equal(calls.editCalls[0].options.id, 'cron-board')
+  assert.equal(configStore.sidebarTab, true)
+  assert.equal(configStore.tickSeconds, 60)
+  assert.equal(res.payload.ui.sidebarTab, true)
+})
+
+test('0.1.7 形态:configEditor 缺失即 200 ok:false 拒写,不崩溃', async (t) => {
+  // Given configEditor 服务缺席
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-rc17-'))
+  t.after(async () => {
+    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+  process.env.DSH_CRON_BOARD_DATA_DIR = dir
+  const { ctx, routes, config } = makeRc17Ctx({ configEditorAvailable: false })
+  apply(ctx, config)
+  // When POST 写设置
+  const res = await callApi(routes, '/api/cron-board/ui-settings', { sidebarTab: true })
+  // Then ok:false 拒写(api 层 persisted=false 语义),进程存活(测试走完即证)
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.ok, false)
+})
+
+test('0.1.7 形态:settings.configure 在场即关闭原生自动页,缺席静默跳过', () => {
+  // Given configure 在场
+  const { ctx, calls, config } = makeRc17Ctx()
+  apply(ctx, config)
+  // Then 关闭自动页,owner 为本插件 fiber
+  assert.deepEqual(calls.configureCalls, [{ presentation: { auto: false }, owner: ctx.fiber }])
+  // Given configure 缺席
+  const bare = makeRc17Ctx({ configureAvailable: false })
+  // When apply
+  // Then 不抛错(测试走完即证)
+  apply(bare.ctx, bare.config)
+})
+
+test('0.1.7 形态:settings 注入回调不因 register 缺失抛错', () => {
+  // Given settings 桩全空方法面(比真实宿主更严)
+  const { ctx, config } = makeRc17Ctx({ configureAvailable: false })
+  // When apply
+  // Then 注入回调静默返回,无异常
+  apply(ctx, config)
+})

@@ -51,6 +51,14 @@ pnpm config set --global minimumReleaseAge 360
 - CI 测试(`.github/workflows/test.yml`):push 按改动范围收敛(全部改动落在 `packages/<X>/` 只测 X + 冒烟与仓库根测试;触及非包路径回退全量),每 3 天定时与手动触发为全量;amd64/arm64 双架构并行,各跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现 + 仓库根 tests/;测试文件按平台过滤,`*.linux.test.mjs`/`*.win.test.mjs` 专属,CI 只跑 linux 侧;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
 - CI 兼容性测试(`.github/workflows/compat.yml`):每 3 天定时 + 手动触发,真实 dsh 宿主版本窗口逐版本全家桶 boot,断言统一底线;不被 push 触发,方法见 docs/兼容性测试/测试与隔离方法.md
 
+### 宿主兼容性(2026-09-27,Round 30)
+
+窗口三版本:0.1.2-rc.1(基线)/ 0.1.5-rc.3(主测)/ 0.1.7-rc.2(完全兼容目标),逐包测试进度见 docs/兼容性测试/逐包测试进度.md。
+
+- **0.1.7-rc.2(完全兼容)**:宿主 SettingsForms 形态(settings 无 register/get)下,六包(context-manager/cron-board/session-manager/turn-notify/usage-dash/usage-panel)settings 读/写循环端到端可用——双形态适配:legacy 方法面(settings.register+update)与 0.1.7 静态 Config(volatile schema)+ configEditor.edit 写入并存,运行期以 `register && update` 双在检测分派。真机验收:六包 HTTP 写读闭环 + profile cordis.patch.yml 逐字段落盘 + Playwright UI 分区渲染(含 usage-dash 定价表格回读、turn-notify 深合并芯片态)。
+- **0.1.5-rc.3 / 0.1.2-rc.1(不崩溃底线,实测通过)**:同套代码 legacy 分支回归,六包写读经宿主 settings.yaml 命名空间段,行为与适配前一致(双形态检测在旧宿主恒走原路径,零行为漂移)。
+- 例外:dsh-shell-select 预设架构要求 ≥0.1.7-rc.1(`@deepseek-ai/dsh-agent-preset` 依赖),0.1.2-rc.1 上不可安装(peerDependencies 已声明门槛);其余包三版本全装。
+
 ## 开发态链接(dev-link)
 
 ```sh

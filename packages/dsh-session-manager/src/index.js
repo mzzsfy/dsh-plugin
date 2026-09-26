@@ -98,6 +98,21 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
 })
 
+// 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
+// settings.register 注册同名命名空间。根级 volatile 包装:0.1.7 下整节为 live
+// 表单,节写经 loader 原地热更;旧宿主 schemastery 无 volatile 方法,特性检测原样返回
+export const Config = volatileWrap(SETTINGS_SCHEMA)
+
+function volatileWrap(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
+
+// volatile ref 动态解包(get 协议):0.1.7 下 apply 入参 config 为整节单 ref;
+// legacy 宿主 config 为普通对象原样透传
+function unwrapVolatile(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
@@ -114,10 +129,12 @@ function respondError(ctx, res, error) {
   sendJson(res, 400, { error: message })
 }
 
-function readSettings(ctx) {
+function readSettings(ctx, config) {
   const settings = ctx.get('settings')
-  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值,防 timer 回调抛错崩进程
-  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
+  // 双形读(maintain 同构):legacy settings 命名空间 get;0.1.7+ apply 入参
+  // config 整节解包。方法面守卫兼防:服务在但缺 get(宿主升级变更面)时回落默认值,
+  // 防 timer 回调抛错崩进程
+  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : unwrapVolatile(config)
   const days = Number(value && value.autoArchiveDays)
   const hours = Number(value && value.autoArchiveIntervalHours)
   return {
@@ -229,7 +246,7 @@ export function apply(ctx, config) {
   // 活跃会话零 IO。返回是否真正启动:被门闩/关闭挡下的调用方(周期 tick)保持到期态
   // 由下个 tick 重试,不得据此重排周期
   function evaluateArchives(cwd) {
-    const { days } = readSettings(ctx)
+    const { days } = readSettings(ctx, config)
     if (days === 0 || evaluating) return false
     evaluating = true
     let timeoutGuard
@@ -625,7 +642,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            const current = readSettings(ctx)
+            const current = readSettings(ctx, config)
             sendJson(res, 200, { days: current.days, intervalHours: current.intervalHours })
             return
           }
@@ -637,11 +654,20 @@ export function apply(ctx, config) {
             throw new Error(MESSAGES.badJsonBody)
           }
           const patch = readAutoArchivePatch(body)
+          // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+          // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+          // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)。
+          // await 保证回显为新值,persist 失败走 respondError
           const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证回显为新值,persist 失败走 respondError
-          await settings.update(NAMESPACE, patch)
-          const current = readSettings(ctx)
+          if (typeof settings?.register === 'function' && typeof settings?.update === 'function') {
+            await settings.update(NAMESPACE, patch)
+          } else {
+            const editor = ctx.get('configEditor')
+            const entry = ctx.fiber?.entry
+            if (!editor || typeof editor.edit !== 'function' || !entry) throw new Error('宿主设置服务不可用')
+            await editor.edit(entry, (current) => ({ ...current, ...patch }))
+          }
+          const current = readSettings(ctx, config)
           sendJson(res, 200, { days: current.days, intervalHours: current.intervalHours })
         } catch (error) {
           respondError(ctx, res, error)
@@ -736,13 +762,13 @@ export function apply(ctx, config) {
     let nextDueAt = null
     let lastArmedAt = 0
     const scheduleNext = () => {
-      const { intervalHours } = readSettings(ctx)
+      const { intervalHours } = readSettings(ctx, config)
       lastArmedAt = Date.now()
       nextDueAt = intervalHours > 0 ? lastArmedAt + intervalHours * HOUR_MS : null
     }
     try {
       const dispose = timerCtx.interval(() => {
-        const { intervalHours } = readSettings(ctx)
+        const { intervalHours } = readSettings(ctx, config)
         // 设置变更对账:0 即时暂停;缺失 due(0 重启用)时补排,防周期轮静默死亡;
         // 缩短间隔时以 lastArmedAt 锚定前移,最长等新间隔而非等满旧周期
         if (intervalHours === 0) {
@@ -771,8 +797,14 @@ export function apply(ctx, config) {
 
   ctx.inject(['settings'], (settingsCtx) => {
     // 方法面守卫:settings 服务在但缺 register(宿主升级变更面)时跳过注册,
-    // 周期轮与启动补扫按 readSettings 的默认值降级运行,不因服务形变炸 fiber
-    if (typeof settingsCtx.settings.register !== 'function') return
+    // 周期轮与启动补扫按 readSettings 的默认值降级运行,不因服务形变炸 fiber;
+    // 0.1.7 关闭原生自动设置页,设置面由本包自带分区承担(maintain 同构)
+    if (typeof settingsCtx.settings.register !== 'function') {
+      if (typeof settingsCtx.settings?.configure === 'function') {
+        settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
+      }
+      return
+    }
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
     // 启动补扫不依赖定时服务:settings 就绪即评估一轮,清掉停机期间积压的超期会话
     evaluateArchives()

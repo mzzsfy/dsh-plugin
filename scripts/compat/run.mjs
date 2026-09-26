@@ -39,6 +39,11 @@ function parseArgs(argv) {
       '--work-root': () => { args.workRoot = argv[++i] },
       '--skip-externals': () => { args.skipExternals = true },
       '--seed-gateway': () => { args.seedGateway = true },
+      '--only': () => {
+        const short = argv[++i]
+        if (!short) throw new Error('--only 缺包名')
+        args.only = [...(args.only ?? []), ...short.split(',').map((s) => s.trim()).filter(Boolean)]
+      },
       '--keep': () => { args.keep = true },
     }
     const handler = map[argv[i]]
@@ -517,7 +522,7 @@ async function main() {
     await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
-  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir, seedGateway: args.seedGateway === true })
+  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir, seedGateway: args.seedGateway === true, only: args.only ?? [] })
   log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
 
   // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry

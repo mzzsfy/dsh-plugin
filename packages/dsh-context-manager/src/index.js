@@ -61,6 +61,21 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('会话标题栏的复制 sessionId 按钮,平时隐藏,鼠标悬停标题栏时显示,点击复制当前会话 id;关闭后按钮整体不渲染;变更刷新页面生效'),
 })
 
+// 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
+// settings.register 注册命名空间。根级 volatile 包装:0.1.7 下整节为 live 表单,
+// 节写经 loader 原地热更;旧宿主 schemastery 无 volatile 方法,特性检测原样返回
+export const Config = volatileWrap(SETTINGS_SCHEMA)
+
+function volatileWrap(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
+
+// volatile ref 动态解包(get 协议):0.1.7 下 apply 入参 config 为整节单 ref;
+// legacy 宿主 config 为普通对象原样透传
+function unwrapVolatile(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
@@ -77,10 +92,11 @@ function respondError(ctx, res, error) {
   sendJson(res, 400, { error: message })
 }
 
-function readSettings(ctx) {
+function readSettings(ctx, config) {
   const settings = ctx.get('settings')
-  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值,防路由 handler 抛错
-  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
+  // 双形读(maintain 同构):legacy settings 命名空间 get;0.1.7+ apply 入参
+  // config 整节解包。方法面守卫兼防:服务在但缺 get 时回落默认值,防路由 handler 抛错
+  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : unwrapVolatile(config)
   return {
     historyEnabled: !value || value.historyEnabled !== false,
     historyButtonEnabled: !value || value.historyButtonEnabled !== false,
@@ -89,6 +105,22 @@ function readSettings(ctx) {
     forkAutoResendEnabled: Boolean(value && value.forkAutoResendEnabled === true),
     copySidEnabled: !value || value.copySidEnabled !== false,
   }
+}
+
+// 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+// (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+// 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦),
+// 仅 volatile 字段变化时 loader 原地热更不重启。await 保证持久化完成后再读回
+async function persistToggle(ctx, patch) {
+  const settings = ctx.get('settings')
+  if (typeof settings?.register === 'function' && typeof settings?.update === 'function') {
+    await settings.update(NAMESPACE, patch)
+    return
+  }
+  const editor = ctx.get('configEditor')
+  const entry = ctx.fiber?.entry
+  if (!editor || typeof editor.edit !== 'function' || !entry) throw new Error('宿主设置服务不可用')
+  await editor.edit(entry, (current) => ({ ...current, ...patch }))
 }
 
 function readBody(req) {
@@ -454,7 +486,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
+            sendJson(res, 200, { enabled: readSettings(ctx, config).historyEnabled })
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
@@ -464,11 +496,8 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
-          await settings.update(NAMESPACE, { historyEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).historyEnabled })
+          await persistToggle(ctx, { historyEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).historyEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -480,7 +509,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).historyButtonEnabled })
+            sendJson(res, 200, { enabled: readSettings(ctx, config).historyButtonEnabled })
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
@@ -490,11 +519,8 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
-          await settings.update(NAMESPACE, { historyButtonEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).historyButtonEnabled })
+          await persistToggle(ctx, { historyButtonEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).historyButtonEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -506,7 +532,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
+            sendJson(res, 200, { enabled: readSettings(ctx, config).steerRecallEnabled })
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
@@ -516,11 +542,8 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
-          await settings.update(NAMESPACE, { steerRecallEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).steerRecallEnabled })
+          await persistToggle(ctx, { steerRecallEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).steerRecallEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -532,7 +555,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).forkEnabled })
+            sendJson(res, 200, { enabled: readSettings(ctx, config).forkEnabled })
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
@@ -542,11 +565,8 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          // update 异步落盘后才提交新值:await 保证持久化完成后再读回
-          await settings.update(NAMESPACE, { forkEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).forkEnabled })
+          await persistToggle(ctx, { forkEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).forkEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -558,7 +578,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).forkAutoResendEnabled })
+            sendJson(res, 200, { enabled: readSettings(ctx, config).forkAutoResendEnabled })
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
@@ -568,10 +588,8 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          await settings.update(NAMESPACE, { forkAutoResendEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).forkAutoResendEnabled })
+          await persistToggle(ctx, { forkAutoResendEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).forkAutoResendEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -583,7 +601,7 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         try {
           if (req.method === 'GET') {
-            sendJson(res, 200, { enabled: readSettings(ctx).copySidEnabled })
+            sendJson(res, 200, { enabled: readSettings(ctx, config).copySidEnabled })
             return
           }
           if (!rejectMethod(req, res, 'POST')) return
@@ -593,10 +611,8 @@ export function apply(ctx, config) {
           } catch {
             throw new Error(MESSAGES.badJsonBody)
           }
-          const settings = ctx.get('settings')
-          if (!settings) throw new Error('宿主设置服务不可用')
-          await settings.update(NAMESPACE, { copySidEnabled: Boolean(body && body.enabled) })
-          sendJson(res, 200, { enabled: readSettings(ctx).copySidEnabled })
+          await persistToggle(ctx, { copySidEnabled: Boolean(body && body.enabled) })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).copySidEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
@@ -610,6 +626,14 @@ export function apply(ctx, config) {
   }
 
   ctx.inject(['settings'], (settingsCtx) => {
+    // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支;
+    // 0.1.7 关闭原生自动设置页,设置面由本包自带分区承担(maintain 同构)
+    if (typeof settingsCtx.settings.register !== 'function') {
+      if (typeof settingsCtx.settings?.configure === 'function') {
+        settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
+      }
+      return
+    }
     settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
   })
 }

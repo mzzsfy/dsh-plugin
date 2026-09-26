@@ -413,3 +413,141 @@ test('test-webhook 已配置时送达并返回真实结果', async () => {
     assert.ok(String(calls[0].body.text).startsWith('[dsh]'), 'webhook payload 缺少 text')
   } finally { globalThis.fetch = original }
 })
+
+// --- 0.1.7 settings 面双形适配(maintain a913c2c 同构) ---
+
+test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默认值对拍', async () => {
+  const mod = await import('../src/index.js')
+  assert.ok(mod.Config, 'Config 导出必须在场')
+  const resolved = mod.Config['~standard'].validate({})
+  assert.equal(resolved.issues, undefined)
+  const section = resolved.value.get()
+  assert.equal(section.webhookUrl, '')
+  assert.equal(section.rootsOnly, true)
+  assert.equal(section.imEnabled, true)
+  assert.ok(section.enabled && typeof section.enabled === 'object')
+})
+
+// 0.1.7 形态装配:settings 无 register/get(宿主已移除),config 为整节单 ref 桩,
+// configEditor 桩经深合并后原样写回
+function makeRc17Ctx({ configStore = {}, configEditorAvailable = true } = {}) {
+  const routes = new Map()
+  const editCalls = []
+  const config = { get: () => ({ ...configStore }) }
+  const settingsService = {}
+  const configEditor = {
+    async edit(entry, change) {
+      editCalls.push(entry)
+      const merge = (under, over) => {
+        const out = { ...under }
+        for (const key of Object.keys(over)) {
+          const next = over[key]
+          const underValue = out[key]
+          const bothPlain = (next !== null && typeof next === 'object' && !Array.isArray(next))
+            && (underValue !== null && typeof underValue === 'object' && !Array.isArray(underValue))
+          out[key] = bothPlain ? merge(underValue, next) : next
+        }
+        return out
+      }
+      const next = merge({ ...configStore }, change({}, {}))
+      for (const key of Object.keys(next)) configStore[key] = next[key]
+    },
+  }
+  const configureCalls = []
+  const ctx = {
+    on() {},
+    fiber: { entry: { options: { id: 'turn-notify', name: '@mzzsfy/dsh-turn-notify' } } },
+    get(key) {
+      if (key === 'settings') return settingsService
+      if (key === 'configEditor') return configEditorAvailable ? configEditor : undefined
+      return undefined
+    },
+    inject(deps, fn) {
+      if (deps[0] === 'settings') {
+        fn({
+          settings: settingsService,
+          effect(stubEffect) {
+            const disposer = stubEffect()
+            if (typeof disposer === 'function') configureCalls.push(disposer)
+          },
+        })
+      }
+    },
+    effect(thunk) { thunk() },
+    webServer: { register(route) { routes.set(route.path, route.handler) } },
+  }
+  return { ctx, routes, config, configStore, editCalls, configureCalls }
+}
+
+test('0.1.7 形态:config GET 读 config ref 节值,POST 经 configEditor.edit 深合并', async () => {
+  // Given config ref 携带用户值 + configEditor 桩
+  const { ctx, routes, config, configStore, editCalls } = makeRc17Ctx({
+    configStore: { enabled: { completed: false }, webhookUrl: 'https://hook.example' },
+  })
+  apply(ctx, config)
+  // When GET config
+  const read = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('GET'), read)
+  // Then 返回 config 节值
+  assert.equal(read.body.enabled.completed, false)
+  assert.equal(read.body.webhookUrl, 'https://hook.example')
+  // When POST 嵌套补丁(仅关一个分类 + 改时长)
+  const saved = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { enabled: { error: false }, minTurnDurationMs: 1234 }, JSON_HEADERS), saved)
+  // Then 深合并落盘:未提交的兄弟分类保留,新键写入
+  assert.equal(saved.status, 200)
+  assert.equal(editCalls.length, 1)
+  assert.equal(editCalls[0].options.id, 'turn-notify')
+  assert.equal(configStore.enabled.completed, false, '既有分类开关保留')
+  assert.equal(configStore.enabled.error, false, '新分类开关写入')
+  assert.equal(configStore.minTurnDurationMs, 1234)
+  // When 重读
+  const reread = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('GET'), reread)
+  // Then 回显合并后节值
+  assert.equal(reread.body.enabled.error, false)
+  assert.equal(reread.body.enabled.completed, false)
+})
+
+test('0.1.7 形态:soundMapping 单分类写经 configEditor.edit 深合并,null 清除保留', async () => {
+  // Given 既有映射两个分类
+  const { ctx, routes, config, configStore } = makeRc17Ctx({
+    configStore: { soundMapping: { completed: 'ding', 'max-tokens': 'buzz' } },
+  })
+  apply(ctx, config)
+  // When POST 单分类改映射
+  const saved = makeRes()
+  await routes.get('/api/turn-notify/mapping')(makeReq('POST', { category: 'completed', id: 'bell' }, JSON_HEADERS), saved)
+  // Then 兄弟分类保留,目标分类更新
+  assert.equal(saved.status, 200)
+  assert.equal(configStore.soundMapping.completed, 'bell')
+  assert.equal(configStore.soundMapping['max-tokens'], 'buzz')
+  // When POST 空 id(清除语义,null 落盘)
+  await routes.get('/api/turn-notify/mapping')(makeReq('POST', { category: 'max-tokens', id: '' }, JSON_HEADERS), makeRes())
+  // Then null 原样落盘(读侧过滤)
+  assert.equal(configStore.soundMapping['max-tokens'], null)
+})
+
+test('0.1.7 形态:configEditor 缺失即 500 拒写,不崩溃', async () => {
+  // Given configEditor 服务缺席
+  const { ctx, routes, config } = makeRc17Ctx({ configEditorAvailable: false })
+  apply(ctx, config)
+  // When POST 写配置
+  const denied = makeRes()
+  await routes.get('/api/turn-notify/config')(makeReq('POST', { rootsOnly: false }, JSON_HEADERS), denied)
+  // Then 400 错误响应(sendError 归一,settings 服务不可用非 fs 错误),进程存活
+  assert.equal(denied.status, 400)
+  assert.ok(denied.body.error)
+})
+
+test('0.1.7 形态:settings.configure 在场即关闭原生自动页,register 缺失不抛错', () => {
+  // Given settingsForms 带 configure 无 register
+  const configureCalls = []
+  const { ctx, config } = makeRc17Ctx()
+  ctx.get('settings').configure = (presentation, owner) => { configureCalls.push({ presentation, owner }); return () => {} }
+  // When apply
+  apply(ctx, config)
+  // Then 关闭自动页且 owner 为本插件 fiber
+  assert.equal(configureCalls.length, 1)
+  assert.deepEqual(configureCalls[0].presentation, { auto: false })
+})

@@ -43,6 +43,21 @@ const SETTINGS_SCHEMA = schemastery.object({
   sidebarTab: schemastery.boolean().default(false).description('看板移入 better-sidebar 侧边栏(需已安装;关闭时始终使用主界面)'),
 })
 
+// 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
+// settings.register 注册同名命名空间。根级 volatile 包装:0.1.7 下整节为 live
+// 表单,节写经 loader 原地热更;旧宿主 schemastery 无 volatile 方法,特性检测原样返回
+export const Config = volatileWrap(SETTINGS_SCHEMA)
+
+function volatileWrap(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
+
+// volatile ref 动态解包(get 协议):0.1.7 下 apply 入参 config 为整节单 ref;
+// legacy 宿主 config 为普通对象原样透传
+function unwrapVolatile(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
 export function resolveDataDir(env = process.env) {
   const override = env[DATA_DIR_ENV]
   if (override && override.trim() !== '') return override.trim()
@@ -139,20 +154,37 @@ export function apply(ctx, config) {
     const value = readSettingValue(name)
     return typeof value === 'boolean' ? value : fallback
   }
-  // 客户端设置面板写入通道:settings 服务在场时按命名空间合并补丁。
-  // 必须 await:宿主 settings.update 的写失败在异步段抛出(rc.1 "No configurable
-  // plugin entry" 实测打崩宿主),不 await 即成无人接管的 rejection → uncaughtException;
-  // await 后异常传播到 api.handle 的路由级 catch,降级为 400 响应,宿主存活
-  async function updateUiSettings(patch) {
+  // 配置面双形态(maintain 同构,判定一律延迟到使用点,settings 挂载时序无保证):
+  // legacy(≤0.1.6)settings 服务 register/get/update 命名空间语义;
+  // 0.1.7+ 静态 Config 导出生成节表单,读经 volatile ref 解包,写经 configEditor
+  const legacySettingsFace = () => {
     const settings = ctx.get('settings')
-    if (!settings || typeof settings.update !== 'function') return false
-    await settings.update(SETTINGS_NS, patch)
+    return typeof settings?.register === 'function' && typeof settings?.update === 'function'
+  }
+  // 0.1.7 写路径:configEditor.edit 定位本条目(fiber.entry,与命名空间解耦),
+  // change 回调合并落 profile patch;仅 volatile 字段变化时 loader 原地热更不重启
+  async function persistPatch(patch) {
+    if (legacySettingsFace()) {
+      await ctx.get('settings').update(SETTINGS_NS, patch)
+      return true
+    }
+    const editor = ctx.get('configEditor')
+    const entry = ctx.fiber?.entry
+    if (!editor || typeof editor.edit !== 'function' || !entry) return false
+    await editor.edit(entry, (current) => ({ ...current, ...patch }))
     return true
   }
+  // 客户端设置面板写入通道。必须 await:宿主写失败在异步段抛出(0.1.5 前
+  // settings 对未注册命名空间 "No configurable plugin entry" 实测打崩宿主),
+  // await 后异常传播到 api.handle 的路由级 catch,降级为 400 响应,宿主存活
+  async function updateUiSettings(patch) {
+    return persistPatch(patch)
+  }
   function readSettingValue(name) {
-    const settings = ctx.get('settings')
     try {
-      const scope = settings && settings.get ? settings.get(SETTINGS_NS) : undefined
+      const settings = ctx.get('settings')
+      // 双形读:legacy settings 命名空间;0.1.7+ apply 入参 config 整节解包
+      const scope = settings && settings.get ? settings.get(SETTINGS_NS) : unwrapVolatile(config)
       return scope ? scope[name] : undefined
     } catch {
       // 与写入同防:宿主 settings 对未注册命名空间抛错时读面降级为缺省
@@ -191,7 +223,14 @@ export function apply(ctx, config) {
   })
 
   ctx.inject(['settings'], (sctx) => {
-    if (typeof sctx.settings.register !== 'function') return
+    // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支
+    if (typeof sctx.settings.register !== 'function') {
+      // 0.1.7:原生自动设置页与本包插件卡重复,特性检测关闭(maintain 同构)
+      if (typeof sctx.settings?.configure === 'function') {
+        sctx.effect(() => sctx.settings.configure({ auto: false }, ctx.fiber))
+      }
+      return
+    }
     const scope = sctx.settings.register(SETTINGS_NS, SETTINGS_SCHEMA, { base: config })
     // tick 周期等设置变更即时对账(重建 interval)
     if (scope && typeof scope.watch === 'function') {

@@ -92,10 +92,20 @@ export async function installPackageExternals() {
   return installed
 }
 
-export async function buildProfile({ version, workRoot, hostDir, seedGateway = false }) {
+// only:裸装白名单(包短名或全名),空 = 全家桶。命中包及其 dsh.bundle 标记才入 bundles;
+// dependencies 仍全量(装而不载无副作用,verifyActivation 按 dependencies 记账依赖它)
+export async function buildProfile({ version, workRoot, hostDir, seedGateway = false, only = [] }) {
   const homeDir = join(workRoot, version, 'home')
   const profileDir = join(homeDir, 'profiles', 'web')
   const { bundles, all } = enumeratePackages()
+  const wanted = new Set(only.map((name) => name.replace(/^@mzzsfy\//, '')))
+  const pickedBundles = wanted.size
+    ? bundles.filter((name) => wanted.has(name.replace(/^@mzzsfy\//, '')))
+    : bundles
+  if (wanted.size && pickedBundles.length !== wanted.size) {
+    const missing = [...wanted].filter((short) => !pickedBundles.some((name) => name.replace(/^@mzzsfy\//, '') === short))
+    throw new Error(`--only 含非 bundle 包或拼写错误: ${missing.join(', ')}`)
+  }
   const unpublished = await probeUnpublished(all)
 
   mkdirSync(profileDir, { recursive: true })
@@ -103,7 +113,7 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
   // v4 头即拒),workspaceRegistry 起不来 → session-controller 不可用 →
   // 模型目录 RPC 全灭。每轮净启动
   rmSync(join(homeDir, 'sessions'), { recursive: true, force: true })
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(profileManifest(bundles, all, unpublished), null, 2) + '\n', 'utf8')
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(profileManifest(pickedBundles, all, unpublished), null, 2) + '\n', 'utf8')
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n', 'utf8')
   // 默认模型条目:宿主树含 dsh-agent-default-model(0.1.7+)才注入,旧宿主
   // 目录为单 provider,UI 默认即 echo,无需条目
@@ -184,5 +194,5 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
 
   const binPath = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   if (!existsSync(binPath)) throw new Error(`宿主入口缺失: ${binPath}`)
-  return { homeDir, profileDir, binPath, bundleNames: bundles, allNames: all }
+  return { homeDir, profileDir, binPath, bundleNames: pickedBundles, allNames: all }
 }
