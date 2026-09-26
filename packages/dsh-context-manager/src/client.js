@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const { useState, useEffect, useRef } = React
+    const PKG_ID = '@mzzsfy/dsh-context-manager'
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;键 = 市场短名(发现页
     // 收录显示形态);该插件未就绪时入队,由其启动时排空
@@ -1395,15 +1396,24 @@ function ContextPanel() {
         }, 'context-manager styles')
 
         // 设置卡片:注册进官方「插件」设置页的可配置插件区(keyed slot,
-        // key = 本插件 settings namespace),不占独立设置导航项
+        // key = 本插件 settings namespace),不占独立设置导航项。
+        // 0.1.7-rc.1+ 该槽被宿主移除,卡片换形注册进插件管理页包详情配置槽
+        // (plugins.bundle.config,key = 包名,管理页 ledger.bundles 判定在场);
+        // 两代槽位并存注册:inject 是声明生命周期效应,错误世代宿主永不声明
+        // 该槽,回调挂起不执行,零成本
         ctx.slots.inject('settings.plugin.item', () =>
           ctx.slots.register(
             { name: 'settings.plugin.item', id: 'context', key: 'context' },
             () => React.createElement(ContextPanel),
           ))
+        ctx.slots.inject('plugins.bundle.config', () =>
+          ctx.slots.register(
+            { name: 'plugins.bundle.config', key: PKG_ID },
+            () => React.createElement(ContextPanel),
+          ))
 
         // 历史输入回溯入口:官方 conversation.input.dock 插槽(dsh-client-ui-goal 同构)。
-        // 宿主缺该插槽时注册抛错即禁用本功能,不阻塞其余能力
+        // 宿主缺该插槽时 inject 挂起不注册(声明生命周期效应),本功能静默缺席
         try {
           ctx.slots.inject('conversation.input.dock', () =>
             ctx.slots.register(
