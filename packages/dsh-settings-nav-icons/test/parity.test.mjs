@@ -26,7 +26,7 @@ function clientLogic() {
   }
   const factory = new Function(
     'ATTR_MARK', 'SELECTOR_LABEL',
-    section + '; return { ICONS, DECLARED_ICONS, USER_OVERRIDES, ALIAS_GROUPS, FALLBACK, GLYPHS, GEAR_PATH, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, iconSourceOf, lookupWithAlias, aliasKeysOf, decide, applyDecision, decideAvatar, applyAvatar };',
+    section + '; return { ICONS, DECLARED_ICONS, USER_OVERRIDES, ALIAS_GROUPS, FALLBACK, GLYPHS, GEAR_PATHS, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, iconSourceOf, lookupWithAlias, aliasKeysOf, decide, applyDecision, decideAvatar, applyAvatar };',
   )
   return factory(pick('ATTR_MARK'), pick('SELECTOR_LABEL'))
 }
@@ -36,11 +36,16 @@ function clientLogic() {
 // 内容改写制:决策直接写 official.innerHTML 与 official.dataset.navic,
 // 不新建节点、不动其余属性;桩以普通属性承接 innerHTML 写入。
 function makeSvg({ gear = false } = {}) {
+  // 两代官方齿轮桩路径:0.1.x 内联齿轮 / 0.1.7 primitives 齿体(实文前缀)
+  const GEAR_STUB_PATHS = {
+    legacy: 'M14.0861 3.2c-.9.4-1.4 1-1.6 1.9',
+    rc1: 'M13.0107 7.79377C12.9505 7.89401 12.9205 7.94413 12.9205 7.99951',
+  }
   const node = {
     dataset: {},
     style: { display: '' },
     inner: '',
-    paths: gear ? ['M14.0861 3.2c-.9.4-1.4 1-1.6 1.9'] : ['M8 2.2a4 4 0 0 1 4 4'],
+    paths: gear ? [GEAR_STUB_PATHS[gear === 'rc1' ? 'rc1' : 'legacy']] : ['M8 2.2a4 4 0 0 1 4 4'],
     insertAdjacentHTML() {},
     remove() {},
     querySelector(sel) {
@@ -73,7 +78,7 @@ function makeCell(labelText, { marked = false, gear, noSvg = false } = {}) {
 }
 
 function defineScenarios(prefix, L) {
-  const { ICONS, FALLBACK, GEAR_PATH, poolIndexOf, themedIcon, decide, applyDecision, svgInner } = L
+  const { ICONS, FALLBACK, GEAR_PATHS, poolIndexOf, themedIcon, decide, applyDecision, svgInner } = L
 
   test(prefix + '收录分区返回改写决策:剥壳 inner,不建节点', () => {
     const cell = makeCell('插件市场')
@@ -105,8 +110,15 @@ function defineScenarios(prefix, L) {
     assert.ok(reached.size >= 2, '哈希应在池内产生区分,reached=' + reached.size)
   })
 
-  test(prefix + 'GEAR_PATH 是官方齿轮路径前缀', () => {
-    assert.equal(GEAR_PATH, 'M14.0861')
+  test(prefix + 'GEAR_PATHS 收两代官方齿轮前缀(0.1.x 内联 / rc.1 primitives 齿体)', () => {
+    assert.deepEqual(GEAR_PATHS, ['M14.0861', 'M13.0107 7.79377'])
+  })
+
+  test(prefix + 'rc.1 primitives 齿轮 fallback 同样强补(新代齿轮识别)', () => {
+    const cell = makeCell('某新装插件分区', { gear: 'rc1' })
+    const d = decide(cell)
+    assert.ok(d, '新代齿轮兜底应有决策')
+    assert.equal(d.inner, svgInner(FALLBACK[poolIndexOf('某新装插件分区')]))
   })
 
   test(prefix + '已改写形态(svg 记账等于 label)返回 null', () => {
@@ -401,7 +413,7 @@ test('两份实现常量同源', () => {
   assert.equal(logic.STROKE_ATTRS, client.STROKE_ATTRS)
   assert.equal(logic.ATTR_MARK, client.ATTR_MARK)
   assert.equal(logic.SELECTOR_LABEL, client.SELECTOR_LABEL, 'label 选择器同源(精确匹配桩防子串容忍)')
-  assert.equal(logic.GEAR_PATH, client.GEAR_PATH)
+  assert.deepEqual(logic.GEAR_PATHS, client.GEAR_PATHS, '两代齿轮前缀同源')
   assert.equal(logic.SVG_MAX_CHARS, client.SVG_MAX_CHARS)
   assert.deepEqual(logic.ALIAS_GROUPS, client.ALIAS_GROUPS, '别名组同源')
   assert.equal(Object.keys(logic.USER_OVERRIDES).length, 0, '用户覆盖表初始为空(logic 侧)')
