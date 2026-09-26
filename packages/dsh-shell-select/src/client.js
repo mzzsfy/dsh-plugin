@@ -157,6 +157,9 @@ window.__ModuleLoader__.load({
       '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; }',
       '.sls-tv__pill--bg { color:var(--dsw-alias-label-tertiary, inherit); }',
       '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; font-variant-numeric:tabular-nums; }',
+      // 运行中脉冲文字:零信息窗口(参数未到)的活体反馈
+      '.sls-tv__pulse { font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; animation:sls-pulse 1.5s ease-in-out infinite; }',
+      '@keyframes sls-pulse { 0%,100% { opacity:.35; } 50% { opacity:1; } }',
       '.sls-tv__sp { flex:1; }',
       '.sls-tv__copy { display:flex; align-items:center; gap:2px; flex:none; }',
       '.sls-tv__copyBtn { padding:2px 8px; border:1px solid rgba(128,128,128,.35); border-radius:6px; background:transparent; color:inherit; cursor:pointer; font-size:12px; }',
@@ -631,7 +634,7 @@ window.__ModuleLoader__.load({
       const cwdDir = cwdFull !== undefined ? lastSegment(cwdFull) : undefined
       // shell 名 = 用户在配置页起的条目名;args.shell 缺省时按 default 客户端解析(配置当前读数)
       const shellName = clientDisplayName(typeof args?.shell === 'string' ? args.shell : undefined)
-      if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null }
+      if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null, running: !settled, alert: undefined }
 
       if (!settled) {
         const startedAt = typeof block.time === 'number' ? block.time : undefined
@@ -645,9 +648,11 @@ window.__ModuleLoader__.load({
         const jobId = /started background job (\S+)/.exec(contentText)?.[1]
         return { kind: 'background', status: 'background', command, description, cwdDir, cwdFull, shellName, output: contentText, jobId }
       }
-      // 空结果落 generic:官方 singleResultText 无文本即回通用卡,避免空输出伪 done 终端卡
+      // 空结果落 generic:官方 singleResultText 无文本即回通用卡,避免空输出伪 done 终端卡;
+      // isError/error 块带 alert(错误红点语义),其余(空输出/无描述/截断)中性无状态点
       if (contentText === '' || block.isError === true || block.error !== undefined || description === undefined || hasSpillNotice(contentText)) {
-        return { kind: 'generic', command, summary: description, output: contentText }
+        const alert = block.isError === true || block.error !== undefined ? 'error' : undefined
+        return { kind: 'generic', command, summary: description, output: contentText, running: false, alert }
       }
       const tail = parseExitTail(contentText)
       const status = tail.signal !== undefined ? 'signaled' : tail.exitCode !== 0 ? 'failed' : 'done'
@@ -738,11 +743,13 @@ window.__ModuleLoader__.load({
       }, done ? (detectEnglish() ? 'Copied' : '已复制') : label)
     }
 
-    // 非终端意图回退行(后台 ack / isError / 截断):摘要 + 可展开原文。
-    // 错误行始终可展开(isError 块 output 常空,收起态看不到失败详情——
-    // 官方 genericBody 以 bodyRaw/output 任一非空判定,同理)
+    // 非终端意图回退行(后台 ack / isError / 截断 / 参数未到):摘要 + 可展开原文。
+    // 状态语义对齐官方:运行中灰 spinner,settled 错误红点,其余中性 icon——
+    // 黄点(warning)仅真实告警,禁止挪用作"进行中"(用户把黄点当卡死)。
+    // 运行中且零信息(参数未到)显示脉冲「运行中…」,给用户活着的感觉。
     function GenericShellRow({ model, inspect, en }) {
       const [open, setOpen] = useState(false)
+      const status = model.running === true ? 'running' : model.alert === 'error' ? 'generic-error' : undefined
       const summary = model.summary !== undefined && model.summary !== ''
         ? model.summary.split('\n')[0]
         : (model.output !== null && model.output !== '' ? model.output.split('\n')[0] : '')
@@ -762,12 +769,13 @@ window.__ModuleLoader__.load({
           } : undefined,
         },
           h('span', { className: 'sls-tv__lead' },
-            leadingStack({ status: model.running === true ? 'running' : 'generic-warn', icons: TOOLVIEW_ICONS }),
+            leadingStack({ status, icons: TOOLVIEW_ICONS }),
             expandable ? h('span', { className: 'sls-tv__chev', 'data-open': open ? '1' : '0', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })) : null,
           ),
           h('span', { className: 'sls-tv__title' }, 'Shell'),
           summary !== '' ? h('span', { className: 'sls-tv__sep', 'aria-hidden': true }) : null,
-          summary !== '' ? h('span', { className: 'sls-tv__sum' }, summary) : null,
+          summary !== '' ? h('span', { className: 'sls-tv__sum' + (status === 'generic-error' ? ' sls-tv__sum--err' : '') }, summary) : null,
+          status === 'running' ? h('span', { className: 'sls-tv__pulse' }, en ? 'running…' : '运行中…') : null,
         ),
         open && expandable ? h('pre', { className: 'sls-tv__out', style: { border: '1px solid rgba(128,128,128,.28)', borderRadius: 8 } }, model.command + (model.output !== null && model.output !== '' ? `\n${model.output}` : '')) : null,
         inspect !== undefined ? h('button', { className: 'sls-tv__inspect', onClick: inspect }, TOOLVIEW_ICONS.IconInspect({}), en ? 'Inspect' : '检查') : null,

@@ -127,7 +127,7 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   const lines = listing.shells
     .map((entry) => `${entry.id} (${entry.kind}${entry.available ? '' : ', executable not found'})`)
     .join(', ')
-  const base = 'Primary shell tool for this environment: use it for every command (PowerShell, POSIX, cmd, WSL alike). '
+  const base = 'Default shell tool for this environment: call it for EVERY command — PowerShell, POSIX, cmd, WSL alike — unless the session explicitly requires the legacy pwsh tool. '
     + `Execute a command in one of the configured shell clients and return its stdout/stderr. Available clients: ${lines}. The default client is "${listing.default}"; pass \`shell\` only when this command needs a different client (dialects differ: pwsh = PowerShell, bash/wsl = POSIX, cmd = cmd.exe). `
     + 'Each call runs in a fresh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
     + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
@@ -139,10 +139,10 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
 }
 
-/** pwsh 工具描述:官方 dsh-tool-pwsh 同构(PowerShell 专用语义),开头引导优先用 shell 工具。 */
+/** pwsh 工具描述:兼容别名,开头一句硬引导模型改调 shell 工具。 */
 function pwshDescription({ backgroundEnabled, escalationModes }) {
-  const base = 'Legacy compatibility alias: prefer the `shell` tool for all commands — this pinned PowerShell entry exists only for older sessions. '
-    + 'Execute a PowerShell command and return its stdout/stderr. '
+  const base = 'This is a legacy compatibility tool only — you should call the `shell` tool instead. '
+    + 'Do not use this tool in new sessions. It executes a PowerShell command and returns its stdout/stderr; the shell tool does the same plus multi-client selection. '
     + 'Each call runs in a fresh pwsh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
     + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
     + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
