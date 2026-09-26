@@ -90,23 +90,31 @@ export async function apply(ctx, config) {
   endShellSelectApplyActive()
 }
 
-/**
- * 挂载执行器(注册 ctx.shell 服务、shell 工具与 systemPrompt 段,均随本行
- * fiber 卸载自动清理)。行 config 的 volatile 字段(0.1.7 settings 面节值)
- * 是响应式 ref(get() 协议,官方 plainOptions 同构),挂载前动态解包,legacy
- * 普通对象原样透传——直接透传 ref 会令执行器 schema 校验撞对象形状炸。
- * 解包产物必须 structuredClone:ref .get() 返回 cosmokit snapshot 深冻结对象,
- * 而执行器 static Config 使 cordis 挂载管线对 section 再做一次原地 resolve,
- * 冻结 env 会炸 "Cannot assign to read only property" 并触发接管回滚。
- */
-async function mountExecutor(ctx, config) {
-  const unwrapVolatile = (value) => {
+/** volatile ref 解包成挂载/刷新快照(深拷切断冻结产物,见 mountExecutor 注释)。 */
+function unwrapConfigSnapshot(config) {
+  const unwrap = (value) => {
     const raw = typeof value?.get === 'function' ? value.get() : value
     return raw !== null && typeof raw === 'object' ? structuredClone(raw) : raw
   }
   const section = { ...config }
-  for (const key of Object.keys(section)) section[key] = unwrapVolatile(section[key])
-  const fiber = await ctx.plugin(ShellSelectExecutor, section)
+  for (const key of Object.keys(section)) section[key] = unwrap(section[key])
+  return section
+}
+
+/**
+ * 挂载执行器(注册 ctx.shell 服务、shell 工具与 systemPrompt 段,均随本行
+ * fiber 卸载自动清理)。行 config 的 volatile 字段是响应式 ref(get() 协议):
+ * 挂载前解包成快照——子行管线(ShellSelectExecutor static Config)是纯
+ * schemastery,不认 ref,透传 ref 容器直接撞 "expected array but got
+ * [object Object]" 拒挂(真机实证);解包产物必须 structuredClone:ref
+ * .get() 返回 cosmokit snapshot 深冻结对象,cordis 挂载管线对 section 原地
+ * resolve,冻结 env 直接炸 "Cannot assign to read only property" 并触发
+ * 接管回滚。快照的陈旧由 apply 里的 loader/volatile-update 监听补偿:
+ * volatile-only 变更宿主换值后发事件不重挂行,监听器现取 ref 解包成新
+ * 快照经 ctx.shell.refresh 换源并重建工具。
+ */
+async function mountExecutor(ctx, config) {
+  const fiber = await ctx.plugin(ShellSelectExecutor, unwrapConfigSnapshot(config))
   // await 返回 ≠ 激活:executor inject 的宿主服务缺失时 fiber 静默 pending
   // (不 provide 不报错),ctx.shell 空缺会被官方复活行补位——挂载必须核实
   // 激活态,未激活按失败处理(触发回滚,官方接管)

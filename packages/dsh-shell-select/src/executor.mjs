@@ -125,6 +125,8 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
   source
   /** 工具重注册句柄(仅构造期闭包触达,this 恒为裸实例)。 */
   #toolRegistration = null
+  /** 配置快照(挂载时解包产物;volatile 变更经 refresh 换新)。 */
+  #entry = {}
   /** 托管进程的每进程 confinement 事实(官方同构)。 */
   processFacts = new Map()
   /** SANDBOX_UNAVAILABLE 构造器(动态导入就绪后由官方类顶替降级类)。 */
@@ -135,9 +137,11 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     void loadSandboxUnavailable(ctx).then((resolved) => {
       this.unavailableError = resolved
     })
-    const entry = config ?? {}
-    assertServiceableConfig(resolveConfig(entry))
-    this.source = () => resolveConfig(entry)
+    this.#entry = config ?? {}
+    assertServiceableConfig(resolveConfig(this.#entry))
+    this.source = () => resolveConfig(this.#entry)
+    // refresh 桥绑定随本 fiber 卸载自动解绑(实例退场后写路径请求静默丢弃)
+    ctx.effect(() => bindShellRefreshBridge((next) => this.refresh(next)))
     // 自带设置页(客户端半区自定义卡):抑制宿主按 schema 自动生成的原生页
     // (官方 README 同构:可选子级注入声明策略归属 fiber,服务迟加载也采纳)
     ctx.inject?.(['settings'], (child) => {
@@ -146,6 +150,14 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     })
     this.#registerTool()
     this.#mountPromptSection()
+  }
+
+  /** volatile-only 配置变更的活刷新:换配置源并重建工具注册(写路径经
+   * requestShellRefresh 触达;行不重挂,本实例与进行中执行不受扰)。 */
+  refresh(config) {
+    this.#entry = config ?? {}
+    assertServiceableConfig(resolveConfig(this.#entry))
+    this.#registerTool()
   }
 
   get config() {
@@ -600,6 +612,24 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       }
     }
   }
+}
+
+// volatile 变更的 refresh 桥(模块级单例,apply-state 同款先例):执行器
+// provide 的 ctx.shell 作用域在主行子树,web-routes 行是兄弟行,cordis 服务
+// 沿 ctx 树向上查找不横向,ctx.shell getter 直接 throw——写路径经此桥触达
+// 活跃实例。挂载绑定、实例卸载/顶替时解绑,未挂载时请求静默丢弃(执行面
+// 由下次挂载的行配置重建)。
+let refreshBridge = null
+
+export function bindShellRefreshBridge(handler) {
+  refreshBridge = handler
+  return () => {
+    if (refreshBridge === handler) refreshBridge = null
+  }
+}
+
+export function requestShellRefresh(snapshot) {
+  refreshBridge?.(snapshot)
 }
 
 export default ShellSelectExecutor

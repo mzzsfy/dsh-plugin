@@ -375,3 +375,18 @@ test('execute 契约:默认客户端解析,显式 onExpiry kill 正常完成', a
   assert.equal(result.exitCode, 0)
   assert.equal(result.timeoutMs, 5000)
 })
+
+test('refresh:换源后执行面即时收紧(已删 id 拒绝,新清单生效)', async () => {
+  const { ctx, registered } = stubCtx()
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  assert.equal(executor.entryFor('cmd').id, 'cmd')
+  const toolsBefore = registered.tools.length
+  executor.refresh({
+    shells: baseConfig().shells.filter((entry) => entry.id !== 'cmd'),
+    default: 'pwsh',
+  })
+  assert.throws(() => executor.entryFor('cmd'), /cmd/)
+  assert.equal(executor.entryFor('pwsh').id, 'pwsh')
+  assert.equal(executor.entryFor(undefined).id, 'pwsh')
+  assert.equal(registered.tools.length, toolsBefore)
+})

@@ -7,6 +7,7 @@
 
 import { KINDS, resolveConfig, assertServiceableConfig, normalizeConfigPaths, normalizeWin32Path } from './config.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
+import { requestShellRefresh } from './executor.mjs'
 import { mountRoutes } from './api.mjs'
 
 export const name = 'shell-select/web'
@@ -60,7 +61,11 @@ export function buildFaces(ctx, settings) {
   return {
     readConfig: () => readCurrent(),
     listShells: () => listShellsOf(readCurrent()),
-    // replace 后 cordis 对主行配置变更做行重载,写路径不做本地回读
+    // replace 落盘后经模块级桥刷新执行面:执行器 provide 的 ctx.shell 作用域
+    // 在主行子树,本行是兄弟行够不着(cordis 服务不横向查找,getter 直接
+    // throw);cordis 对 volatile-only diff 换 ref 不重挂行,执行器手里的
+    // 挂载快照就此陈旧——replace 成功即权威信号,桥调活跃实例换源并重建
+    // 工具注册(原生设置页对本行被 auto:false 抑制,本 API 是唯一写口)
     async updateConfig(patch) {
       const current = readCurrent()
       const section = normalizeConfigPaths({
@@ -72,6 +77,7 @@ export function buildFaces(ctx, settings) {
       const validated = resolveConfig(section)
       assertServiceableConfig(validated)
       await settings.replace(SECTION_NS, section)
+      requestShellRefresh(validated)
       return listShellsOf(validated)
     },
     detect: (kinds) => detectCandidates(kinds ?? [...KINDS], process.env, candidateExists),

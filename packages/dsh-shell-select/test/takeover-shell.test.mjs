@@ -209,7 +209,7 @@ test('awaitOfficialExit:双行全退场(含收尾间隔)→ true;退场卡死 �
 // ── 接线层(W-1 ~ W-7):主行 apply 桩测 ─────────────────────────────────
 
 function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
-  const log = { warns: [], errors: [], infos: [], plugins: [] }
+  const log = { warns: [], errors: [], infos: [], plugins: [], listeners: [] }
   const ctx = {
     loader: loaderOf(entries),
     logger: {
@@ -223,6 +223,11 @@ function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
       // state=2 对齐宿主 cordis 激活态(挂载校验据它判定激活成功)
       return { dispose: async () => {}, state: 2 }
     },
+    on: (event, listener) => {
+      log.listeners.push({ event, listener })
+      return () => {}
+    },
+    effect: (fn) => fn(),
   }
   return { ctx, log }
 }
@@ -363,6 +368,25 @@ test('W-6 await-exit:禁用行退场完成后挂载(真实 setTimeout 微延迟)
     const { ctx, log } = stubCtxOf([tool, sandbox])
     await mainApply(ctx, {})
     assert.equal(log.plugins.length, 1)
+  } finally {
+    Object.defineProperty(process, 'platform', { value: realPlatform })
+  }
+})
+
+// ── volatile 陈旧问题:执行面刷新收口在 web 写路径(updateConfig 直调
+// ctx.shell.refresh),主行不监听宿主事件(真实链路 volatile-only 不重挂行、
+// 事件不达本包,投机监听已移除;挂载路径零监听即正确形态)──
+
+test('apply 挂载路径零宿主事件监听(refresh 收口在 web 写路径)', async () => {
+  const realPlatform = process.platform
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  try {
+    const tool = entryOf(TOOL_PWSH, { rawDisabled: true, disabled: true })
+    const sandbox = entryOf(PWSH_SANDBOX, { rawDisabled: true, disabled: true })
+    const { ctx, log } = stubCtxOf([tool, sandbox])
+    await mainApply(ctx, {})
+    assert.equal(log.plugins.length, 1)
+    assert.equal(log.listeners.length, 0)
   } finally {
     Object.defineProperty(process, 'platform', { value: realPlatform })
   }

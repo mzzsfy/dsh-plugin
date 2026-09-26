@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as webRoutes from '../src/web-routes.mjs'
 import { SECTION_NS, buildFaces } from '../src/web-routes.mjs'
+import { bindShellRefreshBridge } from '../src/executor.mjs'
 
 const NODE_EXE = process.execPath
 
@@ -174,6 +175,41 @@ test('POST /config:写路径合并既有字段(单改 default 保留 timeoutMs)'
   })
   const written = settings.calls.replace[0].section
   assert.equal(written.timeoutMs, 12e4)
+})
+
+test('POST /config:落盘后经 refresh 桥刷新执行面(运行中删除客户端即时生效)', async () => {
+  const described = describedSection()
+  described.value.shells.push({ id: 'cmd', name: 'CMD', kind: 'cmd', path: NODE_EXE, args: [], login: false, distro: '', env: {} })
+  const refreshes = []
+  const unbind = bindShellRefreshBridge((next) => refreshes.push(next))
+  try {
+    const { ctx, settings } = stubCtx({ settings: stubSettings([described]) })
+    webRoutes.apply(ctx)
+    const remaining = described.value.shells.filter((entry) => entry.id !== 'cmd')
+    const state = await callConfig(ctx, 'POST', {
+      shells: remaining.map(({ id, name, kind, path }) => ({ id, name, kind, path })),
+      default: 'git-bash',
+      deny: [],
+    })
+    assert.equal(state.status, 200)
+    assert.equal(settings.calls.replace.length, 1)
+    assert.equal(refreshes.length, 1)
+    assert.deepEqual(refreshes[0].shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
+  } finally {
+    unbind()
+  }
+})
+
+test('POST /config:桥未绑定(未接管态)请求静默丢弃,写路径不炸', async () => {
+  const { ctx, settings } = stubCtx()
+  webRoutes.apply(ctx)
+  const state = await callConfig(ctx, 'POST', {
+    shells: [{ id: 'pwsh', name: 'PowerShell', kind: 'pwsh', path: NODE_EXE }],
+    default: 'pwsh',
+    deny: [],
+  })
+  assert.equal(state.status, 200)
+  assert.equal(settings.calls.replace.length, 1)
 })
 
 test('POST /config:非法负载(空清单/坏 default)400 不写', async () => {
