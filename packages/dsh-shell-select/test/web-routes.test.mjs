@@ -197,6 +197,32 @@ test('POST /config:非对象负载 400', async () => {
   assert.equal(state.status, 400)
 })
 
+test('删除条目全链:POST 移除 cmd → 落盘无 cmd → 执行面拒绝已删 id(出厂默认不复活)', async () => {
+  // 用户报告:设置页删除 cmd 后"还能用"。写路径契约:shells 整体替换,
+  // schema resolve 的出厂默认(含 cmd)只兜底缺节/坏形态,不得回灌合法清单。
+  const described = describedSection()
+  described.value.shells.push({ id: 'cmd', name: 'CMD', kind: 'cmd', path: NODE_EXE, args: [], login: false, distro: '', env: {} })
+  const { ctx, settings } = stubCtx({ settings: stubSettings([described]) })
+  webRoutes.apply(ctx)
+  const remaining = described.value.shells.filter((entry) => entry.id !== 'cmd')
+  const state = await callConfig(ctx, 'POST', {
+    shells: remaining.map(({ id, name, kind, path }) => ({ id, name, kind, path })),
+    default: 'git-bash',
+    deny: [],
+  })
+  assert.equal(state.status, 200)
+  const payload = JSON.parse(state.body)
+  assert.deepEqual(payload.resolved.shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
+  const written = settings.calls.replace[0].section
+  assert.deepEqual(written.shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
+  // 落盘形态再喂回执行面(resolve→requireEntry):已删 id 拒绝,不出厂默认回灌
+  const { resolveConfig } = await import('../src/config.mjs')
+  const resolved = resolveConfig(written)
+  assert.deepEqual(resolved.shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
+  const { requireEntry } = await import('../src/config.mjs')
+  assert.throws(() => requireEntry(resolved.shells, 'cmd', resolved.default), /cmd/)
+})
+
 test('buildFaces:probe 真实路径布尔,detect 返回候选数组', () => {
   const settings = stubSettings([describedSection()])
   const faces = buildFaces({ logger: { warn: () => {} } }, settings)
