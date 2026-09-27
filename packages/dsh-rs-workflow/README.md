@@ -1,4 +1,4 @@
-# @mzzsfy/dsh-rs-workflow
+﻿# @mzzsfy/dsh-rs-workflow
 
 若水工作流 dsh 插件——设置面:流程模板管理与工作位/预算配置。模板编辑(host dryRun 权威校验)、只读详情、模板规范、六工作位与三预算配置读写。
 
@@ -25,4 +25,4 @@ node --test "test/*.test.mjs"      # 包内测试(在 packages/dsh-rs-workflow �
 
 ## dsh 版本兼容
 
-三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:preset 释放、Agent 预设页若水工作流卡(0.1.7-rc.1 预设页换形「模式」卡,属宿主演进)、rs_workflow_ 工具可列出、配置页六工作位、移除删除联动、激活 live。
+主测 0.1.7-rc.2 完全适配通过(20/21:预设卡真机渲染/模板模态/配置页/释放物落盘/删除联动;#18 真实 LLM 轮需 provider 接管,单包 bundles 下 NO_ADAPTER 预期形态)。基线 0.1.5-rc.3 不崩溃底线通过(其上 21/21 全过含 #17 预设 seat 闭合)。历史窗口 0.1.2-rc.1 全格通过。0.1.7 预设页换形「模式」卡属宿主演进。

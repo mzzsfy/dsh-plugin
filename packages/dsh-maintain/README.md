@@ -1,4 +1,4 @@
-# @mzzsfy/dsh-maintain
+﻿# @mzzsfy/dsh-maintain
 
 DeepSeek Harness 设置页插件:版本与进程运维一体化——监测 npm 新版本、查看更新内容、一键安装(升级/重装/回退)、安全重启。
 
@@ -60,4 +60,4 @@ cd packages/dsh-maintain && npm test
 
 ## dsh 版本兼容
 
-三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:版本与运维页控件完整、检查/升级/重启入口可用、激活 live。配置面双形态特性检测(照 dsh-llm-pi-gateway,不做版本硬编码):0.1.7-rc.1 走静态 Config 导出 + configEditor 写回 + volatile 原地热更,legacy(0.1.2–0.1.6)走 settings 命名空间 register/get/update;宿主 settings/configEditor 方法面缺失时对应能力守卫降级(面板提示),不阻塞页面。
+主测 0.1.7-rc.2 完全适配通过(17/17:骨架控件/版本行/通道/安装弹窗/重启卡;配置面走静态 Config 导出 + configEditor 写回 + volatile 原地热更)。基线 0.1.5-rc.3 不崩溃底线通过(方法面缺失守卫降级形态)。历史窗口 0.1.2-rc.1 全格通过(legacy settings 命名空间形态)。配置面双形态特性检测(照 dsh-llm-pi-gateway,不做版本硬编码):宿主方法面缺失时对应能力守卫降级(面板提示),不阻塞页面。

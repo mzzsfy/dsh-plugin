@@ -1,4 +1,4 @@
-# @mzzsfy/dsh-shell-select
+﻿# @mzzsfy/dsh-shell-select
 
 Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配置多客户端的 `shell` 工具——pwsh / git bash / cmd / WSL / 任意第三方实现,自定义路径,多个客户端并存,设默认,模型经工具参数按名选择。
 
@@ -91,5 +91,10 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
     - id: shell-select/web
       name: '@mzzsfy/dsh-shell-select/web'
 ```
+
+
+## dsh 版本兼容
+
+宿主要求 ≥0.1.7-rc.1(bundle patch 引用 0.1.7 才有的 dsh-agent-preset 宿主包,更旧宿主安装即 boot 失败,README 已声明不视为缺陷)。主测 0.1.7-rc.2:设置面 7 格过(自动探测/自定义路径/坏路径徽标/黑名单往返含行号拦截/默认热更落盘/preset 接管入册);工具调用链格需 LLM tool use 模拟器,当前 E(执行层语义由 217 单测覆盖);运行时接管(Round 29)9291 keep 宿主实证 runtime-disable→fiber 激活+INV-6 残影稳定。
 
 测试:`node --test "test/*.test.mjs"`(包目录内)。

@@ -1,4 +1,4 @@
-# @mzzsfy/dsh-model-capability-editor
+﻿# @mzzsfy/dsh-model-capability-editor
 
 DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(7 个标准思考档位与每档线上值)与 `input` 多模态声明,经官方 settings RPC 整组写回 settings.yaml。
 
@@ -86,4 +86,4 @@ node scripts/dev-link.mjs dsh-model-capability-editor   # 仓库根执行:归一
 
 ## dsh 版本兼容
 
-三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)兼容通过:模型页行内能力面板注入。注入前提=模型行「容量 N」箭头展开高级设置区(0.1.5+/0.1.6 官方行为);0.1.6 插件 client 装载为聚合 URL 形态。激活 live、findings 0。0.1.7-rc.1 深测项依赖 providers 配置夹具(ENV-003),装载与激活面正常。
+主测 0.1.7-rc.2:P 10/12 + 2 阻断(#12 受 FIND-RC2-1 gateway 接管迁移连带,非本包缺陷;行内面板/七档控件/混合展开/保存随动写回全过;BUG-009 route 匹配 P1 修复已复验)。基线 0.1.5-rc.3 不崩溃底线通过(其上 BUG-009 已修复并 12 格全绿复验)。历史窗口 0.1.2-rc.1 兼容通过。注入前提=模型行「容量 N」箭头展开高级设置区;插件 client 装载 rc.2 为聚合 URL 形态(独立 client.js 404 同口径);激活 live、findings 0。

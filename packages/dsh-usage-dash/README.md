@@ -1,4 +1,4 @@
-# @mzzsfy/dsh-usage-dash
+﻿# @mzzsfy/dsh-usage-dash
 
 用量统计面板(dsh 插件)。天/小时/分钟三粒度 token 与请求统计,设置页自绘面板:汇总卡、活动热力图、缓存命中率曲线、模型 donut 与列表、回扫状态行、会话底栏接管与回合费用芯片,支持 en/zh 双语与可选费用估算。复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),感谢原作者。
 
@@ -93,4 +93,4 @@ dsh --profile <profile> --no-open --port 9191
 
 ## dsh 版本兼容
 
-三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)兼容通过:激活 live;0.1.7-rc.1 依赖会话用量数据夹具(ENV-003),装载与激活面正常。
+主测 0.1.7-rc.2 完全适配通过(设置 HTTP 写读闭环 pricing 规则 + 「使用统计」分区全渲染+写读 UI 闭环;model 键两段式校验与 shell 直发编码坑见进度文档)。基线 0.1.5-rc.3 不崩溃底线通过。历史窗口 0.1.2-rc.1 兼容通过:激活 live。
