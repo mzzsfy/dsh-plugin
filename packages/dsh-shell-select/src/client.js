@@ -41,9 +41,6 @@ window.__ModuleLoader__.load({
           opacity: .7, display: 'inline-block', flex: 'none',
         },
       })),
-      IconChevron: createElementOf(['IconChevronDownOutlineRegular', 'IconChevronDownOutlineMedium', 'IconChevronDownOutline14'], ({ size }) => h('span', {
-        style: { fontSize: (size ?? 14) - 3, lineHeight: 1, userSelect: 'none' },
-      }, '▾')),
       IconInspect: createElementOf(['IconInspectOutlineRegular', 'IconInspectOutlineMedium', 'IconInspectOutline12'], () => h('span', {
         style: { fontSize: 10, lineHeight: 1, opacity: .8 },
       }, 'ⓘ')),
@@ -134,17 +131,13 @@ window.__ModuleLoader__.load({
       '.sls-tv__row { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:default; }',
       '.sls-tv__row--exp { cursor:pointer; user-select:none; }',
       '.sls-tv__lead { display:flex; align-items:center; gap:4px; color:var(--dsw-alias-label-tertiary, inherit); }',
-      // 官方 DisclosureRow 同构:icon 与 chevron 同 16px 槽,hover 交叉淡化;
+      // 官方 ToolRow 同构:行首仅 icon,无展开箭头(可展开性由指针与整行点击承载);
       // 错误/进行中状态点绝对定位覆盖 icon(红点掩盖 icon)
       '.sls-tv__leadStack { position:relative; width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; flex:none; }',
-      '.sls-tv__iconIdle { display:inline-flex; opacity:1; transition:opacity 100ms ease; }',
+      '.sls-tv__iconIdle { display:inline-flex; }',
       '.sls-tv__stateCover { position:absolute; inset:0; margin:auto; display:inline-flex; align-items:center; justify-content:center; background:transparent; }',
       '.sls-tv__stateCover::before { content:""; position:absolute; inset:-2px; border-radius:50%; background:var(--dsw-alias-bg-primary, #fff); }',
       '.sls-tv__stateCover > span { position:relative; }',
-      '.sls-tv__row:hover .sls-tv__iconIdle { opacity:0; }',
-      '.sls-tv__chev { opacity:.45; transition:transform .15s ease, opacity .1s ease; }',
-      '.sls-tv__row:hover .sls-tv__chev { opacity:1; }',
-      '.sls-tv__row[data-open="1"] .sls-tv__chev { transform:rotate(-90deg); }',
       '.sls-tv__sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }',
       '.sls-tv__title { font-weight:400; }',
       '.sls-tv__sep { width:2px; height:2px; border-radius:1px; background:var(--dsw-alias-label-caption, currentColor); opacity:.8; flex:none; }',
@@ -661,9 +654,8 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END shellCardModel
 
-    // 官方 DisclosureRow leading 同构:16px 槽内 icon 与 chevron 同位,
-    // 收起时 chevron hover 才现(交叉淡化),展开时仅 chevron-up;错误态
-    // 红点叠 icon 之上(掩盖 icon,官方状态点语义)
+    // 官方 ToolRow leading 同构:行首仅 icon;错误/进行中状态红点叠 icon 之上
+    // (掩盖 icon,官方状态点语义)
     function leadingStack({ status, icons }) {
       const failed = status === 'failed' || status === 'signaled' || status === 'generic-error'
       const dot = failed ? icons.StateDot({ state: 'error' }) : status === 'generic-warn' ? icons.StateDot({ state: 'warning' }) : status === 'running' ? icons.StateDot({ state: 'ongoing' }) : null
@@ -771,7 +763,6 @@ window.__ModuleLoader__.load({
         },
           h('span', { className: 'sls-tv__lead' },
             leadingStack({ status, icons: TOOLVIEW_ICONS }),
-            expandable ? h('span', { className: 'sls-tv__chev', 'data-open': open ? '1' : '0', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })) : null,
           ),
           h('span', { className: 'sls-tv__title' }, 'Shell'),
           summary !== '' ? h('span', { className: 'sls-tv__sep', 'aria-hidden': true }) : null,
@@ -848,7 +839,6 @@ window.__ModuleLoader__.load({
         return () => { disposed = true }
       }, [])
       if (model.kind === 'generic') return h(GenericShellRow, { model, inspect, en })
-      const expandable = true
       const srStatus = statusTextOf(model.status, en)
       const summary = model.description !== undefined ? model.description.split('\n')[0] : (en ? '(no description)' : '(无描述)')
       const failed = model.status === 'failed' || model.status === 'signaled'
@@ -858,7 +848,6 @@ window.__ModuleLoader__.load({
           role: 'button',
           tabIndex: 0,
           'aria-expanded': open,
-          'data-open': open ? '1' : '0',
           onClick: () => setOpen((value) => !value),
           onKeyDown: (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
@@ -869,7 +858,6 @@ window.__ModuleLoader__.load({
         },
           h('span', { className: 'sls-tv__lead' },
             leadingStack({ status: model.status, icons: TOOLVIEW_ICONS }),
-            h('span', { className: 'sls-tv__chev', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })),
           ),
           srStatus !== null ? h('span', { className: 'sls-tv__sr' }, srStatus) : null,
           h('span', { className: 'sls-tv__title' }, 'Shell'),

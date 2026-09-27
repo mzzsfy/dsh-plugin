@@ -166,6 +166,13 @@ test('S18 头部单行:cwd 与客户端徽章强制不换行(渲染守卫)', () 
   assert.match(source, /\.sls-tv__pulse \{[^}]*white-space:nowrap/)
 })
 
+test('S19 行首无展开箭头:官方组件无展开箭头,可展开性由指针与整行点击承载(渲染守卫)', () => {
+  // BDD:Given 官方 ToolRow 无展开箭头,When 行渲染,Then 不存在 chevron 节点及其样式与状态钩子
+  assert.doesNotMatch(source, /sls-tv__chev/)
+  assert.doesNotMatch(source, /IconChevron/)
+  assert.doesNotMatch(source, /data-open/)
+})
+
 test('S12c isError 与空结果仍走 generic(回归)', () => {
   const errored = cardModel()(settledBlock(ARGS, 'boom', { isError: true }), SESSION_CWD)
   assert.equal(errored.kind, 'generic')

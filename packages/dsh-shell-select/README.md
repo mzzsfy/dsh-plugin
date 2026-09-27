@@ -30,7 +30,7 @@ Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配�
 - 折叠行:状态点(失败红/中断黄/其余工具图标)+ `Shell` 标题 + 描述首行摘要,失败摘要红显。
 - 展开卡:状态点 + cwd 末段目录 + 客户端名徽标(模型传了 `shell` 参数时)+ 失败 pill(退出码/信号)+ 复制命令/复制输出按钮 + 命令折行带行号 + 输出区(横向滚动,竖向限高)。
 - 非终端意图回退简版行:摘要 + 可展开原文 + 检查按钮。
-- 图标取官方 `dsh-client-ui-primitives`(StateDot/IconApi/IconInspect/Chevron),模块表缺席时降级自绘。
+- 图标取官方 `dsh-client-ui-primitives`(StateDot/IconApi/IconInspect),模块表缺席时降级自绘。行首无展开箭头,与官方组件一致,可展开性由指针与整行点击承载。
 
 ## 配置(行条目 `shell-select`,settings 面同名 ns)
 

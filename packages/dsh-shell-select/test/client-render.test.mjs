@@ -119,7 +119,6 @@ test('图标名守卫:0.1.7 primitives 字重后缀名在场,尺寸后缀旧名�
   // 0.1.7 图标改名:尺寸从名字移除(IconApiOutline14 → IconApiOutlineRegular/Medium),
   // 旧名 miss 使 IconApi 落淡灰 fallback 被当成"空白 icon"(实测事故)
   assert.match(source, /'IconApiOutlineRegular'/)
-  assert.match(source, /'IconChevronDownOutlineRegular'/)
   assert.match(source, /'IconInspectOutlineRegular'/)
   assert.doesNotMatch(source, /createElementOf\('IconApiOutline14'/)
 })
