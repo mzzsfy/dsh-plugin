@@ -155,11 +155,11 @@ window.__ModuleLoader__.load({
       // 头部单行片段禁折行:cwd 行宽不足时收缩出省略号,徽章不收缩不折行
       '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
       '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; white-space:nowrap; }',
-      '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; }',
+      '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; white-space:nowrap; }',
       '.sls-tv__pill--bg { color:var(--dsw-alias-label-tertiary, inherit); }',
-      '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; font-variant-numeric:tabular-nums; }',
+      '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; white-space:nowrap; font-variant-numeric:tabular-nums; }',
       // 运行中脉冲文字:零信息窗口(参数未到)的活体反馈
-      '.sls-tv__pulse { font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; animation:sls-pulse 1.5s ease-in-out infinite; }',
+      '.sls-tv__pulse { font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; white-space:nowrap; animation:sls-pulse 1.5s ease-in-out infinite; }',
       '@keyframes sls-pulse { 0%,100% { opacity:.35; } 50% { opacity:1; } }',
       '.sls-tv__sp { flex:1; }',
       '.sls-tv__copy { display:flex; align-items:center; gap:2px; flex:none; }',

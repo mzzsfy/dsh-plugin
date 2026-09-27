@@ -161,6 +161,9 @@ test('S18 头部单行:cwd 与客户端徽章强制不换行(渲染守卫)', () 
   assert.match(source, /\.sls-tv__cwd \{[^}]*overflow:hidden/)
   assert.match(source, /\.sls-tv__cwd \{[^}]*text-overflow:ellipsis/)
   assert.match(source, /\.sls-tv__badge \{[^}]*white-space:nowrap/)
+  assert.match(source, /\.sls-tv__pill \{[^}]*white-space:nowrap/)
+  assert.match(source, /\.sls-tv__duration \{[^}]*white-space:nowrap/)
+  assert.match(source, /\.sls-tv__pulse \{[^}]*white-space:nowrap/)
 })
 
 test('S12c isError 与空结果仍走 generic(回归)', () => {
