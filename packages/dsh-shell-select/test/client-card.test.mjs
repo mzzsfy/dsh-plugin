@@ -155,6 +155,14 @@ test('S17d 后台状态中性:不断言运行中,点为中性图标(渲染守卫
   assert.doesNotMatch(source, /case 'background': return en \? 'Background' : '后台运行'/)
 })
 
+test('S18 头部单行:cwd 与客户端徽章强制不换行(渲染守卫)', () => {
+  // BDD:Given 头部行宽受限,When cwd 或客户端名过长,Then 二者均不内部折行(cwd 压缩出省略号,徽章保持完整)
+  assert.match(source, /\.sls-tv__cwd \{[^}]*white-space:nowrap/)
+  assert.match(source, /\.sls-tv__cwd \{[^}]*overflow:hidden/)
+  assert.match(source, /\.sls-tv__cwd \{[^}]*text-overflow:ellipsis/)
+  assert.match(source, /\.sls-tv__badge \{[^}]*white-space:nowrap/)
+})
+
 test('S12c isError 与空结果仍走 generic(回归)', () => {
   const errored = cardModel()(settledBlock(ARGS, 'boom', { isError: true }), SESSION_CWD)
   assert.equal(errored.kind, 'generic')

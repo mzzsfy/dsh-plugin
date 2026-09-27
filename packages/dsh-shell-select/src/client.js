@@ -152,8 +152,9 @@ window.__ModuleLoader__.load({
       '.sls-tv__sum--err { color:var(--dsw-alias-state-error-primary, #d4553f); }',
       '.sls-tv__body { margin:6px 0 4px; border:1px solid rgba(128,128,128,.28); border-radius:8px; overflow:hidden; }',
       '.sls-tv__head { display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid rgba(128,128,128,.18); background:rgba(128,128,128,.05); }',
-      '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; }',
-      '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; }',
+      // 头部单行片段禁折行:cwd 行宽不足时收缩出省略号,徽章不收缩不折行
+      '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+      '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; white-space:nowrap; }',
       '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; }',
       '.sls-tv__pill--bg { color:var(--dsw-alias-label-tertiary, inherit); }',
       '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; font-variant-numeric:tabular-nums; }',
