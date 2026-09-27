@@ -86,4 +86,4 @@ node scripts/dev-link.mjs dsh-model-capability-editor   # 仓库根执行:归一
 
 ## dsh 版本兼容
 
-三版本全部通过:模型页行内能力面板注入。注入前提=模型行「容量 N」箭头展开高级设置区(0.1.5+/0.1.6 官方行为);0.1.6 插件 client 装载为聚合 URL 形态。激活 live、双 live findings 0。
+三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)兼容通过:模型页行内能力面板注入。注入前提=模型行「容量 N」箭头展开高级设置区(0.1.5+/0.1.6 官方行为);0.1.6 插件 client 装载为聚合 URL 形态。激活 live、findings 0。0.1.7-rc.1 深测项依赖 providers 配置夹具(ENV-003),装载与激活面正常。

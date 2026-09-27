@@ -1,7 +1,12 @@
 // 官方 entry 生命周期探测与复活守卫 BDD:
-// 接管决策三态(接管/等待退场/让位)与官方复活让位(守卫自停)。
+// 接管决策四态(接管/等待退场/让位/运行时禁用)与官方复活让位(守卫自停)。
 // 背景:宿主注册排他,官方行复活撞本包在场注册会令官方 init 失败并拖垮
 // 整批 patch 应用;守卫经 waterfall 在官方 apply 前自停让位。
+// 运行时接管:bundle patch 不再静态禁官方行(组合期禁用不检查 gateway 可
+// 服务性,gateway 损伤即全模型不可用);官方行的禁用由 gateway apply 落定
+// 后 runtime-disable 执行。行 options.disabled 原始值三态区分意图:
+// undefined=默认态(runtime-disable 的接管空间)/ false=用户显式启用(yield,
+// 永不强抢)/ true=已禁(await-exit/takeover)。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -25,16 +30,30 @@ function loaderOf(entry) {
   }
 }
 
-function entryOf({ disabled = false, running = false, disabledThrows = false } = {}) {
-  return {
-    options: disabled ? { disabled: true } : {},
-    // 宿主 Entry.disabled getter 桩:含 !!js 表达式求值与父链回溯语义
+// rawDisabled:options.disabled 原始值(默认 undefined);disabled:entry.disabled
+// getter 求值结果(含 !!js 表达式与父链回溯语义);updateLog:entry.update 调用记录
+// (runtime-disable 断言点);exitOnDisable:update(disabled:true) 时模拟宿主
+// 「禁用 → fiber 撤清」语义(真实宿主 dispose 异步,测试即时或经延迟函数控制)
+function entryOf({ disabled = false, running = false, disabledThrows = false, rawDisabled, updateLog, exitOnDisable = true } = {}) {
+  const entry = {
+    options: { disabled: rawDisabled, ...(disabled ? { disabled: true } : {}) },
+    // 宿主 Entry.disabled getter 桩:!!js 求值结果以 options.disabled 为源
+    // (runtime-disable update 后 getter 跟随翻转,同宿主行为)
     get disabled() {
       if (disabledThrows) throw new Error('bad !!js expression')
-      return disabled
+      return entry.options.disabled === true
     },
     fiber: running ? { uid: 1 } : undefined,
+    update: async (patch, quiet, force) => {
+      updateLog?.push({ patch, quiet, force })
+      if (patch?.disabled === true) {
+        entry.options.disabled = true
+        if (exitOnDisable) entry.fiber = undefined
+      }
+      return undefined
+    },
   }
+  return entry
 }
 
 test('探测: loader 缺失或官方行不存在,按缺席处理(接管语义)', () => {
@@ -55,14 +74,25 @@ test('探测: disabled getter 抛错(!!js 求值失败)按未禁用处理,决策
   assert.equal(takeoverDecision(state), 'yield')
 })
 
+test('决策: getter 抛错时即使 options 显式 false 或 undefined,一律让位安全向', () => {
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ disabledThrows: true, rawDisabled: false })))), 'yield')
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ disabledThrows: true, rawDisabled: undefined })))), 'yield')
+})
+
 test('决策: 缺席或已禁用停稳 → 接管', () => {
   assert.equal(takeoverDecision(officialEntryState(ABSENT_LOADER)), 'takeover')
   assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ disabled: true })))), 'takeover')
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ disabled: true, rawDisabled: true })))), 'takeover')
 })
 
-test('决策: 行未被禁(用户层启用官方)→ 让位', () => {
-  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf()))), 'yield')
-  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ running: true })))), 'yield')
+test('决策: 默认启用(options.disabled undefined)→ runtime-disable(gateway 落定后运行时禁用接管)', () => {
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf()))), 'runtime-disable')
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ running: true })))), 'runtime-disable', 'boot 常态:官方先服务,gateway 落定后禁用接管')
+})
+
+test('决策: 用户显式启用(options.disabled false)→ 让位,永不强抢', () => {
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ rawDisabled: false })))), 'yield')
+  assert.equal(takeoverDecision(officialEntryState(loaderOf(entryOf({ rawDisabled: false, running: true })))), 'yield')
 })
 
 test('决策: 禁用但插件仍在退场 → 等待退场', () => {
@@ -276,13 +306,50 @@ function integrationCtx({ officialEntry, officialDiscoveryPresent = false } = {}
 
 const OFFICIAL_STUB = async () => ({ Config: {} })
 
-test('接线: 官方行未禁(用户层启用)→ 让位态,settings/discovery 均不占用官方资源,不装守卫', async () => {
-  const { ctx, logs, installed, discovery, guards } = integrationCtx({ officialEntry: entryOf() })
-  await apply(ctx, undefined, OFFICIAL_STUB)
-  assert.match(logs.warn.join('\n'), /行未被禁用/)
+// runtime-disable 异步序列的等待锚点:序列挂在 apply 返回后的微任务链上,
+// 轮询/退场等待经注入参数收敛为即时完成
+const runtimeDisableOptions = { exitPoll: { intervalMs: 1, rounds: 3 }, deferredExit: { intervalMs: 1, delay: async () => {} } }
+const flushDisableSequence = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+test('接线: 官方行默认启用(options undefined)→ apply 落定后 runtime-disable 官方行并补接管', async () => {
+  const updateLog = []
+  const entry = entryOf({ running: true, updateLog })
+  const { ctx, installed, discovery, guards } = integrationCtx({ officialEntry: entry })
+  await apply(ctx, undefined, OFFICIAL_STUB, runtimeDisableOptions)
+  // apply 落定期:官方资源零占用(接管未完成)
+  assert.deepEqual(installed, [SETTINGS_NS], 'apply 返回时官方节尚未接管')
+  assert.deepEqual(discovery, [SETTINGS_NS], '官方 ns 在官方退场前不得抢占')
+  assert.equal(guards.length, 0, '守卫在接管完成序列中安装')
+  await flushDisableSequence()
+  assert.deepEqual(updateLog, [{ patch: { disabled: true }, quiet: false, force: true }], 'market 同款运行时禁用调用')
+  assert.deepEqual(installed, [SETTINGS_NS, OFFICIAL_SETTINGS_NS], '官方退场后补接管官方节')
+  assert.deepEqual(discovery, [SETTINGS_NS, OFFICIAL_SETTINGS_NS], '官方 ns discovery 补注册')
+  assert.equal(guards.length, 1, '接管完成后复活守卫在位')
+})
+
+test('接线: 官方行显式启用(options false)→ 让位态,不调用 update,settings/discovery 均不占用官方资源', async () => {
+  const updateLog = []
+  const entry = entryOf({ running: true, rawDisabled: false, updateLog })
+  const { ctx, logs, installed, discovery, guards } = integrationCtx({ officialEntry: entry })
+  await apply(ctx, undefined, OFFICIAL_STUB, runtimeDisableOptions)
+  await flushDisableSequence()
+  assert.match(logs.warn.join('\n'), /显式启用/)
+  assert.deepEqual(updateLog, [], '用户意图最高,永不强抢')
   assert.deepEqual(installed, [SETTINGS_NS])
   assert.deepEqual(discovery, [SETTINGS_NS], '官方 ns 必须留给官方插件注册')
   assert.equal(guards.length, 0, '让位态无需复活守卫')
+})
+
+test('接线: runtime-disable update 抛错 → 降级让官方继续服务,不接管', async () => {
+  const entry = entryOf({ running: true })
+  entry.update = async () => { throw new Error('host update rejected') }
+  const { ctx, logs, installed, discovery, guards } = integrationCtx({ officialEntry: entry })
+  await apply(ctx, undefined, OFFICIAL_STUB, runtimeDisableOptions)
+  await flushDisableSequence()
+  assert.match(logs.warn.join('\n'), /运行时禁用失败/)
+  assert.deepEqual(installed, [SETTINGS_NS])
+  assert.deepEqual(discovery, [SETTINGS_NS])
+  assert.equal(guards.length, 0)
 })
 
 test('接线: 官方行禁用且停稳 → 接管态,装守卫并安装官方节', async () => {
@@ -303,11 +370,14 @@ test('接线: 官方行禁用但仍在退场 → 等待退场后接管', async (
   assert.deepEqual(installed, [OFFICIAL_SETTINGS_NS, SETTINGS_NS], '退场完成后必须接管官方节')
 })
 
-test('接线: 官方行禁用但退场超时 → 降级为只服务本包节,武装延迟补接管', async () => {
-  const entry = entryOf({ disabled: true, running: true })
+test('接线: 官方行禁用但退场超时(runtime-disable 后在途流)→ 降级为只服务本包节,武装延迟补接管', async () => {
+  const updateLog = []
+  const entry = entryOf({ running: true, updateLog, exitOnDisable: false })
   const { ctx, logs, installed, discovery } = integrationCtx({ officialEntry: entry })
   try {
-    await apply(ctx, undefined, OFFICIAL_STUB, { exitPoll: { intervalMs: 1, rounds: 1 }, deferredExit: { intervalMs: 1, delay: async () => {} } })
+    await apply(ctx, undefined, OFFICIAL_STUB, { exitPoll: { intervalMs: 1, rounds: 1 }, deferredExit: { intervalMs: 2, delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } })
+    await flushDisableSequence()
+    assert.deepEqual(updateLog, [{ patch: { disabled: true }, quiet: false, force: true }])
     assert.match(logs.warn.join('\n'), /退场超时/)
     assert.deepEqual(installed, [SETTINGS_NS])
     assert.deepEqual(discovery, [SETTINGS_NS])

@@ -70,7 +70,12 @@ function setup() {
       fn(tctx)
     },
   }
-  registerOrchestrator(ctx, { templateId: 'default' })
+  registerOrchestrator(ctx, {
+    templateId: 'default',
+    // 守门消息构造器注入桩:dsh-llm 是 peerDependency,仅宿主运行时可解析,
+    // 单元测试以透传桩替代(守门 steer 的消息形状即构造参数本身)
+    createUserMessage: (spec) => spec,
+  })
   const tool = (name) => registered.find((t) => t.name === name)
   const agent = { id: `agent-${setup.seq = (setup.seq ?? 0) + 1}` }
   const exec = { agent, signal: { throwIfAborted: () => {}, aborted: false } }

@@ -1,4 +1,4 @@
-// executor 官方 seam 集成(桩 ctx):BDD 场景见本文件与 README「官方工具兼容」。
+﻿// executor 官方 seam 集成(桩 ctx):BDD 场景见本文件与 README「官方工具兼容」。
 // 背景:preset 注入的官方 tool-pwsh 经 cordis 服务代理(ctx.shell)调用执行器,
 // 代理把方法 this 重定向到阴影对象;执行器公开面必须与官方 PwshLocalExecutor
 // 同构地使用公有字段/方法(#私有在阴影 receiver 下触发品牌检查错误)。
@@ -6,7 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import ShellSelectExecutor from '../src/executor.mjs'
-import { Config } from '../src/config.mjs'
+import { resolveConfig } from '../src/config.mjs'
 
 function stubReader(text) {
   return { readFrom: () => ({ text, lossy: false, nextOffset: text.length }) }
@@ -33,7 +33,7 @@ function stubCtx({ sandboxMode = 'danger-full-access', spawn = stubSpawn() } = {
   const settingsImpl = {
     installSection: (ctx, ns, schema, base, hooks) => {
       registered.sections.push({ ns, schema, base, hooks })
-      settingsImpl._source = () => Config(base ?? {})
+      settingsImpl._source = () => resolveConfig(base ?? {})
     },
   }
   const ctx = {

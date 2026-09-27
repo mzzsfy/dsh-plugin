@@ -198,4 +198,4 @@ npm test        # node --test test/*.test.mjs,纯逻辑层;devDependencies 提�
 
 ## dsh 版本兼容
 
-0.1.2-rc.1 / 0.1.5-rc.2 / 0.1.6-alpha.1 三版本(固定版本窗口)全部通过:激活 live、本包节路由注册、header 三通道注入(anthropic/openai)、cacheRetention 门控与还原、热更新 patch、禁用窗口 guard 代挂官方服务(0.1.2-rc.1 经剥键收敛修复后数据面完整)。配置写入按版本分流:0.1.2/0.1.5 可直接写 settings.yaml 官方节(合法数据回读有效;非法条目被 schemastery 静默丢弃),0.1.6 起建议走 settings/update RPC(校验前置)。详见包内 兼容性测试.md「0.1.6 兼容性备注」与「三版本兼容实测」。
+0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1 版本窗口通过(0.1.5-rc.2 / 0.1.6-alpha.1 历史窗口同过):激活 live、本包节路由注册、header 三通道注入(anthropic/openai)、cacheRetention 门控与还原、热更新 patch、禁用窗口 guard 代挂官方服务(0.1.2-rc.1 经剥键收敛修复后数据面完整)。配置写入按版本分流:0.1.2/0.1.5 可直接写 settings.yaml 官方节(合法数据回读有效;非法条目被 schemastery 静默丢弃),0.1.6 起建议走 settings/update RPC(校验前置)。0.1.7-rc.1 会话+echo 夹具受限,装载与激活面实测通过。详见包内 兼容性测试.md「0.1.6 兼容性备注」与「三版本兼容实测」。

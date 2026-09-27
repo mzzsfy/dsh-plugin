@@ -1069,6 +1069,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const TAB_ID = 'cron-board:board'
     const PANEL_ID = 'cron-board'
     const PANEL_LABEL = '定时任务'
+    const PKG_ID = '@mzzsfy/dsh-cron-board'
 
     // 设置>插件页卡片:官方 PluginCard 形制(名称/描述头部 + chevron 折叠 + 行内开关);better-sidebar 在场可切换,否则仅展示禁用态
     const CARD_TITLE = '定时任务'
@@ -1219,6 +1220,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             () => h(CronBoardPluginCard, { ctx }),
           )
         }), 'cron-board settings card')
+        // 插件管理页(0.1.7-rc.1+)包详情配置卡:key = 包名,管理页 ledger.bundles 判定 section
+        // 在场;卡片自包含(只调本插件 API,不触宿主 settings)。两代槽位并存注册:inject 是
+        // 声明生命周期效应,错误世代宿主永不声明该槽,回调挂起不执行,零成本
+        ctx.effect(() => ctx.slots.inject('plugins.bundle.config', function* () {
+          yield ctx.slots.register(
+            { name: 'plugins.bundle.config', key: PKG_ID },
+            () => h(CronBoardPluginCard, { ctx }),
+          )
+        }), 'cron-board plugin manager card')
         ctx.inject(['betterSidebar'], (bsCtx) => {
           currentSidebar = bsCtx.betterSidebar
           applyPref()

@@ -109,6 +109,11 @@ test('client.js 主页面双形态挂载契约(默认宿主全局面板;设置�
   assert.match(source, /function CronBoardPluginCard/)
   assert.match(source, /'ui-settings'/)
   assert.match(source, /sidebarReady/)
+  // 插件管理页包详情配置卡(0.1.7-rc.1+ plugins.bundle.config,key=包名);两代槽位并存注册,
+  // 各自宿主只消费其一(旧宿主无 plugins.bundle.config 消费方,rc.1 无 settings.plugin.item 消费方)
+  assert.match(source, /const PKG_ID = '@mzzsfy\/dsh-cron-board'/)
+  assert.match(source, /ctx\.slots\.inject\('plugins\.bundle\.config'/)
+  assert.match(source, /name: 'plugins\.bundle\.config', key: PKG_ID/)
   // 挂载仲裁:偏好(status.ui.sidebarTab)驱动全局面板/扩展槽互斥
   assert.match(source, /applyPref\(\)/)
   assert.match(source, /ui\.sidebarTab/)

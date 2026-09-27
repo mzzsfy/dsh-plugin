@@ -54,11 +54,16 @@ function makeCtx({
   settingsValue,
   settingsGetError,
   readSessions,
+  configRef,
+  configEditor,
+  settingsService: settingsServiceOverride,
 }) {
   const routes = []
   const pendingInjects = []
   const settingsState = { value: settingsValue }
-  const settingsService = {
+  // settingsServiceOverride(0.1.7 形态桩,如仅 update 的 forms 面)优先;
+  // 缺省时构造 legacy 方法面桩(get/register/update 命名空间语义)
+  const settingsService = settingsServiceOverride ?? {
     // settingsGetError 注入读取期故障:验证 respondError 的系统级错误收敛分支
     get: () => {
       if (settingsGetError) throw settingsGetError
@@ -95,7 +100,12 @@ function makeCtx({
       if (typeof disposer === 'function') effectDisposers.push(disposer)
     },
     inject: (_deps, fn) => { pendingInjects.push(fn) },
-    get: (name) => ({ agents, sessionPersistence, settings: settingsService }[name]),
+    // fiber 桩:0.1.7 configure 装配以本条目 fiber 为 owner
+    fiber: { entry: { options: { id: 'context-manager', name: '@mzzsfy/dsh-context-manager' } } },
+    get: (name) => {
+      if (name === 'configEditor') return configEditor
+      return { agents, sessionPersistence, settings: settingsService }[name]
+    },
     logger: { warns: [], warn(message) { this.warns.push(message) }, infos: [], info(message) { this.infos.push(message) } },
   }
   const ctx = new Proxy(base, {
@@ -108,14 +118,23 @@ function makeCtx({
       return services[prop]
     },
   })
-  apply(ctx, undefined)
+  apply(ctx, configRef)
   return {
     handlers: new Map(routes.map((route) => [route.path, route.handler])),
     logger: base.logger,
     readCounts,
     // 模拟宿主 settings 服务激活:触发 inject 回调(注册)
     activateSettings: () => {
-      while (pendingInjects.length > 0) pendingInjects.shift()({ settings: settingsService })
+      while (pendingInjects.length > 0) {
+        pendingInjects.shift()({
+          settings: settingsService,
+          // 注入上下文的 effect 桩:0.1.7 分支经它注册 configure 装配
+          effect(fn) {
+            const disposer = fn()
+            if (typeof disposer === 'function') effectDisposers.push(disposer)
+          },
+        })
+      }
     },
   }
 }
@@ -898,4 +917,97 @@ test('输入框历史按钮启停:GET 默认启用,POST 切换经 settings 持�
   const restored = response()
   await handlers.get('/api/context/history-button-enabled')(getRequest2('/api/context/history-button-enabled', 'GET'), restored)
   assert.equal(restored.body.enabled, true)
+})
+
+// --- 0.1.7 settings 面双形适配(maintain a913c2c 同构) ---
+
+test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默认值对拍', () => {
+  // Given 静态 Config 导出(0.1.7 节表单事实源)
+  assert.ok(indexModule.Config, 'Config 导出必须在场')
+  // When 空配置校验
+  const resolved = indexModule.Config['~standard'].validate({})
+  // Then 产整节单 ref(get 协议),布尔开关默认全开(forkAutoResend 除外)
+  assert.equal(resolved.issues, undefined)
+  const section = resolved.value.get()
+  assert.equal(section.historyEnabled, true)
+  assert.equal(section.forkAutoResendEnabled, false)
+  assert.equal(section.copySidEnabled, true)
+})
+
+test('0.1.7 形态:settings 无 get/register 时读回落 config ref 节值', skipMissingDeps, async () => {
+  // Given settingsForms 只有 update(0.1.7 真实方法面)+ config ref 携带用户值
+  const settingsForms = { update: async () => {} }
+  const configRef = { get: () => ({ historyEnabled: false, copySidEnabled: false }) }
+  const { handlers } = makeCtx({
+    headers: [{ id: 's1', cwd: 'C:/x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+    configRef,
+  })
+  // When GET 开关路由
+  const res = response()
+  await handlers.get('/api/context/history-enabled')(getRequest2('/api/context/history-enabled', 'GET'), res)
+  // Then 返回 config 节值而非默认
+  assert.equal(res.body.enabled, false)
+})
+
+test('0.1.7 形态:开关 POST 经 configEditor.edit 落 fiber.entry 并回显新值', skipMissingDeps, async () => {
+  // Given settingsForms 只有 update + configEditor 桩(合并写回 configStore)
+  const settingsForms = { update: async () => {} }
+  const configStore = {}
+  const editCalls = []
+  const configRef = { get: () => ({ ...configStore }) }
+  const { handlers } = makeCtx({
+    headers: [{ id: 's1', cwd: 'C:/x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+    configRef,
+    configEditor: {
+      async edit(entry, change) {
+        editCalls.push(entry)
+        const next = change({ ...configStore }, {})
+        for (const [key, value] of Object.entries(next)) configStore[key] = value
+      },
+    },
+  })
+  // When POST 关闭历史浮层
+  const off = await postJson(handlers, '/api/context/history-enabled', { enabled: false })
+  // Then edit 定位本条目,合并写回,回显新值
+  assert.equal(off.body.enabled, false)
+  assert.equal(editCalls.length, 1)
+  assert.equal(editCalls[0].options.id, 'context-manager')
+  assert.equal(configStore.historyEnabled, false)
+})
+
+test('0.1.7 形态:configEditor 缺失即 400 拒写,配置不变', skipMissingDeps, async () => {
+  // Given settingsForms 只有 update 且无 configEditor
+  const settingsForms = { update: async () => {} }
+  const configRef = { get: () => ({}) }
+  const { handlers } = makeCtx({
+    headers: [{ id: 's1', cwd: 'C:/x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+    configRef,
+  })
+  // When POST 写开关
+  const denied = await postJson(handlers, '/api/context/history-enabled', { enabled: false })
+  // Then 400 错误响应
+  assert.equal(denied.status, 400)
+  assert.ok(denied.body.error)
+})
+
+test('0.1.7 形态:settings.configure 在场即关闭原生自动页,register 缺失不抛错', skipMissingDeps, () => {
+  // Given settingsForms 带 configure 无 register
+  const configureCalls = []
+  const settingsForms = { configure: (presentation, owner) => { configureCalls.push({ presentation, owner }); return () => {} } }
+  const { activateSettings } = makeCtx({
+    headers: [{ id: 's1', cwd: 'C:/x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+  })
+  // When 激活 settings 注入
+  activateSettings()
+  // Then 关闭自动页且 owner 为本插件 fiber
+  assert.equal(configureCalls.length, 1)
+  assert.deepEqual(configureCalls[0].presentation, { auto: false })
 })

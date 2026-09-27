@@ -1,5 +1,5 @@
 // CI 兼容性测试入口:解析版本窗口 → 逐版本端到端验证 → 汇总 → 按阻塞槽位定退出码。
-// 前瞻槽(最新线预发布)失败只发 warning 不阻塞;基线/主测槽失败置退出码 1。
+// 前瞻槽(全通道最新)失败只发 warning 不阻塞;基线/主测槽失败置退出码 1。
 // 用法:node scripts/compat/ci.mjs [--window-file PATH]
 //   --window-file:读取已解析好的窗口 JSON(workflow 单次实算,避免与缓存键窗口漂移);
 //   缺省依次回退 DSH_COMPAT_VERSIONS 显式清单 / registry 实算
@@ -40,15 +40,28 @@ function runVersion(entry, port) {
   })
 }
 
+// LLM 链路列:PASS = provider 注册 + 真实对话驱动 + 宿主经 gateway 打到模拟器(留档证据);
+// 模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
+function llmCell(result) {
+  try {
+    const llm = JSON.parse(readFileSync(join(COMPAT_ROOT, result.version, 'result.json'), 'utf8')).checks.llm
+    if (!llm) return 'N/A'
+    const flags = [llm.providerRegistered ? '注册✓' : '注册✗', llm.chatDriven ? '对话✓' : '对话✗', llm.upstreamSeen ? '上游✓' : '上游✗']
+    return llm.providerRegistered && llm.chatDriven && llm.upstreamSeen ? 'PASS' : `FAIL(${flags.join('/')})`
+  } catch {
+    return 'N/A'
+  }
+}
+
 function writeSummary(results) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY
   if (!summaryPath) return
   const lines = [
     '## dsh 兼容性测试(全家桶 boot + 统一底线)',
     '',
-    '| 槽位 | 版本 | 判定 | 端口 |',
-    '|------|------|------|------|',
-    ...results.map((r) => `| ${SLOT_LABELS[r.slot]} | ${r.version} | ${r.ok ? 'PASS' : 'FAIL'} | ${r.port} |`),
+    '| 槽位 | 版本 | 判定 | 端口 | LLM 链路 |',
+    '|------|------|------|------|----------|',
+    ...results.map((r) => `| ${SLOT_LABELS[r.slot]} | ${r.version} | ${r.ok ? 'PASS' : 'FAIL'} | ${r.port} | ${llmCell(r)} |`),
     '',
   ]
   const blocked = results.filter((r) => !r.ok && r.blocking)
@@ -66,8 +79,12 @@ function printFailureDetail(failed) {
   const channel = failed.blocking ? '::error::' : '::warning::'
   const clip = (text) => text.replace(/\s+/g, ' ').slice(0, STDERR_TAIL_BYTES)
   try {
-    const detail = readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8')
-    console.log(`${channel}兼容性明细 ${failed.version}: ${clip(detail)}`)
+    const detail = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8'))
+    const llm = detail.checks?.llm
+    const llmNote = llm && !(llm.providerRegistered && llm.chatDriven && llm.upstreamSeen)
+      ? `;LLM 链路: 注册=${llm.providerRegistered} 对话=${llm.chatDriven ?? 'n/a'} 上游=${llm.upstreamSeen} 路径=${(llm.upstreamKinds ?? []).join(',') || '无'} 步骤失败=${(llm.stepErrors ?? []).join(' / ') || '无'}`
+      : ''
+    console.log(`${channel}兼容性明细 ${failed.version}: ${clip(JSON.stringify(detail))}${llmNote}`)
   } catch {
     // boot/判定早期退出未落 result.json:真因只在 run.mjs stderr,尾部直贴注解
     console.log(`${channel}兼容性明细 ${failed.version}: 无 result.json;stderr 尾部: ${clip(failed.stderrTail || '(空)')}`)
@@ -88,7 +105,7 @@ const window_ = args.windowFile
   ? JSON.parse(readFileSync(args.windowFile, 'utf8'))
   : process.env.DSH_COMPAT_VERSIONS
     ? parseExplicit(process.env.DSH_COMPAT_VERSIONS)
-    : resolveWindow(await fromRegistry())
+    : await fromRegistry().then(({ latest, versions }) => resolveWindow(versions, latest))
 log(`版本窗口: ${window_.map((w) => `${w.version}(${SLOT_LABELS[w.slot]}${w.blocking ? '' : ',非阻塞'})`).join(' → ')}`)
 
 // 逐包外部依赖与版本槽无关,全窗口只装一次

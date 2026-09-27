@@ -297,8 +297,8 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
         if (typeof body.sidebarTab === 'boolean') patch.sidebarTab = body.sidebarTab
         if (!Object.keys(patch).length) return sendJson(res, 400, { error: '无有效字段' })
         if (typeof updateUiSettings !== 'function') return sendJson(res, 200, { ok: false, error: '设置服务不可用' })
-        updateUiSettings(patch)
-        sendJson(res, 200, { ok: true, ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false } })
+        const persisted = await updateUiSettings(patch)
+        sendJson(res, 200, { ok: persisted, ui: { sidebarTab: readSidebarTab ? readSidebarTab() === true : false } })
       },
     },
     {

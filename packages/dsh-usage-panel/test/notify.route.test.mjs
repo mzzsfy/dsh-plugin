@@ -446,3 +446,105 @@ test('长轮询: cursor 落后当前版本时立即返回不挂起', async () =>
   assert.equal(res.payload.units.length, 2)
   assert.ok(res.payload.version > 0)
 })
+
+// --- 0.1.7 settings 面双形适配(maintain a913c2c 同构) ---
+
+test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默认值对拍', async () => {
+  const mod = await import('../src/index.js')
+  assert.ok(mod.Config, 'Config 导出必须在场')
+  const resolved = mod.Config['~standard'].validate({})
+  assert.equal(resolved.issues, undefined)
+  const section = resolved.value.get()
+  assert.equal(section.notify.enabled, false)
+  assert.equal(section.notify.toast, true)
+  assert.equal(section.notify.imTargets.length, 0)
+})
+
+// 0.1.7 形态装配:settings 无 register/get(宿主已移除),configRef 为整节单 ref 桩
+function makeRc17Ctx({ configStore = {}, configEditorAvailable = true } = {}) {
+  const routes = new Map()
+  const editCalls = []
+  const configureCalls = []
+  const disposers = []
+  const configRef = { get: () => ({ ...configStore }) }
+  const settingsService = { configure: (presentation, owner) => { configureCalls.push({ presentation, owner }); return () => {} } }
+  const configEditor = {
+    async edit(entry, change) {
+      editCalls.push(entry)
+      const next = change({ ...configStore }, {})
+      for (const key of Object.keys(next)) configStore[key] = next[key]
+    },
+  }
+
+  const ctx = {
+    get(name) {
+      if (name === 'settings') return settingsService
+      if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
+      return undefined
+    },
+    fiber: { entry: { options: { id: 'usage-panel', name: '@mzzsfy/dsh-usage-panel' } } },
+    effect(fn) { fn() },
+    inject(_deps, fn) {
+      fn({
+        settings: settingsService,
+        interval: () => {},
+        effect(stubEffect) {
+          const disposer = stubEffect()
+          if (typeof disposer === 'function') disposers.push(disposer)
+        },
+      })
+    },
+    webServer: {
+      register(route) {
+        routes.set(route.path, route.handler)
+        return () => routes.delete(route.path)
+      },
+    },
+  }
+  return { ctx, routes, configRef, configStore, editCalls, configureCalls, disposers }
+}
+
+test('0.1.7 形态:notify-config GET 读 configRef 节值,POST 经 configEditor.edit 落 fiber.entry', async () => {
+  // Given configRef 携带用户值 + configEditor 桩
+  const { ctx, routes, configRef, configStore, editCalls } = makeRc17Ctx({
+    configStore: { notify: { enabled: true, quotaThresholdPct: 88 } },
+  })
+  apply(ctx, configRef)
+  // When GET notify-config
+  const read = await call(routes, '/api/usage-panel/notify-config', makeReq('GET'))
+  // Then 返回 configRef 节值
+  assert.equal(read.status, 200)
+  assert.equal(read.payload.notify.enabled, true)
+  assert.equal(read.payload.notify.quotaThresholdPct, 88)
+  // When POST 部分补丁
+  const saved = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { enabled: true, balanceThreshold: 12 }))
+  // Then 整节合并落本条目
+  assert.equal(saved.status, 200)
+  assert.equal(saved.payload.ok, true)
+  assert.equal(editCalls.length, 1)
+  assert.equal(editCalls[0].options.id, 'usage-panel')
+  assert.equal(configStore.notify.enabled, true)
+  assert.equal(configStore.notify.balanceThreshold, 12)
+  assert.equal(configStore.notify.quotaThresholdPct, 88, '未提交字段整节保留')
+})
+
+test('0.1.7 形态:configEditor 缺失即 400 拒写,不崩溃', async () => {
+  // Given configEditor 服务缺席
+  const { ctx, routes, configRef } = makeRc17Ctx({ configEditorAvailable: false })
+  apply(ctx, configRef)
+  // When POST 写配置
+  const denied = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { enabled: true }))
+  // Then 400 错误响应,进程存活(测试走完即证)
+  assert.equal(denied.status, 400)
+  assert.ok(denied.payload.error)
+})
+
+test('0.1.7 形态:settings.configure 在场即关闭原生自动页,register 缺失不抛错', () => {
+  // Given settingsForms 带 configure 无 register
+  const { ctx, configRef, configureCalls } = makeRc17Ctx()
+  // When apply
+  apply(ctx, configRef)
+  // Then 关闭自动页且 owner 为本插件 fiber
+  assert.equal(configureCalls.length, 1)
+  assert.deepEqual(configureCalls[0].presentation, { auto: false })
+})

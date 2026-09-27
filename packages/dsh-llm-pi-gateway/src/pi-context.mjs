@@ -1,13 +1,15 @@
 // harness 历史到 pi-ai Context 的转换(移植自 dsh-llm-pi-ai context/replay)。
-// 文本路径与图片路径与官方逐项对表:图片管线复用 dsh-llm 公共导出
-// (contentHasImage / offloadRequestImagesWithPolicy / requestImageHandleText),
-// offloadedImageText 为 0.1.2 新增导出,经 images.offloadedText 注入以兼容旧宿主,
+// 文本路径与图片路径与官方逐项对表:图片卸载管线经 images.offload 注入
+// (src/image-offload.mjs 特性检测,0.1.7 routed / 0.1.2–0.1.5 transient 双形态),
+// offloadedText 为 0.1.2 起导出,经 images.offloadedText 注入以兼容旧宿主,
 // 图片仅 user 角色可表示,读出经 attachments 服务转 base64 块;
 // systemPrompt 择取同官方 0.1.5 splitSystemPrompt:leading system 折叠为
 // systemPrompt(非 leading system 仍投影为 user)。
 // finish 块产出官方同构 replayState(pi-ai kind, version 2),后续请求按其重建原生 assistant 历史。
+// 0.1.7 历史词汇:tool 结果改为顶层 role:"tool" 消息(旧宿主为 user 消息内
+// tool-result 块),developer 角色与 tool-change 块不受支持即拒——两词汇同径兼容。
 
-import { contentHasImage, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, requestImageHandleText } from '@deepseek-ai/dsh-llm'
 import { DEFAULT_IMAGE_MAX_BYTES, DEFAULT_IMAGE_PIXEL_BUDGET } from './config.mjs'
 import { GatewayError } from './errors.mjs'
 
@@ -249,8 +251,11 @@ function splitSystemPrompt(options) {
   return { systemPrompt: text.length > 0 ? text : undefined, messages: rest }
 }
 
-/** 组装请求级 pi-ai context 信封。 */
+/** 组装请求级 pi-ai context 信封(官方 toolsOf 同构:延迟加载工具即拒)。 */
 function piContext(systemPrompt, options, messages) {
+  if (options.tools?.some((tool) => tool.deferLoading === true)) {
+    throw new GatewayError('Deferred tool loading is not supported yet', 'UNSUPPORTED_CONTENT')
+  }
   const tools = options.tools?.map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -260,6 +265,20 @@ function piContext(systemPrompt, options, messages) {
     ...(systemPrompt !== undefined ? { systemPrompt } : {}),
     messages,
     ...(tools !== undefined && tools.length > 0 ? { tools } : {}),
+  }
+}
+
+/** 官方 toolResultOf 同构:role:"tool" 消息(0.1.7 词汇)转 pi-ai toolResult。 */
+function toolResultMessage(message, toolNames, content) {
+  return {
+    role: 'toolResult',
+    toolCallId: message.toolCallId,
+    toolName: toolNames.get(message.toolCallId) ?? 'unknown',
+    content: typeof content === 'string'
+      ? [{ type: 'text', text: content || NO_OUTPUT_TEXT }]
+      : content,
+    isError: message.isError ?? false,
+    timestamp: TIMESTAMP_ZERO,
   }
 }
 
@@ -291,6 +310,10 @@ export function toPiContext(options, onDegrade) {
       messages.push(assistant)
       continue
     }
+    if (message.role === 'tool') {
+      messages.push(toolResultMessage(message, toolNames, flattenText(message)))
+      continue
+    }
     const text = flattenText(message)
     const results = message.content.filter((block) => block.type === 'tool-result')
     if (text.length > 0 || results.length === 0) {
@@ -310,10 +333,18 @@ export function toPiContext(options, onDegrade) {
   return piContext(split.systemPrompt, options, messages)
 }
 
-/** 图片仅 user 角色可表示(官方 assertSupportedImageRoles 同语义)。 */
-function assertSupportedImageRoles(messages) {
+/** 历史支持性断言(官方 assertSupportedHistory 同语义):
+ * developer 角色与 tool-change 块不受支持即拒(0.1.7 词汇,旧宿主不出现);
+ * 图片仅 user/tool 结果内可表示。 */
+function assertSupportedHistory(messages) {
   for (const message of messages) {
-    if (message.role !== 'user' && contentHasImage(message.content)) {
+    if (message.role === 'developer') {
+      throw new GatewayError('Developer messages are not supported yet', 'UNSUPPORTED_CONTENT')
+    }
+    if (message.content.some((block) => block.type === 'tool-addition' || block.type === 'tool-removal')) {
+      throw new GatewayError('Tool-change blocks require developer role', 'UNSUPPORTED_CONTENT')
+    }
+    if (message.role !== 'user' && message.role !== 'tool' && contentHasImage(message.content)) {
       throw new GatewayError(
         `pi-ai cannot represent an image in an in-history ${message.role} message`,
         'UNSUPPORTED_CONTENT',
@@ -351,17 +382,23 @@ async function userContent(blocks, requestImages, resolveImageAccess) {
 
 function collectImageRefs(blocks, refs) {
   for (const block of blocks) {
-    if (block.type === 'image') refs.set(block.attachment.attachmentId, block.attachment)
+    if (block.type === 'image' && block.offloaded !== true) refs.set(block.attachment.attachmentId, block.attachment)
     else if (block.type === 'tool-result') collectImageRefs(block.content, refs)
   }
 }
 
-/** 按首次出现顺序读出全部请求图片(官方 prepareRequestImages 同构)。 */
-async function prepareRequestImages(messages, attachments, policy, signal) {
+/** 按首次出现顺序读出全部保留请求图片(官方 prepareRequestImages 同构):
+ * 读出第二参经 images.offload.requestTarget 适配宿主契约——routed 形态传
+ * 精确目标尺寸,transient 形态传预算策略本体。 */
+async function prepareRequestImages(messages, attachments, budget, offload, signal) {
   const refs = new Map()
   for (const message of messages) collectImageRefs(message.content, refs)
   const orderedRefs = [...refs.values()]
-  const prepared = await Promise.all(orderedRefs.map((ref) => attachments.readImageRequest(ref, policy, signal)))
+  const prepared = await Promise.all(orderedRefs.map((ref) => attachments.readImageRequest(
+    ref,
+    offload.kind === 'routed' ? offload.requestTarget(ref, budget) : budget,
+    signal,
+  )))
   const versions = new Map()
   for (const [index, ref] of orderedRefs.entries()) versions.set(ref.attachmentId, prepared[index])
   return versions
@@ -369,35 +406,51 @@ async function prepareRequestImages(messages, attachments, policy, signal) {
 
 /**
  * 图片路径 harness 历史转 pi-ai Context(官方 toPiContextWithImages 同构):
- * 两段 offload——声明字节先验预算,读出后按实际字节精确重排;图片转 base64 块;
- * 被预算裁掉的图片替换为占位文本,恢复路径经 resolveImageAccess 解析。
+ * routed(0.1.7+)——先按精确请求字节判定必需卸载量,超限抛
+ * IMAGE_OFFLOAD_REQUIRED 由上游标记最旧图片并重试,已标记块投影为占位文本;
+ * transient(0.1.2–0.1.5)——两段瞬时投影,声明字节先验预算,读出后按实际
+ * 字节精确重排,被裁图片替换为占位文本,恢复路径经 resolveImageAccess 解析。
  * @param {object} options harness 请求
- * @param {object} images 图片路径参数集:{attachments, resolveImageAccess, maxRequestImageBytes, requestImagePolicy, offloadedText(必填,缺失且图片被裁即抛)}
+ * @param {object} images 图片路径参数集:{attachments, resolveImageAccess, maxRequestImageBytes, requestImagePolicy, offload(image-offload.mjs 适配器,必填), offloadedText(必填,缺失且图片被裁即抛)}
  * @param {(reason: string) => void} [onDegrade] replay 降级回调
  */
 export async function toPiContextWithImages(options, images, onDegrade) {
-  const { attachments, resolveImageAccess, maxRequestImageBytes, offloadedText } = images
+  const { attachments, resolveImageAccess, maxRequestImageBytes, offloadedText, offload } = images
   const requestImagePolicy = images.requestImagePolicy ?? {
     maxPixels: DEFAULT_IMAGE_PIXEL_BUDGET,
     maxBytes: DEFAULT_IMAGE_MAX_BYTES,
   }
-  assertSupportedImageRoles(options.messages)
+  assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
-  const requestMessages = offloadRequestImagesWithPolicy(split.messages, {
-    representation: 'base64',
-    ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
-    byteQuantum: 1,
-    byteLength: (ref) => Math.min(ref.bytes, requestImagePolicy.maxBytes),
-    placeholder: (ref) => offloadedText(ref, resolveImageAccess(ref)),
-  })
-  const requestImages = await prepareRequestImages(requestMessages, attachments, requestImagePolicy, options.signal)
-  const exactMessages = offloadRequestImagesWithPolicy(requestMessages, {
-    representation: 'base64',
-    ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
-    byteQuantum: 1,
-    byteLength: (ref) => requestImages.get(ref.attachmentId).bytes,
-    placeholder: (ref) => offloadedText(ref, resolveImageAccess(ref)),
-  })
+  const placeholder = (ref) => offloadedText(ref, resolveImageAccess(ref))
+  let requestImages
+  let exactMessages
+  if (offload.kind === 'routed') {
+    requestImages = await prepareRequestImages(split.messages, attachments, requestImagePolicy, offload, options.signal)
+    const required = offload.required(
+      split.messages,
+      maxRequestImageBytes,
+      (block) => requestImages.get(block.attachment.attachmentId).bytes,
+    )
+    if (required > 0) throw offload.requiredError(maxRequestImageBytes, required)
+    exactMessages = offload.project(split.messages, placeholder)
+  } else {
+    const requestMessages = offload.project(split.messages, {
+      representation: 'base64',
+      ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
+      byteQuantum: 1,
+      byteLength: (ref) => Math.min(ref.bytes, requestImagePolicy.maxBytes),
+      placeholder,
+    })
+    requestImages = await prepareRequestImages(requestMessages, attachments, requestImagePolicy, offload, options.signal)
+    exactMessages = offload.project(requestMessages, {
+      representation: 'base64',
+      ...(maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes }),
+      byteQuantum: 1,
+      byteLength: (ref) => requestImages.get(ref.attachmentId).bytes,
+      placeholder,
+    })
+  }
   const toolNames = new Map()
   const messages = []
   for (const message of exactMessages) {
@@ -411,6 +464,10 @@ export async function toPiContextWithImages(options, images, onDegrade) {
         if (block.type === 'toolCall') toolNames.set(block.id, block.name)
       }
       messages.push(assistant)
+      continue
+    }
+    if (message.role === 'tool') {
+      messages.push(toolResultMessage(message, toolNames, await userContent(message.content, requestImages, resolveImageAccess)))
       continue
     }
     const content = await userContent(message.content.filter((block) => block.type !== 'tool-result'), requestImages, resolveImageAccess)

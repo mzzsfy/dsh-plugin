@@ -4,12 +4,12 @@
 // 判定门槛 = 统一底线:activation live + findings 0 + 页面无 Failed to load plugins + 正常访问。
 // 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals]
 import { spawn, spawnSync } from 'node:child_process'
-import { createWriteStream, existsSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { createWriteStream, existsSync, lstatSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
-import { buildProfile, installPackageExternals } from './profile.mjs'
+import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
 import { isSemver } from './window.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
@@ -38,6 +38,13 @@ function parseArgs(argv) {
       '--host-dir': () => { args.hostDir = argv[++i] },
       '--work-root': () => { args.workRoot = argv[++i] },
       '--skip-externals': () => { args.skipExternals = true },
+      '--seed-gateway': () => { args.seedGateway = true },
+      '--only': () => {
+        const short = argv[++i]
+        if (!short) throw new Error('--only 缺包名')
+        args.only = [...(args.only ?? []), ...short.split(',').map((s) => s.trim()).filter(Boolean)]
+      },
+      '--keep': () => { args.keep = true },
     }
     const handler = map[argv[i]]
     if (!handler) throw new Error(`未知参数: ${argv[i]}`)
@@ -52,13 +59,23 @@ function parseArgs(argv) {
   return args
 }
 
-// 根桥重指:dst 原位暂存为 .compat-bak;中途失败自动还原已重指部分
+// 根桥重指:dst 原位暂存为 .compat-bak;中途失败自动还原已重指部分。
+// 每次形态变迁落审计日志:桥包消失事故定位需要确切的变迁时刻与前后形态
 function repointBridgeFromHost(hostDir) {
   const backups = []
+  const shape = (p) => {
+    if (!existsSync(p)) return 'absent'
+    const st = lstatSync(p)
+    return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'dir' : 'other'
+  }
+  const audit = (phase, name, dst, backup) => log(
+    `[bridge] ${phase} ${name}: dst=${shape(dst)} bak=${shape(backup)}`,
+  )
   const restore = () => {
     for (const { dst, backup } of backups) {
       rmSync(dst, { recursive: true, force: true })
       if (existsSync(backup)) renameSync(backup, dst)
+      audit('restore', basename(dst), dst, backup)
     }
   }
   try {
@@ -67,6 +84,7 @@ function repointBridgeFromHost(hostDir) {
       const dst = join(REPO_ROOT, 'node_modules', name)
       if (!existsSync(src)) continue
       const backup = `${dst}.compat-bak`
+      audit('repoint-before', name, dst, backup)
       // 上次运行异常退出未还原(bak 残留):先恢复原桥,防止本次误删原件
       if (existsSync(backup)) {
         if (existsSync(dst)) rmSync(dst, { recursive: true, force: true })
@@ -75,6 +93,7 @@ function repointBridgeFromHost(hostDir) {
       if (existsSync(dst)) renameSync(dst, backup)
       symlinkDir(src, dst)
       backups.push({ dst, backup })
+      audit('repoint-after', name, dst, backup)
     }
   } catch (error) {
     restore()
@@ -215,6 +234,263 @@ function runBrowserProbe(probeScript, url, pngPath) {
   })
 }
 
+// 本地 LLM 模拟器(scripts/echo-upstream.mjs):兼容性测试的 LLM 夹具。
+// 全功能兼容性测试的 LLM 链路断言(provider 注册 → 宿主经 gateway 打到模拟器)必须走它,不依赖真实 API。
+const SIM_BOOT_TIMEOUT_MS = 15 * 1000
+
+function startSimulator(workDir) {
+  const logPath = join(workDir, 'llm-echo.jsonl')
+  const child = spawn(process.execPath, [
+    join(REPO_ROOT, 'scripts', 'echo-upstream.mjs'), '--port', '0', '--log', logPath,
+  ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: true })
+  return new Promise((resolve, reject) => {
+    let out = ''
+    const timer = setTimeout(() => reject(new Error(`模拟器启动超时: ${out}`)), SIM_BOOT_TIMEOUT_MS)
+    child.stdout.on('data', (chunk) => {
+      out += chunk
+      const match = out.match(/listening 127\.0\.0\.1:(\d+)/)
+      if (match) {
+        clearTimeout(timer)
+        resolve({ child, port: Number(match[1]), logPath })
+      }
+    })
+    child.on('exit', (code) => reject(new Error(`模拟器提前退出 code=${code}: ${out}`)))
+  })
+}
+
+// LLM 链路验证:经页面 RPC 注册 echo provider(baseURL 指模拟器)→ 新建会话选
+// echo 模型发真实消息 → 读留档。上游请求唯一触发面是会话补全(模型目录只走
+// 宿主本地快照),留档出现 /chat/completions 或 /messages = 宿主 → gateway →
+// 模拟器全链真实打通。
+const LLM_PROBE_TIMEOUT_MS = 120 * 1000
+
+async function runLlmVerification(base, token, simulatorPort, workDir) {
+  const providerPatch = {
+    type: 'client-request',
+    rpcId: `compat-llm-${Date.now()}`,
+    method: 'settings/update',
+    path: '/api/settings/update',
+    payload: {
+      args: {
+        ns: 'llm-pi-gateway',
+        patch: {
+          providers: {
+            'echo-openai': {
+              displayName: 'Echo OpenAI',
+              api: 'openai-completions',
+              baseURL: `http://127.0.0.1:${simulatorPort}`,
+              apiKeyEnv: 'ECHO_KEY',
+              defaultInput: ['text'],
+              models: [{ id: 'echo-model', name: 'Echo Model', input: ['text'] }],
+            },
+            // anthropic 通道条目:#3 metadata.user_id 派生标记与 #5 亲和头发射
+            // 都从该路由的真实发话留档断言;compat 开 sendSessionAffinityHeaders
+            'echo-anthropic': {
+              displayName: 'Echo Anthropic',
+              api: 'anthropic-messages',
+              baseURL: `http://127.0.0.1:${simulatorPort}`,
+              apiKeyEnv: 'ECHO_KEY',
+              defaultInput: ['text'],
+              compat: { sendSessionAffinityHeaders: true },
+              models: [{ id: 'echo-a-model', name: 'Echo A Model', input: ['text'] }],
+            },
+          },
+        },
+      },
+    },
+  }
+  // #3/#5 第二段:默认模型切 echo-anthropic/echo-a-model 后新会话发话,上游即
+  // anthropic /messages 通道;留档 headers/body 断言亲和头与派生标记
+  const anthropicDefaultPatch = {
+    type: 'client-request',
+    rpcId: `compat-llm-anthropic-${Date.now()}`,
+    method: 'settings/update',
+    path: '/api/settings/update',
+    payload: {
+      args: {
+        ns: 'agent-default-model',
+        patch: { provider: 'echo-anthropic', model: 'echo-a-model' },
+      },
+    },
+  }
+  const steps = [
+    { name: 'register-echo-provider', http: { path: '/api/settings/update', method: 'POST', body: providerPatch } },
+    { name: 'wait-hot-reload', wait: 4 * 1000 },
+    // 重载页面:UI 在挂载时拉一次模型目录,settings/update 的 live 生效不触发
+    // 前端刷新,不重载则目录里没有 echo,默认模型被判"不可用",composer 消失
+    { name: 'reload-page', goto: `${base}/?token=${token}` },
+    { name: 'wait-ui-settle', wait: 2500 },
+    // 真实对话驱动:默认模型已由 composition patch 指向 echo(provider 声明显式
+    // models 时模型目录只走宿主本地快照),上游请求唯一触发面是会话补全——
+    // 新建会话直接发消息
+    {
+      // 内测声明模态每轮新 browser context 都会弹出,遮挡 composer 命中检测,
+      // 必须先点"继续"关掉
+      name: 'dismiss-intro',
+      eval: `(() => {
+        const hit = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '继续')
+        if (!hit) return 'no-modal'
+        hit.click()
+        return 'dismissed'
+      })()`,
+    },
+    { name: 'wait-intro-gone', wait: 800 },
+    {
+      name: 'new-session',
+      eval: `(() => {
+        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
+        if (!hit) return 'new-session-not-found'
+        hit.click()
+        return 'clicked'
+      })()`,
+    },
+    { name: 'wait-composer', wait: 2500 },
+    {
+      name: 'diag-catalog',
+      eval: `(async () => {
+        const call = async (endpoint) => {
+          const resp = await fetch('/api/' + endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'client-request', rpcId: 'diag-' + endpoint.replace('/', '-'), method: endpoint, path: '/api/' + endpoint, payload: { args: {} } }),
+          })
+          const text = await resp.text()
+          let body
+          try { body = JSON.parse(text) } catch { body = text.slice(0, 80) }
+          return { status: resp.status, body }
+        }
+        const catalog = await call('session/modelCatalog')
+        const providers = await call('llm/listProviders')
+        const catalogValue = catalog.body?.result?.value
+        return JSON.stringify({
+          catalogStatus: catalog.status,
+          routableProviders: catalogValue?.routableProviders,
+          groups: catalogValue?.groups?.map((g) => ({ id: g?.id, models: g?.models?.map((m) => m?.id) })),
+          failures: catalogValue?.failures ?? catalogValue?.modelErrors,
+          llmProviders: providers.body?.result?.value?.map((p) => p?.id),
+        })
+      })()`,
+    },
+    { name: 'type-message', type: { selector: '[contenteditable="true"]', text: '回复:ok' } },
+    { name: 'send', press: 'Enter' },
+    { name: 'wait-roundtrip', wait: 10 * 1000 },
+    {
+      name: 'post-send-state',
+      eval: `(() => {
+        const ce = document.querySelector('[contenteditable="true"]')
+        const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')]
+          .map((el) => el.textContent.trim().slice(0, 160))
+          .filter((t) => t.length > 0)
+          .slice(0, 5)
+        return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
+      })()`,
+    },
+    // ---- #3/#5 anthropic 段:默认模型切 echo-anthropic 后再发一轮,上游走
+    // /v1/messages;亲和头与 metadata.user_id 从该轮留档断言
+    { name: 'switch-default-anthropic', http: { path: '/api/settings/update', method: 'POST', body: anthropicDefaultPatch } },
+    { name: 'wait-anthropic-switch', wait: 3 * 1000 },
+    {
+      name: 'new-session-anthropic',
+      eval: `(() => {
+        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
+        if (!hit) return 'new-session-not-found'
+        hit.click()
+        return 'clicked'
+      })()`,
+    },
+    { name: 'wait-composer-anthropic', wait: 2500 },
+    { name: 'type-message-anthropic', type: { selector: '[contenteditable="true"]', text: '回复:anth' } },
+    { name: 'send-anthropic', press: 'Enter' },
+    { name: 'wait-roundtrip-anthropic', wait: 10 * 1000 },
+    {
+      name: 'post-send-state-anthropic',
+      eval: `(() => {
+        const ce = document.querySelector('[contenteditable="true"]')
+        const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')]
+          .map((el) => el.textContent.trim().slice(0, 160))
+          .filter((t) => t.length > 0)
+          .slice(0, 5)
+        return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
+      })()`,
+    },
+  ]
+  const payload = JSON.stringify({
+    url: `${base}/?token=${token}`,
+    out: join(workDir, 'l3-llm.json'),
+    steps,
+  })
+  const probeResult = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [
+      fileURLToPath(new URL('./l3-probe.mjs', import.meta.url)),
+      '-',
+    ], { cwd: process.cwd(), windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    child.stdin.write(payload)
+    child.stdin.end()
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    const timer = setTimeout(() => killTree(child), LLM_PROBE_TIMEOUT_MS)
+    child.on('close', () => {
+      clearTimeout(timer)
+      const line = stdout.trim().split('\n').at(-1) ?? ''
+      try {
+        resolve(JSON.parse(line))
+      } catch {
+        resolve({ results: [], consoleErrors: [], error: `l3-probe 无输出: ${stderr.slice(-500) || line}` })
+      }
+    })
+  })
+  const stepByName = Object.fromEntries((probeResult.results ?? []).map((r) => [r.name, r]))
+  const registration = stepByName['register-echo-provider']?.value?.body
+  const providerRegistered = stepByName['register-echo-provider']?.ok === true
+    && registration !== null
+    && typeof registration === 'object'
+    && registration.error === undefined
+  const chatDriven = stepByName['new-session']?.value === 'clicked'
+    && stepByName['type-message']?.ok === true
+    && stepByName['send']?.ok === true
+  // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
+  const anthropicDriven = stepByName['switch-default-anthropic']?.ok === true
+    && stepByName['new-session-anthropic']?.value === 'clicked'
+    && stepByName['type-message-anthropic']?.ok === true
+    && stepByName['send-anthropic']?.ok === true
+  // 留档证据:任一对话请求打到模拟器即链路通(openai /chat/completions 或
+  // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)。
+  // anthropic 轮单独取证:#3 metadata.user_id 派生标记 + #5 亲和头发射
+  let upstreamSeen = false
+  let upstreamKinds = []
+  let anthropicUpstream = { seen: false, userId: null, affinityHeaders: [], headers: null }
+  try {
+    const lines = readFileSync(join(workDir, 'llm-echo.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    upstreamKinds = [...new Set(lines.map((l) => l.path))]
+    upstreamSeen = lines.some((l) => l.path.includes('/chat/completions') || l.path.includes('/messages'))
+    const anthropicTurns = lines.filter((l) => l.path.includes('/messages'))
+    const last = anthropicTurns.at(-1)
+    if (last !== undefined) {
+      const headerNames = Object.keys(last.headers ?? {}).map((k) => k.toLowerCase())
+      anthropicUpstream = {
+        seen: true,
+        userId: last.body?.metadata?.user_id ?? null,
+        affinityHeaders: headerNames.filter((k) => k.includes('affinity') || k.includes('request-id')),
+        headers: last.headers ?? {},
+      }
+    }
+  } catch { /* 无留档 = 零请求 */ }
+  return {
+    providerRegistered,
+    chatDriven,
+    anthropicDriven,
+    anthropicUpstream,
+    upstreamSeen,
+    upstreamKinds,
+    stepValues: Object.fromEntries(Object.entries(stepByName).map(([name, step]) => [name, step.value ?? (step.ok ? 'ok' : step.error)])),
+    stepErrors: (probeResult.results ?? []).filter((r) => !r.ok).map((r) => `${r.name}: ${r.error ?? ''}`),
+    consoleErrors: (probeResult.consoleErrors ?? []).slice(0, 5),
+    probeError: probeResult.error,
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const workDir = join(args.workRoot, args.version)
@@ -224,7 +500,7 @@ async function main() {
   const bootLogPath = join(workDir, 'boot.log')
   const hostDir = args.hostDir ?? join(workDir, 'dsh-host')
   const base = `http://127.0.0.1:${args.port}`
-  const checks = { page: false, activation: null, browser: null }
+  const checks = { page: false, activation: null, browser: null, llm: null }
 
   // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录
   const binGuess = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -246,7 +522,7 @@ async function main() {
     await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
-  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir })
+  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir, seedGateway: args.seedGateway === true, only: args.only ?? [] })
   log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
 
   // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
@@ -264,7 +540,11 @@ async function main() {
   const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
   let child = null
   let restoreBridge = null
+  let simulator = null
   try {
+    // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
+    simulator = await startSimulator(workDir)
+    log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
@@ -272,6 +552,7 @@ async function main() {
         ...process.env,
         DSH_HOME: profile.homeDir,
         DSH_CRON_BOARD_DATA_DIR: join(workDir, 'data'),
+        ECHO_KEY: 'echo-compat',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -302,28 +583,54 @@ async function main() {
 
     checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
     log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
-
     checks.browser = await runBrowserProbe(
       fileURLToPath(new URL('./browser-probe.mjs', import.meta.url)),
       `${base}/?token=${token}`,
       join(workDir, 'page.png'),
     )
     log(`[${args.version}] browser ok=${checks.browser.ok}`)
+
+    // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
+    // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
+    checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
+    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    // --keep:宿主与模拟器存活导出(后续 l3-probe 接管跑 UI 专项);
+    // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出
+    if (args.keep === true) {
+      writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, pid: child.pid, logPath: simulator.logPath }, null, 2), 'utf8')
+      log(`[${args.version}] keep:宿主 :${args.port} token=${token} 模拟器 :${simulator.port}(live.json 已落,自行收尾用 scripts/compat/keep-stop.mjs)`)
+    }
+    if (args.keep === true) return
   } finally {
-    killTree(child)
-    await sleep(KILL_GRACE_MS)
-    killTree(child, { force: true })
+    if (args.keep !== true) {
+      killTree(child)
+      simulator?.child.kill()
+      await sleep(KILL_GRACE_MS)
+      killTree(child, { force: true })
+    }
     await new Promise((done) => bootLog.end(done))
     restoreBridge?.()
-    if (!(await canBind(args.port))) {
+    if (args.keep !== true && !(await canBind(args.port))) {
       log(`端口 ${args.port} 残留监听,强制清理`)
       killPortOwner(args.port)
     }
   }
 
-  const ok = checks.page && checks.activation.liveAll && checks.browser.ok
-  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, ok }, null, 2), 'utf8')
-  log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})`)
+  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.chatDriven && checks.llm.upstreamSeen
+  // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
+  // boot(0.1.7-rc.1 实测 false-pass——主行 import 崩溃仅此一行 error,activation
+  // 仍 live)。本包任一行出现加载失败字样直接 FAIL,与 activation/llm 判定并联
+  let importFailures = []
+  try {
+    const names = enumeratePackages().all
+    const text = readFileSync(bootLogPath, 'utf8')
+    importFailures = text.split('\n').filter((line) =>
+      names.some((name) => line.includes(name)) && /failed to import|did not activate/.test(line))
+  } catch { /* 日志缺失按无失败处理,activation/llm 判定兜底 */ }
+
+  const ok = checks.page && checks.activation.liveAll && checks.browser.ok && llmOk && importFailures.length === 0
+  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, importFailures, ok }, null, 2), 'utf8')
+  log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1
 }
 

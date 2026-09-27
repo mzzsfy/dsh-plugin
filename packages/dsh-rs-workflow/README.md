@@ -25,4 +25,4 @@ node --test "test/*.test.mjs"      # 包内测试(在 packages/dsh-rs-workflow �
 
 ## dsh 版本兼容
 
-三版本全部通过:preset 释放、Agent 预设页若水工作流卡、rs_workflow_ 工具可列出、激活 live。
+三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:preset 释放、Agent 预设页若水工作流卡(0.1.7-rc.1 预设页换形「模式」卡,属宿主演进)、rs_workflow_ 工具可列出、配置页六工作位、移除删除联动、激活 live。

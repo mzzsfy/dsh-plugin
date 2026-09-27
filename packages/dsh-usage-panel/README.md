@@ -133,4 +133,4 @@ node scripts/dev-link.mjs dsh-usage-panel   # 仓库根执行:归一 profile 依
 
 ## dsh 版本兼容
 
-三版本全部通过:用量面板渲染、激活 live。
+三版本(0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1)全部通过:用量面板渲染(账号卡/通知规则折叠卡全控件)、API 面(pollArmed/通知投影)、激活 live。

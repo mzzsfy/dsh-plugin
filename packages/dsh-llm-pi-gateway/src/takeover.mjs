@@ -5,6 +5,13 @@
 // EntryGroup.update 任一失败即整批回滚)。守卫经 cordis waterfall 事件
 // (global 监听 loader/patch-context)在官方 apply 前自停让位,是两插件间
 // 唯一的原子交接点。
+//
+// 运行时接管(替代 bundle patch 静态禁行):官方行的禁用由本包 apply 落定后
+// 经 entry.update(dsh-market 同款调用)执行——禁用官方的前提严格强于本包
+// 可服务性,本包任意死法(模块加载崩/apply 中途崩/被禁/卸载)下官方行保持
+// 启用,官方插件自服务,系统不出现全模型不可用窗口。行 options.disabled
+// 原始值三态区分意图:undefined=行树默认态(本包的接管空间)/ false=用户
+// 显式启用(最高意图,让位,永不强抢)/ true=已禁(停稳接管/退场等待)。
 
 // 护栏:有界等待工具(超时降级放行,防 boot 收尾树卡死)
 import { withTimeout, DISPOSE_TIMEOUT_MS } from './guard-rail.mjs'
@@ -25,24 +32,25 @@ export const DEFERRED_EXIT_POLL_INTERVAL_MS = 500
 // 形态。resolve 对缺失 id 抛错,调用方逐候选试解
 export const ROW_ID_PREFIXES = ['include:', '']
 
-const ABSENT = Object.freeze({ present: false, disabled: false, running: false, entry: undefined })
+const ABSENT = Object.freeze({ present: false, disabled: false, running: false, entry: undefined, disabledUnreliable: false })
 
 // 宿主 Entry.disabled getter 语义:!!js 表达式求值 + 父链回溯 + 布尔宽化,
 // 裸读 options.disabled 会漏掉表达式与非布尔真值两类禁用形态;求值抛错按
-// 未禁用处理(让位安全向:不占官方资源,不会制造注册冲突)
+// 未禁用处理并置 disabledUnreliable(宿主状态异常,自动动作一律让位安全向)
 function effectiveDisabled(entry) {
   try {
     return entry.disabled === true
   } catch {
-    return false
+    return undefined
   }
 }
 
 /**
  * 探测官方 entry 生命周期状态。loader 缺失或官方行不存在(官方包未装)按
- * 缺席处理,与「官方包缺失时照常接管」的既有降级语义一致。
+ * 缺席处理,与「官方包缺失时照常接管」的既有降级语义一致。disabled getter
+ * 求值抛错时 disabled=false 且 disabledUnreliable=true(宿主状态异常)。
  * @param {object|undefined} loader 宿主 loader 服务(cordis Loader/EntryTree)
- * @returns {{present: boolean, disabled: boolean, running: boolean, entry: object|undefined}}
+ * @returns {{present: boolean, disabled: boolean, running: boolean, entry: object|undefined, disabledUnreliable: boolean}}
  */
 export function officialEntryState(loader) {
   if (loader?.resolve === undefined) return ABSENT
@@ -59,23 +67,47 @@ export function officialEntryState(loader) {
     }
   }
   if (!entry) return ABSENT
+  const disabled = effectiveDisabled(entry)
   return {
     present: true,
-    disabled: effectiveDisabled(entry),
+    disabled: disabled === true,
     running: entry.fiber?.uid != null,
     entry,
+    disabledUnreliable: disabled === undefined,
   }
 }
 
 /**
  * 接管决策:官方行缺席或已禁用停稳 → 接管;禁用但插件仍在退场 → 等待退场;
- * 行未被禁(用户层启用官方)→ 让位,官方节归官方插件。
- * @returns {'takeover'|'await-exit'|'yield'}
+ * 行启用:options.disabled 原始布尔 false = 用户显式启用 → 让位,永不强抢;
+ * 原始 undefined = 行树默认态 → runtime-disable,由 apply 落定后的运行时
+ * 序列禁用官方行再接管;原始值非布尔(!!js 表达式等宿主求值形态)或
+ * getter 求值不可信(抛错)→ 让位安全向。
+ * @returns {'takeover'|'await-exit'|'yield'|'runtime-disable'}
  */
 export function takeoverDecision(state) {
   if (!state.present) return 'takeover'
-  if (!state.disabled) return 'yield'
-  return state.running ? 'await-exit' : 'takeover'
+  if (state.disabledUnreliable) return 'yield'
+  if (state.disabled) return state.running ? 'await-exit' : 'takeover'
+  let raw
+  try {
+    raw = state.entry?.options?.disabled
+  } catch {
+    return 'yield'
+  }
+  if (raw === false) return 'yield'
+  return raw === undefined ? 'runtime-disable' : 'yield'
+}
+
+/**
+ * 运行时禁用官方行:dsh-market toggle 同款调用(force update,穿透
+ * 「init 在途时 options 翻转但收尾 init 仍拉起 fiber」的空 diff 形态)。
+ * 纯内存态不持久:重启后官方行回归行树声明态,由下一轮 apply 收敛。
+ * @param {object} entry 官方 loader entry
+ * @param {{quiet?: boolean, force?: boolean}} [options]
+ */
+export async function runtimeDisableOfficial(entry, { quiet = false, force = true } = {}) {
+  await entry.update({ disabled: true }, quiet, force)
 }
 
 const defaultDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

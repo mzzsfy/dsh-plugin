@@ -2,14 +2,18 @@
 
 Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配置多客户端的 `shell` 工具——pwsh / git bash / cmd / WSL / 任意第三方实现,自定义路径,多个客户端并存,设默认,模型经工具参数按名选择。
 
+**宿主要求 ≥ 0.1.7-rc.1**:预设面用 preset-* 声明行(patch 引用 `@deepseek-ai/dsh-agent-preset`,0.1.7 起提供);装到更旧宿主会因该包缺失导致组合树加载失败——0.1.5 及以下请勿安装本包。
+
 ## 工作方式
 
-- bundle 补丁按 id 禁用官方 `tool-pwsh`、`pwsh-sandbox` 两行,插入本包主行(`ctx.shell` 执行器 + `shell` 工具 + 设置节 + 浏览器设置页路由)与 guard 哨兵行;卸载本包即补丁消失,官方行自动复位。
+- **运行时接管**:bundle 补丁不静态禁用官方 `tool-pwsh`、`pwsh-sandbox` 两行——boot 期官方 pwsh 链先服务,主行(`ctx.shell` 执行器 + `shell` 工具 + systemPrompt 段)apply 落定后经 `entry.update` 运行时禁用官方两行(dsh-market 同款,内存态不持久),再挂载执行器接管。本包任意死法(import 崩/apply 崩/被禁/卸载)下官方行保持启用,官方 pwsh 链自服务,系统不出现 shell 全灭窗口;重启后由行树声明态收敛。web 行(设置页数据通道,`inject: ['webServer', 'settings']` 声明式门控——服务就绪才激活)与 guard 哨兵行同 patch 插入。
+- 配置事实源 = 主行 Config(dsh 0.1.7 settings 面以 profile 条目为存储,ns `shell-select`);自带设置页经 `settings.configure({ auto: false })` 抑制原生自动页,写路径 `settings.replace`,配置变更由 cordis 行重载活生效(工具描述随行重建即时更新)。
 - client 半区 `dsh.client.inject` 声明(官方机制,dsh-client-file-upload 等官方包同款):保证 client 运行时模块表中 `primitives`/`slots` 面在场;primitives 另有 try/catch 降级自绘兜底。
 - 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(实例状态/方法全公有——cordis 服务代理会把经 `ctx.shell` 调用的方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误)。
-- preset 面收口:web 面把 agent 平面后移到每会话 agent preset,内置 standard 预设在 win32 重新声明官方 `pwsh` 工具行,bundle 补丁对 preset 组合树不可达。本包自带预设 `shell-select`(standard 全量副本 − tool-pwsh 行,`presets/shell-select/`),经补丁覆写 `agent-presets` 行接入:win32 默认预设切到本包预设(POSIX 保持 standard,行为与上游一致),`roots` 指向本包 presets 目录;`agent-presets.default` 的 settings 值恒优先于补丁缺省,用户显式选择不被劫持。上游预设漂移由 `test/preset-drift.test.mjs` 逐行守卫,升级后按官方实文对表。
+- preset 面收口(0.1.7 架构):agent 面整体移入会话预设(preset-* 声明行内联 roster,web 表面在根组合树禁用全部 agent 工具行)。本包 patch insert 自带预设 `shell-select`(standard 内联 roster 全量 − tool-pwsh 行,逐项同构官方 standard.patch.yml)并覆写 `agent-preset-registry` 的 default:win32 默认预设切到本包预设(POSIX 保持 standard,行为与上游一致)。用户显式选择其他预设恒优先——官方 minimal/cordis/ptc 预设自带 persistent pwsh 终端链,显式选用时不在接管范围。上游预设漂移由 `test/preset-drift.test.mjs` 逐行守卫,升级后按官方实文对表。
 - 沙箱语义官方同构:`danger-full-access` 直跑;受限模式经 `ctx.sandbox.confine` 包装并按官方方言分类拒绝/runner 失败,权限模型不变。
-- 死态自愈:用户 patch 层禁用主行的窗口内,guard 哨兵(id 含 `/`,市场不写该层)代挂官方 `dsh-tool-pwsh` + `dsh-pwsh-sandbox` 恢复 host 面服务与 boot 组合(预载失败退避重试,至多 3 次),任一方复活先卸代挂。哨兵/复活让位语义逐项同构 `dsh-llm-pi-gateway`。边界:cordis 服务按 fiber 树解析,代挂对 agent preset 作用域不可见,死态窗口新会话的 preset tool-pwsh 行拒挂(报错清晰)属预期。
+- 死态自愈:用户 patch 层禁用主行的窗口(接管中 runtime-disable 残留)内,guard 哨兵(id 含 `/`,市场不写该层)代挂官方 `dsh-tool-pwsh` + `dsh-pwsh-sandbox` 恢复 host 面服务与 boot 组合(预载失败退避重试,至多 3 次),任一方复活先卸代挂。哨兵/复活让位语义逐项同构 `dsh-llm-pi-gateway`。边界:cordis 服务按 fiber 树解析,代挂对 agent preset 作用域不可见,死态窗口新会话的 preset tool-pwsh 行拒挂(报错清晰)属预期。
+- escape hatch(用户想用官方 pwsh 链):market 禁用 shell-select 或 user patch 写 `- id: shell-select / disabled: true`——主行退场后官方行保持启用自服务,重启后官方自然回归;删除禁行重启即恢复接管。(官方两行带平台表达式,行级 `disabled: false` 与宿主默认启用同形,不作让位信号。)
 - POSIX 上本包全部行停用,官方 bash 链不受影响。
 
 ## 工具
@@ -28,7 +32,7 @@ Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配�
 - 非终端意图回退简版行:摘要 + 可展开原文 + 检查按钮。
 - 图标取官方 `dsh-client-ui-primitives`(StateDot/IconApi/IconInspect/Chevron),模块表缺席时降级自绘。
 
-## 配置(settings 命名空间 `shell-select`)
+## 配置(行条目 `shell-select`,settings 面同名 ns)
 
 ```yaml
 shell-select:
@@ -84,6 +88,8 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
       name: '@mzzsfy/dsh-shell-select'
     - id: shell-select/guard
       name: '@mzzsfy/dsh-shell-select/guard'
+    - id: shell-select/web
+      name: '@mzzsfy/dsh-shell-select/web'
 ```
 
 测试:`node --test "test/*.test.mjs"`(包目录内)。

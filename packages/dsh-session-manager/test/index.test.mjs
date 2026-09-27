@@ -118,16 +118,20 @@ function makeCtx({
   openRejected,
   workspaces,
   settingsValue,
+  settingsService: settingsServiceOverride,
   timerAvailable,
   readSessions,
+  configRef,
+  configEditor,
 }) {
   const routes = []
   const eventHandlers = {}
   const pendingInjects = []
+  const disposers = []
   const ledgerDomain = ledger === undefined ? makeLedgerDomain([]) : ledger
   const workspaceList = workspaces || []
   const settingsState = { value: settingsValue }
-  const settingsService = {
+  const settingsService = settingsServiceOverride ?? {
     get: () => settingsState.value,
     register: () => ({ resolved: undefined }),
     // 宿主 update 为异步串行:合并进微任务队列后生效,读旧值发生在 flush 前
@@ -173,7 +177,12 @@ function makeCtx({
   const base = {
     effect: (fn) => fn(),
     inject: (_deps, fn) => { pendingInjects.push(fn) },
-    get: (name) => ({ agents, sessionPersistence, settings: settingsService }[name]),
+    // fiber 桩:0.1.7 configure 装配以本条目 fiber 为 owner
+    fiber: { entry: { options: { id: 'session-manager', name: '@mzzsfy/dsh-session-manager' } } },
+    get: (name) => {
+      if (name === 'configEditor') return configEditor
+      return { agents, sessionPersistence, settings: settingsService }[name]
+    },
     on: (event, handler) => { eventHandlers[event] = handler },
     // 日志桩:partial 降级点(logger.warn)在测试中可执行且可断言,不再被 undefined 短路
     logger: { warns: [], warn(message) { this.warns.push(message) }, infos: [], info(message) { this.infos.push(message) } },
@@ -188,7 +197,7 @@ function makeCtx({
       return services[prop]
     },
   })
-  apply(ctx, undefined)
+  apply(ctx, configRef)
   return {
     handlers: new Map(routes.map((route) => [route.path, route.handler])),
     eventHandlers,
@@ -199,7 +208,15 @@ function makeCtx({
     readCounts,
     // 模拟宿主 settings 与 timer 服务激活:触发 inject 回调(注册 + 启动补扫 + 周期武装)
     activateSettings: () => {
-      const injected = { settings: settingsService, interval: timerAvailable === false ? undefined : intervalStub }
+      const injected = {
+        settings: settingsService,
+        interval: timerAvailable === false ? undefined : intervalStub,
+        // 注入上下文的 effect 桩:0.1.7 分支经它注册 configure 装配
+        effect(fn) {
+          const disposer = fn()
+          if (typeof disposer === 'function') disposers.push(disposer)
+        },
+      }
       while (pendingInjects.length > 0) pendingInjects.shift()(injected)
     },
   }
@@ -806,6 +823,42 @@ test('周期评估:间隔设置运行时变更经 tick 对账(0 重启用 / 关�
     mock.timers.tick(TICK_MS)
     await waitFor(() => registry.archiveCalls.includes('s3'))
     assert.deepEqual(registry.archiveCalls, ['s1', 's2', 's3'])
+  } finally {
+    mock.timers.reset()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('settings 方法面缺失(0.1.7 SettingsForms 形态):tick 与 status 路由不抛错,配置回落默认', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-methodface-'))
+  // 宿主 0.1.7-alpha.1 将 settings 服务换形为 SettingsForms:缺 get/register,仅剩 update。
+  // 旧形态直接 settings.get 会在 timer 回调抛 TypeError 崩进程(实测事故),守卫后应回落默认值
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const TICK_MS = 60 * 1000
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  try {
+    const artifact = path.join(dir, 'a.jsonl')
+    await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(artifact, stale / 1000, stale / 1000)
+    const settingsForms = { update: async () => {} }
+    const { activateSettings, handlers, registry } = makeCtx({
+      archivedIds: [],
+      headers: [{ id: 'a', cwd: 'C:\\x', createdAt: stale }],
+      agents: new Map(),
+      settingsService: settingsForms,
+      sessionPersistence: { locate: () => ({ path: artifact }) },
+    })
+    activateSettings()
+    // 守卫生效:配置读不到回落默认(days=7,intervalHours=24),30 天超期夹具到期即按默认轮归档
+    mock.timers.tick(DAY_MS + TICK_MS)
+    await waitFor(() => registry.archiveCalls.includes('a'))
+    assert.deepEqual(registry.archiveCalls, ['a'], '配置缺失按默认间隔正常评估,不因服务形变停摆')
+    // status 路由读设置不抛:回默认 days/intervalHours
+    const statusHandler = handlers.get('/api/session-manager/status')
+    const res = response()
+    await statusHandler(request('s1', 'GET'), res)
+    assert.equal(res.status, 200)
   } finally {
     mock.timers.reset()
     await rm(dir, { recursive: true, force: true })
@@ -1728,3 +1781,103 @@ test('自动归档配置提交判定:client 与 core 镜像同源,提交守卫�
   assert.match(clientSource, /classifyAutoArchiveInput\(committed\[field\], text\)/, 'commit 必须以 committed[field] 为守卫基准')
 })
 
+
+// --- 0.1.7 settings 面双形适配(maintain a913c2c 同构) ---
+
+test('Config 导出契约:根级 volatile 包装,validate 产整节单 ref,默认值对拍', () => {
+  // Given 静态 Config 导出(0.1.7 节表单事实源)
+  assert.ok(indexModule.Config, 'Config 导出必须在场')
+  // When 空配置校验
+  const resolved = indexModule.Config['~standard'].validate({})
+  // Then 产整节单 ref(get 协议),字段为 schema 默认值
+  assert.equal(resolved.issues, undefined)
+  const section = resolved.value.get()
+  assert.equal(section.autoArchiveDays, DEFAULT_AUTO_ARCHIVE_DAYS)
+  assert.equal(section.autoArchiveIntervalHours, DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS)
+  // When 显式值校验
+  // Then 值透传
+  const provided = indexModule.Config['~standard'].validate({ autoArchiveDays: 3 }).value.get()
+  assert.equal(provided.autoArchiveDays, 3)
+})
+
+test('0.1.7 形态:settings 无 get/register 时读回落 config ref 节值', skipMissingDeps, async () => {
+  // Given settingsForms 只有 update(0.1.7 真实方法面)+ config ref 携带用户值
+  const settingsForms = { update: async () => {} }
+  const configRef = { get: () => ({ autoArchiveDays: 3, autoArchiveIntervalHours: 12 }) }
+  const { handlers } = makeCtx({
+    archivedIds: [],
+    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+    configRef,
+  })
+  // When GET auto-archive
+  const res = response()
+  await handlers.get('/api/session-manager/auto-archive')(getRequest2('/api/session-manager/auto-archive', 'GET'), res)
+  // Then 返回 config 节值而非默认
+  assert.deepEqual(res.body, { days: 3, intervalHours: 12 })
+})
+
+test('0.1.7 形态:auto-archive POST 经 configEditor.edit 落 fiber.entry 并回显新值', skipMissingDeps, async () => {
+  // Given settingsForms 只有 update + configEditor 桩(合并写回 configStore)
+  const settingsForms = { update: async () => {} }
+  const configStore = { autoArchiveDays: 7 }
+  const editCalls = []
+  const configRef = { get: () => ({ ...configStore }) }
+  const { handlers } = makeCtx({
+    archivedIds: [],
+    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+    configRef,
+    configEditor: {
+      async edit(entry, change) {
+        editCalls.push(entry)
+        const next = change({ ...configStore }, {})
+        for (const [key, value] of Object.entries(next)) configStore[key] = value
+      },
+    },
+  })
+  // When POST 写 days
+  const changed = await postJson(handlers, '/api/session-manager/auto-archive', { days: 3 })
+  // Then edit 定位本条目,合并写回,响应回显新值
+  assert.deepEqual(changed.body, { days: 3, intervalHours: DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS })
+  assert.equal(editCalls.length, 1)
+  assert.equal(editCalls[0].options.id, 'session-manager')
+  assert.equal(configStore.autoArchiveDays, 3)
+})
+
+test('0.1.7 形态:configEditor 缺失即 400 拒写,配置不变', skipMissingDeps, async () => {
+  // Given settingsForms 只有 update 且无 configEditor
+  const settingsForms = { update: async () => {} }
+  const configRef = { get: () => ({}) }
+  const { handlers } = makeCtx({
+    archivedIds: [],
+    headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }],
+    agents: new Map(),
+    settingsService: settingsForms,
+    configRef,
+  })
+  // When POST 写 days
+  const denied = await postJson(handlers, '/api/session-manager/auto-archive', { days: 3 })
+  // Then 400 错误响应
+  assert.equal(denied.status, 400)
+  assert.ok(denied.body.error)
+})
+
+test('0.1.7 形态:settings.configure 在场即关闭原生自动页', skipMissingDeps, () => {
+  // Given settingsForms 带 configure 无 register
+  const configureCalls = []
+  const settingsForms = { configure: (presentation, owner) => { configureCalls.push({ presentation, owner }); return () => {} } }
+  const { activateSettings } = makeCtx({
+    archivedIds: [],
+    headers: [],
+    agents: new Map(),
+    settingsService: settingsForms,
+  })
+  // When 激活 settings 注入
+  activateSettings()
+  // Then 关闭自动页
+  assert.equal(configureCalls.length, 1)
+  assert.deepEqual(configureCalls[0].presentation, { auto: false })
+})

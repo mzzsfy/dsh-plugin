@@ -32,6 +32,9 @@ async function main() {
     const consoleErrors = []
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()) })
     page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
+    // 4xx/5xx 资源 URL 留痕:仅文本的 console error 无法定位失败资源
+    const httpFailures = []
+    page.on('response', (res) => { if (res.status() >= 400) httpFailures.push({ status: res.status(), url: res.url() }) })
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45 * 1000 })
     let rendered = true
@@ -49,7 +52,7 @@ async function main() {
     const hasWorkspace = WORKSPACE_TEXT.test(text)
     const hasFailBanner = text.includes(FAIL_BANNER)
     await page.screenshot({ path: pngPath }).catch(() => {})
-    const result = { ok: hasWorkspace && !hasFailBanner, rendered, hasWorkspace, hasFailBanner, consoleErrors }
+    const result = { ok: hasWorkspace && !hasFailBanner, rendered, hasWorkspace, hasFailBanner, consoleErrors, httpFailures }
     writeFileSync(pngPath.replace(/\.png$/, '.json'), JSON.stringify(result, null, 2), 'utf8')
     console.log(JSON.stringify(result))
     process.exitCode = result.ok ? 0 : 1

@@ -1,15 +1,4 @@
-# The `rs-workflow` agent preset: 若水工作流(v5,主循环协作编排)。
-#
-# 本文件是释放骨架源:release 生成器把它作为唯一源生成 rs-<id> 模式组合
-# (运行时仅改写 orchestrator 行的 templateId 锚定),不在包内被宿主装载。
-#
-# 基底是 `standard` 全功能编码代理行集,差异:
-#   1. persona 换成流程模式纪律 v5(人机接口+受约束规划者,任务交付由编排子代理承担);
-#   2. delegation 组内 rs-workflow-orchestrator 工具行与 template-tool 行;
-#   3. 无 report 行(trace 事件 + run-store 取代);plan-mode 组移除(规划在编排内)。
-
-# ── identity ────────────────────────────────────────────────────────────────
-
+# 由 lib/skeleton.mjs emitRows 规范化生成,勿手改;漂移对拍见 test/skeleton.test.mjs。
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
@@ -33,64 +22,35 @@
       5. 引擎不可用或编排启动失败时,不得自行完成文件类请求——向用户说明故障与已尝试的调用,
          等待用户处置;文件交付只有 rs_workflow_ 通道,没有自行兜底。
     suffix: Your working directory is {{cwd}}.
-
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
   config:
     maxBytes: 65536
-
-# ── shell ───────────────────────────────────────────────────────────────────
-
-# 注:不可禁本组合 shell/fs 工具行——宿主 workflow worker 的段子代理继承组合行集,
-# 禁行使段子代理无法落盘交付物(实测证实)。主循环不写文件由 persona 判据约束,
-# 物理隔离需宿主提供 worker 行集覆写能力(外部依赖)。
-
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
   disabled: !!js process.platform === 'win32'
-
 - id: tool-pwsh
   name: '@deepseek-ai/dsh-tool-pwsh'
   disabled: !!js process.platform !== 'win32'
-
-# ── filesystem ──────────────────────────────────────────────────────────────
-
 - id: tool-fs
   name: '@deepseek-ai/dsh-tool-fs'
-
 - id: tool-fs-search
   name: '@deepseek-ai/dsh-tool-fs-search'
   config:
     sampleOverCapGlobResults: false
-
-# ── background jobs ────────────────────────────────────────────────────────
-
 - id: tool-jobs
   name: '@deepseek-ai/dsh-tool-jobs'
-  # 缺省连续唤醒预算 3 次且仅用户消息重置:纯自主编排每段 settle 耗 1 次,第 4 段起降级 inject 不唤醒,
-  # 编排静默停滞;放宽到 64 段(覆盖 spec 建议的 3~12 步多实例流程上限)
   config:
     maxConsecutiveWakes: 64
-
-# ── skills ──────────────────────────────────────────────────────────────────
-
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
-
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
-
-# ── web ─────────────────────────────────────────────────────────────────────
-
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
   config:
     fetch: false
     searchTimeoutMs: 60000
-
-# ── compaction ──────────────────────────────────────────────────────────────
-
-# 编排子代理上下文较长,保留 standard 的压缩组。
 - id: compaction
   name: cordis:group
   group: true
@@ -100,23 +60,14 @@
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
-
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
-
     - id: tool-result-pruner
       name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
       config:
         thresholdChars: 8192
         headChars: 4096
         tailChars: 1024
-
-# ── delegation and workflows ────────────────────────────────────────────────
-
-# workflowEngine 是预设私有服务(preset 组合发布全局服务会被宿主拒绝 mount),
-# 所有触达它的行共享一个 entry-local isolate realm。
-# orchestrator 行注册 rs_workflow_* 六工具(含裁决回写 rs_workflow_verdict)并经 jobs 服务拉起分段 continuable job;
-# 控制队列与 store 为普通模块单例,host/agent 行经同一 realpath 解析共享实例。
 - id: delegation
   name: cordis:group
   group: true
@@ -125,56 +76,42 @@
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
-
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-
     - id: tool-subagent
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: spawn
         toolName: subagent
         backgroundMode: continuable
-
     - id: tool-subagent-fork
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: fork
         toolName: subagent_fork
         backgroundMode: continuable
-
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
       config:
         provider: spawn
-
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
-
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'
       config:
         subagentProvider: spawn
         maxRounds: 64
-
-    # orchestrator 工具行:模板 id 由组合名承载(rs-<id> → <id>),释放生成器按组合名写入
     - id: rs-workflow-orchestrator
       name: '@mzzsfy/dsh-rs-workflow'
       config:
         role: orchestrator
         templateId: TPL_ANCHOR
-
-    # 模板编辑工具行:rs_workflow_template(AI 按口述逻辑生成/修改流程模板)
     - id: rs-workflow-template-tool
       name: '@mzzsfy/dsh-rs-workflow'
       config:
         role: template-tool
-
-# ── remaining model-facing rows ─────────────────────────────────────────────
-
 - id: tool-ask-user
   name: '@deepseek-ai/dsh-tool-ask-user'
-
 - id: tool-todo
   name: '@deepseek-ai/dsh-tool-todo'
   config:

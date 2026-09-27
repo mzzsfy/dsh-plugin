@@ -163,3 +163,42 @@ test('非法json与未知路径_仍返回固定响应不拒绝', async () => {
     await stopServer(child)
   }
 })
+
+test('流式请求_返回SSE_chunk序列终止DONE', async () => {
+  const { child, port } = await startServer(['--port', '0'])
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'm', stream: true }),
+    })
+    assert.match(response.headers.get('content-type'), /text\/event-stream/)
+    const payloads = (await response.text()).split('\n\n').filter((b) => b.trim())
+      .map((b) => b.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join(''))
+    assert.equal(payloads.at(-1), '[DONE]')
+    const chunks = payloads.slice(0, -1).map((d) => JSON.parse(d))
+    assert.equal(chunks.some((c) => c.choices?.[0]?.delta?.content === FIXED_TEXT), true)
+    assert.equal(chunks.some((c) => c.usage), true)
+  } finally {
+    await stopServer(child)
+  }
+})
+
+test('thinking模型_流式含reasoning块_错误注入_返回错误码', async () => {
+  const { child, port } = await startServer(['--port', '0'])
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'echo-model-think', stream: true }),
+    })
+    const text = await response.text()
+    assert.equal(text.includes('reasoning_content'), true)
+    assert.equal(text.includes('echo-upstream-thinking'), true)
+    const bad = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'echo-model-err429' }),
+    })
+    assert.equal(bad.status, 429)
+  } finally {
+    await stopServer(child)
+  }
+})

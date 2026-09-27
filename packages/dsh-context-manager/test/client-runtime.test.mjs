@@ -132,3 +132,17 @@ test('运行时:缺 remote.session 时仍完成全部插槽注册', () => {
   const names = slots.map(({ definition }) => definition.name)
   assert.ok(names.includes('conversation.input.dock'), '输入框 dock 是 fork/历史/撤回三入口的载体')
 })
+
+// 双代插件卡:settings.plugin.item(0.1.2-0.1.5)与 plugins.bundle.config(0.1.7-rc.1+)
+// 并存注册,各自宿主只消费其一;两代定义都必须在 apply 后注册在案
+test('运行时:插件卡双代槽位并存注册且组件可渲染', () => {
+  const { plugin, slots, ctx } = loadPlugin()
+  plugin.apply(ctx)
+  const legacy = slots.find(({ definition }) => definition.name === 'settings.plugin.item')
+  const modern = slots.find(({ definition }) => definition.name === 'plugins.bundle.config')
+  assert.ok(legacy, '缺 settings.plugin.item 注册(0.1.2-0.1.5 设置卡)')
+  assert.equal(legacy.definition.key, 'context', '旧代 key 须配对 settings namespace')
+  assert.ok(modern, '缺 plugins.bundle.config 注册(0.1.7-rc.1+ 插件管理页卡)')
+  assert.equal(modern.definition.key, '@mzzsfy/dsh-context-manager', '新代 key 须为完整包名')
+  assert.equal(typeof modern.component, 'function')
+})

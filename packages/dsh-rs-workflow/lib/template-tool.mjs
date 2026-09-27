@@ -1,10 +1,10 @@
 // template-tool — rs_workflow_template 模型工具:AI 按用户口述逻辑生成/修改流程模板
-// 激活于已创建组合行(template-tool 行);落盘走自有文件存储与 release 模块,不直接触碰预设目录(v5)
+// 激活于已创建组合行(template-tool 行);落盘走自有文件存储与释放分派,不直接触碰预设目录(v5)
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { parseTemplate, validateTemplate, validateTemplateSet } from './template.mjs'
 import { SPEC_TEXT } from './spec.mjs'
 import { loadJson, saveJson } from './storage.mjs'
-import { releaseFlowTemplate, unreleaseFlowTemplate } from './release.mjs'
+import { currentAgentPresets, markReleased, releaseTemplateVia, unreleaseTemplateVia } from './release-registry.mjs'
 
 const ACTIONS = ['spec', 'list', 'save', 'remove']
 
@@ -18,11 +18,13 @@ function normalizeTemplates(value) {
       description: typeof t.description === 'string' ? t.description : '',
       enabled: t.enabled !== false,
       json: typeof t.json === 'string' ? t.json : '',
+      // released 是注册形态的释放事实源(templates.json),归一化不得剥离
+      ...(t.released === true ? { released: true } : {}),
     }))
     .filter((t) => t.id !== '')
 }
 
-export function createTemplateTool({ getTemplates, setTemplates, removeTemplate, releaseTemplate, unreleaseTemplate, logger }) {
+export function createTemplateTool({ getTemplates, setTemplates, removeTemplate, releaseTemplate, logger }) {
   return defineTool({
     name: 'rs_workflow_template',
     description: [
@@ -90,7 +92,8 @@ export function createTemplateTool({ getTemplates, setTemplates, removeTemplate,
         // 单模板校验 + 与既有模板并集跨流程校验(动态路由目标存在性;损坏既有模板跳过)
         const single = validateTemplate(parsed)
         if (single.length > 0) return { ok: false, action, errors: single.map((e) => `${e.target}: ${e.message}`) }
-        const others = normalizeTemplates(await getTemplates()).filter((item) => item.id !== id)
+        const all = normalizeTemplates(await getTemplates())
+        const others = all.filter((item) => item.id !== id)
         const otherFlows = []
         for (const item of others) {
           try {
@@ -105,6 +108,8 @@ export function createTemplateTool({ getTemplates, setTemplates, removeTemplate,
           description: typeof t.description === 'string' && t.description.trim() !== '' ? t.description.trim() : (parsed && parsed.description) || '',
           enabled: t.enabled !== false,
           json,
+          // 编辑性重存不改变释放态(注销走 remove/unrelease 显式动作)
+          ...(all.find((item) => item.id === id)?.released === true ? { released: true } : {}),
         }
         if (args.dryRun === true) {
           return { ok: true, action, templates: normalizeTemplates([...others, entry]) }
@@ -132,29 +137,35 @@ export function createTemplateTool({ getTemplates, setTemplates, removeTemplate,
   })
 }
 
-// 模式行激活入口:自有文件存储读写 + release 落盘(ctx = agent realm 组合行上下文)
+// 模式行激活入口:自有文件存储读写 + 释放分派(注册/目录形态,与 board 同源
+// 服务当值;ctx = agent realm 组合行上下文)
 export function registerTemplateTool(ctx) {
   ctx.inject(['tools'], (tctx) => {
     tctx.effect(() => tctx.tools.register(createTemplateTool({
       getTemplates: () => loadJson('templates.json', []),
       setTemplates: (templates) => saveJson('templates.json', templates),
-      removeTemplate: (id) => {
+      removeTemplate: async (id) => {
         const raw = loadJson('templates.json', [])
         const next = raw.filter((t) => t.id !== id)
         if (next.length === raw.length) return { ok: false, error: '模板不存在: ' + id }
         saveJson('templates.json', next)
-        const outcome = unreleaseFlowTemplate(id)
-        return { ok: true, templates: next, outcome }
+        const result = await unreleaseTemplateVia(currentAgentPresets(), id)
+        return { ok: true, templates: next, outcome: result.outcome }
       },
-      releaseTemplate: (entry) => {
+      releaseTemplate: async (entry) => {
         try {
-          return releaseFlowTemplate(entry) !== 'foreign'
+          const result = await releaseTemplateVia(currentAgentPresets(), entry)
+          if (result.outcome === 'failed') {
+            ctx.logger?.warn?.(`rs-workflow 模板释放失败: ${result.broken ?? '未知原因'}`)
+            return false
+          }
+          markReleased(entry.id, true)
+          return true
         } catch (error) {
           ctx.logger?.warn?.(`rs-workflow 模板释放失败: ${error?.message ?? error}`)
           return false
         }
       },
-      unreleaseTemplate: (id) => unreleaseFlowTemplate(id),
       logger: ctx.logger,
     })), 'rs-workflow template tool')
   })

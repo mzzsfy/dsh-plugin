@@ -420,7 +420,7 @@ test('空态判定仅四项全零成立', () => {
   assert.equal(isEmptyRange({ tokens: 0, cacheHit: 0, requests: 0, turns: 3 }), false)
 })
 
-test('groupStats 折叠 top5 之外为其他哨兵并归并逐日', () => {
+test('groupStats 折叠超免折叠上限条目为其他哨兵并归并逐日', () => {
   const stats = {
     models: [
       { model: 'p/m1', tokens: 500 },
@@ -436,8 +436,8 @@ test('groupStats 折叠 top5 之外为其他哨兵并归并逐日', () => {
     ],
   }
   const grouped = groupStats(stats)
-  assert.deepEqual(grouped.models.map((m) => m.model), ['p/m1', 'p/m2', 'p/m3', 'p/m4', 'p/m5', OTHER_MODEL])
-  assert.equal(grouped.models[5].tokens, 50)
+  assert.deepEqual(grouped.models.map((m) => m.model), ['p/m1', 'p/m2', 'p/m3', 'p/m4', OTHER_MODEL])
+  assert.equal(grouped.models[4].tokens, 100 + 50)
   assert.deepEqual(grouped.daily[0].byModel, { 'p/m1': 400, 'p/m2': 500, [OTHER_MODEL]: 100 })
   assert.deepEqual(grouped.daily[1].byModel, { 'p/m3': 300, [OTHER_MODEL]: 250 })
 })
@@ -460,8 +460,8 @@ test('groupPointSlots 窗口模型超上限折叠其他', () => {
   ]
   const grouped = groupPointSlots(slots)
   assert.equal(grouped.models.at(-1).model, OTHER_MODEL)
-  assert.equal(grouped.models.at(-1).tokens, 1)
-  assert.deepEqual(grouped.daily[0].byModel, { m1: 1, m2: 1, m3: 1, m4: 1, m6: 1, [OTHER_MODEL]: 1 })
+  assert.equal(grouped.models.at(-1).tokens, 1 + 1)
+  assert.deepEqual(grouped.daily[0].byModel, { m1: 1, m2: 1, m3: 1, m6: 1, [OTHER_MODEL]: 1 + 1 })
 })
 
 test('cardsStatsOf 天视图用 range 聚合,时/分视图用点聚合,点未回为 null', () => {
@@ -485,9 +485,9 @@ test('usageModelsOf 天视图用预折叠分组,时/分视图折叠点窗口模�
     { model: 'p/m6', tokens: 1 },
   ]
   const folded = usageModelsOf('hour', null, { models: ranked })
-  assert.equal(folded.length, 6)
+  assert.equal(folded.length, 5)
   assert.equal(folded.at(-1).model, OTHER_MODEL)
-  assert.equal(folded.at(-1).tokens, 1)
+  assert.equal(folded.at(-1).tokens, 1 + 1)
   // 空窗口契约:返回空数组渲染空环(与天视图空数据行为一致),非 null 隐藏
   assert.deepEqual(usageModelsOf('minute', null, { models: [] }), [])
   assert.equal(usageModelsOf('minute', null, null), null)
@@ -873,14 +873,14 @@ test('groupStats 哨兵折叠四桶求和,top 模型四桶透传', () => {
   const grouped = groupStats(stats)
   assert.equal(grouped.models[0].inputTokens, 300)
   assert.equal(grouped.models[0].outputTokens, 200)
-  assert.deepEqual(grouped.models[5], {
+  assert.deepEqual(grouped.models[4], {
     model: OTHER_MODEL,
-    tokens: 50,
-    inputTokens: 10,
-    outputTokens: 30,
+    tokens: 100 + 50,
+    inputTokens: 60 + 10,
+    outputTokens: 40 + 30,
     cacheReadTokens: 5,
     cacheWriteTokens: 5,
-    items: [stats.models[5]],
+    items: [stats.models[4], stats.models[5]],
   })
 })
 
@@ -894,7 +894,7 @@ test('groupStats 哨兵费用同源:无 cost 输入不挂 cost,有 cost 求和',
     { model: 'p/m5', tokens: 100 },
     { model: 'p/m6', tokens: 50 },
   ], daily: [] })
-  assert.equal('cost' in bare.models[5], false)
+  assert.equal('cost' in bare.models[4], false)
   const priced = groupStats({ models: [
     { model: 'p/m1', tokens: 500, cost: 1 },
     { model: 'p/m2', tokens: 400, cost: 2 },
@@ -904,7 +904,7 @@ test('groupStats 哨兵费用同源:无 cost 输入不挂 cost,有 cost 求和',
     { model: 'p/m6', tokens: 50, cost: 16 },
     { model: 'p/m7', tokens: 25, cost: 32 },
   ], daily: [] })
-  assert.equal(priced.models[5].cost, 16 + 32)
+  assert.equal(priced.models[4].cost, 8 + 16 + 32)
 })
 
 test('groupStats 哨兵保留其他模型明细供展开与提示', () => {
@@ -920,9 +920,26 @@ test('groupStats 哨兵保留其他模型明细供展开与提示', () => {
     daily: [],
   }
   const grouped = groupStats(stats)
-  assert.deepEqual(grouped.models[5].items, [{ model: 'p/m6', tokens: 50 }])
+  // Given 超过免折叠上限 When 折叠 Then 保留 top4,哨兵在末位并携带其余明细
+  assert.deepEqual(grouped.models[4].items, [{ model: 'p/m5', tokens: 100 }, { model: 'p/m6', tokens: 50 }])
   // Given 旧形条目无四桶 When 折叠 Then 哨兵不合成零值四桶,与 top 条目降级形态一致
-  assert.equal('inputTokens' in grouped.models[5], false)
+  assert.equal('inputTokens' in grouped.models[4], false)
+})
+
+test('groupStats 条目不超免折叠上限时全展示', () => {
+  const stats = {
+    models: [
+      { model: 'p/m1', tokens: 500 },
+      { model: 'p/m2', tokens: 400 },
+      { model: 'p/m3', tokens: 300 },
+      { model: 'p/m4', tokens: 200 },
+      { model: 'p/m5', tokens: 100 },
+    ],
+    daily: [],
+  }
+  const grouped = groupStats(stats)
+  assert.equal(grouped.models.length, 5)
+  assert.equal(grouped.models.some((item) => item.model === OTHER_MODEL), false)
 })
 
 test('groupStats 逐日保留其他明细映射供 tooltip', () => {

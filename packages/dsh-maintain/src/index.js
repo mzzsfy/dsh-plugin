@@ -1,6 +1,7 @@
 // dsh-maintain Host 半区:版本监测 + 一键升级 + 安全重启。
 // 双端模式照 dsh-usage-panel:webServer 具名路由供浏览器半区调用;
-// 设置持久化走 settings 命名空间 maintain,检查结果仅存内存,不落盘。
+// 配置持久化双形态:legacy 走 settings 命名空间 maintain,0.1.7+ 走 profile
+// 条目 config 节(Config 导出 + volatile 热更),检查结果仅存内存。
 
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -253,19 +254,26 @@ function upgradeLockStale(lock) {
   return lock === null || Date.now() - lock.startedAt > UPGRADE_LOCK_STALE_MS
 }
 
-const DEFAULT_CHANNEL = 'latest'
 // 默认值导出仅供 parity 测试作 host 侧锚点;行为入口全部经 readSettings 回落
+export const DEFAULT_CHANNEL = 'latest'
 export const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
 export const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g ' + TARGET_PACKAGE + '@' + TAG_PLACEHOLDER
 export const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 
 // 注册即声明 GUI 设置表单,schema 默认值即生效默认值(rs-workflow-config 先例)。
-const SETTINGS_SCHEMA = z.object({
+// 0.1.7 宿主以静态 Config 导出生成节表单;legacy 宿主经 settings.register 注册同名命名空间。
+// volatile 根包装(照 dsh-llm-pi-gateway volatileWrap 同构):0.1.7 下整节为 live 表单,
+// 节写经 loader volatile 快速道原地热更;旧宿主 schemastery 无 volatile 方法,特性检测原样返回
+export const Config = volatileWrap(z.object({
   channel: z.string().default(DEFAULT_CHANNEL).description('追踪通道:npm dist-tag 名(latest/next/alpha 等,以检查返回的通道列表为准)'),
   pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('轮询间隔秒数,仅正数启用周期检查'),
   upgradeCommandTemplate: z.string().default(DEFAULT_UPGRADE_TEMPLATE).description('升级命令模板,{tag} 执行时替换为追踪通道,可整体自改为任意命令'),
   registryBase: z.string().default(DEFAULT_REGISTRY_BASE).description('npm registry 基地址,官方源不可达时改为镜像地址'),
-})
+}))
+
+function volatileWrap(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -326,10 +334,17 @@ function readBody(req) {
   })
 }
 
-function readSettings(ctx) {
+// volatile ref 动态解包(get 协议,官方 plainOptions 同构);legacy 宿主 config 为普通对象原样透传。
+// Config 为根级 volatile 包装,解析产物是整节单 ref,解包一次即得字段明值
+function unwrapVolatile(value) {
+  return typeof value?.get === 'function' ? value.get() : value
+}
+
+function readSettings(ctx, config) {
   const settings = ctx.get('settings')
-  // 方法面守卫:settings 服务在但缺 get(宿主升级变更面)时回落默认值
-  const value = settings && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
+  // 双形态读(照 dsh-llm-pi-gateway,特性检测不硬编码版本):
+  // legacy:settings 命名空间 get;0.1.7+:apply 入参 config 整节解包
+  const value = typeof settings?.get === 'function' ? settings.get(NAMESPACE) : unwrapVolatile(config)
   return {
     channel: value && typeof value.channel === 'string' && value.channel.trim().length > 0 ? value.channel.trim() : DEFAULT_CHANNEL,
     pollIntervalSec:
@@ -348,7 +363,32 @@ function readSettings(ctx) {
 }
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
-export function apply(ctx) {
+export function apply(ctx, config) {
+  // 配置面双形态(照 dsh-llm-pi-gateway,特性检测不硬编码版本),判定一律延迟到使用点:
+  // settings 服务挂载时序无保证,apply 时刻探测会误判形态。
+  // legacy(≤0.1.6):settings 服务 register/get/update 命名空间语义;
+  // 0.1.7+:静态 Config 导出生成节表单,读经 volatile ref 解包,写经 configEditor 落 profile 条目
+  const legacySettingsFace = () => {
+    const settings = ctx.get('settings')
+    return typeof settings?.register === 'function' && typeof settings?.update === 'function'
+  }
+  // 写路径分发。0.1.7:configEditor.edit 的 change 回调返回完整 raw config,
+  // 仅 volatile 字段变化时 loader 原地热更不重启插件,apply 无需重入。
+  // 服务面缺失发 500 后返回 false,业务异常抛出由路由统一归一 400
+  async function persistPatch(res, patch) {
+    if (legacySettingsFace()) {
+      await ctx.get('settings').update(NAMESPACE, patch)
+      return true
+    }
+    const editor = ctx.get('configEditor')
+    const entry = ctx.fiber?.entry
+    if (!editor || typeof editor.edit !== 'function' || !entry) {
+      sendJson(res, 500, { error: 'configEditor 服务不可用' })
+      return false
+    }
+    await editor.edit(entry, (current) => ({ ...current, ...patch }))
+    return true
+  }
   // 启动器在挂载前提供 appExit(有界退出,5 秒兜底强制);缺失时重启能力关闭
   const exit = ctx.get('appExit')
   if (typeof exit !== 'function') {
@@ -395,9 +435,9 @@ export function apply(ctx) {
   function runCheck() {
     if (checkInFlight) return checkInFlight
     checkInFlight = (async () => {
-      const config = readSettings(ctx)
+      const cfg = readSettings(ctx, config)
       try {
-        snapshot.tags = await fetchDistTags({ registryBase: config.registryBase, timeoutMs: CHECK_TIMEOUT_MS })
+        snapshot.tags = await fetchDistTags({ registryBase: cfg.registryBase, timeoutMs: CHECK_TIMEOUT_MS })
         snapshot.error = null
       } catch (error) {
         // registry 不可达:保留上次 tags,仅记录错误
@@ -420,7 +460,7 @@ export function apply(ctx) {
   }
 
   function scheduleNext() {
-    const intervalSec = readSettings(ctx).pollIntervalSec
+    const intervalSec = readSettings(ctx, config).pollIntervalSec
     nextDueAt = intervalSec > 0 && intervalSec <= POLL_INTERVAL_MAX_SEC ? Date.now() + intervalSec * 1000 : null
   }
 
@@ -444,13 +484,13 @@ export function apply(ctx) {
 
   function judgeNow() {
     // verdict 以运行版本判定:用户关心"跑的是不是最新";已装版本供升级复读校验
-    return judgeVersion({ currentVersion: runningVersion, tags: snapshot.tags, channel: readSettings(ctx).channel })
+    return judgeVersion({ currentVersion: runningVersion, tags: snapshot.tags, channel: readSettings(ctx, config).channel })
   }
 
   async function currentStatus() {
     // 等运行版本首读落定:apply 即发起,此处仅吸收启动窗口的微小延迟
     await runningVersionReady
-    const config = readSettings(ctx)
+    const cfg = readSettings(ctx, config)
     const judged = judgeNow()
     // running 即视为持锁:省一次盘读,且窗口期语义与 upgrade 路由的门闩一致
     const lock = upgrade.running === true ? { startedAt: Date.now() } : readUpgradeLock()
@@ -463,10 +503,10 @@ export function apply(ctx) {
       runningVersion,
       installedVersion: snapshot.installedVersion,
       restartPending: isVersionPendingRestart({ runningVersion, installedVersion: snapshot.installedVersion }),
-      channel: config.channel,
-      upgradeTemplate: config.upgradeCommandTemplate,
-      pollIntervalSec: config.pollIntervalSec,
-      registryBase: config.registryBase,
+      channel: cfg.channel,
+      upgradeTemplate: cfg.upgradeCommandTemplate,
+      pollIntervalSec: cfg.pollIntervalSec,
+      registryBase: cfg.registryBase,
       tags: snapshot.tags,
       channelLatest: judged.channelLatest,
       verdict: judged.verdict,
@@ -481,15 +521,15 @@ export function apply(ctx) {
   }
 
   function triggerUpgrade(autoRestart) {
-    const config = readSettings(ctx)
+    const cfg = readSettings(ctx, config)
     // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
-    const command = buildUpgradeCommand({ template: config.upgradeCommandTemplate, tag: config.channel })
+    const command = buildUpgradeCommand({ template: cfg.upgradeCommandTemplate, tag: cfg.channel })
     // 通道名恰为 semver 形态时 {tag} 展开产物会被误读为钉定:与通道名重合即非钉定
     const pinnedVersion = extractPinnedVersion(command)
     const last = {
       command,
       // 钉定版本随命令定格:落定复读按安装意图(钉定/通道)判定 stale
-      pinnedVersion: pinnedVersion === config.channel ? null : pinnedVersion,
+      pinnedVersion: pinnedVersion === cfg.channel ? null : pinnedVersion,
       startedAt: Date.now(),
       ok: false,
       finishedAt: null,
@@ -510,7 +550,7 @@ export function apply(ctx) {
     upgrade = { running: true, last }
     writeUpgradeLock(last.startedAt)
     audit('upgrade', 'triggered', 'command=' + singleLine(command) + ' autoRestart=' + (autoRestart === true))
-    void performUpgrade(command, last, config.channel, autoRestart === true)
+    void performUpgrade(command, last, cfg.channel, autoRestart === true)
   }
 
   // 升级锁文件只在此写入:首次与每次重试覆写,startedAt 取当前尝试开始时刻,
@@ -650,12 +690,7 @@ export function apply(ctx) {
           sendJson(res, 400, { error: '通道 ' + channel + ' 不在当前 dist-tags 中' })
           return
         }
-        const settings = ctx.get('settings')
-        if (!settings) {
-          sendJson(res, 500, { error: 'settings 服务不可用' })
-          return
-        }
-        await settings.update(NAMESPACE, { channel })
+        if (!(await persistPatch(res, { channel }))) return
         // 切通道无需重查:dist-tags 与 channel 无关,白名单已用现有 snapshot 校验
         scheduleNext()
         sendJson(res, 200, await currentStatus())
@@ -670,12 +705,7 @@ export function apply(ctx) {
           sendJson(res, 400, { error: '升级命令不能为空' })
           return
         }
-        const settings = ctx.get('settings')
-        if (!settings) {
-          sendJson(res, 500, { error: 'settings 服务不可用' })
-          return
-        }
-        await settings.update(NAMESPACE, { upgradeCommandTemplate: template })
+        if (!(await persistPatch(res, { upgradeCommandTemplate: template }))) return
         sendJson(res, 200, await currentStatus())
       }),
     },
@@ -694,12 +724,7 @@ export function apply(ctx) {
           sendJson(res, 400, { error: '轮询间隔不能超过 ' + POLL_INTERVAL_MAX_SEC + ' 秒' })
           return
         }
-        const settings = ctx.get('settings')
-        if (!settings) {
-          sendJson(res, 500, { error: 'settings 服务不可用' })
-          return
-        }
-        await settings.update(NAMESPACE, { pollIntervalSec: seconds })
+        if (!(await persistPatch(res, { pollIntervalSec: seconds }))) return
         scheduleNext()
         sendJson(res, 200, await currentStatus())
       }),
@@ -713,12 +738,7 @@ export function apply(ctx) {
           sendJson(res, 400, { error: 'registry 基地址须为 http(s) 地址且不带查询串或锚点' })
           return
         }
-        const settings = ctx.get('settings')
-        if (!settings) {
-          sendJson(res, 500, { error: 'settings 服务不可用' })
-          return
-        }
-        await settings.update(NAMESPACE, { registryBase: base })
+        if (!(await persistPatch(res, { registryBase: base }))) return
         if (restartScheduled) {
           // 保存生效但不发起检查:关机窗口内网络请求与磁盘读取都是半写状态风险
           sendJson(res, 200, await currentStatus())
@@ -843,14 +863,16 @@ export function apply(ctx) {
   }
 
   ctx.inject(['settings'], (settingsCtx) => {
-    // 方法面防御对齐 timer 软依赖:宿主升级变更 settings 服务方法面时干净降级并留痕,
-    // 不让 fiber 激活即抛错拖垮启动检查与全部写路由
-    if (!settingsCtx.settings || typeof settingsCtx.settings.register !== 'function' || typeof settingsCtx.settings.update !== 'function') {
-      console.warn('[dsh-maintain] settings 服务方法面不可用,版本检查停用,通道/设置保存不可用')
-      return
+    // 方法面防御对齐 timer 软依赖:settings 服务缺 register 面(0.1.7 已移除)即走
+    // 新形态分支,不在此路径抛错拖垮启动检查
+    if (legacySettingsFace()) {
+      settingsCtx.settings.register(NAMESPACE, Config)
+    } else if (typeof settingsCtx.settings?.configure === 'function') {
+      // 0.1.7 形态:原生自动设置页与本包自定义面板重复,特性检测关闭
+      // (官方 dsh-agent-default-model 同构)
+      settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
     }
-    settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA)
-    // 启动检查放在 settings 注册之后:命名空间未注册时 readSettings 只能拿默认值,
+    // 启动检查在 settings 注册之后:legacy 命名空间未注册时 readSettings 只能拿默认值,
     // 配置了镜像地址的部署会确定性检查失败
     runCheck().then(scheduleNext, scheduleNext)
   })

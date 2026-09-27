@@ -39,23 +39,26 @@ function overlayFind(root, pred) {
   return null
 }
 
-// 官方 svg 桩:gear=true 模拟官方齿轮路径,否则为无路径原生图形;内容改写制下
+// 官方 svg 桩:gear 模拟官方齿轮路径('legacy'=0.1.x 内联 / 'rc1'=0.1.7
+// primitives 齿体 / true 同 legacy),否则为无路径原生图形;内容改写制下
 // applyDecision 直接写 innerHTML(桩以 innerHTML 属性承接)与 dataset.navic
-function makeOfficialSvg({ gear = true } = {}) {
+function makeOfficialSvg({ gear = 'legacy' } = {}) {
+  const GEAR_PREFIXES = { legacy: 'M14.0861', rc1: 'M13.0107 7.79377' }
+  const prefix = gear === true ? GEAR_PREFIXES.legacy : GEAR_PREFIXES[gear]
   const svg = {
     tagName: 'svg',
     dataset: { navic: '' },
     style: { display: '' },
     innerHTML: '',
     remove() {},
-    querySelector(sel) { return gear && sel.includes('M14.0861') ? {} : null },
+    querySelector(sel) { return prefix !== undefined && sel.includes(prefix) ? {} : null },
   }
   return svg
 }
 
 // 导航单元格桩:官方 svg 恒为首个;内容改写制下不再产生注入节点,
 // remove 语义仅服务于 0.1.x 升级残留清理路径
-function makeCell(label, { gear = true, navic = '' } = {}) {
+function makeCell(label, { gear = 'legacy', navic = '' } = {}) {
   const cell = { dataset: {}, injectedCount: 0, svgs: [] }
   const official = makeOfficialSvg({ gear })
   if (navic) official.dataset.navic = navic

@@ -1,10 +1,12 @@
 // llm-pi-gateway guard 哨兵行:死态自愈,守服务不抢权。
 // 死态 = gateway 行功能性停摆(行被禁并停稳,或行活着但 apply 因宿主能力
-// 缺失干净早退)且官方行仍被 bundle patch 禁用并停稳——无任何插件服务
-// provider 路由,所有模型不可用。触发路径:dsh-market 对本包(禁用承载
-// 官方行的 disable-carrier)的 UI 开关写入即时生效的 user patch 行禁用,
-// 而其恢复机制(整包移出 bundles)只在下次 boot 生效,窗口内 composed
-// 自相矛盾;旧宿主(rc.2)则恒为假活形态。
+// 缺失干净早退)且官方行禁用并停稳——无任何插件服务 provider 路由,所有
+// 模型不可用。运行时接管下(bundle patch 不再静态禁官方行,官方行的禁用
+// 由 gateway apply 落定后 entry.update 执行)该形态的唯一来源:gateway
+// 接管中(官方行禁用为内存残留态)被外部停摆(market toggle / 删行),
+// 禁用残留至本进程结束。gateway 自身加载失败/被禁的其余形态下官方行保持
+// 启用,官方插件自服务,恒非死态,guard 空闲——"能正常加载才允许禁用
+// 官方行"的不变式由此成立,无需 import 崩宽限判死机制。
 // 自愈手段:动态挂载官方插件模块(ctx.plugin),settings 节与模型注册全
 // 原生语义,挂 guard 子 context 随 guard fiber 卸载。gateway 行或官方行
 // 任一复活时先卸代挂再放行。guard 行 id 含 "/",dsh-market 的行写入对其
@@ -36,7 +38,7 @@ export const GUARD_FOR_GATEWAY_ID = 'llm-pi-gateway/guard'
 const OFFICIAL_SETTINGS_NS = 'llm-pi-ai'
 
 // 轮询兜底周期:边沿事件缺失/丢失时的状态跟随精度,幂等不抖动
-const SWEEP_INTERVAL_MS = 3000
+export const SWEEP_INTERVAL_MS = 3000
 // boot 树就绪等待:兄弟行 update 事务完成的上限(超时按当前状态判定)
 const BOOT_SETTLE_ROUNDS = 50
 const BOOT_SETTLE_INTERVAL_MS = 100
@@ -76,8 +78,8 @@ function settled(entry) {
 
 /**
  * 死态判定:gateway 行功能性停摆(禁用停稳,或 apply 声明未接管),且官方
- * 行禁用并已停稳。官方行未禁 = 官方自行服务。gateway apply 中途崩溃
- * (旗标 undefined)不在判定内:自愈执行者不越权重启他人。
+ * 行禁用并已停稳。官方行未禁 = 官方自行服务(gateway 任意死法下系统的
+ * 兜底服务面),恒非死态。
  * 返回 PENDING 表示行尚无法解析(树未就绪或行不存在),调用方应稍后
  * 重试——PENDING 不能当真值也不能当假值。
  * @param {object|undefined} loader
@@ -357,7 +359,9 @@ export async function installGuard(ctx, {
   // 复活→卸代挂的最终一致。与事件通道幂等并发:mount/unmount 各自去重,
   // 双通道同时触发不会叠加。PENDING 轮跳过,下轮再扫。mount 前置条件:
   // settings 服务已 provide——官方目录首注册需要 settings 现值作行配置,
-  // 且 boot 事务内 mount 会让官方插件的 settings 接线时序劣化
+  // 且 boot 事务内 mount 会让官方插件的 settings 接线时序劣化。
+  // 运行时接管下死态唯一来源 = 接管中 gateway 停摆而官方行禁用态残留
+  // (runtime-disable 为内存态);官方行启用形态恒非死态,官方自服务。
   let sweeping = false
   const sweep = async () => {
     if (sweeping) return

@@ -1,34 +1,35 @@
 // shell-select 执行器:ctx.shell 提供者(官方 SandboxPwshExecutor 同构,进程机制
-// 继承 dsh-pwsh-local 形态),并把模型可见 shell 工具、systemPrompt 段、
-// shell-select 设置节与浏览器半区路由一并挂在本行 fiber 上。
+// 继承 dsh-pwsh-local 形态),并把模型可见 shell 工具与 systemPrompt 段挂在本行
+// fiber 上;设置页数据通道在 web-routes 行(声明式 webServer 门控),配置事实源
+// = 本行 Config(settings 面以行条目为存储,变更经 cordis 行重载活生效)。
 //
 // 与官方的两处结构差异(其余逐项同构):
 // 1. argv 由「本次调用选中的 shell 条目」决定(pwsh/bash/cmd/wsl 四形 + args 模板),
 //    confine 包的正是该条目 argv;
-// 2. 执行器预算与客户端清单同节('shell-select'),官方拆 'shell' 节 + 行内 Config。
+// 2. 执行器预算与客户端清单同行 Config,官方拆 'shell' 节 + 行内 Config。
 //
 // 兼容性:ShellExecutor 基类为官方文档级扩展缝(dsh-shell README 明示子类化);
 // dsh-llm 经 tool.mjs 动态 import + 特性检测(HarnessError 缺失即降级),
 // dsh-tools/dsh-sandbox 静态 import(官方组合必装,无降级面)。
 
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
-import { MAX_TIMER_DELAY_MS, clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { Config, KINDS, buildArgv, requireEntry } from './config.mjs'
+import { clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { Config, KINDS, buildArgv, requireEntry, resolveConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
 import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
 import { registerShellTool } from './tool.mjs'
-import { mountRoutes } from './api.mjs'
-import { beginShellSelectApply, endShellSelectApplyActive } from './apply-state.mjs'
 
 export const name = 'shell-select'
 
-// 单一事实源:loader 消费模块级 inject 导出,Service 类静态与它共用同一常量
-export const SHELL_SELECT_INJECT = ['subprocess', 'sandbox', 'sandboxPolicy', 'settings', 'tools', 'systemPrompt', 'shellEnv']
+// 单一事实源:loader 消费模块级 inject 导出,Service 类静态与它共用同一常量。
+// settings 不在列:配置事实源 = 行 Config(0.1.7 settings 面语义),页面策略经
+// apply 内可选子级注入注册,业务插件无 settings 服务也可运行(官方 README 同构)。
+export const SHELL_SELECT_INJECT = ['subprocess', 'sandbox', 'sandboxPolicy', 'tools', 'systemPrompt', 'shellEnv']
 
 export const inject = SHELL_SELECT_INJECT
 
-export { Config }
+export { Config } from './config.mjs'
 
 // 面向模型的终端环境覆盖(官方 dsh-pwsh-local 同构):禁色禁 pager
 export const ENV_OVERRIDES = {
@@ -82,41 +83,6 @@ function assertPositiveFinite(name, value) {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`shell-select: ${name} must be a positive finite number`)
 }
 
-// yaml 无引号标量会把 `\` 字面落盘,任何一层再转义都让路径翻倍(C:\\ 实测):
-// 入口统一归一,保证进 schema 的 path 就是干净值。
-// 仅 Windows 宿主生效:posix 路径以 / 分隔,归一会把合法路径毁成反斜杠字面(CI linux 实测)
-function normalizeWin32Path(path) {
-  if (process.platform !== 'win32') return path
-  if (typeof path !== 'string' || path.length === 0) return path
-  return path.replace(/\\{2,}/g, '\\').replace(/\//g, '\\')
-}
-
-// 更新负载深归一:shells[].path 与任意层字符串值只处理 path 键,避免误伤 args 模板
-function normalizeConfigPaths(patch) {
-  if (typeof patch !== 'object' || patch === null || !Array.isArray(patch.shells)) return patch
-  return {
-    ...patch,
-    shells: patch.shells.map((entry) => (typeof entry?.path === 'string' ? { ...entry, path: normalizeWin32Path(entry.path) } : entry)),
-  }
-}
-
-/** 拒绝无法运行的已解析配置节(schema 之外的正数/时限/清单约束,官方 assertServiceable 同构)。 */
-export function assertServiceableConfig(config) {
-  assertPositiveFinite('timeoutMs', config.timeoutMs)
-  assertPositiveFinite('maxTimeoutMs', config.maxTimeoutMs)
-  assertPositiveFinite('maxOutputBytes', config.maxOutputBytes)
-  assertPositiveFinite('maxSpillBytes', config.maxSpillBytes)
-  assertPositiveFinite('graceMs', config.graceMs)
-  if (config.graceMs > MAX_TIMER_DELAY_MS) throw new Error(`shell-select: graceMs must be no greater than ${MAX_TIMER_DELAY_MS}`)
-  if (!Array.isArray(config.shells) || config.shells.length === 0) throw new Error('shell-select: shells must not be empty')
-  const ids = new Set()
-  for (const entry of config.shells) {
-    if (ids.has(entry.id)) throw new Error(`shell-select: duplicate shell id "${entry.id}"`)
-    ids.add(entry.id)
-  }
-  if (!ids.has(config.default)) throw new Error(`shell-select: default "${config.default}" is not a configured shell id`)
-}
-
 /** 收集模式的 reader 投影成 CollectedOutput(官方同构)。 */
 function finalOutput(reader) {
   const read = reader.readFrom(0)
@@ -155,10 +121,12 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
   // (getTraceable/createShadowMethod)会把经 ctx.shell 访问的方法 this 重定向到
   // 阴影对象,#私有字段在阴影 receiver 下触发 V8 品牌检查错误(官方工具
   // tool-pwsh 正是经 ctx.shell 调用,实测复现)。
-  /** 当前权威配置来源:设置节(接线后)或行内配置。 */
+  /** 当前权威配置:行 Config(0.1.7 settings 面以行为存储,变更即行重载重建本实例)。 */
   source
-  /** 工具重注册句柄(onChange 先卸后挂;仅构造期闭包触达,this 恒为裸实例)。 */
+  /** 工具重注册句柄(仅构造期闭包触达,this 恒为裸实例)。 */
   #toolRegistration = null
+  /** 配置快照(挂载时解包产物;volatile 变更经 refresh 换新)。 */
+  #entry = {}
   /** 托管进程的每进程 confinement 事实(官方同构)。 */
   processFacts = new Map()
   /** SANDBOX_UNAVAILABLE 构造器(动态导入就绪后由官方类顶替降级类)。 */
@@ -166,36 +134,30 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
 
   constructor(ctx, config) {
     super(ctx)
-    beginShellSelectApply()
     void loadSandboxUnavailable(ctx).then((resolved) => {
       this.unavailableError = resolved
     })
-    // settings 为硬依赖(static inject 门控);面异常按降级处理,能力不损
-    const settingsOk = typeof ctx.settings?.installSection === 'function'
-    if (!settingsOk) ctx.logger?.warn?.('shell-select: 宿主 settings 服务缺 installSection,配置退化为行内 Config,无热更新')
-
-    const entry = config ?? {}
-    assertServiceableConfig(Config(entry))
-    this.source = () => Config(entry)
-    if (settingsOk) {
-      ctx.settings.installSection(ctx, 'shell-select', Config, entry, {
-        validate: assertServiceableConfig,
-        setSource: (current) => {
-          this.source = current
-        },
-        onChange: () => this.#onConfigChange(),
-      })
-    }
+    this.#entry = config ?? {}
+    assertServiceableConfig(resolveConfig(this.#entry))
+    this.source = () => resolveConfig(this.#entry)
+    // refresh 桥绑定随本 fiber 卸载自动解绑(实例退场后写路径请求静默丢弃)
+    ctx.effect(() => bindShellRefreshBridge((next) => this.refresh(next)))
+    // 自带设置页(客户端半区自定义卡):抑制宿主按 schema 自动生成的原生页
+    // (官方 README 同构:可选子级注入声明策略归属 fiber,服务迟加载也采纳)
+    ctx.inject?.(['settings'], (child) => {
+      if (typeof child.settings?.configure !== 'function') return
+      child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+    })
     this.#registerTool()
     this.#mountPromptSection()
-    mountRoutes(ctx, {
-      listShells: () => this.listShells(),
-      readConfig: () => this.source(),
-      updateConfig: (patch) => this.updateConfig(patch),
-      detect: (kinds) => this.detect(kinds),
-      probe: (candidatePath) => candidateExists(candidatePath),
-    })
-    endShellSelectApplyActive()
+  }
+
+  /** volatile-only 配置变更的活刷新:换配置源并重建工具注册(写路径经
+   * requestShellRefresh 触达;行不重挂,本实例与进行中执行不受扰)。 */
+  refresh(config) {
+    this.#entry = config ?? {}
+    assertServiceableConfig(resolveConfig(this.#entry))
+    this.#registerTool()
   }
 
   get config() {
@@ -224,7 +186,6 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
         const resolved = normalizeWin32Path(resolveEntryPath(entry, candidateExists))
         return {
           id: entry.id,
-          name: entry.name,
           kind: entry.kind,
           args: entry.args,
           path: resolved,
@@ -256,33 +217,6 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       throw new Error(`shell client "${entry.id}" (${entry.kind}) has no executable on this machine: set an explicit path in the shell-select settings section or reinstall the client`)
     }
     return { id: entry.id, kind: entry.kind, path: resolved, args: entry.args, login: entry.login === true, distro: entry.distro ?? '', env: entry.env ?? {} }
-  }
-
-  /**
-   * 客户端半区配置更新入口:wholesale replace(settings merge 对数组是整值
-   * 覆盖,部分清单会静默丢条目;设置页语义是保存完整清单);等写队列落定再回读。
-   */
-  async updateConfig(patch) {
-    const current = this.config
-    const section = normalizeConfigPaths({
-      shells: patch.shells ?? current.shells,
-      default: patch.default ?? current.default,
-      deny: Array.isArray(patch.deny) ? patch.deny : current.deny,
-    })
-    assertServiceableConfig(Config(section))
-    await this.ctx.settings.replace('shell-select', section)
-    return this.listShells()
-  }
-
-  #onConfigChange() {
-    try {
-      assertServiceableConfig(this.config)
-    } catch (error) {
-      // validate hook 已在写入路径拦截;此处兜底防御,保旧配置
-      this.ctx.logger?.warn?.(`shell-select: 新配置不可用,保留先前配置: ${error?.message ?? error}`)
-      return
-    }
-    this.#registerTool()
   }
 
   /** 注册/重注册 shell 工具(描述随客户端清单变化)。 */
@@ -323,9 +257,160 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return buildArgv(entry, spec.command)
   }
 
-  /** 官方 run seam:已解析 spec 按默认客户端前台执行(dsh-pwsh-local run 同构)。 */
+  /** 官方 execute seam:已解析 spec 按默认客户端前台执行(dsh-pwsh-local run 同构)。 */
   async run(spec) {
     return this.runFor(this.entryFor(), spec)
+  }
+
+  /**
+   * 官方 ctx.shell 唯一执行契约(ShellExecutor 抽象方法,官方 tool-pwsh 与
+   * 进程内消费方共同依赖):解析 spec 后按默认客户端 spawn,返回 ShellExecution
+   * 句柄(done/readOutput/kill/observed/result)。前台与否是调用方 await 什么的
+   * 属性,不是 spawn 的属性。沙箱语义与 runFor 同源:danger 直跑,受限模式
+   * confine 包装,定案按 denial/runner-failure 规则附 sandbox 事实。
+   * @param {object} spec resolve() 产物(never 原始 request)
+   * @returns {Promise<object>} ShellExecution 句柄
+   */
+  async execute(spec) {
+    this.assertNotDenied(spec.command)
+    const entry = this.entryFor()
+    const policy = spec.sandboxPolicy
+    const { mode } = policy
+    if (mode === 'danger-full-access') {
+      return this.executionArgv(entry, spec)
+    }
+    const confined = this.ctx.sandbox.confine(this.argvFor(entry, spec), { ...policy, mode })
+    return this.executionArgv(entry, spec, confined.argv, {
+      mode,
+      enforcement: confined.enforcement,
+      denialSignatures: confined.denialSignatures,
+      runnerFailureRules: confined.runnerFailureRules,
+      runnerProgram: confined.argv[0],
+      workdir: spec.workdir,
+    })
+  }
+
+  /**
+   * 官方 executeArgv 同构(条目参数化):deadline 按 spec.onExpiry 武装
+   * ('kill' 到期杀,'none'/缺省只跟随调用方信号);done 永不 reject,provider
+   * spawn 失败定局 killed + stderr 注记,result() 携带同一 rejection;受限模式
+   * 定案事实经 processFacts/onProcessDone 单通道写 proc.sandbox(官方
+   * pwsh-sandbox 子类同构),unsandboxed 的 result() 无 sandbox 键。
+   */
+  executionArgv(entry, spec, forcedArgv, sandboxFacts) {
+    const argv = forcedArgv ?? this.argvFor(entry, spec)
+    const armDeadline = spec.onExpiry === 'kill'
+    const d = armDeadline ? deadline(spec.signal, spec.timeoutMs, 'SHELL_TIMEOUT') : undefined
+    const spawnSignal = d ? d.signal : spec.signal
+    const classifyState = () => {
+      if (d === undefined) return { timedOut: false, aborted: spec.signal?.aborted === true }
+      const timedOut = timeoutOf(d.signal, 'SHELL_TIMEOUT') !== undefined
+      return { timedOut, aborted: d.signal.aborted === true && !timedOut }
+    }
+    let running
+    let syncSpawnError
+    const prepareAborted = spawnSignal?.aborted === true
+    if (!prepareAborted) {
+      try {
+        running = this.ctx.subprocess.spawn(this.spawnSpec(entry, spec, argv, spec.stdoutMaxBytes, spawnSignal))
+      } catch (error) {
+        syncSpawnError = { error }
+      }
+    }
+    const emptyReader = { readFrom: () => ({ text: '', lossy: false, nextOffset: 0 }) }
+    const collected = running !== undefined ? ShellSelectExecutor.collected(running) : { stdout: emptyReader, stderr: emptyReader }
+    const spawnThrow = () => syncSpawnError.error
+    const spawned = prepareAborted
+      ? Promise.resolve({ exitCode: null, signal: null })
+      : running !== undefined ? running.done : Promise.reject(spawnThrow())
+    let providerFailure
+    const consumeProviderFailure = () => {
+      if (providerFailure === undefined || providerFailure.reported) return ''
+      providerFailure.reported = true
+      return providerFailure.note
+    }
+    let stdoutOffset = 0
+    let stderrOffset = 0
+    const readCollected = (offsets) => ({
+      out: collected.stdout.readFrom(offsets.stdout),
+      err: collected.stderr.readFrom(offsets.stderr),
+    })
+    const executor = this
+    let resultPromise
+    const proc = {
+      status: 'running',
+      exitCode: null,
+      signal: null,
+      observed: {
+        stdout: collected.stdout,
+        stderr: {
+          readFrom: (fromByte) => {
+            if (providerFailure === undefined) return collected.stderr.readFrom(fromByte)
+            const note = Buffer.from(providerFailure.note, 'utf8')
+            return { text: note.subarray(Math.min(fromByte, note.length)).toString('utf8'), nextOffset: note.length, lossy: false }
+          },
+        },
+      },
+      done: spawned.then((outcome) => {
+        if (proc.status === 'running') proc.status = spawnSignal?.aborted === true || outcome.signal !== null ? 'killed' : 'completed'
+        proc.exitCode = outcome.exitCode
+        proc.signal = outcome.signal
+        if (sandboxFacts !== undefined) executor.processFacts.set(proc, sandboxFacts)
+        executor.onProcessDone(proc, collected.stderr.readFrom(0).text, false)
+        d?.[Symbol.dispose]?.()
+      }, (error) => {
+        proc.status = 'killed'
+        let detail = 'unprintable provider failure'
+        try {
+          detail = String(error)
+        } catch {}
+        const isRunnerFailure = sandboxFacts !== undefined && isRunnerSpawnFailure(error, sandboxFacts.runnerProgram, sandboxFacts.workdir)
+        if (isRunnerFailure) {
+          providerFailure = { error: new executor.unavailableError(sandboxFacts.mode, String(error)), note: String(error), reported: false }
+        } else {
+          providerFailure = { error, note: `subprocess failed before reporting an outcome: ${detail}`, reported: false }
+        }
+        executor.onProcessDone(proc, providerFailure.note, true, error)
+        d?.[Symbol.dispose]?.()
+      }),
+      readOutput: () => {
+        const { out, err } = readCollected({ stdout: stdoutOffset, stderr: stderrOffset })
+        stdoutOffset = out.nextOffset
+        stderrOffset = err.nextOffset
+        const providerNote = consumeProviderFailure()
+        const failureSeparator = err.text.length > 0 && !err.text.endsWith('\n') ? '\n' : ''
+        const errText = err.text + (providerNote.length > 0 ? `${failureSeparator}${providerNote}` : '')
+        const separator = out.text.length > 0 && !out.text.endsWith('\n') ? '\n' : ''
+        return {
+          delta: out.text + (errText.length > 0 ? `${separator}[stderr]\n${errText}` : ''),
+          lossy: out.lossy || err.lossy,
+          ...out.spillPath !== undefined ? { stdoutSpillPath: out.spillPath } : {},
+          ...err.spillPath !== undefined ? { stderrSpillPath: err.spillPath } : {},
+        }
+      },
+      kill: () => {
+        if (proc.status !== 'running') return false
+        proc.status = 'killed'
+        running?.terminate()
+        return true
+      },
+      result: () => {
+        resultPromise ??= proc.done.then(() => {
+          if (providerFailure !== undefined) throw providerFailure.error
+          return {
+            exitCode: proc.exitCode,
+            signal: proc.signal,
+            ...classifyState(),
+            timeoutMs: spec.timeoutMs,
+            stdout: finalOutput(collected.stdout),
+            stderr: finalOutput(collected.stderr),
+            ...proc.sandbox !== undefined ? { sandbox: proc.sandbox } : {},
+          }
+        })
+        return resultPromise
+      },
+    }
+    return Promise.resolve(proc)
   }
 
   /** 官方 start seam:已解析 spec 按默认客户端后台启动(dsh-pwsh-local start 同构)。 */
@@ -527,6 +612,24 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       }
     }
   }
+}
+
+// volatile 变更的 refresh 桥(模块级单例,apply-state 同款先例):执行器
+// provide 的 ctx.shell 作用域在主行子树,web-routes 行是兄弟行,cordis 服务
+// 沿 ctx 树向上查找不横向,ctx.shell getter 直接 throw——写路径经此桥触达
+// 活跃实例。挂载绑定、实例卸载/顶替时解绑,未挂载时请求静默丢弃(执行面
+// 由下次挂载的行配置重建)。
+let refreshBridge = null
+
+export function bindShellRefreshBridge(handler) {
+  refreshBridge = handler
+  return () => {
+    if (refreshBridge === handler) refreshBridge = null
+  }
+}
+
+export function requestShellRefresh(snapshot) {
+  refreshBridge?.(snapshot)
 }
 
 export default ShellSelectExecutor

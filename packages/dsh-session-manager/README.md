@@ -89,4 +89,4 @@ node scripts/dev-link.mjs dsh-session-manager   # 仓库根执行:归一 profile
 
 ## dsh 版本兼容
 
-三版本全部通过:会话树渲染、归档入口、激活 live、diagnostics 0 findings。
+0.1.2-rc.1 / 0.1.5-rc.3 通过:归档入口、激活 live、diagnostics 0 findings。0.1.7-rc.1 上宿主服务拓扑变化(workspaceRegistry 激活链)导致本包七项 inject 未满足、HTTP 面 404,功能待宿主 rc 线定型后专项对齐(详见包内 兼容性测试.md 与仓库兼容性进度文档 FIND-RC1-1)。

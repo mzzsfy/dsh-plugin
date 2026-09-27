@@ -1081,7 +1081,10 @@ function RowEditor(props) {
           const route = editor.firstElementChild !== null ? editor.firstElementChild.textContent : null
           const modelId = idInput.value
           if (route === null || modelId.length === 0) return false
-          if (!piAiRoutes.has(route) || !piAiModelIds.has(modelId)) return false
+          // rc.3 卡头把显示名与 provider id 放进同一块,route 文本为「名称id」拼接;
+          // 匹配放宽为全等或以 provider 键结尾(alpha.2 纯键形态全等仍命中)
+          const matchedRoute = piAiRoutes.has(route) ? route : [...piAiRoutes].find((key) => route.endsWith(key))
+          if (matchedRoute === undefined || !piAiModelIds.has(modelId)) return false
           // 面板只挂官方展开区:箭头未点开时官方 DOM 无展开块,不注入;展开块随
           // 箭头收起被官方整体移除,面板由 reconcile 的孤儿清理随之释放,无从常驻
           const advanced = advancedAreaOf(idInput)
@@ -1092,9 +1095,9 @@ function RowEditor(props) {
           const root = createRoot(container)
           root.render(React.createElement(RowEditor, {
             settings: face,
-            route,
+            route: matchedRoute,
             modelId,
-            saveFollow: rowSaveFollow(container, route, modelId),
+            saveFollow: rowSaveFollow(container, matchedRoute, modelId),
           }))
           roots.set(container, root)
           return true

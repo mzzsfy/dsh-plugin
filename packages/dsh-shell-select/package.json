@@ -3,10 +3,12 @@
   "description": "Windows shell 接管:替换默认 pwsh 工具为可配置多客户端的 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择)",
   "version": "0.3.1",
   "type": "module",
-  "main": "src/executor.mjs",
+  "main": "src/index.js",
   "exports": {
-    ".": "./src/executor.mjs",
+    ".": "./src/index.js",
+    "./executor": "./src/executor.mjs",
     "./guard": "./src/guard.js",
+    "./web": "./src/web-routes.mjs",
     "./client": "./src/client.js",
     "./package.json": "./package.json"
   },
@@ -23,7 +25,8 @@
         "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
-    }
+    },
+    "hostMin": "0.1.7-rc.1"
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
@@ -39,27 +42,30 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent-preset": ">=0.1.7-rc.1",
     "@deepseek-ai/dsh-http-proxy": ">=0.1.5-rc.2",
     "@deepseek-ai/dsh-jobs": ">=0.1.5-rc.2",
     "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2",
     "@deepseek-ai/dsh-sandbox": ">=0.1.5-rc.2",
+    "@deepseek-ai/dsh-settings": ">=0.1.7-rc.1",
     "@deepseek-ai/dsh-shell": ">=0.1.5-rc.2",
     "@deepseek-ai/dsh-subprocess": ">=0.1.5-rc.2",
     "@deepseek-ai/dsh-timeout": ">=0.1.5-rc.2",
     "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-http-proxy": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-jobs": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-sandbox": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-shell": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-subprocess": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-timeout": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-http-proxy": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-jobs": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-sandbox": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-scope": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-shell": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-subprocess": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-timeout": "0.1.5-rc.2 || 0.1.5-rc.3",
     "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/schemastery": "3.18.4",
     "js-yaml": "4.3.2"
   },
   "files": [

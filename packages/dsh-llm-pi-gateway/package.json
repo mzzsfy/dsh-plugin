@@ -16,7 +16,8 @@
     },
     "client": {
       "platform": "web"
-    }
+    },
+    "hostMin": "0.1.7-rc.1"
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
@@ -36,19 +37,25 @@
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
     "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1",
+    "@deepseek-ai/dsh-attachment": ">=0.1.7-rc.1",
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
     "@deepseek-ai/dsh-credentials": ">=0.1.2-rc.1",
     "@deepseek-ai/dsh-launch-environment": ">=0.1.2-rc.1",
     "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.2-rc.1"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-attachment": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/schemastery": "3.18.2",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-settings": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-credentials": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-launch-environment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.2"
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-settings": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-credentials": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-launch-environment": "0.1.5-rc.2 || 0.1.5-rc.3",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.2 || 0.1.5-rc.3"
   },
   "files": [
     "src",

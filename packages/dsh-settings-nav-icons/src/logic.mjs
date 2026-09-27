@@ -158,11 +158,13 @@ export function resolveIcon(value) {
 // 官方 DOM 锚点:与 client.js 控制器字面量同源锁定(parity 断言对表)。
 export const SELECTOR_LABEL = '.VOzbGW_navLabel'
 
-// 官方默认齿轮首段路径前缀,用于识别"未装饰"单元格。
-export const GEAR_PATH = 'M14.0861'
+// 官方默认齿轮识别前缀(两代):0.1.x 内联齿轮 / 0.1.7 起 primitives
+// IconSettingsOutlineMedium 齿体路径。官方分区语义图标非齿轮一律不动;
+// 插件注册分区走齿轮 fallback,是本插件强补对象。
+export const GEAR_PATHS = ['M14.0861', 'M13.0107 7.79377']
 
 export function isGear(svg) {
-  return svg.querySelector('path[d^="' + GEAR_PATH + '"]') !== null
+  return GEAR_PATHS.some((prefix) => svg.querySelector('path[d^="' + prefix + '"]') !== null)
 }
 
 // 完整 svg 字符串剥壳取内部内容:resolveIcon 输出与 GLYPHS/声明值均为完整 svg,

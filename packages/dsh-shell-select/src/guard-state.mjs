@@ -60,3 +60,29 @@ export function detectDeadState(loader, { applyState }) {
     return !state.present || (state.disabled && !state.running)
   })
 }
+
+/**
+ * 全树扫描:枚举 loader 树内全部 entry 中 id/name 命中 pwsh 关键字的行,
+ * 报告前缀 id/声明禁用/求值禁用/fiber 存活(多实例二相性诊断用)。
+ * @param {object} loader 宿主 loader 服务
+ */
+export function rowScan(loader) {
+  if (loader?.root === undefined) return []
+  const hits = []
+  const walk = (tree, prefix) => {
+    for (const [id, entry] of Object.entries(tree.store ?? {})) {
+      const fullId = prefix + id
+      if (/pwsh/i.test(fullId) || /pwsh/i.test(String(entry.options?.name ?? ''))) {
+        hits.push({
+          id: fullId,
+          rawType: typeof entry.options?.disabled,
+          evalDisabled: (() => { try { return entry.disabled === true } catch { return 'throw' } })(),
+          running: entry.fiber?.uid != null,
+        })
+      }
+      if (entry.subtree) walk(entry.subtree, `${fullId}:`)
+    }
+  }
+  walk(loader.root.tree ?? loader.root, '')
+  return hits
+}

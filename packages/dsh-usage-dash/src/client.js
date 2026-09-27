@@ -20,8 +20,8 @@ const DAY_MAX_SLOTS = 180
 const API_PREFIX = '/api/usage-dash/'
 const ENDPOINTS = { range: 'range', hours: 'hours', minutes: 'minutes', status: 'status', reset: 'reset', restore: 'restore', pricing: 'pricing' }
 
-// 宿主语义 token 之外的插件本地模型色板容量与哨兵
-const GROUP_TOP_COUNT = 5
+// 模型免折叠上限:条目不超它全展示,超过才折叠为 top(上限-1)+Other
+const GROUP_UNFOLDED_MAX = 5
 const OTHER_MODEL = '\u0000other'
 
 const PAD_WIDTH = 2
@@ -603,9 +603,10 @@ const moneyViewOf = (slots, costView) => {
 }
 
 const topWithOther = (ranked) => {
-  const models = ranked.slice(0, GROUP_TOP_COUNT)
-  if (ranked.length > GROUP_TOP_COUNT) {
-    const rest = ranked.slice(GROUP_TOP_COUNT)
+  const folded = ranked.length > GROUP_UNFOLDED_MAX
+  const models = ranked.slice(0, folded ? GROUP_UNFOLDED_MAX - 1 : GROUP_UNFOLDED_MAX)
+  if (folded) {
+    const rest = ranked.slice(models.length)
     // 四桶与费用同源条件挂载:输入条目无该字段(旧形数据/未配价)时哨兵同样不带,防零值假数据
     models.push({
       model: OTHER_MODEL,
@@ -640,7 +641,7 @@ function groupPointSlots(slots) {
 // (预设与自定义挡)用点端点聚合,字段同形;点数据未回为 null,调用方判空不渲染
 const cardsStatsOf = (view, stats, pointView) => (view === 'day' ? stats : pointView)
 
-// 模型用量列表:天视图用预折叠分组,时/分视图折叠点窗口模型(top5+other),点数据未回为 null
+// 模型用量列表:天视图用预折叠分组,时/分视图折叠点窗口模型(超上限折叠 top(上限-1)+other),点数据未回为 null
 const usageModelsOf = (view, grouped, pointView) => (
   view === 'day' ? grouped?.models ?? null : pointView ? topWithOther(pointView.models) : null
 )
@@ -2125,14 +2126,14 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
 .ud-donut-center{font-size:18px;font-weight:600;fill:var(--dsw-alias-label-primary)}
 .ud-donut-label{font-size:11px;fill:var(--dsw-alias-label-tertiary)}
 .ud-models{flex:1 1 260px;min-width:240px;display:flex;flex-direction:column}
-.ud-model-row{display:flex;align-items:center;gap:8px;min-height:48px;padding:2px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ud-model-row{display:flex;align-items:center;gap:8px;min-height:46px;padding:1px 4px;border-bottom:1px solid var(--dsw-alias-border-l1)}
 .ud-model-row--expand{cursor:pointer}
 .ud-model-row--expand:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .ud-model-swatch{width:10px;height:10px;border-radius:2px;flex:none}
-.ud-model-id{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.ud-model-id{display:flex;flex-direction:column;min-width:0;flex:1}
 .ud-model-name{font-size:14px;font-weight:500;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-model-provider{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ud-model-values{display:flex;flex-direction:column;align-items:flex-end;gap:1px;font-variant-numeric:tabular-nums;flex:none}
+.ud-model-values{display:flex;flex-direction:column;align-items:flex-end;font-variant-numeric:tabular-nums;flex:none}
 .ud-model-tokens{font-size:12px;color:var(--dsw-alias-label-secondary)}
 .ud-model-io{font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .ud-model-meta{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
@@ -2293,7 +2294,7 @@ body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,wh
     const colorForModel = (models) => (model) => {
       if (model === OTHER_MODEL) return 'var(--ud-chart-other)'
       const slot = models.findIndex((item) => item.model === model)
-      const rank = Math.min(slot < 0 ? 0 : slot, GROUP_TOP_COUNT - 1) + 1
+      const rank = Math.min(slot < 0 ? 0 : slot, GROUP_UNFOLDED_MAX - 1) + 1
       return `var(--ud-chart-${rank})`
     }
 

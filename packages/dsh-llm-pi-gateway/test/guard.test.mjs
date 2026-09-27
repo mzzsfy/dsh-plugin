@@ -1,17 +1,21 @@
 // guard 哨兵行 BDD:死态(gateway 行功能性停摆:行被禁停稳,或行活着但
-// apply 因宿主能力缺失干净早退;且官方行仍被 bundle patch 禁用停稳)时
-// 动态代挂官方插件恢复服务;gateway 行复活时先卸代挂再放行,零冲突交接。
-// 背景:dsh-market 对 carrier 包的禁用写即时生效的 user patch 行,而其恢复
-// 机制(整包移出 bundles)只在下次 boot 生效,窗口内 composed = 官方禁 +
-// gateway 停 = 全模型不可用;旧宿主(rc.2)上 gateway 行恒为假活形态。
+// apply 因宿主能力缺失干净早退;且官方行禁用停稳)时动态代挂官方插件恢复
+// 服务;gateway 行复活时先卸代挂再放行,零冲突交接。
+// 背景:运行时接管下官方行的禁用是 gateway apply 落定后的内存态;gateway
+// 接管中被停摆(market toggle/删行)时禁用残留,窗口内 composed = 官方禁 +
+// gateway 停 = 全模型不可用。官方行启用形态恒非死态(官方自服务)——gateway
+// 自身加载失败不再制造死态,guard 无需 import 崩判死机制。
 // guard 行 id 带 "/" 使 market 的行写入拒绝,窗口内始终存活,是死态唯一的
 // 自愈执行者。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { GUARD_FOR_GATEWAY_ID, detectDeadState, installGuard } from '../src/guard.js'
+import { GUARD_FOR_GATEWAY_ID, detectDeadState, installGuard, SWEEP_INTERVAL_MS } from '../src/guard.js'
 import { OFFICIAL_ENTRY_ID } from '../src/takeover.mjs'
 import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from '../src/apply-state.mjs'
+
+// 死态边沿测试的 sweep 等待:跨过一个轮询周期加调度余量
+const SWEEP_TEST_WAIT_MS = SWEEP_INTERVAL_MS + 400
 
 const OFFICIAL_STUB = { name: 'dsh-llm-pi-ai', apply() {}, Config: undefined }
 
@@ -109,6 +113,18 @@ test('死态判定: 接管态(gateway 启)/官方启用态/官方退场中/官�
   assert.equal(detectDeadState(loaderOf({ ...base, gateway: entryOf({ id: 'llm-pi-gateway' }) })), false)
   assert.equal(detectDeadState(loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID }) })), false, '官方行未禁归官方服务')
   assert.equal(detectDeadState(loaderOf({ base, gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true, running: true }) })), false, '官方仍退场中,等它死透再判')
+})
+
+test('判定: gateway 接管中停摆(禁用停稳)+ 官方禁用停稳 → 死态', () => {
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway', disabled: true }), official: entryOf({ id: OFFICIAL_ENTRY_ID, disabled: true }) })
+  assert.equal(detectDeadState(loader), true, '双停摆 = 全模型不可用死态')
+})
+
+test('判定: gateway 主行损伤形态(行启用、fiber 未建、旗标缺席)+ 官方启用 → 非死态,官方自服务', () => {
+  // 运行时接管的核心收益:官方行默认启用,主行 import 崩不再制造死态,
+  // 官方插件 boot 即服务,guard 不判死不代挂
+  const loader = loaderOf({ gateway: entryOf({ id: 'llm-pi-gateway' }), official: entryOf({ id: OFFICIAL_ENTRY_ID }) })
+  assert.equal(detectDeadState(loader), false, '官方启用恒非死态')
 })
 
 test('apply: 死态下代挂官方模块并等待其激活', async () => {
