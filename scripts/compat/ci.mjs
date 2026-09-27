@@ -1,5 +1,6 @@
 // CI 兼容性测试入口:解析版本窗口 → 逐版本端到端验证 → 汇总 → 按阻塞槽位定退出码。
-// 前瞻槽(全通道最新)失败只发 warning 不阻塞;基线/主测槽失败置退出码 1。
+// 主测槽完整判定,基线槽只判不崩溃(run.mjs --crash-only);两槽失败均置退出码 1,
+// 显式覆盖(~ 后缀)标记的非阻塞槽失败只发 warning。
 // 用法:node scripts/compat/ci.mjs [--window-file PATH]
 //   --window-file:读取已解析好的窗口 JSON(workflow 单次实算,避免与缓存键窗口漂移);
 //   缺省依次回退 DSH_COMPAT_VERSIONS 显式清单 / registry 实算
@@ -22,6 +23,7 @@ function runVersion(entry, port) {
       '--version', entry.version,
       '--port', String(port),
       '--skip-externals',
+      ...(entry.slot === 'baseline' ? ['--crash-only'] : []),
     ], { stdio: ['inherit', 'inherit', 'pipe'], windowsHide: true })
     // boot 早退(无 result.json)时失败原因只在 stderr:收尾部进结果,失败注解就地可读
     let stderrTail = ''
@@ -40,8 +42,8 @@ function runVersion(entry, port) {
   })
 }
 
-// LLM 链路列:PASS = provider 注册 + 真实对话驱动 + 宿主经 gateway 打到模拟器(留档证据);
-// 模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
+// LLM 链路列(仅主测槽):PASS = provider 注册 + 真实对话驱动 + 宿主经 gateway 打到模拟器(留档证据);
+// 基线槽无 LLM 断言呈 N/A;主测槽模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
 function llmCell(result) {
   try {
     const llm = JSON.parse(readFileSync(join(COMPAT_ROOT, result.version, 'result.json'), 'utf8')).checks.llm
@@ -65,10 +67,10 @@ function writeSummary(results) {
     '',
   ]
   const blocked = results.filter((r) => !r.ok && r.blocking)
-  const previewFailed = results.filter((r) => !r.ok && !r.blocking)
+  const nonBlockingFailed = results.filter((r) => !r.ok && !r.blocking)
   if (blocked.length > 0) lines.push(`阻塞槽失败:${blocked.map((r) => r.version).join(', ')}(明细见日志 .compat/<版本>/)`, '')
-  if (previewFailed.length > 0) {
-    lines.push(`> [!WARNING]`, `> 前瞻槽失败(不阻塞):${previewFailed.map((r) => r.version).join(', ')};新宿主线首发破坏即此信号,按 dsh-api-alignment 条款 3 排查`, '')
+  if (nonBlockingFailed.length > 0) {
+    lines.push(`> [!WARNING]`, `> 非阻塞槽失败(不阻塞):${nonBlockingFailed.map((r) => r.version).join(', ')};新宿主线首发破坏即此信号,按 dsh-api-alignment 条款 3 排查`, '')
   }
   appendFileSync(summaryPath, lines.join('\n'))
 }
@@ -105,7 +107,7 @@ const window_ = args.windowFile
   ? JSON.parse(readFileSync(args.windowFile, 'utf8'))
   : process.env.DSH_COMPAT_VERSIONS
     ? parseExplicit(process.env.DSH_COMPAT_VERSIONS)
-    : await fromRegistry().then(({ latest, versions }) => resolveWindow(versions, latest))
+    : await fromRegistry().then(({ distTags, versions }) => resolveWindow(versions, distTags))
 log(`版本窗口: ${window_.map((w) => `${w.version}(${SLOT_LABELS[w.slot]}${w.blocking ? '' : ',非阻塞'})`).join(' → ')}`)
 
 // 逐包外部依赖与版本槽无关,全窗口只装一次

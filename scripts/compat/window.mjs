@@ -1,19 +1,18 @@
-// 兼容性测试版本窗口解析:dist-tag latest 锚定三槽(2026-09-18 改版)。
-//   基线 = latest 版本线之前、含 rc 的最近版本线的线内最后 rc(稳定回归锚);
-//   主测 = npm dist-tag latest 指向的版本(当前稳定);
-//   前瞻 = registry versions 全量 semver 最大(全通道最新,非阻塞,升级预警)。
-// 前瞻与已选槽相同则丢弃(窗口缩为 2);基线缺失抛错(latest 之前无含 rc 线)。
+// 兼容性测试版本窗口解析:dist-tag 双槽锚定(2026-09-27 改版,三版本完全兼容停测)。
+//   主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取 dist-tag 值最大),完全适配判定;
+//   基线 = npm dist-tag latest 指向版本,仅不崩溃判定(run.mjs --crash-only)。
+// 基线与主测同版本则窗口缩为单主测;入选版本不在 registry versions 列表(疑似 unpublish 残留)抛错。
 // 显式覆盖:环境变量 DSH_COMPAT_VERSIONS=逗号清单,条目尾缀 ~ 表示非阻塞。
 // 用法:node scripts/compat/window.mjs [--self-test]
-// 输出:JSON 数组 [{version, slot, blocking}](slot: baseline|current|preview)
+// 输出:JSON 数组 [{version, slot, blocking}](slot: primary|baseline)
 import { DSH_PACKAGE, cmdName } from './lib.mjs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-export const WINDOW_SIZE = 3
-// 槽位单一事实源:执行序(基线 → 主测 → 前瞻)与展示名
-export const EXEC_SLOTS = ['baseline', 'current', 'preview']
-export const SLOT_LABELS = { baseline: '基线', current: '主测', preview: '前瞻' }
+export const WINDOW_SIZE = 2
+// 槽位单一事实源:执行序(主测 → 基线)与展示名
+export const EXEC_SLOTS = ['primary', 'baseline']
+export const SLOT_LABELS = { primary: '主测', baseline: '基线' }
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
 
@@ -56,30 +55,24 @@ export function compareSemver(a, b) {
   return 0
 }
 
-export function resolveWindow(versions, latest) {
-  // unpublish 后 dist-tag 可能残留:幽灵版本做主测会到安装期才失败,且前瞻语义反转
-  if (!versions.includes(latest)) {
-    throw new Error(`dist-tag latest ${latest} 不在 registry versions 列表中(疑似 unpublish 残留)`)
+export function resolveWindow(versions, distTags) {
+  if (!distTags?.latest) throw new Error('registry 缺 dist-tags.latest')
+  // unpublish 后 dist-tag 可能残留:幽灵版本入选会拖到安装期才失败
+  const guardGhost = (version) => {
+    if (!versions.includes(version)) {
+      throw new Error(`dist-tag 指向 ${version} 不在 registry versions 列表中(疑似 unpublish 残留)`)
+    }
   }
-  const latestCore = parseSemver(latest).core
-  // 基线:latest 之前各线的最大 rc,纯 alpha 死线(线内无 rc)天然不入候选
-  const lastRcByLine = new Map()
-  for (const v of versions) {
-    const s = parseSemver(v)
-    if (compareSemver(s.core, latestCore) >= 0 || s.pre[0] !== 'rc') continue
-    const cur = lastRcByLine.get(s.core)
-    if (!cur || compareSemver(v, cur) > 0) lastRcByLine.set(s.core, v)
-  }
-  const baseline = [...lastRcByLine.entries()].sort((a, b) => compareSemver(b[0], a[0]))[0]
-  if (!baseline) throw new Error(`基线缺失:latest ${latest} 之前无含 rc 的版本线`)
-  const picked = [
-    { version: baseline[1], slot: 'baseline', blocking: true },
-    { version: latest, slot: 'current', blocking: true },
-  ]
-  // 前瞻:全通道最新,与已选槽相同即丢弃(窗口缩为 2)
-  const preview = versions.reduce((a, b) => (compareSemver(a, b) >= 0 ? a : b))
-  if (!picked.some((p) => p.version === preview)) {
-    picked.push({ version: preview, slot: 'preview', blocking: false })
+  guardGhost(distTags.latest)
+  const tagged = [...new Set(Object.values(distTags))]
+  // 主测:渠道中最新的 rc;渠道全无 rc(如全线转正式的稳定期)时取渠道最大
+  const latestOf = (list) => list.reduce((a, b) => (compareSemver(a, b) >= 0 ? a : b))
+  const rcTags = tagged.filter((v) => parseSemver(v).pre[0] === 'rc')
+  const primary = latestOf(rcTags.length > 0 ? rcTags : tagged)
+  guardGhost(primary)
+  const picked = [{ version: primary, slot: 'primary', blocking: true }]
+  if (distTags.latest !== primary) {
+    picked.push({ version: distTags.latest, slot: 'baseline', blocking: true })
   }
   return picked
 }
@@ -111,7 +104,7 @@ export async function fromRegistry() {
   const payload = JSON.parse(res.stdout)
   const { 'dist-tags': distTags, versions } = payload
   if (!distTags?.latest) throw new Error('registry 缺 dist-tags.latest')
-  return { latest: distTags.latest, versions }
+  return { distTags, versions }
 }
 
 const FIXTURE_VERSIONS = [
@@ -122,7 +115,7 @@ const FIXTURE_VERSIONS = [
   '0.1.3-alpha.2',
   '0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2', '0.1.5-rc.3',
   '0.1.6-alpha.1', '0.1.6-alpha.2',
-  '0.1.7-alpha.1', '0.1.7-alpha.2',
+  '0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7',
 ]
 
 function selfTest() {
@@ -144,26 +137,25 @@ function selfTest() {
   assertEq(compareSemver('1.0.0-alpha-1', '1.0.0-alpha.1'), 1, '连字符标识符按 ASCII 与段数比较')
   assertEq(compareSemver('1.0.0-1', '1.0.0-alpha'), -1, '数值标识符优先于字母标识符')
   assertEq(compareSemver('1.0.0-rc.9', '1.0.0-rc.10'), -1, '数值标识符按数值比较(进位)')
-  assertThrows(() => parseExplicit('a,b,c,d'), '显式清单超出槽位数抛错')
+  assertThrows(() => parseExplicit('a,b,c'), '显式清单超出槽位数抛错')
   assertThrows(() => parseExplicit('0.1.5-rc.2,非法'), '显式清单非法版本抛错')
-  assertEq(resolveWindow(FIXTURE_VERSIONS, '0.1.5-rc.2'), [
-    { version: '0.1.2-rc.1', slot: 'baseline', blocking: true },
-    { version: '0.1.5-rc.2', slot: 'current', blocking: true },
-    { version: '0.1.7-alpha.2', slot: 'preview', blocking: false },
-  ], '当前 registry 窗口:主测取 latest 而非线内最大(0.1.5-rc.3),纯 alpha 死线 0.1.3 不作基线')
-  assertEq(resolveWindow(FIXTURE_VERSIONS, '0.1.7-alpha.2'), [
+  assertEq(resolveWindow(FIXTURE_VERSIONS, { alpha: '0.1.7-alpha.2', latest: '0.1.5-rc.3', next: '0.1.7-rc.2' }), [
+    { version: '0.1.7-rc.2', slot: 'primary', blocking: true },
     { version: '0.1.5-rc.3', slot: 'baseline', blocking: true },
-    { version: '0.1.7-alpha.2', slot: 'current', blocking: true },
-  ], 'latest 追平全通道最新时前瞻槽丢弃,基线取上一含 rc 线的最后 rc')
-  assertEq(resolveWindow(['0.1.2-rc.1', '0.1.5'], '0.1.5'), [
-    { version: '0.1.2-rc.1', slot: 'baseline', blocking: true },
-    { version: '0.1.5', slot: 'current', blocking: true },
-  ], 'latest 为正式版时入主测槽,前瞻与已选槽重复丢弃')
-  assertThrows(() => resolveWindow(['0.1.5-rc.2'], '0.1.5-rc.2'), '无更早含 rc 线时基线缺失抛错')
-  assertEq(parseExplicit('0.1.2-rc.1,0.1.5-rc.2~'), [
-    { version: '0.1.2-rc.1', slot: 'baseline', blocking: true },
-    { version: '0.1.5-rc.2', slot: 'current', blocking: false },
-  ], '显式清单按执行序,~ 非阻塞')
+  ], '当前 registry 窗口:主测取渠道中最新的 rc(next),基线取 latest 渠道,alpha 渠道不入窗')
+  assertEq(resolveWindow(FIXTURE_VERSIONS, { alpha: '0.1.7-alpha.2', latest: '0.1.7', next: '0.1.7' }), [
+    { version: '0.1.7', slot: 'primary', blocking: true },
+  ], '渠道全无 rc 时主测取渠道最大,与 latest 同版本则窗口缩为单主测')
+  assertEq(resolveWindow(FIXTURE_VERSIONS, { latest: '0.1.5-rc.3', next: '0.1.5-rc.3' }), [
+    { version: '0.1.5-rc.3', slot: 'primary', blocking: true },
+  ], '主测与基线同版本时窗口缩为单主测')
+  assertThrows(() => resolveWindow(['0.1.5-rc.2'], { latest: '0.1.5-rc.2', next: '0.1.9-rc.1' }), '主测渠道幽灵版本抛错')
+  assertThrows(() => resolveWindow(['0.1.5-rc.2'], { latest: '0.1.4-rc.9' }), '基线渠道幽灵版本抛错')
+  assertThrows(() => resolveWindow(['0.1.5-rc.2'], { alpha: '0.1.5-rc.2' }), 'dist-tags.latest 缺失抛错')
+  assertEq(parseExplicit('0.1.7-rc.2,0.1.5-rc.3~'), [
+    { version: '0.1.7-rc.2', slot: 'primary', blocking: true },
+    { version: '0.1.5-rc.3', slot: 'baseline', blocking: false },
+  ], '显式清单按执行序对应 主测/基线,~ 非阻塞')
   console.log('window self-test OK')
 }
 
@@ -175,7 +167,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // 显式覆盖不触 registry(离线可用),registry 拉取仅服务实算路径
     const window_ = process.env.DSH_COMPAT_VERSIONS
       ? parseExplicit(process.env.DSH_COMPAT_VERSIONS)
-      : await fromRegistry().then(({ latest, versions }) => resolveWindow(versions, latest))
+      : await fromRegistry().then(({ distTags, versions }) => resolveWindow(versions, distTags))
     console.log(JSON.stringify(window_, null, 2))
   }
 }

@@ -1,8 +1,10 @@
 // 单版本端到端兼容性验证(docs/兼容性测试/测试与隔离方法.md 逐包标准流程的自动化):
 // 宿主安装 → 隔离 profile → 杀旧进程 → boot(等就绪 + 取 token)→ HTTP 冒烟 →
 // activation live + diagnostics findings 0 → 浏览器渲染探针 → 进程收尾。
-// 判定门槛 = 统一底线:activation live + findings 0 + 页面无 Failed to load plugins + 正常访问。
-// 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals]
+// 判定门槛两档:缺省 = 完全适配(正常访问 + activation live + 页面无 Failed to load plugins +
+// LLM 链路 + 无行级加载失败);--crash-only = 不崩溃(正常访问 + 页面无 Failed to load plugins +
+// 无行级加载失败,跳过模拟器/activation/LLM——窗口基线槽口径)。
+// 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals] [--crash-only]
 import { spawn, spawnSync } from 'node:child_process'
 import { createWriteStream, existsSync, lstatSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -38,6 +40,7 @@ function parseArgs(argv) {
       '--host-dir': () => { args.hostDir = argv[++i] },
       '--work-root': () => { args.workRoot = argv[++i] },
       '--skip-externals': () => { args.skipExternals = true },
+      '--crash-only': () => { args.crashOnly = true },
       '--seed-gateway': () => { args.seedGateway = true },
       '--only': () => {
         const short = argv[++i]
@@ -51,6 +54,7 @@ function parseArgs(argv) {
     handler()
   }
   if (!args.version) throw new Error('缺少 --version')
+  if (args.keep === true && args.crashOnly === true) throw new Error('--keep 与 --crash-only 互斥(keep 依赖 LLM 模拟器)')
   if (!isSemver(args.version)) throw new Error(`非法版本号: ${args.version}`)
   if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) throw new Error(`--port 非法: ${args.port}`)
   // spawn 会切换 cwd,路径参数必须先定死为绝对
@@ -542,9 +546,12 @@ async function main() {
   let restoreBridge = null
   let simulator = null
   try {
-    // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
-    simulator = await startSimulator(workDir)
-    log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
+    // crash-only(不崩溃口径)无 LLM 链路断言,模拟器一并跳过
+    if (!args.crashOnly) {
+      // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
+      simulator = await startSimulator(workDir)
+      log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
+    }
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
@@ -581,8 +588,10 @@ async function main() {
     }
     checks.page = pageRes !== null && (pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400))
 
-    checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
-    log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
+    if (!args.crashOnly) {
+      checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
+      log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
+    }
     checks.browser = await runBrowserProbe(
       fileURLToPath(new URL('./browser-probe.mjs', import.meta.url)),
       `${base}/?token=${token}`,
@@ -592,8 +601,10 @@ async function main() {
 
     // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
     // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
-    checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
-    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    if (!args.crashOnly) {
+      checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
+      log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    }
     // --keep:宿主与模拟器存活导出(后续 l3-probe 接管跑 UI 专项);
     // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出
     if (args.keep === true) {
@@ -628,9 +639,13 @@ async function main() {
       names.some((name) => line.includes(name)) && /failed to import|did not activate/.test(line))
   } catch { /* 日志缺失按无失败处理,activation/llm 判定兜底 */ }
 
-  const ok = checks.page && checks.activation.liveAll && checks.browser.ok && llmOk && importFailures.length === 0
-  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, importFailures, ok }, null, 2), 'utf8')
-  log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
+  // 基线槽只判不崩溃:页面可达 + 渲染无加载失败 + 无行级加载失败
+  const crashOnly = args.crashOnly === true
+  const ok = crashOnly
+    ? checks.page && checks.browser.ok && importFailures.length === 0
+    : checks.page && checks.activation.liveAll && checks.browser.ok && llmOk && importFailures.length === 0
+  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, mode: crashOnly ? 'crash-only' : 'full', checks, importFailures, ok }, null, 2), 'utf8')
+  log(`[${args.version}] 判定(${crashOnly ? '不崩溃口径' : '完全适配口径'}) ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1
 }
 
