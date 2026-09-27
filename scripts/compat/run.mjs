@@ -1,8 +1,9 @@
 // 单版本端到端兼容性验证(docs/兼容性测试/测试与隔离方法.md 逐包标准流程的自动化):
 // 宿主安装 → 隔离 profile → 杀旧进程 → boot(等就绪 + 取 token)→ HTTP 冒烟 →
 // activation live + diagnostics findings 0 → 浏览器渲染探针 → 进程收尾。
-// 判定门槛两档:缺省 = 完全适配(正常访问 + activation live + 页面无 Failed to load plugins +
-// LLM 链路 + 无行级加载失败);--crash-only = 不崩溃(正常访问 + 页面无 Failed to load plugins +
+// 判定门槛两档:缺省 = 完全适配(正常访问 + activation live + diagnostics findings 0 +
+// 页面渲染工作区文案且无 Failed to load plugins + LLM 链路 + 无行级加载失败);
+// --crash-only = 不崩溃(正常访问 + 页面渲染且无 Failed to load plugins +
 // 无行级加载失败,跳过模拟器/activation/LLM——窗口基线槽口径)。
 // 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals] [--crash-only]
 import { spawn, spawnSync } from 'node:child_process'
@@ -178,8 +179,9 @@ function extractToken(bootLogPath) {
   return matches.at(-1)?.[1] ?? ''
 }
 
-// activation 全 live;findings 以命中时的响应为准随结果返回。未就绪(404/激活中)
-// 重试至多轮上限;live 后短暂 findings>0 的热载瞬态不拖死整体判定(终态快照落盘可查)
+// activation 全 live 且 findings 0 才提前返回;live 后短暂 findings>0 视为热载瞬态,
+// 继续轮询让其沉降,耗尽轮次仍不满足即按当前终态返回(快照落盘可查),由判定端处置。
+// 未就绪(404/激活中)同样重试至多轮上限
 async function checkActivation(base, token, bundleNames, workDir) {
   const url = `${base}/dsh-market/installed?token=${token}`
   const options = { headers: { Origin: base, Referer: `${base}/` } }
@@ -201,7 +203,7 @@ async function checkActivation(base, token, bundleNames, workDir) {
           findingsSample: findings.slice(0, 5),
           apiShape: Object.keys(data),
         }
-        if (lastSeen.liveAll) {
+        if (lastSeen.liveAll && lastSeen.findingsCount === 0) {
           writeFileSync(join(workDir, 'installed.json'), lastRaw, 'utf8')
           return lastSeen
         }
@@ -643,7 +645,7 @@ async function main() {
   const crashOnly = args.crashOnly === true
   const ok = crashOnly
     ? checks.page && checks.browser.ok && importFailures.length === 0
-    : checks.page && checks.activation.liveAll && checks.browser.ok && llmOk && importFailures.length === 0
+    : checks.page && checks.activation.liveAll && checks.activation.findingsCount === 0 && checks.browser.ok && llmOk && importFailures.length === 0
   writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, mode: crashOnly ? 'crash-only' : 'full', checks, importFailures, ok }, null, 2), 'utf8')
   log(`[${args.version}] 判定(${crashOnly ? '不崩溃口径' : '完全适配口径'}) ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1

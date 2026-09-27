@@ -4,15 +4,17 @@
 // 基线与主测同版本则窗口缩为单主测;入选版本不在 registry versions 列表(疑似 unpublish 残留)抛错。
 // 显式覆盖:环境变量 DSH_COMPAT_VERSIONS=逗号清单,条目尾缀 ~ 表示非阻塞。
 // 用法:node scripts/compat/window.mjs [--self-test]
-// 输出:JSON 数组 [{version, slot, blocking}](slot: primary|baseline)
+// 输出:JSON 数组 [{version, slot, blocking, mode}](slot: primary|baseline;mode: full|crash-only)
 import { DSH_PACKAGE, cmdName } from './lib.mjs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-export const WINDOW_SIZE = 2
-// 槽位单一事实源:执行序(主测 → 基线)与展示名
+// 槽位单一事实源:执行序(主测 → 基线)与展示名;窗口大小与槽位-口径映射由此派生
 export const EXEC_SLOTS = ['primary', 'baseline']
+export const WINDOW_SIZE = EXEC_SLOTS.length
 export const SLOT_LABELS = { primary: '主测', baseline: '基线' }
+// 槽位 → run.mjs 判定口径:主测完全适配,基线只判不崩溃
+export const SLOT_MODES = { primary: 'full', baseline: 'crash-only' }
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
 
@@ -70,9 +72,9 @@ export function resolveWindow(versions, distTags) {
   const rcTags = tagged.filter((v) => parseSemver(v).pre[0] === 'rc')
   const primary = latestOf(rcTags.length > 0 ? rcTags : tagged)
   guardGhost(primary)
-  const picked = [{ version: primary, slot: 'primary', blocking: true }]
+  const picked = [{ version: primary, slot: 'primary', blocking: true, mode: SLOT_MODES.primary }]
   if (distTags.latest !== primary) {
-    picked.push({ version: distTags.latest, slot: 'baseline', blocking: true })
+    picked.push({ version: distTags.latest, slot: 'baseline', blocking: true, mode: SLOT_MODES.baseline })
   }
   return picked
 }
@@ -86,7 +88,8 @@ export function parseExplicit(spec) {
     const blocking = !raw.endsWith('~')
     const version = blocking ? raw : raw.slice(0, -1)
     if (!isSemver(version)) throw new Error(`非法版本号: ${version}`)
-    return { version, slot: EXEC_SLOTS[idx], blocking }
+    const slot = EXEC_SLOTS[idx]
+    return { version, slot, blocking, mode: SLOT_MODES[slot] }
   })
 }
 
@@ -116,6 +119,7 @@ const FIXTURE_VERSIONS = [
   '0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2', '0.1.5-rc.3',
   '0.1.6-alpha.1', '0.1.6-alpha.2',
   '0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7',
+  '0.1.8-alpha.1',
 ]
 
 function selfTest() {
@@ -140,22 +144,29 @@ function selfTest() {
   assertThrows(() => parseExplicit('a,b,c'), '显式清单超出槽位数抛错')
   assertThrows(() => parseExplicit('0.1.5-rc.2,非法'), '显式清单非法版本抛错')
   assertEq(resolveWindow(FIXTURE_VERSIONS, { alpha: '0.1.7-alpha.2', latest: '0.1.5-rc.3', next: '0.1.7-rc.2' }), [
-    { version: '0.1.7-rc.2', slot: 'primary', blocking: true },
-    { version: '0.1.5-rc.3', slot: 'baseline', blocking: true },
+    { version: '0.1.7-rc.2', slot: 'primary', blocking: true, mode: 'full' },
+    { version: '0.1.5-rc.3', slot: 'baseline', blocking: true, mode: 'crash-only' },
   ], '当前 registry 窗口:主测取渠道中最新的 rc(next),基线取 latest 渠道,alpha 渠道不入窗')
   assertEq(resolveWindow(FIXTURE_VERSIONS, { alpha: '0.1.7-alpha.2', latest: '0.1.7', next: '0.1.7' }), [
-    { version: '0.1.7', slot: 'primary', blocking: true },
+    { version: '0.1.7', slot: 'primary', blocking: true, mode: 'full' },
   ], '渠道全无 rc 时主测取渠道最大,与 latest 同版本则窗口缩为单主测')
+  assertEq(resolveWindow(FIXTURE_VERSIONS, { alpha: '0.1.8-alpha.1', latest: '0.1.7' }), [
+    { version: '0.1.8-alpha.1', slot: 'primary', blocking: true, mode: 'full' },
+    { version: '0.1.7', slot: 'baseline', blocking: true, mode: 'crash-only' },
+  ], '渠道全无 rc 且最大值为 alpha 时,alpha 以完全适配口径入主测,latest 为基线')
   assertEq(resolveWindow(FIXTURE_VERSIONS, { latest: '0.1.5-rc.3', next: '0.1.5-rc.3' }), [
-    { version: '0.1.5-rc.3', slot: 'primary', blocking: true },
+    { version: '0.1.5-rc.3', slot: 'primary', blocking: true, mode: 'full' },
   ], '主测与基线同版本时窗口缩为单主测')
   assertThrows(() => resolveWindow(['0.1.5-rc.2'], { latest: '0.1.5-rc.2', next: '0.1.9-rc.1' }), '主测渠道幽灵版本抛错')
   assertThrows(() => resolveWindow(['0.1.5-rc.2'], { latest: '0.1.4-rc.9' }), '基线渠道幽灵版本抛错')
   assertThrows(() => resolveWindow(['0.1.5-rc.2'], { alpha: '0.1.5-rc.2' }), 'dist-tags.latest 缺失抛错')
   assertEq(parseExplicit('0.1.7-rc.2,0.1.5-rc.3~'), [
-    { version: '0.1.7-rc.2', slot: 'primary', blocking: true },
-    { version: '0.1.5-rc.3', slot: 'baseline', blocking: false },
+    { version: '0.1.7-rc.2', slot: 'primary', blocking: true, mode: 'full' },
+    { version: '0.1.5-rc.3', slot: 'baseline', blocking: false, mode: 'crash-only' },
   ], '显式清单按执行序对应 主测/基线,~ 非阻塞')
+  assertEq(parseExplicit('0.1.7-rc.2'), [
+    { version: '0.1.7-rc.2', slot: 'primary', blocking: true, mode: 'full' },
+  ], '显式单条目仅主测槽')
   console.log('window self-test OK')
 }
 

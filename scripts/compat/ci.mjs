@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { resolveWindow, parseExplicit, fromRegistry, SLOT_LABELS } from './window.mjs'
+import { resolveWindow, parseExplicit, fromRegistry, SLOT_LABELS, SLOT_MODES, EXEC_SLOTS } from './window.mjs'
 import { installPackageExternals } from './profile.mjs'
 import { COMPAT_ROOT, DEFAULT_PORT, killPortOwner, log } from './lib.mjs'
 
@@ -23,7 +23,7 @@ function runVersion(entry, port) {
       '--version', entry.version,
       '--port', String(port),
       '--skip-externals',
-      ...(entry.slot === 'baseline' ? ['--crash-only'] : []),
+      ...(entry.mode === SLOT_MODES.baseline ? ['--crash-only'] : []),
     ], { stdio: ['inherit', 'inherit', 'pipe'], windowsHide: true })
     // boot 早退(无 result.json)时失败原因只在 stderr:收尾部进结果,失败注解就地可读
     let stderrTail = ''
@@ -70,7 +70,7 @@ function writeSummary(results) {
   const nonBlockingFailed = results.filter((r) => !r.ok && !r.blocking)
   if (blocked.length > 0) lines.push(`阻塞槽失败:${blocked.map((r) => r.version).join(', ')}(明细见日志 .compat/<版本>/)`, '')
   if (nonBlockingFailed.length > 0) {
-    lines.push(`> [!WARNING]`, `> 非阻塞槽失败(不阻塞):${nonBlockingFailed.map((r) => r.version).join(', ')};新宿主线首发破坏即此信号,按 dsh-api-alignment 条款 3 排查`, '')
+    lines.push(`> [!WARNING]`, `> 非阻塞槽失败(不阻塞,仅显式覆盖 ~ 可产生):${nonBlockingFailed.map((r) => r.version).join(', ')};按 dsh-api-alignment 条款 3 排查`, '')
   }
   appendFileSync(summaryPath, lines.join('\n'))
 }
@@ -109,6 +109,14 @@ const window_ = args.windowFile
     ? parseExplicit(process.env.DSH_COMPAT_VERSIONS)
     : await fromRegistry().then(({ distTags, versions }) => resolveWindow(versions, distTags))
 log(`版本窗口: ${window_.map((w) => `${w.version}(${SLOT_LABELS[w.slot]}${w.blocking ? '' : ',非阻塞'})`).join(' → ')}`)
+// window-file 来自磁盘,槽位形态需校验(env/registry 路径由 window.mjs 自身保证)
+if (args.windowFile) {
+  for (const w of window_) {
+    if (!EXEC_SLOTS.includes(w.slot) || !Object.values(SLOT_MODES).includes(w.mode)) {
+      throw new Error(`window-file 条目形态非法: ${w.version} slot=${w.slot} mode=${w.mode}`)
+    }
+  }
+}
 
 // 逐包外部依赖与版本槽无关,全窗口只装一次
 log(`逐包外部依赖安装: ${(await installPackageExternals()).length} 包`)
