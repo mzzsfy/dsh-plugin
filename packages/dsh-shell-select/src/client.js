@@ -610,6 +610,20 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END hasSpillNotice
 
+    // 执行事实标记(host renderResult 落,格式见 render.mjs):卡片徽章第一优先级,
+    // 配置事后变更/跨宿主查看不溯往改写历史调用
+    // LOGIC-BEGIN parseShellMark
+    function parseShellMark(text) {
+      return /\[shell: ([^\]\n]+)\]/.exec(text)?.[1]
+    }
+    // LOGIC-END parseShellMark
+
+    // LOGIC-BEGIN stripShellMark
+    function stripShellMark(text) {
+      return text.split('\n').filter((line) => !/^\[shell: [^\]]+\]$/.test(line)).join('\n')
+    }
+    // LOGIC-END stripShellMark
+
     // block → 卡片模型(官方 terminalCardModel 同构,数据源 argsRaw + content 文本)。
     // generic = 后台 ack / isError / 溢出预览 / persistent 形(无 description,
     // 官方 shellCall persistent→generic 同构),交回退行;terminal = 全量卡。
@@ -626,29 +640,34 @@ window.__ModuleLoader__.load({
       const description = typeof args?.description === 'string' && args.description.trim() !== '' ? args.description : undefined
       const cwdFull = displayCwd(typeof args?.workdir === 'string' ? args.workdir : undefined, sessionCwd)
       const cwdDir = cwdFull !== undefined ? lastSegment(cwdFull) : undefined
-      // shell 名 = 用户在配置页起的条目名;args.shell 缺省时按 default 客户端解析(配置当前读数)
-      const shellName = clientDisplayName(typeof args?.shell === 'string' ? args.shell : undefined)
+      // shell 徽章优先级:结果标记(执行事实)→ 显式参数 → default 读数(旧块兜底,
+      // 配置即当前解析事实);读数推导仅兜无标记历史块,不覆盖事实
+      const requested = typeof args?.shell === 'string' ? args.shell : undefined
+      const shellNameOf = (mark) => mark ?? clientDisplayName(requested)
       if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null, running: !settled, alert: undefined }
 
       if (!settled) {
         const startedAt = typeof block.time === 'number' ? block.time : undefined
-        // 运行中一律全量卡:阻塞时展开即可见命令与时长,不落无命令的 generic 回退行
-        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined, startedAt }
+        // 运行中一律全量卡:阻塞时展开即可见命令与时长,不落无命令的 generic 回退行;
+        // 无结果文本,徽章按读数推导,落定后由标记校正
+        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName: shellNameOf(undefined), output: undefined, exitCode: undefined, signal: undefined, code: undefined, startedAt }
       }
 
       const contentText = (block.content ?? []).map((part) => (part.type === 'text' ? part.text : '')).filter((text) => text !== '').join('\n')
+      const shellName = shellNameOf(parseShellMark(contentText))
+      const outputText = stripShellMark(contentText)
       // 后台 ack:独立卡呈现命令全文与任务号徽标,ack 原文作输出(不再落 generic 简版行)
       if (args.run_in_background === true) {
         const jobId = /started background job (\S+)/.exec(contentText)?.[1]
-        return { kind: 'background', status: 'background', command, description, cwdDir, cwdFull, shellName, output: contentText, jobId }
+        return { kind: 'background', status: 'background', command, description, cwdDir, cwdFull, shellName, output: outputText, jobId }
       }
       // 空结果落 generic:官方 singleResultText 无文本即回通用卡,避免空输出伪 done 终端卡;
       // isError/error 块带 alert(错误红点语义),其余(空输出/无描述/截断)中性无状态点
-      if (contentText === '' || block.isError === true || block.error !== undefined || description === undefined || hasSpillNotice(contentText)) {
+      if (outputText === '' || block.isError === true || block.error !== undefined || description === undefined || hasSpillNotice(contentText)) {
         const alert = block.isError === true || block.error !== undefined ? 'error' : undefined
-        return { kind: 'generic', command, summary: description, output: contentText, running: false, alert }
+        return { kind: 'generic', command, summary: description, output: outputText, running: false, alert }
       }
-      const tail = parseExitTail(contentText)
+      const tail = parseExitTail(outputText)
       const status = tail.signal !== undefined ? 'signaled' : tail.exitCode !== 0 ? 'failed' : 'done'
       return { kind: 'terminal', status, command, description, cwdDir, cwdFull, shellName, output: tail.output, exitCode: tail.exitCode, signal: tail.signal, code: undefined }
     }

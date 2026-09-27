@@ -16,6 +16,45 @@ test('干净退出:仅 stdout,无标记', () => {
   assert.equal(text, 'hello\n')
 })
 
+test('S20h shell 客户端标记:首标记行落,官方退出锚保持末行', () => {
+  // BDD:Given 调用经 git-bash 客户端执行且非零退出,When 渲染模型可见文本,Then 首行标记 [shell: git-bash],[exit code] 仍居末(官方 parseExitStatus 锚不被破坏)
+  const text = renderResult({
+    stdout: { text: 'out\n', truncated: false },
+    stderr: { text: '', truncated: false },
+    exitCode: 2, signal: null, timedOut: false, sandbox: undefined,
+  }, NO_ESCALATION, 'git-bash')
+  assert.equal(text, 'out\n[shell: git-bash]\n[exit code: 2]')
+})
+
+test('S20h shell 标记:干净成功仅标记行,退出锚缺省形态不变', () => {
+  // BDD:Given exit 0 成功调用,When 渲染,Then 输出尾追 [shell: id] 单行,无退出标记
+  const text = renderResult({
+    stdout: { text: 'hello\n', truncated: false },
+    stderr: { text: '', truncated: false },
+    exitCode: 0, signal: null, timedOut: false, sandbox: undefined,
+  }, NO_ESCALATION, 'pwsh')
+  assert.equal(text, 'hello\n[shell: pwsh]')
+})
+
+test('S20h shell 标记:先于超时/信号标记,退出锚仍居末', () => {
+  const text = renderResult({
+    stdout: { text: '', truncated: false },
+    stderr: { text: '', truncated: false },
+    exitCode: null, signal: 'SIGTERM', timedOut: true, timeoutMs: 1000, sandbox: undefined,
+  }, NO_ESCALATION, 'pwsh')
+  assert.equal(text, '(no output)\n[shell: pwsh]\n[timed out after 1000ms]\n[killed by signal: SIGTERM]')
+})
+
+test('S20h shell 标记:未传 id 不加标记(渲染面与官方逐字同构)', () => {
+  // BDD:Given 调用方未携带客户端事实,When 渲染,Then 文本与官方 pwsh 工具逐字一致
+  const text = renderResult({
+    stdout: { text: 'hello\n', truncated: false },
+    stderr: { text: '', truncated: false },
+    exitCode: 0, signal: null, timedOut: false, sandbox: undefined,
+  }, NO_ESCALATION)
+  assert.equal(text, 'hello\n')
+})
+
 test('stderr 段 + 非零退出标记次序', () => {
   const text = renderResult({
     stdout: { text: 'out\n', truncated: false },

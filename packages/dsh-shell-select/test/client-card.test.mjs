@@ -26,6 +26,8 @@ function cardModel(catalog = null) {
     lastSegment,
     parseExitTail: extractLogic('parseExitTail'),
     hasSpillNotice: extractLogic('hasSpillNotice'),
+    parseShellMark: extractLogic('parseShellMark'),
+    stripShellMark: extractLogic('stripShellMark'),
     clientDisplayName: extractLogic('clientDisplayName', { clientCatalog: catalog }),
   })
 }
@@ -171,6 +173,58 @@ test('S19 行首无展开箭头:官方组件无展开箭头,可展开性由指�
   assert.doesNotMatch(source, /sls-tv__chev/)
   assert.doesNotMatch(source, /IconChevron/)
   assert.doesNotMatch(source, /data-open/)
+})
+
+test('S20 徽章执行事实:结果标记优先于查看时配置读数', () => {
+  // BDD:Given 缺省客户端调用时 default 为 pwsh,查看时配置 default 已改 git-bash,When 派生卡片模型,Then 徽章显示标记承载的 pwsh,输出不含标记行
+  const model = cardModel({ default: 'git-bash', byId: { 'git-bash': 'git-bash' } })(
+    settledBlock(ARGS, 'out\n[shell: pwsh]\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(model.kind, 'terminal')
+  assert.equal(model.shellName, 'pwsh')
+  assert.equal(model.output, 'out')
+})
+
+test('S20b 徽章执行事实:标记在场不依赖配置面,catalog 缺失仍显示', () => {
+  // BDD:Given 配置读取失败(catalog null),When 块带执行事实标记,Then 徽章仍按标记显示(执行事实不依赖查看时读数)
+  const model = cardModel(null)(
+    settledBlock(ARGS, 'out\n[shell: git-bash]\n[exit code: 2]'), SESSION_CWD)
+  assert.equal(model.shellName, 'git-bash')
+  assert.equal(model.exitCode, 2)
+})
+
+test('S20c 旧块无标记:回退显式参数 → 查看时 default(S15 链不回归)', () => {
+  // BDD:Given 历史块无标记时代产物,When 派生模型,Then 沿用显式参数/查看时 default 推导
+  const catalog = { default: 'git-bash', byId: { 'git-bash': 'git-bash', pwsh: 'pwsh' } }
+  const fallback = cardModel(catalog)(settledBlock(ARGS, 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(fallback.shellName, 'git-bash')
+  const explicit = cardModel(catalog)(
+    settledBlock(JSON.stringify({ command: 'ls', description: 'list', shell: 'pwsh' }), 'out\n[exit code: 0]'), SESSION_CWD)
+  assert.equal(explicit.shellName, 'pwsh')
+})
+
+test('S20d 后台 ack:标记入徽章,输出剥离标记行', () => {
+  // BDD:Given 后台调用 ack 携带执行事实标记,When 派生模型,Then shellName 按标记,输出仅剩 ack 原文
+  const model = cardModel({ default: 'git-bash', byId: {} })(settledBlock(
+    JSON.stringify({ command: 'node server.js', description: 'Boot server', run_in_background: true }),
+    'started background job shell-11\n[shell: pwsh]'), SESSION_CWD)
+  assert.equal(model.kind, 'background')
+  assert.equal(model.jobId, 'shell-11')
+  assert.equal(model.shellName, 'pwsh')
+  assert.equal(model.output, 'started background job shell-11')
+})
+
+test('S20e generic 输出剥离标记行(isError 路径)', () => {
+  // BDD:Given isError 块文本含标记,When 回退 generic,Then 输出不含标记行
+  const model = cardModel(null)(settledBlock(ARGS, 'boom\n[shell: pwsh]', { isError: true }), SESSION_CWD)
+  assert.equal(model.kind, 'generic')
+  assert.equal(model.output, 'boom')
+})
+
+test('S20f 运行中块:无结果文本,徽章按显式参数/查看时 default 推导(现状)', () => {
+  // BDD:Given 调用进行中无结果,When 派生模型,Then 徽章沿用配置读数(执行事实落定后由标记校正)
+  const catalog = { default: 'git-bash', byId: { 'git-bash': 'git-bash' } }
+  const model = cardModel(catalog)(runningBlock(ARGS), SESSION_CWD)
+  assert.equal(model.shellName, 'git-bash')
 })
 
 test('S12c isError 与空结果仍走 generic(回归)', () => {
