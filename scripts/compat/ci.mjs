@@ -23,7 +23,10 @@ function runVersion(entry, port) {
       '--version', entry.version,
       '--port', String(port),
       '--skip-externals',
-      ...(entry.mode === SLOT_MODES.baseline ? ['--crash-only'] : []),
+      // 主测槽 LLM 链路走装载期注册(patch 行 config seed):宿主对插件 ns 的
+      // settings/update 写入门控随世代收紧(0.2.0 起 "no longer configurable"),
+      // 装载期注册不受影响
+      ...(entry.mode === SLOT_MODES.baseline ? ['--crash-only'] : ['--seed-gateway']),
     ], { stdio: ['inherit', 'inherit', 'pipe'], windowsHide: true })
     // boot 早退(无 result.json)时失败原因只在 stderr:收尾部进结果,失败注解就地可读
     let stderrTail = ''

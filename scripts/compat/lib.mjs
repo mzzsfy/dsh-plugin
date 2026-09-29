@@ -7,9 +7,10 @@ import { mkdirSync, symlinkSync } from 'node:fs'
 export const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 export const COMPAT_ROOT = join(REPO_ROOT, '.compat')
 export const DSH_PACKAGE = '@deepseek-ai/dsh'
-// dshmarket 固定 pin:旧宿主全家桶可共启的前提;allowBuilds 与根桥 pin 的对照来源均为
-// docs/兼容性测试/测试与隔离方法.md 的 profile 章节与 CI test job,升级时同步复核
-export const DSHMARKET_PIN = '1.47.0'
+// dshmarket 固定 pin:1.66.5 是当前唯一同时声明 0.1.x 与 0.2.0-rc.1 peer range 的
+// 版本(^0.1.2-alpha.2 || ^0.2.0-rc.1),单一 pin 双槽共用;allowBuilds 与根桥 pin 的
+// 对照来源均为 docs/兼容性测试/测试与隔离方法.md 的 profile 章节与 CI test job,升级时同步复核
+export const DSHMARKET_PIN = '1.66.5'
 // 上游 dsh-app-boot 幽灵依赖 cordis-plugin-group(顶层 import 未声明,已考察宿主世代均缺),
 // nodeLinker: hoisted 下整树无人声明不安装,boot 必炸;宿主闭包显式补装,移除条件与
 // 手工流程对照见 docs/兼容性测试/测试与隔离方法.md 被测宿主安装节

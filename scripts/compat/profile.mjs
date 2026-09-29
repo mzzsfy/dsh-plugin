@@ -94,7 +94,7 @@ export async function installPackageExternals() {
 
 // only:裸装白名单(包短名或全名),空 = 全家桶。命中包及其 dsh.bundle 标记才入 bundles;
 // dependencies 仍全量(装而不载无副作用,verifyActivation 按 dependencies 记账依赖它)
-export async function buildProfile({ version, workRoot, hostDir, seedGateway = false, only = [] }) {
+export async function buildProfile({ version, workRoot, hostDir, seedGateway = false, gatewayBaseURL = 'http://127.0.0.1:8578', only = [] }) {
   const homeDir = join(workRoot, version, 'home')
   const profileDir = join(homeDir, 'profiles', 'web')
   const { bundles, all } = enumeratePackages()
@@ -139,7 +139,7 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '      echo-openai:',
         '        displayName: Echo OpenAI',
         '        api: openai-completions',
-        '        baseURL: http://127.0.0.1:8578',
+        `        baseURL: ${gatewayBaseURL}`,
         '        apiKeyEnv: ECHO_KEY',
         '        defaultInput:',
         '          - text',
@@ -151,7 +151,7 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '      echo-anthropic:',
         '        displayName: Echo Anthropic',
         '        api: anthropic-messages',
-        '        baseURL: http://127.0.0.1:8578',
+        `        baseURL: ${gatewayBaseURL}`,
         '        apiKeyEnv: ECHO_KEY',
         '        defaultInput:',
         '          - text',

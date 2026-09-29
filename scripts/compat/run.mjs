@@ -271,40 +271,6 @@ function startSimulator(workDir) {
 const LLM_PROBE_TIMEOUT_MS = 120 * 1000
 
 async function runLlmVerification(base, token, simulatorPort, workDir) {
-  const providerPatch = {
-    type: 'client-request',
-    rpcId: `compat-llm-${Date.now()}`,
-    method: 'settings/update',
-    path: '/api/settings/update',
-    payload: {
-      args: {
-        ns: 'llm-pi-gateway',
-        patch: {
-          providers: {
-            'echo-openai': {
-              displayName: 'Echo OpenAI',
-              api: 'openai-completions',
-              baseURL: `http://127.0.0.1:${simulatorPort}`,
-              apiKeyEnv: 'ECHO_KEY',
-              defaultInput: ['text'],
-              models: [{ id: 'echo-model', name: 'Echo Model', input: ['text'] }],
-            },
-            // anthropic 通道条目:#3 metadata.user_id 派生标记与 #5 亲和头发射
-            // 都从该路由的真实发话留档断言;compat 开 sendSessionAffinityHeaders
-            'echo-anthropic': {
-              displayName: 'Echo Anthropic',
-              api: 'anthropic-messages',
-              baseURL: `http://127.0.0.1:${simulatorPort}`,
-              apiKeyEnv: 'ECHO_KEY',
-              defaultInput: ['text'],
-              compat: { sendSessionAffinityHeaders: true },
-              models: [{ id: 'echo-a-model', name: 'Echo A Model', input: ['text'] }],
-            },
-          },
-        },
-      },
-    },
-  }
   // #3/#5 第二段:默认模型切 echo-anthropic/echo-a-model 后新会话发话,上游即
   // anthropic /messages 通道;留档 headers/body 断言亲和头与派生标记
   const anthropicDefaultPatch = {
@@ -320,10 +286,11 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     },
   }
   const steps = [
-    { name: 'register-echo-provider', http: { path: '/api/settings/update', method: 'POST', body: providerPatch } },
-    { name: 'wait-hot-reload', wait: 4 * 1000 },
-    // 重载页面:UI 在挂载时拉一次模型目录,settings/update 的 live 生效不触发
-    // 前端刷新,不重载则目录里没有 echo,默认模型被判"不可用",composer 消失
+    // 注册面 = --seed-gateway 装载期 patch(唯一路径):宿主对插件 ns 的运行期
+    // settings/update 写入门控已收紧(0.2.0 起 "no longer configurable"),写尝试
+    // 只产生条目 dispose 噪音,污染后续冷启动断言;注册语义由 L1 config 测试锁定
+    // 重载页面:UI 在挂载时拉一次模型目录,seed 的 live 生效不触发前端刷新,
+    // 不重载则目录里没有 echo,默认模型被判"不可用",composer 消失
     { name: 'reload-page', goto: `${base}/?token=${token}` },
     { name: 'wait-ui-settle', wait: 2500 },
     // 真实对话驱动:默认模型已由 composition patch 指向 echo(provider 声明显式
@@ -449,10 +416,15 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   })
   const stepByName = Object.fromEntries((probeResult.results ?? []).map((r) => [r.name, r]))
   const registration = stepByName['register-echo-provider']?.value?.body
-  const providerRegistered = stepByName['register-echo-provider']?.ok === true
-    && registration !== null
-    && typeof registration === 'object'
-    && registration.error === undefined
+  // 注册判定以模型目录为准(routableProviders 含 echo-openai):settings/update 运行期
+  // 热更与 --seed-gateway 装载期注册两种形态都在目录收敛;宿主对插件 ns 的写入门控
+  // 随世代收紧(0.2.0 起 "no longer configurable"),目录形态不受其影响
+  let catalogEcho = false
+  try {
+    const catalog = JSON.parse(stepByName['diag-catalog']?.value ?? '{}')
+    catalogEcho = (catalog.routableProviders ?? []).includes('echo-openai')
+  } catch { /* 目录步失败按未注册处理 */ }
+  const providerRegistered = catalogEcho
   const chatDriven = stepByName['new-session']?.value === 'clicked'
     && stepByName['type-message']?.ok === true
     && stepByName['send']?.ok === true
@@ -528,7 +500,22 @@ async function main() {
     await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
-  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir, seedGateway: args.seedGateway === true, only: args.only ?? [] })
+  // LLM 模拟器先于 profile 构建启动:--seed-gateway 的 patch 行 config 需要模拟器
+  // 实际端口(baseURL 注入),模拟器 --port 0 动态分配,无法预写
+  let simulator = null
+  if (!args.crashOnly) {
+    // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
+    simulator = await startSimulator(workDir)
+    log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
+  }
+  const profile = await buildProfile({
+    version: args.version,
+    workRoot: args.workRoot,
+    hostDir,
+    seedGateway: args.seedGateway === true,
+    gatewayBaseURL: simulator ? `http://127.0.0.1:${simulator.port}` : undefined,
+    only: args.only ?? [],
+  })
   log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
 
   // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
@@ -546,14 +533,7 @@ async function main() {
   const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
   let child = null
   let restoreBridge = null
-  let simulator = null
   try {
-    // crash-only(不崩溃口径)无 LLM 链路断言,模拟器一并跳过
-    if (!args.crashOnly) {
-      // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
-      simulator = await startSimulator(workDir)
-      log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
-    }
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
