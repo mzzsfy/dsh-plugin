@@ -34,6 +34,11 @@ async function writeOpenaiStream(response, model, tokens, scenario) {
   if (scenario === 'drop') { response.end(); return }
   sseWrite(response, null, chunk({ content: 'echo-upstream-fixed' }))
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
+  // 终止块:finish_reason 落在 choices[0],严格消费端(0.2.0+)以 finish_reason 判流完整性
+  sseWrite(response, null, JSON.stringify({
+    id: 'chatcmpl-echo-upstream', object: 'chat.completion.chunk', created: 0, model,
+    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+  }))
   // usage 终块 choices 为空数组,对齐真实 openai stream_options.include_usage 形状
   sseWrite(response, null, chunk({}, { choices: [], finish_reason: null, usage: openaiUsage(tokens) }))
   sseWrite(response, null, '[DONE]')
