@@ -5,7 +5,7 @@
 // 用法:node scripts/compat/boot-keep.mjs --daemon --version <v> [--only 包,包] [--port N]
 import { spawn } from 'node:child_process'
 import { createWriteStream, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { isSemver } from './window.mjs'
 import { buildProfile, enumeratePackages } from './profile.mjs'
 import { COMPAT_ROOT, DEFAULT_PORT, killPortOwner, log } from './lib.mjs'
@@ -97,7 +97,7 @@ function canBind(p) {
 const args = parseArgs(process.argv.slice(2))
 const { version, port } = args
 const workDir = join(COMPAT_ROOT, version)
-const hostDir = join(workDir, 'dsh-host')
+const hostDir = args.hostDir ? resolve(args.hostDir) : join(workDir, 'dsh-host')
 const stopFlag = join(workDir, 'boot-keep.stop')
 const binPath = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 if (!existsSync(binPath)) throw new Error(`宿主闭包缺失,先跑 run.mjs --version ${version} 完成安装: ${binPath}`)
