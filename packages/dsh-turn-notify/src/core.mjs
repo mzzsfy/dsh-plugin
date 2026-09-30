@@ -87,6 +87,11 @@ const IM_TARGET_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/
 export const isValidImBotId = (value) => typeof value === 'string' && IM_BOT_ID_PATTERN.test(value)
 
 const TURN_END_KIND = 'turn/end'
+// 审批请求的会话事件类型(DSH SessionEventMap 官方定义:
+//   'approval/asked': { id; toolName; callId?; reason? })。
+// 宿主端 approval/request waterfall 由客户端 UI 独占应答(正常审批不 next() 下放),
+// 宿主侧观察者收不到该事件;会话事件流是唯一稳定可达的审批信号。
+export const APPROVAL_ASKED_KIND = 'approval/asked'
 
 // turn/end reason.kind 到通知分类的映射;未知 kind(插件可扩展)返回 null。
 const REASON_KIND_TO_CATEGORY = {
@@ -103,6 +108,7 @@ export function mapEventToCategory(type, data) {
     const kind = data && data.reason && data.reason.kind
     return Object.prototype.hasOwnProperty.call(REASON_KIND_TO_CATEGORY, kind) ? REASON_KIND_TO_CATEGORY[kind] : null
   }
+  if (type === APPROVAL_ASKED_KIND) return CATEGORY_APPROVAL
   if (type === 'tool/call' && data && data.name === 'ask_user_question') return CATEGORY_ASK
   return null
 }

@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  APPROVAL_ASKED_KIND,
   CATEGORIES,
   CATEGORY_DONE,
   CATEGORY_ERROR,
@@ -127,6 +128,36 @@ test('非回合结束事件仅 ask_user_question tool/call 命中提问分类', 
   assert.equal(mapEventToCategory('tool/call', { name: 'bash' }), null)
   assert.equal(mapEventToCategory('assistant/chunk', {}), null)
   assert.equal(mapEventToCategory('turn/start', {}), null)
+})
+
+test('approval/asked 会话事件命中审批分类(宿主 waterfall 被 UI 独占时的唯一信号)', () => {
+  assert.equal(
+    mapEventToCategory('approval/asked', { id: 'a-1', toolName: 'bash', reason: 'escalate' }),
+    CATEGORY_APPROVAL,
+  )
+  // 同一命名空间下的其他事件不误判为审批
+  assert.equal(mapEventToCategory('approval/decided', { id: 'a-1', outcome: 'allowed-once' }), null)
+  assert.equal(mapEventToCategory('approval/policy', { policy: 'ask' }), null)
+})
+
+test('审批通知即时送达,不受最短回合时长过滤', () => {
+  const settings = { enabled: { approval: true }, rootsOnly: true, minTurnDurationMs: 5000 }
+  // 即使时长为 0(< 阈值),approval/asked 仍应放行
+  assert.equal(shouldNotify({
+    category: CATEGORY_APPROVAL,
+    kind: APPROVAL_ASKED_KIND,
+    durationMs: 0,
+    settings,
+    header: {},
+  }), true)
+  // 对照:turn/end 类仍受碎轮过滤
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE,
+    kind: 'turn/end',
+    durationMs: 0,
+    settings,
+    header: {},
+  }), false)
 })
 
 test('rootsOnly 按子代理会话过滤', () => {

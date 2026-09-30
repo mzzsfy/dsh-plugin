@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import {
+  APPROVAL_ASKED_KIND,
   AUDIO_EXTS,
   CATEGORIES,
   CATEGORY_ASK,
@@ -405,12 +406,19 @@ export function apply(ctx) {
     const category = mapEventToCategory(event.type, event.data)
     if (category === null) return
     const reasonKind = event.type === TURN_END_KIND && event.data.reason ? event.data.reason.kind : null
-    // tool/call 的提问事件与 turn/end 分类共用入口;提问通知不受碎轮过滤
-    const kind = category === CATEGORY_ASK ? TOOL_CALL_KIND : TURN_END_KIND
+    // 即时送达类事件(tool/call 提问、approval/asked 审批)用自身 kind,
+    // 不落入 turn/end 的碎轮时长过滤;其余归类沿用 turn/end。
+    const kind = category === CATEGORY_ASK
+      ? TOOL_CALL_KIND
+      : category === CATEGORY_APPROVAL && event.type === APPROVAL_ASKED_KIND
+        ? APPROVAL_ASKED_KIND
+        : TURN_END_KIND
     notifyUnit({ category, kind, reasonKind, session, ...(endedTurn ?? {}) })
   })
 
-  // 审批 waterfall 观察者:next() 同步放行,通知异步投递
+  // 宿主端 approval/request waterfall 观察者(兼容不独占应答的宿主形态,如 ACP 应答器);
+  // 客户端 UI 独占应答时该事件不下放,审批通知由上方 session/event 的
+  // approval/asked 分支承担——两条路径同分类同去重,不会重复送达。
   ctx.on('approval/request', createApprovalTap(
     ({ category }) => {
       // waterfall 请求不携带会话对象,标题与工作区留空,仅分类与时间有效
