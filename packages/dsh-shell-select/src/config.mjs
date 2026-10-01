@@ -99,6 +99,56 @@ export function resolveConfigStrict(entry) {
   return unwrapConfig(Config(structuredClone(sanitized)))
 }
 
+/** 用户声明值挂载前 coercing:类型清洗(sanitize)+ 语义兜底,任意用户输入
+ * 产出可服务配置——插件本体不因配置死(行活、工具活,坏字段告警后降默认)。
+ * 语义兜底:shells 清洗后为空(含条目缺 id/kind 或 kind 非法被剔除)补出厂
+ * 默认;default 不在 shells id 集归 shells[0];预算数字非正数或超 graceMs
+ * 上限降 schema 默认;deny 剔除非字符串与不可编译条目。 */
+export function coerceServiceable(entry) {
+  const warnings = []
+  const cleaned = sanitizeConfigEntry(entry ?? {})
+  const rawShells = Array.isArray(cleaned.shells) ? cleaned.shells : []
+  const usable = rawShells.filter((item) => item !== null && typeof item === 'object'
+    && typeof item.id === 'string' && item.id !== ''
+    && typeof item.kind === 'string' && KINDS.includes(item.kind))
+  if (usable.length !== rawShells.length) warnings.push(`shells 剔除 ${rawShells.length - usable.length} 个缺 id/kind 或 kind 非法的条目`)
+  const shells = usable.length > 0 ? usable : defaultConfig().shells
+  if (usable.length === 0) warnings.push('shells 为空或全部非法,回落出厂默认客户端清单')
+  let defaultId = cleaned.default
+  if (typeof defaultId !== 'string' || !shells.some((item) => item.id === defaultId)) {
+    warnings.push(`default ${JSON.stringify(defaultId)} 不在 shells 清单,归 shells[0]`)
+    defaultId = shells[0].id
+  }
+  const rawDeny = Array.isArray(cleaned.deny) ? cleaned.deny : undefined
+  const deny = rawDeny?.filter((pattern) => {
+    if (typeof pattern !== 'string' || pattern === '') return false
+    try {
+      new RegExp(pattern, 'i')
+      return true
+    } catch {
+      return false
+    }
+  })
+  if (rawDeny !== undefined && deny.length !== rawDeny.length) warnings.push(`deny 剔除 ${rawDeny.length - deny.length} 个非字符串或不可编译正则的条目`)
+  const budgets = {}
+  for (const key of ['timeoutMs', 'maxTimeoutMs', 'maxOutputBytes', 'maxSpillBytes', 'graceMs']) {
+    const value = cleaned[key]
+    if (value === undefined) continue
+    const overCeiling = key === 'graceMs' && value > MAX_TIMER_DELAY_MS
+    if (!Number.isFinite(value) || value <= 0 || overCeiling) {
+      warnings.push(`${key} 必须为正有限数${key === 'graceMs' ? `且不大于 ${MAX_TIMER_DELAY_MS}` : ''},降 schema 默认`)
+      // 显式置空覆盖 cleaned 原值,交 schema 默认兜底
+      budgets[key] = undefined
+      continue
+    }
+    budgets[key] = value
+  }
+  return {
+    config: { ...cleaned, shells, default: defaultId, deny, ...budgets },
+    warnings,
+  }
+}
+
 // 落盘行 config 的类型防御:设置写路径(原生页/mutate)可能把 volatile 字段
 // 以非预期形态(ref 序列化产物 {})持久化,冷启动 Config 直接抛 → 行死 →
 // settings describe 无此节 → 设置页保存 "no longer configurable" 死锁,

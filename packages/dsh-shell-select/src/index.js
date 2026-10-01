@@ -31,6 +31,7 @@ import {
   runtimeDisableRows,
   takeoverDecision,
 } from './takeover.mjs'
+import { coerceServiceable } from './config.mjs'
 
 export const name = 'shell-select'
 
@@ -114,7 +115,12 @@ function unwrapConfigSnapshot(config) {
  * 快照经 ctx.shell.refresh 换源并重建工具。
  */
 async function mountExecutor(ctx, config) {
-  const fiber = await ctx.plugin(ShellSelectExecutor, unwrapConfigSnapshot(config))
+  // 用户声明值挂载前 coercing:任意配置(坏类型/空 shells/悬空 default/坏
+  // deny 正则)降级为可服务配置 + 逐条告警,行永不因配置死(官方链兜底之外
+  // 的第一道本体防线)
+  const { config: coerced, warnings } = coerceServiceable(unwrapConfigSnapshot(config))
+  for (const warning of warnings) ctx.logger?.warn?.(`shell-select: ${warning}`)
+  const fiber = await ctx.plugin(ShellSelectExecutor, coerced)
   // await 返回 ≠ 激活:executor inject 的宿主服务缺失时 fiber 静默 pending
   // (不 provide 不报错),ctx.shell 空缺会被官方复活行补位——挂载必须核实
   // 激活态,未激活按失败处理(触发回滚,官方接管)

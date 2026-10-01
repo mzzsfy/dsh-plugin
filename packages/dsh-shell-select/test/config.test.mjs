@@ -3,7 +3,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveConfig, resolveConfigStrict, defaultConfig, entryById, requireEntry, buildArgv, KINDS, RESOLVED_AUTO } from '../src/config.mjs'
+import { resolveConfig, resolveConfigStrict, coerceServiceable, defaultConfig, entryById, requireEntry, buildArgv, KINDS, RESOLVED_AUTO } from '../src/config.mjs'
+import { assertServiceableConfig } from '../src/config.mjs'
 
 test('schema 应用出厂默认:三客户端 + 默认 pwsh', () => {
   const applied = resolveConfig({})
@@ -54,8 +55,38 @@ test('落盘坏形态防御:volatile 字段被序列化成对象时降级默认,
   }
 })
 
-test('冻结输入防御:volatile ref 深冻结快照喂入不改写不抛(挂载路径)', () => {
-  // 事故:cosmokit createVolatile 的 snapshot 对 volatile 值逐层 Object.freeze,
+// --- coerceServiceable:任意用户输入产出可服务配置(插件不因配置死) ---
+
+test('coerce:悬空 default 归 shells[0],空/全非法 shells 回落出厂默认', () => {
+  const { config, warnings } = coerceServiceable({ shells: [{ id: 'pwsh', kind: 'pwsh' }], default: 'nope' })
+  assert.equal(config.default, 'pwsh')
+  assert.ok(warnings.some((line) => line.includes('default')))
+  const emptied = coerceServiceable({ shells: [{ id: 'x', kind: 'fish' }], default: 'x' })
+  assert.deepEqual(emptied.config.shells.map((entry) => entry.id), ['pwsh', 'git-bash', 'cmd'])
+  assert.equal(emptied.config.default, 'pwsh')
+  assert.ok(emptied.warnings.length >= 2)
+})
+
+test('coerce:预算字段非正数降默认,deny 剔除不可编译条目,合法输入零告警原样', () => {
+  const { config, warnings } = coerceServiceable({
+    shells: [{ id: 'pwsh', kind: 'pwsh' }],
+    default: 'pwsh',
+    timeoutMs: -5,
+    graceMs: Number.MAX_SAFE_INTEGER,
+    deny: ['rm -rf', '(unclosed', '', 42],
+  })
+  assert.equal(config.timeoutMs, undefined)
+  assert.equal(config.graceMs, undefined)
+  assert.deepEqual(config.deny, ['rm -rf'])
+  assert.equal(warnings.length, 3)
+  const clean = coerceServiceable({ shells: [{ id: 'pwsh', kind: 'pwsh' }], default: 'pwsh' })
+  assert.equal(clean.warnings.length, 0)
+  // 产物必过可服务校验:任意输入不产出会炸挂载的配置
+  assertServiceableConfig(resolveConfig(clean.config))
+  assertServiceableConfig(resolveConfig(config))
+})
+
+test('冻结输入防御:volatile ref 深冻结快照喂入不改写不抛(挂载路径)', () => {  // 事故:cosmokit createVolatile 的 snapshot 对 volatile 值逐层 Object.freeze,
   // 行 Config ref .get() 产物是深冻结对象;sanitizeConfigEntry 引用透传,
   // schemastery resolve 原地改写入参(填默认)撞冻结 env 抛
   // "Cannot assign to read only property 'MSYSTEM'" → 执行器挂载失败,

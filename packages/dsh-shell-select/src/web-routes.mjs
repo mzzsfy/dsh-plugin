@@ -5,7 +5,7 @@
 // settings.describe,写经 settings.replace;探测/扫描用 resolve 纯函数。
 // HTTP 形态(具名 exact 路由 + 跨源守卫 + 业务异常归一 400)照 dsh-maintain。
 
-import { KINDS, resolveConfig, assertServiceableConfig, normalizeConfigPaths, normalizeWin32Path } from './config.mjs'
+import { KINDS, resolveConfig, coerceServiceable, assertServiceableConfig, normalizeConfigPaths, normalizeWin32Path } from './config.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { requestShellRefresh } from './executor.mjs'
 import { mountRoutes } from './api.mjs'
@@ -48,7 +48,9 @@ function readSection(ctx, settings) {
     ctx.logger?.warn?.(`shell-select: settings 面无 "${SECTION_NS}" 节,设置页回落出厂默认`)
     return resolveConfig({})
   }
-  return resolveConfig(found.value ?? {})
+  // 读出面同走 coercing:落盘坏值(悬空 default/空 shells)投影为可服务配置,
+  // 设置页显示与执行面一致,不再暴露不可服务的中间态
+  return resolveConfig(coerceServiceable(found.value ?? {}).config)
 }
 
 /**
