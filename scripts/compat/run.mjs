@@ -285,6 +285,35 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
       },
     },
   }
+  // 宿主 0.2.0 起无可用 provider 时 DeepSeekOnboardingDialog 自动弹出,输入框
+  // autoFocus 抢占焦点且 appRoot 置 inert:探针的 type 会整段落进 API Key 输入框,
+  // 中文消息触发「密钥格式错误」字段校验,发话被吞(FIND-020-1 伪影根因)。
+  // 每轮 type 前先关弹窗,type 后校验 composer 实际持有文本
+  const dismissOnboardingEval = `(() => {
+    const dialog = [...document.querySelectorAll('[role="dialog"]')].find((d) => (d.getAttribute('aria-label') ?? '').includes('API Key'));
+    if (!dialog) return 'no-dialog';
+    const later = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '稍后配置');
+    if (!later) return 'later-not-found';
+    later.click();
+    return 'dismissed';
+  })()`
+  const verifyTypedEval = `(() => {
+    const ce = document.querySelector('[contenteditable="true"]');
+    return JSON.stringify({ composerText: ce?.textContent ?? 'missing' });
+  })()`
+  // 发话到位判定:type.ok/send.ok 只证明探针调用不抛错,onboarding 弹窗在场时
+  // 键盘事件会整段落入其输入框且不抛错(FIND-020-1),必须以 dismiss 结果与
+  // composer 实际文本为准
+  const chatMessage = '回复:ok'
+  const anthropicMessage = '回复:anth'
+  const composerTextOf = (name) => {
+    try {
+      return JSON.parse(stepByName[name]?.value ?? '{}').composerText
+    } catch {
+      return ''
+    }
+  }
+  const onboardingCleared = (name) => ['no-dialog', 'dismissed'].includes(stepByName[name]?.value)
   const steps = [
     // 注册面 = --seed-gateway 装载期 patch(唯一路径):宿主对插件 ns 的运行期
     // settings/update 写入门控已收紧(0.2.0 起 "no longer configurable"),写尝试
@@ -318,6 +347,8 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
       })()`,
     },
     { name: 'wait-composer', wait: 2500 },
+    { name: 'dismiss-onboarding', eval: dismissOnboardingEval },
+    { name: 'wait-after-dismiss', wait: 800 },
     {
       name: 'diag-catalog',
       eval: `(async () => {
@@ -344,7 +375,8 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
         })
       })()`,
     },
-    { name: 'type-message', type: { selector: '[contenteditable="true"]', text: '回复:ok' } },
+    { name: 'type-message', type: { selector: '[contenteditable="true"]', text: chatMessage } },
+    { name: 'verify-typed', eval: verifyTypedEval },
     { name: 'send', press: 'Enter' },
     { name: 'wait-roundtrip', wait: 10 * 1000 },
     {
@@ -372,7 +404,10 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
       })()`,
     },
     { name: 'wait-composer-anthropic', wait: 2500 },
-    { name: 'type-message-anthropic', type: { selector: '[contenteditable="true"]', text: '回复:anth' } },
+    { name: 'dismiss-onboarding-anthropic', eval: dismissOnboardingEval },
+    { name: 'wait-after-dismiss-anthropic', wait: 800 },
+    { name: 'type-message-anthropic', type: { selector: '[contenteditable="true"]', text: anthropicMessage } },
+    { name: 'verify-typed-anthropic', eval: verifyTypedEval },
     { name: 'send-anthropic', press: 'Enter' },
     { name: 'wait-roundtrip-anthropic', wait: 10 * 1000 },
     {
@@ -428,11 +463,15 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   const chatDriven = stepByName['new-session']?.value === 'clicked'
     && stepByName['type-message']?.ok === true
     && stepByName['send']?.ok === true
+    && onboardingCleared('dismiss-onboarding')
+    && composerTextOf('verify-typed') === chatMessage
   // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
   const anthropicDriven = stepByName['switch-default-anthropic']?.ok === true
     && stepByName['new-session-anthropic']?.value === 'clicked'
     && stepByName['type-message-anthropic']?.ok === true
     && stepByName['send-anthropic']?.ok === true
+    && onboardingCleared('dismiss-onboarding-anthropic')
+    && composerTextOf('verify-typed-anthropic') === anthropicMessage
   // 留档证据:任一对话请求打到模拟器即链路通(openai /chat/completions 或
   // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)。
   // anthropic 轮单独取证:#3 metadata.user_id 派生标记 + #5 亲和头发射
