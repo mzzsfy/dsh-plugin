@@ -3,7 +3,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveConfig, defaultConfig, entryById, requireEntry, buildArgv, KINDS, RESOLVED_AUTO } from '../src/config.mjs'
+import { resolveConfig, resolveConfigStrict, defaultConfig, entryById, requireEntry, buildArgv, KINDS, RESOLVED_AUTO } from '../src/config.mjs'
 
 test('schema 应用出厂默认:三客户端 + 默认 pwsh', () => {
   const applied = resolveConfig({})
@@ -38,6 +38,13 @@ test('落盘坏形态防御:volatile 字段被序列化成对象时降级默认,
   const valid = resolveConfig({ shells: [{ id: 'pwsh', kind: 'pwsh' }], default: 'pwsh', deny: ['rm -rf'], cwd: 'C:\\tmp', timeoutMs: 5000 })
   assert.equal(valid.shells.length, 1)
   assert.equal(valid.default, 'pwsh')
+
+  // 执行面 strict:同款坏形态必须炸(宿主 resolve 产物须先解箱;静默降级
+  // 曾让行 config 永不生效,0.2.0-rc.2 真机实证)。宽容路径(上方)保留。
+  assert.throws(() => resolveConfigStrict(poisoned), /形态非法.*shells/)
+  // 合法输入与 undefined 缺省:strict 与宽容同产出
+  assert.deepEqual(resolveConfigStrict(valid), valid)
+  assert.deepEqual(resolveConfigStrict(undefined), defaultConfig())
   assert.deepEqual(valid.deny, ['rm -rf'])
   assert.equal(valid.cwd, 'C:\\tmp')
   assert.equal(valid.timeoutMs, 5000)

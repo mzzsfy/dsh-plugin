@@ -83,6 +83,22 @@ export function resolveConfig(entry) {
   return unwrapConfig(Config(structuredClone(sanitized)))
 }
 
+/** 执行面严格解析:输入键被类型对账丢弃时抛。执行面(挂载/refresh)输入是
+ * 宿主刚 resolve 的产物,形态非法 = 宿主契约变化或调用方未解箱,必须炸在
+ * 挂载点(接管序列有回滚告警)而非静默回落出厂默认——静默曾让行 config
+ * 长期失效(0.2.0-rc.2 真机实证)。持久化读回路径(落盘写坏降级、行不死
+ * 可保存修复)仍用 resolveConfig 的宽容语义。 */
+export function resolveConfigStrict(entry) {
+  const input = entry ?? {}
+  const sanitized = sanitizeConfigEntry(input)
+  const dropped = Object.keys(FIELD_TYPES)
+    .filter((key) => input[key] !== undefined && !(key in sanitized))
+  if (dropped.length > 0) {
+    throw new Error(`shell-select: config 字段形态非法(执行面输入须先解箱为普通对象): ${dropped.join(', ')}`)
+  }
+  return unwrapConfig(Config(structuredClone(sanitized)))
+}
+
 // 落盘行 config 的类型防御:设置写路径(原生页/mutate)可能把 volatile 字段
 // 以非预期形态(ref 序列化产物 {})持久化,冷启动 Config 直接抛 → 行死 →
 // settings describe 无此节 → 设置页保存 "no longer configurable" 死锁,

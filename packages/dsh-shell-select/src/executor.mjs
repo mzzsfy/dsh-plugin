@@ -14,7 +14,7 @@
 
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import { clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { Config, KINDS, buildArgv, requireEntry, resolveConfig, unwrapConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
+import { Config, KINDS, buildArgv, requireEntry, resolveConfig, resolveConfigStrict, unwrapConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
 import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
@@ -152,11 +152,12 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
   }
 
   /** 挂载/换源共用落定:入参经宿主按 static Config resolve,volatile 字段是
-   * boxed ref,存储前解箱成普通对象——否则 resolveConfig 的类型对账把 ref
-   * 全部当非法输入丢弃,执行面静默回落出厂默认(行 config 永不生效)。 */
+   * boxed ref,存储前解箱成普通对象;落定校验走 strict——解箱后仍存在非法
+   * 形态字段即抛(宿主契约变化炸在挂载点,接管序列回滚告警),禁止静默回落
+   * 出厂默认(行 config 永不生效缺陷的机械化防线)。 */
   #setEntry(config) {
     this.#entry = unwrapConfig(config ?? {})
-    assertServiceableConfig(resolveConfig(this.#entry))
+    assertServiceableConfig(resolveConfigStrict(this.#entry))
   }
 
   /** volatile-only 配置变更的活刷新:换配置源并重建工具注册(写路径经

@@ -467,3 +467,14 @@ test('入参缺省:null/undefined 落出厂默认,不抛', () => {
   const fromUndefined = new ShellSelectExecutor(ctx, undefined)
   assert.equal(fromUndefined.entryFor(undefined).id, 'pwsh')
 })
+
+test('fail-loud:解箱后仍非法的形态炸在挂载点,不静默回落出厂默认', () => {
+  const { ctx } = stubCtx()
+  // ref 容器但解箱值非法(模拟宿主 resolve 形态契约变化):strict 必须抛
+  assert.throws(
+    () => new ShellSelectExecutor(ctx, { shells: { get: () => 'not-array' }, default: 'pwsh' }),
+    /形态非法.*shells/,
+  )
+  // 同形态宽容路径(resolveConfig)不抛——降级语义仅保留给持久化读回
+  assert.doesNotThrow(() => new ShellSelectExecutor(ctx, baseConfig()))
+})
