@@ -14,7 +14,7 @@
 
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import { clampTimeout, deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import { Config, KINDS, buildArgv, requireEntry, resolveConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
+import { Config, KINDS, buildArgv, requireEntry, resolveConfig, unwrapConfig, assertServiceableConfig, normalizeWin32Path } from './config.mjs'
 import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
@@ -137,8 +137,7 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     void loadSandboxUnavailable(ctx).then((resolved) => {
       this.unavailableError = resolved
     })
-    this.#entry = config ?? {}
-    assertServiceableConfig(resolveConfig(this.#entry))
+    this.#setEntry(config)
     this.source = () => resolveConfig(this.#entry)
     // refresh 桥绑定随本 fiber 卸载自动解绑(实例退场后写路径请求静默丢弃)
     ctx.effect(() => bindShellRefreshBridge((next) => this.refresh(next)))
@@ -152,11 +151,18 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     this.#mountPromptSection()
   }
 
+  /** 挂载/换源共用落定:入参经宿主按 static Config resolve,volatile 字段是
+   * boxed ref,存储前解箱成普通对象——否则 resolveConfig 的类型对账把 ref
+   * 全部当非法输入丢弃,执行面静默回落出厂默认(行 config 永不生效)。 */
+  #setEntry(config) {
+    this.#entry = unwrapConfig(config ?? {})
+    assertServiceableConfig(resolveConfig(this.#entry))
+  }
+
   /** volatile-only 配置变更的活刷新:换配置源并重建工具注册(写路径经
    * requestShellRefresh 触达;行不重挂,本实例与进行中执行不受扰)。 */
   refresh(config) {
-    this.#entry = config ?? {}
-    assertServiceableConfig(resolveConfig(this.#entry))
+    this.#setEntry(config)
     this.#registerTool()
   }
 
