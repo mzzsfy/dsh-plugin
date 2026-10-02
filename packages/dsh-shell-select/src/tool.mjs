@@ -142,18 +142,10 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
 }
 
-/** pwsh 工具描述:兼容保留工具,开头一句禁止调用。 */
-function pwshDescription({ backgroundEnabled, escalationModes }) {
-  const base = 'Do not call this tool. It is kept only for backward compatibility with old sessions — call the `shell` tool instead. '
-    + 'It executes a PowerShell command and returns its stdout/stderr. '
-    + 'Each call runs in a fresh pwsh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
-    + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
-    + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
-    + (backgroundEnabled
-      ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
-      : 'Background execution is not available; long-running commands must finish within the timeout.')
-  if (escalationModes.length === 0) return base
-  return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
+/** pwsh 工具描述:兼容保留工具,唯一职责是把旧会话引导到 `shell`;执行语义
+ * 不在此复述(描述越长越诱导调用,细节归 shell 描述)。 */
+function pwshDescription() {
+  return 'Do not call this tool. It is kept only for backward compatibility with old sessions — call the `shell` tool instead (it runs the same PowerShell command; pass `shell: "pwsh"` if the default client differs).'
 }
 
 /**
@@ -192,7 +184,7 @@ export function registerShellTool(ctx, { executor }) {
     name: toolName,
     description: pinned === undefined
       ? shellDescription({ executor: faces.executor, backgroundEnabled, escalationModes })
-      : pwshDescription({ backgroundEnabled, escalationModes }),
+      : pwshDescription(),
     parameters: {
       command: {
         type: 'string',

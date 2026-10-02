@@ -125,7 +125,10 @@ test('构造:注册 shell+pwsh 双工具与 systemPrompt 段,路由不再由主�
   const shell = registered.tools.find((tool) => tool.name === 'shell')
   const pwsh = registered.tools.find((tool) => tool.name === 'pwsh')
   assert.match(shell.description, /git-bash/)
-  assert.match(pwsh.description, /PowerShell/)
+  // 兼容工具描述单句引导:禁用开头 + 指向 shell + 等价执行提示,无执行语义复述
+  assert.match(pwsh.description, /^Do not call this tool/)
+  assert.match(pwsh.description, /`shell` tool instead/)
+  assert.ok(pwsh.description.length < 260)
   assert.ok(!('shell' in pwsh.parameters.properties))
   assert.ok('shell' in shell.parameters.properties)
   assert.equal(registered.promptSections.length, 1)
