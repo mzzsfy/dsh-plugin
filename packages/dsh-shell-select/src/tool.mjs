@@ -144,7 +144,7 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
 
 /** pwsh 工具描述:兼容保留工具,只声明不要调用与去向,零执行语义。 */
 function pwshDescription() {
-  return 'Do not call this tool. It is kept only for backward compatibility with old sessions — call the `shell` tool instead.'
+  return 'Do not call this tool; use `shell` instead.'
 }
 
 /**
