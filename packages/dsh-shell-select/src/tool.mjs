@@ -142,10 +142,9 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
 }
 
-/** pwsh 工具描述:兼容保留工具,唯一职责是把旧会话引导到 `shell`;执行语义
- * 不在此复述(描述越长越诱导调用,细节归 shell 描述)。 */
+/** pwsh 工具描述:兼容保留工具,只声明不要调用与去向,零执行语义。 */
 function pwshDescription() {
-  return 'Do not call this tool. It is kept only for backward compatibility with old sessions — call the `shell` tool instead (it runs the same PowerShell command; pass `shell: "pwsh"` if the default client differs).'
+  return 'Do not call this tool. It is kept only for backward compatibility with old sessions — call the `shell` tool instead.'
 }
 
 /**
