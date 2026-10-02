@@ -246,6 +246,9 @@ const SIM_BOOT_TIMEOUT_MS = 15 * 1000
 
 function startSimulator(workDir) {
   const logPath = join(workDir, 'llm-echo.jsonl')
+  // 留档按轮截断:recorder 是 append 语义,复用 workDir 复跑时旧轮请求行会污染
+  // 本轮判定(upstreamSeen/亲和头读全文件),必须先清零再起模拟器
+  writeFileSync(logPath, '')
   const child = spawn(process.execPath, [
     join(REPO_ROOT, 'scripts', 'echo-upstream.mjs'), '--port', '0', '--log', logPath,
   ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: true })
@@ -340,7 +343,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     {
       name: 'new-session',
       eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
+        const hit = [...document.querySelectorAll('button')].find((b) => ((b.getAttribute('aria-label') ?? '') + ' ' + b.textContent).includes('新建会话'))
         if (!hit) return 'new-session-not-found'
         hit.click()
         return 'clicked'
@@ -397,7 +400,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     {
       name: 'new-session-anthropic',
       eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
+        const hit = [...document.querySelectorAll('button')].find((b) => ((b.getAttribute('aria-label') ?? '') + ' ' + b.textContent).includes('新建会话'))
         if (!hit) return 'new-session-not-found'
         hit.click()
         return 'clicked'
@@ -450,7 +453,6 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     })
   })
   const stepByName = Object.fromEntries((probeResult.results ?? []).map((r) => [r.name, r]))
-  const registration = stepByName['register-echo-provider']?.value?.body
   // 注册判定以模型目录为准(routableProviders 含 echo-openai):settings/update 运行期
   // 热更与 --seed-gateway 装载期注册两种形态都在目录收敛;宿主对插件 ns 的写入门控
   // 随世代收紧(0.2.0 起 "no longer configurable"),目录形态不受其影响
