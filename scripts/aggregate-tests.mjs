@@ -79,6 +79,16 @@ export function changedFilesList(base) {
   return result.stdout.split('\n').map(line => line.trim()).filter(Boolean)
 }
 
+// 仓库根解析桥供给检查:root package.json 声明的依赖在 node_modules 缺项时逐个列出。
+// 缺项时逐包单测会以 MODULE_NOT_FOUND 大面积恒红,且与真实代码失败不可区分(类7 现症
+// 2026-10-01:宿主闭包拷贝覆盖 npm 供给,7 包 1538 用例恒红无人发现);预检把这类
+// 环境损伤变成一条可行动的显式失败,先于任何单元执行
+export function missingBridgeDeps(repoRoot, rootPackageJsonPath = join(repoRoot, 'package.json')) {
+  const manifest = JSON.parse(readFileSync(rootPackageJsonPath, 'utf8'))
+  const deps = manifest.dependencies ?? {}
+  return Object.keys(deps).filter(name => !existsSync(join(repoRoot, 'node_modules', ...name.split('/'))))
+}
+
 // 单元发现:冒烟 + 含适用测试文件的包(字典序,保轮次间顺序稳定)+ 仓库根 tests。
 // changedLines 传入 push 改动清单:全部落在 packages/<X>/ 时只保留 X(冒烟与仓库根测试保留),
 // 否则全量。测试文件按平台过滤(win32/linux 后缀约定)。
@@ -206,6 +216,11 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
 
 async function main() {
   const {rounds, changedSince} = parseArgs(process.argv.slice(2))
+  const missing = missingBridgeDeps(REPO_ROOT)
+  if (missing.length > 0) {
+    console.log(`::error::仓库根解析桥缺供给: ${missing.join(', ')} — 先在仓库根执行 npm install(按 package.json dependencies 供给),再跑单元;缺项时逐包单测恒红且与代码失败不可区分`)
+    return {failures: 1, failedUnits: []}
+  }
   const changedLines = changedSince === undefined ? undefined : changedFilesList(changedSince)
   const units = discoverUnits(REPO_ROOT, changedLines)
   const scoped = changedLines === undefined || changedLines === null

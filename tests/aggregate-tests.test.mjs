@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles} from '../scripts/aggregate-tests.mjs'
+import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles, missingBridgeDeps} from '../scripts/aggregate-tests.mjs'
 
 /**
  * aggregate-tests.mjs CI 全量测试聚合
@@ -217,4 +217,24 @@ test('parseChangedPackages_无改动_判全量', () => {
 test('parseChangedPackages_前缀相近目录_不串包', () => {
   assert.deepEqual(parseChangedPackages(['packages/dsh-maintain/src/index.js']), new Set(['dsh-maintain']))
   assert.deepEqual(parseChangedPackages(['packages/a/b/c.test.mjs']), new Set(['a']))
+})
+
+test('missingBridgeDeps_root 声明依赖缺失_逐项列出', t => {
+  const root = tempDir(t, 'agg-bridge-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({dependencies: {'@deepseek-ai/schemastery': '3.18.4', zod: '4.5.4'}}))
+  mkdirSync(join(root, 'node_modules', '@deepseek-ai', 'schemastery'), {recursive: true})
+  assert.deepEqual(missingBridgeDeps(root), ['zod'])
+})
+
+test('missingBridgeDeps_全部在场_空数组', t => {
+  const root = tempDir(t, 'agg-bridge-ok-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({dependencies: {'@deepseek-ai/schemastery': '3.18.4'}}))
+  mkdirSync(join(root, 'node_modules', '@deepseek-ai', 'schemastery'), {recursive: true})
+  assert.deepEqual(missingBridgeDeps(root), [])
+})
+
+test('missingBridgeDeps_无声明依赖_空数组', t => {
+  const root = tempDir(t, 'agg-bridge-empty-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({private: true}))
+  assert.deepEqual(missingBridgeDeps(root), [])
 })
