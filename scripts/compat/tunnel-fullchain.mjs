@@ -12,6 +12,8 @@ import { buildProfile, installPackageExternals } from './profile.mjs'
 
 const VERSION = process.argv[2] ?? '0.1.7-alpha.2'
 const PORT = Number(process.argv[3] ?? 9295)
+// 宿主闭包目录:默认闭包自足(workDir/dsh-host),已装闭包(.dsh-versions/<v>)经 argv[4] 复用
+const HOST_DIR = process.argv[4] ?? join(COMPAT_ROOT, VERSION, 'dsh-host')
 const BOOT_TIMEOUT_MS = 150 * 1000
 const READY_POLL_MS = 1500
 const FETCH_TIMEOUT_MS = 10 * 1000
@@ -149,7 +151,7 @@ writeFileSync(join(homeDir, 'dsh-tunnel', 'tunnels.json'), JSON.stringify([
 ], null, 2), 'utf8')
 log(`预种隧道表(target=${targetPort}), 构建 profile`)
 
-const profile = await buildProfile({ version: VERSION, workRoot, hostDir: join(workDir, 'dsh-host') })
+const profile = await buildProfile({ version: VERSION, workRoot, hostDir: HOST_DIR })
 log(`bundles ${profile.bundleNames.length} 包, dsh-tunnel 在列: ${profile.bundleNames.includes('@mzzsfy/dsh-tunnel')}`)
 
 // 逐包外部依赖必须晚于隔离 profile 的 pnpm install(与 run.mjs 同款):

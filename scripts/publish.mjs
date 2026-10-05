@@ -263,6 +263,35 @@ function publishOne(dirName, opts) {
 
 const opts = parseArgs(process.argv.slice(2))
 if (opts.dryRun) console.log('dry-run 模式:不会发布、不会改版本、不会打 tag')
+
+/** 发布门前置聚合测试门(轮 3 收敛④:发布门与 CI 门互不引用的闭合):
+ * 强制跑一遍仓库聚合单测(与 CI 同一入口),非零即中止;--skip-test 显式豁免时
+ * 仍打印警告,逃生口保留但不静默。另打印最近一次 compat 结论作信息行(无则注明) */
+function aggregateGate() {
+  if (opts.dryRun) {
+    console.log('dry-run:聚合测试门跳过(真实发布时强制执行)')
+    return
+  }
+  if (opts.skipTest) {
+    console.log('WARN  --skip-test:聚合测试门已跳过,发布未经任何测试验证')
+    return
+  }
+  console.log('  $ node scripts/aggregate-tests.mjs --rounds 1(发布门引用 CI 同源单测)')
+  const gate = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'aggregate-tests.mjs'), '--rounds', '1'], { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
+  if (gate.status !== 0) fail(`聚合测试未通过(exit ${gate.status}),中止发布;明细见上方输出`)
+  const compatVersions = existsSync(join(repoRoot, '.compat'))
+    ? readdirSync(join(repoRoot, '.compat')).filter((v) => /^\d/.test(v) && existsSync(join(repoRoot, '.compat', v, 'result.json')))
+    : []
+  for (const version of compatVersions) {
+    try {
+      const result = JSON.parse(readFileSync(join(repoRoot, '.compat', version, 'result.json'), 'utf8'))
+      console.log(`INFO  最近 compat 结论: ${version} ${result.ok === true ? 'PASS' : 'FAIL'}(mode=${result.mode ?? '?'})`)
+    } catch { /* 结果文件损坏不阻塞发布,聚合门才是闸门 */ }
+  }
+  if (compatVersions.length === 0) console.log('INFO  无 compat 结论留档(聚合门已过;兼容面未覆盖)')
+}
+
+aggregateGate()
 for (const name of opts.targets) publishOne(name, opts)
 console.log('\n完成')
 process.exitCode = exitCode

@@ -43,6 +43,12 @@ export function unitFailCount(logText) {
   return line ? line.split(' ')[2] : null
 }
 
+// spec reporter 的 skip 统计行;无该行(旧 runner/全崩)视 0
+export function unitSkipCount(logText) {
+  const line = logText.split('\n').find(candidate => candidate.startsWith('ℹ skipped'))
+  return line ? Number(line.split(' ')[2]) || 0 : 0
+}
+
 // 测试文件平台过滤:通用 + 当前平台专属;platform 参数供测试注入
 export function filterTestFiles(files, platform = process.platform) {
   const platformSuffix = PLATFORM_TEST_SUFFIXES[platform]
@@ -60,8 +66,10 @@ export function applicableTestFiles(dir, testDir) {
     .map(f => join(testDir, f))
 }
 
-// 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号)
+// 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号);
+// 非数组输入(null = changedFilesList 的 fail-open 信号)同样返回 null,禁止崩溃
 export function parseChangedPackages(lines) {
+  if (!Array.isArray(lines)) return null
   const packages = new Set()
   for (const line of lines) {
     const segments = line.split('/')
@@ -157,10 +165,16 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
     log(`::group::第 ${round}/${rounds} 轮`)
     // 本轮失败单元个数(事件计数,同一单元连败多轮每轮各计 1)
     let roundFails = 0
+    // skip 可见性:OK 单元的 skip 数也要呈现(CI 恒 skip 的防绿断言若不可见即假绿,F 现症)
+    let roundSkips = 0
+    const skipDetail = []
     for (const unit of units) {
       const logPath = roundLogPath(logDir, unit.name, round)
       if (await runUnit(unit, logPath)) {
-        log(`OK   ${unit.name}`)
+        const skipCount = unitSkipCount(readFileSync(logPath, 'utf8'))
+        roundSkips += skipCount
+        if (skipCount > 0) skipDetail.push(`${unit.name}(${skipCount})`)
+        log(`OK   ${unit.name}${skipCount > 0 ? ` (skipped ${skipCount})` : ''}`)
         rmSync(logPath, {force: true})
         continue
       }
@@ -177,6 +191,8 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
       for (const name of namesFromLogs(logText.split('\n')).slice(0, PREVIEW_LIMIT)) log(`  ✖ ${name}`)
     }
     log(`本轮失败单元数: ${roundFails}`)
+    // 0 skip 也输出:汇总行缺席本身即不可观测(恒 skip 的假绿必须显式曝光)
+    log(`本轮 skip 用例数: ${roundSkips}${skipDetail.length > 0 ? ` (${skipDetail.join(', ')})` : ''}`)
     log('::endgroup::')
   }
   log(`汇总: ${rounds} 轮, 失败单元累计 ${totalFailures(failed)}`)

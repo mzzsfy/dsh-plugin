@@ -14,6 +14,8 @@ import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
 import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
 import { isSemver } from './window.mjs'
+import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
+import { judgeUpstreamSeen, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
 const BOOT_SETTLE_MS = 8 * 1000
@@ -291,19 +293,8 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   // 宿主 0.2.0 起无可用 provider 时 DeepSeekOnboardingDialog 自动弹出,输入框
   // autoFocus 抢占焦点且 appRoot 置 inert:探针的 type 会整段落进 API Key 输入框,
   // 中文消息触发「密钥格式错误」字段校验,发话被吞(FIND-020-1 伪影根因)。
-  // 每轮 type 前先关弹窗,type 后校验 composer 实际持有文本
-  const dismissOnboardingEval = `(() => {
-    const dialog = [...document.querySelectorAll('[role="dialog"]')].find((d) => (d.getAttribute('aria-label') ?? '').includes('API Key'));
-    if (!dialog) return 'no-dialog';
-    const later = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '稍后配置');
-    if (!later) return 'later-not-found';
-    later.click();
-    return 'dismissed';
-  })()`
-  const verifyTypedEval = `(() => {
-    const ce = document.querySelector('[contenteditable="true"]');
-    return JSON.stringify({ composerText: ce?.textContent ?? 'missing' });
-  })()`
+  // 每轮 type 前先关弹窗,type 后校验 composer 实际持有文本。
+  // 三个 eval 与判定值表定义在模块顶层(export 供 fixture 自测复用)
   // 发话到位判定:type.ok/send.ok 只证明探针调用不抛错,onboarding 弹窗在场时
   // 键盘事件会整段落入其输入框且不抛错(FIND-020-1),必须以 dismiss 结果与
   // composer 实际文本为准
@@ -316,7 +307,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
       return ''
     }
   }
-  const onboardingCleared = (name) => ['no-dialog', 'dismissed'].includes(stepByName[name]?.value)
+  const onboardingCleared = (name) => ONBOARDING_CLEARED_VALUES.includes(stepByName[name]?.value)
   const steps = [
     // 注册面 = --seed-gateway 装载期 patch(唯一路径):宿主对插件 ns 的运行期
     // settings/update 写入门控已收紧(0.2.0 起 "no longer configurable"),写尝试
@@ -342,12 +333,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     { name: 'wait-intro-gone', wait: 800 },
     {
       name: 'new-session',
-      eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => ((b.getAttribute('aria-label') ?? '') + ' ' + b.textContent).includes('新建会话'))
-        if (!hit) return 'new-session-not-found'
-        hit.click()
-        return 'clicked'
-      })()`,
+      eval: newSessionEval,
     },
     { name: 'wait-composer', wait: 2500 },
     { name: 'dismiss-onboarding', eval: dismissOnboardingEval },
@@ -399,12 +385,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     { name: 'wait-anthropic-switch', wait: 3 * 1000 },
     {
       name: 'new-session-anthropic',
-      eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => ((b.getAttribute('aria-label') ?? '') + ' ' + b.textContent).includes('新建会话'))
-        if (!hit) return 'new-session-not-found'
-        hit.click()
-        return 'clicked'
-      })()`,
+      eval: newSessionEval,
     },
     { name: 'wait-composer-anthropic', wait: 2500 },
     { name: 'dismiss-onboarding-anthropic', eval: dismissOnboardingEval },
@@ -483,7 +464,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   try {
     const lines = readFileSync(join(workDir, 'llm-echo.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
     upstreamKinds = [...new Set(lines.map((l) => l.path))]
-    upstreamSeen = lines.some((l) => l.path.includes('/chat/completions') || l.path.includes('/messages'))
+    upstreamSeen = judgeUpstreamSeen(lines)
     const anthropicTurns = lines.filter((l) => l.path.includes('/messages'))
     const last = anthropicTurns.at(-1)
     if (last !== undefined) {
@@ -521,9 +502,23 @@ async function main() {
   const base = `http://127.0.0.1:${args.port}`
   const checks = { page: false, activation: null, browser: null, llm: null }
 
-  // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录
+  // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录;
+  // 复用前校验闭包版本与目标一致(B12:binGuess 在场即复用会让 0.2.0 请求跑到
+  // 0.1.x 闭包上,全部版本敏感断言静默失真),不一致显式 FAIL——闭包可能被
+  // .dsh-versions 共享,自动重装属破坏性操作,交人工处置
   const binGuess = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const groupPath = join(hostDir, 'node_modules', '@deepseek-ai', 'cordis-plugin-group')
+  if (existsSync(binGuess)) {
+    let installedVersion = null
+    try {
+      installedVersion = JSON.parse(readFileSync(join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version ?? null
+    } catch { installedVersion = null }
+    if (installedVersion !== null && installedVersion !== args.version) {
+      log(`[${args.version}] FAIL: 复用闭包版本不匹配(闭包=${installedVersion},请求=${args.version});删 ${hostDir} 或改 --host-dir 后重试`)
+      process.exitCode = 1
+      return
+    }
+  }
   if (!existsSync(binGuess)) {
     mkdirSync(hostDir, { recursive: true })
     // 幽灵依赖补装(CORDIS_GROUP_PIN):与 dsh 同闭包声明,一条 pnpm add 装齐
@@ -650,23 +645,19 @@ async function main() {
     }
   }
 
-  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.chatDriven && checks.llm.upstreamSeen
+  const llmOk = judgeLlm(checks.llm)
   // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
   // boot(0.1.7-rc.1 实测 false-pass——主行 import 崩溃仅此一行 error,activation
   // 仍 live)。本包任一行出现加载失败字样直接 FAIL,与 activation/llm 判定并联
   let importFailures = []
   try {
     const names = enumeratePackages().all
-    const text = readFileSync(bootLogPath, 'utf8')
-    importFailures = text.split('\n').filter((line) =>
-      names.some((name) => line.includes(name)) && /failed to import|did not activate/.test(line))
+    importFailures = judgeImportFailures(readFileSync(bootLogPath, 'utf8').split('\n'))
   } catch { /* 日志缺失按无失败处理,activation/llm 判定兜底 */ }
 
   // 基线槽只判不崩溃:页面可达 + 渲染无加载失败 + 无行级加载失败
   const crashOnly = args.crashOnly === true
-  const ok = crashOnly
-    ? checks.page && checks.browser.ok && importFailures.length === 0
-    : checks.page && checks.activation.liveAll && checks.activation.findingsCount === 0 && checks.browser.ok && llmOk && importFailures.length === 0
+  const ok = judgeFinal({ crashOnly, page: checks.page, browserOk: checks.browser.ok, activation: checks.activation, llm: checks.llm, importFailures })
   writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, mode: crashOnly ? 'crash-only' : 'full', checks, importFailures, ok }, null, 2), 'utf8')
   log(`[${args.version}] 判定(${crashOnly ? '不崩溃口径' : '完全适配口径'}) ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1

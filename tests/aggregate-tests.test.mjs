@@ -170,6 +170,14 @@ test('discoverUnits_非包改动清单_全量回退', () => {
   assert.deepEqual(scoped, full)
 })
 
+test('discoverUnits_null改动清单_全量回退不崩溃', () => {
+  // fail-open 契约(:74-80):changedFilesList 返回 null(首推全零 SHA/浅克隆 diff 失败)
+  // 时 discoverUnits 必须回退全量,而非对 null 迭代 TypeError 崩红(现症:整轮聚合 exit 1)
+  const full = discoverUnits(repo).map(u => u.name)
+  const scoped = discoverUnits(repo, null).map(u => u.name)
+  assert.deepEqual(scoped, full)
+})
+
 test('parseArgs_默认与显式轮次_非法值拒绝', () => {
   assert.deepEqual(parseArgs([]), {rounds: 10})
   assert.deepEqual(parseArgs(['--rounds', '3']), {rounds: 3})

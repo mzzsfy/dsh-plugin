@@ -40,7 +40,19 @@ function runVersion(entry, port) {
     }, PROBE_TIMEOUT_MS)
     child.on('close', (code) => {
       clearTimeout(timer)
-      resolve({ ...entry, port, ok: code === 0, exitCode: code, stderrTail })
+      // M1 防线:退出码与 result.json 的 ok 交叉复读。run.mjs 内部二者同源单点
+      // (:647-649),任一侧被变异/早退失写,此处不一致即红(0.1.5 实爆行教训)
+      let integrity = ''
+      if (code === 0) {
+        try {
+          const persisted = JSON.parse(readFileSync(join(COMPAT_ROOT, entry.version, 'result.json'), 'utf8'))
+          if (persisted.ok !== true) integrity = `result.json ok=${persisted.ok} 与退出码 0 不一致`
+          else if (persisted.version !== entry.version) integrity = `result.json version=${persisted.version} 与槽位 ${entry.version} 不一致`
+        } catch (error) {
+          integrity = `result.json 复读失败: ${error.message.slice(0, 120)}`
+        }
+      }
+      resolve({ ...entry, port, ok: code === 0 && integrity === '', exitCode: code, integrity, stderrTail })
     })
   })
 }
@@ -83,6 +95,10 @@ function writeSummary(results) {
 function printFailureDetail(failed) {
   const channel = failed.blocking ? '::error::' : '::warning::'
   const clip = (text) => text.replace(/\s+/g, ' ').slice(0, STDERR_TAIL_BYTES)
+  if (failed.integrity) {
+    console.log(`${channel}完整性交叉复读失败 ${failed.version}: ${failed.integrity}`)
+    return
+  }
   try {
     const detail = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8'))
     const llm = detail.checks?.llm
