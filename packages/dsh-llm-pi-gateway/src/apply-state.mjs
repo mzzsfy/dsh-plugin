@@ -23,3 +23,8 @@ export function endGatewayApplyInactive() {
 export function gatewayApplyState() {
   return globalThis[KEY]
 }
+
+// 测试复位:清除残留态,防用例间串扰
+export function resetGatewayApplyStateForTest() {
+  delete globalThis[KEY]
+}

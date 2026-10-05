@@ -120,7 +120,7 @@ test('providerRetryPolicy 暴露已解析策略(注册捕获路径)', async () =
   assert.equal(adapter.providerRetryPolicy('a').maxRetries, 5)
 })
 
-test('场景: routes getter 恒返同一 Map 引用,重复 ensure 不重放注册与目录,内容变化后才 replace', () => {
+test('场景: routes getter 恒返同一 Map 引用,重复 ensure 不重注册,幂等 replace 探活,内容变化后仍 replace', () => {
   const counts = { adapters: 0, adapterReplaces: 0, directories: 0, directoryReplaces: 0 }
   const table = routesOf({ a: profile() })
   const manager = createRouteManager({
@@ -140,15 +140,19 @@ test('场景: routes getter 恒返同一 Map 引用,重复 ensure 不重放注�
   manager.ensureDirectory()
   assert.equal(counts.adapters, 1)
   assert.equal(counts.directories, 1)
+  // facts 相等的 ensure 也幂等 replace 一次:兼注册句柄存活探测(宿主侧
+  // fiber 级联卸载会连坐注册而 facts 不变,死亡即清态重注册,见 orphan 自愈)
+  assert.equal(counts.adapterReplaces, 1)
+  assert.equal(counts.directoryReplaces, 1)
   // 换表语义:同一 Map 引用内内容演进也构成变化(facts 由内容计算,非引用)
   table.set('b', resolveRoute('b', profile({ baseURL: 'https://other.example.com' })))
   manager.ensureRegistration()
   manager.ensureDirectory()
-  assert.equal(counts.adapterReplaces, 1)
-  assert.equal(counts.directoryReplaces, 1)
+  assert.equal(counts.adapterReplaces, 2)
+  assert.equal(counts.directoryReplaces, 2)
 })
 
-test('场景: 换表但 provider 集纯重排,排序事实相同不触发重放', () => {
+test('场景: 换表但 provider 集纯重排,不重注册,仅幂等 replace 探活', () => {
   const counts = { adapters: 0, adapterReplaces: 0 }
   let table = routesOf({ b: profile(), a: profile({ baseURL: 'https://other.example.com' }) })
   const manager = createRouteManager({
@@ -163,7 +167,7 @@ test('场景: 换表但 provider 集纯重排,排序事实相同不触发重放'
   table = routesOf({ a: profile({ baseURL: 'https://other.example.com' }), b: profile() })
   manager.ensureRegistration()
   assert.equal(counts.adapters, 1)
-  assert.equal(counts.adapterReplaces, 0, '纯重排不构成注册事实变化')
+  assert.equal(counts.adapterReplaces, 1, '纯重排不重注册,仅一次幂等重提交探活')
 })
 
 test('场景: 失服路由进目录 error 条目(官方 directoryEntries error 字段对表);修复后条目消失', () => {

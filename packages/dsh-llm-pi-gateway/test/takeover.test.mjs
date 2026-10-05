@@ -13,6 +13,13 @@ const OFFICIAL_ROUTE = {
   models: [{ id: 'auto' }],
 }
 
+// 0.1.7+ 官方 Config 规范化产物:providers 为 volatile 引用(get() 返回普通对象),
+// 与运行时读官方节的 unwrapVolatile 同款还原;直接 Object.entries 只能得到 get 方法。
+function providersOf(parsed) {
+  const providers = parsed.providers
+  return typeof providers?.get === 'function' ? providers.get() : providers
+}
+
 test('官方节与 gateway 节路由并集,来源标记正确', () => {
   const merged = mergeProviderSections(
     { newapi: OFFICIAL_ROUTE },
@@ -76,8 +83,9 @@ test('场景: 同一 provider 两节同名,gateway 节整体优先,resolveRoutes
 test('官方 Config schema 消费官方节形状(真实官方导出):baseURL/models 解析产物', async () => {
   const official = await import('@deepseek-ai/dsh-llm-pi-ai')
   const parsed = official.Config({ providers: { newapi: OFFICIAL_ROUTE } })
-  assert.equal(parsed.providers.newapi.baseURL, 'https://newapi.it.jze100.com/')
-  assert.equal(parsed.providers.newapi.models[0].id, 'auto')
+  const entry = providersOf(parsed).newapi
+  assert.equal(entry.baseURL, 'https://newapi.it.jze100.com/')
+  assert.equal(entry.models[0].id, 'auto')
   return parsed
 })
 
@@ -86,7 +94,7 @@ test('官方 schema 规范化产物(含 modelOverrides 键与目录 compat)经 r
   const official = await import('@deepseek-ai/dsh-llm-pi-ai')
   // 官方 schema 允许的 modelOverrides 键(空对象即官方对无目录路由的默认产物形态)
   const parsed = official.Config({ providers: { newapi: { ...OFFICIAL_ROUTE, modelOverrides: {} } } })
-  const routes = resolveRoutes(parsed.providers, undefined)
+  const routes = resolveRoutes(providersOf(parsed), undefined)
   const route = routes.get('newapi')
   assert.equal(route.api, 'anthropic-messages')
   assert.equal(route.source, 'llm-pi-ai')
@@ -105,7 +113,7 @@ test('场景: 官方 schema 非空 modelOverrides(真实规范化产物)→ reso
     },
   })
   const unserviceable = []
-  const routes = resolveRoutes(parsed.providers, undefined, (provider, reason) => unserviceable.push([provider, reason]))
+  const routes = resolveRoutes(providersOf(parsed), undefined, (provider, reason) => unserviceable.push([provider, reason]))
   assert.equal(routes.has('newapi'), false, '本包无目录通道,该路由不被服务')
   assert.ok(routes.has('plain'), '同节其余路由不受 skip 影响')
   assert.match(unserviceable[0][1], /modelOverrides/)
