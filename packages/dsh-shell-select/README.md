@@ -1,4 +1,4 @@
-﻿# @mzzsfy/dsh-shell-select
+# @mzzsfy/dsh-shell-select
 
 Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配置多客户端的 `shell` 工具——pwsh / git bash / cmd / WSL / 任意第三方实现,自定义路径,多个客户端并存,设默认,模型经工具参数按名选择。
 
@@ -95,6 +95,14 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
 
 ## dsh 版本兼容
 
-宿主要求 ≥0.1.7-rc.1(bundle patch 引用 0.1.7 才有的 dsh-agent-preset 宿主包,更旧宿主安装即 boot 失败,README 已声明不视为缺陷)。主测 0.1.7-rc.2:设置面 7 格过(自动探测/自定义路径/坏路径徽标/黑名单往返含行号拦截/默认热更落盘/preset 接管入册);工具调用链格需 LLM tool use 模拟器,当前 E(执行层语义由 217 单测覆盖);运行时接管(Round 29)9291 keep 宿主实证 runtime-disable→fiber 激活+INV-6 残影稳定。
+宿主要求 ≥0.1.7-rc.1:bundle patch 引用 0.1.7 才有的 @deepseek-ai/dsh-agent-preset 宿主包,更旧宿主安装即 boot 失败(2026-09-27 裁定不视为缺陷)。
+
+- 0.2.0-rc.2:完全适配(设置面通过;16 格 LLM 工具调用格因模拟模型无 tool_calls 能力登记环境不可测,历史真机记录与单元测试覆盖)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(本包宿主要求 ≥0.1.7-rc.1,该版本不安装;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 设置面 7 格过(自动探测/自定义路径/坏路径徽标/黑名单往返含行号拦截/默认热更落盘/preset 接管入册);运行时接管(Round 29)9291 keep 宿主实证 runtime-disable→fiber 激活+INV-6 残影稳定。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
 
 测试:`node --test "test/*.test.mjs"`(包目录内)。

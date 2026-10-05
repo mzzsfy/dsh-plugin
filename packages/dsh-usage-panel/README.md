@@ -1,4 +1,4 @@
-﻿# @mzzsfy/dsh-usage-panel(用量面板)
+# @mzzsfy/dsh-usage-panel(用量面板)
 
 DeepSeek Harness 双端插件:在「设置 → 账号余额」手动配置多组(上限 20 个)LLM 平台账号(API 地址 + Key),定期自动查询并展示每个账号的余额、额度与历史趋势;刷新评估越过逻辑点(用量阈值穿越 / 余额阈值穿越 / 额度窗口重置)时,经 webhook、dsh-im、页内 toast 三通道推送通知。无自动发现;配置持久化在本机 `~/.dsh/dsh-usage-panel/accounts.json`,查询快照留存于同目录 `history.json`。
 
@@ -133,4 +133,10 @@ node scripts/dev-link.mjs dsh-usage-panel   # 仓库根执行:归一 profile 依
 
 ## dsh 版本兼容
 
-主测 0.1.7-rc.2 完全适配通过(设置 HTTP 写读闭环 notify 节 + 「账号余额」分区账号卡/通知规则渲染)。基线 0.1.5-rc.3 不崩溃底线通过。历史窗口 0.1.2-rc.1 全格通过(面板渲染/API 面 pollArmed/通知投影)。
+- 0.2.0-rc.2:完全适配(11 过 + 4 格文档漂移登记:实现要求 Key/URL 才能添加账号,文档的无 Key 流已不可达)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 完全适配(设置 HTTP 写读闭环 notify 节 + 「账号余额」分区账号卡/通知规则渲染);0.1.5-rc.3 曾判不崩溃底线通过(已被 2026-09-30 复测推翻,见上);历史窗口 0.1.2-rc.1 全格通过(面板渲染/API 面 pollArmed/通知投影)。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

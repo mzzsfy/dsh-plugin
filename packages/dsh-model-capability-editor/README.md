@@ -1,4 +1,4 @@
-﻿# @mzzsfy/dsh-model-capability-editor
+# @mzzsfy/dsh-model-capability-editor
 
 DeepSeek Harness 模型能力编辑插件:编辑 `llm-pi-ai` 管理的第三方模型的 `reasoningEfforts`(7 个标准思考档位与每档线上值)与 `input` 多模态声明,经官方 settings RPC 整组写回 settings.yaml。
 
@@ -86,4 +86,10 @@ node scripts/dev-link.mjs dsh-model-capability-editor   # 仓库根执行:归一
 
 ## dsh 版本兼容
 
-主测 0.1.7-rc.2:P 10/12 + 2 阻断(#12 受 FIND-RC2-1 gateway 接管迁移连带,非本包缺陷;行内面板/七档控件/混合展开/保存随动写回全过;BUG-009 route 匹配 P1 修复已复验)。基线 0.1.5-rc.3 不崩溃底线通过(其上 BUG-009 已修复并 12 格全绿复验)。历史窗口 0.1.2-rc.1 兼容通过。注入前提=模型行「容量 N」箭头展开高级设置区;插件 client 装载 rc.2 为聚合 URL 形态(独立 client.js 404 同口径);激活 live、findings 0。
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;1 格环境性登记)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 为 P 10/12 + 2 阻断(#12 受 FIND-RC2-1 gateway 接管迁移连带,非本包缺陷;行内面板/七档控件/混合展开/保存随动写回全过;BUG-009 route 匹配 P1 修复已复验);0.1.5-rc.3 曾判不崩溃底线通过(其上 BUG-009 已修复并 12 格全绿复验;已被 2026-09-30 复测推翻,见上);历史窗口 0.1.2-rc.1 兼容通过。注入前提=模型行「容量 N」箭头展开高级设置区;插件 client 装载 0.1.7-rc.2 为聚合 URL 形态(独立 client.js 404 同口径);激活 live、findings 0。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

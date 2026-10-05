@@ -1,4 +1,4 @@
-﻿# @mzzsfy/dsh-llm-pi-gateway
+# @mzzsfy/dsh-llm-pi-gateway
 
 把 DSH 会话的 sessionId 注入发往 newapi 等 LLM 网关的每个请求,供网关做请求亲和性(粘性会话路由):同一会话的请求稳定落到同一上游渠道,上游 prompt cache 命中是这种路由方式的结果。形态上是官方 `dsh-llm-pi-ai` 的零感知增强替换(装上即接管、卸载即还原),compat 全控、metadata 模板透传与静态 headers 兜底一并提供。镜像对表锚:官方 `dsh-llm-pi-ai@0.1.5-rc.2` / pi-ai `^0.85.1`。
 
@@ -198,4 +198,10 @@ npm test        # node --test test/*.test.mjs,纯逻辑层;devDependencies 提�
 
 ## dsh 版本兼容
 
-主测 0.1.7-rc.2:E 被 FIND-RC2-1 阻断(P1 待修复)——rc.2 上运行时接管后官方节读路径丢失(llm-pi-ai ns 从 settings describe 消失),发话链路 NO_ADAPTER;#1/#2 装载与激活面过,修复后须全量复验。0.1.7-rc.1/Rounds 16-19 版本窗口通过:header 三通道注入、patch/market 禁用三路径全链、运行时接管 E-1~E-4(Round 28)。0.1.5-rc.3(基线)不崩溃底线通过(其上 11/12 全过)。0.1.2-rc.1 历史窗口同过(guard 代挂剥键收敛修复后数据面完整)。配置写入按版本分流:0.1.2/0.1.5 可直接写 settings.yaml 官方节,0.1.6 起建议走 settings/update RPC(校验前置)。详见包内 兼容性测试.md 与仓库兼容性进度文档 FIND-RC2-1。
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 曾登记 FIND-RC2-1(运行时接管后官方节读路径丢失,llm-pi-ai ns 从 settings describe 消失,发话链路 NO_ADAPTER,P1;#1/#2 装载与激活面过),该登记限于 0.1.7-rc.2 窗口,0.2.0-rc.2 功能面复验通过;0.1.7-rc.1/Rounds 16-19 版本窗口通过:header 三通道注入、patch/market 禁用三路径全链、运行时接管 E-1~E-4(Round 28);0.1.5-rc.3 曾判不崩溃底线通过(其上 11/12 全过;已被 2026-09-30 复测推翻,见上);0.1.2-rc.1 历史窗口同过(guard 代挂剥键收敛修复后数据面完整)。配置写入按版本分流:0.1.2/0.1.5 可直接写 settings.yaml 官方节,0.1.6 起建议走 settings/update RPC(校验前置)。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

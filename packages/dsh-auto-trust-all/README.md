@@ -1,4 +1,4 @@
-﻿# @mzzsfy/dsh-auto-trust-all
+# @mzzsfy/dsh-auto-trust-all
 
 DeepSeek Harness web 入口插件:动态信任所有实际到达的 Host,并将 web 默认绑定翻转为全部网卡——`dsh web` 零参数启动等效 `dsh web --host 0.0.0.0 --trusted-host=<任何实际到达的 host>`。
 
@@ -77,4 +77,10 @@ node --test "test/*.test.mjs"
 
 ## dsh 版本兼容
 
-主测 0.1.7-rc.2 完全适配通过:15/15(横幅容量/LRU 淘汰/热禁用守卫/market 禁用恢复双半程/LAN token 页 console 零错误)。基线 0.1.5-rc.3 不崩溃底线通过。历史窗口 0.1.2-rc.1 全格通过(0.0.0.0 动态信任、伪造 Host 200、IPv6 与 loopback 边界、激活 live、diagnostics 0 findings)。0.1.5-rc.3 上修复市场热禁用后旧闭包继续注册的问题(fiber 活性守卫);0.1.7-rc.1 上进一步修复恢复启用后注册不重现的问题(载体代际令牌守卫,换代自动改道新载体),禁用/恢复双半程真机复验通过。
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 完全适配 15/15(横幅容量/LRU 淘汰/热禁用守卫/market 禁用恢复双半程/LAN token 页 console 零错误);0.1.5-rc.3 曾判不崩溃底线通过(已被 2026-09-30 复测推翻,见上);历史窗口 0.1.2-rc.1 全格通过(0.0.0.0 动态信任、伪造 Host 200、IPv6 与 loopback 边界、激活 live、diagnostics 0 findings)。0.1.5-rc.3 上修复市场热禁用后旧闭包继续注册的问题(fiber 活性守卫);0.1.7-rc.1 上进一步修复恢复启用后注册不重现的问题(载体代际令牌守卫,换代自动改道新载体),禁用/恢复双半程真机复验通过。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
