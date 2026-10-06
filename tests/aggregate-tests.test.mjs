@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync} from 'node:fs'
+import {mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles} from '../scripts/aggregate-tests.mjs'
+import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles, missingBridgeDeps} from '../scripts/aggregate-tests.mjs'
 
 /**
  * aggregate-tests.mjs CI 全量测试聚合
@@ -170,6 +170,14 @@ test('discoverUnits_非包改动清单_全量回退', () => {
   assert.deepEqual(scoped, full)
 })
 
+test('discoverUnits_null改动清单_全量回退不崩溃', () => {
+  // fail-open 契约(:74-80):changedFilesList 返回 null(首推全零 SHA/浅克隆 diff 失败)
+  // 时 discoverUnits 必须回退全量,而非对 null 迭代 TypeError 崩红(现症:整轮聚合 exit 1)
+  const full = discoverUnits(repo).map(u => u.name)
+  const scoped = discoverUnits(repo, null).map(u => u.name)
+  assert.deepEqual(scoped, full)
+})
+
 test('parseArgs_默认与显式轮次_非法值拒绝', () => {
   assert.deepEqual(parseArgs([]), {rounds: 10})
   assert.deepEqual(parseArgs(['--rounds', '3']), {rounds: 3})
@@ -217,4 +225,24 @@ test('parseChangedPackages_无改动_判全量', () => {
 test('parseChangedPackages_前缀相近目录_不串包', () => {
   assert.deepEqual(parseChangedPackages(['packages/dsh-maintain/src/index.js']), new Set(['dsh-maintain']))
   assert.deepEqual(parseChangedPackages(['packages/a/b/c.test.mjs']), new Set(['a']))
+})
+
+test('missingBridgeDeps_root 声明依赖缺失_逐项列出', t => {
+  const root = tempDir(t, 'agg-bridge-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({dependencies: {'@deepseek-ai/schemastery': '3.18.4', zod: '4.5.4'}}))
+  mkdirSync(join(root, 'node_modules', '@deepseek-ai', 'schemastery'), {recursive: true})
+  assert.deepEqual(missingBridgeDeps(root), ['zod'])
+})
+
+test('missingBridgeDeps_全部在场_空数组', t => {
+  const root = tempDir(t, 'agg-bridge-ok-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({dependencies: {'@deepseek-ai/schemastery': '3.18.4'}}))
+  mkdirSync(join(root, 'node_modules', '@deepseek-ai', 'schemastery'), {recursive: true})
+  assert.deepEqual(missingBridgeDeps(root), [])
+})
+
+test('missingBridgeDeps_无声明依赖_空数组', t => {
+  const root = tempDir(t, 'agg-bridge-empty-')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({private: true}))
+  assert.deepEqual(missingBridgeDeps(root), [])
 })

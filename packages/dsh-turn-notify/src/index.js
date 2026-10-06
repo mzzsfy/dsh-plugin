@@ -1,4 +1,4 @@
-// dsh-turn-notify Host 半区:回合通知单源决策。观察 session/event 与 approval/request,
+// dsh-turn-notify Host 半区:回合通知单源决策。观察 session/event,
 // 命中分类即发 webhook、写入内存投影;webServer 路由供浏览器半区轮询投影与管理音效。
 // 音效持久化在 ~/.dsh/dsh-turn-notify/sounds/,投影不落盘。
 
@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import {
+  APPROVAL_ASKED_KIND,
   AUDIO_EXTS,
   CATEGORIES,
   CATEGORY_ASK,
@@ -21,7 +22,6 @@ import {
   buildWebhookPayload,
   collectAssistantTail,
   collectSessionEvents,
-  createApprovalTap,
   createProjection,
   isSubagent,
   isSubagentWakeTurn,
@@ -446,19 +446,15 @@ export function apply(ctx, config) {
     const category = mapEventToCategory(event.type, event.data)
     if (category === null) return
     const reasonKind = event.type === TURN_END_KIND && event.data.reason ? event.data.reason.kind : null
-    // tool/call 的提问事件与 turn/end 分类共用入口;提问通知不受碎轮过滤
-    const kind = category === CATEGORY_ASK ? TOOL_CALL_KIND : TURN_END_KIND
+    // 即时送达类事件(tool/call 提问、approval/asked 审批)用自身 kind,
+    // 不落入 turn/end 的碎轮时长过滤;其余归类沿用 turn/end。
+    const kind = category === CATEGORY_ASK
+      ? TOOL_CALL_KIND
+      : category === CATEGORY_APPROVAL && event.type === APPROVAL_ASKED_KIND
+        ? APPROVAL_ASKED_KIND
+        : TURN_END_KIND
     notifyUnit({ category, kind, reasonKind, session, ...(endedTurn ?? {}) })
   })
-
-  // 审批 waterfall 观察者:next() 同步放行,通知异步投递
-  ctx.on('approval/request', createApprovalTap(
-    ({ category }) => {
-      // waterfall 请求不携带会话对象,标题与工作区留空,仅分类与时间有效
-      notifyUnit({ category, kind: 'approval/request', reasonKind: category, session: { header: {} } })
-    },
-    (fn) => { fn() },
-  ))
 
   ctx.inject(['settings'], (settingsCtx) => {
     // 方法面守卫:settings 服务缺 register 面(0.1.7 已移除)即走新形态分支;

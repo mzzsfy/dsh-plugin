@@ -38,6 +38,10 @@ test('openai 流式 chunk 序列终止 [DONE]', async () => {
   const usageChunk = chunks.find((c) => c.usage)
   assert.deepEqual(usageChunk.usage, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })
   assert.ok(chunks.every((c) => c.model === 'my-model'))
+  // 终止块:content 之后必须有 choices[0].finish_reason=stop,严格消费端(0.2.0+)以它判流完整性
+  const stopChunk = chunks.find((c) => c.choices[0]?.finish_reason === 'stop')
+  assert.ok(stopChunk, 'openai 流必须有 finish_reason=stop 终止块')
+  assert.ok(chunks.indexOf(stopChunk) > chunks.indexOf(contentChunk), 'finish_reason=stop 必须在 content 块之后')
 })
 
 test('anthropic 流式 event 序列含 message_start 与 usage', async () => {

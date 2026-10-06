@@ -17,10 +17,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 兼容性测试:真实 dsh 宿主 × 版本窗口(基线/主测槽阻塞,前瞻槽非阻塞预警)。
-  # 隔离 profile 装全部 bundle 包全家桶共启,断言统一底线:正常访问 + activation live +
-  # diagnostics findings 0 + 浏览器页面无 Failed to load plugins(方法论:
-  # docs/兼容性测试/测试与隔离方法.md,自动化实现 scripts/compat/)。
+  # 兼容性测试:真实 dsh 宿主 × 双槽版本窗口(主测 = 渠道中最新的 rc,完整判定;
+  # 基线 = dist-tag latest 指向版本,仅不崩溃判定;两槽失败均阻塞)。
+  # 隔离 profile 装全部 bundle 包全家桶共启:主测断言正常访问 + activation live +
+  # diagnostics findings 0 + 浏览器页面无 Failed to load plugins + LLM 链路,基线只断言不崩溃
+  # (方法论:docs/兼容性测试/测试与隔离方法.md,自动化实现 scripts/compat/)。
   # 版本窗口策略见 scripts/compat/window.mjs;显式覆盖:DSH_COMPAT_VERSIONS=版本[,版本~]
   compat:
     name: dsh 兼容性测试(全家桶 boot)

@@ -41,9 +41,6 @@ window.__ModuleLoader__.load({
           opacity: .7, display: 'inline-block', flex: 'none',
         },
       })),
-      IconChevron: createElementOf(['IconChevronDownOutlineRegular', 'IconChevronDownOutlineMedium', 'IconChevronDownOutline14'], ({ size }) => h('span', {
-        style: { fontSize: (size ?? 14) - 3, lineHeight: 1, userSelect: 'none' },
-      }, '▾')),
       IconInspect: createElementOf(['IconInspectOutlineRegular', 'IconInspectOutlineMedium', 'IconInspectOutline12'], () => h('span', {
         style: { fontSize: 10, lineHeight: 1, opacity: .8 },
       }, 'ⓘ')),
@@ -134,17 +131,13 @@ window.__ModuleLoader__.load({
       '.sls-tv__row { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:default; }',
       '.sls-tv__row--exp { cursor:pointer; user-select:none; }',
       '.sls-tv__lead { display:flex; align-items:center; gap:4px; color:var(--dsw-alias-label-tertiary, inherit); }',
-      // 官方 DisclosureRow 同构:icon 与 chevron 同 16px 槽,hover 交叉淡化;
+      // 官方 ToolRow 同构:行首仅 icon,无展开箭头(可展开性由指针与整行点击承载);
       // 错误/进行中状态点绝对定位覆盖 icon(红点掩盖 icon)
       '.sls-tv__leadStack { position:relative; width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; flex:none; }',
-      '.sls-tv__iconIdle { display:inline-flex; opacity:1; transition:opacity 100ms ease; }',
+      '.sls-tv__iconIdle { display:inline-flex; }',
       '.sls-tv__stateCover { position:absolute; inset:0; margin:auto; display:inline-flex; align-items:center; justify-content:center; background:transparent; }',
       '.sls-tv__stateCover::before { content:""; position:absolute; inset:-2px; border-radius:50%; background:var(--dsw-alias-bg-primary, #fff); }',
       '.sls-tv__stateCover > span { position:relative; }',
-      '.sls-tv__row:hover .sls-tv__iconIdle { opacity:0; }',
-      '.sls-tv__chev { opacity:.45; transition:transform .15s ease, opacity .1s ease; }',
-      '.sls-tv__row:hover .sls-tv__chev { opacity:1; }',
-      '.sls-tv__row[data-open="1"] .sls-tv__chev { transform:rotate(-90deg); }',
       '.sls-tv__sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }',
       '.sls-tv__title { font-weight:400; }',
       '.sls-tv__sep { width:2px; height:2px; border-radius:1px; background:var(--dsw-alias-label-caption, currentColor); opacity:.8; flex:none; }',
@@ -152,13 +145,14 @@ window.__ModuleLoader__.load({
       '.sls-tv__sum--err { color:var(--dsw-alias-state-error-primary, #d4553f); }',
       '.sls-tv__body { margin:6px 0 4px; border:1px solid rgba(128,128,128,.28); border-radius:8px; overflow:hidden; }',
       '.sls-tv__head { display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid rgba(128,128,128,.18); background:rgba(128,128,128,.05); }',
-      '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; }',
-      '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; }',
-      '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; }',
+      // 头部单行片段禁折行:cwd 行宽不足时收缩出省略号,徽章不收缩不折行
+      '.sls-tv__cwd { font-family:var(--sls-mono, monospace); font-size:12px; opacity:.7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+      '.sls-tv__badge { font-size:11px; padding:0 7px; border-radius:999px; border:1px solid rgba(128,128,128,.35); opacity:.85; flex:none; white-space:nowrap; }',
+      '.sls-tv__pill { font-size:12px; color:#d4553f; flex:none; white-space:nowrap; }',
       '.sls-tv__pill--bg { color:var(--dsw-alias-label-tertiary, inherit); }',
-      '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; font-variant-numeric:tabular-nums; }',
+      '.sls-tv__duration { font-family:var(--sls-mono, monospace); font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; white-space:nowrap; font-variant-numeric:tabular-nums; }',
       // 运行中脉冲文字:零信息窗口(参数未到)的活体反馈
-      '.sls-tv__pulse { font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; animation:sls-pulse 1.5s ease-in-out infinite; }',
+      '.sls-tv__pulse { font-size:12px; color:var(--dsw-alias-label-tertiary, inherit); flex:none; white-space:nowrap; animation:sls-pulse 1.5s ease-in-out infinite; }',
       '@keyframes sls-pulse { 0%,100% { opacity:.35; } 50% { opacity:1; } }',
       '.sls-tv__sp { flex:1; }',
       '.sls-tv__copy { display:flex; align-items:center; gap:2px; flex:none; }',
@@ -616,6 +610,20 @@ window.__ModuleLoader__.load({
     }
     // LOGIC-END hasSpillNotice
 
+    // 执行事实标记(host renderResult 落,格式见 render.mjs):卡片徽章第一优先级,
+    // 配置事后变更/跨宿主查看不溯往改写历史调用
+    // LOGIC-BEGIN parseShellMark
+    function parseShellMark(text) {
+      return /\[shell: ([^\]\n]+)\]/.exec(text)?.[1]
+    }
+    // LOGIC-END parseShellMark
+
+    // LOGIC-BEGIN stripShellMark
+    function stripShellMark(text) {
+      return text.split('\n').filter((line) => !/^\[shell: [^\]]+\]$/.test(line)).join('\n')
+    }
+    // LOGIC-END stripShellMark
+
     // block → 卡片模型(官方 terminalCardModel 同构,数据源 argsRaw + content 文本)。
     // generic = 后台 ack / isError / 溢出预览 / persistent 形(无 description,
     // 官方 shellCall persistent→generic 同构),交回退行;terminal = 全量卡。
@@ -632,37 +640,41 @@ window.__ModuleLoader__.load({
       const description = typeof args?.description === 'string' && args.description.trim() !== '' ? args.description : undefined
       const cwdFull = displayCwd(typeof args?.workdir === 'string' ? args.workdir : undefined, sessionCwd)
       const cwdDir = cwdFull !== undefined ? lastSegment(cwdFull) : undefined
-      // shell 名 = 用户在配置页起的条目名;args.shell 缺省时按 default 客户端解析(配置当前读数)
-      const shellName = clientDisplayName(typeof args?.shell === 'string' ? args.shell : undefined)
+      // shell 徽章优先级:结果标记(执行事实)→ 显式参数 → default 读数(旧块兜底,
+      // 配置即当前解析事实);读数推导仅兜无标记历史块,不覆盖事实
+      const requested = typeof args?.shell === 'string' ? args.shell : undefined
+      const shellNameOf = (mark) => mark ?? clientDisplayName(requested)
       if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null, running: !settled, alert: undefined }
 
       if (!settled) {
         const startedAt = typeof block.time === 'number' ? block.time : undefined
-        // 运行中一律全量卡:阻塞时展开即可见命令与时长,不落无命令的 generic 回退行
-        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName, output: undefined, exitCode: undefined, signal: undefined, code: undefined, startedAt }
+        // 运行中一律全量卡:阻塞时展开即可见命令与时长,不落无命令的 generic 回退行;
+        // 无结果文本,徽章按读数推导,落定后由标记校正
+        return { kind: 'terminal', status: 'running', command, description, cwdDir, cwdFull, shellName: shellNameOf(undefined), output: undefined, exitCode: undefined, signal: undefined, code: undefined, startedAt }
       }
 
       const contentText = (block.content ?? []).map((part) => (part.type === 'text' ? part.text : '')).filter((text) => text !== '').join('\n')
+      const shellName = shellNameOf(parseShellMark(contentText))
+      const outputText = stripShellMark(contentText)
       // 后台 ack:独立卡呈现命令全文与任务号徽标,ack 原文作输出(不再落 generic 简版行)
       if (args.run_in_background === true) {
         const jobId = /started background job (\S+)/.exec(contentText)?.[1]
-        return { kind: 'background', status: 'background', command, description, cwdDir, cwdFull, shellName, output: contentText, jobId }
+        return { kind: 'background', status: 'background', command, description, cwdDir, cwdFull, shellName, output: outputText, jobId }
       }
       // 空结果落 generic:官方 singleResultText 无文本即回通用卡,避免空输出伪 done 终端卡;
       // isError/error 块带 alert(错误红点语义),其余(空输出/无描述/截断)中性无状态点
-      if (contentText === '' || block.isError === true || block.error !== undefined || description === undefined || hasSpillNotice(contentText)) {
+      if (outputText === '' || block.isError === true || block.error !== undefined || description === undefined || hasSpillNotice(contentText)) {
         const alert = block.isError === true || block.error !== undefined ? 'error' : undefined
-        return { kind: 'generic', command, summary: description, output: contentText, running: false, alert }
+        return { kind: 'generic', command, summary: description, output: outputText, running: false, alert }
       }
-      const tail = parseExitTail(contentText)
+      const tail = parseExitTail(outputText)
       const status = tail.signal !== undefined ? 'signaled' : tail.exitCode !== 0 ? 'failed' : 'done'
       return { kind: 'terminal', status, command, description, cwdDir, cwdFull, shellName, output: tail.output, exitCode: tail.exitCode, signal: tail.signal, code: undefined }
     }
     // LOGIC-END shellCardModel
 
-    // 官方 DisclosureRow leading 同构:16px 槽内 icon 与 chevron 同位,
-    // 收起时 chevron hover 才现(交叉淡化),展开时仅 chevron-up;错误态
-    // 红点叠 icon 之上(掩盖 icon,官方状态点语义)
+    // 官方 ToolRow leading 同构:行首仅 icon;错误/进行中状态红点叠 icon 之上
+    // (掩盖 icon,官方状态点语义)
     function leadingStack({ status, icons }) {
       const failed = status === 'failed' || status === 'signaled' || status === 'generic-error'
       const dot = failed ? icons.StateDot({ state: 'error' }) : status === 'generic-warn' ? icons.StateDot({ state: 'warning' }) : status === 'running' ? icons.StateDot({ state: 'ongoing' }) : null
@@ -770,7 +782,6 @@ window.__ModuleLoader__.load({
         },
           h('span', { className: 'sls-tv__lead' },
             leadingStack({ status, icons: TOOLVIEW_ICONS }),
-            expandable ? h('span', { className: 'sls-tv__chev', 'data-open': open ? '1' : '0', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })) : null,
           ),
           h('span', { className: 'sls-tv__title' }, 'Shell'),
           summary !== '' ? h('span', { className: 'sls-tv__sep', 'aria-hidden': true }) : null,
@@ -847,7 +858,6 @@ window.__ModuleLoader__.load({
         return () => { disposed = true }
       }, [])
       if (model.kind === 'generic') return h(GenericShellRow, { model, inspect, en })
-      const expandable = true
       const srStatus = statusTextOf(model.status, en)
       const summary = model.description !== undefined ? model.description.split('\n')[0] : (en ? '(no description)' : '(无描述)')
       const failed = model.status === 'failed' || model.status === 'signaled'
@@ -857,7 +867,6 @@ window.__ModuleLoader__.load({
           role: 'button',
           tabIndex: 0,
           'aria-expanded': open,
-          'data-open': open ? '1' : '0',
           onClick: () => setOpen((value) => !value),
           onKeyDown: (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
@@ -868,7 +877,6 @@ window.__ModuleLoader__.load({
         },
           h('span', { className: 'sls-tv__lead' },
             leadingStack({ status: model.status, icons: TOOLVIEW_ICONS }),
-            h('span', { className: 'sls-tv__chev', style: { display: 'inline-flex', transform: open ? 'rotate(-90deg)' : 'none' } }, TOOLVIEW_ICONS.IconChevron({ size: 14 })),
           ),
           srStatus !== null ? h('span', { className: 'sls-tv__sr' }, srStatus) : null,
           h('span', { className: 'sls-tv__title' }, 'Shell'),

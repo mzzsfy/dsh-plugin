@@ -9,6 +9,8 @@
 //   { name, type: {selector, text} }    聚焦并逐键输入(contenteditable/输入框)
 //   { name, press: '<键名>' }           键盘按键(如 Enter)
 //   { name, http: {path, method?, body?, headers?} }  页面内同源 fetch
+//   { name, shot: '<绝对或相对路径>' }                  视口截图落盘(关键格留档)
+//   { name, hover: '<css 选择器>' }                     真实鼠标悬停(触发 React 合成事件)
 import { writeFileSync, readFileSync } from 'node:fs'
 
 const RENDER_TIMEOUT_MS = 25 * 1000
@@ -82,11 +84,18 @@ async function main() {
         } else if (step.wait !== undefined) {
           await page.waitForTimeout(step.wait)
           entry.ok = true
+        } else if (step.hover !== undefined) {
+          await page.hover(step.hover, { timeout: 10 * 1000 })
+          entry.ok = true
+        } else if (step.shot !== undefined) {
+          await page.screenshot({ path: step.shot })
+          entry.ok = true
+          entry.value = step.shot
         } else if (step.eval !== undefined) {
           entry.value = await page.evaluate(step.eval)
           entry.ok = true
         } else if (step.http !== undefined) {
-          const { path, method = 'GET', body, headers = {} } = step.http
+          const { path, method = 'GET', body, headers = {}, expectedStatus } = step.http
           entry.value = await page.evaluate(async ({ path, method, body, headers }) => {
             const res = await fetch(path, {
               method,
@@ -98,7 +107,12 @@ async function main() {
             try { parsed = JSON.parse(text) } catch { parsed = text.slice(0, 200) }
             return { status: res.status, body: parsed }
           }, { path, method, body, headers })
-          entry.ok = true
+          // expectedStatus 显式声明(单值或区间数组);缺省 2xx 即 ok——status 不设门槛
+          // 的 http 步会把你 404/500 也记 ok(组 E probe-evals 缺口②)
+          entry.ok = expectedStatus === undefined
+            ? (entry.value.status >= 200 && entry.value.status < 300)
+            : (Array.isArray(expectedStatus) ? expectedStatus.includes(entry.value.status) : entry.value.status === expectedStatus)
+          if (!entry.ok) entry.error = `http status ${entry.value.status} 不满足门槛 ${expectedStatus ?? '2xx'}`
         } else {
           entry.ok = false
           entry.error = '空步骤(无 goto/wait/eval/http)'

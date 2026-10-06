@@ -125,7 +125,8 @@ test('构造:注册 shell+pwsh 双工具与 systemPrompt 段,路由不再由主�
   const shell = registered.tools.find((tool) => tool.name === 'shell')
   const pwsh = registered.tools.find((tool) => tool.name === 'pwsh')
   assert.match(shell.description, /git-bash/)
-  assert.match(pwsh.description, /PowerShell/)
+  // 兼容工具描述一句话:不要调用,使用 shell
+  assert.equal(pwsh.description, 'Do not call; use `shell`.')
   assert.ok(!('shell' in pwsh.parameters.properties))
   assert.ok('shell' in shell.parameters.properties)
   assert.equal(registered.promptSections.length, 1)
@@ -406,4 +407,75 @@ test('refresh:换源后执行面即时收紧(已删 id 拒绝,新清单生效)',
   assert.equal(executor.entryFor('pwsh').id, 'pwsh')
   assert.equal(executor.entryFor(undefined).id, 'pwsh')
   assert.equal(registered.tools.length, toolsBefore)
+})
+
+// 真机宿主形态:行 config 经宿主按 static Config resolve,volatile 字段是
+// boxed ref({get}),非普通对象。构造/refresh 直存该形态时 resolveConfig 的
+// 类型对账会把 ref 全部当非法输入丢弃,执行面静默回落出厂默认(行 config
+// 永不生效,真机 0.2.0-rc.2 实证)。回归锁定:boxed 形态必须解箱生效。
+
+// cordis resolve 产物的同构 boxed 形态:每字段值包 {get}
+function boxFields(config) {
+  return Object.fromEntries(Object.entries(config).map(([key, value]) => [key, { get: () => value }]))
+}
+
+test('构造:boxed volatile 字段(宿主 resolve 产物)解箱生效,不回落出厂默认', () => {
+  const { ctx, registered } = stubCtx()
+  const userConfig = {
+    shells: baseConfig().shells.filter((entry) => entry.id !== 'cmd'),
+    default: 'git-bash',
+  }
+  const executor = new ShellSelectExecutor(ctx, boxFields(userConfig))
+  const listing = executor.listShells()
+  assert.equal(listing.default, 'git-bash')
+  assert.deepEqual(listing.shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
+  assert.equal(executor.entryFor(undefined).id, 'git-bash')
+  const shell = registered.tools.find((tool) => tool.name === 'shell')
+  assert.match(shell.description, /git-bash \(bash\)$|default client is "git-bash"/)
+  assert.doesNotMatch(shell.description, /cmd \(cmd\)/)
+})
+
+test('refresh:boxed volatile 字段换源同样解箱生效', () => {
+  const { ctx } = stubCtx()
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  executor.refresh(boxFields({
+    shells: baseConfig().shells,
+    default: 'git-bash',
+  }))
+  assert.equal(executor.entryFor(undefined).id, 'git-bash')
+  const listing = executor.listShells()
+  assert.equal(listing.default, 'git-bash')
+  assert.equal(listing.shells.length, 3)
+})
+
+test('构造:混合形态(部分字段 boxed 部分普通)逐字段解箱生效', () => {
+  const { ctx } = stubCtx()
+  const executor = new ShellSelectExecutor(ctx, {
+    shells: boxFields({ shells: baseConfig().shells }).shells,
+    default: 'git-bash',
+    timeoutMs: 30000,
+  })
+  assert.equal(executor.entryFor(undefined).id, 'git-bash')
+  assert.equal(executor.config.timeoutMs, 30000)
+})
+
+test('入参缺省:null/undefined 落出厂默认,不抛', () => {
+  const { ctx } = stubCtx()
+  const fromNull = new ShellSelectExecutor(ctx, null)
+  assert.equal(fromNull.entryFor(undefined).id, 'pwsh')
+  fromNull.refresh(null)
+  assert.equal(fromNull.entryFor(undefined).id, 'pwsh')
+  const fromUndefined = new ShellSelectExecutor(ctx, undefined)
+  assert.equal(fromUndefined.entryFor(undefined).id, 'pwsh')
+})
+
+test('fail-loud:解箱后仍非法的形态炸在挂载点,不静默回落出厂默认', () => {
+  const { ctx } = stubCtx()
+  // ref 容器但解箱值非法(模拟宿主 resolve 形态契约变化):strict 必须抛
+  assert.throws(
+    () => new ShellSelectExecutor(ctx, { shells: { get: () => 'not-array' }, default: 'pwsh' }),
+    /形态非法.*shells/,
+  )
+  // 同形态宽容路径(resolveConfig)不抛——降级语义仅保留给持久化读回
+  assert.doesNotThrow(() => new ShellSelectExecutor(ctx, baseConfig()))
 })

@@ -89,4 +89,10 @@ node scripts/dev-link.mjs dsh-session-manager   # 仓库根执行:归一 profile
 
 ## dsh 版本兼容
 
-0.1.2-rc.1 / 0.1.5-rc.3 通过:归档入口、激活 live、diagnostics 0 findings。0.1.7-rc.1 上宿主服务拓扑变化(workspaceRegistry 激活链)导致本包七项 inject 未满足、HTTP 面 404,功能待宿主 rc 线定型后专项对齐(详见包内 兼容性测试.md 与仓库兼容性进度文档 FIND-RC1-1)。
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;4 格无夹具豁免,按文档以空态替代)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 完全适配(设置 HTTP 写读闭环 auto-archive + 「会话归档」分区渲染;FIND-RC1-1 已关闭=环境事故非插件缺陷);0.1.5-rc.3 曾判不崩溃底线通过(已被 2026-09-30 复测推翻,见上);历史窗口 0.1.2-rc.1 通过:归档入口、激活 live、diagnostics 0 findings。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

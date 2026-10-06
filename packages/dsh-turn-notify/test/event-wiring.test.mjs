@@ -462,13 +462,13 @@ test('Given 非提问的 tool/call When 事件到达 Then 不产生通知', asyn
   assert.equal(units.length, 0)
 })
 
-test('Given approval/request 观察者 When 触发 Then 投影审批单元且 next 同步放行', async () => {
+test('Given approval/asked 会话事件 When 到达 Then 投影恰好一条审批单元且 approval/request 无观察者', async () => {
   const { ctx, routes, handlers } = makeCtx()
   apply(ctx)
-  const tap = handlers.get('approval/request')
-  assert.equal(typeof tap, 'function')
-  const returned = tap({}, () => 'next-value')
-  assert.equal(returned, 'next-value')
+  // 回归锁定:审批通知单源为 session/event,waterfall 观察者不得回潮(双路重复送达)
+  assert.equal(handlers.get('approval/request'), undefined)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'approval/asked', data: { id: 'a-1', toolName: 'bash' } })
   const units = await projectionUnits(routes)
   assert.equal(units.filter((unit) => unit.category === 'approval').length, 1)
 })
@@ -508,8 +508,8 @@ test('Given 会话无事件日志可读 When 通知投递 Then 不抛并回落�
     sessionTitle: { get: () => { throw new Error('no event log') } },
   })
   apply(ctx)
-  const tap = handlers.get('approval/request')
-  tap({}, () => 'next')
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'approval/asked', data: { id: 'a-1', toolName: 'bash' } })
   const units = await projectionUnits(routes)
   const approval = units.find((unit) => unit.category === 'approval')
   assert.equal(approval.session, null)

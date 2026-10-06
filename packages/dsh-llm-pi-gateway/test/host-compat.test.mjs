@@ -30,6 +30,43 @@ test('场景: settings 无节安装面(0.1.7 形态),apply 走条目重载驱动
   assert.deepEqual(llmCalls.discovery, [SETTINGS_NS, OFFICIAL_SETTINGS_NS], '0.1.7 形态照常注册 discovery(接管态含官方 ns)')
 })
 
+const OFFICIAL_ROUTE_FORM = {
+  apiKeyEnv: 'OFFICIAL_KEY',
+  api: 'openai-completions',
+  baseURL: 'https://official.example.com',
+  models: [{ id: 'official-model' }],
+}
+
+test('场景: 0.1.7 形态官方行禁用停稳,官方节配置经 loader entry 读入路由表', async () => {
+  const officialEntry = {
+    disabled: true,
+    fiber: { config: { providers: { 'official-route': { ...OFFICIAL_ROUTE_FORM } } } },
+    options: { id: 'llm-pi-ai' },
+  }
+  const loader = { resolve: (id) => (id === 'llm-pi-ai' ? officialEntry : undefined) }
+  const { ctx, llmCalls, installed } = makeCtx({ legacySettings: true, loader })
+  await apply(ctx, gatewayConfig(), OFFICIAL_STUB)
+  assert.deepEqual(installed, [], '0.1.7 形态不装节')
+  assert.ok(llmCalls.adapters.at(-1).includes('official-route'), '官方节路由必须进表(接管读路径不得断)')
+  assert.ok(llmCalls.adapters.at(-1).includes('new-api'), 'gateway 节路由并存')
+})
+
+test('场景: 0.1.7 形态官方节 volatile ref 写入经解包进路由(热更新读路径)', async () => {
+  let stored = { providers: { 'official-route': { ...OFFICIAL_ROUTE_FORM } } }
+  const officialEntry = {
+    disabled: true,
+    fiber: { config: { providers: { get: () => stored.providers } } },
+    options: { id: 'llm-pi-ai' },
+  }
+  const loader = { resolve: (id) => (id === 'llm-pi-ai' ? officialEntry : undefined) }
+  const { ctx, llmCalls } = makeCtx({ legacySettings: true, loader })
+  await apply(ctx, gatewayConfig(), OFFICIAL_STUB)
+  assert.ok(llmCalls.adapters.at(-1).includes('official-route'), 'ref 协议值必须解包进表')
+  stored = { providers: {} }
+  ctx.emitVolatileUpdate()
+  assert.equal(llmCalls.adapterReplacements.at(-1)?.includes('official-route'), false, 'volatile 写入后官方路由随快照重算退场')
+})
+
 test('探测清单:缺失任一必备导出即报告其名,双缺报告两名', () => {
   const partial = { ...realDshLlm, offloadedImageText: undefined }
   assert.deepEqual(missingHostExports(partial), ['offloadedImageText'])
@@ -40,14 +77,15 @@ test('探测清单:缺失任一必备导出即报告其名,双缺报告两名', 
 // 假宿主:settings 安装记录可注入接管失败形态,llm 注册与 logger 全程 spy。
 const CONFLICT_MESSAGE_FORM = (ns) => `settings namespace "${ns}" is already registered`
 
-function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySettings = false, noSettings = false } = {}) {
+function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySettings = false, noSettings = false, loader = undefined } = {}) {
   const logs = { warn: [], error: [] }
   const installed = []
   const hooksByNs = {}
-  const llmCalls = { adapters: [], adapterReplaces: 0, directories: 0, discovery: [] }
+  const llmCalls = { adapters: [], adapterReplacements: [], adapterReplaces: 0, directories: 0, discovery: [] }
   const sectionValues = {}
   const discoveries = new Set()
   if (officialDiscoveryPresent) discoveries.add(OFFICIAL_SETTINGS_NS)
+  const volatileListeners = []
   const ctx = {
     logger: {
       warn: (message) => logs.warn.push(message),
@@ -55,12 +93,23 @@ function makeCtx({ officialInstallFailure, officialDiscoveryPresent, legacySetti
     },
     get: () => undefined,
     // 复活守卫注册面与自停面:loader 缺失 → 官方行缺席 → 接管态装守卫
-    on: () => {},
+    on: (event, listener) => {
+      if (event === 'loader/volatile-update') volatileListeners.push(listener)
+    },
+    emitVolatileUpdate: () => {
+      for (const listener of volatileListeners) listener()
+    },
+    loader,
     fiber: { dispose: async () => {} },
     llm: {
       registerAdapter: (providers) => {
         llmCalls.adapters.push(providers)
-        return { replace: () => { llmCalls.adapterReplaces += 1 } }
+        return {
+          replace: (next) => {
+            llmCalls.adapterReplaces += 1
+            llmCalls.adapterReplacements.push(next)
+          },
+        }
       },
       registerConfigurableProviders: () => {
         llmCalls.directories += 1

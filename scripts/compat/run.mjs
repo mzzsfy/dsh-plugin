@@ -1,8 +1,11 @@
 // 单版本端到端兼容性验证(docs/兼容性测试/测试与隔离方法.md 逐包标准流程的自动化):
 // 宿主安装 → 隔离 profile → 杀旧进程 → boot(等就绪 + 取 token)→ HTTP 冒烟 →
 // activation live + diagnostics findings 0 → 浏览器渲染探针 → 进程收尾。
-// 判定门槛 = 统一底线:activation live + findings 0 + 页面无 Failed to load plugins + 正常访问。
-// 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals]
+// 判定门槛两档:缺省 = 完全适配(正常访问 + activation live + diagnostics findings 0 +
+// 页面渲染工作区文案且无 Failed to load plugins + LLM 链路 + 无行级加载失败);
+// --crash-only = 不崩溃(正常访问 + 页面渲染且无 Failed to load plugins +
+// 无行级加载失败,跳过模拟器/activation/LLM——窗口基线槽口径)。
+// 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals] [--crash-only]
 import { spawn, spawnSync } from 'node:child_process'
 import { createWriteStream, existsSync, lstatSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +14,9 @@ import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
 import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
 import { isSemver } from './window.mjs'
+import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
+import { judgeUpstreamSeen, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
+import { PLATFORM_GATED_BUNDLES } from './compat-criteria.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
 const BOOT_SETTLE_MS = 8 * 1000
@@ -38,6 +44,7 @@ function parseArgs(argv) {
       '--host-dir': () => { args.hostDir = argv[++i] },
       '--work-root': () => { args.workRoot = argv[++i] },
       '--skip-externals': () => { args.skipExternals = true },
+      '--crash-only': () => { args.crashOnly = true },
       '--seed-gateway': () => { args.seedGateway = true },
       '--only': () => {
         const short = argv[++i]
@@ -51,6 +58,7 @@ function parseArgs(argv) {
     handler()
   }
   if (!args.version) throw new Error('缺少 --version')
+  if (args.keep === true && args.crashOnly === true) throw new Error('--keep 与 --crash-only 互斥(keep 依赖 LLM 模拟器)')
   if (!isSemver(args.version)) throw new Error(`非法版本号: ${args.version}`)
   if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) throw new Error(`--port 非法: ${args.port}`)
   // spawn 会切换 cwd,路径参数必须先定死为绝对
@@ -174,8 +182,9 @@ function extractToken(bootLogPath) {
   return matches.at(-1)?.[1] ?? ''
 }
 
-// activation 全 live;findings 以命中时的响应为准随结果返回。未就绪(404/激活中)
-// 重试至多轮上限;live 后短暂 findings>0 的热载瞬态不拖死整体判定(终态快照落盘可查)
+// activation 全 live 且 findings 0 才提前返回;live 后短暂 findings>0 视为热载瞬态,
+// 继续轮询让其沉降,耗尽轮次仍不满足即按当前终态返回(快照落盘可查),由判定端处置。
+// 未就绪(404/激活中)同样重试至多轮上限
 async function checkActivation(base, token, bundleNames, workDir) {
   const url = `${base}/dsh-market/installed?token=${token}`
   const options = { headers: { Origin: base, Referer: `${base}/` } }
@@ -197,7 +206,7 @@ async function checkActivation(base, token, bundleNames, workDir) {
           findingsSample: findings.slice(0, 5),
           apiShape: Object.keys(data),
         }
-        if (lastSeen.liveAll) {
+        if (lastSeen.liveAll && lastSeen.findingsCount === 0) {
           writeFileSync(join(workDir, 'installed.json'), lastRaw, 'utf8')
           return lastSeen
         }
@@ -240,6 +249,9 @@ const SIM_BOOT_TIMEOUT_MS = 15 * 1000
 
 function startSimulator(workDir) {
   const logPath = join(workDir, 'llm-echo.jsonl')
+  // 留档按轮截断:recorder 是 append 语义,复用 workDir 复跑时旧轮请求行会污染
+  // 本轮判定(upstreamSeen/亲和头读全文件),必须先清零再起模拟器
+  writeFileSync(logPath, '')
   const child = spawn(process.execPath, [
     join(REPO_ROOT, 'scripts', 'echo-upstream.mjs'), '--port', '0', '--log', logPath,
   ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: true })
@@ -265,40 +277,6 @@ function startSimulator(workDir) {
 const LLM_PROBE_TIMEOUT_MS = 120 * 1000
 
 async function runLlmVerification(base, token, simulatorPort, workDir) {
-  const providerPatch = {
-    type: 'client-request',
-    rpcId: `compat-llm-${Date.now()}`,
-    method: 'settings/update',
-    path: '/api/settings/update',
-    payload: {
-      args: {
-        ns: 'llm-pi-gateway',
-        patch: {
-          providers: {
-            'echo-openai': {
-              displayName: 'Echo OpenAI',
-              api: 'openai-completions',
-              baseURL: `http://127.0.0.1:${simulatorPort}`,
-              apiKeyEnv: 'ECHO_KEY',
-              defaultInput: ['text'],
-              models: [{ id: 'echo-model', name: 'Echo Model', input: ['text'] }],
-            },
-            // anthropic 通道条目:#3 metadata.user_id 派生标记与 #5 亲和头发射
-            // 都从该路由的真实发话留档断言;compat 开 sendSessionAffinityHeaders
-            'echo-anthropic': {
-              displayName: 'Echo Anthropic',
-              api: 'anthropic-messages',
-              baseURL: `http://127.0.0.1:${simulatorPort}`,
-              apiKeyEnv: 'ECHO_KEY',
-              defaultInput: ['text'],
-              compat: { sendSessionAffinityHeaders: true },
-              models: [{ id: 'echo-a-model', name: 'Echo A Model', input: ['text'] }],
-            },
-          },
-        },
-      },
-    },
-  }
   // #3/#5 第二段:默认模型切 echo-anthropic/echo-a-model 后新会话发话,上游即
   // anthropic /messages 通道;留档 headers/body 断言亲和头与派生标记
   const anthropicDefaultPatch = {
@@ -313,11 +291,52 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
       },
     },
   }
+  // 宿主 0.2.0 起无可用 provider 时 DeepSeekOnboardingDialog 自动弹出,输入框
+  // autoFocus 抢占焦点且 appRoot 置 inert:探针的 type 会整段落进 API Key 输入框,
+  // 中文消息触发「密钥格式错误」字段校验,发话被吞(FIND-020-1 伪影根因)。
+  // 每轮 type 前先关弹窗,type 后校验 composer 实际持有文本。
+  // 三个 eval 与判定值表定义在模块顶层(export 供 fixture 自测复用)
+  // 发话到位判定:type.ok/send.ok 只证明探针调用不抛错,onboarding 弹窗在场时
+  // 键盘事件会整段落入其输入框且不抛错(FIND-020-1),必须以 dismiss 结果与
+  // composer 实际文本为准
+  const chatMessage = '回复:ok'
+  const anthropicMessage = '回复:anth'
+  const composerTextOf = (name) => {
+    try {
+      return JSON.parse(stepByName[name]?.value ?? '{}').composerText
+    } catch {
+      return ''
+    }
+  }
+  const onboardingCleared = (name) => ONBOARDING_CLEARED_VALUES.includes(stepByName[name]?.value)
+  // 0.2.x 会话面以工作区为锚:全新 profile 无 workspace.json 绑定时会话视图
+  // 落「选择一个工作区」空态,composer 不渲染(linux CI 实爆);探针先经
+  // workspace/create 绑定确定性目录,幂等(已绑定返回 created=false)
+  const workspaceDir = join(workDir, 'workspace')
+  mkdirSync(workspaceDir, { recursive: true })
   const steps = [
-    { name: 'register-echo-provider', http: { path: '/api/settings/update', method: 'POST', body: providerPatch } },
-    { name: 'wait-hot-reload', wait: 4 * 1000 },
-    // 重载页面:UI 在挂载时拉一次模型目录,settings/update 的 live 生效不触发
-    // 前端刷新,不重载则目录里没有 echo,默认模型被判"不可用",composer 消失
+    // 工作区绑定先行且必须先于页面挂载:API 创建不推送前端 store,后创建需
+    // 二次重载;前置创建则 reload-page 挂载时注册表已含工作区,空态面不出现
+    {
+      name: 'workspace-create',
+      http: {
+        path: '/api/workspace/create',
+        method: 'POST',
+        body: {
+          type: 'client-request',
+          rpcId: 'compat-workspace-create',
+          method: 'workspace/create',
+          path: '/api/workspace/create',
+          payload: { args: { request: { path: workspaceDir } } },
+        },
+      },
+    },
+    { name: 'wait-workspace', wait: 1500 },
+    // 注册面 = --seed-gateway 装载期 patch(唯一路径):宿主对插件 ns 的运行期
+    // settings/update 写入门控已收紧(0.2.0 起 "no longer configurable"),写尝试
+    // 只产生条目 dispose 噪音,污染后续冷启动断言;注册语义由 L1 config 测试锁定
+    // 重载页面:UI 在挂载时拉一次模型目录,seed 的 live 生效不触发前端刷新,
+    // 不重载则目录里没有 echo,默认模型被判"不可用",composer 消失
     { name: 'reload-page', goto: `${base}/?token=${token}` },
     { name: 'wait-ui-settle', wait: 2500 },
     // 真实对话驱动:默认模型已由 composition patch 指向 echo(provider 声明显式
@@ -337,14 +356,11 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     { name: 'wait-intro-gone', wait: 800 },
     {
       name: 'new-session',
-      eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
-        if (!hit) return 'new-session-not-found'
-        hit.click()
-        return 'clicked'
-      })()`,
+      eval: newSessionEval,
     },
     { name: 'wait-composer', wait: 2500 },
+    { name: 'dismiss-onboarding', eval: dismissOnboardingEval },
+    { name: 'wait-after-dismiss', wait: 800 },
     {
       name: 'diag-catalog',
       eval: `(async () => {
@@ -371,7 +387,8 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
         })
       })()`,
     },
-    { name: 'type-message', type: { selector: '[contenteditable="true"]', text: '回复:ok' } },
+    { name: 'type-message', type: { selector: '[contenteditable="true"]', text: chatMessage } },
+    { name: 'verify-typed', eval: verifyTypedEval },
     { name: 'send', press: 'Enter' },
     { name: 'wait-roundtrip', wait: 10 * 1000 },
     {
@@ -385,21 +402,35 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
         return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
       })()`,
     },
+    {
+      // composer 缺席取证面:DOM 结构摘要(属性值/输入面/按钮文案/面板 class/页面文本),
+      // 与 ci.mjs 注解取证通道联动——composer 不在 DOM 时给出页面真实形态
+      name: 'dom-scan',
+      eval: `(() => {
+        const editable = [...document.querySelectorAll('[contenteditable]')].map((el) => el.getAttribute('contenteditable'))
+        const inputs = document.querySelectorAll('textarea, input').length
+        const buttons = [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 15)
+        const panels = [...document.querySelectorAll('[class]')]
+          .map((el) => el.className)
+          .filter((c) => typeof c === 'string' && /composer|editor|chat|session|welcome|empty|onboard/i.test(c))
+          .slice(0, 10)
+        const text = (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 400)
+        return JSON.stringify({ editable, inputs, buttons, panels, text })
+      })()`,
+    },
     // ---- #3/#5 anthropic 段:默认模型切 echo-anthropic 后再发一轮,上游走
     // /v1/messages;亲和头与 metadata.user_id 从该轮留档断言
     { name: 'switch-default-anthropic', http: { path: '/api/settings/update', method: 'POST', body: anthropicDefaultPatch } },
     { name: 'wait-anthropic-switch', wait: 3 * 1000 },
     {
       name: 'new-session-anthropic',
-      eval: `(() => {
-        const hit = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '') + b.textContent.includes('新建会话'))
-        if (!hit) return 'new-session-not-found'
-        hit.click()
-        return 'clicked'
-      })()`,
+      eval: newSessionEval,
     },
     { name: 'wait-composer-anthropic', wait: 2500 },
-    { name: 'type-message-anthropic', type: { selector: '[contenteditable="true"]', text: '回复:anth' } },
+    { name: 'dismiss-onboarding-anthropic', eval: dismissOnboardingEval },
+    { name: 'wait-after-dismiss-anthropic', wait: 800 },
+    { name: 'type-message-anthropic', type: { selector: '[contenteditable="true"]', text: anthropicMessage } },
+    { name: 'verify-typed-anthropic', eval: verifyTypedEval },
     { name: 'send-anthropic', press: 'Enter' },
     { name: 'wait-roundtrip-anthropic', wait: 10 * 1000 },
     {
@@ -411,6 +442,21 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
           .filter((t) => t.length > 0)
           .slice(0, 5)
         return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
+      })()`,
+    },
+    {
+      // anthropic 段同款取证(切默认模型后第二形态)
+      name: 'dom-scan-anthropic',
+      eval: `(() => {
+        const editable = [...document.querySelectorAll('[contenteditable]')].map((el) => el.getAttribute('contenteditable'))
+        const inputs = document.querySelectorAll('textarea, input').length
+        const buttons = [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 15)
+        const panels = [...document.querySelectorAll('[class]')]
+          .map((el) => el.className)
+          .filter((c) => typeof c === 'string' && /composer|editor|chat|session|welcome|empty|onboard/i.test(c))
+          .slice(0, 10)
+        const text = (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 400)
+        return JSON.stringify({ editable, inputs, buttons, panels, text })
       })()`,
     },
   ]
@@ -442,19 +488,39 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     })
   })
   const stepByName = Object.fromEntries((probeResult.results ?? []).map((r) => [r.name, r]))
-  const registration = stepByName['register-echo-provider']?.value?.body
-  const providerRegistered = stepByName['register-echo-provider']?.ok === true
-    && registration !== null
-    && typeof registration === 'object'
-    && registration.error === undefined
-  const chatDriven = stepByName['new-session']?.value === 'clicked'
+  // 注册判定以模型目录为准(routableProviders 含 echo-openai):settings/update 运行期
+  // 热更与 --seed-gateway 装载期注册两种形态都在目录收敛;宿主对插件 ns 的写入门控
+  // 随世代收紧(0.2.0 起 "no longer configurable"),目录形态不受其影响
+  let catalogEcho = false
+  try {
+    const catalog = JSON.parse(stepByName['diag-catalog']?.value ?? '{}')
+    catalogEcho = (catalog.routableProviders ?? []).includes('echo-openai')
+  } catch { /* 目录步失败按未注册处理 */ }
+  const providerRegistered = catalogEcho
+  // 工作区绑定判定走响应体:网关把业务失败包在 HTTP 200 里(result.ok=false),
+  // 状态门槛与步骤 ok 均不可见,绑定失败时新建会话不产生会话,type 面即空态假信号
+  const workspaceCreated = (() => {
+    // http 步 value 是对象(l3-probe evaluate 原样返回),字符串形态仅历史留档兼容
+    const raw = stepByName['workspace-create']?.value
+    try {
+      const shape = typeof raw === 'string' ? JSON.parse(raw) : raw
+      return shape?.body?.result?.ok === true
+    } catch { return false }
+  })()
+  const chatDriven = workspaceCreated
+    && stepByName['new-session']?.value === 'clicked'
     && stepByName['type-message']?.ok === true
     && stepByName['send']?.ok === true
+    && onboardingCleared('dismiss-onboarding')
+    && composerTextOf('verify-typed') === chatMessage
   // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
-  const anthropicDriven = stepByName['switch-default-anthropic']?.ok === true
+  const anthropicDriven = workspaceCreated
+    && stepByName['switch-default-anthropic']?.ok === true
     && stepByName['new-session-anthropic']?.value === 'clicked'
     && stepByName['type-message-anthropic']?.ok === true
     && stepByName['send-anthropic']?.ok === true
+    && onboardingCleared('dismiss-onboarding-anthropic')
+    && composerTextOf('verify-typed-anthropic') === anthropicMessage
   // 留档证据:任一对话请求打到模拟器即链路通(openai /chat/completions 或
   // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)。
   // anthropic 轮单独取证:#3 metadata.user_id 派生标记 + #5 亲和头发射
@@ -464,7 +530,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   try {
     const lines = readFileSync(join(workDir, 'llm-echo.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
     upstreamKinds = [...new Set(lines.map((l) => l.path))]
-    upstreamSeen = lines.some((l) => l.path.includes('/chat/completions') || l.path.includes('/messages'))
+    upstreamSeen = judgeUpstreamSeen(lines)
     const anthropicTurns = lines.filter((l) => l.path.includes('/messages'))
     const last = anthropicTurns.at(-1)
     if (last !== undefined) {
@@ -502,9 +568,23 @@ async function main() {
   const base = `http://127.0.0.1:${args.port}`
   const checks = { page: false, activation: null, browser: null, llm: null }
 
-  // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录
+  // 宿主安装(幂等):已装则复用,支持 --host-dir 指向既有 .dsh-versions 目录;
+  // 复用前校验闭包版本与目标一致(B12:binGuess 在场即复用会让 0.2.0 请求跑到
+  // 0.1.x 闭包上,全部版本敏感断言静默失真),不一致显式 FAIL——闭包可能被
+  // .dsh-versions 共享,自动重装属破坏性操作,交人工处置
   const binGuess = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const groupPath = join(hostDir, 'node_modules', '@deepseek-ai', 'cordis-plugin-group')
+  if (existsSync(binGuess)) {
+    let installedVersion = null
+    try {
+      installedVersion = JSON.parse(readFileSync(join(hostDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version ?? null
+    } catch { installedVersion = null }
+    if (installedVersion !== null && installedVersion !== args.version) {
+      log(`[${args.version}] FAIL: 复用闭包版本不匹配(闭包=${installedVersion},请求=${args.version});删 ${hostDir} 或改 --host-dir 后重试`)
+      process.exitCode = 1
+      return
+    }
+  }
   if (!existsSync(binGuess)) {
     mkdirSync(hostDir, { recursive: true })
     // 幽灵依赖补装(CORDIS_GROUP_PIN):与 dsh 同闭包声明,一条 pnpm add 装齐
@@ -522,7 +602,22 @@ async function main() {
     await runCmd('pnpm', ['add', `@deepseek-ai/cordis-plugin-group@${CORDIS_GROUP_PIN}`], { cwd: hostDir })
   }
 
-  const profile = await buildProfile({ version: args.version, workRoot: args.workRoot, hostDir, seedGateway: args.seedGateway === true, only: args.only ?? [] })
+  // LLM 模拟器先于 profile 构建启动:--seed-gateway 的 patch 行 config 需要模拟器
+  // 实际端口(baseURL 注入),模拟器 --port 0 动态分配,无法预写
+  let simulator = null
+  if (!args.crashOnly) {
+    // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
+    simulator = await startSimulator(workDir)
+    log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
+  }
+  const profile = await buildProfile({
+    version: args.version,
+    workRoot: args.workRoot,
+    hostDir,
+    seedGateway: args.seedGateway === true,
+    gatewayBaseURL: simulator ? `http://127.0.0.1:${simulator.port}` : undefined,
+    only: args.only ?? [],
+  })
   log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
 
   // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
@@ -540,11 +635,7 @@ async function main() {
   const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
   let child = null
   let restoreBridge = null
-  let simulator = null
   try {
-    // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
-    simulator = await startSimulator(workDir)
-    log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
@@ -581,8 +672,14 @@ async function main() {
     }
     checks.page = pageRes !== null && (pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400))
 
-    checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
-    log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
+    if (!args.crashOnly) {
+      // 平台门控包在 POSIX 按设计不 live,不入 liveAll 期望集
+      const expectedLive = process.platform === 'win32'
+        ? profile.bundleNames
+        : profile.bundleNames.filter((name) => !PLATFORM_GATED_BUNDLES.includes(name))
+      checks.activation = await checkActivation(base, token, expectedLive, workDir)
+      log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
+    }
     checks.browser = await runBrowserProbe(
       fileURLToPath(new URL('./browser-probe.mjs', import.meta.url)),
       `${base}/?token=${token}`,
@@ -592,8 +689,10 @@ async function main() {
 
     // LLM 链路验证(链路级边界:provider 注册 → 宿主经 gateway 打到模拟器 → 留档证据;
     // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
-    checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
-    log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    if (!args.crashOnly) {
+      checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
+      log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+    }
     // --keep:宿主与模拟器存活导出(后续 l3-probe 接管跑 UI 专项);
     // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出
     if (args.keep === true) {
@@ -616,21 +715,21 @@ async function main() {
     }
   }
 
-  const llmOk = checks.llm !== null && checks.llm.providerRegistered && checks.llm.chatDriven && checks.llm.upstreamSeen
+  const llmOk = judgeLlm(checks.llm)
   // boot.log 入库面断言:行级 "failed to import"/"did not activate" 不阻塞
   // boot(0.1.7-rc.1 实测 false-pass——主行 import 崩溃仅此一行 error,activation
   // 仍 live)。本包任一行出现加载失败字样直接 FAIL,与 activation/llm 判定并联
   let importFailures = []
   try {
     const names = enumeratePackages().all
-    const text = readFileSync(bootLogPath, 'utf8')
-    importFailures = text.split('\n').filter((line) =>
-      names.some((name) => line.includes(name)) && /failed to import|did not activate/.test(line))
+    importFailures = judgeImportFailures(readFileSync(bootLogPath, 'utf8').split('\n'))
   } catch { /* 日志缺失按无失败处理,activation/llm 判定兜底 */ }
 
-  const ok = checks.page && checks.activation.liveAll && checks.browser.ok && llmOk && importFailures.length === 0
-  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, checks, importFailures, ok }, null, 2), 'utf8')
-  log(`[${args.version}] 判定 ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
+  // 基线槽只判不崩溃:页面可达 + 渲染无加载失败 + 无行级加载失败
+  const crashOnly = args.crashOnly === true
+  const ok = judgeFinal({ crashOnly, page: checks.page, browserOk: checks.browser.ok, activation: checks.activation, llm: checks.llm, importFailures })
+  writeFileSync(join(workDir, 'result.json'), JSON.stringify({ version: args.version, mode: crashOnly ? 'crash-only' : 'full', checks, importFailures, ok }, null, 2), 'utf8')
+  log(`[${args.version}] 判定(${crashOnly ? '不崩溃口径' : '完全适配口径'}) ${ok ? 'PASS' : 'FAIL'}(明细 ${join(workDir, 'result.json')})${importFailures.length > 0 ? ` 行加载失败: ${importFailures.join(' | ')}` : ''}`)
   process.exitCode = ok ? 0 : 1
 }
 

@@ -43,6 +43,12 @@ export function unitFailCount(logText) {
   return line ? line.split(' ')[2] : null
 }
 
+// spec reporter 的 skip 统计行;无该行(旧 runner/全崩)视 0
+export function unitSkipCount(logText) {
+  const line = logText.split('\n').find(candidate => candidate.startsWith('ℹ skipped'))
+  return line ? Number(line.split(' ')[2]) || 0 : 0
+}
+
 // 测试文件平台过滤:通用 + 当前平台专属;platform 参数供测试注入
 export function filterTestFiles(files, platform = process.platform) {
   const platformSuffix = PLATFORM_TEST_SUFFIXES[platform]
@@ -60,8 +66,10 @@ export function applicableTestFiles(dir, testDir) {
     .map(f => join(testDir, f))
 }
 
-// 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号)
+// 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号);
+// 非数组输入(null = changedFilesList 的 fail-open 信号)同样返回 null,禁止崩溃
 export function parseChangedPackages(lines) {
+  if (!Array.isArray(lines)) return null
   const packages = new Set()
   for (const line of lines) {
     const segments = line.split('/')
@@ -77,6 +85,16 @@ export function changedFilesList(base) {
   const result = spawnSync('git', ['diff', '--name-only', `${base}..HEAD`], {cwd: REPO_ROOT, encoding: 'utf8', windowsHide: true})
   if (result.status !== 0 || typeof result.stdout !== 'string') return null
   return result.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+}
+
+// 仓库根解析桥供给检查:root package.json 声明的依赖在 node_modules 缺项时逐个列出。
+// 缺项时逐包单测会以 MODULE_NOT_FOUND 大面积恒红,且与真实代码失败不可区分(类7 现症
+// 2026-10-01:宿主闭包拷贝覆盖 npm 供给,7 包 1538 用例恒红无人发现);预检把这类
+// 环境损伤变成一条可行动的显式失败,先于任何单元执行
+export function missingBridgeDeps(repoRoot, rootPackageJsonPath = join(repoRoot, 'package.json')) {
+  const manifest = JSON.parse(readFileSync(rootPackageJsonPath, 'utf8'))
+  const deps = manifest.dependencies ?? {}
+  return Object.keys(deps).filter(name => !existsSync(join(repoRoot, 'node_modules', ...name.split('/'))))
 }
 
 // 单元发现:冒烟 + 含适用测试文件的包(字典序,保轮次间顺序稳定)+ 仓库根 tests。
@@ -147,10 +165,16 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
     log(`::group::第 ${round}/${rounds} 轮`)
     // 本轮失败单元个数(事件计数,同一单元连败多轮每轮各计 1)
     let roundFails = 0
+    // skip 可见性:OK 单元的 skip 数也要呈现(CI 恒 skip 的防绿断言若不可见即假绿,F 现症)
+    let roundSkips = 0
+    const skipDetail = []
     for (const unit of units) {
       const logPath = roundLogPath(logDir, unit.name, round)
       if (await runUnit(unit, logPath)) {
-        log(`OK   ${unit.name}`)
+        const skipCount = unitSkipCount(readFileSync(logPath, 'utf8'))
+        roundSkips += skipCount
+        if (skipCount > 0) skipDetail.push(`${unit.name}(${skipCount})`)
+        log(`OK   ${unit.name}${skipCount > 0 ? ` (skipped ${skipCount})` : ''}`)
         rmSync(logPath, {force: true})
         continue
       }
@@ -167,6 +191,8 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
       for (const name of namesFromLogs(logText.split('\n')).slice(0, PREVIEW_LIMIT)) log(`  ✖ ${name}`)
     }
     log(`本轮失败单元数: ${roundFails}`)
+    // 0 skip 也输出:汇总行缺席本身即不可观测(恒 skip 的假绿必须显式曝光)
+    log(`本轮 skip 用例数: ${roundSkips}${skipDetail.length > 0 ? ` (${skipDetail.join(', ')})` : ''}`)
     log('::endgroup::')
   }
   log(`汇总: ${rounds} 轮, 失败单元累计 ${totalFailures(failed)}`)
@@ -206,6 +232,11 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
 
 async function main() {
   const {rounds, changedSince} = parseArgs(process.argv.slice(2))
+  const missing = missingBridgeDeps(REPO_ROOT)
+  if (missing.length > 0) {
+    console.log(`::error::仓库根解析桥缺供给: ${missing.join(', ')} — 先在仓库根执行 npm install(按 package.json dependencies 供给),再跑单元;缺项时逐包单测恒红且与代码失败不可区分`)
+    return {failures: 1, failedUnits: []}
+  }
   const changedLines = changedSince === undefined ? undefined : changedFilesList(changedSince)
   const units = discoverUnits(REPO_ROOT, changedLines)
   const scoped = changedLines === undefined || changedLines === null

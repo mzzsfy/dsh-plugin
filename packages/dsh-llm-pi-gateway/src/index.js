@@ -205,6 +205,18 @@ export async function apply(ctx, config, importOfficial = () => import('@deepsee
     return { providers: unwrapVolatile(section?.providers) ?? {} }
   }
   let readOfficial = () => undefined
+  if (!legacySectionFace) {
+    // 0.1.7+ 行树形态:官方节值随官方 entry 配置链走(loader.resolve 命中禁用
+    // 行,settings 面无单节读 API);直读 entry 配置等价 legacy setSource 注入。
+    // 运行时禁用后行仍在树,volatile 节写就地换 ref 并经 volatile-update 事件
+    // 驱动 snapshot 重读;fiber 未启(禁用停稳后清理)回落 options 原始 patch 值
+    readOfficial = () => {
+      const entry = officialState.entry
+      const section = unwrapVolatile(entry?.fiber?.config ?? entry?.options?.config)
+      if (section === undefined || section === null || typeof section !== 'object') return undefined
+      return { providers: unwrapVolatile(section.providers) ?? {} }
+    }
+  }
   let readGateway = gatewaySection
   let lastSnapshot
   let memoized

@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  APPROVAL_ASKED_KIND,
   CATEGORIES,
   CATEGORY_DONE,
   CATEGORY_ERROR,
@@ -41,7 +42,6 @@ import {
   TITLE_MAX_CHARS,
   readRawBody,
   sessionTitle,
-  createApprovalTap,
   sendWebhook,
   TONE_BELL,
   TONE_UP_ARPEGGIO,
@@ -129,6 +129,36 @@ test('非回合结束事件仅 ask_user_question tool/call 命中提问分类', 
   assert.equal(mapEventToCategory('turn/start', {}), null)
 })
 
+test('approval/asked 会话事件命中审批分类(宿主 waterfall 被 UI 独占时的唯一信号)', () => {
+  assert.equal(
+    mapEventToCategory('approval/asked', { id: 'a-1', toolName: 'bash', reason: 'escalate' }),
+    CATEGORY_APPROVAL,
+  )
+  // 同一命名空间下的其他事件不误判为审批
+  assert.equal(mapEventToCategory('approval/decided', { id: 'a-1', outcome: 'allowed-once' }), null)
+  assert.equal(mapEventToCategory('approval/policy', { policy: 'ask' }), null)
+})
+
+test('审批通知即时送达,不受最短回合时长过滤', () => {
+  const settings = { enabled: { approval: true }, rootsOnly: true, minTurnDurationMs: 5000 }
+  // 即使时长为 0(< 阈值),approval/asked 仍应放行
+  assert.equal(shouldNotify({
+    category: CATEGORY_APPROVAL,
+    kind: APPROVAL_ASKED_KIND,
+    durationMs: 0,
+    settings,
+    header: {},
+  }), true)
+  // 对照:turn/end 类仍受碎轮过滤
+  assert.equal(shouldNotify({
+    category: CATEGORY_DONE,
+    kind: 'turn/end',
+    durationMs: 0,
+    settings,
+    header: {},
+  }), false)
+})
+
 test('rootsOnly 按子代理会话过滤', () => {
   const subByOrigin = { origin: 'subagent' }
   const subByDepth = { delegationDepth: 1 }
@@ -164,7 +194,7 @@ test('碎轮过滤仅作用于 turn/end 类,时长恰等边界放行', () => {
     category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS, settings, header: top,
   }), true)
   assert.equal(shouldNotify({
-    category: CATEGORY_APPROVAL, kind: 'approval/request', durationMs: null, settings, header: top,
+    category: CATEGORY_APPROVAL, kind: APPROVAL_ASKED_KIND, durationMs: null, settings, header: top,
   }), true)
   assert.equal(shouldNotify({
     category: CATEGORY_ASK, kind: 'tool/call', durationMs: null, settings, header: top,
@@ -545,20 +575,6 @@ test('标题提取:首个用户文本并截断', () => {
   assert.equal(sessionTitle(events), '帮我修复登录页面的崩溃问题')
   assert.equal(sessionTitle(eventsLong).length, TITLE_MAX_CHARS)
   assert.equal(sessionTitle([]), null)
-})
-
-test('审批观察器 next() 立即放行且只通知一次', () => {
-  const notified = []
-  const scheduled = []
-  const tap = createApprovalTap((unit) => { notified.push(unit) }, (fn) => { scheduled.push(fn) })
-  let nextCalled = 0
-  const returned = tap({ toolName: 'bash' }, () => { nextCalled += 1; return 'next-result' })
-  assert.equal(nextCalled, 1)
-  assert.equal(returned, 'next-result')
-  assert.equal(notified.length, 0)
-  for (const fn of scheduled) fn()
-  assert.equal(notified.length, 1)
-  assert.equal(notified[0].category, CATEGORY_APPROVAL)
 })
 
 test('webhook 发送吞错不抛出', async () => {

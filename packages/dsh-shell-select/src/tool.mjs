@@ -56,8 +56,8 @@ function processOutcome(proc) {
   return { status: 'completed', detail: `exit code: ${proc.exitCode ?? 0}` }
 }
 
-/** 前台结果 DTO 去只读化(官方 canonical 同构)。 */
-function canonicalResult(result) {
+/** 前台结果 DTO 去只读化(官方 canonical 同构);shellId 为执行事实,随块落存储供卡片徽章回放。 */
+function canonicalResult(result, shellId) {
   const output = (stream) => ({
     text: stream.text,
     truncated: stream.truncated,
@@ -72,6 +72,7 @@ function canonicalResult(result) {
     timeoutMs: result.timeoutMs,
     stdout: output(result.stdout),
     stderr: output(result.stderr),
+    ...shellId !== undefined ? { shell: shellId } : {},
     ...result.sandbox !== undefined ? { sandbox: {
       mode: result.sandbox.mode,
       denied: result.sandbox.denied,
@@ -81,10 +82,11 @@ function canonicalResult(result) {
   }
 }
 
-/** 后台输出并集公共键(官方同构)。 */
+/** 后台输出并集公共键(官方同构);shell 同前台,执行事实随 DTO 供渲染。 */
 const BACKGROUND_OUTPUT_PROPERTIES = {
   kind: { type: 'string', required: true, const: 'background' },
   jobId: { type: 'string', required: true },
+  shell: { type: 'string' },
 }
 
 /** 前台输出分支(官方同构,逐字段)。 */
@@ -108,6 +110,7 @@ function foregroundOutputProperties() {
     timeoutMs: { type: 'number', required: true },
     stdout: streamSchema,
     stderr: streamSchema,
+    shell: { type: 'string' },
     sandbox: {
       type: 'object',
       additionalProperties: false,
@@ -139,18 +142,9 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
 }
 
-/** pwsh 工具描述:兼容保留工具,开头一句禁止调用。 */
-function pwshDescription({ backgroundEnabled, escalationModes }) {
-  const base = 'Do not call this tool. It is kept only for backward compatibility with old sessions — call the `shell` tool instead. '
-    + 'It executes a PowerShell command and returns its stdout/stderr. '
-    + 'Each call runs in a fresh pwsh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
-    + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
-    + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
-    + (backgroundEnabled
-      ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
-      : 'Background execution is not available; long-running commands must finish within the timeout.')
-  if (escalationModes.length === 0) return base
-  return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
+/** pwsh 工具描述:兼容保留工具,只声明不要调用与去向,零执行语义。 */
+function pwshDescription() {
+  return 'Do not call; use `shell`.'
 }
 
 /**
@@ -189,7 +183,7 @@ export function registerShellTool(ctx, { executor }) {
     name: toolName,
     description: pinned === undefined
       ? shellDescription({ executor: faces.executor, backgroundEnabled, escalationModes })
-      : pwshDescription({ backgroundEnabled, escalationModes }),
+      : pwshDescription(),
     parameters: {
       command: {
         type: 'string',
@@ -243,7 +237,9 @@ export function registerShellTool(ctx, { executor }) {
       }] },
       render: (_args, value) => [{
         type: 'text',
-        text: value.kind === 'background' ? `started background job ${value.jobId}` : renderResult(value, escalationModes),
+        text: value.kind === 'background'
+          ? `started background job ${value.jobId}${value.shell !== undefined ? `\n[shell: ${value.shell}]` : ''}`
+          : renderResult(value, escalationModes, value.shell),
       }],
     },
     async execute(args, exec) {
@@ -269,11 +265,12 @@ export function registerShellTool(ctx, { executor }) {
         try {
           faces.executor.startFor(entry, faces.executor.resolve(request))
         } catch (error) {
-          if (isDenyError(error)) return { kind: 'foreground', blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+          if (isDenyError(error)) return { kind: 'foreground', shell: entry.id, blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
           throw error
         }
         return {
           kind: 'background',
+          shell: entry.id,
           jobId: jobs.start({
             kind: 'shell',
             label: args.command,
@@ -296,11 +293,11 @@ export function registerShellTool(ctx, { executor }) {
           signal: exec.signal,
         }))
       } catch (error) {
-        if (isDenyError(error)) return { kind: 'foreground', blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+        if (isDenyError(error)) return { kind: 'foreground', shell: entry.id, blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
         throw error
       }
       if (result.aborted) throw await abortError('tool call aborted')
-      return canonicalResult(result)
+      return canonicalResult(result, entry.id)
     },
     presentCall: (args) => {
       if (args.run_in_background === true) {

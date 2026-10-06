@@ -14,8 +14,11 @@ function streamText(output) {
  * 前台运行结果 → 模型可见文本。
  * @param {object} result ShellRunResult(含 sandbox 事实)
  * @param {string[]} escalationModes 本组合公示的升权目标;非空时拒绝标记后附升权提示
+ * @param {string|undefined} shellId 执行事实:实际生效的客户端条目 id;缺省不落标记
+ * (渲染面与官方逐字同构)。标记居 markers 首位,官方退出/信号锚保持末行,
+ * parseExitStatus 复原不受扰;客户端半区据此校正卡片徽章(配置事后变更不溯往)。
  */
-export function renderResult(result, escalationModes = []) {
+export function renderResult(result, escalationModes = [], shellId) {
   const out = streamText(result.stdout)
   const err = streamText(result.stderr)
   let body = out
@@ -25,6 +28,7 @@ export function renderResult(result, escalationModes = []) {
   }
   if (body.length === 0) body = '(no output)'
   const markers = []
+  if (shellId !== undefined) markers.push(`[shell: ${shellId}]`)
   if (result.sandbox?.denied) {
     markers.push(sandboxDenialMarker(result.sandbox.mode))
     if (escalationModes.length > 0) markers.push(escalationHintMarker('command'))

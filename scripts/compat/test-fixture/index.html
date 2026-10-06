@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<body>
+  <!-- l3-probe 探针的探针 fixture:基线断言文案 + 三变体(默认=可 dismiss 弹窗 / ?variant=non-dismissible=无「稍后配置」 / ?variant=no-dialog=无弹窗)。
+       FIND-020-1 陷阱机制同构真实宿主:弹窗在场时主容器 inert——composer 是唯一 [contenteditable="true"],
+       探针 click 10s 超时被 l3-probe try/catch 吞掉 → focus 在 inert 子树静默失效 → 逐键事件全部落入 autofocus 的密钥 input。
+       型签名:type.ok 绿 + composer 空;verifyTypedEval 读 composer 才能暴露。dismiss 后弹窗层移除且 inert 解除。
+       诱饵首按钮在弹窗移除后成为文档首个 button:new-session 谓词若恒真(「串+布尔」形态)必点它——decoyClicks 即回归判定。 -->
+  <div id="dialog-layer">
+    <div id="dialog" role="dialog" aria-label="DeepSeekOnboarding API Key 配置">
+      <input id="apikey" autofocus placeholder="API Key" />
+      <button id="later" onclick="dismissDialog()">稍后配置</button>
+    </div>
+  </div>
+  <div id="app" inert>
+    <header>工作区</header>
+    <button id="decoy" onclick="window.__fixture.decoyClicks++">首按钮</button>
+    <button id="new-session" aria-label="新建会话" onclick="window.__fixture.sessionClicks++">新建会话</button>
+    <div id="composer" contenteditable="true" style="min-height: 32px; border: 1px solid #ccc;"></div>
+  </div>
+  <script>
+    window.__fixture = { decoyClicks: 0, sessionClicks: 0 }
+    function dismissDialog() {
+      document.getElementById('dialog-layer').remove()
+      document.getElementById('app').removeAttribute('inert')
+    }
+    var variant = new URLSearchParams(location.search).get('variant')
+    if (variant === 'non-dismissible') document.getElementById('later').remove()
+    if (variant === 'no-dialog') dismissDialog()
+    // l3-probe 拆义变体:?variant=inert=弹窗与 composer 双缺(scan-inconclusive 哨兵)
+    if (variant === 'inert') { dismissDialog(); document.querySelector('[contenteditable="true"]').remove() }
+    // browser-probe 变体:?variant=fail-banner=行级加载失败横幅在场(判定取反);
+    // ?variant=blank=无工作台文案(渲染门槛死锁探针——WORKSPACE_TEXT 恒真变异即在此暴露)
+    if (variant === 'fail-banner') document.body.insertAdjacentHTML('beforeend', '<div id="fail-banner">Failed to load plugins</div>')
+    if (variant === 'blank') document.querySelector('header').remove()
+  </script>
+</body>
+</html>

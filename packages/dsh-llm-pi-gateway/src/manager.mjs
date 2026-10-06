@@ -76,7 +76,19 @@ export function createRouteManager({ routes, directoryErrors = () => new Map(), 
   let directoryFacts
   const ensureRegistration = () => {
     const facts = registrationFacts(routes())
-    if (deepEqualJson(facts, registeredFacts)) return
+    if (deepEqualJson(facts, registeredFacts) && registration !== undefined) {
+      // 宿主侧 fiber 卸载会连坐注册(cordis ambient scope 级联)而 facts 未变;
+      // replace 幂等重提交兼存活探测,死亡即清态走下方重注册
+      try {
+        registration.replace([...routes().keys()])
+        return
+      } catch (error) {
+        // 空路由的 INVALID_ADAPTER 原样上抛(保留旧语义);仅卸载死亡清态自愈
+        if (!/disposed/i.test(String(error?.message))) throw error
+        registration = undefined
+        registeredFacts = undefined
+      }
+    }
     const providers = [...routes().keys()]
     if (registration === undefined) {
       if (providers.length === 0) {
@@ -91,7 +103,17 @@ export function createRouteManager({ routes, directoryErrors = () => new Map(), 
   }
   const ensureDirectory = () => {
     const entries = directoryEntries(routes(), directoryErrors())
-    if (deepEqualJson(entries, directoryFacts)) return
+    if (deepEqualJson(entries, directoryFacts) && directory !== undefined) {
+      // 与 adapter 通道同款:幂等 replace 兼目录句柄存活探测,死亡清态重注册
+      try {
+        directory.replace(entries)
+        return
+      } catch (error) {
+        if (!/disposed/i.test(String(error?.message))) throw error
+        directory = undefined
+        directoryFacts = undefined
+      }
+    }
     if (directory === undefined) {
       if (entries.length === 0) {
         directoryFacts = entries

@@ -3,9 +3,9 @@
 // console error 全量上报供诊断(不作门槛,隔离环境存在与插件无关的环境噪音)。
 // 用法:node scripts/compat/browser-probe.mjs '<JSON:{url, pngPath}>'(stdout 输出 JSON 判定)
 import { writeFileSync } from 'node:fs'
+import { WORKSPACE_TEXT, FAIL_BANNER } from './compat-criteria.mjs'
+import { judgeProbeText } from './compat-judges.mjs'
 
-const WORKSPACE_TEXT = /工作区|Workspace/
-const FAIL_BANNER = 'Failed to load plugins'
 const RENDER_TIMEOUT_MS = 25 * 1000
 const SETTLE_MS = 2 * 1000
 
@@ -52,7 +52,7 @@ async function main() {
     const hasWorkspace = WORKSPACE_TEXT.test(text)
     const hasFailBanner = text.includes(FAIL_BANNER)
     await page.screenshot({ path: pngPath }).catch(() => {})
-    const result = { ok: hasWorkspace && !hasFailBanner, rendered, hasWorkspace, hasFailBanner, consoleErrors, httpFailures }
+    const result = { ok: judgeProbeText(text), rendered, hasWorkspace, hasFailBanner, consoleErrors, httpFailures }
     writeFileSync(pngPath.replace(/\.png$/, '.json'), JSON.stringify(result, null, 2), 'utf8')
     console.log(JSON.stringify(result))
     process.exitCode = result.ok ? 0 : 1

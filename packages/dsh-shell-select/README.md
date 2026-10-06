@@ -28,9 +28,9 @@ Windows shell 链接管:禁用官方 `pwsh` 工具与执行器,替换为可配�
 注册 keyed slot `tool.call.toolview`(key `shell`/`pwsh`/`bash` 三支,priority -1)替换默认通用卡,官方 `terminalCardModel` 同构派生(argsRaw + 结果文本尾部退出标记)。`pwsh`/`bash` 两支覆盖官方工具名:死态窗口 guard 代挂官方 tool-pwsh 时,其调用行同样获得增强卡;persistent 形(无 description)与后台 ack、isError、溢出预览一样回退简版行,不误渲染:
 
 - 折叠行:状态点(失败红/中断黄/其余工具图标)+ `Shell` 标题 + 描述首行摘要,失败摘要红显。
-- 展开卡:状态点 + cwd 末段目录 + 客户端名徽标(模型传了 `shell` 参数时)+ 失败 pill(退出码/信号)+ 复制命令/复制输出按钮 + 命令折行带行号 + 输出区(横向滚动,竖向限高)。
+- 展开卡:状态点 + cwd 末段目录 + 客户端名徽标 + 失败 pill(退出码/信号)+ 复制命令/复制输出按钮 + 命令折行带行号 + 输出区(横向滚动,竖向限高)。徽章忠实于执行事实:每次调用结果尾附 `[shell: <id>]` 标记(模型可见,官方退出标记同族),卡片按标记回放实际生效的客户端——缺省调用在配置事后变更或跨宿主查看时不被查看时读数改写;无标记的历史块回退显式参数 → 当前 default 推导。
 - 非终端意图回退简版行:摘要 + 可展开原文 + 检查按钮。
-- 图标取官方 `dsh-client-ui-primitives`(StateDot/IconApi/IconInspect/Chevron),模块表缺席时降级自绘。
+- 图标取官方 `dsh-client-ui-primitives`(StateDot/IconApi/IconInspect),模块表缺席时降级自绘。行首无展开箭头,与官方组件一致,可展开性由指针与整行点击承载。
 
 ## 配置(行条目 `shell-select`,settings 面同名 ns)
 
@@ -91,5 +91,18 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
     - id: shell-select/web
       name: '@mzzsfy/dsh-shell-select/web'
 ```
+
+
+## dsh 版本兼容
+
+宿主要求 ≥0.1.7-rc.1:bundle patch 引用 0.1.7 才有的 @deepseek-ai/dsh-agent-preset 宿主包,更旧宿主安装即 boot 失败(2026-09-27 裁定不视为缺陷)。
+
+- 0.2.0-rc.2:完全适配(设置面通过;16 格 LLM 工具调用格因模拟模型无 tool_calls 能力登记环境不可测,历史真机记录与单元测试覆盖)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(本包宿主要求 ≥0.1.7-rc.1,该版本不安装;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 设置面 7 格过(自动探测/自定义路径/坏路径徽标/黑名单往返含行号拦截/默认热更落盘/preset 接管入册);运行时接管(Round 29)9291 keep 宿主实证 runtime-disable→fiber 激活+INV-6 残影稳定。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
 
 测试:`node --test "test/*.test.mjs"`(包目录内)。

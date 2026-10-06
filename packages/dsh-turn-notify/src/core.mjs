@@ -87,6 +87,11 @@ const IM_TARGET_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/
 export const isValidImBotId = (value) => typeof value === 'string' && IM_BOT_ID_PATTERN.test(value)
 
 const TURN_END_KIND = 'turn/end'
+// 审批请求的会话事件类型(DSH SessionEventMap 官方定义:
+//   'approval/asked': { id; toolName; callId?; reason? })。
+// 审批通知唯一信号:生产者(dsh-user-approval request)先 append 后发 waterfall,
+// 会话事件流恒先达且不依赖应答方放行;approval/request waterfall 只读不可靠,不作信号源。
+export const APPROVAL_ASKED_KIND = 'approval/asked'
 
 // turn/end reason.kind 到通知分类的映射;未知 kind(插件可扩展)返回 null。
 const REASON_KIND_TO_CATEGORY = {
@@ -103,6 +108,7 @@ export function mapEventToCategory(type, data) {
     const kind = data && data.reason && data.reason.kind
     return Object.prototype.hasOwnProperty.call(REASON_KIND_TO_CATEGORY, kind) ? REASON_KIND_TO_CATEGORY[kind] : null
   }
+  if (type === APPROVAL_ASKED_KIND) return CATEGORY_APPROVAL
   if (type === 'tool/call' && data && data.name === 'ask_user_question') return CATEGORY_ASK
   return null
 }
@@ -466,14 +472,6 @@ export function readRawBody(req, maxBytes) {
       if (!req.readableEnded) fail(new Error('请求连接中断'))
     })
   })
-}
-
-// 审批观察器包装:notify 异步投递,next() 同步立即放行,不阻塞 waterfall。
-export function createApprovalTap(notify, schedule) {
-  return function approvalTap(_req, next) {
-    schedule(() => notify({ category: CATEGORY_APPROVAL }))
-    return next()
-  }
 }
 
 // webhook 直发:未配置跳过;任何失败不抛出(fire-and-forget,不重试)。

@@ -198,4 +198,10 @@ npm test        # node --test test/*.test.mjs,纯逻辑层;devDependencies 提�
 
 ## dsh 版本兼容
 
-0.1.2-rc.1 / 0.1.5-rc.3 / 0.1.7-rc.1 版本窗口通过(0.1.5-rc.2 / 0.1.6-alpha.1 历史窗口同过):激活 live、本包节路由注册、header 三通道注入(anthropic/openai)、cacheRetention 门控与还原、热更新 patch、禁用窗口 guard 代挂官方服务(0.1.2-rc.1 经剥键收敛修复后数据面完整)。配置写入按版本分流:0.1.2/0.1.5 可直接写 settings.yaml 官方节(合法数据回读有效;非法条目被 schemastery 静默丢弃),0.1.6 起建议走 settings/update RPC(校验前置)。0.1.7-rc.1 会话+echo 夹具受限,装载与激活面实测通过。详见包内 兼容性测试.md「0.1.6 兼容性备注」与「三版本兼容实测」。
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过)
+- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
+- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
+
+历史验收(Round 30,2026-09-27):0.1.7-rc.2 曾登记 FIND-RC2-1(运行时接管后官方节读路径丢失,llm-pi-ai ns 从 settings describe 消失,发话链路 NO_ADAPTER,P1;#1/#2 装载与激活面过),该登记限于 0.1.7-rc.2 窗口,0.2.0-rc.2 功能面复验通过;0.1.7-rc.1/Rounds 16-19 版本窗口通过:header 三通道注入、patch/market 禁用三路径全链、运行时接管 E-1~E-4(Round 28);0.1.5-rc.3 曾判不崩溃底线通过(其上 11/12 全过;已被 2026-09-30 复测推翻,见上);0.1.2-rc.1 历史窗口同过(guard 代挂剥键收敛修复后数据面完整)。配置写入按版本分流:0.1.2/0.1.5 可直接写 settings.yaml 官方节,0.1.6 起建议走 settings/update RPC(校验前置)。
+
+更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

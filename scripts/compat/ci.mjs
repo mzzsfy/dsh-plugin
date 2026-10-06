@@ -1,5 +1,6 @@
 // CI 兼容性测试入口:解析版本窗口 → 逐版本端到端验证 → 汇总 → 按阻塞槽位定退出码。
-// 前瞻槽(全通道最新)失败只发 warning 不阻塞;基线/主测槽失败置退出码 1。
+// 主测槽完整判定,基线槽只判不崩溃(run.mjs --crash-only);两槽失败均置退出码 1,
+// 显式覆盖(~ 后缀)标记的非阻塞槽失败只发 warning。
 // 用法:node scripts/compat/ci.mjs [--window-file PATH]
 //   --window-file:读取已解析好的窗口 JSON(workflow 单次实算,避免与缓存键窗口漂移);
 //   缺省依次回退 DSH_COMPAT_VERSIONS 显式清单 / registry 实算
@@ -7,7 +8,7 @@ import { spawn } from 'node:child_process'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { resolveWindow, parseExplicit, fromRegistry, SLOT_LABELS } from './window.mjs'
+import { resolveWindow, parseExplicit, fromRegistry, SLOT_LABELS, SLOT_MODES, EXEC_SLOTS } from './window.mjs'
 import { installPackageExternals } from './profile.mjs'
 import { COMPAT_ROOT, DEFAULT_PORT, killPortOwner, log } from './lib.mjs'
 
@@ -22,6 +23,10 @@ function runVersion(entry, port) {
       '--version', entry.version,
       '--port', String(port),
       '--skip-externals',
+      // 主测槽 LLM 链路走装载期注册(patch 行 config seed):宿主对插件 ns 的
+      // settings/update 写入门控随世代收紧(0.2.0 起 "no longer configurable"),
+      // 装载期注册不受影响
+      ...(entry.mode === SLOT_MODES.baseline ? ['--crash-only'] : ['--seed-gateway']),
     ], { stdio: ['inherit', 'inherit', 'pipe'], windowsHide: true })
     // boot 早退(无 result.json)时失败原因只在 stderr:收尾部进结果,失败注解就地可读
     let stderrTail = ''
@@ -35,13 +40,25 @@ function runVersion(entry, port) {
     }, PROBE_TIMEOUT_MS)
     child.on('close', (code) => {
       clearTimeout(timer)
-      resolve({ ...entry, port, ok: code === 0, exitCode: code, stderrTail })
+      // M1 防线:退出码与 result.json 的 ok 交叉复读。run.mjs 内部二者同源单点
+      // (:647-649),任一侧被变异/早退失写,此处不一致即红(0.1.5 实爆行教训)
+      let integrity = ''
+      if (code === 0) {
+        try {
+          const persisted = JSON.parse(readFileSync(join(COMPAT_ROOT, entry.version, 'result.json'), 'utf8'))
+          if (persisted.ok !== true) integrity = `result.json ok=${persisted.ok} 与退出码 0 不一致`
+          else if (persisted.version !== entry.version) integrity = `result.json version=${persisted.version} 与槽位 ${entry.version} 不一致`
+        } catch (error) {
+          integrity = `result.json 复读失败: ${error.message.slice(0, 120)}`
+        }
+      }
+      resolve({ ...entry, port, ok: code === 0 && integrity === '', exitCode: code, integrity, stderrTail })
     })
   })
 }
 
-// LLM 链路列:PASS = provider 注册 + 真实对话驱动 + 宿主经 gateway 打到模拟器(留档证据);
-// 模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
+// LLM 链路列(仅主测槽):PASS = provider 注册 + 真实对话驱动 + 宿主经 gateway 打到模拟器(留档证据);
+// 基线槽无 LLM 断言呈 N/A;主测槽模拟器启动失败早退时 result.json 无 llm 项,呈 N/A 并随阻塞判定失败
 function llmCell(result) {
   try {
     const llm = JSON.parse(readFileSync(join(COMPAT_ROOT, result.version, 'result.json'), 'utf8')).checks.llm
@@ -65,19 +82,46 @@ function writeSummary(results) {
     '',
   ]
   const blocked = results.filter((r) => !r.ok && r.blocking)
-  const previewFailed = results.filter((r) => !r.ok && !r.blocking)
+  const nonBlockingFailed = results.filter((r) => !r.ok && !r.blocking)
   if (blocked.length > 0) lines.push(`阻塞槽失败:${blocked.map((r) => r.version).join(', ')}(明细见日志 .compat/<版本>/)`, '')
-  if (previewFailed.length > 0) {
-    lines.push(`> [!WARNING]`, `> 前瞻槽失败(不阻塞):${previewFailed.map((r) => r.version).join(', ')};新宿主线首发破坏即此信号,按 dsh-api-alignment 条款 3 排查`, '')
+  if (nonBlockingFailed.length > 0) {
+    lines.push(`> [!WARNING]`, `> 非阻塞槽失败(不阻塞,仅显式覆盖 ~ 可产生):${nonBlockingFailed.map((r) => r.version).join(', ')};按 dsh-api-alignment 条款 3 排查`, '')
   }
   appendFileSync(summaryPath, lines.join('\n'))
 }
 
 // FAIL 明细直达日志与注解:result.json 与 run.mjs stderr 在 runner 磁盘/日志里,
 // 匿名日志 API 读不到,只有注解在 GitHub 页面就地可读;单条注解截到定长防超限
+// LLM 失败取证面:关键步骤值逐条进注解(runner 磁盘明细匿名不可读,注解是唯一
+// 匿名可见通道;每条截定长防超限)
+const LLM_DIAGNOSTIC_STEPS = [
+  'baseline-render', 'dismiss-intro', 'new-session', 'dismiss-onboarding', 'diag-catalog',
+  'verify-typed', 'post-send-state', 'dom-scan',
+  'new-session-anthropic', 'dismiss-onboarding-anthropic', 'post-send-state-anthropic', 'dom-scan-anthropic',
+]
+
+function emitLlmStepNotes(failed, llm) {
+  if (!llm || (llm.providerRegistered && llm.chatDriven && llm.upstreamSeen)) return
+  const channel = failed.blocking ? '::error::' : '::warning::'
+  try {
+    const probe = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'l3-llm.json'), 'utf8'))
+    for (const step of probe.results ?? []) {
+      if (!LLM_DIAGNOSTIC_STEPS.includes(step.name)) continue
+      const shape = step.ok
+        ? `值=${JSON.stringify(step.value ?? null).slice(0, STDERR_TAIL_BYTES)}`
+        : `error=${step.error}`
+      console.log(`${channel}LLM 步骤 ${step.name}: ${shape}`)
+    }
+  } catch { /* 探针未落盘(boot 早退)无取证面 */ }
+}
+
 function printFailureDetail(failed) {
   const channel = failed.blocking ? '::error::' : '::warning::'
   const clip = (text) => text.replace(/\s+/g, ' ').slice(0, STDERR_TAIL_BYTES)
+  if (failed.integrity) {
+    console.log(`${channel}完整性交叉复读失败 ${failed.version}: ${failed.integrity}`)
+    return
+  }
   try {
     const detail = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'result.json'), 'utf8'))
     const llm = detail.checks?.llm
@@ -85,6 +129,7 @@ function printFailureDetail(failed) {
       ? `;LLM 链路: 注册=${llm.providerRegistered} 对话=${llm.chatDriven ?? 'n/a'} 上游=${llm.upstreamSeen} 路径=${(llm.upstreamKinds ?? []).join(',') || '无'} 步骤失败=${(llm.stepErrors ?? []).join(' / ') || '无'}`
       : ''
     console.log(`${channel}兼容性明细 ${failed.version}: ${clip(JSON.stringify(detail))}${llmNote}`)
+    emitLlmStepNotes(failed, llm)
   } catch {
     // boot/判定早期退出未落 result.json:真因只在 run.mjs stderr,尾部直贴注解
     console.log(`${channel}兼容性明细 ${failed.version}: 无 result.json;stderr 尾部: ${clip(failed.stderrTail || '(空)')}`)
@@ -105,8 +150,16 @@ const window_ = args.windowFile
   ? JSON.parse(readFileSync(args.windowFile, 'utf8'))
   : process.env.DSH_COMPAT_VERSIONS
     ? parseExplicit(process.env.DSH_COMPAT_VERSIONS)
-    : await fromRegistry().then(({ latest, versions }) => resolveWindow(versions, latest))
+    : await fromRegistry().then(({ distTags, versions }) => resolveWindow(versions, distTags))
 log(`版本窗口: ${window_.map((w) => `${w.version}(${SLOT_LABELS[w.slot]}${w.blocking ? '' : ',非阻塞'})`).join(' → ')}`)
+// window-file 来自磁盘,槽位形态需校验(env/registry 路径由 window.mjs 自身保证)
+if (args.windowFile) {
+  for (const w of window_) {
+    if (!EXEC_SLOTS.includes(w.slot) || !Object.values(SLOT_MODES).includes(w.mode)) {
+      throw new Error(`window-file 条目形态非法: ${w.version} slot=${w.slot} mode=${w.mode}`)
+    }
+  }
+}
 
 // 逐包外部依赖与版本槽无关,全窗口只装一次
 log(`逐包外部依赖安装: ${(await installPackageExternals()).length} 包`)

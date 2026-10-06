@@ -28,10 +28,11 @@ import {
   ROW_ID_PREFIXES,
 } from './takeover.mjs'
 import { gatewayApplyState } from './apply-state.mjs'
+import { detectOrphanTakeover, reviveGateway } from './orphan.mjs'
 import { withTimeout, isGuardRailTimeout, MODULE_LOAD_TIMEOUT_MS, DISPOSE_TIMEOUT_MS, MOUNT_TIMEOUT_MS } from './guard-rail.mjs'
 
 // 本包主行 id(cordis.patch.yml 的 insert 声明)
-const GATEWAY_ENTRY_ID = 'llm-pi-gateway'
+export const GATEWAY_ENTRY_ID = 'llm-pi-gateway'
 // guard 行 id:带 "/" 使 market 的 ROW_ID_RE 拒绝写入 user patch 层
 export const GUARD_FOR_GATEWAY_ID = 'llm-pi-gateway/guard'
 // 官方插件 settings 命名空间(官方源码常量同构)
@@ -39,6 +40,9 @@ const OFFICIAL_SETTINGS_NS = 'llm-pi-ai'
 
 // 轮询兜底周期:边沿事件缺失/丢失时的状态跟随精度,幂等不抖动
 export const SWEEP_INTERVAL_MS = 3000
+// 孤儿判据连续成立轮数门槛:live 重载事务内行 fiber 短暂缺席属良性瞬态,
+// 事务秒级完成,连续两轮(约两个扫描周期)仍缺席即为终态级联死亡
+export const ORPHAN_CONFIRM_SWEEPS = 2
 // boot 树就绪等待:兄弟行 update 事务完成的上限(超时按当前状态判定)
 const BOOT_SETTLE_ROUNDS = 50
 const BOOT_SETTLE_INTERVAL_MS = 100
@@ -48,7 +52,7 @@ const BOOT_SETTLE_INTERVAL_MS = 100
 const PENDING = null
 
 // 解析按 ROW_ID_PREFIXES 候选顺序兜底;全部解析失败报 PENDING
-function resolveEntry(loader, id) {
+export function resolveEntry(loader, id) {
   for (const prefix of ROW_ID_PREFIXES) {
     try {
       const entry = loader?.resolve(prefix + id)
@@ -63,7 +67,7 @@ function resolveEntry(loader, id) {
 // 行有效禁用读宿主 Entry.disabled getter(!!js 求值 + 父链 + 宽化)。
 // 调用方保证 entry 非 undefined/PENDING;求值抛错按未禁用处理(保守向:
 // 少代挂,不多抢)
-function effectiveDisabled(entry) {
+export function effectiveDisabled(entry) {
   try {
     return entry.disabled === true
   } catch {
@@ -72,7 +76,7 @@ function effectiveDisabled(entry) {
 }
 
 // 行停稳 = fiber 已撤清(uid null 即 dispose 完成,注册已全部释放)
-function settled(entry) {
+export function settled(entry) {
   return entry.fiber?.uid == null
 }
 
@@ -363,10 +367,33 @@ export async function installGuard(ctx, {
   // 运行时接管下死态唯一来源 = 接管中 gateway 停摆而官方行禁用态残留
   // (runtime-disable 为内存态);官方行启用形态恒非死态,官方自服务。
   let sweeping = false
+  let orphanStrikes = 0
+  let reviving = false
   const sweep = async () => {
     if (sweeping) return
     sweeping = true
     try {
+      // 孤儿接管自愈:行启用而 fiber 停稳缺席(级联死亡),连续确认后
+      // 往返重启 gateway 行。与代挂互斥天然成立:孤儿态下官方行禁用,
+      // dead 判 false,代挂通道不动作
+      const orphan = detectOrphanTakeover(ctx.loader)
+      if (orphan === true) {
+        orphanStrikes += 1
+        if (orphanStrikes >= ORPHAN_CONFIRM_SWEEPS && !reviving) {
+          reviving = true
+          try {
+            const revived = await reviveGateway(ctx.loader)
+            if (revived) ctx.logger.warn('llm-pi-gateway/guard: gateway 行启用而 fiber 缺席(宿主级联卸载),已往返重启重建注册')
+          } catch (error) {
+            ctx.logger.warn(`llm-pi-gateway/guard: 往返重启 gateway 行失败: ${error?.message ?? error}`)
+          } finally {
+            reviving = false
+          }
+          orphanStrikes = 0
+        }
+      } else {
+        orphanStrikes = 0
+      }
       const dead = detectDeadState(ctx.loader)
       if (dead === true && settingsReady() && mounted === null && mounting === null) await mountOfficial()
       else if (dead === false && (mounted !== null || mounting !== null)) await unmountOfficial()
