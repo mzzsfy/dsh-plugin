@@ -16,6 +16,7 @@ import { buildProfile, installPackageExternals, enumeratePackages } from './prof
 import { isSemver } from './window.mjs'
 import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
 import { judgeUpstreamSeen, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
+import { PLATFORM_GATED_BUNDLES } from './compat-criteria.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
 const BOOT_SETTLE_MS = 8 * 1000
@@ -607,7 +608,11 @@ async function main() {
     checks.page = pageRes !== null && (pageRes.status === 200 || (pageRes.status >= 300 && pageRes.status < 400))
 
     if (!args.crashOnly) {
-      checks.activation = await checkActivation(base, token, profile.bundleNames, workDir)
+      // 平台门控包在 POSIX 按设计不 live,不入 liveAll 期望集
+      const expectedLive = process.platform === 'win32'
+        ? profile.bundleNames
+        : profile.bundleNames.filter((name) => !PLATFORM_GATED_BUNDLES.includes(name))
+      checks.activation = await checkActivation(base, token, expectedLive, workDir)
       log(`[${args.version}] activation live=${checks.activation.liveAll} findings=${checks.activation.findingsCount}`)
     }
     checks.browser = await runBrowserProbe(

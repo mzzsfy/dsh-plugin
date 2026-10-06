@@ -92,6 +92,29 @@ function writeSummary(results) {
 
 // FAIL 明细直达日志与注解:result.json 与 run.mjs stderr 在 runner 磁盘/日志里,
 // 匿名日志 API 读不到,只有注解在 GitHub 页面就地可读;单条注解截到定长防超限
+// LLM 失败取证面:关键步骤值逐条进注解(runner 磁盘明细匿名不可读,注解是唯一
+// 匿名可见通道;每条截定长防超限)
+const LLM_DIAGNOSTIC_STEPS = [
+  'baseline-render', 'dismiss-intro', 'new-session', 'dismiss-onboarding', 'diag-catalog',
+  'verify-typed', 'post-send-state',
+  'new-session-anthropic', 'dismiss-onboarding-anthropic', 'post-send-state-anthropic',
+]
+
+function emitLlmStepNotes(failed, llm) {
+  if (!llm || (llm.providerRegistered && llm.chatDriven && llm.upstreamSeen)) return
+  const channel = failed.blocking ? '::error::' : '::warning::'
+  try {
+    const probe = JSON.parse(readFileSync(join(COMPAT_ROOT, failed.version, 'l3-llm.json'), 'utf8'))
+    for (const step of probe.results ?? []) {
+      if (!LLM_DIAGNOSTIC_STEPS.includes(step.name)) continue
+      const shape = step.ok
+        ? `值=${JSON.stringify(step.value ?? null).slice(0, STDERR_TAIL_BYTES)}`
+        : `error=${step.error}`
+      console.log(`${channel}LLM 步骤 ${step.name}: ${shape}`)
+    }
+  } catch { /* 探针未落盘(boot 早退)无取证面 */ }
+}
+
 function printFailureDetail(failed) {
   const channel = failed.blocking ? '::error::' : '::warning::'
   const clip = (text) => text.replace(/\s+/g, ' ').slice(0, STDERR_TAIL_BYTES)
@@ -106,6 +129,7 @@ function printFailureDetail(failed) {
       ? `;LLM 链路: 注册=${llm.providerRegistered} 对话=${llm.chatDriven ?? 'n/a'} 上游=${llm.upstreamSeen} 路径=${(llm.upstreamKinds ?? []).join(',') || '无'} 步骤失败=${(llm.stepErrors ?? []).join(' / ') || '无'}`
       : ''
     console.log(`${channel}兼容性明细 ${failed.version}: ${clip(JSON.stringify(detail))}${llmNote}`)
+    emitLlmStepNotes(failed, llm)
   } catch {
     // boot/判定早期退出未落 result.json:真因只在 run.mjs stderr,尾部直贴注解
     console.log(`${channel}兼容性明细 ${failed.version}: 无 result.json;stderr 尾部: ${clip(failed.stderrTail || '(空)')}`)

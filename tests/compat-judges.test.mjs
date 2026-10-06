@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   judgeProbeText, judgeActivationSnapshot, judgeUpstreamSeen, judgeLlm, judgeImportFailures, judgeFinal,
 } from '../scripts/compat/compat-judges.mjs'
-import { WORKSPACE_TEXT, FAIL_BANNER, IMPORT_FAIL_RE, TOKEN_RE, UPSTREAM_PATHS } from '../scripts/compat/compat-criteria.mjs'
+import { WORKSPACE_TEXT, FAIL_BANNER, IMPORT_FAIL_RE, TOKEN_RE, UPSTREAM_PATHS, PLATFORM_GATED_BUNDLES } from '../scripts/compat/compat-criteria.mjs'
 
 /**
  * 判定链纯归约的变异锁:合成「假绿输入」必须产出 false。
@@ -24,6 +24,8 @@ test('常量_非平凡性_串漂移自检', t => {
   TOKEN_RE.lastIndex = 0
   assert.ok(TOKEN_RE.test('boot: http://127.0.0.1:3080/?token=Abc12345_-xyz ready'), 'token 提取串漂移自检')
   assert.deepEqual(UPSTREAM_PATHS, ['/chat/completions', '/messages'])
+  assert.ok(PLATFORM_GATED_BUNDLES.length > 0, '空名单使 POSIX liveAll 判定恒红(平台门控包按设计不 live)')
+  assert.ok(PLATFORM_GATED_BUNDLES.every((name) => name.startsWith('@mzzsfy/')), '豁免名单只收自有包')
 })
 
 test('渲染判定_文案与横幅四象限', t => {
