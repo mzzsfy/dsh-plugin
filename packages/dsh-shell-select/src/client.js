@@ -628,7 +628,7 @@ window.__ModuleLoader__.load({
     // generic = 后台 ack / isError / 溢出预览 / persistent 形(无 description,
     // 官方 shellCall persistent→generic 同构),交回退行;terminal = 全量卡。
     // LOGIC-BEGIN shellCardModel
-    function shellCardModel(block, sessionCwd) {
+    function shellCardModel(block, sessionCwd, toolKey) {
       const settled = 'kind' in block
       const call = settled ? block.call : block
       let args = null
@@ -640,10 +640,13 @@ window.__ModuleLoader__.load({
       const description = typeof args?.description === 'string' && args.description.trim() !== '' ? args.description : undefined
       const cwdFull = displayCwd(typeof args?.workdir === 'string' ? args.workdir : undefined, sessionCwd)
       const cwdDir = cwdFull !== undefined ? lastSegment(cwdFull) : undefined
-      // shell 徽章优先级:结果标记(执行事实)→ 显式参数 → default 读数(旧块兜底,
+      // 官方钉死客户端工具(bash/pwsh)徽章即工具名:其输出无标记、参数无 shell
+      // 字段,落默认读数会误标(官方 pwsh 调用显示当前默认客户端的事故根因)
+      const PINNED_CLIENT = { pwsh: 'pwsh', bash: 'bash' }
+      // shell 工具徽章优先级:结果标记(执行事实)→ 显式参数 → default 读数(旧块兜底,
       // 配置即当前解析事实);读数推导仅兜无标记历史块,不覆盖事实
       const requested = typeof args?.shell === 'string' ? args.shell : undefined
-      const shellNameOf = (mark) => mark ?? clientDisplayName(requested)
+      const shellNameOf = (mark) => PINNED_CLIENT[toolKey] ?? mark ?? clientDisplayName(requested)
       if (command === '') return { kind: 'generic', command: '', summary: undefined, output: null, running: !settled, alert: undefined }
 
       if (!settled) {
@@ -844,9 +847,9 @@ window.__ModuleLoader__.load({
     }
 
     function ShellToolRow(props) {
-      const { block, cwd, inspect } = props
+      const { block, cwd, inspect, toolKey } = props
       const en = detectEnglish()
-      const model = shellCardModel(block, cwd)
+      const model = shellCardModel(block, cwd, toolKey)
       // hooks 恒序:必须在任何提前 return 之前完整执行(真实 React 的 hooks
       // 链表按调用序对位,generic 行与 terminal 行的提前 return 分叉会让
       // 后续 hook 错位,行组件树被整棵卸载——卡片全消失事故根因)
@@ -909,15 +912,15 @@ window.__ModuleLoader__.load({
           ))
         // 替换 shell 族工具行渲染:keyed hit 优先于 GenericToolCard 兜底;
         // priority -1 阴影官方同 key 注册(低值先渲染)。pwsh/bash 为官方工具
-        // 名(死态窗口 guard 代挂官方 tool-pwsh 时,其调用行同样获得增强卡;
-        // 卡片模型按官方 terminalCardModel 同构自 argsRaw+结果文本派生,数据
-        // 面对两类工具一致,无需分支)。
+        // 名(死态窗口 guard 代挂官方 tool-pwsh 时,其调用行同样获得增强卡);
+        // key 以 toolKey 注入卡片,官方钉死客户端工具的徽章按工具名钉死,
+        // 不落默认客户端读数。
         const TOOLVIEW_KEYS = ['shell', 'pwsh', 'bash']
         for (const toolKey of TOOLVIEW_KEYS) {
           ctx.slots.inject('tool.call.toolview', () =>
             ctx.slots.register(
               { name: 'tool.call.toolview', key: toolKey, priority: -1 },
-              (props) => React.createElement(ShellToolRow, props),
+              (props) => React.createElement(ShellToolRow, { ...props, toolKey }),
             ))
         }
       },
