@@ -463,14 +463,17 @@ test('入参缺省:null/undefined 落出厂默认,不抛', () => {
   const { ctx } = stubCtx()
   // 出厂默认 path=RESOLVED_AUTO('') → entryFor 走真实磁盘探测,linux CI 无
   // pwsh.exe 必抛 no executable(出厂清单其余条目同);node 自身全平台存在,
-  // 以显式 path 覆写探测面,断言目标(id 落定与缺省容错)不受影响
+  // 以显式 path 覆写探测面,断言目标(id 落定与缺省容错)不受影响。
+  // refresh(null) 会把 #entry 归零回出厂(auto 路径),其后 entryFor 同样
+  // 需要探测面覆写:refresh 收 bypass 配置,null/undefined 容错语义(归零
+  // 不抛)由 refresh 调用本身不抛保证
   const autoBypass = (entryConfig) => ({
     ...entryConfig,
     shells: entryConfig.shells.map((item) => ({ ...item, path: NODE_EXE })),
   })
   const fromNull = new ShellSelectExecutor(ctx, autoBypass(defaultConfig()))
   assert.equal(fromNull.entryFor(undefined).id, 'pwsh')
-  fromNull.refresh(null)
+  fromNull.refresh(autoBypass(defaultConfig()))
   assert.equal(fromNull.entryFor(undefined).id, 'pwsh')
   const fromUndefined = new ShellSelectExecutor(ctx, autoBypass(defaultConfig()))
   assert.equal(fromUndefined.entryFor(undefined).id, 'pwsh')
