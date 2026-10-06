@@ -43,9 +43,11 @@ jobs:
           node-version: '24'
       # CI 无 dsh 本体:按测试静态 import 闭包在仓库根装宿主 peer 与 zod
       # (session-manager 顶层 import zod;node ESM 逐级向上解析命中根 node_modules,
-      # 镜像开发态 junction 桥);--no-save --no-package-lock 保证不产生任何入库文件
+      # 镜像开发态 junction 桥);--no-save --no-package-lock 保证不产生任何入库文件。
+      # schemastery 钉 3.18.4 = dsh-maintain peer 下限(3.18.2 无 volatile 方法,
+      # Config 契约测试「根级单 ref get 协议」在 CI 恒红)
       - name: 安装宿主 peer(仓库根解析桥)
-        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.2 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4
+        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.4 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 zod@4.5.4
       # 含外部依赖的包自动发现并安装(node ESM 逐级向上解析命中包内 node_modules);
       # dependencies/devDependencies 全为 @mzzsfy 自依赖、为空或缺失的包跳过——
       # 自依赖统一走符号链接桥,禁止经 registry 解析。
