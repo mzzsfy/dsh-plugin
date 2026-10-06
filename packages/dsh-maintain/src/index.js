@@ -238,8 +238,12 @@ const BOOT_AT = Date.now() - Math.round(process.uptime() * 1000)
 // 跨进程升级锁:升级子进程 detached 存活于宿主死后,宿主被外部重启时内存门闩归零
 // 会放行第二次升级,与仍在跑的旧包管理器并发写同一全局目录。锁文件随升级结束删除,
 // 宿主崩溃残留时按 startedAt 过期(超 UPGRADE_TIMEOUT_MS + 强杀宽限)自动失效
-// 升级锁绝对路径:导出仅供测试预热清理(防测试进程中断残留毒化后续运行)
-export const UPGRADE_LOCK_PATH = join(tmpdir(), 'dsh-maintain-upgrade.lock')
+// 升级锁绝对路径:导出仅供测试预热清理(防测试进程中断残留毒化后续运行)。
+// 测试进程按 PID 隔离锁文件:node --test 多 worker 并发跑多个测试文件时,
+// 固定路径会让 A 文件升级中的锁毒化 B 文件的 409 门闩判定(共享 tmpdir 全局态)
+export const UPGRADE_LOCK_PATH = process.env.NODE_TEST_CONTEXT !== undefined
+  ? join(tmpdir(), `dsh-maintain-upgrade-${process.pid}.lock`)
+  : join(tmpdir(), 'dsh-maintain-upgrade.lock')
 const UPGRADE_LOCK_STALE_MS = UPGRADE_TIMEOUT_MS + 10 * 1000
 
 function readUpgradeLock() {
