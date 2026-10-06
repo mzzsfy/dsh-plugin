@@ -130,7 +130,11 @@ function parseArgs(argv) {
       },
     }
     const handler = map[argv[i]]
-    if (!handler) throw new Error(`未知参数: ${argv[i]}`)
+    // 后台任务运行器会向命令行尾注附加 token(实测注入 AGENTS.md):裸 token 忽略,未知选项仍抛错
+    if (!handler) {
+      if (argv[i].startsWith('--')) throw new Error(`未知参数: ${argv[i]}`)
+      continue
+    }
     handler()
   }
   if (!args.version || !isSemver(args.version)) throw new Error(`--version 缺失或非法: ${args.version}`)

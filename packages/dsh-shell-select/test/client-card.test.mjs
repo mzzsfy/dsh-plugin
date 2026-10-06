@@ -239,6 +239,91 @@ test('S13 注册面:shell/pwsh/bash 三 key 且 priority -1(文本守卫)', () =
   assert.match(source, /key: toolKey, priority: -1/)
 })
 
+// ── S21 六态徽章矩阵:前台/后台 × shell(git-bash/pwsh) × pwsh 官方 ──
+// 背景:官方 pwsh 工具调用被增强卡接管,但其输出无 [shell: ...] 标记、参数无
+// shell 字段,徽章兜底落查看时默认客户端读数 → 官方 pwsh 调用误标 git-bash。
+
+const BG_ARGS = JSON.stringify({ command: 'node server.js', description: 'Boot server', run_in_background: true })
+
+test('S21a shell 前台 git-bash:执行事实标记入徽章', () => {
+  // BDD:Given shell 工具经 git-bash 客户端前台执行,When 派生卡片模型,Then 徽章显示标记承载的 git-bash
+  const model = cardModel(null)(settledBlock(ARGS, 'out\n[shell: git-bash]\n[exit code: 0]'), SESSION_CWD, 'shell')
+  assert.equal(model.kind, 'terminal')
+  assert.equal(model.shellName, 'git-bash')
+})
+
+test('S21b shell 前台 pwsh:执行事实标记入徽章', () => {
+  // BDD:Given shell 工具经 pwsh 客户端前台执行失败,When 派生卡片模型,Then 徽章 pwsh 且退出码保留
+  const model = cardModel(null)(settledBlock(ARGS, 'out\n[shell: pwsh]\n[exit code: 2]'), SESSION_CWD, 'shell')
+  assert.equal(model.shellName, 'pwsh')
+  assert.equal(model.exitCode, 2)
+})
+
+test('S21c shell 后台 git-bash:ack 标记入徽章,jobId 解析', () => {
+  // BDD:Given shell 工具后台启动于 git-bash,When 派生 ack 卡,Then 徽章 git-bash 且 jobId 取自 ack
+  const model = cardModel(null)(settledBlock(BG_ARGS, 'started background job shell-4\n[shell: git-bash]'), SESSION_CWD, 'shell')
+  assert.equal(model.kind, 'background')
+  assert.equal(model.jobId, 'shell-4')
+  assert.equal(model.shellName, 'git-bash')
+})
+
+test('S21d shell 后台 pwsh:ack 标记入徽章', () => {
+  // BDD:Given shell 工具后台启动于 pwsh,When 派生 ack 卡,Then 徽章 pwsh
+  const model = cardModel(null)(settledBlock(BG_ARGS, 'started background job shell-5\n[shell: pwsh]'), SESSION_CWD, 'shell')
+  assert.equal(model.kind, 'background')
+  assert.equal(model.jobId, 'shell-5')
+  assert.equal(model.shellName, 'pwsh')
+})
+
+test('S21e pwsh 官方前台:徽章钉死 pwsh,不落默认客户端读数', () => {
+  // BDD:Given 官方 pwsh 工具调用(无标记无 shell 参数)且查看时默认客户端为 git-bash,
+  // When 派生卡片模型,Then 徽章 pwsh(工具名即执行事实,读数兜底只属 shell 工具历史块)
+  const model = cardModel({ default: 'git-bash', byId: { 'git-bash': 'git-bash' } })(
+    settledBlock(ARGS, 'On branch main\n[exit code: 0]'), SESSION_CWD, 'pwsh')
+  assert.equal(model.kind, 'terminal')
+  assert.equal(model.shellName, 'pwsh')
+})
+
+test('S21f pwsh 官方后台:徽章钉死 pwsh,官方 pwsh 前缀 jobId 解析', () => {
+  // BDD:Given 官方 pwsh 工具后台启动(kind pwsh → 任务号 pwsh-N),When 派生 ack 卡,Then 徽章 pwsh 且 jobId=pwsh-3
+  const model = cardModel({ default: 'git-bash', byId: { 'git-bash': 'git-bash' } })(
+    settledBlock(BG_ARGS, 'started background job pwsh-3'), SESSION_CWD, 'pwsh')
+  assert.equal(model.kind, 'background')
+  assert.equal(model.jobId, 'pwsh-3')
+  assert.equal(model.shellName, 'pwsh')
+})
+
+test('S21g pwsh 官方运行中:徽章钉死 pwsh(落定前不误标)', () => {
+  // BDD:Given 官方 pwsh 调用进行中无结果文本,When 派生 running 卡,Then 徽章 pwsh 而非默认客户端读数
+  const model = cardModel({ default: 'git-bash', byId: { 'git-bash': 'git-bash' } })(runningBlock(ARGS), SESSION_CWD, 'pwsh')
+  assert.equal(model.status, 'running')
+  assert.equal(model.shellName, 'pwsh')
+})
+
+test('S21h bash 官方 key 同规钉死(同类预防)', () => {
+  // BDD:Given 官方 bash 工具调用且默认客户端读数为 git-bash,When 派生卡片模型,Then 徽章 bash
+  const model = cardModel({ default: 'git-bash', byId: { 'git-bash': 'git-bash' } })(
+    settledBlock(ARGS, 'out\n[exit code: 0]'), SESSION_CWD, 'bash')
+  assert.equal(model.shellName, 'bash')
+})
+
+test('S21i toolKey 贯通:注册循环注入 + 行组件传入模型(渲染守卫)', () => {
+  // BDD:Given 卡片按 key 注册,When 渲染,Then key 以 toolKey 注入组件并传入模型派生(漏任何一环徽章退回读数兜底)
+  assert.match(source, /React\.createElement\(ShellToolRow, \{ \.\.\.props, toolKey \}\)/)
+  assert.match(source, /shellCardModel\(block, cwd, toolKey\)/)
+})
+
+test('S21j 钉死键集与注册键集同源:PINNED_CLIENT 恒等于 TOOLVIEW_KEYS 去 shell(渲染守卫)', () => {
+  // BDD:Given 官方钉死客户端事实在 client.js 双处字面编码(TOOLVIEW_KEYS 与 PINNED_CLIENT),
+  // When 派生两处键集,Then 钉死键集恒等于注册键集去掉 shell——注册面新增官方工具 key 而
+  // 漏配钉死映射时此处红,误标 bug 不静默复发
+  const toolviewKeys = /const TOOLVIEW_KEYS = \[([^\]]*)\]/.exec(source)[1]
+    .split(',').map((item) => item.trim().replace(/^'|'$/g, '')).filter((key) => key !== '' && key !== 'shell')
+  const pinnedKeys = /const PINNED_CLIENT = \{([^}]*)\}/.exec(source)[1]
+    .split(',').map((pair) => pair.trim().split(':')[0].trim().replace(/^'|'$/g, '')).filter((key) => key !== '')
+  assert.deepEqual(pinnedKeys.sort(), toolviewKeys.sort())
+})
+
 test('K=V 往返:值含 = 与空格无损,空行忽略,重复键后行胜', () => {
   const parse = parseEnvText()
   assert.deepEqual(parse('A=1\nB=x=y z\n\nA=2'), { A: '2', B: 'x=y z' })
