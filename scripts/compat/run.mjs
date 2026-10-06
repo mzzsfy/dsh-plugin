@@ -380,6 +380,22 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
         return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
       })()`,
     },
+    {
+      // composer 缺席取证面:DOM 结构摘要(属性值/输入面/按钮文案/面板 class/页面文本),
+      // 与 ci.mjs 注解取证通道联动——composer 不在 DOM 时给出页面真实形态
+      name: 'dom-scan',
+      eval: `(() => {
+        const editable = [...document.querySelectorAll('[contenteditable]')].map((el) => el.getAttribute('contenteditable'))
+        const inputs = document.querySelectorAll('textarea, input').length
+        const buttons = [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 15)
+        const panels = [...document.querySelectorAll('[class]')]
+          .map((el) => el.className)
+          .filter((c) => typeof c === 'string' && /composer|editor|chat|session|welcome|empty|onboard/i.test(c))
+          .slice(0, 10)
+        const text = (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 400)
+        return JSON.stringify({ editable, inputs, buttons, panels, text })
+      })()`,
+    },
     // ---- #3/#5 anthropic 段:默认模型切 echo-anthropic 后再发一轮,上游走
     // /v1/messages;亲和头与 metadata.user_id 从该轮留档断言
     { name: 'switch-default-anthropic', http: { path: '/api/settings/update', method: 'POST', body: anthropicDefaultPatch } },
@@ -404,6 +420,21 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
           .filter((t) => t.length > 0)
           .slice(0, 5)
         return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
+      })()`,
+    },
+    {
+      // anthropic 段同款取证(切默认模型后第二形态)
+      name: 'dom-scan-anthropic',
+      eval: `(() => {
+        const editable = [...document.querySelectorAll('[contenteditable]')].map((el) => el.getAttribute('contenteditable'))
+        const inputs = document.querySelectorAll('textarea, input').length
+        const buttons = [...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 15)
+        const panels = [...document.querySelectorAll('[class]')]
+          .map((el) => el.className)
+          .filter((c) => typeof c === 'string' && /composer|editor|chat|session|welcome|empty|onboard/i.test(c))
+          .slice(0, 10)
+        const text = (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 400)
+        return JSON.stringify({ editable, inputs, buttons, panels, text })
       })()`,
     },
   ]

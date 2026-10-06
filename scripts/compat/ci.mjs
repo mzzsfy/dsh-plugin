@@ -96,8 +96,8 @@ function writeSummary(results) {
 // 匿名可见通道;每条截定长防超限)
 const LLM_DIAGNOSTIC_STEPS = [
   'baseline-render', 'dismiss-intro', 'new-session', 'dismiss-onboarding', 'diag-catalog',
-  'verify-typed', 'post-send-state',
-  'new-session-anthropic', 'dismiss-onboarding-anthropic', 'post-send-state-anthropic',
+  'verify-typed', 'post-send-state', 'dom-scan',
+  'new-session-anthropic', 'dismiss-onboarding-anthropic', 'post-send-state-anthropic', 'dom-scan-anthropic',
 ]
 
 function emitLlmStepNotes(failed, llm) {
