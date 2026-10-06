@@ -113,6 +113,10 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
   // v4 头即拒),workspaceRegistry 起不来 → session-controller 不可用 →
   // 模型目录 RPC 全灭。每轮净启动
   rmSync(join(homeDir, 'sessions'), { recursive: true, force: true })
+  // storages 同净:workspace.json 绑定残留会让复用轮吃到上轮工作区形态,
+  // 与 CI 全新 profile 分叉出平台假象(B3 跨轮污染实锤:本地 home 复用曾
+  // 残留人工轮绑定的宿主外工作区,composer 在场假绿,linux 全新面红)
+  rmSync(join(homeDir, 'storages'), { recursive: true, force: true })
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify(profileManifest(pickedBundles, all, unpublished), null, 2) + '\n', 'utf8')
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n', 'utf8')
   // 默认模型条目:宿主树含 dsh-agent-default-model(0.1.7+)才注入,旧宿主

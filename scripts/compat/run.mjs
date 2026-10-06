@@ -309,7 +309,29 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     }
   }
   const onboardingCleared = (name) => ONBOARDING_CLEARED_VALUES.includes(stepByName[name]?.value)
+  // 0.2.x 会话面以工作区为锚:全新 profile 无 workspace.json 绑定时会话视图
+  // 落「选择一个工作区」空态,composer 不渲染(linux CI 实爆);探针先经
+  // workspace/create 绑定确定性目录,幂等(已绑定返回 created=false)
+  const workspaceDir = join(workDir, 'workspace')
+  mkdirSync(workspaceDir, { recursive: true })
   const steps = [
+    // 工作区绑定先行且必须先于页面挂载:API 创建不推送前端 store,后创建需
+    // 二次重载;前置创建则 reload-page 挂载时注册表已含工作区,空态面不出现
+    {
+      name: 'workspace-create',
+      http: {
+        path: '/api/workspace/create',
+        method: 'POST',
+        body: {
+          type: 'client-request',
+          rpcId: 'compat-workspace-create',
+          method: 'workspace/create',
+          path: '/api/workspace/create',
+          payload: { args: { path: workspaceDir } },
+        },
+      },
+    },
+    { name: 'wait-workspace', wait: 1500 },
     // 注册面 = --seed-gateway 装载期 patch(唯一路径):宿主对插件 ns 的运行期
     // settings/update 写入门控已收紧(0.2.0 起 "no longer configurable"),写尝试
     // 只产生条目 dispose 噪音,污染后续冷启动断言;注册语义由 L1 config 测试锁定
@@ -475,13 +497,16 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     catalogEcho = (catalog.routableProviders ?? []).includes('echo-openai')
   } catch { /* 目录步失败按未注册处理 */ }
   const providerRegistered = catalogEcho
-  const chatDriven = stepByName['new-session']?.value === 'clicked'
+  // 工作区绑定是发话前置:绑定失败时新建会话不产生会话,type 面即空态假信号
+  const chatDriven = stepByName['workspace-create']?.ok === true
+    && stepByName['new-session']?.value === 'clicked'
     && stepByName['type-message']?.ok === true
     && stepByName['send']?.ok === true
     && onboardingCleared('dismiss-onboarding')
     && composerTextOf('verify-typed') === chatMessage
   // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
-  const anthropicDriven = stepByName['switch-default-anthropic']?.ok === true
+  const anthropicDriven = stepByName['workspace-create']?.ok === true
+    && stepByName['switch-default-anthropic']?.ok === true
     && stepByName['new-session-anthropic']?.value === 'clicked'
     && stepByName['type-message-anthropic']?.ok === true
     && stepByName['send-anthropic']?.ok === true
