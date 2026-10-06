@@ -327,7 +327,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
           rpcId: 'compat-workspace-create',
           method: 'workspace/create',
           path: '/api/workspace/create',
-          payload: { args: { path: workspaceDir } },
+          payload: { args: { request: { path: workspaceDir } } },
         },
       },
     },
@@ -497,15 +497,24 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     catalogEcho = (catalog.routableProviders ?? []).includes('echo-openai')
   } catch { /* 目录步失败按未注册处理 */ }
   const providerRegistered = catalogEcho
-  // 工作区绑定是发话前置:绑定失败时新建会话不产生会话,type 面即空态假信号
-  const chatDriven = stepByName['workspace-create']?.ok === true
+  // 工作区绑定判定走响应体:网关把业务失败包在 HTTP 200 里(result.ok=false),
+  // 状态门槛与步骤 ok 均不可见,绑定失败时新建会话不产生会话,type 面即空态假信号
+  const workspaceCreated = (() => {
+    // http 步 value 是对象(l3-probe evaluate 原样返回),字符串形态仅历史留档兼容
+    const raw = stepByName['workspace-create']?.value
+    try {
+      const shape = typeof raw === 'string' ? JSON.parse(raw) : raw
+      return shape?.body?.result?.ok === true
+    } catch { return false }
+  })()
+  const chatDriven = workspaceCreated
     && stepByName['new-session']?.value === 'clicked'
     && stepByName['type-message']?.ok === true
     && stepByName['send']?.ok === true
     && onboardingCleared('dismiss-onboarding')
     && composerTextOf('verify-typed') === chatMessage
   // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
-  const anthropicDriven = stepByName['workspace-create']?.ok === true
+  const anthropicDriven = workspaceCreated
     && stepByName['switch-default-anthropic']?.ok === true
     && stepByName['new-session-anthropic']?.value === 'clicked'
     && stepByName['type-message-anthropic']?.ok === true
