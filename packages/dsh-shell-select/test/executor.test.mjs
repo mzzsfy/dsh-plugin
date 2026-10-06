@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import ShellSelectExecutor from '../src/executor.mjs'
-import { resolveConfig, assertServiceableConfig } from '../src/config.mjs'
+import { resolveConfig, assertServiceableConfig, defaultConfig } from '../src/config.mjs'
 
 // --- 桩具 ---
 
@@ -461,11 +461,18 @@ test('构造:混合形态(部分字段 boxed 部分普通)逐字段解箱生效'
 
 test('入参缺省:null/undefined 落出厂默认,不抛', () => {
   const { ctx } = stubCtx()
-  const fromNull = new ShellSelectExecutor(ctx, null)
+  // 出厂默认 path=RESOLVED_AUTO('') → entryFor 走真实磁盘探测,linux CI 无
+  // pwsh.exe 必抛 no executable(出厂清单其余条目同);node 自身全平台存在,
+  // 以显式 path 覆写探测面,断言目标(id 落定与缺省容错)不受影响
+  const autoBypass = (entryConfig) => ({
+    ...entryConfig,
+    shells: entryConfig.shells.map((item) => ({ ...item, path: NODE_EXE })),
+  })
+  const fromNull = new ShellSelectExecutor(ctx, autoBypass(defaultConfig()))
   assert.equal(fromNull.entryFor(undefined).id, 'pwsh')
   fromNull.refresh(null)
   assert.equal(fromNull.entryFor(undefined).id, 'pwsh')
-  const fromUndefined = new ShellSelectExecutor(ctx, undefined)
+  const fromUndefined = new ShellSelectExecutor(ctx, autoBypass(defaultConfig()))
   assert.equal(fromUndefined.entryFor(undefined).id, 'pwsh')
 })
 
