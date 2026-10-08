@@ -59,6 +59,10 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
         '            name: Echo Think Model',
         '            input:',
         '              - text',
+        '          - id: echo-model-tool',
+        '            name: Echo Tool Model',
+        '            input:',
+        '              - text',
         '      echo-anthropic:',
         '        displayName: Echo Anthropic',
         '        api: anthropic-messages',
@@ -85,9 +89,10 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
       writeFileSync(patchPath, pending, 'utf8')
     }
     if (gateway) seeded.push('llm-pi-gateway')
-    // 宿主重启会重写 patch 规范形(丢扩展模型行);幂等补 think 模型行(流式思考断言依赖 -think 后缀)
-    const THINK_BLOCK = [
-      '        models:',
+    // 宿主重启会重写 patch 规范形(丢扩展模型行);幂等补 think/tool 模型行
+    // (流式思考断言依赖 -think 后缀,工具链断言依赖 -tool 后缀)
+    const MODEL_TAIL = '          - id: echo-model\n            name: Echo Model\n            input:\n              - text'
+    const EXT_BLOCK = [
       '          - id: echo-model',
       '            name: Echo Model',
       '            input:',
@@ -96,16 +101,17 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
       '            name: Echo Think Model',
       '            input:',
       '              - text',
+      '          - id: echo-model-tool',
+      '            name: Echo Tool Model',
+      '            input:',
+      '              - text',
       '',
     ].join('\n')
-    if (think && !pending.includes('echo-model-think') && pending.includes('- id: echo-model\n            name: Echo Model\n            input:\n              - text')) {
+    if ((think || gateway) && !pending.includes('echo-model-tool') && pending.includes(MODEL_TAIL)) {
       // 基于 pending(含官方行块)修补,再落盘,防 stale 抹除
-      const patched = pending.replace(
-        '        models:\n          - id: echo-model\n            name: Echo Model\n            input:\n              - text',
-        THINK_BLOCK,
-      )
+      const patched = pending.replace(MODEL_TAIL, EXT_BLOCK)
       writeFileSync(patchPath, patched, 'utf8')
-      logFn('[daemon] gateway think model row injected')
+      logFn('[daemon] gateway think/tool model rows injected')
     }
     if (think) seeded.push('think-expand')
   } catch (error) {

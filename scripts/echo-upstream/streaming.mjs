@@ -2,7 +2,7 @@
 // openai responses(事件序列:response.created → output_item.added → output_text.delta → response.completed)与
 // anthropic(event 序列:message_start → content_block → message_delta → message_stop)。
 // 场景(scenarios.resolveScenario)经模型名触发:thinking 块、错误码、流中断、慢速间隔。
-import { resolveScenario, THINKING_TEXT, SLOW_CHUNK_INTERVAL_MS } from './scenarios.mjs'
+import { resolveScenario, THINKING_TEXT, SLOW_CHUNK_INTERVAL_MS, TOOL_NAME, TOOL_ARGUMENTS } from './scenarios.mjs'
 import { FIXED_CONTENT } from './protocol.mjs'
 
 const SSE_HEADERS = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' }
@@ -32,6 +32,17 @@ async function writeOpenaiStream(response, model, tokens, scenario) {
   if (scenario === 'think') sseWrite(response, null, chunk({ reasoning_content: THINKING_TEXT }))
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   if (scenario === 'drop') { response.end(); return }
+  if (scenario === 'tool') {
+    sseWrite(response, null, chunk({ tool_calls: [{ index: 0, id: 'call_echo-upstream', type: 'function', function: { name: TOOL_NAME, arguments: TOOL_ARGUMENTS } }] }))
+    sseWrite(response, null, JSON.stringify({
+      id: 'chatcmpl-echo-upstream', object: 'chat.completion.chunk', created: 0, model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+    }))
+    sseWrite(response, null, chunk({}, { choices: [], finish_reason: null, usage: openaiUsage(tokens) }))
+    sseWrite(response, null, '[DONE]')
+    response.end()
+    return
+  }
   sseWrite(response, null, chunk({ content: 'echo-upstream-fixed' }))
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   // 终止块:finish_reason 落在 choices[0],严格消费端(0.2.0+)以 finish_reason 判流完整性
@@ -83,6 +94,15 @@ async function writeAnthropicStream(response, model, tokens, scenario) {
   }
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   if (scenario === 'drop') { response.end(); return }
+  if (scenario === 'tool') {
+    blockStart(index, { type: 'tool_use', id: 'toolu_echo-upstream', name: TOOL_NAME, input: {} })
+    blockDelta(index, { type: 'input_json_delta', partial_json: TOOL_ARGUMENTS })
+    blockStop(index)
+    sseWrite(response, 'message_delta', JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: anthropicUsage(tokens).output_tokens } }))
+    sseWrite(response, 'message_stop', JSON.stringify({ type: 'message_stop' }))
+    response.end()
+    return
+  }
   blockStart(index, { type: 'text', text: '' })
   blockDelta(index, { type: 'text_delta', text: 'echo-upstream-fixed' })
   blockStop(index)

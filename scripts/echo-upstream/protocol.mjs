@@ -2,7 +2,7 @@
 // 含 /messages 走 anthropic message 形状,
 // GET /models 按客户端协议(anthropic-version 头)回双形态列表,其余回 openai chat.completion 形状。
 // 模型名回显请求 model;usage 为固定最小值,由场景层(--tokens)覆写。
-import { THINKING_TEXT } from './scenarios.mjs'
+import { THINKING_TEXT, TOOL_NAME, TOOL_ARGUMENTS } from './scenarios.mjs'
 
 export const FIXED_CONTENT = 'echo-upstream-fixed'
 export const MODEL_ID = 'echo-model'
@@ -45,6 +45,7 @@ export function respondFor(method, path, headers, parsedBody, options = {}) {
   const model = parsedBody?.model ?? null
   if (method === 'GET' && path.includes('/models')) return modelListResponse(headers, options.models)
   const thinking = options.scenario === 'think'
+  const scenarioTool = options.scenario === 'tool'
   const [input = 1, output = 1] = options.tokens ?? []
   if (path.includes('/responses')) {
     const usage = { input_tokens: input, output_tokens: output, total_tokens: input + output }
@@ -55,11 +56,17 @@ export function respondFor(method, path, headers, parsedBody, options = {}) {
   if (path.includes('/messages')) {
     const content = thinking
       ? [{ type: 'thinking', thinking: THINKING_TEXT }, { type: 'text', text: FIXED_CONTENT }]
-      : [{ type: 'text', text: FIXED_CONTENT }]
-    return { ...anthropicResponse(model, { input_tokens: input, output_tokens: output }), content }
+      : scenarioTool
+        ? [{ type: 'tool_use', id: 'toolu_echo-upstream', name: TOOL_NAME, input: JSON.parse(TOOL_ARGUMENTS) }]
+        : [{ type: 'text', text: FIXED_CONTENT }]
+    const stopReason = scenarioTool ? 'tool_use' : 'end_turn'
+    return { ...anthropicResponse(model, { input_tokens: input, output_tokens: output }), content, stop_reason: stopReason }
   }
   const message = thinking
     ? { role: 'assistant', reasoning_content: THINKING_TEXT, content: FIXED_CONTENT }
-    : { role: 'assistant', content: FIXED_CONTENT }
-  return openaiResponse(model, { prompt_tokens: input, completion_tokens: output, total_tokens: input + output }, message)
+    : scenarioTool
+      ? { role: 'assistant', content: null, tool_calls: [{ id: 'call_echo-upstream', type: 'function', function: { name: TOOL_NAME, arguments: TOOL_ARGUMENTS } }] }
+      : { role: 'assistant', content: FIXED_CONTENT }
+  const finishReason = scenarioTool ? 'tool_calls' : 'stop'
+  return { ...openaiResponse(model, { prompt_tokens: input, completion_tokens: output, total_tokens: input + output }, message), choices: [{ index: 0, message, finish_reason: finishReason }] }
 }

@@ -93,3 +93,55 @@ test('非流式不受 drop/slow 影响,仅流式注入生效', async () => {
     assert.equal((await res.json()).object, 'chat.completion')
   } finally { close() }
 })
+
+test('tool 模型非流式产出 tool_calls/tool_use(name=shell)', async () => {
+  const { base, close } = await launch()
+  try {
+    const o = await post(base, '/v1/chat/completions', { model: 'echo-model-tool' })
+    const ob = await o.json()
+    assert.equal(ob.choices[0].finish_reason, 'tool_calls')
+    const call = ob.choices[0].message.tool_calls[0]
+    assert.equal(call.function.name, 'shell')
+    assert.deepEqual(JSON.parse(call.function.arguments), { command: 'echo echo-upstream-tool', description: 'echo-upstream tool probe' })
+
+    const a = await post(base, '/v1/messages', { model: 'echo-model-tool' })
+    const ab = await a.json()
+    assert.equal(ab.stop_reason, 'tool_use')
+    assert.equal(ab.content[0].type, 'tool_use')
+    assert.equal(ab.content[0].name, 'shell')
+    assert.deepEqual(ab.content[0].input, { command: 'echo echo-upstream-tool', description: 'echo-upstream tool probe' })
+  } finally { close() }
+})
+
+test('tool 模型流式产出 tool_calls delta 与 finish_reason=tool_calls / stop_reason=tool_use', async () => {
+  const { base, close } = await launch()
+  try {
+    const o = await post(base, '/v1/chat/completions', { model: 'echo-model-tool', stream: true })
+    const chunks = parseSse(await o.text()).map((e) => e.data).filter((d) => d !== '[DONE]').map((d) => JSON.parse(d))
+    const callDelta = chunks.find((c) => c.choices?.[0]?.delta?.tool_calls)
+    assert.equal(callDelta.choices[0].delta.tool_calls[0].function.name, 'shell')
+    assert.equal(callDelta.choices[0].delta.tool_calls[0].function.arguments, '{"command":"echo echo-upstream-tool","description":"echo-upstream tool probe"}')
+    assert.ok(chunks.some((c) => c.choices?.[0]?.finish_reason === 'tool_calls'))
+    assert.ok(chunks.some((c) => Array.isArray(c.choices) && c.choices.length === 0 && c.usage))
+
+    const a = await post(base, '/v1/messages', { model: 'echo-model-tool', stream: true })
+    const events = parseSse(await a.text()).map((e) => JSON.parse(e.data))
+    const toolStart = events.find((e) => e.content_block?.type === 'tool_use')
+    assert.equal(toolStart.content_block.name, 'shell')
+    const jsonDelta = events.find((e) => e.delta?.type === 'input_json_delta')
+    assert.equal(jsonDelta.delta.partial_json, '{"command":"echo echo-upstream-tool","description":"echo-upstream tool probe"}')
+    assert.ok(events.some((e) => e.delta?.stop_reason === 'tool_use'))
+    assert.ok(events.some((e) => e.type === 'message_stop'))
+  } finally { close() }
+})
+
+test('tool 场景默认模型不受影响(default 仍为纯文本 stop)', async () => {
+  const { base, close } = await launch()
+  try {
+    const res = await post(base, '/v1/chat/completions', { model: 'echo-model' })
+    const body = await res.json()
+    assert.equal(body.choices[0].finish_reason, 'stop')
+    assert.equal(body.choices[0].message.content, 'echo-upstream-fixed')
+    assert.equal(body.choices[0].message.tool_calls, undefined)
+  } finally { close() }
+})

@@ -97,7 +97,7 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
 
 宿主要求 ≥0.1.7-rc.1:bundle patch 引用 0.1.7 才有的 @deepseek-ai/dsh-agent-preset 宿主包,更旧宿主安装即 boot 失败(2026-09-27 裁定不视为缺陷)。
 
-- 0.2.0-rc.2:完全适配(设置面通过;16 格 LLM 工具调用格因模拟模型无 tool_calls 能力登记环境不可测,历史真机记录与单元测试覆盖)
+- 0.2.0-rc.2:完全适配(设置面通过;LLM 工具调用格 2026-10-08 经 echo-upstream -tool 场景真机解锁:放行路径 [shell: <id>] 尾标 ✓,deny 拦截 spawn 未发生 ✓——拦截文案被宿主工具输出校验吞为 INVALID_TOOL_OUTPUT,登记 FIND-020-3 P3 不修)
 - 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
 - 0.1.5-rc.3:未承诺(本包宿主要求 ≥0.1.7-rc.1,该版本不安装;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
 
