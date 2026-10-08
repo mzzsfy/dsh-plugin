@@ -76,7 +76,7 @@ function makeDomain(initialIds) {
 // 台账域句柄;openRejected 模拟台账域打开失败
 function makeLedgerDomain(entries) {
   const domain = {
-    state: { deleted: entries },
+    state: { deleted: entries, unarchived: [] },
     writes: 0,
     global: {
       get: () => domain.state,
@@ -479,6 +479,62 @@ test('取消归档路由:快照领先域时补全清理(重试路径)', skipMiss
   assert.deepEqual(domain.state.archivedSessionIds, [])
   assert.equal(domain.writes, 1)
   assert.deepEqual(registry.state.archivedSessionIds, [])
+})
+
+test('取消归档宽限:记账落台账,宽限期内评估不再归档', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-grace-'))
+  try {
+    const artifact = path.join(dir, 's1.jsonl')
+    await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(artifact, stale / 1000, stale / 1000)
+    const headers = [{ id: 's1', cwd: 'C:\\x', createdAt: stale }]
+    const persistence = { locate: () => ({ path: artifact }) }
+    // 同一台账域实例跨两轮复用,模拟宿主持久层
+    const ledger = makeLedgerDomain([])
+    const first = makeCtx({ archivedIds: [], headers, agents: new Map(), sessionPersistence: persistence, ledger, domain: makeDomain([]) })
+    first.activateSettings()
+    await waitFor(() => first.registry.archiveCalls.length > 0)
+    assert.deepEqual(first.registry.archiveCalls, ['s1'])
+    // 手动恢复:归档集合移除 + 宽限记账
+    const res = response()
+    await first.handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+    assert.equal(res.status, 200)
+    assert.equal(ledger.state.unarchived.length, 1)
+    assert.equal(ledger.state.unarchived[0].sessionId, 's1')
+    // 下一轮评估(启动补扫同构):同产物仍超期,但宽限期内不归档
+    const second = makeCtx({ archivedIds: [], headers, agents: new Map(), sessionPersistence: persistence, ledger, domain: makeDomain([]) })
+    second.activateSettings()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    assert.deepEqual(second.registry.archiveCalls, [], '宽限期内不得重新归档')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('取消归档宽限:台账既有到期条目在记账时修剪,不影响新条目', skipMissingDeps, async () => {
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const ledger = makeLedgerDomain([])
+  ledger.state.unarchived = [{ sessionId: 'old', unarchivedAt: Date.now() - 8 * DAY_MS }]
+  const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), ledger, domain: makeDomain(['s1']) })
+  const res = response()
+  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(ledger.state.unarchived.map((entry) => entry.sessionId), ['s1'])
+})
+
+test('取消归档宽限:台账域不可用时记账降级告警,恢复动作不回滚', skipMissingDeps, async () => {
+  const domain = makeDomain(['s1'])
+  const { handlers, logger, registry } = makeCtx({
+    archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain,
+    openRejected: new Error('domain down'),
+  })
+  const res = response()
+  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+  assert.equal(res.status, 200)
+  assert.deepEqual(registry.state.archivedSessionIds, [])
+  await waitFor(() => logger.warns.some((message) => message.includes('宽限记账失败')))
 })
 
 test('info 路由:会话不存在拒绝', skipMissingDeps, async () => {

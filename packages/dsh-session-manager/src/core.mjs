@@ -24,16 +24,31 @@ export function updatedAtOf(header, activityAtMs) {
   return Math.max(header.createdAt, activityAtMs ?? 0)
 }
 
+/** 宽限期判定:取消归档后 thresholdDays 天内不再参与自动归档(用户恢复即意图信号)。 */
+export function unarchiveGraceActive(unarchivedAtMs, nowMs, thresholdDays) {
+  if (!Number.isFinite(unarchivedAtMs)) return false
+  return nowMs - unarchivedAtMs < thresholdDays * DAY_MS
+}
+
+/** 宽限台账修剪:到期条目移除,输入非数组按空处理;返回新数组。 */
+export function pruneUnarchivedEntries(entries, nowMs, thresholdDays) {
+  const list = Array.isArray(entries) ? entries : []
+  return list.filter((entry) => entry && unarchiveGraceActive(entry.unarchivedAt, nowMs, thresholdDays))
+}
+
 /**
  * 归档评估状态机:按阈值筛出待归档会话 id。
  * @param records - 候选行 {id, archived, running, blank, updatedAt}
- * @returns 超期且未归档、非运行中、非空白的会话 id
+ * @param unarchivedAtById - 取消归档宽限台账(id → unarchivedAt),宽限内不入选
  */
-export function selectArchiveCandidates({ records, nowMs, thresholdDays }) {
+export function selectArchiveCandidates({ records, nowMs, thresholdDays, unarchivedAtById }) {
   if (!Number.isFinite(thresholdDays) || thresholdDays <= 0) return []
   const cutoff = nowMs - thresholdDays * DAY_MS
+  const grace = unarchivedAtById instanceof Map ? unarchivedAtById : new Map()
   return records
-    .filter((item) => !item.archived && !item.running && !item.blank && item.updatedAt < cutoff)
+    .filter((item) => !item.archived && !item.running && !item.blank
+      && item.updatedAt < cutoff
+      && !unarchiveGraceActive(grace.get(String(item.id)), nowMs, thresholdDays))
     .map((item) => item.id)
 }
 

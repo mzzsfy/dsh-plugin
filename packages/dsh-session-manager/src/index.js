@@ -25,6 +25,7 @@ import {
   isSessionRunning,
   mergeDeletedEntry,
   removeDeletedEntry,
+  pruneUnarchivedEntries,
   selectArchiveCandidates,
   updatedAtOf,
 } from './core.mjs'
@@ -51,8 +52,14 @@ const LEDGER_SPEC = defineDomain({
         heldPath: z.string().optional(),
         deletedAt: z.number(),
       })),
+      // 取消归档宽限台账:用户手动恢复即意图信号,宽限期内不再自动归档;
+      // default 兼容旧数据(域内既有持久层无此字段)
+      unarchived: z.array(z.object({
+        sessionId: z.string(),
+        unarchivedAt: z.number(),
+      })).default([]),
     }),
-    initial: { deleted: [] },
+    initial: { deleted: [], unarchived: [] },
   },
 })
 
@@ -258,6 +265,14 @@ export function apply(ctx, config) {
       const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
       const nowMs = Date.now()
+      // 宽限台账读取:域不可用按无宽限降级(宁可漏归档不可阻断评估);
+      // 用户取消归档后的会话在宽限期内永不入选
+      const grace = new Map()
+      try {
+        for (const entry of (await ledgerReady).global.get().unarchived) {
+          grace.set(entry.sessionId, entry.unarchivedAt)
+        }
+      } catch {}
       const cutoff = nowMs - days * DAY_MS
       const candidates = []
       for (const recordItem of records) {
@@ -295,7 +310,12 @@ export function apply(ctx, config) {
           updatedAt,
         })
       }
-      for (const id of selectArchiveCandidates({ records: candidates, nowMs, thresholdDays: days })) {
+      for (const id of selectArchiveCandidates({
+        records: candidates,
+        nowMs,
+        thresholdDays: days,
+        unarchivedAtById: grace,
+      })) {
         try {
           await registry.archiveSession(id)
           ctx.logger && ctx.logger.info && ctx.logger.info('session-manager 已归档会话: ' + id)
@@ -385,6 +405,23 @@ export function apply(ctx, config) {
     })
   }
 
+  // 宽限记账:取消归档时记录时间点并修剪到期条目;域失败仅告警不回滚恢复动作,
+  // 恢复本身已成功,宽限丢失的最坏后果是该会话下轮被重新归档(可再恢复)
+  async function recordUnarchiveGrace(sessionId) {
+    try {
+      const ledger = await ledgerReady
+      const current = ledger.global.get()
+      const { days } = readSettings(ctx, config)
+      const nowMs = Date.now()
+      const unarchived = pruneUnarchivedEntries(current.unarchived, nowMs, days)
+        .filter((entry) => entry.sessionId !== sessionId)
+      unarchived.push({ sessionId, unarchivedAt: nowMs })
+      await ledger.global.set({ ...current, unarchived })
+    } catch (error) {
+      ctx.logger && ctx.logger.warn('session-manager 宽限记账失败(' + sessionId + '): ' + String(error && error.stack || error))
+    }
+  }
+
   // 台账命中查询:同 id 曾删除过(重删场景的幽灵资格依据);域不可用时按未命中
   async function ledgerHasEntry(sessionId) {
     try {
@@ -451,7 +488,9 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
         try {
-          await removeArchivedId(await requireSessionId(req))
+          const sessionId = await requireSessionId(req)
+          await removeArchivedId(sessionId)
+          await recordUnarchiveGrace(sessionId)
           sendJson(res, 200, { ok: true })
         } catch (error) {
           respondError(ctx, res, error)
