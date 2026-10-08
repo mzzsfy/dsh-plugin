@@ -24,9 +24,9 @@ import {
   pageArchiveRows,
   projectArchiveRows,
   projectDeletedRows,
-  pruneUnarchivedEntries,
   removeDeletedEntry,
   selectArchiveCandidates,
+  UNARCHIVE_GRACE_MS,
   unarchiveGraceActive,
   updatedAtOf,
   workspaceTitleForSession,
@@ -82,34 +82,16 @@ test('阈值负值与非有限值防御性关闭', () => {
   assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: Number.NaN }), [])
 })
 
-test('取消归档宽限期内的会话不参与评估', () => {
-  const grace = new Map([['s1', NOW - 2 * DAY_MS]])
-  const picked = selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: 7, unarchivedAtById: grace })
-  assert.deepEqual(picked, [])
+test('全局宽限:取消归档后 graceMs 内宽限生效,到期与非法输入失效', () => {
+  assert.equal(unarchiveGraceActive(NOW - 2 * 60 * 1000, NOW), true)
+  assert.equal(unarchiveGraceActive(NOW - UNARCHIVE_GRACE_MS, NOW), false)
+  assert.equal(unarchiveGraceActive(0, NOW), false)
+  assert.equal(unarchiveGraceActive(undefined, NOW), false)
+  assert.equal(unarchiveGraceActive(Number.NaN, NOW), false)
 })
 
-test('宽限期到期后恢复参与评估', () => {
-  const grace = new Map([['s1', NOW - 7 * DAY_MS]])
-  const picked = selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: 7, unarchivedAtById: grace })
-  assert.deepEqual(picked, ['s1'])
-})
-
-test('宽限判定:非法时间戳与非 Map 台账防御', () => {
-  assert.equal(unarchiveGraceActive(undefined, NOW, 7), false)
-  assert.equal(unarchiveGraceActive(Number.NaN, NOW, 7), false)
-  assert.equal(unarchiveGraceActive(NOW - 2 * DAY_MS, NOW, 7), true)
-  // 台账缺失(Map 之外)按无宽限
-  assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: 7, unarchivedAtById: undefined }), ['s1'])
-})
-
-test('宽限台账修剪:到期条目移除,宽限内与非法条目形态守恒', () => {
-  const pruned = pruneUnarchivedEntries([
-    { sessionId: 'fresh', unarchivedAt: NOW - 2 * DAY_MS },
-    { sessionId: 'expired', unarchivedAt: NOW - 8 * DAY_MS },
-    { sessionId: 'broken' },
-  ], NOW, 7)
-  assert.deepEqual(pruned, [{ sessionId: 'fresh', unarchivedAt: NOW - 2 * DAY_MS }])
-  assert.deepEqual(pruneUnarchivedEntries(undefined, NOW, 7), [])
+test('全局宽限:常量与天级时长的量级自洽', () => {
+  assert.equal(UNARCHIVE_GRACE_MS, 10 * 60 * 1000)
 })
 
 test('updatedAt 取创建时间与最近活跃的较大者', () => {
