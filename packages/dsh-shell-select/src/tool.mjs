@@ -40,6 +40,25 @@ function blockedMarker(error) {
   return `[blocked by shell-select: matches deny pattern ${error.pattern}]`
 }
 
+/**
+ * deny 命中 → schema 合法的前台结果:拒绝事实全在 stderr 标记文本,
+ * 禁止携带 blocked/blockedBy 等声明外字段——输出 oneOf 各分支
+ * additionalProperties:false,违者被宿主判 INVALID_TOOL_OUTPUT,拒绝文案不可达。
+ */
+function deniedForeground(error, shellId) {
+  return {
+    kind: 'foreground',
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    aborted: false,
+    timeoutMs: 0,
+    stdout: { text: '', truncated: false },
+    stderr: { text: blockedMarker(error), truncated: false },
+    shell: shellId,
+  }
+}
+
 /** 显式 workdir 先行,相对者落会话工作区;否则用会话 cwd,执行器默认兜底(官方同构)。 */
 function resolveWorkdir(modelWorkdir, exec) {
   const headerCwd = exec.agent?.session.header.cwd
@@ -265,7 +284,7 @@ export function registerShellTool(ctx, { executor }) {
         try {
           faces.executor.startFor(entry, faces.executor.resolve(request))
         } catch (error) {
-          if (isDenyError(error)) return { kind: 'foreground', shell: entry.id, blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+          if (isDenyError(error)) return deniedForeground(error, entry.id)
           throw error
         }
         return {
@@ -293,7 +312,7 @@ export function registerShellTool(ctx, { executor }) {
           signal: exec.signal,
         }))
       } catch (error) {
-        if (isDenyError(error)) return { kind: 'foreground', shell: entry.id, blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+        if (isDenyError(error)) return deniedForeground(error, entry.id)
         throw error
       }
       if (result.aborted) throw await abortError('tool call aborted')
