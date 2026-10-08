@@ -1104,9 +1104,6 @@ window.__ModuleLoader__.load({
       '.tn-field__control { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }',
       '.tn-field__hint { grid-column:2; color:var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));',
       '  font-size:11.5px; line-height:1.5; }',
-      // 卡片底部动作区:主操作右对齐
-      '.tn-actions { display:flex; justify-content:flex-end; gap:8px;',
-      '  border-top:1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); padding-top:10px; }',
       '.tn-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
       '.tn-error { color:var(--dsw-alias-state-error-primary, #d43a3a); }',
       '.tn-btn { cursor:pointer; border:1px solid var(--dsw-alias-border-l2, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
@@ -1421,28 +1418,45 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function saveConfig() {
+      // 按字段提交:字段值与已存配置一致时不发请求;成功静默(值未变),失败浮出错误
+      async function saveConfigFields(fields) {
         if (!configLoaded) {
           patch('配置尚未加载,不能保存(刷新页面重试)', 'error')
           return
         }
         setBusy(true)
         try {
-          const raw = typeof config.minTurnDurationMs === 'string'
-            ? config.minTurnDurationMs.trim()
-            : String(config.minTurnDurationMs)
-          if (raw.length === 0) throw new Error('最短回合时长不能为空')
-          const trimmedUrl = urlDraft.trim()
-          // 所见即所存:输入框即配置值,清空并保存即禁用 webhook 通道
-          const patchBody = { webhookUrl: trimmedUrl, minTurnDurationMs: Number(raw), rootsOnly: config.rootsOnly, suppressSubagentWake: config.suppressSubagentWake, hostNotify: config.hostNotify, hostNotifyFallback: config.hostNotifyFallback }
-          const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(patchBody) })
+          const res = await api('/api/turn-notify/config', { method: 'POST', body: JSON.stringify(fields) })
           setConfig({ ...DEFAULT_CONFIG, ...res })
           if (res.soundMapping) setMappingState(res.soundMapping)
-          setUrlDraft(typeof res.webhookUrl === 'string' ? res.webhookUrl : '')
-          patch('配置已保存,立即生效')
+          if ('webhookUrl' in fields) setUrlDraft(typeof res.webhookUrl === 'string' ? res.webhookUrl : '')
         } catch (error) {
           patch('保存失败:' + (error && error.message ? error.message : String(error)), 'error')
         } finally { setBusy(false) }
+      }
+
+      // webhook 失焦即存:草稿与已存值一致时跳过;清空并失焦即禁用 webhook 通道
+      function saveWebhookOnBlur() {
+        const trimmed = urlDraft.trim()
+        if (trimmed === (config.webhookUrl || '')) return
+        void saveConfigFields({ webhookUrl: trimmed })
+      }
+
+      // 最短回合时长失焦即存:空值或与已存值一致时跳过
+      function saveMinTurnOnBlur() {
+        const raw = typeof config.minTurnDurationMs === 'string'
+          ? config.minTurnDurationMs.trim()
+          : String(config.minTurnDurationMs)
+        if (raw.length === 0) return
+        const value = Number(raw)
+        if (value === config.minTurnDurationMs) return
+        void saveConfigFields({ minTurnDurationMs: value })
+      }
+
+      // 开关字段变更即存:乐观回填,失败由响应回滚
+      function setConfigField(name, value) {
+        setConfig((current) => ({ ...current, [name]: value }))
+        void saveConfigFields({ [name]: value })
       }
 
       async function clearWebhook() {
@@ -1559,7 +1573,7 @@ window.__ModuleLoader__.load({
       async function testWebhook() {
         // 草稿与已保存值不同即存在未保存改动,测试的只能是已保存配置
         if (urlDraft.trim() !== String(config.webhookUrl || '').trim()) {
-          patch('表单中的 webhook URL 尚未保存,本次测试的是已保存配置;请先保存再测试', 'error')
+          patch('表单中的 webhook URL 尚未落盘(失焦后才保存),本次测试的是已保存配置;点击别处后再测试', 'error')
           return
         }
         try {
@@ -1714,7 +1728,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'tn-panel' },
         h('div', { className: 'tn-head' },
           h('span', { className: 'tn-head__title' }, '消息通知'),
-          h('span', { className: 'tn-head__hint' }, '保存即生效;标签页全关时仅 webhook、IM 与宿主通知(如开启)送达'),
+          h('span', { className: 'tn-head__hint' }, '改动即时生效;标签页全关时仅 webhook、IM 与宿主通知(如开启)送达'),
         ),
         h('div', { className: 'tn-tabs', role: 'tablist' },
           tabs.map((item) => h('button', {
@@ -1730,7 +1744,7 @@ window.__ModuleLoader__.load({
           activeTab === '通知' ? h('div', { className: 'tn-card' },
             h('div', { className: 'tn-card__head' },
               h('span', { className: 'tn-card__title' }, '通知配置'),
-              h('span', { className: 'tn-card__sub' }, '六类事件的触发与过滤;开关即时生效,数值改动需点保存'),
+              h('span', { className: 'tn-card__sub' }, '六类事件的触发与过滤;全部改动即时生效'),
             ),
             field('webhook', [
               h('input', {
@@ -1739,17 +1753,19 @@ window.__ModuleLoader__.load({
                 placeholder: 'Slack-compatible URL,留空禁用',
                 value: urlDraft,
                 onChange: (e) => setUrlDraft(e.target.value),
+                onBlur: () => saveWebhookOnBlur(),
               }),
               String(config.webhookUrl || '').trim().length > 0
                 ? h('button', { className: 'tn-btn tn-btn--danger', disabled: busy, title: '清除已配置的 webhook,清除后该通道禁用', onClick: () => void clearWebhook() }, '清除')
                 : null,
-            ], '保存即提交输入框内容,清空并保存即禁用;改动后先保存,测试按钮只测已保存配置'),
+            ], '失焦即提交输入框内容,清空并失焦即禁用;测试按钮只测已保存配置'),
             field('最短回合时长', [
               h('input', {
                 className: 'tn-input', type: 'number', min: 0, step: 500, style: { width: '90px' },
                 title: '过滤连续快速的小回合(如自动压缩、状态刷新);默认 5000 毫秒,设为 0 关闭过滤',
                 value: config.minTurnDurationMs,
                 onChange: (e) => setConfig({ ...config, minTurnDurationMs: e.target.value }),
+                onBlur: () => saveMinTurnOnBlur(),
               }),
               h('span', { className: 'tn-meta' }, '毫秒,回合结束类通知短于此时长不送达;提问与审批请求即时送达'),
             ]),
@@ -1757,13 +1773,13 @@ window.__ModuleLoader__.load({
               h('label', { className: 'tn-meta tn-switch', title: '子代理是主会话委托出去的独立会话;开启后子代理自身的完成/出错不通知,只有主会话通知' },
                 ...switchToggle({
                   checked: config.rootsOnly,
-                  onChange: (e) => setConfig({ ...config, rootsOnly: e.target.checked }),
+                  onChange: (e) => setConfigField('rootsOnly', e.target.checked),
                 }),
                 ' 子代理会话不通知'),
               h('label', { className: 'tn-meta tn-switch', title: '发起后台委托后主回合先结束的等待期,以及子代理完成后唤醒父会话继续工作的回合,任务完成通知均静默;整条委托链只在最终回合响一次' },
                 ...switchToggle({
                   checked: config.suppressSubagentWake,
-                  onChange: (e) => setConfig({ ...config, suppressSubagentWake: e.target.checked }),
+                  onChange: (e) => setConfigField('suppressSubagentWake', e.target.checked),
                 }),
                 ' 后台委托未收尾或收尾唤醒的回合不通知(仅完成类)'),
             ]),
@@ -1771,16 +1787,16 @@ window.__ModuleLoader__.load({
               h('label', { className: 'tn-meta tn-switch', title: '通知触发时由宿主进程弹系统级桌面通知(osascript/notify-send/PowerShell toast);浏览器优先:有浏览器窗口在线(2 秒内有在途长轮询)时由浏览器呈现,宿主不重复弹;浏览器全关(标签页全关)时宿主弹' },
                 ...switchToggle({
                   checked: config.hostNotify,
-                  onChange: (e) => setConfig({ ...config, hostNotify: e.target.checked }),
+                  onChange: (e) => setConfigField('hostNotify', e.target.checked),
                 }),
                 ' 宿主机弹桌面通知'),
               h('label', { className: 'tn-meta tn-switch', title: '浏览器在场(2 秒内有在途长轮询)时由浏览器呈现,离场时宿主补位桌面通知;与总开关判定一致,任一开启即生效' },
                 ...switchToggle({
                   checked: config.hostNotifyFallback,
-                  onChange: (e) => setConfig({ ...config, hostNotifyFallback: e.target.checked }),
+                  onChange: (e) => setConfigField('hostNotifyFallback', e.target.checked),
                 }),
                 ' 仅当无浏览器接收时补位'),
-            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器优先——浏览器在线时由浏览器呈现,宿主不重复弹,离场(2 秒内无在途长轮询)时宿主补位,边界情况(窗口边界与网络抖动)宁重复不漏。需点保存生效,测试页可逐条点火验证。'),
+            ], '由宿主进程直接弹 OS 桌面通知,服务器/浏览器全关场景可达;浏览器优先——浏览器在线时由浏览器呈现,宿主不重复弹,离场(2 秒内无在途长轮询)时宿主补位,边界情况(窗口边界与网络抖动)宁重复不漏。切换即生效,测试页可逐条点火验证。'),
             field('事件分类', h('div', { className: 'tn-pills' },
               CATEGORIES.map((category) => h('span', {
                 className: 'tn-pill' + (config.enabled[category] ? ' tn-pill--on' : ''),
@@ -1789,9 +1805,6 @@ window.__ModuleLoader__.load({
                 onClick: () => void toggleCategory(category, !config.enabled[category]),
               }, CATEGORY_LABELS[category])),
             ), '亮=触发通知,暗=不触发,点击即存即时生效'),
-            h('div', { className: 'tn-actions' },
-              h('button', { className: 'tn-btn tn-btn--primary', disabled: busy, title: '保存 webhook、时长与子代理过滤的改动;六类事件开关点击时已即时保存', onClick: () => void saveConfig() }, '保存'),
-            ),
           ) : null,
           activeTab === '偏好' ? h('div', { className: 'tn-card' },
             h('div', { className: 'tn-card__head' },

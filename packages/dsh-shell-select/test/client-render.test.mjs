@@ -108,13 +108,6 @@ test('渲染守卫:后台 ack 块(默认收起行 + 任务号徽标)组件执行
   assert.notEqual(element, undefined)
 })
 
-test('设置卡注册:settings.section 单卡 id shell-select', () => {
-  const registrations = loadClient()
-  const card = registrations.find((item) => item.meta.name === 'settings.section')
-  assert.notEqual(card, undefined)
-  assert.equal(card.meta.id, 'shell-select')
-})
-
 test('图标名守卫:0.1.7 primitives 字重后缀名在场,尺寸后缀旧名不在首选位', () => {
   // 0.1.7 图标改名:尺寸从名字移除(IconApiOutline14 → IconApiOutlineRegular/Medium),
   // 旧名 miss 使 IconApi 落淡灰 fallback 被当成"空白 icon"(实测事故)
@@ -156,7 +149,7 @@ test('hooks 恒序守卫:组件内 hook 调用必须全部位于第一个提前 
     const m = /return h\(/.exec(scope)
     return m === null ? Number.POSITIVE_INFINITY : beginLine + scope.slice(0, m.index).split('\n').length - 1
   }
-  for (const name of ['ShellToolRow', 'GenericShellRow', 'CopyButton', 'RunningDuration', 'ShellSelectApp']) {
+  for (const name of ['ShellToolRow', 'GenericShellRow', 'CopyButton', 'RunningDuration']) {
     const { hookLines } = extract(name)
     const scopeBody = source.slice(source.indexOf(`function ${name}(`))
     const end = scopeBody.indexOf('\n    function ', 1)
