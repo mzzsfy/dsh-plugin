@@ -533,6 +533,23 @@ function draftsFromModels(models) {
   }
   return drafts
 }
+
+// 官方输入类型槽位识别:新版宿主在模型行展开区渲染「输入类型(文本/图片)」
+// fieldset,写回字段与本插件 inputMode 同源(providers.<route>.models[].input),
+// 命中即本插件的输入模态控件冗余,应隐藏;思考档位映射官方刻意不提供,保留。
+// 锚点以 aria-label 前缀判定(zh/en),不依赖构建哈希 class。
+const OFFICIAL_INPUT_TYPE_LABELS = ['输入类型', 'Input types']
+
+function isOfficialInputTypesFieldset(el) {
+  return el !== null && typeof el === 'object' && el.tagName === 'FIELDSET' &&
+    typeof el.ariaLabel === 'string' &&
+    OFFICIAL_INPUT_TYPE_LABELS.some((label) => el.ariaLabel.startsWith(label))
+}
+
+// 行内块标题随模态控件显隐切换:官方槽位在场时模态编辑由官方承担。
+function inlineTitleText(hideInputMode) {
+  return hideInputMode === true ? '模型能力(思考档位)' : '模型能力(思考档位 / 输入模态)'
+}
 /* LOGIC-END */
 
 function LevelEditor(props) {
@@ -864,7 +881,7 @@ function RowEditor(props) {
     patch({ draft: next })
   }
   return h('div', { className: 'mce-inline' },
-    h('div', { className: 'mce-inline__title' }, '模型能力(思考档位 / 输入模态)'),
+    h('div', { className: 'mce-inline__title' }, inlineTitleText(props.hideInputMode === true)),
     h('div', { className: 'mce-inline__grid' },
       EFFORT_LEVELS.map((level) => h('div', { className: 'mce-inline__field', key: level },
         h('label', { className: 'mce-switch' },
@@ -885,7 +902,7 @@ function RowEditor(props) {
         }),
       )),
     ),
-    h('div', { className: 'mce-inline__field' },
+    props.hideInputMode === true ? null : h('div', { className: 'mce-inline__field' },
       h('span', { className: 'mce-label' }, '输入模态:'),
       h('select', {
         className: 'mce-select',
@@ -1089,6 +1106,9 @@ function RowEditor(props) {
           // 箭头收起被官方整体移除,面板由 reconcile 的孤儿清理随之释放,无从常驻
           const advanced = advancedAreaOf(idInput)
           if (advanced === null || advanced.querySelector(':scope > .mce-inline-root') !== null) return false
+          // 官方输入类型槽位在场(新版宿主,展开态渲染,与本注入同帧)→ 模态控件
+          // 冗余,行内块仅保留官方没有的思考档位映射编辑
+          const hideInputMode = [...advanced.querySelectorAll('fieldset')].some(isOfficialInputTypesFieldset)
           const container = document.createElement('div')
           container.className = 'mce-inline-root'
           advanced.appendChild(container)
@@ -1097,6 +1117,7 @@ function RowEditor(props) {
             settings: face,
             route: matchedRoute,
             modelId,
+            hideInputMode,
             saveFollow: rowSaveFollow(container, matchedRoute, modelId),
           }))
           roots.set(container, root)
