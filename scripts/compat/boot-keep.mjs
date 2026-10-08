@@ -98,12 +98,16 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
       '            name: Echo Tool Model',
       '            input:',
       '              - text',
+      '          - id: echo-model-call',
+      '            name: Echo Call Model',
+      '            input:',
+      '              - text',
       '',
     ].join('\n')
     // 幂等补 think/tool 模型行(宿主重启重写 patch 丢扩展行;流式思考断言依赖
     // -think 后缀,工具链断言依赖 -tool 后缀)。重读防与上方 seed 写盘互抹
     const afterSeed = readFileSync(patchPath, 'utf8')
-    if ((think || gateway) && !afterSeed.includes('echo-model-tool') && afterSeed.includes(MODEL_TAIL)) {
+    if ((think || gateway) && !(afterSeed.includes('echo-model-tool') && afterSeed.includes('echo-model-call')) && afterSeed.includes(MODEL_TAIL)) {
       writeFileSync(patchPath, afterSeed.replace(MODEL_TAIL, EXT_BLOCK), 'utf8')
       logFn('[daemon] gateway think/tool model rows injected')
     }

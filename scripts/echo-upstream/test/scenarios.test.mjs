@@ -135,6 +135,46 @@ test('tool 模型流式产出 tool_calls delta 与 finish_reason=tool_calls / st
   } finally { close() }
 })
 
+test('call 模型产出 rs_workflow_start 工具调用(非流式双协议)', async () => {
+  const { base, close } = await launch()
+  try {
+    const expected = { request: 'compat rsww run probe', templateId: 'compat-test', plan: { brief: 'compat acceptance', steps: [{ ref: 'first', note: 'echo-upstream -call probe', done: 'result 回填' }] } }
+    const o = await post(base, '/v1/chat/completions', { model: 'echo-model-call' })
+    const ob = await o.json()
+    assert.equal(ob.choices[0].finish_reason, 'tool_calls')
+    const call = ob.choices[0].message.tool_calls[0]
+    assert.equal(call.function.name, 'rs_workflow_start')
+    assert.deepEqual(JSON.parse(call.function.arguments), expected)
+
+    const a = await post(base, '/v1/messages', { model: 'echo-model-call' })
+    const ab = await a.json()
+    assert.equal(ab.stop_reason, 'tool_use')
+    assert.equal(ab.content[0].type, 'tool_use')
+    assert.equal(ab.content[0].name, 'rs_workflow_start')
+    assert.deepEqual(ab.content[0].input, expected)
+  } finally { close() }
+})
+
+test('call 模型流式产出 rs_workflow_start delta 与终止原因', async () => {
+  const { base, close } = await launch()
+  try {
+    const o = await post(base, '/v1/chat/completions', { model: 'echo-model-call', stream: true })
+    const chunks = parseSse(await o.text()).map((e) => e.data).filter((d) => d !== '[DONE]').map((d) => JSON.parse(d))
+    const callDelta = chunks.find((c) => c.choices?.[0]?.delta?.tool_calls)
+    assert.equal(callDelta.choices[0].delta.tool_calls[0].function.name, 'rs_workflow_start')
+    assert.ok(chunks.some((c) => c.choices?.[0]?.finish_reason === 'tool_calls'))
+    assert.ok(chunks.some((c) => Array.isArray(c.choices) && c.choices.length === 0 && c.usage))
+
+    const a = await post(base, '/v1/messages', { model: 'echo-model-call', stream: true })
+    const events = parseSse(await a.text()).map((e) => JSON.parse(e.data))
+    const toolStart = events.find((e) => e.content_block?.type === 'tool_use')
+    assert.equal(toolStart.content_block.name, 'rs_workflow_start')
+    const jsonDelta = events.find((e) => e.delta?.type === 'input_json_delta')
+    assert.deepEqual(JSON.parse(jsonDelta.delta.partial_json).templateId, 'compat-test')
+    assert.ok(events.some((e) => e.delta?.stop_reason === 'tool_use'))
+  } finally { close() }
+})
+
 test('tool 场景默认模型不受影响(default 仍为纯文本 stop)', async () => {
   const { base, close } = await launch()
   try {

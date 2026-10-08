@@ -45,10 +45,12 @@ const fakeEngine = () => ({
 
 const registered = []
 let currentJobs = []
+const jobSpecs = []
 
 function setup() {
   registered.length = 0
   currentJobs = []
+  jobSpecs.length = 0
   const handlers = new Map()
   const ctx = {
     logger: { info: () => {}, warn: () => {} },
@@ -59,6 +61,7 @@ function setup() {
         workflowEngine: fakeEngine(),
         jobs: {
           start(spec) {
+            jobSpecs.push(spec)
             const hooks = spec.run()
             currentJobs.push(hooks)
             return `rsww-segment-${currentJobs.length}`
@@ -88,12 +91,14 @@ const fullPlan = (brief = '口径', refs = ['triage', 'execute', 'review', 'deli
 })
 
 test('Given 合法 plan When rs_workflow_start Then 受理返回 runId 且首段 job 启动', async () => {
-  const { start, exec } = setup()
+  const { start, exec, agent } = setup()
   const r = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
   assert.equal(r.ok, true)
   assert.equal(r.status, 'running')
   assert.match(r.runId, /^r-/)
   assert.equal(currentJobs.length, 1)
+  // FIND-020-4 回归:owner 必须是 agent id 字符串(宿主 jobs 按 session id 解析活体,对象形态恒 "no live agent")
+  assert.equal(jobSpecs[0].owner, agent.id)
   const record = reportStore().get(r.runId)
   assert.equal(record.status, 'running')
   assert.equal(record.plan.source, 'model')
