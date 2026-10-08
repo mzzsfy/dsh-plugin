@@ -16,31 +16,17 @@ const WATCH_POLL_MS = 5000
 
 // gateway LLM 链路的 echo 路由 seed:宿主重启会重写 profile cordis.patch.yml,
 // 每轮 boot 前幂等补行(行形态与 profile.mjs seedGatewayEntry 一致,端口 18123)
-// seed 跟随 --only 意图(V6 根因修复):gateway/think 的 seed 行是非 insert 形态,
-// 只能改写 bundle 层已 insert 的条目;包不在 --only 即不在 bundles,注入必打空
-// (app-boot applyEntryPatches :95-98 warn+skip,宿主不自愈)。此前无条件注入,
-// --only 单包轮每 boot 产出 not found warn 且 seed 静默无效
+// 装饰器形态:echo 路由声明在官方 llm-pi-ai 节(官方行自服务,gateway 仅经
+// registerAdapter shadow 装饰,不服务任何路由);gateway 节仅 sessionMarker。
+// 不再注入官方行静态禁用(接管形态遗产,已退役)
 function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } = {}) {
   if (!gateway && !think) return []
   const seeded = []
   try {
     const current = readFileSync(patchPath, 'utf8')
-    // 官方行静态禁用(takeover 本位形态):运行时禁用会在冷 boot 触发宿主
-    // inject-epoch 级联('llm' impl 换 fiber → gateway fiber 卸载 → 注册全灭
-    // 且无重建);官方行从不动则零级联,复活由 gateway 守卫接管。
-    // DSH_COMPAT_SKIP_OFFICIAL_SEED=1 跳过:guard 孤儿自愈活体验证需要官
-    // 方启用形态的级联场景,与 seed 静态禁用互斥
-    // 单次写盘:多块拼接后一次写,分次写会用 stale 内容互相抹除(实证缺陷)
-    let pending = current
-    if (gateway && process.env.DSH_COMPAT_SKIP_OFFICIAL_SEED !== '1' && !/^-\s*id:\s*llm-pi-ai\s*$/m.test(current)) {
-      // 块前空行:紧接 models 列表尾会被 YAML 缩进歧义解析为子项而被宿主丢弃
-      pending = pending.replace(/\n*$/, '\n') + ['', '- id: llm-pi-ai', '  disabled: true', ''].join('\n')
-      logFn('[daemon] official row static-disable injected')
-    }
-    if (gateway && !current.includes('llm-pi-gateway')) {
+    if (gateway && !current.includes('echo-anthropic')) {
       const seedRows = [
-        '- id: llm-pi-gateway',
-        '  name: "@mzzsfy/dsh-llm-pi-gateway"',
+        '- id: llm-pi-ai',
         '  config:',
         '    providers:',
         '      echo-openai:',
@@ -55,18 +41,6 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
         '            name: Echo Model',
         '            input:',
         '              - text',
-        '          - id: echo-model-think',
-        '            name: Echo Think Model',
-        '            input:',
-        '              - text',
-        '          - id: echo-model-thinkslow',
-        '            name: Echo Thinkslow Model',
-        '            input:',
-        '              - text',
-        '          - id: echo-model-tool',
-        '            name: Echo Tool Model',
-        '            input:',
-        '              - text',
         '      echo-anthropic:',
         '        displayName: Echo Anthropic',
         '        api: anthropic-messages',
@@ -74,23 +48,36 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
         '        apiKeyEnv: ECHO_KEY',
         '        defaultInput:',
         '          - text',
-        '        compat:',
-        '          sendSessionAffinityHeaders: true',
         '        models:',
         '          - id: echo-a-model',
         '            name: Echo A Model',
         '            input:',
         '              - text',
+        '- id: llm-pi-gateway',
+        '  name: "@mzzsfy/dsh-llm-pi-gateway"',
+        '  config:',
+        '    sessionMarker:',
+        '      enabled: true',
+        '      prefix: dsh',
         '',
       ].join('\n')
-      pending = pending.replace(/\n*$/, '\n') + seedRows
+      const pending = current.replace(/\n*$/, '\n') + seedRows
       writeFileSync(patchPath, pending, 'utf8')
-      logFn(`[daemon] gateway seed rows injected -> ${patchPath}`)
+      logFn(`[daemon] decorator seed rows injected -> ${patchPath}`)
       return think ? ['llm-pi-gateway', 'think-expand'] : ['llm-pi-gateway']
     }
-    if (pending !== current) {
-      // 仅官方行块被拼接(gateway 行已在)的路径:在此统一落盘
+    if (gateway && !current.includes('llm-pi-gateway')) {
+      const pending = current.replace(/\n*$/, '\n') + [
+        '- id: llm-pi-gateway',
+        '  name: "@mzzsfy/dsh-llm-pi-gateway"',
+        '  config:',
+        '    sessionMarker:',
+        '      enabled: true',
+        '      prefix: dsh',
+        '',
+      ].join('\n')
       writeFileSync(patchPath, pending, 'utf8')
+      logFn(`[daemon] gateway row injected -> ${patchPath}`)
     }
     if (gateway) seeded.push('llm-pi-gateway')
     // 宿主重启会重写 patch 规范形(丢扩展模型行);幂等补 think/tool 模型行
@@ -107,18 +94,17 @@ function ensureGatewaySeed(patchPath, logFn, { gateway = false, think = false } 
       '            name: Echo Thinkslow Model',
       '            input:',
       '              - text',
-      '            input:',
-      '              - text',
       '          - id: echo-model-tool',
       '            name: Echo Tool Model',
       '            input:',
       '              - text',
       '',
     ].join('\n')
-    if ((think || gateway) && !pending.includes('echo-model-tool') && pending.includes(MODEL_TAIL)) {
-      // 基于 pending(含官方行块)修补,再落盘,防 stale 抹除
-      const patched = pending.replace(MODEL_TAIL, EXT_BLOCK)
-      writeFileSync(patchPath, patched, 'utf8')
+    // 幂等补 think/tool 模型行(宿主重启重写 patch 丢扩展行;流式思考断言依赖
+    // -think 后缀,工具链断言依赖 -tool 后缀)。重读防与上方 seed 写盘互抹
+    const afterSeed = readFileSync(patchPath, 'utf8')
+    if ((think || gateway) && !afterSeed.includes('echo-model-tool') && afterSeed.includes(MODEL_TAIL)) {
+      writeFileSync(patchPath, afterSeed.replace(MODEL_TAIL, EXT_BLOCK), 'utf8')
       logFn('[daemon] gateway think/tool model rows injected')
     }
     if (think) seeded.push('think-expand')

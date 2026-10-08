@@ -1,405 +1,70 @@
-// llm-pi-gateway Host 半区:注册 settings 命名空间 llm-pi-gateway,按其路由表
-// 经 ctx.llm 注册网关 adapter。配置经 settings onChange 热更新,解析失败保旧。
+// llm-pi-gateway Host 半区(装饰器形态):官方 llm-pi-ai 行保持启用并自服务,
+// 本包在官方 adapter 类的 streamWithSnapshot 原型上注入派生会话标记。
+// 不注册任何 adapter/directory/discovery,不接管官方 settings 节
+// (0.1.7+ 宿主设置页模型新增因此原生完好)。
 
 import z from '@deepseek-ai/schemastery'
-import { RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import { resolveRoutes, OFFICIAL_SETTINGS_NS, SETTINGS_NS, THINKING_LEVELS } from './config.mjs'
-import { createGatewayAdapter } from './adapter.mjs'
-import { createCredentialResolver } from './credentials.mjs'
-import { createRouteManager, deepEqualJson } from './manager.mjs'
-import { discoverModels } from './discovery.mjs'
-import { takeoverFailureText } from './errors.mjs'
-import {
-  officialEntryState,
-  takeoverDecision,
-  awaitOfficialExit,
-  installOfficialRevivalGuard,
-  armDeferredTakeover,
-  runtimeDisableOfficial,
-} from './takeover.mjs'
-import { beginGatewayApply, endGatewayApplyActive, endGatewayApplyInactive } from './apply-state.mjs'
-import { imageOffloadAdapter } from './image-offload.mjs'
-import { withTimeout, MODULE_LOAD_TIMEOUT_MS } from './guard-rail.mjs'
+import { SETTINGS_NS } from './config.mjs'
+import { createMarkerInject, sweepRegisteredAdapters } from './decorator.mjs'
 
 export const name = 'llm-pi-gateway'
 
-const NS = SETTINGS_NS
-const OFFICIAL_NS = OFFICIAL_SETTINGS_NS
-
-// 宿主必备导出:均为 dsh 0.1.2 引入,激活时逐项探测,缺失即禁用
-const HOST_REQUIRED_EXPORTS = ['resolveImageAttachmentAccess', 'offloadedImageText']
-
-export const inject = ['llm', 'settings']
-
-const reasoningEfforts = z.dict(z.union([z.string(), z.const(null)]), z.union(THINKING_LEVELS))
-
-const modelEntry = z.object({
-  id: z.string().required(),
-  name: z.string(),
-  contextWindow: z.number(),
-  maxTokens: z.number(),
-  input: z.array(z.union(['text', 'image'])),
-  reasoningEfforts: z.union([z.const(false), reasoningEfforts]),
-  compat: z.dict(z.any()),
-})
-
-const providerEntry = z.object({
-  api: z.union(['anthropic-messages', 'openai-completions', 'openai-responses']),
-  baseURL: z.string(),
-  apiKeyEnv: z.string().role('credential-ref'),
-  displayName: z.string(),
-  reasoning: z.union(THINKING_LEVELS),
-  thinkingBudgets: z.dict(z.any()),
-  transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
-  timeoutMs: z.natural(),
-  websocketConnectTimeoutMs: z.natural(),
-  cacheRetention: z.union(['none', 'short', 'long']),
-  defaultContextWindow: z.number(),
-  defaultMaxTokens: z.number(),
-  defaultInput: z.array(z.union(['text', 'image'])),
-  maxRequestImageBytes: z.number(),
-  requestImagePixelBudget: z.number(),
-  requestImageMaxBytes: z.number(),
-  retryPolicy: RetryPolicySchema,
-  sessionMarker: z.object({
-    enabled: z.boolean().default(true),
-    prefix: z.string(),
-  }),
-  metadata: z.dict(z.any()),
-  compat: z.dict(z.any()),
-  headers: z.dict(z.string()),
-  models: z.array(modelEntry),
+const sessionMarkerSchema = z.object({
+  enabled: z.boolean().default(true),
+  prefix: z.string(),
 })
 
 export const Config = volatileWrap(z.object({
-  providers: z.dict(providerEntry).default({}),
+  sessionMarker: sessionMarkerSchema.default({ enabled: true, prefix: 'dsh' }),
 }))
 
-// 宿主 settings 写路径的 volatile 表单门槛(0.1.7 settings/update 经
-// volatileForm(schema) 判定,无 volatile 字段即拒整节写);对表官方
-// 0.1.7 Config 的 providers .volatile()。旧宿主 schemastery 无 volatile
-// 方法,特性检测原样返回
+// 宿主 settings 写路径的 volatile 表单门槛(0.1.7 无 volatile 字段即拒整节写);
+// 旧宿主 schemastery 无 volatile 方法,特性检测原样返回
 function volatileWrap(schema) {
   return typeof schema.volatile === 'function' ? schema.volatile() : schema
 }
 
-/** 探测宿主 dsh-llm 缺失的必备导出,齐全返回空表。 */
-export function missingHostExports(dshLlm) {
-  return HOST_REQUIRED_EXPORTS.filter((name) => dshLlm[name] === undefined)
-}
+// 0.1.7 volatile 形态:apply 入参 config 中 volatile 字段是响应式 ref(get 协议),
+// 节写经 updateVolatile 就地换值广播 volatile-update,读值必须动态解包
+const unwrapVolatile = (value) => (typeof value?.get === 'function' ? value.get() : value)
+
+// 官方行注册 adapter 晚于本包 apply(装载序无保证),sweep + 事件是承载机制;
+// inject 声明 llm 依赖,保证可用性与禁用顺序
+export const inject = ['llm']
+
+// llm 服务内部形态门槛(adapters 为 Map):版本漂移防御
+const hostShadowable = (llm) => llm !== null && typeof llm === 'object' && llm.adapters instanceof Map
 
 /**
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {object} config 本节初始配置
- * @param {() => Promise<object>} [importOfficial] 官方包加载器,测试注入桩;
- *   默认动态 import(官方包缺失时仅降级本节接管,不拖垮本包加载——
- *   静态 import 命名导出缺失即加载崩溃,违反干净禁用规约)
- * @param {{exitPoll?: object, deferredExit?: object, loadTimeoutMs?: number}} [pollOptions] 轮询参数,
- *   仅测试注入:exitPoll 透传快速退场窗(awaitOfficialExit),deferredExit
- *   透传延迟补接管轮询(armDeferredTakeover),loadTimeoutMs 覆盖官方包加载
- *   护栏(仅测试注入);生产全部缺省
+ * @param {object} config 本节初始配置(volatile 字段为 ref,动态解包)
  */
-export async function apply(ctx, config, importOfficial = () => import('@deepseek-ai/dsh-llm-pi-ai'), { exitPoll = {}, deferredExit = {}, loadTimeoutMs = MODULE_LOAD_TIMEOUT_MS } = {}) {
-  // 生命周期旗标:guard 据此识别本行的功能性停摆(早退 = 假活,详见
-  // apply-state.mjs);中途崩溃旗标停留 undefined,guard 保守不代挂
-  beginGatewayApply()
-  // boot 诊断锚点:挂起形态(横幅不打印)时此日志是"树推进到本行"的标记
-  ctx.logger.info?.('llm-pi-gateway: apply 开始')
-  // 宿主兼容探测,两项独立:
-  // 1) settings 服务面:0.1.2–0.1.5 提供 installSection(本包节安装 +
-  //    validate/setSource/onChange);0.1.7 起该面移除,节表单由插件静态
-  //    Config 导出自动生成,配置变更经"写节 → Loader 重载条目 → 重跑 apply"
-  //    驱动,apply 入参 config 即最新值,重入即热更新。两种形态特性检测,
-  //    不做版本硬编码
-  // 2) dsh-llm 导出:HOST_REQUIRED_EXPORTS 为 dsh 0.1.2 引入,动态探测防静态
-  //    import 命名导出缺失即加载崩溃;旧本体缺失时同样禁用,boot 保持干净。
-  if (ctx.settings === undefined) {
-    ctx.logger.warn('llm-pi-gateway: 宿主 settings 服务缺席,插件禁用')
-    endGatewayApplyInactive()
+export async function apply(ctx, config) {
+  const llm = ctx.llm
+  if (!hostShadowable(llm)) {
+    ctx.logger?.warn?.('llm-pi-gateway: 宿主 llm 服务形态不符,插件禁用')
     return undefined
   }
-  const legacySectionFace = typeof ctx.settings.installSection === 'function'
-  if (!legacySectionFace) {
-    ctx.logger.info?.('llm-pi-gateway: 宿主 settings 无节安装面(0.1.7 形态),配置变更经条目重载驱动')
+  const readMarker = () => unwrapVolatile(unwrapVolatile(config)?.sessionMarker) ?? { enabled: true, prefix: 'dsh' }
+  let markerConfig = readMarker()
+  const warnOnce = (provider, message) => ctx.logger?.warn?.(message)
+  const injectOptions = createMarkerInject(() => markerConfig, warnOnce)
+  let active = true
+  const isActive = () => active
+  const sweep = () => {
+    return sweepRegisteredAdapters(llm, injectOptions, isActive)
   }
-  // 宿主包读取:模块头部静态 import 只覆盖跨版本稳定符号(contentHasImage /
-  // requestImageHandleText 等,0.1.2 起在),图片卸载管线为版本换形面,经
-  // image-offload 特性检测;此处动态 import 为同模块缓存命中,瞬时返回无
-  // 失败路径;dsh-llm 挂起形态发生在模块加载期、先于本函数,由"apply 开始"
-  // 锚点日志缺席定位
-  const dshLlm = await import('@deepseek-ai/dsh-llm')
-  // dsh-attachment 仅 routed 形态图片管线需要(requestImageDimensions);
-  // 旧宿主闭包可能无此包,加载失败按缺失处理,由适配器选择回落 transient
-  let dshAttachment
-  try {
-    dshAttachment = await import('@deepseek-ai/dsh-attachment')
-  } catch {
-    dshAttachment = undefined
-  }
-  const imageOffload = imageOffloadAdapter(dshLlm, dshAttachment)
-  if (imageOffload === null) {
-    ctx.logger.warn('llm-pi-gateway: 宿主 dsh-llm 缺少图片卸载管线(0.1.7 routed 或 0.1.2–0.1.5 transient 皆缺),插件禁用')
-    endGatewayApplyInactive()
-    return undefined
-  }
-  const missing = missingHostExports(dshLlm)
-  if (missing.length > 0) {
-    ctx.logger.warn(`llm-pi-gateway: 宿主缺少 ${missing.join(', ')}(需要 dsh 本体 0.1.2+),插件禁用`)
-    endGatewayApplyInactive()
-    return undefined
-  }
-  // 官方 Config 同样动态获取:官方包缺失/加载超时/无 Config 导出(包被移除、
-  // 版本演进、损伤包树)时统一告警并跳过官方节接管,本包节照常服务
-  let OfficialConfig
-  try {
-    const officialModule = await withTimeout(importOfficial(), loadTimeoutMs, 'gateway 官方包加载')
-    OfficialConfig = officialModule?.Config
-    if (OfficialConfig === undefined) {
-      ctx.logger.warn('llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节')
-    }
-  } catch (error) {
-    ctx.logger.warn(`llm-pi-gateway: 官方 dsh-llm-pi-ai 不可用,降级为只服务 llm-pi-gateway 节(${error?.message ?? error})`)
-    OfficialConfig = undefined
-  }
-  // 官方 entry 生命周期决策:接管(官方行停稳/缺席)/等待退场/runtime-disable
-  // (行树默认启用态,apply 落定后运行时禁用再接管)/让位(用户显式启用官方,
-  // 永不强抢)。宿主注册排他,官方在场时本包不得占用其任何注册。servingOfficial
-  // 供复活守卫判定:仅正服务官方节时,官方行复活才需要自停让位。
-  let servingOfficial = false
-  const officialState = officialEntryState(ctx.loader)
-  const decision = takeoverDecision(officialState)
-  let takeover
-  // 退场超时标记:arm 延迟到全部装配落定后执行,装配中途失败不留僵尸轮询
-  let exitTimedOut = false
-  if (decision === 'yield') {
-    ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 行被用户显式启用,本包降级为只服务 llm-pi-gateway 节')
-    takeover = false
-  } else if (decision === 'runtime-disable') {
-    // 行树默认启用态:官方插件本轮 boot 先服务(官方行不经静态 patch 禁用,
-    // 本包损伤时系统仍有官方可用);本包 apply 落定后运行时禁用官方行再接管。
-    // apply 期不占官方资源,禁用序列在落定后的异步链上执行
-    ctx.logger.info?.('llm-pi-gateway: 官方 llm-pi-ai 行为默认启用态,apply 落定后运行时禁用并接管')
-    takeover = false
-  } else if (decision === 'await-exit') {
-    ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 插件退场中,等待其完全卸载后接管')
-    takeover = await awaitOfficialExit(officialState.entry, exitPoll)
-    if (!takeover) {
-      // 退场受在途流拖长属常态(用户边用边装),快速窗耗尽只是接管推迟:
-      // 先服务本包节,官方退场后补完成接管,服务与标记注入最终一致
-      ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 退场超时(存在在途流),先服务本包节,官方退场后自动完成接管')
-      exitTimedOut = true
-    }
-  } else {
-    takeover = true
-  }
-  if (takeover) installOfficialRevivalGuard(ctx, () => servingOfficial)
-  // 两节来源:官方节(官方 schema 消费,零感知接管)+ 本包节(独立/增强)。
-  // 合并路由表按原始快照恒等记忆;任一节解析即抛,记忆保持旧值,
-  // 调用方捕获后沿用上一份好配置(官方同款)。
-  // 0.1.7 volatile 形态:apply 的 config 中 volatile 字段是响应式 ref(get 协议),
-  // 节写经 loader updateVolatile 就地换值并广播 volatile-update;读值必须动态解包
-  // (官方 plainOptions 同构),legacy 宿主 config 为普通对象原样透传
-  const unwrapVolatile = (value) => (typeof value?.get === 'function' ? value.get() : value)
-  const gatewaySection = () => {
-    const section = unwrapVolatile(config)
-    return { providers: unwrapVolatile(section?.providers) ?? {} }
-  }
-  let readOfficial = () => undefined
-  if (!legacySectionFace) {
-    // 0.1.7+ 行树形态:官方节值随官方 entry 配置链走(loader.resolve 命中禁用
-    // 行,settings 面无单节读 API);直读 entry 配置等价 legacy setSource 注入。
-    // 运行时禁用后行仍在树,volatile 节写就地换 ref 并经 volatile-update 事件
-    // 驱动 snapshot 重读;fiber 未启(禁用停稳后清理)回落 options 原始 patch 值
-    readOfficial = () => {
-      const entry = officialState.entry
-      const section = unwrapVolatile(entry?.fiber?.config ?? entry?.options?.config)
-      if (section === undefined || section === null || typeof section !== 'object') return undefined
-      return { providers: unwrapVolatile(section.providers) ?? {} }
-    }
-  }
-  let readGateway = gatewaySection
-  let lastSnapshot
-  let memoized
-  // 官方节 catalog 形态/modelOverrides 路由 skip 上报:按 provider 去重防
-  // onChange 重放刷屏;诊断随重解析失效,并进目录 error 条目(配置面可见可修)。
-  // 诊断只承载已提交解析:profiles() 真解析先清空再写入;validate 路径用
-  // 本地收集器,写入被拒时不留幻影条目
-  const unserviceableReported = new Set()
-  const unserviceableDiagnostics = new Map()
-  const unserviceableCollector = (sink) => (provider, reason, source) => {
-    sink.set(provider, { reason, source })
-  }
-  const onUnserviceable = (provider, reason, source) => {
-    if (unserviceableReported.has(provider)) return
-    unserviceableReported.add(provider)
-    unserviceableDiagnostics.set(provider, { reason, source })
-    ctx.logger.warn(`llm-pi-gateway: ${reason}`)
-  }
-  const snapshot = () => [readOfficial(), readGateway()]
-  const profiles = () => {
-    const current = snapshot()
-    if (lastSnapshot !== undefined
-      && current[0] === lastSnapshot[0] && current[1] === lastSnapshot[1]) return memoized
-    // 去重按配置代失效:真解析(重跑)才重报,记忆命中不重放;修复后再次劣化能再次告警
-    unserviceableReported.clear()
-    unserviceableDiagnostics.clear()
-    const next = resolveRoutes(current[0]?.providers, current[1]?.providers, onUnserviceable)
-    lastSnapshot = current
-    memoized = next
-    return next
-  }
-  // 凭据解析器无状态,单例闭包复用(adapter 注册与模型发现共用)
-  const resolveCredential = createCredentialResolver(ctx)
-  const adapter = createGatewayAdapter(profiles, undefined, resolveCredential, () => ctx.get('attachments'), (reason) => {
-    ctx.logger.warn('llm-pi-gateway: replay 降级为 provider 中性历史: ' + reason)
-  }, (attachments, ref) => dshLlm.resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath), ref), dshLlm.offloadedImageText, imageOffload)
-  const manager = createRouteManager({
-    routes: profiles,
-    directoryErrors: () => unserviceableDiagnostics,
-    adapter,
-    registerAdapter: (providers, registered) => ctx.llm.registerAdapter(providers, registered),
-    registerDirectory: (entries) => ctx.llm.registerConfigurableProviders(entries),
+  const swept = sweep()
+  if (swept === 0) ctx.logger?.warn?.('llm-pi-gateway: apply 时无官方 adapter(等 llm/adapters-updated 兜底)')
+  const offSweep = ctx.on('llm/adapters-updated', sweep, { global: true })
+  const offUpdate = ctx.on('loader/volatile-update', () => { markerConfig = readMarker() })
+  ctx.fiber.effect(() => () => {
+    active = false
+    offSweep?.()
+    offUpdate?.()
   })
-  // 模型发现:两节命名空间各注册同一回调(官方节被本包接管后,官方 ns 的
-  // discovery 注册随官方插件消失,不补注册则官方节配置面拉取模型必 NO_DISCOVERY);
-  // 宿主契约第二参为取消 signal,透传给探测 fetch;探测请求合入路由自定义头。
-  // 官方 ns 注册可能撞已在场的官方插件(同 ns 重复注册宿主硬抛),冲突即降级跳过,
-  // 与 settings 接管的降级路径对称——patch 失效共存场景双方都能活着
-  const discoverFor = (request, signal) => {
-    const route = profiles().get(request.provider)
-    return discoverModels(
-      { ...request, ...(signal === undefined ? {} : { signal }), headers: route?.headers },
-      () => resolveCredential(request.provider, route?.apiKeyEnv),
-    )
-  }
-  ctx.llm.registerModelDiscovery(NS, discoverFor)
-  // 官方 ns 补注册仅在接管态:让位态官方插件在场,会自行注册该 ns,本包
-  // 抢注册必令官方 init 撞 DUPLICATE_DISCOVERY 而拖垮整批 patch 应用。
-  // 注册成功即置 servingOfficial:持有任一官方注册就需要复活守卫,官方
-  // 复活撞本包在场 discovery 与撞 settings 节的后果相同。
-  // 同步接管与延迟补接管共用同一装配,延迟路径在退场后的轮询序列上调用
-  const registerOfficialDiscovery = () => {
-    try {
-      ctx.llm.registerModelDiscovery(OFFICIAL_NS, discoverFor)
-      servingOfficial = true
-    } catch (error) {
-      ctx.logger.warn('llm-pi-gateway: 官方 discovery 注册冲突(官方 llm-pi-ai 插件仍在),由官方继续服务模型发现')
-      ctx.logger.warn(error)
-    }
-  }
-  if (takeover) registerOfficialDiscovery()
-  const onSectionChange = () => {
-    try {
-      manager.ensureRegistration()
-    } catch (error) {
-      ctx.logger.error('llm-pi-gateway: 拒绝的更新后保留先前注册的路由')
-      ctx.logger.error(error)
-    }
-    try {
-      manager.ensureDirectory()
-    } catch (error) {
-      ctx.logger.error('llm-pi-gateway: 拒绝的更新后保留先前的可配置目录')
-      ctx.logger.error(error)
-    }
-  }
-  // 官方节接管(仅接管态):官方插件被本包 patch 禁用后,其 settings 节由
-  // 本包以官方 schema 注册。若注册冲突(patch 失效、官方仍在),降级为只
-  // 服务本包节。validate 只验被写节相对存量变化的 provider(官方
-  // assertServiceable 同构):存量 provider 的既有漂移不得阻塞无关写入。
-  // 与官方 registering 旗标语义的差异:镜像注册期不强制全量 deferred 校验,
-  // 坏存量由 apply 末尾 profiles() 启动 fail-loud 统一拦截(官方注册期仅
-  // deferred 校验,同样放行 catalog 漂移,实际拦截面等价)。官方包缺失时
-  // 跳过接管(动态获取已告警)。servingOfficial 已在官方 discovery 注册
-  // 处置位,此处不再改写。同步接管与延迟补接管共用同一装配
-  /** changed-only 校验:被写节中与存量深比较不同的 provider 才重新校验;
-   *  失服诊断入临时收集器,validate 拒绝/未提交即弃,不污染共享诊断。 */
-  const validateSection = (section, previous, side) => {
-    const providers = section?.providers ?? {}
-    const previousProviders = previous?.providers ?? {}
-    const changed = Object.fromEntries(Object.entries(providers)
-      .filter(([provider, profile]) => !deepEqualJson(profile, previousProviders[provider])))
-    const diagnostics = new Map()
-    const collect = unserviceableCollector(diagnostics)
-    resolveRoutes(
-      side === OFFICIAL_NS ? changed : undefined,
-      side === OFFICIAL_NS ? undefined : changed,
-      collect,
-    )
-  }
-  const installOfficialSection = () => {
-    if (!legacySectionFace) return
-    if (OfficialConfig === undefined) return
-    try {
-      ctx.settings.installSection(ctx, OFFICIAL_NS, OfficialConfig, undefined, {
-        validate: (section) => validateSection(section, readOfficial(), OFFICIAL_NS),
-        setSource: (source) => {
-          readOfficial = source
-        },
-        onChange: () => onSectionChange(),
-      })
-    } catch (error) {
-      ctx.logger.error(takeoverFailureText(error))
-      ctx.logger.error(error)
-    }
-  }
-  // 延迟补接管装配:与同步接管同一套动作、同一顺序(守卫→discovery→节→
-  // 路由重算),在官方行退场后的轮询序列上执行
-  const completeOfficialTakeover = () => {
-    installOfficialRevivalGuard(ctx, () => servingOfficial)
-    registerOfficialDiscovery()
-    installOfficialSection()
-    onSectionChange()
-  }
-  if (takeover) installOfficialSection()
-  // 节安装面:legacy 宿主经 installSection 注册本包节(写校验 + 热更新钩子);
-  // 0.1.7 形态节由静态 Config 导出自动生成,写路径不经本包 —— 节写后宿主广播
-  // settings/document-updated,订阅该事件重读节值并重算路由
-  if (legacySectionFace) {
-    ctx.settings.installSection(ctx, NS, Config, config, {
-      validate: (section) => validateSection(section, readGateway(), NS),
-      setSource: (source) => {
-        readGateway = source
-      },
-      onChange: () => onSectionChange(),
-    })
-  } else {
-    // 0.1.7 节写路径:settings.write → loader entry.update 的 volatile-only 快速道,
-    // updateVolatile 就地换 ref 值并向本 fiber 广播 volatile-update,apply 不重跑;
-    // 读值走 gatewaySection 动态解包,事件驱动路由重算(官方 llm 插件同构)
-    ctx.on('loader/volatile-update', () => onSectionChange())
-  }
-  // 启动 fail loud:组合后不可服务的配置在加载期失败(与官方一致)
-  profiles()
-  onSectionChange()
-  endGatewayApplyActive()
-  // boot 诊断锚点:本行全部装配落定,树收尾若仍卡死则卡点在本行之外
-  ctx.logger.info?.('llm-pi-gateway: apply 完成')
-  // 延迟补接管:全部装配落定后才武装;轮询在 apply 返回后的轮询序列上执行,
-  // completeOfficialTakeover 闭包至此全部就绪,装配中途失败不会留下僵尸轮询
-  if (exitTimedOut) armDeferredTakeover(ctx, officialState.entry, () => completeOfficialTakeover(), deferredExit)
-  // 运行时接管:apply 落定(=本包可服务的证明)之后才允许禁用官方行——
-  // 本包任意死法(模块加载崩/apply 中途崩/被禁/卸载)都到不了这里,官方行
-  // 保持启用,官方插件自服务,系统不出现全模型不可用。序列挂 apply 返回后
-  // 的异步链,不阻塞本 apply 生命周期;异常只告警降级,官方继续服务
-  if (decision === 'runtime-disable') {
-    const runtimeTakeover = async () => {
-      try {
-        await runtimeDisableOfficial(officialState.entry)
-      } catch (error) {
-        ctx.logger.warn(`llm-pi-gateway: 官方行运行时禁用失败,官方继续服务模型路由(${error?.message ?? error})`)
-        return
-      }
-      const exited = await awaitOfficialExit(officialState.entry, exitPoll)
-      if (!exited) {
-        ctx.logger.warn('llm-pi-gateway: 官方 llm-pi-ai 禁用后退场超时(存在在途流),退场后自动完成接管')
-        armDeferredTakeover(ctx, officialState.entry, () => completeOfficialTakeover(), deferredExit)
-        return
-      }
-      completeOfficialTakeover()
-    }
-    void runtimeTakeover().catch((error) => {
-      ctx.logger.warn(`llm-pi-gateway: 运行时接管序列失败,官方继续服务模型路由(${error?.message ?? error})`)
-    })
-  }
+  ctx.logger?.info?.('llm-pi-gateway: 装饰器就绪(官方行自服务,anthropic 会话标记注入)')
+  return undefined
 }
 
+export { SETTINGS_NS }

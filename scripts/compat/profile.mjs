@@ -131,13 +131,12 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '    model: echo-model',
       ].join('\n') + '\n'
     : ''
-  // 预置 gateway 节:boot 期注册 echo provider(--seed-gateway)。区分"装载期注册"
-  // 与"运行期节写热更"两条回归面。anthropic 条目供 #3 body 标记/#5 亲和头专项:
-  // compat.sendSessionAffinityHeaders 开亲和头发射, anthropic 通道无 prompt_cache_key
+  // 预置 echo 路由(装饰器形态,--seed-gateway):providers 声明在官方
+  // llm-pi-ai 节(官方行自服务,gateway 经 registerAdapter shadow 装饰注入),
+  // gateway 节仅 sessionMarker。区分"装载期注册"与"运行期节写热更"两条回归面
   const seedGatewayEntry = seedGateway
     ? [
-        '- id: llm-pi-gateway',
-        '  name: "@mzzsfy/dsh-llm-pi-gateway"',
+        '- id: llm-pi-ai',
         '  config:',
         '    providers:',
         '      echo-openai:',
@@ -163,13 +162,17 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '        apiKeyEnv: ECHO_KEY',
         '        defaultInput:',
         '          - text',
-        '        compat:',
-        '          sendSessionAffinityHeaders: true',
         '        models:',
         '          - id: echo-a-model',
         '            name: Echo A Model',
         '            input:',
         '              - text',
+        '- id: llm-pi-gateway',
+        '  name: "@mzzsfy/dsh-llm-pi-gateway"',
+        '  config:',
+        '    sessionMarker:',
+        '      enabled: true',
+        '      prefix: dsh',
       ].join('\n') + '\n'
     : ''
   writeFileSync(join(profileDir, 'cordis.patch.yml'), (defaultModelEntry || '[]\n') + (seedGatewayEntry || ''), 'utf8')

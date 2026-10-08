@@ -1,12 +1,11 @@
 {
   "name": "@mzzsfy/dsh-llm-pi-gateway",
-  "description": "NewAPI 等 LLM 网关接入:向每个上游请求注入会话 sessionId(请求体派生标记 + 亲和头裸 sessionId),供网关做请求亲和性粘性路由,compat 全开放",
+  "description": "NewAPI 等 LLM 网关接入:经 adapter 装饰器向 anthropic 上游请求注入派生会话标记(metadata.user_id),官方 llm-pi-ai 行保持自服务,零接管",
   "version": "0.7.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./guard": "./src/guard.js",
     "./client": "./src/client.js",
     "./package.json": "./package.json"
   },
@@ -17,7 +16,7 @@
     "client": {
       "platform": "web"
     },
-    "hostMin": "0.1.7-rc.1"
+    "hostMin": "0.2.0-rc.1"
   },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
@@ -35,27 +34,11 @@
     "@earendil-works/pi-ai": "^0.85.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1",
-    "@deepseek-ai/dsh-attachment": ">=0.1.7-rc.1",
-    "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
-    "@deepseek-ai/dsh-credentials": ">=0.1.2-rc.1",
-    "@deepseek-ai/dsh-launch-environment": ">=0.1.2-rc.1",
-    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.2-rc.1"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-attachment": {
-      "optional": true
-    }
+    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/schemastery": "3.18.2",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.2 || 0.1.5-rc.3",
-    "@deepseek-ai/dsh-settings": "0.1.5-rc.2 || 0.1.5-rc.3",
-    "@deepseek-ai/dsh-credentials": "0.1.5-rc.2 || 0.1.5-rc.3",
-    "@deepseek-ai/dsh-launch-environment": "0.1.5-rc.2 || 0.1.5-rc.3",
-    "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.2 || 0.1.5-rc.3"
+    "@deepseek-ai/schemastery": "3.18.2"
   },
   "files": [
     "src",
