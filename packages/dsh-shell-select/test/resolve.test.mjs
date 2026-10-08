@@ -117,7 +117,7 @@ test('detect 返回全部命中并去重', () => {
     'C:\\PF\\Git\\bin\\bash.exe',
     'C:\\three\\bash.exe',
     'C:\\WINDOWS\\System32\\cmd.exe',
-  ], 'win32'))
+  ]), 'win32')
   assert.deepEqual(found, [
     { kind: 'bash', path: 'C:\\PF\\Git\\bin\\bash.exe' },
     { kind: 'bash', path: 'C:\\three\\bash.exe' },
