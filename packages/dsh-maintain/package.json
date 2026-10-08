@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-maintain",
   "description": "DSH 自身的版本管理:追踪 npm dist-tag 新版本、一键升级、安全重启",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -18,6 +18,13 @@
       "external": [
         "@mzzsfy/dsh-toast/client"
       ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.1": "unknown",
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.1": "unknown"
+      }
     }
   },
   "scripts": {

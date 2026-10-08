@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-context-manager",
   "description": "对话增强:历史输入浮层(范围导航/搜索/subagent排除)、常用提示词收藏、插话撤回、对话 fork(进行中轮分叉/自动重发)",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -18,6 +18,13 @@
       "external": [
         "@mzzsfy/dsh-toast/client"
       ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.1": "unknown",
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.1": "unknown"
+      }
     }
   },
   "scripts": {

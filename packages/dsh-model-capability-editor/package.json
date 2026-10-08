@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-model-capability-editor",
   "description": "在设置页编辑第三方模型的思考档位与图片输入声明,解决手写配置易错与档位拼写不可控",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -18,6 +18,13 @@
       "external": [
         "@mzzsfy/dsh-toast/client"
       ]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.1": "unknown",
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.1": "unknown"
+      }
     }
   },
   "scripts": {
