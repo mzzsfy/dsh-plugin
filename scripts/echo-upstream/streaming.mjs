@@ -2,7 +2,7 @@
 // openai responses(事件序列:response.created → output_item.added → output_text.delta → response.completed)与
 // anthropic(event 序列:message_start → content_block → message_delta → message_stop)。
 // 场景(scenarios.resolveScenario)经模型名触发:thinking 块、错误码、流中断、慢速间隔。
-import { resolveScenario, THINKING_TEXT, SLOW_CHUNK_INTERVAL_MS, TOOL_NAME, TOOL_ARGUMENTS } from './scenarios.mjs'
+import { resolveScenario, THINKING_TEXT, THINKSLOW_CHUNK_INTERVAL_MS, THINKSLOW_CHUNK_SIZE, SLOW_CHUNK_INTERVAL_MS, TOOL_NAME, TOOL_ARGUMENTS } from './scenarios.mjs'
 import { FIXED_CONTENT } from './protocol.mjs'
 
 const SSE_HEADERS = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' }
@@ -30,6 +30,14 @@ async function writeOpenaiStream(response, model, tokens, scenario) {
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   sseWrite(response, null, chunk({ role: 'assistant', content: '' }))
   if (scenario === 'think') sseWrite(response, null, chunk({ reasoning_content: THINKING_TEXT }))
+  // thinkslow:reasoning 分片慢速流出,给真机留出流式思考行的观察与交互窗口
+  if (scenario === 'thinkslow') {
+    const parts = THINKING_TEXT.match(new RegExp(`.{1,${THINKSLOW_CHUNK_SIZE}}`, 'g')) ?? []
+    for (const part of parts) {
+      sseWrite(response, null, chunk({ reasoning_content: part }))
+      await sleep(THINKSLOW_CHUNK_INTERVAL_MS)
+    }
+  }
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   if (scenario === 'drop') { response.end(); return }
   if (scenario === 'tool') {
@@ -86,7 +94,7 @@ async function writeAnthropicStream(response, model, tokens, scenario) {
   const blockDelta = (index, delta) => sseWrite(response, 'content_block_delta', JSON.stringify({ type: 'content_block_delta', index, delta }))
   const blockStop = (index) => sseWrite(response, 'content_block_stop', JSON.stringify({ type: 'content_block_stop', index }))
   let index = 0
-  if (scenario === 'think') {
+  if (scenario === 'think' || scenario === 'thinkslow') {
     blockStart(index, { type: 'thinking', thinking: '' })
     blockDelta(index, { type: 'thinking_delta', thinking: THINKING_TEXT })
     blockStop(index)
