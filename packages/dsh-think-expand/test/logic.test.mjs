@@ -21,7 +21,7 @@ function clientLogic() {
   const factory = new Function(
     '"use strict";'
       + section
-      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, needsReattach, SEEN_MAP_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore };',
+      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, capSet, needsReattach, SEEN_MAP_CAP, EXPANDED_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore };',
   )
   return factory()
 }
@@ -239,6 +239,31 @@ function defineScenarios(prefix, L) {
     // 新回合行 uid=9 同开头:不因旧标记被拦
     const next = plan(reg, [row(RUNNING, '好的，让我重新分析', false, true, false, 9)])
     assert.equal(expandOf(next, 0), 1)
+  })
+
+  test(prefix + 'RC2-3 running 行用户收起不被强制重展开', () => {
+    const reg = createRegistry()
+    plan(reg, [row(RUNNING, '流式思考', false, true, false, 5)])
+    plan(reg, [row(RUNNING, '流式思考', true, true, false, 5)])
+    // 用户收起:宽松已读落盘,插件不再重展开
+    const collapsed = plan(reg, [row(RUNNING, '流式思考', false, true, false, 5)])
+    assert.equal(expandOf(collapsed, 0), 0)
+    assert.equal(reg.read.size, 1)
+    const again = plan(reg, [row(RUNNING, '流式思考补充内容', false, true, false, 5)])
+    assert.equal(again.actions.length, 0)
+  })
+
+  test(prefix + 'RC2-2 回合收尾重建行:宽松已读保持收起意图', () => {
+    const reg = createRegistry()
+    plan(reg, [row(RUNNING, '思考内容', false, true, false, 2)])
+    plan(reg, [row(RUNNING, '思考内容', true, true, false, 2)])
+    // 下一回合开始,旧行元素丢失(uid 失配):宽松已读落盘
+    plan(reg, [row(RUNNING, '新行', false, true, false, 9)])
+    assert.equal(reg.read.size, 1)
+    // 回合收尾宿主重建行(新 uid,展开态):已读兜底命中 → 收起,不登记手动
+    const rebuilt = plan(reg, [row(OK, '思考内容更完整后的全文', true, true, false, 12)])
+    assert.equal(collapseOf(rebuilt, 0), 1)
+    assert.equal(reg.manual.size, 0)
   })
 
   test(prefix + 'suppressManual 首扫不把既存展开行登记为手动', () => {

@@ -44,6 +44,9 @@ window.__ModuleLoader__.load({
     // 已见文本 Map 容量上限,超出按插入序裁剪最旧条目(手动/已读标记增长有界)。
     const SEEN_MAP_CAP = 10 * 20
 
+    // 插件展开行 uid 记录上限(用户收起意图识别用),超出整体清空(防御性有界)。
+    const EXPANDED_CAP = 64
+
     // 置底判定阈值:与官方滚动跟随的贴近底部语义一致,距离底部不超过该值视为置底。
     const PIN_THRESHOLD_PX = 25
 
@@ -108,8 +111,14 @@ window.__ModuleLoader__.load({
       capMap(map)
     }
 
+    // uid 记录容量裁剪:超出整体清空(记录仅服务收起意图识别,清空只损失一轮记忆)。
+    function capSet(set, cap = EXPANDED_CAP) {
+      if (set.size > cap) set.clear()
+      return set
+    }
+
     function createRegistry() {
-      return { marks: new Map(), manual: new Map(), read: new Map(), current: null }
+      return { marks: new Map(), manual: new Map(), read: new Map(), current: null, expanded: new Set() }
     }
 
     // 当前插件行定位:uid 优先(行序上 current 必然靠后,findLastIndex 消解同开头
@@ -163,10 +172,16 @@ window.__ModuleLoader__.load({
       // running 行同样识别:插件展开带 plugged 闩锁,无闩锁的展开即用户手动意图;
       // 正文未挂载时不识别,空串 seen 会污染全部前缀匹配。
       if (options.suppressManual !== true) {
-        for (const row of rows) {
+        for (const [index, row] of rows.entries()) {
           if (!row.headable || !row.expanded || row.bodyText === '' || row.plugged) continue
           if (findSeenKey(registry.marks, row.uid, row.bodyText) !== null) continue
           if (isCurrent(registry, row.uid, row.bodyText)) continue
+          // 回合收尾宿主重建行(uid 变)后,已读标记按纯前缀兜底命中:保持用户收起意图,
+          // 不再把该行登记为手动展开(手动集合会永久免干预,收起意图就此丢失)。
+          if (findSeenKey(registry.read, row.uid, row.bodyText) !== null) {
+            actions.push({ index, kind: 'collapse' })
+            continue
+          }
           if (findSeenKey(registry.manual, row.uid, row.bodyText) === null) {
             putSeen(registry.manual, row.uid, row.bodyText)
             if (registry.current !== null) {
@@ -180,11 +195,14 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 插件展开的行变为收起 → 手动收起,视为已读。
+      // 插件展开的行变为收起 → 手动收起,视为已读。同元素折叠写 uid 限定已读
+      // (不拦同开头新回合行);元素定位丢失(宿主回合收尾重建行,uid 失配)时
+      // 额外写宽松已读(纯前缀命中),否则收起意图随 uid 失配永久丢失(FIND-RC2-2)。
       if (registry.current !== null) {
         const index = findRow(registry, rows)
         if (index < 0 || !rows[index].expanded) {
           putSeen(registry.read, registry.current.uid, registry.current.seen)
+          if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
           registry.marks.delete(registry.current.seen)
           registry.current = null
         }
@@ -203,6 +221,17 @@ window.__ModuleLoader__.load({
       if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
       if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
 
+      // 用户对插件已展开 running 行的收起:登记宽松已读(纯前缀,跨 uid 重渲染稳定),
+      // 不再周期性强制重展开(FIND-RC2-3);正文未挂载时保留展开记录,正文到位后
+      // 下一轮在此补写已读。uid 记录仅服务控制器行(控制器恒派 uid),无 uid 行
+      // (测试桩/异常形态)不记录,保持原语义。已知权衡:宽松已读按登记时文本快照
+      // 前缀命中,后续回合以该全文为前缀的展开行会被压制自动展开(概率低,cap
+      // 裁剪有界),换取收起意图跨重建存活。
+      if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+        if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
+        return { actions }
+      }
+
       // 新思考行出现:收起旧的插件行(手动行除外),展开新行。
       if (registry.current !== null) {
         const oldIndex = findRow(registry, rows)
@@ -213,7 +242,10 @@ window.__ModuleLoader__.load({
         registry.current = null
       }
 
-      if (!target.expanded) actions.push({ index: targetIndex, kind: 'expand' })
+      if (!target.expanded) {
+        actions.push({ index: targetIndex, kind: 'expand' })
+        if (target.uid !== undefined) capSet(registry.expanded.add(target.uid))
+      }
       // 正文未挂载时仅展开不登记,空串 seen 会污染全部前缀匹配;正文挂载后下轮补登记
       if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
       return { actions }
@@ -223,6 +255,7 @@ window.__ModuleLoader__.load({
     function registerCurrent(registry, uid, seen) {
       registry.current = { uid, seen }
       putSeen(registry.marks, uid, seen)
+      if (uid !== undefined) capSet(registry.expanded.add(uid))
     }
     /* LOGIC-END */
 
