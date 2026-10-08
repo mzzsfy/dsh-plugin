@@ -269,7 +269,8 @@ export function registerShellTool(ctx, { executor }) {
         : undefined
       const policy = approvedMode === undefined ? standingPolicy : { ...standingPolicy, mode: approvedMode }
       const workdir = resolveWorkdir(args.workdir, exec)
-      const entry = faces.executor.entryFor(pinned ?? args.shell)
+      // pwsh 契约:钉死工具永远 PowerShell,配置删条目也现场探测,不落默认客户端
+      const entry = pinned !== undefined ? faces.executor.contractEntry() : faces.executor.entryFor(args.shell)
       const request = {
         command: args.command,
         ...workdir !== undefined ? { workdir } : {},
@@ -282,7 +283,7 @@ export function registerShellTool(ctx, { executor }) {
         if (jobs === undefined) throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
         if (exec.signal.aborted) throw await abortError('tool call aborted')
         try {
-          faces.executor.startFor(entry, faces.executor.resolve(request))
+          faces.executor.assertNotDenied(request.command)
         } catch (error) {
           if (isDenyError(error)) return deniedForeground(error, entry.id)
           throw error
@@ -293,7 +294,7 @@ export function registerShellTool(ctx, { executor }) {
           jobId: jobs.start({
             kind: 'shell',
             label: args.command,
-            ...exec.agent ? { owner: exec.agent } : {},
+            ...exec.agent ? { owner: exec.agent.id } : {},
             run: () => {
               const proc = faces.executor.startFor(entry, faces.executor.resolve(request))
               return {
