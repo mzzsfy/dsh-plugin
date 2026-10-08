@@ -95,6 +95,19 @@ test('Given sessions 服务缺 fork/open(旧宿主), When apply, Then fork 条�
   assert.ok(entries.some((item) => item.options.id === 'context-manager-history'), '历史条目不应被 fork 门控阻塞')
 })
 
+test('Given sessions 仅有 fork 无 open(FIND-020-2 宿主形态), When apply+forkSession, Then 条目注册且分叉成功', async () => {
+  const forkCalls = []
+  const { entry } = findForkEntry({
+    sessions: { binding: () => undefined, fork: (opts) => { forkCalls.push(opts); return Promise.resolve('child-2') } },
+    remoteSession: EMPTY_FOLLOW,
+  })
+  const props = entry.options.inject('s1')
+  assert.equal(typeof props.forkSession, 'function', '仅 fork 无 open 时 forkSession 应可用')
+  const childId = await props.forkSession({ sessionId: 's1', atSeq: 5 })
+  assert.deepEqual(forkCalls, [{ sessionId: 's1', atSeq: 5 }])
+  assert.equal(childId, 'child-2', 'open 缺失不得影响分叉本体')
+})
+
 test('Given dock inject, Then 返回 forkSession(loadTurnEnds 通道)且按会话寻址', async () => {
   const forkCalls = []
   const openCalls = []

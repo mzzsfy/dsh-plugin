@@ -1355,16 +1355,20 @@ function ContextPanel() {
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
         const remoteSession = ctx.remote ? ctx.remote.session : undefined
-        // 分叉动作通道:fork 成功即打开子会话;open 失败不影响分叉成功的事实,
-        // 单独吞掉(警告日志),点击处不再误报「分叉失败」
-        const forkService = (sessions && typeof sessions.fork === 'function' && typeof sessions.open === 'function')
+        // 分叉动作通道:分叉本体只依赖 sessions.fork;open 仅是分叉成功后打开
+        // 子会话的收尾动作(失败单独吞掉,警告日志),缺失时条件执行——两代宿主
+        // client 面均无 sessions.open(FIND-020-2:双函数在场探测致 fork dock
+        // 整体静默缺失),放宽探测为只要求 fork。
+        const forkService = (sessions && typeof sessions.fork === 'function')
           ? (opts) => sessions.fork(opts).then((childId) => {
-            try {
-              Promise.resolve(sessions.open(childId)).catch((error) => {
+            if (typeof sessions.open === 'function') {
+              try {
+                Promise.resolve(sessions.open(childId)).catch((error) => {
+                  console.warn('[context-manager] 分叉子会话已创建,但打开失败', error)
+                })
+              } catch (error) {
                 console.warn('[context-manager] 分叉子会话已创建,但打开失败', error)
-              })
-            } catch (error) {
-              console.warn('[context-manager] 分叉子会话已创建,但打开失败', error)
+              }
             }
             return childId
           })
