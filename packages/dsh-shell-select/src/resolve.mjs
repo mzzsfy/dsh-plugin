@@ -4,8 +4,18 @@
 
 import { lstatSync } from 'node:fs'
 
-// PATH 分隔符:仅 Windows 分号(本包 v1 仅 win32 激活)
-const PATH_SEP = ';'
+// 平台形态:win32 反斜杠拼接 + 分号 PATH;POSIX 正斜杠 + 冒号 PATH
+const IS_WIN32 = process.platform === 'win32'
+const PATH_SEP = IS_WIN32 ? ';' : ':'
+const FILE_SEP = IS_WIN32 ? '\\' : '/'
+
+// POSIX pwsh 探测锚点:发行版包管理器与官方 tarball/Microsoft 源的固定落点
+const POSIX_PWSH_ANCHORS = [
+  '/usr/bin/pwsh',
+  '/usr/local/bin/pwsh',
+  '/opt/microsoft/powershell/7/pwsh',
+  '/opt/homebrew/bin/pwsh',
+]
 
 // 各 kind 的探测锚点:主 ProgramFiles;x86 与 LOCALAPPDATA 仅 bash 有常见安装
 const PF_RELATIVE = {
@@ -29,10 +39,10 @@ const SYSTEM32_FILES = {
   wsl: 'wsl.exe',
 }
 
-// PATH 探测的可执行名
+// PATH 探测的可执行名(POSIX 无 .exe 后缀)
 const PATH_EXECUTABLES = {
-  pwsh: 'pwsh.exe',
-  bash: 'bash.exe',
+  pwsh: IS_WIN32 ? 'pwsh.exe' : 'pwsh',
+  bash: IS_WIN32 ? 'bash.exe' : 'bash',
 }
 
 // MSYS2 默认安装锚点:真实 bash.exe 优先。msys2.exe(Cygwin 控制台启动器)
@@ -71,9 +81,10 @@ export function candidatePaths(kind, env) {
     if (localAppData.length > 0) candidates.push([localAppData, ...relative].join('\\'))
   }
   if (kind === 'bash') candidates.push(...MSYS2_ANCHORS)
+  if (!IS_WIN32 && kind === 'pwsh') candidates.push(...POSIX_PWSH_ANCHORS)
   for (const entry of pathEntriesForKind(kind)) {
     const executable = PATH_EXECUTABLES[kind]
-    if (executable !== undefined) candidates.push(`${entry}\\${executable}`)
+    if (executable !== undefined) candidates.push(`${entry}${FILE_SEP}${executable}`)
   }
   const system32File = SYSTEM32_FILES[kind]
   if (system32File !== undefined) candidates.push(`${system32}\\${system32File}`)
