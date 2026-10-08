@@ -66,7 +66,7 @@
 
 ## dsh 版本兼容
 
-- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;fork 按钮注入在 0.2.0-rc.2 宿主下待归因,见 FIND-020-2)
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;fork 按钮注入在 0.2.0-rc.2 宿主下待归因,见 FIND-020-2)。插话撤回数据面适配:0.2.0 起 conversation `useSession` 的 `queue` 仅含 inbox `next-turn`,未应用插话改驻留 inbox `next-step` 队列,撤回行改经会话绑定面 `projections.faceOf('inbox')` 读取
 - 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
 - 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
 

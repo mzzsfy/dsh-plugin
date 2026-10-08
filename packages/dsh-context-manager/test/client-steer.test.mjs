@@ -79,6 +79,7 @@ test('Given 会话绑定存在, When dock inject, Then updateQueue 路由到 bin
         calls.push({ itemId, action })
         return { ok: true }
       },
+      projections: { faceOf: () => ({ getSnapshot: () => ({}) }) },
     },
   }
   const { entry } = findSteerEntry({ binding })
@@ -87,6 +88,30 @@ test('Given 会话绑定存在, When dock inject, Then updateQueue 路由到 bin
   const result = await props.updateQueue('m1', { kind: 'remove' })
   assert.deepEqual(calls, [{ itemId: 'm1', action: { kind: 'remove' } }], 'updateQueue 未按 remove 动作透传')
   assert.deepEqual(result, { ok: true })
+})
+
+test('Given 会话绑定存在, When dock inject, Then steerRows 读取 inbox next-step 投影', () => {
+  const binding = {
+    session: {
+      updateQueue: async () => ({ ok: true }),
+      projections: {
+        faceOf: (name) => ({
+          getSnapshot: () => name === 'inbox' ? { 'next-step': [INBOX_MESSAGE] } : {},
+        }),
+      },
+    },
+  }
+  const { entry } = findSteerEntry({ binding })
+  const props = entry.options.inject('s1')
+  assert.equal(typeof props.steerRows, 'function', 'inject 未返回 steerRows')
+  assert.deepEqual(props.steerRows(), [STEERING_ROW])
+})
+
+test('Given 会话面无 inbox 投影(旧宿主), When dock inject, Then steerRows 恒空数组(功能干净缺席)', () => {
+  const binding = { session: { updateQueue: async () => ({ ok: true }) } }
+  const { entry } = findSteerEntry({ binding })
+  const props = entry.options.inject('s1')
+  assert.deepEqual(props.steerRows(), [])
 })
 
 test('Given 会话绑定缺失, When dock inject, Then 返回空 props(干净禁用)', () => {
@@ -100,28 +125,48 @@ test('Given 会话面无 updateQueue(旧宿主), When dock inject, Then 返回�
   assert.deepEqual(entry.options.inject('s1'), {}, '会话面无 updateQueue 应返回空 props')
 })
 
-// 纯函数切片:steerRowsOf / withdrawFailureText / withdrawSteer(无外部依赖,动作经注入)
-const PURE_START = CLIENT_SRC.indexOf('function steerRowsOf(')
+// 纯函数切片:steerRowsOfInbox / withdrawFailureText / withdrawSteer(无外部依赖,动作经注入)
+const PURE_START = CLIENT_SRC.indexOf('function steerRowsOfInbox(')
 const PURE_END = CLIENT_SRC.indexOf('function SteerRecallDock(')
 assert.ok(PURE_START >= 0 && PURE_END > PURE_START, 'client.js 插话撤回纯函数切片定位失败')
 const pure = new Function(
   CLIENT_SRC.slice(PURE_START, PURE_END)
-  + '; return { steerRowsOf: steerRowsOf, withdrawFailureText: withdrawFailureText, withdrawSteer: withdrawSteer }',
+  + '; return { steerRowsOfInbox: steerRowsOfInbox, withdrawFailureText: withdrawFailureText, withdrawSteer: withdrawSteer }',
 )()
 
-const STEERING_ROW = { id: 'm1', placement: 'steering', preview: '帮我看下', text: '帮我看下' }
+const INBOX_MESSAGE = {
+  id: 'm1',
+  source: { kind: 'user' },
+  content: [{ type: 'text', text: '帮我看下' }],
+}
+const STEERING_ROW = { id: 'm1', preview: '帮我看下', text: '帮我看下' }
 
-test('steerRowsOf:仅保留 placement=steering,防非数组与非行形态', () => {
-  const queue = [
-    { id: 'q1', placement: 'queued' },
-    STEERING_ROW,
-    { id: 'c1', placement: 'context' },
-    STEERING_ROW,
+test('steerRowsOfInbox:仅保留 user 来源的 next-step 行,映射为撤回行', () => {
+  const messages = [
+    { id: 'x1', source: { kind: 'system' }, content: [{ type: 'text', text: '注入' }] },
+    INBOX_MESSAGE,
     null,
+    { id: 'x2', source: { kind: 'user' }, content: [{ type: 'text', text: '第二条' }] },
   ]
-  assert.deepEqual(pure.steerRowsOf(queue), [STEERING_ROW, STEERING_ROW])
-  assert.deepEqual(pure.steerRowsOf([]), [])
-  assert.deepEqual(pure.steerRowsOf(undefined), [])
+  const rows = pure.steerRowsOfInbox(messages)
+  assert.deepEqual(rows.map((row) => row.id), ['m1', 'x2'])
+  assert.equal(rows[0].text, '帮我看下')
+  assert.ok(rows[0].preview.includes('帮我看下'))
+  assert.deepEqual(pure.steerRowsOfInbox([]), [])
+  assert.deepEqual(pure.steerRowsOfInbox(undefined), [])
+})
+
+test('steerRowsOfInbox:含非文本块的插话不可撤回(text 为 null)', () => {
+  const rows = pure.steerRowsOfInbox([
+    { id: 'm2', source: { kind: 'user' }, content: [{ type: 'text', text: '看图' }, { type: 'image', attachment: {} }] },
+    { id: 'm3', source: { kind: 'user' }, content: [] },
+    { id: 'm4', source: { kind: 'user' } },
+    { id: 'm5' },
+  ])
+  assert.equal(rows[0].text, null)
+  assert.equal(rows[1].text, null)
+  assert.equal(rows[2].text, null)
+  assert.deepEqual(rows.map((row) => row.id), ['m2', 'm3', 'm4'])
 })
 
 test('withdrawSteer 主路径:remove 成功后回填草稿并提示,返回 true', async () => {
@@ -236,20 +281,22 @@ const OK_UPDATE = async () => ({ ok: true })
 // useSession 桩:两次 selector 读取共用同一快照(与官方 SessionSnapshotSelector 单快照同构)
 function dockWith(snapshot) {
   const useSession = (selector) => selector(snapshot)
-  return (props) => DOCK_COMPONENT({ session: {}, useSession, inputActions: NO_ACTIONS, updateQueue: OK_UPDATE, ...props })
+  const steerRows = () => [STEERING_ROW]
+  return (props) => DOCK_COMPONENT({ session: {}, useSession, inputActions: NO_ACTIONS, updateQueue: OK_UPDATE, steerRows, ...props })
 }
 
 test('SteerRecallDock 干净禁用:依赖任一缺失即返回 null', () => {
-  const dock = dockWith({ queue: [STEERING_ROW], subagent: null })
+  const dock = dockWith({ subagent: null })
   assert.equal(dock({ session: undefined }), null, 'session 缺失应不渲染')
   assert.equal(dock({ inputActions: undefined }), null, 'inputActions 缺失应不渲染')
   assert.equal(dock({ updateQueue: undefined }), null, 'updateQueue 缺失应不渲染')
+  assert.equal(dock({ steerRows: undefined }), null, 'steerRows 缺失应不渲染(旧宿主无 inbox 投影)')
 })
 
 test('SteerRecallDock 干净禁用:subagent 非 continuable 即返回 null,启用时零占位宿主', () => {
-  const locked = dockWith({ queue: [STEERING_ROW], subagent: { address: { mode: 'prompt' } } })
+  const locked = dockWith({ subagent: { address: { mode: 'prompt' } } })
   assert.equal(locked({}), null, 'queueMutable 为假应不渲染')
-  const host = dockWith({ queue: [], subagent: null })({})
+  const host = dockWith({ subagent: null })({})
   assert.equal(host.type, 'div')
   assert.equal(host.props.className, 'cx-steer-host', '启用时应渲染 display:none 宿主承载注入逻辑')
 })

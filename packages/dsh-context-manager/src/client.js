@@ -766,11 +766,33 @@ function HistoryDock({ session, inputActions }) {
   )
 }
 
-// 插话撤回投影:仅用户插话(宿主队列 placement=steering,已发出但未被 step 边界
-// claim 应用);queued 由官方队列面板呈现,context 为注入上下文非用户消息
-function steerRowsOf(queue) {
-  const rows = Array.isArray(queue) ? queue : []
-  return rows.filter((row) => row && row.placement === 'steering')
+// 插话撤回投影:dsh 0.2.0 起未应用插话驻留会话 inbox 的 next-step 队列
+// (conversation useSession 的 queue 仅含 next-turn,不含插话),经会话绑定面
+// inbox 投影读取;仅 user 来源的插话可撤回,含非文本块的插话 text 置空(不可撤回)
+function steerRowsOfInbox(messages) {
+  // 行与气泡按 next-step 顺序 index 对齐:宿主 steering 队列 user-only,
+  // 若宿主未来引入其他来源的 pending 气泡需改为按 id 匹配
+  const rows = Array.isArray(messages) ? messages : []
+  return rows
+    .filter((item) => item && item.source && item.source.kind === 'user')
+    .map(steerRowOfMessage)
+}
+
+function steerRowOfMessage(item) {
+  const blocks = Array.isArray(item.content) ? item.content : []
+  const textBlocks = blocks.filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+  const text = blocks.length > 0 && textBlocks.length === blocks.length
+    ? textBlocks.map((block) => block.text).join('')
+    : null
+  return { id: item.id, text, preview: text === null ? null : text.slice(0, STEER_PREVIEW_MAX) }
+}
+
+// 宿主会话面缺 inbox 投影(旧宿主)时恒空数组,功能干净缺席不崩溃
+function inboxSteerRows(session) {
+  const projections = session && session.projections
+  const face = projections && typeof projections.faceOf === 'function' ? projections.faceOf(INBOX_STEER_KEY) : null
+  const snapshot = face && typeof face.getSnapshot === 'function' ? face.getSnapshot() : null
+  return steerRowsOfInbox(snapshot && snapshot[INBOX_STEER_QUEUE])
 }
 
 // 撤回失败文案:queue-item-not-found = 消息已被 step 边界 claim(应用),无法撤回;
@@ -854,6 +876,10 @@ const FORK_BTN_FLAG = 'data-cx-fork'
 // 消息节点的轮号标记(fork 锚点输入)
 const STEER_BUBBLE_SELECTOR = '[data-pending-steering]'
 const STEER_ACTIONS_SUFFIX = '[class$="_actions"]'
+// 宿主 inbox 投影:未应用插话驻留的队列键(dsh 0.2.0 语义)
+const INBOX_STEER_KEY = 'inbox'
+const INBOX_STEER_QUEUE = 'next-step'
+const STEER_PREVIEW_MAX = 40
 const TURN_ATTR = 'data-chat-turn'
 // 官方消息流气泡的语义类型标记:user=用户输入气泡(turn-tail=官方轮尾,官方分支按钮驻留处)
 const FLOW_KIND_ATTR = 'data-chat-flow-kind'
@@ -886,8 +912,7 @@ async function followOpening(remote, sessionId) {
 // 官方按钮 className 完全原生;气泡被应用后整棵卸载,注入按钮随之消失。
 // dock 本体 display:none 零占位,仅承载观察与注入;官方 DOM 结构漂移时注入静默
 // 跳过(不报错),干净禁用精神
-function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
-  const queue = useSession((state) => state.queue)
+function SteerRecallDock({ session, useSession, inputActions, updateQueue, steerRows }) {
   const queueMutable = useSession((state) => state.subagent === null || state.subagent.address.mode === 'continuable')
   const [busy, setBusy] = useState(false)
   // 启停开关(设置页):挂载拉取一次,停用即不注入并移除已注入按钮;失败按启用兜底
@@ -900,15 +925,16 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
   }, [])
   // 条件 return 之前同步:停用路径也要让 scan 门控看到最新值
   enabledRef.current = enabled
-  // 观察回调经由 ref 读最新状态,观察器只挂一次不随渲染重挂
-  const rowsRef = useRef([])
+  // 观察回调经由 ref 读最新状态,观察器只挂一次不随渲染重挂;
+  // 行集在 scan 时实时读取(插话入队/摘除伴随气泡 DOM 变化,观察器自然覆盖)
   const mutableRef = useRef(true)
   const busyRef = useRef(false)
   const actionsRef = useRef(null)
-  rowsRef.current = steerRowsOf(queue)
+  const rowsRef = useRef(null)
   mutableRef.current = queueMutable
   busyRef.current = busy
   actionsRef.current = { updateQueue, setDraft: inputActions ? inputActions.setDraft : undefined }
+  rowsRef.current = steerRows
   const scanRef = useRef(null)
   useEffect(() => {
     function withdraw(row) {
@@ -930,7 +956,7 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
         return
       }
       const bubbles = document.querySelectorAll(STEER_BUBBLE_SELECTOR)
-      const rows = mutableRef.current ? rowsRef.current : []
+      const rows = mutableRef.current && rowsRef.current ? rowsRef.current() : []
       bubbles.forEach((bubble, index) => {
         const actionsRow = bubble.querySelector(STEER_ACTIONS_SUFFIX)
         if (!actionsRow) return
@@ -942,7 +968,7 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
           return
         }
         if (!button) {
-          const official = actionsRow.querySelector('button:not([' + STEER_BTN_FLAG + '])')
+          const official = actionsRow.querySelector('button:not([' + STEER_BTN_FLAG + ']):not([' + FORK_BTN_FLAG + '])')
           if (!official) return
           button = document.createElement('button')
           button.type = 'button'
@@ -966,11 +992,11 @@ function SteerRecallDock({ session, useSession, inputActions, updateQueue }) {
       document.querySelectorAll('[' + STEER_BTN_FLAG + ']').forEach((button) => button.remove())
     }
   }, [])
-  // 行集/开关/忙碌变化即时重扫(观察器只覆盖 DOM 变更,状态变化需主动对账)
+  // 开关/忙碌/可变性变化即时重扫(行集 scan 时实时读取,观察器只覆盖 DOM 变更)
   useEffect(() => {
     if (scanRef.current) scanRef.current()
-  }, [queue, enabled, busy, queueMutable])
-  if (session === undefined || inputActions === undefined || updateQueue === undefined) return null
+  }, [enabled, busy, queueMutable])
+  if (session === undefined || inputActions === undefined || updateQueue === undefined || typeof steerRows !== 'function') return null
   if (!enabled || !queueMutable) return null
   return h('div', { className: 'cx-steer-host' })
 }
@@ -1442,7 +1468,10 @@ function ContextPanel() {
                   const binding = sessions.binding(sessionId)
                   const updateQueue = binding && binding.session && binding.session.updateQueue
                   if (typeof updateQueue !== 'function') return {}
-                  return { updateQueue: (itemId, action) => binding.session.updateQueue(itemId, action) }
+                  return {
+                    updateQueue: (itemId, action) => binding.session.updateQueue(itemId, action),
+                    steerRows: () => inboxSteerRows(binding.session),
+                  }
                 },
               },
               SteerRecallDock,
