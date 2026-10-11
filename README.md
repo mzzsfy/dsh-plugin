@@ -23,7 +23,7 @@ dsh-plugin/
 | @mzzsfy/dsh-maintain | 版本与运维一体化:自动发现新版本、一键升级、安全重启,重启后页面自动恢复 | 监测 npm dist-tag 发现新版本;升级即执行自定义命令(`{tag}` 占位符);重启走优雅退出(5 秒兜底),页面轮询检测宿主恢复后自动刷新 | DSH 双端插件(settings 槽位 + web 路由) |
 | @mzzsfy/dsh-think-expand | 流式思考自动展开:始终显示最新一条思考,手动操作优先,打开会话仅展开最后一条,卸载无残留 | 纯前端观察流式渲染,新思考出现即收起上一条;无设置项,安装即自动生效 | DSH 纯前端插件(client 模块,DOM 观察) |
 | @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM 五通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;同浏览器多窗口按 localStorage 认领保证唯一发声;非回环 HTTP 访问降级 toast + 标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
-| @mzzsfy/dsh-session-manager | 会话管理三合一:超期会话自动归档(阈值可配)、归档面板(取消归档 / 两段式删除 / 回收站还原)、归档推送提示 | host 启动补扫、每日周期轮与新会话创建三路触发同一幂等归档评估(阈值与周期均可配,timer 软依赖缺失自动降级);删除移入系统回收站可恢复,面板维护已删台账并支持一键重新挂载 | DSH 双端插件(host 自动归档 + client 面板) |
+| @mzzsfy/dsh-session-manager | 会话管理三合一:超期会话自动归档(阈值可配)、归档面板(取消归档 / 两段式删除 / 回收站还原)、归档推送提示 | host 启动补扫、每日周期轮与新会话创建三路触发同一幂等归档评估(阈值与周期均可配,timer 软依赖缺失自动降级);取消归档后 10 分钟内暂停自动归档(进程内宽限);删除移入系统回收站可恢复,面板维护已删台账并支持一键重新挂载 | DSH 双端插件(host 自动归档 + client 面板) |
 | @mzzsfy/dsh-toast | 全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻确认两种生命周期,供各插件发送操作反馈与事件通知 | 普通 npm 依赖(非 dsh 插件,不声明 dsh.bundle.patch),不进 profile 表层 manifest(市场不显示);经消费插件 dependencies 声明随装,作为传递依赖实体落入顶层 node_modules(hoisted),dsh 启动 fallback 补链兜底,dev-link junction 保开发热更;消费插件 cordis.patch.yml 代挂其宿主占位条目使 client 进入模块表,经 dsh.client.external require 使用;容器直挂 body 顶部居中,样式全取宿主令牌 | DSH 公共 client 依赖库(external require) |
 | @mzzsfy/dsh-rs-workflow | 若水工作流 v5:人在场的强规则编排——主循环协作编排、分段推进、结构化产出契约强制校验、审批原语、运行中排队/注入/取消/暂停/断点续跑、全量运行记录无截断回看;用户自建模板经设置页管理,每套模板一键释放为一个模式 | 角色行:board(/api/rsww/* 运行中心+模板管理+配置,host 平面)/orchestrator(preset 平面,主循环七工具+分段 continuable job)/template-tool(preset 平面,AI 模板编辑入口);实现与设计文档见 docs/rsww-v5/(仓库本地) | DSH 插件(host 单角色 + 预设层两角色) |
 | @mzzsfy/dsh-llm-pi-gateway | 把会话 sessionId 注入发往 newapi 等 LLM 网关的每个请求,供网关做请求亲和性粘性路由(prompt cache 命中是结果);装上即零感知接管官方 pi-ai 路由,卸载即还原 | 请求体按协议写入 sessionId 派生标记(anthropic metadata.user_id / openai prompt_cache_key);亲和头携带裸 sessionId(anthropic / openai-completions 经 compat sendSessionAffinityHeaders 开启);metadata 模板透传、静态 headers 兜底;bundle patch 以官方 schema 接管路由 | DSH host 端插件(pi-ai 透传 adapter) |
@@ -45,7 +45,7 @@ pnpm config set --global minimumReleaseAge 360
 
 ## 开发与测试
 
-要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20,dsh-rs-workflow 未声明 engines)。
+要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20)。各包 manifest 以 `dsh.compatibility.dshReleases` 逐版本声明 DSH 完整版本兼容性(0.2.0-rc.2 实测 compatible,未经实测验证的版本声明 unknown)。
 
 - 包内测试:14 个含 test/ 目录的包执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 未声明 test 脚本,以 `node --test "test/*.test.mjs"` 直接运行,已按 docs/rsww-v5/ 实现,全绿
 - CI 测试(`.github/workflows/test.yml`):push 按改动范围收敛(全部改动落在 `packages/<X>/` 只测 X + 冒烟与仓库根测试;触及非包路径回退全量),每 3 天定时与手动触发为全量;amd64/arm64 双架构并行,各跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现 + 仓库根 tests/;测试文件按平台过滤,`*.linux.test.mjs`/`*.win.test.mjs` 专属,CI 只跑 linux 侧;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)

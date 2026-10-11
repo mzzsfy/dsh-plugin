@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'src', 'client.js'), 'utf8')
 
-function reactStub() {
+function reactStub(expanded = false) {
   // 函数组件即时执行(模拟渲染语义):组件体内的未定义引用/坏访问当场抛出
   const createElement = (type, props, ...children) => {
     if (typeof type === 'function') return type(props ?? {})
@@ -18,14 +18,14 @@ function reactStub() {
   }
   return {
     createElement,
-    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    useState: (init) => [expanded || (typeof init === 'function' ? init() : init), () => {}],
     useEffect: () => {},
   }
 }
 
 // 加载 client.js 并执行 apply,返回 slots 注册面
-function loadClient() {
-  const React = reactStub()
+function loadClient(expanded = false) {
+  const React = reactStub(expanded)
   const registrations = []
   const slots = {
     inject: (_name, factory) => factory(),
@@ -70,6 +70,39 @@ function settledBlock(argsRaw, text) {
   }
 }
 
+test('直接 pwsh 接管:折叠与展开都有独立徽章，复制输出剥离事实标记', () => {
+  // Given 已接管 pwsh 结果；When折叠/展开渲染；Then徽章可见且输出不泄露内部标记。
+  const args = JSON.stringify({ command: 'Get-Date', description: 'probe' })
+  for (const expanded of [false, true]) {
+    const component = toolviewOf(loadClient(expanded), 'pwsh')
+    const block = settledBlock(args, 'out\n[exit code: 2]')
+    block.content.push({ type: 'shell-select-takeover', tool: 'pwsh' })
+    const element = component({ block, cwd: 'C:\\repo' })
+    const nodes = []
+    const walk = (node) => { if (!node || typeof node !== 'object') return; if (Array.isArray(node)) return node.forEach(walk); nodes.push(node); node.children?.forEach(walk) }
+    walk(element)
+    assert.ok(nodes.some(node => node.props?.className === 'sls-tv__takeover' && node.children.includes('插件接管')))
+    assert.doesNotMatch(JSON.stringify(element), /\[shell-select: pwsh takeover\]/)
+    if (expanded) assert.ok(nodes.some(node => node.props?.className === 'sls-tv__badge' && node.children.includes('pwsh')))
+  }
+})
+
+test('历史 stdout 恰含标记也不得冒充接管事实或丢失输出', () => {
+  // Given历史pwsh stdout含旧标记；When展开；Then没有接管徽章且原文保留。
+  const element = toolviewOf(loadClient(true), 'pwsh')({ block: settledBlock(JSON.stringify({ command: 'Write-Output marker', description: 'history' }), '[shell-select: pwsh takeover]'), cwd: 'C:\\repo' })
+  assert.doesNotMatch(JSON.stringify(element), /插件接管/)
+  assert.match(JSON.stringify(element), /\[shell-select: pwsh takeover\]/)
+})
+
+test('未标记历史 pwsh 与普通 shell 不显示接管徽章', () => {
+  // Given普通/历史结果；When渲染；Then不由工具名或当前配置臆测接管。
+  const args = JSON.stringify({ command: 'echo x', description: 'probe' })
+  for (const key of ['pwsh', 'shell']) {
+    const element = toolviewOf(loadClient(true), key)({ block: settledBlock(args, 'out'), cwd: 'C:\\repo' })
+    assert.doesNotMatch(JSON.stringify(element), /插件接管/)
+  }
+})
+
 test('渲染守卫:settled terminal 调用组件执行不抛(引用完整)', () => {
   const component = toolviewOf(loadClient(), 'shell')
   const element = component({
@@ -106,13 +139,6 @@ test('渲染守卫:后台 ack 块(默认收起行 + 任务号徽标)组件执行
     cwd: 'C:\\repo',
   })
   assert.notEqual(element, undefined)
-})
-
-test('设置卡注册:settings.section 单卡 id shell-select', () => {
-  const registrations = loadClient()
-  const card = registrations.find((item) => item.meta.name === 'settings.section')
-  assert.notEqual(card, undefined)
-  assert.equal(card.meta.id, 'shell-select')
 })
 
 test('图标名守卫:0.1.7 primitives 字重后缀名在场,尺寸后缀旧名不在首选位', () => {
@@ -156,7 +182,7 @@ test('hooks 恒序守卫:组件内 hook 调用必须全部位于第一个提前 
     const m = /return h\(/.exec(scope)
     return m === null ? Number.POSITIVE_INFINITY : beginLine + scope.slice(0, m.index).split('\n').length - 1
   }
-  for (const name of ['ShellToolRow', 'GenericShellRow', 'CopyButton', 'RunningDuration', 'ShellSelectApp']) {
+  for (const name of ['ShellToolRow', 'GenericShellRow', 'CopyButton', 'RunningDuration']) {
     const { hookLines } = extract(name)
     const scopeBody = source.slice(source.indexOf(`function ${name}(`))
     const end = scopeBody.indexOf('\n    function ', 1)

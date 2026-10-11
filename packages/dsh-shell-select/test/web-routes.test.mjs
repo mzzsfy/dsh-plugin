@@ -118,12 +118,25 @@ test('webServer 缺席:路由跳过不抛(带告警,headless 合法形态)', () 
   assert.match(registered.warnings.join('\n'), /webServer/)
 })
 
-test('webServer 在场:三条 exact 路由注册', () => {
+test('webServer 在场:四条 exact 路由注册', () => {
   const { ctx, webServer } = stubCtx()
   webRoutes.apply(ctx)
   const paths = webServer.state.registered.map((item) => item.path).sort()
-  assert.deepEqual(paths, ['/api/shell-select/config', '/api/shell-select/detect', '/api/shell-select/probe'])
+  assert.deepEqual(paths, ['/api/shell-select/config', '/api/shell-select/detect', '/api/shell-select/pathmap', '/api/shell-select/probe'])
   assert.ok(webServer.state.registered.every((item) => item.kind === 'exact'))
+})
+
+test('GET /pathmap:返回宿主平台事实(platform/home/tmpDir)', async () => {
+  const { ctx } = stubCtx()
+  webRoutes.apply(ctx)
+  const handler = ctx.webServer.state.handlers.get('/api/shell-select/pathmap')
+  const res = fakeRes()
+  await handler(fakeReq('GET'), res)
+  assert.equal(res.state.status, 200)
+  const payload = JSON.parse(res.state.body)
+  assert.equal(payload.platform, process.platform)
+  assert.equal(typeof payload.home, 'string')
+  assert.equal(typeof payload.tmpDir, 'string')
 })
 
 test('GET /config:返回 describe 值 + resolved 投影(路径已解析)', async () => {

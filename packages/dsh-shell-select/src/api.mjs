@@ -61,7 +61,7 @@ function readBody(req) {
 /**
  * 挂载配置/探测路由。可写操作(settings.update)在 settings 缺席时由闭包抛错归一 400。
  * @param {object} ctx cordis context
- * @param {{listShells: Function, readConfig: Function, updateConfig: Function, detect: Function, probe: Function}} faces
+ * @param {{listShells: Function, readConfig: Function, updateConfig: Function, detect: Function, probe: Function, pathMap: Function}} faces
  */
 export function mountRoutes(ctx, faces) {
   const webServer = ctx.get('webServer')
@@ -92,6 +92,12 @@ export function mountRoutes(ctx, faces) {
         const { path: candidatePath } = JSON.parse(await readBody(req))
         if (typeof candidatePath !== 'string' || candidatePath.length === 0) throw new Error('path 必须是非空字符串')
         sendJson(res, 200, { exists: faces.probe(candidatePath) })
+      }),
+    },
+    {
+      path: `${API_ROOT}/pathmap`,
+      handler: route('GET', async (req, res) => {
+        sendJson(res, 200, faces.pathMap())
       }),
     },
     {

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { COMPAT_ROOT, log } from './lib.mjs'
+import { killSimulators, reportSimulatorCleanupFailure } from './simulator-cleanup.mjs'
 
 function killTree(pid) {
   if (process.platform === 'win32') {
@@ -12,15 +13,6 @@ function killTree(pid) {
     return
   }
   spawnSync('kill', ['-9', String(pid)], { windowsHide: true })
-}
-
-function killSimulators() {
-  const filter = "Name='node.exe'"
-  const res = spawnSync('powershell', [
-    '-NoProfile', '-Command',
-    `Get-CimInstance ${filter} | Where-Object { $_.CommandLine -match 'echo-upstream\\.mjs' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`,
-  ], { encoding: 'utf8', windowsHide: true })
-  if (res.status !== 0) log(`keep-stop: 模拟器清理异常: ${(res.stderr ?? '').trim().slice(0, 200)}`)
 }
 
 const versions = process.argv.slice(2)
@@ -42,5 +34,6 @@ for (const version of dirs) {
   }
   rmSync(livePath, { force: true })
 }
-killSimulators()
-log(`keep-stop: 收尾 ${stopped} 个宿主,模拟器已清理`)
+const simulatorCleanup = killSimulators()
+reportSimulatorCleanupFailure(simulatorCleanup, log)
+log(`keep-stop: 收尾 ${stopped} 个宿主,模拟器清理命令已执行`)

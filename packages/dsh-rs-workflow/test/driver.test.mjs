@@ -711,6 +711,25 @@ test('Given 引擎无 dispose(桩缺省) When runSegment Then 不抛(可选链�
   assert.equal(payload.kind, 'terminal')
 })
 
+test('FIND-020-6 回归:engine.start args 是 lossless JSON,calls 不含 undefined 值键', async () => {
+  let seenArgs
+  const engine = { start(args) { seenArgs = args; return { result: Promise.resolve({ results: [] }), dispose: async () => {} } } }
+  const plan = fullPlan(['only'])
+  const driver = new RunDriver({
+    template: SINGLE, plan, runId: 'r-lossless-1', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  await driver.runSegment()
+  // lossless 约束作用域 = 脚本 args(parent/signal 是引擎绑定句柄,不经 JSON 通道)
+  const lossless = JSON.parse(JSON.stringify(seenArgs.args))
+  // undefined 值键被 JSON 静默丢弃即非 lossless:还原后必须与原值 deepEqual(宿主 ptc 通道按此拒收)
+  assert.deepEqual(lossless, seenArgs.args)
+  for (const call of seenArgs.args.calls) {
+    for (const [k, v] of Object.entries(call)) assert.notEqual(v, undefined, `calls 键 ${k} 为 undefined`)
+  }
+})
+
 test('Given 有 controlSeq 与步级 escalateReady 的终态记录 When buildSeed Then 计数归零且逐步清标志', () => {
   const record = {
     runId: 'r-old', templateId: 't', request: '需求', inputs: { a: 'x' },

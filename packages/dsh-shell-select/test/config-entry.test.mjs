@@ -1,4 +1,4 @@
-﻿// 条目级 env 与 wsl distro:schema 默认、argv 形、entryFor 透传。BDD 场景见 docs/feat-shell-select-optim/plan.md S5-S10。
+// 条目级 env 与 wsl distro:schema 默认、argv 形、entryFor 透传。BDD 场景见 docs/feat-shell-select-optim/plan.md S5-S10。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -69,6 +69,7 @@ function stubCtxFor(config) {
   const registered = { sections: [], tools: [], promptSections: [], routes: [] }
   return {
     reflect: { provide: () => {} },
+    on: () => () => {},
     logger: { warn: () => {} },
     effect: (fn) => { registered.routes.push(fn) },
     get() { return { register: () => {} } },

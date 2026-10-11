@@ -277,7 +277,8 @@ function aggregateGate() {
     return
   }
   console.log('  $ node scripts/aggregate-tests.mjs --rounds 1(发布门引用 CI 同源单测)')
-  const gate = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'aggregate-tests.mjs'), '--rounds', '1'], { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
+  const gate = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'aggregate-tests.mjs'), '--rounds', '1'], { cwd: repoRoot, stdio: 'inherit', windowsHide: true })
+  if (gate.error) fail(`聚合测试启动失败: ${gate.error.message}`)
   if (gate.status !== 0) fail(`聚合测试未通过(exit ${gate.status}),中止发布;明细见上方输出`)
   const compatVersions = existsSync(join(repoRoot, '.compat'))
     ? readdirSync(join(repoRoot, '.compat')).filter((v) => /^\d/.test(v) && existsSync(join(repoRoot, '.compat', v, 'result.json')))

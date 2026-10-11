@@ -415,3 +415,20 @@ export function draftsFromModels(models) {
   }
   return drafts
 }
+
+// 官方输入类型槽位识别:新版宿主在模型行展开区渲染「输入类型(文本/图片)」
+// fieldset,写回字段与本插件 inputMode 同源(providers.<route>.models[].input),
+// 命中即本插件的输入模态控件冗余,应隐藏;思考档位映射官方刻意不提供,保留。
+// 锚点以 aria-label 前缀判定(zh/en),不依赖构建哈希 class。
+export const OFFICIAL_INPUT_TYPE_LABELS = ['输入类型', 'Input types']
+
+export function isOfficialInputTypesFieldset(el) {
+  return el !== null && typeof el === 'object' && el.tagName === 'FIELDSET' &&
+    typeof el.ariaLabel === 'string' &&
+    OFFICIAL_INPUT_TYPE_LABELS.some((label) => el.ariaLabel.startsWith(label))
+}
+
+// 行内块标题随模态控件显隐切换:官方槽位在场时模态编辑由官方承担。
+export function inlineTitleText(hideInputMode) {
+  return hideInputMode === true ? '模型能力(思考档位)' : '模型能力(思考档位 / 输入模态)'
+}

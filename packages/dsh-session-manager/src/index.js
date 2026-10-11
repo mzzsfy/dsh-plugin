@@ -26,6 +26,8 @@ import {
   mergeDeletedEntry,
   removeDeletedEntry,
   selectArchiveCandidates,
+  UNARCHIVE_GRACE_MS,
+  unarchiveGraceActive,
   updatedAtOf,
 } from './core.mjs'
 import { moveToQuarantine, restoreFromQuarantine, trashPath } from './trash.mjs'
@@ -217,6 +219,9 @@ function rejectMethod(req, res, method) {
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
   let evaluating = false
+  // 取消归档全局宽限起点(进程内,重启失效可接受):恢复会话到用户发出首条
+  // 消息之间的评估窗口保护,首条消息更新产物 mtime 后由阈值自然接管
+  let unarchivedAtMs = 0
   // 删除路由同 id 并发去重(进程内)
   const inFlightDeletes = new Set()
 
@@ -258,6 +263,8 @@ export function apply(ctx, config) {
       const persistence = ctx.get('sessionPersistence')
       const records = await ctx.sessionQuery.listSessions()
       const nowMs = Date.now()
+      // 全局宽限短路:恢复动作后 graceMs 内暂停归档,保护「恢复 → 首条消息」窗口
+      if (unarchiveGraceActive(unarchivedAtMs, nowMs)) return
       const cutoff = nowMs - days * DAY_MS
       const candidates = []
       for (const recordItem of records) {
@@ -385,6 +392,11 @@ export function apply(ctx, config) {
     })
   }
 
+  // 宽限记账:取消归档时更新宽限起点(进程内变量,无持久化副作用)
+  function recordUnarchiveGrace() {
+    unarchivedAtMs = Date.now()
+  }
+
   // 台账命中查询:同 id 曾删除过(重删场景的幽灵资格依据);域不可用时按未命中
   async function ledgerHasEntry(sessionId) {
     try {
@@ -451,7 +463,9 @@ export function apply(ctx, config) {
       handler: async (req, res) => {
         if (!rejectMethod(req, res, 'POST')) return
         try {
-          await removeArchivedId(await requireSessionId(req))
+          const sessionId = await requireSessionId(req)
+          await removeArchivedId(sessionId)
+          await recordUnarchiveGrace()
           sendJson(res, 200, { ok: true })
         } catch (error) {
           respondError(ctx, res, error)

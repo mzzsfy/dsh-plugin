@@ -12,6 +12,7 @@ import { TOOL_ABORTED, defineTool } from '@deepseek-ai/dsh-tools'
 import { ESCALATION_TARGETS, approveEscalation, validateEscalationArgs } from '@deepseek-ai/dsh-sandbox'
 import { isAbsolute, resolve } from 'node:path'
 import { renderResult, renderProcessRead } from './render.mjs'
+import { PWSH_TAKEOVER_BLOCK } from './pwsh-takeover.mjs'
 import { parseExitStatus } from '@deepseek-ai/dsh-shell'
 
 /** 拒升权/Abort 错误构造:dsh-llm HarnessError 缺失时以同码 Error 降级(错误码通道不变)。 */
@@ -38,6 +39,25 @@ function isDenyError(error) {
 /** 拒绝 → 模型可见标记文本(与沙箱拒绝标记同风格)。 */
 function blockedMarker(error) {
   return `[blocked by shell-select: matches deny pattern ${error.pattern}]`
+}
+
+/**
+ * deny 命中 → schema 合法的前台结果:拒绝事实全在 stderr 标记文本,
+ * 禁止携带 blocked/blockedBy 等声明外字段——输出 oneOf 各分支
+ * additionalProperties:false,违者被宿主判 INVALID_TOOL_OUTPUT,拒绝文案不可达。
+ */
+function deniedForeground(error, shellId) {
+  return {
+    kind: 'foreground',
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    aborted: false,
+    timeoutMs: 0,
+    stdout: { text: '', truncated: false },
+    stderr: { text: blockedMarker(error), truncated: false },
+    shell: shellId,
+  }
 }
 
 /** 显式 workdir 先行,相对者落会话工作区;否则用会话 cwd,执行器默认兜底(官方同构)。 */
@@ -124,8 +144,11 @@ function foregroundOutputProperties() {
   }
 }
 
+/** bash 路径措辞:bash 输出的 MSYS 拼写不得回流进工具参数(宿主文件面只认 Windows 形式)。 */
+const BASH_PATH_GUIDANCE = 'Bash clients accept Windows-style paths (C:/...): use that form for `workdir` and file-tool arguments — MSYS spellings like `/c/Users/...` or `/tmp` only work inside the bash command itself, never in tool arguments.'
+
 /** 工具描述:客户端清单与方言随配置动态变化。 */
-function shellDescription({ executor, backgroundEnabled, escalationModes }) {
+export function shellDescription({ executor, backgroundEnabled, escalationModes }) {
   const listing = executor.listShells()
   const lines = listing.shells
     .map((entry) => `${entry.id} (${entry.kind}${entry.available ? '' : ', executable not found'})`)
@@ -138,8 +161,10 @@ function shellDescription({ executor, backgroundEnabled, escalationModes }) {
     + (backgroundEnabled
       ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
       : 'Background execution is not available; long-running commands must finish within the timeout.')
-  if (escalationModes.length === 0) return base
-  return base + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
+  const bashPresent = listing.shells.some((candidate) => candidate.kind === 'bash' && candidate.available)
+  const text = bashPresent ? `${base} ${BASH_PATH_GUIDANCE}` : base
+  if (escalationModes.length === 0) return text
+  return text + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
 }
 
 /** pwsh 工具描述:兼容保留工具,只声明不要调用与去向,零执行语义。 */
@@ -240,7 +265,7 @@ export function registerShellTool(ctx, { executor }) {
         text: value.kind === 'background'
           ? `started background job ${value.jobId}${value.shell !== undefined ? `\n[shell: ${value.shell}]` : ''}`
           : renderResult(value, escalationModes, value.shell),
-      }],
+      }, ...(toolName === 'pwsh' ? [PWSH_TAKEOVER_BLOCK] : [])],
     },
     async execute(args, exec) {
       validateArgs(args)
@@ -250,7 +275,8 @@ export function registerShellTool(ctx, { executor }) {
         : undefined
       const policy = approvedMode === undefined ? standingPolicy : { ...standingPolicy, mode: approvedMode }
       const workdir = resolveWorkdir(args.workdir, exec)
-      const entry = faces.executor.entryFor(pinned ?? args.shell)
+      // pwsh 契约:钉死工具永远 PowerShell,配置删条目也现场探测,不落默认客户端
+      const entry = pinned !== undefined ? faces.executor.contractEntry() : faces.executor.entryFor(args.shell)
       const request = {
         command: args.command,
         ...workdir !== undefined ? { workdir } : {},
@@ -263,9 +289,9 @@ export function registerShellTool(ctx, { executor }) {
         if (jobs === undefined) throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
         if (exec.signal.aborted) throw await abortError('tool call aborted')
         try {
-          faces.executor.startFor(entry, faces.executor.resolve(request))
+          faces.executor.assertNotDenied(request.command)
         } catch (error) {
-          if (isDenyError(error)) return { kind: 'foreground', shell: entry.id, blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+          if (isDenyError(error)) return deniedForeground(error, entry.id)
           throw error
         }
         return {
@@ -274,7 +300,7 @@ export function registerShellTool(ctx, { executor }) {
           jobId: jobs.start({
             kind: 'shell',
             label: args.command,
-            ...exec.agent ? { owner: exec.agent } : {},
+            ...exec.agent ? { owner: exec.agent.id } : {},
             run: () => {
               const proc = faces.executor.startFor(entry, faces.executor.resolve(request))
               return {
@@ -293,7 +319,7 @@ export function registerShellTool(ctx, { executor }) {
           signal: exec.signal,
         }))
       } catch (error) {
-        if (isDenyError(error)) return { kind: 'foreground', shell: entry.id, blocked: true, blockedBy: error.pattern, exitCode: null, signal: null, timedOut: false, aborted: false, timeoutMs: 0, stdout: { text: '', truncated: false }, stderr: { text: blockedMarker(error), truncated: false } }
+        if (isDenyError(error)) return deniedForeground(error, entry.id)
         throw error
       }
       if (result.aborted) throw await abortError('tool call aborted')
@@ -317,7 +343,7 @@ export function registerShellTool(ctx, { executor }) {
       }
     },
     presentResult: (args, result) => {
-      const block = result.content.length === 1 ? result.content[0] : undefined
+      const block = result.content.filter(part => part.type === 'text').length === 1 ? result.content.find(part => part.type === 'text') : undefined
       if (block === undefined || block.type !== 'text') return undefined
       const raw = block.text
       if (typeof args === 'object' && args !== null && args.run_in_background === true || result.isError) {

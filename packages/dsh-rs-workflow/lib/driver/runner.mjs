@@ -70,7 +70,11 @@ export async function runBatch({ state, script, template, batch, ctx }) {
     })
     const callId = `${item.stepId}#${inst?.key ?? '-'}@${batchNo}:${i}`
     const label = `${step.label ?? step.id}${inst ? ` ${inst.key}` : ''}`
-    calls.push({ callId, prompt, label, schema: schemaOf(step), provider, model })
+    // 引擎 args 是 lossless JSON 绑定:undefined 键直接拒(与 flow-exec agent options 同纪律),缺省必须整键省略
+    const call = { callId, prompt, label, schema: schemaOf(step) }
+    if (provider !== undefined) call.provider = provider
+    if (model !== undefined) call.model = model
+    calls.push(call)
     callMeta.set(callId, { item, step, slotKey, cursorKey, prompt, label })
   }
 

@@ -67,7 +67,8 @@ export function registerOrchestrator(ctx, config) {
         kind: SEGMENT_KIND,
         label: `若水编排段推进 ${driver.runId}`,
         outputLimitBytes: SETTLE_OUTPUT_LIMIT,
-        owner: agent,
+        // owner 必须是 agent id 字符串:宿主 jobs 按 session id 解析活体,传对象得 "[object Object]"
+        owner: agentIdOf(agent),
         run: () => ({
           cancel: () => driver.cancel(),
           done: promise.then((payload) => ({ status: 'completed', output: JSON.stringify(payload) })),

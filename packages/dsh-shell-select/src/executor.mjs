@@ -19,6 +19,8 @@ import { matchDeny } from './denylist.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { classifyDenial, classifyRunnerFailure, isRunnerSpawnFailure } from './sandbox-classify.mjs'
 import { registerShellTool } from './tool.mjs'
+import { mountShellPromptProjection } from './prompt-projection.mjs'
+import { mountPwshTakeover } from './pwsh-takeover.mjs'
 
 export const name = 'shell-select'
 
@@ -149,6 +151,8 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     })
     this.#registerTool()
     this.#mountPromptSection()
+    mountShellPromptProjection(ctx)
+    this.markPwshTakeover = mountPwshTakeover(ctx)
   }
 
   /** 挂载/换源共用落定:入参经宿主按 static Config resolve,volatile 字段是
@@ -226,6 +230,21 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return { id: entry.id, kind: entry.kind, path: resolved, args: entry.args, login: entry.login === true, distro: entry.distro ?? '', env: entry.env ?? {} }
   }
 
+  /**
+   * 官方契约的 pwsh 落点:配置含 pwsh 条目时走 entryFor;条目被删除或不可解析时
+   * 仍按候选探测现场解析一台 pwsh(官方 dsh-pwsh-local 语义——pwsh 调用永远
+   * PowerShell,不落默认客户端,也不得以配置缺失为由改方言)。探测全失时才抛。
+   */
+  contractEntry() {
+    try {
+      return this.entryFor('pwsh')
+    } catch {
+      const [detected] = detectCandidates(['pwsh'], process.env, candidateExists)
+      if (detected === undefined) throw new Error('no pwsh executable on this machine: the official pwsh contract requires PowerShell (pwsh 7 or Windows PowerShell); reinstall PowerShell or add a pwsh entry in the shell-select settings section')
+      return { id: 'pwsh', kind: 'pwsh', path: normalizeWin32Path(detected.path), args: [], login: false, distro: '', env: {} }
+    }
+  }
+
   /** 注册/重注册 shell 工具(描述随客户端清单变化)。 */
   #registerTool() {
     this.#toolRegistration?.()
@@ -236,7 +255,7 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     this.ctx.systemPrompt.section({
       name: 'tool:shell',
       order: this.ctx.systemPrompt.getSectionOrder('TOOL_PWSH'),
-      text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. Commands run in fresh processes: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Pass the `shell` argument only when the default client cannot run the command; the available clients are listed in the tool description.',
+      text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure. Commands run in fresh processes: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Pass the `shell` argument only when the default client cannot run the command; the available clients are listed in the tool description.',
     })
   }
 
@@ -264,14 +283,17 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return buildArgv(entry, spec.command)
   }
 
-  /** 官方 execute seam:已解析 spec 按默认客户端前台执行(dsh-pwsh-local run 同构)。 */
+  /** 官方 execute seam:pwsh 客户端前台执行(dsh-pwsh-local run 同构,契约钉死 pwsh)。 */
   async run(spec) {
-    return this.runFor(this.entryFor(), spec)
+    this.markPwshTakeover()
+    return this.runFor(this.contractEntry(), spec)
   }
 
   /**
    * 官方 ctx.shell 唯一执行契约(ShellExecutor 抽象方法,官方 tool-pwsh 与
-   * 进程内消费方共同依赖):解析 spec 后按默认客户端 spawn,返回 ShellExecution
+   * 进程内消费方共同依赖):解析 spec 后按 pwsh 客户端 spawn(官方 dsh-pwsh-local
+   * 契约即 PowerShell 专用,落默认客户端会随配置漂移炸方言),返回
+   * ShellExecution
    * 句柄(done/readOutput/kill/observed/result)。前台与否是调用方 await 什么的
    * 属性,不是 spawn 的属性。沙箱语义与 runFor 同源:danger 直跑,受限模式
    * confine 包装,定案按 denial/runner-failure 规则附 sandbox 事实。
@@ -279,8 +301,9 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
    * @returns {Promise<object>} ShellExecution 句柄
    */
   async execute(spec) {
+    this.markPwshTakeover()
     this.assertNotDenied(spec.command)
-    const entry = this.entryFor()
+    const entry = this.contractEntry()
     const policy = spec.sandboxPolicy
     const { mode } = policy
     if (mode === 'danger-full-access') {
@@ -420,9 +443,10 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     return Promise.resolve(proc)
   }
 
-  /** 官方 start seam:已解析 spec 按默认客户端后台启动(dsh-pwsh-local start 同构)。 */
+  /** 官方 start seam:pwsh 客户端后台启动(dsh-pwsh-local start 同构,契约钉死 pwsh)。 */
   start(spec) {
-    return this.startFor(this.entryFor(), spec)
+    this.markPwshTakeover()
+    return this.startFor(this.contractEntry(), spec)
   }
 
   /** 组装一次 spawn 的完整规格(官方 spawnSpec 同构,argv/条目参数化)。 */

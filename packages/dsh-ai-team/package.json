@@ -1,0 +1,50 @@
+{
+  "name": "@mzzsfy/dsh-ai-team",
+  "description": "AI 团队任务控制室:管理员/调度员/实施/验收角色编排 DSH 会话完成任务,含看板、时间线、中断恢复",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible"
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "object",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "files": [
+    "lib",
+    "src",
+    "preset",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.2-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": ">=0.2.0-rc.1",
+    "zod": "^3.23.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -27,7 +27,7 @@ function clientLogic() {
       + ' anchorsBroken, unwrapEnvelope, rejectRpc, makeSettingsFace, describeNs, modelsOf, findNsEntry,'
       + ' advancedAreaChild, writeModels, saveModels, draftsFromModels,'
       + ' SAVE_BUTTON_LABELS, SAVE_BUTTON_BUSY_LABELS, isSaveButton, isSaveCommitButton, draftEdited, collectSaveFollowDrafts, saveFollowReady,'
-      + ' saveFollowArms, saveFollowDismissible };',
+      + ' saveFollowArms, saveFollowDismissible, isOfficialInputTypesFieldset, inlineTitleText };',
   )
   return factory()
 }
@@ -48,7 +48,7 @@ test('parity: 共享常量双副本一致', () => {
 })
 
 function defineScenarios(prefix, L) {
-  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, fillDrafts, advancedAreaChild, SAVE_BUTTON_LABELS, SAVE_BUTTON_BUSY_LABELS, isSaveButton, isSaveCommitButton, draftEdited, collectSaveFollowDrafts, saveFollowReady, saveFollowArms, saveFollowDismissible } = L
+  const { effortsToDrafts, draftsToEfforts, inputToMode, modeToInput, applyDraft, mergeBaselineModels, detectCompetitorTraces, draftsFromModels, stashDrafts, restoreDrafts, isModelsTitle, anchorsBroken, fillDrafts, advancedAreaChild, SAVE_BUTTON_LABELS, SAVE_BUTTON_BUSY_LABELS, isSaveButton, isSaveCommitButton, draftEdited, collectSaveFollowDrafts, saveFollowReady, saveFollowArms, saveFollowDismissible, isOfficialInputTypesFieldset, inlineTitleText } = L
 
   test(prefix + '保存随动:保存按钮判定与文案表', () => {
     assert.deepEqual(SAVE_BUTTON_LABELS, ['保存', 'Apply'])
@@ -171,6 +171,19 @@ function defineScenarios(prefix, L) {
       { checked: { low: true }, spellings: { low: 'v2' }, inputMode: 'text', seed: null },
     )
     assert.deepEqual(nullSeed.reasoningEfforts, { low: 'v2' }, 'null seed 走写回时点投影,不崩且参与判定')
+  })
+
+  test(prefix + '官方输入类型槽位:fieldset 判定与标题切换', () => {
+    const { isOfficialInputTypesFieldset, inlineTitleText } = L
+    assert.equal(isOfficialInputTypesFieldset({ tagName: 'FIELDSET', ariaLabel: '输入类型 2' }), true)
+    assert.equal(isOfficialInputTypesFieldset({ tagName: 'FIELDSET', ariaLabel: 'Input types 1' }), true)
+    assert.equal(isOfficialInputTypesFieldset({ tagName: 'FIELDSET', ariaLabel: '输入类型' }), true, '无序号也命中')
+    assert.equal(isOfficialInputTypesFieldset({ tagName: 'DIV', ariaLabel: '输入类型 1' }), false, '非 fieldset 不命中')
+    assert.equal(isOfficialInputTypesFieldset({ tagName: 'FIELDSET', ariaLabel: '模型选项 1' }), false, '其他 aria-label 不命中')
+    assert.equal(isOfficialInputTypesFieldset({ tagName: 'FIELDSET' }), false, '缺 aria-label 不命中')
+    assert.equal(isOfficialInputTypesFieldset(null), false)
+    assert.equal(inlineTitleText(true), '模型能力(思考档位)')
+    assert.equal(inlineTitleText(false), '模型能力(思考档位 / 输入模态)')
   })
 
   test(prefix + '标题标记与锚点破坏判定', () => {
@@ -346,6 +359,15 @@ defineScenarios('[client.js] ', clientLogic())
 
 test('client.js 语法可被 node 解析', () => {
   execFileSync(process.execPath, ['--check', join(PKG_ROOT, 'src', 'client.js')])
+})
+
+// 官方输入类型槽位门接线契约:mountRow 必须以行展开区内 fieldset 判定驱动
+// hideInputMode prop 传入 RowEditor,官方 DOM 锚点或接线被移除时测试报警。
+test('mountRow 接线:fieldset 判定驱动 hideInputMode prop', () => {
+  const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  assert.ok(source.includes(".some(isOfficialInputTypesFieldset)"), 'mountRow 缺少官方 fieldset 判定')
+  assert.ok(/React\.createElement\(RowEditor, \{[\s\S]*?hideInputMode,/.test(source), 'RowEditor 未接收 hideInputMode prop')
+  assert.ok(source.includes('inlineTitleText(props.hideInputMode === true)'), '标题未随 hideInputMode 切换')
 })
 
 // 保存流双副本守卫:client.js 的 unwrapEnvelope/rejectRpc/makeSettingsFace/describeNs/

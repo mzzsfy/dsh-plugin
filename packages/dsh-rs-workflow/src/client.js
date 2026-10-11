@@ -1218,27 +1218,39 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },
             () => React.createElement(RswwApp),
           ))
-        // 会话感知条件注入:当前会话存在 rs 运行记录才挂页签(v3 ensure/judge 模式)
+        // 会话感知条件注入:当前会话存在 rs 运行记录才挂页签(v3 ensure/judge 模式)。
+        // 当前会话 id 由 session 作用域哨兵插槽镜像(sessions.list snapshot 无 current 字段,
+        // 宿主不向插件暴露导航态;哨兵借 standardProps 下发的 sessionId 回写后 judge 轮询消费)
         ctx.effect(() => {
           let disposed = false
           let timer = null
           let disposeView = null
+          let disposeSentinel = null
           let cache = { sessionId: undefined, isRs: false }
           let currentSessionId
+          try {
+            disposeSentinel = ctx.slots.inject('conversation.input.overlay', () =>
+              ctx.slots.register(
+                { name: 'conversation.input.overlay', id: 'rsww-session-sentinel', order: 90 },
+                (props) => { currentSessionId = props?.sessionId; return null },
+              ))
+          } catch (error) {
+            console.warn('[rs-workflow] sessionId 哨兵未注册(宿主无 conversation.input.overlay 插槽)', error)
+          }
           const ensure = (isRs) => {
             if (disposed) return
             if (isRs && !disposeView) {
               disposeView = ctx.slots.inject('conversation.view', () =>
                 ctx.slots.register(
                   { name: 'conversation.view', id: VIEW_ID, order: 15, label: '若水编排' },
-                  (props) => React.createElement(FlowView, { getSessionId: () => currentSessionId, ...props }),
+                  (props) => React.createElement(FlowView, { getSessionId: () => props.sessionId ?? currentSessionId, ...props }),
                 ))
             } else if (!isRs && disposeView) {
               disposeView(); disposeView = null
             }
           }
           const judge = async () => {
-            const sessionId = ctx.sessions?.list?.getSnapshot?.().current
+            const sessionId = currentSessionId
             currentSessionId = sessionId
             if (sessionId === undefined) { ensure(false); return }
             if (cache.sessionId === sessionId && cache.fetched) { ensure(cache.isRs); return }
@@ -1260,6 +1272,7 @@ window.__ModuleLoader__.load({
             unsubscribe()
             if (timer) clearInterval(timer)
             if (disposeView) disposeView()
+            if (disposeSentinel) disposeSentinel()
           }
         }, 'rs-workflow: session-aware flow view')
       },

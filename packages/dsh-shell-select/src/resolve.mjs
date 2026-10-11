@@ -4,8 +4,19 @@
 
 import { lstatSync } from 'node:fs'
 
-// PATH 分隔符:仅 Windows 分号(本包 v1 仅 win32 激活)
-const PATH_SEP = ';'
+// POSIX pwsh 探测锚点:发行版包管理器与官方 tarball/Microsoft 源的固定落点
+const POSIX_PWSH_ANCHORS = [
+  '/usr/bin/pwsh',
+  '/usr/local/bin/pwsh',
+  '/opt/microsoft/powershell/7/pwsh',
+  '/opt/homebrew/bin/pwsh',
+]
+
+// PATH 探测的可执行名:win32 带 .exe 后缀,POSIX 裸名
+const executableName = (kind, platform) => {
+  const suffix = platform === 'win32' ? '.exe' : ''
+  return { pwsh: `pwsh${suffix}`, bash: `bash${suffix}` }[kind]
+}
 
 // 各 kind 的探测锚点:主 ProgramFiles;x86 与 LOCALAPPDATA 仅 bash 有常见安装
 const PF_RELATIVE = {
@@ -29,12 +40,6 @@ const SYSTEM32_FILES = {
   wsl: 'wsl.exe',
 }
 
-// PATH 探测的可执行名
-const PATH_EXECUTABLES = {
-  pwsh: 'pwsh.exe',
-  bash: 'bash.exe',
-}
-
 // MSYS2 默认安装锚点:真实 bash.exe 优先。msys2.exe(Cygwin 控制台启动器)
 // 在管道 stdio 下 exit 0 且零输出——命令静默失败,任何情形不得进入候选
 const MSYS2_ANCHORS = [
@@ -43,18 +48,22 @@ const MSYS2_ANCHORS = [
 ]
 
 /**
- * 一个 kind 的候选路径,按解析顺序。显式参数化(env)保证纯函数性。
+ * 一个 kind 的候选路径,按解析顺序。显式参数化(env/platform)保证纯函数性。
  * @param {string} kind pwsh|bash|cmd|wsl
  * @param {object} env 模拟进程环境
+ * @param {string} [platform] 目标平台,缺省 process.platform
  * @returns {string[]}
  */
-export function candidatePaths(kind, env) {
+export function candidatePaths(kind, env, platform = process.platform) {
+  const isWin32 = platform === 'win32'
+  const pathSep = isWin32 ? ';' : ':'
+  const fileSep = isWin32 ? '\\' : '/'
   const programFiles = env.ProgramFiles ?? 'C:\\Program Files'
   const programFilesX86 = env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)'
   const localAppData = env.LocalAppData ?? ''
   const system32 = `${env.SystemRoot ?? 'C:\\WINDOWS'}\\System32`
   const pathEntries = (env.PATH ?? '')
-    .split(PATH_SEP)
+    .split(pathSep)
     .map((entry) => entry.trim().replace(/^"|"$/g, ''))
     .filter((entry) => entry.length > 0)
   // bash 的 PATH 探测排除 SystemRoot 下条目:System32\bash.exe 是 WSL forwarder,
@@ -65,18 +74,21 @@ export function candidatePaths(kind, env) {
     ? pathEntries.filter((entry) => !entry.toLowerCase().replace(/\//g, '\\').startsWith(`${systemRoot}\\`))
     : pathEntries)
   const candidates = []
-  for (const relative of PF_RELATIVE[kind] ?? []) candidates.push([programFiles, ...relative].join('\\'))
-  for (const relative of PF_X86_RELATIVE[kind] ?? []) candidates.push([programFilesX86, ...relative].join('\\'))
-  for (const relative of LAD_RELATIVE[kind] ?? []) {
-    if (localAppData.length > 0) candidates.push([localAppData, ...relative].join('\\'))
+  if (isWin32) {
+    for (const relative of PF_RELATIVE[kind] ?? []) candidates.push([programFiles, ...relative].join('\\'))
+    for (const relative of PF_X86_RELATIVE[kind] ?? []) candidates.push([programFilesX86, ...relative].join('\\'))
+    for (const relative of LAD_RELATIVE[kind] ?? []) {
+      if (localAppData.length > 0) candidates.push([localAppData, ...relative].join('\\'))
+    }
   }
-  if (kind === 'bash') candidates.push(...MSYS2_ANCHORS)
+  if (isWin32 && kind === 'bash') candidates.push(...MSYS2_ANCHORS)
+  if (!isWin32 && kind === 'pwsh') candidates.push(...POSIX_PWSH_ANCHORS)
   for (const entry of pathEntriesForKind(kind)) {
-    const executable = PATH_EXECUTABLES[kind]
-    if (executable !== undefined) candidates.push(`${entry}\\${executable}`)
+    const executable = executableName(kind, platform)
+    if (executable !== undefined) candidates.push(`${entry}${fileSep}${executable}`)
   }
   const system32File = SYSTEM32_FILES[kind]
-  if (system32File !== undefined) candidates.push(`${system32}\\${system32File}`)
+  if (isWin32 && system32File !== undefined) candidates.push(`${system32}\\${system32File}`)
   return candidates
 }
 
@@ -87,9 +99,9 @@ export function candidatePaths(kind, env) {
  * @param {object} [env] 模拟进程环境,缺省用 process.env
  * @returns {string|undefined} 无候选命中时 undefined
  */
-export function resolveEntryPath(entry, exists, env = process.env) {
+export function resolveEntryPath(entry, exists, env = process.env, platform = process.platform) {
   if (entry.path.length > 0) return entry.path
-  for (const candidate of candidatePaths(entry.kind, env)) {
+  for (const candidate of candidatePaths(entry.kind, env, platform)) {
     if (exists(candidate)) return candidate
   }
   return undefined
@@ -103,11 +115,11 @@ export function resolveEntryPath(entry, exists, env = process.env) {
  * @param {(candidate: string) => boolean} exists
  * @returns {{kind: string, path: string}[]}
  */
-export function detectCandidates(kinds, env, exists) {
+export function detectCandidates(kinds, env, exists, platform = process.platform) {
   const seen = new Set()
   const found = []
   for (const kind of kinds) {
-    for (const candidate of candidatePaths(kind, env)) {
+    for (const candidate of candidatePaths(kind, env, platform)) {
       if (seen.has(candidate)) continue
       if (!exists(candidate)) continue
       seen.add(candidate)

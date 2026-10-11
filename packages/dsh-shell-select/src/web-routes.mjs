@@ -5,6 +5,7 @@
 // settings.describe,写经 settings.replace;探测/扫描用 resolve 纯函数。
 // HTTP 形态(具名 exact 路由 + 跨源守卫 + 业务异常归一 400)照 dsh-maintain。
 
+import { homedir, tmpdir } from 'node:os'
 import { KINDS, resolveConfig, coerceServiceable, assertServiceableConfig, normalizeConfigPaths, normalizeWin32Path } from './config.mjs'
 import { candidateExists, detectCandidates, resolveEntryPath } from './resolve.mjs'
 import { requestShellRefresh } from './executor.mjs'
@@ -84,6 +85,8 @@ export function buildFaces(ctx, settings) {
     },
     detect: (kinds) => detectCandidates(kinds ?? [...KINDS], process.env, candidateExists),
     probe: (candidatePath) => candidateExists(candidatePath),
+    // 宿主路径事实:客户端侧栏路径救援用(翻译 MSYS 拼写回宿主形式的事实来源)
+    pathMap: () => ({ platform: process.platform, home: homedir(), tmpDir: tmpdir() }),
   }
 }
 

@@ -7,8 +7,8 @@ import {spawn, spawnSync} from 'node:child_process'
 import {mkdtempSync, readdirSync, existsSync, statSync, readFileSync, rmSync, appendFileSync, createWriteStream} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, basename} from 'node:path'
+import {createEvidenceLogDir} from './aggregate-evidence.mjs'
 import {fileURLToPath, pathToFileURL} from 'node:url'
-
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const TOTAL_ROUNDS = 10
 const PREVIEW_LIMIT = 5
@@ -159,7 +159,7 @@ const roundLogPath = (logDir, name, round) => join(logDir, `${name}-${round}.log
 const countOrUnknown = count => count ?? '?'
 const totalFailures = failed => [...failed.values()].reduce((sum, entry) => sum + entry.count, 0)
 
-export async function runUnits({rounds, logDir, summaryPath, log = console.log, units}) {
+export async function runUnits({rounds, logDir, summaryPath, log = console.log, units, retainLogs = false}) {
   const failed = new Map()
   for (let round = 1; round <= rounds; round++) {
     log(`::group::第 ${round}/${rounds} 轮`)
@@ -175,7 +175,7 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
         roundSkips += skipCount
         if (skipCount > 0) skipDetail.push(`${unit.name}(${skipCount})`)
         log(`OK   ${unit.name}${skipCount > 0 ? ` (skipped ${skipCount})` : ''}`)
-        rmSync(logPath, {force: true})
+        if (!retainLogs) rmSync(logPath, {force: true})
         continue
       }
       const logText = readFileSync(logPath, 'utf8')
@@ -243,11 +243,19 @@ async function main() {
     ? '全量'
     : `范围收敛: ${units.length} 单元`
   console.log(`测试范围: ${scoped}(单元 ${units.map(u => u.name).join(', ')})`)
-  const logDir = mkdtempSync(join(tmpdir(), 'aggregate-tests-'))
+  const evidenceRoot = process.env.DSH_AGGREGATE_TEST_LOG_DIR
+  const preserve = Boolean(evidenceRoot)
+  let logDir
+  if (preserve) {
+    logDir = await createEvidenceLogDir(evidenceRoot)
+    console.log(`失败日志留存目录: ${logDir}`)
+  } else {
+    logDir = mkdtempSync(join(tmpdir(), 'aggregate-tests-'))
+  }
   try {
-    return await runUnits({rounds, logDir, summaryPath: process.env.GITHUB_STEP_SUMMARY ?? null, units})
+    return await runUnits({rounds, logDir, summaryPath: process.env.GITHUB_STEP_SUMMARY ?? null, units, retainLogs: preserve})
   } finally {
-    rmSync(logDir, {recursive: true, force: true})
+    if (!preserve) rmSync(logDir, {recursive: true, force: true})
   }
 }
 

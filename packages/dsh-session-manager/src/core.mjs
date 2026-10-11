@@ -24,10 +24,19 @@ export function updatedAtOf(header, activityAtMs) {
   return Math.max(header.createdAt, activityAtMs ?? 0)
 }
 
+// 取消归档全局宽限时长:恢复会话到用户发出首条消息之间的评估窗口保护,
+// 首条消息更新产物 mtime 后由阈值自然接管;只查阅不发言的会话宽限后正常归档
+export const UNARCHIVE_GRACE_MS = 10 * 60 * 1000
+
+/** 宽限期判定:取消归档后 graceMs 内暂停自动归档(用户恢复即意图信号)。 */
+export function unarchiveGraceActive(unarchivedAtMs, nowMs, graceMs = UNARCHIVE_GRACE_MS) {
+  if (!Number.isFinite(unarchivedAtMs) || unarchivedAtMs <= 0) return false
+  return nowMs - unarchivedAtMs < graceMs
+}
+
 /**
  * 归档评估状态机:按阈值筛出待归档会话 id。
  * @param records - 候选行 {id, archived, running, blank, updatedAt}
- * @returns 超期且未归档、非运行中、非空白的会话 id
  */
 export function selectArchiveCandidates({ records, nowMs, thresholdDays }) {
   if (!Number.isFinite(thresholdDays) || thresholdDays <= 0) return []

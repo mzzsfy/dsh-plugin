@@ -32,10 +32,6 @@ function cardModel(catalog = null) {
   })
 }
 
-function parseEnvText() {
-  return extractLogic('parseEnvText')
-}
-
 test('运行时长格式:秒→m:ss,一小时以上→h:mm:ss,负值钳 0', () => {
   const formatDuration = extractLogic('formatDuration')
   assert.equal(formatDuration(0), '0:00')
@@ -45,10 +41,6 @@ test('运行时长格式:秒→m:ss,一小时以上→h:mm:ss,负值钳 0', () =
   assert.equal(formatDuration(3661_000), '1:01:01')
   assert.equal(formatDuration(-5), '0:00')
 })
-
-function invalidEnvLines() {
-  return extractLogic('invalidEnvLines')
-}
 
 // 运行中调用块(官方形态:无 kind 字段)
 function runningBlock(argsRaw) {
@@ -322,17 +314,4 @@ test('S21j 钉死键集与注册键集同源:PINNED_CLIENT 恒等于 TOOLVIEW_KE
   const pinnedKeys = /const PINNED_CLIENT = \{([^}]*)\}/.exec(source)[1]
     .split(',').map((pair) => pair.trim().split(':')[0].trim().replace(/^'|'$/g, '')).filter((key) => key !== '')
   assert.deepEqual(pinnedKeys.sort(), toolviewKeys.sort())
-})
-
-test('K=V 往返:值含 = 与空格无损,空行忽略,重复键后行胜', () => {
-  const parse = parseEnvText()
-  assert.deepEqual(parse('A=1\nB=x=y z\n\nA=2'), { A: '2', B: 'x=y z' })
-  assert.deepEqual(parse(''), {})
-  assert.deepEqual(parse(undefined), {})
-})
-
-test('invalidEnvLines:缺 = 行报出,空行不报', () => {
-  const invalid = invalidEnvLines()
-  assert.deepEqual(invalid('A=1\nbroken\n\n  noSep  '), ['broken', 'noSep'])
-  assert.deepEqual(invalid('A=1'), [])
 })

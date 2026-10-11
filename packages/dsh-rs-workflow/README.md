@@ -25,7 +25,7 @@ node --test "test/*.test.mjs"      # 包内测试(在 packages/dsh-rs-workflow �
 
 ## dsh 版本兼容
 
-- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;2 格环境性登记:被测形态无 gateway 时 LLM 工具链不可真机触发)
+- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;2026-10-08 轮 3:rsww+gateway 双包真机发话,模板创建/释放/预设卡/存储声明/配置面与 #18 工具清单(rs_workflow_* 八工具)全过;同日活跃 run 面板全链真机达成——echo -call 场景触发 rs_workflow_start,修复三枚 P1(段 job owner 须为 agent id 字符串、会话页签判定的当前会话 id 来源、engine args 的 lossless JSON 纪律)后 run 受理→段推进→结构化产出→completed 全生命周期真机全绿,回归测试随 L1 三轮全绿验收)
 - 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
 - 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
 

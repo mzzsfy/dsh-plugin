@@ -6,6 +6,13 @@ import assert from 'node:assert/strict'
 import ShellSelectExecutor from '../src/executor.mjs'
 import { resolveConfig, assertServiceableConfig, defaultConfig } from '../src/config.mjs'
 
+test('执行器激活后挂模型工具投影', () => {
+  // Given 有模型服务；When构造执行器；Then组装事件由执行器生命周期持有。
+  const { ctx, registered } = stubCtx()
+  new ShellSelectExecutor(ctx, baseConfig())
+  assert.equal(registered.listeners?.filter((row) => row.name === 'system-prompt/assemble').length, 1)
+})
+
 // --- 桩具 ---
 
 function stubReader(text) {
@@ -58,6 +65,11 @@ function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spaw
         },
       }
       fn(child)
+    },
+    on(name, handler) {
+      registered.listeners ??= []
+      registered.listeners.push({ name, handler })
+      return () => {}
     },
     subprocess: spawn,
     sandbox: {

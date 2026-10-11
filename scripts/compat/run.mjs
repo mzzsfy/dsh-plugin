@@ -15,8 +15,8 @@ import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, wo
 import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
 import { isSemver } from './window.mjs'
 import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
-import { judgeUpstreamSeen, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
-import { PLATFORM_GATED_BUNDLES } from './compat-criteria.mjs'
+import { judgeUpstreamSeen, judgeRoundtrip, judgeLlm, judgeImportFailures, judgeFinal } from './compat-judges.mjs'
+import { PLATFORM_GATED_BUNDLES, COMPAT_CHAT_MESSAGE, COMPAT_ANTHROPIC_MESSAGE } from './compat-criteria.mjs'
 
 const BOOT_TIMEOUT_MS = 150 * 1000
 const BOOT_SETTLE_MS = 8 * 1000
@@ -243,7 +243,7 @@ function runBrowserProbe(probeScript, url, pngPath) {
   })
 }
 
-// 本地 LLM 模拟器(scripts/echo-upstream.mjs):兼容性测试的 LLM 夹具。
+// 本地 LLM 模拟器(scripts/echo-upstream/cli.mjs):兼容性测试的 LLM 夹具。
 // 全功能兼容性测试的 LLM 链路断言(provider 注册 → 宿主经 gateway 打到模拟器)必须走它,不依赖真实 API。
 const SIM_BOOT_TIMEOUT_MS = 15 * 1000
 
@@ -253,7 +253,8 @@ function startSimulator(workDir) {
   // 本轮判定(upstreamSeen/亲和头读全文件),必须先清零再起模拟器
   writeFileSync(logPath, '')
   const child = spawn(process.execPath, [
-    join(REPO_ROOT, 'scripts', 'echo-upstream.mjs'), '--port', '0', '--log', logPath,
+    join(REPO_ROOT, 'scripts', 'echo-upstream', 'cli.mjs'), '--port', '0', '--log', logPath, '--echo-user-message',
+
   ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: true })
   return new Promise((resolve, reject) => {
     let out = ''
@@ -275,7 +276,6 @@ function startSimulator(workDir) {
 // 宿主本地快照),留档出现 /chat/completions 或 /messages = 宿主 → gateway →
 // 模拟器全链真实打通。
 const LLM_PROBE_TIMEOUT_MS = 120 * 1000
-
 async function runLlmVerification(base, token, simulatorPort, workDir) {
   // #3/#5 第二段:默认模型切 echo-anthropic/echo-a-model 后新会话发话,上游即
   // anthropic /messages 通道;留档 headers/body 断言亲和头与派生标记
@@ -299,8 +299,20 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
   // 发话到位判定:type.ok/send.ok 只证明探针调用不抛错,onboarding 弹窗在场时
   // 键盘事件会整段落入其输入框且不抛错(FIND-020-1),必须以 dismiss 结果与
   // composer 实际文本为准
-  const chatMessage = '回复:ok'
-  const anthropicMessage = '回复:anth'
+  const chatMessage = COMPAT_CHAT_MESSAGE
+  const anthropicMessage = COMPAT_ANTHROPIC_MESSAGE
+  const llmUserEcho = (userMessage) => `(() => {
+    const ce = document.querySelector('[contenteditable="true"]')
+    const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')].map((el) => el.textContent.trim()).filter(Boolean)
+    const allRows = [...document.querySelectorAll('[data-chat-flow-kind]')]
+    const matchingUserRows = allRows.filter((row) => row.getAttribute('data-chat-flow-kind') === 'user' && (row.innerText || '').includes(${JSON.stringify(userMessage)}))
+    const userTurn = matchingUserRows.at(-1)?.getAttribute('data-chat-turn') ?? null
+    const userIndex = userTurn === null ? -1 : allRows.indexOf(matchingUserRows.at(-1))
+    const responseRows = userIndex < 0 ? [] : allRows.slice(userIndex + 1).filter((row) => row.getAttribute('data-chat-flow-kind') === 'assistant-step' && row.getAttribute('data-chat-turn') === userTurn)
+    const currentTurnText = responseRows.map((row) => row.innerText || row.textContent || '').join(' ')
+    const hasResponseGroup = responseRows.some((row) => row.getAttribute('data-chat-group-part') === 'response' && !row.hasAttribute('data-turn-process-hidden') && !row.hasAttribute('data-turn-process-member'))
+    return JSON.stringify({ composerText: ce?.textContent ?? 'missing', userMessage: userIndex < 0 ? '' : ${JSON.stringify(userMessage)}, errors, currentTurnText, hasResponseGroup })
+  })()`
   const composerTextOf = (name) => {
     try {
       return JSON.parse(stepByName[name]?.value ?? '{}').composerText
@@ -309,6 +321,13 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     }
   }
   const onboardingCleared = (name) => ONBOARDING_CLEARED_VALUES.includes(stepByName[name]?.value)
+  // 请求留档不能证明回复成功；必须看到 fixture 回复且 composer 已清空。
+  const roundtripComplete = (name, userMessage) => {
+    try {
+      const state = JSON.parse(stepByName[name]?.value ?? '{}')
+      return judgeRoundtrip(state, userMessage)
+    } catch { return false }
+  }
   // 0.2.x 会话面以工作区为锚:全新 profile 无 workspace.json 绑定时会话视图
   // 落「选择一个工作区」空态,composer 不渲染(linux CI 实爆);探针先经
   // workspace/create 绑定确定性目录,幂等(已绑定返回 created=false)
@@ -393,14 +412,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     { name: 'wait-roundtrip', wait: 10 * 1000 },
     {
       name: 'post-send-state',
-      eval: `(() => {
-        const ce = document.querySelector('[contenteditable="true"]')
-        const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')]
-          .map((el) => el.textContent.trim().slice(0, 160))
-          .filter((t) => t.length > 0)
-          .slice(0, 5)
-        return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
-      })()`,
+      eval: llmUserEcho(chatMessage),
     },
     {
       // composer 缺席取证面:DOM 结构摘要(属性值/输入面/按钮文案/面板 class/页面文本),
@@ -435,14 +447,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     { name: 'wait-roundtrip-anthropic', wait: 10 * 1000 },
     {
       name: 'post-send-state-anthropic',
-      eval: `(() => {
-        const ce = document.querySelector('[contenteditable="true"]')
-        const errors = [...document.querySelectorAll('[class*="error" i], [role="alert"]')]
-          .map((el) => el.textContent.trim().slice(0, 160))
-          .filter((t) => t.length > 0)
-          .slice(0, 5)
-        return JSON.stringify({ composerText: ce?.textContent ?? 'missing', errors })
-      })()`,
+      eval: llmUserEcho(anthropicMessage),
     },
     {
       // anthropic 段同款取证(切默认模型后第二形态)
@@ -513,6 +518,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     && stepByName['send']?.ok === true
     && onboardingCleared('dismiss-onboarding')
     && composerTextOf('verify-typed') === chatMessage
+  const chatRoundtrip = roundtripComplete('post-send-state', chatMessage)
   // #3/#5 anthropic 段:切默认模型后新会话发话到位即 anthropicDriven
   const anthropicDriven = workspaceCreated
     && stepByName['switch-default-anthropic']?.ok === true
@@ -521,6 +527,7 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
     && stepByName['send-anthropic']?.ok === true
     && onboardingCleared('dismiss-onboarding-anthropic')
     && composerTextOf('verify-typed-anthropic') === anthropicMessage
+  const anthropicRoundtrip = roundtripComplete('post-send-state-anthropic', anthropicMessage)
   // 留档证据:任一对话请求打到模拟器即链路通(openai /chat/completions 或
   // anthropic /messages;发现探测 GET /models 仅 ambient discovery 命中,不判)。
   // anthropic 轮单独取证:#3 metadata.user_id 派生标记 + #5 亲和头发射
@@ -540,13 +547,16 @@ async function runLlmVerification(base, token, simulatorPort, workDir) {
         userId: last.body?.metadata?.user_id ?? null,
         affinityHeaders: headerNames.filter((k) => k.includes('affinity') || k.includes('request-id')),
         headers: last.headers ?? {},
+        completed: anthropicRoundtrip,
       }
     }
   } catch { /* 无留档 = 零请求 */ }
   return {
     providerRegistered,
     chatDriven,
+    chatRoundtrip,
     anthropicDriven,
+    anthropicRoundtrip,
     anthropicUpstream,
     upstreamSeen,
     upstreamKinds,
@@ -691,7 +701,7 @@ async function main() {
     // 模型行为驱动面如 shell 工具调用不在此列——模拟器不发 tool_use,该面归 L1 stub + 真实模型人工轮)
     if (!args.crashOnly) {
       checks.llm = await runLlmVerification(base, token, simulator.port, workDir)
-      log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven} anthropic=${checks.llm.anthropicDriven} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
+      log(`[${args.version}] llm provider=${checks.llm.providerRegistered} chat=${checks.llm.chatDriven}/${checks.llm.chatRoundtrip} anthropic=${checks.llm.anthropicDriven}/${checks.llm.anthropicRoundtrip} anthropicUpstream=${checks.llm.anthropicUpstream.seen} affinity=[${checks.llm.anthropicUpstream.affinityHeaders.join(',')}] userId=${checks.llm.anthropicUpstream.userId ?? '(无)'} upstream=${checks.llm.upstreamSeen} paths=${checks.llm.upstreamKinds.join(',') || '(无)'}`)
     }
     // --keep:宿主与模拟器存活导出(后续 l3-probe 接管跑 UI 专项);
     // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出

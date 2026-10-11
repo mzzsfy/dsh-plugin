@@ -76,7 +76,7 @@ function makeDomain(initialIds) {
 // 台账域句柄;openRejected 模拟台账域打开失败
 function makeLedgerDomain(entries) {
   const domain = {
-    state: { deleted: entries },
+    state: { deleted: entries, unarchivedAt: 0 },
     writes: 0,
     global: {
       get: () => domain.state,
@@ -479,6 +479,40 @@ test('取消归档路由:快照领先域时补全清理(重试路径)', skipMiss
   assert.deepEqual(domain.state.archivedSessionIds, [])
   assert.equal(domain.writes, 1)
   assert.deepEqual(registry.state.archivedSessionIds, [])
+})
+
+test('取消归档宽限:恢复后 graceMs 内同进程评估暂停,不秒归档', skipMissingDeps, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'sm-grace-'))
+  try {
+    const artifact = path.join(dir, 's1.jsonl')
+    await writeFile(artifact, '{"header":1}\n{"event":0}\n')
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const stale = Date.now() - 30 * DAY_MS
+    await utimes(artifact, stale / 1000, stale / 1000)
+    const headers = [{ id: 's1', cwd: 'C:\\x', createdAt: stale }]
+    const ctxBundle = makeCtx({
+      archivedIds: [],
+      headers,
+      agents: new Map(),
+      sessionPersistence: { locate: () => ({ path: artifact }) },
+      domain: makeDomain([]),
+    })
+    const { activateSettings, registry, handlers, eventHandlers } = ctxBundle
+    activateSettings()
+    await waitFor(() => registry.archiveCalls.length > 0)
+    assert.deepEqual(registry.archiveCalls, ['s1'])
+    // 手动恢复:归档集合移除 + 进程内宽限生效
+    const res = response()
+    await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(registry.state.archivedSessionIds, [])
+    // 宽限内经新会话创建触发评估:同产物仍超期,但不再归档
+    eventHandlers['session/created']({ header: { cwd: 'C:\\x' } })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    assert.deepEqual(registry.archiveCalls, ['s1'], '宽限期内不得重新归档')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('info 路由:会话不存在拒绝', skipMissingDeps, async () => {

@@ -26,6 +26,8 @@ import {
   projectDeletedRows,
   removeDeletedEntry,
   selectArchiveCandidates,
+  UNARCHIVE_GRACE_MS,
+  unarchiveGraceActive,
   updatedAtOf,
   workspaceTitleForSession,
   workspaceTitleOf,
@@ -78,6 +80,18 @@ test('阈值为零关闭功能', () => {
 test('阈值负值与非有限值防御性关闭', () => {
   assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: -1 }), [])
   assert.deepEqual(selectArchiveCandidates({ records: [record({})], nowMs: NOW, thresholdDays: Number.NaN }), [])
+})
+
+test('全局宽限:取消归档后 graceMs 内宽限生效,到期与非法输入失效', () => {
+  assert.equal(unarchiveGraceActive(NOW - 2 * 60 * 1000, NOW), true)
+  assert.equal(unarchiveGraceActive(NOW - UNARCHIVE_GRACE_MS, NOW), false)
+  assert.equal(unarchiveGraceActive(0, NOW), false)
+  assert.equal(unarchiveGraceActive(undefined, NOW), false)
+  assert.equal(unarchiveGraceActive(Number.NaN, NOW), false)
+})
+
+test('全局宽限:常量与天级时长的量级自洽', () => {
+  assert.equal(UNARCHIVE_GRACE_MS, 10 * 60 * 1000)
 })
 
 test('updatedAt 取创建时间与最近活跃的较大者', () => {
