@@ -3,7 +3,6 @@
 // 配置持久化双形态:legacy 走 settings 命名空间 maintain,0.1.7+ 走 profile
 // 条目 config 节(Config 导出 + volatile 热更),检查结果仅存内存。
 
-import { readFile } from 'node:fs/promises'
 import { readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -20,11 +19,7 @@ import {
   resolveHostVersion,
 } from './core.mjs'
 import { createLayout } from './managed-layout.mjs'
-import { performManagedUpgrade, MANAGED_TIMEOUT_MS, createCandidateEnvironment } from './managed-upgrade.mjs'
-import { runProcess } from './managed-process.mjs'
-
-// 候选依赖树校验超时:只读 npm ls,远短于安装时长
-const MANAGED_VALIDATE_TIMEOUT_MS = 60 * 1000
+import { performManagedUpgrade, validateCandidate } from './managed-upgrade.mjs'
 
 export const name = 'dsh-maintain'
 
@@ -471,20 +466,6 @@ export function apply(ctx, config, dependencies = {}) {
     }
   }
 
-  async function defaultValidateCandidate({ slot, npmCli, nodePath = process.execPath }) {
-    const npm = npmCli || join(dirname(realpathSync(nodePath)), 'node_modules/npm/bin/npm-cli.js')
-    const env = createCandidateEnvironment({ root: slot })
-    const result = await runProcess({
-      executable: nodePath,
-      args: [npm, 'ls', '--omit=dev', '--prefix', slot],
-      cwd: slot,
-      env,
-      timeoutMs: MANAGED_VALIDATE_TIMEOUT_MS,
-    })
-    if (!result.ok) return result
-    return { ok: false, stderrTail: '候选profile隔离启动与健康探针尚未验证,拒绝切换' }
-  }
-
   async function defaultBeforeSwitch() {
     const activeWork = collectActiveWork(ctx)
     if (activeWork.detectionAvailable !== true || activeWork.total > 0) {
@@ -542,7 +523,7 @@ export function apply(ctx, config, dependencies = {}) {
         runningPackage: managedInstall.runningPackage ?? managedInstall.originalPackage,
         targetVersion,
         registryBase,
-        validate: defaultValidateCandidate,
+        validate: validateCandidate,
         beforeSwitch: defaultBeforeSwitch,
         onPhase: (state) => {
           last.phase = state.phase
@@ -724,11 +705,6 @@ export function apply(ctx, config, dependencies = {}) {
             items: activeWork,
             detectionAvailable: activeWork.detectionAvailable,
           })
-          return
-        }
-        if (dependencies.runManagedUpgrade === undefined) {
-          audit('upgrade', 'rejected', 'reason=candidate-validation-unavailable')
-          sendJson(res, 409, { error: '候选profile隔离启动与健康探针尚未实现,受管升级已禁用' })
           return
         }
         // 编排先入内存门闩再取快照:响应快照必须呈现 running=true,并发请求才能被 409 挡住

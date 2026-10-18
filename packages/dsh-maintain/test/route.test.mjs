@@ -412,7 +412,8 @@ const LAYOUT_STUB = {
 }
 
 // 受管升级路由:门控顺序 目标解析→互斥→受管可用→appExit→活跃工作,全部通过才进 runner。
-// runner 注入桩,禁止测试触发真实 npm;exit 调度经 mock timers 控制
+// runner 注入桩,禁止测试触发真实 npm(未注入 runner 即真实编排器,fake 路径会被 mkdir);
+// exit 调度经 mock timers 控制
 const IDLE_SERVICES = { agents: { list: () => [] }, jobs: { list: () => [] } }
 const DEPS = (overrides = {}) => ({ runManagedUpgrade: makeRunnerStub(), createLayout: async () => LAYOUT_STUB, ...overrides })
 
@@ -492,13 +493,6 @@ test('upgrade:活跃检测不可用 fail-closed 409,存在活跃工作 409 不�
   assert.equal(busyDenied.payload.items.agents, 1)
   await drainMicrotasks()
   assert.equal(runner.calls.length, 0, '活跃工作路径不得进入 runner')
-})
-
-test('upgrade:默认候选profile验证能力未实现时禁用runner', async () => {
-  const { routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: { createLayout: async () => LAYOUT_STUB } })
-  const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
-  assert.equal(denied.status, 409)
-  assert.match(denied.payload.error, /候选profile.*未实现/)
 })
 
 test('upgrade:runner 成功调度一次正常退出', async (t) => {
@@ -847,6 +841,7 @@ test('受管切换接线:切换成功必经统一退出入口调度关机(源码
   assert.doesNotMatch(source, /autoRestart/, '自动重启勾选链必须整体移除')
   assert.doesNotMatch(source, /upgradeCommandTemplate|buildUpgradeCommand|runUpgradeWithRetry/, '模板与重试链必须整体移除')
   assert.doesNotMatch(source, /UPGRADE_LOCK_PATH|upgradeLockStale/, '全局 tmp 锁必须整体移除')
+  assert.doesNotMatch(source, /candidate-validation-unavailable/, '候选验证已落地,runner 门闩不得回归')
   // 切换成功但 appExit 缺失必须可见地失败,不得静默吞掉
   assert.match(source, /exit-missing/, 'appExit 缺失的已切换状态必须留审计')
 })

@@ -5,10 +5,11 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createLayout, readSelectedVersion } from '../src/managed-layout.mjs'
 import { compareSemver, parseSemver } from '../src/core.mjs'
-import { performManagedUpgrade, findNpmCli } from '../src/managed-upgrade.mjs'
+import { performManagedUpgrade, findNpmCli, validateCandidate } from '../src/managed-upgrade.mjs'
 
 // 受管升级隔离冒烟:临时 npm global prefix 内完成 安装→候选验证→切换→失败轮。
-// 仅验证 CLI 编排链路,不启动宿主 profile,不代表候选宿主健康验收;需显式手动执行(真实联网 npm 安装)。
+// 候选验证与生产路径同源(validateCandidate:npm ls 依赖树 + CLI --version 真实执行,
+// 不启动宿主服务);需显式手动执行(真实联网 npm 安装)。
 const [oldVersion, nextVersion] = process.argv.slice(2)
 if (!oldVersion || !nextVersion || !parseSemver(oldVersion) || !parseSemver(nextVersion)) {
   throw new Error('参数必须为合法semver: <oldVersion> <nextVersion>')
@@ -102,16 +103,8 @@ const install = version => async ({ slot, env: candidateEnv }) => trackedRun({
   timeoutMs: 20 * 60 * 1000,
 })
 
-// 候选验证:npm ls 依赖树 + 直接以 node 执行候选 bin(切换前全局入口仍指向旧版,不能复用)
-const validate = async ({ slot, candidatePackage, env: candidateEnv }) => {
-  const tree = await trackedRun({ executable: process.execPath, args: [npmCli, 'ls', '--omit=dev', '--prefix', slot], cwd: slot, env: candidateEnv, timeoutMs: 60 * 1000 })
-  if (!tree.ok) return { ok: false, stderrTail: tree.stderrTail || '依赖树检查失败' }
-  const cli = join(candidatePackage, JSON.parse(await readFile(join(candidatePackage, 'package.json'), 'utf8')).bin.dsh)
-  const bootEnv = { ...candidateEnv, DSH_HOME: join(slot, 'probe-home', '.dsh'), HOME: join(slot, 'probe-home'), USERPROFILE: join(slot, 'probe-home'), PORT: '0' }
-  await mkdir(join(slot, 'probe-home'), { recursive: true })
-  const boot = await trackedRun({ executable: process.execPath, args: [cli, '--version'], cwd: candidatePackage, env: bootEnv, timeoutMs: 60 * 1000 })
-  return boot.ok ? { ok: true } : { ok: false, stderrTail: boot.stderrTail || boot.stdoutTail || '候选CLI版本探针失败' }
-}
+// 候选验证与生产同源:依赖树检查 + CLI真实执行冒烟(managed-upgrade.mjs validateCandidate)
+const validate = validateCandidate
 
 try {
   await mkdir(home, { recursive: true })
@@ -157,7 +150,6 @@ try {
   assert(first.switched, '第一轮没有激活')
   assert(await readSelectedVersion(layout) === nextVersion, 'A/B链接版本错误')
   assert(await sha256(bin) === before, '原始CLI被修改')
-  assert(await stat(join(layout.a, 'probe-home')).then(info => info.isDirectory(), () => false), 'CLI探针HOME未创建')
   // 切换后同一 npm 入口必须解析到新版本(证明入口跟随 dsh_link)
   const entryAfter = await runEntry()
   assert(entryAfter.ok, entryAfter.stderrTail || '切换后npm命令入口不可执行')

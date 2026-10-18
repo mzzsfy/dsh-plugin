@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, symlink } from 'node
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { createLayout } from '../src/managed-layout.mjs'
-import { createCandidateEnvironment, findNpmCli } from '../src/managed-upgrade.mjs'
+import { createCandidateEnvironment, findNpmCli, validateCandidate } from '../src/managed-upgrade.mjs'
 
 async function setup(t) {
   const prefix = await mkdtemp(join(tmpdir(), 'maintain-upgrade-test-'))
@@ -182,5 +182,40 @@ test('非法精确版本不清空任何目录或启动安装', async t => {
   const f = await setup(t)
   await assert.rejects(f.api.performManagedUpgrade({ ...f, runningPackage: f.originalPackage, targetVersion: 'latest;bad' }), /版本/)
   assert.deepEqual(f.events, [])
+})
+
+// 候选验证真实执行:真 npm ls 依赖树 + 真 node 执行候选 bin --version(自然退出,不起服务)。
+// env 直传 process.env:隔离性由 createCandidateEnvironment 独立用例覆盖,此处只验判定逻辑
+async function candidateFixture(t, binScript) {
+  const prefix = await mkdtemp(join(tmpdir(), 'maintain-validate-test-'))
+  t.after(() => rm(prefix, { recursive: true, force: true }))
+  const slot = join(prefix, 'install-a')
+  const candidatePackage = join(slot, 'node_modules/@deepseek-ai/dsh')
+  await mkdir(join(slot, 'node_modules'), { recursive: true })
+  await mkdir(join(candidatePackage, 'lib'), { recursive: true })
+  await writeFile(join(candidatePackage, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '2.0.0', bin: { dsh: 'lib/bin.js' } }))
+  if (binScript !== null) await writeFile(join(candidatePackage, 'lib/bin.js'), binScript)
+  return { slot, candidatePackage }
+}
+
+test('候选验证:依赖树与CLI冒烟均通过即放行', async t => {
+  const f = await candidateFixture(t, 'console.log("2.0.0")\n')
+  const result = await validateCandidate({ slot: f.slot, candidatePackage: f.candidatePackage, env: process.env })
+  assert.deepEqual(result, { ok: true })
+})
+
+test('候选验证:CLI冒烟非零退出即拒绝且不触发锁保留', async t => {
+  const f = await candidateFixture(t, 'process.exit(3)\n')
+  const result = await validateCandidate({ slot: f.slot, candidatePackage: f.candidatePackage, env: process.env })
+  assert.equal(result.ok, false)
+  assert.notEqual(result.timedOut, true)
+  assert.notEqual(result.stillRunning, true)
+  assert.ok(result.stderrTail || result.stdoutTail, '失败必须携带可诊断输出')
+})
+
+test('候选验证:候选bin缺失即拒绝', async t => {
+  const f = await candidateFixture(t, null)
+  const result = await validateCandidate({ slot: f.slot, candidatePackage: f.candidatePackage, env: process.env })
+  assert.equal(result.ok, false)
 })
 

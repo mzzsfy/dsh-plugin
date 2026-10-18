@@ -392,13 +392,11 @@ function VersionCard(props) {
         disabled: props.busy.refresh || props.restarting,
         onClick: props.onRefresh,
       }, props.busy.refresh ? '检查中…' : '刷新'),
-      h('span', { className: 'dm-meta' }, '候选profile隔离启动与健康探针尚未实现，升级功能暂不可用。'),
       h('button', {
         className: 'dm-btn',
-        disabled: true,
-        title: '候选profile隔离启动与健康探针尚未实现',
+        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running === true),
         onClick: props.onUpgrade,
-      }, '安装（暂不可用）'),
+      }, props.busy.upgrade ? '安装中…' : '安装'),
     ),
     status.restartPending === true
       ? h('div', { className: 'dm-notice dm-notice--warn' },

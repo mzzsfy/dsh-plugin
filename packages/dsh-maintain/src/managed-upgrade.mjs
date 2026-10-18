@@ -8,6 +8,9 @@ import { runProcess } from './managed-process.mjs'
 
 export const MANAGED_TIMEOUT_MS = 10 * 60 * 1000
 
+// 候选验证超时:依赖树检查与CLI冒烟均为本地短操作,远短于安装时长
+const MANAGED_VALIDATE_TIMEOUT_MS = 60 * 1000
+
 export async function saveManagedState(layout, state) {
   const temp = join(layout.root, 'state.json.next')
   await writeFile(temp, JSON.stringify(state, null, 2))
@@ -71,6 +74,35 @@ export function createCandidateEnvironment(layout) {
     npm_config_userconfig: npmUserConfig,
     npm_config_global: 'false',
   }
+}
+
+// 候选验证:依赖树完整性(npm ls)+ 候选CLI真实执行(--version,自然退出,不起服务)。
+// 切换前全局命令入口仍指向旧版,候选只能以 node 直接执行其 bin 验证;
+// 失败分支透传 timedOut/stillRunning,编排器据此决定锁保留语义
+export async function validateCandidate({ slot, candidatePackage, env, nodePath = process.execPath, npmCli }) {
+  const npm = npmCli || await findNpmCli(nodePath)
+  const tree = await runProcess({
+    executable: nodePath,
+    args: [npm, 'ls', '--omit=dev', '--prefix', slot],
+    cwd: slot,
+    env,
+    timeoutMs: MANAGED_VALIDATE_TIMEOUT_MS,
+  })
+  if (!tree.ok) {
+    return { ok: false, stderrTail: tree.stderrTail || '依赖树检查失败', timedOut: tree.timedOut, stillRunning: tree.stillRunning }
+  }
+  const manifest = JSON.parse(await readFile(join(candidatePackage, 'package.json'), 'utf8'))
+  const boot = await runProcess({
+    executable: nodePath,
+    args: [join(candidatePackage, manifest.bin.dsh), '--version'],
+    cwd: candidatePackage,
+    env,
+    timeoutMs: MANAGED_VALIDATE_TIMEOUT_MS,
+  })
+  if (!boot.ok) {
+    return { ok: false, stderrTail: boot.stderrTail || boot.stdoutTail || '候选CLI版本探针失败', timedOut: boot.timedOut, stillRunning: boot.stillRunning }
+  }
+  return { ok: true }
 }
 
 export async function performManagedUpgrade({ layout, runningPackage, targetVersion, registryBase, env,

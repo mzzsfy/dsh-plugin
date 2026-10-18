@@ -202,10 +202,11 @@ test('源码契约: 重启轮询与升级观察器不得回退 setInterval 重�
   assert.ok(CLIENT_SOURCE.includes('upgradeWatch.generation !== generation'), '升级观察拍 settle 后必须验代际')
 })
 
-test('源码契约: 候选宿主健康探针缺失时安装入口明确禁用', () => {
-  assert.ok(CLIENT_SOURCE.includes("}, '安装（暂不可用）'),"), '升级入口必须明确显示暂不可用')
-  assert.ok(CLIENT_SOURCE.includes('候选profile隔离启动与健康探针尚未实现'), '必须解释禁用原因')
-  assert.ok(CLIENT_SOURCE.includes("'确认安装'"), '旧确认弹窗文案仍存在，入口禁用时不可达')
+test('源码契约: 升级入口可用,确认弹窗链路完整', () => {
+  // 禁用态残留即回归:验证已下沉 validateCandidate,入口不得再携带禁用文案
+  assert.ok(!CLIENT_SOURCE.includes('暂不可用'), '升级入口不得残留禁用文案')
+  assert.ok(!CLIENT_SOURCE.includes('尚未实现'), 'client 半区不得残留未实现声明')
+  assert.ok(CLIENT_SOURCE.includes("'确认安装'"), '确认弹窗必须存在且可达')
 })
 
 test('源码契约: 升级请求携带精确 targetVersion,禁止 autoRestart 勾选回归', () => {
