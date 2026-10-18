@@ -255,7 +255,7 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
     this.ctx.systemPrompt.section({
       name: 'tool:shell',
       order: this.ctx.systemPrompt.getSectionOrder('TOOL_PWSH'),
-      text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure. Commands run in fresh processes: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Pass the `shell` argument only when the default client cannot run the command; the available clients are listed in the tool description.',
+      text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure.',
     })
   }
 

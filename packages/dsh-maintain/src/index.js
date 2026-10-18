@@ -4,29 +4,27 @@
 // 条目 config 节(Config 导出 + volatile 热更),检查结果仅存内存。
 
 import { readFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 import {
   TARGET_PACKAGE,
-  TAG_PLACEHOLDER,
-  buildUpgradeCommand,
-  extractPinnedVersion,
-  classifyUpgradeFailure,
   fetchDistTags,
   fetchReleaseNotes,
   isValidChannelName,
   isValidRegistryBase,
   isVersionPendingRestart,
-  judgeUpgradeFreshness,
   judgeVersion,
+  parseSemver,
   resolveHostVersion,
-  UPGRADE_FAIL_FILE_LOCKED,
-  UPGRADE_FAIL_TRANSIENT_NETWORK,
 } from './core.mjs'
-import { runUpgrade } from './upgrade.mjs'
+import { createLayout } from './managed-layout.mjs'
+import { performManagedUpgrade, MANAGED_TIMEOUT_MS, createCandidateEnvironment } from './managed-upgrade.mjs'
+import { runProcess } from './managed-process.mjs'
+
+// 候选依赖树校验超时:只读 npm ls,远短于安装时长
+const MANAGED_VALIDATE_TIMEOUT_MS = 60 * 1000
 
 export const name = 'dsh-maintain'
 
@@ -40,36 +38,19 @@ const CHECK_TIMEOUT_MS = 20 * 1000
 // 版本更新内容缓存上限:长期运行中通道切换持续产生新键,无上限则缓存无界;
 // 超限删最旧(Map 迭代序即插入序,命中不重插);导出仅供测试
 export const RELEASE_NOTES_CACHE_MAX = 20
-// 升级命令超时:client 浮条观察上限与此对拍(parity 锁定),强杀宽限另计
-export const UPGRADE_TIMEOUT_MS = 10 * 60 * 1000
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
 // 导出仅供测试计算延迟窗口等待时长
 export const RESTART_DELAY_MS = 2 * 1000
-// 升级成功后自动重启的延迟:给浮条终态与观察器接管一拍时间,观察器轮询可赶上;
-// 导出仅供测试计算延迟窗口等待时长
-export const AUTO_RESTART_DELAY_MS = 3 * 1000
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
 // 轮询间隔上界:超大值会让到期时间戳溢出为 Infinity,轮询静默失效
 export const POLL_INTERVAL_MAX_SEC = 30 * 24 * 60 * 60
 
-// 升级尝试次数上限(含首次):npm 文件锁重试收益递减,收敛防长期占锁;导出仅供测试与 parity 对拍
-export const UPGRADE_MAX_ATTEMPTS = 3
-// 可重试失败的退避序列,按重试序号取值,越界取末位;导出仅供测试与 parity 对拍
-export const UPGRADE_RETRY_BACKOFF_MS = Object.freeze({
-  [UPGRADE_FAIL_FILE_LOCKED]: Object.freeze([5 * 1000, 15 * 1000]),
-  [UPGRADE_FAIL_TRANSIENT_NETWORK]: Object.freeze([3 * 1000, 9 * 1000]),
-})
-
-// 退避序列缺失返回 null,由调用方判不可重试:宁可不重试,不可零间隔轰击上游
-function upgradeRetryBackoffMs(backoff, kind, retryIndex) {
-  const seq = backoff[kind]
-  if (!seq || seq.length === 0) return null
-  return seq[Math.min(retryIndex, seq.length - 1)]
-}
-
 // 日志单行化:拼入 console.warn 的动态串不得携带换行,防日志结构被打散
 const singleLine = (text) => String(text ?? '').replace(/[\r\n]+/g, ' ')
+
+// 受管升级只接受精确版本:范围/标签/空串一律拒绝,通道目标经 dist-tags 解析为精确值
+const parseSemverStrict = (version) => (typeof version === 'string' ? parseSemver(version.trim()) : null) !== null
 
 // 审计日志:升级/重启的触发、落定、拒绝各一行结构化输出,不引日志框架
 const audit = (endpoint, outcome, extra) => {
@@ -108,7 +89,7 @@ export function collectActiveWork(ctx) {
     const jobs = ctx.get('jobs')
     if (!jobs || typeof jobs.list !== 'function') throw new Error('jobs 服务方法面不可用')
     const seen = new Set()
-    for (const caller of [undefined, ...agentList]) {
+    for (const caller of [undefined, ...agentList.map(agent => agent && agent.id).filter(id => typeof id === 'string')]) {
       const rows = jobs.list(caller)
       for (const job of Array.isArray(rows) ? rows : []) {
         const key = String(job && job.id)
@@ -126,8 +107,16 @@ export function collectActiveWork(ctx) {
     const seen = new Set()
     let sawTerminalsService = false
     const scan = (terminals, owner) => {
-      if (!terminals || typeof terminals.list !== 'function') return
+      if (!terminals) return
       sawTerminalsService = true
+      if (owner && typeof terminals.hasOwnerActivity === 'function' && terminals.hasOwnerActivity(owner)) {
+        const key = 'pending:' + String(owner.id)
+        if (!seen.has(key)) { seen.add(key); counts.terminals += 1 }
+      }
+      if (typeof terminals.list !== 'function') {
+        if (!owner || typeof terminals.hasOwnerActivity !== 'function') throw new Error('terminals 服务方法面不可用')
+        return
+      }
       const rows = terminals.list(owner)
       for (const terminal of Array.isArray(rows) ? rows : []) {
         const key = String(terminal && terminal.sessionId)
@@ -165,66 +154,11 @@ export function collectActiveWork(ctx) {
   }
 }
 
-const sleepMs = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
-
-// 升级尝试循环:单次执行语义与超时不变,失败经分类,可重试类按退避重试,
-// 直至成功/不可重试/次数上限;尾流只在落定结果上,attempts 条目只留判定字段。
-// runImpl/sleepImpl/backoff 注入仅供测试,默认真实执行器、定时睡眠与导出退避表
-export async function runUpgradeWithRetry({ command, timeoutMs = UPGRADE_TIMEOUT_MS, maxAttempts = UPGRADE_MAX_ATTEMPTS, backoff = UPGRADE_RETRY_BACKOFF_MS, runImpl = runUpgrade, sleepImpl = sleepMs, onAttemptStart }) {
-  const attempts = []
-  for (let index = 0; index < maxAttempts; index += 1) {
-    if (index > 0 && typeof onAttemptStart === 'function') onAttemptStart()
-    const startedAt = Date.now()
-    let result = null
-    let thrownMessage = null
-    try {
-      result = await runImpl({ command, timeoutMs })
-    } catch (error) {
-      thrownMessage = error && error.message ? error.message : String(error)
-    }
-    if (thrownMessage !== null) {
-      attempts.push({ startedAt, finishedAt: Date.now(), ok: false, code: null, timedOut: false, kind: null })
-      return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: thrownMessage }
-    }
-    const failure = result.ok ? null : classifyUpgradeFailure(result)
-    attempts.push({
-      startedAt,
-      finishedAt: Date.now(),
-      ok: result.ok === true,
-      code: typeof result.code === 'number' ? result.code : null,
-      timedOut: result.timedOut === true,
-      kind: failure === null ? null : failure.kind,
-    })
-    const settle = { attempts, ok: result.ok === true, kind: failure === null ? null : failure.kind, stillRunning: result.stillRunning === true, stdoutTail: result.stdoutTail ?? '', stderrTail: result.stderrTail ?? '', error: null }
-    if (result.ok) return settle
-    if (failure.retryable !== true || index >= maxAttempts - 1) return settle
-    const backoffMs = upgradeRetryBackoffMs(backoff, failure.kind, index)
-    if (backoffMs === null) {
-      console.warn('[dsh-maintain] 可重试分类缺少退避序列,按不可重试落定: kind=' + singleLine(failure.kind))
-      return settle
-    }
-    await sleepImpl(backoffMs)
-  }
-  return { attempts, ok: false, kind: null, stillRunning: false, stdoutTail: '', stderrTail: '', error: null }
-}
-
-// 升级后自动重启守卫:三条件缺一不可——成功、本次勾选 enabled、appExit 可用。
-// 宿主退出动作与面板"确认重启"完全同一调度入口,拉起责任归启动方式:
-// 托管环境由进程管理器拉起,手动直跑等同点了重启按钮后自行再启动
-// 无 stale 条件:版本复读属升级后磁盘读取,关机路径禁止;版本是否前进由重启后的启动检查呈现
-export function judgeAutoRestart({ ok, hasExit, enabled }) {
-  if (ok !== true) return { schedule: false }
-  if (enabled !== true) return { schedule: false }
-  if (hasExit !== true) return { schedule: false }
-  return { schedule: true }
-}
-
 // 浏览器半区调用的 API 路径清单:client.js 同名常量与之对拍(parity),防单侧改路径生产 404
 export const API_PATHS = Object.freeze({
   STATUS: '/api/maintain/status',
   REFRESH: '/api/maintain/refresh',
   CHANNEL: '/api/maintain/channel',
-  UPGRADE_TEMPLATE: '/api/maintain/upgrade-template',
   POLL_INTERVAL: '/api/maintain/poll-interval',
   REGISTRY_BASE: '/api/maintain/registry-base',
   UPGRADE: '/api/maintain/upgrade',
@@ -235,33 +169,9 @@ export const API_PATHS = Object.freeze({
 // 宿主进程启动时刻:重启探测的第三代际信号(容器内 pid 恒 1 且零失联时 pid 信号失效)
 const BOOT_AT = Date.now() - Math.round(process.uptime() * 1000)
 
-// 跨进程升级锁:升级子进程 detached 存活于宿主死后,宿主被外部重启时内存门闩归零
-// 会放行第二次升级,与仍在跑的旧包管理器并发写同一全局目录。锁文件随升级结束删除,
-// 宿主崩溃残留时按 startedAt 过期(超 UPGRADE_TIMEOUT_MS + 强杀宽限)自动失效
-// 升级锁绝对路径:导出仅供测试预热清理(防测试进程中断残留毒化后续运行)。
-// 测试进程按 PID 隔离锁文件:node --test 多 worker 并发跑多个测试文件时,
-// 固定路径会让 A 文件升级中的锁毒化 B 文件的 409 门闩判定(共享 tmpdir 全局态)
-export const UPGRADE_LOCK_PATH = process.env.NODE_TEST_CONTEXT !== undefined
-  ? join(tmpdir(), `dsh-maintain-upgrade-${process.pid}.lock`)
-  : join(tmpdir(), 'dsh-maintain-upgrade.lock')
-const UPGRADE_LOCK_STALE_MS = UPGRADE_TIMEOUT_MS + 10 * 1000
-
-function readUpgradeLock() {
-  try {
-    const raw = JSON.parse(readFileSync(UPGRADE_LOCK_PATH, 'utf8'))
-    if (raw && typeof raw.startedAt === 'number') return raw
-  } catch { /* 缺失/损坏等同无锁 */ }
-  return null
-}
-
-function upgradeLockStale(lock) {
-  return lock === null || Date.now() - lock.startedAt > UPGRADE_LOCK_STALE_MS
-}
-
 // 默认值导出仅供 parity 测试作 host 侧锚点;行为入口全部经 readSettings 回落
 export const DEFAULT_CHANNEL = 'latest'
 export const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
-export const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g ' + TARGET_PACKAGE + '@' + TAG_PLACEHOLDER
 export const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 
 // 注册即声明 GUI 设置表单,schema 默认值即生效默认值(rs-workflow-config 先例)。
@@ -271,7 +181,6 @@ export const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 export const Config = volatileWrap(z.object({
   channel: z.string().default(DEFAULT_CHANNEL).description('追踪通道:npm dist-tag 名(latest/next/alpha 等,以检查返回的通道列表为准)'),
   pollIntervalSec: z.number().default(DEFAULT_POLL_INTERVAL_SEC).description('轮询间隔秒数,仅正数启用周期检查'),
-  upgradeCommandTemplate: z.string().default(DEFAULT_UPGRADE_TEMPLATE).description('升级命令模板,{tag} 执行时替换为追踪通道,可整体自改为任意命令'),
   registryBase: z.string().default(DEFAULT_REGISTRY_BASE).description('npm registry 基地址,官方源不可达时改为镜像地址'),
 }))
 
@@ -355,10 +264,6 @@ function readSettings(ctx, config) {
       value && typeof value.pollIntervalSec === 'number' && Number.isFinite(value.pollIntervalSec)
         ? value.pollIntervalSec
         : DEFAULT_POLL_INTERVAL_SEC,
-    upgradeCommandTemplate:
-      value && typeof value.upgradeCommandTemplate === 'string' && value.upgradeCommandTemplate.trim().length > 0
-        ? value.upgradeCommandTemplate
-        : DEFAULT_UPGRADE_TEMPLATE,
     registryBase:
       value && typeof value.registryBase === 'string' && value.registryBase.trim().length > 0
         ? value.registryBase.trim()
@@ -366,12 +271,52 @@ function readSettings(ctx, config) {
   }
 }
 
+const samePath = (a, b, platform = process.platform) => platform === 'win32'
+  ? resolve(a).toLowerCase() === resolve(b).toLowerCase()
+  : resolve(a) === resolve(b)
+
+export function discoverRunningInstall({ argv1 = process.argv[1], installAnchor, platform = process.platform } = {}) {
+  try {
+    const entry = realpathSync(argv1)
+    const argvPackage = dirname(dirname(entry))
+    const runtimePackage = installAnchor ? dirname(realpathSync(installAnchor)) : argvPackage
+    if (installAnchor && !samePath(runtimePackage, argvPackage)) throw new Error('运行入口与宿主安装锚点不一致')
+    const manifest = JSON.parse(readFileSync(join(runtimePackage, 'package.json'), 'utf8'))
+    if (manifest.name !== TARGET_PACKAGE) throw new Error('运行入口不是 ' + TARGET_PACKAGE + ': ' + manifest.name)
+    const segments = manifest.name.split('/')
+    let dir = runtimePackage
+    let managedBase = null
+    for (let depth = 0; depth < segments.length + 4; depth += 1) {
+      if (dir === dirname(dir)) break
+      dir = dirname(dir)
+      if (basename(dir) === '.dsh-maintain') { managedBase = dir; break }
+    }
+    if (managedBase !== null) {
+      const prefix = dirname(managedBase)
+      const originalPackage = platform === 'win32'
+        ? join(prefix, 'node_modules', ...segments)
+        : join(prefix, 'lib', 'node_modules', ...segments)
+      const originalManifest = JSON.parse(readFileSync(join(originalPackage, 'package.json'), 'utf8'))
+      if (originalManifest.name !== TARGET_PACKAGE) throw new Error('原包清单异常: ' + originalPackage)
+      return { prefix, originalPackage, runningPackage: runtimePackage, runningVersion: manifest.version, error: null }
+    }
+    let prefix = runtimePackage
+    const climbs = segments.length + (platform === 'win32' ? 1 : 2)
+    for (let depth = 0; depth < climbs; depth += 1) prefix = dirname(prefix)
+    return { prefix, originalPackage: runtimePackage, runningPackage: runtimePackage, runningVersion: manifest.version, error: null }
+  } catch (error) {
+    return { prefix: null, originalPackage: null, runningPackage: null, runningVersion: null, error: error && error.message ? error.message : String(error) }
+  }
+}
+
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
-export function apply(ctx, config) {
-  // 配置面双形态(照 dsh-llm-pi-gateway,特性检测不硬编码版本),判定一律延迟到使用点:
-  // settings 服务挂载时序无保证,apply 时刻探测会误判形态。
-  // legacy(≤0.1.6):settings 服务 register/get/update 命名空间语义;
-  // 0.1.7+:静态 Config 导出生成节表单,读经 volatile ref 解包,写经 configEditor 落 profile 条目
+export function apply(ctx, config, dependencies = {}) {
+  const maintenance = { active: false }
+  const hooks = ctx.get('hooks')
+  hooks?.on?.('agent/pre-step', ({ signal }, next) => {
+    if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject' })
+    return next()
+  })
   const legacySettingsFace = () => {
     const settings = ctx.get('settings')
     return typeof settings?.register === 'function' && typeof settings?.update === 'function'
@@ -393,29 +338,28 @@ export function apply(ctx, config) {
     await editor.edit(entry, (current) => ({ ...current, ...patch }))
     return true
   }
-  // 启动器在挂载前提供 appExit(有界退出,5 秒兜底强制);缺失时重启能力关闭
+  // 启动器在挂载前提供 appExit(有界退出,5 秒兜底强制);缺失时重启能力关闭,
+  // 受管升级切换成功必须正常退出交第三方拉起,无 appExit 时升级在切换前拒绝
   const exit = ctx.get('appExit')
   if (typeof exit !== 'function') {
-    console.warn('[dsh-maintain] 启动器未提供 appExit,就地重启能力关闭(面板按钮禁用)')
-  }
-  // 幽灵锁检测:宿主外部重启后残留的锁文件若仍在有效期,升级能力保持锁定
-  const staleLock = upgradeLockStale(readUpgradeLock()) ? null : readUpgradeLock()
-  if (staleLock !== null) {
-    console.warn('[dsh-maintain] 检测到未过期的升级锁(可能存在残留升级子进程),升级端点保持拒绝直至锁过期: ' + UPGRADE_LOCK_PATH)
+    console.warn('[dsh-maintain] 启动器未提供 appExit,就地重启与受管升级切换能力关闭(面板按钮禁用)')
   }
 
   // 运行版本探测:服务面可注入受控实现(测试面),缺省走真实盘读;
   // 约定恒 resolve 不 reject,真实实现全失败回 null,注入侧经 then 同步抛错同折进 rejection
   function resolveCurrentHostVersion() {
-    const probe = ctx.get('hostVersionProbe')
-    if (typeof probe === 'function') return Promise.resolve().then(probe)
-    return resolveHostVersion({
-      execPath: process.execPath,
-      platform: process.platform,
-      argv1: process.argv[1],
-      readFileImpl: readFile,
-      resolveImpl: undefined,
-    })
+    try {
+      const probe = ctx.get('hostVersionProbe')
+      if (typeof probe === 'function') return Promise.resolve().then(probe)
+      const runtimeManifest = ctx.profileContext?.installAnchor
+        ? realpathSync(ctx.profileContext.installAnchor)
+        : join(dirname(dirname(realpathSync(process.argv[1]))), 'package.json')
+      const manifest = JSON.parse(readFileSync(runtimeManifest, 'utf8'))
+      if (manifest.name !== TARGET_PACKAGE || typeof manifest.version !== 'string') throw new Error('运行宿主清单无效')
+      return Promise.resolve(manifest.version)
+    } catch {
+      return Promise.resolve(null)
+    }
   }
 
   // 内存快照:仅存当前态,进程重启后从启动检查重新开始(设计约束:不持久化)。
@@ -432,7 +376,12 @@ export function apply(ctx, config) {
   let checkInFlight = null
   let nextDueAt = null
   let restartScheduled = false
-  let autoRestartScheduled = false
+  // 受管安装发现:apply 时刻缓存(链接切换后不再重新 realpath 推断运行版)。
+  // 发现失败不阻塞面板,仅升级入口拒绝并带原因
+  const installAnchor = ctx.profileContext?.installAnchor
+  const managedInstall = dependencies.runningInstall !== undefined
+    ? dependencies.runningInstall
+    : discoverRunningInstall({ installAnchor })
   // 版本更新内容缓存:键为通道最新版原始值(未归一),值为 {url,publishedAt,body};仅成功结果入缓存
   const releaseNotesCache = new Map()
 
@@ -496,19 +445,18 @@ export function apply(ctx, config) {
     await runningVersionReady
     const cfg = readSettings(ctx, config)
     const judged = judgeNow()
-    // running 即视为持锁:省一次盘读,且窗口期语义与 upgrade 路由的门闩一致
-    const lock = upgrade.running === true ? { startedAt: Date.now() } : readUpgradeLock()
     return {
       packageName: TARGET_PACKAGE,
       pid: process.pid,
       bootAt: BOOT_AT,
       pollRunning,
-      upgradeLockHeld: lock !== null && !upgradeLockStale(lock),
       runningVersion,
+      runningSource: managedInstall.error === null ? 'managed-layout' : 'unknown',
+      managedReady: managedInstall.error === null,
+      managedError: managedInstall.error,
       installedVersion: snapshot.installedVersion,
       restartPending: isVersionPendingRestart({ runningVersion, installedVersion: snapshot.installedVersion }),
       channel: cfg.channel,
-      upgradeTemplate: cfg.upgradeCommandTemplate,
       pollIntervalSec: cfg.pollIntervalSec,
       registryBase: cfg.registryBase,
       tags: snapshot.tags,
@@ -518,140 +466,125 @@ export function apply(ctx, config) {
       checkedAt: snapshot.checkedAt,
       checkError: snapshot.error,
       upgrade,
-      autoRestartScheduled,
       activeWork: collectActiveWork(ctx),
       canRestart: typeof exit === 'function',
     }
   }
 
-  function triggerUpgrade(autoRestart) {
-    const cfg = readSettings(ctx, config)
-    // 模板校验同步失败即同步 throw,由调用方 try/catch 转 400,不走异步通道
-    const command = buildUpgradeCommand({ template: cfg.upgradeCommandTemplate, tag: cfg.channel })
-    // 通道名恰为 semver 形态时 {tag} 展开产物会被误读为钉定:与通道名重合即非钉定
-    const pinnedVersion = extractPinnedVersion(command)
-    const last = {
-      command,
-      // 钉定版本随命令定格:落定复读按安装意图(钉定/通道)判定 stale
-      pinnedVersion: pinnedVersion === cfg.channel ? null : pinnedVersion,
-      startedAt: Date.now(),
-      ok: false,
-      finishedAt: null,
-      timedOut: false,
-      stillRunning: false,
-      code: null,
-      stdoutTail: '',
-      stderrTail: '',
-      error: null,
-      kind: null,
-      attempts: [],
-      previousVersion: null,
-      installedVersion: null,
-      stale: null,
-      reason: null,
-    }
-    // running 即串行化门闩:路由检查与本处置位之间无 await,单线程下无竞态窗口
-    upgrade = { running: true, last }
-    writeUpgradeLock(last.startedAt)
-    audit('upgrade', 'triggered', 'command=' + singleLine(command) + ' autoRestart=' + (autoRestart === true))
-    void performUpgrade(command, last, cfg.channel, autoRestart === true)
+  async function defaultValidateCandidate({ slot, npmCli, nodePath = process.execPath }) {
+    const npm = npmCli || join(dirname(realpathSync(nodePath)), 'node_modules/npm/bin/npm-cli.js')
+    const env = createCandidateEnvironment({ root: slot })
+    const result = await runProcess({
+      executable: nodePath,
+      args: [npm, 'ls', '--omit=dev', '--prefix', slot],
+      cwd: slot,
+      env,
+      timeoutMs: MANAGED_VALIDATE_TIMEOUT_MS,
+    })
+    if (!result.ok) return result
+    return { ok: false, stderrTail: '候选profile隔离启动与健康探针尚未验证,拒绝切换' }
   }
 
-  // 升级锁文件只在此写入:首次与每次重试覆写,startedAt 取当前尝试开始时刻,
-  // 过期阈值覆盖单次尝试的完整时长(超时 + 强杀宽限)
-  function writeUpgradeLock(startedAt) {
-    try {
-      writeFileSync(UPGRADE_LOCK_PATH, JSON.stringify({ startedAt, pid: process.pid }), 'utf8')
-    } catch { /* 锁不可写仅损失跨进程防护,内存门闩仍生效 */ }
+  async function defaultBeforeSwitch() {
+    const activeWork = collectActiveWork(ctx)
+    if (activeWork.detectionAvailable !== true || activeWork.total > 0) {
+      throw new Error('提交窗口检测到活跃工作或检测不可用(detectionAvailable=' + activeWork.detectionAvailable + ' total=' + activeWork.total + ')')
+    }
   }
+
+
+  // 受管升级执行器:注入优先,缺省真实编排器。测试注入 deferred runner,
+  // 禁止回落真实 npm;切换成功即正常退出,由第三方启动方式再次拉起
+  const runManagedUpgrade = typeof dependencies.runManagedUpgrade === 'function'
+    ? dependencies.runManagedUpgrade
+    : performManagedUpgrade
+  const buildLayout = typeof dependencies.createLayout === 'function'
+    ? dependencies.createLayout
+    : createLayout
 
   // 宿主退出调度唯一入口:手动重启(HTTP 入口)与升级落定(内部入口)共用,
   // 置双向互斥标记、留审计、延迟 exit(0)。调度窗口内升级被 409,手动重启幂等
-  function scheduleHostExit({ detail, autoRestart = false, delayMs }) {
+  function scheduleHostExit({ detail, delayMs }) {
     restartScheduled = true
-    if (autoRestart === true) autoRestartScheduled = true
-    audit('restart', autoRestart === true ? 'scheduled' : 'triggered', detail + ' delayMs=' + delayMs)
+    maintenance.active = true
+    audit('restart', 'triggered', detail + ' delayMs=' + delayMs)
     // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
     // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
     setTimeout(() => exit(0), delayMs)
   }
 
-  async function performUpgrade(command, last, channel, autoRestart) {
-    // settle 声明在 try 外:继续运行路径的版本复读在 finally 中消费它
-    let settle = null
+  // 受管升级全流程:布局发现→编排(安装/验证/切换,锁与阶段持久化在编排器内)
+  // →成功后调度正常退出。任何阶段失败保留原版本服务,锁与阶段状态由编排器落盘
+  async function performManagedUpgradeFlow({ targetVersion, registryBase }) {
+    const last = {
+      operationId: null,
+      targetVersion,
+      startedAt: Date.now(),
+      finishedAt: null,
+      ok: false,
+      switched: false,
+      phase: null,
+      slot: null,
+      error: null,
+    }
+    upgrade = { running: true, last }
+    audit('upgrade', 'triggered', 'targetVersion=' + targetVersion)
     try {
-      // 触发前快照磁盘版本,继续运行路径复读时以此为对比基线
-      last.previousVersion = await resolveCurrentHostVersion()
-      settle = await runUpgradeWithRetry({
-        command,
-        onAttemptStart: () => writeUpgradeLock(Date.now()),
+      const layout = await buildLayout({
+        prefix: managedInstall.prefix,
+        originalPackage: managedInstall.originalPackage,
       })
-      const final = settle.attempts[settle.attempts.length - 1] ?? null
+      last.operationId = null
+      maintenance.active = true
+      await defaultBeforeSwitch()
+      const result = await runManagedUpgrade({
+        layout,
+        runningPackage: managedInstall.runningPackage ?? managedInstall.originalPackage,
+        targetVersion,
+        registryBase,
+        validate: defaultValidateCandidate,
+        beforeSwitch: defaultBeforeSwitch,
+        onPhase: (state) => {
+          last.phase = state.phase
+          last.slot = state.slot ?? null
+          last.operationId = state.operationId ?? last.operationId
+        },
+      })
       Object.assign(last, {
-        attempts: settle.attempts,
-        ok: settle.ok,
-        kind: settle.kind,
-        error: settle.error,
+        ok: true,
+        switched: result.switched === true,
+        phase: result.phase,
+        slot: result.slot ?? null,
+        operationId: result.operationId ?? last.operationId,
         finishedAt: Date.now(),
-        timedOut: final !== null ? final.timedOut : false,
-        stillRunning: settle.stillRunning,
-        code: final !== null ? final.code : null,
-        stdoutTail: settle.stdoutTail,
-        stderrTail: settle.stderrTail,
       })
-    } catch (error) {
-      last.error = error && error.message ? error.message : String(error)
-    } finally {
-      // 关机路径经 return 提前离场会吞掉 finally 内新抛异常:本块各消费点已 try/catch
-      // 防御(删锁/复读/runCheck),后续修改必须保持该契约,勿在此块新增可抛调用
-      if (last.finishedAt === null) last.finishedAt = Date.now()
-      upgrade = { running: false, last }
-      // stillRunning(强杀后进程树疑似仍在写全局目录)时保留锁文件,由过期机制收敛,
-      // 与"宿主死后幽灵锁"防线对称;正常落定即删
-      if (last.stillRunning === true) {
-        console.warn('[dsh-maintain] 升级超时强杀且进程疑似仍存活,升级锁保留至过期: ' + UPGRADE_LOCK_PATH)
+      audit('upgrade', 'ok', 'operationId=' + last.operationId + ' slot=' + last.slot + ' phase=' + last.phase)
+      // 切换成功即正常退出:启动语义固定,不再提供"切了链接继续跑旧宿主"的路径
+      if (typeof exit === 'function') {
+        last.exitScheduled = true
+        scheduleHostExit({ detail: 'reason=managed-upgrade-switched operationId=' + last.operationId, delayMs: RESTART_DELAY_MS })
       } else {
-        try {
-          rmSync(UPGRADE_LOCK_PATH, { force: true })
-        } catch (lockError) {
-          console.warn('[dsh-maintain] 升级锁删除失败(将由过期机制收敛): ' + (lockError?.message ?? lockError))
-        }
+        last.error = '启动器未提供 appExit,已切换但无法退出;请手动重启'
+        audit('upgrade', 'exit-missing', 'operationId=' + last.operationId)
       }
-      console.warn('[dsh-maintain] 升级结束: ok=' + last.ok + ' kind=' + singleLine(last.kind)
-        + (last.code !== null ? ' 退出码=' + last.code : '')
-        + (last.error ? ' ' + singleLine(last.error) : '')
-        + (last.stale === true ? ' stale=' + singleLine(last.reason) : ''))
-      audit('upgrade', last.ok === true ? 'ok' : 'failed',
-        'durationMs=' + (last.finishedAt - last.startedAt) + ' code=' + last.code + ' kind=' + singleLine(last.kind))
-      // 关机前置判定只取内存输入(本次会话勾选 + 启动器退出能力):升级命令刚
-      // 替换过宿主磁盘文件,落定钩子发起网络请求或读取磁盘都是半写状态下的故障源
-      const decision = judgeAutoRestart({ ok: last.ok === true, hasExit: typeof exit === 'function', enabled: autoRestart === true })
-      if (decision.schedule === true) {
-        // 关机路径零收尾:与确认重启同一内部动作,直接进入延迟退出
-        // last 镜像调度标记:浮条终态文案按其分流(与 status.autoRestartScheduled 同值)
-        last.autoRestartScheduled = true
-        scheduleHostExit({ detail: 'reason=upgrade-ok', autoRestart: true, delayMs: AUTO_RESTART_DELAY_MS })
-        return
+    } catch (error) {
+      last.ok = false
+      last.finishedAt = Date.now()
+      last.error = error && error.message ? error.message : String(error)
+      last.switched = error.switched === true
+      last.phase = last.phase ?? 'failed'
+      if (error.switched === true || error.indeterminate === true) {
+        last.switched = true
+        last.phase = 'indeterminate'
+        last.exitScheduled = true
+        scheduleHostExit({ detail: 'reason=post-switch-state-indeterminate operationId=' + (last.operationId ?? 'unknown'), delayMs: RESTART_DELAY_MS })
+      } else {
+        maintenance.active = false
       }
-      // 继续运行路径(失败/本次未勾选自动重启/appExit 缺失):复读磁盘版本标 stale,版本未前进提示保留
-      if (settle !== null && settle.ok) {
-        // 复读属磁盘消费点,拒绝不得以 unhandledRejection 形式逃逸(void 触发即崩宿主):
-        // 失败时放弃 stale 判定,保留已装版本 null 由启动检查兜底呈现
-        try {
-          last.installedVersion = await resolveCurrentHostVersion()
-          const tags = snapshot.tags
-          const freshness = judgeUpgradeFreshness({
-            previousVersion: last.previousVersion,
-            installedVersion: last.installedVersion,
-            channelLatest: tags !== null && Object.prototype.hasOwnProperty.call(tags, channel) ? tags[channel] : null,
-            pinnedVersion: last.pinnedVersion,
-          })
-          last.stale = freshness.stale
-          last.reason = freshness.reason
-        } catch { /* 复读失败仅损失 stale 提示,不覆盖升级成功结果 */ }
-      }
-      // 升级结束后自动重新检查版本并重排轮询(命令可能改了本地版本)
-      runCheck().then(scheduleNext, scheduleNext)
+      console.warn('[dsh-maintain] 受管升级失败: ' + singleLine(last.error))
+      audit('upgrade', 'failed', 'phase=' + last.phase + ' error=' + singleLine(last.error))
+    } finally {
+      upgrade = { running: false, last }
     }
   }
 
@@ -701,19 +634,6 @@ export function apply(ctx, config) {
       }),
     },
     {
-      path: API_PATHS.UPGRADE_TEMPLATE,
-      handler: route('POST', WRITE, async (req, res) => {
-        const body = JSON.parse(await readBody(req))
-        const template = body && typeof body.template === 'string' ? body.template.trim() : ''
-        if (template.length === 0) {
-          sendJson(res, 400, { error: '升级命令不能为空' })
-          return
-        }
-        if (!(await persistPatch(res, { upgradeCommandTemplate: template }))) return
-        sendJson(res, 200, await currentStatus())
-      }),
-    },
-    {
       path: API_PATHS.POLL_INTERVAL,
       handler: route('POST', WRITE, async (req, res) => {
         const body = JSON.parse(await readBody(req))
@@ -756,40 +676,65 @@ export function apply(ctx, config) {
     {
       path: API_PATHS.UPGRADE,
       handler: route('POST', WRITE, async (req, res) => {
-        // body 校验必须在全部门控之前:门控到 triggerUpgrade 置位之间不得插入 await,
-        // 否则并发请求双双通过 409 门控,两个升级进程并发写全局目录
-        // 自动重启为确认弹窗的会话级勾选,严格 boolean:缺失/宽转一律拒绝,防静默翻转关机行为
+        // body 校验必须在全部门控之前:门控到编排器置位之间不得插入 await,
+        // 否则并发请求双双通过 409 门控(锁文件是第二道防线,但内存门闩先拒绝)
+        // 目标版本可选:缺省按追踪通道 dist-tag 解析为精确版本;显式传入也必须精确
         const rawBody = await readBody(req)
         const requestBody = rawBody ? (JSON.parse(rawBody) || {}) : {}
-        if (typeof requestBody.autoRestart !== 'boolean') {
-          sendJson(res, 400, { error: 'autoRestart 必须是 boolean' })
+        let targetVersion = requestBody.targetVersion
+        if (targetVersion === undefined) {
+          const cfgChannel = readSettings(ctx, config).channel
+          const tags = snapshot.tags
+          if (!tags || typeof tags[cfgChannel] !== 'string' || !parseSemverStrict(tags[cfgChannel])) {
+            sendJson(res, 400, { error: '通道 ' + cfgChannel + ' 最新版本未知或不精确,请先检查更新' })
+            return
+          }
+          targetVersion = tags[cfgChannel]
+        }
+        if (!parseSemverStrict(targetVersion)) {
+          sendJson(res, 400, { error: 'targetVersion 必须是精确 semver 版本: ' + targetVersion })
           return
         }
         // 与重启调度双向互斥:restartScheduled 置位到 exit(0) 执行的窗口内触发升级,
-        // detached 孤儿会与新宿主交错
+        // 切换后的退出会与新宿主交错
         if (upgrade.running || restartScheduled) {
           audit('upgrade', 'rejected', restartScheduled ? 'reason=restart-scheduled' : 'reason=running')
           sendJson(res, 409, { error: restartScheduled ? '重启已调度,禁止触发升级' : '升级进行中' })
           return
         }
-        if (upgradeLockStale(readUpgradeLock()) === false) {
-          audit('upgrade', 'rejected', 'reason=lock')
-          sendJson(res, 409, { error: '存在未过期的升级锁(可能有残留升级子进程),等待锁过期或删除 ' + UPGRADE_LOCK_PATH })
+        if (managedInstall.error !== null) {
+          audit('upgrade', 'rejected', 'reason=managed-unavailable')
+          sendJson(res, 409, { error: '受管安装不可用: ' + managedInstall.error })
           return
         }
-        // 活跃工作门控:升级不可越(agent 会话/job 在跑时强行升级会被中断)
+        if (typeof exit !== 'function') {
+          audit('upgrade', 'rejected', 'reason=no-appExit')
+          sendJson(res, 409, { error: '启动器未提供 appExit,切换后无法退出,升级被拒绝' })
+          return
+        }
+        // 活跃工作门控(fail-closed):检测面缺失即拒绝,不以放行冒充弱一致窗口;
+        // 切换前编排器 beforeSwitch 还会做最终核验
         const activeWork = collectActiveWork(ctx)
-        if (activeWork.total > 0) {
-          audit('upgrade', 'rejected', 'reason=active-work total=' + activeWork.total)
+        if (activeWork.detectionAvailable !== true || activeWork.total > 0) {
+          audit('upgrade', 'rejected', 'reason=active-work total=' + activeWork.total + ' detectionAvailable=' + activeWork.detectionAvailable)
           sendJson(res, 409, {
-            error: '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),升级会中断它们,请等待完成',
+            error: activeWork.detectionAvailable !== true
+              ? '活跃工作检测不可用,为避免中断任务已拒绝升级;请处理检测面后重试'
+              : '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),升级切换会中断它们,请等待完成',
             items: activeWork,
             detectionAvailable: activeWork.detectionAvailable,
           })
           return
         }
-        triggerUpgrade(requestBody.autoRestart)
-        sendJson(res, 200, await currentStatus())
+        if (dependencies.runManagedUpgrade === undefined) {
+          audit('upgrade', 'rejected', 'reason=candidate-validation-unavailable')
+          sendJson(res, 409, { error: '候选profile隔离启动与健康探针尚未实现,受管升级已禁用' })
+          return
+        }
+        // 编排先入内存门闩再取快照:响应快照必须呈现 running=true,并发请求才能被 409 挡住
+        const flow = performManagedUpgradeFlow({ targetVersion, registryBase: readSettings(ctx, config).registryBase })
+        sendJson(res, 200, { ok: true, targetVersion, status: await currentStatus() })
+        void flow
       }),
     },
     {

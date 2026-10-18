@@ -22,12 +22,15 @@ export function judgeUpstreamSeen(lines) {
 }
 
 // 文本 roundtrip 判定:当前 user turn 的响应文本已渲染;不证明生成流完整终止。
+// 发话内容由 verify-typed(发话前)与 snapshot.userMessage(发话后回显)双采样;
+// 0.2.1-rc.2 起用户消息不再并入 turn 文本(dom-scan 实证消息渲染于会话行)。本轮/旧轮
+// 绑定由消费方 llmUserEcho 的 DOM turn 锚定(data-chat-turn + matchingUserRows)
+// 承担,本 judge 单独复用于新消费方时不防御旧轮回复。
 export function judgeRoundtrip(snapshot, userMessage) {
   return snapshot !== null && snapshot !== undefined
     && snapshot.composerText === ''
     && typeof snapshot.userMessage === 'string' && snapshot.userMessage === userMessage
     && typeof snapshot.currentTurnText === 'string'
-    && snapshot.currentTurnText.includes(userMessage)
     && snapshot.currentTurnText.includes('echo-upstream-fixed')
     && snapshot.hasResponseGroup === true
     && Array.isArray(snapshot.errors) && snapshot.errors.length === 0

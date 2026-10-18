@@ -127,6 +127,7 @@ function parseArgs(argv) {
       '--llm-port': () => { args.llmPort = Number(argv[++i]) },
       '--host-dir': () => { args.hostDir = argv[++i] },
       '--daemon': () => { args.daemon = true },
+      '--refuse-port-owner': () => { args.refusePortOwner = true },
       // 会话夹具轮(#5/#6 类需要伪造会话跨重启存活)跳过净启动清理
       '--keep-sessions': () => { args.keepSessions = true },
       '--only': () => {
@@ -186,22 +187,25 @@ function acquireKeeperLock() {
 acquireKeeperLock()
 
 // 幂等 profile:bundles 形态与工作副本桥都齐时跳过重建(pnpm install 分钟级,逐包轮同闭包形态复用)
-const { bundles: repoBundles } = enumeratePackages()
+// enumeratePackages 返回的已是 @mzzsfy 全名,此处禁止再拼 scope
+const { bundles: repoBundles } = enumeratePackages({ hostVersion: version })
 const wantedShort = (args.only ?? []).map((n) => n.replace(/^@mzzsfy\//, ''))
 const wantedBundles = wantedShort.length > 0
-  ? repoBundles.filter((name) => wantedShort.includes(name.replace(/^@mzzsfy\//, ''))).map((name) => `@mzzsfy/${name}`)
-  : repoBundles.map((name) => `@mzzsfy/${name}`)
+  ? repoBundles.filter((name) => wantedShort.includes(name.replace(/^@mzzsfy\//, '')))
+  : repoBundles
 const profileManifestPath = join(workDir, 'home', 'profiles', 'web', 'package.json')
 const linkBase = join(workDir, 'home', 'profiles', 'web', 'node_modules', '@mzzsfy')
 const expectShape = [...new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dshmarket', ...wantedBundles])]
-const profileReuseReady = existsSync(profileManifestPath)
-  && JSON.parse(readFileSync(profileManifestPath, 'utf8'))?.dsh?.profile?.bundles?.join('|') === expectShape.join('|')
-  && wantedBundles.every((name) => existsSync(join(linkBase, name.replace('@mzzsfy/', ''))))
+const reuseManifest = existsSync(profileManifestPath) ? JSON.parse(readFileSync(profileManifestPath, 'utf8')) : null
+const reuseShapeOk = reuseManifest?.dsh?.profile?.bundles?.join('|') === expectShape.join('|')
+const reuseLinksOk = wantedBundles.every((name) => existsSync(join(linkBase, name.replace('@mzzsfy/', ''))))
+const profileReuseReady = existsSync(profileManifestPath) && reuseShapeOk && reuseLinksOk
 let profile
 if (profileReuseReady) {
   profile = { homeDir: join(workDir, 'home'), binPath, bundleNames: wantedBundles }
   log(`[daemon] ${version} profile 复用 bundles=${profile.bundleNames.length}`)
 } else {
+  log(`[daemon] profile 复用未命中: manifest=${existsSync(profileManifestPath)} shape=${reuseShapeOk} links=${reuseLinksOk}(per-link=${wantedBundles.map((n) => `${n}:${existsSync(join(linkBase, n.replace('@mzzsfy/', '')))}`).join(',')}) 期望(${expectShape.length})=${expectShape.join('|')} 实际(${reuseManifest?.dsh?.profile?.bundles?.length})=${reuseManifest?.dsh?.profile?.bundles?.join('|')}`)
   profile = await buildProfile({ version, workRoot: COMPAT_ROOT, hostDir, only: args.only ?? [] })
   log(`[daemon] ${version} profile 构建 bundles=${profile.bundleNames.length}`)
 }
@@ -210,6 +214,7 @@ async function bootOnce() {
   // 陈旧 live.json 会在就绪前误导读取方(死 token 401 / 旧 bundles),每轮 spawn 前净删
   rmSync(join(workDir, 'live.json'), { force: true })
   if (!(await canBind(port))) {
+    if (args.refusePortOwner) throw new Error(`端口 ${port} 被占，拒绝清理其他进程`)
     log(`[daemon] 端口 ${port} 被占,清理`)
     killPortOwner(port)
     await sleep(3000)

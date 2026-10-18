@@ -9,10 +9,11 @@
 // - anthropic 传输原生消费 metadata.user_id;openai 系忽略未知键,仍按协议门控
 // - options 深冻结,注入必须不可变构造
 
+import { OFFICIAL_ROW_ID } from './config.mjs'
 import { deriveMarker } from './marker.mjs'
 
-const PATCHED = Symbol('llm-pi-gateway.patched')
 const ANTHROPIC_API = 'anthropic-messages'
+const prototypePatches = new WeakMap()
 
 /**
  * 构造标记注入:GenerateOptions.sessionId → metadata.user_id
@@ -47,21 +48,36 @@ export function createMarkerInject(getConfig, onWarn = () => {}) {
   }
 }
 
-// 对单个 Models 实例的 streamSimple 做一次性 shadow(幂等),覆盖 anthropic
-// GenerateOptions;其余协议原样透传
-const decorateModels = (inject, isActive) => (models) => {
-  if (models === null || typeof models !== 'object' || models[PATCHED]) return
-  const original = models.streamSimple
-  if (typeof original !== 'function') return
-  models[PATCHED] = true
-  models.streamSimple = (model, context, options) =>
-    original.call(models, model, context, model?.api === ANTHROPIC_API && isActive() ? inject(options) : options)
+// streamWithSnapshot 为每次调用构造绑定来源 adapter 实例的 Models facade。
+const decorateModels = (models, sourcePatch, adapter) => {
+  if (models === null || typeof models !== 'object') return models
+  const streamSimple = models.streamSimple
+  if (typeof streamSimple !== 'function') return models
+  return new Proxy(models, {
+    get(target, property) {
+      if (property === 'streamSimple') {
+        return (model, context, options) => {
+          const owners = sourcePatch.owners.filter((owner) => owner.adapter === adapter && owner.isActive())
+          const owner = owners.at(-1)
+          const nextOptions = model?.api === ANTHROPIC_API && owner ? owner.inject(options) : options
+          return streamSimple.call(target, model, context, nextOptions)
+        }
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+const addOwner = (patch, adapter, owner) => {
+  patch.owners = patch.owners.filter((existing) => existing.isActive())
+  if (patch.owners.some((existing) => existing.adapter === adapter && existing.inject === owner.inject && existing.isActive === owner.isActive)) return
+  patch.owners.push({ adapter, ...owner })
 }
 
 /**
- * 在 adapter 原型上 shadow streamWithSnapshot(全部实例共享一个原型,一次覆盖
- * 存量与未来实例),并对入参 snapshot.models 就地装饰。原型方法缺失或不可写
- * (版本漂移)返回 false,调用方干净禁用。
+ * 在 adapter 原型上 shadow streamWithSnapshot,但注入 owner 限定于登记授权的实例。
+ * 对入参 snapshot.models 就地装饰。原型方法缺失或不可写(版本漂移)返回 false。
  * @param {object} adapter 官方注册的 adapter 实例
  * @param {(options: object) => object} inject 标记注入
  * @param {() => boolean} [isActive] 注入活性;还原后透传
@@ -70,17 +86,17 @@ const decorateModels = (inject, isActive) => (models) => {
 export function patchAdapterPrototype(adapter, inject, isActive = () => true) {
   const proto = Object.getPrototypeOf(adapter)
   if (proto === null || typeof proto !== 'object') return false
-  if (proto[PATCHED]) return true
   const original = proto.streamWithSnapshot
   if (typeof original !== 'function') return false
-  const decorate = decorateModels(inject, isActive)
+  let patch = prototypePatches.get(proto)
+  if (patch) {
+    addOwner(patch, adapter, { inject, isActive })
+    return true
+  }
+  patch = { owners: [{ adapter, inject, isActive }] }
   const wrapper = function (options, snapshot) {
-    try {
-      decorate(snapshot?.models)
-    } catch {
-      // 装饰失败不阻断模型请求
-    }
-    return original.call(this, options, snapshot)
+    const callSnapshot = { ...snapshot, models: decorateModels(snapshot?.models, patch, this) }
+    return original.call(this, options, callSnapshot)
   }
   try {
     proto.streamWithSnapshot = wrapper
@@ -88,7 +104,7 @@ export function patchAdapterPrototype(adapter, inject, isActive = () => true) {
   } catch {
     return false
   }
-  proto[PATCHED] = true
+  prototypePatches.set(proto, patch)
   return true
 }
 
@@ -100,12 +116,15 @@ export function patchAdapterPrototype(adapter, inject, isActive = () => true) {
  * @returns {number} 已确保覆盖的注册 adapter 数(含既往已覆盖)
  */
 export function sweepRegisteredAdapters(llm, inject, isActive = () => true) {
-  const entries = llm?.adapters instanceof Map ? [...llm.adapters.values()] : []
+  if (!(llm?.adapters instanceof Map) || !(llm.directory instanceof Map)) return 0
+  const officialRoutes = new Set([...llm.directory.values()]
+    .filter((entry) => entry?.settingsNs === OFFICIAL_ROW_ID)
+    .map((entry) => entry.provider))
   let count = 0
-  for (const entry of entries) {
-    if (entry !== null && typeof entry === 'object' && patchAdapterPrototype(entry.adapter, inject, isActive)) {
-      count += 1
-    }
+  for (const provider of officialRoutes) {
+    const entry = llm.adapters.get(provider)
+    if (entry === undefined || entry.provider?.id !== provider) continue
+    if (patchAdapterPrototype(entry.adapter, inject, isActive)) count += 1
   }
   return count
 }

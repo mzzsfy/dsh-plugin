@@ -39,7 +39,7 @@ test('源码契约:六项设置的悬停说明齐备且挂到对应控件', () =
 test('源码契约:悬停说明覆盖各设置的关键行为语义', () => {
   assert.ok(CLIENT_SRC.includes('←/→ 切换范围'), '历史说明缺范围切换语义')
   assert.ok(CLIENT_SRC.includes('刷新页面生效'), '开关说明缺刷新生效提示')
-  assert.ok(CLIENT_SRC.includes('含附件的插话不可撤回'), '撤回说明缺附件限制')
+  assert.ok(CLIENT_SRC.includes('含附件的插话不支持撤回'), '撤回说明缺附件限制')
   assert.ok(CLIENT_SRC.includes('进行中的轮(回复尚未完成)'), 'fork 说明缺进行中轮可分叉语义')
   assert.ok(CLIENT_SRC.includes('停止本会话该轮未完成的回复'), 'fork 说明缺进行中轮分叉后止损语义')
   assert.ok(CLIENT_SRC.includes('无文本输入的轮'), 'fork 说明缺纯图等无文本轮限制')

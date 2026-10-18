@@ -39,6 +39,7 @@ const CSS = [
   '  color:inherit; border-radius:6px; padding:3px 10px; font-size:12px; }',
   '.dm-btn:hover { opacity:0.8; }',
   '.dm-btn:disabled { opacity:0.45; cursor:default; }',
+  '.dm-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
   '.dm-btn--danger { color:var(--dsw-alias-state-error-primary, #d43a3a); border-color:var(--dsw-alias-state-error-primary, #d43a3a); }',
   '.dm-card { border:1px solid var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); border-radius:10px; padding:10px 12px;',
   '  display:flex; flex-direction:column; gap:8px; }',
@@ -67,20 +68,6 @@ const CSS = [
   '.dm-notice--ok { color:var(--dsw-alias-state-success-primary, #1a9e55); }',
   '.dm-pre { margin:0; font-family:ui-monospace, Consolas, monospace; font-size:11px; line-height:1.6; white-space:pre-wrap;',
   '  word-break:break-all; color:var(--dsw-alias-label-secondary); max-height:120px; overflow:auto; }',
-  // ---- 布尔开关:规约形态(track 胶囊 + thumb 圆点,状态锚定 input) ----
-  '.dm-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }',
-  '.dm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
-  '.dm-switch__track { width:30px; height:16px; border-radius:999px; flex:none; position:relative;',
-  '  background:var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)); transition:background 0.15s ease; }',
-  '.dm-switch__thumb { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%;',
-  '  background:#fff; transition:left 0.15s ease; }',
-  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track { background:var(--dsw-alias-state-success-primary, #1a9e55); }',
-  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track .dm-switch__thumb { left:16px; }',
-  '.dm-switch input[type="checkbox"]:focus-visible + .dm-switch__track { outline:2px solid var(--dsw-alias-brand-primary, #4d6bfe); outline-offset:2px; }',
-  '.dm-switch input[type="checkbox"]:disabled + .dm-switch__track { opacity:0.45; cursor:default; }',
-  '.dm-switch:hover { opacity:0.85; }',
-  // 文字标签在 DOM 中排 track 之后(保 input+track 紧邻兄弟,状态选择器才生效),视觉以 order 提前
-  '.dm-switch .dm-row__label { order:-1; }',
   // ---- 升级确认弹窗:遮罩 + 居中窗体 ----
   '.dm-dialog__mask { position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:9999;',
   '  display:flex; align-items:center; justify-content:center; padding:16px; }',
@@ -100,7 +87,6 @@ const CSS = [
 const STATUS_URL = '/api/maintain/status'
 const REFRESH_URL = '/api/maintain/refresh'
 const CHANNEL_URL = '/api/maintain/channel'
-const TEMPLATE_URL = '/api/maintain/upgrade-template'
 const POLL_INTERVAL_URL = '/api/maintain/poll-interval'
 const REGISTRY_BASE_URL = '/api/maintain/registry-base'
 const UPGRADE_URL = '/api/maintain/upgrade'
@@ -112,9 +98,8 @@ const UPGRADE_FLOAT_ID = 'dsh-maintain-upgrade-float'
 const UPGRADE_FLOAT_STYLE_ID = UPGRADE_FLOAT_ID + '__style'
 // 与 host 侧轮询 tick(TICK_MS)同源:间隔设置的生效粒度受固定 tick 调度限制
 const POLL_MIN_TICK_SECONDS = 60
-// 与 host 侧默认值同源(DEFAULT_POLL_INTERVAL_SEC / DEFAULT_REGISTRY_BASE / DEFAULT_UPGRADE_TEMPLATE):
+// 与 host 侧默认值同源(DEFAULT_POLL_INTERVAL_SEC / DEFAULT_REGISTRY_BASE):
 // 等于默认值时输入框留空以 placeholder 展示,清空保存即恢复默认
-const DEFAULT_UPGRADE_TEMPLATE = 'npm install -g @deepseek-ai/dsh@{tag}'
 const DEFAULT_POLL_INTERVAL_SEC = 6 * 60 * 60
 const DEFAULT_REGISTRY_BASE = 'https://registry.npmjs.org'
 const RESTART_POLL_MS = 1 * 1000
@@ -155,13 +140,10 @@ function restartPostLost(error) {
 }
 // LOGIC-END restartPostLost
 
-// 判定常量与 host 侧 core.mjs 保持一致:client 半区无法 import ESM,
-// test/parity.test.mjs 按 const 名正则提取对拍,修改任一侧必须同步。
+// 与 host 侧常量同源:client 半区无法 import ESM,parity 对拍锁定
 const VERDICT_OUTDATED = 'outdated'
 const VERDICT_UP_TO_DATE = 'up-to-date'
 const VERDICT_UNKNOWN = 'unknown'
-// 与 host AUTO_RESTART_DELAY_MS 镜像(parity 对拍):弹窗文案引用,勿手抄数字
-const AUTO_RESTART_DELAY_SEC = 3
 
 // 非 2xx 应答抛带 status 与完整 payload 的错误对象:调用方据此区分"活宿主明确回绝"(有 status)
 // 与"网络失联"(fetch reject TypeError/abort DOMException,无 status);payload 供活跃工作
@@ -196,13 +178,11 @@ function post(url, body) {
 
 // 升级观察器:模块级单例,升级进行中每拍拉取状态并广播,组件挂载与否不影响;
 // 发现任意一拍不在进行中即升级落定,展示结果浮条后停止轮询;
-// 总时长上限覆盖宿主重试链上限(尝试次数×单次超时+退避+强杀宽限,见 parity 对拍):
+// 总时长上限覆盖 npm 安装全时长(超时 + 强杀宽限,与 host MANAGED_TIMEOUT_MS 对拍):
 // 超限说明宿主或进程管理器异常,浮条转状态未知。
 // 代际令牌防重叠拍:顺序自调度(settle 后排下一拍),单请求带超时,stop 后迟到拍经验代际丢弃
 const UPGRADE_WATCH_MAX_MS = 32 * 60 * 1000
 const UPGRADE_POLL_TIMEOUT_MS = 5 * 1000
-// 落定补查宽限:宿主自动重启调度延迟与观察裕量之和(parity 对拍提取形态限单项乘积)
-const UPGRADE_AUTO_RESTART_GRACE_MS = 5 * 1000
 const upgradeWatch = { generation: null, startedAt: 0, listeners: new Set() }
 
 function broadcastUpgradeStatus(status) {
@@ -211,23 +191,6 @@ function broadcastUpgradeStatus(status) {
 
 function stopUpgradeWatch() {
   upgradeWatch.generation = null
-}
-
-// 落定补查:延迟窗口后单拍重拉状态并广播(驱动自动重启接管守卫),按标记终判;
-// 补查前后验让位——新一轮升级观察已启动即放弃,其自身落定拍会终判
-async function recheckUpgradeSettle(previousLast) {
-  let final = null
-  try {
-    final = await api(STATUS_URL, { signal: AbortSignal.timeout(UPGRADE_POLL_TIMEOUT_MS) })
-  } catch {
-    final = null
-  }
-  if (upgradeWatch.generation !== null) return
-  if (final !== null) broadcastUpgradeStatus(final)
-  const last = final !== null && final.upgrade ? final.upgrade.last : null
-  if (last !== null && last.autoRestartScheduled === true) showUpgradeFloat(last)
-  // 补查仍无落定结果(观察窗错过且宿主已换代):转状态未知,不再停留进行中文案
-  else showUpgradeFloat(previousLast !== null ? previousLast : 'unknown')
 }
 
 function subscribeUpgradeStatus(listener) {
@@ -255,26 +218,10 @@ function ensureUpgradeWatch() {
       pollFailures = 0
       broadcastUpgradeStatus(next)
       const upgrade = next ? next.upgrade : null
+      // 落定即终判:切换成功由切换退出接管守卫进入重启等待,失败浮条展示原因
       if (!upgrade || upgrade.running !== true) {
         upgradeWatch.generation = null
-        // 落定拍(last 在)但未见调度标记不立即终判:继续运行路径的 stale 复读在
-        // 落定后异步完成,延迟宽限补查一拍再取终态;快照归零(last 空,宿主已换代)
-        // 同样补查,仍无结果即转状态未知,不留永久"进行中"
-        if (upgrade && upgrade.last) {
-          if (upgrade.last.autoRestartScheduled === true) {
-            showUpgradeFloat(upgrade.last)
-            return
-          }
-          setTimeout(() => {
-            if (upgradeWatch.generation !== null) return
-            void recheckUpgradeSettle(upgrade.last)
-          }, UPGRADE_AUTO_RESTART_GRACE_MS)
-        } else if (upgrade) {
-          setTimeout(() => {
-            if (upgradeWatch.generation !== null) return
-            void recheckUpgradeSettle(null)
-          }, UPGRADE_AUTO_RESTART_GRACE_MS)
-        }
+        if (upgrade && upgrade.last) showUpgradeFloat(upgrade.last)
         return
       }
     } catch (pollError) {
@@ -306,48 +253,22 @@ function ensureUpgradeFloatStyle() {
   document.head.appendChild(style)
 }
 
-// 升级成功落定的浮条终态文案:stale(执行成功但目标未达成)最优先且不得提及重启,
-// 其后按宿主是否自动重启分流指引
+// 升级落定的浮条终态文案:切换成功必接退出,失败按原因分流
 // LOGIC-BEGIN upgradeFinalText
 function upgradeFinalText(state) {
-  if (state.stale === true) return '升级命令执行完成,但结果与安装意图不符,详情见版本与运维页'
-  if (state.autoRestartScheduled === true) return '升级完成,宿主将自动重启,页面恢复后可直接使用'
-  return '升级完成,重启宿主后生效(版本与运维页可重启)'
+  if (state.ok === true) return '升级完成,宿主正在退出切换版本,页面恢复后可直接使用'
+  return '升级失败:' + (state.error || '详情见版本与运维页')
 }
 // LOGIC-END upgradeFinalText
 
-// 从已解析安装命令提取钉定版本(@x.y.z 精确版本 token,取最后合法者)。
-// 与 core extractPinnedVersion 镜像(parity 对拍):客户端无 parseSemver,
-// token 合法性以内嵌 semver 语法判定,规则与 host SEMVER_PATTERN 同源
-// LOGIC-BEGIN extractPinnedVersion
-function extractPinnedVersion(command) {
-  const text = typeof command === 'string' ? command : ''
-  const pattern = /@([0-9A-Za-z][0-9A-Za-z.+-]*)/g
-  const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
-  let pinned = null
-  for (const match of text.matchAll(pattern)) {
-    if (semverPattern.test(match[1])) pinned = match[1]
-  }
-  return pinned
-}
-// LOGIC-END extractPinnedVersion
-
-// 安装确认弹窗的版本变更说明:钉定版本最优先(意图=精确版本,附改回 {tag} 指引);
-// 通道语义按 未知/重装(含已装将被替换提示)/升级/无法判定/回退 分支,
-// 回退表述不断言方向(semver 等值但字面不同时同样成立),判等只用字符串相等
+// 安装确认弹窗的版本变更说明:目标=通道最新精确版本;按 未知/重装(含已装将被替换
+// 提示)/升级/无法判定/回退 分支,回退表述不断言方向,判等只用字符串相等
 // LOGIC-BEGIN buildInstallChangeLine
-function buildInstallChangeLine(status, command) {
-  // 与通道名重合的 token 是 {tag} 展开产物(通道名可为 semver 形态),不属钉定
-  const detected = extractPinnedVersion(command)
-  const pinned = detected !== null && detected !== status.channel ? detected : null
-  if (pinned !== null) {
-    return '将安装指定版本 ' + pinned + '(当前运行 ' + (status.runningVersion || '未知')
-      + ');回退或修复完成后,请把命令模板改回含 {tag} 的原形态,否则后续安装持续钉在该版本。'
-  }
+function buildInstallChangeLine(status) {
   const target = status.channelLatest
   const running = status.runningVersion
   if (!target) {
-    return '通道最新版未知,将安装通道「' + status.channel + '」当前指向的版本。'
+    return '通道最新版未知,请先检查更新。'
   }
   if (target === running) {
     const pending = status.installedVersion && status.installedVersion !== running
@@ -363,13 +284,6 @@ function buildInstallChangeLine(status, command) {
   return '通道目标 ' + target + ' 不高于当前运行 ' + (running || '未知') + ',宿主将回退/对齐到通道版本。'
 }
 // LOGIC-END buildInstallChangeLine
-
-// 弹窗的当前版本行:运行/已装任一缺失回退"未知"
-// LOGIC-BEGIN buildInstallVersionHint
-function buildInstallVersionHint(status) {
-  return '版本变更:当前 运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')
-}
-// LOGIC-END buildInstallVersionHint
 
 // state:null=进行中;对象=升级结果(last,ok 区分成败);'unknown'=观察超限状态未知
 function showUpgradeFloat(state) {
@@ -390,12 +304,9 @@ function showUpgradeFloat(state) {
     text.textContent = '升级状态长时间未更新,请刷新页面查看'
   } else if (state.ok) {
     text.textContent = upgradeFinalText(state)
-  } else if (state.stillRunning === true) {
-    // 强杀后进程树疑似仍存活:升级入口已由锁锁定直至过期,不做"可重跑"的误导指引
-    text.textContent = '升级超时已终止;旧进程可能仍在运行,升级入口已锁定直至其退出或锁过期'
-  } else if (state.timedOut === true) {
-    // 超时强杀即包管理器被中途杀死,全局目录可能半写,提示先验证再重启
-    text.textContent = '升级超时已终止;安装可能只完成一半,重启宿主前请先确认命令需否重跑'
+  } else if (state.phase === 'indeterminate') {
+    // 超时强杀/npm 仍在写:槽位已隔离,升级入口锁定直至人工核验,不做"可重跑"误导
+    text.textContent = '升级异常终止;安装目录已隔离待人工核验,详情见版本与运维页'
   } else {
     // 浮条只做通知,stderr 摘要在版本与运维页完整展示
     text.textContent = '升级失败:' + (state.error || '详情见版本与运维页')
@@ -464,22 +375,7 @@ function EditRow(props) {
   )
 }
 
-// 布尔开关:原生 checkbox 保可访问性,视觉为 track 胶囊 + thumb 圆点(规约形态);
-// input 与 track 必须保持紧邻兄弟(状态选择器为紧邻组合器),文字标签排最后,视觉经 order 提前
-function Switch(props) {
-  return h('label', { className: 'dm-switch', title: props.title },
-    h('input', {
-      type: 'checkbox',
-      checked: props.checked === true,
-      disabled: props.disabled === true,
-      onChange: (e) => props.onChange(e.target.checked),
-    }),
-    h('span', { className: 'dm-switch__track' }, h('span', { className: 'dm-switch__thumb' })),
-    props.label ? h('span', { className: 'dm-row__label' }, props.label) : null,
-  )
-}
-
-// 版本区:当前版本、通道切换、通道最新版、结论、检查时间与错误、刷新与升级、升级命令编辑。
+// 版本区:当前版本、通道切换、通道最新版、结论、检查时间与错误、刷新与升级。
 function VersionCard(props) {
   const status = props.status
   const tags = status.tags || {}
@@ -496,13 +392,13 @@ function VersionCard(props) {
         disabled: props.busy.refresh || props.restarting,
         onClick: props.onRefresh,
       }, props.busy.refresh ? '检查中…' : '刷新'),
+      h('span', { className: 'dm-meta' }, '候选profile隔离启动与健康探针尚未实现，升级功能暂不可用。'),
       h('button', {
         className: 'dm-btn',
-        // 安装入口全版本状态可点(重装修复/回退是显式意图):仅瞬态禁用(请求在途/升级进行中/重启等待);
-        // 残留锁与互斥保护在提交时由 host 409 拒绝,原因经 toast 提示
-        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running),
+        disabled: true,
+        title: '候选profile隔离启动与健康探针尚未实现',
         onClick: props.onUpgrade,
-      }, '安装'),
+      }, '安装（暂不可用）'),
     ),
     status.restartPending === true
       ? h('div', { className: 'dm-notice dm-notice--warn' },
@@ -534,15 +430,6 @@ function VersionCard(props) {
         onClick: props.onReleaseNotes,
       }, '更新内容'),
     ),
-    h(EditRow, {
-      label: '升级命令',
-      value: status.upgradeTemplate === DEFAULT_UPGRADE_TEMPLATE ? '' : status.upgradeTemplate,
-      placeholder: DEFAULT_UPGRADE_TEMPLATE,
-      busy: props.busy.template,
-      restarting: props.restarting,
-      onSave: props.onTemplateSave,
-      hint: '默认以灰字提示,清空保存即恢复默认;{tag} 执行时替换为追踪通道;升级完成后需重启生效',
-    }),
   )
 }
 
@@ -572,7 +459,7 @@ function SettingsCard(props) {
   )
 }
 
-// 升级状态区:进行中显示命令与已用时;结束后显示结果,成功附重启入口,失败附 stderr 摘要。
+// 升级状态区:进行中显示阶段与已用时;结束后显示结果,失败附原因摘要。
 function UpgradeCard(props) {
   const upgrade = props.status.upgrade
   if (!upgrade || (!upgrade.running && !upgrade.last)) return null
@@ -582,35 +469,18 @@ function UpgradeCard(props) {
     upgrade.running
       ? h('div', { className: 'dm-row' },
           h('span', { className: 'dm-warn' }, '升级进行中'),
-          h('span', { className: 'dm-meta' }, last ? last.command : ''),
+          h('span', { className: 'dm-meta' }, last ? (last.phase || '') + (last.targetVersion ? ' → ' + last.targetVersion : '') : ''),
           h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(last ? last.startedAt : Date.now())),
         )
       : null,
     !upgrade.running && last
       ? h('div', { className: 'dm-row' },
-          // stale(执行成功但版本未前进/未达目标)时成功行降格为中性表述,不引导重启,
-          // 与下方 stale 警告行自洽
-          last.ok ? h('span', { className: last.stale === true ? 'dm-warn' : 'dm-ok' },
-              last.stale === true ? '升级命令执行完成,但结果与安装意图不符' : '升级完成,重启宿主后生效')
-            : h('span', { className: 'dm-error' }, '升级失败'
-                + (last.code !== null && last.code !== undefined ? '(退出码 ' + last.code + ')' : '')
-                + (Array.isArray(last.attempts) && last.attempts.length > 1 ? '(已尝试 ' + last.attempts.length + ' 次)' : '')
-                + (last.timedOut ? ',已超时终止;安装可能只完成一半,重启前先确认命令需否重跑' : '')),
-          h('span', { className: 'dm-spacer' }),
-          last.ok && last.stale !== true ? h('button', {
-            className: 'dm-btn',
-            // 与 OpsCard 入口行为归一:appExit 缺失时必然 500,不得开放重启入口
-            disabled: props.restarting || !props.status.canRestart,
-            onClick: props.onRestart,
-          }, restartConfirmLabel(props.restartArmed, props.activeWorkTotal)) : null,
-        )
+          last.ok ? h('span', { className: 'dm-ok' }, '升级完成,宿主正在退出切换版本')
+            : h('span', { className: 'dm-error' }, '升级失败:' + (last.error || '详情见日志')))
       : null,
-    !upgrade.running && last && last.ok === true && last.stale === true
+    !upgrade.running && last && last.ok === true && last.exitScheduled !== true
       ? h('div', { className: 'dm-row' },
-          h('span', { className: 'dm-warn' }, '安装结果与意图不符: ' + (last.reason || '镜像可能滞后')))
-      : null,
-    !upgrade.running && last && !last.ok && last.stderrTail
-      ? h('pre', { className: 'dm-pre' }, last.stderrTail)
+          h('span', { className: 'dm-warn' }, '已切换但启动器未提供退出能力,请手动重启宿主'))
       : null,
   )
 }
@@ -642,42 +512,22 @@ function OpsCard(props) {
   )
 }
 
-// 安装确认弹窗:展示版本变更(从→到)、将执行的命令({tag} 已替换为追踪通道)与自动重启勾选。
+// 安装确认弹窗:展示版本变更(从→到)与目标版本,安装即正常退出切换,由启动方式拉起。
 // 重装修复(目标==运行版本)与回退(目标低于运行版本)是面板显式意图,窗内分类说明
 function UpgradeDialog(props) {
-  // 每次打开都重新挂载(MaintainApp 条件渲染),默认勾选随挂载重置
-  const [autoRestart, setAutoRestart] = useState(true)
   const status = props.status
-  const template = typeof status.upgradeTemplate === 'string' && status.upgradeTemplate.length > 0
-    ? status.upgradeTemplate
-    : DEFAULT_UPGRADE_TEMPLATE
-  const command = template.split('{tag}').join(status.channel)
-  const changeLine = buildInstallChangeLine(status, command)
+  const changeLine = buildInstallChangeLine(status)
   return h('div', { className: 'dm-dialog__mask', onClick: props.onCancel },
     h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
       h('div', { className: 'dm-card__title' }, '确认安装'),
-      h('div', { className: 'dm-dialog__hint' }, buildInstallVersionHint(status)),
+      h('div', { className: 'dm-dialog__hint' }, '版本变更:当前 运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h('div', { className: 'dm-dialog__hint dm-warn' }, changeLine),
-      h('div', { className: 'dm-dialog__hint' }, '将执行以下命令(安装期间页面可离开,进度由右下角浮条提示):'),
-      h('pre', { className: 'dm-pre' }, command),
-      h('div', { className: 'dm-dialog__section' },
-        h(Switch, {
-          label: '安装完成后自动重启宿主',
-          checked: autoRestart,
-          onChange: setAutoRestart,
-          disabled: status.canRestart !== true,
-        }),
-        h('div', { className: 'dm-dialog__outcome' },
-          status.canRestart !== true
-            ? '当前启动方式不支持就地退出:无论是否勾选,安装完成后都需在宿主侧重启生效。'
-            : autoRestart
-              ? '已勾选:安装命令执行成功后,宿主将在 ' + AUTO_RESTART_DELAY_SEC + ' 秒后自动退出——等同点击重启按钮:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;本页随宿主恢复自动刷新。安装落定后宿主不再执行任何网络请求与磁盘读取。'
-              : '未勾选:安装完成后宿主继续运行当前版本,面板提示「重启宿主后生效」,需要你手动点击重启按钮才切换到目标版本。'),
-      ),
+      h('div', { className: 'dm-dialog__hint' },
+        '安装完成后宿主将正常退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'),
       h('div', { className: 'dm-row' },
         h('span', { className: 'dm-spacer' }),
         h('button', { className: 'dm-btn', onClick: props.onCancel }, '取消'),
-        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(autoRestart) }, '开始安装'),
+        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(status.channelLatest) }, '开始安装'),
       ),
     ),
   )
@@ -764,8 +614,8 @@ function MaintainApp() {
   // pid/bootAt 保持确认时刻基线不可被拍结果覆盖,否则重启判定恒 false;null=未在等待态
   const restartPrevRef = useRef(null)
   const restartPendingRef = useRef(false)
-  // 自动重启接管防重入:接管无 POST 在途语义(restartPendingRef),需独立一次性令牌
-  const autoRestartTakenRef = useRef(false)
+  // 切换退出接管防重入:接管无 POST 在途语义(restartPendingRef),需独立一次性令牌
+  const switchExitTakenRef = useRef(false)
 
   function markBusy(key, value) {
     setBusy((prev) => Object.assign({}, prev, { [key]: value }))
@@ -782,25 +632,26 @@ function MaintainApp() {
   }
 
   // 挂载即订阅观察器快照,页面刷新落在升级进行中时恢复浮条与观察;
-  // 订阅回调(落定拍)与初始 load 快照(刷新落在调度窗口)两路同走接管守卫
+  // 订阅回调(落定拍)与初始 load 快照(刷新落在调度窗口)两路同走切换退出接管守卫
   useEffect(() => {
     const unsubscribe = subscribeUpgradeStatus((snapshot) => {
       if (snapshot !== null) setStatus(snapshot)
-      takeOverAutoRestart(snapshot)
+      takeOverSwitchExit(snapshot)
     })
     void load().then((next) => {
-      if (next !== null) takeOverAutoRestart(next)
+      if (next !== null) takeOverSwitchExit(next)
       if (next !== null && next.upgrade !== null && next.upgrade.running === true) ensureUpgradeWatch()
     })
     return unsubscribe
   }, [])
 
-  // 自动重启接管守卫:快照带调度标记且未在等待/接管态时,以该快照为基线自动进入
-  // 重启等待(复用 restartTick 探测,无需用户点击);autoRestartTakenRef 防多拍重入
-  function takeOverAutoRestart(snapshot) {
-    if (snapshot === null || snapshot.autoRestartScheduled !== true) return
-    if (restartPendingRef.current === true || autoRestartTakenRef.current === true) return
-    autoRestartTakenRef.current = true
+  // 切换退出接管守卫:快照带 exitScheduled 且未在等待/接管态时,以该快照为基线自动进入
+  // 重启等待(复用 restartTick 探测,无需用户点击);switchExitTakenRef 防多拍重入
+  function takeOverSwitchExit(snapshot) {
+    if (snapshot === null || !snapshot.upgrade || !snapshot.upgrade.last) return
+    if (snapshot.upgrade.last.exitScheduled !== true) return
+    if (restartPendingRef.current === true || switchExitTakenRef.current === true) return
+    switchExitTakenRef.current = true
     beginRestartWait({ lost: false, pid: snapshot.pid, bootAt: snapshot.bootAt, readyStreak: 0 })
   }
 
@@ -928,12 +779,6 @@ function MaintainApp() {
       .then(() => markBusy(busyKey, false))
   }
 
-  function onTemplateSave(template) {
-    const text = typeof template === 'string' ? template.trim() : ''
-    // 空输入即恢复默认:输入框留空时以 placeholder 展示默认命令,保存空 = 回到默认模板
-    submitEdit(TEMPLATE_URL, { template: text.length > 0 ? text : DEFAULT_UPGRADE_TEMPLATE }, 'template', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
-  }
-
   function onPollInterval(raw) {
     const text = typeof raw === 'string' ? raw.trim() : ''
     // 空输入即恢复默认:输入框留空时以 placeholder 展示默认间隔
@@ -977,12 +822,13 @@ function MaintainApp() {
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
-  function onUpgrade(autoRestart) {
+  function onUpgrade(targetVersion) {
     setUpgradeDialogOpen(false)
     markBusy('upgrade', true)
-    post(UPGRADE_URL, { autoRestart: autoRestart === true })
+    post(UPGRADE_URL, { targetVersion })
       .then((next) => {
-        setStatus(next); setError(null)
+        const snapshot = next && next.status ? next.status : next
+        setStatus(snapshot); setError(null)
         // 升级转后台执行:观察器接管状态跟踪与完成提示,页面可离开
         ensureUpgradeWatch()
       })
@@ -1069,7 +915,7 @@ function MaintainApp() {
     h('style', { 'data-plugin': '@mzzsfy/dsh-maintain', dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'dm-head' },
       h('span', { className: 'dm-head__title' }, '版本与运维'),
-      h('span', { className: 'dm-head__hint' }, '追踪 npm 新版本,一键升级,安全重启'),
+      h('span', { className: 'dm-head__hint' }, '追踪 npm 新版本,查看更新内容,安全重启'),
     ),
     restarting ? h('div', { className: 'dm-notice dm-notice--warn' },
       '重启指令已发送,宿主正在退出;恢复后本页自动刷新,请勿关闭页面。') : null,
@@ -1083,7 +929,6 @@ function MaintainApp() {
       restarting,
       onRefresh,
       onChannel,
-      onTemplateSave,
       onUpgrade: () => { setRestartArmed(false); setUpgradeDialogOpen(true) },
       onReleaseNotes: () => { setRestartArmed(false); setNotesVersion(status.channelLatest) },
       onRestart,

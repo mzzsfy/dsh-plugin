@@ -96,7 +96,10 @@ test('源码契约:回填前经 useInput 快照探测输入框,非空不覆盖',
 // - 重拉结果与在途基线对比,相同则不再 setState(否则 setState→重渲染→扫描无限循环)
 
 test('源码契约:映射缺失的轮触发重拉而非静默跳过', () => {
-  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {'), CLIENT_SRC.indexOf('if (typeof MutationObserver'))
+  // 锚定 ForkDock 起点切片:SteerRecallDock 的注入 scan 同名在先,不得误抓
+  const forkStart = CLIENT_SRC.indexOf('function ForkDock({')
+  assert.ok(forkStart > 0, 'ForkDock 切片定位失败')
+  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {', forkStart), CLIENT_SRC.indexOf('if (typeof MutationObserver', forkStart))
   assert.ok(scan.includes('entry === undefined'), '扫描应识别映射缺失的轮')
   assert.ok(scan.includes('refreshRef.current()'), '映射缺失时应触发重拉')
 })

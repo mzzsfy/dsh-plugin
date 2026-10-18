@@ -11,7 +11,6 @@ export const VERDICT_UP_TO_DATE = 'up-to-date'
 export const VERDICT_UNKNOWN = 'unknown'
 
 export const TARGET_PACKAGE = '@deepseek-ai/dsh'
-export const TAG_PLACEHOLDER = '{tag}'
 export const DIST_TAGS_PATH = '/-/package/' + encodeURIComponent(TARGET_PACKAGE) + '/dist-tags'
 
 const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/
@@ -91,91 +90,7 @@ export function isVersionPendingRestart({ runningVersion, installedVersion }) {
   return Boolean(parseSemver(runningVersion) && parseSemver(installedVersion) && gtSemver(installedVersion, runningVersion))
 }
 
-// 从已解析安装命令提取钉定版本(形如 @x.y.z[-pre][+build] 的精确版本 token),
-// 取最后一个合法者(包说明符通常在命令尾部);token 只在 semver 字符集内截取,
-// shell 粘连(&&、;、>)不参与;通道名/@latest/非法形态不命中,无钉定返回 null。
-// 约束:semver 形态的通道名({tag} 展开产物)不属钉定,调用方须排除与通道名重合的 token
-const PINNED_TOKEN_PATTERN = /@([0-9A-Za-z][0-9A-Za-z.+-]*)/g
-export function extractPinnedVersion(command) {
-  const text = typeof command === 'string' ? command : ''
-  let pinned = null
-  for (const match of text.matchAll(PINNED_TOKEN_PATTERN)) {
-    if (parseSemver(match[1]) !== null) pinned = match[1]
-  }
-  return pinned
-}
-
-// 升级后磁盘版本复读判定:stale=结果与安装意图不符。意图优先级:
-// 钉定版本(命令含 @x.y.z)→ 恰装到该版本才算达成,通道目标不参与对拍;
-// 通道语义:目标>来版=升级(未前进/未达皆 stale);目标<=来版=重装或回退,
-// 恰落到通道目标即达成(重装版本不变是预期,回退方向不套"未前进"口径)。
-// previous 未知只豁免"未前进"分支;目标缺失时无法证明未达标,宽松判 fresh 不误报。
-export function judgeUpgradeFreshness({ previousVersion, installedVersion, channelLatest, pinnedVersion }) {
-  if (!parseSemver(installedVersion)) {
-    return { stale: true, reason: '升级后磁盘版本解析失败' + (installedVersion ? ': ' + installedVersion : '(读取失败)') }
-  }
-  if (parseSemver(pinnedVersion)) {
-    return compareSemver(installedVersion, pinnedVersion) === 0
-      ? { stale: false, reason: null }
-      : { stale: true, reason: '未安装到指定版本: ' + installedVersion + '(命令钉定 ' + pinnedVersion + ')' }
-  }
-  if (parseSemver(previousVersion) !== null && parseSemver(channelLatest) !== null
-    && compareSemver(channelLatest, previousVersion) <= 0) {
-    return compareSemver(installedVersion, channelLatest) === 0
-      ? { stale: false, reason: null }
-      : { stale: true, reason: '未落到通道目标: ' + installedVersion + '(通道目标 ' + channelLatest + ')' }
-  }
-  if (parseSemver(previousVersion) && !gtSemver(installedVersion, previousVersion)) {
-    return { stale: true, reason: '磁盘版本未前进,升级可能静默失败或镜像滞后: ' + installedVersion }
-  }
-  if (parseSemver(channelLatest) && gtSemver(channelLatest, installedVersion)) {
-    return { stale: true, reason: '已升级但未达通道目标: ' + installedVersion + ' < ' + channelLatest }
-  }
-  return { stale: false, reason: null }
-}
-
-// 升级失败分类 kind 常量;导出供重试循环与测试对拍
-export const UPGRADE_FAIL_TRANSIENT_NETWORK = 'transient-network'
-export const UPGRADE_FAIL_FILE_LOCKED = 'file-locked'
-export const UPGRADE_FAIL_NPM_MISSING = 'npm-missing'
-export const UPGRADE_FAIL_TIMEOUT = 'timeout'
-export const UPGRADE_FAIL_UNKNOWN = 'unknown'
-
-// 特征宽松:未命中一律归 unknown 不可重试,绝不误判重试不可重试类。
-// 文件锁特征(npm error code EBUSY/EPERM 等 Windows 全局目录占用形态);
-// ENOENT 与 rename/unlink 分行输出,故窗口跨行。
-const FILE_LOCKED_PATTERN = /EBUSY|EPERM|ENOENT[\s\S]{0,200}(?:rename|unlink)|resource busy|being used by another process/i
-const NPM_ERROR_MARKER = 'npm error'
-// 命令未找到形态:cmd 与 sh 的报错文案 + spawn 失败裸 ENOENT(无 npm error 前缀)
-const COMMAND_MISSING_PATTERN = /不是内部或外部命令|command not found|not found/i
-const ENOENT_PATTERN = /\bENOENT\b/i
-// 网络瞬断特征:常见 errno + socket/fetch 文案 + registry 5xx 形态(E503/HTTP 5xx)
-const TRANSIENT_NETWORK_PATTERN = /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|socket hang up|fetch failed|network|\bE5\d{2}\b|HTTP 5\d{2}/i
-
-// 升级单次尝试失败分类:超时强杀最优先(超时绝不重试),其余按输出特征匹配。
-// 合并 stderr 与 stdout 尾流:npm 的 code/syscall 行在 stderr,部分形态在 stdout。
-export function classifyUpgradeFailure({ code, timedOut, stdoutTail, stderrTail } = {}) {
-  const text = String(stderrTail ?? '') + '\n' + String(stdoutTail ?? '')
-  if (timedOut === true) {
-    return { kind: UPGRADE_FAIL_TIMEOUT, retryable: false, reason: '升级命令超时被强制终止' }
-  }
-  if (FILE_LOCKED_PATTERN.test(text)) {
-    return { kind: UPGRADE_FAIL_FILE_LOCKED, retryable: true, reason: '全局目录文件被占用(杀毒/索引服务或并行进程)' }
-  }
-  const hasNpmErrorPrefix = text.includes(NPM_ERROR_MARKER)
-  if ((COMMAND_MISSING_PATTERN.test(text) || ENOENT_PATTERN.test(text)) && !hasNpmErrorPrefix) {
-    return { kind: UPGRADE_FAIL_NPM_MISSING, retryable: false, reason: '命令未找到,检查升级命令模板' }
-  }
-  if (TRANSIENT_NETWORK_PATTERN.test(text)) {
-    return { kind: UPGRADE_FAIL_TRANSIENT_NETWORK, retryable: true, reason: '网络瞬断或 registry 暂不可用' }
-  }
-  return { kind: UPGRADE_FAIL_UNKNOWN, retryable: false, reason: '未识别的失败形态' }
-}
-
-// 模板占位符执行时替换;模板允许不含占位符(用户整体自改命令),空模板拒绝。
-// tag 经白名单校验:tag 名来自远端 registry 数据,拼入 shell 命令前单点拦截
-// shell 元字符,封死"远端数据回流成命令"通路。
-// 形态对齐 npm dist-tag 规则:仅 ASCII 字母数字-._,首尾为字母数字,长度上限 214。
+// 通道名白名单:形态对齐 npm dist-tag 规则,仅 ASCII 字母数字-._,首尾字母数字,长度上限 214。
 const CHANNEL_NAME_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-_.]*[0-9A-Za-z]$|^[0-9A-Za-z]$/
 const CHANNEL_NAME_MAX_LENGTH = 214
 
@@ -184,13 +99,6 @@ export function isValidChannelName(channel) {
     && channel.length > 0
     && channel.length <= CHANNEL_NAME_MAX_LENGTH
     && CHANNEL_NAME_PATTERN.test(channel)
-}
-
-export function buildUpgradeCommand({ template, tag }) {
-  const text = typeof template === 'string' ? template.trim() : ''
-  if (text.length === 0) throw new Error('升级命令模板为空,拒绝执行')
-  if (!isValidChannelName(tag)) throw new Error('通道名含非法字符,拒绝执行: ' + tag)
-  return text.split(TAG_PLACEHOLDER).join(tag)
 }
 
 // 重启后是否整页刷新:prev/next 为 {lost,pid,bootAt} 快照。

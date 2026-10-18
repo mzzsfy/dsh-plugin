@@ -18,7 +18,12 @@
 
 ### 插话撤回
 
-消息气泡操作排的撤回图标:未应用的插话撤回到输入框重新编辑。RPC 走会话绑定面 `binding.session.updateQueue`,不与官方会话服务耦合。
+未应用插话气泡(消息流 steering 项)操作排的撤回图标:点击撤回到输入框重新编辑。RPC 走会话绑定面 `binding.session.updateQueue`,不与官方会话服务耦合。
+
+- 注入形态同 fork(官方复制按钮模式):克隆官方按钮类,尺寸/hover/悬停显隐原生;显隐由 inbox 投影行集驱动——行在(未应用)注入,行不在(已应用/已撤回)即时摘除,投影订阅驱动重扫
+- 气泡双阶段全覆盖:插话发送后第一阶段为 Host optimistic pending 气泡(`data-pending-steering`,无 node-key,按渲染文本对齐投影行),消费后转 durable steering 气泡(`data-chat-flow-kind="steering"`,按 node-key messageId 匹配)——pending 文本不一致(Markdown 渲染)时不注入,降级等 durable,失败方向安全
+- 图标在场即暗示可撤:点击与投影更新之间的竞态窗口由「行不在降级提示 / remove 失败提示」兜底;含附件的插话点击明确提示不支持
+- 匹配:durable 气泡 `data-chat-node-key` 的 `input-message` 后缀与 `next-step` 投影行 id 同源(官方两侧同用 `String(event.data.id)`),点击时实时重读防节点复用后过期
 
 ### 对话分叉(fork,重写式)
 
@@ -66,10 +71,4 @@
 
 ## dsh 版本兼容
 
-- 0.2.0-rc.2:完全适配(装载 + 功能面逐格验证通过;fork 按钮注入在 0.2.0-rc.2 宿主下待归因,见 FIND-020-2)。插话撤回数据面适配:0.2.0 起 conversation `useSession` 的 `queue` 仅含 inbox `next-turn`,未应用插话改驻留 inbox `next-step` 队列,撤回行改经会话绑定面 `projections.faceOf('inbox')` 读取
-- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
-- 0.1.5-rc.3:未承诺(仅 shell-select 有宿主要求豁免;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
-
-历史验收(Round 30,2026-09-27):0.1.7-rc.2 完全适配(设置 HTTP 写读闭环 + 内置插件分区卡渲染 + 样式契约 + 历史输入浮层面);0.1.5-rc.3 曾判不崩溃底线通过(已被 2026-09-30 复测推翻,见上);历史窗口 0.1.2-rc.1 兼容通过(浮层/启停路由/方法白名单)。0.1.6 设置分区卡片位于「插件」页,非独立导航项;0.1.7 内置插件页改版为分组列表(无卡片开关锚,宿主演进),样式与 API 面实测正常。
-
-更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

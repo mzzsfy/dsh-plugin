@@ -1,10 +1,12 @@
 // BDD 场景 11 + 12:usage 可配(--tokens)与留档 scenario 字段(只增不改)。
+// BDD 场景 13:留档总大小上限(超 maxBytes 截到 maxBytes/2 以下,行完整优先)。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { start } from '../server.mjs'
+import { createRecorder } from '../recorder.mjs'
 import { installDelegate } from '../streaming.mjs'
 import { parseSse } from './helpers.mjs'
 
@@ -78,4 +80,53 @@ test('错误码注入先于流式判定:stream 与 -err 组合仍为错误码', 
     assert.equal(res.status, 429)
     assert.doesNotMatch(res.headers.get('content-type'), /event-stream/)
   } finally { close() }
+})
+
+// Given maxBytes=1000 的 recorder / When 记录总量越过上限 / Then 文件收缩至 500 以下且行完整可解析
+test('留档超限截断:总量超 maxBytes 后收缩至 maxBytes/2 以下', () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'echo-upstream-rec-')), 'r.jsonl')
+  const rec = createRecorder(log, 1000)
+  rec({ msg: 'a'.repeat(400) })
+  rec({ msg: 'b'.repeat(400) })
+  rec({ msg: 'c'.repeat(400) })
+  const buf = readFileSync(log)
+  assert.ok(buf.length <= 500, `size=${buf.length}`)
+  const lines = buf.toString('utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(lines, [{ msg: 'c'.repeat(400) }])
+})
+
+// Given 已截断的 recorder / When 继续记录再次超限 / Then 再次收缩且追加不受影响
+test('留档截断可重复触发:截断后继续记录仍有界', () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'echo-upstream-rec-')), 'r.jsonl')
+  const rec = createRecorder(log, 1000)
+  rec({ msg: 'a'.repeat(400) })
+  rec({ msg: 'b'.repeat(400) })
+  rec({ msg: 'c'.repeat(400) })
+  rec({ msg: 'd'.repeat(400) })
+  rec({ msg: 'e'.repeat(400) })
+  const buf = readFileSync(log)
+  assert.ok(buf.length <= 500, `size=${buf.length}`)
+  const lines = buf.toString('utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(lines, [{ msg: 'e'.repeat(400) }])
+})
+
+// Given 单条记录超过保留线 / When 总量超限触发截断 / Then 最后一条完整行保留,不产生半行
+test('留档单行超限:截断退化为保留最后一行', () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'echo-upstream-rec-')), 'r.jsonl')
+  const rec = createRecorder(log, 1000)
+  rec({ msg: 'a'.repeat(400) })
+  rec({ msg: 'b'.repeat(1200) })
+  const buf = readFileSync(log)
+  const lines = buf.toString('utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(lines, [{ msg: 'b'.repeat(1200) }])
+})
+
+// Given 文件仅一条自身超限的记录(此前无任何行边界) / When 记录触发超限 / Then 无旧边界可回退,完整保留该行
+test('留档首行即超限:无旧行边界时完整保留全部', () => {
+  const log = join(mkdtempSync(join(tmpdir(), 'echo-upstream-rec-')), 'r.jsonl')
+  const rec = createRecorder(log, 1000)
+  rec({ msg: 'b'.repeat(1200) })
+  const buf = readFileSync(log)
+  const lines = buf.toString('utf8').trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(lines, [{ msg: 'b'.repeat(1200) }])
 })

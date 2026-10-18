@@ -6,12 +6,13 @@
  *   node scripts/publish.mjs <包名|all> [选项]
  * 选项:
  *   --bump patch|minor|major   本地版本已发布时自动升版本再发(默认同版本即 no-op)
- *   --skip-test                跳过发布前测试
+ *   --skip-test                跳过目标包测试;all 模式下也跳过聚合门(显式豁免,高风险)
  *   --dry-run                  只打印将执行的动作,不发布、不改版本、不打 tag
  *
  * 规则:
  *   - 发版判定以 tag 为事实源:发布成功后自动提交版本号变更并打 tag,tag 始终指向该版本的完整源码状态
  *   - 本地版本低于线上:拒绝发布(防版本回退);版本无法比较(如 prerelease)时中止
+ *   - <包名> 只执行该包测试;all 先运行全仓聚合测试,再逐包运行测试
  *   - 本地版本等于线上:按版本 tag 后的包目录提交数判定——无提交则 SKIP(无需发版);
  *     有提交则拒绝并要求显式 --bump(防止代码已变而版本未动被误判为无需更新);
  *     tag 缺失则补打 tag 并跳过(自愈历史"发布成功未打 tag"状态)
@@ -54,8 +55,9 @@ function sleepMs(ms) {
  * 执行 npm 命令。Windows 下 npm 是 .cmd 脚本,Node 对其强制要求 shell
  * (无 shell 直接 EINVAL),故走 shell 字符串形式;参数全部来自内部白名单
  * (包名白名单/版本正则校验/registry 常量),无外部输入拼接。返回 { status, stdout, stderr }。
- * opts.interactive = true 时 stdio 继承当前终端(npm 账号开 2FA 时,发布的
- * EOTP/WebAuthn 流程需要 TTY:按回车打开浏览器认证后自动继续),此时无捕获输出。
+ * opts.stdio 默认 'pipe'(捕获输出供解析);传 'inherit' 时直连当前终端:
+ * 发布步骤必须如此(npm 账号开 2FA 时,EOTP/WebAuthn 流程需要 TTY,按回车打开
+ * 浏览器认证后自动继续),测试步骤也如此(失败明细实时可见,与聚合门同款)。
  */
 function runNpm(args, cwd, opts = {}) {
   const display = ['npm', ...args].join(' ')
@@ -64,7 +66,7 @@ function runNpm(args, cwd, opts = {}) {
     cwd,
     encoding: 'utf8',
     shell: true,
-    stdio: opts.interactive ? 'inherit' : 'pipe',
+    stdio: opts.stdio ?? 'pipe',
   })
   if (r.error) fail(`命令启动失败: ${display}(${r.error.message})`)
   return r
@@ -220,18 +222,25 @@ function publishOne(dirName, opts) {
     console.log(`${name} 尚未发布,本地 ${version} 将为首个线上版本`)
   }
 
+  const hasPackageTest = typeof manifest.scripts?.test === 'string' && manifest.scripts.test.trim().length > 0
   if (opts.dryRun) {
     console.log(`dry-run:将跳过测试与发布,动作序列如下`)
-    if (!opts.skipTest && manifest.scripts?.test) console.log(`  $ npm test(cwd: ${pkgDir})`)
+    if (!opts.skipTest && hasPackageTest) console.log(`  $ npm test(cwd: ${pkgDir})`)
+    else if (opts.skipTest) console.log('  (显式 --skip-test:目标包测试跳过)')
+    else if (opts.target !== 'all' && !hasPackageTest) console.log('  (缺少有效 test script:单包正式发布会拒绝)')
     else console.log('  (无测试步骤:--skip-test 或包未定义 test script)')
     console.log(`  $ npm run npmPublish(cwd: ${pkgDir}) -> ${name}@${version}`)
     ensureTag(name, version, opts)
     return
   }
 
-  if (opts.skipTest) console.log('SKIP  测试(--skip-test)')
-  else if (manifest.scripts?.test) {
-    const r = runNpm(['test'], pkgDir)
+  if (!opts.skipTest && opts.target !== 'all' && !hasPackageTest) {
+    fail(`${name} 未定义有效 test script,单包发布拒绝无目标测试发版`)
+  }
+  if (opts.skipTest) {
+    console.log('SKIP  测试(--skip-test)')
+  } else if (hasPackageTest) {
+    const r = runNpm(['test'], pkgDir, { stdio: 'inherit' })
     if (r.status !== 0) fail(`${name} 测试未通过,中止发布`)
   } else {
     console.log('SKIP  测试(包未定义 test script)')
@@ -240,7 +249,7 @@ function publishOne(dirName, opts) {
   // 发布步骤交互式执行:2FA 账号在终端按回车打开浏览器认证后自动继续。
   // 成败判据 = npm publish 退出码("+ 包@版本"输出由 npm 自身保证);registry CDN
   // 传播延迟不影响成败,回读 view 仅作信息展示,不做闸门。
-  const pub = runNpm(['run', 'npmPublish'], pkgDir, { interactive: true })
+  const pub = runNpm(['run', 'npmPublish'], pkgDir, { stdio: 'inherit' })
   if (pub.status !== 0) fail('发布失败(npm publish 非零退出,交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
   const readback = runNpm(['view', name, 'version', '--registry', REGISTRY])
@@ -264,19 +273,24 @@ function publishOne(dirName, opts) {
 const opts = parseArgs(process.argv.slice(2))
 if (opts.dryRun) console.log('dry-run 模式:不会发布、不会改版本、不会打 tag')
 
-/** 发布门前置聚合测试门(轮 3 收敛④:发布门与 CI 门互不引用的闭合):
- * 强制跑一遍仓库聚合单测(与 CI 同一入口),非零即中止;--skip-test 显式豁免时
- * 仍打印警告,逃生口保留但不静默。另打印最近一次 compat 结论作信息行(无则注明) */
+/** 单包目标只执行包测试;all 目标先执行全仓聚合测试,之后逐包测试。 */
 function aggregateGate() {
   if (opts.dryRun) {
-    console.log('dry-run:聚合测试门跳过(真实发布时强制执行)')
+    if (opts.skipTest) console.log('dry-run:--skip-test 将跳过全仓聚合门和目标包测试')
+    else console.log(opts.target === 'all'
+      ? 'dry-run:全量发布将先运行 node scripts/aggregate-tests.mjs --rounds 1 聚合门,再逐包测试'
+      : 'dry-run:单包发布只运行目标包测试,不运行全仓聚合门')
     return
   }
   if (opts.skipTest) {
-    console.log('WARN  --skip-test:聚合测试门已跳过,发布未经任何测试验证')
+    console.log('WARN  --skip-test:测试已显式跳过,发布未经测试验证')
     return
   }
-  console.log('  $ node scripts/aggregate-tests.mjs --rounds 1(发布门引用 CI 同源单测)')
+  if (opts.target !== 'all') {
+    console.log('单包发布:全仓聚合门不运行,目标包测试在发版前执行')
+    return
+  }
+  console.log('  $ node scripts/aggregate-tests.mjs --rounds 1(全量发布门引用 CI 同源单测)')
   const gate = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'aggregate-tests.mjs'), '--rounds', '1'], { cwd: repoRoot, stdio: 'inherit', windowsHide: true })
   if (gate.error) fail(`聚合测试启动失败: ${gate.error.message}`)
   if (gate.status !== 0) fail(`聚合测试未通过(exit ${gate.status}),中止发布;明细见上方输出`)

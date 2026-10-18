@@ -3,8 +3,8 @@ import { performance } from 'node:perf_hooks'
 import { register } from 'node:module'
 
 // 直接在进程内复刻存储面:用真实 createTask 造 1000 个聚合存内存 Map,压 board 投影纯函数
-const { queryBoard, projectTaskDetail } = await import('../../packages/dsh-ai-team/lib/core/query.mjs')
-const { createTask, defineWorkItem, authorizeTask } = await import('../../packages/dsh-ai-team/lib/core/task.mjs')
+const { queryBoard, projectTaskDetail } = await import('../../packages/dsh-boss-simulator/lib/core/query.mjs')
+const { createTask, defineWorkItem, authorizeTask } = await import('../../packages/dsh-boss-simulator/lib/core/task.mjs')
 
 const now = () => 1
 const aggregates = new Map()

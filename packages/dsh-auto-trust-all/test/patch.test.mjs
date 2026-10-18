@@ -1,7 +1,6 @@
-// patch 文件形态断言:覆盖 webserver 行的 config 是整体替换语义(不深合并),
-// 本包必须镜像官方全部键。此测试只读本包 patch 文本,锁本地镜像形态快照——
-// 它读不到官方安装目录,上游增删键不会在此失败;dsh 升级后须用
-// `dsh web --dump-default-config` 对照官方 webserver 行核对键集。
+// patch 文件形态断言:v2 形态起 bundle patch 只插入本插件行,不覆盖官方
+// webserver 行——0.2.1 线宿主拒通配绑定,bind 责任归部署层。此测试只读本包
+// patch 文本与 manifest,锁定发布物形态。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -10,22 +9,19 @@ import { dirname, join } from 'node:path'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const patchText = readFileSync(join(PKG_ROOT, 'cordis.patch.yml'), 'utf8')
+const manifest = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf8'))
 
-test('场景10 patch 形态: Given bundle patch Then webserver 行 name 防御且 host 默认翻转为全接口', () => {
-  // name 字段是 id 撞车防御:官方行改名即跳过并告警,而非误写他方行
-  assert.match(patchText, /- id: webserver\n  name: '@deepseek-ai\/dsh-host-webserver'/)
-  assert.match(patchText, /host: !!js ctx\.webStartup\.host \?\? '0\.0\.0\.0'/)
-})
-
-test('场景10 镜像契约: config 整体替换要求官方行全部键在场', () => {
-  // 本地镜像形态快照:与文件头声明一致,官方增删键不会在此失败,
-  // dsh 升级后须用 `dsh web --dump-default-config` 对照官方 webserver 行人工核对
-  assert.match(patchText, /port: !!js ctx\.webStartup\.port \?\? 3080/)
-  assert.match(patchText, /compression: gzip/)
-  assert.match(patchText, /compressionLevel: 1/)
-  assert.match(patchText, /compressionThresholdBytes: 1024/)
-})
-
-test('场景10 插件行: insert 操作指向本包', () => {
+test('场景10 patch 形态: Given bundle patch Then 仅含插件插入 op,不覆盖 webserver 且无通配绑定字样', () => {
   assert.match(patchText, /- insert:\n    - id: auto-trust-all\n      name: '@mzzsfy\/dsh-auto-trust-all'/)
+  assert.doesNotMatch(patchText, /id: webserver/)
+  assert.doesNotMatch(patchText, /0\.0\.0\.0/)
+})
+
+test('场景10 版本底线: manifest 声明最低验证宿主代际为 0.2.0-rc.2(同包覆盖 0.2.0/0.2.1 双线)', () => {
+  assert.equal(manifest.dsh.hostMin, '0.2.0-rc.2')
+})
+
+test('场景10 兼容登记: 双目标宿主代际均在 dshReleases', () => {
+  assert.equal(manifest.dsh.compatibility.dshReleases['0.2.0-rc.2'], 'compatible')
+  assert.ok(manifest.dsh.compatibility.dshReleases['0.2.1-alpha.2'])
 })

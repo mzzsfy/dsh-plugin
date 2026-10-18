@@ -1,0 +1,10 @@
+# boss-simulator bundle patch:把宿主控制面行注册进 profile 根
+# (`dsh plugin add @mzzsfy/dsh-boss-simulator` 应用):
+#   - boss-simulator-control:控制室服务(任务存储/派发/事件归并/看板路由)。
+# 角色会话(管理员/调度员)经专用预设组合进入控制室,不在宿主根注册会话行。
+
+- insert:
+    - id: boss-simulator-control
+      name: '@mzzsfy/dsh-boss-simulator'
+      config:
+        role: control

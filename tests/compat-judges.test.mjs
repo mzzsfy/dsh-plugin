@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  judgeProbeText, judgeActivationSnapshot, judgeUpstreamSeen, judgeLlm, judgeImportFailures, judgeFinal,
+  judgeProbeText, judgeActivationSnapshot, judgeUpstreamSeen, judgeRoundtrip, judgeLlm, judgeImportFailures, judgeFinal,
 } from '../scripts/compat/compat-judges.mjs'
 import { WORKSPACE_TEXT, FAIL_BANNER, IMPORT_FAIL_RE, TOKEN_RE, UPSTREAM_PATHS, PLATFORM_GATED_BUNDLES } from '../scripts/compat/compat-criteria.mjs'
 
@@ -52,12 +52,49 @@ test('上游留档判定_ambient放松变异锁', t => {
   assert.equal(judgeUpstreamSeen([{ path: '/v1/models' }, { path: '/chat/completions' }]), true)
 })
 
-test('llm判定_三合取', t => {
+test('roundtrip判定_发话回显与回复渲染合取', () => {
+  const base = { composerText: '', userMessage: '回复:anth', currentTurnText: 'echo-upstream-fixed', hasResponseGroup: true, errors: [] }
+  assert.equal(judgeRoundtrip(base, '回复:anth'), true)
+  assert.equal(judgeRoundtrip({ ...base, userMessage: '' }, '回复:anth'), false)
+  assert.equal(judgeRoundtrip({ ...base, userMessage: '回复:ok' }, '回复:anth'), false)
+  // 0.2.1-rc.2 起用户消息不并入 turn 文本;本轮/旧轮绑定由消费方 llmUserEcho 的
+  // DOM turn 锚定(data-chat-turn + matchingUserRows.at(-1))承担,本 judge 单独
+  // 复用于新消费方时不防御旧轮回复
+  assert.equal(judgeRoundtrip({ ...base, hasResponseGroup: false }, '回复:anth'), false)
+  assert.equal(judgeRoundtrip({ ...base, composerText: '仍在输入' }, '回复:anth'), false)
+  assert.equal(judgeRoundtrip({ ...base, errors: ['上游失败'] }, '回复:anth'), false)
+  assert.equal(judgeRoundtrip({ ...base, errors: Array(6).fill('超出旧诊断截断范围') }, '回复:anth'), false)
+  assert.equal(judgeRoundtrip({ ...base, errors: null }, '回复:anth'), false)
+})
+
+test('llm判定_注册双协议对话与派生标记合取', t => {
+  const good = {
+    providerRegistered: true,
+    chatDriven: true,
+    chatRoundtrip: true,
+    anthropicDriven: true,
+    anthropicRoundtrip: true,
+    upstreamSeen: true,
+    upstreamKinds: ['/v1/chat/completions', '/v1/messages?beta=true'],
+    anthropicUpstream: { seen: true, userId: 'dsh:0123456789abcdef0123456789abcdef01234567' },
+  }
+  assert.equal(judgeLlm(good), true)
   assert.equal(judgeLlm(null), false)
-  assert.equal(judgeLlm({ providerRegistered: true, chatDriven: true, upstreamSeen: true }), true)
-  assert.equal(judgeLlm({ providerRegistered: true, chatDriven: true, upstreamSeen: false }), false)
-  assert.equal(judgeLlm({ providerRegistered: false, chatDriven: true, upstreamSeen: true }), false)
-  assert.equal(judgeLlm({ providerRegistered: true, chatDriven: false, upstreamSeen: true }), false)
+  for (const [key, bad] of [
+    ['providerRegistered', false],
+    ['chatDriven', false],
+    ['chatRoundtrip', false],
+    ['anthropicDriven', false],
+    ['anthropicRoundtrip', false],
+    ['upstreamSeen', false],
+    ['upstreamKinds', ['/v1/chat/completions']],
+    ['upstreamKinds', ['/v1/messages']],
+    ['anthropicUpstream', { seen: false, userId: good.anthropicUpstream.userId }],
+    ['anthropicUpstream', { seen: true, userId: null }],
+    ['anthropicUpstream', { seen: true, userId: 'raw-session-id' }],
+  ]) {
+    assert.equal(judgeLlm({ ...good, [key]: bad }), false, `${key} 劣化必须 FAIL`)
+  }
 })
 
 test('行级失败提取_正则漂移变异锁', t => {
@@ -75,15 +112,20 @@ test('行级失败提取_正则漂移变异锁', t => {
 })
 
 test('终局判定_crashOnly与full合取', t => {
-  const full = { crashOnly: false, page: true, browserOk: true, activation: { liveAll: true, findingsCount: 0 }, llm: { providerRegistered: true, chatDriven: true, upstreamSeen: true }, importFailures: [] }
+  const goodLlm = { providerRegistered: true, chatDriven: true, chatRoundtrip: true, anthropicDriven: true, anthropicRoundtrip: true, upstreamSeen: true, upstreamKinds: ['/chat/completions', '/messages'], anthropicUpstream: { seen: true, userId: 'dsh:0123456789abcdef0123456789abcdef01234567' } }
+  const full = { crashOnly: false, page: true, browserOk: true, activation: { liveAll: true, findingsCount: 0 }, llm: goodLlm, importFailures: [] }
   assert.equal(judgeFinal(full), true)
   for (const [key, bad] of [
     ['page', false],
     ['browserOk', false],
     ['activation', { liveAll: true, findingsCount: 1 }],
     ['activation', { liveAll: false, findingsCount: 0 }],
-    ['llm', { providerRegistered: true, chatDriven: true, upstreamSeen: false }],
+    ['llm', { ...goodLlm, upstreamSeen: false }],
     ['llm', null],
+    ['llm', { ...goodLlm, chatRoundtrip: false }],
+    ['llm', { ...goodLlm, anthropicDriven: false }],
+    ['llm', { ...goodLlm, anthropicRoundtrip: false }],
+    ['llm', { ...goodLlm, anthropicUpstream: { seen: false, userId: goodLlm.anthropicUpstream?.userId } }],
     ['importFailures', ['x failed to import']],
   ]) {
     assert.equal(judgeFinal({ ...full, [key]: bad }), false, `full 口径 ${key} 劣化必须 FAIL(M1 汇总恒真锁)`)

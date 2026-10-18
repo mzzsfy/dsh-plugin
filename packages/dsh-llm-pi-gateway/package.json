@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-llm-pi-gateway",
   "description": "NewAPI 等 LLM 网关接入:经 adapter 装饰器向 anthropic 上游请求注入派生会话标记(metadata.user_id),官方 llm-pi-ai 行保持自服务,零接管",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {

@@ -1,11 +1,7 @@
 # The llm-pi-gateway bundle patch (decorator form): the official `llm-pi-ai`
-# row stays enabled and serves everything natively — the settings Models page
-# keeps its full editor and model-add flows. The gateway row only shadows the
-# shared `ctx.llm.registerAdapter` service method and decorates the official
-# adapter at the documented `LlmAdapter.prepareCall` boundary, injecting a
-# derived session marker into `metadata.user_id` for anthropic-protocol routes.
-# No adapter/directory/discovery registration happens here, so there is no
-# takeover, no revival guard, and no sentinel row.
+# row stays enabled; the gateway decorates streamWithSnapshot and injects a
+# derived marker into Anthropic metadata.user_id.
+# No provider takeover or static disable is performed.
 
 - insert:
     - id: llm-pi-gateway

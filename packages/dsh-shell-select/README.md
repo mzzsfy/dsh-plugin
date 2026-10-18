@@ -7,7 +7,7 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 ## 工作方式
 
 - **运行时接管**:bundle 补丁不静态禁用官方 `tool-pwsh`、`pwsh-sandbox` 两行——boot 期官方 pwsh 链先服务,主行(`ctx.shell` 执行器 + `shell` 工具 + systemPrompt 段)apply 落定后经 `entry.update` 运行时禁用官方两行(dsh-market 同款,内存态不持久),再挂载执行器接管。本包任意死法(import 崩/apply 崩/被禁/卸载)下官方行保持启用,官方 pwsh 链自服务,系统不出现 shell 全灭窗口;重启后由行树声明态收敛。web 行(`/api/shell-select/*` 数据通道,`inject: ['webServer', 'settings']` 声明式门控——服务就绪才激活)与 guard 哨兵行同 patch 插入。
-- 配置事实源 = 主行 Config(dsh 0.1.7 settings 面以 profile 条目为存储,ns `shell-select`);配置仅经宿主 settings JSON(settings.yaml / settings 面)读写,浏览器侧不注入宿主设置页 UI,写路径 `settings.replace`,配置变更由 cordis 行重载活生效(工具描述随行重建即时更新)。
+- 配置事实源 = 主行 Config(dsh 0.1.7 settings 面以 profile 条目为存储,ns `shell-select`);设置中的 **Shell 管理** 页面经现有 API 读写宿主 settings,写路径 `settings.replace` 后刷新执行面(工具描述与默认客户端即时更新),也可通过宿主配置编辑器维护。
 - client 半区 `dsh.client.inject` 声明(官方机制,dsh-client-file-upload 等官方包同款):保证 client 运行时模块表中 `primitives`/`slots` 面在场;primitives 另有 try/catch 降级自绘兜底。
 - 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(实例状态/方法全公有——cordis 服务代理会把经 `ctx.shell` 调用的方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误)。
 - **不管理会话预设**:bundle 补丁仅插入主行、guard、web，不声明 `shell-select` 预设，不覆写 `agent-preset-registry` 默认值。宿主及用户选择的预设保持原样，已存活代理及其子代理可继续持有旧预设修订；部署若显式指定已删除的 `shell-select` 预设，应通过宿主预设选择入口改选现存预设，本包不保留别名或迁移路径。
@@ -22,6 +22,7 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 `shell` 工具(官方 `pwsh` 工具逐调用镜像):
 
 - 参数:`command`、`description`、`shell`(客户端 id,缺省用默认)、`timeoutMs`、`workdir`、`run_in_background`,沙箱升权面与官方一致。
+- 模型主描述先说明当前默认 `shell`,再按配置逐项列出客户端 id 与工作环境(WSL 附已配置发行版,不可用项标记 `unavailable`);存在可用 Bash 时统一追加 Windows 路径提示。主描述只讲常规调用,不包含拒绝重试流程;系统提示保留退出失败与 Windows 中断处理纪律,不重复客户端选择和独立进程说明。拒绝返回及权限执行契约不变。
 - 输出标记与官方逐字同构:`[exit code: N]`、`[killed by signal: X]`、`[timed out after …]`、`[sandbox: …]`、截断 spill 提示;terminal 卡退出 pill 照常复原。
 
 ## 会话卡(tool.call.toolview)
@@ -58,7 +59,7 @@ shell-select:
   default: pwsh
 ```
 
-出厂默认即上述三客户端。配置仅经 settings JSON 编辑(本包不向宿主设置页注入任何 UI);浏览器侧仅保留 `GET /api/shell-select/config` 名册读取,供会话卡徽章解析客户端命名。第三方实现:任意可执行文件 + 自定义 args 模板。
+出厂默认即上述三客户端。设置中的 **Shell 管理** 沿用客户端卡片：在卡片内单选默认客户端，可添加/移除条目、探测路径及扫描本机、配置登录壳与 WSL 发行版。参数为空格分隔的文本，含空格的单项用引号包裹，例如 `-c "echo hello" {command}`，普通引号中的 Windows 反斜线不解码为控制字符，控制字符参数使用显式 `$'…'` 转义。环境按每行 `K=V` 编辑，普通值可含空格、等号和反斜线；含换行或以双引号开头的值显示为双引号字符串，仅此形式解析 `\n` 等转义。命令黑名单逐条添加/删除并显示行级正则错误，非法正则阻止保存；保留模式原有空白与换行，空字符串规则不参与拦截。没有编辑时保存按钮禁用；保存不会拆分未编辑的参数、改写正则或把自动探测路径写回声明值。保存后回读完整配置，执行预算保持不变，回读失败明确提示已保存但刷新失败。第三方实现:任意可执行文件 + 自定义 args 模板。
 
 env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `env` < 调用方环境(spec.env + 会话 `DSH_*` 事实)。wsl 形把条目 env 与调用方环境全部键(WSLENV 本身除外)追加进 WSLENV 白名单,过 WSL 边界不静默失效。
 
@@ -97,14 +98,4 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
 
 ## dsh 版本兼容
 
-宿主要求仍为 ≥0.1.7-rc.1；当前补丁不再引用预设声明模块。以下为历史兼容验收记录，删除预设后的行为以当前「工作方式」为准。
-
-- 0.2.0-rc.2:完全适配(设置面通过;LLM 工具调用格 2026-10-08 经 echo-upstream -tool 场景真机解锁:放行路径 [shell: <id>] 尾标 ✓,deny 拦截 spawn 未发生 ✓——拦截文案被宿主工具输出校验吞为 INVALID_TOOL_OUTPUT,登记 FIND-020-3 P3 不修)
-- 0.1.7-rc.2:不崩溃底线通过(全家桶 crash-only)
-- 0.1.5-rc.3:未承诺(本包宿主要求 ≥0.1.7-rc.1,该版本不安装;全家桶在该版本不启动,详见仓库 docs/兼容性测试/逐包测试进度.md)
-
-历史验收(Round 30,2026-09-27):0.1.7-rc.2 设置面 7 格过(自动探测/自定义路径/坏路径徽标/黑名单往返含行号拦截/默认热更落盘/preset 接管入册);运行时接管(Round 29)9291 keep 宿主实证 runtime-disable→fiber 激活+INV-6 残影稳定。
-
-更细的逐包结论见仓库 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
-
-测试:`node --test "test/*.test.mjs"`(包目录内)。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.1.7-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。

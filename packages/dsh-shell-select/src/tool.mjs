@@ -144,27 +144,34 @@ function foregroundOutputProperties() {
   }
 }
 
-/** bash 路径措辞:bash 输出的 MSYS 拼写不得回流进工具参数(宿主文件面只认 Windows 形式)。 */
-const BASH_PATH_GUIDANCE = 'Bash clients accept Windows-style paths (C:/...): use that form for `workdir` and file-tool arguments — MSYS spellings like `/c/Users/...` or `/tmp` only work inside the bash command itself, never in tool arguments.'
+/** Bash 命令内路径与宿主工具参数使用不同拼写。 */
+const BASH_PATH_GUIDANCE = 'Use Windows-style paths (C:/...) in workdir and file-tool arguments; MSYS paths (/c/..., /tmp) are valid only inside Bash commands.'
+const SHELL_ENVIRONMENTS = { pwsh: 'PowerShell', bash: 'Bash', cmd: 'Windows cmd.exe', wsl: 'WSL' }
 
-/** 工具描述:客户端清单与方言随配置动态变化。 */
-export function shellDescription({ executor, backgroundEnabled, escalationModes }) {
+/** 工具描述只展示当前配置与常规调用方式。 */
+export function shellDescription({ executor, backgroundEnabled }) {
   const listing = executor.listShells()
-  const lines = listing.shells
-    .map((entry) => `${entry.id} (${entry.kind}${entry.available ? '' : ', executable not found'})`)
-    .join(', ')
-  const base = 'Execute a command in one of the configured shell clients and return its stdout/stderr. '
-    + `Available clients: ${lines}. The default client is "${listing.default}"; pass \`shell\` only when this command needs a different client (dialects differ: pwsh = PowerShell, bash/wsl = POSIX, cmd = cmd.exe). `
-    + 'Each call runs in a fresh process: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. '
-    + 'Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed environment variables (`DSH_*`); inspect them when needed. '
-    + 'Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. '
-    + (backgroundEnabled
-      ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
-      : 'Background execution is not available; long-running commands must finish within the timeout.')
-  const bashPresent = listing.shells.some((candidate) => candidate.kind === 'bash' && candidate.available)
-  const text = bashPresent ? `${base} ${BASH_PATH_GUIDANCE}` : base
-  if (escalationModes.length === 0) return text
-  return text + ' Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Never escalate speculatively: ground the request in a real denial. If the session states approval prompts are disabled, a denial is final — do not set `sandbox_permissions`.'
+  const clients = listing.shells.map((entry) => {
+    const distro = entry.kind === 'wsl' && entry.distro ? ` (${entry.distro})` : ''
+    const availability = entry.available ? '' : ' (unavailable)'
+    return `- ${entry.id} — ${SHELL_ENVIRONMENTS[entry.kind]}${distro}${availability}`
+  }).join('\n')
+  const bashPresent = listing.shells.some((entry) => entry.kind === 'bash' && entry.available)
+  return [
+    `Execute commands using shell=${JSON.stringify(listing.default)} by default and return stdout/stderr.`,
+    'Omit shell to use the default; set it to one of:',
+    clients,
+    '',
+    'Each call starts a fresh process; cwd, variables, and functions do not persist.',
+    'Use workdir to set the working directory.',
+    ...bashPresent ? [BASH_PATH_GUIDANCE] : [],
+    '',
+    ...backgroundEnabled ? [
+      'For long-running commands, set run_in_background=true.',
+      'Use job_output to read background output and job_kill to stop the job.',
+    ] : ['Background execution is not available; long-running commands must finish within the timeout.'],
+    'Long output is truncated; the full-output file path is reported when available.',
+  ].join('\n')
 }
 
 /** pwsh 工具描述:兼容保留工具,只声明不要调用与去向,零执行语义。 */
@@ -207,7 +214,7 @@ export function registerShellTool(ctx, { executor }) {
   const makeDefinition = (toolName, pinned) => (faces) => defineTool({
     name: toolName,
     description: pinned === undefined
-      ? shellDescription({ executor: faces.executor, backgroundEnabled, escalationModes })
+      ? shellDescription({ executor: faces.executor, backgroundEnabled })
       : pwshDescription(),
     parameters: {
       command: {
@@ -224,7 +231,7 @@ export function registerShellTool(ctx, { executor }) {
       },
       ...pinned === undefined ? { shell: {
         type: 'string',
-        description: 'Shell client id from the tool description list (e.g. pwsh, git-bash, cmd). Omit to use the configured default client.',
+        description: 'Override the default shell using an id listed above.',
       } } : {},
       timeoutMs: {
         type: 'number',
@@ -242,7 +249,7 @@ export function registerShellTool(ctx, { executor }) {
         sandbox_permissions: {
           type: 'string',
           enum: [...escalationModes],
-          description: 'The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.',
+          description: 'Wider sandbox access mode for this command; requires justification and user approval.',
         },
         justification: {
           type: 'string',

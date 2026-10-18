@@ -4,8 +4,34 @@
 // 模型名回显请求 model;usage 为固定最小值,由场景层(--tokens)覆写。
 import { THINKING_TEXT, toolCallOf } from './scenarios.mjs'
 
+
+
 export const FIXED_CONTENT = 'echo-upstream-fixed'
 export const MODEL_ID = 'echo-model'
+
+function textFromUserMessage(message) {
+  if (typeof message?.content === 'string') return message.content.trim()
+  if (!Array.isArray(message?.content)) return ''
+  return message.content
+    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join(' ')
+}
+
+// compat 仅用于夹具判定，不声明为通用上下文分类器。
+function isRuntimeContext(text) {
+  return /<system-reminder>|Current runtime context\.|Current DSH file policy:/.test(text)
+}
+
+export function fixtureContent(messages, options = {}) {
+  if (!options.echoUserMessage || options.scenario !== 'default' || !['openai', 'anthropic'].includes(options.protocol)) return FIXED_CONTENT
+  const userMessage = Array.isArray(messages)
+    ? [...messages].reverse().find((message) => message?.role === 'user' && !isRuntimeContext(textFromUserMessage(message)))
+    : null
+  const echoText = textFromUserMessage(userMessage)
+  return echoText ? `${FIXED_CONTENT} ${echoText}` : FIXED_CONTENT
+}
 
 export function anthropicResponse(model, usage = { input_tokens: 1, output_tokens: 1 }) {
   return {
@@ -48,26 +74,29 @@ export function respondFor(method, path, headers, parsedBody, options = {}) {
   const toolCall = toolCallOf(options.scenario, parsedBody)
   const scenarioTool = toolCall !== null
   const [input = 1, output = 1] = options.tokens ?? []
+  const protocol = path.includes('/responses') ? 'responses' : path.includes('/messages') ? 'anthropic' : path.includes('/chat/completions') ? 'openai' : 'other'
+  const messages = parsedBody?.messages ?? parsedBody?.system
   if (path.includes('/responses')) {
     const usage = { input_tokens: input, output_tokens: output, total_tokens: input + output }
     return thinking
       ? { ...responsesResponse(model, usage), output: [{ type: 'reasoning', id: 'rs_echo-upstream', summary: [] }, ...responsesResponse(model, usage).output] }
       : responsesResponse(model, usage)
   }
+  const fixtureReply = fixtureContent(messages, { ...options, protocol, scenario: scenarioTool ? 'tool' : thinking ? 'think' : options.scenario })
   if (path.includes('/messages')) {
-    const content = thinking
+    const responseContent = thinking
       ? [{ type: 'thinking', thinking: THINKING_TEXT }, { type: 'text', text: FIXED_CONTENT }]
       : scenarioTool
         ? [{ type: 'tool_use', id: toolCall.anthropicId, name: toolCall.name, input: JSON.parse(toolCall.arguments) }]
-        : [{ type: 'text', text: FIXED_CONTENT }]
+        : [{ type: 'text', text: fixtureReply }]
     const stopReason = scenarioTool ? 'tool_use' : 'end_turn'
-    return { ...anthropicResponse(model, { input_tokens: input, output_tokens: output }), content, stop_reason: stopReason }
+    return { ...anthropicResponse(model, { input_tokens: input, output_tokens: output }), content: responseContent, stop_reason: stopReason }
   }
   const message = thinking
     ? { role: 'assistant', reasoning_content: THINKING_TEXT, content: FIXED_CONTENT }
     : scenarioTool
       ? { role: 'assistant', content: null, tool_calls: [{ id: toolCall.id, type: 'function', function: { name: toolCall.name, arguments: toolCall.arguments } }] }
-      : { role: 'assistant', content: FIXED_CONTENT }
+      : { role: 'assistant', content: fixtureReply }
   const finishReason = scenarioTool ? 'tool_calls' : 'stop'
   return { ...openaiResponse(model, { prompt_tokens: input, completion_tokens: output, total_tokens: input + output }, message), choices: [{ index: 0, message, finish_reason: finishReason }] }
 }

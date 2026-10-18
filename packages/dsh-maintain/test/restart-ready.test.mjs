@@ -203,17 +203,11 @@ const clientUpgradeFinalText = extractLogic('upgradeFinalText')
 // 重启确认态文案:armed 且有活跃计数时改「仍要重启」
 const clientRestartConfirmLabel = extractLogic('restartConfirmLabel')
 
-test('upgradeFinalText: stale 优先于重启指引,不得引导重启', () => {
-  const text = clientUpgradeFinalText({ ok: true, stale: true, autoRestartScheduled: true })
-  // stale 口径泛化:未前进/未达目标/未落到目标/未装到指定版本统称与安装意图不符
-  assert.match(text, /意图不符/)
-  assert.doesNotMatch(text, /重启/)
-})
-
-test('upgradeFinalText: 自动重启终态指向页面自恢复,默认终态指向手动重启', () => {
-  assert.match(clientUpgradeFinalText({ ok: true, stale: false, autoRestartScheduled: true }), /自动重启/)
-  // 默认成功终态
-  assert.match(clientUpgradeFinalText({ ok: true, stale: false, autoRestartScheduled: false }), /重启宿主/)
+test('upgradeFinalText: 成功终态必接退出切换语义,失败附原因', () => {
+  assert.match(clientUpgradeFinalText({ ok: true, switched: true }), /退出/)
+  assert.doesNotMatch(clientUpgradeFinalText({ ok: true, switched: true }), /手动/)
+  assert.match(clientUpgradeFinalText({ ok: false, error: '候选验证失败' }), /候选验证失败/)
+  assert.match(clientUpgradeFinalText({ ok: false }), /详情/)
 })
 
 test('restartConfirmLabel: armed 且活跃计数>0 才显示仍要重启文案', () => {
@@ -223,26 +217,24 @@ test('restartConfirmLabel: armed 且活跃计数>0 才显示仍要重启文案',
   assert.equal(clientRestartConfirmLabel(true, 3), '仍要重启(3 项活跃工作)')
 })
 
-test('client 自动重启接管:单一守卫函数,订阅回调与初始加载两路同走', () => {
+test('client 切换退出接管:单一守卫函数,订阅回调与初始加载两路同走', () => {
   const source = clientSource()
-  const guardFn = source.match(/function takeOverAutoRestart\(snapshot\)\s*\{([\s\S]*?)\n  \}/)
-  assert.ok(guardFn, 'client.js 缺少 takeOverAutoRestart 接管守卫')
-  assert.match(guardFn[1], /autoRestartScheduled !== true/, '守卫必须以 autoRestartScheduled 触发')
+  const guardFn = source.match(/function takeOverSwitchExit\(snapshot\)\s*\{([\s\S]*?)\n  \}/)
+  assert.ok(guardFn, 'client.js 缺少 takeOverSwitchExit 接管守卫')
+  assert.match(guardFn[1], /exitScheduled !== true/, '守卫必须以 exitScheduled 触发')
   assert.match(guardFn[1], /restartPendingRef\.current === true/, '重启 POST 在途不得接管')
-  assert.match(guardFn[1], /autoRestartTakenRef\.current === true/, '不得重复接管')
+  assert.match(guardFn[1], /switchExitTakenRef\.current === true/, '不得重复接管')
   assert.match(guardFn[1], /pid:\s*snapshot\.pid/, '接管基线必须取快照 pid')
   assert.match(guardFn[1], /bootAt:\s*snapshot\.bootAt/, '接管基线必须取快照 bootAt')
   // 两路调用:观察器订阅回调(升级落定拍)+ 初始 load 快照(页面刷新落在调度窗口)
-  assert.match(source, /subscribeUpgradeStatus\(\(snapshot\)\s*=>\s*\{[\s\S]*?takeOverAutoRestart\(snapshot\)/, '订阅回调必须走接管守卫')
-  assert.match(source, /void load\(\)\.then\(\(next\)\s*=>\s*\{[\s\S]*?takeOverAutoRestart\(next\)/, '初始快照必须走接管守卫')
+  assert.match(source, /subscribeUpgradeStatus\(\(snapshot\)\s*=>\s*\{[\s\S]*?takeOverSwitchExit\(snapshot\)/, '订阅回调必须走接管守卫')
+  assert.match(source, /void load\(\)\.then\(\(next\)\s*=>\s*\{[\s\S]*?takeOverSwitchExit\(next\)/, '初始快照必须走接管守卫')
 })
 
-test('client 落定补查:未见自动重启标记时延迟宽限补查一拍再终判', () => {
+test('client 升级观察器:落定即终判,不再延迟补查', () => {
   const source = clientSource()
-  // 落定拍可见时继续运行路径的 stale 复读可能尚未完成:未见调度标记不得立即终判
-  assert.match(source, /setTimeout\(\(\)\s*=>\s*\{[\s\S]*?recheckUpgradeSettle\(/, '落定拍未见标记必须延迟补查')
-  assert.match(source, /async function recheckUpgradeSettle\([\s\S]*?broadcastUpgradeStatus\(final\)/, '补查必须广播以驱动接管守卫')
-  assert.match(source, /upgradeWatch\.generation !== null\) return[\s\S]*?recheckUpgradeSettle|recheckUpgradeSettle\([\s\S]*?upgradeWatch\.generation !== null\) return/, '补查前后必须验让位新观察')
+  assert.doesNotMatch(source, /recheckUpgradeSettle/, '补查链必须整体移除')
+  assert.match(source, /if \(!upgrade \|\| upgrade\.running !== true\) \{\s*upgradeWatch\.generation = null\s*if \(upgrade && upgrade\.last\) showUpgradeFloat\(upgrade\.last\)/, '落定拍直接展示结果')
 })
 
 test('force 发送条件锁定:仅活跃计数>0 的重启确认带 force', () => {

@@ -443,12 +443,18 @@ test('构造:boxed volatile 字段(宿主 resolve 产物)解箱生效,不回落�
   assert.deepEqual(listing.shells.map((entry) => entry.id), ['pwsh', 'git-bash'])
   assert.equal(executor.entryFor(undefined).id, 'git-bash')
   const shell = registered.tools.find((tool) => tool.name === 'shell')
-  assert.match(shell.description, /git-bash \(bash\)$|default client is "git-bash"/)
-  assert.doesNotMatch(shell.description, /cmd \(cmd\)/)
+  assert.match(shell.description, /^Execute commands using shell="git-bash" by default/)
+  assert.doesNotMatch(shell.description, /^- cmd —/m)
+  assert.equal(shell.parameters.properties.shell.description, 'Override the default shell using an id listed above.')
+  assert.doesNotMatch(shell.parameters.properties.sandbox_permissions.description, /retry/)
+  const prompt = registered.promptSections.find((section) => section.name === 'tool:shell').text
+  assert.match(prompt, /investigate failures/)
+  assert.match(prompt, /after an interruption/)
+  assert.doesNotMatch(prompt, /fresh processes|default client|Pass the `shell`/)
 })
 
 test('refresh:boxed volatile 字段换源同样解箱生效', () => {
-  const { ctx } = stubCtx()
+  const { ctx, registered } = stubCtx()
   const executor = new ShellSelectExecutor(ctx, baseConfig())
   executor.refresh(boxFields({
     shells: baseConfig().shells,
@@ -458,6 +464,8 @@ test('refresh:boxed volatile 字段换源同样解箱生效', () => {
   const listing = executor.listShells()
   assert.equal(listing.default, 'git-bash')
   assert.equal(listing.shells.length, 3)
+  assert.match(registered.tools.findLast((tool) => tool.name === 'shell').description,
+    /^Execute commands using shell="git-bash" by default/)
 })
 
 test('构造:混合形态(部分字段 boxed 部分普通)逐字段解箱生效', () => {

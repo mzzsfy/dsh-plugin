@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-shared-terminal
+      name: '@mzzsfy/dsh-shared-terminal'

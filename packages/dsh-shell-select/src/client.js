@@ -1,8 +1,7 @@
 // dsh-shell-select Client 半区:tool.call.toolview shell 族卡片(官方 BashRow/
 // terminalCardModel 同构 + 复制/折行/客户端徽章增强)。
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory});
-// 客户端名册经 webServer 路由 /api/shell-select/config 读取(配置写入走宿主
-// settings JSON,浏览器侧无设置页)。
+// 客户端名册与 Shell 管理设置页经 /api/shell-select/* 读写宿主配置。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-shell-select',
@@ -50,6 +49,8 @@ window.__ModuleLoader__.load({
 
     const API = {
       config: '/api/shell-select/config',
+      probe: '/api/shell-select/probe',
+      detect: '/api/shell-select/detect',
     }
 
     async function api(path, options) {
@@ -202,6 +203,44 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = [
+      '.sls-card { display:flex; flex-direction:column; gap:10px; }',
+      '.sls-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
+      '.sls-entry { display:flex; flex-direction:column; gap:6px; padding:10px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); border-radius:8px; }',
+      '.sls-entry__head { display:flex; align-items:center; gap:8px; }',
+      '.sls-grid { display:grid; grid-template-columns: 90px 1fr; gap:4px 8px; align-items:center; }',
+      '.sls-grid__label { opacity:.75; font-size:12px; }',
+      '.sls-input { padding:4px 8px; border-radius:6px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); background:transparent; color:inherit; min-width:0; }',
+      '.sls-input--wide { width:100%; box-sizing:border-box; }',
+      '.sls-btn { padding:3px 10px; border-radius:6px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); background:transparent; color:inherit; cursor:pointer; font-size:12px; }',
+      '.sls-btn:disabled { opacity:.5; cursor:default; }',
+      '.sls-btn--primary { border-color: transparent; background: var(--sls-accent, #4b7bcc); color:#fff; }',
+      '.sls-badge { font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); opacity:.85; }',
+      '.sls-badge--ok { color:#2e9e5b; border-color:#2e9e5b; }',
+      '.sls-badge--bad { color:#c44; border-color:#c44; }',
+      '.sls-badge--default { color:#fff; background:var(--sls-accent, #4b7bcc); border-color:transparent; }',
+      '.sls-hint { font-size:12px; opacity:.7; white-space:pre-wrap; overflow-wrap:anywhere; }',
+      '.sls-error { font-size:12px; color:#c44; white-space:pre-wrap; }',
+      '.sls-args { font-size:12px; font-family:var(--sls-mono, monospace); }',
+      '.sls-rules { display:flex; flex-direction:column; gap:6px; padding:10px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); border-radius:8px; }',
+      '.sls-rules__head { display:flex; align-items:center; gap:8px; }',
+      '.sls-rules__title { font-weight:500; }',
+      '.sls-rules__note { font-size:12px; opacity:.7; }',
+      '.sls-rule { display:flex; align-items:center; gap:6px; }',
+      '.sls-rule__no { flex:none; width:18px; text-align:right; font-size:12px; opacity:.45; user-select:none; }',
+      '.sls-rule__input { flex:1; min-width:0; padding:4px 8px; border-radius:6px; border:1px solid var(--sls-border, rgba(128,128,128,.35)); background:transparent; color:inherit; font-size:12px; font-family:var(--sls-mono, monospace); resize:vertical; }',
+      '.sls-rule__input:focus-visible { outline:2px solid var(--sls-accent, #4b7bcc); outline-offset:1px; }',
+      '.sls-rule--bad .sls-rule__input { border-color:#c44; }',
+      '.sls-rule__err { flex:none; max-width:40%; font-size:11px; color:#c44; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }',
+      '.sls-rule__del { flex:none; padding:2px 8px; }',
+      '.sls-switch { display:inline-flex; align-items:center; cursor:pointer; }',
+      '.sls-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }',
+      '.sls-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box; background:var(--sls-track, rgba(128,128,128,.35)); border:1px solid var(--sls-border, rgba(128,128,128,.35)); transition:background .15s, border-color .15s; }',
+      '.sls-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%; background:var(--sls-thumb, rgba(128,128,128,.6)); transform:translateY(-50%); transition:left .15s, background .15s; }',
+      '.sls-switch:hover .sls-switch__track { border-color:var(--sls-accent, #4b7bcc); }',
+      '.sls-switch input[type="checkbox"]:checked + .sls-switch__track { background:var(--sls-accent, #4b7bcc); border-color:var(--sls-accent, #4b7bcc); }',
+      '.sls-switch input[type="checkbox"]:checked + .sls-switch__track .sls-switch__thumb { left:17px; background:var(--sls-bg-base, #fff); }',
+      '.sls-switch input[type="checkbox"]:focus-visible + .sls-switch__track { outline:2px solid var(--sls-accent, #4b7bcc); outline-offset:1px; }',
+      '.sls-switch input[type="checkbox"]:disabled + .sls-switch__track { opacity:.5; }',
       // tool.call.toolview 卡片(key 'shell'):官方 terminal 行同构 + 复制/折行增强。
       // 色彩对齐官方 ToolRow:标题 label-secondary、icon 盒 label-tertiary(实证自
       // 官方行 computed style);token 缺失时回退 inherit 不致不可读
@@ -614,9 +653,304 @@ window.__ModuleLoader__.load({
       )
     }
 
+    const SHELL_KINDS = { pwsh: 'PowerShell', bash: 'POSIX bash(git bash / msys2 / cygwin)', cmd: 'CMD', wsl: 'WSL bash' }
+
+    function argsTextOf(args) {
+      return args.map((arg) => {
+        if (/[\u0000-\u001f\u007f]/.test(arg)) {
+          const body = arg.replace(/[\u0000-\u001f\u007f'\\]/g, (char) => {
+            if (char === "'" || char === '\\') return '\\' + char
+            return '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')
+          })
+          return "$'" + body + "'"
+        }
+        return arg !== '' && !/[\s'"\\]/.test(arg) ? arg : '"' + arg.replace(/["\\]/g, (char) => '\\' + char) + '"'
+      }).join(' ')
+    }
+
+    // 普通引号只转义当前引号与反斜线；控制字符仅在显式 ANSI-C 引号内解码，不执行 shell。
+    function parseArgsText(text) {
+      const args = []
+      const controls = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v' }
+      let token = '', started = false
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index]
+        if (/\s/.test(char)) {
+          if (started) args.push(token)
+          token = ''
+          started = false
+          continue
+        }
+        started = true
+        const ansi = char === '$' && text[index + 1] === "'"
+        if (!ansi && char !== '"' && char !== "'") {
+          token += char
+          continue
+        }
+        if (ansi) index += 1
+        const quote = text[index]
+        index += 1
+        for (; index < text.length && text[index] !== quote; index += 1) {
+          const current = text[index]
+          const next = text[index + 1]
+          if (current === '\\' && (next === quote || next === '\\')) {
+            token += next
+            index += 1
+          } else if (ansi && current === '\\' && Object.hasOwn(controls, next)) {
+            token += controls[next]
+            index += 1
+          } else if (ansi && current === '\\' && next === 'u' && /^[\da-f]{4}$/i.test(text.slice(index + 2, index + 6))) {
+            token += String.fromCharCode(parseInt(text.slice(index + 2, index + 6), 16))
+            index += 5
+          } else {
+            token += current
+          }
+        }
+        if (index >= text.length) throw new Error('参数引号未闭合')
+      }
+      if (started) args.push(token)
+      return args
+    }
+
+    function envTextOf(env) {
+      return Object.entries(env).map(([key, value]) => `${key}=${/[\r\n]|^"/.test(value) ? JSON.stringify(value) : value}`).join('\n')
+    }
+
+    function parseEnvText(text) {
+      const pairs = []
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        const separator = line.indexOf('=')
+        const key = separator < 0 ? '' : line.slice(0, separator).trim()
+        if (key === '') throw new Error('环境变量每行必须为 K=V')
+        const value = line.slice(separator + 1)
+        const parsed = value.startsWith('"') ? JSON.parse(value) : value
+        if (typeof parsed !== 'string') throw new Error('环境变量双引号值必须是字符串')
+        pairs.push([key, parsed])
+      }
+      return Object.fromEntries(pairs)
+    }
+
+    function denyPatternIssue(rule) {
+      if (rule === '') return undefined
+      try { new RegExp(rule, 'i') } catch (error) { return error.message }
+      return undefined
+    }
+
+    function editableSection(section) {
+      const { resolved, ...config } = section
+      return {
+        config,
+        entries: config.shells.map((entry, index) => {
+          const argsText = argsTextOf(entry.args ?? [])
+          const envText = envTextOf(entry.env ?? {})
+          const fact = resolved?.shells.find((item) => item.id === entry.id)
+          return { ...entry, key: `loaded-${index}`, argsText, originalArgsText: argsText,
+            envText, originalEnvText: envText, available: fact?.available, resolved: fact?.path }
+        }),
+        nextKey: config.shells.length,
+        defaultId: config.default,
+        rules: (config.deny ?? []).map((value, index) => ({ key: `rule-${index}`, value })),
+        nextRuleKey: (config.deny ?? []).length,
+        dirty: false,
+      }
+    }
+
+    function ShellSelectApp() {
+      const [form, setForm] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [notice, setNotice] = useState('')
+      const [revision, setRevision] = useState(0)
+
+      useEffect(() => {
+        let disposed = false
+        setNotice('')
+        api(API.config).then((section) => {
+          if (!disposed) setForm(editableSection(section))
+        }).catch((error) => { if (!disposed) setNotice('加载失败：' + error.message) })
+        return () => { disposed = true }
+      }, [revision])
+
+      const editForm = (update) => {
+        if (busy) return
+        setForm((current) => ({ ...update(current), dirty: true }))
+      }
+      const patchEntry = (key, changes) => editForm((current) => ({
+        ...current,
+        defaultId: changes.id !== undefined && current.entries.find((entry) => entry.key === key)?.id === current.defaultId
+          ? changes.id : current.defaultId,
+        entries: current.entries.map((entry) => entry.key === key ? { ...entry, ...changes, available: undefined, resolved: undefined } : entry),
+      }))
+      const removeEntry = (key) => editForm((current) => {
+        const entries = current.entries.filter((entry) => entry.key !== key)
+        return { ...current, entries, defaultId: entries.some((entry) => entry.id === current.defaultId) ? current.defaultId : entries[0]?.id ?? '' }
+      })
+      const addEntry = () => editForm((current) => ({
+        ...current, nextKey: current.nextKey + 1,
+        entries: [...current.entries, { key: `added-${current.nextKey}`, id: '', kind: 'bash', path: '', argsText: '', envText: '', login: false, distro: '' }],
+      }))
+      const patchRule = (key, value) => editForm((current) => ({ ...current,
+        rules: current.rules.map((rule) => rule.key === key ? { ...rule, value } : rule),
+      }))
+      const addRule = () => editForm((current) => ({ ...current, nextRuleKey: current.nextRuleKey + 1,
+        rules: [...current.rules, { key: `rule-${current.nextRuleKey}`, value: '' }],
+      }))
+      const removeRule = (key) => editForm((current) => ({ ...current, rules: current.rules.filter((rule) => rule.key !== key) }))
+      const save = async () => {
+        if (busy || !form.dirty) return
+        setBusy(true)
+        setNotice('')
+        try {
+          const shells = form.entries.map((entry) => {
+            // 显示未变时直接复用原值，避免表单控件归一换行等行为改写已有配置。
+            const args = entry.argsText === entry.originalArgsText ? entry.args ?? [] : parseArgsText(entry.argsText)
+            const env = entry.envText === entry.originalEnvText ? entry.env ?? {} : parseEnvText(entry.envText)
+            return { id: entry.id.trim(), kind: entry.kind, path: entry.path.trim(), args, login: entry.login === true, distro: entry.distro ?? '', env }
+          })
+          const ids = shells.map((entry) => entry.id)
+          if (ids.length === 0 || ids.some((id) => id === '')) throw new Error('至少保留一个客户端，id 不能为空')
+          if (new Set(ids).size !== ids.length) throw new Error('客户端 id 重复')
+          const defaultId = form.defaultId.trim()
+          if (!ids.includes(defaultId)) throw new Error('默认客户端不在列表中')
+          for (const [index, rule] of form.rules.entries()) {
+            const issue = denyPatternIssue(rule.value)
+            if (issue !== undefined) throw new Error(`第 ${index + 1} 条正则非法：${issue}`)
+          }
+          const deny = form.rules.map((rule) => rule.value).filter((rule) => rule !== '')
+          const result = await api(API.config, { method: 'POST', body: JSON.stringify({ ...form.config, shells, default: defaultId, deny }) })
+          clientCatalog = { default: result.resolved.default, byId: Object.fromEntries(result.resolved.shells.map((entry) => [entry.id, entry.id])) }
+          setForm((current) => ({ ...current, dirty: false }))
+          setNotice('已保存，默认客户端与工具描述即时生效')
+          try {
+            const section = await api(API.config)
+            setForm(editableSection(section))
+          } catch (error) { setNotice('已保存，但刷新失败：' + error.message + '；请重新加载') }
+        } catch (error) {
+          setNotice('保存失败：' + error.message)
+        } finally { setBusy(false) }
+      }
+      const probe = async (entry) => {
+        if (busy) return
+        setBusy(true)
+        setNotice('')
+        try {
+          const result = await api(API.probe, { method: 'POST', body: JSON.stringify({ path: entry.path }) })
+          setForm((current) => ({ ...current, entries: current.entries.map((item) => item.key === entry.key
+            ? { ...item, available: result.exists, resolved: entry.path } : item) }))
+          setNotice(result.exists ? '路径存在' : '路径不存在')
+        } catch (error) { setNotice('探测失败：' + error.message) }
+        finally { setBusy(false) }
+      }
+      const detect = async (kind) => {
+        if (busy) return
+        setBusy(true)
+        setNotice('')
+        try {
+          const result = await api(API.detect, { method: 'POST', body: JSON.stringify({ kinds: [kind] }) })
+          setNotice(result.found.length > 0 ? kind + ' 候选:' + result.found.map((item) => item.path).join(' ; ') : kind + ' 未发现候选')
+        } catch (error) { setNotice('探测失败：' + error.message) }
+        finally { setBusy(false) }
+      }
+      const reload = h('button', { type: 'button', className: 'sls-btn', disabled: busy, onClick: () => {
+        if (busy) return
+        setForm(null)
+        setNotice('')
+        setRevision((value) => value + 1)
+      } }, '重新加载')
+      if (form === null) return h('div', { className: 'sls-card', 'aria-busy': !notice },
+        h('div', { role: notice ? 'alert' : 'status', className: 'sls-hint' }, notice || '加载中…'), notice ? reload : null)
+
+      const activeRules = form.rules.filter((rule) => rule.value !== '').length
+      return h('div', { className: 'sls-card', 'aria-busy': busy },
+        h('div', { className: 'sls-row' }, h('span', { className: 'sls-hint' },
+          '命令行客户端清单。路径留空自动探测;模型可通过工具的 shell 参数选择任一条目,缺省用默认。')),
+        form.entries.map((entry, index) => {
+          const input = (label, name, placeholder, type = 'input') => h(type, {
+            className: 'sls-input sls-input--wide' + (name === 'argsText' || name === 'envText' ? ' sls-args' : ''),
+            'aria-label': `客户端 ${index + 1} ${label}`, value: entry[name] ?? '', disabled: busy,
+            rows: type === 'textarea' ? 2 : undefined, placeholder,
+            onChange: (event) => patchEntry(entry.key, { [name]: event.target.value }),
+          })
+          return h('div', { className: 'sls-entry', key: entry.key },
+            h('div', { className: 'sls-entry__head' },
+              h('label', { className: 'sls-row' },
+                h('input', { type: 'radio', name: 'sls-default', 'aria-label': `客户端 ${index + 1} 默认`,
+                  checked: form.defaultId === entry.id && entry.id.length > 0, disabled: busy || entry.id.trim() === '',
+                  title: '设为默认客户端(模型缺省 shell 参数时使用)',
+                  onChange: () => editForm((current) => ({ ...current, defaultId: entry.id })),
+                }), h('span', { className: 'sls-hint' }, '默认')),
+              h('span', { className: 'sls-badge' + (entry.available === true ? ' sls-badge--ok' : entry.available === false ? ' sls-badge--bad' : ''),
+                title: entry.resolved ? '解析路径:' + entry.resolved : '路径尚未解析',
+              }, entry.available === true ? '可用' : entry.available === false ? '不可用' : '未知'),
+              entry.id === form.defaultId && entry.id !== '' ? h('span', { className: 'sls-badge sls-badge--default' }, '默认') : null,
+              h('span', { style: { flex: 1 } }),
+              h('button', { type: 'button', className: 'sls-btn', disabled: busy || entry.path.trim() === '', title: '检查该路径是否存在', onClick: () => probe(entry) }, '探测路径'),
+              h('button', { type: 'button', className: 'sls-btn', disabled: busy, 'aria-label': `移除客户端 ${index + 1}`, title: '移除该条目', onClick: () => removeEntry(entry.key) }, '移除')),
+            h('div', { className: 'sls-grid' },
+              h('span', { className: 'sls-grid__label' }, 'id'),
+              input('id', 'id', 'pwsh / git-bash / …(模型看到的 shell 参数值,亦作显示名)'),
+              h('span', { className: 'sls-grid__label' }, '形态'),
+              h('div', { className: 'sls-row' },
+                h('select', { className: 'sls-input', 'aria-label': `客户端 ${index + 1} 形态`, value: entry.kind, disabled: busy,
+                  onChange: (event) => patchEntry(entry.key, { kind: event.target.value }),
+                }, Object.entries(SHELL_KINDS).map(([kind, label]) => h('option', { key: kind, value: kind }, label))),
+                h('button', { type: 'button', className: 'sls-btn', disabled: busy, title: '扫描本机常见安装位置', onClick: () => detect(entry.kind) }, '扫描本机')),
+              h('span', { className: 'sls-grid__label' }, '路径'),
+              input('路径', 'path', '留空自动探测,如 C:\\Program Files\\Git\\bin\\bash.exe'),
+              h('span', { className: 'sls-grid__label' }, '参数'),
+              input('参数', 'argsText', '留空用形态默认;空格分隔,引号包住含空格参数,{command} 为命令占位'),
+              h('span', { className: 'sls-hint', style: { gridColumn: '2' } }, "空格参数加引号；控制字符用 $'…' 转义，仅解析不执行。"),
+              ...(entry.kind === 'bash' ? [
+                h('span', { className: 'sls-grid__label' }, '登录壳'),
+                h('label', { className: 'sls-row sls-switch', title: '-lc 登录壳拉起 /etc/profile(只注入 /usr/bin;/mingw64/bin 需在下方的环境里配 MSYSTEM=MINGW64)' },
+                  h('input', { type: 'checkbox', 'aria-label': `客户端 ${index + 1} 登录壳`, checked: entry.login === true, disabled: busy,
+                    onChange: (event) => patchEntry(entry.key, { login: event.target.checked }),
+                  }), h('span', { className: 'sls-switch__track' }, h('span', { className: 'sls-switch__thumb' })),
+                  h('span', { className: 'sls-hint' }, '-lc 登录壳')),
+              ] : []),
+              ...(entry.kind === 'wsl' ? [h('span', { className: 'sls-grid__label' }, '发行版'), input('发行版', 'distro', '留空用默认发行版,如 Ubuntu-22.04')] : []),
+              h('span', { className: 'sls-grid__label' }, '环境'),
+              input('环境', 'envText', '每行 K=V,如 MSYSTEM=MINGW64;wsl 形自动经 WSLENV 透传', 'textarea'),
+              h('span', { className: 'sls-hint', style: { gridColumn: '2' } }, '每行 K=V；换行值用双引号及 \\n，双引号内反斜线写 \\\\。')))
+        }),
+        h('div', { className: 'sls-rules' },
+          h('div', { className: 'sls-rules__head' }, h('span', { className: 'sls-rules__title' }, '命令黑名单'),
+            h('span', { className: 'sls-badge' + (activeRules > 0 ? ' sls-badge--ok' : ' sls-badge--bad') }, activeRules > 0 ? activeRules + ' 条规则' : '未生效')),
+          h('span', { className: 'sls-rules__note' }, '每条规则为一条正则,对整条命令全文匹配(大小写不敏感),命中即拒,无豁免;精细放行写在模式内用前瞻,如 rm -rf\\s+(?!\\S*node_modules)。'),
+          form.rules.length === 0 ? h('span', { className: 'sls-rules__note' }, '未配置,命中拦截不生效,模型可执行任意命令。') : form.rules.map((rule, index) => {
+            const issue = denyPatternIssue(rule.value)
+            const errorId = `sls-${rule.key}-error`
+            return h('div', { className: 'sls-rule' + (issue !== undefined ? ' sls-rule--bad' : ''), key: rule.key },
+              h('span', { className: 'sls-rule__no' }, index + 1),
+              h('textarea', { className: 'sls-rule__input', rows: Math.max(1, rule.value.split('\n').length), 'aria-label': `黑名单第 ${index + 1} 条`,
+                'aria-invalid': issue !== undefined, 'aria-describedby': issue !== undefined ? errorId : undefined,
+                value: rule.value, disabled: busy, placeholder: '正则,如 ^format\\s', onChange: (event) => patchRule(rule.key, event.target.value),
+              }),
+              issue !== undefined ? h('span', { id: errorId, className: 'sls-rule__err', title: issue }, issue) : null,
+              h('button', { type: 'button', className: 'sls-btn sls-rule__del', disabled: busy, 'aria-label': `删除规则 ${index + 1}`, title: '删除该条规则', onClick: () => removeRule(rule.key) }, '删除'))
+          }),
+          h('div', { className: 'sls-row' }, h('button', { type: 'button', className: 'sls-btn', disabled: busy, onClick: addRule }, '添加规则'))),
+        h('div', { className: 'sls-row' },
+          h('button', { type: 'button', className: 'sls-btn', disabled: busy, onClick: addEntry }, '添加客户端'),
+          h('span', { style: { flex: 1 } }),
+          form.dirty ? h('span', { className: 'sls-hint' }, '有未保存改动') : null,
+          reload,
+          h('button', { type: 'button', className: 'sls-btn sls-btn--primary', disabled: busy || !form.dirty, onClick: save }, '保存')),
+        notice ? h('div', { role: notice.includes('失败') ? 'alert' : 'status', className: 'sls-hint' }, notice) : null,
+      )
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
+        const NAV_ICON = { 'Shell 管理': 'terminal' }
+        if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+        else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+        else window.__navicIconQueue = [NAV_ICON]
+        ctx.slots.inject('settings.section', () => ctx.slots.register(
+          { name: 'settings.section', id: 'shell-select', order: 82, label: 'Shell 管理' },
+          () => React.createElement(ShellSelectApp),
+        ))
         installPathRescue(ctx)
         ctx.effect(() => {
           const style = document.createElement('style')

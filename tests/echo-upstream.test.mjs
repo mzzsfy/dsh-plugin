@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const SCRIPT = fileURLToPath(new URL('../scripts/echo-upstream.mjs', import.meta.url))
+const SCRIPT = fileURLToPath(new URL('../scripts/echo-upstream/cli.mjs', import.meta.url))
 const FIXED_TEXT = 'echo-upstream-fixed'
 
 function startServer(args) {

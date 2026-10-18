@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {execFileSync} from 'node:child_process'
-import {mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync} from 'node:fs'
+import {execFileSync, execSync} from 'node:child_process'
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -42,6 +42,7 @@ function sandbox(t, {packages, profileDeps = {}, bundles}) {
   mkdirSync(join(home, '.dsh', 'profiles', 'web'), {recursive: true})
   mkdirSync(join(sandRepo, 'scripts'))
   writeFileSync(join(sandRepo, 'scripts', 'dev-link.mjs'), readFileSync(join(repo, 'scripts', 'dev-link.mjs')))
+  writeFileSync(join(sandRepo, 'scripts', 'compare-version.mjs'), readFileSync(join(repo, 'scripts', 'compare-version.mjs')))
   for (const [dir, manifest] of Object.entries(packages)) {
     const pkgDir = join(sandRepo, 'packages', dir)
     mkdirSync(pkgDir, {recursive: true})
@@ -143,6 +144,33 @@ test('公共依赖包带残留依赖行与 bundles 条目:一次运行联动治�
   assert.deepEqual(readBundles(sand), ['@deepseek-ai/dsh-base'])
   const deps = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8')).dependencies
   assert.deepEqual(deps, {}, '依赖行应清空')
+})
+
+test('孤儿清理:改名/删除包的 file 残留依赖行与装载条目一并出层,registry 来源不动', (t) => {
+  const sand = sandbox(t, {
+    packages: {'pkg-a': PLUGIN_MANIFEST},
+    bundles: ['@mzzsfy/pkg-old', '@mzzsfy/pkg-a', '@mzzsfy/pkg-npm'],
+  })
+  const profileManifest = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8'))
+  profileManifest.dependencies['@mzzsfy/pkg-a'] = fileSpec(sand.sandRepo, 'pkg-a')
+  profileManifest.dependencies['@mzzsfy/pkg-old'] = fileSpec(sand.sandRepo, 'pkg-old')
+  writeFileSync(join(sand.profile, 'package.json'), JSON.stringify(profileManifest))
+
+  // dangling junction:目标目录已不存在,existsSync 跟随解析恒 false,清理须按链接形态判断
+  const nodeModules = join(sand.profile, 'node_modules', '@mzzsfy')
+  mkdirSync(nodeModules, {recursive: true})
+  const dangling = join(nodeModules, 'pkg-old')
+  execSync(`cmd /c mklink /J "${dangling}" "${join(sand.sandRepo, 'packages', 'pkg-old')}"`)
+
+  const out = runDevLink(sand, ['all'])
+  assert.match(out, /pkg-old.*删除孤儿依赖行/, '指向仓库的孤儿依赖行应被删除')
+  assert.match(out, /pkg-old.*已移除 dangling junction/, 'dangling junction 应被移除')
+  assert.match(out, /孤儿装载层条目已随依赖行出层/, '孤儿装载条目应随依赖行出层')
+  assert.deepEqual(readBundles(sand), ['@mzzsfy/pkg-a', '@mzzsfy/pkg-npm'], 'registry 来源的 scope 装载条目不得误删')
+  assert.equal(existsSync(dangling), false, 'dangling junction 应不存在')
+  const deps = JSON.parse(readFileSync(join(sand.profile, 'package.json'), 'utf8')).dependencies
+  assert.equal(deps['@mzzsfy/pkg-old'], undefined)
+  assert.equal(deps['@mzzsfy/pkg-a'], fileSpec(sand.sandRepo, 'pkg-a'))
 })
 
 test('all 模式:批量加入缺失插件包并移出公共依赖包残留', (t) => {

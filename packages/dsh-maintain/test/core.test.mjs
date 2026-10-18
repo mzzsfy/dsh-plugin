@@ -5,22 +5,13 @@ import {
   parseSemver,
   gtSemver,
   judgeVersion,
-  judgeUpgradeFreshness,
-  extractPinnedVersion,
   isVersionPendingRestart,
-  classifyUpgradeFailure,
-  buildUpgradeCommand,
   isValidChannelName,
   isValidRegistryBase,
   shouldReloadAfterRestart,
   VERDICT_OUTDATED,
   VERDICT_UP_TO_DATE,
   VERDICT_UNKNOWN,
-  UPGRADE_FAIL_TRANSIENT_NETWORK,
-  UPGRADE_FAIL_FILE_LOCKED,
-  UPGRADE_FAIL_NPM_MISSING,
-  UPGRADE_FAIL_TIMEOUT,
-  UPGRADE_FAIL_UNKNOWN,
 } from '../src/core.mjs'
 
 const CURRENT = '0.1.1-rc.2'
@@ -105,35 +96,6 @@ test('场景:版本字符串非法判未知', () => {
   assert.match(result.reason, /dev-main/)
 })
 
-test('场景:升级命令占位符替换', () => {
-  const command = buildUpgradeCommand({ template: 'npm install -g @deepseek-ai/dsh@{tag}', tag: 'next' })
-  assert.equal(command, 'npm install -g @deepseek-ai/dsh@next')
-})
-
-test('场景:升级命令模板可整体自改为无占位符命令', () => {
-  const command = buildUpgradeCommand({ template: 'pnpm add -g @deepseek-ai/dsh', tag: 'alpha' })
-  assert.equal(command, 'pnpm add -g @deepseek-ai/dsh')
-})
-
-test('场景:升级命令占位符多次出现全部替换', () => {
-  const command = buildUpgradeCommand({ template: 'echo {tag} {tag}', tag: 'latest' })
-  assert.equal(command, 'echo latest latest')
-})
-
-test('场景:升级命令模板为空拒绝执行', () => {
-  assert.throws(() => buildUpgradeCommand({ template: '   ', tag: 'latest' }), /模板/)
-  assert.throws(() => buildUpgradeCommand({ template: null, tag: 'latest' }), /模板/)
-})
-
-test('场景:tag 含 shell 元字符拒绝执行(远端数据回流成命令的拦截点)', () => {
-  for (const tag of ['latest; rm -rf /', 'x && calc', 'a|b', '$(whoami)', '`id`', 'a b', '']) {
-    assert.throws(() => buildUpgradeCommand({ template: 'npm install -g pkg@{tag}', tag }), /非法字符/, tag)
-  }
-  for (const tag of ['latest', 'next', 'beta-1.2', 'canary_ignored', 'v1.0.0-rc.1']) {
-    assert.doesNotThrow(() => buildUpgradeCommand({ template: 'npm install -g pkg@{tag}', tag }), tag)
-  }
-})
-
 test('场景:tag 白名单形态对齐 npm dist-tag 规则(首尾字母数字,上限 214)', () => {
   assert.equal(isValidChannelName('..'), false)
   assert.equal(isValidChannelName('.a'), false)
@@ -184,157 +146,6 @@ test('场景:未失联且实例标识未变不刷新', () => {
   assert.equal(shouldReloadAfterRestart({ lost: false, pid: 100, bootAt: null }, { lost: false, pid: 100, bootAt: 200 }), false)
 })
 
-// 升级失败分类:npm 输出特征取自 npm 10/11 真实错误行形态(npm error code/syscall),
-// 特征未命中一律宽松归 unknown,不可重试类绝不重试。
-test('分类:Windows 文件锁形态归 file-locked 且可重试', () => {
-  const samples = [
-    'npm error code EBUSY\nnpm error syscall rename\nnpm error path C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\package.json',
-    'npm error code EPERM\nnpm error syscall unlink\nnpm error path C:\\nvm\\node_modules\\.bin\\dsh.cmd',
-    'npm error code ENOENT\nnpm error syscall rename\nnpm error path C:\\nvm\\node_modules\\@deepseek-ai\\dsh',
-    'C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\lib\\index.js is being used by another process',
-    'EBUSY: resource busy or locked, unlink C:\\nvm\\node_modules\\@deepseek-ai\\dsh\\lib\\index.js',
-  ]
-  for (const stderrTail of samples) {
-    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
-    assert.equal(result.kind, UPGRADE_FAIL_FILE_LOCKED, stderrTail)
-    assert.equal(result.retryable, true, stderrTail)
-    assert.ok(typeof result.reason === 'string' && result.reason.length > 0)
-  }
-})
-
-test('分类:网络瞬断形态归 transient-network 且可重试', () => {
-  const samples = [
-    'npm error network request to https://registry.npmjs.org/@deepseek-ai%2fdsh failed, reason: socket hang up',
-    'npm error code ECONNRESET\nnpm error errno ECONNRESET\nnpm error network This is a problem related to network connectivity.',
-    'npm error code EAI_AGAIN\nnpm error syscall getaddrinfo',
-    'npm error code ECONNREFUSED',
-    'fetch failed',
-    'npm error code E503\nnpm error 503 Service Unavailable - GET https://registry.npmjs.org/dsh',
-  ]
-  for (const stderrTail of samples) {
-    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
-    assert.equal(result.kind, UPGRADE_FAIL_TRANSIENT_NETWORK, stderrTail)
-    assert.equal(result.retryable, true, stderrTail)
-  }
-})
-
-test('分类:命令未找到形态归 npm-missing 且不可重试', () => {
-  const samples = [
-    "'npmm' 不是内部或外部命令,也不是可运行的程序或批处理文件。",
-    '/bin/sh: 1: npmm: command not found',
-    '/bin/sh: 1: npmm: not found',
-    'spawn npmm ENOENT',
-  ]
-  for (const stderrTail of samples) {
-    const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail })
-    assert.equal(result.kind, UPGRADE_FAIL_NPM_MISSING, stderrTail)
-    assert.equal(result.retryable, false, stderrTail)
-  }
-})
-
-test('分类:超时强杀优先归 timeout,尾流含文件锁特征也不重试', () => {
-  const result = classifyUpgradeFailure({ code: null, timedOut: true, stillRunning: false, stdoutTail: '', stderrTail: 'npm error code EBUSY' })
-  assert.equal(result.kind, UPGRADE_FAIL_TIMEOUT)
-  assert.equal(result.retryable, false)
-})
-
-test('分类:未识别输出归 unknown 兜底且不可重试', () => {
-  for (const input of [
-    { code: 3, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: 'boom-fail' },
-    { code: 1, timedOut: false, stillRunning: false, stdoutTail: '', stderrTail: '' },
-    { code: null, timedOut: false, stillRunning: true, stdoutTail: '', stderrTail: '' },
-    { code: 1, timedOut: false, stillRunning: false, stdoutTail: 'npm warn deprecated x', stderrTail: 'exit 1' },
-  ]) {
-    const result = classifyUpgradeFailure(input)
-    assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN, JSON.stringify(input))
-    assert.equal(result.retryable, false, JSON.stringify(input))
-  }
-})
-
-test('分类:stdout 尾流特征同样参与匹配', () => {
-  const result = classifyUpgradeFailure({ code: 1, timedOut: false, stillRunning: false, stdoutTail: 'npm error code EBUSY', stderrTail: '' })
-  assert.equal(result.kind, UPGRADE_FAIL_FILE_LOCKED)
-  assert.equal(result.retryable, true)
-})
-
-test('分类:输入字段缺省容忍不抛错', () => {
-  const result = classifyUpgradeFailure({})
-  assert.equal(result.kind, UPGRADE_FAIL_UNKNOWN)
-  assert.equal(result.retryable, false)
-  assert.ok(typeof result.reason === 'string')
-})
-
-// 钉定版本提取:取命令中最后一个合法 semver token(包说明符通常在尾部);
-// 通道名/@latest/无版本形态天然不命中;shell 粘连(&&、;、>)在 token 边界截断
-test('钉定版本:提取命令中的 @x.y.z token,取最后合法者', () => {
-  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@0.1.4'), '0.1.4')
-  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@0.1.4 --silent'), '0.1.4')
-  assert.equal(extractPinnedVersion('npm i -g @deepseek-ai/dsh@0.1.4 && echo ok'), '0.1.4')
-  assert.equal(extractPinnedVersion('@scope/pkg@1.2.3-rc.1'), '1.2.3-rc.1')
-  assert.equal(extractPinnedVersion('pkg@1.2.3+build.7'), '1.2.3+build.7')
-  assert.equal(extractPinnedVersion('a@1.0.0 b@2.0.0'), '2.0.0')
-  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@{tag}'), null)
-  assert.equal(extractPinnedVersion('npm install -g @deepseek-ai/dsh@latest'), null)
-  assert.equal(extractPinnedVersion('node -e "process.exit(0)"'), null)
-  assert.equal(extractPinnedVersion('pkg@0.1.4beta'), null)
-  assert.equal(extractPinnedVersion('pkg@01.2.3'), null)
-  assert.equal(extractPinnedVersion('@@1.0.0'), '1.0.0')
-  assert.equal(extractPinnedVersion(''), null)
-  assert.equal(extractPinnedVersion(null), null)
-})
-
-// 升级后磁盘版本复读判定:stale=版本未前进或未达通道目标;信息缺失宽松不误报。
-test('复读:版本前进且达通道目标判 fresh', () => {
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
-  // prerelease 目标达成也算 fresh;prerelease 低于正式版属未达目标(见下例)
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '2.1.0-rc.1', channelLatest: '2.1.0-rc.1' }), { stale: false, reason: null })
-})
-
-test('复读:磁盘版本未前进或回退判 stale', () => {
-  const same = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '2.0.0' })
-  assert.equal(same.stale, true)
-  assert.match(same.reason, /未前进/)
-  const rollback = judgeUpgradeFreshness({ previousVersion: '2.0.0', installedVersion: '1.9.0', channelLatest: '2.0.0' })
-  assert.equal(rollback.stale, true)
-  // 目标==来版属重装/回退意图:失败原因按"未落到通道目标"口径,不得走"未前进"文案
-  assert.match(rollback.reason, /通道目标/)
-})
-
-// 重装场景(通道目标与来版相同):版本不前进是预期结果,不得误报 stale
-test('复读:重装(目标==来版)版本不变判 fresh', () => {
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '1.0.0' }), { stale: false, reason: null })
-})
-
-test('复读:重装场景装出更低版本判 stale(未落到通道目标)', () => {
-  const result = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '0.9.0', channelLatest: '1.0.0' })
-  assert.equal(result.stale, true)
-  assert.match(result.reason, /通道目标/)
-})
-
-// 切通道回退(目标<来版):恰落到通道目标即达成;静默未动(磁盘仍是来版)必须拦下
-test('复读:回退落到通道目标判 fresh,静默未动判 stale', () => {
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '0.2.0-rc.1', installedVersion: '0.1.5', channelLatest: '0.1.5' }), { stale: false, reason: null })
-  const silent = judgeUpgradeFreshness({ previousVersion: '0.2.0-rc.1', installedVersion: '0.2.0-rc.1', channelLatest: '0.1.5' })
-  assert.equal(silent.stale, true)
-  assert.match(silent.reason, /通道目标/)
-})
-
-// 钉定版本(命令含 @x.y.z):意图=精确版本,装到位即达成,通道目标不参与对拍
-test('复读:钉定版本装到位判 fresh,装偏判 stale', () => {
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '0.1.5', installedVersion: '0.1.4', channelLatest: '0.1.5', pinnedVersion: '0.1.4' }), { stale: false, reason: null })
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.0.0', channelLatest: '2.0.0', pinnedVersion: '1.0.0' }), { stale: false, reason: null })
-  const missed = judgeUpgradeFreshness({ previousVersion: '0.1.5', installedVersion: '0.1.5', channelLatest: '0.1.5', pinnedVersion: '0.1.4' })
-  assert.equal(missed.stale, true)
-  assert.match(missed.reason, /指定版本/)
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.2.3-rc.1', channelLatest: '2.0.0', pinnedVersion: '1.2.3-rc.1' }), { stale: false, reason: null })
-})
-
-test('复读:前进但未达通道目标判 stale', () => {
-  const result = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '1.5.0', channelLatest: '2.0.0' })
-  assert.equal(result.stale, true)
-  assert.match(result.reason, /未达/)
-})
-
 // 运行/已装版本区分:磁盘版本领先运行版本即待重启生效;任一侧不可解析一律 false 不误报。
 test('重启待生效:仅已装版本严格领先运行版本时为真', () => {
   assert.equal(isVersionPendingRestart({ runningVersion: '1.0.0', installedVersion: '2.0.0' }), true)
@@ -344,19 +155,4 @@ test('重启待生效:仅已装版本严格领先运行版本时为真', () => {
   assert.equal(isVersionPendingRestart({ runningVersion: null, installedVersion: '2.0.0' }), false)
   assert.equal(isVersionPendingRestart({ runningVersion: '2.0.0', installedVersion: null }), false)
   assert.equal(isVersionPendingRestart({ runningVersion: 'dev-main', installedVersion: '2.0.0' }), false)
-})
-
-test('复读:installed 解析失败判 stale,previous 缺失不豁免未达目标', () => {
-  const broken = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: null, channelLatest: '2.0.0' })
-  assert.equal(broken.stale, true)
-  assert.match(broken.reason, /解析失败|读取/)
-  const garbage = judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: 'dev-main', channelLatest: '2.0.0' })
-  assert.equal(garbage.stale, true)
-  // 旧版本未知只豁免"未前进"分支:磁盘低于通道目标仍判 stale
-  const unknownPrevious = judgeUpgradeFreshness({ previousVersion: null, installedVersion: '1.5.0', channelLatest: '2.0.0' })
-  assert.equal(unknownPrevious.stale, true)
-  assert.match(unknownPrevious.reason, /未达/)
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: null, installedVersion: '2.0.0', channelLatest: '2.0.0' }), { stale: false, reason: null })
-  // 通道目标缺失时无法证明未达标,宽松判 fresh
-  assert.deepEqual(judgeUpgradeFreshness({ previousVersion: '1.0.0', installedVersion: '2.0.0', channelLatest: null }), { stale: false, reason: null })
 })

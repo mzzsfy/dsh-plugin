@@ -3,7 +3,7 @@
 // anthropic(event 序列:message_start → content_block → message_delta → message_stop)。
 // 场景(scenarios.resolveScenario)经模型名触发:thinking 块、错误码、流中断、慢速间隔。
 import { resolveScenario, THINKING_TEXT, THINKSLOW_CHUNK_INTERVAL_MS, THINKSLOW_CHUNK_SIZE, SLOW_CHUNK_INTERVAL_MS, toolCallOf } from './scenarios.mjs'
-import { FIXED_CONTENT } from './protocol.mjs'
+import { FIXED_CONTENT, fixtureContent, respondFor } from './protocol.mjs'
 
 const SSE_HEADERS = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' }
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
@@ -21,7 +21,7 @@ function anthropicUsage(tokens) {
   return { input_tokens: tokens?.[0] ?? 1, output_tokens: tokens?.[1] ?? 1 }
 }
 
-async function writeOpenaiStream(response, model, tokens, scenario, toolCall) {
+async function writeOpenaiStream(response, model, tokens, scenario, toolCall, content = FIXED_CONTENT) {
   response.writeHead(200, SSE_HEADERS)
   const chunk = (delta, extra = {}) => JSON.stringify({
     id: 'chatcmpl-echo-upstream', object: 'chat.completion.chunk', created: 0, model,
@@ -51,7 +51,7 @@ async function writeOpenaiStream(response, model, tokens, scenario, toolCall) {
     response.end()
     return
   }
-  sseWrite(response, null, chunk({ content: 'echo-upstream-fixed' }))
+  sseWrite(response, null, chunk({ content }))
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   // 终止块:finish_reason 落在 choices[0],严格消费端(0.2.0+)以 finish_reason 判流完整性
   sseWrite(response, null, JSON.stringify({
@@ -64,12 +64,12 @@ async function writeOpenaiStream(response, model, tokens, scenario, toolCall) {
   response.end()
 }
 
-async function writeResponsesStream(response, model, tokens, scenario) {
+async function writeResponsesStream(response, model, tokens, scenario, content = FIXED_CONTENT) {
   response.writeHead(200, SSE_HEADERS)
   const usage = { input_tokens: tokens?.[0] ?? 1, output_tokens: tokens?.[1] ?? 1, total_tokens: (tokens?.[0] ?? 1) + (tokens?.[1] ?? 1) }
   const completed = {
     id: 'resp_echo-upstream', object: 'response', created: 0, status: 'completed', model,
-    output: [{ type: 'message', id: 'msg_echo-upstream', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: FIXED_CONTENT, annotations: [] }] }],
+    output: [{ type: 'message', id: 'msg_echo-upstream', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: content, annotations: [] }] }],
     usage,
   }
   sseWrite(response, null, JSON.stringify({ type: 'response.created', response: { id: completed.id, ...completed, output: [], usage: undefined } }))
@@ -77,14 +77,14 @@ async function writeResponsesStream(response, model, tokens, scenario) {
   sseWrite(response, null, JSON.stringify({ type: 'response.output_item.added', output_index: 0, item: completed.output[0] }))
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
   if (scenario === 'drop') { response.end(); return }
-  sseWrite(response, null, JSON.stringify({ type: 'response.output_text.delta', item_id: completed.output[0].id, output_index: 0, content_index: 0, delta: FIXED_CONTENT }))
+  sseWrite(response, null, JSON.stringify({ type: 'response.output_text.delta', item_id: completed.output[0].id, output_index: 0, content_index: 0, delta: content }))
   if (scenario === 'slow') await sleep(SLOW_CHUNK_INTERVAL_MS)
-  sseWrite(response, null, JSON.stringify({ type: 'response.output_text.done', item_id: completed.output[0].id, output_index: 0, content_index: 0, text: FIXED_CONTENT }))
+  sseWrite(response, null, JSON.stringify({ type: 'response.output_text.done', item_id: completed.output[0].id, output_index: 0, content_index: 0, text: content }))
   sseWrite(response, null, JSON.stringify({ type: 'response.completed', response: completed }))
   response.end()
 }
 
-async function writeAnthropicStream(response, model, tokens, scenario, toolCall) {
+async function writeAnthropicStream(response, model, tokens, scenario, toolCall, content = FIXED_CONTENT) {
   response.writeHead(200, SSE_HEADERS)
   sseWrite(response, 'message_start', JSON.stringify({
     type: 'message_start',
@@ -112,7 +112,7 @@ async function writeAnthropicStream(response, model, tokens, scenario, toolCall)
     return
   }
   blockStart(index, { type: 'text', text: '' })
-  blockDelta(index, { type: 'text_delta', text: 'echo-upstream-fixed' })
+  blockDelta(index, { type: 'text_delta', text: content })
   blockStop(index)
   sseWrite(response, 'message_delta', JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: anthropicUsage(tokens).output_tokens } }))
   sseWrite(response, 'message_stop', JSON.stringify({ type: 'message_stop' }))
@@ -135,10 +135,20 @@ export function installDelegate(options = {}) {
       const model = parsedBody?.model ?? null
       if (scenario === 'err429') return respondError(response, 429), true
       if (scenario === 'err500') return respondError(response, 500), true
-      if (!parsedBody?.stream) return undefined
-      if (request.url.includes('/responses')) return void writeResponsesStream(response, model, startOptions.tokens, scenario), true
-      if (request.url.includes('/messages')) return void writeAnthropicStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario, parsedBody)), true
-      return void writeOpenaiStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario, parsedBody)), true
+      if (!parsedBody?.stream) {
+        const route = request.url.includes('/messages') ? 'anthropic' : request.url.includes('/chat/completions') ? 'openai' : 'other'
+        const routeOptions = { ...startOptions, scenario, protocol: route }
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify(respondFor(request.method, request.url, request.headers, parsedBody, routeOptions)))
+        return true
+      }
+      const protocol = request.url.includes('/messages') ? 'anthropic' : request.url.includes('/chat/completions') ? 'openai' : 'other'
+      const content = startOptions.echoUserMessage && scenario === 'default'
+        ? fixtureContent(parsedBody?.messages, { echoUserMessage: true, protocol, scenario })
+        : FIXED_CONTENT
+      if (request.url.includes('/responses')) return void writeResponsesStream(response, model, startOptions.tokens, scenario, content), true
+      if (request.url.includes('/messages')) return void writeAnthropicStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario, parsedBody), content), true
+      return void writeOpenaiStream(response, model, startOptions.tokens, scenario, toolCallOf(scenario, parsedBody), content), true
     },
   }
 }

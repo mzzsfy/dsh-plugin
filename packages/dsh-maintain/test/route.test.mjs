@@ -6,11 +6,31 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_UPGRADE_TEMPLATE, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, AUTO_RESTART_DELAY_MS, UPGRADE_LOCK_PATH, RELEASE_NOTES_CACHE_MAX, collectActiveWork } from '../src/index.js'
-import { rmSync, readFileSync } from 'node:fs'
+import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, RELEASE_NOTES_CACHE_MAX, collectActiveWork, discoverRunningInstall } from '../src/index.js'
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const TEST_RUNTIME_MANIFEST = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
 
-// 锁文件是固定共享路径:测试进程中断可能残留幽灵锁毒化后续运行,用例前预热清理
-rmSync(UPGRADE_LOCK_PATH, { force: true })
+// 受管安装桩:测试进程 argv[1] 不是 DSH 包,真实发现必失败;全部用例注入可用桩,
+// 失败面由 discoverRunningInstall 自身的专项用例覆盖
+const RUNNING_INSTALL = {
+  prefix: 'C:/fake-prefix',
+  originalPackage: 'C:/fake-prefix/node_modules/@deepseek-ai/dsh',
+  runningVersion: '0.1.1',
+  error: null,
+}
+
+// 受管升级 runner 桩:记录入参并返回可控结果/异常,禁止测试触发真实 npm
+function makeRunnerStub(overrides = {}) {
+  const calls = []
+  const stub = Object.assign((input) => {
+    calls.push(input)
+    return typeof overrides.result === 'function' ? overrides.result(input) : Promise.resolve({ operationId: 'op-1', switched: true, phase: 'awaiting-restart', slot: 'a', targetVersion: input.targetVersion })
+  }, overrides)
+  stub.calls = calls
+  return stub
+}
 
 // 全局 fetch 拦截:core.fetchDistTags 默认绑定全局 fetch,测试期返回与 dist-tags.test
 // 同形的流式响应(tags 就绪),防止启动检查/refresh 触发真实网络请求
@@ -35,7 +55,7 @@ function tagsBody(tags) {
 
 globalThis.fetch = async () => tagsBody(MOCK_TAGS)
 
-function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySettings = false, configEditorAvailable = true, timerAvailable = true, services = {} } = {}) {
+function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySettings = false, configEditorAvailable = true, timerAvailable = true, services = {}, dependencies = {}, installAnchor = TEST_RUNTIME_MANIFEST, hostVersionProbeAvailable = true } = {}) {
   const routes = new Map()
   let tick = null
   // 条目配置桩:settingsStore 对象即 apply 入参 config(0.1.7 形态的宿主解析配置);
@@ -44,6 +64,7 @@ function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySetti
   const config = legacySettings ? {} : (settingsStore ?? {})
   const legacyStore = legacySettings ? (settingsStore ?? {}) : {}
   const calls = { exits: [], registered: [], disposers: [], editCalls: [], configureCalls: [], registerCalls: [] }
+  const hooks = { on(event, listener) { calls.agentHook = { event, listener }; return () => {} } }
   const settingsService = {
     configure(presentation, owner) {
       calls.configureCalls.push({ presentation, owner })
@@ -71,7 +92,11 @@ function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySetti
     calls,
     // fiber 桩:0.1.7 写路径经 fiber.entry 定位 profile 条目
     fiber: { entry: { options: { id: 'maintain', name: '@mzzsfy/dsh-maintain' } } },
+    profileContext: installAnchor === null ? {} : { installAnchor, name: 'web', dir: 'test-profile', home: 'test-home' },
+    hooks,
     get(name) {
+      if (name === 'hostVersionProbe') return hostVersionProbeAvailable ? services.hostVersionProbe || (() => '1.0.0') : undefined
+      if (name === 'hooks') return services.agentHooks || hooks
       if (name === 'appExit') return appExit
       if (name === 'settings') return settingsAvailable ? settingsService : undefined
       if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
@@ -113,7 +138,7 @@ function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySetti
       for (const disposer of calls.disposers) disposer()
     },
   }
-  apply(ctx, config)
+  apply(ctx, config, { runningInstall: RUNNING_INSTALL, ...dependencies })
   return { ctx, routes, config }
 }
 
@@ -163,9 +188,32 @@ const realSleep = (ms) => new Promise((resolve) => {
   setImmediate(spin)
 })
 
-test('挂载:9 条路由注册,启动检查后快照就绪', async () => {
+test('缺失宿主安装锚点时插件仍挂载并以未知版本提供状态', async () => {
+  const { routes } = makeCtx({ installAnchor: 'C:/missing-maintain-runtime/package.json', hostVersionProbeAvailable: false })
+  assert.ok(await waitSnapshotReady(routes))
+  const status = await get(routes, '/api/maintain/status')
+  assert.equal(status.status, 200)
+  assert.equal(status.payload.runningVersion, null)
+})
+
+test('宿主清单损坏时插件仍挂载并以未知版本提供状态', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = await mkdtemp(join(tmpdir(), 'maintain-bad-manifest-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const manifest = join(root, 'package.json')
+  await writeFile(manifest, '{')
+  const { routes } = makeCtx({ installAnchor: manifest, hostVersionProbeAvailable: false })
+  assert.ok(await waitSnapshotReady(routes))
+  const status = await get(routes, '/api/maintain/status')
+  assert.equal(status.status, 200)
+  assert.equal(status.payload.runningVersion, null)
+})
+
+test('挂载:8 条路由注册,启动检查后快照就绪', async () => {
   const { ctx, routes } = makeCtx()
-  assert.equal(routes.size, 9)
+  assert.equal(routes.size, 8)
   assert.deepEqual(
     [...routes.keys()].sort(),
     [
@@ -177,7 +225,6 @@ test('挂载:9 条路由注册,启动检查后快照就绪', async () => {
       '/api/maintain/restart',
       '/api/maintain/status',
       '/api/maintain/upgrade',
-      '/api/maintain/upgrade-template',
     ],
   )
   // 启动检查是异步链(mock fetch 微任务 + resolveHostVersion 真实文件读),
@@ -201,8 +248,8 @@ test('Config 导出契约:根级 volatile 包装,validate 产出整节单 ref,�
   const section = value.get()
   assert.equal(section.channel, DEFAULT_CHANNEL)
   assert.equal(section.pollIntervalSec, DEFAULT_POLL_INTERVAL_SEC)
-  assert.equal(section.upgradeCommandTemplate, DEFAULT_UPGRADE_TEMPLATE)
   assert.equal(section.registryBase, DEFAULT_REGISTRY_BASE)
+  assert.equal('upgradeCommandTemplate' in section, false, '模板配置字段必须移除')
   const provided = Config['~standard'].validate({ channel: 'next' }).value.get()
   assert.equal(provided.channel, 'next')
 })
@@ -331,19 +378,6 @@ test('channel:空值 400;非法字符 400;不在 tags 400;合法通道走白名�
   assert.equal(store.channel, 'next')
 })
 
-test('upgrade-template:空值 400;合法值持久化', async () => {
-  const store = {}
-  const { ctx, routes } = makeCtx({ settingsStore: store })
-  const empty = await post(routes, '/api/maintain/upgrade-template', { template: '' })
-  assert.equal(empty.status, 400)
-  const blank = await post(routes, '/api/maintain/upgrade-template', { template: '   ' })
-  assert.equal(blank.status, 400, '空白模板与空值同判,不得落盘')
-  assert.equal(store.upgradeCommandTemplate, undefined, '空白模板不得经路由落盘')
-  const ok = await post(routes, '/api/maintain/upgrade-template', { template: 'npm i -g pkg@{tag}' })
-  assert.equal(ok.status, 200)
-  assert.equal(store.upgradeCommandTemplate, 'npm i -g pkg@{tag}')
-})
-
 test('poll-interval:负数 400;合法值持久化', async () => {
   const store = {}
   const { ctx, routes } = makeCtx({ settingsStore: store })
@@ -366,167 +400,174 @@ test('registry-base:非法 scheme 400;合法值持久化', async () => {
   assert.equal(store.registryBase, 'https://mirror.example')
 })
 
-test('upgrade:运行版本已是通道最新放行(重装/回退场景),不再 409 拒绝', async () => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  // 版本探测注入受控值:CI 无 dsh 本体,真实盘读回 null 会把 verdict 打成 unknown,
-  // 重装放行断言(本用例核心)在 CI 恒不触发
-  const { ctx, routes } = makeCtx({
-    settingsStore: store,
-    services: { hostVersionProbe: () => Promise.resolve('5.4.3') },
+// 受管布局桩:路由测试不触真实文件系统,layout 由依赖注入
+const LAYOUT_STUB = {
+  prefix: RUNNING_INSTALL.prefix,
+  originalPackage: RUNNING_INSTALL.originalPackage,
+  bin: 'lib/bin.js',
+  root: 'C:/fake-prefix/.dsh-maintain',
+  a: 'C:/fake-prefix/.dsh-maintain/install-a',
+  b: 'C:/fake-prefix/.dsh-maintain/install-b',
+  link: 'C:/fake-prefix/node_modules/@deepseek-ai/dsh/dsh_link',
+}
+
+// 受管升级路由:门控顺序 目标解析→互斥→受管可用→appExit→活跃工作,全部通过才进 runner。
+// runner 注入桩,禁止测试触发真实 npm;exit 调度经 mock timers 控制
+const IDLE_SERVICES = { agents: { list: () => [] }, jobs: { list: () => [] } }
+const DEPS = (overrides = {}) => ({ runManagedUpgrade: makeRunnerStub(), createLayout: async () => LAYOUT_STUB, ...overrides })
+
+test('upgrade:targetVersion 非精确一律 400,runner 不得启动', async () => {
+  const runner = makeRunnerStub()
+  const { ctx, routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  for (const targetVersion of ['latest', '1.2', '', '1.0.0; rm -rf /', null, 3]) {
+    const denied = await post(routes, '/api/maintain/upgrade', { targetVersion })
+    assert.equal(denied.status, 400, '非法目标必须 400: ' + String(targetVersion))
+    assert.match(denied.payload.error, /精确/)
+  }
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 0, '拒绝路径不得进入 runner')
+})
+
+test('upgrade:目标缺省按通道 dist-tag 解析为精确版本;tags 未就绪 400', async () => {
+  const runner = makeRunnerStub()
+  const { ctx, routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  await waitSnapshotReady(routes)
+  const accepted = await post(routes, '/api/maintain/upgrade', {})
+  assert.equal(accepted.status, 200)
+  assert.equal(accepted.payload.targetVersion, MOCK_TAGS.latest, '缺省目标必须来自通道 dist-tag')
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 1)
+  assert.equal(runner.calls[0].targetVersion, MOCK_TAGS.latest)
+  assert.equal(runner.calls[0].registryBase, 'https://registry.npmjs.org', 'runner 收到配置镜像地址')
+})
+
+test('upgrade:受管安装不可用或 appExit 缺失 409,runner 不得启动', async () => {
+  const runner = makeRunnerStub()
+  const brokenInstall = { ...RUNNING_INSTALL, error: 'DSH profileContext.installAnchor 不可用', prefix: null, originalPackage: null, runningPackage: null }
+  const broken = makeCtx({
+    appExit: () => {},
+    services: IDLE_SERVICES,
+    dependencies: DEPS({ runManagedUpgrade: runner, runningInstall: { ...RUNNING_INSTALL, ...brokenInstall } }),
   })
-  // 注入运行版本远高于假目标版本:verdict 应转 up-to-date,安装入口照常放行
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => tagsBody({ latest: '0.0.1', next: '0.0.2' })
-  const warns = []
-  const originalWarn = console.warn
-  console.warn = (text) => warns.push(String(text))
-  try {
-    const refreshed = await post(routes, '/api/maintain/refresh')
-    assert.equal(refreshed.status, 200)
-    assert.equal(refreshed.payload.verdict, 'up-to-date', '前置:注入运行版本应高于 0.0.1 假目标')
-    const accepted = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-    assert.equal(accepted.status, 200, '已是通道最新必须放行:重装修复与回退是显式用户意图')
-    assert.equal(accepted.payload.upgrade.running, true)
-    for (let i = 0; i < 50; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) break
-    }
-    assert.equal(store.upgradeCommandTemplate, 'node -e "process.exit(0)"', '放行路径命令模板不得被改动')
-    assert.ok(warns.some((text) => /audit endpoint=upgrade outcome=triggered/.test(text)), '放行安装须留审计行')
-  } finally {
-    globalThis.fetch = originalFetch
-    console.warn = originalWarn
-  }
+  const noExit = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const deniedManaged = await post(broken.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(deniedManaged.status, 409)
+  assert.match(deniedManaged.payload.error, /受管安装不可用/)
+  const deniedExit = await post(noExit.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(deniedExit.status, 409)
+  assert.match(deniedExit.payload.error, /appExit/)
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 0, '能力缺失路径不得进入 runner')
 })
 
-test('upgrade:verdict unknown 放行(tags 未就绪不得 409 误拒)', async () => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  // fetch 在 apply 前替换:启动检查即失败,tags 保持 null,verdict 恒 unknown
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
-  try {
-    const { ctx, routes } = makeCtx({ settingsStore: store })
-      let snapshot = null
-    for (let waited = 0; waited < 5000 && snapshot === null; waited += 25) {
-      const poll = await get(routes, '/api/maintain/status').then((r) => r.payload)
-      if (poll.checkedAt !== null) snapshot = poll
-      else await new Promise((resolve) => setTimeout(resolve, 25))
-    }
-    assert.ok(snapshot, '启动检查 5 秒内未完成')
-    assert.equal(snapshot.tags, null, '前置:registry 不可达,tags 未就绪')
-    assert.equal(snapshot.verdict, 'unknown', '前置:verdict 应为 unknown')
-    const allowed = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-    assert.equal(allowed.status, 200, 'verdict unknown 必须放行,不得 409 误拒')
-    assert.equal(allowed.payload.upgrade.running, true)
-    // 等假命令落定:防残留升级锁毒化后续用例
-    for (let i = 0; i < 50; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      const s = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (s && s.upgrade && s.upgrade.running === false && s.upgrade.last !== null) break
-    }
-  } finally {
-    globalThis.fetch = originalFetch
-  }
+test('upgrade:活跃检测不可用 fail-closed 409,存在活跃工作 409 不可越', async () => {
+  const runner = makeRunnerStub()
+  const blind = makeCtx({ appExit: () => {}, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const blindDenied = await post(blind.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(blindDenied.status, 409)
+  assert.match(blindDenied.payload.error, /检测不可用/)
+  assert.equal(blindDenied.payload.detectionAvailable, false)
+  const pendingTerminals = { list: () => [], hasOwnerActivity: (owner) => owner.id === 'session-pending' }
+  const isolatedPending = makeCtx({
+    appExit: () => {},
+    services: {
+      agents: { list: () => [{ id: 'session-pending', status: 'idle', ctx: { get: () => pendingTerminals } }] },
+      jobs: { list: (caller) => caller === 'session-pending' ? [{ id: 'owned', status: 'running' }] : [] },
+      terminals: pendingTerminals,
+    },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const pendingDenied = await post(isolatedPending.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(pendingDenied.status, 409)
+  assert.equal(pendingDenied.payload.items.terminals, 1)
+  assert.equal(pendingDenied.payload.detectionAvailable, true)
+  const busy = makeCtx({
+    appExit: () => {},
+    services: { agents: { list: () => [{ id: 'a1', status: 'running' }] }, jobs: { list: () => [] }, terminals: { list: () => [], hasOwnerActivity: () => false } },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const busyDenied = await post(busy.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(busyDenied.status, 409)
+  assert.match(busyDenied.payload.error, /活跃工作/)
+  assert.equal(busyDenied.payload.items.agents, 1)
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 0, '活跃工作路径不得进入 runner')
 })
 
-test('upgrade:空白模板经 upgrade-template 路由拒绝', async () => {  // 默认模板是真实 npm install 命令,POST upgrade 的默认路径禁止在测试中触发;
-  // 门闩语义由"真实挂起命令"用例覆盖,此处锁定保存侧空白拒绝
-  const store = {}
-  const { ctx, routes } = makeCtx({ settingsStore: store })
-  const blank = await post(routes, '/api/maintain/upgrade-template', { template: '   ' })
-  assert.equal(blank.status, 400)
-  assert.equal(store.upgradeCommandTemplate, undefined)
+test('upgrade:默认候选profile验证能力未实现时禁用runner', async () => {
+  const { routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: { createLayout: async () => LAYOUT_STUB } })
+  const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /候选profile.*未实现/)
 })
 
-test('upgrade:真实挂起命令触达门闩,二次 409,结束后自动重查', async () => {
-  const store = { upgradeCommandTemplate: 'node -e "setTimeout(() => {}, 2000)"' }
-  const { ctx, routes } = makeCtx({ settingsStore: store })
-  const baseline = await get(routes, '/api/maintain/status').then((r) => r.payload)
-  const first = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-  assert.equal(first.status, 200)
-  assert.equal(first.payload.upgrade.running, true)
-  assert.equal(first.payload.upgradeLockHeld, true, '升级期间锁文件持有效力')
-  const second = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+test('upgrade:runner 成功调度一次正常退出', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exits = []
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const runner = makeRunnerStub({ result: () => gate.then(() => ({ operationId: 'op-1', switched: true, phase: 'awaiting-restart', slot: 'a', targetVersion: '9.9.9' })) })
+  const { routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
+  assert.equal(accepted.status, 200)
+  await drainMicrotasks()
+  const second = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(second.status, 409)
-  // 等挂起命令自然退出(轮询而非固定 sleep,兼做落定状态显式断言)
+  release()
   let settled = null
   for (let i = 0; i < 50 && settled === null; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    await realSleep(30)
     const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
     if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
   }
-  assert.ok(settled, '升级应在挂起命令退出后落定')
+  assert.ok(settled)
   assert.equal(settled.upgrade.last.ok, true)
-  assert.equal(settled.upgradeLockHeld, false, '升级结束后锁文件应删除')
-  assert.notEqual(settled.checkedAt, baseline.checkedAt, '升级落定后自动重查链应已刷新 checkedAt')
-  assert.ok(settled.checkedAt !== null)
+  assert.deepEqual(exits, [])
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [0])
 })
 
-test('upgrade:托管+勾选自动重启,命令成功即调度关机且落定钩子零网络零读盘', async (t) => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+
+
+test('upgrade:runner 失败不调度退出,状态落定失败,可再次发起', async () => {
   const exits = []
-  let fetchCalls = 0
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async (...args) => {
-    fetchCalls += 1
-    return originalFetch(...args)
+  let calls = 0
+  const runner = makeRunnerStub({ result: async () => { calls += 1; if (calls === 1) throw new Error('npm 安装失败'); return { operationId: 'op-2', switched: true, phase: 'awaiting-restart', slot: 'b' } } })
+  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const first = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
+  assert.equal(first.status, 200)
+  let failed = null
+  for (let i = 0; i < 50 && failed === null; i += 1) {
+    await realSleep(30)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) failed = status
   }
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  try {
-    const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-      // 等启动检查落定,固定网络请求基线(mock timers 域内以 realSleep 自旋让出事件循环)
-    let baseline = null
-    for (let waited = 0; waited < 5000 && baseline === null; waited += 25) {
-      const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (poll && poll.checkedAt !== null) baseline = fetchCalls
-      else await realSleep(25)
-    }
-    assert.ok(baseline !== null, '启动检查 5 秒内未完成')
-    const first = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-    assert.equal(first.status, 200)
-    let settled = null
-    for (let i = 0; i < 50 && settled === null; i += 1) {
-      await realSleep(30)
-      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
-    }
-    assert.ok(settled, '升级应在假命令退出后落定')
-    assert.equal(settled.upgrade.last.ok, true)
-    // 关机路径零复读:版本复读属升级后磁盘读取,是明确的故障源,砍掉
-    assert.equal(settled.upgrade.last.installedVersion, null, '关机路径禁止复读磁盘版本')
-    assert.equal(settled.upgrade.last.stale, null, '关机路径无 stale 判定')
-    assert.equal(settled.autoRestartScheduled, true, '命令成功即调度关机(stale 不再抑制)')
-    assert.equal(settled.upgradeLockHeld, false, '升级结束后锁文件应删除')
-    // 落定钩子零网络:观察窗口内 fetch 计数不得增长(runCheck 已随关机路径移除)
-    await realSleep(300)
-    assert.equal(fetchCalls, baseline, '落定钩子禁止网络请求')
-    // 关机动作与确认重启同源:延迟窗口后 exit(0),窗口内不得提前
-    assert.deepEqual(exits, [], '延迟窗口内不得提前退出')
-    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
-    assert.deepEqual(exits, [0], '延迟窗口过后必须调度宿主退出')
-  } finally {
-    globalThis.fetch = originalFetch
-    rmSync(UPGRADE_LOCK_PATH, { force: true })
-  }
+  assert.ok(failed, '失败必须落定,不得停留进行中')
+  assert.equal(failed.upgrade.last.ok, false)
+  assert.match(failed.upgrade.last.error, /npm 安装失败/)
+  await realSleep(RESTART_DELAY_MS + 50)
+  assert.deepEqual(exits, [], '失败路径禁止调度退出')
+  const retried = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
+  assert.equal(retried.status, 200, '失败落定后新请求必须放行')
+  await drainMicrotasks()
+  assert.equal(calls, 2)
 })
 
 test('restart:升级进行中 409 拒绝且不调度退出', async () => {
-  const store = { upgradeCommandTemplate: 'node -e "setTimeout(() => {}, 2000)"' }
   const exits = []
-  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-  const upgrade = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+  // deferred runner:升级持续进行中,轮询 restart 互斥
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const runner = makeRunnerStub({ result: () => gate.then(() => ({ operationId: 'op-1', switched: true, phase: 'awaiting-restart', slot: 'a' })) })
+  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const upgrade = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(upgrade.status, 200)
+  await drainMicrotasks()
   const denied = await post(routes, '/api/maintain/restart')
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /升级进行中/)
-  // 等挂起命令退出后确认 exit 未被调度(轮询上限 5s)
-  let running = true
-  for (let i = 0; i < 50 && running; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-    running = Boolean(status && status.upgrade && status.upgrade.running)
-  }
+  release()
+  await drainMicrotasks()
   assert.deepEqual(exits, [], '409 拒绝路径不得调度 exit')
 })
 
@@ -536,7 +577,7 @@ test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
   const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
   const restart = await post(routes, '/api/maintain/restart')
   assert.equal(restart.status, 200)
-  const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+  const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /重启已调度/)
   t.mock.timers.tick(RESTART_DELAY_MS + 1)
@@ -617,126 +658,12 @@ test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {
   assert.equal(store.pollIntervalSec, undefined, '超上界值不得落盘')
 })
 
-test('upgrade:未勾选自动重启,升级成功落定继续运行并标 stale', async (t) => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const exits = []
-  const { ctx, routes } = makeCtx({
-    settingsStore: store,
-    appExit: (code) => exits.push(code),
-    // 探针恒读旧版:模拟假命令不改磁盘,复读版本与触发前快照一致即 stale
-    services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
-  })
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  // 排空启动期微任务链,探针读序此后稳定
-  await drainMicrotasks()
-  const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: false })
-  assert.equal(trigger.status, 200)
-  let settled = null
-  try {
-    for (let i = 0; i < 50 && settled === null; i += 1) {
-      await realSleep(30)
-      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
-    }
-    assert.ok(settled, '升级应在假命令退出后落定')
-    assert.equal(settled.upgrade.last.ok, true)
-    // 假命令不改磁盘,复读版本与触发前快照一致 → stale
-    assert.equal(settled.upgrade.last.stale, true, '继续运行路径必须复读并标注 stale')
-    assert.ok(typeof settled.upgrade.last.reason === 'string' && settled.upgrade.last.reason.length > 0, 'stale 必须带原因')
-    assert.equal(settled.autoRestartScheduled, false, '未勾选不得置调度标记')
-    // 推过完整调度延迟:若误调度,延迟窗口内 exit 必被调用
-    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
-    assert.deepEqual(exits, [], '未勾选自动重启时禁止调度任何宿主退出')
-  } finally {
-    rmSync(UPGRADE_LOCK_PATH, { force: true })
-  }
-})
-
-test('upgrade:模板钉定版本时按钉定意图判 fresh(通道目标不参与对拍)', async (t) => {
-  // 假命令携带钉定 token(参数位),语义等同 `npm i -g pkg@1.0.0` 但不真装
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)" @deepseek-ai/dsh@1.0.0' }
-  const exits = []
-  const { ctx, routes } = makeCtx({
-    settingsStore: store,
-    appExit: (code) => exits.push(code),
-    // 探针恒读 1.0.0:钉定 1.0.0 时"磁盘未变"即达成,不得按通道目标误报 stale
-    services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
-  })
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  await drainMicrotasks()
-  const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: false })
-  assert.equal(trigger.status, 200)
-  let settled = null
-  try {
-    for (let i = 0; i < 50 && settled === null; i += 1) {
-      await realSleep(30)
-      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
-    }
-    assert.ok(settled, '升级应在假命令退出后落定')
-    assert.equal(settled.upgrade.last.ok, true)
-    assert.equal(settled.upgrade.last.stale, false, '钉定版本装到位即达成')
-    assert.equal(settled.upgrade.last.reason, null)
-    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
-    assert.deepEqual(exits, [])
-  } finally {
-    rmSync(UPGRADE_LOCK_PATH, { force: true })
-  }
-})
-
-test('upgrade:勾选自动重启+落定,延迟窗口后调度宿主退出', async (t) => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const exits = []
-  const { ctx, routes } = makeCtx({
-    settingsStore: store,
-    appExit: (code) => exits.push(code),
-    // 关机路径零读盘:探针返回值不影响断言,恒读旧版即可
-    services: { hostVersionProbe: () => Promise.resolve('1.0.0') },
-  })
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  await drainMicrotasks()
-  const trigger = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-  assert.equal(trigger.status, 200)
-  let settled = null
-  try {
-    for (let i = 0; i < 50 && settled === null; i += 1) {
-      await realSleep(30)
-      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
-    }
-    assert.ok(settled, '升级应在假命令退出后落定')
-    assert.equal(settled.upgrade.last.ok, true)
-    assert.equal(settled.upgrade.last.stale, null, '关机路径零复读,stale 不再判定')
-    // 调度标记与 running=false 同拍置位,落定快照直接可断言
-    assert.equal(settled.autoRestartScheduled, true, '勾选自动重启时升级成功必须调度')
-    assert.deepEqual(exits, [], '调度延迟窗口内不得提前退出')
-    t.mock.timers.tick(AUTO_RESTART_DELAY_MS + 1)
-    assert.deepEqual(exits, [0], '延迟窗口过后必须调度宿主退出')
-  } finally {
-    rmSync(UPGRADE_LOCK_PATH, { force: true })
-  }
-})
-
-test('upgrade:autoRestart 缺失或非 boolean 一律 400', async () => {
-  // 假命令兜底:本用例期待 400,但若校验意外放行,真实默认模板会当场触发 npm install
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const { ctx, routes } = makeCtx({ settingsStore: store })
-  const missing = await post(routes, '/api/maintain/upgrade')
-  assert.equal(missing.status, 400, '缺失 autoRestart 必须拒绝,防静默翻转关机行为')
-  const stringInput = await post(routes, '/api/maintain/upgrade', { autoRestart: 'true' })
-  assert.equal(stringInput.status, 400, '字符串宽转必须拒绝')
-  const status = await get(routes, '/api/maintain/status').then((r) => r.payload)
-  assert.equal(status.upgrade.running, false, '非法输入不得触发升级')
-  assert.equal(status.upgrade.last, null, '非法输入不得产生升级记录')
-})
-
-test('upgrade:body 校验先于门控,门控命中时非法 body 仍 400', async (t) => {
+test('upgrade:非法 body 先于门控校验,门控命中时非法 targetVersion 仍 400', async (t) => {
   // 锁定 handler 顺序:readBody 在全部门控之前,门控到置位之间零 await
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
-  const { ctx, routes } = makeCtx({ settingsStore: store, appExit: () => {} })
+  const { ctx, routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES })
   await post(routes, '/api/maintain/restart')
-  const denied = await post(routes, '/api/maintain/upgrade')
+  const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: 'latest' })
   assert.equal(denied.status, 400, 'body 非法时即使门控(重启已调度)命中也必须 400')
 })
 
@@ -793,22 +720,30 @@ test('readBody 超限:路由归一 400', async () => {
 
 // ---- 活跃工作门控(S10)----
 
+test('collectActiveWork:按SessionId查询所属job并检测未发布终端活动', () => {
+  const pendingOwner = { id: 'session-pending', status: 'idle', ctx: { get: () => terminals } }
+  const ownedJob = { id: 'job-owned', owner: 'session-pending', status: 'running' }
+  const agents = { list: () => [pendingOwner] }
+  const jobs = { list: (caller) => caller === 'session-pending' ? [ownedJob] : [] }
+  const terminals = { list: () => [], hasOwnerActivity: (owner) => owner === pendingOwner }
+  const result = collectActiveWork({ get: (name) => ({ agents, jobs, terminals })[name] })
+  assert.equal(result.jobs, 1, 'owned job 必须按 SessionId 传给 jobs.list')
+  assert.equal(result.terminals, 1, 'spawn-to-close 未发布终端也必须计活')
+  assert.equal(result.total, 2)
+  assert.equal(result.detectionAvailable, true)
+})
+
 test('collectActiveWork:agents/jobs/terminals 计活与去重', () => {
-  const terminals = {
-    list: (owner) => owner && owner.id === 'a1'
-      ? [{ sessionId: 't1', status: { kind: 'running' } }, { sessionId: 't3', status: { kind: 'exited' } }]
-      : [{ sessionId: 't1', status: { kind: 'running' } }, { sessionId: 't2', status: { kind: 'running' } }],
-  }
-  const agentA = { id: 'a1', status: 'running', ctx: { get: (n) => (n === 'terminals' ? terminals : undefined) } }
+  const terminals = { list: (owner) => owner?.id === 'a1'
+    ? [{ sessionId: 't1', status: { kind: 'running' } }, { sessionId: 't3', status: { kind: 'exited' } }]
+    : [{ sessionId: 't1', status: { kind: 'running' } }, { sessionId: 't2', status: { kind: 'running' } }] }
+  const agentA = { id: 'a1', status: 'running', ctx: { get: (name) => name === 'terminals' ? terminals : undefined } }
   const agentB = { id: 'a2', status: 'idle' }
   const agents = { list: () => [agentA, agentB] }
-  const jobs = {
-    list: (caller) => caller === undefined
-      ? [{ id: 'j1', status: 'running' }]
-      : [{ id: 'j1', status: 'running' }, { id: 'j2', status: 'stopping' }, { id: 'j3', status: 'done' }],
-  }
-  const result = collectActiveWork({ get: (n) => (n === 'agents' ? agents : n === 'jobs' ? jobs : n === 'terminals' ? terminals : undefined) })
-  // agents:a1 running;a jobs:j1 双 caller 去重计一,j2 stopping 计活,j3 不计;terminals:t1 去重,t2 计,t3 非运行不计
+  const jobs = { list: (caller) => caller === 'a1' || caller === undefined
+    ? [{ id: 'j1', status: 'running' }, { id: 'j2', status: 'stopping' }, { id: 'j3', status: 'done' }]
+    : [] }
+  const result = collectActiveWork({ get: (name) => ({ agents, jobs, terminals })[name] })
   assert.deepEqual({ agents: result.agents, jobs: result.jobs, terminals: result.terminals }, { agents: 1, jobs: 2, terminals: 2 })
   assert.equal(result.total, 5)
   assert.equal(result.detectionAvailable, true)
@@ -857,12 +792,11 @@ test('collectActiveWork:有 agent 而服务面缺失(可探或不可探),仍降�
 })
 
 test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {
-  const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
   const agents = { list: () => [{ id: 'a1', status: 'running' }] }
   const jobs = { list: () => [] }
   const terminals = { list: () => [] }
-  const { ctx, routes } = makeCtx({ settingsStore: store, services: { agents, jobs, terminals } })
-  const denied = await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+  const { routes } = makeCtx({ appExit: () => {}, services: { agents, jobs, terminals } })
+  const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /活跃工作/)
   assert.equal(denied.payload.items.agents, 1)
@@ -906,33 +840,76 @@ test('restart:null 体按空体处理,内部形态不泄漏', async (t) => {
   assert.deepEqual(exits, [0], 'null 体等价空体:正常调度退出')
 })
 
-test('自动重启接线:落定链只取内存输入并直接分流调度(源码形态锁定)', () => {
+test('受管切换接线:切换成功必经统一退出入口调度关机(源码形态锁定)', () => {
   const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
-  const settle = source.match(/const decision = judgeAutoRestart\(\{([\s\S]*?)\}\)/)
-  assert.ok(settle, '落定链缺少 judgeAutoRestart 判定')
-  assert.doesNotMatch(settle[1], /runtimeKind|runtimeEnv/, '落定判定禁止消费运行环境:升级即调度与启动形态无关')
-  assert.doesNotMatch(source, /requiresManualRestart/, '手动直跑指引链必须整体移除,不得残留回写')
-  assert.match(source, /if \(decision\.schedule === true\) \{[\s\S]*?last\.autoRestartScheduled = true[\s\S]*?scheduleHostExit\(\{ detail: 'reason=upgrade-ok', autoRestart: true/, '调度链必须置位标记并经统一退出入口关机')
+  assert.match(source, /reason=managed-upgrade-switched/, '切换成功必须经 scheduleHostExit 关机')
+  assert.match(source, /beforeSwitch/, '编排必须带提交前门控')
+  assert.doesNotMatch(source, /autoRestart/, '自动重启勾选链必须整体移除')
+  assert.doesNotMatch(source, /upgradeCommandTemplate|buildUpgradeCommand|runUpgradeWithRetry/, '模板与重试链必须整体移除')
+  assert.doesNotMatch(source, /UPGRADE_LOCK_PATH|upgradeLockStale/, '全局 tmp 锁必须整体移除')
+  // 切换成功但 appExit 缺失必须可见地失败,不得静默吞掉
+  assert.match(source, /exit-missing/, 'appExit 缺失的已切换状态必须留审计')
 })
 
-test('upgrade:运行环境不参与自动重启判定(env 注入 manual 仍调度关机)', async () => {
-  // DSH_MAINTAIN_RUNTIME_ENV 已无消费者:注入历史值证明判定与运行环境彻底解耦
-  process.env.DSH_MAINTAIN_RUNTIME_ENV = 'manual'
+test('运行安装发现:原始安装 win/posix 布局与接管后槽位反解', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join, sep } = await import('node:path')
+  const base = await mkdtemp(join(tmpdir(), 'discover-test-'))
   try {
-    const store = { upgradeCommandTemplate: 'node -e "process.exit(0)"' }
+    const manifest = JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0', bin: { dsh: 'lib/bin.js' } })
+    // 原始安装 win 布局:P/node_modules/@deepseek-ai/dsh
+    const winPrefix = join(base, 'win-prefix')
+    const winPkg = join(winPrefix, 'node_modules', '@deepseek-ai', 'dsh')
+    await mkdir(join(winPkg, 'lib'), { recursive: true })
+    await writeFile(join(winPkg, 'package.json'), manifest)
+    await writeFile(join(winPkg, 'lib', 'bin.js'), '')
+    const winFound = discoverRunningInstall({ argv1: join(winPkg, 'lib', 'bin.js'), installAnchor: join(winPkg, 'package.json'), platform: 'win32' })
+    assert.equal(winFound.error, null, winFound.error)
+    assert.equal(winFound.prefix, winPrefix, 'win prefix 必须上跳 scope+node_modules 共三级')
+    assert.equal(winFound.originalPackage, winPkg)
+    assert.equal(winFound.runningPackage, winPkg, '原始安装运行包即原包')
+    // 原始安装 posix 布局:P/lib/node_modules/@deepseek-ai/dsh
+    const posixPrefix = join(base, 'posix-prefix')
+    const posixPkg = join(posixPrefix, 'lib', 'node_modules', '@deepseek-ai', 'dsh')
+    await mkdir(join(posixPkg, 'lib'), { recursive: true })
+    await writeFile(join(posixPkg, 'package.json'), manifest)
+    await writeFile(join(posixPkg, 'lib', 'bin.js'), '')
+    const posixFound = discoverRunningInstall({ argv1: join(posixPkg, 'lib', 'bin.js'), installAnchor: join(posixPkg, 'package.json'), platform: 'posix' })
+    assert.equal(posixFound.error, null, posixFound.error)
+    assert.equal(posixFound.prefix, posixPrefix, 'posix prefix 必须多上跳 lib 一级')
+    // dsh_link 接管后:realpath 落在受管槽,运行包=槽内包,原包按标准布局反解
+    const takeoverPrefix = join(base, 'takeover-prefix')
+    const original = join(takeoverPrefix, 'node_modules', '@deepseek-ai', 'dsh')
+    const slotPkg = join(takeoverPrefix, '.dsh-maintain', 'install-a', 'node_modules', '@deepseek-ai', 'dsh')
+    await mkdir(join(slotPkg, 'lib'), { recursive: true })
+    await writeFile(join(slotPkg, 'package.json'), manifest)
+    await writeFile(join(slotPkg, 'lib', 'bin.js'), '')
+    await mkdir(original, { recursive: true })
+    await writeFile(join(original, 'package.json'), manifest)
+    const takeover = discoverRunningInstall({ argv1: join(slotPkg, 'lib', 'bin.js'), installAnchor: join(slotPkg, 'package.json'), platform: 'win32' })
+    assert.equal(takeover.error, null, takeover.error)
+    assert.equal(takeover.prefix, takeoverPrefix, '接管后 prefix 必须反解到原全局根')
+    assert.equal(takeover.originalPackage, original, '接管后原包按标准布局反解')
+    assert.equal(takeover.runningPackage, slotPkg, '接管后运行包是受管槽包')
+    assert.ok(!takeover.prefix.endsWith('.dsh-maintain'), '禁止把受管槽当 prefix')
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('upgrade:运行环境不参与切换判定(env 注入 manual 仍正常调度退出)', async (t) => {
+  // DSH_MAINTAIN_RUNTIME_ENV 已无消费者:注入历史值证明切换语义与运行环境彻底解耦
+  process.env.DSH_MAINTAIN_RUNTIME_ENV = 'manual'
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
     const exits = []
-    const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-      await post(routes, '/api/maintain/upgrade', { autoRestart: true })
-    let settled = null
-    for (let i = 0; i < 50 && settled === null; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
-    }
-    assert.ok(settled, '升级应在假命令退出后落定')
-    assert.equal(settled.autoRestartScheduled, true, '升级成功勾选即调度,运行环境不得抑制')
-    assert.equal(settled.upgrade.last.requiresManualRestart, undefined, '手动指引链已移除')
-    assert.deepEqual(exits, [], '调度延迟窗口内不得提前退出')
+    const runner = makeRunnerStub()
+    const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+    await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
+    await drainMicrotasks()
+    t.mock.timers.tick(RESTART_DELAY_MS + 1)
+    assert.deepEqual(exits, [0], '切换成功即调度退出,运行环境不得抑制')
   } finally {
     delete process.env.DSH_MAINTAIN_RUNTIME_ENV
   }
@@ -946,8 +923,8 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   console.warn = (text) => warns.push(String(text))
   try {
     const agents = { list: () => [{ id: 'a1', status: 'running' }] }
-    const { ctx, routes } = makeCtx({ services: { agents }, appExit: () => {} })
-      await post(routes, '/api/maintain/upgrade', { autoRestart: true })
+    const { routes } = makeCtx({ services: { agents }, appExit: () => {} })
+    await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
     assert.equal(warns.some((text) => text.includes('audit endpoint=upgrade outcome=rejected reason=active-work')), true, '门控拒绝须留审计行')
     await post(routes, '/api/maintain/restart')
     assert.equal(warns.some((text) => text.includes('audit endpoint=restart outcome=rejected reason=active-work')), true, '重启门控拒绝须留审计行')
@@ -956,22 +933,18 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   } finally {
     console.warn = originalWarn
   }
-  // 升级触发与落定:假命令真实进程,落定行带 durationMs 与 code
+  // 升级触发与落定:runner 注入桩,落定行带 operationId 与阶段
   const plainWarns = []
-  const plainCtx = makeCtx({ settingsStore: { upgradeCommandTemplate: 'node -e "process.exit(0)"' }, appExit: () => {} })
+  const plainCtx = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: makeRunnerStub() }) })
   console.warn = (text) => plainWarns.push(String(text))
   try {
-    await post(plainCtx.routes, '/api/maintain/upgrade', { autoRestart: true })
-    for (let i = 0; i < 50; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      const status = await get(plainCtx.routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-      if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) break
-    }
+    await post(plainCtx.routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
+    await drainMicrotasks()
   } finally {
     console.warn = originalWarn
   }
   assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=triggered/.test(text)), true, '升级触发须留审计行')
-  assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=(ok|failed) durationMs=[0-9]+ code=/.test(text)), true, '升级落定须留审计行')
+  assert.equal(plainWarns.some((text) => /audit endpoint=upgrade outcome=ok operationId=op-1/.test(text)), true, '升级落定须留审计行')
 })
 
 // ---- release notes 路由 ----

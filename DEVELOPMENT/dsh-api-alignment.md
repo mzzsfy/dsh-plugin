@@ -17,7 +17,7 @@
 
 **所有包不做 host 认证,不设 Host/Origin 可达性闸门,不做自有 token/cookie 校验。**这是全仓库强制约定,不是遗漏:
 
-- 项目威胁模型:本地/内网可达即可信。宿主的 Host 信任闸门(可达性闸门,官方文档明言"绝不建立身份")由 `dsh-auto-trust-all` 统一放行——它把每个实际到达请求的 Host 动态注册进 `webRuntime.trustedHosts`,效果是**任何**入口(泛域名、内网 IP、rebinding 名)都放行到会话闸门前。
+- 项目威胁模型:本地/内网可达即可信。宿主的 Host 信任闸门(可达性闸门,官方文档明言"绝不建立身份")由 `dsh-auto-trust-all` 统一放行——它把每个实际到达请求的 Host 动态注册进 `connection` 服务的 `trustedHosts`(`webRuntime.trustedHosts` 为 0.2.0 线可选镜像),效果是**任何**入口(泛域名、内网 IP、rebinding 名)都放行到会话闸门前。
 - 身份认证只由宿主原生层承担:dsh 自带 cookie 会话(按 `主机:端口` 绑定)与 `dsh-web-startup-auth` 登录闸门。本仓库不重复、不加强、不旁路这三层中的任何一层。
 - 因此:插件包新增 HTTP 路由时,禁止实现 Host 白名单、DNS-rebinding 防线、token 校验、IP 过滤等自有认证/可达性层。这类代码与 `dsh-auto-trust-all` 直接冲突(宿主放行、单包再拦,行为不一致且破坏"入口审计只看一处"的口径)。写路由的跨源防护以 **Origin 与 Host 的同源比对**为上限(浏览器侧 CSRF 防线,非身份认证;dsh-rs-workflow `lib/board.mjs` 的 `rejectCrossOrigin` 为同构范例)。
 - 事故记录:rs-workflow 1.0.1 全量审查中,曾把宿主 `/api` 前缀路由的 Host fence 缺失误判为"严重漏洞"并给 board 路由补了回环 Host 白名单——实为违反本约定。已在 commit 后续修正移除,并留下回归测试锁定"伪造 Host 照常受理"。

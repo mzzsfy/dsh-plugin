@@ -16,12 +16,30 @@ const harness = {}
   const server = await start({ port: 0, log, ...installDelegate({}) })
   after(() => { server.close(); server.closeIdleConnections() })
   harness.base = `http://127.0.0.1:${server.address().port}`
+  const echoLog = join(mkdtempSync(join(tmpdir(), 'echo-upstream-compat-stream-')), 'requests.jsonl')
+  const echoServer = await start({ port: 0, log: echoLog, ...installDelegate({ echoUserMessage: true }) })
+  after(() => { echoServer.close(); echoServer.closeIdleConnections() })
+  harness.echoBase = `http://127.0.0.1:${echoServer.address().port}`
 }
 
-const post = (path, body) => fetch(harness.base + path, {
+const post = (path, body, base = harness.base) => fetch(base + path, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(body),
+})
+
+test('OpenAI 与 Anthropic compat 流式 fixture 回显当前请求 user 输入', async () => {
+  const openai = await post('/v1/chat/completions', { model: 'my-model', stream: true, messages: [{ role: 'user', content: 'compat-user-openai' }] }, harness.echoBase)
+  const openaiEvents = parseSse(await openai.text())
+  const openaiContent = openaiEvents.map((event) => event.data).filter((data) => data !== '[DONE]').map((data) => JSON.parse(data).choices?.[0]?.delta?.content).filter(Boolean).join('')
+  assert.equal(openaiContent, 'echo-upstream-fixed compat-user-openai')
+  const anthropic = await post('/v1/messages', { model: 'claude-x', stream: true, messages: [{ role: 'user', content: [{ type: 'text', text: 'compat-user-anthropic' }] }] }, harness.echoBase)
+  const anthropicEvents = parseSse(await anthropic.text())
+  const anthropicText = anthropicEvents.filter((event) => event.event === 'content_block_delta').map((event) => JSON.parse(event.data).delta.text).join('')
+  assert.equal(anthropicText, 'echo-upstream-fixed compat-user-anthropic')
+  const responses = await post('/v1/responses', { model: 'my-model', stream: true, input: 'compat-user-responses' }, harness.echoBase)
+  const responseEvents = parseSse(await responses.text()).map((event) => JSON.parse(event.data))
+  assert.equal(responseEvents.at(-1).response.output[0].content[0].text, 'echo-upstream-fixed')
 })
 
 test('openai 流式 chunk 序列终止 [DONE]', async () => {

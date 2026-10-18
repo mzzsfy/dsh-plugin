@@ -41,6 +41,7 @@ import {spawnSync} from 'node:child_process'
 import {existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
+import {judgeHostMin} from './compare-version.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const profileRoot = join(process.env.USERPROFILE, '.dsh', 'profiles', 'web')
@@ -109,44 +110,6 @@ function hostVersion() {
 }
 
 /**
- * prerelease 感知版本比较(-alpha/-rc 段低于同位正式版):a<b → -1,a>b → 1,等 → 0。
- * 核心段允许 3-4 位(x.y.z 或 x.y.z.w,宿主出现过 4 位形态),prerelease 段按
- * '.' 切分逐段比较(数字段数值比,标识段字典比,数字段 > 标识段,同 publish 规则)。
- * 形态不符合返回 null,调用方按无法校验处理(不放行也不阻塞)。
- */
-function compareVersion(a, b) {
-  const parse = (v) => {
-    const m = /^(\d+(?:\.\d+){2,3})(?:-([0-9A-Za-z.-]+))?$/.exec(v)
-    return m ? {core: m[1].split('.').map(Number), pre: m[2] ?? null} : null
-  }
-  const preKey = (t) => (/^\d+$/.test(t) ? [0, Number(t)] : [1, t])
-  const preCmp = (x, y) => {
-    const kx = preKey(x)
-    const ky = preKey(y)
-    return kx[0] !== ky[0] ? kx[0] - ky[0] : kx[1] < ky[1] ? -1 : kx[1] > ky[1] ? 1 : 0
-  }
-  const pa = parse(a)
-  const pb = parse(b)
-  if (!pa || !pb) return null
-  const width = Math.max(pa.core.length, pb.core.length)
-  for (let i = 0; i < width; i += 1) {
-    if ((pa.core[i] || 0) !== (pb.core[i] || 0)) return Math.sign((pa.core[i] || 0) - (pb.core[i] || 0))
-  }
-  if (pa.pre === pb.pre) return 0
-  if (pa.pre === null) return 1
-  if (pb.pre === null) return -1
-  const xs = pa.pre.split('.')
-  const ys = pb.pre.split('.')
-  for (let i = 0; i < Math.max(xs.length, ys.length); i += 1) {
-    if (xs[i] === undefined) return -1
-    if (ys[i] === undefined) return 1
-    const order = preCmp(xs[i], ys[i])
-    if (order !== 0) return order
-  }
-  return 0
-}
-
-/**
  * 宿主版本底线:包 manifest 的 dsh.hostMin(语义 = 低于该宿主版本的 API 面未验证,
  * 强链即复现 0.1.7-rc.2 时代的接管断裂)。宿主版本或 hostMin 任一缺失 → 校验跳过;
  * 可比且宿主 < hostMin → 拒绝该包进流程(返回 false,调用方摘出,不写依赖行不挂载)。
@@ -160,12 +123,12 @@ function meetsHostMin(dir) {
     console.log(`SKIP ${dir}: 宿主版本不可读,hostMin(${hostMin})校验跳过`)
     return true
   }
-  const order = compareVersion(host, hostMin)
-  if (order === null) {
+  const verdict = judgeHostMin(host, hostMin)
+  if (verdict === 'skip') {
     console.log(`SKIP ${dir}: 版本形态无法比较(宿主 ${host} / hostMin ${hostMin}),校验跳过`)
     return true
   }
-  if (order < 0) {
+  if (verdict === 'fail') {
     console.error(`FAIL ${dir}: 实时宿主 ${host} 低于 dsh.hostMin ${hostMin},拒绝 dev-link(升级宿主或下调 hostMin)`)
     return false
   }
@@ -340,6 +303,48 @@ function normalizeBundles(packages) {
   manifest.dsh = {...manifest.dsh, profile: {...manifest.dsh?.profile, bundles: plugins}}
   writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
   console.log('FIX  dsh.profile.bundles 已对账,重启 dsh 后装载层生效')
+  return true
+}
+
+/**
+ * 仓库清单孤儿清理:包目录改名/删除后,profile 残留的 file:/link: 指向本仓库 packages
+ * 的依赖行、对应装载层条目与 dangling junction 一并移除(镜像官方 reconcile"失去声明
+ * 或依赖行即出层"语义)。registry 来源的 @mzzsfy 条目(用户自装的其他包)不动。
+ * 这是全局卫生动作:单包模式同样全量执行,发现孤儿即触发全 profile 重装与重挂。
+ */
+function pruneRepoOrphans(packages) {
+  const manifest = readProfileManifest()
+  manifest.dependencies = manifest.dependencies || {}
+  const repoKeys = new Set(packages.map((dir) => SCOPE + dir))
+  const repoMark = join(repoRoot, 'packages', '').replace(/\\/g, '/')
+  const orphanKeys = new Set()
+  let changed = false
+  for (const key of Object.keys(manifest.dependencies)) {
+    if (repoKeys.has(key) || !key.startsWith(SCOPE)) continue
+    const spec = String(manifest.dependencies[key])
+    if (!/^(file|link):/.test(spec) || !spec.includes(repoMark)) continue
+    console.log(`FIX  ${key}: 删除孤儿依赖行 ${spec}(仓库包已不存在)`)
+    delete manifest.dependencies[key]
+    orphanKeys.add(key)
+    const name = key.slice(SCOPE.length)
+    // dangling junction 的目标已不存在,existsSync 跟随解析恒 false,须按链接形态判断
+    const junction = junctionPath(name)
+    const target = readJunctionTarget(junction)
+    if (target !== null) {
+      rmSync(junction, {recursive: true, force: true})
+      console.log(`FIX  ${key}: 已移除 dangling junction -> ${target}`)
+    } else if (existsSync(junction)) {
+      console.warn(`WARN ${key}: node_modules 位置已是实体目录而非链接,跳过删除`)
+    }
+    changed = true
+  }
+  if (!changed) return false
+  const plugins = [...(manifest.dsh?.profile?.bundles ?? [])]
+  // 只移除已证实为孤儿的装载条目;清单外条目(官方内盒/registry 自装)一律不动
+  const kept = plugins.filter((key) => !orphanKeys.has(key))
+  manifest.dsh = {...manifest.dsh, profile: {...manifest.dsh?.profile, bundles: kept}}
+  writeFileSync(profileManifest, JSON.stringify(manifest, null, 2) + '\n')
+  console.log('FIX  孤儿装载层条目已随依赖行出层,重启 dsh 后生效')
   return true
 }
 
@@ -519,12 +524,14 @@ if (!unlink) {
   const scope = target === 'all' ? packages : usable
   const normalized = normalizeDeps(scope)
   latests = normalized.latests
+  // 孤儿清理在装载层对账前执行:改名/删除包的残留行出层后,bundles 对账不再见到它们
+  const orphanChanged = pruneRepoOrphans(packages)
   // 装载层对账依赖依赖行归一结果;成员关系不改依赖图,不触发安装
   normalizeBundles(scope)
   // 豁免清单是全 profile 级策略,仅在 all 模式全量重写(只豁免各包线上最新版——
   // 历史版本早已过宽限期)
   const excludeChanged = target === 'all' ? syncReleaseAgeExclude(packages, latests) : false
-  if (normalized.changed || excludeChanged) {
+  if (normalized.changed || orphanChanged || excludeChanged) {
     if (!pnpmInstall(allowFresh)) {
       console.error('FAIL 依赖行已写入但安装失败,终态不保证;处理后同参数重跑本脚本')
       process.exitCode = 1

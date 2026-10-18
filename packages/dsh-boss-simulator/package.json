@@ -1,0 +1,49 @@
+{
+  "name": "@mzzsfy/dsh-boss-simulator",
+  "description": "公司管理模拟器:以老板身份安排任务,分派给部门自治执行,只接受汇报;含看板、时间线、中断恢复",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "hostMin": "0.2.0-rc.1",
+    "client": {
+      "platform": "web"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible"
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "object",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.2-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": ">=0.2.0-rc.1",
+    "zod": "^3.23.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,4 +1,7 @@
-# 运行时接管 BDD(gateway 修复:能正常加载才允许禁用官方行)
+# 运行时接管 BDD（历史方案，已退役）
+
+> **已退役，不描述当前行为。** 此文档记录 0.1.7 时代的 takeover/disable 实验；当前 gateway 改为装饰官方 adapter，官方 `llm-pi-ai` 持续启用并自服务，详见 [装饰器方案-BDD.md](装饰器方案-BDD.md)。下方场景、实现不变式和实测记录仅供历史追溯，不可作为现行实施规格。
+
 
 背景:原设计以 bundle patch 静态声明 `llm-pi-ai: disabled: true`,loader 组合期无条件生效。
 gateway 包级损伤(import 崩、node_modules 损伤、共享模块图崩)时 guard 哨兵与主行同包同死,

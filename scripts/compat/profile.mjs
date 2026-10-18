@@ -6,25 +6,34 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { REPO_ROOT, DSHMARKET_PIN, workspaceYaml, runCmd, symlinkDir, log } from './lib.mjs'
+import { judgeHostMin } from '../compare-version.mjs'
 
 const PROFILE_PACKAGES_DIR = 'node_modules/@mzzsfy'
 // 宿主内部基座 bundle,随宿主安装解析,不进 profile dependencies
 const HOST_BASE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
-// 枚举仓库包:bundles = 带 dsh.bundle 标记且 main 入口存在的包;依赖目标 = 全部 @mzzsfy 包
-export function enumeratePackages() {
+// 枚举仓库包:bundles = 带 dsh.bundle 标记且 main 入口存在的包;依赖目标 = 全部 @mzzsfy 包。
+// hostVersion 给定时按包 manifest dsh.hostMin 过滤(宿主低于 hostMin 的包不装载:
+// 该代际 API 面未验证,强装复现 shell-select × 0.1.5 boot 崩形态);dependencies(all)
+// 恒全量——装而不载无副作用,避免 dsh-market 记账缺行
+export function enumeratePackages({ hostVersion, packagesDir } = {}) {
   const bundles = []
   const all = []
-  for (const dir of readdirSync(join(REPO_ROOT, 'packages'), { withFileTypes: true })) {
+  for (const dir of readdirSync(packagesDir ?? join(REPO_ROOT, 'packages'), { withFileTypes: true })) {
     if (!dir.isDirectory()) continue
-    const pkgDir = join(REPO_ROOT, 'packages', dir.name)
+    const pkgDir = join(packagesDir ?? join(REPO_ROOT, 'packages'), dir.name)
     const manifestPath = join(pkgDir, 'package.json')
     if (!existsSync(manifestPath)) continue
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
     all.push(manifest.name)
     const entryExists = manifest.main && existsSync(join(pkgDir, manifest.main))
-    if (manifest.dsh?.bundle && entryExists) bundles.push(manifest.name)
-    else if (manifest.dsh?.bundle && !entryExists) log(`SKIP ${manifest.name}(入口缺失:实现未就绪)`)
+    if (manifest.dsh?.bundle && entryExists) {
+      if (judgeHostMin(hostVersion, manifest.dsh?.hostMin) === 'fail') {
+        log(`SKIP ${manifest.name}(宿主 ${hostVersion} 低于 dsh.hostMin ${manifest.dsh.hostMin}:该代际不装载)`)
+      } else {
+        bundles.push(manifest.name)
+      }
+    } else if (manifest.dsh?.bundle && !entryExists) log(`SKIP ${manifest.name}(入口缺失:实现未就绪)`)
   }
   return { bundles, all }
 }
@@ -97,7 +106,7 @@ export async function installPackageExternals() {
 export async function buildProfile({ version, workRoot, hostDir, seedGateway = false, gatewayBaseURL = 'http://127.0.0.1:8578', only = [] }) {
   const homeDir = join(workRoot, version, 'home')
   const profileDir = join(homeDir, 'profiles', 'web')
-  const { bundles, all } = enumeratePackages()
+  const { bundles, all } = enumeratePackages({ hostVersion: version })
   const wanted = new Set(only.map((name) => name.replace(/^@mzzsfy\//, '')))
   const pickedBundles = wanted.size
     ? bundles.filter((name) => wanted.has(name.replace(/^@mzzsfy\//, '')))

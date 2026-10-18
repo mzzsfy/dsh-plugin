@@ -31,6 +31,7 @@ function sandbox(t, {packages, profileDeps}) {
   // 临时仓:scripts/ 与 packages/ 齐备,dev-link 以自身路径定位 repoRoot
   mkdirSync(join(sandRepo, 'scripts'))
   writeFileSync(join(sandRepo, 'scripts', 'dev-link.mjs'), readFileSync(join(repo, 'scripts', 'dev-link.mjs')))
+  writeFileSync(join(sandRepo, 'scripts', 'compare-version.mjs'), readFileSync(join(repo, 'scripts', 'compare-version.mjs')))
   for (const [name, manifest] of Object.entries(packages)) {
     const dir = join(sandRepo, 'packages', name)
     mkdirSync(dir, {recursive: true})

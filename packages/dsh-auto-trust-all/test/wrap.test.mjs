@@ -1,6 +1,7 @@
 // 包装行为测试:mock webServer(实例形态与官方一致:三 Map + fallback 字段 +
-// 原型注册方法)与 mock webRuntime/ctx,不起真服务器。
-// Given-When-Then 场景见各用例注释,规格源 docs/design/dsh-auto-trust-all.md。
+// 原型注册方法)与 mock connection(信任主目标)/webRuntime(可选镜像)/ctx,
+// 不起真服务器。
+// Given-When-Then 场景见各用例注释,规格源本包 0.2.1适配方案-BDD.md。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -35,20 +36,22 @@ class MockWebServer {
   }
 }
 
-// 构造最小插件上下文:webServer 静态注入,webRuntime/connection 经 ctx.get 可选探测
-// (与真实 cordis 语义一致,strict get 对未提供服务返回 undefined),
-// holder.current 支持测试中延迟就绪或换代;ctx.on 收集事件监听器供模拟触发;
+// 构造最小插件上下文:webServer 静态注入,connection(信任主目标)与
+// webRuntime(可选镜像)经 ctx.get 可选探测(与真实 cordis 语义一致,strict get
+// 对未提供服务返回 undefined),两 holder 支持测试中延迟就绪或换代;官方初始
+// 条目按真实形态同时落在两数组(装配期克隆);ctx.on 收集事件监听器供模拟触发;
 // console 输出经 t.mock 捕获,测试结束自动还原
 function createCtx({ trustedHosts = [], host = '0.0.0.0', webRuntimeReady = true, connectionReady = true } = {}) {
   const webServer = new MockWebServer(host)
   const holder = { current: webRuntimeReady ? { trustedHosts } : undefined }
-  const fenceHosts = []
+  const fenceHosts = [...trustedHosts]
+  const fenceHolder = { current: connectionReady ? { trustedHosts: fenceHosts } : undefined }
   const listeners = []
   const ctx = {
     webServer,
     get: (name) => {
       if (name === 'webRuntime') return holder.current
-      if (name === 'connection') return connectionReady ? { trustedHosts: fenceHosts } : undefined
+      if (name === 'connection') return fenceHolder.current
       return undefined
     },
     on: (name, listener) => {
@@ -56,7 +59,7 @@ function createCtx({ trustedHosts = [], host = '0.0.0.0', webRuntimeReady = true
       return () => {}
     },
   }
-  return { ctx, webServer, holder, trustedHosts, fenceHosts, listeners }
+  return { ctx, webServer, holder, trustedHosts, fenceHosts, fenceHolder, listeners }
 }
 
 const mockConsole = (t) => {
@@ -384,10 +387,10 @@ test('场景17 换代移交: Given 行级 config 变更触发重跑 apply When �
 
 const NOTICE_DELAY = 15 * 1000
 
-test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 服务就绪事件在提示阈值内到达 Then 自动完成激活且不打印等待行', async (t) => {
+test('场景18 延迟激活: Given 激活时 connection 未就绪 When 服务就绪事件在提示阈值内到达 Then 自动完成激活且不打印等待行', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const output = mockConsole(t)
-  const { ctx, webServer, holder, trustedHosts, fenceHosts, listeners } = createCtx({ webRuntimeReady: false })
+  const { ctx, webServer, holder, trustedHosts, fenceHosts, fenceHolder, listeners } = createCtx({ connectionReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
   const handlerBefore = webServer.exact.get('/api/x').handler
 
@@ -397,45 +400,46 @@ test('场景18 延迟激活: Given 激活时 webRuntime 未就绪 When 服务就
   assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
   assert.equal(webServer.autoTrustAllRegister, undefined)
   assert.deepEqual(listeners.map(([name]) => name), ['internal/service'])
-  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
+  assert.ok(!output.some(([, message]) => message.includes('connection 未就绪')))
 
-  // 模拟 web-app fiber 激活完成(阈值内):runtime 就绪并发出服务事件
-  holder.current = { trustedHosts: [] }
+  // 模拟 connection fiber 激活完成(阈值内):信任数组就绪并发出服务事件
+  fenceHolder.current = { trustedHosts: fenceHosts }
   const [, listener] = listeners[0]
-  listener('webRuntime')
+  listener('connection')
   assert.notEqual(webServer.exact.get('/api/x').handler, handlerBefore)
   assert.equal(typeof webServer.autoTrustAllRegister, 'function')
   assert.ok(output.some(([, message]) => message.includes('动态信任已启用')))
 
   // 阈值走完:激活已发生,等待行不再补打
   t.mock.timers.tick(NOTICE_DELAY)
-  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
+  assert.ok(!output.some(([, message]) => message.includes('connection 未就绪')))
 
   await webServer.exact.get('/api/x').handler({ headers: { host: 'late.example.com' } }, {})
+  assert.deepEqual(fenceHosts, ['late.example.com'])
   assert.deepEqual(holder.current.trustedHosts, ['late.example.com'])
   dispose()
   // 卸载撤销本代放行:两侧数组的 late 条目均被移除,后续请求经空载体纯透传不再注册
-  assert.deepEqual(holder.current.trustedHosts, [])
   assert.deepEqual(fenceHosts, [])
+  assert.deepEqual(holder.current.trustedHosts, [])
 })
 
-test('场景19 等待超时提示: Given webRuntime 持续未就绪 When 超过提示阈值 Then 打印等待行一次,此前不打印', (t) => {
+test('场景19 等待超时提示: Given connection 持续未就绪 When 超过提示阈值 Then 打印等待行一次,此前不打印', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const output = mockConsole(t)
-  const { ctx, webServer } = createCtx({ webRuntimeReady: false })
+  const { ctx, webServer } = createCtx({ connectionReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
 
   const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
 
   // 阈值内静默等待
   t.mock.timers.tick(NOTICE_DELAY - 1)
-  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
+  assert.ok(!output.some(([, message]) => message.includes('connection 未就绪')))
   // 阈值到:仍未就绪才输出等待行,且只此一次
   t.mock.timers.tick(1)
-  const waiting = output.filter(([, message]) => message.includes('webRuntime 未就绪'))
+  const waiting = output.filter(([, message]) => message.includes('connection 未就绪'))
   assert.equal(waiting.length, 1)
   t.mock.timers.tick(NOTICE_DELAY)
-  assert.equal(output.filter(([, message]) => message.includes('webRuntime 未就绪')).length, 1)
+  assert.equal(output.filter(([, message]) => message.includes('connection 未就绪')).length, 1)
   dispose()
 })
 
@@ -459,15 +463,15 @@ test('场景20 卸载撤销: Given 已激活 When 卸载 Then 载体断开且本
 
 test('场景21 激活幂等: Given 事件路径激活后服务再次发事件 When 重复触发 Then 不重复激活(横幅与载体不换代)', (t) => {
   const output = mockConsole(t)
-  const { ctx, webServer, holder, listeners } = createCtx({ webRuntimeReady: false })
+  const { ctx, webServer, fenceHolder, fenceHosts, listeners } = createCtx({ connectionReady: false })
   apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
 
-  holder.current = { trustedHosts: ['10.0.0.9'] }
+  fenceHolder.current = { trustedHosts: fenceHosts }
   const [, listener] = listeners[0]
-  listener('webRuntime')
+  listener('connection')
   const carrier = webServer.autoTrustAllRegister
 
-  listener('webRuntime')
+  listener('connection')
 
   assert.equal(webServer.autoTrustAllRegister, carrier)
   assert.equal(output.filter(([, message]) => message.includes('动态信任已启用')).length, 1)
@@ -502,16 +506,26 @@ test('场景23 fence 淘汰同步: Given 容量淘汰发生 When webRuntime 侧�
   assert.deepEqual(fenceHosts, ['second.test'])
 })
 
-test('场景24 fence 缺失降级: Given connection 服务缺失 When 注册发生 Then 仅 webRuntime 侧生效且不抛错', async (t) => {
-  mockConsole(t)
-  const { ctx, webServer, trustedHosts } = createCtx({ connectionReady: false })
+test('场景24 connection 缺失不激活: Given 仅 webRuntime 在场而 connection 缺席 When 请求到达 Then 不包装不写任何目标,等待期静默', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const output = mockConsole(t)
+  const { ctx, webServer, holder, trustedHosts, listeners } = createCtx({ connectionReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
-  apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+  const handlerBefore = webServer.exact.get('/api/x').handler
 
-  const route = webServer.exact.get('/api/x')
-  await route.handler({ headers: { host: 'probe.example.com' } }, {})
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
 
-  assert.deepEqual(trustedHosts, ['probe.example.com'])
+  // connection 是宿主 /api 闸门信任数组的唯一承载:它缺席时动态登记对闸门不可见,
+  // 不得宣称启用;webRuntime 镜像也不写(避免装配期克隆把动态条目误认成预存条目)
+  assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
+  assert.equal(webServer.autoTrustAllRegister, undefined)
+  assert.deepEqual(listeners.map(([name]) => name), ['internal/service'])
+  await webServer.exact.get('/api/x').handler({ headers: { host: 'early.test' } }, {})
+  assert.deepEqual(trustedHosts, [])
+  t.mock.timers.tick(NOTICE_DELAY)
+  assert.equal(output.filter(([, message]) => message.includes('connection 未就绪')).length, 1)
+  assert.ok(!output.some(([, message]) => message.includes('动态信任已启用')))
+  dispose()
 })
 
 test('场景25 LRU 续期: Given 容量已满 When 最早注册者被再次访问 Then 新条目淘汰的是最久未访问者', async (t) => {
@@ -610,29 +624,30 @@ test('场景29 路由表形态守卫: Given 路由表非 Map 形态 When 激活 
   dispose()
 })
 
-test('场景30 其他服务名不激活: Given internal/service 携带其他服务名 When 事件到达 Then 不激活,webRuntime 事件才激活', async (t) => {
+test('场景30 其他服务名不激活: Given internal/service 携带其他服务名 When 事件到达 Then 不激活,connection 事件才激活', async (t) => {
   mockConsole(t)
-  const { ctx, webServer, holder, listeners } = createCtx({ webRuntimeReady: false })
+  const { ctx, webServer, fenceHolder, fenceHosts, listeners } = createCtx({ connectionReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
   const handlerBefore = webServer.exact.get('/api/x').handler
   apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
 
   const [, listener] = listeners[0]
-  // webRuntime 先就绪:此时能拦住激活的只剩服务名过滤,断言不依赖就绪守卫
-  holder.current = { trustedHosts: [] }
+  // webRuntime/其他服务就绪不构成激活条件:信任主目标只有 connection
+  listener('webRuntime')
   listener('settings')
   assert.equal(webServer.autoTrustAllRegister, undefined)
   assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
 
-  listener('webRuntime')
+  fenceHolder.current = { trustedHosts: fenceHosts }
+  listener('connection')
   assert.notEqual(webServer.exact.get('/api/x').handler, handlerBefore)
   assert.equal(typeof webServer.autoTrustAllRegister, 'function')
 })
 
-test('场景31 未就绪即卸载: Given 未激活时卸载 When 等待阈值走完且 webRuntime 就绪事件迟到 Then 等待行不补打且不再激活', async (t) => {
+test('场景31 未就绪即卸载: Given 未激活时卸载 When 等待阈值走完且 connection 就绪事件迟到 Then 等待行不补打且不再激活', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const output = mockConsole(t)
-  const { ctx, webServer, holder, listeners } = createCtx({ webRuntimeReady: false })
+  const { ctx, webServer, fenceHolder, fenceHosts, listeners } = createCtx({ connectionReady: false })
   webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
   const handlerBefore = webServer.exact.get('/api/x').handler
 
@@ -641,11 +656,11 @@ test('场景31 未就绪即卸载: Given 未激活时卸载 When 等待阈值走
 
   // 卸载清除等待定时器:阈值走完不补打等待行
   t.mock.timers.tick(NOTICE_DELAY)
-  assert.ok(!output.some(([, message]) => message.includes('webRuntime 未就绪')))
+  assert.ok(!output.some(([, message]) => message.includes('connection 未就绪')))
 
-  holder.current = { trustedHosts: [] }
+  fenceHolder.current = { trustedHosts: fenceHosts }
   const [, listener] = listeners[0]
-  listener('webRuntime')
+  listener('connection')
   assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
   assert.equal(webServer.autoTrustAllRegister, undefined)
   assert.equal(output.filter(([, message]) => message.includes('动态信任已启用')).length, 0)
@@ -789,4 +804,103 @@ test('场景37 卸载后残余闭包: Given 卸载(令牌与载体同撤) When �
   await route.handler({ headers: { host: 'after-dispose.test' } }, {})
   assert.deepEqual(trustedHosts, [], '卸载即撤销本代放行,残余闭包不得新注册')
   assert.equal(webServer.autoTrustAllGuard, null, '令牌须与载体同撤')
+})
+
+test('场景38 单 fence 全流程: Given 仅 connection 在场(0.2.1 形态) When 注册/淘汰/卸载 Then 主数组与审计日志成立且无 webRuntime 依赖', async (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, fenceHosts } = createCtx({ webRuntimeReady: false })
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose = apply(ctx, { maxHosts: 1 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'a.example.com' } }, {})
+  assert.deepEqual(fenceHosts, ['a.example.com'])
+  assert.ok(output.some(([, message]) => message === 'auto-trust-all: registered host a.example.com'))
+  assert.ok(output.some(([, message]) => message.includes('镜像 webRuntime 缺席')))
+  assert.ok(!output.some(([, message]) => message.includes('未就绪')))
+
+  await route.handler({ headers: { host: 'b.example.com' } }, {})
+  assert.deepEqual(fenceHosts, ['b.example.com'])
+  assert.ok(output.some(([, message]) => message === 'auto-trust-all: evicted host a.example.com'))
+
+  dispose()
+  assert.deepEqual(fenceHosts, [])
+})
+
+test('场景39 冻结数组守卫: Given connection.trustedHosts 冻结 When 激活 Then 告警停用,不包装不抛错', (t) => {
+  const output = mockConsole(t)
+  const { ctx, webServer, fenceHolder } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const handlerBefore = webServer.exact.get('/api/x').handler
+  Object.freeze(fenceHolder.current.trustedHosts)
+
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  assert.ok(output.some(([, message]) => message.includes('形态不符')))
+  assert.equal(webServer.exact.get('/api/x').handler, handlerBefore)
+  assert.equal(webServer.autoTrustAllRegister, undefined)
+  dispose()
+})
+
+test('场景40 主数组换代回填: Given connection 提供新数组 When 请求触发换代探测 Then LRU 记账不清空,动态条目回填新数组且归属延续', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, fenceHosts, fenceHolder, holder } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose = apply(ctx, { maxHosts: 1 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  assert.deepEqual(fenceHosts, ['first.test'])
+
+  // 模拟 connection 行重载:新数组只含官方初始条目
+  const rebuilt = ['10.0.0.2']
+  fenceHolder.current = { trustedHosts: rebuilt }
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  // 换代探测即回填仍有效的动态条目(记账未清空),命中归属不再重复输出
+  assert.deepEqual(rebuilt, ['10.0.0.2', 'first.test'])
+
+  await route.handler({ headers: { host: 'second.test' } }, {})
+  assert.deepEqual(rebuilt, ['10.0.0.2', 'second.test'])
+  assert.deepEqual(holder.current.trustedHosts, ['second.test'])
+
+  dispose()
+  assert.deepEqual(rebuilt, ['10.0.0.2'])
+  assert.deepEqual(holder.current.trustedHosts, [])
+})
+
+test('场景41 镜像数组换代: Given webRuntime 提供新数组 When 已注册域名再次到达 Then 镜像回填且归属延续,卸载清理覆盖新镜像', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, fenceHosts, holder } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose = apply(ctx, { maxHosts: 2 })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  assert.deepEqual(holder.current.trustedHosts, ['first.test'])
+
+  const rebuiltMirror = []
+  holder.current = { trustedHosts: rebuiltMirror }
+  await route.handler({ headers: { host: 'first.test' } }, {})
+  assert.deepEqual(rebuiltMirror, ['first.test'])
+
+  dispose()
+  assert.deepEqual(rebuiltMirror, [])
+  assert.deepEqual(fenceHosts, [])
+})
+
+test('场景42 换代后未注册即卸载: Given 主数组换代但换代探测未触发 When 卸载 Then 新数组不被触碰(身份守卫,非归属不撤)', async (t) => {
+  mockConsole(t)
+  const { ctx, webServer, fenceHolder } = createCtx()
+  webServer.register({ kind: 'exact', path: '/api/x', handler: async () => {} })
+  const dispose = apply(ctx, { maxHosts: DEFAULT_MAX_HOSTS })
+
+  const route = webServer.exact.get('/api/x')
+  await route.handler({ headers: { host: 'first.test' } }, {})
+
+  // 模拟 connection 重建且此后无请求流经(换代探测未触发,seenFor 仍指旧数组)
+  const rebuilt = ['10.0.0.7']
+  fenceHolder.current = { trustedHosts: rebuilt }
+
+  dispose()
+  assert.deepEqual(rebuilt, ['10.0.0.7'], '新数组未发生换代探测,卸载不得触碰')
 })
