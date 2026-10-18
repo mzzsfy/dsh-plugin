@@ -82,6 +82,21 @@ const CSS = [
   '.dm-notes__h { font-weight:600; margin-top:8px; }',
   '.dm-notes__li { padding-left:12px; }',
   '.dm-notes__gap { height:6px; }',
+  // ---- 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现(mce-switch 同构) ----
+  '.dm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
+  '.dm-switch { display:inline-flex; align-items:center; cursor:pointer; gap:6px; font-size:12px; }',
+  '.dm-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box; flex:none;',
+  '  background:var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.35));',
+  '  border:1px solid var(--dsw-alias-border-l2, var(--dsw-alias-separator-primary, rgba(128,128,128,0.35)));',
+  '  transition:background 0.15s, border-color 0.15s; }',
+  '.dm-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+  '  background:var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6));',
+  '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
+  '.dm-switch:not(:has(input[type="checkbox"]:disabled)):hover .dm-switch__track { border-color:var(--dsw-alias-brand-primary, #4d6bfe); }',
+  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track { background:var(--dsw-alias-brand-primary, #4d6bfe); border-color:var(--dsw-alias-brand-primary, #4d6bfe); }',
+  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track .dm-switch__thumb { left:17px; background:var(--dsw-alias-bg-base, #fff); }',
+  '.dm-switch input[type="checkbox"]:focus-visible + .dm-switch__track { outline:2px solid var(--dsw-alias-brand-primary, #4d6bfe); outline-offset:1px; }',
+  '.dm-switch input[type="checkbox"]:disabled + .dm-switch__track { opacity:0.45; cursor:default; }',
 ].join('\n')
 
 const STATUS_URL = '/api/maintain/status'
@@ -253,11 +268,14 @@ function ensureUpgradeFloatStyle() {
   document.head.appendChild(style)
 }
 
-// 升级落定的浮条终态文案:切换成功必接退出,失败按原因分流
+// 升级落定的浮条终态文案:按退出调度与失败原因分流;
+// 未调度退出(单次意图关闭)不得宣称宿主退出与页面恢复
 // LOGIC-BEGIN upgradeFinalText
 function upgradeFinalText(state) {
-  if (state.ok === true) return '升级完成,宿主正在退出切换版本,页面恢复后可直接使用'
-  return '升级失败:' + (state.error || '详情见版本与运维页')
+  if (state.ok !== true) return '升级失败:' + (state.error || '详情见版本与运维页')
+  return state.exitScheduled === true
+    ? '升级完成,宿主正在退出切换版本,页面恢复后可直接使用'
+    : '升级完成,已切换版本链接;请手动重启宿主加载新版本'
 }
 // LOGIC-END upgradeFinalText
 
@@ -473,12 +491,15 @@ function UpgradeCard(props) {
       : null,
     !upgrade.running && last
       ? h('div', { className: 'dm-row' },
-          last.ok ? h('span', { className: 'dm-ok' }, '升级完成,宿主正在退出切换版本')
+          last.ok
+            ? h('span', { className: 'dm-ok' }, last.exitScheduled === true ? '升级完成,宿主正在退出切换版本' : '升级完成,已切换版本链接')
             : h('span', { className: 'dm-error' }, '升级失败:' + (last.error || '详情见日志')))
       : null,
     !upgrade.running && last && last.ok === true && last.exitScheduled !== true
       ? h('div', { className: 'dm-row' },
-          h('span', { className: 'dm-warn' }, '已切换但启动器未提供退出能力,请手动重启宿主'))
+          last.error
+            ? h('span', { className: 'dm-warn' }, '已切换但启动器未提供退出能力,请手动重启宿主')
+            : h('span', { className: 'dm-warn' }, '自动重启未勾选:请手动重启宿主加载新版本,重启前不能再次发起升级'))
       : null,
   )
 }
@@ -510,22 +531,38 @@ function OpsCard(props) {
   )
 }
 
-// 安装确认弹窗:展示版本变更(从→到)与目标版本,安装即正常退出切换,由启动方式拉起。
-// 重装修复(目标==运行版本)与回退(目标低于运行版本)是面板显式意图,窗内分类说明
+// 开关的 checkbox + 轨道对,checkbox 语义保留仅视觉隐藏
+function switchToggle(props) {
+  return [
+    h('input', { type: 'checkbox', ...props }),
+    h('span', { className: 'dm-switch__track' }, h('span', { className: 'dm-switch__thumb' })),
+  ]
+}
+
+// 安装确认弹窗:展示版本变更(从→到)与目标版本,安装即退出切换,由启动方式拉起。
+// 重装修复(目标==运行版本)与回退(目标低于运行版本)是面板显式意图,窗内分类说明;
+// 自动重启为单次意图(默认开),关闭则安装后宿主继续运行,手动重启加载新版本
 function UpgradeDialog(props) {
   const status = props.status
   const changeLine = buildInstallChangeLine(status)
+  const [autoRestart, setAutoRestart] = useState(true)
+  const finishLine = autoRestart
+    ? '安装完成后宿主将正常退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'
+    : '安装完成后宿主继续运行当前版本,需手动重启宿主加载新版本;重启前不能再次发起升级。'
   return h('div', { className: 'dm-dialog__mask', onClick: props.onCancel },
     h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
       h('div', { className: 'dm-card__title' }, '确认安装'),
       h('div', { className: 'dm-dialog__hint' }, '版本变更:当前 运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
       h('div', { className: 'dm-dialog__hint dm-warn' }, changeLine),
-      h('div', { className: 'dm-dialog__hint' },
-        '安装完成后宿主将正常退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'),
+      h('div', { className: 'dm-dialog__hint' }, finishLine),
+      h('label', { className: 'dm-switch' },
+        ...switchToggle({ checked: autoRestart, onChange: (e) => setAutoRestart(e.target.checked) }),
+        '安装后自动重启宿主',
+      ),
       h('div', { className: 'dm-row' },
         h('span', { className: 'dm-spacer' }),
         h('button', { className: 'dm-btn', onClick: props.onCancel }, '取消'),
-        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(status.channelLatest) }, '开始安装'),
+        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(status.channelLatest, autoRestart) }, '开始安装'),
       ),
     ),
   )
@@ -820,10 +857,10 @@ function MaintainApp() {
     submitEdit(REGISTRY_BASE_URL, { base }, 'registryBase', (error) => '保存失败:' + (error && error.message ? error.message : String(error)))
   }
 
-  function onUpgrade(targetVersion) {
+  function onUpgrade(targetVersion, autoRestart) {
     setUpgradeDialogOpen(false)
     markBusy('upgrade', true)
-    post(UPGRADE_URL, { targetVersion })
+    post(UPGRADE_URL, { targetVersion, autoRestart })
       .then((next) => {
         const snapshot = next && next.status ? next.status : next
         setStatus(snapshot); setError(null)

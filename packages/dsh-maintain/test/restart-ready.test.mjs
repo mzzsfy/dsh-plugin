@@ -203,9 +203,11 @@ const clientUpgradeFinalText = extractLogic('upgradeFinalText')
 // 重启确认态文案:armed 且有活跃计数时改「仍要重启」
 const clientRestartConfirmLabel = extractLogic('restartConfirmLabel')
 
-test('upgradeFinalText: 成功终态必接退出切换语义,失败附原因', () => {
-  assert.match(clientUpgradeFinalText({ ok: true, switched: true }), /退出/)
-  assert.doesNotMatch(clientUpgradeFinalText({ ok: true, switched: true }), /手动/)
+test('upgradeFinalText: 按退出调度分流终态,失败附原因', () => {
+  assert.match(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: true }), /退出/)
+  assert.doesNotMatch(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: true }), /手动/)
+  assert.match(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: false }), /手动重启/)
+  assert.doesNotMatch(clientUpgradeFinalText({ ok: true, switched: true, exitScheduled: false }), /正在退出/, '未调度退出不得宣称宿主退出')
   assert.match(clientUpgradeFinalText({ ok: false, error: '候选验证失败' }), /候选验证失败/)
   assert.match(clientUpgradeFinalText({ ok: false }), /详情/)
 })

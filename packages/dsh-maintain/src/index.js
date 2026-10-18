@@ -495,8 +495,9 @@ export function apply(ctx, config, dependencies = {}) {
   }
 
   // 受管升级全流程:布局发现→编排(安装/验证/切换,锁与阶段持久化在编排器内)
-  // →成功后调度正常退出。任何阶段失败保留原版本服务,锁与阶段状态由编排器落盘
-  async function performManagedUpgradeFlow({ targetVersion, registryBase }) {
+  // →成功后按单次 autoRestart 意图收尾。任何阶段失败保留原版本服务,
+  // 锁与阶段状态由编排器落盘;切换状态未知时无视意图强制退出
+  async function performManagedUpgradeFlow({ targetVersion, registryBase, autoRestart }) {
     const last = {
       operationId: null,
       targetVersion,
@@ -507,6 +508,7 @@ export function apply(ctx, config, dependencies = {}) {
       phase: null,
       slot: null,
       error: null,
+      exitScheduled: false,
     }
     upgrade = { running: true, last }
     audit('upgrade', 'triggered', 'targetVersion=' + targetVersion)
@@ -540,8 +542,12 @@ export function apply(ctx, config, dependencies = {}) {
         finishedAt: Date.now(),
       })
       audit('upgrade', 'ok', 'operationId=' + last.operationId + ' slot=' + last.slot + ' phase=' + last.phase)
-      // 切换成功即正常退出:启动语义固定,不再提供"切了链接继续跑旧宿主"的路径
-      if (typeof exit === 'function') {
+      // 切换成功按单次 autoRestart 意图收尾:开=调度正常退出交托管方式拉起;
+      // 关=保留旧宿主继续跑,等待手动重启(重启按钮同链路),期间下一轮升级被运行路径不一致拒绝
+      if (autoRestart === false) {
+        last.exitScheduled = false
+        audit('upgrade', 'switched-manual-restart', 'operationId=' + last.operationId + ' 自动重启已关闭,等待手动重启')
+      } else if (typeof exit === 'function') {
         last.exitScheduled = true
         scheduleHostExit({ detail: 'reason=managed-upgrade-switched operationId=' + last.operationId, delayMs: RESTART_DELAY_MS })
       } else {
@@ -676,6 +682,12 @@ export function apply(ctx, config, dependencies = {}) {
           sendJson(res, 400, { error: 'targetVersion 必须是精确 semver 版本: ' + targetVersion })
           return
         }
+        // 单次意图:本次升级是否自动调度退出,缺省开;非布尔非缺省即 400(宽转会静默翻转收尾语义)
+        const autoRestart = requestBody.autoRestart === undefined ? true : requestBody.autoRestart
+        if (typeof autoRestart !== 'boolean') {
+          sendJson(res, 400, { error: 'autoRestart 必须是布尔值或缺省' })
+          return
+        }
         // 与重启调度双向互斥:restartScheduled 置位到 exit(0) 执行的窗口内触发升级,
         // 切换后的退出会与新宿主交错
         if (upgrade.running || restartScheduled) {
@@ -708,7 +720,7 @@ export function apply(ctx, config, dependencies = {}) {
           return
         }
         // 编排先入内存门闩再取快照:响应快照必须呈现 running=true,并发请求才能被 409 挡住
-        const flow = performManagedUpgradeFlow({ targetVersion, registryBase: readSettings(ctx, config).registryBase })
+        const flow = performManagedUpgradeFlow({ targetVersion, registryBase: readSettings(ctx, config).registryBase, autoRestart })
         sendJson(res, 200, { ok: true, targetVersion, status: await currentStatus() })
         void flow
       }),

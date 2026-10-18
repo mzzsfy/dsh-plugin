@@ -523,6 +523,65 @@ test('upgrade:runner 成功调度一次正常退出', async (t) => {
 
 
 
+test('upgrade:autoRestart 关闭时切换成功不调度退出', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exits = []
+  const runner = makeRunnerStub({ result: async () => ({ operationId: 'op-3', switched: true, phase: 'awaiting-restart', slot: 'a' }) })
+  const { routes } = makeCtx({
+    appExit: (code) => exits.push(code),
+    services: IDLE_SERVICES,
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', autoRestart: false })
+  assert.equal(accepted.status, 200)
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await realSleep(30)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+  }
+  assert.ok(settled)
+  assert.equal(settled.upgrade.last.ok, true)
+  assert.notEqual(settled.upgrade.last.exitScheduled, true, '自动重启关闭时不得标记退出调度')
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [], '自动重启关闭时不得调度宿主退出')
+})
+
+test('upgrade:autoRestart 关闭时切换状态未知仍强制调度退出', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exits = []
+  const runner = makeRunnerStub({ result: async () => { const error = new Error('post-switch boom'); error.switched = true; throw error } })
+  const { routes } = makeCtx({
+    appExit: (code) => exits.push(code),
+    services: IDLE_SERVICES,
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', autoRestart: false })
+  assert.equal(accepted.status, 200)
+  await drainMicrotasks()
+  let settled = null
+  for (let i = 0; i < 50 && settled === null; i += 1) {
+    await realSleep(30)
+    const status = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (status && status.upgrade && status.upgrade.running === false && status.upgrade.last !== null) settled = status
+  }
+  assert.ok(settled)
+  assert.equal(settled.upgrade.last.phase, 'indeterminate')
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [0], '切换状态未知必须无视意图强制退出')
+})
+
+test('upgrade:autoRestart 非布尔非缺省 400,runner 不得启动', async () => {
+  const runner = makeRunnerStub()
+  const { routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  for (const autoRestart of ['yes', 0, null]) {
+    const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', autoRestart })
+    assert.equal(denied.status, 400, '非布尔必须 400: ' + String(autoRestart))
+  }
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 0, '拒绝路径不得进入 runner')
+})
+
 test('upgrade:runner 失败不调度退出,状态落定失败,可再次发起', async () => {
   const exits = []
   let calls = 0
@@ -838,10 +897,15 @@ test('受管切换接线:切换成功必经统一退出入口调度关机(源码
   const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.match(source, /reason=managed-upgrade-switched/, '切换成功必须经 scheduleHostExit 关机')
   assert.match(source, /beforeSwitch/, '编排必须带提交前门控')
-  assert.doesNotMatch(source, /autoRestart/, '自动重启勾选链必须整体移除')
   assert.doesNotMatch(source, /upgradeCommandTemplate|buildUpgradeCommand|runUpgradeWithRetry/, '模板与重试链必须整体移除')
   assert.doesNotMatch(source, /UPGRADE_LOCK_PATH|upgradeLockStale/, '全局 tmp 锁必须整体移除')
   assert.doesNotMatch(source, /candidate-validation-unavailable/, '候选验证已落地,runner 门闩不得回归')
+  // 单次意图边界:配置节 schema 与持久化写入均不得携带 autoRestart(防降级回持久开关)
+  const configSchema = source.slice(source.indexOf('export const Config'), source.indexOf('function volatileWrap'))
+  assert.ok(!configSchema.includes('autoRestart'), '自动重启不得进入持久配置节')
+  assert.equal(source.match(/persistPatch\([^)]*autoRestart/g), null, '自动重启不得经 persistPatch 落盘')
+  assert.match(source, /autoRestart === false/, '自动重启意图必须接入升级收尾分流')
+  assert.match(source, /reason=post-switch-state-indeterminate/, '切换状态未知必须无视意图强制退出')
   // 切换成功但 appExit 缺失必须可见地失败,不得静默吞掉
   assert.match(source, /exit-missing/, 'appExit 缺失的已切换状态必须留审计')
 })

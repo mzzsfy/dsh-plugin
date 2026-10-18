@@ -76,9 +76,11 @@ test('parity: buildInstallChangeLine 分支行为', () => {
   assert.ok(rollback.includes('0.1.5'), rollback)
 })
 
-// 升级浮条终态文案:成功必接退出语义,失败附原因
+// 升级浮条终态文案:调度退出必接退出语义,未调度(单次意图关闭)必须引导手动重启,失败附原因
 test('parity: upgradeFinalText 分支行为', () => {
-  assert.ok(clientUpgradeFinalText({ ok: true }).includes('退出'))
+  assert.ok(clientUpgradeFinalText({ ok: true, exitScheduled: true }).includes('退出'))
+  assert.ok(clientUpgradeFinalText({ ok: true, exitScheduled: false }).includes('手动重启'))
+  assert.ok(!clientUpgradeFinalText({ ok: true, exitScheduled: false }).includes('正在退出'), '未调度退出不得宣称宿主退出')
   assert.ok(clientUpgradeFinalText({ ok: false, error: '锁被占用' }).includes('锁被占用'))
   assert.ok(clientUpgradeFinalText({ ok: false }).includes('详情'))
 })
@@ -209,8 +211,7 @@ test('源码契约: 升级入口可用,确认弹窗链路完整', () => {
   assert.ok(CLIENT_SOURCE.includes("'确认安装'"), '确认弹窗必须存在且可达')
 })
 
-test('源码契约: 升级请求携带精确 targetVersion,禁止 autoRestart 勾选回归', () => {
-  assert.ok(CLIENT_SOURCE.includes('post(UPGRADE_URL, { targetVersion })'), '升级请求必须携带 targetVersion')
-  assert.ok(!CLIENT_SOURCE.includes('autoRestart'), 'client 半区不得残留 autoRestart 语义')
+test('源码契约: 升级请求携带精确 targetVersion 与单次 autoRestart 意图', () => {
+  assert.ok(CLIENT_SOURCE.includes('post(UPGRADE_URL, { targetVersion, autoRestart })'), '升级请求必须携带 targetVersion 与单次 autoRestart')
   assert.ok(!CLIENT_SOURCE.includes('upgrade-template'), 'client 半区不得残留命令模板入口')
 })
