@@ -4,6 +4,29 @@ import { createTerminalTool } from '../src/lib/tool.mjs'
 import { defineTool, validateJsonSchemaValue } from './host.mjs'
 
 
+// Given 0.2.1 形态(无 write 有泵工厂),When 工具 write,Then 走泵通道且 submit 附加回车
+test('attach泵工具层_write分叉_走泵且submit附加CR', async () => {
+  const writes = []
+  const pumpFactory = { for: () => ({ write: async (text) => { writes.push(text) } }) }
+  const controller = makeController({ list() { return [{ id: 'term-a' }] } })
+  const tool = makeTool(controller, undefined, pumpFactory)
+  const result = await tool.execute({ action: 'write', terminal_id: 'term-a', text: 'echo pump', submit: true }, exec)
+  assert.equal(result.ok, true)
+  assert.equal(result.accepted, true)
+  assert.deepEqual(writes, ['echo pump\r'])
+})
+
+// Given 泵写入被持续拒绝,When 工具 write,Then 返回 TERMINAL_ERROR 并提示接管语义
+test('attach泵工具层_拒绝错误_映射TERMINAL_ERROR', async () => {
+  const pumpFactory = { for: () => ({ write: async () => { throw Object.assign(new Error('terminal 写入被拒绝: read-only'), { code: 'terminal/write-refused', refusal: 'read-only' }) } }) }
+  const controller = makeController({ list() { return [{ id: 'term-a' }] } })
+  const tool = makeTool(controller, undefined, pumpFactory)
+  const result = await tool.execute({ action: 'write', terminal_id: 'term-a', text: 'x' }, exec)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'TERMINAL_ERROR')
+  assert.match(result.error.message, /接管/)
+})
+
 test('Given all action results, When validated by Host output validator, Then each closed branch is accepted and incomplete output is rejected', async () => {
   const controller = makeController({ list() { return [{ id: 'term-a', title: 'bash', cwd: '/work', cols: 80, rows: 24, state: 'running', controllerId: 'attach-a' }] } })
   const tool = makeTool(controller)
@@ -46,8 +69,8 @@ function makeController(overrides = {}) {
   return controller
 }
 
-const makeTool = (controller, readScreen = async () => ({ text: 'screen', lines: 1, truncated: false, state: 'running', sequence: 3 })) =>
-  createTerminalTool({ controller, readScreen, defineTool })
+const makeTool = (controller, readScreen = async () => ({ text: 'screen', lines: 1, truncated: false, state: 'running', sequence: 3 }), pumpFactory) =>
+  createTerminalTool({ controller, readScreen, defineTool, pumpFactory })
 
 test('Given open with default dimensions, When creating terminal, Then it uses DSH controller and returns id', async () => {
   const controller = makeController()
@@ -96,6 +119,7 @@ test('Given attachment lost, When writing, Then it does not create a new followe
   const controller = makeController({ list() { return [{ id: 'term-a' }] } })
   const result = await makeTool(controller).execute({ action: 'write', terminal_id: 'term-a', text: 'x' }, exec)
   assert.equal(result.error.code, 'NOT_ATTACHED')
+  assert.match(result.error.message, /侧边栏面板未打开/, '错误文案须引导用户打开面板')
   assert.equal(controller.calls.length, 0)
 })
 

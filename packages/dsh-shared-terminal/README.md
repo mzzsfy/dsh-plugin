@@ -1,6 +1,6 @@
 # DSH 共享终端
 
-AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同一 Session-owned shell。官方 xterm UI 持有输入 attachment；AI 使用它写入，并对同一终端的 Host xterm active viewport 做只读快照。
+AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同一 Session-owned shell,并对同一终端的 Host xterm active viewport 做只读快照。写入通道随宿主代际:0.2.0 与 0.2.1-alpha.2 代 AI 借用官方 xterm UI 的输入 attachment 写入;0.2.1-rc.2 起插件自持输入附着(attach 泵,见下)。
 
 ## 功能
 
@@ -11,7 +11,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 | `open` | 当前 Session 创建官方终端，返回 `terminal_id`。默认 `cols=80, rows=24`，整数范围 `cols=2..300, rows=1..200`，宿主仍可进一步限制；`shell_path` 只能选择 Controller 发现的 shell。成功结果挂载后打开官方 tab。 |
 | `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与 attachment 有无。 |
 | `read` | 必填 `terminal_id`；`lines` 默认 20，范围 1–200。读取 active buffer viewport 内最新内容起的最多 N 个物理行——以最后一个非空行与光标行（非空时）为界，高窗口不会读到尾部空白；保留内部空行、软换行和当前 alternate screen（整屏坐标）。 |
-| `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。没有 attachment 返回 `NOT_ATTACHED`，不创建 follower、不抢 control。 |
+| `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。0.2.0 与 0.2.1-alpha.2 蹭 UI attachment 写（无附着返回 `NOT_ATTACHED`，不创建 follower、不抢 control）；0.2.1-rc.2 起自持 attach 泵（持续持有输入控制权，用户可随时「接管输入」抢回，泵的下一次写入重新抢回——最后写入者胜出；重抢仍失败返回 `TERMINAL_ERROR`，可重试）。 |
 | `close` | 必填 `terminal_id`；通过官方 Controller 关闭终端，同一 Session 重复关闭保持宿主的幂等语义。 |
 
 `read` 返回 `text, lines, truncated, state, sequence`；`truncated` 表示该读取窗口上方仍有当前 viewport 行未返回，不表示截断历史。`sequence` 是宿主输出帧编号，不是所有屏幕变化的修订号。请求行数超过屏幕内容范围时只返回实际内容行数。
@@ -26,9 +26,9 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 
 命令由 shell 执行；本工具不做命令安全校验。Controller 使用 **system-user execution permissions**，不受 Agent sandbox/approval 策略约束。命令可能修改系统用户有权限访问的文件。停止 AI 回合不撤销已经交给 Controller 的 `write/close`；排队写入也可能在取消后执行。
 
-仅支持实测版本 DSH **0.2.0-rc.2 与 0.2.1-alpha.2**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这两个版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不修改 DSH、不另开 PTY、不调用 `follow`/`attach` 抢 attachment、不读取 serializer 输出。
+仅支持实测版本 DSH **0.2.0-rc.2、0.2.1-alpha.2 与 0.2.1-rc.2**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不修改 DSH、不另开 PTY、不读取 serializer 输出；附着策略随宿主代际：0.2.0 与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
 
-装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包在该宿主可装载，启动时经版本白名单与 Controller 方法存在性检查双重拦截，不注册工具并告警（功能停用）；完全适配需按 attach 泵模型重构输入路径。
+装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件成为控制者（0.2.1-rc.2 输入排他），泵保持附着直到用户点官方「接管输入」拿回控制权、终端关闭被驱逐或插件停用；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，用户可随时再次接管，双方交替互斥）。插件持有控制权期间用户页面显示「此页面当前只读」与「接管输入」按钮。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
 
 Host 启动检查 Controller 版本、方法和 owner map；检测不匹配时不注册工具并告警。每次读取另检查终端实例、队列和屏幕结构，失败返回 `TERMINAL_UNAVAILABLE`。这不是公开 API，升级后不保证兼容。
 
@@ -61,4 +61,4 @@ npm test -- /path/to/isolated-dsh-host
 
 按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.2"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`。
 
-dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包在该宿主上可装载但功能停用(SUPPORTED_VERSIONS 版本白名单与 Controller 方法存在性检查双重拦截,打告警日志),完全适配需按 attach 泵模型重构输入路径。
+dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`(dshReleases `compatible`)。

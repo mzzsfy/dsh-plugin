@@ -159,7 +159,7 @@ window.__ModuleLoader__.load({
         })
         .catch((error) => {
           pathMapRequested = false
-          console.warn('shell-select: pathmap fetch failed', error)
+          console.warn('shell-select: pathmap fetch failed: ' + (error instanceof Error ? error.message : String(error)))
         })
     }
     // LOGIC-END loadPathMap

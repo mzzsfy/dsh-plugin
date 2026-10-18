@@ -52,7 +52,7 @@ function requireAgent(exec) {
   return exec.agent
 }
 
-export function createTerminalTool({ controller, readScreen, defineTool }) {
+export function createTerminalTool({ controller, readScreen, defineTool, pumpFactory }) {
   return defineTool({
     name: TOOL_NAME,
     description: [
@@ -128,7 +128,18 @@ export function createTerminalTool({ controller, readScreen, defineTool }) {
           }
           const info = controller.list(sessionId).find((row) => row.id === args.terminal_id)
           if (!info) return invalid('TERMINAL_UNAVAILABLE', 'terminal 不在当前 Session')
-          if (info.controllerId === undefined) return invalid('NOT_ATTACHED', 'terminal 当前没有可写 attachment')
+          if (pumpFactory) {
+            // 0.2.1-rc.2 attach 模型:自持附着写,写失败自动重抢一次;不依赖 UI 附着
+            try {
+              await pumpFactory.for(agent, args.terminal_id).write(args.text + (args.submit === true ? '\r' : ''))
+            } catch (error) {
+              if (error.refusal === 'read-only') return invalid('TERMINAL_ERROR', '写入失败(read-only),用户接管中可稍后重试')
+              if (error.refusal === 'detached') return invalid('TERMINAL_ERROR', '写入失败(附着断开),请重试')
+              return projectError(error)
+            }
+            return { ok: true, terminal_id: args.terminal_id, accepted: true }
+          }
+          if (info.controllerId === undefined) return invalid('NOT_ATTACHED', 'terminal 侧边栏面板未打开(切页会断开输入附着),打开面板后重试')
           await controller.write(agent, args.terminal_id, info.controllerId, args.text + (args.submit === true ? '\r' : ''))
           return { ok: true, terminal_id: args.terminal_id, accepted: true }
         }
@@ -136,6 +147,8 @@ export function createTerminalTool({ controller, readScreen, defineTool }) {
         if (action === 'close') {
           if (!validateKeys(args, ['action', 'terminal_id']) || !validateTerminalId(args.terminal_id)) return invalid('INVALID_ARGS', 'close 需要有效 terminal_id 且不能含未知字段')
           await controller.close(agent, args.terminal_id)
+          // 实例销毁,自持附着随行驱逐
+          pumpFactory?.evict(agent, args.terminal_id)
           return { ok: true, terminal_id: args.terminal_id }
         }
         return invalid('INVALID_ARGS', '不支持的 action')

@@ -3,25 +3,34 @@ import { readFile, realpath } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { createTerminalTool } from './lib/tool.mjs'
 import { readControllerViewport } from './lib/private-screen.mjs'
+import { createPumpFactory } from './lib/attach-pump.mjs'
 
 export const name = 'dsh-shared-terminal'
 export const inject = ['terminalController', 'tools']
-// 仅实测过私有结构的精确版本；其余版本（含未测的 0.2.1 预发布）clean-disable。
-export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.2', '0.2.1-alpha.2'])
-const METHODS = ['shells', 'list', 'create', 'write', 'close', 'terminal']
+// 仅实测过私有结构的精确版本;其余版本 clean-disable。
+export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2'])
+// 两代写模型:0.2.0-rc.2 与 0.2.1-alpha.2 蹭 UI 附着直调 write;0.2.1-rc.2 起 write 移除,改自持 attach 泵
+const METHODS_LEGACY = ['shells', 'list', 'create', 'write', 'close', 'terminal']
+const METHODS_SHARED = ['shells', 'list', 'create', 'attach', 'close', 'terminal']
 const require = createRequire(import.meta.url)
 
 export function registerTerminalTool(ctx, { version, defineTool }) {
   const controller = ctx.get('terminalController')
   const tools = ctx.get('tools')
+  const hasLegacyWrite = typeof controller?.write === 'function'
+  const required = hasLegacyWrite ? METHODS_LEGACY : METHODS_SHARED
   if (!SUPPORTED_VERSIONS.includes(version) || typeof defineTool !== 'function'
     || typeof tools?.register !== 'function' || !(controller?.owners instanceof Map)
-    || METHODS.some((method) => typeof controller[method] !== 'function')
+    || required.some((method) => typeof controller[method] !== 'function')
     || [...controller.owners.values()].some((owner) => !(owner?.terminals instanceof Map))) {
-    ctx.logger?.warn?.(`[dsh-shared-terminal] 需要 Controller ${SUPPORTED_VERSIONS.join(' 或 ')} 与私有 lookup/queue，插件停用`)
+    ctx.logger?.warn?.(`[dsh-shared-terminal] 需要 Controller ${SUPPORTED_VERSIONS.join(' 或 ')} 与私有 lookup/queue,插件停用`)
     return
   }
-  ctx.effect(() => tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool })))
+  const pumpFactory = hasLegacyWrite ? undefined : createPumpFactory(controller)
+  ctx.effect(() => {
+    const stopTool = tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool, pumpFactory }))
+    return () => { stopTool?.(); pumpFactory?.dispose() }
+  })
 }
 
 export async function apply(ctx) {
@@ -32,6 +41,6 @@ export async function apply(ctx) {
     const api = await import(pathToFileURL(toolsEntry).href)
     registerTerminalTool(ctx, { version: manifest.version, defineTool: api.defineTool })
   } catch (error) {
-    ctx.logger?.warn?.(`[dsh-shared-terminal] 宿主依赖加载失败，插件停用: ${error.message}`)
+    ctx.logger?.warn?.(`[dsh-shared-terminal] 宿主依赖加载失败,插件停用: ${error.message}`)
   }
 }

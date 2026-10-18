@@ -17,10 +17,16 @@ function context(controller = { owners: new Map(), terminal() {}, shells() {}, l
 }
 
 test('Given each tested Controller runtime, When installing, Then one terminal tool registers and disposes', () => {
-  for (const version of ['0.2.0-rc.2', '0.2.1-alpha.2']) {
-    const fixture = context()
+  const legacy = { owners: new Map(), terminal() {}, shells() {}, list() {}, create() {}, write() {}, close() {} }
+  const attachEra = { owners: new Map(), terminal() {}, shells() {}, list() {}, create() {}, attach() {}, close() {} }
+  for (const [version, controller] of [
+    ['0.2.0-rc.2', legacy],
+    ['0.2.1-alpha.2', legacy],
+    ['0.2.1-rc.2', attachEra],
+  ]) {
+    const fixture = context(controller)
     registerTerminalTool(fixture.ctx, { version, defineTool })
-    assert.equal(fixture.registrations.length, 1)
+    assert.equal(fixture.registrations.length, 1, `版本 ${version} 应注册`)
     assert.equal(fixture.registrations[0].name, 'terminal')
     fixture.dispose()
     assert.equal(fixture.registrations.length, 0)

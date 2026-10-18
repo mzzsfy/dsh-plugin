@@ -217,7 +217,7 @@ test('S6 错误:错误态摘要含 code,展开 label 与原文', () => {
   const { component, t } = loadClient(true)
   const tree = component({ ...settledProps(
     { action: 'write', terminal_id: 'tid-1', text: 'x' },
-    { ok: false, error: { code: 'NOT_ATTACHED', message: 'terminal 当前没有可写 attachment' } },
+    { ok: false, error: { code: 'NOT_ATTACHED', message: 'terminal 侧边栏面板未打开(切页会断开输入附着),打开面板后重试' } },
   ), t })
   assert.notEqual(findAttr(tree, 'data-state', 'error'), undefined, '缺 error 状态')
   assert.ok(textOf(tree).includes('NOT_ATTACHED'), '摘要缺错误码')
