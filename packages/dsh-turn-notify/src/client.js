@@ -872,21 +872,44 @@ window.__ModuleLoader__.load({
     const FOLD_RUNNING_FLAG = 'data-tn-folder-running'
     const FOLD_SCAN_DELAY_MS = 50
 
-    // 运行标记状态:官方 dsh-client-ui-workspace 分组语义的投影——
-    // 归属走 workspace 账本 sessionIds 一级映射(官方 owningGroupKey 同构,无 cwd 回退),
-    // 游离会话入末位未分组桶;可见性镜像官方 sessionVisible(subagent / 已归档 /
-    // 空白且非当前排除),组内任一可见会话 running 即该工作区运行中。
-    // ids 保工作区登记序(官方组渲染序 = 快照 items 序),供 DOM 组容器按下标对位
-    function folderRunningState(sessionsState, workspacesState) {
+    // 活动与侧边栏可见性分离:隐藏子会话通过 parentId 归到可见主会话,
+    // 不按 cwd 猜归属。byId 含不在 ids 中的 catalog 子行(官方同构)。
+    function folderActivityOwners(sessionsState, workspacesState) {
+      const byId = (sessionsState && sessionsState.byId) || {}
+      const archived = new Set((workspacesState && workspacesState.archivedSessionIds) || [])
+      const owners = new Map()
+      for (const id of Object.keys(byId)) {
+        let root = id
+        const seen = new Set()
+        while (byId[root] && !archived.has(root) && !seen.has(root)) {
+          seen.add(root)
+          const row = byId[root]
+          if (row.origin !== 'subagent') {
+            if (!row.blank || root === sessionsState.current) owners.set(id, root)
+            break
+          }
+          root = row.parentId
+        }
+      }
+      return owners
+    }
+
+    // 归属仍走 workspace 账本一级映射;游离主会话入末位未分组桶。
+    // Agent 状态取 uiSession.sessionStatus 的即时值优先(官方 ui-subagent 同构),
+    // Bash 等后台活动取 jobs 名册;只计该会话拥有的 running/stopping 任务,
+    // 名册同时可见的无主任务不得让所有文件夹误亮。完成/失败/取消均不算运行。
+    function folderRunningState(sessionsState, workspacesState, jobsState, sessionStatuses) {
       const byId = (sessionsState && sessionsState.byId) || {}
       const ids = (sessionsState && sessionsState.ids) || []
-      const current = sessionsState ? sessionsState.current : undefined
       const workspaces = workspacesState && Array.isArray(workspacesState.items) ? workspacesState.items : []
-      const archived = new Set((workspacesState && workspacesState.archivedSessionIds) || [])
-      const visible = (row) => Boolean(row)
-        && row.origin !== 'subagent'
-        && !archived.has(row.id)
-        && (!row.blank || row.id === current)
+      const owners = folderActivityOwners(sessionsState, workspacesState)
+      const active = new Set()
+      for (const [id, root] of owners) {
+        const row = byId[id]
+        const agentRunning = sessionStatuses?.get(id)?.running ?? row.running
+        const jobs = jobsState?.rows?.[id] || []
+        if (agentRunning || jobs.some((job) => job.owner === id && (job.status === 'running' || job.status === 'stopping'))) active.add(root)
+      }
       const running = new Set()
       const accounted = new Set()
       const workspaceIds = []
@@ -896,22 +919,16 @@ window.__ModuleLoader__.load({
         workspaceIds.push(workspace.workspaceId)
         const sessionIds = Array.isArray(workspace.sessionIds) ? workspace.sessionIds : []
         for (const sessionId of sessionIds) {
-          const row = byId[sessionId]
-          if (!row) continue
+          if (!byId[sessionId]) continue
           accounted.add(sessionId)
-          if (row.running && visible(row)) running.add(workspace.workspaceId)
+          if (active.has(sessionId)) running.add(workspace.workspaceId)
         }
       }
-      let ungrouped = false
-      for (const sessionId of ids) {
-        if (accounted.has(sessionId)) continue
-        const row = byId[sessionId]
-        if (row && row.running && visible(row)) ungrouped = true
-      }
+      const ungrouped = ids.some((id) => !accounted.has(id) && active.has(id))
       return { ids: workspaceIds, running, ungrouped }
     }
 
-    const FOLD_SWITCH_TITLE = '侧边栏会话列表按工作区分组时,有运行中会话的文件夹组头显示运行点并给文件夹图标着色,文件夹折叠与展开同样生效;游离会话所在的「未分组」组同样标记;单列表模式下无此标记。停用即全部隐藏,刷新页面生效。'
+    const FOLD_SWITCH_TITLE = '侧边栏会话列表按工作区分组时,有运行中会话的文件夹组头显示运行点并给文件夹图标着色,包括主回合、本地子智能体与会话自有后台任务;文件夹折叠与展开同样生效;游离会话所在的「未分组」组同样标记;单列表模式下无此标记。停用即全部隐藏,刷新页面生效。'
 
     // ---- 点击直达会话:页内卡片与系统弹窗共用 ----
 
@@ -2143,78 +2160,106 @@ window.__ModuleLoader__.load({
         start()
         // 工作区文件夹运行标记:服务快照投影 + DOM 组容器下标对位,状态变化经
         // 订阅与 DOM 变更(合并窗口)双通道驱动;开关读宿主配置,变更刷新页面生效
-        let foldEnabled = null
-        ctx.effect(() => {
-          if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return
-          let disposed = false
-          let timer = null
-          function clearAll() {
-            document.querySelectorAll('[' + FOLD_RUNNING_FLAG + ']').forEach((section) => {
-              section.removeAttribute(FOLD_RUNNING_FLAG)
-            })
-          }
-          function scan() {
-            const sections = document.querySelectorAll(FOLD_SECTION_SELECTOR)
-            if (sections.length === 0) {
-              clearAll()
-              return
+        // 所需服务缺席时仅运行标记不激活,不阻塞通知、音效与设置页。
+        ctx.inject(['jobs', 'uiSession'], (activityCtx) => {
+          const jobs = activityCtx.get('jobs')
+          const sessionStatus = activityCtx.get('uiSession').sessionStatus
+          let foldEnabled = null
+          activityCtx.effect(() => {
+            if (typeof MutationObserver === 'undefined' || typeof document.querySelectorAll !== 'function') return
+            let disposed = false
+            let timer = null
+            const jobWatches = new Map()
+            function syncJobWatches(owners) {
+              for (const [id, release] of jobWatches) {
+                if (owners.has(id)) continue
+                jobWatches.delete(id)
+                release()
+              }
+              for (const id of owners.keys()) {
+                if (!jobWatches.has(id)) jobWatches.set(id, jobs.watchRows(id))
+              }
             }
-            // 开关未决时仅清除:终态正确且停用用户刷新页面不闪现标记
-            if (foldEnabled === null) {
-              clearAll()
-              return
+            function clearAll() {
+              document.querySelectorAll('[' + FOLD_RUNNING_FLAG + ']').forEach((section) => {
+                section.removeAttribute(FOLD_RUNNING_FLAG)
+              })
             }
-            const state = foldEnabled
-              ? folderRunningState(sessions.list.getSnapshot(), workspaces.list.getSnapshot())
-              : { ids: [], running: new Set(), ungrouped: false }
-            const expected = state.ids.length
-            // 数量不变量:组容器数 = 工作区数 或 工作区数+1(末位未分组桶);
-            // 漂移(单列表模式 / 搜索态 / 官方结构变更)即清除标记,不误标
-            const ungroupedLast = sections.length === expected + 1
-            if (sections.length !== expected && !ungroupedLast) {
-              clearAll()
-              return
+            function scan() {
+              const sections = document.querySelectorAll(FOLD_SECTION_SELECTOR)
+              if (sections.length === 0) {
+                syncJobWatches(new Map())
+                clearAll()
+                return
+              }
+              // 开关未决时仅清除:终态正确且停用用户刷新页面不闪现标记
+              if (foldEnabled === null) {
+                clearAll()
+                return
+              }
+              const sessionsState = sessions.list.getSnapshot()
+              const workspacesState = workspaces.list.getSnapshot()
+              const state = foldEnabled
+                ? folderRunningState(sessionsState, workspacesState, jobs.state.getSnapshot(), sessionStatus.getSnapshot())
+                : { ids: [], running: new Set(), ungrouped: false }
+              const expected = state.ids.length
+              // 数量不变量:组容器数 = 工作区数 或 工作区数+1(末位未分组桶);
+              // 漂移(单列表模式 / 搜索态 / 官方结构变更)即清除标记,不误标
+              const ungroupedLast = sections.length === expected + 1
+              if (sections.length !== expected && !ungroupedLast) {
+                syncJobWatches(new Map())
+                clearAll()
+                return
+              }
+              // 不依赖当前打开哪个会话:为可见主会话及其子树持有官方引用计数名册,
+              // 折叠组同样实时更新;关闭标记或离开分组模式即释放,不读取任务输出。
+              syncJobWatches(foldEnabled ? folderActivityOwners(sessionsState, workspacesState) : new Map())
+              sections.forEach((section, index) => {
+                const running = index < expected ? state.running.has(state.ids[index]) : ungroupedLast && state.ungrouped
+                // 同值跳过:流式输出期间扫描高频,重复写属性触发无谓的 CSS 重匹配
+                if (running === section.hasAttribute(FOLD_RUNNING_FLAG)) return
+                if (running) section.setAttribute(FOLD_RUNNING_FLAG, '')
+                else section.removeAttribute(FOLD_RUNNING_FLAG)
+              })
             }
-            sections.forEach((section, index) => {
-              const running = index < expected ? state.running.has(state.ids[index]) : ungroupedLast && state.ungrouped
-              // 同值跳过:流式输出期间扫描高频,重复写属性触发无谓的 CSS 重匹配
-              if (running === section.hasAttribute(FOLD_RUNNING_FLAG)) return
-              if (running) section.setAttribute(FOLD_RUNNING_FLAG, '')
-              else section.removeAttribute(FOLD_RUNNING_FLAG)
-            })
-          }
-          let scheduled = false
-          const schedule = () => {
-            if (disposed || scheduled) return
-            scheduled = true
-            timer = setTimeout(() => {
-              scheduled = false
-              timer = null
-              if (!disposed) scan()
-            }, FOLD_SCAN_DELAY_MS)
-          }
-          api('/api/turn-notify/config')
-            .then((payload) => {
-              foldEnabled = payload ? payload.folderRunningEnabled !== false : true
-            })
-            .catch(() => {
-              foldEnabled = true
-            })
-            .finally(schedule)
-          const unsubscribeSessions = sessions.list.subscribe(schedule)
-          const unsubscribeWorkspaces = workspaces.list.subscribe(schedule)
-          const observer = new MutationObserver(schedule)
-          observer.observe(document.documentElement, { childList: true, subtree: true })
-          schedule()
-          return () => {
-            disposed = true
-            if (timer !== null) clearTimeout(timer)
-            observer.disconnect()
-            unsubscribeSessions()
-            unsubscribeWorkspaces()
-            clearAll()
-          }
-        }, 'turn-notify folder running mark')
+            let scheduled = false
+            const schedule = () => {
+              if (disposed || scheduled) return
+              scheduled = true
+              timer = setTimeout(() => {
+                scheduled = false
+                timer = null
+                if (!disposed) scan()
+              }, FOLD_SCAN_DELAY_MS)
+            }
+            api('/api/turn-notify/config')
+              .then((payload) => {
+                foldEnabled = payload ? payload.folderRunningEnabled !== false : true
+              })
+              .catch(() => {
+                foldEnabled = true
+              })
+              .finally(schedule)
+            const unsubscribeSessions = sessions.list.subscribe(schedule)
+            const unsubscribeWorkspaces = workspaces.list.subscribe(schedule)
+            const unsubscribeJobs = jobs.state.subscribe(schedule)
+            const unsubscribeStatus = sessionStatus.subscribe(schedule)
+            const observer = new MutationObserver(schedule)
+            observer.observe(document.documentElement, { childList: true, subtree: true })
+            schedule()
+            return () => {
+              disposed = true
+              if (timer !== null) clearTimeout(timer)
+              observer.disconnect()
+              unsubscribeSessions()
+              unsubscribeWorkspaces()
+              unsubscribeJobs()
+              unsubscribeStatus()
+              syncJobWatches(new Map())
+              clearAll()
+            }
+          }, 'turn-notify folder running mark')
+        })
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'turn-notify', order: 41, label: '消息通知' },

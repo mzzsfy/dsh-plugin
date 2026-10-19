@@ -47,7 +47,7 @@ test('folderRunningState 未分组:游离运行中会话使末位未分组桶标
   assert.equal(state.ungrouped, true)
 })
 
-test('folderRunningState 排除项:subagent、已归档、空白非当前不标记,空白当前例外', () => {
+test('folderRunningState 排除项:无父级 subagent、已归档、空白非当前不标记,空白当前例外', () => {
   const sessions = {
     ids: ['sub', 'arch', 'blank', 'cur'],
     byId: {
@@ -74,6 +74,74 @@ test('folderRunningState 缺省守卫:快照缺失或账本悬空不抛错', () 
   const state = pure.folderRunningState({ ids: ['gone'], byId: {} }, { items: [WS('w1', ['gone'])] })
   assert.deepEqual([...state.running], [])
   assert.equal(state.ungrouped, false)
+})
+
+test('folderRunningState 隐藏多级子代理不在 ids 中,仍归到主会话工作区', () => {
+  const sessions = { ids: ['root', 'other'], byId: {
+    root: ROW('root', { running: false, cwd: '/root' }),
+    other: ROW('other', { running: false }),
+    child: ROW('child', { origin: 'subagent', parentId: 'root', running: false, cwd: '/elsewhere' }),
+    nested: ROW('nested', { origin: 'subagent', parentId: 'child', running: true }),
+  } }
+  const state = pure.folderRunningState(sessions, { items: [WS('w1', ['root']), WS('w2', ['other'])] })
+  assert.deepEqual([...state.running], ['w1'])
+  assert.equal(state.ungrouped, false)
+})
+
+test('folderRunningState 使用全局即时状态覆盖惰性子行,显式 false 结束不残留', () => {
+  const sessions = { ids: ['root'], byId: {
+    root: ROW('root', { running: false }),
+    child: ROW('child', { origin: 'subagent', parentId: 'root', running: false }),
+  } }
+  const ws = { items: [WS('w1', ['root'])] }
+  assert.ok(pure.folderRunningState(sessions, ws, undefined, new Map([['child', { running: true }]])).running.has('w1'))
+  sessions.byId.child.running = true
+  assert.equal(pure.folderRunningState(sessions, ws, undefined, new Map([['child', { running: false }]])).running.size, 0)
+})
+
+test('folderRunningState 后台 Bash 与停止中任务使空闲主会话保持标记,终态全部熄灭', () => {
+  const sessions = { ids: ['root'], byId: { root: ROW('root', { running: false }) } }
+  const ws = { items: [WS('w1', ['root'])] }
+  for (const status of ['running', 'stopping', 'completed', 'failed', 'killed']) {
+    const state = pure.folderRunningState(sessions, ws, { rows: { root: [{ id: 'bash-1', kind: 'bash', owner: 'root', status }] } })
+    assert.equal(state.running.has('w1'), status === 'running' || status === 'stopping', status)
+  }
+})
+
+test('folderRunningState 子代理后台任务归父主会话,未分组根同样受理', () => {
+  const sessions = { ids: ['root'], byId: {
+    root: ROW('root', { running: false }),
+    child: ROW('child', { origin: 'subagent', parentId: 'root', running: false }),
+  } }
+  const jobs = { rows: { child: [{ owner: 'child', status: 'running' }] } }
+  assert.ok(pure.folderRunningState(sessions, { items: [WS('w1', ['root'])] }, jobs).running.has('w1'))
+  assert.ok(pure.folderRunningState(sessions, { items: [] }, jobs).ungrouped)
+})
+
+test('folderRunningState 无主或其他 owner 任务不归到名册查看者', () => {
+  const sessions = { ids: ['root'], byId: { root: ROW('root', { running: false }) } }
+  const state = pure.folderRunningState(sessions, { items: [WS('w1', ['root'])] }, {
+    rows: { root: [{ status: 'running' }, { owner: 'other', status: 'stopping' }] },
+  })
+  assert.equal(state.running.size, 0)
+  assert.equal(state.ungrouped, false)
+})
+
+test('folderRunningState 归档或空白根、孤儿和循环子代理不误标,普通 fork 不回传', () => {
+  const sessions = { ids: ['root', 'fork', 'blank'], byId: {
+    root: ROW('root', { running: false }),
+    fork: ROW('fork', { parentId: 'root', running: true }),
+    blank: ROW('blank', { blank: true }),
+    blankChild: ROW('blankChild', { origin: 'subagent', parentId: 'blank', running: true }),
+    orphan: ROW('orphan', { origin: 'subagent', parentId: 'missing', running: true }),
+    cycleA: ROW('cycleA', { origin: 'subagent', parentId: 'cycleB', running: true }),
+    cycleB: ROW('cycleB', { origin: 'subagent', parentId: 'cycleA', running: true }),
+  } }
+  const ws = { items: [WS('source', ['root']), WS('forked', ['fork']), WS('empty', ['blank'])] }
+  assert.deepEqual([...pure.folderRunningState(sessions, ws).running], ['forked'])
+  sessions.byId.child = ROW('child', { origin: 'subagent', parentId: 'root', running: true })
+  ws.archivedSessionIds = ['root', 'fork']
+  assert.equal(pure.folderRunningState(sessions, ws).running.size, 0)
 })
 
 // ── effect 扫描接线:DOM 桩 + 捕获 effect 函数驱动 ──
@@ -142,6 +210,10 @@ function loadClient() {
   // 快照源桩:监听器捕获 + emit,供测试模拟服务变更触发的重扫(生产由订阅驱动)
   let sessionsState = { ids: [], byId: {} }
   let workspacesState = undefined
+  let jobsState = { rows: {} }
+  let statusState = new Map()
+  const watched = new Set()
+  const released = []
   function sourceStub(getSnapshot) {
     const listeners = new Set()
     return {
@@ -159,8 +231,20 @@ function loadClient() {
   }
   const sessions = { binding: () => undefined, ...sourceStub(() => sessionsState) }
   const workspaces = sourceStub(() => workspacesState)
+  const jobSource = sourceStub(() => jobsState)
+  const statusSource = sourceStub(() => statusState)
+  const jobs = {
+    state: jobSource.list,
+    watchRows(id) {
+      assert.equal(watched.has(id), false, '同一会话不得重复持有名册')
+      watched.add(id)
+      return () => { watched.delete(id); released.push(id) }
+    },
+  }
+  const services = { sessions, workspaces, jobs, uiSession: { sessionStatus: statusSource.list } }
   const ctx = {
-    get: (name) => (name === 'sessions' ? sessions : name === 'workspaces' ? workspaces : {}),
+    get: (name) => services[name] || {},
+    inject: (names, callback) => { if (names.every((name) => services[name])) callback(ctx) },
     effect: (fn, tag) => effects.push({ fn, tag }),
     slots: { inject: () => {}, register: () => {} },
   }
@@ -171,6 +255,13 @@ function loadClient() {
     sections,
     runEffect: entry.fn,
     emitSessions: sessions.emit,
+    emitWorkspaces: workspaces.emit,
+    emitJobs: jobSource.emit,
+    emitStatus: statusSource.emit,
+    watched,
+    released,
+    setJobs: (next) => { jobsState = next },
+    setStatus: (next) => { statusState = next },
     setSessions: (next) => { sessionsState = next },
     setWorkspaces: (next) => { workspacesState = next },
   }
@@ -385,6 +476,71 @@ test('Given 开关停用, When 拉取完成前的首次扫描, Then 不产生标
     assert.equal(s1.hasAttribute(pure.runningFlag), false, '拉取未决期首次扫描不标记')
     await sleep(SCAN_SETTLE_MS * 2)
     assert.equal(s1.hasAttribute(pure.runningFlag), false, '拉取返回停用后维持无标记')
+  })
+})
+
+test('Given 非当前折叠组仅有后台任务, When jobs 推送开始/结束, Then 标记实时跟随且名册幂等', async () => {
+  await withFetch(undefined, async () => {
+    const client = loadClient()
+    client.setSessions({ ids: ['a', 'b'], current: 'b', byId: {
+      a: ROW('a', { running: false }), b: ROW('b', { running: false }),
+      child: ROW('child', { origin: 'subagent', parentId: 'a', running: false }),
+    } })
+    client.setWorkspaces({ items: [WS('w1', ['a']), WS('w2', ['b'])] })
+    const [s1, s2] = [sectionStub(), sectionStub()]
+    client.sections.push(s1, s2)
+    const cleanup = client.runEffect()
+    await sleep(SCAN_SETTLE_MS)
+    assert.deepEqual([...client.watched].sort(), ['a', 'b', 'child'])
+    client.setJobs({ rows: { child: [{ owner: 'child', status: 'running' }] } })
+    client.emitJobs()
+    await sleep(SCAN_SETTLE_MS)
+    assert.ok(s1.hasAttribute(pure.runningFlag))
+    assert.equal(s2.hasAttribute(pure.runningFlag), false)
+    client.setJobs({ rows: { child: [{ owner: 'child', status: 'completed' }] } })
+    client.emitJobs()
+    await sleep(SCAN_SETTLE_MS)
+    assert.equal(s1.hasAttribute(pure.runningFlag), false)
+    client.setStatus(new Map([['child', { running: true }]]))
+    client.emitStatus()
+    await sleep(SCAN_SETTLE_MS)
+    assert.ok(s1.hasAttribute(pure.runningFlag), '全局子代理状态也独立触发重扫')
+    cleanup()
+    assert.equal(client.watched.size, 0)
+    assert.equal(s1.hasAttribute(pure.runningFlag), false)
+    client.emitJobs()
+    client.emitStatus()
+    await sleep(SCAN_SETTLE_MS)
+    assert.equal(client.watched.size, 0, '卸载后不重新持有名册')
+    assert.equal(s1.hasAttribute(pure.runningFlag), false)
+  })
+})
+
+test('Given 主会话归档或离开分组, When 重新扫描, Then 释放整棵子树名册', async () => {
+  await withFetch(undefined, async () => {
+    const client = loadClient()
+    client.setSessions({ ids: ['a'], byId: {
+      a: ROW('a', { running: false }),
+      child: ROW('child', { origin: 'subagent', parentId: 'a', running: false }),
+    } })
+    client.setWorkspaces({ items: [WS('w1', ['a'])] })
+    client.sections.push(sectionStub())
+    const cleanup = client.runEffect()
+    await sleep(SCAN_SETTLE_MS)
+    assert.deepEqual([...client.watched].sort(), ['a', 'child'])
+    client.setWorkspaces({ items: [WS('w1', ['a'])], archivedSessionIds: ['a'] })
+    client.emitWorkspaces()
+    await sleep(SCAN_SETTLE_MS)
+    assert.equal(client.watched.size, 0)
+    client.setWorkspaces({ items: [WS('w1', ['a'])] })
+    client.emitWorkspaces()
+    await sleep(SCAN_SETTLE_MS)
+    assert.equal(client.watched.size, 2)
+    client.sections.length = 0
+    client.emitSessions()
+    await sleep(SCAN_SETTLE_MS)
+    assert.equal(client.watched.size, 0)
+    cleanup()
   })
 })
 
