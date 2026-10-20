@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-tool-gate",
   "description": "全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 交给宿主 deferred tool loading 链(API 服务端按需搜索激活);声明式收敛,行退场按 undo journal 还原原状",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "src/index.js",
   "exports": {
