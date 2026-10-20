@@ -12,15 +12,16 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 | `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与 attachment 有无。 |
 | `read` | 必填 `terminal_id`；`lines` 默认 20，范围 1–200。读取 active buffer viewport 内最新内容起的最多 N 个物理行——以最后一个非空行与光标行（非空时）为界，高窗口不会读到尾部空白；保留内部空行、软换行和当前 alternate screen（整屏坐标）。 |
 | `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。0.2.0 与 0.2.1-alpha.2 蹭 UI attachment 写（无附着返回 `NOT_ATTACHED`，不创建 follower、不抢 control）；0.2.1-rc.2 起自持 attach 泵（持续持有输入控制权，用户可随时「接管输入」抢回，泵的下一次写入重新抢回——最后写入者胜出；重抢仍失败返回 `TERMINAL_ERROR`，可重试）。 |
+| `wait` | 必填 `terminal_id, text`；`text` 为待等待子串（大小写敏感逐字），`timeout_ms` 默认 10000、范围 100–55000（上限为工具超时减返回余量）。阻塞轮询屏幕直到 `text` 出现（`found`，携带命中时刻屏幕快照与 `elapsed_ms`）、终端进入 `exited/failed`（`exited`，退出优先于命中）或超时（`timeout`，携带 `timeout_ms` 与最后一次屏幕快照）。匹配面为 read 同款 active viewport：滚出屏幕的历史不参与匹配；等待中终端被关闭返回 `TERMINAL_UNAVAILABLE`；回合取消即中止。轮询间隔 100ms。 |
 | `close` | 必填 `terminal_id`；通过官方 Controller 关闭终端，同一 Session 重复关闭保持宿主的幂等语义。 |
 
-`read` 返回 `text, lines, truncated, state, sequence`；`truncated` 表示该读取窗口上方仍有当前 viewport 行未返回，不表示截断历史。`sequence` 是宿主输出帧编号，不是所有屏幕变化的修订号。请求行数超过屏幕内容范围时只返回实际内容行数。
+`read` 返回 `text, lines, truncated, state, sequence`；`truncated` 表示该读取窗口上方仍有当前 viewport 行未返回，不表示截断历史。`sequence` 是宿主输出帧编号，不是所有屏幕变化的修订号。请求行数超过屏幕内容范围时只返回实际内容行数。`wait` 复用同一快照形状并增加 `kind`；长命令（构建、服务启动、交互提示符）用 `wait` 同步完成信号，替代反复 `read` 轮询。
 
 `open` 结果提供“打开终端”按钮；已有匹配 tab 则揭示该 tab，不重复打开。`read/write/close` 只呈现结果，不触发导航。历史 `open` 结果只能打开仍存在的终端，不能恢复已经关闭的 PTY。
 
 ## 会话内工具卡片
 
-`terminal` 调用在会话流中经官方 `tool.call.toolview` 槽位渲染：动作标题 + 摘要 + 可展开详情（read 的屏幕文本、list 的终端清单、write 的输入回显、open/close 的终端短 ID）；错误显示错误码与消息，参数或结果无法解析时回退原文行。文案经 locale 字典注册（中英双语），图标与文本微光使用官方 primitives，样式注入按 `data-plugin` 契约。
+`terminal` 调用在会话流中经官方 `tool.call.toolview` 槽位渲染：动作标题 + 摘要 + 可展开详情（read/wait 的屏幕文本、list 的终端清单、write 的输入回显、open/close 的终端短 ID）；wait 摘要为等待子串并以徽章标示 `found/timeout/exited` 终态。错误显示错误码与消息，参数或结果无法解析时回退原文行。文案经 locale 字典注册（中英双语），图标与文本微光使用官方 primitives，样式注入按 `data-plugin` 契约。
 
 ## 权限与版本边界
 

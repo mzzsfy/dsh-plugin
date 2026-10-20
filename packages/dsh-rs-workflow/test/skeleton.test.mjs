@@ -47,3 +47,20 @@ test('Given 非法 templateId When skeletonRows Then 拒绝', () => {
   assert.throws(() => skeletonRows(''), /骨架 templateId 非法/)
   assert.throws(() => skeletonRows(undefined), /骨架 templateId 非法/)
 })
+
+test('Given 骨架行集 When 校验模板变量 Then 只引用宿主注册变量', () => {
+  // 宿主渲染期严格校验 prompt 模板且仅注册 provider/model,未知变量使会话补全即失败
+  const registered = ['provider', 'model']
+  const templates = []
+  const walk = (value) => {
+    if (typeof value === 'string') templates.push(value)
+    else if (Array.isArray(value)) value.forEach(walk)
+    else if (value !== null && typeof value === 'object') Object.values(value).forEach(walk)
+  }
+  walk(skeletonRows(TEMPLATE_ANCHOR))
+  for (const template of templates) {
+    for (const m of template.matchAll(/\{\{(\w+)\}\}/g)) {
+      assert.ok(registered.includes(m[1]), `模板引用未注册变量 ${m[1]}`)
+    }
+  }
+})

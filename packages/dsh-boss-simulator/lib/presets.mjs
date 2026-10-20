@@ -1,5 +1,5 @@
 // DSH 只注册公司管理工作台入口;执行与验收由插件驱动标准会话。
-const PERSONA_TAIL = 'Your working directory is {{cwd}}.'
+// 模板变量渲染期严格校验,宿主仅注册 provider/model,不得引用其余变量;工作目录由 runtime context 提供。
 const TOOLS_ROW = { id: 'boss-simulator-tools-row', name: '@mzzsfy/dsh-boss-simulator', config: { role: 'tools-row' } }
 
 export const ADMIN_PRESET_ID = 'boss-simulator-admin'
@@ -8,7 +8,7 @@ function persona(prefix) {
   return {
     id: 'persona',
     name: '@deepseek-ai/dsh-persona',
-    config: { prefix, suffix: PERSONA_TAIL },
+    config: { prefix },
   }
 }
 

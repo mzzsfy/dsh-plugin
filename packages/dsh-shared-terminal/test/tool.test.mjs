@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createTerminalTool } from '../src/lib/tool.mjs'
+import { MAX_SCREEN_LINES } from '../src/lib/private-screen.mjs'
 import { defineTool, validateJsonSchemaValue } from './host.mjs'
 
 
@@ -48,6 +49,105 @@ test('Given dispatched write waiting on Controller, When the turn aborts, Then a
   release()
   assert.equal((await running).accepted, true)
   assert.deepEqual(sent, ['echo test\r'])
+})
+
+// ── wait 动作 ─────────────────────────────────────────────────────────
+
+const waitReadScreen = (screens) => {
+  const calls = []
+  const queue = screens.map((item) => (typeof item === 'function' ? item : () => item))
+  const readScreen = async (...args) => {
+    calls.push(args)
+    const next = queue.length > 1 ? queue.shift() : queue[0]
+    return next()
+  }
+  return { readScreen, calls }
+}
+
+const screen = (text, state = 'running') => ({ text, lines: text.split('\n').length, truncated: false, state, sequence: 7 })
+
+test('Given needle already on screen, When waiting, Then found with elapsed and match-time screen', async () => {
+  const controller = makeController()
+  const { readScreen, calls } = waitReadScreen([() => screen('ready\nBuild successful')])
+  const tool = makeTool(controller, readScreen)
+  const result = await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'Build successful' }, exec)
+  assert.equal(result.kind, 'found')
+  assert.equal(result.ok, true)
+  assert.equal(result.terminal_id, 'term-a')
+  assert.equal(result.text, 'ready\nBuild successful')
+  assert.equal(typeof result.elapsed_ms, 'number')
+  assert.equal(calls.length, 1, '立即命中不得空转轮询')
+  assert.deepEqual(calls[0], [controller, agent, 'term-a', MAX_SCREEN_LINES], 'wait 应以全 viewport 窗口扫描')
+})
+
+test('Given needle appears later, When waiting across polls, Then found carries the match-time screen', async () => {
+  const { readScreen, calls } = waitReadScreen([screen('starting'), screen('compiling'), screen('Build successful\n$')])
+  const tool = makeTool(makeController(), readScreen)
+  const result = await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'Build successful' }, exec)
+  assert.equal(result.kind, 'found')
+  assert.equal(result.text, 'Build successful\n$')
+  assert.equal(calls.length, 3)
+})
+
+test('Given needle absent for the whole budget, When waiting, Then timeout echoes budget with the last screen', async () => {
+  const { readScreen } = waitReadScreen([() => screen('$')])
+  const tool = makeTool(makeController(), readScreen)
+  const result = await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'never', timeout_ms: 150 }, exec)
+  assert.equal(result.kind, 'timeout')
+  assert.equal(result.timeout_ms, 150)
+  assert.equal(result.text, '$')
+})
+
+test('Given terminal exits before the needle, When waiting, Then exited short-circuits ahead of timeout', async () => {
+  const { readScreen, calls } = waitReadScreen([screen('$'), screen('process exited', 'exited')])
+  const tool = makeTool(makeController(), readScreen)
+  const result = await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'never' }, exec)
+  assert.equal(result.kind, 'exited')
+  assert.equal(result.state, 'exited')
+  assert.equal(calls.length, 2, '退出即返回,不得等满预算')
+})
+
+test('Given malformed wait arguments, When executing, Then closed schemas reject with distinct codes', async () => {
+  const tool = makeTool(makeController())
+  assert.equal((await tool.execute({ action: 'wait', terminal_id: 'term-a', text: '' }, exec)).error.code, 'INVALID_ARGS')
+  assert.equal((await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'x', lines: 5 }, exec)).error.code, 'INVALID_ARGS')
+  assert.equal((await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'x', timeout_ms: 99 }, exec)).error.code, 'INVALID_TIMEOUT')
+  assert.equal((await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'x', timeout_ms: 55_001 }, exec)).error.code, 'INVALID_TIMEOUT')
+  assert.equal((await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'x', timeout_ms: 10.5 }, exec)).error.code, 'INVALID_TIMEOUT')
+  assert.equal((await tool.execute({ action: 'wait', terminal_id: '', text: 'x' }, exec)).error.code, 'INVALID_ARGS')
+})
+
+test('Given a wait result, When validated by Host output validator, Then all three kinds are closed-schema valid', async () => {
+  for (const screens of [
+    [() => screen('Build successful')],
+    [() => screen('$')],
+    [screen('$'), screen('done', 'exited')],
+  ]) {
+    const tool = makeTool(makeController(), waitReadScreen(screens).readScreen)
+    const result = await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'Build successful', timeout_ms: 150 }, exec)
+    assert.deepEqual(validateJsonSchemaValue(tool.output.schema, result), [])
+  }
+})
+
+test('Given terminal closes mid-wait, When waiting, Then unavailable surfaces instead of spinning', async () => {
+  let first = true
+  const readScreen = async () => {
+    if (first) { first = false; return screen('$') }
+    throw { code: 'terminal/unavailable', message: 'Terminal no longer available' }
+  }
+  const result = await makeTool(makeController(), readScreen).execute({ action: 'wait', terminal_id: 'term-a', text: 'never', timeout_ms: 150 }, exec)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'TERMINAL_UNAVAILABLE')
+})
+
+test('Given the turn aborts mid-wait, When waiting, Then the wait aborts cooperatively', async () => {
+  const abort = new AbortController()
+  const readScreen = async () => screen('$')
+  const running = makeTool(makeController(), readScreen).execute({ action: 'wait', terminal_id: 'term-a', text: 'never', timeout_ms: 5000 }, { agent, signal: abort.signal })
+  abort.abort()
+  const result = await running
+  assert.equal(result.ok, false)
+  assert.match(result.error.message, /abort/i)
 })
 
 const agent = { id: 'session-a', session: { id: 'session-a' } }

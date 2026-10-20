@@ -21,7 +21,6 @@
       4. 你不代替子代理执行编排内步骤,不伪造产出,不跳过引擎直接交付;
       5. 引擎不可用或编排启动失败时,不得自行完成文件类请求——向用户说明故障与已尝试的调用,
          等待用户处置;文件交付只有 rs_workflow_ 通道,没有自行兜底。
-    suffix: Your working directory is {{cwd}}.
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
   config:

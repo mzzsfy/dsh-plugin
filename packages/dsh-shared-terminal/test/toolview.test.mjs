@@ -198,6 +198,43 @@ test('S4 write 成功:提交徽章,展开输入文本', () => {
   assert.ok(input.includes("date '+%H:%M'"), '展开缺输入文本')
 })
 
+test('S4b wait found:needle 摘要与已出现徽章,展开屏幕文本', () => {
+  const { component, t } = loadClient(true)
+  const tree = component({ ...settledProps(
+    { action: 'wait', terminal_id: 'tid-1', text: 'Build successful' },
+    { ok: true, terminal_id: 'tid-1', kind: 'found', text: 'Build successful\n$', lines: 2, truncated: false, state: 'running', sequence: 9, elapsed_ms: 12 },
+  ), t })
+  assert.ok(textOf(tree).includes('等待屏幕文本'), '缺动作文案')
+  assert.ok(textOf(tree).includes('Build successful'), '摘要缺 needle')
+  assert.ok(findAll(tree, (node) => node.type === 'span' && node.props?.className === 'stv-badge' && textOf(node) === '已出现').length > 0, '缺 found 徽章')
+  const screen = findAll(tree, (node) => node.props?.className === 'stv-ioText').map(textOf).join('\n')
+  assert.ok(screen.includes('Build successful'), '展开缺屏幕文本')
+  assert.ok(!textOf(tree).includes('@@'), '不得出现缺键哨兵')
+})
+
+test('S4c wait 终态徽章随 kind,运行中 shimmer', () => {
+  const { component, t } = loadClient(true)
+  const timeoutTree = component({ ...settledProps(
+    { action: 'wait', terminal_id: 'tid-1', text: 'never', timeout_ms: 150 },
+    { ok: true, terminal_id: 'tid-1', kind: 'timeout', text: '$', lines: 1, truncated: false, state: 'running', sequence: 9, timeout_ms: 150 },
+  ), t })
+  assert.ok(findAll(timeoutTree, (node) => node.props?.className === 'stv-badge' && textOf(node) === '超时').length > 0, '缺超时徽章')
+  const exitedTree = component({ ...settledProps(
+    { action: 'wait', terminal_id: 'tid-1', text: 'never' },
+    { ok: true, terminal_id: 'tid-1', kind: 'exited', text: 'process exited', lines: 1, truncated: false, state: 'exited', sequence: 10 },
+  ), t })
+  assert.ok(findAll(exitedTree, (node) => node.props?.className === 'stv-badge' && textOf(node) === '已退出').length > 0, '缺退出徽章')
+  const runningTree = component({
+    phase: 'executing',
+    callId: 'c1',
+    sessionId: 's1',
+    block: { argsRaw: JSON.stringify({ action: 'wait', terminal_id: 'tid-1', text: 'Build successful' }) },
+    t,
+  })
+  assert.ok(textOf(runningTree).includes('等待屏幕文本'), '运行中缺动作文案')
+  assert.ok(findAll(runningTree, (node) => node.type === 'TextShimmer' && node.props.active === true).length > 0, '运行中应激活 shimmer')
+})
+
 test('S5 open/close 成功:id 短码,open 带打开按钮', () => {
   const { component, t } = loadClient(true)
   const openProps = settledProps(

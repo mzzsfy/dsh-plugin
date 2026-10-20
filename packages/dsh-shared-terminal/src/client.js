@@ -17,12 +17,16 @@ window.__ModuleLoader__.load({
       'action.read': '读取屏幕',
       'action.write': '写入终端',
       'action.list': '列出终端',
+      'action.wait': '等待屏幕文本',
       'unit.lines': '行',
       'unit.terminals': '个终端',
       'badge.truncated': '已截断',
       'badge.submitted': '已提交',
       'badge.attached': '已连接',
       'badge.detached': '未连接',
+      'badge.found': '已出现',
+      'badge.timeout': '超时',
+      'badge.exited': '已退出',
       'label.terminal': '终端 ID',
       'label.screen': '屏幕',
       'label.input': '输入',
@@ -41,12 +45,16 @@ window.__ModuleLoader__.load({
       'action.read': 'Read screen',
       'action.write': 'Write terminal',
       'action.list': 'List terminals',
+      'action.wait': 'Wait for screen text',
       'unit.lines': 'lines',
       'unit.terminals': 'terminal(s)',
       'badge.truncated': 'truncated',
       'badge.submitted': 'submitted',
       'badge.attached': 'attached',
       'badge.detached': 'not attached',
+      'badge.found': 'found',
+      'badge.timeout': 'timeout',
+      'badge.exited': 'exited',
       'label.terminal': 'Terminal ID',
       'label.screen': 'Screen',
       'label.input': 'Input',
@@ -95,8 +103,10 @@ window.__ModuleLoader__.load({
     }
 
     function actionKey(action) {
-      return ['open', 'close', 'read', 'write', 'list'].includes(action) ? `action.${action}` : undefined
+      return ['open', 'close', 'read', 'write', 'list', 'wait'].includes(action) ? `action.${action}` : undefined
     }
+
+    const WAIT_KINDS = ['found', 'timeout', 'exited']
 
     function cardModel(block, phase, t) {
       const settled = phase === 'result'
@@ -152,6 +162,11 @@ window.__ModuleLoader__.load({
       } else if (action === 'write') {
         if (args.submit === true) badges.push(t('badge.submitted'))
         if (typeof args.text === 'string' && args.text !== '') sections.push({ label: t('label.input'), text: args.text })
+      } else if (action === 'wait') {
+        if (typeof args.text === 'string' && args.text !== '') summary = args.text
+        if (WAIT_KINDS.includes(result.kind)) badges.push(t(`badge.${result.kind}`))
+        const screen = result.text ?? ''
+        sections.push({ label: t('label.screen'), text: screen.trim() === '' ? t('hint.blankScreen') : screen })
       } else if (action === 'open') {
         summary = shortId(result.terminal_id)
         sections.push({ label: t('label.terminal'), text: shortId(result.terminal_id) })

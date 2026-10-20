@@ -16,6 +16,18 @@ test('公司管理只向 DSH 注册一个自定义入口预设', () => {
   assert.deepEqual(definitions[0].plugins.map((plugin) => plugin.id), ['persona', 'boss-simulator-tools-row'])
 })
 
+test('预设模板只引用宿主注册的 prompt 变量', () => {
+  // 渲染期严格校验,宿主仅注册 provider/model,引用其余变量使会话启动即失败
+  const registered = ['provider', 'model']
+  for (const plugin of presetDefinitions()[0].plugins) {
+    for (const template of Object.values(plugin.config ?? {}).filter((v) => typeof v === 'string')) {
+      for (const m of template.matchAll(/\{\{(\w+)\}\}/g)) {
+        assert.ok(registered.includes(m[1]), `${plugin.id} 模板引用未注册变量 ${m[1]}`)
+      }
+    }
+  }
+})
+
 test('package.json 契约', () => {
   const dsh = pkg.dsh
   if (!dsh) return

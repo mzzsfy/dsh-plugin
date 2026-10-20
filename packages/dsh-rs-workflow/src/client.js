@@ -1297,7 +1297,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'sessions'],
+      inject: ['slots'],
       apply(ctx) {
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
@@ -1314,11 +1314,24 @@ window.__ModuleLoader__.load({
           let disposeSentinel = null
           let cache = { sessionId: undefined, isRs: false }
           let currentSessionId
+          let judgeQueued = false
+          // 哨兵渲染即会话作用域更新:sessionId 变化时调度重判(微任务去重,渲染期不触副作用)
+          const queueJudge = () => {
+            if (judgeQueued) return
+            judgeQueued = true
+            queueMicrotask(() => { judgeQueued = false; judge() })
+          }
           try {
             disposeSentinel = ctx.slots.inject('conversation.input.overlay', () =>
               ctx.slots.register(
                 { name: 'conversation.input.overlay', id: 'rsww-session-sentinel', order: 90 },
-                (props) => { currentSessionId = props?.sessionId; return null },
+                (props) => {
+                  const next = props?.sessionId
+                  const changed = currentSessionId !== next
+                  currentSessionId = next
+                  if (changed) queueJudge()
+                  return null
+                },
               ))
           } catch (error) {
             console.warn('[rs-workflow] sessionId 哨兵未注册(宿主无 conversation.input.overlay 插槽)', error)
@@ -1350,12 +1363,19 @@ window.__ModuleLoader__.load({
               ensure(isRs)
             } catch { /* host 未就绪:下轮重试 */ }
           }
-          const unsubscribe = ctx.sessions.list.subscribe(() => { cache = { sessionId: undefined, isRs: false }; judge() })
+          // 重判触发走变更总线:run 创建必 bump version,广播(合并节流)时重查;
+          // 页签已在列时重复判定无信息增益,短路;禁随会话列表 emit 重查(emit 高频且无限频,曾致请求风暴)
+          const rejudge = () => {
+            if (cache.fetched && cache.isRs) return
+            cache = { sessionId: undefined, isRs: false }
+            judge()
+          }
+          const unsubscribeChanges = subscribeChanges(rejudge)
           timer = setInterval(judge, JUDGE_RETRY_MS)
           judge()
           return () => {
             disposed = true
-            unsubscribe()
+            unsubscribeChanges()
             if (timer) clearInterval(timer)
             if (disposeView) disposeView()
             if (disposeSentinel) disposeSentinel()

@@ -327,8 +327,8 @@ test('steerRecallSvg:DOM 元素形态,16px viewBox 双路径 stroke 描边', () 
 
 // 注入契约(源码级守卫,与 client-fork.test.mjs 的 fork 契约同构):
 // 显隐由 inbox 投影行集驱动——行在注入、行不在摘除,投影订阅保证应用后即时消失。
-// pending 与 durable 双路径:pending 气泡(data-pending-steering,无 node-key)按
-// 渲染文本对齐投影行,durable 气泡按 node-key messageId 匹配。
+// pending 与 durable 双路径:pending 气泡(data-pending-steering,含双标记 echo
+// 形态)按文档序与投影序对齐,durable 气泡按 node-key messageId 匹配。
 // 锚定 SteerRecallDock 函数体切片:防止常量定义行/注释文本满足 grep 造成守卫空转
 test('SteerRecallDock 注入契约:双路径气泡锚点、投影驱动显隐、官方类克隆与清理齐备', () => {
   const DOCK_START = CLIENT_SRC.indexOf('function SteerRecallDock(')
@@ -337,7 +337,7 @@ test('SteerRecallDock 注入契约:双路径气泡锚点、投影驱动显隐、
   const dock = CLIENT_SRC.slice(DOCK_START, DOCK_END)
   assert.ok(dock.includes("querySelectorAll('[' + FLOW_KIND_ATTR + '=\"steering\"]')"), '应扫描 durable steering 气泡(node-key 匹配路径)')
   assert.ok(dock.includes("querySelectorAll('[' + STEER_PENDING_ATTR + ']')"), '应扫描 Host pending steering 气泡(顺序对齐路径)')
-  assert.ok(dock.includes('SUBMISSION_ECHO_ATTR'), 'pending 对齐应排除本地提交 echo(Host 未确认,无对应投影行)')
+  assert.ok(!dock.includes('SUBMISSION_ECHO_ATTR'), 'pending 对齐不得排除本地提交 echo——宿主 0.2.1-rc.2 发送会话内插话即双标记 echo 形态,排除即主场景错杀(行存在性检查已覆盖 Host 未确认防误配)')
   assert.ok(dock.includes("button.setAttribute(STEER_BTN_FLAG, '')"), '注入按钮应带自家标记(防重复注入与误删官方节点)')
   assert.ok(dock.includes("bubble.querySelector('[' + STEER_BTN_FLAG + ']')"), '应按气泡范围查询防重标记(同一查询点承担行不在时的摘除)')
   assert.ok(dock.includes('STEER_NODE_KEY_RE'), 'durable 气泡应经 node-key 正则提取 messageId 匹配投影行')
@@ -390,12 +390,16 @@ function mountScanHarness({ faceRows, updateQueue, setDraft, pendingBubble = fal
   const pendingSeeds = pendingBubbles !== null
     ? pendingBubbles
     : (pendingBubble ? [{ text: '帮我看下' }] : [])
-  const makeBubble = ({ pending, text }) => {
+  // echo 形态:宿主 0.2.1-rc.2 发送会话内,投影行被本地 submission 替换渲染,
+  // steering 气泡 = data-pending-steering + data-submission-echo 双标记;
+  // 切会话回来(本地 state 清空)渲染纯 pending 单标记
+  const makeBubble = ({ pending, echo, text }) => {
     const b = {
       attrs: {
         'data-chat-node-key': pending ? null : '5:input-messagem1',
         'data-chat-flow-kind': pending ? null : 'steering',
         'data-pending-steering': pending ? '' : null,
+        'data-submission-echo': echo ? '' : null,
       },
       textContent: text || '',
       buttons: null,
@@ -410,7 +414,7 @@ function mountScanHarness({ faceRows, updateQueue, setDraft, pendingBubble = fal
     return b
   }
   const bubble = makeBubble({ pending: false })
-  const pendingDom = pendingSeeds.map((seed) => makeBubble({ pending: true, text: seed.text }))
+  const pendingDom = pendingSeeds.map((seed) => makeBubble({ pending: true, echo: seed.echo, text: seed.text }))
   // 真实宿主单条插话只渲染一种气泡(pending 或 durable),桩随 pendingSeeds 切换
   const allBubbles = pendingSeeds.length > 0 ? [...pendingDom] : [bubble]
   const reactStub = {
@@ -524,6 +528,46 @@ test('scan pending 顺序:多行多气泡按序一一配对', () => {
   ]
   const h = mountScanHarness({ faceRows: rows, pendingBubbles: [{ text: '第一条' }, { text: '第二条' }] })
   assert.equal(h.injected.length, 2, '两个 pending 气泡按序配对两行')
+})
+
+// 第三次失效(2026-10-20)回归:宿主 0.2.1-rc.2 发送会话内,投影行被本地 submission
+// 替换渲染,steering 气泡 = data-pending-steering + data-submission-echo 双标记;
+// 排除 echo 的旧过滤把主场景气泡整体错杀,图标只在切会话回来(纯 pending 形态)出现。
+// 顺序对齐保证「行存在才注入」,echo 排除的原始动机(Host 未确认防误配)已由其覆盖。
+test('scan pending 双标记:发送会话内 echo 形态气泡仍按序注入(第三次失效回归)', () => {
+  const h = mountScanHarness({ faceRows: [INBOX_MESSAGE], pendingBubbles: [{ text: '帮我看下', echo: true }] })
+  assert.equal(h.injected.length, 1, 'Host 已确认(投影有行)的双标记 echo 气泡必须注入,不得按 echo 标记排除')
+})
+
+test('scan pending 混合:echo 与纯 pending 混合序列按序配对', () => {
+  const rows = [
+    { id: 'm1', source: { kind: 'user' }, content: [{ type: 'text', text: '第一条' }] },
+    { id: 'm2', source: { kind: 'user' }, content: [{ type: 'text', text: '第二条' }] },
+  ]
+  const h = mountScanHarness({ faceRows: rows, pendingBubbles: [{ text: '第一条', echo: true }, { text: '第二条' }] })
+  assert.equal(h.injected.length, 2, '双标记与单标记气泡在同序队列中一并配对')
+})
+
+test('scan pending 双标记:无行排尾 echo(Host 未确认)不注入', () => {
+  const rows = [{ id: 'm1', source: { kind: 'user' }, content: [{ type: 'text', text: '第一条' }] }]
+  const h = mountScanHarness({ faceRows: rows, pendingBubbles: [{ text: '第一条', echo: true }, { text: '刚发出', echo: true }] })
+  assert.equal(h.injected.length, 1, '行存在性检查天然覆盖 Host 未确认场景,尾部无行 echo 不得注入')
+})
+
+test('scan pending 双标记点击:echo 形态气泡点击走 remove 主路径并回填', async () => {
+  const calls = []
+  const h = mountScanHarness({
+    faceRows: [INBOX_MESSAGE],
+    pendingBubbles: [{ text: '帮我看下', echo: true }],
+    updateQueue: async (itemId, action) => { calls.push({ itemId, action }); return { ok: true } },
+    setDraft: (text) => calls.push({ setDraft: text }),
+  })
+  h.injected[0].listeners.click()
+  await settle()
+  assert.deepEqual(calls, [
+    { itemId: 'm1', action: { kind: 'remove' } },
+    { setDraft: '帮我看下' },
+  ], 'echo 形态气泡点击不得被 echo 排除拦截为「已被应用」')
 })
 
 test('scan pending 顺序:行数少于气泡数(尾部行已应用)→ 多余气泡不注入', () => {

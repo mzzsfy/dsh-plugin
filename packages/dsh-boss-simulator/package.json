@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-boss-simulator",
   "description": "公司管理模拟器:以老板身份安排任务,分派给部门自治执行,只接受汇报;含看板、时间线、中断恢复",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

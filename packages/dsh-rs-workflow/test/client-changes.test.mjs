@@ -26,3 +26,10 @@ test('client.js 长轮询须带防风暴限频:未挂起响应按忙时间隙续
   assert.match(source, /CHANGES_NOTIFY_MERGE_MS/, '缺广播合并节流(高频写入放大订阅者全量重拉)')
   assert.doesNotMatch(source, /changesSleep\(0,/, '禁止无条件立即续连(变更密集时退化为紧密循环)')
 })
+
+test('client.js 页签判定重查走变更总线,禁随会话列表 emit 无限频重查', () => {
+  const source = readFileSync(join(root, 'src', 'client.js'), 'utf8')
+  assert.doesNotMatch(source, /list\.subscribe\(\(\) => \{ cache/, '会话列表 emit 高频且无限频,重置 cache 即请求风暴源')
+  assert.match(source, /subscribeChanges\(rejudge\)/, '页签判定重查须走变更总线(合并节流兜底)')
+  assert.match(source, /cache\.fetched && cache\.isRs/, '页签已在列时须短路重查(无信息增益)')
+})

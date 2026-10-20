@@ -21,7 +21,7 @@ export function skeletonRows(templateId) {
     throw new Error(`骨架 templateId 非法: ${JSON.stringify(templateId)}`)
   }
   return [
-    { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: PERSONA_PREFIX, suffix: 'Your working directory is {{cwd}}.' } },
+    { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: PERSONA_PREFIX } },
     { id: 'agent-instructions', name: '@deepseek-ai/dsh-agent-instructions', config: { maxBytes: 65536 } },
     // 不可禁本组合 shell/fs 工具行:workflow worker 的段子代理继承组合行集,禁行使
     // 段子代理无法落盘交付物(实测证实)。主循环不写文件由 persona 判据约束

@@ -875,11 +875,12 @@ const BUBBLE_ACTIONS_SUFFIX = '[class$="_actions"]'
 const STEER_NODE_KEY_RE = /input-message(.+)$/
 // 气泡 node-key 属性名(与 TURN_ATTR/FLOW_KIND_ATTR 同族的官方流标记)
 const NODE_KEY_ATTR = 'data-chat-node-key'
-// Host optimistic pending steering bubble 标记(dsh-client-ui-chat PendingSteeringBubble,
-// 插话发送后的第一阶段气泡,无 flow-kind/node-key;消费后转 durable steering 节点)
+// 宿主插话气泡标记(0.2.1-rc.2 源码形态,ChatFlow.pendingInputs):
+// 发送会话内投影行被本地 submission 替换渲染,气泡 = data-pending-steering +
+// data-submission-echo 双标记;切会话回来/刷新(本地 state 清空)渲染纯
+// data-pending-steering 单标记。pending 顺序对齐覆盖两种形态,行存在性检查
+// 天然保证 Host 未确认(无行)不注入
 const STEER_PENDING_ATTR = 'data-pending-steering'
-// 本地提交 echo 标记(PendingSubmissionBubble,Host 未确认的暂存气泡,无对应投影行)
-const SUBMISSION_ECHO_ATTR = 'data-submission-echo'
 // 宿主 inbox 投影:未应用插话驻留的队列键(dsh 0.2.0 语义)
 const INBOX_STEER_KEY = 'inbox'
 const INBOX_STEER_QUEUE = 'next-step'
@@ -973,17 +974,16 @@ function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
           if (!node) return
           const currentSnapshot = current.inboxFace.getSnapshot()
           const currentRows = steerRowsOfInbox(currentSnapshot && currentSnapshot[INBOX_STEER_QUEUE])
-          // 点击重读行:durable 按 messageId;pending 按文档序对齐(与 scan 同构)
+          // 点击重读行:durable 按 messageId;pending(含双标记 echo 形态)按文档序对齐(与 scan 同构)
           const nodeMatch = STEER_NODE_KEY_RE.exec(node.getAttribute(NODE_KEY_ATTR) || '')
           let currentRow = null
           if (nodeMatch) {
             currentRow = currentRows.find((item) => String(item.id) === nodeMatch[1]) || null
-          } else if (node.hasAttribute(STEER_PENDING_ATTR) && !node.hasAttribute(SUBMISSION_ECHO_ATTR)) {
-            const pendingList = Array.prototype.filter.call(
+          } else if (node.hasAttribute(STEER_PENDING_ATTR)) {
+            const pendingList = Array.prototype.slice.call(
               document.querySelectorAll('[' + STEER_PENDING_ATTR + ']'),
-              (item) => !item.hasAttribute(SUBMISSION_ECHO_ATTR),
             )
-            const seq = Array.prototype.indexOf.call(pendingList, node)
+            const seq = pendingList.indexOf(node)
             currentRow = seq >= 0 ? (currentRows[seq] || null) : null
           }
           if (!currentRow) {
@@ -1013,13 +1013,14 @@ function SteerRecallDock({ useSession, inputActions, updateQueue, inboxFace }) {
         if (existing) return
         injectRecall(bubble)
       })
-      // pending:Host-authoritative optimistic 气泡与 next-step user 行同源保序渲染
-      // (宿主 pendingInputs 即 next-step user 行 flatMap),按文档序与投影序一一
-      // 配对;渲染文本不参与匹配(Markdown 插话的 textContent 与原文必不一致)。
-      // 本地 echo(Host 未确认,无对应行)排除
-      const pendingList = Array.prototype.filter.call(
+      // pending:带 data-pending-steering 的气泡(发送会话内双标记 echo 形态 +
+      // 切会话回来的纯 pending 形态)与 next-step user 行同源保序渲染(宿主
+      // pendingInputs 即 next-step user 行 flatMap,本地 submission 仅替换同序
+      // 行不改序),按文档序与投影序一一配对;渲染文本不参与匹配(Markdown 插话
+      // 的 textContent 与原文必不一致);无行排尾(Host 未确认)由行存在性检查
+      // 天然不注入
+      const pendingList = Array.prototype.slice.call(
         document.querySelectorAll('[' + STEER_PENDING_ATTR + ']'),
-        (bubble) => !bubble.hasAttribute(SUBMISSION_ECHO_ATTR),
       )
       pendingList.forEach((bubble, index) => {
         const existing = bubble.querySelector('[' + STEER_BTN_FLAG + ']')
