@@ -22,6 +22,8 @@ import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
 import { loadJson, saveJson } from './storage.mjs'
 
 const BODY_MAX_BYTES = 256 * 1024
+// 长轮询挂起上限:客户端请求超时须大于此值
+const LONG_POLL_WAIT_MS = 25 * 1000
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -272,6 +274,21 @@ export function registerBoardRoutes(ctx) {
     route('/api/rsww/runs', guardedRoute(async (req, res) => {
       sendJson(res, 200, { runs: store.list() })
     }), 'rsww runs route')
+    // 长轮询变更源:cursor 缺省=首拉立即返回;仅版本恰等时挂起至写路径 bump / 超时;
+    // cursor 超前(宿主重启版本回退)立即返回,客户端以响应 version 重置游标自愈
+    wctx.effect(() => {
+      wctx.webServer.register({ kind: 'exact', path: '/api/rsww/changes', handler: guardedRoute(async (req, res) => {
+        const url = new URL(req.url, 'http://localhost')
+        const rawCursor = Number(url.searchParams.get('cursor'))
+        const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
+        if (url.searchParams.has('cursor') && store.version() === cursor) {
+          await store.waitChanged(cursor, LONG_POLL_WAIT_MS)
+        }
+        sendJson(res, 200, { version: store.version() })
+      }) })
+      // 插件卸载唤醒全部挂起连接,以当前版本收尾,防连接悬挂
+      return () => store.wakeWaiters()
+    }, 'rsww changes route')
     route('/api/rsww/run', guardedRoute(async (req, res) => {
       const url = new URL(req.url, 'http://localhost')
       const runId = url.searchParams.get('id') || ''

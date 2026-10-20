@@ -30,6 +30,19 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
 
   const warn = (message) => logger.warn?.(`[rsww-store] ${message}`)
 
+  // 变更版本:写路径统一 bump 唤醒全部挂起长轮询;形态对齐 turn-notify/usage-panel projection
+  let version = 0
+  const waiters = new Set()
+  const settle = (waiter) => {
+    clearTimeout(waiter.timer)
+    waiters.delete(waiter)
+    waiter.resolve(version)
+  }
+  const bump = () => {
+    version += 1
+    for (const waiter of [...waiters]) settle(waiter)
+  }
+
   const writeAtomic = (path, text) => {
     // 临时文件落目标同目录:跨卷 tmpdir rename 触发 EXDEV;同盘保证原子性
     const tmp = `${path}.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`
@@ -176,6 +189,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
         throw e
       }
       evictOverCapacity()
+      bump()
       return record
     },
 
@@ -194,6 +208,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
         ;(stepEvents[key] ??= []).push({ event, at, ...body })
       }
       persistRun(record)
+      bump()
       return record
     },
 
@@ -210,12 +225,13 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       if (queued !== undefined) record.queued = queued
       if (waiting !== undefined) record.waiting = waiting ?? undefined
       if (status !== undefined) {
-        // 状态迁移同步 index 行:waiting_approval/paused 期间列表分组/轮询不基于失真状态
+        // 状态迁移同步 index 行:waiting_approval/paused 期间列表分组/长轮询不基于失真状态
         const entry = index.find((e) => e.runId === runId)
         if (entry) Object.assign(entry, indexEntryOf(record))
         persistIndex()
       }
       persistRun(record)
+      bump()
       return record
     },
 
@@ -233,6 +249,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       if (entry) Object.assign(entry, indexEntryOf(record))
       persistIndex()
       evictOverCapacity()
+      bump()
       return record
     },
 
@@ -261,7 +278,20 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
       assertRunId(runId)
       removeInternal(runId)
       persistIndex()
+      bump()
     },
+
+    version: () => version,
+    // 长轮询挂起:已超前立即返回;恰等挂起至 bump/超时;超时与唤醒均以当前版本收尾不报错
+    waitChanged(cursor, timeoutMs) {
+      if (version > cursor) return Promise.resolve(version)
+      return new Promise((resolve) => {
+        const waiter = { resolve, timer: null }
+        waiter.timer = setTimeout(() => settle(waiter), timeoutMs)
+        waiters.add(waiter)
+      })
+    },
+    wakeWaiters: () => { for (const waiter of [...waiters]) settle(waiter) },
   }
   return store
 }

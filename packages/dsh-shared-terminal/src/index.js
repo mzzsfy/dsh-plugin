@@ -8,8 +8,8 @@ import { createPumpFactory } from './lib/attach-pump.mjs'
 export const name = 'dsh-shared-terminal'
 export const inject = ['terminalController', 'tools']
 // 仅实测过私有结构的精确版本;其余版本 clean-disable。
-export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2'])
-// 两代写模型:0.2.0-rc.2 与 0.2.1-alpha.2 蹭 UI 附着直调 write;0.2.1-rc.2 起 write 移除,改自持 attach 泵
+export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-alpha.2', '0.2.1-rc.2'])
+// 两代写模型:0.2.0 系(自 rc.1 起)与 0.2.1-alpha.2 蹭 UI 附着直调 write;0.2.1-rc.2 起 write 移除,改自持 attach 泵
 const METHODS_LEGACY = ['shells', 'list', 'create', 'write', 'close', 'terminal']
 const METHODS_SHARED = ['shells', 'list', 'create', 'attach', 'close', 'terminal']
 const require = createRequire(import.meta.url)

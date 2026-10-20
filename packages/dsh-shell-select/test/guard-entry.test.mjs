@@ -45,6 +45,9 @@ function stubCtx({ rows, importOfficial }) {
         },
       })
     },
+    effect(execute) {
+      return execute()
+    },
   }
   return { ctx, log, mounts, listeners }
 }

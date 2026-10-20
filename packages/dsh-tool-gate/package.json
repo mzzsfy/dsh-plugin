@@ -1,0 +1,66 @@
+{
+  "name": "@mzzsfy/dsh-tool-gate",
+  "description": "全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 交给宿主 deferred tool loading 链(API 服务端按需搜索激活);声明式收敛,行退场按 undo journal 还原原状",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./converge": "./src/converge.mjs",
+    "./registry": "./src/registry.mjs",
+    "./web": "./src/web-routes.mjs",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    },
+    "hostMin": "0.2.0-rc.1",
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.1": "unknown",
+        "0.2.0-rc.2": "unknown",
+        "0.2.1-alpha.1": "unknown"
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "白名单延迟加载-BDD.md",
+    "README.md"
+  ]
+}

@@ -118,7 +118,8 @@ test('初次接入只新增包内链接，原文件不改且命令入口目标�
     if (process.platform === 'win32') assert.ok(info.isFile())
     else {
       assert.ok(info.isSymbolicLink())
-      assert.equal(await realpath(entry), join(f.layout.link, 'lib', 'bin.js'))
+      // realpath 恒穿透 dsh_link,与穿透后的目标比对(字面路径比对恒假)
+      assert.equal(await realpath(entry), await realpath(join(f.layout.link, 'lib', 'bin.js')))
     }
     assert.ok(!(await readFile(entry, 'utf8')).includes('.dsh-maintain'))
   }
@@ -151,11 +152,16 @@ test('运行路径与link不一致时拒绝再次升级，不能清理当前或�
 
 test('未知命令入口不改，切换失败保持原link', async t => {
   const f = await fixture(t)
-  await writeFile(join(f.prefix, 'dsh.cmd'), 'custom unrelated launcher')
+  // 入口面按平台语义注入未知形态:win32 未知 shim 内容;POSIX 入口被替换为实体文件(非symlink)
+  const posix = process.platform !== 'win32'
+  const entryPath = posix ? join(f.prefix, 'bin', 'dsh') : join(f.prefix, 'dsh.cmd')
+  // POSIX 入口是 symlink,writeFile 会跟随链接改写目标;须先摘链接再落实体文件
+  if (posix) await rm(entryPath)
+  await writeFile(entryPath, 'custom unrelated launcher')
   const pkg = await f.install('a', '2.0.0')
   await assert.rejects(f.api.activateInstallation(f.layout, pkg, { runningPackage: f.originalPackage }), /入口|shim/)
   await assert.rejects(realpath(f.layout.link), { code: 'ENOENT' })
-  assert.equal(await readFile(join(f.prefix, 'dsh.cmd'), 'utf8'), 'custom unrelated launcher')
+  assert.equal(await readFile(entryPath, 'utf8'), 'custom unrelated launcher')
 })
 
 test('实体dsh_link和备用目录symlink禁止删除，不跟随链接清理其它树', async t => {

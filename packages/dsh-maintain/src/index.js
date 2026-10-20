@@ -52,21 +52,26 @@ const audit = (endpoint, outcome, extra) => {
   console.warn('[dsh-maintain] audit endpoint=' + endpoint + ' outcome=' + outcome + (extra ? ' ' + extra : ''))
 }
 
-// 活跃工作检测:agents/jobs/terminals 全软依赖方法面守卫,缺失或异常即降级放行(fail-open,
-// 不因安全网缺失死锁重启)。terminals 主路径逐 agent 的 realm 作用域解析(PTY 注册表随
-// agent 挂载且 isolate,共享根作用域因 realm 隔离恒缺,仅兜底;无 agent 时服务面
-// 不可见属常态,不计降级);sessions 不作活跃指标;禁止顶层 inject(阻塞装载)。导出仅供测试
+// 活跃工作检测:agents/jobs/terminals 全软依赖方法面守卫,缺失或异常即降级——重启门控
+// fail-open(不因安全网缺失死锁重启),升级门控 fail-closed(检测面缺失拒绝升级)。
+// 0.2.0 实测:terminals 服务对插件 ctx 根与 agent realm 均不可探,面不可见属宿主常态
+// 不计降级,终端归属 agent、agents 计数覆盖 running 期间终端活动;agent 转 idle 后
+// 存活终端不可计数,属已知盲区(宿主能力边界,非本插件可修);sessions 不作活跃指标;
+// 禁止顶层 inject(阻塞装载)。导出仅供测试
 // 降级留痕按服务键进程首见一次:status 每拍重检,不限频会刷屏
 const degradedWarned = new Set()
 
 export function collectActiveWork(ctx) {
   const counts = { agents: 0, jobs: 0, terminals: 0 }
   let detectionAvailable = true
+  const degraded = {}
   const degrade = (key, detail) => {
     detectionAvailable = false
+    // 明细恒收集(409/status 透出供定位),控制台留痕按服务键进程首见一次防刷屏
+    degraded[key] = singleLine(detail)
     if (degradedWarned.has(key)) return
     degradedWarned.add(key)
-    console.warn('[dsh-maintain] 活跃工作检测降级,门控放行(' + key + '): ' + singleLine(detail))
+    console.warn('[dsh-maintain] 活跃工作检测降级,升级门拒绝/重启门放行(' + key + '): ' + degraded[key])
   }
 
   let agentList = []
@@ -100,10 +105,8 @@ export function collectActiveWork(ctx) {
 
   try {
     const seen = new Set()
-    let sawTerminalsService = false
     const scan = (terminals, owner) => {
       if (!terminals) return
-      sawTerminalsService = true
       if (owner && typeof terminals.hasOwnerActivity === 'function' && terminals.hasOwnerActivity(owner)) {
         const key = 'pending:' + String(owner.id)
         if (!seen.has(key)) { seen.add(key); counts.terminals += 1 }
@@ -133,9 +136,9 @@ export function collectActiveWork(ctx) {
     } catch (error) {
       degrade('terminals', '根探测异常: ' + (error && error.message ? error.message : String(error)))
     }
-    // 服务面随 agent realm 挂载:无 agent 时不可见属常态(无对象即无终端),不计降级;
-    // 有 agent 而探不到服务面(可探性缺失或面缺失)属异常,降级留痕
-    if (!sawTerminalsService && agentList.length > 0) degrade('terminals', 'terminals 服务面不可用')
+    // 0.2.0 实测:terminals 服务对插件 ctx 根与 agent realm 均不可探,面不可见属宿主常态
+    // 不计降级;agents 计数覆盖 running 期间的终端活动,agent 转 idle 后存活终端属已知盲区;
+    // 服务面可见时(测试桩/未来宿主)照常计数
   } catch (error) {
     degrade('terminals', error && error.message ? error.message : String(error))
   }
@@ -146,6 +149,8 @@ export function collectActiveWork(ctx) {
     terminals: counts.terminals,
     total: counts.agents + counts.jobs + counts.terminals,
     detectionAvailable,
+    // 仅降级时非空:键为服务名,值为失败明细,随 status 与 409 透出供定位
+    degraded,
   }
 }
 
@@ -709,10 +714,12 @@ export function apply(ctx, config, dependencies = {}) {
         // 切换前编排器 beforeSwitch 还会做最终核验
         const activeWork = collectActiveWork(ctx)
         if (activeWork.detectionAvailable !== true || activeWork.total > 0) {
-          audit('upgrade', 'rejected', 'reason=active-work total=' + activeWork.total + ' detectionAvailable=' + activeWork.detectionAvailable)
+          // 降级明细随 409 透出:检测面缺失时"哪个面、什么原因"是定位的必要信息
+          const degradedSummary = Object.entries(activeWork.degraded).map(([key, detail]) => key + '(' + detail + ')').join('; ')
+          audit('upgrade', 'rejected', 'reason=active-work total=' + activeWork.total + ' detectionAvailable=' + activeWork.detectionAvailable + (degradedSummary ? ' degraded=' + degradedSummary : ''))
           sendJson(res, 409, {
             error: activeWork.detectionAvailable !== true
-              ? '活跃工作检测不可用,为避免中断任务已拒绝升级;请处理检测面后重试'
+              ? '活跃工作检测不可用,为避免中断任务已拒绝升级;降级面: ' + degradedSummary
               : '存在活跃工作(共 ' + activeWork.total + ' 项:agents ' + activeWork.agents + '/jobs ' + activeWork.jobs + '/terminals ' + activeWork.terminals + '),升级切换会中断它们,请等待完成',
             items: activeWork,
             detectionAvailable: activeWork.detectionAvailable,

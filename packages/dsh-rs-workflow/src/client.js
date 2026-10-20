@@ -10,16 +10,104 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback } = React
 
     const API = '/api/rsww/'
-    const REFRESH_MS = 5 * 1000
-    const LIVE_REFRESH_MS = 2 * 1000
+    const JUDGE_RETRY_MS = 5 * 1000
     const VIEW_ID = 'rsww-flow'
     const SETTLED_COUNT = 8
     const ARMED_TIMEOUT_MS = 3 * 1000
+    // 长轮询:失败重连退避指数增长至上限;请求超时须大于服务端挂起上限(25s)。
+    // 变更密集防风暴:响应未经历挂起(服务端因版本已超前立即返回)时按忙时间隙限频续连;
+    // 广播合并节流,窗口内多次变更只触发一轮订阅者重拉
+    const CHANGES_RETRY_MIN_MS = 2 * 1000
+    const CHANGES_RETRY_MAX_MS = 30 * 1000
+    const CHANGES_REQUEST_TIMEOUT_MS = 30 * 1000
+    const CHANGES_HUNG_MIN_MS = 5 * 1000
+    const CHANGES_BUSY_GAP_MS = 1 * 1000
+    const CHANGES_NOTIFY_MERGE_MS = 300
+    const CHANGES_TOKEN = 'rsww:changes-poll'
 
     const NAV_ICON = { '若水工作流': 'flow', 'dsh-rs-workflow': 'flow' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
+
+    // 变更长轮询总线:全局单飞循环挂起等待服务端变更,version 推进即广播订阅者;
+    // 代际 token abort 旧代,防重复装载堆积循环
+    if (window[CHANGES_TOKEN] instanceof AbortController) window[CHANGES_TOKEN].abort()
+    const changesController = new AbortController()
+    window[CHANGES_TOKEN] = changesController
+    const changesListeners = new Set()
+    let changesCursor = null
+    const changesSleep = (ms, signal) => new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve()
+        return
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort)
+        resolve()
+      }, ms)
+      const onAbort = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    async function changesPollOnce() {
+      let version = null
+      try {
+        // cursor 为空即首拉,服务端立即返回;之后携带版本挂起等待变更
+        const query = changesCursor === null ? '' : '?cursor=' + changesCursor
+        const response = await fetch(API + 'changes' + query, {
+          signal: AbortSignal.any([changesController.signal, AbortSignal.timeout(CHANGES_REQUEST_TIMEOUT_MS)]),
+        })
+        if (!response.ok) {
+          void response.body?.cancel()
+          return false
+        }
+        const payload = await response.json()
+        // 版本缺失即异常响应:按失败退避,防游标停滞退化成紧密首拉循环
+        if (typeof payload.version !== 'number') return false
+        version = payload.version
+      } catch {
+        return false
+      }
+      const advanced = changesCursor !== null && version > changesCursor
+      changesCursor = version
+      if (advanced) notifyAdvanced()
+      return true
+    }
+    let notifyTimer = null
+    const notifyAdvanced = () => {
+      if (notifyTimer !== null) return
+      notifyTimer = setTimeout(() => {
+        notifyTimer = null
+        for (const listener of [...changesListeners]) listener()
+      }, CHANGES_NOTIFY_MERGE_MS)
+    }
+    void (async () => {
+      // 主循环:经历服务端挂起即立即重连,未挂起(变更密集)按忙时间隙限频;失败指数退避;任何时刻至多一条在途请求
+      let backoffMs = CHANGES_RETRY_MIN_MS
+      while (!changesController.signal.aborted) {
+        let ok = false
+        const startedAt = Date.now()
+        try {
+          ok = await changesPollOnce()
+        } catch { ok = false }
+        if (changesController.signal.aborted) break
+        if (ok) {
+          backoffMs = CHANGES_RETRY_MIN_MS
+          const hung = Date.now() - startedAt >= CHANGES_HUNG_MIN_MS
+          await changesSleep(hung ? 0 : CHANGES_BUSY_GAP_MS, changesController.signal)
+        } else {
+          await changesSleep(backoffMs, changesController.signal)
+          backoffMs = Math.min(backoffMs * 2, CHANGES_RETRY_MAX_MS)
+        }
+      }
+    })()
+    const subscribeChanges = (fn) => {
+      changesListeners.add(fn)
+      return () => changesListeners.delete(fn)
+    }
 
     const STATUS_META = {
       running: { label: '运行中', tone: 'business' },
@@ -308,7 +396,7 @@ window.__ModuleLoader__.load({
         error ? React.createElement('span', { className: 'rsww-error' }, error) : null)
     }
 
-    // 单 run 卡片:详情自轮询(运行中 2s;落定仅挂载一次);终态卡内嵌重跑/续跑/删除操作
+    // 单 run 卡片:详情经变更总线重拉(运行中订阅;落定仅挂载一次);终态卡内嵌重跑/续跑/删除操作
     function RunCard({ run, onChanged }) {
       const [detail, setDetail] = useState(null)
       const [fetchError, setFetchError] = useState(false)
@@ -317,11 +405,10 @@ window.__ModuleLoader__.load({
         if (outcome.ok) { setDetail(outcome.data); setFetchError(false) } else setFetchError(true)
       }), [run.runId])
       useEffect(() => {
-        let alive = true
-        const load = () => reload().then(() => { if (!alive) return })
+        const load = () => reload().then(() => {})
         load()
-        const timer = live ? setInterval(load, LIVE_REFRESH_MS) : null
-        return () => { alive = false; if (timer) clearInterval(timer) }
+        if (!live) return undefined
+        return subscribeChanges(load)
       }, [reload, live])
       const view = detail || run
       const queued = Array.isArray(view.queued) ? view.queued : []
@@ -369,7 +456,7 @@ window.__ModuleLoader__.load({
           view.plan ? React.createElement('span', { className: 'rsww-note' },
             ' · ' + (view.plan.source === 'model' ? '模型规划' : '模板全序')) : null) : null,
         settled && detail ? React.createElement(DetailActions, { detail, onReload: reload, onRemoved: onChanged }) : null,
-        fetchError ? React.createElement('span', { className: 'rsww-error' }, '详情拉取失败,下轮自动重试') : null)
+        fetchError ? React.createElement('span', { className: 'rsww-error' }, '详情拉取失败,待变更后自动重试') : null)
     }
 
     function FlowView({ getSessionId }) {
@@ -381,8 +468,7 @@ window.__ModuleLoader__.load({
       }, [])
       useEffect(() => {
         reload()
-        const timer = setInterval(reload, REFRESH_MS)
-        return () => clearInterval(timer)
+        return subscribeChanges(reload)
       }, [reload])
       if (error && !runs) return React.createElement('div', { className: 'rsww-flow' }, React.createElement('span', { className: 'rsww-error' }, error))
       // 只呈现本会话的 run:页签语义=本会话编排在场;跨会话检索交给宿主会话搜索
@@ -1265,7 +1351,7 @@ window.__ModuleLoader__.load({
             } catch { /* host 未就绪:下轮重试 */ }
           }
           const unsubscribe = ctx.sessions.list.subscribe(() => { cache = { sessionId: undefined, isRs: false }; judge() })
-          timer = setInterval(judge, REFRESH_MS)
+          timer = setInterval(judge, JUDGE_RETRY_MS)
           judge()
           return () => {
             disposed = true

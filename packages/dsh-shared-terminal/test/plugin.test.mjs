@@ -20,6 +20,7 @@ test('Given each tested Controller runtime, When installing, Then one terminal t
   const legacy = { owners: new Map(), terminal() {}, shells() {}, list() {}, create() {}, write() {}, close() {} }
   const attachEra = { owners: new Map(), terminal() {}, shells() {}, list() {}, create() {}, attach() {}, close() {} }
   for (const [version, controller] of [
+    ['0.2.0-rc.1', legacy],
     ['0.2.0-rc.2', legacy],
     ['0.2.1-alpha.2', legacy],
     ['0.2.1-rc.2', attachEra],

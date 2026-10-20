@@ -190,3 +190,47 @@ test('Given DSH_RS_WORKFLOW_DATA_DIR 覆写 When defaultDataDir Then 落 v5 子�
     else process.env.DSH_RS_WORKFLOW_DATA_DIR = prev
   }
 })
+
+test('Given 写路径各调一次 When start/step/update/finish/remove Then version 逐次单调递增', () => {
+  const dir = fresh()
+  const store = createStore({ dir })
+  const seen = [store.version()]
+  store.start({ runId: 'r-ver' })
+  seen.push(store.version())
+  store.step({ runId: 'r-ver', event: 'control', body: { kind: 'message', text: 'x' } })
+  seen.push(store.version())
+  store.update({ runId: 'r-ver', status: 'paused' })
+  seen.push(store.version())
+  store.finish({ runId: 'r-ver', status: 'completed', summary: '' })
+  seen.push(store.version())
+  store.remove('r-ver')
+  seen.push(store.version())
+  for (let i = 1; i < seen.length; i++) assert.ok(seen[i] > seen[i - 1], `version 须递增:${seen[i - 1]} -> ${seen[i]}`)
+})
+
+test('Given waitChanged 恰等挂起 When 写路径 bump Then 以更新后 version resolve', async () => {
+  const dir = fresh()
+  const store = createStore({ dir })
+  store.start({ runId: 'r-wait-bump' })
+  const before = store.version()
+  const pending = store.waitChanged(before, 60 * 1000)
+  store.step({ runId: 'r-wait-bump', event: 'control', body: { kind: 'message', text: '唤醒' } })
+  assert.equal(await pending, store.version())
+  assert.ok(store.version() > before)
+})
+
+test('Given 无变更 When waitChanged 超时 Then 以当前 version 收尾不报错', async () => {
+  const dir = fresh()
+  const store = createStore({ dir })
+  store.start({ runId: 'r-wait-idle' })
+  const before = store.version()
+  assert.equal(await store.waitChanged(before, 20), before)
+})
+
+test('Given 已超前 cursor When waitChanged Then 立即返回不挂起', async () => {
+  const dir = fresh()
+  const store = createStore({ dir })
+  store.start({ runId: 'r-wait-ahead' })
+  const current = store.version()
+  assert.equal(await store.waitChanged(current - 1, 0), current)
+})

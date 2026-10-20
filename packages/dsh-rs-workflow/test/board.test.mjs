@@ -149,3 +149,42 @@ test('Given 无会话挂靠(重启后) When 页签裁决 Then 受理但不拉段
     await board.close()
   }
 })
+
+test('Given changes 无 cursor When GET Then 立即返回当前版本(首拉)', async () => {
+  const board = await startBoard()
+  try {
+    const res = await fetch(board.base + '/api/rsww/changes')
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(typeof body.version, 'number')
+  } finally {
+    await board.close()
+  }
+})
+
+test('Given changes cursor 恰等当前版本 When store 写入 Then 挂起解除并返回更新版本', async () => {
+  const board = await startBoard()
+  try {
+    const current = (await (await fetch(board.base + '/api/rsww/changes')).json()).version
+    const pending = fetch(board.base + `/api/rsww/changes?cursor=${current}`)
+    await new Promise((r) => setTimeout(r, 50))
+    reportStore().start({ runId: 'r-changes-wake', request: 'R' })
+    const body = await (await pending).json()
+    assert.ok(body.version > current, '挂起解除后版本须超前')
+  } finally {
+    reportStore().remove('r-changes-wake')
+    await board.close()
+  }
+})
+
+test('Given changes cursor 超前(宿主重启版本回退) When GET Then 立即返回当前版本自愈', async () => {
+  const board = await startBoard()
+  try {
+    const current = (await (await fetch(board.base + '/api/rsww/changes')).json()).version
+    const res = await fetch(board.base + `/api/rsww/changes?cursor=${current + 1000}`)
+    const body = await res.json()
+    assert.equal(body.version, current)
+  } finally {
+    await board.close()
+  }
+})

@@ -495,6 +495,64 @@ test('upgrade:活跃检测不可用 fail-closed 409,存在活跃工作 409 不�
   assert.equal(runner.calls.length, 0, '活跃工作路径不得进入 runner')
 })
 
+test('upgrade:terminals 面不可见属宿主常态,agents 计数照常门控', async () => {
+  const runner = makeRunnerStub()
+  // 0.2.0 真实形态:terminals 服务对插件 ctx 根与 agent realm 均不可探(agent.ctx.get 返回 undefined),
+  // 活跃 agent 由 agents 计数覆盖,不得因此降级为"检测不可用"
+  const noTerminalFace = makeCtx({
+    appExit: () => {},
+    services: { agents: { list: () => [{ id: 'a-live', status: 'running', ctx: { get: () => undefined } }] }, jobs: { list: () => [] } },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const denied = await post(noTerminalFace.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /活跃工作/, 'agents 计数必须照常门控')
+  assert.equal(denied.payload.items.agents, 1)
+  assert.equal(denied.payload.items.terminals, 0)
+  assert.equal(denied.payload.detectionAvailable, true, 'terminals 面不可见不得降级为检测不可用')
+  const idle = makeCtx({
+    appExit: () => {},
+    services: { agents: { list: () => [{ id: 'a-idle', status: 'idle' }] }, jobs: { list: () => [] } },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const accepted = await post(idle.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(accepted.status, 200, 'terminals 面不可见且无活跃工作时必须放行')
+  await drainMicrotasks()
+})
+
+test('upgrade:terminals 面可见但方法面残缺仍降级(残余 fail-closed 路径)', async () => {
+  const runner = makeRunnerStub()
+  const brokenFace = makeCtx({
+    appExit: () => {},
+    services: { agents: { list: () => [] }, jobs: { list: () => [] }, terminals: {} },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const denied = await post(brokenFace.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /检测不可用/, '面可见但残缺属真缺陷,保持 fail-closed')
+  assert.match(denied.payload.error, /terminals\(/, '错误文案必须携带降级明细供定位')
+  assert.equal(denied.payload.detectionAvailable, false)
+  assert.match(denied.payload.items.degraded.terminals, /服务方法面不可用/)
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 0, '检测降级路径不得进入 runner')
+})
+
+test('upgrade:agent realm 面可见但残缺仍降级(per-agent fail-closed 对称)', async () => {
+  const runner = makeRunnerStub()
+  // realm 面 get('terminals') 返回 {} 与根面残缺同构:扫描 throw → 降级,不得静默当 0 计数
+  const realmBroken = makeCtx({
+    appExit: () => {},
+    services: { agents: { list: () => [{ id: 'a-realm', status: 'idle', ctx: { get: () => ({}) } }] }, jobs: { list: () => [] } },
+    dependencies: DEPS({ runManagedUpgrade: runner }),
+  })
+  const denied = await post(realmBroken.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
+  assert.equal(denied.status, 409)
+  assert.match(denied.payload.error, /检测不可用/, 'realm 面可见但残缺属真缺陷,保持 fail-closed')
+  assert.equal(denied.payload.detectionAvailable, false)
+  await drainMicrotasks()
+  assert.equal(runner.calls.length, 0, '检测降级路径不得进入 runner')
+})
+
 test('upgrade:runner 成功调度一次正常退出', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
@@ -832,16 +890,6 @@ test('collectActiveWork:无 agent 时 terminals 服务面不可见属常态,不�
   } finally {
     console.warn = originalWarn
   }
-})
-
-test('collectActiveWork:有 agent 而服务面缺失(可探或不可探),仍降级', () => {
-  const probeless = { id: 'a1', status: 'idle' }
-  const blindProbe = { id: 'a2', status: 'idle', ctx: { get: () => undefined } }
-  const probelessResult = collectActiveWork({ get: (n) => (n === 'agents' ? { list: () => [probeless] } : n === 'jobs' ? { list: () => [] } : undefined) })
-  assert.equal(probelessResult.detectionAvailable, false)
-  const blindResult = collectActiveWork({ get: (n) => (n === 'agents' ? { list: () => [blindProbe] } : n === 'jobs' ? { list: () => [] } : undefined) })
-  assert.equal(blindResult.detectionAvailable, false)
-  assert.equal(blindResult.terminals, 0)
 })
 
 test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {

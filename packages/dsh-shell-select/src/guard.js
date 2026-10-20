@@ -208,6 +208,9 @@ export async function installGuard(ctx, {
       const dead = detectDeadState(ctx.loader, { applyState: shellSelectApplyState })
       if (dead === true && mounted.size === 0 && mounting === null) await mountOfficial()
       else if (dead === false && (mounted.size > 0 || mounting !== null)) await unmountOfficial()
+    } catch {
+      // 停机竞态:fiber 已停而末次 tick 先于 effect 清理触发,loader 访问必抛;
+      // rejection 逃逸会被宿主 fail-loud 判 fatal load failure 杀进程,静默放行
     } finally {
       sweeping = false
     }
@@ -246,10 +249,15 @@ export async function installGuard(ctx, {
   ctx.logger.info?.(`shell-select/guard: 初始判定 dead=${initial}`)
   if (initial === true) await mountOfficial()
 
-  const timer = setInterval(() => {
-    void sweep()
-  }, sweepIntervalMs)
-  timer.unref?.()
+  // 定时器随 fiber 清理:裸 setInterval 会在行停用后残留 tick,停机序列中
+  // 访问 loader 抛错并经宿主 fail-loud 升级为进程级 fatal
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      void sweep()
+    }, sweepIntervalMs)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, 'shell-select/guard sweep timer')
   return undefined
 }
 
