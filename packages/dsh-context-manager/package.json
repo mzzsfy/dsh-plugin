@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-context-manager",
   "description": "对话增强:历史输入浮层(范围导航/搜索/常用提示词收藏)、插话撤回、对话 fork(进行中轮分叉/自动重发)、标题栏复制 sessionId",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
