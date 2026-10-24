@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-settings-nav-icons",
   "description": "设置弹窗导航分区与插件市场卡片图标替换:按分区显示文本把回退齿轮换成专属图形,市场卡片头像槽换成插件图标;支持右键自定义覆盖与外部插件声明接入,附带导航溢出滚动补偿;DOM 观察实现,卸载后重载页面恢复官方图标",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "type": "module",
   "main": "src/index.js",
   "exports": {
