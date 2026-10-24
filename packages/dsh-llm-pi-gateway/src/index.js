@@ -1,5 +1,5 @@
 // llm-pi-gateway Host 半区(装饰器形态):官方 llm-pi-ai 行保持启用并自服务,
-// 本包在官方 adapter 类的 streamWithSnapshot 原型上注入派生会话标记。
+// 本包在官方 adapter 类的 streamWithSnapshot 原型上补协议对应会话键。
 // 不注册任何 adapter/directory/discovery,不接管官方 settings 节
 // (0.1.7+ 宿主设置页模型新增因此原生完好)。
 
@@ -63,7 +63,7 @@ export async function apply(ctx, config) {
     offSweep?.()
     offUpdate?.()
   })
-  ctx.logger?.info?.('llm-pi-gateway: 装饰器就绪(官方行自服务,anthropic 会话标记注入)')
+  ctx.logger?.info?.('llm-pi-gateway: 装饰器就绪(官方行自服务,Anthropic 标记与 Chat 会话头注入)')
   return undefined
 }
 

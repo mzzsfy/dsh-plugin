@@ -758,12 +758,12 @@ test('常用提示词:超长截断、上限裁剪、空 text 拒绝', skipMissin
 
 // ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
 
-test('横切守卫:8 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+test('横切守卫:9 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
     const getOnly = '/api/context/inputs'
     const postOnly = '/api/context/prompts/toggle'
-    const dualMethods = ['/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled']
+    const dualMethods = ['/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled']
     // GET-only 路由:POST 拒绝
     const inputsPost = response()
     await handlers.get(getOnly)(request('s1'), inputsPost)
@@ -781,10 +781,10 @@ test('横切守卫:8 条路由方法白名单,白名单外一律 405', skipMissi
   })
 })
 
-test('横切守卫:7 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+test('横切守卫:9 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
-    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled']
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone']
     for (const routePath of postPaths) {
       const res = await postRaw(handlers, routePath, '{oops')
       assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')

@@ -1,6 +1,6 @@
 # Gateway Provider 装饰器 BDD
 
-状态：已实施；DSH `0.2.0-rc.2` 隔离兼容测试通过。隔离判定覆盖页面收到 echo fixture 回复，不代表真实 provider 的完整契约。
+状态：已实施。三协议实际 adapter 请求验证覆盖 DSH `0.2.1-rc.2` / pi-ai `1.3.0`，同版本有头 GUI 四主轮回归通过；历史 GUI 隔离兼容测试覆盖 DSH `0.2.0-rc.2`。验证均使用 echo fixture，不代表真实上游路由策略或真实 provider 的完整契约。
 
 ## 目标
 
@@ -21,16 +21,39 @@
 
 ### Anthropic 请求注入派生标记
 
-- **Given** 注册表中 adapter 原型提供 `streamWithSnapshot`，请求为 Anthropic 且包含 sessionId
+- **Given** 官方 adapter 已授权、owner 活跃、开关开启，原型提供 `streamWithSnapshot`，请求为 Anthropic 且包含非空字符串 sessionId
 - **When** 请求到达 `snapshot.models.streamSimple`
 - **Then** 传给原始方法的 options 含派生 `metadata.user_id`
 - **And** 原始 options 对象不被修改
 
-### 非 Anthropic 请求透传
+### Chat 请求补会话头
+
+- **Given** 官方 adapter 已授权、owner 活跃、开关开启，实际 model.api 为 `openai-completions`，options.sessionId 为非空字符串，且 cacheRetention 不是 `none`
+- **When** 请求经过 `streamSimple`
+- **Then** 仅补缺失的 `session_id`、`x-client-request-id` 头，值均为原始 sessionId
+- **And** 大小写无关地尊重 options.headers 与 model.headers 的显式键，包括 `null` 抑制值，不制造同名大小写变体
+- **And** 冻结的 options、headers、model 不被修改，不新增 metadata 或 prompt_cache_key，不改变 cacheRetention
+- **And** 同会话多轮值相同，新会话值不同
+
+### Chat 缓存关闭
+
+- **Given** Chat options.cacheRetention 为 `none`
+- **When** 请求经过装饰器
+- **Then** 不添加自动会话头，options 原对象透传，显式头保留
+
+### Responses 与其他协议透传
 
 - **Given** adapter 已装饰
-- **When** 非 `anthropic-messages` 请求经过 streamSimple
-- **Then** gateway 不添加 metadata，原 options 透传
+- **When** Responses 或其他非 Chat、非 Anthropic 协议请求经过 streamSimple
+- **Then** gateway 原样透传 options，不重复注入或抑制 pi-ai 的原生会话键
+- **And** 已验证的 pi-ai Responses 默认发送 `session_id`、`x-client-request-id` 与顶层 `prompt_cache_key`，`cacheRetention: 'none'` 时不自动发送这些键
+
+### 关闭总开关
+
+- **Given** sessionMarker.enabled 为 false
+- **When** Chat 或 Anthropic 请求经过已装饰的 streamSimple
+- **Then** gateway 原样透传 options
+- **And** 重开后恢复自动注入，Responses 原生行为不受此开关控制
 
 ### 注册先后变化
 
@@ -56,25 +79,26 @@
 
 - **Given** snapshot 的 models 不是对象，或 `streamSimple` 不是函数
 - **When** 已装饰的 adapter 调用 `streamWithSnapshot`
-- **Then** 不创建注入 facade，并原样透传 snapshot，使原 adapter 保持原生行为
+- **Then** 不创建注入 facade，保留原 models 引用；snapshot 仍按调用复制，其余字段保持不变
 
 ### 前缀配置热更新
 
 - **Given** 同一 gateway owner 已为会话派生标记，随后配置 prefix 更新
 - **When** 旧 sessionId 与新 sessionId 分别发起 Anthropic 请求
 - **Then** 已见过的 sessionId 稳定使用缓存的原标记，新 sessionId 使用当前 prefix
+
 ### sessionId 缺失
 
-- **Given** Anthropic GenerateOptions 没有非空 sessionId
+- **Given** 官方 adapter 已授权、owner 活跃且开关开启，Anthropic 或满足其他注入条件的 Chat options 没有非空字符串 sessionId
 - **When** 请求经过已装饰的 streamSimple
-- **Then** 不新增派生标记，原 options 透传，并按模型告警一次
+- **Then** 不新增会话键，原 options 透传，并按实际 model.id 告警一次
 
 
 ### dispose 后旁路
 
 - **Given** gateway owner active 且原型和 Models 已装饰
 - **When** gateway fiber dispose
-- **Then** 后续请求不注入标记，已装饰 Models 同样旁路，官方 adapter 继续服务
+- **Then** 后续请求不注入 Anthropic 标记或 Chat 头，已装饰 Models 同样旁路，官方 adapter 继续服务
 
 ### 同进程重新启用
 
@@ -90,7 +114,7 @@
 - sweep 与 `llm/adapters-updated` listener 安装在 apply 中同步完成，中间不插入 await。
 - 只有 `llm.directory` 中 `settingsNs` 为官方 namespace 的 route 会被检查；对应 adapter registration 的 provider identity 必须与 route key 相同。
 - directory entry.provider 是实际 route key；不以 directory Map key 作为 adapter 查询值。
-- `llm.adapters` 或 `llm.directory` 不是 Map 时告警并退出，不改变官方插件注册面。
+- `llm.adapters` 不是 Map 时告警并退出 apply；`llm.directory` 不是 Map 时 sweep 返回零，仍监听后续 adapter 更新，初始 sweep 为零时记录无官方 adapter 告警。两种情况均不改变官方插件注册面。
 
 ## 验证
 
@@ -98,9 +122,9 @@
 
 ```sh
 npm test --prefix packages/dsh-llm-pi-gateway
-node scripts/compat/run.mjs --version 0.2.0-rc.2 --host-dir .compat/0.2.0-rc.2/dsh-host --work-root .compat/gateway-0.7.2-final-validation --only dsh-llm-pi-gateway --seed-gateway
+node scripts/compat/affinity-probe-3proto.mjs --host-dir .compat/0.2.1-rc.2/dsh-host
 ```
 
-第一条覆盖 decorator 单元行为，包括 owner 实例授权、route 移除后 owner 的持续区间、dispose 旁路和 reapply；不模拟 Cordis apply/fiber 和事件 listener 装配。第二条在 `.compat` 隔离 profile 验证 `--seed-gateway` echo fixture 注册、当前 chat turn 匹配 user 节点之后的 assistant-step 文本同时包含该轮 user message 与 fixture marker、response group 存在、composer 清空且 UI error/alert 文案为空、上游请求留档和 Anthropic 派生 marker，以上均是 full compat 阻塞条件；response group 不代表生成终态。DOM 当前没有稳定跨协议终态信号，因此完整文本 delta 后连接异常中断仍可能通过 UI 断言。此测试不触碰真实 `~/.dsh` profile，也不代表真实 provider 配置的全量契约；`consoleErrors` 与 `httpFailures` 仅供诊断。
+第一条覆盖协议注入、不可变构造、显式头优先、开关、owner 实例授权、route 移除后 owner 的持续区间、dispose 旁路与 reapply；不模拟 Cordis apply/fiber 和 listener 装配。第二条需要先安装该版本的隔离宿主，通过真实官方 PiAiAdapter 与 Models，使用手工构造的 provider fixture 向新起的 echo-upstream 实例发送请求，严格断言三协议成功流终态、会话稳定与隔离及 Chat 主要退出条件；它不覆盖 Cordis 装配或 GUI。
 
-隔离 compat 测试仅由 runner 启用 echo simulator 的 `--echo-user-message`；该开关覆盖 default OpenAI 与 Anthropic 的流式及非流式回复，用于使当前轮 fixture 文本可判定。Responses、think/tool 与公共 echo CLI 默认保持固定内容。
+GUI 隔离测试与断言边界见 `兼容性测试.md`。Compat runner 的 UI roundtrip 断言覆盖当前 user 对应的 fixture 回复文本已渲染、response group 存在、composer 清空且 UI error/alert 为空；DOM 没有稳定跨协议终态信号，因此此项不证明生成流完整终止。runner 专用 `--echo-user-message` 仅在 default Chat/Anthropic 回复附带该轮 user 文本，Responses、think/tool 与公共 CLI 默认保持固定内容。全部 AI 自测使用隔离数据与新起的模拟器，不操作生产 profile。

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles, missingBridgeDeps} from '../scripts/aggregate-tests.mjs'
+import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseChangedPackages, filterTestFiles, missingBridgeDeps, nodeFlagsFromTestScript, applicableTestFiles} from '../scripts/aggregate-tests.mjs'
 
 /**
  * aggregate-tests.mjs CI 全量测试聚合
@@ -16,6 +16,8 @@ import {namesFromLogs, unitFailCount, discoverUnits, runUnits, parseArgs, parseC
  *   5. 混合单元 -> 通过单元日志删,失败单元日志留
  *   6. 单元发现 -> 冒烟 + 仓库根测试 + 含 test 目录的包,顺序确定
  *   7. spawn 失败 -> 仍按失败计数,日志留错误锚点,与"跑了但失败"可区分
+ *   8. 包 test script 的 node 运行参数(--test 前段)-> "node " 开头且 flag/值成对合法才透传
+ *      进单元命令,其余形态(裸 node --test / 自定义 runner / 裸值 / 缺 --test)-> 空数组回退默认命令
  */
 
 const repo = join(import.meta.dirname, '..')
@@ -144,6 +146,71 @@ test('runUnits_双流输出_同一日志完整留痕', async t => {
   const logText = readFileSync(join(logDir, 'dual-1.log'), 'utf8')
   assert.ok(logText.includes('stderr-mark'), 'stderr 须进日志')
   assert.ok(logText.includes('stdout-mark'), 'stdout 须进日志')
+})
+
+test('nodeFlagsFromTestScript_实验flag桩预载_整段透传', () => {
+  const script = 'node --experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs --test "test/*.test.mjs"'
+  assert.deepEqual(nodeFlagsFromTestScript(script), ['--experimental-test-module-mocks', '--import', './test/_mocks.common-tools.mjs'])
+})
+
+test('nodeFlagsFromTestScript_回退矩阵_非白名单形态一律空数组', () => {
+  assert.deepEqual(nodeFlagsFromTestScript('node --test "test/*.test.mjs"'), [])
+  assert.deepEqual(nodeFlagsFromTestScript('npm test'), [])
+  assert.deepEqual(nodeFlagsFromTestScript('node test/run.mjs'), [])
+  assert.deepEqual(nodeFlagsFromTestScript('node --import ./x.mjs "test/*.test.mjs"'), [])
+  assert.deepEqual(nodeFlagsFromTestScript('node test/setup.mjs --test "test/*.test.mjs"'), [])
+  assert.deepEqual(nodeFlagsFromTestScript('node --a v1 裸值 --test "g"'), [])
+  // 引号出现在锚点前段 -> 不做引号解析,整段回退(防引号值内的 --test 被截断成假绿)
+  assert.deepEqual(nodeFlagsFromTestScript('node --import "./a b.mjs" --test "g"'), [])
+  assert.deepEqual(nodeFlagsFromTestScript(undefined), [])
+})
+
+test('nodeFlagsFromTestScript_边界锚定与空白等价_按 shell 语义采纳', () => {
+  // script 以 --test 结尾(无尾随空格):词边界锚定仍命中,已有 flag 不被静默丢弃
+  assert.deepEqual(nodeFlagsFromTestScript('node --flag --test'), ['--flag'])
+  // 连续空格在 token 间:过滤空 token 后与单空格等价(shell 分词语义)
+  assert.deepEqual(nodeFlagsFromTestScript('node  --flag v --test g'), ['--flag', 'v'])
+  assert.deepEqual(nodeFlagsFromTestScript('node --flag  --test g'), ['--flag'])
+})
+
+test('nodeFlagsFromTestScript_flag带独立值_成对透传', () => {
+  assert.deepEqual(nodeFlagsFromTestScript('node --import ./x.mjs --test "test/*.test.mjs"'), ['--import', './x.mjs'])
+  assert.deepEqual(nodeFlagsFromTestScript('node --a v1 --b v2 --test "g"'), ['--a', 'v1', '--b', 'v2'])
+})
+
+test('discoverUnits_真实仓库_带桩包命令透传运行参数且文件仍由聚合器枚举', () => {
+  const units = discoverUnits(repo)
+  const tunnel = units.find(u => u.name === 'dsh-tunnel')
+  assert.ok(tunnel, 'tunnel 单元应在列')
+  const i = tunnel.command.indexOf('--test')
+  assert.ok(i > 0, '命令须仍含 --test 文件枚举段')
+  const flags = tunnel.command.slice(1, i)
+  assert.deepEqual(flags, ['--experimental-test-module-mocks', '--import', './test/_mocks.common-tools.mjs'])
+  // 命令重排后文件段须与聚合器枚举结果同源(平台过滤 + test/ 前缀相对路径)
+  assert.deepEqual(tunnel.command.slice(i + 1), applicableTestFiles(join(repo, 'packages', 'dsh-tunnel'), 'test'))
+})
+
+test('discoverUnits_真实仓库_裸script包命令与默认形态逐字节同旧', () => {
+  const rs = discoverUnits(repo).find(u => u.name === 'dsh-rs-workflow')
+  assert.ok(rs, 'rs-workflow 单元应在列')
+  assert.deepEqual(rs.command[1], '--test')
+  assert.ok(!rs.command.some(arg => arg === '--experimental-test-module-mocks'))
+})
+
+test('discoverUnits_清单缺失或畸形_回退默认命令不崩红', t => {
+  const root = tempDir(t, 'agg-script-')
+  for (const name of ['pkg-bad', 'pkg-missing']) {
+    mkdirSync(join(root, 'packages', name, 'test'), {recursive: true})
+    writeFileSync(join(root, 'packages', name, 'test', 'a.test.mjs'), '')
+  }
+  writeFileSync(join(root, 'packages', 'pkg-bad', 'package.json'), '{oops')
+  mkdirSync(join(root, 'tests'), {recursive: true})
+  const units = discoverUnits(root)
+  for (const name of ['pkg-bad', 'pkg-missing']) {
+    const unit = units.find(u => u.name === name)
+    assert.ok(unit, `${name} 单元应在列`)
+    assert.deepEqual(unit.command[1], '--test')
+  }
 })
 
 test('discoverUnits_真实仓库_冒烟与仓库根测试在列且顺序稳定', () => {

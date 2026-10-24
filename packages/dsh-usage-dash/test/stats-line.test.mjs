@@ -1,4 +1,4 @@
-// 底部信息栏增强纯函数层测试:官方 StatsLine 口径(dsh-client-ui-chat 同构)+ usp 双开关状态
+// 底部信息栏 append 条目纯函数层测试:官方 pill 数据后追加增强项 + usp 双开关状态
 // Given/When/Then 场景内嵌于用例描述
 // client.js 为经典 script bundle(禁 import/export),整文件 IIFE 书挡;经 client-eval 剥壳后整源求值,按顶层声明名收集
 import { test } from 'node:test'
@@ -12,24 +12,16 @@ const {
   MESSAGES_EN,
   MESSAGES_ZH,
   billedInputTokens,
-  roundedPercentUnits,
-  displayPercentUnits,
-  formatCacheHitPercent,
-  cacheHitPercent,
   cacheHitPercentPrecise,
   formatTokensCompact,
   formatDuration,
   formatTokensPerSecond,
-  assistantStepReading,
-  deriveStats,
-  buildStatsGroups,
   buildCostItem,
   createStatsLineState,
   createTranslator,
 } = core
 
 const USAGE = { uncachedInputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 0, outputTokens: 500 }
-const STATS = { turns: 2, steps: 3, llmMs: 1500, toolMs: 2000, ttftMs: 200, ttftSteps: 1, decodeMs: 800, decodeTokens: 50 }
 const PREFS_OFF = { cachePrecision: false, tokenDetail: false, costDisplay: false }
 const PREFS_COST_ON = { cachePrecision: false, tokenDetail: false, costDisplay: true }
 const zhT = createTranslator(MESSAGES_ZH)
@@ -54,20 +46,13 @@ function fakeStorage(initial = {}) {
   }
 }
 
-test('stats 词典 zh 关键值逐字节对齐官方,en 族逐字节取官方 chat', () => {
+test('stats 词典关键值逐字节,en 族逐字节', () => {
   assert.equal(STATS_LINE_STORAGE_KEY, 'dsh-usage-dash:stats-line')
-  assert.equal(MESSAGES_ZH['stats.counts'], '{turns} 轮 · {steps} 步')
-  assert.equal(MESSAGES_ZH['stats.llm'], 'LLM {duration}')
-  assert.equal(MESSAGES_ZH['stats.toolCall'], '工具调用 {duration}')
-  assert.equal(MESSAGES_ZH['stats.ttftAverage'], '首 token 平均 {duration}')
-  assert.equal(MESSAGES_ZH['stats.tokensPerSecond'], '{throughput} tok/s')
-  assert.equal(MESSAGES_ZH['stats.cacheHit'], '缓存命中 {percent}%')
   assert.equal(MESSAGES_ZH['stats.tokens'], '输入 {input} tok · 输出 {output} tok')
-  assert.equal(MESSAGES_ZH['stats.tokensDetail'], '总 {total} tok · 输入 {input} tok · 命中缓存 {hit} tok · 未命中缓存 {miss} tok · 输出 {output} tok')
   assert.equal(MESSAGES_ZH.cachePrecision, '精确缓存命中率')
-  assert.equal(MESSAGES_ZH.cachePrecisionDesc, '在会话底部信息栏以两位小数显示缓存命中率。')
+  assert.equal(MESSAGES_ZH.cachePrecisionDesc, '将官方用量胶囊及弹窗中的命中率显示为两位小数。')
   assert.equal(MESSAGES_ZH.tokenDetail, '会话 Token 明细')
-  assert.equal(MESSAGES_ZH.tokenDetailDesc, '在会话底部信息栏显示总 Token、命中/未命中缓存与输出明细。')
+  assert.equal(MESSAGES_ZH.tokenDetailDesc, '在官方 Token 用量弹窗末尾追加含缓存输入合计；存在缓存写入时追加未命中合计。')
   assert.equal(MESSAGES_ZH['stats.cost'], '费用 ≈ {cost}')
   assert.equal(MESSAGES_ZH.costDisplay, '费用显示')
   assert.equal(MESSAGES_EN['stats.cost'], 'Cost ≈ {cost}')
@@ -76,14 +61,6 @@ test('stats 词典 zh 关键值逐字节对齐官方,en 族逐字节取官方 ch
   assert.equal(MESSAGES_ZH['duration.compactMinutes'], '{minutes}分{seconds}秒')
   assert.equal(MESSAGES_ZH['number.thousand'], '{value}K')
   assert.equal(MESSAGES_ZH['number.million'], '{value}M')
-  assert.equal(MESSAGES_EN['stats.counts'], '{turns} turns · {steps} steps')
-  assert.equal(MESSAGES_EN['stats.llm'], 'LLM {duration}')
-  assert.equal(MESSAGES_EN['stats.toolCall'], 'Tool call {duration}')
-  assert.equal(MESSAGES_EN['stats.ttftAverage'], 'TTFT avg {duration}')
-  assert.equal(MESSAGES_EN['stats.tokensPerSecond'], '{throughput} tok/s')
-  assert.equal(MESSAGES_EN['stats.cacheHit'], 'Cache hit {percent}%')
-  assert.equal(MESSAGES_EN['stats.tokens'], 'Input {input} tok · Output {output} tok')
-  assert.equal(MESSAGES_EN['stats.tokensDetail'], 'Total {total} tok · Input {input} tok · Cache hit {hit} tok · Cache miss {miss} tok · Output {output} tok')
   assert.equal(MESSAGES_EN['duration.compactSeconds'], '{seconds}s')
   assert.equal(MESSAGES_EN['duration.compactMinutes'], '{minutes}m{seconds}s')
   assert.equal(MESSAGES_EN['number.thousand'], '{value}K')
@@ -93,46 +70,6 @@ test('stats 词典 zh 关键值逐字节对齐官方,en 族逐字节取官方 ch
 test('billedInputTokens 为三个互斥 prompt 桶之和', () => {
   assert.equal(billedInputTokens(USAGE), 5000)
   assert.equal(billedInputTokens({ uncachedInputTokens: 100, cacheReadTokens: 200, cacheWriteTokens: 300, outputTokens: 0 }), 600)
-})
-
-test('roundedPercentUnits 整数位 0.5 进位', () => {
-  // 125*100/200 = 62.5 → 63(0.5 进位,非银行家舍入)
-  assert.equal(roundedPercentUnits(125, 200, 0), 63)
-  assert.equal(roundedPercentUnits(75, 100, 0), 75)
-  assert.equal(roundedPercentUnits(999946, 1000000, 0), 100)
-})
-
-test('roundedPercentUnits 十分位单位 0.5 进位', () => {
-  // 755*1000/1000 = 755 个十分位 → 755('75.5')
-  assert.equal(roundedPercentUnits(755, 1000, 1), 755)
-  assert.equal(roundedPercentUnits(125, 200, 1), 625)
-})
-
-test('displayPercentUnits 按小数位渲染,十分位为 0 时省略小数点', () => {
-  assert.equal(displayPercentUnits(75, 0), '75')
-  assert.equal(displayPercentUnits(805, 1), '80.5')
-  assert.equal(displayPercentUnits(800, 1), '80')
-})
-
-test('formatCacheHitPercent 无分母为 null,无 miss 为 100', () => {
-  assert.equal(formatCacheHitPercent(100, 0, 0), null)
-  assert.equal(formatCacheHitPercent(100, 100, 0), '100')
-})
-
-test('formatCacheHitPercent 整数位四舍五入', () => {
-  assert.equal(formatCacheHitPercent(75, 100), '75')
-  assert.equal(formatCacheHitPercent(125, 200), '63')
-  assert.equal(formatCacheHitPercent(52, 100), '52')
-})
-
-test('formatCacheHitPercent 溢出 100 时闭式构造 99.x', () => {
-  assert.equal(formatCacheHitPercent(999946, 1000000), '99.99')
-  assert.equal(formatCacheHitPercent(99995, 100000), '99.995')
-})
-
-test('cacheHitPercent 官方整数口径与空数据 null', () => {
-  assert.equal(cacheHitPercent(USAGE), '80')
-  assert.equal(cacheHitPercent({ uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 500 }), null)
 })
 
 test('cacheHitPercentPrecise 恒两位小数且 99.99 封顶', () => {
@@ -161,123 +98,6 @@ test('formatTokensPerSecond 钳负值且阈值上下分别取整', () => {
   assert.equal(formatTokensPerSecond(9.96), '10')
   assert.equal(formatTokensPerSecond(150), '150')
   assert.equal(formatTokensPerSecond(3.24), '3.2')
-})
-
-test('assistantStepReading 时间戳齐全时产出 TTFT/decode/输出 token', () => {
-  assert.deepEqual(
-    assistantStepReading({ timing: { stepStartTime: 1000, firstTokenTime: 1200, completedTime: 2000 }, usage: 50 }),
-    { ttftMs: 200, decodeMs: 800, outputTokens: 50 },
-  )
-})
-
-test('assistantStepReading 负时长钳 0 且非法 usage 为 null', () => {
-  // completedTime 早于 firstTokenTime → decode 钳 0
-  assert.deepEqual(
-    assistantStepReading({ timing: { stepStartTime: 1000, firstTokenTime: 2000, completedTime: 1500 }, usage: 30 }),
-    { ttftMs: 1000, decodeMs: 0, outputTokens: 30 },
-  )
-  assert.equal(assistantStepReading({ timing: { stepStartTime: 0, firstTokenTime: 100, completedTime: 200 }, usage: 'oops' }).outputTokens, null)
-  assert.equal(assistantStepReading({ timing: { stepStartTime: 0, firstTokenTime: 100, completedTime: 200 }, usage: -1 }).outputTokens, null)
-  assert.equal(assistantStepReading({ timing: { stepStartTime: 0, firstTokenTime: 100, completedTime: 200 }, usage: Number.NaN }).outputTokens, null)
-})
-
-test('assistantStepReading 无 timing 时读数双 null', () => {
-  assert.deepEqual(assistantStepReading({ usage: 50 }), { ttftMs: null, decodeMs: null, outputTokens: 50 })
-})
-
-test('deriveStats 折叠窗口节点:轮次去重/负值钳制/读数按有值步聚合', () => {
-  // When:混合 tool-result 与 assistant(含 turn 重复、stepStart null、firstToken null、非法 usage)
-  const nodes = [
-    { kind: 'user' },
-    { kind: 'tool-result', time: 5000, callTime: 3000 },
-    { kind: 'tool-result', time: 1000, callTime: 3000 },
-    { kind: 'tool-result', time: 9000, callTime: null },
-    { kind: 'assistant', turn: 1, timing: { stepStartTime: 1000, firstTokenTime: 1200, completedTime: 2000 }, usage: 50 },
-    { kind: 'assistant', turn: 1, timing: { stepStartTime: null, firstTokenTime: 1300, completedTime: 2100 }, usage: 10 },
-    { kind: 'assistant', turn: 2, timing: { stepStartTime: 3000, firstTokenTime: null, completedTime: 3500 }, usage: 30 },
-    { kind: 'assistant', turn: 3, timing: { stepStartTime: 4000, firstTokenTime: 4100, completedTime: 4600 }, usage: 'oops' },
-  ]
-  // Then:llm 1000+0+500+600;ttft 分母=有值 2 步;decode 只算时间戳与 usage 双全的步
-  assert.deepEqual(deriveStats(nodes), {
-    turns: 3,
-    steps: 4,
-    llmMs: 2100,
-    toolMs: 2000,
-    ttftMs: 300,
-    ttftSteps: 2,
-    decodeMs: 1600,
-    decodeTokens: 60,
-  })
-})
-
-test('deriveStats 空节点为零值统计', () => {
-  assert.deepEqual(deriveStats([]), { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 })
-})
-
-test('buildStatsGroups 双开关全关与官方行逐字节一致', () => {
-  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_OFF, zhT), [
-    '2 轮 · 3 步',
-    'LLM 1.5秒 · 工具调用 2秒',
-    '首 token 平均 0.2秒 · 63 tok/s',
-    '缓存命中 80%',
-    '输入 5K tok · 输出 500 tok',
-  ])
-})
-
-test('buildStatsGroups 传 en 翻译器输出官方 en 口径逐字节', () => {
-  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_OFF, enT), [
-    '2 turns · 3 steps',
-    'LLM 1.5s · Tool call 2s',
-    'TTFT avg 0.2s · 63 tok/s',
-    'Cache hit 80%',
-    'Input 5K tok · Output 500 tok',
-  ])
-})
-
-test('buildStatsGroups en 零命中率呈现 Cache hit 0%', () => {
-  const zeroHitStats = { turns: 2, steps: 3, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
-  const zeroHitUsage = { uncachedInputTokens: 4000, cacheReadTokens: 0, cacheWriteTokens: 1000, outputTokens: 0 }
-  assert.deepEqual(buildStatsGroups(zeroHitStats, zeroHitUsage, PREFS_OFF, enT), [
-    '2 turns · 3 steps',
-    'Cache hit 0%',
-    'Input 5K tok · Output 0 tok',
-  ])
-})
-
-test('buildStatsGroups tokenDetail 开关切换五项明细组', () => {
-  const groups = buildStatsGroups(STATS, USAGE, { cachePrecision: false, tokenDetail: true }, zhT)
-  assert.deepEqual(groups.slice(0, 4), [
-    '2 轮 · 3 步',
-    'LLM 1.5秒 · 工具调用 2秒',
-    '首 token 平均 0.2秒 · 63 tok/s',
-    '缓存命中 80%',
-  ])
-  assert.equal(groups[4], '总 5.5K tok · 输入 5K tok · 命中缓存 4K tok · 未命中缓存 1K tok · 输出 500 tok')
-})
-
-test('buildStatsGroups cachePrecision 开关切精确命中率', () => {
-  const groups = buildStatsGroups(STATS, USAGE, { cachePrecision: true, tokenDetail: false }, zhT)
-  assert.equal(groups[3], '缓存命中 80.00%')
-})
-
-test('buildStatsGroups usage 缺席时命中与 Token 组整体缺席', () => {
-  assert.deepEqual(buildStatsGroups(STATS, undefined, PREFS_OFF, zhT), [
-    '2 轮 · 3 步',
-    'LLM 1.5秒 · 工具调用 2秒',
-    '首 token 平均 0.2秒 · 63 tok/s',
-  ])
-})
-
-test('buildStatsGroups 无步进且用量空为空数组', () => {
-  const zeroStats = { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
-  const zeroUsage = { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
-  assert.deepEqual(buildStatsGroups(zeroStats, zeroUsage, PREFS_OFF, zhT), [])
-})
-
-test('buildStatsGroups 仅输出时命中率组因 null 丢弃', () => {
-  const zeroStats = { turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
-  const usage = { uncachedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 500 }
-  assert.deepEqual(buildStatsGroups(zeroStats, usage, PREFS_OFF, zhT), ['输入 0 tok · 输出 500 tok'])
 })
 
 test('createStatsLineState 默认三开,非法 JSON 回落三开,显式 false 才视为关', () => {
@@ -334,15 +154,8 @@ test('createStatsLineState 写入失败仅丢持久化,内存仍生效', () => {
 
 // —— S14 费用组(buildCostItem) ——
 
-test('buildCostItem 开关关恒为 null,组数组不受 rules 影响', () => {
+test('buildCostItem 开关关恒为 null', () => {
   assert.equal(buildCostItem(COST_USAGE, COST_RULES, PREFS_OFF, zhT, COST_NOW), null)
-  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_OFF, zhT, COST_RULES), [
-    '2 轮 · 3 步',
-    'LLM 1.5秒 · 工具调用 2秒',
-    '首 token 平均 0.2秒 · 63 tok/s',
-    '缓存命中 80%',
-    '输入 5K tok · 输出 500 tok',
-  ])
 })
 
 test('buildCostItem routes 缺席按全通配规则匹配,符号取全局口径(首个非空货币)', () => {
@@ -376,24 +189,22 @@ test('buildCostItem usage 缺席为 null', () => {
   assert.equal(buildCostItem(undefined, COST_RULES, PREFS_COST_ON, zhT, COST_NOW), null)
 })
 
-test('buildCostItem buildStatsGroups 费用组符号同全局口径', () => {
-  // USAGE 无 routes → 通配价 input 1:1000 × 1 / 每百万 = 0.001 → 四位小数微观格式;符号取首个非空 ¥
-  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_COST_ON, zhT, COST_RULES), [
-    '2 轮 · 3 步',
-    'LLM 1.5秒 · 工具调用 2秒',
-    '首 token 平均 0.2秒 · 63 tok/s',
-    '缓存命中 80%',
-    '输入 5K tok · 输出 500 tok',
-    '费用 ≈ ¥0.0010',
-  ])
+test('dock 注册 append 契约:order 排官方 pill(activity 0/usage 1)之后,条目只消费 useProjection', () => {
+  assert.ok(CLIENT_BODY.includes("id: 'stats', order: 2, priority: STATS_SLOT_PRIORITY"))
+  assert.ok(CLIENT_BODY.includes('StatsLineAppended({ useProjection, t = defaultT })'))
+  assert.ok(!CLIENT_BODY.includes("useProjection('sessionStats')"))
+  assert.ok(!CLIENT_BODY.includes('deriveStats'))
 })
 
-test('buildStatsGroups 开+无价不追加费用组', () => {
-  assert.deepEqual(buildStatsGroups(STATS, USAGE, PREFS_COST_ON, zhT, null), [
-    '2 轮 · 3 步',
-    'LLM 1.5秒 · 工具调用 2秒',
-    '首 token 平均 0.2秒 · 63 tok/s',
-    '缓存命中 80%',
-    '输入 5K tok · 输出 500 tok',
-  ])
+test('dock append 条目布局契约:官方 pill 满宽不受挤压,空间不足时增强条目先让位', () => {
+  // 失效方式:回退为整行 width:100% 或去掉让位收缩/截断,官方胶囊被压缩或被溢出文本遮挡(独立环境实测 147→96px)
+  const rule = CLIENT_BODY.match(/\.ud-statsline-root\{[^}]*\}/)?.[0]
+  assert.ok(rule, '存在 .ud-statsline-root 规则')
+  assert.ok(!/(^|[^-a-z])width:100%/.test(rule), '不再整行占满,dock 内为并列条目')
+  assert.ok(!rule.includes('--dsh-composer-side-clearance'), '不再沿用整行侧边距')
+  assert.ok(rule.includes('flex:0 999 auto'), '高收缩因子锁定,空间不足时先收缩自身,挤压亏损不由官方 pill 承担')
+  assert.ok(rule.includes('padding:0;'), '费用收缩到零时不留下固定内边距挤压官方胶囊')
+  assert.ok(rule.includes('margin-left:calc(0px - var(--ud-dock-gap,0px))') && rule.includes('text-indent:var(--ud-dock-gap,0px)'), '抵消新增 flex gap，文字缩进提供可收缩间距')
+  assert.ok(rule.includes('min-width:0'), '允许收缩到零')
+  assert.ok(rule.includes('overflow:hidden') && rule.includes('white-space:nowrap') && rule.includes('text-overflow:ellipsis'), '收缩残态截断三件套在位,溢出不遮挡官方 pill')
 })

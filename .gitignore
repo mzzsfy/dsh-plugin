@@ -8,4 +8,7 @@ node_modules/
 *-lock.*
 
 .worktrees/
-/docs
+/docs/*
+!/docs/兼容性测试/
+/docs/兼容性测试/*
+!/docs/兼容性测试/浏览器工具会话隔离.md

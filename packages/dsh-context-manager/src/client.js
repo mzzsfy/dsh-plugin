@@ -1,7 +1,8 @@
-// dsh-context-manager Client 半区:「插件」设置页可配置卡片(六启停开关)
+// dsh-context-manager Client 半区:「插件」设置页可配置卡片(七启停开关)
 // + 历史输入浮层(Alt+↑ 或输入框工具排按钮唤起,范围导航/搜索/收藏回填)
 // + 插话撤回 + 对话 fork
-// + 标题栏复制 sessionId(悬停显隐)。
+// + 标题栏复制 sessionId(悬停显隐)
+// + 克隆仓库打开工作区(官方浏览目录弹窗注入按钮,git clone 后自动打开新工作区)。
 // 历史输入挂官方 conversation.input.dock 插槽(渲染为零高度锚点),回填走宿主公共
 // 契约 inputActions.setDraft;插话撤回为投影驱动的自绘撤回行(订阅 inbox face);
 // fork 注入消息气泡操作排,分叉到该轮之前并把该轮用户输入回填子会话输入框(重试
@@ -27,11 +28,11 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-toast 可选消费(占位条目全仓唯一,由
+    // 通知出口:公共依赖 @mzzsfy/dsh-change-bus 可选消费(占位条目全仓唯一,由
     // dsh-session-manager 代挂;模块表缺失或导出缺 show 即通知通道置空)
     let toast = () => {}
     try {
-      toast = require('@mzzsfy/dsh-toast/client').show || (() => {})
+      toast = require('@mzzsfy/dsh-change-bus/client').toast.show || (() => {})
     } catch {
       toast = () => {}
     }
@@ -160,6 +161,32 @@ const CSS = [
   '.cx-sid:focus-visible { outline:2px solid #1677ff; outline-offset:1px; }',
   '[class*="_header"]:has(.cx-sid):hover .cx-sid, [class*="_header"]:has(.cx-sid):focus-within .cx-sid { opacity:1; }',
   '@media (prefers-reduced-motion: reduce) { .cx-sid { transition:none; } }',
+  // 克隆仓库弹窗:官方浏览目录弹窗之上的自绘覆盖层,视觉基线取 cx-hist 浮层
+  // (不透明实底 + 宿主同款卡片投影,dsw alias 变量在宿主为空不可依赖)
+  '.cx-clone-overlay { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;',
+  '  background:rgba(0,0,0,.35); }',
+  '.cx-clone { width:min(460px, calc(100vw - 32px)); display:flex; flex-direction:column; gap:10px; padding:18px;',
+  '  border-radius:14px; color-scheme:light dark; color:light-dark(#0f1115, #e8eaed);',
+  '  background:light-dark(#fff, #1e1f22);',
+  '  box-shadow:0 0 0 0.5px light-dark(rgba(15,17,21,.18), rgba(255,255,255,.14)), 0 4px 16px rgba(0,0,0,.08), 0 16px 48px rgba(0,0,0,.16); }',
+  '.cx-clone__title { margin:0; font-size:15px; font-weight:600; }',
+  '.cx-clone__field { display:flex; flex-direction:column; gap:4px;',
+  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55)); }',
+  '.cx-clone__input { border:1px solid light-dark(rgba(15,17,21,.14), rgba(255,255,255,.18)); border-radius:8px;',
+  '  padding:6px 10px; font:var(--dsw-font-s-14, 14px/22px sans-serif); color:inherit; background:transparent; }',
+  '.cx-clone__input:focus { outline:2px solid #1677ff; outline-offset:-1px; }',
+  '.cx-clone__input:disabled { opacity:.5; }',
+  '.cx-clone__switch { margin-top:0; }',
+  '.cx-clone__status { min-height:18px; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
+  '  color:light-dark(rgba(15,17,21,.55), rgba(232,234,237,.55)); white-space:pre-wrap; word-break:break-all; }',
+  '.cx-clone__status--error { color:#e5484d; }',
+  '.cx-clone__actions { display:flex; justify-content:flex-end; gap:8px; }',
+  '.cx-clone__btn { appearance:none; border:0; cursor:pointer; padding:6px 14px; border-radius:8px;',
+  '  font:var(--dsw-font-s-14, 14px/22px sans-serif); font-weight:600;',
+  '  color:#fff; background:#1677ff; }',
+  '.cx-clone__btn:disabled { opacity:.5; cursor:default; }',
+  '.cx-clone__btn--ghost { color:inherit; background:light-dark(rgba(15,17,21,.06), rgba(255,255,255,.08)); }',
+  '.cx-clone__btn--ghost:hover { background:light-dark(rgba(15,17,21,.1), rgba(255,255,255,.14)); }',
 ].join('\n')
 
 const INPUTS_URL = '/api/context/inputs'
@@ -170,6 +197,8 @@ const STEER_ENABLED_URL = '/api/context/steer-recall-enabled'
 const FORK_ENABLED_URL = '/api/context/fork-enabled'
 const FORK_AUTO_RESEND_URL = '/api/context/fork-auto-resend-enabled'
 const COPY_SID_ENABLED_URL = '/api/context/copy-sid-enabled'
+const CLONE_ENABLED_URL = '/api/context/clone-enabled'
+const CLONE_API_URL = '/api/context/git-clone'
 
 // 请求默认超时:host 被批量解压等同步任务阻塞时路由会迟滞数秒,
 // 无超时则浮层停在「正在读取…」假死;超时按错误抛出,由调用方兜底,
@@ -1302,6 +1331,7 @@ const STEER_SWITCH_TITLE = '未应用插话气泡的操作排显示撤回图标(
 const FORK_SWITCH_TITLE = '消息气泡操作排显示分叉按钮,点击分叉出新会话到该轮之前(该轮不带入子会话),该轮的用户输入自动回填子会话输入框供编辑重发,子会话自动打开且标题尾号递增;进行中的轮(回复尚未完成)同样可分叉,分叉后自动停止本会话该轮未完成的回复;首轮(无更早上下文可继承,新建会话即为同义操作)与无文本输入的轮(纯图等,无从重发)不注入;停用即不再注入,刷新页面生效。'
 const FORK_AUTO_RESEND_SWITCH_TITLE = '分叉成功后自动把该轮原输入发送到子会话立即开跑(重生成语义,相当于原输入重跑一遍);关闭时分叉仅把原输入回填子会话输入框,由你编辑后再手动发送。'
 const COPY_SID_SWITCH_TITLE = '会话标题栏显示复制 sessionId 按钮,平时隐藏,鼠标移到标题栏任意位置时显示,点击复制当前会话 id 到剪贴板(便于粘贴给他人排查或脚本引用);关闭后按钮整体不渲染,刷新页面生效。'
+const CLONE_SWITCH_TITLE = '官方「添加工作区」浏览目录弹窗内显示「克隆仓库…」按钮:输入远程仓库地址,克隆到弹窗当前所选目录(或记忆/手填的父目录)并自动打开为新工作区,空会话立即可发消息;私有仓库使用 git 自身凭据;关闭后按钮不再注入,刷新页面生效。'
 
 // 复制动作(纯函数,剪贴板与文档依赖注入):clipboard.writeText 优先,缺失或
 // 抛错(LAN http 非安全上下文无 navigator.clipboard)回退隐藏文本域 execCommand;
@@ -1358,6 +1388,477 @@ function CopySidButton({ sessionId }) {
   )
 }
 
+// ── 克隆仓库打开工作区:官方「添加工作区」浏览目录弹窗内注入「克隆仓库…」按钮 ──
+// IDEA "Get from VCS" 同构:按钮点击读取弹窗当前目录为父目录,自绘弹窗收集
+// 仓库地址/目录名/浅克隆,宿主 git clone 成功后 workspaces.create +
+// uiWorkspace.startSession 直接落入新工作区空会话。
+
+const CLONE_BTN_FLAG = 'data-cx-clone-trigger'
+// 工作区 header 常驻克隆入口:官方「添加工作区」按钮旁。浏览弹窗的打开依赖
+// web-startup-auth 环境组合,未装时基座按钮无反应,此按钮为独立可用入口
+// (生产有 auth 环境同为快捷入口,行为一致不做环境探测)
+const HEADER_CLONE_BTN_FLAG = 'data-cx-clone-header-btn'
+const HEADER_CLONE_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M4 2v8"/><circle cx="12" cy="4" r="2"/><circle cx="4" cy="12" r="2"/><path d="M12 6a6 6 0 0 1-6 6"/></svg>'
+// 官方浏览目录弹窗识别:含面包屑导航(role=navigation)的 dialog 卡片即唯一;
+// 新建文件夹子弹窗无导航,天然排除
+const BROWSE_NAV_SELECTOR = '[role="dialog"]'
+// 父目录与浅克隆偏好记忆:localStorage,读写全吞异常(隐私模式可能拒绝)
+const CLONE_PARENT_MEMORY_KEY = 'cxCloneParent'
+const CLONE_SHALLOW_MEMORY_KEY = 'cxCloneShallow'
+// 弹窗与 Escape 竞态:捕获阶段吃掉弹窗打开期的 Escape,防官方浏览弹窗同时被关
+const CLONE_SCAN_WINDOW_MS = 5 * 1000
+const CLONE_SCAN_LIMIT = 2000
+
+// 目录名推导镜像(与 clone.mjs deriveRepoName 同步维护,parity 测试锁定):
+// https(s)/ssh/git 协议取路径尾段,git@host:path scp 语法取冒号后尾段,
+// 去 .git 后缀;推导不出非空名返回 null,由弹窗要求手填
+function deriveRepoNameClient(rawUrl) {
+  const url = String(rawUrl ?? '').trim()
+  if (url === '') return null
+  let tail = url
+  const scp = /^git@[^:]+:(.+)$/.exec(url)
+  if (scp) tail = scp[1]
+  else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) tail = url.slice(url.indexOf('://') + 3)
+  tail = tail.replace(/\/+$/, '')
+  const name = tail.split('/').pop().replace(/\.git$/i, '').trim()
+  return name === '' || name === '.' || name === '..' ? null : name
+}
+
+// 读取浏览弹窗当前目录:点击官方「编辑路径」按钮切到输入态,轮询读完整路径。
+// 代价与边界(实测锁定):合成 Escape 在 portal 内到不了 React 面但会触发官方
+// Modal 的 document 级监听——还原动作必然把浏览弹窗整体收起,故读取即收起,
+// 克隆弹窗随后顶上;读取失败(按钮缺失/输入态未渲染)返回 null,由调用方回退
+// 记忆值。poll 注入便于测试
+async function readBrowseCurrentPath(card, doc, { poll = defaultPoll } = {}) {
+  try {
+    const crumbBar = card.querySelector('[role="navigation"]').parentElement
+    const editZone = crumbBar.querySelector('button[class*="_crumbEditZone"]')
+    if (!editZone || editZone.disabled) return null
+    editZone.click()
+    const pathInput = await poll(() => crumbBar.querySelector('input'))
+    if (!pathInput) return null
+    const value = pathInput.value
+    try {
+      pathInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    } catch {
+      // 测试环境无 KeyboardEvent;浏览器内该派发必然收起官方弹窗(函数头注释)
+    }
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+  } catch {
+    return null
+  }
+}
+
+// 轮询默认实现:30ms 步进,上限 600ms(后台标签 rAF 被节流,不可用)
+function defaultPoll(query) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const tick = () => {
+      const found = query()
+      if (found || Date.now() - startedAt > 600) {
+        resolve(found)
+        return
+      }
+      setTimeout(tick, 30)
+    }
+    tick()
+  })
+}
+
+// 官方浏览目录弹窗寻卡:含面包屑的 dialog 卡片
+function findBrowseDialog(doc) {
+  for (const card of doc.querySelectorAll(BROWSE_NAV_SELECTOR)) {
+    if (card.querySelector('[role="navigation"]')) return card
+  }
+  return null
+}
+
+// 弹窗 footer 定位:面包屑向上走到卡片直子(editorScope),其末子 div 即
+// footerBar;打开按钮=末个 button,取消按钮=其前一个兄弟 button。
+// 结构不符返回 null(官方改版时整体静默跳过,干净禁用)
+function findBrowseFooter(card) {
+  let scope = card.querySelector('[role="navigation"]')
+  if (!scope) return null
+  while (scope.parentElement && scope.parentElement !== card) scope = scope.parentElement
+  if (scope.parentElement !== card) return null
+  const footer = scope.lastElementChild
+  if (!footer || !footer.querySelectorAll || footer.querySelectorAll('button').length < 3) return null
+  const openButton = footer.querySelector('button:last-of-type')
+  if (!openButton) return null
+  const previous = openButton.previousElementSibling
+  const cancelButton = previous && previous.tagName === 'BUTTON' ? previous : null
+  return { footer, openButton, cancelButton }
+}
+
+// 幂等注入:未注入时克隆取消按钮类名(outline 形态)创建,置于打开按钮之前;
+// 已注入时同步 disabled 镜像(镜像打开按钮:loading/拖拽态/无目标目录同样不可克隆)
+function ensureCloneButton(doc, footerParts, onOpen) {
+  const existing = footerParts.footer.querySelector('[' + CLONE_BTN_FLAG + ']')
+  if (existing) {
+    // 条件写入:disabled 无变化不落属性,防「观察→写属性→再观察」变异环
+    const next = footerParts.openButton.disabled
+    if (existing.disabled !== next) {
+      existing.disabled = next
+      return true
+    }
+    return false
+  }
+  const button = doc.createElement('button')
+  button.type = 'button'
+  button.setAttribute(CLONE_BTN_FLAG, '')
+  button.className = footerParts.cancelButton ? footerParts.cancelButton.className : footerParts.openButton.className
+  button.textContent = '克隆仓库…'
+  button.title = '输入远程仓库地址,克隆到当前所选目录并打开为新工作区'
+  button.disabled = footerParts.openButton.disabled
+  button.addEventListener('click', onOpen)
+  footerParts.footer.insertBefore(button, footerParts.openButton)
+  return true
+}
+
+// header 常驻克隆入口:悬浮定位在官方「添加工作区」按钮右侧。必须挂 body——
+// 插进 headerActions 会被基座 React 重渲染反复卸载,注入→卸载→再注入自激成
+// 变异风暴(隔离环境实测);body 直挂节点 React 管不到,位置校正用条件写
+// (值不变不落样式),稳态零变异
+function ensureHeaderCloneButton(doc, onOpen, allowed) {
+  const existing = doc.querySelector('[' + HEADER_CLONE_BTN_FLAG + ']')
+  const addBtn = doc.querySelector('button[aria-label=添加工作区]')
+  if (allowed === false) {
+    // auth 在场:header 保持官方布局,隐藏(而非移除)已注入按钮,状态翻转可复显
+    if (!existing) return false
+    if (existing.style.display !== 'none') { existing.style.display = 'none'; return true }
+    return false
+  }
+  if (!addBtn || !addBtn.parentElement) {
+    if (!existing) return false
+    if (existing.style.display !== 'none') existing.style.display = 'none'
+    return true
+  }
+  if (existing) {
+    let touched = false
+    if (existing.style.display === 'none') { existing.style.display = ''; touched = true }
+    // disabled 镜像:基座重渲染会重建按钮并重置镜像,条件写跟进
+    const next = addBtn.disabled
+    if (existing.disabled !== next) { existing.disabled = next; touched = true }
+    // 容器宽度护栏:官方样式对 headerActions 硬编码 max-width(仅容 2 图标)+
+    // overflow:hidden,第 3 个图标会被整体裁掉;条件写解除,隐藏分支回落原状
+    if (addBtn.parentElement.style.maxWidth !== 'none') { addBtn.parentElement.style.maxWidth = 'none'; touched = true }
+    return touched
+  }
+  const button = doc.createElement('button')
+  button.type = 'button'
+  button.setAttribute(HEADER_CLONE_BTN_FLAG, '')
+  // 不带 data-plugin:该标记会被宿主样式 claim 逻辑登记为插件名下节点被回收
+  button.className = addBtn.className
+  button.setAttribute('aria-label', '克隆仓库打开工作区')
+  button.title = '克隆仓库打开工作区(输入远程地址与目标全路径,无需浏览目录)'
+  button.innerHTML = HEADER_CLONE_ICON
+  button.disabled = addBtn.disabled
+  button.addEventListener('click', onOpen)
+  addBtn.parentElement.insertBefore(button, addBtn.nextSibling)
+  addBtn.parentElement.style.maxWidth = 'none'
+  return true
+}
+function readMemory(key) {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeMemory(key, value) {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // 隐私模式等存储不可用场景,记忆缺失仅影响下次预填
+  }
+}
+
+// 克隆弹窗(纯 DOM,无 ReactDOM 依赖):收集仓库地址/目标目录全路径/浅克隆
+// (IDEA Get from VCS 同构,单一路径字段);目标目录预填 = 弹窗当前目录(或记忆)
+// + 推导目录名,地址变更时未手改的目标自动重算尾段;提交经 onSubmit 注入,
+// 弹窗只管状态呈现。返回 close
+function openCloneModal(doc, { parentDir, onSubmit }) {
+  const overlay = doc.createElement('div')
+  overlay.className = 'cx-clone-overlay'
+
+  const close = () => { overlay.remove(); doc.removeEventListener('keydown', onKey, true) }
+  const onKey = (event) => {
+    if (event.key !== 'Escape') return
+    if (busy) return
+    event.stopPropagation()
+    close()
+  }
+
+  const title = doc.createElement('h3')
+  title.className = 'cx-clone__title'
+  title.textContent = '克隆仓库'
+
+  const mkField = (labelText, value, placeholder) => {
+    const field = doc.createElement('label')
+    field.className = 'cx-clone__field'
+    const label = doc.createElement('span')
+    label.textContent = labelText
+    const input = doc.createElement('input')
+    input.className = 'cx-clone__input'
+    input.value = value
+    input.placeholder = placeholder || ''
+    field.appendChild(label)
+    field.appendChild(input)
+    return { field, input }
+  }
+
+  const urlField = mkField('仓库地址', '', 'https://github.com/user/repo.git')
+  const targetField = mkField('目标目录(完整路径)', '', '如 C:\\Users\\you\\projects\\repo')
+
+  // 预填基准:弹窗当前目录(读取即含尾分隔符)优先,记忆父目录次之;
+  // 地址变更时未手改的目标重算尾段为推导目录名
+  const baseDir = parentDir
+  const joinTarget = (name) => {
+    if (baseDir === '') return name
+    const sep = /[\\/]$/.test(baseDir) ? '' : (baseDir.includes('\\') ? '\\' : '/')
+    return baseDir + sep + name
+  }
+  let targetDirty = false
+  urlField.input.addEventListener('change', () => {
+    if (targetDirty) return
+    const derived = deriveRepoNameClient(urlField.input.value)
+    if (derived !== null) targetField.input.value = joinTarget(derived)
+  })
+  targetField.input.addEventListener('input', () => { targetDirty = true })
+  const initialName = deriveRepoNameClient('')
+  targetField.input.value = baseDir === '' ? '' : joinTarget(initialName || 'repo')
+
+  const switchLabel = doc.createElement('label')
+  switchLabel.className = 'cx-switch cx-clone__switch'
+  const shallowBox = doc.createElement('input')
+  shallowBox.type = 'checkbox'
+  shallowBox.checked = readMemory(CLONE_SHALLOW_MEMORY_KEY) === '1'
+  const track = doc.createElement('span')
+  track.className = 'cx-switch__track'
+  const thumb = doc.createElement('span')
+  thumb.className = 'cx-switch__thumb'
+  track.appendChild(thumb)
+  const switchText = doc.createElement('span')
+  switchText.textContent = '浅克隆(--depth 1,只取最新提交)'
+  switchLabel.appendChild(shallowBox)
+  switchLabel.appendChild(track)
+  switchLabel.appendChild(switchText)
+
+  const status = doc.createElement('div')
+  status.className = 'cx-clone__status'
+
+  const actions = doc.createElement('div')
+  actions.className = 'cx-clone__actions'
+  const cancelBtn = doc.createElement('button')
+  cancelBtn.type = 'button'
+  cancelBtn.className = 'cx-clone__btn cx-clone__btn--ghost'
+  cancelBtn.textContent = '取消'
+  const submitBtn = doc.createElement('button')
+  submitBtn.type = 'button'
+  submitBtn.className = 'cx-clone__btn'
+  submitBtn.textContent = '克隆'
+  actions.appendChild(cancelBtn)
+  actions.appendChild(submitBtn)
+
+  const card = doc.createElement('div')
+  card.className = 'cx-clone'
+  card.appendChild(title)
+  card.appendChild(urlField.field)
+  card.appendChild(targetField.field)
+  card.appendChild(switchLabel)
+  card.appendChild(status)
+  card.appendChild(actions)
+  overlay.appendChild(card)
+
+  let busy = false
+  const setBusy = (value) => {
+    busy = value
+    for (const input of [urlField.input, targetField.input, shallowBox]) input.disabled = value
+    submitBtn.disabled = value
+    cancelBtn.disabled = value
+  }
+  const setStatus = (text, isError) => {
+    status.textContent = text
+    status.className = 'cx-clone__status' + (isError ? ' cx-clone__status--error' : '')
+  }
+
+  cancelBtn.addEventListener('click', () => { if (!busy) close() })
+  overlay.addEventListener('mousedown', (event) => {
+    if (event.target === overlay && !busy) close()
+  })
+  submitBtn.addEventListener('click', () => {
+    if (busy) return
+    const payload = {
+      url: urlField.input.value.trim(),
+      target: targetField.input.value.trim(),
+      shallow: shallowBox.checked,
+    }
+    if (payload.url === '') {
+      setStatus('仓库地址不能为空', true)
+      return
+    }
+    if (payload.target === '') {
+      setStatus('目标目录不能为空', true)
+      return
+    }
+    setBusy(true)
+    setStatus('克隆中…(大仓库可能需要数分钟,请勿关闭页面)', false)
+    onSubmit(payload)
+      .then((result) => {
+        writeMemory(CLONE_PARENT_MEMORY_KEY, parentOfClient(payload.target))
+        writeMemory(CLONE_SHALLOW_MEMORY_KEY, shallowBox.checked ? '1' : '0')
+        close()
+        return result
+      })
+      .catch((error) => {
+        setBusy(false)
+        setStatus(error && error.message ? error.message : String(error), true)
+      })
+  })
+
+  doc.addEventListener('keydown', onKey, true)
+  doc.body.appendChild(overlay)
+  urlField.input.focus()
+  return close
+}
+
+// 目标全路径的父目录(记忆下次预填基准);正反斜杠分隔符均支持
+function parentOfClient(targetPath) {
+  const trimmed = String(targetPath ?? '').replace(/[\\/]+$/, '')
+  const cut = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
+  return cut <= 0 ? trimmed : trimmed.slice(0, cut)
+}
+
+// 全局注入循环:MutationObserver(childList,与 steer/fork dock 同构)跟踪官方
+// 弹窗出现,rescan 幂等;弹窗不在场或开关关闭时摘除自家按钮。变异风暴熔断:
+// 计数对象是「自家写入」——注入/摘除/条件写各计一次,窗口内超限即断开观察器
+// 并摘除自家节点。页面水合期的高频自身变异零自家写入,不会误伤;而
+// 「注入→基座卸载→再注入」类自激环必然高频自家写入,稳定触发熔断。
+// 返回清理函数
+function setupCloneInjection(doc, { enabledRef, onOpen }) {
+  if (typeof MutationObserver === 'undefined' || typeof doc.querySelectorAll !== 'function') return () => {}
+  let disposed = false
+  let writes = 0
+  let windowStart = Date.now()
+  let observer = null
+  // header 兜底入口:默认注入(无闸门环境基座按钮无反应,第 4 按钮是唯一入口),
+  // 启动后轮询探测登录闸门——`/login` 是 auth 包的排他性路由,带闸门宿主返回
+  // 200,无闸门宿主 404;命中即物理移除按钮还原官方 3 按钮布局,克隆入口收敛到
+  // 浏览弹窗 footer。探测窗口 30s 封顶(每秒一次),超时未见闸门则按钮常驻
+  let headerAllowed = true
+  const HEADER_PROBE_INTERVAL_MS = 1000
+  const HEADER_PROBE_ROUNDS = 30
+  let headerProbeTimer = null
+  let headerProbeRounds = 0
+  const armAuthProbe = () => {
+    if (typeof fetch !== 'function' || headerProbeTimer) return
+    const probe = () => {
+      if (disposed || !headerAllowed) { clearInterval(headerProbeTimer); headerProbeTimer = null; return }
+      headerProbeRounds += 1
+      fetch('/login', { credentials: 'omit' })
+        .then((res) => {
+          if (disposed || !headerAllowed) return
+          if (res.ok) {
+            headerAllowed = false
+            clearInterval(headerProbeTimer)
+            headerProbeTimer = null
+            removeAllHeader()
+            rescan()
+          }
+        })
+        .catch(() => {})
+      if (headerProbeRounds >= HEADER_PROBE_ROUNDS) { clearInterval(headerProbeTimer); headerProbeTimer = null }
+    }
+    probe()
+    headerProbeTimer = setInterval(probe, HEADER_PROBE_INTERVAL_MS)
+  }
+  // header 按钮被外部(基座重渲染卸载/早期净化)移除时指数退避重试;重试由
+  // setTimeout 主动调度——静置期无变异驱动 observer,被动等变异会死锁在退避期
+  let headerInjected = false
+  let headerRetryAt = 0
+  let headerBackoffMs = 1000
+  let headerRetryTimer = null
+  // 只摘 footer 按钮:header 按钮生命周期由 ensureHeader 独占(在场条件写/
+  // 消失隐藏,永不物理移除)。若在此摘 header 按钮,「摘+建」会在同一 rescan
+  // 内各计一次写,形成摘建自激永动机(隔离环境实测 2001 写熔断)
+  const removeAll = () => {
+    let removedAny = false
+    for (const stale of doc.querySelectorAll('[' + CLONE_BTN_FLAG + ']')) { stale.remove(); removedAny = true }
+    return removedAny
+  }
+  const removeAllHeader = () => {
+    let removedAny = false
+    for (const stale of doc.querySelectorAll('[' + HEADER_CLONE_BTN_FLAG + ']')) { stale.remove(); removedAny = true }
+    return removedAny
+  }
+  const ensureHeader = (now) => {
+    // 探测到登录闸门(headerAllowed=false)后保持官方 3 按钮布局:按钮已物理
+    // 移除,基座重渲染也不会再注入
+    if (!headerAllowed) return ensureHeaderCloneButton(doc, onOpen, false)
+    const floatingPresent = !!doc.querySelector('[' + HEADER_CLONE_BTN_FLAG + ']')
+    if (headerInjected && !floatingPresent) {
+      headerBackoffMs = Math.min(headerBackoffMs * 2, 30 * 1000)
+      headerRetryAt = now + headerBackoffMs
+      headerInjected = false
+      return false
+    }
+    if (floatingPresent) {
+      headerInjected = true
+      headerBackoffMs = 1000
+      return ensureHeaderCloneButton(doc, onOpen)
+    }
+    if (now < headerRetryAt) {
+      if (!headerRetryTimer) headerRetryTimer = setTimeout(() => { headerRetryTimer = null; rescan() }, headerRetryAt - now + 50)
+      return false
+    }
+    const created = ensureHeaderCloneButton(doc, onOpen)
+    if (created) headerInjected = true
+    return created
+  }
+  const rescan = () => {
+    if (disposed) return
+    const now = Date.now()
+    if (now - windowStart > CLONE_SCAN_WINDOW_MS) {
+      windowStart = now
+      writes = 0
+    }
+    let wrote = false
+    let wroteFrom = ''
+    const card = enabledRef.current ? findBrowseDialog(doc) : null
+    if (!card) {
+      if (ensureHeader(now)) { wrote = true; wroteFrom = '+header' }
+      if (!wrote) return
+    } else {
+      if (ensureHeader(now)) { wrote = true; wroteFrom = '+header' }
+      const footerParts = findBrowseFooter(card)
+      if (footerParts && ensureCloneButton(doc, footerParts, onOpen)) { wrote = true; wroteFrom += '+footer' }
+      if (!wrote) return
+    }
+    writes += 1
+    if (writes > CLONE_SCAN_LIMIT) {
+      console.error('[context-manager] 克隆按钮注入触发变异风暴,已自动断开观察器', JSON.stringify({ writes, wroteFrom }))
+      if (observer) observer.disconnect()
+      removeAll()
+      removeAllHeader()
+    }
+  }
+  observer = new MutationObserver(rescan)
+  // disabled 属性观察:空目录导航完成后无 childList 变异,打开按钮的可用态
+  // 翻转只有属性事件;镜像写入是条件写(值不变不落属性),不构成变异环
+  observer.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
+  armAuthProbe()
+  rescan()
+  return () => {
+    disposed = true
+    if (headerProbeTimer) clearInterval(headerProbeTimer)
+    if (headerRetryTimer) clearTimeout(headerRetryTimer)
+    if (observer) observer.disconnect()
+    removeAll()
+    removeAllHeader()
+  }
+}
+
 // 启停开关行工厂:三个开关同构(受控 checkbox + cx-switch 形态),值存宿主 settings,
 // 切换经本插件路由中转,变更刷新页面生效
 function switchRow(url, label, title, okText) {
@@ -1397,6 +1898,7 @@ const SteerSwitchRow = switchRow(STEER_ENABLED_URL, '插话撤回', STEER_SWITCH
 const ForkSwitchRow = switchRow(FORK_ENABLED_URL, '对话 fork', FORK_SWITCH_TITLE, '对话 fork')
 const ForkAutoResendSwitchRow = switchRow(FORK_AUTO_RESEND_URL, '分叉后自动重发', FORK_AUTO_RESEND_SWITCH_TITLE, '分叉后自动重发')
 const CopySidSwitchRow = switchRow(COPY_SID_ENABLED_URL, '标题栏复制 sessionId', COPY_SID_SWITCH_TITLE, '标题栏复制 sessionId')
+const CloneSwitchRow = switchRow(CLONE_ENABLED_URL, '克隆仓库按钮', CLONE_SWITCH_TITLE, '克隆仓库按钮')
 
 // 「插件」设置页卡片:与官方 PluginCard 同款折叠卡(header 展开/收起 + body),
 // 视觉值取自宿主实测(见 CSS 注释),组件因缺宿主 i18n/表单状态而自绘
@@ -1406,7 +1908,7 @@ function ContextPanel() {
     h('button', { type: 'button', className: 'cx-card__header', 'aria-expanded': open, onClick: () => setOpen(!open) },
       h('span', { className: 'cx-card__head-text' },
         h('span', { className: 'cx-card__name' }, '对话增强'),
-        h('span', { className: 'cx-card__description' }, '历史输入、插话撤回与对话分叉的启停'),
+        h('span', { className: 'cx-card__description' }, '历史输入、插话撤回、对话分叉与克隆仓库的启停'),
       ),
       h('span', { className: 'cx-card__chevron', 'aria-hidden': 'true' },
         h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none' },
@@ -1422,6 +1924,7 @@ function ContextPanel() {
       h(ForkSwitchRow),
       h(ForkAutoResendSwitchRow),
       h(CopySidSwitchRow),
+      h(CloneSwitchRow),
     ),
   )
 }
@@ -1430,8 +1933,9 @@ function ContextPanel() {
       // remote.session 点分声明交 cordis 门控(规约禁 apply 内同步探测该面):
       // namespace 由宿主异步 $mount,fiber 等其就绪才激活,旧宿主无此 namespace
       // 即整体未激活(干净禁用,不阻塞 web 启动)
-      inject: ['slots', 'sessions', 'workspaces', 'remote', 'remote.session'],
+      inject: ['slots', 'sessions', 'workspaces', 'uiWorkspace', 'remote', 'remote.session'],
       apply(ctx) {
+        const uiWorkspace = ctx.get('uiWorkspace')
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
         const remoteSession = ctx.remote ? ctx.remote.session : undefined
@@ -1608,6 +2112,80 @@ function ContextPanel() {
         } catch (error) {
           console.warn('[context-manager] 复制 sessionId 入口未注册(宿主无 conversation.session.header.actions 插槽)', error)
         }
+
+        // 克隆仓库入口:全局 DOM 注入官方「添加工作区」浏览目录弹窗(非插槽,该洞
+        // 为 single 已被目录选择 flow 占用)。开关读取失败按启用兜底(与 CopySidButton
+        // 一致);uiWorkspace 走 inject 声明(services 与 slots/sessions 同代际,
+        // 实测 ctx.get 懒取不可用,服务面缺声明不可达),克隆成功后 startSession
+        // 直接落入新工作区空会话。workspaces.create 的 client 代理直返视图
+        // ({workspaceId,...};{workspace,created} 形态只存在于宿主 RPC 层)
+        const openCloneWorkspace = async (targetPath) => {
+          const view = await workspaces.create({ path: targetPath })
+          const workspaceId = view && view.workspaceId
+          if (workspaceId && uiWorkspace && typeof uiWorkspace.startSession === 'function') {
+            uiWorkspace.startSession(workspaceId)
+            toast('已克隆并打开工作区')
+            return
+          }
+          toast('已克隆到 ' + targetPath + ',但无法自动打开,请手动打开工作区', { kind: 'error', sticky: true })
+        }
+
+        // 父目录来源:点击克隆按钮时经官方「编辑路径」输入态读取弹窗当前目录
+        // (读取即收起浏览弹窗,代价见 readBrowseCurrentPath 注释),回退上次克隆
+        // 位置(localStorage)
+        const handleCloneOpen = async () => {
+          const card = findBrowseDialog(document)
+          const fromDialog = card ? await readBrowseCurrentPath(card, document) : null
+          const parentDir = fromDialog || readMemory(CLONE_PARENT_MEMORY_KEY) || ''
+          openCloneModal(document, {
+            parentDir,
+            onSubmit: async (payload) => {
+              // 克隆耗时以分钟计,不走带 8s 超时的 api()
+              const response = await fetch(CLONE_API_URL, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(payload),
+              })
+              const result = await response.json().catch(() => ({}))
+              if (!response.ok) throw new Error(result && result.error ? result.error : 'HTTP ' + response.status)
+              const targetPath = result && result.path
+              if (typeof targetPath !== 'string' || targetPath === '') throw new Error('克隆完成但未返回路径')
+              // 收起浏览弹窗(读取路径路径已收起,此处兜底读取失败仍开着的场景):
+              // 注册工作区与浏览弹层互不叠影,收起失败不影响注册
+              const aliveCard = findBrowseDialog(document)
+              const footerParts = aliveCard ? findBrowseFooter(aliveCard) : null
+              if (footerParts && footerParts.cancelButton) footerParts.cancelButton.click()
+              try {
+                await openCloneWorkspace(targetPath)
+              } catch (error) {
+                toast('已克隆,但打开工作区失败: ' + String(error && error.message || error), { kind: 'error', sticky: true })
+              }
+            },
+          })
+        }
+        ctx.effect(() => {
+          const enabledRef = { current: true }
+          let disposeScan = () => {}
+          let cancelled = false
+          api(CLONE_ENABLED_URL)
+            .then((payload) => {
+              enabledRef.current = payload ? payload.enabled !== false : true
+            })
+            .catch(() => {})
+            .finally(() => {
+              if (cancelled) return
+              disposeScan = setupCloneInjection(document, {
+                enabledRef,
+                onOpen: () => {
+                  void handleCloneOpen()
+                },
+              })
+            })
+          return () => {
+            cancelled = true
+            disposeScan()
+          }
+        }, 'context-manager clone injection')
       },
     }
   },
