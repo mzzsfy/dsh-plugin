@@ -1,5 +1,5 @@
 // parity 测试:client.js LOGIC 标记段与 src/logic.mjs 同源逻辑对照。
-// 覆盖替换决策全部分支 + 安全门矩阵 + 两份实现全量同源断言。
+// 替换决策全部分支 + 安全门矩阵 + 两份实现全量同源断言。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -26,7 +26,7 @@ function clientLogic() {
   }
   const factory = new Function(
     'ATTR_MARK', 'SELECTOR_LABEL',
-    section + '; return { ICONS, DECLARED_ICONS, USER_OVERRIDES, ALIAS_GROUPS, FALLBACK, GLYPHS, GEAR_PATHS, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, iconSourceOf, lookupWithAlias, aliasKeysOf, decide, applyDecision, decideAvatar, applyAvatar };',
+    section + '; return { ICONS, DECLARED_ICONS, ALIAS_GROUPS, FALLBACK, GLYPHS, GEAR_PATHS, SVG_MAX_CHARS, STROKE_ATTRS, NAME_RULES, ATTR_MARK, SELECTOR_LABEL, poolIndexOf, resolveIcon, svgInner, resolveForLabel, themedIcon, lookupWithAlias, aliasKeysOf, decide, applyDecision, decideAvatar, applyAvatar };',
   )
   return factory(pick('ATTR_MARK'), pick('SELECTOR_LABEL'))
 }
@@ -198,12 +198,12 @@ function defineScenarios(prefix, L) {
     ].sort())
   })
 
-  test(prefix + '声明机制:label 命中声明时覆盖内置与关键词', () => {
+  test(prefix + '声明机制:label 命中声明时压过内置与关键词', () => {
     const { DECLARED_ICONS, resolveIcon } = L
     try {
       DECLARED_ICONS['插件市场'] = 'git'
       const d = decide(makeCell('插件市场'))
-      assert.equal(d.inner, svgInner(resolveIcon('git')), '声明覆盖内置映射')
+      assert.equal(d.inner, svgInner(resolveIcon('git')), '声明压过内置映射')
     } finally {
       delete DECLARED_ICONS['插件市场']
     }
@@ -305,47 +305,25 @@ function defineScenarios(prefix, L) {
   })
 
   test(prefix + '别名等价:双语分区任一语言键命中,组外键不受影响', () => {
-    const { USER_OVERRIDES, lookupWithAlias, aliasKeysOf } = L
+    const { DECLARED_ICONS, lookupWithAlias, aliasKeysOf } = L
     try {
-      USER_OVERRIDES['通用设置'] = 'bell'
-      assert.equal(lookupWithAlias(USER_OVERRIDES, 'General'), 'bell', '反向等价命中')
-      assert.equal(lookupWithAlias(USER_OVERRIDES, '通用设置'), 'bell', '正向直查')
+      DECLARED_ICONS['通用设置'] = 'bell'
+      assert.equal(lookupWithAlias(DECLARED_ICONS, 'General'), 'bell', '反向等价命中')
+      assert.equal(lookupWithAlias(DECLARED_ICONS, '通用设置'), 'bell', '正向直查')
       assert.equal(aliasKeysOf('General').length, 2, '等价组键展开为双语两侧')
       assert.deepEqual(aliasKeysOf('插件市场'), ['插件市场'], '组外键只返回自身')
     } finally {
-      delete USER_OVERRIDES['通用设置']
+      delete DECLARED_ICONS['通用设置']
     }
   })
 
-  test(prefix + '用户覆盖插到取图链最前,撤销后回声明/内置/推导管线', () => {
-    const { USER_OVERRIDES, DECLARED_ICONS, ICONS, resolveForLabel, resolveIcon, iconSourceOf } = L
+  test(prefix + '声明的别名等价:声明写在任一语言键,双语 label 都命中', () => {
+    const { DECLARED_ICONS, resolveForLabel, resolveIcon } = L
     try {
-      DECLARED_ICONS['插件市场'] = 'git'
-      assert.equal(resolveForLabel('插件市场'), resolveIcon('git'), '基线:声明命中')
-      assert.equal(iconSourceOf('插件市场'), 'declared')
-      USER_OVERRIDES['插件市场'] = 'bell'
-      assert.equal(resolveForLabel('插件市场'), resolveIcon('bell'), '覆盖压过声明')
-      assert.equal(iconSourceOf('插件市场'), 'user')
-      delete USER_OVERRIDES['插件市场']
-      assert.equal(resolveForLabel('插件市场'), resolveIcon('git'), '撤销覆盖回声明')
-      delete DECLARED_ICONS['插件市场']
-      assert.equal(resolveForLabel('插件市场'), ICONS['插件市场'], '再撤声明回内置映射')
-      assert.equal(iconSourceOf('插件市场'), 'builtin')
-      assert.equal(iconSourceOf('无任何命中的分区'), 'derived', '无命中归推导')
+      DECLARED_ICONS['General'] = 'search'
+      assert.equal(resolveForLabel('通用设置'), resolveIcon('search'), '反向 label 命中声明')
     } finally {
-      delete USER_OVERRIDES['插件市场']
-      delete DECLARED_ICONS['插件市场']
-    }
-  })
-
-  test(prefix + '覆盖的别名等价:覆盖写在任一语言键,双语 label 都命中且来源为 user', () => {
-    const { USER_OVERRIDES, resolveForLabel, resolveIcon, iconSourceOf } = L
-    try {
-      USER_OVERRIDES['General'] = 'search'
-      assert.equal(resolveForLabel('通用设置'), resolveIcon('search'), '反向 label 命中覆盖')
-      assert.equal(iconSourceOf('通用设置'), 'user')
-    } finally {
-      delete USER_OVERRIDES['General']
+      delete DECLARED_ICONS['General']
     }
   })
 
@@ -356,6 +334,7 @@ function defineScenarios(prefix, L) {
       tagName: 'IMG',
       dataset: {},
       hidden: false,
+      style: { display: '' },
       parentInjections: [],
       parentElement: {
         querySelectorAll(sel) {
@@ -369,6 +348,7 @@ function defineScenarios(prefix, L) {
     assert.ok(d1, '首次应产出决策')
     applyAvatar(img, d1)
     assert.equal(img.hidden, true, '原子节点隐藏保留(React 持引用)')
+    assert.equal(img.style.display, 'none', '行内 display:none 压过市场卡自有类规则(hidden 属性是 UA 样式可被 .av{display:grid} 覆盖)')
     assert.equal(img.dataset.navic, '某插件')
     assert.ok(img.inserted.startsWith('afterend:'), '注入跟随其后')
     // 换名:行内带标记的旧注入清理,无标记外来兄弟不动
@@ -379,7 +359,14 @@ function defineScenarios(prefix, L) {
     applyAvatar(img, d2)
     assert.deepEqual(removed, ['stale'], '旧注入清理,外来兄弟保留')
     assert.equal(img.dataset.navic, '改名插件')
-    assert.equal(decideAvatar(img, '改名插件'), null, '同名幂等')
+    assert.equal(decideAvatar(img, '改名插件'), null, '同名且行内隐藏在场,幂等')
+    // React 重渲染清 style 保记账:放行重贴,replacePass 全量重置实现自愈
+    img.style.display = ''
+    const d3 = decideAvatar(img, '改名插件')
+    assert.ok(d3, '行内隐藏丢失时重出决策')
+    applyAvatar(img, d3)
+    assert.equal(img.style.display, 'none', '重贴恢复行内隐藏')
+    assert.equal(decideAvatar(img, '改名插件'), null, '重贴后回归幂等')
     assert.equal(decideAvatar(img, ''), null, '空名不决策')
   })
 
@@ -390,6 +377,7 @@ function defineScenarios(prefix, L) {
       dataset: {},
       textContent: 'X',
       hidden: false,
+      style: { display: '' },
       parentElement: { querySelectorAll(sel) { return sel === '[data-navic="1"]' ? [] : [] } },
       inserted: null,
       insertAdjacentHTML(pos, html) { div.inserted = pos + ':' + html },
@@ -397,6 +385,7 @@ function defineScenarios(prefix, L) {
     const d = decideAvatar(div, '另一插件')
     applyAvatar(div, d)
     assert.equal(div.hidden, true, '色块节点隐藏(React 受管子树不触碰)')
+    assert.equal(div.style.display, 'none', '行内隐藏与 img 同构')
     assert.equal(div.textContent, 'X', '子树不清空(与 IMG 同构)')
     assert.ok(div.inserted.startsWith('afterend:'), '图标跟随其后')
     assert.equal(div.dataset.navic, '另一插件')
@@ -416,8 +405,6 @@ test('两份实现常量同源', () => {
   assert.deepEqual(logic.GEAR_PATHS, client.GEAR_PATHS, '两代齿轮前缀同源')
   assert.equal(logic.SVG_MAX_CHARS, client.SVG_MAX_CHARS)
   assert.deepEqual(logic.ALIAS_GROUPS, client.ALIAS_GROUPS, '别名组同源')
-  assert.equal(Object.keys(logic.USER_OVERRIDES).length, 0, '用户覆盖表初始为空(logic 侧)')
-  assert.equal(Object.keys(client.USER_OVERRIDES).length, 0, '用户覆盖表初始为空(client 侧)')
 })
 
 test('两份实现 ICONS/GLYPHS/FALLBACK 全量同源', () => {
@@ -447,7 +434,7 @@ test('LOGIC 段与 logic.mjs 决策函数逐函数源码一致(归一化注释�
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\s+/g, '')
-  for (const name of ['resolveIcon', 'svgInner', 'resolveForLabel', 'themedIcon', 'iconSourceOf', 'lookupWithAlias', 'aliasKeysOf', 'decide', 'applyDecision', 'decideAvatar', 'applyAvatar', 'poolIndexOf']) {
+  for (const name of ['resolveIcon', 'svgInner', 'resolveForLabel', 'themedIcon', 'lookupWithAlias', 'aliasKeysOf', 'decide', 'applyDecision', 'decideAvatar', 'applyAvatar', 'poolIndexOf']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(logic[name].toString()),
