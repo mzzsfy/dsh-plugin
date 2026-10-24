@@ -1,5 +1,5 @@
 // 开关样式守卫 BDD:裸 checkbox/裸 input 状态选择器会静默损坏 UI 或误伤同 label 的文本输入,
-// 属无报错的 UI 退化,静态断言锁死 cb-switch 结构(参照 mce-switch 同款守卫)。
+// 属无报错的 UI 退化,静态断言锁死 cb-switch 结构(参照 tn-switch 同款守卫)。
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'

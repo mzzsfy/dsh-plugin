@@ -7,6 +7,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync
 import { join } from 'node:path'
 import { REPO_ROOT, DSHMARKET_PIN, workspaceYaml, runCmd, symlinkDir, log } from './lib.mjs'
 import { judgeHostMin } from '../compare-version.mjs'
+import { packageDirs, installExternals } from '../install-externals.mjs'
 
 const PROFILE_PACKAGES_DIR = 'node_modules/@mzzsfy'
 // 宿主内部基座 bundle,随宿主安装解析,不进 profile dependencies
@@ -73,30 +74,16 @@ async function probeUnpublished(names) {
   return unpublished
 }
 
-// 逐包安装 deps+devDeps(--omit=peer,与 CI test job 同款):包内模块级 import 的
-// 宿主稳定导出(@deepseek-ai/*)靠包内 devDeps 解析;仓库文件解析链碰不到宿主安装目录。
-// 过滤同 test job:仅含非 @mzzsfy 外部依赖的包安装,自依赖统一走符号链接桥。
+// 逐包安装外部依赖:显式 CLI spec(name@range;@mzzsfy 依赖映射 file:../ 同层包 symlink,
+// 未发布依赖不再经 registry 解析),实现与 CI test job 共用 scripts/install-externals.mjs。
 // 幂等,CI 维度全窗口只执行一次
 export async function installPackageExternals() {
   const installed = []
-  for (const dir of readdirSync(join(REPO_ROOT, 'packages'), { withFileTypes: true })) {
-    if (!dir.isDirectory()) continue
-    const pkgDir = join(REPO_ROOT, 'packages', dir.name)
-    const manifestPath = join(pkgDir, 'package.json')
-    if (!existsSync(manifestPath)) continue
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    const hasExternal = [manifest.dependencies, manifest.devDependencies]
-      .some((deps) => deps && Object.keys(deps).some((name) => !name.startsWith('@mzzsfy/')))
-    if (!hasExternal) continue
-    try {
-      await runCmd('npm', ['install', '--omit=peer', '--legacy-peer-deps', '--no-save', '--no-package-lock', '--no-audit', '--no-fund'], { cwd: pkgDir })
-    } catch {
-      // 本地陈旧 node_modules(如 pnpm 残留 .pnpm 虚拟 store)会让 npm arborist 崩溃,清空重装自愈
-      log(`外部依赖安装失败,清空 ${manifest.name} node_modules 重装`)
-      rmSync(join(pkgDir, 'node_modules'), { recursive: true, force: true })
-      await runCmd('npm', ['install', '--omit=peer', '--legacy-peer-deps', '--no-save', '--no-package-lock', '--no-audit', '--no-fund'], { cwd: pkgDir })
-    }
-    installed.push(manifest.name)
+  for (const pkgDir of packageDirs()) {
+    const outcome = installExternals({pkgDir, log})
+    if (outcome.skipped) continue
+    if (!outcome.ok) throw new Error(`外部依赖安装失败: ${outcome.name} (exit ${outcome.status})`)
+    installed.push(outcome.name)
   }
   return installed
 }

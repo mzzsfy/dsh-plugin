@@ -12,6 +12,7 @@ function harness(initialLayers, initialConfig = {}) {
   const registered = new Map()
   const tools = {
     layers: { global: { tools: { data: globalData } }, scoped },
+    view: () => ({ visible: new Map([...globalData, ...registered]) }),
     register: (definition) => {
       registered.set(definition.name, definition)
       return () => registered.delete(definition.name)
@@ -205,6 +206,15 @@ test('SC-22 tool_search 注册与隐式白名单:收敛不打标,退场注销', 
   assert.equal(h.definitionOf('global', 'web').deferLoading, true)
   h.dispose()
   assert.equal(h.registered.has('tool_search'), false)
+})
+
+test('搜索视图缺失时不注册入口并告警,其他工具仍正常收敛', () => {
+  const h = harness({ global: { web: { name: 'web' } } })
+  delete h.tools.view
+  h.applyRow()
+  assert.equal(h.registered.has('tool_search'), false)
+  assert.ok(h.logs.warn.some((message) => message.includes('tools.register/view')))
+  assert.equal(h.definitionOf('global', 'web').deferLoading, true)
 })
 
 test('SC-22 收敛不打标 tool_search(白名单外仍保持清标)', () => {

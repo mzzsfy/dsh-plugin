@@ -754,7 +754,7 @@ test('用户覆盖:非 nav 单元格右键不弹浮层', () => {
 // 包脱离 monorepo 布局(发布态)时跳过:无兄弟包源码可读。
 test('生产者样板契约:全包注册走 __navicIcons/__navicIconQueue', () => {
   const producers = ['dsh-session-manager', 'dsh-usage-panel', 'dsh-turn-notify', 'dsh-maintain', 'dsh-rs-workflow',
-    'dsh-usage-dash', 'dsh-cron-board', 'dsh-think-expand', 'dsh-model-capability-editor', 'dsh-settings-nav-icons',
+    'dsh-usage-dash', 'dsh-cron-board', 'dsh-think-expand', 'dsh-settings-nav-icons',
     'dsh-auto-trust-all', 'dsh-llm-pi-gateway']
   let checked = 0
   for (const pkg of producers) {

@@ -122,14 +122,14 @@ export function apply(ctx, config) {
   }
 
   // tool_search 注册(折叠入口,隐式白名单 INV-12):行退场随 effect 注销,
-  // 系统回到「没装本包」的世界;register 面缺失(宿主漂移)只损失折叠入口,
+  // 系统回到「没装本包」的世界;register/view 面缺失只损失折叠入口,
   // 打标收敛不受影响
-  const searchTool = buildSearchTool(() => store.layers())
   const toolsService = ctx.get('tools')
-  if (typeof toolsService?.register === 'function') {
+  if (typeof toolsService?.register === 'function' && typeof toolsService.view === 'function') {
+    const searchTool = buildSearchTool((scope) => toolsService.view(scope).visible)
     ctx.effect(() => toolsService.register(searchTool), 'tool-gate tool_search')
   } else {
-    ctx.logger?.warn?.('tool-gate: tools.register 面缺失,tool_search 未注册(降级折叠入口不可用)')
+    ctx.logger?.warn?.('tool-gate: tools.register/view 面缺失,tool_search 未注册(降级折叠入口不可用)')
   }
   // ---- 降级折叠(INV-10):llm 服务软依赖,缺失 = 只打标不折叠 ----
 

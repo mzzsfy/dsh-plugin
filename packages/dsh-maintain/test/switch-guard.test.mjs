@@ -1,5 +1,5 @@
 // 开关样式守卫 BDD:状态选择器回退为裸 input 会误伤同 label 内的其他 input(无报错 UI 损坏),
-// 静态断言锁死结构与锚定形态(mce-switch 守卫同构)
+// 静态断言锁死结构与锚定形态(tn-switch 守卫同构)
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'

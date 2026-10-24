@@ -29,9 +29,9 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
 - **INV-4 干净禁用**:宿主 `ctx.tools` 缺失或全局层内部结构
   (`layers.global.tools`,NamedEntries Map)与已知形态不符时,apply 打日志
   即返回,零动作不崩;宿主升级重构内部面后自愈路径 = 形态再探测。
-- **INV-5 零会话干预**:deferred 工具的搜索、激活、会话投影、prompt 顺序
-  校验全部由宿主原生链路承担,本包不注册任何工具、不 provide 任何服务、
-  不拦截任何执行。
+- **INV-5 原生会话投影零干预**:原生路由的激活、会话投影与 prompt 顺序
+  校验由宿主承担。本包注册只读 `tool_search` 供降级路由检索定义文本,
+  不注册被搜索工具、不修改会话加载态、不 provide 服务、不拦截执行。
 - **INV-6 非 deferLoading 能力宿主不受影响**:工具执行、权限、guard、
   presentCall/presentResult 均不读 `deferLoading`,本包不触碰 definition
   其余字段。
@@ -72,7 +72,8 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   路由,不读宿主 modelInfo/compat 内部面。
 - **INV-12 tool_search 隐式白名单**:折叠入口工具 `tool_search` 经
   `defineTool` 注册于主行全局层(effect 注销),收敛把它视作隐式白名单成员
-  永不打标;执行按全层 registry 现读正则匹配 name+description,返回定义文本
+  永不打标;执行只读 `tools.view(exec.agent).visible`,正则匹配 name+description,
+  继承、restrict 与同名遮蔽由宿主解析,无 agent 时仅全局视图。返回定义文本
   (name/description/parameters),模型据文本以正确名字与参数直接调用
   (宿主执行层按名查 registry,与请求 tools 列表无关;但请求 tools 必须含
   该名字,见 INV-10a)。无效 pattern 返回错误文本不抛。owner 限定 adapter
@@ -128,6 +129,11 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
 - **SC-22 收敛不打标 tool_search**:tool_search 在白名单外 ⇒ 收敛后其
   definition 仍无 deferLoading(隐式白名单,INV-12);GUI 工具清单该行显示
   「折叠入口」锁定态。
+- **SC-23 检索会话隔离**:Given A/B scope 注册各自私有工具,A 继承预设工具并
+  restrict 一个全局工具;When A/B 分别搜索;Then 只返回各自可见定义,局部
+  同名定义覆盖全局定义,无 agent 调用只返回全局定义。
+- **SC-24 检索无加载副作用**:Given A/B 均已投影 tools;When A 搜索私有工具;
+  Then 两者 tools schema 与 defer 态均不变,B 仍搜不到 A 的私有工具。
 
 ## 场景
 

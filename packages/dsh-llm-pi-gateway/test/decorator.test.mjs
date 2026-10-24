@@ -50,12 +50,153 @@ test('原型级一次覆盖存量与未来实例;同 Models 实例幂等', () =>
   assert.equal(models.streamSimple, shadowed) // 二次进入不重复 shadow
 })
 
-test('openai 协议不注入(未知键不进入其他传输)', () => {
+test('Chat 冻结入参补原始会话头,保留其他头且不新增 metadata', () => {
   const { Adapter, models, consumed } = makeParts()
   const adapter = new Adapter()
   patchAdapterPrototype(adapter, baseInject())
-  adapter.streamWithSnapshot({ sessionId: 's1', api: 'openai-completions' }, { models })
+  const options = Object.freeze({
+    sessionId: 'session-a', api: 'openai-completions',
+    headers: Object.freeze({ 'x-gateway-group': 'pool-a' }),
+  })
+  adapter.streamWithSnapshot(options, { models })
+  assert.deepEqual(consumed[0].options.headers, {
+    'x-gateway-group': 'pool-a', session_id: 'session-a', 'x-client-request-id': 'session-a',
+  })
   assert.equal(consumed[0].options.metadata, undefined)
+  assert.deepEqual(options.headers, { 'x-gateway-group': 'pool-a' })
+})
+
+test('Chat 同会话多轮头稳定,不同会话隔离', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject())
+  for (const sessionId of ['session-a', 'session-a', 'session-b']) {
+    adapter.streamWithSnapshot({ sessionId, api: 'openai-completions' }, { models })
+  }
+  assert.deepEqual(consumed.map(({ options }) => options.headers), [
+    { session_id: 'session-a', 'x-client-request-id': 'session-a' },
+    { session_id: 'session-a', 'x-client-request-id': 'session-a' },
+    { session_id: 'session-b', 'x-client-request-id': 'session-b' },
+  ])
+})
+
+test('Chat 显式头按大小写无关匹配保留,只补缺失键', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject())
+  adapter.streamWithSnapshot({
+    sessionId: 'session-a', api: 'openai-completions', headers: { Session_ID: 'explicit-session' },
+  }, { models })
+  assert.deepEqual(consumed[0].options.headers, {
+    Session_ID: 'explicit-session', 'x-client-request-id': 'session-a',
+  })
+})
+
+test('Chat 显式 null 抑制头,不被自动注入覆盖', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject())
+  const options = { sessionId: 'session-a', api: 'openai-completions', headers: { SESSION_ID: null, 'X-Client-Request-Id': null } }
+  adapter.streamWithSnapshot(options, { models })
+  assert.deepEqual(consumed[0].options.headers, { SESSION_ID: null, 'X-Client-Request-Id': null })
+})
+
+test('Chat model.headers 显式值优先,不生成其他大小写的重复头', () => {
+  const consumed = []
+  const model = { api: 'openai-completions', id: 'chat-x', headers: { SESSION_ID: 'model-session' } }
+  const models = { streamSimple: (_model, _context, options) => consumed.push(options) }
+  class Adapter {
+    streamWithSnapshot(options, snapshot) {
+      return snapshot.models.streamSimple(model, [], options)
+    }
+  }
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject())
+  adapter.streamWithSnapshot({ sessionId: 'session-a' }, { models })
+  assert.deepEqual(consumed[0].headers, { 'x-client-request-id': 'session-a' })
+  assert.deepEqual(model.headers, { SESSION_ID: 'model-session' })
+})
+
+test('Chat 两来源显式头均保留,模型 null 抑制且 options 引用不变', () => {
+  const model = Object.freeze({ api: 'openai-completions', id: 'chat-x', headers: Object.freeze({ SESSION_ID: null }) })
+  const options = Object.freeze({ sessionId: 'session-a', headers: Object.freeze({ 'X-CLIENT-REQUEST-ID': 'caller-request' }) })
+  const inject = baseInject()
+  assert.equal(inject(options, model), options)
+  assert.deepEqual(model.headers, { SESSION_ID: null })
+  assert.deepEqual(options.headers, { 'X-CLIENT-REQUEST-ID': 'caller-request' })
+})
+
+test('Chat cacheRetention none 原样透传,显式头仍保留', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject())
+  const options = { sessionId: 'session-a', api: 'openai-completions', cacheRetention: 'none', headers: { session_id: 'explicit' } }
+  adapter.streamWithSnapshot(options, { models })
+  assert.equal(consumed[0].options, options)
+})
+
+test('Chat 无有效 sessionId 时原样透传且按实际模型去重告警', () => {
+  const warnings = []
+  const consumed = []
+  const models = { streamSimple: (_model, _context, options) => consumed.push(options) }
+  class Adapter {
+    streamWithSnapshot(options, snapshot) {
+      return snapshot.models.streamSimple({ api: 'openai-completions', id: options.actualModel }, [], options)
+    }
+  }
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject({ onWarn: (model) => warnings.push(model) }))
+  for (const actualModel of ['chat-a', 'chat-b']) {
+    for (const sessionId of [undefined, '', null, 0]) {
+      const options = { sessionId, actualModel, model: { id: 'conflicting-options-model' } }
+      adapter.streamWithSnapshot(options, { models })
+      assert.equal(consumed.at(-1), options)
+    }
+  }
+  assert.deepEqual(warnings, ['chat-a', 'chat-b'])
+})
+
+test('Chat 总开关热切换与 owner 卸载控制自动头', () => {
+  let enabled = false
+  let active = true
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject({ getConfig: () => ({ enabled, prefix: PREFIX }) }), () => active)
+  const options = { sessionId: 'session-a', api: 'openai-completions' }
+  adapter.streamWithSnapshot(options, { models })
+  assert.equal(consumed.at(-1).options, options)
+  enabled = true
+  adapter.streamWithSnapshot(options, { models })
+  assert.equal(consumed.at(-1).options.headers.session_id, 'session-a')
+  active = false
+  adapter.streamWithSnapshot(options, { models })
+  assert.equal(consumed.at(-1).options, options)
+})
+
+test('Chat sweep 授权不扩散到共享原型的其他实例', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const official = new Adapter()
+  const foreign = new Adapter()
+  sweepRegisteredAdapters({
+    adapters: new Map([['route', { provider: { id: 'route' }, adapter: official }]]),
+    directory: new Map([['route', { provider: 'route', settingsNs: 'llm-pi-ai' }]]),
+  }, baseInject())
+  official.streamWithSnapshot({ sessionId: 'official-session', api: 'openai-completions' }, { models })
+  const foreignOptions = { sessionId: 'foreign-session', api: 'openai-completions' }
+  foreign.streamWithSnapshot(foreignOptions, { models })
+  assert.equal(consumed[0].options.headers.session_id, 'official-session')
+  assert.equal(consumed[1].options, foreignOptions)
+})
+
+test('Responses 和其他协议原样透传,不重复注入原生会话键', () => {
+  const { Adapter, models, consumed } = makeParts()
+  const adapter = new Adapter()
+  patchAdapterPrototype(adapter, baseInject())
+  for (const api of ['openai-responses', 'openai-codex-responses', 'azure-openai-responses', 'unknown']) {
+    const options = { sessionId: 'session-a', api, headers: { session_id: 'explicit' } }
+    adapter.streamWithSnapshot(options, { models })
+    assert.equal(consumed.at(-1).options, options)
+  }
 })
 
 test('metadata 其余键保留,冻结入参不被改写', () => {

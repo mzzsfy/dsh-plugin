@@ -1,0 +1,235 @@
+diff --git a/lib/index.js b/lib/index.js
+index b40d2ec..3e93923 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1827,16 +1827,6 @@ function getLastEgoActivity() {
+ 	return lastEgoActivity;
+ }
+ const activityListeners = /* @__PURE__ */ new Set();
+-/**
+-* Subscribe to "one bcdp_* call just landed".
+-* @returns the unsubscribe function.
+-*/
+-function onEgoActivity(cb) {
+-	activityListeners.add(cb);
+-	return () => {
+-		activityListeners.delete(cb);
+-	};
+-}
+ function markEgoToolCall(sessionId) {
+ 	toolCallCount += 1;
+ 	lastEgoActivity = Date.now();
+@@ -3713,6 +3703,11 @@ function createTierInjector(o) {
+ 			reapply();
+ 		},
+ 		reapply,
++		dispose() {
++			for (const undo of live.values()) undo();
++			live.clear();
++			all.clear();
++		},
+ 		surface() {
+ 			return {
+ 				live: [...live.keys()],
+@@ -8061,67 +8056,100 @@ function apply(ctx, config = {}) {
+ 			return judgeSettingsOf(resolveConfig(bridge.source())).wallMs;
+ 		}
+ 	};
+-	let browserActive = false;
+-	let browseBatchDepth = 0;
+-	const tiers = createTierInjector({
+-		register: (tool) => {
+-			const dispose = ctx.tools.register(tool);
+-			ctx.effect?.(() => dispose);
+-			return dispose;
+-		},
+-		policy: () => ({
+-			injection: cfg.toolInjection,
+-			toolBrowse: cfg.toolBrowse,
+-			toolExtended: cfg.toolExtended,
+-			toolEscape: cfg.toolEscape,
+-			toolJudge: cfg.toolJudge,
+-			judgeConfigured: judgeConfigured({
+-				jevKey: cfg.jevKey,
+-				layaKey: cfg.layaKey
+-			}),
+-			active: browserActive,
+-			batchDepth: browseBatchDepth
++	const sessions = /* @__PURE__ */ new Map();
++	const definitions = [];
++	const policy = (depth) => ({
++		injection: cfg.toolInjection,
++		toolBrowse: cfg.toolBrowse,
++		toolExtended: cfg.toolExtended,
++		toolEscape: cfg.toolEscape,
++		toolJudge: cfg.toolJudge,
++		judgeConfigured: judgeConfigured({
++			jevKey: cfg.jevKey,
++			layaKey: cfg.layaKey
+ 		}),
++		active: depth > 0,
++		batchDepth: depth
++	});
++	const tiers = createTierInjector({
++		register: (tool) => ctx.tools.register({ ...tool }),
++		policy: () => policy(0),
+ 		logger: ctx.logger
+ 	});
+-	/**
+-	* 活动信号：每�?bcdp_* 调用推进 browse 批次（act �?observe �?wait），
+-	* 到顶即止。只有注入面真的变了�?reapply�?   */
+-	const pulseActivity = () => {
+-		const before = browseBatchDepth;
+-		browserActive = true;
+-		browseBatchDepth = Math.min(BATCH_ORDER.length, browseBatchDepth + 1);
+-		if (before !== browseBatchDepth) tiers.reapply();
++	const pulseActivity = (exec) => {
++		if (cfg.toolInjection !== "lazy") return;
++		const agent = exec?.agent;
++		if (!agent?.ctx?.tools?.register) return;
++		let state = sessions.get(agent);
++		if (!state) {
++			state = {
++				depth: 0,
++				injector: void 0
++			};
++			const owned = state;
++			state.injector = createTierInjector({
++				register: (tool) => agent.ctx.tools.register({ ...tool }),
++				policy: () => policy(owned.depth),
++				logger: ctx.logger
++			});
++			sessions.set(agent, state);
++			for (const tool of definitions) if (!["core", "escape"].includes(tierOfTool(tool.name))) state.injector.offer(tool);
++		}
++		state.depth = Math.min(BATCH_ORDER.length, state.depth + 1);
++		try {
++			state.injector.reapply();
++		} catch (error) {
++			state.injector.dispose();
++			sessions.delete(agent);
++			throw error;
++		}
+ 	};
+-	{
+-		const offActivity = onEgoActivity(pulseActivity);
+-		ctx.effect?.(() => offActivity);
+-	}
+-	/**
+-	* 闲置回收后把注入面收�?core 级（lazy 模式专属）：浏览器已经停了，模型
+-	* 面上留着 30 多个驱动它的工具只是白付。下一次活动会重新铺开�?   */
+ 	const sealAfterReap = () => {
+-		if (cfg.toolInjection !== "lazy" || !browserActive) return;
+-		browserActive = false;
+-		browseBatchDepth = 0;
+-		tiers.reapply();
++		for (const state of sessions.values()) state.injector.dispose();
++		sessions.clear();
+ 	};
+-	/**
+-	* 常驻级工具看到的分级视图：`pulse` = 把本次调用当成一次浏览器活动�?   * `surface` = 当前注入面（doctor 直接打出来，开关状态得看得见）�?   */
++	ctx.on?.("agent/disposed", (payload) => {
++		const agent = payload.agent;
++		sessions.get(agent)?.injector.dispose();
++		sessions.delete(agent);
++	});
++	ctx.effect?.(() => () => {
++		sealAfterReap();
++		tiers.dispose();
++	});
+ 	const tierView = {
+-		pulse: pulseActivity,
+-		active: () => browserActive,
+-		surface: () => tiers.surface()
++		active: (exec) => (sessions.get(exec?.agent)?.depth ?? 0) > 0,
++		surface: (exec) => {
++			const root = tiers.surface();
++			const local = sessions.get(exec?.agent)?.injector.surface();
++			const live = [...root.live, ...local?.live ?? []];
++			return {
++				live,
++				sealed: root.sealed.filter((name$1) => !live.includes(name$1))
++			};
++		}
++	};
++	const offer = (tool) => {
++		const execute = tool.execute;
++		const wrapped = {
++			...tool,
++			execute: (args, exec) => {
++				pulseActivity(exec);
++				return execute(args, exec);
++			}
++		};
++		definitions.push(wrapped);
++		tiers.offer(wrapped);
+ 	};
+ 	const reg = (tool) => {
+-		tiers.offer(tool);
++		offer(tool);
+ 		if (cfg.legacyEgoToolNames && typeof tool.name === "string" && tool.name.startsWith("bcdp_")) {
+ 			const alias = {
+ 				...tool,
+ 				name: "ego_" + tool.name.slice(5)
+ 			};
+ 			try {
+-				tiers.offer(alias);
++				offer(alias);
+ 			} catch (error) {
+ 				ctx.logger?.warn?.(`dsh-browser-cdp: legacy alias ${alias.name} not registered: ${error.message}`);
+ 			}
+@@ -8141,7 +8169,17 @@ function apply(ctx, config = {}) {
+ 			layaKey: cfg.layaKey
+ 		})})`);
+ 	}
+-	bridge.onChange(() => tiers.reapply());
++	bridge.onChange(() => {
++		if (cfg.toolInjection === "always") sealAfterReap();
++		tiers.reapply();
++		for (const [agent, state] of sessions) try {
++			state.injector.reapply();
++		} catch (error) {
++			state.injector.dispose();
++			sessions.delete(agent);
++			ctx.logger?.warn?.(`dsh-browser-cdp: session tools reset after registration failure: ${String(error)}`);
++		}
++	});
+ 	const triggerCdpRefresh = (() => {
+ 		let inFlight = false;
+ 		let pending = false;
+@@ -8337,7 +8375,6 @@ function registerEgoStatus(ctx, cfg, reg, tiers) {
+ 		},
+ 		timeoutMs: 15e3,
+ 		execute: async () => {
+-			tiers.pulse();
+ 			return withEgoLock(async () => {
+ 				try {
+ 					const attach = defaultAttachCache.get();
+@@ -9321,7 +9358,6 @@ function registerHelpAndDoctor(ctx, cfg, reg, tiers) {
+ 		},
+ 		timeoutMs: 1e4,
+ 		execute: async (args) => {
+-			tiers.pulse();
+ 			const q = str(args.topic, "").trim().toLowerCase();
+ 			const key = Object.prototype.hasOwnProperty.call(EGO_HELP_INDEX, q) ? q : "";
+ 			const text = key ? EGO_HELP_INDEX[key] : q ? `未找�?topic "${q}"。可�? ` + Object.keys(EGO_HELP_INDEX).filter((k) => k !== "overview").join(", ") + "\n\noverview: " + EGO_HELP_INDEX.overview : EGO_HELP_INDEX.overview;
+@@ -9360,16 +9396,15 @@ function registerHelpAndDoctor(ctx, cfg, reg, tiers) {
+ 			render: renderText
+ 		},
+ 		timeoutMs: 25e3,
+-		execute: async () => {
+-			tiers.pulse();
++		execute: async (_args, exec) => {
+ 			const lines = [];
+ 			{
+-				const s = tiers.surface();
++				const s = tiers.surface(exec);
+ 				const key = judgeConfigured({
+ 					jevKey: cfg.jevKey,
+ 					layaKey: cfg.layaKey
+ 				});
+-				lines.push(`tool injection: mode=${cfg.toolInjection} browse=${cfg.toolBrowse ? "open" : "sealed"} extended=${cfg.toolExtended ? "open" : "sealed"} escape=${cfg.toolEscape ? "open" : "sealed"} judge=${cfg.toolJudge ? "open" : "sealed"} judgeKey=${key ? "set" : "none"} active=${tiers.active() ? "yes" : "no"} �?live ${s.live.length} / sealed ${s.sealed.length}`);
++				lines.push(`tool injection: mode=${cfg.toolInjection} browse=${cfg.toolBrowse ? "open" : "sealed"} extended=${cfg.toolExtended ? "open" : "sealed"} escape=${cfg.toolEscape ? "open" : "sealed"} judge=${cfg.toolJudge ? "open" : "sealed"} judgeKey=${key ? "set" : "none"} active=${tiers.active(exec) ? "yes" : "no"} �?live ${s.live.length} / sealed ${s.sealed.length}`);
+ 			}
+ 			lines.push(`egoBin: ${cfg.egoBin}`);
+ 			try {

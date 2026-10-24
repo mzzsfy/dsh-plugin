@@ -18,6 +18,7 @@ const FAILING_SECTION_ANCHOR = '✖ failing tests:'
 // 单元运行错误锚点:写入单元日志,供失败明细区分"没跑起来"与"跑了但失败"
 const UNIT_ERROR_ANCHOR = '[unit-error]'
 const PACKAGES_DIR = 'packages'
+const NODE_CMD = 'node '
 const GENERIC_TEST_SUFFIX = '.test.mjs'
 // 平台专属测试文件后缀:通用 *.test.mjs 两平台都跑,专属文件仅对应平台跑(CI=linux)
 const PLATFORM_TEST_SUFFIXES = {
@@ -66,6 +67,36 @@ export function applicableTestFiles(dir, testDir) {
     .map(f => join(testDir, f))
 }
 
+// 包内 test script 的 node 运行参数段(--test 锚点之前),供桩预载等 flag 随单元透传。
+// 锚点为词边界 --test(含 script 以 --test 结尾形态);head 段含引号即整段回退——
+// 引号值内的 --test(如 --test-name-pattern "x --test y")不做引号解析,保守安全。
+// head 按 flag/值成对扫描:不以 -- 开头的 token 只能作为前一 flag 的值,违反即整体回退。
+// 契约:head 不得引入改变输出统计形态的 flag(聚合器按 ℹ fail/ℹ skipped 解析),由包侧保证
+export function nodeFlagsFromTestScript(testScript) {
+  if (typeof testScript !== 'string' || !testScript.startsWith(NODE_CMD)) return []
+  const anchor = testScript.match(/(?:^|\s)--test(?:\s|$)/)
+  if (!anchor) return []
+  const head = testScript.slice(NODE_CMD.length, anchor.index)
+  if (head.includes('"') || head.includes("'")) return []
+  const tokens = head.split(' ').filter(Boolean)
+  for (let i = 0; i < tokens.length; i++) {
+    if (!tokens[i].startsWith('--')) return []
+    if (tokens[i + 1] !== undefined && !tokens[i + 1].startsWith('--')) i++
+  }
+  return tokens
+}
+
+// 包清单的 test script;清单缺失或非法 -> undefined(回退默认命令,不让发现层崩红)
+function readTestScript(pkgDir) {
+  const manifestPath = join(pkgDir, 'package.json')
+  if (!existsSync(manifestPath)) return undefined
+  try {
+    return JSON.parse(readFileSync(manifestPath, 'utf8'))?.scripts?.test
+  } catch {
+    return undefined
+  }
+}
+
 // 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号);
 // 非数组输入(null = changedFilesList 的 fail-open 信号)同样返回 null,禁止崩溃
 export function parseChangedPackages(lines) {
@@ -107,9 +138,11 @@ export function discoverUnits(repoRoot, changedLines) {
     const testPath = join(repoRoot, PACKAGES_DIR, dir, 'test')
     if (!existsSync(testPath) || !statSync(testPath).isDirectory()) continue
     if (changed && !changed.has(dir)) continue
-    const files = applicableTestFiles(join(repoRoot, PACKAGES_DIR, dir), 'test')
+    const pkgDir = join(repoRoot, PACKAGES_DIR, dir)
+    const files = applicableTestFiles(pkgDir, 'test')
     if (files.length === 0) continue
-    units.push({name: dir, command: [process.execPath, '--test', ...files], cwd: join(repoRoot, PACKAGES_DIR, dir)})
+    const flags = nodeFlagsFromTestScript(readTestScript(pkgDir))
+    units.push({name: dir, command: [process.execPath, ...flags, '--test', ...files], cwd: pkgDir})
   }
   const repoFiles = applicableTestFiles(repoRoot, 'tests')
   if (repoFiles.length > 0) units.push({name: 'repo-tests', command: [process.execPath, '--test', ...repoFiles], cwd: repoRoot})

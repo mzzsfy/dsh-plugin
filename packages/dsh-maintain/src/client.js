@@ -82,7 +82,7 @@ const CSS = [
   '.dm-notes__h { font-weight:600; margin-top:8px; }',
   '.dm-notes__li { padding-left:12px; }',
   '.dm-notes__gap { height:6px; }',
-  // ---- 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现(mce-switch 同构) ----
+  // ---- 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现(tn-switch 同构) ----
   '.dm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
   '.dm-switch { display:inline-flex; align-items:center; cursor:pointer; gap:6px; font-size:12px; }',
   '.dm-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box; flex:none;',

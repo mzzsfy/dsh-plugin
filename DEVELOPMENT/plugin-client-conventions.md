@@ -4,8 +4,8 @@
 
 - 插件 UI 中的布尔开关一律用开关(switch)形态,即 track 胶囊 + thumb 圆点的视觉开关,禁止裸 `<input type="checkbox">` 直接呈现,也不得用 `<input type="range">` 数值滑块实现布尔语义;多选列表行内的勾选同样用开关。独立布尔偏好用开关;成组分类的快捷切换(如事件分类启停)可用 pill 组(参考 `dsh-turn-notify` 的 `.tn-pill`,选中态 `.tn-pill--on`),不属布尔开关
 - 实现模式:原生 checkbox 保留(`input[type="checkbox"]`,保可访问性与表单语义)但视觉隐藏,相邻兄弟节点 `track`(圆角胶囊 `<span>`)+ 其子节点 `thumb`(圆点 `<span>`)用 CSS 过渡呈现选中态;结构为 `label.<前缀>-switch > input[type="checkbox"] + .<前缀>-switch__track > .<前缀>-switch__thumb`,label 内允许其余子节点(文字标签、同 label 的文本 input)
-- 各包样式类名必须带包前缀(前缀取包名缩写,须在 packages/ 全清单内唯一,如 `tn-switch` / `mce-switch`),因插件 style 均为全局注入;开关的 `:checked` / `:focus-visible` / `:disabled` 状态选择器必须以 `input[type="checkbox"]` 锚定,防止组合进含其他 input 的 label 时误伤;`:hover` 例外地锚定 label(视觉隐藏的 input 无法成为指针目标)
-- 参考实现:`dsh-model-capability-editor` 的 `.mce-switch`(状态最全,含 disabled);`dsh-turn-notify` 的 `.tn-switch` 为同款。新包仿制并复制对应 switch-guard 守卫测试,不抽共享 UI 包
+- 各包样式类名必须带包前缀(前缀取包名缩写,须在 packages/ 全清单内唯一,如 `tn-switch`),因插件 style 均为全局注入;开关的 `:checked` / `:focus-visible` / `:disabled` 状态选择器必须以 `input[type="checkbox"]` 锚定,防止组合进含其他 input 的 label 时误伤;`:hover` 例外地锚定 label(视觉隐藏的 input 无法成为指针目标)
+- 参考实现:`dsh-model-capability-editor` 的 `.mce-switch`(状态最全,含 disabled);`dsh-turn-notify` 的 `.tn-switch` 为同款。需 disabled 开关形态参照 dsh-maintain 的 `.dm-switch`;新包仿制并复制对应 switch-guard 守卫测试,不抽共享 UI 包
 
 ## 导航图标声明规约
 

@@ -18,6 +18,9 @@
   名单工具,空 schema 会让模型发空参数,均真机实证);模型经 `tool_search`
   检索完整定义后以正确名字与参数调用(宿主按名执行 registry 完整定义)。
   capable 路由(请求带 defer 标)与 deepseek 原生 adapter 一律透传。
+- **会话隔离检索**:`tool_search` 只搜索调用方可见工具,继承、限制与同名覆盖
+  由宿主 `tools.view(exec.agent)` 解析;无 agent 的调用只搜索全局层。搜索只返回
+  定义文本,不注册工具、不修改白名单或任何会话的加载态。
 - **原状还原**:收敛改动以 undo journal 记录,行禁用/卸载按 journal 还原,
   系统回到「没装本包」的世界;重注册顶替的 definition 跳过还原。
 - **干净禁用**:宿主 tools/llm 全局层内部结构不符已知形态时打日志零动作,不崩;

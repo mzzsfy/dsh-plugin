@@ -1,7 +1,4 @@
-// tool_search 折叠入口工具(BDD INV-12/SC-21/SC-22):正则搜全层 registry,
-// 返回命中工具的完整定义文本(name/description/parameters),模型据文本直接
-// 调用(宿主按名执行,与请求 tools 列表无关)。执行只读 registry,与宿主
-// 执行管线零耦合;隐式白名单成员,收敛永不打标。
+// tool_search 只读调用方 scope 的可见定义，搜索不改变 registry 或加载态。
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TOOL_SEARCH_NAME } from './fallback.mjs'
@@ -44,26 +41,12 @@ export function formatMatches(matches) {
   }).join('\n\n')
 }
 
-/** 全层定义收集(按名去重,先层优先),跳过 tool_search 自身。 */
-function collectDefinitions(layers) {
-  const byName = new Map()
-  for (const layer of layers) {
-    for (const name of layer.names()) {
-      if (name === TOOL_SEARCH_NAME || byName.has(name)) continue
-      const definition = layer.definitionOf(name)
-      if (definition === null || typeof definition !== 'object') continue
-      byName.set(name, definition)
-    }
-  }
-  return byName
-}
-
 /**
  * 构造 tool_search 定义(defineTool 产物,含编译 schema 与执行体)。
- * @param {() => Array<{ names: () => string[], definitionOf: (name: string) => unknown|undefined }>} layersOf 层读取器(现读)
+ * @param {(scope: object|undefined) => Map<string, object>} definitionsOf 调用方可见定义读取器(现读)
  * @returns {object} ToolRuntime.register 直收的定义
  */
-export function buildSearchTool(layersOf) {
+export function buildSearchTool(definitionsOf) {
   return defineTool({
     name: TOOL_SEARCH_NAME,
     description: '按需检索延迟加载的工具:输入正则模式(不区分大小写,匹配工具名与描述),返回命中工具的完整定义。需要当前工具列表中没有的能力时调用,拿到定义后即可直接调用该工具。',
@@ -75,13 +58,14 @@ export function buildSearchTool(layersOf) {
       schema: { type: 'object', properties: {}, additionalProperties: true },
       render: (_args, value) => [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value, null, 2) }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const regex = compilePattern(args?.pattern)
       if (regex === undefined) return { text: `无效模式:${String(args?.pattern ?? '')}。请输入合法正则表达式。` }
       const limit = clampLimit(args?.limit)
       const matches = []
-      for (const [name, definition] of collectDefinitions(layersOf())) {
+      for (const [name, definition] of definitionsOf(exec?.agent)) {
         if (matches.length >= limit) break
+        if (name === TOOL_SEARCH_NAME || definition === null || typeof definition !== 'object') continue
         const description = typeof definition.description === 'string' ? definition.description : ''
         if (regex.test(name) || regex.test(description)) {
           matches.push({ name, description, parameters: definition.parameters })

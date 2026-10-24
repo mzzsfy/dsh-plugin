@@ -1,0 +1,446 @@
+diff --git a/src/index.ts b/src/index.ts
+index aba4b8f..b66da64 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -34,13 +34,13 @@ import { existsSync, readdirSync } from 'node:fs'
+ import { homedir } from 'node:os'
+ import { fileURLToPath } from 'node:url'
+ import { importLoginCookies } from './login-import.ts'
+-import { initCastServer, markEgoToolCall, getLastEgoActivity, onEgoActivity, setAttachEndpoint, recycleWorker } from './cast-server.ts'
++import { initCastServer, markEgoToolCall, getLastEgoActivity, setAttachEndpoint, recycleWorker } from './cast-server.ts'
+ import { registerEgoBrowserGateway } from './gateway.ts'
+ import { EGO_HELP_INDEX } from './help.ts'
+ import { HUMAN_CHECK_PROBE } from './captcha.ts'
+ import { Config as ConfigSchema, resolveConfig, judgeSettingsOf, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs, DEFAULT_SPACE, AUTO_SPACE_SENTINEL } from './config.ts'
+ import { installSettingsAuto, registerSettingsBridge } from './settings.ts'
+-import { BATCH_ORDER, createTierInjector, judgeConfigured, unknownTieredTools, type TierInjector } from './toolTiers.ts'
++import { BATCH_ORDER, createTierInjector, judgeConfigured, unknownTieredTools, tierOfTool, type TierInjector } from './toolTiers.ts'
+ import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
+ import { SENTINEL, j, str, num, bool, readAll, SAFE_FN, safeEvalWrap } from './util.ts'
+ import {
+@@ -990,9 +990,8 @@ interface ExecLike {
+ 
+ /** 常驻级工具看到的工具分级视图（活动脉�?+ 活动�?+ 当前注入面）�?*/
+ interface TierView {
+-  pulse: () => void
+-  active: () => boolean
+-  surface: () => { live: string[]; sealed: string[] }
++  active: (exec?: ToolExec) => boolean
++  surface: (exec?: ToolExec) => { live: string[]; sealed: string[] }
+ }
+ 
+ /**
+@@ -1350,60 +1349,84 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
+   // ── 工具分级注入 ──────────────────────────────────────────────────────
+   // 以前挂载时一次性把 41 �?bcdp_* 工具注册进宿主工具表，每个会话每一轮都�?  // schema 成本（实�?desc+params �?25.6K 字符），而不碰浏览器的会话一个也用不上�?  // 现在把「谁能出现在模型面前」交�?src/toolTiers.ts 的策略，注册时机由这�?  // 控制器执行：封印 = 反注册（从工具列表消失），不是执行期拒绝——与
+   // prime-memory 的工具组封印同式�?
+-  let browserActive = false
+-  // browse 内部批次深度�? = 尚未放行�? = act�? = +observe�? = +wait�?  // 每次浏览器活动推进一批；到顶后不再变化（幂等）�?
+-  let browseBatchDepth = 0
+-  const tiers: TierInjector = createTierInjector({
+-    register: (tool) => {
+-      const dispose = ctx.tools.register(tool) as unknown as () => void
+-      // Cordis lifecycle: unregister the tool when the plugin unmounts.
+-      ctx.effect?.(() => dispose)
+-      return dispose
+-    },
+-    policy: () => ({
+-      injection: cfg.toolInjection,
+-      toolBrowse: cfg.toolBrowse,
+-      toolExtended: cfg.toolExtended,
+-      toolEscape: cfg.toolEscape,
+-      toolJudge: cfg.toolJudge,
+-      judgeConfigured: judgeConfigured({ jevKey: cfg.jevKey, layaKey: cfg.layaKey }),
+-      active: browserActive,
+-      batchDepth: browseBatchDepth,
+-    }),
++  type AgentScope = { ctx: { tools: { register(tool: unknown): () => void } } }
++  type SessionTiers = { depth: number; injector: TierInjector }
++  const sessions = new Map<AgentScope, SessionTiers>()
++  const definitions: ToolHandle[] = []
++  const policy = (depth: number) => ({
++    injection: cfg.toolInjection,
++    toolBrowse: cfg.toolBrowse,
++    toolExtended: cfg.toolExtended,
++    toolEscape: cfg.toolEscape,
++    toolJudge: cfg.toolJudge,
++    judgeConfigured: judgeConfigured({ jevKey: cfg.jevKey, layaKey: cfg.layaKey }),
++    active: depth > 0,
++    batchDepth: depth,
++  })
++  const tiers = createTierInjector({
++    register: tool => ctx.tools.register({ ...tool }) as () => void,
++    policy: () => policy(0),
+     logger: ctx.logger,
+   })
+-  /**
+-   * 活动信号：每�?bcdp_* 调用推进 browse 批次（act �?observe �?wait），
+-   * 到顶即止。只有注入面真的变了�?reapply�?   */
+-  const pulseActivity = (): void => {
+-    const before = browseBatchDepth
+-    browserActive = true
+-    browseBatchDepth = Math.min(BATCH_ORDER.length, browseBatchDepth + 1)
+-    if (before !== browseBatchDepth) tiers.reapply()
+-  }
+-  // markEgoToolCall() 是所�?bcdp_* 调用的公共出口（也是 idle reaper 的活动时钟）�?  // 分级解锁挂在同一个信号上：工具体不需要知�?tiers 存在�?
+-  {
+-    const offActivity = onEgoActivity(pulseActivity)
+-    ctx.effect?.(() => offActivity)
++  const pulseActivity = (exec: ToolExec): void => {
++    if (cfg.toolInjection !== 'lazy') return
++    const agent = exec?.agent as AgentScope | undefined
++    if (!agent?.ctx?.tools?.register) return
++    let state = sessions.get(agent)
++    if (!state) {
++      state = { depth: 0, injector: undefined as unknown as TierInjector }
++      const owned = state
++      state.injector = createTierInjector({
++        register: tool => agent.ctx.tools.register({ ...tool }),
++        policy: () => policy(owned.depth),
++        logger: ctx.logger,
++      })
++      sessions.set(agent, state)
++      for (const tool of definitions) {
++        if (!['core', 'escape'].includes(tierOfTool(tool.name))) state.injector.offer(tool)
++      }
++    }
++    state.depth = Math.min(BATCH_ORDER.length, state.depth + 1)
++    try {
++      state.injector.reapply()
++    } catch (error) {
++      state.injector.dispose()
++      sessions.delete(agent)
++      throw error
++    }
+   }
+-  /**
+-   * 闲置回收后把注入面收�?core 级（lazy 模式专属）：浏览器已经停了，模型
+-   * 面上留着 30 多个驱动它的工具只是白付。下一次活动会重新铺开�?   */
+   const sealAfterReap = (): void => {
+-    if (cfg.toolInjection !== 'lazy' || !browserActive) return
+-    browserActive = false
+-    browseBatchDepth = 0
+-    tiers.reapply()
++    for (const state of sessions.values()) {
++      state.injector.dispose()
++    }
++    sessions.clear()
+   }
+-  /**
+-   * 常驻级工具看到的分级视图：`pulse` = 把本次调用当成一次浏览器活动�?   * `surface` = 当前注入面（doctor 直接打出来，开关状态得看得见）�?   */
++  ctx.on?.('agent/disposed', (payload: unknown) => {
++    const agent = (payload as { agent: AgentScope }).agent
++    sessions.get(agent)?.injector.dispose()
++    sessions.delete(agent)
++  })
++  ctx.effect?.(() => () => { sealAfterReap(); tiers.dispose() })
+   const tierView: TierView = {
+-    pulse: pulseActivity,
+-    active: () => browserActive,
+-    surface: () => tiers.surface(),
++    active: exec => (sessions.get(exec?.agent as AgentScope)?.depth ?? 0) > 0,
++    surface: exec => {
++      const root = tiers.surface()
++      const local = sessions.get(exec?.agent as AgentScope)?.injector.surface()
++      const live = [...root.live, ...(local?.live ?? [])]
++      return { live, sealed: root.sealed.filter(name => !live.includes(name)) }
++    },
++  }
++  const offer = (tool: ToolHandle): void => {
++    const execute = tool.execute
++    const wrapped = { ...tool, execute: (args: Record<string, unknown>, exec: ToolExec) => {
++      pulseActivity(exec)
++      return execute(args, exec as never)
++    } } as ToolHandle
++    definitions.push(wrapped)
++    tiers.offer(wrapped)
+   }
+   const reg = (tool: ToolHandle): void => {
+-    tiers.offer(tool)
++    offer(tool)
+     // T8.5: optional ego_* aliases for scripts written before the bcdp_*
+     // rename. Off by default; the old names collide with the upstream
+     // ego-browser plugin, so enabling this IS the opt-in to that conflict.
+@@ -1411,7 +1434,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
+     if (cfg.legacyEgoToolNames && typeof tool.name === 'string' && tool.name.startsWith('bcdp_')) {
+       const alias = { ...tool, name: 'ego_' + tool.name.slice('bcdp_'.length) } as ToolHandle
+       try {
+-        tiers.offer(alias)
++        offer(alias)
+       } catch (error) {
+         ctx.logger?.warn?.(`dsh-browser-cdp: legacy alias ${alias.name} not registered: ${(error as Error).message}`)
+       }
+@@ -1439,7 +1462,18 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
+     )
+   }
+   // 设置页翻 toolInjection / toolBrowse / toolExtended / toolEscape / toolJudge �?volatile 热更 �?当场重算注入�?  // （与 prime-memory �?applyToolSeals 同式：不需要重启插件）�?
+-bridge.onChange(() => tiers.reapply())
++bridge.onChange(() => {
++    if (cfg.toolInjection === 'always') sealAfterReap()
++    tiers.reapply()
++    for (const [agent, state] of sessions) {
++      try { state.injector.reapply() }
++      catch (error) {
++        state.injector.dispose()
++        sessions.delete(agent)
++        ctx.logger?.warn?.(`dsh-browser-cdp: session tools reset after registration failure: ${String(error)}`)
++      }
++    }
++  })
+ 
+   // ── R1: CDP attach cache �?the bridge between settings and every spawn ────
+   // `resolveEgoEnv` is synchronous and reads `defaultAttachCache`, so the cache
+@@ -1735,7 +1769,6 @@ function registerEgoStatus(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool: T
+       timeoutMs: 15_000,
+       execute: async () => {
+         // 分级注入：常驻级的探�?指南/诊断被调�?= 用户或模型已经在�?        // 注浏览器，把其余分级按当前深度铺开来（幂等）。不�?        // markEgoToolCall：那个信号会顺带弹开侧栏观察面板�?
+-        tiers.pulse()
+         return withEgoLock(async () => {
+           try {
+             const attach = defaultAttachCache.get()
+@@ -2998,7 +3031,6 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
+       timeoutMs: 10_000,
+       execute: async (args: Record<string, unknown>) => {
+         // 分级注入：读了指南就得有工具可用，否则指南里介绍的工具模�?        // 根本调不到�?
+-        tiers.pulse()
+         const q = str(args.topic, '').trim().toLowerCase()
+         const key = Object.prototype.hasOwnProperty.call(EGO_HELP_INDEX, q) ? q : ''
+         const text = key
+@@ -3031,20 +3063,19 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
+         render: renderText,
+       },
+       timeoutMs: 25_000,
+-      execute: async () => {
++      execute: async (_args: Record<string, unknown>, exec: ToolExec) => {
+         // 分级注入：预检即视为浏览器活动（同 bcdp_status）�?
+-        tiers.pulse()
+         const lines: string[] = []
+         // 工具注入面：每个开关的当前状态与实际注册了多少工具，一行说完�?
+         {
+-          const s = tiers.surface()
++          const s = tiers.surface(exec)
+           const key = judgeConfigured({ jevKey: cfg.jevKey, layaKey: cfg.layaKey })
+           lines.push(
+             `tool injection: mode=${cfg.toolInjection}` +
+             ` browse=${cfg.toolBrowse ? 'open' : 'sealed'} extended=${cfg.toolExtended ? 'open' : 'sealed'}` +
+             ` escape=${cfg.toolEscape ? 'open' : 'sealed'}` +
+             ` judge=${cfg.toolJudge ? 'open' : 'sealed'} judgeKey=${key ? 'set' : 'none'}` +
+-            ` active=${tiers.active() ? 'yes' : 'no'} �?live ${s.live.length} / sealed ${s.sealed.length}`,
++            ` active=${tiers.active(exec) ? 'yes' : 'no'} �?live ${s.live.length} / sealed ${s.sealed.length}`,
+           )
+         }
+         // vendored runtime
+diff --git a/src/toolTiers.ts b/src/toolTiers.ts
+index c1a5c35..906458b 100644
+--- a/src/toolTiers.ts
++++ b/src/toolTiers.ts
+@@ -248,6 +248,8 @@ export interface TierInjector {
+   offer(tool: TierToolLike): void
+   /** 策略变了（设置热更 / 活动解锁 / 闲置回收）：补齐该注册的、收回该封印的。幂等。 */
+   reapply(): void
++  /** 注销本控制器拥有的全部注册。 */
++  dispose(): void
+   /** 当前注入面（测试与 doctor 用）。 */
+   surface(): { live: string[]; sealed: string[] }
+ }
+@@ -292,6 +294,11 @@ export function createTierInjector(o: TierInjectorOptions): TierInjector {
+       reapply()
+     },
+     reapply,
++    dispose() {
++      for (const undo of live.values()) undo()
++      live.clear()
++      all.clear()
++    },
+     surface() {
+       return { live: [...live.keys()], sealed: [...all.keys()].filter((n) => !live.has(n)) }
+     },
+diff --git a/tests/tier-mount.test.ts b/tests/tier-mount.test.ts
+index 14644bd..4e21ba2 100644
+--- a/tests/tier-mount.test.ts
++++ b/tests/tier-mount.test.ts
+@@ -21,6 +21,7 @@ const mount = (config: Record<string, unknown> = {}) => {
+   /** 已注册工具句柄，按名字取回以便直接调用 execute。 */
+   const handles = new Map<string, any>();
+   const volatileHandlers = new Set<(paths: string[]) => void>();
++  const disposedHandlers = new Set<(payload: any) => void>();
+   const teardown: Array<() => void> = [];
+   const ctx: any = {
+     tools: {
+@@ -43,9 +44,10 @@ const mount = (config: Record<string, unknown> = {}) => {
+         },
+       }),
+     },
+-    on: (_event: string, fn: (paths: string[]) => void) => {
+-      volatileHandlers.add(fn);
+-      return () => volatileHandlers.delete(fn);
++    on: (event: string, fn: any) => {
++      const handlers = event === 'agent/disposed' ? disposedHandlers : volatileHandlers;
++      handlers.add(fn);
++      return () => handlers.delete(fn);
+     },
+     effect: (fn: () => unknown) => {
+       try {
+@@ -59,9 +61,18 @@ const mount = (config: Record<string, unknown> = {}) => {
+     },
+     logger: { info() {}, warn() {}, error() {} },
+   };
++  const local: string[] = [];
++  const agent = { ctx: { tools: { register: (tool: any) => {
++    local.push(tool.name); handles.set(tool.name, tool);
++    return () => { const i = local.indexOf(tool.name); if (i >= 0) local.splice(i, 1); };
++  } } } };
+   apply(ctx, config as never);
+   return {
+-    live,
++    get live() { return [...live, ...local]; },
++    rootLive: live,
++    local,
++    agent,
++    disposeAgent: () => { for (const fn of disposedHandlers) fn({ agent }); },
+     handles,
+     /** 插件卸载：跑掉所有 effect disposer（工具应全部反注册）。 */
+     unmount: () => { for (const d of teardown.splice(0)) d(); },
+@@ -101,7 +112,7 @@ describe("tool tier injection at mount", () => {
+   it("the first core-tier call releases the act batch (bcdp_help needs no browser)", async () => {
+     const m = mount();
+     expect(sorted(m.live)).toEqual(sorted(RESIDENT()));
+-    await m.handles.get("bcdp_help").execute({ topic: "navigate" }, {});
++    await m.handles.get("bcdp_help").execute({ topic: "navigate" }, { agent: m.agent });
+     // 批次模型：一次活动只放出 act 批；observe/wait 仍封印。
+     expect(sorted(m.live)).toEqual(sorted([
+       ...RESIDENT(), ...TIER_MEMBERS.act, ...TIER_MEMBERS.power, ...TIER_MEMBERS.session,
+@@ -116,13 +127,13 @@ describe("tool tier injection at mount", () => {
+   it("each further activity releases the next browsing batch (act → observe → wait)", async () => {
+     const m = mount();
+     const help = m.handles.get("bcdp_help");
+-    await help.execute({}, {}); // depth 1
++    await help.execute({}, { agent: m.agent }); // depth 1
+     expect(m.live).toContain("bcdp_click");
+     expect(m.live).not.toContain("bcdp_screenshot");
+-    await help.execute({}, {}); // depth 2
++    await help.execute({}, { agent: m.agent }); // depth 2
+     expect(m.live).toContain("bcdp_screenshot");
+     expect(m.live).not.toContain("bcdp_wait");
+-    await help.execute({}, {}); // depth 3
++    await help.execute({}, { agent: m.agent }); // depth 3
+     expect(m.live).toContain("bcdp_wait");
+     expect(sorted(m.live)).toEqual(sorted([
+       ...TIER_MEMBERS.core, ...TIER_MEMBERS.act, ...TIER_MEMBERS.observe, ...TIER_MEMBERS.wait,
+@@ -133,7 +144,7 @@ describe("tool tier injection at mount", () => {
+   it("one switch group can be sealed alone, live, without touching the others", async () => {
+     const config: Record<string, unknown> = { toolInjection: "lazy" };
+     const m = mount(config);
+-    const report = await m.handles.get("bcdp_doctor").execute({}, {});
++    const report = await m.handles.get("bcdp_doctor").execute({}, { agent: m.agent });
+     // depth 1: core + escape + act batch + power + session.
+     expect(m.live.length).toBe(
+       RESIDENT().length + browseBatch("act").length + TIER_MEMBERS.power.length + TIER_MEMBERS.session.length,
+@@ -181,9 +192,106 @@ describe("tool tier injection at mount", () => {
+     expect(live).not.toContain("ego_click");
+   });
+ 
++  it('lazy activity stays local and agent disposal retracts its additions', async () => {
++    const m = mount();
++    await m.handles.get('bcdp_help').execute({}, { agent: m.agent });
++    expect(m.local).toContain('bcdp_click');
++    expect(m.rootLive).not.toContain('bcdp_click');
++    m.disposeAgent();
++    expect(m.local).toEqual([]);
++    expect(sorted(m.rootLive)).toEqual(sorted(RESIDENT()));
++    m.unmount();
++  });
++
++  it('agents activated by help own distinct click handles and isolated deferLoading state', async () => {
++    const m = mount();
++    const secondHandles = new Map<string, { name: string; deferLoading?: boolean }>();
++    const secondAgent = { ctx: { tools: { register: (tool: { name: string; deferLoading?: boolean }) => {
++      secondHandles.set(tool.name, tool);
++      return () => { secondHandles.delete(tool.name); };
++    } } } };
++    try {
++      const help = m.handles.get('bcdp_help');
++      await help.execute({}, { agent: m.agent });
++      const firstClick = m.handles.get('bcdp_click');
++      expect(firstClick).toBeDefined();
++      expect(firstClick.deferLoading).toBeUndefined();
++      firstClick.deferLoading = true;
++
++      await help.execute({}, { agent: secondAgent });
++      const secondClick = secondHandles.get('bcdp_click');
++      expect(secondClick).toBeDefined();
++      expect(secondClick).not.toBe(firstClick);
++      expect(secondClick!.deferLoading).toBeUndefined();
++      secondClick!.deferLoading = false;
++      expect(firstClick.deferLoading).toBe(true);
++      expect(m.rootLive).not.toContain('bcdp_click');
++    } finally {
++      m.unmount();
++    }
++  });
++
++  it('always and lazy registrations cannot mutate the reusable click definition template', async () => {
++    const config: Record<string, unknown> = { toolInjection: 'always' };
++    const m = mount(config);
++    try {
++      const rootClick = m.handles.get('bcdp_click');
++      expect(rootClick).toBeDefined();
++      expect(rootClick.deferLoading).toBeUndefined();
++      rootClick.deferLoading = true;
++
++      config.toolInjection = 'lazy';
++      m.emitVolatileUpdate();
++      expect(m.rootLive).not.toContain('bcdp_click');
++      await m.handles.get('bcdp_help').execute({}, { agent: m.agent });
++      const localClick = m.handles.get('bcdp_click');
++      expect(m.local).toContain('bcdp_click');
++      expect(localClick).not.toBe(rootClick);
++      expect(localClick.deferLoading).toBeUndefined();
++      localClick.deferLoading = false;
++      expect(rootClick.deferLoading).toBe(true);
++
++      config.toolInjection = 'always';
++      m.emitVolatileUpdate();
++      const nextRootClick = m.handles.get('bcdp_click');
++      expect(m.local).toEqual([]);
++      expect(m.rootLive).toContain('bcdp_click');
++      expect(nextRootClick).not.toBe(rootClick);
++      expect(nextRootClick).not.toBe(localClick);
++      expect(nextRootClick.deferLoading).toBeUndefined();
++    } finally {
++      m.unmount();
++    }
++  });
++
++  it('switching lazy to always and back removes all old local registrations', async () => {
++    const config: Record<string, unknown> = { toolInjection: 'lazy' };
++    const m = mount(config);
++    await m.handles.get('bcdp_help').execute({}, { agent: m.agent });
++    config.toolInjection = 'always';
++    m.emitVolatileUpdate();
++    expect(m.local).toEqual([]);
++    expect(m.rootLive).toContain('bcdp_wait');
++    config.toolInjection = 'lazy';
++    m.emitVolatileUpdate();
++    expect(sorted(m.rootLive)).toEqual(sorted(RESIDENT()));
++    await m.handles.get('bcdp_help').execute({}, { agent: m.agent });
++    expect(m.local).toContain('bcdp_click');
++    expect(m.local).not.toContain('bcdp_screenshot');
++    m.unmount();
++  });
++
++  it('an unscoped help call cannot open tools globally', async () => {
++    const m = mount();
++    await m.handles.get('bcdp_help').execute({}, {});
++    expect(sorted(m.rootLive)).toEqual(sorted(RESIDENT()));
++    expect(m.local).toEqual([]);
++    m.unmount();
++  });
++
+   it("unmounting the plugin unregisters everything that is live", async () => {
+     const m = mount();
+-    await m.handles.get("bcdp_help").execute({}, {});
++    await m.handles.get("bcdp_help").execute({}, { agent: m.agent });
+     expect(m.live.length).toBeGreaterThan(0);
+     m.unmount();
+     expect(m.live).toEqual([]);
