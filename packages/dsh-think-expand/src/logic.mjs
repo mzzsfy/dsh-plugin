@@ -221,59 +221,94 @@ export function registerCurrent(registry, uid, seen) {
   if (uid !== undefined) capSet(registry.expanded.add(uid))
 }
 
+// ---- 工具机:与思考机独立的第二状态机(展开全部消息模式) ----
+
+// 行结构:{ uid, expandable, expanded, plugged, bodyText }。
+// 独立 registry/current/manual/read,与思考机互不读写;共享 seen 存取助手与
+// 容量上限。目标行 = 文档序最后一个可展开行(工具流 state 形态多样,不按
+// state 选行;preparing 行无官方 expandable 标记天然落选);至多一条工具行展开。
+export function createToolsRegistry() {
+  return { current: null, marks: new Map(), manual: new Map(), read: new Map(), expanded: new Set() }
+}
+
+export function planTools(registry, rows, options = {}) {
+  const actions = []
+
+  // 手动识别:已展开且无插件闩锁 → manual(永不干预);正文未挂载不识别。
+  // 仅在插件已展开过行(current 在场)后识别:首轮既存展开行视为中性,
+  // 与思考机"无 running 行不干预"同构,防首扫把用户历史展开误判挡住目标行
+  if (options.suppressManual !== true && registry.current !== null) {
+    for (const row of rows) {
+      if (!row.expandable || !row.expanded || row.bodyText === '' || row.plugged) continue
+      if (findSeenKey(registry.marks, row.uid, row.bodyText) !== null) continue
+      if (isCurrent(registry, row.uid, row.bodyText)) continue
+      const readKey = findSeenKey(registry.read, row.uid, row.bodyText)
+      if (readKey !== null) {
+        if (row.uid !== undefined && registry.expanded.has(row.uid)) registry.read.delete(readKey)
+        continue
+      }
+      if (findSeenKey(registry.manual, row.uid, row.bodyText) === null) {
+        putSeen(registry.manual, row.uid, row.bodyText)
+        if (registry.current !== null) {
+          const currentIndex = findRow(registry, rows)
+          const currentRow = currentIndex >= 0 ? rows[currentIndex] : null
+          if (currentRow !== null && currentRow.expanded) actions.push({ index: currentIndex, kind: 'collapse' })
+          registry.marks.delete(registry.current.seen)
+          registry.current = null
+        }
+      }
+    }
+  }
+
+  // 插件展开行被收起 → 已读(该工具行不再展开)
+  if (registry.current !== null) {
+    const index = findRow(registry, rows)
+    if (index < 0 || !rows[index].expandable || !rows[index].expanded) {
+      putSeen(registry.read, registry.current.uid, registry.current.seen)
+      if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
+      registry.marks.delete(registry.current.seen)
+      registry.current = null
+    }
+  }
+
+  // 目标行:文档序最后一个可展开行;无则不干预
+  let targetIndex = -1
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index].expandable) { targetIndex = index; break }
+  }
+  if (targetIndex < 0) return { actions }
+  const target = rows[targetIndex]
+
+  if (findSeenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
+  if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
+  if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
+
+  // 插件展开过的目标行被收起(如回合收尾重建后):登记宽松已读,不强制重展开
+  if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+    if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
+    return { actions }
+  }
+
+  // 新目标行:收起旧插件行(手动行除外),展开目标行
+  if (registry.current !== null) {
+    const oldIndex = findRow(registry, rows)
+    const oldIsManual = findSeenKey(registry.manual, registry.current.uid, registry.current.seen) !== null
+    const old = oldIndex >= 0 ? rows[oldIndex] : null
+    if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
+    registry.marks.delete(registry.current.seen)
+    registry.current = null
+  }
+
+  if (!target.expanded) {
+    actions.push({ index: targetIndex, kind: 'expand' })
+    if (target.uid !== undefined) capSet(registry.expanded.add(target.uid))
+  }
+  if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
+  return { actions }
+}
+
 // 观察器重挂判定:已观察节点为空或与当前容器不一致(容器被重建)即需重挂,
 // 旧观察器 disconnect,避免 detached 节点泄漏与观察永久失效。
 export function needsReattach(observed, current) {
   return observed === null || observed !== current
-}
-
-// ---- 全部消息模式:行触达登记与展开决策 ----
-
-// 用户触达登记值:open = 手动展开过的行,插件持续保持展开;
-// closed = 手动收起过的行,插件不再展开。
-export const TOUCH_OPEN = 'open'
-export const TOUCH_CLOSED = 'closed'
-
-// 触达登记容量上限,超出按插入序裁剪最旧条目(登记以会话行数量级增长,有界防御)。
-export const ALL_TOUCHED_CAP = 10 * 50
-
-export function createAllRegistry() {
-  return { touched: new Map() }
-}
-
-// 行触达键:宿主稳定行键优先,控制器元素序号兜底。
-function allRowKey(item) {
-  return item.key !== undefined ? item.key : item.uid
-}
-
-// 行目标态:未触达默认展开,触达后以登记值为准。
-function touchedValue(registry, item) {
-  const value = registry.touched.get(allRowKey(item))
-  return value !== undefined ? value : TOUCH_OPEN
-}
-
-function putTouched(map, key, value) {
-  map.delete(key)
-  map.set(key, value)
-  capMap(map, ALL_TOUCHED_CAP)
-}
-
-// 全部消息模式展开决策。行结构:{ uid, key, expandable, expanded, plugged, touched }。
-// key 为宿主稳定行键;touched 为控制器查表结果(键已在登记表)。
-// 动作只补齐目标态差:目标展开且当前收起 → expand。登记规则(suppressManual 首扫除外):
-// 无插件闩锁的展开 = 用户手动意图 → open;有闩锁的收起 = 用户收回插件行 → closed。
-export function planAll(registry, rows, options = {}) {
-  const actions = []
-  if (options.suppressManual !== true) {
-    for (const item of rows) {
-      if (!item.expandable || item.touched) continue
-      if (item.expanded && !item.plugged) putTouched(registry.touched, allRowKey(item), TOUCH_OPEN)
-      else if (!item.expanded && item.plugged) putTouched(registry.touched, allRowKey(item), TOUCH_CLOSED)
-    }
-  }
-  for (const [index, item] of rows.entries()) {
-    if (!item.expandable || item.expanded) continue
-    if (touchedValue(registry, item) !== TOUCH_CLOSED) actions.push({ index, kind: 'expand' })
-  }
-  return { actions }
 }
