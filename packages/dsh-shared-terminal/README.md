@@ -11,7 +11,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 | `open` | 当前 Session 创建官方终端，返回 `terminal_id`。默认 `cols=80, rows=24`，整数范围 `cols=2..300, rows=1..200`，宿主仍可进一步限制；`shell_path` 只能选择 Controller 发现的 shell。成功结果挂载后打开官方 tab。 |
 | `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与 attachment 有无。 |
 | `read` | 必填 `terminal_id`；`lines` 默认 20，范围 1–200。读取 active buffer viewport 内最新内容起的最多 N 个物理行——以最后一个非空行与光标行（非空时）为界，高窗口不会读到尾部空白；保留内部空行、软换行和当前 alternate screen（整屏坐标）。 |
-| `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。0.2.0 与 0.2.1-alpha.2 蹭 UI attachment 写（无附着返回 `NOT_ATTACHED`，不创建 follower、不抢 control）；0.2.1-rc.2 起自持 attach 泵（持续持有输入控制权，用户可随时「接管输入」抢回，泵的下一次写入重新抢回——最后写入者胜出；重抢仍失败返回 `TERMINAL_ERROR`，可重试）。 |
+| `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。0.2.0 与 0.2.1-alpha.2 蹭 UI attachment 写（无附着返回 `NOT_ATTACHED`，不创建 follower、不抢 control）；0.2.1-rc.2 起自持 attach 泵：写入时短暂抢附着、**写完空闲即释放**（最后写入者胜出，用户可随时接管）；重抢仍失败返回 `TERMINAL_ERROR`，可重试。 |
 | `wait` | 必填 `terminal_id, text`；`text` 为待等待子串（大小写敏感逐字），`timeout_ms` 默认 10000、范围 100–55000（上限为工具超时减返回余量）。阻塞轮询屏幕直到 `text` 出现（`found`，携带命中时刻屏幕快照与 `elapsed_ms`）、终端进入 `exited/failed`（`exited`，退出优先于命中）或超时（`timeout`，携带 `timeout_ms` 与最后一次屏幕快照）。匹配面为 read 同款 active viewport：滚出屏幕的历史不参与匹配；等待中终端被关闭返回 `TERMINAL_UNAVAILABLE`；回合取消即中止。轮询间隔 100ms。 |
 | `close` | 必填 `terminal_id`；通过官方 Controller 关闭终端，同一 Session 重复关闭保持宿主的幂等语义。 |
 
@@ -29,7 +29,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 
 仅支持实测版本 DSH **0.2.0-rc.1、0.2.0-rc.2、0.2.1-alpha.2、0.2.1-rc.2 与 0.2.1-rc.3**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不修改 DSH、不另开 PTY、不读取 serializer 输出；附着策略随宿主代际：0.2.0 系与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
 
-装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件成为控制者（0.2.1-rc.2 输入排他），泵保持附着直到用户点官方「接管输入」拿回控制权、终端关闭被驱逐或插件停用；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，用户可随时再次接管，双方交替互斥）。插件持有控制权期间用户页面显示「此页面当前只读」与「接管输入」按钮。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
+装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件短暂成为控制者（0.2.1-rc.2 输入排他），**写完空闲即释放附着**；空闲期无人附着，宿主向 UI 广播状态使其恢复可写并按容器重算终端几何——若泵持续附着，UI 长期只读，官方布局重算被跳过，插件写入推高的 PTY 行数会把终端底部推出可视区且滚动失效（0.2.1-rc.2 实测，见修复记录）。用户点官方「接管输入」随时拿回控制权；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，双方交替互斥）。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
 
 Host 启动检查 Controller 版本、方法和 owner map；检测不匹配时不注册工具并告警。每次读取另检查终端实例、队列和屏幕结构，失败返回 `TERMINAL_UNAVAILABLE`。这不是公开 API，升级后不保证兼容。
 
@@ -62,4 +62,4 @@ npm test -- /path/to/isolated-dsh-host
 
 按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`。
 
-dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2` 与 `0.2.1-rc.3`(dshReleases `compatible`)。
+dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2` 与 `0.2.1-rc.3`(dshReleases `compatible`)。

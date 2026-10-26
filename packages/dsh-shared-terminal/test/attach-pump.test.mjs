@@ -69,7 +69,7 @@ test('attach泵_控制权竞争_重试耗尽抛错', async () => {
   factory.dispose()
 })
 
-// Given 同一泵连续多次 write,When 依次提交,Then 命令帧 sequence 严格递增且都成功
+// Given 同一泵连续多次 write,When 依次提交,Then 逐次新世代附着,数据按序送达且各世代 sequence 合规
 test('attach泵_序列递增_连续写', async () => {
   const { createPumpFactory } = await import('../src/lib/attach-pump.mjs')
   const agent = { id: 'agent-1' }
@@ -79,7 +79,8 @@ test('attach泵_序列递增_连续写', async () => {
   await pump.write('one')
   await pump.write('two')
   await pump.write('three')
-  assert.deepEqual(frames.map(f => f.sequence), [1, 2, 3])
+  // 空闲释放后每次写入各自建立附着,sequence 按世代从 1 起
+  assert.deepEqual(frames.map(f => `${f.attempt}:${f.sequence}:${f.data}`), ['1:1:one', '2:1:two', '3:1:three'])
   factory.dispose()
 })
 
@@ -183,4 +184,67 @@ test('attach泵_dispose_停止附着并重置缓存', async () => {
   await fresh.write('after-dispose')
   assert.equal(signals.length, 2, 'dispose 后 for 返回全新泵(新附着)')
   fresh.stop()
+})
+
+// Given 写入全部 ack,When 泵空闲,Then 主动释放附着(UI 恢复可写,官方 fit 自愈几何)
+test('attach泵_空闲释放_写完即detach', async () => {
+  const { createPumpFactory } = await import('../src/lib/attach-pump.mjs')
+  const agent = { id: 'agent-1' }
+  const { attachment, signals } = makeEra({ recordSignals: true })
+  const factory = createPumpFactory(makeController(attachment))
+  await factory.for(agent, 'term-a').write('echo hi')
+  assert.equal(signals.length, 1, '本次写入应建立一次附着')
+  assert.equal(signals[0].aborted, true, '写完空闲后附着应立即释放')
+  factory.dispose()
+})
+
+// Given 并发多写在途,When 部分仍 pending,Then 不释放;全部 ack 后才释放
+test('attach泵_空闲释放_并发等全部ack', async () => {
+  const { createPumpFactory } = await import('../src/lib/attach-pump.mjs')
+  const agent = { id: 'agent-1' }
+  const gates = []
+  let releaseSlowAck
+  const attachment = {
+    attach: async function* (input, limits, signal) {
+      gates.push(signal)
+      yield { type: 'snapshot', sequence: 0, screen: '', info: { state: 'running' }, writable: false }
+      for await (const cmd of input) {
+        if (cmd.data === 'slow') {
+          // 挂起 ack,由测试手动放行
+          await new Promise((resolve) => { releaseSlowAck = resolve })
+        }
+        yield { type: 'ack', sequence: cmd.sequence }
+      }
+    }
+  }
+  const factory = createPumpFactory(makeController(attachment))
+  const pump = factory.for(agent, 'term-a')
+  const slow = pump.write('slow')
+  let settled = false
+  slow.then(() => { settled = true }, () => { settled = true })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  try {
+    assert.equal(gates[0].aborted, false, '仍有 pending 时附着必须保持')
+    releaseSlowAck()
+    await slow
+    assert.equal(gates[0].aborted, true, '全部 ack 后附着应释放')
+    assert.equal(settled, true)
+  } finally {
+    releaseSlowAck?.()
+  }
+  factory.dispose()
+})
+
+// Given 空闲释放后再次 write,When 重建附着,Then 新世代 sequence 从 1 起且写入成功
+test('attach泵_空闲释放_再写重建附着', async () => {
+  const { createPumpFactory } = await import('../src/lib/attach-pump.mjs')
+  const agent = { id: 'agent-1' }
+  const { attachment, frames, signals } = makeEra({ recordSignals: true })
+  const factory = createPumpFactory(makeController(attachment))
+  const pump = factory.for(agent, 'term-a')
+  await pump.write('first')
+  await pump.write('second')
+  assert.equal(signals.length, 2, '两次写入应各自建立一次附着')
+  assert.deepEqual(frames.map(f => `${f.attempt}:${f.sequence}`), ['1:1', '2:1'], '每世代 sequence 从 1 起')
+  factory.dispose()
 })
