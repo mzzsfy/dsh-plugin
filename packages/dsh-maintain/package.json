@@ -40,7 +40,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@mzzsfy/dsh-common-tools": "^1.0.0"
+    "@mzzsfy/dsh-common-tools": "^0.2.0"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": ">=3.18.4",
