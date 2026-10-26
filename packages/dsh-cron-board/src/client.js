@@ -15,7 +15,7 @@ const STATUS_META = {
 const TRIGGER_META = { cron: { label: '定时' }, manual: { label: '手动' } }
 const KIND_LABELS = { shell: '脚本', session: '会话' }
 const MODE_LABELS = { fresh: '每次新建', pinned: '固定会话' }
-const STATUS_TONE_COLOR = { ok: '#22a06b', bad: '#e5484d', warn: '#f5a524', mute: '#8b8d98', run: '#3b82f6' }
+const STATUS_TONE_COLOR = { ok: 'var(--dsw-alias-state-success-primary)', bad: 'var(--dsw-alias-state-error-primary)', warn: 'var(--dsw-alias-state-warn-primary)', mute: 'var(--dsw-alias-label-tertiary)', run: 'var(--dsw-alias-brand-primary)' }
 const SECOND_MS = 1000
 const MINUTE_MS = 60 * SECOND_MS
 const HOUR_MS = 60 * MINUTE_MS
@@ -214,23 +214,23 @@ const STYLE = `
 /* 组件令牌层(形制对齐 dsh-im):宿主 dsw-alias 定义在 body 作用域,cb- 令牌必须在 body 声明才能解析到主题值;
    fallback 取浅色中性(dsh-im 同款),深色主题由令牌接管,fallback 只兜裸宿主 */
 body{
---cb-bg:var(--dsw-alias-bg-layer-1,#ffffff);
---cb-bg-sub:var(--dsw-alias-bg-layer-2,#f7f8fa);
---cb-bg-muted:var(--dsw-alias-bg-module-platform,#f2f3f5);
---cb-border:var(--dsw-alias-border-l2,#e5e6eb);
---cb-border-strong:var(--dsw-alias-border-l3,#dfe1e5);
---cb-text:var(--dsw-alias-label-primary,#1f2329);
---cb-text-sub:var(--dsw-alias-label-secondary,#646a73);
---cb-text-dim:var(--dsw-alias-label-tertiary,#8f959e);
---cb-accent:#1677ff;
---cb-accent-deep:#0958d9;
---cb-accent-wash:#eaf3ff;
---cb-danger:var(--dsw-alias-state-error-primary,#d54941);
---cb-ok:var(--dsw-alias-state-success-primary,#20a162);
---cb-warn:var(--dsw-alias-state-warn-primary,#d97706);
---cb-hover:var(--dsw-alias-interactive-bg-hover,#f7f8fa);
---cb-mask:var(--dsw-alias-bg-mask-1,rgba(31,35,41,.5));
---cb-shadow:0 1px 2px rgb(31 35 41 / 4%);
+--cb-bg:var(--dsw-alias-bg-layer-1);
+--cb-bg-sub:var(--dsw-alias-bg-layer-2);
+--cb-bg-muted:var(--dsw-alias-bg-module-platform);
+--cb-border:var(--dsw-alias-border-l2);
+--cb-border-strong:var(--dsw-alias-border-l3);
+--cb-text:var(--dsw-alias-label-primary);
+--cb-text-sub:var(--dsw-alias-label-secondary);
+--cb-text-dim:var(--dsw-alias-label-tertiary);
+--cb-accent:var(--dsw-alias-brand-primary);
+--cb-accent-deep:var(--dsw-alias-button-primary-hover);
+--cb-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);
+--cb-danger:var(--dsw-alias-state-error-primary);
+--cb-ok:var(--dsw-alias-state-success-primary);
+--cb-warn:var(--dsw-alias-state-warn-primary);
+--cb-hover:var(--dsw-alias-interactive-bg-hover);
+--cb-mask:var(--dsw-alias-bg-mask-1);
+--cb-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
 --cb-radius-sm:6px;--cb-radius-md:8px;--cb-radius-lg:14px;
 --cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:10px;--cb-space-5:12px;--cb-space-6:18px;
 --cb-font-xs:12px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
@@ -238,7 +238,7 @@ body{
 }
 .cb-panel{display:flex;flex-direction:column;gap:var(--cb-space-5);min-width:0;max-width:880px;margin:0 auto;width:100%;color:var(--cb-text);container-type:inline-size}
 /* 全局面板壳:占满宿主中央区,滚动自持(main keyed 条目根) */
-.cb-main{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:var(--cb-space-6);background:var(--dsw-alias-bg-base,var(--cb-bg))}
+.cb-main{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:var(--cb-space-6);background:var(--dsw-alias-bg-base)}
 .cb-toolbar{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-tabs{display:flex;gap:var(--cb-space-1);background:var(--cb-bg-muted);border-radius:999px;padding:3px}
 .cb-pill{border:none;border-radius:999px;padding:5px 14px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;font-weight:560;transition:color .15s,background .15s}
@@ -247,31 +247,31 @@ body{
 .cb-pill--on:hover{color:var(--cb-text)}
 .cb-spacer{flex:1}
 .cb-button{min-height:var(--cb-control-h);display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:0 13px;font:inherit;font-size:var(--cb-font-md);font-weight:560;background:var(--cb-bg);color:var(--cb-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
-.cb-button:hover:not(:disabled){border-color:#aeb3bb;background:var(--cb-hover)}
+.cb-button:hover:not(:disabled){border-color:var(--cb-border-strong);background:var(--cb-hover)}
 .cb-button:disabled{cursor:not-allowed;opacity:.55}
-.cb-button--primary{background:var(--cb-accent);border-color:var(--cb-accent);color:#fff}
+.cb-button--primary{background:var(--cb-accent);border-color:var(--cb-accent);color:var(--dsw-alias-bg-base)}
 .cb-button--primary:hover:not(:disabled){background:var(--cb-accent-deep);border-color:var(--cb-accent-deep)}
 .cb-button--danger{color:var(--cb-danger)}
-.cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:#fff}
+.cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:var(--dsw-alias-bg-base)}
 .cb-button--sm{min-height:28px;padding:0 10px;font-size:var(--cb-font-sm)}
 .cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:2px}
 .cb-button:active:not(:disabled){transform:translateY(1px)}
 .cb-cards{display:flex;flex-direction:column;gap:var(--cb-space-3)}
 .cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg);box-shadow:var(--cb-shadow);transition:border-color .15s,box-shadow .15s}
-.cb-card:hover{border-color:var(--cb-accent);box-shadow:0 2px 8px rgb(31 35 41 / 8%)}
-.cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3.5px;background:var(--cb-status,#aeb3bb)}
+.cb-card:hover{border-color:var(--cb-accent);box-shadow:var(--cb-shadow)}
+.cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3.5px;background:var(--cb-status)}
 .cb-card-row{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-name{font-size:14px;font-weight:600;color:var(--cb-text)}
 .cb-badge{min-height:22px;display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;color:var(--cb-text-sub);background:var(--cb-bg-muted);font-size:var(--cb-font-sm);white-space:nowrap}
-.cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status,#aeb3bb);flex:none}
+.cb-dot{width:8px;height:8px;border-radius:50%;background:var(--cb-status);flex:none}
 .cb-meta{font-size:var(--cb-font-sm);color:var(--cb-text-sub)}
 .cb-actions{display:flex;align-items:center;gap:var(--cb-space-2);margin-left:auto}
 .cb-icon{min-height:28px;border:none;background:transparent;color:var(--cb-text-sub);cursor:pointer;font-size:var(--cb-font-sm);padding:0 8px;border-radius:var(--cb-radius-sm);transition:background .15s,color .15s}
 .cb-icon:hover{background:var(--cb-hover);color:var(--cb-text)}
 .cb-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--cb-space-2)}
 .cb-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
-.cb-switch__track{width:30px;height:17px;border-radius:999px;background:#aeb3bb;position:relative;transition:background .15s;flex:none}
-.cb-switch__thumb{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.cb-switch__track{width:30px;height:17px;border-radius:999px;background:var(--cb-border-strong);position:relative;transition:background .15s;flex:none}
+.cb-switch__thumb{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-bg-base);transition:left .15s;box-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 30%, transparent)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track{background:var(--cb-accent)}
 .cb-switch input[type="checkbox"]:checked + .cb-switch__track .cb-switch__thumb{left:15px}
 .cb-switch input[type="checkbox"]:focus-visible + .cb-switch__track{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:1px}
@@ -301,7 +301,7 @@ body{
 .cb-code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:var(--cb-font-sm);color:var(--cb-text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cb-mask{color:var(--cb-text-sub)}
 .cb-modal-mask{position:fixed;inset:0;background:var(--cb-mask);display:flex;align-items:center;justify-content:center;z-index:60;animation:cb-fade-in .16s ease-out}
-.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:auto;display:flex;flex-direction:column;gap:14px;box-shadow:0 12px 40px rgb(31 35 41 / 18%);animation:cb-pop-in .2s ease-out}
+.cb-modal{background:var(--cb-bg);color:var(--cb-text);border-radius:var(--cb-radius-lg);padding:var(--cb-space-6);max-width:640px;width:min(640px,94vw);max-height:90vh;overflow:auto;display:flex;flex-direction:column;gap:14px;box-shadow:var(--dsw-shadow-lv3);animation:cb-pop-in .2s ease-out}
 @keyframes cb-fade-in{from{opacity:0}to{opacity:1}}
 @keyframes cb-pop-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion: reduce){.cb-modal-mask,.cb-modal{animation:none}.cb-card,.cb-row,.cb-button,.cb-pill,.cb-icon,.cb-switch__track,.cb-pc,.cb-pc__chevron{transition:none}}
@@ -324,8 +324,8 @@ body{
 .cb-seg{display:inline-flex;gap:2px;background:var(--cb-bg-muted);border-radius:8px;padding:2px;width:fit-content}
 .cb-seg__opt{border:none;background:transparent;border-radius:6px;padding:5px 11px;font:inherit;font-size:var(--cb-font-sm);font-weight:520;color:var(--cb-text-sub);cursor:pointer;line-height:1.2;white-space:nowrap;transition:background .15s,color .15s}
 .cb-seg__opt:hover{color:var(--cb-text)}
-.cb-seg__opt--on{background:var(--cb-accent);color:#fff;font-weight:560}
-.cb-seg__opt--on:hover{color:#fff}
+.cb-seg__opt--on{background:var(--cb-accent);color:var(--dsw-alias-bg-base);font-weight:560}
+.cb-seg__opt--on:hover{color:var(--dsw-alias-bg-base)}
 .cb-seg__opt:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:1px}
 /* 调度构建器:极浅洗底面板,收纳频率/上下文/表达式/预览 */
 .cb-builder{background:var(--cb-bg-sub);border:1px solid var(--cb-border);border-radius:10px;padding:var(--cb-space-5);display:flex;flex-direction:column;gap:10px}

@@ -14,3 +14,11 @@ test('client.js 注册 id 为完整包名', () => {
   assert.ok(match, 'client.js 缺少 __ModuleLoader__.load 注册')
   assert.equal(match[1], name)
 })
+
+test('client.js 样式注入点全部带 data-plugin 标记', () => {
+  const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  const created = source.match(/createElement\('style'\)/g)?.length ?? 0
+  const marked = source.match(/setAttribute\('data-plugin',\s*'@mzzsfy\/dsh-think-expand'\)/g)?.length ?? 0
+  assert.ok(created > 0, 'client.js 无样式注入点,守卫失去对象')
+  assert.equal(created, marked, '存在缺 data-plugin 标记的样式注入点')
+})

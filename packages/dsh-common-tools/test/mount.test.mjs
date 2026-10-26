@@ -281,3 +281,23 @@ test('CSS 内容齐备:选择器、变体、动画与减弱动态块', () => {
     assert.ok(css.includes(needle), 'CSS 缺少 ' + needle)
   }
 })
+
+test('配色走官方 dsw 令牌:局部 token 封装,禁用明暗反转语义错误的 label-primary-inverted', () => {
+  const state = makeState()
+  const { mod } = loadModule(state)
+  mod.toast.show('建立样式')
+  const css = state.byId.get(STYLE_ID).textContent
+  // 槽位定义引用官方 toast 专用 alias(亮暗两套均近白);反转令牌在暗色下解析为深色,深底深字即 issue #4
+  for (const needle of ['--dct-bg:var(--dsw-alias-toast-bg,', '--dct-label:var(--dsw-alias-toast-label,']) {
+    assert.ok(css.includes(needle), 'CSS 缺少官方 toast 令牌封装 ' + needle)
+  }
+  // fallback 字面量锁值:防 fallback 被改成深底深字的暗色反转值(如 #353638)
+  for (const needle of ['#43454a', '#fff']) {
+    assert.ok(css.includes(needle), 'CSS 缺少官方同值 fallback ' + needle)
+  }
+  assert.ok(!css.includes('label-primary-inverted'), '禁用明暗随主题反转的文字令牌')
+  assert.ok(!css.includes('rgba(') && !css.includes('rgb('), 'fallback 一律官方同值字面量,不留自造配色')
+  // 规则内禁止裸引用宿主别名,一律消费局部 token(插件 UI 统一设计规范)
+  const bodyRules = css.replace(/^  --dct-.*$/gm, '').split('\n').join(' ')
+  assert.ok(!/--dsw-alias-/.test(bodyRules), '组件规则只消费包局部 token,不散落宿主别名')
+})

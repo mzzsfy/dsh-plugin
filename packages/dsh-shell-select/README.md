@@ -40,20 +40,17 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 ```yaml
 shell-select:
   shells:
-    - id: pwsh
-      name: PowerShell
-      kind: pwsh        # pwsh | bash | cmd | wsl
-      path: ""          # 留空自动探测;bash 形探测序含 msys2 锚位(见下)
-      args: []          # 留空用形态默认;自定义模板以 {command} 为命令占位
-      login: false      # bash 形 true 时 -lc 登录壳(-lc 只取 /usr/bin;/mingw64/bin 需另配 env MSYSTEM=MINGW64)
-      distro: ""        # wsl 形发行版(如 Ubuntu-22.04),留空用 wsl 默认;args 模板条目忽略
-      env: {}           # 条目级环境变量,如 { MSYSTEM: MINGW64 };wsl 形键自动经 WSLENV 透传
+    - id: pwsh        # id 亦作显示名
+      kind: pwsh      # pwsh | bash | cmd | wsl
+      path: ""        # 留空自动探测;bash 形探测序含 msys2 锚位(见下)
+      args: []        # 留空用形态默认;自定义模板以 {command} 为命令占位
+      login: false    # bash 形 true 时 -lc 登录壳(-lc 只取 /usr/bin;/mingw64/bin 需另配 env MSYSTEM=MINGW64)
+      distro: ""      # wsl 形发行版(如 Ubuntu-22.04),留空用 wsl 默认;args 模板条目忽略
+      env: {}         # 条目级环境变量,如 { MSYSTEM: MINGW64 };wsl 形键自动经 WSLENV 透传
     - id: git-bash
-      name: Git Bash
       kind: bash
       path: ""
     - id: cmd
-      name: CMD
       kind: cmd
       path: ""
   default: pwsh

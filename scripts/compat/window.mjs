@@ -1,5 +1,5 @@
 // 兼容性测试版本窗口解析:dist-tag 双槽锚定(2026-09-27 改版,三版本完全兼容停测)。
-//   主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取 dist-tag 值最大),完全适配判定;
+//   主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大),完全适配判定;
 //   基线 = npm dist-tag latest 指向版本,仅不崩溃判定(run.mjs --crash-only)。
 // 基线与主测同版本则窗口缩为单主测;入选版本不在 registry versions 列表(疑似 unpublish 残留)抛错。
 // 显式覆盖:环境变量 DSH_COMPAT_VERSIONS=逗号清单,条目尾缀 ~ 表示非阻塞。

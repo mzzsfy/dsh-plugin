@@ -18,20 +18,24 @@ dsh-plugin/
 
 | 名称 | 功能 | 简单原理 | 类型 |
 | --- | --- | --- | --- |
-| @mzzsfy/dsh-usage-panel | 多平台 LLM 账号余额与额度面板:配置 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点,定期自动查询并画趋势图,用量/余额阈值与窗口重置多通道通知 | 定时调用各平台查询接口并存快照(分频 + 指数退避防风控),面板用自绘 SVG 画余额/额度趋势,快照分档留存;阈值与重置事件经通知通道推送 | DSH 双端插件(settings 槽位 + web 路由) |
-| @mzzsfy/dsh-usage-dash | 用量统计面板:天/小时/分钟三粒度 token 与请求统计、活跃热力图、会话底栏信息接管与回合费用芯片、多条件分时段定价费用估算;复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),致谢原作者 | host 端订阅会话事件采集用量落存储域,web 路由供面板查询;client 端设置面板 + 底栏接管与官方动作行回合费用芯片;定价规则按精确/通配与时段/星期/号段多条件匹配 | DSH 双端插件(storage 域 + web 路由 + 槽位注入) |
-| @mzzsfy/dsh-maintain | 版本与运维一体化:自动发现新版本、一键升级、安全重启,重启后页面自动恢复 | 监测 npm dist-tag 发现新版本;升级即执行自定义命令(`{tag}` 占位符);重启走优雅退出(5 秒兜底),页面轮询检测宿主恢复后自动刷新 | DSH 双端插件(settings 槽位 + web 路由) |
+| @mzzsfy/dsh-usage-panel | 多平台 LLM 账号余额与额度面板:七类 provider(DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi/自定义端点)定期自动查询并画趋势图,用量/余额阈值与窗口重置多通道通知 | 定时调用各平台查询接口并存快照(分频 + 指数退避防风控),快照分档留存,面板自绘 SVG 画余额/额度趋势;通知经公共 WS 总线分发,多窗口 IndexedDB 认领 | DSH 双端插件(settings 槽位 + web 路由) |
+| @mzzsfy/dsh-usage-dash | 用量统计面板:天/小时/分钟三粒度 token 与请求统计、26 周活跃热力图、会话底栏信息接管与回合费用芯片、多条件分时段定价费用估算;复刻自 [HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel),致谢原作者 | host 端订阅会话事件采集用量落存储域,web 路由供面板查询;client 端设置面板 + 底栏接管与官方动作行回合费用芯片;定价规则按精确/通配与时段/星期/号段多条件匹配 | DSH 双端插件(storage 域 + web 路由 + 槽位注入) |
+| @mzzsfy/dsh-maintain | 版本与运维一体化:自动发现新版本、受管 A/B 一键升级(候选验证 fail-closed)、安全重启,重启后页面自动恢复 | 监测 npm dist-tag 发现新版本;升级走 A/B 双目录编排(依赖树完整性 + 候选 CLI 冒烟通过才切换链接);重启走优雅退出(5 秒兜底),页面轮询检测宿主恢复后自动刷新 | DSH 双端插件(settings 槽位 + web 路由) |
 | @mzzsfy/dsh-think-expand | 流式思考自动展开:始终显示最新一条思考,手动操作优先,打开会话仅展开最后一条,卸载无残留 | 纯前端观察流式渲染,新思考出现即收起上一条;无设置项,安装即自动生效 | DSH 纯前端插件(client 模块,DOM 观察) |
-| @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM 五通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;同浏览器多窗口按 localStorage 认领保证唯一发声;非回环 HTTP 访问降级 toast + 标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
-| @mzzsfy/dsh-session-manager | 会话管理三合一:超期会话自动归档(阈值可配)、归档面板(取消归档 / 两段式删除 / 回收站还原)、归档推送提示 | host 启动补扫、每日周期轮与新会话创建三路触发同一幂等归档评估(阈值与周期均可配,timer 软依赖缺失自动降级);取消归档后 10 分钟内暂停自动归档(进程内宽限);删除移入系统回收站可恢复,面板维护已删台账并支持一键重新挂载 | DSH 双端插件(host 自动归档 + client 面板) |
-| @mzzsfy/dsh-rs-workflow | 若水工作流 v5:人在场的强规则编排——主循环协作编排、分段推进、结构化产出契约强制校验、审批原语、运行中排队/注入/取消/暂停/断点续跑、全量运行记录无截断回看;用户自建模板经设置页管理,每套模板一键释放为一个模式 | 角色行:board(/api/rsww/* 运行中心+模板管理+配置,host 平面)/orchestrator(preset 平面,主循环七工具+分段 continuable job)/template-tool(preset 平面,AI 模板编辑入口);实现与设计文档见 docs/rsww-v5/(仓库本地) | DSH 插件(host 单角色 + 预设层两角色) |
-| @mzzsfy/dsh-llm-pi-gateway | 为官方 PiAiAdapter 提供会话标记增强；官方 `llm-pi-ai` 保持启用并继续自服务 | 仅装饰官方 namespace 注册且结构匹配的 adapter；Anthropic 请求注入派生 `metadata.user_id`，OpenAI 请求透传；不接管或注册 provider | DSH host 端插件(adapter 装饰器) |
-| @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
-| @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host 并把 web 默认绑定翻转为 0.0.0.0:泛域名等无法枚举的入口免改启动命令,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由(回溯 + 遮蔽注册方法)把 Host 头实时注册进 webRuntime.trustedHosts,闸门每请求实时读数组;容量 maxHosts 默认 100,按最久未访问(LRU)淘汰,行级 config 配置无 GUI;启动横幅与注册/淘汰 console 直出;webRuntime 走服务事件延迟激活,卸载经 disposer 断开注册 | DSH host 端插件(bundle patch 覆盖 + 路由包装) |
-| @mzzsfy/dsh-shared-terminal | 共享交互式终端:AI `terminal` 单工具与 DSH 官方 Sidebar xterm 共用 Session terminal,用户可输入并查看当前屏幕 | 通过 DSH 官方 terminalController 管理终端; read 使用 DSH 限定版本(0.2.0-rc.2 / 0.2.1-alpha.2)私有 owner lookup 与 xterm viewport queue 读取 active screen; 无自建 PTY/REST UI | DSH 双端插件(官方 terminal controller + Session result renderer) |
-| @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾,错过的触发不补跑;web 路由供看板/环境变量/日志三面板;会话任务经 sessionController 投递,支持允许时段与忙时跳过 | DSH 双端插件(web 路由 + settings 槽位) |
-| @mzzsfy/dsh-common-tools | 公共依赖库:两端 setupCommonTools(ctx) 自动绑定当前插件，提供 WebSocket 订阅/推送与卸载清理，client 经占位条目进模块表 | 插件就是通道，subscribe(listener)/publish(payload)，共享单条页面 WS；host 提供 presence，client 提供 toast | 普通 npm 依赖非插件,插件管理不可见 |
-| @mzzsfy/dsh-context-manager | 对话增强:历史输入浮层(`Alt+↑` 唤起,workspace/session/global/prompts 四范围导航与即时搜索,常用提示词收藏)、插话撤回(未应用插话撤回输入框重编辑)、对话分叉(重写式 fork:该轮不带入子会话,原输入自动回填供编辑重发,支持进行中轮分叉与分叉后自动重发);dsh-session-manager 历史输入功能的独立延续包 | Host 聚合工作区历史缓存(`~/.dsh/historyPrompt/`,解压 + stat 指纹增量对齐)经 `/api/context/*` 路由供浮层查询;分叉走宿主 sessions 服务面 fork+open(follow 开场帧建轮锚点),成功自动打开子会话并回填草稿 | DSH 双端插件(host 路由 + client 注入) |
+| @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM / 宿主桌面通知多通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;多窗口经公共 WS 总线快照 + IndexedDB 原子认领唯一呈现;系统弹窗不可用(非回环/未授权)降级标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
+| @mzzsfy/dsh-session-manager | 会话生命周期管理:超期会话自动归档(阈值/周期可配)、归档面板(取消归档 / 删除进系统回收站或插件回收区 / 台账一键重挂载)、归档推送提示 | host 三路触发同一幂等归档评估(timer 软依赖缺失自动降级);取消归档后 10 分钟内评估短路防误归档;删除三次确认,系统回收站不可用自动降级插件回收区,台账承载重挂载 | DSH 双端插件(host 自动归档 + client 面板) |
+| @mzzsfy/dsh-rs-workflow | 若水工作流:流程模板管理与一键释放为 Agent 预设组合——主循环编排七工具、分段推进、结构化产出契约强制校验、审批原语、运行记录无截断回看;模板经设置页管理 | host board 行挂 `/api/rsww/*`(模板/配置/运行记录/控制/释放);释放链把模板生成为 `rs-<id>` 预设组合(orchestrator 七工具 + template-tool 行);数据落自有文件不经宿主 settings | DSH 插件(host board 行 + 释放组合两角色) |
+| @mzzsfy/dsh-llm-pi-gateway | 为官方 PiAiAdapter 提供会话标记增强:Anthropic 注入 `metadata.user_id`,Chat 补会话亲和头(`session_id` / `x-client-request-id`);官方 `llm-pi-ai` 保持启用并继续自服务 | 仅装饰官方 namespace 注册且结构匹配的 adapter;OpenAI 请求透传;不接管或注册 provider | DSH host 端插件(adapter 装饰器) |
+| @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本贴图;插件面板可声明自己的图标;取图链 声明→内置→关键词→哈希 | DSH 纯前端插件(DOM 观察) |
+| @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host:泛域名等无法枚举的入口免改启动命令即可达,监听绑定归部署层,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由把 Host 头实时注册进 `connection.trustedHosts`(0.2.0 线 `webRuntime` 镜像);容量 maxHosts 默认 100 按 LRU 淘汰,注册/淘汰 console 直出可作入口审计 | DSH host 端插件(bundle patch + 路由包装) |
+| @mzzsfy/dsh-shared-terminal | 共享交互式终端:AI `terminal` 单工具(open/list/read/write/wait/close)与 DSH 官方 Sidebar xterm 共用 Session terminal,用户可输入并查看当前屏幕 | 通过 DSH 官方 terminalController 管理终端;read 走私有 owner lookup 与 xterm active viewport;0.2.1-rc.2 起写入改自持 attach 泵(用户可随时接管) | DSH 双端插件(官方 terminal controller + Session result renderer) |
+| @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话,可指定模型) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾;支持内联时区后缀 `T±N`、允许时段与忙时跳过;会话任务经 sessionController 投递,投递即终态 | DSH 双端插件(web 路由 + settings 槽位) |
+| @mzzsfy/dsh-common-tools | 公共依赖库:按插件空间隔离的 WebSocket 订阅/推送总线与 toast,两端 `setupCommonTools(ctx)` 自动绑定当前插件 | 插件就是通道,subscribe/publish 共享单条页面 WS;host 提供 presence,client 提供 toast;经 session-manager 占位条目装载 | 普通 npm 依赖非插件,插件管理不可见 |
+| @mzzsfy/dsh-context-manager | 对话增强:历史输入浮层(`Alt+↑` 唤起,四范围导航与即时搜索,常用提示词收藏)、插话撤回、对话分叉(重写式 fork,原输入回填供编辑重发)、标题栏复制 sessionId、克隆仓库打开工作区 | Host 聚合工作区历史缓存(`~/.dsh/historyPrompt/`)经 `/api/context/*` 供浮层查询;分叉走宿主 sessions 服务面 fork+open;克隆注入官方浏览目录弹窗 | DSH 双端插件(host 路由 + client 注入) |
+| @mzzsfy/dsh-boss-simulator | 公司管理模拟器:以老板身份安排任务,分派给部门自治执行,只接受汇报;含看板、时间线、中断恢复 | 管理员预设会话经单一 `boss_simulator` 工具派发任务,实施与独立验收派发到标准会话执行,报告经 durable 会话事件归并;GUI 看板 + 内嵌管理员聊天 + 侧边栏入口 | DSH 双端插件(host 角色行 + client 看板) |
+| @mzzsfy/dsh-shell-select | Windows shell 接管:替换默认 pwsh 工具为可配置多客户端 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择);命令 deny 黑名单,接管失败自动回退官方 pwsh 链 | 工具接管 + 配置校验管线(volatile ref 解箱 + 执行面 strict);bash 候选多锚位探测;web 行提供设置页与 POSIX 形态声明 | DSH host 端插件(工具接管 + 设置页) |
+| @mzzsfy/dsh-tool-gate | 全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 标交宿主 deferred tool loading(API 服务端按需搜索激活);第三方路由降级折叠为占位 + `tool_search` 检索 | 声明式收敛(白名单为唯一事实源),行退场按 undo journal 还原原状;设置卡 GUI 配置 | DSH host 端插件(工具收敛 + 设置卡) |
+| @mzzsfy/dsh-tunnel | 路径穿透隧道:在 dsh 宿主进程内把本地 TCP 端口反向代理出去(`/p/<name>` 子路径或 `<name>.*` 子域名),ai 经 `tunnel_open`/`tunnel_list`/`tunnel_close` 三工具自管 | 进程内反代,不引入 nginx/caddy 等外部反代;HTTP 前缀 strip 转发 + 声明式 WS upgrade,子域名全路径透传;REST + GUI 看板 + 设置卡,持久化随 `DSH_HOME` | DSH 双端插件(web 路由 + client 看板) |
 
 ## 安装与更新:缩短 pnpm 宽限期
 
@@ -45,17 +49,17 @@ pnpm config set --global minimumReleaseAge 360
 
 ## 开发与测试
 
-要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20)。各包 manifest 以 `dsh.compatibility.dshReleases` 逐版本声明 DSH 完整版本兼容性(0.2.0-rc.2 实测 compatible,未经实测验证的版本声明 unknown)。
+要求 Node >= 22(各包 engines 字段;其中 dsh-settings-nav-icons 为 >=20)。各包 manifest 以 `dsh.compatibility.dshReleases` 逐版本声明 DSH 完整版本兼容性(实测过的版本记 `compatible`,未经实测验证的版本声明 `unknown`,以各包 manifest 为准)。
 
-- 包内测试:14 个含 test/ 目录的包执行 `npm test`(即 `node --test "test/*.test.mjs"`);@mzzsfy/dsh-rs-workflow 未声明 test 脚本,以 `node --test "test/*.test.mjs"` 直接运行,已按 docs/rsww-v5/ 实现,全绿
+- 包内测试:18 个包全部含 test/ 目录,统一 `npm test`(即 `node --test "test/*.test.mjs"`,各包 scripts.test 同款声明)
 - CI 测试(`.github/workflows/test.yml`):push 按改动范围收敛(全部改动落在 `packages/<X>/` 只测 X + 冒烟与仓库根测试;触及非包路径回退全量),每 3 天定时与手动触发为全量;amd64/arm64 双架构并行,各跑 10 轮(smoke-load + 全部含 test/ 目录的包自动发现 + 仓库根 tests/;测试文件按平台过滤,`*.linux.test.mjs`/`*.win.test.mjs` 专属,CI 只跑 linux 侧;宿主 peer 以钉版包装入仓库根 node_modules 作解析桥,包间依赖以 @mzzsfy 符号链接解析、不经 registry,均不入库)
 - CI 兼容性测试(`.github/workflows/compat.yml`):每 3 天定时 + 手动触发,真实 dsh 宿主双槽窗口逐版本全家桶 boot(主测完全适配判定 + 基线不崩溃判定,均阻塞);不被 push 触发,方法见 docs/兼容性测试/测试与隔离方法.md
 
 ### 宿主兼容性
 
-兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道最大;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。例外:dsh-shell-select 需 ≥0.1.7-rc.1,对基线版本不可安装(见下方 Round 30 例外条)。当前窗口:0.1.7-rc.2(主测)/ 0.1.5-rc.3(基线),窗口实算 `node scripts/compat/window.mjs`(唯一规则实现),逐包测试进度见 docs/兼容性测试/逐包测试进度.md(docs/ 目录不入库,仅本地维护)。
+兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。当前窗口实算 `node scripts/compat/window.mjs`(唯一规则实现,会随 dist-tag 滑动):以 2026-10-26 实算为 0.2.1-rc.3(主测)/ 0.2.1-rc.2(基线)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本实测登记(存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤(声明包:auto-trust-all/boss-simulator/llm-pi-gateway/shared-terminal/shell-select/tool-gate)。逐包测试进度见 docs/兼容性测试/逐包测试进度.md(仅该文件本地维护,不入库)。
 
-以下为 2026-09-27 Round 30 实测记录(当时窗口仍为三版本:0.1.2-rc.1 基线 / 0.1.5-rc.3 主测 / 0.1.7-rc.2 完全兼容目标):
+以下为 2026-09-27 Round 30 实测记录(历史留档,当时窗口仍为三版本:0.1.2-rc.1 基线 / 0.1.5-rc.3 主测 / 0.1.7-rc.2 完全兼容目标;其中 dsh-shell-select 预设架构当时要求 ≥0.1.7-rc.1,对当时基线不可安装——该例外随窗口滑动已不再成立,hostMin 过滤现由装载层通用承载):
 
 - **0.1.7-rc.2(完全兼容)**:宿主 SettingsForms 形态(settings 无 register/get)下,六包(context-manager/cron-board/session-manager/turn-notify/usage-dash/usage-panel)settings 读/写循环端到端可用——双形态适配:legacy 方法面(settings.register+update)与 0.1.7 静态 Config(volatile schema)+ configEditor.edit 写入并存,运行期以 `register && update` 双在检测分派。真机验收:六包 HTTP 写读闭环 + profile cordis.patch.yml 逐字段落盘 + Playwright UI 分区渲染(含 usage-dash 定价表格回读、turn-notify 深合并芯片态)。
 - **0.1.5-rc.3 / 0.1.2-rc.1(不崩溃底线,实测通过)**:同套代码 legacy 分支回归,六包写读经宿主 settings.yaml 命名空间段,行为与适配前一致(双形态检测在旧宿主恒走原路径,零行为漂移)。
@@ -73,7 +77,7 @@ node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 - `dsh.profile.bundles` 由 dev-link 对账(镜像官方 `dsh plugin` reconcilePlugins 语义):清单内插件包且依赖行已声明即入层,公共依赖包或无依赖行即出层;装载层变化不走热重载,重启 dsh 后生效
 - link 时在 home 补丁层(~/.dsh/cordis.patch.yml)维护 hmr 覆盖行:仓库 packages 保存即热重载(host 半区约 1 秒,client 半区刷新页面),卸链时移除
 
-dsh-usage-panel 的无 IO 纯逻辑层(`src/parsers.mjs`)由其 npm test 覆盖。包元数据:dsh-usage-panel peerDependencies 为 `@deepseek-ai/dsh-settings`(>=0.1.2-alpha.2)、`@deepseek-ai/schemastery`(>=3.18.0)与 `react`(^18.2.0);@mzzsfy/dsh-rs-workflow 为 `@deepseek-ai/dsh-settings`(>=0.1.2-alpha.2)、`@deepseek-ai/dsh-tools`(^0.1.1-rc.2)与 `@deepseek-ai/schemastery`(^3.18.1);@mzzsfy/dsh-maintain 为 `@deepseek-ai/schemastery`(>=3.18.4,`volatile` 引入线)与 `react`(^18.2.0),settings/configEditor 经服务注入使用不占 peer。peer 不落盘(profile pnpm `autoInstallPeers: false`),开发态由目录逐级兜底解析到 dsh 本体全局安装目录,CI 无 dsh 本体时以钉版包装入仓库根 node_modules 作解析桥。
+dsh-usage-panel 的无 IO 纯逻辑层(`src/parsers.mjs`)由其 npm test 覆盖。包元数据:dsh-usage-panel peerDependencies 为 `@deepseek-ai/dsh-settings`(>=0.1.2-alpha.2)、`@deepseek-ai/schemastery`(>=3.18.0)与 `react`(^18.2.0);@mzzsfy/dsh-rs-workflow 为 `@deepseek-ai/schemastery`(^3.18.1)、`@deepseek-ai/dsh-llm`(>=0.1.2-rc.1)与 `@deepseek-ai/dsh-tools`(>=0.1.5-rc.2);@mzzsfy/dsh-maintain 为 `@deepseek-ai/schemastery`(>=3.18.4,`volatile` 引入线)与 `react`(^18.2.0),settings/configEditor 经服务注入使用不占 peer。peer 不落盘(profile pnpm `autoInstallPeers: false`),开发态由目录逐级兜底解析到 dsh 本体全局安装目录,CI 无 dsh 本体时以钉版包装入仓库根 node_modules 作解析桥。
 
 ## 发布
 

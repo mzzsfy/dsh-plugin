@@ -4,7 +4,7 @@
 // 宿主退出即按同参重启并更新 live.json(新 boot 新 token);STOP 文件存在则退出。
 // 用法:node scripts/compat/boot-keep.mjs --daemon --version <v> [--only 包,包] [--port N]
 import { spawn } from 'node:child_process'
-import { createWriteStream, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isSemver } from './window.mjs'
 import { buildProfile, enumeratePackages } from './profile.mjs'
@@ -149,6 +149,26 @@ function parseArgs(argv) {
 
 function sleep(ms) { return new Promise((done) => setTimeout(done, ms)) }
 
+// echo-upstream 探活:gateway seed 场景下宿主先于 echo 就绪会让 provider 首轮
+// 注册落空(NO_ADAPTER 空转),每轮宿主 spawn 前必须确认 llmPort 控制面就绪。
+// 只探活不代启——echo 生命周期归外部(run.mjs/人工)管,boot-keep 只守住顺序
+const ECHO_PROBE_TIMEOUT_MS = 30 * 1000
+const ECHO_PROBE_POLL_MS = 1000
+async function awaitEchoReady(llmPort) {
+  const url = `http://127.0.0.1:${llmPort}/control/requests`
+  const deadline = Date.now() + ECHO_PROBE_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(2000) })
+      // 断言控制面响应体形态({requests,lastRequestId}):端口被无关服务占且 200 时防假绿
+      const body = await res.json().catch(() => null)
+      if (res.ok && body && Array.isArray(body.requests)) { log(`[daemon] echo 就绪 ${url}`); return }
+    } catch { /* 未就绪 */ }
+    await sleep(ECHO_PROBE_POLL_MS)
+  }
+  throw new Error(`echo 未就绪(${url},${ECHO_PROBE_TIMEOUT_MS / 1000}s):宿主先起会 NO_ADAPTER 空转,先起 echo-upstream 再启动 boot-keep`)
+}
+
 function canBind(p) {
   return new Promise((resolve) => {
     import('node:net').then(({ createServer }) => {
@@ -173,6 +193,8 @@ if (!existsSync(binPath)) throw new Error(`宿主闭包缺失,先跑 run.mjs --v
 // 存活判定自愈陈旧项,持有期写 pid,STOP 标记退出时释放
 const keeperLockPath = join(workDir, 'boot-keep.lock')
 function acquireKeeperLock() {
+  // 全新 --version 工位目录不存在,写锁 ENOENT;lock 前自建(run.mjs 安装面同构)
+  mkdirSync(workDir, { recursive: true })
   if (existsSync(keeperLockPath)) {
     let holder = null
     try { holder = JSON.parse(readFileSync(keeperLockPath, 'utf8')) } catch { /* 损坏锁按陈旧处理 */ }
@@ -230,6 +252,9 @@ async function bootOnce() {
     think: wantedShort.includes('dsh-think-expand'),
     llmPort: args.llmPort ?? 18123,
   })
+  // 探活绑意图(--only 含 gateway)而非 seed 返回值:seed 的 catch 吞错返回 []
+  // 时守卫若跟着 seed 走会静默旁路,恰是 NO_ADAPTER 最可能场景
+  if (wantedShort.includes('dsh-llm-pi-gateway')) await awaitEchoReady(args.llmPort ?? 18123)
   const bootLog = createWriteStream(join(workDir, 'boot-l3.log'), { flags: 'w' })
   const child = spawn(process.execPath, [binPath, 'web', '--no-open', '--port', String(port)], {
     cwd: profile.homeDir,

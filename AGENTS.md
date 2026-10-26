@@ -10,6 +10,7 @@
 | profile 链接(dev-link 唯一入口 / junction / fallback 补链) | [DEVELOPMENT/profile-link.md](DEVELOPMENT/profile-link.md) |
 | 日常开发循环(热重载边界 / 测试命令 / 提交纪律)、双实现同源 | [DEVELOPMENT/dev-loop.md](DEVELOPMENT/dev-loop.md) |
 | 插件 client 规约(UI 开关控件 / 导航图标声明 / 样式注入 data-plugin 契约) | [DEVELOPMENT/plugin-client-conventions.md](DEVELOPMENT/plugin-client-conventions.md) |
+| 插件 UI 统一设计规范(色彩槽位 / 尺寸标尺 / 组件视觉形态) | [DEVELOPMENT/plugin-ui-design.md](DEVELOPMENT/plugin-ui-design.md) |
 | 公共 client 依赖包(依赖形态发布 / 代挂装载链 / 占位条目) | [DEVELOPMENT/client-dependency.md](DEVELOPMENT/client-dependency.md) |
 | DSH 本体 API 对齐(服务优先 / 干净禁用 / 升级回归) | [DEVELOPMENT/dsh-api-alignment.md](DEVELOPMENT/dsh-api-alignment.md) |
 
