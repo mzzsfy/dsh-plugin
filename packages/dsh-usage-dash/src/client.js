@@ -1921,11 +1921,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     const STYLE_CSS = `
+/* 图表区分色:brand 派生为主,其余为规范允许的区分色 token(集中声明,S≥70%);
+   亮暗差异由 color-mix 百分比随宿主主题的 bg-base 派生自动适配,不再手动切主题 */
 .ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
---ud-chart-1:color-mix(in srgb,#0576ff 70%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 70%,white);--ud-chart-3:color-mix(in srgb,#c46212 70%,white);--ud-chart-4:color-mix(in srgb,#975bf1 70%,white);--ud-chart-5:color-mix(in srgb,#d34591 70%,white);--ud-chart-other:color-mix(in srgb,#576270 70%,white);
---dsw-heat-0:#ebedf0;--dsw-heat-1:#dbe3ff;--dsw-heat-2:#b7c5ff;--dsw-heat-3:#8ea4ff;--dsw-heat-4:#6884ff;--dsw-heat-5:#4d6bfe;--ud-trend-line:#0576ff;--ud-trend-speed:#0ca678;--ud-trend-ttft:#e8590c}
-body[data-ds-dark-theme] .ud-panel{--ud-chart-1:color-mix(in srgb,#0576ff 65%,white);--ud-chart-2:color-mix(in srgb,#2f6f37 65%,white);--ud-chart-3:color-mix(in srgb,#c46212 65%,white);--ud-chart-4:color-mix(in srgb,#975bf1 65%,white);--ud-chart-5:color-mix(in srgb,#d34591 65%,white);--ud-chart-other:color-mix(in srgb,#576270 65%,white);
---dsw-heat-0:#21262d;--dsw-heat-1:#2f4bd0;--dsw-heat-2:#4d6bfe;--dsw-heat-3:#6e8bff;--dsw-heat-4:#93aaff;--dsw-heat-5:#c4d0ff;--ud-trend-line:#4d6bfe;--ud-trend-speed:#2fbf8f;--ud-trend-ttft:#ffa94d}
+--ud-chart-1:var(--dsw-alias-brand-primary);--ud-chart-2:var(--dsw-alias-state-success-primary);--ud-chart-3:var(--dsw-alias-state-warn-primary);--ud-chart-4:#975bf1;--ud-chart-5:#d34591;--ud-chart-other:var(--dsw-alias-label-tertiary);
+--dsw-heat-0:color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);--dsw-heat-1:color-mix(in srgb, var(--dsw-alias-brand-primary) 18%, transparent);--dsw-heat-2:color-mix(in srgb, var(--dsw-alias-brand-primary) 36%, transparent);--dsw-heat-3:color-mix(in srgb, var(--dsw-alias-brand-primary) 54%, transparent);--dsw-heat-4:color-mix(in srgb, var(--dsw-alias-brand-primary) 74%, transparent);--dsw-heat-5:var(--dsw-alias-brand-primary);--ud-trend-line:var(--dsw-alias-brand-primary);--ud-trend-speed:var(--dsw-alias-state-success-primary);--ud-trend-ttft:var(--dsw-alias-state-warn-primary)}
 .ud-toolbar{display:flex;align-items:flex-start;gap:8px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}

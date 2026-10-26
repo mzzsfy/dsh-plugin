@@ -2,8 +2,9 @@
 # profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-turn-notify`;
 # the row id addresses this plugin's host half, whose `session/event` observer
 # feeds the projection observed by the browser half via `/api/turn-notify/*`.
-# Shared client capability (toast/bus subscribe) lives in the dsh-change-bus
-# plugin's own module-table entry; no placeholder rows for other packages here.
+# Shared client capability (toast/bus subscribe) is provided by dsh-common-tools
+# via the session-manager placeholder entry; no placeholder rows for other
+# packages here.
 
 - insert:
     - id: turn-notify

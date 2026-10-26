@@ -162,6 +162,43 @@ test('后台卡头部守卫:状态点缺省渲染(bg pill 即标识),非法 Stat
   assert.doesNotMatch(source, /dot: 'none'/)
 })
 
+test('状态点原位替换:失败/进行中只渲染状态点,不再叠图标与白片遮罩', () => {
+  // Given 失败/进行中/完成的调用块;When 折叠渲染;Then 行首仅状态点或图标,
+  // 无图标+状态点叠加、无遮罩容器(遮罩白底 #fff 在暗色主题呈现白圆事故)。
+  const nodesOf = (element) => {
+    const nodes = []
+    const walk = (node) => { if (!node || typeof node !== 'object') return; if (Array.isArray(node)) return node.forEach(walk); nodes.push(node); node.children?.forEach(walk) }
+    walk(element)
+    return nodes
+  }
+  const failed = nodesOf(toolviewOf(loadClient(), 'shell')({
+    block: settledBlock(JSON.stringify({ command: 'exit 3', description: 'boom' }), 'err\n[exit code: 3]'),
+    cwd: 'C:\\repo',
+  }))
+  assert.ok(failed.some((node) => String(node.props?.className ?? '').includes('sls-dot--err')), '失败行应有红色状态点(sls-dot--err 令牌类,主题自适应)')
+  assert.ok(failed.every((node) => node.props?.style?.borderRadius !== 3), '状态点行不应再渲染降级图标矩形(叠加形态)')
+  assert.ok(failed.every((node) => !String(node.props?.className ?? '').includes('stateCover')), '不应存在遮罩容器')
+  const running = nodesOf(toolviewOf(loadClient(), 'shell')({
+    block: { callId: 'c9', name: 'shell', argsRaw: JSON.stringify({ command: 'sleep 1', description: 'wait' }), time: Date.now() },
+    cwd: 'C:\\repo',
+  }))
+  assert.ok(running.some((node) => String(node.props?.className ?? '').includes('sls-dot--idle')), '进行中行应有状态点(sls-dot--idle 令牌类)')
+  assert.ok(running.every((node) => node.props?.style?.borderRadius !== 3), '进行中行不应再渲染降级图标矩形(叠加形态)')
+  const done = nodesOf(toolviewOf(loadClient(), 'shell')({
+    block: settledBlock(JSON.stringify({ command: 'echo ok', description: 'fine' }), 'ok\n[exit code: 0]'),
+    cwd: 'C:\\repo',
+  }))
+  assert.ok(done.some((node) => node.props?.style?.borderRadius === 3), '完成行保留工具图标')
+  assert.ok(done.every((node) => node.props?.style?.background === undefined), '完成行无状态点')
+})
+
+test('遮罩路径清除守卫:遮罩容器类与白底 token 不再存在', () => {
+  // Given 修复后的 client.js;When 源码扫描;Then 遮罩结构与其背景依赖全部消失,
+  // 状态点以原位替换呈现,双主题无背景依赖。
+  assert.doesNotMatch(source, /stateCover|leadStack|iconIdle/)
+  assert.doesNotMatch(source, /--dsw-alias-bg-primary/)
+})
+
 test('hooks 恒序守卫:组件内 hook 调用必须全部位于第一个提前 return 之前', () => {
   // 真实 React 的 hooks 链表按调用序对位:提前 return 之后的 hook 使不同
   // 块形态(generic/terminal)的 hook 数量分叉 → "Rendered fewer hooks

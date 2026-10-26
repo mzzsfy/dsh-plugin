@@ -65,8 +65,8 @@
 
 ## 依赖与门控
 
-- client 半区宿主服务经 inject 声明(`slots`/`sessions`/`workspaces`/`remote`/`remote.session` 点分声明),namespace 未就绪整体保持未激活(干净禁用);host 半区 inject 为 `webServer`/`agents`/`sessionQuery`/`sessionPersistence`
-- 公共依赖 `@mzzsfy/dsh-change-bus` 可选消费(模块缺失通知通道置空)
+- client 半区宿主服务经 inject 声明(`slots`/`sessions`/`workspaces`/`uiWorkspace`/`remote`/`remote.session` 点分声明),namespace 未就绪整体保持未激活(干净禁用);host 半区 inject 为 `webServer`/`agents`/`sessionQuery`/`sessionPersistence`
+- 公共依赖 `@mzzsfy/dsh-common-tools` 可选消费(toast 通知通道,模块缺失即置空)
 - 样式注入带 `data-plugin` 标记,开关为 `cx-switch` 形态(状态选择器锚定 `input[type="checkbox"]`)
 
 ## API(host 半区)
@@ -83,8 +83,6 @@
 | `/api/context/copy-sid-enabled` | GET/POST | 标题栏复制 sessionId 启停 |
 | `/api/context/git-clone` | POST | 克隆仓库(url/parent/name/shallow,单飞行,返回 `{path}`) |
 | `/api/context/clone-enabled` | GET/POST | 克隆仓库按钮启停 |
-
-设计文档:仓库根 `docs/上下文管理插件设计.md`
 
 ## dsh 版本兼容
 

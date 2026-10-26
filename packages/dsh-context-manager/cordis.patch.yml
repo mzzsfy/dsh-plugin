@@ -1,8 +1,8 @@
 # context-manager 打包补丁:历史输入浮层 + 插话撤回 + 对话 fork 以单条目
 # 注入 profile 根。由 `dsh plugin add @mzzsfy/dsh-context-manager` 应用;
 # 行 id 指向本插件宿主半区,其 /api/context/* 路由服务设置页与浮层的浏览器半区。
-# 公共 client 能力(toast/bus)随 dsh-change-bus 插件自身条目进模块表,本补丁
-# 不代挂任何公共依赖占位条目。
+# 公共 client 能力(toast/bus)经 dsh-common-tools 由 session-manager 占位条目
+# 进模块表,本补丁不代挂任何公共依赖占位条目。
 
 - insert:
     - id: context-manager

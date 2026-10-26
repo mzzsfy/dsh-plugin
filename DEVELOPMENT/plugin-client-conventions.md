@@ -1,5 +1,7 @@
 # 插件 client 规约(UI 控件 / 导航图标 / 样式注入)
 
+视觉决策(色彩槽位 / 尺寸标尺 / 组件视觉参数)见 [plugin-ui-design.md](plugin-ui-design.md),本文件只管结构与注入契约,两份同时生效。
+
 ## 插件 UI 控件规约
 
 - 插件 UI 中的布尔开关一律用开关(switch)形态,即 track 胶囊 + thumb 圆点的视觉开关,禁止裸 `<input type="checkbox">` 直接呈现,也不得用 `<input type="range">` 数值滑块实现布尔语义;多选列表行内的勾选同样用开关。独立布尔偏好用开关;成组分类的快捷切换(如事件分类启停)可用 pill 组(参考 `dsh-turn-notify` 的 `.tn-pill`,选中态 `.tn-pill--on`),不属布尔开关

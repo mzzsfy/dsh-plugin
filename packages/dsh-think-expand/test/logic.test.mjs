@@ -21,7 +21,7 @@ function clientLogic() {
   const factory = new Function(
     '"use strict";'
       + section
-      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, capSet, needsReattach, SEEN_MAP_CAP, EXPANDED_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore };',
+      + '; return { STATE_RUNNING, STATE_OK, createRegistry, plan, planFinal, registerCurrent, capMap, capSet, needsReattach, SEEN_MAP_CAP, EXPANDED_CAP, prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, TOUCH_OPEN, TOUCH_CLOSED, ALL_TOUCHED_CAP, createAllRegistry, planAll, allRowKey, touchedValue, putTouched };',
   )
   return factory()
 }
@@ -37,7 +37,7 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore } = L
+  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createAllRegistry, planAll, TOUCH_OPEN, TOUCH_CLOSED, ALL_TOUCHED_CAP } = L
 
   // 滚动度量构造:{ scrollHeight, scrollTop, clientHeight }
   const metrics = (scrollHeight, scrollTop, clientHeight) => ({ scrollHeight, scrollTop, clientHeight })
@@ -381,6 +381,118 @@ function defineScenarios(prefix, L) {
     assert.ok(reg.manual.size > 0)
     assert.ok(reg.manual.size <= SEEN_MAP_CAP)
   })
+
+  // ---- 全部消息模式(planAll):Given 各前置,When 扫描,Then 动作集 ----
+
+  test(prefix + 'all:可展开未展开未登记行产生展开动作', () => {
+    const reg = createAllRegistry()
+    const result = planAll(reg, [
+      { uid: 1, expandable: true, expanded: false, touched: false },
+      { uid: 2, expandable: true, expanded: false, touched: false },
+    ])
+    assert.equal(expandOf(result, 0), 1)
+    assert.equal(expandOf(result, 1), 1)
+  })
+
+  test(prefix + 'all:用户手动收起过的行不再展开', () => {
+    const reg = createAllRegistry()
+    reg.touched.set(7, L.TOUCH_CLOSED)
+    const result = planAll(reg, [
+      { uid: 7, expandable: true, expanded: false, touched: true },
+    ])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + 'all:用户手动展开过的行收起后恢复展开', () => {
+    const reg = createAllRegistry()
+    reg.touched.set(3, L.TOUCH_OPEN)
+    const result = planAll(reg, [
+      { uid: 3, expandable: true, expanded: false, touched: true },
+    ])
+    assert.equal(expandOf(result, 0), 1)
+  })
+
+  test(prefix + 'all:不可展开行与已展开行无动作', () => {
+    const reg = createAllRegistry()
+    const result = planAll(reg, [
+      { uid: 1, expandable: false, expanded: false, touched: false },
+      { uid: 2, expandable: true, expanded: true, touched: false },
+    ])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + 'all:插件展开的行被用户手动展开登记为 open', () => {
+    const reg = createAllRegistry()
+    // 行已在展开态且非插件动作(plugged=false):登记 open,不收起
+    const result = planAll(reg, [
+      { uid: 5, expandable: true, expanded: true, touched: false, plugged: false },
+    ])
+    assert.equal(result.actions.length, 0)
+    assert.equal(reg.touched.get(5), L.TOUCH_OPEN)
+  })
+
+  test(prefix + 'all:插件展开行被手动收起登记为 closed', () => {
+    const reg = createAllRegistry()
+    const first = planAll(reg, [
+      { uid: 9, expandable: true, expanded: false, touched: false, plugged: false },
+    ])
+    assert.equal(expandOf(first, 0), 1)
+    // 插件展开落定(控制器登记 plugged)后用户收起:expanded=false + plugged=true
+    const collapsed = planAll(reg, [
+      { uid: 9, expandable: true, expanded: false, touched: false, plugged: true },
+    ])
+    assert.equal(collapsed.actions.length, 0)
+    assert.equal(reg.touched.get(9), L.TOUCH_CLOSED)
+  })
+
+  test(prefix + 'all:行重建后 touched 标记按行键恢复语义', () => {
+    const reg = createAllRegistry()
+    reg.touched.set('row-key-a', L.TOUCH_CLOSED)
+    // 重建行带宿主稳定行键:closed 保持不展开
+    const closed = planAll(reg, [
+      { uid: 21, key: 'row-key-a', expandable: true, expanded: false, touched: true },
+    ])
+    assert.equal(closed.actions.length, 0)
+    reg.touched.set('row-key-b', L.TOUCH_OPEN)
+    const open = planAll(reg, [
+      { uid: 22, key: 'row-key-b', expandable: true, expanded: false, touched: true },
+    ])
+    assert.equal(expandOf(open, 0), 1)
+  })
+
+  test(prefix + 'all:suppressManual 首扫不登记 touched', () => {
+    const reg = createAllRegistry()
+    const result = planAll(reg, [
+      { uid: 4, expandable: true, expanded: true, touched: false, plugged: false },
+    ], { suppressManual: true })
+    assert.equal(result.actions.length, 0)
+    assert.equal(reg.touched.size, 0)
+  })
+
+  test(prefix + 'all:插件已展开行不登记 touched,收回后登记 closed', () => {
+    const reg = createAllRegistry()
+    // 插件展开落定行(expanded+plugged):不登记,否则用户收起会被重新展开形成对抗
+    const result = planAll(reg, [
+      { uid: 31, expandable: true, expanded: true, touched: false, plugged: true },
+    ])
+    assert.equal(result.actions.length, 0)
+    assert.equal(reg.touched.size, 0)
+    // 用户收起该行:登记 closed,插件不再展开
+    const collapsed = planAll(reg, [
+      { uid: 31, expandable: true, expanded: false, touched: false, plugged: true },
+    ])
+    assert.equal(collapsed.actions.length, 0)
+    assert.equal(reg.touched.get(31), L.TOUCH_CLOSED)
+  })
+
+  test(prefix + 'all:touched 超容量裁剪最旧条目', () => {
+    const reg = createAllRegistry()
+    for (let index = 0; index < L.ALL_TOUCHED_CAP + 5; index += 1) {
+      planAll(reg, [{ uid: 100 + index, expandable: true, expanded: true, touched: false }])
+    }
+    assert.ok(reg.touched.size <= L.ALL_TOUCHED_CAP)
+    assert.equal(reg.touched.has(100), false)
+  })
 }
 
 defineScenarios('[logic.mjs] ', logic)
@@ -405,7 +517,7 @@ function logicInternals() {
   const factory = new Function(
     '"use strict";'
       + stripped
-      + '; return { prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow };',
+      + '; return { prefixOf, matchMark, findSeenKey, isCurrent, putSeen, findRow, allRowKey, touchedValue, putTouched };',
   )
   return factory()
 }
@@ -417,21 +529,21 @@ test('LOGIC 段与 logic.mjs 逐函数源码一致(归一化注释与空白,含�
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\/\/[^\n]*/g, '')
     .replace(/\s+/g, '')
-  for (const name of ['plan', 'planFinal', 'createRegistry', 'capMap', 'needsReattach', 'registerCurrent', 'isPinned', 'shouldPinRestore']) {
+  for (const name of ['plan', 'planFinal', 'createRegistry', 'capMap', 'needsReattach', 'registerCurrent', 'isPinned', 'shouldPinRestore', 'createAllRegistry', 'planAll']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(logic[name].toString()),
       'LOGIC 段与 logic.mjs 漂移: ' + name,
     )
   }
-  for (const name of ['prefixOf', 'matchMark', 'findSeenKey', 'isCurrent', 'putSeen', 'findRow']) {
+  for (const name of ['prefixOf', 'matchMark', 'findSeenKey', 'isCurrent', 'putSeen', 'findRow', 'allRowKey', 'touchedValue', 'putTouched']) {
     assert.equal(
       normalize(client[name].toString()),
       normalize(internals[name].toString()),
       'LOGIC 段内部助手与 logic.mjs 漂移: ' + name,
     )
   }
-  for (const name of ['STATE_RUNNING', 'STATE_OK', 'SEEN_MAP_CAP', 'PIN_THRESHOLD_PX']) {
+  for (const name of ['STATE_RUNNING', 'STATE_OK', 'SEEN_MAP_CAP', 'PIN_THRESHOLD_PX', 'TOUCH_OPEN', 'TOUCH_CLOSED', 'ALL_TOUCHED_CAP', 'EXPANDED_CAP']) {
     assert.equal(client[name], logic[name], '常量漂移: ' + name)
   }
 })

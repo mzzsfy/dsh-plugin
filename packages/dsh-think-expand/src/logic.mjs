@@ -226,3 +226,54 @@ export function registerCurrent(registry, uid, seen) {
 export function needsReattach(observed, current) {
   return observed === null || observed !== current
 }
+
+// ---- 全部消息模式:行触达登记与展开决策 ----
+
+// 用户触达登记值:open = 手动展开过的行,插件持续保持展开;
+// closed = 手动收起过的行,插件不再展开。
+export const TOUCH_OPEN = 'open'
+export const TOUCH_CLOSED = 'closed'
+
+// 触达登记容量上限,超出按插入序裁剪最旧条目(登记以会话行数量级增长,有界防御)。
+export const ALL_TOUCHED_CAP = 10 * 50
+
+export function createAllRegistry() {
+  return { touched: new Map() }
+}
+
+// 行触达键:宿主稳定行键优先,控制器元素序号兜底。
+function allRowKey(item) {
+  return item.key !== undefined ? item.key : item.uid
+}
+
+// 行目标态:未触达默认展开,触达后以登记值为准。
+function touchedValue(registry, item) {
+  const value = registry.touched.get(allRowKey(item))
+  return value !== undefined ? value : TOUCH_OPEN
+}
+
+function putTouched(map, key, value) {
+  map.delete(key)
+  map.set(key, value)
+  capMap(map, ALL_TOUCHED_CAP)
+}
+
+// 全部消息模式展开决策。行结构:{ uid, key, expandable, expanded, plugged, touched }。
+// key 为宿主稳定行键;touched 为控制器查表结果(键已在登记表)。
+// 动作只补齐目标态差:目标展开且当前收起 → expand。登记规则(suppressManual 首扫除外):
+// 无插件闩锁的展开 = 用户手动意图 → open;有闩锁的收起 = 用户收回插件行 → closed。
+export function planAll(registry, rows, options = {}) {
+  const actions = []
+  if (options.suppressManual !== true) {
+    for (const item of rows) {
+      if (!item.expandable || item.touched) continue
+      if (item.expanded && !item.plugged) putTouched(registry.touched, allRowKey(item), TOUCH_OPEN)
+      else if (!item.expanded && item.plugged) putTouched(registry.touched, allRowKey(item), TOUCH_CLOSED)
+    }
+  }
+  for (const [index, item] of rows.entries()) {
+    if (!item.expandable || item.expanded) continue
+    if (touchedValue(registry, item) !== TOUCH_CLOSED) actions.push({ index, kind: 'expand' })
+  }
+  return { actions }
+}

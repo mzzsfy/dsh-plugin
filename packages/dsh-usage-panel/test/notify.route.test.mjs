@@ -21,7 +21,7 @@ after(async () => {
 
 const NOTIFY_ON = { notify: { enabled: true, quotaThresholdPct: 50 } }
 
-function makeCtx({ settingsValue = {}, dshIm = undefined } = {}) {
+function makeCtx({ settingsValue = {}, dshIm = undefined, beforeSettingsUpdate } = {}) {
   let value = settingsValue
   const routes = new Map()
   resetBusStub()
@@ -30,6 +30,7 @@ function makeCtx({ settingsValue = {}, dshIm = undefined } = {}) {
     register() {},
     get: () => value,
     update: async (_ns, patch) => {
+      if (beforeSettingsUpdate) await beforeSettingsUpdate(patch)
       value = { ...value, ...patch }
     },
   }
@@ -209,6 +210,58 @@ test('notify-config: 非法补丁 400, 合法补丁合并生效', async () => {
   assert.equal(view.payload.notify.balanceThreshold, 20)
   assert.equal(view.payload.notify.enabled, true)
   assert.equal(view.payload.notify.webhookUrl, 'https://hooks.example.com/keep')
+})
+
+test('notify-config: 并发 POST 串行化读改写, 先写不被后写基于旧快照覆盖', async () => {
+  // Given 慢写 settings.update(可控闸门队列,落盘真实发生),初始通知关闭
+  const gates = []
+  const writes = []
+  const beforeSettingsUpdate = async (patch) => {
+    writes.push(patch)
+    await new Promise((resolve) => gates.push(resolve))
+  }
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: false, balanceThreshold: 20 } }, beforeSettingsUpdate })
+  apply(ctx)
+  // When 启用通知(写1)与保存阈值(写2)并发提交
+  const waitForGate = () => new Promise((resolve) => {
+    const poll = () => { gates.length === 1 ? resolve() : setImmediate(poll) }
+    poll()
+  })
+  const enable = call(routes, '/api/usage-panel/notify-config', makeReq('POST', { enabled: true }))
+  await waitForGate()
+  const threshold = call(routes, '/api/usage-panel/notify-config', makeReq('POST', { balanceThreshold: 5 }))
+  // Then 两写按提交序串行落盘:写2 须在写1 完成后才进入读改写(闸门二次出现),
+  // 且基于含 enabled=true 的快照合并
+  gates.shift()()
+  await waitForGate()
+  gates.shift()()
+  // 两写均已放闸,完成序颠倒也不影响断言(读快照序已由串行链锁定)
+  const [enableRes, thresholdRes] = await Promise.all([enable, threshold])
+  assert.equal(enableRes.status, 200)
+  assert.equal(thresholdRes.status, 200)
+  assert.equal(writes.length, 2)
+  assert.equal(writes[0].notify.enabled, true)
+  assert.equal(writes[1].notify.enabled, true, '写2 读改写须含写1 的 enabled=true')
+  assert.equal(writes[1].notify.balanceThreshold, 5)
+})
+
+test('notify-config: 单次写失败不阻塞后续写, 失败响应 400 且错误可见', async () => {
+  // Given settings.update 首次失败
+  let calls = 0
+  const flakyBefore = async () => {
+    calls += 1
+    if (calls === 1) throw new Error('disk full')
+  }
+  const { ctx, routes } = makeCtx({ settingsValue: { notify: { enabled: false } }, beforeSettingsUpdate: flakyBefore })
+  apply(ctx)
+  // When 第一次写失败后第二次写
+  const first = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { enabled: true }))
+  const second = await call(routes, '/api/usage-panel/notify-config', makeReq('POST', { enabled: true }))
+  // Then 首写 400 携带原因, 次写成功生效
+  assert.equal(first.status, 400)
+  assert.match(first.payload.error, /disk full/)
+  assert.equal(second.status, 200)
+  assert.equal(calls, 2)
 })
 
 test('test-webhook: 返回真实投递结果而非谎报成功', async () => {

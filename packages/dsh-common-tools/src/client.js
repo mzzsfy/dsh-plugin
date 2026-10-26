@@ -29,19 +29,23 @@ window.__ModuleLoader__.load({
     // 层级假设的显式化:承诺"高于设置全屏层"绑定此值,宿主层级调整时回归核对
     const TOAST_Z_INDEX = 1100
 
-    // 令牌 fallback:宿主 dsh 升级更名 --dsw-* 变量时降级为可用默认形态,
-    // 不静默失效为透明底/不可读字
+    // 色彩槽位:经包前缀局部 token 二次封装引用宿主语义别名,fallback 取
+    // dsh 0.2.1-rc.2 client-ui-theme 官方同值字面量(toast 底/字为官方专用
+    // alias,亮暗两套各自定义,文字恒近白;状态色随主题切换但白字均可读)
     const CSS = [
       '.dsh-toast-stack { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:' + TOAST_Z_INDEX + ';',
-      '  display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none; }',
-      '.dsh-toast { pointer-events:auto; background:var(--dsw-alias-toast-bg, rgba(32,33,36,.92)); color:var(--dsw-alias-label-primary-inverted, #fff);',
-      '  font:var(--dsw-font-xs-13, 13px/1.5 system-ui, sans-serif); padding:8px 14px; border-radius:10px; box-shadow:var(--dsw-shadow-lv2, 0 2px 8px rgba(0,0,0,.25));',
+      '  display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none;',
+      '  --dct-bg:var(--dsw-alias-toast-bg, #43454a); --dct-label:var(--dsw-alias-toast-label, #fff);',
+      '  --dct-ok:var(--dsw-alias-state-success-primary, #22c55e); --dct-danger:var(--dsw-alias-state-error-primary, #ec1313);',
+      '  --dct-radius:var(--dsw-radius-lg, 16px); --dct-shadow:var(--dsw-shadow-lv3, 0 0 1px 0 #0003, 0 0 4px 0 #00000005, 0 12px 32px 0 #00000014); }',
+      '.dsh-toast { pointer-events:auto; background:var(--dct-bg); color:var(--dct-label);',
+      '  font:var(--dsw-font-xs-13, 13px/20px var(--dsw-font-family, system-ui), sans-serif); padding:8px 14px; border-radius:var(--dct-radius); box-shadow:var(--dct-shadow);',
       '  animation:dsh-toast-in 0.18s ease-out; max-width:520px; max-height:60vh; overflow:auto; overflow-wrap:anywhere; display:flex; align-items:safe center; gap:10px; }',
-      '.dsh-toast--ok { background:var(--dsw-alias-state-success-primary, #1a7f37); color:var(--dsw-alias-label-primary-inverted, #fff); }',
-      '.dsh-toast--error { background:var(--dsw-alias-state-error-primary, #d93025); color:#fff; }',
+      '.dsh-toast--ok { background:var(--dct-ok); }',
+      '.dsh-toast--error { background:var(--dct-danger); }',
       '.dsh-toast--click { cursor:pointer; }',
       '.dsh-toast__close { border:0; background:transparent; cursor:pointer; color:inherit;',
-      '  font:var(--dsw-font-xs-strong-13, 13px system-ui, sans-serif); padding:0 2px; opacity:.8; }',
+      '  font:var(--dsw-font-xs-strong-13, 500 13px/20px var(--dsw-font-family, system-ui), sans-serif); padding:0 2px; opacity:.8; }',
       '.dsh-toast__close:hover { opacity:1; }',
       '@keyframes dsh-toast-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }',
       '@media (prefers-reduced-motion: reduce) { .dsh-toast { animation:none; } }',

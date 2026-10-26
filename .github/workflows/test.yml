@@ -46,8 +46,11 @@ jobs:
       # 镜像开发态 junction 桥);--no-save --no-package-lock 保证不产生任何入库文件。
       # schemastery 钉 3.18.4 = dsh-maintain peer 下限(3.18.2 无 volatile 方法,
       # Config 契约测试「根级单 ref get 协议」在 CI 恒红)
+      # dsh 系三包代际与根桥 package.json 一致(rc.3):tools peer 链经 dsh-agent 拉
+      # dsh-scope peer,与根桥显式 scope 版本互斥即 ERESOLVE;aggregate-tests 的
+      # missingBridgeDeps 也按根声明核对,缺 scope/system-prompt 即全单元拒绝
       - name: 安装宿主 peer(仓库根解析桥)
-        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.4 @deepseek-ai/dsh-storage-domain@0.1.2-rc.1 @deepseek-ai/dsh-tools@0.1.2-rc.1 @deepseek-ai/dsh-api-terminal-controller@0.2.0-rc.2 zod@4.5.4
+        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.4 @deepseek-ai/dsh-storage-domain@0.2.1-rc.3 @deepseek-ai/dsh-tools@0.2.1-rc.3 @deepseek-ai/dsh-scope@0.2.1-rc.3 @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 @deepseek-ai/dsh-api-terminal-controller@0.2.1-rc.3 zod@4.5.4
       # 含外部依赖的包自动发现并安装:显式 CLI spec(name@range;@mzzsfy 依赖映射
       # file:../ 同层包 symlink,未经 registry 解析,未发布依赖不再 ETARGET)。
       # 自依赖统一走符号链接桥,禁止经 registry 解析。

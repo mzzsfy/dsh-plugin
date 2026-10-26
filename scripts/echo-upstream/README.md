@@ -4,13 +4,17 @@
 
 ## 启动与接入
 
+AI 会话与自动化测试一律用随机端口新起独立实例(`--port 0`),用完即杀;禁止复用长驻实例(旧进程即旧代码,是"测到旧行为"的已知根因),禁止消耗真实 API 配额。需隔离 profile 全家桶级宿主链路验证时按 [docs/兼容性测试/测试与隔离方法.md](../../docs/兼容性测试/测试与隔离方法.md) 走 compat 隔离工位,生产 profile、`~/.dsh` 与 3080 零接触。固定端口 18123 仅属人工长驻调试惯例:
+
 ```bash
+node scripts/echo-upstream/cli.mjs --port 0
+# AI/自动化默认形态:随机端口,stdout 打印实际端口;每次自测新起,用完即杀
 node scripts/echo-upstream/cli.mjs --port 18123
 # 独立实例，打印实际端口；不同实例的队列和请求历史互不影响
 node scripts/echo-upstream/cli.mjs --port 0 --log .compat/llm-requests.jsonl
 ```
 
-只监听 `127.0.0.1`，无真实凭据需求。将宿主 provider 的 baseURL 设为 `http://127.0.0.1:18123`；支持 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`（也支持无 `/v1` 前缀）。`stream` 由上游请求决定，模拟器自动返回 JSON 或 SSE。
+只监听 `127.0.0.1`，无真实凭据需求。将宿主 provider 的 baseURL 设为 `http://127.0.0.1:<实例实际端口>`；支持 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`（也支持无 `/v1` 前缀）。`stream` 由上游请求决定，模拟器自动返回 JSON 或 SSE。
 
 默认日志位于系统临时目录下的 `echo-upstream.jsonl`。指定 `--log` 时，父目录必须预先存在；模拟器不会创建目录。
 

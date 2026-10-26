@@ -365,6 +365,26 @@ export function apply(ctx, configRef) {
     return resolvedNotifySettings(value && typeof value === 'object' ? value.notify : undefined)
   }
 
+  // 通知配置串行写链:读改写整体入链,任一失败不吞链(catch 后换行续链)
+  let notifyConfigWriteChain = Promise.resolve()
+
+  function persistNotifyPatch(patch) {
+    // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
+    const merged = { ...readNotifySettings(), ...patch }
+    // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+    // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+    // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
+    const settings = ctx.get('settings')
+    requireOk(settings !== undefined, 'settings 服务不可用')
+    if (typeof settings.register === 'function' && typeof settings.update === 'function') {
+      return settings.update(NAMESPACE, { notify: merged })
+    }
+    const editor = ctx.get('configEditor')
+    const entry = ctx.fiber?.entry
+    requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
+    return editor.edit(entry, (current) => ({ ...current, notify: merged }))
+  }
+
   function ensureHistory() {
     return historyStore.ensure().then((sequences) => {
       history = sequences
@@ -646,21 +666,12 @@ export function apply(ctx, configRef) {
           const body = JSON.parse(await readBody(req))
           const check = validateNotifyPatch(body)
           requireOk(check.ok, check.reason)
-          // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
-          const merged = { ...readNotifySettings(), ...check.patch }
-          // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
-          // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
-          // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
-          const settings = ctx.get('settings')
-          requireOk(settings !== undefined, 'settings 服务不可用')
-          if (typeof settings.register === 'function' && typeof settings.update === 'function') {
-            await settings.update(NAMESPACE, { notify: merged })
-          } else {
-            const editor = ctx.get('configEditor')
-            const entry = ctx.fiber?.entry
-            requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
-            await editor.edit(entry, (current) => ({ ...current, notify: merged }))
-          }
+          // 读改写经串行链执行:重叠请求各自基于旧快照合并会互相覆盖
+          // (先写的 enabled 被后写基于旧 enabled=false 的合并抹掉),链式
+          // 追加保证任一写读取的总是前序写完成后的最新值;共享链以 catch
+          // 续接,单次失败只回报本次请求(抛错由 guardedRoute 统一转 400),
+          // 不阻断后续写
+          await notifyConfigWriteChain.then(() => persistNotifyPatch(check.patch))
           sendJson(res, 200, { ok: true, notify: publicNotify(readNotifySettings()) })
         }),
       }),
