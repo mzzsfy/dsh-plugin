@@ -98,7 +98,14 @@ export class AttachPump {
         }
       })
       this.#push({ sequence, type: WRITE, data: text })
-    })
+    }).finally(() => this.#releaseWhenIdle(epoch))
+  }
+
+  // 空闲即释放附着:宿主 detach 会广播 state,UI 恢复 writable 触发官方 fit 重算几何
+  // 持续附着会让 UI 长期只读,官方 fit 不跑,插件写入推高的 PTY 行数把底部推出可视区
+  #releaseWhenIdle(epoch) {
+    if (this.#epoch !== epoch || this.#pending.size > 0) return
+    this.stop()
   }
 
   stop() {
