@@ -22,14 +22,17 @@ window.__ModuleLoader__.load({
 
     const SELECTOR_SCROLL = '[data-conversation-scroll]'
     const SELECTOR_ROW = '[data-variant="think"]'
+    // 工具机行根:flowItem 全集(控制器排除思考行根);宿主每 flowItem 渲染单行
+    const SELECTOR_ANY_ROW = '[data-chat-node-key]'
     const SELECTOR_HEAD = '[data-disclosure-row]'
-    // body 类名经 CSS Modules 哈希带前缀(如 QWLzlG_thinkBody),按子串匹配
+    // body 类名经 CSS Modules 哈希带前缀(如 QWLzlG_thinkBody / CY-8Ka_bodyWrap),按子串匹配
     const SELECTOR_BODY = '[class*="thinkBody"]'
+    const SELECTOR_TOOL_BODY = '[class*="bodyWrap"]'
     const ATTR_STATE = 'data-state'
     const ATTR_EXPANDED = 'aria-expanded'
-    // 全部消息模式:可展开头带官方 expandable 标记;行键取 flowItem 宿主稳定行键
     const ATTR_EXPANDABLE = 'data-expandable'
-    const SELECTOR_FLOW_ITEM = '[data-chat-node-key]'
+    const ATTR_VARIANT = 'data-variant'
+    const VARIANT_THINK = 'think'
 
     // ---- 配置常量 ----
 
@@ -296,54 +299,89 @@ window.__ModuleLoader__.load({
       if (uid !== undefined) capSet(registry.expanded.add(uid))
     }
 
-    // ---- 全部消息模式:行触达登记与展开决策 ----
+    // ---- 工具机:与思考机独立的第二状态机(展开全部消息模式) ----
 
-    // 用户触达登记值:open = 手动展开过的行,插件持续保持展开;
-    // closed = 手动收起过的行,插件不再展开。
-    const TOUCH_OPEN = 'open'
-    const TOUCH_CLOSED = 'closed'
-
-    // 触达登记容量上限,超出按插入序裁剪最旧条目(登记以会话行数量级增长,有界防御)。
-    const ALL_TOUCHED_CAP = 10 * 50
-
-    function createAllRegistry() {
-      return { touched: new Map() }
+    // 行结构:{ uid, expandable, expanded, plugged, bodyText }。
+    // 独立 registry/current/manual/read,与思考机互不读写;共享 seen 存取助手与
+    // 容量上限。目标行 = 文档序最后一个可展开行(工具流 state 形态多样,不按
+    // state 选行;preparing 行无官方 expandable 标记天然落选);至多一条工具行展开。
+    function createToolsRegistry() {
+      return { current: null, marks: new Map(), manual: new Map(), read: new Map(), expanded: new Set() }
     }
 
-    // 行触达键:宿主稳定行键优先,控制器元素序号兜底。
-    function allRowKey(item) {
-      return item.key !== undefined ? item.key : item.uid
-    }
-
-    // 行目标态:未触达默认展开,触达后以登记值为准。
-    function touchedValue(registry, item) {
-      const value = registry.touched.get(allRowKey(item))
-      return value !== undefined ? value : TOUCH_OPEN
-    }
-
-    function putTouched(map, key, value) {
-      map.delete(key)
-      map.set(key, value)
-      capMap(map, ALL_TOUCHED_CAP)
-    }
-
-    // 全部消息模式展开决策。行结构:{ uid, key, expandable, expanded, plugged, touched }。
-    // key 为宿主稳定行键;touched 为控制器查表结果(键已在登记表)。
-    // 动作只补齐目标态差:目标展开且当前收起 → expand。登记规则(suppressManual 首扫除外):
-    // 无插件闩锁的展开 = 用户手动意图 → open;有闩锁的收起 = 用户收回插件行 → closed。
-    function planAll(registry, rows, options = {}) {
+    function planTools(registry, rows, options = {}) {
       const actions = []
-      if (options.suppressManual !== true) {
-        for (const item of rows) {
-          if (!item.expandable || item.touched) continue
-          if (item.expanded && !item.plugged) putTouched(registry.touched, allRowKey(item), TOUCH_OPEN)
-          else if (!item.expanded && item.plugged) putTouched(registry.touched, allRowKey(item), TOUCH_CLOSED)
+
+      // 手动识别:已展开且无插件闩锁 → manual(永不干预);正文未挂载不识别。
+      // 仅在插件已展开过行(current 在场)后识别:首轮既存展开行视为中性,
+      // 与思考机"无 running 行不干预"同构,防首扫把用户历史展开误判挡住目标行
+      if (options.suppressManual !== true && registry.current !== null) {
+        for (const row of rows) {
+          if (!row.expandable || !row.expanded || row.bodyText === '' || row.plugged) continue
+          if (findSeenKey(registry.marks, row.uid, row.bodyText) !== null) continue
+          if (isCurrent(registry, row.uid, row.bodyText)) continue
+          const readKey = findSeenKey(registry.read, row.uid, row.bodyText)
+          if (readKey !== null) {
+            if (row.uid !== undefined && registry.expanded.has(row.uid)) registry.read.delete(readKey)
+            continue
+          }
+          if (findSeenKey(registry.manual, row.uid, row.bodyText) === null) {
+            putSeen(registry.manual, row.uid, row.bodyText)
+            if (registry.current !== null) {
+              const currentIndex = findRow(registry, rows)
+              const currentRow = currentIndex >= 0 ? rows[currentIndex] : null
+              if (currentRow !== null && currentRow.expanded) actions.push({ index: currentIndex, kind: 'collapse' })
+              registry.marks.delete(registry.current.seen)
+              registry.current = null
+            }
+          }
         }
       }
-      for (const [index, item] of rows.entries()) {
-        if (!item.expandable || item.expanded) continue
-        if (touchedValue(registry, item) !== TOUCH_CLOSED) actions.push({ index, kind: 'expand' })
+
+      // 插件展开行被收起 → 已读(该工具行不再展开)
+      if (registry.current !== null) {
+        const index = findRow(registry, rows)
+        if (index < 0 || !rows[index].expandable || !rows[index].expanded) {
+          putSeen(registry.read, registry.current.uid, registry.current.seen)
+          if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
+          registry.marks.delete(registry.current.seen)
+          registry.current = null
+        }
       }
+
+      // 目标行:文档序最后一个可展开行;无则不干预
+      let targetIndex = -1
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        if (rows[index].expandable) { targetIndex = index; break }
+      }
+      if (targetIndex < 0) return { actions }
+      const target = rows[targetIndex]
+
+      if (findSeenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
+      if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
+      if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
+
+      // 插件展开过的目标行被收起(如回合收尾重建后):登记宽松已读,不强制重展开
+      if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+        if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
+        return { actions }
+      }
+
+      // 新目标行:收起旧插件行(手动行除外),展开目标行
+      if (registry.current !== null) {
+        const oldIndex = findRow(registry, rows)
+        const oldIsManual = findSeenKey(registry.manual, registry.current.uid, registry.current.seen) !== null
+        const old = oldIndex >= 0 ? rows[oldIndex] : null
+        if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
+        registry.marks.delete(registry.current.seen)
+        registry.current = null
+      }
+
+      if (!target.expanded) {
+        actions.push({ index: targetIndex, kind: 'expand' })
+        if (target.uid !== undefined) capSet(registry.expanded.add(target.uid))
+      }
+      if (target.bodyText !== '') registerCurrent(registry, target.uid, target.bodyText)
       return { actions }
     }
     /* LOGIC-END */
@@ -351,11 +389,8 @@ window.__ModuleLoader__.load({
     // ---- DOM 控制器:识别行、执行展开/收起、MutationObserver 接线 ----
 
     let registry = createRegistry()
-    // 全部消息模式登记表:行触达标记(用户手动意图),容器重建即重置
-    let allRegistry = createAllRegistry()
-    // 全部消息模式插件动作闩锁(元素级):展开记入、收起解除;行重建即失效,
-    // 重建行视为未触达,自然重新展开
-    let allPluggedEls = new WeakSet()
+    // 工具机登记表:与思考机独立,展开全部消息模式运行
+    let toolsRegistry = createToolsRegistry()
     let containerObserver = null
     let bodySentinel = null
     let observedContainer = null
@@ -376,8 +411,10 @@ window.__ModuleLoader__.load({
     }
 
     // final 握手状态单点:pending(容器就绪待执行)→ awaitRegister(已展开待登记),
-    // el 为待登记/待登记中的行元素(登记完成即清引用,不延长 detached 子树寿命)
+    // el 为待登记/待登记中的行元素(登记完成即清引用,不延长 detached 子树寿命);
+    // 思考机与工具机各持一套(finalState / toolsFinalState),登记按所属机分流
     const finalState = { pending: false, awaitRegister: false, el: null }
+    const toolsFinalState = { pending: false, awaitRegister: false, el: null }
 
     function describeRow(el) {
       const head = el.querySelector(SELECTOR_HEAD)
@@ -395,37 +432,43 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // 剥离 el 等控制器字段,保持 plan() 纯度(单点定义防行结构加字段时漏改)
+    // 工具机行描述:行根为非思考行根(含无 variant 的 DisclosureRow 行);
+    // expandable 按官方 data-expandable 标记(preparing 行天然无标记),
+    // 正文取工具行 bodyWrap 容器(CSS Modules 哈希前缀子串匹配)
+    function describeToolRow(el) {
+      const head = el.querySelector(SELECTOR_HEAD)
+      const body = head !== null ? el.querySelector(SELECTOR_TOOL_BODY) : null
+      return {
+        el,
+        uid: rowUid(el),
+        expandable: head !== null && head.getAttribute(ATTR_EXPANDABLE) !== null,
+        bodyText: body !== null ? body.textContent || '' : '',
+        expanded: head !== null && head.getAttribute(ATTR_EXPANDED) === 'true',
+        plugged: pluginExpandedEls.has(el),
+      }
+    }
+
+    // 剥离 el 等控制器字段,保持 plan()/planTools() 纯度(单点定义防行结构加字段时漏改)
     const toLogicRows = (described) => described.map(({ uid, headable, state, bodyText, expanded, plugged }) =>
       ({ uid, headable, state, bodyText, expanded, plugged }))
+    const toToolLogicRows = (described) => described.map(({ uid, expandable, bodyText, expanded, plugged }) =>
+      ({ uid, expandable, bodyText, expanded, plugged }))
 
-    // 全部消息模式行集:选择器放行所有行,expandable 由官方折叠头标记判定;
-    // 行键取宿主 flowItem 稳定行键(宿主 ChatView 每 flowItem 渲染单 routedNode 单
-    // 折叠头,键与行一一对应;无 flowItem 时退化为 head 元素序号,不与宿主键混用),
-    // touched 查登记表,plugged 查双闩锁并集(think 机制与 all 机制的插件动作同属插件)
-    const collectRowsAll = (container) => Array.from(container.querySelectorAll(SELECTOR_HEAD), (head) => {
-      const root = head.closest(SELECTOR_FLOW_ITEM) || head.parentElement
-      const key = root.getAttribute('data-chat-node-key') ?? rowUid(head)
-      return {
-        el: root,
-        head,
-        uid: rowUid(root),
-        key,
-        expandable: head.getAttribute(ATTR_EXPANDABLE) !== null,
-        expanded: head.getAttribute(ATTR_EXPANDED) === 'true',
-        touched: allRegistry.touched.has(key),
-        plugged: allPluggedEls.has(root) || pluginExpandedEls.has(root),
-      }
-    })
-
+    // 行集分发:思考机恒认思考行;工具机行根 = flowItem 全集 − 思考行根
+    // (非思考行根含工具/命令卡/上下文注入/系统提示行;但上下文注入等无 variant 行
+    // 可能不具 data-expandable,此时 expandable=false 不干预)
     const collectRows = (container) => Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
+    const collectToolRows = (container) => Array.from(
+      container.querySelectorAll(SELECTOR_ANY_ROW),
+      (el) => el.getAttribute(ATTR_VARIANT) === VARIANT_THINK ? null : describeToolRow(el)
+    ).filter(Boolean)
 
     // 执行动作并返回被点击的行元素(未触发点击返回 null)。
     // 动作改变内容高度会把置底视口推离底部,官方滚动跟随随即失联:
     // 动作前处于置底态时,高度落定后回补置底。
     function applyAction(container, described, action) {
       const row = described[action.index]
-      if (!row || !row.headable) return null
+      if (!row || (row.headable === false && row.expandable === false)) return null
       const head = row.el.querySelector(SELECTOR_HEAD)
       if (head === null) return null
       if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) {
@@ -437,24 +480,6 @@ window.__ModuleLoader__.load({
         return row.el
       }
       return null
-    }
-
-    // 全部消息模式动作执行:批量动作前记一次置底状态,全部落定后回补一次;
-    // 闩锁为元素级 WeakSet,展开记入、收起解除
-    function applyActionsAll(container, items, actions) {
-      if (actions.length === 0) return
-      const before = containerMetrics(container)
-      for (const action of actions) {
-        const item = items[action.index]
-        if (!item) continue
-        const head = item.head
-        if (head.getAttribute(ATTR_EXPANDED) !== String(action.kind === 'expand')) {
-          if (action.kind === 'expand') allPluggedEls.add(item.el)
-          else allPluggedEls.delete(item.el)
-          head.click()
-        }
-      }
-      if (isPinned(before)) schedulePinRestore(container, before)
     }
 
     // ---- 置底回补 ----
@@ -504,20 +529,16 @@ window.__ModuleLoader__.load({
       const container = document.querySelector(SELECTOR_SCROLL)
       // 容器身份守卫:容器替换至哨兵回调之间,旧观察器投递的扫描不对新容器用旧 registry 决策
       if (container === null || container !== observedContainer) return 0
-      if (expandAll) return scanAll(container, false)
       const described = collectRows(container)
       releaseLatchIfCollapsed(described)
       for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
+      // 工具机与思考机并行(独立 registry/独立目标行),仅全部消息模式运行
+      if (expandAll) {
+        const tools = collectToolRows(container)
+        releaseToolLatchIfCollapsed(tools)
+        for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) applyAction(container, tools, action)
+      }
       return described.length
-    }
-
-    // 全部消息模式扫描:先按触达规则登记,再补齐展开差;返回行数供 final 握手判定
-    function scanAll(container, suppressManual) {
-      const items = collectRowsAll(container)
-      const rows = items.map(({ el, head, ...rest }) => rest)
-      const result = planAll(allRegistry, rows, { suppressManual })
-      applyActionsAll(container, items, result.actions)
-      return items.length
     }
 
     // 用户手动收起不经 applyAction(闩锁解除只发生在插件 collapse 分支):
@@ -529,25 +550,38 @@ window.__ModuleLoader__.load({
       if (row !== undefined && !row.expanded) pluginExpandedEls.delete(row.el)
     }
 
-    // 展开动作落定后登记当前行,使 plan() 识别为插件展开而非手动意图;
-    // 行已收起(用户抢先)则放弃登记
+    // 工具机同款:工具 current 行被用户收起时解除闩锁
+    function releaseToolLatchIfCollapsed(described) {
+      if (toolsRegistry.current === null) return
+      const row = described.find((item) => item.uid === toolsRegistry.current.uid)
+      if (row !== undefined && !row.expanded) pluginExpandedEls.delete(row.el)
+    }
+
+    // 展开动作落定后登记当前行,使 plan()/planTools() 识别为插件展开而非手动意图;
+    // 行已收起(用户抢先)则放弃登记。machine='think'|'tools' 决定登记目标机
     function registerFinal() {
-      if (!finalState.awaitRegister) return
-      finalState.awaitRegister = false
-      const el = finalState.el
-      finalState.el = null
+      if (!finalState.awaitRegister && !toolsFinalState.awaitRegister) return
+      if (finalState.awaitRegister) registerFinalInto(finalState, 'think')
+      if (toolsFinalState.awaitRegister) registerFinalInto(toolsFinalState, 'tools')
+    }
+
+    function registerFinalInto(state, machine) {
+      state.awaitRegister = false
+      const el = state.el
+      state.el = null
       if (el === null || !el.isConnected) return
-      const described = describeRow(el)
+      const described = machine === 'think' ? describeRow(el) : describeToolRow(el)
       if (!described.expanded) {
         pluginExpandedEls.delete(el)
         return
       }
       if (described.bodyText === '') {
-        finalState.el = el
-        finalState.awaitRegister = true
+        state.el = el
+        state.awaitRegister = true
         return
       }
-      registerCurrent(registry, described.uid, described.bodyText)
+      if (machine === 'think') registerCurrent(registry, described.uid, described.bodyText)
+      else registerCurrent(toolsRegistry, described.uid, described.bodyText)
     }
 
     // 容器就绪/重建后执行一次:展开最后一条;
@@ -556,13 +590,28 @@ window.__ModuleLoader__.load({
       const container = document.querySelector(SELECTOR_SCROLL)
       if (container === null) return
       const described = collectRows(container)
-      if (!described.some((row) => row.headable)) return
-      finalState.pending = false
-      for (const action of planFinal(toLogicRows(described)).actions) {
-        const clicked = applyAction(container, described, action)
-        if (clicked !== null) {
-          finalState.el = clicked
-          finalState.awaitRegister = true
+      if (described.some((row) => row.headable)) {
+        finalState.pending = false
+        for (const action of planFinal(toLogicRows(described)).actions) {
+          const clicked = applyAction(container, described, action)
+          if (clicked !== null) {
+            finalState.el = clicked
+            finalState.awaitRegister = true
+          }
+        }
+      }
+      // 工具机 final:仅全部消息模式参与,目标为最后一个可展开工具行
+      if (expandAll) {
+        const tools = collectToolRows(container)
+        if (tools.some((row) => row.expandable)) {
+          toolsFinalState.pending = false
+          for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) {
+            const clicked = applyAction(container, tools, action)
+            if (clicked !== null) {
+              toolsFinalState.el = clicked
+              toolsFinalState.awaitRegister = true
+            }
+          }
         }
       }
     }
@@ -575,14 +624,9 @@ window.__ModuleLoader__.load({
       slot.debounceTimer = setTimeout(() => {
         slot.debounceTimer = null
         if (window[SLOT_KEY] !== slot) return
-        if (expandAll) {
-          // 全部消息模式:final 握手不参与,普通扫描即幂等补齐展开差
-          if (scan() === 0) finalState.pending = true
-          return
-        }
         registerFinal()
         if (scan() === 0) finalState.pending = true
-        else if (finalState.pending) tryPlanFinal()
+        else if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
       }, DEBOUNCE_MS)
     }
 
@@ -595,7 +639,7 @@ window.__ModuleLoader__.load({
     }
 
     // 从 body 等待观察切换为容器子树观察,并记录已观察节点。
-    // 会话切换不继承标记,registry 重建;首扫抑制手动识别:
+    // 会话切换不继承标记,双机 registry 重建;首扫抑制手动识别:
     // 既存展开行视为中性(可能是上一代插件的展开),由 planFinal/流式流程接管
     function attach(container) {
       if (containerObserver !== null) containerObserver.disconnect()
@@ -604,55 +648,58 @@ window.__ModuleLoader__.load({
       if (slot !== null) slot.containerObserver = containerObserver
       observedContainer = container
       registry = createRegistry()
-      allRegistry = createAllRegistry()
+      toolsRegistry = createToolsRegistry()
       pluginExpandedEls = new WeakSet()
-      allPluggedEls = new WeakSet()
       finalState.el = null
       finalState.awaitRegister = false
       finalState.pending = true
+      toolsFinalState.el = null
+      toolsFinalState.awaitRegister = false
+      toolsFinalState.pending = true
       scanSuppressManual()
-      if (!expandAll && finalState.pending) tryPlanFinal()
+      if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
     }
 
     function scanSuppressManual() {
       const container = observedContainer
       if (container === null) return 0
-      if (expandAll) return scanAll(container, true)
       const described = collectRows(container)
       const actions = plan(registry, toLogicRows(described), { suppressManual: true }).actions
       for (const action of actions) applyAction(container, described, action)
+      // 工具机首扫同抑制(仅全部消息模式)
+      if (expandAll) {
+        const tools = collectToolRows(container)
+        const toolActions = planTools(toolsRegistry, toToolLogicRows(tools), { suppressManual: true }).actions
+        for (const action of toolActions) applyAction(container, tools, action)
+      }
       return described.length
     }
 
-    // 模式切换(开关回调):实时生效。
-    // → 全部消息:直接重扫补齐展开差;
-    // → 仅思考:收起全部插件闩锁(双闩锁并集)内的展开行(手动行保留)并解除全部
-    //   闩锁(收起行残留闩锁会让后续手动重展开被 plan 误判插件动作),登记表重置后
-    //   走 think 首扫;批量收起与批量展开同构,动作前记置底状态落定后回补
+    // 模式切换(开关回调):实时生效。两机共用闩锁与点击通道,行集与决策独立。
+    // 切换时收起插件闩锁内的全部展开行(手动行保留)并解除全部闩锁(残留闩锁会让
+    // 后续手动重展开被决策误判插件动作),双机 registry 重置后走新契约首扫;
+    // 动作前记置底状态,落定后回补一次
     function setMode(value) {
       expandAll = value
       writeExpandAll(value)
       const container = observedContainer
       if (container === null || !container.isConnected) return
-      if (value) {
-        scanAll(container, false)
-        return
-      }
-      const items = collectRowsAll(container)
+      const described = collectRows(container)
+      const tools = expandAll ? [] : collectToolRows(container)
       const before = containerMetrics(container)
       const pinned = isPinned(before)
-      for (const item of items) {
-        if (!item.plugged) continue
-        allPluggedEls.delete(item.el)
-        pluginExpandedEls.delete(item.el)
-        if (item.expanded) item.head.click()
+      for (const row of [...described, ...tools]) {
+        if (!row.plugged) continue
+        pluginExpandedEls.delete(row.el)
+        if (row.expanded) row.el.querySelector(SELECTOR_HEAD)?.click()
       }
       if (pinned) schedulePinRestore(container, before)
       registry = createRegistry()
-      allRegistry = createAllRegistry()
+      toolsRegistry = createToolsRegistry()
       finalState.pending = true
+      toolsFinalState.pending = expandAll
       scanSuppressManual()
-      if (finalState.pending) tryPlanFinal()
+      if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
     }
 
     // body 哨兵常驻,监视容器出现与身份变化;发现容器即挂载子树观察。
