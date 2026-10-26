@@ -15,7 +15,7 @@ const STATUS_META = {
 const TRIGGER_META = { cron: { label: '定时' }, manual: { label: '手动' } }
 const KIND_LABELS = { shell: '脚本', session: '会话' }
 const MODE_LABELS = { fresh: '每次新建', pinned: '固定会话' }
-const STATUS_TONE_COLOR = { ok: 'var(--dsw-alias-state-success-primary)', bad: 'var(--dsw-alias-state-error-primary)', warn: 'var(--dsw-alias-state-warn-primary)', mute: 'var(--dsw-alias-label-tertiary)', run: 'var(--dsw-alias-brand-primary)' }
+const STATUS_TONE_COLOR = { ok: 'var(--cb-status-ok)', bad: 'var(--cb-status-bad)', warn: 'var(--cb-status-warn)', mute: 'var(--cb-status-mute)', run: 'var(--cb-status-run)' }
 const SECOND_MS = 1000
 const MINUTE_MS = 60 * SECOND_MS
 const HOUR_MS = 60 * MINUTE_MS
@@ -228,10 +228,12 @@ body{
 --cb-danger:var(--dsw-alias-state-error-primary);
 --cb-ok:var(--dsw-alias-state-success-primary);
 --cb-warn:var(--dsw-alias-state-warn-primary);
+--cb-status-ok:var(--cb-ok);--cb-status-bad:var(--cb-danger);--cb-status-warn:var(--cb-warn);--cb-status-mute:var(--cb-text-dim);--cb-status-run:var(--cb-accent);
 --cb-hover:var(--dsw-alias-interactive-bg-hover);
 --cb-mask:var(--dsw-alias-bg-mask-1);
 --cb-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
---cb-radius-sm:6px;--cb-radius-md:8px;--cb-radius-lg:14px;
+--cb-shadow-lift:0 2px 8px color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);
+--cb-radius-sm:6px;--cb-radius-md:8px;--cb-radius-lg:12px;
 --cb-space-1:4px;--cb-space-2:6px;--cb-space-3:8px;--cb-space-4:10px;--cb-space-5:12px;--cb-space-6:18px;
 --cb-font-xs:12px;--cb-font-sm:12px;--cb-font-md:13px;--cb-font-lg:15px;
 --cb-control-h:30px;
@@ -243,7 +245,7 @@ body{
 .cb-tabs{display:flex;gap:var(--cb-space-1);background:var(--cb-bg-muted);border-radius:999px;padding:3px}
 .cb-pill{border:none;border-radius:999px;padding:5px 14px;font-size:var(--cb-font-md);background:transparent;color:var(--cb-text-sub);cursor:pointer;font-weight:560;transition:color .15s,background .15s}
 .cb-pill:hover{color:var(--cb-text)}
-.cb-pill--on{background:var(--cb-bg);color:var(--cb-text);box-shadow:var(--cb-shadow)}
+.cb-pill--on{background:var(--cb-bg);color:var(--cb-text);box-shadow:var(--cb-shadow-lift)}
 .cb-pill--on:hover{color:var(--cb-text)}
 .cb-spacer{flex:1}
 .cb-button{min-height:var(--cb-control-h);display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--cb-border-strong);border-radius:var(--cb-radius-md);padding:0 13px;font:inherit;font-size:var(--cb-font-md);font-weight:560;background:var(--cb-bg);color:var(--cb-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
@@ -254,11 +256,11 @@ body{
 .cb-button--danger{color:var(--cb-danger)}
 .cb-button--danger:hover:not(:disabled){border-color:var(--cb-danger);background:var(--cb-danger);color:var(--dsw-alias-bg-base)}
 .cb-button--sm{min-height:28px;padding:0 10px;font-size:var(--cb-font-sm)}
-.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, white);outline-offset:2px}
+.cb-button:focus-visible,.cb-icon:focus-visible,.cb-pill:focus-visible,.cb-select:focus-visible{outline:2px solid color-mix(in srgb, var(--cb-accent) 70%, var(--dsw-alias-bg-base));outline-offset:2px}
 .cb-button:active:not(:disabled){transform:translateY(1px)}
 .cb-cards{display:flex;flex-direction:column;gap:var(--cb-space-3)}
-.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg);box-shadow:var(--cb-shadow);transition:border-color .15s,box-shadow .15s}
-.cb-card:hover{border-color:var(--cb-accent);box-shadow:var(--cb-shadow)}
+.cb-card{position:relative;display:flex;flex-direction:column;gap:var(--cb-space-2);border:1px solid var(--cb-border);border-radius:var(--cb-radius-lg);padding:var(--cb-space-4) var(--cb-space-5);cursor:pointer;overflow:hidden;background:var(--cb-bg);transition:border-color .15s,box-shadow .15s}
+.cb-card:hover{border-color:var(--cb-accent);box-shadow:var(--cb-shadow-lift)}
 .cb-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3.5px;background:var(--cb-status)}
 .cb-card-row{display:flex;align-items:center;gap:var(--cb-space-3);flex-wrap:wrap}
 .cb-name{font-size:14px;font-weight:600;color:var(--cb-text)}

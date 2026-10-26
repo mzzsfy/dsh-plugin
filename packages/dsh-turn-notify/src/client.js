@@ -1242,7 +1242,7 @@ window.__ModuleLoader__.load({
       '  background:var(--dsw-alias-interactive-bg-hover); }',
       '.tn-btn--danger:hover { border-color:var(--dsw-alias-state-error-primary);',
       '  color:var(--dsw-alias-state-error-primary); }',
-      '.tn-select, .tn-input { background:var(--dsw-specific-input-major, var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary);',
+      '.tn-select, .tn-input { background:var(--dsw-specific-input-major, var(--dsw-alias-bg-layer-2)); color:var(--dsw-alias-label-primary);',
       '  border:1px solid var(--dsw-alias-border-l1);',
       '  border-radius:8px; padding:5px 9px; font-size:12px; font-family:inherit; transition:border-color 0.15s; }',
       '.tn-select:focus, .tn-input:focus { outline:none; border-color:var(--dsw-alias-brand-primary); }',
