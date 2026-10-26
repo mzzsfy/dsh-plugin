@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-think-expand",
   "description": "流式回复时自动展开最新一条思考行;可选开启工具行展开机,独立自动展开最新一条工具调用等折叠行(思考与工具两台状态机互不接管);手动操作优先,插件展开收起后回补置底保持官方滚动跟随",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
