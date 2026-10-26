@@ -14,18 +14,22 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-common-tools/client"
+      ]
     },
     "compatibility": {
       "dshReleases": {
         "0.2.0-rc.1": "unknown",
         "0.2.0-rc.2": "compatible",
-        "0.2.1-alpha.1": "unknown"
+        "0.2.1-alpha.1": "unknown",
+        "0.2.1-rc.2": "unknown"
       }
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
   "license": "MIT",
@@ -37,6 +41,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@mzzsfy/dsh-common-tools": "^1.0.0",
     "croner": "^10.0.1"
   },
   "peerDependencies": {

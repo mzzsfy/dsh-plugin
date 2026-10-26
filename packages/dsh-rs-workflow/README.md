@@ -16,6 +16,8 @@
 
 `/api/rsww/templates` `template` `template-save`(含 dryRun) `template-remove` `spec` `config` `config-save`
 
+会话运行记录列表与详情刷新经公共 WS 总线 `@mzzsfy/dsh-rs-workflow` 插件通道驱动;首连与重连全量对账,变更广播合并节流。模板与配置使用各自请求刷新。host/client 均在 `apply(ctx)` 调用 `setupCommonTools(ctx)`，通道身份取 `ctx.fiber.entry.options.name` 的完整 npm 包名；client 各实例退出时释放自己的订阅，同一 factory 的存活实例接管共享变更广播，最后实例退出才取消合并计时器；跨 factory HMR 清理旧代。
+
 ## 开发
 
 ```sh

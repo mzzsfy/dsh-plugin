@@ -15,7 +15,7 @@ node scripts/publish.mjs <包名|all> [--bump patch|minor|major] [--skip-test] [
 
 - 测试门按目标分流:`node scripts/publish.mjs <包名>` 运行目标包有效 `npm test`；若 `test` script 缺失、空白则报错并拒绝无测试发布。`all` 先运行全仓 `aggregate-tests.mjs --rounds 1`,再对有有效 `test` script 的包逐个运行测试,无脚本包跳过；任一实际运行的测试失败均阻断发布。`--skip-test` 显式跳过聚合门和包测试,会警告未经测试发布,不得作为常规提速方式。
 
-- npm 2FA 认证需交互终端(publish.mjs 本身不检测 TTY,非 TTY 下会在 npm 认证阶段卡住),用弹出 shell 执行,不用于后台/管道;--dry-run 无此要求
+- npm 2FA 认证需交互终端(publish.mjs 本身不检测 TTY,非 TTY 下会在 npm 认证阶段卡住),用 terminal 工具执行;认证 URL 出现后由人浏览器完成认证,发布自动续跑;--dry-run 无此要求
 - 每包独立版本 tag(格式 `@mzzsfy-<包>-v<版本>`,轻量 tag),发版即对齐:发布成功后脚本自动提交该包版本号变更(`chore(<包>): 发版版本号 x.y.z`)并把 tag 打在该提交上,tag 始终指向该版本的完整源码状态,不再需要手动"版本号对齐"提交
 - 发版判定(本地版本==线上时)以版本 tag 后的包目录提交数为事实源:
   - tag 后无提交 → SKIP,该包无需发版(禁止凭"感觉有改动"重复发版,避免用户误判需要更新)

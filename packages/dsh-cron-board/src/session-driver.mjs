@@ -13,6 +13,8 @@ const REBOUND_MESSAGE = '首次运行已创建并绑定会话'
 const RECREATED_MESSAGE = '原会话丢失已重建'
 const REJECTED_MESSAGE = '会话输入投递被拒绝'
 const DELIVERED_MESSAGE = '已投递会话'
+const MODEL_UNAVAILABLE_PREFIX = '模型不可用'
+const MODEL_UNSUPPORTED_MESSAGE = '宿主会话服务不支持指定模型,任务模型设置无法生效'
 
 // 宿主入口(prompt 准入 / listSessions 读取)逐版本形态有差异:prompt 各版本均非可选链校验
 // signal,listSessions 各版本为可选链;进程内调用无取消来源,统一传永不中止的信号,
@@ -35,6 +37,53 @@ async function resolveWorkspaceId(registry, workdir) {
   const canonical = await realpath(workdir)
   const created = await registry.createCanonical(canonical)
   return created.id
+}
+
+// 模型标签(记录面):'provider/model' 或指定 effort 时 'provider/model(effort)'
+function modelLabel(model) {
+  return model.reasoningEffort ? model.provider + '/' + model.model + '(' + model.reasoningEffort + ')' : model.provider + '/' + model.model
+}
+
+// 投递前模型可用性校验:目录是运行时事实,未列出即不可用(不猜宿主解析行为);
+// failures 携带宿主原始原因(凭据缺失等),拼接保证可读。返回 undefined 表示不可用
+function catalogSelection(raw, modelCatalog) {
+  const routable = Array.isArray(modelCatalog.routableProviders) ? modelCatalog.routableProviders : []
+  if (!routable.includes(raw.provider)) {
+    const failure = (Array.isArray(modelCatalog.failures) ? modelCatalog.failures : []).find((item) => item && item.id === raw.provider)
+    return { error: MODEL_UNAVAILABLE_PREFIX + ':provider "' + raw.provider + '" 未注册或目录加载失败' + (failure && failure.message ? '(' + failure.message + ')' : '') }
+  }
+  const group = (Array.isArray(modelCatalog.groups) ? modelCatalog.groups : []).find((item) => item && item.id === raw.provider)
+  const entry = group && Array.isArray(group.models) ? group.models.find((item) => item && item.id === raw.model) : undefined
+  if (!entry) {
+    return { error: MODEL_UNAVAILABLE_PREFIX + ':模型 "' + raw.model + '" 不在 provider "' + raw.provider + '" 的目录中' }
+  }
+  if (raw.reasoningEffort !== undefined) {
+    const efforts = entry.reasoning && Array.isArray(entry.reasoning.efforts) ? entry.reasoning.efforts : []
+    if (!efforts.some((effort) => effort && effort.id === raw.reasoningEffort)) {
+      return { error: MODEL_UNAVAILABLE_PREFIX + ':推理强度 "' + raw.reasoningEffort + '" 不被模型 "' + raw.model + '" 支持' }
+    }
+  }
+  return { selection: { provider: raw.provider, model: raw.model, ...(raw.reasoningEffort !== undefined ? { reasoningEffort: raw.reasoningEffort } : {}) } }
+}
+
+// 任务显式指定模型时的能力与目录校验(建会话前,失败不留残缺会话);
+// 目录是运行时事实,未列出即不可用(不猜宿主解析行为),failures 携带宿主原始原因。
+// 能力面稳定性:sessionController.agents 在宿主类型为 private(0.2.x 实现细节非服务契约),
+// modelCatalog 为公开面;私有面重构时此处在 typeof 门控下干净退化为「不支持指定模型」,
+// 不崩溃不误投递——依赖等级即「探测可用则用,不可用即拒」,不随宿主内部形态漂移产生部分生效
+async function validateModelSelection(sessionController, raw) {
+  if (typeof sessionController.modelCatalog !== 'function' || !sessionController.agents || typeof sessionController.agents.selectForNextRequest !== 'function' || typeof sessionController.agents.resolveAgent !== 'function') {
+    return { fail: MODEL_UNSUPPORTED_MESSAGE }
+  }
+  let modelCatalog
+  try {
+    modelCatalog = await sessionController.modelCatalog()
+  } catch (error) {
+    return { fail: MODEL_UNAVAILABLE_PREFIX + ':模型目录读取失败(' + String(error && error.message || error) + ')' }
+  }
+  const checked = catalogSelection(raw, modelCatalog || {})
+  if (checked.error) return { fail: checked.error }
+  return { selection: checked.selection }
 }
 
 export function createSessionDriver({ getSessionController, getWorkspaceRegistry, agents, sessionQuery }) {
@@ -65,7 +114,9 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
       else payload.cwd = workdir
     }
     if (agentPreset) payload.agentPreset = agentPreset
-    return sessionController.create(Object.keys(payload).length > 0 ? payload : undefined)
+    // 宿主 host 方法签名无默认参(create(request) 首行即读 request.workspaceId),
+    // 进程内直调空载必须传空对象而非 undefined
+    return sessionController.create(payload)
   }
 
   async function run({ job, env, mask, updateRecord }) {
@@ -90,9 +141,35 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
       }
     }
 
+    // 模型指定面:任务显式配置才走,校验在建会话前(失败不残留新会话);
+    // 未指定零动作,行为与未提供该设置的版本一致
+    let model
+    if (session.model && session.model.provider && session.model.model) {
+      const resolved = await validateModelSelection(sessionController, session.model)
+      if (resolved.fail) return { status: 'fail', message: resolved.fail }
+      model = modelLabel(resolved.selection)
+    }
+
     if (recreated || !isPinned) {
       const created = await createSession(sessionController, job.workdir, session.agentPreset)
       sessionId = created.sessionId
+    }
+
+    // 会话内安装(纯会话面,无宿主全局副作用):宿主 resolveAgent 返回 {agent}/{error} 包装
+    // (ApiSessionAgentController 契约),fresh 复用与 pinned 冷会话都经它解包;
+    // 解析失败(会话被写句柄占用等)在投递前 fail 并透传宿主原因
+    if (model) {
+      const found = await sessionController.agents.resolveAgent(sessionId)
+      if (!found || found.error || !found.agent) {
+        const detail = found && found.error && found.error.message ? found.error.message : 'agent 未就绪'
+        return { status: 'fail', message: MODEL_UNAVAILABLE_PREFIX + ':会话不可用(' + detail + ')', sessionId }
+      }
+      try {
+        sessionController.agents.selectForNextRequest(found.agent, session.model)
+      } catch (error) {
+        // 宿主安装面异常(modelSelection 投影未注册等)在投递前收敛为可读 fail,不落原始异常串
+        return { status: 'fail', message: MODEL_UNAVAILABLE_PREFIX + ':模型安装失败(' + String(error && error.message || error) + ')', sessionId }
+      }
     }
 
     const submission = await sessionController.prompt({
@@ -111,6 +188,7 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     return {
       status: 'success',
       sessionId,
+      ...(model ? { model } : {}),
       message: recreated ? recreatedMessage(recreated) : DELIVERED_MESSAGE,
       ...(recreated ? { pinnedNewId: sessionId } : {}),
     }

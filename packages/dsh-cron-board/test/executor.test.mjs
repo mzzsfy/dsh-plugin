@@ -102,6 +102,26 @@ test('executor:pinned 自愈回写 session.pinnedSessionId 且清除顶层孤立
   assert.equal(store.runs.get(runId).message, '首次运行已创建并绑定会话')
 })
 
+test('executor:会话任务 outcome.model 写入运行记录', async (t) => {
+  // Given 会话 runner 返回 model 标签
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-exec-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir: join(dir, 'data') })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  const executor = createExecutor({
+    store,
+    logger,
+    sessionRunner: { run: async () => ({ status: 'success', sessionId: 's-x', model: 'p1/m1(high)' }) },
+    readMaxConcurrent: () => 2,
+  })
+  await store.jobs.create({ ...JOB_BASE, kind: 'session', session: { mode: 'fresh' }, id: 'j-model' })
+  // When 手动触发并等待任务卡回填(收尾信号)
+  const [runId] = await executor.dispatch({ ...JOB_BASE, kind: 'session', session: { mode: 'fresh' }, id: 'j-model' }, 'manual')
+  await waitFor(() => store.jobs.get('j-model')?.lastStatus !== undefined)
+  // Then 运行记录带模型标签
+  assert.equal(store.runs.get(runId).model, 'p1/m1(high)')
+})
+
 test('executor:runner 拒绝时补写 fail 终态', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-exec-'))
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))

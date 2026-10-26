@@ -28,11 +28,11 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-change-bus 可选消费(占位条目全仓唯一,由
+    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools 可选消费(占位条目全仓唯一,由
     // dsh-session-manager 代挂;模块表缺失或导出缺 show 即通知通道置空)
     let toast = () => {}
     try {
-      toast = require('@mzzsfy/dsh-change-bus/client').toast.show || (() => {})
+      toast = require('@mzzsfy/dsh-common-tools/client').toast.show || (() => {})
     } catch {
       toast = () => {}
     }

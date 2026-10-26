@@ -14,7 +14,10 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-common-tools/client"
+      ]
     },
     "compatibility": {
       "dshReleases": {
@@ -25,7 +28,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
   "license": "MIT",
@@ -35,6 +38,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@mzzsfy/dsh-common-tools": "^1.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": ">=3.18.0",

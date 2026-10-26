@@ -23,7 +23,7 @@ function loadClient({ binding, remoteSession } = {}) {
     createElement: () => null,
   }
   const requireStub = (name) => {
-    if (name === '@mzzsfy/dsh-toast/client') return { show: () => 0 }
+    if (name === '@mzzsfy/dsh-common-tools/client') return { toast: { show: () => 0 } }
     return reactStub
   }
   const factory = new Function('window', 'require', 'document', CLIENT_SRC + '\n;return null')
@@ -244,7 +244,7 @@ function loadComponent() {
     createElement: (type, props, ...children) => ({ type, props, children }),
   }
   const requireStub = (name) => {
-    if (name === '@mzzsfy/dsh-toast/client') return { show: () => 0 }
+    if (name === '@mzzsfy/dsh-common-tools/client') return { toast: { show: () => 0 } }
     return reactStub
   }
   const factory = new Function('window', 'require', 'document', CLIENT_SRC + '\n;return null')
@@ -453,7 +453,7 @@ function mountScanHarness({ faceRows, updateQueue, setDraft, pendingBubble = fal
   }
   const windowStub = { __ModuleLoader__: { load: (module) => modules.push(module) }, addEventListener: () => {} }
   const requireStub = (name) => {
-    if (name === '@mzzsfy/dsh-toast/client') return { show: (text, opts) => toastCalls.push({ text, opts }) }
+    if (name === '@mzzsfy/dsh-common-tools/client') return { toast: { show: (text, opts) => toastCalls.push({ text, opts }) } }
     return reactStub
   }
   const factory = new Function('window', 'require', 'document', 'MutationObserver', 'fetch', CLIENT_SRC + '\n;return null')

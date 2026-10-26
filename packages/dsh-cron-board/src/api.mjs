@@ -1,6 +1,7 @@
 // api:REST 路由 /api/cron-board/*。宿主 webServer 仅支持 exact/prefix 注册,
 // 本插件注册一条 prefix,handler 内按 method + 路径段表驱动分发(:id 路径段捕获);
 // 错误语义对齐仓内惯例:业务错误中文透传,系统级错误收敛固定文案并落服务端日志。
+// 写方法成功受理即经 notifyChange 发布总线变更(通知面/数据面分离,客户端 refetch 快照)。
 
 import { assertValidSchedule, nextRunAtOf, nextRunsOf, summarizeCron } from './cron.mjs'
 import { DEFAULT_MAX_EXPANSION, DEFAULT_TIMEOUT_MS } from './config.mjs'
@@ -20,6 +21,7 @@ export const MESSAGES = {
   badKind: '任务类型不合法',
   badSessionMode: '会话模式仅支持 fresh 或 pinned',
   badAgentPreset: '执行预设 ID 仅限小写字母、数字与连字符',
+  badSessionModel: '模型指定不合法:provider 与 model 必须为非空文本,reasoningEffort 可省略',
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
   sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
@@ -113,6 +115,20 @@ export function parseEnvText(text) {
 // 会话任务专有字段(设计 §3.2 job.session 子对象);agentPreset 形态对齐宿主预设目录 id(dsh-im 同款校验)
 const AGENT_PRESET_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 
+// 模型指定归一:provider/model 必填非空文本,reasoningEffort 可省;
+// provider/model 均为空白 = 未指定(返回 undefined,跟随宿主默认);形态残缺即业务错误
+function normalizeSessionModel(raw) {
+  if (raw === undefined) return undefined
+  if (raw === null || typeof raw !== 'object') throw new Error(MESSAGES.badSessionModel)
+  const provider = typeof raw.provider === 'string' ? raw.provider.trim() : ''
+  const model = typeof raw.model === 'string' ? raw.model.trim() : ''
+  if (provider === '' && model === '') return undefined
+  if (provider === '' || model === '') throw new Error(MESSAGES.badSessionModel)
+  const reasoningEffort = typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort.trim() : ''
+  if (raw.reasoningEffort !== undefined && reasoningEffort === '') throw new Error(MESSAGES.badSessionModel)
+  return reasoningEffort === '' ? { provider, model } : { provider, model, reasoningEffort }
+}
+
 // 会话任务专有字段(设计 §3.2 job.session 子对象)
 function normalizeSession(body) {
   if (body.kind !== 'session') return undefined
@@ -120,12 +136,15 @@ function normalizeSession(body) {
   if (raw.mode !== undefined && raw.mode !== 'fresh' && raw.mode !== 'pinned') throw new Error(MESSAGES.badSessionMode)
   const agentPreset = typeof raw.agentPreset === 'string' ? raw.agentPreset.trim() : ''
   if (agentPreset !== '' && !AGENT_PRESET_PATTERN.test(agentPreset)) throw new Error(MESSAGES.badAgentPreset)
-  return {
+  const session = {
     mode: raw.mode === 'pinned' ? 'pinned' : 'fresh',
     pinnedSessionId: typeof raw.pinnedSessionId === 'string' ? raw.pinnedSessionId.trim() : '',
     // 空串 = 跟随宿主当前默认(driver 建会话时对空值省略字段)
     agentPreset,
   }
+  const model = normalizeSessionModel(raw.model)
+  if (model) session.model = model
+  return session
 }
 
 function normalizeJob(body) {
@@ -152,7 +171,6 @@ function normalizeJob(body) {
   if (kind === 'shell') {
     normalized.timeoutMs = Number.isInteger(body.timeoutMs) && body.timeoutMs > 0 ? body.timeoutMs : DEFAULT_TIMEOUT_MS
   }
-  if (normalized.session === undefined) delete normalized.session
   // 单次运行:真实运行入队即禁用(executor dispatch 承担),缺省关闭
   normalized.runOnce = body.runOnce === true
   // 任务级并发上限:合法正整数才落库,缺省走全局闸门(executor min 规则)
@@ -164,7 +182,7 @@ function normalizeJob(body) {
   return normalized
 }
 
-export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, getAgentPresets, logSystem }) {
+export function createApi({ store, logger, executor, scheduler, periodic, sessionState, readSidebarTab, updateUiSettings, getAgentPresets, getSessionController, logSystem, notifyChange }) {
 
   const routes = [
     {
@@ -340,6 +358,47 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
       },
     },
     {
+      // 模型目录:宿主 sessionController.modelCatalog 的看板归一面;
+      // 服务缺失或异常回空目录,前端仅「跟随宿主默认」可选(agent-presets 同构)
+      method: 'GET',
+      segments: ['model-catalog'],
+      handler: async ({ res }) => {
+        const catalog = { default: null, items: [], failures: [] }
+        try {
+          const controller = getSessionController ? getSessionController() : undefined
+          if (controller && typeof controller.modelCatalog === 'function') {
+            const raw = await controller.modelCatalog()
+            for (const group of Array.isArray(raw && raw.groups) ? raw.groups : []) {
+              const models = Array.isArray(group && group.models) ? group.models : []
+              if (group && typeof group.id === 'string' && group.id !== '' && models.length > 0) {
+                catalog.items.push({
+                  provider: group.id,
+                  name: typeof group.name === 'string' && group.name.trim() ? group.name.trim() : group.id,
+                  models: models
+                    .filter((model) => model && typeof model.id === 'string' && model.id !== '')
+                    .map((model) => ({
+                      id: model.id,
+                      name: typeof model.name === 'string' && model.name.trim() ? model.name.trim() : model.id,
+                      efforts: model.reasoning && Array.isArray(model.reasoning.efforts)
+                        ? model.reasoning.efforts.filter((effort) => effort && typeof effort.id === 'string' && effort.id !== '')
+                        : [],
+                      ...(model.reasoning && typeof model.reasoning.defaultEffort === 'string' ? { defaultEffort: model.reasoning.defaultEffort } : {}),
+                    })),
+                })
+              }
+            }
+            const failures = Array.isArray(raw && raw.failures) ? raw.failures : []
+            catalog.failures = failures.filter((item) => item && typeof item.id === 'string' && item.id !== '')
+            const fallback = raw && raw.default
+            if (fallback && typeof fallback.provider === 'string' && typeof fallback.model === 'string') {
+              catalog.default = { provider: fallback.provider, model: fallback.model }
+            }
+          }
+        } catch { /* 目录降级为空,不阻断任务表单 */ }
+        sendJson(res, 200, catalog)
+      },
+    },
+    {
       method: 'GET',
       segments: ['jobs'],
       handler: async ({ res }) => {
@@ -461,6 +520,13 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
     return null
   }
 
+  // 写方法统一包装:成功受理即发布变更。预览类 POST(如 envs/import 预览)多发
+  // 一次通知,客户端 refetch 幂等无害;集中包装保证未来新增写路由不漏发
+  const WRITE_METHODS = new Set(['POST', 'PATCH', 'DELETE', 'PUT'])
+  const dispatchRoute = (matched, callArgs) => WRITE_METHODS.has(matched.route.method) && notifyChange
+    ? matched.route.handler(callArgs).then((result) => { notifyChange(); return result })
+    : matched.route.handler(callArgs)
+
   return {
     async handle(req, res) {
       const url = new URL(req.url, 'http://localhost')
@@ -478,7 +544,7 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
           sendJson(res, 404, { error: MESSAGES.notFound })
           return
         }
-        await matched.route.handler({ req, res, url, params: matched.params })
+        await dispatchRoute(matched, { req, res, url, params: matched.params })
       } catch (error) {
         respondError(res, error, logSystem)
       }

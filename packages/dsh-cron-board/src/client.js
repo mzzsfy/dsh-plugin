@@ -180,7 +180,21 @@ function scheduleTzOffset(schedule) {
 }
 
 const API_PREFIX = '/api/cron-board/'
-const REFRESH_INTERVAL_MS = 30 * SECOND_MS
+/* MODELKEY-BEGIN */
+// 模型表单态 key 序列化(标记段供 test/model-key.test.mjs 提取执行):
+// 模型表单态 key 分隔符:单元分隔控制字符(转义书写),provider/model id 空间不含控制字符不会碰撞
+const MODEL_KEY_SEP = '\u001f'
+// 模型表单态 key:'provider<sep>model[<sep>effort]';'' = 跟随宿主默认;effort 段省略 = 跟随模型默认
+function serializeModelKey(model) {
+  if (!model || typeof model !== 'object' || !model.provider || !model.model) return ''
+  return [model.provider, model.model, model.reasoningEffort || ''].join(MODEL_KEY_SEP)
+}
+function parseModelKey(key) {
+  const parts = String(key || '').split(MODEL_KEY_SEP)
+  if (parts.length < 2 || parts[0] === '' || parts[1] === '') return undefined
+  return parts[2] ? { provider: parts[0], model: parts[1], reasoningEffort: parts[2] } : { provider: parts[0], model: parts[1] }
+}
+/* MODELKEY-END */
 const TABS = [
   { value: 'jobs', label: '看板' },
   { value: 'envs', label: '环境变量' },
@@ -378,9 +392,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   function factory(require) {
     let React = null
     let ReactDOMClient = null
+    let tools = null
     try {
       React = require('react')
       ReactDOMClient = require('react-dom/client')
+      // 公共工具库:bus 订阅是数据刷新唯一通道,缺失即整面板禁用(无轮询回退)
+      tools = require('@mzzsfy/dsh-common-tools/client')
     } catch {
       return noopFactory()
     }
@@ -403,6 +420,25 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       try { json = await response.json() } catch { json = null }
       if (!response.ok) return { ok: false, error: json && json.error ? json.error : '请求失败(' + response.status + ')' }
       return { ok: true, data: json }
+    }
+
+    const statusReaders = new WeakMap()
+    function createStatusReader(bus) {
+      let pending = null, resolvePending
+      const snapshot = tools.createSnapshotRefresh(async () => {
+        const outcome = await request('GET', 'status')
+        const resolve = resolvePending
+        pending = resolvePending = null
+        resolve?.(outcome)
+      })
+      const read = () => pending ??= new Promise(resolve => { resolvePending = resolve; snapshot.refresh() })
+      statusReaders.set(bus, read)
+      return () => {
+        snapshot.dispose()
+        statusReaders.delete(bus)
+        resolvePending?.({ ok: false, error: '插件已卸载' })
+        pending = resolvePending = null
+      }
     }
 
     function ensureStyle(document) {
@@ -589,6 +625,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           mode: job && job.session ? job.session.mode : 'fresh',
           pinnedSessionId: job && job.session ? job.session.pinnedSessionId : '',
           agentPreset: job && job.session ? job.session.agentPreset : '',
+          // 表单态为序列化 key(分隔符见 MODELKEY 段 / '' = 跟随宿主默认),提交时还原对象
+          modelKey: serializeModelKey(job && job.session ? job.session.model : undefined),
         },
       }))
       const [preview, setPreview] = useState(null)
@@ -596,8 +634,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [error, setError] = useState(null)
       const [saving, setSaving] = useState(false)
       const [presetCatalog, setPresetCatalog] = useState({ defaultId: '', items: [] })
+      const [modelCatalog, setModelCatalog] = useState({ default: null, items: [], failures: [] })
       const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
       const setSession = (patch) => setForm((prev) => ({ ...prev, session: { ...prev.session, ...patch } }))
+      // 模型选择派生态:modelKey 仍指向目录中存在的项才有效(目录刷新后残留项回退默认)
+      const modelSelected = parseModelKey(form.session.modelKey)
+      const selectedModelMeta = modelSelected
+        ? (modelCatalog.items.find((group) => group.provider === modelSelected.provider) || { models: [] }).models.find((model) => model.id === modelSelected.model)
+        : null
       const applyScheduleState = (next) => {
         // custom 频率下表达式携带合法后缀时以表达式为准(剥离归一并回填时区);
         // 无后缀保留调用方传入的时区(select 与频率切换不丢配置);非法后缀原文保留且时区置空
@@ -618,6 +662,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         let alive = true
         request('GET', 'agent-presets').then((outcome) => {
           if (alive && outcome.ok && outcome.data && Array.isArray(outcome.data.items)) setPresetCatalog(outcome.data)
+        })
+        // 模型目录同源拉取:失败或宿主不支持即空目录,仅「跟随宿主默认」可选
+        request('GET', 'model-catalog').then((outcome) => {
+          if (alive && outcome.ok && outcome.data && Array.isArray(outcome.data.items)) setModelCatalog(outcome.data)
         })
         return () => { alive = false }
       }, [])
@@ -641,7 +689,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         setError(null)
         const payload = { ...form }
         payload.concurrency = form.concurrency === '' ? undefined : Number(form.concurrency)
-        payload.session = form.kind === 'session' ? form.session : undefined
+        // 副本上还原模型对象:state 内对象不得突变,保存失败重开表单时 modelKey 仍在
+        payload.session = form.kind === 'session' ? { ...form.session } : undefined
+        if (payload.session) {
+          payload.session.model = parseModelKey(form.session.modelKey)
+          delete payload.session.modelKey
+        }
         const outcome = await request(editing ? 'PATCH' : 'POST', editing ? 'jobs/' + job.id : 'jobs', payload)
         setSaving(false)
         if (outcome.ok) onDone()
@@ -707,6 +760,34 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 },
                   h('option', { value: '' }, '跟随宿主默认'),
                   presetCatalog.items.map((item) => h('option', { key: item.id, value: item.id }, item.label)))),
+              h(Field, {
+                label: '模型',
+                hint: modelCatalog.failures.length > 0
+                  ? '部分 provider 目录加载失败:' + modelCatalog.failures.map((item) => item.name || item.id).join('、')
+                  : '仅作用于本任务的会话;跟随宿主默认时不改变任何全局设置',
+              },
+                h('select', {
+                  className: 'cb-select',
+                  value: modelSelected ? serializeModelKey(modelSelected) : form.session.modelKey,
+                  onChange: (e) => setSession({ modelKey: e.target.value }),
+                },
+                  h('option', { value: '' }, '跟随宿主默认'),
+                  modelCatalog.items.map((group) => h('optgroup', { key: group.provider, label: group.name },
+                    group.models.map((model) => {
+                      // 选项 value 统一经 serializeModelKey 产出:与解析侧同分隔符,防三侧漂移
+                      const value = serializeModelKey({ provider: group.provider, model: model.id, ...(model.efforts.length > 0 && model.defaultEffort ? { reasoningEffort: model.defaultEffort } : {}) })
+                      return h('option', { key: value, value }, model.name)
+                    }))))),
+              modelSelected && selectedModelMeta && selectedModelMeta.efforts.length > 0
+                ? h(Field, { label: '推理强度', hint: '仅作用于本任务;跟随模型默认时由模型解析' },
+                    h('select', {
+                      className: 'cb-select',
+                      value: modelSelected.reasoningEffort || '',
+                      onChange: (e) => setSession({ modelKey: serializeModelKey({ ...modelSelected, reasoningEffort: e.target.value }) }),
+                    },
+                      h('option', { value: '' }, '跟随模型默认'),
+                      selectedModelMeta.efforts.map((effort) => h('option', { key: effort.id, value: effort.id }, effort.name))))
+                : null,
               h(Field, { label: '任务文本', hint: '投递给会话的任务内容,环境变量会折叠在文本前部' },
                 h('textarea', { value: form.prompt, onChange: (e) => set({ prompt: e.target.value }) }))),
         h('div', { className: 'cb-inline' },
@@ -1000,6 +1081,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 h('span', { className: 'cb-badge' }, TRIGGER_META[run.trigger] ? TRIGGER_META[run.trigger].label : run.trigger),
                 h('span', { className: 'cb-meta' }, formatDateTime(run.createdAt, displayTzOffset)),
                 typeof run.durationMs === 'number' ? h('span', { className: 'cb-meta' }, formatDuration(run.durationMs)) : null,
+                run.model ? h('span', { className: 'cb-badge' }, run.model) : null,
                 run.message ? h('span', { className: 'cb-meta' }, run.message) : null,
                 h('div', { className: 'cb-actions' },
                   h('button', { className: 'cb-icon', onClick: () => openLog(run) }, '日志'),
@@ -1012,7 +1094,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('button', { className: 'cb-button', onClick: () => setLogText(null) }, '关闭'))) : null)
     }
 
-    function CronBoardPanel({ visible, wsModel } = {}) {
+    function CronBoardPanel({ bus, visible, wsModel }) {
       const active = visible !== false
       const [tab, setTab] = useState('jobs')
       const [jobs, setJobs] = useState([])
@@ -1020,7 +1102,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [status, setStatus] = useState(null)
       const [now, setNow] = useState(Date.now())
       const [reloadFlag, setReloadFlag] = useState(0)
-      const reload = useCallback(() => setReloadFlag((value) => value + 1), [])
+      const refreshRef = useRef(() => {})
+      const reload = useCallback(() => { refreshRef.current(); setReloadFlag((value) => value + 1) }, [])
       // 乐观更新:受控开关点击即时到位,PATCH 失败由调用方回滚;reload 拉权威态对账
       const applyJobPatch = useCallback((id, patch) => {
         setJobs((prev) => prev.map((job) => (job.id === id ? { ...job, ...patch } : job)))
@@ -1036,7 +1119,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           const [jobsOutcome, envsOutcome, statusOutcome] = await Promise.all([
             request('GET', 'jobs'),
             request('GET', 'envs'),
-            request('GET', 'status'),
+            statusReaders.get(bus)(),
           ])
           if (!alive) return
           if (jobsOutcome.ok) setJobs(jobsOutcome.data.items)
@@ -1044,10 +1127,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           if (statusOutcome.ok) setStatus(statusOutcome.data)
           setNow(Date.now())
         }
-        load()
-        const timer = setInterval(load, REFRESH_INTERVAL_MS)
-        return () => { alive = false; clearInterval(timer) }
-      }, [reloadFlag, active])
+        // 数据刷新唯一通道:订阅推送总线(首连 onReset 即首拉,消息到达刷新);
+        // 相对时间走针是纯本地时钟,本地 timer 驱动,不发请求
+        const snapshot = tools.createSnapshotRefresh(load)
+        refreshRef.current = snapshot.refresh
+        const unsubscribe = bus.subscribe(snapshot.refresh, { onReset: snapshot.refresh })
+        const clock = setInterval(() => setNow(Date.now()), SECOND_MS)
+        return () => { alive = false; refreshRef.current = () => {}; snapshot.dispose(); unsubscribe(); clearInterval(clock) }
+      }, [bus, active])
 
       return h('div', { className: 'cb-panel' },
         h('div', { className: 'cb-toolbar' },
@@ -1123,7 +1210,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // better-sidebar tab:注册即单实例(single);只注册不主动打开,
     // 打开由用户从侧边栏目录手动进入(注册即 openTab 会在每次页面加载时抢占当前视图)
-    function registerBoardTab(ctx, service, wsModel) {
+    function registerBoardTab(ctx, service, wsModel, bus) {
       return ctx.effect(() => {
         const disposeTab = service.registerTab({
           id: TAB_ID,
@@ -1134,7 +1221,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('path', { d: 'M6 2v12M10 2v12' })),
           order: 46,
           single: true,
-          component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel }),
+          component: (props) => h(CronBoardPanel, { visible: props.visible, wsModel, bus }),
         })
         return disposeTab
       }, 'cron-board sidebar tab')
@@ -1150,13 +1237,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // 全局面板形态:main keyed 条目(中央面板)+ sidebar.panellist 条目(侧栏入口行),同 id 配对;
     // 页签点击切换、激活高亮均由宿主管;effect 工厂必须交付组合清理,否则互斥仲裁拆不掉条目
-    function registerMainPanel(ctx, wsModel) {
+    function registerMainPanel(ctx, wsModel, bus) {
       return ctx.effect(() => {
         const injectDisposers = []
         injectDisposers.push(ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
           key: PANEL_ID,
-        }, () => h('div', { className: 'cb-main' }, h(CronBoardPanel, { wsModel })))))
+        }, () => h('div', { className: 'cb-main' }, h(CronBoardPanel, { wsModel, bus })))))
         injectDisposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
           id: PANEL_ID,
@@ -1170,6 +1257,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       // workspaces 由宿主 client 常驻提供;slots 供设置页分区挂载(缺失则 fiber 未激活,即干净禁用)
       inject: ['workspaces', 'slots'],
       apply(ctx) {
+        const bus = tools.setupCommonTools(ctx)
+        ctx.effect(() => createStatusReader(bus), 'cron-board 共享状态快照')
         ensureStyle(document)
         // 工作区 model(list 即 getSnapshot/subscribe 契约的响应式模型;形态不符传 null,表单仅保留手输)
         const wsService = ctx.get('workspaces')
@@ -1179,7 +1268,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         let sidebarTabOn = false
         let tabDisposer = null
         let panelDisposer = null
-        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel)
+        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, wsModel, bus)
         const applyPref = () => {
           const wantTab = sidebarTabOn && currentSidebar !== undefined
           if (wantTab && tabDisposer === null) {
@@ -1189,11 +1278,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             tabDisposer()
             tabDisposer = null
           }
-          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, wsModel)
+          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, wsModel, bus)
         }
-        const prefWatch = setInterval(async () => {
+        // 偏好仲裁数据源:订阅总线刷新(updateUiSettings 变更即 publish),不再周期轮询
+        let prefAlive = true
+        const syncPref = async () => {
           try {
-            const outcome = await request('GET', 'status')
+            const outcome = await statusReaders.get(bus)()
+            if (!prefAlive) return
             const next = readSidebarTabPref(outcome)
             if (next !== sidebarTabOn) {
               const previous = sidebarTabOn
@@ -1201,15 +1293,19 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               try {
                 applyPref()
               } catch (error) {
-                // 形态切换失败回滚偏好,下轮轮询重试,避免入口消失后卡死
+                // 形态切换失败回滚偏好,下轮事件重试,避免入口消失后卡死
                 sidebarTabOn = previous
                 console.warn('[cron-board] 看板形态切换失败:', error)
               }
             }
-          } catch { /* 轮询失败保形态不变,下轮重试 */ }
-        }, 5 * 1000)
+          } catch { /* 刷新失败保形态不变,下轮事件重试 */ }
+        }
+        const prefRefresh = tools.createSnapshotRefresh(syncPref)
+        const unsubscribePref = bus.subscribe(prefRefresh.refresh, { onReset: prefRefresh.refresh })
         ctx.effect(() => () => {
-          clearInterval(prefWatch)
+          prefAlive = false
+          prefRefresh.dispose()
+          unsubscribePref()
           if (tabDisposer) tabDisposer()
           if (panelDisposer) panelDisposer()
         }, 'cron-board mount arbitration')

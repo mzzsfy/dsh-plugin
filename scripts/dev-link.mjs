@@ -11,7 +11,7 @@
  *   - 已发布包:profile 依赖行一律 semver(^线上最新版),link:/file:/本地路径一律被本脚本归一清除
  *   - 未发布包(线上 404):依赖行 = file 协议直指仓库工作副本,不强制发布;junction 照挂,
  *     线上出版本后重跑本脚本自动归一 ^latest
- *   - 公共依赖包(manifest 无 dsh.bundle,如 dsh-toast):不走表层依赖行,任意形态残留行一律删除;
+ *   - 公共依赖包(manifest 无 dsh.bundle,如历史 dsh-toast):不走表层依赖行,任意形态残留行一律删除;
  *     安装与装载由消费插件 dependencies 声明 + dsh module fallback 启动补链承载,
  *     junction 照挂工作副本保开发热更
  *   - 工作副本挂载只靠 node_modules 里的 junction,依赖清单永不指向仓库路径(未发布包的

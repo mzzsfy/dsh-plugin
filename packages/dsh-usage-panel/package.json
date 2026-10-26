@@ -16,7 +16,7 @@
     "client": {
       "platform": "web",
       "external": [
-        "@mzzsfy/dsh-toast/client"
+        "@mzzsfy/dsh-common-tools/client"
       ]
     },
     "compatibility": {
@@ -28,7 +28,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
   "license": "MIT",
@@ -40,7 +40,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@mzzsfy/dsh-toast": "^0.1.2"
+    "@mzzsfy/dsh-common-tools": "^1.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",

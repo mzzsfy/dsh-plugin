@@ -24,7 +24,7 @@
 ## 使用
 
 - ai 通道: 会话内直接让 ai 开隧道 `tunnel_open`(name, targetPort, entry?, wsPaths?) / `tunnel_list` / `tunnel_close`; 「允许 ai 使用」开关(默认开)关闭即向 ai 注销三件工具, 看板与 REST 管理不受影响
-- GUI 通道: 侧边栏「穿透隧道」面板手动添加/删除/复制访问地址(与 ai 同表); 设置卡两枚开关——「允许 ai 使用隧道工具」与「看板移入 better-sidebar 侧边栏」(设置 > 插件页 / 0.1.7+ 插件管理页包详情)
+- GUI 通道: 侧边栏「穿透隧道」面板手动添加/删除/复制访问地址(与 ai 同表); 设置卡两枚开关——「允许 ai 使用隧道工具」与「看板移入 better-sidebar 侧边栏」(设置 > 插件页 / 0.1.7+ 插件管理页包详情);数据与偏好变更经公共 WS 总线 `@mzzsfy/dsh-tunnel` 插件通道推送;host/client 在 `apply(ctx)` 调用 `setupCommonTools(ctx)`,以 `ctx.fiber.entry.options.name` 的完整 npm 包名绑定通道,组件捕获所属 ctx 的 bus，卸载可提前退订；ctx 卸载释放连接持有与全部订阅
 - 设置面: legacy(≤0.1.6) 设置 > 插件页独立配置节; 0.1.7+ Config volatile 字段自动配置节(connectTimeoutMs / aiTools / sidebarTab 均支持原地热更, dataDir 为环境路径不进 UI)。`connectTimeoutMs`(响应头等待超时, 改动即时生效, 无需重启)
 - 持久化 `~/.dsh/dsh-tunnel/tunnels.json`(随 `DSH_HOME`), 重启自动恢复; 目标拒连 502, 响应头等待超时(默认 10s, 头到即解除, SSE 不受影响)504
 - REST: `/api/tunnel/tunnels`(GET/POST/DELETE `/api/tunnel/tunnels/:name`) + `/api/tunnel/status` + `/api/tunnel/ui-settings`(PATCH: aiTools / sidebarTab), 与 GUI/ai 同一入口

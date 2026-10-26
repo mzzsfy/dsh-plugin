@@ -48,6 +48,20 @@ function clientLogic() {
 
 const client = clientLogic()
 
+test('Given 两个窗口共用localStorage When 请求认领身份 Then 窗口身份互异且各自稳定', () => {
+  const previous = globalThis.window
+  const values = new Map()
+  globalThis.window = { localStorage: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) } }
+  try {
+    const a = clientLogic(), b = clientLogic()
+    assert.notEqual(a.windowId(), b.windowId())
+    assert.equal(a.windowId(), a.windowId())
+    assert.equal(b.windowId(), b.windowId())
+    assert.equal(a.claimEvent('concurrent-event'), true)
+    assert.equal(b.claimEvent('concurrent-event'), false, '他窗有效锁不得视为自锁')
+  } finally { globalThis.window = previous }
+})
+
 // 数据镜像常量对照:client 与 core 任一侧漂移即失败,防改文案或增删分类时静默失同步
 test('[parity 数据镜像] 分类清单与标签对照', () => {
   assert.deepEqual(client.CATEGORIES, coreCategories)

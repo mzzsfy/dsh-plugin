@@ -10,16 +10,20 @@ import { join } from 'node:path'
 import { createSessionDriver } from '../src/session-driver.mjs'
 
 // 可控桩:会话注册表 + 控制器(autoIdle 模拟宿主投递后处理完成转 idle;投递即终态下仅影响忙判定)
-function makeStubs({ autoIdle = true, persisted = [] } = {}) {
+function makeStubs({ autoIdle = true, persisted = [], catalog, agentLookupError } = {}) {
   const sessions = new Map()
   let nextId = 0
   const created = []
   const createRequests = []
   const prompts = []
+  const selections = []
+  const resolveAgentIds = []
   const sessionController = {
     async create(request) {
+      // 镜像宿主 host 方法契约:无默认参,首行即读 request.workspaceId(dsh-api-session-controller L756)
+      if (request === undefined || request === null) throw new TypeError("Cannot read properties of undefined (reading 'workspaceId')")
       const sessionId = 'sess-' + (++nextId)
-      const cwd = request && request.cwd
+      const cwd = request.cwd
       sessions.set(sessionId, { id: sessionId, cwd, status: 'running' })
       created.push({ sessionId, cwd })
       createRequests.push(request)
@@ -37,6 +41,26 @@ function makeStubs({ autoIdle = true, persisted = [] } = {}) {
       }
       return { accepted: true }
     },
+    ...(catalog
+      ? {
+          async modelCatalog() {
+            return catalog
+          },
+          // 镜像宿主内部 ApiSessionAgentController 契约:resolveAgent 返回 {agent} 或 {error},
+          // selectForNextRequest 收解包后的 live agent 并装会话级 selection
+          agents: {
+            async resolveAgent(sessionId) {
+              resolveAgentIds.push(sessionId)
+              if (agentLookupError) return { error: agentLookupError }
+              if (!sessions.has(sessionId)) sessions.set(sessionId, { id: sessionId, status: 'idle' })
+              return { agent: sessions.get(sessionId) }
+            },
+            selectForNextRequest(agent, selection) {
+              selections.push({ agent, selection })
+            },
+          },
+        }
+      : {}),
   }
   const agents = {
     get: (id) => sessions.get(id),
@@ -52,7 +76,7 @@ function makeStubs({ autoIdle = true, persisted = [] } = {}) {
       ]
     },
   }
-  return { sessions, created, createRequests, prompts, sessionController, agents, sessionQuery }
+  return { sessions, created, createRequests, prompts, selections, resolveAgentIds, sessionController, agents, sessionQuery }
 }
 
 // workspaceRegistry 桩:resolveByPath 按规范化 path 命中,createCanonical 建新组
@@ -310,4 +334,139 @@ test('session-driver:registry 缺失时降级 cwd 建会话', async () => {
   // Then 回落 cwd 形态(旧行为),不影响可用性
   assert.equal(outcome.status, 'success')
   assert.deepEqual(stubs.createRequests[0], { cwd: 'C:\\work\\x' })
+})
+
+const MODEL_CATALOG = {
+  default: { provider: 'p0', model: 'm0' },
+  routableProviders: ['p1'],
+  groups: [
+    { id: 'p1', name: 'P1', models: [
+      { id: 'm1', name: 'M1', reasoning: { efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' } },
+      { id: 'm2', name: 'M2' },
+    ] },
+  ],
+  failures: [{ id: 'p9', name: 'P9', message: '凭据未配置' }],
+}
+
+test('session-driver:fresh 指定模型在投递前安装选择并记 model', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm1', reasoningEffort: 'high' } } }
+  // When 带模型指定发起
+  const outcome = await driver.run({ job, env: {} })
+  // Then 新会话上安装选择,记录 'p1/m1(high)',投递成功
+  assert.equal(outcome.status, 'success')
+  assert.equal(stubs.selections.length, 1)
+  assert.equal(stubs.selections[0].agent.id, outcome.sessionId)
+  assert.deepEqual(stubs.selections[0].selection, { provider: 'p1', model: 'm1', reasoningEffort: 'high' })
+  assert.equal(outcome.model, 'p1/m1(high)')
+})
+
+test('session-driver:pinned 指定模型复用会话不新建', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 's-1', model: { provider: 'p1', model: 'm2' } } }
+  // When pinned 任务带模型指定
+  const outcome = await driver.run({ job, env: {} })
+  // Then 复用 s-1(resolveAgent 获取),安装选择后投递,无 create
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.sessionId, 's-1')
+  assert.equal(stubs.created.length, 0)
+  assert.deepEqual(stubs.resolveAgentIds, ['s-1'])
+  assert.equal(stubs.selections[0].agent.id, 's-1')
+  assert.deepEqual(stubs.selections[0].selection, { provider: 'p1', model: 'm2' })
+  assert.equal(outcome.model, 'p1/m2')
+})
+
+test('session-driver:未指定模型零额外动作(行为与既有版本一致)', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  const driver = makeDriver(stubs)
+  // When 未配置 model 字段
+  const outcome = await driver.run({ job: BASE_JOB, env: {} })
+  // Then 不拉目录不装选择,无 model 记录
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.model, undefined)
+  assert.equal(stubs.selections.length, 0)
+  assert.equal(stubs.resolveAgentIds.length, 0)
+})
+
+test('session-driver:provider 不在可路由集时投递前失败且带原因', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p9', model: 'm1' } } }
+  // When 指定 failures 内的 provider
+  const outcome = await driver.run({ job, env: {} })
+  // Then fail 文案含 provider 名与宿主原因,未投递未装选择未建会话
+  assert.equal(outcome.status, 'fail')
+  assert.ok(outcome.message.includes('p9'))
+  assert.ok(outcome.message.includes('凭据未配置'))
+  assert.equal(stubs.prompts.length, 0)
+  assert.equal(stubs.selections.length, 0)
+  assert.equal(stubs.created.length, 0)
+  assert.equal(outcome.model, undefined)
+})
+
+test('session-driver:model 不在 provider 目录时投递前失败', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'nope' } } }
+  const outcome = await driver.run({ job, env: {} })
+  assert.equal(outcome.status, 'fail')
+  assert.ok(outcome.message.includes('nope'))
+  assert.equal(stubs.prompts.length, 0)
+  assert.equal(stubs.selections.length, 0)
+})
+
+test('session-driver:effort 不在模型 efforts 目录时投递前失败', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm1', reasoningEffort: 'nope' } } }
+  const outcome = await driver.run({ job, env: {} })
+  assert.equal(outcome.status, 'fail')
+  assert.ok(outcome.message.includes('nope'))
+  assert.equal(stubs.prompts.length, 0)
+  // 模型无 efforts 目录时带 effort 同样拒绝(不猜宿主行为)
+  const noEfforts = await driver.run({ job: { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm2', reasoningEffort: 'high' } } }, env: {} })
+  assert.equal(noEfforts.status, 'fail')
+})
+
+test('session-driver:宿主无目录能力时指定模型即失败(干净禁用语义)', async () => {
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm1' } } }
+  // When 控制器无 modelCatalog/agents 面(旧宿主)
+  const outcome = await driver.run({ job, env: {} })
+  // Then fail 可读文案,不投递
+  assert.equal(outcome.status, 'fail')
+  assert.ok(outcome.message.includes('不支持指定模型'))
+  assert.equal(stubs.prompts.length, 0)
+})
+
+test('session-driver:指定模型时 agent 解析失败投递前 fail 不投递', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG, agentLookupError: new Error('writer-held') })
+  const driver = makeDriver(stubs)
+  stubs.sessions.set('s-1', { id: 's-1', status: 'idle' })
+  const job = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 's-1', model: { provider: 'p1', model: 'm2' } } }
+  // When 会话被其他写句柄占用(resolveAgent 返回 {error})
+  const outcome = await driver.run({ job, env: {} })
+  // Then fail 带宿主原因,无选择安装无投递
+  assert.equal(outcome.status, 'fail')
+  assert.ok(outcome.message.includes('writer-held'))
+  assert.equal(stubs.selections.length, 0)
+  assert.equal(stubs.prompts.length, 0)
+})
+
+test('session-driver:模型安装异常投递前 fail 带可读前缀', async () => {
+  const stubs = makeStubs({ catalog: MODEL_CATALOG })
+  stubs.sessionController.agents.selectForNextRequest = () => { throw new Error('projection modelSelection is not registered') }
+  const driver = makeDriver(stubs)
+  const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm1' } } }
+  // When 宿主安装面抛错(modelSelection 投影未注册等)
+  const outcome = await driver.run({ job, env: {} })
+  // Then fail 文案带「模型安装失败」前缀与宿主原因,不投递
+  assert.equal(outcome.status, 'fail')
+  assert.ok(outcome.message.includes('模型安装失败'))
+  assert.ok(outcome.message.includes('projection modelSelection is not registered'))
+  assert.equal(stubs.prompts.length, 0)
 })

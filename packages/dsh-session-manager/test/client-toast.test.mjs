@@ -19,9 +19,9 @@ function loadClient() {
   const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {}, useSyncExternalStore: () => [], createElement: () => null }
   const requireStub = (name) => {
     required.push(name)
-    // 通知出口:公共依赖 @mzzsfy/dsh-toast 的捕获桩
-    if (name === '@mzzsfy/dsh-toast/client') {
-      return { show: (text, opts) => { shown.push({ text, opts }); return shown.length } }
+    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools 的捕获桩
+    if (name === '@mzzsfy/dsh-common-tools/client') {
+      return { toast: { show: (text, opts) => { shown.push({ text, opts }); return shown.length } } }
     }
     return reactStub
   }
@@ -76,10 +76,10 @@ function loadClient() {
 
 const READY = (ids) => ({ phase: 'ready', archivedSessionIds: ids })
 
-test('apply:external require specifier 锁定为 @mzzsfy/dsh-toast/client', () => {
+test('apply:external require specifier 锁定为 @mzzsfy/dsh-common-tools/client', () => {
   const client = loadClient()
-  assert.ok(client.required.includes('@mzzsfy/dsh-toast/client'),
-    'client.js 未按约定 specifier require 公共通知依赖: ' + client.required.join(', '))
+  assert.ok(client.required.includes('@mzzsfy/dsh-common-tools/client'),
+    'client.js 未按约定 specifier require 公共依赖包: ' + client.required.join(', '))
 })
 
 test('apply:归档差分经 toast 出口,连续 ready 才计新增', () => {

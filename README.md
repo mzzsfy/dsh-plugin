@@ -24,13 +24,13 @@ dsh-plugin/
 | @mzzsfy/dsh-think-expand | 流式思考自动展开:始终显示最新一条思考,手动操作优先,打开会话仅展开最后一条,卸载无残留 | 纯前端观察流式渲染,新思考出现即收起上一条;无设置项,安装即自动生效 | DSH 纯前端插件(client 模块,DOM 观察) |
 | @mzzsfy/dsh-turn-notify | 回合事件通知:声音 / 系统弹窗 / 页内提示 / webhook / IM 五通道,六类事件独立开关,多窗口只响一次 | host 端观察回合状态,client 端发声;同浏览器多窗口按 localStorage 认领保证唯一发声;非回环 HTTP 访问降级 toast + 标题闪烁 | DSH 双端插件(host 观察投影 + client 发声) |
 | @mzzsfy/dsh-session-manager | 会话管理三合一:超期会话自动归档(阈值可配)、归档面板(取消归档 / 两段式删除 / 回收站还原)、归档推送提示 | host 启动补扫、每日周期轮与新会话创建三路触发同一幂等归档评估(阈值与周期均可配,timer 软依赖缺失自动降级);取消归档后 10 分钟内暂停自动归档(进程内宽限);删除移入系统回收站可恢复,面板维护已删台账并支持一键重新挂载 | DSH 双端插件(host 自动归档 + client 面板) |
-| @mzzsfy/dsh-toast | 全局浮出通知 Toast 库:多条并存栈式展示,自动消失与常驻确认两种生命周期,供各插件发送操作反馈与事件通知 | 普通 npm 依赖(非 dsh 插件,不声明 dsh.bundle.patch),不进 profile 表层 manifest(市场不显示);经消费插件 dependencies 声明随装,作为传递依赖实体落入顶层 node_modules(hoisted),dsh 启动 fallback 补链兜底,dev-link junction 保开发热更;消费插件 cordis.patch.yml 代挂其宿主占位条目使 client 进入模块表,经 dsh.client.external require 使用;容器直挂 body 顶部居中,样式全取宿主令牌 | DSH 公共 client 依赖库(external require) |
 | @mzzsfy/dsh-rs-workflow | 若水工作流 v5:人在场的强规则编排——主循环协作编排、分段推进、结构化产出契约强制校验、审批原语、运行中排队/注入/取消/暂停/断点续跑、全量运行记录无截断回看;用户自建模板经设置页管理,每套模板一键释放为一个模式 | 角色行:board(/api/rsww/* 运行中心+模板管理+配置,host 平面)/orchestrator(preset 平面,主循环七工具+分段 continuable job)/template-tool(preset 平面,AI 模板编辑入口);实现与设计文档见 docs/rsww-v5/(仓库本地) | DSH 插件(host 单角色 + 预设层两角色) |
 | @mzzsfy/dsh-llm-pi-gateway | 为官方 PiAiAdapter 提供会话标记增强；官方 `llm-pi-ai` 保持启用并继续自服务 | 仅装饰官方 namespace 注册且结构匹配的 adapter；Anthropic 请求注入派生 `metadata.user_id`，OpenAI 请求透传；不接管或注册 provider | DSH host 端插件(adapter 装饰器) |
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本匹配贴图;插件面板可声明自己的图标,语言切换自动重贴 | DSH 纯前端插件(DOM 观察) |
 | @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host 并把 web 默认绑定翻转为 0.0.0.0:泛域名等无法枚举的入口免改启动命令,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由(回溯 + 遮蔽注册方法)把 Host 头实时注册进 webRuntime.trustedHosts,闸门每请求实时读数组;容量 maxHosts 默认 100,按最久未访问(LRU)淘汰,行级 config 配置无 GUI;启动横幅与注册/淘汰 console 直出;webRuntime 走服务事件延迟激活,卸载经 disposer 断开注册 | DSH host 端插件(bundle patch 覆盖 + 路由包装) |
 | @mzzsfy/dsh-shared-terminal | 共享交互式终端:AI `terminal` 单工具与 DSH 官方 Sidebar xterm 共用 Session terminal,用户可输入并查看当前屏幕 | 通过 DSH 官方 terminalController 管理终端; read 使用 DSH 限定版本(0.2.0-rc.2 / 0.2.1-alpha.2)私有 owner lookup 与 xterm viewport queue 读取 active screen; 无自建 PTY/REST UI | DSH 双端插件(官方 terminal controller + Session result renderer) |
 | @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾,错过的触发不补跑;web 路由供看板/环境变量/日志三面板;会话任务经 sessionController 投递,支持允许时段与忙时跳过 | DSH 双端插件(web 路由 + settings 槽位) |
+| @mzzsfy/dsh-common-tools | 公共依赖库:两端 setupCommonTools(ctx) 自动绑定当前插件，提供 WebSocket 订阅/推送与卸载清理，client 经占位条目进模块表 | 插件就是通道，subscribe(listener)/publish(payload)，共享单条页面 WS；host 提供 presence，client 提供 toast | 普通 npm 依赖非插件,插件管理不可见 |
 | @mzzsfy/dsh-context-manager | 对话增强:历史输入浮层(`Alt+↑` 唤起,workspace/session/global/prompts 四范围导航与即时搜索,常用提示词收藏)、插话撤回(未应用插话撤回输入框重编辑)、对话分叉(重写式 fork:该轮不带入子会话,原输入自动回填供编辑重发,支持进行中轮分叉与分叉后自动重发);dsh-session-manager 历史输入功能的独立延续包 | Host 聚合工作区历史缓存(`~/.dsh/historyPrompt/`,解压 + stat 指纹增量对齐)经 `/api/context/*` 路由供浮层查询;分叉走宿主 sessions 服务面 fork+open(follow 开场帧建轮锚点),成功自动打开子会话并回填草稿 | DSH 双端插件(host 路由 + client 注入) |
 
 ## 安装与更新:缩短 pnpm 宽限期
@@ -69,7 +69,7 @@ node scripts/dev-link.mjs <包名>       # 单包模式
 node scripts/dev-link.mjs all --unlink # 恢复纯 registry 版本
 ```
 
-- 开发态合法形态:已发布包依赖行 = `^线上最新`,未发布包(线上 404)依赖行 = `file:<仓库>/packages/<包>`(dev-link 自动写入,出版本后重跑自动归一);工作副本挂载一律 = junction;公共依赖包(如 dsh-toast)无表层依赖行(残留行由 dev-link 删除),由消费插件 dependencies 声明随装 + dsh fallback 补链兜底
+- 开发态合法形态:已发布包依赖行 = `^线上最新`,未发布包(线上 404)依赖行 = `file:<仓库>/packages/<包>`(dev-link 自动写入,出版本后重跑自动归一);工作副本挂载一律 = junction;公共依赖包无表层依赖行(残留行由 dev-link 删除),由消费插件 dependencies 声明随装 + dsh fallback 补链兜底
 - `dsh.profile.bundles` 由 dev-link 对账(镜像官方 `dsh plugin` reconcilePlugins 语义):清单内插件包且依赖行已声明即入层,公共依赖包或无依赖行即出层;装载层变化不走热重载,重启 dsh 后生效
 - link 时在 home 补丁层(~/.dsh/cordis.patch.yml)维护 hmr 覆盖行:仓库 packages 保存即热重载(host 半区约 1 秒,client 半区刷新页面),卸链时移除
 

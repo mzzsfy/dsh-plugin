@@ -3,6 +3,7 @@
 
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -23,6 +24,8 @@ const NOTIFY_ON = { notify: { enabled: true, quotaThresholdPct: 50 } }
 function makeCtx({ settingsValue = {}, dshIm = undefined } = {}) {
   let value = settingsValue
   const routes = new Map()
+  resetBusStub()
+  const published = busStub.published
   const settingsService = {
     register() {},
     get: () => value,
@@ -49,7 +52,7 @@ function makeCtx({ settingsValue = {}, dshIm = undefined } = {}) {
       },
     },
   }
-  return { ctx, routes }
+  return { ctx, routes, published }
 }
 
 function makeReq(method, body, extraHeaders = {}) {
@@ -414,32 +417,41 @@ test('长轮询: 无 cursor 首拉立即返回空投影与当前版本', async (
   assert.equal(res.payload.version, 0)
 })
 
-test('长轮询: cursor 追平当前版本时挂起, 事件 push 后唤醒并返回新版本', async () => {
-  // Given 通知启用
+test('快照: 恒立即返回全量投影与当前版本, 无挂起形态', async () => {
+  // Given 通知启用且投影为空
   const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
   apply(ctx)
-  // When 以追平版本 0 发起长轮询
-  const { req, res } = notifyRequest('?cursor=0')
-  const pending = routes.get('/api/usage-panel/notifications')(req, res)
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  // Then 未唤醒前不响应
-  assert.equal(res.payload, null, '未唤醒前不应响应')
-  // When 查询产生越阈事件入投影
-  await produceNotifyEvent(routes)
-  await pending
-  // Then 唤醒返回新版本与事件
+  // When 快照请求(带或带 cursor 均为全量形态)
+  const { req, res } = notifyRequest('')
+  await routes.get('/api/usage-panel/notifications')(req, res)
+  // Then 立即返回且携带版本号
   assert.equal(res.status, 200)
-  assert.equal(res.payload.version, 2, 'push 两条事件应各递增一次版本并唤醒等待者')
-  assert.equal(res.payload.units.length, 2)
+  assert.deepEqual(res.payload.units, [])
+  assert.equal(res.payload.version, 0)
 })
 
-test('长轮询: cursor 落后当前版本时立即返回不挂起', async () => {
+test('变更发布: 事件 push 进入投影即发布总线变更', async () => {
+  // Given 通知启用
+  const { ctx, routes, published } = makeCtx({ settingsValue: NOTIFY_ON })
+  apply(ctx)
+  // When 查询产生越阈事件入投影
+  await produceNotifyEvent(routes)
+  // Then 快照携带事件,总线收到发布
+  const { req, res } = notifyRequest('')
+  await routes.get('/api/usage-panel/notifications')(req, res)
+  assert.equal(res.status, 200)
+  assert.equal(res.payload.units.length, 2)
+  assert.ok(res.payload.version > 0)
+  assert.deepEqual(published, [null, null], '每条事件入投影各发布一次')
+})
+
+test('快照: 投影已有事件时返回全量', async () => {
   // Given 投影已有事件(版本已前进)
   const { ctx, routes } = makeCtx({ settingsValue: NOTIFY_ON })
   apply(ctx)
   await produceNotifyEvent(routes)
-  // When 以落后 cursor 请求
-  const { req, res } = notifyRequest('?cursor=0')
+  // When 快照请求
+  const { req, res } = notifyRequest('')
   await routes.get('/api/usage-panel/notifications')(req, res)
   // Then 立即返回全量
   assert.equal(res.status, 200)

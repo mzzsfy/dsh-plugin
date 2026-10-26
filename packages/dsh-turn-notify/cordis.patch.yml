@@ -1,12 +1,9 @@
 # The turn-notify bundle patch: inserts the turn notification plugin into the
 # profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-turn-notify`;
 # the row id addresses this plugin's host half, whose `session/event` observer
-# feeds the projection polled by the browser half via `/api/turn-notify/*`.
-# No dsh-toast placeholder row here: the shared dependency's module-table mount
-# has a single authoritative consumer (session-manager). This plugin consumes
-# the toast client optionally (dynamic require with graceful channel disable),
-# since two placeholder rows for the same package name compose two module
-# sources when their loader base URLs differ, which is fatal at boot.
+# feeds the projection observed by the browser half via `/api/turn-notify/*`.
+# Shared client capability (toast/bus subscribe) lives in the dsh-change-bus
+# plugin's own module-table entry; no placeholder rows for other packages here.
 
 - insert:
     - id: turn-notify

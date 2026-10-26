@@ -1,13 +1,21 @@
 {
-  "name": "@mzzsfy/dsh-toast",
-  "description": "全局浮出通知 Toast 库:多条并存栈式展示,info/ok/error 三色,自动消失与常驻确认两种生命周期;普通 npm 依赖(非 dsh 插件),宿主占位条目由唯一授权消费插件代挂,其余插件可选消费",
-  "version": "0.2.5",
+  "name": "@mzzsfy/dsh-common-tools",
+  "description": "全家桶公共依赖库:按插件空间隔离的 WebSocket 双向订阅/推送与 toast;host setupCommonTools 借消费插件生命周期激活,client 复用页面单连接;普通 npm 依赖而非 dsh 插件",
+  "version": "1.0.0",
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./host": "./src/host.js",
     "./client": "./src/client.js",
     "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "react": "^18 || ^19",
+    "react-dom": "^18 || ^19"
   },
   "dsh": {
     "client": {
@@ -16,7 +24,7 @@
     "compatibility": {
       "dshReleases": {
         "0.2.0-rc.1": "unknown",
-        "0.2.0-rc.2": "compatible",
+        "0.2.0-rc.2": "unknown",
         "0.2.1-alpha.1": "unknown"
       }
     }
@@ -33,14 +41,10 @@
   "engines": {
     "node": ">=22"
   },
-  "peerDependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
-  },
   "files": [
     "src",
     "test",
     "README.md",
-    "MECHANISM.md"
+    "兼容性测试.md"
   ]
 }

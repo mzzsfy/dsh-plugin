@@ -400,6 +400,48 @@ test('jobs 路由:会话任务字段校验与默认值', async (t) => {
   assert.equal(badPreset.status, 400)
 })
 
+test('jobs 路由:会话任务 model 字段归一与校验(跟随默认=缺省)', async (t) => {
+  const { store, api } = await makeApi(t)
+  // When 指定 provider+model+effort(带空白)
+  const created = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'm1', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { mode: 'fresh', model: { provider: ' deepseek ', model: ' deepseek-chat ', reasoningEffort: ' high ' } },
+  })
+  // Then trim 后落库,形态合法
+  assert.equal(created.status, 200)
+  assert.deepEqual(created.payload.session.model, { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })
+  // When model 空对象 = 未指定(跟随宿主默认,字段删除)
+  const empty = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'm2', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { mode: 'fresh', model: { provider: '  ', model: '' } },
+  })
+  assert.equal(empty.status, 200)
+  assert.equal(empty.payload.session.model, undefined)
+  // When model 缺失(旧任务形态)
+  const legacy = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'm3', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { mode: 'fresh' },
+  })
+  assert.equal(legacy.status, 200)
+  assert.equal(legacy.payload.session.model, undefined)
+  // When provider 或 model 非字符串/为空字符串(指定形态残缺)
+  for (const [name, model] of [['m4', { provider: 123, model: 'm' }], ['m5', { provider: 'p' }], ['m6', { provider: '', model: 'm' }]]) {
+    const bad = await call(api, 'POST', '/api/cron-board/jobs', {
+      name, kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+      session: { mode: 'fresh', model },
+    })
+    assert.equal(bad.status, 400, name)
+    assert.match(bad.payload.error, /模型指定不合法/)
+  }
+  // When reasoningEffort 非字符串
+  const badEffort = await call(api, 'POST', '/api/cron-board/jobs', {
+    name: 'm7', kind: 'session', prompt: 'x', schedule: '* * * * *', enabled: true,
+    session: { mode: 'fresh', model: { provider: 'p', model: 'm', reasoningEffort: 9 } },
+  })
+  assert.equal(badEffort.status, 400)
+  assert.match(badEffort.payload.error, /模型指定不合法/)
+})
+
 test('agent-presets 路由:目录来自宿主服务,缺失降级空目录', async (t) => {
   // Given 宿主 agentPresets 服务返回混合形态列表
   const service = {
@@ -438,6 +480,48 @@ test('agent-presets 路由:目录来自宿主服务,缺失降级空目录', asyn
   // Then 仍空目录 200
   assert.equal(failed.status, 200)
   assert.deepEqual(failed.payload, { defaultId: '', items: [] })
+})
+
+test('model-catalog 路由:宿主目录归一,缺失与异常降级空目录', async (t) => {
+  // Given 宿主 sessionController.modelCatalog 返回官方形态
+  const catalog = {
+    default: { provider: 'deepseek-account', model: 'deepseek-chat' },
+    routableProviders: ['deepseek-account', 'custom'],
+    groups: [
+      { id: 'deepseek-account', name: 'DeepSeek', models: [
+        { id: 'deepseek-chat', name: 'DeepSeek Chat' },
+        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', reasoning: { efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' } },
+      ] },
+      { id: 'custom', name: 'Custom', models: [] },
+    ],
+    failures: [{ id: 'broken', name: 'Broken', message: '凭据未配置' }],
+  }
+  const { api } = await makeApi(t, { getSessionController: () => ({ modelCatalog: async () => catalog }) })
+  // When 拉取
+  const res = await call(api, 'GET', '/api/cron-board/model-catalog')
+  // Then 只保留有模型的组,模型带 efforts,default 透传,failures 原样
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.payload, {
+    default: { provider: 'deepseek-account', model: 'deepseek-chat' },
+    items: [
+      { provider: 'deepseek-account', name: 'DeepSeek', models: [
+        { id: 'deepseek-chat', name: 'DeepSeek Chat', efforts: [] },
+        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' },
+      ] },
+    ],
+    failures: [{ id: 'broken', name: 'Broken', message: '凭据未配置' }],
+  })
+  // When 服务缺失
+  const bare = await makeApi(t)
+  const empty = await call(bare.api, 'GET', '/api/cron-board/model-catalog')
+  // Then 空目录 200
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.payload, { default: null, items: [], failures: [] })
+  // When 服务异常
+  const throwing = await makeApi(t, { getSessionController: () => ({ modelCatalog: async () => { throw new Error('boom') } }) })
+  const failed = await call(throwing.api, 'GET', '/api/cron-board/model-catalog')
+  assert.equal(failed.status, 200)
+  assert.deepEqual(failed.payload, { default: null, items: [], failures: [] })
 })
 
 test('jobs 路由:会话通道禁用时建会话任务 400,脚本任务不受限', async (t) => {
