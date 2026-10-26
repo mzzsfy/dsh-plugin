@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-cron-board",
   "description": "轻量级定时任务看板:环境变量集中管理与定时任务调度(croner,支持内联时区后缀 T±N),执行体支持本地脚本与 dsh 会话任务(fresh/pinned 两种会话模式);看板可移入 better-sidebar 侧边栏",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
