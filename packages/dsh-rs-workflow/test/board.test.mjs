@@ -20,11 +20,15 @@ async function startBoard() {
   const wctx = {
     inject(deps, fn) {
       const [name] = deps
-      fn({ effect: (f) => f(), webServer: { register: (r) => { handlers[r.path] = r.handler } }, [name]: { register: (r) => { handlers[r.path] = r.handler } } })
+      fn({ fiber: { entry: { options: { name: '@mzzsfy/dsh-rs-workflow' } } }, effect: (f) => f(), webServer: { register: (r) => { handlers[r.path] = r.handler } }, [name]: { register: (r) => { handlers[r.path] = r.handler } } })
     },
   }
   registerBoardRoutes(wctx)
-  const server = createServer((req, res) => handlers[req.url.split('?')[0]](req, res))
+  const server = createServer((req, res) => {
+    const handler = handlers[req.url.split('?')[0]]
+    if (handler === undefined) { res.writeHead(404); res.end(); return }
+    handler(req, res)
+  })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const base = `http://127.0.0.1:${server.address().port}`
   return { base, close: () => new Promise((r) => server.close(r)) }
@@ -150,40 +154,25 @@ test('Given 无会话挂靠(重启后) When 页签裁决 Then 受理但不拉段
   }
 })
 
-test('Given changes 无 cursor When GET Then 立即返回当前版本(首拉)', async () => {
+test('Given 写路径 store 写入 When 观测总线 Then 触发变更通知(notify-plane 唯一通道)', async () => {
+  const board = await startBoard()
+  let notified = 0
+  const dispose = reportStore().onChange(() => { notified += 1 })
+  try {
+    reportStore().start({ runId: 'r-changes-pub', request: 'R' })
+    assert.equal(notified, 1)
+  } finally {
+    dispose()
+    reportStore().remove('r-changes-pub')
+    await board.close()
+  }
+})
+
+test('Given changes 路由已废除 When GET Then 404(过时路径移除不留兼容)', async () => {
   const board = await startBoard()
   try {
     const res = await fetch(board.base + '/api/rsww/changes')
-    assert.equal(res.status, 200)
-    const body = await res.json()
-    assert.equal(typeof body.version, 'number')
-  } finally {
-    await board.close()
-  }
-})
-
-test('Given changes cursor 恰等当前版本 When store 写入 Then 挂起解除并返回更新版本', async () => {
-  const board = await startBoard()
-  try {
-    const current = (await (await fetch(board.base + '/api/rsww/changes')).json()).version
-    const pending = fetch(board.base + `/api/rsww/changes?cursor=${current}`)
-    await new Promise((r) => setTimeout(r, 50))
-    reportStore().start({ runId: 'r-changes-wake', request: 'R' })
-    const body = await (await pending).json()
-    assert.ok(body.version > current, '挂起解除后版本须超前')
-  } finally {
-    reportStore().remove('r-changes-wake')
-    await board.close()
-  }
-})
-
-test('Given changes cursor 超前(宿主重启版本回退) When GET Then 立即返回当前版本自愈', async () => {
-  const board = await startBoard()
-  try {
-    const current = (await (await fetch(board.base + '/api/rsww/changes')).json()).version
-    const res = await fetch(board.base + `/api/rsww/changes?cursor=${current + 1000}`)
-    const body = await res.json()
-    assert.equal(body.version, current)
+    assert.equal(res.status, 404)
   } finally {
     await board.close()
   }

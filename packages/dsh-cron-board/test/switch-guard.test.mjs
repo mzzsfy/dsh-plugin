@@ -78,6 +78,22 @@ test('启停开关乐观更新契约:即时翻转 + 失败回滚提示,禁止等
   assert.match(source, /envs, reload, applyEnvPatch/)
 })
 
+test('会话任务模型选择契约:目录拉取 + 两级选择 + 记录展示', () => {
+  // Given 会话任务表单需指定 provider/model(可选 effort),目录来自 model-catalog 接口
+  // When 静态断言表单与记录展示的实现形态
+  // Then 锁定:目录请求、跟随默认选项、effort 联动、LogsTab 模型标签
+  assert.match(source, /'GET', 'model-catalog'/, '表单必须拉取模型目录')
+  assert.match(source, /modelCatalog/, '表单必须持有模型目录状态')
+  assert.match(source, /label: '模型'/, '会话区必须有模型选择字段')
+  assert.match(source, /跟随宿主默认/, '模型选择首选项必须是跟随宿主默认')
+  assert.match(source, /跟随模型默认/, 'effort 首选项必须是跟随模型默认')
+  assert.match(source, /reasoningEffort: e\.target\.value/, 'effort 选择必须回写表单')
+  // 提交链:modelKey 经 parseModelKey 还原对象,空串还原 undefined 即不携带字段
+  assert.match(source, /payload\.session\.model = parseModelKey\(form\.session\.modelKey\)/, '提交必须经 key 还原模型对象')
+  // 记录面:运行行展示 model 标签
+  assert.match(source, /run\.model/, '运行记录行必须展示模型标签')
+})
+
 test('client.js 主页面双形态挂载契约(默认宿主全局面板;设置开关手动移入侧边栏;无自动回退)', () => {
   // Given 定时任务是全局工具,入口必须不依赖会话:main 为 keyed 全局中央面板插槽,
   //        sidebar.panellist 为侧栏面板行,点击切换由宿主 layout.selectPanel 承载

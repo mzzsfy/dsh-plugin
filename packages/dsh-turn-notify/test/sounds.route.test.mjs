@@ -2,6 +2,8 @@
 // 隔离真实 ~/.dsh 音效库;覆盖 sounds 列表 / sound 读取与删除 / upload 写入 /
 // mapping 映射写读的完整链路(此前仅守卫路径有覆盖)。
 import test from 'node:test'
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'

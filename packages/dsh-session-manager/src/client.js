@@ -1,7 +1,7 @@
 // dsh-session-manager Client 半区:settings.section 归档面板 + 归档/操作反馈通知。
 // 归档快照来自官方 workspace.follow 客户端模型(ctx.get('workspaces')),会话行来自
 // ctx.get('sessions');面板数据 = 会话行 ∩ 归档集合(纯投影),通知由 archived
-// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-toast 展示。
+// 增量帧的集合差分驱动,经公共依赖 @mzzsfy/dsh-common-tools 展示。
 // 浏览器半区经 webServer 路由('/api/session-manager/*')访问 Host。打包为单文件自包含格式,无法跨文件
 // require;与 src/core.mjs 镜像的纯函数(projectRows / archiveToastStep /
 // archiveToastText / projectDeletedRows / pageArchiveRows /
@@ -20,9 +20,9 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-toast(external require,宿主占位条目由
+    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools(external require,宿主占位条目由
     // 本插件 cordis.patch.yml 代挂)
-    const { show: toast } = require('@mzzsfy/dsh-toast/client')
+    const { show: toast } = require('@mzzsfy/dsh-common-tools/client').toast
 
 // 视觉方案:归档台账——全部取宿主 alias 令牌(双主题自适应,不造色),数据列
 // 用宿主代码字体(会话即文件的档案词汇),签名元素为托盘内的归档轨

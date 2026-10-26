@@ -505,31 +505,11 @@ export function hostNotifyWanted({ hostNotify, hostNotifyFallback, browserPresen
   return browserPresent !== true
 }
 
-// 浏览器在场判定:有在途长轮询即在场信号(无论时间戳新旧);无在途时,
-// 最近活动在认可窗口内(长轮询刚完成、断连刚出账)仍算在场,超窗或从未在场为假
+// 浏览器在场判定:有在途连接(SSE)即在场信号(无论时间戳新旧);无在途时,
+// 最近活动在认可窗口内(断连刚出账)仍算在场,超窗或从未在场为假
 export function isBrowserPresent({ inFlightPolls, lastSeenAt, now, windowMs }) {
   if (typeof inFlightPolls === 'number' && inFlightPolls > 0) return true
   return typeof lastSeenAt === 'number' && lastSeenAt > 0 && now - lastSeenAt <= windowMs
-}
-
-// 浏览器轮询判定:长轮询续传形态(带 cursor)+ fetch 请求形态 + Origin 对账。
-// 来源不限地址:浏览器可在任意机器访问 dsh(局域网部署),在场信号看的是
-// "有无 dsh 页面在轮询",与浏览器同不同机无关。投影为无守卫 GET,记账须排除
-// 可伪造在场的形态:no-cors(img 跨站探活)、无 cursor 的手工探测、跨源 fetch
-// (恶意网页,sec-fetch-mode 同为 cors 无法区分,凭 Origin 与 Host 不符识别;
-// 同源 GET fetch 不带 Origin,无 Origin 放行,旧浏览器同样覆盖)——只有 dsh
-// 同源页面自身能发出合格形态,伪造面与来源地址无关
-export function isBrowserPoll({ hasCursor, secFetchMode, origin, host }) {
-  if (hasCursor !== true) return false
-  if (secFetchMode !== undefined && secFetchMode !== 'cors') return false
-  if (typeof origin === 'string' && origin.length > 0) {
-    try {
-      if (new URL(origin).host !== host) return false
-    } catch {
-      return false
-    }
-  }
-  return true
 }
 
 // 文本规整:换行压平为空格,防命令行参数与通知文案中的换行歧义

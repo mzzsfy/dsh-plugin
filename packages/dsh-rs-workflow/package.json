@@ -14,7 +14,10 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-common-tools/client"
+      ]
     },
     "compatibility": {
       "dshReleases": {
@@ -48,5 +51,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@mzzsfy/dsh-common-tools": "^1.0.0"
   }
 }

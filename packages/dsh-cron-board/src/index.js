@@ -1,6 +1,7 @@
 // dsh-cron-board Host 半区:轻量级定时任务看板。环境变量集中管理 + 定时任务(cron)调度,
 // 执行体两类:本地脚本(宿主进程内 spawn)与 dsh 会话任务(定时向 dsh 会话投递任务文本)。
 // 模块分层:store(持久化)/ logger(日志)/ executor(执行链)/ scheduler(调度)/ api(路由)。
+import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 // timer 为软依赖(嵌套注入,缺失降级只影响自动调度);settings 缺省时读默认常量。
 
 import { homedir } from 'node:os'
@@ -21,7 +22,8 @@ export const name = 'dsh-cron-board'
 // 会话任务依赖的 sessionController 由 dsh-web-app 的 session-controller 条目挂载,
 // 注册晚于同批条目的 apply(异步装配),且 0.1.1-rc.2 无此服务:inject 声明会在旧版
 // 永久 pending 拖死 boot,apply 内同步探测又会抢在挂载前误判缺失(0.1.2-rc.1 实测
-// 404)。唯一两头正确的形态:启动后异步轮询等待服务出现再装配,超时仍缺失即干净禁用
+// 404)。唯一两头正确的形态:启动后异步轮询等待服务出现再装配,超时仍缺失即干净禁用。
+// 推送总线:数据刷新统一走公共依赖 common-tools,客户端轮询已废除(不留双路径)
 export const inject = ['webServer']
 
 // 数据目录 env 覆盖:测试注入临时目录(对齐 dsh-usage-panel 先例)
@@ -66,6 +68,10 @@ export function resolveDataDir(env = process.env) {
 
 export function apply(ctx, config) {
   const dataDir = resolveDataDir()
+  const tools = setupCommonTools(ctx)
+  const changes = createChangeNotifier(() => tools.publish())
+  ctx.effect(() => () => changes.dispose(), '通知变更合并')
+  const notifyChange = changes.refresh
   // 装配惰性单例:首个请求 / timer 激活触发初始化,各组件只建一次
   let runtimePromise = null
   // 会话通道就绪状态:等待期 API 已可服务脚本任务,就绪/禁用后状态定格
@@ -94,8 +100,9 @@ export function apply(ctx, config) {
           readLogKeep: () => readNumber('logKeepPerJob', DEFAULT_LOG_KEEP_PER_JOB),
           readMaskEnvInPrompt: () => readBoolean('maskEnvInPrompt', false),
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
+          onChange: notifyChange,
         })
-        const scheduler = createScheduler({ store, executor, readTickMs })
+        const scheduler = createScheduler({ store, executor, readTickMs, onChange: notifyChange })
         schedulerRef.current = scheduler
         await scheduler.recover()
         const api = createApi({
@@ -108,7 +115,9 @@ export function apply(ctx, config) {
           readSidebarTab: () => readBoolean('sidebarTab', false),
           updateUiSettings,
           getAgentPresets: () => ctx.get('agentPresets'),
+          getSessionController: () => sessionControllerRef.current,
           logSystem: (line) => (ctx.logger && ctx.logger.warn ? ctx.logger.warn(line) : undefined),
+          notifyChange,
         })
         return { api, scheduler }
       })()

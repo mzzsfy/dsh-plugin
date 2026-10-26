@@ -1,6 +1,8 @@
 // host 事件接线集成测试:stub ctx 装载真实 src/index.js,伪造 session/event 序列,
 // 经投影路由断言子代理回执静默的标记/消费/清理时序与异常分类放行。
 import test from 'node:test'
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
@@ -48,6 +50,8 @@ function makeCtx(extraServices) {
   const routes = new Map()
   const handlers = new Map()
   const settingsService = makeSettings()
+  resetBusStub()
+  const published = busStub.published
   const ctx = {
     on(event, fn) { handlers.set(event, fn) },
     get(key) {
@@ -58,7 +62,7 @@ function makeCtx(extraServices) {
     effect(thunk) { thunk() },
     webServer: { register(route) { routes.set(route.path, route.handler) } },
   }
-  return { ctx, routes, handlers }
+  return { ctx, routes, handlers, published }
 }
 
 const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve))
@@ -548,7 +552,7 @@ function projectionRequest(query) {
   return { req, res }
 }
 
-test('Given 无 cursor 的首拉请求 When 投影为空 Then 立即返回空投影与当前版本', async () => {
+test('Given 快照请求到达 When 投影为空 Then 立即返回空投影与当前版本(无挂起形态)', async () => {
   const { ctx, routes } = makeCtx()
   apply(ctx)
   const { req, res } = projectionRequest('')
@@ -558,22 +562,22 @@ test('Given 无 cursor 的首拉请求 When 投影为空 Then 立即返回空投
   assert.equal(res.body.version, 0)
 })
 
-test('Given cursor 追平当前版本 When 新事件 push Then 挂起被唤醒并返回新投影', async () => {
-  const { ctx, routes, handlers } = makeCtx()
+test('Given 事件 push When 快照与总线观测 Then 立即返回新投影且 publish 契约成立', async () => {
+  const { ctx, routes, handlers, published } = makeCtx()
   apply(ctx)
   await disableDurationFilter(routes)
-  // config POST 成功即 bump,当前版本为 1;cursor 追平后请求挂起
-  const { req, res } = projectionRequest('?cursor=1')
-  const pending = routes.get('/api/turn-notify/projection')(req, res)
-  await flushMicrotasks()
-  assert.equal(res.body, null, '未唤醒前不应响应')
   const onEvent = handlers.get('session/event')
   onEvent(MAIN, { type: 'turn/start' })
   onEvent(MAIN, turnEnd('completed'))
-  await pending
+  // 数据面:快照端点即时返回全量,无挂起
+  const { req, res } = projectionRequest('')
+  await routes.get('/api/turn-notify/projection')(req, res)
   assert.equal(res.status, 200)
-  assert.equal(res.body.version, 2, 'push 应递增版本并唤醒等待者')
   assert.equal(res.body.units.filter((unit) => unit.category === 'completed').length, 1)
+  assert.ok(res.body.version > 0)
+  // 通知面:事件 push 即发布总线变更(config POST 亦发,至少一条且无负载)
+  assert.ok(published.length >= 1)
+  for (const payload of published) assert.equal(payload, null)
 })
 
 test('Given cursor 落后当前版本 When 请求到达 Then 立即返回无需挂起', async () => {
@@ -590,18 +594,12 @@ test('Given cursor 落后当前版本 When 请求到达 Then 立即返回无需�
   assert.ok(res.body.version > 0)
 })
 
-test('Given 配置 POST 成功 When 长轮询挂起 Then bump 唤醒返回新版本', async () => {
-  const { ctx, routes } = makeCtx()
+test('Given 配置 POST 成功 When 观测总线 Then bump 发布变更契约成立', async () => {
+  const { ctx, routes, published } = makeCtx()
   apply(ctx)
-  const { req, res } = projectionRequest('?cursor=0')
-  const pending = routes.get('/api/turn-notify/projection')(req, res)
-  await flushMicrotasks()
-  assert.equal(res.body, null, '未唤醒前不应响应')
   const config = makeRes()
   await routes.get('/api/turn-notify/config')(makeReq('POST', { suppressSubagentWake: false }, JSON_HEADERS), config)
   assert.equal(config.status, 200)
-  await pending
-  assert.equal(res.status, 200)
-  assert.ok(res.body.version > 0, '配置变更应唤醒挂起连接')
+  assert.deepEqual(published, [null], '配置变更应发布总线变更')
   assert.equal(config.body.suppressSubagentWake, false)
 })

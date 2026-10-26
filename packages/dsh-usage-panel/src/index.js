@@ -1,3 +1,4 @@
+import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 // 用量面板 Host 半区:多平台余额查询 + 定期轮询 + 历史快照落盘。webServer 路由供浏览器半区调用,
 // fetch 直连平台 API,配置持久化在 ~/.dsh/dsh-usage-panel/accounts.json,快照在 history.json。
 
@@ -42,8 +43,6 @@ const MAX_ACCOUNTS = 20
 // 单轮轮询的受限并发:串行执行时单账号 20s 超时即可拖满整轮(pollInFlight 互斥
 // 使后续 tick 全部跳过,轮询事实停摆),并发上限同时压住上游瞬时压力
 const POLL_CONCURRENCY = 4
-// 通知长轮询服务端挂起上限,与 turn-notify 同值;客户端超时须大于此值
-const LONG_POLL_WAIT_MS = 25 * 1000
 // 数据目录支持 env 注入(测试隔离);缺省落 ~/.dsh/dsh-usage-panel
 const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR || join(homedir(), '.dsh', 'dsh-usage-panel')
 const DATA_FILE = join(DATA_DIR, 'accounts.json')
@@ -339,9 +338,14 @@ async function queryAccount(account) {
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 // timer 为软依赖:不进 inject 声明,服务缺失时仅停用自动轮询,面板手动查询不受影响
+// 推送总线:页内通知刷新统一走公共依赖 common-tools,客户端长轮询已废除(不留双路径)
 export const inject = ['webServer']
 
 export function apply(ctx, configRef) {
+  const tools = setupCommonTools(ctx)
+  const changes = createChangeNotifier(() => tools.publish())
+  ctx.effect(() => () => changes.dispose(), '通知变更合并')
+  const notifyChange = changes.refresh
   let config = null
   let loadPromise = null
   let writeChain = Promise.resolve()
@@ -424,8 +428,11 @@ export function apply(ctx, configRef) {
     notifySeq += outcome.events.length
     account.notifyState = outcome.state
     for (const event of outcome.events) {
-      // toast 开关在投影侧消费:关闭即浏览器半区轮询不到,出站通道不受影响
-      if (globalNotify.toast) projection.push(event)
+      // toast 开关在投影侧消费:关闭即浏览器半区订阅不到,出站通道不受影响
+      if (globalNotify.toast) {
+        projection.push(event)
+        notifyChange()
+      }
       void sendWebhook({ url: globalNotify.webhookUrl, payload: buildWebhookPayload(event) })
       deliverIm(event, globalNotify)
     }
@@ -616,20 +623,12 @@ export function apply(ctx, configRef) {
           sendJson(res, 405, { error: 'method not allowed' })
           return
         }
-        // 长轮询:cursor 缺省=首拉立即返回;仅版本恰等时挂起至事件 push / 超时;
-        // cursor 超前(宿主重启版本回退)立即返回全量,客户端以响应 version 重置游标自愈
-        const url = new URL(req.url, 'http://localhost')
-        const rawCursor = Number(url.searchParams.get('cursor'))
-        const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
-        if (url.searchParams.has('cursor') && projection.version() === cursor) {
-          await projection.wait(cursor, LONG_POLL_WAIT_MS)
-        }
+        // 快照:恒全量返回(变更通知走总线,不再长轮询挂起);丢失恢复靠订阅 onReset 全量对账
         sendJson(res, 200, { units: projection.list(), version: projection.version() })
       },
     })
     return () => {
       disposeRoute()
-      // 唤醒全部挂起长轮询,以当前版本收尾,防卸载后连接悬挂
       projection.dispose()
     }
   }, 'usage-panel notifications route')

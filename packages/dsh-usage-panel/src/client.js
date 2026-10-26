@@ -9,11 +9,14 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useRef } = React
 
-    // 面板反馈出口:公共依赖 @mzzsfy/dsh-toast,可选消费——占位条目由
-    // session-manager 唯一代挂,权威方未安装时降级 console,不挂死不报错
+    // 公共依赖 @mzzsfy/dsh-common-tools:总线订阅硬消费(页内通知数据刷新唯一
+    // 通道;模块表缺失即本 client factory 抛错,由装载层判定失败,无轮询回退);
+    // toast 可选消费——占位条目由 session-manager 唯一代挂,权威方未安装时降级
+    // console,不挂死不报错
+    const tools = require('@mzzsfy/dsh-common-tools/client')
     let toast = null
     try {
-      toast = require('@mzzsfy/dsh-toast/client').show
+      toast = tools.toast.show
     } catch {
       // 模块表无 toast → 反馈降级 console.warn
     }
@@ -88,46 +91,100 @@ window.__ModuleLoader__.load({
     }
     /* LOGIC-END */
 
-    // 页内通知长轮询:client 激活即挂起等待,不依赖面板打开;toast 库缺失(权威代挂方
+    // 页内通知推送订阅:client 激活即订阅,不依赖面板打开;toast 库缺失(权威代挂方
     // session-manager 未安装)整段跳过;批内逐条认领防多窗口重复弹;
-    // 代际令牌自愈:HMR/闭包重建首挂 abort 旧代长轮询再启新代,旧代不滞留不叠加
+    // 代际令牌自愈:HMR/闭包重建首挂中止旧代快照请求与总线订阅再启新代,旧代不滞留不叠加
     const NOTIFY_REQUEST_TIMEOUT_MS = 30 * 1000
-    // 失败重连退避:指数增长至上限,防网络中断期间打爆服务端;须大于服务端挂起上限
-    const NOTIFY_RETRY_MIN_MS = 2 * 1000
-    const NOTIFY_RETRY_MAX_MS = 30 * 1000
     const NOTIFY_TOAST_MS = 6 * 1000
     const KEY_POLL_TOKEN = 'usage-panel:notify-poll'
-    if (toast) {
-      // 已有 AbortController 代即 abort 旧代长轮询;遗留非 AbortController 旧令牌
-      // (interval 形态)无法中止,由页面刷新自然清偿
-      if (window[KEY_POLL_TOKEN] instanceof AbortController) window[KEY_POLL_TOKEN].abort()
+    const KEY_POLL_DISPOSE = 'usage-panel:notify-poll:dispose'
+    const notificationOwners = new Set()
+    let activeNotificationOwner = null
+    let notificationWork = null
+    const NOTIFY_TTL_MS = 60 * 1000
+    const CLAIM_DB = 'dsh-usage-panel'
+    const CLAIM_STORE = 'claims'
+    const CLAIM_RETENTION_MS = NOTIFY_TTL_MS + NOTIFY_REQUEST_TIMEOUT_MS
+    const announcedIds = new Map()
+    let claimDegradeAnnounced = false
+    let claimDbPromise = null
+    function closeClaimDb() {
+      const pending = claimDbPromise
+      claimDbPromise = null
+      pending?.then(db => db.close(), () => {})
+    }
+    function openClaimDb() {
+      if (claimDbPromise) return claimDbPromise
+      const pending = new Promise((resolve, reject) => {
+        const request = window.indexedDB.open(CLAIM_DB, 1)
+        request.onupgradeneeded = () => { request.result.createObjectStore(CLAIM_STORE, { keyPath: 'id' }) }
+        request.onerror = () => reject(request.error)
+        request.onblocked = () => reject(new Error('通知认领库被阻塞'))
+        request.onsuccess = () => {
+          const db = request.result
+          if (claimDbPromise !== pending) { db.close(); reject(new Error('通知认领代已退出')); return }
+          db.onversionchange = () => { if (claimDbPromise === pending) closeClaimDb() }
+          resolve(db)
+        }
+      })
+      claimDbPromise = pending
+      pending.catch(() => { if (claimDbPromise === pending) claimDbPromise = null })
+      return pending
+    }
+    // 同库 readwrite 事务串行，提交终态后才呈现；HTTP LAN 同样可用。
+    async function claimNotification(unit, signal) {
+      if (signal?.aborted) return false
+      const now = Date.now()
+      try {
+        const db = await openClaimDb()
+        if (signal?.aborted) return false
+        const claimed = await new Promise((resolve, reject) => {
+          const transaction = db.transaction(CLAIM_STORE, 'readwrite')
+          const store = transaction.objectStore(CLAIM_STORE)
+          let winner = false
+          const abort = () => { try { transaction.abort() } catch { /* 已提交事务不能回滚 */ } }
+          const cleanup = () => signal?.removeEventListener('abort', abort)
+          signal?.addEventListener('abort', abort, { once: true })
+          transaction.oncomplete = () => { cleanup(); resolve(winner) }
+          transaction.onabort = transaction.onerror = () => { cleanup(); reject(transaction.error) }
+          const request = store.getAll()
+          request.onsuccess = () => {
+            const now = Date.now()
+            const rows = request.result
+            for (const row of rows) if (row.expiresAt <= now) store.delete(row.id)
+            if (signal?.aborted) return
+            if (rows.some(row => row.id === unit.id && row.expiresAt > now)) return
+            store.add({ id: unit.id, expiresAt: now + CLAIM_RETENTION_MS })
+            winner = localGet(KEY_DONE + unit.id) === null
+          }
+        })
+        return !signal?.aborted && claimed
+      } catch {
+        if (signal?.aborted) return false
+        if (!claimDegradeAnnounced) {
+          claimDegradeAnnounced = true
+          console.warn('[dsh-usage-panel] IndexedDB 不可用，跨窗口通知认领已降级')
+        }
+        for (const [id, at] of announcedIds) if (now - at >= NOTIFY_TTL_MS) announcedIds.delete(id)
+        if (announcedIds.has(unit.id) || !claimEvent(unit.id)) return false
+        announcedIds.set(unit.id, now)
+        return true
+      }
+    }
+    function createNotificationWork() {
+      const previousDispose = window[KEY_POLL_DISPOSE]
+      if (typeof previousDispose === 'function') previousDispose()
       const notifyController = new AbortController()
       window[KEY_POLL_TOKEN] = notifyController
-      // 已见投影版本:空即未首拉;长轮询续传游标,响应后随 payload 推进
+      // 已见投影版本:仅作观测;丢失恢复靠订阅 onReset 全量对账,不设游标重放
       let notifyCursor = null
-      const notifySleep = (ms, signal) => new Promise((resolve) => {
-        if (signal.aborted) {
-          resolve()
-          return
-        }
-        const timer = setTimeout(() => {
-          signal.removeEventListener('abort', onAbort)
-          resolve()
-        }, ms)
-        const onAbort = () => {
-          clearTimeout(timer)
-          resolve()
-        }
-        signal.addEventListener('abort', onAbort, { once: true })
-      })
       async function notifyPollOnce(signal) {
-        let payload
+        let payload, requestSignal
         try {
-          // cursor 为空即首拉,服务端立即返回全量;之后携带版本挂起等待增量
-          const query = notifyCursor === null ? '' : '?cursor=' + notifyCursor
+          // 恒全量快照(变更通知走总线);组合代际中止与请求超时防悬挂
           const timeoutSignal = AbortSignal.timeout(NOTIFY_REQUEST_TIMEOUT_MS)
-          const requestSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
-          const response = await fetch('/api/usage-panel/notifications' + query, { signal: requestSignal })
+          requestSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal])
+          const response = await fetch('/api/usage-panel/notifications', { signal: requestSignal })
           if (!response.ok) {
             void response.body?.cancel()
             return false
@@ -136,7 +193,8 @@ window.__ModuleLoader__.load({
         } catch {
           return false
         }
-        // 版本缺失即异常响应:按失败退避,防游标停滞退化成紧密首拉循环
+        if (requestSignal.aborted) return false
+        // 版本缺失即异常响应:按失败处理,由调用方决定是否通告
         if (typeof payload.version !== 'number') return false
         notifyCursor = payload.version
         const units = payload && Array.isArray(payload.units) ? payload.units : []
@@ -154,31 +212,47 @@ window.__ModuleLoader__.load({
           } catch { storageBroken = true }
         }
         for (const unit of units) {
-          if (!claimEvent(unit.id)) continue
+          const claimed = await claimNotification(unit, requestSignal)
+          if (requestSignal.aborted) return false
+          if (!claimed) continue
           markDone(unit.id)
           toast(unit.text, { kind: unit.kind === 'reset' ? 'ok' : 'error', holdMs: NOTIFY_TOAST_MS })
         }
         return true
       }
-      // 长轮询主循环:成功即立即重连(空闲期由服务端挂起兜底),失败指数退避;
-      // 循环体严格顺序,任何时刻至多一条在途请求
-      void (async () => {
-        let backoffMs = NOTIFY_RETRY_MIN_MS
-        while (!notifyController.signal.aborted) {
-          let ok = false
-          try {
-            ok = await notifyPollOnce(notifyController.signal)
-          } catch { ok = false }
-          if (notifyController.signal.aborted) break
-          if (ok) {
-            backoffMs = NOTIFY_RETRY_MIN_MS
-            await notifySleep(0, notifyController.signal)
-          } else {
-            await notifySleep(backoffMs, notifyController.signal)
-            backoffMs = Math.min(backoffMs * 2, NOTIFY_RETRY_MAX_MS)
-          }
-        }
-      })()
+      // 订阅插件空间 WS 总线:首连 onReset 即首拉,消息到达重拉;
+      // 公共总线重连成功再触发 onReset 全量对账自愈;快照失败不自动重试
+      const snapshot = tools.createSnapshotRefresh(() => notifyPollOnce(notifyController.signal))
+      const refresh = snapshot.refresh
+      const dispose = () => {
+        if (notificationWork?.dispose !== dispose) return
+        notificationWork = null
+        snapshot.dispose()
+        notifyController.abort()
+        closeClaimDb()
+        for (const item of notificationOwners) item.unsubscribe?.()
+        notificationOwners.clear()
+        activeNotificationOwner = null
+        if (window[KEY_POLL_TOKEN] === notifyController) delete window[KEY_POLL_TOKEN]
+        if (window[KEY_POLL_DISPOSE] === dispose) delete window[KEY_POLL_DISPOSE]
+      }
+      notificationWork = { refresh, dispose }
+      window[KEY_POLL_DISPOSE] = dispose
+    }
+    function startNotifications(bus) {
+      if (!toast) return
+      const owner = { unsubscribe: null }
+      if (notificationOwners.size === 0) createNotificationWork()
+      notificationOwners.add(owner)
+      if (activeNotificationOwner === null) activeNotificationOwner = owner
+      const refresh = () => { if (activeNotificationOwner === owner) void notificationWork.refresh() }
+      owner.unsubscribe = bus.subscribe(refresh, { onReset: refresh })
+      return () => {
+        if (!notificationOwners.delete(owner)) return
+        owner.unsubscribe()
+        if (activeNotificationOwner === owner) activeNotificationOwner = notificationOwners.values().next().value || null
+        if (notificationOwners.size === 0) notificationWork.dispose()
+      }
     }
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场
@@ -1429,6 +1503,8 @@ function UsagePanelApp() {
     return {
       inject: ['slots'],
       apply(ctx) {
+        const bus = tools.setupCommonTools(ctx)
+        ctx.effect(() => startNotifications(bus), 'usage-panel notifications')
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'usage-panel', order: 40, label: '账号余额' },

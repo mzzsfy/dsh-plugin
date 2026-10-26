@@ -2,6 +2,8 @@
 // 隔离真实 ~/.dsh 音效库;覆盖展示名落索引 / 文件名不变 / 映射引用不动 / 幂等 /
 // 非法名 / 404 / 并发收敛 / 删除清索引 / 守卫。
 import test from 'node:test'
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'

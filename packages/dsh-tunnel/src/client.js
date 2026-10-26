@@ -9,8 +9,6 @@ const PANEL_ID = 'tunnel'
 const PANEL_LABEL = '穿透隧道'
 const TAB_ID = 'tunnel:board'
 const TAB_ORDER = 47
-const REFRESH_INTERVAL_MS = 30 * 1000
-const PREF_POLL_MS = 5 * 1000
 const COPY_FLASH_MS = 1200
 const PORT_MIN = 1
 const PORT_MAX = 65535
@@ -171,9 +169,12 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   function factory(require) {
     let React = null
     let ReactDOMClient = null
+    let tools = null
     try {
       React = require('react')
       ReactDOMClient = require('react-dom/client')
+      // 公共工具库:bus 订阅是数据刷新唯一通道,缺失即整面板禁用(无轮询回退)
+      tools = require('@mzzsfy/dsh-common-tools/client')
     } catch {
       return noopFactory()
     }
@@ -324,26 +325,28 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             disabled: busy || !nameOk || !portOk, onClick: submit }, '创建')))
     }
 
-    function TunnelPanel() {
+    function TunnelPanel({ bus }) {
       const [rows, setRows] = useState(null)
       const [error, setError] = useState('')
       const [showAdd, setShowAdd] = useState(false)
       const [busyName, setBusyName] = useState('')
-      const [reloadFlag, setReloadFlag] = useState(0)
-      const reload = useCallback(() => setReloadFlag((flag) => flag + 1), [])
+      const refreshRef = useRef(() => {})
+      const reload = useCallback(() => refreshRef.current(), [])
       useEffect(() => {
         let alive = true
         const load = async () => {
           const listOutcome = await request('GET', '/tunnels')
           if (!alive) return
-          // 成功即清错误: 瞬态失败(如插件重载期轮询)恢复后错误条不滞留
+          // 成功即清错误: 瞬态失败(如插件重载期刷新)恢复后错误条不滞留
           if (listOutcome.ok) { setRows(listOutcome.data.items); setError('') }
           else setError(listOutcome.error)
         }
-        load()
-        const timer = setInterval(load, REFRESH_INTERVAL_MS)
-        return () => { alive = false; clearInterval(timer) }
-      }, [reloadFlag])
+        // 数据刷新唯一通道:订阅推送总线(首连 onReset 即首拉,消息到达刷新)
+        const snapshot = tools.createSnapshotRefresh(load)
+        refreshRef.current = snapshot.refresh
+        const unsubscribe = bus.subscribe(snapshot.refresh, { onReset: snapshot.refresh })
+        return () => { alive = false; refreshRef.current = () => {}; snapshot.dispose(); unsubscribe() }
+      }, [bus])
       const remove = async (row) => {
         if (!window.confirm('删除隧道 ' + row.name + '?')) return
         setBusyName(row.name)
@@ -384,13 +387,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         h('path', { d: 'm10.5 10.5 3 3' }))
     }
 
-    function registerMainPanel(ctx) {
+    function registerMainPanel(ctx, bus) {
       return ctx.effect(() => {
         const injectDisposers = []
         injectDisposers.push(ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
           key: PANEL_ID,
-        }, () => h('div', { className: 'tu-main' }, h(TunnelPanel)))))
+        }, () => h('div', { className: 'tu-main' }, h(TunnelPanel, { bus })))))
         injectDisposers.push(ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
           id: PANEL_ID,
@@ -402,7 +405,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // better-sidebar tab:注册即单实例(single);只注册不主动打开,
     // 打开由用户从侧边栏目录手动进入
-    function registerBoardTab(ctx, service) {
+    function registerBoardTab(ctx, service, bus) {
       return ctx.effect(() => {
         return service.registerTab({
           id: TAB_ID,
@@ -410,7 +413,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           icon: (size) => h(PanelIcon, { size }),
           order: TAB_ORDER,
           single: true,
-          component: (props) => h('div', { className: 'tu-main' }, h(TunnelPanel)),
+          component: (props) => h('div', { className: 'tu-main' }, h(TunnelPanel, { bus })),
         })
       }, 'dsh-tunnel sidebar tab')
     }
@@ -480,13 +483,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       // slots 供面板与设置卡片挂载(缺失则 fiber 未激活, 即干净禁用)
       inject: ['slots'],
       apply(ctx) {
+        const bus = tools.setupCommonTools(ctx)
         ensureStyle(document)
         // 挂载权交给用户:默认注册全局面板;偏好开启且侧边栏服务在场才移入扩展槽
         let currentSidebar = ctx.get('betterSidebar')
         let sidebarTabOn = false
         let tabDisposer = null
         let panelDisposer = null
-        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar)
+        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, bus)
         const applyPref = () => {
           const wantTab = sidebarTabOn && currentSidebar !== undefined
           if (wantTab && tabDisposer === null) {
@@ -496,11 +500,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             tabDisposer()
             tabDisposer = null
           }
-          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx)
+          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, bus)
         }
-        const prefWatch = setInterval(async () => {
+        // 偏好仲裁数据源:订阅总线刷新(ui-settings 变更即 publish),不再周期轮询
+        let prefAlive = true
+        const syncPref = async () => {
           try {
             const outcome = await request('GET', '/status')
+            if (!prefAlive) return
             const next = outcome.ok && outcome.data && outcome.data.ui ? outcome.data.ui.sidebarTab === true : false
             if (next !== sidebarTabOn) {
               const previous = sidebarTabOn
@@ -508,15 +515,19 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               try {
                 applyPref()
               } catch (error) {
-                // 形态切换失败回滚偏好, 下轮轮询重试, 避免入口消失后卡死
+                // 形态切换失败回滚偏好, 下轮事件重试, 避免入口消失后卡死
                 sidebarTabOn = previous
                 console.warn('[dsh-tunnel] 看板形态切换失败:', error)
               }
             }
-          } catch { /* 轮询失败保形态不变, 下轮重试 */ }
-        }, PREF_POLL_MS)
+          } catch { /* 刷新失败保形态不变, 下轮事件重试 */ }
+        }
+        const prefRefresh = tools.createSnapshotRefresh(syncPref)
+        const unsubscribePref = bus.subscribe(prefRefresh.refresh, { onReset: prefRefresh.refresh })
         ctx.effect(() => () => {
-          clearInterval(prefWatch)
+          prefAlive = false
+          prefRefresh.dispose()
+          unsubscribePref()
           if (tabDisposer) tabDisposer()
           if (panelDisposer) panelDisposer()
         }, 'dsh-tunnel mount arbitration')

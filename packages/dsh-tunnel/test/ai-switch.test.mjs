@@ -8,6 +8,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+
 const TOOL_NAMES = ['tunnel_open', 'tunnel_list', 'tunnel_close']
 
 class MockWebServer {
@@ -56,6 +58,9 @@ function createCtx({ tools, settings, configEditor, fiber } = {}) {
     if (typeof disposer === 'function') effectDisposers.push(disposer)
     return disposer
   }
+  // 总线 publish 桩:桥接到最近 createCtx 的 published 供断言
+  resetBusStub()
+  const published = busStub.published
   const ctx = {
     webServer: undefined,
     fiber,
@@ -68,7 +73,7 @@ function createCtx({ tools, settings, configEditor, fiber } = {}) {
     effect: runEffect,
     inject(names, cb) { cb({ tools, settings, effect: runEffect }) },
   }
-  return { ctx, events, effectDisposers }
+  return { ctx, events, effectDisposers, published }
 }
 
 // legacy mock settings: 与 tunnel.test.mjs 同款语义(内存存储 + watch 登记 + 手动触发)

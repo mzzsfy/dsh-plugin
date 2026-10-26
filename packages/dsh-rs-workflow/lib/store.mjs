@@ -30,17 +30,15 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
 
   const warn = (message) => logger.warn?.(`[rsww-store] ${message}`)
 
-  // 变更版本:写路径统一 bump 唤醒全部挂起长轮询;形态对齐 turn-notify/usage-panel projection
+  // 变更版本:写路径统一 bump,并经 notifier 发布总线变更(notify-plane);
+  // 数据面由 runs/run 快照 GET 承载,订阅丢失恢复靠 onReset 全量对账
   let version = 0
-  const waiters = new Set()
-  const settle = (waiter) => {
-    clearTimeout(waiter.timer)
-    waiters.delete(waiter)
-    waiter.resolve(version)
-  }
+  let notifier = null
   const bump = () => {
     version += 1
-    for (const waiter of [...waiters]) settle(waiter)
+    if (notifier !== null) {
+      try { notifier() } catch (e) { warn(`变更通知失败:${e?.message ?? e}`) }
+    }
   }
 
   const writeAtomic = (path, text) => {
@@ -282,16 +280,11 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
     },
 
     version: () => version,
-    // 长轮询挂起:已超前立即返回;恰等挂起至 bump/超时;超时与唤醒均以当前版本收尾不报错
-    waitChanged(cursor, timeoutMs) {
-      if (version > cursor) return Promise.resolve(version)
-      return new Promise((resolve) => {
-        const waiter = { resolve, timer: null }
-        waiter.timer = setTimeout(() => settle(waiter), timeoutMs)
-        waiters.add(waiter)
-      })
+    // 变更通知挂点:板卡行注入 bus 后挂接,单值覆盖(重复挂接以最后一次为准)
+    onChange(fn) {
+      notifier = fn
+      return () => { if (notifier === fn) notifier = null }
     },
-    wakeWaiters: () => { for (const waiter of [...waiters]) settle(waiter) },
   }
   return store
 }

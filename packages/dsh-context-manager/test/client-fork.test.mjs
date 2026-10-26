@@ -37,7 +37,7 @@ function loadClient({ sessions, remoteSession } = {}) {
     createElement: () => null,
   }
   const requireStub = (name) => {
-    if (name === '@mzzsfy/dsh-toast/client') return { show: () => 0 }
+    if (name === '@mzzsfy/dsh-common-tools/client') return { toast: { show: () => 0 } }
     return reactStub
   }
   const factory = new Function('window', 'require', 'document', CLIENT_SRC + '\n;return null')

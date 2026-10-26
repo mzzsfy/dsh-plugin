@@ -54,7 +54,7 @@ function loadClientHarness({ documentStub } = {}) {
     },
   }
   const requireStub = (name) => {
-    if (name === '@mzzsfy/dsh-toast/client') return { show: (text, opts) => toasts.push({ text, opts }) }
+    if (name === '@mzzsfy/dsh-common-tools/client') return { toast: { show: (text, opts) => toasts.push({ text, opts }) } }
     return reactStub
   }
   const document = documentStub || {

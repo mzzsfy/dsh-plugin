@@ -1,11 +1,37 @@
-# 公共 client 依赖包规约
+# 公共 client 依赖包规约(common-tools)
 
-跨插件共享的 client 能力(如 `dsh-toast` 的浮出通知)按**普通 npm 依赖**形态发布,禁止做成 dsh 插件(不声明 `dsh.bundle.patch`、不自带 cordis.patch.yml、无需 plugin add):
+跨插件共享的 client 能力(浮出通知、推送总线订阅等)以**普通 npm 依赖包**形态发布
+(`@mzzsfy/dsh-common-tools`),不是 dsh 插件:无 `dsh.bundle.patch`、不进 profile
+依赖行与 bundles、插件管理列表不可见。两个半区各有激活通道:
 
-- 消费插件在 `dependencies` 声明该包,在 `dsh.client.external` 声明 `'@mzzsfy/<包>/client'`,factory 内直接 `require` 使用;禁止 window 全局注册器 + 队列模式——纯依赖包不经宿主条目装载,其模块永不物化,window API 无人物化挂载
-- **安装与装载链(不进 profile 表层 manifest 依赖行)**:消费插件 dependencies 声明 → pnpm 安装时作为传递依赖落顶层 node_modules(profile 为 `nodeLinker: hoisted` 布局,传递依赖实体直达解析链;dev-link junction 覆盖同一路径保工作副本,`pnpm install` 对既有 junction 不 prune 不覆盖)。dsh 启动 `healProfileModuleFallback` 沿 bundles 依赖闭包补链顶层缺失的包(`ensureProfileSymlink` 对已存在链接跳过不替换;卸载最后消费方后 owned 清理循环自动移除残留链接)作为兜底。表层 manifest 无此包行 → 插件市场已装列表不显示它。机制对齐版本:dsh 0.1.2-rc.1 源码实测 + hoisted 传递依赖落顶层的 pnpm 11.24 实测(dsh-app-boot lib/index.js healProfileModuleFallback / ensureProfileSymlink / ownedPackageNames)
-- **装载前提**:代挂方 session-manager 必须存在于 `dsh.profile.bundles`(占位条目随其装载,模块表才物化依赖包 client);全部消费方都退出 bundles 时闭包不覆盖、fallback 不补链。已知空窗形态:顶层 junction 不在 + `pnpm install` 增量(Already up to date)不补装 → 顶层暂无该包,直到依赖图变化触发真实安装 / 重跑 dev-link / dsh 启动 fallback 补链
-- 依赖包的 client 进入客户端模块表靠**消费插件代挂**:消费插件 cordis.patch.yml 的 insert 列表追加该包宿主占位条目,**id 必须带消费插件前缀**(如 `session-manager-dsh-toast`),`name` 指向依赖包 npm 名(name 才是 cordis 加载与模块表的包解析键);依赖包宿主入口形态 = **仅 `export function apply() {}`**(对齐 `dsh-think-expand`;name+inject+apply 三件套命名空间形态经 dsh-web-app 装载链被判 invalid plugin 拖垮整树,禁止使用)
-- **占位条目全仓唯一**:同一依赖包的占位只允许一个 insert——client-modules 按 npm 名做多源检查,两个占位条目若装载基不同(如市场托管 .dsh-market 与 profile 根 junction)即判 fatal 拖垮整树组合。其余消费方一律**可选消费**:factory 内 try/catch 动态 require,模块表缺失即禁用该通道,禁止再代挂占位(参考 `dsh-turn-notify`)
-- client.js 仍以 `__ModuleLoader__.load({id, factory})` 自注册格式发布;**factory 返回值必须含空 `apply()`**——浏览器 cordis loader 装载宿主占位条目时经裸名 id 从模块表取同一记录(stripClientSuffix 使裸名与 /client 共享),无 apply 即判 invalid plugin 拖垮整树(参考 `dsh-toast`:库导出 show/dismiss/mount + 空 apply 共存);渲染容器惰性自举、按 id 幂等自愈(HMR 新代首挂清旧代残留),不依赖宿主生命周期
-- 参考实现:`dsh-toast`(README 含接入三步,机制推导见 `packages/dsh-toast/MECHANISM.md`);react / react-dom/client 由宿主平台种子表提供
+## client 半区(toast / setupCommonTools)
+
+- 实现以 `__ModuleLoader__.load({ id: '@mzzsfy/dsh-common-tools', factory })` 自注册,
+  factory 返回值含空 `apply()` + 能力命名空间(缺 apply 即 invalid plugin 拖垮整树)
+- **装载来源 = session-manager 的 cordis.patch.yml 全仓唯一代挂占位条目**(dsh-toast 原模式),其他消费方不得重复插入:
+  条目 id 带代挂插件前缀防树内冲突,`name` 才是模块表的包解析键;包自身不带 patch
+- 消费插件:`dependencies` 声明该包(传递依赖 hoisted 落 profile 顶层),
+  `dsh.client.external` 声明 `'@mzzsfy/dsh-common-tools/client'`,factory 内 require
+  后经命名空间使用;toast 通道可选消费(try/catch,模块表缺失即置空),总线订阅为
+  硬消费(缺失即 factory 抛错由装载层判定)
+- **物化顺序约束**:占位条目随代挂插件 bundle 进 client 拼接序,代挂插件
+  (session-manager)必须排在所有消费方之前(bundles @mzzsfy 区段最前),否则硬消费
+  require 先于模块物化而拖垮整 client bundle
+
+## host 半区(setupCommonTools)
+
+- host 能力不占条目:消费插件在自己 `apply` 里执行
+  `setupCommonTools(ctx)`,返回绑定当前插件空间的 `subscribe / publish` 门面；host 额外提供 `onPresence`
+- 进程级注册表 + semver 版本接管:WS 同代际多版本实体共存时新者接管,旧实现自治拆卸并交出
+  状态;同版幂等,降级不接管。0.1 SSE 与 1.0 WS 不支持跨代际热接管；升级须统一更新消费方与依赖、完整重启宿主并刷新旧页面
+- 卸载合规:调用者按实例独立记账,路由由进程级总线持有;非最后一个消费方卸载只清理该实例订阅,最后一个卸载才收尾——总线存活期 = 至少一个消费方在场
+- 两端均在消费插件的 `apply(ctx)` 中调用 `setupCommonTools(ctx)`，以 `ctx.fiber.entry.options.name` 完整 npm 包名绑定空间。`subscribe(listener)` 接收对端 payload，`publish(payload)` 向对端发送；插件就是通道，没有 topic、消息版本或跨插件通配。client 可用 `subscribe(listener, { onReset })` 在接收订阅确认后拉快照。
+- client 实例持有页面共享的一条 WebSocket，发送无需接收订阅。组件退订只停止接收，插件卸载清理自己的所有订阅与连接使用权，最后一个实例退出才关闭连接。host presence 仅统计有接收订阅的连接。不得在 factory 顶层持有常驻订阅，不得由共享可变 bus 将不同实例串到一起。组件应捕获所属 ctx 的 bus；通知共享工作须记录活动实例，当前实例退出后由存活实例接管，最后实例退出才停止共享工作，跨 factory HMR 清理旧代。
+- 旧 SSE、forPlugin 与 topic/version 接口已移除，不保留兼容层。协议与断线恢复见[包 README](../packages/dsh-common-tools/README.md)
+
+## 红线
+
+- 不得为共享能力另造插件包(会出现在插件管理)
+- 不得让非插件包以三件态(name/inject)声明插件身份进装载树
+- 消费方不得绕过 `setupCommonTools` 门面直触总线内部
+- react / react-dom/client 由宿主平台种子表提供,能力实现经模块表 require 使用

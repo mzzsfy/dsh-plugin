@@ -83,11 +83,11 @@ usage-panel:
 
 - webhook:host 直发(Slack-compatible `{text}` + 结构化字段),超时 10 秒不重试,fire-and-forget;面板「保存并测试」返回真实投递结果
 - dsh-im:安装 [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 后自动启用,面板粘贴 Bot ID 加载其已保存投递目标目录,勾选即自动保存;支持绑定多个 bot,已绑 bot 以标签展示,点标签加载该 bot 目录,× 一键取消注册(移除该 bot 全部目标);触发逻辑与 webhook 完全一致(fire-and-forget 不重试);目标的新建与平台测试仍在 dsh-im 设置页完成,此处仅选择;「测试 IM」逐目标返回真实结果
-- 页内 toast:host 内存投影(环形 20 条 / 60 秒过期,version 单调递增),浏览器半区长轮询挂起等待增量并经公共依赖 `@mzzsfy/dsh-toast` 展示(语义与 turn-notify 同构);localStorage 单元级认领锁保证多窗口只弹一次。**toast 依赖由 session-manager 插件代挂**,未安装 session-manager 时此通道静默不可用,其余通道不受影响
+- 页内 toast:host 内存投影(环形 20 条 / 60 秒过期,version 单调递增),浏览器订阅公共依赖 `@mzzsfy/dsh-common-tools` 的 WS 总线 `@mzzsfy/dsh-usage-panel` 插件通道,首连、重连与变更时拉取快照,经其 toast 展示(语义与 turn-notify 同构);同源窗口通过 IndexedDB 事务认领同一事件,提交后仅认领成功的窗口呈现;认领记录自认领起按浏览器本地时间保留 90 秒（60 秒投影窗口 + 30 秒请求消费窗口）,不按单窗旧快照删除。快照请求及后续认领共用超时信号,不比较宿主与浏览器时钟。IndexedDB 不可用时控制台通告降级,仅保证本窗口去重。公共依赖由 session-manager 插件代挂装载,为总线订阅的硬依赖。host/client 在 `apply(ctx)` 调用 `setupCommonTools(ctx)`,通道身份来自 `ctx.fiber.entry.options.name` 的完整 npm 包名;client 各实例退出时释放自己的订阅，同一 factory 的存活实例接管一次共享通知工作，最后实例退出才中止共享快照；跨 factory HMR 清理旧代
 
 ### 通知接口
 
-- `GET /api/usage-panel/notifications`:通知投影长轮询;`cursor` 缺省=首拉立即返回全量,`cursor` 等于当前版本时挂起至事件或超时,落后或超前(宿主重启版本回退)立即返回全量,客户端以响应 version 重置游标自愈;响应 `{units, version}`
+- `GET /api/usage-panel/notifications`:通知投影即时全量快照,响应 `{units, version}`;变更通知由公共 WS 总线插件空间推送
 - `GET|POST /api/usage-panel/notify-config`:全局通知规则;`webhookUrl` 原文随响应回显
 - `POST /api/usage-panel/test-webhook` / `POST /api/usage-panel/test-im`:测试投递,返回真实结果
 - `GET /api/usage-panel/im-targets?botId=`:列出 dsh-im 该 bot 已保存投递目标
@@ -110,7 +110,7 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 ## 架构与依赖
 
 - Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings / notifications / notify-config / test-webhook / test-im / im-targets);需要 DSH 提供 `webServer` 服务与 `settings` 服务(通知规则持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
-- Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;`@mzzsfy/dsh-toast` 可选消费(动态 require,模块表缺失即页内通道停用,操作反馈降级 `console.warn`)
+- Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;公共依赖 `@mzzsfy/dsh-common-tools` 的 WS 总线为硬消费,toast 不可用时操作反馈降级 `console.warn`
 - 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/historyStore.mjs` / `src/notify.mjs`):无 IO 数据变换,`npm test` 覆盖解析、时间驱动调度与退避、快照留存、持久化守卫与规则合并 / 沿触发评估 / 投影认领 / 配置校验;趋势图 SVG 点位算法内联于 client.js(唯一实现)
 
 ## 安全提示

@@ -1,6 +1,8 @@
 // host 路由测试:stub ctx 装载真实 src/index.js,验证 config 读写链路与
 // test-webhook 的真实投递结果(回归:测试按钮不再无条件谎报成功)。
 import test from 'node:test'
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 

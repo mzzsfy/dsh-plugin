@@ -208,29 +208,25 @@ test('Given 写路径各调一次 When start/step/update/finish/remove Then vers
   for (let i = 1; i < seen.length; i++) assert.ok(seen[i] > seen[i - 1], `version 须递增:${seen[i - 1]} -> ${seen[i]}`)
 })
 
-test('Given waitChanged 恰等挂起 When 写路径 bump Then 以更新后 version resolve', async () => {
+test('Given onChange 挂接 When 写路径 bump Then 通知函数被调用且 version 递增', () => {
   const dir = fresh()
   const store = createStore({ dir })
-  store.start({ runId: 'r-wait-bump' })
-  const before = store.version()
-  const pending = store.waitChanged(before, 60 * 1000)
-  store.step({ runId: 'r-wait-bump', event: 'control', body: { kind: 'message', text: '唤醒' } })
-  assert.equal(await pending, store.version())
-  assert.ok(store.version() > before)
+  store.start({ runId: 'r-notify' })
+  let called = 0
+  const dispose = store.onChange(() => { called += 1 })
+  store.step({ runId: 'r-notify', event: 'control', body: { kind: 'message', text: '变更' } })
+  assert.equal(called, 1, 'bump 即通知一次')
+  dispose()
+  store.update({ runId: 'r-notify', status: 'paused' })
+  assert.equal(called, 1, '退订后不再通知')
 })
 
-test('Given 无变更 When waitChanged 超时 Then 以当前 version 收尾不报错', async () => {
+test('Given 通知函数抛错 When 写路径 bump Then 写路径不中断且 version 照常递增', () => {
   const dir = fresh()
   const store = createStore({ dir })
-  store.start({ runId: 'r-wait-idle' })
+  store.start({ runId: 'r-notify-throw' })
+  store.onChange(() => { throw new Error('listener down') })
   const before = store.version()
-  assert.equal(await store.waitChanged(before, 20), before)
-})
-
-test('Given 已超前 cursor When waitChanged Then 立即返回不挂起', async () => {
-  const dir = fresh()
-  const store = createStore({ dir })
-  store.start({ runId: 'r-wait-ahead' })
-  const current = store.version()
-  assert.equal(await store.waitChanged(current - 1, 0), current)
+  assert.doesNotThrow(() => store.step({ runId: 'r-notify-throw', event: 'control', body: { kind: 'message', text: 'x' } }))
+  assert.ok(store.version() > before, '通知失败不影响版本推进')
 })

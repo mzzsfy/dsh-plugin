@@ -7,7 +7,7 @@ import { nextRunAtOf } from './cron.mjs'
 const SKIPPED_MISFIRE_MESSAGE = '停机期间错过'
 const INTERRUPTED_MESSAGE = 'dsh 重启中断'
 
-export function createScheduler({ store, executor, readTickMs, now = () => Date.now() }) {
+export function createScheduler({ store, executor, readTickMs, onChange, now = () => Date.now() }) {
   // 重入闸门:上一 tick 未完成(store 写链排队/慢盘)时跳过本轮,防同一触发点双触发
   let ticking = false
 
@@ -36,10 +36,12 @@ export function createScheduler({ store, executor, readTickMs, now = () => Date.
     try {
       const nowMs = now()
       const graceMs = readTickMs()
+      let dueCount = 0
       for (const job of store.jobs.list()) {
         if (!job.enabled) continue
         if (typeof job.nextRunAt !== 'number' || Number.isNaN(job.nextRunAt)) continue
         if (job.nextRunAt > nowMs) continue
+        dueCount++
         // misfire 判定须在推进前读取到期值(update 会原地改写任务对象)
         const dueAt = job.nextRunAt
         const misfired = nowMs - dueAt > graceMs
@@ -52,6 +54,8 @@ export function createScheduler({ store, executor, readTickMs, now = () => Date.
         }
         await executor.dispatch(job, 'cron')
       }
+      // 有到期任务即有状态变更(nextRunAt 推进 / skipped 记录 / 运行入队),发布总线
+      if (dueCount > 0 && onChange) onChange()
     } finally {
       ticking = false
     }

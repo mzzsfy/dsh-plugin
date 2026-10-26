@@ -5,7 +5,7 @@ profile 位于 `~/.dsh/profiles/web`。合法状态只有一种,禁止第三种:
 1. **已发布包依赖行 = semver**:线上已有版本的包,profile 的 package.json 中依赖行必须是 `^线上最新版`,禁止 `link:` / 本地路径
 2. **未发布包依赖行 = file 协议**:线上 404 的包,依赖行由 dev-link 自动写为 `file:<仓库>/packages/<包>`(不强制先发布;junction 照挂,线上出版本后重跑 dev-link 自动归一 ^latest)
 3. **工作副本挂载 = junction**:`node_modules/@mzzsfy/<包>` 是指向仓库 `packages/<包>` 的 junction
-4. **公共依赖包(manifest 无 dsh.bundle.patch,如 dsh-toast)= 无表层依赖行**:不写依赖行(任意形态残留由 dev-link 删除);安装与装载由消费插件 dependencies 声明承载——pnpm hoisted 布局把传递依赖实体安装到顶层 node_modules,dsh 启动 fallback 沿 bundles 依赖闭包补链兜底;junction 照挂工作副本保开发热更。junction(仓库工作副本)与 pnpm/fallback 安装实体是同一 npm 包的两种实体来源。禁止手工放置非脚本管理的目录
+4. **公共依赖包(manifest 无 dsh.bundle.patch,如 dsh-common-tools))= 无表层依赖行**:不写依赖行(任意形态残留由 dev-link 删除);安装与装载由消费插件 dependencies 声明承载——pnpm hoisted 布局把传递依赖实体安装到顶层 node_modules,dsh 启动 fallback 沿 bundles 依赖闭包补链兜底;junction 照挂工作副本保开发热更。junction(仓库工作副本)与 pnpm/fallback 安装实体是同一 npm 包的两种实体来源。禁止手工放置非脚本管理的目录
 
 **操作唯一入口:**
 

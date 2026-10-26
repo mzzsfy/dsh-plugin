@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-turn-notify",
   "description": "消息通知:六类回合事件送达声音、系统弹窗、页内提示、webhook、IM 与宿主桌面通知;内置八种合成音色,自定义音效,按事件分类指定;多窗口只响一次",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -16,7 +16,7 @@
     "client": {
       "platform": "web",
       "external": [
-        "@mzzsfy/dsh-toast/client"
+        "@mzzsfy/dsh-common-tools/client"
       ]
     },
     "compatibility": {
@@ -28,7 +28,7 @@
     }
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
   "license": "MIT",
@@ -40,9 +40,11 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@mzzsfy/dsh-toast": "^0.2.0"
+    "@mzzsfy/dsh-common-tools": "^1.0.0"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-api-job-controller": ">=0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": ">=0.2.1-rc.2",
     "@deepseek-ai/dsh-session-title": ">=0.1.2-rc.1",
     "@deepseek-ai/dsh-settings": ">=0.1.2-alpha.2",
     "@deepseek-ai/schemastery": ">=3.18.0",

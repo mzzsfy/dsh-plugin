@@ -7,75 +7,29 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-rs-workflow',
   factory(require) {
     const React = require('react')
-    const { useState, useEffect, useCallback } = React
+    const { useState, useEffect, useCallback, useRef } = React
 
     const API = '/api/rsww/'
     const JUDGE_RETRY_MS = 5 * 1000
     const VIEW_ID = 'rsww-flow'
     const SETTLED_COUNT = 8
     const ARMED_TIMEOUT_MS = 3 * 1000
-    // 长轮询:失败重连退避指数增长至上限;请求超时须大于服务端挂起上限(25s)。
-    // 变更密集防风暴:响应未经历挂起(服务端因版本已超前立即返回)时按忙时间隙限频续连;
-    // 广播合并节流,窗口内多次变更只触发一轮订阅者重拉
-    const CHANGES_RETRY_MIN_MS = 2 * 1000
-    const CHANGES_RETRY_MAX_MS = 30 * 1000
-    const CHANGES_REQUEST_TIMEOUT_MS = 30 * 1000
-    const CHANGES_HUNG_MIN_MS = 5 * 1000
-    const CHANGES_BUSY_GAP_MS = 1 * 1000
-    const CHANGES_NOTIFY_MERGE_MS = 300
+    // 变更广播合并节流:窗口内多次发布只触发一轮订阅者重拉(密集 step 事件防风暴)
+    const CHANGES_NOTIFY_MERGE_MS = 1000
     const CHANGES_TOKEN = 'rsww:changes-poll'
+    // 推送总线订阅:数据刷新唯一通道(dsh-common-tools 的 client 侧协议),硬消费——
+    // 模块表缺失即本 client factory 抛错,由装载层判定失败(无轮询回退)
+    const tools = require('@mzzsfy/dsh-common-tools/client')
 
     const NAV_ICON = { '若水工作流': 'flow', 'dsh-rs-workflow': 'flow' }
     if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 变更长轮询总线:全局单飞循环挂起等待服务端变更,version 推进即广播订阅者;
-    // 代际 token abort 旧代,防重复装载堆积循环
-    if (window[CHANGES_TOKEN] instanceof AbortController) window[CHANGES_TOKEN].abort()
-    const changesController = new AbortController()
-    window[CHANGES_TOKEN] = changesController
+    // 变更总线:订阅推送,首连 onReset 与消息经合并节流广播订阅者;
+    // 断线由公共 WS 总线重连,重连成功再触发 onReset 全量对账自愈;
+    // 代际 token 退订旧代,防重复装载堆积订阅
     const changesListeners = new Set()
-    let changesCursor = null
-    const changesSleep = (ms, signal) => new Promise((resolve) => {
-      if (signal.aborted) {
-        resolve()
-        return
-      }
-      const timer = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort)
-        resolve()
-      }, ms)
-      const onAbort = () => {
-        clearTimeout(timer)
-        resolve()
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-    })
-    async function changesPollOnce() {
-      let version = null
-      try {
-        // cursor 为空即首拉,服务端立即返回;之后携带版本挂起等待变更
-        const query = changesCursor === null ? '' : '?cursor=' + changesCursor
-        const response = await fetch(API + 'changes' + query, {
-          signal: AbortSignal.any([changesController.signal, AbortSignal.timeout(CHANGES_REQUEST_TIMEOUT_MS)]),
-        })
-        if (!response.ok) {
-          void response.body?.cancel()
-          return false
-        }
-        const payload = await response.json()
-        // 版本缺失即异常响应:按失败退避,防游标停滞退化成紧密首拉循环
-        if (typeof payload.version !== 'number') return false
-        version = payload.version
-      } catch {
-        return false
-      }
-      const advanced = changesCursor !== null && version > changesCursor
-      changesCursor = version
-      if (advanced) notifyAdvanced()
-      return true
-    }
     let notifyTimer = null
     const notifyAdvanced = () => {
       if (notifyTimer !== null) return
@@ -84,26 +38,37 @@ window.__ModuleLoader__.load({
         for (const listener of [...changesListeners]) listener()
       }, CHANGES_NOTIFY_MERGE_MS)
     }
-    void (async () => {
-      // 主循环:经历服务端挂起即立即重连,未挂起(变更密集)按忙时间隙限频;失败指数退避;任何时刻至多一条在途请求
-      let backoffMs = CHANGES_RETRY_MIN_MS
-      while (!changesController.signal.aborted) {
-        let ok = false
-        const startedAt = Date.now()
-        try {
-          ok = await changesPollOnce()
-        } catch { ok = false }
-        if (changesController.signal.aborted) break
-        if (ok) {
-          backoffMs = CHANGES_RETRY_MIN_MS
-          const hung = Date.now() - startedAt >= CHANGES_HUNG_MIN_MS
-          await changesSleep(hung ? 0 : CHANGES_BUSY_GAP_MS, changesController.signal)
-        } else {
-          await changesSleep(backoffMs, changesController.signal)
-          backoffMs = Math.min(backoffMs * 2, CHANGES_RETRY_MAX_MS)
+    const changesOwners = new Set()
+    let activeChangesOwner = null
+    let stopChanges = null
+    function startChanges(bus) {
+      const owner = { unsubscribe: null }
+      if (changesOwners.size === 0) {
+        if (typeof window[CHANGES_TOKEN] === 'function') window[CHANGES_TOKEN]()
+        const dispose = () => {
+          if (stopChanges !== dispose) return
+          stopChanges = null
+          for (const item of changesOwners) item.unsubscribe?.()
+          changesOwners.clear()
+          activeChangesOwner = null
+          if (notifyTimer !== null) clearTimeout(notifyTimer)
+          notifyTimer = null
+          if (window[CHANGES_TOKEN] === dispose) delete window[CHANGES_TOKEN]
         }
+        stopChanges = dispose
+        window[CHANGES_TOKEN] = dispose
       }
-    })()
+      changesOwners.add(owner)
+      if (activeChangesOwner === null) activeChangesOwner = owner
+      const notify = () => { if (activeChangesOwner === owner) notifyAdvanced() }
+      owner.unsubscribe = bus.subscribe(notify, { onReset: notify })
+      return () => {
+        if (!changesOwners.delete(owner)) return
+        owner.unsubscribe()
+        if (activeChangesOwner === owner) activeChangesOwner = changesOwners.values().next().value || null
+        if (changesOwners.size === 0) stopChanges()
+      }
+    }
     const subscribeChanges = (fn) => {
       changesListeners.add(fn)
       return () => changesListeners.delete(fn)
@@ -401,15 +366,20 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = useState(null)
       const [fetchError, setFetchError] = useState(false)
       const live = run.status === 'running' || run.status === 'paused' || run.status === 'waiting_approval'
-      const reload = useCallback(() => request('run?id=' + encodeURIComponent(run.runId)).then((outcome) => {
-        if (outcome.ok) { setDetail(outcome.data); setFetchError(false) } else setFetchError(true)
-      }), [run.runId])
+      const refreshRef = useRef(() => {})
+      const reload = useCallback(() => refreshRef.current(), [])
       useEffect(() => {
-        const load = () => reload().then(() => {})
-        load()
-        if (!live) return undefined
-        return subscribeChanges(load)
-      }, [reload, live])
+        let alive = true
+        const snapshot = tools.createSnapshotRefresh(async () => {
+          const outcome = await request('run?id=' + encodeURIComponent(run.runId))
+          if (!alive) return
+          if (outcome.ok) { setDetail(outcome.data); setFetchError(false) } else setFetchError(true)
+        })
+        refreshRef.current = snapshot.refresh
+        snapshot.refresh()
+        const unsubscribe = live ? subscribeChanges(snapshot.refresh) : () => {}
+        return () => { alive = false; refreshRef.current = () => {}; snapshot.dispose(); unsubscribe() }
+      }, [run.runId, live])
       const view = detail || run
       const queued = Array.isArray(view.queued) ? view.queued : []
       const warnings = Array.isArray(view.warnings) ? view.warnings : []
@@ -462,14 +432,20 @@ window.__ModuleLoader__.load({
     function FlowView({ getSessionId }) {
       const [runs, setRuns] = useState(null)
       const [error, setError] = useState('')
-      const reload = useCallback(async () => {
-        const outcome = await request('runs')
-        if (outcome.ok) { setRuns(outcome.data.runs || []); setError('') } else setError(outcome.error)
-      }, [])
+      const refreshRef = useRef(() => {})
+      const reload = useCallback(() => refreshRef.current(), [])
       useEffect(() => {
-        reload()
-        return subscribeChanges(reload)
-      }, [reload])
+        let alive = true
+        const snapshot = tools.createSnapshotRefresh(async () => {
+          const outcome = await request('runs')
+          if (!alive) return
+          if (outcome.ok) { setRuns(outcome.data.runs || []); setError('') } else setError(outcome.error)
+        })
+        refreshRef.current = snapshot.refresh
+        snapshot.refresh()
+        const unsubscribe = subscribeChanges(snapshot.refresh)
+        return () => { alive = false; refreshRef.current = () => {}; snapshot.dispose(); unsubscribe() }
+      }, [])
       if (error && !runs) return React.createElement('div', { className: 'rsww-flow' }, React.createElement('span', { className: 'rsww-error' }, error))
       // 只呈现本会话的 run:页签语义=本会话编排在场;跨会话检索交给宿主会话搜索
       const mine = (runs || []).filter((r) => r.sessionId === getSessionId())
@@ -1299,6 +1275,8 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        const bus = tools.setupCommonTools(ctx)
+        ctx.effect(() => startChanges(bus), 'rs-workflow changes subscription')
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'rs-workflow-board', order: 45, label: '若水工作流' },

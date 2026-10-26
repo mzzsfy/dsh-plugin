@@ -28,7 +28,7 @@ class BrokenStorage {
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象、页内通知捕获表与 window 桩。
 // shortTimers:闪烁常量替换为毫秒级,配合真实定时器验证硬顶与重入(node:test mock.timers
 // 拦截不到 new Function 沙箱里的 timer,不能用于本 loader)
-function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers }) {
+function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers, indexedDB, abortSignalImpl = AbortSignal }) {
   const raw = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
   const source = shortTimers
     ? raw.replace('const TOAST_MS = 6 * 1000', 'const TOAST_MS = 60')
@@ -44,6 +44,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     removeEventListener: (type, fn) => { windowListeners[type] = (windowListeners[type] || []).filter((f) => f !== fn) },
     listeners: windowListeners,
     localStorage: storage,
+    indexedDB,
   }
   const styleTags = []
   const documentStub = {
@@ -57,10 +58,19 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     ...documentOverride,
   }
   const reactStub = { useState: (value) => [value, () => {}], useEffect: () => {}, useSyncExternalStore: () => [] }
+  const busHandlers = []
   const requireStub = (name) => {
-    // 页内通知通道出口:公共依赖 @mzzsfy/dsh-toast 的捕获桩
-    if (name === '@mzzsfy/dsh-toast/client') {
-      return { show: (text, opts) => { shown.push({ text, opts }); return shown.length } }
+    // 页内通知通道出口与推送总线订阅:公共依赖 @mzzsfy/dsh-common-tools 捕获桩
+    if (name === '@mzzsfy/dsh-common-tools/client') {
+      return {
+        createSnapshotRefresh: refresh => ({ refresh, dispose() {} }),
+        toast: { show: (text, opts) => { shown.push({ text, opts }); return shown.length } },
+        setupCommonTools: () => ({ subscribe: (onMessage, { onReset } = {}) => {
+          const handlers = { onMessage, onReset }
+          busHandlers.push(handlers)
+          return () => { const index = busHandlers.indexOf(handlers); if (index >= 0) busHandlers.splice(index, 1) }
+        } }),
+      }
     }
     return reactStub
   }
@@ -72,7 +82,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     return { ok: true, json: async () => payload }
   }
   const factory = new Function(
-    'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification',
+    'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification', 'requestAnimationFrame', 'cancelAnimationFrame', 'AbortSignal',
     source + '\n;return null',
   )
   let calls = 0
@@ -83,11 +93,175 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     class { observe() {} disconnect() {} },
     fetchImpl || defaultFetch,
     undefined,
+    fn => setTimeout(fn, 0),
+    id => clearTimeout(id),
+    abortSignalImpl,
   )
   assert.equal(modules.length, 1, 'client.js 模块未被捕获')
   // load({id, factory}) 结构:再调 factory(require) 得到真正的模块对象
-  return { mod: modules[0].factory(requireStub), shown, window: windowStub, document: documentStub, styleTags }
+  const mod = modules[0].factory(requireStub)
+  const start = mod.__test.start
+  mod.__test.start = () => start(requireStub('@mzzsfy/dsh-common-tools/client').setupCommonTools())
+  return {
+    mod,
+    shown,
+    window: windowStub,
+    document: documentStub,
+    styleTags,
+    subscriptionCount: () => busHandlers.length,
+    emitBus: () => { for (const handlers of busHandlers) handlers.onReset?.() },
+    reload() {
+      const next = modules[0].factory(requireStub)
+      const start = next.__test.start
+      next.__test.start = () => start(requireStub('@mzzsfy/dsh-common-tools/client').setupCommonTools())
+      return next
+    },
+  }
 }
+
+// 仅模拟 IDB 边界：同库 readwrite 事务串行，事务完成前不发布写入。
+function indexedDbFixture() {
+  let rows = new Map(), initialized = false, queue = Promise.resolve(), gate = null
+  const connections = []
+  const factory = {
+    open() {
+      const request = {}
+      setImmediate(() => {
+        const db = {
+          closed: false,
+          createObjectStore() {},
+          close() { this.closed = true },
+          transaction() {
+            if (this.closed) throw new Error('closed')
+            const tx = {}, operations = []
+            let draft, aborted = false
+            tx.abort = () => { aborted = true }
+            const requestFor = run => {
+              const request = {}
+              operations.push(() => { request.result = run(); request.onsuccess?.() })
+              return request
+            }
+            tx.objectStore = () => ({
+              getAll: () => requestFor(() => [...draft.values()]),
+              delete: id => requestFor(() => draft.delete(id)),
+              add: row => requestFor(() => {
+                if (draft.has(row.id)) throw new Error('ConstraintError')
+                draft.set(row.id, row)
+              }),
+            })
+            queue = queue.then(async () => {
+              if (gate) await gate.promise
+              draft = new Map(rows)
+              try {
+                if (aborted) throw new Error('AbortError')
+                while (operations.length) operations.shift()()
+                rows = draft
+                tx.oncomplete?.()
+              } catch (error) { tx.error = error; tx.onabort?.() }
+            })
+            return tx
+          },
+        }
+        connections.push(db)
+        request.result = db
+        if (!initialized) { initialized = true; request.onupgradeneeded?.() }
+        request.onsuccess?.()
+      })
+      return request
+    },
+  }
+  return { factory, connections, get rows() { return rows },
+    hold() { gate = {}; gate.promise = new Promise(resolve => { gate.resolve = resolve }) },
+    release() { const current = gate; gate = null; current?.resolve() },
+  }
+}
+
+test('Given 双窗共享存储 When 新通知done后旧空快照抵达再追平 Then 不重复呈现', async () => {
+  const storage = new FakeStorage(), idb = indexedDbFixture()
+  let aPayload = { version: 0, units: [] }, bPayload = aPayload
+  const a = loadClient({ storage, indexedDB: idb.factory, fetchImpl: async () => ({ ok: true, json: async () => aPayload }) })
+  const b = loadClient({ storage, indexedDB: idb.factory, fetchImpl: async () => ({ ok: true, json: async () => bPayload }) })
+  await a.mod.__test.poll(); await b.mod.__test.poll()
+  aPayload = { version: 1, units: [{ id: 'new', category: 'ask', text: '新通知', ts: Date.now() - 10 * 60 * 1000 }] }
+  await a.mod.__test.poll()
+  await b.mod.__test.poll()
+  bPayload = aPayload
+  await b.mod.__test.poll()
+  assert.equal(a.shown.length + b.shown.length, 1, '旧快照不得清除别窗新通知的权威完成标记')
+})
+
+test('Given 双窗storage读快照均为空 When 同时消费通知 Then 事务仅允许一窗呈现', async () => {
+  const idb = indexedDbFixture()
+  // 两窗口在事务开始前都观察不到对方的 localStorage 写入。
+  const make = () => loadClient({ storage: new FakeStorage(), indexedDB: idb.factory,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ version: 1, units: [{ id: 'race', category: 'ask', text: '并发' }] }) }) })
+  const a = make(), b = make()
+  await Promise.all([a.mod.__test.poll(), b.mod.__test.poll()])
+  assert.equal(a.shown.length + b.shown.length, 1)
+  assert.equal(idb.rows.size, 1)
+})
+
+test('Given 冷启动静默终态 When 他窗用旧storage追平 Then 不重放且过期表被清理', async () => {
+  const idb = indexedDbFixture()
+  idb.rows.set('expired', { id: 'expired', expiresAt: 0 })
+  const payload = { version: 1, units: [{ id: 'cold', category: 'completed', text: '静默' }] }
+  const a = loadClient({ storage: new FakeStorage(), indexedDB: idb.factory,
+    fetchImpl: async () => ({ ok: true, json: async () => payload }) })
+  await a.mod.__test.poll()
+  let current = { version: 0, units: [] }
+  const b = loadClient({ storage: new FakeStorage(), indexedDB: idb.factory,
+    fetchImpl: async () => ({ ok: true, json: async () => current }) })
+  await b.mod.__test.poll(); current = payload; await b.mod.__test.poll()
+  assert.equal(a.shown.length + b.shown.length, 0)
+  assert.equal(idb.rows.has('expired'), false)
+  assert.equal(idb.rows.has('cold'), true)
+})
+
+test('Given IDB事务在途 When 最后owner退出与HMR Then 无late显示且连接关闭再激活恢复', async () => {
+  const idb = indexedDbFixture()
+  let payload = { version: 1, units: [{ id: 'late-idb', category: 'ask', text: '迟到' }] }
+  const f = loadClient({ storage: new FakeStorage(), indexedDB: idb.factory,
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetchImpl: async () => ({ ok: true, json: async () => payload }) })
+  const disposeA = f.mod.__test.start(), disposeB = f.mod.__test.start()
+  idb.hold()
+  const controller = f.window['turn-notify:polling'], pending = f.mod.__test.poll(controller.signal)
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+  disposeA()
+  assert.equal(idb.connections[0].closed, false)
+  disposeB(); idb.release(); await pending
+  assert.equal(f.shown.length, 0)
+  assert.equal(idb.connections[0].closed, true)
+  assert.equal(idb.rows.has('late-idb'), false, '卸载必须回滚在途认领，不能吞掉其他窗口待呈现通知')
+  payload = { version: 2, units: [{ id: 'late-idb', category: 'ask', text: '恢复' }] }
+  const disposeAgain = f.mod.__test.start()
+  await f.mod.__test.poll(f.window['turn-notify:polling'].signal)
+  assert.deepEqual(f.shown.map(item => item.text), ['恢复'])
+  const next = f.reload(), disposeNext = next.__test.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(idb.connections[1].closed, true, 'HMR接管关闭旧代连接')
+  disposeAgain(); disposeNext()
+})
+
+test('Given turn认领事务等待 When 本地快照消费超时 Then 回滚不留done且另窗能接手', async () => {
+  const idb = indexedDbFixture(), timeout = new AbortController()
+  const payload = { version: 1, units: [{ id: 'timeout', category: 'ask', text: '可接手', ts: Date.now() - 10 * 60 * 1000 }] }
+  const a = loadClient({ storage: new FakeStorage(), indexedDB: idb.factory,
+    abortSignalImpl: { timeout: () => timeout.signal, any: signals => AbortSignal.any(signals) },
+    fetchImpl: async () => ({ ok: true, json: async () => payload }) })
+  idb.hold()
+  const pending = a.mod.__test.pollOnce()
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve))
+  timeout.abort(); idb.release()
+  assert.equal(await pending, false)
+  assert.deepEqual(a.shown, [])
+  assert.equal(idb.rows.has('timeout'), false)
+  const b = loadClient({ storage: new FakeStorage(), indexedDB: idb.factory,
+    fetchImpl: async () => ({ ok: true, json: async () => payload }) })
+  await b.mod.__test.pollOnce()
+  assert.equal(b.shown.length, 1)
+})
 
 const units = [
   { id: 'u1', category: 'completed', text: '[dsh] 任务完成: t1' },
@@ -731,12 +905,16 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
   const serviceStub = { list: { subscribe: () => () => {}, getSnapshot: () => ({}) } }
   mod.apply({
     get: (name) => (name === 'sessions' || name === 'workspaces' ? serviceStub : undefined),
+    inject: (names, callback) => {
+      assert.deepEqual(names, ['jobs', 'uiSession'])
+      callback({ get: () => ({}), effect: (fn) => { effects.push(fn()) } })
+    },
     slots: { inject: (name, fn) => { injected.push([name, fn]) } },
     effect: (fn) => { effects.push(fn()) },
   })
-  assert.equal(effects.length, 2, '文档级样式与文件夹运行标记两个 effect 均已挂载')
+  assert.equal(effects.length, 3, '样式、通知订阅与文件夹运行标记三个 effect 均已挂载')
   assert.equal(styleTags[0].attrs['data-plugin'], '@mzzsfy/dsh-turn-notify', '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
-  assert.deepEqual(injected.map(([name]) => name), ['settings.section'], '页内通知展示已移交 dsh-toast,不再注入 shell.overlay')
+  assert.deepEqual(injected.map(([name]) => name), ['settings.section'], '页内通知展示已移交公共依赖包,不再注入 shell.overlay')
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
   await new Promise((resolve) => { setTimeout(resolve, 0) })
   assert.ok(fetched.indexOf('/api/turn-notify/sounds') >= 0)
@@ -808,18 +986,48 @@ function activate(mod) {
   // sessions/workspaces 桩:apply 的注入面声明;fold effect 在无 querySelectorAll
   // 的 document 桩上装配即退出,不触碰订阅
   const serviceStub = { list: { subscribe: () => () => {}, getSnapshot: () => ({}) } }
+  const cleanups = []
   mod.apply({
     get: (name) => (name === 'sessions' || name === 'workspaces' ? serviceStub : undefined),
+    // 模拟缺少活动服务:标记子 fiber 不激活,通知轮询仍必须正常工作。
+    inject: () => {},
     slots: { inject: () => {} },
-    effect: (fn) => { fn() },
+    effect: (fn) => { const off = fn(); if (typeof off === 'function') cleanups.push(off) },
   })
+  return () => { for (const off of cleanups.reverse()) off() }
 }
 
-test('长轮询代际中止:abort 后循环退出不再发起新请求', async () => {
-  let calls = 0
-  const { mod, window: windowStub } = loadClient({
+test('Given 已激活且快照在途 When ctx 卸载 Then 退订中止且迟到投影不呈现,再次激活恢复订阅', async () => {
+  let pending, signal
+  const client = loadClient({
     storage: new FakeStorage(),
-    // 桩模拟真实 fetch 的中止语义:代际 signal 触发即 reject,释放循环;仅计投影请求
+    fetchImpl: async (path, options) => {
+      if (path.includes('/sounds')) return { ok: true, json: async () => ({ sounds: [] }) }
+      signal = options.signal
+      return new Promise(resolve => { pending = resolve })
+    },
+  })
+  const dispose = activate(client.mod)
+  assert.equal(client.subscriptionCount(), 1)
+  client.emitBus()
+  dispose()
+  assert.equal(client.subscriptionCount(), 0)
+  assert.equal(signal.aborted, true)
+  assert.equal(Object.hasOwn(client.window, 'turn-notify:polling'), false)
+  assert.equal(Object.hasOwn(client.window, 'turn-notify:polling:dispose'), false)
+  pending({ ok: true, json: async () => ({ version: 1, units: [{ id: 'late', category: 'ask', text: '迟到提问' }] }) })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(client.shown.length, 0)
+  const disposeAgain = activate(client.mod)
+  assert.equal(client.subscriptionCount(), 1, '卸载清 running,同一 factory 再激活可重新订阅')
+  disposeAgain()
+})
+
+test('快照请求代际中止:abort 后不再发起新请求(重拉只由总线事件驱动)', async () => {
+  let calls = 0
+  const client = loadClient({
+    storage: new FakeStorage(),
+    // 桩模拟真实 fetch 的中止语义:代际 signal 触发即 reject;仅计投影请求
     fetchImpl: (path, init) => new Promise((resolve, reject) => {
       if (path.indexOf('/sounds') >= 0) {
         resolve({ ok: true, json: async () => ({ sounds: [] }) })
@@ -829,21 +1037,23 @@ test('长轮询代际中止:abort 后循环退出不再发起新请求', async (
       init.signal.addEventListener('abort', () => reject(new Error('aborted')))
     }),
   })
+  const { mod, window: windowStub } = client
   activate(mod)
+  client.emitBus()
   await new Promise((resolve) => { setTimeout(resolve, 0) })
   assert.equal(calls, 1, '首拉已发出并挂起')
   windowStub['turn-notify:polling'].abort()
   await new Promise((resolve) => { setTimeout(resolve, 10) })
-  assert.equal(calls, 1, '中止后不应再发起新请求')
+  assert.equal(calls, 1, '中止后不再发起新请求;失败不自动重试,重拉只由总线事件驱动')
 })
 
-test('长轮询失败:降级通告一次,退避期内不重试不通告第二次', async () => {
+test('快照失败:降级通告一次,无自动重试(重拉只由总线事件驱动)', async () => {
   const warns = []
   const original = console.warn
   console.warn = (message) => { warns.push(message) }
   let calls = 0
   try {
-    const { mod } = loadClient({
+    const client = loadClient({
       storage: new FakeStorage(),
       fetchImpl: async (path) => {
         if (path.indexOf('/sounds') >= 0) return { ok: true, json: async () => ({ sounds: [] }) }
@@ -851,8 +1061,9 @@ test('长轮询失败:降级通告一次,退避期内不重试不通告第二次
         throw new Error('down')
       },
     })
-    activate(mod)
-    // 退避起点远大于此等待窗:窗内恰好一次失败与一次通告
+    activate(client.mod)
+    client.emitBus()
+    // 无轮询循环:等待窗内不会出现第二次请求与第二次通告
     await new Promise((resolve) => { setTimeout(resolve, 100) })
   } finally { console.warn = original }
   assert.equal(calls, 1)
@@ -860,7 +1071,7 @@ test('长轮询失败:降级通告一次,退避期内不重试不通告第二次
   assert.ok(warns[0].indexOf('通知降级') >= 0)
 })
 
-test('长轮询游标推进:带 version 响应推进 cursor,后续请求携带游标', async () => {
+test('冷启动对齐:首个快照静默,后续快照正常呈现,请求恒无游标', async () => {
   const paths = []
   const { mod } = loadClient({
     storage: new FakeStorage(),
@@ -872,6 +1083,5 @@ test('长轮询游标推进:带 version 响应推进 cursor,后续请求携带�
   const { poll } = mod.__test
   assert.equal(await poll(), true, '带 version 响应视为成功')
   assert.equal(await poll(new AbortController().signal), true)
-  assert.ok(paths[0].indexOf('?cursor=') < 0, '首拉无游标')
-  assert.ok(paths[1].indexOf('?cursor=7') >= 0, '游标随响应推进')
+  for (const path of paths) assert.ok(path.indexOf('?cursor=') < 0, '快照端点无游标形态,变更通知由总线承载')
 })

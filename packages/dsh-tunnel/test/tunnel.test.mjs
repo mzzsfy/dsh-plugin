@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 
+import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+
 const DEFAULT_CONNECT_TIMEOUT = 10 * 1000
 const PORT_MAX = 65535
 
@@ -51,6 +53,9 @@ function createCtx(webServer, tools = undefined, settings = undefined) {
     if (typeof disposer === 'function') effectDisposers.push(disposer)
     return disposer
   }
+  // 总线 publish 桩:桥接到最近 createCtx 的 published 供断言
+  resetBusStub()
+  const published = busStub.published
   const ctx = {
     webServer,
     get: () => undefined,
@@ -60,7 +65,7 @@ function createCtx(webServer, tools = undefined, settings = undefined) {
       cb({ tools: toolsService, settings, effect: runEffect })
     },
   }
-  return { ctx, toolsService, effectDisposers }
+  return { ctx, toolsService, effectDisposers, published }
 }
 
 // mock settings 服务: 内存存储 + watch 回调登记, 测试手动触发模拟设置页写入
@@ -92,7 +97,7 @@ process.on('exit', () => {
 
 async function applyPlugin(webServer, options = {}) {
   const { apply } = await import('../src/index.js')
-  const { ctx, toolsService, effectDisposers } = createCtx(webServer, undefined, options.settings)
+  const { ctx, toolsService, effectDisposers, published } = createCtx(webServer, undefined, options.settings)
   const dataDir = options.dataDir ?? defaultDataDir()
   const config = { connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT, dataDir }
   const warnings = []
@@ -110,7 +115,7 @@ async function applyPlugin(webServer, options = {}) {
     dispose()
     for (const disposer of effectDisposers.reverse()) disposer()
   }
-  return { webServer, tools, dataDir, warnings, dispose: disposeAll, ctx }
+  return { webServer, tools, dataDir, warnings, dispose: disposeAll, ctx, published }
 }
 
 function toolOf(plugin, name) {
@@ -260,6 +265,17 @@ test('场景2 open: Given 合法参数与 wsPaths Then prefix 路由与两形态
   assert.ok(plugin.webServer.upgrades.has('/p/app/'))
   const persisted = JSON.parse(readFileSync(join(plugin.dataDir, 'tunnels.json'), 'utf8'))
   assert.deepEqual(persisted.map((row) => row.name), ['app'])
+})
+
+test('场景2b 总线通知: Given 增删与偏好写路径 Then publish() 契约', async (t) => {
+  const plugin = await applyPlugin(new MockWebServer())
+  assert.deepEqual(plugin.published, [], '装载期无变更不发布')
+  await open(plugin, { name: 'app', targetPort: PORT_MAX - 1 })
+  await open(plugin, { name: 'app2', targetPort: PORT_MAX - 2, wsPaths: [] })
+  await close(plugin, 'app')
+  const published = plugin.published
+  assert.equal(published.length, 3, 'open 两次 + close 一次')
+  for (const payload of published) assert.equal(payload, null)
 })
 
 test('场景3 校验: Given 非法名或越界端口 Then 拒收且不注册不落盘', async (t) => {

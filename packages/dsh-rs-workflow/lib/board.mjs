@@ -3,6 +3,7 @@
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
 // 安全边界(全仓库约定,AGENTS.md):不做 host 认证,无 Host 白名单/rebinding 防线/token 校验;
 // 认证由宿主原生 cookie/startup-auth 承担,写路由跨源防护以 Origin 同源比对为上限
+import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { reportStore, ACTIVE_STATES } from './store.mjs'
 import { registry, post, initiatorOf, resumerOf } from './driver/control.mjs'
 import { validateTemplate, validateTemplateSet } from './template.mjs'
@@ -22,8 +23,6 @@ import { normalizeConfig, BUDGET_KEYS, SLOT_KEYS } from './settings-schema.mjs'
 import { loadJson, saveJson } from './storage.mjs'
 
 const BODY_MAX_BYTES = 256 * 1024
-// 长轮询挂起上限:客户端请求超时须大于此值
-const LONG_POLL_WAIT_MS = 25 * 1000
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
@@ -270,25 +269,15 @@ export function registerBoardRoutes(ctx) {
     }, 'rs-workflow preset registrations')
   })
   ctx.inject(['webServer'], (wctx) => {
+    const tools = setupCommonTools(wctx)
+    const changes = createChangeNotifier(() => tools.publish())
+    wctx.effect(() => () => changes.dispose(), 'rsww 通知变更合并')
     const route = (path, handler, name) => wctx.effect(() => wctx.webServer.register({ kind: 'exact', path, handler }), name)
+    // 变更通知:store 写路径 bump 即发布总线;行卸载退订(notify-plane 唯一通道)
+    wctx.effect(() => store.onChange(changes.refresh), 'rsww bus notify wiring')
     route('/api/rsww/runs', guardedRoute(async (req, res) => {
       sendJson(res, 200, { runs: store.list() })
     }), 'rsww runs route')
-    // 长轮询变更源:cursor 缺省=首拉立即返回;仅版本恰等时挂起至写路径 bump / 超时;
-    // cursor 超前(宿主重启版本回退)立即返回,客户端以响应 version 重置游标自愈
-    wctx.effect(() => {
-      wctx.webServer.register({ kind: 'exact', path: '/api/rsww/changes', handler: guardedRoute(async (req, res) => {
-        const url = new URL(req.url, 'http://localhost')
-        const rawCursor = Number(url.searchParams.get('cursor'))
-        const cursor = Number.isFinite(rawCursor) ? rawCursor : 0
-        if (url.searchParams.has('cursor') && store.version() === cursor) {
-          await store.waitChanged(cursor, LONG_POLL_WAIT_MS)
-        }
-        sendJson(res, 200, { version: store.version() })
-      }) })
-      // 插件卸载唤醒全部挂起连接,以当前版本收尾,防连接悬挂
-      return () => store.wakeWaiters()
-    }, 'rsww changes route')
     route('/api/rsww/run', guardedRoute(async (req, res) => {
       const url = new URL(req.url, 'http://localhost')
       const runId = url.searchParams.get('id') || ''

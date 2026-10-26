@@ -150,10 +150,10 @@ test('对表_insert引用本仓mzzsfy包_refCheck命中packages', t => {
 test('对表_无patch文件_NO_PATCH', t => {
   const closure = buildClosure(t, {
     'node_modules/@deepseek-ai/dsh-web-app/cordis.patch.yml': OFFICIAL({ host: '127.0.0.1' }),
-    'pkgs/dsh-toast/README.md': 'x\n',
+    'pkgs/dsh-shell-select/README.md': 'x\n',
   })
   const { verdicts } = patchKeys({ closureDir: closure, packagesDir: join(closure, 'pkgs') })
-  const v = verdicts.find(x => x.pkg === 'dsh-toast')
+  const v = verdicts.find(x => x.pkg === 'dsh-shell-select')
   assert.equal(v.verdict, 'NO_PATCH')
 })
 

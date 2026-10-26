@@ -13,10 +13,13 @@ import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
+import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { createApi, MESSAGES, ROUTE_PREFIX as API_PREFIX } from './api.mjs'
 
 export const name = 'dsh-tunnel'
 
+// 推送总线:变更通知统一走公共依赖 common-tools(webServer 形状到位即激活,
+// 客户端轮询已废除不留双路径);插件卸载时总线按在场消费方自动收尾
 export const inject = ['webServer']
 
 const PATH_PREFIX = '/p/'
@@ -280,6 +283,9 @@ function saveStore(dataDir, rows) {
 
 export function apply(ctx, config) {
   const webServer = ctx.webServer
+  const bus = setupCommonTools(ctx)
+  const changes = createChangeNotifier(() => bus.publish())
+  ctx.effect(() => () => changes.dispose(), '通知变更合并')
 
   // 形状守卫: 宿主形态漂移时干净禁用并告警, 绝不破坏宿主
   const shapeOk = webServer.exact instanceof Map
@@ -392,6 +398,7 @@ export function apply(ctx, config) {
         subdomains.set(record.name, record)
         tunnels.set(record.name, record)
         persist()
+        changes.refresh()
         return { ok: true, name: record.name, entry, host: `${record.name}.localhost`, port: webServer.port }
       }
       let disposeRoutes
@@ -402,6 +409,7 @@ export function apply(ctx, config) {
       }
       tunnels.set(record.name, { ...record, disposeRoutes })
       persist()
+      changes.refresh()
       return { ok: true, name: record.name, entry, path: PATH_PREFIX + record.name, port: webServer.port }
     },
     list() {
@@ -424,6 +432,7 @@ export function apply(ctx, config) {
       subdomains.delete(args.name)
       tunnels.delete(args.name)
       persist()
+      changes.refresh()
       return { ok: true, removed: true }
     },
     disposeAll() {
@@ -656,6 +665,7 @@ export function apply(ctx, config) {
     if (Object.keys(patch).length === 0) throw new Error(uiBooleanError(UI_PREF_KEYS))
     if (!(await persistPatch(patch))) return { ok: false, error: SETTINGS_UNAVAILABLE }
     applyPreferences()
+    changes.refresh()
     return { ok: true, ui: readUi() }
   }
 
