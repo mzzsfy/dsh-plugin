@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-rs-workflow",
   "description": "若水工作流:流程模板管理与工作位/预算配置,支持模板可视化编辑与校验、编排运行与活跃任务面板",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
