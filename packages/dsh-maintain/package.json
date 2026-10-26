@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-maintain",
   "description": "DSH 自身的版本管理:追踪 npm dist-tag 通道新版本、查看 GitHub Releases 更新内容、活跃工作门控、安全重启与受管 A/B 升级",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
