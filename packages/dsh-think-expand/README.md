@@ -33,8 +33,11 @@ DeepSeek Harness 插件:流式输出思考时自动展开最新一条思考行,�
 
 ## 实现要点
 
-- Think 行识别:官方 ReasoningRow 根节点字面量属性 `[data-variant="think"]` + `data-state`,折叠头 `[data-disclosure-row]`,滚动容器 `[data-conversation-scroll]`;正文容器按 `_content_` 哈希段子串匹配(DiscloseCard 2026-10 统一,思考与工具正文同构);识别失败即不干预。
-- 工具机(全部消息模式):第二状态机 `planTools`,独立 registry/current/manual/read,与思考机零共享状态;行根 = flowItem `[data-chat-node-key]` 全集减思考行根,可展开性按官方 `data-expandable` 标记判定(preparing 行无标记天然落选),正文按 `_content_` 哈希段子串匹配(与思考行同选择器);目标行 = 文档序最后一个可展开行(工具流 state 形态多样,不按 state 选行);手动识别仅在插件已展开过行后激活(首轮既存展开行视为中性,与思考机流式守卫同构)。
+- Think 行识别:官方 ReasoningRow 根节点字面量属性 `[data-variant="think"]` + `data-state`,折叠头 `[data-disclosure-row]`,滚动容器 `[data-conversation-scroll]`;思考正文容器按 `thinkBody` 哈希段子串匹配(折叠头摘要 `_content_` 不是正文,不读取);识别失败即不干预。
+- 工具机(全部消息模式):第二状态机 `planTools`,独立 registry/current/manual/read,与思考机零共享状态;行根 = flowItem `[data-chat-node-key]` 全集减思考行根(思考行在 flow 后代,按后代判定排除),可展开性按官方 `data-expandable` 标记判定(preparing 行无标记天然落选),正文按 `bodyWrap` 哈希段子串匹配;目标行 = 文档序最后一个可展开行(工具流 state 形态多样,不按 state 选行);手动识别仅在插件已展开过行后激活(首轮既存展开行视为中性,与思考机流式守卫同构)。
+- 完成态恢复:回合完成后官方会隐藏整个过程组并重置子折叠(useDisclosure version 自增);扫描前检测插件仍负责的末行位于 `hidden` 祖先内时,向祖先派发官方 `beforematch`(与浏览器查找同入口)恢复过程可见,再按需重新展开;用户手动收起的行已解除插件所有权,不恢复。
+- 所有权让渡:capture 阶段监听容器点击,按被点头部区分层级——行头只清该行,过程汇总按钮(`data-turn-process`)清同回合全部行,步骤组头清同组行;插件自身点击经 applyingAction 屏蔽,用户任何折叠动作都会把所有权还给用户。
+- 工具开关(setMode):只作用于工具机——关闭前把已收起的插件 current 行同步登记已读(不依赖 50ms 防抖),撤回插件展开并保留手动行;开启前把关闭期间用户手动展开的工具行登记 manual,不收编;思考机 registry 全程不动。
 - 展开/收起模拟点击折叠头(按 `aria-expanded` 判定),与官方组件状态机一致,不直改 DOM 内部状态;会话区不写任何 DOM 属性,设置卡片样式元素自带 `data-plugin` 标记(claimStyles/HMR 契约)。
 - 行标识 = 控制器侧元素稳定 uid(WeakMap 计数),标记命中 uid 优先、已见文本前缀兜底,标记载体为模块级 Map(键为登记时文本);client 端插件展开过的行另以元素 WeakSet 记闩锁(展开记入、收起解除,会话切换重置),供决策层区分手动展开,不写 DOM 属性;全部标记随页面生命周期存活,不持久化。body 哨兵观察器常驻 document.body 监视容器身份变化(会话切换,仅 childList 通道);容器重挂后首扫抑制手动识别,既存展开行视为中性;观察器句柄挂 window 代际槽,HMR 重评估先拆上一代,防多套决策机并行同扫。
 - 纯逻辑层(行分类、展开决策、标记存活性、置底判定、工具机)在 `src/logic.mjs`,`src/client.js` 内嵌同源实现,`node --test` 以同一套 BDD 场景对两份实现做 parity 验证,并逐函数对比源码文本(含内部助手)防双写漂移。
@@ -67,7 +70,7 @@ pnpm --dir packages/dsh-think-expand test
 node --test packages/dsh-think-expand/test/*.test.mjs
 ```
 
-覆盖:上表全部行为场景、置底判定与置底回补判定(阈值边界/高度变化可解释偏离/用户滚开不回补)、uid 行身份(同开头历史行不劫持定位、已读标记不拦同开头新行)、suppressManual 首扫、批量 running 降级、识别失败降级、空正文降级、工具机场景(目标行展开/已读/手动/manual 接管不收/接管收起/preparing 跳过/无行不干预/首扫中性/双机状态隔离)、双实现 parity(场景 + 导出键守卫 + 逐函数源码对比)、client.js 语法检查与样式 data-plugin 守卫。
+覆盖:上表全部行为场景、置底判定与置底回补判定(阈值边界/高度变化可解释偏离/用户滚开不回补)、uid 行身份(同开头历史行不劫持定位、已读标记不拦同开头新行)、suppressManual 首扫、批量 running 降级、识别失败降级、空正文降级、工具机场景(目标行展开/已读/手动/manual 接管不收/接管收起/preparing 跳过/无行不干预/首扫中性/双机状态隔离)、工具开关切换(双向实时/思考已读不丢/插件工具撤回恢复/手动工具保留/关闭前已读结算/开启前 manual 收编)、完成态恢复(插件末行 hidden 揭示重开/用户收起不重开)、控制器生命周期(禁用后旧观察器与计时器不动作/重启单套控制器/卸载后旧滚动帧不写滚动)、双实现 parity(场景 + 导出键守卫 + 逐函数源码对比)、client.js 语法检查与样式 data-plugin 守卫。
 
 ## License
 

@@ -25,10 +25,8 @@ window.__ModuleLoader__.load({
     // 工具机行根:flowItem 全集(控制器排除思考行根);宿主每 flowItem 渲染单行
     const SELECTOR_ANY_ROW = '[data-chat-node-key]'
     const SELECTOR_HEAD = '[data-disclosure-row]'
-    // body 类名经 CSS Modules 哈希(如 _content_1rdzk_11),按哈希段子串匹配;
-    // 思考与工具正文同构(DiscloseCard 2026-10 统一),金丝雀测试锁契约
-    const SELECTOR_BODY = '[class*="_content_"]'
-    const SELECTOR_TOOL_BODY = '[class*="_content_"]'
+    const SELECTOR_BODY = '[class*="thinkBody"]'
+    const SELECTOR_TOOL_BODY = '[class*="bodyWrap"]'
     const ATTR_STATE = 'data-state'
     const ATTR_EXPANDED = 'aria-expanded'
     const ATTR_EXPANDABLE = 'data-expandable'
@@ -432,6 +430,7 @@ window.__ModuleLoader__.load({
     // 插件动作闩锁:展开记入、收起解除,语义为"自上次收起以来的插件动作",
     // 保证用户收起后再手动展开同一条能被识别为手动意图(至多一条展开契约)
     let pluginExpandedEls = new WeakSet()
+    let applyingAction = false
     // 行身份:元素稳定 uid(WeakMap 计数器),行重排/文本增长不影响标记命中
     const rowUidMap = new WeakMap()
     let rowUidSeq = 0
@@ -467,9 +466,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // 工具机行描述:行根为非思考行根(含无 variant 的 DisclosureRow 行);
-    // expandable 按官方 data-expandable 标记(preparing 行天然无标记),
-    // 正文取 DiscloseCard content 容器(与思考行同构,哈希段子串匹配)
+    // 工具正文只取 bodyWrap,不读取折叠头的摘要;preparing 行无可展开标记。
     function describeToolRow(el) {
       const head = el.querySelector(SELECTOR_HEAD)
       const body = head !== null ? el.querySelector(SELECTOR_TOOL_BODY) : null
@@ -495,8 +492,38 @@ window.__ModuleLoader__.load({
     const collectRows = (container) => Array.from(container.querySelectorAll(SELECTOR_ROW), describeRow)
     const collectToolRows = (container) => Array.from(
       container.querySelectorAll(SELECTOR_ANY_ROW),
-      (el) => el.getAttribute(ATTR_VARIANT) === VARIANT_THINK ? null : describeToolRow(el)
+      (el) => el.getAttribute(ATTR_VARIANT) === VARIANT_THINK || el.querySelector(SELECTOR_ROW) !== null ? null : describeToolRow(el)
     ).filter(Boolean)
+
+    function revealAncestors(el) {
+      for (let ancestor = el; ancestor !== null; ancestor = ancestor.parentElement) {
+        if (ancestor.hasAttribute('hidden')) ancestor.dispatchEvent(new Event('beforematch'))
+      }
+    }
+
+    // 宿主隐藏已完成过程会重置子折叠;只恢复仍由插件负责的末行。
+    function restoreHiddenCurrent(container, state, rows) {
+      const row = rows.find(row => row.uid === state.current?.uid)
+      if (!row?.plugged || rows.filter(row => row.headable || row.expandable).at(-1) !== row || row.el.closest('[hidden]') === null) return
+      revealAncestors(row.el)
+      if (!row.expanded) applyAction(container, [row], { index: 0, kind: 'expand' })
+    }
+
+    function onDisclosureClick(event) {
+      if (applyingAction) return
+      const head = event.target.closest?.('[aria-expanded="true"]')
+      if (!head) return
+      const rows = [...collectRows(observedContainer), ...collectToolRows(observedContainer)]
+      const row = rows.find((row) => row.el.querySelector(SELECTOR_HEAD) === head)
+      if (row !== undefined) { pluginExpandedEls.delete(row.el); return }
+      const turn = head.getAttribute('data-turn-process')
+      if (turn !== null) {
+        for (const item of rows) if (item.el.closest(SELECTOR_ANY_ROW)?.getAttribute('data-chat-turn') === turn) pluginExpandedEls.delete(item.el)
+        return
+      }
+      const group = head.closest('[data-step-process]')
+      if (group !== null) for (const item of rows) if (item.el.closest('[data-step-process]') === group) pluginExpandedEls.delete(item.el)
+    }
 
     // 执行动作并返回被点击的行元素(未触发点击返回 null)。
     // 动作改变内容高度会把置底视口推离底部,官方滚动跟随随即失联:
@@ -510,7 +537,11 @@ window.__ModuleLoader__.load({
         const before = containerMetrics(container)
         if (action.kind === 'expand') pluginExpandedEls.add(row.el)
         else pluginExpandedEls.delete(row.el)
-        head.click()
+        applyingAction = true
+        try {
+          if (action.kind === 'expand') revealAncestors(row.el)
+          head.click()
+        } finally { applyingAction = false }
         if (isPinned(before)) schedulePinRestore(container, before)
         return row.el
       }
@@ -566,11 +597,13 @@ window.__ModuleLoader__.load({
       // 容器身份守卫:容器替换至哨兵回调之间,旧观察器投递的扫描不对新容器用旧 registry 决策
       if (container === null || container !== observedContainer) return 0
       const described = collectRows(container)
+      restoreHiddenCurrent(container, registry, described)
       releaseLatchIfCollapsed(described)
       for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
       // 工具机与思考机并行(独立 registry/独立目标行),仅全部消息模式运行
       if (expandAll) {
         const tools = collectToolRows(container)
+        restoreHiddenCurrent(container, toolsRegistry, tools)
         releaseToolLatchIfCollapsed(tools)
         for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) applyAction(container, tools, action)
       }
@@ -626,7 +659,7 @@ window.__ModuleLoader__.load({
       const container = document.querySelector(SELECTOR_SCROLL)
       if (container === null) return
       const described = collectRows(container)
-      if (described.some((row) => row.headable)) {
+      if (finalState.pending && described.some((row) => row.headable)) {
         finalState.pending = false
         for (const action of planFinal(toLogicRows(described)).actions) {
           const clicked = applyAction(container, described, action)
@@ -637,7 +670,7 @@ window.__ModuleLoader__.load({
         }
       }
       // 工具机 final:仅全部消息模式参与,目标为最后一个可展开工具行
-      if (expandAll) {
+      if (expandAll && toolsFinalState.pending) {
         const tools = collectToolRows(container)
         if (tools.some((row) => row.expandable)) {
           toolsFinalState.pending = false
@@ -679,8 +712,11 @@ window.__ModuleLoader__.load({
     // 会话切换不继承标记,双机 registry 重建;首扫抑制手动识别:
     // 既存展开行视为中性(可能是上一代插件的展开),由 planFinal/流式流程接管
     function attach(container) {
+      if (observedContainer !== null) observedContainer.removeEventListener('click', onDisclosureClick, true)
       if (containerObserver !== null) containerObserver.disconnect()
-      containerObserver = new MutationObserver(scheduleScan)
+      container.addEventListener('click', onDisclosureClick, true)
+      const owner = slot
+      containerObserver = new MutationObserver(() => scheduleScan(owner))
       containerObserver.observe(container, OBSERVER_OPTIONS)
       if (slot !== null) slot.containerObserver = containerObserver
       observedContainer = container
@@ -695,11 +731,7 @@ window.__ModuleLoader__.load({
       toolsFinalState.pending = true
       // 首扫移入宏任务:哨兵回调的同步栈落在 React 提交窗口内,此栈中的点击
       // 会被随后的官方重渲染冲掉(aria 翻转即被回写);宏任务点击不受影响
-      setTimeout(() => {
-        if (window[SLOT_KEY] !== slot || observedContainer !== container) return
-        scanSuppressManual()
-        if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
-      }, 0)
+      scheduleInitialScan(container)
     }
 
     function scanSuppressManual() {
@@ -717,57 +749,83 @@ window.__ModuleLoader__.load({
       return described.length
     }
 
-    // 模式切换(开关回调):实时生效。两机共用闩锁与点击通道,行集与决策独立。
-    // 切换时收起插件闩锁内的全部展开行(手动行保留)并解除全部闩锁(残留闩锁会让
-    // 后续手动重展开被决策误判插件动作),双机 registry 重置后走新契约首扫;
-    // 动作前记置底状态,落定后回补一次
+    // 工具开关不重置思考机;关闭只撤回插件展开的工具,保留两机手动/已读意图。
     function setMode(value) {
+      if (!isActive(slot) || expandAll === value) return
       expandAll = value
       writeExpandAll(value)
       const container = observedContainer
       if (container === null || !container.isConnected) return
-      const described = collectRows(container)
-      const tools = expandAll ? [] : collectToolRows(container)
-      const before = containerMetrics(container)
-      const pinned = isPinned(before)
-      for (const row of [...described, ...tools]) {
-        if (!row.plugged) continue
-        pluginExpandedEls.delete(row.el)
-        if (row.expanded) row.el.querySelector(SELECTOR_HEAD)?.click()
+      const tools = collectToolRows(container)
+      releaseToolLatchIfCollapsed(tools)
+      if (value) {
+        for (const row of tools) {
+          if (row.expanded && !row.plugged && row.bodyText !== '') putSeen(toolsRegistry.manual, row.uid, row.bodyText)
+        }
+      } else {
+        const current = toolsRegistry.current
+        const row = current === null ? null : tools.find(row => row.uid === current.uid)
+        if (row && !row.expanded) putSeen(toolsRegistry.read, row.uid, current.seen)
+        for (const row of tools) {
+          if (!row.plugged) continue
+          applyAction(container, [row], { index: 0, kind: 'collapse' })
+          pluginExpandedEls.delete(row.el)
+          toolsRegistry.expanded.delete(row.uid)
+        }
+        if (toolsRegistry.current !== null) toolsRegistry.marks.delete(toolsRegistry.current.seen)
+        toolsRegistry.current = null
+        toolsFinalState.pending = false
+        toolsFinalState.awaitRegister = false
+        toolsFinalState.el = null
       }
-      if (pinned) schedulePinRestore(container, before)
-      registry = createRegistry()
-      toolsRegistry = createToolsRegistry()
-      finalState.pending = true
-      toolsFinalState.pending = expandAll
-      // 首扫异步化,理由同 attach:开关回调虽是手势上下文,但首扫的官方行点击
-      // 仍落在 React 受控渲染周期内,同步栈点击会被提交冲掉
-      setTimeout(() => {
-        if (window[SLOT_KEY] !== slot || observedContainer !== container) return
-        scanSuppressManual()
-        if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
-      }, 0)
+      scheduleScan()
     }
 
     // body 哨兵常驻,监视容器出现与身份变化;发现容器即挂载子树观察。
     // 代际槽:HMR 同页重评估时先拆上一代观察器与挂起计时,防多套决策机并行同扫
     const SLOT_KEY = Symbol.for('@mzzsfy/dsh-think-expand')
     let slot = null
+    const isActive = owner => owner?.active === true && window[SLOT_KEY] === owner
+    function scheduleInitialScan(container) {
+      const owner = slot
+      if (!isActive(owner)) return
+      if (owner.initialTimer !== null) clearTimeout(owner.initialTimer)
+      owner.initialTimer = setTimeout(() => {
+        owner.initialTimer = null
+        if (!isActive(owner) || observedContainer !== container) return
+        scanSuppressManual()
+        if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
+      }, 0)
+    }
+    function stop(owner) {
+      if (!owner?.active) return
+      owner.active = false
+      owner.bodySentinel?.disconnect()
+      owner.containerObserver?.disconnect()
+      clearTimeout(owner.debounceTimer)
+      clearTimeout(owner.initialTimer)
+      if (owner.pinFrame !== null) cancelAnimationFrame(owner.pinFrame)
+      if (window[SLOT_KEY] === owner) delete window[SLOT_KEY]
+      if (slot !== owner) return
+      bodySentinel = null
+      containerObserver = null
+      observedContainer?.removeEventListener('click', onDisclosureClick, true)
+      observedContainer = null
+      finalState.el = null
+      toolsFinalState.el = null
+    }
     function start() {
-      if (bodySentinel !== null) return
-      const previous = window[SLOT_KEY]
-      if (previous !== undefined) {
-        if (previous.bodySentinel !== null) previous.bodySentinel.disconnect()
-        if (previous.containerObserver !== null) previous.containerObserver.disconnect()
-        if (previous.debounceTimer !== null) clearTimeout(previous.debounceTimer)
-        if (previous.pinFrame !== null) cancelAnimationFrame(previous.pinFrame)
-      }
-      slot = { bodySentinel: null, containerObserver: null, debounceTimer: null, pinFrame: null }
-      window[SLOT_KEY] = slot
-      bodySentinel = new MutationObserver(ensureAttached)
-      slot.bodySentinel = bodySentinel
+      if (isActive(slot)) { slot.users++; return slot }
+      window[SLOT_KEY]?.stop?.()
+      const owner = { active: true, users: 1, bodySentinel: null, containerObserver: null, debounceTimer: null, initialTimer: null, pinFrame: null }
+      owner.stop = () => stop(owner)
+      slot = owner
+      window[SLOT_KEY] = owner
+      bodySentinel = new MutationObserver(() => ensureAttached(owner))
+      owner.bodySentinel = bodySentinel
       bodySentinel.observe(document.body, SENTINEL_OPTIONS)
-      ensureAttached()
+      ensureAttached(owner)
+      return owner
     }
 
     // ---- 设置卡片:「插件」设置页折叠卡 + 全部消息开关(实时生效,持久 localStorage) ----
@@ -843,7 +901,10 @@ window.__ModuleLoader__.load({
       // slots 仅服务设置卡片;缺失(声明生命周期门控)时卡片缺席,决策机不受影响
       inject: ['slots'],
       apply(ctx) {
-        start()
+        ctx.effect(() => {
+          const owner = start()
+          return () => { if (--owner.users === 0) stop(owner) }
+        }, 'think-expand controller')
         const slots = ctx.slots
         if (!slots || typeof slots.inject !== 'function') return
         // 样式挂文档级:设置页未打开时面板不存在,样式随面板注入会裸渲染

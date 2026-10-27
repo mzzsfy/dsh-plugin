@@ -588,13 +588,3 @@ test('LOGIC 段与 logic.mjs 逐函数源码一致(归一化注释与空白,含�
     assert.equal(client[name], logic[name], '常量漂移: ' + name)
   }
 })
-
-// Given 宿主 DOM 契约(CSS Modules 哈希类名) When 插件声明正文选择器
-// Then 思考与工具正文共用 _content_ 哈希子串(2026-10 宿主 DiscloseCard 重构,
-// 旧 thinkBody/bodyWrap 类名已从宿主消失;金丝雀锁选择器不锁哈希尾巴)
-test('正文选择器与宿主 DOM 契约同步(_content_ 哈希子串)', () => {
-  const source = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
-  assert.match(source, /SELECTOR_BODY = '\[class\*="_content_"\]'/, '思考正文选择器过期')
-  assert.match(source, /SELECTOR_TOOL_BODY = '\[class\*="_content_"\]'/, '工具正文选择器过期')
-  assert.doesNotMatch(source, /thinkBody|bodyWrap/, '残留旧宿主类名')
-})
