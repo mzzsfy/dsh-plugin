@@ -16,7 +16,7 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 | --- | --- | --- |
 | Chat Completions (`openai-completions`) | 补 `session_id`、`x-client-request-id` 请求头，值为原始 DSH `sessionId` | request_header `session_id` 或 `x-client-request-id` |
 | Responses (`openai-responses`) | 原 options 透传，保留 pi-ai 原生行为 | 当前验证的 pi-ai 默认发送上述两个头及请求体顶层 `prompt_cache_key` |
-| Anthropic Messages (`anthropic-messages`) | 注入派生 `metadata.user_id`，格式为 `<prefix>:<40 位小写十六进制>`，默认前缀 `dsh` | gjson `metadata.user_id` |
+| Anthropic Messages (`anthropic-messages`) | 注入派生 `metadata.user_id`，格式为 `<prefix>:<40 位小写十六进制>`，默认前缀 `dsh` | —(本包按 sessionId 本地派生后注入,不从上游提取；上游亲和以 Anthropic 服务端 metadata 策略为准) |
 
 Chat 补齐规则：仅在开关开启、owner 活跃、`sessionId` 为非空字符串且 `cacheRetention !== 'none'` 时生效。`options.headers` 和模型描述的 `model.headers` 中，大小写无关的显式同名键均优先，包括用于抑制头的 `null`；只补缺失键，不改写输入。请求中会发送原始 sessionId，规则沿用 Responses 的会话键语义。同会话多轮保持相同值，不同会话使用不同值。
 
@@ -43,7 +43,7 @@ npm test --prefix packages/dsh-llm-pi-gateway
 在已安装的隔离宿主上验证三协议实际 HTTP 请求：
 
 ```sh
-node scripts/compat/affinity-probe-3proto.mjs --host-dir .compat/0.2.1-rc.2/dsh-host
+node scripts/compat/affinity-probe-3proto.mjs --host-dir <本机隔离宿主闭包目录,如 .compat/<版本>/dsh-host>
 ```
 
 该探针需要对应目录已安装 DSH 及其 pi-ai 依赖，通过真实官方 `PiAiAdapter`、Models 和 gateway 装饰器调用新起的 echo-upstream 随机端口实例，断言流以成功终态结束、同会话稳定、新会话隔离、开关、卸载、`none` 及显式头优先。请求 JSONL 与结果保留在输出的临时目录，模拟器在结束时退出。它使用手工构造的 provider fixture，不验证 Cordis 装配、GUI 或真实上游路由策略。
@@ -52,4 +52,4 @@ GUI 的隔离测试方法与覆盖边界见 [兼容性测试.md](./兼容性测�
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证（`scripts/compat/window.mjs`），不预置固定版本槽：主测为渠道 dist-tag 最新 rc，基线为 npm latest，同版收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`，低于该代际的宿主 API 面未验证。逐轮结论见本包 [兼容性测试.md](./兼容性测试.md) 与仓库逐包测试记录。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`,低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 [兼容性测试.md](./兼容性测试.md)。

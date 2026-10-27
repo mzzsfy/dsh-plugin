@@ -1,6 +1,11 @@
 // boss-simulator E2E 编排(隔离环境):铸 cookie → drive 造任务/派发 → 模拟器排队工具报告 → prompt 驱动 → 断言推进。
 // 前置: 隔离宿主(9371, DSH_HOME=.compat home)+ 模拟器(18129) 已启动。
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { resolve, dirname } from 'node:path'
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const compatWorkspaceCwd = `${repoRoot.replace(/\\/g, '/')}/.compat/0.2.0-rc.2/workspace`
 
 const live = JSON.parse(readFileSync('.compat/0.2.0-rc.2/live.json', 'utf8'))
 const base = `http://127.0.0.1:${live.port}`
@@ -17,7 +22,7 @@ const get = async (p) => {
 }
 
 console.log('create:', (await post('drive', { action: 'create', taskId: 't-e2e', title: '端到端任务', projectWorkspaceId: 'ws1', definition: { goal: '端到端目标', acceptanceCriteria: [{ criterionId: 'c1', text: '标准一' }] }, workItemId: 'w1' })).body)
-console.log('dispatch:', (await post('drive', { action: 'dispatch', taskId: 't-e2e', workItemId: 'w1', phase: 'implement', runId: 'r1', requestId: 'req-r1', sessionCwd: '~/Desktop/jzjy/dsh-plugin/.compat/0.2.0-rc.2/workspace' })).body)
+console.log('dispatch:', (await post('drive', { action: 'dispatch', taskId: 't-e2e', workItemId: 'w1', phase: 'implement', runId: 'r1', requestId: 'req-r1', sessionCwd: compatWorkspaceCwd })).body)
 const detail = await get('board?taskId=t-e2e')
 const sessionId = detail.runs?.[0]?.sessionId
 console.log('session:', sessionId)

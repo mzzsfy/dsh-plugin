@@ -94,7 +94,7 @@ presence 只统计有接收订阅的连接，纯发送实例不计在场。对�
 
 订阅帧替换接收空间清单，与发送资格无关。revision 仅协调接收确认，不是业务消息版本。非法帧或二进制上行关闭连接；明确跨源上行写入被拒绝，身份认证及可达性由宿主承担，不设插件认证层。
 
-host 的 WS 实现多实体以进程级注册表共享传输，同版不重复安装，较新版本接管传输并保留监听；已有 WS 门面动态转发。缺少 registerUpgrade 时告警并停用总线，不注册资源。loader 上下文缺少包名时明确拒绝，不猜测身份。0.2.0 移除旧 SSE、topic、forPlugin 和 version 接口，无兼容路径。升级须统一更新消费方与依赖，完整重启宿主并刷新旧页面；0.1 与 0.2 同进程混装会发生注册表冲突，不支持跨该代际热接管。
+host 的 WS 实现多实体以进程级注册表共享传输，同版不重复安装，较新版本接管传输并保留监听；已有 WS 门面动态转发。缺少 registerUpgrade 时告警并停用总线，不注册资源。loader 上下文缺少包名时明确拒绝，不猜测身份。0.2.0 移除旧 SSE、topic、forPlugin 和 version 接口，无兼容路径。升级须统一更新消费方与依赖，完整重启宿主并刷新旧页面；旧代际 SSE(包 0.1)与 WS 代际(注册版本 1.0,包 0.2 起)同进程混装会发生注册表冲突，不支持跨该代际热接管。
 
 ## 装载与 Toast
 
@@ -103,7 +103,10 @@ client 由 session-manager 全仓唯一占位条目代挂，必须先于消费�
 ```js
 const { toast } = require('@mzzsfy/dsh-common-tools/client')
 toast.show('已归档', { kind: 'ok' })
+toast.show('任务完成\n耗时 12 秒', { appearance: 'panel', holdMs: 6000 })
 ```
+
+自 0.3.0 起,`appearance` 支持 `toast`(默认,宿主 toast-bg/toast-label 色对)与 `panel`(宿主 bg-layer-1/label-primary 色对)。两种样式随宿主亮暗主题更新,成功/错误只强调边框,不覆盖底色或文案颜色;多行文本保留换行。未知值使用 `toast`,设置仅作用于本条通知。`kind` 支持 info/ok/error,`sticky: true` 常驻并显示“知道了”,`onClick` 点击直达,`holdMs` 指定自动消失时间(默认 4 秒)。
 
 ## 测试
 

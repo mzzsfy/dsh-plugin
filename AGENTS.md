@@ -22,6 +22,6 @@ AI 会话自测(凡涉及 LLM 链路:对话轮、思考流、工具调用、usag
 
 - **LLM 上游一律指向 echo-upstream**:`node scripts/echo-upstream/cli.mjs --port 0` 新起独立实例(随机端口,stdout 打印实际端口),provider baseURL 指向该实例;三协议、SSE 流式、thinking、工具调用、错误注入与 HTTP 控制面见 [scripts/echo-upstream/README.md](scripts/echo-upstream/README.md)。禁止消耗真实 API 配额,禁止以"环境不可测"跳过可测断言(分层与夹具规则见 [scripts/echo-upstream/兼容性测试.md](scripts/echo-upstream/兼容性测试.md))。
 - **每次自测新起实例,用完即杀**(终止 = 结束本会话拉起的实例进程):独立脚本无热重载,旧进程即旧代码——2026-09-24 cd0224b 之前的实例不支持流式(`stream:true` 恒回单块 JSON),复用长驻实例(默认端口 18123)是"测到旧行为"的唯一已知根因。随机端口按会话隔离,队列与请求历史互不串扰;模拟器实例不留常驻。
-- **不改宿主生产面**:不动生产 profile 与 `~/.dsh` 配置、不重启宿主服务,留档不入版本库(默认临时目录;compat 工位按链接方法落 `llm-echo.jsonl`,gitignore 豁免)。需隔离 profile 全家桶级宿主链路验证时,走 `node scripts/compat/run.mjs` 同款隔离方法([docs/兼容性测试/测试与隔离方法.md](docs/兼容性测试/测试与隔离方法.md))。
+- **不改宿主生产面**:不动生产 profile 与 `~/.dsh` 配置、不重启宿主服务,留档不入版本库(默认临时目录;compat 工位按链接方法落 `llm-echo.jsonl`,gitignore 豁免)。需隔离 profile 全家桶级宿主链路验证时,走 `node scripts/compat/run.mjs` 同款隔离方法([docs/兼容性测试/测试与隔离方法.md](docs/兼容性测试/测试与隔离方法.md),本地维护不入库)。
 
 各 `兼容性测试.md` 与模拟器 README 中固定端口 18123、真实 API、仓库内留档路径的写法属人工历史流程记录,AI 会话一律以本节为准。

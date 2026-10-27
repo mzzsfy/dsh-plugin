@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-common-tools",
   "description": "全家桶公共依赖库:按插件空间隔离的 WebSocket 双向订阅/推送与 toast;host setupCommonTools 借消费插件生命周期激活,client 复用页面单连接;普通 npm 依赖而非 dsh 插件",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "dependencies": {
     "ws": "^8.22.0"
   },

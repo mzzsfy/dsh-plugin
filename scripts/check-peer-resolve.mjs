@@ -1,9 +1,10 @@
 // 验证:仓库包目录内能否解析全部 peer 依赖(Node ESM/require 双语义)
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
 
-const repo = '~/Desktop/jzjy/dsh-plugin'
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pkgs = {
   'dsh-usage-panel': ['@deepseek-ai/dsh-settings', '@deepseek-ai/schemastery'],
   'dsh-maintain': ['@deepseek-ai/schemastery'],
