@@ -390,24 +390,41 @@ window.__ModuleLoader__.load({
     // ---- 声音:Web Audio,autoplay 解锁依赖首次用户交互,解锁前静默 ----
 
     let audioCtx = null
+    let audioLease = null
     const decodedCache = new Map()
-
+    const ACTION_EVENTS = ['pointerdown', 'keydown', 'mousemove', 'wheel']
+    const assertAudioActive = (ctx2 = audioCtx) => {
+      if (!audioLease?.active || ctx2 === null || ctx2 !== audioCtx) throw new Error('通知音频已停用')
+    }
     function ensureAudioCtx() {
+      if (!audioLease?.active) throw new Error('通知音频已停用')
       if (audioCtx === null) audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-      // resume 仅触发不等待(通知链路 fire-and-forget);手动播放由 ensureRunnableCtx 等待并给可见反馈
       if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {})
       return audioCtx
     }
-    // 首次交互解锁:解锁前静默不视为故障
-    window.addEventListener('pointerdown', () => { ensureAudioCtx() }, { once: true })
-
-    // 用户行动时刻:空闲满阈值视为离开,聚焦静默不再适用;
-    // handler 挂 window 共享并按标记幂等注册,防模块重载后监听累积
-    if (!window.__tnActionHandler) {
+    function startAudio() {
+      const lease = { active: true }
+      audioLease = lease
+      const unlockAudio = () => {
+        if (audioLease !== lease || !lease.active) return
+        try { ensureAudioCtx() } catch { /* 缺少音频能力不影响其余通道 */ }
+      }
+      const recordAction = () => { if (lease.active) window.__tnLastActionAt = Date.now() }
       window.__tnLastActionAt = Date.now()
-      window.__tnActionHandler = () => { window.__tnLastActionAt = Date.now() }
-      for (const type of ['pointerdown', 'keydown', 'mousemove', 'wheel']) {
-        window.addEventListener(type, window.__tnActionHandler)
+      window.__tnActionHandler = recordAction
+      window.addEventListener('pointerdown', unlockAudio, { once: true })
+      for (const type of ACTION_EVENTS) window.addEventListener(type, recordAction)
+      return () => {
+        lease.active = false
+        window.removeEventListener('pointerdown', unlockAudio)
+        for (const type of ACTION_EVENTS) window.removeEventListener(type, recordAction)
+        if (window.__tnActionHandler === recordAction) delete window.__tnActionHandler
+        if (audioLease !== lease) return
+        audioLease = null
+        const closing = audioCtx
+        audioCtx = null
+        decodedCache.clear()
+        try { Promise.resolve(closing?.close()).catch(() => {}) } catch { /* 资源已失效也保持退役 */ }
       }
     }
     const lastActionAt = () => window.__tnLastActionAt ?? Date.now()
@@ -415,6 +432,7 @@ window.__ModuleLoader__.load({
     function volume() { return parseVolume(localGet(KEY_VOLUME)) }
 
     function playTone(ctx2, spec) {
+      assertAudioActive(ctx2)
       const master = ctx2.createGain()
       master.gain.value = volume()
       master.connect(ctx2.destination)
@@ -435,6 +453,7 @@ window.__ModuleLoader__.load({
     }
 
     function playBuffer(ctx2, buffer) {
+      assertAudioActive(ctx2)
       const source = ctx2.createBufferSource()
       const master = ctx2.createGain()
       master.gain.value = volume()
@@ -455,7 +474,10 @@ window.__ModuleLoader__.load({
       if (buffer === undefined) {
         const response = await fetch('/api/turn-notify/sound?id=' + encodeURIComponent(sound.id))
         if (!response.ok) throw new Error('读取音效失败: HTTP ' + response.status)
-        buffer = await ctx2.decodeAudioData(await response.arrayBuffer())
+        const raw = await response.arrayBuffer()
+        assertAudioActive(ctx2)
+        buffer = await ctx2.decodeAudioData(raw)
+        assertAudioActive(ctx2)
         decodedCache.set(sound.id, buffer)
       }
       playBuffer(ctx2, buffer)
@@ -468,13 +490,15 @@ window.__ModuleLoader__.load({
     async function ensureRunnableCtx() {
       const ctx2 = ensureAudioCtx()
       if (ctx2.state === 'suspended') {
+        let timer
         try {
           await Promise.race([
             ctx2.resume(),
-            new Promise((resolve) => { setTimeout(resolve, AUDIO_RESUME_WAIT_MS) }),
+            new Promise((resolve) => { timer = setTimeout(resolve, AUDIO_RESUME_WAIT_MS) }),
           ])
-        } catch { }
+        } catch { } finally { clearTimeout(timer) }
       }
+      assertAudioActive(ctx2)
       return ctx2
     }
 
@@ -499,6 +523,7 @@ window.__ModuleLoader__.load({
       const pre = await playableCtx()
       if (pre.blocked) return { ok: false, reason: pre.blocked }
       try {
+        assertAudioActive(pre.ctx2)
         await playSound(sound)
         return { ok: true }
       } catch (error) {
@@ -534,28 +559,41 @@ window.__ModuleLoader__.load({
 
     // ---- 页内通知与标题闪烁 ----
 
-    // 页内通知经公共依赖 @mzzsfy/dsh-toast 展示(栈式多条并存),
-    // 本包只保留标题闪烁通道
+    const KEY_TOAST_APPEARANCE = 'turn-notify:toast-appearance'
+    const TOAST_APPEARANCES = { toast: '标准浮条', panel: '主题卡片' }
+    const readToastAppearance = () => localGet(KEY_TOAST_APPEARANCE) === 'panel' ? 'panel' : 'toast'
+
+    // 每次呈现读取本机偏好,其他窗口更改及二次提醒同样即时生效。
+    function showPageNotification(text, onClick) {
+      return toast?.(text, { holdMs: TOAST_MS, appearance: readToastAppearance(), onClick })
+    }
+
+    function previewPageNotification() {
+      return showPageNotification('[dsh] 页内通知样式预览\n耗时 12 秒 · 1.5k tokens · 已完成任务')
+    }
 
     let blinkTimer = null
     let blinkStopTimer = null
+    let blinkDeadline = null
     const baseTitle = () => document.title.replace(/^⏳ /, '')
 
     // 连环通知(并行会话批量报错)间隔小于 TOAST_MS 时,闪烁会被逐条续命;
     // 硬顶 BLINK_MAX_MS 保证任何情况下标题必停,焦点返回时由可见性同步立即清除
     function startTitleBlink() {
-      if (blinkTimer !== null) {
-        clearTimeout(blinkStopTimer)
-        blinkStopTimer = setTimeout(stopTitleBlink, BLINK_MAX_MS - BLINK_MS)
-        return
+      const now = Date.now()
+      if (blinkTimer === null) {
+        blinkDeadline = now + BLINK_MAX_MS
+        blinkTimer = setInterval(() => {
+          if (Date.now() >= blinkDeadline) { stopTitleBlink(); return }
+          document.title = document.title.startsWith('⏳ ') ? baseTitle() : '⏳ ' + baseTitle()
+        }, BLINK_MS)
       }
-      blinkTimer = setInterval(() => {
-        document.title = document.title.startsWith('⏳ ') ? baseTitle() : '⏳ ' + baseTitle()
-      }, BLINK_MS)
-      blinkStopTimer = setTimeout(stopTitleBlink, TOAST_MS)
+      clearTimeout(blinkStopTimer)
+      blinkStopTimer = setTimeout(stopTitleBlink, Math.max(0, Math.min(now + TOAST_MS, blinkDeadline) - now))
     }
 
     function stopTitleBlink() {
+      blinkDeadline = null
       if (blinkStopTimer !== null) {
         clearTimeout(blinkStopTimer)
         blinkStopTimer = null
@@ -673,10 +711,7 @@ window.__ModuleLoader__.load({
           rememberSessionHighlight(unit, engaged)
         }
         if (channels.toast) {
-          toast?.(unit.text + (unit.summary ? '\n' + unit.summary : ''), {
-            holdMs: TOAST_MS,
-            onClick: activateSessionFromUnit(unit),
-          })
+          showPageNotification(unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit))
         }
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
         // toast 库缺失时卡片不存在,补位音随之禁用(声明与可用分离,可用性在调用点合流);
@@ -1032,7 +1067,7 @@ window.__ModuleLoader__.load({
         pendingReminders.delete(unit.id)
         if (actionHandled(unit)) return
         // 补发独立于聚焦静默与路由名单:它就是"通道没送达"的兜底
-        toast?.('[再次提醒] ' + unit.text + (unit.summary ? '\n' + unit.summary : ''), { holdMs: TOAST_MS, onClick: activateSessionFromUnit(unit) })
+        showPageNotification('[再次提醒] ' + unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit))
         playSound(resolveSound(unit.category, effectiveMapping(), uploadedIds)).catch(() => {})
         startTitleBlink()
       }, ACTION_REMIND_MS)
@@ -1120,6 +1155,7 @@ window.__ModuleLoader__.load({
         const highlightListener = window[KEY_HL_LISTENER]
         const highlightVisibility = window[KEY_HL_VISIBLE]
         const highlightObserver = window[KEY_HL_OBSERVER]
+        const disposeAudio = startAudio()
         refreshSounds()
         const dispose = () => {
           if (stopNotifications !== dispose) return
@@ -1127,6 +1163,7 @@ window.__ModuleLoader__.load({
           snapshot.dispose()
           controller.abort()
           closeClaimDb()
+          disposeAudio()
           for (const item of notificationOwners) item.unsubscribe?.()
           notificationOwners.clear()
           activeNotificationOwner = null
@@ -1370,6 +1407,7 @@ window.__ModuleLoader__.load({
       const [pageSoundCategories, setPageSoundCategoriesState] = useState(() => readPageSoundCategories())
       // 页内提示音场景映射镜像:select 变更即写 localStorage,仅存本机
       const [pageMapping, setPageMappingState] = useState(() => readPageMapping())
+      const [toastAppearance, setToastAppearance] = useState(readToastAppearance)
       // 待确认上传:文件选中且解码校验通过后挂起,用户试听并确认才落盘
       const [pendingUploads, setPendingUploads] = useState([])
       // 面板分区:tab 切换仅显隐,不触碰任何已装载状态
@@ -1385,6 +1423,14 @@ window.__ModuleLoader__.load({
             setConfigLoaded(true)
           })
           .catch(() => {})
+      }, [])
+
+      useEffect(() => {
+        const syncAppearance = (event) => {
+          if (event.key === KEY_TOAST_APPEARANCE || event.key === null) setToastAppearance(readToastAppearance())
+        }
+        window.addEventListener('storage', syncAppearance)
+        return () => window.removeEventListener('storage', syncAppearance)
       }, [])
 
       // 操作反馈出口:统一浮出通知,成功 ok / 失败 error;toast 模块缺失降级 console
@@ -1638,7 +1684,7 @@ window.__ModuleLoader__.load({
           patch('toast 库未装载(权威消费方未安装),页内通知通道不可用', 'error')
           return
         }
-        toast('[dsh] 页内通知测试', { holdMs: TOAST_MS })
+        showPageNotification('[dsh] 页内通知测试')
         // 复用页内提示音开关,点火即播,音色按页内场景映射解析;播放结果回执可见
         if (localGet(KEY_PAGE_SOUND) === '1') {
           const sound = resolveSound('completed', effectivePageMapping, soundIds)
@@ -1980,6 +2026,19 @@ window.__ModuleLoader__.load({
                 }),
                 ' 开启'),
             ], '页面角落浮出卡片提示;聚焦时通知声音静默,提示音的听觉提醒由页内提示音场景独立承担。'),
+            field('提示样式', [
+              h('select', {
+                className: 'tn-select', 'aria-label': '页内提示样式', value: toastAppearance,
+                onChange: (e) => {
+                  localSet(KEY_TOAST_APPEARANCE, e.target.value)
+                  setToastAppearance(readToastAppearance())
+                },
+              }, Object.entries(TOAST_APPEARANCES).map(([value, label]) => h('option', { key: value, value }, label))),
+              h('button', {
+                className: 'tn-btn', disabled: !toast, onClick: previewPageNotification,
+                title: '预览当前页内提示样式,不播放声音',
+              }, '预览样式'),
+            ], '标准浮条使用宿主通知配色;主题卡片使用宿主面板配色,两者均跟随亮暗主题。选择即保存,新通知与二次提醒即时生效。'),
             field('页内提示音', [
               h('label', { className: 'tn-meta tn-switch', title: '页内提示音总开关:页内提示弹出且未播放通知声音时补一声提示(聚焦时通知声音静默,靠它保留听觉提醒);与通知声音互斥,同一通知至多一声,音量与本页音量滑块共用' },
                 ...switchToggle({
@@ -2378,7 +2437,7 @@ window.__ModuleLoader__.load({
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
       // 页内通知的展示结果经 require 桩捕获,不在本包断言
-      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders },
+      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification },
     }
   },
 })

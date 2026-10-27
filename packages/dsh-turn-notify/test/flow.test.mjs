@@ -28,8 +28,9 @@ class BrokenStorage {
 // 以注入的 stub 加载真实 src/client.js,返回捕获的模块对象、页内通知捕获表与 window 桩。
 // shortTimers:闪烁常量替换为毫秒级,配合真实定时器验证硬顶与重入(node:test mock.timers
 // 拦截不到 new Function 沙箱里的 timer,不能用于本 loader)
-function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers, indexedDB, abortSignalImpl = AbortSignal }) {
-  const raw = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOverride, shortTimers, timerImpl = setTimeout, clearTimerImpl = clearTimeout, intervalImpl = setInterval, clearIntervalImpl = clearInterval, dateImpl = Date, reactImpl, indexedDB, abortSignalImpl = AbortSignal }) {
+  const raw = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8').replace('__test: { poll,', '__test: { startTitleBlink, playAudible, poll,')
+  assert.ok(raw.includes('__test: { startTitleBlink, playAudible, poll,'), '测试钩子注入锚点失效:src/client.js 的 __test 行格式已变,核对替换锚点')
   const source = shortTimers
     ? raw.replace('const TOAST_MS = 6 * 1000', 'const TOAST_MS = 60')
       .replace('const BLINK_MS = 1 * 1000', 'const BLINK_MS = 20')
@@ -72,7 +73,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
         } }),
       }
     }
-    return reactStub
+    return reactImpl || reactStub
   }
   const defaultFetch = async (path) => {
     if (onFetch) onFetch(path)
@@ -82,7 +83,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     return { ok: true, json: async () => payload }
   }
   const factory = new Function(
-    'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification', 'requestAnimationFrame', 'cancelAnimationFrame', 'AbortSignal',
+    'window', 'require', 'document', 'MutationObserver', 'fetch', 'Notification', 'requestAnimationFrame', 'cancelAnimationFrame', 'AbortSignal', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date',
     source + '\n;return null',
   )
   let calls = 0
@@ -96,6 +97,7 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     fn => setTimeout(fn, 0),
     id => clearTimeout(id),
     abortSignalImpl,
+    timerImpl, clearTimerImpl, intervalImpl, clearIntervalImpl, dateImpl,
   )
   assert.equal(modules.length, 1, 'client.js 模块未被捕获')
   // load({id, factory}) 结构:再调 factory(require) 得到真正的模块对象
@@ -118,6 +120,125 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
     },
   }
 }
+
+test('F22 Given 每隔5秒再通知 When 到首次30秒绝对期限 Then 重入不延长且恢复原标题', () => {
+  let now = 0, next = 0
+  const jobs = new Map()
+  class Clock extends Date { static now() { return now } }
+  const timer = (fn, delay, interval = false) => { jobs.set(++next, { fn, at: now + delay, delay, interval }); return next }
+  const advance = ms => {
+    const target = now + ms
+    while (true) {
+      const entry = [...jobs].filter(([, job]) => job.at <= target).sort((a, b) => a[1].at - b[1].at)[0]
+      if (!entry) break
+      const [id, job] = entry
+      now = job.at
+      if (job.interval) job.at += job.delay
+      else jobs.delete(id)
+      job.fn()
+    }
+    now = target
+  }
+  const f = loadClient({ storage: new FakeStorage(), payload: {}, dateImpl: Clock,
+    timerImpl: (fn, delay) => timer(fn, delay), clearTimerImpl: id => jobs.delete(id),
+    intervalImpl: (fn, delay) => timer(fn, delay, true), clearIntervalImpl: id => jobs.delete(id),
+  })
+  f.mod.__test.startTitleBlink()
+  for (let i = 0; i < 5; i++) { advance(5 * 1000); f.mod.__test.startTitleBlink() }
+  advance(5 * 1000)
+  assert.equal(jobs.size, 0, '首次deadline必须清理全部闪烁timer')
+  assert.equal(f.document.title, 'dsh')
+  f.mod.__test.startTitleBlink()
+  advance(6 * 1000)
+  assert.equal(jobs.size, 0, '下一轮拥有新的首次期限,无重入则正常停止')
+})
+
+function audioFixture(f) {
+  const contexts = []
+  f.window.AudioContext = class {
+    state = 'running'
+    currentTime = 0
+    played = 0
+    closed = 0
+    constructor() { contexts.push(this) }
+    async close() { this.closed++; this.state = 'closed' }
+    async resume() {}
+    async decodeAudioData() { return {} }
+    createGain() { return { gain: { value: 1 }, connect() {} } }
+    createBufferSource() { return { connect() {}, start: () => { this.played++ } } }
+  }
+  const click = () => { for (const listener of [...(f.window.listeners.pointerdown || [])]) listener() }
+  return { contexts, click }
+}
+
+test('F30 Given factory尚未激活 When 用户pointerdown Then 不创建音频上下文', () => {
+  const f = loadClient({ storage: new FakeStorage(), payload: {} })
+  const audio = audioFixture(f)
+  audio.click()
+  assert.equal(audio.contexts.length, 0)
+})
+
+test('F30 Given 同factory两个租约已解锁并缓存音频 When 分别退出再激活 Then 最后退出关闭上下文清缓存且旧listener不复活', async () => {
+  let soundFetches = 0
+  const f = loadClient({ storage: new FakeStorage(), payload: {}, fetchImpl: async path => {
+    if (path.includes('/sound?')) { soundFetches++; return { ok: true, arrayBuffer: async () => new ArrayBuffer(1) } }
+    return { ok: true, json: async () => ({ sounds: [] }) }
+  } })
+  const audio = audioFixture(f), offA = f.mod.__test.start(), offB = f.mod.__test.start()
+  const oldListeners = [...f.window.listeners.pointerdown]
+  audio.click()
+  await f.mod.__test.playAudible({ kind: 'custom', id: 'audio' })
+  offA()
+  assert.equal(audio.contexts[0].closed, 0)
+  await f.mod.__test.playAudible({ kind: 'custom', id: 'audio' })
+  assert.equal(soundFetches, 1)
+  offB()
+  assert.equal(audio.contexts[0].closed, 1)
+  for (const listener of oldListeners) listener()
+  assert.equal(audio.contexts.length, 1)
+  const offC = f.mod.__test.start()
+  audio.click()
+  await f.mod.__test.playAudible({ kind: 'custom', id: 'audio' })
+  assert.equal(audio.contexts.length, 2)
+  assert.equal(soundFetches, 2, '最后退出后解码cache不可跨租约复用')
+  offC()
+  assert.equal(audio.contexts[1].closed, 1)
+})
+
+test('F30 Given 旧代已有音频且新factory接管 When 旧listener迟到及旧租约退出 Then 仅新代可解锁且存活上下文不被关闭', () => {
+  const f = loadClient({ storage: new FakeStorage(), payload: {} }), audio = audioFixture(f)
+  const offA = f.mod.__test.start()
+  audio.click()
+  const late = [...f.window.listeners.pointerdown]
+  const fresh = f.reload(), offB = fresh.__test.start()
+  assert.equal(audio.contexts[0].closed, 1)
+  for (const listener of late) listener()
+  assert.equal(audio.contexts.length, 1)
+  audio.click()
+  assert.equal(audio.contexts.length, 2)
+  offA()
+  assert.equal(audio.contexts[1].closed, 0)
+  offB()
+  assert.equal(audio.contexts[1].closed, 1)
+})
+
+test('F30 Given 自定义音频decode在途 When 最后租约退出再返回 Then 不播放也不回填旧缓存', async () => {
+  let decode, entered
+  const decoding = new Promise(resolve => { entered = resolve })
+  const f = loadClient({ storage: new FakeStorage(), payload: {}, fetchImpl: async path => path.includes('/sound?')
+    ? { ok: true, arrayBuffer: async () => new ArrayBuffer(1) }
+    : { ok: true, json: async () => ({ sounds: [] }) } })
+  const audio = audioFixture(f), off = f.mod.__test.start()
+  audio.click()
+  audio.contexts[0].decodeAudioData = () => { entered(); return new Promise(resolve => { decode = resolve }) }
+  const playing = f.mod.__test.playAudible({ kind: 'custom', id: 'late' })
+  await decoding
+  off()
+  decode({})
+  const result = await playing
+  assert.equal(result.ok, false)
+  assert.equal(audio.contexts[0].played, 0)
+})
 
 // 仅模拟 IDB 边界：同库 readwrite 事务串行，事务完成前不发布写入。
 function indexedDbFixture() {
@@ -918,6 +1039,115 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
   await new Promise((resolve) => { setTimeout(resolve, 0) })
   assert.ok(fetched.indexOf('/api/turn-notify/sounds') >= 0)
+})
+
+test('Given 偏好面板 When 选择样式与预览 Then 保存本机偏好并用于页内测试通知', async () => {
+  const states = [], cleanups = []
+  let cursor = 0, runEffects = true
+  const reactImpl = {
+    useState(initial) {
+      const index = cursor++
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
+      return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value }]
+    },
+    useRef: value => ({ current: value }),
+    useEffect(effect) { if (runEffects) cleanups.push(effect()) },
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+  }
+  const storage = new FakeStorage(), fetched = []
+  const { mod, shown, window: winStub } = loadClient({ storage, reactImpl, onFetch: path => fetched.push(path), payload: { units: [], version: 1 } })
+  let component
+  mod.apply({
+    get: () => ({}), inject() {}, effect() {},
+    slots: {
+      inject: (_name, register) => register(),
+      register: (_entry, render) => { component = render().type },
+    },
+  })
+  const render = () => { cursor = 0; const tree = component(); runEffects = false; return tree }
+  const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node)
+    ? node.flatMap(nodes) : [node, ...node.children.flatMap(nodes)]
+  const button = (tree, label) => nodes(tree).find(node => node.type === 'button' && node.children.includes(label))
+  button(render(), '偏好').props.onClick()
+  const select = nodes(render()).find(node => node.props['aria-label'] === '页内提示样式')
+  assert.equal(select.props.value, 'toast')
+  const requestsBefore = fetched.length
+  select.props.onChange({ target: { value: 'panel' } })
+  assert.equal(fetched.length, requestsBefore, '样式只存本机,不发 HTTP 请求')
+  assert.equal(storage.getItem('turn-notify:toast-appearance'), 'panel')
+  assert.equal(nodes(render()).find(node => node.props['aria-label'] === '页内提示样式').props.value, 'panel')
+  let audioStarts = 0
+  winStub.AudioContext = class { constructor() { audioStarts += 1; this.state = 'running' } }
+  storage.setItem('turn-notify:page-sound', '1')
+  button(render(), '预览样式').props.onClick()
+  assert.equal(audioStarts, 0, '即使页内提示音开启,样式预览也不创建音频上下文')
+  storage.setItem('turn-notify:page-sound', '0')
+  assert.equal(shown.length, 1, '预览仅产生一条页内通知')
+  assert.equal(shown[0].opts.appearance, 'panel')
+  button(render(), '测试').props.onClick()
+  button(render(), '测试页内通知').props.onClick()
+  assert.equal(shown[1].text, '[dsh] 页内通知测试')
+  assert.equal(shown[1].opts.appearance, 'panel')
+  button(render(), '偏好').props.onClick()
+  storage.setItem('turn-notify:toast-appearance', 'toast')
+  for (const listener of winStub.listeners.storage) listener({ key: 'turn-notify:toast-appearance' })
+  assert.equal(nodes(render()).find(node => node.props['aria-label'] === '页内提示样式').props.value, 'toast')
+  storage.setItem('turn-notify:toast-appearance', 'panel')
+  for (const listener of winStub.listeners.storage) listener({ key: 'turn-notify:toast-appearance' })
+  assert.equal(nodes(render()).find(node => node.props['aria-label'] === '页内提示样式').props.value, 'panel')
+  storage.removeItem('turn-notify:toast-appearance')
+  for (const listener of winStub.listeners.storage) listener({ key: null })
+  assert.equal(nodes(render()).find(node => node.props['aria-label'] === '页内提示样式').props.value, 'toast')
+  for (const cleanup of cleanups) cleanup?.()
+  assert.equal(winStub.listeners.storage.length, 0, '卸载移除存储监听')
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('Given 未配置或非法样式 When 通知送达 Then 使用标准浮条', async () => {
+  for (const appearance of [undefined, '', 'invalid', '__proto__']) {
+    const storage = new FakeStorage(appearance === undefined ? {} : { 'turn-notify:toast-appearance': appearance })
+    const { mod, shown } = loadClient({ storage, payload: { units: [{ id: 'style-default', category: 'completed', text: '通知' }], version: 1 } })
+    await mod.__test.poll()
+    await mod.__test.poll()
+    assert.equal(shown.at(-1).opts.appearance, 'toast')
+  }
+})
+
+test('Given 本机选择主题卡片 When 通知与刷新后预览 Then 共用持久偏好且摘要换行与直达保留', async () => {
+  const storage = new FakeStorage({ 'turn-notify:toast-appearance': 'panel' })
+  const { mod, shown, reload } = loadClient({ storage, payload: {
+    units: [{ id: 'style-panel', category: 'completed', text: '任务完成', summary: '耗时 12 秒' }], version: 1,
+  } })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(shown[0].text, '任务完成\n耗时 12 秒')
+  assert.equal(shown[0].opts.appearance, 'panel')
+  assert.equal(shown[0].opts.holdMs, 6 * 1000)
+  assert.equal(typeof shown[0].opts.onClick, 'function')
+  reload().__test.previewPageNotification()
+  assert.equal(shown.at(-1).opts.appearance, 'panel')
+  storage.setItem('turn-notify:toast-appearance', 'toast')
+  mod.__test.previewPageNotification()
+  assert.equal(shown.at(-1).opts.appearance, 'toast', '已加载窗口每次呈现读取最新偏好')
+})
+
+test('Given 审批已送达后更换样式 When 二次提醒 Then 采用最新样式', async (t) => {
+  const storage = new FakeStorage()
+  const timers = []
+  const { mod, shown } = loadClient({ storage,
+    timerImpl: (callback, ms) => { timers.push({ callback, ms }); return { unref() {} } },
+    payload: { units: [{ id: 'style-reminder', category: 'approval', text: '等待审批' }], version: 1 },
+  })
+  await mod.__test.poll()
+  await mod.__test.poll()
+  assert.equal(shown[0].opts.appearance, 'toast')
+  storage.setItem('turn-notify:toast-appearance', 'panel')
+  const reminder = timers.find(timer => timer.ms === 10 * 60 * 1000)
+  assert.ok(reminder)
+  t.after(() => timers.find(timer => timer.ms === 6 * 1000)?.callback())
+  reminder.callback()
+  assert.equal(shown.at(-1).text, '[再次提醒] 等待审批')
+  assert.equal(shown.at(-1).opts.appearance, 'panel')
 })
 
 test('页内提示通道独立开关:关闭后投影事件不再弹页内提示', async () => {
