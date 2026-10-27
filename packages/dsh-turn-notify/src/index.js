@@ -252,7 +252,7 @@ export function apply(ctx, config) {
   // 事件读序:标题提取需要事件流,按会话累积 user/message 文本;标题封账后不再累积
   const sessionEvents = new Map()
   const titledSessions = new Set()
-  // 回合尾部统计:assistant/message 的 tokens 累加与回答前缀,回合结束随通知消费即清
+  // 回合尾部统计在结束时无条件清账,通知仅使用捕获的快照。
   const assistantTails = new Map()
   // 浏览器在场信号:本插件空间的 WS 订阅连接计数,用于宿主通知去重。
   // 连接生命周期即在场,断连 close 即时出账;出账后经认可窗口收敛,窗口内事件
@@ -290,14 +290,11 @@ export function apply(ctx, config) {
   }
 
   // durationMs 与 wakeTurn / awaitingChildren 由调用方在清理状态前读取后传入,防先删后读
-  function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false, awaitingChildren = false }) {
+  function notifyUnit({ category, kind, reasonKind, session, durationMs = null, wakeTurn = false, awaitingChildren = false, tail = assistantTails.get(String(session.id ?? '')) ?? null }) {
     const settings = readSettings(ctx, config)
     const header = session.header || {}
     const sessionId = String(session.id ?? '')
     if (!shouldNotify({ category, kind, durationMs, settings, header, wakeTurn, awaitingChildren })) return
-    // 回合尾部统计:tokens 与回答前缀随回合结束消费,统计缺失不影响送达
-    const tail = assistantTails.get(sessionId) ?? null
-    assistantTails.delete(sessionId)
     seq += 1
     const summary = buildSummary({
       durationMs,
@@ -400,7 +397,8 @@ export function apply(ctx, config) {
       return
     }
     if (event.type === 'turn/start') {
-      // 回合级标记重置:上一回合的委托与收尾残留不跨回合
+      // 回合级账本不跨回合,即时提问只读当前快照。
+      assistantTails.delete(sessionId)
       turnDelegation.delete(sessionId)
       turnChildSettled.delete(sessionId)
       // 子代理结束后窗口内父会话开新回合 = 回执唤醒回合;标记即消费,仅首个回合生效。
@@ -426,10 +424,12 @@ export function apply(ctx, config) {
       // 先读后清:通知决策需要回合时长(相对 start 的差值)与唤醒标记;
       // 无 start 记录(如观察器中途装载)时长置 null,碎轮过滤跳过
       endedTurn = {
+        tail: assistantTails.get(sessionId) ?? null,
         durationMs: currentTurnStart === undefined ? null : now - currentTurnStart.at,
         wakeTurn: wakeTurns.has(sessionId),
         awaitingChildren,
       }
+      assistantTails.delete(sessionId)
       turnDelegation.delete(sessionId)
       turnChildSettled.delete(sessionId)
       // 子代理会话收尾:记录到父会话名下,供其唤醒回合判定;注销活动注册;

@@ -213,14 +213,14 @@ test('渲染产物:栈容器类名、变体类、role 与 sticky 按钮接线', 
   const items = tree.children.flat()
   const okItem = items.find((vnode) => vnode.props.item.text === '普通')
   const okTree = okItem.type(okItem.props)
-  assert.equal(okTree.props.className, 'dsh-toast dsh-toast--ok')
+  assert.equal(okTree.props.className, 'dsh-toast dsh-toast--ok dsh-toast--toast')
   assert.equal(okTree.props.role, 'alert')
   assert.equal(okTree.props.onClick, undefined, '无 onClick 条目整卡不可点')
   assert.equal(okTree.children[1], null, '非 sticky 无按钮')
 
   const stickyItem = items.find((vnode) => vnode.props.item.text === '常驻')
   const stickyTree = stickyItem.type(stickyItem.props)
-  assert.equal(stickyTree.props.className, 'dsh-toast dsh-toast--error')
+  assert.equal(stickyTree.props.className, 'dsh-toast dsh-toast--error dsh-toast--toast')
   const button = stickyTree.children[1]
   assert.equal(button.type, 'button')
   assert.equal(button.props.className, 'dsh-toast__close')
@@ -237,7 +237,7 @@ test('渲染产物:onClick 条目整卡可点,点击即消失并触发回调;按
   const tree = root.vnode.type()
   const vnode = tree.children.flat().find((entry) => entry.props.item.text === '可点通知')
   const card = vnode.type(vnode.props)
-  assert.equal(card.props.className, 'dsh-toast dsh-toast--info dsh-toast--click', '可点条目带标记类')
+  assert.equal(card.props.className, 'dsh-toast dsh-toast--info dsh-toast--toast dsh-toast--click', '可点条目带标记类')
   card.props.onClick()
   assert.equal(activated, true, '点击触发回调')
   assert.equal(mod.toast.__test.getItems().length, 0, '点击后条目消失')
@@ -282,22 +282,54 @@ test('CSS 内容齐备:选择器、变体、动画与减弱动态块', () => {
   }
 })
 
-test('配色走官方 dsw 令牌:局部 token 封装,禁用明暗反转语义错误的 label-primary-inverted', () => {
+test('Given 通知含状态与多行文本 When 渲染两种样式 Then 保留选择、摘要和关闭动作', () => {
+  const state = makeState()
+  const { mod, roots } = loadRenderModule(state)
+  for (const appearance of ['toast', 'panel']) {
+    for (const kind of ['info', 'ok', 'error']) {
+      mod.toast.show('标题\n摘要', { kind, appearance, sticky: true })
+      const tree = roots.at(-1).vnode.type()
+      const vnode = tree.children.flat().at(-1)
+      const card = vnode.type(vnode.props)
+      assert.equal(card.props.className, 'dsh-toast dsh-toast--' + kind + ' dsh-toast--' + appearance)
+      assert.equal(card.children[0].props.className, 'dsh-toast__text')
+      assert.equal(card.children[0].children[0], '标题\n摘要')
+      card.children[1].props.onClick({ stopPropagation() {} })
+      assert.equal(mod.toast.__test.getItems().length, 0)
+    }
+  }
+  for (const appearance of [undefined, '', 'unknown', {}, '__proto__']) {
+    mod.toast.show('默认样式', { appearance })
+    assert.equal(mod.toast.__test.getItems().at(-1).appearance, 'toast')
+  }
+})
+
+test('主题色契约:每种样式成对消费宿主变量,状态色仅强调边框', () => {
   const state = makeState()
   const { mod } = loadModule(state)
   mod.toast.show('建立样式')
   const css = state.byId.get(STYLE_ID).textContent
-  // 槽位定义引用官方 toast 专用 alias(亮暗两套均近白);反转令牌在暗色下解析为深色,深底深字即 issue #4
-  for (const needle of ['--dct-bg:var(--dsw-alias-toast-bg,', '--dct-label:var(--dsw-alias-toast-label,']) {
-    assert.ok(css.includes(needle), 'CSS 缺少官方 toast 令牌封装 ' + needle)
+  for (const needle of [
+    '--dct-bg:var(--dsw-alias-toast-bg)', '--dct-label:var(--dsw-alias-toast-label)',
+    '--dct-panel-bg:var(--dsw-alias-bg-layer-1)', '--dct-text:var(--dsw-alias-label-primary)',
+    'background:var(--dct-panel-bg)', 'color:var(--dct-text)', 'white-space:pre-line',
+  ]) assert.ok(css.includes(needle), 'CSS 缺少 ' + needle)
+  const rule = selector => css.slice(css.indexOf(selector + ' {')).split('}')[0]
+  for (const [selector, bg, text] of [
+    ['.dsh-toast', '--dct-bg', '--dct-label'],
+    ['.dsh-toast--panel', '--dct-panel-bg', '--dct-text'],
+  ]) {
+    assert.ok(rule(selector).includes('background:var(' + bg + ')'))
+    assert.ok(rule(selector).includes('color:var(' + text + ')'))
   }
-  // fallback 字面量锁值:防 fallback 被改成深底深字的暗色反转值(如 #353638)
-  for (const needle of ['#43454a', '#fff']) {
-    assert.ok(css.includes(needle), 'CSS 缺少官方同值 fallback ' + needle)
+  assert.ok(rule('.dsh-toast__close').includes('background:transparent'))
+  assert.ok(rule('.dsh-toast__close').includes('color:inherit'))
+  assert.doesNotMatch(rule('.dsh-toast__close'), /opacity:/)
+  for (const kind of ['ok', 'error']) {
+    const body = css.match(new RegExp('\\.dsh-toast--' + kind + ' \\{([^}]+)\\}'))?.[1]
+    assert.ok(body?.includes('border-inline-start-color:'), '状态只影响强调边框')
+    assert.doesNotMatch(body, /(?:background|(?:^|;)\s*color)\s*:/)
   }
-  assert.ok(!css.includes('label-primary-inverted'), '禁用明暗随主题反转的文字令牌')
-  assert.ok(!css.includes('rgba(') && !css.includes('rgb('), 'fallback 一律官方同值字面量,不留自造配色')
-  // 规则内禁止裸引用宿主别名,一律消费局部 token(插件 UI 统一设计规范)
-  const bodyRules = css.replace(/^  --dct-.*$/gm, '').split('\n').join(' ')
-  assert.ok(!/--dsw-alias-/.test(bodyRules), '组件规则只消费包局部 token,不散落宿主别名')
+  assert.doesNotMatch(css, /#[\da-f]{3,8}\b|rgba?\(|label-primary-inverted|var\([^)]*,/i)
+  assert.doesNotMatch(css.replace(/--dct-[\w-]+:var\(--dsw-[\w-]+\);?/g, ''), /--dsw-alias-/)
 })

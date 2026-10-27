@@ -103,7 +103,10 @@ client 由 session-manager 全仓唯一占位条目代挂，必须先于消费�
 ```js
 const { toast } = require('@mzzsfy/dsh-common-tools/client')
 toast.show('已归档', { kind: 'ok' })
+toast.show('任务完成\n耗时 12 秒', { appearance: 'panel', holdMs: 6000 })
 ```
+
+自 0.3.0 起,`appearance` 支持 `toast`(默认,宿主 toast-bg/toast-label 色对)与 `panel`(宿主 bg-layer-1/label-primary 色对)。两种样式随宿主亮暗主题更新,成功/错误只强调边框,不覆盖底色或文案颜色;多行文本保留换行。未知值使用 `toast`,设置仅作用于本条通知。`kind` 支持 info/ok/error,`sticky: true` 常驻并显示“知道了”,`onClick` 点击直达,`holdMs` 指定自动消失时间(默认 4 秒)。
 
 ## 测试
 
