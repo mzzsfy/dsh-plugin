@@ -31,7 +31,7 @@
 
 ## 验证
 
-- `node --test "test/*.test.mjs"`: 37 场景 + 8 api 用例 + 11 ai 开关注册面 + 11 守卫断言 + client 端 8 用例(id 守卫 + 总线生命周期;mock webServer + 真实 http/net 端到端)
+- `npm test`(经 _mocks.common-tools.mjs 预载公共依赖桩): 37 场景 + 8 api 用例 + 11 ai 开关注册面 + 11 守卫断言 + client 端 8 用例(id 守卫 + 总线生命周期;mock webServer + 真实 http/net 端到端)
 - `node scripts/compat/tunnel-fullchain.mjs`: 隔离 dsh 实例全链路(真实激活/恢复/分发面七项探针)
 
 ## 设计文档

@@ -5,7 +5,9 @@
 // 页面渲染工作区文案且无 Failed to load plugins + LLM 链路 + 无行级加载失败);
 // --crash-only = 不崩溃(正常访问 + 页面渲染且无 Failed to load plugins +
 // 无行级加载失败,跳过模拟器/activation/LLM——窗口基线槽口径)。
-// 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH] [--skip-externals] [--crash-only]
+// 用法:node scripts/compat/run.mjs --version <v> [--port N] [--host-dir PATH] [--work-root PATH]
+//   [--only 包,包] [--skip-externals] [--crash-only] [--seed-gateway](主测槽:seed echo 路由入隔离 profile)
+//   [--keep](宿主+模拟器驻留交接,live.json 落盘,收尾 keep-stop.mjs;与 --crash-only 互斥)
 import { spawn, spawnSync } from 'node:child_process'
 import { createWriteStream, existsSync, lstatSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'

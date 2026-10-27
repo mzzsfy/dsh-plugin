@@ -51,7 +51,7 @@ cd packages/dsh-boss-simulator
 npm test                                        # node --test "test/*.test.mjs"
 ```
 
-测试覆盖:核心编排/查询/设置/任务状态机、board 路由、管理员会话生命周期、工具行与隔离、报表事件归并、跟随恢复、用量台账、client 行为与结构守卫、浏览器端到端(browser/)。
+测试覆盖:核心编排/查询/设置/任务状态机、board 路由、管理员会话生命周期、工具行与隔离、报表事件归并、跟随恢复、用量台账、client 行为与结构守卫;浏览器端到端经 `test/browser/run.mjs` 单独驱动,不在默认 `npm test` 内(live-workbench 用例另需独立宿主 :9382)。
 
 ## dsh 版本兼容
 

@@ -46,7 +46,7 @@
 ```sh
 node scripts/dev-link.mjs dsh-cron-board   # 挂载工作副本到 profile
 cd packages/dsh-cron-board
-node --test "test/*.test.mjs"              # 测试
+npm test                                   # 测试(经 _mocks.common-tools.mjs 预载公共依赖桩)
 ```
 
 注意:插件新增进入 profile bundles(`dsh plugin add`)后需 dsh 重启一次完成首装载;此后工作副本改动经 dev-link HMR 热重载。

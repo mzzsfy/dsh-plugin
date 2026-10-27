@@ -211,7 +211,7 @@ function publishOne(dirName, opts) {
         console.log(`SKIP  ${name}@${version} 线上已最新,tag ${tag} 后包目录无变更,无需发版`)
         return
       }
-      fail(`本地 ${version} 与线上相同,但 tag ${tag} 后包目录有 ${commits} 个新提交未发布。请传 --bump patch|minor|major 后发布(feat 用 minor,fix/style 用 patch)`)
+      fail(`本地 ${version} 与线上相同,但 tag ${tag} 后包目录有 ${commits} 个新提交未发布。请传 --bump patch|minor|major 后发布(feat 用 minor,fix/style 用 patch;完整映射见 DEVELOPMENT/structure-and-release.md 版本位规则)`)
     } else if (order < 0) {
       fail(`本地 ${version} 低于线上 ${online},拒绝发布(防版本回退)。请提升版本号(--bump 仅适用于本地等于线上的场景)`)
     } else if (opts.bump) {

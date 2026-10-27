@@ -17,10 +17,12 @@ node scripts/publish.mjs <包名|all> [--bump patch|minor|major] [--skip-test] [
 - 测试门按目标分流:`node scripts/publish.mjs <包名>` 运行目标包有效 `npm test`；若 `test` script 缺失、空白则报错并拒绝无测试发布。`all` 先运行全仓 `aggregate-tests.mjs --rounds 1`,再对有有效 `test` script 的包逐个运行测试,无脚本包跳过；任一实际运行的测试失败均阻断发布。`--skip-test` 显式跳过聚合门和包测试,会警告未经测试发布,不得作为常规提速方式。
 
 - npm 2FA 认证需交互终端(publish.mjs 本身不检测 TTY,非 TTY 下会在 npm 认证阶段卡住),用 terminal 工具执行;认证 URL 出现后由人浏览器完成认证,发布自动续跑;--dry-run 无此要求
-- 每包独立版本 tag(格式 `@mzzsfy-<包>-v<版本>`,轻量 tag),发版即对齐:发布成功后脚本自动提交该包版本号变更(`chore(<包>): 发版版本号 x.y.z`)并把 tag 打在该提交上,tag 始终指向该版本的完整源码状态,不再需要手动"版本号对齐"提交
+- 发布范围必须已提交：目标包有修改、暂存或未跟踪文件即拒绝，包括 dry-run。`--bump` 由脚本修改版本并单独提交 manifest，测试之后再次核对源码洁净，再执行 `npm pack --ignore-scripts`；只允许打包已跟踪文件。包内 npmPublish 脚本不再用于构造或发布另一份目录内容。
+- 每次发布在系统临时目录保留 tarball 与 release.json，记录 commit、打包文件清单和 SHA-512 integrity；发布这同一份 tarball，禁用发布生命周期脚本。失败时保留记录用于核对 registry，不能仅凭线上同版本认定内容一致。
+- 每包独立版本 tag(格式 `@mzzsfy-<包>-v<版本>`,轻量 tag)，发布成功后将 tag 指向记录中的确切源码提交；发布期间 HEAD 推进不改变该指向。推送仍由维护者执行。
 - 发版判定(本地版本==线上时)以版本 tag 后的包目录提交数为事实源:
   - tag 后无提交 → SKIP,该包无需发版(禁止凭"感觉有改动"重复发版,避免用户误判需要更新)
-  - tag 后有提交 → 拒绝发布并提示提交数,必须显式传 --bump(防止代码已变而版本号未动被误判为无需更新而漏发);feat 用 minor,fix/style 用 patch
-  - 本地 tag 缺失 → 补打 tag 并跳过(自愈历史"发布成功未打 tag"状态)
+  - tag 后有提交 → 拒绝发布并提示提交数,必须显式传 --bump(防止代码已变而版本号未动被误判为无需更新而漏发);映射同上文"版本位"规则:feat 用 minor,fix/style 用 patch,breaking(含 refactor! 等)0.x 走 minor、1.x 走 major,普通 refactor 触及功能面随 fix 走 patch
+  - 本地 tag 缺失 → 拒绝；维护者必须比较 registry tarball 与可还原的历史提交后恢复 tag，不得自动绑定当前 HEAD
 - 本地版本低于线上:拒绝(防版本回退);高于线上:直接发布(--bump 仅适用于本地等于线上的场景)
 - 推送 main 与 tag 由维护者执行;发版后重跑 `node scripts/dev-link.mjs all`,让 profile 依赖行追上线上新版本

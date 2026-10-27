@@ -2,8 +2,8 @@
 
 ## 新 clone 初始化(按序执行,顺序有依赖)
 
-1. 仓库根解析桥:包测试与仓库级测试的外部依赖解析依赖根 node_modules(CI 同款钉版清单见 `.github/workflows/test.yml`「安装宿主 peer」步,或 `node scripts/install-externals.mjs` 装各包外部依赖);本机已装 dsh 本体时,`@deepseek-ai/*` 宿主 API 也可经目录逐级兜底解析到本体安装目录(DEVELOPMENT/dsh-api-alignment.md)
-2. `node scripts/dev-link.mjs all`:自动为各包安装外部依赖(包内 node_modules)并挂工作副本——包内 `npm test` 依赖此步先完成,直接跑包测试报 ERR_MODULE_NOT_FOUND 时先查包内 node_modules 是否存在
+1. 仓库根解析桥(不可省):包测试与仓库级测试的外部依赖解析依赖根 node_modules(CI 同款钉版清单见 `.github/workflows/test.yml`「安装宿主 peer」步,或 `node scripts/install-externals.mjs` 装各包外部依赖);本机已装 dsh 本体时,`@deepseek-ai/*` 宿主 API 也可经目录逐级兜底解析到本体安装目录(DEVELOPMENT/dsh-api-alignment.md)
+2. `node scripts/dev-link.mjs all`:自动为各包安装外部依赖(包内 node_modules)并挂工作副本——包内 `npm test` 依赖此步先完成;直接跑包测试报 ERR_MODULE_NOT_FOUND 时,先查包内 node_modules:不存在 → 重跑本步;已存在仍报错 → 核对第 1 步根 node_modules(宿主 peer 桥),并按该包 manifest 的 scripts.test 原样命令执行(部分包需 mock 预载参数,勿裸跑 `node --test`)
 3. 之后进入下述日常循环
 
 ## 日常开发循环

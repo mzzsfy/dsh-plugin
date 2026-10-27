@@ -3,6 +3,8 @@
 // 对象内,跨命令存活——实测孤儿形态会被滞后清理扫掉,必须常驻持有)。
 // 宿主退出即按同参重启并更新 live.json(新 boot 新 token);STOP 文件存在则退出。
 // 用法:node scripts/compat/boot-keep.mjs --daemon --version <v> [--only 包,包] [--port N]
+//   [--llm-port N](echo 模拟器端口,seed 与探活用,默认 18123) [--host-dir PATH]
+//   [--refuse-port-owner](端口被占即拒绝清理) [--keep-sessions](夹具轮跳过净启动清会话)
 import { spawn } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'

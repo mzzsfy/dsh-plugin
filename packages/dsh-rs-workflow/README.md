@@ -1,6 +1,6 @@
 # @mzzsfy/dsh-rs-workflow
 
-若水工作流 dsh 插件——设置面:流程模板管理与工作位/预算配置。模板编辑(host dryRun 权威校验)、只读详情、模板规范、六工作位与三预算配置读写;模板一键释放为「若水·<label>」Agent 预设组合,提供主循环编排(七工具)、分段推进、结构化产出契约、审批原语与运行记录;会话页签「若水编排」回看运行。
+若水工作流 dsh 插件——设置面:流程模板管理与工作位/预算配置。模板编辑(host dryRun 单模板权威校验,跨流程校验在释放权威点)、只读详情、模板规范、六工作位与三预算配置读写;模板一键释放为「若水·<label>」Agent 预设组合,提供主循环编排(七工具)、分段推进、结构化产出契约、审批原语与运行记录;会话页签「若水编排」回看运行。
 
 模板文本为**严格 JSON**(有 GUI 编辑器,无 JSON5 需求);配置与模板存自有文件 `~/.dsh/dsh-rs-workflow/v5/`,**不经宿主 settings 服务,不写 settings.yaml**。
 
@@ -14,7 +14,7 @@
 
 ## HTTP 路由(前缀 `/api/rsww`)
 
-模板与配置:`templates` `template` `template-save`(含 dryRun) `template-remove` `spec` `config` `config-save`
+模板与配置:`templates` `template` `template-save`(含 dryRun:仅单模板校验;跨流程校验在 `release`) `template-remove` `spec` `config` `config-save`
 运行与释放:`runs` `run` `control` `resume-from` `run-remove` `released` `release` `unrelease`
 
 会话运行记录列表与详情刷新经公共 WS 总线 `@mzzsfy/dsh-rs-workflow` 插件通道驱动;首连与重连全量对账,变更广播合并节流。模板与配置使用各自请求刷新。host/client 均在 `apply(ctx)` 调用 `setupCommonTools(ctx)`，通道身份取 `ctx.fiber.entry.options.name` 的完整 npm 包名；client 各实例退出时释放自己的订阅，同一 factory 的存活实例接管共享变更广播，最后实例退出才取消合并计时器；跨 factory HMR 清理旧代。
