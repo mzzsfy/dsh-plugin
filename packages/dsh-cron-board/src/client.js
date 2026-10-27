@@ -394,15 +394,18 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   function factory(require) {
     let React = null
     let ReactDOMClient = null
-    let tools = null
     try {
       React = require('react')
       ReactDOMClient = require('react-dom/client')
-      // 公共工具库:bus 订阅是数据刷新唯一通道,缺失即整面板禁用(无轮询回退)
-      tools = require('@mzzsfy/dsh-common-tools/client')
-    } catch {
+    } catch (error) {
+      // 宿主种子表异常的防御兜底:干净禁用但必须显式报错,禁止静默
+      console.error('[cron-board] react/react-dom 加载失败,面板禁用:', error)
       return noopFactory()
     }
+    // 公共工具库为总线订阅硬消费:数据刷新唯一通道,缺失即 factory 抛错交装载层判定
+    // (client-dependency 规约),禁止吞成静默禁用;单独安装且无 session-manager 代挂
+    // 占位条目时的恢复方法见 README「依赖」节
+    const tools = require('@mzzsfy/dsh-common-tools/client')
     const { useState, useEffect, useRef, useCallback } = React
     const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)
 
