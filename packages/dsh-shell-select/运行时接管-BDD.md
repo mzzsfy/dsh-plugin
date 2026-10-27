@@ -1,5 +1,7 @@
 # shell-select 运行时接管 BDD(能正常加载才禁用官方 pwsh 链)
 
+> 状态:已实施,描述当前行为(guard 代挂与运行时禁用链在 src 中;README「接管失败自动回退官方 pwsh 链」即本设计)。验证版本见包 README 与 `兼容性测试.md`。
+
 背景:原设计以 bundle patch 静态声明 `tool-pwsh: disabled: true` 与
 `pwsh-sandbox: disabled: true`,loader 组合期无条件生效。本包级损伤(import 崩、
 node_modules 损伤)时 guard 哨兵与主行同包同死,官方两行已被禁而无人提供

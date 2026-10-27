@@ -31,13 +31,13 @@
 
 ## 验证
 
-- `node --test "test/*.test.mjs"`: 37 场景 + 8 api 用例 + 11 ai 开关注册面 + 11 守卫断言 + client 端 8 用例(id 守卫 + 总线生命周期;mock webServer + 真实 http/net 端到端)
+- `npm test`(经 _mocks.common-tools.mjs 预载公共依赖桩): 37 场景 + 8 api 用例 + 11 ai 开关注册面 + 11 守卫断言 + client 端 8 用例(id 守卫 + 总线生命周期;mock webServer + 真实 http/net 端到端)
 - `node scripts/compat/tunnel-fullchain.mjs`: 隔离 dsh 实例全链路(真实激活/恢复/分发面七项探针)
 
 ## 设计文档
 
-`docs/调研-路径穿透插件.md`(「方案设计」两节为本包实施规格, 含已知限制); `docs/设计-隧道GUI.md`(GUI/设置/侧边栏注入实施规格)。
+`docs/调研-路径穿透插件.md`(「方案设计」两节为本包实施规格, 含已知限制); `docs/设计-隧道GUI.md`(GUI/设置/侧边栏注入实施规格)。两份均为仓库本地维护文档,不入库,npm 安装读者不可见。
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。

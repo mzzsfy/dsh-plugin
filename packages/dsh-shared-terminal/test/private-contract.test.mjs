@@ -26,7 +26,7 @@ function fixture(t, { cols = 12, rows = 3 } = {}) {
   controller.owners = new Map([['session', owner]])
   const agent = { id: 'session' }
   t.after(() => terminal.dispose())
-  return { terminal, controller, owner, agent }
+  return { terminal, controller, owner, agent, handle }
 }
 
 test('Given real xterm CJK and combining cells, When reading bottom physical rows, Then text and blank rows are preserved', async (t) => {
@@ -51,21 +51,63 @@ test('Given alternate buffer is active, When reading then returning to normal bu
   assert.equal((await readControllerViewport(controller, agent, 'term', 3)).text, 'normal')
 })
 
-test('Given official UI has writable attachment, When reading and resizing in queue, Then no follower or control is replaced', async (t) => {
-  const { terminal, controller, agent } = fixture(t)
+async function attachUI(t, terminal) {
   const signal = new AbortController()
-  const follow = terminal.follow('ui', signal.signal)
-  await follow.next()
-  t.after(() => { signal.abort(); return follow.return() })
+  const input = typeof terminal.attach === 'function' ? new PassThrough({ objectMode: true }) : undefined
+  const follow = input
+    ? terminal.attach(input, { maxCols: terminal.info.cols, maxRows: terminal.info.rows }, signal.signal)
+    : terminal.follow('ui', signal.signal)
+  t.after(async () => { signal.abort(); input?.end(); await follow.return() })
+  const { value: snapshot } = await follow.next()
+  assert.equal(snapshot.type, 'snapshot')
+  const assertWritable = () => input
+    ? assert.equal(terminal.writable(terminal.controller), true)
+    : assert.equal(terminal.info.controllerId, 'ui')
+  if (input) assert.equal(snapshot.writable, true)
+  assertWritable()
+  let sequence = 0
+  return {
+    assertWritable,
+    async resize(cols, rows) {
+      if (!input) return terminal.resize('ui', cols, rows)
+      input.write({ type: 'resize', sequence: ++sequence, cols, rows })
+      while (true) {
+        const { value: frame, done } = await follow.next()
+        assert.equal(done, false, 'UI attachment ended before resize acknowledgement')
+        if (frame.type !== 'ack') continue
+        assert.equal(frame.sequence, sequence)
+        assert.equal(frame.refusal, undefined)
+        return
+      }
+    },
+  }
+}
+
+test('Given official UI has writable attachment, When reading and resizing in queue, Then no follower or control is replaced', async (t) => {
+  const { terminal, controller, agent, handle } = fixture(t)
+  const ui = await attachUI(t, terminal)
   const originalController = terminal.controller
+  const originalFollowers = [...terminal.followers]
+  assert.equal(originalFollowers.length, 1)
   await terminal.output('shared')
-  const resize = terminal.resize('ui', 10, 2)
-  const read = readControllerViewport(controller, agent, 'term', 20)
+  let releaseResize
+  const resizeGate = new Promise((resolve) => { releaseResize = resolve })
+  let startResize
+  const resizeStarted = new Promise((resolve) => { startResize = resolve })
+  handle.resize = async () => { startResize(); await resizeGate }
+  const resize = ui.resize(10, 2)
+  await resizeStarted
+  const read = readControllerViewport(controller, agent, 'term', 20).then((snapshot) => {
+    assert.deepEqual([terminal.screen.cols, terminal.screen.rows], [10, 2])
+    return snapshot
+  })
+  releaseResize()
   await resize
   assert.equal((await read).text, 'shared')
+  assert.deepEqual([terminal.screen.cols, terminal.screen.rows], [10, 2])
   assert.equal(terminal.controller, originalController)
-  assert.equal(terminal.info.controllerId, 'ui')
-  assert.equal(terminal.followers.size, 1)
+  assert.deepEqual([...terminal.followers], originalFollowers)
+  ui.assertWritable()
 })
 
 test('Given foreign or closed terminal identity, When reading through actual Controller lookup, Then unavailable is returned', async (t) => {

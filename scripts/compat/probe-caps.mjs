@@ -1,6 +1,11 @@
 // CAP-01/02/04 真机证据采集:默认目录隔离、预设 roster 干净、requestId→消息/turn 关联。
 // 前置: 隔离场 keeper(0.2.0-rc.2.aitk, 9381/18129)已起。
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { resolve, dirname } from 'node:path'
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const compatWorkspaceCwd = `${repoRoot.replace(/\\/g, '/')}/.compat/0.2.0-rc.2/workspace`
 
 const live = JSON.parse(readFileSync('.compat/0.2.0-rc.2.aitk/live.json', 'utf8'))
 const base = `http://127.0.0.1:${live.port}`
@@ -16,7 +21,7 @@ const evidence = {}
 // CAP-04: requestId 持久化到 user 消息(turn 关联)+Run settled
 const requestId = `cap4-${Date.now().toString(36)}`
 console.log('create:', (await post('drive', { action: 'create', taskId: 't-cap', title: 'CAP 探针', projectWorkspaceId: 'ws1', definition: { goal: '探针目标', acceptanceCriteria: [{ criterionId: 'c1', text: '标准' }] }, workItemId: 'w1' })).body)
-console.log('dispatch:', (await post('drive', { action: 'dispatch', taskId: 't-cap', workItemId: 'w1', phase: 'implement', runId: 'r1', requestId, sessionCwd: '~/Desktop/jzjy/dsh-plugin/.compat/0.2.0-rc.2/workspace' })).body)
+console.log('dispatch:', (await post('drive', { action: 'dispatch', taskId: 't-cap', workItemId: 'w1', phase: 'implement', runId: 'r1', requestId, sessionCwd: compatWorkspaceCwd })).body)
 await new Promise((d) => setTimeout(d, 6000))
 const latest = await (await fetch('http://127.0.0.1:18129/control/requests/latest')).json()
 const userTexts = (latest.messages ?? []).filter((m) => m.role === 'user').map((m) => JSON.stringify(m.content))

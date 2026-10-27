@@ -17,7 +17,7 @@
 - 回合费用芯片:经官方 `conversation.chat.assistant-actions` 槽注入动作行(复制与分支图标之间,官方赞/踩与上下文跳转同排),每轮对话结束后显示该轮估算费用(悬停 title 带 token 摘要与估算口径;显隐节奏随官方动作行——最新一轮常显,历史轮悬停显现;受「费用显示」开关;官方用量芯片弹窗已有 token 明细,芯片只承载费用)。旧宿主无该插槽时告警禁用
 - 定价规则编辑器:设置面板内按**模型分组**编辑,组头 = 模型键(整组一次改名,改后即时重新聚合)+ 删除整组;组内 = **默认价**槽(价格四桶,不设条件——附加规则全不命中时兜底,禁排序/删除)+ **附加计费规则**列表(四桶单价 + 条件组合,「+添加条件」追加条件行,行内下拉切换类型,规则带 ↑/↓ 调序与删除),「添加额外计费规则」追加一条(默认带全天时段条件);货币为全局切换(「定价规则」标题右侧,仅 ¥/$ 两档,整表统一),显式「保存」整表写入
 - 双语:跟随宿主语言设置(设置 → 通用 → 语言)即时切换 en/zh
-- 数据 API 守卫:POST 同源校验 + JSON content-type(与 dsh-usage-panel 同构),局域网远程访问可用
+- 数据 API 守卫:POST 同源校验 + JSON content-type,与 dsh-usage-panel 同构(pricing 端点例外:GET/POST 放行且不要求 content-type),局域网远程访问可用
 
 口径:token 总量 = 未缓存输入 + 输出 + 缓存读 + 缓存写;命中率 = 缓存读 / (缓存读 + 未缓存输入 + 缓存写);桶按 host 本地时区。聚合响应 `models` 数组每模型带 `inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheWriteTokens` 四桶拆分(与定价四桶同口径),模型列表据此展示输入输出对比。平均生成速度 = decode 配对分子 ÷ 解码时长,两者均取官方吞吐口径(与官方 session-stats 投影同构):解码时长为该步首 token 时刻(首个产出 token 的 attempt 流,回落 message 自带流)到 usage 汇报时刻,不含首 token 前的排队与提示处理等待;首 token 延迟(TTFT)= 首 token 时刻 − `step/start`(起点不随 `llm/retry-started` 重置,即含失败尝试时间)。首 token 时刻在 chunk token 样本上不可得,由后续 usage 报告(message 为主)补发零桶 timing 增量行承载(decodeTokens 与时长同源配对,不重复计 token);存量旧行(时长为旧全时长口径)速度分子回落输出 token,聚合随新数据自然收敛,重建(重扫)可全量按新口径重建。保留策略:天桶永久,小时桶固定 15 天,分钟桶默认 7 天且上限 7 天(设置项 `minuteRetentionDays`,0 = 禁用分钟桶)。
 
@@ -93,4 +93,4 @@ dsh --profile <profile> --no-open --port 9191
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。

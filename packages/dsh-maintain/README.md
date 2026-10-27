@@ -35,7 +35,7 @@ node scripts/dev-link.mjs dsh-maintain   # 仓库根执行:归一 profile 依赖
 ```yaml
 maintain:
   channel: latest                                # 追踪通道,选项以检查返回的 dist-tags 为准
-  pollIntervalSec: 21600                         # 轮询间隔秒,仅正数启用周期检查,0/负数禁用
+  pollIntervalSec: 21600                         # 轮询间隔秒,仅正数启用周期检查,0/负数禁用,上限 30 天
   registryBase: https://registry.npmjs.org       # 官方源不可达时可改为镜像地址
 ```
 
@@ -54,6 +54,8 @@ maintain:
 cd packages/dsh-maintain && npm test
 ```
 
+路由测试静态导入宿主 peer；缺依赖会报 ERR_MODULE_NOT_FOUND 并失败。新 clone 先按根 DEVELOPMENT/dev-loop.md 初始化解析桥，再执行包内 `npm test`。平台专属测试仅按适用平台跳过。
+
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。

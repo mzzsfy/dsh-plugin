@@ -37,7 +37,7 @@ const collapseOf = (result, index) =>
   result.actions.filter((a) => a.index === index && a.kind === 'collapse').length
 
 function defineScenarios(prefix, L) {
-  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createToolsRegistry, planTools } = L
+  const { createRegistry, plan, planFinal, registerCurrent, STATE_RUNNING, STATE_OK, capMap, needsReattach, SEEN_MAP_CAP, PIN_THRESHOLD_PX, isPinned, shouldPinRestore, createToolsRegistry, planTools, putSeen } = L
 
   // 滚动度量构造:{ scrollHeight, scrollTop, clientHeight }
   const metrics = (scrollHeight, scrollTop, clientHeight) => ({ scrollHeight, scrollTop, clientHeight })
@@ -165,9 +165,61 @@ function defineScenarios(prefix, L) {
     assert.equal(result.actions.length, 0)
   })
 
-  test(prefix + '历史会话常规扫描不干预', () => {
+  test(prefix + '历史会话常规扫描仅开最后一条(宿主流式态不再标注 running 后的兜底)', () => {
     const reg = createRegistry()
     const result = plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    assert.equal(expandOf(result, 0), 0)
+    assert.equal(expandOf(result, 1), 1)
+    assert.equal(result.actions.length, 1)
+  })
+
+  test(prefix + '尾部兜底:已读命中不开最后一条', () => {
+    const reg = createRegistry()
+    putSeen(reg.read, undefined, 'B')
+    const result = plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '尾部兜底:手动命中不开最后一条', () => {
+    const reg = createRegistry()
+    putSeen(reg.manual, undefined, 'B')
+    const result = plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '尾部兜底:开最后一条后登记 current,幂等无动作', () => {
+    const reg = createRegistry()
+    plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    const result = plan(reg, [row(OK, 'A'), row(OK, 'B', true, true, true)])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '尾部兜底:新回合行出现收起旧 current 开新行', () => {
+    const reg = createRegistry()
+    plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    const result = plan(reg, [row(OK, 'A'), row(OK, 'B', true, true, true), row(OK, 'C')])
+    assert.equal(collapseOf(result, 1), 1)
+    assert.equal(expandOf(result, 2), 1)
+  })
+
+  test(prefix + '尾部兜底:空正文行不作为目标', () => {
+    const reg = createRegistry()
+    const result = plan(reg, [row(OK, '')])
+    assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '尾部兜底:存在手动展开行不收手动行,且不再开目标(单条约束让位手动)', () => {
+    const reg = createRegistry()
+    plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    const result = plan(reg, [row(OK, 'A', true, true, false, 7), row(OK, 'B', true, true, true)])
+    const expands = expandOf(result, 0) + expandOf(result, 1)
+    assert.equal(expands, 0)
+    assert.equal(collapseOf(result, 1), 1)
+  })
+
+  test(prefix + '尾部兜底:识别失败行不作目标', () => {
+    const reg = createRegistry()
+    const result = plan(reg, [row(OK, 'B', false, false)])
     assert.equal(result.actions.length, 0)
   })
 
@@ -398,6 +450,30 @@ function defineScenarios(prefix, L) {
     const reg = createToolsRegistry()
     const result = planTools(reg, [toolRow(false, false), toolRow(false, false)])
     assert.equal(result.actions.length, 0)
+  })
+
+  test(prefix + '工具机:目标行展开后宿主改写正文,uid 身份仍命中,不误判手动不误收', () => {
+    // Given 工具行已由插件展开并登记 current(正文为登记时快照)
+    const reg = createToolsRegistry()
+    planTools(reg, [toolRow(false, true, false, 7, 'A'.repeat(31))])
+    assert.notEqual(reg.current, null)
+    // When 宿主改写正文为等长无关文本(非前缀关系)且行保持展开
+    const rewritten = planTools(reg, [toolRow(true, true, true, 7, 'B'.repeat(36))])
+    // Then 无任何动作:不误判手动、不接管收起自己、current 保持
+    assert.equal(rewritten.actions.length, 0)
+    assert.equal(reg.manual.size, 0)
+    assert.notEqual(reg.current, null)
+  })
+
+  test(prefix + '工具机:正文改写后的收起仍走已读登记(uid 兜底)', () => {
+    const reg = createToolsRegistry()
+    planTools(reg, [toolRow(false, true, false, 7, 'A'.repeat(31))])
+    // When 宿主改写正文后行被收起
+    const result = planTools(reg, [toolRow(false, true, false, 7, 'B'.repeat(36))])
+    // Then 不重展开,已读落盘(uid 限定),current 释放
+    assert.equal(result.actions.filter((a) => a.kind === 'expand').length, 0)
+    assert.notEqual(reg.read.size, 0)
+    assert.equal(reg.current, null)
   })
 
   test(prefix + '工具机:suppressManual 首扫既存展开行视为中性', () => {

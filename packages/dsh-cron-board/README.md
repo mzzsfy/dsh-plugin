@@ -2,8 +2,6 @@
 
 轻量级定时任务看板 dsh 插件:环境变量集中管理 + 定时任务(cron)调度,执行体支持两类——本地脚本(dsh 宿主进程内 spawn)与 dsh 会话任务(定时向 dsh 会话投递任务,投递即终态,支持「每次新建会话」或「固定同一会话」)。
 
-设计文档见仓库 `docs/progress/debug-fix-cron-board-delivery-semantics.md`(近期语义收敛决策记录)。
-
 ## 功能
 
 - **看板**:任务卡片列表(状态色/下次触发相对时间/启停开关/立即运行/编辑/删除),新建编辑模态为调度构建器布局:类型/会话模式/调度频率统一分段组件,结构化频率(每天/每周/工作日/固定间隔)自动生成表达式(反解不出即自定义手输),即将执行时刻 chips 为服务端实时预览
@@ -15,7 +13,7 @@
 
 ## 路由
 
-前缀 `/api/cron-board`(envs / jobs / runs / status / cron/preview / agent-presets / model-catalog),REST 风格,中文业务错误透传。
+前缀 `/api/cron-board`(envs / jobs / runs / status / cron/preview / agent-presets / model-catalog / ui-settings),REST 风格,中文业务错误透传。
 
 ## 界面挂载
 
@@ -41,6 +39,15 @@
 ## 依赖
 
 - `croner`:cron 表达式解析与触发点计算
+- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费)。其 client 模块由 session-manager 的 patch 占位条目全仓唯一代挂(规约禁止消费方重复插入),与 session-manager 同装即自动就绪;单独安装本包时须二选一:安装 `@mzzsfy/dsh-session-manager`,或在 profile `cordis.patch.yml` 手工加入同款占位条目(条目须排在 cron-board 之前物化):
+
+  ```yaml
+  - insert:
+      - id: cron-board-dsh-common-tools
+        name: '@mzzsfy/dsh-common-tools'
+  ```
+
+  条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)
 - 宿主服务:settings / timer(软依赖)、webServer;sessionController 缺失不影响装载:启动后异步轮询等待,仍缺失仅禁用会话任务通道并打日志,看板与脚本任务照常(0.1.1-rc.2 及更早版本无此服务)
 
 ## 开发
@@ -48,11 +55,11 @@
 ```sh
 node scripts/dev-link.mjs dsh-cron-board   # 挂载工作副本到 profile
 cd packages/dsh-cron-board
-node --test "test/*.test.mjs"              # 测试
+npm test                                   # 测试(经 _mocks.common-tools.mjs 预载公共依赖桩)
 ```
 
 注意:插件新增进入 profile bundles(`dsh plugin add`)后需 dsh 重启一次完成首装载;此后工作副本改动经 dev-link HMR 热重载。
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。兼容面以窗口实测为准,不逐版本承诺。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。

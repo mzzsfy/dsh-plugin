@@ -29,7 +29,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 
 仅支持实测版本 DSH **0.2.0-rc.1、0.2.0-rc.2、0.2.1-alpha.2、0.2.1-rc.2 与 0.2.1-rc.3**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不修改 DSH、不另开 PTY、不读取 serializer 输出；附着策略随宿主代际：0.2.0 系与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
 
-装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件短暂成为控制者（0.2.1-rc.2 输入排他），**写完空闲即释放附着**；空闲期无人附着，宿主向 UI 广播状态使其恢复可写并按容器重算终端几何——若泵持续附着，UI 长期只读，官方布局重算被跳过，插件写入推高的 PTY 行数会把终端底部推出可视区且滚动失效（0.2.1-rc.2 实测，见修复记录）。用户点官方「接管输入」随时拿回控制权；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，双方交替互斥）。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
+装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件短暂成为控制者（0.2.1-rc.2 输入排他），**写完空闲即释放附着**；空闲期无人附着，宿主向 UI 广播状态使其恢复可写并按容器重算终端几何——若泵持续附着，UI 长期只读，官方布局重算被跳过，插件写入推高的 PTY 行数会把终端底部推出可视区且滚动失效(0.2.1-rc.2 实测;已由"写完空闲即释放附着"修复,即上文本包 attach 泵模型)。用户点官方「接管输入」随时拿回控制权；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，双方交替互斥）。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
 
 Host 启动检查 Controller 版本、方法和 owner map；检测不匹配时不注册工具并告警。每次读取另检查终端实例、队列和屏幕结构，失败返回 `TERMINAL_UNAVAILABLE`。这不是公开 API，升级后不保证兼容。
 
@@ -56,10 +56,10 @@ npm test -- /path/to/isolated-dsh-host
 
 也可设 `DSH_TEST_HOST`。runner 校验精确 Controller 版本后将绝对宿主路径传入子进程；测试 helper 从该宿主显式解析、校验并导入受支持版本的 Tools 与 Controller（同一允许表），不依赖 ESM 的 `NODE_PATH` 查找。未提供宿主且普通模块解析链缺少限定版本时明确失败，不跳过真实契约测试。
 
-测试包含真实 BrowserTerminal/xterm 的宽字符、组合字符、软换行、scrollback、alternate buffer、resize、队列与关闭竞态；其 subprocess 边界为测试替身，不等于真实 shell E2E。真实 shell、工具调度和客户端装载须在独立 `DSH_HOME`、独立 profile、独立端口中另做验收。
+测试包含真实 BrowserTerminal/xterm 的宽字符、组合字符、软换行、scrollback、alternate buffer、resize、队列与关闭竞态；UI 附着夹具按宿主能力使用 `follow/resize` 或 `attach` resize 命令帧，验证读取排在 resize 之后，且原 follower、控制者和可写权限保持不变。其 subprocess 边界为测试替身，不等于真实 shell E2E。真实 shell、工具调度和客户端装载须在独立 `DSH_HOME`、独立 profile、独立端口中另做验收。
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
 
 dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2` 与 `0.2.1-rc.3`(dshReleases `compatible`)。

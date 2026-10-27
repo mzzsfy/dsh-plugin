@@ -594,6 +594,56 @@ test('Given cursor 落后当前版本 When 请求到达 Then 立即返回无需�
   assert.ok(res.body.version > 0)
 })
 
+const assistant = (tokens, text = '') => ({ type: 'assistant/message', data: {
+  usage: { inputTokens: tokens, outputTokens: 0 }, message: { content: text ? [{ type: 'text', text }] : [] },
+} })
+
+for (const reason of ['completed', 'unknown']) {
+  test(`F29 Given 被过滤或无通知的100tokens回合 When 无start结束下一200tokens回合 Then 不携带旧账或前缀(${reason})`, async () => {
+    const { ctx, routes, handlers } = makeCtx()
+    apply(ctx)
+    const onEvent = handlers.get('session/event')
+    onEvent(MAIN, { type: 'turn/start' })
+    onEvent(MAIN, assistant(100, '旧回答'))
+    onEvent(MAIN, turnEnd(reason))
+    await disableDurationFilter(routes)
+    onEvent(MAIN, assistant(200))
+    onEvent(MAIN, turnEnd('completed'))
+    const completed = (await projectionUnits(routes)).find(unit => unit.category === 'completed')
+    assert.equal(completed.tokens, 200)
+    assert.doesNotMatch(completed.summary, /旧回答/)
+  })
+}
+
+test('F29 Given 回合内100tokens后即时ask When 再产生200tokens并结束 Then ask只读且最终合计300', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, assistant(100, '本回合'))
+  onEvent(MAIN, toolCall('ask_user_question'))
+  onEvent(MAIN, assistant(200))
+  onEvent(MAIN, turnEnd('completed'))
+  const units = await projectionUnits(routes)
+  assert.equal(units.find(unit => unit.category === 'ask').tokens, 100)
+  assert.equal(units.find(unit => unit.category === 'completed').tokens, 300)
+})
+
+test('F29 Given 残余assistant账 When 新回合start后结束 Then start重置且无旧前缀', async () => {
+  const { ctx, routes, handlers } = makeCtx()
+  apply(ctx)
+  await disableDurationFilter(routes)
+  const onEvent = handlers.get('session/event')
+  onEvent(MAIN, assistant(100, '旧前缀'))
+  onEvent(MAIN, { type: 'turn/start' })
+  onEvent(MAIN, assistant(200, '新前缀'))
+  onEvent(MAIN, turnEnd('completed'))
+  const unit = (await projectionUnits(routes))[0]
+  assert.equal(unit.tokens, 200)
+  assert.doesNotMatch(unit.summary, /旧前缀/)
+})
+
 test('Given 配置 POST 成功 When 观测总线 Then bump 发布变更契约成立', async () => {
   const { ctx, routes, published } = makeCtx()
   apply(ctx)

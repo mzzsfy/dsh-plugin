@@ -15,7 +15,8 @@
   后经命名空间使用;toast 通道可选消费(try/catch,模块表缺失即置空),总线订阅为
   硬消费(缺失即 factory 抛错由装载层判定)
 - **物化顺序约束**:占位条目随代挂插件 bundle 进 client 拼接序,代挂插件
-  (session-manager)必须排在所有消费方之前(bundles @mzzsfy 区段最前),否则硬消费
+  (session-manager)必须排在所有消费方之前(bundles @mzzsfy 区段最前;该顺序是不变式
+  约束,dev-link 只做尾部追加不重排,新包入列时人工核对),否则硬消费
   require 先于模块物化而拖垮整 client bundle
 
 ## host 半区(setupCommonTools)
@@ -23,7 +24,7 @@
 - host 能力不占条目:消费插件在自己 `apply` 里执行
   `setupCommonTools(ctx)`,返回绑定当前插件空间的 `subscribe / publish` 门面；host 额外提供 `onPresence`
 - 进程级注册表 + semver 版本接管:WS 同代际多版本实体共存时新者接管,旧实现自治拆卸并交出
-  状态;同版幂等,降级不接管。0.1 SSE 与 1.0 WS 不支持跨代际热接管；升级须统一更新消费方与依赖、完整重启宿主并刷新旧页面
+  状态;同版幂等,降级不接管。旧代际 SSE(包 0.1)与 WS 代际(注册版本 1.0,包 0.2 起)不支持跨代际热接管；升级须统一更新消费方与依赖、完整重启宿主并刷新旧页面
 - 卸载合规:调用者按实例独立记账,路由由进程级总线持有;非最后一个消费方卸载只清理该实例订阅,最后一个卸载才收尾——总线存活期 = 至少一个消费方在场
 - 两端均在消费插件的 `apply(ctx)` 中调用 `setupCommonTools(ctx)`，以 `ctx.fiber.entry.options.name` 完整 npm 包名绑定空间。`subscribe(listener)` 接收对端 payload，`publish(payload)` 向对端发送；插件就是通道，没有 topic、消息版本或跨插件通配。client 可用 `subscribe(listener, { onReset })` 在接收订阅确认后拉快照。
 - client 实例持有页面共享的一条 WebSocket，发送无需接收订阅。组件退订只停止接收，插件卸载清理自己的所有订阅与连接使用权，最后一个实例退出才关闭连接。host presence 仅统计有接收订阅的连接。不得在 factory 顶层持有常驻订阅，不得由共享可变 bus 将不同实例串到一起。组件应捕获所属 ctx 的 bus；通知共享工作须记录活动实例，当前实例退出后由存活实例接管，最后实例退出才停止共享工作，跨 factory HMR 清理旧代。

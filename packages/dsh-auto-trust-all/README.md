@@ -66,7 +66,7 @@ bundle patch 经 dev-link 维护的 hmr 覆盖行保存约 1 秒热重载;规约
 
 ## dsh 版本兼容
 
-同一版本覆盖 0.2.0 线与 0.2.1 线宿主(共同契约:`connection.trustedHosts` 实时数组 + webServer 路由包装,均为两代源码核实的形态;`webRuntime` 镜像仅 0.2.0 线可用),两线均经隔离实测(横幅/注册/401/403/淘汰自愈/激活 live)。manifest `dsh.hostMin = 0.2.0-rc.2` 为本包验证过的最低宿主代际(dev-link / compat 装载层按其过滤);两线实测状态与登记见 manifest `dsh.compatibility.dshReleases`。**注意**:自本版本起 bundle patch 不再翻转 web 默认绑定——依赖旧版"零参数监听 0.0.0.0"的部署需按上文「绑定不干预」在部署层显式配置监听。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md` 与本包 `兼容性测试.md`。
+同一版本覆盖 0.2.0 线与 0.2.1 线宿主(共同契约:`connection.trustedHosts` 实时数组 + webServer 路由包装,均为两代源码核实的形态;`webRuntime` 镜像仅 0.2.0 线可用),两线均经隔离实测(横幅/注册/401/403/淘汰自愈/激活 live)。manifest `dsh.hostMin = 0.2.0-rc.2` 为本包验证过的最低宿主代际(dev-link / compat 装载层按其过滤);两线实测状态与登记见 manifest `dsh.compatibility.dshReleases`。**注意**:自本版本起 bundle patch 不再翻转 web 默认绑定——依赖旧版"零参数监听 0.0.0.0"的部署需按上文「绑定不干预」在部署层显式配置监听。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。
 
 ## 开发
 
