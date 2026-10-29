@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-auto-trust-all",
   "description": "动态信任所有实际到达的 Host:包装 webServer 路由把 Host 头实时注册进 connection 信任数组(webRuntime 在场时镜像),泛域名入口免改启动命令;不干预监听绑定(由部署层 --host 或宿主缺省决定);认证层(原生 cookie 与 startup-auth 会话)原样保留;推荐与 dsh-web-startup-auth 搭配使用,便于远程开发与反向代理",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "main": "src/index.js",
   "exports": {
