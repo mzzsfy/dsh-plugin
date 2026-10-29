@@ -139,6 +139,88 @@ function loadClient({ storage, payload, onFetch, fetchImpl, document: documentOv
   }
 }
 
+test('navigation registry through full factory/apply/projection click survives either unload order and shared references', async (t) => {
+  for (const first of [0, 1]) for (const sameReference of [false, true]) {
+    await t.test(`unload ${first === 0 ? 'A' : 'B'} first; shared service=${sameReference}`, async () => {
+      const opened = [], native = [], requests = [], timers = new Map()
+      let timerId = 0, focuses = 0, payload = { version: 0, units: [] }
+      class NotificationStub {
+        static permission = 'granted'
+        constructor(text, options) { Object.assign(this, { text, options, closed: false }); native.push(this) }
+        close() { this.closed = true }
+      }
+      const f = loadClient({ storage: new FakeStorage(), notificationImpl: NotificationStub,
+        document: { hasFocus: () => false, addEventListener() {}, removeEventListener() {}, documentElement: { dataset: { platform: 'darwin' } } },
+        fetchImpl: async (path, options) => { requests.push({ path, options }); return { ok: true, json: async () => path.endsWith('/projection') ? payload : path.endsWith('/sounds') ? { sounds: [] } : { ok: true } } },
+        timerImpl: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId }, clearTimerImpl: id => timers.delete(id),
+      })
+      f.window.location = { protocol: 'dsh-app:' }
+      f.window.focus = () => { focuses++ }
+      const a = { openSession: id => opened.push(['A', id]) }
+      const b = sameReference ? a : { openSession: id => opened.push(['B', id]) }
+      const mount = navigator => {
+        const cleanups = []
+        let injectNavigation
+        const effect = fn => { const off = fn(); if (typeof off === 'function') cleanups.push(off) }
+        f.mod.apply({
+          get: () => ({ list: { getSnapshot: () => ({}), subscribe: () => () => {} } }),
+          slots: { inject() {} }, effect,
+          inject(names, callback) {
+            if (names[0] !== 'uiWorkspace') return // optional activity services absent
+            injectNavigation = value => {
+              let release
+              callback({ get: () => value, effect: fn => { release = fn(); cleanups.push(release) } })
+              return release
+            }
+            if (navigator) injectNavigation(navigator)
+          },
+        })
+        return { dispose() { while (cleanups.length) cleanups.pop()() }, injectNavigation }
+      }
+      const owners = [mount(a), mount(b)]
+      try {
+        await f.mod.__test.pollOnce()
+        payload = { version: 1, units: [{ id: 'nav-1', sessionId: 'target-1', session: 'not rendered', category: 'ask', text: 'first' }] }
+        await f.mod.__test.pollOnce()
+        assert.equal(native.length, 1)
+        assert.equal(requests.filter(r => r.path.endsWith('/focus-desktop')).length, 0, 'creation never wakes App')
+        native[0].onclick()
+        assert.deepEqual(opened.at(-1), [sameReference ? 'A' : 'B', 'target-1'])
+        assert.equal(native[0].closed, true)
+        owners[first].dispose()
+        assert.equal(f.subscriptionCount(), 1, 'surviving instance still owns notification subscription')
+        f.shown[0].opts.onClick()
+        assert.deepEqual(opened.at(-1), [sameReference || first === 1 ? 'A' : 'B', 'target-1'], 'already-shown callbacks resolve the live navigator')
+        payload = { version: 2, units: [{ id: 'nav-2', sessionId: 'target-2', category: 'ask', text: 'second' }] }
+        await f.mod.__test.pollOnce()
+        native[1].onclick()
+        assert.deepEqual(opened.at(-1), [sameReference || first === 1 ? 'A' : 'B', 'target-2'])
+        owners[1 - first].dispose()
+        assert.equal(f.subscriptionCount(), 0)
+        const count = opened.length
+        native[0].onclick()
+        assert.equal(opened.length, count, 'last exit must not retain a stale navigator')
+        assert.match(f.shown.at(-1).text, /尚未就绪/)
+        const absent = mount(null)
+        f.shown[0].opts.onClick()
+        assert.equal(opened.length, count, 'missing navigation service does not revive an old instance')
+        const release1 = absent.injectNavigation(a), release2 = absent.injectNavigation(a)
+        release1()
+        f.shown[0].opts.onClick()
+        assert.deepEqual(opened.at(-1), ['A', 'target-1'], 'each injected activation has an independent token even for the same reference')
+        release2()
+        const finalCount = opened.length
+        f.shown[0].opts.onClick()
+        assert.equal(opened.length, finalCount)
+        absent.dispose()
+        assert.ok(focuses > 0)
+        await Promise.resolve()
+        assert.ok(requests.some(r => r.path.endsWith('/focus-desktop') && r.options.method === 'POST'))
+      } finally { owners.forEach(owner => owner.dispose()) }
+    })
+  }
+})
+
 test('foregroundSystem real factory/poll preserves native silence, permissions, routes and page sound', async (t) => {
   const cases = [
     { name: 'quiet desktop', silent: true, audio: false },
@@ -929,15 +1011,18 @@ test('Given 通知标题字段缺失 When 认领 Then 不挂高亮类且链路�
   assert.equal(dom.rows[0].classList.set.has('tn-sess-hl'), false)
 })
 
-// 点击直达使用owner导航服务；无身份仅聚焦，有身份无标题仍可导航。
-test('Given 带身份通知 When 点击页内卡片 Then 聚焦并按ID导航；无身份仅聚焦', async () => {
+// 点击直达:身份走通知携带的 sessionId(uiWorkspace.openSession 延迟注入),
+// 不再按侧边栏 DOM 标题模拟点击;旧投影无 ID 只聚焦,不按同名标题猜目标会话
+test('Given 新投影携带sessionId When 点击页内卡片 Then 按ID导航;无ID旧通知仅聚焦不误点同名行', async () => {
   const dom = makeSidebarDom([{ leafText: '会话甲' }])
   const hlUnits = [
-    { id: 'u-jump', category: 'completed', text: '[dsh] 任务完成: 会话甲', sessionId: '会话甲', session: '会话甲', summary: '耗时 12 秒' },
+    { id: 'u-jump', category: 'completed', text: '[dsh] 任务完成: 会话甲', session: '会话甲', sessionId: 'sess-jump', summary: '耗时 12 秒' },
+    { id: 'u-legacy', category: 'ask', text: '[dsh] AI 提问: 会话甲', session: '会话甲' },
     { id: 'u-bare', category: 'error', text: '[dsh] 任务出错: 无标题' },
   ]
   const focuses = []
-  const { mod, shown, opened, window: winStub } = loadClient({
+  const opened = []
+  const { mod, shown, window: winStub } = loadClient({
     storage: new FakeStorage(),
     payload: { units: hlUnits, soundMapping: {}, version: 1 },
     document: { title: '会话乙 — DeepSeek Harness', ...dom },
@@ -946,18 +1031,23 @@ test('Given 带身份通知 When 点击页内卡片 Then 聚焦并按ID导航；
   mod.__test.start()
   await mod.__test.poll()
   await mod.__test.poll()
-  assert.equal(shown.length, 2)
+  assert.equal(shown.length, 3)
   // 摘要随文本两行呈现
   assert.ok(shown[0].text.includes('\n耗时 12 秒'), '卡片文本含小结行')
-  assert.equal(typeof shown[0].opts.onClick, 'function', '带标题通知携带直达回调')
-  assert.equal(typeof shown[1].opts.onClick, 'function', '无标题通知仍携带回调(仅聚焦)')
+  assert.equal(typeof shown[0].opts.onClick, 'function', '页内卡片携带直达回调')
+  // 绑定会话导航服务:uiWorkspace 软依赖注入(缺席时仅禁用直达不阻断通知)
+  activate(mod, { openSession: (id) => { opened.push(id) } })
   shown[0].opts.onClick()
   assert.deepEqual(focuses, ['focus'], '直达先聚焦窗口')
-  assert.deepEqual(opened, ['会话甲'], '通过正式服务按身份切换会话')
-  assert.equal(dom.rows[0].clicks, 0, '导航不依赖DOM点击')
+  assert.deepEqual(opened, ['sess-jump'], '按通知携带的 sessionId 导航')
+  assert.equal(dom.rows[0].clicks, 0, '不按标题模拟点击侧边栏会话行')
   shown[1].opts.onClick()
   assert.deepEqual(focuses, ['focus', 'focus'])
-  assert.deepEqual(opened, ['会话甲'], '无身份通知不导航任何会话')
+  assert.deepEqual(opened, ['sess-jump'], '旧投影没有唯一 ID 时只聚焦')
+  assert.equal(dom.rows[0].clicks, 0, '没有ID不得按标题误跳')
+  shown[2].opts.onClick()
+  assert.deepEqual(focuses, ['focus', 'focus', 'focus'])
+  assert.equal(dom.rows[0].clicks, 0, '无标题通知不触碰任何行')
 })
 
 // 二次提醒:等待用户动作的事件超时未处理补发一轮;已处理(点击行/切到会话)与投影过期不补
@@ -1118,13 +1208,13 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
   mod.apply({
     get: (name) => (name === 'sessions' || name === 'workspaces' ? serviceStub : undefined),
     inject: (names, callback) => {
-      assert.deepEqual(names, ['jobs', 'uiSession'])
+      assert.ok(JSON.stringify(names) === '["jobs","uiSession"]' || JSON.stringify(names) === '["uiWorkspace"]')
       callback({ get: () => ({}), effect: (fn) => { effects.push(fn()) } })
     },
     slots: { inject: (name, fn) => { injected.push([name, fn]) } },
     effect: (fn) => { effects.push(fn()) },
   })
-  assert.equal(effects.length, 3, '样式、通知订阅与文件夹运行标记三个 effect 均已挂载')
+  assert.equal(effects.length, 4, '会话导航、文档级样式、通知订阅与文件夹运行标记四个 effect 均已挂载')
   assert.equal(styleTags[0].attrs['data-plugin'], '@mzzsfy/dsh-turn-notify', '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
   assert.deepEqual(injected.map(([name]) => name), ['settings.section'], '页内通知展示已移交公共依赖包,不再注入 shell.overlay')
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出
@@ -1300,15 +1390,20 @@ test('分类通知开关提交失败:报错并以权威配置纠偏', async () =
   assert.deepEqual(configs, [{ enabled: { completed: true } }])
 })
 
-function activate(mod) {
+function activate(mod, navigator) {
   // sessions/workspaces 桩:apply 的注入面声明;fold effect 在无 querySelectorAll
   // 的 document 桩上装配即退出,不触碰订阅
   const serviceStub = { list: { subscribe: () => () => {}, getSnapshot: () => ({}) } }
   const cleanups = []
   mod.apply({
     get: (name) => (name === 'sessions' || name === 'workspaces' ? serviceStub : undefined),
-    // 模拟缺少活动服务:标记子 fiber 不激活,通知轮询仍必须正常工作。
-    inject: () => {},
+    // 模拟缺少活动服务:标记子 fiber 不激活,通知轮询仍必须正常工作;
+    // 提供导航服务时补 uiWorkspace 注入(会话导航软依赖),活动服务仍缺席
+    inject: (names, callback) => {
+      if (navigator !== undefined && names.indexOf('uiWorkspace') >= 0) {
+        callback({ get: () => navigator, effect: (fn) => { fn() } })
+      }
+    },
     slots: { inject: () => {} },
     effect: (fn) => { const off = fn(); if (typeof off === 'function') cleanups.push(off) },
   })

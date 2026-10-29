@@ -619,7 +619,8 @@ window.__ModuleLoader__.load({
     const notificationPermission = () => (typeof Notification === 'undefined' ? 'denied' : Notification.permission)
 
     // onOutcome 仅供测试路径取显示回执(onshow/onerror),真实路径吞错降级已在链路内。
-    // onclick 点击直达:聚焦窗口并切到对应会话后关闭弹窗;summary 作 body 两级呈现
+    // onclick 点击直达:唤醒窗口(桌面壳在直达动作内一并唤起)并按 ID 导航后关闭弹窗;
+    // summary 作 body 两级呈现;桌面前台偏好下以静默方式弹出
     function notifySystem(unit, onOutcome, silent = false) {
       try {
         const notification = new Notification(unit.text, { tag: unit.id, body: unit.summary ?? '', ...(silent ? { silent: true } : {}) })
@@ -1007,18 +1008,38 @@ window.__ModuleLoader__.load({
 
     // ---- 点击直达会话:页内卡片与系统弹窗共用 ----
 
-    // 回调持有代际信号，执行时选存活租约；同factory重启也不复活旧通知。
+    // 身份走通知携带的 sessionId(uiWorkspace.openSession),标题只作展示与高亮,
+    // 不按 DOM 标题猜会话。uiWorkspace 经 inject 延迟注入,缺席时仅禁用直达,
+    // 不阻断通知与设置页。导航注册表挂在 factory 闭包,与实例代际无关:
+    // 已显示通知的迟到闭包点击时现读 Map,由最后激活的存活实例接管。
+    const sessionNavigators = new Map()
     function activateSessionFromUnit(unit) {
       const controller = notificationController
       return () => {
+        try { if (typeof window.focus === 'function') window.focus() } catch { /* 唤醒失败不阻断导航 */ }
+        // Electron 的 window.focus 不保证恢复隐藏/最小化窗口;固定协议交给桌面壳。
+        // 普通浏览器不请求,避免远程浏览器点击时意外唤起服务端机器上的 App。
+        if (window.location?.protocol === 'dsh-app:' && document.documentElement?.dataset?.platform === 'darwin') {
+          void api('/api/turn-notify/focus-desktop', { method: 'POST' })
+            .then((result) => { if (!result.ok) throw new Error(result.detail || '无法唤起桌面版') })
+            // 无会话 ID 的通知(如测试点火)不会切换会话,文案不得声称已尝试切换
+            .catch(() => toast?.(hasSessionId(unit) ? '无法唤起 DSH 桌面窗口，请从 Dock 打开；会话已尝试切换' : '无法唤起 DSH 桌面窗口，请从 Dock 打开', { holdMs: TOAST_MS }))
+        }
+        // 历史投影和无会话测试通知不含 ID,只唤醒,不冒险跳到同名会话。
+        // toast 缺席(公共依赖未装载)时提示面缺失属合法降级,守卫链继续导航
+        if (!hasSessionId(unit)) return
+        const sessionNavigator = [...sessionNavigators.values()].at(-1)
+        if (!sessionNavigator) {
+          toast?.('会话导航尚未就绪，请稍后重试', { holdMs: TOAST_MS })
+          return
+        }
         try {
-          if (typeof window.focus === 'function') window.focus()
-          if (!controller || controller.signal.aborted || controller !== notificationController || !hasSessionId(unit)) return
-          const owner = activeNotificationOwner
-          if (!owner) return
-          owner.uiWorkspace.openSession(unit.sessionId)
-          markSessionHandled(unit.sessionId)
-        } catch { /* 导航失败不记已读，不掩盖通知收尾 */ }
+          sessionNavigator.openSession(unit.sessionId)
+          // 已读收尾只在登记实例仍存活时执行,过期代际闭包不误清当前代高亮
+          if (controller && !controller.signal.aborted && controller === notificationController) markSessionHandled(unit.sessionId)
+        } catch {
+          toast?.('无法打开通知对应的会话，请在会话列表中查看', { holdMs: TOAST_MS })
+        }
       }
     }
 
@@ -2260,6 +2281,16 @@ window.__ModuleLoader__.load({
         const bus = tools.setupCommonTools(ctx)
         const sessions = ctx.get('sessions')
         const workspaces = ctx.get('workspaces')
+        // 会话导航(uiWorkspace.openSession):软依赖延迟注入,服务缺席仅禁用
+        // 通知点击直达,不阻断通知链路与设置页;每次注入激活独占 token,
+        // 退出只删自己的登记,点击时选择最后激活且仍存活的服务(同引用也独立)。
+        ctx.inject(['uiWorkspace'], (navigationCtx) => {
+          navigationCtx.effect(() => {
+            const token = Symbol('turn-notify session navigation')
+            sessionNavigators.set(token, navigationCtx.get('uiWorkspace'))
+            return () => { sessionNavigators.delete(token) }
+          }, 'turn-notify session navigation')
+        })
         // 样式挂载宿主文档级:通知栈在面板未打开时也要有完整样式
         ctx.effect(() => {
           const style = document.createElement('style')

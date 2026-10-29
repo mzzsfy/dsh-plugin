@@ -4,6 +4,7 @@ import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
 import { apply } from '../src/index.js'
 
 const PROJECTION_PATH = '/api/turn-notify/projection'
+const FOCUS_DESKTOP_PATH = '/api/turn-notify/focus-desktop'
 
 // 路由注册表是服务边界:保留注册直到注销,不允许覆盖既有路由。
 function makeWebServer() {
@@ -60,6 +61,7 @@ test('Given 已注册投影路由 When 插件卸载 Then 路由与在场订阅�
   const mounted = mount(webServer)
   t.after(() => mounted.dispose())
   assert.ok(webServer.routes.has(PROJECTION_PATH))
+  assert.ok(webServer.routes.has(FOCUS_DESKTOP_PATH), 'macOS 桌面唤起路由随插件注册')
   assert.equal(busStub.presence.size, 1)
   notify(mounted)
   assert.equal((await readProjection(webServer)).units.length, 1)
@@ -67,6 +69,7 @@ test('Given 已注册投影路由 When 插件卸载 Then 路由与在场订阅�
   mounted.dispose()
 
   assert.equal(webServer.routes.has(PROJECTION_PATH), false, '卸载必须释放 projection 路由')
+  assert.equal(webServer.routes.has(FOCUS_DESKTOP_PATH), false, '卸载必须释放 focus-desktop 路由')
   assert.equal(webServer.routes.size, 0)
   assert.equal(busStub.presence.size, 0)
 })

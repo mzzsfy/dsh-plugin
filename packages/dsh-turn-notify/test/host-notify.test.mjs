@@ -422,6 +422,34 @@ test('Given test-host 路由 When 合法点火 Then 返回真实结果;非法方
   })
 })
 
+test('Given focus-desktop 路由 When 合法POST同源 Then 固定参数唤起;非法方法与跨源被拒;非macOS 409', async () => {
+  await withStubSpawn(async (spawns) => {
+    const { ctx, routes } = makeCtx()
+    apply(ctx)
+    const handler = routes.get('/api/turn-notify/focus-desktop')
+    for (const [method, headers, expected] of [
+      ['GET', {}, 405],
+      ['POST', { origin: 'https://other.example' }, 403],
+    ]) {
+      const res = makeRes()
+      await handler(makeReq(method, undefined, headers), res)
+      assert.equal(res.status, expected)
+    }
+    assert.equal(spawns.length, 0, '被拒请求不触发 spawn')
+    // 请求体携带任意命令/URL均被忽略:固定 open -b com.deepseek.dsh dsh://open
+    const res = makeRes()
+    await handler(makeReq('POST', { command: 'untrusted', url: 'https://example.org' }, JSON_HEADERS), res)
+    if (process.platform === 'darwin') {
+      assert.equal(res.status, 200)
+      assert.deepEqual(res.body, { ok: true })
+      assert.deepEqual(spawns, [{ file: '/usr/bin/open', args: ['-b', 'com.deepseek.dsh', 'dsh://open'] }])
+    } else {
+      assert.equal(res.status, 409)
+      assert.equal(spawns.length, 0, '非 darwin 平台不执行 spawn')
+    }
+  })
+})
+
 test('Given 测试点火在途 When 再次点火 Then 429 且不重复 spawn', async () => {
   const releases = []
   const original = __hostSpawn.impl

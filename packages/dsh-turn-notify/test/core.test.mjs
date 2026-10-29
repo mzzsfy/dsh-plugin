@@ -456,12 +456,14 @@ test('webhook payload 字段映射', () => {
     event: 'n1',
     category: CATEGORY_DONE,
     status: 'completed',
+    sessionId: null,
     session: '修复登录',
     workspace: '/repo',
     durationMs: 12 * 1000,
     tokens: 1500,
     ts: 1234,
   })
+  assert.equal(buildWebhookPayload(buildUnit({ sessionId: 's9' })).sessionId, 's9', '会话 ID 结构化随行')
 })
 
 test('通知统计与降级小结:buildSummary 组装与空缺归 null', () => {

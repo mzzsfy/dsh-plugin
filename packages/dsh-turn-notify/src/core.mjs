@@ -148,6 +148,7 @@ export function buildUnit({ id, category, status, sessionId, sessionTitle, works
     id,
     category,
     status,
+    // 会话唯一身份:点击直达按 ID 导航,缺省 null(历史投影/测试点火)只唤醒不跳转
     sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null,
     session: sessionTitle,
     workspace,
@@ -210,7 +211,8 @@ export function collectAssistantTail(tail, sessionId, data) {
   return next
 }
 
-// 投影单元字段到 webhook 结构化字段的一比一映射(text/summary 随行)。
+// 投影单元字段到 webhook 结构化字段的一比一映射(text/summary 随行);
+// sessionId 结构化同步(null 显式随行),新增字段的消费方自行判空,向后兼容。
 export function buildWebhookPayload(unit) {
   return {
     text: unit.text,
@@ -218,6 +220,7 @@ export function buildWebhookPayload(unit) {
     event: unit.id,
     category: unit.category,
     status: unit.status,
+    sessionId: unit.sessionId,
     session: unit.session,
     workspace: unit.workspace,
     durationMs: unit.durationMs,
@@ -505,6 +508,8 @@ const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 
 // 宿主桌面通知 spawn 超时:与 webhook 同语义,超时强杀不重试
 export const HOST_NOTIFY_TIMEOUT_MS = 10 * 1000
+// focus-desktop 唤醒走 `open -b`(冷启动可能秒级),超时短于宿主通知以尽快回执失败提示
+export const HOST_FOCUS_TIMEOUT_MS = 5 * 1000
 
 // 宿主通知决策:浏览器优先——浏览器在场由浏览器呈现,宿主让位(正常路径
 // 零重复);离场由宿主补位。重复只发生在在场判定的边界情况(认可窗口边界与

@@ -1,10 +1,143 @@
+// 通知点击直达与身份高亮 BDD:
+// 点击行为按通知携带的 sessionId 身份导航(uiWorkspace.openSession),不再按侧边栏 DOM
+// 标题模拟点击;macOS 桌面壳经 focus-desktop 端点唤起;导航服务按实例登记、存活实例接管。
+// 客户端片段按源码标记切片后在桩环境求值,宿主路由片段同样按标记切片求值;
+// 高亮/提醒/代际套件走完整源码与真实 factory/apply/poll 链路。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { buildUnit } from '../src/core.mjs'
+import { buildUnit, buildWebhookPayload } from '../src/core.mjs'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
+const host = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
 const REMIND_MS = 10 * 60 * 1000
+const navigation = source.slice(source.indexOf('const sessionNavigators = new Map()'), source.indexOf('// ---- 审批/提问超时二次提醒'))
+const system = source.slice(source.indexOf('function notifySystem('), source.indexOf('// ---- 投影快照与认领'))
+
+// 切片求值只含导航与系统通知段,身份判定与已读收尾以同名实现注入,
+// 保证被测片段的调用形态与完整源码一致
+function clickFixture({ protocol = 'dsh-app:', platform = 'darwin', focusThrows = false, openThrows = false, wakeFails = false } = {}) {
+  const opened = [], requests = [], messages = [], notifications = []
+  let focuses = 0
+  const window = { location: { protocol }, focus() { focuses++; if (focusThrows) throw new Error('focus') } }
+  const document = { documentElement: { dataset: { platform } } }
+  const api = async (...args) => { requests.push(args); if (wakeFails) throw new Error('wake'); return { ok: true } }
+  const toast = (message) => messages.push(message)
+  class Notification { constructor(title, options) { Object.assign(this, { title, options, closed: false }); notifications.push(this) } close() { this.closed = true } }
+  const runtime = new Function('window', 'document', 'api', 'toast', 'Notification', 'TOAST_MS', 'hasSessionId', 'markSessionHandled', 'notificationController', navigation + system + '\nreturn { activateSessionFromUnit, notifySystem, bind(value) { sessionNavigators.clear(); if (value) sessionNavigators.set(Symbol(), value) } }')(window, document, api, toast, Notification, 6000, (unit) => typeof unit.sessionId === 'string' && unit.sessionId.length > 0, () => {}, null)
+  runtime.bind({ openSession(id) { if (openThrows) throw new Error('open'); opened.push(id) } })
+  return { ...runtime, opened, requests, messages, notifications, focuses: () => focuses }
+}
+
+test('投影携带唯一会话ID，标题仍作展示，webhook 结构化同步且向后兼容', () => {
+  const unit = buildUnit({ id: 'n', sessionId: 'session-42', sessionTitle: '同名标题', category: 'completed' })
+  assert.equal(unit.sessionId, 'session-42')
+  assert.equal(unit.session, '同名标题')
+  assert.equal(buildUnit({}).sessionId, null)
+  assert.equal(buildUnit({ sessionId: '' }).sessionId, null, '空串按缺省归 null')
+  assert.equal(buildWebhookPayload(unit).sessionId, 'session-42', 'webhook 结构化字段同步会话 ID')
+  assert.equal(buildWebhookPayload(buildUnit({})).sessionId, null, 'null 显式随行,消费方自行判空')
+  assert.match(host, /status: reasonKind \?\? category,\s*sessionId,/)
+})
+
+test('真实系统通知点击回调按ID导航并关闭通知，通知创建不唤起App', async () => {
+  const f = clickFixture()
+  f.notifySystem({ id: 'n', text: '标题', summary: '摘要', sessionId: 's-target', session: '同名标题' })
+  assert.equal(f.requests.length, 0, '通知创建不触发唤醒请求')
+  assert.deepEqual(f.notifications[0].options, { tag: 'n', body: '摘要' })
+  f.notifications[0].onclick()
+  await Promise.resolve()
+  assert.deepEqual(f.opened, ['s-target'])
+  assert.equal(f.notifications[0].closed, true)
+  assert.deepEqual(f.requests, [['/api/turn-notify/focus-desktop', { method: 'POST' }]])
+})
+
+test('重名、改名、空标题、跨工作区和折叠列表均按ID，不访问DOM', () => {
+  const f = clickFixture({ protocol: 'http:' })
+  for (const unit of [
+    { sessionId: 'a', session: '相同标题', workspace: '/a' },
+    { sessionId: 'b', session: '相同标题', workspace: '/b' },
+    { sessionId: 'a', session: '旧标题' },
+    { sessionId: 'c', session: null },
+  ]) f.activateSessionFromUnit(unit)()
+  assert.deepEqual(f.opened, ['a', 'b', 'a', 'c'])
+  assert.equal(f.requests.length, 0)
+})
+
+test('旧通知或测试通知无ID时只聚焦，不按标题误跳', () => {
+  const f = clickFixture({ protocol: 'http:' })
+  for (const sessionId of [undefined, null, '', 42]) f.activateSessionFromUnit({ session: '存在同名行', sessionId })()
+  assert.deepEqual(f.opened, [])
+  assert.equal(f.focuses(), 4)
+})
+
+test('window.focus抛错不阻断ID导航；唤醒失败不产生未处理拒绝', async () => {
+  const f = clickFixture({ focusThrows: true, wakeFails: true })
+  f.notifySystem({ id: 'n', sessionId: 's' })
+  assert.doesNotThrow(() => f.notifications[0].onclick())
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(f.opened, ['s'])
+  assert.equal(f.notifications[0].closed, true)
+  assert.equal(f.messages.length, 1)
+})
+
+test('导航服务缺席或调用失败时提示，不按标题走第二条路径', () => {
+  const missing = clickFixture({ protocol: 'http:' })
+  missing.bind(null)
+  missing.activateSessionFromUnit({ sessionId: 's' })()
+  assert.match(missing.messages[0], /尚未就绪/)
+  const failed = clickFixture({ protocol: 'http:', openThrows: true })
+  failed.notifySystem({ sessionId: 's' })
+  failed.notifications[0].onclick()
+  assert.match(failed.messages[0], /无法打开/)
+  assert.equal(failed.notifications[0].closed, true)
+})
+
+test('普通浏览器和Windows桌面不请求macOS唤醒端点', () => {
+  for (const config of [{ protocol: 'https:' }, { platform: 'win32' }]) {
+    const f = clickFixture(config)
+    f.activateSessionFromUnit({ sessionId: 's' })()
+    assert.equal(f.requests.length, 0)
+    assert.deepEqual(f.opened, ['s'])
+  }
+})
+
+test('导航服务经注入生命周期绑定并卸载，不影响其他通知服务', () => {
+  const start = source.indexOf("ctx.inject(['uiWorkspace']")
+  const end = source.indexOf('// 样式挂载宿主文档级', start)
+  let release
+  const navigator = { openSession() {} }
+  const ctx = { inject(names, fn) { assert.deepEqual(names, ['uiWorkspace']); fn({ get: () => navigator, effect(fn) { release = fn() } }) } }
+  const run = new Function('ctx', 'const sessionNavigators = new Map();\n' + source.slice(start, end) + '\nreturn () => [...sessionNavigators.values()].at(-1) ?? null')
+  const current = run(ctx)
+  assert.equal(current(), navigator)
+  release()
+  assert.equal(current(), null)
+})
+
+test('宿主唤醒业务固定指向DSH，非macOS不执行且失败如实返回', async () => {
+  const start = host.indexOf('  // 只唤起本机 macOS 桌面 App')
+  const end = host.indexOf('  // 宿主通知测试点火互斥', start)
+  const fragment = host.slice(start, end)
+  for (const platform of ['darwin', 'linux']) {
+    let registered, fail = false
+    const calls = []
+    const ctx = { effect(fn) { fn() }, webServer: { register(value) { registered = value } } }
+    const route = (method, options, fn) => { assert.equal(method, 'POST'); assert.equal(options.crossOrigin, true); return fn }
+    const spawn = { impl(...args) { calls.push(args.slice(0, 3)); args[3](fail ? new Error('failure') : null) } }
+    new Function('ctx', 'route', 'sendJson', '__hostSpawn', 'process', 'HOST_FOCUS_TIMEOUT_MS', fragment)(ctx, route, (res, status, body) => Object.assign(res, { status, body }), spawn, { platform }, 5000)
+    const res = {}
+    await registered.handler({ body: { command: 'untrusted', url: 'https://example.org' } }, res)
+    if (platform !== 'darwin') { assert.equal(res.status, 409); assert.equal(calls.length, 0); continue }
+    assert.deepEqual(calls[0], ['/usr/bin/open', ['-b', 'com.deepseek.dsh', 'dsh://open'], { timeout: 5000 }])
+    assert.deepEqual(res.body, { ok: true })
+    fail = true
+    await registered.handler({}, res)
+    assert.equal(res.body.ok, false)
+  }
+})
+
+// ---- 以下为身份高亮/提醒/代际套件:完整源码 + 真实 factory/apply/poll ----
 
 // 仅替换浏览器/宿主边界；执行真实 factory、apply、poll 与回调。
 function fixture({ rows = [], current = null, focus = false, highlight = true } = {}) {
@@ -61,7 +194,11 @@ function fixture({ rows = [], current = null, focus = false, highlight = true } 
       uiWorkspace: { openSession(id) { assert.ok(live, '旧owner服务被调用'); if (fail) throw new Error('failed'); opened.push(id) } },
       sessions: { list: { getSnapshot() { assert.ok(live, '旧owner快照被读取'); return { byId: ownerCurrent ? { [ownerCurrent]: { id: ownerCurrent, retainedBy: { mainView: 1 } } } : {} } }, subscribe(fn) { subscriptions.add(fn); return () => subscriptions.delete(fn) } } }, workspaces: {},
     }
-    module.apply({ get: key => services[key], effect(fn) { const off = fn(); if (typeof off === 'function') cleanups.push(off) }, inject() {}, slots: { inject() {} } })
+    module.apply({ get: key => services[key], effect(fn) { const off = fn(); if (typeof off === 'function') cleanups.push(off) },
+      inject(names, callback) {
+        if (names[0] !== 'uiWorkspace') return // 会话导航软依赖:接通登记,存活实例接管
+        callback({ get: () => services.uiWorkspace, effect(fn) { const off = fn(); if (typeof off === 'function') cleanups.push(off) } })
+      }, slots: { inject() {} } })
     return { opened, setCurrent(id) { ownerCurrent = id; for (const fn of subscriptions) fn() }, off() { while (cleanups.length) cleanups.pop()(); live = false } }
   }
   const emit = (type, event) => { for (const fn of [...(events.get(type) || [])]) fn(event) }
@@ -182,13 +319,19 @@ for (const first of [0, 1]) test('N4 任一owner先卸载均用存活服务 ' + 
 
 test('N4 最后卸载/同factory重启/HMR后旧动作不复活，旧cleanup不伤新代', async () => {
   const f = fixture(), a = f.owner()
+  // 唤醒端点的失败提示异步落栈且不带 onClick,取卡片时按直达回调过滤
+  const cards = () => f.shown.filter(item => typeof item.opts?.onClick === 'function')
   await f.notify([unit()]); const oldClick = f.shown[0].opts.onClick, oldNative = f.native[0]
   a.off(); oldClick(); oldNative.onclick(); assert.deepEqual(a.opened, [])
-  const b = f.owner(); oldClick(); assert.deepEqual(b.opened, [])
-  await f.notify([{ ...unit(), id: 'B2' }]); const bClick = f.shown.at(-1).opts.onClick
+  const b = f.owner(); oldClick(); assert.deepEqual(b.opened, ['B'], '迟到闭包点击现读注册表,由同factory存活实例接管')
+  await f.notify([{ ...unit(), id: 'B2' }])
+  await new Promise(resolve => setImmediate(resolve))
+  const bClick = cards().at(-1).opts.onClick
   const fresh = f.factory(), c = f.owner(fresh)
-  bClick(); b.off(); a.off(); assert.deepEqual(b.opened, [])
-  await f.notify([{ ...unit(), id: 'B3' }], fresh); f.shown.at(-1).opts.onClick()
+  bClick(); b.off(); a.off(); assert.deepEqual(b.opened, ['B', 'B'], 'B2 卡片点击由同 factory 存活的 b 接管')
+  await f.notify([{ ...unit(), id: 'B3' }], fresh)
+  await new Promise(resolve => setImmediate(resolve))
+  cards().at(-1).opts.onClick()
   assert.deepEqual(c.opened, ['B']); c.off()
 })
 

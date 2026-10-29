@@ -16,6 +16,7 @@ import {
   CATEGORY_ASK,
   CATEGORY_APPROVAL,
   MIN_TURN_DURATION_MS,
+  HOST_FOCUS_TIMEOUT_MS,
   OPEN_TURN_STALE_MS,
   SUBAGENT_WAKE_WINDOW_MS,
   buildSummary,
@@ -275,13 +276,15 @@ export function apply(ctx, config) {
   // dshIm 在场判定:可选依赖运行期探测,各路由统一由此取语义
   const imReady = () => ctx.get('dshIm') !== undefined
 
-  // 测试事件构造:test-webhook 与 test-im 共用同一形态,防两处样例走样
+  // 测试事件构造:test-webhook 与 test-im 共用同一形态,防两处样例走样;
+  // sessionId 恒 null:测试点火通知不绑定会话,点击只唤醒不跳转
   const buildTestUnit = () => {
     seq += 1
     return buildUnit({
       id: 'test-' + Date.now().toString(36) + '-' + String(seq),
       category: CATEGORY_APPROVAL,
       status: CATEGORY_ASK,
+      sessionId: null,
       sessionTitle: '测试事件',
       workspace: '',
       durationMs: null,
@@ -721,6 +724,27 @@ export function apply(ctx, config) {
         sendJson(res, 200, result)
       }),
     }), 'turn-notify test-webhook route')
+
+  // 只唤起本机 macOS 桌面 App;会话导航由已点击通知的 renderer 按 ID 完成。
+  // 固定协议与参数,不接受请求体中的命令/路径,也不导航到浏览器的 HTTP 地址;
+  // 认证由宿主层承担,跨源防护与既有写路由同为 Origin/Host 同源比对。
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/turn-notify/focus-desktop',
+      handler: route('POST', { crossOrigin: true }, async (req, res) => {
+        if (process.platform !== 'darwin') {
+          sendJson(res, 409, { ok: false, detail: '仅支持 macOS 桌面版' })
+          return
+        }
+        const result = await new Promise((resolve) => {
+          __hostSpawn.impl('/usr/bin/open', ['-b', 'com.deepseek.dsh', 'dsh://open'], { timeout: HOST_FOCUS_TIMEOUT_MS }, (error) => {
+            resolve(error ? { ok: false, detail: '无法唤起 DSH 桌面版' } : { ok: true })
+          })
+        })
+        sendJson(res, 200, result)
+      }),
+    }), 'turn-notify focus-desktop route')
 
   // 宿主通知测试点火互斥:spawn 代价高于既有端点(powershell/osascript 秒级),
   // 单在途防连点堆积
