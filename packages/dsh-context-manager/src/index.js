@@ -41,7 +41,7 @@ import {
   isSessionRunning,
   maxArtifactBytesForHost,
 } from './core.mjs'
-import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, writePrompts, writeWorkspaceCache } from './history-cache.mjs'
+import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, updatePrompts, updateWorkspaceCache } from './history-cache.mjs'
 import { createRequire } from 'node:module'
 
 export const name = 'dsh-context-manager'
@@ -213,8 +213,7 @@ export function apply(ctx, config) {
 
   // 双车道对齐队列:批量车道(启动/请求触发,一次解一整个窗口)与焦点车道
   // (单会话实时追加,延时敏感)各自串行、互不等待——焦点车道不被冷启动
-  // 批量任务的分钟级解压堵死。两车道并发写同一工作区缓存时,最坏丢一次
-  // 更新,但批量窗口必含活跃会话(其自身重读即收敛),下轮指纹失配自愈
+  // 批量任务的分钟级解压堵死。提交时按文件短锁重读合并,防跨车道丢更新
   function makeLane() {
     const tasks = []
     let draining = false
@@ -311,13 +310,20 @@ export function apply(ctx, config) {
       const subagentIds = new Set(records
         .filter((recordItem) => recordItem.header.origin === 'subagent')
         .map((recordItem) => recordItem.header.id))
-      const legacyEntries = subagentIds.size === 0 ? (cached ? cached.entries : [])
-        : (cached ? cached.entries : []).filter((entry) => entry.sid === undefined || !subagentIds.has(entry.sid))
-      const merged = aggregateInputs(
-        legacyEntries.concat(fresh),
-        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
-      )
-      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts: prunedExtracts })
+      await updateWorkspaceCache(cacheDir, cwd, (latest) => {
+        const legacyEntries = (latest?.entries ?? []).filter((entry) => entry.sid === undefined || !subagentIds.has(entry.sid))
+        const nextExtracts = { ...latest?.extracts }
+        // 提取期间已有新提交的会话保留新指纹,陈旧任务只能替换自己的基线。
+        for (const sessionId of new Set([...Object.keys(cached?.extracts ?? {}), ...Object.keys(prunedExtracts)])) {
+          if (JSON.stringify(nextExtracts[sessionId]) !== JSON.stringify(cached?.extracts?.[sessionId])) continue
+          if (prunedExtracts[sessionId]) nextExtracts[sessionId] = prunedExtracts[sessionId]
+          else delete nextExtracts[sessionId]
+        }
+        return {
+          entries: aggregateInputs(legacyEntries.concat(fresh), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }),
+          extracts: nextExtracts,
+        }
+      })
     })
   }
 
@@ -337,11 +343,17 @@ export function apply(ctx, config) {
       const cached = await readWorkspaceCache(cacheDir, cwd)
       const extracts = cached && cached.extracts ? { ...cached.extracts } : {}
       const entries = await extractSession({ header }, fingerprint, extracts, isRunning)
-      const merged = aggregateInputs(
-        (cached ? cached.entries : []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))),
-        { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS },
-      )
-      await writeWorkspaceCache(cacheDir, cwd, { entries: merged, extracts })
+      await updateWorkspaceCache(cacheDir, cwd, (latest) => {
+        const nextExtracts = { ...latest?.extracts }
+        if (JSON.stringify(nextExtracts[sessionId]) === JSON.stringify(cached?.extracts?.[sessionId])) {
+          if (extracts[sessionId]) nextExtracts[sessionId] = extracts[sessionId]
+          else delete nextExtracts[sessionId]
+        }
+        return {
+          entries: aggregateInputs((latest?.entries ?? []).concat(entries.map((entry) => ({ ...entry, sid: sessionId }))), { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }),
+          extracts: nextExtracts,
+        }
+      })
     })
   }
 
@@ -576,18 +588,19 @@ export function apply(ctx, config) {
           }
           const text = typeof body.text === 'string' ? body.text.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
           if (text === '') throw new Error('text 不能为空')
-          const items = await readPrompts(cacheDir)
-          const at = items.findIndex((item) => item.text === text)
           let collected
-          if (at >= 0) {
-            items.splice(at, 1)
-            collected = false
-          } else {
-            items.unshift({ text, at: Date.now() })
-            if (items.length > HISTORY_PROMPTS_MAX) items.length = HISTORY_PROMPTS_MAX
-            collected = true
-          }
-          await writePrompts(cacheDir, items)
+          await updatePrompts(cacheDir, (items) => {
+            const at = items.findIndex((item) => item.text === text)
+            if (at >= 0) {
+              items.splice(at, 1)
+              collected = false
+            } else {
+              items.unshift({ text, at: Date.now() })
+              if (items.length > HISTORY_PROMPTS_MAX) items.length = HISTORY_PROMPTS_MAX
+              collected = true
+            }
+            return items
+          })
           sendJson(res, 200, { collected })
         } catch (error) {
           respondError(ctx, res, error)

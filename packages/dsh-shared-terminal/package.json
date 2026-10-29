@@ -1,7 +1,7 @@
 {
   "name": "@mzzsfy/dsh-shared-terminal",
   "description": "AI 与用户通过 DSH 官方交互终端共同操作 Session shell",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -23,7 +23,8 @@
         "0.2.1-alpha.1": "unknown",
         "0.2.1-alpha.2": "compatible",
         "0.2.1-rc.2": "compatible",
-        "0.2.1-rc.3": "compatible"
+        "0.2.1-rc.3": "compatible",
+        "0.2.1-rc.4": "compatible"
       }
     },
     "hostMin": "0.2.0-rc.1"
@@ -42,7 +43,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2",
-    "@deepseek-ai/dsh-api-terminal-controller": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.1-rc.3",
+    "@deepseek-ai/dsh-api-terminal-controller": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4",
     "@deepseek-ai/dsh-client-ui-sidebar-terminal": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-sidebar-right": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-tool": ">=0.2.0-rc.2"

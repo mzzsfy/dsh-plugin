@@ -54,6 +54,7 @@ function makeCtx({
   settingsValue,
   settingsGetError,
   readSessions,
+  readSession,
   configRef,
   configEditor,
   settingsService: settingsServiceOverride,
@@ -82,6 +83,7 @@ function makeCtx({
     listSessions: async () => headers.map((header) => ({ header })),
     readSession: async (sessionId) => {
       readCounts.set(sessionId, (readCounts.get(sessionId) || 0) + 1)
+      if (readSession) return readSession(sessionId)
       const events = readSessions ? readSessions[sessionId] : undefined
       if (typeof events === 'function') throw events()
       if (events === undefined) throw new Error('桩未配置该会话产物')
@@ -434,6 +436,32 @@ test('历史输入路由:会话产物变化即席聚焦对齐,单次请求内拿
   })
 })
 
+test('HC3 Given stale bulk read and new focus commit, When bulk finishes, Then acknowledged focus input survives', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const artifact = path.join(cacheDir, 'artifact')
+    await writeFile(artifact, 'old')
+    const started = Promise.withResolvers(), release = Promise.withResolvers()
+    const shared = { headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map(), sessionPersistence: { locate: () => ({ path: artifact }) } }
+    const old = makeCtx({ ...shared, readSession: async () => { started.resolve(); await release.promise; return { events: [userMessageEvent('old', 100)] } } })
+    const initial = response()
+    await old.handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=workspace'), initial)
+    await started.promise
+    await writeFile(artifact, 'new-longer')
+    const newer = makeCtx({ ...shared, readSessions: { s1: [userMessageEvent('old', 100), userMessageEvent('new', 200)] } })
+    try {
+      const focus = response()
+      await newer.handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), focus)
+      assert.ok(focus.body.inputs.some((item) => item.text === 'new'))
+    } finally { release.resolve() }
+    // 两个车道仍独立;等待旧批量路径写回完成后核对磁盘。
+    await requestUntil(old.handlers, '?sessionId=s1&scope=workspace', (body) => body.aligned)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const cached = JSON.parse(await readFile(workspaceCacheFile(cacheDir, 'C:\\x'), 'utf8'))
+    assert.ok(cached.entries.some((item) => item.text === 'new'), '旧bulk不得覆写已确认新输入')
+    assert.equal(cached.extracts.s1.size, 'new-longer'.length, '旧指纹不得覆盖新提交')
+  })
+})
+
 test('历史输入路由:聚焦对齐只更新目标会话,不抹其他会话的持久 extracts', skipMissingDeps, async () => {
   await withHistoryCacheDir(async (cacheDir) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-prune-'))
@@ -682,6 +710,25 @@ test('历史输入路由:subagent 排最前不挤占窗口——第 SCAN 个主�
 })
 
 // ── 常用提示词 ──
+
+for (const sameText of [false, true]) {
+  test(`HC${sameText ? 2 : 1} Given two live instances, When toggles overlap, Then acknowledged changes serialize (same=${sameText})`, skipMissingDeps, async () => {
+    await withHistoryCacheDir(async () => {
+      const make = () => makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map(), readSessions: {} })
+      const a = make(), b = make()
+      const results = await Promise.all([
+        postJson(a.handlers, '/api/context/prompts/toggle', { text: 'A' }),
+        postJson(b.handlers, '/api/context/prompts/toggle', { text: sameText ? 'A' : 'B' }),
+      ])
+      assert.deepEqual(results.map((res) => res.status), [200, 200])
+      assert.deepEqual(results.map((res) => res.body.collected), sameText ? [true, false] : [true, true])
+      const res = response()
+      await a.handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=prompts'), res)
+      assert.deepEqual(res.body.inputs.map((item) => item.text).sort(), sameText ? [] : ['A', 'B'])
+    })
+  })
+}
+
 
 test('常用提示词:toggle 收藏/取消,prompts 范围可见,与工作区缓存互不污染', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {

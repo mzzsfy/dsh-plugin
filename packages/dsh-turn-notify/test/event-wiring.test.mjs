@@ -110,6 +110,19 @@ async function projectionUnits(routes) {
   return res.body.units
 }
 
+test('N1 Given 同名会话与无标题会话 When host事件投影 Then 保留各自sessionId', async () => {
+  const { ctx, routes, handlers } = makeCtx({ sessionTitle: { get: () => ({ title: '同名' }) } })
+  apply(ctx)
+  const onEvent = handlers.get('session/event')
+  onEvent({ id: 'A', header: {} }, toolCall('ask_user_question'))
+  onEvent({ id: 'B', header: {} }, toolCall('ask_user_question'))
+  assert.deepEqual((await projectionUnits(routes)).map(unit => [unit.sessionId, unit.session]), [['A', '同名'], ['B', '同名']])
+  const bare = makeCtx()
+  apply(bare.ctx)
+  bare.handlers.get('session/event')({ id: 'no-title', header: {} }, toolCall('ask_user_question'))
+  assert.equal((await projectionUnits(bare.routes))[0].sessionId, 'no-title')
+})
+
 test('Given 子代理刚结束 When 父会话唤醒回合以 completed 结束 Then 投影无完成通知', async () => {
   const { ctx, routes, handlers } = makeCtx()
   apply(ctx)

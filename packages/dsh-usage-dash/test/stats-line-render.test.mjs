@@ -17,7 +17,7 @@ function render(options = {}) {
   const useState = (init) => [stateIndex++ === 1 ? pricing : typeof init === 'function' ? init() : init, () => {}]
   const noop = () => {}
   const names = Object.keys(core)
-  const component = new Function(...names, 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'fetchPricing', 'useUsageDialogTarget', 'createPortal', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), noop, () => target, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }))
+  const component = new Function(...names, 'React', 'h', 'useState', 'useEffect', 'useLayoutEffect', 'useRef', 'statsLineState', 'defaultT', 'usePricing', 'useUsageDialogTarget', 'createPortal', `return (${source})`)(...Object.values(core), React, h, useState, noop, noop, () => ({ current: null }), { get: () => prefs }, core.createTranslator(core.MESSAGES_ZH), () => ({ rules: pricing }), () => target, (content, container) => ({ type: 'portal', props: { container }, children: [content].flat(Infinity) }))
   return component({ useProjection: () => value, t: core.createTranslator(lang === 'en' ? core.MESSAGES_EN : core.MESSAGES_ZH) })
 }
 const nodes = (tree) => tree && typeof tree === 'object' ? [tree, ...tree.children.flatMap(nodes)] : []

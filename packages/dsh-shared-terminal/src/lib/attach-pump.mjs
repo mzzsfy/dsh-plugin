@@ -1,7 +1,9 @@
-// 0.2.1-rc.2 attach 泵:自持附着写通道,命令帧 sequence 按附着世代严格递增,ack 按 sequence 匹配
 const ACK = 'ack'
 const WRITE = 'write'
 const READ_ONLY = 'read-only'
+const RELEASE_IDLE_MS = 10 * 1000
+const disposedError = () => Object.assign(new Error('Terminal pump disposed'), { code: 'terminal/disposed' })
+const refusalError = (refusal, epoch) => Object.assign(new Error(`terminal 写入被拒绝: ${refusal}`), { code: 'terminal/write-refused', refusal, epoch })
 
 export class AttachPump {
   #controller
@@ -13,6 +15,8 @@ export class AttachPump {
   #push
   #pending = new Map()
   #reading = false
+  #idleTimer
+  #disposed = false
 
   constructor(controller, agent, id) {
     this.#controller = controller
@@ -21,104 +25,131 @@ export class AttachPump {
   }
 
   #ensure() {
+    if (this.#disposed) throw disposedError()
+    // 即使复用 warm 附着也必须经过宿主 closed identity 校验。
+    const attachment = this.#controller.terminal(this.#agent, this.#id)
+    clearTimeout(this.#idleTimer)
     if (this.#reading) return
-    this.#ac = new AbortController()
+    const ac = new AbortController()
+    this.#ac = ac
     this.#seq = 0
     const epoch = ++this.#epoch
-    // 队列与唤醒按世代局部化:旧附着残留帧随旧队列一并作废,不污染新附着
     const queue = []
     let wake
-    const input = {
-      [Symbol.asyncIterator]: () => ({
-        next: async () => {
-          while (queue.length === 0) {
-            if (this.#ac.signal.aborted) return { value: undefined, done: true }
-            await new Promise((resolve) => { wake = resolve })
-          }
-          return { value: queue.shift(), done: false }
-        },
-        return: async () => ({ value: undefined, done: true })
-      })
+    let closed = false
+    const close = () => {
+      closed = true
+      queue.length = 0
+      wake?.()
+      wake = undefined
     }
+    ac.signal.addEventListener('abort', close, { once: true })
+    const iterator = {
+      next: async () => {
+        while (!closed && queue.length === 0) await new Promise((resolve) => { wake = resolve })
+        return closed ? { value: undefined, done: true } : { value: queue.shift(), done: false }
+      },
+      return: async () => { close(); return { value: undefined, done: true } },
+    }
+    const input = { [Symbol.asyncIterator]: () => iterator }
     this.#push = (frame) => {
+      if (closed) return
       queue.push(frame)
       wake?.()
       wake = undefined
     }
-    const attachment = this.#controller.terminal(this.#agent, this.#id)
-    const reader = attachment.attach(input, this.#controller.config, this.#ac.signal)
+    const reader = attachment.attach(input, this.#controller.config, ac.signal)
     this.#reading = true
     void (async () => {
       try {
         for await (const frame of reader) {
-          // 旧附着的迟到帧不得命中新附着的同号 pending
           if (this.#epoch !== epoch) return
           if (frame?.type !== ACK) continue
-          const pending = this.#pending.get(frame.sequence)
-          this.#pending.delete(frame.sequence)
-          pending?.(frame)
+          this.#pending.get(frame.sequence)?.(frame.refusal === undefined ? undefined : refusalError(frame.refusal, epoch))
         }
       } catch {
-        // 附着取消或终端消失:静默结束,后续 write 由调用方错误路径处理
+        // 附着结束统一交由当前世代的 pending 处理。
       } finally {
-        // 仅清理属于本次附着的 pending;重抢后的新附着 pending 不受旧循环退出影响
-        if (this.#epoch === epoch) {
-          this.#reading = false
-          for (const pending of this.#pending.values()) {
-            pending({ type: ACK, sequence: -1, refusal: 'detached' })
-          }
-          this.#pending.clear()
-        }
+        close()
+        ac.signal.removeEventListener('abort', close)
+        if (this.#epoch === epoch) this.#halt(refusalError('detached', epoch))
       }
     })()
   }
 
-  async write(text) {
+  async write(text, signal) {
+    signal?.throwIfAborted()
+    if (this.#disposed) throw disposedError()
     try {
-      return await this.#attemptWrite(text)
+      return await this.#attemptWrite(text, signal)
     } catch (error) {
-      // 控制权被接管或附着流断:重抢一次,sequence 随新附着重置
+      signal?.throwIfAborted()
+      if (this.#disposed) throw disposedError()
       if (error.refusal !== READ_ONLY && error.refusal !== 'detached') throw error
-      // 并发下被拒世代可能已被其他 write 重建,此时直接挂靠活世代,禁止互杀
-      if (this.#epoch === error.epoch) this.stop()
-      return await this.#attemptWrite(text)
+      // 并发写若已重建世代,直接挂靠新世代,禁止互杀。
+      if (this.#epoch === error.epoch) this.#halt(refusalError('detached', error.epoch))
+      return await this.#attemptWrite(text, signal)
     }
   }
 
-  #attemptWrite(text) {
+  #attemptWrite(text, signal) {
+    signal?.throwIfAborted()
     this.#ensure()
     const epoch = this.#epoch
     const sequence = ++this.#seq
     return new Promise((resolve, reject) => {
-      this.#pending.set(sequence, (frame) => {
-        if (frame.refusal !== undefined) {
-          reject(Object.assign(new Error(`terminal 写入被拒绝: ${frame.refusal}`), { code: 'terminal/write-refused', refusal: frame.refusal, epoch }))
-        } else {
-          resolve()
-        }
-      })
+      const settle = (error) => {
+        this.#pending.delete(sequence)
+        signal?.removeEventListener('abort', cancel)
+        error === undefined ? resolve() : reject(error)
+      }
+      const cancel = () => {
+        settle(signal.reason)
+        // 不能删除单个已编号帧:终止旧代以保持宿主连续 sequence 契约。
+        if (this.#epoch === epoch) this.#halt(Object.assign(new Error('Terminal attachment cancelled; write outcome unknown'), { code: 'terminal/write-unknown' }))
+      }
+      this.#pending.set(sequence, settle)
+      signal?.addEventListener('abort', cancel, { once: true })
       this.#push({ sequence, type: WRITE, data: text })
     }).finally(() => this.#releaseWhenIdle(epoch))
   }
 
-  // 空闲即释放附着:宿主 detach 会广播 state,UI 恢复 writable 触发官方 fit 重算几何
-  // 持续附着会让 UI 长期只读,官方 fit 不跑,插件写入推高的 PTY 行数把底部推出可视区
   #releaseWhenIdle(epoch) {
-    if (this.#epoch !== epoch || this.#pending.size > 0) return
-    this.stop()
+    if (this.#epoch !== epoch || this.#pending.size > 0 || !this.#reading) return
+    clearTimeout(this.#idleTimer)
+    this.#idleTimer = setTimeout(() => {
+      this.#idleTimer = undefined
+      if (this.#epoch === epoch && this.#pending.size === 0) this.stop()
+    }, RELEASE_IDLE_MS)
+  }
+
+  #halt(error) {
+    clearTimeout(this.#idleTimer)
+    this.#idleTimer = undefined
+    ++this.#epoch
+    this.#reading = false
+    this.#ac?.abort()
+    for (const pending of this.#pending.values()) pending(error)
+    this.#pending.clear()
   }
 
   stop() {
-    this.#ac?.abort()
-    this.#reading = false
+    this.#halt(Object.assign(new Error('Terminal pump stopped'), { code: 'terminal/stopped' }))
+  }
+
+  dispose() {
+    this.#disposed = true
+    this.#halt(disposedError())
   }
 }
 
 export function createPumpFactory(controller) {
   const pumps = new Map()
+  let disposed = false
   const key = (agent, id) => `${agent.id}:${id}`
   return {
     for(agent, id) {
+      if (disposed) throw disposedError()
       let pump = pumps.get(key(agent, id))
       if (pump === undefined) {
         pump = new AttachPump(controller, agent, id)
@@ -126,14 +157,14 @@ export function createPumpFactory(controller) {
       }
       return pump
     },
-    // 终端关闭后实例销毁,泵随行驱逐
     evict(agent, id) {
-      pumps.get(key(agent, id))?.stop()
+      pumps.get(key(agent, id))?.dispose()
       pumps.delete(key(agent, id))
     },
     dispose() {
-      for (const pump of pumps.values()) pump.stop()
+      disposed = true
+      for (const pump of pumps.values()) pump.dispose()
       pumps.clear()
-    }
+    },
   }
 }

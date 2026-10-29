@@ -13,6 +13,7 @@ import {
   mergeMapping as coreMergeMapping,
   deadCustomIds as coreDeadCustomIds,
   chooseChannels as coreChooseChannels,
+  foregroundSystemDefault as coreForegroundSystemDefault,
   parseVolume as coreParseVolume,
   imTargetKeyOf as coreImTargetKeyOf,
   toggleImTargetList as coreToggleImTargetList,
@@ -41,7 +42,7 @@ function clientLogic() {
   const section = source.slice(begin + '/* LOGIC-BEGIN */'.length, end)
   const factory = new Function(
     section
-      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SOUND, KEY_SYSTEM, KEY_PAGE_SOUND, KEY_PAGE_SOUND_CATEGORIES, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
+      + '; return { decideClaim, resolveSound, mergeMapping, deadCustomIds, chooseChannels, parseVolume, foregroundSystemDefault, claimEvent, markDone, windowId, localGet, localSet, localDel, storageState, CLAIM_LOCK_TTL_MS, IDLE_AWAY_MS, KEY_DND, KEY_TOAST, KEY_SOUND, KEY_SYSTEM, KEY_PAGE_SOUND, KEY_PAGE_SOUND_CATEGORIES, imTargetKey, toggleImTargetList, removeImTargetFromList, unregisterImBotList, imBoundBotIds, CATEGORIES, CATEGORY_LABELS, DEFAULT_TONES, TONE_LABELS, AUDIO_EXTS, MIME_BY_EXT };',
   )
   return factory()
 }
@@ -157,8 +158,17 @@ function defineDeadScenarios(prefix, dead) {
 defineDeadScenarios('[core.mjs deadCustomIds] ', coreDeadCustomIds)
 defineDeadScenarios('[client.js deadCustomIds] ', client.deadCustomIds)
 
+// Given darwin/win32/linux/未知平台 When 双实现分别计算前台豁免缺省 Then 四组合输出一致
+test('[parity 数据镜像] 平台前台豁免缺省对照', () => {
+  for (const platform of ['darwin', 'win32', 'linux', undefined]) {
+    assert.equal(client.foregroundSystemDefault(platform), coreForegroundSystemDefault(platform))
+  }
+  assert.equal(coreForegroundSystemDefault('darwin'), true)
+  assert.equal(coreForegroundSystemDefault('win32'), false)
+})
+
 // 四通道矩阵对照:client 版开关取自 localStorage,经 stub 注入后与 core 参数化版本逐场景比对。
-function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, soundEnabled, soundCategories, category, systemEnabled, idleMs, idleThresholdMs, pageSoundEnabled, pageSoundCategories, routes }) {
+function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, soundEnabled, soundCategories, category, systemEnabled, idleMs, idleThresholdMs, pageSoundEnabled, pageSoundCategories, routes, foregroundSystem }) {
   const backing = new Map()
   if (focusQuiet === false) backing.set(client.KEY_DND, '0')
   if (systemEnabled === false) backing.set(client.KEY_SYSTEM, '0')
@@ -169,23 +179,48 @@ function clientChooseChannels({ hasFocus, permission, focusQuiet, toastEnabled, 
   globalThis.window = { localStorage: { getItem: (key) => (backing.has(key) ? backing.get(key) : null) } }
   try {
     if (idleThresholdMs !== undefined) assert.equal(client.IDLE_AWAY_MS, idleThresholdMs)
-    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined, soundCategories ?? null, category ?? null, routes ?? null)
+    return client.chooseChannels(hasFocus, permission, idleMs ?? undefined, soundCategories ?? null, category ?? null, routes ?? null, foregroundSystem ?? false)
   } finally {
     delete globalThis.window
   }
 }
 
 function defineChannelScenarios(prefix, channels) {
+  test(prefix + '桌面前台豁免:system 穿透聚焦静默,授权/总开关/路由/空闲对照不变', () => {
+    const base = { hasFocus: true, permission: 'granted', foregroundSystem: true }
+    // 豁免仅放行 system:声音与标题闪烁仍被聚焦静默压制,页内提示照常
+    assert.deepEqual(channels(base), { toast: true, sound: false, system: true, systemSilent: true, blink: false, pageSound: false })
+    // 豁免关闭(普通浏览器):前台保持静默,零行为变化
+    assert.equal(channels({ ...base, foregroundSystem: false }).system, false)
+    // 页内提示音聚焦补位不因豁免改变
+    assert.equal(channels({ ...base, pageSoundEnabled: true }).pageSound, true)
+    // 豁免不绕过授权:未授权不弹,降级闪烁仍被聚焦静默压制
+    assert.equal(channels({ ...base, permission: 'denied' }).system, false)
+    assert.equal(channels({ ...base, permission: 'default' }).system, false)
+    assert.equal(channels({ ...base, permission: 'default' }).blink, false)
+    // 豁免不绕过系统通知总开关
+    assert.equal(channels({ ...base, systemEnabled: false }).system, false)
+    // 豁免与事件路由(kindRoutes 投影 routes)AND 叠加:名单排除即不弹
+    assert.equal(channels({ ...base, routes: ['toast'] }).system, false)
+    assert.equal(channels({ ...base, routes: [] }).system, false)
+    assert.equal(channels({ ...base, routes: ['system'] }).system, true)
+    // 后台(无焦点)行为不变
+    assert.equal(channels({ ...base, hasFocus: false }).system, true)
+    // 空闲满阈值离开:quiet 本为 false,豁免与否输出同形
+    const away = { hasFocus: true, permission: 'granted', idleThresholdMs: USER_IDLE_AWAY_MS, idleMs: USER_IDLE_AWAY_MS }
+    assert.deepEqual(channels({ ...away, foregroundSystem: true }), channels({ ...away, foregroundSystem: false }))
+    assert.deepEqual(channels(away), { toast: true, sound: true, system: true, systemSilent: false, blink: false, pageSound: false })
+  })
   test(prefix + '五通道矩阵对照:聚焦静默 / 双开关 / 授权与降级 / 提示音分类静音', () => {
     const base = { hasFocus: false, permission: 'granted' }
-    assert.deepEqual(channels(base), { toast: true, sound: true, system: true, blink: false, pageSound: false })
-    assert.deepEqual(channels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, blink: false, pageSound: false })
+    assert.deepEqual(channels(base), { toast: true, sound: true, system: true, systemSilent: false, blink: false, pageSound: false })
+    assert.deepEqual(channels({ ...base, hasFocus: true }), { toast: true, sound: false, system: false, systemSilent: false, blink: false, pageSound: false })
     assert.deepEqual(channels({ ...base, hasFocus: true, focusQuiet: false }).sound, true)
     assert.deepEqual(channels({ ...base, toastEnabled: false }).toast, false)
-    assert.deepEqual(channels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, blink: false, pageSound: false })
-    assert.deepEqual(channels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, blink: true, pageSound: false })
+    assert.deepEqual(channels({ ...base, systemEnabled: false }), { toast: true, sound: true, system: false, systemSilent: false, blink: false, pageSound: false })
+    assert.deepEqual(channels({ ...base, permission: 'default' }), { toast: true, sound: true, system: false, systemSilent: false, blink: true, pageSound: false })
     assert.deepEqual(channels({ ...base, permission: 'denied', systemEnabled: false }).blink, false)
-    assert.deepEqual(channels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, blink: false, pageSound: false })
+    assert.deepEqual(channels({ ...base, soundEnabled: false }), { toast: true, sound: false, system: true, systemSilent: false, blink: false, pageSound: false })
     assert.equal(channels({ ...base, soundCategories: { ask: false }, category: 'ask' }).sound, false)
     assert.equal(channels({ ...base, soundCategories: { ask: false }, category: 'completed' }).sound, true)
     assert.equal(channels({ ...base, soundCategories: { ask: false } }).sound, true)
@@ -205,19 +240,19 @@ function defineChannelScenarios(prefix, channels) {
   })
   test(prefix + '用户空闲对照:满阈值离开全通道,活跃聚焦静默', () => {
     const base = { hasFocus: true, permission: 'granted', idleThresholdMs: USER_IDLE_AWAY_MS }
-    assert.deepEqual(channels({ ...base, idleMs: USER_IDLE_AWAY_MS }), { toast: true, sound: true, system: true, blink: false, pageSound: false })
+    assert.deepEqual(channels({ ...base, idleMs: USER_IDLE_AWAY_MS }), { toast: true, sound: true, system: true, systemSilent: false, blink: false, pageSound: false })
     assert.equal(channels({ ...base, idleMs: USER_IDLE_AWAY_MS - 1 }).sound, false)
     assert.equal(channels({ ...base, idleMs: 0 }).sound, false)
-    assert.deepEqual(channels(base), { toast: true, sound: false, system: false, blink: false, pageSound: false })
+    assert.deepEqual(channels(base), { toast: true, sound: false, system: false, systemSilent: false, blink: false, pageSound: false })
   })
   test(prefix + '事件→通道路由:放行名单叠加本机偏好,缺省全放行', () => {
     const base = { hasFocus: false, permission: 'granted' }
     // 未配置(null):全通道,与旧行为一致
-    assert.deepEqual(channels({ ...base, routes: null }), { toast: true, sound: true, system: true, blink: false, pageSound: false })
+    assert.deepEqual(channels({ ...base, routes: null }), { toast: true, sound: true, system: true, systemSilent: false, blink: false, pageSound: false })
     // 名单外通道一律不出
     assert.deepEqual(
       channels({ ...base, routes: ['webhook', 'im'] }),
-      { toast: false, sound: false, system: false, blink: false, pageSound: false },
+      { toast: false, sound: false, system: false, systemSilent: false, blink: false, pageSound: false },
       '呈现通道全被路由排除',
     )
     assert.equal(channels({ ...base, routes: ['sound'] }).sound, true)
@@ -226,7 +261,7 @@ function defineChannelScenarios(prefix, channels) {
     // 空名单 = 全禁(显式配置)
     assert.deepEqual(
       channels({ ...base, routes: [] }),
-      { toast: false, sound: false, system: false, blink: false, pageSound: false },
+      { toast: false, sound: false, system: false, systemSilent: false, blink: false, pageSound: false },
     )
     // 路由与聚焦静默叠加:名单放行 + 聚焦静默仍压声音
     assert.equal(channels({ ...base, hasFocus: true, routes: ['sound', 'system'] }).sound, false)

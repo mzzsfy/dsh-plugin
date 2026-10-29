@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
 
-function fixture(mode = false) {
+function fixture(mode = false, deferredClick = false) {
   const timers = new Map(), observers = [], frames = new Map()
   const storage = new Map([['dsh-think-expand:expandAll', mode ? 'on' : 'off']])
   let seq = 0, definition, panel
@@ -62,7 +62,11 @@ function fixture(mode = false) {
     const row = { variant, text, state: 'running', open: expanded, clicks: 0, isConnected: true }
     row.head = { hasAttribute: key => key === 'data-disclosure-row', getAttribute: key => key === 'aria-expanded' ? String(row.open) : key === 'data-expandable' ? 'true' : null,
       closest: selector => selector === '[data-disclosure-row]' || selector === '[aria-expanded="true"]' && row.open ? row.head : null,
-      click() { row.open = !row.open; row.clicks++; notify() } }
+      click() {
+        const commit = () => { row.open = !row.open; row.clicks++; notify() }
+        if (deferredClick) timers.set(++seq, commit)
+        else commit()
+      } }
     row.closest = selector => selector === '[data-chat-node-key]' ? row.flow : row.hiddenProcess && selector === '[hidden]' ? row.flow : null
     row.getAttribute = key => key === 'data-variant' ? variant : key === 'data-state' ? row.state : null
     row.querySelector = selector => {
@@ -72,7 +76,7 @@ function fixture(mode = false) {
       if (selector === '[data-variant="think"]') return null
       return null
     }
-    row.flow = { getAttribute: key => key === 'data-chat-turn' ? '1' : null, querySelector: selector => selector === '[data-variant="think"]' ? variant === 'think' ? row : null : row.querySelector(selector), closest: selector => selector === '[data-step-process]' ? row.group : null }
+    row.flow = { getAttribute: key => key === 'data-chat-turn' ? '1' : null, querySelector: selector => selector === '[data-variant="think"]' ? variant === 'think' ? row : null : row.querySelector(selector), closest: selector => selector === '[data-step-process]' ? row.group : selector === '[hidden]' && row.hiddenProcess ? row.flow : null }
     row.group = { querySelector: () => row.groupHead }
     row.parentElement = row.flow
     row.hasAttribute = () => false
@@ -181,6 +185,21 @@ test('Given 最新思考由插件展开 When 宿主完成时隐藏过程并重�
   assert.equal(think.hiddenProcess, false)
   assert.equal(think.open, true)
 })
+
+for (const deferredClick of [false, true]) for (const variant of ['think', 'others']) {
+  test(`Given ${variant}完成后${deferredClick ? '异步' : '同步'}恢复 When 新同类行出现 Then 收起仍由插件负责的旧行`, () => {
+    const f = fixture(variant === 'others', deferredClick)
+    const old = f.add(variant, '上一回合正文')
+    f.mount(); f.flush()
+    old.state = 'ok'; old.hiddenProcess = true; old.open = false
+    f.notify(); f.flush()
+    assert.equal(old.open, true)
+    const next = f.add(variant, '新回合正文')
+    f.flush()
+    assert.equal(old.open, false, '恢复后不能把插件所有权误判为手动展开')
+    assert.equal(next.open, true)
+  })
+}
 
 test('Given 用户主动收起末思考 When 随后宿主隐藏过程 Then 不重新展开', () => {
   const f = fixture()

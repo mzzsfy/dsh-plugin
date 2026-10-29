@@ -48,12 +48,21 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
     try {
       const startedAt = Date.now()
       await store.runs.update(record.runId, { status: 'running', startedAt })
-      const outcome = await runnerFor(job).run({
-        job,
+      // pinned 绑定在准入锁内发布;出队使用最新绑定,其余参数保留入队快照。
+      const current = job.kind === 'session' ? store.jobs.get(job.id) : undefined
+      const executionJob = current && job.session?.mode === 'pinned'
+        ? { ...job, session: { ...job.session, pinnedSessionId: current.session?.pinnedSessionId } }
+        : job
+      const outcome = await runnerFor(executionJob).run({
+        job: executionJob,
         env,
         mask: readMaskEnvInPrompt ? readMaskEnvInPrompt() : false,
         logSink: { append: (chunk) => logger.append(job.id, record.runId, chunk) },
         updateRecord: (patch) => store.runs.update(record.runId, patch),
+        updateBinding: (sessionId) => store.jobs.update(job.id, {
+          session: { ...(store.jobs.get(job.id)?.session ?? job.session), pinnedSessionId: sessionId },
+          pinnedSessionId: undefined,
+        }),
       })
       // 终态补记:session 附带 message/sessionId,pinned 自愈时回写新会话 id
       const patch = {
@@ -68,12 +77,6 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       await store.runs.update(record.runId, patch)
       // 任务卡状态回填:看板状态点/耗时直接读任务行(手动与 cron 同源更新)
       const jobPatch = { lastStatus: outcome.status, lastDurationMs: patch.durationMs }
-      if (outcome.pinnedNewId !== undefined) {
-        // pinned 绑定必须落 session 子对象(driver 读 job.session.pinnedSessionId),
-        // 浅合并保留 mode 等其余字段;顶层孤立字段以 undefined 覆盖,落盘时自然消失(历史数据自愈)
-        jobPatch.session = { ...job.session, pinnedSessionId: outcome.pinnedNewId }
-        jobPatch.pinnedSessionId = undefined
-      }
       await store.jobs.update(job.id, jobPatch)
     } catch (error) {
       // runner 拒绝(会话服务异常等)也必须有终态,否则运行记录永久停留 running;

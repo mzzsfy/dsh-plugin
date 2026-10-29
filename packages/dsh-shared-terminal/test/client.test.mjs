@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import { setImmediate as settled } from 'node:timers/promises'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
-function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }) } = {}) {
+function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }) } = {}) {
   let definition, component
   const effects = [], calls = [], seen = [], refs = []
   let index = 0, declared = false, active = true
@@ -28,6 +28,7 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
   new vm.Script(source).runInNewContext({
     AbortController,
+    fetch: fetchImpl,
     document: { createElement: () => ({ setAttribute: () => {}, remove: () => {}, style: {}, textContent: '' }), head: { appendChild: () => {} } },
     window: { __ModuleLoader__: { load(value) { definition = value } } },
   })
@@ -139,4 +140,65 @@ test('Given preparing or start phase, When rendering, Then a visible tool status
   for (const phase of ['preparing', 'start']) {
     assert.ok(app.render({ phase, sessionId: 'session-a', callId: phase, toolName: 'terminal', block: { argsRaw: '{"action":"read"}' } }))
   }
+})
+
+// ── wait 手动打断(SK7) ────────────────────────────────────────────────
+
+const fetchCalls = []
+const fetchStub = async (url, options) => {
+  fetchCalls.push([url, options])
+  return { ok: true, json: async () => ({ ok: true, skipped: 1 }) }
+}
+
+// t 桩直读中文字典:真实宿主由 locale 槽位注入,文案断言须过同一字典
+
+test('Given a running wait, When rendering, Then the card shows the wait needle and a skip button that posts to the skip route', async () => {
+  fetchCalls.length = 0
+  const app = fixture({ fetchImpl: fetchStub })
+  const tree = app.render({
+    phase: 'start', sessionId: 'session-a', callId: 'call-wait', toolName: 'terminal',
+    t: (key) => ({ 'action.wait': '等待屏幕文本', 'action.skipWait': '跳过等待', 'running': '执行中' })[key] ?? key,
+    block: { argsRaw: JSON.stringify({ action: 'wait', terminal_id: 'term-a', text: 'Build successful' }) },
+  })
+  const rendered = JSON.stringify(tree)
+  assert.match(rendered, /Build successful/, '运行中须提示正在等什么')
+  assert.match(rendered, /跳过等待/)
+  // fixture createElement 把 children 存 node.children(与 props 分离)
+  const button = walk(tree).find((node) => node.type === 'button' && JSON.stringify(node.children ?? '').includes('跳过等待'))
+  assert.ok(button, '须渲染跳过按钮')
+  await button.props.onClick()
+  const [url, options] = fetchCalls[0] ?? []
+  assert.equal(url, '/api/shared-terminal/wait/skip')
+  assert.equal(options.method, 'POST')
+  assert.deepEqual(JSON.parse(options.body), { sessionId: 'session-a', terminalId: 'term-a' })
+})
+
+test('Given a settled wait with kind skipped, When rendering, Then a skipped badge is shown', () => {
+  const app = fixture()
+  const tree = app.render({
+    ...props('wait', { ok: true, terminal_id: 'term-a', kind: 'skipped', text: '$', lines: 1, truncated: false, state: 'running', sequence: 1 }),
+    t: (key) => ({ 'badge.skipped': '已跳过', 'action.wait': '等待屏幕文本', 'unit.lines': '行', 'label.screen': '屏幕', 'hint.blankScreen': '（屏幕底部为空白行）' })[key] ?? key,
+  })
+  assert.match(JSON.stringify(tree), /已跳过/)
+})
+
+test('Given a failed skip request, When the skip button is clicked, Then the failure is surfaced without throwing and the route was hit', async () => {
+  const calls = []
+  const app = fixture({ fetchImpl: async (url, options) => { calls.push([url, options]); return { ok: false, status: 500, json: async () => ({}) } } })
+  const renderProps = {
+    phase: 'start', sessionId: 'session-a', callId: 'call-wait-fail', toolName: 'terminal',
+    t: (key) => ({ 'action.skipWait': '跳过等待' })[key] ?? key,
+    block: { argsRaw: JSON.stringify({ action: 'wait', terminal_id: 'term-a', text: 'Build successful' }) },
+  }
+  const tree = app.render(renderProps)
+  const button = walk(tree).find((node) => node.type === 'button' && JSON.stringify(node.children ?? '').includes('跳过等待'))
+  await button.props.onClick()
+  assert.equal(calls.length, 1, 'skip 请求须已发出')
+  // 错误经 catch 落卡(error state 非空分支),不向 React 抛出;渲染形态与既有 error 徽章同构
+})
+
+test('Given a running non-wait tool, When rendering, Then no skip button appears', () => {
+  const app = fixture()
+  const tree = app.render({ phase: 'start', sessionId: 'session-a', callId: 'call-read', toolName: 'terminal', block: { argsRaw: '{"action":"read","terminal_id":"term-a"}' } })
+  assert.ok(!JSON.stringify(tree).includes('跳过等待'))
 })

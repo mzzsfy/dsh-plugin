@@ -7,7 +7,19 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, stat, writeFile, rename } from 'node:fs/promises'
-import { dirname, join, sep } from 'node:path'
+import { dirname, join, sep, resolve } from 'node:path'
+
+// 热重载两代共用文件提交队列,只锁读改写,不锁会话解压。
+const commits = globalThis[Symbol.for('@mzzsfy/dsh-context-manager/cache-commits')] ??= new Map()
+function commit(file, body) {
+  const key = process.platform === 'win32' ? resolve(file).toLowerCase() : resolve(file)
+  const previous = commits.get(key) ?? Promise.resolve()
+  const run = previous.then(body)
+  const tail = run.then(() => {}, () => {})
+  commits.set(key, tail)
+  void tail.then(() => { if (commits.get(key) === tail) commits.delete(key) })
+  return run
+}
 
 function workspaceFile(dir, cwd) {
   // 末段取字母数字段(冒号等非法文件名字符剔除):盘根 C:\ 末段 'C:' 直出即非法文件名
@@ -38,12 +50,20 @@ export async function readWorkspaceCache(dir, cwd) {
 }
 
 // 原子写:先写临时文件再改名,进程中断不会留下半截 JSON
-export async function writeWorkspaceCache(dir, cwd, cache) {
-  await ensureCacheDir(dir)
-  const target = workspaceFile(dir, cwd)
-  const tmp = target + '.tmp'
-  await writeFile(tmp, JSON.stringify({ cwd, entries: cache.entries, extracts: cache.extracts }, null, 0), 'utf8')
-  await rename(tmp, target)
+export function updateWorkspaceCache(dir, cwd, update) {
+  return commit(workspaceFile(dir, cwd), async () => {
+    const cache = await update(await readWorkspaceCache(dir, cwd))
+    await ensureCacheDir(dir)
+    const target = workspaceFile(dir, cwd)
+    const tmp = target + '.tmp'
+    await writeFile(tmp, JSON.stringify({ cwd, entries: cache.entries, extracts: cache.extracts }, null, 0), 'utf8')
+    await rename(tmp, target)
+    return cache
+  })
+}
+
+export function writeWorkspaceCache(dir, cwd, cache) {
+  return updateWorkspaceCache(dir, cwd, () => cache)
 }
 
 // global 浮层轮询用指纹缓存:每 3s 轮询都全量读取并 JSON.parse 所有工作区缓存文件,
@@ -119,10 +139,18 @@ export async function readPrompts(dir) {
   }
 }
 
-export async function writePrompts(dir, items) {
-  await ensureCacheDir(dir)
-  const target = join(dir, PROMPTS_FILE)
-  const tmp = target + '.tmp'
-  await writeFile(tmp, JSON.stringify({ items }, null, 0), 'utf8')
-  await rename(tmp, target)
+export function updatePrompts(dir, update) {
+  return commit(join(dir, PROMPTS_FILE), async () => {
+    const items = await update(await readPrompts(dir))
+    await ensureCacheDir(dir)
+    const target = join(dir, PROMPTS_FILE)
+    const tmp = target + '.tmp'
+    await writeFile(tmp, JSON.stringify({ items }, null, 0), 'utf8')
+    await rename(tmp, target)
+    return items
+  })
+}
+
+export function writePrompts(dir, items) {
+  return updatePrompts(dir, () => items)
 }

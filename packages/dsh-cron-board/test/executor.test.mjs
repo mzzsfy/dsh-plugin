@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { createStore } from '../src/store.mjs'
 import { createLogger } from '../src/logger.mjs'
 import { createExecutor } from '../src/executor.mjs'
+import { createSessionDriver } from '../src/session-driver.mjs'
 
 async function makeExecutor(t, { jobsBroken = false, logLines = [] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-exec-'))
@@ -83,24 +84,80 @@ test('executor:非 runOnce 任务运行后保持启用', async (t) => {
 
 test('executor:pinned 自愈回写 session.pinnedSessionId 且清除顶层孤立字段', async (t) => {
   const { store, executor } = await makeExecutor(t)
-  // Given pinned 任务(session 子对象承载绑定),runner 返回 pinnedNewId 模拟自愈
+  // Given pinned 任务,runner在准入期间发布绑定
   const executorWithPinned = createExecutor({
     store: await (async () => {
       await store.jobs.create({ ...JOB_BASE, kind: 'session', session: { mode: 'pinned', pinnedSessionId: '' }, id: 'j-pin' })
       return store
     })(),
     logger: createLogger({ rootDir: join(tmpdir(), 'cron-board-exec-pin-logs') }),
-    sessionRunner: { run: async () => ({ status: 'success', sessionId: 's-new', pinnedNewId: 's-new', message: '首次运行已创建并绑定会话' }) },
+    sessionRunner: { run: async ({ updateBinding }) => { await updateBinding('s-new'); return { status: 'success', sessionId: 's-new', message: '首次运行已创建并绑定会话' } } },
     readMaxConcurrent: () => 2,
   })
   const [runId] = await executorWithPinned.dispatch({ ...JOB_BASE, kind: 'session', session: { mode: 'pinned', pinnedSessionId: '' }, id: 'j-pin' }, 'manual')
-  // Then 绑定写入 session 子对象,顶层无孤立残留;回填晚于 runs 终态,以回填可见为落定信号
-  await waitFor(() => store.jobs.get('j-pin')?.session?.pinnedSessionId === 's-new')
+  // Then 绑定先发布,等待执行收尾后同时核对运行记录。
+  await waitFor(() => executorWithPinned.status().active === 0)
   const job = store.jobs.get('j-pin')
   assert.equal(job.session.pinnedSessionId, 's-new')
   assert.equal(job.pinnedSessionId, undefined)
   assert.equal(store.runs.get(runId).message, '首次运行已创建并绑定会话')
 })
+
+test('C3 Given two queued pinned runs, When first persists a binding, Then second uses the current binding', async (t) => {
+  const { store } = await makeExecutor(t)
+  const seen = []
+  const job = { ...JOB_BASE, id: 'j-queued-pin', kind: 'session', session: { mode: 'pinned', pinnedSessionId: '' } }
+  await store.jobs.create(job)
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const executor = createExecutor({
+    store, logger: { prune: async () => {} }, readMaxConcurrent: () => 1,
+    sessionRunner: { run: async ({ job, updateBinding }) => {
+      seen.push(job.session.pinnedSessionId)
+      if (seen.length === 1) { entered.resolve(); await release.promise; await updateBinding('new-session'); return { status: 'success' } }
+      return { status: 'success' }
+    } },
+  })
+  await executor.dispatch(job, 'manual')
+  await entered.promise
+  await executor.dispatch(job, 'cron')
+  release.resolve()
+  await waitFor(() => executor.status().active === 0 && executor.status().queued === 0)
+  assert.deepEqual(seen, ['', 'new-session'])
+})
+
+for (const lost of [false, true]) {
+test(`C${lost ? 6 : 5} Given accepted pinned run awaiting terminal record, When second dispatch starts (lost=${lost}), Then binding stays current`, async (t) => {
+  const { store } = await makeExecutor(t)
+  const sessions = new Map(), created = [], prompts = []
+  const controller = {
+    async create() { const sessionId = 's-' + (created.length + 1); created.push(sessionId); sessions.set(sessionId, { status: 'running' }); return { sessionId } },
+    async prompt({ sessionId }) { prompts.push(sessionId); return { accepted: true } },
+  }
+  const driver = createSessionDriver({ getSessionController: () => controller, agents: { get: id => sessions.get(id) }, sessionQuery: { listSessions: async () => [...sessions.keys()].map(id => ({ header: { id } })) } })
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const update = store.runs.update.bind(store.runs)
+  let held = false
+  store.runs.update = async (id, patch) => {
+    if (!held && patch.status === 'success') { held = true; entered.resolve(); await release.promise }
+    return update(id, patch)
+  }
+  const executor = createExecutor({ store, logger: {}, sessionRunner: driver, readMaxConcurrent: () => 2 })
+  const job = { ...JOB_BASE, id: 'j-publish-gap', kind: 'session', session: { mode: 'pinned', pinnedSessionId: '' } }
+  await store.jobs.create(job)
+  await executor.dispatch(job, 'manual'); await entered.promise
+  try {
+    if (lost) sessions.delete('s-1')
+    await executor.dispatch(job, 'cron')
+    await waitFor(() => executor.status().active === 1)
+    assert.deepEqual(created, lost ? ['s-1', 's-2'] : ['s-1'])
+    assert.deepEqual(prompts, lost ? ['s-1', 's-2'] : ['s-1'])
+  } finally {
+    release.resolve()
+    await waitFor(() => executor.status().active === 0)
+  }
+  assert.equal(store.jobs.get(job.id).session.pinnedSessionId, lost ? 's-2' : 's-1')
+})
+}
 
 test('executor:会话任务 outcome.model 写入运行记录', async (t) => {
   // Given 会话 runner 返回 model 标签
