@@ -51,6 +51,25 @@ test('Given dispatched write waiting on Controller, When the turn aborts, Then a
   assert.deepEqual(sent, ['echo test\r'])
 })
 
+for (const usePump of [false, true]) {
+  test(`Given pre-aborted write with pump=${usePump}, When executing, Then no input is dispatched`, async () => {
+    const sent = []
+    const controller = makeController({ list() { return [{ id: 'term-a', controllerId: 'attach-a' }] }, async write(...args) { sent.push(args) } })
+    const pumpFactory = usePump ? { for: () => ({ async write(...args) { sent.push(args) } }) } : undefined
+    const result = await makeTool(controller, undefined, pumpFactory).execute({ action: 'write', terminal_id: 'term-a', text: 'cancelled' }, { agent, signal: AbortSignal.abort() })
+    assert.equal(result.ok, false)
+    assert.deepEqual(sent, [])
+  })
+}
+test('Given turn signal, When dispatching pump write, Then signal reaches the pump', async () => {
+  const signal = new AbortController().signal
+  const sent = []
+  const controller = makeController({ list() { return [{ id: 'term-a' }] } })
+  const pumpFactory = { for: () => ({ async write(...args) { sent.push(args) } }) }
+  await makeTool(controller, undefined, pumpFactory).execute({ action: 'write', terminal_id: 'term-a', text: 'x' }, { agent, signal })
+  assert.deepEqual(sent, [['x', signal]])
+})
+
 // ── wait 动作 ─────────────────────────────────────────────────────────
 
 const waitReadScreen = (screens) => {
@@ -117,6 +136,17 @@ test('Given malformed wait arguments, When executing, Then closed schemas reject
   assert.equal((await tool.execute({ action: 'wait', terminal_id: '', text: 'x' }, exec)).error.code, 'INVALID_ARGS')
 })
 
+test('Given the user skips the wait, When the wait returns, Then skipped carries the screen and validates closed-schema', async () => {
+  const { readScreen } = waitReadScreen([() => screen('$')])
+  // 注册即 abort,模拟用户在等待期间点「跳过等待」
+  const registry = { register(_key, controller) { controller.abort() }, release() {} }
+  const tool = makeTool(makeController(), readScreen, undefined, registry)
+  const result = await tool.execute({ action: 'wait', terminal_id: 'term-a', text: 'never', timeout_ms: 150 }, exec)
+  assert.equal(result.kind, 'skipped')
+  assert.equal(result.text, '$')
+  assert.deepEqual(validateJsonSchemaValue(tool.output.schema, result), [])
+})
+
 test('Given a wait result, When validated by Host output validator, Then all three kinds are closed-schema valid', async () => {
   for (const screens of [
     [() => screen('Build successful')],
@@ -169,8 +199,8 @@ function makeController(overrides = {}) {
   return controller
 }
 
-const makeTool = (controller, readScreen = async () => ({ text: 'screen', lines: 1, truncated: false, state: 'running', sequence: 3 }), pumpFactory) =>
-  createTerminalTool({ controller, readScreen, defineTool, pumpFactory })
+const makeTool = (controller, readScreen = async () => ({ text: 'screen', lines: 1, truncated: false, state: 'running', sequence: 3 }), pumpFactory, waitSkipRegistry) =>
+  createTerminalTool({ controller, readScreen, defineTool, pumpFactory, ...(waitSkipRegistry ? { waitSkipRegistry } : {}) })
 
 test('Given open with default dimensions, When creating terminal, Then it uses DSH controller and returns id', async () => {
   const controller = makeController()

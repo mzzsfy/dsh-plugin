@@ -21,6 +21,9 @@ const MODEL_UNSUPPORTED_MESSAGE = '宿主会话服务不支持指定模型,任�
 // 宿主仅在入口读一次不保留,共享单例安全,宿主将来收紧为非可选链亦无需再改
 const ADMISSION_SIGNAL = new AbortController().signal
 
+// 同一宿主控制器的热重载实例共用短准入闸门,不延伸到会话运行生命周期。
+const admissions = globalThis[Symbol.for('@mzzsfy/dsh-cron-board/session-admissions')] ??= new WeakMap()
+
 // pinned 自愈三态:未绑定过(首跑)/已绑定但会话丢失;两者都回写新绑定,仅文案不同
 function recreatedMessage(recreated) {
   return recreated === 'unbound' ? REBOUND_MESSAGE : RECREATED_MESSAGE
@@ -119,10 +122,22 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     return sessionController.create(payload)
   }
 
-  async function run({ job, env, mask, updateRecord }) {
-    // 控制器运行时动态解析:装配可能先于宿主挂载 sessionController(异步就绪等待中)
+  async function run(input) {
+    // 控制器运行时动态解析,同任务及同 pinned 会话均先占位再进行异步准入。
     const sessionController = getSessionController ? getSessionController() : undefined
     if (!sessionController) return { status: 'fail', message: '会话服务不可用' }
+    const { job } = input
+    if (job.session?.mode !== 'pinned') return runAdmitted(input, sessionController)
+    const locks = admissions.get(sessionController) ?? new Set()
+    admissions.set(sessionController, locks)
+    const keys = ['job:' + job.id, ...(job.session.pinnedSessionId ? ['session:' + job.session.pinnedSessionId] : [])]
+    if (keys.some((key) => locks.has(key))) return { status: 'skipped', message: BUSY_MESSAGE }
+    for (const key of keys) locks.add(key)
+    try { return await runAdmitted(input, sessionController) }
+    finally { for (const key of keys) locks.delete(key) }
+  }
+
+  async function runAdmitted({ job, env, mask, updateRecord, updateBinding }, sessionController) {
     const session = job.session || {}
     const isPinned = session.mode === 'pinned'
     let sessionId = isPinned ? session.pinnedSessionId : null
@@ -181,6 +196,8 @@ export function createSessionDriver({ getSessionController, getWorkspaceRegistry
     if (!submission || submission.accepted !== true) {
       return { status: 'fail', message: REJECTED_MESSAGE, sessionId }
     }
+    // 新绑定必须在准入锁释放前可见,终态记录可随后独立落定。
+    if (recreated && typeof updateBinding === 'function') await updateBinding(sessionId)
     if (typeof updateRecord === 'function') {
       await updateRecord({ sessionId })
     }

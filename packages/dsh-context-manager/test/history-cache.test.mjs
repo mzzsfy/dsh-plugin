@@ -7,7 +7,35 @@ import { mkdtemp, writeFile, utimes, rm, readdir, mkdir } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const { listWorkspaceCachesCached } = await import('../src/history-cache.mjs')
+const { listWorkspaceCachesCached, updatePrompts, updateWorkspaceCache } = await import('../src/history-cache.mjs')
+
+// HC4/HC5 使用真实文件边界,分别验证热重载互斥、文件独立和失败恢复。
+test('HC4 Given two module generations, When transactions overlap, Then both acknowledged changes survive', async (t) => {
+  const dir = await makeDir(t)
+  const next = await import('../src/history-cache.mjs?generation=next')
+  const started = Promise.withResolvers(), release = Promise.withResolvers()
+  const first = updatePrompts(dir, async (items) => { started.resolve(); await release.promise; return [...items, { text: 'A', at: 1 }] })
+  await started.promise
+  const second = next.updatePrompts(dir, (items) => [...items, { text: 'B', at: 2 }])
+  release.resolve()
+  await Promise.all([first, second])
+  assert.deepEqual((await readPrompts(dir)).map((item) => item.text), ['A', 'B'])
+})
+
+test('HC5 Given blocked prompt commit, When another file commits and failed task follows, Then files stay independent and queue recovers', async (t) => {
+  const dir = await makeDir(t)
+  const started = Promise.withResolvers(), release = Promise.withResolvers()
+  const first = updatePrompts(dir, async (items) => { started.resolve(); await release.promise; return items })
+  await started.promise
+  try {
+    await updateWorkspaceCache(dir, 'C:\\other', () => ({ entries: [{ text: 'independent', at: 1 }], extracts: {} }))
+    assert.equal((await readWorkspaceCache(dir, 'C:\\other')).entries[0].text, 'independent')
+  } finally { release.resolve() }
+  await first
+  await assert.rejects(updatePrompts(dir, () => { throw new Error('injected failure') }), /injected failure/)
+  await updatePrompts(dir, () => [{ text: 'after failure', at: 2 }])
+  assert.equal((await readPrompts(dir))[0].text, 'after failure')
+})
 
 async function makeDir(t) {
   const dir = await mkdtemp(join(tmpdir(), 'cx-fp-cache-'))

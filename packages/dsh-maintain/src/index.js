@@ -36,6 +36,13 @@ export const RELEASE_NOTES_CACHE_MAX = 20
 // 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
 // 导出仅供测试计算延迟窗口等待时长
 export const RESTART_DELAY_MS = 2 * 1000
+// 宿主关停宽限与排空余量:appExit 关停链 dispose 落定后宿主只置 exitCode 依赖事件循环
+// 自然排空,残留句柄会钉住循环致进程僵活(实测 30s+ 不退);死线强杀兜底覆盖该场景。
+// 宿主宽限镜像宿主 0.2.1-rc.2 关停控制器 PROCESS_SHUTDOWN_TIMEOUT_MS,宿主升级
+// 改宽限时须同步调整,漂移过短误杀正常关停、过长延长僵活;死线 = 调用方延迟 + 二者;导出仅供测试
+export const HOST_SHUTDOWN_GRACE_MS = 5 * 1000
+export const HOST_DRAIN_MARGIN_MS = 1 * 1000
+export const RESTART_DEADLINE_MS = RESTART_DELAY_MS + HOST_SHUTDOWN_GRACE_MS + HOST_DRAIN_MARGIN_MS
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
 // 轮询间隔上界:超大值会让到期时间戳溢出为 Infinity,轮询静默失效
@@ -497,6 +504,19 @@ export function apply(ctx, config, dependencies = {}) {
     // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
     // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
     setTimeout(() => exit(0), delayMs)
+    // 死线强杀兜底:宿主 appExit 关停链 dispose 正常落定后只置 exitCode 依赖事件循环
+    // 自然排空,残留句柄钉住循环会让进程僵活且无任何兜底;正常退出时进程先死,死线自然失效。
+    // 死线从调用方延迟推导,防未来调用方传更大延迟时死线先行误杀;unref:兜底自身不反向钉住循环。
+    // process._getActiveHandles 为非公开 API,仅死线诊断路径使用,触发即倾倒活跃句柄概要供定位钉住者
+    setTimeout(() => {
+      const handles = process._getActiveHandles().map((handle) => {
+        const ctor = handle && handle.constructor ? handle.constructor.name : typeof handle
+        const fd = handle && typeof handle === 'object' && Number.isFinite(handle.fd) ? handle.fd : null
+        return ctor + (fd !== null ? ' fd=' + fd : '')
+      })
+      console.warn('[dsh-maintain] 重启死线到期宿主仍未退出,强杀兜底生效;活跃句柄: ' + (handles.length > 0 ? handles.join(', ') : '(无)'))
+      process.exit(0)
+    }, delayMs + HOST_SHUTDOWN_GRACE_MS + HOST_DRAIN_MARGIN_MS).unref()
   }
 
   // 受管升级全流程:布局发现→编排(安装/验证/切换,锁与阶段持久化在编排器内)

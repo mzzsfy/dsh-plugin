@@ -27,6 +27,8 @@ window.__ModuleLoader__.load({
       'badge.found': '已出现',
       'badge.timeout': '超时',
       'badge.exited': '已退出',
+      'badge.skipped': '已跳过',
+      'action.skipWait': '跳过等待',
       'label.terminal': '终端 ID',
       'label.screen': '屏幕',
       'label.input': '输入',
@@ -55,6 +57,8 @@ window.__ModuleLoader__.load({
       'badge.found': 'found',
       'badge.timeout': 'timeout',
       'badge.exited': 'exited',
+      'badge.skipped': 'skipped',
+      'action.skipWait': 'Skip wait',
       'label.terminal': 'Terminal ID',
       'label.screen': 'Screen',
       'label.input': 'Input',
@@ -106,16 +110,18 @@ window.__ModuleLoader__.load({
       return ['open', 'close', 'read', 'write', 'list', 'wait'].includes(action) ? `action.${action}` : undefined
     }
 
-    const WAIT_KINDS = ['found', 'timeout', 'exited']
+    const WAIT_KINDS = ['found', 'timeout', 'exited', 'skipped']
 
     function cardModel(block, phase, t) {
       const settled = phase === 'result'
       if (!settled) {
         const args = parse(block.argsRaw)
+        const waiting = actionKey(args?.action) === 'action.wait' && typeof args?.text === 'string' && args.text !== ''
         return {
           state: 'running',
           title: t(actionKey(args?.action) ?? 'title'),
-          summary: undefined,
+          summary: waiting ? args.text : undefined,
+          waiting: waiting && typeof args?.terminal_id === 'string' && args.terminal_id !== '',
           sections: [],
           badges: [],
         }
@@ -132,10 +138,11 @@ window.__ModuleLoader__.load({
           summary: [code, message].filter(Boolean).join(' '),
           sections: raw === '' ? [] : [{ label: t('label.result'), text: raw }],
           badges: [],
+          waiting: false,
         }
       }
       if (args === undefined || result === undefined || typeof actionKey(args.action) !== 'string' || result.ok !== true) {
-        return { state: 'done', title: t('title'), summary: firstLine(raw), sections: raw === '' ? [] : [{ label: t('label.result'), text: raw }], badges: [] }
+        return { state: 'done', title: t('title'), summary: firstLine(raw), sections: raw === '' ? [] : [{ label: t('label.result'), text: raw }], badges: [], waiting: false }
       }
       const action = args.action
       const badges = []
@@ -176,7 +183,7 @@ window.__ModuleLoader__.load({
         summary = shortId(args.terminal_id)
         sections.push({ label: t('label.terminal'), text: shortId(args.terminal_id) })
       }
-      return { state: 'done', title: t(`action.${action}`), summary, sections, badges }
+      return { state: 'done', title: t(`action.${action}`), summary, sections, badges, waiting: false }
     }
 
     // ── 行组件(官方 BashRow 同构) ───────────────────────────────────────
@@ -195,6 +202,21 @@ window.__ModuleLoader__.load({
       const canOpen = args?.action === 'open' && terminalId !== undefined && typeof props.sessionId === 'string'
       const navigate = (signal = lifetime.current?.signal) => props.openTerminal(sessionIdOf(props), terminalId, () => signal !== undefined && !signal.aborted)
         .catch((cause) => { if (signal && !signal.aborted) setError(String(cause?.message ?? cause)) })
+      // wait 手动打断:POST 宿主 skip 路由,abort 同键全部 pending wait(结果以 skipped 落卡)
+      const canSkip = model.waiting === true && typeof props.sessionId === 'string' && typeof args?.terminal_id === 'string'
+      const skipWait = async () => {
+        try {
+          const response = await fetch('/api/shared-terminal/wait/skip', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: props.sessionId, terminalId: args.terminal_id }),
+          })
+          if (!response.ok) throw new Error('HTTP ' + response.status)
+        } catch (cause) {
+          const signal = lifetime.current?.signal
+          if (signal && !signal.aborted) setError(String(cause?.message ?? cause))
+        }
+      }
       React.useEffect(() => {
         const controller = new AbortController()
         lifetime.current = controller
@@ -244,9 +266,10 @@ window.__ModuleLoader__.load({
           h(primitives.TextShimmer, { active: model.state === 'running' },
             h('span', { className: 'stv-title' }, model.title),
             (model.state === 'running' || model.summary !== '') && h('span', { className: 'stv-sep', 'data-shimmer-decoration': true, 'aria-hidden': true }),
-            h('span', { className: 'stv-summary', 'data-error': model.state === 'error' || undefined }, model.state === 'running' ? props.t?.('running') : model.summary),
+            h('span', { className: 'stv-summary', 'data-error': model.state === 'error' || undefined }, model.waiting ? model.summary : model.state === 'running' ? props.t?.('running') : model.summary),
           ),
           model.badges.map((badge) => h('span', { key: badge, className: 'stv-badge' }, badge)),
+          canSkip ? h('button', { type: 'button', className: 'stv-openBtn', onClick: () => { void skipWait() } }, props.t?.('action.skipWait') ?? '') : null,
           canOpen ? h('button', { type: 'button', className: 'stv-openBtn', onClick: () => navigate() }, props.t?.('action.open') ?? '') : null,
           error !== '' ? h('span', { className: 'stv-badge', role: 'alert' }, error) : null,
         ),

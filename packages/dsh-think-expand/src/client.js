@@ -507,6 +507,8 @@ window.__ModuleLoader__.load({
       if (!row?.plugged || rows.filter(row => row.headable || row.expandable).at(-1) !== row || row.el.closest('[hidden]') === null) return
       revealAncestors(row.el)
       if (!row.expanded) applyAction(container, [row], { index: 0, kind: 'expand' })
+      scheduleScan()
+      return true
     }
 
     function onDisclosureClick(event) {
@@ -597,15 +599,17 @@ window.__ModuleLoader__.load({
       // 容器身份守卫:容器替换至哨兵回调之间,旧观察器投递的扫描不对新容器用旧 registry 决策
       if (container === null || container !== observedContainer) return 0
       const described = collectRows(container)
-      restoreHiddenCurrent(container, registry, described)
-      releaseLatchIfCollapsed(described)
-      for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
+      if (!restoreHiddenCurrent(container, registry, described)) {
+        releaseLatchIfCollapsed(described)
+        for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
+      }
       // 工具机与思考机并行(独立 registry/独立目标行),仅全部消息模式运行
       if (expandAll) {
         const tools = collectToolRows(container)
-        restoreHiddenCurrent(container, toolsRegistry, tools)
-        releaseToolLatchIfCollapsed(tools)
-        for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) applyAction(container, tools, action)
+        if (!restoreHiddenCurrent(container, toolsRegistry, tools)) {
+          releaseToolLatchIfCollapsed(tools)
+          for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) applyAction(container, tools, action)
+        }
       }
       return described.length
     }

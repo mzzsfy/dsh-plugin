@@ -169,15 +169,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
   function factory(require) {
     let React = null
     let ReactDOMClient = null
-    let tools = null
     try {
       React = require('react')
       ReactDOMClient = require('react-dom/client')
-      // 公共工具库:bus 订阅是数据刷新唯一通道,缺失即整面板禁用(无轮询回退)
-      tools = require('@mzzsfy/dsh-common-tools/client')
-    } catch {
+    } catch (error) {
+      console.error('[dsh-tunnel] 宿主 React 模块加载失败', error)
       return noopFactory()
     }
+    const tools = require('@mzzsfy/dsh-common-tools/client')
     const { useState, useEffect, useRef, useCallback } = React
     const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)
 

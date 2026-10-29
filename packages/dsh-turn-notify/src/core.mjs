@@ -14,10 +14,10 @@ export const CATEGORIES = [CATEGORY_DONE, CATEGORY_ERROR, CATEGORY_INTERRUPTED, 
 export const CATEGORY_LABELS = {
   [CATEGORY_DONE]: '任务完成',
   [CATEGORY_ERROR]: '任务出错',
-  [CATEGORY_INTERRUPTED]: '被中断',
+  [CATEGORY_INTERRUPTED]: '异常中断',
   [CATEGORY_APPROVAL]: '等待审批',
   [CATEGORY_ASK]: 'AI 提问',
-  [CATEGORY_MAX_TOKENS]: '达到上限',
+  [CATEGORY_MAX_TOKENS]: '回复被截断',
 }
 
 // 内置合成音名(参数见 client 音色表),按分类给默认映射。
@@ -44,7 +44,7 @@ export const BUILTIN_TONES = {
   [TONE_UP_ARPEGGIO]: '上行琶音',
   [TONE_BELL]: '铃铛',
   [TONE_DUO]: '清脆双音',
-  [TONE_ALARM_SQUARE]: '警报方波',
+  [TONE_ALARM_SQUARE]: '急促警报',
   [TONE_LOW_HUM]: '低鸣',
   [TONE_DOUBLE_PING]: '双音提示',
   [TONE_TICK]: '嘀嗒',
@@ -142,12 +142,14 @@ export function shouldNotify({ category, kind, durationMs, settings, header, wak
   return true
 }
 
-export function buildUnit({ id, category, status, sessionTitle, workspace, durationMs, ts, tokens, summary }) {
+export function buildUnit({ id, category, status, sessionId, sessionTitle, workspace, durationMs, ts, tokens, summary }) {
   const label = CATEGORY_LABELS[category] || category
   return {
     id,
     category,
     status,
+    // 会话唯一身份:点击直达按 ID 导航,缺省 null(历史投影/测试点火)只唤醒不跳转
+    sessionId: typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null,
     session: sessionTitle,
     workspace,
     durationMs,
@@ -209,7 +211,8 @@ export function collectAssistantTail(tail, sessionId, data) {
   return next
 }
 
-// 投影单元字段到 webhook 结构化字段的一比一映射(text/summary 随行)。
+// 投影单元字段到 webhook 结构化字段的一比一映射(text/summary 随行);
+// sessionId 结构化同步(null 显式随行),新增字段的消费方自行判空,向后兼容。
 export function buildWebhookPayload(unit) {
   return {
     text: unit.text,
@@ -217,6 +220,7 @@ export function buildWebhookPayload(unit) {
     event: unit.id,
     category: unit.category,
     status: unit.status,
+    sessionId: unit.sessionId,
     session: unit.session,
     workspace: unit.workspace,
     durationMs: unit.durationMs,
@@ -296,22 +300,30 @@ export const CHANNELS = ['sound', 'system', 'toast', 'blink', 'webhook', 'im', '
 // 提示音另受分类配置约束:soundCategories 中该分类显式 false 即静音,缺省键与空分类放行。
 // 系统弹窗须授权,想弹而未授权时降级标题闪烁(调用方再按降级提示开关呈现)。
 // idleMs 为距上次用户行动的时长,满阈值视为离开,等效未聚焦。
+// foregroundSystem仅豁免system的聚焦静默，不绕过授权/总开关/事件路由，也不解除声音静默。
+// systemSilent 将此时仍生效的 quiet 意图传到原生通知,不从 sound 开关/分类/路由反推。
 // pageSound 为页内提示音:页内提示弹出且通知声音未播时补一声(聚焦场景的听觉提醒),
 // 不受聚焦静默压制,受页内总开关、页内分类配置(pageSoundCategories,独立于提示音分类)
 // 与通知声音互斥约束(同一通知至多一声)。
 // routes 为事件→通道路由放行名单(null=未配置全放行):单元级 AND 叠加在本机偏好之上,
 // 名单外的呈现通道一律不出。
-export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false, pageSoundCategories = null, routes = null }) {
+export function foregroundSystemDefault(platform) {
+  return platform === 'darwin'
+}
+
+export function chooseChannels({ hasFocus, permission, focusQuiet = true, toastEnabled = true, soundEnabled = true, soundCategories = null, category = null, systemEnabled = true, idleMs = null, idleThresholdMs = USER_IDLE_AWAY_MS, pageSoundEnabled = false, pageSoundCategories = null, routes = null, foregroundSystem = false }) {
   const idleAway = typeof idleMs === 'number' && idleMs >= idleThresholdMs
   const quiet = hasFocus && focusQuiet && !idleAway
   const categoryMuted = soundCategories != null && category != null && soundCategories[category] === false
   const pageCategoryMuted = pageSoundCategories != null && category != null && pageSoundCategories[category] === false
   const routed = (channel) => routes === null || routes.indexOf(channel) >= 0
   const sound = !quiet && soundEnabled && !categoryMuted && routed('sound')
+  const system = (!quiet || foregroundSystem) && systemEnabled && permission === 'granted' && routed('system')
   return {
     toast: toastEnabled && routed('toast'),
     sound,
-    system: !quiet && systemEnabled && permission === 'granted' && routed('system'),
+    system,
+    systemSilent: system && quiet && foregroundSystem,
     blink: !quiet && systemEnabled && permission !== 'granted' && routed('blink'),
     pageSound: pageSoundEnabled && toastEnabled && !pageCategoryMuted && !sound && routed('toast'),
   }
@@ -496,6 +508,8 @@ const CONFIG_WEBHOOK_SCHEMES = ['http:', 'https:']
 
 // 宿主桌面通知 spawn 超时:与 webhook 同语义,超时强杀不重试
 export const HOST_NOTIFY_TIMEOUT_MS = 10 * 1000
+// focus-desktop 唤醒走 `open -b`(冷启动可能秒级),超时短于宿主通知以尽快回执失败提示
+export const HOST_FOCUS_TIMEOUT_MS = 5 * 1000
 
 // 宿主通知决策:浏览器优先——浏览器在场由浏览器呈现,宿主让位(正常路径
 // 零重复);离场由宿主补位。重复只发生在在场判定的边界情况(认可窗口边界与

@@ -59,6 +59,24 @@ test('Given terminal closes mid-wait, When readScreen fails, Then the wait fails
   )
 })
 
+test('Given the user skips the wait, When the skip signal fires, Then the wait returns skipped with the last screen', async () => {
+  const skip = new AbortController()
+  const outcome = waitForScreenText({ readScreen: () => running('$'), controller: {}, agent: {}, id: 't', needle: 'never', timeoutMs: 5000, intervalMs: 1, skipSignal: skip.signal })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  skip.abort()
+  const result = await outcome
+  assert.equal(result.kind, 'skipped')
+  assert.equal(result.screen.text, '$')
+})
+
+test('Given needle appears in the same round as skip, When both fire together, Then found wins over skipped', async () => {
+  const skip = new AbortController()
+  const outcome = waitForScreenText({ readScreen: () => running('Build successful\n$'), controller: {}, agent: {}, id: 't', needle: 'Build successful', timeoutMs: 1000, intervalMs: 1, skipSignal: skip.signal })
+  skip.abort()
+  const result = await outcome
+  assert.equal(result.kind, 'found', '命中不得被 skip 吞掉')
+})
+
 test('Given module constants, When inspected, Then the poll interval stays conservative for the private queue', () => {
   assert.equal(WAIT_POLL_INTERVAL_MS, 100)
 })

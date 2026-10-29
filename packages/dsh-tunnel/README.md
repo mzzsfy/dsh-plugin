@@ -29,6 +29,10 @@
 - 持久化 `~/.dsh/dsh-tunnel/tunnels.json`(随 `DSH_HOME`), 重启自动恢复; 目标拒连 502, 响应头等待超时(默认 10s, 头到即解除, SSE 不受影响)504
 - REST: `/api/tunnel/tunnels`(GET/POST/DELETE `/api/tunnel/tunnels/:name`) + `/api/tunnel/status` + `/api/tunnel/ui-settings`(POST: aiTools / sidebarTab), 与 GUI/ai 同一入口
 
+## client 依赖
+
+看板通过 `@mzzsfy/dsh-common-tools/client` 订阅数据变更。安装时同时启用 `dsh-session-manager`，由其唯一代挂条目装载公共 client，并排在 tunnel 前物化。公共模块缺失时装载层会报告具体依赖错误；宿主 React 模块缺失时控制台报告原因并禁用面板。
+
 ## 验证
 
 - `npm test`(经 _mocks.common-tools.mjs 预载公共依赖桩): 37 场景 + 8 api 用例 + 11 ai 开关注册面 + 11 守卫断言 + client 端 8 用例(id 守卫 + 总线生命周期;mock webServer + 真实 http/net 端到端)

@@ -46,10 +46,15 @@ export function createShellRunner({ workdirFallback }) {
             timedOut = true
             logSink.append('\n[cron-board] 运行超时,强制终止\n')
             killTree(child)
-            // 终止宽限兜底:树未被清干净时直接 SIGKILL 兜底(POSIX;Windows /F 已强杀)
-            setTimeout(() => {
-              if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-            }, KILL_GRACE_MS)
+            // 父 shell 可先退出而子孙仍持有管道;宽限后无条件清理整个 POSIX 组。
+            if (!isWindows) {
+              setTimeout(() => {
+                try { process.kill(-child.pid, 'SIGKILL') }
+                catch {
+                  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+                }
+              }, KILL_GRACE_MS).unref()
+            }
           }, job.timeoutMs)
         }
 

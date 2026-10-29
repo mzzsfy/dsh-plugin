@@ -214,6 +214,10 @@ const MESSAGES_ZH = {
   modelOutput: '输出',
   other: '其他',
   total: '总用量',
+  selectedTotal: '所选用量',
+  totalCost: '估算费用',
+  selectedCost: '所选估算费用',
+  slotMetrics: '时段整体指标',
   percent: '占比',
   asOf: '统计截至',
   empty: '当前时间范围内暂无用量数据。Token 用量从本面板启用后开始累计,并会一次性回扫已有的历史会话。',
@@ -357,6 +361,10 @@ const MESSAGES_EN = {
   modelOutput: 'Output',
   other: 'Other',
   total: 'Total',
+  selectedTotal: 'Selected usage',
+  totalCost: 'Estimated cost',
+  selectedCost: 'Selected estimated cost',
+  slotMetrics: 'Overall interval metrics',
   percent: 'Share',
   asOf: 'Stats as of',
   empty: 'No usage data in this range yet. Token usage accumulates from when this panel is enabled, and existing sessions are scanned once.',
@@ -926,6 +934,13 @@ const tipModelEntries = (hoverSlot, visibleSet) => {
     : []
   return { main, other }
 }
+
+// 悬浮合计与柱形共用可见模型集合,其他子项仅展开、不重复求和。
+const visibleTipSlot = (slot, visibleModels) => slot ? {
+  ...slot,
+  total: visibleModels.reduce((sum, model) => sum + (slot.byModel[model] ?? 0), 0),
+  cost: slot.cost === undefined ? undefined : visibleModels.reduce((sum, model) => sum + (slot.byCostModel[model] ?? 0), 0),
+} : null
 
 // 趋势 tooltip 槽级均价:槽费用折每百万 token 单价;无槽或无有效费用(含零值)为 null
 const tipAvgPriceText = (hoverSlot, currency) => (
@@ -1785,8 +1800,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     const PRICING_CACHE_TTL_MS = 5 * 60 * 1000
     const PRICING_SAVED_NOTICE_MS = 3 * 1000
     let cached = null
-    const applyPricingValue = (value) => {
+    let pricingFlight = null
+    const pricingListeners = new Set()
+    const validPricing = value => value && Number.isFinite(value.revision) && Array.isArray(value.rules)
+    const applyPricingValue = (value, mutation = false) => {
+      if (!validPricing(value) || (cached && value.revision < cached.revision)) return cached
+      const refresh = mutation || (cached !== null && value.revision !== cached.revision)
       cached = { revision: value.revision, rules: value.rules, fetchedAt: Date.now() }
+      for (const listener of pricingListeners) listener(cached, refresh)
       return cached
     }
 
@@ -1809,10 +1830,29 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // value 缺形状按失败处理:回退旧值,无旧值为 null(费用显示占位)
     const fetchPricing = async (force = false) => {
       if (!force && cached && Date.now() - cached.fetchedAt < PRICING_CACHE_TTL_MS) return cached
-      const result = await requestGet(ENDPOINTS.pricing)
-      const value = result.ok ? result.value : null
-      if (value && Number.isFinite(value.revision) && Array.isArray(value.rules)) return applyPricingValue(value)
-      return cached
+      if (!pricingFlight) {
+        pricingFlight = (async () => {
+          const result = await requestGet(ENDPOINTS.pricing)
+          return validPricing(result.ok ? result.value : null) ? applyPricingValue(result.value) : cached
+        })().finally(() => { pricingFlight = null })
+      }
+      return pricingFlight
+    }
+
+    function usePricing() {
+      const [value, setValue] = useState(cached)
+      const [tick, setTick] = useState(0)
+      useEffect(() => {
+        const listener = (next, refresh) => {
+          setValue(next)
+          if (refresh) setTick(previous => previous + 1)
+        }
+        pricingListeners.add(listener)
+        if (cached) listener(cached, false)
+        void fetchPricing()
+        return () => pricingListeners.delete(listener)
+      }, [])
+      return { rules: value?.rules ?? null, tick }
     }
 
     // 交互与尺寸常量
@@ -2222,7 +2262,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       }, [])
       const hasSpeed = slots.some((slot) => slot.speed !== undefined)
       const hasTtft = slots.some((slot) => slot.ttft !== undefined)
-      const visibleSet = visibleKeys ?? trendDefaultVisibleKeys(modelOrder, hasSpeed)
+      const availableKeys = new Set([
+        ...modelOrder, LEGEND_KEY_RATE,
+        ...(hasSpeed ? [LEGEND_KEY_SPEED] : []),
+        ...(hasTtft ? [LEGEND_KEY_TTFT] : []),
+      ])
+      const selectedKeys = visibleKeys && new Set([...visibleKeys].filter((key) => availableKeys.has(key)))
+      if (selectedKeys && selectedKeys.size !== visibleKeys.size) {
+        setVisibleKeys(selectedKeys.size ? selectedKeys : null)
+      }
+      const visibleSet = selectedKeys?.size ? selectedKeys : trendDefaultVisibleKeys(modelOrder, hasSpeed)
       const visibleModels = modelOrder.filter((model) => visibleSet.has(model))
       const showRate = visibleSet.has(LEGEND_KEY_RATE)
       const showSpeed = hasSpeed && visibleSet.has(LEGEND_KEY_SPEED)
@@ -2242,15 +2291,26 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       // 金额视图左轴走紧凑金额读数,速度接管时仍为 tok/s 紧凑读数
       const yTicks = leftAxisTicks(layout.ticks, layout.scaleMax, speedAxisTicks, speedAxisMax,
         money ? (value) => formatCostCompact(value, costCurrency) : formatCompact)
-      // 悬浮明细恒用 token 槽渲染:金额模式只切柱几何与左轴,悬浮文本不随口径变化
-      const hoverSlot = hover ? (tipSlots ?? slots)[hover.index] : null
+      const hoverSlot = hover ? tipSlots.find((slot) => slot.day === hover.day) : null
+      const selectedSlot = visibleTipSlot(hoverSlot, visibleModels)
+      const tipEntries = tipModelEntries(selectedSlot, visibleSet)
+      const hasModels = tipEntries.main.length > 0
+      const tipRate = showRate && hoverSlot && cacheRate(hoverSlot.cacheHit, hoverSlot.cacheMiss) !== null
+      const tipSpeed = showSpeed && hoverSlot?.speed !== undefined
+      const tipTtft = showTtft && hoverSlot?.ttft !== undefined
+      const hasMetrics = tipRate || tipSpeed || tipTtft
+      const hasTip = hasModels || hasMetrics
+      const filtered = visibleModels.length < modelOrder.length
+      const formatTipValue = money ? (value) => `≈ ${formatCost(value, costCurrency)}` : (value) => `${formatTokens(value)} tok`
+      const tipTotalLabel = t(money ? (filtered ? 'selectedCost' : 'totalCost') : (filtered ? 'selectedTotal' : 'total'))
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
-      const pick = (index) => (event) => setHover({ index, anchor: pointerAt(event) })
+      const pick = (index) => (event) => setHover({ day: slots[index].day, anchor: pointerAt(event) })
       const clear = () => setHover(null)
-      const tipEntries = hasTipContent(hoverSlot) ? tipModelEntries(hoverSlot, visibleSet) : null
-      const avgPrice = tipAvgPriceText(hoverSlot, costCurrency)
+      const showCost = hasModels && (money || prefsRef.current.costDisplay) && selectedSlot.cost !== undefined
+      const avgPrice = showCost ? tipAvgPriceText(selectedSlot, costCurrency) : null
+      const otherEntries = money ? [...tipEntries.other].sort(([a], [b]) => (hoverSlot.otherCostByModel[b] ?? 0) - (hoverSlot.otherCostByModel[a] ?? 0)) : tipEntries.other
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
           h('span', { className: 'ud-section-title' }, title),
@@ -2279,11 +2339,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 x: plotRight + AXIS_RATE_GAP, y: y + AXIS_LABEL_BASELINE,
               }, String(tick))
             }),
-            layout.bars.flatMap((bar, barIndex) => bar.segments.map((segment) => h('rect', {
+            layout.bars.flatMap((bar) => bar.segments.map((segment) => h('rect', {
               key: `${bar.key}/${segment.model}`, className: 'ud-bar',
               x: bar.x - layout.barWidth / 2, y: segment.y, width: layout.barWidth, height: segment.height,
               fill: colorFor(segment.model),
-              style: hover?.index === barIndex
+              style: hover?.day === bar.key
                 ? { transform: `scaleX(${(layout.barWidth + BAR_HOVER_GROW) / layout.barWidth})` }
                 : undefined,
             }))),
@@ -2321,25 +2381,22 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           isVisible: (key) => visibleSet.has(key),
           onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleSet, key, ctrl)),
         }),
-        h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
-          tipEntries
+        h(ChartTip, { anchor: hasTip ? hover.anchor : null, panelRef },
+          hasTip
             ? [
                 h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
-                h('div', { key: 'total', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(hoverSlot.total)}`),
+                hasModels ? h('div', { key: 'total', className: 'ud-tip-row' }, `${tipTotalLabel}: ${formatTipValue(money ? selectedSlot.cost : selectedSlot.total)}`) : null,
                 ...tipEntries.main.map((row) => h('div', { key: `m-${row.model}`, className: 'ud-tip-row' },
                   h('i', { className: 'ud-legend-swatch', style: { background: colorFor(row.model) } }),
-                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${formatTokens(row.tokens)}`)),
-                ...tipEntries.other.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${formatTokens(tokens)}`)),
-                showRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
-                showSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
-                showTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
-                prefsRef.current.costDisplay && hoverSlot.cost !== undefined
-                  ? [
-                      h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(hoverSlot.cost, costCurrency)}`),
-                      avgPrice ? h('div', { key: 'avg-price', className: 'ud-tip-row' }, `${t('avgPrice')}: ${avgPrice}`) : null,
-                    ]
-                  : null,
+                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${formatTipValue(money ? hoverSlot.byCostModel[row.model] ?? 0 : row.tokens)}`)),
+                ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
+                  `${model}: ${formatTipValue(money ? hoverSlot.otherCostByModel[model] ?? 0 : tokens)}`)),
+                showCost && !money ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(selectedSlot.cost, costCurrency)}`) : null,
+                avgPrice ? h('div', { key: 'avg-price', className: 'ud-tip-row' }, `${t('avgPrice')}: ${avgPrice}`) : null,
+                hasMetrics ? h('div', { key: 'metrics', className: 'ud-tip-title' }, t('slotMetrics')) : null,
+                tipRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
+                tipSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
+                tipTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
               ]
             : null))
     }
@@ -2605,14 +2662,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const usage = useProjection('tokenUsage')
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
-      const [pricingRules, setPricingRules] = useState(null)
-      useEffect(() => {
-        let alive = true
-        fetchPricing().then((value) => {
-          if (alive && value) setPricingRules(value.rules)
-        })
-        return () => { alive = false }
-      }, [])
+      const { rules: pricingRules } = usePricing()
       const anchorRef = useRef(null)
       const costRef = useRef(null)
       useLayoutEffect(() => {
@@ -2649,14 +2699,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         : null
       const [prefs, setPrefs] = useState(() => statsLineState.get())
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
-      const [pricingRules, setPricingRules] = useState(null)
-      useEffect(() => {
-        let alive = true
-        fetchPricing().then((value) => {
-          if (alive && value) setPricingRules(value.rules)
-        })
-        return () => { alive = false }
-      }, [])
+      const { rules: pricingRules } = usePricing()
       const matched = usageSourceBuckets(usageSource)
       const price = matched && prefs.costDisplay && pricingRules !== null
         ? matchPrice(pricingRules, turnModelOf(matched), new Date())
@@ -2900,6 +2943,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [saving, setSaving] = useState(false)
       const [saved, setSaved] = useState(false)
       const savedTimerRef = useRef(null)
+      const aliveRef = useRef(false)
+      useEffect(() => {
+        aliveRef.current = true
+        return () => { aliveRef.current = false }
+      }, [])
 
       useEffect(() => {
         let alive = true
@@ -2930,13 +2978,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (found.size > 0) return
         setSaving(true)
         const result = await requestPost(ENDPOINTS.pricing, { rules: coercePricingRules(rules) })
+        // 保存属于共享数据提交,编辑器退出后仍广播;局部状态只由存活实例更新。
+        if (result.ok && validPricing(result.value)) applyPricingValue(result.value, true)
+        if (!aliveRef.current) return
         setSaving(false)
-        if (!result.ok) {
-          setSaveError(result.message)
+        if (!result.ok || !validPricing(result.value)) {
+          setSaveError(result.message || '价格响应无效')
           return
         }
-        // 保存即生效:响应 value 直接覆盖缓存,编辑副本同步为服务端规整后的规则
-        applyPricingValue(result.value)
+        // 编辑副本同步为本次保存返回的规则,其他编辑器草稿保持独立。
         setSaveError('')
         setErrors(new Map())
         setRules(copyRules(result.value.rules))
@@ -3152,19 +3202,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const panelRef = useRef(null)
       const [heatDays, setHeatDays] = useState(null)
       // 费用展示货币来源:价格规则异步首帧未回时空串即不带符号
-      const [pricingRules, setPricingRules] = useState(null)
-
-      useEffect(() => {
-        let alive = true
-        fetchPricing().then((value) => {
-          if (alive && value) setPricingRules(value.rules)
-        })
-        return () => { alive = false }
-      }, [])
+      const { rules: pricingRules, tick: pricingTick } = usePricing()
 
       const costCurrency = aggregateCurrencyOf(pricingRules)
 
-      // 热力图独立请求:与所选范围无关,失败静默留空,过期响应丢弃
+      // 热力图独立请求:范围切换不重取,价格变更重算费用,过期响应丢弃
       useEffect(() => {
         const generation = ++heatGenerationRef.current
         const request = { from: localDay(-(HEAT_WINDOW_DAYS - 1)), to: localDay(0) }
@@ -3183,7 +3225,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             }
           }))
         })
-      }, [])
+        return () => { heatGenerationRef.current++ }
+      }, [pricingTick])
 
       const load = useCallback(async () => {
         const request = range === 'custom'
@@ -3201,10 +3244,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         }
         setError('')
         setStats(result.value)
-      }, [range, customFrom, customTo])
+      }, [range, customFrom, customTo, pricingTick])
 
       useEffect(() => {
         load()
+        return () => { generationRef.current++ }
       }, [load])
 
       const rawPreset = view === 'hour' ? hourPreset : view === 'minute' ? minutePreset : null
@@ -3213,7 +3257,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
       useEffect(() => {
         if (!activeQuery) return
-        if (pointStatsMatches(pointStats, view, activeQuery.key)) return
+        if (pointStatsMatches(pointStats, view, activeQuery.key) && pointStats.pricingTick === pricingTick) return
         const generation = ++pointGenerationRef.current
         setPointStatus('loading')
         requestPost(view === 'hour' ? ENDPOINTS.hours : ENDPOINTS.minutes, activeQuery.request).then((result) => {
@@ -3225,9 +3269,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           }
           setError('')
           setPointStatus('ok')
-          setPointStats({ view, preset: activeQuery.key, value: result.value })
+          setPointStats({ view, preset: activeQuery.key, pricingTick, value: result.value })
         })
-      }, [view, rawPreset, pointCustomFrom, pointCustomTo, fetchTick])
+        return () => { pointGenerationRef.current++ }
+      }, [view, rawPreset, pointCustomFrom, pointCustomTo, fetchTick, pricingTick])
 
       const refreshPoints = useCallback(() => {
         setPointStats(null)

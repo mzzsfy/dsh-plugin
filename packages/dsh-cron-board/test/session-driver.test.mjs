@@ -110,6 +110,37 @@ const BASE_JOB = { id: 'j1', kind: 'session', prompt: '跑日报', session: { mo
 const PINNED_S1 = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 's-1' } }
 const PINNED_GONE = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'gone' } }
 
+for (const bound of [false, true]) {
+  test(`C${bound ? 2 : 1} Given two drivers share admission, When pinned runs overlap, Then only one creates or prompts (bound=${bound})`, async () => {
+    const stubs = makeStubs({ autoIdle: false, persisted: ['s-1'] })
+    const entered = Promise.withResolvers(), release = Promise.withResolvers()
+    const prompt = stubs.sessionController.prompt
+    stubs.sessionController.prompt = async (...args) => { entered.resolve(); await release.promise; return prompt(...args) }
+    const a = makeDriver(stubs), b = makeDriver(stubs)
+    const job = bound ? PINNED_S1 : { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: '' } }
+    const first = a.run({ job, env: {} })
+    await entered.promise
+    const second = b.run({ job: bound ? { ...job, id: 'other-job' } : { ...job }, env: {} })
+    release.resolve()
+    const results = await Promise.all([first, second])
+    assert.deepEqual(results.map((result) => result.status), ['success', 'skipped'])
+    assert.equal(stubs.created.length, bound ? 0 : 1)
+    assert.equal(stubs.prompts.length, 1)
+  })
+}
+
+test('C4 Given pinned admission throws, When same job retries, Then the gate is released', async () => {
+  const stubs = makeStubs()
+  const driver = makeDriver(stubs)
+  const create = stubs.sessionController.create
+  stubs.sessionController.create = async () => { throw new Error('create unavailable') }
+  const job = { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: '' } }
+  await assert.rejects(driver.run({ job, env: {} }), /create unavailable/)
+  stubs.sessionController.create = create
+  assert.equal((await driver.run({ job, env: {} })).status, 'success')
+  assert.equal(stubs.created.length, 1)
+})
+
 test('session-driver:fresh 每次新建,两次触发不同 sessionId', async () => {
   const stubs = makeStubs()
   const driver = makeDriver(stubs)

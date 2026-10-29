@@ -6,11 +6,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, RELEASE_NOTES_CACHE_MAX, collectActiveWork, discoverRunningInstall } from '../src/index.js'
+import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, RESTART_DEADLINE_MS, RELEASE_NOTES_CACHE_MAX, collectActiveWork, discoverRunningInstall } from '../src/index.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const TEST_RUNTIME_MANIFEST = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+
+// 死线强杀兜底走真实 setTimeout 且到期即 process.exit:凡调度退出的用例若不 stub,
+// 真实 timer 泄漏到期会杀死测试进程;文件级 stub,子用例经 t.mock.method 各自覆盖
+process.exit = () => {}
 
 // 受管安装桩:测试进程 argv[1] 不是 DSH 包,真实发现必失败;全部用例注入可用桩,
 // 失败面由 discoverRunningInstall 自身的专项用例覆盖
@@ -693,6 +697,53 @@ test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
   assert.match(denied.payload.error, /重启已调度/)
   t.mock.timers.tick(RESTART_DELAY_MS + 1)
   assert.deepEqual(exits, [0])
+})
+
+// Given 宿主 appExit 关停链 dispose 落定后被残留句柄钉住,进程不排空
+// When 重启死线到期
+// Then 直接 process.exit(0) 强杀并留诊断输出;死线到达前不得提前强杀
+test('restart:宿主排空僵活时死线强杀兜底', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const processExit = t.mock.method(process, 'exit', () => {})
+  const warns = []
+  const originalWarn = console.warn
+  console.warn = (text) => warns.push(String(text))
+  try {
+    const { routes } = makeCtx({ appExit: () => {} })
+    const restart = await post(routes, '/api/maintain/restart')
+    assert.equal(restart.status, 200)
+    t.mock.timers.tick(RESTART_DELAY_MS + 1)
+    assert.equal(processExit.mock.callCount(), 0, '死线先于宿主关停宽限到期前不得强杀')
+    t.mock.timers.tick(RESTART_DEADLINE_MS - RESTART_DELAY_MS + 1)
+    assert.equal(processExit.mock.callCount(), 1, '死线到期必须强杀')
+    assert.equal(processExit.mock.calls[0].arguments[0], 0)
+    assert.equal(warns.some((text) => text.includes('重启死线到期宿主仍未退出') && text.includes('活跃句柄')), true, '死线强杀须留句柄诊断输出')
+  } finally {
+    console.warn = originalWarn
+  }
+})
+
+// Given 升级切换落定走同一条退出调度链
+// When 升级成功调度退出且宿主僵活
+// Then 死线兜底同样生效(入口唯一,不区分触发方)
+// 启动检查走真实网络与真实 AbortSignal timer:等待用 realSleep 自旋,不用被 mock 冻结的 setTimeout
+test('upgrade:切换退出同样受死线兜底保护', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const processExit = t.mock.method(process, 'exit', () => {})
+  const runner = makeRunnerStub()
+  const { routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  let ready = null
+  for (let waited = 0; waited < 5000 && ready === null; waited += 25) {
+    const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
+    if (poll && poll.checkedAt !== null) ready = poll
+    else await realSleep(25)
+  }
+  assert.ok(ready !== null, '启动检查 5 秒内未完成')
+  await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
+  await drainMicrotasks()
+  t.mock.timers.tick(RESTART_DEADLINE_MS + 1)
+  assert.equal(processExit.mock.callCount(), 1, '升级退出链同样受死线保护')
+  assert.equal(processExit.mock.calls[0].arguments[0], 0)
 })
 
 test('upgrade:重启调度窗口内 refresh 409,registry-base 保存但不发起检查', async (t) => {

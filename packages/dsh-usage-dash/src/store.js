@@ -2,8 +2,9 @@
 // single 布局每次持久化写都全量重发布 unit 文档,故写入侧做合并(write-behind):
 // record 同步累加进内存 pending,按周期 flush 批量落盘,同桶多样本折叠为一次
 // update;flush 失败的行留在 pending 下轮重试,错误经 onFlushError 上抛。
-// 游标读写与 flush 全部串行在同一条 promise 链上,防 lost update。进程级单例
-// 挂 globalThis,防 HMR 热重载后重复开域。
+// 游标读写与 flush 全部串行在同一条 promise 链上,防 lost update。store 实例
+// 按 facility 弱关联缓存,防 HMR 热重载换 facility 后旧实例泄漏或撞单开守卫;
+// 同名域被上一代遗留占用时收养(close 孤儿后重开),不留永久降级。
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
@@ -217,6 +218,7 @@ export class UsageStore {
   }
 
   async initialize(facility) {
+    // 占用不等于无主:开域失败只降级,不关闭其他实例仍在写入的句柄。
     const domain = await facility.open(usageStatsDomain)
     this.domain = domain
     this.table = domain.table(TABLE_BUCKETS)
@@ -480,13 +482,18 @@ export class UsageStore {
   }
 }
 
-const SHARED_STORE_KEY = '__dshUsageDashStore'
+const SHARED_STORE_KEY = '__dshUsageDashStores'
 
+// 单例按 facility 关联:插件热重载会换 facility 再 apply,全局单 key 缓存会把
+// 绑定旧域的实例泄漏给新一代,或将新一代 open 撞 reserved 固化为永久降级;
+// 未降级实例同 facility 复用,降级/异 facility 一律重建
+// 可作弱键的 facility 才可缓存:服务缺席桩(非对象)退化为不缓存,每次新建
 export function sharedStore(facility, options = {}) {
-  const existing = globalThis[SHARED_STORE_KEY]
-  if (existing) return existing
+  const cacheable = (typeof facility === 'object' && facility !== null) || typeof facility === 'function'
+  const existing = cacheable ? globalThis[SHARED_STORE_KEY]?.get?.(facility) : undefined
+  if (existing && existing.degradation === undefined) return existing
   const store = new UsageStore(facility, options)
-  globalThis[SHARED_STORE_KEY] = store
+  if (cacheable) (globalThis[SHARED_STORE_KEY] ??= new WeakMap()).set(facility, store)
   return store
 }
 
