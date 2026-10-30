@@ -1334,7 +1334,6 @@ window.__ModuleLoader__.load({
           }
           const judge = async () => {
             const sessionId = currentSessionId
-            currentSessionId = sessionId
             if (sessionId === undefined) { ensure(false); return }
             if (cache.sessionId === sessionId && cache.fetched) { ensure(cache.isRs); return }
             try {
@@ -1342,6 +1341,9 @@ window.__ModuleLoader__.load({
               if (!res.ok) return
               const json = await res.json()
               if (disposed) return
+              // 会话代际校验(F21):响应期间用户已切会话则本次判定作废——
+              // 旧会话的 isRs 结论不得污染新会话的 cache 与页签态
+              if (currentSessionId !== sessionId) return
               const isRs = (json && Array.isArray(json.runs) ? json.runs : []).some((r) => r.sessionId === sessionId)
               cache = { sessionId, isRs, fetched: true }
               ensure(isRs)
