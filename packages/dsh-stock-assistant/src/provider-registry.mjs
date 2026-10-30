@@ -3,7 +3,7 @@ export function createRegistry(providers = []) {
   const entries = new Map()
   for (const provider of providers) {
     const d = provider.descriptor
-    if (!d || entries.has(d.adapterId) || typeof provider.probe !== 'function' || d.capabilities.some(c => !['quotes', 'catalog', 'search', 'calendar'].includes(c) || typeof provider[c] !== 'function') || (d.capabilities.includes('quotes') && !(d.maxQuoteBatch > 0))) fail('INVALID_ADAPTER', '数据适配器合同不完整', 422)
+    if (!d || entries.has(d.adapterId) || typeof provider.probe !== 'function' || d.capabilities.some(c => !['quotes', 'catalog', 'search', 'calendar', 'kline'].includes(c) || typeof provider[c] !== 'function') || (d.capabilities.includes('quotes') && !(d.maxQuoteBatch > 0))) fail('INVALID_ADAPTER', '数据适配器合同不完整', 422)
     entries.set(d.adapterId, provider)
   }
   const get = id => entries.get(id) || fail('UNKNOWN_ADAPTER', '未安装此数据适配器', 422)

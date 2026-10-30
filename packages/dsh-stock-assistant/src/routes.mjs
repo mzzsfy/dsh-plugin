@@ -28,6 +28,7 @@ export function registerRoutes(webServer, app) {
     'catalog-sync': ['POST', input => app.sync(input)],
     'route-selection': ['POST', (input, signal) => app.routeSelection(input, signal)],
     refresh: ['POST', (input, signal) => app.refresh(input, signal)],
+    kline: ['GET', (input, signal) => app.kline(input, signal)],
   }
   const controllers = new Set(), disposers = []
   let stopped = false

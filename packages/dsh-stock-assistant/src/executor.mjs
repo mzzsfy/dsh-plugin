@@ -1,5 +1,5 @@
 import { StockError, fail } from './market-model.mjs'
-export function createExecutor({ registry, budget, env = process.env, fetch: fetchImpl = globalThis.fetch, now = Date.now, timers = globalThis }) {
+export function createExecutor({ registry, budget, env = process.env, fetch: fetchImpl = globalThis.fetch, now = Date.now, timers = globalThis, usSymbols = new Map() }) {
   const queues = new Map(), controllers = new Set(), starts = new Map()
   let stopped = false, running = 0
   const slots = []
@@ -36,7 +36,7 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
           // 超时计时覆盖整个能力调用;分页适配器每次网络活动重置计时,空闲超过窗口才判超时。
           const armTimeout = () => { timers.clearTimeout(timeout); timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), 8 * 1000) }
           armTimeout()
-          const ctx = { now, signal: controller.signal, credential: () => instance.credentialEnv === null ? undefined : env[instance.credentialEnv] || fail('AUTH', '未在Host环境中配置凭据', 422),
+          const ctx = { now, signal: controller.signal, usSymbols, credential: () => instance.credentialEnv === null ? undefined : env[instance.credentialEnv] || fail('AUTH', '未在Host环境中配置凭据', 422),
             fetch: async (...args) => {
               if (used) {
                 const gap = Math.max(0, starts.get(instance.quotaGroup) + (instance.budget?.requestsPerMinute === null ? 10 * 1000 : 1000) - now())

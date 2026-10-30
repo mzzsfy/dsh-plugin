@@ -520,7 +520,7 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 | vendor 路由冲突 | 低 | 独立命名空间+降级开关 |
 | 日/韩/英数据质量 | 中 | 探针门控+"未验证"标（启用前不展示） |
 | usSymbols 不持久化: 进程重启后腾讯美股 K线不可用直至重新搜索（东财主源不受影响——默认 105+suggest 重试兜底） | 低 | 声明取舍不持久化（映射可由任意一次搜索重建，持久化收益不抵复杂度）；腾讯美股备源降级为搜索后可用，风险表留档 |
-| 腾讯 preClose 索引未决 | 低 | 实施首步实测补证回填证据表，失败则 kline 响应 preClose 缺省（客户端昨收来自 quotes 兜底） |
+| 腾讯 preClose 索引未决 | ~~低~~ **已实测清零（2026-10-30）**: `qt.{symbol}[4]`=昨收（sz000001 值 11.54 与东财 f18 一致），已实现+夹具断言 |
 
 ## 里程碑总览
 
@@ -537,58 +537,58 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 ## M1 后端管道
 
 ### Step 1.1 schemas.mjs — 枚举与守卫
-- [ ] `capability` 枚举 +`'kline'`
-- [ ] 抽取 `marketSchema` 导出（八市场），routeSchema/securitySchema 引用同源
-- [ ] 备源守卫放宽: `['quotes','kline'].includes(r.capability)` 才允许 fallback/failoverMode!=='off'
-- [ ] `endpointsSchema = z.record(z.string().url()).optional()` 并入 providerSchema
-- [ ] `klineQuerySchema` 导出（securityId/period 枚举/limit 20..1000 默认 250）
-- [ ] defaultConfig: em-default `capabilityLimits` +`{ kline: 30 }`
+- [x] `capability` 枚举 +`'kline'`
+- [x] 抽取 `marketSchema` 导出（八市场），routeSchema/securitySchema 引用同源
+- [x] 备源守卫放宽: `['quotes','kline'].includes(r.capability)` 才允许 fallback/failoverMode!=='off'
+- [x] `endpointsSchema` 并入 providerSchema（z.record URL）
+- [x] `klineQuerySchema` 导出（securityId/period 枚举/limit 20..1000 默认 250）
+- [x] defaultConfig: em-default `capabilityLimits` +`{ kline: 30 }`
 - 测试（schemas.test.mjs）: 八市场逐一过 routeSchema 构造；XAMEX 拒绝；kline 路由带 fallback 通过守卫、catalog 路由带 fallback 仍拒；endpoints 非法 URL 拒；klineQuerySchema limit 默认 250/越界拒
 - RED 顺序: 先写测试（引用未导出的 marketSchema/klineQuerySchema 编译失败即 RED）→ 实现 → GREEN
 
 ### Step 1.2 market-model.mjs — MARKET_META 派生
-- [ ] `MARKET_META` 常量导出（八市场 currency/timezone/priceScale/codePattern，见设计"schema 扩展（五处联动）"节 MARKET_META 代码块）
-- [ ] securitySchema: currency→string、timezone→string、priceScale→number，superRefine 对照 MARKET_META 校验一致
-- [ ] makeSecurity: 币种/时区/精度从 MARKET_META 派生（签名不变）
-- [ ] 新增 `parseSecurityId(id)` 导出: split(':') 解析 + codePattern 校验，非法抛 fail('INVALID_PARAM')
+- [x] `MARKET_META` 常量导出（八市场 currency/timezone/priceScale/codePattern，见设计"schema 扩展（五处联动）"节 MARKET_META 代码块）
+- [x] securitySchema: currency→string、timezone→string、priceScale→number，superRefine 对照 MARKET_META 校验一致
+- [x] makeSecurity: 币种/时区/精度从 MARKET_META 派生（签名不变）
+- [x] 新增 `parseSecurityId(id)` 导出: split(':') 解析 + codePattern 校验，非法抛 fail('INVALID_PARAM')
 - 测试（market-model.test.mjs 新建）: 港股 00700 构造（HKD/Asia/Hong_Kong/2）、美股 AAPL（USD/^[A-Z]{1,5}$/）、日股 7203（JPY/0 位）构造与校验通过；沪深既有值断言不变（无迁移）；codePattern 违反（XHKG:equity:ABC）拒绝；parseSecurityId 正反例
 - 回归: 既有 catalog/collector 测试不动应全绿（派生值兼容验证）
 
 ### Step 1.3 kline-cache.mjs — 新建
-- [ ] `createKlineCache({ cacheTable, now })` → get/put/invalidate
-- [ ] key `kline:{instanceId}:{market}:{period}:{code}`；value 套 cache 表壳 `{kind:'kline', source, fetchedAt, payload:{candles,preClose,complete,routingRevision}}`
-- [ ] TTL 表（引用"数据结构-kline 缓存"节唯一事实源）: put 时 TTL=0（trend）直接跳过写入
-- [ ] get: 过期/routingRevision 不符/JSON 损坏→null+异步删除；invalidate(keyParts): 删指定条目（强刷消费点）
+- [x] `createKlineCache({ cacheTable, now })` → get/put/invalidate
+- [x] key `kline:{instanceId}:{market}:{period}:{code}`；value 套 cache 表壳 `{kind:'kline', source, fetchedAt, payload:{candles,preClose,complete,routingRevision}}`
+- [x] TTL 表（引用"数据结构-kline 缓存"节唯一事实源）: put 时 TTL=0（trend）直接跳过写入
+- [x] get: 过期/routingRevision 不符/JSON 损坏→null+异步删除；invalidate(keyParts): 删指定条目（强刷消费点）
 - 测试（kline-cache.test.mjs 新建）: 命中（payload 原样返回）；过期 1ms 边界；版本不符 miss；损坏条目 miss 且后台删除不抛；trend TTL=0 put 后 get 仍 miss（未写入）；invalidate 后 get miss
 - 固定时钟注入（now 参数）驱动 TTL 断言
 
 ### Step 1.4 eastmoney.mjs — kline 主源
-- [ ] descriptor: capabilities +`'kline'`，markets 八市场
-- [ ] `SECID_PREFIX` 常量表；美股 mktNum 从 ctx.usSymbols 读（miss→105+重试路径）
-- [ ] kline(): trend→trends2（fields2=f51-f58，avg 列→candles[].avg，preClose=data.preClose）；1d/1w/1M→push2his（fields2=f51-f57 固定 7 列，**f52=open/f53=close/f54=high/f55=low**，preClose=data.preKPrice，lmt=limit，fqt=1）
-- [ ] CSV 解析: split(',') 列数<7→BAD_PAYLOAD；升序校验（重复→BAD_PAYLOAD）；parseFloat
-- [ ] data:null→美股 suggest 解析（ctx.fetch 直连 searchapi）重试一次→NO_DATA；非美股 null 直接 NO_DATA
+- [x] descriptor: capabilities +`'kline'`，markets 八市场
+- [x] `SECID_PREFIX` 常量表；美股 mktNum 从 ctx.usSymbols 读（miss→105+重试路径）
+- [x] kline(): trend→trends2（fields2=f51-f58，avg 列→candles[].avg，preClose=data.preClose）；1d/1w/1M→push2his（fields2=f51-f57 固定 7 列，**f52=open/f53=close/f54=high/f55=low**，preClose=data.preKPrice，lmt=limit，fqt=1）
+- [x] CSV 解析: split(',') 列数<7→BAD_PAYLOAD；升序校验（重复→BAD_PAYLOAD）；parseFloat
+- [x] data:null→美股 suggest 解析（ctx.fetch 直连 searchapi）重试一次→NO_DATA；非美股 null 直接 NO_DATA
 - 测试（public-providers.test.mjs）: 八市场 secid 映射表断言；7 列 CSV 解析（夹具固定串）；data:null→重试→成功（fetch 计数=2）；data:null×2→NO_DATA；trend 8 列含 avg；preKPrice 提取；乱序/重复 BAD_PAYLOAD；usSymbols stub 注入 miss→默认 105；complete=false（dktotal<lmt 夹具）
 
 ### Step 1.5 tencent.mjs — kline 备源（扩展既有文件）
-- [ ] descriptor: capabilities +`'kline'`，markets +XHKG/XNAS/XNYS
-- [ ] symbolOf 内联三元重构为 `SYMBOL_PREFIX` 查表（quotes 共用，防漂移）；美股 `us{code}.{suffix}`（suffix=JYS_TO_SUFFIX 映射取 usSymbols.jys；无映射→UNSUPPORTED_CAPABILITY）
-- [ ] kline(): URL param=`{symbol},{day|week|month},,,{limit},qfq`，Referer gu.qq.com；键名兜底 `Object.values(data[symbol]).find(Array.isArray)`；行数组 parseFloat；升序校验
-- [ ] preClose 从 `data.{symbol}.qt.{symbol}` 提取 + AMEX 腾讯符号形态——**本步首任务：真实拉取实测（qt 字段族索引/JYS=AMEX 候选的腾讯符号），回填设计文档"实测证据基线-数据端点"表**（未决项清零）；preClose 提取失败→缺省（合同可空）
-- [ ] period='trend'→UNSUPPORTED_CAPABILITY
+- [x] descriptor: capabilities +`'kline'`，markets +XHKG/XNAS/XNYS
+- [x] symbolOf 内联三元重构为 `SYMBOL_PREFIX` 查表（quotes 共用，防漂移）；美股 `us{code}.{suffix}`（suffix=JYS_TO_SUFFIX 映射取 usSymbols.jys；无映射→UNSUPPORTED_CAPABILITY）
+- [x] kline(): URL param=`{symbol},{day|week|month},,,{limit},qfq`，Referer gu.qq.com；键名兜底 `Object.values(data[symbol]).find(Array.isArray)`；行数组 parseFloat；升序校验
+- [x] preClose 从 `data.{symbol}.qt.{symbol}` 提取 + AMEX 腾讯符号形态——**本步首任务：真实拉取实测（qt 字段族索引/JYS=AMEX 候选的腾讯符号），回填设计文档"实测证据基线-数据端点"表**（未决项清零）；preClose 提取失败→缺省（合同可空）
+- [x] period='trend'→UNSUPPORTED_CAPABILITY
 - 测试: 三市场映射；键名漂移兜底（夹具只给 qfqday 键）；trend 拒绝；字符串数值 parseFloat；美股无映射拒绝文案；JYS_TO_SUFFIX 映射断言
 
 ### Step 1.6 接线层 — registry/executor/application/routes
-- [ ] provider-registry.mjs: 能力白名单数组 +`'kline'`
-- [ ] executor.mjs: createExecutor 签名 +`usSymbols`，ctx 注入只读引用（一行透传）
+- [x] provider-registry.mjs: 能力白名单数组 +`'kline'`
+- [x] executor.mjs: createExecutor 签名 +`usSymbols`，ctx 注入只读引用（一行透传）
 - [ ] application.mjs: usSymbols Map；search() 东财候选写 usSymbols（MktNum→mktNum+JYS→jys，TTL 24h）+候选项按 MARKET_META 附带 currency/priceScale；kline() 按设计"application 接线"节伪代码（缓存链查询→runWithFailover 即时轨→非 trend 缓存写实际源）；runWithFailover 私有函数；snapshot() +klineReady/vendorAvailable
-- [ ] routes.mjs: `kline: ['GET', (input, signal) => app.kline(input, signal)]`
+- [x] routes.mjs: `kline: ['GET', (input, signal) => app.kline(input, signal)]`
 - 测试（routes.test.mjs/application 相关）: 无路由 422（router 自抛语义）；缓存命中 executor 计数不变+fetchedAt=缓存时间；备源链缓存命中（主源 miss+备源 hit）；runWithFailover 主源 NETWORK→备源成功 source=备源；全败抛最后一错；RATE_LIMIT 不触发 failover；search 后 usSymbols 命中（适配器收到非空 Map）+候选含 currency/priceScale；klineReady 只含已配市场；400 校验（period 非法/limit 越界）
 
 ### Step 1.7 M1 出口
-- [ ] npm test 全绿（75 旧+约 24 新）
-- [ ] 真实拉取矩阵（唯一执行点，标记 `test('real', { skip: 无网 })`）: 沪深（000001）/港（00700）/美（AAPL）日K 各 3 条双源对齐 ±0.01+腾讯 preClose/AMEX 符号实测回填——证据记入兼容性测试文档
-- [ ] 设计文档未决项（腾讯 preClose 索引/AMEX 腾讯符号）清零确认
+- [x] npm test 全绿（75 旧+37 新，实际 112/112）
+- [x] 真实拉取矩阵（唯一执行点，标记 `test('real', { skip: 无网 })`）: 沪深（000001）/港（00700）/美（AAPL）日K 各 3 条双源对齐 ±0.01+腾讯 preClose/AMEX 符号实测回填——证据记入兼容性测试文档
+- [x] 设计文档未决项（腾讯 preClose 索引/AMEX 腾讯符号）清零确认
 
 ## M2 前端图表
 
@@ -670,3 +670,6 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 | 东财 h5chart 交互 | dev-browser 实页截图 em-h5chart.png（周期段/头部条格式/分时双轴/量副图） |
 | 既有插件合同 | packages/dsh-stock-assistant/src/*（executor 滑动超时/schemas 枚举/state cache 壳/routes 模式/router.select 语义） |
 | 东财 CSV fields2 列数关系 | 会话实测 f51-f57→7 列/f51-f61→11 列对照 |
+| 腾讯 qt 字段族 preClose 索引 | 2026-10-30 实测 web.ifzq fqkline 响应 `qt.{symbol}[4]`=昨收（sz000001→11.54 与东财 f18 一致；[3]=现价/[5]=今开） |
+| 腾讯美股后缀形态 | 2026-10-30 实测: .OQ/.N/裸代码三者同价有效（SPY 769.36 一致）；.A/.U 返回空数据——JYS_TO_SUFFIX={NASDAQ:OQ,NYSE:N,AMEX:''裸代码} |
+| M1 真实拉取矩阵 | 2026-10-30 跨源对齐: 600519 EM 1392.05/000001 EM=TX 11.64/00700 EM=TX 383.6/AAPL 348.91（±0.01 达标） |

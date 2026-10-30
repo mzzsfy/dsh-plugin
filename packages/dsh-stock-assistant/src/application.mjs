@@ -7,25 +7,29 @@ import { tencent } from './providers/tencent.mjs'
 import { sina } from './providers/sina.mjs'
 import { eastmoney } from './providers/eastmoney.mjs'
 import { openState, digest } from './state.mjs'
-import { parseConfiguration, preferencesSchema, defaultConfig } from './schemas.mjs'
+import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema } from './schemas.mjs'
 import { createWatchlistService } from './service.mjs'
 import { createBudget } from './budget.mjs'
 import { createExecutor } from './executor.mjs'
 import { createCollector } from './collector.mjs'
 import { createCatalog } from './catalog.mjs'
 import { createDemand } from './demand.mjs'
-import { fail } from './market-model.mjs'
+import { createKlineCache } from './kline-cache.mjs'
+import { fail, parseSecurityId, MARKET_META } from './market-model.mjs'
 const WINDOW = 5 * 60 * 1000
-export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis }) {
+const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
+export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
   let snapshotSeq = 0, stopped = false, collector, catalog, demand
+  const usSymbols = new Map()
   const touched = () => snapshotSeq++
   const changed = () => { touched(); publish({ type: 'invalidate', serverEpoch, snapshotSeq, scopes: ['snapshot'] }) }
   const state = await openState(storageDomain, changed, now)
   const registry = createRegistry(providers), budget = createBudget(now)
-  const executor = createExecutor({ registry, budget, env, fetch, now, timers })
+  const executor = createExecutor({ registry, budget, env, fetch, now, timers, usSymbols })
   const getControl = state.get
   const router = createRouter(getControl, now, () => collector?.reset())
+  const klineCache = createKlineCache({ cacheTable: state.cache, now })
   catalog = createCatalog({ state, getControl, router, executor, now, changed })
   let ensuring = null, lastEnsure = -Infinity, ensureError = null
   const ensureCaches = () => {
@@ -46,13 +50,13 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const watchlist = createWatchlistService(state, catalog.resolve, now)
   const snapshot = () => {
     const control = state.get(); delete control.operations
-    return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.entries(), routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialEnv === null || !!env[p.credentialEnv] })) }
+    return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.entries(), routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialEnv === null || !!env[p.credentialEnv] })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])) }
   }
   function assertLive() { if (stopped) fail('STOPPED', '股票工具已停止', 503) }
   async function providerCheck(input, signal) {
     assertLive()
     const config = parseConfiguration({ providers: input.providers, routes: input.routes })
-    const caps = z.array(z.enum(['quotes', 'catalog', 'search', 'calendar'])).min(1).max(4).parse(input.capabilities)
+    const caps = z.array(z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])).min(1).max(5).parse(input.capabilities)
     const at = now()
     for (const [id, check] of checks) if (check.until <= at) checks.delete(id)
     if (checks.size >= 64) fail('CHECK_LIMIT', '检查请求过多，请稍后重试', 429)
@@ -91,13 +95,64 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     return result
   }
 
+  // 搜索候选项服务端补全市场元数据(单一事实源 MARKET_META),client 零映射表。
+  function decorateWithMarketMeta(items) {
+    for (const item of items) if (item?.exchange && !item.currency) {
+      const meta = MARKET_META[item.exchange]
+      if (meta) { item.currency = meta.currency; item.priceScale = meta.priceScale }
+    }
+  }
+  // kline 即时故障转移: 触发码 NETWORK/TIMEOUT/BAD_PAYLOAD 且有备源→逐备源各试一次;每次尝试后 recordRound 记账;RATE_LIMIT 不触发。
+  async function runWithFailover(route, primary, fallbacks, request, signal) {
+    const chain = [primary, ...fallbacks]
+    let lastError
+    for (const cand of chain) {
+      try {
+        return await executor.run(cand, 'kline', request, { signal })
+      } catch (e) {
+        lastError = e
+        router.recordRound(route.id, e)
+        if (!['NETWORK', 'TIMEOUT', 'BAD_PAYLOAD'].includes(e.code)) throw e
+      }
+    }
+    throw lastError
+  }
+
   return {
     snapshot, providerCheck, configuration,
     demand(message) { assertLive(); demand.update(message) },
     async search(q, phase = 'local', signal) {
       assertLive()
       if (typeof q !== 'string' || [...q].length > 100) fail('INVALID_QUERY', '搜索词过长')
-      return { items: phase === 'remote' ? await catalog.remote(q, signal) : catalog.search(q), catalogs: catalog.status(), routingRevision: state.get().routingRevision }
+      const items = phase === 'remote' ? await catalog.remote(q, signal) : catalog.search(q)
+      decorateWithMarketMeta(items)
+      const routingRevision = state.get().routingRevision
+      if (phase === 'remote') {
+        for (const item of items) {
+          const row = item.raw && typeof item.raw === 'object' ? item.raw : null
+          if (row?.MktNum && /^10[567]$/.test(row.MktNum)) usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: now() })
+        }
+      }
+      for (const [key, value] of usSymbols) if (now() - value.at > US_SYMBOL_TTL) usSymbols.delete(key)
+      return { items, catalogs: catalog.status(), routingRevision }
+    },
+    async kline(input, signal) {
+      assertLive()
+      const parsed = klineQuerySchema.safeParse(input)
+      if (!parsed.success) fail('INVALID_PARAM', 'K线请求参数无效', 400)
+      const { securityId: sid, period, limit } = parsed.data
+      let exchange, code
+      try { ({ exchange, code } = parseSecurityId(sid)) } catch { fail('INVALID_PARAM', '证券身份无效', 400) }
+      const config = state.get()
+      const { route, instance } = router.select('kline', exchange, 'equity')
+      const fallbacks = route.fallbackInstanceIds.map(id => config.providers.find(p => p.id === id && p.enabled !== false)).filter(Boolean)
+      for (const cand of [instance, ...fallbacks]) {
+        const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code }, config.routingRevision)
+        if (cached) return { data: { ...cached.payload, source: cand.id }, revision: config.revision }
+      }
+      const result = await runWithFailover(route, instance, fallbacks, { securityId: sid, market: exchange, code, period, adjust: 'qfq', limit }, signal)
+      if (period !== 'trend') await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code }, result, config.routingRevision)
+      return { data: { ...result, source: result.providerInstanceId }, revision: config.revision }
     },
     async browse(input) {
       assertLive()

@@ -5,6 +5,147 @@ import { tencent } from '../src/providers/tencent.mjs'
 import { sina } from '../src/providers/sina.mjs'
 import { eastmoney } from '../src/providers/eastmoney.mjs'
 import { makeSecurity } from '../src/market-model.mjs'
+
+// ---- Step 1.4: 东财 kline ----
+
+const klineCtx = (bodies, log = []) => {
+  let i = 0
+  return { now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async url => { log.push(String(url)); const body = bodies[Math.min(i++, bodies.length - 1)]; return { ok: true, json: async () => typeof body === 'function' ? body(url) : body } } }
+}
+const KLINE_REQ = (market, code, period = '1d', limit = 250) => ({ providerInstanceId: 'em', securityId: `${market}:equity:${code}`, market, code, period, adjust: 'qfq', limit })
+const CSV_OK = '2026-10-29,11.30,11.54,11.55,11.29,1993504,2283899682.66'
+
+test('东财 secid 前缀多市场映射与美股动态归属', async () => {
+  const log = []
+  const ctx = klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 100 } }], log)
+  await eastmoney.kline(KLINE_REQ('XHKG', '00700'), ctx)
+  assert.ok(log[0].includes('secid=116.00700'))
+  const ctx2 = klineCtx([{ data: { klines: [CSV_OK], preKPrice: '227.5', dktotal: 5000 } }], log)
+  ctx2.usSymbols.set('US:AAPL', { mktNum: '105', jys: 'NASDAQ', at: 1 })
+  await eastmoney.kline(KLINE_REQ('XNAS', 'AAPL'), ctx2)
+  assert.ok(log.at(-1).includes('secid=105.AAPL'))
+})
+
+test('东财 kline CSV 列序 f52=open/f53=close 与 preKPrice 与源截断标志', async () => {
+  const ctx = klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 100 } }])
+  const result = await eastmoney.kline(KLINE_REQ('XSHG', '600519'), ctx)
+  const c = result.candles[0]
+  assert.deepEqual({ time: c.time, open: c.open, close: c.close, high: c.high, low: c.low, volume: c.volume }, { time: '2026-10-29', open: 11.30, close: 11.54, high: 11.55, low: 11.29, volume: 1993504 })
+  assert.equal(result.preClose, 11.31)
+  // dktotal(100) < limit(250): 数据不足请求量, complete=false(源截断)
+  assert.equal(result.complete, false)
+  const full = klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 250 } }])
+  assert.equal((await eastmoney.kline(KLINE_REQ('XSHG', '600519'), full)).complete, true)
+})
+
+test('东财 kline klt 周期映射 101/102/103 与 lmt/fqt', async () => {
+  const log = []
+  const body = { data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 100 } }
+  const ctx = klineCtx([body, body, body], log)
+  await eastmoney.kline(KLINE_REQ('XSHE', '000001', '1d'), ctx)
+  await eastmoney.kline(KLINE_REQ('XSHE', '000001', '1w'), ctx)
+  await eastmoney.kline(KLINE_REQ('XSHE', '000001', '1M'), ctx)
+  assert.ok(log[0].includes('klt=101&fqt=1&end=20500101&lmt=250'))
+  assert.ok(log[1].includes('klt=102'))
+  assert.ok(log[2].includes('klt=103'))
+})
+
+test('东财 trend trends2 8列含avg与preClose', async () => {
+  const ctx = klineCtx([{ data: { trends: ['2026-10-30 09:30,11.53,11.53,11.53,11.53,11523,13286019.00,11.530', '2026-10-30 09:31,11.54,11.54,11.54,11.54,8000,9200000.00,11.531'], preClose: 11.54 } }])
+  const result = await eastmoney.kline(KLINE_REQ('XSHE', '000001', 'trend'), ctx)
+  assert.equal(result.candles.length, 2)
+  assert.deepEqual({ time: result.candles[0].time, avg: result.candles[0].avg, open: result.candles[0].open }, { time: '09:30', avg: 11.53, open: 11.53 })
+  assert.equal(result.preClose, 11.54)
+})
+
+test('东财 kline 列数不足与乱序重复 BAD_PAYLOAD', async () => {
+  const short = klineCtx([{ data: { klines: ['2026-10-29,11.30,11.54'], preKPrice: '11.31', dktotal: 10 } }])
+  await assert.rejects(() => eastmoney.kline(KLINE_REQ('XSHG', '600519'), short), e => e.code === 'BAD_PAYLOAD')
+  const dup = klineCtx([{ data: { klines: [CSV_OK, CSV_OK], preKPrice: '11.31', dktotal: 10 } }])
+  await assert.rejects(() => eastmoney.kline(KLINE_REQ('XSHG', '600519'), dup), e => e.code === 'BAD_PAYLOAD')
+  const unordered = klineCtx([{ data: { klines: ['2026-10-30,11.30,11.54,11.55,11.29,1,2', '2026-10-29,11.30,11.54,11.55,11.29,1,2'], preKPrice: '11.31', dktotal: 10 } }])
+  await assert.rejects(() => eastmoney.kline(KLINE_REQ('XSHG', '600519'), unordered), e => e.code === 'BAD_PAYLOAD')
+})
+
+test('东财 kline 美股默认105 data:null→suggest 解析重试一次', async () => {
+  const log = []
+  const suggestBody = { QuotationCodeTable: { Data: [{ Code: 'BABA', Name: '阿里巴巴', MktNum: '106', JYS: 'NYSE', QuoteID: '106.BABA', Classify: 'UsStock' }] } }
+  const babaOk = { data: { klines: ['2026-10-29,90.10,91.20,91.50,89.90,12345678,1123000000.00'], preKPrice: '89.80', dktotal: 3000 } }
+  const bodies = [url => url.includes('push2his') ? { data: null } : suggestBody, url => url.includes('push2his') ? babaOk : suggestBody]
+  const ctx = klineCtx(bodies, log)
+  const result = await eastmoney.kline(KLINE_REQ('XNAS', 'BABA'), ctx)
+  assert.ok(log[0].includes('secid=105.BABA'))
+  assert.ok(log[1].includes('searchapi'))
+  assert.ok(log[2].includes('secid=106.BABA'))
+  assert.equal(result.candles[0].close, 91.20)
+  assert.equal(ctx.usSymbols.get('US:BABA').mktNum, '106')
+})
+
+test('东财 kline 美股二次失败 NO_DATA 而非死循环', async () => {
+  const suggestBody = { QuotationCodeTable: { Data: [{ Code: 'XX', MktNum: '105', QuoteID: '105.XX', Classify: 'UsStock' }] } }
+  const ctx = klineCtx([url => url.includes('push2his') ? { data: null } : suggestBody])
+  await assert.rejects(() => eastmoney.kline(KLINE_REQ('XNAS', 'XX'), ctx), e => e.code === 'NO_DATA')
+})
+
+test('东财 kline 非美股 data:null 直接 NO_DATA', async () => {
+  const ctx = klineCtx([{ data: null }])
+  await assert.rejects(() => eastmoney.kline(KLINE_REQ('XSHG', '600519'), ctx), e => e.code === 'NO_DATA')
+})
+
+// ---- Step 1.5: 腾讯 kline 备源 ----
+
+const tencentKlineCtx = (body, log = []) => ({ now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async url => { log.push(String(url)); return { ok: true, json: async () => body } } })
+
+test('腾讯 kline 三市场 symbol 映射与 param 形态与 preClose 索引', async () => {
+  const log = []
+  const body = { data: { sz000001: { qfqday: [['2026-10-29', '11.30', '11.54', '11.55', '11.29', '1993504']], qt: { sz000001: ['51', '平安银行', '000001', '11.64', '11.54', '11.30'] } } } }
+  const ctx = tencentKlineCtx(body, log)
+  const result = await tencent.kline(KLINE_REQ('XSHE', '000001'), ctx)
+  assert.ok(log[0].includes('param=sz000001,day,,,250,qfq'))
+  assert.deepEqual(result.candles[0], { time: '2026-10-29', open: 11.30, close: 11.54, high: 11.55, low: 11.29, volume: 1993504 })
+  assert.equal(result.preClose, 11.54, 'qt[4]=昨收(实测定案)')
+  const hk = tencentKlineCtx({ data: { hk00700: { qfqday: [['2026-10-29', '380', '385', '386', '379', '10000000']] } } }, log)
+  await tencent.kline(KLINE_REQ('XHKG', '00700'), hk)
+  assert.ok(log.at(-1).includes('param=hk00700,day'))
+  const week = tencentKlineCtx({ data: { sz000001: { qfqweek: [['2026-10-25', '11', '11.5', '11.6', '10.9', '900000']] } } }, log)
+  await tencent.kline(KLINE_REQ('XSHE', '000001', '1w'), week)
+  assert.ok(log.at(-1).includes('param=sz000001,week'))
+})
+
+test('腾讯 kline 键名漂移兜底(只给 qfqweek 键)', async () => {
+  const ctx = tencentKlineCtx({ data: { sh600519: { qfqweek: [['2026-10-25', '1370', '1392', '1396', '1362', '23651']] } } })
+  const result = await tencent.kline(KLINE_REQ('XSHG', '600519', '1w'), ctx)
+  assert.equal(result.candles[0].close, 1392)
+})
+
+test('腾讯 kline trend 拒绝与乱序拒绝', async () => {
+  await assert.rejects(() => tencent.kline(KLINE_REQ('XSHG', '600519', 'trend'), tencentKlineCtx({})), e => e.code === 'UNSUPPORTED_CAPABILITY')
+  const ctx = tencentKlineCtx({ data: { sz000001: { day: [['2026-10-29', '11.30', '11.54', '11.55', '11.29', '1993504'], ['2026-10-28', '11', '11', '11', '11', '1']] } } })
+  await assert.rejects(() => tencent.kline(KLINE_REQ('XSHE', '000001'), ctx), e => e.code === 'BAD_PAYLOAD')
+})
+
+test('腾讯 kline 美股无映射拒绝 含提示文案', async () => {
+  await assert.rejects(() => tencent.kline(KLINE_REQ('XNAS', 'AAPL'), tencentKlineCtx({})), e => { assert.equal(e.code, 'UNSUPPORTED_CAPABILITY'); assert.match(e.message, /代码映射/); return true })
+})
+
+test('腾讯 kline 美股 JYS 映射 suffix 正确拼入', async () => {
+  const log = []
+  const ctx = tencentKlineCtx({ data: { 'usAAPL.OQ': { qfqday: [['2026-10-29', '255', '258', '259', '254', '50000000']] } } }, log)
+  ctx.usSymbols.set('US:AAPL', { mktNum: '105', jys: 'NASDAQ', at: 1 })
+  const result = await tencent.kline(KLINE_REQ('XNAS', 'AAPL'), ctx)
+  assert.ok(log[0].includes('param=usAAPL.OQ,day'))
+  assert.equal(result.candles[0].close, 258)
+  const nyse = tencentKlineCtx({ data: { 'usBABA.N': { qfqday: [['2026-10-29', '90', '91', '92', '89', '12000000']] } } }, log)
+  nyse.usSymbols.set('US:BABA', { mktNum: '106', jys: 'NYSE', at: 1 })
+  await tencent.kline(KLINE_REQ('XNAS', 'BABA'), nyse)
+  assert.ok(log.at(-1).includes('param=usBABA.N,day'))
+  // AMEX: 腾讯 .A 形态返回空数据(实测), 走裸代码兜底
+  const amex = tencentKlineCtx({ data: { usSPY: { qfqday: [['2026-10-29', '765', '769', '770', '764', '70000000']] } } }, log)
+  amex.usSymbols.set('US:SPY', { mktNum: '107', jys: 'AMEX', at: 1 })
+  await tencent.kline(KLINE_REQ('XNAS', 'SPY'), amex)
+  assert.ok(log.at(-1).includes('param=usSPY,day'))
+})
+
 const security = makeSecurity('XSHG', '600519', '贵州茅台')
 const req = { providerInstanceId: 'web-one', securities: [security], market: 'XSHG' }
 const gbkCtx = body => ({ now: () => 100, signal: new AbortController().signal, fetch: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode(body).buffer }) })

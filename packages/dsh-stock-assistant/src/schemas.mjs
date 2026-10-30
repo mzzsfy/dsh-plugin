@@ -1,19 +1,31 @@
 import { z } from 'zod'
 import { fail } from './market-model.mjs'
+import { MARKET_META } from './market-model.mjs'
 const id = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/)
 const rate = z.number().int().positive().max(100000)
-export const capability = z.enum(['quotes', 'catalog', 'search', 'calendar'])
+export const capability = z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])
+export const marketSchema = z.enum(Object.keys(MARKET_META))
 export const providerSchema = z.strictObject({
   id, adapterId: id, enabled: z.boolean(), credentialEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).nullable(), quotaGroup: id,
   budget: z.strictObject({ requestsPerMinute: rate.nullable(), dailyRequestLimit: rate.nullable(), billingUnit: z.enum(['request', 'symbol']), symbolCreditsPerMinute: rate.nullable(), capabilityLimits: z.partialRecord(capability, rate) }),
+  endpoints: z.record(z.string().url()).optional(),
 }).refine(p => p.credentialEnv !== null || p.budget.requestsPerMinute !== null, '免凭据来源必须声明保守预算')
 export const routeSchema = z.strictObject({
-  id, capability, market: z.enum(['XSHG', 'XSHE']), instrument: z.literal('equity'), primaryInstanceId: id,
+  id, capability, market: marketSchema, instrument: z.literal('equity'), primaryInstanceId: id,
   fallbackInstanceIds: z.array(id).max(1), failoverMode: z.enum(['off', 'network']), maxDelaySeconds: z.number().nonnegative().nullable(), acceptUnknownDelay: z.boolean(),
+})
+export const klineQuerySchema = z.strictObject({
+  securityId: z.string().regex(/^[\w]+:equity:[\w.]{1,15}$/),
+  period: z.enum(['trend', '1d', '1w', '1M']),
+  limit: z.number().int().min(20).max(1000).default(250),
 })
 const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(8) })
 export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']) })
-export const securitySchema = z.object({ id: z.string().regex(/^(XSHG|XSHE):equity:\d{6}$/), exchange: z.enum(['XSHG', 'XSHE']), code: z.string().regex(/^\d{6}$/), officialName: z.string().min(1).max(100), instrument: z.literal('equity'), currency: z.literal('CNY'), timezone: z.literal('Asia/Shanghai'), priceScale: z.literal(2), listingStatus: z.string() }).refine(s => s.id === `${s.exchange}:equity:${s.code}`, '证券身份不一致')
+export const securitySchema = z.object({ id: z.string(), exchange: marketSchema, code: z.string(), officialName: z.string().min(1).max(100), instrument: z.literal('equity'), currency: z.string(), timezone: z.string(), priceScale: z.number().int(), listingStatus: z.string() }).superRefine((s, ctx) => {
+  const meta = MARKET_META[s.exchange]
+  if (!meta || !meta.codePattern.test(s.code) || s.id !== `${s.exchange}:equity:${s.code}`) { ctx.addIssue({ code: 'custom', message: '证券身份不一致' }); return }
+  if (s.currency !== meta.currency || s.timezone !== meta.timezone || s.priceScale !== meta.priceScale) ctx.addIssue({ code: 'custom', message: '证券市场元数据与该市场不符' })
+})
 export function parseConfiguration(value) {
   const result = configSchema.safeParse(value)
   if (!result.success) fail('INVALID_CONFIGURATION', '数据源配置字段或格式无效', 422)
@@ -32,7 +44,7 @@ export function parseConfiguration(value) {
     seen.add(key); routeIds.add(r.id)
     const targets = [r.primaryInstanceId, ...r.fallbackInstanceIds]
     if (new Set(targets).size !== targets.length || targets.some(target => !config.providers.some(p => p.id === target && p.enabled))) fail('INVALID_ROUTE', '路由引用了不存在或禁用的数据源', 422)
-    if (r.capability !== 'quotes' && (r.failoverMode !== 'off' || r.fallbackInstanceIds.length)) fail('INVALID_ROUTE', '只有报价支持备用源', 422)
+    if (!['quotes', 'kline'].includes(r.capability) && (r.failoverMode !== 'off' || r.fallbackInstanceIds.length)) fail('INVALID_ROUTE', '只有报价与K线支持备用源', 422)
     if (r.failoverMode !== 'off' && !r.fallbackInstanceIds.length) fail('INVALID_ROUTE', '自动切换需要备用报价源', 422)
   }
   return config
@@ -48,7 +60,7 @@ export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single
 // 默认数据源:免凭据公开源+保守预算,首用即可检查保存;目录走新浪分市场节点,行情与搜索走东财。
 export const defaultConfig = () => {
   const catalog = { id: 'sn-catalog', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: { requestsPerMinute: 120, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { catalog: 60 } } }
-  const market = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
+  const market = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { kline: 30 } } }
   const routes = ['XSHG', 'XSHE'].flatMap(m => [
     { id: `${m.toLowerCase()}-catalog`, capability: 'catalog', market: m, instrument: 'equity', primaryInstanceId: catalog.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
     { id: `${m.toLowerCase()}-search`, capability: 'search', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },

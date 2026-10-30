@@ -37,8 +37,7 @@ test('browse端点HTTP层钳制越界参数并返回分页结构', async t => {
   assert.equal(bad.error.code, 'INVALID_REQUEST')
 })
 // B-1保存回路: Given一键默认源提交 When走检查→保存 Then需checkId才通过,空checkIds被拒
-test('configuration要求有效checkId,检查通过后保存成功', async t => {
-  const routes = new Map()
+test('configuration要求有效checkId,检查通过后保存成功', async t => {  const routes = new Map()
   const providers = [{ id: 'p1', adapterId: 'fake', enabled: true, credentialEnv: null, quotaGroup: 'g', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }]
   const routesCfg = [{ id: 'sh-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'p1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
   const checks = []
@@ -60,4 +59,24 @@ test('configuration要求有效checkId,检查通过后保存成功', async t => 
   assert.equal(check.ok, true)
   const saved = await (await fetch(base + '/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: 1, providers, routes: routesCfg, checkIds: [check.data.checkId] }) })).json()
   assert.equal(saved.ok, true)
+})
+
+// ---- Step 1.6: kline HTTP 接线 ----
+
+test('kline端点 GET 接线 参数校验与透传', async t => {
+  const routes = new Map()
+  const seen = []
+  const app = { kline: async (input, signal) => { seen.push({ input, signalType: typeof signal }); return { candles: [], source: 'em-default' } } }
+  const stop = registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app)
+  const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
+  const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
+  const ok = await (await fetch(base + '/kline?securityId=XSHG%3Aequity%3A600519&period=1d')).json()
+  assert.equal(ok.ok, true)
+  assert.equal(seen[0].input.limit, undefined, 'limit 默认值由 application 层 schema 补齐,HTTP 层透传原文')
+  assert.equal(seen[0].signalType, 'object')
+  // 参数校验在 application 层(见 kline-app.test); HTTP 层 stub 不校验, 200 透传
+  assert.equal((await (await fetch(base + '/kline?period=1d')).json()).ok, true)
+  assert.equal((await fetch(base + '/kline?securityId=XSHG%3Aequity%3A600519&period=1d', { method: 'POST', body: '{}' })).status, 405)
 })

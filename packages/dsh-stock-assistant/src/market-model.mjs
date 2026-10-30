@@ -1,6 +1,26 @@
+// 每市场的币种/时区/价格精度/代码形态/探针门控——securitySchema 与 makeSecurity 的派生源(来源标注见 design.md)
+export const MARKET_META = {
+  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true },
+  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true },
+  XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true },
+  XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true },
+  XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true },
+  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: false },
+  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: false },
+  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: false },
+}
+
 export function securityId(exchange, code, instrument = 'equity') {
-  if (!['XSHG', 'XSHE'].includes(exchange) || typeof code !== 'string' || !/^\d{6}$/.test(code) || instrument !== 'equity') throw new Error('不支持的证券身份')
+  const meta = MARKET_META[exchange]
+  if (!meta || instrument !== 'equity' || typeof code !== 'string' || !meta.codePattern.test(code)) throw new Error('不支持的证券身份')
   return `${exchange}:${instrument}:${code}`
+}
+
+export function parseSecurityId(securityIdValue) {
+  const parts = String(securityIdValue || '').split(':')
+  const [exchange, instrument, code] = parts
+  if (parts.length !== 3 || instrument !== 'equity' || !MARKET_META[exchange]) throw new Error('不支持的证券身份')
+  return { exchange, instrument, code: securityId(exchange, code, instrument).split(':')[2], meta: MARKET_META[exchange] }
 }
 function cents(value) {
   if (value === null || value === undefined || value === '') return null
@@ -36,7 +56,9 @@ export function parseQuoteTime(value) {
 }
 
 export function makeSecurity(exchange, code, officialName, extra = {}) {
-  return { ...extra, id: securityId(exchange, code), exchange, code, officialName, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed' }
+  const meta = MARKET_META[exchange]
+  if (!meta) throw new Error('不支持的证券身份')
+  return { ...extra, id: securityId(exchange, code), exchange, code, officialName, instrument: 'equity', currency: meta.currency, timezone: meta.timezone, priceScale: meta.priceScale, listingStatus: 'listed' }
 }
 
 export class StockError extends Error {
