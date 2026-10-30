@@ -1,11 +1,11 @@
 // 真实数据源自检(授权后人工执行):node scripts/stock-probe.mjs [XSHG|XSHE] [tushare|eastmoney]
 // Tushare读DSH_STOCK_TUSHARE_TOKEN(约3次请求);eastmoney免凭据(目录1次分页探测+报价/联想各1次)。
-import { tushare } from '../packages/dsh-stock-sidebar/src/providers/tushare.mjs'
-import { eastmoney } from '../packages/dsh-stock-sidebar/src/providers/eastmoney.mjs'
-import { createBudget } from '../packages/dsh-stock-sidebar/src/budget.mjs'
-import { createExecutor } from '../packages/dsh-stock-sidebar/src/executor.mjs'
-import { createRegistry } from '../packages/dsh-stock-sidebar/src/provider-registry.mjs'
-import { makeSecurity } from '../packages/dsh-stock-sidebar/src/market-model.mjs'
+import { tushare } from '../packages/dsh-stock-assistant/src/providers/tushare.mjs'
+import { eastmoney } from '../packages/dsh-stock-assistant/src/providers/eastmoney.mjs'
+import { createBudget } from '../packages/dsh-stock-assistant/src/budget.mjs'
+import { createExecutor } from '../packages/dsh-stock-assistant/src/executor.mjs'
+import { createRegistry } from '../packages/dsh-stock-assistant/src/provider-registry.mjs'
+import { makeSecurity } from '../packages/dsh-stock-assistant/src/market-model.mjs'
 const choice = process.argv[3] === 'eastmoney' || !process.env.DSH_STOCK_TUSHARE_TOKEN && process.argv[3] !== 'tushare' ? 'eastmoney' : 'tushare'
 if (choice === 'tushare' && !process.env.DSH_STOCK_TUSHARE_TOKEN) { console.error('未配置环境变量 DSH_STOCK_TUSHARE_TOKEN；或使用: node scripts/stock-probe.mjs XSHG eastmoney'); process.exit(2) }
 const adapter = choice === 'tushare' ? tushare : eastmoney
