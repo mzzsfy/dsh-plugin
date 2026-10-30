@@ -87,12 +87,15 @@ export function defineWorkItem(aggregate, { workItemId, title, scope = '', depen
   return pass({ aggregate: next })
 }
 
+// 判环:新增边成环 ⇔ 从依赖沿依赖边可达 workItemId 自身;共同前置的合法菱形
+// 依赖两条路径汇于起点而非回到自身,不触发。全局重复访问不当回边
 function hasCycle(dependencyIds, workItemId, aggregate) {
-  const seen = new Set([workItemId])
+  const seen = new Set()
   const queue = [...dependencyIds]
   while (queue.length > 0) {
     const id = queue.pop()
-    if (seen.has(id)) return true
+    if (id === workItemId) return true
+    if (seen.has(id)) continue
     seen.add(id)
     queue.push(...(aggregate.workItems[id]?.dependencyWorkItemIds ?? []))
   }
@@ -153,7 +156,7 @@ export function hasActiveRuns(aggregate) {
   return Object.values(aggregate.runs).some((r) => ['prepared', 'submitted', 'running', 'unknown'].includes(r.state))
 }
 
-// 执行许可九条(生命周期"全局与局部停止代次");宿主能力就绪由适配层另行检查
+// 执行许可十条(生命周期"全局与局部停止代次" + 依赖准入);宿主能力就绪由适配层另行检查
 export function checkExecutionPermission(aggregate, globalControl, { workItemId, phase, actorRole }) {
   if (!PHASES.includes(phase)) return fail(E.INVALID_ARGUMENT, `phase 非法: ${phase}`)
   if (!(aggregate.control.state === 'active')) return fail(E.TASK_PAUSED, `控制状态 ${aggregate.control.state} 不允许派发`)
@@ -165,6 +168,14 @@ export function checkExecutionPermission(aggregate, globalControl, { workItemId,
     return fail(E.TASK_PAUSED, '全局停止中且无当前代次单项放行')
   }
   if (!aggregate.workItems[workItemId]) return fail(E.NOT_FOUND, `workItem 不存在: ${workItemId}`)
+  // 依赖准入:缺失/已替换/未验收的依赖一律拒绝派发——依赖声明是调度承诺,
+  // 与查询面 deriveWorkItemState 的 blocked 展示同一语义,不产生"显示 blocked 却获准"的分叉
+  const unmet = aggregate.workItems[workItemId].dependencyWorkItemIds.filter((id) => {
+    const dep = aggregate.workItems[id]
+    if (dep === undefined || dep.replacedBy !== null) return true
+    return !dependencyAccepted(aggregate, id)
+  })
+  if (unmet.length > 0) return fail(E.DEPENDENCY_BLOCKED, `依赖未就绪: ${unmet.join(', ')}(缺失/已替换/未验收)`)
   const roles = PHASE_ROLE[phase].split('|')
   if (!roles.includes(actorRole)) return fail(E.INVALID_ARGUMENT, `phase ${phase} 不允许角色 ${actorRole}`)
   if (!DISPATCHABLE_BUSINESS.has(aggregate.businessState)) return fail(E.INVALID_ARGUMENT, `业务状态 ${aggregate.businessState} 不可派发`)
@@ -172,6 +183,14 @@ export function checkExecutionPermission(aggregate, globalControl, { workItemId,
   const slotTaken = Object.values(aggregate.runs).some((r) => r.executionSlot === slotKey && ['prepared', 'submitted', 'running', 'unknown'].includes(r.state))
   if (slotTaken) return fail(E.EXECUTION_STILL_ACTIVE, '同一执行槽存在未核清 Run')
   return pass({ slotKey })
+}
+
+// 依赖项已验收:存在非历史 pass 报告;历史报告(authorize 重置/定义修订)不算数
+function dependencyAccepted(aggregate, workItemId) {
+  return Object.values(aggregate.reports).some((report) => {
+    if (report.historical || report.workItemId !== workItemId) return false
+    return report.verdict === 'pass'
+  })
 }
 
 const DISPATCHABLE_BUSINESS = new Set(['ready', 'implementing', 'awaiting_acceptance'])
