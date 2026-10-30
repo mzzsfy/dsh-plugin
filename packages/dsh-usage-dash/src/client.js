@@ -3206,6 +3206,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const heatGenerationRef = useRef(0)
       const panelRef = useRef(null)
       const [heatDays, setHeatDays] = useState(null)
+      // 热力图重取信号(F23):手动刷新/回扫完成即 bump,独立请求随之重取
+      const [heatFetchTick, setHeatFetchTick] = useState(0)
+      const bumpHeatFetch = () => setHeatFetchTick((tick) => tick + 1)
       // 费用展示货币来源:价格规则异步首帧未回时空串即不带符号
       const { rules: pricingRules, tick: pricingTick } = usePricing()
 
@@ -3231,7 +3234,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           }))
         })
         return () => { heatGenerationRef.current++ }
-      }, [pricingTick])
+      }, [pricingTick, heatFetchTick])
 
       const load = useCallback(async () => {
         const request = range === 'custom'
@@ -3310,6 +3313,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
       const refresh = () => {
         setError('')
+        // 手动刷新同触热力图重取(F23):重建后热力图口径随日桶更新,
+        // 独立请求此前只随挂载/价格变更重取,重建产物不进热力图
+        bumpHeatFetch()
         if (view === 'day') load()
         else refreshPoints()
       }
@@ -3340,9 +3346,18 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               baseDone = value.done
               scheduleRefresh()
             }
+            wasRunning = true
             schedule(STATUS_POLL_FAST_MS)
+          } else if (wasRunning) {
+            // running→idle 转换补最终刷新(F23):reset 同步等回扫,响应时 running 已 false,
+            // done 增长分支永不触发——回扫产物的最终态靠此转换收尾(含热力图重取)
+            wasRunning = false
+            scheduleRefresh()
+            bumpHeatFetch()
+            schedule(STATUS_POLL_SLOW_MS)
           }
         }
+        let wasRunning = false
         tick()
         statusMachineRef.current = { restart: () => { baseDone = 0; schedule(STATUS_POLL_FAST_MS) } }
         return () => {
