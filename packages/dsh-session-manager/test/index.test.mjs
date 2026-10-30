@@ -39,16 +39,25 @@ const GHOST_DIR = path.join(tmpdir(), 'sm-ghost-fixture', 's1')
 const GHOST_PATH = path.join(GHOST_DIR, 'session.jsonl.zstd')
 
 function makeRegistry(initialIds) {
-  // 真实注册表契约:archivedSessionIds 是进程内快照的 getter,官方读路径全部经快照;
-  // archiveSession 归档即入集合(官方幂等判定依据),桩保持同语义
+  // 真实注册表契约(0.2.1-rc.2+):archivedSessionIds 是进程内快照的 getter;
+  // archiveSession 归档即入集合,unarchiveSession 串行移除(未归档 id 幂等不写),
+  // 两个官方入口都写穿 state——快照与持久集由注册表自身保证一致
   const registry = {
     state: { initialized: true, workspaceIds: [], archivedSessionIds: initialIds },
     list: () => [],
     archiveCalls: [],
+    unarchiveCalls: [],
     archiveSession: async (id) => {
       const sid = String(id)
       registry.archiveCalls.push(sid)
       registry.state.archivedSessionIds = [...registry.state.archivedSessionIds, sid]
+    },
+    unarchiveSession: async (id) => {
+      const sid = String(id)
+      const next = registry.state.archivedSessionIds.filter((existing) => String(existing) !== sid)
+      if (next.length === registry.state.archivedSessionIds.length) return
+      registry.unarchiveCalls.push(sid)
+      registry.state.archivedSessionIds = next
     },
   }
   Object.defineProperty(registry, 'archivedSessionIds', {
@@ -399,17 +408,17 @@ test('多工作区 detach:首个失败不终止后续,全部失败进日志', sk
   }
 })
 
-test('取消归档:域领先快照时反向合并清理', skipMissingDeps, async () => {
-  const domain = makeDomain(['s1'])
-  const { handlers, registry } = makeCtx({ archivedIds: [], headers: [HEADER], agents: new Map(), domain })
+test('取消归档路由:走官方 unarchiveSession 写穿注册表', skipMissingDeps, async () => {
+  const domain = makeDomain(['s1', 's2'])
+  const { handlers, registry } = makeCtx({ archivedIds: ['s1', 's2'], headers: [HEADER], agents: new Map(), domain })
   const res = response()
   await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { ok: true })
-  // durable 有而快照无:合并后仍完成移除,防漏清理
-  assert.deepEqual(domain.state.archivedSessionIds, [])
-  assert.equal(domain.writes, 1)
-  assert.deepEqual(registry.state.archivedSessionIds, [])
+  // 官方 API 写穿:注册表快照移除,无私有直写路径
+  assert.deepEqual(registry.unarchiveCalls, ['s1'])
+  assert.deepEqual(registry.state.archivedSessionIds, ['s2'])
+  assert.deepEqual(registry.archivedSessionIds, ['s2'])
 })
 
 test('台账 deletedAt 为删除时刻的数值(面板排序依据)', skipMissingDeps, async () => {
@@ -435,50 +444,14 @@ test('台账 deletedAt 为删除时刻的数值(面板排序依据)', skipMissin
   }
 })
 
-test('取消归档路由:从域集合移除目标 id 并写回', skipMissingDeps, async () => {
-  const domain = makeDomain(['s1', 's2'])
-  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
-  const res = response()
-  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
-  assert.equal(res.status, 200)
-  assert.deepEqual(res.body, { ok: true })
-  assert.deepEqual(domain.state.archivedSessionIds, ['s2'])
-  assert.equal(domain.writes, 1)
-  // 复活守卫:注册表进程内快照必须同步移除,否则官方全量写回与 list 基线会恢复该 id
-  assert.deepEqual(registry.state.archivedSessionIds, ['s2'])
-  assert.deepEqual(registry.archivedSessionIds, ['s2'])
-})
-
-test('取消归档路由:workspace 域未打开时拒绝', skipMissingDeps, async () => {
-  const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain: null })
-  const res = response()
-  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
-  assert.equal(res.status, 400)
-  assert.equal(res.body.error, 'workspace 域未打开')
-})
-
-test('取消归档路由:未归档 id 幂等跳过,不产生写回', skipMissingDeps, async () => {
-  const domain = makeDomain(['s1'])
-  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
+test('取消归档路由:未归档 id 幂等,注册表零写', skipMissingDeps, async () => {
+  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map() })
   const res = response()
   await handlers.get('/api/session-manager/unarchive')(request('s9'), res)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, { ok: true })
-  assert.deepEqual(domain.state.archivedSessionIds, ['s1'])
-  assert.equal(domain.writes, 0)
+  assert.deepEqual(registry.unarchiveCalls, [])
   assert.deepEqual(registry.state.archivedSessionIds, ['s1'])
-})
-
-test('取消归档路由:快照领先域时补全清理(重试路径)', skipMissingDeps, async () => {
-  const domain = makeDomain([])
-  const { handlers, registry } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map(), domain })
-  const res = response()
-  await handlers.get('/api/session-manager/unarchive')(request('s1'), res)
-  assert.equal(res.status, 200)
-  assert.deepEqual(res.body, { ok: true })
-  assert.deepEqual(domain.state.archivedSessionIds, [])
-  assert.equal(domain.writes, 1)
-  assert.deepEqual(registry.state.archivedSessionIds, [])
 })
 
 test('取消归档宽限:恢复后 graceMs 内同进程评估暂停,不秒归档', skipMissingDeps, async () => {
@@ -1077,7 +1050,7 @@ test('删除成功:trash 目标为会话目录,台账记录目录路径', skipMi
   try {
     const domain = makeDomain(['s1'])
     const workspace = makeWorkspace('C:\\x', ['s1'])
-    const { handlers, ledger } = makeCtx({
+    const { handlers, ledger, registry } = makeCtx({
       archivedIds: ['s1'],
       headers: [HEADER],
       agents: IDLE_S1,
@@ -1097,7 +1070,8 @@ test('删除成功:trash 目标为会话目录,台账记录目录路径', skipMi
     assert.equal(ledger.state.deleted.length, 1)
     assert.equal(ledger.state.deleted[0].sessionId, 's1')
     assert.equal(ledger.state.deleted[0].path, artifact.locatedDir)
-    assert.deepEqual(domain.state.archivedSessionIds, [])
+    // 取消归档走官方 unarchiveSession:注册表快照为事实源,域不再被插件直写
+    assert.deepEqual(registry.state.archivedSessionIds, [])
     assert.deepEqual(workspace.sessionIds, [])
   } finally {
     await artifact.cleanup()
@@ -1251,17 +1225,18 @@ test('删除:产物已缺失时运行中守卫仍然生效', skipMissingDeps, as
   assert.equal(res.body.error, MESSAGES.running)
 })
 
-test('删除:产物已缺失且清理半失败时聚合失败点', skipMissingDeps, async () => {
+test('删除:产物已缺失且归档清理半失败时聚合失败点', skipMissingDeps, async () => {
   const workspace = makeWorkspace('C:\\x', ['s1'], { detachError: new Error('detach boom') })
-  const { handlers, logger } = makeCtx({
-    archivedIds: [],
+  const { handlers, logger, registry } = makeCtx({
+    archivedIds: ['s1'],
     headers: [HEADER],
     agents: IDLE_S1,
-    domain: null,
     sessionPersistence: { locate: (header) => header.id === 's1' ? { path: GHOST_PATH } : undefined },
     ledger: makeLedgerDomain([{ sessionId: 's1', path: GHOST_DIR, deletedAt: 1 }]),
     workspaces: [workspace],
   })
+  // 官方取消归档半失败:注入 unarchiveSession 抛错
+  registry.unarchiveSession = async () => { throw new Error('unarchive boom') }
   const res = response()
   await withTrashStub(async () => {}, async () => {
     await handlers.get('/api/session-manager/delete')(request('s1'), res)
@@ -1323,16 +1298,16 @@ test('归档评估:超期运行中会话零产物 IO(早退,core 过滤为第二
   assert.deepEqual(registry.archiveCalls, [])
 })
 
-test('删除:workspace 域未打开时归档清理失败,响应 partial 且台账已记录', skipMissingDeps, async () => {
+test('删除:取消归档半失败时响应 partial 且台账已记录', skipMissingDeps, async () => {
   const artifact = await makeLocatedArtifact()
   try {
-    const { handlers, ledger } = makeCtx({
+    const { handlers, ledger, registry } = makeCtx({
       archivedIds: ['s1'],
       headers: [HEADER],
       agents: IDLE_S1,
-      domain: null,
       sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
     })
+    registry.unarchiveSession = async () => { throw new Error('unarchive boom') }
     const res = response()
     await withTrashStub(async () => {}, async () => {
       await handlers.get('/api/session-manager/delete')(request('s1'), res)
@@ -1383,12 +1358,10 @@ test('删除:detach 与台账同时失败时,partial 消息聚合两个失败点
 test('台账域打开失败:删除其余成功仍响应 partial', skipMissingDeps, async () => {
   const artifact = await makeLocatedArtifact()
   try {
-    const domain = makeDomain(['s1'])
-    const { handlers } = makeCtx({
+    const { handlers, registry } = makeCtx({
       archivedIds: ['s1'],
       headers: [HEADER],
       agents: IDLE_S1,
-      domain,
       sessionPersistence: { locate: (header) => header.id === 's1' ? { path: artifact.locatedPath } : undefined },
       openRejected: new Error('ledger down'),
     })
@@ -1399,8 +1372,8 @@ test('台账域打开失败:删除其余成功仍响应 partial', skipMissingDep
     assert.equal(res.status, 200)
     assert.equal(res.body.partial, true)
     assert.equal(res.body.message, '已移入回收站,但重挂载记录失败')
-    // 台账失败不阻断删除主链路:归档清理照常完成
-    assert.deepEqual(domain.state.archivedSessionIds, [])
+    // 台账失败不阻断删除主链路:归档清理经官方 API 照常完成
+    assert.deepEqual(registry.state.archivedSessionIds, [])
   } finally {
     await artifact.cleanup()
   }

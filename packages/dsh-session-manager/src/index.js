@@ -37,7 +37,6 @@ export const name = 'dsh-session-manager'
 export const inject = ['webServer', 'workspaceRegistry', 'sessionQuery', 'storageDomain', 'agents', 'sessions', 'sessionPersistence']
 
 const NAMESPACE = 'session-manager'
-const WORKSPACE_DOMAIN_NAME = 'workspace'
 
 // 已删除台账域:global 单列表,条目为回收站还原后重挂载所需的最小信息;
 // heldPath 仅回收区降级条目携带(暂存路径,重挂载时移回 path 原位置)
@@ -226,9 +225,9 @@ export function apply(ctx, config) {
   const inFlightDeletes = new Set()
 
   // 插件回收区:系统回收站不可用环境的删除降级暂存地,重挂载时移回原位置。
-  // 测试经 env DSH_QUARANTINE_DIR 注入临时目录
+  // 测试经 env DSH_QUARANTINE_DIR 注入临时目录;缺省从宿主 home 派生(DSH_HOME 即 .dsh 根)
   const quarantineDir = process.env.DSH_QUARANTINE_DIR
-    || join(homedir(), '.dsh', 'trash', 'session-manager')
+    || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'trash', 'session-manager')
 
   // header 查找缓存:归档/删除/重挂载路由共用(inputs 浮层已迁 dsh-context-manager)
   const headerCache = new Map()
@@ -332,27 +331,11 @@ export function apply(ctx, config) {
     evaluateArchives(cwd)
   })
 
-  // 取消归档:直写 workspace 域 global,无官方 API 可用。注册表把域 global 快照到
-  // 进程内 state 且只在自身写路径同步,直写后必须把快照一并改掉:否则注册表后续
-  // 全量写回(含自动归档)与 workspace.list 重连基线都会复活该 id,官方归档的幂等
-  // 判定也会因旧快照静默跳过。合并 durable 与快照再移除,可自愈历史失同步与清理
-  // 半失败(经取消归档重试即补全),代价是快照中的陈旧 id 会随任一次清理重新落盘,
-  // 可经再次取消归档清除。inject 保证注册表就绪,快照缺失即上游形态变更,loud fail;
-  // 域 global 仅支持整体写回,读改写窗口若与注册表两阶段变更交错,理论上可回退其
-  // pendingMutation/workspaceIds 中间态,下次启动 validateStoredState 将 loud fail,
-  // 窗口极窄且域 API 无原子原语可用,属已知取舍(详见 README)。
+  // 取消归档:官方 workspaceRegistry.unarchiveSession(0.2.1-rc.2+ 串行实现,
+  // 未归档 id 幂等不写)写穿 state,无私有直写的读改写窗口与快照失同步问题;
+  // 合并自愈语义随私有写一并退役(开发守则:移除被宿主能力取代的实现)
   async function removeArchivedId(sessionId) {
-    const domain = ctx.storageDomain.get(WORKSPACE_DOMAIN_NAME)
-    if (domain === undefined) throw new Error('workspace 域未打开')
-    const durable = domain.global.get()
-    const cached = ctx.workspaceRegistry.state
-    if (cached === undefined) throw new Error('workspace 注册表快照不可用')
-    const merged = new Set(durable.archivedSessionIds.map(String))
-    for (const id of cached.archivedSessionIds) merged.add(String(id))
-    if (!merged.delete(String(sessionId))) return
-    const next = { ...durable, archivedSessionIds: [...merged] }
-    await domain.global.set(next)
-    ctx.workspaceRegistry.state = next
+    await ctx.workspaceRegistry.unarchiveSession(sessionId)
   }
 
   // 台账记账:trash 成功即记录,路径为回收站「原位置」还原所需。
