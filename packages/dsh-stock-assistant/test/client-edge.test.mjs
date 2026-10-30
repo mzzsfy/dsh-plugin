@@ -104,3 +104,40 @@ test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async 
   r.value.dispose()
   for (const item of callbacks) item.resolve({ ok: true, json: async () => ({ ok: true, data: { items: [], routingRevision: 0 } }) })
 })
+
+// ---- KlineView 与 kline 数据流(设计"client 详情重构"节) ----
+
+const klineSnapshot = (seq = 1) => ({ ...snapshot(seq), vendorAvailable: true, klineReady: { XSHG: true } })
+
+test('K1 loadKline 拉取灌state与force参数', async () => {
+  const calls = []
+  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
+  value.applySnapshot(klineSnapshot())
+  const result = await value.loadKline('XSHG:equity:600519', '1d')
+  assert.equal(result.candles[0].close, 1.5)
+  assert.match(calls[0], /securityId=XSHG%3Aequity%3A600519/)
+  assert.match(calls[0], /period=1d/)
+  assert.ok(!calls[0].includes('force'))
+  const again = await value.loadKline('XSHG:equity:600519', '1d')
+  assert.deepEqual(again.candles, result.candles, '同证券同周期非force复用state结果')
+  assert.equal(again.source, result.source)
+  assert.equal(calls.length, 1)
+  await value.loadKline('XSHG:equity:600519', '1d', true)
+  assert.match(calls[1], /force=1/)
+  value.dispose()
+})
+
+test('K2 loadKline 网络失败置错误态', async () => {
+  const { value } = await runtime({ fetch: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, error: { code: 'NETWORK', message: '无法连接行情来源' } }) }) })
+  value.applySnapshot(klineSnapshot())
+  await assert.rejects(() => value.loadKline('XSHG:equity:600519', '1d'))
+  assert.equal(value.getSnapshot().kline.error, '无法连接行情来源')
+  value.dispose()
+})
+
+test('K3 setKlinePeriod 切换state', async () => {
+  const { value } = await runtime()
+  value.setKlinePeriod('1w')
+  assert.equal(value.getSnapshot().klinePeriod, '1w')
+  value.dispose()
+})

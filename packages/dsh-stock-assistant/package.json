@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@mzzsfy/dsh-common-tools": "^0.3.0",
+    "lightweight-charts": "^5.2.1",
     "zod": "^4.6.6"
   },
   "scripts": {

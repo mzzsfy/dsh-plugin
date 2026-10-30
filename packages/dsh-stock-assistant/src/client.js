@@ -103,6 +103,22 @@ window.__ModuleLoader__.load({
         sync: market => action('sync', async () => { const result = await api('/catalog-sync', 'POST', { market, expectedRoutingRevision: state.data?.routingRevision }); refresher.refresh(); return result }),
         check: configuration => action('check', () => api('/provider-check', 'POST', configuration)),
         switchPrimary: routeId => action('switch', async () => { const data = await api('/route-selection', 'POST', { routeId, target: 'primary', expectedRoutingRevision: state.data.routingRevision, expectedRouteEpoch: state.data.routeSelections[routeId].routeEpoch }); applySnapshot(data) }),
+        setKlinePeriod(key) { patch({ klinePeriod: key }) },
+        setKlineError(securityId, message) { patch({ kline: { loading: false, error: message, candles: null } }) },
+        // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
+        loadKline(securityId, period, force = false) {
+          const key = `${securityId}|${period}`
+          if (state.klineKey === key && state.kline?.candles && !force) return Promise.resolve(state.kline)
+          patch({ klineKey: key, kline: { loading: !state.kline?.candles, error: '', candles: state.klineKey === key ? state.kline?.candles ?? null : null } })
+          return api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET').then(result => {
+            patch({ kline: { loading: false, error: '', ...result } })
+            return result
+          }).catch(e => {
+            patch({ kline: { loading: false, error: e.message || 'K线加载失败', candles: null } })
+            throw e
+          })
+        },
+        getKlineResult() { return state.kline?.candles ? state.kline : null },
         dispose() {
           if (disposed) return
           try { bus.publish({ type: 'watch-demand', pageId, generation: ++demandGeneration, active: false }) } catch {}
@@ -170,17 +186,129 @@ window.__ModuleLoader__.load({
                     view.sort !== 'manual' ? h('span', { className: 'ssb-muted' }, '切回手动顺序后可移动') : null))) : null)
               })))))
     }
+    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
+    const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
+    const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
+    const MA_WINDOWS = [5, 10, 20, 60]
+    // ensureLwc: 模块级 promise 单例;script 已存在等 onload,否则注入 vendor URL;失败统一文案 reject。
+    let lwcPromise = null
+    function ensureLwc(document) {
+      if (lwcPromise) return lwcPromise
+      lwcPromise = new Promise((resolve, reject) => {
+        if (window.LightweightCharts?.createChart) { resolve(window.LightweightCharts); return }
+        const existing = document.querySelector('script[data-lwc]')
+        if (existing) {
+          existing.addEventListener('load', () => resolve(window.LightweightCharts))
+          existing.addEventListener('error', () => { lwcPromise = null; reject(new Error('图表组件不可用')) })
+          return
+        }
+        const script = document.createElement('script')
+        script.dataset.lwc = '1'
+        script.src = VENDOR_URL
+        script.onload = () => resolve(window.LightweightCharts)
+        script.onerror = () => { lwcPromise = null; reject(new Error('图表组件不可用')) }
+        document.head.appendChild(script)
+      })
+      return lwcPromise
+    }
+    function readChartTheme(root, colorMode) {
+      const cs = getComputedStyle(root)
+      const red = cs.getPropertyValue('--ssb-danger').trim(), green = cs.getPropertyValue('--ssb-ok').trim()
+      const [up, down] = colorMode === 'green-up' ? [green, red] : [red, green]
+      return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'] }
+    }
+    function computeMA(candles, n) { return candles.map((c, i) => i < n - 1 ? null : { time: c.time, value: candles.slice(i - n + 1, i + 1).reduce((s, x) => s + x.close, 0) / n }).filter(Boolean) }
+    function KlineError({ message, onRetry }) {
+      return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
+    }
+    function KlineView({ runtime, state, item }) {
+      const period = state.klinePeriod || '1d'
+      const kline = state.kline || {}
+      const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), maRef = React.useRef([]), volRef = React.useRef(null), avgRef = React.useRef(null)
+      const themeOf = () => readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, state.data.control.preferences.colorMode)
+      // 量柱着色与 MA 灌入(日/周/月)
+      function fillCandleData(result) {
+        const theme = themeOf()
+        mainRef.current.setData(result.candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })))
+        volRef.current.setData(result.candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? theme.volumeUp : theme.volumeDown })))
+        MA_WINDOWS.forEach((n, i) => maRef.current[i].setData(computeMA(result.candles, n)))
+      }
+      // 分时: Area 收盘线+均价线+昨收虚线
+      function fillTrendData(result) {
+        const base = Math.floor(new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).getTime() / 1000)
+        const points = result.candles.map((c, i) => ({ time: base + i * 60, value: c.close }))
+        mainRef.current.setData(points)
+        avgRef.current.setData(result.candles.map((c, i) => ({ time: base + i * 60, value: c.avg ?? c.close })))
+        if (result.preClose != null) mainRef.current.createPriceLine({ price: result.preClose, color: themeOf().crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' })
+      }
+      // 周期序列形态切换: trend↔K线 类型不同需重建;同类型仅重灌。
+      function ensureSeries(LWC, wantTrend) {
+        const chart = chartRef.current
+        if (!chart || !LWC) return
+        const isTrend = !!avgRef.current
+        if (wantTrend === isTrend && mainRef.current) return
+        for (const s of [mainRef.current, avgRef.current, volRef.current, ...maRef.current]) if (s) chart.removeSeries(s)
+        mainRef.current = avgRef.current = volRef.current = null; maRef.current = []
+        const theme = themeOf()
+        if (wantTrend) {
+          mainRef.current = chart.addSeries(LWC.AreaSeries, { topColor: theme.up + '4d', bottomColor: theme.up + '07', lineColor: theme.up, lineWidth: 1 }, 0)
+          avgRef.current = chart.addSeries(LWC.LineSeries, { color: theme.MA[0], lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 0)
+        } else {
+          mainRef.current = chart.addSeries(LWC.CandlestickSeries, { upColor: theme.up, downColor: theme.down, wickUpColor: theme.up, wickDownColor: theme.down, borderUpColor: theme.up, borderDownColor: theme.down }, 0)
+          maRef.current = MA_WINDOWS.map((n, i) => chart.addSeries(LWC.LineSeries, { color: theme.MA[i], lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 0))
+          volRef.current = chart.addSeries(LWC.HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 1)
+        }
+      }
+      // 数据+图表双就绪后灌入(两条异步链汇合点: chart 就绪 effect 与 loadKline effect)
+      function maybeFill(result) {
+        if (!chartRef.current || !result) return
+        ensureSeries(window.LightweightCharts, period === 'trend')
+        chartRef.current.timeScale().applyOptions({ timeVisible: period === 'trend' })
+        period === 'trend' ? fillTrendData(result) : fillCandleData(result)
+      }
+      // effect A: 图表创建一次;主题变更(MutationObserver)重涂;卸载销毁。
+      React.useEffect(() => {
+        let dead = false, mo
+        const root = holder.current?.closest('.ssb-root') || document.documentElement
+        ensureLwc(document).then(LWC => {
+          if (dead || !holder.current) return
+          const theme = themeOf()
+          chartRef.current = LWC.createChart(holder.current, { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: LWC.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true })
+          maybeFill(runtime.getKlineResult(item.id, period))
+        }).catch(e => runtime.setKlineError(item.id, e.message))
+        mo = new MutationObserver(() => { const chart = chartRef.current; if (!chart) return; const t = themeOf(); chart.applyOptions({ layout: { background: { color: t.background }, textColor: t.textColor }, grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } } }) })
+        mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
+        return () => { dead = true; mo.disconnect(); chartRef.current?.remove(); chartRef.current = null }
+      }, [])
+      // effect B: 证券/周期变化→拉数据→图表在则灌
+      React.useEffect(() => {
+        let dead = false
+        runtime.loadKline(item.id, period).then(result => { if (!dead) maybeFill(result) }).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message) })
+        return () => { dead = true }
+      }, [item.id, period])
+      return h('div', { className: 'ssb-kline' },
+        h('div', { className: 'ssb-kline-toolbar' }, ...PERIODS.map(p => h(Button, { key: p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label)), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻')),
+        kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
+        kline.error ? h(KlineError, { message: kline.error, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))() }) : null,
+        !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
+        state.data.vendorAvailable === false ? h('div', { className: 'ssb-banner' }, '图表组件不可用，已降级为数字详情。') : null,
+        h('div', { ref: holder, className: 'ssb-kline-holder' }))
+    }
     function Detail({ runtime, state }) {
       const { data, view } = state, item = data.control.watchlist.items[view.detailId]
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
       const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
-      const fields = [['今开', q?.open], ['最高', q?.high], ['最低', q?.low], ['昨收', q?.previousClose], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量（股）', q?.volume], ['成交额（元）', q?.amount], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['个股状态', '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', q?.delayKind === 'unknown' || !q ? '未知' : q.delayKind === 'realtime' ? '实时' : `${q.delaySeconds}秒`]]
+      const marketLabel = ({ XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' })[item.exchange] || item.exchange
+      const currency = item.currency || ({ XSHG: 'CNY', XSHE: 'CNY', XHKG: 'HKD', XNAS: 'USD', XNYS: 'USD', XJPX: 'JPY', XKRX: 'KRW', XLON: 'GBp' })[item.exchange] || ''
+      const fields = [['今开', q?.open], ['最高', q?.high], ['最低', q?.low], ['昨收', q?.previousClose], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量（股）', q?.volume], ['成交额', q?.amount], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['个股状态', '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', q?.delayKind === 'unknown' || !q ? '未知' : q.delayKind === 'realtime' ? '实时' : `${q.delaySeconds}秒`]]
       return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), h(Button, { className: 'ssb-mobile-back', onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')),
-        h('p', { className: 'ssb-muted' }, `${item.officialName} · ${item.exchange === 'XSHG' ? '上海' : '深圳'} ${item.code}`),
+        h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
         h('div', { className: `ssb-detail-price ssb-number${direction}` }, q?.last ?? '—', h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
-        h(QuoteStatus, { entry }), h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))),
-        h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 60, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write || [...(view.alias || '')].length > 30 }, '保存别名')))
+        h('div', { className: 'ssb-detail-grid' },
+          h('div', { className: 'ssb-detail-main' }, h(KlineView, { runtime, state, item })),
+          h('div', { className: 'ssb-detail-side' }, h(QuoteStatus, { entry }), h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))),
+            h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 60, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write || [...(view.alias || '')].length > 30 }, '保存别名')))))
     }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
@@ -263,8 +391,11 @@ window.__ModuleLoader__.load({
 .ssb-root input:not([type=checkbox]),.ssb-root select { background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:6px 8px; font:inherit; max-width:100%; }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
 .ssb-content { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:16px; }.ssb-list-pane,.ssb-detail { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:11px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:10px 12px; text-align:left; border-top:1px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
 .ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:8px; margin-top:20px; }.ssb-alias-form label { display:grid; gap:8px; }
+.ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
+.ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:1fr; }
 .ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:720px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-results { display:grid; gap:8px; margin:16px 0; }.ssb-candidate { padding:12px; display:flex; justify-content:space-between; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route { padding:12px 0; border-bottom:1px solid var(--ssb-border); }.ssb-route:last-child { border:0; }.ssb-route-options { display:flex; flex-wrap:wrap; gap:16px; align-items:center; margin-top:12px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }.ssb-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }.ssb-mobile-back { display:none; }
+@media(max-width:720px) { .ssb-detail-grid { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:959px) { .ssb-content { grid-template-columns:minmax(0,1fr); }.ssb-content:not(.ssb-view-detail) .ssb-detail { display:none; }.ssb-view-detail .ssb-list-pane { display:none; }.ssb-mobile-back { display:inline-block; }.ssb-page { padding:16px; } }
 @media(max-width:479px) { .ssb-page { padding:12px; }.ssb-header { align-items:flex-start; gap:12px; }.ssb-aux { display:none; }.ssb-table td,.ssb-table th { padding:8px; }.ssb-form-grid { grid-template-columns:minmax(0,1fr); }.ssb-detail-price { font-size:24px; }.ssb-button { min-height:36px; }.ssb-section-head { padding:12px; } }
 @media(prefers-reduced-motion:reduce) { .ssb-root * { transition:none; } }
