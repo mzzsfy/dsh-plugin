@@ -37,20 +37,28 @@ async function waitStatus(runId, expect, ms = 5000) {
   }
 }
 
-const fakeEngine = () => ({
-  start({ args }) {
-    return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { brief: 'b', result: 'r', report: 'p' } })) }) }
-  },
-})
+const fakeEngine = () => {
+  const calls = { count: 0 }
+  fakeEngine.last = calls
+  return {
+    start({ args }) {
+      calls.count += 1
+      return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { brief: 'b', result: 'r', report: 'p' } })) }) }
+    },
+  }
+}
 
 const registered = []
 let currentJobs = []
 const jobSpecs = []
+// jobs.start 拒绝注入:置为函数时 start 即走注入(模拟宿主 owner 超限/无控制器的同步拒绝)
+let jobsStartOverride = null
 
 function setup() {
   registered.length = 0
   currentJobs = []
   jobSpecs.length = 0
+  jobsStartOverride = null
   const handlers = new Map()
   const ctx = {
     logger: { info: () => {}, warn: () => {} },
@@ -61,6 +69,7 @@ function setup() {
         workflowEngine: fakeEngine(),
         jobs: {
           start(spec) {
+            if (jobsStartOverride) return jobsStartOverride(spec)
             jobSpecs.push(spec)
             const hooks = spec.run()
             currentJobs.push(hooks)
@@ -102,6 +111,24 @@ test('Given 合法 plan When rs_workflow_start Then 受理返回 runId 且首段
   const record = reportStore().get(r.runId)
   assert.equal(record.status, 'running')
   assert.equal(record.plan.source, 'model')
+})
+
+test('F02 Given jobs 在调用工厂前拒绝 When start Then engine 调用数为 0 且 run 收敛 failed', async () => {
+  const { start, exec } = setup()
+  // 宿主 jobs.start 在 run 工厂调用前同步拒绝(owner 超上限/无控制器):run() 不得执行
+  jobsStartOverride = () => { throw new Error('owner 超上限') }
+  const engineCalls = fakeEngine.last
+  const r = await start.execute({ request: '整理仓库', templateId: 'default', plan: fullPlan() }, exec)
+  // 先等一拍:runSegment 若被错误地在工厂外启动,引擎调用会在微任务后出现
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(engineCalls.count, 0, '拒绝后引擎必须零调用(runSegment 在工厂内启动)')
+  assert.equal(r.ok, false, 'start 工具须向调用方回报失败')
+  // run 记录须收敛终态:registry 中无该 run 的活驱动器,store 记录 failed 而非 running
+  const records = reportStore().list()
+  const orphan = records.find((record) => record.status === 'running')
+  assert.equal(orphan, undefined, '拒绝 run 不得残留 running 记录')
+  const record = records.find((entry) => entry.status === 'failed')
+  assert.ok(record, '拒绝 run 须收敛 failed 终态')
 })
 
 test('Given 非法 ref When start 三连 Then 逐次 errors 且第 3 次起恒失败', async () => {

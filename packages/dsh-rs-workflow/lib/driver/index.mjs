@@ -3,11 +3,14 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { reportStore } from '../store.mjs'
-import { templateDeps } from '../planner-gate.mjs'
+import { fallbackScript } from '../planner-gate.mjs'
 import { nextBatch, scriptViewOf } from './scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from './approve.mjs'
 import { runBatch } from './runner.mjs'
 import { registerDriver, unregisterDriver } from './control.mjs'
+
+// 子流程嵌套深度上限:合法链深以内自由嵌套,循环路由在此截断为失败步骤
+const FLOW_DEPTH_LIMIT = 8
 
 const TERMINAL_STATES = new Set(['completed', 'cancelled', 'failed', 'blocked'])
 
@@ -101,7 +104,7 @@ export function buildSeed(record, plan, fromStepId, inputs) {
 }
 
 export class RunDriver {
-  constructor({ template, templateSet = [], plan, warnings = [], runId, request, inputs, state, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false, parent = undefined }) {
+  constructor({ template, templateSet = [], plan, warnings = [], runId, request, inputs, state, engine, slots = {}, budgets = {}, sessionId = '', workspace = '', store = reportStore(), signal, subordinate = false, parent = undefined, depth = 0 }) {
     this.template = template
     this.templateSet = templateSet
     this.plan = plan
@@ -125,6 +128,8 @@ export class RunDriver {
     this.finished = false
     this.active = false
     this.subordinate = subordinate
+    // 嵌套深度:顶层 0,runFlowStep 下传 +1;循环路由由深度上限截断
+    this.depth = depth
     // 编排子代理的挂载父 agent(与 workflow 工具链对齐;undefined 时引擎派发行为未定义)
     this.parent = parent
     // spec §8 doc:<相对路径>:读会话工作区文件,缺失不阻断(空串);resolve 限定在 workspace 内防路径逃逸
@@ -412,7 +417,8 @@ export class RunDriver {
     this.finish('completed', '全部步骤完成')
   }
 
-  // 嵌套子流程:解析路由 → 模板集查找 → 递归子循环;route 空即 done
+  // 嵌套子流程:解析路由 → 模板集查找 → 经 gate 保底构造子剧本(依赖规范化为可序列化
+  // 对象,scheduler 以同一接缝读取);templateSet 全量下传保 A→B→C 链;深度上限防循环路由
   async runFlowStep(step) {
     const s = this.state.steps[step.id]
     s.status = 'running'
@@ -428,15 +434,20 @@ export class RunDriver {
       s.error = `子流程模板不存在:${route}`
       return
     }
-    const { deps: subDeps } = templateDeps(sub)
-    const subScript = scriptViewOf(sub, { steps: sub.steps.map((x) => ({ ref: x.id })), deps: subDeps })
+    if (this.depth >= FLOW_DEPTH_LIMIT) {
+      s.status = 'failed'
+      s.error = `子流程嵌套超限(>${FLOW_DEPTH_LIMIT}):${route}`
+      return
+    }
+    const planScript = fallbackScript(sub)
+    const subScript = scriptViewOf(sub, planScript)
     const subState = initState(subScript, this.request, this.resolveFlowInputs(step))
     const subDriver = new RunDriver({
-      template: sub, plan: { source: 'fallback', brief: '', steps: sub.steps.map((x) => ({ ref: x.id, note: '', done: '' })), deps: subDeps },
+      template: sub, templateSet: this.templateSet, plan: planScript,
       runId: this.runId, request: this.request,
       inputs: subState.inputs, state: subState, engine: this.engine, parent: this.parent,
       slots: this.slots, budgets: this.budgets, sessionId: this.sessionId, workspace: this.workspace,
-      store: this.store, signal: this.signal, subordinate: true,
+      store: this.store, signal: this.signal, subordinate: true, depth: this.depth + 1,
     })
     this.store.step({ runId: this.runId, stepId: step.id, event: 'dispatch', body: { prompt: `[嵌套子流程] ${route}`, callLabel: route } })
     await subDriver.loop()

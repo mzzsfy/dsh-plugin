@@ -597,7 +597,9 @@ window.__ModuleLoader__.load({
     const rowsToObj = (rows) => Object.fromEntries((rows || []).filter((r) => r.k.trim() !== '').map((r) => [r.k.trim(), r.v]))
     const outNamesOf = (s) => s.outputs.map((r) => r.k.trim()).filter((n) => n !== '')
 
-    const newStep = () => ({ id: '', label: '', type: 'ai', slot: '', prompt: '', outputs: [], listOutputs: [], load: [], after: [], maxFail: '', for_each: '', mode: '', target: '', rounds: '', onExhausted: '', flow: '', input: [] })
+    // after 三态:undefined = 缺省(依赖前一步)/ 数组 = 显式(空数组 = 无前置,并行根)。
+    // 读入保留原状,序列化按三态还原——往返不改图(F06:显式 [] 合并进缺省曾把并行根变串行)
+    const newStep = () => ({ id: '', label: '', type: 'ai', slot: '', prompt: '', outputs: [], listOutputs: [], load: [], after: undefined, maxFail: '', for_each: '', mode: '', target: '', rounds: '', onExhausted: '', flow: '', input: [] })
 
     function normalizeStep(s) {
       const base = newStep()
@@ -607,7 +609,9 @@ window.__ModuleLoader__.load({
         id: asStr(s.id), label: asStr(s.label),
         type: ['ai', 'approve', 'flow'].includes(s.type) ? s.type : 'ai',
         slot: asStr(s.slot), prompt: asStr(s.prompt),
-        outputs: objToRows(s.outputs), listOutputs: asArr(s.listOutputs), load: asArr(s.load), after: asArr(s.after),
+        outputs: objToRows(s.outputs), listOutputs: asArr(s.listOutputs), load: asArr(s.load),
+        // 数组原样保留(含空数组);undefined/缺失 = 缺省三态;其他形态按缺省处理
+        after: Array.isArray(s.after) ? [...s.after] : undefined,
         maxFail: Number.isInteger(s.maxFail) ? s.maxFail : '',
         for_each: asStr(s.for_each), mode: asStr(s.mode),
         target: asStr(s.target), rounds: Number.isInteger(s.rounds) ? s.rounds : '',
@@ -622,7 +626,7 @@ window.__ModuleLoader__.load({
       if (s.type !== 'ai') o.type = s.type
       if (s.slot !== '') o.slot = s.slot
       if (s.type !== 'flow' && s.prompt !== '') o.prompt = s.prompt
-      if (s.after.length > 0) o.after = s.after
+      if (s.after !== undefined) o.after = s.after
       if (s.type === 'ai') {
         if (outNamesOf(s).length > 0) o.outputs = rowsToObj(s.outputs)
         if (s.listOutputs.length > 0) o.listOutputs = s.listOutputs
@@ -734,11 +738,13 @@ window.__ModuleLoader__.load({
 
     function AfterSelect({ step, otherIds, onChange }) {
       if (otherIds.length === 0) return h('span', { className: 'rsww-note' }, 'after:暂无其他步骤可选')
-      const toggle = (id) => onChange({ ...step, after: step.after.includes(id) ? step.after.filter((x) => x !== id) : step.after.concat(id) })
+      // undefined = 缺省三态:首次编辑物化为空数组,勾选语义与缺省(文档序前一步)不混同
+      const current = Array.isArray(step.after) ? step.after : []
+      const toggle = (id) => onChange({ ...step, after: current.includes(id) ? current.filter((x) => x !== id) : current.concat(id) })
       return h('div', { className: 'rsww-section' },
-        h('span', { className: 'rsww-label' }, 'after(前置步骤;缺省=文档序前一步)'),
+        h('span', { className: 'rsww-label' }, 'after(前置步骤;不勾选且未编辑=缺省文档序前一步;全不勾选并保存=显式无前置)'),
         otherIds.map((id) => h('label', { className: 'rsww-switch', key: id },
-          h('input', { type: 'checkbox', checked: step.after.includes(id), onChange: () => toggle(id), 'aria-label': id }),
+          h('input', { type: 'checkbox', checked: current.includes(id), onChange: () => toggle(id), 'aria-label': id }),
           h('span', { className: 'rsww-switch__track' }, h('span', { className: 'rsww-switch__thumb' })),
           h('span', { className: 'rsww-mono' }, id))))
     }
@@ -1019,7 +1025,7 @@ window.__ModuleLoader__.load({
             row('flow', step.flow),
             step.input.length > 0 ? h('div', { className: 'rsww-section' },
               h('span', { className: 'rsww-label' }, 'input(子流程入参)'), kvRows(step.input)) : null) : null,
-          step.after.length > 0 ? row('after', step.after.join(', ')) : null,
+          Array.isArray(step.after) ? row('after', step.after.length > 0 ? step.after.join(', ') : '(显式无前置)') : null,
           step.for_each !== '' ? h('div', { className: 'rsww-stack' },
             row('for_each', step.for_each), row('mode', step.mode === 'parallel' ? 'parallel' : 'sequential')) : null,
           step.load.length > 0 ? row('load', step.load.join(', ')) : null,
