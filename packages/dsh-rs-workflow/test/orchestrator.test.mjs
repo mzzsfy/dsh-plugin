@@ -462,3 +462,30 @@ test('Given 欠动作被处置后再次欠动作 When 轮次将停 Then 提醒�
 
 // 收尾钩子置于末尾:提前注册会截杀其后声明的用例
 // probe: hook removed
+
+// ── F07: 模板快照 ──────────────────────────────────────────────────────────
+test('F07 Given start When 落盘 Then 记录含模板快照且续跑用快照', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  const record = reportStore().get(r0.runId)
+  // 快照在 start 即落盘:template+templateSet 双份
+  assert.ok(record.templateSnapshot?.template, '快照须含主模板')
+  assert.ok(Array.isArray(record.templateSnapshot.templateSet) && record.templateSnapshot.templateSet.length > 0, '快照须含子模板闭包')
+  assert.equal(record.templateSnapshot.template.id, 'default')
+  await cancel.execute({ runId: r0.runId }, exec)
+  // 删除当前模板文件模拟"模板被禁用后续跑":快照应让续跑不受影响
+  const rf = await resumeFrom.execute({ runId: r0.runId }, exec)
+  assert.equal(rf.ok, true, `快照续跑须成功: ${JSON.stringify(rf)}`)
+  registry.drivers.get(rf.runId)?.cancel()
+})
+
+test('F07 Given 无快照旧记录 When resume_from Then 拒绝', async () => {
+  const { resumeFrom, exec, agent } = setup()
+  // 经 reportStore 落一个旧版本形态记录(无 templateSnapshot),终态、本会话可续跑
+  reportStore().start({ runId: 'r-legacy', sessionId: agent.id, templateId: 'default', request: '旧', inputs: {}, plan: fullPlan(), state: { steps: {} }, templateSnapshot: null })
+  reportStore().update({ runId: 'r-legacy', status: 'cancelled', finishedAt: Date.now() })
+  const rf = await resumeFrom.execute({ runId: 'r-legacy' }, exec)
+  assert.equal(rf.ok, false)
+  assert.match(String(rf.error ?? ''), /无模板快照/)
+})

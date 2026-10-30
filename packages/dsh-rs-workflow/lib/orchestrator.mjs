@@ -92,15 +92,16 @@ export function registerOrchestrator(ctx, config) {
 
     // 断点续跑挂靠:board resume-from 经此回调在原会话重建种子 run(engine/parent 闭包自本域)
     function startSeedRun(agent, record, fromStepId, inputs) {
-      const templates = enabledTemplates()
-      const template = templates.find((t) => t.entry.id === record.templateId)
-      if (template === undefined) return { ok: false, error: `模板不存在或已禁用: ${record.templateId}` }
+      // 续跑锚定模板快照(F07):解释按启动时点闭包,当前模板编辑/禁用不影响历史 run;
+      // 无快照(旧版本落盘)拒绝续跑——无从保证解释一致
+      const snapshot = record.templateSnapshot
+      if (!snapshot?.template) return { ok: false, error: '运行记录无模板快照,无法续跑(旧版本记录)' }
       // 单活跃约束:种子 run 与 start 工具同守卫;主循环成为其推进者(activeRuns 注册,补拉/守卫生效)
       const current = currentRunId(agent)
       if (current !== undefined) return { ok: false, error: `本会话已有进行中的编排 ${current},不可续跑` }
       const seed = buildSeed(record, record.plan, fromStepId, inputs)
       const driver = startRun({
-        template: template.parsed, templateSet: templates.map((t) => t.parsed),
+        template: snapshot.template, templateSet: snapshot.templateSet ?? [snapshot.template],
         plan: record.plan, warnings: record.warnings ?? [],
         request: record.request, inputs: seed.inputs, state: seed,
         sessionId: agentIdOf(agent), workspace: agent.session?.header?.cwd ?? process.cwd(),

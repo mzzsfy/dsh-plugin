@@ -180,6 +180,9 @@ export class RunDriver {
       runId: this.runId, sessionId: this.sessionId, workspace: this.workspace,
       request: this.request, templateId: this.template.id, inputs: this.inputs,
       plan: this.plan, warnings: this.warnings, state: this.state,
+      // 模板快照(F07):续跑锚定启动时点的模板与子模板闭包,
+      // 模板编辑/禁用/删除不改变已落盘编排的解释
+      templateSnapshot: { template: this.template, templateSet: this.templateSet },
     })
   }
 
