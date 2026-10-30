@@ -38,9 +38,10 @@
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
 import {spawnSync} from 'node:child_process'
+import {createRequire} from 'node:module'
 import {existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
-import {fileURLToPath} from 'node:url'
+import {fileURLToPath, pathToFileURL} from 'node:url'
 import {judgeHostMin} from './compare-version.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -367,12 +368,22 @@ function pnpmInstall(allowFresh) {
 function installPackageDeps(name) {
   const pkgDir = join(repoRoot, 'packages', name)
   const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
-  const hasExternal = ['dependencies', 'devDependencies']
-    .some((k) => Object.keys(manifest[k] ?? {}).some((n) => !n.startsWith(SCOPE)))
-  if (!hasExternal) return true
+  const externalDeps = ['dependencies', 'devDependencies']
+    .flatMap((k) => Object.keys(manifest[k] ?? {}))
+    .filter((n) => !n.startsWith(SCOPE))
+  if (externalDeps.length === 0) return true
   if (existsSync(join(pkgDir, 'node_modules'))) {
-    console.log(`OK   ${name}: 包内依赖已存在,跳过安装`)
-    return true
+    // 摘要比对(I05):目录存在即跳过曾固化半装态——逐外部依赖解析核验,
+    // 全部命中才跳过,任一缺失重装修复
+    const require = createRequire(pathToFileURL(join(pkgDir, 'package.json')))
+    const missing = externalDeps.filter((dep) => {
+      try { require.resolve(dep); return false } catch { return true }
+    })
+    if (missing.length === 0) {
+      console.log(`OK   ${name}: 包内依赖已存在,跳过安装`)
+      return true
+    }
+    console.log(`REPAIR ${name}: 包内依赖缺失 ${missing.join(', ')},重装`)
   }
   console.log(`$ 包内依赖安装 ${name}(npm install --omit=dev --omit=peer)`)
   const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps'], {

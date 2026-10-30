@@ -175,7 +175,10 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '      prefix: dsh',
       ].join('\n') + '\n'
     : ''
-  writeFileSync(join(profileDir, 'cordis.patch.yml'), (defaultModelEntry || '[]\n') + (seedGatewayEntry || ''), 'utf8')
+  // patch 文档形态(I06):两段任一存在才为有效条目流;都缺才落空数组文档——
+  // 先前 `entry || '[]'` 会在 seedGateway 有值时拼出 "[]\n" 前缀混入条目流
+  const patchBody = (defaultModelEntry + seedGatewayEntry) || '[]\n'
+  writeFileSync(join(profileDir, 'cordis.patch.yml'), patchBody, 'utf8')
   writeFileSync(join(profileDir, '.npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   // minimumReleaseAge: 0 覆盖全局宽限配置,隔离环境不拦刚发布版本(测试对象经 symlink 指向仓库副本);
   // allowBuilds 与真实 profile 同款:pnpm 11 对未批准的依赖构建脚本按错误处理;

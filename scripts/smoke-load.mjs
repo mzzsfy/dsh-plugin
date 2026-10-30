@@ -23,9 +23,11 @@ for (const dir of readdirSync(base, { withFileTypes: true })) {
   if (!existsSync(manifest)) continue
   const { main, name } = JSON.parse(readFileSync(manifest, 'utf8'))
   const entry = join(pkgDir, main)
-  // 实现暂缺的包(如重建中的 dsh-rs-workflow,仅骨架与设计文档)跳过加载
+  // 活动包缺入口即失败(I05):加载冒烟是"可装载性"断言,入口缺失属破相,
+  // 静默跳过会让重建中的包永久绕过冒烟面
   if (!existsSync(entry)) {
-    console.log(`SKIP ${name ?? dir.name}(入口缺失:实现未就绪)`)
+    failures.push({ pkg: name ?? dir.name, error: new Error(`入口缺失: ${main}`) })
+    console.log(`FAIL ${name ?? dir.name} | 入口缺失: ${main}`)
     continue
   }
   try {
