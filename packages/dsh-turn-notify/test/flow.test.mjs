@@ -1072,25 +1072,30 @@ test('Given 审批通知超时未处理 When 提醒到期 Then 补发一轮;已�
   assert.equal(shown.length, before, '提醒未到期不补发')
 })
 
-test('Given 审批提醒登记 When 单元过期(prune)Then 不再补发', async () => {
+test('F22 Given 审批提醒登记 When 仅投影刷新不含单元 Then 登记保留;已处理事实才撤销', async () => {
   const dom = makeSidebarDom([{ leafText: '会话甲' }])
   const hlUnits = [
     { id: 'u-appr-gone', category: 'approval', text: '[dsh] 等待审批: 会话甲', sessionId: '会话甲', session: '会话甲' },
   ]
-  // 第二轮投影不再含该单元:prune 撤销登记
   const { mod, shown } = loadClient({
     storage: new FakeStorage(),
     payload: { units: hlUnits, soundMapping: {}, version: 1 },
     document: { title: '会话乙 — DeepSeek Harness', ...dom },
+    shortTimers: false,
   })
   const { poll } = mod.__test
   await poll()
   await poll()
-  // 第三轮投影单元消失
-  mod.__test.pruneReminders(new Set())
-  const before = shown.length
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(shown.length, before, '登记撤销后不补发')
+  const initialShown = shown.length
+  // 登记在册:轮询再刷新(投影 TTL 过期同形)不撤销——二次提醒寿命独立于投影窗口
+  assert.equal(mod.__test.pendingReminders.has('u-appr-gone'), true, '审批待办必须已登记提醒')
+  await poll()
+  await poll()
+  assert.equal(mod.__test.pendingReminders.has('u-appr-gone'), true, '投影刷新不得撤销登记(F22)')
+  // 已处理事实(本会话被标记处理)撤销登记
+  mod.__test.markSessionHandled('会话甲')
+  assert.equal(mod.__test.pendingReminders.has('u-appr-gone'), false, '已处理事实必须撤销登记')
+  assert.equal(shown.length, initialShown, '全程未到期不补发')
 })
 
 test('Given 短标题先于长前缀行匹配 When 挂类 Then 短标题精确命中自身行', async () => {  // 长标题行在前,短标题是长标题的子串:短标题通知必须挂到全等行,不得被子串误吸

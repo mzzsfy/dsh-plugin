@@ -683,7 +683,9 @@ window.__ModuleLoader__.load({
       }
       const units = payload.units || []
       const liveIds = new Set(units.map((unit) => unit.id))
-      pruneReminders(liveIds)
+      // 提醒注册仅由"已处理"事实清除(F22 决策):点击行/聚焦当前会话/会话新回合;
+      // 投影 TTL 过期只清理本地锁/完成标记残留(liveIds 消费点),不撤销二次提醒——
+      // 提醒是"通道没送达"的兜底,寿命独立于通知投影窗口
       // 投影中已过期的本地残留清理,防旧锁与完成标记滞留;
       // 访问失败即标记 broken 并整段跳过,防抛出被外层吞掉、发声链路失效
       try {
@@ -2417,7 +2419,7 @@ window.__ModuleLoader__.load({
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
       // 页内通知的展示结果经 require 桩捕获,不在本包断言
-      __test: { poll, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification },
+      __test: { poll, pendingReminders, markSessionHandled, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification },
     }
   },
 })
