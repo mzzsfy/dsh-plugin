@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { resolveWindow, parseExplicit, fromRegistry, SLOT_LABELS, SLOT_MODES, EXEC_SLOTS } from './window.mjs'
 import { installPackageExternals } from './profile.mjs'
 import { judgeLlm } from './compat-judges.mjs'
-import { COMPAT_ROOT, DEFAULT_PORT, killPortOwner, log } from './lib.mjs'
+import { COMPAT_ROOT, DEFAULT_PORT, log } from './lib.mjs'
 
 const PROBE_TIMEOUT_MS = 12 * 60 * 1000
 const STDERR_TAIL_BYTES = 700
@@ -30,8 +30,9 @@ function runVersion(entry, port) {
       stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_BYTES)
     })
     const timer = setTimeout(() => {
+      // 超时只清本槽 spawn 的 run.mjs 子进程;其内部 finally 自会收尾宿主与模拟器,
+      // 不按端口猜所有者(端口可能是其他会话或用户进程)
       child.kill('SIGKILL')
-      killPortOwner(port)
     }, PROBE_TIMEOUT_MS)
     child.on('close', (code) => {
       clearTimeout(timer)

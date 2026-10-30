@@ -54,6 +54,7 @@ function parseArgs(argv) {
         args.only = [...(args.only ?? []), ...short.split(',').map((s) => s.trim()).filter(Boolean)]
       },
       '--keep': () => { args.keep = true },
+      '--refuse-port-owner': () => { args.refusePortOwner = true },
     }
     const handler = map[argv[i]]
     if (!handler) throw new Error(`未知参数: ${argv[i]}`)
@@ -260,7 +261,11 @@ function startSimulator(workDir) {
   ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, detached: true })
   return new Promise((resolve, reject) => {
     let out = ''
-    const timer = setTimeout(() => reject(new Error(`模拟器启动超时: ${out}`)), SIM_BOOT_TIMEOUT_MS)
+    const timer = setTimeout(() => {
+      // 超时即终止半启动进程:拒绝路径不留孤儿(外层 finally 尚未接管)
+      child.kill()
+      reject(new Error(`模拟器启动超时: ${out}`))
+    }, SIM_BOOT_TIMEOUT_MS)
     child.stdout.on('data', (chunk) => {
       out += chunk
       const match = out.match(/listening 127\.0\.0\.1:(\d+)/)
@@ -269,7 +274,10 @@ function startSimulator(workDir) {
         resolve({ child, port: Number(match[1]), logPath })
       }
     })
-    child.on('exit', (code) => reject(new Error(`模拟器提前退出 code=${code}: ${out}`)))
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`模拟器提前退出 code=${code}: ${out}`))
+    })
   })
 }
 
@@ -615,46 +623,57 @@ async function main() {
   }
 
   // LLM 模拟器先于 profile 构建启动:--seed-gateway 的 patch 行 config 需要模拟器
-  // 实际端口(baseURL 注入),模拟器 --port 0 动态分配,无法预写
+  // 实际端口(baseURL 注入),模拟器 --port 0 动态分配,无法预写。
+  // 失败经外层 finally 终止半启动进程,不留孤儿(bootLog 流一并收尾)
   let simulator = null
   if (!args.crashOnly) {
     // apiKeyEnv 引用名 ECHO_KEY 的凭据来源:进程 env(gateway 凭据链的 env 通道)
     simulator = await startSimulator(workDir)
     log(`[${args.version}] LLM 模拟器就绪(:${simulator.port},留档 ${simulator.logPath})`)
   }
-  const profile = await buildProfile({
-    version: args.version,
-    workRoot: args.workRoot,
-    hostDir,
-    seedGateway: args.seedGateway === true,
-    gatewayBaseURL: simulator ? `http://127.0.0.1:${simulator.port}` : undefined,
-    only: args.only ?? [],
-  })
-  log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
-
-  // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
-  // 依赖时会同步依赖源目录的 node_modules,把 npm 装好的包清空(实测);补装
-  // 在 pnpm 之后,宿主经 symlink 桥 import 的包内依赖才是齐的
-  log(`[${args.version}] 逐包外部依赖安装${args.skipExternals ? '(跳过)' : `: ${(await installPackageExternals()).length} 包`}`)
-
-  if (!(await canBind(args.port))) {
-    log(`端口 ${args.port} 被占,清理旧实例`)
-    killPortOwner(args.port)
-    await sleep(3 * 1000)
-    if (!(await canBind(args.port))) throw new Error(`端口 ${args.port} 清理后仍被占,请手动处理`)
-  }
-
   const bootLog = createWriteStream(bootLogPath, { flags: 'w' })
   let child = null
   let restoreBridge = null
+  // 成功交接标记:--keep 只在宿主与模拟器全部就绪并写出 live.json 后移交,
+  // 失败路径一律收尾,不保留半启动工位
+  let handedOver = false
   try {
+    const profile = await buildProfile({
+      version: args.version,
+      workRoot: args.workRoot,
+      hostDir,
+      seedGateway: args.seedGateway === true,
+      gatewayBaseURL: simulator ? `http://127.0.0.1:${simulator.port}` : undefined,
+      only: args.only ?? [],
+    })
+    log(`[${args.version}] bundles: ${profile.bundleNames.length} 包`)
+
+    // 逐包外部依赖必须晚于隔离 profile 的 pnpm install:pnpm 解析 file:/registry
+    // 依赖时会同步依赖源目录的 node_modules,把 npm 装好的包清空(实测);补装
+    // 在 pnpm 之后,宿主经 symlink 桥 import 的包内依赖才是齐的
+    log(`[${args.version}] 逐包外部依赖安装${args.skipExternals ? '(跳过)' : `: ${(await installPackageExternals()).length} 包`}`)
+
+    if (!(await canBind(args.port))) {
+      if (args.refusePortOwner) throw new Error(`端口 ${args.port} 被占,已按 --refuse-port-owner 拒绝清理其他进程`)
+      log(`端口 ${args.port} 被占,清理旧实例`)
+      killPortOwner(args.port)
+      await sleep(3 * 1000)
+      if (!(await canBind(args.port))) throw new Error(`端口 ${args.port} 清理后仍被占,请手动处理`)
+    }
+
     // detached 使 POSIX 子进程为进程组长,killTree 组杀才生效;win32 由 taskkill /T 承担
     child = spawn(process.execPath, [profile.binPath, 'web', '--no-open', '--port', String(args.port)], {
       cwd: profile.homeDir,
       env: {
         ...process.env,
         DSH_HOME: profile.homeDir,
-        DSH_CRON_BOARD_DATA_DIR: join(workDir, 'data'),
+        // 逐包数据目录隔离(boot-keep 同款):缺一会写到生产 ~/.dsh,
+        // 测试账号 Key 明文落生产文件。新增带数据目录的包时在此追加
+        DSH_CRON_BOARD_DATA_DIR: join(workDir, 'data', 'cron-board'),
+        DSH_USAGE_PANEL_DATA_DIR: join(workDir, 'data', 'usage-panel'),
+        DSH_HISTORY_CACHE_DIR: join(workDir, 'data', 'context-manager-history'),
+        DSH_RS_WORKFLOW_DATA_DIR: join(workDir, 'data', 'rs-workflow'),
+        DSH_RS_WORKFLOW_PRESET_ROOT: join(workDir, 'data', 'rs-workflow-presets'),
         ECHO_KEY: 'echo-compat',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -710,20 +729,28 @@ async function main() {
     if (args.keep === true) {
       writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, pid: child.pid, logPath: simulator.logPath }, null, 2), 'utf8')
       log(`[${args.version}] keep:宿主 :${args.port} token=${token} 模拟器 :${simulator.port}(live.json 已落,自行收尾用 scripts/compat/keep-stop.mjs)`)
+      handedOver = true
     }
     if (args.keep === true) return
   } finally {
-    if (args.keep !== true) {
+    // 资源收尾按所有权与交接,不按参数:keep 仅在成功交接(live.json 已写)后生效,
+    // 失败路径无条件收尾,半启动工位不留孤儿
+    if (handedOver !== true) {
       killTree(child)
-      simulator?.child.kill()
+      if (simulator) simulator.child.kill()
       await sleep(KILL_GRACE_MS)
       killTree(child, { force: true })
     }
     await new Promise((done) => bootLog.end(done))
     restoreBridge?.()
-    if (args.keep !== true && !(await canBind(args.port))) {
-      log(`端口 ${args.port} 残留监听,强制清理`)
-      killPortOwner(args.port)
+    if (handedOver !== true && !(await canBind(args.port))) {
+      // 残留监听只可能是本次 spawn 的宿主(收尾已组杀),正常即端口已释放;
+      // 仍被占说明有未知第三方进程,按 opt-in 约定处置
+      if (args.refusePortOwner) log(`端口 ${args.port} 残留未知监听,按 --refuse-port-owner 跳过清理`)
+      else {
+        log(`端口 ${args.port} 残留监听,强制清理`)
+        killPortOwner(args.port)
+      }
     }
   }
 

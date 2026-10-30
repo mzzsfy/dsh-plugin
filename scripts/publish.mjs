@@ -10,18 +10,21 @@
  *   --dry-run                  只打印将执行的动作,不发布、不改版本、不打 tag
  *
  * 规则:
- *   - 发版判定以 tag 为事实源:发布成功后自动提交版本号变更并打 tag,tag 始终指向该版本的完整源码状态
+ *   - 发布范围必须已提交:目标包存在修改/暂存/未跟踪文件即拒绝(含 dry-run);打包前复检
+ *   - 流程:测试 -> 版本提交 -> 洁净复检 -> npm pack(留档 commit/文件清单/SHA-512 到
+ *     release.json)-> npm publish 同一 tarball -> 回读 registry -> tag 打在打包时 commit
  *   - 本地版本低于线上:拒绝发布(防版本回退);版本无法比较(如 prerelease)时中止
  *   - <包名> 只执行该包测试;all 先运行全仓聚合测试,再逐包运行测试
  *   - 本地版本等于线上:按版本 tag 后的包目录提交数判定——无提交则 SKIP(无需发版);
  *     有提交则拒绝并要求显式 --bump(防止代码已变而版本未动被误判为无需更新);
- *     tag 缺失则补打 tag 并跳过(自愈历史"发布成功未打 tag"状态)
+ *     tag 缺失拒绝自动补打(维护者核对 registry tarball 后手工恢复,不得绑定任意 HEAD)
  *   - npm view 非 E404 失败直接中止(防把网络故障当未发布造成重复发布)
- *   - 发布后回读 registry 做多次确认,通过后提交版本号并打本地 tag(npm 名斜杠替换为连字符,如 @mzzsfy-dsh-usage-panel-v0.1.0),推送由维护者执行
+ *   - 推送(main 与 tag)由维护者执行
  */
 
 import {spawnSync} from 'node:child_process'
-import {readFileSync, readdirSync, existsSync} from 'node:fs'
+import {readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync} from 'node:fs'
+import {tmpdir} from 'node:os'
 import {dirname, join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
@@ -153,8 +156,8 @@ function commitsSinceTag(dirName, tag) {
   return r.stdout.split('\n').filter(Boolean).length
 }
 
-/** 打版本 tag;已存在则跳过,失败置非零退出码 */
-function ensureTag(pkgName, version, opts) {
+/** 打版本 tag;已存在则跳过;commit 指定发布证据的确切源码提交(发布期间 HEAD 推进不改指向) */
+function ensureTag(pkgName, version, opts, commit = undefined) {
   const tag = tagFor(pkgName, version)
   if (tagExists(tag)) {
     console.log(`OK    tag ${tag} 已存在`)
@@ -164,13 +167,26 @@ function ensureTag(pkgName, version, opts) {
     console.log(`  $ git tag ${tag}(dry-run 模拟)`)
     return
   }
-  const t = run('git', ['tag', tag], repoRoot)
+  const target = commit ?? 'HEAD'
+  const t = run('git', ['tag', tag, target], repoRoot)
   if (t.status !== 0) {
-    console.error(`FAIL  tag ${tag} 打设失败(发布已成功,请手动执行 git tag ${tag}):\n${t.stderr}`)
+    console.error(`FAIL  tag ${tag} 打设失败(发布已成功,请手动执行 git tag ${tag} ${target}):\n${t.stderr}`)
     exitCode = 1
   } else {
-    console.log(`OK    tag ${tag} 已打在本地,推送时一并 git push --tags`)
+    console.log(`OK    tag ${tag} 已打在 ${target.slice(0, 10)}(发布证据 commit),推送时一并 git push --tags`)
   }
+}
+
+/** 发布工件的临时目录(系统临时目录下按包名隔离),失败时保留供人工核对 */
+function publishArtifactsDir(packageName) {
+  const dir = join(tmpdir(), 'dsh-plugin-publish', tagSafe(packageName))
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 临时目录路径段白名单:仅字母数字连字符下划线,防包名注入路径 */
+function tagSafe(value) {
+  return value.replace(/[^A-Za-z0-9_-]/g, '_')
 }
 
 /** dirName 是 packages/ 下的目录名;npm 包名以目录内 package.json 为准(可为 scoped) */
@@ -200,10 +216,10 @@ function publishOne(dirName, opts) {
       }
     } else if (order === 0) {
       const tag = tagFor(name, version)
+      // 缺 tag 不自愈:tag 是发布源码身份声明,registry tarball 与哪个提交对应未证时
+      // 补打会把任意 HEAD 绑上线上版本;恢复必须由维护者核对 tarball 后手工执行
       if (!tagExists(tag)) {
-        console.log(`SKIP  ${name}@${version} 线上已最新且本地 tag 缺失,补打 tag(自愈历史状态)`)
-        ensureTag(name, version, opts)
-        return
+        fail(`本地 ${version} 与线上相同但 tag ${tag} 缺失,拒绝自动补打。请先核对 registry tarball 与可还原的历史提交,确认后再手工 git tag`)
       }
       const commits = commitsSinceTag(dirName, tag)
       if (commits === null) fail(`查询 tag ${tag} 后的变更失败,中止以避免误判`)
@@ -222,6 +238,14 @@ function publishOne(dirName, opts) {
     console.log(`${name} 尚未发布,本地 ${version} 将为首个线上版本`)
   }
 
+  // 发布范围洁净门:目标包内任何修改/暂存/未跟踪文件都改变打包内容,
+  // tag 却只能指向一个提交——dirty 即拒绝(含 dry-run),先提交再发版
+  const dirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
+  if (dirty.status !== 0) fail(`查询 ${dirName} 工作区状态失败,中止`)
+  if (dirty.stdout.trim() !== '') {
+    fail(`${dirName} 发布范围存在未提交变更,拒绝发布(tag 须指向可还原的源码提交)。先提交或清理:\n${dirty.stdout.trim()}`)
+  }
+
   const hasPackageTest = typeof manifest.scripts?.test === 'string' && manifest.scripts.test.trim().length > 0
   if (opts.dryRun) {
     console.log(`dry-run:将跳过测试与发布,动作序列如下`)
@@ -229,7 +253,7 @@ function publishOne(dirName, opts) {
     else if (opts.skipTest) console.log('  (显式 --skip-test:目标包测试跳过)')
     else if (opts.target !== 'all' && !hasPackageTest) console.log('  (缺少有效 test script:单包正式发布会拒绝)')
     else console.log('  (无测试步骤:--skip-test 或包未定义 test script)')
-    console.log(`  $ npm run npmPublish(cwd: ${pkgDir}) -> ${name}@${version}`)
+    console.log(`  $ npm pack --ignore-scripts + npm publish <tarball>(cwd: ${pkgDir}) -> ${name}@${version}`)
     ensureTag(name, version, opts)
     return
   }
@@ -246,28 +270,65 @@ function publishOne(dirName, opts) {
     console.log('SKIP  测试(包未定义 test script)')
   }
 
+  // 版本号变更入库后 tag 才指向该版本的完整源码状态,tag 后无提交的判定才能成立;
+  // manifest 无变更(如首发时版本已提交)则跳过。提交失败不继续发布,仅提示手动收尾
+  const manifestDirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}/package.json`], { cwd: repoRoot, encoding: 'utf8' })
+  if (manifestDirty.status === 0 && manifestDirty.stdout.trim() !== '') {
+    const c = run('git', ['add', `packages/${dirName}/package.json`], repoRoot)
+    const cm = c.status === 0 ? run('git', ['commit', '-m', `chore(${dirName}): 发版版本号 ${version}`], repoRoot) : { status: 1 }
+    if (cm.status !== 0) {
+      fail(`版本号提交失败,中止发布(请手动 git commit packages/${dirName}/package.json 后重跑)`)
+    }
+  }
+  // 打包前洁净复检:--bump 改版本只动 manifest,版本提交后不得再有其他变更——
+  // tag 只能指向一个提交,打包内容必须可还原到它
+  const recheck = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
+  if (recheck.status === 0 && recheck.stdout.trim() !== '') {
+    fail(`${dirName} 打包前发布范围仍有未提交变更,拒绝发布:\n${recheck.stdout.trim()}`)
+  }
+
+  // 打包同一份 tarball 再发布:记录 commit、文件清单与 SHA-512 integrity 到临时目录
+  // release.json,发布内容与源码提交的绑定证据落盘(registry 同版本回读不能替代内容相等)
+  const artifactsDir = publishArtifactsDir(name)
+  const pack = runNpm(['pack', '--ignore-scripts', '--pack-destination', artifactsDir], pkgDir)
+  if (pack.status !== 0) fail(`npm pack 失败,中止发布(打包内容不可证):\n${pack.stderr}`)
+  const tarball = join(artifactsDir, `${name.replace('/', '-')}-${version}.tgz`)
+  if (!existsSync(tarball)) fail(`npm pack 产物缺失: ${tarball}`)
+  const integrity = spawnSync(process.execPath, ['-e', `
+    const {createHash} = require('node:crypto');
+    const {readFileSync} = require('node:fs');
+    const h = createHash('sha512');
+    h.update(readFileSync(process.argv[1]));
+    console.log('sha512-' + h.digest('base64'));
+  `, tarball], { cwd: repoRoot, encoding: 'utf8', windowsHide: true })
+  if (integrity.status !== 0 || !integrity.stdout.trim()) fail(`tarball integrity 计算失败:\n${integrity.stderr}`)
+  const commitAtPack = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim()
+  const fileList = spawnSync('tar', ['-tzf', tarball], { cwd: repoRoot, encoding: 'utf8' })
+  const record = {
+    package: name,
+    version,
+    commit: commitAtPack,
+    tarball,
+    integrity: integrity.stdout.trim(),
+    files: fileList.status === 0 ? fileList.stdout.split('\n').filter(Boolean) : null,
+    recordedAt: new Date().toISOString(),
+  }
+  const recordPath = join(artifactsDir, 'release.json')
+  writeFileSync(recordPath, JSON.stringify(record, null, 2), 'utf8')
+  console.log(`OK    打包证据已落盘: ${recordPath}(commit ${commitAtPack.slice(0, 10)}, integrity ${record.integrity.slice(0, 20)}...)`)
+
   // 发布步骤交互式执行:2FA 账号在终端按回车打开浏览器认证后自动继续。
   // 成败判据 = npm publish 退出码("+ 包@版本"输出由 npm 自身保证);registry CDN
   // 传播延迟不影响成败,回读 view 仅作信息展示,不做闸门。
-  const pub = runNpm(['run', 'npmPublish'], pkgDir, { stdio: 'inherit' })
+  // 发布这同一份 tarball(非重新 pack):内容与 release.json 记录严格一致
+  const pub = runNpm(['publish', tarball, '--registry', REGISTRY], pkgDir, { stdio: 'inherit' })
   if (pub.status !== 0) fail('发布失败(npm publish 非零退出,交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
   const readback = runNpm(['view', name, 'version', '--registry', REGISTRY])
   if (readback.status === 0 && readback.stdout.trim() === version) console.log(`OK    ${name}@${version} 已上线`)
   else console.log(`OK    ${name}@${version} 发布成功(CDN 传播中,registry 稍后可见)`)
 
-  // 版本号变更入库后 tag 才指向该版本的完整源码状态,tag 后无提交的判定才能成立;
-  // manifest 无变更(如首发时版本已提交)则直接打 tag。提交失败不回滚发布,仅提示手动收尾
-  const dirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}/package.json`], { cwd: repoRoot, encoding: 'utf8' })
-  if (dirty.status === 0 && dirty.stdout.trim() !== '') {
-    const c = run('git', ['add', `packages/${dirName}/package.json`], repoRoot)
-    const cm = c.status === 0 ? run('git', ['commit', '-m', `chore(${dirName}): 发版版本号 ${version}`], repoRoot) : { status: 1 }
-    if (cm.status !== 0) {
-      console.error(`FAIL  版本号提交失败(发布已成功,请手动 git commit packages/${dirName}/package.json 后重跑补 tag)`)
-      exitCode = 1
-    }
-  }
-  ensureTag(name, version, opts)
+  ensureTag(name, version, opts, commitAtPack)
 }
 
 const opts = parseArgs(process.argv.slice(2))

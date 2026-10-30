@@ -61,7 +61,8 @@ export const inject = ['webServer']
 export const __hostSpawn = { impl: execFile }
 
 const NAMESPACE = 'turn-notify'
-const SOUNDS_DIR = join(homedir(), '.dsh', 'dsh-turn-notify', 'sounds')
+// 声音目录从宿主 home 派生(DSH_HOME 即 .dsh 根,rs-workflow 同构)
+const SOUNDS_DIR = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-turn-notify', 'sounds')
 const REQUEST_BODY_MAX_BYTES = 64 * 1024
 // 浏览器在场认可窗口:WS 插件空间退订或连接出账后的宽限时长;
 // 窗口内事件仍视为浏览器呈现,超窗即宿主补位(宁可重复不可漏)
