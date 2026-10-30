@@ -63,7 +63,8 @@ function unwrapVolatile(value) {
 export function resolveDataDir(env = process.env) {
   const override = env[DATA_DIR_ENV]
   if (override && override.trim() !== '') return override.trim()
-  return join(homedir(), '.dsh', 'cron-board')
+  // 缺省从宿主 home 派生(DSH_HOME 即 .dsh 根,rs-workflow 同构)
+  return join(env.DSH_HOME || join(homedir(), '.dsh'), 'cron-board')
 }
 
 export function apply(ctx, config) {
@@ -271,6 +272,6 @@ export function apply(ctx, config) {
   )
 
   // defer 挂起定时器随插件生命周期回收,不遗留生命周期外触发
-  // 生命周期钩子:scheduler 无挂起资源时 dispose 可缺省,可选调用保持约定统一
+  // 生命周期钩子:scheduler dispose 停 tick 并收敛执行链(清队/杀在途/等归零)
   ctx.effect(() => () => schedulerRef.current.dispose?.(), 'cron-board scheduler lifecycle')
 }

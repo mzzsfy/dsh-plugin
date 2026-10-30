@@ -24,7 +24,7 @@ for (const closeBeforeGrace of [false, true]) {
     }
     const create = load(() => child, processBoundary, schedule, (id) => timers.delete(id))
     const runner = create({ workdirFallback: '/isolated' })
-    const pending = runner.run({ job: { command: 'fixture', timeoutMs: 100 }, env: {}, logSink: { append() {} } })
+    const { promise } = runner.run({ job: { command: 'fixture', timeoutMs: 100 }, env: {}, logSink: { append() {} } })
     fire(100)
     assert.deepEqual(signals, [[-12345, 'SIGTERM']])
     child.exitCode = 0
@@ -33,7 +33,7 @@ for (const closeBeforeGrace of [false, true]) {
     assert.deepEqual(signals, [[-12345, 'SIGTERM'], [-12345, 'SIGKILL']])
     assert.deepEqual(direct, [], 'group termination must not kill only the departed parent')
     if (!closeBeforeGrace) child.emit('close', 0)
-    assert.equal((await pending).status, 'timeout')
+    assert.equal((await promise).status, 'timeout')
     assert.equal(timers.size, 0)
     child.stdout.destroy(); child.stderr.destroy()
   })

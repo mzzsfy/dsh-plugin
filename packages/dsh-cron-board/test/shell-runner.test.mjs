@@ -8,14 +8,15 @@ import { join } from 'node:path'
 
 import { createShellRunner } from '../src/shell-runner.mjs'
 
-// 便捷断言:等待执行结束并收集日志
+// 便捷断言:等待执行结束并收集日志(run 返回 { promise, cancel })
 async function runAndCollect(runner, { command, env, timeoutMs, workdir }) {
   const chunks = []
-  const outcome = await runner.run({
+  const { promise } = runner.run({
     job: { command, workdir, timeoutMs: timeoutMs ?? 10 * 1000 },
     env: env || {},
     logSink: { append: (chunk) => { chunks.push(chunk) } },
   })
+  const outcome = await promise
   return { outcome, log: chunks.join('') }
 }
 

@@ -69,10 +69,21 @@ export function createScheduler({ store, executor, readTickMs, onChange, now = (
     return dueList.length > 0 ? Math.min(...dueList) : null
   }
 
+  // 停止:置位后 tick 直通返回(执行链闸门兜底,双保险),并收敛执行链
+  let disposed = false
+  async function dispose() {
+    disposed = true
+    await executor.stop()
+  }
+
   return {
     recover,
-    tick,
+    tick() {
+      if (disposed) return Promise.resolve()
+      return tick()
+    },
     status: () => executor.status(),
     nextRunAt,
+    dispose,
   }
 }
