@@ -129,13 +129,20 @@ export const GLYPHS = {
   wallet: WALLET, gauge: GAUGE,
 }
 
-// 声明值解析与安全门:svg 须完整开标签(大小写不敏感)且单根闭合(首个 </svg>
-// 后不得再有内容,堵尾缀活动 HTML);不带事件属性(\b 前界堵斜杠分隔绕过)、
-// 不带脚本/样式/SMIL 动画载体(内联 svg 的 style 全文档生效,@import 外联可达)、
-// 不带 href/xlink:href 与 SMIL attributeName 注入(16×16 静态图标无合法引用/
-// 动画场景,外联与事件注入一并封死),超长拒绝;glyph 名称查表(原型链成员经
-// typeof 收口不可能混入);非法值返回 undefined。
+// 声明值解析与安全门(F28 加固):唯一 SVG 根(首 <svg> 尾 </svg> 且中间不得
+// 出现第二个根级标签) + 标签白名单(静态图形元素: path/circle/rect/line/
+// polyline/polygon/ellipse/g/defs/linearGradient/radialGradient/stop/title/desc),
+// 其余标签(iframe/foreignObject/script/style/animate/use/a/image…)一律拒绝;
+// 黑名单仍保留事件属性与 javascript: 兜底(防白名单标签携带活动属性)。
+// glyph 名称查表(原型链成员经 typeof 收口不可能混入);非法值 undefined。
 export const SVG_MAX_CHARS = 4 * 1024
+// 白名单标签集:16×16 静态图标的合法绘制元素
+const SVG_TAG_ALLOW = new Set([
+  'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse',
+  'g', 'defs', 'lineargradient', 'radialgradient', 'stop', 'title', 'desc',
+])
+const SVG_TAG_RE = /<\/?([a-z][a-z0-9-]*)(?=[\s/>])/gi
+
 export function resolveIcon(value) {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
@@ -143,16 +150,38 @@ export function resolveIcon(value) {
     trimmed.length <= SVG_MAX_CHARS
     && /^<svg[\s>]/i.test(trimmed)
     && /<\/svg>\s*$/i.test(trimmed)
+    && resolveIconTagsAllowed(trimmed)
     && !/\bon[a-z]+\s*=/i.test(trimmed)
-    && !/<foreignObject/i.test(trimmed)
-    && !/<script[\s/>]/i.test(trimmed)
-    && !/<style[\s/>]/i.test(trimmed)
-    && !/<(animate|animatemotion|animatetransform|set)[\s/>]/i.test(trimmed)
-    && !/\b(xlink:)?href\s*=/i.test(trimmed)
-    && !/attributeName\s*=\s*["']?\s*(xlink:)?href/i.test(trimmed)
     && !/javascript:/i.test(trimmed)
   ) return trimmed
   return typeof GLYPHS[trimmed] === 'string' ? GLYPHS[trimmed] : undefined
+}
+
+// 唯一根 + 标签白名单(F28):逐标签扫描,svg 开闭计数兜底唯一根;
+// 白名单外标签(含自闭合 iframe 等)直接否决
+function resolveIconTagsAllowed(markup) {
+  let svgDepth = 0
+  let seenRootOpen = false
+  let seenRootClose = false
+  for (const match of markup.matchAll(SVG_TAG_RE)) {
+    const name = match[1].toLowerCase()
+    const closing = match[0].startsWith('</')
+    if (name === 'svg') {
+      if (closing) {
+        svgDepth -= 1
+        if (svgDepth === 0) seenRootClose = true
+        else if (svgDepth < 0) return false
+      } else {
+        svgDepth += 1
+        if (seenRootOpen && svgDepth === 1) return false
+        if (svgDepth === 1) seenRootOpen = true
+      }
+      continue
+    }
+    if (svgDepth === 0) return false
+    if (!SVG_TAG_ALLOW.has(name)) return false
+  }
+  return seenRootOpen && seenRootClose && svgDepth === 0
 }
 
 // 官方 DOM 锚点:与 client.js 控制器字面量同源锁定(parity 断言对表)。

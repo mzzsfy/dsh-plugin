@@ -1860,6 +1860,8 @@ function setupCloneInjection(doc, { enabledRef, onOpen }) {
     return removedAny
   }
   const ensureHeader = (now) => {
+    // 停用即不注入(F24):enabled 只挡浏览弹窗曾让 header/点击/footer 照跑
+    if (enabledRef.current === false) { removeAllHeader(); return false }
     // 探测到登录闸门(headerAllowed=false)后保持官方 3 按钮布局:按钮已物理
     // 移除,基座重渲染也不会再注入
     if (!headerAllowed) return ensureHeaderCloneButton(doc, onOpen, false)
@@ -1885,6 +1887,12 @@ function setupCloneInjection(doc, { enabledRef, onOpen }) {
   }
   const rescan = () => {
     if (disposed) return
+    // 停用即全量移除已注入按钮(F24):footer 与 header 两处,不进入注入分支
+    if (enabledRef.current === false) {
+      removeAll()
+      removeAllHeader()
+      return
+    }
     const now = Date.now()
     if (now - windowStart > CLONE_SCAN_WINDOW_MS) {
       windowStart = now
@@ -2218,6 +2226,8 @@ function ContextPanel() {
               disposeScan = setupCloneInjection(document, {
                 enabledRef,
                 onOpen: () => {
+                  // 点击复核(F24):注入与点击间开关可能已翻停用,停用即不弹
+                  if (enabledRef.current === false) return
                   void handleCloneOpen()
                 },
               })

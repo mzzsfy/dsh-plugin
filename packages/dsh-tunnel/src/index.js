@@ -90,10 +90,12 @@ export const SETTINGS_SCHEMA = z.object({
 
 const normalizeWsPath = (value) => value.replace(/\/+$/, '')
 
-// 校验作用于归一前的原始值; '/' 为合法输入
+// 校验作用于归一前的原始值; '/' 为合法输入。空串 = 根路径归一产物(F26:
+// '/' 去尾斜杠得 '',恢复校验须接受,否则根 WS 隧道重启丢)
 function normalizeWsPaths(raw) {
   if (raw === undefined) return []
-  if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string' || !WS_PATH_CHARS_RE.test(item))) return undefined
+  const legal = (item) => typeof item === 'string' && (item === '' || WS_PATH_CHARS_RE.test(item))
+  if (!Array.isArray(raw) || raw.some((item) => !legal(item))) return undefined
   return [...new Set(raw.map(normalizeWsPath))]
 }
 
@@ -201,6 +203,11 @@ function forwardHttp(req, res, record, connectTimeoutMs) {
     }
     res.writeHead(proxyRes.statusCode, headers)
     proxyRes.pipe(res)
+    // 上游响应中断即终止下游(F25,与 res close 反向联动成对):
+    // aborted 覆盖请求体阶段中断,error 覆盖响应期套接字错误;
+    // 两态都是"响应不再完整",挂着的下游连接应立刻回收
+    proxyRes.on('aborted', () => res.destroy())
+    proxyRes.on('error', () => res.destroy())
   })
   proxyReq.on('error', (error) => {
     if (res.headersSent) return res.destroy()
@@ -385,6 +392,11 @@ export function apply(ctx, config) {
       if (!VALID_ENTRIES.has(entry)) {
         return { ok: false, error: `entry 不合法: 须为 ${ENTRY_PATH} 或 ${ENTRY_SUBDOMAIN}` }
       }
+      // 自代理拒绝(F27):target 指向本监听端口时,子域名全路径透传+Host 原样
+      // 会把上游请求再导回自身,形成无限自代理环
+      if (args.targetPort === webServer.port) {
+        return { ok: false, error: `targetPort 不得为宿主监听端口 ${webServer.port}(自代理环)` }
+      }
       // 子域名全路径全协议透传, wsPaths 无意义
       const wsPaths = entry === ENTRY_SUBDOMAIN ? [] : normalizeWsPaths(args.wsPaths)
       if (wsPaths === undefined) {
@@ -519,6 +531,11 @@ export function apply(ctx, config) {
   for (const row of loadStore(dataDir)) {
     if (!validateName(row?.name) || !validatePort(row?.targetPort)) {
       console.warn(`${WARN_TAG}隧道表存在非法行, 已跳过: ${JSON.stringify(row)}`)
+      continue
+    }
+    // 自代理拒绝同 open(F27):恢复面不放行指向宿主监听端口的环
+    if (row.targetPort === webServer.port) {
+      console.warn(`${WARN_TAG}隧道 ${row.name} 的 targetPort 为宿主监听端口 ${webServer.port}(自代理环), 已跳过`)
       continue
     }
     if (tunnels.has(row.name)) {
