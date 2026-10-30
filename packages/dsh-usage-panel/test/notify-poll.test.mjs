@@ -20,8 +20,10 @@ function clientFixture({ storage = storageFixture(), indexedDB, abortSignalImpl 
       const work = refresh(); pending.add(work); work.finally(() => pending.delete(work)); return work
     }, dispose() {} }),
     toast: { show: text => shown.push(text) },
-    setupCommonTools: () => ({ subscribe(onMessage, { onReset }) {
-      subscriptions.add(onReset); return () => subscriptions.delete(onReset)
+    setupCommonTools: () => ({ subscribe(onMessage, { onReset } = {}) {
+      // F31 数据失效桥订阅无 onReset:不入 poll 触发集
+      if (typeof onReset === 'function') subscriptions.add(onReset)
+      return () => subscriptions.delete(onReset)
     } }),
   }
   const fetch = async () => ({ ok: true, json: async () => payload })

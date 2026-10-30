@@ -399,8 +399,17 @@ export function apply(ctx, configRef) {
   }
 
   function persistHistory() {
-    return historyStore.persist()
+    return historyStore.persist().then(() => { bumpDataRevision() })
   }
+
+  // 数据修订号(F31):账号/历史任一持久化成功即自增;面板经 revision 路由
+  // 对账,读数落后即重拉——后台轮询写入不再让面板陈旧
+  let dataRevision = 0
+  function bumpDataRevision() {
+    dataRevision += 1
+    notifyChange()
+  }
+  const dataRevisionOf = () => dataRevision
 
   // 查询成功后落快照:按读数取样追加各序列,并重建当月月窗口序列。
   function recordSnapshots(account, reading, queriedAt) {
@@ -421,9 +430,19 @@ export function apply(ctx, configRef) {
     return backoff
   }
 
+  // 同账号单飞(F13):重复触发的查询共享同一在途 promise,不并发打上游
+  const inflightQueries = new Map()
+
   function runQuery(account) {
+    // 归属校验(F13):闭包持的是查询发起时的账号对象;完成时按当前 config
+    // 引用对账——账号已删除/替换则本结果为孤儿,丢弃不写不评估
+    const owned = () => config !== null && Array.isArray(config.accounts) && config.accounts.includes(account)
     const queriedAt = Date.now()
-    return queryAccount(account).then((result) => {
+    const inflight = inflightQueries.get(account.id)
+    if (inflight !== undefined) return inflight
+    const run = queryAccount(account).then((result) => {
+      inflightQueries.delete(account.id)
+      if (!owned()) return { ...result, ok: false, orphaned: true }
       const backoff = pollEntry(account)
       if (result.ok) {
         backoff.onSuccess()
@@ -435,7 +454,12 @@ export function apply(ctx, configRef) {
       }
       backoff.onFailure(Math.floor(queriedAt / 1000))
       return result
+    }).catch((error) => {
+      inflightQueries.delete(account.id)
+      throw error
     })
+    inflightQueries.set(account.id, run)
+    return run
   }
 
   // 刷新评估:越逻辑点事件入投影并经 webhook / dsh-im 投递;沿触发状态随账号落盘,
@@ -509,10 +533,13 @@ export function apply(ctx, configRef) {
 
   function persistConfig() {
     if (accountsBroken) return Promise.reject(new Error(ACCOUNTS_BROKEN_MESSAGE))
-    // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败)
+    // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败);
+    // 落盘成功即自增修订号并广播(F31):全部账号变更路径(增删改/启停/重排)
+    // 都经此口,面板订阅对账,单飞重拉账号与历史
     const result = writeChain.then(async () => {
       await mkdir(dirname(DATA_FILE), { recursive: true })
       await writeFile(DATA_FILE, JSON.stringify(config), 'utf8')
+      bumpDataRevision()
     })
     writeChain = result.catch(() => {})
     return result
@@ -658,6 +685,23 @@ export function apply(ctx, configRef) {
       projection.dispose()
     }
   }, 'usage-panel notifications route')
+
+  // 数据修订号对账口(F31):面板轮询比对本值,落后即重拉账号与历史
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/usage-panel/revision',
+        handler: async (req, res) => {
+          if (req.method !== 'GET') {
+            sendJson(res, 405, { error: 'method not allowed' })
+            return
+          }
+          sendJson(res, 200, { revision: dataRevisionOf() })
+        },
+      }),
+    'usage-panel revision route',
+  )
 
   ctx.effect(
     () =>

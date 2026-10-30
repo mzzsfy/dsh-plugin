@@ -52,7 +52,8 @@ test('Given 尚未激活的 client When factory 物化 Then 不订阅或拉取�
 test('Given ctx 已激活且快照在途 When 卸载 Then 退订并中止请求且不呈现迟到快照', async () => {
   const f = fixture(), plugin = f.instantiate()
   plugin.apply()
-  assert.equal(f.subscriptions.size, 1)
+  // 通知投影 + F31 数据失效广播桥:激活期恒两条订阅
+  assert.equal(f.subscriptions.size, 2)
   f.emit()
   assert.equal(f.requests.length, 1)
   const request = f.requests[0]
@@ -74,10 +75,11 @@ test('Given 旧代激活 When 新代 apply Then 仅保留新代订阅且旧代�
   const current = f.instantiate()
   current.apply()
   assert.equal(f.requests[0].options.signal.aborted, true)
-  assert.equal(f.subscriptions.size, 1)
   const token = f.window['usage-panel:notify-poll']
   old.dispose()
   assert.equal(f.window['usage-panel:notify-poll'], token)
+  // 旧代卸载后仅存新代两条订阅(通知投影 + 数据失效广播桥)
+  assert.equal(f.subscriptions.size, 2)
   current.dispose()
   assert.equal(f.subscriptions.size, 0)
 })
