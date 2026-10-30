@@ -110,9 +110,9 @@ function unwrapConfigSnapshot(config) {
  * [object Object]" 拒挂(真机实证);解包产物必须 structuredClone:ref
  * .get() 返回 cosmokit snapshot 深冻结对象,cordis 挂载管线对 section 原地
  * resolve,冻结 env 直接炸 "Cannot assign to read only property" 并触发
- * 接管回滚。快照的陈旧由 apply 里的 loader/volatile-update 监听补偿:
- * volatile-only 变更宿主换值后发事件不重挂行,监听器现取 ref 解包成新
- * 快照经 ctx.shell.refresh 换源并重建工具。
+ * 接管回滚。快照的陈旧由设置页写路径收口补偿(F18:注释曾宣称的
+ * loader/volatile-update 监听为幻影机制,apply 零宿主事件监听是锁定契约;
+ * 设置页写成功后直接经 ctx.shell.refresh 换源,见 client/写路径)。
  */
 async function mountExecutor(ctx, config) {
   // 用户声明值挂载前 coercing:任意配置(坏类型/空 shells/悬空 default/坏
@@ -147,8 +147,12 @@ async function runtimeTakeover(ctx, config, targets) {
   }
   const exited = await awaitOfficialExit(targets)
   if (!exited) {
-    ctx.logger.warn('shell-select: 官方行退场超时,放弃接管(官方 fiber 仍在服务);重启后由行树声明态收敛')
-    recordTakeover({ event: 'runtime 退场超时,放弃挂载' })
+    // 退场超时回滚已禁行(F18):本包不挂载,官方链必须复活自服务,
+    // 不留"官方已禁+本包未挂"的 shell 真空窗口
+    ctx.logger.warn('shell-select: 官方行退场超时,回滚启用并放弃接管')
+    recordTakeover({ event: 'runtime 退场超时,回滚已禁行,放弃挂载' })
+    await rollbackDisabledRows(disabled)
+    recordTakeover({ event: `rolledBack=${disabled.length}, 退场超时` })
     return
   }
   try {
