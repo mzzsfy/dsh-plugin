@@ -56,7 +56,7 @@
 - 目标目录预填:点击 footer 按钮时经官方「编辑路径」输入态读取弹窗当前目录(读取即收起浏览弹窗,合成 Escape 在 portal 内必然触发官方 Modal 的整体关闭,这是实测锁定的代价),预填 = 当前目录 + 推导目录名;读取失败回退上次克隆位置(localStorage 记忆目标的父目录),两者皆无则要求手填;header 按钮无弹窗可读,直接走记忆/手填
 - 目录名按仓库地址自动推导(去 `.git`,支持 https/ssh/git 协议与 `git@host:path` scp 语法),目标目录手改过则不覆盖
 - 执行:POST `/api/context/git-clone` → 宿主 `git clone [选项] -- <url> <目标>`(参数数组直传,无 shell;url 以 `-` 开头拒绝,`--` 兜底);目标必须绝对路径且支持 `~` 展开,已存在时须为空目录(git 允许克隆进空目录),父目录必须存在;单飞行守卫,并发请求直接拒绝;超时 30 分钟树杀(Windows `taskkill /T /F`);失败透出 git stderr 尾部;git 缺失收敛为可行动文案
-- 完成链:关闭弹窗 → 收起浏览弹窗 → `workspaces.create({path})`(幂等,已登记返回现有)→ `uiWorkspace.startSession(workspaceId)` 打开新工作区空会话;uiWorkspace 经 inject 声明获取(实测 ctx.get 懒取不可达),与 slots/sessions 等既有 services 同门控策略
+- 完成链:克隆 resolve 即收起浏览弹窗(footer 取消按钮主路径,结构漂移派发 document 级合成 Escape 兜底)并关闭克隆弹窗——两弹窗关闭不依赖登记链;随后 `workspaces.create({path})`(幂等,已登记返回现有)→ `uiWorkspace.startSession(workspaceId)` 打开新工作区空会话,登记迟滞/挂起/失败均不阻塞关闭,失败经 toast 通报;uiWorkspace 经 inject 声明获取(实测 ctx.get 懒取不可达),与 slots/sessions 等既有 services 同门控策略
 - 凭据走 git 自身凭据链(私有仓库与命令行克隆同源);浅克隆为 `--depth 1`(只取最新提交),选择记忆
 
 ## 启停
