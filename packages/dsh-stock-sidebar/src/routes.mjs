@@ -38,7 +38,7 @@ export function registerRoutes(webServer, app) {
       const controller = new AbortController(); controllers.add(controller)
       const onClose = () => { if (!res.writableEnded) controller.abort() }
       res.on('close', onClose)
-      const timeout = name === 'provider-check' ? 60 * 1000 : name === 'catalog-sync' ? 30 * 1000 : 10 * 1000
+      const timeout = name === 'provider-check' ? 60 * 1000 : name === 'catalog-sync' ? 120 * 1000 : 10 * 1000
       let timer
       try {
         const input = method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://local').searchParams) : await body(req)

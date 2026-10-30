@@ -30,10 +30,12 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
           })
           await acquire(controller.signal); acquired = true
           starts.set(instance.quotaGroup, now())
-          timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), 8 * 1000)
           const adapter = registry.get(instance.adapterId), method = options.probe ? 'probe' : capability
           if (typeof adapter[method] !== 'function') fail('UNSUPPORTED_CAPABILITY', '来源不支持该能力', 422)
-          let used = false
+          let used = false, timeout
+          // 超时计时覆盖整个能力调用;分页适配器每次网络活动重置计时,空闲超过窗口才判超时。
+          const armTimeout = () => { timers.clearTimeout(timeout); timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), 8 * 1000) }
+          armTimeout()
           const ctx = { now, signal: controller.signal, credential: () => instance.credentialEnv === null ? undefined : env[instance.credentialEnv] || fail('AUTH', '未在Host环境中配置凭据', 422),
             fetch: async (...args) => {
               if (used) {
@@ -45,7 +47,11 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
                 })
               }
               if (controller.signal.aborted) fail('CANCELLED', '请求已取消', 503)
-              budget.reserve(instance, capability, request.securities?.length || 1, !!options.periodic, !!options.probe); used = true; starts.set(instance.quotaGroup, now()); return fetchImpl(...args)
+              armTimeout()
+              budget.reserve(instance, capability, request.securities?.length || 1, !!options.periodic, !!options.probe); used = true; starts.set(instance.quotaGroup, now())
+              const response = await fetchImpl(...args)
+              armTimeout()
+              return response
             } }
           // 免凭据实例(credentialEnv=null)跳过Host环境检查;其余沿用原守卫。
           if (instance.credentialEnv !== null && !env[instance.credentialEnv]) fail('AUTH', '未在Host环境中配置凭据', 422)

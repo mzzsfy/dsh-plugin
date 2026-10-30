@@ -67,6 +67,23 @@ test('东财搜索联想过滤非A股与跨市场行', async () => {
   assert.deepEqual(result.items.map(i => i.code), ['600519'])
   assert.equal(result.items[0].cnspell, 'gzmt')
 })
+test('新浪目录分页过滤沪深以外板块并按短页终止', async () => {
+  const requests = []
+  const row = (code, symbol, name) => ({ code, symbol, name })
+  const ctx = { now: () => 100, signal: new AbortController().signal, fetch: async url => {
+    requests.push(url)
+    if (!/node=sh_a/.test(url)) return { ok: true, json: async () => [] }
+    const page = Number(/page=(\d+)/.exec(url)[1])
+    const rows = page === 1 ? [row('600001', 'sh600001', '沪市甲'), row('000001', 'sz000001', '深市混入')] : []
+    return { ok: true, json: async () => rows }
+  } }
+  const result = await sina.catalog({ providerInstanceId: 'sn', market: 'XSHG' }, ctx)
+  assert.equal(requests.length, 2)
+  assert.deepEqual(result.items.map(i => i.code), ['600001'])
+  assert.equal(result.complete, true)
+  const full = { now: () => 0, signal: new AbortController().signal, fetch: async () => ({ ok: true, json: async () => [row('600001', 'sh600001', '甲'), row('600001', 'sh600001', '重复')] }) }
+  await assert.rejects(sina.catalog({ providerInstanceId: 'sn', market: 'XSHG' }, full), e => e.code === 'BAD_PAYLOAD')
+})
 test('免凭据实例跳过Host环境检查但必须声明保守预算', async () => {
   const { parseConfiguration } = await import('../src/schemas.mjs')
   const base = { id: 'em-one', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
@@ -85,8 +102,9 @@ test('三个公开适配器合同完整且网络错误归NETWORK', async () => {
   const registry = createRegistry([tencent, sina])
   for (const adapter of [tencent, sina]) {
     assert.doesNotThrow(() => registry.validate({ adapterId: adapter.descriptor.adapterId }, { capability: 'quotes', market: 'XSHG', instrument: 'equity' }))
-    assert.throws(() => registry.validate({ adapterId: adapter.descriptor.adapterId }, { capability: 'catalog', market: 'XSHG', instrument: 'equity' }), e => e.code === 'UNSUPPORTED_CAPABILITY')
+    assert.throws(() => registry.validate({ adapterId: adapter.descriptor.adapterId }, { capability: 'calendar', market: 'XSHG', instrument: 'equity' }), e => e.code === 'UNSUPPORTED_CAPABILITY')
   }
+  assert.doesNotThrow(() => registry.validate({ adapterId: 'sina' }, { capability: 'catalog', market: 'XSHE', instrument: 'equity' }))
   const emRegistry = createRegistry([eastmoney])
   assert.doesNotThrow(() => emRegistry.validate({ adapterId: 'eastmoney' }, { capability: 'quotes', market: 'XSHG', instrument: 'equity' }))
   assert.doesNotThrow(() => emRegistry.validate({ adapterId: 'eastmoney' }, { capability: 'catalog', market: 'XSHE', instrument: 'equity' }))

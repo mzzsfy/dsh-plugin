@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({
       async function api(path, method = 'GET', body, signal) {
         const controller = new AbortController(); requests.add(controller)
         const abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true })
-        const timeout = setTimeout(() => controller.abort(), path === '/provider-check' ? 61000 : path === '/catalog-sync' ? 31000 : 11000)
+        const timeout = setTimeout(() => controller.abort(), path === '/provider-check' ? 61000 : path === '/catalog-sync' ? 121000 : 11000)
         try {
           const response = await request(BASE + path, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal })
           const result = await response.json()

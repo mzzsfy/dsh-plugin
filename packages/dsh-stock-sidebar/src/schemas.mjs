@@ -45,10 +45,15 @@ export const controlSchema = z.object({ revision: z.number().int().nonnegative()
   try { parseConfiguration({ providers: control.providers, routes: control.routes }) } catch { ctx.addIssue({ code: 'custom', message: '来源配置不一致' }) }
 })
 export const domainSpec = { name: 'stock_sidebar', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
-// 默认数据源:免凭据公开源+保守预算,首用即可检查保存;设置页一键恢复复用同一构造。
+// 默认数据源:免凭据公开源+保守预算,首用即可检查保存;目录走新浪分市场节点,行情与搜索走东财。
 export const defaultConfig = () => {
-  const instance = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
-  const routes = ['XSHG', 'XSHE'].flatMap(market => ['catalog', 'search', 'quotes'].map(capability => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: instance.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true })))
-  return { providers: [instance], routes }
+  const catalog = { id: 'sn-catalog', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: { requestsPerMinute: 120, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { catalog: 60 } } }
+  const market = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
+  const routes = ['XSHG', 'XSHE'].flatMap(m => [
+    { id: `${m.toLowerCase()}-catalog`, capability: 'catalog', market: m, instrument: 'equity', primaryInstanceId: catalog.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+    { id: `${m.toLowerCase()}-search`, capability: 'search', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+    { id: `${m.toLowerCase()}-quotes`, capability: 'quotes', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+  ])
+  return { providers: [catalog, market], routes }
 }
 export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })
