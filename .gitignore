@@ -11,6 +11,7 @@ node_modules/
 /docs/*
 !/docs/调研-股票侧边栏插件.md
 !/docs/开发-股票侧边栏插件.md
+!/docs/dsh-stock-assistant/
 !/docs/兼容性测试/
 /docs/兼容性测试/*
 !/docs/兼容性测试/2026-10-28回归审查.md
