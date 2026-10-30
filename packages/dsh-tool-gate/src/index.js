@@ -55,6 +55,9 @@ export function apply(ctx, config) {
    * undo journal:层数据表(Map 引用)→ 名 → { definition, hadField, value };
    * 仅记录首次改变时的原状。层键是对象引用,直接作 Map 键,禁止字符串化
    * (对象 String 化坍缩 '[object Object]' 串层,真机实证)。
+   * 记录按 definition 引用身份对账:同名换对象(宿主重挂定义)后旧记录还原
+   * 不再命中,当前定义在 toDefer/toClear 时刷新记录指向当前对象(F16:
+   * 只记首个定义曾让新对象退场时不还原 deferLoading)。
    */
   const journal = new Map()
 
@@ -73,14 +76,29 @@ export function apply(ctx, config) {
     journal.clear()
   }
 
-  /** 取(或建)该层的原状记录表。 */
-  function journalOf(layer) {
-    let records = journal.get(layer.key)
-    if (records === undefined) {
-      records = new Map()
-      journal.set(layer.key, records)
+  /** 取该层的原状记录;definition 与已记录身份不一致时刷新指向当前对象(保还原命中)。 */
+  function journalEntry(layer, name, definition) {
+    const records = (() => {
+      let existing = journal.get(layer.key)
+      if (existing === undefined) {
+        existing = new Map()
+        journal.set(layer.key, existing)
+      }
+      return existing
+    })()
+    const recorded = records.get(name)
+    if (recorded === undefined) {
+      const fresh = { definition, hadField: 'deferLoading' in definition, value: definition.deferLoading }
+      records.set(name, fresh)
+      return fresh
     }
-    return records
+    if (recorded.definition !== definition) {
+      // 同名换对象:旧对象的原始态已随旧对象离场,新对象以当前现场重新记录
+      const fresh = { definition, hadField: 'deferLoading' in definition, value: definition.deferLoading }
+      records.set(name, fresh)
+      return fresh
+    }
+    return recorded
   }
 
   /** 一轮声明式收敛:白名单是唯一事实源,逐层只动与目标态有差异的名。 */
@@ -99,16 +117,15 @@ export function apply(ctx, config) {
     let cleared = 0
     for (const plan of perLayer) {
       const layer = layers.find((candidate) => candidate.key === plan.key)
-      const records = journalOf(layer)
       for (const name of plan.toDefer) {
         const definition = layer.definitionOf(name)
-        if (!records.has(name)) records.set(name, { definition, hadField: 'deferLoading' in definition, value: definition.deferLoading })
+        journalEntry(layer, name, definition)
         definition.deferLoading = true
         deferred += 1
       }
       for (const name of plan.toClear) {
         const definition = layer.definitionOf(name)
-        if (!records.has(name)) records.set(name, { definition, hadField: 'deferLoading' in definition, value: definition.deferLoading })
+        journalEntry(layer, name, definition)
         delete definition.deferLoading
         cleared += 1
       }
@@ -166,7 +183,13 @@ export function apply(ctx, config) {
       ctx.logger?.warn?.('tool-gate: 宿主 llm 服务形态不符,降级折叠禁用(打标收敛不受影响)')
       return
     }
+    // owner 活性 = 配置开关 且 本行 fiber 存活:行卸载/HMR 后旧 owner isActive 恒假,
+    // 装饰器透传,原型上残留的 owner 记录由 addOwner 的惰性清扫回收(F16:
+    // 只看配置曾让卸载行的旧 owner 恒真,新行同 adapter 注册被去重拒绝)
+    let disposed = false
+    ctx.effect(() => () => { disposed = true }, 'tool-gate collapse owner lifetime')
     const isActive = () => {
+      if (disposed) return false
       const current = readConfig()
       return current.enabled && current.collapse
     }
