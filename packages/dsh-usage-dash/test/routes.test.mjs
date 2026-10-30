@@ -453,6 +453,8 @@ test('pricing POST 非法规则拒绝 400 且不写入', async () => {
     { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'unknown' }] }] },
     { rules: [{ ...PRICING_RULE, conditions: [{ kind: 'weekdays', days: [7] }] }] },
     { rules: [{ ...PRICING_RULE, currency: '€' }] },
+    // F15 表级单币:非空币种混用整表拒绝;null 与单币并存合法
+    { rules: [{ ...PRICING_RULE, currency: '¥' }, { ...PRICING_RULE, model: 'openai/gpt-x', currency: '$' }] },
   ]
   for (const payload of invalidPayloads) {
     const res = await invokeJson(routes, PATH_PRICING, { payload })

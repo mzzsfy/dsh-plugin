@@ -2701,8 +2701,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       useEffect(() => statsLineState.subscribe(() => setPrefs(statsLineState.get())), [])
       const { rules: pricingRules } = usePricing()
       const matched = usageSourceBuckets(usageSource)
-      const price = matched && prefs.costDisplay && pricingRules !== null
-        ? matchPrice(pricingRules, turnModelOf(matched), new Date())
+      // 计价时点 = 回合结束事件被观测的时刻(F15 决策:统一用当时价格、按回合
+      // 事件时点匹配当前规则表)。官方 tokenUsage 无事件时间戳,以用量首次到
+      // 达的观测时刻冻结:后续规则重渲染不再漂移,同一回合计价时点恒定
+      const observedAtRef = useRef(null)
+      if (matched && observedAtRef.current === null) observedAtRef.current = Date.now()
+      const price = matched && prefs.costDisplay && pricingRules !== null && observedAtRef.current !== null
+        ? matchPrice(pricingRules, turnModelOf(matched), new Date(observedAtRef.current))
         : null
       // 0 元(全零价/全零桶)与价未命中同不渲染,无占位符
       const cost = matched && price ? turnCostAmountOf(matched, price) : null
