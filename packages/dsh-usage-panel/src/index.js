@@ -43,8 +43,9 @@ const MAX_ACCOUNTS = 20
 // 单轮轮询的受限并发:串行执行时单账号 20s 超时即可拖满整轮(pollInFlight 互斥
 // 使后续 tick 全部跳过,轮询事实停摆),并发上限同时压住上游瞬时压力
 const POLL_CONCURRENCY = 4
-// 数据目录支持 env 注入(测试隔离);缺省落 ~/.dsh/dsh-usage-panel
-const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR || join(homedir(), '.dsh', 'dsh-usage-panel')
+// 数据目录支持 env 注入(测试隔离);缺省从宿主 home 派生(DSH_HOME 即 .dsh 根,rs-workflow 同构)
+const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR
+  || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-usage-panel')
 const DATA_FILE = join(DATA_DIR, 'accounts.json')
 const HISTORY_FILE = join(DATA_DIR, 'history.json')
 const BAK_SUFFIX = '.bak'
@@ -365,24 +366,29 @@ export function apply(ctx, configRef) {
     return resolvedNotifySettings(value && typeof value === 'object' ? value.notify : undefined)
   }
 
-  // 通知配置串行写链:读改写整体入链,任一失败不吞链(catch 后换行续链)
+  // 通知配置串行写链:读改写整体追加进链,合并读的总是前序写完成后的最新值;
+  // 任一失败不吞链(换行续链,失败只回报本次请求)
   let notifyConfigWriteChain = Promise.resolve()
 
   function persistNotifyPatch(patch) {
-    // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
-    const merged = { ...readNotifySettings(), ...patch }
-    // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
-    // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
-    // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
-    const settings = ctx.get('settings')
-    requireOk(settings !== undefined, 'settings 服务不可用')
-    if (typeof settings.register === 'function' && typeof settings.update === 'function') {
-      return settings.update(NAMESPACE, { notify: merged })
-    }
-    const editor = ctx.get('configEditor')
-    const entry = ctx.fiber?.entry
-    requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
-    return editor.edit(entry, (current) => ({ ...current, notify: merged }))
+    const run = notifyConfigWriteChain.then(async () => {
+      // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
+      const merged = { ...readNotifySettings(), ...patch }
+      // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+      // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+      // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
+      const settings = ctx.get('settings')
+      requireOk(settings !== undefined, 'settings 服务不可用')
+      if (typeof settings.register === 'function' && typeof settings.update === 'function') {
+        return settings.update(NAMESPACE, { notify: merged })
+      }
+      const editor = ctx.get('configEditor')
+      const entry = ctx.fiber?.entry
+      requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
+      return editor.edit(entry, (current) => ({ ...current, notify: merged }))
+    })
+    notifyConfigWriteChain = run.then(() => {}, () => {})
+    return run
   }
 
   function ensureHistory() {
@@ -667,11 +673,10 @@ export function apply(ctx, configRef) {
           const check = validateNotifyPatch(body)
           requireOk(check.ok, check.reason)
           // 读改写经串行链执行:重叠请求各自基于旧快照合并会互相覆盖
-          // (先写的 enabled 被后写基于旧 enabled=false 的合并抹掉),链式
-          // 追加保证任一写读取的总是前序写完成后的最新值;共享链以 catch
-          // 续接,单次失败只回报本次请求(抛错由 guardedRoute 统一转 400),
-          // 不阻断后续写
-          await notifyConfigWriteChain.then(() => persistNotifyPatch(check.patch))
+          // persistNotifyPatch 内部把读改写整体追加进共享写链:任一写读取的总是
+          // 前序写完成后的最新值;链以 catch 续接,单次失败只回报本次请求
+          // (抛错由 guardedRoute 统一转 400),不阻断后续写
+          await persistNotifyPatch(check.patch)
           sendJson(res, 200, { ok: true, notify: publicNotify(readNotifySettings()) })
         }),
       }),
