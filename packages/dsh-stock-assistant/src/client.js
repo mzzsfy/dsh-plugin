@@ -2,6 +2,7 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-stock-assistant',
   factory(require) {
     const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50
+    const BROWSE_MARKETS = { XSHG: '上海A股', XSHE: '深圳A股' }
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
       let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, queryGeneration = 0, querying, composing = false
       const subscribers = new Set(), retiredEpochs = new Set(), requests = new Set()
@@ -105,6 +106,31 @@ window.__ModuleLoader__.load({
         switchPrimary: routeId => action('switch', async () => { const data = await api('/route-selection', 'POST', { routeId, target: 'primary', expectedRoutingRevision: state.data.routingRevision, expectedRouteEpoch: state.data.routeSelections[routeId].routeEpoch }); applySnapshot(data) }),
         setKlinePeriod(key) { patch({ klinePeriod: key }) },
         setKlineError(securityId, message) { patch({ kline: { loading: false, error: message, candles: null } }) },
+        // 一键K线路由: 已启用市场(verified 且 quotes 路由存在即视为启用)逐一生成 (market,'kline') 草稿;
+        // 主源=该市场 quotes 主源(支持 kline 的备选优先), 备源=支持 kline 的其他启用实例;已存在 kline 路由的市场跳过。
+        async oneClickKline() {
+          const saved = state.data.control
+          const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkIds: [], checkResults: [] }
+          const enabledMarkets = new Set(saved.routes.filter(r => r.capability === 'quotes').map(r => r.market))
+          const klineAdapters = state.data.adapters.filter(a => a.capabilities.includes('kline'))
+          const routes = [...draft.routes]
+          for (const market of enabledMarkets) {
+            if (routes.some(r => r.market === market && r.capability === 'kline')) continue
+            const candidates = draft.providers.filter(p => p.enabled && klineAdapters.some(a => a.adapterId === p.adapterId))
+            if (!candidates.length) continue
+            const quotesRoute = saved.routes.find(r => r.market === market && r.capability === 'quotes')
+            const primary = candidates.find(p => p.id === quotesRoute?.primaryInstanceId) || candidates[0]
+            const fallback = candidates.find(p => p.id !== primary.id)
+            routes.push({ id: `${market.toLowerCase()}-kline`, capability: 'kline', market, instrument: 'equity', primaryInstanceId: primary.id, fallbackInstanceIds: fallback ? [fallback.id] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
+          }
+          if (routes.length === draft.routes.length) return
+          const configuration = { providers: draft.providers, routes }
+          await action('configuration', async () => {
+            const check = await api('/provider-check', 'POST', { ...configuration, capabilities: ['kline'] })
+            await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.data.control.revision, ...configuration, checkIds: [check.checkId] })
+            updateView({ settingsDraft: null }); refresher.refresh()
+          })
+        },
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
         loadKline(securityId, period, force = false) {
           const key = `${securityId}|${period}`
@@ -138,6 +164,7 @@ window.__ModuleLoader__.load({
     const quiet = fn => (...args) => { Promise.resolve().then(() => fn(...args)).catch(() => {}) }
     const signed = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${value}`
     const timeText = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知'
+    const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
     function Button({ children, onClick, primary, danger, className = '', ...props }) { return h('button', { type: 'button', className: `ssb-button${primary ? ' ssb-primary' : ''}${danger ? ' ssb-danger' : ''} ${className}`, onClick, ...props }, children) }
     function Toggle({ label, checked, onChange, disabled = false }) {
       return h('label', { className: 'ssb-switch' }, h('input', { type: 'checkbox', checked, disabled, onChange: e => onChange(e.target.checked) }), h('span', { className: 'ssb-switch__track' }, h('span', { className: 'ssb-switch__thumb' })), h('span', null, label))
@@ -173,7 +200,7 @@ window.__ModuleLoader__.load({
                       e.preventDefault(); const at = order.indexOf(id), next = e.key === 'Home' ? 0 : e.key === 'End' ? order.length - 1 : Math.max(0, Math.min(order.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
                       runtime.updateView({ keyboardNavigating: true, frozenOrder: order, focusId: order[next] }); const buttons = [...e.currentTarget.closest('tbody').querySelectorAll('.ssb-stock-name')]; buttons[next]?.focus()
                     }
-                  } }, item.pinned ? '置顶 · ' : '', item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${item.exchange === 'XSHG' ? '沪' : '深'} ${item.code}`))),
+                  } }, item.pinned ? '置顶 · ' : '', item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`))),
                   h('td', { className: `ssb-number${direction}` }, q?.last ?? '—'),
                   h('td', { className: `ssb-number${direction}` }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`),
                   h('td', { className: 'ssb-aux' }, h(QuoteStatus, { entry })),
@@ -299,7 +326,7 @@ window.__ModuleLoader__.load({
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
       const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
-      const marketLabel = ({ XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' })[item.exchange] || item.exchange
+      const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
       const currency = item.currency || ({ XSHG: 'CNY', XSHE: 'CNY', XHKG: 'HKD', XNAS: 'USD', XNYS: 'USD', XJPX: 'JPY', XKRX: 'KRW', XLON: 'GBp' })[item.exchange] || ''
       const fields = [['今开', q?.open], ['最高', q?.high], ['最低', q?.low], ['昨收', q?.previousClose], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量（股）', q?.volume], ['成交额', q?.amount], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['个股状态', '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', q?.delayKind === 'unknown' || !q ? '未知' : q.delayKind === 'realtime' ? '实时' : `${q.delaySeconds}秒`]]
       return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), h(Button, { className: 'ssb-mobile-back', onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')),
@@ -314,11 +341,11 @@ window.__ModuleLoader__.load({
       const { view, busy, data } = state
       const rows = view.browseRows
       return h('section', { className: 'ssb-search-view' }, h('h2', null, '浏览市场'),
-        h('div', { className: 'ssb-toolbar' }, ...['XSHG', 'XSHE'].map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, market === 'XSHG' ? '上海A股' : '深圳A股'))),
+        h('div', { className: 'ssb-toolbar' }, ...Object.keys(BROWSE_MARKETS).map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, BROWSE_MARKETS[market]))),
         !rows ? h('div', { className: 'ssb-empty' }, h('p', null, '目录尚未同步。先在设置中保存数据源配置，再同步目录。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录')) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
             const added = !!data?.control.watchlist.items[item.id]
-            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${item.exchange === 'XSHG' ? '沪' : '深'} ${item.code}`), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
+            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
           })),
         rows?.length ? h('div', { className: 'ssb-toolbar' }, h('span', { className: 'ssb-muted' }, `共 ${view.browseTotal} 只`), h(Button, { disabled: !view.browseOffset || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, Math.max(0, view.browseOffset - BROWSE_PAGE))) }, '上一页'), h(Button, { disabled: view.browseOffset + BROWSE_PAGE >= view.browseTotal || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, view.browseOffset + BROWSE_PAGE)) }, '下一页')) : null,
         h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')))
@@ -326,15 +353,17 @@ window.__ModuleLoader__.load({
     function SearchView({ runtime, state }) {
       const { view, candidates, data } = state
       function choose(item) { runtime.updateView({ selectedId: item.id }) }
+      const visible = view.searchMarket && view.searchMarket !== 'all' ? candidates.filter(c => c.exchange === view.searchMarket) : candidates
       return h('section', { className: 'ssb-search-view' }, h('h2', null, '添加自选'),
-        h('label', { className: 'ssb-search-label' }, '搜索名称、代码或拼音首字母', h('input', { type: 'search', autoFocus: true, value: view.query, placeholder: '例如 600519、茅台、gzmt', onChange: e => runtime.search(e.target.value), onCompositionStart: () => runtime.composition(true), onCompositionEnd: () => runtime.composition(false), onKeyDown: e => {
+        h('div', { className: 'ssb-toolbar' }, h('label', { className: 'ssb-field' }, h('span', null, '市场'), h('select', { value: view.searchMarket || 'all', onChange: e => runtime.updateView({ searchMarket: e.target.value }) }, ...[['all', '全部'], ['XSHG', '沪A股'], ['XSHE', '深A股'], ['XHKG', '港股'], ['XNAS', '美股'], ['XNYS', '美股(NYSE)']].map(([value, label]) => h('option', { value, key: value }, label))))),
+        h('label', { className: 'ssb-search-label' }, '搜索名称、代码或拼音首字母', h('input', { type: 'search', autoFocus: true, value: view.query, placeholder: '例如 600519、茅台、腾讯、AAPL', onChange: e => runtime.search(e.target.value), onCompositionStart: () => runtime.composition(true), onCompositionEnd: () => runtime.composition(false), onKeyDown: e => {
           if (e.nativeEvent?.isComposing || state.composing) return
-          const at = candidates.findIndex(c => c.id === view.selectedId)
-          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const index = e.key === 'ArrowDown' ? Math.min(candidates.length - 1, at + 1) : Math.max(0, at - 1); if (candidates[index]) choose(candidates[index]) }
+          const at = visible.findIndex(c => c.id === view.selectedId)
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const index = e.key === 'ArrowDown' ? Math.min(visible.length - 1, at + 1) : Math.max(0, at - 1); if (visible[index]) choose(visible[index]) }
           if (e.key === 'Escape') runtime.updateView({ view: 'list' })
         } })),
-        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...candidates.map(item => h('button', { type: 'button', role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${item.exchange === 'XSHG' ? '沪' : '深'} ${item.code}`)))),
-        !candidates.length ? h('p', { className: 'ssb-muted' }, view.query ? '暂无匹配。目录未同步时，请先到设置配置并同步目录。' : '先选择证券，再确认添加。') : null,
+        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('button', { type: 'button', role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)))),
+        !visible.length ? h('p', { className: 'ssb-muted' }, view.query ? '暂无匹配。目录未同步时，请先到设置配置并同步目录。' : '先选择证券，再确认添加。') : null,
         state.errorCode === 'CATALOG_NOT_READY' ? h('div', { className: 'ssb-banner' }, '目录未就绪。可以直接浏览市场添加自选。', h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '前往浏览市场')) : null,
         h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control.watchlist.items[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control.watchlist.items[view.selectedId] ? '已在自选' : '确认添加'), h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')))
     }
@@ -361,16 +390,17 @@ window.__ModuleLoader__.load({
             p.budget.billingUnit === 'symbol' ? field('每分钟证券额度', p.budget.symbolCreditsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, symbolCreditsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }) : null,
             ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap }))),
           h('div', { className: 'ssb-toolbar' }, h(Toggle, { label: '启用实例', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }), h('span', { className: 'ssb-muted' }, state.data.adapters.find(a => a.adapterId === p.adapterId)?.credential === 'none' ? '公开来源 · 延迟未知 · 无SLA' : state.data.providerStatus?.find(s => s.id === p.id)?.credentialPresent ? 'Host已配置变量' : '保存前检查Host凭据'), h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除实例')))),
-        h('h3', null, '按市场与能力选择来源'), h('p', { className: 'ssb-muted' }, '目录、报价与日历可独立选择。未配置的能力不会隐式使用其他来源。'),
-        ...['XSHG', 'XSHE'].map(market => h('fieldset', { className: 'ssb-provider', key: market, disabled: state.busy.configuration }, h('legend', null, market === 'XSHG' ? '上海A股' : '深圳A股'),
-          ...['catalog', 'search', 'quotes', 'calendar'].map(cap => {
+        h('h3', null, '按市场与能力选择来源'), h('p', { className: 'ssb-muted' }, '目录、报价、日历与K线可独立选择。未配置的能力不会隐式使用其他来源。'),
+        ...Object.keys(MARKET_LABEL).map(market => h('fieldset', { className: 'ssb-provider', key: market, disabled: state.busy.configuration }, h('legend', null, `${MARKET_LABEL[market]} · ${market}${state.data.markets?.[market]?.verified ? '' : '（未验证）'}`),
+          ...['catalog', 'search', 'quotes', 'calendar', 'kline'].filter(cap => cap !== 'catalog' && cap !== 'search' && cap !== 'calendar' || ['XSHG', 'XSHE'].includes(market)).map(cap => {
             const route = draft.routes.find(r => r.market === market && r.capability === cap)
             const updateRoute = patch => change({ routes: draft.routes.map(r => r === route ? { ...r, ...patch } : r) })
             const options = [h('option', { value: '', key: '' }, '未配置'), ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap)).map(p => h('option', { value: p.id, key: p.id }, p.id))]
-            return h('div', { className: 'ssb-route', key: cap }, h('label', { className: 'ssb-field' }, h('span', null, ({ quotes: '报价', catalog: '证券目录', search: '远程搜索（可选）', calendar: '交易日历' })[cap]), h('select', { value: route?.primaryInstanceId || '', onChange: e => change({ routes: [...draft.routes.filter(r => r !== route), ...(e.target.value ? [routeFor(market, cap, e.target.value)] : [])] }) }, ...options)),
-              cap === 'quotes' && route ? h('div', { className: 'ssb-route-options' }, h('label', { className: 'ssb-field' }, h('span', null, '备用报价源'), h('select', { value: route.fallbackInstanceIds[0] || '', onChange: e => updateRoute({ fallbackInstanceIds: e.target.value ? [e.target.value] : [], failoverMode: 'off' }) }, ...options.filter(o => o.props.value !== route.primaryInstanceId))), h(Toggle, { label: route.fallbackInstanceIds.length ? '网络连续失败自动切换' : '配置兼容备用源后可启用自动切换', disabled: !route.fallbackInstanceIds.length, checked: route.failoverMode === 'network', onChange: on => updateRoute({ failoverMode: on ? 'network' : 'off' }) }), h(Toggle, { label: '接受延迟未知', checked: route.acceptUnknownDelay, onChange: on => updateRoute({ acceptUnknownDelay: on }) }), field('最大延迟秒数（留空无限制）', route.maxDelaySeconds, value => updateRoute({ maxDelaySeconds: value ? Number(value) : null }), { type: 'number', min: 0 })) : null)
+            return h('div', { className: 'ssb-route', key: cap }, h('label', { className: 'ssb-field' }, h('span', null, ({ quotes: '报价', catalog: '证券目录', search: '远程搜索（可选）', calendar: '交易日历', kline: 'K线' })[cap]), h('select', { value: route?.primaryInstanceId || '', onChange: e => change({ routes: [...draft.routes.filter(r => r !== route), ...(e.target.value ? [routeFor(market, cap, e.target.value)] : [])] }) }, ...options)),
+              (cap === 'quotes' || cap === 'kline') && route ? h('div', { className: 'ssb-route-options' }, h('label', { className: 'ssb-field' }, h('span', null, cap === 'kline' ? '备用K线源' : '备用报价源'), h('select', { value: route.fallbackInstanceIds[0] || '', onChange: e => updateRoute({ fallbackInstanceIds: e.target.value ? [e.target.value] : [], failoverMode: 'off' }) }, ...options.filter(o => o.props.value !== route.primaryInstanceId))), h(Toggle, { label: route.fallbackInstanceIds.length ? '网络失败自动切换' : '配置兼容备用源后可启用自动切换', disabled: !route.fallbackInstanceIds.length, checked: route.failoverMode === 'network', onChange: on => updateRoute({ failoverMode: on ? 'network' : 'off' }) }), cap === 'quotes' ? h(React.Fragment, null, h(Toggle, { label: '接受延迟未知', checked: route.acceptUnknownDelay, onChange: on => updateRoute({ acceptUnknownDelay: on }) }), field('最大延迟秒数（留空无限制）', route.maxDelaySeconds, value => updateRoute({ maxDelaySeconds: value ? Number(value) : null }), { type: 'number', min: 0 })) : null) : null)
           }))),
         h('div', { className: 'ssb-toolbar' },
+          h(Button, { disabled: state.busy.check || state.busy.configuration, onClick: quiet(() => runtime.oneClickKline()) }, '一键为已启用市场配置K线'),
           h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => { const result = await runtime.check({ ...configuration, capabilities: [...new Set(draft.routes.map(r => r.capability))] }); const current = runtime.getSnapshot().view.settingsDraft; if (current && JSON.stringify({ providers: current.providers, routes: current.routes }) !== JSON.stringify(configuration)) return; change({ expectedRevision: runtime.getSnapshot().data.control.revision, checkIds: [...draft.checkIds, result.checkId], checkResults: result.checks }, false) }) }, state.busy.check ? '正在逐项检查…' : '检查所有来源能力'),
           h(Button, { primary: true, disabled: state.busy.configuration || state.busy.check || !draft.checkIds.length && draft.providers.some(p => p.enabled), onClick: quiet(() => runtime.configuration(configuration, draft.checkIds)) }, '保存配置'),
           h(Button, { disabled: state.busy.check || state.busy.configuration, onClick: () => runtime.updateView({ settingsDraft: null }) }, '放弃草稿')),

@@ -256,3 +256,32 @@ test('三个公开适配器合同完整且网络错误归NETWORK', async () => {
   await assert.rejects(sina.quotes(req, brokenCtx), e => e.code === 'NETWORK')
   await assert.rejects(eastmoney.quotes(req, brokenCtx), e => e.code === 'NETWORK')
 })
+
+// ---- Step 4.1/4.3: 东财港美 quotes 解析与 search 放宽 ----
+
+test('东财 quotes 港美市场解析与币种派生', async () => {
+  const hkCtx = { now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async () => ({ ok: true, json: async () => ({ data: { diff: [{ f2: 385.2, f12: '00700', f13: 116, f14: '腾讯控股', f15: 386, f16: 380, f17: 382.4, f18: 380, f5: 12345678, f6: 4712345678.9, f124: 1761816000 }] } }) }) }
+  const hk = await eastmoney.quotes({ providerInstanceId: 'em', securities: [{ id: 'XHKG:equity:00700', exchange: 'XHKG', code: '00700' }] }, hkCtx)
+  assert.equal(hk.items[0].last, '385.20')
+  assert.match(hk.items[0].amountUnit ?? hk.items[0].amount?.unit, /HKD/)
+  const usCtx = { now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async () => ({ ok: true, json: async () => ({ data: { diff: [{ f2: 348.91, f12: 'AAPL', f13: 105, f14: '苹果', f17: 347, f18: 345.2, f5: 50000000, f6: 17000000000, f124: 1761816000 }] } }) }) }
+  const us = await eastmoney.quotes({ providerInstanceId: 'em', securities: [{ id: 'XNAS:equity:AAPL', exchange: 'XNAS', code: 'AAPL' }] }, usCtx)
+  assert.equal(us.items[0].last, '348.91')
+  assert.match(us.items[0].amountUnit ?? us.items[0].amount?.unit, /USD/)
+})
+
+test('东财 search 放宽至港美并写 usSymbols', async () => {
+  const usSymbols = new Map()
+  const ctx = { now: () => 100, signal: new AbortController().signal, usSymbols, fetch: async () => ({ ok: true, json: async () => ({ QuotationCodeTable: { Data: [
+    { Code: '600519', Name: '贵州茅台', MktNum: '1', JYS: 'SSE', QuoteID: '1.600519', Classify: 'AStock', PinYin: 'gzmt' },
+    { Code: '00700', Name: '腾讯控股', MktNum: '116', JYS: 'HKEX', QuoteID: '116.00700', Classify: 'HKStock', PinYin: 'txkg' },
+    { Code: 'AAPL', Name: '苹果', MktNum: '105', JYS: 'NASDAQ', QuoteID: '105.AAPL', Classify: 'UsStock', PinYin: 'apple' },
+  ] } }) }) }
+  const cn = await eastmoney.search({ providerInstanceId: 'em', q: '贵州茅台', market: 'XSHG', limit: 10 }, ctx)
+  assert.equal(cn.items.length, 1); assert.equal(cn.items[0].code, '600519')
+  const hk = await eastmoney.search({ providerInstanceId: 'em', q: '腾讯', market: 'XHKG', limit: 10 }, ctx)
+  assert.equal(hk.items.length, 1); assert.equal(hk.items[0].code, '00700'); assert.equal(hk.items[0].currency, 'HKD')
+  const us = await eastmoney.search({ providerInstanceId: 'em', q: '苹果', market: 'XNAS', limit: 10 }, ctx)
+  assert.equal(us.items.length, 1); assert.equal(us.items[0].code, 'AAPL'); assert.equal(us.items[0].currency, 'USD')
+  assert.equal(usSymbols.get('US:AAPL')?.mktNum, '105', '美股候选写 usSymbols')
+})

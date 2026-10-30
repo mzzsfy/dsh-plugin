@@ -166,15 +166,15 @@ GET /plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production
 
 ```js
 MARKET_META = {
-  // 来源标注: XSHG/XSHE=一期既有值（实测对照）；XHKG/XNAS/XNYS=会话实测行情与代码形态（00700/AAPL/BABA）+交易所公开惯例；XJPX/XKRX/XLON=惯例值（M4.6 探针时一并实测回填后转"实测"标注）
+  // 来源标注: XSHG/XSHE=一期既有值（实测对照）；XHKG/XNAS/XNYS=实测；XJPX/XKRX/XLON=M4.6 探针实测通过（2026-10-31: 176.7203 丰田 3070/177.005930 三星 225000/155.SHEL 壳牌 4036.5）后转 true 交付
   XSHG: { currency:'CNY', timezone:'Asia/Shanghai', priceScale:2, codePattern:/^\d{6}$/, verifiedByDefault:true },
   XSHE: { currency:'CNY', timezone:'Asia/Shanghai', priceScale:2, codePattern:/^\d{6}$/, verifiedByDefault:true },
   XHKG: { currency:'HKD', timezone:'Asia/Hong_Kong', priceScale:2, codePattern:/^\d{4,5}$/, verifiedByDefault:true },
   XNAS: { currency:'USD', timezone:'America/New_York', priceScale:2, codePattern:/^[A-Z]{1,5}$/, verifiedByDefault:true },
   XNYS: { currency:'USD', timezone:'America/New_York', priceScale:2, codePattern:/^[A-Z]{1,5}$/, verifiedByDefault:true },
-  XJPX: { currency:'JPY', timezone:'Asia/Tokyo', priceScale:0, codePattern:/^\d{4}$/, verifiedByDefault:false },
-  XKRX: { currency:'KRW', timezone:'Asia/Seoul', priceScale:0, codePattern:/^\d{6}$/, verifiedByDefault:false },
-  XLON: { currency:'GBP', timezone:'Europe/London', priceScale:2, codePattern:/^[A-Z0-9.]{1,10}$/, verifiedByDefault:false },
+  XJPX: { currency:'JPY', timezone:'Asia/Tokyo', priceScale:0, codePattern:/^\d{4}$/, verifiedByDefault:true },
+  XKRX: { currency:'KRW', timezone:'Asia/Seoul', priceScale:0, codePattern:/^\d{6}$/, verifiedByDefault:true },
+  XLON: { currency:'GBP', timezone:'Europe/London', priceScale:2, codePattern:/^[A-Z0-9.]{1,10}$/, verifiedByDefault:true },
 }
 // verifiedByDefault: 探针门控唯一事实源（M4.4 一键按钮/路由保存检查/未验证标三项消费）——静态常量非运行时状态，探针通过随代码改 true 交付
 // securitySchema: currency/timezone/priceScale 改 string/number + superRefine 对照 MARKET_META 校验一致
@@ -673,3 +673,4 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 | 腾讯 qt 字段族 preClose 索引 | 2026-10-30 实测 web.ifzq fqkline 响应 `qt.{symbol}[4]`=昨收（sz000001→11.54 与东财 f18 一致；[3]=现价/[5]=今开） |
 | 腾讯美股后缀形态 | 2026-10-30 实测: .OQ/.N/裸代码三者同价有效（SPY 769.36 一致）；.A/.U 返回空数据——JYS_TO_SUFFIX={NASDAQ:OQ,NYSE:N,AMEX:''裸代码} |
 | M1 真实拉取矩阵 | 2026-10-30 跨源对齐: 600519 EM 1392.05/000001 EM=TX 11.64/00700 EM=TX 383.6/AAPL 348.91（±0.01 达标） |
+| 日韩英 kline 探针 | 2026-10-31 实测通过: XJPX 176.7203 丰田 3070 JPY/XKRX 177.005930 三星 225000 KRW/XLON 155.SHEL 壳牌 4036.5 GBp；三市场响应无 preKPrice 字段（preClose=null 合同可空兜底）→verifiedByDefault 全翻 true |

@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MARKET_META, securityId, parseSecurityId, makeSecurity } from '../src/market-model.mjs'
 
-test('MARKET_META 八市场齐全且五市场探针默认通过', () => {
+test('MARKET_META 八市场齐全且八市场探针全部实测通过', () => {
   assert.deepEqual(Object.keys(MARKET_META), ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'])
-  assert.equal(Object.values(MARKET_META).filter(m => m.verifiedByDefault).length, 5)
+  assert.equal(Object.values(MARKET_META).filter(m => m.verifiedByDefault).length, 8)
 })
 
 test('多市场证券构造: 港/美/日按 MARKET_META 派生币种时区精度', () => {

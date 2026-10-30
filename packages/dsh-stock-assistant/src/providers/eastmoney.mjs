@@ -1,6 +1,5 @@
 // 东财公开行情接口适配器:quotes/catalog/search/kline。非官方端点,无SLA;延迟未知,f124为来源秒级时间戳。
-import { normalizeQuote, makeSecurity, StockError } from '../market-model.mjs'
-import { securityId } from '../market-model.mjs'
+import { normalizeQuote, makeSecurity, securityId, StockError, MARKET_META } from '../market-model.mjs'
 const QUOTES_ENDPOINT = 'https://push2.eastmoney.com/api/qt/ulist.np/get'
 const LIST_ENDPOINT = 'https://push2.eastmoney.com/api/qt/clist/get'
 const SEARCH_ENDPOINT = 'https://searchapi.eastmoney.com/api/suggest/get'
@@ -8,6 +7,8 @@ const KLINE_ENDPOINT = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
 const TREND_ENDPOINT = 'https://push2his.eastmoney.com/api/qt/stock/trends2/get'
 // 东财市场代码:XSHG=1,XSHE=0;美股 secid 前缀由搜索 MktNum 动态归属(usSymbols),其余市场实测前缀。
 const MARKET = { XSHG: '1', XSHE: '0' }
+// 搜索联想 MktNum→交易所全集(实测: 1/0 沪深, 116 港, 105/106/107 美三大)
+const SEARCH_EXCHANGE = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNAS' }
 const SECID_PREFIX = { XSHG: '1', XSHE: '0', XHKG: '116', XNAS: '105', XNYS: '106', XJPX: '176', XKRX: '177', XLON: '155' }
 const US_DEFAULT_MKT = '105'
 // klt 周期映射(实测): 日101/周102/月103; trends2 无 klt。
@@ -19,7 +20,8 @@ const PROBE_SECURITY = { XSHG: '600519', XSHE: '000001', XHKG: '00700', XNAS: 'A
 // klines CSV 前 7 列固定语义(实测 fields2=f51-f57); f53=close 在 f54=high 前为东财原生序。
 const KLINE_FIELDS = 'f51,f52,f53,f54,f55,f56,f57'
 const TREND_FIELDS = 'f51,f52,f53,f54,f55,f56,f57,f58'
-const symbolOf = security => `${MARKET[security.exchange]}.${security.code}`
+// quotes secid 与 kline secidOf 同源(八市场前缀表);美股 quotes 同样走 usSymbols 动态归属。
+const symbolOf = security => `${SECID_PREFIX[security.exchange]}.${security.code}`
 const num = value => value == null || typeof value === 'number' && !Number.isFinite(value) ? null : value === '-' ? null : String(value)
 async function getJson(ctx, url) {
   let response
@@ -55,7 +57,9 @@ export const eastmoney = {
     return { status: 'ready', capability: 'quotes', market: request.market, instrument: 'equity' }
   },
   async quotes(request, ctx) {
-    const symbols = new Map(request.securities.map(s => [symbolOf(s), s]))
+    // 美股 secid 走 usSymbols 动态归属(miss 默认 NASDAQ);其余市场静态前缀表。
+    const secidOf = security => (security.exchange === 'XNAS' || security.exchange === 'XNYS') ? `${ctx.usSymbols?.get(`US:${security.code}`)?.mktNum || US_DEFAULT_MKT}.${security.code}` : `${SECID_PREFIX[security.exchange]}.${security.code}`
+    const symbols = new Map(request.securities.map(s => [secidOf(s), s]))
     const body = await getJson(ctx, `${QUOTES_ENDPOINT}?secids=${[...symbols.keys()].join(',')}&fields=f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124&fltt=2&invt=2`)
     const rows = body?.data?.diff
     // data:null表示全部secids无效(如整批退市),降级为逐证券缺失,不让单批坏行瘫痪路由。
@@ -66,12 +70,13 @@ export const eastmoney = {
       if (!security) continue
       if (seen.has(security.id)) throw new StockError('BAD_PAYLOAD', '报价身份冲突', 502)
       seen.add(security.id)
-      // fltt=2时价格为已缩放数值, "-"表示停牌等无值;f124为来源Unix秒。
+      // fltt=2时价格为已缩放数值, "-"表示停牌等无值;f124为来源Unix秒;成交额币种按市场派生(单一事实源 MARKET_META.currency)。
       const quoteAt = Number.isFinite(row.f124) ? new Date(row.f124 * 1000).toISOString() : null
+      const currency = MARKET_META[security.exchange]?.currency || 'CNY'
       items.push(normalizeQuote({
         securityId: security.id, providerInstanceId: request.providerInstanceId, adapterId: 'eastmoney', providerSymbol: `${row.f13}.${row.f12}`,
         last: num(row.f2), previousClose: num(row.f18), open: num(row.f17), high: num(row.f15), low: num(row.f16),
-        volume: num(row.f5), volumeUnit: 'share', amount: num(row.f6), amountUnit: 'CNY',
+        volume: num(row.f5), volumeUnit: 'share', amount: num(row.f6), amountUnit: currency,
         quoteAt, timestampKind: 'trade',
         receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown',
       }))
@@ -110,9 +115,12 @@ export const eastmoney = {
     if (!Array.isArray(rows)) return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: [], errors: [] }
     const items = []
     for (const row of rows) {
-      if (row.Classify !== 'AStock' || !['1', '0'].includes(row.MktNum)) continue
-      const exchange = SYMBOL_PREFIX[Number(row.MktNum)]
-      if (exchange !== request.market || !/^\d{6}$/.test(row.Code)) continue
+      const exchange = SEARCH_EXCHANGE[row.MktNum]
+      if (!exchange || exchange !== request.market) continue
+      // 美股候选写 usSymbols(代码→MktNum/JYS), kline 美股动态归属与腾讯 suffix 唯一数据来源
+      if ((exchange === 'XNAS' || exchange === 'XNYS') && ctx.usSymbols && ['105', '106', '107'].includes(row.MktNum)) ctx.usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: ctx.now() })
+      const meta = MARKET_META[exchange]
+      if (!meta || !meta.codePattern.test(row.Code)) continue
       items.push(makeSecurity(exchange, row.Code, row.Name, { cnspell: typeof row.PinYin === 'string' ? row.PinYin.toLowerCase() : '', catalogSource: request.providerInstanceId }))
     }
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: [] }

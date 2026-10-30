@@ -5,9 +5,9 @@ export const MARKET_META = {
   XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true },
   XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true },
   XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true },
-  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: false },
-  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: false },
-  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: false },
+  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: true },
+  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: true },
+  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: true },
 }
 
 export function securityId(exchange, code, instrument = 'equity') {
