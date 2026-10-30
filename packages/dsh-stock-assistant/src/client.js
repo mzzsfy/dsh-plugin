@@ -1,7 +1,7 @@
 window.__ModuleLoader__.load({
-  id: '@mzzsfy/dsh-stock-sidebar',
+  id: '@mzzsfy/dsh-stock-assistant',
   factory(require) {
-    const PANEL_ID = 'stock-sidebar', BASE = '/api/stock-sidebar', BROWSE_PAGE = 50
+    const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
       let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, queryGeneration = 0, querying, composing = false
       const subscribers = new Set(), retiredEpochs = new Set(), requests = new Set()
@@ -277,7 +277,7 @@ window.__ModuleLoader__.load({
         if (node?.tagName === 'H2') node.setAttribute('tabindex', '-1'); node?.focus({ preventScroll: true })
       }, [view.view])
       return h('div', { className: `ssb-root${data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
-        React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-sidebar', dangerouslySetInnerHTML: { __html: CSS } }),
+        React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' }, h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, '自选行情 · 沪深A股')), h('nav', { className: 'ssb-toolbar', 'aria-label': '股票工具操作' },
           h(Button, { onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选'), h(Button, { onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '浏览市场'), h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(runtime.refresh) }, state.busy.refresh ? '刷新中…' : '刷新'), h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused }), h(Button, { onClick: () => runtime.updateView({ view: 'settings' }) }, '设置'), h(Button, { onClick: () => layout.selectPanel(null) }, '返回对话'))),
           state.error ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'settings' }) }, '检查设置')) : null,
@@ -293,14 +293,14 @@ window.__ModuleLoader__.load({
         if (!ctx.slots?.inject || !ctx.layout?.panelInfo?.subscribe) return
         const bus = tools.setupCommonTools(ctx)
         const runtime = createPageRuntime({ layout: ctx.layout, bus, tools })
-        ctx.effect(() => () => runtime.dispose(), 'stock-sidebar page runtime')
+        ctx.effect(() => () => runtime.dispose(), 'stock-assistant page runtime')
         ctx.effect(() => {
           const disposers = [
             ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, () => h(StockPage, { runtime, layout: ctx.layout }))),
             ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, label: '股票' }, props => h(PanelIcon, props))),
           ]
           return () => { for (const stop of disposers.reverse()) stop() }
-        }, 'stock-sidebar main panel')
+        }, 'stock-assistant main panel')
       },
       __testing: { createPageRuntime, StockPage },
     }

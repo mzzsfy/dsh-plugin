@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { StockError, fail } from './market-model.mjs'
-const PREFIX = '/api/stock-sidebar'
+const PREFIX = '/api/stock-assistant'
 const operationSchema = z.object({ operationId: z.uuid(), expectedRevision: z.number().int().nonnegative() })
 async function body(req) {
   const chunks = []; let size = 0

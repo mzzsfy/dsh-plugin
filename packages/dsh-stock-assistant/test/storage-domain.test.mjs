@@ -24,7 +24,7 @@ test('S08 真实DomainFacility校验独立域，关闭重开回读自有结构',
   assert.equal(reopened.get().revision, 1)
   assert.equal(reopened.get().preferences.refreshSeconds, 60)
   assert.deepEqual(spec.tables, ['control', 'cache'])
-  assert.equal(spec.name, 'stock_sidebar')
+  assert.equal(spec.name, 'stock_assistant')
   assert.equal((await readFile(file, 'utf8')).includes('settings'), false)
   await reopened.close()
 })

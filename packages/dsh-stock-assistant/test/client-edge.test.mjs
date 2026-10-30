@@ -12,7 +12,7 @@ async function loadClientWithReact() {
   return { plugin }
 }
 async function runtime(options = {}) {
-  let plugin, reset, snapshotTask, listener, panel = 'stock-sidebar'
+  let plugin, reset, snapshotTask, listener, panel = 'stock-assistant'
   const messages = [], source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(() => ({})) } } }
   vm.runInNewContext(source, { window, console, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto, fetch: globalThis.fetch })
@@ -37,7 +37,7 @@ test('U05 暂停期间路由变化清掉旧价格而保留暂停和设置草稿'
 })
 test('D01/D04/H09 同页反复入口不重复需求；暂停只撤销本页', async () => {
   const r = await runtime(), before = r.messages.length
-  r.select('stock-sidebar'); assert.equal(r.messages.length, before)
+  r.select('stock-assistant'); assert.equal(r.messages.length, before)
   r.value.setPaused(true); assert.equal(r.messages.at(-1).active, false)
   r.value.setPaused(false); assert.equal(r.messages.at(-1).active, true)
   assert.equal(new Set(r.messages.map(m => m.pageId)).size, 1)

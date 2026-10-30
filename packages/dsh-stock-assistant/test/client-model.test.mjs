@@ -33,7 +33,7 @@ test('UI01 自选列表呈现同源价格、涨跌符号与未知延迟', async 
   const runtime = { getSnapshot: () => ({ view: { view: 'list', sort: 'manual' }, busy: {}, data: { control: { revision: 1, watchlist: { order: ['XSHG:equity:600519'], items: { 'XSHG:equity:600519': { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG' } } }, preferences: { colorMode: 'red-up' } }, quotes: { 'XSHG:equity:600519': { health: 'ok', quote: { last: '10.00', changePct: '25.00', providerInstanceId: 'a', delayKind: 'unknown' } } } } }), subscribe: () => () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime, layout: {} }))
   assert.match(html, /贵州茅台/); assert.match(html, /10\.00/); assert.match(html, /\+25\.00%/); assert.match(html, /延迟未知/)
-  assert.match(html, /data-plugin="@mzzsfy\/dsh-stock-sidebar"/)
+  assert.match(html, /data-plugin="@mzzsfy\/dsh-stock-assistant"/)
 })
 test('H03/H04 main和导航入口配对且注册清理成对', async () => {
   const modules = { react: { createElement: (...args) => args }, '@mzzsfy/dsh-common-tools/client': { setupCommonTools: () => ({ publish() {}, subscribe: () => () => {} }), createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) } }
@@ -42,19 +42,19 @@ test('H03/H04 main和导航入口配对且注册清理成对', async () => {
   const cleanups = [], registrations = [], removed = []
   const ctx = { effect: fn => cleanups.push(fn()), layout: { panelInfo: { getSnapshot: () => ({ activePanelId: null }), subscribe: () => () => {} } }, slots: { inject: (name, fn) => { fn(); return () => removed.push(name) }, register: options => registrations.push(options) } }
   plugin.apply(ctx)
-  assert.equal(registrations.find(r => r.name === 'main')?.key, 'stock-sidebar')
-  assert.equal(registrations.find(r => r.name === 'sidebar.panellist')?.id, 'stock-sidebar')
+  assert.equal(registrations.find(r => r.name === 'main')?.key, 'stock-assistant')
+  assert.equal(registrations.find(r => r.name === 'sidebar.panellist')?.id, 'stock-assistant')
   for (const cleanup of cleanups.reverse()) cleanup?.()
   assert.equal(removed.length, 2)
 })
 test('H05/H07/H08 页面级运行时保留跨会话与隐藏后的草稿，不因view卸载重建', async () => {
   const { plugin } = await loadClient()
-  let panel = 'stock-sidebar', listener
+  let panel = 'stock-assistant', listener
   const layout = { panelInfo: { getSnapshot: () => ({ activePanelId: panel }), subscribe: fn => { listener = fn; return () => { listener = null } } } }
   const runtime = plugin.__testing.createPageRuntime({ layout, bus: { subscribe: () => () => {}, publish() {} }, tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) }, document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }, fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: { serverEpoch: 'one', snapshotSeq: 1, control: { revision: 0, watchlist: { order: [] }, preferences: {} } } }) }) })
   runtime.updateView({ view: 'settings', query: '茅台', settingsDraft: { preserved: true }, scrollTop: 120 })
   panel = null; listener()
-  panel = 'stock-sidebar'; listener()
+  panel = 'stock-assistant'; listener()
   const value = runtime.getSnapshot()
   assert.equal(value.view.query, '茅台')
   assert.equal(value.view.settingsDraft.preserved, true)

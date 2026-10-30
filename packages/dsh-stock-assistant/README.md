@@ -1,4 +1,4 @@
-# @mzzsfy/dsh-stock-sidebar
+# @mzzsfy/dsh-stock-assistant
 
 DSH 全局股票工具。左侧“股票”入口打开独立主页面，无会话也可使用。切换、关闭 DSH 会话或临时打开其他工具，不会清除股票工具的搜索、详情、排序、滚动位置和设置草稿。
 
@@ -8,7 +8,7 @@ DSH 全局股票工具。左侧“股票”入口打开独立主页面，无会�
 
 **不使用 DSH 默认设置系统。** 本插件不声明 `Config`，不调用 `settings` 或 `configEditor`。配置界面位于股票工具自己的“设置”视图中。
 
-通过宿主 `storageDomain` 使用专用 `stock_sidebar` 数据域，version=1、layout=single：
+通过宿主 `storageDomain` 使用专用 `stock_assistant` 数据域（2026-10-30 前为 `stock_sidebar`，随包改名一并更名；生产 profile 未挂载过旧域，无迁移），version=1、layout=single：
 
 | 表 / 记录 | 内容 |
 | --- | --- |
@@ -70,7 +70,7 @@ HTTP 路径前缀 `/api/stock-sidebar`：`snapshot/search/watchlist/preferences/
 
 ## 安装与开发
 
-源码初始版本0.1.0，尚未发布。仓库开发挂载遵循根目录 `scripts/dev-link.mjs dsh-stock-sidebar`；本轮实现未修改生产 profile，也未重启生产宿主。装载层新增插件通常需要操作者在合适时机重新启动宿主。
+源码初始版本0.1.0，尚未发布。仓库开发挂载遵循根目录 `scripts/dev-link.mjs dsh-stock-assistant`；本轮实现未修改生产 profile，也未重启生产宿主。装载层新增插件通常需要操作者在合适时机重新启动宿主。
 
 要求 Node>=22，宿主已有 `webServer`（包括upgrade）、`storageDomain`、有效 backend；client 需要 `slots/locale/layout`。缺服务干净禁用。公共 client 依赖由 `dsh-session-manager` 的唯一占位项承载，本包只声明 dependency/external，不插第二条占位。Host/client使用同代 common-tools 0.3.x。
 

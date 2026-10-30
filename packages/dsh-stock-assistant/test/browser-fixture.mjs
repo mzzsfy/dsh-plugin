@@ -24,10 +24,10 @@ const modules={ react:window.React, 'react-dom/client':{createRoot:window.create
 window.__ModuleLoader__={load(entry){modules[entry.id]=entry.factory(name=>modules[name])}};
 `
 const setup = `
-const plugin=modules['@mzzsfy/dsh-stock-sidebar'];
-const panelListeners=new Set();let panelId='stock-sidebar',main;
+const plugin=modules['@mzzsfy/dsh-stock-assistant'];
+const panelListeners=new Set();let panelId='stock-assistant',main;
 const root=window.createRoot(document.getElementById('app'));
-const ctx={fiber:{entry:{options:{name:'@mzzsfy/dsh-stock-sidebar'}}},effect:fn=>{const stop=fn();cleanup.push(stop);return stop},layout:{panelInfo:{getSnapshot:()=>({activePanelId:panelId}),subscribe:fn=>{panelListeners.add(fn);return()=>panelListeners.delete(fn)}},selectPanel:id=>{panelId=id;panelListeners.forEach(fn=>fn());root.render(id==='stock-sidebar'?main:React.createElement('button',{onClick:()=>ctx.layout.selectPanel('stock-sidebar')},'打开股票'))}},slots:{inject:(name,fn)=>{fn();return()=>{}},register:(opts,render)=>{if(opts.name==='main')main=render();return()=>{}}}};
+const ctx={fiber:{entry:{options:{name:'@mzzsfy/dsh-stock-assistant'}}},effect:fn=>{const stop=fn();cleanup.push(stop);return stop},layout:{panelInfo:{getSnapshot:()=>({activePanelId:panelId}),subscribe:fn=>{panelListeners.add(fn);return()=>panelListeners.delete(fn)}},selectPanel:id=>{panelId=id;panelListeners.forEach(fn=>fn());root.render(id==='stock-assistant'?main:React.createElement('button',{onClick:()=>ctx.layout.selectPanel('stock-assistant')},'打开股票'))}},slots:{inject:(name,fn)=>{fn();return()=>{}},register:(opts,render)=>{if(opts.name==='main')main=render();return()=>{}}}};
 plugin.apply(ctx);root.render(main);
 window.fixture={selectPanel:ctx.layout.selectPanel,sessionChange:()=>panelListeners.forEach(fn=>fn()),cleanup:()=>cleanup.reverse().forEach(fn=>fn?.())};
 `

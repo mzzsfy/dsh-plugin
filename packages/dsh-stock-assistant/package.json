@@ -1,5 +1,5 @@
 {
-  "name": "@mzzsfy/dsh-stock-sidebar",
+  "name": "@mzzsfy/dsh-stock-assistant",
   "version": "0.1.0",
   "description": "股票单页面工具：独立于会话的自选、多平台数据路由与行情查看",
   "type": "module",

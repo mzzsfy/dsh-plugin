@@ -10,7 +10,7 @@ test('C03 HTTP刷新等待完成且同价不依赖WS回执，非法方法拒绝'
   const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
-  const base = `http://127.0.0.1:${server.address().port}/api/stock-sidebar`
+  const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
   const response = await fetch(base + '/refresh', { method: 'POST', body: '{}' })
   assert.equal(response.status, 200)
   assert.equal((await response.json()).data.snapshotSeq, 2)
@@ -28,7 +28,7 @@ test('browse端点HTTP层钳制越界参数并返回分页结构', async t => {
   const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
-  const base = `http://127.0.0.1:${server.address().port}/api/stock-sidebar`
+  const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
   const ok = await (await fetch(base + '/browse?market=XSHG&offset=-5&limit=99999')).json()
   assert.equal(ok.ok, true)
   assert.deepEqual(ok.data.items, [])
@@ -53,7 +53,7 @@ test('configuration要求有效checkId,检查通过后保存成功', async t => 
   const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
-  const base = `http://127.0.0.1:${server.address().port}/api/stock-sidebar`
+  const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
   const rejected = await (await fetch(base + '/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: 1, providers, routes: routesCfg }) })).json()
   assert.equal(rejected.error.code, 'CHECK_REQUIRED')
   const check = await (await fetch(base + '/provider-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ providers, routes: routesCfg, capabilities: ['quotes'] }) })).json()

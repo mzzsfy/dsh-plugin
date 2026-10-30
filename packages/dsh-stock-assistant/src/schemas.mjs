@@ -44,7 +44,7 @@ export const controlSchema = z.object({ revision: z.number().int().nonnegative()
   for (const id of w.order) { if (!w.items[id]?.pinned) unpinned = true; else if (unpinned) ctx.addIssue({ code: 'custom', message: '置顶序列混乱' }) }
   try { parseConfiguration({ providers: control.providers, routes: control.routes }) } catch { ctx.addIssue({ code: 'custom', message: '来源配置不一致' }) }
 })
-export const domainSpec = { name: 'stock_sidebar', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
+export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
 // 默认数据源:免凭据公开源+保守预算,首用即可检查保存;目录走新浪分市场节点,行情与搜索走东财。
 export const defaultConfig = () => {
   const catalog = { id: 'sn-catalog', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: { requestsPerMinute: 120, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { catalog: 60 } } }

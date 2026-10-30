@@ -1,4 +1,4 @@
-export const name = 'dsh-stock-sidebar'
+export const name = 'dsh-stock-assistant'
 export const inject = ['webServer', 'storageDomain']
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { createApplication } from './application.mjs'
@@ -12,7 +12,7 @@ export async function apply(ctx) {
   ctx.effect(() => () => {
     disposed = true; stopRoutes?.(); unsubscribe?.(); notifier?.dispose()
     return application?.close()
-  }, 'stock-sidebar lifecycle')
+  }, 'stock-assistant lifecycle')
   try {
     application = await createApplication({ storageDomain: ctx.storageDomain, publish: () => notifier?.refresh() })
     if (disposed) { await application.close(); return }
