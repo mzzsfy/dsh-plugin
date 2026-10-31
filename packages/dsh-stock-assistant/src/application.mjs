@@ -30,7 +30,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const getControl = state.get
   const router = createRouter(getControl, now, () => collector?.reset())
   const klineCache = createKlineCache({ cacheTable: state.cache, now })
-  catalog = createCatalog({ state, getControl, router, executor, now, changed })
+  catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
   let ensuring = null, lastEnsure = -Infinity, ensureError = null
   const ensureCaches = () => {
     if (ensuring || now() - lastEnsure < 60 * 1000) return

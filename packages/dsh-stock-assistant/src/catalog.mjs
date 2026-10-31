@@ -2,7 +2,17 @@ import { securitySchema } from './schemas.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 const localDate = ms => new Date(ms + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
-export function createCatalog({ state, getControl = state.get, router, executor, now = Date.now, changed = () => {} }) {
+// 实例id→其适配器 markets 集合(搜索市场面唯一事实源)
+function adapterMarketsOf(config, registry) {
+  const map = new Map()
+  for (const p of config.providers.filter(p => p.enabled)) {
+    const adapter = (registry?.descriptors() || []).find(d => d.adapterId === p.adapterId)
+    map.set(p.id, new Set(adapter?.markets || []))
+  }
+  return map
+}
+
+export function createCatalog({ state, getControl = state.get, router, executor, registry, now = Date.now, changed = () => {} }) {
   const flights = new Map(), candidates = new Map()
   let stopped = false
   const controllers = new Set()
@@ -43,9 +53,22 @@ export function createCatalog({ state, getControl = state.get, router, executor,
     status: () => records('catalog').map(c => ({ source: c.source, fetchedAt: c.fetchedAt, complete: c.payload.complete, stale: now() - c.fetchedAt > (c.kind === 'calendar' ? 7 * DAY : DAY) })),
     async remote(q, signal) {
       const config = structuredClone(getControl()), results = new Map(search(q).map(s => [s.id, s]))
-      for (const route of config.routes.filter(r => r.capability === 'search')) {
-        const selected = router.select('search', route.market)
-        const batch = await executor.run(selected.instance, 'search', { q, limit: 20, market: route.market, routingRevision: config.routingRevision }, { signal })
+      // 搜索市场面=启用实例的适配器市场并集(suggest 天然全市场, 已启用市场语义跟随实例能力而非路由)
+      const adapterMarkets = adapterMarketsOf(config, registry)
+      const quoteMarkets = new Set([...adapterMarkets.values()].flat())
+      const searchRoutes = new Map(config.routes.filter(r => r.capability === 'search').map(r => [r.market, r]))
+      for (const market of quoteMarkets) {
+        const route = searchRoutes.get(market)
+        let instance
+        if (route) { instance = router.select('search', market).instance }
+        else {
+          // 无 search 路由的市场: 用支持 search 的启用实例直连(市场过滤在适配器端)
+          const searchAdapters = new Set((registry?.descriptors() || []).filter(d => d.capabilities.includes('search')).map(d => d.adapterId))
+          instance = config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId) && adapterMarkets.get(p.id)?.has(market))
+            || config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId))
+          if (!instance) continue
+        }
+        const batch = await executor.run(instance, 'search', { q, limit: 20, market, routingRevision: config.routingRevision }, { signal })
         if (stopped || getControl().routingRevision !== config.routingRevision) fail('ROUTE_CONFLICT', '目录路由已变化', 409)
         for (const s of batch.items) {
           if (!securitySchema.safeParse(s).success) fail('BAD_PAYLOAD', '来源返回不受支持的证券身份', 502)
