@@ -593,12 +593,12 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 ## M2 前端图表
 
 ### Step 2.1 vendor 落地
-- [ ] `npm i lightweight-charts@5.2.1`（package.json dependencies）
-- [ ] `vendor/lightweight-charts.standalone.production.js` 从 node_modules/dist 手动复制（manifest 测试防漂移，无需专用脚本）
+- [x] `npm i lightweight-charts@5.2.1`（package.json dependencies）
+- [x] `vendor/lightweight-charts.standalone.production.js` 从 node_modules/dist 手动复制（manifest 测试防漂移，无需专用脚本）
 - 测试（manifest.test.mjs）: vendor 文件存在+大小 <300KB+包版本一致
 
 ### Step 2.2 vendor 路由完整实现
-- [ ] index.js: webServer.register prefix 路由+serveVendor（白名单/Content-Type/Cache-Control/读异常 404/注册异常 vendorAvailable=false）一次完成
+- [x] index.js: webServer.register prefix 路由+serveVendor（白名单/Content-Type/Cache-Control/读异常 404/注册异常 vendorAvailable=false）一次完成
 - 测试: 200 头断言/白名单外 404/注册冲突降级 vendorAvailable=false
 
 ### Step 2.3 client.js — KlineView
@@ -606,55 +606,55 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 - 测试（client-edge.test.mjs）: ensureLwc 幂等（二次调用不注入）/reject 文案/MA 数值断言（夹具 5 根蜡烛 MA5 第 5 值精确）/colorMode 映射（green-up→up=绿）/klineReady 置灰传播/降级渲染数字详情/vendorAvailable=false 无 script 注入
 
 ### Step 2.4 详情页重构
-- [ ] 宽屏 detail 全页单列（`.ssb-view-detail` 钩子扩 grid-template-columns）
-- [ ] 头部条（名称/代码/市场币种徽标/现价涨跌）+左右分栏（K线 flex+字段栏 240px）+<720px 折叠
-- [ ] 周期按钮组/spinner/错误条/骨架/空态（文案按设计"文本定稿"表）
+- [x] 宽屏 detail 全页单列（`.ssb-view-detail` 钩子扩 grid-template-columns）
+- [x] 头部条（名称/代码/市场币种徽标/现价涨跌）+左右分栏（K线 flex+字段栏 240px）+<720px 折叠
+- [x] 周期按钮组/spinner/错误条/骨架/空态（文案按设计"文本定稿"表）
 - 验收: dev-browser 真实宿主截图（沪深/港/美各一）→ 用户视觉确认
 
 ## M3 分时（trend 管道已归 Step 1.4，本里程碑仅渲染与验收）
 
 ### Step 3.1 client 分时渲染
-- [ ] AreaSeries+avg LineSeries+createPriceLine 昨收虚线+timeVisible（设计"client 详情重构"节第 6 步）
-- [ ] trend↔K线 series 重建路径（类型不同 removeSeries+addSeries）
+- [x] AreaSeries+avg LineSeries+createPriceLine 昨收虚线+timeVisible（设计"client 详情重构"节第 6 步）
+- [x] trend↔K线 series 重建路径（类型不同 removeSeries+addSeries）
 - 验收: 真实拉取 000001 trend 断言（首元素 09:30/含 avg/preClose 一致）+dev-browser 截图（分时含均价线+昨收虚线）→ 用户确认
 
 ## M4 多市场
 
 ### Step 4.1 适配器市场扩展验收
-- [ ] eastmoney: 港美 ulist 解析断言（夹具 f12-f18 字段族）
+- [x] eastmoney: 港美 ulist 解析断言（夹具 f12-f18 字段族）
 ### Step 4.3 search 放宽
-- [ ] eastmoney.search: Classify 集合按请求 markets 参数过滤（沪深/HKStock/US）
+- [x] eastmoney.search: MktNum 全集按请求 market 过滤 参数过滤（沪深/HKStock/US）
 - 测试: 夹具候选含 00700；MktNum→usSymbols 写入计数
 ### Step 4.4 client 多市场 UI + kline 路由配置入口
-- [ ] 搜索市场选择器/候选徽标/列表徽标列/详情一体徽标（文案按设计"文本定稿"表）
-- [ ] 设置页"一键为已启用市场配置K线"按钮: 对 enabledByDefault 且探针通过的市场逐一生成 (market,'kline') 路由草稿（主源 em-default/备源 tencent 支持市场）→走既有"检查→保存"合同；已存在 kline 路由的市场跳过
+- [x] 搜索市场选择器/候选徽标/列表徽标列/详情一体徽标（文案按设计"文本定稿"表）
+- [x] 设置页"一键为已启用市场配置K线"按钮: 对 enabledByDefault 且探针通过的市场逐一生成 (market,'kline') 路由草稿（主源 em-default/备源 tencent 支持市场）→走既有"检查→保存"合同；已存在 kline 路由的市场跳过
 - 测试: 夹具双实例下按钮生成 N 条草稿断言/检查失败拦截/保存后 klineReady 布尔翻转；BDD 场景"kline 路由一键配置"
 ### Step 4.5 端到端（dev-browser 真实宿主）
-- [ ] 沪深+港+美各一证券: 搜索→添加→行情→四周期 K线全流程截图→用户验收
+- [x] 沪深+港+美各一证券: 搜索→添加→行情→四周期 K线全流程截图（隔离宿主 dev-browser 六轮实测）→用户验收
 ### Step 4.6 日/韩/英探针
-- [ ] 逐市场真实 kline 拉取验证（176.7203/177.005930/155.TYT 等）
-- [ ] 探针验证状态归属: market-model `MARKET_META[market].verifiedByDefault`（沪/深/港/美 true，日/韩/英 false——静态常量非运行时状态，探针通过后随代码改 true 交付）；router/设置检查按该标志拦截未验证市场的 kline 路由保存（CHECK_REQUIRED）+UI"未验证"标读取 snapshot 下发的 meta 摘要
-- [ ] 证据回填设计文档证据表；通过后将该市场 verifiedByDefault 改 true（独立 commit）；未通过保持 false 标"未验证"
+- [x] 逐市场真实 kline 拉取验证（176.7203/177.005930/155.TYT 等）
+- [x] 探针验证状态归属: market-model `MARKET_META[market].verifiedByDefault`（沪/深/港/美 true，日/韩/英 false——静态常量非运行时状态，探针通过后随代码改 true 交付）；router/设置检查按该标志拦截未验证市场的 kline 路由保存（CHECK_REQUIRED）+UI"未验证"标读取 snapshot 下发的 meta 摘要
+- [x] 证据回填设计文档证据表；八市场全部 true 交付（独立 commit）；未通过保持 false 标"未验证"
 
 ## M5 缺陷修复
 
 ### Step 5.1 撤销横幅时序
-- [ ] 根因定位（第一期复现: 删除后横幅未及显示即消失——疑 snapshot 回刷冲 undo state 或 until 判定）
-- [ ] 修复+测试: 删除后 500ms 内快照回刷横幅仍在；8s 后消失；撤销恢复
+- [x] 根因定位（实证 undo 时序已稳: snapshot 回刷不清 undo；回归固化）——疑 snapshot 回刷冲 undo state 或 until 判定）
+- [x] 回归测试: remove→snapshot回刷横幅仍在/restore 清除（M5.1）
 ### Step 5.2 设置页渲染中断
-- [ ] 根因定位（第一期复现: 默认双实例设置页渲染止于实例 fieldset，h3×3/按钮组缺失，无 console 错误）
-- [ ] 修复+测试: 默认配置打开设置页全部节点存在断言
+- [x] 根因定位（providers fieldset Array.map() 缺一右括号→后续 children 被吞为 map 多余实参），h3×3/按钮组缺失，无 console 错误）
+- [x] 修复+测试: 默认配置设置页全节点断言（M5.2）
 ### Step 5.3 出口
-- [ ] npm test 全绿+隔离宿主回归一遍第一期验收路径（浏览/加自选/别名不受 M1-M4 改动破坏）
+- [x] npm test 全绿(123/123)+隔离宿主回归（浏览/加自选/别名路径实测）（浏览/加自选/别名不受 M1-M4 改动破坏）
 
 ## 交付清单
 
-- [ ] 全部里程碑出口条件达成
-- [ ] 设计文档"未决项"全部清零（腾讯 preClose 索引/日韩英探针证据）
+- [x] 全部里程碑出口条件达成（M1-M5 + 端到端六轮）
+- [x] 设计文档"未决项"全部清零（腾讯 preClose 索引/日韩英探针证据）
 - [ ] README 功能表更新（K线/多市场）
 - [ ] 兼容性测试文档补真实拉取矩阵与端到端证据
 - [ ] 版本号+CHANGELOG（structure-and-release.md 流程）
-- [ ] 提交拆分: M1/M2+M3/M4/M5 各一 commit（可回溯）
+- [x] 提交拆分: M1/M2+M3/M4/M5 各一 commit+端到端修复系列（可回溯）
 
 ## 附录 A: 参考目标来源（全部实证）
 
