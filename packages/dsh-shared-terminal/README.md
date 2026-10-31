@@ -31,7 +31,7 @@ wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提
 
 命令由 shell 执行；本工具不做命令安全校验。Controller 使用 **system-user execution permissions**，不受 Agent sandbox/approval 策略约束。命令可能修改系统用户有权限访问的文件。回合取消会拒绝尚未完成的插件泵写入并丢弃该附着尚未消费的输入；已经交给 Controller/provider 的 `write/close` 无法撤销。同代并发写随取消一起中止时，其他尚未确认的写报结果未知且不自动重发，以免重复执行已经投递的输入。卸载与关闭永久销毁对应泵，旧引用不可继续写入或自动重抢；关闭失败也不复用旧附着，仍允许再次尝试关闭。
 
-仅支持实测版本 DSH **0.2.0-rc.1、0.2.0-rc.2、0.2.1-alpha.2、0.2.1-rc.2、0.2.1-rc.3 与 0.2.1-rc.4**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不修改 DSH、不另开 PTY、不读取 serializer 输出；附着策略随宿主代际：0.2.0 系与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
+仅支持实测版本 DSH **0.2.0-rc.1、0.2.0-rc.2、0.2.1-alpha.2、0.2.1-rc.2、0.2.1-rc.3、0.2.1-rc.4 与 0.2.1-rc.5**（精确允许表；其他版本启动时干净禁用并告警）。`read` 使用这些版本共同的 `@deepseek-ai/dsh-api-terminal-controller` 私有 owner lookup、BrowserTerminal operation queue 和 xterm-headless active buffer。新建终端的工作目录：0.2.0-rc.2 为创建时的宿主默认工作区目录；0.2.1 起为 Session 当前目录（Controller 工作目录服务）。插件不修改 DSH、不另开 PTY、不读取 serializer 输出；附着策略随宿主代际：0.2.0 系与 0.2.1-alpha.2 蹭 UI 附着写入（不调用 `follow` 抢 attachment），0.2.1-rc.2 起自持 attach 泵（见下）。
 
 装载与功能是两层：peerDependencies 声明装载面（允许宿主装载后走停用路径），允许表声明功能面。dsh **0.2.1-rc.2** 实测：Controller 移除 `write`/`resize` 公开方法，输入改经 `attach` 命令帧通道——本包自持 attach 泵适配该模型：工具 `write` 时插件成为控制者（0.2.1-rc.2 输入排他），**最后一笔写入 ack 后空闲冷却 10s 才释放附着**。释放仍必要：无人附着时宿主向 UI 广播状态使其恢复可写并按容器重算终端几何——若泵永久附着，UI 长期只读，官方布局重算被跳过，插件写入推高的 PTY 行数会把终端底部推出可视区且滚动失效。冷却期亦必要：写完立即释放会让每次写入都经历 attach/detach,宿主 gateway `cancellableStream` 的 abort 竞态偶发吞掉 UI 输出流的终止信号(实机复现:渲染冻结在旧屏、phase 停留 connected,须换代重连恢复);高频连续写场景下"写完即释放"的停摆概率显著,冷却把 attach/detach 频率从每写一次收敛到每轮命令一次。用户点官方「接管输入」随时拿回控制权；用户接管后泵的下一次写入会重新附着抢回（最后写入者胜出，双方交替互斥）。0.2.1-rc.2 上切走浏览器页面等价于放弃输入控制权，AI 写入不再依赖 UI 附着。
 
@@ -66,4 +66,4 @@ npm test -- /path/to/isolated-dsh-host
 
 按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
 
-dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3` 与 `0.2.1-rc.4`(dshReleases `compatible`)。
+dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4` 与 `0.2.1-rc.5`(dshReleases `compatible`)。
