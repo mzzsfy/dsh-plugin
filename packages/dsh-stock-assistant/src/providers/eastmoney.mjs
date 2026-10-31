@@ -39,8 +39,8 @@ export const eastmoney = {
   descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none' },
   async probe(request, ctx) {
     if (request.capability === 'catalog' || request.capability === 'search') {
-      // 探针词按市场选代表证券,跨市场词会误判能力不可用。
-      const result = await this[request.capability]({ ...request, q: request.market === 'XSHG' ? '茅台' : '平安', limit: 5 }, ctx)
+      // 探针词按市场用代表证券代码(茅台/平安只对沪深有效, 其他市场返回 0 项会误判 denied)。
+      const result = await this[request.capability]({ ...request, q: PROBE_SECURITY[request.market] || '平安', limit: 5 }, ctx)
       if (!result.items.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
       return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' }
     }
