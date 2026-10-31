@@ -55,7 +55,7 @@ export function createCatalog({ state, getControl = state.get, router, executor,
       const config = structuredClone(getControl()), results = new Map(search(q).map(s => [s.id, s]))
       // 搜索市场面=启用实例的适配器市场并集(suggest 天然全市场, 已启用市场语义跟随实例能力而非路由)
       const adapterMarkets = adapterMarketsOf(config, registry)
-      const quoteMarkets = new Set([...adapterMarkets.values()].flat())
+      const quoteMarkets = new Set([...adapterMarkets.values()].flatMap(set => [...set]))
       const searchRoutes = new Map(config.routes.filter(r => r.capability === 'search').map(r => [r.market, r]))
       for (const market of quoteMarkets) {
         const route = searchRoutes.get(market)
