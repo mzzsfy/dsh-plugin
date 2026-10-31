@@ -1486,8 +1486,9 @@ function findBrowseDialog(doc) {
 }
 
 // 弹窗 footer 定位:面包屑向上走到卡片直子(editorScope),其末子 div 即
-// footerBar;打开按钮=末个 button,取消按钮=其前一个兄弟 button。
-// 结构不符返回 null(官方改版时整体静默跳过,干净禁用)
+// footerBar;打开按钮=末个 button,取消按钮=其前一个兄弟 button——自家克隆
+// 按钮(带标记)也插在该位置,解析时跳过,否则收起弹窗会误点自家按钮变成
+// 再次弹窗。结构不符返回 null(官方改版时整体静默跳过,干净禁用)
 function findBrowseFooter(card) {
   let scope = card.querySelector('[role="navigation"]')
   if (!scope) return null
@@ -1497,7 +1498,10 @@ function findBrowseFooter(card) {
   if (!footer || !footer.querySelectorAll || footer.querySelectorAll('button').length < 3) return null
   const openButton = footer.querySelector('button:last-of-type')
   if (!openButton) return null
-  const previous = openButton.previousElementSibling
+  let previous = openButton.previousElementSibling
+  while (previous && (previous.tagName !== 'BUTTON' || previous.hasAttribute(CLONE_BTN_FLAG))) {
+    previous = previous.previousElementSibling
+  }
   const cancelButton = previous && previous.tagName === 'BUTTON' ? previous : null
   return { footer, openButton, cancelButton }
 }

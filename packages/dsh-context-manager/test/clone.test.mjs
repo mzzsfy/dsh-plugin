@@ -391,14 +391,17 @@ function fakeElement(tag) {
     insertBefore() {},
     remove() {},
     getAttribute: () => null,
+    setAttribute(name) { this.attrs = this.attrs || {}; this.attrs[name] = '' },
+    hasAttribute(name) { return !!(this.attrs && name in this.attrs) },
     appendChild(child) { this.children.push(child); child.parentElement = this },
   }
 }
 
 test('Given 官方弹窗结构, When findBrowseFooter 逻辑, Then 定位打开与取消按钮;结构漂移返回 null', () => {
   const declared = CLIENT_SRC.match(/function findBrowseFooter\(card\) \{[\s\S]*?\n\}/)
-  assert.ok(declared, 'client.js 必须内联声明 findBrowseFooter')
-  const findFooter = new Function(declared[0] + '\nreturn findBrowseFooter')()
+  const flagDecl = CLIENT_SRC.match(/const CLONE_BTN_FLAG = '([^']+)'/)
+  assert.ok(declared && flagDecl, 'client.js 必须内联声明 findBrowseFooter')
+  const findFooter = new Function('CLONE_BTN_FLAG', declared[0] + '\nreturn findBrowseFooter')(flagDecl[1])
 
   const openButton = fakeElement('button')
   const cancelButton = fakeElement('button')
@@ -437,6 +440,37 @@ test('Given 官方弹窗结构, When findBrowseFooter 逻辑, Then 定位打开�
   scope2.parentElement = thinCard
   thinCard.querySelector = (selector) => (selector === '[role="navigation"]' ? nav2 : null)
   assert.equal(findFooter(thinCard), null, '按钮不足 3 的 footer 应返回 null')
+})
+
+test('Given footer 内自家克隆按钮插在取消与打开之间, When findBrowseFooter, Then cancelButton 跳过自家按钮解析到真取消', () => {
+  const declared = CLIENT_SRC.match(/function findBrowseFooter\(card\) \{[\s\S]*?\n\}/)
+  const flagDecl = CLIENT_SRC.match(/const CLONE_BTN_FLAG = '([^']+)'/)
+  assert.ok(declared && flagDecl, 'client.js 必须内联声明 findBrowseFooter 与 CLONE_BTN_FLAG')
+  const findFooter = new Function('CLONE_BTN_FLAG', declared[0] + '\nreturn findBrowseFooter')(flagDecl[1])
+
+  const realCancel = fakeElement('button')
+  const injected = fakeElement('button')
+  injected.setAttribute(flagDecl[1], '')
+  const openButton = fakeElement('button')
+  // DOM 顺序:取消 → 自家克隆按钮 → 打开(ensureCloneButton insertBefore 打开按钮)
+  openButton.previousElementSibling = injected
+  injected.previousElementSibling = realCancel
+  realCancel.previousElementSibling = null
+  const footer = fakeElement('div')
+  footer.querySelectorAll = (selector) => (selector === 'button' ? [realCancel, injected, openButton] : [])
+  footer.querySelector = (selector) => (selector === 'button:last-of-type' ? openButton : null)
+  footer.lastElementChild = openButton
+  const scope = fakeElement('div')
+  scope.lastElementChild = footer
+  const nav = fakeElement('span')
+  const card = fakeElement('div')
+  nav.parentElement = scope
+  scope.parentElement = card
+  card.querySelector = (selector) => (selector === '[role="navigation"]' ? nav : null)
+
+  const parts = findFooter(card)
+  assert.equal(parts.cancelButton, realCancel, 'cancelButton 必须是真取消按钮,误指自家按钮会把收起变成再次弹窗')
+  assert.equal(parts.openButton, openButton)
 })
 
 test('Given 注入循环, When setupCloneInjection, Then header 默认注入并轮询 /login 探测闸门,命中即移除还原 3 按钮布局', () => {
