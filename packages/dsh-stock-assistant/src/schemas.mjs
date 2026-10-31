@@ -19,7 +19,8 @@ export const klineQuerySchema = z.strictObject({
   period: z.enum(['trend', '1d', '1w', '1M']),
   limit: z.number().int().min(20).max(1000).default(250),
 })
-const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(8) })
+// 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
+const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
 export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']) })
 export const securitySchema = z.object({ id: z.string(), exchange: marketSchema, code: z.string(), officialName: z.string().min(1).max(100), instrument: z.literal('equity'), currency: z.string(), timezone: z.string(), priceScale: z.number().int(), listingStatus: z.string() }).superRefine((s, ctx) => {
   const meta = MARKET_META[s.exchange]

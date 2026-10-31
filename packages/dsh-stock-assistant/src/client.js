@@ -126,7 +126,8 @@ window.__ModuleLoader__.load({
           if (routes.length === draft.routes.length) return
           const configuration = { providers: draft.providers, routes }
           await action('configuration', async () => {
-            const check = await api('/provider-check', 'POST', { ...configuration, capabilities: ['kline'] })
+            // 保存合同要求所有路由目标都经检查: capabilities 传草稿路由能力并集(与设置页手检按钮一致)
+            const check = await api('/provider-check', 'POST', { ...configuration, capabilities: [...new Set(routes.map(r => r.capability))] })
             await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.data.control.revision, ...configuration, checkIds: [check.checkId] })
             updateView({ settingsDraft: null }); refresher.refresh()
           })

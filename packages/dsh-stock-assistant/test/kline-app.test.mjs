@@ -60,12 +60,12 @@ test('kline 主源成功+缓存命中不触源', async () => {
   const fx = fetchFixture()
   const app = await setup(fx.fetch)
   const first = await app.kline({ securityId: 'XHKG:equity:00700', period: '1d', limit: 250 })
-  assert.equal(first.data.source, 'em-default')
-  assert.equal(first.data.candles[0].close, 11.54)
-  assert.equal(first.data.preClose, 11.31)
+  assert.equal(first.source, 'em-default')
+  assert.equal(first.candles[0].close, 11.54)
+  assert.equal(first.preClose, 11.31)
   const before = fx.calls.length
   const second = await app.kline({ securityId: 'XHKG:equity:00700', period: '1d', limit: 250 })
-  assert.equal(second.data.source, 'em-default')
+  assert.equal(second.source, 'em-default')
   assert.equal(fx.calls.length, before, '缓存命中不应触源')
   assert.equal(second.revision, first.revision)
 })
@@ -83,11 +83,11 @@ test('kline 主源 NETWORK 即时切换备源 source=备源 且缓存写备源 k
   } }
   const app = await setup(fx.fetch)
   const result = await app.kline({ securityId: 'XHKG:equity:00700', period: '1d', limit: 250 })
-  assert.equal(result.data.source, 'tx-fallback')
+  assert.equal(result.source, 'tx-fallback')
   // 备源缓存命中: 主源仍故障, 再次请求不再触任何上游
   const before = calls.length
   const again = await app.kline({ securityId: 'XHKG:equity:00700', period: '1d', limit: 250 })
-  assert.equal(again.data.source, 'tx-fallback')
+  assert.equal(again.source, 'tx-fallback')
   assert.equal(calls.length, before)
 })
 
@@ -102,7 +102,7 @@ test('kline 参数校验 400', async () => {
   await assert.rejects(() => app.kline({ securityId: 'XHKG:equity:00700', period: '5m' }), e => e.code === 'INVALID_PARAM')
   await assert.rejects(() => app.kline({ securityId: 'XHKG:equity:00700', period: '1d', limit: 10 }), e => e.code === 'INVALID_PARAM')
   const ok = await app.kline({ securityId: 'XHKG:equity:00700', period: '1d' })
-  assert.ok(ok.data.candles.length >= 0)
+  assert.ok(ok.candles.length >= 0)
 })
 
 test('trend 不写缓存每次触源', async () => {

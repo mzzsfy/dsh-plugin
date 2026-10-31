@@ -148,11 +148,11 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       const fallbacks = route.fallbackInstanceIds.map(id => config.providers.find(p => p.id === id && p.enabled !== false)).filter(Boolean)
       for (const cand of [instance, ...fallbacks]) {
         const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code }, config.routingRevision)
-        if (cached) return { data: { ...cached.payload, source: cand.id }, revision: config.revision }
+        if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
       }
       const result = await runWithFailover(route, instance, fallbacks, { securityId: sid, market: exchange, code, period, adjust: 'qfq', limit }, signal)
       if (period !== 'trend') await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code }, result, config.routingRevision)
-      return { data: { ...result, source: result.providerInstanceId }, revision: config.revision }
+      return { ...result, source: result.providerInstanceId, revision: config.revision }
     },
     async browse(input) {
       assertLive()
