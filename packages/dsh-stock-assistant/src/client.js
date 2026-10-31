@@ -58,7 +58,8 @@ window.__ModuleLoader__.load({
         try { return await work() } catch (e) { if (e.snapshot) applySnapshot(e.snapshot); patch({ error: e.message, errorCode: e.code }); throw e }
         finally { patch({ busy: { ...state.busy, [key]: false } }) }
       }
-      function updateView(next) { patch({ view: { ...state.view, ...next } }); sendDemand() }
+      // 离开 detail 视图时统一清详情态, 防止列表视图残留 detail 面板
+      function updateView(next) { const leaveDetail = next.view && next.view !== 'detail'; patch({ view: { ...state.view, ...next, ...(leaveDetail ? { detailId: null, alias: '' } : {}) } }); sendDemand() }
       function scheduleSearch(query) {
         updateView({ query, selectedId: null }); clearTimeout(timer); querying?.abort(); querying = new AbortController()
         if (composing || !query.trim()) { patch({ candidates: [] }); return }
