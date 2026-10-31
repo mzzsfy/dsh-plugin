@@ -141,3 +141,52 @@ test('K3 setKlinePeriod 切换state', async () => {
   assert.equal(value.getSnapshot().klinePeriod, '1w')
   value.dispose()
 })
+
+// ---- M5 缺陷修复回归 ----
+
+test('M5.1 remove后snapshot回刷横幅不消失且8s后清除', async () => {
+  let removeCalls = 0, restoreCalls = 0
+  const { value } = await runtime({ fetch: async (url, opts) => {
+    const u = String(url)
+    if (u.includes('/watchlist')) {
+      const body = JSON.parse(opts.body)
+      if (body.action === 'remove') { removeCalls++; return { ok: true, json: async () => ({ ok: true, data: { revision: 2, unchanged: false } }) } }
+      if (body.action === 'restore') { restoreCalls++; return { ok: true, json: async () => ({ ok: true, data: { revision: 3, unchanged: false } }) } }
+    }
+    if (u.includes('/snapshot')) return { ok: true, json: async () => ({ ok: true, data: snapshot(2) }) }
+    return { ok: true, json: async () => ({ ok: true, data: {} }) }
+  } })
+  value.applySnapshot(snapshot(1, 'a', 0))
+  // remove 前快照回刷模拟: snapshot(2) 触发 invalidate→refresh
+  await value.mutate('remove', { securityId: 'XSHG:equity:600519' })
+  const undo = value.getSnapshot().undo
+  assert.ok(undo, 'remove 后 undo 态存在')
+  assert.ok(undo.until > Date.now())
+  // snapshot 回刷(同 epoch 新 seq)不得清 undo
+  value.applySnapshot(snapshot(5))
+  assert.ok(value.getSnapshot().undo, 'snapshot 回刷后横幅态仍在')
+  // 恢复清 undo
+  await value.mutate('restore', { removeOperationId: undo.removeOperationId })
+  assert.equal(value.getSnapshot().undo, null)
+  assert.equal(removeCalls, 1); assert.equal(restoreCalls, 1)
+  value.dispose()
+})
+
+test('M5.2 默认配置设置页全节点渲染无截断', async () => {
+  let plugin
+  const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(name => name === 'react' ? React : {}) } } }
+  vm.runInNewContext(source, { window, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto })
+  const { defaultConfig } = await import('../src/schemas.mjs')
+  const saved = defaultConfig()
+  const data = { serverEpoch: 'a', snapshotSeq: 1, routingRevision: 0, control: { ...saved, revision: 1, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 30, colorMode: 'red-up' } }, quotes: {}, routeSelections: {}, catalogs: [], adapters: [{ adapterId: 'tushare', credential: 'token', capabilities: ['quotes', 'catalog', 'search', 'calendar'] }, { adapterId: 'tencent', credential: 'none', capabilities: ['quotes', 'kline'] }, { adapterId: 'sina', credential: 'none', capabilities: ['quotes', 'catalog'] }, { adapterId: 'eastmoney', credential: 'none', capabilities: ['quotes', 'catalog', 'search', 'kline'] }], suggested: saved, providerStatus: [], markets: { XSHG: { currency: 'CNY', verified: true } }, vendorAvailable: true, klineReady: {} }
+  const state = { view: { view: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  for (const marker of ['数据源实例', '按市场与能力选择来源', '目录与日历', '显示偏好', '保存配置', '检查所有来源能力', '放弃草稿', '一键为已启用市场配置K线']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
+  // 启用banner仅在无实例时出现(默认配置自带双实例, 不含该banner为正确行为)
+  assert.ok(!html.includes('启用默认数据源'))
+  // 8市场 fieldset 全渲染(K线行存在)
+  for (const market of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']) assert.ok(html.includes(market), `市场 fieldset 缺: ${market}`)
+  assert.ok(html.includes('>K线<'), 'K线能力行缺')
+})
