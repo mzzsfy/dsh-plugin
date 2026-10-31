@@ -14,10 +14,11 @@ export const routeSchema = z.strictObject({
   id, capability, market: marketSchema, instrument: z.literal('equity'), primaryInstanceId: id,
   fallbackInstanceIds: z.array(id).max(1), failoverMode: z.enum(['off', 'network']), maxDelaySeconds: z.number().nonnegative().nullable(), acceptUnknownDelay: z.boolean(),
 })
+// GET query 唯一入口: limit 为字符串形态需 coerce
 export const klineQuerySchema = z.strictObject({
   securityId: z.string().regex(/^[\w]+:equity:[\w.]{1,15}$/),
   period: z.enum(['trend', '1d', '1w', '1M']),
-  limit: z.number().int().min(20).max(1000).default(250),
+  limit: z.coerce.number().int().min(20).max(1000).default(250),
 })
 // 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
 const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
