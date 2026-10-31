@@ -1,7 +1,8 @@
 import { z } from 'zod'
-import { fail } from './market-model.mjs'
+import { fail, parseSecurityId } from './market-model.mjs'
 import { securitySchema } from './schemas.mjs'
-const securityId = z.string().regex(/^(XSHG|XSHE):equity:\d{6}$/)
+// 自选身份八市场: parseSecurityId 是唯一事实源(市场/代码形态随 MARKET_META)
+const securityId = z.string().refine(v => { try { parseSecurityId(v); return true } catch { return false } })
 const payloads = {
   add: z.strictObject({ securityId }), remove: z.strictObject({ securityId }),
   restore: z.strictObject({ removeOperationId: z.uuid() }),
