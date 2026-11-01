@@ -138,13 +138,16 @@ window.__ModuleLoader__.load({
           const key = `${securityId}|${period}`
           if (state.klineKey === key && state.kline?.candles && !force) return Promise.resolve(state.kline)
           patch({ klineKey: key, kline: { loading: !state.kline?.candles, error: '', candles: state.klineKey === key ? state.kline?.candles ?? null : null } })
-          return api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET').then(result => {
+          const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')).then(result => {
             patch({ kline: { loading: false, error: '', ...result } })
             return result
           }).catch(e => {
-            patch({ kline: { loading: false, error: e.message || 'K线加载失败', candles: null } })
+            // 额度窗口瞬时满/网络抖动: 退避自动重试一次, 避免让用户手动点重试
+            if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(4 * 1000, true)
+            patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code, candles: null } })
             throw e
           })
+          return attempt()
         },
         getKlineResult() { return state.kline?.candles ? state.kline : null },
         dispose() {
@@ -247,8 +250,8 @@ window.__ModuleLoader__.load({
       return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'] }
     }
     function computeMA(candles, n) { return candles.map((c, i) => i < n - 1 ? null : { time: c.time, value: candles.slice(i - n + 1, i + 1).reduce((s, x) => s + x.close, 0) / n }).filter(Boolean) }
-    function KlineError({ message, onRetry }) {
-      return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
+    function KlineError({ message, onRetry, guide }) {
+      return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, guide ? h(Button, { onClick: guide }, '去设置开启K线') : null, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
     }
     function KlineView({ runtime, state, item }) {
       const period = state.klinePeriod || '1d'
@@ -318,7 +321,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ssb-kline' },
         h('div', { className: 'ssb-kline-toolbar' }, ...PERIODS.map(p => h(Button, { key: p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label)), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻')),
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
-        kline.error ? h(KlineError, { message: kline.error, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))() }) : null,
+        kline.error ? h(KlineError, { message: kline.error, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? () => runtime.updateView({ view: 'settings' }) : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
         state.data.vendorAvailable === false ? h('div', { className: 'ssb-banner' }, '图表组件不可用，已降级为数字详情。') : null,
         h('div', { ref: holder, className: 'ssb-kline-holder' }))
