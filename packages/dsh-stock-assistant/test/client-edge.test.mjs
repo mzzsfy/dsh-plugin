@@ -179,7 +179,7 @@ test('K7 NO_ROUTE 错误条渲染去设置引导按钮', async () => {
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /未配置该市场的数据来源/)
-  assert.match(html, /去设置开启K线/)
+  assert.match(html, /一键开启K线/)
 })
 
 // ---- M5 缺陷修复回归 ----
