@@ -80,3 +80,22 @@ test('kline端点 GET 接线 参数校验与透传', async t => {
   assert.equal((await (await fetch(base + '/kline?period=1d')).json()).ok, true)
   assert.equal((await fetch(base + '/kline?securityId=XSHG%3Aequity%3A600519&period=1d', { method: 'POST', body: '{}' })).status, 405)
 })
+
+test('kline端点错误码→HTTP状态与error体透传(client重试与引导判据依赖)', async t => {
+  const routes = new Map()
+  const app = { kline: async () => fail('NO_ROUTE', '未配置该市场的数据来源', 422) }
+  const stop = registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app)
+  const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
+  const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
+  const noRoute = await (await fetch(base + '/kline?securityId=XSHG%3Aequity%3A600519&period=1d')).json()
+  assert.equal(noRoute.ok, false)
+  assert.equal(noRoute.error.code, 'NO_ROUTE', 'error.code 必须透传, client 引导按钮按 code 判')
+  app.kline = async () => fail('RATE_LIMIT', '数据源额度受限，请稍后重试', 429, { retryable: true, retryAfterMs: 58000 })
+  const res = await fetch(base + '/kline?securityId=XSHG%3Aequity%3A600519&period=1d')
+  const rate = await res.json()
+  assert.equal(res.status, 429, 'HTTP 状态随 StockError.status 透传')
+  assert.equal(rate.error.code, 'RATE_LIMIT')
+  assert.equal(rate.error.retryAfterMs, 58000, 'retryAfterMs 透传供 client 退避')
+})

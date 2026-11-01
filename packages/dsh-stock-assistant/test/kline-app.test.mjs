@@ -133,3 +133,27 @@ test('search 远程候选下发 currency/priceScale', async () => {
   const hk = result.items.find(i => i.exchange === 'XHKG')
   if (hk) { assert.equal(hk.currency, 'HKD'); assert.equal(hk.priceScale, 2) }
 })
+
+test('remote 搜索市场面=启用实例适配器市场并集(无search路由市场仍直连可搜)', async () => {
+  // 默认配置只有沪深 search 路由; suggest 全市场语义要求 XHKG 等无路由市场也经 em-default 直连(每市场一拍)
+  let suggestCalls = 0
+  const storage = memoryStorage()
+  const app = await createApplication({ storageDomain: storage, providers: [tencent, sina, eastmoney], fetch: async url => {
+    if (String(url).includes('suggest')) suggestCalls += 1
+    return { ok: true, json: async () => ({ QuotationCodeTable: { Data: [{ Code: '00700', Name: '腾讯控股', MktNum: '116', JYS: null, QuoteID: '116.00700', Classify: 'HKStock', PinYin: 'txkg' }] } }) }
+  }, publish: () => {} })
+  const result = await app.search('00700', 'remote')
+  assert.ok(suggestCalls >= 3, `启用实例市场面应逐市场直连(实拍 ${suggestCalls} 次, 沪深路由2+无路由直连≥1)`)
+  assert.ok(result.items.some(i => i.exchange === 'XHKG'), '直连批次候选进入结果')
+})
+
+test('remote 搜索期间路由变化即拒 ROUTE_CONFLICT', async () => {
+  const storage = memoryStorage()
+  let first = true
+  const app = await createApplication({ storageDomain: storage, providers: [tencent, sina, eastmoney], fetch: async url => {
+    // 首拍返回后推进存储内 routingRevision, 模拟搜索进行中路由并发变化
+    if (first) { first = false; storage.maps.control.get('root').routingRevision += 1 }
+    return { ok: true, json: async () => ({ QuotationCodeTable: { Data: [{ Code: '00700', Name: '腾讯控股', MktNum: '116', JYS: null, QuoteID: '116.00700', Classify: 'HKStock', PinYin: 'txkg' }] } }) }
+  }, publish: () => {} })
+  await assert.rejects(() => app.search('00700', 'remote'), e => e.code === 'ROUTE_CONFLICT')
+})
