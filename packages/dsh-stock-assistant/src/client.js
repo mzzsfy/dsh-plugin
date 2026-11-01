@@ -143,8 +143,8 @@ window.__ModuleLoader__.load({
             patch({ kline: { loading: false, error: '', ...result } })
             return result
           }).catch(e => {
-            // 额度窗口瞬时满/网络抖动: 退避自动重试一次, 避免让用户手动点重试
-            if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(4 * 1000, true)
+            // 额度窗口瞬时满/网络抖动: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
+            if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(Math.max(4 * 1000, e.retryAfterMs || 0), true)
             patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code, candles: null } })
             throw e
           })
@@ -333,7 +333,8 @@ window.__ModuleLoader__.load({
       const entry = data.quotes[item.id], q = entry?.quote
       const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
       const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
-      const currency = item.currency || ({ XSHG: 'CNY', XSHE: 'CNY', XHKG: 'HKD', XNAS: 'USD', XNYS: 'USD', XJPX: 'JPY', XKRX: 'KRW', XLON: 'GBp' })[item.exchange] || ''
+      // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
+      const currency = item.currency || ''
       const fields = [['今开', q?.open], ['最高', q?.high], ['最低', q?.low], ['昨收', q?.previousClose], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量（股）', q?.volume], ['成交额', q?.amount], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', q?.delayKind === 'unknown' || !q ? '未知' : q.delayKind === 'realtime' ? '实时' : `${q.delaySeconds}秒`]]
       return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), h(Button, { className: 'ssb-mobile-back', onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')),
         h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
@@ -391,10 +392,11 @@ window.__ModuleLoader__.load({
             state.data.adapters.find(a => a.adapterId === p.adapterId)?.credential === 'none' ? h('span', { className: 'ssb-muted' }, '公开来源，无需凭据') : field('Host环境变量名', p.credentialEnv, value => providerChange(p.id, { credentialEnv: value }), { autoComplete: 'off', spellCheck: false }),
             field('共享额度组（同账号保持一致）', p.quotaGroup, value => providerChange(p.id, { quotaGroup: value })),
             field('每分钟请求上限（留空仅允许探针）', p.budget.requestsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, requestsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }),
-            field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
+            // 高级预算项默认折叠: 免凭据公开源用户不需要每日上限/计费单位/分能力额度
+            h('details', { key: 'adv-' + p.id }, h('summary', { className: 'ssb-muted' }, '高级预算设置'), field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
             h('label', { className: 'ssb-field' }, h('span', null, '计费单位'), h('select', { value: p.budget.billingUnit, onChange: e => providerChange(p.id, { budget: { ...p.budget, billingUnit: e.target.value } }) }, h('option', { value: 'request' }, '请求'), h('option', { value: 'symbol' }, '证券'))),
             p.budget.billingUnit === 'symbol' ? field('每分钟证券额度', p.budget.symbolCreditsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, symbolCreditsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }) : null,
-            ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap }))),
+            ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap })))),
           h('div', { className: 'ssb-toolbar' }, h(Toggle, { label: '启用实例', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }), h('span', { className: 'ssb-muted' }, state.data.adapters.find(a => a.adapterId === p.adapterId)?.credential === 'none' ? '公开来源 · 延迟未知 · 无SLA' : state.data.providerStatus?.find(s => s.id === p.id)?.credentialPresent ? 'Host已配置变量' : '保存前检查Host凭据'), h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除实例'))))),
         h('h3', null, '按市场与能力选择来源'), h('p', { className: 'ssb-muted' }, '目录、报价、日历与K线可独立选择。未配置的能力不会隐式使用其他来源。'),
         ...Object.keys(MARKET_LABEL).map(market => h('fieldset', { className: 'ssb-provider', key: market, disabled: state.busy.configuration }, h('legend', null, `${MARKET_LABEL[market]} · ${market}${state.data.markets?.[market]?.verified ? '' : '（未验证）'}`),

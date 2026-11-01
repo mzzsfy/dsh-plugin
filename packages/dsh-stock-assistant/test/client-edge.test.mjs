@@ -150,13 +150,15 @@ test('K4 NO_ROUTE 错误态携带 errorCode 供引导按钮判据', async () => 
   value.dispose()
 })
 
-test('K5 RATE_LIMIT 退避自动重试一次后成功', async () => {
+test('K5 RATE_LIMIT 退避自动重试一次后成功(等待≥retryAfterMs)', async () => {
   const calls = []
-  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); if (calls.length === 1) { return { ok: false, status: 429, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试', retryAfterMs: 58000 } }) } } return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
+  const t0 = Date.now()
+  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); if (calls.length === 1) { return { ok: false, status: 429, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试', retryAfterMs: 20 } }) } } return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
   value.applySnapshot(klineSnapshot())
   const result = await value.loadKline('XSHG:equity:600519', '1d')
   assert.equal(result.candles.length, 1)
   assert.equal(calls.length, 2, '首次429后退避重试一次')
+  assert.ok(Date.now() - t0 >= 20, '重试等待不小于服务端 retryAfterMs')
   assert.equal(value.getSnapshot().kline.error, '')
   value.dispose()
 }, { timeout: 10000 })
@@ -171,7 +173,7 @@ test('K6 NO_ROUTE 二次失败不自动重试(避免额外资损)', async () => 
   value.dispose()
 }, { timeout: 10000 })
 
-test('K7 NO_ROUTE 错误条渲染去设置引导按钮', async () => {
+test('K7 NO_ROUTE 错误条渲染一键开启按钮', async () => {
   const { plugin } = await loadClientWithReact()
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
   const state = { view: { view: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
@@ -180,6 +182,16 @@ test('K7 NO_ROUTE 错误条渲染去设置引导按钮', async () => {
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /未配置该市场的数据来源/)
   assert.match(html, /一键开启K线/)
+})
+
+test('K8 非瞬时码首拍即拒不重试', async () => {
+  const calls = []
+  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); return { ok: false, status: 422, json: async () => ({ ok: false, error: { code: 'NO_ROUTE', message: '未配置该市场的数据来源' } }) } } })
+  value.applySnapshot(klineSnapshot())
+  await assert.rejects(() => value.loadKline('XSHG:equity:600519', '1d'))
+  assert.equal(calls.length, 1, 'NO_ROUTE 不在可重试集合, 首拍即拒')
+  assert.equal(value.getSnapshot().kline.errorCode, 'NO_ROUTE')
+  value.dispose()
 })
 
 // ---- M5 缺陷修复回归 ----
