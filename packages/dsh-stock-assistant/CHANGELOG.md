@@ -16,10 +16,11 @@ K 线图表与八市场支持。
 ### 修复
 
 - 设置页 providers fieldset Array.map 缺右括号静默吞 children（M5.2）。
-- 删除撤销横幅时序（M5.1）；detail 视图宽屏全页单列（K 线可用宽度 30→444px）；watchlist securityId 八市场准入；kline GET query limit coerce；响应双层 data 包裹；路由上限 8→40。
+- 删除撤销横幅时序（M5.1）；watchlist securityId 八市场准入；kline GET query limit coerce；响应双层 data 包裹；路由上限 8→40；K 线额度/网络瞬时错误退避自动重试（按服务端 retryAfterMs）。
+- 三角色评审收敛（2026-11-01）：宽屏详情返回入口常驻；一键 K 线成功/no-op 均有反馈且错误条可内联开启；搜索筛选补全八市场对称标签；移除"个股状态"死字段；别名 maxLength 对齐 30；高级预算项默认折叠；client 币种回退表删除（消除 GBP 漂移）。
 
 ### 兼容性
 
 - `capability` 新增 `kline`；provider 合同 descriptor 需声明 kline 能力方可承载 kline 路由（registry 白名单强制）。
 - 配置 routes 上限 8→40（八市场×5 能力全开 40 封顶）。
-- 包内测试 123/123；端到端证据见 兼容性测试.md 2026-10-31 节。
+- 包内测试 131/131；端到端与三角色评审证据见 兼容性测试.md 2026-10-31 / 2026-11-01 节。
