@@ -40,7 +40,7 @@ async function getJson(ctx, url) {
   return response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
 }
 export const eastmoney = {
-  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
+  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
   async probe(request, ctx) {
     if (request.capability === 'catalog' || request.capability === 'search') {
       // 探针词按市场用代表证券代码(茅台/平安只对沪深有效, 其他市场返回 0 项会误判 denied)。

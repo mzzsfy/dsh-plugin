@@ -37,7 +37,7 @@ async function query(capability, params, ctx) {
 }
 function symbol(security) { return `${security.code}.${SUFFIX[security.exchange]}` }
 export const tushare = {
-  descriptor: { adapterId: 'tushare', capabilities: ['quotes', 'catalog', 'calendar'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 20, credential: 'env' },
+  descriptor: { adapterId: 'tushare', capabilities: ['quotes', 'catalog', 'calendar'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 20, credential: 'env', description: 'Tushare Pro：需在Host环境配置凭据，沪深目录/日历/行情，有SLA' },
   async catalog(request, ctx) {
     let rows = await query('catalog', { exchange: EXCHANGE[request.market], list_status: 'L' }, ctx)
     let complete = rows.length < 6000

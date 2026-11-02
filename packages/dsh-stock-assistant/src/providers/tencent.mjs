@@ -24,7 +24,7 @@ const firstArray = data => Object.values(data).find(Array.isArray)
 const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
 
 export const tencent = {
-  descriptor: { adapterId: 'tencent', capabilities: ['quotes', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'kline', label: 'K线历史' }] },
+  descriptor: { adapterId: 'tencent', capabilities: ['quotes', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '腾讯公开接口：免凭据，行情与K线备源，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'kline', label: 'K线历史' }] },
   async probe(request, ctx) {
     // kline 探针直接拉代表证券 3 根日K(quotes 不覆盖港股);quotes 探针沿用代表证券行。
     if (request.capability === 'kline') {

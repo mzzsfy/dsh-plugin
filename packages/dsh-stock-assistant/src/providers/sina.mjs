@@ -7,7 +7,7 @@ const symbolOf = security => `${security.exchange === 'XSHG' ? 'sh' : 'sz'}${sec
 // 新浪价格固定三位小数,A股最小变动0.01,第三位恒为0,裁剪到两位不损失精度。
 const trim = value => /^\d+(\.\d+)?$/.test(value) ? Number(value).toFixed(2) : value
 export const sina = {
-  descriptor: { adapterId: 'sina', capabilities: ['quotes', 'catalog'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none' },
+  descriptor: { adapterId: 'sina', capabilities: ['quotes', 'catalog'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '新浪公开接口：免凭据，仅沪深行情与目录' },
   async probe(request, ctx) {
     if (request.capability === 'catalog') {
       // 探针只拉一页验证端点连通,不做全量分页。

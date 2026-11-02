@@ -72,6 +72,23 @@ test('设置页空配置一键默认源填充草稿', async () => {
   assert.match(renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} })), /启用默认数据源/)
   assert.equal(updates.length, 0)
 })
+// 设置页信息架构: 递进区块+实例卡描述+反代端点+最近请求+概览横幅
+test('设置页递进区块与实例可观测面渲染', async () => {
+  const { plugin } = await loadClientWithReact()
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const suggested = { providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }
+  const state = { view: { view: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} }, endpoints: { kline: 'https://proxy.corp/em/kline' } }], routes: [] }, quotes: { [item.id]: { last: '1392.05', previousClose: '1376.95', receivedAt: 1, quoteAt: null, delayKind: 'unknown' } }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline'], credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'kline', label: 'K线历史' }, { key: 'quotes', label: '行情批量' }] }], providerStatus: [{ id: 'em-default', credentialPresent: true, proxy: false, endpointsCovered: 1, recentRequests: [{ at: 1000, url: 'quotes eastmoney', status: 'ok', ms: 120 }] }], catalogs: [], routeSelections: {}, klineReady: {}, suggested, vendorAvailable: true } }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /数据源/, '区块1标题')
+  assert.match(html, /市场与能力/, '区块2标题')
+  assert.match(html, /显示偏好/, '区块3标题')
+  assert.match(html, /东方财富公开接口/, '适配器一句话描述')
+  assert.match(html, /接口反代/, '反代端点区可见')
+  assert.match(html, /proxy\.corp\/em\/kline/, '已覆盖端点值回显')
+  assert.match(html, /运行状态/, '请求日志区可见')
+  assert.match(html, /quotes eastmoney/, '日志条目渲染')
+})
 // E1: Given搜索报目录未就绪 When搜索页渲染 Then错误下方出现前往浏览市场引导
 test('搜索未就绪时引导前往浏览市场', async () => {
   const { plugin } = await loadClientWithReact()
@@ -176,7 +193,7 @@ test('K6 NO_ROUTE 二次失败不自动重试(避免额外资损)', async () => 
 test('K7 NO_ROUTE 错误条渲染一键开启按钮', async () => {
   const { plugin } = await loadClientWithReact()
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
-  const state = { view: { view: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
+  const state = { view: { view: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
   const updates = []
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
@@ -235,7 +252,7 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   const state = { view: { view: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  for (const marker of ['数据源实例', '按市场与能力选择来源', '目录与日历', '显示偏好', '保存配置', '检查所有来源能力', '放弃草稿', '一键为已启用市场配置K线']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
+  for (const marker of ['① 数据源', '② 市场与能力', '目录与日历', '③ 显示偏好', '保存配置', '检查所有来源能力', '放弃草稿', '一键为已启用市场配置K线']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
   // 启用banner仅在无实例时出现(默认配置自带双实例, 不含该banner为正确行为)
   assert.ok(!html.includes('启用默认数据源'))
   // 8市场 fieldset 全渲染(K线行存在)
