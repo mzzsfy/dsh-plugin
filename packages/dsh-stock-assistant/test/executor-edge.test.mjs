@@ -70,7 +70,6 @@ test('组内节拍等待唤醒后时钟已推进满间隔(定时器截断与唤�
   // 契约:执行器守门的等待必须上取整加裕度,唤醒后 now-starts>=间隔恒成立。
   let now = 1_000_000
   const registry = createRegistry([{ descriptor, probe() {}, async quotes(req, ctx) { await ctx.fetch('http://fixture'); return { items: [] } } }])
-  const scheduled = []
   const timers = {
     // 复刻 Node 语义:节拍等待(间隔量级,<8s 超时臂)按 ms 向下取整并注入 4ms
     // 唤醒滞后,模拟"醒来时 now-starts<间隔"的真实竞态;超时臂(8s)按真实间隔
@@ -84,6 +83,5 @@ test('组内节拍等待唤醒后时钟已推进满间隔(定时器截断与唤�
   // 第二拍:无论注入多少时钟滞后,不应以 RATE_LIMIT 拒绝
   const result = await executor.run(provider('b', 'fake'), 'quotes', {})
   assert.deepEqual(result.items, [])
-  assert.ok(scheduled.length >= 0, '等待次数不设上限断言,仅锁预算门')
   executor.dispose()
 })
