@@ -2,7 +2,7 @@ import { StockError, fail } from './market-model.mjs'
 // 报价时间距获取时间不超过该秒数视为实时; 免凭据公开源常缺延迟声明, 由时间戳差派生
 const REALTIME_WINDOW_SECONDS = 90
 // 适配器未声明延迟但带报价时间时, 按时差派生 delayKind; 缺时间戳保持 unknown 不编造
-function deriveDelay(quote, now) {
+export function deriveDelay(quote, now) {
   if (quote.delayKind !== 'unknown' || !quote.quoteAt) return quote
   const lagSeconds = Math.max(0, Math.round((now() - Date.parse(quote.quoteAt)) / 1000))
   if (!Number.isFinite(lagSeconds)) return quote

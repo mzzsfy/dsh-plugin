@@ -168,3 +168,38 @@ test('remote 搜索期间路由变化即拒 ROUTE_CONFLICT', async () => {
   }, publish: () => {} })
   await assert.rejects(() => app.search('00700', 'remote'), e => e.code === 'ROUTE_CONFLICT')
 })
+
+test('browse 概览: 头部指数行情随 browse 返回(上证/深成指), 指数失败静默为null', async () => {
+  const sinaPage = Array.from({ length: 80 }, (_, i) => ({ symbol: `sh${String(600000 + i)}`, code: String(600000 + i), name: `沪股${i}` }))
+  // 新浪分页: page2 短页代码须与 page1 不重叠(真实目录按代码排序天然不重叠)
+  const sinaFetch = url => ({ ok: true, json: async () => String(url).includes('page=1') ? sinaPage : Array.from({ length: 3 }, (_, i) => ({ symbol: `sh68800${i}`, code: `68800${i}`, name: `科创${i}` })) })
+  const app = await createApplication({ storageDomain: memoryStorage(), providers: [tencent, sina, eastmoney], fetch: async url => {
+    const u = String(url)
+    // 指数批量请求: 响应行 secid 必须与请求对齐(1.000001 上证 / 0.399001 深成), 适配器按 f13.f12 回配
+    if (u.includes('ulist.np') && u.includes('secids=1.000001')) return { ok: true, json: async () => ({ data: { diff: [{ f2: 3900.25, f12: '000001', f13: 1, f14: '上证指数', f18: 3874.75 }] } }) }
+    if (u.includes('ulist.np') && u.includes('secids=0.399001')) return { ok: true, json: async () => ({ data: { diff: [{ f2: 12800.4, f12: '399001', f13: 0, f14: '深证成指', f18: 12750.1 }] } }) }
+    // 新浪目录分页
+    if (u.includes('getHQNodeData')) return sinaFetch(url)
+    // 东财 quotes 探针与指数同通道, 通用放行
+    return { ok: true, json: async () => ({ data: { diff: [{ f2: 11.54, f12: '000001', f13: 0, f14: '探针证券', f18: 11.31 }] } }) }
+  }, publish: () => {} })
+  await app.sync({ market: 'XSHG', expectedRoutingRevision: 0 })
+  const sh = await app.browse({ market: 'XSHG', offset: 0, limit: 50 })
+  assert.equal(sh.overview.name, '上证指数')
+  assert.equal(sh.overview.last, '3900.25')
+  assert.ok(sh.overview.changePct !== null, '带涨跌幅')
+  await app.sync({ market: 'XSHE', expectedRoutingRevision: 0 })
+  const sz = await app.browse({ market: 'XSHE', offset: 0, limit: 50 })
+  assert.equal(sz.overview.name, '深证成指')
+  // 指数拉取失败: 概览静默 null 不阻断目录浏览
+  const broken = await createApplication({ storageDomain: memoryStorage(), providers: [tencent, sina, eastmoney], fetch: async url => {
+    const u = String(url)
+    if (u.includes('ulist.np')) return { ok: false, status: 502, json: async () => ({}) }
+    if (u.includes('getHQNodeData')) return sinaFetch(url)
+    return { ok: true, json: async () => ({ data: { diff: [{ f2: 11.54, f12: '000001', f13: 0, f14: '探针证券', f18: 11.31 }] } }) }
+  }, publish: () => {} })
+  await broken.sync({ market: 'XSHG', expectedRoutingRevision: 0 })
+  const page = await broken.browse({ market: 'XSHG', offset: 0, limit: 50 })
+  assert.equal(page.overview, null, '指数失败静默 null')
+  await app.close(); await broken.close()
+})

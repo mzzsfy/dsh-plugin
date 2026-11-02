@@ -88,6 +88,7 @@ window.__ModuleLoader__.load({
           return action('browse', async () => {
             const result = await api(`/browse?${new URLSearchParams({ market, offset: String(offset), limit: String(BROWSE_PAGE) })}`, 'GET')
             updateView({ browseMarket: market, browseOffset: offset, browseRows: result.items, browseTotal: result.total })
+            patch({ data: { ...state.data, browseOverview: result.overview || null } })
           })
         },
         async mutate(actionName, payload) {
@@ -353,6 +354,7 @@ window.__ModuleLoader__.load({
       const { view, busy, data } = state
       const rows = view.browseRows
       return h('section', { className: 'ssb-search-view' }, h('h2', null, '浏览市场'),
+        data?.browseOverview ? h('div', { className: 'ssb-banner ssb-banner-ok' }, `${data.browseOverview.name} ${data.browseOverview.last}`, h('span', { className: `ssb-number ${Number(data.browseOverview.change) >= 0 ? 'ssb-up' : 'ssb-down'}` }, `${Number(data.browseOverview.change) >= 0 ? '+' : ''}${data.browseOverview.change}（${Number(data.browseOverview.changePct) >= 0 ? '+' : ''}${data.browseOverview.changePct}%）`), h('span', { className: 'ssb-muted' }, `${data.browseOverview.source} · ${data.browseOverview.delayKind === 'realtime' ? '实时' : data.browseOverview.delayKind === 'unknown' ? '延迟未知' : `延迟${data.browseOverview.delaySeconds}秒`}`)) : null,
         h('div', { className: 'ssb-toolbar' }, ...Object.keys(BROWSE_MARKETS).map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, BROWSE_MARKETS[market]))),
         !rows ? h('div', { className: 'ssb-empty' }, h('p', null, '目录尚未同步。先在设置中保存数据源配置，再同步目录。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录')) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {

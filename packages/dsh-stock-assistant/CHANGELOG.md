@@ -6,6 +6,7 @@
 
 ### 新增
 
+- **市场概览**：浏览市场页头部显示代表指数实时点位与涨跌幅（沪=上证指数 000001，深=深证成指 399001），随 browse 响应一并返回（`browse.overview`），指数拉取失败静默隐藏不阻断目录浏览；指数不入自选/目录，走东财 quotes 管道直拉并经延迟派生。
 - **接口反代（API 端点覆盖）**：数据源实例可按适配器端点键替换请求地址（东财五个端点/腾讯两个端点，descriptor `endpointKeys` 下发标签），自建反向代理或镜像只需原样转发同路径；留空回官方默认。适配器端点表化（`DEFAULT_ENDPOINTS`+`endpointOf(ctx,key)`）。
 - **实例级 HTTP 代理出口**：`providers[].proxy`（`http(s)://[user:pass@]host:port`），executor 按 URL 惰性缓存 undici ProxyAgent 注入 ctx.fetch；包不可用时该实例静默降级直连。
 - **上游可观测**：executor 记录每实例最近 20 条请求环形日志（时间/能力·适配器/状态/耗时），快照 `providerStatus[].recentRequests` 下发；设置页实例卡「运行状态」折叠组展示，summary 标注代理态。

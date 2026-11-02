@@ -11,7 +11,7 @@ import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema 
 import { createWatchlistService } from './service.mjs'
 import { createBudget } from './budget.mjs'
 import { createExecutor } from './executor.mjs'
-import { createCollector } from './collector.mjs'
+import { createCollector, deriveDelay } from './collector.mjs'
 import { createCatalog } from './catalog.mjs'
 import { createDemand } from './demand.mjs'
 import { createKlineCache } from './kline-cache.mjs'
@@ -160,7 +160,19 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     async browse(input) {
       assertLive()
       if (!['XSHG', 'XSHE'].includes(input.market)) fail('INVALID_REQUEST', '市场参数无效')
-      return { ...await catalog.browse(input), catalogs: catalog.status(), routingRevision: state.get().routingRevision }
+      // 市场概览: 代表指数不入目录/自选, 走 quotes 管道直拉; 失败静默为 null 不阻断目录浏览
+      const INDEX = { XSHG: { id: 'XSHG:index:000001', exchange: 'XSHG', code: '000001', name: '上证指数' }, XSHE: { id: 'XSHE:index:399001', exchange: 'XSHE', code: '399001', name: '深证成指' } }
+      const index = INDEX[input.market]
+      const route = router.select('quotes', input.market)
+      let overview = null
+      if (route.instance) {
+        try {
+          const result = await executor.run(route.instance, 'quotes', { securities: [{ id: index.id, exchange: index.exchange, code: index.code }], routingRevision: state.get().routingRevision }, { signal: new AbortController().signal })
+          const quote = result.items?.find(q => q.securityId === index.id)
+          if (quote && quote.last !== null) { deriveDelay(quote, now); overview = { name: index.name, last: quote.last, change: quote.change, changePct: quote.changePct, quoteAt: quote.quoteAt, delayKind: quote.delayKind, delaySeconds: quote.delaySeconds, source: quote.providerInstanceId } }
+        } catch {}
+      }
+      return { ...await catalog.browse(input), overview, catalogs: catalog.status(), routingRevision: state.get().routingRevision }
     },
     async sync(input) {
       assertLive()

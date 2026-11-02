@@ -108,6 +108,20 @@ test('浏览视图渲染市场目录与空态同步引导', async () => {
   assert.match(html, /浏览市场/)
   assert.match(html, /600001/)
 })
+// 概览: browse 头部指数条(名称+点位+涨跌幅+来源延迟), 概览缺省不渲染不占位
+test('浏览页指数概览条渲染与静默缺省', async () => {
+  const { plugin } = await loadClientWithReact()
+  const securities = [{ id: 'XSHG:equity:600001', officialName: '甲', code: '600001', exchange: 'XSHG' }]
+  const base = { view: { view: 'browse', query: '', selectedId: null, sort: 'manual', browseMarket: 'XSHG', browseRows: securities, browseTotal: 1 }, busy: {}, candidates: [], composing: false, undo: null, data: { control: { revision: 1, watchlist: { order: [], items: {} }, preferences: {} } } }
+  const withOverview = { ...base, data: { ...base.data, browseOverview: { name: '上证指数', last: '3900.25', change: '25.50', changePct: '0.66', delayKind: 'realtime', source: 'em-default' } } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => withOverview, subscribe: () => () => {}, updateView() {}, mutate: async () => {} }, layout: {} }))
+  assert.match(html, /上证指数/)
+  assert.match(html, /3900\.25/)
+  assert.match(html, /\+25\.50（\+0\.66%）/)
+  assert.match(html, /em-default · 实时/)
+  const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => base, subscribe: () => () => {}, updateView() {}, mutate: async () => {} }, layout: {} }))
+  assert.doesNotMatch(html2, /上证指数/, '无概览时不渲染不占位')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
