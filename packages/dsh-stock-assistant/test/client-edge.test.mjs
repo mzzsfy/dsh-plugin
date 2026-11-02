@@ -65,7 +65,7 @@ test('U03 未选中候选时确认添加不可用，不自动取首项', async (
 test('设置页空配置一键默认源填充草稿', async () => {
   const { plugin } = await loadClientWithReact()
   const suggested = { providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [{ id: 'xshg-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }] }
-  const state = { view: { view: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [], routes: [] }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, suggested } }
+  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [], routes: [] }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, suggested } }
   const updates = []
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch) }
   renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
@@ -77,7 +77,7 @@ test('设置页递进区块与实例可观测面渲染', async () => {
   const { plugin } = await loadClientWithReact()
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
   const suggested = { providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }
-  const state = { view: { view: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} }, endpoints: { kline: 'https://proxy.corp/em/kline' } }], routes: [] }, quotes: { [item.id]: { last: '1392.05', previousClose: '1376.95', receivedAt: 1, quoteAt: null, delayKind: 'unknown' } }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline'], credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'kline', label: 'K线历史' }, { key: 'quotes', label: '行情批量' }] }], providerStatus: [{ id: 'em-default', credentialPresent: true, proxy: false, endpointsCovered: 1, recentRequests: [{ at: 1000, url: 'quotes eastmoney', status: 'ok', ms: 120 }] }], catalogs: [], routeSelections: {}, klineReady: {}, suggested, vendorAvailable: true } }
+  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} }, endpoints: { kline: 'https://proxy.corp/em/kline' } }], routes: [] }, quotes: { [item.id]: { last: '1392.05', previousClose: '1376.95', receivedAt: 1, quoteAt: null, delayKind: 'unknown' } }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline'], credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'kline', label: 'K线历史' }, { key: 'quotes', label: '行情批量' }] }], providerStatus: [{ id: 'em-default', credentialPresent: true, proxy: false, endpointsCovered: 1, recentRequests: [{ at: 1000, url: 'quotes eastmoney', status: 'ok', ms: 120 }] }], catalogs: [], routeSelections: {}, klineReady: {}, suggested, vendorAvailable: true } }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /数据源/, '区块1标题')
@@ -133,7 +133,7 @@ test('搜索候选看一眼进详情', async () => {
   assert.ok(html.includes('ssb-peek'), '候选行有看一眼按钮')
   assert.match(html, /腾讯控股/, '候选渲染')
   // 点击行为: 模拟 DOM 不便, 直接断言 updateView 调用契约由交互测试承担——渲染层锚定按钮与详情落地形态
-  const detail = { ...base, view: { view: 'detail', detailId: cand[0].id, browsePeek: { [cand[0].id]: cand[0] }, selectedId: null, sort: 'manual', alias: '' }, kline: null }
+  const detail = { ...base, view: { view: 'search', overlay: 'detail', detailId: cand[0].id, browsePeek: { [cand[0].id]: cand[0] }, selectedId: null, sort: 'manual', alias: '' }, kline: null }
   const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => detail, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
   assert.match(html2, /腾讯控股/, 'peek 详情渲染')
   assert.match(html2, /加自选/, '非自选详情主操作')
@@ -144,7 +144,7 @@ test('browse行点击进详情与非自选详情形态', async () => {
   const { plugin } = await loadClientWithReact()
   const peer = { id: 'XSHG:equity:600001', officialName: '甲股', code: '600001', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
-  const base = { view: { view: 'detail', detailId: peer.id, browsePeek: { [peer.id]: peer }, selectedId: null, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: { [peer.id]: { quote: { last: '12.00', previousClose: '11.50', change: '0.50', changePct: '4.35', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, open: '11.8', high: '12.1', low: '11.4', volume: '1000', amount: '12000', sessionState: 'trading' }, health: 'ok', lastError: null } }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const base = { view: { view: 'list', overlay: 'detail', detailId: peer.id, browsePeek: { [peer.id]: peer }, selectedId: null, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: { [peer.id]: { quote: { last: '12.00', previousClose: '11.50', change: '0.50', changePct: '4.35', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, open: '11.8', high: '12.1', low: '11.4', volume: '1000', amount: '12000', sessionState: 'trading' }, health: 'ok', lastError: null } }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const runtimeStub = { getSnapshot: () => base, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /甲股/, 'browsePeek 证券详情可渲染')
@@ -156,6 +156,66 @@ test('browse行点击进详情与非自选详情形态', async () => {
   const detailHtml2 = html2.slice(html2.indexOf('ssb-detail'))
   assert.match(html2.slice(html2.indexOf('ssb-detail')), /保存别名/, '自选详情保留别名区')
   assert.doesNotMatch(detailHtml2.slice(0, detailHtml2.indexOf('ssb-facts')), /加自选/, '自选详情无加自选主操作')
+})
+// 交互分层: 详情=右侧抽屉浮层(底层列表仍渲染, 关闭语义统一无返回按钮), 设置=模态, K线周期=Tab 语义
+test('详情抽屉化: 浮层结构+底层保留+无返回按钮', async () => {
+  const { plugin } = await loadClientWithReact()
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const state = { view: { view: 'list', overlay: 'detail', detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: { [item.id]: { quote: { last: '10.00', previousClose: '9.50', change: '0.50', changePct: '5.26', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null } }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /ssb-overlay/, '浮层容器渲染')
+  assert.match(html, /ssb-drawer/, '抽屉形态')
+  assert.match(html, /贵州茅台/, '抽屉内详情')
+  assert.match(html, /自选 · /, '底层自选列表仍渲染')
+  assert.doesNotMatch(html, /返回自选/, '抽屉无返回自选按钮')
+  assert.doesNotMatch(html, /返回市场/, '抽屉无返回市场按钮')
+  assert.match(html, /ssb-overlay-close|关闭/, '统一关闭入口')
+})
+test('设置模态化: 遮罩居中+关闭回主区', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'list', overlay: 'settings', settingsDraft: { step: 1, providers: [], routes: [], saved: false, json: '', checkIds: [], checkResults: [] }, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {} }, layout: { providerCheck: () => {} } }))
+  assert.match(html, /ssb-modal/, '模态形态')
+  assert.match(html, /ssb-overlay/, '遮罩层')
+  assert.match(html, /自选 · /, '底层主区仍渲染')
+  assert.doesNotMatch(html, /返回自选/, '模态无返回自选按钮')
+})
+test('K线周期Tab语义', async () => {
+  const { plugin } = await loadClientWithReact()
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const state = { view: { view: 'list', overlay: 'detail', detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', kline: { [item.id]: { '1d': { candles: [] } } }, klinePeriod: '1d', data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /role="tab"/, '周期为 tab 角色')
+  assert.match(html, /aria-selected="true"/, '当前周期选中态')
+})
+// 规范收敛: 弹层焦点管理结构锚(aria/层次), 交互行为(焦点移入还原/滚动锁定/Esc)真机验证
+test('弹层焦点结构: 对话框可聚焦容器+关闭钮aria', async () => {
+  const { plugin } = await loadClientWithReact()
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const state = { view: { view: 'list', overlay: 'detail', detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /aria-label="关闭"/, '关闭钮有可访问名')
+  assert.match(html, /tabindex="-1"/, '浮层卡片可编程聚焦(焦点移入落点)')
+})
+test('顶部导航层次: 低频操作收进更多菜单', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
+  assert.match(html, /更多/, '更多菜单入口')
+  assert.ok(!html.match(/aria-label="股票工具操作"[^>]*>[^<]*<button[^>]*>设置/), '设置不再平铺在主导航')
+})
+test('browse主区返回入口与K线tablist纯净', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'browse', browseMarket: 'XSHG', browseRows: [], browseTotal: 0, browseOffset: 0, sort: 'manual', alias: '', browsePeek: {} }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadBrowse: () => Promise.resolve({ items: [], total: 0 }) }, layout: {} }))
+  assert.match(html, /返回自选/, 'browse 主区有返回入口')
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const detail = { ...state, view: { ...state.view, view: 'list', overlay: 'detail', detailId: item.id, browsePeek: { [item.id]: item } }, kline: { [item.id]: { '1d': { candles: [] } } }, klinePeriod: '1d' }
+  const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => detail, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.ok(html2.includes('role="tablist"'), 'tablist 存在')
+  const tabStart = html2.indexOf('role="tablist"')
+  const tabSeg = html2.slice(tabStart, html2.indexOf('</div>', tabStart))
+  assert.ok(!tabSeg.includes('↻'), '刷新钮不在 tablist 内')
 })
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
@@ -242,7 +302,7 @@ test('K6 NO_ROUTE 二次失败不自动重试(避免额外资损)', async () => 
 test('K7 NO_ROUTE 错误条渲染一键开启按钮', async () => {
   const { plugin } = await loadClientWithReact()
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
-  const state = { view: { view: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
+  const state = { view: { view: 'list', overlay: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
   const updates = []
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
@@ -298,7 +358,7 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   const { defaultConfig } = await import('../src/schemas.mjs')
   const saved = defaultConfig()
   const data = { serverEpoch: 'a', snapshotSeq: 1, routingRevision: 0, control: { ...saved, revision: 1, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 30, colorMode: 'red-up' } }, quotes: {}, routeSelections: {}, catalogs: [], adapters: [{ adapterId: 'tushare', credential: 'token', capabilities: ['quotes', 'catalog', 'search', 'calendar'] }, { adapterId: 'tencent', credential: 'none', capabilities: ['quotes', 'kline'] }, { adapterId: 'sina', credential: 'none', capabilities: ['quotes', 'catalog'] }, { adapterId: 'eastmoney', credential: 'none', capabilities: ['quotes', 'catalog', 'search', 'kline'] }], suggested: saved, providerStatus: [], markets: { XSHG: { currency: 'CNY', verified: true } }, vendorAvailable: true, klineReady: {} }
-  const state = { view: { view: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
+  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   for (const marker of ['① 数据源', '② 市场与能力', '目录与日历', '③ 显示偏好', '保存配置', '检查所有来源能力', '放弃草稿', '一键为已启用市场配置K线']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
