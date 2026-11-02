@@ -9,6 +9,8 @@ export const providerSchema = z.strictObject({
   id, adapterId: id, enabled: z.boolean(), credentialEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).nullable(), quotaGroup: id,
   budget: z.strictObject({ requestsPerMinute: rate.nullable(), dailyRequestLimit: rate.nullable(), billingUnit: z.enum(['request', 'symbol']), symbolCreditsPerMinute: rate.nullable(), capabilityLimits: z.partialRecord(capability, rate) }),
   endpoints: z.record(z.string().url()).optional(),
+  // 上游出口代理(反代/正向代理统一走 URL): http(s)://[user:pass@]host:port, 凭据在 userinfo
+  proxy: z.string().url().refine(v => v.startsWith('http://') || v.startsWith('https://'), '代理仅支持 http(s) URL').optional(),
 }).refine(p => p.credentialEnv !== null || p.budget.requestsPerMinute !== null, '免凭据来源必须声明保守预算')
 export const routeSchema = z.strictObject({
   id, capability, market: marketSchema, instrument: z.literal('equity'), primaryInstanceId: id,

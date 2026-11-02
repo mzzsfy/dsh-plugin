@@ -58,3 +58,11 @@ test('endpoints 覆盖块校验合法 URL 且可省略', () => {
   assert.throws(() => parseConfiguration({ providers: [bad], routes: [] }))
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), endpoints: { kline: 42 } }], routes: [] }))
 })
+
+test('proxy 仅接受 http(s) URL 且可省略(反代/代理出口)', () => {
+  assert.doesNotThrow(() => parseConfiguration({ providers: [provider()], routes: [] }))
+  assert.doesNotThrow(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'http://127.0.0.1:7890' }], routes: [] }))
+  assert.doesNotThrow(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'https://user:pass@proxy.corp:8443' }], routes: [] }))
+  assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'socks5://127.0.0.1:1080' }], routes: [] }))
+  assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'not-a-url' }], routes: [] }))
+})

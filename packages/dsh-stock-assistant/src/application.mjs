@@ -26,7 +26,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const changed = () => { touched(); publish({ type: 'invalidate', serverEpoch, snapshotSeq, scopes: ['snapshot'] }) }
   const state = await openState(storageDomain, changed, now)
   const registry = createRegistry(providers), budget = createBudget(now)
-  const executor = createExecutor({ registry, budget, env, fetch, now, timers, usSymbols })
+  // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
+  let proxyFactory = null
+  try { const undici = await import('undici'); proxyFactory = url => new undici.ProxyAgent(url) } catch {}
+  const executor = createExecutor({ registry, budget, env, fetch, now, timers, usSymbols, proxyFactory })
   const getControl = state.get
   const router = createRouter(getControl, now, () => collector?.reset())
   const klineCache = createKlineCache({ cacheTable: state.cache, now })
