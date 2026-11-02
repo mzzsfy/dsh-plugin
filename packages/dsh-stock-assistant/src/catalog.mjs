@@ -68,7 +68,10 @@ export function createCatalog({ state, getControl = state.get, router, executor,
             || config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId))
           if (!instance) continue
         }
-        const batch = await executor.run(instance, 'search', { q, limit: 20, market, routingRevision: config.routingRevision }, { signal })
+        // 单市场来源限速不终止整个搜索:其余市场候选照常下发(逐市场直连,部分受限不影响其余)
+        let batch
+        try { batch = await executor.run(instance, 'search', { q, limit: 20, market, routingRevision: config.routingRevision }, { signal }) }
+        catch (e) { if (e.code === 'RATE_LIMIT') continue; throw e }
         if (stopped || getControl().routingRevision !== config.routingRevision) fail('ROUTE_CONFLICT', '目录路由已变化', 409)
         for (const s of batch.items) {
           if (!securitySchema.safeParse(s).success) fail('BAD_PAYLOAD', '来源返回不受支持的证券身份', 502)

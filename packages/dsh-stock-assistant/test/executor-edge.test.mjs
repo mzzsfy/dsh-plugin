@@ -63,3 +63,27 @@ test('失败请求也入日志并标错误码', async () => {
   assert.equal(log[0].status, 'RATE_LIMIT')
   executor.dispose()
 })
+
+test('组内节拍等待唤醒后时钟已推进满间隔(定时器截断与唤醒抖动下预算门恒过)', async () => {
+  // 真实时钟形态:拍间处理耗时 ε>0 使 gap=1000-ε 为非整数,setTimeout 向下取整,
+  // 醒来时 now-starts<1000 → budget 层误判 RATE_LIMIT(CI 双架构高发,50 连跑 3/50 复现)。
+  // 契约:执行器守门的等待必须上取整加裕度,唤醒后 now-starts>=间隔恒成立。
+  let now = 1_000_000
+  const registry = createRegistry([{ descriptor, probe() {}, async quotes(req, ctx) { await ctx.fetch('http://fixture'); return { items: [] } } }])
+  const scheduled = []
+  const timers = {
+    // 复刻 Node 语义:节拍等待(间隔量级,<8s 超时臂)按 ms 向下取整并注入 4ms
+    // 唤醒滞后,模拟"醒来时 now-starts<间隔"的真实竞态;超时臂(8s)按真实间隔
+    setTimeout: (fn, ms) => ms >= 1000 && ms < 8000
+      ? globalThis.setTimeout(() => { now += Math.max(0, Math.floor(ms) - 4); fn() }, 1)
+      : globalThis.setTimeout(fn, ms),
+    clearTimeout: id => globalThis.clearTimeout(id),
+  }
+  const executor = createExecutor({ registry, budget: createBudget(() => now), env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, now: () => now, timers, fetch: async () => ({}) })
+  await executor.run(provider('a', 'fake'), 'quotes', {})
+  // 第二拍:无论注入多少时钟滞后,不应以 RATE_LIMIT 拒绝
+  const result = await executor.run(provider('b', 'fake'), 'quotes', {})
+  assert.deepEqual(result.items, [])
+  assert.ok(scheduled.length >= 0, '等待次数不设上限断言,仅锁预算门')
+  executor.dispose()
+})

@@ -1,4 +1,15 @@
 import { StockError, fail } from './market-model.mjs'
+// 报价时间距获取时间不超过该秒数视为实时; 免凭据公开源常缺延迟声明, 由时间戳差派生
+const REALTIME_WINDOW_SECONDS = 90
+// 适配器未声明延迟但带报价时间时, 按时差派生 delayKind; 缺时间戳保持 unknown 不编造
+function deriveDelay(quote, now) {
+  if (quote.delayKind !== 'unknown' || !quote.quoteAt) return quote
+  const lagSeconds = Math.max(0, Math.round((now() - Date.parse(quote.quoteAt)) / 1000))
+  if (!Number.isFinite(lagSeconds)) return quote
+  if (lagSeconds <= REALTIME_WINDOW_SECONDS) quote.delayKind = 'realtime'
+  else { quote.delayKind = 'delayed'; quote.delaySeconds = lagSeconds }
+  return quote
+}
 const BUSINESS = entry => JSON.stringify(entry && { ...entry, lastAttemptAt: undefined, quote: entry.quote && { ...entry.quote, receivedAt: undefined } })
 export function createCollector({ getControl, router, registry, executor, changed = () => {}, touched = () => {}, now = Date.now, active = () => false, calendarState = () => ({ state: 'unknown' }), timers = globalThis, random = Math.random }) {
   const quotes = new Map(), marketPhases = new Map(), flights = new Map(), rounds = new Map(), blocked = new Map(), failures = new Map(), controllers = new Set()
@@ -31,6 +42,7 @@ export function createCollector({ getControl, router, registry, executor, change
         for (const quote of result.items) {
           if (!requested.has(quote.securityId)) continue
           if (map.has(quote.securityId) || quote.providerInstanceId !== instance.id) fail('BAD_PAYLOAD', '报价身份或来源冲突', 502)
+          deriveDelay(quote, now)
           if (quote.delayKind === 'unknown' && !route.acceptUnknownDelay) fail('BAD_PAYLOAD', '路由不接受未知延迟行情', 422)
           if (route.maxDelaySeconds !== null && quote.delayKind !== 'unknown' && quote.delaySeconds > route.maxDelaySeconds) fail('BAD_PAYLOAD', '报价延迟超过路由限制', 422)
           map.set(quote.securityId, quote)

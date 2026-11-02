@@ -19,6 +19,11 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
     }
     return proxies.get(proxy)
   }
+  // 组内节拍等待:上取整加裕度。setTimeout 对非整数 ms 向下取整且唤醒有抖动,
+  // 直接 setTimeout(gap) 会在 now-starts<间隔 时醒来,预算层同源时钟误判 RATE_LIMIT
+  // (CI 双架构高发竞态);唤醒后 now-starts>=间隔 恒成立,预算门恒过。
+  const THROTTLE_SLACK_MS = 5
+  const throttleDelay = gap => Math.ceil(gap) + THROTTLE_SLACK_MS
   const slots = []
   async function acquire(signal) {
     if (running < 2) { running++; return }
@@ -43,7 +48,7 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
           const gap = Math.max(0, (starts.get(instance.quotaGroup) ?? -Infinity) + (instance.budget?.requestsPerMinute === null ? 10 * 1000 : 1000) - now())
           if (gap) await new Promise((resolve, reject) => {
             const abortWait = () => { timers.clearTimeout(wait); reject(new StockError('CANCELLED', '请求已取消', 503)) }
-            const wait = timers.setTimeout(() => { controller.signal.removeEventListener('abort', abortWait); resolve() }, gap)
+            const wait = timers.setTimeout(() => { controller.signal.removeEventListener('abort', abortWait); resolve() }, throttleDelay(gap))
             controller.signal.addEventListener('abort', abortWait, { once: true })
           })
           await acquire(controller.signal); acquired = true
@@ -60,7 +65,7 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
                 const gap = Math.max(0, starts.get(instance.quotaGroup) + (instance.budget?.requestsPerMinute === null ? 10 * 1000 : 1000) - now())
                 if (gap) await new Promise((resolve, reject) => {
                   const cancel = () => { timers.clearTimeout(id); reject(new StockError('CANCELLED', '请求已取消', 503)) }
-                  const id = timers.setTimeout(() => { controller.signal.removeEventListener('abort', cancel); resolve() }, gap)
+                  const id = timers.setTimeout(() => { controller.signal.removeEventListener('abort', cancel); resolve() }, throttleDelay(gap))
                   controller.signal.addEventListener('abort', cancel, { once: true }); if (controller.signal.aborted) cancel()
                 })
               }

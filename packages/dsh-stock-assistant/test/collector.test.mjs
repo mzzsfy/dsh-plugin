@@ -49,3 +49,20 @@ test('C01/C02/C03 相同批次复用且同价手动刷新仍返回新获取时�
   await d; assert.equal(c.entries()[security.id].quote.receivedAt, 200); assert.equal(changed, 1)
   c.dispose()
 })
+
+test('延迟派生: 有quoteAt的unknown按时差定realtime/delayed, 缺quoteAt保持unknown', async () => {
+  const config = control(), router = createRouter(() => config)
+  let items = []
+  const c = createCollector({ getControl: () => config, router, registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, executor: { run: async () => ({ items }) }, now: () => Date.parse('2026-11-02T12:00:30Z'), active: () => false })
+  // 5min 前: delayed+300(先入库); 10s 前: realtime 覆盖(新时间合法); 无 quoteAt: 保持 unknown 不编造
+  items = [{ securityId: security.id, last: '10.00', previousClose: '8.00', quoteAt: '2026-11-02T11:55:30Z', receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }]
+  await c.refresh()
+  assert.deepEqual({ kind: c.entries()[security.id].quote.delayKind, s: c.entries()[security.id].quote.delaySeconds }, { kind: 'delayed', s: 300 })
+  items = [{ securityId: security.id, last: '10.00', previousClose: '8.00', quoteAt: '2026-11-02T12:00:20Z', receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }]
+  await c.refresh()
+  assert.deepEqual({ kind: c.entries()[security.id].quote.delayKind, s: c.entries()[security.id].quote.delaySeconds }, { kind: 'realtime', s: null })
+  items = [{ securityId: security.id, last: '10.00', previousClose: '8.00', quoteAt: null, receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }]
+  await c.refresh()
+  assert.equal(c.entries()[security.id].quote.delayKind, 'unknown')
+  c.dispose()
+})

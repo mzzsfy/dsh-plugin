@@ -147,6 +147,17 @@ test('remote 搜索市场面=启用实例适配器市场并集(无search路由�
   assert.ok(result.items.some(i => i.exchange === 'XHKG'), '直连批次候选进入结果')
 })
 
+test('remote 单市场限速跳过不终止整个搜索(其余市场照常下发)', async () => {
+  // 冻结时钟复现 budget 速率门:第一拍(XSHG)过门产出候选,后续拍 RATE_LIMIT 被免疫跳过;
+  // 契约:搜索整体不因单市场 RATE_LIMIT 失败,已产出候选照常下发
+  const storage = memoryStorage()
+  const app = await createApplication({ storageDomain: storage, providers: [tencent, sina, eastmoney], now: () => 1_700_000_000_000, fetch: async url => {
+    return { ok: true, json: async () => ({ QuotationCodeTable: { Data: [{ Code: '600519', Name: '贵州茅台', MktNum: '1', JYS: null, QuoteID: '1.600519', Classify: 'ABStock', PinYin: 'gzmt' }] } }) }
+  }, publish: () => {} })
+  const result = await app.search('平安', 'remote')
+  assert.ok(result.items.some(i => i.exchange === 'XSHG' && i.code === '600519'), '首拍候选照常进入结果,搜索整体不因单市场 RATE_LIMIT 失败')
+})
+
 test('remote 搜索期间路由变化即拒 ROUTE_CONFLICT', async () => {
   const storage = memoryStorage()
   let first = true
