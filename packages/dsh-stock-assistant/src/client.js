@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
       let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, queryGeneration = 0, querying, composing = false
       const subscribers = new Set(), retiredEpochs = new Set(), requests = new Set()
-      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, menuId: null, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '' }, data: null, paused: false, error: '', errorCode: '', busy: {}, candidates: [], composing: false, undo: null }
+      let state = { view: { view: 'list', query: '', selectedId: null, detailId: null, sort: 'manual', focusId: null, keyboardNavigating: false, frozenOrder: null, settingsDraft: null, scrollTop: 0, menuId: null, alias: '', browseMarket: 'XSHG', browseRows: null, browseTotal: 0, browseOffset: 0, notice: '', browsePeek: {} }, data: null, paused: false, error: '', errorCode: '', busy: {}, candidates: [], composing: false, undo: null }
       function emit() { for (const fn of subscribers) fn() }
       function patch(next) { if (!disposed) { state = { ...state, ...next }; emit() } }
       function applySnapshot(data, explicit = false) {
@@ -59,7 +59,7 @@ window.__ModuleLoader__.load({
         finally { patch({ busy: { ...state.busy, [key]: false } }) }
       }
       // 离开 detail 视图时统一清详情态, 防止列表视图残留 detail 面板
-      function updateView(next) { const leaveDetail = next.view && next.view !== 'detail'; patch({ view: { ...state.view, ...next, ...(leaveDetail ? { detailId: null, alias: '' } : {}) } }); sendDemand() }
+      function updateView(next) { const leaveDetail = next.view && next.view !== 'detail'; patch({ view: { ...state.view, ...next, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}) } }); sendDemand() }
       function scheduleSearch(query) {
         updateView({ query, selectedId: null }); clearTimeout(timer); querying?.abort(); querying = new AbortController()
         if (composing || !query.trim()) { patch({ candidates: [] }); return }
@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
             refresher.refresh(); return result
           })
         },
-        refresh() { return action('refresh', async () => { const gen = generation; const data = await api('/refresh', 'POST', { expectedRoutingRevision: state.data?.routingRevision }); if (gen === generation) applySnapshot(data, true) }) },
+        refresh(securityIds) { return action('refresh', async () => { const gen = generation; const data = await api('/refresh', 'POST', { expectedRoutingRevision: state.data?.routingRevision, ...(securityIds ? { securities: securityIds } : {}) }); if (gen === generation) applySnapshot(data, true) }) },
         preferences(patchValue) { return action('write', async () => { const result = await api('/preferences', 'POST', { ...operation(), patch: patchValue }); if (state.data && state.data.control.revision <= result.revision) patch({ data: { ...state.data, control: { ...state.data.control, revision: result.revision, preferences: { ...state.data.control.preferences, ...patchValue } } } }); refresher.refresh() }) },
         configuration: (configuration, checkIds) => action('configuration', async () => { await api('/configuration', 'POST', { ...operation(), ...configuration, expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data?.control.revision, checkIds }); updateView({ settingsDraft: null }); refresher.refresh() }),
         sync: market => action('sync', async () => { const result = await api('/catalog-sync', 'POST', { market, expectedRoutingRevision: state.data?.routingRevision }); refresher.refresh(); return result }),
@@ -334,7 +334,10 @@ window.__ModuleLoader__.load({
         h('div', { ref: holder, className: 'ssb-kline-holder' }))
     }
     function Detail({ runtime, state }) {
-      const { data, view } = state, item = data.control.watchlist.items[view.detailId]
+      const { data, view } = state
+      // 详情解析链: 自选优先, browsePeek 兜底(市场浏览点进来的临时详情, 无需先加自选)
+      const item = data.control.watchlist.items[view.detailId] || view.browsePeek?.[view.detailId]
+      const inWatchlist = !!data.control.watchlist.items[view.detailId]
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
       const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
@@ -342,13 +345,16 @@ window.__ModuleLoader__.load({
       // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
       const currency = item.currency || ''
       const fields = [['今开', q?.open], ['最高', q?.high], ['最低', q?.low], ['昨收', q?.previousClose], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量（股）', q?.volume], ['成交额', q?.amount], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', q?.delayKind === 'unknown' || !q ? '未知' : q.delayKind === 'realtime' ? '实时' : `${q.delaySeconds}秒`]]
-      return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), h(Button, { className: 'ssb-mobile-back', onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')),
+      // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
+      const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'), h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '返回市场'))
+      const watchActions = inWatchlist ? h(React.Fragment, null, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名'))) : null
+      return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), h(Button, { className: 'ssb-mobile-back', onClick: () => runtime.updateView({ view: inWatchlist ? 'list' : 'browse' }) }, inWatchlist ? '返回自选' : '返回市场')),
         h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
         h('div', { className: `ssb-detail-price ssb-number${direction}` }, q?.last ?? '—', h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
         h('div', { className: 'ssb-detail-grid' },
           h('div', { className: 'ssb-detail-main' }, h(KlineView, { runtime, state, item })),
-          h('div', { className: 'ssb-detail-side' }, h(QuoteStatus, { entry }), h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))),
-            h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')))))
+          h('div', { className: 'ssb-detail-side' }, peekActions, h(QuoteStatus, { entry }), h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))),
+            watchActions)))
     }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
@@ -359,7 +365,7 @@ window.__ModuleLoader__.load({
         !rows ? h('div', { className: 'ssb-empty' }, h('p', null, '目录尚未同步。先在设置中保存数据源配置，再同步目录。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录')) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
             const added = !!data?.control.watchlist.items[item.id]
-            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
+            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('button', { type: 'button', className: 'ssb-stock-name', onClick: () => { runtime.updateView({ detailId: item.id, view: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.loadKline(item.id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([item.id]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
           })),
         rows?.length ? h('div', { className: 'ssb-toolbar' }, h('span', { className: 'ssb-muted' }, `共 ${view.browseTotal} 只`), h(Button, { disabled: !view.browseOffset || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, Math.max(0, view.browseOffset - BROWSE_PAGE))) }, '上一页'), h(Button, { disabled: view.browseOffset + BROWSE_PAGE >= view.browseTotal || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, view.browseOffset + BROWSE_PAGE)) }, '下一页')) : null,
         h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选')))

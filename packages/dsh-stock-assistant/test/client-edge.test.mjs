@@ -122,6 +122,24 @@ test('浏览页指数概览条渲染与静默缺省', async () => {
   const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => base, subscribe: () => () => {}, updateView() {}, mutate: async () => {} }, layout: {} }))
   assert.doesNotMatch(html2, /上证指数/, '无概览时不渲染不占位')
 })
+// browse 可点进详情: 行点击开详情(无需加自选), 非自选详情显示加自选而非别名/删除
+test('browse行点击进详情与非自选详情形态', async () => {
+  const { plugin } = await loadClientWithReact()
+  const peer = { id: 'XSHG:equity:600001', officialName: '甲股', code: '600001', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
+  const base = { view: { view: 'detail', detailId: peer.id, browsePeek: { [peer.id]: peer }, selectedId: null, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: { [peer.id]: { quote: { last: '12.00', previousClose: '11.50', change: '0.50', changePct: '4.35', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, open: '11.8', high: '12.1', low: '11.4', volume: '1000', amount: '12000', sessionState: 'trading' }, health: 'ok', lastError: null } }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const runtimeStub = { getSnapshot: () => base, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /甲股/, 'browsePeek 证券详情可渲染')
+  assert.match(html, /加自选/, '非自选详情显示加自选')
+  assert.doesNotMatch(html, /保存别名/, '非自选详情不显示别名区')
+  assert.doesNotMatch(html, /删除/, '非自选详情不显示删除')
+  const inWatch = { ...base, view: { ...base.view, detailId: item.id, browsePeek: {} } }
+  const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => inWatch, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  const detailHtml2 = html2.slice(html2.indexOf('ssb-detail'))
+  assert.match(html2.slice(html2.indexOf('ssb-detail')), /保存别名/, '自选详情保留别名区')
+  assert.doesNotMatch(detailHtml2.slice(0, detailHtml2.indexOf('ssb-facts')), /加自选/, '自选详情无加自选主操作')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)

@@ -49,7 +49,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       collector?.reconcile()
     } else collector?.cancelIdle()
   }, now, timers)
-  collector = createCollector({ getControl, router, registry, executor, changed, touched, now, timers, active: demand.active, calendarState: catalog.marketState })
+  collector = createCollector({ getControl, router, registry, executor, resolveSecurity: catalog.resolve, changed, touched, now, timers, active: demand.active, calendarState: catalog.marketState })
   const watchlist = createWatchlistService(state, catalog.resolve, now)
   const snapshot = () => {
     const control = state.get(); delete control.operations

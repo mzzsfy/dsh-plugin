@@ -50,8 +50,7 @@ test('C01/C02/C03 相同批次复用且同价手动刷新仍返回新获取时�
   c.dispose()
 })
 
-test('延迟派生: 有quoteAt的unknown按时差定realtime/delayed, 缺quoteAt保持unknown', async () => {
-  const config = control(), router = createRouter(() => config)
+test('延迟派生: 有quoteAt的unknown按时差定realtime/delayed, 缺quoteAt保持unknown', async () => {  const config = control(), router = createRouter(() => config)
   let items = []
   const c = createCollector({ getControl: () => config, router, registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, executor: { run: async () => ({ items }) }, now: () => Date.parse('2026-11-02T12:00:30Z'), active: () => false })
   // 5min 前: delayed+300(先入库); 10s 前: realtime 覆盖(新时间合法); 无 quoteAt: 保持 unknown 不编造
@@ -64,5 +63,17 @@ test('延迟派生: 有quoteAt的unknown按时差定realtime/delayed, 缺quoteAt
   items = [{ securityId: security.id, last: '10.00', previousClose: '8.00', quoteAt: null, receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }]
   await c.refresh()
   assert.equal(c.entries()[security.id].quote.delayKind, 'unknown')
+  c.dispose()
+})
+
+test('目录证券解析链: refresh可拉非自选目录证券行情, 未知id仍NOT_FOUND', async () => {
+  const config = control(), router = createRouter(() => config)
+  const peer = makeSecurity('XSHG', '600521', '目录中的另一只')
+  const requested = []
+  const c = createCollector({ getControl: () => config, router, resolveSecurity: id => id === peer.id ? peer : null, registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, executor: { run: async (i, cap, req) => { requested.push(...req.securities.map(s => s.id)); return { items: [{ securityId: peer.id, last: '20.00', previousClose: '19.00', quoteAt: null, receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }] } } } })
+  await c.refresh([peer.id])
+  assert.deepEqual(requested, [peer.id], '目录证券经 resolveSecurity 解析并拉行情')
+  assert.equal(c.entries()[peer.id].quote.last, '20.00')
+  await assert.rejects(() => c.refresh(['XSHG:equity:999999']), e => e.code === 'NOT_FOUND', '不在自选也不在目录仍拒')
   c.dispose()
 })

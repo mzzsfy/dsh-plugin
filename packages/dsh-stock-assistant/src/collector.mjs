@@ -11,7 +11,7 @@ export function deriveDelay(quote, now) {
   return quote
 }
 const BUSINESS = entry => JSON.stringify(entry && { ...entry, lastAttemptAt: undefined, quote: entry.quote && { ...entry.quote, receivedAt: undefined } })
-export function createCollector({ getControl, router, registry, executor, changed = () => {}, touched = () => {}, now = Date.now, active = () => false, calendarState = () => ({ state: 'unknown' }), timers = globalThis, random = Math.random }) {
+export function createCollector({ getControl, router, registry, executor, resolveSecurity = null, changed = () => {}, touched = () => {}, now = Date.now, active = () => false, calendarState = () => ({ state: 'unknown' }), timers = globalThis, random = Math.random }) {
   const quotes = new Map(), marketPhases = new Map(), flights = new Map(), rounds = new Map(), blocked = new Map(), failures = new Map(), controllers = new Set()
   let generation = 0, timer, stopped = false, lastStart = -Infinity, manualWaiters = 0
   const entries = () => Object.fromEntries([...quotes].map(([id, value]) => [id, structuredClone(value)]))
@@ -69,7 +69,8 @@ export function createCollector({ getControl, router, registry, executor, change
     if (!options.periodic) manualWaiters++
     try {
     const config = structuredClone(getControl()), gen = generation
-    const securities = (ids || config.watchlist.order).map(id => config.watchlist.items[id] || fail('NOT_FOUND', '自选证券不存在', 404))
+    // 证券解析链: 自选优先, 目录缓存兜底(browse 任意证券可按需拉行情), 两者皆无拒 NOT_FOUND
+    const securities = (ids || config.watchlist.order).map(id => config.watchlist.items[id] || resolveSecurity?.(id) || fail('NOT_FOUND', '自选证券不存在', 404))
     const grouped = new Map(), immediate = []
     const closeMarkets = new Set(securities.map(s => s.exchange).filter(market => calendarState(market).state === 'closed' && marketPhases.get(market) === 'trading'))
     for (const s of securities) {
