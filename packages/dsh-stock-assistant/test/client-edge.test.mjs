@@ -122,6 +122,23 @@ test('浏览页指数概览条渲染与静默缺省', async () => {
   const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => base, subscribe: () => () => {}, updateView() {}, mutate: async () => {} }, layout: {} }))
   assert.doesNotMatch(html2, /上证指数/, '无概览时不渲染不占位')
 })
+// 搜索候选「看一眼」: 名称区点击进详情(browsePeek 同源), 加自选/选择语义不变
+test('搜索候选看一眼进详情', async () => {
+  const { plugin } = await loadClientWithReact()
+  const cand = [{ id: 'XHKG:equity:00700', officialName: '腾讯控股', code: '00700', exchange: 'XHKG', instrument: 'equity', currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, listingStatus: 'listed' }]
+  const base = { view: { view: 'search', query: '腾讯', selectedId: null, sort: 'manual', alias: '' }, busy: {}, candidates: cand, composing: false, undo: null, error: '', data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const updates = []
+  const runtimeStub = { getSnapshot: () => base, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }), refresh: () => Promise.resolve({}), mutate: async () => {} }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.ok(html.includes('ssb-peek'), '候选行有看一眼按钮')
+  assert.match(html, /腾讯控股/, '候选渲染')
+  // 点击行为: 模拟 DOM 不便, 直接断言 updateView 调用契约由交互测试承担——渲染层锚定按钮与详情落地形态
+  const detail = { ...base, view: { view: 'detail', detailId: cand[0].id, browsePeek: { [cand[0].id]: cand[0] }, selectedId: null, sort: 'manual', alias: '' }, kline: null }
+  const html2 = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => detail, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html2, /腾讯控股/, 'peek 详情渲染')
+  assert.match(html2, /加自选/, '非自选详情主操作')
+  assert.match(html2, /HKD/, '港股币种徽标')
+})
 // browse 可点进详情: 行点击开详情(无需加自选), 非自选详情显示加自选而非别名/删除
 test('browse行点击进详情与非自选详情形态', async () => {
   const { plugin } = await loadClientWithReact()

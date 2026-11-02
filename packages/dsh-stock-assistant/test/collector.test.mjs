@@ -77,3 +77,14 @@ test('目录证券解析链: refresh可拉非自选目录证券行情, 未知id�
   await assert.rejects(() => c.refresh(['XSHG:equity:999999']), e => e.code === 'NOT_FOUND', '不在自选也不在目录仍拒')
   c.dispose()
 })
+
+test('对象形态securities: 搜索候选peek不经目录解析直拉(港美股路径)', async () => {
+  const config = control(), router = createRouter(() => ({ ...config, routes: [...config.routes, { id: 'hk', capability: 'quotes', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'a', fallbackInstanceIds: [], failoverMode: 'off', acceptUnknownDelay: true }] }))
+  const tencent = { id: 'XHKG:equity:00700', exchange: 'XHKG', code: '00700', officialName: '腾讯控股' }
+  const requested = []
+  const c = createCollector({ getControl: () => config, router, registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, executor: { run: async (i, cap, req) => { requested.push(...req.securities.map(s => ({ id: s.id, ex: s.exchange, code: s.code }))); return { items: [{ securityId: tencent.id, last: '383.60', previousClose: '377.20', quoteAt: null, receivedAt: 1, providerInstanceId: 'a', delayKind: 'unknown', delaySeconds: null }] } } } })
+  await c.refresh([tencent])
+  assert.deepEqual(requested, [{ id: tencent.id, ex: 'XHKG', code: '00700' }], '对象形态按完整身份构造')
+  assert.equal(c.entries()[tencent.id].quote.last, '383.60')
+  c.dispose()
+})

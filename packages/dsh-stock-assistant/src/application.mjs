@@ -190,7 +190,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     async refresh(input = {}, signal) {
       assertLive()
       if (input.expectedRoutingRevision !== undefined && input.expectedRoutingRevision !== state.get().routingRevision) fail('ROUTE_CONFLICT', '路由配置已变化', 409)
-      if (input.securities && (!Array.isArray(input.securities) || input.securities.length > 100 || input.securities.some(id => typeof id !== 'string'))) fail('INVALID_REFRESH', '刷新证券参数无效')
+      if (input.securities && (!Array.isArray(input.securities) || input.securities.length > 100 || input.securities.some(s => typeof s === 'string' ? typeof s !== 'string' : !(typeof s === 'object' && typeof s.id === 'string' && typeof s.exchange === 'string' && typeof s.code === 'string')))) fail('INVALID_REFRESH', '刷新证券参数无效')
       try { await collector.refresh(input.securities, { signal }) } catch (e) { e.snapshot = snapshot(); throw e }
       return snapshot()
     },

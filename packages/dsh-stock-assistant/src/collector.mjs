@@ -1,4 +1,4 @@
-import { StockError, fail } from './market-model.mjs'
+import { StockError, fail, makeSecurity } from './market-model.mjs'
 // 报价时间距获取时间不超过该秒数视为实时; 免凭据公开源常缺延迟声明, 由时间戳差派生
 const REALTIME_WINDOW_SECONDS = 90
 // 适配器未声明延迟但带报价时间时, 按时差派生 delayKind; 缺时间戳保持 unknown 不编造
@@ -69,8 +69,8 @@ export function createCollector({ getControl, router, registry, executor, resolv
     if (!options.periodic) manualWaiters++
     try {
     const config = structuredClone(getControl()), gen = generation
-    // 证券解析链: 自选优先, 目录缓存兜底(browse 任意证券可按需拉行情), 两者皆无拒 NOT_FOUND
-    const securities = (ids || config.watchlist.order).map(id => config.watchlist.items[id] || resolveSecurity?.(id) || fail('NOT_FOUND', '自选证券不存在', 404))
+    // 证券解析链: 对象形态(搜索候选peek, 客户端持有完整身份)直接构造; 字符串形态自选优先, 目录缓存兜底, 两者皆无拒 NOT_FOUND
+    const securities = (ids || config.watchlist.order).map(id => typeof id === 'object' && id?.id ? makeSecurity(id.exchange, id.code, id.officialName || id.code, { catalogSource: 'peek' }) : config.watchlist.items[id] || resolveSecurity?.(id) || fail('NOT_FOUND', '自选证券不存在', 404))
     const grouped = new Map(), immediate = []
     const closeMarkets = new Set(securities.map(s => s.exchange).filter(market => calendarState(market).state === 'closed' && marketPhases.get(market) === 'trading'))
     for (const s of securities) {
