@@ -1,5 +1,22 @@
 # 更新日志
 
+## 0.3.0（2026-11-02）
+
+设置可递进、上游可观测、API 反代可用。
+
+### 新增
+
+- **接口反代（API 端点覆盖）**：数据源实例可按适配器端点键替换请求地址（东财五个端点/腾讯两个端点，descriptor `endpointKeys` 下发标签），自建反向代理或镜像只需原样转发同路径；留空回官方默认。适配器端点表化（`DEFAULT_ENDPOINTS`+`endpointOf(ctx,key)`）。
+- **实例级 HTTP 代理出口**：`providers[].proxy`（`http(s)://[user:pass@]host:port`），executor 按 URL 惰性缓存 undici ProxyAgent 注入 ctx.fetch；包不可用时该实例静默降级直连。
+- **上游可观测**：executor 记录每实例最近 20 条请求环形日志（时间/能力·适配器/状态/耗时），快照 `providerStatus[].recentRequests` 下发；设置页实例卡「运行状态」折叠组展示，summary 标注代理态。
+- **设置页递进信息架构**：「① 数据源 → ② 市场与能力 → ③ 显示偏好」三区块；实例卡内适配器一句话说明（descriptor `description`）、高级预算折叠、接口反代与运行状态分组。
+- **列表概览横幅**：常驻显示启用数据源数与最近请求失败实例，「管理」直达设置页；K 线就绪市场数随横幅展示。
+
+### 变更
+
+- snapshot `providerStatus[]` 扩展 `proxy`/`endpointsCovered`/`recentRequests` 字段（向后兼容追加）。
+- 包内测试 131→139。
+
 ## 0.2.0（2026-10-31）
 
 K 线图表与八市场支持。
