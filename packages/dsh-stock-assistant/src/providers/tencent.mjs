@@ -1,7 +1,11 @@
 // 腾讯公开行情接口适配器:quotes+kline(备源)。非官方端点,无SLA,随时可能失效;延迟未知,行情时间戳为来源快照时间。
 import { normalizeQuote, parseQuoteTime, StockError } from '../market-model.mjs'
-const ENDPOINT = 'https://qt.gtimg.cn/q='
-const KLINE_ENDPOINT = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
+// 官方默认端点表(key 供 instance.endpoints 覆盖, 反代/镜像场景由 ctx.endpoints 提供同名 key)
+const DEFAULT_ENDPOINTS = {
+  quotes: 'https://qt.gtimg.cn/q=',
+  kline: 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+}
+const endpointOf = (ctx, key) => ctx.endpoints?.[key] || DEFAULT_ENDPOINTS[key]
 // quotes 与 kline 共用一张前缀表,防双源漂移(design.md 数据结构节)。
 const SYMBOL_PREFIX = { XSHG: 'sh', XSHE: 'sz', XHKG: 'hk' }
 // 美股 symbol 后缀由搜索联想 JYS 字段映射(2026-10-30 实测: suggest 返回 JYS="NASDAQ"/"NYSE"/"AMEX";
@@ -20,7 +24,7 @@ const firstArray = data => Object.values(data).find(Array.isArray)
 const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
 
 export const tencent = {
-  descriptor: { adapterId: 'tencent', capabilities: ['quotes', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none' },
+  descriptor: { adapterId: 'tencent', capabilities: ['quotes', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'kline', label: 'K线历史' }] },
   async probe(request, ctx) {
     // kline 探针直接拉代表证券 3 根日K(quotes 不覆盖港股);quotes 探针沿用代表证券行。
     if (request.capability === 'kline') {
@@ -40,7 +44,7 @@ export const tencent = {
     const symbols = new Map(request.securities.map(s => [symbolOf(s), s]))
     let response
     try {
-      response = await ctx.fetch(ENDPOINT + [...symbols.keys()].join(','), { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctx.signal, redirect: 'error' })
+      response = await ctx.fetch(endpointOf(ctx, 'quotes') + [...symbols.keys()].join(','), { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctx.signal, redirect: 'error' })
     } catch (e) {
       if (ctx.signal.aborted) throw new StockError('CANCELLED', '请求已取消', 503)
       if (e instanceof StockError) throw e
@@ -82,7 +86,7 @@ export const tencent = {
     const param = `${symbol},${{ '1d': 'day', '1w': 'week', '1M': 'month' }[request.period]},,,${request.limit},qfq`
     let response
     try {
-      response = await ctx.fetch(`${KLINE_ENDPOINT}?param=${param}`, { headers: { Referer: 'https://gu.qq.com/', 'User-Agent': 'Mozilla/5.0' }, signal: ctx.signal, redirect: 'error' })
+      response = await ctx.fetch(`${endpointOf(ctx, 'kline')}?param=${param}`, { headers: { Referer: 'https://gu.qq.com/', 'User-Agent': 'Mozilla/5.0' }, signal: ctx.signal, redirect: 'error' })
     } catch (e) {
       if (ctx.signal.aborted) throw new StockError('CANCELLED', '请求已取消', 503)
       if (e instanceof StockError) throw e

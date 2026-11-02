@@ -285,3 +285,21 @@ test('东财 search 放宽至港美并写 usSymbols', async () => {
   assert.equal(us.items.length, 1); assert.equal(us.items[0].code, 'AAPL'); assert.equal(us.items[0].currency, 'USD')
   assert.equal(usSymbols.get('US:AAPL')?.mktNum, '105', '美股候选写 usSymbols')
 })
+
+test('ctx.endpoints 覆盖端点(反代场景): 东财kline与腾讯kline', async () => {
+  const log = []
+  const ctx = { ...klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 100 } }], log), endpoints: { kline: 'https://proxy.corp/em/kline' } }
+  await eastmoney.kline(KLINE_REQ('XSHG', '000001'), ctx)
+  assert.match(log[0], /^https:\/\/proxy\.corp\/em\/kline\?/, '东财 kline 走覆盖端点')
+  const tlog = []
+  const tctx = { now: () => 100, signal: new AbortController().signal, fetch: async url => { tlog.push(String(url)); return { ok: true, json: async () => ({ data: { sz000001: { qfqday: [['2026-10-29', '11.30', '11.54', '11.55', '11.29', '1993504']] } } }) } }, endpoints: { kline: 'https://proxy.corp/tx/kline' } }
+  await tencent.kline({ providerInstanceId: 'tx', securityId: 'XSHE:equity:000001', market: 'XSHE', code: '000001', period: '1d', adjust: 'qfq', limit: 20 }, tctx)
+  assert.match(tlog[0], /^https:\/\/proxy\.corp\/tx\/kline\?param=/, '腾讯 kline 走覆盖端点')
+})
+
+test('未配置 endpoints 时用官方默认端点(回归)', async () => {
+  const log = []
+  const ctx = klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 100 } }], log)
+  await eastmoney.kline(KLINE_REQ('XSHG', '000001'), ctx)
+  assert.match(log[0], /^https:\/\/push2his\.eastmoney\.com\//, '默认端点不变')
+})

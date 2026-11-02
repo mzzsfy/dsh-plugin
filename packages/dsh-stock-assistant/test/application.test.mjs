@@ -24,3 +24,17 @@ test('P04/P13 配置检查摘要匹配后落独立域，目录源可供标准自
   assert.equal(replay.revision, 1)
   await app.close()
 })
+
+test('snapshot 下发实例可观测面: 凭据/代理/端点覆盖/最近请求', async () => {
+  const app = await createApplication({ storageDomain: memoryStorage(), env: {}, now: () => 1000 })
+  const snap = app.snapshot()
+  const status = snap.providerStatus.find(s => s.id === 'em-default')
+  assert.equal(status.credentialPresent, true)
+  assert.equal('proxy' in status, true, '下发是否配置代理')
+  assert.equal('endpointsCovered' in status, true, '下发端点覆盖 key 数')
+  assert.deepEqual(status.recentRequests, [], '最近请求初始为空')
+  const em = snap.adapters.find(a => a.adapterId === 'eastmoney')
+  assert.ok(em.endpointKeys?.length >= 5, '适配器下发端点键(供反代 UI)')
+  assert.equal(em.endpointKeys[0].label.length > 0, true, '端点键带中文标签')
+  await app.close()
+})

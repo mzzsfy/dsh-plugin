@@ -1,10 +1,14 @@
 // 东财公开行情接口适配器:quotes/catalog/search/kline。非官方端点,无SLA;延迟未知,f124为来源秒级时间戳。
 import { normalizeQuote, makeSecurity, securityId, StockError, MARKET_META } from '../market-model.mjs'
-const QUOTES_ENDPOINT = 'https://push2.eastmoney.com/api/qt/ulist.np/get'
-const LIST_ENDPOINT = 'https://push2.eastmoney.com/api/qt/clist/get'
-const SEARCH_ENDPOINT = 'https://searchapi.eastmoney.com/api/suggest/get'
-const KLINE_ENDPOINT = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
-const TREND_ENDPOINT = 'https://push2his.eastmoney.com/api/qt/stock/trends2/get'
+// 官方默认端点表(key 供 instance.endpoints 覆盖, 反代/镜像场景由 ctx.endpoints 提供同名 key)
+const DEFAULT_ENDPOINTS = {
+  quotes: 'https://push2.eastmoney.com/api/qt/ulist.np/get',
+  list: 'https://push2.eastmoney.com/api/qt/clist/get',
+  search: 'https://searchapi.eastmoney.com/api/suggest/get',
+  kline: 'https://push2his.eastmoney.com/api/qt/stock/kline/get',
+  trend: 'https://push2his.eastmoney.com/api/qt/stock/trends2/get',
+}
+const endpointOf = (ctx, key) => ctx.endpoints?.[key] || DEFAULT_ENDPOINTS[key]
 // 东财市场代码:XSHG=1,XSHE=0;美股 secid 前缀由搜索 MktNum 动态归属(usSymbols),其余市场实测前缀。
 const MARKET = { XSHG: '1', XSHE: '0' }
 // 搜索联想 MktNum→交易所全集(实测: 1/0 沪深, 116 港, 105/106/107 美三大)
@@ -36,7 +40,7 @@ async function getJson(ctx, url) {
   return response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
 }
 export const eastmoney = {
-  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none' },
+  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
   async probe(request, ctx) {
     if (request.capability === 'catalog' || request.capability === 'search') {
       // 探针词按市场用代表证券代码(茅台/平安只对沪深有效, 其他市场返回 0 项会误判 denied)。
@@ -60,7 +64,7 @@ export const eastmoney = {
     // 美股 secid 走 usSymbols 动态归属(miss 默认 NASDAQ);其余市场静态前缀表。
     const secidOf = security => (security.exchange === 'XNAS' || security.exchange === 'XNYS') ? `${ctx.usSymbols?.get(`US:${security.code}`)?.mktNum || US_DEFAULT_MKT}.${security.code}` : `${SECID_PREFIX[security.exchange]}.${security.code}`
     const symbols = new Map(request.securities.map(s => [secidOf(s), s]))
-    const body = await getJson(ctx, `${QUOTES_ENDPOINT}?secids=${[...symbols.keys()].join(',')}&fields=f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124&fltt=2&invt=2`)
+    const body = await getJson(ctx, `${endpointOf(ctx, 'quotes')}?secids=${[...symbols.keys()].join(',')}&fields=f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124&fltt=2&invt=2`)
     const rows = body?.data?.diff
     // data:null表示全部secids无效(如整批退市),降级为逐证券缺失,不让单批坏行瘫痪路由。
     if (!Array.isArray(rows)) return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: [], errors: request.securities.map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }
@@ -88,7 +92,7 @@ export const eastmoney = {
     const PAGE_SIZE = 100, MAX_PAGES = 50
     let page = 1, complete = true
     while (page <= MAX_PAGES) {
-      const url = `${LIST_ENDPOINT}?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f12&fs=${LIST_FS[request.market]}&fields=f12,f13,f14`
+      const url = `${endpointOf(ctx, 'list')}?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f12&fs=${LIST_FS[request.market]}&fields=f12,f13,f14`
       const body = await getJson(ctx, url)
       const diff = body?.data?.diff
       if (!Array.isArray(diff)) throw new StockError('BAD_PAYLOAD', '目录字段结构异常', 502)
@@ -109,7 +113,7 @@ export const eastmoney = {
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: [], complete }
   },
   async search(request, ctx) {
-    const url = `${SEARCH_ENDPOINT}?input=${encodeURIComponent(request.q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=${Math.min(20, request.limit || 10)}`
+    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=${Math.min(20, request.limit || 10)}`
     const body = await getJson(ctx, url)
     const rows = body?.QuotationCodeTable?.Data
     if (!Array.isArray(rows)) return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: [], errors: [] }
@@ -137,7 +141,7 @@ export const eastmoney = {
   async kline(request, ctx) {
     if (request.period === 'trend') return this.trend(request, ctx)
     const secid = this.secidOf(request, ctx)
-    const url = `${KLINE_ENDPOINT}?secid=${secid}&fields1=f1,f2,f3&fields2=${KLINE_FIELDS}&klt=${KLT[request.period]}&fqt=1&end=20500101&lmt=${request.limit}`
+    const url = `${endpointOf(ctx, 'kline')}?secid=${secid}&fields1=f1,f2,f3&fields2=${KLINE_FIELDS}&klt=${KLT[request.period]}&fqt=1&end=20500101&lmt=${request.limit}`
     const body = await getJson(ctx, url)
     if (!body?.data?.klines) {
       if (request.market !== 'XNAS' && request.market !== 'XNYS') throw new StockError('NO_DATA', '来源未返回此证券K线', 422)
@@ -153,14 +157,14 @@ export const eastmoney = {
     return buildKlineResponse(request, body.data, ctx)
   },
   async resolveUsSecid(request, ctx) {
-    const url = `${SEARCH_ENDPOINT}?input=${encodeURIComponent(request.code)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=5`
+    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.code)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=5`
     const body = await getJson(ctx, url)
     const row = body?.QuotationCodeTable?.Data?.find(r => r.Code === request.code && /^10[567]$/.test(r.MktNum || ''))
     return row ? { mktNum: row.MktNum, jys: row.JYS || null, at: ctx.now() } : null
   },
   async trend(request, ctx) {
     const secid = this.secidOf(request, ctx)
-    const url = `${TREND_ENDPOINT}?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=${TREND_FIELDS}&iscr=0&ndays=1`
+    const url = `${endpointOf(ctx, 'trend')}?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=${TREND_FIELDS}&iscr=0&ndays=1`
     const body = await getJson(ctx, url)
     if (!body?.data?.trends) throw new StockError('NO_DATA', '来源未返回此证券分时', 422)
     const candles = body.data.trends.map(row => {
