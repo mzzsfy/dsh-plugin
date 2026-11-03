@@ -242,6 +242,27 @@ test('键盘邻移与穿透切换契约', async () => {
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
   assert.match(html, /上一只|下一只/, '详情抽屉有邻移入口')
 })
+// Leek-Fund 对标降噪: 健康横幅仅异常态/概览并入节头/设置手风琴
+test('主页横幅仅异常态且概览并入节头', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false })
+  const a = mk('XSHG:equity:600519', '贵州茅台', '600519', 'XSHG')
+  const base = () => ({ view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id], items: { [a.id]: a } }, preferences: {} }, quotes: { [a.id]: { quote: { last: '1', change: '0.01', changePct: '1', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null } }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
+  const okHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => base(), subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.ok(!okHtml.includes('个数据源启用'), '健康态无运维横幅')
+  assert.match(okHtml, /1 涨 0 跌/, '概览数字仍在')
+  const bad = base()
+  bad.data.providerStatus = [{ id: 'em-default', recentRequests: [{ status: 'error' }] }]
+  const badHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => bad, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
+  assert.match(badHtml, /最近请求失败|个数据源启用/, '异常态横幅出现')
+})
+test('设置手风琴: 数据源展开+其余折叠摘要', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'list', overlay: 'settings', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { colorMode: 'red-up', refreshSeconds: 15 }, routes: [{ id: 'r1', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'p1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }], providers: [{ id: 'p1', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }] }, quotes: {}, adapters: [{ id: 'eastmoney', label: 'eastmoney', capabilities: ['quotes', 'kline', 'search', 'catalog'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: { XSHG: true }, vendorAvailable: false }, settingsDraft: { providers: [{ id: 'p1', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [{ id: 'r1', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'p1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }], checkIds: [], checkResults: [], colorMode: 'red-up', klineAutoLoad: true } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: { providerCheck: () => {} } }))
+  assert.match(html, /<summary/, '手风琴 summary 存在')
+  assert.match(html, /1 市场/, '能力分配摘要显示市场数')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
