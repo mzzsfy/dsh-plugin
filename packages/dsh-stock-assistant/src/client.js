@@ -193,7 +193,7 @@ window.__ModuleLoader__.load({
         return view.sort === 'asc' ? aa - bb : bb - aa
       })
       const order = (view.menuId || view.keyboardNavigating) && view.frozenOrder ? [...view.frozenOrder.filter(id => w.items[id]), ...sortedOrder.filter(id => !view.frozenOrder.includes(id))] : sortedOrder
-      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null, alias: w.items[id].alias || '', costDraft: null, groupDraft: null }) }
+      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null, alias: w.items[id].alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null }) }
       // 概览横幅: 仅异常态显示(健康态运维摘要收进「更多」菜单), Leek-Fund 模式=主页纯列表
       const unhealthy = (state.data.providerStatus || []).filter(s => { const log = s.recentRequests || []; return log.length && log[0].status !== 'ok' })
       const providers = state.data.control.providers || []
@@ -394,7 +394,7 @@ window.__ModuleLoader__.load({
       const onMaskClick = e => {
         if (e.target !== e.currentTarget) return
         const hit = kind === 'drawer' ? document.elementsFromPoint(e.clientX, e.clientY).find(n => n.classList?.contains('ssb-stock-name')) : null
-        if (hit?.dataset.securityId) runtime.updateView({ detailId: hit.dataset.securityId, selectedId: hit.dataset.securityId, alias: state.data.control.watchlist.items[hit.dataset.securityId]?.alias || '', costDraft: null, groupDraft: null })
+        if (hit?.dataset.securityId) runtime.updateView({ detailId: hit.dataset.securityId, selectedId: hit.dataset.securityId, alias: state.data.control.watchlist.items[hit.dataset.securityId]?.alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null })
         else close()
       }
       return h('div', { className: `ssb-overlay ssb-overlay-${kind}`, onClick: onMaskClick, role: 'presentation' },
@@ -411,7 +411,7 @@ window.__ModuleLoader__.load({
       const order = data.control.watchlist.order
       const at = order.indexOf(item.id)
       const neighbor = dir => order[(at + dir + order.length) % order.length]
-      const openNeighbor = id => { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', alias: data.control.watchlist.items[id]?.alias || '', costDraft: null, groupDraft: null }); runtime.loadKline(id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([{ id, exchange: data.control.watchlist.items[id].exchange, code: data.control.watchlist.items[id].code, officialName: data.control.watchlist.items[id].officialName }]).catch(() => {}) }
+      const openNeighbor = id => { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', alias: data.control.watchlist.items[id]?.alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null }); runtime.loadKline(id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([{ id, exchange: data.control.watchlist.items[id].exchange, code: data.control.watchlist.items[id].code, officialName: data.control.watchlist.items[id].officialName }]).catch(() => {}) }
       const inWatchlist = !!data.control.watchlist.items[view.detailId]
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
