@@ -295,6 +295,20 @@ test('分组渲染与折叠', async () => {
   const sorted = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('desc', {}), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
   assert.ok(!sorted.includes('白酒 ·'), '全局排序无组头')
 })
+// 审查阻断修复锚: 分组入口/NaN防御/均值修正
+test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, cost) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', cost })
+  const a = mk('XSHG:equity:600001', '甲股', '600001', 100), b = mk('XSHG:equity:600002', '乙股', '600002', 100), c = mk('XSHG:equity:600519', '丙股', '600519', null)
+  const q = { quote: { last: '110', previousClose: '1', change: '1', changePct: '1', providerInstanceId: 'p', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
+  const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /设分组/, '详情有分组入口(B1)')
+  assert.match(html, /持仓盈亏 \+10 · \+10%/, '详情成本块独立锚(S9)')
+  const listState = JSON.parse(JSON.stringify(state)); listState.view = { view: 'list', sort: 'manual', alias: '' }
+  const listHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => listState, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
+  assert.match(listHtml, /持仓盈亏 \+10%(?!\d)/, '两持仓各+10%均值=+10%(B4,非求和+20%)')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
