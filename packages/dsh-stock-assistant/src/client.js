@@ -176,8 +176,10 @@ window.__ModuleLoader__.load({
     function Toggle({ label, checked, onChange, disabled = false }) {
       return h('label', { className: 'ssb-switch' }, h('input', { type: 'checkbox', checked, disabled, onChange: e => onChange(e.target.checked) }), h('span', { className: 'ssb-switch__track' }, h('span', { className: 'ssb-switch__thumb' })), h('span', null, label))
     }
-    function QuoteStatus({ entry }) {
+    function QuoteStatus({ entry, short = false }) {
       const quote = entry?.quote
+      // short: 列表行降权形态, 仅健康异常时显示警示词, 正常态收进 title
+      if (short) return h('span', { className: 'ssb-muted ssb-source', title: (quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价') + (entry?.lastError?.message ? ` · ${entry.lastError.message}` : '') }, entry?.health && entry.health !== 'ok' ? ({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health : '✓')
       return h('span', { className: 'ssb-muted ssb-source', title: entry?.lastError?.message || '' }, entry?.health && entry.health !== 'ok' ? `${({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health} · ` : '', quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价')
     }
     function Watchlist({ runtime, state }) {
@@ -198,10 +200,12 @@ window.__ModuleLoader__.load({
       const sourcesBanner = providers.length && (providers.some(p => !p.enabled) || unhealthy.length) ? h('div', { className: 'ssb-banner' }, `${providers.filter(p => p.enabled).length}/${providers.length} 个数据源启用${unhealthy.length ? `，${unhealthy.map(s => s.id).join('、')} 最近请求失败` : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '查看')) : h('div', { className: 'ssb-banner ssb-banner-ok' }, `${providers.filter(p => p.enabled).length} 个数据源启用${state.data.klineReady ? Object.keys(state.data.klineReady).length ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : '' : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '管理'))
       return h('section', { className: 'ssb-list-pane' },
         sourcesBanner,
+        // 组合概览: 涨跌家数与合计涨跌额一眼可读(涨跌以 changePct 正负计)
+        w.order.length ? (() => { const stats = w.order.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (Number.isNaN(pct)) return acc; acc.up += pct > 0; acc.down += pct < 0; acc.sum += Number(data.quotes[id]?.quote?.change ?? 0); return acc }, { up: 0, down: 0, sum: 0 }); return h('div', { className: 'ssb-banner ssb-banner-ok' }, `${w.order.length} 只 · ${stats.up} 涨 ${stats.down} 跌 · 合计 ${signed(stats.sum)}`) })() : null,
         h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
         !order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
           h('div', { className: 'ssb-table-scroll', onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
-            h('table', { className: 'ssb-table' }, h('thead', null, h('tr', null, h('th', null, '证券'), h('th', null, '最新价'), h('th', null, '涨跌幅'), h('th', { className: 'ssb-aux' }, '来源 / 状态'), h('th', null, h('span', { className: 'ssb-sr' }, '操作')))),
+            h('table', { className: 'ssb-table' }, h('thead', null, h('tr', null, h('th', null, '证券'), h('th', null, '最新价'), h('th', null, '涨跌额'), h('th', null, '涨跌幅'), h('th', { className: 'ssb-aux' }, '来源 / 状态'), h('th', null, h('span', { className: 'ssb-sr' }, '操作')))),
               h('tbody', null, ...order.map(id => {
                 const item = w.items[id], entry = data.quotes[id], q = entry?.quote
                 const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
@@ -214,10 +218,11 @@ window.__ModuleLoader__.load({
                     }
                   } }, item.pinned ? '置顶 · ' : '', item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`))),
                   h('td', { className: `ssb-number${direction}` }, q?.last ?? '—'),
+                  h('td', { className: `ssb-number${direction}` }, q?.change == null ? '—' : signed(q.change)),
                   h('td', { className: `ssb-number${direction}` }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`),
-                  h('td', { className: 'ssb-aux' }, h(QuoteStatus, { entry })),
+                  h('td', { className: 'ssb-aux' }, h(QuoteStatus, { entry, short: true })),
                   h('td', null, h(Button, { 'aria-label': `${item.officialName}更多操作`, 'aria-expanded': view.menuId === id, onClick: () => runtime.updateView({ menuId: view.menuId === id ? null : id, frozenOrder: view.menuId === id ? null : order }) }, '更多'))),
-                  view.menuId === id ? h('tr', null, h('td', { colSpan: 5 }, h('div', { className: 'ssb-row-actions' },
+                  view.menuId === id ? h('tr', null, h('td', { colSpan: 6 }, h('div', { className: 'ssb-row-actions' },
                     h(Button, { disabled: busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === 0 || w.items[order[order.indexOf(id) - 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) - 1] })) }, '上移'),
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === order.length - 1 || w.items[order[order.indexOf(id) + 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) + 2] && w.items[order[order.indexOf(id) + 2]]?.pinned === item.pinned ? order[order.indexOf(id) + 2] : null })) }, '下移'),
@@ -362,7 +367,14 @@ window.__ModuleLoader__.load({
         }
       }, [])
       const close = () => runtime.updateView({ overlay: null })
-      return h('div', { className: `ssb-overlay ssb-overlay-${kind}`, onClick: e => { if (e.target === e.currentTarget) close() }, role: 'presentation' },
+      // 遮罩点击: 命中下层自选行则穿透切换详情(抽屉保持开), 否则关闭
+      const onMaskClick = e => {
+        if (e.target !== e.currentTarget) return
+        const hit = document.elementsFromPoint(e.clientX, e.clientY).find(n => n.classList?.contains('ssb-stock-name'))
+        if (hit?.dataset.securityId) runtime.updateView({ detailId: hit.dataset.securityId, selectedId: hit.dataset.securityId, alias: state.data.control.watchlist.items[hit.dataset.securityId]?.alias || '' })
+        else close()
+      }
+      return h('div', { className: `ssb-overlay ssb-overlay-${kind}`, onClick: onMaskClick, role: 'presentation' },
         kind === 'drawer' ? h('aside', { ref: cardRef, tabIndex: -1, className: 'ssb-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '证券详情' },
           h('div', { className: 'ssb-drawer-head' }, h(Button, { onClick: close, 'aria-label': '关闭' }, '×')), h(Detail, { runtime, state }))
         : h('div', { ref: cardRef, tabIndex: -1, className: 'ssb-modal-card', role: 'dialog', 'aria-modal': 'true', 'aria-label': '设置' },
@@ -372,6 +384,11 @@ window.__ModuleLoader__.load({
       const { data, view } = state
       // 详情解析链: 自选优先, browsePeek 兜底(市场浏览点进来的临时详情, 无需先加自选)
       const item = data.control.watchlist.items[view.detailId] || view.browsePeek?.[view.detailId]
+      // 邻移: 自选详情在抽屉内直接切上下只(对比场景免关-点-开三步); order 为当前排序视图
+      const order = data.control.watchlist.order
+      const at = order.indexOf(item.id)
+      const neighbor = dir => order[(at + dir + order.length) % order.length]
+      const openNeighbor = id => { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', alias: data.control.watchlist.items[id]?.alias || '' }); runtime.loadKline(id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([{ id, exchange: data.control.watchlist.items[id].exchange, code: data.control.watchlist.items[id].code, officialName: data.control.watchlist.items[id].officialName }]).catch(() => {}) }
       const inWatchlist = !!data.control.watchlist.items[view.detailId]
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
@@ -383,7 +400,7 @@ window.__ModuleLoader__.load({
       // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
       const watchActions = inWatchlist ? h(React.Fragment, null, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名'))) : null
-      return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName)),
+      return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), inWatchlist && order.length > 1 ? h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => openNeighbor(neighbor(-1)) }, '上一只'), h(Button, { onClick: () => openNeighbor(neighbor(1)) }, '下一只')) : null),
         h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
         h('div', { className: `ssb-detail-price ssb-number${direction}` }, q?.last ?? '—', h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
         h('div', { className: 'ssb-detail-grid' },

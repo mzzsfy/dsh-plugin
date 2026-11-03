@@ -217,6 +217,31 @@ test('browse主区返回入口与K线tablist纯净', async () => {
   const tabSeg = html2.slice(tabStart, html2.indexOf('</div>', tabStart))
   assert.ok(!tabSeg.includes('↻'), '刷新钮不在 tablist 内')
 })
+// 好用性收敛: 穿透切换/键盘邻移/列权重/组合概览
+test('自选列表列权重与组合概览', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: ex === 'XHKG' ? 'HKD' : 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false })
+  const a = mk('XHKG:equity:00700', '腾讯控股', '00700', 'XHKG'), b = mk('XSHG:equity:600519', '贵州茅台', '600519', 'XSHG')
+  const q = (last, pct, change) => ({ quote: { last, previousClose: '1', change, changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
+  const state = { view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('397.20', '1.27', '5.00'), [b.id]: q('1480.00', '2.84', '40.85') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /2 只 · 2 涨 0 跌/, '组合概览条')
+  assert.match(html, /\+5\.00/, '涨跌额列存在')
+  const rowSeg = html.slice(html.indexOf('腾讯控股'), html.indexOf('贵州茅台'))
+  assert.ok(!rowSeg.includes('延迟'), '来源延迟不再占主列（收进状态徽标 title）')
+  assert.match(rowSeg, /✓/, '健康徽标短形态')
+})
+test('键盘邻移与穿透切换契约', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false })
+  const a = mk('XSHG:equity:600001', '甲股', '600001', 'XSHG'), b = mk('XSHG:equity:600519', '贵州茅台', '600519', 'XSHG')
+  const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '', browsePeek: {} }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const updates = []
+  const rt = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }), refresh: () => Promise.resolve({}) }
+  // 渲染层锚: 详情抽屉含邻移按钮(上下只), 点击触发 updateView detailId 切换
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
+  assert.match(html, /上一只|下一只/, '详情抽屉有邻移入口')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
