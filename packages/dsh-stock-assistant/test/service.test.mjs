@@ -12,6 +12,19 @@ test('S08 第101只自选明确拒绝且不改已有列表', async () => {
   assert.equal(state.get().watchlist.order.length, 100); assert.equal(state.get().revision, 100)
   await state.close()
 })
+test('COST01 成本价写入清空与非法值拒绝', async () => {
+  const state = await openState(memoryStorage()), s = makeSecurity('XSHG', '600001', '甲')
+  const service = createWatchlistService(state, id => s)
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: s.id })
+  await exec('cost', { securityId: s.id, cost: 1450.5 })
+  assert.equal(state.get().watchlist.items[s.id].cost, 1450.5)
+  await exec('cost', { securityId: s.id, cost: null })
+  assert.equal(state.get().watchlist.items[s.id].cost, null)
+  await assert.rejects(exec('cost', { securityId: s.id, cost: -1 }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('cost', { securityId: s.id, cost: 0 }), e => e.code === 'INVALID_OPERATION')
+})
 test('S01/S05/S09 添加、移动和撤销使用当前序列不覆盖别页操作', async () => {
   const state = await openState(memoryStorage()), securities = ['600001','600002','600003'].map(code => makeSecurity('XSHG', code, code))
   const service = createWatchlistService(state, id => securities.find(s => s.id === id), () => 1000)

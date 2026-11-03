@@ -7,6 +7,7 @@ const payloads = {
   add: z.strictObject({ securityId }), remove: z.strictObject({ securityId }),
   restore: z.strictObject({ removeOperationId: z.uuid() }),
   alias: z.strictObject({ securityId, alias: z.string().refine(s => [...s].length <= 30) }),
+  cost: z.strictObject({ securityId, cost: z.number().positive().nullable() }),
   pin: z.strictObject({ securityId, pinned: z.boolean() }),
   move: z.strictObject({ securityId, beforeId: securityId.nullable() }),
 }
@@ -25,7 +26,7 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
           if (w.order.length >= 100) fail('LIMIT_REACHED', '最多添加100只自选', 422)
           const security = resolveSecurity(p.securityId)
           if (!security || !securitySchema.safeParse(security).success) fail('CANDIDATE_EXPIRED', '候选已过期，请重新搜索', 409)
-          w.items[p.securityId] = { ...security, alias: '', pinned: false }; w.order.push(p.securityId)
+          w.items[p.securityId] = { ...security, alias: '', pinned: false, cost: null }; w.order.push(p.securityId)
         } else if (operation.action === 'restore') {
           const deleted = control.operations.find(o => o.id === p.removeOperationId && o.action === 'remove')
           const restore = deleted?.result.restore
@@ -45,6 +46,7 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
             control.operationResult = { restore: { item, previousId: w.order[i - 1] || null, nextId: w.order[i + 1] || null } }
             w.order.splice(i, 1); delete w.items[p.securityId]
           } else if (operation.action === 'alias') item.alias = p.alias.trim()
+          else if (operation.action === 'cost') item.cost = p.cost
           else if (operation.action === 'pin') {
             if (item.pinned === p.pinned) return control
             w.order = w.order.filter(id => id !== item.id); item.pinned = p.pinned

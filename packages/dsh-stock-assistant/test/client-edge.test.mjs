@@ -263,6 +263,18 @@ test('设置手风琴: 数据源展开+其余折叠摘要', async () => {
   assert.match(html, /<summary/, '手风琴 summary 存在')
   assert.match(html, /1 市场/, '能力分配摘要显示市场数')
 })
+// 持仓成本盈亏: 行内盈亏%/详情成本块/概览持仓合计
+test('成本盈亏渲染', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex, cost) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost })
+  const a = mk('XSHG:equity:600001', '甲股', '600001', 'XSHG', 100), b = mk('XSHG:equity:600519', '乙股', '600519', 'XSHG', null)
+  const q = (last, change) => ({ quote: { last, previousClose: '1', change, changePct: '1', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
+  const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('120', '1'), [b.id]: q('50', '1') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /\+20\.0%/, '成本100现价120盈亏20%')
+  assert.match(html, /持仓盈亏/, '详情盈亏块')
+  assert.match(html, /成本价/, '详情成本设置入口')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
