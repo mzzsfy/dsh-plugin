@@ -207,8 +207,10 @@ window.__ModuleLoader__.load({
         !order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
           h('div', { className: 'ssb-table-scroll', onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
             h('table', { className: 'ssb-table' }, h('thead', null, h('tr', null, h('th', null, '证券'), h('th', null, '最新价'), h('th', null, '涨跌额'), h('th', null, '涨跌幅'), h('th', null, '持仓盈亏'), h('th', { className: 'ssb-aux' }, '来源 / 状态'), h('th', null, h('span', { className: 'ssb-sr' }, '操作')))),
-              h('tbody', null, ...order.map(id => {
-                const item = w.items[id], entry = data.quotes[id], q = entry?.quote
+              h('tbody', null, ...(() => {
+                // 分组分段: 仅手动序生效(全局排序即比较语义不分区); 置顶区不进组段; 组序=首现序; 折叠组隐藏成员
+                const rowOf = id => {
+                  const item = w.items[id], entry = data.quotes[id], q = entry?.quote
                 const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
                 return h(React.Fragment, { key: id }, h('tr', { className: `${view.detailId === id ? 'ssb-selected' : ''}${entry?.health !== 'ok' ? ' ssb-stale' : ''}` },
                   h('td', null, h('button', { className: 'ssb-stock-name', 'data-security-id': id, onClick: () => open(id), onFocus: () => { if (view.focusId !== id) runtime.updateView({ focusId: id }) }, onBlur: e => { if (!e.relatedTarget?.closest('.ssb-stock-name')) runtime.updateView({ keyboardNavigating: false, frozenOrder: null }) }, onKeyDown: e => {
@@ -231,7 +233,23 @@ window.__ModuleLoader__.load({
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === order.length - 1 || w.items[order[order.indexOf(id) + 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) + 2] && w.items[order[order.indexOf(id) + 2]]?.pinned === item.pinned ? order[order.indexOf(id) + 2] : null })) }, '下移'),
                     h(Button, { onClick: () => open(id) }, '详情 / 别名'), h(Button, { danger: true, disabled: busy.write, onClick: quiet(() => runtime.mutate('remove', { securityId: id })) }, '删除'),
                     view.sort !== 'manual' ? h('span', { className: 'ssb-muted' }, '切回手动顺序后可移动') : null))) : null)
-              })))))
+                }
+                // 手动序: 未分组置顶区行 + 组段(组头行含统计/重命名/解散+折叠); 全局排序: 平铺不分区
+                if (view.sort !== 'manual') return order.map(rowOf)
+                const grouped = order.filter(id => !w.items[id].pinned && w.items[id].group)
+                const ungrouped = order.filter(id => !w.items[id].pinned && !w.items[id].group)
+                const groups = [...new Set(grouped.map(id => w.items[id].group))]
+                const out = order.filter(id => w.items[id].pinned).map(rowOf)
+                for (const name of groups) {
+                  const members = grouped.filter(id => w.items[id].group === name)
+                  const gs = members.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
+                  const open = !view.groupCollapsed?.[name]
+                  out.push(h('tr', { key: 'grp-' + name, className: 'ssb-group-head' }, h('td', { colSpan: 7 }, h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${name} 分组折叠`, onClick: () => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }) } } }, open ? '▾' : '▸', ` ${name} · ${members.length} 只 · ${gs.up} 涨 ${gs.down} 跌`), h('span', { className: 'ssb-toolbar' }, h(Button, { onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))() } }, '重命名'), h(Button, { disabled: busy.write, onClick: quiet(() => runtime.mutate('groupRemove', { group: name })) }, '解散')))))
+                  if (open) for (const id of members) out.push(rowOf(id))
+                }
+                for (const id of ungrouped) out.push(rowOf(id))
+                return out
+              })()))))
     }
     // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]

@@ -25,6 +25,22 @@ test('COST01 成本价写入清空与非法值拒绝', async () => {
   await assert.rejects(exec('cost', { securityId: s.id, cost: -1 }), e => e.code === 'INVALID_OPERATION')
   await assert.rejects(exec('cost', { securityId: s.id, cost: 0 }), e => e.code === 'INVALID_OPERATION')
 })
+test('GROUP01 组分配重命名解散与校验', async () => {
+  const state = await openState(memoryStorage()), securities = ['600001', '600002'].map(code => makeSecurity('XSHG', code, code))
+  const service = createWatchlistService(state, id => securities.find(s => s.id === id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  for (const s of securities) await exec('add', { securityId: s.id })
+  await exec('group', { securityIds: [securities[0].id, securities[1].id], group: '白酒' })
+  assert.equal(state.get().watchlist.items[securities[0].id].group, '白酒')
+  await exec('groupRename', { from: '白酒', to: '消费' })
+  assert.equal(state.get().watchlist.items[securities[1].id].group, '消费')
+  await exec('groupRemove', { group: '消费' })
+  assert.equal(state.get().watchlist.items[securities[1].id].group, '')
+  await assert.rejects(exec('group', { securityIds: [securities[0].id], group: '这是一个超过十二个字符的分组名' }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('groupRename', { from: '不存在', to: 'x' }), e => e.code === 'NOT_FOUND')
+  await assert.rejects(exec('groupRemove', { group: '不存在' }), e => e.code === 'NOT_FOUND')
+})
 test('S01/S05/S09 添加、移动和撤销使用当前序列不覆盖别页操作', async () => {
   const state = await openState(memoryStorage()), securities = ['600001','600002','600003'].map(code => makeSecurity('XSHG', code, code))
   const service = createWatchlistService(state, id => securities.find(s => s.id === id), () => 1000)

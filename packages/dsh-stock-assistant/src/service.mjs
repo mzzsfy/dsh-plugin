@@ -8,6 +8,9 @@ const payloads = {
   restore: z.strictObject({ removeOperationId: z.uuid() }),
   alias: z.strictObject({ securityId, alias: z.string().refine(s => [...s].length <= 30) }),
   cost: z.strictObject({ securityId, cost: z.number().positive().nullable() }),
+  group: z.strictObject({ securityIds: z.array(securityId).min(1), group: z.string().refine(s => [...s].length <= 12) }),
+  groupRename: z.strictObject({ from: z.string().min(1), to: z.string().refine(s => [...s].length <= 12) }),
+  groupRemove: z.strictObject({ group: z.string().min(1) }),
   pin: z.strictObject({ securityId, pinned: z.boolean() }),
   move: z.strictObject({ securityId, beforeId: securityId.nullable() }),
 }
@@ -26,7 +29,7 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
           if (w.order.length >= 100) fail('LIMIT_REACHED', '最多添加100只自选', 422)
           const security = resolveSecurity(p.securityId)
           if (!security || !securitySchema.safeParse(security).success) fail('CANDIDATE_EXPIRED', '候选已过期，请重新搜索', 409)
-          w.items[p.securityId] = { ...security, alias: '', pinned: false, cost: null }; w.order.push(p.securityId)
+          w.items[p.securityId] = { ...security, alias: '', pinned: false, cost: null, group: '' }; w.order.push(p.securityId)
         } else if (operation.action === 'restore') {
           const deleted = control.operations.find(o => o.id === p.removeOperationId && o.action === 'remove')
           const restore = deleted?.result.restore
@@ -39,7 +42,10 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
             const after = w.order.indexOf(restore.previousId) + 1; w.order.splice(after, 0, restored.id)
           } else if (restore.nextId && same(restore.nextId)) insert(restored.id, restore.nextId)
           else insert(restored.id, restored.pinned ? regionEnd(true) : null)
-        } else {
+        } else if (operation.action === 'group') { for (const id of p.securityIds) { if (!w.items[id]) fail('NOT_FOUND', '证券已被移除', 404); w.items[id].group = p.group.trim() } }
+        else if (operation.action === 'groupRename') { if (!w.order.some(id => w.items[id].group === p.from)) fail('NOT_FOUND', '分组不存在', 404); for (const id of w.order) if (w.items[id].group === p.from) w.items[id].group = p.to.trim() }
+        else if (operation.action === 'groupRemove') { if (!w.order.some(id => w.items[id].group === p.group)) fail('NOT_FOUND', '分组不存在', 404); for (const id of w.order) if (w.items[id].group === p.group) w.items[id].group = '' }
+        else {
           if (!item) fail('NOT_FOUND', '证券已被移除', 404)
           if (operation.action === 'remove') {
             const i = w.order.indexOf(p.securityId)

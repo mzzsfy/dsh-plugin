@@ -275,6 +275,26 @@ test('成本盈亏渲染', async () => {
   assert.match(html, /持仓盈亏/, '详情盈亏块')
   assert.match(html, /成本价/, '详情成本设置入口')
 })
+// 自选分组: 零侵入/组头统计/折叠/全局排序无组头
+test('分组渲染与折叠', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, group) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost: null, group })
+  const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', ''), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒')
+  const q = { quote: { last: '10', previousClose: '1', change: '0.5', changePct: '5', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
+  const mkState = (sort, collapsed) => ({ view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('manual', {}), subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  const gi = html.indexOf('白酒')
+  assert.ok(gi >= 0, '组名出现: ' + (gi < 0 ? html.slice(0, 0) : html.slice(gi - 60, gi + 120)))
+  assert.match(html, /aria-expanded="true"/, '组头可折叠语义')
+  const collapsed = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('manual', { 白酒: true }), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
+  const seg = collapsed.slice(collapsed.indexOf('白酒 ·'))
+  assert.ok(!seg.includes('甲股'), '折叠后组员隐藏')
+  assert.match(collapsed, /aria-expanded="false"/, '折叠态 aria')
+  const plain = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => { const s = mkState('manual', {}); s.data.control.watchlist.items[a.id].group = ''; s.data.control.watchlist.items[c.id].group = ''; return s }, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
+  assert.ok(!plain.includes('· 0 只'), '零侵入: 无空组头')
+  const sorted = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('desc', {}), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
+  assert.ok(!sorted.includes('白酒 ·'), '全局排序无组头')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
