@@ -138,16 +138,20 @@ window.__ModuleLoader__.load({
           let routes = bootstrapRoutes({ adapters: state.data.adapters, providers: draft.providers, routes: draft.routes })
           if (routes.length === draft.routes.length) { updateView({ view: 'list', notice: '已启用数据源的能力路由均已配置，打开证券详情即可查看行情与K线。' }); return }
           const added = routes.length - draft.routes.length
+          const CAP_LABEL = { quotes: '行情', kline: 'K线', catalog: '目录', search: '搜索', calendar: '日历' }
           await action('configuration', async () => {
-            // 分批检查: provider-check 服务端 60s 网关上限, 按能力拆批每批独立拿 checkId
             // 分批检查+denied 降级: 剔除 denied 路由保留 ready 部分; 剔除后 hash 变化使早批 checkId 失配, 故每轮全量重查, 收敛(无 denied 或全灭)即止
+            // 每批完成即 patch 进度文案(aria-live 区与按钮文案共享), 避免长检查期 UI 无反馈
             const checkIds = []
+            let progress = ''
             for (let round = 0; round < 3; round++) {
               checkIds.length = 0
               let deniedAll = []
               for (const caps of [['quotes'], ['kline'], ['catalog', 'search']]) {
                 const usedCaps = caps.filter(c => routes.some(r => r.capability === c))
                 if (!usedCaps.length) continue
+                progress = usedCaps.map(c => CAP_LABEL[c]).join('/') + (round ? `（重查第${round + 1}轮）` : '') + '：检查中…'
+                patch({ checkProgress: progress })
                 const check = await api('/provider-check', 'POST', { providers: draft.providers, routes, capabilities: usedCaps })
                 checkIds.push(check.checkId)
                 deniedAll.push(...check.checks.filter(c => c.status !== 'ready').map(c => c.providerInstanceId + ':' + c.capability + ':' + c.market))
@@ -155,11 +159,12 @@ window.__ModuleLoader__.load({
               if (!deniedAll.length) break
               const deniedKeys = new Set(deniedAll)
               routes = routes.filter(r => !deniedKeys.has(r.primaryInstanceId + ':' + r.capability + ':' + r.market))
-              if (!routes.length) { patch({ error: '已启用数据源暂无可用探针，请检查网络后重试' }); return }
+              if (!routes.length) { patch({ error: '已启用数据源暂无可用探针，请检查网络后重试', checkProgress: null }); return }
             }
+            patch({ checkProgress: null })
             await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.data.control.revision, providers: draft.providers, routes, checkIds })
             updateView({ view: 'list', settingsDraft: null, notice: `已自动启用 ${added} 项能力路由（行情/K线/目录/搜索），全部市场可用。` })
-          })
+          }).finally(() => patch({ checkProgress: null }))
         },
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
         loadKline(securityId, period, force = false) {
@@ -543,11 +548,11 @@ window.__ModuleLoader__.load({
         providerCards,
         h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.configuration || !draft.providers.length, onClick: quiet(() => runtime.configuration(providersOnly, [])) }, '保存数据源'), h('span', { className: 'ssb-muted' }, '仅保存实例；能力分配在「市场与能力」页检查并保存'))) :
         tab === 'routes' ? h(React.Fragment, null,
+        h('div', { className: 'ssb-section-head' }, h('h3', null, '一键启用'), h('span', { className: 'ssb-muted', 'aria-live': 'polite' }, state.checkProgress || '按已启用数据源自动补全全部市场能力路由，检查通过后自动保存'), h(Button, { primary: true, disabled: state.busy.check || state.busy.configuration, onClick: quiet(() => runtime.oneClickKline()) }, state.checkProgress || state.busy.configuration || state.busy.check ? state.checkProgress || '正在保存…' : '一键启用全部能力')),
         h('p', { className: 'ssb-muted' }, '目录、报价、日历与K线可独立选择。未配置的能力不会隐式使用其他来源。数据源实例在「数据源」页保存。'),
         routeTables,
         h('div', { 'aria-live': 'polite' }, ...draft.checkResults.map((r, index) => h('p', { key: `${r.key}-${index}`, className: 'ssb-muted' }, `${r.providerInstanceId} / ${r.market} / ${r.capability}：${r.status === 'ready' ? '就绪' : r.error?.message || '不可用'}`))),
         h('div', { className: 'ssb-toolbar' },
-          h(Button, { disabled: state.busy.check || state.busy.configuration, onClick: quiet(() => runtime.oneClickKline()) }, '一键启用全部能力（自动检查并保存）'),
           h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => { const result = await runtime.check({ providers: draft.providers, routes: draft.routes, capabilities: [...new Set(draft.routes.map(r => r.capability))] }); const current = runtime.getSnapshot().view.settingsDraft; if (current && JSON.stringify({ providers: current.providers, routes: current.routes }) !== JSON.stringify({ providers: draft.providers, routes: draft.routes })) return; change({ expectedRevision: runtime.getSnapshot().data.control.revision, checkIds: [...draft.checkIds, result.checkId], checkResults: result.checks }, false) }) }, state.busy.check ? '正在逐项检查…' : '检查全部能力'),
           h(Button, { primary: true, disabled: state.busy.configuration || state.busy.check || !draft.checkIds.length && draft.routes.length, title: !draft.checkIds.length && draft.routes.length ? '先运行「检查全部能力」，检查通过后才能保存' : undefined, onClick: quiet(() => runtime.configuration(routesOnly, draft.checkIds)) }, '保存路由'),
           !draft.checkIds.length && !state.busy.check ? h('span', { className: 'ssb-muted' }, '先检查，通过后才能保存') : null,

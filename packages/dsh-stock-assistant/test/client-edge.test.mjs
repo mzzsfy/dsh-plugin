@@ -356,7 +356,12 @@ test('设置R: 三段Tab布局与分域保存', async () => {
 })
 // 一键全能力自举: 按适配器 markets×capabilities 补全缺失路由(含K线/目录/搜索)
 test('bootstrap: 全能力路由补全', async () => {
-  const { bootstrapRoutes } = await import('../src/route-bootstrap.mjs')
+  // bootstrapRoutes 内联在 client factory 作用域(bundle 源无 ESM import), 从源文本抽取函数体实例化验证
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
+  const start = src.indexOf('const CAP_ORDER')
+  const end = src.indexOf('const BROWSE_MARKETS')
+  const bootstrapRoutes = new Function(`${src.slice(start, end)}; return bootstrapRoutes`)()
   const adapters = [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline', 'search', 'catalog'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'] }]
   const providers = [{ id: 'em-default', adapterId: 'eastmoney', enabled: true }]
   const existing = [{ id: 'xshg-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
