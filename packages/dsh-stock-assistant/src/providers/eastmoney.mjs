@@ -12,13 +12,13 @@ const endpointOf = (ctx, key) => ctx.endpoints?.[key] || DEFAULT_ENDPOINTS[key]
 // 东财市场代码:XSHG=1,XSHE=0;美股 secid 前缀由搜索 MktNum 动态归属(usSymbols),其余市场实测前缀。
 const MARKET = { XSHG: '1', XSHE: '0' }
 // 搜索联想 MktNum→交易所全集(实测: 1/0 沪深, 116 港, 105/106/107 美三大)
-const SEARCH_EXCHANGE = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNAS' }
+const SEARCH_EXCHANGE = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNYS' }
 const SECID_PREFIX = { XSHG: '1', XSHE: '0', XHKG: '116', XNAS: '105', XNYS: '106', XJPX: '176', XKRX: '177', XLON: '155' }
 const US_DEFAULT_MKT = '105'
 // klt 周期映射(实测): 日101/周102/月103; trends2 无 klt。
 const KLT = { '1d': 101, '1w': 102, '1M': 103 }
-const LIST_FS = { XSHG: 'm:1+t:2,m:1+t:23', XSHE: 'm:0+t:6,m:0+t:80' }
-const SYMBOL_PREFIX = { 1: 'XSHG', 0: 'XSHE' }
+const LIST_FS = { XSHG: 'm:1+t:2,m:1+t:23', XSHE: 'm:0+t:6,m:0+t:80', XHKG: 'm:116+t:3,m:116+t:4', XNAS: 'm:105+t:1', XNYS: 'm:106+t:1,m:107+t:1' }
+const SYMBOL_PREFIX = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNYS' }
 // 探针代表证券(实测可用的各市场流动性代表),quotes/kline 探针按市场取用。
 const PROBE_SECURITY = { XSHG: '600519', XSHE: '000001', XHKG: '00700', XNAS: 'AAPL', XNYS: 'BABA', XJPX: '7203', XKRX: '005930', XLON: 'SHEL' }
 // klines CSV 前 7 列固定语义(实测 fields2=f51-f57); f53=close 在 f54=high 前为东财原生序。
@@ -40,11 +40,11 @@ async function getJson(ctx, url) {
   return response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
 }
 export const eastmoney = {
-  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
+  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，沪深港美目录，八市场行情/K线/搜索，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
   async probe(request, ctx) {
     if (request.capability === 'catalog' || request.capability === 'search') {
       // 探针词按市场用代表证券代码(茅台/平安只对沪深有效, 其他市场返回 0 项会误判 denied)。
-      const result = await this[request.capability]({ ...request, q: PROBE_SECURITY[request.market] || '平安', limit: 5 }, ctx)
+      const result = await this[request.capability]({ ...request, probe: true, q: PROBE_SECURITY[request.market] || '平安', limit: 5 }, ctx)
       if (!result.items.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
       return { status: 'ready', capability: request.capability, market: request.market, instrument: 'equity' }
     }
@@ -90,8 +90,10 @@ export const eastmoney = {
   async catalog(request, ctx) {
     const items = [], seen = new Set()
     const PAGE_SIZE = 100, MAX_PAGES = 50
+    // 探针只拉一页: executor 单请求 8 秒预算内完成, 全量翻页是同步通道的职责
+    const pages = request.probe ? 1 : MAX_PAGES
     let page = 1, complete = true
-    while (page <= MAX_PAGES) {
+    while (page <= pages) {
       const url = `${endpointOf(ctx, 'list')}?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f12&fs=${LIST_FS[request.market]}&fields=f12,f13,f14`
       const body = await getJson(ctx, url)
       const diff = body?.data?.diff
@@ -100,7 +102,7 @@ export const eastmoney = {
       if (!Number.isFinite(total)) throw new StockError('BAD_PAYLOAD', '目录总数缺失', 502)
       for (const row of diff) {
         const exchange = SYMBOL_PREFIX[row.f13]
-        if (exchange !== request.market || typeof row.f12 !== 'string' || !/^\d{6}$/.test(row.f12) || typeof row.f14 !== 'string' || !row.f14) continue
+        if (exchange !== request.market || typeof row.f12 !== 'string' || !MARKET_META[request.market].codePattern.test(row.f12) || typeof row.f14 !== 'string' || !row.f14) continue
         const id = securityId(exchange, row.f12)
         if (seen.has(id)) throw new StockError('BAD_PAYLOAD', '目录身份冲突', 502)
         seen.add(id)

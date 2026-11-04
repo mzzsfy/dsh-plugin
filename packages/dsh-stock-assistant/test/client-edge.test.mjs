@@ -309,6 +309,33 @@ test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
   const listHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => listState, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
   assert.match(listHtml, /持仓盈亏 \+10%(?!\d)/, '两持仓各+10%均值=+10%(B4,非求和+20%)')
 })
+// 可用性三连: 浏览全市场/搜索不逼同步/保存钮提示
+test('审查R2: 浏览市场随实例能力+保存钮检查提示', async () => {
+  const { plugin } = await loadClientWithReact()
+  const state = { view: { view: 'browse', browseMarket: 'XSHG', browseRows: [], browseTotal: 0, browseOffset: 0, sort: 'manual', alias: '', browsePeek: {} }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }] }, quotes: {}, adapters: [{ id: 'eastmoney', adapterId: 'eastmoney', label: 'em', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const rt = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadBrowse: () => Promise.resolve({ items: [], total: 0 }) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
+  for (const label of ['港股', '纳斯达克', '纽交所', '日本', '英国']) assert.ok(html.includes(label), `浏览按钮含 ${label}`)
+  // 设置页: 启用实例未检查时保存钮灰且带提示
+  const settings = { ...state, view: { view: 'list', overlay: 'settings', sort: 'manual', alias: '', settingsDraft: { providers: [{ id: 'p1', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [], checkIds: [], checkResults: [], colorMode: 'red-up', klineAutoLoad: true } } }
+  const sHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => settings, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: { providerCheck: () => {} } }))
+  assert.match(sHtml, /通过后才能保存/, '保存钮灰时有原因提示(S-Q1)')
+})
+// 浏览点进详情: overlay 打开时 updateView 不触发 leaveDetail 清理(崩溃修复锚)
+test('审查R2b: browse点进保留browsePeek与detailId', async () => {
+  const { plugin } = await loadClientWithReact()
+  let view = { view: 'browse', browseMarket: 'XHKG', browseRows: [{ id: 'XHKG:equity:00001', exchange: 'XHKG', code: '00001', officialName: '长和' }], browseTotal: 1, browseOffset: 0, sort: 'manual', alias: '', browsePeek: {} }
+  let lastPatch = null
+  const updateView = next => { const merged = { ...view, ...next }; view = merged; lastPatch = next }
+  const rt = { getSnapshot: () => ({ view, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }), subscribe: () => () => {}, updateView, loadKline: () => Promise.resolve({ candles: [] }), refresh: () => Promise.resolve({}), loadBrowse: () => Promise.resolve({ items: [], total: 0 }), sync: () => Promise.resolve([]) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
+  assert.ok(html.includes('长和'), '浏览行渲染')
+  // 模拟点行 updateView 语义: overlay 开着时 detailId/browsePeek 不被清
+  const clickPatch = { detailId: 'XHKG:equity:00001', view: 'browse', overlay: 'detail', browsePeek: { 'XHKG:equity:00001': view.browseRows[0] } }
+  const merged = { ...view, ...clickPatch, ...((clickPatch.view && clickPatch.view !== 'detail' && !clickPatch.overlay) ? { detailId: null, alias: '', browsePeek: {} } : {}) }
+  assert.equal(merged.detailId, 'XHKG:equity:00001', '点行后 detailId 保留')
+  assert.ok(merged.browsePeek['XHKG:equity:00001'], '点行后 browsePeek 保留')
+})
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
   r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)

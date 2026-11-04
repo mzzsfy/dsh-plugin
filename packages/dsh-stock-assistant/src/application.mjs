@@ -159,9 +159,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     },
     async browse(input) {
       assertLive()
-      if (!['XSHG', 'XSHE'].includes(input.market)) fail('INVALID_REQUEST', '市场参数无效')
+      if (!MARKET_META[input.market]) fail('INVALID_REQUEST', '市场参数无效')
       // 市场概览: 代表指数不入目录/自选, 走 quotes 管道直拉; 失败静默为 null 不阻断目录浏览
-      const INDEX = { XSHG: { id: 'XSHG:index:000001', exchange: 'XSHG', code: '000001', name: '上证指数' }, XSHE: { id: 'XSHE:index:399001', exchange: 'XSHE', code: '399001', name: '深证成指' } }
+      const INDEX = { XSHG: { id: 'XSHG:index:000001', exchange: 'XSHG', code: '000001', name: '上证指数' }, XSHE: { id: 'XSHE:index:399001', exchange: 'XSHE', code: '399001', name: '深证成指' }, XHKG: { id: 'XHKG:index:HSI', exchange: 'XHKG', code: 'HSI', name: '恒生指数' }, XNAS: { id: 'XNAS:index:NDX', exchange: 'XNAS', code: 'NDX', name: '纳斯达克100' }, XNYS: { id: 'XNYS:index:DJI', exchange: 'XNYS', code: 'DJI', name: '道琼斯' }, XJPX: { id: 'XJPX:index:N225', exchange: 'XJPX', code: 'N225', name: '日经225' }, XKRX: { id: 'XKRX:index:KOSPI', exchange: 'XKRX', code: 'KOSPI', name: '韩国综指' }, XLON: { id: 'XLON:index:FTSE', exchange: 'XLON', code: 'FTSE', name: '富时100' } }
       const index = INDEX[input.market]
       const route = router.select('quotes', input.market)
       let overview = null
@@ -176,7 +176,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     },
     async sync(input) {
       assertLive()
-      if (!['XSHG', 'XSHE'].includes(input.market) || input.expectedRoutingRevision !== state.get().routingRevision) fail('ROUTE_CONFLICT', '目录路由已变化', 409)
+      if (!MARKET_META[input.market] || input.expectedRoutingRevision !== state.get().routingRevision) fail('ROUTE_CONFLICT', '目录路由已变化', 409)
       const result = await catalog.sync(input.market); collector.reconcile(); return result
     },
     async watchlist(operation) { assertLive(); const result = await watchlist.execute(operation); collector.reconcile(); return result },
