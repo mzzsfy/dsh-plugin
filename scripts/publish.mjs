@@ -294,7 +294,7 @@ function publishOne(dirName, opts) {
   const artifactsDir = publishArtifactsDir(name)
   const pack = runNpm(['pack', '--ignore-scripts', '--pack-destination', artifactsDir], pkgDir)
   if (pack.status !== 0) fail(`npm pack 失败,中止发布(打包内容不可证):\n${pack.stderr}`)
-  const tarball = join(artifactsDir, `${name.replace('/', '-')}-${version}.tgz`)
+  const tarball = join(artifactsDir, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
   if (!existsSync(tarball)) fail(`npm pack 产物缺失: ${tarball}`)
   const integrity = spawnSync(process.execPath, ['-e', `
     const {createHash} = require('node:crypto');
