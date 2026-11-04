@@ -1,0 +1,479 @@
+{
+  "format": 1,
+  "title": {
+    "en": "mzzsfy dsh plugins",
+    "zh": "mzzsfy 的 dsh 插件"
+  },
+  "description": {
+    "en": "All published dsh plugins from mzzsfy/dsh-plugin, with icons.",
+    "zh": "mzzsfy/dsh-plugin 全部已发布插件,含商店图标。"
+  },
+  "metadata": {
+    "categories": {
+      "remote": {
+        "title": {
+          "en": "Remote & Mobile",
+          "zh": "远程与移动端"
+        }
+      },
+      "workflow": {
+        "title": {
+          "en": "Workflow & Automation",
+          "zh": "工作流与自动化"
+        }
+      },
+      "ui": {
+        "title": {
+          "en": "UI Enhancements",
+          "zh": "UI 增强"
+        }
+      },
+      "model": {
+        "title": {
+          "en": "Models & Providers",
+          "zh": "模型与账号接入"
+        }
+      },
+      "dev": {
+        "title": {
+          "en": "Development & Runtime",
+          "zh": "开发与运行时"
+        }
+      },
+      "session": {
+        "title": {
+          "en": "Sessions & Messages",
+          "zh": "会话与消息"
+        }
+      },
+      "security": {
+        "title": {
+          "en": "Security & Permissions",
+          "zh": "安全与权限"
+        }
+      },
+      "notify": {
+        "title": {
+          "en": "Notifications & Integrations",
+          "zh": "通知与集成"
+        }
+      },
+      "usage": {
+        "title": {
+          "en": "Usage & Billing",
+          "zh": "用量与计费"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "@mzzsfy/dsh-auto-trust-all",
+      "title": "dsh-auto-trust-all",
+      "description": "动态信任所有实际到达的 Host:包装 webServer 路由把 Host 头实时注册进 connection 信任数组(webRuntime 在场时镜像),泛域名入口免改启动命令;不干预监听绑定(由部署层 --host 或宿主缺省决定);认证层(原生 cookie 与 startup-auth 会话)原样保留;推荐与 dsh-web-startup-auth 搭配使用,便于远程开发与反向代理",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSA0OCAxMC44IDc4IDIxLjZ2IDI1LjJjIDAgMTkuMiAtMTIuNiAzMi40IC0zMCAzOC40IC0xNy40IC02IC0zMCAtMTkuMiAtMzAgLTM4LjRWIDIxLjZ6IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJtIDM0LjggNDcuNCA5LjYgOS42IDE2LjggLTE4IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4K",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-auto-trust-all/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-auto-trust-all"
+      },
+      "metadata": {
+        "category": "remote"
+      },
+      "versions": [
+        {
+          "version": "0.3.2",
+          "publishTimestamp": 1793257403,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-boss-simulator",
+      "title": "dsh-boss-simulator",
+      "description": "公司管理模拟器:以老板身份安排任务,分派给部门自治执行,只接受汇报;含看板、时间线、中断恢复",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iNDgiIGN5PSI0OCIgcj0iMzMiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gNDggMzB2IDE5LjJsIDEzLjIgOS42IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4K",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-boss-simulator/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-boss-simulator"
+      },
+      "metadata": {
+        "category": "workflow"
+      },
+      "versions": [
+        {
+          "version": "0.1.3",
+          "publishTimestamp": 1793258091,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-context-manager",
+      "title": "dsh-context-manager",
+      "description": "对话增强:历史输入浮层(范围导航/搜索/常用提示词收藏)、插话撤回、对话 fork(进行中轮分叉/自动重发)、标题栏复制 sessionId",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iMjciIGN5PSIyNCIgcj0iOS42IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48Y2lyY2xlIGN4PSIyNyIgY3k9IjcyIiByPSI5LjYiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjY5IiBjeT0iMzkiIHI9IjkuNiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTSAyNyAzMy42diAyOC44IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDY5IDQ4LjZjIDAgMTMuMiAtMTAuOCAxOCAtMjQgMTgiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-context-manager/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-context-manager"
+      },
+      "metadata": {
+        "category": "ui"
+      },
+      "versions": [
+        {
+          "version": "0.5.1",
+          "publishTimestamp": 1793256774,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-cron-board",
+      "title": "dsh-cron-board",
+      "description": "轻量级定时任务看板:环境变量集中管理与定时任务调度(croner,支持内联时区后缀 T±N),执行体支持本地脚本与 dsh 会话任务(fresh/pinned 两种会话模式);看板可移入 better-sidebar 侧边栏",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iNDgiIGN5PSI0OCIgcj0iMzMiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gNDggMzB2IDE5LjJsIDEzLjIgOS42IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4K",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-cron-board/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-cron-board"
+      },
+      "metadata": {
+        "category": "workflow"
+      },
+      "versions": [
+        {
+          "version": "0.7.2",
+          "publishTimestamp": 1793256849,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-llm-pi-gateway",
+      "title": "dsh-llm-pi-gateway",
+      "description": "NewAPI 等 LLM 网关接入:经 adapter 装饰器注入 Anthropic 会话标记与 Chat 会话头,Responses 保持原生行为,官方 llm-pi-ai 行自服务",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iNDgiIGN5PSI0OCIgcj0iMzMiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gMTUgNDhoIDY2IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDQ4IDE1YyAxMC4yIDEwLjIgMTUuNiAyMSAxNS42IDMzUyA1OC4yIDcwLjggNDggODFDIDM3LjggNzAuOCAzMi40IDYwIDMyLjQgNDhTIDM3LjggMjUuMiA0OCAxNXoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-llm-pi-gateway/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-llm-pi-gateway"
+      },
+      "metadata": {
+        "category": "model"
+      },
+      "versions": [
+        {
+          "version": "0.8.2",
+          "publishTimestamp": 1793258087,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-maintain",
+      "title": "dsh-maintain",
+      "description": "DSH 自身的版本管理:追踪 npm dist-tag 通道新版本、查看 GitHub Releases 更新内容、活跃工作门控、安全重启与受管 A/B 升级",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSA3OS4yIDMzLjZhIDIxLjYgMjEuNiAwIDAgMSAtMjkuNCAyNi4xTCAyNy42IDgxLjZhIDcuOCA3LjggMCAwIDEgLTExLjA0IC0xMS4wNEwgMzguNCA0OC4zQSAyMS42IDIxLjYgMCAwIDEgNjQuNSAxOS4yTCA1My40IDMwLjNsIDIuNCA5LjkgOS45IDIuNHoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-maintain/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-maintain"
+      },
+      "metadata": {
+        "category": "dev"
+      },
+      "versions": [
+        {
+          "version": "0.15.3",
+          "publishTimestamp": 1793257353,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-rs-workflow",
+      "title": "dsh-rs-workflow",
+      "description": "若水工作流:流程模板管理与工作位/预算配置,支持模板可视化编辑与校验、编排运行与活跃任务面板",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHJlY3QgeD0iMTQuNCIgeT0iMTQuNCIgd2lkdGg9IjI4LjgiIGhlaWdodD0iMjEuNiIgcng9IjYiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxyZWN0IHg9IjUyLjgiIHk9IjYwIiB3aWR0aD0iMjguOCIgaGVpZ2h0PSIyMS42IiByeD0iNiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTSA0My4yIDI1LjJoIDE5LjhhIDkgOSAwIDAgMSA5IDl2IDIyLjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-rs-workflow/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-rs-workflow"
+      },
+      "metadata": {
+        "category": "workflow"
+      },
+      "versions": [
+        {
+          "version": "1.1.4",
+          "publishTimestamp": 1793258202,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-session-manager",
+      "title": "dsh-session-manager",
+      "description": "会话自动归档与管理:超期自动归档、归档面板、删除进系统回收站、还原后一键重挂载",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHJlY3QgeD0iMTUiIHk9IjE2LjgiIHdpZHRoPSI2NiIgaGVpZ2h0PSIxOCIgcng9IjQuOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTSAyMi44IDM0LjhWIDc1LjZhIDQuOCA0LjggMCAwIDAgNC44IDQuOGggNDAuOGEgNC44IDQuOCAwIDAgMCA0LjggLTQuOFYgMzQuOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTSAzOC40IDUxLjZoIDE5LjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-session-manager/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-session-manager"
+      },
+      "metadata": {
+        "category": "session"
+      },
+      "versions": [
+        {
+          "version": "0.9.6",
+          "publishTimestamp": 1793258697,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-settings-nav-icons",
+      "title": "dsh-settings-nav-icons",
+      "description": "设置弹窗导航分区与插件市场卡片图标替换:按分区显示文本把回退齿轮换成专属图形,市场卡片头像槽换成插件图标;支持外部插件声明接入,附带导航溢出滚动补偿;DOM 观察实现,卸载后重载页面恢复官方图标",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSAxNSAzMGggMjcuNiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTSA2NS40IDMwaCAxNS42IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48Y2lyY2xlIGN4PSI1NS4yIiBjeT0iMzAiIHI9IjEwLjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gMTUgNjZoIDE0LjQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gNTEuNiA2NmggMjkuNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PGNpcmNsZSBjeD0iNDEuNCIgY3k9IjY2IiByPSIxMC4yIiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4K",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-settings-nav-icons/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-settings-nav-icons"
+      },
+      "metadata": {
+        "category": "ui"
+      },
+      "versions": [
+        {
+          "version": "0.5.0",
+          "publishTimestamp": 1792841173,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-shared-terminal",
+      "title": "dsh-shared-terminal",
+      "description": "AI 与用户通过 DSH 官方交互终端共同操作 Session shell",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHJlY3QgeD0iMTUiIHk9IjE4IiB3aWR0aD0iNjYiIGhlaWdodD0iNjAiIHJ4PSI5IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDM5LjYgMTh2IDYwIiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4K",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-shared-terminal/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-shared-terminal"
+      },
+      "metadata": {
+        "category": "dev"
+      },
+      "versions": [
+        {
+          "version": "0.4.0",
+          "publishTimestamp": 1793256913,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-shell-select",
+      "title": "dsh-shell-select",
+      "description": "Windows shell 接管:替换默认 pwsh 工具为可配置多客户端的 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择);支持命令 deny 黑名单、会话终端卡增强和直接 pwsh 接管徽章,接管失败自动回退官方 pwsh 链",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHJlY3QgeD0iMTUiIHk9IjE4IiB3aWR0aD0iNjYiIGhlaWdodD0iNjAiIHJ4PSI3LjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gMzEuMiAzNy4yIDQ1LjYgNTEgMzEuMiA2NC44IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDU1LjIgNjZoIDE1LjYiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-shell-select/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-shell-select"
+      },
+      "metadata": {
+        "category": "dev"
+      },
+      "versions": [
+        {
+          "version": "0.4.7",
+          "publishTimestamp": 1793258396,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-think-expand",
+      "title": "dsh-think-expand",
+      "description": "流式回复时自动展开最新一条思考行;可选开启工具行展开机,独立自动展开最新一条工具调用等折叠行(思考与工具两台状态机互不接管);手动操作优先,插件展开收起后回补置底保持官方滚动跟随",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSA0OCA5LjZsIDEwLjIgMjguMiAyOC4yIDEwLjIgLTI4LjIgMTAuMkwgNDggODYuNCAzNy44IDU4LjIgOS42IDQ4bCAyOC4yIC0xMC4yeiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+Cg==",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-think-expand/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-think-expand"
+      },
+      "metadata": {
+        "category": "ui"
+      },
+      "versions": [
+        {
+          "version": "0.4.1",
+          "publishTimestamp": 1793256972,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-tool-gate",
+      "title": "dsh-tool-gate",
+      "description": "全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 交给宿主 deferred tool loading 链(API 服务端按需搜索激活);声明式收敛,行退场按 undo journal 还原原状",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0ibSA0OCAxMS40IDMzIDE2LjhMIDQ4IDQ1IDE1IDI4LjJ6IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDE1IDQ4LjYgNDggNjUuNGwgMzMgLTE2LjgiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gMTUgNjcuOCA0OCA4NC42bCAzMyAtMTYuOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+Cg==",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-tool-gate/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-tool-gate"
+      },
+      "metadata": {
+        "category": "security"
+      },
+      "versions": [
+        {
+          "version": "0.1.3",
+          "publishTimestamp": 1793006303,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-tunnel",
+      "title": "dsh-tunnel",
+      "description": "路径穿透隧道:在 dsh 宿主进程内把 /p/<name> 反向代理到本地 TCP 端口(HTTP strip 转发 + 声明式 WS upgrade + 3xx Location 单头改写),支持 <name>.* 子域名全路径透传(任意 WS 路径);GUI 看板手动管理隧道,设置页独立配置节与侧边栏注入开关;向 ai 注册 tunnel_open/tunnel_list/tunnel_close 工具且「允许 ai 使用」可开关(关闭即注销);代理逻辑全在插件进程内,不引入 nginx/caddy 等外部反代",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSA1My40IDEwLjggMjIuOCA1My40aCAyMUwgNDIgODUuMmwgMzEuMiAtNDIuNkggNTEuNnoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-tunnel/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-tunnel"
+      },
+      "metadata": {
+        "category": "remote"
+      },
+      "versions": [
+        {
+          "version": "0.1.3",
+          "publishTimestamp": 1793257125,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-turn-notify",
+      "title": "dsh-turn-notify",
+      "description": "消息通知:六类回合事件送达声音、系统弹窗、页内提示、webhook、IM 与宿主桌面通知;内置八种合成音色,自定义音效,按事件分类指定;多窗口只响一次",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSA0OCAxMy4yYSAyNCAyNCAwIDAgMSAyNCAyNHYgMTQuNGwgNy44IDE0LjRhIDMgMyAwIDAgMSAtMi42NCA0LjQ0SCAxOC44NGEgMyAzIDAgMCAxIC0yLjY0IC00LjQ0TCAyNCA1MS42ViAzNy4yYSAyNCAyNCAwIDAgMSAyNCAtMjR6IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDM5LjYgNzkuMmEgOSA5IDAgMCAwIDE2LjggMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+Cg==",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-turn-notify/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-turn-notify"
+      },
+      "metadata": {
+        "category": "notify"
+      },
+      "versions": [
+        {
+          "version": "0.14.0",
+          "publishTimestamp": 1793257199,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-usage-dash",
+      "title": "dsh-usage-dash",
+      "description": "用量统计面板:天/小时/分钟三粒度 token 与请求统计,26 周活跃热力图、缓存命中率/生成速度/首 token 延迟曲线、模型占比与四桶明细,会话底栏官方数据后追加增强项与官方动作行回合费用芯片,多条件分时段定价规则与费用估算,en/zh 双语;复刻自 github.com/HaoyueQin/dsh-usage-statistics-panel,感谢原作者 HaoyueQin",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTSAxNSA3MmEgMzMgMzMgMCAxIDEgNjYgMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PHBhdGggZD0iTSA0OCA3MiA2NC44IDU1LjIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iY3VycmVudENvbG9yIiBzdHJva2Utd2lkdGg9IjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0gMTUgNzJoIDY2IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4K",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-usage-dash/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-usage-dash"
+      },
+      "metadata": {
+        "category": "usage"
+      },
+      "versions": [
+        {
+          "version": "0.10.4",
+          "publishTimestamp": 1793257226,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "@mzzsfy/dsh-usage-panel",
+      "title": "dsh-usage-panel",
+      "description": "多平台 LLM 账号余额与额度面板:支持 DeepSeek/OpenRouter/Kimi/智谱/MiniMax/NewApi 及自定义端点,自动定期查询,趋势图与历史快照,用量/余额阈值与窗口重置多通道通知",
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5NiA5NiIgZmlsbD0ibm9uZSI+PHJlY3QgeD0iMTUiIHk9IjIxIiB3aWR0aD0iNjYiIGhlaWdodD0iNTciIHJ4PSI5IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSI5IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNIDgxIDQ0LjRoIC0xMi42YSA5LjYgOS42IDAgMCAwIDAgMTkuMmggMTIuNiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iOSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+Cg==",
+      "author": "mzzsfy",
+      "homepage": "https://awesome-dsh-plugin.com/p/mzzsfy__dsh-plugin--packages-dsh-usage-panel/",
+      "repository": {
+        "url": "https://github.com/mzzsfy/dsh-plugin",
+        "directory": "packages/dsh-usage-panel"
+      },
+      "metadata": {
+        "category": "usage"
+      },
+      "versions": [
+        {
+          "version": "0.8.4",
+          "publishTimestamp": 1793258463,
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    }
+  ]
+}

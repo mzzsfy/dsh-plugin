@@ -1,0 +1,29 @@
+{
+  "name": "@mzzsfy/dsh-plugin-catalog",
+  "description": "mzzsfy/dsh-plugin 全部已发布插件的 DSH 插件市场索引(format 1,含商店图标):在 DSH 设置的 Plugins → Discover 索引源中加入 https://cdn.jsdelivr.net/npm/@mzzsfy/dsh-plugin-catalog/index.json 即可浏览",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./index.json": "./index.json"
+  },
+  "files": [
+    "index.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-catalog.mjs",
+    "test": "node ../../tests/store-images.test.mjs"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git",
+    "directory": "packages/dsh-plugin-catalog"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
