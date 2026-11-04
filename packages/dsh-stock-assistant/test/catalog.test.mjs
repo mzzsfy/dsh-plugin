@@ -28,11 +28,19 @@ test('浏览接口按市场分页返回代码升序目录', async () => {
   const page2 = await catalog.browse({ market: 'XSHG', offset: 1, limit: 1 })
   assert.deepEqual(page2.items.map(s => s.code), ['600002'])
 })
-// M2: Given无目录缓存 When浏览 Then明确未就绪
-test('浏览接口无目录缓存时报未就绪', async () => {
+// M2: Given无目录缓存 When浏览 Then返回syncing态并触发后台同步(不再甩422给用户)
+test('浏览接口无目录缓存时返回同步中态', async () => {
   const storage = memoryStorage(), state = await openState(storage)
+  let syncCalled = 0
   const catalog = createCatalog({ state, getControl: () => state.get(), router: { select: () => ({ instance: { id: 'd' }, route: {} }) }, executor: { run: async () => ({ items: [] }) }, now: () => 100 })
-  await assert.rejects(catalog.browse({ market: 'XSHG', offset: 0, limit: 50 }), e => e.code === 'CATALOG_NOT_READY')
+  const origSync = catalog.sync.bind(catalog)
+  catalog.sync = (...args) => { syncCalled++; return Promise.resolve() }
+  const page = await catalog.browse({ market: 'XSHG', offset: 0, limit: 50 })
+  assert.equal(page.syncing, true, 'syncing 态')
+  assert.equal(page.items.length, 0)
+  await new Promise(r => setTimeout(r, 20))
+  assert.ok(syncCalled >= 1, '后台同步已触发')
+  catalog.sync = origSync
 })
 // M4: Given越界分页参数 When浏览 Then钳制不抛错
 test('浏览接口钳制越界分页参数', async () => {
