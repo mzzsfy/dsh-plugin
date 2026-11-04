@@ -1,0 +1,75 @@
+import { z } from 'zod'
+import { fail } from './market-model.mjs'
+import { MARKET_META } from './market-model.mjs'
+const id = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/)
+const rate = z.number().int().positive().max(100000)
+export const capability = z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])
+export const marketSchema = z.enum(Object.keys(MARKET_META))
+export const providerSchema = z.strictObject({
+  id, adapterId: id, enabled: z.boolean(), credentialEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).nullable(), quotaGroup: id,
+  budget: z.strictObject({ requestsPerMinute: rate.nullable(), dailyRequestLimit: rate.nullable(), billingUnit: z.enum(['request', 'symbol']), symbolCreditsPerMinute: rate.nullable(), capabilityLimits: z.partialRecord(capability, rate) }),
+  endpoints: z.record(z.string().url()).optional(),
+  // 上游出口代理(反代/正向代理统一走 URL): http(s)://[user:pass@]host:port, 凭据在 userinfo
+  proxy: z.string().url().refine(v => v.startsWith('http://') || v.startsWith('https://'), '代理仅支持 http(s) URL').optional(),
+}).refine(p => p.credentialEnv !== null || p.budget.requestsPerMinute !== null, '免凭据来源必须声明保守预算')
+export const routeSchema = z.strictObject({
+  id, capability, market: marketSchema, instrument: z.literal('equity'), primaryInstanceId: id,
+  fallbackInstanceIds: z.array(id).max(1), failoverMode: z.enum(['off', 'network']), maxDelaySeconds: z.number().nonnegative().nullable(), acceptUnknownDelay: z.boolean(),
+})
+// GET query 唯一入口: limit 为字符串形态需 coerce
+export const klineQuerySchema = z.strictObject({
+  securityId: z.string().regex(/^[\w]+:equity:[\w.]{1,15}$/),
+  period: z.enum(['trend', '1d', '1w', '1M']),
+  limit: z.coerce.number().int().min(20).max(1000).default(250),
+})
+// 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
+const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
+export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']) })
+export const securitySchema = z.object({ id: z.string(), exchange: marketSchema, code: z.string(), officialName: z.string().min(1).max(100), instrument: z.literal('equity'), currency: z.string(), timezone: z.string(), priceScale: z.number().int(), listingStatus: z.string() }).superRefine((s, ctx) => {
+  const meta = MARKET_META[s.exchange]
+  if (!meta || !meta.codePattern.test(s.code) || s.id !== `${s.exchange}:equity:${s.code}`) { ctx.addIssue({ code: 'custom', message: '证券身份不一致' }); return }
+  if (s.currency !== meta.currency || s.timezone !== meta.timezone || s.priceScale !== meta.priceScale) ctx.addIssue({ code: 'custom', message: '证券市场元数据与该市场不符' })
+})
+export function parseConfiguration(value) {
+  const result = configSchema.safeParse(value)
+  if (!result.success) fail('INVALID_CONFIGURATION', '数据源配置字段或格式无效', 422)
+  const config = result.data, seen = new Set(), providerIds = new Set()
+  for (const p of config.providers) {
+    if (providerIds.has(p.id)) fail('DUPLICATE_PROVIDER', '数据源实例名称重复', 422)
+    providerIds.add(p.id)
+    if (p.budget.billingUnit === 'symbol' && p.budget.symbolCreditsPerMinute === null) fail('INVALID_BUDGET', '按证券计费必须提供证券额度', 422)
+    const same = config.providers.filter(other => other.adapterId === p.adapterId && other.credentialEnv === p.credentialEnv)
+    if (same.some(other => other.quotaGroup !== p.quotaGroup)) fail('INVALID_BUDGET', '同账号引用必须共享额度组', 422)
+  }
+  const routeIds = new Set()
+  for (const r of config.routes) {
+    const key = `${r.capability}:${r.market}:${r.instrument}`
+    if (seen.has(key) || routeIds.has(r.id)) fail('DUPLICATE_ROUTE', '数据能力路由重复', 422)
+    seen.add(key); routeIds.add(r.id)
+    const targets = [r.primaryInstanceId, ...r.fallbackInstanceIds]
+    if (new Set(targets).size !== targets.length || targets.some(target => !config.providers.some(p => p.id === target && p.enabled))) fail('INVALID_ROUTE', '路由引用了不存在或禁用的数据源', 422)
+    if (!['quotes', 'kline'].includes(r.capability) && (r.failoverMode !== 'off' || r.fallbackInstanceIds.length)) fail('INVALID_ROUTE', '只有报价与K线支持备用源', 422)
+    if (r.failoverMode !== 'off' && !r.fallbackInstanceIds.length) fail('INVALID_ROUTE', '自动切换需要备用报价源', 422)
+  }
+  return config
+}
+export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), cost: z.number().positive().nullable().default(null), group: z.string().refine(s => [...s.trim()].length <= 12).default('') })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string(), payload: z.unknown() })).max(256) }).superRefine((control, ctx) => {
+  const w = control.watchlist
+  if (new Set(w.order).size !== w.order.length || w.order.length !== Object.keys(w.items).length || w.order.some(id => w.items[id]?.id !== id)) ctx.addIssue({ code: 'custom', message: '自选序列与证券不一致' })
+  let unpinned = false
+  for (const id of w.order) { if (!w.items[id]?.pinned) unpinned = true; else if (unpinned) ctx.addIssue({ code: 'custom', message: '置顶序列混乱' }) }
+  try { parseConfiguration({ providers: control.providers, routes: control.routes }) } catch { ctx.addIssue({ code: 'custom', message: '来源配置不一致' }) }
+})
+export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
+// 默认数据源:免凭据公开源+保守预算,首用即可检查保存;目录走新浪分市场节点,行情与搜索走东财。
+export const defaultConfig = () => {
+  const catalog = { id: 'sn-catalog', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: { requestsPerMinute: 120, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { catalog: 60 } } }
+  const market = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { kline: 30 } } }
+  const routes = ['XSHG', 'XSHE'].flatMap(m => [
+    { id: `${m.toLowerCase()}-catalog`, capability: 'catalog', market: m, instrument: 'equity', primaryInstanceId: catalog.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+    { id: `${m.toLowerCase()}-search`, capability: 'search', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+    { id: `${m.toLowerCase()}-quotes`, capability: 'quotes', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+  ])
+  return { providers: [catalog, market], routes }
+}
+export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })

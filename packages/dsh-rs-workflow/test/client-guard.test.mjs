@@ -93,3 +93,14 @@ test('Given client.js When 检查 color 值 Then 不使用裸 hex(仅 alias toke
   const bareHex = css.match(/(?<![-#])[0-9a-fA-F]{6}\b/g) || []
   assert.deepEqual(bareHex, [])
 })
+
+test('F06 Given 模板编辑序列化 When 步骤带显式空数组 after Then 三态保留不改图', () => {
+  const text = readFileSync(join(PKG_ROOT, 'src', 'client.js'), 'utf8')
+  // 读入三态:undefined(缺省)与数组原样保留,不得把显式 [] 合并进缺省
+  assert.ok(text.includes('Array.isArray(s.after) ? [...s.after] : undefined'), 'normalizeStep 须按三态读入 after')
+  // 序列化三态:undefined 省略;数组(含 [])原样输出——省略空数组曾把并行根变串行
+  assert.ok(text.includes('if (s.after !== undefined) o.after = s.after'), 'stepOut 须显式输出空数组 after')
+  // 不允许旧的合并式读入/裁剪式写回回归
+  assert.ok(!text.includes('after: asArr(s.after)'), '禁止 asArr 合并读入(丢三态)')
+  assert.ok(!text.includes('if (s.after.length > 0) o.after'), '禁止按非空裁剪写回(丢显式 [])')
+})

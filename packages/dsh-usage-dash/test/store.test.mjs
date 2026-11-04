@@ -81,9 +81,13 @@ function fakeDomain({ failUpdate = () => null } = {}) {
   }
 }
 
+// F14 契约:record 按档保留资格过滤。夹具时钟固定在样本日次日,样本全部
+// 落在留存期内;超期丢弃语义由专项用例验证
+const FIXED_NOW = local(2026, 8, 3, 0, 0)
 const facilityOf = (domain, backupDomain) => ({
   open: async (definition) => (definition?.name === 'usage_stats_backup' ? (backupDomain ?? domain) : domain),
 })
+const makeStore = (domain, options = {}) => new UsageStore(facilityOf(domain), { now: () => FIXED_NOW, ...options })
 
 const tokenSample = (time, extra = {}) => ({
   time,
@@ -134,7 +138,7 @@ test('跨日跨时跨分边界:毫秒推进即换桶', () => {
 
 test('token 样本同刻落三粒度三行,行内无 g 字段', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   await store.flushNow()
   const keys = ['D|2026-08-02', 'H|2026-08-02T14', 'M|2026-08-02T14:30'].map(
@@ -156,7 +160,7 @@ test('token 样本同刻落三粒度三行,行内无 g 字段', async () => {
 
 test('turn 样本落合成行:provider default 与 model (turns)', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.record({ time: local(2026, 8, 2, 14, 37), turn: true })
   await store.flushNow()
   const seen = domain.rows.get('D|2026-08-02|default|(turns)')
@@ -167,7 +171,7 @@ test('turn 样本落合成行:provider default 与 model (turns)', async () => {
 
 test('request 样本只计请求数,无归因落 (unknown)', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.record({ time: local(2026, 8, 2, 14, 37), request: true, model: 'deepseek-chat' })
   await store.record({ time: local(2026, 8, 2, 14, 38), request: true })
   await store.flushNow()
@@ -182,7 +186,7 @@ test('request 样本只计请求数,无归因落 (unknown)', async () => {
 
 test('token 样本时长落三粒度累加,request 与 turn 行时长恒 0', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const at = local(2026, 8, 2, 14, 37)
   await store.record(tokenSample(at, { durationMs: 6500 }))
   await store.record(tokenSample(at + 1000, { durationMs: 2500 }))
@@ -204,7 +208,7 @@ test('token 样本时长落三粒度累加,request 与 turn 行时长恒 0', asy
 
 test('老行缺 durationMs 字段:增量求和不产 NaN', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const at = local(2026, 8, 2, 14, 37)
   const key = 'D|2026-08-02|deepseek|deepseek/deepseek-chat'
   await store.record(tokenSample(at))
@@ -221,7 +225,7 @@ test('老行缺 durationMs 字段:增量求和不产 NaN', async () => {
 
 test('decode 配对与首字样本落三粒度累加,timing 样本不重复计 token', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const at = local(2026, 8, 2, 14, 37)
   // chunk 先发 token 样本:只有 token 桶
   await store.record(tokenSample(at, { durationMs: undefined }))
@@ -245,7 +249,7 @@ test('decode 配对与首字样本落三粒度累加,timing 样本不重复计 t
 
 test('timing 缺失样本:decodeTokens 与 ttft 字段按零累计', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const at = local(2026, 8, 2, 14, 37)
   await store.record(tokenSample(at))
   await store.flushNow()
@@ -258,7 +262,7 @@ test('timing 缺失样本:decodeTokens 与 ttft 字段按零累计', async () =>
 
 test('老行缺 decode/ttft 字段:增量求和不产 NaN', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const at = local(2026, 8, 2, 14, 37)
   const key = 'D|2026-08-02|deepseek|deepseek/deepseek-chat'
   await store.record(tokenSample(at))
@@ -279,7 +283,7 @@ test('老行缺 decode/ttft 字段:增量求和不产 NaN', async () => {
 
 test('missing-record 首写竞态:put 种子后重试写入真值', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   await store.flushNow()
   assert.equal(domain.stats.puts, 3)
@@ -296,7 +300,7 @@ test('flush 中单粒度失败:错误经 onFlushError 上抛,失败行留 pendin
       return new Error('simulated hour failure')
     },
   })
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const errors = []
   store.onFlushError = (err) => errors.push(err)
   await store.readyPromise()
@@ -317,7 +321,7 @@ test('非 missing 错误不触发种子重试', async () => {
   const domain = fakeDomain({
     failUpdate: (candidate) => (candidate === key ? new Error('backend write failed') : null),
   })
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const errors = []
   store.onFlushError = (err) => errors.push(err)
   await store.readyPromise()
@@ -331,7 +335,7 @@ test('非 missing 错误不触发种子重试', async () => {
 
 test('rangeRows 按粒度前缀与桶串闭区间扫描', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const table = domain.table()
   await table.put('D|2026-07-31|a|m', rowOf('2026-07-31', 'a', 'm'))
   await table.put('D|2026-08-01|a|m', rowOf('2026-08-01', 'a', 'm'))
@@ -348,7 +352,7 @@ test('rangeRows 按粒度前缀与桶串闭区间扫描', async () => {
 
 test('pruneMinutes 按保留窗口清理分钟桶且不碰其他粒度', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
+  const store = makeStore(domain, { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
   await table.put('M|2026-08-08T11:00|a|m', rowOf('2026-08-08T11:00', 'a', 'm'))
   await table.put('M|2026-08-08T12:00|a|m', rowOf('2026-08-08T12:00', 'a', 'm'))
@@ -365,7 +369,7 @@ test('pruneMinutes 按保留窗口清理分钟桶且不碰其他粒度', async (
 
 test('保留窗口为 0 时分钟桶全部清理', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
+  const store = makeStore(domain, { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
   await table.put('M|2026-08-10T11:00|a|m', rowOf('2026-08-10T11:00', 'a', 'm'))
   await table.put('D|2026-08-10|a|m', rowOf('2026-08-10', 'a', 'm'))
@@ -376,7 +380,7 @@ test('保留窗口为 0 时分钟桶全部清理', async () => {
 
 test('分钟保留超上限时 clamp 到 7 天窗口', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
+  const store = makeStore(domain, { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
   // clamp 后窗口起点 = 08-03T12:00,7 天前的桶一律清理,即使注入 30 天
   await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
@@ -388,7 +392,7 @@ test('分钟保留超上限时 clamp 到 7 天窗口', async () => {
 
 test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain), { now: () => local(2026, 8, 10, 12, 0) })
+  const store = makeStore(domain, { now: () => local(2026, 8, 10, 12, 0) })
   const table = domain.table()
   await table.put('H|2026-07-25T00:00|a|m', rowOf('2026-07-25T00:00', 'a', 'm'))
   await table.put('H|2026-07-26T12:00|a|m', rowOf('2026-07-26T12:00', 'a', 'm'))
@@ -404,7 +408,7 @@ test('pruneHours 固定 15 天窗口清理小时桶且不碰其他粒度', async
 test('每日本地日首次 flush 触发清理,同日后续 flush 不重复触发', async () => {
   let clock = local(2026, 8, 10, 12, 0)
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain), { now: () => clock, retentionDays: () => 0 })
+  const store = makeStore(domain, { now: () => clock, retentionDays: () => 0 })
   const table = domain.table()
   await table.put('M|2026-08-01T00:00|a|m', rowOf('2026-08-01T00:00', 'a', 'm'))
   await store.record(tokenSample(local(2026, 8, 10, 12, 0)))
@@ -422,7 +426,7 @@ test('每日本地日首次 flush 触发清理,同日后续 flush 不重复触�
 
 test('并发 markSeenSessions 不丢 id', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await Promise.all([
     store.markSeenSessions(['a']),
     store.markSeenSessions(['b']),
@@ -433,7 +437,7 @@ test('并发 markSeenSessions 不丢 id', async () => {
 
 test('游标链串行:reset 排在先前 markSeen 之后,行与游标一致重置', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   const pending = store.markSeenSessions(['a'])
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   await store.reset(new Map([['live-a', 7]]))
@@ -444,7 +448,7 @@ test('游标链串行:reset 排在先前 markSeen 之后,行与游标一致重�
 
 test('reset 不带边界时游标清空', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.markLiveSequences([['s', 5]])
   await store.reset()
   assert.deepEqual(domain.global.get(), { backfilledSessions: [], liveFirstSeq: {} })
@@ -452,7 +456,7 @@ test('reset 不带边界时游标清空', async () => {
 
 test('markLiveSequences 保留最小 seq 且无变化不写 global', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.markLiveSequences([['s', 5]])
   assert.deepEqual(await store.liveSequences(), new Map([['s', 5]]))
   await store.markLiveSequences([['s', 3], ['t', 9]])
@@ -474,7 +478,7 @@ test('游标写单次失败不断链', async () => {
     }
     return originalSet(value)
   }
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await assert.rejects(store.markSeenSessions(['a']))
   await store.markSeenSessions(['b'])
   assert.deepEqual([...(await store.seenSessions())].sort(), ['b'])
@@ -483,7 +487,7 @@ test('游标写单次失败不断链', async () => {
 test('启动时游标为空且已有行则清空待重建', async () => {
   const domain = fakeDomain()
   await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.readyPromise()
   assert.equal(domain.rows.size, 0)
 })
@@ -492,7 +496,7 @@ test('启动时游标非空则既有行保留', async () => {
   const domain = fakeDomain()
   await domain.table().put('D|2026-08-02|a|m', rowOf('2026-08-02', 'a', 'm'))
   await domain.global.set({ backfilledSessions: ['old'], liveFirstSeq: {} })
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.readyPromise()
   assert.equal(domain.rows.size, 1)
 })
@@ -500,7 +504,7 @@ test('启动时游标非空则既有行保留', async () => {
 test('reset 前自动快照,restore 整体回退到快照态', async () => {
   const domain = fakeDomain()
   const backup = fakeDomain()
-  const store = new UsageStore(facilityOf(domain, backup))
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
   await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
   await store.markSeenSessions(['s1', 's2'])
   assert.equal(store.backupInfo().available, false)
@@ -521,7 +525,7 @@ test('reset 前自动快照,restore 整体回退到快照态', async () => {
 test('restore 前先快照当前态:回退动作自身可再回退', async () => {
   const domain = fakeDomain()
   const backup = fakeDomain()
-  const store = new UsageStore(facilityOf(domain, backup))
+  const store = new UsageStore(facilityOf(domain, backup), { now: () => FIXED_NOW })
   await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
   await store.reset()
   await store.record(tokenSample(local(2026, 8, 3, 14, 0), { inputTokens: 99 }))
@@ -544,7 +548,7 @@ test('备份域不可用:重建照常,backupInfo 标记不可用,restore 报错'
       return domain
     },
   }
-  const store = new UsageStore(facility)
+  const store = new UsageStore(facility, { now: () => FIXED_NOW })
   await store.record(tokenSample(local(2026, 8, 2, 14, 0)))
   await store.reset()
   assert.equal(domain.rows.size, 0)
@@ -631,7 +635,7 @@ for (const withCode of [true, false]) {
 test('UO1 Given old owner with seen cursor and pending tokens, When new generation opens, Then old owner flushes every bucket once', async () => {
   __resetSharedStoreForTests()
   const facility = facilityWithReserved()
-  const old = new UsageStore(facility)
+  const old = new UsageStore(facility, { now: () => FIXED_NOW })
   await old.readyPromise()
   await old.markSeenSessions(['s1'])
   await old.record(tokenSample(local(2026, 8, 2, 14, 37)))
@@ -681,7 +685,7 @@ test('get 缝在场但孤儿已不存在:维持降级,不逃逸', async () => {
 
 test('record 只入 pending 不产生持久化写,flushNow 后每脏行恰一次 update', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.readyPromise()
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   assert.equal(domain.rows.size, 0)
@@ -693,7 +697,7 @@ test('record 只入 pending 不产生持久化写,flushNow 后每脏行恰一次
 
 test('同桶多样本合并:pending 累加,一次 update 落全部计数', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.readyPromise()
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   await store.record(tokenSample(local(2026, 8, 2, 14, 38)))
@@ -706,7 +710,7 @@ test('同桶多样本合并:pending 累加,一次 update 落全部计数', async
 
 test('flush 周期自动落盘', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain), { flushIntervalMs: 5 })
+  const store = makeStore(domain, { flushIntervalMs: 5 })
   await store.readyPromise()
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   await new Promise((resolve) => setTimeout(resolve, 30))
@@ -715,7 +719,7 @@ test('flush 周期自动落盘', async () => {
 
 test('rangeRows 前自动 flush,读己之写', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.readyPromise()
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   const rows = await store.rangeRows('D', '2026-08-02', '2026-08-02')
@@ -725,7 +729,7 @@ test('rangeRows 前自动 flush,读己之写', async () => {
 
 test('reset 前 pending 先落盘再清表', async () => {
   const domain = fakeDomain()
-  const store = new UsageStore(facilityOf(domain))
+  const store = makeStore(domain)
   await store.readyPromise()
   await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
   await store.reset(new Map())
@@ -737,4 +741,22 @@ test('降级态 record 仍按调用失败', async () => {
   const store = new UsageStore({ open: () => Promise.reject(new Error('domain already open')) })
   await store.readyPromise()
   await assert.rejects(store.record(tokenSample(local(2026, 8, 2, 14, 37))), /usage store degraded/)
+})
+
+// ── F14: 入队保留资格过滤 ──────────────────────────────────────────────────
+test('F14: 超出档留存期的样本不入 pending 不落盘,回扫同通道受控', async () => {
+  const domain = fakeDomain()
+  // 时钟"今天" = 样本日次日 + 8 天:8/2 样本对分钟档(7 天)超期、小时档(15 天)与日档在期
+  const now = local(2026, 8, 10, 0, 0)
+  const store = new UsageStore(facilityOf(domain), { now: () => now })
+  await store.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  await store.flushNow()
+  const prefixes = [...domain.rows.keys()].map((key) => key.split('|').slice(0, 2).join('|'))
+  assert.ok(!prefixes.some((p) => p.startsWith('M|')), `分钟档超期不得落行: ${prefixes.join(',')}`)
+  assert.ok(prefixes.some((p) => p.startsWith('D|')), '日档无留存上限恒写入')
+  assert.ok(prefixes.some((p) => p.startsWith('H|')), '小时档 15 天内在期')
+  // 分钟档保留 0(关闭):分钟样本一律不入队
+  const offStore = new UsageStore(facilityOf(fakeDomain()), { now: () => local(2026, 8, 2, 14, 38), retentionDays: () => 0 })
+  await offStore.record(tokenSample(local(2026, 8, 2, 14, 37)))
+  assert.equal(offStore.pending.size, 2, '关闭分钟档后仅日/小时两行入队')
 })

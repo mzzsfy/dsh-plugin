@@ -5,6 +5,7 @@ import { nextBatch, scriptViewOf } from '../lib/driver/scheduler.mjs'
 import { applyApproveResult, applyExternalVerdict, waitingPayload } from '../lib/driver/approve.mjs'
 import { buildPrompt, schemaOf, resolvePlaceholders } from '../lib/driver/prompts.mjs'
 import { RunDriver, collectSubOutputs, buildSeed } from '../lib/driver/index.mjs'
+import { fallbackScript } from '../lib/planner-gate.mjs'
 
 const init = (template, plan, { request = '需求', inputs = {} } = {}) => {
   const view = scriptViewOf(template, plan)
@@ -763,4 +764,106 @@ test('Given pause 期裁决已入队且 waitingApproval 残留 When drain Then �
   // drain 应用后若残留 waitingApproval,下次 pause+裁决会对非等待步幽灵生效
   assert.equal(driver.state.waitingApproval, undefined)
   assert.equal(driver.state.pendingApprovals.length, 0)
+})
+
+// ── F01 嵌套子流程:依赖规范化与深链 ────────────────────────────────────────
+test('Given B 中 b 依赖 a 且 prompt 引用 {a.out} When A 调用 B Then 首批仅 a 且 b 收到 a 输出', async () => {
+  const templateB = {
+    id: 'tpl-b', label: 'B',
+    steps: [
+      { id: 'a', prompt: 'A: {request}', outputs: { out: '产出' } },
+      { id: 'b', prompt: 'B 用 {a.out}', outputs: { o: '产出' } },
+    ],
+  }
+  const templateA = {
+    id: 'tpl-a', label: 'A',
+    steps: [{ id: 'go', type: 'flow', flow: 'tpl-b', input: {} }],
+  }
+  const engineCalls = []
+  const engine = {
+    start({ args }) {
+      engineCalls.push(...args.calls.map((c) => ({ prompt: c.prompt, label: c.label })))
+      return {
+        result: Promise.resolve({
+          results: args.calls.map((c, i) => ({ callId: c.callId, ok: true, outputs: { out: `OUT-${engineCalls.length - args.calls.length + i}`, o: 'SUB' } })),
+        }),
+      }
+    },
+  }
+  const driver = new RunDriver({
+    template: templateA, templateSet: [templateA, templateB],
+    plan: fallbackScript(templateA),
+    runId: 'r-flow-1', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  // 路由解析走 {route} 占位:父步骤无上游产出,route 直接字面量形态
+  driver.state.steps.go.flow = 'tpl-b'
+  driver.startPersist()
+  const payload = await driver.runSegment()
+  assert.equal(payload.kind, 'terminal')
+  assert.equal(driver.state.status, 'completed')
+  // 依赖核验:引擎先收到 a 再收到 b,b 的 prompt 引用 a 的实际输出
+  assert.equal(engineCalls.length, 2, JSON.stringify(engineCalls))
+  assert.match(engineCalls[0].prompt, /A: 需求/)
+  assert.match(engineCalls[1].prompt, /B 用 OUT-\d/)
+})
+
+test('Given 合法 A→B→C 三层 When 依次执行 Then 三层全部完成', async () => {
+  const templateC = {
+    id: 'tpl-c', label: 'C',
+    steps: [{ id: 'leaf', prompt: 'C leaf', outputs: { c: '产出' } }],
+  }
+  const templateB = {
+    id: 'tpl-b', label: 'B',
+    steps: [{ id: 'mid', type: 'flow', flow: 'tpl-c', input: {} }],
+  }
+  const templateA = {
+    id: 'tpl-a', label: 'A',
+    steps: [{ id: 'top', type: 'flow', flow: 'tpl-b', input: {} }],
+  }
+  const engine = {
+    start({ args }) {
+      return {
+        result: Promise.resolve({
+          results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { c: 'LEAF' } })),
+        }),
+      }
+    },
+  }
+  const driver = new RunDriver({
+    template: templateA, templateSet: [templateA, templateB, templateC],
+    plan: fallbackScript(templateA),
+    runId: 'r-flow-2', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  const payload = await driver.runSegment()
+  assert.equal(payload.kind, 'terminal')
+  assert.equal(driver.state.status, 'completed')
+})
+
+test('Given 循环路由 A→B→A When 执行 Then 深度上限处失败不悬挂', async () => {
+  const templateA = {
+    id: 'tpl-a', label: 'A',
+    steps: [{ id: 'top', type: 'flow', flow: 'tpl-b', input: {} }],
+  }
+  const templateB = {
+    id: 'tpl-b', label: 'B',
+    steps: [{ id: 'back', type: 'flow', flow: 'tpl-a', input: {} }],
+  }
+  const engine = {
+    start({ args }) {
+      return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: {} })) }) }
+    },
+  }
+  const driver = new RunDriver({
+    template: templateA, templateSet: [templateA, templateB],
+    plan: fallbackScript(templateA),
+    runId: 'r-flow-3', request: '需求', engine,
+    store: memoryStore(), budgets: { approveRounds: 2, escalateLimit: 2, maxStepFail: 2 },
+  })
+  driver.startPersist()
+  const payload = await driver.runSegment()
+  assert.equal(payload.kind, 'terminal')
+  assert.notEqual(driver.state.status, 'running')
 })

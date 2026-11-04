@@ -439,6 +439,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
       method: 'DELETE',
       segments: ['jobs', ':id'],
       handler: async ({ res, params }) => {
+        // 删除先清执行面:该任务的排队记录 cancelled、在途运行杀树/终态;
+        // 半失败经 stopJob 抛错上抛(路由层统一 500),不静默残留活跃运行
+        await executor.stopJob(params.id)
         const removed = await store.jobs.remove(params.id)
         if (!removed) throw new Error(MESSAGES.jobNotFound)
         await logger.removeJob(params.id)

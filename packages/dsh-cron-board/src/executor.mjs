@@ -1,6 +1,8 @@
 // executor:执行链共用模块(api 手动运行与 scheduler cron 触发同源)。
 // 预占 RunRecord → 全局/任务级并发闸门(内存队列)→ 执行到终态。
 // 会话任务不展开同名多值(设计 §4.2);shell 任务按启用变量笛卡尔积展开。
+// 停止生命周期:stopAccepting 后 dispatch 拒绝;cancelQueued 清队;
+// abortActive 杀在途;settle 等活跃归零(插件卸载 await 收敛用)。
 
 import { DEFAULT_MAX_EXPANSION } from './config.mjs'
 import { expandEnvMatrix } from './env-expand.mjs'
@@ -11,12 +13,18 @@ const SESSION_UNAVAILABLE = {
   run: async () => ({ status: 'fail', message: '会话服务不可用' }),
 }
 
+// 卸载收敛上限:可取消单元(shell)立即终态,不可取消单元(会话)超限放行
+const SETTLE_TIMEOUT_MS = 5 * 1000
+
 export function createExecutor({ store, logger, runner, sessionRunner, maxExpansion = DEFAULT_MAX_EXPANSION, readMaxConcurrent, readLogKeep, readMaskEnvInPrompt, logSystem, onChange }) {
   const shellRunner = runner || createShellRunner({ workdirFallback: process.cwd() })
   // 队列与活跃计数:许可数 = min(全局上限, 任务级收紧值);全局上限经 readMaxConcurrent 动态读
   const queue = []
   const activeByJob = new Map()
   let activeTotal = 0
+  // 停止态与在途句柄:cancelByRunId 登记可取消运行;settled 等待零活跃
+  let stopped = false
+  const cancelByRunId = new Map()
 
   function activeOf(jobId) {
     return activeByJob.get(jobId) || 0
@@ -29,6 +37,7 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
   }
 
   function pump() {
+    if (stopped) return
     for (let i = 0; i < queue.length;) {
       const item = queue[i]
       if (activeTotal >= (readMaxConcurrent ? readMaxConcurrent() : Infinity)) break
@@ -53,7 +62,7 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
       const executionJob = current && job.session?.mode === 'pinned'
         ? { ...job, session: { ...job.session, pinnedSessionId: current.session?.pinnedSessionId } }
         : job
-      const outcome = await runnerFor(executionJob).run({
+      const execution = runnerFor(executionJob).run({
         job: executionJob,
         env,
         mask: readMaskEnvInPrompt ? readMaskEnvInPrompt() : false,
@@ -64,6 +73,12 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
           pinnedSessionId: undefined,
         }),
       })
+      // 统一形态:{ promise, cancel };async 兼容形态(既有 runner/测试桩)转 { promise, cancel: 无 }
+      const promise = typeof execution?.then === 'function' ? execution : execution.promise
+      const cancel = typeof execution?.cancel === 'function' ? execution.cancel : undefined
+      if (cancel !== undefined) cancelByRunId.set(record.runId, { cancel, jobId: job.id })
+      const outcome = await promise
+      cancelByRunId.delete(record.runId)
       // 终态补记:session 附带 message/sessionId,pinned 自愈时回写新会话 id
       const patch = {
         status: outcome.status,
@@ -119,6 +134,8 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
   return {
     // 预占记录并按闸门调度执行;返回 runIds 同步可得(执行在后台按许可推进)
     async dispatch(job, trigger) {
+      // 停止态拒绝新执行:拒绝须发生在预占记录之前,不留 queued 孤儿
+      if (stopped) throw new Error('执行链已停止(插件卸载中),拒绝新运行')
       const expansion = job.kind === 'session'
         ? { combinations: [{}], truncated: false }
         : expandEnvMatrix({ envs: store.envs.list(), maxExpansion })
@@ -144,6 +161,51 @@ export function createExecutor({ store, logger, runner, sessionRunner, maxExpans
     },
     status() {
       return { active: activeTotal, queued: queue.length }
+    },
+    // 停止生命周期:拒新 → 清队(记录 cancelled)→ 杀在途 → settle 等活跃归零
+    async stop() {
+      stopped = true
+      for (const item of queue.splice(0, queue.length)) {
+        cancelByRunId.delete(item.record.runId)
+        await store.runs.update(item.record.runId, {
+          status: 'cancelled',
+          endedAt: Date.now(),
+          message: '执行链停止,排队运行取消',
+        }).catch(() => {})
+      }
+      for (const entry of [...cancelByRunId.values()]) entry.cancel()
+      cancelByRunId.clear()
+      await this.settle()
+    },
+    // 任务级清场(删除任务前置):清该任务排队记录、杀该任务在途运行、等其归零;
+    // 不置停止态,其余任务不受影响。无执行面的任务幂等空操作
+    async stopJob(jobId) {
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i].job.id !== jobId) continue
+        const [item] = queue.splice(i, 1)
+        await store.runs.update(item.record.runId, {
+          status: 'cancelled',
+          endedAt: Date.now(),
+          message: '任务已删除,排队运行取消',
+        }).catch(() => {})
+      }
+      for (const [runId, entry] of [...cancelByRunId]) {
+        if (entry.jobId !== jobId) continue
+        entry.cancel()
+        cancelByRunId.delete(runId)
+      }
+      while (activeOf(jobId) > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+    },
+    // 等待全部活跃单元终态收敛(pump 已被停止态闸死,活跃只减不增);
+    // 上限兜底:会话 runner 无取消句柄,单步在途可能长时间挂起——超限放行,
+    // 不阻塞宿主卸载(记录留 running,重启 recover 收敛为 interrupted)
+    async settle() {
+      const deadline = Date.now() + SETTLE_TIMEOUT_MS
+      while (activeTotal > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
     },
   }
 }

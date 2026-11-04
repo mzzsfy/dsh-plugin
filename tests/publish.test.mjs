@@ -14,6 +14,11 @@ function fixture(t, { hasTestScript = true } = {}) {
   if (hasTestScript) manifest.scripts = { test: 'node test.mjs' }
   writeFileSync(join(root, 'packages', 'probe', 'package.json'), JSON.stringify(manifest))
   copyFileSync(new URL('../scripts/publish.mjs', import.meta.url), join(root, 'scripts', 'publish.mjs'))
+  // I04 发布洁净门要求目标包 git 干净:夹具初始化仓库并提交基线
+  for (const args of [['init'], ['add', '.'], ['-c', 'user.name=fixture', '-c', 'user.email=fixture@test', 'commit', '-m', 'fixture']]) {
+    const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+    if (r.status !== 0) throw new Error('fixture git 初始化失败: ' + (r.stderr || r.stdout))
+  }
   return root
 }
 
@@ -30,12 +35,22 @@ for (const stream of ['stdout', 'stderr']) {
   })
 }
 
+/** 夹具追加文件后补提交:发布洁净门要求目标包提交态(I04 契约);无变更时静默 */
+function commitAll(root) {
+  spawnSync('git', ['add', '-A'], { cwd: root, encoding: 'utf8' })
+  const r = spawnSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@test', 'commit', '-qm', 'fixture-update'], { cwd: root, encoding: 'utf8' })
+  if (r.status !== 0 && !/nothing to commit/.test(r.stdout + r.stderr)) {
+    throw new Error('fixture git 提交失败: ' + (r.stderr || r.stdout))
+  }
+}
+
 test('单包目标测试失败阻断npm且不调用全仓门', t => {
   // Given目标包测试失败且聚合门是失败哨兵；When单包发布；Then只运行目标测试、明细可见并中止。
   const root = fixture(t)
   writeFileSync(join(root, 'packages', 'probe', 'test.mjs'), "console.log('target-test-ran');process.exit(1)")
   writeFileSync(join(root, 'packages', 'probe', 'package.json'), JSON.stringify({ name: '@example/probe', version: '1.0.0', scripts: { test: 'node test.mjs' } }))
   writeFileSync(join(root, 'scripts', 'aggregate-tests.mjs'), "throw new Error('single-package must not run aggregate')")
+  commitAll(root)
   const result = spawnSync(process.execPath, [join(root, 'scripts', 'publish.mjs'), 'probe'], { cwd: root, encoding: 'utf8' })
   assert.equal(result.status, 1)
   assert.match(result.stdout, /npm(?:\.cmd)? test/)
@@ -46,6 +61,7 @@ test('单包目标测试失败阻断npm且不调用全仓门', t => {
 test('单包未定义test script时拒绝无测试发布', t => {
   // Given目标包没有test script；When真实单包发布；Then必须在npm publish前拒绝。
   const root = fixture(t, { hasTestScript: false })
+  commitAll(root)
   const result = spawnSync(process.execPath, [join(root, 'scripts', 'publish.mjs'), 'probe'], { cwd: root, encoding: 'utf8' })
   assert.equal(result.status, 1)
   assert.match(result.stderr, /未定义有效 test script.*拒绝无目标测试发版/)
@@ -57,6 +73,7 @@ for (const testScript of ['', '   ']) {
     // Given目标包test script为空或纯空白；When真实单包发布；Then不得无测试发布。
     const root = fixture(t)
     writeFileSync(join(root, 'packages', 'probe', 'package.json'), JSON.stringify({ name: '@example/probe', version: '1.0.0', scripts: { test: testScript } }))
+    commitAll(root)
     const result = spawnSync(process.execPath, [join(root, 'scripts', 'publish.mjs'), 'probe'], { cwd: root, encoding: 'utf8' })
     assert.equal(result.status, 1)
     assert.match(result.stderr, /未定义有效 test script.*拒绝无目标测试发版/)

@@ -6,7 +6,7 @@ import { applyCommand, applyEnvelope, actionKeyOf, ERROR_CODES } from '../lib/co
 import {
   createTask, defineWorkItem, authorizeTask, reviseDefinition, checkExecutionPermission,
   recordRun, submitReport, markSessionExecutor, closeTask, stopTask, confirmStopped,
-  requestResume, confirmResume, requestCancel, resolveDependencyBlock,
+  requestResume, confirmResume, requestCancel, resolveDependencyBlock, replaceWorkItem,
 } from '../lib/core/task.mjs'
 import { createGlobalControl, stopAll } from '../lib/core/global-control.mjs'
 
@@ -225,4 +225,47 @@ test('停止→恢复核对→确认放行:新 epoch 与当前全局代次单项
   assert.equal(agg.control.state, 'active')
   assert.equal(agg.control.executionEpoch, (stopped.result.aggregate.control.executionEpoch) + 1)
   assert.equal(agg.control.allowedGlobalGeneration, 0)
+})
+
+// ── F05: 依赖准入与判环 ─────────────────────────────────────────────────────
+test('F05: 缺失/未验收依赖拒绝派发;依赖验收后放行', async () => {
+  let agg = await makeReadyTask()
+  // 依赖引用可前向声明(缺失不拒定义),但派发时拒绝
+  const w2 = defineWorkItem(agg, { workItemId: 'w2', title: '前置项', requiredCriterionIds: ['c1'] })
+  assert.ok(w2.ok, w2.message)
+  agg = w2.result.aggregate
+  const w1 = defineWorkItem(agg, { workItemId: 'w1d', title: '后继项', requiredCriterionIds: ['c1'], dependencyWorkItemIds: ['w2'] })
+  assert.ok(w1.ok, w1.message)
+  agg = w1.result.aggregate
+  const control = { globalStopped: false, globalStopGeneration: 0 }
+  // w1 的依赖 w2 未验收:拒绝派发
+  const denied = checkExecutionPermission(agg, control, { workItemId: 'w1d', phase: 'implement', actorRole: 'executor' })
+  assert.equal(denied.ok, false)
+  assert.equal(denied.code, 'DEPENDENCY_BLOCKED')
+  // 替换 w2 → 依赖已替换,同样拒绝
+  const replaced = replaceWorkItem(agg, { oldWorkItemId: 'w2', newWorkItemId: 'w2r', title: '前置项二', requiredCriterionIds: ['c1'], reason: '重构' })
+  assert.ok(replaced.ok, replaced.message)
+  const deniedReplaced = checkExecutionPermission(replaced.result.aggregate, control, { workItemId: 'w1d', phase: 'implement', actorRole: 'executor' })
+  assert.equal(deniedReplaced.ok, false)
+  assert.equal(deniedReplaced.code, 'DEPENDENCY_BLOCKED')
+})
+
+test('F05: 合法菱形可定义,真回边拒绝', async () => {
+  let agg = await makeReadyTask()
+  // 菱形:b、c 共依赖 a,d 依赖 b/c — 定义过程不触发判环
+  for (const [id, deps] of [['a', []], ['b', ['a']], ['c', ['a']], ['d', ['b', 'c']]]) {
+    const r = defineWorkItem(agg, { workItemId: id, title: '菱形' + id, requiredCriterionIds: ['c1'], dependencyWorkItemIds: deps })
+    assert.ok(r.ok, `${id} 定义失败: ${r.message}`)
+    agg = r.result.aggregate
+  }
+  // 真回边:新项依赖 d 不成环(前向合法);但依赖链已含 d→b→a 的图里,
+  // 再定义 e 依赖 a 且让 d 依赖 e 不可表达(defineWorkItem 只创建不修改);
+  // 回边判定以"新边经依赖链可达自身"验证:q 依赖 d 且 d 已依赖链回 q 不可能,
+  // 改以闭环创建验证:p1 依赖 p2、p2 依赖 p1 中第二条定义时 p1 已在图内,可达自身
+  const p1 = defineWorkItem(agg, { workItemId: 'p1', title: '环一', requiredCriterionIds: ['c1'], dependencyWorkItemIds: ['p2'] })
+  assert.ok(p1.ok, 'p2 未定义时 p1 前向声明合法')
+  agg = p1.result.aggregate
+  const p2 = defineWorkItem(agg, { workItemId: 'p2', title: '环二', requiredCriterionIds: ['c1'], dependencyWorkItemIds: ['p1'] })
+  assert.equal(p2.ok, false, 'p2→p1→p2 闭环在第二条定义时判环拒绝')
+  assert.equal(p2.code, 'DEPENDENCY_BLOCKED')
 })

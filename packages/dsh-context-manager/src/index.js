@@ -189,9 +189,10 @@ export function apply(ctx, config) {
   // (mtimeMs+size),对齐时先 stat 比对,产物没变零解压——判断全部基于磁盘,跨重启生效。
   // 运行中会话(当前会话)提取结果只保留内存不落盘(产物持续变化,落盘指纹立即失效)。
   // 解压是同步 CPU 操作:对齐中连续占用超 SLICE 即让出 YIELD,启动对齐延迟
-  // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录
+  // STARTUP_DELAY 再跑,绝不阻塞宿主启动。测试经 env DSH_HISTORY_CACHE_DIR 注入临时目录;
+  // 缺省从宿主 home 派生(DSH_HOME 即 .dsh 根,rs-workflow 同构)
   const cacheDir = process.env.DSH_HISTORY_CACHE_DIR
-    || join(homedir(), '.dsh', 'historyPrompt')
+    || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'historyPrompt')
   // 巨产物跳过线按宿主版本黑名单取值:0.1.1/0.1.2 解压实现无周期让出从严 8MiB,
   // 其余 16MiB。运行宿主清单经 require 链解析(插件随宿主树部署时必命中),
   // 探测失败按黑名单保守回退旧线。激活时求值一次即冻结,热路径只读值;
@@ -488,7 +489,7 @@ export function apply(ctx, config) {
             throw new Error(MESSAGES.badJsonBody)
           }
           const request = await resolveCloneRequest(body, {
-            homedirPath: homedir(),
+            homedirPath: process.env.DSH_HOME || homedir(),
             // stat + readdir 归一四态:git 允许克隆进空目录,其余占用形态拒绝
             targetState: async (target) => {
               let info

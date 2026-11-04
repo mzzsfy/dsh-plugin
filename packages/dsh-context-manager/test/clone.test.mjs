@@ -391,14 +391,17 @@ function fakeElement(tag) {
     insertBefore() {},
     remove() {},
     getAttribute: () => null,
+    setAttribute(name) { this.attrs = this.attrs || {}; this.attrs[name] = '' },
+    hasAttribute(name) { return !!(this.attrs && name in this.attrs) },
     appendChild(child) { this.children.push(child); child.parentElement = this },
   }
 }
 
 test('Given 官方弹窗结构, When findBrowseFooter 逻辑, Then 定位打开与取消按钮;结构漂移返回 null', () => {
   const declared = CLIENT_SRC.match(/function findBrowseFooter\(card\) \{[\s\S]*?\n\}/)
-  assert.ok(declared, 'client.js 必须内联声明 findBrowseFooter')
-  const findFooter = new Function(declared[0] + '\nreturn findBrowseFooter')()
+  const flagDecl = CLIENT_SRC.match(/const CLONE_BTN_FLAG = '([^']+)'/)
+  assert.ok(declared && flagDecl, 'client.js 必须内联声明 findBrowseFooter')
+  const findFooter = new Function('CLONE_BTN_FLAG', declared[0] + '\nreturn findBrowseFooter')(flagDecl[1])
 
   const openButton = fakeElement('button')
   const cancelButton = fakeElement('button')
@@ -439,6 +442,37 @@ test('Given 官方弹窗结构, When findBrowseFooter 逻辑, Then 定位打开�
   assert.equal(findFooter(thinCard), null, '按钮不足 3 的 footer 应返回 null')
 })
 
+test('Given footer 内自家克隆按钮插在取消与打开之间, When findBrowseFooter, Then cancelButton 跳过自家按钮解析到真取消', () => {
+  const declared = CLIENT_SRC.match(/function findBrowseFooter\(card\) \{[\s\S]*?\n\}/)
+  const flagDecl = CLIENT_SRC.match(/const CLONE_BTN_FLAG = '([^']+)'/)
+  assert.ok(declared && flagDecl, 'client.js 必须内联声明 findBrowseFooter 与 CLONE_BTN_FLAG')
+  const findFooter = new Function('CLONE_BTN_FLAG', declared[0] + '\nreturn findBrowseFooter')(flagDecl[1])
+
+  const realCancel = fakeElement('button')
+  const injected = fakeElement('button')
+  injected.setAttribute(flagDecl[1], '')
+  const openButton = fakeElement('button')
+  // DOM 顺序:取消 → 自家克隆按钮 → 打开(ensureCloneButton insertBefore 打开按钮)
+  openButton.previousElementSibling = injected
+  injected.previousElementSibling = realCancel
+  realCancel.previousElementSibling = null
+  const footer = fakeElement('div')
+  footer.querySelectorAll = (selector) => (selector === 'button' ? [realCancel, injected, openButton] : [])
+  footer.querySelector = (selector) => (selector === 'button:last-of-type' ? openButton : null)
+  footer.lastElementChild = openButton
+  const scope = fakeElement('div')
+  scope.lastElementChild = footer
+  const nav = fakeElement('span')
+  const card = fakeElement('div')
+  nav.parentElement = scope
+  scope.parentElement = card
+  card.querySelector = (selector) => (selector === '[role="navigation"]' ? nav : null)
+
+  const parts = findFooter(card)
+  assert.equal(parts.cancelButton, realCancel, 'cancelButton 必须是真取消按钮,误指自家按钮会把收起变成再次弹窗')
+  assert.equal(parts.openButton, openButton)
+})
+
 test('Given 注入循环, When setupCloneInjection, Then header 默认注入并轮询 /login 探测闸门,命中即移除还原 3 按钮布局', () => {
   assert.ok(CLIENT_SRC.includes('const armAuthProbe'), '必须有 armAuthProbe 登录闸门轮询')
   assert.match(CLIENT_SRC, /let headerAllowed = true/, '默认注入第 4 按钮(无闸门环境零延迟有入口)')
@@ -448,6 +482,115 @@ test('Given 注入循环, When setupCloneInjection, Then header 默认注入并�
   assert.ok(!CLIENT_SRC.includes('armClickProbe'), '不得再用点击行为探测(要求用户先点一次才出按钮)')
   assert.ok(!CLIENT_SRC.includes('headerEntry'), '不得依赖宿主 headerEntry 字段(静态环境归因已证伪)')
   assert.ok(!CLIENT_SRC.includes('dsh-web-startup-auth'), 'client 不得引用 auth 包名(归因不可靠)')
+})
+
+test('Given 浏览弹窗与结构漂移形态, When dismissBrowseDialog, Then 点取消收起,结构漂移派发 Escape;无弹窗零动作', () => {
+  const declared = CLIENT_SRC.match(/function dismissBrowseDialog\(doc\) \{[\s\S]*?\n\}/)
+  assert.ok(declared, 'client.js 必须内联声明 dismissBrowseDialog')
+  class FakeKeyboardEvent {
+    constructor(_type, init) { this.key = init.key; this.bubbles = init.bubbles; this.cancelable = init.cancelable }
+  }
+  // KeyboardEvent 经形参注入:Node 测试环境无该全局,浏览器内为自由变量全局
+  const makeDismiss = (findCard, findFooter) =>
+    new Function('findBrowseDialog', 'findBrowseFooter', 'KeyboardEvent', declared[0] + '\nreturn dismissBrowseDialog')(
+      findCard, findFooter, FakeKeyboardEvent,
+    )
+
+  const cancelled = []
+  const goodFooter = { cancelButton: { click() { cancelled.push('cancel') } } }
+  const dismissGood = makeDismiss(() => ({}), () => goodFooter)
+  const docGood = {
+    dispatchEvent() { throw new Error('cancel 可点时不应派发 Escape') },
+  }
+  dismissGood(docGood)
+  assert.deepEqual(cancelled, ['cancel'], 'cancel 可点时应点击取消按钮收起')
+
+  const escaped = []
+  const dismissBad = makeDismiss(() => ({}), () => null)
+  dismissBad({ dispatchEvent(event) { escaped.push(event) } })
+  assert.equal(escaped.length, 1, '结构漂移应派发 document 级 Escape 兜底')
+  assert.equal(escaped[0].key, 'Escape')
+  assert.equal(escaped[0].bubbles, true)
+
+  const dismissNone = makeDismiss(() => null, () => ({}))
+  dismissNone({ dispatchEvent() { throw new Error('无弹窗不应派发事件') } })
+})
+
+test('Given 克隆提交成功且 workspaces.create 挂起, When submitClone 完成, Then 浏览弹窗已收起且克隆弹窗立即关闭,不被登记链阻塞', async () => {
+  const submitDecl = CLIENT_SRC.match(/async function submitClone\(payload, deps\) \{[\s\S]*?\n\}/)
+  const openDecl = CLIENT_SRC.match(/async function openCloneWorkspace\(targetPath, deps\) \{[\s\S]*?\n\}/)
+  const dismissDecl = CLIENT_SRC.match(/function dismissBrowseDialog\(doc\) \{[\s\S]*?\n\}/)
+  assert.ok(submitDecl && openDecl && dismissDecl, 'client.js 必须内联声明 submitClone/openCloneWorkspace/dismissBrowseDialog')
+
+  const order = []
+  let resolveCreate
+  const deps = {
+    fetch: async () => ({ ok: true, json: async () => ({ path: '/t/clone-target' }) }),
+    doc: {},
+    workspaces: {
+      create: (input) => {
+        order.push('create:' + input.path)
+        return new Promise((resolve) => { resolveCreate = resolve })
+      },
+    },
+    uiWorkspace: { startSession: (id) => order.push('start:' + id) },
+    toast: (text) => order.push('toast:' + text),
+  }
+  const dismiss = new Function('findBrowseDialog', 'findBrowseFooter', dismissDecl[0] + '\nreturn dismissBrowseDialog')(
+    () => ({}),
+    () => ({ cancelButton: { click: () => order.push('dismiss') } }),
+  )
+  const openWorkspace = new Function(openDecl[0] + '\nreturn openCloneWorkspace')()
+  const submitClone = new Function(
+    'CLONE_API_URL',
+    'dismissBrowseDialog',
+    'openCloneWorkspace',
+    submitDecl[0] + '\nreturn submitClone',
+  )('/api/context/git-clone', dismiss, openWorkspace)
+
+  const modalClosed = submitClone(
+    { url: 'https://e.com/r.git', target: '/t/clone-target', shallow: false },
+    deps,
+  ).then(() => order.push('modal-closed'))
+  await modalClosed
+  assert.deepEqual(
+    order,
+    ['dismiss', 'create:/t/clone-target', 'modal-closed'],
+    '克隆弹窗应在收起浏览弹窗后立即关闭,不等工作区登记 resolve',
+  )
+  resolveCreate({ workspaceId: 'w1' })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(
+    order.slice(3),
+    ['start:w1', 'toast:已克隆并打开工作区'],
+    '登记完成后落入新工作区空会话并通报',
+  )
+})
+
+test('Given 克隆成功但登记链拒绝, When submitClone 完成, Then 提交链不拒钮且失败经 toast 通报', async () => {
+  const submitDecl = CLIENT_SRC.match(/async function submitClone\(payload, deps\) \{[\s\S]*?\n\}/)
+  const openDecl = CLIENT_SRC.match(/async function openCloneWorkspace\(targetPath, deps\) \{[\s\S]*?\n\}/)
+  assert.ok(submitDecl && openDecl, 'client.js 必须内联声明 submitClone/openCloneWorkspace')
+
+  let rejectCreate
+  const deps = {
+    fetch: async () => ({ ok: true, json: async () => ({ path: '/t/x' }) }),
+    doc: {},
+    workspaces: { create: () => new Promise((_resolve, reject) => { rejectCreate = reject }) },
+    uiWorkspace: { startSession: () => {} },
+    toast: (text) => { deps.lastToast = text },
+  }
+  const openWorkspace = new Function(openDecl[0] + '\nreturn openCloneWorkspace')()
+  const submitClone = new Function('CLONE_API_URL', 'dismissBrowseDialog', 'openCloneWorkspace', submitDecl[0] + '\nreturn submitClone')(
+    '/api/context/git-clone', () => {}, openWorkspace,
+  )
+  const settled = submitClone({ url: 'https://e.com/r.git', target: '/t/x', shallow: false }, deps)
+  await new Promise((resolve) => setImmediate(resolve))
+  rejectCreate(new Error('boom'))
+  await settled
+  // toast 在登记链 catch 回调内,晚于 submitClone resolve 一个微任务
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.match(deps.lastToast, /打开工作区失败/, '登记失败应经 toast 通报而非静默')
 })
 
 test('Given 工作区 header, When ensureHeaderCloneButton, Then 注入添加按钮旁克隆邻居类名;幂等条件写;邻居缺失隐藏;auth 在场强制隐藏', () => {

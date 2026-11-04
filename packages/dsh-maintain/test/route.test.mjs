@@ -1309,3 +1309,22 @@ test('release-notes:上游失败 400 带错误信息', async () => {
     restore()
   }
 })
+
+// ── F08: 显式暂停契约 ──────────────────────────────────────────────────────
+test('F08: 维护态 pre-step 拒绝携带"已切换暂停重启可用"说明,状态快照 awaitingRestart 置位', async () => {
+  const { ctx, routes } = makeCtx({ appExit: () => {} })
+  const hook = ctx.calls.agentHook
+  assert.ok(hook?.listener, 'pre-step 钩子必须已挂')
+  const next = async () => ({ kind: 'continue' })
+  // 非维护态:放行
+  const pass = await hook.listener({ signal: { aborted: false } }, next)
+  assert.equal(pass.kind, 'continue')
+  // 经 restart 路由进入维护态(scheduleHostExit 置 active,退出延迟未到进程仍在)
+  await post(routes, '/api/maintain/restart', { force: true })
+  const reject = await hook.listener({ signal: { aborted: false } }, next)
+  assert.equal(reject.kind, 'reject')
+  assert.match(String(reject.message ?? ''), /暂停新回合|重启后可用/)
+  // status 快照携带结构化 awaitingRestart
+  const res = await get(routes, '/api/maintain/status')
+  assert.equal(res.payload.awaitingRestart, true)
+})

@@ -913,44 +913,61 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // —— 环境变量 Tab ——
     // —— 环境变量表单(新建/编辑)——
-    // 编辑经明文单条接口回填:列表接口的 value 已打码,直接回填保存会覆盖真实值
+    // 编辑经明文单条接口回填:列表接口的 value 已打码,直接回填保存会覆盖真实值。
+    // 提交门控:明文加载完成前不可保存;加载失败禁保存(掩码值不得提交);
+    // 值未被用户修改时 PATCH 不携带该字段(防迟到回填与掩码路径覆盖真值)
     function EnvForm({ row, onDone }) {
       const editing = Boolean(row && row.id)
       const [form, setForm] = useState(() => ({
         name: row ? row.name : '',
-        value: row ? row.value : '',
+        value: editing ? undefined : '',
         remarks: row ? row.remarks : '',
         multi: row ? row.multi : false,
         enabled: row ? row.enabled : true,
       }))
+      const [plaintextReady, setPlaintextReady] = useState(!editing)
+      const [plaintextFailed, setPlaintextFailed] = useState(false)
+      const valueDirtyRef = useRef(false)
       const [error, setError] = useState(null)
       useEffect(() => {
         if (!editing) return
         let alive = true
         request('GET', 'envs/' + row.id).then((outcome) => {
           if (!alive) return
-          if (outcome.ok) setForm((prev) => ({ ...prev, value: outcome.data.value }))
-          else setError('读取变量明文失败:' + outcome.error)
+          if (outcome.ok) {
+            // 用户已抢先输入草稿时迟到回填不得覆盖
+            setForm((prev) => (valueDirtyRef.current ? prev : { ...prev, value: outcome.data.value }))
+            setPlaintextReady(true)
+          } else {
+            setPlaintextFailed(true)
+            setError('读取变量明文失败,保存已禁用:' + outcome.error)
+          }
         })
         return () => { alive = false }
       }, [editing, row && row.id])
-      const set = (patch) => setForm((prev) => ({ ...prev, ...patch }))
+      const set = (patch) => {
+        if (patch.value !== undefined) valueDirtyRef.current = true
+        setForm((prev) => ({ ...prev, ...patch }))
+      }
       const submit = async () => {
         setError(null)
-        const payload = { ...form }
-        if (form.multi) payload.values = form.value.split('\n').map((line) => line.trim()).filter(Boolean)
+        // 掩码不可提交:未修改时值字段不携带,服务端保留原值;新建时值始终提交
+        const valueSubmittable = !editing || (plaintextReady && !plaintextFailed && valueDirtyRef.current)
+        const payload = { ...form, value: valueSubmittable ? form.value : undefined }
+        if (valueSubmittable && form.multi) payload.values = form.value.split('\n').map((line) => line.trim()).filter(Boolean)
         const outcome = await request(editing ? 'PATCH' : 'POST', editing ? 'envs/' + row.id : 'envs', payload)
         if (outcome.ok) onDone()
         else setError(outcome.error)
       }
+      const submitBlocked = editing && (!plaintextReady || plaintextFailed)
       return h(Modal, { title: editing ? '编辑变量' : '新建变量', onClose: onDone, width: 520 },
         h('div', { className: 'cb-grid' },
           h(Field, { label: '名称' }, h('input', { type: 'text', value: form.name, onChange: (e) => set({ name: e.target.value }) })),
           h(Field, { label: '备注(可空)' }, h('input', { type: 'text', value: form.remarks, onChange: (e) => set({ remarks: e.target.value }) })),
-          h(Field, { label: '值', wide: true, hint: '勾选多值后每行一个值,运行时按同名多值展开' },
+          h(Field, { label: '值', wide: true, hint: submitBlocked ? '正在读取变量明文…' : '勾选多值后每行一个值,运行时按同名多值展开' },
             form.multi
-              ? h('textarea', { value: form.value, onChange: (e) => set({ value: e.target.value }) })
-              : h('input', { type: 'text', value: form.value, onChange: (e) => set({ value: e.target.value }) })),
+              ? h('textarea', { value: form.value ?? '', onChange: (e) => set({ value: e.target.value }), disabled: submitBlocked })
+              : h('input', { type: 'text', value: form.value ?? '', onChange: (e) => set({ value: e.target.value }), disabled: submitBlocked })),
           h('div', { className: 'cb-field' }, switchToggle({ checked: form.multi, onChange: (e) => set({ multi: e.target.checked }), label: '多值' })),
         ),
         error ? h('div', { className: 'cb-error' }, error) : null,
@@ -958,7 +975,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('button', { className: 'cb-button', onClick: onDone }, '取消'),
           h('div', { className: 'cb-spacer' }),
           switchToggle({ checked: form.enabled, onChange: (e) => set({ enabled: e.target.checked }), label: '启用' }),
-          h('button', { className: 'cb-button cb-button--primary', onClick: submit }, '保存')))
+          h('button', { className: 'cb-button cb-button--primary', onClick: submit, disabled: submitBlocked }, '保存')))
     }
 
     function ImportForm({ onDone, reload }) {

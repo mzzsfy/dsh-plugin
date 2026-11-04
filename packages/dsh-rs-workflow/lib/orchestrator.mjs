@@ -59,20 +59,24 @@ export function registerOrchestrator(ctx, config) {
     const configOf = () => normalizeConfig(loadJson('config.json', undefined))
 
     // 段 job:jobs.start 包装 runSegment;settle 负载进 output,经 tool-jobs 完成通知唤醒主循环。
-    // jobs.start 同步抛错(无控制器/owner 超上限/stale owner)时 run 已落盘而段未起,必须收敛为 failed,
-    // 否则本会话被未终态 run 永久阻塞(start 与页签 resume-from 均拒)
+    // runSegment 必须在 run 工厂内启动:宿主 jobs.start 在调用工厂前同步校验 owner/容量/控制器,
+    // 先启动后准入会让拒绝路径残留一个已开始的引擎循环;工厂内启动 = 拒绝即零执行。
+    // jobs.start 同步抛错时 run 已落盘而段未起,仍须收敛为 failed,否则本会话被未终态
+    // run 永久阻塞(start 与页签 resume-from 均拒)
     function startSegmentJob(agent, driver) {
-      const promise = driver.runSegment()
       return jobs.start({
         kind: SEGMENT_KIND,
         label: `若水编排段推进 ${driver.runId}`,
         outputLimitBytes: SETTLE_OUTPUT_LIMIT,
         // owner 必须是 agent id 字符串:宿主 jobs 按 session id 解析活体,传对象得 "[object Object]"
         owner: agentIdOf(agent),
-        run: () => ({
-          cancel: () => driver.cancel(),
-          done: promise.then((payload) => ({ status: 'completed', output: JSON.stringify(payload) })),
-        }),
+        run: () => {
+          const promise = driver.runSegment()
+          return {
+            cancel: () => driver.cancel(),
+            done: promise.then((payload) => ({ status: 'completed', output: JSON.stringify(payload) })),
+          }
+        },
       })
     }
     // 包装失败收敛:jobs.start 抛错 → run 收敛 failed + 注销驱动器,保持记录终态一致
@@ -88,15 +92,16 @@ export function registerOrchestrator(ctx, config) {
 
     // 断点续跑挂靠:board resume-from 经此回调在原会话重建种子 run(engine/parent 闭包自本域)
     function startSeedRun(agent, record, fromStepId, inputs) {
-      const templates = enabledTemplates()
-      const template = templates.find((t) => t.entry.id === record.templateId)
-      if (template === undefined) return { ok: false, error: `模板不存在或已禁用: ${record.templateId}` }
+      // 续跑锚定模板快照(F07):解释按启动时点闭包,当前模板编辑/禁用不影响历史 run;
+      // 无快照(旧版本落盘)拒绝续跑——无从保证解释一致
+      const snapshot = record.templateSnapshot
+      if (!snapshot?.template) return { ok: false, error: '运行记录无模板快照,无法续跑(旧版本记录)' }
       // 单活跃约束:种子 run 与 start 工具同守卫;主循环成为其推进者(activeRuns 注册,补拉/守卫生效)
       const current = currentRunId(agent)
       if (current !== undefined) return { ok: false, error: `本会话已有进行中的编排 ${current},不可续跑` }
       const seed = buildSeed(record, record.plan, fromStepId, inputs)
       const driver = startRun({
-        template: template.parsed, templateSet: templates.map((t) => t.parsed),
+        template: snapshot.template, templateSet: snapshot.templateSet ?? [snapshot.template],
         plan: record.plan, warnings: record.warnings ?? [],
         request: record.request, inputs: seed.inputs, state: seed,
         sessionId: agentIdOf(agent), workspace: agent.session?.header?.cwd ?? process.cwd(),
@@ -209,7 +214,11 @@ export function registerOrchestrator(ctx, config) {
           registerInitiator(agentIdOf(agent), (record, fromStepId, inputs) => startSeedRun(agent, record, fromStepId, inputs))
           ensureResumer(agent)
           // 先拉段后注册现役:jobs.start 抛错时 run 已收敛 failed,不占 activeRuns 阻塞本会话
-          startSegmentJobSafe(agent, driver)
+          try {
+            startSegmentJobSafe(agent, driver)
+          } catch (error) {
+            return { ok: false, error: `段任务启动失败:${error?.message ?? error}` }
+          }
           activeRuns.set(agentIdOf(agent), driver.runId)
           return { ok: true, runId: driver.runId, status: driver.state.status }
         },

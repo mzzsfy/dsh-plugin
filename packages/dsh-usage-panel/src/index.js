@@ -43,8 +43,9 @@ const MAX_ACCOUNTS = 20
 // 单轮轮询的受限并发:串行执行时单账号 20s 超时即可拖满整轮(pollInFlight 互斥
 // 使后续 tick 全部跳过,轮询事实停摆),并发上限同时压住上游瞬时压力
 const POLL_CONCURRENCY = 4
-// 数据目录支持 env 注入(测试隔离);缺省落 ~/.dsh/dsh-usage-panel
-const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR || join(homedir(), '.dsh', 'dsh-usage-panel')
+// 数据目录支持 env 注入(测试隔离);缺省从宿主 home 派生(DSH_HOME 即 .dsh 根,rs-workflow 同构)
+const DATA_DIR = process.env.DSH_USAGE_PANEL_DATA_DIR
+  || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-usage-panel')
 const DATA_FILE = join(DATA_DIR, 'accounts.json')
 const HISTORY_FILE = join(DATA_DIR, 'history.json')
 const BAK_SUFFIX = '.bak'
@@ -365,24 +366,29 @@ export function apply(ctx, configRef) {
     return resolvedNotifySettings(value && typeof value === 'object' ? value.notify : undefined)
   }
 
-  // 通知配置串行写链:读改写整体入链,任一失败不吞链(catch 后换行续链)
+  // 通知配置串行写链:读改写整体追加进链,合并读的总是前序写完成后的最新值;
+  // 任一失败不吞链(换行续链,失败只回报本次请求)
   let notifyConfigWriteChain = Promise.resolve()
 
   function persistNotifyPatch(patch) {
-    // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
-    const merged = { ...readNotifySettings(), ...patch }
-    // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
-    // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
-    // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
-    const settings = ctx.get('settings')
-    requireOk(settings !== undefined, 'settings 服务不可用')
-    if (typeof settings.register === 'function' && typeof settings.update === 'function') {
-      return settings.update(NAMESPACE, { notify: merged })
-    }
-    const editor = ctx.get('configEditor')
-    const entry = ctx.fiber?.entry
-    requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
-    return editor.edit(entry, (current) => ({ ...current, notify: merged }))
+    const run = notifyConfigWriteChain.then(async () => {
+      // 读出当前值做浅合并后整体写回,不依赖宿主写入的嵌套合并语义
+      const merged = { ...readNotifySettings(), ...patch }
+      // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+      // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+      // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
+      const settings = ctx.get('settings')
+      requireOk(settings !== undefined, 'settings 服务不可用')
+      if (typeof settings.register === 'function' && typeof settings.update === 'function') {
+        return settings.update(NAMESPACE, { notify: merged })
+      }
+      const editor = ctx.get('configEditor')
+      const entry = ctx.fiber?.entry
+      requireOk(editor && typeof editor.edit === 'function' && entry, 'configEditor 服务不可用')
+      return editor.edit(entry, (current) => ({ ...current, notify: merged }))
+    })
+    notifyConfigWriteChain = run.then(() => {}, () => {})
+    return run
   }
 
   function ensureHistory() {
@@ -393,8 +399,17 @@ export function apply(ctx, configRef) {
   }
 
   function persistHistory() {
-    return historyStore.persist()
+    return historyStore.persist().then(() => { bumpDataRevision() })
   }
+
+  // 数据修订号(F31):账号/历史任一持久化成功即自增;面板经 revision 路由
+  // 对账,读数落后即重拉——后台轮询写入不再让面板陈旧
+  let dataRevision = 0
+  function bumpDataRevision() {
+    dataRevision += 1
+    notifyChange()
+  }
+  const dataRevisionOf = () => dataRevision
 
   // 查询成功后落快照:按读数取样追加各序列,并重建当月月窗口序列。
   function recordSnapshots(account, reading, queriedAt) {
@@ -415,9 +430,19 @@ export function apply(ctx, configRef) {
     return backoff
   }
 
+  // 同账号单飞(F13):重复触发的查询共享同一在途 promise,不并发打上游
+  const inflightQueries = new Map()
+
   function runQuery(account) {
+    // 归属校验(F13):闭包持的是查询发起时的账号对象;完成时按当前 config
+    // 引用对账——账号已删除/替换则本结果为孤儿,丢弃不写不评估
+    const owned = () => config !== null && Array.isArray(config.accounts) && config.accounts.includes(account)
     const queriedAt = Date.now()
-    return queryAccount(account).then((result) => {
+    const inflight = inflightQueries.get(account.id)
+    if (inflight !== undefined) return inflight
+    const run = queryAccount(account).then((result) => {
+      inflightQueries.delete(account.id)
+      if (!owned()) return { ...result, ok: false, orphaned: true }
       const backoff = pollEntry(account)
       if (result.ok) {
         backoff.onSuccess()
@@ -429,7 +454,12 @@ export function apply(ctx, configRef) {
       }
       backoff.onFailure(Math.floor(queriedAt / 1000))
       return result
+    }).catch((error) => {
+      inflightQueries.delete(account.id)
+      throw error
     })
+    inflightQueries.set(account.id, run)
+    return run
   }
 
   // 刷新评估:越逻辑点事件入投影并经 webhook / dsh-im 投递;沿触发状态随账号落盘,
@@ -503,10 +533,13 @@ export function apply(ctx, configRef) {
 
   function persistConfig() {
     if (accountsBroken) return Promise.reject(new Error(ACCOUNTS_BROKEN_MESSAGE))
-    // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败)
+    // 写链毒化防护:链上失败不传播到后续写入(调用方 await 本次结果感知单次失败);
+    // 落盘成功即自增修订号并广播(F31):全部账号变更路径(增删改/启停/重排)
+    // 都经此口,面板订阅对账,单飞重拉账号与历史
     const result = writeChain.then(async () => {
       await mkdir(dirname(DATA_FILE), { recursive: true })
       await writeFile(DATA_FILE, JSON.stringify(config), 'utf8')
+      bumpDataRevision()
     })
     writeChain = result.catch(() => {})
     return result
@@ -653,6 +686,23 @@ export function apply(ctx, configRef) {
     }
   }, 'usage-panel notifications route')
 
+  // 数据修订号对账口(F31):面板轮询比对本值,落后即重拉账号与历史
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/usage-panel/revision',
+        handler: async (req, res) => {
+          if (req.method !== 'GET') {
+            sendJson(res, 405, { error: 'method not allowed' })
+            return
+          }
+          sendJson(res, 200, { revision: dataRevisionOf() })
+        },
+      }),
+    'usage-panel revision route',
+  )
+
   ctx.effect(
     () =>
       ctx.webServer.register({
@@ -667,11 +717,10 @@ export function apply(ctx, configRef) {
           const check = validateNotifyPatch(body)
           requireOk(check.ok, check.reason)
           // 读改写经串行链执行:重叠请求各自基于旧快照合并会互相覆盖
-          // (先写的 enabled 被后写基于旧 enabled=false 的合并抹掉),链式
-          // 追加保证任一写读取的总是前序写完成后的最新值;共享链以 catch
-          // 续接,单次失败只回报本次请求(抛错由 guardedRoute 统一转 400),
-          // 不阻断后续写
-          await notifyConfigWriteChain.then(() => persistNotifyPatch(check.patch))
+          // persistNotifyPatch 内部把读改写整体追加进共享写链:任一写读取的总是
+          // 前序写完成后的最新值;链以 catch 续接,单次失败只回报本次请求
+          // (抛错由 guardedRoute 统一转 400),不阻断后续写
+          await persistNotifyPatch(check.patch)
           sendJson(res, 200, { ok: true, notify: publicNotify(readNotifySettings()) })
         }),
       }),

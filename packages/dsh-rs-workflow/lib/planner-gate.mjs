@@ -62,9 +62,22 @@ function referencedSteps(step) {
   return refs
 }
 
-// 主入口:gate(plan, template, expected)
+// 子流程保底剧本:全序保留 + 依赖压缩(gate 保底路径同款,纯函数无 entry/enabled 门——
+// 子模板已被父模板路由选中,enabled 归 templates.json 存储层);deps 输出为可序列化对象
+export function fallbackScript(parsed) {
+  const { deps: depsOf } = templateDeps(parsed)
+  const kept = new Set()
+  const scriptSteps = parsed.steps.filter((s) => isObj(s) && typeof s.id === 'string').map((s) => ({ ref: s.id, note: '', done: '' }))
+  for (const s of scriptSteps) kept.add(s.ref)
+  const deps = {}
+  for (const s of scriptSteps) {
+    deps[s.ref] = dedup((depsOf.get(s.ref) ?? []).flatMap((d) => compressed(depsOf, d, kept))).filter((d) => d !== s.ref)
+  }
+  return { source: 'fallback', brief: '', steps: scriptSteps, deps }
+}
 // plan = orchestrator 组装后的 PLAN_SCHEMA(request/templateId/inputs 顶层注入;brief/steps 来自 plan 工具参数)
 // 显式 plan = plan 工具参数含 steps/brief 任一字段;plan 缺省(或空对象)→ 保底全序
+// 主入口:gate(plan, template, expected)
 export function gate(plan, template, expected) {
   const explicit = plan != null && (plan.steps !== undefined || plan.brief !== undefined)
   const stepsIn = explicit && Array.isArray(plan.steps) ? plan.steps : []
