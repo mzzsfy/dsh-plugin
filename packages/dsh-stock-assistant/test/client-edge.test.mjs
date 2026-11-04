@@ -77,7 +77,7 @@ test('设置页递进区块与实例可观测面渲染', async () => {
   const { plugin } = await loadClientWithReact()
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
   const suggested = { providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }
-  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} }, endpoints: { kline: 'https://proxy.corp/em/kline' } }], routes: [] }, quotes: { [item.id]: { last: '1392.05', previousClose: '1376.95', receivedAt: 1, quoteAt: null, delayKind: 'unknown' } }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline'], credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'kline', label: 'K线历史' }, { key: 'quotes', label: '行情批量' }] }], providerStatus: [{ id: 'em-default', credentialPresent: true, proxy: false, endpointsCovered: 1, recentRequests: [{ at: 1000, url: 'quotes eastmoney', status: 'ok', ms: 120 }] }], catalogs: [], routeSelections: {}, klineReady: {}, suggested, vendorAvailable: true } }
+  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: null }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, routes: [{ id: 'xhkg-catalog', capability: 'catalog', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }, { id: 'xnas-catalog', capability: 'catalog', market: 'XNAS', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }, { id: 'xnys-catalog', capability: 'catalog', market: 'XNYS', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }, { id: 'xshg-catalog', capability: 'catalog', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }], providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} }, endpoints: { kline: 'https://proxy.corp/em/kline' } }], routes: [] }, quotes: { [item.id]: { last: '1392.05', previousClose: '1376.95', receivedAt: 1, quoteAt: null, delayKind: 'unknown' } }, adapters: [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline'], credential: 'none', description: '东方财富公开接口：免凭据，八市场行情/K线/搜索/目录，非官方无SLA', endpointKeys: [{ key: 'kline', label: 'K线历史' }, { key: 'quotes', label: '行情批量' }] }], providerStatus: [{ id: 'em-default', credentialPresent: true, proxy: false, endpointsCovered: 1, recentRequests: [{ at: 1000, url: 'quotes eastmoney', status: 'ok', ms: 120 }] }], catalogs: [], routeSelections: {}, klineReady: {}, suggested, vendorAvailable: true } }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /数据源/, '区块1标题')
@@ -313,10 +313,11 @@ test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
 // 可用性三连: 浏览全市场/搜索不逼同步/保存钮提示
 test('审查R2: 浏览市场随实例能力+保存钮检查提示', async () => {
   const { plugin } = await loadClientWithReact()
-  const state = { view: { view: 'browse', browseMarket: 'XSHG', browseRows: [], browseTotal: 0, browseOffset: 0, sort: 'manual', alias: '', browsePeek: {} }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }] }, quotes: {}, adapters: [{ id: 'eastmoney', adapterId: 'eastmoney', label: 'em', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const state = { view: { view: 'browse', browseMarket: 'XSHG', browseRows: [], browseTotal: 0, browseOffset: 0, sort: 'manual', alias: '', browsePeek: {} }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: {}, routes: [{ id: 'xhkg-catalog', capability: 'catalog', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }, { id: 'xnas-catalog', capability: 'catalog', market: 'XNAS', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }, { id: 'xnys-catalog', capability: 'catalog', market: 'XNYS', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }, { id: 'xshg-catalog', capability: 'catalog', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }], providers: [{ id: 'em-default', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }] }, quotes: {}, adapters: [{ id: 'eastmoney', adapterId: 'eastmoney', label: 'em', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], credential: 'none' }], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const rt = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadBrowse: () => Promise.resolve({ items: [], total: 0 }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
-  for (const label of ['港股', '纳斯达克', '纽交所', '日本', '英国']) assert.ok(html.includes(label), `浏览按钮含 ${label}`)
+  for (const label of ['港股', '纳斯达克', '纽交所']) assert.ok(html.includes(label), `浏览按钮含 ${label}`)
+  for (const label of ['日本', '英国']) assert.ok(!html.includes(label), `无目录路由不亮: ${label}`)
   // 设置页: 启用实例未检查时保存钮灰且带提示
   const settings = { ...state, view: { view: 'list', overlay: 'settings', sort: 'manual', alias: '', settingsDraft: { providers: [{ id: 'p1', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [], checkIds: [], checkResults: [], colorMode: 'red-up', klineAutoLoad: true, tab: 'routes' } } }
   const sHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => settings, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: { providerCheck: () => {} } }))
@@ -352,6 +353,24 @@ test('设置R: 三段Tab布局与分域保存', async () => {
   const pHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => prefState, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }), refresh: () => Promise.resolve({}), preferences: () => Promise.resolve({ ok: true }) }, layout: { providerCheck: () => {} } }))
   assert.match(pHtml, /刷新间隔/, '③内容渲染')
   assert.ok(!pHtml.includes('保存显示偏好'), '③无保存钮(即改即存)')
+})
+// 一键全能力自举: 按适配器 markets×capabilities 补全缺失路由(含K线/目录/搜索)
+test('bootstrap: 全能力路由补全', async () => {
+  const { bootstrapRoutes } = await import('../src/route-bootstrap.mjs')
+  const adapters = [{ adapterId: 'eastmoney', capabilities: ['quotes', 'kline', 'search', 'catalog'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'] }]
+  const providers = [{ id: 'em-default', adapterId: 'eastmoney', enabled: true }]
+  const existing = [{ id: 'xshg-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
+  const routes = bootstrapRoutes({ adapters, providers, routes: existing })
+  assert.equal(routes.length, 20, '5市场×4能力全补齐')
+  for (const cap of ['quotes', 'kline', 'catalog', 'search']) for (const m of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']) assert.ok(routes.some(r => r.market === m && r.capability === cap), `${m}/${cap} 存在`)
+  assert.equal(routes.find(r => r.market === 'XHKG' && r.capability === 'kline').primaryInstanceId, 'em-default', '主源=启用实例')
+  // 多实例: quotes 主源跟随既有 quotes 路由的实例选择
+  const adapters2 = [...adapters, { adapterId: 'sina', capabilities: ['quotes', 'catalog'], markets: ['XSHG', 'XSHE'] }]
+  const providers2 = [...providers, { id: 'sn-catalog', adapterId: 'sina', enabled: true }]
+  const routes2 = bootstrapRoutes({ adapters: adapters2, providers: providers2, routes: existing })
+  assert.equal(routes2.find(r => r.market === 'XSHG' && r.capability === 'catalog').primaryInstanceId, 'sn-catalog', '目录优先专属适配器(唯一支持者)')
+  // 无启用实例: 返回原样不炸
+  assert.equal(bootstrapRoutes({ adapters, providers: [{ id: 'x', adapterId: 'eastmoney', enabled: false }], routes: existing }).length, 1)
 })
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
@@ -443,7 +462,7 @@ test('K7 NO_ROUTE 错误条渲染一键开启按钮', async () => {
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
   assert.match(html, /未配置该市场的数据来源/)
-  assert.match(html, /一键开启K线/)
+  assert.match(html, /一键开启</, '一键开启按钮')
 })
 
 test('K8 非瞬时码首拍即拒不重试', async () => {
@@ -497,7 +516,7 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: { providers: saved.providers, routes: saved.routes, checkIds: ['seed'], checkResults: [], tab: 'routes' }, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '检查全部能力', '放弃草稿', '一键为已启用市场配置K线', '目录与日历']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
+  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '检查全部能力', '放弃草稿', '一键启用全部能力', '目录与日历']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
   // 启用banner仅在无实例时出现(默认配置自带双实例, 不含该banner为正确行为)
   assert.ok(!html.includes('启用默认数据源'))
   // 8市场 fieldset 全渲染(K线行存在)
