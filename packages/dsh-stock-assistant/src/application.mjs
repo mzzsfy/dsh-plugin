@@ -36,7 +36,8 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
   let ensuring = null, lastEnsure = -Infinity, ensureError = null
   const ensureCaches = () => {
-    if (ensuring || now() - lastEnsure < 60 * 1000) return
+    // 面板活跃(demand)时让路: 目录后台同步占满并发槽会拖死交互请求(浏览504实测), 仅在面板空闲时补目录
+    if (ensuring || now() - lastEnsure < 60 * 1000 || demand.active()) return
     lastEnsure = now()
     ensuring = catalog.ensure().catch(e => { ensureError = { message: e.message, at: now() }; changed() }).finally(() => { ensuring = null; collector?.reconcile() })
   }
@@ -163,15 +164,16 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       // 市场概览: 代表指数不入目录/自选, 走 quotes 管道直拉; 失败静默为 null 不阻断目录浏览
       const INDEX = { XSHG: { id: 'XSHG:index:000001', exchange: 'XSHG', code: '000001', name: '上证指数' }, XSHE: { id: 'XSHE:index:399001', exchange: 'XSHE', code: '399001', name: '深证成指' }, XHKG: { id: 'XHKG:index:HSI', exchange: 'XHKG', code: 'HSI', name: '恒生指数' }, XNAS: { id: 'XNAS:index:NDX', exchange: 'XNAS', code: 'NDX', name: '纳斯达克100' }, XNYS: { id: 'XNYS:index:DJI', exchange: 'XNYS', code: 'DJI', name: '道琼斯' }, XJPX: { id: 'XJPX:index:N225', exchange: 'XJPX', code: 'N225', name: '日经225' }, XKRX: { id: 'XKRX:index:KOSPI', exchange: 'XKRX', code: 'KOSPI', name: '韩国综指' }, XLON: { id: 'XLON:index:FTSE', exchange: 'XLON', code: 'FTSE', name: '富时100' } }
       const index = INDEX[input.market]
-      const route = router.select('quotes', input.market)
+      // 概览指数是装饰性数据: 无路由或拉取失败(含5s短超时不与目录翻页争槽)都静默为 null, 不阻断目录浏览
       let overview = null
-      if (route.instance) {
-        try {
-          const result = await executor.run(route.instance, 'quotes', { securities: [{ id: index.id, exchange: index.exchange, code: index.code }], routingRevision: state.get().routingRevision }, { signal: new AbortController().signal })
+      try {
+        const route = router.select('quotes', input.market)
+        if (route.instance) {
+          const result = await executor.run(route.instance, 'quotes', { securities: [{ id: index.id, exchange: index.exchange, code: index.code }], routingRevision: state.get().routingRevision }, { signal: AbortSignal.timeout(5 * 1000) })
           const quote = result.items?.find(q => q.securityId === index.id)
           if (quote && quote.last !== null) { deriveDelay(quote, now); overview = { name: index.name, last: quote.last, change: quote.change, changePct: quote.changePct, quoteAt: quote.quoteAt, delayKind: quote.delayKind, delaySeconds: quote.delaySeconds, source: quote.providerInstanceId } }
-        } catch {}
-      }
+        }
+      } catch {}
       return { ...await catalog.browse(input), overview, catalogs: catalog.status(), routingRevision: state.get().routingRevision }
     },
     async sync(input) {

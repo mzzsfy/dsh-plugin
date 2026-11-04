@@ -38,8 +38,11 @@ export function createCatalog({ state, getControl = state.get, router, executor,
   return {
     search,
     async browse({ market, offset, limit }) {
-      // 未就绪指无有效缓存记录;同步后为空是合法状态。
-      if (!records('catalog').some(c => c.payload.market === market)) fail('CATALOG_NOT_READY', '目录未就绪，请先在设置中同步目录', 422)
+      // 缓存缺失不再报错甩给用户: 返回 syncing 态并触发后台同步(sync 内部 flights 去重), 同步后为空是合法状态
+      if (!records('catalog').some(c => c.payload.market === market)) {
+        this.sync(market, ['catalog']).catch(() => {})
+        return { syncing: true, total: 0, items: [] }
+      }
       const securities = all().filter(s => s.exchange === market).sort((a, b) => a.code.localeCompare(b.code))
       const start = Math.max(0, Math.trunc(Number(offset) || 0)), size = Math.min(200, Math.max(1, Math.trunc(Number(limit) || 50)))
       return { total: securities.length, items: securities.slice(start, start + size) }
