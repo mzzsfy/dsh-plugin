@@ -198,22 +198,16 @@ function publishOne(dirName, opts) {
   if (!name) fail(`${dirName} 的 package.json 缺少 name 字段`)
   let version = manifest.version
   if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`${name} 版本号 ${version} 不是 x.y.z 形式,不支持`)
+  let pendingBump = null
 
   const online = onlineVersion(name)
   if (online !== null) {
     const order = compareSemver(version, online)
     if (order === null) fail(`无法比较版本 ${version} 与线上 ${online}(prerelease 或非法格式不受支持),中止`)
     if (order === 0 && opts.bump) {
-      if (opts.dryRun) {
-        console.log(`本地 ${version} 与线上相同,将按 ${opts.bump} 升级(预期 ${nextVersion(version, opts.bump)})`)
-        version = nextVersion(version, opts.bump)
-      } else {
-        console.log(`本地 ${version} 与线上相同,按 ${opts.bump} 升级`)
-        const r = runNpm(['version', opts.bump, '--no-git-tag-version'], pkgDir)
-        if (r.status !== 0) fail(`npm version 失败:\n${r.stderr}`)
-        version = r.stdout.trim().replace(/^v/, '')
-        if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`npm version 输出异常: ${version}`)
-      }
+      version = nextVersion(version, opts.bump)
+      pendingBump = opts.bump
+      console.log(`本地与线上相同,按 ${opts.bump} 升级(版本号写入延迟到洁净门与测试之后)`)
     } else if (order === 0) {
       const tag = tagFor(name, version)
       // 缺 tag 不自愈:tag 是发布源码身份声明,registry tarball 与哪个提交对应未证时
@@ -270,6 +264,14 @@ function publishOne(dirName, opts) {
     console.log('SKIP  测试(包未定义 test script)')
   }
 
+  // 版本号写入延迟到洁净门与测试之后:--bump 若在洁净门前执行,manifest 改动
+  // 会立即弄脏发布范围导致洁净门自拒(顺序回归);此时测试对象与线上版本同源
+  if (pendingBump) {
+    const r = runNpm(['version', pendingBump, '--no-git-tag-version'], pkgDir)
+    if (r.status !== 0) fail(`npm version 失败:\n${r.stderr}`)
+    version = r.stdout.trim().replace(/^v/, '')
+    if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`npm version 输出异常: ${version}`)
+  }
   // 版本号变更入库后 tag 才指向该版本的完整源码状态,tag 后无提交的判定才能成立;
   // manifest 无变更(如首发时版本已提交)则跳过。提交失败不继续发布,仅提示手动收尾
   const manifestDirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}/package.json`], { cwd: repoRoot, encoding: 'utf8' })
