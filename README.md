@@ -31,6 +31,7 @@ dsh-plugin/
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本贴图;插件面板可声明自己的图标;取图链 声明→内置→关键词→哈希 | DSH 纯前端插件(DOM 观察) |
 | @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host:泛域名等无法枚举的入口免改启动命令即可达,监听绑定归部署层,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由把 Host 头实时注册进 `connection.trustedHosts`(0.2.0 线 `webRuntime` 镜像);容量 maxHosts 默认 100 按 LRU 淘汰,注册/淘汰 console 直出可作入口审计 | DSH host 端插件(bundle patch + 路由包装) |
 | @mzzsfy/dsh-shared-terminal | 共享交互式终端:AI `terminal` 单工具(open/list/read/write/wait/close)与 DSH 官方 Sidebar xterm 共用 Session terminal,用户可输入并查看当前屏幕 | 通过 DSH 官方 terminalController 管理终端;read 走私有 owner lookup 与 xterm active viewport;0.2.1-rc.2 起写入改自持 attach 泵(用户可随时接管) | DSH 双端插件(官方 terminal controller + Session result renderer) |
+| @mzzsfy/dsh-stock-assistant | 股票单页面工具：沪深A股自选、搜索、基础行情、别名/置顶/排序、数据源与路由设置；页面状态不随会话切换销毁 | 根作用域 main + 左导航入口；Provider按市场/能力路由，报价同源归一；专用 stock_assistant 数据域保存自选/配置/缓存，不使用默认 settings；通知复用公共WS | DSH 双端插件(storage 域 + web 路由 + 全局工具页) |
 | @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话,可指定模型) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾;支持内联时区后缀 `T±N`;pinned 会话任务忙时自动跳过;会话任务经 sessionController 投递,投递即终态 | DSH 双端插件(web 路由 + settings 槽位) |
 | @mzzsfy/dsh-common-tools | 公共依赖库:按插件空间隔离的 WebSocket 订阅/推送总线与 toast,两端 `setupCommonTools(ctx)` 自动绑定当前插件 | 插件就是通道,subscribe/publish 共享单条页面 WS;host 提供 presence,client 提供 toast;经 session-manager 占位条目装载 | 普通 npm 依赖非插件,插件管理不可见 |
 | @mzzsfy/dsh-context-manager | 对话增强:历史输入浮层(`Alt+↑` 唤起,四范围导航与即时搜索,常用提示词收藏)、插话撤回、对话分叉(重写式 fork,原输入回填供编辑重发)、标题栏复制 sessionId、克隆仓库打开工作区 | Host 聚合工作区历史缓存(`~/.dsh/historyPrompt/`)经 `/api/context/*` 供浮层查询;分叉走宿主 sessions 服务面 fork+open;克隆注入官方浏览目录弹窗 | DSH 双端插件(host 路由 + client 注入) |
@@ -38,6 +39,13 @@ dsh-plugin/
 | @mzzsfy/dsh-shell-select | Windows shell 接管:替换默认 pwsh 工具为可配置多客户端 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择);命令 deny 黑名单,接管失败自动回退官方 pwsh 链 | 工具接管 + 配置校验管线(volatile ref 解箱 + 执行面 strict);bash 候选多锚位探测;web 行提供设置页与 POSIX 形态声明 | DSH host 端插件(工具接管 + 设置页) |
 | @mzzsfy/dsh-tool-gate | 全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 标交宿主 deferred tool loading(API 服务端按需搜索激活);第三方路由降级折叠为占位 + `tool_search` 检索 | 声明式收敛(白名单为唯一事实源),行退场按 undo journal 还原原状;设置卡 GUI 配置 | DSH host 端插件(工具收敛 + 设置卡) |
 | @mzzsfy/dsh-tunnel | 路径穿透隧道:在 dsh 宿主进程内把本地 TCP 端口反向代理出去(`/p/<name>` 子路径或 `<name>.*` 子域名),ai 经 `tunnel_open`/`tunnel_list`/`tunnel_close` 三工具自管 | 进程内反代,不引入 nginx/caddy 等外部反代;HTTP 前缀 strip 转发 + 声明式 WS upgrade,子域名全路径透传;REST + GUI 看板 + 设置卡,持久化随 `DSH_HOME` | DSH 双端插件(web 路由 + client 看板) |
+
+## 商店展示
+
+插件在 DSH 商店(设置 → Plugins → Discover)的图片分两层:
+
+- **48px 图标**(列表卡片):图标资产 `assets/icons/*.svg`(Discover 索引内联形态)与 `assets/icons/png/`(上游 icon 光栅形态,180px)由 `scripts/generate-icons.mjs` 从 nav-icons glyph 生成,与设置页图标同一视觉语言。官方目录(awesome-dsh-plugin)当前全部条目无图标且其索引生成器不透传 icon 字段,随上游 PR 补齐。
+- **详情页效果截图**:仓库 `assets/screenshots/<包名>/` 收录各插件真实界面截图,随上游收录与截图 PR 提交,展示于 awesome-dsh-plugin.com 与 dshmarket 详情页(官方 Discover 详情不承载截图字段)。上游采用方式:awesome-dsh-plugin 仓库的 `build-site.mjs` 按作者仓库根 `screenshots.json` 登记的 GitHub 直链取图,截图 PR 需同时提交本目录图片与该登记文件(收录条目草稿在任务工作区,随 PR 一并提交)。
 
 ## 安装与更新:缩短 pnpm 宽限期
 

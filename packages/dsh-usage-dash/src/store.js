@@ -37,6 +37,7 @@ const TABLE_BUCKETS = 'buckets'
 const MISSING_RECORD_PATTERN = /no record .* to update/
 const MINUTE_KEY_PREFIX = `${GRANULARITY_MINUTE}|`
 const HOUR_KEY_PREFIX = `${GRANULARITY_HOURLY}|`
+const DAILY_KEY_PREFIX = `${GRANULARITY_DAILY}|`
 
 // 保留值归一:非法回落默认,超出上限截到上限;0(禁用)合法保留
 export function clampMinuteRetentionDays(days) {
@@ -69,6 +70,16 @@ export const GRANULARITIES = [
   [GRANULARITY_HOURLY, hourKey],
   [GRANULARITY_MINUTE, minuteKey],
 ]
+
+// 档保留资格(F14):样本桶 ≥ 该档 cutoff 即可写入。日档无上限恒写;
+// 小时档固定留存;分钟档走可配置天数(0 = 分钟档关闭,一律不写)
+function withinRetention(g, bucket, nowMs, minuteRetentionDays) {
+  if (g === GRANULARITY_DAILY) return true
+  if (g === GRANULARITY_HOURLY) return bucket >= hourKey(nowMs - HOUR_RETENTION_DAYS * DAY_MS)
+  const retention = clampMinuteRetentionDays(minuteRetentionDays)
+  if (retention === 0) return false
+  return bucket >= minuteKey(nowMs - retention * DAY_MS)
+}
 
 // vendor 段推导与定价匹配同源:首个 / 前段,无 / 或首位斜杠归 default
 export function providerOf(modelRef) {
@@ -259,7 +270,9 @@ export class UsageStore {
     return this.readCursor() ?? {}
   }
 
-  // 同步合并进 pending,不等待持久化;崩溃丢失窗口 = flush 周期
+  // 同步合并进 pending,不等待持久化;崩溃丢失窗口 = flush 周期。
+  // 入队按档保留资格过滤(F14):超出该档留存期的样本不写入——
+  // 写后即被 prune 删除是纯 IO 浪费;回扫历史导入经同一通道自动受控
   async record(sample) {
     await this.ready
     this.requireTable()
@@ -268,6 +281,7 @@ export class UsageStore {
     const provider = sample.turn ? PROVIDER_UNSET : providerOf(model)
     const delta = deltaOf(sample, nowMs)
     for (const [g, bucketOf] of GRANULARITIES) {
+      if (!withinRetention(g, bucketOf(sample.time), nowMs, this.retentionDays())) continue
       const bucket = bucketOf(sample.time)
       const entry = { ...delta, bucket, provider, model }
       const existing = this.pending.get(rowKey(g, bucket, provider, model))
@@ -310,6 +324,9 @@ export class UsageStore {
       if (outcome.status !== 'rejected') return []
       const key = [...batch.keys()][index]
       const [entryKey, entry] = [key, batch.get(key)]
+      // 重排前复核保留资格(F14):失败重试期间样本可能已滑出留存期,不再重排
+      const g = key.startsWith(DAILY_KEY_PREFIX) ? GRANULARITY_DAILY : key.startsWith(HOUR_KEY_PREFIX) ? GRANULARITY_HOURLY : GRANULARITY_MINUTE
+      if (!withinRetention(g, entry.bucket, this.now(), this.retentionDays())) return []
       const existing = this.pending.get(entryKey)
       this.pending.set(entryKey, existing ? addDelta(existing, entry) : entry)
       return [outcome.reason]

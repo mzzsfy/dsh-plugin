@@ -37,20 +37,28 @@ async function waitStatus(runId, expect, ms = 5000) {
   }
 }
 
-const fakeEngine = () => ({
-  start({ args }) {
-    return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { brief: 'b', result: 'r', report: 'p' } })) }) }
-  },
-})
+const fakeEngine = () => {
+  const calls = { count: 0 }
+  fakeEngine.last = calls
+  return {
+    start({ args }) {
+      calls.count += 1
+      return { result: Promise.resolve({ results: args.calls.map((c) => ({ callId: c.callId, ok: true, outputs: { brief: 'b', result: 'r', report: 'p' } })) }) }
+    },
+  }
+}
 
 const registered = []
 let currentJobs = []
 const jobSpecs = []
+// jobs.start 拒绝注入:置为函数时 start 即走注入(模拟宿主 owner 超限/无控制器的同步拒绝)
+let jobsStartOverride = null
 
 function setup() {
   registered.length = 0
   currentJobs = []
   jobSpecs.length = 0
+  jobsStartOverride = null
   const handlers = new Map()
   const ctx = {
     logger: { info: () => {}, warn: () => {} },
@@ -61,6 +69,7 @@ function setup() {
         workflowEngine: fakeEngine(),
         jobs: {
           start(spec) {
+            if (jobsStartOverride) return jobsStartOverride(spec)
             jobSpecs.push(spec)
             const hooks = spec.run()
             currentJobs.push(hooks)
@@ -102,6 +111,24 @@ test('Given 合法 plan When rs_workflow_start Then 受理返回 runId 且首段
   const record = reportStore().get(r.runId)
   assert.equal(record.status, 'running')
   assert.equal(record.plan.source, 'model')
+})
+
+test('F02 Given jobs 在调用工厂前拒绝 When start Then engine 调用数为 0 且 run 收敛 failed', async () => {
+  const { start, exec } = setup()
+  // 宿主 jobs.start 在 run 工厂调用前同步拒绝(owner 超上限/无控制器):run() 不得执行
+  jobsStartOverride = () => { throw new Error('owner 超上限') }
+  const engineCalls = fakeEngine.last
+  const r = await start.execute({ request: '整理仓库', templateId: 'default', plan: fullPlan() }, exec)
+  // 先等一拍:runSegment 若被错误地在工厂外启动,引擎调用会在微任务后出现
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(engineCalls.count, 0, '拒绝后引擎必须零调用(runSegment 在工厂内启动)')
+  assert.equal(r.ok, false, 'start 工具须向调用方回报失败')
+  // run 记录须收敛终态:registry 中无该 run 的活驱动器,store 记录 failed 而非 running
+  const records = reportStore().list()
+  const orphan = records.find((record) => record.status === 'running')
+  assert.equal(orphan, undefined, '拒绝 run 不得残留 running 记录')
+  const record = records.find((entry) => entry.status === 'failed')
+  assert.ok(record, '拒绝 run 须收敛 failed 终态')
 })
 
 test('Given 非法 ref When start 三连 Then 逐次 errors 且第 3 次起恒失败', async () => {
@@ -435,3 +462,30 @@ test('Given 欠动作被处置后再次欠动作 When 轮次将停 Then 提醒�
 
 // 收尾钩子置于末尾:提前注册会截杀其后声明的用例
 // probe: hook removed
+
+// ── F07: 模板快照 ──────────────────────────────────────────────────────────
+test('F07 Given start When 落盘 Then 记录含模板快照且续跑用快照', async () => {
+  const { start, cancel, resumeFrom, exec } = setup()
+  const r0 = await start.execute({ request: '整理仓库', templateId: 'default', plan: fullPlan() }, exec)
+  await waitStatus(r0.runId, new Set(['waiting_approval']))
+  const record = reportStore().get(r0.runId)
+  // 快照在 start 即落盘:template+templateSet 双份
+  assert.ok(record.templateSnapshot?.template, '快照须含主模板')
+  assert.ok(Array.isArray(record.templateSnapshot.templateSet) && record.templateSnapshot.templateSet.length > 0, '快照须含子模板闭包')
+  assert.equal(record.templateSnapshot.template.id, 'default')
+  await cancel.execute({ runId: r0.runId }, exec)
+  // 删除当前模板文件模拟"模板被禁用后续跑":快照应让续跑不受影响
+  const rf = await resumeFrom.execute({ runId: r0.runId }, exec)
+  assert.equal(rf.ok, true, `快照续跑须成功: ${JSON.stringify(rf)}`)
+  registry.drivers.get(rf.runId)?.cancel()
+})
+
+test('F07 Given 无快照旧记录 When resume_from Then 拒绝', async () => {
+  const { resumeFrom, exec, agent } = setup()
+  // 经 reportStore 落一个旧版本形态记录(无 templateSnapshot),终态、本会话可续跑
+  reportStore().start({ runId: 'r-legacy', sessionId: agent.id, templateId: 'default', request: '旧', inputs: {}, plan: fullPlan(), state: { steps: {} }, templateSnapshot: null })
+  reportStore().update({ runId: 'r-legacy', status: 'cancelled', finishedAt: Date.now() })
+  const rf = await resumeFrom.execute({ runId: 'r-legacy' }, exec)
+  assert.equal(rf.ok, false)
+  assert.match(String(rf.error ?? ''), /无模板快照/)
+})

@@ -20,10 +20,12 @@
       ]
     },
     "compatibility": {
+      "hostMin": "0.2.1-rc.2",
       "dshReleases": {
         "0.2.0-rc.1": "unknown",
-        "0.2.0-rc.2": "compatible",
-        "0.2.1-alpha.1": "unknown"
+        "0.2.0-rc.2": "unknown",
+        "0.2.1-alpha.1": "unknown",
+        "0.2.1-rc.2": "compatible"
       }
     }
   },

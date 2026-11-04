@@ -462,20 +462,31 @@ function HistoryDock({ session, inputActions }) {
   // 数据可能晚于首次响应到达,一次性重拉预算耗尽后迟到的数据将永不出现
   // (实机验证实测:API 已就绪而浮层停在旧列表)。轮询开销为毫秒级缓存读;
   // 请求失败(含超时)也保持轮询,host 恢复后列表自愈,不假死
+  // 代际令牌(F21):浮层每次打开新开一代,旧代的定时链/迟到响应全部失效——
+  // 修复"关闭再重开后旧代 timeout 复活叠加轮询链"
+  let scopeGeneration = 0
+
   function requestScope(scopeIdx) {
+    const generation = scopeGeneration
     const scope = HISTORY_SCOPES[scopeIdx]
     const scheduleNext = () => {
+      if (generation !== scopeGeneration) return
       if (!viewRef.current.open || viewRef.current.scopeIndex !== scopeIdx) return
       setTimeout(() => {
+        if (generation !== scopeGeneration) return
         if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
       }, HISTORY_REPULL_MS)
     }
     fetchInputs(scope)
       .then((result) => {
+        if (generation !== scopeGeneration) return
         applyResult(scopeIdx, result)
+        // 成功即清错误态(F21):此前 loadError 只在打开时清,失败后成功永不恢复
+        setLoadError(false)
         scheduleNext()
       })
       .catch((error) => {
+        if (generation !== scopeGeneration) return
         if (viewRef.current.scopeIndex !== scopeIdx) return
         rawItemsRef.current = []
         syncView({ items: [] })
@@ -493,6 +504,7 @@ function HistoryDock({ session, inputActions }) {
   }
 
   function openPopup() {
+    scopeGeneration += 1
     rawItemsRef.current = null
     queryRef.current = ''
     setQuery('')
@@ -1474,8 +1486,9 @@ function findBrowseDialog(doc) {
 }
 
 // 弹窗 footer 定位:面包屑向上走到卡片直子(editorScope),其末子 div 即
-// footerBar;打开按钮=末个 button,取消按钮=其前一个兄弟 button。
-// 结构不符返回 null(官方改版时整体静默跳过,干净禁用)
+// footerBar;打开按钮=末个 button,取消按钮=其前一个兄弟 button——自家克隆
+// 按钮(带标记)也插在该位置,解析时跳过,否则收起弹窗会误点自家按钮变成
+// 再次弹窗。结构不符返回 null(官方改版时整体静默跳过,干净禁用)
 function findBrowseFooter(card) {
   let scope = card.querySelector('[role="navigation"]')
   if (!scope) return null
@@ -1485,9 +1498,31 @@ function findBrowseFooter(card) {
   if (!footer || !footer.querySelectorAll || footer.querySelectorAll('button').length < 3) return null
   const openButton = footer.querySelector('button:last-of-type')
   if (!openButton) return null
-  const previous = openButton.previousElementSibling
+  let previous = openButton.previousElementSibling
+  while (previous && (previous.tagName !== 'BUTTON' || previous.hasAttribute(CLONE_BTN_FLAG))) {
+    previous = previous.previousElementSibling
+  }
   const cancelButton = previous && previous.tagName === 'BUTTON' ? previous : null
   return { footer, openButton, cancelButton }
+}
+
+// 收起官方浏览目录弹窗:优先点官方取消按钮;结构漂移(footer 定位失败)派发
+// document 级 Escape 兜底——官方 Modal 在 document 监听,合成 Escape 必然收起
+// (证据同 readBrowseCurrentPath);克隆弹窗打开期 busy 态放行该事件,不受自家
+// 捕获拦截。弹窗不在场零动作
+function dismissBrowseDialog(doc) {
+  const card = findBrowseDialog(doc)
+  if (!card) return
+  const footerParts = findBrowseFooter(card)
+  if (footerParts && footerParts.cancelButton) {
+    footerParts.cancelButton.click()
+    return
+  }
+  try {
+    doc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  } catch {
+    // KeyboardEvent 缺失的极端环境,兜底失效可接受(cancel 主路径已覆盖)
+  }
 }
 
 // 幂等注入:未注入时克隆取消按钮类名(outline 形态)创建,置于打开按钮之前;
@@ -1572,6 +1607,42 @@ function writeMemory(key, value) {
   } catch {
     // 隐私模式等存储不可用场景,记忆缺失仅影响下次预填
   }
+}
+
+// 登记新工作区并落入空会话;workspaces.create 的 client 代理直返视图
+// ({workspaceId,...};{workspace,created} 形态只存在于宿主 RPC 层)。
+// deps 注入:workspaces/uiWorkspace/toast(装配点传真身,测试传桩)
+async function openCloneWorkspace(targetPath, deps) {
+  const view = await deps.workspaces.create({ path: targetPath })
+  const workspaceId = view && view.workspaceId
+  if (workspaceId && deps.uiWorkspace && typeof deps.uiWorkspace.startSession === 'function') {
+    deps.uiWorkspace.startSession(workspaceId)
+    deps.toast('已克隆并打开工作区')
+    return
+  }
+  deps.toast('已克隆到 ' + targetPath + ',但无法自动打开,请手动打开工作区', { kind: 'error', sticky: true })
+}
+
+// 提交克隆:克隆请求(resolve 即克隆成功)后先收起浏览弹窗、resolve 让克隆
+// 弹窗立即关闭,登记工作区 fire-and-forget——弹窗关闭不依赖登记链,create
+// 迟滞/挂起/失败均不阻塞关闭,失败经 toast 通报(上屏证据,注释按规则不记文案)
+async function submitClone(payload, deps) {
+  // 克隆耗时以分钟计,不走带 8s 超时的 api()
+  const response = await deps.fetch(CLONE_API_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(result && result.error ? result.error : 'HTTP ' + response.status)
+  const targetPath = result && result.path
+  if (typeof targetPath !== 'string' || targetPath === '') throw new Error('克隆完成但未返回路径')
+  // 收起浏览弹窗(读取路径路径已收起,此处兜底读取失败仍开着的场景):
+  // 登记工作区与浏览弹层互不叠影,收起失败不影响登记
+  dismissBrowseDialog(deps.doc)
+  void openCloneWorkspace(targetPath, deps).catch((error) => {
+    deps.toast('已克隆,但打开工作区失败: ' + String(error && error.message || error), { kind: 'error', sticky: true })
+  })
 }
 
 // 克隆弹窗(纯 DOM,无 ReactDOM 依赖):收集仓库地址/目标目录全路径/浅克隆
@@ -1793,6 +1864,8 @@ function setupCloneInjection(doc, { enabledRef, onOpen }) {
     return removedAny
   }
   const ensureHeader = (now) => {
+    // 停用即不注入(F24):enabled 只挡浏览弹窗曾让 header/点击/footer 照跑
+    if (enabledRef.current === false) { removeAllHeader(); return false }
     // 探测到登录闸门(headerAllowed=false)后保持官方 3 按钮布局:按钮已物理
     // 移除,基座重渲染也不会再注入
     if (!headerAllowed) return ensureHeaderCloneButton(doc, onOpen, false)
@@ -1818,6 +1891,12 @@ function setupCloneInjection(doc, { enabledRef, onOpen }) {
   }
   const rescan = () => {
     if (disposed) return
+    // 停用即全量移除已注入按钮(F24):footer 与 header 两处,不进入注入分支
+    if (enabledRef.current === false) {
+      removeAll()
+      removeAllHeader()
+      return
+    }
     const now = Date.now()
     if (now - windowStart > CLONE_SCAN_WINDOW_MS) {
       windowStart = now
@@ -2117,17 +2196,12 @@ function ContextPanel() {
         // 为 single 已被目录选择 flow 占用)。开关读取失败按启用兜底(与 CopySidButton
         // 一致);uiWorkspace 走 inject 声明(services 与 slots/sessions 同代际,
         // 实测 ctx.get 懒取不可用,服务面缺声明不可达),克隆成功后 startSession
-        // 直接落入新工作区空会话。workspaces.create 的 client 代理直返视图
-        // ({workspaceId,...};{workspace,created} 形态只存在于宿主 RPC 层)
-        const openCloneWorkspace = async (targetPath) => {
-          const view = await workspaces.create({ path: targetPath })
-          const workspaceId = view && view.workspaceId
-          if (workspaceId && uiWorkspace && typeof uiWorkspace.startSession === 'function') {
-            uiWorkspace.startSession(workspaceId)
-            toast('已克隆并打开工作区')
-            return
-          }
-          toast('已克隆到 ' + targetPath + ',但无法自动打开,请手动打开工作区', { kind: 'error', sticky: true })
+        // 直接落入新工作区空会话
+        const openCloneWorkspaceDeps = { workspaces, uiWorkspace, toast }
+        const submitCloneDeps = {
+          fetch: (url, init) => fetch(url, init),
+          doc: document,
+          ...openCloneWorkspaceDeps,
         }
 
         // 父目录来源:点击克隆按钮时经官方「编辑路径」输入态读取弹窗当前目录
@@ -2139,28 +2213,7 @@ function ContextPanel() {
           const parentDir = fromDialog || readMemory(CLONE_PARENT_MEMORY_KEY) || ''
           openCloneModal(document, {
             parentDir,
-            onSubmit: async (payload) => {
-              // 克隆耗时以分钟计,不走带 8s 超时的 api()
-              const response = await fetch(CLONE_API_URL, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify(payload),
-              })
-              const result = await response.json().catch(() => ({}))
-              if (!response.ok) throw new Error(result && result.error ? result.error : 'HTTP ' + response.status)
-              const targetPath = result && result.path
-              if (typeof targetPath !== 'string' || targetPath === '') throw new Error('克隆完成但未返回路径')
-              // 收起浏览弹窗(读取路径路径已收起,此处兜底读取失败仍开着的场景):
-              // 注册工作区与浏览弹层互不叠影,收起失败不影响注册
-              const aliveCard = findBrowseDialog(document)
-              const footerParts = aliveCard ? findBrowseFooter(aliveCard) : null
-              if (footerParts && footerParts.cancelButton) footerParts.cancelButton.click()
-              try {
-                await openCloneWorkspace(targetPath)
-              } catch (error) {
-                toast('已克隆,但打开工作区失败: ' + String(error && error.message || error), { kind: 'error', sticky: true })
-              }
-            },
+            onSubmit: (payload) => submitClone(payload, submitCloneDeps),
           })
         }
         ctx.effect(() => {
@@ -2177,6 +2230,8 @@ function ContextPanel() {
               disposeScan = setupCloneInjection(document, {
                 enabledRef,
                 onOpen: () => {
+                  // 点击复核(F24):注入与点击间开关可能已翻停用,停用即不弹
+                  if (enabledRef.current === false) return
                   void handleCloneOpen()
                 },
               })

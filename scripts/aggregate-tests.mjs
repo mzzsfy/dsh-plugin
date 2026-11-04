@@ -97,6 +97,50 @@ function readTestScript(pkgDir) {
   }
 }
 
+// runner 协议判定:test script 是 `node ... --test <files>` 形态时聚合器可重建等价命令
+// (flag 段透传),否则整个 script 视为自定义 runner,原样经 shell 执行——宿主定位/版本
+// 校验/NODE_PATH 等准备逻辑归包所有,聚合器不猜
+export function isNodeTestScript(testScript) {
+  return typeof testScript === 'string' && testScript.startsWith(NODE_CMD)
+    && /(?:^|\s)--test(?:\s|$)/.test(testScript)
+    && !(testScript.slice(NODE_CMD.length, testScript.match(/(?:^|\s)--test(?:\s|$)/).index).includes('"'))
+    && !(testScript.slice(NODE_CMD.length, testScript.match(/(?:^|\s)--test(?:\s|$)/).index).includes("'"))
+}
+
+// 包间依赖反向闭包:dependencies 里的 @mzzsfy/dsh-* 即依赖边(去掉 @mzzsfy/ 前缀,
+// 映射到 packages/ 目录名);changed ∪ 直接/传递消费者。共享库(common-tools 等)
+// 变更时其消费者必须入列,漏消费方 = 绿测假象
+export function expandConsumers(repoRoot, changed) {
+  const dependents = new Map()
+  for (const dir of readdirSync(join(repoRoot, PACKAGES_DIR))) {
+    const manifestPath = join(repoRoot, PACKAGES_DIR, dir, 'package.json')
+    if (!existsSync(manifestPath)) continue
+    let deps
+    try {
+      deps = JSON.parse(readFileSync(manifestPath, 'utf8'))?.dependencies ?? {}
+    } catch {
+      continue
+    }
+    for (const name of Object.keys(deps)) {
+      if (!name.startsWith('@mzzsfy/dsh-')) continue
+      const target = name.slice('@mzzsfy/'.length)
+      if (!dependents.has(target)) dependents.set(target, new Set())
+      dependents.get(target).add(dir)
+    }
+  }
+  const expanded = new Set(changed)
+  const queue = [...changed]
+  while (queue.length > 0) {
+    const current = queue.pop()
+    for (const consumer of dependents.get(current) ?? []) {
+      if (expanded.has(consumer)) continue
+      expanded.add(consumer)
+      queue.push(consumer)
+    }
+  }
+  return expanded
+}
+
 // 改动文件 -> 涉及包名集合;出现任何非 packages/ 路径 -> null(全量信号);
 // 非数组输入(null = changedFilesList 的 fail-open 信号)同样返回 null,禁止崩溃
 export function parseChangedPackages(lines) {
@@ -128,11 +172,13 @@ export function missingBridgeDeps(repoRoot, rootPackageJsonPath = join(repoRoot,
   return Object.keys(deps).filter(name => !existsSync(join(repoRoot, 'node_modules', ...name.split('/'))))
 }
 
-// 单元发现:冒烟 + 含适用测试文件的包(字典序,保轮次间顺序稳定)+ 仓库根 tests。
-// changedLines 传入 push 改动清单:全部落在 packages/<X>/ 时只保留 X(冒烟与仓库根测试保留),
-// 否则全量。测试文件按平台过滤(win32/linux 后缀约定)。
+// 单元发现:冒烟 + 含适用测试文件的包(字典序,保轮次间顺序稳定)+ 仓库根 tests
+// + compat 专项(自定义发现范围外的登记测试)。changedLines 传入 push 改动清单:
+// 全部落在 packages/<X>/ 时只保留 X 及其反向依赖闭包(冒烟与仓库根测试保留),否则全量。
+// 测试文件按平台过滤(win32/linux 后缀约定)。
 export function discoverUnits(repoRoot, changedLines) {
-  const changed = changedLines === undefined ? undefined : parseChangedPackages(changedLines)
+  const changedRaw = changedLines === undefined ? undefined : parseChangedPackages(changedLines)
+  const changed = changedRaw === undefined || changedRaw === null ? changedRaw : expandConsumers(repoRoot, changedRaw)
   const units = [{name: 'smoke-load', command: [process.execPath, 'scripts/smoke-load.mjs'], cwd: repoRoot}]
   for (const dir of readdirSync(join(repoRoot, PACKAGES_DIR)).sort()) {
     const testPath = join(repoRoot, PACKAGES_DIR, dir, 'test')
@@ -141,7 +187,13 @@ export function discoverUnits(repoRoot, changedLines) {
     const pkgDir = join(repoRoot, PACKAGES_DIR, dir)
     const files = applicableTestFiles(pkgDir, 'test')
     if (files.length === 0) continue
-    const flags = nodeFlagsFromTestScript(readTestScript(pkgDir))
+    const testScript = readTestScript(pkgDir)
+    // 自定义 runner 协议:非 `node --test` 形态整体执行,包保留其准备逻辑
+    if (!isNodeTestScript(testScript) && testScript !== undefined) {
+      units.push({name: dir, command: testScript.split(' '), cwd: pkgDir})
+      continue
+    }
+    const flags = nodeFlagsFromTestScript(testScript)
     units.push({name: dir, command: [process.execPath, ...flags, '--test', ...files], cwd: pkgDir})
   }
   const repoFiles = applicableTestFiles(repoRoot, 'tests')
@@ -150,6 +202,10 @@ export function discoverUnits(repoRoot, changedLines) {
   const simDir = join(repoRoot, 'scripts', 'echo-upstream')
   const simFiles = existsSync(simDir) ? applicableTestFiles(simDir, 'test') : []
   if (simFiles.length > 0) units.push({name: 'echo-upstream', command: [process.execPath, '--test', ...simFiles], cwd: simDir})
+  // compat 专项登记:发现范围不含 scripts/compat,显式列出防漏测
+  const compatDir = join(repoRoot, 'scripts', 'compat')
+  const compatFiles = existsSync(compatDir) ? applicableTestFiles(compatDir, '.') : []
+  if (compatFiles.length > 0) units.push({name: 'compat-tests', command: [process.execPath, '--test', ...compatFiles], cwd: compatDir})
   return units
 }
 

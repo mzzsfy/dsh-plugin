@@ -1,7 +1,0 @@
-{
-  "package": "dsh-browser-cdp",
-  "version": "1.6.0",
-  "upstreamCommit": "da9891b9c8ee64b6c4da16d3ae654d0f1166cccd",
-  "originalSha256": "fd21d52bd8185fb08df5a7533ee3ec38f0d75d14c9aaa7015d2877aff5a2c3be",
-  "patchedSha256": "ec6715c9e6ce205bb5c8c2d0d72705b39820d03461cf9d7e954013da4d50f47d"
-}

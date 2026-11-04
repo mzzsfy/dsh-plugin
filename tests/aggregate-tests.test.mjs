@@ -226,9 +226,27 @@ test('discoverUnits_真实仓库_冒烟与仓库根测试在列且顺序稳定',
 
 test('discoverUnits_单包改动清单_只保留该包', () => {
   const units = discoverUnits(repo, ['packages/dsh-turn-notify/client.js', 'packages/dsh-turn-notify/package.json'])
-  assert.deepEqual(units.map(u => u.name), ['smoke-load', 'dsh-turn-notify', 'repo-tests', 'echo-upstream'])
+  // turn-notify 无消费者,闭包 = 自身;compat 专项单在列(发现范围登记)
+  assert.deepEqual(units.map(u => u.name), ['smoke-load', 'dsh-turn-notify', 'repo-tests', 'echo-upstream', 'compat-tests'])
   const turnNotify = units.find(u => u.name === 'dsh-turn-notify')
   assert.ok(turnNotify.command.some(arg => arg.includes('test')))
+})
+
+test('discoverUnits_共享库改动_消费者闭包入列', () => {
+  const units = discoverUnits(repo, ['packages/dsh-common-tools/src/x.mjs'])
+  const names = units.map(u => u.name)
+  // common-tools 的直接消费者(session-manager 等)必须入列,漏消费方 = 绿测假象
+  assert.ok(names.includes('dsh-session-manager'))
+  assert.ok(names.includes('dsh-turn-notify'))
+  assert.ok(names.includes('dsh-common-tools'))
+})
+
+test('discoverUnits_自定义runner_整体执行不重建命令', () => {
+  const units = discoverUnits(repo, ['packages/dsh-shared-terminal/src/index.js'])
+  const st = units.find(u => u.name === 'dsh-shared-terminal')
+  assert.ok(st, 'shared-terminal 单元应在列')
+  // test script = "node test/run.mjs"(无 --test 锚点):原样整体执行,保留宿主定位/版本校验/NODE_PATH
+  assert.deepEqual(st.command, ['node', 'test/run.mjs'])
 })
 
 test('discoverUnits_非包改动清单_全量回退', () => {

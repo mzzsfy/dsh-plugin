@@ -1388,7 +1388,44 @@ function UsagePanelApp() {
         setPollArmed(res ? Boolean(res.pollArmed) : null)
       })
       .catch(() => {})
-    return () => { alive = false }
+
+    // 服务端数据对账(F31):账号/历史持久化经总线广播桥转 window 事件,
+    // 面板收到即单飞重拉;窗口聚焦同样对账(兜底错过的广播)。无轮询
+    let knownRevision = null
+    let resyncInFlight = false
+    const resync = () => {
+      if (resyncInFlight) return
+      resyncInFlight = true
+      api('/api/usage-panel/revision')
+        .then((res) => {
+          if (!alive || !res || typeof res.revision !== 'number') return null
+          if (knownRevision !== null && res.revision !== knownRevision) {
+            knownRevision = res.revision
+            return Promise.all([
+              api('/api/usage-panel/accounts'),
+              api('/api/usage-panel/history'),
+            ]).then(([accountsRes, historyRes]) => {
+              if (!alive) return null
+              if (accountsRes && accountsRes.accounts) setAccounts(accountsRes.accounts)
+              if (historyRes && historyRes.sequences) setSequences(historyRes.sequences)
+              return null
+            })
+          }
+          if (knownRevision === null) knownRevision = res.revision
+          return null
+        })
+        .catch(() => {})
+        .then(() => { resyncInFlight = false })
+    }
+    const onDataChanged = () => resync()
+    const onFocus = () => resync()
+    window.addEventListener('up-data-changed', onDataChanged)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      alive = false
+      window.removeEventListener('up-data-changed', onDataChanged)
+      window.removeEventListener('focus', onFocus)
+    }
   }, [])
 
   function refreshSequences() {
@@ -1516,6 +1553,11 @@ function UsagePanelApp() {
       apply(ctx) {
         const bus = tools.setupCommonTools(ctx)
         ctx.effect(() => startNotifications(bus), 'usage-panel notifications')
+        // 数据失效广播桥(F31):服务端账号/历史持久化经总线发布变更,
+        // 桥转 window 事件供面板组件对账(组件树无总线句柄)
+        ctx.effect(() => bus.subscribe(() => {
+          window.dispatchEvent(new CustomEvent('up-data-changed'))
+        }, {}), 'usage-panel data-changed bridge')
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             { name: 'settings.section', id: 'usage-panel', order: 40, label: '账号余额' },

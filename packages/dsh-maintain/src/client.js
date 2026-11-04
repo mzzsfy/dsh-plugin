@@ -416,9 +416,11 @@ function VersionCard(props) {
         onClick: props.onUpgrade,
       }, props.busy.upgrade ? '安装中…' : '安装'),
     ),
-    status.restartPending === true
+    status.restartPending === true || status.awaitingRestart === true
       ? h('div', { className: 'dm-notice dm-notice--warn' },
-          '已装新版本 ' + (status.installedVersion || '') + ',重启宿主后生效。')
+          status.awaitingRestart === true
+            ? '宿主已切换,当前暂停;重启后可用。'
+            : '已装新版本 ' + (status.installedVersion || '') + ',重启宿主后生效。')
       : null,
     h('div', { className: 'dm-row' },
       h('span', { className: 'dm-row__label' }, '追踪通道'),

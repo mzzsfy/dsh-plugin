@@ -319,9 +319,12 @@ export function discoverRunningInstall({ argv1 = process.argv[1], installAnchor,
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config, dependencies = {}) {
   const maintenance = { active: false }
+  // 显式暂停契约(F08):维护态即"已切换/切换中、当前暂停、重启后可用";
+  // pre-step 拒绝携带结构化说明,与 status 快照/审计同口径
+  const PAUSED_MESSAGE = '宿主已切换或升级进行中,当前暂停新回合;重启后可用'
   const hooks = ctx.get('hooks')
   hooks?.on?.('agent/pre-step', ({ signal }, next) => {
-    if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject' })
+    if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject', message: PAUSED_MESSAGE })
     return next()
   })
   const legacySettingsFace = () => {
@@ -463,6 +466,8 @@ export function apply(ctx, config, dependencies = {}) {
       managedError: managedInstall.error,
       installedVersion: snapshot.installedVersion,
       restartPending: isVersionPendingRestart({ runningVersion, installedVersion: snapshot.installedVersion }),
+      // 显式暂停契约(F08):维护态独立于版本推导——切换进行中/退出已调度都算
+      awaitingRestart: maintenance.active,
       channel: cfg.channel,
       pollIntervalSec: cfg.pollIntervalSec,
       registryBase: cfg.registryBase,

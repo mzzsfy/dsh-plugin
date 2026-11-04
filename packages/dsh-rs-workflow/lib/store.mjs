@@ -161,7 +161,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
   }
 
   const store = {
-    start({ runId, sessionId, workspace, request, templateId, inputs, plan, warnings, state }) {
+    start({ runId, sessionId, workspace, request, templateId, inputs, plan, warnings, state, templateSnapshot }) {
       ensureLoaded()
       const id = runId === undefined || runId === null || runId === '' ? genRunId() : runId
       assertRunId(id)
@@ -172,6 +172,7 @@ export function createStore({ dir = defaultDataDir(), logger = console, keepRuns
         request: request ?? '', inputs: inputs ?? {}, status: 'running', createdAt: at,
         summary: '', plan: plan ?? null, warnings: warnings ?? [],
         state: state ?? emptyState(), controls: [], stepsTrace: {}, queued: [],
+        templateSnapshot: templateSnapshot ?? null,
       }
       records.set(id, record)
       const entry = indexEntryOf(record)

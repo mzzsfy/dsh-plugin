@@ -229,3 +229,77 @@ test('executor:运行终态补写失败经 logSystem 留痕', async (t) => {
   assert.ok(logLines[0].includes(runId))
   assert.ok(logLines[0].includes('补写失败'))
 })
+
+// ── F03: 停止生命周期 ───────────────────────────────────────────────────────
+test('F03: stop 后 dispatch 拒绝,排队记录取消,在途运行杀树,活跃归零', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-f03-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir: join(dir, 'data') })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  // 慢 runner:首个调用挂起在闸门,后续调用立即完成(停止后取消的单元直接终态)
+  let firstStarted
+  const firstGate = new Promise((resolve) => { firstStarted = resolve })
+  let cancelled = 0
+  let first = true
+  let releaseFirst
+  const runner = {
+    run: () => {
+      if (first) {
+        first = false
+        const promise = new Promise((resolve) => {
+          releaseFirst = () => resolve({ status: 'cancelled', exitCode: null })
+        })
+        return { promise, cancel: () => { cancelled += 1; releaseFirst() } }
+      }
+      return { promise: Promise.resolve({ status: 'cancelled', exitCode: null }), cancel: () => {} }
+    },
+  }
+  const executor = createExecutor({ store, logger, runner, readMaxConcurrent: () => 1 })
+  // shell 展开:启用 multi env 3 值 → 3 组合(首单元在途,余 2 排队)
+  await store.envs.create({ name: 'X', value: '1\n2\n3', multi: true, remarks: '', enabled: true })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-a' })
+  const runIds = await executor.dispatch({ ...JOB_BASE, id: 'j-a' }, 'manual')
+  assert.equal(runIds.length, 3)
+  await waitFor(() => executor.status().active === 1 && executor.status().queued === 2)
+  await executor.stop()
+  // 排队 → cancelled;在途 → cancel 被调用且终态落 cancelled;活跃归零
+  assert.equal(cancelled, 1, '在途运行句柄必须被取消')
+  assert.equal(executor.status().active, 0)
+  assert.equal(executor.status().queued, 0)
+  const statuses = runIds.map((runId) => store.runs.get(runId).status)
+  assert.ok(statuses.every((s) => ['cancelled', 'fail'].includes(s)), `全部终态: ${statuses.join(',')}`)
+  // 停止态拒新
+  await assert.rejects(() => executor.dispatch({ ...JOB_BASE, id: 'j-b' }, 'manual'), /执行链已停止/)
+})
+
+test('F03: stopJob 只清目标任务,其余任务继续', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cron-board-f03b-'))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  const store = await createStore({ dir: join(dir, 'data') })
+  const logger = createLogger({ rootDir: join(dir, 'logs') })
+  // 两任务各自闸门独立放行;取消即以 cancelled 终态收敛
+  const gates = new Map()
+  const cancelledJobs = []
+  const runner = {
+    run: ({ job }) => {
+      const promise = new Promise((resolve) => {
+        gates.set(job.id, (outcome) => resolve(outcome))
+      })
+      return { promise, cancel: () => { cancelledJobs.push(job.id); gates.get(job.id)({ status: 'cancelled', exitCode: null }) } }
+    },
+  }
+  const executor = createExecutor({ store, logger, runner, readMaxConcurrent: () => 2 })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-del' })
+  await store.jobs.create({ ...JOB_BASE, id: 'j-keep' })
+  const delRun = (await executor.dispatch({ ...JOB_BASE, id: 'j-del' }, 'manual'))[0]
+  const keepRun = (await executor.dispatch({ ...JOB_BASE, id: 'j-keep' }, 'manual'))[0]
+  await waitFor(() => executor.status().active === 2)
+  await executor.stopJob('j-del')
+  assert.deepEqual(cancelledJobs, ['j-del'], '只杀目标任务')
+  assert.equal(store.runs.get(delRun).status, 'cancelled')
+  // 其余任务不受影响:放行后正常终态,执行链未停
+  gates.get('j-keep')({ status: 'success', exitCode: 0 })
+  await waitFor(() => store.runs.get(keepRun)?.status === 'success')
+  const [extra] = await executor.dispatch({ ...JOB_BASE, id: 'j-keep' }, 'manual')
+  await waitFor(() => store.runs.get(extra)?.status !== undefined)
+})

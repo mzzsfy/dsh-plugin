@@ -73,20 +73,25 @@ const conditionSchema = z.union(
   CONDITION_KINDS.map((kind) => z.object({ kind: z.literal(kind), ...CONDITION_FIELD_SCHEMAS[kind] })),
 )
 
-const pricingRulesSchema = z.array(
-  z.object({
-    // 模型键强制两段式 vendor/model(段可通配),单段旧形态提交即拒
-    model: z.string().refine(isTwoSegmentModel),
-    unit: z.literal(UNIT_PER_MILLION).optional(),
-    currency: z.enum(CURRENCIES).nullable(),
-    price: z.object({
-      input: z.number().min(0),
-      output: z.number().min(0),
-      cacheRead: z.number().min(0),
-      cacheWrite: z.number().min(0),
-    }),
-    conditions: z.array(conditionSchema),
+const pricingRuleShape = z.object({
+  // 模型键强制两段式 vendor/model(段可通配),单段旧形态提交即拒
+  model: z.string().refine(isTwoSegmentModel),
+  unit: z.literal(UNIT_PER_MILLION).optional(),
+  currency: z.enum(CURRENCIES).nullable(),
+  price: z.object({
+    input: z.number().min(0),
+    output: z.number().min(0),
+    cacheRead: z.number().min(0),
+    cacheWrite: z.number().min(0),
   }),
+  conditions: z.array(conditionSchema),
+})
+
+const pricingRulesSchema = z.array(pricingRuleShape).refine(
+  // 表级单币约束(F15):定价聚合按数值直接相加,混币相加无意义;
+  // 非空币种全表必须同一种(null 视为未指定,不参与币种一致对账)
+  (rules) => new Set(rules.map((rule) => rule.currency).filter((c) => c !== null)).size <= 1,
+  { message: '定价表必须单币种:非空 currency 全表一致' },
 )
 
 // 桶串形态锚定 + 本地时区分量回读,回滚形(13 月/25 时/60 分)当场拒绝,
