@@ -5,7 +5,29 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { GLYPHS } from '../packages/dsh-settings-nav-icons/src/logic.mjs'
-import { ICON_MAP } from './catalog-manifest.mjs'
+
+// 图标映射:glyph 名与 nav-icons 声明一致;tunnel 商店面取 zap 避免与 llm-pi-gateway 撞形
+const ICON_MAP = {
+  'dsh-auto-trust-all': 'shield',
+  'dsh-boss-simulator': 'plan',
+  'dsh-common-tools': 'cube',
+  'dsh-context-manager': 'git',
+  'dsh-cron-board': 'plan',
+  'dsh-llm-pi-gateway': 'globe',
+  'dsh-maintain': 'wrench',
+  'dsh-rs-workflow': 'flow',
+  'dsh-session-manager': 'archive',
+  'dsh-settings-nav-icons': 'tune',
+  'dsh-shared-terminal': 'cards',
+  'dsh-shell-select': 'term',
+  'dsh-stock-assistant': 'chart',
+  'dsh-think-expand': 'spark',
+  'dsh-tool-gate': 'layers',
+  'dsh-tunnel': 'zap',
+  'dsh-turn-notify': 'bell',
+  'dsh-usage-dash': 'gauge',
+  'dsh-usage-panel': 'wallet',
+}
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = join(repo, 'assets/icons')

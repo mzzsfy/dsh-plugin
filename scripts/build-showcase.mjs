@@ -3,7 +3,29 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ICON_MAP } from './catalog-manifest.mjs'
+
+// 图标映射:glyph 名与 nav-icons 声明一致;tunnel 商店面取 zap 避免与 llm-pi-gateway 撞形
+const ICON_MAP = {
+  'dsh-auto-trust-all': 'shield',
+  'dsh-boss-simulator': 'plan',
+  'dsh-common-tools': 'cube',
+  'dsh-context-manager': 'git',
+  'dsh-cron-board': 'plan',
+  'dsh-llm-pi-gateway': 'globe',
+  'dsh-maintain': 'wrench',
+  'dsh-rs-workflow': 'flow',
+  'dsh-session-manager': 'archive',
+  'dsh-settings-nav-icons': 'tune',
+  'dsh-shared-terminal': 'cards',
+  'dsh-shell-select': 'term',
+  'dsh-stock-assistant': 'chart',
+  'dsh-think-expand': 'spark',
+  'dsh-tool-gate': 'layers',
+  'dsh-tunnel': 'zap',
+  'dsh-turn-notify': 'bell',
+  'dsh-usage-dash': 'gauge',
+  'dsh-usage-panel': 'wallet',
+}
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const shotsRoot = join(repo, 'assets/screenshots')
@@ -83,10 +105,10 @@ const style = [
 
 const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>dsh-plugin 商店展示效果</title><style>${style}</style>` +
   '<h1>dsh-plugin 商店展示效果</h1>' +
-  '<div class=note>自建市场索引 <b>@mzzsfy/dsh-plugin-catalog</b>:在 DSH 设置 → Plugins → Discover → Index sources 加入 <code>https://cdn.jsdelivr.net/npm/@mzzsfy/dsh-plugin-catalog/index.json</code>,列表卡片即显示下方语义图标(48px);截图展示于 awesome-dsh-plugin.com 与 dshmarket 详情页。全部 19 包图标与各界面截图均来自隔离环境实测。</div>' +
+  '<div class=note>图标随上游收录 PR 提交至 awesome-dsh-plugin(icon 走 assets/icons/png 180px 光栅),展示于 dshmarket 与官方 Discover;截图展示于 awesome-dsh-plugin.com 与 dshmarket 详情页。全部 19 包图标与各界面截图均来自隔离环境实测。</div>' +
   '<h2 style="margin-top:32px">商店图标(19 包)</h2><p class=desc>glyph 名与插件设置页图标声明一致;tunnel 取 zap 避免与 llm-pi-gateway 撞形</p>' +
   `<div class=grid>${iconCards}</div>${shotSections}` +
-  '<p style="margin-top:48px;color:#999;font-size:12px">生成于 2026-11-03 · 图标数据源 scripts/catalog-manifest.mjs · 截图 assets/screenshots/ · 重新生成:node scripts/build-showcase.mjs</p></html>'
+  '<p style="margin-top:48px;color:#999;font-size:12px">生成于 2026-11-04 · 截图 assets/screenshots/ · 重新生成:node scripts/build-showcase.mjs</p></html>'
 
 mkdirSync(dirname(outPath), { recursive: true })
 writeFileSync(outPath, html)

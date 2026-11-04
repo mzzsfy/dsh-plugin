@@ -39,13 +39,12 @@ dsh-plugin/
 | @mzzsfy/dsh-shell-select | Windows shell 接管:替换默认 pwsh 工具为可配置多客户端 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择);命令 deny 黑名单,接管失败自动回退官方 pwsh 链 | 工具接管 + 配置校验管线(volatile ref 解箱 + 执行面 strict);bash 候选多锚位探测;web 行提供设置页与 POSIX 形态声明 | DSH host 端插件(工具接管 + 设置页) |
 | @mzzsfy/dsh-tool-gate | 全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 标交宿主 deferred tool loading(API 服务端按需搜索激活);第三方路由降级折叠为占位 + `tool_search` 检索 | 声明式收敛(白名单为唯一事实源),行退场按 undo journal 还原原状;设置卡 GUI 配置 | DSH host 端插件(工具收敛 + 设置卡) |
 | @mzzsfy/dsh-tunnel | 路径穿透隧道:在 dsh 宿主进程内把本地 TCP 端口反向代理出去(`/p/<name>` 子路径或 `<name>.*` 子域名),ai 经 `tunnel_open`/`tunnel_list`/`tunnel_close` 三工具自管 | 进程内反代,不引入 nginx/caddy 等外部反代;HTTP 前缀 strip 转发 + 声明式 WS upgrade,子域名全路径透传;REST + GUI 看板 + 设置卡,持久化随 `DSH_HOME` | DSH 双端插件(web 路由 + client 看板) |
-| @mzzsfy/dsh-plugin-catalog | 插件市场自建索引(format 1):Discover 列出全部已发布插件并带商店图标;收录官方目录缺失的包,与官方目录索引共存 | `scripts/catalog-manifest.mjs` 清单驱动,`scripts/build-catalog.mjs` 按 registry 元数据构建 index.json,图标为 nav-icons glyph 等比放大的 data: 内联 SVG | 普通 npm 包(索引数据,非 dsh 插件) |
 
 ## 商店展示
 
 插件在 DSH 商店(设置 → Plugins → Discover)的图片分两层:
 
-- **48px 图标**(列表卡片):自建索引 `@mzzsfy/dsh-plugin-catalog` 为每条内联 data: SVG 图标,用户在 Discover 索引源加入 `https://cdn.jsdelivr.net/npm/@mzzsfy/dsh-plugin-catalog/index.json` 即可见;图标资产 `assets/icons/*.svg` 由 `scripts/generate-icons.mjs` 从 nav-icons glyph 生成,与设置页图标同一视觉语言。官方目录(awesome-dsh-plugin)当前全部条目无图标且其索引生成器不透传 icon 字段,上游 PR 跟进中。
+- **48px 图标**(列表卡片):图标资产 `assets/icons/*.svg`(Discover 索引内联形态)与 `assets/icons/png/`(上游 icon 光栅形态,180px)由 `scripts/generate-icons.mjs` 从 nav-icons glyph 生成,与设置页图标同一视觉语言。官方目录(awesome-dsh-plugin)当前全部条目无图标且其索引生成器不透传 icon 字段,随上游 PR 补齐。
 - **详情页效果截图**:仓库 `assets/screenshots/<包名>/` 收录各插件真实界面截图,随上游收录与截图 PR 提交,展示于 awesome-dsh-plugin.com 与 dshmarket 详情页(官方 Discover 详情不承载截图字段)。上游采用方式:awesome-dsh-plugin 仓库的 `build-site.mjs` 按作者仓库根 `screenshots.json` 登记的 GitHub 直链取图,截图 PR 需同时提交本目录图片与该登记文件(收录条目草稿在任务工作区,随 PR 一并提交)。
 
 ## 安装与更新:缩短 pnpm 宽限期
