@@ -6,6 +6,7 @@ import { tushare } from './providers/tushare.mjs'
 import { tencent } from './providers/tencent.mjs'
 import { sina } from './providers/sina.mjs'
 import { eastmoney } from './providers/eastmoney.mjs'
+import { xueqiu } from './providers/xueqiu.mjs'
 import { openState, digest } from './state.mjs'
 import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema } from './schemas.mjs'
 import { createWatchlistService } from './service.mjs'
@@ -20,7 +21,7 @@ const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
 const US_SYMBOL_LIMIT = 500
 const PROBE_LIMIT = 512
-export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
+export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
   // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
   const probeCache = new Map()
@@ -160,15 +161,18 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       assertLive()
       const parsed = klineQuerySchema.safeParse(input)
       if (!parsed.success) fail('INVALID_PARAM', 'K线请求参数无效', 400)
-      const { securityId: sid, period, limit } = parsed.data
+      const { securityId: sid, period, limit, force } = parsed.data
       let exchange, code
       try { ({ exchange, code } = parseSecurityId(sid)) } catch { fail('INVALID_PARAM', '证券身份无效', 400) }
       const config = state.get()
       const { route, instance } = router.select('kline', exchange, 'equity')
       const fallbacks = route.fallbackInstanceIds.map(id => config.providers.find(p => p.id === id && p.enabled !== false)).filter(Boolean)
-      for (const cand of [instance, ...fallbacks]) {
-        const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code }, config.routingRevision)
-        if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
+      // force=1 跳过缓存读(详情页手动刷新);缓存写入仍按正常策略,失败回源不额外惩罚
+      if (force !== '1') {
+        for (const cand of [instance, ...fallbacks]) {
+          const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code }, config.routingRevision)
+          if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
+        }
       }
       const result = await runWithFailover(route, instance, fallbacks, { securityId: sid, market: exchange, code, period, adjust: 'qfq', limit }, signal)
       if (period !== 'trend') await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code }, result, config.routingRevision)
