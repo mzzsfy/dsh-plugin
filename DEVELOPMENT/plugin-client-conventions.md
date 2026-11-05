@@ -11,7 +11,9 @@
 
 ## 导航图标声明规约
 
-插件需要设置导航分区图标或 dsh-market 卡片图标时,唯一合法方式是经 `dsh-settings-nav-icons` 的声明机制在 client 半区注册,禁止自行改写官方 svg 或另行注入图标:
+设置导航分区的图标呈现分三层:官方默认(齿轮/原生语义图形)→ 插件自供给(各插件对**自己的**分区自行注入,官方 DOM 演进时由插件自己负责适配)→ `dsh-settings-nav-icons` **兜底**(只替换官方默认齿轮,非默认图标一律不管)。
+
+**推荐**接入兜底层的声明机制(免维护:官方 DOM 变更由兜底层统一适配,插件零成本跟随):
 
 ```js
 const NAV_ICON = { '<分区显示文本或插件名>': '<glyph 名或 svg>' }
@@ -23,6 +25,8 @@ else window.__navicIconQueue = [NAV_ICON]
 - 键为设置分区显示文本或插件名;值为内置 glyph 名或完整 16×16 `<svg>` 字符串(经安全门),合法 glyph 名与安全门规则见 `packages/dsh-settings-nav-icons/README.md`
 - 生产者样板由 `dsh-settings-nav-icons` 契约测试锁定,改样板须同步全部生产者包
 - 取图优先级:插件声明 > 内置映射 > 关键词 > 哈希;同键重复注册幂等
+- 外部包不受本规约约束,自供给自己的分区图标是合法形态(如 dshmarket 的 mask 插头);兜底层识别其公开供给声明(`data-*-nav-icon` 标记)后让位不与其叠加,已叠加的残留自动回退
+- 自供给插件 DOM 演进适配责任自负(案例:dshmarket `> svg` 直子选择器在 dsh 0.2.2-rc.1 navCell span 包裹结构下失效致双图,上游 issue dsh-market/dsh-market#1104)
 
 ## 插件 client 样式注入规约
 

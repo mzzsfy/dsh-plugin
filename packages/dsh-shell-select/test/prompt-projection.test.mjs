@@ -118,3 +118,32 @@ test('SDK 投影不可用时整体不改并告警', async () => {
   assert.equal(await handlers[0](final, {}, async () => final), final)
   assert.equal(warnings.length, 1)
 })
+
+// Given 0.2.2 宿主 assemble 把 tools 移到 waterfall 之后合并,链值只含 sections/contexts/variables;
+// When 投影读到链值缺 tools 数组;Then 原样透传不抛错,一次性告警登记契约变更(回合管线不崩)。
+test('链值缺 tools 数组(0.2.2 契约)时透传且告警', async () => {
+  const handlers = []
+  const warnings = []
+  const ctx = { on: (name, handler) => { handlers.push(handler); return () => {} }, tools: { get: () => ({}) }, logger: { warn: (msg) => warnings.push(msg) } }
+  projection.mountShellPromptProjection(ctx)
+  const chainValue = { sections: [{ name: 'tool:pwsh' }, { name: 'policy' }], contexts: [], variables: {} }
+  const result = await handlers[0]({}, { scope: 'scope' }, async () => chainValue)
+  assert.equal(result, chainValue)
+  assert.deepEqual(result.sections.map((s) => s.name), ['tool:pwsh', 'policy'])
+  assert.equal(warnings.length, 1)
+  // 第二次组装不再重复告警
+  await handlers[0]({}, { scope: 'scope' }, async () => chainValue)
+  assert.equal(warnings.length, 1)
+})
+
+// Given sections 缺席而 tools 在场的畸形链值;When 投影;Then 同样透传告警,不半改。
+test('链值缺 sections 数组时同样透传告警', async () => {
+  const handlers = []
+  const warnings = []
+  const ctx = { on: (name, handler) => { handlers.push(handler); return () => {} }, tools: { get: () => ({}) }, logger: { warn: (msg) => warnings.push(msg) } }
+  projection.mountShellPromptProjection(ctx)
+  const chainValue = { tools: [{ name: 'pwsh' }] }
+  const result = await handlers[0]({}, { scope: 'scope' }, async () => chainValue)
+  assert.equal(result, chainValue)
+  assert.equal(warnings.length, 1)
+})

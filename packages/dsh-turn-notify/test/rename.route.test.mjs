@@ -1,4 +1,4 @@
-// 音效重命名路由测试(展示名语义):USERPROFILE 重定向到临时目录后动态装载 host 路由,
+// 音效重命名路由测试(展示名语义):DSH_HOME 指向临时目录后动态装载 host 路由,
 // 隔离真实 ~/.dsh 音效库;覆盖展示名落索引 / 文件名不变 / 映射引用不动 / 幂等 /
 // 非法名 / 404 / 并发收敛 / 删除清索引 / 守卫。
 import test from 'node:test'
@@ -14,6 +14,7 @@ import { SOUND_NAME_MAX_CHARS } from '../src/core.mjs'
 const homeRoot = await mkdtemp(join(tmpdir(), 'tn-rename-'))
 process.env.USERPROFILE = homeRoot
 process.env.HOME = homeRoot
+process.env.DSH_HOME = join(homeRoot, '.dsh')
 const { apply } = await import('../src/index.js')
 
 test.after(async () => { await rm(homeRoot, { recursive: true, force: true }) })
