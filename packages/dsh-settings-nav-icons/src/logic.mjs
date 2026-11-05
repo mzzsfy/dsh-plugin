@@ -187,12 +187,14 @@ function resolveIconTagsAllowed(markup) {
 // 官方 DOM 锚点:与 client.js 控制器字面量同源锁定(parity 断言对表)。
 export const SELECTOR_LABEL = '.VOzbGW_navLabel'
 
-// 官方默认齿轮识别前缀(两代):0.1.x 内联齿轮 / 0.1.7 起 primitives
-// IconSettingsOutlineMedium 齿体路径。官方分区语义图标非齿轮一律不动;
-// 插件注册分区走齿轮 fallback,是本插件强补对象。
+// 官方默认齿轮识别(三代):0.1.x 内联齿体 / 0.1.7 起 primitives 内联齿体 /
+// 0.2.2 起 sprite 引用形态(use[href^=…],内联 path 消失,语义由 sprite 名承载)。
+// 官方分区语义图标非齿轮一律不动;插件注册分区走齿轮 fallback,是本插件强补对象。
 export const GEAR_PATHS = ['M14.0861', 'M13.0107 7.79377']
+export const GEAR_SPRITE_PREFIX = '#dsw-icon-settings-outline'
 
 export function isGear(svg) {
+  if (svg.querySelector('use[href^="' + GEAR_SPRITE_PREFIX + '"]') !== null) return true
   return GEAR_PATHS.some((prefix) => svg.querySelector('path[d^="' + prefix + '"]') !== null)
 }
 
