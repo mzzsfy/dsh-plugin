@@ -71,22 +71,19 @@ export const defaultConfig = () => {
     { id: 'sn-default', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
     { id: 'tx-backup', adapterId: 'tencent', enabled: true, credentialEnv: null, quotaGroup: 'free-backup', budget: budget(60, { kline: 20 }) },
   ]
-  // 备用源只在探针可验证的组合上声明:腾讯美股K线需先由搜索建立代码映射,探针期必然不可用
-  const quoteBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
+  // 备用源只在探针可验证的组合上声明: 腾讯美股K线需先由搜索建立代码映射, 探针期必然不可用
+  const quoteBackup = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
   const klineBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
   // 目录只有沪深港美有来源节点(实测东财 clist 的 fs 只覆盖这五个),其余市场不配目录路由
   const catalogCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
-  // 搜索只有沪深港美可用:东财联想对日韩英返回的候选市场号不在既有前缀表内,配了也是空结果
-  const searchCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
   const route = (market, capability, primary, fallback = null) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: fallback ? [fallback] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
   const routes = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'].flatMap(market => {
     const cn = market === 'XSHG' || market === 'XSHE'
     return [
       // 沪深目录走新浪分市场节点(单请求一页,不依赖东财分页);目录不支持备用源
       ...(catalogCovered.has(market) ? [route(market, 'catalog', cn ? 'sn-default' : 'em-default')] : []),
-      ...(searchCovered.has(market) ? [route(market, 'search', 'em-default')] : []),
-      // 纽交所报价主源用新浪:东财美股 secid 依赖搜索建立的交易所映射,探针期无映射时取不到
-      route(market, 'quotes', market === 'XNYS' ? 'sn-default' : 'em-default', quoteBackup.has(market) ? 'sn-default' : null),
+      route(market, 'search', 'em-default'),
+      route(market, 'quotes', 'em-default', quoteBackup.has(market) ? 'sn-default' : null),
       route(market, 'kline', 'em-default', klineBackup.has(market) ? 'tx-backup' : null),
     ]
   })

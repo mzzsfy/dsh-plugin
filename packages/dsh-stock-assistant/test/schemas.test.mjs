@@ -16,24 +16,28 @@ test('初始控制状态内置免凭据默认实例与全市场四能力路由',
   const catalogInstance = control.providers.find(p => p.adapterId === 'sina')
   const marketInstance = control.providers.find(p => p.adapterId === 'eastmoney')
   for (const p of control.providers) { assert.equal(p.credentialEnv, null, '默认实例不需要凭据'); assert.ok(p.budget.requestsPerMinute > 0) }
-  // 目录与搜索只有沪深港美有来源节点;报价与K线八市场齐备
+  // 目录只有沪深港美有来源节点;搜索/报价/K线八市场齐备
   const NODE_MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']
-  assert.equal(control.routes.length, NODE_MARKETS.length * 2 + MARKETS.length * 2, '目录与搜索五市场 + 报价与K线八市场')
+  assert.equal(control.routes.length, NODE_MARKETS.length + MARKETS.length * 3, '目录五市场 + 其余能力八市场')
   for (const m of MARKETS) for (const capability of ['search', 'quotes', 'kline', 'catalog']) {
     const r = control.routes.find(route => route.market === m && route.capability === capability)
-    if (!NODE_MARKETS.includes(m) && capability !== 'quotes' && capability !== 'kline') { assert.equal(r, undefined, `${m} 无来源节点时不应配 ${capability} 路由`); continue }
+    if (!NODE_MARKETS.includes(m) && capability === 'catalog') { assert.equal(r, undefined, `${m} 无目录来源节点时不应配目录路由`); continue }
     assert.ok(r, `${m} 缺 ${capability} 路由`)
-    const expected = capability === 'catalog' && (m === 'XSHG' || m === 'XSHE') ? catalogInstance.id : capability === 'quotes' && m === 'XNYS' ? 'sn-default' : marketInstance.id
+    const expected = capability === 'catalog' && (m === 'XSHG' || m === 'XSHE') ? catalogInstance.id : marketInstance.id
     assert.equal(r.primaryInstanceId, expected, `${m}/${capability} 主源`)
   }
   // 备用源只允许出现在报价与K线,且只在备用源探针可验证的市场
   const fallbacks = control.routes.filter(route => route.fallbackInstanceIds.length)
-  assert.equal(fallbacks.length, 3 * 2, '沪深港各两条(报价+K线)')
+  const quoteBackups = fallbacks.filter(route => route.capability === 'quotes')
+  const klineBackups = fallbacks.filter(route => route.capability === 'kline')
+  assert.equal(quoteBackups.length, NODE_MARKETS.length, '报价备源覆盖沪深港美')
+  assert.equal(klineBackups.length, 3, 'K线备源只覆盖沪深港(腾讯美股需先建立代码映射)')
   assert.ok(fallbacks.every(route => ['quotes', 'kline'].includes(route.capability)), '目录与搜索不得配置备用源')
-  assert.ok(fallbacks.every(route => ['XSHG', 'XSHE', 'XHKG'].includes(route.market)), '备用市场必须在备用源探针可验证范围内')
   assert.ok(fallbacks.every(route => route.failoverMode === 'network'))
-  assert.ok(fallbacks.filter(route => route.capability === 'quotes').every(route => route.fallbackInstanceIds[0] === 'sn-default'), '报价备源为新浪')
-  assert.ok(fallbacks.filter(route => route.capability === 'kline').every(route => route.fallbackInstanceIds[0] === 'tx-backup'), 'K线备源为腾讯')
+  assert.ok(quoteBackups.every(route => route.fallbackInstanceIds[0] === 'sn-default'), '报价备源为新浪')
+  assert.ok(quoteBackups.every(route => NODE_MARKETS.includes(route.market)))
+  assert.ok(klineBackups.every(route => route.fallbackInstanceIds[0] === 'tx-backup'), 'K线备源为腾讯')
+  assert.ok(klineBackups.every(route => ['XSHG', 'XSHE', 'XHKG'].includes(route.market)))
   assert.doesNotThrow(() => parseConfiguration({ providers: control.providers, routes: control.routes }))
 })
 

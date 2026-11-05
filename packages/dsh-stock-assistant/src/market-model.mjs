@@ -64,6 +64,13 @@ export function makeSecurity(exchange, code, officialName, extra = {}) {
   return { ...extra, id: securityId(exchange, code), exchange, code, officialName, instrument: 'equity', currency: meta.currency, timezone: meta.timezone, priceScale: meta.priceScale, listingStatus: 'listed' }
 }
 
+// 成交量单位换算: 沪深来源按手报价(1 手 = 100 股), 港美来源直接给股。对外统一按股呈现。
+export const LOTS_EXCHANGES = new Set(['XSHG', 'XSHE'])
+export const sharesFromLots = (volume, exchange) => (volume === null || volume === undefined ? null : LOTS_EXCHANGES.has(exchange) ? volume * 100 : volume)
+// 成交额单位换算: 沪深来源按万元给, 港美来源直接给元。
+export const LOTS_AMOUNT_EXCHANGES = new Set(['XSHG', 'XSHE'])
+export const amountFromWan = (amount, exchange) => (amount === null || amount === undefined ? null : LOTS_AMOUNT_EXCHANGES.has(exchange) ? Math.round(amount * 10000) : amount)
+
 export class StockError extends Error {
   constructor(code, message, status = 400, extra = {}) {
     super(message)

@@ -30,7 +30,8 @@ test('东财 kline CSV 列序 f52=open/f53=close 与 preKPrice 与源截断标�
   const ctx = klineCtx([{ data: { klines: [CSV_OK], preKPrice: '11.31', dktotal: 100 } }])
   const result = await eastmoney.kline(KLINE_REQ('XSHG', '600519'), ctx)
   const c = result.candles[0]
-  assert.deepEqual({ time: c.time, open: c.open, close: c.close, high: c.high, low: c.low, volume: c.volume }, { time: '2026-10-29', open: 11.30, close: 11.54, high: 11.55, low: 11.29, volume: 1993504 })
+  // 沪深成交量来源单位是手, 对外统一换算成股
+  assert.deepEqual({ time: c.time, open: c.open, close: c.close, high: c.high, low: c.low, volume: c.volume }, { time: '2026-10-29', open: 11.30, close: 11.54, high: 11.55, low: 11.29, volume: 199350400 })
   assert.equal(result.preClose, 11.31)
   // dktotal(100) < limit(250): 数据不足请求量, complete=false(源截断)
   assert.equal(result.complete, false)
@@ -55,6 +56,9 @@ test('东财 trend trends2 8列含avg与preClose', async () => {
   const result = await eastmoney.kline(KLINE_REQ('XSHE', '000001', 'trend'), ctx)
   assert.equal(result.candles.length, 2)
   assert.deepEqual({ time: result.candles[0].time, avg: result.candles[0].avg, open: result.candles[0].open }, { time: '09:30', avg: 11.53, open: 11.53 })
+  // 横轴时刻按市场时区(沪深/Asia/Shanghai)换算成 Unix 秒:09:30 → 01:30Z;缺 at 时客户端才有自造轴的回退
+  assert.equal(result.candles[0].at, Date.UTC(2026, 9, 30, 1, 30) / 1000)
+  assert.equal(result.candles[1].at, Date.UTC(2026, 9, 30, 1, 31) / 1000)
   assert.equal(result.preClose, 11.54)
 })
 
@@ -102,7 +106,7 @@ test('腾讯 kline 三市场 symbol 映射与 param 形态与 preClose 索引', 
   const ctx = tencentKlineCtx(body, log)
   const result = await tencent.kline(KLINE_REQ('XSHE', '000001'), ctx)
   assert.ok(log[0].includes('param=sz000001,day,,,250,qfq'))
-  assert.deepEqual(result.candles[0], { time: '2026-10-29', open: 11.30, close: 11.54, high: 11.55, low: 11.29, volume: 1993504 })
+  assert.deepEqual(result.candles[0], { time: '2026-10-29', open: 11.30, close: 11.54, high: 11.55, low: 11.29, volume: 199350400 })
   assert.equal(result.preClose, 11.54, 'qt[4]=昨收(实测定案)')
   const hk = tencentKlineCtx({ data: { hk00700: { qfqday: [['2026-10-29', '380', '385', '386', '379', '10000000']] } } }, log)
   await tencent.kline(KLINE_REQ('XHKG', '00700'), hk)
