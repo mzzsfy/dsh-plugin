@@ -175,9 +175,25 @@ export async function buildProfile({ version, workRoot, hostDir, seedGateway = f
         '      prefix: dsh',
       ].join('\n') + '\n'
     : ''
+  // welcome ack 预置条目:前端把预览版声明确认落 ui-settings-general 行
+  // (welcomeNoticeVersion = 弹窗文案版本),Windows 工位实测前端 configEditor
+  // 写该行失败弹窗驻留拦截 composer(linux 无此问题),预置行等价于人工点过
+  // "继续",探针不再依赖弹窗自愈;版本串从宿主闭包现提取,提取失败回退已知值
+  const WELCOME_ACK_FALLBACK_VERSION = '2026-09-28.1'
+  let welcomeAckVersion = WELCOME_ACK_FALLBACK_VERSION
+  try {
+    const welcomeClientSrc = readFileSync(join(hostDir, 'node_modules', '@deepseek-ai', 'dsh-client-ui-settings-models', 'lib', 'client.js'), 'utf8')
+    welcomeAckVersion = welcomeClientSrc.match(/WELCOME_NOTICE_VERSION\s*=\s*"([^"]+)"/)?.[1] ?? WELCOME_ACK_FALLBACK_VERSION
+  } catch { /* 宿主无该包(旧代际)时回退;行写错版本串只是弹窗再现,不崩溃 */ }
+  const welcomeAckEntry = [
+    '- id: ui-settings-general',
+    '  name: "@deepseek-ai/dsh-client-ui-settings-general"',
+    '  config:',
+    `    welcomeNoticeVersion: ${welcomeAckVersion}`,
+  ].join('\n') + '\n'
   // patch 文档形态(I06):两段任一存在才为有效条目流;都缺才落空数组文档——
   // 先前 `entry || '[]'` 会在 seedGateway 有值时拼出 "[]\n" 前缀混入条目流
-  const patchBody = (defaultModelEntry + seedGatewayEntry) || '[]\n'
+  const patchBody = (welcomeAckEntry + defaultModelEntry + seedGatewayEntry) || '[]\n'
   writeFileSync(join(profileDir, 'cordis.patch.yml'), patchBody, 'utf8')
   writeFileSync(join(profileDir, '.npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
   // minimumReleaseAge: 0 覆盖全局宽限配置,隔离环境不拦刚发布版本(测试对象经 symlink 指向仓库副本);

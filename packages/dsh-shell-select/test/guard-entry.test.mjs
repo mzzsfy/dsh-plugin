@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { installGuard } from '../src/guard.js'
 import { MAIN_ROW_ID, OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
-import { shellSelectApplyState } from '../src/apply-state.mjs'
+import { shellSelectApplyState, shellSelectExecutorFiber } from '../src/apply-state.mjs'
 
 function row({ id, disabled = false, running = false }) {
   return {
@@ -157,4 +157,80 @@ test('模块归一:两形态皆无的官方包按预载失败处理,停用自愈
   })
   assert.equal(mounts.length, 0)
   assert.ok(log.some(([level, msg]) => level === 'warn' && msg.includes('停用')))
+})
+
+// HOST-022(0.2.2 写事务重评 !!js 表达式):官方行翻回启用且主行执行器在场
+// (句柄在场),guard 卸执行器让位;句柄空缺(guard 代挂态)零动作。
+test('官方行翻回启用+执行器在场:dispose 句柄让位', async () => {
+  const rows = [
+    row({ id: MAIN_ROW_ID, disabled: false, running: true }),
+    row({ id: 'tool-pwsh', disabled: true }),
+    row({ id: 'pwsh-sandbox', disabled: false }),
+  ]
+  const { ctx, log, listeners } = stubCtx({ rows })
+  await installGuard(ctx, { importOfficial: makeImport(), delay: async () => {}, sweepIntervalMs: 3600 * 1000 })
+  const patchContext = listeners.get('loader/patch-context')
+  let disposed = 0
+  shellSelectExecutorFiber.current = { dispose: () => { disposed += 1; return Promise.resolve() } }
+  try {
+    await patchContext(rows[2], () => 'passed')
+    assert.equal(disposed, 1)
+    assert.equal(shellSelectExecutorFiber.current, undefined)
+    assert.ok(log.some(([level, msg]) => level === 'warn' && msg.includes('让位')))
+  } finally {
+    shellSelectExecutorFiber.current = undefined
+  }
+})
+
+test('官方行保持禁用态 patch:零动作', async () => {
+  const rows = [
+    row({ id: MAIN_ROW_ID, disabled: false, running: true }),
+    row({ id: 'tool-pwsh', disabled: true }),
+    row({ id: 'pwsh-sandbox', disabled: true }),
+  ]
+  const { ctx, listeners } = stubCtx({ rows })
+  await installGuard(ctx, { importOfficial: makeImport(), delay: async () => {}, sweepIntervalMs: 3600 * 1000 })
+  const patchContext = listeners.get('loader/patch-context')
+  let disposed = 0
+  shellSelectExecutorFiber.current = { dispose: () => { disposed += 1; return Promise.resolve() } }
+  try {
+    await patchContext(rows[1], () => 'passed')
+    assert.equal(disposed, 0)
+    assert.notEqual(shellSelectExecutorFiber.current, undefined)
+  } finally {
+    shellSelectExecutorFiber.current = undefined
+  }
+})
+
+test('句柄空缺(guard 代挂态):官方行翻回零动作', async () => {
+  const rows = [
+    row({ id: MAIN_ROW_ID, disabled: true }),
+    row({ id: 'tool-pwsh', disabled: true }),
+    row({ id: 'pwsh-sandbox', disabled: false }),
+  ]
+  const { ctx, listeners } = stubCtx({ rows })
+  await installGuard(ctx, { importOfficial: makeImport(), delay: async () => {}, sweepIntervalMs: 3600 * 1000 })
+  const patchContext = listeners.get('loader/patch-context')
+  await patchContext(rows[2], () => 'passed')
+  assert.equal(shellSelectExecutorFiber.current, undefined)
+})
+
+test('官方行求值抛错(disabledUnreliable):零动作安全向', async () => {
+  const rows = [
+    row({ id: MAIN_ROW_ID, disabled: false, running: true }),
+    row({ id: 'tool-pwsh', disabled: true }),
+    row({ id: 'pwsh-sandbox', disabled: true }),
+  ]
+  const { ctx, listeners } = stubCtx({ rows })
+  await installGuard(ctx, { importOfficial: makeImport(), delay: async () => {}, sweepIntervalMs: 3600 * 1000 })
+  const patchContext = listeners.get('loader/patch-context')
+  let disposed = 0
+  shellSelectExecutorFiber.current = { dispose: () => { disposed += 1; return Promise.resolve() } }
+  try {
+    const hostile = { options: { id: 'pwsh-sandbox' }, get disabled() { throw new Error('broken') }, fiber: undefined }
+    await patchContext(hostile, () => 'passed')
+    assert.equal(disposed, 0)
+  } finally {
+    shellSelectExecutorFiber.current = undefined
+  }
 })

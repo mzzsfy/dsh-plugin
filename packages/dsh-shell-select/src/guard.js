@@ -9,7 +9,7 @@
 import { MAIN_ROW_ID, OFFICIAL_ROW_IDS, detectDeadState, rowState, rowScan } from './guard-state.mjs'
 import { officialRowConfig, readSettingsDocument, resolveFromHostTree } from './guard-config.mjs'
 import { officialRowState } from './takeover.mjs'
-import { shellSelectApplyState, shellSelectTakeoverTrace } from './apply-state.mjs'
+import { shellSelectApplyState, shellSelectTakeoverTrace, shellSelectExecutorFiber } from './apply-state.mjs'
 
 // 官方包 npm 名(与行 id 独立:行 id 是 dsh-base 组合行,包名才是模块解析键)
 const OFFICIAL_PACKAGES = {
@@ -171,10 +171,34 @@ export async function installGuard(ctx, {
     }
   }
 
-  // 复活让位:受控行任一即将 init 且本方在场,先卸代挂(waterfall 保证先于其 apply)
+  // 复活让位:受控行任一即将 init 且本方在场,先卸代挂(waterfall 保证先于其 apply)。
+  // HOST-022 分支(0.2.2 写事务重评 !!js 表达式):官方行翻回启用且主行执行器
+  // 在场(句柄在场 = 主行活态接管中),dispose 执行器让位官方链——官方行激活
+  // 与 ShellSelectExecutor 撞 ctx.shell 会炸行激活并被写入门控放大为
+  // settings/rejected;求值抛错按零动作安全向(让位制造 shell 真空,不确定时
+  // 保持现状由 sweep 兜底)。
   const patchContextGuard = async (entry, next) => {
     const id = entry?.options?.id
     if (id !== MAIN_ROW_ID && !OFFICIAL_ROW_IDS.includes(id)) return next()
+    if (id !== MAIN_ROW_ID && entry.fiber?.uid == null && shellSelectExecutorFiber.current !== undefined) {
+      let state
+      try {
+        state = officialRowState(ctx.loader, id)
+      } catch {
+        state = null
+      }
+      if (state?.present === true && state.disabled === false && state.disabledUnreliable === false) {
+        const fiber = shellSelectExecutorFiber.current
+        shellSelectExecutorFiber.current = undefined
+        ctx.logger.warn(`shell-select/guard: 官方行 ${id} 翻回启用,主行执行器卸载让位(官方链接管)`)
+        try {
+          await fiber.dispose()
+        } catch (error) {
+          ctx.logger.warn(`shell-select/guard: 执行器让位 dispose 失败(${error?.message ?? error});官方行激活可能撞服务,由宿主行级失败兜底`)
+        }
+        return next()
+      }
+    }
     if (entry.fiber?.uid != null) return next()
     if (mounted.size === 0 && mounting === null) return next()
     ctx.logger.warn(`shell-select/guard: ${id} 行复活,卸代挂让位`)

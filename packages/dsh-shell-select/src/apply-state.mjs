@@ -32,3 +32,9 @@ export function recordTakeover(event) {
 export function shellSelectTakeoverTrace() {
   return takeoverTrace
 }
+
+// 主行执行器 fiber 句柄(HOST-022 让位通道):mountExecutor 挂载成功后回填,
+// guard 监视官方行翻回启用时 dispose 让位;执行器不在场(guard 代挂态/挂载
+// 失败)恒 undefined,guard 零动作不与代挂官方链抢权。模块级单例,主行 fiber
+// 生命周期内有效。
+export const shellSelectExecutorFiber = { current: undefined }

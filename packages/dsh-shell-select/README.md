@@ -96,3 +96,5 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
 ## dsh 版本兼容
 
 按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.1.7-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。
+
+dsh **0.2.2-rc.1** 实测两处代际契约变更均已适配:system-prompt assemble 的 tools 移到 waterfall 之后合并(投影面特性检测透传,过滤失效仅告警);设置写事务重评行 disabled 的 `!!js` 表达式(官方 pwsh-sandbox 被 runtime-disable 后可能被翻回启用)——guard 监视该翻回,dispose 主行执行器让位官方链,服务不真空、写事务不被拒。
