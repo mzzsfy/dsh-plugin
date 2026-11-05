@@ -390,6 +390,35 @@ window.__ModuleLoader__.load({
     // bailout,改写内容稳定存活;旧版 NotFoundError 仅源于 remove 节点本身。
     // 只对官方齿轮强补:非齿轮(官方原生图形或第三方供给形态)一律不动,
     // 映射/声明命中也不例外。已改写的按 svg 记账与当前 label 同异决定幂等或重写。
+    // 官方 sprite 原样重建:官方 svg 携带 data-icon 声明(sprite 代自描述形态),
+    // 按该属性即可无损重建。返回 null = 非自描述形态(内联代)。
+    function officialSpriteRestore(svg) {
+      const icon = svg.getAttribute ? svg.getAttribute('data-icon') : null
+      if (icon === null || icon === '') return null
+      return '<use href="#' + icon + '"></use>'
+    }
+
+    // 外部图标供给声明:cell 携带他包 data-*-nav-icon 标记(dshmarket 等以此
+    // 声明「本格图标归我供给」)。读公开 DOM 声明做让位裁决,零写零改他包——
+    // 该格即使官方 svg 仍是默认形态,格面呈现权已归外部,强补必双图。
+    function hasExternalNavMark(cell) {
+      const keys = Object.keys(cell.dataset ?? {})
+      for (const key of keys) {
+        if (key === 'navic' || key === 'navicOrig' || key === 'navicYield') continue
+        if (/^[a-z][a-zA-Z0-9]*NavIcon$/.test(key)) return true
+      }
+      return false
+    }
+
+    // 单元格改写判定(内容改写制):不新建 svg、不动属性,直接把官方齿轮 svg 的
+    // 内部内容改写为本插件图标;记账迁到官方 svg 自身(dataset.navic = label),
+    // 原样以 navicOrig 留存,节点与 class/位置等属性保持官方原样。
+    // 裁决(哲学:只替换官方默认齿轮;非默认 icon 一律不管):
+    // 1. yield 记账(navicYield)永不重入;
+    // 2. 外部供给声明格(data-*-nav-icon,他包公开声明):无残留零动作;有残留
+    //    回退——恢复官方原样(navicOrig 优先,data-icon 重建兜底),清账留 yield;
+    // 3. 其余格子只认官方默认齿轮形态(sprite data-icon 声明 / 两代内联齿体),
+    //    非默认形态一律不管;我方记账在即幂等或随 label 重写(语言切换)。
     function decide(cell) {
       const labelNode = cell.querySelector(SELECTOR_LABEL)
       if (labelNode === null) return null
@@ -404,15 +433,35 @@ window.__ModuleLoader__.load({
         }
       }
       if (official === null) return null
-      if (official.dataset.navic === label) return null
+      if (official.dataset.navicYield !== undefined) return null
+      const external = hasExternalNavMark(cell)
       const touched = official.dataset.navic !== undefined && official.dataset.navic !== ''
-      if (!touched && !isGear(official)) return null
-      return { label, inner: svgInner(resolveForLabel(label)), official }
+      if (!touched) {
+        if (external) return null
+        if (!isGear(official)) return null
+        return { label, official, inner: svgInner(resolveForLabel(label)), orig: official.innerHTML }
+      }
+      if (external) return revertDecision(official, official.dataset.navic)
+      if (official.dataset.navic === label) return null
+      return { label, official, inner: svgInner(resolveForLabel(label)), orig: official.dataset.navicOrig ?? official.innerHTML }
+    }
+
+    function revertDecision(official, booked) {
+      const inner = official.dataset.navicOrig !== undefined ? official.dataset.navicOrig : officialSpriteRestore(official)
+      if (inner === null) return null
+      return { label: booked, revert: true, official, inner }
     }
 
     function applyDecision(cell, decision) {
       // 内容改写 + svg 自记账;先清 0.1.x 注入语义的升级残留(带 '1' 标记的旧节点)
       for (const injected of cell.querySelectorAll('[' + ATTR_MARK + '="1"]')) injected.remove()
+      if (decision.revert === true) {
+        decision.official.innerHTML = decision.inner
+        delete decision.official.dataset.navic
+        decision.official.dataset.navicYield = decision.label
+        return
+      }
+      decision.official.dataset.navicOrig = decision.orig
       decision.official.innerHTML = decision.inner
       decision.official.dataset.navic = decision.label
     }

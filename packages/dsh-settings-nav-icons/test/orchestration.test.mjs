@@ -43,6 +43,7 @@ function makeOfficialSvg({ gear = 'legacy' } = {}) {
     style: { display: '' },
     innerHTML: '',
     remove() {},
+    getAttribute(name) { return spriteRef && name === 'data-icon' ? 'dsw-icon-settings-outline-medium' : null },
     querySelector(sel) {
       if (spriteRef) return sel.includes('#dsw-icon-settings-outline') ? { nodeName: 'use' } : null
       return prefix !== undefined && sel.includes(prefix) ? {} : null
@@ -497,6 +498,60 @@ test('replacePass:非齿轮 sprite(官方语义图标)仍零动作', () => {
     raf.flush()
     assert.equal(cell.official.innerHTML.length, 0, '非齿轮不强补')
     assert.equal(cell.official.dataset.navic, '', '无记账')
+  } finally {
+    unload()
+  }
+})
+
+// 我方改写残留 + 第三方自供图:第三方(如 dshmarket mask 插头)自己供图的格,
+// 本包此前的改写残留必须回退——恢复官方原样(data-icon sprite 重建)、清记账
+// 留 yield 永不重入;第三方改的图标非官方默认形态,一律不管。
+test('replacePass:第三方自供图行回退我方残留恢复官方原样', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite', navic: '插件市场' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, undefined, '记账清除')
+    assert.equal(cell.official.dataset.navicYield, '插件市场', '留 yield 永不重入')
+    assert.equal(cell.official.innerHTML, '<use href="#dsw-icon-settings-outline-medium"></use>', '官方 sprite 原样重建')
+  } finally {
+    unload()
+  }
+})
+
+// 回退后幂等:yield 记账在,外部声明格永不重入,第三方 mask 单图
+test('replacePass:回退后 yield 记账永不重入', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite', navic: '插件市场' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    win.__navicIcons.register({ 触发二扫: 'bell' })
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, undefined, '仍无强补记账')
+    assert.equal(cell.official.dataset.navicYield, '插件市场', 'yield 仍在')
+    assert.equal(cell.official.innerHTML, '<use href="#dsw-icon-settings-outline-medium"></use>', '官方原样保持')
+  } finally {
+    unload()
+  }
+})
+
+// 外部声明格无我方残留:零动作不碰官方 svg(供给权归外部,无论其何时接管)
+test('replacePass:外部声明格无残留零动作', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, '', '无强补记账')
+    assert.equal(cell.official.innerHTML, '', '官方 svg 原样未动')
   } finally {
     unload()
   }
