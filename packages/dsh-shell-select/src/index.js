@@ -32,6 +32,7 @@ import {
   takeoverDecision,
 } from './takeover.mjs'
 import { coerceServiceable } from './config.mjs'
+import { shellSelectExecutorFiber } from './apply-state.mjs'
 
 export const name = 'shell-select'
 
@@ -128,6 +129,10 @@ async function mountExecutor(ctx, config) {
     const waiting = fiber?.inject ? Object.keys(fiber.inject).join(',') : '?'
     throw new Error(`执行器 fiber 未激活(state=${fiber?.state},inject=${waiting})`)
   }
+  // 执行器句柄回填(HOST-022):0.2.2 写事务重评官方行 disabled 表达式可翻回
+  // 启用,官方行复活与本方执行器撞 ctx.shell——guard 监视 patch 事件,官方行
+  // 翻回启用即经此句柄 dispose 本方执行器让位。dispose 后句柄清空防重入。
+  shellSelectExecutorFiber.current = fiber
 }
 
 /**

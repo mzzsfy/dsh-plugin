@@ -20,6 +20,8 @@ const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
 export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
+  // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
+  const probeCache = new Map()
   let snapshotSeq = 0, stopped = false, collector, catalog, demand
   const usSymbols = new Map()
   const touched = () => snapshotSeq++
@@ -72,7 +74,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (results.some(r => r.key === key)) continue
       try {
         const result = await executor.run(instance, route.capability, { market: route.market, instrument: route.instrument }, { probe: true, signal })
-        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: result.status === 'ready' ? 'ready' : 'unavailable' })
+        const status = result.status === 'ready' ? 'ready' : 'unavailable'
+        probeCache.set(key, { status, until: now() + WINDOW })
+        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status })
       } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', error: { code: e.code, message: e.message } }) }
     }
     const checkId = randomUUID()
@@ -86,10 +90,12 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const replay = state.replay({ ...operation, action: 'configuration', payload: config })
     if (replay) return replay
     const hash = digest(config), valid = (operation.checkIds || []).map(id => checks.get(id)).filter(c => c?.until > now() && c.hash === hash)
-    if (config.providers.some(p => p.enabled) && !valid.length) fail('CHECK_REQUIRED', '配置已变化，请重新检查来源能力', 422)
+    // 增量合同: 每目标在探针缓存或随附 checkId 中有未过期 ready 记录即通过; 缓存不随无关字段改动失效, 只验新目标与过期目标
     for (const route of config.routes) for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) {
       const instance = config.providers.find(p => p.id === target); registry.validate(instance, route)
-      if (!valid.some(c => c.results.some(r => r.providerInstanceId === target && r.capability === route.capability && r.market === route.market && r.status === 'ready'))) fail('CHECK_REQUIRED', '请先检查所有路由目标能力', 422)
+      const cached = probeCache.get(`${target}:${route.capability}:${route.market}`)
+      if (cached?.status === 'ready' && cached.until > now()) continue
+      if (!valid.some(c => c.results.some(r => r.providerInstanceId === target && r.capability === route.capability && r.market === route.market && r.status === 'ready'))) fail('CHECK_REQUIRED', `${target} 的 ${route.market}/${route.capability} 尚未验证或已过期，请检查后保存`, 422)
     }
     const result = await state.mutate({ ...operation, action: 'configuration', payload: config }, current => {
       if (JSON.stringify(current.providers) === JSON.stringify(config.providers) && JSON.stringify(current.routes) === JSON.stringify(config.routes)) return current

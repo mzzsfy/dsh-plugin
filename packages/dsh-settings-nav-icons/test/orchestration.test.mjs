@@ -30,18 +30,24 @@ function fakeRaf() {
 }
 
 // 官方 svg 桩:gear 模拟官方齿轮路径('legacy'=0.1.x 内联 / 'rc1'=0.1.7
-// primitives 齿体 / true 同 legacy),否则为无路径原生图形;内容改写制下
-// applyDecision 直接写 innerHTML(桩以 innerHTML 属性承接)与 dataset.navic
+// primitives 齿体 / 'sprite'=0.2.2 sprite 引用形态 / true 同 legacy),否则为
+// 无路径原生图形;内容改写制下 applyDecision 直接写 innerHTML(桩以 innerHTML
+// 属性承接)与 dataset.navic
 function makeOfficialSvg({ gear = 'legacy' } = {}) {
   const GEAR_PREFIXES = { legacy: 'M14.0861', rc1: 'M13.0107 7.79377' }
   const prefix = gear === true ? GEAR_PREFIXES.legacy : GEAR_PREFIXES[gear]
+  const spriteRef = gear === 'sprite'
   const svg = {
     tagName: 'svg',
     dataset: { navic: '' },
     style: { display: '' },
     innerHTML: '',
     remove() {},
-    querySelector(sel) { return prefix !== undefined && sel.includes(prefix) ? {} : null },
+    getAttribute(name) { return spriteRef && name === 'data-icon' ? 'dsw-icon-settings-outline-medium' : null },
+    querySelector(sel) {
+      if (spriteRef) return sel.includes('#dsw-icon-settings-outline') ? { nodeName: 'use' } : null
+      return prefix !== undefined && sel.includes(prefix) ? {} : null
+    },
   }
   return svg
 }
@@ -458,6 +464,94 @@ test('replacePass:官方齿轮 svg 内容改写 + 记账,不建节点,再扫幂�
     raf.flush()
     assert.equal(cell.svgs.length, 1, '幂等:再扫无新节点')
     assert.equal(cell.official.dataset.navic, '插件市场')
+  } finally {
+    unload()
+  }
+})
+
+// 0.2.2-rc.1 官方图标改 sprite 引用形态(use[href^="#dsw-icon-settings-outline"]),
+// 内联齿体 path 消失,旧 path 前缀识别全部落空 → 全部格子判非齿轮零动作(生产
+// 实爆:__navicIcons 在场、17 cell 零标记零替换)。sprite 形态必须等同齿轮强补。
+test('replacePass:0.2.2 sprite 形态齿轮等同识别并改写(legacy/rc1 之外第三代)', () => {
+  for (const gear of ['legacy', 'rc1', 'sprite']) {
+    const cell = makeCell('插件市场', { gear })
+    const { win, doc, raf } = loadClient()
+    doc.cells.push(cell)
+    const unload = boot(win.__loaded, doc)
+    try {
+      raf.flush()
+      assert.ok(cell.official.innerHTML.length > 0, gear + ' 形态识别为齿轮并改写')
+      assert.equal(cell.official.dataset.navic, '插件市场', gear + ' 形态记账正常')
+    } finally {
+      unload()
+    }
+  }
+})
+
+// 非齿轮语义 sprite(官方分区原生图形)仍不强补:只放行 settings-outline 语义
+test('replacePass:非齿轮 sprite(官方语义图标)仍零动作', () => {
+  const cell = makeCell('模型', { gear: 'none' })
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.official.innerHTML.length, 0, '非齿轮不强补')
+    assert.equal(cell.official.dataset.navic, '', '无记账')
+  } finally {
+    unload()
+  }
+})
+
+// 我方改写残留 + 第三方自供图:第三方(如 dshmarket mask 插头)自己供图的格,
+// 本包此前的改写残留必须回退——恢复官方原样(data-icon sprite 重建)、清记账
+// 留 yield 永不重入;第三方改的图标非官方默认形态,一律不管。
+test('replacePass:第三方自供图行回退我方残留恢复官方原样', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite', navic: '插件市场' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, undefined, '记账清除')
+    assert.equal(cell.official.dataset.navicYield, '插件市场', '留 yield 永不重入')
+    assert.equal(cell.official.innerHTML, '<use href="#dsw-icon-settings-outline-medium"></use>', '官方 sprite 原样重建')
+  } finally {
+    unload()
+  }
+})
+
+// 回退后幂等:yield 记账在,外部声明格永不重入,第三方 mask 单图
+test('replacePass:回退后 yield 记账永不重入', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite', navic: '插件市场' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    win.__navicIcons.register({ 触发二扫: 'bell' })
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, undefined, '仍无强补记账')
+    assert.equal(cell.official.dataset.navicYield, '插件市场', 'yield 仍在')
+    assert.equal(cell.official.innerHTML, '<use href="#dsw-icon-settings-outline-medium"></use>', '官方原样保持')
+  } finally {
+    unload()
+  }
+})
+
+// 外部声明格无我方残留:零动作不碰官方 svg(供给权归外部,无论其何时接管)
+test('replacePass:外部声明格无残留零动作', () => {
+  const cell = makeCell('插件市场', { gear: 'sprite' })
+  cell.dataset.marketNavIcon = ''
+  const { win, doc, raf } = loadClient()
+  doc.cells.push(cell)
+  const unload = boot(win.__loaded, doc)
+  try {
+    raf.flush()
+    assert.equal(cell.official.dataset.navic, '', '无强补记账')
+    assert.equal(cell.official.innerHTML, '', '官方 svg 原样未动')
   } finally {
     unload()
   }

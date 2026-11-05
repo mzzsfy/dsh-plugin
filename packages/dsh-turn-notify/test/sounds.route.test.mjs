@@ -1,4 +1,4 @@
-// 音效库路由集成测试:USERPROFILE 重定向到临时目录后动态装载 host 路由,
+// 音效库路由集成测试:DSH_HOME 指向临时目录后动态装载 host 路由,
 // 隔离真实 ~/.dsh 音效库;覆盖 sounds 列表 / sound 读取与删除 / upload 写入 /
 // mapping 映射写读的完整链路(此前仅守卫路径有覆盖)。
 import test from 'node:test'
@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto'
 const homeRoot = await mkdtemp(join(tmpdir(), 'tn-sounds-'))
 process.env.USERPROFILE = homeRoot
 process.env.HOME = homeRoot
+process.env.DSH_HOME = join(homeRoot, '.dsh')
 const { apply } = await import('../src/index.js')
 
 test.after(async () => { await rm(homeRoot, { recursive: true, force: true }) })
