@@ -586,3 +586,15 @@ test('D02 拖拽落位计算: 段内前插/后插与折叠隐藏项回填', asyn
   const full = ['a', 'x', 'b', 'y']
   assert.deepEqual([...dragOrder(['a', 'b'], full, 'b', 'a', false)], ['b', 'x', 'a', 'y'], '隐藏项保持原槽位')
 })
+
+test('D03 副标题按自选实际市场面生成', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false })
+  const a = mk('XHKG:equity:00700', '腾讯控股', '00700', 'XHKG'), b = mk('XNAS:equity:NVDA', '英伟达', 'NVDA', 'XNAS'), c = mk('XSHE:equity:000001', '平安银行', '000001', 'XSHE')
+  const build = ids => ({ view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: ids, items: Object.fromEntries([a, b, c].map(s => [s.id, s]).filter(([id]) => ids.includes(id))) }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
+  const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(render(build([a.id, b.id, c.id])), /自选行情 · 沪深A股、港股、美股/, '三市场按固定优先级列出')
+  assert.match(render(build([b.id, a.id])), /自选行情 · 港股、美股/, '只列实际持有市场')
+  assert.match(render(build([c.id])), /自选行情 · 沪深A股/, '深市归入沪深A股')
+  assert.match(render(build([])), /自选行情 · 沪深A股、港股、美股、日股、韩股、英股/, '空自选给出覆盖范围')
+})

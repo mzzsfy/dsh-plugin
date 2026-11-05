@@ -231,6 +231,14 @@ window.__ModuleLoader__.load({
       return age < 3 ? '刚刚更新' : `${age} 秒前更新`
     }
     const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
+    // 副标题市场面: 沪深两所合并一档, 按固定优先级输出, 避免随添加顺序抖动
+    const MARKET_SCOPE = { XSHG: '沪深A股', XSHE: '沪深A股', XHKG: '港股', XNAS: '美股', XNYS: '美股', XJPX: '日股', XKRX: '韩股', XLON: '英股' }
+    const SCOPE_ORDER = ['沪深A股', '港股', '美股', '日股', '韩股', '英股']
+    const scopeText = ids => {
+      const present = new Set(ids.map(id => MARKET_SCOPE[id.split(':')[0]]).filter(Boolean))
+      const listed = SCOPE_ORDER.filter(scope => present.has(scope))
+      return `自选行情 · ${listed.length ? listed.join('、') : SCOPE_ORDER.join('、')}`
+    }
     function Button({ children, onClick, primary, danger, className = '', ...props }) { return h('button', { type: 'button', className: `ssb-button${primary ? ' ssb-primary' : ''}${danger ? ' ssb-danger' : ''} ${className}`, onClick, ...props }, children) }
     function Toggle({ label, checked, onChange, disabled = false }) {
       return h('label', { className: 'ssb-switch' }, h('input', { type: 'checkbox', checked, disabled, onChange: e => onChange(e.target.checked) }), h('span', { className: 'ssb-switch__track' }, h('span', { className: 'ssb-switch__thumb' })), h('span', null, label))
@@ -707,7 +715,7 @@ window.__ModuleLoader__.load({
       }, [view.view])
       return h('div', { className: `ssb-root${data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' }, h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, '自选行情 · 沪深A股')), h('nav', { className: 'ssb-toolbar', 'aria-label': '股票工具操作' },
+        h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' }, h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control.watchlist.order || []))), h('nav', { className: 'ssb-toolbar', 'aria-label': '股票工具操作' },
           h(Button, { primary: view.view === 'list', onClick: () => runtime.updateView({ view: 'list' }) }, '自选'), h(Button, { primary: view.view === 'browse', onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'), h(Button, { primary: view.view === 'search', onClick: () => runtime.updateView({ view: 'search' }) }, '搜索'), h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(runtime.refresh) }, state.busy.refresh ? '刷新中…' : '刷新'),
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
