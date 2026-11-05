@@ -8,19 +8,32 @@ test('配置拒绝重复能力路由与不同变量外的密钥字段', () => {
   assert.equal(parseConfiguration({ providers: [provider()], routes: [route()] }).routes.length, 1)
 })
 // D1: Given全新安装 When取初始控制状态 Then内置免凭据默认实例(目录新浪+行情搜索东财)与沪深六条路由,配置自身合法
-test('初始控制状态内置免凭据默认实例与沪深三能力路由', () => {
+test('初始控制状态内置免凭据默认实例与全市场四能力路由', () => {
   const control = initialControl()
-  assert.equal(control.providers.length, 2)
+  const MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']
+  assert.equal(control.providers.length, 3, '三个免凭据源全开')
+  assert.deepEqual(control.providers.map(p => p.adapterId).sort(), ['eastmoney', 'sina', 'tencent'])
   const catalogInstance = control.providers.find(p => p.adapterId === 'sina')
   const marketInstance = control.providers.find(p => p.adapterId === 'eastmoney')
-  assert.equal(catalogInstance.credentialEnv, null)
-  assert.equal(marketInstance.credentialEnv, null)
-  for (const p of control.providers) assert.ok(p.budget.requestsPerMinute > 0)
-  assert.equal(control.routes.length, 6)
-  for (const m of ['XSHG', 'XSHE']) for (const capability of ['catalog', 'search', 'quotes']) {
-    const r = control.routes.find(r => r.market === m && r.capability === capability)
-    assert.equal(r.primaryInstanceId, capability === 'catalog' ? catalogInstance.id : marketInstance.id)
+  for (const p of control.providers) { assert.equal(p.credentialEnv, null, '默认实例不需要凭据'); assert.ok(p.budget.requestsPerMinute > 0) }
+  // 目录与搜索只有沪深港美有来源节点;报价与K线八市场齐备
+  const NODE_MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']
+  assert.equal(control.routes.length, NODE_MARKETS.length * 2 + MARKETS.length * 2, '目录与搜索五市场 + 报价与K线八市场')
+  for (const m of MARKETS) for (const capability of ['search', 'quotes', 'kline', 'catalog']) {
+    const r = control.routes.find(route => route.market === m && route.capability === capability)
+    if (!NODE_MARKETS.includes(m) && capability !== 'quotes' && capability !== 'kline') { assert.equal(r, undefined, `${m} 无来源节点时不应配 ${capability} 路由`); continue }
+    assert.ok(r, `${m} 缺 ${capability} 路由`)
+    const expected = capability === 'catalog' && (m === 'XSHG' || m === 'XSHE') ? catalogInstance.id : capability === 'quotes' && m === 'XNYS' ? 'sn-default' : marketInstance.id
+    assert.equal(r.primaryInstanceId, expected, `${m}/${capability} 主源`)
   }
+  // 备用源只允许出现在报价与K线,且只在备用源探针可验证的市场
+  const fallbacks = control.routes.filter(route => route.fallbackInstanceIds.length)
+  assert.equal(fallbacks.length, 3 * 2, '沪深港各两条(报价+K线)')
+  assert.ok(fallbacks.every(route => ['quotes', 'kline'].includes(route.capability)), '目录与搜索不得配置备用源')
+  assert.ok(fallbacks.every(route => ['XSHG', 'XSHE', 'XHKG'].includes(route.market)), '备用市场必须在备用源探针可验证范围内')
+  assert.ok(fallbacks.every(route => route.failoverMode === 'network'))
+  assert.ok(fallbacks.filter(route => route.capability === 'quotes').every(route => route.fallbackInstanceIds[0] === 'sn-default'), '报价备源为新浪')
+  assert.ok(fallbacks.filter(route => route.capability === 'kline').every(route => route.fallbackInstanceIds[0] === 'tx-backup'), 'K线备源为腾讯')
   assert.doesNotThrow(() => parseConfiguration({ providers: control.providers, routes: control.routes }))
 })
 

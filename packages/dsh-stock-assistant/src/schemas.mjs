@@ -21,6 +21,8 @@ export const klineQuerySchema = z.strictObject({
   securityId: z.string().regex(/^[\w]+:equity:[\w.]{1,15}$/),
   period: z.enum(['trend', '1d', '1w', '1M']),
   limit: z.coerce.number().int().min(20).max(1000).default(250),
+  // 强制刷新:客户端详情页刷新走 ?force=1,服务端据此跳过缓存读;缺省按缓存
+  force: z.enum(['0', '1']).optional(),
 })
 // 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
 const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
@@ -61,15 +63,33 @@ export const controlSchema = z.object({ revision: z.number().int().nonnegative()
   try { parseConfiguration({ providers: control.providers, routes: control.routes }) } catch { ctx.addIssue({ code: 'custom', message: '来源配置不一致' }) }
 })
 export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
-// 默认数据源:免凭据公开源+保守预算,首用即可检查保存;目录走新浪分市场节点,行情与搜索走东财。
+// 推荐配置:三个免凭据源全开,八市场四能力路由齐备,公开源无SLA故对可覆盖的市场串备源。
 export const defaultConfig = () => {
-  const catalog = { id: 'sn-catalog', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: { requestsPerMinute: 120, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { catalog: 60 } } }
-  const market = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { kline: 30 } } }
-  const routes = ['XSHG', 'XSHE'].flatMap(m => [
-    { id: `${m.toLowerCase()}-catalog`, capability: 'catalog', market: m, instrument: 'equity', primaryInstanceId: catalog.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
-    { id: `${m.toLowerCase()}-search`, capability: 'search', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
-    { id: `${m.toLowerCase()}-quotes`, capability: 'quotes', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
-  ])
-  return { providers: [catalog, market], routes }
+  const budget = (requestsPerMinute, capabilityLimits = {}) => ({ requestsPerMinute, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits })
+  const providers = [
+    { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: budget(60, { kline: 30 }) },
+    { id: 'sn-default', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
+    { id: 'tx-backup', adapterId: 'tencent', enabled: true, credentialEnv: null, quotaGroup: 'free-backup', budget: budget(60, { kline: 20 }) },
+  ]
+  // 备用源只在探针可验证的组合上声明:腾讯美股K线需先由搜索建立代码映射,探针期必然不可用
+  const quoteBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
+  const klineBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
+  // 目录只有沪深港美有来源节点(实测东财 clist 的 fs 只覆盖这五个),其余市场不配目录路由
+  const catalogCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
+  // 搜索只有沪深港美可用:东财联想对日韩英返回的候选市场号不在既有前缀表内,配了也是空结果
+  const searchCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
+  const route = (market, capability, primary, fallback = null) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: fallback ? [fallback] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
+  const routes = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'].flatMap(market => {
+    const cn = market === 'XSHG' || market === 'XSHE'
+    return [
+      // 沪深目录走新浪分市场节点(单请求一页,不依赖东财分页);目录不支持备用源
+      ...(catalogCovered.has(market) ? [route(market, 'catalog', cn ? 'sn-default' : 'em-default')] : []),
+      ...(searchCovered.has(market) ? [route(market, 'search', 'em-default')] : []),
+      // 纽交所报价主源用新浪:东财美股 secid 依赖搜索建立的交易所映射,探针期无映射时取不到
+      route(market, 'quotes', market === 'XNYS' ? 'sn-default' : 'em-default', quoteBackup.has(market) ? 'sn-default' : null),
+      route(market, 'kline', 'em-default', klineBackup.has(market) ? 'tx-backup' : null),
+    ]
+  })
+  return { providers, routes }
 }
 export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })
