@@ -19,11 +19,21 @@ window.__ModuleLoader__.load({
         const minCaps = (adapters.find(x => x.adapterId === supporters[0].adapterId)?.capabilities || []).length
         const preferred = supporters.find(p => p.id === marketRoute?.primaryInstanceId && (adapters.find(x => x.adapterId === p.adapterId)?.capabilities || []).length === minCaps)
         const primary = preferred || supporters[0]
-        const fallbacks = supporters.filter(p => p.id !== primary.id).map(p => p.id)
-        out.push({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary.id, fallbackInstanceIds: fallbacks, failoverMode: fallbacks.length ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
+        // 只有报价与K线支持备用源(schema 约束), 其余能力恒单源不切换
+        const failover = ['quotes', 'kline'].includes(capability)
+        const fallbacks = failover ? supporters.filter(p => p.id !== primary.id).map(p => p.id).slice(0, 1) : []
+        out.push({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary.id, fallbackInstanceIds: fallbacks, failoverMode: failover && fallbacks.length ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
       }
       return out
     }
+    // 探针失败按目标粒度剔除: 主源不可用提升首个可用备源, 备源不可用仅移除该备源, 全部目标不可用才删路由。
+    // 适配器声明的能力矩阵是粗粒度笛卡尔积(如腾讯声明 kline 含美股但实际不支持), 整条剔除会连带丢掉可用备源。
+    const pruneDeniedTargets = (routes, deniedKeys) => routes.map(route => {
+      const target = id => `${id}:${route.capability}:${route.market}`
+      const alive = [route.primaryInstanceId, ...route.fallbackInstanceIds].filter(id => !deniedKeys.has(target(id)))
+      if (!alive.length) return null
+      return { ...route, primaryInstanceId: alive[0], fallbackInstanceIds: alive.slice(1, 2), failoverMode: alive.length > 1 ? route.failoverMode : 'off' }
+    }).filter(Boolean)
     const BROWSE_MARKETS = { XSHG: '沪 A', XSHE: '深 A', XHKG: '港股', XNAS: '纳斯达克', XNYS: '纽交所', XJPX: '日本', XKRX: '韩国', XLON: '英国' }
     function createPageRuntime({ layout, bus, tools, document: doc = document, fetch: request = fetch }) {
       let disposed = false, generation = 0, demandGeneration = 0, pageId = crypto.randomUUID(), timer, heartbeat, undoTimer, queryGeneration = 0, querying, composing = false
@@ -160,8 +170,7 @@ window.__ModuleLoader__.load({
                 deniedAll.push(...check.checks.filter(c => c.status !== 'ready').map(c => c.providerInstanceId + ':' + c.capability + ':' + c.market))
               }
               if (!deniedAll.length) break
-              const deniedKeys = new Set(deniedAll)
-              routes = routes.filter(r => !deniedKeys.has(r.primaryInstanceId + ':' + r.capability + ':' + r.market))
+              routes = pruneDeniedTargets(routes, new Set(deniedAll))
               if (!routes.length) { patch({ error: '已启用数据源暂无可用探针，请检查网络后重试', checkProgress: null }); return }
             }
             patch({ checkProgress: null })

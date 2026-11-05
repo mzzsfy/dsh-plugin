@@ -376,6 +376,45 @@ test('bootstrap: 全能力路由补全', async () => {
   assert.equal(routes2.find(r => r.market === 'XSHG' && r.capability === 'catalog').primaryInstanceId, 'sn-catalog', '目录优先专属适配器(唯一支持者)')
   // 无启用实例: 返回原样不炸
   assert.equal(bootstrapRoutes({ adapters, providers: [{ id: 'x', adapterId: 'eastmoney', enabled: false }], routes: existing }).length, 1)
+  // 备源上限 1: 多实例支持同市场同能力时只取首个支持者, 否则 schema 拒绝整份配置
+  const adapters3 = [{ adapterId: 'eastmoney', capabilities: ['quotes'], markets: ['XSHG'] }, { adapterId: 'sina', capabilities: ['quotes'], markets: ['XSHG'] }, { adapterId: 'tencent', capabilities: ['quotes'], markets: ['XSHG'] }]
+  const providers3 = adapters3.map((a, i) => ({ id: 'p' + i, adapterId: a.adapterId, enabled: true }))
+  const routes3 = bootstrapRoutes({ adapters: adapters3, providers: providers3, routes: [] })
+  assert.equal(routes3.length, 1)
+  assert.equal(routes3[0].fallbackInstanceIds.length, 1, '备源最多一个')
+  // 只有 quotes/kline 支持备源: 目录与搜索路由恒无备源且不自动切换
+  const adapters4 = [{ adapterId: 'eastmoney', capabilities: ['catalog', 'search'], markets: ['XSHG'] }, { adapterId: 'sina', capabilities: ['catalog'], markets: ['XSHG'] }]
+  const providers4 = adapters4.map((a, i) => ({ id: 'q' + i, adapterId: a.adapterId, enabled: true }))
+  for (const r of bootstrapRoutes({ adapters: adapters4, providers: providers4, routes: [] })) {
+    if (!['quotes', 'kline'].includes(r.capability)) { assert.deepEqual(r.fallbackInstanceIds, [], `${r.capability} 无备源`); assert.equal(r.failoverMode, 'off', `${r.capability} 不自动切换`) }
+  }
+})
+// 探针失败按目标粒度剔除: 主源不可用提升备源, 备源不可用仅移除备源, 全部不可用才删路由
+test('pruneDeniedTargets: 主源失败提升备源而非删整条路由', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
+  const start = src.indexOf('const pruneDeniedTargets')
+  const end = src.indexOf('const BROWSE_MARKETS')
+  const pruneDeniedTargets = new Function(`${src.slice(start, end)}; return pruneDeniedTargets`)()
+  const route = { id: 'xnas-kline', capability: 'kline', market: 'XNAS', instrument: 'equity', primaryInstanceId: 'ts-1', fallbackInstanceIds: ['em-default'], failoverMode: 'network', maxDelaySeconds: null, acceptUnknownDelay: true }
+  // 主源腾讯美股K线不支持, 备源东财可用: 提升东财为主源, 不留死备源
+  const lifted = pruneDeniedTargets([route], new Set(['ts-1:kline:XNAS']))
+  assert.equal(lifted.length, 1, '不删整条路由')
+  assert.equal(lifted[0].primaryInstanceId, 'em-default', '可用备源提升为主源')
+  assert.deepEqual(lifted[0].fallbackInstanceIds, [], '被拒目标不留在备源')
+  assert.equal(lifted[0].failoverMode, 'off', '无备源时关闭故障切换')
+  // 备源不可用: 仅移除备源, 主源不动
+  const trimmed = pruneDeniedTargets([route], new Set(['em-default:kline:XNAS']))
+  assert.equal(trimmed.length, 1)
+  assert.equal(trimmed[0].primaryInstanceId, 'ts-1', '主源保留')
+  assert.deepEqual(trimmed[0].fallbackInstanceIds, [])
+  // 全部目标不可用: 删除该路由
+  assert.equal(pruneDeniedTargets([route], new Set(['ts-1:kline:XNAS', 'em-default:kline:XNAS'])).length, 0)
+  // 无拒绝目标: 原样返回
+  const untouched = pruneDeniedTargets([route], new Set())
+  assert.equal(untouched[0].primaryInstanceId, 'ts-1')
+  assert.deepEqual(untouched[0].fallbackInstanceIds, ['em-default'])
+  assert.equal(untouched[0].failoverMode, 'network')
 })
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
