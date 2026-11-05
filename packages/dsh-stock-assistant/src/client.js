@@ -142,7 +142,7 @@ window.__ModuleLoader__.load({
         check: configuration => action('check', () => api('/provider-check', 'POST', configuration)),
         switchPrimary: routeId => action('switch', async () => { const data = await api('/route-selection', 'POST', { routeId, target: 'primary', expectedRoutingRevision: state.data.routingRevision, expectedRouteEpoch: state.data.routeSelections[routeId].routeEpoch }); applySnapshot(data) }),
         setKlinePeriod(key) { patch({ klinePeriod: key }) },
-        setKlineError(securityId, message) { patch({ kline: { loading: false, error: message, candles: null } }) },
+        setKlineError(securityId, message, code = '') { patch({ kline: { loading: false, error: message, errorCode: code, candles: null } }) },
         // 一键K线路由: 已启用市场(verified 且 quotes 路由存在即视为启用)逐一生成 (market,'kline') 草稿;
         // 主源=该市场 quotes 主源(支持 kline 的备选优先), 备源=支持 kline 的其他启用实例;已存在 kline 路由的市场跳过。
         // 检查通过即保存: 分批探测(避开单请求预算), denied 目标剔除后整轮重查, 收敛即提交。
@@ -494,7 +494,7 @@ window.__ModuleLoader__.load({
           const theme = themeOf()
           chartRef.current = LWC.createChart(holder.current, { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: LWC.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true })
           maybeFill(runtime.getKlineResult(item.id, period))
-        }).catch(e => runtime.setKlineError(item.id, e.message))
+        }).catch(e => runtime.setKlineError(item.id, e.message, e.code))
         mo = new MutationObserver(() => { const chart = chartRef.current; if (!chart) return; const t = themeOf(); chart.applyOptions({ layout: { background: { color: t.background }, textColor: t.textColor }, grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } } }) })
         mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
         return () => { dead = true; mo.disconnect(); chartRef.current?.remove(); chartRef.current = null }
@@ -502,7 +502,7 @@ window.__ModuleLoader__.load({
       // effect B: 证券/周期变化→拉数据→图表在则灌
       React.useEffect(() => {
         let dead = false
-        runtime.loadKline(item.id, period).then(result => { if (!dead) maybeFill(result) }).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message) })
+        runtime.loadKline(item.id, period).then(result => { if (!dead) maybeFill(result) }).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
         return () => { dead = true }
       }, [item.id, period])
       return h('div', { className: 'ssb-kline' },
