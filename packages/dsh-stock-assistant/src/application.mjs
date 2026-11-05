@@ -18,6 +18,8 @@ import { createKlineCache } from './kline-cache.mjs'
 import { fail, parseSecurityId, MARKET_META } from './market-model.mjs'
 const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
+const US_SYMBOL_LIMIT = 500
+const PROBE_LIMIT = 512
 export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
   // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
@@ -65,6 +67,8 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const caps = z.array(z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])).min(1).max(5).parse(input.capabilities)
     const at = now()
     for (const [id, check] of checks) if (check.until <= at) checks.delete(id)
+    // 过期目标直接淘汰: 键空间随实例/市场/能力组合有界, 但不留过期条目占位
+    for (const [key, entry] of probeCache) if (entry.until <= at) probeCache.delete(key)
     if (checks.size >= 64) fail('CHECK_LIMIT', '检查请求过多，请稍后重试', 429)
     const results = []
     for (const route of config.routes.filter(r => caps.includes(r.capability))) for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) {
@@ -76,6 +80,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
         const result = await executor.run(instance, route.capability, { market: route.market, instrument: route.instrument }, { probe: true, signal })
         const status = result.status === 'ready' ? 'ready' : 'unavailable'
         probeCache.set(key, { status, until: now() + WINDOW })
+        while (probeCache.size > PROBE_LIMIT) probeCache.delete(probeCache.keys().next().value)
         results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status })
       } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', error: { code: e.code, message: e.message } }) }
     }
@@ -140,7 +145,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (phase === 'remote') {
         for (const item of items) {
           const row = item.raw && typeof item.raw === 'object' ? item.raw : null
-          if (row?.MktNum && /^10[567]$/.test(row.MktNum)) usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: now() })
+          if (row?.MktNum && /^10[567]$/.test(row.MktNum)) {
+            usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: now() })
+            while (usSymbols.size > US_SYMBOL_LIMIT) usSymbols.delete(usSymbols.keys().next().value)
+          }
         }
       }
       for (const [key, value] of usSymbols) if (now() - value.at > US_SYMBOL_TTL) usSymbols.delete(key)

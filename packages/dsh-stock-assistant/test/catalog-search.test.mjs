@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createCatalog } from '../src/catalog.mjs'
+import { createCatalog, setBounded } from '../src/catalog.mjs'
 import { makeSecurity } from '../src/market-model.mjs'
 import { openState } from '../src/state.mjs'
 import { memoryStorage } from './helpers.mjs'
@@ -60,5 +60,20 @@ test('S04 单实例限流不终止整个搜索', async () => {
   const { catalog, state } = await harness({ run: async () => { throw rateLimited() } })
   const items = await catalog.remote('茅台')
   assert.deepEqual(items, [], '限流时不抛错且返回已有本地结果')
+  catalog.dispose(); await state.close()
+})
+
+test('S05 缓存有界: 大量不同查询后缓存与在途表不越界', async () => {
+  const map = new Map()
+  for (let i = 0; i < 100; i++) setBounded(map, `k${i}`, i, 16)
+  assert.equal(map.size, 16, '写入超限即淘汰最早条目')
+  assert.equal(map.has('k99'), true, '保留最新条目')
+  assert.equal(map.has('k0'), false, '淘汰最早条目')
+  const { catalog, state } = await harness()
+  for (let i = 0; i < 100; i++) await catalog.remote(`查询${i}`)
+  const stats = catalog.stats()
+  assert.ok(stats.searchCache <= 64, `结果缓存不越界(${stats.searchCache})`)
+  assert.ok(stats.candidates <= 200, `候选表不越界(${stats.candidates})`)
+  assert.equal(stats.searchFlights, 0, '在途表在完成后清空')
   catalog.dispose(); await state.close()
 })

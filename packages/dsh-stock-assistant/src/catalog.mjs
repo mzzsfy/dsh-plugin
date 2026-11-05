@@ -3,8 +3,15 @@ import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 const SEARCH_TTL = 60 * 1000
 const SEARCH_CACHE_LIMIT = 64
+const SEARCH_FLIGHT_LIMIT = 32
 const CANDIDATE_TTL = 5 * 60 * 1000
 const CANDIDATE_LIMIT = 200
+// 有界写入: Map 迭代序即插入序, 超限淘汰最早条目, 保证长跑内存不随查询次数增长
+export function setBounded(map, key, value, limit) {
+  map.set(key, value)
+  while (map.size > limit) map.delete(map.keys().next().value)
+  return map
+}
 const localDate = ms => new Date(ms + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
 // 实例id→其适配器 markets 集合(搜索市场面唯一事实源)
 function adapterMarketsOf(config, registry) {
@@ -98,13 +105,14 @@ export function createCatalog({ state, getControl = state.get, router, executor,
         while (candidates.size > CANDIDATE_LIMIT) candidates.delete(candidates.keys().next().value)
         if (!config.routes.some(r => r.capability === 'search') && !records('catalog').length) fail('CATALOG_NOT_READY', '目录未就绪，请先在设置中配置目录来源或搜索来源并同步', 422)
         const items = [...results.values()].slice(0, 20)
-        searchCache.set(key, { items, until: now() + SEARCH_TTL })
-        while (searchCache.size > SEARCH_CACHE_LIMIT) searchCache.delete(searchCache.keys().next().value)
+        setBounded(searchCache, key, { items, until: now() + SEARCH_TTL }, SEARCH_CACHE_LIMIT)
         return items
       })()
-      searchFlights.set(key, { job, signal })
+      setBounded(searchFlights, key, { job, signal }, SEARCH_FLIGHT_LIMIT)
       try { return await job } finally { if (searchFlights.get(key)?.job === job) searchFlights.delete(key) }
     },
+    // 内存占用可观测: 长跑核对缓存不越界
+    stats: () => ({ searchCache: searchCache.size, candidates: candidates.size, searchFlights: searchFlights.size, syncFlights: flights.size }),
     async ensure() {
       for (const route of getControl().routes.filter(r => ['catalog', 'calendar'].includes(r.capability))) {
         if (getControl().providers.find(p => p.id === route.primaryInstanceId)?.budget.requestsPerMinute === null) continue
