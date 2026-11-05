@@ -43,7 +43,8 @@ export function createCatalog({ state, getControl = state.get, router, executor,
   function search(q, limit = 20) {
     const query = q.trim().toLowerCase()
     if (!query) return []
-    const score = s => s.code === query ? 0 : s.officialName.toLowerCase() === query ? 1 : s.code.startsWith(query) ? 2 : s.officialName.toLowerCase().includes(query) ? 3 : s.cnspell?.toLowerCase().startsWith(query) ? 4 : 99
+    // 代码大小写不敏感: 美股代码全大写, 逐字比较会让本地目录搜不到 aapl/apple
+    const score = s => { const code = s.code.toLowerCase(), name = s.officialName.toLowerCase(); return code === query ? 0 : name === query ? 1 : code.startsWith(query) ? 2 : name.includes(query) ? 3 : s.cnspell?.toLowerCase().startsWith(query) ? 4 : 99 }
     return all().map(s => ({ s, rank: score(s) })).filter(r => r.rank < 99).sort((a, b) => a.rank - b.rank || a.s.id.localeCompare(b.s.id)).slice(0, limit).map(r => r.s)
   }
   return {
