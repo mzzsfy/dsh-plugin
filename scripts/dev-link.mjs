@@ -30,18 +30,18 @@
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
  *     realpath,天然读到仓库工作副本;同时本脚本在 home 补丁层维护 hmr 覆盖行,
  *     watch 仓库 packages —— host 半区保存即热重载,client 半区刷新页面即生效。
- *   - 包内外部依赖(dependencies/devDependencies 含非 @mzzsfy)由本脚本自动安装
- *     (--omit=peer,与 CI test.yml 同源):工作副本经 junction realpath 解析,依赖
- *     须物理存在于包内 node_modules;已装跳过,重跑幂等
+ *   - 包内 dependencies 的外部依赖(非 @mzzsfy)由本脚本自动安装(--omit=dev --omit=peer):
+ *     工作副本经 junction realpath 解析,依赖须物理存在于包内 node_modules;devDeps 不装
+ *     不校验(devDeps 落包内会截胡宿主 API 解析链,构建/测试态依赖走 install-externals.mjs),
+ *     已装按 node_modules/<名>/package.json 物理存在核验,重跑幂等
  *   - pnpm install(依赖图变化)与 dsh plugin add 会重建 node_modules:之后必须重跑本脚本;
  *     增量 install(Already up to date)按实测不动 junction,重跑幂等可作兜底。
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
 import {spawnSync} from 'node:child_process'
-import {createRequire} from 'node:module'
 import {existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
-import {fileURLToPath, pathToFileURL} from 'node:url'
+import {fileURLToPath} from 'node:url'
 import {judgeHostMin} from './compare-version.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -358,32 +358,29 @@ function pnpmInstall(allowFresh) {
 }
 
 /**
- * 包内外部依赖自动安装(发现口径与 CI test.yml"安装含外部依赖的包"同源):
- * dependencies/devDependencies 含非 @mzzsfy 依赖的包,包内 npm install --omit=dev --omit=peer,
+ * 包内外部依赖自动安装(口径 = dependencies):
+ * dependencies 含非 @mzzsfy 依赖的包,包内 npm install --omit=dev --omit=peer,
  * 供工作副本(junction realpath)的 Node ESM 逐级向上解析命中包内 node_modules。
- * 只装 dependencies:devDeps 的 @deepseek-ai 钉版若落包内会截胡宿主 API 解析链,
- * 废掉"本体升级立即生效"模型;profile 安装态由 pnpm 依赖声明承载,此安装只为开发态。
- * 已装过(包内有 node_modules)即跳过,重跑幂等;失败清残留再计入失败,防半装态固化。
+ * devDependencies 不装不校验:devDeps 的 @deepseek-ai 钉版若落包内会截胡宿主 API 解析链,
+ * 废掉"本体升级立即生效"模型;构建/测试态依赖由 scripts/install-externals.mjs 承载。
+ * 已装核验 = 逐依赖 node_modules/<名>/package.json 物理存在——不用 require.resolve:
+ * ESM-only exports(lightweight-charts 等)无 require 条件恒报错,解析式探测失明;
+ * 目录形态核验覆盖整包消失的半装态,与 npm 安装布局同构。失败清残留再计入失败,防半装态固化。
  */
 function installPackageDeps(name) {
   const pkgDir = join(repoRoot, 'packages', name)
   const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
-  const externalDeps = ['dependencies', 'devDependencies']
-    .flatMap((k) => Object.keys(manifest[k] ?? {}))
-    .filter((n) => !n.startsWith(SCOPE))
+  const externalDeps = Object.keys(manifest.dependencies ?? {}).filter((n) => !n.startsWith(SCOPE))
   if (externalDeps.length === 0) return true
   if (existsSync(join(pkgDir, 'node_modules'))) {
-    // 摘要比对(I05):目录存在即跳过曾固化半装态——逐外部依赖解析核验,
+    // 摘要比对(I05):目录存在即跳过曾固化半装态——逐外部依赖核验包清单文件存在,
     // 全部命中才跳过,任一缺失重装修复
-    const require = createRequire(pathToFileURL(join(pkgDir, 'package.json')))
-    const missing = externalDeps.filter((dep) => {
-      try { require.resolve(dep); return false } catch { return true }
-    })
+    const missing = externalDeps.filter((dep) => !existsSync(join(pkgDir, 'node_modules', dep, 'package.json')))
     if (missing.length === 0) {
       console.log(`OK   ${name}: 包内依赖已存在,跳过安装`)
       return true
     }
-    console.log(`REPAIR ${name}: 包内依赖缺失 ${missing.join(', ')},重装`)
+    console.log(`REPAIR ${name}: 包内依赖缺失 ${missing.join(', ')},重装(--omit=dev,包内已有 devDeps 将被剪除,测试态依赖缺失时重跑 scripts/install-externals.mjs 恢复)`)
   }
   console.log(`$ 包内依赖安装 ${name}(npm install --omit=dev --omit=peer)`)
   const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
