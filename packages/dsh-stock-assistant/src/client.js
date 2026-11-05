@@ -247,6 +247,17 @@ window.__ModuleLoader__.load({
       }
       return h('span', { className: 'ssb-muted ssb-source', title: entry?.lastError?.message || '' }, entry?.health && entry.health !== 'ok' ? `${({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health} · ` : '', quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价')
     }
+    // 拖拽落位: 返回新的完整顺序; 折叠隐藏项按原槽位回填, 保证提交的是全量 order
+    function dragOrder(sequence, order, from, over, after) {
+      const visible = sequence.filter(id => id !== from)
+      const at = visible.indexOf(over)
+      if (at < 0) return null
+      visible.splice(at + (after ? 1 : 0), 0, from)
+      const merged = []
+      let index = 0
+      for (const id of order) merged.push(sequence.includes(id) ? visible[index++] : id)
+      return merged
+    }
     function Watchlist({ runtime, state }) {
       const { data, view, busy } = state, control = data.control, w = control.watchlist
       const sortedOrder = [...w.order].sort((a, b) => {
@@ -272,40 +283,72 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), stats ? h('span', { className: 'ssb-muted' }, `${w.order.length} 只 · ${stats.up} 涨 ${stats.down} 跌 · 合计 ${signed(Number(stats.sum.toFixed(2)))}${heldText}${freshnessText(data.quotes) ? ` · ${freshnessText(data.quotes)}` : ''}`) : null, h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
         !order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
           h('div', { className: 'ssb-table-scroll', onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
-            h('table', { className: 'ssb-table' }, h('thead', null, h('tr', null, h('th', null, '证券'), h('th', { className: 'ssb-number' }, '现价'), h('th', { className: 'ssb-aux ssb-col-status' }, h('span', { className: 'ssb-sr' }, '来源 / 状态')), h('th', null, h('span', { className: 'ssb-sr' }, '操作')))),
-              h('tbody', null, ...(() => {
+            h('div', { className: 'ssb-rows', role: 'list', 'aria-label': '自选列表' }, ...(() => {
                 // 分组分段: 仅手动序生效(全局排序即比较语义不分区); 置顶区不进组段; 组序=首现序; 折叠组隐藏成员
+                // 拖拽排序: 提交完整显示序, 折叠组隐藏项保持原槽位由 order 回填
+                const sequence = []
+                const laneOf = id => `${w.items[id].pinned ? 'p' : 'n'}|${w.items[id].group || ''}`
+                const commitOrder = (from, over, after) => {
+                  if (!from || !over || from === over || laneOf(from) !== laneOf(over)) return
+                  const merged = dragOrder(sequence, order, from, over, after)
+                  if (!merged) return
+                  // 失败错误由 action 通道落到顶部横幅, 这里只防未处理拒绝
+                  runtime.mutate('reorder', { order: merged }).catch(() => {})
+                }
                 const rowOf = id => {
                   const item = w.items[id], entry = data.quotes[id], q = entry?.quote
-                const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
-                return h(React.Fragment, { key: id }, h('tr', { className: `${view.detailId === id ? 'ssb-selected' : ''}${entry?.health !== 'ok' ? ' ssb-stale' : ''}` },
-                  h('td', null, h('button', { className: 'ssb-stock-name', 'data-security-id': id, onClick: () => open(id), onFocus: () => { if (view.focusId !== id) runtime.updateView({ focusId: id }) }, onBlur: e => { if (!e.relatedTarget?.closest('.ssb-stock-name')) runtime.updateView({ keyboardNavigating: false, frozenOrder: null }) }, onKeyDown: e => {
+                  sequence.push(id)
+                  const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
+                  const plPct = item.cost && q?.last != null ? Number((Number(q.last) - item.cost) / item.cost * 100).toFixed(1) : null
+                  const amplitude = q?.high != null && q?.low != null && Number(q.previousClose) > 0 ? Number(((Number(q.high) - Number(q.low)) / Number(q.previousClose)) * 100).toFixed(1) : null
+                  const dragging = view.dragId === id
+                  const dropEdge = view.dropAt?.id === id ? view.dropAt.after ? ' ssb-drop-after' : ' ssb-drop-before' : ''
+                  const canDrag = view.sort === 'manual' && !busy.write
+                  const changeOrder = (from, over, after) => commitOrder(from, over, after)
+                  return h(React.Fragment, { key: id },
+                    h('div', {
+                      className: `ssb-row${view.detailId === id ? ' ssb-selected' : ''}${entry?.health !== 'ok' ? ' ssb-stale' : ''}${dragging ? ' ssb-dragging' : ''}${dropEdge}${item.pinned ? ' ssb-pinned' : ''}`,
+                      role: 'listitem', 'data-security-id': id, draggable: canDrag,
+                      onDragStart: e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); runtime.updateView({ dragId: id, dropAt: null }) },
+                      onDragEnd: () => runtime.updateView({ dragId: null, dropAt: null }),
+                      onDragOver: e => {
+                        if (!view.dragId || view.dragId === id || laneOf(view.dragId) !== laneOf(id)) return
+                        e.preventDefault()
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        const after = e.clientY > rect.top + rect.height / 2
+                        if (view.dropAt?.id !== id || view.dropAt.after !== after) runtime.updateView({ dropAt: { id, after } })
+                      },
+                      onDrop: e => { e.preventDefault(); changeOrder(view.dragId, id, view.dropAt?.after === true); runtime.updateView({ dragId: null, dropAt: null }) },
+                    },
+                    h('div', { className: 'ssb-row-main' },
+                      h('span', { className: 'ssb-grip', 'aria-hidden': true, title: canDrag ? '拖动排序' : '切回手动顺序后可拖动' }, '⠿'),
+                      h('button', { className: 'ssb-stock-name', 'data-security-id': id, onClick: () => open(id), onFocus: () => { if (view.focusId !== id) runtime.updateView({ focusId: id }) }, onBlur: e => { if (!e.relatedTarget?.closest('.ssb-stock-name')) runtime.updateView({ keyboardNavigating: false, frozenOrder: null }) }, onKeyDown: e => {
                     if (e.key === 'Escape') { runtime.updateView({ menuId: null, frozenOrder: null, keyboardNavigating: false, view: 'list' }); return }
                     if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
                       // 导航序列=实际渲染 DOM 序(分段后与 order 错位), focusId 取目标行 data-security-id 保持状态同步
-                      e.preventDefault(); const buttons = [...e.currentTarget.closest('tbody').querySelectorAll('.ssb-stock-name')]; const at = buttons.indexOf(e.currentTarget), next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
+                      e.preventDefault(); const buttons = [...e.currentTarget.closest('.ssb-rows').querySelectorAll('.ssb-stock-name')]; const at = buttons.indexOf(e.currentTarget), next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
                       const target = buttons[next]; runtime.updateView({ keyboardNavigating: true, frozenOrder: order, focusId: target?.dataset.securityId }); target?.focus()
                     }
-                  } }, item.pinned ? '置顶 · ' : '', item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)),
-                    h('span', { className: 'ssb-metrics' },
-                      h('span', null, '高 ', formatPrice(q?.high)),
-                      h('span', null, '低 ', formatPrice(q?.low)),
-                      h('span', null, '额 ', formatAmount(q?.amount)))),
-                  h('td', { className: 'ssb-quote-cell' },
-                    h('span', { className: `ssb-price${direction}`, title: q?.last == null ? '等待报价' : `${item.currency} ${q.last}` }, q?.last ?? '—'),
-                    h('span', { className: 'ssb-price-sub' },
-                      q?.changePct == null ? h('span', { className: 'ssb-muted' }, '—') : h('span', { className: `ssb-pill${direction}` }, `${signed(q.changePct)}%`),
-                      q?.change == null ? null : h('span', { className: `ssb-change${direction}` }, signed(q.change))),
-                    // 持仓盈亏: 设了成本价才计算展示(空为 —)
-                    h('span', { className: `ssb-pl-line${item.cost && q?.last != null ? (Number(q.last) > item.cost ? ' ssb-up' : Number(q.last) < item.cost ? ' ssb-down' : '') : ''}` }, item.cost && q?.last != null ? `持仓 ${signed(Number((Number(q.last) - item.cost) / item.cost * 100).toFixed(1))}%` : '')),
-                  h('td', { className: 'ssb-aux ssb-col-status' }, h(QuoteStatus, { entry, short: true })),
-                  h('td', null, h(Button, { 'aria-label': `${item.officialName}更多操作`, 'aria-expanded': view.menuId === id, onClick: () => runtime.updateView({ menuId: view.menuId === id ? null : id, frozenOrder: view.menuId === id ? null : order }) }, '更多'))),
-                  view.menuId === id ? h('tr', null, h('td', { colSpan: 4 }, h('div', { className: 'ssb-row-actions' },
+                  } }, item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)),
+                      h('span', { className: 'ssb-quote' },
+                        h('span', { className: `ssb-price${direction}`, title: q?.last == null ? '等待报价' : `${item.currency} ${q.last}` }, q?.last ?? '—'),
+                        q?.changePct == null ? h('span', { className: 'ssb-muted' }, '—') : h('span', { className: `ssb-pill${direction}` }, `${signed(q.changePct)}%`),
+                        q?.change == null ? null : h('span', { className: `ssb-change${direction}` }, signed(q.change))),
+                      h(QuoteStatus, { entry, short: true }),
+                      h('button', { className: 'ssb-row-more', 'aria-label': `${item.officialName}更多操作`, 'aria-expanded': view.menuId === id, onClick: () => runtime.updateView({ menuId: view.menuId === id ? null : id, frozenOrder: view.menuId === id ? null : order }) }, '⋯')),
+                    h('div', { className: 'ssb-row-sub' },
+                      h('span', { className: 'ssb-kv' }, '开', formatPrice(q?.open)),
+                      h('span', { className: 'ssb-kv' }, '高', formatPrice(q?.high)),
+                      h('span', { className: 'ssb-kv' }, '低', formatPrice(q?.low)),
+                      h('span', { className: 'ssb-kv' }, '额', formatAmount(q?.amount)),
+                      amplitude == null ? null : h('span', { className: 'ssb-kv' }, '振', `${amplitude}%`),
+                      plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, '持仓', `${signed(plPct)}%`))),
+                    view.menuId === id ? h('div', { className: 'ssb-row-menu' }, h('div', { className: 'ssb-row-actions' },
                     h(Button, { disabled: busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === 0 || w.items[order[order.indexOf(id) - 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) - 1] })) }, '上移'),
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === order.length - 1 || w.items[order[order.indexOf(id) + 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) + 2] && w.items[order[order.indexOf(id) + 2]]?.pinned === item.pinned ? order[order.indexOf(id) + 2] : null })) }, '下移'),
                     h(Button, { onClick: () => open(id) }, '详情 / 别名'), h(Button, { danger: true, disabled: busy.write, onClick: quiet(() => runtime.mutate('remove', { securityId: id })) }, '删除'),
-                    view.sort !== 'manual' ? h('span', { className: 'ssb-muted' }, '切回手动顺序后可移动') : null))) : null)
+                    view.sort !== 'manual' ? h('span', { className: 'ssb-muted' }, '切回手动顺序后可移动') : null)) : null)
                 }
                 // 手动序: 未分组置顶区行 + 组段(组头行含统计/重命名/解散+折叠); 全局排序: 平铺不分区
                 if (view.sort !== 'manual') return order.map(rowOf)
@@ -317,14 +360,13 @@ window.__ModuleLoader__.load({
                   const members = grouped.filter(id => w.items[id].group === name)
                   const gs = members.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
                   const open = !view.groupCollapsed?.[name]
-                  out.push(h('tr', { key: 'grp-' + name, className: 'ssb-group-head' }, h('td', { colSpan: 7 }, h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${name} 分组折叠`, onClick: () => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }) } } }, open ? '▾' : '▸', ` ${name} · ${members.length} 只 · ${gs.up} 涨 ${gs.down} 跌`), h('span', { className: 'ssb-toolbar' }, h(Button, { onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'), h(Button, { disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散')))))
+                  out.push(h('div', { key: 'grp-' + name, className: 'ssb-group-head' }, h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${name} 分组折叠`, onClick: () => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }) } } }, open ? '▾' : '▸', ` ${name} · ${members.length} 只 · ${gs.up} 涨 ${gs.down} 跌`), h('span', { className: 'ssb-toolbar' }, h(Button, { onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'), h(Button, { disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'))))
                   if (open) for (const id of members) out.push(rowOf(id))
                 }
                 for (const id of ungrouped) out.push(rowOf(id))
                 return out
-              })()))))
-    }
-    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
+              })())))
+    }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
     const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
     const MA_WINDOWS = [5, 10, 20, 60]
@@ -373,10 +415,12 @@ window.__ModuleLoader__.load({
       }
       // 分时: Area 收盘线+均价线+昨收虚线
       function fillTrendData(result) {
+        // 横轴优先用来源时刻(at):按索引自造会让时间轴整体平移;缺 at 时退回当天 UTC 零点起算
         const base = Math.floor(new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).getTime() / 1000)
-        const points = result.candles.map((c, i) => ({ time: base + i * 60, value: c.close }))
+        const axisTime = (c, i) => c.at ?? base + i * 60
+        const points = result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.close }))
         mainRef.current.setData(points)
-        avgRef.current.setData(result.candles.map((c, i) => ({ time: base + i * 60, value: c.avg ?? c.close })))
+        avgRef.current.setData(result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.avg ?? c.close })))
         if (result.preClose != null) mainRef.current.createPriceLine({ price: result.preClose, color: themeOf().crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' })
       }
       // 周期序列形态切换: trend↔K线 类型不同需重建;同类型仅重灌。
@@ -617,15 +661,33 @@ window.__ModuleLoader__.load({
 .ssb-table th.ssb-number { text-align:right; }.ssb-table th.ssb-col-status { text-align:right; }
 .ssb-table td { vertical-align:middle; padding-top:8px; padding-bottom:8px; }.ssb-table td:first-child { max-width:240px; }
 .ssb-stock-name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
-.ssb-quote-cell { text-align:right; white-space:nowrap; }.ssb-price { display:block; font-size:15px; font-weight:600; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); line-height:1.2; }.ssb-price-sub { display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-top:2px; white-space:nowrap; }
-.ssb-pill { display:inline-block; padding:0 6px; border-radius:var(--ssb-radius-sm); font-size:11px; font-variant-numeric:tabular-nums; background:color-mix(in srgb, currentColor 12%, transparent); }
-.ssb-change { font-size:11px; font-variant-numeric:tabular-nums; }.ssb-change.ssb-up,.ssb-change.ssb-down { opacity:.85; }
-.ssb-dim { display:flex; gap:8px; font-size:11px; color:var(--ssb-text-dim); white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
-.ssb-metrics { display:flex; gap:6px; margin-top:4px; font-size:11px; color:var(--ssb-text-dim); white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); overflow:hidden; }
-.ssb-pl-line { display:block; margin-top:2px; font-size:11px; font-variant-numeric:tabular-nums; }
-.ssb-pl { text-align:right; white-space:nowrap; font-size:13px; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
-.ssb-col-status { width:32px; }.ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); vertical-align:middle; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
-@media(max-width:760px) { .ssb-col-detail { display:none; } }
+/* 紧凑行: 主行给价格与涨跌, 副行铺盘中指标, 一行两段不占格子 */
+.ssb-rows { display:flex; flex-direction:column; }
+.ssb-row { padding:6px 10px; border-top:1px solid var(--ssb-border); }
+.ssb-row:first-child { border-top:0; }
+.ssb-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
+.ssb-row.ssb-pinned { box-shadow:inset 2px 0 0 var(--ssb-accent); }
+.ssb-row.ssb-dragging { opacity:.4; }
+.ssb-row.ssb-drop-before { box-shadow:inset 0 2px 0 var(--ssb-accent); }
+.ssb-row.ssb-drop-after { box-shadow:inset 0 -2px 0 var(--ssb-accent); }
+.ssb-row-main,.ssb-row-sub { display:flex; align-items:baseline; gap:8px; min-width:0; }
+.ssb-row-sub { margin-top:2px; padding-left:18px; gap:10px; font-size:11px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+.ssb-grip { flex:0 0 auto; width:10px; color:var(--ssb-text-dim); cursor:grab; opacity:.35; user-select:none; line-height:1; }
+.ssb-row:hover .ssb-grip { opacity:1; }
+.ssb-row.ssb-dragging .ssb-grip { cursor:grabbing; }
+/* 名称列定宽保证主副行左边界对齐, 超长省略 */
+.ssb-row .ssb-stock-name { flex:0 0 auto; width:172px; max-width:172px; font-size:12px; font-weight:500; display:flex; align-items:baseline; gap:6px; }
+.ssb-row .ssb-code { margin-top:0; flex:0 0 auto; font-size:11px; color:var(--ssb-text-dim); max-width:88px; overflow:hidden; text-overflow:ellipsis; }
+.ssb-quote { display:flex; align-items:baseline; gap:6px; margin-left:auto; white-space:nowrap; }
+.ssb-price { font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); line-height:1.2; }
+.ssb-pill { display:inline-block; padding:0 5px; border-radius:var(--ssb-radius-sm); font-size:11px; font-variant-numeric:tabular-nums; background:color-mix(in srgb, currentColor 12%, transparent); }
+.ssb-change { font-size:11px; font-variant-numeric:tabular-nums; }
+.ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
+.ssb-row-more { flex:0 0 auto; font:inherit; font-size:13px; line-height:1; color:var(--ssb-text-dim); background:transparent; border:0; padding:2px 4px; cursor:pointer; }
+.ssb-row-more:hover { color:var(--ssb-text); }
+.ssb-row-menu { padding:6px 0 2px 18px; }
+.ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:6px 10px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:11px; color:var(--ssb-text-sub); }
+.ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
 .ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:8px; margin-top:20px; }.ssb-alias-form label { display:grid; gap:8px; }
 .ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:1fr; }
@@ -676,7 +738,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage },
+      __testing: { createPageRuntime, StockPage, dragOrder },
     }
   },
 })

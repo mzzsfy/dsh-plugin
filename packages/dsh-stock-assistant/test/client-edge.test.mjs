@@ -228,12 +228,14 @@ test('自选列表列权重与组合概览', async () => {
   assert.match(html, /2 只 · 2 涨 0 跌/, '组合概览条')
   assert.match(html, /\+5\.00/, '涨跌额随现价单元格展示')
   assert.match(html, /\+1\.27%/, '涨跌幅胶囊')
-  assert.match(html, /ssb-metrics/, '今开/最高/最低/成交额行内展示')
-  assert.match(html, /ssb-pl-line/, '持仓盈亏并入现价单元格')
+  assert.match(html, /ssb-row-sub/, '副行展示开/高/低/成交额/振幅')
+  assert.match(html, /ssb-kv/, '副行指标为键值对而非独立格子')
+  assert.match(html, /ssb-row/, '行渲染为紧凑行而非表格单元格')
   const rowSeg = html.slice(html.indexOf('腾讯控股'), html.indexOf('贵州茅台'))
   assert.ok(!rowSeg.includes('延迟'), '来源延迟不再占主列（收进状态点 title）')
   assert.match(rowSeg, /ssb-dot/, '健康态渲染为状态点')
   assert.ok(!rowSeg.includes('✓'), '状态点不再占用文字列')
+  assert.match(rowSeg, /draggable="true"/, '手动序行可拖拽排序')
 })
 test('键盘邻移与穿透切换契约', async () => {
   const { plugin } = await loadClientWithReact()
@@ -570,4 +572,17 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   // 8市场 fieldset 全渲染(K线行存在)
   for (const market of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']) assert.ok(html.includes(market), `市场 fieldset 缺: ${market}`)
   assert.ok(html.includes('>K线<'), 'K线能力行缺')
+})
+
+test('D02 拖拽落位计算: 段内前插/后插与折叠隐藏项回填', async () => {
+  const { plugin } = await loadClientWithReact()
+  const { dragOrder } = plugin.__testing
+  const ids = ['a', 'b', 'c', 'd']
+  assert.deepEqual([...dragOrder(ids, ids, 'a', 'c', false)], ['b', 'a', 'c', 'd'], '拖到目标上半=插到其前')
+  assert.deepEqual([...dragOrder(ids, ids, 'a', 'c', true)], ['b', 'c', 'a', 'd'], '拖到目标下半=插到其后')
+  assert.deepEqual([...dragOrder(ids, ids, 'd', 'b', false)], ['a', 'd', 'b', 'c'], '尾项前移')
+  assert.equal(dragOrder(ids, ids, 'a', 'zz', false), null, '目标不在渲染序则不动')
+  // 折叠组隐藏项 x,y 不在渲染序, 提交时按原槽位回填
+  const full = ['a', 'x', 'b', 'y']
+  assert.deepEqual([...dragOrder(['a', 'b'], full, 'b', 'a', false)], ['b', 'x', 'a', 'y'], '隐藏项保持原槽位')
 })

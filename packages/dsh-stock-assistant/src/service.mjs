@@ -13,6 +13,8 @@ const payloads = {
   groupRemove: z.strictObject({ group: z.string().min(1) }),
   pin: z.strictObject({ securityId, pinned: z.boolean() }),
   move: z.strictObject({ securityId, beforeId: securityId.nullable() }),
+  // 拖拽排序: 提交完整显示序, 前端算好顺序一次落库, 避免逐行 move 的中间态
+  reorder: z.strictObject({ order: z.array(securityId).min(1) }),
 }
 export function createWatchlistService(state, resolveSecurity, now = Date.now) {
   return {
@@ -24,6 +26,14 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
         const w = control.watchlist, item = w.items[p.securityId]
         const insert = (id, beforeId) => { const index = w.order.indexOf(beforeId); w.order.splice(index < 0 ? w.order.length : index, 0, id) }
         const regionEnd = pinned => w.order.find(id => w.items[id].pinned !== pinned && !w.items[id].pinned) || null
+        if (operation.action === 'reorder') {
+          const ids = p.order
+          if (ids.length !== w.order.length || new Set(ids).size !== ids.length || ids.some(id => !w.items[id])) fail('INVALID_ORDER', '排序参数无效')
+          // 置顶项必须连续占据最前段: 与渲染分段一致, 防止拖动把置顶项沉底
+          if (ids.some((id, index) => !w.items[id].pinned && ids.slice(index + 1).some(next => w.items[next].pinned))) fail('INVALID_ORDER', '置顶项必须保持在列表最前')
+          w.order = ids
+          return control
+        }
         if (operation.action === 'add') {
           if (item) return control
           if (w.order.length >= 100) fail('LIMIT_REACHED', '最多添加100只自选', 422)
