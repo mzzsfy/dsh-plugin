@@ -50,7 +50,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const wanted = demand.active(), opening = wanted && !hadDemand; hadDemand = wanted
     if (wanted) {
       ensureCaches()
-      if (opening) collector?.refresh().catch(() => {})
+      // 缓存新鲜时进入面板不重复打上游(限流主因); 过期才拉取, 定时器照常量节奏维持
+      const freshFor = (getControl().preferences?.refreshSeconds ?? 15) * 1000
+      if (opening && !collector?.freshWithin(freshFor)) collector?.refresh().catch(() => {})
       collector?.reconcile()
     } else collector?.cancelIdle()
   }, now, timers)

@@ -15,6 +15,12 @@ export function createCollector({ getControl, router, registry, executor, resolv
   const quotes = new Map(), marketPhases = new Map(), flights = new Map(), rounds = new Map(), blocked = new Map(), failures = new Map(), controllers = new Set()
   let generation = 0, timer, stopped = false, lastStart = -Infinity, manualWaiters = 0
   const entries = () => Object.fromEntries([...quotes].map(([id, value]) => [id, structuredClone(value)]))
+  // 缓存新鲜度: 全部自选都有未过期报价才算新鲜, 用于进入面板时跳过重复拉取
+  const freshWithin = ms => {
+    const order = getControl().watchlist.order
+    if (!order.length) return false
+    return order.every(id => { const quote = quotes.get(id)?.quote; return quote && Number.isFinite(quote.receivedAt) && now() - quote.receivedAt < ms })
+  }
   function apply(id, entry) {
     const before = quotes.get(id)
     quotes.set(id, entry); touched()
@@ -152,7 +158,7 @@ export function createCollector({ getControl, router, registry, executor, resolv
     timer = timers.setTimeout(() => { refresh(undefined, { periodic: true }).catch(() => {}).finally(reconcile) }, Math.max(1000, wake - now())); timer?.unref?.()
   }
   return {
-    refresh, entries, reconcile,
+    refresh, entries, reconcile, freshWithin,
     resume() { blocked.clear(); failures.clear(); reconcile() },
     reset() { generation++; for (const c of controllers) c.abort(); flights.clear(); quotes.clear(); marketPhases.clear(); blocked.clear(); failures.clear(); lastStart = -Infinity; touched(); changed(); reconcile() },
     cancelIdle() { timers.clearTimeout(timer); if (!active() && !manualWaiters) for (const c of controllers) c.abort() },

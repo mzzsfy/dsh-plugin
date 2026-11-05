@@ -226,10 +226,14 @@ test('自选列表列权重与组合概览', async () => {
   const state = { view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('397.20', '1.27', '5.00'), [b.id]: q('1480.00', '2.84', '40.85') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
   assert.match(html, /2 只 · 2 涨 0 跌/, '组合概览条')
-  assert.match(html, /\+5\.00/, '涨跌额列存在')
+  assert.match(html, /\+5\.00/, '涨跌额随现价单元格展示')
+  assert.match(html, /\+1\.27%/, '涨跌幅胶囊')
+  assert.match(html, /ssb-metrics/, '今开/最高/最低/成交额行内展示')
+  assert.match(html, /ssb-pl-line/, '持仓盈亏并入现价单元格')
   const rowSeg = html.slice(html.indexOf('腾讯控股'), html.indexOf('贵州茅台'))
-  assert.ok(!rowSeg.includes('延迟'), '来源延迟不再占主列（收进状态徽标 title）')
-  assert.match(rowSeg, /✓/, '健康徽标短形态')
+  assert.ok(!rowSeg.includes('延迟'), '来源延迟不再占主列（收进状态点 title）')
+  assert.match(rowSeg, /ssb-dot/, '健康态渲染为状态点')
+  assert.ok(!rowSeg.includes('✓'), '状态点不再占用文字列')
 })
 test('键盘邻移与穿透切换契约', async () => {
   const { plugin } = await loadClientWithReact()

@@ -79,3 +79,35 @@ test('增量检查合同: 目标粒度缓存命中, 无关字段改动与新增�
   await assert.rejects(app.configuration({ ...operation(6, 3), payload: stale, checkIds: [] }), e => e.code === 'CHECK_REQUIRED')
   await app.close()
 })
+
+test('F02 进入面板时缓存新鲜则跳过重复拉取, 过期才刷新', async () => {
+  let clock = 1_000_000, quoteCalls = 0
+  const adapter = { descriptor: { adapterId: 'fake', capabilities: ['quotes', 'catalog', 'calendar'], markets: ['XSHG', 'XSHE'], instruments: ['equity'], maxQuoteBatch: 20 },
+    async probe() { return { status: 'ready' } },
+    async catalog() { return { items: [security], complete: true } },
+    async calendar() { return { items: [] } },
+    async quotes() { quoteCalls += 1; return { items: [{ securityId: security.id, providerInstanceId: 'ts-one', last: '10.00', previousClose: '8.00', receivedAt: clock, quoteAt: null, delayKind: 'realtime' }] } } }
+  const app = await createApplication({ storageDomain: memoryStorage(), providers: [adapter], env: { DSH_STOCK_TUSHARE_TOKEN: 'x' }, now: () => clock })
+  const config = { providers: [provider('ts-one', 'fake')], routes: [route(), route('ts-one', 'XSHG', 'catalog')] }
+  const checked = await app.providerCheck({ ...config, capabilities: ['quotes'] })
+  // 同组探针需间隔一拍: 冻结时钟下同毫秒双探针会撞 RATE_LIMIT
+  clock += 1000
+  const checkedCatalog = await app.providerCheck({ ...config, capabilities: ['catalog'] })
+  await app.configuration({ ...operation(), payload: config, checkIds: [checked.checkId, checkedCatalog.checkId] })
+  clock += 1000
+  await app.sync({ market: 'XSHG', expectedRoutingRevision: app.snapshot().control.routingRevision })
+  await app.watchlist({ ...operation(2, app.snapshot().control.revision), action: 'add', payload: { securityId: security.id } })
+  const pageId = '00000000-0000-4000-8000-0000000000aa'
+  // 每次进入前推进一拍: 组内节拍等待基于冻结时钟, 不推进会真实等待 1 秒
+  const open = async generation => { clock += 1000; app.demand({ pageId, generation, active: true }); await new Promise(resolve => setTimeout(resolve, 60)) }
+  await open(1)
+  assert.equal(quoteCalls, 1, '首次进入拉取一次')
+  app.demand({ pageId, generation: 2, active: false })
+  await open(3)
+  assert.equal(quoteCalls, 1, '缓存新鲜时再次进入不再拉取')
+  clock += 20_000
+  app.demand({ pageId, generation: 4, active: false })
+  await open(5)
+  assert.equal(quoteCalls, 2, '缓存过期后进入重新拉取')
+  await app.close()
+})

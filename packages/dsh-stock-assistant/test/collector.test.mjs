@@ -88,3 +88,17 @@ test('对象形态securities: 搜索候选peek不经目录解析直拉(港美股
   assert.equal(c.entries()[tencent.id].quote.last, '383.60')
   c.dispose()
 })
+
+test('F01 缓存新鲜度判定: 全部自选报价未过期才算新鲜', async () => {
+  const config = control(), router = createRouter(() => config)
+  let clock = 1_000_000
+  const c = createCollector({ getControl: () => config, router, registry: { get: () => ({ descriptor: { maxQuoteBatch: 20 } }) }, now: () => clock, executor: { run: async () => ({ items: [{ securityId: security.id, last: '10.00', previousClose: '9.50', quoteAt: null, receivedAt: clock, providerInstanceId: 'a', delayKind: 'realtime', delaySeconds: 0 }] }) } })
+  assert.equal(c.freshWithin(15_000), false, '无报价时不新鲜')
+  await c.refresh()
+  assert.equal(c.freshWithin(15_000), true, '刚刷新完新鲜')
+  clock += 14_000
+  assert.equal(c.freshWithin(15_000), true, '窗口内新鲜')
+  clock += 2_000
+  assert.equal(c.freshWithin(15_000), false, '超出窗口过期')
+  c.dispose()
+})

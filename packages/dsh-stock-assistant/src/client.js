@@ -214,6 +214,22 @@ window.__ModuleLoader__.load({
     const quiet = fn => (...args) => { Promise.resolve().then(() => fn(...args)).catch(() => {}) }
     const signed = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${value}`
     const timeText = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知'
+    // 价格与成交额: 空值显示破折号, 成交额按万/亿缩写避免长列
+    const formatPrice = value => value == null || Number.isNaN(Number(value)) ? '—' : String(value)
+    const formatAmount = value => {
+      const amount = Number(value)
+      if (!Number.isFinite(amount)) return '—'
+      if (Math.abs(amount) >= 1e8) return `${(amount / 1e8).toFixed(1)}亿`
+      if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
+      return amount.toFixed(0)
+    }
+    // 数据新鲜度: 取最旧报价的接收时间, 进入面板时用户能判断是否为缓存值
+    const freshnessText = quotes => {
+      const stamps = Object.values(quotes || {}).map(entry => Number(entry?.quote?.receivedAt)).filter(at => Number.isFinite(at))
+      if (!stamps.length) return ''
+      const age = Math.max(0, Math.round((Date.now() - Math.min(...stamps)) / 1000))
+      return age < 3 ? '刚刚更新' : `${age} 秒前更新`
+    }
     const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
     function Button({ children, onClick, primary, danger, className = '', ...props }) { return h('button', { type: 'button', className: `ssb-button${primary ? ' ssb-primary' : ''}${danger ? ' ssb-danger' : ''} ${className}`, onClick, ...props }, children) }
     function Toggle({ label, checked, onChange, disabled = false }) {
@@ -221,8 +237,14 @@ window.__ModuleLoader__.load({
     }
     function QuoteStatus({ entry, short = false }) {
       const quote = entry?.quote
-      // short: 列表行降权形态, 仅健康异常时显示警示词, 正常态收进 title
-      if (short) return h('span', { className: 'ssb-muted ssb-source', title: (quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价') + (entry?.lastError?.message ? ` · ${entry.lastError.message}` : '') }, entry?.health && entry.health !== 'ok' ? ({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health : '✓')
+      const detail = (quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价') + (entry?.lastError?.message ? ` · ${entry.lastError.message}` : '')
+      // short: 列表行只给状态点, 语义与原因收进 title, 文字列让位给数据
+      if (short) {
+        const health = entry?.health || 'ok'
+        const tone = health === 'ok' ? '' : health === 'unconfigured' ? ' ssb-dot-idle' : health === 'error' ? ' ssb-dot-danger' : ' ssb-dot-warn'
+        const label = ({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[health] || health
+        return h('span', { className: `ssb-dot${tone}`, role: 'img', 'aria-label': health === 'ok' ? `${detail}，正常` : `${label}，${detail}`, title: health === 'ok' ? detail : `${label} · ${detail}` })
+      }
       return h('span', { className: 'ssb-muted ssb-source', title: entry?.lastError?.message || '' }, entry?.health && entry.health !== 'ok' ? `${({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health} · ` : '', quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价')
     }
     function Watchlist({ runtime, state }) {
@@ -247,10 +269,10 @@ window.__ModuleLoader__.load({
       const heldText = stats?.held ? ` · 持仓盈亏 ${signed(Number((stats.pl / stats.held).toFixed(1)))}%` : ''
       return h('section', { className: 'ssb-list-pane' },
         sourcesBanner,
-        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), stats ? h('span', { className: 'ssb-muted' }, `${w.order.length} 只 · ${stats.up} 涨 ${stats.down} 跌 · 合计 ${signed(stats.sum)}${heldText}`) : null, h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
+        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), stats ? h('span', { className: 'ssb-muted' }, `${w.order.length} 只 · ${stats.up} 涨 ${stats.down} 跌 · 合计 ${signed(Number(stats.sum.toFixed(2)))}${heldText}${freshnessText(data.quotes) ? ` · ${freshnessText(data.quotes)}` : ''}`) : null, h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
         !order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
           h('div', { className: 'ssb-table-scroll', onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
-            h('table', { className: 'ssb-table' }, h('thead', null, h('tr', null, h('th', null, '证券'), h('th', null, '最新价'), h('th', null, '涨跌额'), h('th', null, '涨跌幅'), h('th', null, '持仓盈亏'), h('th', { className: 'ssb-aux' }, '来源 / 状态'), h('th', null, h('span', { className: 'ssb-sr' }, '操作')))),
+            h('table', { className: 'ssb-table' }, h('thead', null, h('tr', null, h('th', null, '证券'), h('th', { className: 'ssb-number' }, '现价'), h('th', { className: 'ssb-aux ssb-col-status' }, h('span', { className: 'ssb-sr' }, '来源 / 状态')), h('th', null, h('span', { className: 'ssb-sr' }, '操作')))),
               h('tbody', null, ...(() => {
                 // 分组分段: 仅手动序生效(全局排序即比较语义不分区); 置顶区不进组段; 组序=首现序; 折叠组隐藏成员
                 const rowOf = id => {
@@ -264,15 +286,21 @@ window.__ModuleLoader__.load({
                       e.preventDefault(); const buttons = [...e.currentTarget.closest('tbody').querySelectorAll('.ssb-stock-name')]; const at = buttons.indexOf(e.currentTarget), next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
                       const target = buttons[next]; runtime.updateView({ keyboardNavigating: true, frozenOrder: order, focusId: target?.dataset.securityId }); target?.focus()
                     }
-                  } }, item.pinned ? '置顶 · ' : '', item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`))),
-                  h('td', { className: `ssb-number${direction}` }, q?.last ?? '—'),
-                  h('td', { className: `ssb-number${direction}` }, q?.change == null ? '—' : signed(q.change)),
-                  h('td', { className: `ssb-number${direction}` }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`),
-                  // 持仓盈亏: 设了成本价才计算展示(空为 —)
-                  h('td', { className: `ssb-number${item.cost && q?.last != null ? (Number(q.last) > item.cost ? ' ssb-up' : Number(q.last) < item.cost ? ' ssb-down' : '') : ''}` }, item.cost && q?.last != null ? `${signed(Number((Number(q.last) - item.cost) / item.cost * 100).toFixed(1))}%` : '—'),
-                  h('td', { className: 'ssb-aux' }, h(QuoteStatus, { entry, short: true })),
+                  } }, item.pinned ? '置顶 · ' : '', item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)),
+                    h('span', { className: 'ssb-metrics' },
+                      h('span', null, '高 ', formatPrice(q?.high)),
+                      h('span', null, '低 ', formatPrice(q?.low)),
+                      h('span', null, '额 ', formatAmount(q?.amount)))),
+                  h('td', { className: 'ssb-quote-cell' },
+                    h('span', { className: `ssb-price${direction}`, title: q?.last == null ? '等待报价' : `${item.currency} ${q.last}` }, q?.last ?? '—'),
+                    h('span', { className: 'ssb-price-sub' },
+                      q?.changePct == null ? h('span', { className: 'ssb-muted' }, '—') : h('span', { className: `ssb-pill${direction}` }, `${signed(q.changePct)}%`),
+                      q?.change == null ? null : h('span', { className: `ssb-change${direction}` }, signed(q.change))),
+                    // 持仓盈亏: 设了成本价才计算展示(空为 —)
+                    h('span', { className: `ssb-pl-line${item.cost && q?.last != null ? (Number(q.last) > item.cost ? ' ssb-up' : Number(q.last) < item.cost ? ' ssb-down' : '') : ''}` }, item.cost && q?.last != null ? `持仓 ${signed(Number((Number(q.last) - item.cost) / item.cost * 100).toFixed(1))}%` : '')),
+                  h('td', { className: 'ssb-aux ssb-col-status' }, h(QuoteStatus, { entry, short: true })),
                   h('td', null, h(Button, { 'aria-label': `${item.officialName}更多操作`, 'aria-expanded': view.menuId === id, onClick: () => runtime.updateView({ menuId: view.menuId === id ? null : id, frozenOrder: view.menuId === id ? null : order }) }, '更多'))),
-                  view.menuId === id ? h('tr', null, h('td', { colSpan: 7 }, h('div', { className: 'ssb-row-actions' },
+                  view.menuId === id ? h('tr', null, h('td', { colSpan: 4 }, h('div', { className: 'ssb-row-actions' },
                     h(Button, { disabled: busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === 0 || w.items[order[order.indexOf(id) - 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) - 1] })) }, '上移'),
                     h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === order.length - 1 || w.items[order[order.indexOf(id) + 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) + 2] && w.items[order[order.indexOf(id) + 2]]?.pinned === item.pinned ? order[order.indexOf(id) + 2] : null })) }, '下移'),
@@ -586,6 +614,18 @@ window.__ModuleLoader__.load({
 .ssb-button { color:var(--ssb-text); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:28px; padding:4px 12px; font:inherit; cursor:pointer; transition:background .15s; }.ssb-button:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-button.ssb-primary { background:var(--ssb-accent); color:var(--ssb-on-accent); border-color:var(--ssb-accent); }.ssb-button.ssb-primary:hover { background:var(--ssb-accent-deep); }.ssb-button.ssb-danger { color:var(--ssb-danger); }.ssb-root button:disabled { opacity:.5; cursor:not-allowed; }.ssb-root :focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }
 .ssb-root input:not([type=checkbox]),.ssb-root select { background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:6px 8px; font:inherit; max-width:100%; }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
 .ssb-content { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:16px; }.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:10; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card { animation:ssb-pop .18s ease-out; }@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }@keyframes ssb-pop { from { transform:scale(.96); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:11px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:10px 12px; text-align:left; border-top:1px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
+.ssb-table th.ssb-number { text-align:right; }.ssb-table th.ssb-col-status { text-align:right; }
+.ssb-table td { vertical-align:middle; padding-top:8px; padding-bottom:8px; }.ssb-table td:first-child { max-width:240px; }
+.ssb-stock-name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.ssb-quote-cell { text-align:right; white-space:nowrap; }.ssb-price { display:block; font-size:15px; font-weight:600; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); line-height:1.2; }.ssb-price-sub { display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-top:2px; white-space:nowrap; }
+.ssb-pill { display:inline-block; padding:0 6px; border-radius:var(--ssb-radius-sm); font-size:11px; font-variant-numeric:tabular-nums; background:color-mix(in srgb, currentColor 12%, transparent); }
+.ssb-change { font-size:11px; font-variant-numeric:tabular-nums; }.ssb-change.ssb-up,.ssb-change.ssb-down { opacity:.85; }
+.ssb-dim { display:flex; gap:8px; font-size:11px; color:var(--ssb-text-dim); white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+.ssb-metrics { display:flex; gap:6px; margin-top:4px; font-size:11px; color:var(--ssb-text-dim); white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); overflow:hidden; }
+.ssb-pl-line { display:block; margin-top:2px; font-size:11px; font-variant-numeric:tabular-nums; }
+.ssb-pl { text-align:right; white-space:nowrap; font-size:13px; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+.ssb-col-status { width:32px; }.ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); vertical-align:middle; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
+@media(max-width:760px) { .ssb-col-detail { display:none; } }
 .ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:8px; margin-top:20px; }.ssb-alias-form label { display:grid; gap:8px; }
 .ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:1fr; }
