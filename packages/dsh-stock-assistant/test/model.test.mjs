@@ -11,7 +11,10 @@ test('M01 标准身份包含交易所与品种，保留前导零', () => {
 test('M03 缺昨收和零价不会伪造涨跌', () => {
   assert.equal(normalizeQuote({ last: '10', previousClose: 0 }).changePct, null)
   assert.equal(normalizeQuote({ last: 0, previousClose: 10 }).last, null)
-  assert.equal(normalizeQuote({ last: '1.234', previousClose: 1 }).last, null)
+  // 多于两位小数按四舍五入归一到分(美股常见三位), 非法文本仍判无效
+  assert.equal(normalizeQuote({ last: '1.234', previousClose: 1 }).last, '1.23')
+  assert.equal(normalizeQuote({ last: 'abc', previousClose: 1 }).last, null)
+  assert.equal(normalizeQuote({ last: '-1.20', previousClose: 1 }).last, null)
 })
 
 test('M04 不把不完整的交易时间伪装成当前时间', () => {

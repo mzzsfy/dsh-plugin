@@ -33,3 +33,16 @@ test('parseSecurityId 正反例', () => {
   assert.throws(() => parseSecurityId('XSHG:bond:600519'))
   assert.throws(() => parseSecurityId('garbage'))
 })
+
+test('G11 归一到分: 来源三位及以上小数按四舍五入保留, 不再整行判无效', async () => {
+  const { normalizeQuote } = await import('../src/market-model.mjs')
+  const quote = last => normalizeQuote({ securityId: 'XNAS:equity:GT', last, previousClose: '4.55' })
+  assert.equal(quote('4.755').last, '4.76', '三位小数向上进位')
+  assert.equal(quote('4.745').last, '4.75', '三位小数向上进位')
+  assert.equal(quote('189.285').last, '189.29', '大额价格同样进位')
+  assert.equal(quote('4.754').last, '4.75', '第三位小于五不进位')
+  assert.equal(quote('4.7').last, '4.70', '一位小数补齐两位')
+  assert.equal(quote('4.75').last, '4.75', '两位小数原样保留')
+  assert.equal(quote('0.001').last, null, '进位后为零仍视为无值')
+  assert.equal(quote('4.755').change, '0.21', '涨跌额随归一分值计算')
+})

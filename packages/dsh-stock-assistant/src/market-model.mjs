@@ -22,12 +22,15 @@ export function parseSecurityId(securityIdValue) {
   if (parts.length !== 3 || instrument !== 'equity' || !MARKET_META[exchange]) throw new Error('不支持的证券身份')
   return { exchange, instrument, code: securityId(exchange, code, instrument).split(':')[2], meta: MARKET_META[exchange] }
 }
+// 定点基准是分;来源允许多于两位小数(美股常见三位),超出部分四舍五入到分
 function cents(value) {
   if (value === null || value === undefined || value === '') return null
   const text = String(value)
-  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null
-  const [whole, fraction = ''] = text.split('.')
-  const n = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'))
+  const match = /^(\d+)(?:\.(\d{1,6}))?$/.exec(text)
+  if (!match) return null
+  const [, whole, fraction = ''] = match
+  let n = BigInt(whole) * 100n + BigInt(fraction.slice(0, 2).padEnd(2, '0'))
+  if (fraction.length > 2 && Number(fraction[2]) >= 5) n += 1n
   return n > 0n ? n : null
 }
 function decimal(n) {

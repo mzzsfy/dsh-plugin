@@ -297,7 +297,8 @@ window.__ModuleLoader__.load({
               h('span', { className: 'ssb-cell-price' }, '现价'),
               h('span', { className: 'ssb-cell-pct' }, '涨跌幅'),
               h('span', { className: 'ssb-cell-change' }, '涨跌额'),
-              h('span', { className: 'ssb-cell-range' }, '最高 / 最低'),
+              h('span', { className: 'ssb-cell-open' }, '今开'),
+              h('span', { className: 'ssb-cell-range' }, '最高/最低'),
               h('span', { className: 'ssb-cell-amount' }, '成交额'),
               h('span', { className: 'ssb-cell-amplitude' }, '振幅'),
               h('span', { className: 'ssb-cell-pl' }, '持仓盈亏'),
@@ -353,7 +354,8 @@ window.__ModuleLoader__.load({
                       h('span', { className: `ssb-cell-price ssb-price${direction}`, title: q?.last == null ? '等待报价' : `${item.currency} ${q.last}` }, q?.last ?? '—'),
                       q?.changePct == null ? h('span', { className: 'ssb-cell-pct ssb-muted' }, '—') : h('span', { className: `ssb-cell-pct ssb-pill${direction}` }, `${signed(q.changePct)}%`),
                       q?.change == null ? h('span', { className: 'ssb-cell-change ssb-muted' }, '—') : h('span', { className: `ssb-cell-change ssb-change${direction}` }, signed(q.change)),
-                      h('span', { className: 'ssb-cell-range' }, `${formatPrice(q?.high)} / ${formatPrice(q?.low)}`),
+                      h('span', { className: 'ssb-cell-open' }, formatPrice(q?.open)),
+                      h('span', { className: 'ssb-cell-range' }, `${formatPrice(q?.high)}/${formatPrice(q?.low)}`),
                       h('span', { className: 'ssb-cell-amount' }, formatAmount(q?.amount)),
                       h('span', { className: 'ssb-cell-amplitude' }, amplitude == null ? '—' : `${amplitude}%`),
                       h('span', { className: `ssb-cell-pl${plPct == null ? '' : Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, plPct == null ? '—' : `${signed(plPct)}%`),
@@ -693,7 +695,7 @@ window.__ModuleLoader__.load({
 .ssb-list-pane > .ssb-foot, .ssb-list-pane > .ssb-banner { flex:0 0 auto; }
 .ssb-rows { display:flex; flex-direction:column; }
 /* 表头与数据行共用同一套列模板, 保证逐列对齐 */
-.ssb-row-head,.ssb-row-main { display:grid; grid-template-columns:12px minmax(110px,1fr) 68px 64px 56px 98px 70px 52px 64px 14px 28px; gap:8px; align-items:center; }
+.ssb-row-head,.ssb-row-main { display:grid; grid-template-columns:12px minmax(132px,1fr) 62px 56px 52px 60px 88px 62px 44px 54px 14px 28px; gap:8px; align-items:center; }
 .ssb-row-head { height:32px; padding:0 12px; font-size:12px; color:var(--ssb-text-sub); border-bottom:1px solid var(--ssb-border); }
 .ssb-row-head .ssb-cell-price,.ssb-row-head .ssb-cell-pct,.ssb-row-head .ssb-cell-change,.ssb-row-head .ssb-cell-range,.ssb-row-head .ssb-cell-amount,.ssb-row-head .ssb-cell-amplitude,.ssb-row-head .ssb-cell-pl { font-family:inherit; color:inherit; }
 .ssb-row { padding:0 12px; }
@@ -711,10 +713,10 @@ window.__ModuleLoader__.load({
 .ssb-row .ssb-stock-name { min-width:0; font-size:13px; font-weight:500; display:flex; align-items:baseline; gap:6px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .ssb-row-head .ssb-col-name { min-width:0; }
 .ssb-row .ssb-code { margin-top:0; flex:0 0 auto; font-size:11px; color:var(--ssb-text-dim); }
-.ssb-cell-price,.ssb-cell-pct,.ssb-cell-change,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
+.ssb-cell-price,.ssb-cell-pct,.ssb-cell-change,.ssb-cell-open,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 .ssb-cell-range { white-space:nowrap; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 .ssb-cell-price { font-size:15px; font-weight:600; }
-.ssb-cell-amount,.ssb-cell-amplitude { color:var(--ssb-text-dim); }
+.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-open { color:var(--ssb-text-dim); }
 .ssb-col-status,.ssb-col-more { justify-self:end; }
 .ssb-pill { display:inline-block; padding:0 5px; border-radius:var(--ssb-radius-sm); background:color-mix(in srgb, currentColor 12%, transparent); }
 .ssb-row-more { width:28px; height:24px; font:inherit; font-size:13px; line-height:1; color:var(--ssb-text-dim); background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; justify-self:end; }
@@ -726,7 +728,7 @@ window.__ModuleLoader__.load({
   .ssb-row-head { display:none; }
   .ssb-row { padding:6px 10px; }
   .ssb-row-main { grid-template-columns:12px minmax(80px,1fr) 68px 64px 56px 14px 28px; height:auto; }
-  .ssb-cell-range,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { display:none; }
+  .ssb-cell-open,.ssb-cell-range,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { display:none; }
   .ssb-row-sub { display:flex; gap:10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 }
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
