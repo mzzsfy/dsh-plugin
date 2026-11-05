@@ -29,7 +29,7 @@ export const tencent = {
     // kline 探针直接拉代表证券 3 根日K(quotes 不覆盖港股);quotes 探针沿用代表证券行。
     if (request.capability === 'kline') {
       const code = { XSHG: '600519', XSHE: '000001', XHKG: '00700' }[request.market]
-      if (!code) throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯备源不支持该市场K线', 422)
+      if (!code) throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯来源不提供该市场K线', 422)
       const result = await this.kline({ ...request, securityId: `${request.market}:equity:${code}`, code, period: '1d', adjust: 'qfq', limit: 3 }, ctx)
       if (!result.candles.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
       return { status: 'ready', capability: 'kline', market: request.market, instrument: 'equity' }
@@ -75,12 +75,12 @@ export const tencent = {
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: request.securities.filter(s => !seen.has(symbolOf(s))).map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }
   },
   async kline(request, ctx) {
-    if (request.period === 'trend') throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯备源不支持分时', 422)
+    if (request.period === 'trend') throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯来源不提供分时数据', 422)
     let symbol = klineSymbolOf(request)
     if (request.market === 'XNAS' || request.market === 'XNYS') {
       const mapped = ctx.usSymbols?.get(`US:${request.code}`)
       const suffix = mapped ? JYS_TO_SUFFIX[mapped.jys] : undefined
-      if (suffix === undefined) throw new StockError('UNSUPPORTED_CAPABILITY', '美股腾讯备源需先经搜索建立代码映射', 422)
+      if (suffix === undefined) throw new StockError('UNSUPPORTED_CAPABILITY', '腾讯来源的美股K线需先经搜索建立代码映射', 422)
       symbol = suffix ? `us${request.code}.${suffix}` : `us${request.code}`
     }
     const param = `${symbol},${{ '1d': 'day', '1w': 'week', '1M': 'month' }[request.period]},,,${request.limit},qfq`

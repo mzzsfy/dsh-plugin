@@ -262,7 +262,8 @@ window.__ModuleLoader__.load({
         const label = ({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[health] || health
         return h('span', { className: `ssb-dot ssb-col-status${tone}`, role: 'img', 'aria-label': health === 'ok' ? `${detail}，正常` : `${label}，${detail}`, title: health === 'ok' ? detail : `${label} · ${detail}` })
       }
-      return h('span', { className: 'ssb-muted ssb-source', title: entry?.lastError?.message || '' }, entry?.health && entry.health !== 'ok' ? `${({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health} · ` : '', quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价')
+      // 详情页只给来源名: 延迟与获取时间已在事实表里逐行列出, 这里重复会把抽屉头部撑长
+      return h('span', { className: 'ssb-muted ssb-source', title: detail }, entry?.health && entry.health !== 'ok' ? `${({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health} · ` : '', quote ? quote.providerInstanceId : '等待报价')
     }
     // 拖拽落位: 返回新的完整顺序; 折叠隐藏项按原槽位回填, 保证提交的是全量 order
     function dragOrder(sequence, order, from, over, after) {
@@ -434,7 +435,8 @@ window.__ModuleLoader__.load({
     }
     function computeMA(candles, n) { return candles.map((c, i) => i < n - 1 ? null : { time: c.time, value: candles.slice(i - n + 1, i + 1).reduce((s, x) => s + x.close, 0) / n }).filter(Boolean) }
     function KlineError({ message, onRetry, guide, busyOneClick }) {
-      return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, guide ? h(Button, { onClick: guide, disabled: busyOneClick }, busyOneClick ? '开启中…' : '一键开启') : null, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
+      // guide 由调用方给出动作与文案: 缺路由是一键开启, 来源不支持则是去设置换源
+      return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, guide ? h(Button, { onClick: guide.onClick, disabled: busyOneClick }, busyOneClick ? '处理中…' : guide.label) : null, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
     }
     function KlineView({ runtime, state, item }) {
       const period = state.klinePeriod || '1d'
@@ -506,10 +508,11 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ssb-kline' },
         h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻')),
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
-        kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() : null }) : null,
+        kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
         state.data.vendorAvailable === false ? h('div', { className: 'ssb-banner' }, '图表组件不可用，已降级为数字详情。') : null,
-        h('div', { ref: holder, className: 'ssb-kline-holder' }))
+        // 出错时隐藏画布: 图表实例挂在同一个 DOM 节点上, 卸载会丢实例, 只做可见性切换
+        h('div', { ref: holder, className: 'ssb-kline-holder', style: kline.error ? { display: 'none' } : undefined }))
     }
     // 浮层原语: 遮罩+Esc/遮罩关闭, 抽屉(detail)与模态(settings)共用关闭语义
     // 浮层原语: 遮罩+Esc/遮罩关闭+焦点移入/困住/还原+背景滚动锁定, 抽屉(detail)与模态(settings)共用
