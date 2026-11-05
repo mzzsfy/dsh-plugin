@@ -135,7 +135,7 @@ test('search 远程候选下发 currency/priceScale', async () => {
 })
 
 test('remote 搜索市场面=启用实例适配器市场并集(无search路由市场仍直连可搜)', async () => {
-  // 默认配置只有沪深 search 路由; suggest 全市场语义要求 XHKG 等无路由市场也经 em-default 直连(每市场一拍)
+  // 默认配置只有沪深 search 路由; suggest 为全市场端点, 无路由市场由同一实例一次请求覆盖
   let suggestCalls = 0
   const storage = memoryStorage()
   const app = await createApplication({ storageDomain: storage, providers: [tencent, sina, eastmoney], fetch: async url => {
@@ -143,8 +143,8 @@ test('remote 搜索市场面=启用实例适配器市场并集(无search路由�
     return { ok: true, json: async () => ({ QuotationCodeTable: { Data: [{ Code: '00700', Name: '腾讯控股', MktNum: '116', JYS: null, QuoteID: '116.00700', Classify: 'HKStock', PinYin: 'txkg' }] } }) }
   }, publish: () => {} })
   const result = await app.search('00700', 'remote')
-  assert.ok(suggestCalls >= 3, `启用实例市场面应逐市场直连(实拍 ${suggestCalls} 次, 沪深路由2+无路由直连≥1)`)
-  assert.ok(result.items.some(i => i.exchange === 'XHKG'), '直连批次候选进入结果')
+  assert.equal(suggestCalls, 1, '全市场候选由单次请求覆盖, 不按市场重复请求')
+  assert.ok(result.items.some(i => i.exchange === 'XHKG'), '无 search 路由市场的候选仍进入结果')
 })
 
 test('remote 单市场限速跳过不终止整个搜索(其余市场照常下发)', async () => {

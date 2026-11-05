@@ -115,14 +115,16 @@ export const eastmoney = {
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: [], complete }
   },
   async search(request, ctx) {
-    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=${Math.min(20, request.limit || 10)}`
+    // 不限市场时扩大候选量: 单次响应要覆盖调用方负责的多个市场
+    const count = request.market ? Math.min(20, request.limit || 10) : Math.min(50, (request.limit || 10) * 3)
+    const url = `${endpointOf(ctx, 'search')}?input=${encodeURIComponent(request.q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=${count}`
     const body = await getJson(ctx, url)
     const rows = body?.QuotationCodeTable?.Data
     if (!Array.isArray(rows)) return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: [], errors: [] }
     const items = []
     for (const row of rows) {
       const exchange = SEARCH_EXCHANGE[row.MktNum]
-      if (!exchange || exchange !== request.market) continue
+      if (!exchange || (request.market && exchange !== request.market)) continue
       // 美股候选写 usSymbols(代码→MktNum/JYS), kline 美股动态归属与腾讯 suffix 唯一数据来源
       if ((exchange === 'XNAS' || exchange === 'XNYS') && ctx.usSymbols && ['105', '106', '107'].includes(row.MktNum)) ctx.usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: ctx.now() })
       const meta = MARKET_META[exchange]

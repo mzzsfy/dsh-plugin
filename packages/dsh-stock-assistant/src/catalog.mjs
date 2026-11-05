@@ -1,6 +1,10 @@
 import { securitySchema } from './schemas.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
+const SEARCH_TTL = 60 * 1000
+const SEARCH_CACHE_LIMIT = 64
+const CANDIDATE_TTL = 5 * 60 * 1000
+const CANDIDATE_LIMIT = 200
 const localDate = ms => new Date(ms + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
 // 实例id→其适配器 markets 集合(搜索市场面唯一事实源)
 function adapterMarketsOf(config, registry) {
@@ -13,7 +17,7 @@ function adapterMarketsOf(config, registry) {
 }
 
 export function createCatalog({ state, getControl = state.get, router, executor, registry, now = Date.now, changed = () => {} }) {
-  const flights = new Map(), candidates = new Map()
+  const flights = new Map(), candidates = new Map(), searchCache = new Map(), searchFlights = new Map()
   let stopped = false
   const controllers = new Set()
   function records(kind) {
@@ -55,36 +59,51 @@ export function createCatalog({ state, getControl = state.get, router, executor,
     },
     status: () => records('catalog').map(c => ({ source: c.source, fetchedAt: c.fetchedAt, complete: c.payload.complete, stale: now() - c.fetchedAt > (c.kind === 'calendar' ? 7 * DAY : DAY) })),
     async remote(q, signal) {
-      const config = structuredClone(getControl()), results = new Map(search(q).map(s => [s.id, s]))
-      // 搜索市场面=启用实例的适配器市场并集(suggest 天然全市场, 已启用市场语义跟随实例能力而非路由)
-      const adapterMarkets = adapterMarketsOf(config, registry)
-      const quoteMarkets = new Set([...adapterMarkets.values()].flatMap(set => [...set]))
-      const searchRoutes = new Map(config.routes.filter(r => r.capability === 'search').map(r => [r.market, r]))
-      for (const market of quoteMarkets) {
-        const route = searchRoutes.get(market)
-        let instance
-        if (route) { instance = router.select('search', market).instance }
-        else {
-          // 无 search 路由的市场: 用支持 search 的启用实例直连(市场过滤在适配器端)
-          const searchAdapters = new Set((registry?.descriptors() || []).filter(d => d.capabilities.includes('search')).map(d => d.adapterId))
-          instance = config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId) && adapterMarkets.get(p.id)?.has(market))
-            || config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId))
+      const config = structuredClone(getControl()), revision = config.routingRevision, key = `${revision}:${q.trim().toLowerCase()}`
+      // 结果缓存与在途合并: 联想接口按查询词去重, 退格重输同一词零远端开销
+      const cached = searchCache.get(key)
+      if (cached && cached.until > now()) return cached.items
+      const inflight = searchFlights.get(key)
+      if (inflight && !inflight.signal?.aborted) return inflight.job
+      const job = (async () => {
+        const results = new Map(search(q).map(s => [s.id, s]))
+        // 搜索市场面=启用实例的适配器市场并集(suggest 天然全市场, 已启用市场语义跟随实例能力而非路由)
+        const adapterMarkets = adapterMarketsOf(config, registry)
+        const searchAdapters = new Set((registry?.descriptors() || []).filter(d => d.capabilities.includes('search')).map(d => d.adapterId))
+        const searchRoutes = new Map(config.routes.filter(r => r.capability === 'search').map(r => [r.market, r]))
+        // 实例→负责市场: 有 search 路由用路由实例, 无路由用支持 search 的启用实例直连(市场过滤在适配器端)
+        const assignments = new Map()
+        for (const market of new Set([...adapterMarkets.values()].flatMap(set => [...set]))) {
+          const instance = searchRoutes.has(market) ? router.select('search', market).instance
+            : config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId) && adapterMarkets.get(p.id)?.has(market))
+              || config.providers.find(p => p.enabled && searchAdapters.has(p.adapterId))
           if (!instance) continue
+          const entry = assignments.get(instance.id) || { instance, markets: new Set() }
+          entry.markets.add(market); assignments.set(instance.id, entry)
         }
-        // 单市场来源限速不终止整个搜索:其余市场候选照常下发(逐市场直连,部分受限不影响其余)
-        let batch
-        try { batch = await executor.run(instance, 'search', { q, limit: 20, market, routingRevision: config.routingRevision }, { signal }) }
-        catch (e) { if (e.code === 'RATE_LIMIT') continue; throw e }
-        if (stopped || getControl().routingRevision !== config.routingRevision) fail('ROUTE_CONFLICT', '目录路由已变化', 409)
-        for (const s of batch.items) {
-          if (!securitySchema.safeParse(s).success) fail('BAD_PAYLOAD', '来源返回不受支持的证券身份', 502)
-          candidates.set(s.id, { security: s, until: now() + 5 * 60 * 1000, revision: config.routingRevision }); results.set(s.id, s)
+        // 一个实例只请求一次: 联想端点为全市场端点, 按市场循环是重复请求同一份数据
+        const batches = await Promise.allSettled([...assignments.values()].map(async ({ instance, markets }) => ({ markets, batch: await executor.run(instance, 'search', { q, limit: 20, market: null, routingRevision: revision }, { signal }) })))
+        for (const settled of batches) {
+          // 单来源限速不终止整个搜索: 其余实例候选照常下发
+          if (settled.status === 'rejected') { if (settled.reason?.code === 'RATE_LIMIT') continue; throw settled.reason }
+          const { markets, batch } = settled.value
+          if (stopped || getControl().routingRevision !== revision) fail('ROUTE_CONFLICT', '目录路由已变化', 409)
+          for (const s of batch.items) {
+            if (!securitySchema.safeParse(s).success) fail('BAD_PAYLOAD', '来源返回不受支持的证券身份', 502)
+            if (!markets.has(s.exchange)) continue
+            candidates.set(s.id, { security: s, until: now() + CANDIDATE_TTL, revision }); results.set(s.id, s)
+          }
         }
-      }
-      for (const [id, c] of candidates) if (c.until <= now()) candidates.delete(id)
-      while (candidates.size > 200) candidates.delete(candidates.keys().next().value)
-      if (!config.routes.some(r => r.capability === 'search') && !records('catalog').length) fail('CATALOG_NOT_READY', '目录未就绪，请先在设置中配置目录来源或搜索来源并同步', 422)
-      return [...results.values()].slice(0, 20)
+        for (const [id, c] of candidates) if (c.until <= now()) candidates.delete(id)
+        while (candidates.size > CANDIDATE_LIMIT) candidates.delete(candidates.keys().next().value)
+        if (!config.routes.some(r => r.capability === 'search') && !records('catalog').length) fail('CATALOG_NOT_READY', '目录未就绪，请先在设置中配置目录来源或搜索来源并同步', 422)
+        const items = [...results.values()].slice(0, 20)
+        searchCache.set(key, { items, until: now() + SEARCH_TTL })
+        while (searchCache.size > SEARCH_CACHE_LIMIT) searchCache.delete(searchCache.keys().next().value)
+        return items
+      })()
+      searchFlights.set(key, { job, signal })
+      try { return await job } finally { if (searchFlights.get(key)?.job === job) searchFlights.delete(key) }
     },
     async ensure() {
       for (const route of getControl().routes.filter(r => ['catalog', 'calendar'].includes(r.capability))) {
