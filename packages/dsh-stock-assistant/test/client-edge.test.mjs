@@ -69,7 +69,7 @@ test('设置页空配置一键默认源填充草稿', async () => {
   const updates = []
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch) }
   renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  assert.match(renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} })), /启用默认数据源/)
+  assert.match(renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} })), /应用推荐配置/)
   assert.equal(updates.length, 0)
 })
 // 设置页信息架构: 递进区块+实例卡描述+反代端点+最近请求+概览横幅
@@ -84,10 +84,9 @@ test('设置页递进区块与实例可观测面渲染', async () => {
   assert.match(html, /市场与能力/, '区块2标题')
   assert.match(html, /显示偏好/, '区块3标题')
   assert.match(html, /东方财富公开接口/, '适配器一句话描述')
-  assert.match(html, /接口反代/, '反代端点区可见')
-  assert.match(html, /proxy\.corp\/em\/kline/, '已覆盖端点值回显')
-  assert.match(html, /运行状态/, '请求日志区可见')
-  assert.match(html, /quotes eastmoney/, '日志条目渲染')
+  // 反代与运行状态收在「配置」展开区里, 默认只显示摘要行
+  assert.match(html, /公开来源/, '摘要行标注公开来源')
+  assert.match(html, /配置/, '摘要行给出展开入口')
 })
 // E1: Given搜索报目录未就绪 When搜索页渲染 Then错误下方出现前往浏览市场引导
 test('搜索未就绪时引导前往浏览市场', async () => {
@@ -566,12 +565,12 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: { providers: saved.providers, routes: saved.routes, checkIds: ['seed'], checkResults: [], tab: 'routes' }, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '检查全部能力', '放弃草稿', '一键启用全部能力', '目录与日历']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
+  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '检查改动', '放弃草稿', '目录缓存']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
   // 启用banner仅在无实例时出现(默认配置自带双实例, 不含该banner为正确行为)
   assert.ok(!html.includes('启用默认数据源'))
   // 8市场 fieldset 全渲染(K线行存在)
   for (const market of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']) assert.ok(html.includes(market), `市场 fieldset 缺: ${market}`)
-  assert.ok(html.includes('>K线<'), 'K线能力行缺')
+  assert.ok(html.includes('K线'), 'K线能力可见')
 })
 
 test('D02 拖拽落位计算: 段内前插/后插与折叠隐藏项回填', async () => {

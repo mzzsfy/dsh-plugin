@@ -634,6 +634,7 @@ window.__ModuleLoader__.load({
       function change(next, invalidate = true) { runtime.updateView({ settingsDraft: { ...draft, ...next, ...(invalidate ? { checkIds: [], checkResults: [] } : {}) } }) }
       const providerChange = (id, patch) => change({ providers: draft.providers.map(p => p.id === id ? { ...p, ...patch } : p) })
       const field = (label, value, onChange, props = {}) => h('label', { className: 'ssb-field' }, h('span', null, label), h('input', { value: value ?? '', onChange: e => onChange(e.target.value), ...props }))
+      const CAP_LABEL = { quotes: '报价', catalog: '证券目录', search: '远程搜索', calendar: '交易日历', kline: 'K线' }
       const tab = draft.tab || 'sources'
       const TABS = [['sources', '数据源'], ['routes', '市场与能力'], ['display', '显示偏好']]
       const providersOnly = { providers: draft.providers, routes: saved.routes }
@@ -642,33 +643,53 @@ window.__ModuleLoader__.load({
         const adapter = state.data.adapters.find(a => a.adapterId === p.adapterId)
         const status = state.data.providerStatus?.find(s => s.id === p.id)
         const openSource = adapter?.credential === 'none'
-        return h('fieldset', { className: 'ssb-provider', key: p.id, disabled: state.busy.configuration }, h('legend', null, p.id),
-          h('div', { className: 'ssb-provider-head' },
-            h('label', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h('select', { value: p.adapterId, onChange: e => { const adapterId = e.target.value, descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialEnv: descriptor?.credential === 'none' ? null : p.credentialEnv || 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } }, ...state.data.adapters.map(a => h('option', { value: a.adapterId, key: a.adapterId }, a.adapterId + (a.credential === 'none' ? '（免凭据）' : ''))))),
-            h('div', { className: 'ssb-provider-switches' },
-              h(Toggle, { label: '启用', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }),
-              h('span', { className: 'ssb-muted' }, openSource ? '公开来源 · 延迟未知 · 无SLA' : status?.credentialPresent ? 'Host 已配置凭据' : '保存前检查 Host 凭据'),
-              h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除'))),
+        const expanded = (draft.expandedProvider || '') === p.id
+        // 该实例实际承担的能力与市场(摘要用, 让「这个源在干什么」一眼可见)
+        const owned = draft.routes.filter(r => r.primaryInstanceId === p.id || r.fallbackInstanceIds.includes(p.id))
+        const asPrimary = draft.routes.filter(r => r.primaryInstanceId === p.id)
+        const capsText = [...new Set(owned.map(r => CAP_LABEL[r.capability]))].join('/') || '未分配'
+        const marketsText = new Set(owned.map(r => r.market)).size
+        const toggle = () => change({ expandedProvider: expanded ? '' : p.id }, false)
+        return h('div', { className: 'ssb-provider', key: p.id },
+          h('button', { className: 'ssb-provider-toggle', 'aria-expanded': expanded, disabled: state.busy.configuration, onClick: toggle, title: adapter?.description || '' },
+            h('span', { className: `ssb-dot${p.enabled ? '' : ' ssb-dot-idle'}` }),
+            h('span', { className: 'ssb-provider-id' }, p.id),
+            h('span', { className: 'ssb-provider-adapter-name ssb-muted' }, p.adapterId),
+            h('span', { className: 'ssb-provider-scope' }, `${asPrimary.length} 条路由 · ${marketsText} 市场 · ${capsText}`),
+            h('span', { className: 'ssb-muted ssb-provider-kind' }, openSource ? '公开来源' : status?.credentialPresent ? '凭据已就绪' : '待配置凭据'),
+            h('span', { className: 'ssb-provider-edit' }, expanded ? '收起' : '配置')),
           adapter?.description ? h('p', { className: 'ssb-provider-desc ssb-muted' }, adapter.description) : null,
-          h('details', { className: 'ssb-provider-advanced' },
-            h('summary', { className: 'ssb-muted' }, `额度与接口${status?.endpointsCovered ? `（已覆盖 ${status.endpointsCovered} 项反代）` : ''}${status?.proxy ? ' · 已设代理出口' : ''}`),
-            h('div', { className: 'ssb-form-grid' },
-              openSource ? h('span', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '公开来源，无需凭据') : field('Host环境变量名', p.credentialEnv, value => providerChange(p.id, { credentialEnv: value }), { autoComplete: 'off', spellCheck: false }),
-              field('共享额度组（同账号保持一致）', p.quotaGroup, value => providerChange(p.id, { quotaGroup: value })),
-              field('每分钟请求上限（留空仅允许探针）', p.budget.requestsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, requestsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }),
-              field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
-              h('label', { className: 'ssb-field' }, h('span', null, '计费单位'), h('select', { value: p.budget.billingUnit, onChange: e => providerChange(p.id, { budget: { ...p.budget, billingUnit: e.target.value } }) }, h('option', { value: 'request' }, '请求'), h('option', { value: 'symbol' }, '证券'))),
-              p.budget.billingUnit === 'symbol' ? field('每分钟证券额度', p.budget.symbolCreditsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, symbolCreditsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }) : null,
-              ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap })),
-              adapter?.endpointKeys?.length ? h('details', { key: 'ep-' + p.id, style: { gridColumn: '1 / -1' } },
-                h('summary', { className: 'ssb-muted' }, `接口反代${status?.endpointsCovered ? `（已覆盖 ${status.endpointsCovered} 项）` : ''}`),
-                h('p', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '自建反向代理或镜像站时替换对应地址，留空使用官方默认。路径与参数由本插件拼接，反代只需原样转发。'),
-                h('div', { className: 'ssb-form-grid' }, ...adapter.endpointKeys.map(({ key, label }) => field(label, (p.endpoints || {})[key] || '', value => { const endpoints = { ...p.endpoints }; if (value) endpoints[key] = value; else delete endpoints[key]; providerChange(p.id, { endpoints: Object.keys(endpoints).length ? endpoints : undefined }) }, { placeholder: '官方默认', spellCheck: false })))) : null,
-              h('details', { key: 'obs-' + p.id, style: { gridColumn: '1 / -1' } }, h('summary', { className: 'ssb-muted' }, '运行状态'), status?.recentRequests?.length ? h('ul', { className: 'ssb-reqlog' }, ...status.recentRequests.slice(0, 5).map((r, i) => h('li', { key: i }, `${timeText(r.at)} · ${r.url} · ${r.status} · ${r.ms}ms`))) : h('p', { className: 'ssb-muted' }, '暂无请求记录；启用并保存后，行情/K线请求会在此留最近 20 条轨迹。')))))
+          expanded ? h('div', { className: 'ssb-provider-body', disabled: state.busy.configuration },
+            h('div', { className: 'ssb-provider-head' },
+              h('label', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h('select', { value: p.adapterId, onChange: e => { const adapterId = e.target.value, descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialEnv: descriptor?.credential === 'none' ? null : p.credentialEnv || 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } }, ...state.data.adapters.map(a => h('option', { value: a.adapterId, key: a.adapterId }, a.adapterId + (a.credential === 'none' ? '（免凭据）' : ''))))),
+              h('div', { className: 'ssb-provider-switches' },
+                h(Toggle, { label: '启用', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }),
+                h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除'))),
+            h('div', { className: 'ssb-provider-advanced-open' },
+              h('div', { className: 'ssb-form-grid' },
+                openSource ? h('span', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '公开来源，无需凭据') : field('Host环境变量名', p.credentialEnv, value => providerChange(p.id, { credentialEnv: value }), { autoComplete: 'off', spellCheck: false }),
+                field('共享额度组（同账号保持一致）', p.quotaGroup, value => providerChange(p.id, { quotaGroup: value })),
+                field('每分钟请求上限（留空仅允许探针）', p.budget.requestsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, requestsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }),
+                field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
+                h('label', { className: 'ssb-field' }, h('span', null, '计费单位'), h('select', { value: p.budget.billingUnit, onChange: e => providerChange(p.id, { budget: { ...p.budget, billingUnit: e.target.value } }) }, h('option', { value: 'request' }, '请求'), h('option', { value: 'symbol' }, '证券'))),
+                p.budget.billingUnit === 'symbol' ? field('每分钟证券额度', p.budget.symbolCreditsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, symbolCreditsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }) : null,
+                ...['quotes', 'catalog', 'search', 'calendar'].map(cap => field(`${({ quotes: '报价', catalog: '目录', search: '搜索', calendar: '日历' })[cap]}每分钟上限`, p.budget.capabilityLimits[cap] ?? '', value => providerChange(p.id, { budget: { ...p.budget, capabilityLimits: Object.fromEntries(Object.entries({ ...p.budget.capabilityLimits, [cap]: value ? Number(value) : null }).filter(([, limit]) => limit !== null)) } }), { type: 'number', min: 1, key: cap })),
+                adapter?.endpointKeys?.length ? h('details', { key: 'ep-' + p.id, style: { gridColumn: '1 / -1' } },
+                  h('summary', { className: 'ssb-muted' }, `接口反代${status?.endpointsCovered ? `（已覆盖 ${status.endpointsCovered} 项）` : ''}`),
+                  h('p', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '自建反向代理或镜像站时替换对应地址，留空使用官方默认。路径与参数由本插件拼接，反代只需原样转发。'),
+                  h('div', { className: 'ssb-form-grid' }, ...adapter.endpointKeys.map(({ key, label }) => field(label, (p.endpoints || {})[key] || '', value => { const endpoints = { ...p.endpoints }; if (value) endpoints[key] = value; else delete endpoints[key]; providerChange(p.id, { endpoints: Object.keys(endpoints).length ? endpoints : undefined }) }, { placeholder: '官方默认', spellCheck: false })))) : null,
+                h('details', { key: 'obs-' + p.id, style: { gridColumn: '1 / -1' } }, h('summary', { className: 'ssb-muted' }, '运行状态'), status?.recentRequests?.length ? h('ul', { className: 'ssb-reqlog' }, ...status.recentRequests.slice(0, 5).map((r, i) => h('li', { key: i }, `${timeText(r.at)} · ${r.url} · ${r.status} · ${r.ms}ms`))) : h('p', { className: 'ssb-muted' }, '暂无请求记录；启用并保存后，行情/K线请求会在此留最近 20 条轨迹。'))))) : null)
       })
-      const CAP_LABEL = { quotes: '报价', catalog: '证券目录', search: '远程搜索', calendar: '交易日历', kline: 'K线' }
-      const routeTables = Object.keys(MARKET_LABEL).map(market => {
+      const routeRows = Object.keys(MARKET_LABEL).map(market => {
         const caps = ['catalog', 'search', 'quotes', 'kline', ...(['XSHG', 'XSHE'].includes(market) ? ['calendar'] : [])]
+        const marketRoutes = draft.routes.filter(r => r.market === market)
+        const expanded = (draft.expandedMarket || '') === market
+        // 摘要优先: 八市场默认收成八行, 只暴露「用什么源、备源是谁」, 改的时候才展开下拉
+        const primaries = [...new Set(marketRoutes.map(r => r.primaryInstanceId))]
+        const backs = marketRoutes.filter(r => r.fallbackInstanceIds.length)
+        // 能力按固定顺序呈现, 不跟随 routes 数组顺序(来源提高的顺序会变)
+        const capOrder = caps.filter(cap => marketRoutes.some(r => r.capability === cap))
+        const allocation = marketRoutes.map(r => `${CAP_LABEL[r.capability]}: ${r.primaryInstanceId}${r.fallbackInstanceIds.length ? `（备 ${r.fallbackInstanceIds[0]}）` : ''}`).join('\n')
         const cells = caps.map(cap => {
           const route = draft.routes.find(r => r.market === market && r.capability === cap)
           const options = [h('option', { value: '', key: '' }, '未配置'), ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap)).map(p => h('option', { value: p.id, key: p.id }, p.id))]
@@ -687,27 +708,42 @@ window.__ModuleLoader__.load({
             cap === 'quotes' ? h(Toggle, { label: '接受延迟未知', checked: route.acceptUnknownDelay, onChange: on => updateRoute({ acceptUnknownDelay: on }) }) : null,
             cap === 'quotes' ? h('label', { className: 'ssb-field ssb-route-delay' }, h('span', null, '最大延迟秒'), h('input', { type: 'number', min: 0, value: route.maxDelaySeconds ?? '', placeholder: '不限', onChange: e => updateRoute({ maxDelaySeconds: e.target.value ? Number(e.target.value) : null }) })) : null)
         })
-        return h('fieldset', { className: 'ssb-provider ssb-route-group', key: market, disabled: state.busy.configuration },
-          h('legend', null, `${MARKET_LABEL[market]} · ${market}${state.data.markets?.[market]?.verified ? '' : '（未验证）'}`),
-          h('div', { className: 'ssb-route-grid' }, ...cells),
-          advanced.length ? h('details', { className: 'ssb-route-advanced' }, h('summary', { className: 'ssb-muted' }, `备源与延迟（${tuned.filter(r => r.fallbackInstanceIds.length).length}/${tuned.length} 已具备备用源）`), ...advanced) : null)
+        return h('div', { className: 'ssb-market-row', key: market },
+          h('button', {
+            className: 'ssb-market-toggle', 'aria-expanded': expanded, disabled: state.busy.configuration, title: allocation,
+            onClick: () => change({ expandedMarket: expanded ? '' : market }, false),
+          },
+          h('span', { className: 'ssb-market-name' }, MARKET_LABEL[market]),
+          h('span', { className: 'ssb-market-code' }, market),
+          h('span', { className: 'ssb-market-caps' }, primaries.length === 1 ? primaries[0] : primaries.length ? `${primaries.length} 个主源` : '未配置',
+            h('span', { className: 'ssb-muted' }, ` · ${capOrder.length ? capOrder.map(c => CAP_LABEL[c]).join('/') : '无能力'}`)),
+          h('span', { className: 'ssb-market-back' }, backs.length ? `备 ${[...new Set(backs.map(r => r.fallbackInstanceIds[0]))].join('/')}` : '无备源'),
+          h('span', { className: 'ssb-market-edit' }, expanded ? '收起' : '改')),
+          expanded ? h('div', { className: 'ssb-market-body' },
+            h('div', { className: 'ssb-route-grid' }, ...cells),
+            advanced.length ? h('div', { className: 'ssb-route-advanced' }, ...advanced) : null) : null)
       })
+      const configuredMarkets = new Set(draft.routes.map(r => r.market)).size
       const pane = tab === 'sources' ? h(React.Fragment, null,
-        !draft.providers.length ? h('div', { className: 'ssb-banner' }, '尚未配置任何数据源。可一键启用内置免凭据公开源（延迟未知、无SLA），然后逐项检查并保存。', h(Button, { disabled: state.busy.configuration, onClick: () => change({ providers: state.data?.suggested?.providers || [], routes: state.data?.suggested?.routes || [] }) }, '启用默认数据源')) : null,
+        !draft.providers.length ? h('div', { className: 'ssb-banner' }, '尚未配置任何数据源。点上方「应用推荐配置」一次装好内置的免凭据源（延迟未知、无SLA）。') : null,
         h('div', { className: 'ssb-section-head' }, h('h3', null, '数据源'), h(Button, { disabled: state.busy.configuration || draft.providers.length >= 8, onClick: () => { let n = 1; while (draft.providers.some(p => p.id === `ts-${n}`)) n++; change({ providers: [...draft.providers, defaultProvider(`ts-${n}`)] }) } }, '添加实例')),
         providerCards,
         h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.configuration || !draft.providers.length, onClick: quiet(() => runtime.configuration(providersOnly, [])) }, '保存数据源'), h('span', { className: 'ssb-muted' }, '仅保存实例；能力分配在「市场与能力」页检查并保存'))) :
         tab === 'routes' ? h(React.Fragment, null,
-        h('div', { className: 'ssb-section-head' }, h('h3', null, '一键启用'), h('span', { className: 'ssb-muted', 'aria-live': 'polite' }, state.checkProgress || '按已启用数据源自动补全全部市场能力路由，检查通过后自动保存'), h(Button, { primary: true, disabled: state.busy.check || state.busy.configuration, onClick: quiet(() => runtime.oneClickKline()) }, state.checkProgress || state.busy.configuration || state.busy.check ? state.checkProgress || '正在保存…' : '一键启用全部能力')),
-        h('p', { className: 'ssb-muted' }, '目录、报价、日历与K线可独立选择。未配置的能力不会隐式使用其他来源。数据源实例在「数据源」页保存。'),
-        routeTables,
-        h('div', { 'aria-live': 'polite' }, ...draft.checkResults.map((r, index) => h('p', { key: `${r.key}-${index}`, className: 'ssb-muted' }, `${r.providerInstanceId} / ${r.market} / ${r.capability}：${r.status === 'ready' ? '就绪' : r.error?.message || '不可用'}`))),
+        h('div', { className: 'ssb-section-head' }, h('h3', null, '市场与能力'), h('span', { className: 'ssb-muted', 'aria-live': 'polite' }, state.checkProgress || `${configuredMarkets} 个市场已配置，点行尾「改」调整，其余保持默认即可`)),
+        h('div', { className: 'ssb-market-list' },
+          h('div', { className: 'ssb-market-head', 'aria-hidden': 'true' },
+            h('span', null, '市场'), h('span', null, '代码'), h('span', null, '行情来源'), h('span', null, '备用源'), h('span', null, '')),
+          ...routeRows),
+        h('div', { className: 'ssb-section-foot' },
+          h('p', { className: 'ssb-muted' }, '目录、搜索、报价、日历与K线可独立指定来源；未配置的能力不会隐式借用其他来源。'),
+          h('div', { 'aria-live': 'polite' }, ...draft.checkResults.filter(r => r.status !== 'ready').map((r, index) => h('p', { key: `${r.key}-${index}`, className: 'ssb-muted' }, `${r.providerInstanceId} / ${r.market} / ${r.capability}：${r.error?.message || '不可用'}`)))),
         h('div', { className: 'ssb-toolbar' },
-          h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => { const result = await runtime.check({ providers: draft.providers, routes: draft.routes, capabilities: [...new Set(draft.routes.map(r => r.capability))] }); const current = runtime.getSnapshot().view.settingsDraft; if (current && JSON.stringify({ providers: current.providers, routes: current.routes }) !== JSON.stringify({ providers: draft.providers, routes: draft.routes })) return; change({ expectedRevision: runtime.getSnapshot().data.control.revision, checkIds: [...draft.checkIds, result.checkId], checkResults: result.checks }, false) }) }, state.busy.check ? '正在逐项检查…' : '检查全部能力'),
-          h(Button, { primary: true, disabled: state.busy.configuration || state.busy.check || !draft.checkIds.length && draft.routes.length, title: !draft.checkIds.length && draft.routes.length ? '先运行「检查全部能力」，检查通过后才能保存' : undefined, onClick: quiet(() => runtime.configuration(routesOnly, draft.checkIds)) }, '保存路由'),
+          h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => { const result = await runtime.check({ providers: draft.providers, routes: draft.routes, capabilities: [...new Set(draft.routes.map(r => r.capability))] }); const current = runtime.getSnapshot().view.settingsDraft; if (current && JSON.stringify({ providers: current.providers, routes: current.routes }) !== JSON.stringify({ providers: draft.providers, routes: draft.routes })) return; change({ expectedRevision: runtime.getSnapshot().data.control.revision, checkIds: [...draft.checkIds, result.checkId], checkResults: result.checks }, false) }) }, state.busy.check ? '正在逐项检查…' : '检查改动'),
+          h(Button, { primary: true, disabled: state.busy.configuration || state.busy.check || !draft.checkIds.length && draft.routes.length, title: !draft.checkIds.length && draft.routes.length ? '先运行「检查改动」，通过后才能保存' : undefined, onClick: quiet(() => runtime.configuration(routesOnly, draft.checkIds)) }, '保存路由'),
           !draft.checkIds.length && !state.busy.check ? h('span', { className: 'ssb-muted' }, '先检查，通过后才能保存') : null,
           h(Button, { disabled: state.busy.check || state.busy.configuration, onClick: () => runtime.updateView({ settingsDraft: null }) }, '放弃草稿')),
-        h('h3', null, '目录与日历'), h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.sync, onClick: quiet(async () => { const markets = Object.keys(BROWSE_MARKETS).filter(market => (state.data.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)); const results = await Promise.all(markets.map(market => runtime.sync(market).then(() => null).catch(e => e))); const errors = results.filter(Boolean); if (errors.length) tools.toast?.show(errors.map(e => e.message).join('；'), { kind: 'error' }) }) }, '一键同步全部市场'), ...Object.keys(BROWSE_MARKETS).filter(market => (state.data.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, disabled: state.busy.sync, onClick: quiet(async () => { const results = await runtime.sync(market); const errors = results.filter(r => !r.ok); if (errors.length) tools.toast?.show(errors.map(r => r.error.message).join('；'), { kind: 'error' }) }) }, `同步${BROWSE_MARKETS[market]}目录`))),
+        h('h3', null, '目录缓存'), h('div', { className: 'ssb-toolbar' }, ...Object.keys(BROWSE_MARKETS).filter(market => (state.data.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, disabled: state.busy.sync, onClick: quiet(async () => { const results = await runtime.sync(market); const errors = results.filter(r => !r.ok); if (errors.length) tools.toast?.show(errors.map(r => r.error.message).join('；'), { kind: 'error' }) }) }, `同步${BROWSE_MARKETS[market]}`))),
         ...state.data.catalogs.map(c => h('p', { key: c.source, className: 'ssb-muted' }, `${c.source} · ${timeText(c.fetchedAt)}${c.stale ? ' · 已过期' : ''}${c.complete ? '' : ' · 目录可能不完整'}`)),
         ...Object.entries(state.data.routeSelections).filter(([id, selected]) => selected.providerInstanceId !== saved.routes.find(r => r.id === id)?.primaryInstanceId).map(([id, selected]) => h('div', { className: 'ssb-banner', key: id }, `${id}当前使用备用源 ${selected.providerInstanceId}。`, h(Button, { disabled: state.busy.switch, onClick: quiet(() => runtime.switchPrimary(id)) }, '检查并切回主源')))) :
         h(React.Fragment, null, h('h3', null, '显示偏好（即改即存）'), h('div', { className: 'ssb-toolbar' }, h('label', { className: 'ssb-field' }, h('span', null, '刷新间隔'), h('select', { value: saved.preferences.refreshSeconds, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ refreshSeconds: Number(e.target.value) })) }, ...[15, 30, 60].map(n => h('option', { key: n, value: n }, `${n}秒`)))), h('label', { className: 'ssb-field' }, h('span', null, '涨跌颜色'), h('select', { value: saved.preferences.colorMode, disabled: state.busy.write || state.busy.configuration, onChange: quiet(e => runtime.preferences({ colorMode: e.target.value })) }, h('option', { value: 'red-up' }, '红涨绿跌'), h('option', { value: 'green-up' }, '绿涨红跌')))))
@@ -782,6 +818,21 @@ window.__ModuleLoader__.load({
 .ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
 .ssb-settings-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }.ssb-settings-intro { min-width:0; display:grid; gap:6px; }.ssb-settings-intro p { margin:0; }
 .ssb-provider-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; }.ssb-provider-adapter { flex:0 0 240px; }.ssb-provider-switches { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }.ssb-provider-desc { margin:8px 0 0; }.ssb-provider-advanced { margin-top:8px; }.ssb-provider-advanced > summary { cursor:pointer; }
+/* 摘要行: 数据源与市场默认收成一行, 点开才展开编辑区 */
+.ssb-provider, .ssb-market-row { border-bottom:1px solid var(--ssb-border); }
+.ssb-provider-toggle, .ssb-market-toggle { display:grid; align-items:center; gap:12px; width:100%; padding:12px 4px; background:none; border:0; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+.ssb-provider-toggle { grid-template-columns:10px minmax(96px,auto) minmax(88px,auto) minmax(0,1fr) minmax(88px,auto) 42px; }
+.ssb-market-toggle { grid-template-columns:minmax(88px,auto) 52px minmax(0,1fr) minmax(72px,auto) 42px; }
+.ssb-provider-toggle:hover, .ssb-market-toggle:hover { background:var(--ssb-hover); }
+.ssb-provider-toggle:focus-visible, .ssb-market-toggle:focus-visible { outline:2px solid var(--ssb-accent); outline-offset:-2px; }
+.ssb-provider-toggle[aria-expanded="true"], .ssb-market-toggle[aria-expanded="true"] { border-bottom:1px solid var(--ssb-border); }
+.ssb-provider-id { font-weight:600; }.ssb-provider-adapter-name { font-size:12px; }.ssb-provider-scope { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.ssb-provider-kind { font-size:12px; text-align:right; }.ssb-provider-edit, .ssb-market-edit { font-size:12px; color:var(--ssb-accent); text-align:right; }
+.ssb-provider-body, .ssb-market-body { padding:4px 4px 16px; display:grid; gap:12px; }
+.ssb-market-name { font-weight:600; }.ssb-market-code { font-size:11px; color:var(--ssb-text-sub); }.ssb-market-caps { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.ssb-market-back { font-size:12px; color:var(--ssb-text-sub); text-align:right; }
+.ssb-market-list { display:grid; }
+.ssb-market-head { display:grid; grid-template-columns:minmax(88px,auto) 52px minmax(0,1fr) minmax(72px,auto) 42px; gap:12px; padding:0 4px 6px; font-size:11px; color:var(--ssb-text-dim); border-bottom:1px solid var(--ssb-border); }
+.ssb-section-foot { display:grid; gap:6px; padding:12px 0; }.ssb-section-foot p { margin:0; }
+.ssb-route-advanced { display:grid; gap:8px; padding-top:8px; border-top:1px solid var(--ssb-border); }
 .ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
 .ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
