@@ -3348,18 +3348,23 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             }
             wasRunning = true
             schedule(STATUS_POLL_FAST_MS)
-          } else if (wasRunning) {
-            // running→idle 转换补最终刷新(F23):reset 同步等回扫,响应时 running 已 false,
-            // done 增长分支永不触发——回扫产物的最终态靠此转换收尾(含热力图重取)
-            wasRunning = false
-            scheduleRefresh()
-            bumpHeatFetch()
+          } else {
+            // running→idle 转换补最终刷新(F23):reset/restore 同步等回扫,响应时 running
+            // 已 false、done 增长分支不触发,收尾靠此分支。空闲也必须续轮,否则首个
+            // 空闲 tick(wasRunning 为 false)就让轮询链断掉、汇总停留旧值
+            if (wasRunning) {
+              wasRunning = false
+              scheduleRefresh()
+              bumpHeatFetch()
+            }
             schedule(STATUS_POLL_SLOW_MS)
           }
         }
         let wasRunning = false
         tick()
-        statusMachineRef.current = { restart: () => { baseDone = 0; schedule(STATUS_POLL_FAST_MS) } }
+        // 重启入口:置 wasRunning 让首个 tick 走收尾分支(补刷新 + 重取热力图),
+        // baseDone 归零避免回扫产物计入增量判定
+        statusMachineRef.current = { restart: () => { baseDone = 0; wasRunning = true; schedule(STATUS_POLL_FAST_MS) } }
         return () => {
           alive = false
           if (timer) clearTimeout(timer)
