@@ -190,7 +190,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
         if (route.instance) {
           const result = await executor.run(route.instance, 'quotes', { securities: [{ id: index.id, exchange: index.exchange, code: index.code }], routingRevision: state.get().routingRevision }, { signal: AbortSignal.timeout(5 * 1000) })
           const quote = result.items?.find(q => q.securityId === index.id)
-          if (quote && quote.last !== null) { deriveDelay(quote, now); overview = { name: index.name, last: quote.last, change: quote.change, changePct: quote.changePct, quoteAt: quote.quoteAt, delayKind: quote.delayKind, delaySeconds: quote.delaySeconds, source: quote.providerInstanceId } }
+          if (quote && quote.last !== null) { deriveDelay(quote, now, quote.sessionState === 'trading'); overview = { name: index.name, last: quote.last, change: quote.change, changePct: quote.changePct, quoteAt: quote.quoteAt, delayKind: quote.delayKind, delaySeconds: quote.delaySeconds, source: quote.providerInstanceId } }
         }
       } catch {}
       return { ...await catalog.browse(input), overview, catalogs: catalog.status(), routingRevision: state.get().routingRevision }

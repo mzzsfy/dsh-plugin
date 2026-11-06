@@ -235,12 +235,31 @@ window.__ModuleLoader__.load({
       if (Math.abs(amount) >= 1e8) return `${(amount / 1e8).toFixed(1)}亿`
       if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
       return amount.toFixed(0)    }
+    // 秒数转 1d2h3m4s: 值为 0 的段整段省略, 不留 0 占位
+    const formatDuration = total => {
+      const seconds = Math.max(0, Math.round(Number(total) || 0))
+      let rest = seconds
+      const parts = [['d', 86400], ['h', 3600], ['m', 60], ['s', 1]]
+        .map(([unit, size]) => { const value = Math.floor(rest / size); rest -= value * size; return [value, unit] })
+        .filter(([value]) => value > 0)
+      return parts.length ? parts.map(([value, unit]) => `${value}${unit}`).join('') : '0s'
+    }
+    // 延迟口径: 交易中报秒差, 非交易时段报价停在收盘那刻, 报时间点而不是把收盘后的时长当延迟
+    const TRADING_STATES = ['trading', 'auction']
+    const delayText = quote => {
+      if (!quote || quote.delayKind === 'unknown') return '未知'
+      if (quote.delayKind === 'realtime') return '实时'
+      // sessionState 缺失(如市场概览)时不据此推断休市, 只认 deriveDelay 给出的 closed
+      const offline = quote.delayKind === 'closed' || (quote.sessionState && !TRADING_STATES.includes(quote.sessionState))
+      if (offline) return `最后 ${String(timeText(quote.quoteAt)).split(' ').pop()}`
+      return quote.delaySeconds == null ? '未知' : `延迟 ${formatDuration(quote.delaySeconds)}`
+    }
     // 数据新鲜度: 取最旧报价的接收时间, 进入面板时用户能判断是否为缓存值
     const freshnessText = quotes => {
       const stamps = Object.values(quotes || {}).map(entry => Number(entry?.quote?.receivedAt)).filter(at => Number.isFinite(at))
       if (!stamps.length) return ''
       const age = Math.max(0, Math.round((Date.now() - Math.min(...stamps)) / 1000))
-      return age < 3 ? '刚刚更新' : `${age} 秒前更新`
+      return age < 3 ? '刚刚更新' : `${formatDuration(age)}前更新`
     }
     const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
     // 客户端 K线数据保鲜期, 与服务端 kline-cache 同量级: 分时是实时数据, 日K盘中会动, 周月K一天一换
@@ -259,7 +278,7 @@ window.__ModuleLoader__.load({
     }
     function QuoteStatus({ entry, short = false }) {
       const quote = entry?.quote
-      const detail = (quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : quote.delayKind === 'realtime' ? '实时' : `延迟${quote.delaySeconds}秒`}` : '等待报价') + (entry?.lastError?.message ? ` · ${entry.lastError.message}` : '')
+      const detail = (quote ? `${quote.providerInstanceId} · ${quote.delayKind === 'unknown' ? '延迟未知' : delayText(quote)}` : '等待报价') + (entry?.lastError?.message ? ` · ${entry.lastError.message}` : '')
       // short: 列表行只给状态点, 语义与原因收进 title, 文字列让位给数据
       if (short) {
         const health = entry?.health || 'ok'
@@ -640,7 +659,7 @@ window.__ModuleLoader__.load({
       const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
       // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
       const currency = item.currency || ''
-      const fields = [['今开', formatPrice(q?.open)], ['最高', formatPrice(q?.high)], ['最低', formatPrice(q?.low)], ['昨收', formatPrice(q?.previousClose)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume)}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', q?.delayKind === 'unknown' || !q ? '未知' : q.delayKind === 'realtime' ? '实时' : `${q.delaySeconds}秒`]]
+      const fields = [['今开', formatPrice(q?.open)], ['最高', formatPrice(q?.high)], ['最低', formatPrice(q?.low)], ['昨收', formatPrice(q?.previousClose)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume)}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
       // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
       // 成本块: 有成本显盈亏三元组, 表单可设/清成本; 非法输入就地报错不静默(B2), 草稿绑定 detailId 切换即清(B3 由三处 open 清理保证)
@@ -669,7 +688,7 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ssb-search-view' },
         h('div', { className: 'ssb-panel-head' }, h('h2', null, '浏览市场'), h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选'))),
         h('div', { className: 'ssb-toolbar', style: { padding: '12px 16px 0' } }, ...Object.keys(BROWSE_MARKETS).filter(market => (data?.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, BROWSE_MARKETS[market]))),
-        data?.browseOverview ? h('div', { className: 'ssb-banner ssb-banner-ok', style: { margin: '12px 16px 0' } }, `${data.browseOverview.name} ${data.browseOverview.last}`, h('span', { className: `ssb-number ${Number(data.browseOverview.change) >= 0 ? 'ssb-up' : 'ssb-down'}` }, `${Number(data.browseOverview.change) >= 0 ? '+' : ''}${data.browseOverview.change}（${Number(data.browseOverview.changePct) >= 0 ? '+' : ''}${data.browseOverview.changePct}%）`), h('span', { className: 'ssb-muted' }, `${data.browseOverview.source} · ${data.browseOverview.delayKind === 'realtime' ? '实时' : data.browseOverview.delayKind === 'unknown' ? '延迟未知' : `延迟${data.browseOverview.delaySeconds}秒`}`)) : null,
+        data?.browseOverview ? h('div', { className: 'ssb-banner ssb-banner-ok', style: { margin: '12px 16px 0' } }, `${data.browseOverview.name} ${data.browseOverview.last}`, h('span', { className: `ssb-number ${Number(data.browseOverview.change) >= 0 ? 'ssb-up' : 'ssb-down'}` }, `${Number(data.browseOverview.change) >= 0 ? '+' : ''}${data.browseOverview.change}（${Number(data.browseOverview.changePct) >= 0 ? '+' : ''}${data.browseOverview.changePct}%）`), h('span', { className: 'ssb-muted' }, `${data.browseOverview.source} · ${data.browseOverview.delayKind === 'unknown' ? '延迟未知' : delayText(data.browseOverview)}`)) : null,
         !rows ? h('div', { className: 'ssb-empty' }, view.browseSyncing ? h('p', null, '目录首次同步中（约一两分钟），完成后重新点击该市场即可浏览。') : h(React.Fragment, null, h('p', null, '该市场目录未同步。可直接搜索添加自选，或同步目录后浏览。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录'))) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
             const added = !!data?.control.watchlist.items[item.id]

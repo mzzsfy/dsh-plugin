@@ -49,3 +49,17 @@ test('S6 未知交易所不猜时段', () => {
   assert.equal(sessionStateOf('NOSUCH', at('2026-11-06T02:00:00Z')), 'unknown')
   assert.equal(sessionStateOf(undefined, at('2026-11-06T02:00:00Z')), 'unknown')
 })
+
+test('S7 收盘后按时间点报数据, 不再把收盘后的时长算成延迟', async () => {
+  const { deriveDelay } = await import('../src/collector.mjs')
+  const quote = at => ({ delayKind: 'unknown', delaySeconds: null, quoteAt: at })
+  // 交易中: 两分钟前 => delayed + 秒差
+  const live = deriveDelay(quote('2026-11-06T08:58:00Z'), () => Date.parse('2026-11-06T09:00:00Z'), true)
+  assert.deepEqual({ kind: live.delayKind, s: live.delaySeconds }, { kind: 'delayed', s: 120 })
+  // 休市: 同一份报价不改口径成"延迟一小时", 标 closed 交给界面报时间点
+  const closed = deriveDelay(quote('2026-11-06T07:00:00Z'), () => Date.parse('2026-11-06T08:00:00Z'), false)
+  assert.deepEqual({ kind: closed.delayKind, s: closed.delaySeconds }, { kind: 'closed', s: null })
+  // 实时窗口内不受 trading 影响
+  const fresh = deriveDelay(quote('2026-11-06T08:59:40Z'), () => Date.parse('2026-11-06T09:00:00Z'), false)
+  assert.equal(fresh.delayKind, 'realtime')
+})
