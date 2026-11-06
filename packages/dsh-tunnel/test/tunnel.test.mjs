@@ -495,10 +495,20 @@ test('场景22 宿主关闭: Given 隧道上挂着 upgrade 连接 Then host.clos
     req.end()
   })
   assert.ok(held, 'upgrade 应已建立')
+  // 客户端侧终结以 close 事件为准: destroyed 只反映本地是否调过 destroy(),
+  // 远端关闭经 FIN(优雅)或 RST(error)到达, 两条路径都发 close 但仅后者置 destroyed;
+  // 传播是异步的, 等待窗口只覆盖 I/O 物理时延
+  let clientClosed = false
+  held.once('close', () => { clientClosed = true })
   const closed = await host.dispose()
   assert.equal(closed, 'closed', '拦截的 upgrade 连接必须登记进 upgradedSockets, 否则 server.close 挂死')
   plugin.dispose()
-  assert.equal(held.destroyed, true)
+  const settled = await new Promise((resolve) => {
+    if (clientClosed) return resolve(true)
+    held.once('close', () => { clearTimeout(timer); resolve(true) })
+    const timer = setTimeout(() => resolve(false), 3000)
+  })
+  assert.equal(settled, true, '宿主关闭应终结客户端侧 upgrade 连接')
 })
 
 test('场景23 总线通知: Given 增删 Then publish() 每次变更一发', async () => {
