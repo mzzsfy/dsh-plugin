@@ -112,10 +112,11 @@ test('源码契约:重拉有在途门控', () => {
   assert.ok(refresh.includes('refreshPendingRef.current = false'), '重拉结束应清在途(含失败路径)')
 })
 
-test('源码契约:重拉结果与基线相同则不 setState(防扫描循环)', () => {
+test('源码契约:重拉结果与基线结构签名相同则不 setState(防扫描循环)', () => {
   const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
   assert.ok(refresh.includes('setTurnEnds'), '重拉应更新映射')
-  assert.ok(refresh.includes('if (turnEndsRef.current === map) return'), '同一映射引用应短路,避免 setState 触发扫描循环')
+  assert.ok(refresh.includes('turnEndsSignature(turnEndsRef.current) === turnEndsSignature(map)'),
+    'loadTurnEnds 每次新建 Map,基线必须比结构签名而非引用,相同即短路,避免 setState 触发扫描循环')
 })
 
 test('源码契约:重拉入口经 ref 跨组件传递(Bootstrap 装配,扫描处调用)', () => {
