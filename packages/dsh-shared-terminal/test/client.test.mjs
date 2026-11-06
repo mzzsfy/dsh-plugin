@@ -226,6 +226,7 @@ const fakeRoot = (options = { clicks: [] }) => {
     visible: options.visible ?? true,
     status: options.statusHeight ?? 40,
     connected: options.connected ?? true,
+    label: options.buttonLabel ?? '接管输入',
   }
   const root = {
     state,
@@ -237,7 +238,7 @@ const fakeRoot = (options = { clicks: [] }) => {
         if (!state.readonly) return null
         return {
           getBoundingClientRect: () => ({ width: 400, height: state.status }),
-          querySelector: (inner) => (inner === 'button' ? { click: () => state.clicks.push('takeover') } : null),
+          querySelector: (inner) => (inner === 'button' ? { textContent: state.label, click: () => state.clicks.push('takeover') } : null),
         }
       }
       if (selector === '.xterm-screen') return { getBoundingClientRect: () => ({ width: 400, height: state.content }) }
@@ -366,6 +367,21 @@ test('Given the page is hidden, When healing ticks, Then no pump query is issued
   await app.heal()
   assert.deepEqual(clicks, [])
   assert.deepEqual(app.queries, [], '后台标签页不得发查询')
+})
+
+test('Given the terminal has exited and the status bar only offers a new terminal, When healing ticks, Then it must not create one', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, buttonLabel: '新建终端' })] })
+  await app.heal()
+  assert.deepEqual(clicks, [], '退出态按钮是新建终端,按位置点击会建出多余终端')
+  assert.deepEqual(app.queries, [], '没有接管按钮时连泵查询都不必发')
+})
+
+test('Given the status bar labels the takeover in English, When healing ticks, Then the button is still recognised', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, buttonLabel: 'Take control' })] })
+  await app.heal()
+  assert.deepEqual(clicks, ['takeover'])
 })
 
 test('Given more sessions than the cooldown table holds, When they keep healing, Then the oldest entry is evicted and may heal again', async () => {

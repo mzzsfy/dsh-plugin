@@ -318,7 +318,14 @@ window.__ModuleLoader__.load({
       return content.height - box.height - status > HEAL_OVERFLOW_PX || content.width - box.width > HEAL_OVERFLOW_PX
     }
 
-    const takeoverButton = (root) => root.querySelector('[role="status"]')?.querySelector('button')
+    // 状态栏按钮随终端状态变化:退出态是「新建终端」,按位置取会误建终端
+    const TAKEOVER_LABELS = ['接管输入', 'take control']
+
+    const takeoverButton = (root) => {
+      const button = root.querySelector('[role="status"]')?.querySelector('button')
+      const label = (button?.textContent ?? '').trim().toLowerCase()
+      return TAKEOVER_LABELS.some((text) => label.includes(text)) ? button : undefined
+    }
 
     // 隐藏 tab 没有几何;屏上 Session 才渲染终端面板,附着力按 mounted 判断即可
     const visibleRoot = (root) => {
