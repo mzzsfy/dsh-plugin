@@ -841,7 +841,7 @@ window.__ModuleLoader__.load({
     function FloatingTicker({ runtime }) {
       const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
       const [floating, setFloating] = usePref(FLOAT_KEY, FLOAT_DEFAULT)
-      const [quotes, setQuotes] = React.useState({})
+      const [fetched, setFetched] = React.useState({})
       const [trend, setTrend] = React.useState(null)
       const [error, setError] = React.useState('')
       const [picker, setPicker] = React.useState(false)
@@ -865,7 +865,7 @@ window.__ModuleLoader__.load({
             const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
             fetch(`${BASE}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control.revision ?? 0, securities }) })
               .then(response => response.json())
-              .then(payload => { if (dead) return; if (payload.ok) { setQuotes(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
               .catch(() => { if (!dead) setError('行情不可用') })
           } else if (securityId) {
             fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
@@ -912,6 +912,14 @@ window.__ModuleLoader__.load({
         if (next) { setTrend(null); update({ securityId: next }) }
       }
       const toneOf = pct => pct == null ? '' : Number(pct) > 0 ? ' ssb-up' : Number(pct) < 0 ? ' ssb-down' : ''
+      // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
+      // 否则首次打开要干等一轮上游请求, 列表是空的
+      const entryOf = id => {
+        const panel = state.data?.quotes?.[id], own = fetched[id]
+        if (!panel) return own
+        if (!own) return panel
+        return (Number(own.quote?.receivedAt) || 0) > (Number(panel.quote?.receivedAt) || 0) ? own : panel
+      }
       const current = items[securityId]
       const candles = trend?.candles
       const last = candles?.length ? Number(candles[candles.length - 1].close) : null
@@ -919,7 +927,7 @@ window.__ModuleLoader__.load({
       const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
       const tone = toneOf(pct)
       const rowOf = id => {
-        const item = items[id], quote = quotes[id]?.quote, change = quote?.changePct
+        const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
         return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => update({ mode: 'kline', securityId: id }) },
           h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
           h('span', { className: `ssb-float-row-price ssb-number${toneOf(change)}` }, quote?.last == null ? '—' : formatPrice(quote.last)),
