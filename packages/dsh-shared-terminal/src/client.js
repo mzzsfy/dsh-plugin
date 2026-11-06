@@ -343,10 +343,11 @@ window.__ModuleLoader__.load({
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function' || typeof setInterval !== 'function') return () => {}
       const healed = new Map()
       let running = false
+      // 只保留最近的上限条:重新插入以刷新顺序,超限时淘汰最旧的一条
       const remember = (sessionId, at) => {
+        healed.delete(sessionId)
         healed.set(sessionId, at)
-        if (healed.size <= HEAL_SESSIONS_MAX) return
-        for (const [name, stamp] of healed) if (at - stamp > HEAL_COOLDOWN_MS) healed.delete(name)
+        while (healed.size > HEAL_SESSIONS_MAX) healed.delete(healed.keys().next().value)
       }
       // 每轮重扫 DOM:宿主 tab 可随时增删,缓存 root 会拿到已卸载的节点
       const tick = async () => {

@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8'
 function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [] } = {}) {
   let definition, component
   const effects = [], calls = [], seen = [], refs = [], timers = []
-  let index = 0, declared = false, active = true
+  let index = 0, declared = false, active = true, mountedSession = 'session-a'
   const React = {
     createElement(type, props, ...children) {
       if (typeof type === 'function') return type({ ...(props ?? {}), children })
@@ -23,7 +23,7 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     openTabIn(...args) { calls.push(args) },
     openResourceIn(...args) { calls.push(['reveal', ...args]) },
     openTabs: { getSnapshot: () => tabs },
-    mounted: { getSnapshot: () => 'session-a' },
+    mounted: { getSnapshot: () => mountedSession },
     tabDomain: { occurrence: () => ({ navigation: { getSnapshot: () => ({ params }) } }) },
   }
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
@@ -53,6 +53,7 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
   plugin.apply({ remote, slots, sidebarRight, locale: { register: () => {} }, effect: (fn) => fn() })
   return {
     calls, seen, plugin, document: documentStub,
+    setSession(id) { mountedSession = id },
     render(props) { index = 0; return component(props) },
     async flush() { const pending = effects.splice(0).map((effect) => effect()); await settled(); return pending },
     async heal() { for (const timer of timers) await timer() },
@@ -365,6 +366,20 @@ test('Given the page is hidden, When healing ticks, Then no pump query is issued
   await app.heal()
   assert.deepEqual(clicks, [])
   assert.deepEqual(app.queries, [], '后台标签页不得发查询')
+})
+
+test('Given more sessions than the cooldown table holds, When they keep healing, Then the oldest entry is evicted and may heal again', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })] })
+  const sessions = Array.from({ length: 65 }, (_, number) => `session-${number}`)
+  for (const session of sessions) {
+    app.setSession(session)
+    await app.heal()
+  }
+  assert.equal(clicks.length, sessions.length)
+  app.setSession(sessions[0])
+  await app.heal()
+  assert.equal(clicks.length, sessions.length + 1, '冷却表上限淘汰后最旧 Session 可再次自愈')
 })
 
 test('Given the terminal tab is hidden, When healing ticks, Then it is skipped', async () => {
