@@ -425,8 +425,13 @@ window.__ModuleLoader__.load({
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
     const GUIDE_KEY = 'ssb-guides'
-    const GUIDE_DEFAULT = { preClose: true, cost: true, highLow: false }
-    const GUIDE_ITEMS = [['preClose', '昨收'], ['cost', '成本价'], ['highLow', '区间最高/最低']]
+    const GUIDE_DEFAULT = { preClose: true, cost: true, highLow: false, ma: true, ema: false, boll: false, bbi: false }
+    // horizontal 是横贯全图的参考位(priceLine), indicator 是跟随每根K线的序列(LineSeries)
+    const GUIDE_GROUPS = [
+      { title: '参考位', items: [['preClose', '昨收'], ['cost', '成本价'], ['highLow', '区间最高/最低']] },
+      { title: '指标线', items: [['ma', 'MA 均线'], ['ema', 'EMA 指数均线'], ['boll', 'BOLL 布林带'], ['bbi', 'BBI 多空']] },
+    ]
+    const EMA_WINDOW = 12, BOLL_WINDOW = 20, BOLL_K = 2
     const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
     const MA_WINDOWS = [5, 10, 20, 60]
     // ensureLwc: 模块级 promise 单例;script 已存在等 onload,否则注入 vendor URL;失败统一文案 reject。
@@ -454,9 +459,43 @@ window.__ModuleLoader__.load({
       const cs = getComputedStyle(root)
       const red = cs.getPropertyValue('--ssb-danger').trim(), green = cs.getPropertyValue('--ssb-ok').trim()
       const [up, down] = colorMode === 'green-up' ? [green, red] : [red, green]
-      return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'], cost: '#f97316' }
+      return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'], EMA: '#ec4899', BOLL: ['#3b82f6', '#94a3b8'], BBI: '#10b981', cost: '#f97316' }
     }
-    function computeMA(candles, n) { return candles.map((c, i) => i < n - 1 ? null : { time: c.time, value: candles.slice(i - n + 1, i + 1).reduce((s, x) => s + x.close, 0) / n }).filter(Boolean) }
+    // 以下指标都返回等长数组(前导 null), 因为 BOLL/BBI 要按索引把多条均线对齐
+    function seriesMA(candles, n) {
+      const out = new Array(candles.length).fill(null)
+      let sum = 0
+      for (let i = 0; i < candles.length; i++) {
+        sum += candles[i].close
+        if (i >= n) sum -= candles[i - n].close
+        if (i >= n - 1) out[i] = sum / n
+      }
+      return out
+    }
+    function seriesEMA(candles, n) {
+      const out = new Array(candles.length).fill(null), k = 2 / (n + 1)
+      let prev = null
+      for (let i = 0; i < candles.length; i++) {
+        prev = prev == null ? candles[i].close : candles[i].close * k + prev * (1 - k)
+        if (i >= n - 1) out[i] = prev
+      }
+      return out
+    }
+    function seriesBoll(candles, n = 20, k = 2) {
+      const mid = seriesMA(candles, n), up = new Array(candles.length).fill(null), low = new Array(candles.length).fill(null)
+      for (let i = n - 1; i < candles.length; i++) {
+        const slice = candles.slice(i - n + 1, i + 1).map(c => c.close)
+        const variance = slice.reduce((s, x) => s + (x - mid[i]) ** 2, 0) / n
+        up[i] = mid[i] + k * Math.sqrt(variance)
+        low[i] = mid[i] - k * Math.sqrt(variance)
+      }
+      return [mid, up, low]
+    }
+    function seriesBBI(candles) {
+      const m3 = seriesMA(candles, 3), m6 = seriesMA(candles, 6), m12 = seriesMA(candles, 12), m24 = seriesMA(candles, 24)
+      return candles.map((_, i) => m3[i] == null || m6[i] == null || m12[i] == null || m24[i] == null ? null : (m3[i] + m6[i] + m12[i] + m24[i]) / 4)
+    }
+    const toPoints = (candles, values) => values.map((value, i) => value == null ? null : ({ time: candles[i].time, value })).filter(Boolean)
     function KlineError({ message, onRetry, guide, busyOneClick }) {
       // guide 由调用方给出动作与文案: 缺路由是一键开启, 来源不支持则是去设置换源
       return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, guide ? h(Button, { onClick: guide.onClick, disabled: busyOneClick }, busyOneClick ? '处理中…' : guide.label) : null, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
@@ -464,7 +503,7 @@ window.__ModuleLoader__.load({
     function KlineView({ runtime, state, item }) {
       const period = state.klinePeriod || '1d'
       const kline = state.kline || {}
-      const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), maRef = React.useRef([]), volRef = React.useRef(null), avgRef = React.useRef(null)
+      const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), indicatorRef = React.useRef({}), volRef = React.useRef(null), avgRef = React.useRef(null)
       // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
       const pendingRef = React.useRef(null)
       // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
@@ -477,11 +516,24 @@ window.__ModuleLoader__.load({
       }
       const themeOf = () => readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, state.data.control.preferences.colorMode)
       // 量柱着色与 MA 灌入(日/周/月)
+      // 指标线只灌开着的: 关掉时喂空数组, series 留着不重建
+      function applyIndicators(candles) {
+        if (!candles?.length) return
+        const values = {
+          ma: MA_WINDOWS.map(n => seriesMA(candles, n)),
+          ema: [seriesEMA(candles, EMA_WINDOW)],
+          boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K),
+          bbi: [seriesBBI(candles)],
+        }
+        for (const [key, list] of Object.entries(indicatorRef.current)) {
+          list.forEach((series, index) => series.setData(guides[key] ? toPoints(candles, values[key][index]) : []))
+        }
+      }
       function fillCandleData(result) {
-        const theme = themeOf()
-        mainRef.current.setData(result.candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })))
-        volRef.current.setData(result.candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? theme.volumeUp : theme.volumeDown })))
-        MA_WINDOWS.forEach((n, i) => maRef.current[i].setData(computeMA(result.candles, n)))
+        const theme = themeOf(), candles = result.candles
+        mainRef.current.setData(candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })))
+        volRef.current.setData(candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? theme.volumeUp : theme.volumeDown })))
+        applyIndicators(candles)
       }
       // 分时: Area 收盘线+均价线+昨收虚线
       function fillTrendData(result) {
@@ -514,18 +566,25 @@ window.__ModuleLoader__.load({
           : [['开', price(last.open)], ['高', price(last.high)], ['低', price(last.low)], ['收', price(last.close)]]
         // 分时的 volume 是每分钟增量(实测末条远小于当日总量), 要累加; 日K 最后一根本身就是当日总量
         const volume = wantTrend ? candles.reduce((sum, candle) => sum + (Number(candle.volume) || 0), 0) : last.volume
+        // 指标只列开着的, 否则图例比图还长
+        const series = []
+        if (!wantTrend && guides.ma) MA_WINDOWS.forEach((window, index) => series.push([`MA${window}`, seriesMA(candles, window).at(-1), ` ssb-ma-${index}`]))
+        if (!wantTrend && guides.ema) series.push([`EMA${EMA_WINDOW}`, seriesEMA(candles, EMA_WINDOW).at(-1), ' ssb-ema'])
+        if (!wantTrend && guides.boll) seriesBoll(candles, BOLL_WINDOW, BOLL_K).forEach((line, index) => series.push([['BOLL', 'BOLL上', 'BOLL下'][index], line.at(-1), ` ssb-boll-${index}`]))
+        if (!wantTrend && guides.bbi) series.push(['BBI', seriesBBI(candles).at(-1), ' ssb-bbi'])
         return {
           quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(volume)]],
-          series: wantTrend ? [] : MA_WINDOWS.map(window => [`MA${window}`, computeMA(candles, window).at(-1)?.value]),
+          series: series.filter(([, value]) => value != null && Number.isFinite(Number(value))),
         }
-      }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale])
+      }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale, guides])
       const costPct = item.cost && kline?.candles?.length ? (() => { const last = Number(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
       function ensureSeries(LWC) {
         const chart = chartRef.current
         if (!chart || !LWC) return
         if (wantTrend === !!avgRef.current && mainRef.current) return
-        for (const s of [mainRef.current, avgRef.current, volRef.current, ...maRef.current]) if (s) chart.removeSeries(s)
-        mainRef.current = avgRef.current = volRef.current = null; maRef.current = []
+        const stale = [mainRef.current, avgRef.current, volRef.current, ...Object.values(indicatorRef.current).flat()]
+        for (const s of stale) if (s) chart.removeSeries(s)
+        mainRef.current = avgRef.current = volRef.current = null; indicatorRef.current = {}
         // 旧 series 上的参考线随 series 一起销毁, 引用要清掉
         preCloseLineRef.current = costLineRef.current = highLineRef.current = lowLineRef.current = null
         const theme = themeOf()
@@ -534,7 +593,13 @@ window.__ModuleLoader__.load({
           avgRef.current = chart.addSeries(LWC.LineSeries, { color: theme.MA[0], lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 0)
         } else {
           mainRef.current = chart.addSeries(LWC.CandlestickSeries, { upColor: theme.up, downColor: theme.down, wickUpColor: theme.up, wickDownColor: theme.down, borderUpColor: theme.up, borderDownColor: theme.down }, 0)
-          maRef.current = MA_WINDOWS.map((n, i) => chart.addSeries(LWC.LineSeries, { color: theme.MA[i], lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 0))
+          const line = color => chart.addSeries(LWC.LineSeries, { color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }, 0)
+          indicatorRef.current = {
+            ma: MA_WINDOWS.map((n, i) => line(theme.MA[i])),
+            ema: [line(theme.EMA)],
+            boll: [line(theme.BOLL[0]), line(theme.BOLL[1]), line(theme.BOLL[1])],
+            bbi: [line(theme.BBI)],
+          }
           volRef.current = chart.addSeries(LWC.HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 1)
         }
       }
@@ -629,17 +694,19 @@ window.__ModuleLoader__.load({
         drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
+        // 开关变化不触发数据重灌, 指标线要自己补画
+        if (!wantTrend) applyIndicators(kline?.candles)
       }, [item.cost, kline.candles, guides])
       return h('div', { className: 'ssb-kline' },
         h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻'),
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-expanded': !!state.view.guideOpen, onClick: () => runtime.updateView({ guideOpen: !state.view.guideOpen }) }, '辅助线'),
-            state.view.guideOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', left: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '150px' }, role: 'menu' },
-              ...GUIDE_ITEMS.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => setGuides({ [key]: !guides[key] }) }))) : null),
+            state.view.guideOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', left: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '170px' }, role: 'menu' },
+              ...GUIDE_GROUPS.flatMap(group => [h('div', { key: group.title, className: 'ssb-menu-title' }, group.title), ...group.items.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => setGuides({ [key]: !guides[key] }) }))])) : null),
           h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
         legend ? h('div', { className: 'ssb-kline-legend' },
           h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value))),
           h('div', { className: 'ssb-legend-row' },
-            ...legend.series.map(([label, value]) => h('span', { key: label, className: 'ssb-legend-item' }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : Number(value).toFixed(item.priceScale ?? 2))),
+            ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2))),
             item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null)) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
         kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
@@ -1170,7 +1237,13 @@ window.__ModuleLoader__.load({
 .ssb-legend-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; }
 .ssb-legend-label { color:var(--ssb-text-dim); margin-right:4px; }
 .ssb-legend-cost { color:var(--ssb-text); }
-.ssb-legend-pct { margin-left:4px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
+.ssb-legend-pct { margin-left:4px; }
+/* 图例指标色与图表 series 色板一一对应(图表侧只能吃具体色值, 无法引用主题变量) */
+.ssb-ma-0 { color:#f59e0b; }.ssb-ma-1 { color:#8b5cf6; }.ssb-ma-2 { color:#06b6d4; }.ssb-ma-3 { color:#64748b; }
+.ssb-ema { color:#ec4899; }
+.ssb-boll-0 { color:#3b82f6; }.ssb-boll-1 { color:#94a3b8; }.ssb-boll-2 { color:#94a3b8; }
+.ssb-bbi { color:#10b981; }
+.ssb-menu-title { padding:8px 8px 2px; font-size:11px; color:var(--ssb-text-dim); }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
 .ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }.ssb-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
