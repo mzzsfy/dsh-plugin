@@ -230,11 +230,14 @@ window.__ModuleLoader__.load({
     // 价格与成交额: 空值显示破折号, 成交额按万/亿缩写避免长列
     const formatPrice = value => value == null || Number.isNaN(Number(value)) ? '—' : String(value)
     const formatAmount = value => {
+      // 0 与 null 都按缺失呈现: 日韩分时的成交额来源恒给 0, 显示 0 会被误读成真的没有成交
+      if (value == null) return '—'
       const amount = Number(value)
-      if (!Number.isFinite(amount)) return '—'
+      if (!Number.isFinite(amount) || amount === 0) return '—'
       if (Math.abs(amount) >= 1e8) return `${(amount / 1e8).toFixed(1)}亿`
       if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
-      return amount.toFixed(0)    }
+      return amount.toFixed(0)
+    }
     // 秒数转 1d2h3m4s: 值为 0 的段整段省略, 不留 0 占位
     const formatDuration = total => {
       const seconds = Math.max(0, Math.round(Number(total) || 0))

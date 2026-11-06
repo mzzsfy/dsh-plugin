@@ -74,8 +74,8 @@ export const defaultConfig = () => {
   ]
   // 备用源只在探针可验证的组合上声明: 腾讯美股K线需先由搜索建立代码映射, 探针期必然不可用
   const klineBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
-  // 目录只有沪深港美有来源节点(实测东财 clist 的 fs 只覆盖这五个),其余市场不配目录路由
-  const catalogCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
+  // 目录覆盖八市场: 东财 clist 的 fs 对日韩英同样有节点(日股 3752 / 韩股 2866 / 英股股票 4608), 全量翻页在 50 页上限内
+  const catalogCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'])
   // 报价备源按市场派: 沪深港走新浪(免cookie、单位已是股), 美股走雪球(时间戳是UTC毫秒, 与东财同口径)
   const quoteBackupOf = market => (market === 'XNAS' || market === 'XNYS' ? 'xq-backup' : ['XSHG', 'XSHE', 'XHKG'].includes(market) ? 'sn-backup' : null)
   const route = (market, capability, primary, fallback = null) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: fallback ? [fallback] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })

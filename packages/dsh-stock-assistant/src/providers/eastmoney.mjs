@@ -20,13 +20,16 @@ const US_MKTNUMS = ['105', '106', '107']
 const isUSExchange = exchange => exchange === 'XNAS' || exchange === 'XNYS'
 // klt 周期映射(实测): 日101/周102/月103; trends2 无 klt。
 const KLT = { '1d': 101, '1w': 102, '1M': 103 }
-const LIST_FS = { XSHG: 'm:1+t:2,m:1+t:23', XSHE: 'm:0+t:6,m:0+t:80', XHKG: 'm:116+t:3,m:116+t:4', XNAS: 'm:105+t:1', XNYS: 'm:106+t:1,m:107+t:1' }
-const SYMBOL_PREFIX = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNYS' }
+// 目录 fs 按市场给出; 英股 m:155 含债券与结构性产品, 加 t:1 只取股票; 日韩不支持 t: 细分, 全量即股票
+const LIST_FS = { XSHG: 'm:1+t:2,m:1+t:23', XSHE: 'm:0+t:6,m:0+t:80', XHKG: 'm:116+t:3,m:116+t:4', XNAS: 'm:105+t:1', XNYS: 'm:106+t:1,m:107+t:1', XJPX: 'm:176', XKRX: 'm:177', XLON: 'm:155+t:1' }
+const SYMBOL_PREFIX = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNYS', 176: 'XJPX', 177: 'XKRX', 155: 'XLON' }
 // 探针代表证券(实测可用的各市场流动性代表),quotes/kline 探针按市场取用。
 const PROBE_SECURITY = { XSHG: '600519', XSHE: '000001', XHKG: '00700', XNAS: 'AAPL', XNYS: 'BABA', XJPX: '7203', XKRX: '005930', XLON: 'SHEL' }
 // klines CSV 前 7 列固定语义(实测 fields2=f51-f57); f53=close 在 f54=high 前为东财原生序。
 const KLINE_FIELDS = 'f51,f52,f53,f54,f55,f56,f57'
 const TREND_FIELDS = 'f51,f52,f53,f54,f55,f56,f57,f58'
+// 分时时间戳的来源时区: 东财统一用北京时间, 与证券所属市场无关
+const SOURCE_ZONE = 'Asia/Shanghai'
 // quotes secid 与 kline secidOf 同源(八市场前缀表);美股 quotes 同样走 usSymbols 动态归属。
 const symbolOf = security => `${SECID_PREFIX[security.exchange]}.${security.code}`
 const num = value => value == null || typeof value === 'number' && !Number.isFinite(value) ? null : value === '-' ? null : String(value)
@@ -179,14 +182,15 @@ export const eastmoney = {
     const url = `${endpointOf(ctx, 'trend')}?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=${TREND_FIELDS}&iscr=0&ndays=1`
     const body = await getJson(ctx, url)
     if (!body?.data?.trends) throw new StockError('NO_DATA', '来源未返回此证券分时', 422)
-    const timeZone = MARKET_META[request.market]?.timezone
+    // 东财分时的时间戳一律按北京时间给出(八市场实测: 日股 08:00 对应东京 09:00 开盘, 英股 16:00 对应伦敦 08:00),
+    // 不是市场本地时间; 之前按市场时区解释, 日韩英的横轴整体偏了几小时。
     const candles = body.data.trends.map(row => {
       const cols = row.split(',')
       if (cols.length < 8) throw new StockError('BAD_PAYLOAD', '分时列数不足', 502)
       const [, time] = cols[0].split(' ')
       const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
       // at 是来源时刻的 Unix 秒:只留 HH:MM 会让客户端按索引自造时间轴,横轴整体平移
-      return { time, at: zonedUnixSeconds(cols[0], timeZone), open: num(cols[1]), close: num(cols[2]), high: num(cols[3]), low: num(cols[4]), volume: num(cols[5]), amount: num(cols[6]), avg: num(cols[7]) }
+      return { time, at: zonedUnixSeconds(cols[0], SOURCE_ZONE), open: num(cols[1]), close: num(cols[2]), high: num(cols[3]), low: num(cols[4]), volume: num(cols[5]), amount: num(cols[6]), avg: num(cols[7]) }
     })
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), complete: true, preClose: num_or_null(body.data.preClose), candles }
   },

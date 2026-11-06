@@ -15,26 +15,25 @@ test('初始控制状态内置免凭据默认实例与全市场四能力路由',
   assert.deepEqual(control.providers.map(p => p.adapterId).sort(), ['eastmoney', 'sina', 'tencent', 'xueqiu'])
   const marketInstance = control.providers.find(p => p.adapterId === 'eastmoney')
   for (const p of control.providers) { assert.equal(p.credentialEnv, null, '默认实例不需要凭据'); assert.ok(p.budget.requestsPerMinute > 0) }
-  // 目录只有沪深港美有来源节点;搜索/报价/K线八市场齐备,全部由东财承担
-  const NODE_MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']
-  assert.equal(control.routes.length, NODE_MARKETS.length + MARKETS.length * 3, '目录五市场 + 其余能力八市场')
+  // 八市场的目录/搜索/报价/K线全部由东财承担(实测 clist 的 fs 覆盖日韩英)
+  assert.equal(control.routes.length, MARKETS.length * 4, '四能力 × 八市场')
   for (const m of MARKETS) for (const capability of ['search', 'quotes', 'kline', 'catalog']) {
     const r = control.routes.find(route => route.market === m && route.capability === capability)
-    if (!NODE_MARKETS.includes(m) && capability === 'catalog') { assert.equal(r, undefined, `${m} 无目录来源节点时不应配目录路由`); continue }
     assert.ok(r, `${m} 缺 ${capability} 路由`)
     assert.equal(r.primaryInstanceId, marketInstance.id, `${m}/${capability} 主源`)
   }
   // 备用源只允许出现在报价与K线,且只在备用源探针可验证的市场
+  const BACKUP_MARKETS = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS']
   const fallbacks = control.routes.filter(route => route.fallbackInstanceIds.length)
   const quoteBackups = fallbacks.filter(route => route.capability === 'quotes')
   const klineBackups = fallbacks.filter(route => route.capability === 'kline')
-  assert.equal(quoteBackups.length, NODE_MARKETS.length, '报价备源覆盖沪深港美')
+  assert.equal(quoteBackups.length, BACKUP_MARKETS.length, '报价备源覆盖沪深港美')
   assert.equal(klineBackups.length, 3, 'K线备源只覆盖沪深港(腾讯美股需先建立代码映射)')
   assert.ok(fallbacks.every(route => ['quotes', 'kline'].includes(route.capability)), '目录与搜索不得配置备用源')
   assert.ok(fallbacks.every(route => route.failoverMode === 'network'))
   const backupOf = m => control.providers.find(p => p.adapterId === (m === 'XNAS' || m === 'XNYS' ? 'xueqiu' : 'sina')).id
   assert.ok(quoteBackups.every(route => route.fallbackInstanceIds[0] === backupOf(route.market)), '沪深港备新浪、美股备雪球')
-  assert.ok(quoteBackups.every(route => NODE_MARKETS.includes(route.market)))
+  assert.ok(quoteBackups.every(route => BACKUP_MARKETS.includes(route.market)))
   assert.ok(klineBackups.every(route => route.fallbackInstanceIds[0] === 'tx-backup'), 'K线备源为腾讯')
   assert.ok(klineBackups.every(route => ['XSHG', 'XSHE', 'XHKG'].includes(route.market)))
   assert.doesNotThrow(() => parseConfiguration({ providers: control.providers, routes: control.routes }))
