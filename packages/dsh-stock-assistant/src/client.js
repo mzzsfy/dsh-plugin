@@ -682,6 +682,79 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ssb-detail-side' }, peekActions, h(QuoteStatus, { entry }), costBlock, h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))))),
         watchActions ? h('div', { className: 'ssb-detail-forms' }, watchActions) : null)
     }
+    // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
+    const FLOAT_POLL_MS = 15 * 1000
+    const DEFAULT_FLOATING = { open: false, securityId: null, live: true }
+    // 分时曲线自绘: 只要一条折线加填充, 不值得为它再挂一个图表实例
+    function Sparkline({ candles, preClose }) {
+      const values = (candles || []).map(c => Number(c.close)).filter(Number.isFinite)
+      if (!values.length) return null
+      const width = 264, height = 88
+      const base = Number(preClose)
+      const all = Number.isFinite(base) ? [...values, base] : values
+      const low = Math.min(...all), high = Math.max(...all), span = high - low || 1
+      const y = value => height - ((value - low) / span) * height
+      const x = index => (index / Math.max(1, values.length - 1)) * width
+      const line = values.map((value, index) => `${index ? 'L' : 'M'}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join('')
+      return h('svg', { className: 'ssb-float-spark', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': '分时走势' },
+        Number.isFinite(base) ? h('line', { className: 'ssb-float-base', x1: 0, x2: width, y1: y(base), y2: y(base) }) : null,
+        h('path', { className: 'ssb-float-area', d: `${line}L${width},${height}L0,${height}Z` }),
+        h('path', { className: 'ssb-float-line', d: line }))
+    }
+    function FloatingTicker({ runtime }) {
+      const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
+      const [trend, setTrend] = React.useState(null)
+      const [error, setError] = React.useState('')
+      const order = state.data?.control.watchlist.order || []
+      const items = state.data?.control.watchlist.items || {}
+      const floating = state.data?.control.preferences?.floating || DEFAULT_FLOATING
+      const open = !!floating.open
+      const securityId = (floating.securityId && items[floating.securityId] ? floating.securityId : order[0]) || null
+      // 只有开着且处于监听时才轮询; 关掉就是静态快照, 不打扰来源
+      React.useEffect(() => {
+        if (!open || !securityId || floating.live === false) return
+        let dead = false
+        // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
+        const pull = () => {
+          if (document.visibilityState !== 'visible') return
+          fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
+            .then(response => response.json())
+            .then(payload => { if (dead) return; if (payload.ok) { setTrend(payload.data); setError('') } else setError(payload.error?.message || '行情不可用') })
+            .catch(() => { if (!dead) setError('行情不可用') })
+        }
+        pull()
+        const timer = setInterval(pull, FLOAT_POLL_MS)
+        return () => { dead = true; clearInterval(timer) }
+      }, [open, securityId, floating.live])
+      if (!open || !securityId) return null
+      const item = items[securityId]
+      const candles = trend?.candles
+      const last = candles?.length ? Number(candles[candles.length - 1].close) : null
+      const base = Number(trend?.preClose)
+      const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
+      const update = patch => runtime.preferences({ floating: { ...floating, ...patch } })
+      const step = delta => {
+        const at = order.indexOf(securityId)
+        const next = order[(at + delta + order.length) % order.length]
+        if (next) { setTrend(null); update({ securityId: next }) }
+      }
+      const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
+      return h('div', { className: 'ssb-float', role: 'complementary', 'aria-label': '悬浮盯盘' },
+        React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
+        h('div', { className: 'ssb-float-head' },
+          h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹'),
+          h('span', { className: 'ssb-float-name', title: `${item.officialName} ${item.code}` }, item.alias || item.officialName),
+          h('button', { className: 'ssb-float-icon', 'aria-label': '下一只', onClick: () => step(1) }, '›'),
+          h('button', { className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => update({ open: false }) }, '✕')),
+        h('div', { className: `ssb-float-quote ssb-number${tone}` },
+          h('span', { className: 'ssb-float-price' }, last == null ? '—' : last),
+          h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
+        error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${tone}` }, h(Sparkline, { candles, preClose: base })),
+        h('div', { className: 'ssb-float-foot' },
+          h('span', { className: 'ssb-muted' }, `${order.indexOf(securityId) + 1}/${order.length}`),
+          h('button', { className: 'ssb-float-live', 'aria-pressed': floating.live !== false, onClick: () => update({ live: floating.live === false }) }, floating.live === false ? '开始监听' : '监听中'),
+          h('button', { className: 'ssb-float-icon', 'aria-label': '打开详情', onClick: () => { runtime.updateView({ view: 'list', overlay: 'detail', detailId: securityId, selectedId: securityId, alias: items[securityId]?.alias || '' }); runtime.loadKline(securityId, 'trend').catch(() => {}) } }, '⤢')))
+    }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
       const rows = view.browseRows
@@ -884,8 +957,11 @@ window.__ModuleLoader__.load({
         pane)
     }
     const CSS = `
-.ssb-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
-.ssb-root * { box-sizing:border-box; }
+.ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; }
+/* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
+.ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
+.ssb-float-root { color:var(--ssb-text); font:inherit; font-size:12px; line-height:1.5; }
+.ssb-root *,.ssb-float-root * { box-sizing:border-box; }
 .ssb-page { max-width:1200px; margin:0 auto; padding:20px; }
 .ssb-root h1 { margin:0; font-size:20px; line-height:1.3; }.ssb-root h2 { margin:0; font-size:16px; line-height:1.3; }.ssb-root h3 { margin:24px 0 12px; font-size:14px; }
 .ssb-tablist { display:flex; gap:4px; border-bottom:1px solid var(--ssb-border); margin:12px 0 16px; }.ssb-tab { font:inherit; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); }.ssb-header,.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header { justify-content:space-between; margin-bottom:24px; }.ssb-header p { margin:6px 0 0; }.ssb-section-head { justify-content:space-between; padding:12px 16px; }.ssb-toolbar { margin:12px 0; }
@@ -940,6 +1016,26 @@ window.__ModuleLoader__.load({
   .ssb-row-sub { display:flex; gap:10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 }
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
+/* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
+.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; }
+.ssb-float-head { display:flex; align-items:center; gap:4px; }
+.ssb-float-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.ssb-float-icon { width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:12px; line-height:1; color:var(--ssb-text-sub); background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-float-icon:hover { color:var(--ssb-text); background:var(--ssb-accent-wash); }
+.ssb-float-quote { display:flex; align-items:baseline; gap:8px; }
+.ssb-float-price { font-size:20px; line-height:1.3; font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
+.ssb-float-pct { font-size:12px; }
+.ssb-float-spark { width:100%; height:88px; display:block; }
+/* 曲线用 currentColor 取色: 有涨跌时由 .ssb-up/.ssb-down 决定, 只在两者都没有时退回次要文字色 */
+.ssb-float-chart:not(.ssb-up):not(.ssb-down) { color:var(--ssb-text-sub); }
+.ssb-float-line { fill:none; stroke:currentColor; stroke-width:1.5; vector-effect:non-scaling-stroke; }
+.ssb-float-area { fill:currentColor; opacity:.12; stroke:none; }
+.ssb-float-base { stroke:var(--ssb-text-dim); stroke-width:1; stroke-dasharray:3 3; vector-effect:non-scaling-stroke; opacity:.6; }
+.ssb-float-error { margin:0; height:88px; display:flex; align-items:center; color:var(--ssb-text-sub); }
+.ssb-float-foot { display:flex; align-items:center; gap:8px; }
+.ssb-float-live { margin-left:auto; padding:4px 8px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-float-live[aria-pressed="true"] { color:var(--ssb-ok); border-color:color-mix(in srgb,var(--ssb-ok) 40%,transparent); background:color-mix(in srgb,var(--ssb-ok) 10%,transparent); }
+.ssb-float-live:hover { border-color:var(--ssb-accent); }
 .ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; height:32px; padding:0 12px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:12px; color:var(--ssb-text-sub); }
 .ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
 .ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
@@ -992,6 +1088,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
             h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control.providers || []).filter(p => p.enabled).length}/${(data?.control.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
+            h(Button, { onClick: () => { const floating = data?.control.preferences?.floating || { open: false }; quiet(() => runtime.preferences({ floating: { ...floating, open: !floating.open } }))(); runtime.updateView({ menuOpen: false }) } }, data?.control.preferences?.floating?.open ? '关闭悬浮盯盘' : '悬浮盯盘'),
             h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
             h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
           state.error ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '检查设置')) : null,
@@ -1010,6 +1107,19 @@ window.__ModuleLoader__.load({
         const bus = tools.setupCommonTools(ctx)
         const runtime = createPageRuntime({ layout: ctx.layout, bus, tools })
         ctx.effect(() => () => runtime.dispose(), 'stock-assistant page runtime')
+        // 悬浮盯盘单独挂到 body: 它要在切走面板后继续存在, 不能跟着面板插槽一起卸载
+        ctx.effect(() => {
+          // 无 DOM 的宿主环境(测试/SSR)直接跳过, 不能让挂载失败连累面板注册
+          const body = globalThis.document?.body
+          if (!body) return () => {}
+          const host = globalThis.document.createElement('div')
+          host.className = 'ssb-float-root'
+          body.appendChild(host)
+          let root = null
+          try { root = require('react-dom/client').createRoot(host) } catch { host.remove(); return () => {} }
+          root.render(h(FloatingTicker, { runtime }))
+          return () => { try { root.unmount() } catch {} host.remove() }
+        }, 'stock-assistant floating ticker')
         ctx.effect(() => {
           const disposers = [
             ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, () => h(StockPage, { runtime, layout: ctx.layout }))),

@@ -26,7 +26,7 @@ export const klineQuerySchema = z.strictObject({
 })
 // 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
 const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
-export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']) })
+export const preferencesSchema = z.strictObject({ refreshSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]), colorMode: z.enum(['red-up', 'green-up']), floating: z.object({ open: z.boolean(), securityId: z.string().nullable(), live: z.boolean() }).default({ open: false, securityId: null, live: true }) })
 export const securitySchema = z.object({ id: z.string(), exchange: marketSchema, code: z.string(), officialName: z.string().min(1).max(100), instrument: z.literal('equity'), currency: z.string(), timezone: z.string(), priceScale: z.number().int(), listingStatus: z.string() }).superRefine((s, ctx) => {
   const meta = MARKET_META[s.exchange]
   if (!meta || !meta.codePattern.test(s.code) || s.id !== `${s.exchange}:equity:${s.code}`) { ctx.addIssue({ code: 'custom', message: '证券身份不一致' }); return }
@@ -88,4 +88,4 @@ export const defaultConfig = () => {
   ])
   return { providers, routes }
 }
-export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })
+export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up', floating: { open: false, securityId: null, live: true } }, ...defaultConfig(), operations: [] })
