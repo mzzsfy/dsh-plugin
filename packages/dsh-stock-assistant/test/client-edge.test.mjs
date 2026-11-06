@@ -7,18 +7,61 @@ import { renderToStaticMarkup } from 'react-dom/server'
 async function loadClientWithReact() {
   let plugin
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const clock = createTestClock()
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(name => name === 'react' ? React : {}) } } }
-  vm.runInNewContext(source, { window, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto })
-  return { plugin }
+  vm.runInNewContext(source, { window, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval, crypto: globalThis.crypto })
+  return { plugin, clock }
+}
+// 测试时钟:定时器只在 advance/until 推进。负载下真实退避(4s retryAfter 缺省)与
+// 11s abort 门不再与用例超时窗口竞速;被杀用例的在飞链也不会以真实定时器形态泄漏
+function createTestClock() {
+  let now = 0, seq = 0
+  const pending = new Map()
+  const set = kind => (fn, ms = 0, ...rest) => {
+    // 0ms 是"当前执行段后立即"语义(真实时钟下一宏任务), 只接管长等待定时器;
+    // interval 的 0 周期同样走立即语义, 防 advance 内 at 恒 due 的活锁
+    if (ms === 0) return setImmediate(() => fn(...rest))
+    const id = ++seq
+    pending.set(id, { kind, fn, at: now + ms, ms, rest })
+    return id
+  }
+  const clear = id => pending.delete(id)
+  const drain = async () => { for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)) }
+  async function advance(step) {
+    now += step
+    // 循环:fetch 链的退避/abort 定时器注册晚于 fire, 反复排空-收集直到既无到期也无新注册
+    for (;;) {
+      await drain()
+      const due = [...pending].filter(([, t]) => t.at <= now).sort((a, b) => (a[1].at - b[1].at) || (a[0] - b[0]))
+      if (due.length === 0) return
+      for (const [id, t] of due) {
+        if (!pending.has(id)) continue
+        pending.delete(id)
+        if (t.kind === 'interval') pending.set(id, { ...t, at: t.at + t.ms })
+        t.fn(...t.rest)
+      }
+    }
+  }
+  // 推进直至谓词成立(防止对注册时点的猜测): 每 50ms 小步推进, 谓词真即停
+  async function until(predicate, budgetMs = 60 * 1000) {
+    for (;;) {
+      await drain()
+      if (predicate()) return true
+      await advance(50)
+      if ((now > budgetMs)) throw new Error(`测试时钟预算耗尽(${budgetMs}ms), pending=${pending.size}`)
+    }
+  }
+  return { setTimeout: set('timeout'), clearTimeout: clear, setInterval: set('interval'), clearInterval: clear, advance, until, elapsed: () => now, pendingCount: () => pending.size }
 }
 async function runtime(options = {}) {
   let plugin, reset, snapshotTask, listener, panel = 'stock-assistant'
   const messages = [], source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const clock = createTestClock()
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(() => ({})) } } }
-  vm.runInNewContext(source, { window, console, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto, fetch: globalThis.fetch })
+  vm.runInNewContext(source, { window, console, AbortController, URLSearchParams, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval, crypto: globalThis.crypto, fetch: globalThis.fetch })
   const doc = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }
   const value = plugin.__testing.createPageRuntime({ layout: { panelInfo: { getSnapshot: () => ({ activePanelId: panel }), subscribe: fn => { listener = fn; return () => {} } } }, bus: { publish: m => messages.push(m), subscribe: (fn, opts) => { reset = opts.onReset; return () => {} } }, tools: { createSnapshotRefresh: fn => { snapshotTask = fn; return { refresh() {}, dispose() {} } } }, document: doc, ...options })
-  return { value, doc, messages, reset: () => reset(), pull: () => snapshotTask(), select: id => { panel = id; listener() } }
+  return { value, doc, messages, clock, reset: () => reset(), pull: () => snapshotTask(), select: id => { panel = id; listener() } }
 }
 const snapshot = (seq, epoch = 'a', routingRevision = 0) => ({ serverEpoch: epoch, snapshotSeq: seq, routingRevision, routeSelections: {}, quotes: { a: { quote: { last: String(seq) } } }, control: { revision: seq, watchlist: { order: [], items: {} } } })
 test('U07/U10 旧序号与退休Host epoch都不能回滚UI', async () => {
@@ -424,9 +467,9 @@ test('pruneDeniedTargets: 主源失败提升备源而非删整条路由', async 
 })
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
-  r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
-  r.value.composition(false); await new Promise(resolve => setTimeout(resolve, 320)); const old = callbacks[0]
-  r.value.search('平安'); await new Promise(resolve => setTimeout(resolve, 320)); const newer = callbacks[1]
+  r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await r.clock.advance(400); assert.equal(callbacks.length, 0)
+  r.value.composition(false); await r.clock.until(() => callbacks.length >= 1); const old = callbacks[0]
+  r.value.search('平安'); await r.clock.until(() => callbacks.length >= 2); const newer = callbacks[1]
   newer.resolve({ ok: true, json: async () => ({ ok: true, data: { routingRevision: 0, items: [{ id: 'new' }] } }) })
   await new Promise(resolve => setImmediate(resolve))
   old.resolve({ ok: true, json: async () => ({ ok: true, data: { routingRevision: 0, items: [{ id: 'old' }] } }) })
@@ -459,9 +502,14 @@ test('K1 loadKline 拉取灌state与force参数', async () => {
 })
 
 test('K2 loadKline 网络失败置错误态', async () => {
-  const { value } = await runtime({ fetch: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, error: { code: 'NETWORK', message: '无法连接行情来源' } }) }) })
+  const calls = []
+  const { value, clock } = await runtime({ fetch: async () => { calls.push(1); return { ok: false, status: 502, json: async () => ({ ok: false, error: { code: 'NETWORK', message: '无法连接行情来源' } }) } } })
   value.applySnapshot(klineSnapshot())
-  await assert.rejects(() => value.loadKline('XSHG:equity:600519', '1d'))
+  const flight = value.loadKline('XSHG:equity:600519', '1d')
+  // 先挂接 reject 再驱动时钟: rejection 落在时钟推进期间, 不能出现无接手窗口
+  const expectation = assert.rejects(() => flight)
+  await clock.until(() => calls.length >= 2)
+  await expectation
   assert.equal(value.getSnapshot().kline.error, '无法连接行情来源')
   value.dispose()
 })
@@ -483,22 +531,27 @@ test('K4 NO_ROUTE 错误态携带 errorCode 供引导按钮判据', async () => 
 
 test('K5 RATE_LIMIT 退避自动重试一次后成功(等待≥retryAfterMs)', async () => {
   const calls = []
-  const t0 = Date.now()
-  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); if (calls.length === 1) { return { ok: false, status: 429, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试', retryAfterMs: 20 } }) } } return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
+  const { value, clock } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); if (calls.length === 1) { return { ok: false, status: 429, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试', retryAfterMs: 20 } }) } } return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
   value.applySnapshot(klineSnapshot())
-  const result = await value.loadKline('XSHG:equity:600519', '1d')
+  const flight = value.loadKline('XSHG:equity:600519', '1d')
+  await clock.until(() => calls.length >= 2)
+  const result = await flight
   assert.equal(result.candles.length, 1)
   assert.equal(calls.length, 2, '首次429后退避重试一次')
-  assert.ok(Date.now() - t0 >= 20, '重试等待不小于服务端 retryAfterMs')
+  assert.ok(clock.elapsed() >= 20, '重试等待不小于服务端 retryAfterMs')
   assert.equal(value.getSnapshot().kline.error, '')
   value.dispose()
 }, { timeout: 10000 })
 
 test('K6 NO_ROUTE 二次失败不自动重试(避免额外资损)', async () => {
   const calls = []
-  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); return { ok: false, status: 422, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试' } }) } } })
+  const { value, clock } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); return { ok: false, status: 422, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试' } }) } } })
   value.applySnapshot(klineSnapshot())
-  await assert.rejects(() => value.loadKline('XSHG:equity:600519', '1d'))
+  const flight = value.loadKline('XSHG:equity:600519', '1d')
+  // 先挂接 reject 再驱动时钟: rejection 落在时钟推进期间, 不能出现无接手窗口
+  const expectation = assert.rejects(() => flight)
+  await clock.until(() => calls.length >= 2)
+  await expectation
   assert.equal(calls.length, 2, '重试一次后停止')
   assert.equal(value.getSnapshot().kline.errorCode, 'RATE_LIMIT')
   value.dispose()
