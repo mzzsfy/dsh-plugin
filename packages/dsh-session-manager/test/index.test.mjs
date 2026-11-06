@@ -1888,3 +1888,62 @@ test('0.1.7 形态:settings.configure 在场即关闭原生自动页', skipMissi
   assert.equal(configureCalls.length, 1)
   assert.deepEqual(configureCalls[0].presentation, { auto: false })
 })
+
+// ── 写路由同源 + JSON 守卫回归 ──
+
+// POST 夹具:带 headers 的请求体走 readBody 的 data/end 事件流
+function guardedRequest(routePath, headers, body = { sessionId: 's1' }) {
+  const req = new EventEmitter()
+  req.method = 'POST'
+  req.url = routePath
+  req.headers = headers
+  process.nextTick(() => {
+    req.emit('data', Buffer.from(JSON.stringify(body)))
+    req.emit('end')
+  })
+  return req
+}
+
+test('写路由守卫:跨源 POST 403 / 非 JSON 内容类型 415 / 同源 JSON 正常受理', skipMissingDeps, async () => {
+  // Given 全部写路由(浏览器表单可发 text/plain 且载荷为合法 JSON,仅方法守卫不足)
+  const POST_ROUTES = [
+    '/api/session-manager/unarchive',
+    '/api/session-manager/info',
+    '/api/session-manager/delete',
+    '/api/session-manager/auto-archive',
+    '/api/session-manager/remount',
+    '/api/session-manager/forget',
+  ]
+  const ORIGIN = 'http://127.0.0.1:9291'
+  const sameOrigin = {
+    origin: ORIGIN,
+    host: '127.0.0.1:9291',
+    'content-type': 'application/json; charset=utf-8',
+  }
+
+  for (const routePath of POST_ROUTES) {
+    const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map() })
+
+    // When Origin 与 Host 不同 Then 403,且响应为统一拒绝文案
+    const crossOrigin = response()
+    await handlers.get(routePath)(guardedRequest(routePath, { ...sameOrigin, origin: 'http://evil.example' }), crossOrigin)
+    assert.equal(crossOrigin.status, 403, `${routePath} 跨源 POST 必须 403`)
+
+    // When 同源但 content-type: text/plain Then 415(drive-by 表单形态)
+    const textPlain = response()
+    await handlers.get(routePath)(guardedRequest(routePath, { ...sameOrigin, 'content-type': 'text/plain' }), textPlain)
+    assert.equal(textPlain.status, 415, `${routePath} text/plain POST 必须 415`)
+
+    // When 无 Origin(本地 CLI)但带 text/plain Then 仍 415(内容类型守卫独立生效)
+    const cliTextPlain = response()
+    await handlers.get(routePath)(guardedRequest(routePath, { host: '127.0.0.1:9291', 'content-type': 'text/plain' }), cliTextPlain)
+    assert.equal(cliTextPlain.status, 415, `${routePath} 无 Origin 的 text/plain 仍必须 415`)
+  }
+
+  // When 同源 application/json Then 正常受理(unarchive 可幂等成功)
+  const { handlers } = makeCtx({ archivedIds: ['s1'], headers: [HEADER], agents: new Map() })
+  const accepted = response()
+  await handlers.get('/api/session-manager/unarchive')(guardedRequest('/api/session-manager/unarchive', sameOrigin), accepted)
+  assert.equal(accepted.status, 200)
+  assert.deepEqual(accepted.body, { ok: true })
+})

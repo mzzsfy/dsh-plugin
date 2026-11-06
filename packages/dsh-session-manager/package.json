@@ -10,6 +10,7 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "hostMin": "0.2.1-rc.2",
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -20,7 +21,6 @@
       ]
     },
     "compatibility": {
-      "hostMin": "0.2.1-rc.2",
       "dshReleases": {
         "0.2.0-rc.1": "unknown",
         "0.2.0-rc.2": "unknown",
@@ -32,6 +32,10 @@
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "license": "MIT",
   "repository": {
