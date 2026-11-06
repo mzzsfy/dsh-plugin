@@ -820,7 +820,8 @@ window.__ModuleLoader__.load({
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
     const FLOAT_KEY = 'ssb-floating', FLOAT_POLL_MS = 15 * 1000
-    const FLOAT_DEFAULT = { open: false, live: true, securityId: null, x: null, y: null }
+    // ids 为空时退回自选前几只, 否则第一次打开会是一张空窗
+    const FLOAT_DEFAULT = { open: false, live: true, mode: 'list', ids: [], securityId: null, x: null, y: null }
     // 分时曲线自绘: 只要一条折线加填充, 不值得为它再挂一个图表实例
     function Sparkline({ candles, preClose }) {
       const values = (candles || []).map(c => Number(c.close)).filter(Number.isFinite)
@@ -839,52 +840,59 @@ window.__ModuleLoader__.load({
     }
     function FloatingTicker({ runtime }) {
       const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
+      const [floating, setFloating] = usePref(FLOAT_KEY, FLOAT_DEFAULT)
+      const [quotes, setQuotes] = React.useState({})
       const [trend, setTrend] = React.useState(null)
       const [error, setError] = React.useState('')
-      const [floating, setFloating] = usePref(FLOAT_KEY, FLOAT_DEFAULT)
+      const [picker, setPicker] = React.useState(false)
       // hooks 必须全部在提前返回之前: 开关一旦变化, 排在后头的 useRef 会让 hooks 数量对不上
       const dragRef = React.useRef(null)
-      const order = state.data?.control.watchlist.order || []
       const items = state.data?.control.watchlist.items || {}
+      const order = state.data?.control.watchlist.order || []
+      // 勾选的观测目标: 空则退回自选前几只, 但绝不隐式等于全部自选
+      const picked = (Array.isArray(floating.ids) && floating.ids.length ? floating.ids : order.slice(0, 5)).filter(id => items[id])
+      const mode = floating.mode === 'kline' ? 'kline' : 'list'
       const open = !!floating.open
-      const securityId = (floating.securityId && items[floating.securityId] ? floating.securityId : order[0]) || null
-      // 只有开着且处于监听时才轮询; 关掉就是静态快照, 不打扰来源
+      const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
+      // 列表模式一次 refresh 批量拉勾选的标的; K线模式只拉当前这只的分时
       React.useEffect(() => {
-        if (!open || !securityId || floating.live === false) return
+        if (!open || !picked.length || floating.live === false) return
         let dead = false
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         const pull = () => {
           if (document.visibilityState !== 'visible') return
-          fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
-            .then(response => response.json())
-            .then(payload => { if (dead) return; if (payload.ok) { setTrend(payload.data); setError('') } else setError(payload.error?.message || '行情不可用') })
-            .catch(() => { if (!dead) setError('行情不可用') })
+          if (mode === 'list') {
+            const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
+            fetch(`${BASE}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control.revision ?? 0, securities }) })
+              .then(response => response.json())
+              .then(payload => { if (dead) return; if (payload.ok) { setQuotes(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .catch(() => { if (!dead) setError('行情不可用') })
+          } else if (securityId) {
+            fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
+              .then(response => response.json())
+              .then(payload => { if (dead) return; if (payload.ok) { setTrend(payload.data); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .catch(() => { if (!dead) setError('行情不可用') })
+          }
         }
         pull()
         const timer = setInterval(pull, FLOAT_POLL_MS)
         return () => { dead = true; clearInterval(timer) }
-      }, [open, securityId, floating.live])
-      if (!open || !securityId) return null
-      const item = items[securityId]
-      const candles = trend?.candles
-      const last = candles?.length ? Number(candles[candles.length - 1].close) : null
-      const base = Number(trend?.preClose)
-      const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
+      }, [open, mode, securityId, picked.join(','), floating.live])
+      if (!open) return null
       const update = next => setFloating(next)
-      // 拖动: 只记左上角, 松手才落盘; 越界时收回可视区, 避免窗口缩小后拖不回来
-      const clamp = (x, y) => {
-        const width = 288, height = 210, margin = 8
+      const clamp = (x, y, el) => {
+        const width = el?.offsetWidth || 288, height = el?.offsetHeight || 210, margin = 8
         return { x: Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - width - margin)), y: Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - height - margin)) }
       }
       const onPointerDown = e => {
-        if (e.target.closest('button')) return
+        if (e.target.closest('button, input, label')) return
         const box = e.currentTarget.getBoundingClientRect()
         dragRef.current = { dx: e.clientX - box.left, dy: e.clientY - box.top }
         e.currentTarget.setPointerCapture?.(e.pointerId)
       }
       const onPointerMove = e => {
         if (!dragRef.current) return
-        const { x, y } = clamp(e.clientX - dragRef.current.dx, e.clientY - dragRef.current.dy)
+        const { x, y } = clamp(e.clientX - dragRef.current.dx, e.clientY - dragRef.current.dy, e.currentTarget)
         e.currentTarget.style.left = `${x}px`
         e.currentTarget.style.top = `${y}px`
         e.currentTarget.style.right = 'auto'
@@ -899,26 +907,48 @@ window.__ModuleLoader__.load({
       }
       const position = floating.x == null || floating.y == null ? {} : { left: floating.x, top: floating.y, right: 'auto', bottom: 'auto' }
       const step = delta => {
-        const at = order.indexOf(securityId)
-        const next = order[(at + delta + order.length) % order.length]
+        const at = picked.indexOf(securityId)
+        const next = picked[(at + delta + picked.length) % picked.length]
         if (next) { setTrend(null); update({ securityId: next }) }
       }
-      const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
+      const toneOf = pct => pct == null ? '' : Number(pct) > 0 ? ' ssb-up' : Number(pct) < 0 ? ' ssb-down' : ''
+      const current = items[securityId]
+      const candles = trend?.candles
+      const last = candles?.length ? Number(candles[candles.length - 1].close) : null
+      const base = Number(trend?.preClose)
+      const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
+      const tone = toneOf(pct)
+      const rowOf = id => {
+        const item = items[id], quote = quotes[id]?.quote, change = quote?.changePct
+        return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => update({ mode: 'kline', securityId: id }) },
+          h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
+          h('span', { className: `ssb-float-row-price ssb-number${toneOf(change)}` }, quote?.last == null ? '—' : formatPrice(quote.last)),
+          h('span', { className: `ssb-float-row-pct ssb-number${toneOf(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
+      }
       return h('div', { className: `ssb-float${dragRef.current ? ' ssb-float-dragging' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-float-head' },
-          h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹'),
-          h('span', { className: 'ssb-float-name', title: `${item.officialName} ${item.code}` }, item.alias || item.officialName),
-          h('button', { className: 'ssb-float-icon', 'aria-label': '下一只', onClick: () => step(1) }, '›'),
-          h('button', { className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => update({ open: false }) }, '✕')),
-        h('div', { className: `ssb-float-quote ssb-number${tone}` },
-          h('span', { className: 'ssb-float-price' }, last == null ? '—' : last),
-          h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
-        error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${tone}` }, h(Sparkline, { candles, preClose: base })),
+          mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹') : null,
+          h('span', { className: 'ssb-float-name', title: current ? `${current.officialName} ${current.code}` : '' }, picker ? '选择观测目标' : mode === 'kline' && current ? (current.alias || current.officialName) : `盯盘 ${picked.length}`),
+          mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '下一只', onClick: () => step(1) }, '›') : null,
+          h('div', { className: 'ssb-float-modes' },
+            h('button', { type: 'button', className: `ssb-float-mode${mode === 'list' ? ' on' : ''}`, 'aria-pressed': mode === 'list', onClick: () => update({ mode: 'list' }) }, '列表'),
+            h('button', { type: 'button', className: `ssb-float-mode${mode === 'kline' ? ' on' : ''}`, 'aria-pressed': mode === 'kline', onClick: () => update({ mode: 'kline' }) }, '图')),
+          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': picker ? '完成选择' : '选择观测目标', 'aria-expanded': picker, onClick: () => setPicker(!picker) }, picker ? '✓' : '☰'),
+          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => update({ open: false }) }, '✕')),
+        picker
+          ? h('div', { className: 'ssb-float-picker' }, ...(order.length ? order.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => { const next = picked.includes(id) ? picked.filter(x => x !== id) : [...picked, id]; update({ ids: next }) } })) : [h('p', { className: 'ssb-muted' }, '自选为空')]))
+          : mode === 'list'
+            ? h('div', { className: 'ssb-float-list' }, ...(picked.length ? picked.map(rowOf) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
+            : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(React.Fragment, null,
+              h('div', { className: `ssb-float-quote ssb-number${tone}` },
+                h('span', { className: 'ssb-float-price' }, last == null ? '—' : last),
+                h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
+              error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${tone}` }, h(Sparkline, { candles, preClose: base }))),
         h('div', { className: 'ssb-float-foot' },
-          h('span', { className: 'ssb-muted' }, `${order.indexOf(securityId) + 1}/${order.length}`),
-          h('button', { className: 'ssb-float-live', 'aria-pressed': floating.live !== false, onClick: () => update({ live: floating.live === false }) }, floating.live === false ? '开始监听' : '监听中'),
-          h('button', { className: 'ssb-float-icon', 'aria-label': '打开详情', onClick: () => { runtime.updateView({ view: 'list', overlay: 'detail', detailId: securityId, selectedId: securityId, alias: items[securityId]?.alias || '' }); runtime.loadKline(securityId, 'trend').catch(() => {}) } }, '⤢')))
+          h('span', { className: 'ssb-muted' }, mode === 'kline' && securityId ? `${picked.indexOf(securityId) + 1}/${picked.length}` : `${picked.length} 只`),
+          h('button', { type: 'button', className: 'ssb-float-live', 'aria-pressed': floating.live !== false, onClick: () => update({ live: floating.live === false }) }, floating.live === false ? '开始监听' : '监听中'),
+          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', disabled: !securityId, onClick: () => { if (!securityId) return; runtime.updateView({ view: 'list', overlay: 'detail', detailId: securityId, selectedId: securityId, alias: items[securityId]?.alias || '' }); runtime.loadKline(securityId, 'trend').catch(() => {}) } }, '⤢')))
     }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
@@ -1182,7 +1212,7 @@ window.__ModuleLoader__.load({
 }
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
-.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; cursor:grab; touch-action:none; }
+.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; max-height:calc(100vh - 48px); display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; cursor:grab; touch-action:none; }
 .ssb-float-dragging { cursor:grabbing; }
 .ssb-float-head { display:flex; align-items:center; gap:4px; }
 .ssb-float-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
@@ -1202,6 +1232,18 @@ window.__ModuleLoader__.load({
 .ssb-float-live { margin-left:auto; padding:4px 8px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-live[aria-pressed="true"] { color:var(--ssb-ok); border-color:color-mix(in srgb,var(--ssb-ok) 40%,transparent); background:color-mix(in srgb,var(--ssb-ok) 10%,transparent); }
 .ssb-float-live:hover { border-color:var(--ssb-accent); }
+/* 列表模式: 每行一只标的, 点击切到该只的图形 */
+.ssb-float-list, .ssb-float-picker { flex:0 1 auto; min-height:0; display:flex; flex-direction:column; gap:2px; max-height:min(300px, 45vh); overflow:auto; }
+.ssb-float-row { display:flex; align-items:baseline; gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-float-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
+.ssb-float-row-on { background:var(--ssb-accent-wash); }
+.ssb-float-row-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ssb-float-row-price { font-size:12px; }
+.ssb-float-row-pct { width:58px; text-align:right; font-size:11px; }
+.ssb-float-modes { display:flex; gap:2px; }
+.ssb-float-mode { padding:2px 6px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid transparent; border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-float-mode.on { color:var(--ssb-text); border-color:var(--ssb-border); background:var(--ssb-bg-sub); }
+.ssb-float-picker .ssb-switch { font-size:11px; }
 .ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; height:32px; padding:0 12px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:12px; color:var(--ssb-text-sub); }
 .ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
 .ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
