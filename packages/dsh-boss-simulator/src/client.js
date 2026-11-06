@@ -4,12 +4,14 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const { useState, useEffect, useRef, useCallback } = React
+    // 公共依赖 @mzzsfy/dsh-common-tools:看板失效通知唯一通道(模块表缺失即本 client
+    // factory 抛错,由装载层判定失败,无轮询回退)
+    const tools = require('@mzzsfy/dsh-common-tools/client')
     const ID = '@mzzsfy/dsh-boss-simulator'
     const API = '/api/boss-simulator/'
-    const REFRESH_MS = 3 * 1000
     const READ_TIMEOUT_MS = 10 * 1000
-    const STALE_MS = 15 * 1000
-    const RETRY_MS = [3, 6, 12, 30].map((seconds) => seconds * 1000)
+    // 仅作订阅未就绪时的兜底退避阶梯;订阅恢复即停,空闲不产生周期快照
+    const RETRY_MS = [1, 2, 4, 8, 16, 30].map((seconds) => seconds * 1000)
     const COLUMNS = [
       ['draft', '草稿'], ['ready', '已授权待调度'], ['implementing', '实施中'], ['awaiting_acceptance', '待验收'],
       ['completed', '已结案'], ['blocked', '受阻'], ['cancelled', '已取消'],
@@ -155,7 +157,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function App({ api, sessions, conversation, uiWorkspace, SessionProvider, renderSlot }) {
+    function App({ api, sessions, conversation, uiWorkspace, SessionProvider, renderSlot, bus }) {
       const catalog = React.useSyncExternalStore((notify) => sessions.list.subscribe(notify), () => sessions.list.getSnapshot())
       const accessibleSessions = new Set(catalog.ids)
       const [sessionMessage, setSessionMessage] = useState('')
@@ -201,7 +203,6 @@ window.__ModuleLoader__.load({
       const settingsFocus = useRef(null)
       const returnFocus = useRef(null)
       const detailTitle = useRef(null)
-      const [clock, setClock] = useState(Date.now())
       const [visible, setVisible] = useState(!document.hidden)
 
       useEffect(() => { sessions.refresh().catch(() => setSessionMessage('会话目录读取失败；历史引用保留，未创建替代会话。')) }, [sessions])
@@ -285,21 +286,41 @@ window.__ModuleLoader__.load({
         document.addEventListener('visibilitychange', onVisibility)
         return () => document.removeEventListener('visibilitychange', onVisibility)
       }, [])
+      // 失效通知唯一通道:首连/重连 onReset 全量对账,变更到达单飞刷新(末尾补拉);
+      // 仅订阅未就绪时按退避阶梯兜底拉取,订阅恢复即停,空闲无周期快照
       useEffect(() => {
         if (!visible) return undefined
+        const snapshot = tools.createSnapshotRefresh(() => refresh())
         let disposed = false
-        let timer
-        let failures = 0
-        const poll = async () => {
-          const success = await refresh()
-          if (disposed) return
-          if (success !== null) failures = success ? 0 : failures + 1
-          timer = setTimeout(poll, success || success === null ? REFRESH_MS : RETRY_MS[Math.min(failures - 1, RETRY_MS.length - 1)])
+        let ready = false
+        let attempt = 0
+        let timer = null
+        let unsubscribe = null
+        const fallback = async () => {
+          timer = null
+          if (disposed || ready) return
+          await refresh()
+          if (disposed || ready) return
+          attempt += 1
+          timer = setTimeout(fallback, RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)])
         }
-        poll()
-        const ticker = setInterval(() => setClock(Date.now()), 1000)
-        return () => { disposed = true; clearTimeout(timer); clearInterval(ticker); ++queryEpoch.current; readController.current?.abort() }
-      }, [refresh, visible])
+        try {
+          unsubscribe = bus.subscribe(() => snapshot.refresh(), {
+            onReset: () => { ready = true; clearTimeout(timer); timer = null; snapshot.refresh() },
+          })
+        } catch (error) {
+          console.warn(`[boss-simulator] 推送总线订阅不可用,退回退避兜底: ${String(error?.message ?? error)}`)
+        }
+        if (!ready) timer = setTimeout(fallback, RETRY_MS[0])
+        return () => {
+          disposed = true
+          clearTimeout(timer)
+          unsubscribe?.()
+          snapshot.dispose()
+          ++queryEpoch.current
+          readController.current?.abort()
+        }
+      }, [refresh, visible, bus])
 
       const resizeObserver = useRef(null)
       const attachRoot = useCallback((root) => {
@@ -313,23 +334,21 @@ window.__ModuleLoader__.load({
       }, [])
       useEffect(() => () => resizeObserver.current?.disconnect(), [])
 
+      // 详情随看板快照失效重取:选中或最近一次快照更新触发,失败不自行重试
       useEffect(() => {
         if (!selected || !visible) { if (!selected) { setDetail(null); setDetailError(null) }; return undefined }
         let disposed = false
-        let controller
-        let timer
-        const pollDetail = async () => {
-          controller = new AbortController()
-          const timeout = setTimeout(() => controller.abort(), READ_TIMEOUT_MS)
-          try {
-            const value = await api.get(`board?taskId=${encodeURIComponent(selected)}`, controller.signal)
-            if (!disposed) { setDetail(value); setDetailError(null) }
-          } catch (error) { if (!disposed) setDetailError(error.message ?? '记录不可用') }
-          finally { clearTimeout(timeout); if (!disposed) timer = setTimeout(pollDetail, REFRESH_MS) }
-        }
-        pollDetail()
-        return () => { disposed = true; clearTimeout(timer); controller?.abort() }
-      }, [api, selected, visible])
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(new Error('读取超时')), READ_TIMEOUT_MS)
+        api.get(`board?taskId=${encodeURIComponent(selected)}`, controller.signal)
+          .then((value) => { if (!disposed) { setDetail(value); setDetailError(null) } })
+          .catch((error) => {
+            if (disposed) return
+            if (!controller.signal.aborted || controller.signal.reason?.message === '读取超时') setDetailError(error.message ?? '记录不可用')
+          })
+          .finally(() => clearTimeout(timeout))
+        return () => { disposed = true; clearTimeout(timeout); controller.abort() }
+      }, [api, selected, visible, data])
 
       const narrow = containerWidth <= 767
       const selectedModelSummary = data?.modelTasks?.flatMap((group) => group.tasks).find((task) => task.taskId === selected)
@@ -560,7 +579,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'bs-root', ref: attachRoot, 'data-container-width': containerWidth },
         h('style', { 'data-plugin': ID, dangerouslySetInnerHTML: { __html: CSS } }),
         h('header', { className: 'bs-head' }, h('strong', { className: 'bs-head__title', tabIndex: -1 }, '公司管理'), h('span', { className: 'bs-head__caption' }, '与管理员安排工作，在这里查看团队进展'), h('button', { className: 'bs-btn', disabled: adminEntry.disabled, title: adminEntry.title, onClick: adminEntry.onClick }, adminEntry.label), h('button', { className: 'bs-btn', onClick: openSettings }, '设置'), h('button', { className: 'bs-btn bs-btn--danger', disabled: writing, onClick: () => stop({ global: true }) }, '全局紧急停止')),
-        h('div', { className: 'bs-banner', 'aria-live': 'polite' }, loadError ? h('span', { className: 'bs-banner__error' }, `连接中断，当前执行状态尚不可确认。最后成功观察：${observedAt?.toLocaleTimeString() ?? '无'}`) : h('span', null, `数据观察时间：${observedAt?.toLocaleTimeString() ?? '正在读取任务'}`), observedAt && clock - observedAt.getTime() > STALE_MS ? h('span', null, '数据可能过期；保留最后成功观察事实。') : null, sessionMessage ? h('span', { className: 'bs-banner__error' }, sessionMessage) : null, stopMessage ? h('span', { className: 'bs-banner__error' }, stopMessage) : null),
+        h('div', { className: 'bs-banner', 'aria-live': 'polite' }, loadError ? h('span', { className: 'bs-banner__error' }, `连接中断，当前执行状态尚不可确认。最后成功观察：${observedAt?.toLocaleTimeString() ?? '无'}`) : h('span', null, `数据观察时间：${observedAt?.toLocaleTimeString() ?? '正在读取任务'}`), sessionMessage ? h('span', { className: 'bs-banner__error' }, sessionMessage) : null, stopMessage ? h('span', { className: 'bs-banner__error' }, stopMessage) : null),
         h('div', { className: 'bs-workspace-switch', role: 'group', 'aria-label': '工作区视图' }, h('button', { className: 'bs-btn', 'aria-pressed': workspaceView === 'chat', onClick: () => setWorkspaceView('chat') }, '对话'), h('button', { className: 'bs-btn', 'aria-pressed': workspaceView === 'tasks', onClick: () => setWorkspaceView('tasks') }, '任务')),
         h('div', { className: 'bs-workbench', 'data-workspace-view': workspaceView },
           h(AdminConversation, { sessionId: administrator, sessions, conversation, SessionProvider, renderSlot, pending: adminPending, createSession: createAdminSession, firstMessage, onFirstMessage: updateFirstMessage, onError: setSessionMessage }),
@@ -581,12 +600,12 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function Panel({ ctx, SessionProvider, renderSlot }) {
+    function Panel({ ctx, bus, SessionProvider, renderSlot }) {
       const api = {
         get: async (path, signal) => { const response = await fetch(API + path, { signal }); const body = await response.json().catch(() => null); if (!response.ok) throw Object.assign(new Error(body?.error ?? `请求失败 (${response.status})`), { code: body?.code }); return body },
         post: async (path, body) => { const response = await fetch(API + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) }); const result = await response.json().catch(() => null); if (!response.ok) throw Object.assign(new Error(result?.error ?? `请求失败 (${response.status})`), { code: result?.code, status: response.status }); return result },
       }
-      return h(App, { api, sessions: ctx.sessions, conversation: ctx.conversation, uiWorkspace: ctx.uiWorkspace, SessionProvider, renderSlot })
+      return h(App, { api, sessions: ctx.sessions, conversation: ctx.conversation, uiWorkspace: ctx.uiWorkspace, SessionProvider, renderSlot, bus })
     }
     function PanelIcon({ size }) {
       // 侧栏入口行图标:办公楼轮廓,同 dsh-tunnel/dsh-cron-board 的 16×16 stroke 形态
@@ -598,8 +617,9 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M5.5 6h2M5.5 8.5h2M5.5 11h2M11.2 10.5h.01M11.2 12h.01' }))
     }
     function apply(ctx) {
+      const bus = tools.setupCommonTools(ctx)
       ctx.slots.inject('conversation.session', () => ctx.slots.inject('main', () => {
-        const unregisterMain = ctx.slots.register({ name: 'main', id: 'boss-simulator', key: 'boss-simulator', label: '公司管理', children: { 'boss-simulator.chat': { kind: 'single', scope: 'session' } } }, (props) => h(Panel, { ...props, ctx }))
+        const unregisterMain = ctx.slots.register({ name: 'main', id: 'boss-simulator', key: 'boss-simulator', label: '公司管理', children: { 'boss-simulator.chat': { kind: 'single', scope: 'session' } } }, (props) => h(Panel, { ...props, ctx, bus }))
         const unregisterChat = ctx.slots.register({ name: 'boss-simulator.chat' }, EmbeddedChat)
         return () => { unregisterChat(); unregisterMain() }
       }))

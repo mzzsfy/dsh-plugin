@@ -1,10 +1,14 @@
 // dsh-boss-simulator — 公司管理模拟器任务控制室。行角色分发,业务在 lib/ 各模块。
-// 依赖缺失时干净禁用:不注册任何服务/UI,打日志说明原因即返回(DEVELOPMENT/dsh-api-alignment)。
+// 宿主服务缺失时干净禁用:不注册任何服务/UI,由装载层报告等待或失败;
+// 公共总线 @mzzsfy/dsh-common-tools 为硬依赖(manifest dependencies 承载)。
 import z from '@deepseek-ai/schemastery'
+import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
 import { getControlRuntime, registerControl } from './control.mjs'
 import { registerToolRow } from './tools-row.mjs'
 
 export const name = 'boss-simulator'
+// 公共总线需要 webServer 的 upgrade 注册面;控制室路由亦要求同一服务
+export const inject = ['webServer']
 
 export const Config = z.object({
   role: z.union(['control', 'tools-row', 'persona-row']).required(),
@@ -29,5 +33,10 @@ export function apply(ctx, config) {
     return
   }
   if (cfg.role !== 'control') return
-  registerControl(ctx)
+  // 看板失效广播:写成功后经公共总线只发失效通知;合并节流由 notifier 承担,
+  // 客户端单飞刷新并由 onReset 全量对账
+  const tools = setupCommonTools(ctx)
+  const changes = createChangeNotifier(() => tools.publish())
+  ctx.effect(() => () => changes.dispose(), 'boss-simulator change notifier')
+  registerControl(ctx, { onChange: changes.refresh })
 }

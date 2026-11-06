@@ -15,7 +15,8 @@ let controlRuntime = null
 export function setControlRuntime(runtime) { controlRuntime = runtime }
 export function getControlRuntime() { return controlRuntime }
 
-export function registerControl(ctx) {
+// onChange:看板写路径成功后的失效信号(由插件 apply 注入公共总线发布),业务模块不感知通道
+export function registerControl(ctx, { onChange = () => {} } = {}) {
   let stopped = false
   const followDisposers = new Set()
   ctx.inject(['storageDomain', 'webServer'], async (scope) => {
@@ -24,9 +25,13 @@ export function registerControl(ctx) {
     ctx.effect(() => () => domain.close())
     const table = domain.table('kv')
     const store = {
-      ...createTaskStore(table),
+      ...createTaskStore(table, { onChange }),
       loadAdminBinding: () => loadAdminBinding(table),
-      updateAdminBinding: (fn) => updateAdminBindingRecord(table, fn),
+      updateAdminBinding: async (fn) => {
+        const saved = await updateAdminBindingRecord(table, fn)
+        onChange()
+        return saved
+      },
     }
     const listAggregates = () => store.listAggregates()
     const driveRef = { sessionAdapter: null, followRuns: null, withExecution: createExecutionGate() }

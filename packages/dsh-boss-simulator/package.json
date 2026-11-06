@@ -15,7 +15,10 @@
     },
     "hostMin": "0.2.0-rc.1",
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "external": [
+        "@mzzsfy/dsh-common-tools/client"
+      ]
     },
     "compatibility": {
       "dshReleases": {
@@ -27,6 +30,10 @@
     "test": "node --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "license": "MIT",
   "repository": {
     "type": "object",
@@ -37,10 +44,14 @@
     "src",
     "cordis.patch.yml"
   ],
+  "dependencies": {
+    "@mzzsfy/dsh-common-tools": "^0.3.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
     "@deepseek-ai/dsh-storage-domain": ">=0.1.2-rc.1",
     "@deepseek-ai/dsh-api-session-controller": ">=0.2.0-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2",
     "zod": "^3.23.0"
   },
   "engines": {

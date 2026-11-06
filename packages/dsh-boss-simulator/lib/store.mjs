@@ -1,7 +1,8 @@
 import { createGlobalControl } from './core/global-control.mjs'
 
 // 存储只接收 DTO,根级时钟在读取和原子迁移回调边界恢复。
-export function createTaskStore(handle, { now = Date.now } = {}) {
+// onChange 在写成功后触发,供看板失效广播;读取永不触发。
+export function createTaskStore(handle, { now = Date.now, onChange = () => {} } = {}) {
   function withClock(record) {
     if (record === undefined) return undefined
     return { ...record, now }
@@ -22,6 +23,7 @@ export function createTaskStore(handle, { now = Date.now } = {}) {
 
   async function saveAggregate(aggregate) {
     await handle.put(`task/${aggregate.taskId}`, withoutClock(aggregate))
+    onChange()
     return loadAggregate(aggregate.taskId)
   }
 
@@ -30,6 +32,7 @@ export function createTaskStore(handle, { now = Date.now } = {}) {
       if (current === undefined) throw new Error(`missing key: task/${taskId}`)
       return withoutClock(fn(withClock(current)))
     })
+    onChange()
     return loadAggregate(taskId)
   }
 
@@ -45,6 +48,7 @@ export function createTaskStore(handle, { now = Date.now } = {}) {
 
   async function updateControl(fn) {
     await updateControlRecord(handle, (current) => withoutClock(fn(withClock(current))), createGlobalControl(now))
+    onChange()
     return loadControl()
   }
 
