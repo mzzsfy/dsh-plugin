@@ -137,7 +137,7 @@ window.__ModuleLoader__.load({
         },
         refresh(securityIds) { return action('refresh', async () => { const gen = generation; const data = await api('/refresh', 'POST', { expectedRoutingRevision: state.data?.routingRevision, ...(securityIds ? { securities: securityIds } : {}) }); if (gen === generation) applySnapshot(data, true) }) },
         preferences(patchValue) { return action('write', async () => { const result = await api('/preferences', 'POST', { ...operation(), patch: patchValue }); if (state.data && state.data.control.revision <= result.revision) patch({ data: { ...state.data, control: { ...state.data.control, revision: result.revision, preferences: { ...state.data.control.preferences, ...patchValue } } } }); refresher.refresh() }) },
-        configuration: (configuration, checkIds) => action('configuration', async () => { await api('/configuration', 'POST', { ...operation(), ...configuration, expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data?.control.revision, checkIds }); updateView({ settingsDraft: null }); refresher.refresh() }),
+        configuration: configuration => action('configuration', async () => { await api('/configuration', 'POST', { ...operation(), ...configuration, expectedRevision: state.view.settingsDraft?.expectedRevision ?? state.data?.control.revision }); updateView({ settingsDraft: null }); refresher.refresh() }),
         sync: market => action('sync', async () => { const result = await api('/catalog-sync', 'POST', { market, expectedRoutingRevision: state.data?.routingRevision }); refresher.refresh(); return result }),
         check: configuration => action('check', () => api('/provider-check', 'POST', configuration)),
         switchPrimary: routeId => action('switch', async () => { const data = await api('/route-selection', 'POST', { routeId, target: 'primary', expectedRoutingRevision: state.data.routingRevision, expectedRouteEpoch: state.data.routeSelections[routeId].routeEpoch }); applySnapshot(data) }),
@@ -150,11 +150,11 @@ window.__ModuleLoader__.load({
         async commitConfiguration({ providers, routes, notice }) {
           const CAP_LABEL = { quotes: '行情', kline: 'K线', catalog: '目录', search: '搜索', calendar: '日历' }
           await action('configuration', async () => {
-            const checkIds = []
             let current = routes
             let progress = ''
+            // 推荐配置与一键补全自带体检: 探针不可用的目标先剔除, 保证装上的是立刻能出数的组合。
+            // 这只是推荐配置的质量保证, 手动保存路由不走这条路, 也不看探针结果。
             for (let round = 0; round < 3; round++) {
-              checkIds.length = 0
               const denied = []
               for (const caps of [['quotes'], ['kline'], ['catalog', 'search']]) {
                 const usedCaps = caps.filter(c => current.some(r => r.capability === c))
@@ -162,7 +162,6 @@ window.__ModuleLoader__.load({
                 progress = usedCaps.map(c => CAP_LABEL[c]).join('/') + (round ? `（重查第${round + 1}轮）` : '') + '：检查中…'
                 patch({ checkProgress: progress })
                 const check = await api('/provider-check', 'POST', { providers, routes: current, capabilities: usedCaps })
-                checkIds.push(check.checkId)
                 denied.push(...check.checks.filter(c => c.status !== 'ready').map(c => c.providerInstanceId + ':' + c.capability + ':' + c.market))
               }
               if (!denied.length) break
@@ -170,23 +169,23 @@ window.__ModuleLoader__.load({
               if (!current.length) { patch({ error: '已启用数据源暂无可用探针，请检查网络后重试', checkProgress: null }); return }
             }
             patch({ checkProgress: null })
-            await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.data.control.revision, providers, routes: current, checkIds })
+            await api('/configuration', 'POST', { operationId: crypto.randomUUID(), expectedRevision: state.data.control.revision, providers, routes: current })
             updateView({ view: 'list', settingsDraft: null, notice })
           }).finally(() => patch({ checkProgress: null }))
         },
         // 一键启用: 按当前草稿里已启用的实例补全缺失的市场能力路由
         async oneClickKline() {
           const saved = state.data.control
-          const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkIds: [], checkResults: [] }
+          const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkResults: [], probes: {} }
           const routes = bootstrapRoutes({ adapters: state.data.adapters, providers: draft.providers, routes: draft.routes })
           if (routes.length === draft.routes.length) { updateView({ view: 'list', notice: '已启用数据源的能力路由均已配置，打开证券详情即可查看行情与K线。' }); return }
           await this.commitConfiguration({ providers: draft.providers, routes, notice: `已自动启用 ${routes.length - draft.routes.length} 项能力路由（行情/K线/目录/搜索），全部市场可用。` })
         },
-        // 推荐配置: 三个免凭据源 + 八市场能力一次到位, 覆盖数据源与路由, 自选与显示偏好不动
+        // 推荐配置: 内置免凭据源 + 八市场能力一次到位, 覆盖数据源与路由, 自选与显示偏好不动
         async applyRecommended() {
           const suggested = state.data?.suggested
           if (!suggested?.providers?.length) { patch({ error: '推荐配置不可用' }); return }
-          await this.commitConfiguration({ providers: suggested.providers, routes: suggested.routes, notice: '已应用推荐配置：三个免凭据数据源与八市场能力路由全部就绪。' })
+          await this.commitConfiguration({ providers: suggested.providers, routes: suggested.routes, notice: '已应用推荐配置：免凭据数据源与八市场能力路由全部就绪。' })
         },
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
         loadKline(securityId, period, force = false) {
@@ -629,9 +628,9 @@ window.__ModuleLoader__.load({
     const routeFor = (market, capability, instance) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: instance, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
     function SettingsView({ runtime, state }) {
       const saved = state.data.control
-      const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkIds: [], checkResults: [] }
+      const draft = state.view.settingsDraft || { providers: saved.providers, routes: saved.routes, expectedRevision: saved.revision, checkResults: [], probes: {} }
       const configuration = { providers: draft.providers, routes: draft.routes }
-      function change(next, invalidate = true) { runtime.updateView({ settingsDraft: { ...draft, ...next, ...(invalidate ? { checkIds: [], checkResults: [] } : {}) } }) }
+      function change(next, invalidate = true) { runtime.updateView({ settingsDraft: { ...draft, ...next, ...(invalidate ? { checkResults: [], probes: {} } : {}) } }) }
       const providerChange = (id, patch) => change({ providers: draft.providers.map(p => p.id === id ? { ...p, ...patch } : p) })
       const field = (label, value, onChange, props = {}) => h('label', { className: 'ssb-field' }, h('span', null, label), h('input', { value: value ?? '', onChange: e => onChange(e.target.value), ...props }))
       const CAP_LABEL = { quotes: '报价', catalog: '证券目录', search: '远程搜索', calendar: '交易日历', kline: 'K线' }
@@ -693,7 +692,32 @@ window.__ModuleLoader__.load({
         const cells = caps.map(cap => {
           const route = draft.routes.find(r => r.market === market && r.capability === cap)
           const options = [h('option', { value: '', key: '' }, '未配置'), ...draft.providers.filter(p => p.enabled && state.data.adapters.find(a => a.adapterId === p.adapterId)?.capabilities.includes(cap)).map(p => h('option', { value: p.id, key: p.id }, p.id))]
-          return h('label', { className: 'ssb-route-cell', key: cap }, h('span', { className: 'ssb-route-cell-label' }, CAP_LABEL[cap]), h('select', { value: route?.primaryInstanceId || '', onChange: e => change({ routes: [...draft.routes.filter(r => r !== route), ...(e.target.value ? [routeFor(market, cap, e.target.value)] : [])] }) }, ...options))
+          // 每个能力可单独探一次: 结果只做诊断展示, 不影响能否保存
+          const probeKey = route ? `${route.primaryInstanceId}:${cap}:${market}` : null
+          const probe = probeKey ? (draft.probes || {})[probeKey] : null
+          const probing = probeKey ? (draft.probing || {})[probeKey] : false
+          return h('div', { className: 'ssb-route-cell ssb-route-cell-probe', key: cap },
+            h('label', { className: 'ssb-route-cell-main' }, h('span', { className: 'ssb-route-cell-label' }, CAP_LABEL[cap]), h('select', { value: route?.primaryInstanceId || '', onChange: e => change({ routes: [...draft.routes.filter(r => r !== route), ...(e.target.value ? [routeFor(market, cap, e.target.value)] : [])] }) }, ...options)),
+            route ? h('button', {
+              className: 'ssb-probe', disabled: probing, title: '单独测这一条能力：拉一次真实数据，报告成败与耗时',
+              onClick: quiet(async () => {
+                runtime.updateView({ settingsDraft: { ...runtime.getSnapshot().view.settingsDraft, probing: { ...(draft.probing || {}), [probeKey]: true } } })
+                try {
+                  const result = await runtime.check({ providers: draft.providers, routes: [route], capabilities: [cap] })
+                  const hit = result.checks.find(c => c.providerInstanceId === route.primaryInstanceId) || result.checks[0]
+                  const current = runtime.getSnapshot().view.settingsDraft || draft
+                  runtime.updateView({ settingsDraft: { ...current, probing: { ...(current.probing || {}), [probeKey]: false }, probes: { ...(current.probes || {}), [probeKey]: hit ? { status: hit.status, ms: hit.ms, error: hit.error } : { status: 'denied', error: { message: '未返回结果' } } } } })
+                } catch (e) {
+                  const current = runtime.getSnapshot().view.settingsDraft || draft
+                  runtime.updateView({ settingsDraft: { ...current, probing: { ...(current.probing || {}), [probeKey]: false }, probes: { ...(current.probes || {}), [probeKey]: { status: 'denied', error: { message: e.message } } } } })
+                }
+              }),
+            },
+            probing ? '测试中' : '测试') : null,
+            probe ? h('span', {
+              className: `ssb-probe-result ${probe.status === 'ready' ? 'ssb-probe-ok' : 'ssb-probe-bad'}`,
+              title: probe.error ? `${probe.error.code || ''} ${probe.error.message || ''}`.trim() : `耗时 ${probe.ms}ms`,
+            }, probe.status === 'ready' ? `✓ ${probe.ms ?? '—'}ms` : '✗') : null)
         })
         // 备源与延迟只对报价/ K线有意义,收进行内折叠,避免八市场铺成三屏
         const tuned = draft.routes.filter(r => r.market === market && (r.capability === 'quotes' || r.capability === 'kline'))
@@ -736,12 +760,18 @@ window.__ModuleLoader__.load({
             h('span', null, '市场'), h('span', null, '代码'), h('span', null, '行情来源'), h('span', null, '备用源'), h('span', null, '')),
           ...routeRows),
         h('div', { className: 'ssb-section-foot' },
-          h('p', { className: 'ssb-muted' }, '目录、搜索、报价、日历与K线可独立指定来源；未配置的能力不会隐式借用其他来源。'),
-          h('div', { 'aria-live': 'polite' }, ...draft.checkResults.filter(r => r.status !== 'ready').map((r, index) => h('p', { key: `${r.key}-${index}`, className: 'ssb-muted' }, `${r.providerInstanceId} / ${r.market} / ${r.capability}：${r.error?.message || '不可用'}`)))),
+          h('p', { className: 'ssb-muted' }, '目录、搜索、报价、日历与K线可独立指定来源；未配置的能力不会隐式借用其他来源。展开任一市场可对单项能力做一次探测，结果只作参考，不阻塞保存。')),
         h('div', { className: 'ssb-toolbar' },
-          h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => { const result = await runtime.check({ providers: draft.providers, routes: draft.routes, capabilities: [...new Set(draft.routes.map(r => r.capability))] }); const current = runtime.getSnapshot().view.settingsDraft; if (current && JSON.stringify({ providers: current.providers, routes: current.routes }) !== JSON.stringify({ providers: draft.providers, routes: draft.routes })) return; change({ expectedRevision: runtime.getSnapshot().data.control.revision, checkIds: [...draft.checkIds, result.checkId], checkResults: result.checks }, false) }) }, state.busy.check ? '正在逐项检查…' : '检查改动'),
-          h(Button, { primary: true, disabled: state.busy.configuration || state.busy.check || !draft.checkIds.length && draft.routes.length, title: !draft.checkIds.length && draft.routes.length ? '先运行「检查改动」，通过后才能保存' : undefined, onClick: quiet(() => runtime.configuration(routesOnly, draft.checkIds)) }, '保存路由'),
-          !draft.checkIds.length && !state.busy.check ? h('span', { className: 'ssb-muted' }, '先检查，通过后才能保存') : null,
+          h(Button, { primary: true, disabled: state.busy.configuration || !draft.routes.length, onClick: quiet(() => runtime.configuration(routesOnly)) }, '保存路由'),
+          h(Button, { disabled: state.busy.configuration || state.busy.check || !draft.routes.length, onClick: quiet(async () => {
+            const capsUsed = [...new Set(draft.routes.map(r => r.capability))]
+            const result = await runtime.check({ providers: draft.providers, routes: draft.routes, capabilities: capsUsed })
+            const current = runtime.getSnapshot().view.settingsDraft
+            if (current && JSON.stringify({ providers: current.providers, routes: current.routes }) !== JSON.stringify({ providers: draft.providers, routes: draft.routes })) return
+            const probes = { ...(current?.probes || draft.probes || {}) }
+            for (const c of result.checks) probes[`${c.providerInstanceId}:${c.capability}:${c.market}`] = { status: c.status, ms: c.ms, error: c.error }
+            change({ checkResults: result.checks, probes }, false)
+          }) }, state.busy.check ? '正在全部测试…' : '全部测一次'),
           h(Button, { disabled: state.busy.check || state.busy.configuration, onClick: () => runtime.updateView({ settingsDraft: null }) }, '放弃草稿')),
         h('h3', null, '目录缓存'), h('div', { className: 'ssb-toolbar' }, ...Object.keys(BROWSE_MARKETS).filter(market => (state.data.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, disabled: state.busy.sync, onClick: quiet(async () => { const results = await runtime.sync(market); const errors = results.filter(r => !r.ok); if (errors.length) tools.toast?.show(errors.map(r => r.error.message).join('；'), { kind: 'error' }) }) }, `同步${BROWSE_MARKETS[market]}`))),
         ...state.data.catalogs.map(c => h('p', { key: c.source, className: 'ssb-muted' }, `${c.source} · ${timeText(c.fetchedAt)}${c.stale ? ' · 已过期' : ''}${c.complete ? '' : ' · 目录可能不完整'}`)),
@@ -754,7 +784,7 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ssb-settings' },
         h('div', { className: 'ssb-settings-head' },
           h('div', { className: 'ssb-settings-intro' }, h('h2', null, '设置'), h('p', { className: 'ssb-muted' }, `${enabled} 个数据源 · ${controlRoutes.length} 条能力路由 · ${markets} 个市场；凭据保留在Host环境变量中，这里仅保存变量名与数据路由`)),
-          h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: busyConfig, title: '写入三个免凭据数据源与八市场能力路由，逐项检查通过后保存；自选与显示偏好不受影响', onClick: quiet(() => runtime.applyRecommended()) }, state.checkProgress || (busyConfig ? '正在应用…' : '应用推荐配置')))),
+          h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: busyConfig, title: '写入内置免凭据数据源与八市场能力路由，探针不可用的目标自动剔除；自选与显示偏好不受影响', onClick: quiet(() => runtime.applyRecommended()) }, state.checkProgress || (busyConfig ? '正在应用…' : '应用推荐配置')))),
         h('div', { className: 'ssb-tablist', role: 'tablist', 'aria-label': '设置分区' }, ...TABS.map(([key, label]) => h('button', { key, role: 'tab', 'aria-selected': tab === key, className: `ssb-tab${tab === key ? ' ssb-tab-on' : ''}`, onClick: () => change({ tab: key }, false) }, label))),
         pane)
     }
@@ -830,6 +860,15 @@ window.__ModuleLoader__.load({
 .ssb-provider-body, .ssb-market-body { padding:4px 4px 16px; display:grid; gap:12px; }
 .ssb-market-name { font-weight:600; }.ssb-market-code { font-size:11px; color:var(--ssb-text-sub); }.ssb-market-caps { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.ssb-market-back { font-size:12px; color:var(--ssb-text-sub); text-align:right; }
 .ssb-market-list { display:grid; }
+/* 单元格式: 能力选择 + 单项探针按钮 + 结果徽标 */
+.ssb-route-cell-probe { display:grid; grid-template-columns:minmax(0,1fr); gap:4px; align-content:start; }
+.ssb-route-cell-main { display:grid; gap:2px; }
+.ssb-probe { font:inherit; font-size:11px; padding:2px 6px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); background:var(--ssb-bg); color:var(--ssb-text-sub); cursor:pointer; }
+.ssb-probe:hover:not(:disabled) { color:var(--ssb-text); border-color:var(--ssb-accent); }
+.ssb-probe:disabled { opacity:.6; cursor:progress; }
+.ssb-probe-result { font-size:11px; font-variant-numeric:tabular-nums; }
+.ssb-probe-ok { color:var(--ssb-ok); }
+.ssb-probe-bad { color:var(--ssb-danger); }
 .ssb-market-head { display:grid; grid-template-columns:minmax(88px,auto) 52px minmax(0,1fr) minmax(72px,auto) 42px; gap:12px; padding:0 4px 6px; font-size:11px; color:var(--ssb-text-dim); border-bottom:1px solid var(--ssb-border); }
 .ssb-section-foot { display:grid; gap:6px; padding:12px 0; }.ssb-section-foot p { margin:0; }
 .ssb-route-advanced { display:grid; gap:8px; padding-top:8px; border-top:1px solid var(--ssb-border); }

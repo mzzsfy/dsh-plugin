@@ -323,10 +323,11 @@ test('审查R2: 浏览市场随实例能力+保存钮检查提示', async () => 
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
   for (const label of ['港股', '纳斯达克', '纽交所']) assert.ok(html.includes(label), `浏览按钮含 ${label}`)
   for (const label of ['日本', '英国']) assert.ok(!html.includes(label), `无目录路由不亮: ${label}`)
-  // 设置页: 启用实例未检查时保存钮灰且带提示
+  // 设置页: 保存不再需要先检查, 探针结果只作诊断
   const settings = { ...state, view: { view: 'list', overlay: 'settings', sort: 'manual', alias: '', settingsDraft: { providers: [{ id: 'p1', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [], checkIds: [], checkResults: [], colorMode: 'red-up', klineAutoLoad: true, tab: 'routes' } } }
   const sHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => settings, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: { providerCheck: () => {} } }))
-  assert.match(sHtml, /通过后才能保存/, '保存钮灰时有原因提示(S-Q1)')
+  assert.match(sHtml, /保存路由/, '保存入口常驻')
+  assert.ok(!sHtml.includes('通过后才能保存'), '保存不再被探针结果拦截')
 })
 // 浏览点进详情: overlay 打开时 updateView 不触发 leaveDetail 清理(崩溃修复锚)
 test('审查R2b: browse点进保留browsePeek与detailId', async () => {
@@ -565,7 +566,7 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: { providers: saved.providers, routes: saved.routes, checkIds: ['seed'], checkResults: [], tab: 'routes' }, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '检查改动', '放弃草稿', '目录缓存']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
+  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '全部测一次', '放弃草稿', '目录缓存']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
   // 启用banner仅在无实例时出现(默认配置自带双实例, 不含该banner为正确行为)
   assert.ok(!html.includes('启用默认数据源'))
   // 8市场 fieldset 全渲染(K线行存在)

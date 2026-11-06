@@ -79,13 +79,15 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       registry.validate(instance, route)
       const key = `${instance.id}:${route.capability}:${route.market}`
       if (results.some(r => r.key === key)) continue
+      // 探针耗时就是这一条路由端到端拿数据的真实延迟, 用于把「能不能用」和「快不快」一起回给用户
+      const startedAt = now()
       try {
         const result = await executor.run(instance, route.capability, { market: route.market, instrument: route.instrument }, { probe: true, signal })
         const status = result.status === 'ready' ? 'ready' : 'unavailable'
         probeCache.set(key, { status, until: now() + WINDOW })
         while (probeCache.size > PROBE_LIMIT) probeCache.delete(probeCache.keys().next().value)
-        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status })
-      } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', error: { code: e.code, message: e.message } }) }
+        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status, ms: now() - startedAt })
+      } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', ms: now() - startedAt, error: { code: e.code, message: e.message } }) }
     }
     const checkId = randomUUID()
     checks.set(checkId, { hash: digest(config), until: now() + WINDOW, results })
@@ -97,13 +99,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const config = parseConfiguration(operation.payload)
     const replay = state.replay({ ...operation, action: 'configuration', payload: config })
     if (replay) return replay
-    const hash = digest(config), valid = (operation.checkIds || []).map(id => checks.get(id)).filter(c => c?.until > now() && c.hash === hash)
-    // 增量合同: 每目标在探针缓存或随附 checkId 中有未过期 ready 记录即通过; 缓存不随无关字段改动失效, 只验新目标与过期目标
-    for (const route of config.routes) for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) {
-      const instance = config.providers.find(p => p.id === target); registry.validate(instance, route)
-      const cached = probeCache.get(`${target}:${route.capability}:${route.market}`)
-      if (cached?.status === 'ready' && cached.until > now()) continue
-      if (!valid.some(c => c.results.some(r => r.providerInstanceId === target && r.capability === route.capability && r.market === route.market && r.status === 'ready'))) fail('CHECK_REQUIRED', `${target} 的 ${route.market}/${route.capability} 尚未验证或已过期，请检查后保存`, 422)
+    // 保存不做连通性闸门: 探针是给人看的诊断信息, 不该把人挡在门外。契约只校验路由自身的合法性,
+    // 按能力挑源已经由前端按适配器能力过滤, 后端再校验一次目标是否具备该能力即可。
+    for (const route of config.routes) {
+      for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) registry.validate(config.providers.find(p => p.id === target), route)
     }
     const result = await state.mutate({ ...operation, action: 'configuration', payload: config }, current => {
       if (JSON.stringify(current.providers) === JSON.stringify(config.providers) && JSON.stringify(current.routes) === JSON.stringify(config.routes)) return current

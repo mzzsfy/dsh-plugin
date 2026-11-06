@@ -53,30 +53,20 @@ test('snapshot 下发实例可观测面: 凭据/代理/端点覆盖/最近请求
 })
 
 
-test('增量检查合同: 目标粒度缓存命中, 无关字段改动与新增路由不再全量重验', async () => {
+test('保存不做探针闸门: 未验证的目标照样能存, 校验只针对配置自身', async () => {
   let now = 1000
   const app = await createApplication({ storageDomain: memoryStorage(), providers: [fake], env: { DSH_STOCK_TUSHARE_TOKEN: 'fake' }, now: () => now })
   const generous = { ...provider('ts-one', 'fake'), budget: { ...provider('ts-one', 'fake').budget, requestsPerMinute: 10000, capabilityLimits: { quotes: 10000, catalog: 10000, calendar: 10000 } } }
   const config = { providers: [generous], routes: [route(), route('ts-one', 'XSHG', 'catalog')] }
-  const checked = await app.providerCheck({ ...config, capabilities: ['quotes'] })
-  now += 1000
-  const checkedCatalog = await app.providerCheck({ ...config, capabilities: ['catalog'] })
-  await app.configuration({ ...operation(), payload: config, checkIds: [checked.checkId, checkedCatalog.checkId] })
-  // 1) 无关字段改动(预算数字) + 空 checkIds: 缓存命中应直接保存成功, 不再 CHECK_REQUIRED
-  const tweaked = { ...config, providers: [{ ...config.providers[0], budget: { ...config.providers[0].budget, requestsPerMinute: 99 } }] }
-  await app.configuration({ ...operation(3, 1), payload: tweaked, checkIds: [] })
-  assert.equal(app.snapshot().control.providers[0].budget.requestsPerMinute, 99)
-  // 2) 既有路由字段微调(接受延迟未知) + 空 checkIds: 目标未变缓存命中即过
-  const tweakedRoute = { ...tweaked, routes: tweaked.routes.map(r => ({ ...r, acceptUnknownDelay: !r.acceptUnknownDelay })) }
-  await app.configuration({ ...operation(4, 2), payload: tweakedRoute, checkIds: [] })
-  assert.equal(app.snapshot().control.routes[0].acceptUnknownDelay, false)
-  // 3) 探针从未验证过的全新目标仍拒绝
+  // 一次探针都没跑, 直接保存
+  await app.configuration({ ...operation(), payload: config })
+  assert.equal(app.snapshot().control.routes.length, 2)
+  // 从没验证过的全新目标同样能存
   const stranger = { providers: [{ ...provider('ts-two', 'fake') }], routes: [route('ts-two', 'XSHG', 'quotes')] }
-  await assert.rejects(app.configuration({ ...operation(5, 3), payload: stranger, checkIds: [] }), e => e.code === 'CHECK_REQUIRED')
-  // 4) 缓存过期后旧记录不再有效
-  now += 11 * 60 * 1000
-  const stale = { ...tweakedRoute, providers: [{ ...tweakedRoute.providers[0], budget: { ...tweakedRoute.providers[0].budget, requestsPerMinute: 77 } }] }
-  await assert.rejects(app.configuration({ ...operation(6, 3), payload: stale, checkIds: [] }), e => e.code === 'CHECK_REQUIRED')
+  await app.configuration({ ...operation(3, 1), payload: stranger })
+  assert.equal(app.snapshot().control.routes[0].primaryInstanceId, 'ts-two')
+  // 但配置自身的非法仍要拒绝: 路由指向不存在的实例
+  await assert.rejects(app.configuration({ ...operation(5, 2), payload: { providers: [], routes: [route('ghost', 'XSHG', 'quotes')] } }), e => e.code === 'INVALID_ROUTE')
   await app.close()
 })
 
