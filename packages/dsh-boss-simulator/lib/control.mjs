@@ -1,6 +1,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import { createBoardApi } from './board.mjs'
+import { createTaskApi } from './task-api.mjs'
 import { createSessionAdapter } from './session-adapter.mjs'
 import { createRunFollowers } from './run-followers.mjs'
 import { createRunService, createExecutionGate } from './run-service.mjs'
@@ -19,6 +20,18 @@ export function getControlRuntime() { return controlRuntime }
 export function registerControl(ctx, { onChange = () => {} } = {}) {
   let stopped = false
   const followDisposers = new Set()
+  // 工作区候选:宿主注册表可用时以它为唯一来源,不可用时由任务记录回落
+  let listWorkspaces = () => []
+  ctx.inject(['workspaceRegistry'], (workspaceScope) => {
+    const registry = workspaceScope.workspaceRegistry
+    if (!registry) return
+    listWorkspaces = () => registry.list().map((workspace) => ({
+      workspaceId: String(workspace.id),
+      title: workspace.title,
+      path: workspace.path,
+    }))
+    workspaceScope.effect(() => () => { listWorkspaces = () => [] }, 'boss-simulator workspaces')
+  })
   ctx.inject(['storageDomain', 'webServer'], async (scope) => {
     if (stopped) return
     const domain = await scope.storageDomain.open(DOMAIN_SPEC)
@@ -62,6 +75,10 @@ export function registerControl(ctx, { onChange = () => {} } = {}) {
     ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/interrupt', handler: api.handleInterrupt }), 'boss-simulator interrupt')
     ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/settings', handler: api.handleSettings }), 'boss-simulator settings')
     ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/drive', handler: api.handleDrive }), 'boss-simulator drive')
+    // 人类操作入口:创建/授权/派发与工作区候选,与管理员工具共用同一状态机
+    const taskApi = createTaskApi({ store, drive: driveRef, listWorkspaces: () => listWorkspaces(), now: () => Date.now() })
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/workspaces', handler: taskApi.handleWorkspaces }), 'boss-simulator workspaces')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/task', handler: taskApi.handleTask }), 'boss-simulator task')
     const runtime = {
       store, now: () => Date.now(), withExecution: driveRef.withExecution,
       get sessionAdapter() { return driveRef.sessionAdapter },
@@ -83,16 +100,6 @@ export function registerControl(ctx, { onChange = () => {} } = {}) {
         for (const definition of definitions) {
           const dispose = await registry.register(definition)
           ctx.effect(() => dispose)
-        }
-        const roster = await registry.list().catch(() => [])
-        console.warn('[boss-simulator] preset roster:', JSON.stringify(roster).slice(0, 400))
-        for (const definition of definitions) {
-          try {
-            const resolved = await registry.resolve(definition.id)
-            if (resolved.broken !== undefined) console.warn(`[boss-simulator] preset ${definition.id} broken:`, JSON.stringify(resolved.broken).slice(0, 300))
-          } catch (error) {
-            console.warn(`[boss-simulator] preset ${definition.id} resolve failed:`, String(error?.message ?? error).slice(0, 200))
-          }
         }
       }
       register().catch((error) => console.warn('[boss-simulator] preset registration failed:', String(error?.message ?? error)))

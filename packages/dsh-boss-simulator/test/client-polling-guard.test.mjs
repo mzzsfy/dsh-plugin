@@ -17,9 +17,11 @@ test('Given 工作台看板 When 空闲 Then 无固定周期快照循环', () =>
 test('Given 公共总线 When 订阅失效通知 Then 首连 onReset 全量对账且变更单飞刷新', () => {
   assert.match(source, /const tools = require\('@mzzsfy\/dsh-common-tools\/client'\)/)
   assert.match(source, /tools\.setupCommonTools\(ctx\)/)
-  assert.match(source, /tools\.createSnapshotRefresh\(\(\) => refresh\(\)\)/)
-  assert.match(source, /bus\.subscribe\(\(\) => snapshot\.refresh\(\), \{[\s\S]{0,160}onReset:/)
-  assert.match(source, /onReset: \(\) => \{ ready = true; clearTimeout\(timer\);/)
+  assert.match(source, /tools\.createSnapshotRefresh\(\(\) => refreshRef\.current\(\)\)/)
+  assert.match(source, /bus\.subscribe\(\(\) => snapshot\.refresh\(\), \{[\s\S]{0,200}onReset:/)
+  assert.match(source, /onReset: \(\) => \{ ready = true;[\s\S]{0,60}clearTimeout\(timer\);/)
+  // 订阅不得依赖 refresh:否则搜索每键入一次都会重连并多打一轮快照
+  assert.match(source, /\}, \[visible, bus\]\)/)
 })
 
 test('Given 订阅未就绪 When 兜底拉取 Then 仅指数退避且订阅恢复后停止', () => {

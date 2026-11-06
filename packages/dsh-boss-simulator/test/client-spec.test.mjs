@@ -8,7 +8,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const source = readFileSync(join(root, 'src/client.js'), 'utf8')
 
 test('Given page specification When checking client source Then required semantic states and container/accessibility hooks are present', () => {
-  for (const text of ['aria-label', 'aria-live', '已加载', 'token 未知', '模型待核对', '尚未开始', 'observedAt', 'focus-visible', 'container-type', 'max-width:767px']) {
+  for (const text of ['aria-label', 'aria-live', '加载更多任务', 'token 未知', '模型待核对', '尚未开始', 'observedAt', 'focus-visible', 'container-type', 'max-width:767px']) {
     assert.ok(source.includes(text), `client lacks ${text}`)
   }
 })

@@ -7,50 +7,7 @@ import { createSettings, saveSettings } from './core/settings.mjs'
 import { interruptTask } from './core/orchestrator.mjs'
 import { createTask, defineWorkItem, authorizeTask } from './core/task.mjs'
 import { ADMIN_PRESET_ID } from './presets.mjs'
-
-function sendJson(res, status, payload) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-  res.end(JSON.stringify(payload))
-}
-
-function rejectCrossOrigin(req, res) {
-  const origin = req.headers ? req.headers.origin : undefined
-  if (!origin) return false
-  let sameOrigin = false
-  try {
-    sameOrigin = new URL(origin).host === req.headers.host
-  } catch {
-    sameOrigin = false
-  }
-  if (sameOrigin) return false
-  sendJson(res, 403, { error: '跨源请求被拒绝' })
-  return true
-}
-
-const BODY_LIMIT_BYTES = 64 * 1024
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const declared = Number(req.headers?.['content-length'] ?? 0)
-    if (declared > BODY_LIMIT_BYTES) {
-      reject(Object.assign(new Error('请求体超过大小上限'), { statusCode: 413 }))
-      return
-    }
-    const chunks = []
-    let size = 0
-    req.on('data', (chunk) => {
-      size += chunk.length
-      if (size > BODY_LIMIT_BYTES) {
-        reject(Object.assign(new Error('请求体超过大小上限'), { statusCode: 413 }))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
-  })
-}
+import { sendJson, rejectCrossOrigin, readJsonBody } from './http.mjs'
 
 export function createBoardApi({ store, drive, now = Date.now, serverEpoch = randomUUID() }) {
   async function handleBoard(req, res, url = new URL(req.url ?? '/api/boss-simulator/board', 'http://local')) {
@@ -93,15 +50,8 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
   let adminCreateInFlight = null
   async function handleAdmin(req, res) {
     try {
-      if (rejectCrossOrigin(req, res)) return
-      const raw = await readBody(req).catch((error) => { throw Object.assign(error, { statusCode: error.statusCode ?? 400 }) })
-      let body = {}
-      try {
-        body = raw ? JSON.parse(raw) : {}
-      } catch {
-        sendJson(res, 400, { error: '请求体不是合法 JSON' })
-        return
-      }
+      const body = await readJsonBody(req, res)
+      if (body === null) return
       if (body.action !== 'create') {
         sendJson(res, 400, { error: 'action 须为 create', code: 'ADMIN_CREATE_REJECTED' })
         return
@@ -135,15 +85,8 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
 
   async function handleInterrupt(req, res) {
     try {
-      if (rejectCrossOrigin(req, res)) return
-      const raw = await readBody(req).catch((error) => { throw Object.assign(error, { statusCode: error.statusCode ?? 400 }) })
-      let body = {}
-      try {
-        body = raw ? JSON.parse(raw) : {}
-      } catch {
-        sendJson(res, 400, { error: '请求体不是合法 JSON' })
-        return
-      }
+      const body = await readJsonBody(req, res)
+      if (body === null) return
       if (!body.commandId) {
         sendJson(res, 400, { error: '缺少 commandId' })
         return
@@ -202,19 +145,13 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
 
   async function handleSettings(req, res) {
     try {
-      if (rejectCrossOrigin(req, res)) return
       if (req.method === 'GET') {
+        if (rejectCrossOrigin(req, res)) return
         sendJson(res, 200, store.settings ? await store.loadSettings() : createSettings(now))
         return
       }
-      const raw = await readBody(req).catch((error) => { throw Object.assign(error, { statusCode: error.statusCode ?? 400 }) })
-      let body = {}
-      try {
-        body = raw ? JSON.parse(raw) : {}
-      } catch {
-        sendJson(res, 400, { error: '请求体不是合法 JSON' })
-        return
-      }
+      const body = await readJsonBody(req, res)
+      if (body === null) return
       if (!store.settings) {
         sendJson(res, 501, { error: '设置存储未装配' })
         return
@@ -240,19 +177,12 @@ export function createBoardApi({ store, drive, now = Date.now, serverEpoch = ran
   // 测试入口允许创建、派发，不允许从请求体直接写入报告事实。
   async function handleDrive(req, res) {
     try {
-      if (rejectCrossOrigin(req, res)) return
       if (!drive?.sessionAdapter) {
         sendJson(res, 501, { error: '会话适配未装配' })
         return
       }
-      const raw = await readBody(req).catch((error) => { throw Object.assign(error, { statusCode: error.statusCode ?? 400 }) })
-      let body = {}
-      try {
-        body = raw ? JSON.parse(raw) : {}
-      } catch {
-        sendJson(res, 400, { error: '请求体不是合法 JSON' })
-        return
-      }
+      const body = await readJsonBody(req, res)
+      if (body === null) return
       const control = await store.loadControl()
       if (body.action === 'create') {
         if (await store.loadAggregate(body.taskId)) {

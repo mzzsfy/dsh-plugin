@@ -23,12 +23,9 @@ export function apply(ctx, config) {
       console.warn('[boss-simulator] tools-row without control runtime, skipped')
       return
     }
-    console.warn('[boss-simulator] tools-row row activating')
     ctx.inject(['tools'], (scope) => {
-      console.warn('[boss-simulator] tools-row inject fired, register start')
       // 同 rs-workflow orchestrator 形态:effect 包 register 调用本体,行销毁即注销
       scope.effect(() => registerToolRow(scope, runtime), 'boss-simulator tools-row')
-      console.warn('[boss-simulator] tools-row register done')
     })
     return
   }
