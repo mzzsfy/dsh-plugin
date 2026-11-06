@@ -424,7 +424,8 @@ window.__ModuleLoader__.load({
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
-    const DEFAULT_GUIDES = { preClose: true, cost: true, highLow: false }
+    const GUIDE_KEY = 'ssb-guides'
+    const GUIDE_DEFAULT = { preClose: true, cost: true, highLow: false }
     const GUIDE_ITEMS = [['preClose', '昨收'], ['cost', '成本价'], ['highLow', '区间最高/最低']]
     const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
     const MA_WINDOWS = [5, 10, 20, 60]
@@ -497,16 +498,26 @@ window.__ModuleLoader__.load({
         return { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true }
       }
       const wantTrend = period === 'trend'
-      const guides = state.data?.control.preferences?.guideLines || DEFAULT_GUIDES
-      // 图例: 均线与成本的具体数值集中在这一行, 图面只留曲线本身
+      const [guides, setGuides] = usePref(GUIDE_KEY, GUIDE_DEFAULT)
+      // 图例: 报价要素一行、指标值一行, 数值全部集中在这里, 图面只留曲线本身
       const legend = React.useMemo(() => {
         const candles = kline?.candles || []
         if (!candles.length) return null
-        const last = candles[candles.length - 1]
-        if (wantTrend) return [['均价', last.avg ?? last.close]]
-        return MA_WINDOWS.map((window, index) => [`MA${window}`, computeMA(candles, window).at(-1)?.value])
-      }, [kline?.candles, wantTrend])
-      const costPct = item.cost && legend?.[0] ? (() => { const last = Number(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
+        const last = candles[candles.length - 1], scale = item.priceScale ?? 2
+        const price = value => value == null || value === '' ? null : Number(value).toFixed(scale)
+        // 日K 的 preClose 有时来源不给, 退到前一根收盘; 两者都没有才算涨跌未知
+        const base = Number(kline?.preClose) || Number(candles[candles.length - 2]?.close)
+        const pct = Number.isFinite(base) && base ? (Number(last.close) - base) / base * 100 : null
+        const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
+        const quote = wantTrend
+          ? [['最新', price(last.close)], ['均价', price(last.avg ?? last.close)], ['昨收', price(kline?.preClose)]]
+          : [['开', price(last.open)], ['高', price(last.high)], ['低', price(last.low)], ['收', price(last.close)]]
+        return {
+          quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(last.volume)]],
+          series: wantTrend ? [] : MA_WINDOWS.map(window => [`MA${window}`, computeMA(candles, window).at(-1)?.value]),
+        }
+      }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale])
+      const costPct = item.cost && kline?.candles?.length ? (() => { const last = Number(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
       function ensureSeries(LWC) {
         const chart = chartRef.current
         if (!chart || !LWC) return
@@ -559,7 +570,7 @@ window.__ModuleLoader__.load({
         })
         wantTrend ? fillTrendData(result) : fillCandleData(result)
         // 辅助线统一在这里画: 全部走 createPriceLine, 具体数值看上方图例, 图上只留参考位置
-        const guides = state.data?.control.preferences?.guideLines || DEFAULT_GUIDES, palette = themeOf()
+        const palette = themeOf()
         drawLine(preCloseLineRef, guides.preClose && result.preClose != null ? { price: result.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
         drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
         const highs = result.candles.map(c => Number(c.high)).filter(Number.isFinite), lows = result.candles.map(c => Number(c.low)).filter(Number.isFinite)
@@ -609,23 +620,25 @@ window.__ModuleLoader__.load({
       // 成本/辅助线变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
       React.useEffect(() => {
         if (!mainRef.current) return
-        const guides = state.data?.control.preferences?.guideLines || DEFAULT_GUIDES, palette = themeOf()
+        const palette = themeOf()
         drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
         const candles = kline?.candles || []
         const highs = candles.map(c => Number(c.high)).filter(Number.isFinite), lows = candles.map(c => Number(c.low)).filter(Number.isFinite)
         drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
-      }, [item.cost, kline.candles, state.data?.control.preferences?.guideLines])
+      }, [item.cost, kline.candles, guides])
       return h('div', { className: 'ssb-kline' },
         h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻'),
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-expanded': !!state.view.guideOpen, onClick: () => runtime.updateView({ guideOpen: !state.view.guideOpen }) }, '辅助线'),
             state.view.guideOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', left: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '150px' }, role: 'menu' },
-              ...GUIDE_ITEMS.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => quiet(() => runtime.preferences({ guideLines: { ...guides, [key]: !guides[key] } }))() }))) : null),
+              ...GUIDE_ITEMS.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => setGuides({ [key]: !guides[key] }) }))) : null),
           h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
         legend ? h('div', { className: 'ssb-kline-legend' },
-          ...legend.map(([label, value]) => h('span', { key: label, className: 'ssb-legend-item' }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : Number(value).toFixed(item.priceScale ?? 2))),
-          item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null) : null,
+          h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value))),
+          h('div', { className: 'ssb-legend-row' },
+            ...legend.series.map(([label, value]) => h('span', { key: label, className: 'ssb-legend-item' }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : Number(value).toFixed(item.priceScale ?? 2))),
+            item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null)) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
         kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
@@ -723,9 +736,22 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ssb-detail-side' }, peekActions, h(QuoteStatus, { entry }), costBlock, h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))))),
         watchActions ? h('div', { className: 'ssb-detail-forms' }, watchActions) : null)
     }
+    // 显示偏好(悬浮窗位置/辅助线开关)属于纯客户端状态: 存本地, 不进宿主 schema,
+    // 否则每加一个开关都要重启宿主。同页用自定义事件广播, storage 事件只在跨标签页触发。
+    const readPref = (key, fallback) => { try { return { ...fallback, ...(JSON.parse(localStorage.getItem(key) || 'null') || {}) } } catch { return { ...fallback } } }
+    const writePref = (key, next) => { try { localStorage.setItem(key, JSON.stringify(next)) } catch { } window.dispatchEvent(new Event(`ssb:${key}`)) }
+    function usePref(key, fallback) {
+      const [value, setValue] = React.useState(() => readPref(key, fallback))
+      React.useEffect(() => {
+        const sync = () => setValue(readPref(key, fallback))
+        window.addEventListener(`ssb:${key}`, sync)
+        return () => window.removeEventListener(`ssb:${key}`, sync)
+      }, [key])
+      return [value, next => writePref(key, { ...readPref(key, fallback), ...next })]
+    }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
-    const FLOAT_POLL_MS = 15 * 1000
-    const DEFAULT_FLOATING = { open: false, securityId: null, live: true }
+    const FLOAT_KEY = 'ssb-floating', FLOAT_POLL_MS = 15 * 1000
+    const FLOAT_DEFAULT = { open: false, live: true, securityId: null, x: null, y: null }
     // 分时曲线自绘: 只要一条折线加填充, 不值得为它再挂一个图表实例
     function Sparkline({ candles, preClose }) {
       const values = (candles || []).map(c => Number(c.close)).filter(Number.isFinite)
@@ -746,9 +772,11 @@ window.__ModuleLoader__.load({
       const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
       const [trend, setTrend] = React.useState(null)
       const [error, setError] = React.useState('')
+      const [floating, setFloating] = usePref(FLOAT_KEY, FLOAT_DEFAULT)
+      // hooks 必须全部在提前返回之前: 开关一旦变化, 排在后头的 useRef 会让 hooks 数量对不上
+      const dragRef = React.useRef(null)
       const order = state.data?.control.watchlist.order || []
       const items = state.data?.control.watchlist.items || {}
-      const floating = state.data?.control.preferences?.floating || DEFAULT_FLOATING
       const open = !!floating.open
       const securityId = (floating.securityId && items[floating.securityId] ? floating.securityId : order[0]) || null
       // 只有开着且处于监听时才轮询; 关掉就是静态快照, 不打扰来源
@@ -773,14 +801,41 @@ window.__ModuleLoader__.load({
       const last = candles?.length ? Number(candles[candles.length - 1].close) : null
       const base = Number(trend?.preClose)
       const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
-      const update = patch => runtime.preferences({ floating: { ...floating, ...patch } })
+      const update = next => setFloating(next)
+      // 拖动: 只记左上角, 松手才落盘; 越界时收回可视区, 避免窗口缩小后拖不回来
+      const clamp = (x, y) => {
+        const width = 288, height = 210, margin = 8
+        return { x: Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - width - margin)), y: Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - height - margin)) }
+      }
+      const onPointerDown = e => {
+        if (e.target.closest('button')) return
+        const box = e.currentTarget.getBoundingClientRect()
+        dragRef.current = { dx: e.clientX - box.left, dy: e.clientY - box.top }
+        e.currentTarget.setPointerCapture?.(e.pointerId)
+      }
+      const onPointerMove = e => {
+        if (!dragRef.current) return
+        const { x, y } = clamp(e.clientX - dragRef.current.dx, e.clientY - dragRef.current.dy)
+        e.currentTarget.style.left = `${x}px`
+        e.currentTarget.style.top = `${y}px`
+        e.currentTarget.style.right = 'auto'
+        e.currentTarget.style.bottom = 'auto'
+      }
+      const onPointerUp = e => {
+        if (!dragRef.current) return
+        dragRef.current = null
+        e.currentTarget.releasePointerCapture?.(e.pointerId)
+        const box = e.currentTarget.getBoundingClientRect()
+        update({ x: Math.round(box.left), y: Math.round(box.top) })
+      }
+      const position = floating.x == null || floating.y == null ? {} : { left: floating.x, top: floating.y, right: 'auto', bottom: 'auto' }
       const step = delta => {
         const at = order.indexOf(securityId)
         const next = order[(at + delta + order.length) % order.length]
         if (next) { setTrend(null); update({ securityId: next }) }
       }
       const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
-      return h('div', { className: 'ssb-float', role: 'complementary', 'aria-label': '悬浮盯盘' },
+      return h('div', { className: `ssb-float${dragRef.current ? ' ssb-float-dragging' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-float-head' },
           h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹'),
@@ -1058,7 +1113,8 @@ window.__ModuleLoader__.load({
 }
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
-.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; }
+.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; cursor:grab; touch-action:none; }
+.ssb-float-dragging { cursor:grabbing; }
 .ssb-float-head { display:flex; align-items:center; gap:4px; }
 .ssb-float-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
 .ssb-float-icon { width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:12px; line-height:1; color:var(--ssb-text-sub); background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
@@ -1108,7 +1164,8 @@ window.__ModuleLoader__.load({
 .ssb-route-advanced { display:grid; gap:8px; padding-top:8px; border-top:1px solid var(--ssb-border); }
 .ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-meta { margin-left:auto; color:var(--ssb-text-sub); font-size:12px; white-space:nowrap; }
 /* 图例: 均线/成本的数值只在这里出现, 图面不铺文字标签 */
-.ssb-kline-legend { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; margin:0 0 8px; font-size:11px; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
+.ssb-kline-legend { display:flex; flex-direction:column; gap:4px; margin:0 0 8px; font-size:11px; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
+.ssb-legend-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; }
 .ssb-legend-label { color:var(--ssb-text-dim); margin-right:4px; }
 .ssb-legend-cost { color:var(--ssb-text); }
 .ssb-legend-pct { margin-left:4px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
@@ -1134,7 +1191,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
             h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control.providers || []).filter(p => p.enabled).length}/${(data?.control.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
-            h(Button, { onClick: () => { const floating = data?.control.preferences?.floating || { open: false }; quiet(() => runtime.preferences({ floating: { ...floating, open: !floating.open } }))(); runtime.updateView({ menuOpen: false }) } }, data?.control.preferences?.floating?.open ? '关闭悬浮盯盘' : '悬浮盯盘'),
+            h(Button, { onClick: () => { writePref(FLOAT_KEY, { ...readPref(FLOAT_KEY, FLOAT_DEFAULT), open: !readPref(FLOAT_KEY, FLOAT_DEFAULT).open }); runtime.updateView({ menuOpen: false }) } }, readPref(FLOAT_KEY, FLOAT_DEFAULT).open ? '关闭悬浮盯盘' : '悬浮盯盘'),
             h(Button, { onClick: () => { runtime.updateView({ view: 'list', overlay: 'settings', menuOpen: false }) } }, '设置'),
             h(Button, { onClick: () => { runtime.updateView({ menuOpen: false }); layout.selectPanel(null) } }, '返回对话')) : null))),
           state.error ? h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, state.error, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '检查设置')) : null,

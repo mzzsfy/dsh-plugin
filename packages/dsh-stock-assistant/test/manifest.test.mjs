@@ -11,7 +11,8 @@ test('装配守卫：生产client无打包依赖/React副本，公共依赖exter
   assert.equal(manifest.dependencies.esbuild, undefined)
   assert.equal((client.match(/createElement\('style', \{/g) || []).length, (client.match(/createElement\('style', \{ 'data-plugin': '@mzzsfy\/dsh-stock-assistant'/g) || []).length)
   assert.doesNotMatch(host, /export const Config|configEditor|settings\.register|settings\.update/)
-  assert.doesNotMatch(client, /sidebarRight|sessionId|new WebSocket|localStorage/)
+  // localStorage 不在此列: 悬浮窗位置、辅助线开关属纯客户端显示偏好, 放宿主 schema 会让每次加开关都得重启宿主
+  assert.doesNotMatch(client, /sidebarRight|sessionId|new WebSocket/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:checked/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:focus-visible/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:disabled/)
