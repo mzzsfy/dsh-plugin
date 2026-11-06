@@ -512,8 +512,10 @@ window.__ModuleLoader__.load({
         const quote = wantTrend
           ? [['最新', price(last.close)], ['均价', price(last.avg ?? last.close)], ['昨收', price(kline?.preClose)]]
           : [['开', price(last.open)], ['高', price(last.high)], ['低', price(last.low)], ['收', price(last.close)]]
+        // 分时的 volume 是每分钟增量(实测末条远小于当日总量), 要累加; 日K 最后一根本身就是当日总量
+        const volume = wantTrend ? candles.reduce((sum, candle) => sum + (Number(candle.volume) || 0), 0) : last.volume
         return {
-          quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(last.volume)]],
+          quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(volume)]],
           series: wantTrend ? [] : MA_WINDOWS.map(window => [`MA${window}`, computeMA(candles, window).at(-1)?.value]),
         }
       }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale])
