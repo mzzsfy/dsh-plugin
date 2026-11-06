@@ -51,17 +51,25 @@ const fakeEngine = () => {
 const registered = []
 let currentJobs = []
 const jobSpecs = []
-// jobs.start 拒绝注入:置为函数时 start 即走注入(模拟宿主 owner 超限/无控制器的同步拒绝)
 let jobsStartOverride = null
+// 行级清理登记:宿主卸载/HMR 时执行,验证驱动器随行退役
+let disposers = []
 
 function setup() {
   registered.length = 0
   currentJobs = []
   jobSpecs.length = 0
   jobsStartOverride = null
+  disposers = []
   const handlers = new Map()
   const ctx = {
     logger: { info: () => {}, warn: () => {} },
+    // 行级 effect:宿主卸载/HMR 时执行,登记 disposer 供清理断言
+    effect(reg) {
+      const dispose = reg()
+      if (typeof dispose === 'function') disposers.push(dispose)
+      return dispose
+    },
     // 事件面:捕获守门监听器供契约级断言(真宿主按 scope 投递,此处只验监听器行为)
     on(name, fn) { handlers.set(name, fn) },
     inject(names, fn) {
@@ -77,7 +85,11 @@ function setup() {
           },
         },
         tools: { register: (t) => registered.push(t) },
-        effect: (reg) => reg(),
+        effect: (reg) => {
+          const dispose = reg()
+          if (typeof dispose === 'function') disposers.push(dispose)
+          return dispose
+        },
       }
       fn(tctx)
     },
@@ -91,7 +103,7 @@ function setup() {
   const tool = (name) => registered.find((t) => t.name === name)
   const agent = { id: `agent-${setup.seq = (setup.seq ?? 0) + 1}` }
   const exec = { agent, signal: { throwIfAborted: () => {}, aborted: false } }
-  return { start: tool('rs_workflow_start'), status: tool('rs_workflow_status'), resume: tool('rs_workflow_resume'), cancel: tool('rs_workflow_cancel'), message: tool('rs_workflow_message'), verdict: tool('rs_workflow_verdict'), resumeFrom: tool('rs_workflow_resume_from'), agent, exec, handler: (name) => handlers.get(name) }
+  return { start: tool('rs_workflow_start'), status: tool('rs_workflow_status'), resume: tool('rs_workflow_resume'), cancel: tool('rs_workflow_cancel'), message: tool('rs_workflow_message'), verdict: tool('rs_workflow_verdict'), resumeFrom: tool('rs_workflow_resume_from'), agent, exec, disposers, handler: (name) => handlers.get(name) }
 }
 
 const fullPlan = (brief = '口径', refs = ['triage', 'execute', 'review', 'deliver']) => ({
@@ -113,11 +125,35 @@ test('Given 合法 plan When rs_workflow_start Then 受理返回 runId 且首段
   assert.equal(record.plan.source, 'model')
 })
 
+test('O2 行卸载 When 执行行清理 Then 本行驱动器收到取消且不残留活跃段', async () => {
+  const { start, exec, disposers } = setup()
+  const r = await start.execute({ request: '整理仓库', templateId: 'default', inputs: {}, plan: fullPlan() }, exec)
+  assert.equal(r.ok, true)
+  const driver = registry.drivers.get(r.runId)
+  assert.ok(driver, '驱动器须已注册')
+  // spy:记录行清理对驱动器的取消调用(段在飞时 cancel 只 abort,终态由段自身收敛)
+  const cancelled = []
+  const original = driver.cancel.bind(driver)
+  driver.cancel = () => { cancelled.push(r.runId); return original() }
+  // When 宿主卸载插件行(或 HMR 重载):执行本行登记的 effect 清理
+  assert.ok(disposers.length > 0, '行清理须已登记')
+  for (const dispose of [...disposers]) dispose()
+  // Then 本行创建的驱动器被逐个取消
+  assert.deepEqual(cancelled, [r.runId], '行卸载必须取消本行创建的驱动器')
+  // 重复执行清理幂等:ownedRuns 已清空,不再有取消动作
+  driver.cancel = original
+  for (const dispose of disposers.splice(0)) dispose()
+  assert.deepEqual(cancelled, [r.runId])
+})
+
 test('F02 Given jobs 在调用工厂前拒绝 When start Then engine 调用数为 0 且 run 收敛 failed', async () => {
   const { start, exec } = setup()
   // 宿主 jobs.start 在 run 工厂调用前同步拒绝(owner 超上限/无控制器):run() 不得执行
   jobsStartOverride = () => { throw new Error('owner 超上限') }
   const engineCalls = fakeEngine.last
+  // 基线:同文件其他用例可能留有仍在跑的 run,断言只针对本次拒绝新增的记录
+  const runningBefore = new Set(reportStore().list().filter((record) => record.status === 'running').map((record) => record.runId))
+  const knownBefore = new Set(reportStore().list().map((record) => record.runId))
   const r = await start.execute({ request: '整理仓库', templateId: 'default', plan: fullPlan() }, exec)
   // 先等一拍:runSegment 若被错误地在工厂外启动,引擎调用会在微任务后出现
   await new Promise((resolve) => setTimeout(resolve, 100))
@@ -125,9 +161,9 @@ test('F02 Given jobs 在调用工厂前拒绝 When start Then engine 调用数�
   assert.equal(r.ok, false, 'start 工具须向调用方回报失败')
   // run 记录须收敛终态:registry 中无该 run 的活驱动器,store 记录 failed 而非 running
   const records = reportStore().list()
-  const orphan = records.find((record) => record.status === 'running')
+  const orphan = records.find((record) => record.status === 'running' && !runningBefore.has(record.runId))
   assert.equal(orphan, undefined, '拒绝 run 不得残留 running 记录')
-  const record = records.find((entry) => entry.status === 'failed')
+  const record = records.filter((entry) => !knownBefore.has(entry.runId)).find((entry) => entry.status === 'failed')
   assert.ok(record, '拒绝 run 须收敛 failed 终态')
 })
 
