@@ -25,3 +25,7 @@ AI 会话自测(凡涉及 LLM 链路:对话轮、思考流、工具调用、usag
 - **不改宿主生产面**:不动生产 profile 与 `~/.dsh` 配置、不重启宿主服务,留档不入版本库(默认临时目录;compat 工位按链接方法落 `llm-echo.jsonl`,gitignore 豁免)。需隔离 profile 全家桶级宿主链路验证时,走 `node scripts/compat/run.mjs` 同款隔离方法([docs/兼容性测试/测试与隔离方法.md](docs/兼容性测试/测试与隔离方法.md),本地维护不入库)。
 
 各 `兼容性测试.md` 与模拟器 README 中固定端口 18123、真实 API、仓库内留档路径的写法属人工历史流程记录,AI 会话一律以本节为准。
+
+## AI 发版规约:直接执行
+
+AI 会话发版一律直接运行 `node scripts/publish.mjs <包名|all> [--bump patch|minor|major]`,**禁止任何登录态预检**(不跑 `npm whoami`、不探测 token 有效性、不比对 registry 凭据、不先试 `npm view`)。发布失败按命令输出处置,认证中断直接重跑同一条命令;本地 registry 指向镜像、发布目标为 npmjs 之类的差异不构成预检或改 registry 的理由。发布范围、版本位与 tag 规则见 [DEVELOPMENT/structure-and-release.md](DEVELOPMENT/structure-and-release.md)。
