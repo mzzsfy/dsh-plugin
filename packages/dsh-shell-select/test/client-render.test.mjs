@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { mountPwshTakeover } from '../src/pwsh-takeover.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'src', 'client.js'), 'utf8')
@@ -229,4 +230,45 @@ test('hooks 恒序守卫:组件内 hook 调用必须全部位于第一个提前 
       assert.ok(line < limit, `${name} 的 hook 在第 ${line} 行,位于提前 return(第 ${limit} 行)之后:hooks 恒序被破坏`)
     }
   }
+})
+
+test('契约:服务端产出的接管事实正好被客户端判为徽章', async () => {
+  // Given 真实 mountPwshTakeover 处理一次直接 pwsh 调用;When 其 post-execute
+  // 结果原样交给客户端渲染;Then 徽章出现——两层判定条件绑定,防单边漂移。
+  const listeners = new Map()
+  const touch = mountPwshTakeover({ on: (name, fn) => listeners.set(name, fn), effect: (fn) => fn() })
+  const exec = { name: 'pwsh', token: Symbol() }
+  const raw = { content: [{ type: 'text', text: 'out' }], isError: false }
+  await listeners.get('tools/execute')(exec, async () => { touch(); return raw })
+  const marked = await listeners.get('tools/post-execute')(exec, raw, async () => ({ kind: 'accept' }))
+  assert.deepEqual(marked.content.at(-1), { type: 'shell-select-takeover', tool: 'pwsh' })
+  const block = {
+    kind: 'tool',
+    callId: 'c1',
+    call: { callId: 'c1', name: 'pwsh', argsRaw: JSON.stringify({ command: 'x', description: 'probe' }) },
+    content: marked.content,
+  }
+  const element = toolviewOf(loadClient(true), 'pwsh')({ block, cwd: 'C:\\repo' })
+  assert.match(JSON.stringify(element), /插件接管/)
+})
+
+test('shell 工具指定 pwsh 客户端:不出接管徽章', () => {
+  // Given 通过 shell 工具显式选 pwsh 的已定调用,结果带客户端事实标记;
+  // When 折叠/展开渲染;Then 无「插件接管」徽章——徽章只归属直接 pwsh 调用,
+  // 显式选客户端是用户自己的选择,不构成"被接管"。
+  const args = JSON.stringify({ command: 'Write-Output x', description: 'probe', shell: 'pwsh' })
+  for (const expanded of [false, true]) {
+    const component = toolviewOf(loadClient(expanded), 'shell')
+    const element = component({ block: settledBlock(args, 'x\n[shell: pwsh]'), cwd: 'C:\\repo' })
+    assert.doesNotMatch(JSON.stringify(element), /插件接管/)
+  }
+})
+
+test('shell 结果即使携带接管事实块也不显示徽章', () => {
+  // Given shell 调用结果里混入 takeover 块(下游拼接或历史污染);
+  // When 渲染;Then 仍无徽章——判定同时要求工具名为 pwsh,不是只看块。
+  const component = toolviewOf(loadClient(true), 'shell')
+  const block = settledBlock(JSON.stringify({ command: 'echo x', description: 'probe', shell: 'pwsh' }), 'x')
+  block.content.push({ type: 'shell-select-takeover', tool: 'pwsh' })
+  assert.doesNotMatch(JSON.stringify(component({ block, cwd: 'C:\\repo' })), /插件接管/)
 })
