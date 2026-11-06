@@ -23,7 +23,7 @@
 import { toolLayersOf } from './registry.mjs'
 import { planConvergence } from './converge.mjs'
 import { resolveConfigStrict, unwrapConfig } from './config.mjs'
-import { TOOL_SEARCH_NAME, planRequestTools } from './fallback.mjs'
+import { TOOL_SEARCH_NAME, hideShadowedTools, planRequestTools } from './fallback.mjs'
 import { buildSearchTool } from './tool-search.mjs'
 import { sweepCollapseAdapters } from './decorator.mjs'
 
@@ -162,17 +162,37 @@ export function apply(ctx, config) {
     return names
   }
 
+  // 影子替代:更强工具在场时,被取代者直接从请求剔除(默认行为,无需配置)。
+  // 只在替代者真实在 registry 时才生效,卸载替代者即恢复被取代者可见。
+  const SHADOW_PAIRS = [['pwsh', 'shell']]
+
+  function hasDefinition(name) {
+    for (const layer of store.layers()) {
+      if (layer.definitionOf(name) !== undefined) return true
+    }
+    return false
+  }
+
+  function shadowedNames() {
+    const names = new Set()
+    for (const [shadowed, shadow] of SHADOW_PAIRS) {
+      if (hasDefinition(shadow)) names.add(shadowed)
+    }
+    return names
+  }
+
   // 折叠日志按折叠名集签名去重(逐请求常量名集只记一次)
   let lastFoldedKey = ''
   const rewrite = (options) => {
     const { enabled, collapse } = readConfig()
     if (!enabled || !collapse) return options
-    const plan = planRequestTools(options?.tools, deferredNames())
-    if (plan.folded.length === 0) return options
-    const signature = plan.folded.join(',')
+    const hidden = hideShadowedTools(options?.tools, shadowedNames())
+    const plan = planRequestTools(hidden.tools, deferredNames())
+    if (plan.folded.length === 0 && hidden.hidden.length === 0) return options
+    const signature = [...hidden.hidden, ...plan.folded].join(',')
     if (signature !== lastFoldedKey) {
       lastFoldedKey = signature
-      ctx.logger?.info?.(`tool-gate: 降级折叠为占位 ${plan.folded.length} 工具(${signature})`)
+      ctx.logger?.info?.(`tool-gate: 降级投影(隐藏 ${hidden.hidden.length} / 折叠 ${plan.folded.length}):${signature}`)
     }
     return { ...options, tools: plan.tools }
   }

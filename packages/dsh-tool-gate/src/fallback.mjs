@@ -45,6 +45,25 @@ function placeholderOf(tool) {
 }
 
 /**
+ * 影子工具剔除:存在更强替代时(当前只有 shell 取代官方 pwsh),请求里彻底
+ * 移除被取代者,模型不会看到也无法调用。折叠不适用于此场景——占位仍保留名字
+ * 与参数骨架,模型照常调用;而"收敛到语义最近工具"在这里正是期望行为。
+ * 与折叠同一三重透传门:空表/零命中原引用,capable 路由带 deferLoading 标透传。
+ * @param {Array<{name: string, deferLoading?: true}>|undefined} tools
+ * @param {Set<string>} shadowedNames 被替代工具名集(由调用方按在场替代者判定)
+ * @returns {{ tools: unknown, hidden: string[] }}
+ */
+export function hideShadowedTools(tools, shadowedNames) {
+  if (!Array.isArray(tools) || tools.length === 0) return { tools, hidden: [] }
+  if (shadowedNames.size === 0) return { tools, hidden: [] }
+  if (tools.some((tool) => tool?.deferLoading === true)) return { tools, hidden: [] }
+  const hidden = tools.filter((tool) => shadowedNames.has(tool?.name)).map((tool) => tool.name)
+  if (hidden.length === 0) return { tools, hidden }
+  const hiddenSet = new Set(hidden)
+  return { tools: tools.filter((tool) => !hiddenSet.has(tool?.name)), hidden }
+}
+
+/**
  * @param {Array<{name: string, deferLoading?: true}>|undefined} tools 缝上请求 tools(dsh ToolSchema 形态)
  * @param {Set<string>} deferredNames registry 现读 deferred 名集
  * @returns {{ tools: unknown, folded: string[], native: boolean }}
