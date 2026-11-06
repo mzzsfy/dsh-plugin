@@ -242,6 +242,11 @@ function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
       log.listeners.push({ event, listener })
       return () => {}
     },
+    // llm 服务缺席:请求缝隐藏按零动作跳过,不影响接管断言
+    inject: (services, callback) => {
+      callback({ llm: undefined, on: () => () => {} })
+      return () => {}
+    },
     effect: (fn) => fn(),
   }
   return { ctx, log }

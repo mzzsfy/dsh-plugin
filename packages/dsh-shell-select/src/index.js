@@ -32,6 +32,7 @@ import {
   takeoverDecision,
 } from './takeover.mjs'
 import { coerceServiceable } from './config.mjs'
+import { attachRequestHiding } from './request-hide.mjs'
 import { retireShellSelectExecutorFiber, shellSelectExecutorFiber } from './apply-state.mjs'
 
 export const name = 'shell-select'
@@ -53,6 +54,17 @@ export async function apply(ctx, config) {
     endShellSelectApplyInactive()
     return
   }
+  // pwsh 请求缝隐藏:preset 的官方工具在会话作用域注册,工具层的可见性规则遮蔽
+  // 不了它;剔除只发生在模型请求上,默认生效,行卸载即透传。llm 缺失只损失隐藏,
+  // 终端能力不受影响。
+  ctx.inject(['llm'], (lctx) => {
+    let disposed = false
+    ctx.effect(() => () => { disposed = true }, 'shell-select request hiding lifetime')
+    const sweep = () => attachRequestHiding(lctx.llm, () => disposed === false)
+    const attached = sweep()
+    lctx.on('llm/adapters-updated', sweep, { global: true })
+    if (attached > 0) ctx.logger?.info?.(`shell-select: 请求缝隐藏 pwsh(adapter ${attached})`)
+  })
   const states = officialChainState(ctx.loader)
   const { decision, targets } = takeoverDecision(states)
   recordTakeover({

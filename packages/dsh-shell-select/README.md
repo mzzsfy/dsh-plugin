@@ -11,7 +11,7 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 - client 半区 `dsh.client.inject` 声明(官方机制,dsh-client-file-upload 等官方包同款):保证 client 运行时模块表中 `primitives`/`slots` 面在场;primitives 另有 try/catch 降级自绘兜底。
 - 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(实例状态/方法全公有——cordis 服务代理会把经 `ctx.shell` 调用的方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误)。
 - **不管理会话预设**:bundle 补丁仅插入主行、guard、web，不声明 `shell-select` 预设，不覆写 `agent-preset-registry` 默认值。宿主及用户选择的预设保持原样，已存活代理及其子代理可继续持有旧预设修订；部署若显式指定已删除的 `shell-select` 预设，应通过宿主预设选择入口改选现存预设，本包不保留别名或迁移路径。
-- **只隐藏模型展示，不禁执行能力**:执行器生命周期内通过官方 `system-prompt/assemble` 最终投影删除 `pwsh` 工具 schema 与重复的 `tool:pwsh` 段；native/both 移除模型工具 schema，PTC/both 重建 TypeScript/Python SDK，SDK 使用宿主公开 renderer 重建，不改官方预设、不添加禁止调用提示词。下一次模型步骤重新组装时生效，已发送请求不追溯修改。工具注册和 PowerShell 执行契约仍保留，旧/在途调用及历史卡不受影响；这是减少模型选择与提示成本的展示策略，不是硬拒绝，模型仍可能凭历史猜名调用。若该代理看不到 `shell`（如子代理工具允许集仅保留 `pwsh`），原展示保持不变，避免失去唯一终端；SDK renderer 不可用时整体不改并告警。执行器卸载自动移除投影监听。
+- **只隐藏模型展示，不禁执行能力**:执行器生命周期内通过官方 `system-prompt/assemble` 最终投影删除 `pwsh` 工具 schema 与重复的 `tool:pwsh` 段；native/both 移除模型工具 schema，PTC/both 重建 TypeScript/Python SDK，SDK 使用宿主公开 renderer 重建，不改官方预设、不添加禁止调用提示词。下一次模型步骤重新组装时生效，已发送请求不追溯修改。工具注册和 PowerShell 执行契约仍保留，旧/在途调用及历史卡不受影响；这是减少模型选择与提示成本的展示策略，不是硬拒绝，模型仍可能凭历史猜名调用。若该代理看不到 `shell`（如子代理工具允许集仅保留 `pwsh`），原展示保持不变，避免失去唯一终端；SDK renderer 不可用时整体不改并告警。执行器卸载自动移除投影监听。0.2.2 起宿主不再把 tools 暴露给 `system-prompt/assemble` 投影链,该路径失效且仅告警;隐藏改由执行器自带的请求缝承担——在 llm 已注册 adapter 的 `streamWithSnapshot` 上剔除 `pwsh`,读当前方法作 original 与其它改写链式叠加、同一原型只包一层,默认生效、行卸载即透传,llm 缺失只损失隐藏不影响终端。
 - 沙箱语义官方同构:`danger-full-access` 直跑;受限模式经 `ctx.sandbox.confine` 包装并按官方方言分类拒绝/runner 失败,权限模型不变。
 - 死态自愈:用户 patch 层禁用主行的窗口(接管中 runtime-disable 残留)内,guard 哨兵(id 含 `/`,市场不写该层)代挂官方 `dsh-tool-pwsh` + `dsh-pwsh-sandbox` 恢复 host 面服务与 boot 组合(预载失败退避重试,至多 3 次),任一方复活先卸代挂。哨兵/复活让位语义逐项同构 `dsh-llm-pi-gateway`。边界:cordis 服务按 fiber 树解析,代挂对 agent preset 作用域不可见,死态窗口新会话的 preset tool-pwsh 行拒挂(报错清晰)属预期。
 - escape hatch(用户想用官方 pwsh 链):market 禁用 shell-select 或 user patch 写 `- id: shell-select / disabled: true`——主行退场后官方行保持启用自服务,重启后官方自然回归;删除禁行重启即恢复接管。(官方两行带平台表达式,行级 `disabled: false` 与宿主默认启用同形,不作让位信号。)
@@ -97,4 +97,4 @@ env 优先级(同键高右):内置覆盖集(NO_COLOR/PAGER/GIT_PAGER)< 条目 `e
 
 按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.1.7-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。
 
-dsh **0.2.2-rc.1** 实测两处代际契约变更均已适配:system-prompt assemble 的 tools 移到 waterfall 之后合并(投影面特性检测透传,过滤失效仅告警);设置写事务重评行 disabled 的 `!!js` 表达式(官方 pwsh-sandbox 被 runtime-disable 后可能被翻回启用)——guard 监视该翻回,dispose 主行执行器让位官方链,服务不真空、写事务不被拒。
+dsh **0.2.2-rc.1** 实测两处代际契约变更均已适配:system-prompt assemble 的 tools 移到 waterfall 之后合并(投影面特性检测透传,过滤失效仅告警);设置写事务重评行 disabled 的 `!!js` 表达式(官方 pwsh-sandbox 被 runtime-disable 后可能被翻回启用)——guard 监视该翻回,先对该行重发 disabled 保持接管;宿主拒绝或 30 秒内连续翻回超过三次才 dispose 执行器让位官方链,服务不真空、写事务不被拒。
