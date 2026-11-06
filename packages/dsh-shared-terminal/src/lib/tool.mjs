@@ -123,7 +123,8 @@ export function createTerminalTool({ controller, readScreen, defineTool, pumpFac
             state: info.state,
             cols: info.cols,
             rows: info.rows,
-            attached: info.controllerId !== undefined,
+            // attach 代 Controller info 不含 controllerId,附着与否以插件泵为准
+            attached: pumpFactory ? pumpFactory.attachedById(sessionId, info.id) === true : info.controllerId !== undefined,
           }))
           return { ok: true, terminals }
         }

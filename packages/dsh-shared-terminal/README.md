@@ -9,7 +9,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 | 动作 | 参数与语义 |
 | --- | --- |
 | `open` | 当前 Session 创建官方终端，返回 `terminal_id`。默认 `cols=80, rows=24`，整数范围 `cols=2..300, rows=1..200`，宿主仍可进一步限制；`shell_path` 只能选择 Controller 发现的 shell。成功结果挂载后打开官方 tab。 |
-| `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与 attachment 有无。 |
+| `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与附着状态。0.2.1-rc.2 起附着状态以插件泵为准（Controller info 不暴露 controllerId），其他代际沿用 Controller 的附着标识。 |
 | `read` | 必填 `terminal_id`；`lines` 默认 20，范围 1–200。读取 active buffer viewport 内最新内容起的最多 N 个物理行——以最后一个非空行与光标行（非空时）为界，高窗口不会读到尾部空白；保留内部空行、软换行和当前 alternate screen（整屏坐标）。 |
 | `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。0.2.0 与 0.2.1-alpha.2 蹭 UI attachment 写（无附着返回 `NOT_ATTACHED`，不创建 follower、不抢 control）；0.2.1-rc.2 起自持 attach 泵：写入时抢附着，**空闲冷却 10s 后释放**（冷却期内连续写复用同一附着，sequence 递增；释放后首写重建附着并重置 sequence，最后写入者胜出，用户可随时接管）；重抢仍失败返回 `TERMINAL_ERROR`，可重试。 |
 | `wait` | 必填 `terminal_id, text`；`text` 为待等待子串（大小写敏感逐字），`timeout_ms` 默认 10000、范围 100–55000（上限为工具超时减返回余量）。阻塞轮询屏幕直到 `text` 出现（`found`，携带命中时刻屏幕快照与 `elapsed_ms`）、终端进入 `exited/failed`（`exited`，退出优先于命中）、用户手动跳过（`skipped`，携带跳过时刻屏幕快照）或超时（`timeout`，携带 `timeout_ms` 与最后一次屏幕快照）。匹配面为 read 同款 active viewport：滚出屏幕的历史不参与匹配；等待中终端被关闭返回 `TERMINAL_UNAVAILABLE`；回合取消即中止。轮询间隔 100ms。 |
