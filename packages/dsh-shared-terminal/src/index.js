@@ -14,6 +14,7 @@ export const SUPPORTED_VERSIONS = Object.freeze(['0.2.0-rc.1', '0.2.0-rc.2', '0.
 const METHODS_LEGACY = ['shells', 'list', 'create', 'write', 'close', 'terminal']
 const METHODS_SHARED = ['shells', 'list', 'create', 'attach', 'close', 'terminal']
 const WAIT_SKIP_PATH = '/api/shared-terminal/wait/skip'
+const PUMP_STATE_PATH = '/api/shared-terminal/pump'
 const WAIT_SKIP_BODY_MAX_BYTES = 64 * 1024
 const require = createRequire(import.meta.url)
 
@@ -84,6 +85,32 @@ function createWaitSkipHandler(waitSkipRegistry) {
   }
 }
 
+// 泵附着状态路由:client 自愈只在无控制者时接管输入,避免抢走 AI 的写入
+function createPumpStateHandler(pumpFactory) {
+  return async (req, res) => {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' })
+      return
+    }
+    if (rejectCrossOrigin(req, res)) return
+    let body
+    try {
+      body = JSON.parse(await readBody(req, res))
+    } catch (error) {
+      const overLimit = error?.overLimit === true
+      sendJson(res, overLimit ? 413 : 400, { error: overLimit ? error.message : '请求体须为 JSON' })
+      return
+    }
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+    if (sessionId === '') {
+      sendJson(res, 400, { error: 'sessionId 不能为空' })
+      return
+    }
+    // 回答整条 Session 是否有泵在写:自愈宁可漏判也不抢 AI 的写入
+    sendJson(res, 200, { ok: true, attached: pumpFactory?.attachedIn(sessionId) === true })
+  }
+}
+
 // 供 apply 装配与测试捕获共用的路由注册体
 function registerWaitSkipRoutes(ctx, { waitSkipRegistry, tools, controller, defineTool, version }) {
   const webServer = ctx.get('webServer')
@@ -98,13 +125,16 @@ function registerWaitSkipRoutes(ctx, { waitSkipRegistry, tools, controller, defi
   }
   const pumpFactory = hasLegacyWrite ? undefined : createPumpFactory(controller)
   const waitSkipHandler = createWaitSkipHandler(waitSkipRegistry)
+  const pumpStateHandler = createPumpStateHandler(pumpFactory)
   ctx.effect(() => {
     const stopTool = tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool, pumpFactory, waitSkipRegistry }))
     // 形状漂移(有服务无 register)直接抛错暴露宿主 API 变更,不做静默降级
     const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: waitSkipHandler })
+    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: pumpStateHandler })
     return () => {
       stopTool?.()
       unregisterRoute?.()
+      unregisterPumpRoute?.()
       waitSkipRegistry.abortAll()
       return pumpFactory?.dispose()
     }

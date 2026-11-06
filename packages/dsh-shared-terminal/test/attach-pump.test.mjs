@@ -266,3 +266,32 @@ test('attach泵_空闲释放_再写重建附着', async () => {
   assert.deepEqual(frames.map(f => `${f.attempt}:${f.sequence}`), ['1:1', '2:1'], '每世代 sequence 从 1 起')
   factory.dispose()
 })
+
+// Given 泵的附着生命周期,When 按 id 查询,Then 只在附着活跃期间报告 attached
+test('attach泵_附着状态查询', async () => {
+  const { createPumpFactory } = await import('../src/lib/attach-pump.mjs')
+  const agent = { id: 'agent-1' }
+  const { attachment } = makeEra()
+  const factory = createPumpFactory(makeController(attachment))
+  assert.equal(factory.attachedById('agent-1', 'term-a'), false, '未写过的终端没有附着')
+  const pump = factory.for(agent, 'term-a')
+  await pump.write('echo hi')
+  assert.equal(factory.attachedById('agent-1', 'term-a'), true, '写入后附着保持')
+  pump.stop()
+  assert.equal(factory.attachedById('agent-1', 'term-a'), false, '停止后不再附着')
+  factory.dispose()
+})
+
+// Given 同一 Session 多个终端,When 按 Session 查询,Then 任一端附着即报告,且不串到其他 Session
+test('attach泵_Session级附着查询', async () => {
+  const { createPumpFactory } = await import('../src/lib/attach-pump.mjs')
+  const agent = { id: 'agent-1' }
+  const { attachment } = makeEra()
+  const factory = createPumpFactory(makeController(attachment))
+  assert.equal(factory.attachedIn('agent-1'), false)
+  await factory.for(agent, 'term-b').write('echo hi')
+  assert.equal(factory.attachedIn('agent-1'), true)
+  assert.equal(factory.attachedIn('agent-2'), false, '其他 Session 不受影响')
+  factory.dispose()
+  assert.equal(factory.attachedIn('agent-1'), false, '卸载后不再报告')
+})

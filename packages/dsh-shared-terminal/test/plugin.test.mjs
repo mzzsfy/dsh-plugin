@@ -108,14 +108,14 @@ const installedRoute = () => {
   const fixture = context(WAIT_ROUTE_CTX)
   const waitSkipRegistry = createWaitSkipRegistry()
   registerTerminalTool(fixture.ctx, { version: '0.2.1-rc.3', defineTool, waitSkipRegistry })
-  const route = fixture.routes.at(-1)
+  const route = fixture.routes.find((item) => /wait\/skip$/.test(item.path))
   assert.notEqual(route, undefined, 'skip 路由应随工具注册')
   return { fixture, route, waitSkipRegistry }
 }
 
 test('Given skip route installation, When registering and disposing, Then the route joins and leaves the webServer', () => {
   const { fixture, route } = installedRoute()
-  assert.equal(fixture.routes.length, 1)
+  assert.equal(fixture.routes.length, 2)
   assert.match(route.path, /wait\/skip$/)
   assert.equal(typeof route.handler, 'function')
   fixture.dispose()
@@ -190,4 +190,47 @@ test('Given an oversized body, When POSTing skip, Then the route answers 413 and
   assert.match(res.body, /超过上限/)
   assert.equal(req.paused, true, '超限须暂停流入')
   assert.equal(req.destroyed, true, 'finish 后收尾销毁')
+})
+
+// ── 泵附着状态路由:client 自愈据此避免抢走 AI 的写入 ─────────────────
+
+const ATTACH_ROUTE_CTX = { owners: new Map(), terminal() {}, shells() {}, list() {}, create() {}, attach() {}, close() {} }
+
+const pumpRoute = () => {
+  const fixture = context(ATTACH_ROUTE_CTX)
+  registerTerminalTool(fixture.ctx, { version: '0.2.2-rc.1', defineTool })
+  const route = fixture.routes.find((item) => /\/pump$/.test(item.path))
+  assert.notEqual(route, undefined, '泵状态路由应随工具注册')
+  return { fixture, route }
+}
+
+test('Given no active pump, When querying pump state, Then the route reports no controller', async () => {
+  const { fixture, route } = pumpRoute()
+  const res = stubRes()
+  const req = stubReq({ sessionId: 'session-a' })
+  const handled = route.handler(req, res)
+  req.emit()
+  await handled
+  assert.deepEqual(JSON.parse(res.body), { ok: true, attached: false })
+  fixture.dispose()
+})
+
+test('Given malformed, cross-origin or wrong-method pump queries, When handled, Then they are rejected', async () => {
+  const { fixture, route } = pumpRoute()
+  const cross = stubRes()
+  const crossReq = stubReq({ sessionId: 's', terminalId: 't' }, { origin: 'http://evil.example', host: 'localhost:3080' })
+  const crossHandled = route.handler(crossReq, cross)
+  crossReq.emit()
+  await crossHandled
+  assert.equal(cross.statusCode, 403)
+  const empty = stubRes()
+  const emptyReq = stubReq({ sessionId: '', terminalId: 't' })
+  const emptyHandled = route.handler(emptyReq, empty)
+  emptyReq.emit()
+  await emptyHandled
+  assert.equal(empty.statusCode, 400)
+  const wrongMethod = stubRes()
+  await route.handler({ ...stubReq({ sessionId: 's', terminalId: 't' }), method: 'GET' }, wrongMethod)
+  assert.equal(wrongMethod.statusCode, 405)
+  fixture.dispose()
 })

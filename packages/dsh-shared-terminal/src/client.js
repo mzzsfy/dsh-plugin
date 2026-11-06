@@ -298,6 +298,73 @@ window.__ModuleLoader__.load({
 
     const openedCalls = new Set()
 
+    // ── 只读终端自愈 ─────────────────────────────────────────────────────
+    // 宿主在附着结束时只清 controller,不把 writable 交还 UI(宿主按 controller===follower 判定);
+    // UI 只读时跳过 fitScreen,窗口或侧栏变矮后底部被 overflow:hidden 裁掉且不可滚。
+    // 无控制者时点宿主「接管输入」,UI 重新附着后由宿主自己按容器重算几何。
+    const HEAL_INTERVAL_MS = 2 * 1000
+    const HEAL_COOLDOWN_MS = 5 * 1000
+    const HEAL_OVERFLOW_PX = 2
+    // 查询不能拖住巡检:挂起的请求会让后续轮次被 running 守卫全部跳过
+    const HEAL_QUERY_TIMEOUT_MS = 3 * 1000
+
+    // 只读状态栏会把 .xterm 挤矮,那部分不算内容溢出:否则每次 AI 写完都会白抢一次控制权
+    const clipped = (root) => {
+      const content = root.querySelector('.xterm-screen')?.getBoundingClientRect()
+      const box = root.querySelector('.xterm')?.getBoundingClientRect()
+      if (content === undefined || box === undefined) return false
+      const status = root.querySelector('[role="status"]')?.getBoundingClientRect().height ?? 0
+      return content.height - box.height - status > HEAL_OVERFLOW_PX || content.width - box.width > HEAL_OVERFLOW_PX
+    }
+
+    const takeoverButton = (root) => root.querySelector('[role="status"]')?.querySelector('button')
+
+    // 隐藏 tab 的 .xterm 没有几何,不能算裁切;附着力按屏上 Session 汇总判断,
+    // 只要该 Session 还有泵在写就不动,宁可漏自愈也不抢 AI 的写入
+    const visibleRoot = (root) => typeof root.clientHeight === 'number' && root.clientHeight > 0
+
+    // 查询失败按"仍在附着"处理:宁可不自愈,也不抢走 AI 的写入
+    const pumpAttached = async (sessionId) => {
+      const response = await fetch('/api/shared-terminal/pump', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+        signal: AbortSignal.timeout(HEAL_QUERY_TIMEOUT_MS),
+      })
+      if (!response.ok) return true
+      const state = await response.json()
+      return state?.attached !== false
+    }
+
+    function healReadOnly(ctx) {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function' || typeof setInterval !== 'function') return () => {}
+      const healed = new Map()
+      let running = false
+      // 每轮重扫 DOM:宿主 tab 可随时增删,缓存 root 会拿到已卸载的节点
+      const tick = async () => {
+        if (running) return
+        running = true
+        try {
+          for (const root of document.querySelectorAll('[data-sidebar-terminal]')) {
+            const button = takeoverButton(root)
+            if (button === undefined || !visibleRoot(root) || !clipped(root)) continue
+            const sessionId = ctx.sidebarRight.mounted?.getSnapshot()
+            if (typeof sessionId !== 'string' || healed.get(sessionId) > Date.now() - HEAL_COOLDOWN_MS) continue
+            // 泵附着中不抢控制权:那会让 AI 的下一次写入落空
+            if (await pumpAttached(sessionId)) continue
+            healed.set(sessionId, Date.now())
+            button.click()
+          }
+        } catch {
+          // 自愈是宿主行为的兜底,失败不得影响渲染
+        } finally {
+          running = false
+        }
+      }
+      const timer = setInterval(tick, HEAL_INTERVAL_MS)
+      return () => clearInterval(timer)
+    }
+
     return {
       inject: ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'locale'],
       apply(ctx) {
@@ -326,6 +393,7 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style)
           return () => style.remove()
         }, 'shared-terminal styles')
+        ctx.effect(() => healReadOnly(ctx), 'shared-terminal read-only healing')
       },
     }
   },

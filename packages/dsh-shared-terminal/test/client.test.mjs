@@ -5,9 +5,9 @@ import vm from 'node:vm'
 import { setImmediate as settled } from 'node:timers/promises'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
-function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }) } = {}) {
+function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [] } = {}) {
   let definition, component
-  const effects = [], calls = [], seen = [], refs = []
+  const effects = [], calls = [], seen = [], refs = [], timers = []
   let index = 0, declared = false, active = true
   const React = {
     createElement(type, props, ...children) {
@@ -23,13 +23,24 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     openTabIn(...args) { calls.push(args) },
     openResourceIn(...args) { calls.push(['reveal', ...args]) },
     openTabs: { getSnapshot: () => tabs },
+    mounted: { getSnapshot: () => 'session-a' },
     tabDomain: { occurrence: () => ({ navigation: { getSnapshot: () => ({ params }) } }) },
   }
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
+  // 自愈只扫 [data-sidebar-terminal];其余选择器由各用例的节点桩承担
+  const documentStub = {
+    createElement: () => ({ setAttribute: () => {}, remove: () => {}, style: {}, textContent: '' }),
+    head: { appendChild: () => {} },
+    querySelectorAll: (selector) => (selector === '[data-sidebar-terminal]' ? roots : []),
+  }
   new vm.Script(source).runInNewContext({
     AbortController,
+    AbortSignal,
+    Date,
     fetch: fetchImpl,
-    document: { createElement: () => ({ setAttribute: () => {}, remove: () => {}, style: {}, textContent: '' }), head: { appendChild: () => {} } },
+    document: documentStub,
+    setInterval: (fn) => { timers.push(fn); return timers.length },
+    clearInterval: () => {},
     window: { __ModuleLoader__: { load(value) { definition = value } } },
   })
   assert.equal(definition.id, '@mzzsfy/dsh-shared-terminal')
@@ -44,6 +55,7 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     calls, seen, plugin,
     render(props) { index = 0; return component(props) },
     async flush() { const pending = effects.splice(0).map((effect) => effect()); await settled(); return pending },
+    async heal() { for (const timer of timers) await timer() },
   }
 }
 test('Given an existing terminal tab, When reopening result, Then it reveals the same tab with identity intact', async () => {
@@ -201,4 +213,84 @@ test('Given a running non-wait tool, When rendering, Then no skip button appears
   const app = fixture()
   const tree = app.render({ phase: 'start', sessionId: 'session-a', callId: 'call-read', toolName: 'terminal', block: { argsRaw: '{"action":"read","terminal_id":"term-a"}' } })
   assert.ok(!JSON.stringify(tree).includes('跳过等待'))
+})
+
+// ── 只读终端自愈:泵释放后宿主不归还 writable,只读界面不重算几何 ─────────
+
+const fakeRoot = ({ clicks, contentHeight = 800, readonly = true, visible = true, statusHeight = 40 } = { clicks: [] }) => ({
+  clientHeight: visible ? 500 : 0,
+  querySelector(selector) {
+    if (selector === '[role="status"]') {
+      if (!readonly) return null
+      return {
+        getBoundingClientRect: () => ({ width: 400, height: statusHeight }),
+        querySelector: (inner) => (inner === 'button' ? { click: () => clicks.push('takeover') } : null),
+      }
+    }
+    if (selector === '.xterm-screen') return { getBoundingClientRect: () => ({ width: 400, height: contentHeight }) }
+    if (selector === '.xterm') return { getBoundingClientRect: () => ({ width: 400, height: 300 }) }
+    return null
+  },
+})
+
+const healingFixture = (options) => fixture({
+  tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'content' }],
+  params: { terminalId: 'term-a' },
+  fetchImpl: options.fetchImpl ?? (async () => ({ ok: true, json: async () => ({ ok: true, attached: false }) })),
+  roots: options.roots ?? [],
+})
+
+test('Given a read-only clipped terminal without controller, When healing ticks, Then it takes input control once', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })] })
+  await app.heal()
+  assert.deepEqual(clicks, ['takeover'])
+  await app.heal()
+  assert.deepEqual(clicks, ['takeover'], '冷却窗口内不得重复抢控制权')
+})
+
+test('Given the pump still attached, When healing ticks, Then the user view is left alone', async () => {
+  const clicks = []
+  const app = healingFixture({
+    roots: [fakeRoot({ clicks })],
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, attached: true }) }),
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given content fits the container, When healing ticks, Then no takeover happens', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, contentHeight: 300 })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given only the read-only status bar shortens the box, When healing ticks, Then it is not treated as clipping', async () => {
+  const clicks = []
+  // 311 只比容器多 11px,恰好不足状态栏高度:这是状态栏占位,不是用户看不全
+  const app = healingFixture({ roots: [fakeRoot({ clicks, contentHeight: 311 })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the terminal is not read-only, When healing ticks, Then the status button is never clicked', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, readonly: false })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the pump state route is unavailable, When healing ticks, Then no takeover is attempted', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })], fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }) })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the terminal tab is hidden, When healing ticks, Then it is skipped', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, visible: false })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
 })

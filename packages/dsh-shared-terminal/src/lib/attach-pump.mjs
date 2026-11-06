@@ -137,6 +137,11 @@ export class AttachPump {
     this.#halt(Object.assign(new Error('Terminal pump stopped'), { code: 'terminal/stopped' }))
   }
 
+  // 附着流是否活跃:冷却释放与断开后为 false,供宿主 UI 判断能否安全接管
+  get attached() {
+    return this.#reading && !this.#disposed
+  }
+
   dispose() {
     this.#disposed = true
     this.#halt(disposedError())
@@ -160,6 +165,15 @@ export function createPumpFactory(controller) {
     evict(agent, id) {
       pumps.get(key(agent, id))?.dispose()
       pumps.delete(key(agent, id))
+    },
+    attachedById(agentId, id) {
+      return pumps.get(`${agentId}:${id}`)?.attached === true
+    },
+    attachedIn(agentId) {
+      for (const [key, pump] of pumps) {
+        if (key.startsWith(`${agentId}:`) && pump.attached) return true
+      }
+      return false
     },
     dispose() {
       disposed = true
