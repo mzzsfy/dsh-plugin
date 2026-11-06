@@ -31,6 +31,10 @@
     "test": "node --experimental-test-module-mocks --import ./test/_mocks.common-tools.mjs --test \"test/*.test.mjs\"",
     "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
