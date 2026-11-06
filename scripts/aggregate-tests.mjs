@@ -220,7 +220,7 @@ export function parseArgs(argv) {
   return args
 }
 
-function runUnit(unit, logPath) {
+function runUnit(unit, logPath, sandboxHome) {
   return new Promise(resolve => {
     const out = createWriteStream(logPath)
     out.on('error', error => {
@@ -231,7 +231,14 @@ function runUnit(unit, logPath) {
         console.error(`${UNIT_ERROR_ANCHOR} 日志流留痕失败: ${error}`)
       }
     })
-    const child = spawn(unit.command[0], unit.command.slice(1), {cwd: unit.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true})
+    // 单元一律在一次性 home 下运行:插件数据目录从 DSH_HOME(或 homedir)派生,
+    // 继承会话环境会把测试写入落进宿主真实目录(实例化的写路由用例尤甚)
+    const child = spawn(unit.command[0], unit.command.slice(1), {
+      cwd: unit.cwd,
+      env: {...process.env, DSH_HOME: sandboxHome, USERPROFILE: sandboxHome, HOME: sandboxHome},
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
     // 经 out 写入保持与管道数据同一写入方,顺序一致
     child.on('error', error => out.write(`${UNIT_ERROR_ANCHOR} spawn: ${error}\n`))
     // 双源汇入同一文件流,end 统一由 close 收口,防源间 end 竞争
@@ -250,6 +257,8 @@ const totalFailures = failed => [...failed.values()].reduce((sum, entry) => sum 
 
 export async function runUnits({rounds, logDir, summaryPath, log = console.log, units, retainLogs = false}) {
   const failed = new Map()
+  // 隔离 home:全部单元共用一个空 home,运行结束回收
+  const sandboxHome = mkdtempSync(join(tmpdir(), 'aggregate-home-'))
   for (let round = 1; round <= rounds; round++) {
     log(`::group::第 ${round}/${rounds} 轮`)
     // 本轮失败单元个数(事件计数,同一单元连败多轮每轮各计 1)
@@ -259,7 +268,7 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
     const skipDetail = []
     for (const unit of units) {
       const logPath = roundLogPath(logDir, unit.name, round)
-      if (await runUnit(unit, logPath)) {
+      if (await runUnit(unit, logPath, sandboxHome)) {
         const skipCount = unitSkipCount(readFileSync(logPath, 'utf8'))
         roundSkips += skipCount
         if (skipCount > 0) skipDetail.push(`${unit.name}(${skipCount})`)
@@ -316,6 +325,7 @@ export async function runUnits({rounds, logDir, summaryPath, log = console.log, 
       '',
     ].join('\n'))
   }
+  rmSync(sandboxHome, {recursive: true, force: true})
   return {failures: totalFailures(failed), failedUnits: [...failed.entries()].map(([unitName, entry]) => ({name: unitName, rounds: entry.rounds}))}
 }
 
