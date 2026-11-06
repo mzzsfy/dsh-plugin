@@ -421,6 +421,8 @@ window.__ModuleLoader__.load({
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
+    const DEFAULT_GUIDES = { preClose: true, cost: true, highLow: false }
+    const GUIDE_ITEMS = [['preClose', '昨收'], ['cost', '成本价'], ['highLow', '区间最高/最低']]
     const VENDOR_URL = '/plugins-vendor/dsh-stock-assistant/lightweight-charts.standalone.production.js'
     const MA_WINDOWS = [5, 10, 20, 60]
     // ensureLwc: 模块级 promise 单例;script 已存在等 onload,否则注入 vendor URL;失败统一文案 reject。
@@ -462,7 +464,7 @@ window.__ModuleLoader__.load({
       // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
       const pendingRef = React.useRef(null)
       // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
-      const preCloseLineRef = React.useRef(null), costLineRef = React.useRef(null)
+      const preCloseLineRef = React.useRef(null), costLineRef = React.useRef(null), highLineRef = React.useRef(null), lowLineRef = React.useRef(null)
       function drawLine(ref, options) {
         const series = mainRef.current
         if (!series) return
@@ -485,7 +487,6 @@ window.__ModuleLoader__.load({
         const points = result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.close }))
         mainRef.current.setData(points)
         avgRef.current.setData(result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.avg ?? c.close })))
-        drawLine(preCloseLineRef, result.preClose != null ? { price: result.preClose, color: themeOf().crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
       }
       // 分时用 Area、K线用 Candlestick, 同一 chart 上换形态就是删旧 series 建新 series;
       // 时间轴允许 Unix 秒与业务日期混用, 所以不必重建整个实例。
@@ -493,6 +494,16 @@ window.__ModuleLoader__.load({
         return { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true }
       }
       const wantTrend = period === 'trend'
+      const guides = state.data?.control.preferences?.guideLines || DEFAULT_GUIDES
+      // 图例: 均线与成本的具体数值集中在这一行, 图面只留曲线本身
+      const legend = React.useMemo(() => {
+        const candles = kline?.candles || []
+        if (!candles.length) return null
+        const last = candles[candles.length - 1]
+        if (wantTrend) return [['均价', last.avg ?? last.close]]
+        return MA_WINDOWS.map((window, index) => [`MA${window}`, computeMA(candles, window).at(-1)?.value])
+      }, [kline?.candles, wantTrend])
+      const costPct = item.cost && legend?.[0] ? (() => { const last = Number(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
       function ensureSeries(LWC) {
         const chart = chartRef.current
         if (!chart || !LWC) return
@@ -500,7 +511,7 @@ window.__ModuleLoader__.load({
         for (const s of [mainRef.current, avgRef.current, volRef.current, ...maRef.current]) if (s) chart.removeSeries(s)
         mainRef.current = avgRef.current = volRef.current = null; maRef.current = []
         // 旧 series 上的参考线随 series 一起销毁, 引用要清掉
-        preCloseLineRef.current = null; costLineRef.current = null
+        preCloseLineRef.current = costLineRef.current = highLineRef.current = lowLineRef.current = null
         const theme = themeOf()
         if (wantTrend) {
           mainRef.current = chart.addSeries(LWC.AreaSeries, { topColor: theme.up + '4d', bottomColor: theme.up + '07', lineColor: theme.up, lineWidth: 1 }, 0)
@@ -544,8 +555,13 @@ window.__ModuleLoader__.load({
           timeScale: { timeVisible: wantTrend, tickMarkFormatter: tickMark },
         })
         wantTrend ? fillTrendData(result) : fillCandleData(result)
-        // 成本价是持仓视角的基准线, 设了就要在图上看得见
-        drawLine(costLineRef, item.cost ? { price: item.cost, color: themeOf().cost, lineStyle: 0, lineWidth: 1, title: `成本 ${item.cost}` } : null)
+        // 辅助线统一在这里画: 全部走 createPriceLine, 具体数值看上方图例, 图上只留参考位置
+        const guides = state.data?.control.preferences?.guideLines || DEFAULT_GUIDES, palette = themeOf()
+        drawLine(preCloseLineRef, guides.preClose && result.preClose != null ? { price: result.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
+        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
+        const highs = result.candles.map(c => Number(c.high)).filter(Number.isFinite), lows = result.candles.map(c => Number(c.low)).filter(Number.isFinite)
+        drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
+        drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
         // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上
         chartRef.current.timeScale().fitContent()
       }
@@ -587,13 +603,26 @@ window.__ModuleLoader__.load({
         runtime.loadKline(item.id, period).then(result => { if (!dead) maybeFill(result) }).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
         return () => { dead = true }
       }, [item.id, period])
-      // 成本价单独变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
+      // 成本/辅助线变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
       React.useEffect(() => {
         if (!mainRef.current) return
-        drawLine(costLineRef, item.cost ? { price: item.cost, color: themeOf().cost, lineStyle: 0, lineWidth: 1, title: `成本 ${item.cost}` } : null)
-      }, [item.cost, kline.candles])
+        const guides = state.data?.control.preferences?.guideLines || DEFAULT_GUIDES, palette = themeOf()
+        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
+        const candles = kline?.candles || []
+        const highs = candles.map(c => Number(c.high)).filter(Number.isFinite), lows = candles.map(c => Number(c.low)).filter(Number.isFinite)
+        drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
+        drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
+        drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
+      }, [item.cost, kline.candles, state.data?.control.preferences?.guideLines])
       return h('div', { className: 'ssb-kline' },
-        h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻'), h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
+        h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻'),
+          h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-expanded': !!state.view.guideOpen, onClick: () => runtime.updateView({ guideOpen: !state.view.guideOpen }) }, '辅助线'),
+            state.view.guideOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', left: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '150px' }, role: 'menu' },
+              ...GUIDE_ITEMS.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => quiet(() => runtime.preferences({ guideLines: { ...guides, [key]: !guides[key] } }))() }))) : null),
+          h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
+        legend ? h('div', { className: 'ssb-kline-legend' },
+          ...legend.map(([label, value]) => h('span', { key: label, className: 'ssb-legend-item' }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : Number(value).toFixed(item.priceScale ?? 2))),
+          item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
         kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
@@ -665,7 +694,16 @@ window.__ModuleLoader__.load({
       // 成本块: 有成本显盈亏三元组, 表单可设/清成本; 非法输入就地报错不静默(B2), 草稿绑定 detailId 切换即清(B3 由三处 open 清理保证)
       const lastN = Number(q?.last)
       const costPl = item.cost && lastN ? { amount: Number((lastN - item.cost).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - item.cost) / item.cost * 100).toFixed(1)) } : null
-      const costForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.costDraft?.trim(); if (!raw) { quiet(() => runtime.mutate('cost', { securityId: item.id, cost: null }))(); return } const num = Number(raw); if (!Number.isFinite(num) || num <= 0) { runtime.updateView({ costError: '成本价需为正数' }); return } quiet(() => runtime.mutate('cost', { securityId: item.id, cost: num }))() } }, h('label', null, '成本价', h('input', { value: view.costDraft ?? (item.cost ?? ''), inputMode: 'decimal', onChange: e => runtime.updateView({ costDraft: e.target.value, costError: '' }), placeholder: '留空清除' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存成本'), view.costError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.costError) : null) : null
+      // 没动过草稿就不写: 否则"打开详情直接点保存"会把已有成本清掉
+      const costForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => {
+        e.preventDefault()
+        if (view.costDraft === null || view.costDraft === undefined) return
+        const raw = String(view.costDraft).trim()
+        if (!raw) { quiet(() => runtime.mutate('cost', { securityId: item.id, cost: null }))(); return }
+        const num = Number(raw)
+        if (!Number.isFinite(num) || num <= 0) { runtime.updateView({ costError: '成本价需为正数' }); return }
+        quiet(() => runtime.mutate('cost', { securityId: item.id, cost: num }))()
+      } }, h('label', null, '成本价', h('input', { value: view.costDraft ?? (item.cost ?? ''), inputMode: 'decimal', onChange: e => runtime.updateView({ costDraft: e.target.value, costError: '' }), placeholder: '留空清除' })), h('div', { style: { display: 'flex', gap: '8px' } }, h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存成本'), item.cost ? h(Button, { danger: true, disabled: state.busy.write, onClick: quiet(() => { runtime.updateView({ costDraft: null }); return runtime.mutate('cost', { securityId: item.id, cost: null }) }) }, '清除成本') : null), view.costError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.costError) : null) : null
       // 分组表单(B1): 单标签, 空=移出分组; 草稿 view.groupDraft
       const groupForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.groupDraft?.trim() ?? item.group; if ([...raw].length > 12) { runtime.updateView({ groupError: '分组名最多12字' }); return } quiet(() => runtime.mutate('group', { securityIds: [item.id], group: raw }))() } }, h('label', null, '设分组', h('input', { value: view.groupDraft ?? (item.group || ''), maxLength: 12, onChange: e => runtime.updateView({ groupDraft: e.target.value, groupError: '' }), placeholder: '留空移出分组' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存分组'), view.groupError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.groupError) : null) : null
       const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本 ${item.cost}`)) : null
@@ -1065,7 +1103,12 @@ window.__ModuleLoader__.load({
 .ssb-market-head { display:grid; grid-template-columns:minmax(88px,auto) 52px minmax(0,1fr) minmax(72px,auto) 42px; gap:12px; padding:0 4px 6px; font-size:11px; color:var(--ssb-text-dim); border-bottom:1px solid var(--ssb-border); }
 .ssb-section-foot { display:grid; gap:6px; padding:12px 0; }.ssb-section-foot p { margin:0; }
 .ssb-route-advanced { display:grid; gap:8px; padding-top:8px; border-top:1px solid var(--ssb-border); }
-.ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-meta { margin-left:auto; color:var(--ssb-text-sub); font-size:12px; white-space:nowrap; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
+.ssb-kline { margin:16px 0; }.ssb-kline-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }.ssb-kline-meta { margin-left:auto; color:var(--ssb-text-sub); font-size:12px; white-space:nowrap; }
+/* 图例: 均线/成本的数值只在这里出现, 图面不铺文字标签 */
+.ssb-kline-legend { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; margin:0 0 8px; font-size:11px; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
+.ssb-legend-label { color:var(--ssb-text-dim); margin-right:4px; }
+.ssb-legend-cost { color:var(--ssb-text); }
+.ssb-legend-pct { margin-left:4px; }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
 .ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }.ssb-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
