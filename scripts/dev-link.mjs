@@ -30,16 +30,19 @@
  *   - junction 只覆盖 node_modules 物理目录,dsh bundle 加载走 node_modules
  *     realpath,天然读到仓库工作副本;同时本脚本在 home 补丁层维护 hmr 覆盖行,
  *     watch 仓库 packages —— host 半区保存即热重载,client 半区刷新页面即生效。
- *   - 包内 dependencies 的外部依赖(非 @mzzsfy)由本脚本自动安装(--omit=dev --omit=peer):
- *     工作副本经 junction realpath 解析,依赖须物理存在于包内 node_modules;devDeps 不装
- *     不校验(devDeps 落包内会截胡宿主 API 解析链,构建/测试态依赖走 install-externals.mjs),
- *     已装按 node_modules/<名>/package.json 物理存在核验,重跑幂等
+ *   - 包内 dependencies 的外部依赖(非 @mzzsfy)由本脚本补进**仓库根解析桥**:
+ *     工作副本经 junction realpath 解析,Node 从仓库路径逐级向上找 node_modules,根
+ *     node_modules 是唯一稳定锚点;包内 node_modules 处于 profile pnpm 与插件安装流程的
+ *     重建/剪除路径上,不得作为依赖来源。根桥只补不覆盖(不跑 npm install 重排既有
+ *     pnpm/npm 布局与手工解析桥链接),devDeps 不装不校验(构建/测试态依赖走
+ *     install-externals.mjs);根 package.json 同步声明全部外部依赖,供 CI 与新 clone 一次装齐
  *   - pnpm install(依赖图变化)与 dsh plugin add 会重建 node_modules:之后必须重跑本脚本;
  *     增量 install(Already up to date)按实测不动 junction,重跑幂等可作兜底。
  *   - link 期间 dsh-plugin list 显示的是依赖行 semver,不是工作副本版本。
  */
 import {spawnSync} from 'node:child_process'
-import {existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync} from 'node:fs'
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
 import {dirname, join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {judgeHostMin} from './compare-version.mjs'
@@ -358,42 +361,92 @@ function pnpmInstall(allowFresh) {
 }
 
 /**
- * 包内外部依赖自动安装(口径 = dependencies):
- * dependencies 含非 @mzzsfy 依赖的包,包内 npm install --omit=dev --omit=peer,
- * 供工作副本(junction realpath)的 Node ESM 逐级向上解析命中包内 node_modules。
- * devDependencies 不装不校验:devDeps 的 @deepseek-ai 钉版若落包内会截胡宿主 API 解析链,
- * 废掉"本体升级立即生效"模型;构建/测试态依赖由 scripts/install-externals.mjs 承载。
- * 已装核验 = 逐依赖 node_modules/<名>/package.json 物理存在——不用 require.resolve:
- * ESM-only exports(lightweight-charts 等)无 require 条件恒报错,解析式探测失明;
- * 目录形态核验覆盖整包消失的半装态,与 npm 安装布局同构。失败清残留再计入失败,防半装态固化。
+ * 根解析桥的外部依赖口径(= dependencies,devDeps 归 install-externals):
+ * 同一依赖在多包出现不同 range 时取首个声明,版本漂移由发布前对齐承担。
  */
-function installPackageDeps(name) {
-  const pkgDir = join(repoRoot, 'packages', name)
-  const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
-  const externalDeps = Object.keys(manifest.dependencies ?? {}).filter((n) => !n.startsWith(SCOPE))
-  if (externalDeps.length === 0) return true
-  if (existsSync(join(pkgDir, 'node_modules'))) {
-    // 摘要比对(I05):目录存在即跳过曾固化半装态——逐外部依赖核验包清单文件存在,
-    // 全部命中才跳过,任一缺失重装修复
-    const missing = externalDeps.filter((dep) => !existsSync(join(pkgDir, 'node_modules', dep, 'package.json')))
-    if (missing.length === 0) {
-      console.log(`OK   ${name}: 包内依赖已存在,跳过安装`)
-      return true
+function externalDeps(packages) {
+  const wanted = new Map()
+  for (const dir of packages) {
+    const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages', dir, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
+    for (const [dep, range] of Object.entries(manifest.dependencies ?? {})) {
+      if (dep.startsWith(SCOPE) || wanted.has(dep)) continue
+      wanted.set(dep, range)
     }
-    console.log(`REPAIR ${name}: 包内依赖缺失 ${missing.join(', ')},重装(--omit=dev,包内已有 devDeps 将被剪除,测试态依赖缺失时重跑 scripts/install-externals.mjs 恢复)`)
   }
-  console.log(`$ 包内依赖安装 ${name}(npm install --omit=dev --omit=peer)`)
-  const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
-    cwd: pkgDir, encoding: 'utf8', shell: true,
-  })
-  if (r.status !== 0) {
-    // 失败必不留可被跳过的残留:半装态 node_modules 会让后续重跑误判"已存在"而固化坏态
-    rmSync(join(pkgDir, 'node_modules'), {recursive: true, force: true})
-    console.error(`FAIL ${name}: 包内依赖安装失败\n${r.stderr}`)
+  return wanted
+}
+
+/**
+ * 仓库根解析桥:工作副本外部依赖的唯一稳定来源。
+ * junction realpath 后 Node 自仓库路径逐级向上找 node_modules,根 node_modules 命中;
+ * 包内 node_modules 处于 profile pnpm 与插件安装流程的重建/剪除路径上,不能承担解析。
+ * 根 node_modules 混存 pnpm/npm 布局与手工解析桥链接,一律不跑 npm install 重排:
+ * 缺失依赖装进临时目录后按"只补不覆盖"并入,既有布局保持原样。
+ * 临时目录预置包清单:npm 找不到 package.json 时会向上逃逸到祖先目录安装,污染无关工程。
+ */
+function ensureRootBridge(packages) {
+  const rootModules = join(repoRoot, 'node_modules')
+  const wanted = externalDeps(packages)
+  const missing = [...wanted].filter(([dep]) => !existsSync(join(rootModules, dep, 'package.json')))
+  if (missing.length === 0) {
+    console.log(`OK   根解析桥: ${wanted.size} 个外部依赖齐备`)
+    return true
+  }
+  console.log(`REPAIR 根解析桥: 缺失 ${missing.map(([dep]) => dep).join(', ')},临时安装后并入`)
+  const staging = mkdtempSync(join(tmpdir(), 'dsh-root-bridge-'))
+  try {
+    writeFileSync(join(staging, 'package.json'), JSON.stringify({name: 'dsh-root-bridge', private: true, version: '0.0.0'}))
+    const specs = missing.map(([dep, range]) => `${dep}@${range}`)
+    // Windows 经 cmd 执行:复合 range 的空格与 || 会被当作命令分隔符,逐项加引号
+    const args = specs.map((spec) => (process.platform === 'win32' ? `"${spec}"` : spec))
+    const r = spawnSync(npmCmd(), ['install', '--omit=dev', '--omit=peer', '--no-save', '--no-package-lock', '--no-audit', '--no-fund', '--legacy-peer-deps', ...args], {cwd: staging, encoding: 'utf8', shell: true})
+    if (r.status !== 0) {
+      console.error(`FAIL 根解析桥: 外部依赖安装失败\n${r.stderr}`)
+      return false
+    }
+    try {
+      mergeModules(join(staging, 'node_modules'), rootModules)
+    } catch (error) {
+      console.error(`FAIL 根解析桥: 并入失败,根 node_modules 可能残留临时目录,处理后重跑\n${error?.message ?? error}`)
+      return false
+    }
+  } finally {
+    rmSync(staging, {recursive: true, force: true})
+  }
+  const stillMissing = [...wanted].filter(([dep]) => !existsSync(join(rootModules, dep, 'package.json')))
+  if (stillMissing.length > 0) {
+    console.error(`FAIL 根解析桥: 并入后仍缺 ${stillMissing.map(([dep]) => dep).join(', ')}`)
     return false
   }
-  console.log(`OK   ${name}: 包内依赖安装完成`)
+  console.log(`OK   根解析桥: 补齐 ${missing.map(([dep]) => dep).join(', ')}`)
   return true
+}
+
+/**
+ * 只补不覆盖:目标已存在即跳过,scope 目录逐项判断。
+ * 单包先复制到同目录临时名再 rename,半途失败只留临时名,不会让重跑误判"已存在"。
+ * 点开头条目(.bin、.pnpm、.package-lock.json 等元数据)不参与包解析,一律不并入。
+ */
+function mergeModules(from, into) {
+  for (const entry of readdirSync(from, {withFileTypes: true})) {
+    if (entry.name.startsWith('.')) continue
+    const source = join(from, entry.name)
+    const dest = join(into, entry.name)
+    if (entry.name.startsWith('@')) {
+      mkdirSync(dest, {recursive: true})
+      mergeModules(source, dest)
+      continue
+    }
+    if (existsSync(dest)) continue
+    const pending = `${dest}.dsh-tmp-${process.pid}`
+    try {
+      cpSync(source, pending, {recursive: true})
+      renameSync(pending, dest)
+    } catch (error) {
+      rmSync(pending, {recursive: true, force: true})
+      throw error
+    }
+  }
 }
 
 function junctionPath(name) {
@@ -433,6 +486,12 @@ function verifyAll(packages, latests, unlink, scope) {
   const manifest = readProfileManifest()
   const bundles = manifest.dsh?.profile?.bundles ?? []
   const failures = []
+  // 依赖供给属于终态:根桥缺依赖时工作副本即使挂上也只在运行期 ERR_MODULE_NOT_FOUND
+  if (!unlink) {
+    for (const [dep] of externalDeps(packages)) {
+      if (!existsSync(join(repoRoot, 'node_modules', dep, 'package.json'))) failures.push(`根解析桥: 缺 ${dep}(工作副本运行态会 ERR_MODULE_NOT_FOUND)`)
+    }
+  }
   for (const dir of packages) {
     const key = SCOPE + dir
     // 单包模式只校验指定包,其余包终态不随之校验
@@ -568,16 +627,12 @@ if (unlink) {
   }
 } else {
   syncDevHmr(true)
-  let installFailures = 0
-  for (const name of usable) {
-    if (!installPackageDeps(name)) installFailures++
-    mountJunction(name)
-  }
-  if (installFailures) {
-    console.error(`FAIL ${installFailures} 个包包内依赖安装失败,host 工作副本启动会 ERR_MODULE_NOT_FOUND`)
-    process.exitCode = 1
-  }
+  // 根桥先于挂载:挂上 junction 的那一刻,工作副本的外部依赖解析就必须已经可达;
+  // 根桥不全即不挂载,终态停在"依赖未就绪"而不是"看起来 link 了"
+  const bridgeReady = ensureRootBridge(packages)
+  if (bridgeReady) for (const name of usable) mountJunction(name)
+  else process.exitCode = 1
 }
 
 verifyAll(packages, latests, unlink, usable)
-console.log(`\n提醒: 依赖图变化的 pnpm install / dsh plugin add 之后须重跑本脚本;增量 install 不动 junction,重跑幂等。`)
+console.log(`\n提醒: 依赖图变化的 pnpm install / dsh plugin add 之后须重跑本脚本;根 node_modules 被重建(根目录 npm/pnpm install)后同样须重跑——包内 node_modules 已不参与外部依赖解析。增量 install 不动 junction,重跑幂等。`)
