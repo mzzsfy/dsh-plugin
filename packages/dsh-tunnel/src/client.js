@@ -10,21 +10,32 @@ const PANEL_LABEL = '穿透隧道'
 const TAB_ID = 'tunnel:board'
 const TAB_ORDER = 47
 const COPY_FLASH_MS = 1200
+const REQUEST_TIMEOUT_MS = 15 * 1000
 const PORT_MIN = 1
 const PORT_MAX = 65535
+const PATH_PREFIX = '/p/'
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
+const NAME_HAS_LETTER_RE = /[a-z]/
 const ENTRY_PATH = 'path'
 const ENTRY_SUBDOMAIN = 'subdomain'
+const MODE_PANEL = 'panel'
+const MODE_TAB = 'tab'
 const ENTRY_LABELS = { path: '路径', subdomain: '子域名' }
-const EMPTY_ROW = { name: '', targetPort: '', entry: ENTRY_PATH, wsText: '' }
+const EMPTY_ROW = { name: '', targetPort: '', entry: ENTRY_PATH }
+const LOCAL_HOST_RE = /^(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])$/i
 
-// access 规范形态:子域名按当前 Host 派生 <name>.<当前域>, 泛解析域名场景自动成立
-function accessUrlOf(row) {
-  const host = window.location.host
-  const target = row.entry === ENTRY_SUBDOMAIN
-    ? row.name + '.' + host
-    : host + '/p/' + row.name
-  return window.location.protocol + '//' + target + '/'
+// 访问地址派生: 路径模式走同源前缀; 子域名模式在 IP/localhost 入口下只能退回
+// <name>.localhost(仅本机可解析, 浏览器/系统普遍支持 *.localhost 回环)
+function accessUrlOf(row, location) {
+  if (row.entry !== ENTRY_SUBDOMAIN) return location.origin + PATH_PREFIX + row.name + '/'
+  const port = location.port === '' ? '' : ':' + location.port
+  const base = LOCAL_HOST_RE.test(location.hostname) ? 'localhost' : location.hostname
+  return location.protocol + '//' + row.name + '.' + base + port + '/'
+}
+
+// 子域名入口在纯 IP 访问下只对本机生效, 需要显式提示
+function accessLocalOnly(row, location) {
+  return row.entry === ENTRY_SUBDOMAIN && LOCAL_HOST_RE.test(location.hostname)
 }
 
 function formatCreatedAt(iso) {
@@ -33,13 +44,61 @@ function formatCreatedAt(iso) {
   return Number.isNaN(parsed.getTime()) ? '-' : parsed.toLocaleString()
 }
 
-async function copyText(text) {
+// 剪贴板降级: 非安全上下文(内网 http)无 navigator.clipboard, 退回 execCommand
+function copyViaSelection(document, text) {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  let copied = false
   try {
-    await navigator.clipboard.writeText(text)
-    return true
+    copied = document.execCommand('copy')
   } catch {
-    return false
+    copied = false
   }
+  document.body.removeChild(area)
+  return copied
+}
+
+async function copyText(text, document) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch { /* 降级到选区复制 */ }
+  }
+  return copyViaSelection(document, text)
+}
+
+// 可见性门控: 页面/容器不可见期间的刷新请求只记脏, 恢复可见补拉一次
+// (后台 tab 不再随每次 publish 打请求; readVisible 由调用方注入, 纯逻辑可测)
+function createRefreshGate(readVisible, run) {
+  let pending = false
+  return {
+    request() {
+      if (!readVisible()) {
+        pending = true
+        return false
+      }
+      run()
+      return true
+    },
+    // 可见性恢复时补拉; 无脏标记或仍不可见即不动, 幂等
+    flush() {
+      if (!pending || !readVisible()) return false
+      pending = false
+      run()
+      return true
+    },
+    get pending() { return pending },
+  }
+}
+
+function isPageVisible(document) {
+  return document?.visibilityState !== 'hidden'
 }
 /* LOGIC-END */
 
@@ -60,17 +119,15 @@ body{
 --tu-accent-deep:var(--dsw-alias-button-primary-hover);
 --tu-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);
 --tu-danger:var(--dsw-alias-state-error-primary);
---tu-ok:var(--dsw-alias-state-success-primary);
 --tu-hover:var(--dsw-alias-interactive-bg-hover);
 --tu-mask:var(--dsw-alias-bg-mask-1);
---tu-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
 --tu-radius-sm:6px;--tu-radius-md:8px;--tu-radius-lg:12px;
---tu-space-2:6px;--tu-space-3:8px;--tu-space-4:10px;--tu-space-5:12px;--tu-space-6:18px;
---tu-font-sm:12px;--tu-font-md:13px;--tu-font-lg:15px;
+--tu-space-1:4px;--tu-space-2:6px;--tu-space-3:8px;--tu-space-4:10px;--tu-space-5:12px;--tu-space-6:18px;
+--tu-font-sm:12px;--tu-font-md:13px;
 --tu-control-h:30px;
 }
 .tu-panel{display:flex;flex-direction:column;gap:var(--tu-space-5);min-width:0;max-width:880px;margin:0 auto;width:100%;color:var(--tu-text);container-type:inline-size}
-.tu-main{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:var(--tu-space-6);background:var(--dsw-alias-bg-base,var(--tu-bg))}
+.tu-main{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;padding:var(--tu-space-6);background:var(--tu-bg)}
 .tu-toolbar{display:flex;align-items:center;gap:var(--tu-space-3);flex-wrap:wrap}
 .tu-spacer{flex:1}
 .tu-button{min-height:var(--tu-control-h);display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-md);padding:0 13px;font:inherit;font-size:var(--tu-font-md);font-weight:560;background:var(--tu-bg);color:var(--tu-text);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
@@ -98,10 +155,10 @@ body{
 .tu-error{font-size:var(--tu-font-sm);color:var(--tu-danger);background:var(--tu-bg-sub);border-left:3px solid var(--tu-danger);border-radius:var(--tu-radius-sm);padding:var(--tu-space-2) var(--tu-space-3)}
 .tu-switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;gap:var(--tu-space-2)}
 .tu-switch input[type="checkbox"] { position:absolute;opacity:0;width:1px;height:1px }
-.tu-switch__track{width:30px;height:17px;border-radius:999px;background:var(--tu-border-strong);position:relative;transition:background .15s;flex:none}
-.tu-switch__thumb{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-bg-base);transition:left .15s;box-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 30%, transparent)}
+.tu-switch__track{width:34px;height:19px;border-radius:999px;background:var(--tu-border-strong);position:relative;transition:background .15s;flex:none}
+.tu-switch__thumb{position:absolute;top:3px;left:3px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-bg-base);transition:left .15s;box-shadow:0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 30%, transparent)}
 .tu-switch input[type="checkbox"]:checked + .tu-switch__track{background:var(--tu-accent)}
-.tu-switch input[type="checkbox"]:checked + .tu-switch__track .tu-switch__thumb{left:15px}
+.tu-switch input[type="checkbox"]:checked + .tu-switch__track .tu-switch__thumb{left:18px}
 .tu-switch input[type="checkbox"]:focus-visible + .tu-switch__track{outline:2px solid color-mix(in srgb, var(--tu-accent) 70%, var(--dsw-alias-bg-base));outline-offset:1px}
 .tu-switch input[type="checkbox"]:disabled + .tu-switch__track{opacity:.4;cursor:not-allowed}
 .tu-switch:not(:has(input[type="checkbox"]:disabled)):hover .tu-switch__track{background:var(--tu-accent-deep);opacity:.85}
@@ -140,9 +197,8 @@ body{
 .tu-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--tu-space-3) var(--tu-space-4)}
 .tu-field{display:flex;flex-direction:column;gap:4px;font-size:var(--tu-font-sm);min-width:0;color:var(--tu-text-sub)}
 .tu-field--wide{grid-column:1 / -1}
-.tu-field input[type="text"],.tu-field input[type="number"],.tu-field textarea{min-height:30px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-md);padding:4px 10px;font:inherit;font-size:var(--tu-font-md);background:var(--tu-bg);color:var(--tu-text);min-width:0;transition:border-color .15s,box-shadow .15s}
-.tu-field input:focus,.tu-field textarea:focus{outline:none;border-color:var(--tu-accent);box-shadow:0 0 0 3px var(--tu-accent-wash)}
-.tu-field textarea{min-height:52px;resize:vertical;font-family:inherit}
+.tu-field input[type="text"],.tu-field input[type="number"]{min-height:30px;border:1px solid var(--tu-border-strong);border-radius:var(--tu-radius-md);padding:4px 10px;font:inherit;font-size:var(--tu-font-md);background:var(--tu-bg);color:var(--tu-text);min-width:0;transition:border-color .15s,box-shadow .15s}
+.tu-field input:focus{outline:none;border-color:var(--tu-accent);box-shadow:0 0 0 3px var(--tu-accent-wash)}
 .tu-hint{font-size:var(--tu-font-sm);color:var(--tu-text-dim)}
 @media (max-width: 560px){
 .tu-grid{grid-template-columns:1fr}
@@ -168,10 +224,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
   function factory(require) {
     let React = null
-    let ReactDOMClient = null
     try {
       React = require('react')
-      ReactDOMClient = require('react-dom/client')
     } catch (error) {
       console.error('[dsh-tunnel] 宿主 React 模块加载失败', error)
       return noopFactory()
@@ -182,15 +236,20 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 
     // 数据请求:统一 envelope, error 透传中文业务文案
     async function request(method, endpoint, body) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
       let response
       try {
         response = await fetch(API_PREFIX + endpoint, {
           method,
+          signal: controller.signal,
           headers: body === undefined ? undefined : { 'content-type': 'application/json' },
           body: body === undefined ? undefined : JSON.stringify(body),
         })
       } catch (error) {
-        return { ok: false, error: String(error && error.message || error) }
+        return { ok: false, error: controller.signal.aborted ? '请求超时' : String(error && error.message || error) }
+      } finally {
+        clearTimeout(timer)
       }
       let json = null
       try { json = await response.json() } catch { json = null }
@@ -199,7 +258,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     }
 
     function ensureStyle(document) {
-      const existing = document.getElementById('dsh-tunnel-style')
+      const existing = document.querySelector('style[data-plugin="@mzzsfy/dsh-tunnel"]')
       if (existing) return
       const style = document.createElement('style')
       style.id = 'dsh-tunnel-style'
@@ -229,7 +288,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         return () => document.removeEventListener('keydown', onKey)
       }, [])
       return h('div', { className: 'tu-modal-mask', onClick: (event) => { if (event.target === event.currentTarget) onClose() } },
-        h('div', { className: 'tu-modal' },
+        h('div', { className: 'tu-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
           h('div', { className: 'tu-modal-head' },
             h('span', { className: 'tu-modal-title' }, title),
             h('button', { className: 'tu-icon', 'aria-label': '关闭', onClick: onClose }, '✕')),
@@ -249,9 +308,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
     // —— 隧道列表面板 ——
     function TunnelRow({ row, onRemove, busy }) {
       const [copied, setCopied] = useState(false)
-      const url = accessUrlOf(row)
+      const url = accessUrlOf(row, window.location)
+      const localOnly = accessLocalOnly(row, window.location)
       const copy = async () => {
-        if (await copyText(url)) {
+        if (await copyText(url, document)) {
           setCopied(true)
           setTimeout(() => setCopied(false), COPY_FLASH_MS)
         }
@@ -259,14 +319,15 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return h('div', { className: 'tu-row' },
         h('span', { className: 'tu-name' }, row.name),
         h('span', { className: 'tu-badge' }, ENTRY_LABELS[row.entry] ?? row.entry),
-        h('span', { className: 'tu-code' }, row.entry === ENTRY_SUBDOMAIN ? row.name + '.*' : '/p/' + row.name),
-        h('button', { type: 'button', className: 'tu-link', title: '点击复制 ' + url, onClick: copy },
+        row.active === false ? h('span', { className: 'tu-badge', title: row.error ?? '' }, '未激活') : null,
+        h('span', { className: 'tu-code' }, row.entry === ENTRY_SUBDOMAIN ? row.name + '.*' : PATH_PREFIX + row.name),
+        h('button', { type: 'button', className: 'tu-link', title: '点击复制 ' + url, 'aria-label': '复制 ' + row.name + ' 的访问地址', onClick: copy },
           copied ? '已复制' : '复制地址'),
+        localOnly ? h('span', { className: 'tu-meta' }, '仅本机可解析') : null,
         h('span', { className: 'tu-code' }, ':' + row.targetPort),
-        row.wsPaths && row.wsPaths.length > 0 ? h('span', { className: 'tu-code' }, 'ws ' + row.wsPaths.join(' ')) : null,
         h('span', { className: 'tu-meta' }, formatCreatedAt(row.createdAt)),
         h('span', { className: 'tu-actions' },
-          h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--danger',
+          h('button', { type: 'button', className: 'tu-button tu-button--sm tu-button--danger', 'aria-label': '删除隧道 ' + row.name,
             disabled: busy, onClick: () => onRemove(row) }, '删除')))
     }
 
@@ -278,15 +339,14 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const submit = async () => {
         setBusy(true)
         setError('')
-        const wsPaths = draft.wsText.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '')
         const body = { name: draft.name.trim(), targetPort: Number(draft.targetPort), entry: draft.entry }
-        if (draft.entry === ENTRY_PATH && wsPaths.length > 0) body.wsPaths = wsPaths
         const outcome = await request('POST', '/tunnels', body)
         setBusy(false)
         if (!outcome.ok) { setError(outcome.error); return }
         onAdded()
       }
-      const nameOk = NAME_RE.test(draft.name.trim())
+      const trimmedName = draft.name.trim()
+      const nameOk = NAME_RE.test(trimmedName) && NAME_HAS_LETTER_RE.test(trimmedName)
       const portValue = Number(draft.targetPort)
       const portOk = Number.isInteger(portValue) && portValue >= PORT_MIN && portValue <= PORT_MAX
       return h(Modal, { title: '添加隧道', onClose },
@@ -295,7 +355,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             h('span', null, '隧道名'),
             h('input', { type: 'text', value: draft.name, placeholder: '小写字母/数字/连字符, ≤32 位',
               onChange: (event) => patch({ name: event.target.value }) }),
-            h('span', { className: 'tu-hint' }, '避开 dsh 入口域名首标签(如 dsh); 纯 IP 访问时避开 IP 首段数字(如 127)')),
+            h('span', { className: 'tu-hint' }, '至少含一个字母(纯数字会与纯 IP 访问的首段冲突); 并避开 dsh 入口域名首标签(如 dsh)')),
           h('div', { className: 'tu-field' },
             h('span', null, '目标端口'),
             h('input', { type: 'number', value: draft.targetPort, placeholder: PORT_MIN + '..' + PORT_MAX,
@@ -311,12 +371,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
             }),
             h('span', { className: 'tu-hint' }, draft.entry === ENTRY_SUBDOMAIN
               ? '全路径透传, WebSocket 任意路径可用, 需泛解析域名或 <名>.localhost 访问'
-              : '子路径部署, 目标应用需支持 base 参数(vite --base / jupyter base_url 等)')),
-          draft.entry === ENTRY_PATH ? h('div', { className: 'tu-field tu-field--wide' },
-            h('span', null, 'WebSocket 路径(可选, 每行一条)'),
-            h('textarea', { value: draft.wsText, placeholder: '/\n/ws',
-              onChange: (event) => patch({ wsText: event.target.value }) }),
-            h('span', { className: 'tu-hint' }, '留空 = 纯 HTTP; 子域名模式不需要')) : null),
+              : '子路径部署, 目标应用需支持 base 参数(vite --base / jupyter base_url 等); WebSocket 同样可用。与 dsh 同源, cookie 敏感的应用优先用子域名'))),
         error ? h('div', { className: 'tu-error' }, error) : null,
         h('div', { className: 'tu-actions' },
           h('button', { type: 'button', className: 'tu-button', onClick: onClose }, '取消'),
@@ -329,23 +384,48 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [error, setError] = useState('')
       const [showAdd, setShowAdd] = useState(false)
       const [busyName, setBusyName] = useState('')
-      const refreshRef = useRef(() => {})
-      const reload = useCallback(() => refreshRef.current(), [])
+      const rootRef = useRef(null)
+      const nodeVisibleRef = useRef(true)
+      const aliveRef = useRef(true)
+      const gateRef = useRef(null)
+      const load = useCallback(async () => {
+        const listOutcome = await request('GET', '/tunnels')
+        if (!aliveRef.current) return
+        // 成功即清错误: 瞬态失败(如插件重载期刷新)恢复后错误条不滞留
+        if (listOutcome.ok) { setRows(listOutcome.data.items); setError('') }
+        else setError(listOutcome.error)
+      }, [])
+      const reload = useCallback(() => gateRef.current?.request(), [])
       useEffect(() => {
-        let alive = true
-        const load = async () => {
-          const listOutcome = await request('GET', '/tunnels')
-          if (!alive) return
-          // 成功即清错误: 瞬态失败(如插件重载期刷新)恢复后错误条不滞留
-          if (listOutcome.ok) { setRows(listOutcome.data.items); setError('') }
-          else setError(listOutcome.error)
-        }
-        // 数据刷新唯一通道:订阅推送总线(首连 onReset 即首拉,消息到达刷新)
+        aliveRef.current = true
         const snapshot = tools.createSnapshotRefresh(load)
-        refreshRef.current = snapshot.refresh
-        const unsubscribe = bus.subscribe(snapshot.refresh, { onReset: snapshot.refresh })
-        return () => { alive = false; refreshRef.current = () => {}; snapshot.dispose(); unsubscribe() }
-      }, [bus])
+        // 闸门认 snapshot.refresh 为执行体: 突发事件仍由公共工具合并
+        const gate = createRefreshGate(() => isPageVisible(document) && nodeVisibleRef.current, snapshot.refresh)
+        gateRef.current = gate
+        const unsubscribe = bus.subscribe(() => gate.request(), { onReset: () => gate.request() })
+        const onVisibility = () => { if (isPageVisible(document)) gate.flush() }
+        document.addEventListener('visibilitychange', onVisibility)
+        // 首拉不依赖总线: 总线未就绪/无事件时看板也必须能出数据; 后续增量走推送
+        gate.request()
+        return () => {
+          aliveRef.current = false
+          gateRef.current = null
+          snapshot.dispose()
+          unsubscribe()
+          document.removeEventListener('visibilitychange', onVisibility)
+        }
+      }, [bus, load])
+      // 容器级可见性: 非激活 tab 常以 0 尺寸/隐藏容器挂着, 只靠页面级会永远判可见
+      useEffect(() => {
+        const node = rootRef.current
+        if (!node || typeof IntersectionObserver === 'undefined') return
+        const observer = new IntersectionObserver((entries) => {
+          nodeVisibleRef.current = entries.some((entry) => entry.isIntersecting)
+          if (nodeVisibleRef.current) gateRef.current?.flush()
+        })
+        observer.observe(node)
+        return () => observer.disconnect()
+      }, [])
       const remove = async (row) => {
         if (!window.confirm('删除隧道 ' + row.name + '?')) return
         setBusyName(row.name)
@@ -354,7 +434,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         if (!outcome.ok) setError(outcome.error)
         else reload()
       }
-      return h('div', { className: 'tu-panel' },
+      return h('div', { className: 'tu-panel', ref: rootRef },
         h('div', { className: 'tu-toolbar' },
           h('span', { className: 'tu-meta' }, rows ? '共 ' + rows.length + ' 条隧道' : '加载中…'),
           h('span', { className: 'tu-spacer' }),
@@ -484,26 +564,40 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       apply(ctx) {
         const bus = tools.setupCommonTools(ctx)
         ensureStyle(document)
-        // 挂载权交给用户:默认注册全局面板;偏好开启且侧边栏服务在场才移入扩展槽
+        // 挂载权交给用户:默认注册全局面板;偏好开启且侧边栏服务在场才移入扩展槽。
+        // 形态仲裁收敛成状态机: currentMode 是唯一事实, reconcile 是唯一变更入口
         let currentSidebar = ctx.get('betterSidebar')
         let sidebarTabOn = false
+        let currentMode = null
         let tabDisposer = null
         let panelDisposer = null
-        const attachBoardTab = (sidebar) => registerBoardTab(ctx, sidebar, bus)
-        const applyPref = () => {
-          const wantTab = sidebarTabOn && currentSidebar !== undefined
-          if (wantTab && tabDisposer === null) {
-            if (panelDisposer) { panelDisposer(); panelDisposer = null }
-            tabDisposer = attachBoardTab(currentSidebar)
-          } else if (!wantTab && tabDisposer !== null) {
-            tabDisposer()
-            tabDisposer = null
+        const desiredMode = () => (sidebarTabOn && currentSidebar !== undefined ? MODE_TAB : MODE_PANEL)
+        // 先装新后卸旧: 装载失败时旧形态仍在, 不出现双无窗口; 成功才切换事实并回收旧形态。
+        // 代价是同一 tick 内两种形态短暂并存, 宿主按渲染批次取快照, 用户侧不可见
+        const reconcile = () => {
+          const target = desiredMode()
+          if (target === currentMode) return
+          if (target === MODE_TAB) {
+            const disposeTab = registerBoardTab(ctx, currentSidebar, bus)
+            const previousPanel = panelDisposer
+            tabDisposer = disposeTab
+            panelDisposer = null
+            currentMode = MODE_TAB
+            if (previousPanel) previousPanel()
+            return
           }
-          if (!wantTab && panelDisposer === null) panelDisposer = registerMainPanel(ctx, bus)
+          const disposePanel = registerMainPanel(ctx, bus)
+          const previousTab = tabDisposer
+          panelDisposer = disposePanel
+          tabDisposer = null
+          currentMode = MODE_PANEL
+          if (previousTab) previousTab()
         }
         // 偏好仲裁数据源:订阅总线刷新(ui-settings 变更即 publish),不再周期轮询
         let prefAlive = true
         const syncPref = async () => {
+          // 无侧边栏服务时形态恒为全局面板, 偏好读取无意义: 省掉每次 publish 的 /status
+          if (currentSidebar === undefined) return
           try {
             const outcome = await request('GET', '/status')
             if (!prefAlive) return
@@ -512,7 +606,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               const previous = sidebarTabOn
               sidebarTabOn = next
               try {
-                applyPref()
+                reconcile()
               } catch (error) {
                 // 形态切换失败回滚偏好, 下轮事件重试, 避免入口消失后卡死
                 sidebarTabOn = previous
@@ -527,8 +621,11 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           prefAlive = false
           prefRefresh.dispose()
           unsubscribePref()
+          currentMode = null
           if (tabDisposer) tabDisposer()
           if (panelDisposer) panelDisposer()
+          tabDisposer = null
+          panelDisposer = null
         }, 'dsh-tunnel mount arbitration')
         // 设置>插件页卡片:key 配对 ns, 宿主按 describe 命名空间分发;effect 随 fiber 回收。
         // 0.1.7-rc.1+ 该槽被宿主移除, 卡片换形注册进插件管理页包详情配置槽(plugins.bundle.config,
@@ -548,9 +645,10 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         }), 'dsh-tunnel plugin manager card')
         ctx.inject(['betterSidebar'], (bsCtx) => {
           currentSidebar = bsCtx.betterSidebar
-          applyPref()
+          syncPref()
+          reconcile()
         })
-        applyPref()
+        reconcile()
       },
     }
   }

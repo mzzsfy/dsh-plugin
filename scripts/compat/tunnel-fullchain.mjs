@@ -1,19 +1,19 @@
 // dsh-tunnel 全链路验证: 隔离 dsh 实例(compat 同款机制)内真实激活插件,
 // 预种持久化表恢复双模式隧道, 经真实 webServer 分发面验证子域名/路径/WS/宿主共存。
 // 用法: node scripts/compat/tunnel-fullchain.mjs [version] [port]
-// 判定: 七项探针全过 = PASS
+// 判定: 全部探针 PASS
 import http from 'node:http'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { createWriteStream, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { COMPAT_ROOT, killPortOwner, log } from './lib.mjs'
 import { buildProfile, installPackageExternals } from './profile.mjs'
 
-const VERSION = process.argv[2] ?? '0.1.7-alpha.2'
+const VERSION = process.argv[2] ?? '0.2.2-rc.1'
 const PORT = Number(process.argv[3] ?? 9295)
 // 宿主闭包目录:默认闭包自足(workDir/dsh-host),已装闭包(.dsh-versions/<v>)经 argv[4] 复用
-const HOST_DIR = process.argv[4] ?? join(COMPAT_ROOT, VERSION, 'dsh-host')
+const HOST_DIR = process.argv[4] ? resolve(process.argv[4]) : join(COMPAT_ROOT, VERSION, 'dsh-host')
 const BOOT_TIMEOUT_MS = 150 * 1000
 const READY_POLL_MS = 1500
 const FETCH_TIMEOUT_MS = 10 * 1000
@@ -146,8 +146,9 @@ const bootLogPath = join(workDir, 'tunnel-boot.log')
 // sub1 = 子域名, pat1 = 路径模式(带 WS), 均指向本探针的 target
 mkdirSync(join(homeDir, 'dsh-tunnel'), { recursive: true })
 writeFileSync(join(homeDir, 'dsh-tunnel', 'tunnels.json'), JSON.stringify([
-  { name: 'sub1', targetPort, entry: 'subdomain', wsPaths: [], createdAt: new Date().toISOString() },
-  { name: 'pat1', targetPort, entry: 'path', wsPaths: ['/ws'], createdAt: new Date().toISOString() },
+  { name: 'sub1', targetPort, entry: 'subdomain', createdAt: new Date().toISOString() },
+  { name: 'pat1', targetPort, entry: 'path', createdAt: new Date().toISOString() },
+  { name: '127', targetPort, entry: 'subdomain', createdAt: new Date().toISOString() },
 ], null, 2), 'utf8')
 log(`预种隧道表(target=${targetPort}), 构建 profile`)
 
@@ -206,7 +207,7 @@ try {
     return subApi.status === 200 && JSON.parse(subApi.body).url === '/api/whatever'
   })
   await probe('子域名动态WS', async () => {
-    // jupyter 内核通道形态, upgrades 表 miss 层合成
+    // jupyter 内核通道形态: 监听层按 Host 分发, 任意 WS 路径无需声明
     return (await probeWs(PORT, 'sub1.localhost', '/api/kernels/9f8e7d6c-1234-4321-abcd-001122334455/channels')).ok
   })
   await probe('路径模式strip转发', async () => {
@@ -214,7 +215,17 @@ try {
     const patBody = JSON.parse(pat.body)
     return pat.status === 200 && patBody.url === '/hello'
   })
-  await probe('路径模式WS', async () => (await probeWs(PORT, '127.0.0.1', '/p/pat1/ws')).ok)
+  await probe('路径模式动态WS', async () => (await probeWs(PORT, '127.0.0.1', '/p/pat1/api/kernels/9f8e7d6c-1234-4321-abcd-001122334455/channels')).ok)
+  await probe('子域名管理API隔离', async () => {
+    // 隧道 Host 上的 /api/tunnel 必须归目标应用, 不得落到插件自己的管理面
+    const subApi = await probeHttp(PORT, 'sub1.localhost', '/api/tunnel/tunnels')
+    return subApi.status === 200 && JSON.parse(subApi.body).url === '/api/tunnel/tunnels'
+  })
+  await probe('纯数字名恢复被拒', async () => {
+    // 预种行 name=127 必须被跳过: 裸 127.0.0.1 入口仍是宿主 GUI
+    const gui = await probeHttp(PORT, '127.0.0.1', '/')
+    return gui.status !== 200 || !isTargetBody(gui.body)
+  })
   await probe('宿主GUI共存', async () => {
     // 非隧道 Host 首页宿主自答(200/3xx/401), 绝不是 target 回显
     const gui = await probeHttp(PORT, '127.0.0.1', '/')

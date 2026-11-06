@@ -10,7 +10,13 @@ function fixture(sidebarTab) {
   let definition, pendingEffects
   const owners = new Map(), requests = [], clocks = new Set()
   const window = { __ModuleLoader__: { load: value => { definition = value } } }
-  const document = { getElementById: () => ({}) }
+  const document = {
+    getElementById: () => ({}),
+    querySelector: () => ({}),
+    visibilityState: 'visible',
+    addEventListener() {},
+    removeEventListener() {},
+  }
   const react = {
     createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
     useState: value => [typeof value === 'function' ? value() : value, () => {}],

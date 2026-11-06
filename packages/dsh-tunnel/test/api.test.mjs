@@ -26,12 +26,13 @@ function makeTunnelsApi() {
   }
 }
 
-function makeReq(method, pathAndQuery, body) {
+function makeReq(method, pathAndQuery, body, extraHeaders = {}) {
   const req = new EventEmitter()
   req.method = method
   req.url = pathAndQuery
-  req.headers = { host: 'localhost:3000' }
+  req.headers = { host: 'localhost:3000', ...extraHeaders }
   if (body !== undefined) {
+    if (req.headers['content-type'] === undefined) req.headers['content-type'] = 'application/json'
     const payload = typeof body === 'string' ? body : JSON.stringify(body)
     process.nextTick(() => {
       req.emit('data', Buffer.from(payload))
@@ -41,14 +42,14 @@ function makeReq(method, pathAndQuery, body) {
   return req
 }
 
-async function call(api, method, pathAndQuery, body) {
+async function call(api, method, pathAndQuery, body, extraHeaders) {
   const res = { status: null, payload: null }
   res.writeHead = (status) => { res.status = status }
   res.end = (text) => {
     res.raw = text
     try { res.payload = JSON.parse(text) } catch { res.payload = null }
   }
-  await api.handle(makeReq(method, pathAndQuery, body), res)
+  await api.handle(makeReq(method, pathAndQuery, body, extraHeaders), res)
   return res
 }
 
@@ -142,4 +143,31 @@ test('未知路径与方法 404, 非法 JSON 400', async () => {
   const bad = await call(api, 'POST', '/api/tunnel/tunnels', '{not-json')
   assert.equal(bad.status, 400)
   assert.match(bad.payload.error, /JSON/)
+})
+
+test('跨源写路由 403: 浏览器 CSRF 防线(Origin 与 Host 同源比对)', async () => {
+  const { tunnelsApi, api } = makeApi()
+  const cross = await call(api, 'POST', '/api/tunnel/tunnels', { name: 'app', targetPort: 80 }, { origin: 'http://evil.example' })
+  assert.equal(cross.status, 403)
+  assert.match(cross.payload.error, /跨源/)
+  assert.equal(tunnelsApi.rows.size, 0, '跨源写不得落库')
+  const same = await call(api, 'POST', '/api/tunnel/tunnels', { name: 'app', targetPort: 80 }, { origin: 'http://localhost:3000' })
+  assert.equal(same.status, 200)
+  const crossDelete = await call(api, 'DELETE', '/api/tunnel/tunnels/app', undefined, { origin: 'http://evil.example' })
+  assert.equal(crossDelete.status, 403)
+  assert.equal(tunnelsApi.rows.size, 1)
+})
+
+test('写路由强制 JSON: text/plain 简单请求 400(预检外的唯一跨站写入通道)', async () => {
+  const { tunnelsApi, api } = makeApi()
+  const res = await call(api, 'POST', '/api/tunnel/tunnels', JSON.stringify({ name: 'app', targetPort: 80 }), { 'content-type': 'text/plain' })
+  assert.equal(res.status, 400)
+  assert.match(res.payload.error, /application\/json/)
+  assert.equal(tunnelsApi.rows.size, 0)
+})
+
+test('读路由不受跨源卫影响: GET 携带 Origin 照常 200', async () => {
+  const { api } = makeApi()
+  const res = await call(api, 'GET', '/api/tunnel/tunnels', undefined, { origin: 'http://evil.example' })
+  assert.equal(res.status, 200)
 })

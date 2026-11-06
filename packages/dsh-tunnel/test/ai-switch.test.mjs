@@ -9,40 +9,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { busStub, resetBusStub } from './_mocks.common-tools.mjs'
+import { FakeHost } from './support/fake-host.mjs'
 
 const TOOL_NAMES = ['tunnel_open', 'tunnel_list', 'tunnel_close']
 
-class MockWebServer {
-  exact = new Map()
-  prefixes = new Map()
-  upgrades = new Map()
-  fallback = undefined
-  host = '127.0.0.1'
-  port = 3080
-
-  register(route) {
-    const table = route.kind === 'exact' ? this.exact : this.prefixes
-    if (table.has(route.path)) throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
-    table.set(route.path, route)
-    return () => table.delete(route.path)
-  }
-
-  registerUpgrade(route) {
-    this.upgrades.set(route.path, route)
-    return () => this.upgrades.delete(route.path)
-  }
-
-  registerFallback(handler) {
-    this.fallback = handler
-    return () => { this.fallback = undefined }
-  }
-}
-
+// 工具注册面桩: 只关心「谁被注册/何时被注销」
 function createToolsService() {
   const registered = new Map()
+  const names = () => [...registered.keys()]
   return {
-    registered,
-    names: () => [...registered.keys()],
+    names,
     register(tool) {
       registered.set(tool.name, tool)
       return () => registered.delete(tool.name)
@@ -108,7 +84,9 @@ process.on('exit', () => {
 async function applyPlugin(config = {}, services = {}) {
   const { apply } = await import('../src/index.js')
   const tools = services.tools ?? createToolsService()
-  const webServer = new MockWebServer()
+  const webServer = new FakeHost()
+  await webServer.listen()
+  webServer.installFallback('host-fallback')
   const { ctx, events, effectDisposers } = createCtx({ ...services, tools })
   ctx.webServer = webServer
   const full = { connectTimeoutMs: 10 * 1000, dataDir: defaultDataDir(), ...config }
@@ -116,6 +94,7 @@ async function applyPlugin(config = {}, services = {}) {
   const disposeAll = () => {
     dispose()
     for (const disposer of effectDisposers.reverse()) disposer()
+    return webServer.dispose()
   }
   return { webServer, tools, events, dispose: disposeAll }
 }
@@ -126,7 +105,7 @@ async function callApi(webServer, method, path, body) {
   const req = new EventEmitter()
   req.method = method
   req.url = '/api/tunnel' + path
-  req.headers = { host: 'localhost:3080' }
+  req.headers = { host: 'localhost:3080', ...(body === undefined ? {} : { 'content-type': 'application/json' }) }
   const res = { status: null, payload: null }
   res.writeHead = (status) => { res.status = status }
   res.end = (text) => {
