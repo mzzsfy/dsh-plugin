@@ -188,12 +188,16 @@ window.__ModuleLoader__.load({
           await this.commitConfiguration({ providers: suggested.providers, routes: suggested.routes, notice: '已应用推荐配置：免凭据数据源与八市场能力路由全部就绪。' })
         },
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
+        // 复用同一份 state 前要看它有多旧: 只比 securityId|period 会让开着的页面拿昨天的分时当实时。
         loadKline(securityId, period, force = false) {
           const key = `${securityId}|${period}`
-          if (state.klineKey === key && state.kline?.candles && !force) return Promise.resolve(state.kline)
-          patch({ klineKey: key, kline: { loading: !state.kline?.candles, error: '', candles: state.klineKey === key ? state.kline?.candles ?? null : null } })
+          const sameKey = state.klineKey === key, held = sameKey ? state.kline : null
+          const maxAge = KLINE_MAX_AGE[period] ?? 0
+          const fresh = held?.candles && Date.now() - (held.loadedAt || 0) < maxAge
+          if (fresh && !force) return Promise.resolve(held)
+          patch({ klineKey: key, kline: { loading: !held?.candles, error: '', candles: held?.candles ?? null, loadedAt: held?.loadedAt } })
           const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')).then(result => {
-            patch({ kline: { loading: false, error: '', ...result } })
+            patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result } })
             return result
           }).catch(e => {
             // 额度窗口瞬时满/网络抖动: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
@@ -239,6 +243,8 @@ window.__ModuleLoader__.load({
       return age < 3 ? '刚刚更新' : `${age} 秒前更新`
     }
     const MARKET_LABEL = { XSHG: '沪', XSHE: '深', XHKG: '港', XNAS: '美', XNYS: '美', XJPX: '日', XKRX: '韩', XLON: '英' }
+    // 客户端 K线数据保鲜期, 与服务端 kline-cache 同量级: 分时是实时数据, 日K盘中会动, 周月K一天一换
+    const KLINE_MAX_AGE = { trend: 60 * 1000, '1d': 60 * 60 * 1000, '1w': 24 * 60 * 60 * 1000, '1M': 24 * 60 * 60 * 1000 }
     // 副标题市场面: 沪深两所合并一档, 按固定优先级输出, 避免随添加顺序抖动
     const MARKET_SCOPE = { XSHG: '沪深A股', XSHE: '沪深A股', XHKG: '港股', XNAS: '美股', XNYS: '美股', XJPX: '日股', XKRX: '韩股', XLON: '英股' }
     const SCOPE_ORDER = ['沪深A股', '港股', '美股', '日股', '韩股', '英股']
@@ -441,6 +447,8 @@ window.__ModuleLoader__.load({
       const period = state.klinePeriod || '1d'
       const kline = state.kline || {}
       const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), maRef = React.useRef([]), volRef = React.useRef(null), avgRef = React.useRef(null)
+      // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
+      const pendingRef = React.useRef(null)
       const themeOf = () => readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, state.data.control.preferences.colorMode)
       // 量柱着色与 MA 灌入(日/周/月)
       function fillCandleData(result) {
@@ -459,12 +467,16 @@ window.__ModuleLoader__.load({
         avgRef.current.setData(result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.avg ?? c.close })))
         if (result.preClose != null) mainRef.current.createPriceLine({ price: result.preClose, color: themeOf().crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' })
       }
-      // 周期序列形态切换: trend↔K线 类型不同需重建;同类型仅重灌。
-      function ensureSeries(LWC, wantTrend) {
+      // 分时用 Area、K线用 Candlestick, 同一 chart 上换形态就是删旧 series 建新 series;
+      // 时间轴允许 Unix 秒与业务日期混用, 所以不必重建整个实例。
+      function chartOptions(theme) {
+        return { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true }
+      }
+      const wantTrend = period === 'trend'
+      function ensureSeries(LWC) {
         const chart = chartRef.current
         if (!chart || !LWC) return
-        const isTrend = !!avgRef.current
-        if (wantTrend === isTrend && mainRef.current) return
+        if (wantTrend === !!avgRef.current && mainRef.current) return
         for (const s of [mainRef.current, avgRef.current, volRef.current, ...maRef.current]) if (s) chart.removeSeries(s)
         mainRef.current = avgRef.current = volRef.current = null; maRef.current = []
         const theme = themeOf()
@@ -477,22 +489,52 @@ window.__ModuleLoader__.load({
           volRef.current = chart.addSeries(LWC.HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 1)
         }
       }
-      // 数据+图表双就绪后灌入(两条异步链汇合点: chart 就绪 effect 与 loadKline effect)
+      // 数据就绪后灌入; 图表实例由 effect A 创建, series 按形态在此处切换
       function maybeFill(result) {
-        if (!chartRef.current || !result) return
-        ensureSeries(window.LightweightCharts, period === 'trend')
-        chartRef.current.timeScale().applyOptions({ timeVisible: period === 'trend' })
-        period === 'trend' ? fillTrendData(result) : fillCandleData(result)
+        if (!result) return
+        if (!chartRef.current) { pendingRef.current = result; return }
+        ensureSeries(window.LightweightCharts)
+        if (!mainRef.current) return
+        // 分时喂的是 Unix 秒, 图表默认按 UTC 渲染那一刻——港股 14:45 会被画成 06:45, 所以刻度一律按该证券
+        // 所属市场的时区呈现; 日K的 time 是业务日期(字符串或 BusinessDay), 不参与时区换算, 否则会整体偏一天。
+        const zone = item.timezone || 'Asia/Shanghai'
+        const asDate = time => {
+          if (typeof time === 'number') return new Date(time * 1000)
+          if (typeof time === 'string') return new Date(`${time}T00:00:00Z`)
+          if (time && typeof time === 'object' && time.year) return new Date(Date.UTC(time.year, time.month - 1, time.day))
+          return null
+        }
+        const clock = time => { const d = asDate(time); return d ? new Intl.DateTimeFormat('zh-CN', { timeZone: zone, hour12: false, hour: '2-digit', minute: '2-digit' }).format(d) : '' }
+        const dayStamp = (time, withYear) => {
+          const d = asDate(time)
+          if (!d) return ''
+          const pad = n => String(n).padStart(2, '0')
+          return `${withYear ? `${d.getUTCFullYear()}-` : ''}${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
+        }
+        const tickMark = (time, tickMarkType) => {
+          if (wantTrend) return clock(time)
+          const d = asDate(time)
+          if (!d) return ''
+          return tickMarkType === 0 ? String(d.getUTCFullYear()) : tickMarkType === 1 ? `${d.getUTCMonth() + 1}月` : dayStamp(time, false).slice(3)
+        }
+        chartRef.current.applyOptions({
+          localization: { timeFormatter: wantTrend ? clock : time => dayStamp(time, true) },
+          timeScale: { timeVisible: wantTrend, tickMarkFormatter: tickMark },
+        })
+        wantTrend ? fillTrendData(result) : fillCandleData(result)
+        // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上
+        chartRef.current.timeScale().fitContent()
       }
-      // effect A: 图表创建一次;主题变更(MutationObserver)重涂;卸载销毁。
+      // effect A: 图表创建一次; 主题变更(MutationObserver)重涂; 卸载销毁。
       React.useEffect(() => {
         let dead = false, mo
         const root = holder.current?.closest('.ssb-root') || document.documentElement
         ensureLwc(document).then(LWC => {
           if (dead || !holder.current) return
-          const theme = themeOf()
-          chartRef.current = LWC.createChart(holder.current, { layout: { background: { color: theme.background }, textColor: theme.textColor }, crosshair: { mode: LWC.CrosshairMode.Normal }, timeScale: { timeVisible: false, borderColor: theme.gridLine }, rightPriceScale: { borderColor: theme.gridLine }, grid: { vertLines: { color: theme.gridLine }, horzLines: { color: theme.gridLine } }, autoSize: true })
-          maybeFill(runtime.getKlineResult(item.id, period))
+          chartRef.current = LWC.createChart(holder.current, chartOptions(themeOf()))
+          const early = pendingRef.current
+          pendingRef.current = null
+          maybeFill(early || runtime.getKlineResult(item.id, period))
         }).catch(e => runtime.setKlineError(item.id, e.message, e.code))
         mo = new MutationObserver(() => { const chart = chartRef.current; if (!chart) return; const t = themeOf(); chart.applyOptions({ layout: { background: { color: t.background }, textColor: t.textColor }, grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } } }) })
         mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
