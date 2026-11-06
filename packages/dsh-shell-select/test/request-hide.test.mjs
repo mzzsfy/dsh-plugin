@@ -14,7 +14,7 @@ const toolsOf = (...names) => names.map((name) => ({ name }))
 function stubLlm() {
   // 每个用例独立类:原型级 patch 是进程内共享状态,复用同一类会跨用例串扰
   class Adapter {
-    async streamWithSnapshot(options) {
+    async stream(options) {
       return options
     }
   }
@@ -27,7 +27,7 @@ test('请求含 pwsh:剔除并保留其余工具', async () => {
   assert.equal(attachRequestHiding(llm), 1)
   const read = { name: 'read' }
   const shell = { name: 'shell' }
-  const out = await adapter.streamWithSnapshot({ tools: [read, { name: 'pwsh' }, shell] })
+  const out = await adapter.stream({ tools: [read, { name: 'pwsh' }, shell] })
   assert.deepEqual(out.tools.map((tool) => tool.name), ['read', 'shell'])
   assert.equal(out.tools[0], read)
   assert.equal(out.tools[1], shell)
@@ -37,7 +37,7 @@ test('请求不含 pwsh:原引用透传', async () => {
   const { adapter, llm } = stubLlm()
   attachRequestHiding(llm)
   const tools = toolsOf('read', 'shell')
-  const out = await adapter.streamWithSnapshot({ tools })
+  const out = await adapter.stream({ tools })
   assert.equal(out.tools, tools)
 })
 
@@ -45,14 +45,14 @@ test('与已装改写链式叠加,互不覆盖', async () => {
   // Given 另一个包先装自己的改写(模拟 tool-gate 的折叠)
   const { adapter, llm } = stubLlm()
   const proto = Object.getPrototypeOf(adapter)
-  const base = proto.streamWithSnapshot
-  proto.streamWithSnapshot = function (options, snapshot) {
+  const base = proto.stream
+  proto.stream = function (options, snapshot) {
     return base.call(this, { ...options, marked: true }, snapshot)
   }
   // When 本包装上
   assert.equal(attachRequestHiding(llm), 1)
   // Then 两层都生效
-  const out = await adapter.streamWithSnapshot({ tools: toolsOf('read', 'pwsh') })
+  const out = await adapter.stream({ tools: toolsOf('read', 'pwsh') })
   assert.equal(out.marked, true)
   assert.deepEqual(out.tools.map((tool) => tool.name), ['read'])
 })
@@ -62,7 +62,7 @@ test('行卸载后透传,不再剔除', async () => {
   let active = true
   attachRequestHiding(llm, () => active)
   active = false
-  const out = await adapter.streamWithSnapshot({ tools: toolsOf('read', 'pwsh') })
+  const out = await adapter.stream({ tools: toolsOf('read', 'pwsh') })
   assert.deepEqual(out.tools.map((tool) => tool.name), ['read', 'pwsh'])
 })
 

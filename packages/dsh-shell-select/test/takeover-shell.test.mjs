@@ -419,7 +419,7 @@ test('执行器句柄退役自清:主行 fiber 卸载后句柄清空(陈旧句�
 // ctx.shell.refresh),主行不监听宿主事件(真实链路 volatile-only 不重挂行、
 // 事件不达本包,投机监听已移除;挂载路径零监听即正确形态)──
 
-test('apply 挂载路径零宿主事件监听(refresh 收口在 web 写路径)', async () => {
+test('apply 挂载路径不监听 refresh 类宿主事件(仅 agent/created 用于描述改写)', async () => {
   const realPlatform = process.platform
   Object.defineProperty(process, 'platform', { value: 'win32' })
   try {
@@ -428,7 +428,7 @@ test('apply 挂载路径零宿主事件监听(refresh 收口在 web 写路径)',
     const { ctx, log } = stubCtxOf([tool, sandbox])
     await mainApply(ctx, {})
     assert.equal(log.plugins.length, 1)
-    assert.equal(log.listeners.length, 0)
+    assert.deepEqual(log.listeners.map((entry) => entry.event), ['agent/created'])
   } finally {
     Object.defineProperty(process, 'platform', { value: realPlatform })
   }

@@ -33,6 +33,7 @@ import {
 } from './takeover.mjs'
 import { coerceServiceable } from './config.mjs'
 import { attachRequestHiding } from './request-hide.mjs'
+import { describePwshDirective } from './agent-hints.mjs'
 import { retireShellSelectExecutorFiber, shellSelectExecutorFiber } from './apply-state.mjs'
 
 export const name = 'shell-select'
@@ -69,6 +70,11 @@ export async function apply(ctx, config) {
     sweep()
     lctx.on('llm/adapters-updated', sweep, { global: true })
   })
+  // 会话作用域的官方 pwsh(own 优先)覆盖本包全局注册的同名工具,描述提示只能
+  // 在 agent 创建后改写其定义;只改 description,不影响执行与注册。
+  ctx.on('agent/created', ({ agent }) => {
+    if (describePwshDirective(agent)) recordTakeover({ event: 'pwsh 描述已改为改用 shell 提示' })
+  }, { global: true })
   const states = officialChainState(ctx.loader)
   const { decision, targets } = takeoverDecision(states)
   recordTakeover({
