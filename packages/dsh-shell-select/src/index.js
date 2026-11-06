@@ -60,10 +60,14 @@ export async function apply(ctx, config) {
   ctx.inject(['llm'], (lctx) => {
     let disposed = false
     ctx.effect(() => () => { disposed = true }, 'shell-select request hiding lifetime')
-    const sweep = () => attachRequestHiding(lctx.llm, () => disposed === false)
-    const attached = sweep()
+    const sweep = () => {
+      const attached = attachRequestHiding(lctx.llm, () => disposed === false)
+      if (attached === 0) return
+      recordTakeover({ event: `request-hide attached=${attached}` })
+      ctx.logger?.info?.(`shell-select: 请求缝隐藏 pwsh(adapter ${attached})`)
+    }
+    sweep()
     lctx.on('llm/adapters-updated', sweep, { global: true })
-    if (attached > 0) ctx.logger?.info?.(`shell-select: 请求缝隐藏 pwsh(adapter ${attached})`)
   })
   const states = officialChainState(ctx.loader)
   const { decision, targets } = takeoverDecision(states)
