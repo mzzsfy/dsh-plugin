@@ -65,10 +65,14 @@ function sleepMs(ms) {
 function runNpm(args, cwd, opts = {}) {
   const display = ['npm', ...args].join(' ')
   console.log(`  $ ${display}`)
-  const r = spawnSync([npmCmd(), ...args].join(' '), {
+  // Windows 下 npm 是 .cmd,Node 强制要求 shell;走 shell 时数组会被空格拼接,
+  // 含空格的包目录/产物路径会被切碎,故逐参数加引号(与 install-externals 同口径)。
+  // 参数全部来自内部白名单(目录名/版本号/registry 常量),不含双引号,加引号无需转义。
+  const isWin = process.platform === 'win32'
+  const r = spawnSync(npmCmd(), isWin ? args.map((arg) => `"${arg}"`) : args, {
     cwd,
     encoding: 'utf8',
-    shell: true,
+    shell: isWin,
     stdio: opts.stdio ?? 'pipe',
   })
   if (r.error) fail(`命令启动失败: ${display}(${r.error.message})`)
@@ -200,6 +204,14 @@ function publishOne(dirName, opts) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`${name} 版本号 ${version} 不是 x.y.z 形式,不支持`)
   let pendingBump = null
 
+  // 发布范围洁净门先于一切版本判定:SKIP 早退分支同样改变"已发布内容 vs 工作树"的
+  // 对应关系,放在判定之后会让脏树走到 SKIP 而不被拒(tag 只能指向一个提交)
+  const dirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
+  if (dirty.status !== 0) fail(`查询 ${dirName} 工作区状态失败,中止`)
+  if (dirty.stdout.trim() !== '') {
+    fail(`${dirName} 发布范围存在未提交变更,拒绝发布(tag 须指向可还原的源码提交)。先提交或清理:\n${dirty.stdout.trim()}`)
+  }
+
   const online = onlineVersion(name)
   if (online !== null) {
     const order = compareSemver(version, online)
@@ -230,14 +242,6 @@ function publishOne(dirName, opts) {
   } else {
     if (opts.bump) console.log(`忽略 --bump(${name} 未发布,首发直接用本地版本)`)
     console.log(`${name} 尚未发布,本地 ${version} 将为首个线上版本`)
-  }
-
-  // 发布范围洁净门:目标包内任何修改/暂存/未跟踪文件都改变打包内容,
-  // tag 却只能指向一个提交——dirty 即拒绝(含 dry-run),先提交再发版
-  const dirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
-  if (dirty.status !== 0) fail(`查询 ${dirName} 工作区状态失败,中止`)
-  if (dirty.stdout.trim() !== '') {
-    fail(`${dirName} 发布范围存在未提交变更,拒绝发布(tag 须指向可还原的源码提交)。先提交或清理:\n${dirty.stdout.trim()}`)
   }
 
   const hasPackageTest = typeof manifest.scripts?.test === 'string' && manifest.scripts.test.trim().length > 0
@@ -323,7 +327,7 @@ function publishOne(dirName, opts) {
   // 成败判据 = npm publish 退出码("+ 包@版本"输出由 npm 自身保证);registry CDN
   // 传播延迟不影响成败,回读 view 仅作信息展示,不做闸门。
   // 发布这同一份 tarball(非重新 pack):内容与 release.json 记录严格一致
-  const pub = runNpm(['publish', tarball, '--registry', REGISTRY], pkgDir, { stdio: 'inherit' })
+  const pub = runNpm(['publish', tarball, '--registry', REGISTRY, '--access', 'public'], pkgDir, { stdio: 'inherit' })
   if (pub.status !== 0) fail('发布失败(npm publish 非零退出,交互输出见上;浏览器认证中断可直接重跑本脚本自愈)')
 
   const readback = runNpm(['view', name, 'version', '--registry', REGISTRY])
