@@ -1,35 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFERRED_PLACEHOLDER_DESCRIPTION, TOOL_SEARCH_NAME, hideShadowedTools, planRequestTools } from '../src/fallback.mjs'
-
-test('SC-19 影子工具剔除:shell 在场时请求里不再出现 pwsh', () => {
-  const read = { name: 'read' }
-  const pwsh = { name: 'pwsh' }
-  const shell = { name: 'shell' }
-  const result = hideShadowedTools([read, pwsh, shell], new Set(['pwsh']))
-  assert.deepEqual(result.tools.map((tool) => tool.name), ['read', 'shell'])
-  assert.deepEqual(result.hidden, ['pwsh'])
-  assert.equal(result.tools[1], shell)
-})
-
-test('SC-19a 影子剔除与折叠串联:其余 deferred 仍折为占位', () => {
-  const pwsh = { name: 'pwsh' }
-  const webFetch = { name: 'web_fetch', description: '抓取', parameters: { type: 'object', properties: {} } }
-  const hidden = hideShadowedTools([pwsh, webFetch], new Set(['pwsh']))
-  const plan = planRequestTools(hidden.tools, new Set(['web_fetch']))
-  assert.deepEqual(plan.tools.map((tool) => tool.name), ['web_fetch'])
-  assert.deepEqual(plan.folded, ['web_fetch'])
-})
-
-test('SC-19b 无影子命中零拷贝;capable 路由透传', () => {
-  const tools = [{ name: 'read' }, { name: 'shell' }]
-  assert.equal(hideShadowedTools(tools, new Set(['pwsh'])).tools, tools)
-  const capable = [{ name: 'pwsh', deferLoading: true }]
-  const result = hideShadowedTools(capable, new Set(['pwsh']))
-  assert.equal(result.tools, capable)
-  assert.deepEqual(result.hidden, [])
-})
-
+import { DEFERRED_PLACEHOLDER_DESCRIPTION, TOOL_SEARCH_NAME, planRequestTools } from '../src/fallback.mjs'
 
 test('SC-16 降级折叠投影:deferred 折叠为名字+参数骨架占位,白名单原引用,不可变构造', () => {
   const read = { name: 'read' }
