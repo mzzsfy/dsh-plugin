@@ -19,7 +19,8 @@ import {
   takeoverDecision,
 } from '../src/takeover.mjs'
 import { OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
-import { shellSelectExecutorFiber } from '../src/apply-state.mjs'
+import { shellSelectExecutorFiber, shellSelectTakeoverTrace } from '../src/apply-state.mjs'
+import { PWSH_REDIRECT_DESCRIPTION } from '../src/agent-hints.mjs'
 import { ShellSelectExecutor } from '../src/executor.mjs'
 import { apply as mainApply } from '../src/index.js'
 
@@ -209,7 +210,7 @@ test('awaitOfficialExit:双行全退场(含收尾间隔)→ true;退场卡死 �
 
 // ── 接线层(W-1 ~ W-7):主行 apply 桩测 ─────────────────────────────────
 
-function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
+function stubCtxOf(entries, { updateThrows = false, pluginError, llm } = {}) {
   const log = { warns: [], errors: [], infos: [], plugins: [], listeners: [], fibers: [] }
   const ctx = {
     loader: loaderOf(entries),
@@ -244,7 +245,7 @@ function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
     },
     // llm 服务缺席:请求缝隐藏按零动作跳过,不影响接管断言
     inject: (services, callback) => {
-      callback({ llm: undefined, on: () => () => {} })
+      callback({ llm, on: () => () => {} })
       return () => {}
     },
     effect: (fn) => fn(),
@@ -429,6 +430,40 @@ test('apply 挂载路径不监听 refresh 类宿主事件(仅 agent/created 用�
     await mainApply(ctx, {})
     assert.equal(log.plugins.length, 1)
     assert.deepEqual(log.listeners.map((entry) => entry.event), ['agent/created'])
+  } finally {
+    Object.defineProperty(process, 'platform', { value: realPlatform })
+  }
+})
+
+// llm 就绪后请求缝生效并留轨迹;agent 创建后改写会话作用域 pwsh 的定义。
+test('请求缝与描述改写在 apply 接线层生效', async () => {
+  const realPlatform = process.platform
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  try {
+    class Adapter {
+      async stream(options) { return options }
+
+      async streamWithSnapshot(options) { return options }
+    }
+    const adapter = new Adapter()
+    const llm = { adapters: new Map([['fake', { adapter }]]) }
+    const tool = entryOf(TOOL_PWSH, { rawDisabled: true, disabled: true })
+    const sandbox = entryOf(PWSH_SANDBOX, { rawDisabled: true, disabled: true })
+    const { ctx, log } = stubCtxOf([tool, sandbox], { llm })
+    await mainApply(ctx, {})
+    const viaStream = await adapter.stream({ tools: [{ name: 'read' }, { name: 'pwsh' }] })
+    assert.deepEqual(viaStream.tools.map((entry) => entry.name), ['read'])
+    const viaPrepared = await adapter.streamWithSnapshot({ tools: [{ name: 'pwsh' }] })
+    assert.deepEqual(viaPrepared.tools, [])
+    // apply 开头会重置轨迹,断言只看本次 apply 的全量
+    const trace = shellSelectTakeoverTrace().map((entry) => entry.event)
+    assert.ok(trace.some((event) => event.includes('request-hide attached=1')), `缺少请求缝轨迹: ${trace.join(' | ')}`)
+    const created = log.listeners.find((entry) => entry.event === 'agent/created')
+    assert.notEqual(created, undefined)
+    const definition = { name: 'pwsh', description: 'Run PowerShell commands' }
+    created.listener({ agent: { ctx: { tools: { get: (name) => name === 'pwsh' ? definition : undefined } } } })
+    assert.equal(definition.description, PWSH_REDIRECT_DESCRIPTION)
+    assert.ok(shellSelectTakeoverTrace().some((entry) => entry.event.includes('pwsh 描述')))
   } finally {
     Object.defineProperty(process, 'platform', { value: realPlatform })
   }
