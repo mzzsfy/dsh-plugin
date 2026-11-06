@@ -76,3 +76,23 @@ test('hideShadowedPwsh:空表与非数组原样返回', () => {
   assert.deepEqual(hideShadowedPwsh([]), [])
   assert.equal(hideShadowedPwsh(undefined), undefined)
 })
+
+test('pi-ai 形态:prepared call 直接调 streamWithSnapshot 也被剔除', async () => {
+  // pi-ai 的 PreparedCall.stream 闭包直接调 this.streamWithSnapshot,不经过
+  // adapter.stream;只包公开入口会漏掉这条路径。
+  class Adapter {
+    async stream(options) {
+      return this.streamWithSnapshot(options)
+    }
+
+    async streamWithSnapshot(options) {
+      return options
+    }
+  }
+  const adapter = new Adapter()
+  attachRequestHiding({ adapters: new Map([['pi', { adapter }]]) })
+  const direct = await adapter.streamWithSnapshot({ tools: toolsOf('read', 'pwsh') })
+  assert.deepEqual(direct.tools.map((tool) => tool.name), ['read'])
+  const viaStream = await adapter.stream({ tools: toolsOf('read', 'pwsh') })
+  assert.deepEqual(viaStream.tools.map((tool) => tool.name), ['read'])
+})
