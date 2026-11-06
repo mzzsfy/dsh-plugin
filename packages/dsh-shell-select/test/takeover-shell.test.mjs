@@ -19,6 +19,7 @@ import {
   takeoverDecision,
 } from '../src/takeover.mjs'
 import { OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
+import { shellSelectExecutorFiber } from '../src/apply-state.mjs'
 import { ShellSelectExecutor } from '../src/executor.mjs'
 import { apply as mainApply } from '../src/index.js'
 
@@ -209,7 +210,7 @@ test('awaitOfficialExit:双行全退场(含收尾间隔)→ true;退场卡死 �
 // ── 接线层(W-1 ~ W-7):主行 apply 桩测 ─────────────────────────────────
 
 function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
-  const log = { warns: [], errors: [], infos: [], plugins: [], listeners: [] }
+  const log = { warns: [], errors: [], infos: [], plugins: [], listeners: [], fibers: [] }
   const ctx = {
     loader: loaderOf(entries),
     logger: {
@@ -220,8 +221,22 @@ function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
     plugin: async (module, config) => {
       if (pluginError) throw pluginError
       log.plugins.push({ module, config })
-      // state=2 对齐宿主 cordis 激活态(挂载校验据它判定激活成功)
-      return { dispose: async () => {}, state: 2 }
+      // state=2 对齐宿主 cordis 激活态(挂载校验据它判定激活成功);
+      // effect 同契约为 fiber 级 disposer 通道(句柄退役自清挂这里)
+      const disposers = []
+      const fiber = {
+        state: 2,
+        effect: (execute) => {
+          const dispose = execute()
+          disposers.push(dispose)
+          return dispose
+        },
+        dispose: async () => {
+          for (const dispose of disposers.splice(0).reverse()) await dispose?.()
+        },
+      }
+      log.fibers.push(fiber)
+      return fiber
     },
     on: (event, listener) => {
       log.listeners.push({ event, listener })
@@ -369,6 +384,28 @@ test('W-6 await-exit:禁用行退场完成后挂载(真实 setTimeout 微延迟)
     await mainApply(ctx, {})
     assert.equal(log.plugins.length, 1)
   } finally {
+    Object.defineProperty(process, 'platform', { value: realPlatform })
+  }
+})
+
+// H2 支撑:执行器句柄随 fiber 退役自清——主行被禁后残留的已退役句柄会让
+// guard 把"执行器不在场"误判为在场,吞掉官方行翻回启用时的代挂让位。
+test('执行器句柄退役自清:主行 fiber 卸载后句柄清空(陈旧句柄不得残留)', async () => {
+  const realPlatform = process.platform
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  try {
+    const tool = entryOf(TOOL_PWSH, { rawDisabled: true, disabled: true })
+    const sandbox = entryOf(PWSH_SANDBOX, { rawDisabled: true, disabled: true })
+    const { ctx, log } = stubCtxOf([tool, sandbox])
+    await mainApply(ctx, {})
+    assert.equal(log.plugins.length, 1)
+    const fiber = shellSelectExecutorFiber.current
+    assert.equal(fiber, log.fibers[0], '挂载成功后句柄回填执行器 fiber')
+    // 主行被禁/卸载 → 执行器 fiber 退役
+    await fiber.dispose()
+    assert.equal(shellSelectExecutorFiber.current, undefined, '退役后不得残留已退役句柄')
+  } finally {
+    shellSelectExecutorFiber.current = undefined
     Object.defineProperty(process, 'platform', { value: realPlatform })
   }
 })

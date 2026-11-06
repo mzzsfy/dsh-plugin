@@ -32,7 +32,7 @@ import {
   takeoverDecision,
 } from './takeover.mjs'
 import { coerceServiceable } from './config.mjs'
-import { shellSelectExecutorFiber } from './apply-state.mjs'
+import { retireShellSelectExecutorFiber, shellSelectExecutorFiber } from './apply-state.mjs'
 
 export const name = 'shell-select'
 
@@ -131,8 +131,13 @@ async function mountExecutor(ctx, config) {
   }
   // 执行器句柄回填(HOST-022):0.2.2 写事务重评官方行 disabled 表达式可翻回
   // 启用,官方行复活与本方执行器撞 ctx.shell——guard 监视 patch 事件,官方行
-  // 翻回启用即经此句柄 dispose 本方执行器让位。dispose 后句柄清空防重入。
+  // 翻回启用即经此句柄 dispose 本方执行器让位。
   shellSelectExecutorFiber.current = fiber
+  // 句柄随执行器 fiber 退役自清:主行被禁/卸载后残留的已退役句柄会让 guard
+  // 误判"执行器在场",吞掉官方行翻回启用时的代挂让位(同上写事务实证)。
+  fiber.effect?.(() => () => {
+    if (shellSelectExecutorFiber.current === fiber) retireShellSelectExecutorFiber()
+  }, 'shell-select executor handle retirement')
 }
 
 /**

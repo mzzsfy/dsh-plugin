@@ -215,6 +215,54 @@ test('句柄空缺(guard 代挂态):官方行翻回零动作', async () => {
   assert.equal(shellSelectExecutorFiber.current, undefined)
 })
 
+// H2 回归:代挂态下官方行翻回启用(0.2.2 写事务)。主行被禁后执行器 fiber 已
+// 退役,句柄可能残留(陈旧句柄);旧实现按句柄在场走让位分支并提前 return,
+// 吞掉"卸代挂让位",官方行 provide 撞残留代挂的 ctx.shell 被写入门控放大成
+// settings/rejected。让位必须清空 guard 的"已代挂"记账与 disposer。
+test('HOST-022 让位:代挂态下官方行翻回启用,清空记账并卸代挂(陈旧句柄不吞让位)', async () => {
+  const rows = deadWorld()
+  const { ctx, mounts, listeners } = stubCtx({ rows })
+  // 每个代挂 fiber 占用 shell 服务位:官方行 provide 时撞重复即失败(真实冲突形态)
+  const provided = new Set()
+  ctx.plugin = (module) => {
+    const mount = { moduleName: module.__name }
+    mounts.push(mount)
+    provided.add('shell')
+    return Promise.resolve({
+      dispose: () => {
+        mounts.splice(mounts.indexOf(mount), 1)
+        if (mounts.length === 0) provided.delete('shell')
+        return Promise.resolve()
+      },
+    })
+  }
+  await installGuard(ctx, { importOfficial: makeImport(), delay: async () => {}, sweepIntervalMs: 3600 * 1000 })
+  assert.equal(mounts.length, 2)
+  assert.equal(provided.has('shell'), true)
+  // 陈旧句柄:主行被禁,执行器 fiber 已退役,句柄记账残留
+  let disposed = 0
+  shellSelectExecutorFiber.current = { dispose: () => { disposed += 1; return Promise.resolve() } }
+  try {
+    rows[2] = row({ id: 'pwsh-sandbox', disabled: false })
+    const patchContext = listeners.get('loader/patch-context')
+    let providedAtInit
+    const next = () => {
+      providedAtInit = provided.has('shell')
+      if (providedAtInit) throw new Error('duplicate service: shell')
+      provided.add('shell')
+      return 'passed'
+    }
+    assert.equal(await patchContext(rows[2], next), 'passed')
+    assert.equal(providedAtInit, false, '官方行 init 前必须已撤清代挂占位')
+    assert.equal(mounts.length, 0, 'guard 代挂记账必须清空(不许仍记已代挂)')
+    assert.equal(disposed, 1, '陈旧句柄同样要退役,不得吞掉卸代挂让位')
+    assert.equal(shellSelectExecutorFiber.current, undefined)
+    assert.equal(provided.has('shell'), true, '官方行 provide 成功')
+  } finally {
+    shellSelectExecutorFiber.current = undefined
+  }
+})
+
 test('官方行求值抛错(disabledUnreliable):零动作安全向', async () => {
   const rows = [
     row({ id: MAIN_ROW_ID, disabled: false, running: true }),
