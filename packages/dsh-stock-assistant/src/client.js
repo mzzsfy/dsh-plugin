@@ -646,15 +646,18 @@ window.__ModuleLoader__.load({
         // 该实例实际承担的能力与市场(摘要用, 让「这个源在干什么」一眼可见)
         const owned = draft.routes.filter(r => r.primaryInstanceId === p.id || r.fallbackInstanceIds.includes(p.id))
         const asPrimary = draft.routes.filter(r => r.primaryInstanceId === p.id)
+        const asBackup = draft.routes.filter(r => r.fallbackInstanceIds.includes(p.id))
         const capsText = [...new Set(owned.map(r => CAP_LABEL[r.capability]))].join('/') || '未分配'
         const marketsText = new Set(owned.map(r => r.market)).size
+        // 主源与备源分开计数: 只当备源的实例不该显示成「0 条路由」, 那读起来像没在用
+        const scopeText = [asPrimary.length ? `${asPrimary.length} 主源` : '', asBackup.length ? `${asBackup.length} 备源` : ''].filter(Boolean).join(' · ') || '未分配'
         const toggle = () => change({ expandedProvider: expanded ? '' : p.id }, false)
         return h('div', { className: 'ssb-provider', key: p.id },
           h('button', { className: 'ssb-provider-toggle', 'aria-expanded': expanded, disabled: state.busy.configuration, onClick: toggle, title: adapter?.description || '' },
             h('span', { className: `ssb-dot${p.enabled ? '' : ' ssb-dot-idle'}` }),
             h('span', { className: 'ssb-provider-id' }, p.id),
             h('span', { className: 'ssb-provider-adapter-name ssb-muted' }, p.adapterId),
-            h('span', { className: 'ssb-provider-scope' }, `${asPrimary.length} 条路由 · ${marketsText} 市场 · ${capsText}`),
+            h('span', { className: 'ssb-provider-scope' }, `${scopeText} · ${marketsText} 市场 · ${capsText}`),
             h('span', { className: 'ssb-muted ssb-provider-kind' }, openSource ? '公开来源' : status?.credentialPresent ? '凭据已就绪' : '待配置凭据'),
             h('span', { className: 'ssb-provider-edit' }, expanded ? '收起' : '配置')),
           adapter?.description ? h('p', { className: 'ssb-provider-desc ssb-muted' }, adapter.description) : null,
