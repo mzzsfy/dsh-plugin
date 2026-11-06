@@ -215,6 +215,41 @@ test('Given no active pump, When querying pump state, Then the route reports no 
   fixture.dispose()
 })
 
+test('Given a pump holding a session terminal, When querying pump state, Then the route reports attached', async () => {
+  const attachment = {
+    attach: async function* (input) {
+      yield { type: 'snapshot', sequence: 0, screen: '', info: { state: 'running' }, writable: false }
+      for await (const command of input) yield { type: 'ack', sequence: command.sequence }
+    },
+  }
+  const controller = {
+    owners: new Map(),
+    config: { maxInputBytes: 1024, maxCols: 200, maxRows: 100 },
+    terminal: () => attachment,
+    shells: async () => [],
+    list: () => [{ id: 'term-a', title: 'bash', cwd: '/w', state: 'running', cols: 80, rows: 24 }],
+    create: async () => ({ id: 'term-a' }),
+    attach: () => {},
+    close: async () => {},
+  }
+  const fixture = context(controller)
+  registerTerminalTool(fixture.ctx, { version: '0.2.2-rc.1', defineTool })
+  const tool = fixture.registrations[0]
+  const written = await tool.execute(
+    { action: 'write', terminal_id: 'term-a', text: 'echo hi' },
+    { agent: { id: 'session-a', session: { id: 'session-a' } }, signal: new AbortController().signal },
+  )
+  assert.equal(written.ok, true)
+  const route = fixture.routes.find((item) => /\/pump$/.test(item.path))
+  const res = stubRes()
+  const req = stubReq({ sessionId: 'session-a' })
+  const handled = route.handler(req, res)
+  req.emit()
+  await handled
+  assert.deepEqual(JSON.parse(res.body), { ok: true, attached: true }, '泵附着期间路由须报 attached')
+  fixture.dispose()
+})
+
 test('Given malformed, cross-origin or wrong-method pump queries, When handled, Then they are rejected', async () => {
   const { fixture, route } = pumpRoute()
   const cross = stubRes()

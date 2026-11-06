@@ -151,7 +151,8 @@ export class AttachPump {
 export function createPumpFactory(controller) {
   const pumps = new Map()
   let disposed = false
-  const key = (agent, id) => `${agent.id}:${id}`
+  const keyOf = (agentId, id) => `${agentId}:${id}`
+  const key = (agent, id) => keyOf(agent.id, id)
   return {
     for(agent, id) {
       if (disposed) throw disposedError()
@@ -167,11 +168,12 @@ export function createPumpFactory(controller) {
       pumps.delete(key(agent, id))
     },
     attachedById(agentId, id) {
-      return pumps.get(`${agentId}:${id}`)?.attached === true
+      return pumps.get(keyOf(agentId, id))?.attached === true
     },
     attachedIn(agentId) {
-      for (const [key, pump] of pumps) {
-        if (key.startsWith(`${agentId}:`) && pump.attached) return true
+      const prefix = keyOf(agentId, '')
+      for (const [entry, pump] of pumps) {
+        if (entry.startsWith(prefix) && pump.attached) return true
       }
       return false
     },

@@ -305,6 +305,7 @@ window.__ModuleLoader__.load({
     const HEAL_INTERVAL_MS = 2 * 1000
     const HEAL_COOLDOWN_MS = 5 * 1000
     const HEAL_OVERFLOW_PX = 2
+    const HEAL_SESSIONS_MAX = 64
     // 查询不能拖住巡检:挂起的请求会让后续轮次被 running 守卫全部跳过
     const HEAL_QUERY_TIMEOUT_MS = 3 * 1000
 
@@ -319,9 +320,11 @@ window.__ModuleLoader__.load({
 
     const takeoverButton = (root) => root.querySelector('[role="status"]')?.querySelector('button')
 
-    // 隐藏 tab 的 .xterm 没有几何,不能算裁切;附着力按屏上 Session 汇总判断,
-    // 只要该 Session 还有泵在写就不动,宁可漏自愈也不抢 AI 的写入
-    const visibleRoot = (root) => typeof root.clientHeight === 'number' && root.clientHeight > 0
+    // 隐藏 tab 没有几何;屏上 Session 才渲染终端面板,附着力按 mounted 判断即可
+    const visibleRoot = (root) => {
+      const rect = root.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    }
 
     // 查询失败按"仍在附着"处理:宁可不自愈,也不抢走 AI 的写入
     const pumpAttached = async (sessionId) => {
@@ -340,9 +343,14 @@ window.__ModuleLoader__.load({
       if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function' || typeof setInterval !== 'function') return () => {}
       const healed = new Map()
       let running = false
+      const remember = (sessionId, at) => {
+        healed.set(sessionId, at)
+        if (healed.size <= HEAL_SESSIONS_MAX) return
+        for (const [name, stamp] of healed) if (at - stamp > HEAL_COOLDOWN_MS) healed.delete(name)
+      }
       // 每轮重扫 DOM:宿主 tab 可随时增删,缓存 root 会拿到已卸载的节点
       const tick = async () => {
-        if (running) return
+        if (running || document.hidden === true) return
         running = true
         try {
           for (const root of document.querySelectorAll('[data-sidebar-terminal]')) {
@@ -352,8 +360,12 @@ window.__ModuleLoader__.load({
             if (typeof sessionId !== 'string' || healed.get(sessionId) > Date.now() - HEAL_COOLDOWN_MS) continue
             // 泵附着中不抢控制权:那会让 AI 的下一次写入落空
             if (await pumpAttached(sessionId)) continue
-            healed.set(sessionId, Date.now())
-            button.click()
+            // 等待期间 tab 可能被卸载、状态栏按钮可能被替换、几何可能已恢复
+            if (root.isConnected === false || !clipped(root)) continue
+            const fresh = takeoverButton(root)
+            if (fresh === undefined) continue
+            remember(sessionId, Date.now())
+            fresh.click()
           }
         } catch {
           // 自愈是宿主行为的兜底,失败不得影响渲染

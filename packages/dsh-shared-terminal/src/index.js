@@ -15,7 +15,7 @@ const METHODS_LEGACY = ['shells', 'list', 'create', 'write', 'close', 'terminal'
 const METHODS_SHARED = ['shells', 'list', 'create', 'attach', 'close', 'terminal']
 const WAIT_SKIP_PATH = '/api/shared-terminal/wait/skip'
 const PUMP_STATE_PATH = '/api/shared-terminal/pump'
-const WAIT_SKIP_BODY_MAX_BYTES = 64 * 1024
+const ROUTE_BODY_MAX_BYTES = 64 * 1024
 const require = createRequire(import.meta.url)
 
 const sendJson = (res, status, payload) => {
@@ -29,7 +29,7 @@ const readBody = (req, res) => new Promise((resolve, reject) => {
   const chunks = []
   req.on('data', (chunk) => {
     size += chunk.length
-    if (size > WAIT_SKIP_BODY_MAX_BYTES) {
+    if (size > ROUTE_BODY_MAX_BYTES) {
       // 只暂停流入并标记超限,不销毁 socket:连接毁了 413 就送不出去
       over = true
       req.pause()
@@ -59,24 +59,31 @@ const rejectCrossOrigin = (req, res) => {
   return true
 }
 
+// 统一的 POST+同源+JSON body 入口:失败时已写好响应,调用方拿到 undefined 直接返回
+async function readPostJson(req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method not allowed' })
+    return undefined
+  }
+  if (rejectCrossOrigin(req, res)) return undefined
+  try {
+    return JSON.parse(await readBody(req, res))
+  } catch (error) {
+    const overLimit = error?.overLimit === true
+    sendJson(res, overLimit ? 413 : 400, { error: overLimit ? error.message : '请求体须为 JSON' })
+    return undefined
+  }
+}
+
+const fieldOf = (body, name) => (typeof body?.[name] === 'string' ? body[name].trim() : '')
+
 // wait 手动打断路由:client 卡片「跳过等待」经此 abort 同键全部 pending wait
 function createWaitSkipHandler(waitSkipRegistry) {
   return async (req, res) => {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'method not allowed' })
-      return
-    }
-    if (rejectCrossOrigin(req, res)) return
-    let body
-    try {
-      body = JSON.parse(await readBody(req, res))
-    } catch (error) {
-      const overLimit = error?.overLimit === true
-      sendJson(res, overLimit ? 413 : 400, { error: overLimit ? error.message : '请求体须为 JSON' })
-      return
-    }
-    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
-    const terminalId = typeof body?.terminalId === 'string' ? body.terminalId.trim() : ''
+    const body = await readPostJson(req, res)
+    if (body === undefined) return
+    const sessionId = fieldOf(body, 'sessionId')
+    const terminalId = fieldOf(body, 'terminalId')
     if (sessionId === '' || terminalId === '') {
       sendJson(res, 400, { error: 'sessionId 与 terminalId 不能为空' })
       return
@@ -88,20 +95,9 @@ function createWaitSkipHandler(waitSkipRegistry) {
 // 泵附着状态路由:client 自愈只在无控制者时接管输入,避免抢走 AI 的写入
 function createPumpStateHandler(pumpFactory) {
   return async (req, res) => {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'method not allowed' })
-      return
-    }
-    if (rejectCrossOrigin(req, res)) return
-    let body
-    try {
-      body = JSON.parse(await readBody(req, res))
-    } catch (error) {
-      const overLimit = error?.overLimit === true
-      sendJson(res, overLimit ? 413 : 400, { error: overLimit ? error.message : '请求体须为 JSON' })
-      return
-    }
-    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+    const body = await readPostJson(req, res)
+    if (body === undefined) return
+    const sessionId = fieldOf(body, 'sessionId')
     if (sessionId === '') {
       sendJson(res, 400, { error: 'sessionId 不能为空' })
       return
@@ -112,7 +108,7 @@ function createPumpStateHandler(pumpFactory) {
 }
 
 // 供 apply 装配与测试捕获共用的路由注册体
-function registerWaitSkipRoutes(ctx, { waitSkipRegistry, tools, controller, defineTool, version }) {
+function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller, defineTool, version }) {
   const webServer = ctx.get('webServer')
   const hasLegacyWrite = typeof controller?.write === 'function'
   const required = hasLegacyWrite ? METHODS_LEGACY : METHODS_SHARED
@@ -142,7 +138,7 @@ function registerWaitSkipRoutes(ctx, { waitSkipRegistry, tools, controller, defi
 }
 
 export function registerTerminalTool(ctx, { version, defineTool, waitSkipRegistry = createWaitSkipRegistry() }) {
-  registerWaitSkipRoutes(ctx, {
+  registerSharedTerminalRoutes(ctx, {
     version,
     defineTool,
     controller: ctx.get('terminalController'),

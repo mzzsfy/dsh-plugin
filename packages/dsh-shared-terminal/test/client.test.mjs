@@ -52,7 +52,7 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
   }
   plugin.apply({ remote, slots, sidebarRight, locale: { register: () => {} }, effect: (fn) => fn() })
   return {
-    calls, seen, plugin,
+    calls, seen, plugin, document: documentStub,
     render(props) { index = 0; return component(props) },
     async flush() { const pending = effects.splice(0).map((effect) => effect()); await settled(); return pending },
     async heal() { for (const timer of timers) await timer() },
@@ -217,34 +217,55 @@ test('Given a running non-wait tool, When rendering, Then no skip button appears
 
 // ── 只读终端自愈:泵释放后宿主不归还 writable,只读界面不重算几何 ─────────
 
-const fakeRoot = ({ clicks, contentHeight = 800, readonly = true, visible = true, statusHeight = 40 } = { clicks: [] }) => ({
-  clientHeight: visible ? 500 : 0,
-  querySelector(selector) {
-    if (selector === '[role="status"]') {
-      if (!readonly) return null
-      return {
-        getBoundingClientRect: () => ({ width: 400, height: statusHeight }),
-        querySelector: (inner) => (inner === 'button' ? { click: () => clicks.push('takeover') } : null),
+const fakeRoot = (options = { clicks: [] }) => {
+  const state = {
+    clicks: options.clicks,
+    content: options.contentHeight ?? 800,
+    readonly: options.readonly ?? true,
+    visible: options.visible ?? true,
+    status: options.statusHeight ?? 40,
+    connected: options.connected ?? true,
+  }
+  const root = {
+    state,
+    get isConnected() { return state.connected },
+    set isConnected(value) { state.connected = value },
+    getBoundingClientRect: () => ({ width: state.visible ? 400 : 0, height: state.visible ? 500 : 0 }),
+    querySelector(selector) {
+      if (selector === '[role="status"]') {
+        if (!state.readonly) return null
+        return {
+          getBoundingClientRect: () => ({ width: 400, height: state.status }),
+          querySelector: (inner) => (inner === 'button' ? { click: () => state.clicks.push('takeover') } : null),
+        }
       }
-    }
-    if (selector === '.xterm-screen') return { getBoundingClientRect: () => ({ width: 400, height: contentHeight }) }
-    if (selector === '.xterm') return { getBoundingClientRect: () => ({ width: 400, height: 300 }) }
-    return null
-  },
-})
+      if (selector === '.xterm-screen') return { getBoundingClientRect: () => ({ width: 400, height: state.content }) }
+      if (selector === '.xterm') return { getBoundingClientRect: () => ({ width: 400, height: 300 }) }
+      return null
+    },
+  }
+  return root
+}
 
-const healingFixture = (options) => fixture({
-  tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'content' }],
-  params: { terminalId: 'term-a' },
-  fetchImpl: options.fetchImpl ?? (async () => ({ ok: true, json: async () => ({ ok: true, attached: false }) })),
-  roots: options.roots ?? [],
-})
+const healingFixture = (options) => {
+  const queries = []
+  const inner = options.fetchImpl ?? (async () => ({ ok: true, json: async () => ({ ok: true, attached: false }) }))
+  const app = fixture({
+    tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'content' }],
+    params: { terminalId: 'term-a' },
+    fetchImpl: async (url, init) => { queries.push([url, JSON.parse(init?.body ?? '{}')]); return inner(url, init) },
+    roots: options.roots ?? [],
+  })
+  app.queries = queries
+  return app
+}
 
 test('Given a read-only clipped terminal without controller, When healing ticks, Then it takes input control once', async () => {
   const clicks = []
   const app = healingFixture({ roots: [fakeRoot({ clicks })] })
   await app.heal()
   assert.deepEqual(clicks, ['takeover'])
+  assert.deepEqual(app.queries, [['/api/shared-terminal/pump', { sessionId: 'session-a' }]], '自愈须查宿主泵状态路由')
   await app.heal()
   assert.deepEqual(clicks, ['takeover'], '冷却窗口内不得重复抢控制权')
 })
@@ -286,6 +307,64 @@ test('Given the pump state route is unavailable, When healing ticks, Then no tak
   const app = healingFixture({ roots: [fakeRoot({ clicks })], fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }) })
   await app.heal()
   assert.deepEqual(clicks, [])
+})
+
+test('Given the pump state query rejects, When healing ticks, Then the failure is swallowed and nothing is taken over', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })], fetchImpl: async () => { throw new Error('network down') } })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the tab was detached while the pump state was queried, When healing ticks, Then no click lands on the stale node', async () => {
+  const clicks = []
+  const root = fakeRoot({ clicks })
+  const app = healingFixture({
+    roots: [root],
+    fetchImpl: async () => {
+      root.isConnected = false
+      return { ok: true, json: async () => ({ ok: true, attached: false }) }
+    },
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the terminal regains its geometry while the pump state was queried, When healing ticks, Then no click is dispatched', async () => {
+  const clicks = []
+  const root = fakeRoot({ clicks })
+  const app = healingFixture({
+    roots: [root],
+    fetchImpl: async () => {
+      root.state.content = 300
+      return { ok: true, json: async () => ({ ok: true, attached: false }) }
+    },
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the status bar disappears while the pump state was queried, When healing ticks, Then the stale takeover button is not clicked', async () => {
+  const clicks = []
+  const root = fakeRoot({ clicks })
+  const app = healingFixture({
+    roots: [root],
+    fetchImpl: async () => {
+      root.state.readonly = false
+      return { ok: true, json: async () => ({ ok: true, attached: false }) }
+    },
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the page is hidden, When healing ticks, Then no pump query is issued', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })] })
+  app.document.hidden = true
+  await app.heal()
+  assert.deepEqual(clicks, [])
+  assert.deepEqual(app.queries, [], '后台标签页不得发查询')
 })
 
 test('Given the terminal tab is hidden, When healing ticks, Then it is skipped', async () => {
