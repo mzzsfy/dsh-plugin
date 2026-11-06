@@ -318,8 +318,7 @@ window.__ModuleLoader__.load({
               h('span', { className: 'ssb-cell-amount' }, '成交额'),
               h('span', { className: 'ssb-cell-amplitude' }, '振幅'),
               h('span', { className: 'ssb-cell-pl' }, '持仓盈亏'),
-              h('span', { className: 'ssb-col-status' }, ''),
-              h('span', { className: 'ssb-col-more' }, '')),
+              h('span', { className: 'ssb-col-status' }, '')),
             h('div', { className: 'ssb-rows', role: 'list', 'aria-label': '自选列表' }, ...(() => {
                 // 分组分段: 仅手动序生效(全局排序即比较语义不分区); 置顶区不进组段; 组序=首现序; 折叠组隐藏成员
                 // 拖拽排序: 提交完整显示序, 折叠组隐藏项保持原槽位由 order 回填
@@ -346,6 +345,7 @@ window.__ModuleLoader__.load({
                     h('div', {
                       className: `ssb-row${view.detailId === id ? ' ssb-selected' : ''}${entry?.health !== 'ok' ? ' ssb-stale' : ''}${dragging ? ' ssb-dragging' : ''}${dropEdge}${item.pinned ? ' ssb-pinned' : ''}`,
                       role: 'listitem', 'data-security-id': id, draggable: canDrag,
+                      onClick: () => open(id),
                       onDragStart: e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); runtime.updateView({ dragId: id, dropAt: null }) },
                       onDragEnd: () => runtime.updateView({ dragId: null, dropAt: null }),
                       onDragOver: e => {
@@ -375,21 +375,14 @@ window.__ModuleLoader__.load({
                       h('span', { className: 'ssb-cell-amount' }, formatAmount(q?.amount)),
                       h('span', { className: 'ssb-cell-amplitude' }, amplitude == null ? '—' : `${amplitude}%`),
                       h('span', { className: `ssb-cell-pl${plPct == null ? '' : Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, plPct == null ? '—' : `${signed(plPct)}%`),
-                      h(QuoteStatus, { entry, short: true }),
-                      h('button', { className: 'ssb-row-more', 'aria-label': `${item.officialName}更多操作`, 'aria-expanded': view.menuId === id, onClick: () => runtime.updateView({ menuId: view.menuId === id ? null : id, frozenOrder: view.menuId === id ? null : order }) }, '⋯')),
+                      h(QuoteStatus, { entry, short: true })),
                     h('div', { className: 'ssb-row-sub' },
                       h('span', { className: 'ssb-kv' }, '开', formatPrice(q?.open)),
                       h('span', { className: 'ssb-kv' }, '高', formatPrice(q?.high)),
                       h('span', { className: 'ssb-kv' }, '低', formatPrice(q?.low)),
                       h('span', { className: 'ssb-kv' }, '额', formatAmount(q?.amount)),
                       amplitude == null ? null : h('span', { className: 'ssb-kv' }, '振', `${amplitude}%`),
-                      plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, '持仓', `${signed(plPct)}%`))),
-                    view.menuId === id ? h('div', { className: 'ssb-row-menu' }, h('div', { className: 'ssb-row-actions' },
-                    h(Button, { disabled: busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
-                    h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === 0 || w.items[order[order.indexOf(id) - 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) - 1] })) }, '上移'),
-                    h(Button, { disabled: view.sort !== 'manual' || busy.write || order.indexOf(id) === order.length - 1 || w.items[order[order.indexOf(id) + 1]]?.pinned !== item.pinned, onClick: quiet(() => runtime.mutate('move', { securityId: id, beforeId: order[order.indexOf(id) + 2] && w.items[order[order.indexOf(id) + 2]]?.pinned === item.pinned ? order[order.indexOf(id) + 2] : null })) }, '下移'),
-                    h(Button, { onClick: () => open(id) }, '详情 / 别名'), h(Button, { danger: true, disabled: busy.write, onClick: quiet(() => runtime.mutate('remove', { securityId: id })) }, '删除'),
-                    view.sort !== 'manual' ? h('span', { className: 'ssb-muted' }, '切回手动顺序后可移动') : null)) : null)
+                      plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, '持仓', `${signed(plPct)}%`))))
                 }
                 // 手动序: 未分组置顶区行 + 组段(组头行含统计/重命名/解散+折叠); 全局排序: 平铺不分区
                 if (view.sort !== 'manual') return order.map(rowOf)
@@ -657,7 +650,11 @@ window.__ModuleLoader__.load({
       // 分组表单(B1): 单标签, 空=移出分组; 草稿 view.groupDraft
       const groupForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.groupDraft?.trim() ?? item.group; if ([...raw].length > 12) { runtime.updateView({ groupError: '分组名最多12字' }); return } quiet(() => runtime.mutate('group', { securityIds: [item.id], group: raw }))() } }, h('label', null, '设分组', h('input', { value: view.groupDraft ?? (item.group || ''), maxLength: 12, onChange: e => runtime.updateView({ groupDraft: e.target.value, groupError: '' }), placeholder: '留空移出分组' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存分组'), view.groupError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.groupError) : null) : null
       const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本 ${item.cost}`)) : null
-      const watchActions = inWatchlist ? h(React.Fragment, null, costForm, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名'))) : null
+      const watchActions = inWatchlist ? h(React.Fragment, null, costForm, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
+        // 行内不再挂操作菜单, 排序走拖拽, 剩下的置顶与移出收敛到这里: 低频、且删除需要确认, 不适合出现在每一行
+        h('div', { className: 'ssb-alias-form' }, h('span', { className: 'ssb-muted ssb-small' }, '自选管理'), h('div', { className: 'ssb-toolbar' },
+          h(Button, { disabled: state.busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: item.id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
+          h(Button, { danger: true, disabled: state.busy.write, onClick: () => { if (!confirm(`从自选移除「${item.alias || item.officialName}」?`)) return; quiet(() => runtime.mutate('remove', { securityId: item.id }))(); runtime.updateView({ detailId: null, selectedId: null, overlay: null, focusId: null }) } }, '移出自选')))) : null
       return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), inWatchlist && order.length > 1 ? h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => openNeighbor(neighbor(-1)) }, '上一只'), h(Button, { onClick: () => openNeighbor(neighbor(1)) }, '下一只')) : null),
         h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
         h('div', { className: `ssb-detail-price ssb-number${direction}` }, q?.last ?? '—', h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
@@ -884,11 +881,13 @@ window.__ModuleLoader__.load({
 .ssb-list-pane > .ssb-table-scroll { flex:1; min-height:0; }
 .ssb-list-pane > .ssb-foot, .ssb-list-pane > .ssb-banner { flex:0 0 auto; }
 .ssb-rows { display:flex; flex-direction:column; }
-/* 表头与数据行共用同一套列模板, 保证逐列对齐 */
-.ssb-row-head,.ssb-row-main { display:grid; grid-template-columns:12px minmax(132px,1fr) 62px 56px 52px 60px 88px 62px 44px 54px 14px 28px; gap:8px; align-items:center; }
+/* 表头与数据行共用同一套列模板, 保证逐列对齐; 数值列右对齐且等宽数字, 长内容不再挤占相邻列 */
+.ssb-row-head,.ssb-row-main { display:grid; grid-template-columns:12px minmax(140px,1fr) 64px 58px 56px 62px 104px 82px 52px 60px 16px; gap:8px; align-items:center; font-variant-numeric:tabular-nums; }
 .ssb-row-head { height:32px; padding:0 12px; font-size:12px; color:var(--ssb-text-sub); border-bottom:1px solid var(--ssb-border); }
 .ssb-row-head .ssb-cell-price,.ssb-row-head .ssb-cell-pct,.ssb-row-head .ssb-cell-change,.ssb-row-head .ssb-cell-range,.ssb-row-head .ssb-cell-amount,.ssb-row-head .ssb-cell-amplitude,.ssb-row-head .ssb-cell-pl { font-family:inherit; color:inherit; }
-.ssb-row { padding:0 12px; }
+.ssb-row-main > .ssb-cell-price,.ssb-row-main > .ssb-cell-pct,.ssb-row-main > .ssb-cell-change,.ssb-row-main > .ssb-cell-open,.ssb-row-main > .ssb-cell-range,.ssb-row-main > .ssb-cell-amount,.ssb-row-main > .ssb-cell-amplitude,.ssb-row-main > .ssb-cell-pl,.ssb-row-head > span:nth-child(n+3) { justify-self:end; }
+.ssb-row-main > .ssb-cell-price,.ssb-row-main > .ssb-cell-range,.ssb-row-main > .ssb-cell-amount { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ssb-row { padding:0 12px; cursor:pointer; }
 .ssb-row-main { height:40px; font-size:12px; }
 .ssb-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
 .ssb-row.ssb-selected { background:var(--ssb-accent-wash); }
@@ -907,24 +906,24 @@ window.__ModuleLoader__.load({
 .ssb-cell-range { white-space:nowrap; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 .ssb-cell-price { font-size:15px; font-weight:600; }
 .ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-open { color:var(--ssb-text-dim); }
-.ssb-col-status,.ssb-col-more { justify-self:end; }
+.ssb-col-status { justify-self:end; }
 .ssb-pill { display:inline-block; padding:0 5px; border-radius:var(--ssb-radius-sm); background:color-mix(in srgb, currentColor 12%, transparent); }
-.ssb-row-more { width:28px; height:24px; font:inherit; font-size:13px; line-height:1; color:var(--ssb-text-dim); background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; justify-self:end; }
-.ssb-row-more:hover { color:var(--ssb-text); background:var(--dsw-alias-interactive-bg-hover); }
-.ssb-row-menu { padding:4px 0 8px 20px; border-top:1px solid var(--ssb-border); }
+
+
+
 /* 窄容器降级: 单行拆两段, 隐藏列头与宽屏列 */
 .ssb-row-sub { display:none; }
 @container (max-width:700px) {
   .ssb-row-head { display:none; }
   .ssb-row { padding:6px 10px; }
-  .ssb-row-main { grid-template-columns:12px minmax(80px,1fr) 68px 64px 56px 14px 28px; height:auto; }
+  .ssb-row-main { grid-template-columns:12px minmax(80px,1fr) 68px 64px 56px 16px; height:auto; }
   .ssb-cell-open,.ssb-cell-range,.ssb-cell-amount,.ssb-cell-amplitude,.ssb-cell-pl { display:none; }
   .ssb-row-sub { display:flex; gap:10px; margin-top:2px; padding-left:20px; font-size:12px; color:var(--ssb-text-dim); font-variant-numeric:tabular-nums; font-family:var(--ds-font-family-code); }
 }
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
 .ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; height:32px; padding:0 12px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:12px; color:var(--ssb-text-sub); }
 .ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
-.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
+.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
 .ssb-settings-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }.ssb-settings-intro { min-width:0; display:grid; gap:6px; }.ssb-settings-intro p { margin:0; }
 .ssb-provider-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; }.ssb-provider-adapter { flex:0 0 240px; }.ssb-provider-switches { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }.ssb-provider-desc { margin:8px 0 0; }.ssb-provider-advanced { margin-top:8px; }.ssb-provider-advanced > summary { cursor:pointer; }
 /* 摘要行: 数据源与市场默认收成一行, 点开才展开编辑区 */
