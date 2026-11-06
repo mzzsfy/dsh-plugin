@@ -1,14 +1,32 @@
 // 每市场的币种/时区/价格精度/代码形态/探针门控——securitySchema 与 makeSecurity 的派生源(来源标注见 design.md)
+// sessions 是该市场连续竞价的时段(市场本地时间), 用来判断报价此刻处在交易中/午休/休市;
+// 只描述周内时点, 法定节假日仍以数据本身(最后一根K线的日期)为准。
 export const MARKET_META = {
-  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true },
-  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true },
-  XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true },
-  XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true },
-  XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true },
-  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: true },
-  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: true },
-  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: true },
+  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']] },
+  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']] },
+  XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true, sessions: [['09:30', '12:00'], ['13:00', '16:00']] },
+  XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']] },
+  XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']] },
+  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: true, sessions: [['09:00', '11:30'], ['12:30', '15:30']] },
+  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:00', '15:30']] },
+  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: true, sessions: [['08:00', '16:30']] },
 }
+// 报价此刻落在市场交易日的哪个阶段; 周末恒为休市, 节假日不做推断(没有日历能力时会误判)
+export function sessionStateOf(exchange, nowMs) {
+  const meta = MARKET_META[exchange]
+  if (!meta?.sessions?.length) return 'unknown'
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: meta.timezone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(nowMs))
+  const pick = type => parts.find(part => part.type === type)?.value
+  if (pick('weekday') === 'Sat' || pick('weekday') === 'Sun') return 'closed'
+  const minutes = (Number(pick('hour')) % 24) * 60 + Number(pick('minute'))
+  const bounds = meta.sessions.map(([from, to]) => [toMinutes(from), toMinutes(to)])
+  if (minutes < bounds[0][0]) return 'preopen'
+  if (bounds.some(([from, to]) => minutes >= from && minutes < to)) return 'trading'
+  // 午休只存在于两段之间: 只比前一段的收尾会把收盘后也算成午休
+  if (bounds.some(([, to], index) => index < bounds.length - 1 && minutes >= to && minutes < bounds[index + 1][0])) return 'break'
+  return 'closed'
+}
+const toMinutes = stamp => { const [hh, mm] = stamp.split(':').map(Number); return hh * 60 + mm }
 
 export function securityId(exchange, code, instrument = 'equity') {
   const meta = MARKET_META[exchange]

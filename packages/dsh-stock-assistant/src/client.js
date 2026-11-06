@@ -436,7 +436,7 @@ window.__ModuleLoader__.load({
       const cs = getComputedStyle(root)
       const red = cs.getPropertyValue('--ssb-danger').trim(), green = cs.getPropertyValue('--ssb-ok').trim()
       const [up, down] = colorMode === 'green-up' ? [green, red] : [red, green]
-      return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'] }
+      return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'], cost: '#f97316' }
     }
     function computeMA(candles, n) { return candles.map((c, i) => i < n - 1 ? null : { time: c.time, value: candles.slice(i - n + 1, i + 1).reduce((s, x) => s + x.close, 0) / n }).filter(Boolean) }
     function KlineError({ message, onRetry, guide, busyOneClick }) {
@@ -449,6 +449,14 @@ window.__ModuleLoader__.load({
       const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), maRef = React.useRef([]), volRef = React.useRef(null), avgRef = React.useRef(null)
       // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
       const pendingRef = React.useRef(null)
+      // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
+      const preCloseLineRef = React.useRef(null), costLineRef = React.useRef(null)
+      function drawLine(ref, options) {
+        const series = mainRef.current
+        if (!series) return
+        if (ref.current) { try { series.removePriceLine(ref.current) } catch { } ref.current = null }
+        if (options) ref.current = series.createPriceLine(options)
+      }
       const themeOf = () => readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, state.data.control.preferences.colorMode)
       // 量柱着色与 MA 灌入(日/周/月)
       function fillCandleData(result) {
@@ -465,7 +473,7 @@ window.__ModuleLoader__.load({
         const points = result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.close }))
         mainRef.current.setData(points)
         avgRef.current.setData(result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.avg ?? c.close })))
-        if (result.preClose != null) mainRef.current.createPriceLine({ price: result.preClose, color: themeOf().crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' })
+        drawLine(preCloseLineRef, result.preClose != null ? { price: result.preClose, color: themeOf().crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
       }
       // 分时用 Area、K线用 Candlestick, 同一 chart 上换形态就是删旧 series 建新 series;
       // 时间轴允许 Unix 秒与业务日期混用, 所以不必重建整个实例。
@@ -479,6 +487,8 @@ window.__ModuleLoader__.load({
         if (wantTrend === !!avgRef.current && mainRef.current) return
         for (const s of [mainRef.current, avgRef.current, volRef.current, ...maRef.current]) if (s) chart.removeSeries(s)
         mainRef.current = avgRef.current = volRef.current = null; maRef.current = []
+        // 旧 series 上的参考线随 series 一起销毁, 引用要清掉
+        preCloseLineRef.current = null; costLineRef.current = null
         const theme = themeOf()
         if (wantTrend) {
           mainRef.current = chart.addSeries(LWC.AreaSeries, { topColor: theme.up + '4d', bottomColor: theme.up + '07', lineColor: theme.up, lineWidth: 1 }, 0)
@@ -522,6 +532,8 @@ window.__ModuleLoader__.load({
           timeScale: { timeVisible: wantTrend, tickMarkFormatter: tickMark },
         })
         wantTrend ? fillTrendData(result) : fillCandleData(result)
+        // 成本价是持仓视角的基准线, 设了就要在图上看得见
+        drawLine(costLineRef, item.cost ? { price: item.cost, color: themeOf().cost, lineStyle: 0, lineWidth: 1, title: `成本 ${item.cost}` } : null)
         // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上
         chartRef.current.timeScale().fitContent()
       }
@@ -563,6 +575,11 @@ window.__ModuleLoader__.load({
         runtime.loadKline(item.id, period).then(result => { if (!dead) maybeFill(result) }).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
         return () => { dead = true }
       }, [item.id, period])
+      // 成本价单独变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
+      React.useEffect(() => {
+        if (!mainRef.current) return
+        drawLine(costLineRef, item.cost ? { price: item.cost, color: themeOf().cost, lineStyle: 0, lineWidth: 1, title: `成本 ${item.cost}` } : null)
+      }, [item.cost, kline.candles])
       return h('div', { className: 'ssb-kline' },
         h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻'), h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,

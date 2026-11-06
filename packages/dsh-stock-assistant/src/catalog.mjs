@@ -1,5 +1,5 @@
 import { securitySchema } from './schemas.mjs'
-import { fail } from './market-model.mjs'
+import { fail, sessionStateOf } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 const SEARCH_TTL = 60 * 1000
 const SEARCH_CACHE_LIMIT = 64
@@ -150,7 +150,8 @@ export function createCatalog({ state, getControl = state.get, router, executor,
     },
     marketState(market) {
       const date = localDate(now()), day = records('calendar').filter(c => c.payload.market === market).flatMap(c => c.payload.items).find(d => d.date === date)
-      if (!day || typeof day.isOpen !== 'boolean') return { state: 'unknown' }
+      // 没同步过日历就按市场自身的时段判断, 别让八市场统一显示「未知」; 有日历数据时以日历(含节假日)为准
+      if (!day || typeof day.isOpen !== 'boolean') return { state: sessionStateOf(market, now()) }
       const local = new Date(now() + 8 * 60 * 60 * 1000), minutes = local.getUTCHours() * 60 + local.getUTCMinutes()
       const at = minute => Date.parse(`${date}T00:00:00+08:00`) + minute * 60 * 1000
       if (!day.isOpen) return { state: 'closed', nextAt: at(24 * 60 + 9 * 60 + 15) }
