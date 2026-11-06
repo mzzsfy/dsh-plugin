@@ -63,30 +63,29 @@ export const controlSchema = z.object({ revision: z.number().int().nonnegative()
   try { parseConfiguration({ providers: control.providers, routes: control.routes }) } catch { ctx.addIssue({ code: 'custom', message: '来源配置不一致' }) }
 })
 export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
-// 推荐配置:三个免凭据源全开,八市场四能力路由齐备,公开源无SLA故对可覆盖的市场串备源。
+// 推荐配置:四个免凭据源,东财做八市场主力,其余按实测最强能力分派备份——公开源无SLA,能覆盖的市场都串上备源。
 export const defaultConfig = () => {
   const budget = (requestsPerMinute, capabilityLimits = {}) => ({ requestsPerMinute, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits })
   const providers = [
     { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: budget(60, { kline: 30 }) },
-    { id: 'sn-default', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
+    { id: 'sn-backup', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
     { id: 'tx-backup', adapterId: 'tencent', enabled: true, credentialEnv: null, quotaGroup: 'free-backup', budget: budget(60, { kline: 20 }) },
+    { id: 'xq-backup', adapterId: 'xueqiu', enabled: true, credentialEnv: null, quotaGroup: 'free-xq', budget: budget(60) },
   ]
   // 备用源只在探针可验证的组合上声明: 腾讯美股K线需先由搜索建立代码映射, 探针期必然不可用
-  const quoteBackup = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
   const klineBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
   // 目录只有沪深港美有来源节点(实测东财 clist 的 fs 只覆盖这五个),其余市场不配目录路由
   const catalogCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS'])
+  // 报价备源按市场派: 沪深港走新浪(免cookie、单位已是股), 美股走雪球(时间戳是UTC毫秒, 与东财同口径)
+  const quoteBackupOf = market => (market === 'XNAS' || market === 'XNYS' ? 'xq-backup' : ['XSHG', 'XSHE', 'XHKG'].includes(market) ? 'sn-backup' : null)
   const route = (market, capability, primary, fallback = null) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: fallback ? [fallback] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
-  const routes = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'].flatMap(market => {
-    const cn = market === 'XSHG' || market === 'XSHE'
-    return [
-      // 沪深目录走新浪分市场节点(单请求一页,不依赖东财分页);目录不支持备用源
-      ...(catalogCovered.has(market) ? [route(market, 'catalog', cn ? 'sn-default' : 'em-default')] : []),
-      route(market, 'search', 'em-default'),
-      route(market, 'quotes', 'em-default', quoteBackup.has(market) ? 'sn-default' : null),
-      route(market, 'kline', 'em-default', klineBackup.has(market) ? 'tx-backup' : null),
-    ]
-  })
+  const routes = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'].flatMap(market => [
+    // 目录统一走东财: 一个源覆盖五市场, 不必为沪深单开新浪分支;目录不支持备用源
+    ...(catalogCovered.has(market) ? [route(market, 'catalog', 'em-default')] : []),
+    route(market, 'search', 'em-default'),
+    route(market, 'quotes', 'em-default', quoteBackupOf(market)),
+    route(market, 'kline', 'em-default', klineBackup.has(market) ? 'tx-backup' : null),
+  ])
   return { providers, routes }
 }
 export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })
