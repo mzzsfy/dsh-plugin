@@ -952,8 +952,8 @@ window.__ModuleLoader__.load({
       }
       return {
         onPointerDown: e => {
-          // 只认左键: 右键/中键与拖动手势无关, 抢下来会导致上下文菜单失效
-          if (e.button !== 0 || e.target.closest('button, input, label')) return
+          // 只认左键, 且只从标题条拖: 窗体内要留纵向手势给列表滚动
+          if (e.button !== 0 || !e.target.closest('.ssb-float-head') || e.target.closest('button, input, label')) return
           const box = e.currentTarget.getBoundingClientRect()
           dragRef.current = { dx: e.clientX - box.left, dy: e.clientY - box.top }
           e.currentTarget.setPointerCapture?.(e.pointerId)
@@ -1336,8 +1336,10 @@ window.__ModuleLoader__.load({
 }
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
-.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; max-height:calc(100vh - 48px); display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; cursor:grab; touch-action:none; }
-/* 可滚动区域交还纵向手势, 否则触摸屏上列表和勾选框都滚不动 */
+.ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; max-height:calc(100vh - 48px); display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; }
+/* 拖动只从标题条发起: touch-action 取的是路径交集, 父级给 none 会把列表的 pan-y 一起废掉 */
+.ssb-float { touch-action:pan-y; }
+.ssb-float-head { touch-action:none; cursor:grab; }
 .ssb-float-list,.ssb-float-picker { touch-action:pan-y; }
 .ssb-float-head { display:flex; align-items:center; gap:4px; }
 .ssb-float-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
