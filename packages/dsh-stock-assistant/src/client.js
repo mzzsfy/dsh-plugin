@@ -29,6 +29,12 @@ window.__ModuleLoader__.load({
     // 来源偶发给 null 字段: LWC 只跳过 undefined, null 会按 0 参与价格轴范围把整图压扁;
     // 而非有限的 OHLC 又不能留成 NaN —— 它会顺着均线的滑动窗口把后面所有指标值一起毒掉。
     // 所以四个价格有任一缺失就丢掉整根, 其余字段(avg/amount 等)原样带过去: 分时均价线靠 avg
+    // 两份报价里取较新的一份: 自己拉的和面板的都可能旧, 平局取前者
+    const pickNewest = (mine, theirs) => {
+      if (!mine) return theirs
+      if (!theirs) return mine
+      return (Number(mine.receivedAt) || 0) >= (Number(theirs.receivedAt) || 0) ? mine : theirs
+    }
     // 分时蜡烛的时间是 HH:MM 标签, 日期解析器认不出来
     const CLOCK = /^\d{1,2}:\d{2}(:\d{2})?$/
     function sanitizeCandles(list) {
@@ -500,7 +506,8 @@ window.__ModuleLoader__.load({
                 // 段序固定按自选顺序: 用排序后的 order 取「首现序」会让段落随行情跳动换位,
                 // 正在点的组头会跑掉。排序只决定组内先后
                 const rank = new Map(order.map((id, i) => [id, i]))
-                const sortedIds = ids => ids.slice().sort((left, right) => (rank.get(left) ?? 0) - (rank.get(right) ?? 0))
+                // 缺 id 时排到最后: 排到最前会让一个不该出现的条目抢走组内首位
+                const sortedIds = ids => ids.slice().sort((left, right) => (rank.get(left) ?? Infinity) - (rank.get(right) ?? Infinity))
                 const slices = groupSlices(w.order, w.items)
                 const toggleGroup = (key, open) => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [key]: open } })
                 // 组名来自用户输入: 直接取 groupCollapsed[name] 会让 constructor/toString 这类名字读到原型链上的成员,
@@ -1003,13 +1010,9 @@ window.__ModuleLoader__.load({
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
     function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
       // quotes 的每条是 { quote, health }, 交易时段在 quote 里
-      // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的
-      const stateOf = id => {
-        const own = fetched?.[id]?.quote, panel = quotes?.[id]?.quote
-        if (!own) return panel?.sessionState
-        if (!panel) return own.sessionState
-        return (own.receivedAt ?? 0) >= (panel.receivedAt ?? 0) ? own.sessionState : panel.sessionState
-      }
+      // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的。
+      // 时间戳相同取自己那份——自己那份刚由这一拍的刷新拿到, 而面板可能在本次渲染前就已冻结
+      const stateOf = id => pickNewest(fetched?.[id]?.quote, quotes?.[id]?.quote)?.sessionState
       const pickedKey = picked.join(','), stateKey = picked.map(stateOf).join(',')
       React.useEffect(() => {
         if (!open || !picked.length || live === false) return
@@ -1019,13 +1022,14 @@ window.__ModuleLoader__.load({
         // 间隔由 floatPollDelay 统一算, 这里只判断要不要降频
         // 午休与休市都不产生新数据, 一并归入安静档: 只认 closed 的话, 午休那一个半小时
         // 图形模式还在按交易频率打分时
-        const quiet = picked.every(id => QUIET_STATES.has(stateOf(id)))
+        // 名字不能叫 quiet: 模块里已有一个 quiet() 帮助函数用来包住点击处理
+        const allQuiet = picked.every(id => QUIET_STATES.has(stateOf(id)))
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         let tick = 0
         const pull = () => {
           if (document.visibilityState !== 'visible') return
           tick += 1
-          const plan = pollPlan({ mode, quiet, tick })
+          const plan = pollPlan({ mode, quiet: allQuiet, tick })
           if (plan === 'skip') return
           const refresh = () => fetch(`${BASE}/refresh`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1050,7 +1054,7 @@ window.__ModuleLoader__.load({
         }
         pull()
         // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, floatPollDelay(refreshSeconds, quiet))
+        const timer = setInterval(pull, floatPollDelay(refreshSeconds, allQuiet))
         return () => { dead = true; clearInterval(timer) }
       }, [open, mode, securityId, pickedKey, live, refreshSeconds, stateKey])
     }
@@ -1169,7 +1173,7 @@ window.__ModuleLoader__.load({
         const panel = state.data?.quotes?.[id], own = fetched[id]
         if (!panel) return own
         if (!own) return panel
-        return (Number(own.quote?.receivedAt) || 0) > (Number(panel.quote?.receivedAt) || 0) ? own : panel
+        return pickNewest(own.quote, panel.quote) === own.quote ? own : panel
       }
       const current = items[securityId]
       // 分时数据必须和标的绑在一起: 切标的时新请求还没回来, 直接用旧数据会把上一只的价格当成这一只

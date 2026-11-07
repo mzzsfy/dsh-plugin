@@ -35,7 +35,7 @@ test('重涂按主序列形态选键名, 成交量按当前蜡烛重灌', () => 
 test('轮询决策走纯函数, 不散落在分支里', () => {
   // 决策一旦写成 if 分支就只能靠文本断言, 而文本分辨不出「死代码」与「分支执行」.
   // 抽成 pollPlan 后由 groups.test 直接断言各分支, 这里只钉住调用点
-  must(/const plan = pollPlan\(\{ mode, quiet, tick \}\)/, '拉取前必须由 pollPlan 决定这一拍做什么')
+  must(/const plan = pollPlan\(\{ mode, quiet: allQuiet, tick \}\)/, '拉取前必须由 pollPlan 决定这一拍做什么')
   must(/if \(plan === 'skip'\) return/, 'skip 必须真的跳过')
   must(/plan === 'refresh'/, 'refresh 分支必须存在')
   must(/plan === 'snapshot'/, 'snapshot 分支必须存在')
@@ -45,7 +45,9 @@ test('轮询决策走纯函数, 不散落在分支里', () => {
 
 test('收市判断按 receivedAt 取最新的一份', () => {
   // 无条件偏爱自己那份会让它变成单向闩锁: 一旦写成 trading, 面板的新鲜 closed 也压不过它
-  must(/own\.receivedAt \?\? 0\) >= \(panel\.receivedAt \?\? 0\)/, '两份快照必须按 receivedAt 择优')
+  must(/const stateOf = id => pickNewest\(fetched\?\.\[id\]\?\.quote, quotes\?\.\[id\]\?\.quote\)/, '推广两份必须经同一个择优函数')
+  must(/function pickNewest|const pickNewest =/, '择优逻辑只能有一份实现')
+  assert.equal(count(/pickNewest = /g), 1, 'stateOf 与 entryOf 必须共用同一份平局规则')
 })
 
 test('图形模式收市后不许再打 trend 上游', () => {
