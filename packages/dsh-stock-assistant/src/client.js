@@ -10,6 +10,17 @@ window.__ModuleLoader__.load({
       if (!hasData) return { fit: false, next: shippedKey }
       return { fit: shippedKey !== key, next: key }
     }
+    // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
+    const finiteOr = value => value == null || value === '' ? NaN : Number(value)
+    // 成交额按万/亿缩写避免长列; zeroIsMissing 关掉时 0 按真值显示(成交量用)
+    function formatAmount(value, { zeroIsMissing = true } = {}) {
+      if (value == null) return '—'
+      const amount = Number(value)
+      if (!Number.isFinite(amount) || (zeroIsMissing && amount === 0)) return '—'
+      if (Math.abs(amount) >= 1e8) return `${(amount / 1e8).toFixed(1)}亿`
+      if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
+      return amount.toFixed(0)
+    }
     // 一键全能力自举: 启用实例的适配器能力声明(capabilities×markets)是唯一事实源, 缺什么补什么
     const CAP_ORDER = ['quotes', 'kline', 'catalog', 'search', 'calendar']
     const bootstrapRoutes = ({ adapters, providers, routes }) => {
@@ -268,19 +279,8 @@ window.__ModuleLoader__.load({
     const quiet = fn => (...args) => { Promise.resolve().then(() => fn(...args)).catch(() => {}) }
     const signed = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${value}`
     const timeText = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知'
-    // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
-    const finiteOr = value => value == null || value === '' ? NaN : Number(value)
-    // 价格与成交额: 空值显示破折号, 成交额按万/亿缩写避免长列
+    // 价格: 空值显示破折号
     const formatPrice = value => value == null || Number.isNaN(Number(value)) ? '—' : String(value)
-    const formatAmount = (value, { zeroIsMissing = true } = {}) => {
-      // 成交额来源恒给 0 时按缺失呈现(显示 0 会被误读成真的没有成交); 成交量 0 是真值, 由调用方关掉这个开关
-      if (value == null) return '—'
-      const amount = Number(value)
-      if (!Number.isFinite(amount) || (zeroIsMissing && amount === 0)) return '—'
-      if (Math.abs(amount) >= 1e8) return `${(amount / 1e8).toFixed(1)}亿`
-      if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
-      return amount.toFixed(0)
-    }
     // 秒数转 1d2h3m4s: 值为 0 的段整段省略, 不留 0 占位
     const formatDuration = total => {
       const seconds = Math.max(0, Math.round(Number(total) || 0))
@@ -1474,7 +1474,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount },
     }
   },
 })
