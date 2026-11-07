@@ -606,6 +606,8 @@ window.__ModuleLoader__.load({
       const liveRef = React.useRef({})
       // 建图后补灌动作也走它, 保证用的是最新渲染的 maybeFill 而不是首帧那份
       const fillRef = React.useRef(null)
+      // 上一次铺色用的主题签名, 用来跳过无关的 body style 抖动
+      const paintKeyRef = React.useRef('')
       // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
       const preCloseLineRef = React.useRef(null), costLineRef = React.useRef(null), highLineRef = React.useRef(null), lowLineRef = React.useRef(null)
       function drawLine(ref, options) {
@@ -692,6 +694,10 @@ window.__ModuleLoader__.load({
       function repaintChart(t) {
         const chart = chartRef.current
         if (!chart) return
+        // body 的 style 会因为字体、滚动条之类无关变动抖动, 签名没变就不必整图重涂
+        const signature = themeSignature(t)
+        if (paintKeyRef.current === signature) return
+        paintKeyRef.current = signature
         chart.applyOptions({
           layout: { background: { color: t.background }, textColor: t.textColor },
           grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } },
@@ -798,8 +804,9 @@ window.__ModuleLoader__.load({
         // 用 wantTrend 会读到首帧的值。分时面积序列的键名与蜡烛完全不同, 只按蜡烛键重涂等于没涂
         mo = new MutationObserver(() => repaintChart(readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, liveRef.current.colorMode)))
         mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
-        // 明暗主题标记落在 body 上, 不在 root 的观察范围里, 单开一路才收得到切换
-        mo.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+        // 明暗主题标记落在 body 上, 不在 root 的观察范围里, 单开一路才收得到切换。
+        // 同色系两套主题(或第三方主题覆盖 token)切换时这个标记不变, 必须连 style 一起听
+        mo.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'style'] })
         return () => { dead = true; mo.disconnect(); chartRef.current?.remove(); chartRef.current = null }
       }, [])
       // 数据时间面: 首末日期 + 共几根 + 今日有没有交易。判断只用数据本身, 不猜日历——
@@ -975,7 +982,8 @@ window.__ModuleLoader__.load({
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
     function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, revision, setFetched, setTrend, setError }) {
       // quotes 的每条是 { quote, health }, 交易时段在 quote 里
-      const stateOf = id => quotes?.[id]?.quote?.sessionState
+      // 自己的快照优先: 面板不在前台时宿主会 cancelIdle, 面板那份 quotes 会停在最后一次活动时的时段上
+      const stateOf = id => (fetched?.[id] || quotes?.[id])?.quote?.sessionState
       const pickedKey = picked.join(','), stateKey = picked.map(stateOf).join(',')
       React.useEffect(() => {
         if (!open || !picked.length || live === false) return
@@ -1003,6 +1011,17 @@ window.__ModuleLoader__.load({
               .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
               .catch(() => { if (!dead) setError('行情不可用') })
           } else if (securityId) {
+            // trend 端点不进缓存(每次都是真上游), 收市后继续按秒级打就是白烧额度。
+            // 但也不能就此停手: 收市判断读的是面板 quotes, 面板不在前台时它会一直停在 trading,
+            // 所以收市档改为低频拉快照刷新自己的 quotes, 一旦开市由它把状态翻回来
+            tick += 1
+            if (allClosed && tick % 10 !== 0) {
+              fetch(`${BASE}/snapshot`)
+                .then(response => response.json())
+                .then(payload => { if (!dead && payload.ok) setFetched(payload.data.quotes || {}) })
+                .catch(() => { })
+              return
+            }
             fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
               .then(response => response.json())
               .then(payload => { if (dead) return; if (payload.ok) { setTrend({ securityId, data: payload.data }); setError('') } else setError(payload.error?.message || '行情不可用') })
@@ -1058,6 +1077,9 @@ window.__ModuleLoader__.load({
         ? { lineColor: theme.up, topColor: theme.up + '4d', bottomColor: theme.up + '07' }
         : { upColor: theme.up, downColor: theme.down, borderUpColor: theme.up, borderDownColor: theme.down, wickUpColor: theme.up, wickDownColor: theme.down }
     }
+    // 宿主把主题 token 内联写在 body 的 style 上, 同色系两套主题切换时明暗标记并不变,
+    // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」
+    const themeSignature = t => [t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
     // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游
     const floatPollUrl = allClosed => `${BASE}/${allClosed ? 'snapshot' : 'refresh'}`
     const FLOAT_KEY = 'ssb-floating'
@@ -1592,7 +1614,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl, floatPollDelay, seriesPaintPlan, sanitizeCandles },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

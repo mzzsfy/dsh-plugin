@@ -111,3 +111,23 @@ test('重涂按主序列形态选键名', async () => {
   // 两套键名不允许重叠, 否则「按形态选键」这件事本身就没有意义
   assert.equal(Object.keys(area).some(key => key in candle), false)
 })
+
+// 同色系两套主题切换时明暗标记不变, 所以重涂不能只靠那个标记触发; 签名必须能分辨色值变化
+test('主题签名能分辨换肤, 但不被无关字段干扰', async () => {
+  const { themeSignature } = await load()
+  const theme = {
+    background: '#fff', textColor: '#334155', gridLine: '#e2e8f0', crosshair: '#94a3b8',
+    up: '#dc2626', down: '#16a34a', volumeUp: '#dc262673', volumeDown: '#16a34a73',
+    cost: '#7c3aed', EMA: '#c026d3', BBI: '#0f766e',
+    MA: ['#a16207', '#b91c1c', '#1d4ed8', '#334155'], BOLL: ['#1d4ed8', '#60a5fa'],
+  }
+  const base = themeSignature(theme)
+  // 同色系换主题: 背景与文字微调, 其余不动
+  assert.notEqual(themeSignature({ ...theme, textColor: '#475569' }), base, '文字色变化必须重涂')
+  // 只改涨跌配色
+  assert.notEqual(themeSignature({ ...theme, up: '#b91c1c' }), base, '涨跌配色变化必须重涂')
+  // 任一指标线换色
+  assert.notEqual(themeSignature({ ...theme, MA: ['#000', ...theme.MA.slice(1)] }), base, '指标线换色必须重涂')
+  // 背景由 CSS 处理, 图表本身透明, 不该因为背景色变化就整图重涂
+  assert.equal(themeSignature({ ...theme, background: '#000' }), base, '背景不进签名')
+})

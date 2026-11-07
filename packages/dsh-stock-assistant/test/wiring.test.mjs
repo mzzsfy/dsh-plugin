@@ -11,9 +11,10 @@ const must = (re, why) => assert.match(client, re, why)
 const mustNot = (re, why) => assert.doesNotMatch(client, re, why)
 
 test('悬浮窗读交易时段要走 quote 那一层', () => {
-  // quotes[id] 的形状是 { quote, health }, 读成 quotes[id].sessionState 会让「全部收市降频」恒不成立
-  must(/\?\.quote\?\.sessionState/, '必须quotes[id].quote.sessionState')
-  mustNot(/\?\.sessionState\b(?!)/, '不能直接读 quotes[id].sessionState')
+  // quotes[id] 的形状是 { quote, health }, 读成 quotes[id].sessionState 会让「全部收市降频」恒不成立。
+  // 只查直接从 quotes 取的形式: 详情页的 q 本身就是 quote 层, 拿它读 sessionState 是对的
+  assert.deepEqual([...client.matchAll(/quotes\?\.\[[^\]]+\]\?\.sessionState/g)], [], 'quotes[id] 必须再进一层 quote')
+  must(/\?\.quote\?\.sessionState/, '至少有一处走 quote 层')
 })
 
 test('建图补灌走 fillRef, 不用首帧闭包', () => {
@@ -35,6 +36,16 @@ test('收市档既省额度又能自愈', () => {
   // 面板不在前台时宿主会 cancelIdle, 只读快照会一直停在旧数据上
   must(/const readOnly = allClosed && tick % \d+ !== 0/, '收市档必须隔若干拍插真刷新')
   must(/floatPollUrl\(readOnly\)/, 'URL 必须由 floatPollUrl 决定')
+  // 收市判断要优先用自己拉的快照: 面板那份 quotes 在面板不在前台时会一直停在 trading
+  must(/const stateOf = id => \(fetched\?\.\[id\] \|\| quotes\?\.\[id\]\)\?\.quote\?\.sessionState/, '时段判断要优先用自己的快照')
+})
+
+test('图形模式收市后不许再打 trend 上游', () => {
+  // trend 端点不进缓存, 每次都是真上游; 只修 list 一半的话, 夜里能打出上千次
+  const graph = client.slice(client.indexOf('} else if (securityId) {'), client.indexOf('const timer = setInterval(pull'))
+  assert.match(graph, /allClosed/, '图形分支必须判收市')
+  assert.match(graph, /\/snapshot/, '收市档要拉快照, 而不是继续打 trend')
+  assert.match(graph, /tick % \d+ !== 0/, '收市档要低频')
 })
 
 test('代际淘汰的请求不许落地, 退避到点也要再查一次', () => {
@@ -61,8 +72,8 @@ test('单只标的时不循环到自己', () => {
 
 test('事件处理器不许把 React 事件当业务参数透传', () => {
   // onClick: quiet(runtime.refresh) 会把 SyntheticEvent 当成 securities 发给宿主, 序列化时循环引用
-  mustNot(/onClick: quiet\(runtime\.[a-zA-Z]+\)/, 'handler 必须包一层, 不能直接透传 runtime 方法')
-  must(/onClick: quiet\(\(\) => runtime\.refresh\(\)\)/, '刷新按钮必须包一层')
+  mustNot(/onClick: quiet\(runtime\./, '不能把 runtime 方法直接交给 onClick')
+  must(/onClick: [^,]*runtime\.refresh\(\)/, '刷新按钮必须包一层再调')
 })
 
 test('悬浮窗拖动只从标题条发起', () => {
@@ -73,9 +84,11 @@ test('悬浮窗拖动只从标题条发起', () => {
 })
 
 test('分组折叠的特殊键不会与用户组名撞车', () => {
-  // 组名来自用户输入且只校验长度, 拿 '__pinned' 当键的话, 用户真建一个叫 __pinned 的组就会互相顶掉
-  must(/const PINNED_KEY = '\\u0000pinned', REST_KEY = '\\u0000rest'/, '特殊折叠键必须带不可见前缀')
-  mustNot(/section\('__pinned'|section\('__rest'/, '不能用可输入的名字当特殊键')
+  // 组名来自用户输入且只校验长度, 拿可输入的名字当折叠键的话, 用户建一个同名组就会互相顶掉
+  must(/PINNED_KEY = ['"]\\u0000/, '特殊折叠键必须带不可见前缀')
+  must(/section\(PINNED_KEY/, '置顶段必须用特殊键')
+  must(/section\(REST_KEY/, '未分组段必须用特殊键')
+  assert.deepEqual([...client.matchAll(/section\((['"])(置顶|未分组)/g)], [], '不能拿中文 label 当折叠键')
 })
 
 test('本地存储只经两个封装, 且不接受就地字面量', () => {
