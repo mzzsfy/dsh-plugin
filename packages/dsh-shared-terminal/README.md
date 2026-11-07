@@ -33,6 +33,10 @@ wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提
 
 附着判定经宿主路由 `/api/shared-terminal/pump`（POST JSON `{sessionId}`）回答整条 Session 是否有泵在写，返回 `{ok, attached}`；查询失败或超时按「仍在附着」处理。该判断按 Session 汇总而非按 tab：tab id 在不同 Session 之间会重号，按 Session 保守处理只会漏自愈，不会误抢控制权。
 
+## 终端面板复用
+
+宿主的 `terminal` tab 类型注册为 `multiple`，`openTabIn` 每次调用都生成新的随机 `contentId` 并新建 tab。工具结果卡片会在刷新、切会话、重新挂载时重新渲染并导航，按 `openTabIn` 处理就会不断叠出多个共同指向同一终端的面板——每个面板各挂一份 xterm 与终端订阅，页面越用越卡。0.4.3 起改为固定 `contentId`（`dsh-resource://dsh-shared-terminal/panel`）走 `openResourceIn`，宿主按 `findContentTab` 复用同一面板，导航参数负责切换目标终端；用户自己用官方「新建终端」打开的面板地址随机，只改写其导航参数，不另建。导航另按 `sessionId:terminalId` 去重（原按 callId，刷新即失效）。
+
 ## 权限与版本边界
 
 命令由 shell 执行；本工具不做命令安全校验。Controller 使用 **system-user execution permissions**，不受 Agent sandbox/approval 策略约束。命令可能修改系统用户有权限访问的文件。回合取消会拒绝尚未完成的插件泵写入并丢弃该附着尚未消费的输入；已经交给 Controller/provider 的 `write/close` 无法撤销。同代并发写随取消一起中止时，其他尚未确认的写报结果未知且不自动重发，以免重复执行已经投递的输入。卸载与关闭永久销毁对应泵，旧引用不可继续写入或自动重抢；关闭失败也不复用旧附着，仍允许再次尝试关闭。

@@ -24,7 +24,10 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     openResourceIn(...args) { calls.push(['reveal', ...args]) },
     openTabs: { getSnapshot: () => tabs },
     mounted: { getSnapshot: () => mountedSession },
-    tabDomain: { occurrence: () => ({ navigation: { getSnapshot: () => ({ params }) } }) },
+    tabDomain: {
+      occurrence: () => ({ navigation: { getSnapshot: () => ({ params }) } }),
+      navigate(...args) { calls.push(['navigate', ...args]) },
+    },
   }
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
   // 自愈只扫 [data-sidebar-terminal];其余选择器由各用例的节点桩承担
@@ -59,11 +62,37 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     async heal() { for (const timer of timers) await timer() },
   }
 }
-test('Given an existing terminal tab, When reopening result, Then it reveals the same tab with identity intact', async () => {
-  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://terminal/content' }], params: { terminalId: 'term-a' } })
+test('Given no terminal panel, When reopening result, Then the panel is opened at the stable address', async () => {
+  const app = fixture({ tabs: [], params: undefined })
   app.render(props('open'))
   await app.flush()
-  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://terminal/content', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
+  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
+})
+
+test('Given a terminal panel opened at the stable address, When the result renders again, Then the same panel is revealed', async () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://dsh-shared-terminal/panel' }], params: { terminalId: 'term-a' } })
+  app.render(props('open'))
+  await app.flush()
+  app.render({ ...props('open'), callId: 'call-b' })
+  await app.flush()
+  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
+})
+
+test('Given a panel the user opened by hand, When the result renders, Then only its navigation is rewritten', async () => {
+  // 官方新建按钮给的是随机 contentId:改不了地址,只能改写导航参数,不能另建面板
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab9', contentId: 'sidebar://terminal/2f1c' }], params: undefined })
+  app.render(props('open'))
+  await app.flush()
+  assert.equal(JSON.stringify(app.calls), JSON.stringify([['navigate', 'session-a', 'tab9', { address: 'sidebar://terminal/2f1c', params: { terminalId: 'term-a' } }]]))
+})
+
+test('Given two open results for the same terminal, When both render, Then the panel is navigated once', async () => {
+  const app = fixture({ tabs: [], params: undefined })
+  app.render(props('open'))
+  await app.flush()
+  app.render({ ...props('open'), callId: 'call-b' })
+  await app.flush()
+  assert.equal(app.calls.length, 1, '同一 terminal 只导航一次,重复导航会闪面板')
 })
 
 test('Given remote query pending, When effect unmounts and same result remounts, Then only the new lifetime may navigate', async () => {
@@ -109,7 +138,7 @@ test('Given successful open result, When rendering then committing effect, Then 
   app.render(props('open'))
   await app.flush()
   assert.equal(app.calls.length, 1)
-  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['session-a', 'terminal', { params: { terminalId: 'term-a' } }]))
+  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel', { kind: 'terminal', params: { terminalId: 'term-a' } }]))
   assert.deepEqual(app.seen, ['session-a'])
 })
 
