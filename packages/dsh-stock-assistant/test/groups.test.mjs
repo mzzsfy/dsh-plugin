@@ -145,7 +145,7 @@ test('主题签名能分辨换肤, 但不被无关字段干扰', async () => {
   const theme = {
     background: '#fff', textColor: '#334155', gridLine: '#e2e8f0', crosshair: '#94a3b8',
     up: '#dc2626', down: '#16a34a', volumeUp: '#dc262673', volumeDown: '#16a34a73',
-    cost: '#7c3aed', EMA: '#c026d3', BBI: '#0f766e',
+    cost: '#7c3aed', target: '#a21caf', EMA: '#c026d3', BBI: '#0f766e',
     MA: ['#a16207', '#b91c1c', '#1d4ed8', '#334155'], BOLL: ['#1d4ed8', '#60a5fa'],
   }
   const base = themeSignature(theme)

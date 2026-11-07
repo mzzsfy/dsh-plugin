@@ -2,6 +2,13 @@ import { z } from 'zod'
 import { fail } from './market-model.mjs'
 import { MARKET_META } from './market-model.mjs'
 const id = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/)
+// 用户标在图上并参与盈亏计算的价格点位。kind 决定它在盈亏里扮演什么角色:
+// cost 是持仓成本, target 是打算卖出的价
+export const markSchema = z.strictObject({ id: z.string().min(1).max(40), price: z.number().positive(), kind: z.enum(['cost', 'target']) })
+export const marksSchema = z.array(markSchema).max(12).default([]).superRefine((list, ctx) => {
+  if (new Set(list.map(mark => mark.id)).size !== list.length) ctx.addIssue({ code: 'custom', message: '价格标记 id 重复' })
+  if (new Set(list.map(mark => `${mark.kind}:${mark.price}`)).size !== list.length) ctx.addIssue({ code: 'custom', message: '同类型的价格不能重复' })
+})
 const rate = z.number().int().positive().max(100000)
 export const capability = z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])
 export const marketSchema = z.enum(Object.keys(MARKET_META))
@@ -55,7 +62,7 @@ export function parseConfiguration(value) {
   }
   return config
 }
-export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), cost: z.number().positive().nullable().default(null), group: z.string().refine(s => [...s.trim()].length <= 12 && !/[\u0000-\u001f]/.test(s)).default('') })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string(), payload: z.unknown() })).max(256) }).superRefine((control, ctx) => {
+export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), marks: marksSchema, group: z.string().refine(s => [...s.trim()].length <= 12 && !/[\u0000-\u001f]/.test(s)).default('') })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string(), payload: z.unknown() })).max(256) }).superRefine((control, ctx) => {
   const w = control.watchlist
   if (new Set(w.order).size !== w.order.length || w.order.length !== Object.keys(w.items).length || w.order.some(id => w.items[id]?.id !== id)) ctx.addIssue({ code: 'custom', message: '自选序列与证券不一致' })
   let unpinned = false

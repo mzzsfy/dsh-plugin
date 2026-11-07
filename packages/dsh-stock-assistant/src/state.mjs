@@ -3,11 +3,25 @@ import { domainSpec, initialControl, controlSchema } from './schemas.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+// 成本价曾是单值字段, 现在是带语义的价格标记列表. 旧值在这里一步升级成一条 cost 标记,
+// 之后 cost 字段整体消失——写入路径已经只写 marks
+const upgradeMarks = root => {
+  let touched = false
+  for (const item of Object.values(root?.watchlist?.items || {})) {
+    if (!Object.hasOwn(item, 'cost')) continue
+    if (item.cost != null && !item.marks?.length) item.marks = [{ id: 'm-legacy', price: item.cost, kind: 'cost' }]
+    delete item.cost
+    touched = true
+  }
+  return touched
+}
 export async function openState(storageDomain, changed = () => {}, now = Date.now) {
   const domain = await storageDomain.open(domainSpec)
   const table = domain.table('control'), cache = domain.table('cache')
   try {
     if (!table.get('root')) await table.put('root', initialControl())
+    const upgraded = structuredClone(table.get('root'))
+    if (upgradeMarks(upgraded)) await table.put('root', upgraded)
     controlSchema.parse(table.get('root'))
   } catch (e) { await domain.close(); throw e }
   let tail = Promise.resolve(), stopped = false

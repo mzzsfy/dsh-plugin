@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises'
 // 这里直接解析 client.js 里的 token 声明, 改色若跌破阈值就会红。
 const read = path => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 
-const TOKENS = ['ma-fast', 'ma-mid', 'ma-slow', 'ma-long', 'ema', 'boll-mid', 'boll-rail', 'bbi', 'cost']
+const TOKENS = ['ma-fast', 'ma-mid', 'ma-slow', 'ma-long', 'ema', 'boll-mid', 'boll-rail', 'bbi', 'cost', 'target']
 // 一像素宽曲线的经验下限, 以及两条细线能被区分的大致色差
 const CONTRAST_MIN = 2.5
 const DELTA_E_MIN = 12

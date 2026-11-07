@@ -99,3 +99,25 @@ test('sanitizeCandles 保住额外字段并丢掉残根', async () => {
   assert.equal(bare[0].volume, undefined, '没给量就是 undefined, 不是 0')
   assert.equal(bare[0].at, '2026-11-07T01:30:00Z', '行情自带时间戳要原样带过')
 })
+
+// 价格标记的盈亏口径: 成本看「现价相对它」, 卖价看「它相对成本」, 没有成本时卖价退回现价
+test('价格标记的均价与盈亏口径', async () => {
+  const { avgCostOf, markPct } = await load()
+  const cost = price => ({ id: `c${price}`, price, kind: 'cost' })
+  const target = price => ({ id: `t${price}`, price, kind: 'target' })
+  // 没有成本时均价为空, 卖价也就没有成本基准
+  assert.equal(avgCostOf([]), null)
+  assert.equal(avgCostOf([target(150)]), null)
+  // 多笔成本等权平均: 没有数量信息, 等权是唯一不引入臆测的口径
+  assert.equal(avgCostOf([cost(80), cost(120)]), 100)
+  assert.equal(avgCostOf([cost(100)]), 100)
+  // 成本标记各自看现价: 80 的成本在现价 120 时是 +50%
+  assert.equal(markPct(cost(80), 120, 100), 50)
+  // 卖价看相对成本: 目标 150、均价 100 时是 +50%, 与现价无关
+  assert.equal(markPct(target(150), 120, 100), 50)
+  // 还没有成本时, 卖价退回相对现价
+  assert.equal(markPct(target(150), 120, null), 25)
+  // 缺现价就没有盈方可言
+  assert.equal(markPct(cost(100), null, 100), null)
+  assert.equal(markPct(target(150), null, null), null)
+})

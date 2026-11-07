@@ -54,6 +54,14 @@ window.__ModuleLoader__.load({
     }
     // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
     const finiteOr = value => value == null || value === '' ? NaN : Number(value)
+    // 成本标记取等权平均: 没有数量信息, 等权是唯一不引入臆测的口径
+    const avgCostOf = marks => { const prices = (marks || []).filter(mark => mark.kind === 'cost').map(mark => mark.price); return prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : null }
+    // 每个标记各自的盈亏口径: 成本看「现价相对它」的浮盈, 卖价看「它相对成本」的潜在收益,
+    // 还没有成本时卖价退回相对现价——三个口径都是同一个式子, 只是基准不同
+    const markPct = (mark, last, avgCost) => {
+      const base = mark.kind === 'cost' ? mark.price : avgCost ?? last
+      return base == null || last == null ? null : (mark.kind === 'cost' ? last - base : mark.price - base) / base * 100
+    }
     // 成交额按万/亿缩写避免长列; zeroIsMissing 关掉时 0 按真值显示(成交量用)
     function formatAmount(value, { zeroIsMissing = true } = {}) {
       if (value == null) return '—'
@@ -160,7 +168,7 @@ window.__ModuleLoader__.load({
         const detailChanged = next.detailId !== undefined && next.detailId !== state.view.detailId
         const saved = next.detailId === undefined ? undefined : (state.data?.control.watchlist.items[next.detailId] || state.view.browsePeek?.[next.detailId])
         const alias = next.alias !== undefined ? { alias: next.alias } : detailChanged ? { alias: saved?.alias || '' } : {}
-        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { costDraft: null, groupDraft: null, costError: null, groupError: null } : {}) } })
+        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { markDraft: null, groupDraft: null, markError: null, groupError: null } : {}) } })
         sendDemand()
       }
       function scheduleSearch(query) {
@@ -414,7 +422,7 @@ window.__ModuleLoader__.load({
       const providers = state.data.control.providers || []
       const sourcesBanner = unhealthy.length || providers.some(p => !p.enabled) ? h('div', { className: 'ssb-banner' }, `${providers.filter(p => p.enabled).length}/${providers.length} 个数据源启用${unhealthy.length ? `，${unhealthy.map(s => s.id).join('、')} 最近请求失败` : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '查看')) : null
       // 组合概览并入节头(不占独立横幅带)。不做涨跌额求和: 各市场币种不同且无仓位数量, 相加没有意义
-      const stats = w.order.length ? w.order.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (Number.isNaN(pct)) return acc; acc.up += pct > 0; acc.down += pct < 0; const item = w.items[id], last = Number(data.quotes[id]?.quote?.last); if (item.cost && last) { acc.held += 1; acc.pl += (last - item.cost) / item.cost * 100 } return acc }, { up: 0, down: 0, held: 0, pl: 0 }) : null
+      const stats = w.order.length ? w.order.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (Number.isNaN(pct)) return acc; acc.up += pct > 0; acc.down += pct < 0; const item = w.items[id], last = Number(data.quotes[id]?.quote?.last), avgCost = avgCostOf(item.marks); if (avgCost != null && last) { acc.held += 1; acc.pl += (last - avgCost) / avgCost * 100 } return acc }, { up: 0, down: 0, held: 0, pl: 0 }) : null
       // 持仓合计为等权均值(无仓位数量数据, 百分比求和会随只数放大; 均值是最不坏近似)
       const heldText = stats?.held ? ` · 持仓盈亏 ${signed(Number((stats.pl / stats.held).toFixed(1)))}%（等权）` : ''
       return h('section', { className: 'ssb-list-pane' },
@@ -454,7 +462,9 @@ window.__ModuleLoader__.load({
                   const item = w.items[id], entry = data.quotes[id], q = entry?.quote
                   sequence.push(id)
                   const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
-                  const plPct = item.cost && q?.last != null ? Number((Number(q.last) - item.cost) / item.cost * 100).toFixed(1) : null
+                  // 列表只显示一个数: 多个成本按等权平均合成一个「持仓成本」
+                  const avgCost = avgCostOf(item.marks)
+                  const plPct = avgCost != null && q?.last != null ? Number((Number(q.last) - avgCost) / avgCost * 100).toFixed(1) : null
                   const amplitude = q?.high != null && q?.low != null && Number(q.previousClose) > 0 ? Number(((Number(q.high) - Number(q.low)) / Number(q.previousClose)) * 100).toFixed(1) : null
                   const dragging = view.dragId === id
                   const dropEdge = view.dropAt?.id === id ? view.dropAt.after ? ' ssb-drop-after' : ' ssb-drop-before' : ''
@@ -547,10 +557,10 @@ window.__ModuleLoader__.load({
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
     const GUIDE_KEY = 'ssb-guides'
-    const GUIDE_DEFAULT = { preClose: true, cost: true, highLow: false, ma: true, ema: false, boll: false, bbi: false }
+    const GUIDE_DEFAULT = { preClose: true, marks: true, highLow: false, ma: true, ema: false, boll: false, bbi: false }
     // horizontal 是横贯全图的参考位(priceLine), indicator 是跟随每根K线的序列(LineSeries)
     const GUIDE_GROUPS = [
-      { title: '参考位', items: [['preClose', '昨收'], ['cost', '成本价'], ['highLow', '区间最高/最低']] },
+      { title: '参考位', items: [['preClose', '昨收'], ['marks', '价格标记'], ['highLow', '区间最高/最低']] },
       { title: '指标线', items: [['ma', 'MA 均线'], ['ema', 'EMA 指数均线'], ['boll', 'BOLL 布林带'], ['bbi', 'BBI 多空']] },
     ]
     const EMA_WINDOW = 12, BOLL_WINDOW = 20, BOLL_K = 2
@@ -583,7 +593,7 @@ window.__ModuleLoader__.load({
       const red = varOf('--ssb-danger'), green = varOf('--ssb-ok')
       const [up, down] = colorMode === 'green-up' ? [green, red] : [red, green]
       // 背景取面板底色而不是 transparent: 容器自身没有背景, 交给 canvas 留白的话暗色主题下会露出一块白
-      return { background: varOf('--ssb-bg') || 'transparent', textColor: varOf('--ssb-text-sub'), gridLine: varOf('--ssb-border'), crosshair: varOf('--ssb-text-dim'), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: [varOf('--ssb-chart-ma-fast'), varOf('--ssb-chart-ma-mid'), varOf('--ssb-chart-ma-slow'), varOf('--ssb-chart-ma-long')], EMA: varOf('--ssb-chart-ema'), BOLL: [varOf('--ssb-chart-boll-mid'), varOf('--ssb-chart-boll-rail')], BBI: varOf('--ssb-chart-bbi'), cost: varOf('--ssb-chart-cost') }
+      return { background: varOf('--ssb-bg') || 'transparent', textColor: varOf('--ssb-text-sub'), gridLine: varOf('--ssb-border'), crosshair: varOf('--ssb-text-dim'), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: [varOf('--ssb-chart-ma-fast'), varOf('--ssb-chart-ma-mid'), varOf('--ssb-chart-ma-slow'), varOf('--ssb-chart-ma-long')], EMA: varOf('--ssb-chart-ema'), BOLL: [varOf('--ssb-chart-boll-mid'), varOf('--ssb-chart-boll-rail')], BBI: varOf('--ssb-chart-bbi'), cost: varOf('--ssb-chart-cost'), target: varOf('--ssb-chart-target') }
     }
     // 以下指标都返回等长数组(前导 null), 因为 BOLL/BBI 要按索引把多条均线对齐
     function seriesMA(candles, n) {
@@ -641,7 +651,19 @@ window.__ModuleLoader__.load({
       // 上一次铺色用的主题签名, 用来跳过无关的 body style 抖动
       const paintKeyRef = React.useRef('')
       // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
-      const preCloseLineRef = React.useRef(null), costLineRef = React.useRef(null), highLineRef = React.useRef(null), lowLineRef = React.useRef(null)
+      const preCloseLineRef = React.useRef(null), highLineRef = React.useRef(null), lowLineRef = React.useRef(null)
+      // 价格标记是可变数量的, 数量变了就得把旧的整批撤掉重建
+      const markLinesRef = React.useRef([])
+      function drawMarks(series, palette, list) {
+        if (!series) return
+        for (const line of markLinesRef.current) { try { series.removePriceLine(line) } catch { } }
+        markLinesRef.current = (list || []).map(mark => series.createPriceLine({
+          price: mark.price,
+          color: mark.kind === 'cost' ? palette.cost : palette.target,
+          lineStyle: 3, lineWidth: 1, axisLabelVisible: true,
+          title: mark.kind === 'cost' ? '成本' : '卖价',
+        }))
+      }
       function drawLine(ref, options) {
         const series = mainRef.current
         if (!series) return
@@ -723,7 +745,9 @@ window.__ModuleLoader__.load({
           series: series.filter(([, value]) => value != null && Number.isFinite(Number(value))),
         }
       }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale, guides])
-      const costPct = item.cost && kline?.candles?.length ? (() => { const last = finiteOr(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
+      const marks = item.marks || []
+      const avgCost = avgCostOf(marks)
+      const costPct = avgCost != null && kline?.candles?.length ? (() => { const last = finiteOr(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - avgCost) / avgCost * 100 : null })() : null
       // 把一套主题色铺满整张图: 背景/网格/两轴边框/主序列/成交量/指标线/参考线。
       // 首灌与换主题共用同一份, 免得两处漏项(分时面积序列的键名与蜡烛不同)
       function repaintChart(t) {
@@ -749,7 +773,11 @@ window.__ModuleLoader__.load({
         for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
         // 参考线建好后就固定了, 只换颜色; 没有对应的线时 applyOptions 是 no-op
         preCloseLineRef.current?.applyOptions({ color: t.crosshair })
-        costLineRef.current?.applyOptions({ color: t.cost })
+        // 标记线按种类各一个颜色, 逐条换
+        for (const [index, line] of markLinesRef.current.entries()) {
+          const mark = (liveRef.current.marks || [])[index]
+          line.applyOptions({ color: mark?.kind === 'target' ? t.target : t.cost })
+        }
         highLineRef.current?.applyOptions({ color: t.textColor })
         lowLineRef.current?.applyOptions({ color: t.textColor })
       }
@@ -761,7 +789,8 @@ window.__ModuleLoader__.load({
         for (const s of stale) if (s) chart.removeSeries(s)
         mainRef.current = avgRef.current = volRef.current = null; indicatorRef.current = {}
         // 旧 series 上的参考线随 series 一起销毁, 引用要清掉
-        preCloseLineRef.current = costLineRef.current = highLineRef.current = lowLineRef.current = null
+        preCloseLineRef.current = highLineRef.current = lowLineRef.current = null
+        markLinesRef.current = []
         const theme = themeOf()
         if (wantTrend) {
           mainRef.current = chart.addSeries(LWC.AreaSeries, { topColor: theme.up + '4d', bottomColor: theme.up + '07', lineColor: theme.up, lineWidth: 1 }, 0)
@@ -814,7 +843,7 @@ window.__ModuleLoader__.load({
         // 辅助线统一在这里画: 全部走 createPriceLine, 具体数值看上方图例, 图上只留参考位置
         const palette = themeOf()
         drawLine(preCloseLineRef, guides.preClose && result.preClose != null ? { price: result.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
-        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1, title: '成本' } : null)
+        drawMarks(mainRef.current, palette, guides.marks ? marks : [])
         const highs = result.candles.map(c => finiteOr(c.high)).filter(Number.isFinite), lows = result.candles.map(c => finiteOr(c.low)).filter(Number.isFinite)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
@@ -882,7 +911,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!mainRef.current) return
         const palette = themeOf()
-        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1, title: '成本' } : null)
+        drawMarks(mainRef.current, palette, guides.marks ? marks : [])
         const candles = kline?.candles || []
         const highs = candles.map(c => finiteOr(c.high)).filter(Number.isFinite), lows = candles.map(c => finiteOr(c.low)).filter(Number.isFinite)
         drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
@@ -890,7 +919,7 @@ window.__ModuleLoader__.load({
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
         // 开关变化不触发数据重灌, 指标线要自己补画
         if (!wantTrend) applyIndicators(kline?.candles)
-      }, [item.cost, kline.candles, guides])
+      }, [item.marks, kline.candles, guides])
       return h('div', { className: 'ssb-kline' },
         h('div', { className: 'ssb-kline-toolbar' }, h('div', { role: 'tablist', 'aria-label': 'K线周期', style: { display: 'flex', gap: '8px' } }, ...PERIODS.map(p => h(Button, { key: p.key, role: 'tab', 'aria-selected': period === p.key, primary: period === p.key, onClick: () => runtime.setKlinePeriod(p.key) }, p.label))), h(Button, { onClick: quiet(() => runtime.loadKline(item.id, period, true)) }, '↻'),
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-expanded': !!state.view.guideOpen, onClick: () => runtime.updateView({ guideOpen: !state.view.guideOpen }) }, '辅助线'),
@@ -900,7 +929,7 @@ window.__ModuleLoader__.load({
         legend ? h('div', { className: 'ssb-kline-legend' },
           // 成本是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
           h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value)),
-            item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null),
+            avgCost == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.length > 1 ? `成本(${marks.filter(m => m.kind === 'cost').length}笔均价)` : '成本'), formatPrice(avgCost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`))),
           legend.series.length ? h('div', { className: 'ssb-legend-row' },
             ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2)))) : null) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
@@ -971,23 +1000,43 @@ window.__ModuleLoader__.load({
       const fields = [['今开', formatPrice(q?.open)], ['最高', formatPrice(q?.high)], ['最低', formatPrice(q?.low)], ['昨收', formatPrice(q?.previousClose)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume, { zeroIsMissing: false })}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
       // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
-      // 成本块: 有成本显盈亏三元组, 表单可设/清成本; 非法输入就地报错不静默(B2), 草稿绑定 detailId 切换即清(B3 由三处 open 清理保证)
+      // 价格标记: 每条带语义(成本/卖价), 各自算盈亏, 图上一条线
+      const marks = item.marks || []
+      const avgCost = avgCostOf(marks)
       const lastN = Number(q?.last)
-      const costPl = item.cost && lastN ? { amount: Number((lastN - item.cost).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - item.cost) / item.cost * 100).toFixed(1)) } : null
-      // 没动过草稿就不写: 否则"打开详情直接点保存"会把已有成本清掉
-      const costForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => {
+      const costPl = avgCost != null && lastN ? { amount: Number((lastN - avgCost).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - avgCost) / avgCost * 100).toFixed(1)) } : null
+      const applyMarks = next => quiet(() => runtime.mutate('marks', { securityId: item.id, marks: next }))
+      const toneOfPct = pct => pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
+      // 增删都是整组替换: 协议面只有一个操作, 也不会出现半更新的中间态
+      const markForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => {
         e.preventDefault()
-        if (view.costDraft === null || view.costDraft === undefined) return
-        const raw = String(view.costDraft).trim()
-        if (!raw) { quiet(() => runtime.mutate('cost', { securityId: item.id, cost: null }))(); return }
-        const num = Number(raw)
-        if (!Number.isFinite(num) || num <= 0) { runtime.updateView({ costError: '成本价需为正数' }); return }
-        quiet(() => runtime.mutate('cost', { securityId: item.id, cost: num }))()
-      } }, h('label', null, '成本价', h('input', { value: view.costDraft ?? (item.cost ?? ''), inputMode: 'decimal', onChange: e => runtime.updateView({ costDraft: e.target.value, costError: '' }), placeholder: '留空清除' })), h('div', { style: { display: 'flex', gap: '8px' } }, h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存成本'), item.cost ? h(Button, { danger: true, disabled: state.busy.write, onClick: quiet(() => { runtime.updateView({ costDraft: null }); return runtime.mutate('cost', { securityId: item.id, cost: null }) }) }, '清除成本') : null), view.costError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.costError) : null) : null
+        const raw = String(view.markDraft?.price ?? '').trim()
+        const price = Number(raw)
+        if (!raw || !Number.isFinite(price) || price <= 0) { runtime.updateView({ markError: '价格需为正数' }); return }
+        if (marks.length >= 12) { runtime.updateView({ markError: '最多 12 个标记' }); return }
+        const kind = view.markDraft?.kind === 'target' ? 'target' : 'cost'
+        if (marks.some(mark => mark.kind === kind && mark.price === price)) { runtime.updateView({ markError: '同类型不能有重复价格' }); return }
+        applyMarks([...marks, { id: crypto.randomUUID().slice(0, 8), price, kind }])()
+        runtime.updateView({ markDraft: null, markError: '' })
+      } },
+        h('label', null, '价格标记', h('input', { value: view.markDraft?.price ?? '', inputMode: 'decimal', onChange: e => runtime.updateView({ markDraft: { kind: view.markDraft?.kind ?? 'cost', price: e.target.value }, markError: '' }), placeholder: '输入价格' })),
+        h('div', { className: 'ssb-toolbar', role: 'group', 'aria-label': '标记类型' },
+          h(Button, { primary: (view.markDraft?.kind ?? 'cost') === 'cost', onClick: () => runtime.updateView({ markDraft: { kind: 'cost', price: view.markDraft?.price ?? '' } }) }, '成本'),
+          h(Button, { primary: view.markDraft?.kind === 'target', onClick: () => runtime.updateView({ markDraft: { kind: 'target', price: view.markDraft?.price ?? '' } }) }, '卖价')),
+        h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '添加标记'),
+        view.markError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.markError) : null) : null
+      const markList = marks.length ? h('ul', { className: 'ssb-mark-list', 'aria-label': '价格标记' }, ...marks.map(mark => {
+        const pct = markPct(mark, lastN, avgCost)
+        return h('li', { key: mark.id, className: 'ssb-mark-row' },
+          h('span', { className: 'ssb-mark-kind' }, mark.kind === 'cost' ? '成本' : '卖价'),
+          h('span', { className: 'ssb-number' }, formatPrice(mark.price)),
+          h('span', { className: `ssb-small${toneOfPct(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
+          h(Button, { danger: true, disabled: state.busy.write, onClick: applyMarks(marks.filter(other => other.id !== mark.id)) }, '删除'))
+      })) : null
       // 分组表单(B1): 单标签, 空=移出分组; 草稿 view.groupDraft
       const groupForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.groupDraft?.trim() ?? item.group; if ([...raw].length > 12) { runtime.updateView({ groupError: '分组名最多12字' }); return } quiet(() => runtime.mutate('group', { securityIds: [item.id], group: raw }))() } }, h('label', null, '设分组', h('input', { value: view.groupDraft ?? (item.group || ''), maxLength: 12, onChange: e => runtime.updateView({ groupDraft: e.target.value, groupError: '' }), placeholder: '留空移出分组' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存分组'), view.groupError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.groupError) : null) : null
-      const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本 ${item.cost}`)) : null
-      const watchActions = inWatchlist ? h(React.Fragment, null, costForm, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
+      const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本均价 ${formatPrice(avgCost)}`)) : null
+      const watchActions = inWatchlist ? h(React.Fragment, null, markForm, markList, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
         // 行内不再挂操作菜单, 排序走拖拽, 剩下的置顶与移出收敛到这里: 低频、且删除需要确认, 不适合出现在每一行
         h('div', { className: 'ssb-alias-form' }, h('span', { className: 'ssb-muted ssb-small' }, '自选管理'), h('div', { className: 'ssb-toolbar' },
           h(Button, { disabled: state.busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: item.id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
@@ -1111,7 +1160,7 @@ window.__ModuleLoader__.load({
     // 宿主把主题 token 内联写在 body 的 style 上, 同色系两套主题切换时明暗标记并不变,
     // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」。
     // background 也在签名里: 画布底色就铺的是它, canvas 不透明, 漏掉它等于背景永远不换
-    const themeSignature = t => [t.background, t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
+    const themeSignature = t => [t.background, t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.target, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
     // 轮询决策。三件事必须同时成立: 收市后不再打上游、又不能永远停在那儿、还不能每分钟真刷一次。
     // trend 端点不进缓存, 收市后必须彻底停掉; 而 /snapshot 只读缓存不重算交易时段,
     // 单靠它永远发现不了开市, 所以每隔几拍要用真刷新把状态翻回来
@@ -1459,9 +1508,9 @@ window.__ModuleLoader__.load({
     const CSS = `
 .ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; }
 /* 图表区分色: 亮色取中低明度保证白底上不糊, 取值由 test/chart-colors.test.mjs 卡对比度与线间色差 */
-.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 40%); --ssb-chart-ma-mid: hsl(280 88% 52%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(20 92% 45%); }
+.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 40%); --ssb-chart-ma-mid: hsl(280 88% 52%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(20 92% 45%); --ssb-chart-target: hsl(305 80% 45%); }
 /* 暗色整体提亮一档, 否则深色线条直接溶进背景; 明暗标记由宿主写在 body 上 */
-[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 58%); --ssb-chart-ma-mid: hsl(280 90% 72%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(20 95% 58%); }
+[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 58%); --ssb-chart-ma-mid: hsl(280 90% 72%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(20 95% 58%); --ssb-chart-target: hsl(305 85% 70%); }
 /* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
 .ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
 .ssb-float-root { color:var(--ssb-text); font:inherit; font-size:12px; line-height:1.5; }
@@ -1565,7 +1614,7 @@ window.__ModuleLoader__.load({
 .ssb-float-picker .ssb-switch { font-size:11px; }
 .ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; height:32px; padding:0 12px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:12px; color:var(--ssb-text-sub); }
 .ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
-.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
+.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-mark-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }.ssb-mark-row { display:flex; align-items:center; gap:8px; }.ssb-mark-row .ssb-number { flex:1; }.ssb-mark-kind { min-width:2.5em; color:var(--ssb-text-dim); font-size:12px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
 .ssb-settings-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }.ssb-settings-intro { min-width:0; display:grid; gap:6px; }.ssb-settings-intro p { margin:0; }
 .ssb-provider-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; }.ssb-provider-adapter { flex:0 0 240px; }.ssb-provider-switches { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }.ssb-provider-desc { margin:8px 0 0; }.ssb-provider-advanced { margin-top:8px; }.ssb-provider-advanced > summary { cursor:pointer; }
 /* 摘要行: 数据源与市场默认收成一行, 点开才展开编辑区 */
@@ -1667,7 +1716,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, avgCostOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

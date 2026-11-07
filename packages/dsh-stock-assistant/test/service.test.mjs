@@ -12,18 +12,28 @@ test('S08 第101只自选明确拒绝且不改已有列表', async () => {
   assert.equal(state.get().watchlist.order.length, 100); assert.equal(state.get().revision, 100)
   await state.close()
 })
-test('COST01 成本价写入清空与非法值拒绝', async () => {
+test('MARKS01 价格标记整组替换与校验', async () => {
   const state = await openState(memoryStorage()), s = makeSecurity('XSHG', '600001', '甲')
   const service = createWatchlistService(state, id => s)
   let n = 0
   const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
   await exec('add', { securityId: s.id })
-  await exec('cost', { securityId: s.id, cost: 1450.5 })
-  assert.equal(state.get().watchlist.items[s.id].cost, 1450.5)
-  await exec('cost', { securityId: s.id, cost: null })
-  assert.equal(state.get().watchlist.items[s.id].cost, null)
-  await assert.rejects(exec('cost', { securityId: s.id, cost: -1 }), e => e.code === 'INVALID_OPERATION')
-  await assert.rejects(exec('cost', { securityId: s.id, cost: 0 }), e => e.code === 'INVALID_OPERATION')
+  const mark = (price, kind = 'cost', id = 'm1') => ({ id, price, kind })
+  await exec('marks', { securityId: s.id, marks: [mark(1450.5)] })
+  assert.deepEqual(state.get().watchlist.items[s.id].marks, [mark(1450.5)])
+  // 多个标记共存: 成本与卖价各自独立, 都在同一个数组里
+  await exec('marks', { securityId: s.id, marks: [mark(1450.5), mark(1600, 'target', 'm2')] })
+  assert.equal(state.get().watchlist.items[s.id].marks.length, 2)
+  await exec('marks', { securityId: s.id, marks: [] })
+  assert.deepEqual(state.get().watchlist.items[s.id].marks, [])
+  // 价格必须为正; 同类型不允许重复价; id 必须唯一
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(-1)] }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(0)] }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(100, 'cost', 'a'), mark(100, 'cost', 'b')] }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(100, 'cost', 'a'), mark(200, 'target', 'a')] }), e => e.code === 'INVALID_OPERATION')
+  // 同价格不同类型是合法的
+  await exec('marks', { securityId: s.id, marks: [mark(100, 'cost', 'a'), mark(100, 'target', 'b')] })
+  assert.equal(state.get().watchlist.items[s.id].marks.length, 2)
 })
 test('GROUP01 组分配重命名解散与校验', async () => {
   const state = await openState(memoryStorage()), securities = ['600001', '600002'].map(code => makeSecurity('XSHG', code, code))

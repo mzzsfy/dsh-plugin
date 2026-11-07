@@ -79,18 +79,18 @@ test('换详情时清空成本与分组草稿, 同一只重复打开不清', asy
     fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) }),
   })
   runtime.updateView({ detailId: 'A', overlay: 'detail' })
-  runtime.updateView({ costDraft: '422', groupDraft: '科技', costError: '错', groupError: '错' })
-  assert.equal(runtime.getSnapshot().view.costDraft, '422')
+  runtime.updateView({ markDraft: { kind: 'cost', price: '422' }, groupDraft: '科技', markError: '错', groupError: '错' })
+  assert.equal(runtime.getSnapshot().view.markDraft.price, '422')
   // 同一只再写一次草稿: detailId 没变, 草稿不能被清掉
-  runtime.updateView({ costDraft: '430' })
-  assert.equal(runtime.getSnapshot().view.costDraft, '430')
+  runtime.updateView({ markDraft: { kind: 'cost', price: '430' } })
+  assert.equal(runtime.getSnapshot().view.markDraft.price, '430')
   // 显式重复传同一个 detailId(键盘导航会这么做)同样不该清
-  runtime.updateView({ detailId: 'A', costDraft: '440' })
-  assert.equal(runtime.getSnapshot().view.costDraft, '440')
+  runtime.updateView({ detailId: 'A', markDraft: { kind: 'cost', price: '440' } })
+  assert.equal(runtime.getSnapshot().view.markDraft.price, '440')
   // 换到 B: 四个草稿字段全部归零
   runtime.updateView({ detailId: 'B' })
   const view = runtime.getSnapshot().view
-  assert.deepEqual({ costDraft: view.costDraft, groupDraft: view.groupDraft, costError: view.costError, groupError: view.groupError }, { costDraft: null, groupDraft: null, costError: null, groupError: null })
+  assert.deepEqual({ markDraft: view.markDraft, groupDraft: view.groupDraft, markError: view.markError, groupError: view.groupError }, { markDraft: null, groupDraft: null, markError: null, groupError: null })
   runtime.dispose()
 })
 
