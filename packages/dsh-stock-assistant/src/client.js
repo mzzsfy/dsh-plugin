@@ -127,6 +127,8 @@ window.__ModuleLoader__.load({
         }, 300)
       }
       const operation = () => ({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control.revision ?? 0 })
+      // K线请求代际: 同 key 并发时只认最后一次发出的请求
+      let klineSeq = 0
       return {
         getSnapshot: () => state,
         subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
@@ -225,15 +227,17 @@ window.__ModuleLoader__.load({
           const maxAge = KLINE_MAX_AGE[period] ?? 0
           const fresh = held?.candles && Date.now() - (held.loadedAt || 0) < maxAge
           if (fresh && !force) return Promise.resolve(held)
+          // 同一 key 也可能并发(例如 ↻ 连点): 只让最后一次发出的请求落地, 否则先发后到会盖掉新的
+          const seq = ++klineSeq
           patch({ klineKey: key, kline: { loading: !held?.candles, error: '', candles: held?.candles ?? null, loadedAt: held?.loadedAt } })
           const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')).then(result => {
-            // 等待期间换了标的/周期: 丢弃这轮结果, 否则旧数据会盖掉新数据
-            if (state.klineKey !== key) return result
+            // 等待期间换了标的/周期, 或已有更新的同 key 请求: 丢弃这轮结果, 否则旧数据会盖掉新数据
+            if (state.klineKey !== key || seq !== klineSeq) return result
             patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result } })
             return result
           }).catch(e => {
             // 切走之后就别再为废弃的 key 退避重试了, 白打一次请求还占额度
-            if (state.klineKey !== key) throw e
+            if (state.klineKey !== key || seq !== klineSeq) throw e
             // 额度窗口瞬时满/网络抖动: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
             if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(Math.max(4 * 1000, e.retryAfterMs || 0), true)
             patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code, candles: null } })
@@ -262,13 +266,15 @@ window.__ModuleLoader__.load({
     const quiet = fn => (...args) => { Promise.resolve().then(() => fn(...args)).catch(() => {}) }
     const signed = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${value}`
     const timeText = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知'
+    // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
+    const finiteOr = value => value == null || value === '' ? NaN : Number(value)
     // 价格与成交额: 空值显示破折号, 成交额按万/亿缩写避免长列
     const formatPrice = value => value == null || Number.isNaN(Number(value)) ? '—' : String(value)
-    const formatAmount = value => {
-      // 0 与 null 都按缺失呈现: 日韩分时的成交额来源恒给 0, 显示 0 会被误读成真的没有成交
+    const formatAmount = (value, { zeroIsMissing = true } = {}) => {
+      // 成交额来源恒给 0 时按缺失呈现(显示 0 会被误读成真的没有成交); 成交量 0 是真值, 由调用方关掉这个开关
       if (value == null) return '—'
       const amount = Number(value)
-      if (!Number.isFinite(amount) || amount === 0) return '—'
+      if (!Number.isFinite(amount) || (zeroIsMissing && amount === 0)) return '—'
       if (Math.abs(amount) >= 1e8) return `${(amount / 1e8).toFixed(1)}亿`
       if (Math.abs(amount) >= 1e4) return `${(amount / 1e4).toFixed(0)}万`
       return amount.toFixed(0)
@@ -613,11 +619,11 @@ window.__ModuleLoader__.load({
         if (indicatorValues && guides.boll) ['BOLL', 'BOLL上', 'BOLL下'].forEach((name, index) => series.push([name, indicatorValues.boll[index].at(-1), ` ssb-boll-${index}`]))
         if (indicatorValues && guides.bbi) series.push(['BBI', indicatorValues.bbi[0].at(-1), ' ssb-bbi'])
         return {
-          quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(volume)]],
+          quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(volume, { zeroIsMissing: false })]],
           series: series.filter(([, value]) => value != null && Number.isFinite(Number(value))),
         }
       }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale, guides])
-      const costPct = item.cost && kline?.candles?.length ? (() => { const last = Number(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
+      const costPct = item.cost && kline?.candles?.length ? (() => { const last = finiteOr(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
       function ensureSeries(LWC) {
         const chart = chartRef.current
         if (!chart || !LWC) return
@@ -680,7 +686,7 @@ window.__ModuleLoader__.load({
         const palette = themeOf()
         drawLine(preCloseLineRef, guides.preClose && result.preClose != null ? { price: result.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
         drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1, title: '成本' } : null)
-        const highs = result.candles.map(c => Number(c.high)).filter(Number.isFinite), lows = result.candles.map(c => Number(c.low)).filter(Number.isFinite)
+        const highs = result.candles.map(c => finiteOr(c.high)).filter(Number.isFinite), lows = result.candles.map(c => finiteOr(c.low)).filter(Number.isFinite)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
         // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上; 手动刷新保留缩放
@@ -713,6 +719,8 @@ window.__ModuleLoader__.load({
           for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
         })
         mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
+        // 明暗主题标记落在 body 上, 不在 root 的观察范围里, 单开一路才收得到切换
+        mo.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
         return () => { dead = true; mo.disconnect(); chartRef.current?.remove(); chartRef.current = null }
       }, [])
       // 数据时间面: 首末日期 + 共几根 + 今日有没有交易。判断只用数据本身, 不猜日历——
@@ -755,7 +763,7 @@ window.__ModuleLoader__.load({
         const palette = themeOf()
         drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
         const candles = kline?.candles || []
-        const highs = candles.map(c => Number(c.high)).filter(Number.isFinite), lows = candles.map(c => Number(c.low)).filter(Number.isFinite)
+        const highs = candles.map(c => finiteOr(c.high)).filter(Number.isFinite), lows = candles.map(c => finiteOr(c.low)).filter(Number.isFinite)
         drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
@@ -839,7 +847,7 @@ window.__ModuleLoader__.load({
       const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
       // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
       const currency = item.currency || ''
-      const fields = [['今开', formatPrice(q?.open)], ['最高', formatPrice(q?.high)], ['最低', formatPrice(q?.low)], ['昨收', formatPrice(q?.previousClose)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume)}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
+      const fields = [['今开', formatPrice(q?.open)], ['最高', formatPrice(q?.high)], ['最低', formatPrice(q?.low)], ['昨收', formatPrice(q?.previousClose)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume, { zeroIsMissing: false })}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
       // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
       // 成本块: 有成本显盈亏三元组, 表单可设/清成本; 非法输入就地报错不静默(B2), 草稿绑定 detailId 切换即清(B3 由三处 open 清理保证)
@@ -885,13 +893,78 @@ window.__ModuleLoader__.load({
       return [value, next => writePref(key, { ...readPref(key, fallback), ...next })]
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
+    // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
+    function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, revision, setFetched, setTrend, setError }) {
+      const pickedKey = picked.join(','), stateKey = picked.map(id => quotes?.[id]?.sessionState).join(',')
+      React.useEffect(() => {
+        if (!open || !picked.length || live === false) return
+        let dead = false
+        setError('')
+        // 间隔跟随设置页的刷新间隔; 全部标的都已收市时不必按交易时段频率拉, 只留一拍看是否复盘
+        const intervalMs = Math.max(15, Number(refreshSeconds) || 15) * 1000
+        const allClosed = picked.every(id => quotes?.[id]?.sessionState === 'closed')
+        // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
+        const pull = () => {
+          if (document.visibilityState !== 'visible') return
+          if (allClosed) return
+          if (mode === 'list') {
+            const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
+            fetch(`${BASE}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: revision ?? 0, securities }) })
+              .then(response => response.json())
+              .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .catch(() => { if (!dead) setError('行情不可用') })
+          } else if (securityId) {
+            fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
+              .then(response => response.json())
+              .then(payload => { if (dead) return; if (payload.ok) { setTrend({ securityId, data: payload.data }); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .catch(() => { if (!dead) setError('行情不可用') })
+          }
+        }
+        pull()
+        // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
+        const timer = setInterval(pull, allClosed ? Math.max(intervalMs, 60 * 1000) : intervalMs)
+        return () => { dead = true; clearInterval(timer) }
+      }, [open, mode, securityId, pickedKey, live, refreshSeconds, stateKey])
+    }
+    // 拖动: 按住非控件区域移动, 松手时把落点写回偏好
+    function useFloatingDrag(onDrop) {
+      const dragRef = React.useRef(null)
+      const clamp = (x, y, el) => {
+        const width = el?.offsetWidth || 288, height = el?.offsetHeight || 210, margin = 8
+        return { x: Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - width - margin)), y: Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - height - margin)) }
+      }
+      return {
+        onPointerDown: e => {
+          // 只认左键: 右键/中键与拖动手势无关, 抢下来会导致上下文菜单失效
+          if (e.button !== 0 || e.target.closest('button, input, label')) return
+          const box = e.currentTarget.getBoundingClientRect()
+          dragRef.current = { dx: e.clientX - box.left, dy: e.clientY - box.top }
+          e.currentTarget.setPointerCapture?.(e.pointerId)
+        },
+        onPointerMove: e => {
+          if (!dragRef.current) return
+          const { x, y } = clamp(e.clientX - dragRef.current.dx, e.clientY - dragRef.current.dy, e.currentTarget)
+          e.currentTarget.style.left = `${x}px`
+          e.currentTarget.style.top = `${y}px`
+          e.currentTarget.style.right = 'auto'
+          e.currentTarget.style.bottom = 'auto'
+        },
+        onPointerUp: e => {
+          if (!dragRef.current) return
+          dragRef.current = null
+          e.currentTarget.releasePointerCapture?.(e.pointerId)
+          const box = e.currentTarget.getBoundingClientRect()
+          onDrop({ x: Math.round(box.left), y: Math.round(box.top) })
+        },
+      }
+    }
     const FLOAT_KEY = 'ssb-floating'
     // ids 为空时退回自选前几只, 否则第一次打开会是一张空窗
     // ids 为 null 表示"从没勾过"(退回默认前五只), 空数组表示"明确一只都不盯", 两者不能混
     const FLOAT_DEFAULT = { open: false, live: true, mode: 'list', ids: null, securityId: null, x: null, y: null }
     // 分时曲线自绘: 只要一条折线加填充, 不值得为它再挂一个图表实例
     function Sparkline({ candles, preClose }) {
-      const values = (candles || []).map(c => Number(c.close)).filter(Number.isFinite)
+      const values = (candles || []).map(c => finiteOr(c.close)).filter(Number.isFinite)
       if (!values.length) return null
       const width = 264, height = 88
       const base = Number(preClose)
@@ -912,8 +985,6 @@ window.__ModuleLoader__.load({
       const [trend, setTrend] = React.useState(null)
       const [error, setError] = React.useState('')
       const [picker, setPicker] = React.useState(false)
-      // hooks 必须全部在提前返回之前: 开关一旦变化, 排在后头的 useRef 会让 hooks 数量对不上
-      const dragRef = React.useRef(null)
       const items = state.data?.control.watchlist.items || {}
       const order = state.data?.control.watchlist.order || []
       // 勾选的观测目标: 空则退回自选前几只, 但绝不隐式等于全部自选
@@ -921,63 +992,10 @@ window.__ModuleLoader__.load({
       const mode = floating.mode === 'kline' ? 'kline' : 'list'
       const open = !!floating.open
       const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
-      // 列表模式一次 refresh 批量拉勾选的标的; K线模式只拉当前这只的分时
-      React.useEffect(() => {
-        if (!open || !picked.length || floating.live === false) return
-        let dead = false
-        setError('')
-        // 间隔跟随设置页的刷新间隔; 全部标的都已收市时不必按交易时段频率拉, 只留一拍看是否复盘
-        const intervalMs = Math.max(15, Number(state.data?.control.preferences?.refreshSeconds) || 15) * 1000
-        const allClosed = picked.every(id => state.data?.quotes?.[id]?.sessionState === 'closed')
-        // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
-        const pull = () => {
-          if (document.visibilityState !== 'visible') return
-          if (allClosed) return
-          if (mode === 'list') {
-            const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
-            fetch(`${BASE}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control.revision ?? 0, securities }) })
-              .then(response => response.json())
-              .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
-              .catch(() => { if (!dead) setError('行情不可用') })
-          } else if (securityId) {
-            fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
-              .then(response => response.json())
-              .then(payload => { if (dead) return; if (payload.ok) { setTrend({ securityId, data: payload.data }); setError('') } else setError(payload.error?.message || '行情不可用') })
-              .catch(() => { if (!dead) setError('行情不可用') })
-          }
-        }
-        pull()
-        // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, allClosed ? Math.max(intervalMs, 60 * 1000) : intervalMs)
-        return () => { dead = true; clearInterval(timer) }
-      }, [open, mode, securityId, picked.join(','), floating.live, state.data?.control.preferences?.refreshSeconds, picked.map(id => state.data?.quotes?.[id]?.sessionState).join(',')])
-      if (!open) return null
       const update = next => setFloating(next)
-      const clamp = (x, y, el) => {
-        const width = el?.offsetWidth || 288, height = el?.offsetHeight || 210, margin = 8
-        return { x: Math.min(Math.max(margin, x), Math.max(margin, window.innerWidth - width - margin)), y: Math.min(Math.max(margin, y), Math.max(margin, window.innerHeight - height - margin)) }
-      }
-      const onPointerDown = e => {
-        if (e.target.closest('button, input, label')) return
-        const box = e.currentTarget.getBoundingClientRect()
-        dragRef.current = { dx: e.clientX - box.left, dy: e.clientY - box.top }
-        e.currentTarget.setPointerCapture?.(e.pointerId)
-      }
-      const onPointerMove = e => {
-        if (!dragRef.current) return
-        const { x, y } = clamp(e.clientX - dragRef.current.dx, e.clientY - dragRef.current.dy, e.currentTarget)
-        e.currentTarget.style.left = `${x}px`
-        e.currentTarget.style.top = `${y}px`
-        e.currentTarget.style.right = 'auto'
-        e.currentTarget.style.bottom = 'auto'
-      }
-      const onPointerUp = e => {
-        if (!dragRef.current) return
-        dragRef.current = null
-        e.currentTarget.releasePointerCapture?.(e.pointerId)
-        const box = e.currentTarget.getBoundingClientRect()
-        update({ x: Math.round(box.left), y: Math.round(box.top) })
-      }
+      const drag = useFloatingDrag(update)
+      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, refreshSeconds: state.data?.control.preferences?.refreshSeconds, quotes: state.data?.quotes, revision: state.data?.control.revision, setFetched, setTrend, setError })
+      if (!open) return null
       const position = floating.x == null || floating.y == null ? {} : { left: floating.x, top: floating.y, right: 'auto', bottom: 'auto' }
       const step = delta => {
         const at = picked.indexOf(securityId)
@@ -1009,7 +1027,7 @@ window.__ModuleLoader__.load({
           h('span', { className: `ssb-float-row-pct ssb-number${toneOf(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
       }
       const greenUp = state.data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''
-      return h('div', { className: `ssb-float${greenUp}${dragRef.current ? ' ssb-float-dragging' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp },
+      return h('div', { className: `ssb-float${greenUp}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown: drag.onPointerDown, onPointerMove: drag.onPointerMove, onPointerUp: drag.onPointerUp, onPointerCancel: drag.onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-float-head' },
           mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹') : null,
@@ -1031,7 +1049,8 @@ window.__ModuleLoader__.load({
               error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${tone}` }, h(Sparkline, { candles, preClose: base }))),
         h('div', { className: 'ssb-float-foot' },
           h('span', { className: 'ssb-muted' }, mode === 'kline' && securityId ? `${picked.indexOf(securityId) + 1}/${picked.length}` : `${picked.length} 只`),
-          h('button', { type: 'button', className: 'ssb-float-live', 'aria-pressed': floating.live !== false, onClick: () => update({ live: floating.live === false }) }, floating.live === false ? '开始监听' : '监听中'),
+          // 失败与没选标的都不该继续挂"监听中": 前者让人以为数据是新的, 后者让人以为在看某只标的
+          h('button', { type: 'button', className: `ssb-float-live${error ? ' ssb-float-live-error' : ''}`, 'aria-pressed': floating.live !== false, title: error || '', onClick: () => update({ live: floating.live === false }) }, floating.live === false ? '开始监听' : !picked.length ? '未选择' : error ? '更新失败' : '监听中'),
           h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', disabled: !securityId, onClick: () => { if (securityId) runtime.openDetail(securityId) } }, '⤢')))
     }
     function BrowseView({ runtime, state }) {
@@ -1237,8 +1256,10 @@ window.__ModuleLoader__.load({
     }
     const CSS = `
 .ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; }
-/* 图表区分色: 蜡烛的涨跌仍取语义色, 这里只是均线/布林等多线并存时的辨识色, 饱和度均不低于 70% */
-.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(38 92% 50%); --ssb-chart-ma-mid: hsl(258 90% 66%); --ssb-chart-ma-slow: hsl(189 94% 43%); --ssb-chart-ma-long: hsl(239 84% 67%); --ssb-chart-ema: hsl(330 81% 60%); --ssb-chart-boll-mid: hsl(217 91% 60%); --ssb-chart-boll-rail: hsl(213 94% 78%); --ssb-chart-bbi: hsl(160 84% 39%); --ssb-chart-cost: hsl(25 95% 53%); }
+/* 图表区分色: 亮色主题取中低明度, 保证白底上不糊成一片 */
+.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(38 92% 46%); --ssb-chart-ma-mid: hsl(258 90% 58%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(25 95% 46%); }
+/* 暗色主题整体提亮一档, 否则深色线条直接溶进背景; 明暗标记由宿主写在 body 上 */
+[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(38 95% 60%); --ssb-chart-ma-mid: hsl(258 92% 74%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(25 95% 60%); }
 /* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
 .ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
 .ssb-float-root { color:var(--ssb-text); font:inherit; font-size:12px; line-height:1.5; }
@@ -1299,7 +1320,8 @@ window.__ModuleLoader__.load({
 .ssb-kv { display:inline-flex; gap:3px; white-space:nowrap; }
 /* 悬浮盯盘: 固定右下角, 尺寸以 4px 刻度, 只做轻边框分层不挂阴影 */
 .ssb-float { position:fixed; right:24px; bottom:24px; z-index:60; width:288px; max-height:calc(100vh - 48px); display:flex; flex-direction:column; gap:8px; padding:12px; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); font-size:12px; cursor:grab; touch-action:none; }
-.ssb-float-dragging { cursor:grabbing; }
+/* 可滚动区域交还纵向手势, 否则触摸屏上列表和勾选框都滚不动 */
+.ssb-float-list,.ssb-float-picker { touch-action:pan-y; }
 .ssb-float-head { display:flex; align-items:center; gap:4px; }
 .ssb-float-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
 .ssb-float-icon { width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:12px; line-height:1; color:var(--ssb-text-sub); background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
@@ -1317,6 +1339,7 @@ window.__ModuleLoader__.load({
 .ssb-float-foot { display:flex; align-items:center; gap:8px; }
 .ssb-float-live { margin-left:auto; padding:4px 8px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-live[aria-pressed="true"] { color:var(--ssb-ok); border-color:color-mix(in srgb,var(--ssb-ok) 40%,transparent); background:color-mix(in srgb,var(--ssb-ok) 10%,transparent); }
+.ssb-float-live-error { color:var(--ssb-warn) !important; border-color:color-mix(in srgb,var(--ssb-warn) 40%,transparent) !important; background:color-mix(in srgb,var(--ssb-warn) 10%,transparent) !important; }
 .ssb-float-live:hover { border-color:var(--ssb-accent); }
 /* 列表模式: 每行一只标的, 点击切到该只的图形 */
 .ssb-float-list, .ssb-float-picker { flex:0 1 auto; min-height:0; display:flex; flex-direction:column; gap:2px; max-height:min(300px, 45vh); overflow:auto; }

@@ -170,3 +170,28 @@ test('标的变化后到达的 K 线失败不清空当前标的的数据', async
   assert.equal(after.kline?.error, '', 'A 的错误不该写到 B 上')
   runtime.dispose()
 })
+
+// 同一标的上连点刷新会并发两个同 key 请求, 先发的后到时不能盖掉后发的
+test('同 key 并发只让最后一次请求的结果落地', async () => {
+  const { createPageRuntime } = await load()
+  let pending = 0
+  const releases = []
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: () => { const index = ++pending; return new Promise(resolve => releases.push(() => resolve({ ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-11-06', open: index, high: index, low: index, close: index }] } }) }))) },
+  })
+  const first = runtime.loadKline('A', '1d').catch(() => {})
+  const second = runtime.loadKline('A', '1d').catch(() => {})
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // 后发的先回, 先发的后回
+  releases[1]()
+  await second
+  releases[0]()
+  await first
+  const after = runtime.getSnapshot()
+  assert.equal(after.kline?.candles?.[0]?.close, 2, '应是后发请求的数据')
+  runtime.dispose()
+})

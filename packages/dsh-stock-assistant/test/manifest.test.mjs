@@ -11,7 +11,11 @@ test('装配守卫：生产client无打包依赖/React副本，公共依赖exter
   assert.equal(manifest.dependencies.esbuild, undefined)
   assert.equal((client.match(/createElement\('style', \{/g) || []).length, (client.match(/createElement\('style', \{ 'data-plugin': '@mzzsfy\/dsh-stock-assistant'/g) || []).length)
   assert.doesNotMatch(host, /export const Config|configEditor|settings\.register|settings\.update/)
-  // localStorage 不在此列: 悬浮窗位置、辅助线开关属纯客户端显示偏好, 放宿主 schema 会让每次加开关都得重启宿主
+  // 显示偏好(悬浮窗位置、辅助线开关)允许放 localStorage: 放宿主 schema 每加一个开关都要重启宿主。
+  // 但只能经 readPref/writePref 这两个封装读写, 且 key 必须是 ssb- 前缀, 别把业务数据也塞进浏览器本地
+  const prefKeys = [...client.matchAll(/const (FLOAT_KEY|GUIDE_KEY) = '([^']+)'/g)].map(m => m[2])
+  assert.deepEqual(prefKeys.sort(), ['ssb-floating', 'ssb-guides'], '本地显示偏好的 key 集合固定')
+  assert.equal((client.match(/localStorage\.(get|set)Item\(/g) || []).length, 2, 'localStorage 只允许出现在 readPref/writePref 里')
   assert.doesNotMatch(client, /sidebarRight|sessionId|new WebSocket/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:checked/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:focus-visible/)
