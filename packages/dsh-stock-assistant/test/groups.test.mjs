@@ -65,3 +65,30 @@ test('休市时轮询走只读快照, 开市才刷新', async () => {
   assert.equal(floatPollUrl(true), '/api/stock-assistant/snapshot')
   assert.equal(floatPollUrl(false), '/api/stock-assistant/refresh')
 })
+
+test('休市把轮询压到一分钟一拍, 开市跟随设置', async () => {
+  const { floatPollDelay } = await load()
+  assert.equal(floatPollDelay(15, false), 15 * 1000)
+  assert.equal(floatPollDelay(60, false), 60 * 1000)
+  // 设置比一分钟还慢时不该被强行提速
+  assert.equal(floatPollDelay(120, true), 120 * 1000)
+  assert.equal(floatPollDelay(15, true), 60 * 1000)
+  // 设置缺失或非法时退回默认, 且不低于下限
+  assert.equal(floatPollDelay(undefined, false), 15 * 1000)
+  assert.equal(floatPollDelay(1, false), 15 * 1000)
+})
+
+// 主序列的键名决定重涂能不能生效: 分时用蜡烛那组键名等于什么都没改
+test('重涂按主序列形态选键名', async () => {
+  const { seriesPaintPlan } = await load()
+  const theme = { up: '#c00', down: '#0a0' }
+  const area = seriesPaintPlan(theme, true)
+  assert.deepEqual(Object.keys(area).sort(), ['bottomColor', 'lineColor', 'topColor'])
+  assert.equal(area.lineColor, theme.up)
+  const candle = seriesPaintPlan(theme, false)
+  assert.deepEqual(Object.keys(candle).sort(), ['borderDownColor', 'borderUpColor', 'downColor', 'upColor', 'wickDownColor', 'wickUpColor'])
+  assert.equal(candle.upColor, theme.up)
+  assert.equal(candle.downColor, theme.down)
+  // 两套键名不允许重叠, 否则「按形态选键」这件事本身就没有意义
+  assert.equal(Object.keys(area).some(key => key in candle), false)
+})

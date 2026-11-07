@@ -669,8 +669,7 @@ window.__ModuleLoader__.load({
           rightPriceScale: { borderColor: t.gridLine },
         })
         // 面积序列用 lineColor/topColor/bottomColor, 蜡烛用 up/down 那一组, 键名互不相通
-        if (avgRef.current) mainRef.current?.applyOptions({ lineColor: t.up, topColor: t.up + '4d', bottomColor: t.up + '07' })
-        else mainRef.current?.applyOptions({ upColor: t.up, downColor: t.down, borderUpColor: t.up, borderDownColor: t.down, wickUpColor: t.up, wickDownColor: t.down })
+        mainRef.current?.applyOptions(seriesPaintPlan(t, !!avgRef.current))
         volRef.current?.applyOptions({ upColor: t.volumeUp, downColor: t.volumeDown })
         avgRef.current?.applyOptions({ color: t.MA[0] })
         const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI }
@@ -951,7 +950,7 @@ window.__ModuleLoader__.load({
         let dead = false
         setError('')
         // 间隔跟随设置页的刷新间隔; 全部收市后降到一分钟一拍
-        const intervalMs = Math.max(15, Number(refreshSeconds) || 15) * 1000
+        // 间隔由 floatPollDelay 统一算, 这里只判断要不要降频
         const allClosed = picked.every(id => stateOf(id) === 'closed')
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         const pull = () => {
@@ -977,7 +976,7 @@ window.__ModuleLoader__.load({
         }
         pull()
         // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, allClosed ? Math.max(intervalMs, 60 * 1000) : intervalMs)
+        const timer = setInterval(pull, floatPollDelay(refreshSeconds, allClosed))
         return () => { dead = true; clearInterval(timer) }
       }, [open, mode, securityId, pickedKey, live, refreshSeconds, stateKey])
     }
@@ -1012,6 +1011,17 @@ window.__ModuleLoader__.load({
           onDrop({ x: Math.round(box.left), y: Math.round(box.top) })
         },
       }
+    }
+    // 轮询节奏: 跟随设置页的刷新间隔, 全部收市后压到一分钟一拍
+    const floatPollDelay = (refreshSeconds, allClosed) => {
+      const base = Math.max(15, Number(refreshSeconds) || 15) * 1000
+      return allClosed ? Math.max(base, 60 * 1000) : base
+    }
+    // 主序列是蜡烛还是面积, 决定重涂时该下发哪一组键名: 两组键名互不相通, 用错等于没涂
+    function seriesPaintPlan(theme, isArea) {
+      return isArea
+        ? { lineColor: theme.up, topColor: theme.up + '4d', bottomColor: theme.up + '07' }
+        : { upColor: theme.up, downColor: theme.down, borderUpColor: theme.up, borderDownColor: theme.down, wickUpColor: theme.up, wickDownColor: theme.down }
     }
     // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游
     const floatPollUrl = allClosed => `${BASE}/${allClosed ? 'snapshot' : 'refresh'}`
@@ -1547,7 +1557,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl, floatPollDelay, seriesPaintPlan },
     }
   },
 })
