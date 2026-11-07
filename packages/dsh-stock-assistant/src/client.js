@@ -255,11 +255,17 @@ window.__ModuleLoader__.load({
           // 同一 key 也可能并发(例如 ↻ 连点): 只让最后一次发出的请求落地, 否则先发后到会盖掉新的
           const seq = ++klineSeq
           patch({ klineKey: key, kline: { loading: !held?.candles, error: '', candles: held?.candles ?? null, loadedAt: held?.loadedAt } })
-          const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')).then(result => {
+          const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => {
+            // 退避期间可能已经来了同 key 的新请求, 等到点了就别再打这一枪
+            if (seq !== klineSeq) return undefined
+            return api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')
+          }).then(result => {
             // 等待期间换了标的/周期, 或已有更新的同 key 请求: 丢弃这轮结果, 否则旧数据会盖掉新数据
             if (state.klineKey !== key || seq !== klineSeq) return result
-            patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result } })
-            return result
+            // 来源偶发给 null 字段: LWC 只跳过 undefined, null 会被当成 0 参与价格轴范围计算, 整图被压扁
+            const candles = (result?.candles || []).map(c => ({ time: c.time, at: c.at, open: finiteOr(c.open), high: finiteOr(c.high), low: finiteOr(c.low), close: finiteOr(c.close), volume: finiteOr(c.volume) }))
+            patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result, candles } })
+            return { ...result, candles }
           }).catch(e => {
             // 已被更新的同 key 请求取代: 既不该落错误(会盖掉新数据), 也不该继续退避
             if (seq !== klineSeq) return undefined
@@ -568,6 +574,8 @@ window.__ModuleLoader__.load({
       const pendingRef = React.useRef(null)
       // 建图 effect 是空依赖的, 回调里要用当前主题与当前数据, 只能从这里现取
       const liveRef = React.useRef({})
+      // 建图后补灌动作也走它, 保证用的是最新渲染的 maybeFill 而不是首帧那份
+      const fillRef = React.useRef(null)
       // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
       const preCloseLineRef = React.useRef(null), costLineRef = React.useRef(null), highLineRef = React.useRef(null), lowLineRef = React.useRef(null)
       function drawLine(ref, options) {
@@ -619,14 +627,14 @@ window.__ModuleLoader__.load({
         return { ma: MA_WINDOWS.map(n => seriesMA(candles, n)), ema: [seriesEMA(candles, EMA_WINDOW)], boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K), bbi: [seriesBBI(candles)] }
       }, [kline?.candles, wantTrend])
       // 建图与重涂都在空依赖的回调里跑, 用这份最新值替代首帧闭包
-      liveRef.current = { candles: kline?.candles, colorMode: state.data?.control.preferences?.colorMode, indicators: indicatorValues }
+      liveRef.current = { candles: kline?.candles, colorMode: state.data?.control.preferences?.colorMode, indicators: indicatorValues, period }
       const legend = React.useMemo(() => {
         const candles = kline?.candles || []
         if (!candles.length) return null
         const last = candles[candles.length - 1], scale = item.priceScale ?? 2
         const price = value => value == null || value === '' ? null : Number(value).toFixed(scale)
-        // 日K 的 preClose 有时来源不给, 退到前一根收盘; 两者都没有才算涨跌未知
-        const base = finiteOr(kline?.preClose) || finiteOr(candles[candles.length - 2]?.close)
+        // 日K 的 preClose 有时来源不给, 退到前一根收盘; 分时不能这么退——前一根分钟收盘会算出个假的 0.0x% 涨跌
+        const base = finiteOr(kline?.preClose) || (wantTrend ? NaN : finiteOr(candles[candles.length - 2]?.close))
         const pct = Number.isFinite(base) && base ? (finiteOr(last.close) - base) / base * 100 : null
         const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
         const quote = wantTrend
@@ -649,6 +657,30 @@ window.__ModuleLoader__.load({
         }
       }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale, guides])
       const costPct = item.cost && kline?.candles?.length ? (() => { const last = finiteOr(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - item.cost) / item.cost * 100 : null })() : null
+      // 把一套主题色铺满整张图: 背景/网格/两轴边框/主序列/成交量/指标线/参考线。
+      // 首灌与换主题共用同一份, 免得两处漏项(分时面积序列的键名与蜡烛不同)
+      function repaintChart(t) {
+        const chart = chartRef.current
+        if (!chart) return
+        chart.applyOptions({
+          layout: { background: { color: t.background }, textColor: t.textColor },
+          grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } },
+          timeScale: { borderColor: t.gridLine },
+          rightPriceScale: { borderColor: t.gridLine },
+        })
+        // 面积序列用 lineColor/topColor/bottomColor, 蜡烛用 up/down 那一组, 键名互不相通
+        if (avgRef.current) mainRef.current?.applyOptions({ lineColor: t.up, topColor: t.up + '4d', bottomColor: t.up + '07' })
+        else mainRef.current?.applyOptions({ upColor: t.up, downColor: t.down, borderUpColor: t.up, borderDownColor: t.down, wickUpColor: t.up, wickDownColor: t.down })
+        volRef.current?.applyOptions({ upColor: t.volumeUp, downColor: t.volumeDown })
+        avgRef.current?.applyOptions({ color: t.MA[0] })
+        const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI }
+        for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
+        // 参考线建好后就固定了, 只换颜色; 没有对应的线时 applyOptions 是 no-op
+        preCloseLineRef.current?.applyOptions({ color: t.crosshair })
+        costLineRef.current?.applyOptions({ color: t.cost })
+        highLineRef.current?.applyOptions({ color: t.textColor })
+        lowLineRef.current?.applyOptions({ color: t.textColor })
+      }
       function ensureSeries(LWC) {
         const chart = chartRef.current
         if (!chart || !LWC) return
@@ -717,6 +749,9 @@ window.__ModuleLoader__.load({
         // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上; 手动刷新保留缩放
         if (fit) chartRef.current.timeScale().fitContent()
       }
+      // 建图 effect 是空依赖的, 它拿到的是首帧那份 maybeFill; 转发一次, 让它永远调用最新渲染的版本,
+      // 否则建图那几百毫秒里切的周期/开关的辅助线/改的成本都会用旧值
+      fillRef.current = maybeFill
       // effect A: 图表创建一次; 主题变更(MutationObserver)重涂; 卸载销毁。
       React.useEffect(() => {
         let dead = false, mo
@@ -726,24 +761,11 @@ window.__ModuleLoader__.load({
           chartRef.current = LWC.createChart(holder.current, chartOptions(themeOf()))
           const early = pendingRef.current
           pendingRef.current = null
-          maybeFill(early || runtime.getKlineResult(item.id, period))
-        }).catch(e => runtime.setKlineError(item.id, period, e.message, e.code))
-        // 宿主换主题/切涨跌配色都是给 root 加类或在 body 上打标记, 观察这里重涂; 蜡烛与指标线也要跟着换色,
-        // 否则切到绿涨红跌后只有背景和网格变了, K 线与图例还是旧配色。
-        // 这个 effect 空依赖, 所以主题与数据都从 liveRef 现取, 不能用首帧闭包
-        mo = new MutationObserver(() => {
-          const chart = chartRef.current
-          if (!chart) return
-          const t = readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, liveRef.current.colorMode)
-          chart.applyOptions({ layout: { background: { color: t.background }, textColor: t.textColor }, grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } } })
-          const candles = liveRef.current.candles
-          if (!candles?.length) return
-          mainRef.current?.applyOptions({ upColor: t.up, downColor: t.down, borderUpColor: t.up, borderDownColor: t.down, wickUpColor: t.up, wickDownColor: t.down })
-          volRef.current?.applyOptions({ upColor: t.volumeUp, downColor: t.volumeDown })
-          avgRef.current?.applyOptions({ color: t.MA[0] })
-          const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI }
-          for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
-        })
+          fillRef.current?.(early || runtime.getKlineResult(item.id, period))
+        }).catch(e => runtime.setKlineError(item.id, liveRef.current.period, e.message, e.code))        // 宿主换主题/切涨跌配色都是给 root 加类或在 body 上打标记, 观察这里重涂。
+        // 这个 effect 空依赖, 所以主题与数据都从 liveRef 现取; 主序列是蜡烛还是面积由已建序列判断,
+        // 用 wantTrend 会读到首帧的值。分时面积序列的键名与蜡烛完全不同, 只按蜡烛键重涂等于没涂
+        mo = new MutationObserver(() => repaintChart(readChartTheme(holder.current?.closest('.ssb-root') || document.documentElement, liveRef.current.colorMode)))
         mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
         // 明暗主题标记落在 body 上, 不在 root 的观察范围里, 单开一路才收得到切换
         mo.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
@@ -934,10 +956,15 @@ window.__ModuleLoader__.load({
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         const pull = () => {
           if (document.visibilityState !== 'visible') return
-          // 休市也照拉一拍: 迟到的复盘数据得靠它恢复, 省的只是频率
           if (mode === 'list') {
-            const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
-            fetch(`${BASE}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: revision ?? 0, securities }) })
+            // 全部收市后走快照: 只是看一眼宿主有没有补到迟到的复盘, 不必每分钟真打一次上游
+            const readOnly = allClosed
+            const url = floatPollUrl(readOnly)
+            const init = readOnly ? undefined : {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: revision ?? 0, securities: picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code })) }),
+            }
+            fetch(url, init)
               .then(response => response.json())
               .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
               .catch(() => { if (!dead) setError('行情不可用') })
@@ -986,6 +1013,8 @@ window.__ModuleLoader__.load({
         },
       }
     }
+    // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游
+    const floatPollUrl = allClosed => `${BASE}/${allClosed ? 'snapshot' : 'refresh'}`
     const FLOAT_KEY = 'ssb-floating'
     // ids 为空时退回自选前几只, 否则第一次打开会是一张空窗
     // ids 为 null 表示"从没勾过"(退回默认前五只), 空数组表示"明确一只都不盯", 两者不能混
@@ -1028,7 +1057,8 @@ window.__ModuleLoader__.load({
       const step = delta => {
         const at = picked.indexOf(securityId)
         const next = picked[(at + delta + picked.length) % picked.length]
-        if (next) { setTrend(null); update({ securityId: next }) }
+        // 只有一只时 next 就是自己, 清掉 trend 反而让图空一转到下一拍才回来
+        if (next && next !== securityId) { setTrend(null); update({ securityId: next }) }
       }
       const toneOf = pct => pct == null ? '' : Number(pct) > 0 ? ' ssb-up' : Number(pct) < 0 ? ' ssb-down' : ''
       // 面板已经刷过的报价先拿来渲染, 悬浮窗自己的 refresh 结果回来后再按 receivedAt 择优:
@@ -1043,9 +1073,11 @@ window.__ModuleLoader__.load({
       // 分时数据必须和标的绑在一起: 切标的时新请求还没回来, 直接用旧数据会把上一只的价格当成这一只
       const trendData = trend?.securityId === securityId ? trend.data : null
       const candles = trendData?.candles
-      const last = candles?.length ? Number(candles[candles.length - 1].close) : null
-      const base = Number(trendData?.preClose)
-      const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
+      // 这里必须先过 finiteOr: Number(null) 是 0, 会把缺失的昨收当成真实的 0 交给下游,
+      // 结果是迷你图基准画在 0、价格显示 "0", 与图例里的「昨收 —」自相矛盾
+      const last = finiteOr(candles?.at(-1)?.close)
+      const base = finiteOr(trendData?.preClose)
+      const pct = Number.isFinite(last) && Number.isFinite(base) && base ? (last - base) / base * 100 : null
       const tone = toneOf(pct)
       const rowOf = id => {
         const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
@@ -1094,7 +1126,7 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'ssb-float-list' }, ...(picked.length ? picked.map(rowOf) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
             : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(React.Fragment, null,
               h('div', { className: `ssb-float-quote ssb-number${tone}` },
-                h('span', { className: 'ssb-float-price' }, last == null ? '—' : last),
+                h('span', { className: 'ssb-float-price' }, Number.isFinite(last) ? last : '—'),
                 h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
               error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${tone}` }, h(Sparkline, { candles, preClose: base }))),
         h('div', { className: 'ssb-float-foot' },
@@ -1515,7 +1547,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl },
     }
   },
 })

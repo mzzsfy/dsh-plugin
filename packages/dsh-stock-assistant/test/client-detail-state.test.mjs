@@ -156,6 +156,8 @@ test('标的变化后到达的 K 线失败不清空当前标的的数据', async
     fetch: () => ++pending === 1 ? new Promise((_, reject) => { rejectA = reject }) : new Promise(resolve => { resolveB = resolve }),
   })
   const first = runtime.loadKline('A', '1d').catch(() => {})
+  // 让 A 的请求先真的发出去: 换代后到点的请求会被代际直接拦下, 那样就测不到「失败禁止落地」这条
+  await new Promise(resolve => setTimeout(resolve, 10))
   const second = runtime.loadKline('B', '1d').catch(() => {})
   // loadKline 内部先等一拍再发请求, 同步取不到 resolve 句柄
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -184,6 +186,8 @@ test('同 key 并发只让最后一次请求的结果落地', async () => {
     fetch: () => { const index = ++pending; return new Promise(resolve => releases.push(() => resolve({ ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-11-06', open: index, high: index, low: index, close: index }] } }) }))) },
   })
   const first = runtime.loadKline('A', '1d').catch(() => {})
+  // 先让第一个请求真的发出(退避到点前会被代际拦下, 这是有意的省流)
+  await new Promise(resolve => setTimeout(resolve, 10))
   const second = runtime.loadKline('A', '1d').catch(() => {})
   await new Promise(resolve => setTimeout(resolve, 20))
   // 后发的先回, 先发的后回
@@ -208,6 +212,7 @@ test('同 key 并发: 先发的请求失败时不覆盖后发的成功结果', a
     fetch: () => new Promise((resolve, reject) => releases.push({ resolve, reject })),
   })
   const first = runtime.loadKline('A', '1d').catch(() => {})
+  await new Promise(resolve => setTimeout(resolve, 10))
   const second = runtime.loadKline('A', '1d').catch(() => {})
   await new Promise(resolve => setTimeout(resolve, 20))
   releases[1].resolve({ ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-11-06', open: 2, high: 2, low: 2, close: 2 }] } }) })

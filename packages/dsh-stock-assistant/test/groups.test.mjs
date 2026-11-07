@@ -58,3 +58,10 @@ test('自选里查不到的 id 不会凭空造组', async () => {
   assert.deepEqual(slices.groups, [])
   assert.deepEqual(slices.ungrouped, [])
 })
+
+// 全部收市后还按刷新间隔打上游是白烧额度: 休市应该只读快照
+test('休市时轮询走只读快照, 开市才刷新', async () => {
+  const { floatPollUrl } = await load()
+  assert.equal(floatPollUrl(true), '/api/stock-assistant/snapshot')
+  assert.equal(floatPollUrl(false), '/api/stock-assistant/refresh')
+})
