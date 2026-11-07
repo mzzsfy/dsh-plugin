@@ -323,7 +323,9 @@ window.__ModuleLoader__.load({
     function PanelIcon({ size = 16, active }) {
       return h('svg', { viewBox: '0 0 16 16', width: size, height: size, fill: 'none', stroke: 'currentColor', strokeWidth: active ? 1.8 : 1.4, 'aria-hidden': true }, h('path', { d: 'M2 2v12h12M4 10l3-4 3 2 4-5', strokeLinecap: 'round', strokeLinejoin: 'round' }))
     }
-    const quiet = fn => (...args) => { Promise.resolve().then(() => fn(...args)).catch(() => {}) }
+    // 包住点击处理: 事件对象不会被当成业务参数透传, 而且要把 promise 交回去,
+    // 调用方才能等写入成功再改本地 UI 状态
+    const quiet = fn => (...args) => Promise.resolve().then(() => fn(...args)).catch(() => { })
     const signed = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${value}`
     const timeText = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知'
     // 价格: 空值显示破折号
@@ -529,7 +531,12 @@ window.__ModuleLoader__.load({
                 if (slices.pinned.length) out.push(section(PINNED_KEY, '置顶', sortedIds(slices.pinned), null))
                 for (const { name, ids } of slices.groups) {
                   const actions = [
-                    h(Button, { key: 'rename', onClick: () => { const to = prompt('重命名分组', name)?.trim(); if (to && to !== name) { quiet(() => runtime.mutate('groupRename', { from: name, to }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to]: collapsedOf(name), [name]: undefined } }) } else if (to === name) { quiet(() => runtime.mutate('groupRename', { from: name, to }))() } } }, '重命名'),
+                    // 折叠态迁移必须等写入成功: 名字不合规时服务端会 400, 先迁移会让旧组突然展开
+                    h(Button, { key: 'rename', onClick: () => {
+                      const to = prompt('重命名分组', name)?.trim()
+                      if (!to) return
+                      quiet(() => runtime.mutate('groupRename', { from: name, to }))().then(() => { if (to !== name) runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to]: collapsedOf(name), [name]: undefined } }) }).catch(() => { })
+                    } }, '重命名'),
                     h(Button, { key: 'drop', disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'),
                   ]
                   out.push(section(name, name, sortedIds(ids), actions))
@@ -1660,7 +1667,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

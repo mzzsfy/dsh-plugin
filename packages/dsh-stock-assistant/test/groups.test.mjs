@@ -96,6 +96,16 @@ test('图形模式整十拍无条件真刷新, 才能从 trading 翻到安静', 
   }
 })
 
+// 点击包装必须把 promise 交回去: 重命名要在写入成功后才迁移折叠态, 拿不到 promise
+// 就只能提前改本地状态, 名字不合规时服务端 400 而旧组已经展开了
+test('点击包装返回 promise, 且吞掉异常不产生未处理拒绝', async () => {
+  const { quiet } = await load()
+  const wrapped = quiet(value => value)
+  assert.equal(typeof wrapped().then, 'function', '必须返回 thenable')
+  assert.equal(await wrapped(7), 7, '返回值要透传')
+  await assert.doesNotReject(quiet(() => { throw new Error('boom') })())
+})
+
 // 午休不产生新数据, 与收盘同档; 只认 closed 的话午休一个半小时还在按交易频率打
 test('午休与收盘同属安静档', async () => {
   const { QUIET_STATES } = await load()
