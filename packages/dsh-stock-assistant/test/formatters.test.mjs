@@ -49,3 +49,27 @@ test('formatAmount 区分成交额缺省与成交量真值', async () => {
   assert.equal(formatAmount(-123456789), '-1.2亿')
   assert.equal(formatAmount(Number.NaN), '—')
 })
+
+// 清洗要同时满足三件事: 保住来源独有的字段、别让 null 变成 0 压扁价格轴、别让 NaN 毒掉后续指标
+test('sanitizeCandles 保住额外字段并丢掉残根', async () => {
+  const { sanitizeCandles } = await load()
+  const raw = [
+    { time: 1, open: 10, high: 11, low: 9, close: 10.5, volume: 100, avg: 10.2, amount: 1e6, extra: 'keep' },
+    // close 缺失: 整根丢掉, 否则 NaN 会沿着均线窗口往后传染
+    { time: 2, open: 11, high: 12, low: 10, close: null, volume: 200 },
+    // open 是 NaN: 同样丢掉
+    { time: 3, open: Number.NaN, high: 12, low: 10, close: 11 },
+    // 数值字段以字符串形态给: 要解析出来
+    { time: 4, open: '12', high: '13', low: '11', close: '12.5', volume: '300' },
+  ]
+  const out = sanitizeCandles(raw)
+  assert.equal(out.length, 2, '两根残根应被丢掉')
+  assert.equal(out[0].avg, 10.2, '分时均价线靠 avg, 不能被清洗剥掉')
+  assert.equal(out[0].amount, 1e6, '成交额同理要保留')
+  assert.equal(out[0].extra, 'keep', '未知字段原样带过')
+  assert.equal(out[1].close, 12.5)
+  // 缺失一律 undefined 而不是 NaN, 下游的 ?? 与默认值才接得住
+  assert.equal(out[1].volume, 300)
+  assert.equal(out[1].avg, undefined)
+  assert.equal(sanitizeCandles(null).length, 0)
+})

@@ -24,6 +24,18 @@ window.__ModuleLoader__.load({
         ungrouped: rest.filter(id => !items[id]?.group),
       }
     }
+    // 来源偶发给 null 字段: LWC 只跳过 undefined, null 会按 0 参与价格轴范围把整图压扁;
+    // 而非有限的 OHLC 又不能留成 NaN —— 它会顺着均线的滑动窗口把后面所有指标值一起毒掉。
+    // 所以四个价格有任一缺失就丢掉整根, 其余字段(avg/amount 等)原样带过去: 分时均价线靠 avg
+    function sanitizeCandles(list) {
+      return (list || []).flatMap(candle => {
+        const prices = { open: finiteOr(candle.open), high: finiteOr(candle.high), low: finiteOr(candle.low), close: finiteOr(candle.close) }
+        if (!Object.values(prices).every(Number.isFinite)) return []
+        const volume = finiteOr(candle.volume), avg = finiteOr(candle.avg)
+        // 缺失一律给 undefined 而不是 NaN, 让下游的 ?? / 默认值能正常接住
+        return [{ ...candle, ...prices, volume: Number.isFinite(volume) ? volume : undefined, avg: Number.isFinite(avg) ? avg : undefined }]
+      })
+    }
     // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
     const finiteOr = value => value == null || value === '' ? NaN : Number(value)
     // 成交额按万/亿缩写避免长列; zeroIsMissing 关掉时 0 按真值显示(成交量用)
@@ -262,8 +274,7 @@ window.__ModuleLoader__.load({
           }).then(result => {
             // 等待期间换了标的/周期, 或已有更新的同 key 请求: 丢弃这轮结果, 否则旧数据会盖掉新数据
             if (state.klineKey !== key || seq !== klineSeq) return result
-            // 来源偶发给 null 字段: LWC 只跳过 undefined, null 会被当成 0 参与价格轴范围计算, 整图被压扁
-            const candles = (result?.candles || []).map(c => ({ time: c.time, at: c.at, open: finiteOr(c.open), high: finiteOr(c.high), low: finiteOr(c.low), close: finiteOr(c.close), volume: finiteOr(c.volume) }))
+            const candles = sanitizeCandles(result?.candles)
             patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result, candles } })
             return { ...result, candles }
           }).catch(e => {
@@ -634,10 +645,10 @@ window.__ModuleLoader__.load({
         const candles = kline?.candles || []
         if (!candles.length) return null
         const last = candles[candles.length - 1], scale = item.priceScale ?? 2
-        const price = value => value == null || value === '' ? null : Number(value).toFixed(scale)
+        const price = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value).toFixed(scale)
         // 日K 的 preClose 有时来源不给, 退到前一根收盘; 分时不能这么退——前一根分钟收盘会算出个假的 0.0x% 涨跌
         const base = finiteOr(kline?.preClose) || (wantTrend ? NaN : finiteOr(candles[candles.length - 2]?.close))
-        const pct = Number.isFinite(base) && base ? (finiteOr(last.close) - base) / base * 100 : null
+        const pct = Number.isFinite(base) && base && Number.isFinite(finiteOr(last.close)) ? (finiteOr(last.close) - base) / base * 100 : null
         const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
         const quote = wantTrend
           ? [['最新', price(last.close)], ['均价', price(last.avg ?? last.close)], ['昨收', price(kline?.preClose)]]
@@ -955,11 +966,14 @@ window.__ModuleLoader__.load({
         // 间隔由 floatPollDelay 统一算, 这里只判断要不要降频
         const allClosed = picked.every(id => stateOf(id) === 'closed')
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
+        let tick = 0
         const pull = () => {
           if (document.visibilityState !== 'visible') return
           if (mode === 'list') {
-            // 全部收市后走快照: 只是看一眼宿主有没有补到迟到的复盘, 不必每分钟真打一次上游
-            const readOnly = allClosed
+            // 收市后走快照省额度, 但每十拍插一次真刷新兜底: 面板不在前台时宿主会 cancelIdle,
+            // 没有任何人在刷新 quotes, 纯靠快照会一直停在昨夜的数据上, 第二天开市也醒不过来
+            tick += 1
+            const readOnly = allClosed && tick % 10 !== 0
             const url = floatPollUrl(readOnly)
             const init = readOnly ? undefined : {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1559,7 +1573,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl, floatPollDelay, seriesPaintPlan },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl, floatPollDelay, seriesPaintPlan, sanitizeCandles },
     }
   },
 })
