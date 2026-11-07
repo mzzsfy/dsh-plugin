@@ -222,10 +222,10 @@ window.__ModuleLoader__.load({
             patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result } })
             return result
           }).catch(e => {
+            // 切走之后就别再为废弃的 key 退避重试了, 白打一次请求还占额度
+            if (state.klineKey !== key) throw e
             // 额度窗口瞬时满/网络抖动: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
             if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(Math.max(4 * 1000, e.retryAfterMs || 0), true)
-            // 失败同样要校验 key: 上一只的失败(还带 4s 退避)晚到时不能把当前这只的图清成错误态
-            if (state.klineKey !== key) throw e
             patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code, candles: null } })
             throw e
           })
@@ -339,7 +339,8 @@ window.__ModuleLoader__.load({
         return view.sort === 'asc' ? aa - bb : bb - aa
       })
       const order = (view.menuId || view.keyboardNavigating) && view.frozenOrder ? [...view.frozenOrder.filter(id => w.items[id]), ...sortedOrder.filter(id => !view.frozenOrder.includes(id))] : sortedOrder
-      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null, alias: w.items[id].alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null }) }
+      // 草稿清理由 updateView 在 detailId 变更处统一处理, 这里再清一遍会把键盘导航到同一只时输了一半的内容抹掉
+      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null, alias: w.items[id].alias || '' }) }
       // 概览横幅: 仅异常态显示(健康态运维摘要收进「更多」菜单), Leek-Fund 模式=主页纯列表
       const unhealthy = (state.data.providerStatus || []).filter(s => { const log = s.recentRequests || []; return log.length && log[0].status !== 'ok' })
       const providers = state.data.control.providers || []
@@ -527,7 +528,9 @@ window.__ModuleLoader__.load({
     }
     function KlineView({ runtime, state, item }) {
       const period = state.klinePeriod || '1d'
-      const kline = state.kline || {}
+      // 切标的/周期的当帧 state.kline 还是上一轮的, 只有 key 对上才算这一轮的数据;
+      // 否则图例会拼出上一只的涨跌并带上残缺的"最近 ()"
+      const kline = state.klineKey === klineKeyOf(item.id, period) ? state.kline || {} : {}
       const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), indicatorRef = React.useRef({}), volRef = React.useRef(null), avgRef = React.useRef(null), shippedKeyRef = React.useRef(null)
       // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
       const pendingRef = React.useRef(null)
@@ -543,7 +546,8 @@ window.__ModuleLoader__.load({
       // 量柱着色与 MA 灌入(日/周/月)
       // 指标线只灌开着的: 关掉时喂空数组, series 留着不重建
       function applyIndicators(candles) {
-        if (!candles?.length) return
+        // 数据被清空时指标线也要跟着清, 否则时间轴仍是旧数据驱动的, 会留下一截没有蜡烛的孤立折线
+        if (!candles?.length) { for (const list of Object.values(indicatorRef.current)) list.forEach(series => series.setData([])); return }
         const values = {
           ma: MA_WINDOWS.map(n => seriesMA(candles, n)),
           ema: [seriesEMA(candles, EMA_WINDOW)],
@@ -716,8 +720,12 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const key = klineKeyOf(item.id, period)
         if (state.klineKey !== key) return
-        if (shippedKeyRef.current !== key) { shippedKeyRef.current = key; maybeFill({ candles: kline?.candles || [], preClose: kline?.preClose }, true); return }
-        maybeFill({ candles: kline?.candles || [], preClose: kline?.preClose }, false)
+        // 空壳只清屏, 不推进 shippedKeyRef: 空数据上的 fitContent 是 no-op, 一旦推进,
+        // 真数据到达就走 fit=false, 换标的/换周期后永远铺不满
+        if (!kline?.candles?.length) { maybeFill({ candles: [] }, false); return }
+        const fit = shippedKeyRef.current !== key
+        shippedKeyRef.current = key
+        maybeFill({ candles: kline.candles, preClose: kline.preClose }, fit)
       }, [state.klineKey, kline?.candles, kline?.preClose, item.id, period])
       // 成本/辅助线变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
       React.useEffect(() => {
@@ -1007,7 +1015,7 @@ window.__ModuleLoader__.load({
         !rows ? h('div', { className: 'ssb-empty' }, view.browseSyncing ? h('p', null, '目录首次同步中（约一两分钟），完成后重新点击该市场即可浏览。') : h(React.Fragment, null, h('p', null, '该市场目录未同步。可直接搜索添加自选，或同步目录后浏览。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录'))) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
             const added = !!data?.control.watchlist.items[item.id]
-            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('button', { type: 'button', className: 'ssb-stock-name', onClick: () => { runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.loadKline(item.id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
+            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('button', { type: 'button', className: 'ssb-stock-name', onClick: () => { runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', alias: data?.control.watchlist.items[item.id]?.alias || '', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
           })),
         rows?.length ? h('div', { className: 'ssb-toolbar', style: { padding: '0 16px 12px' } }, h('span', { className: 'ssb-muted' }, `共 ${view.browseTotal} 只`), h(Button, { disabled: !view.browseOffset || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, Math.max(0, view.browseOffset - BROWSE_PAGE))) }, '上一页'), h(Button, { disabled: view.browseOffset + BROWSE_PAGE >= view.browseTotal || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, view.browseOffset + BROWSE_PAGE)) }, '下一页')) : null)
     }
@@ -1026,7 +1034,7 @@ window.__ModuleLoader__.load({
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const index = e.key === 'ArrowDown' ? Math.min(visible.length - 1, at + 1) : Math.max(0, at - 1); if (visible[index]) choose(visible[index]) }
           if (e.key === 'Escape') runtime.updateView({ view: 'list' })
         } }))),
-        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.loadKline(item.id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control.watchlist.items[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control.watchlist.items[item.id] ? '已在自选' : '加自选')))),
+        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', alias: data?.control.watchlist.items[item.id]?.alias || '', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control.watchlist.items[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control.watchlist.items[item.id] ? '已在自选' : '加自选')))),
         !visible.length ? h('p', { className: 'ssb-muted', style: { margin: 0 } }, view.query ? '暂无匹配。目录未同步时，请先到设置配置并同步目录。' : '输入关键词开始搜索，例如代码、名称或拼音首字母。') : null,
         state.errorCode === 'CATALOG_NOT_READY' ? h('div', { className: 'ssb-banner', style: { margin: 0 } }, '目录未就绪。可以直接浏览市场添加自选。', h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '前往浏览市场')) : null,
         h('div', { className: 'ssb-toolbar', style: { margin: 0 } }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control.watchlist.items[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control.watchlist.items[view.selectedId] ? '已在自选' : '确认添加'))))

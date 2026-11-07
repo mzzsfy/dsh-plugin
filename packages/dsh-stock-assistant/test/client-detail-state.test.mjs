@@ -37,6 +37,9 @@ test('换详情时清空成本与分组草稿, 同一只重复打开不清', asy
   // 同一只再写一次草稿: detailId 没变, 草稿不能被清掉
   runtime.updateView({ costDraft: '430' })
   assert.equal(runtime.getSnapshot().view.costDraft, '430')
+  // 显式重复传同一个 detailId(键盘导航会这么做)同样不该清
+  runtime.updateView({ detailId: 'A', costDraft: '440' })
+  assert.equal(runtime.getSnapshot().view.costDraft, '440')
   // 换到 B: 四个草稿字段全部归零
   runtime.updateView({ detailId: 'B' })
   const view = runtime.getSnapshot().view
@@ -62,8 +65,10 @@ test('openDetail 先切面板再进详情, 且不预载 K 线', async () => {
   assert.equal(view.overlay, 'detail')
   assert.equal(view.detailId, security.id)
   assert.deepEqual(calls[0], ['selectPanel', 'stock-assistant'])
+  // 正向确认 refresh 真的发出去了, 否则下面那条"没有 /kline"会恒真而无意义
+  assert.ok(calls.some(([, path]) => path.endsWith('/refresh')), 'openDetail 应请求报价快照')
   // K 线由 KlineView 的加载 effect 负责, openDetail 不重复发
-  assert.equal(calls.filter(([, path]) => path === '/kline').length, 0)
+  assert.equal(calls.filter(([, path]) => path.endsWith('/kline')).length, 0, 'openDetail 不应预载 K 线')
   runtime.dispose()
 })
 
@@ -89,5 +94,32 @@ test('标的变化后到达的 K 线结果被丢弃', async () => {
   // A 的结果不该落到 B 的 key 上
   assert.equal(after.klineKey, 'B|1d')
   assert.equal(after.kline?.candles ?? null, null)
+  runtime.dispose()
+})
+
+// 失败分支和成功分支必须守同一条不变式: 上一只的失败晚到时不能把当前这只清成错误态
+test('标的变化后到达的 K 线失败不清空当前标的的数据', async () => {
+  const { createPageRuntime } = await load()
+  let pending = 0, rejectA, resolveB
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: () => ++pending === 1 ? new Promise((_, reject) => { rejectA = reject }) : new Promise(resolve => { resolveB = resolve }),
+  })
+  const first = runtime.loadKline('A', '1d').catch(() => {})
+  const second = runtime.loadKline('B', '1d').catch(() => {})
+  // loadKline 内部先等一拍再发请求, 同步取不到 resolve 句柄
+  await new Promise(resolve => setTimeout(resolve, 20))
+  resolveB({ ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-11-06', open: 2, high: 2, low: 2, close: 2 }] } }) })
+  await second
+  assert.equal(runtime.getSnapshot().kline?.candles?.length, 1)
+  // A 在 B 成功之后才失败: key 对不上, 不应把 B 已加载的数据清成错误态
+  rejectA(Object.assign(new Error('未配置该市场的数据来源'), { code: 'NO_ROUTE' }))
+  await first
+  const after = runtime.getSnapshot()
+  assert.equal(after.kline?.candles?.length, 1, 'B 的数据应保留')
+  assert.equal(after.kline?.error, '', 'A 的错误不该写到 B 上')
   runtime.dispose()
 })
