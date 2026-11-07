@@ -400,11 +400,29 @@ window.__ModuleLoader__.load({
         // 宿主的 terminal tab 是 multiple 类型:openTabIn 每次生成新随机 contentId 并新建 tab,
         // 于是每次重渲染(刷新、切会话)都多出一个指向同一终端的窗口,越用越卡。
         // 按 terminalId 固定地址走 openResourceIn,同一终端永远命中同一面板。
+        const settlePanel = (sessionId, address, terminalId) => {
+          const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.contentId === address)
+          if (tab !== undefined) ctx.sidebarRight.tabDomain?.navigate(sessionId, tab.tabId, { address, params: { terminalId } })
+        }
+        // 面板首帧读的是导航参数,而参数由 openContent 落库在途;等参数到岸时 xterm 已按
+        // 「新终端」建好,于是显示「此终端已不存在」并不再更新。宿主自身的 contentId→终端
+        // 绑定(落 localStorage)正是首帧的兜底来源,建面板前先写它,首帧就能拿到目标终端。
+        const BINDING_PREFIX = 'dsh.terminal.binding.v1.'
+        const seedBinding = (sessionId, contentId, terminalId) => {
+          try {
+            localStorage.setItem(BINDING_PREFIX + JSON.stringify([sessionId, contentId]), JSON.stringify(terminalId))
+          } catch {
+            // 存储不可用时只剩导航参数一条路,与不写绑定等价
+          }
+        }
         async function openExisting(sessionId, terminalId, alive) {
           const listed = await ctx.remote.terminal.list(sessionId)
           if (!alive() || !listed.ok || !listed.value.some((item) => item.id === terminalId)) return false
-          ctx.sidebarRight.openResourceIn(sessionId, panelAddress(terminalId), { kind: 'terminal', params: { terminalId } })
-          return true
+          const address = panelAddress(terminalId)
+          seedBinding(sessionId, address, terminalId)
+          ctx.sidebarRight.openResourceIn(sessionId, address, { kind: 'terminal', params: { terminalId } })
+          settlePanel(sessionId, address, terminalId)
+          return alive()
         }
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
           { name: 'tool.call.toolview', key: 'terminal', locale: NS },
