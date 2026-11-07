@@ -69,6 +69,17 @@ jobs:
           done
       # push 按改动范围收敛:全部改动落在 packages/<X>/ 时只测 X(冒烟与仓库根测试保留),
       # 触及任何非包路径或 diff 不可得则回退全量;定时/手动(无 before)为全量
+      # 失败单元原始日志留存并上传:聚合器控制台只有用例名,flaky 取证依赖栈原文
       - name: 测试 x10
         run: node scripts/aggregate-tests.mjs --changed-since "${{ github.event.before }}"
+        env:
+          DSH_AGGREGATE_TEST_LOG_DIR: /tmp/agg-logs
+      - name: 上传失败单元日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-logs-${{ matrix.arch }}
+          path: /tmp/agg-logs
+          if-no-files-found: ignore
+          retention-days: 7
 
