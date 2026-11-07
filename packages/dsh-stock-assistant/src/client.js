@@ -1387,7 +1387,7 @@ window.__ModuleLoader__.load({
 .ssb-kline-legend { display:flex; flex-direction:column; gap:4px; margin:0 0 8px; font-size:11px; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
 .ssb-legend-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; }
 .ssb-legend-label { color:var(--ssb-text-dim); margin-right:4px; }
-.ssb-legend-cost { color:var(--ssb-text); }
+.ssb-legend-cost { color:var(--ssb-chart-cost); }
 .ssb-legend-pct { margin-left:4px; }
 /* 图例指标色与图表 series 色板一一对应(图表侧只能吃具体色值, 无法引用主题变量) */
 .ssb-ma-0 { color:var(--ssb-chart-ma-fast); }.ssb-ma-1 { color:var(--ssb-chart-ma-mid); }.ssb-ma-2 { color:var(--ssb-chart-ma-slow); }.ssb-ma-3 { color:var(--ssb-chart-ma-long); }
