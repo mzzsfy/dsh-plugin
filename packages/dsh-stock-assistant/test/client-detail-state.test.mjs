@@ -11,6 +11,53 @@ async function load() {
   return plugin.__testing
 }
 
+// 灌图策略是这条链上唯一连续阻断过一轮的判断, 抽成纯函数后在这里锁死三种迁移
+test('灌图计划: 空壳不记 key, 首次进 key 才重置视口', async () => {
+  const { klineShipPlan } = await load()
+  // vm 里返回的对象原型属于另一个 realm, 摊平后再比较
+  const planOf = (shipped, key, hasData) => { const plan = klineShipPlan(shipped, key, hasData); return { fit: plan.fit, next: plan.next } }
+  // 空壳: 清屏但不重置、也不记 key, 否则真数据回来时 fit 被吃掉
+  assert.deepEqual(planOf(null, 'A|1d', false), { fit: false, next: null })
+  assert.deepEqual(planOf('B|1d', 'A|1d', false), { fit: false, next: 'B|1d' })
+  // 首次看到该 key: 重置视口并记下
+  assert.deepEqual(planOf(null, 'A|1d', true), { fit: true, next: 'A|1d' })
+  assert.deepEqual(planOf('B|1d', 'A|1d', true), { fit: true, next: 'A|1d' })
+  // 同一 key 下数据刷新(手动↻): 保留用户缩放
+  assert.deepEqual(planOf('A|1d', 'A|1d', true), { fit: false, next: 'A|1d' })
+})
+
+// 拉取、校验、灌图必须共用同一个拼法, 否则校验永远对不上
+test('klineKeyOf 对不同标的与周期给出不同键', async () => {
+  const { klineKeyOf } = await load()
+  assert.equal(klineKeyOf('XSHG:equity:600519', '1d'), 'XSHG:equity:600519|1d')
+  assert.notEqual(klineKeyOf('XSHG:equity:600519', '1d'), klineKeyOf('XSHG:equity:600519', '1w'))
+  assert.notEqual(klineKeyOf('XSHG:equity:600519', '1d'), klineKeyOf('XSHG:equity:000300', '1d'))
+})
+
+// 新增一条打开详情的路径时不该还需要记得带 alias, 否则不动输入框直接保存就会把已存别名写成空串
+test('换详情时自动回填该标的已保存的别名', async () => {
+  const { createPageRuntime } = await load()
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) }),
+  })
+  const a = { ...securityOf('XSHG:equity:600519', '600519'), alias: '茅台' }
+  const b = securityOf('XSHG:equity:000300', '000300')
+  runtime.applySnapshot(snapshotOf({ [a.id]: a, [b.id]: b }))
+  runtime.updateView({ detailId: a.id, overlay: 'detail' })
+  assert.equal(runtime.getSnapshot().view.alias, '茅台')
+  // 切到没有别名的标的应清空, 而不是留着上一只的别名
+  runtime.updateView({ detailId: b.id })
+  assert.equal(runtime.getSnapshot().view.alias, '')
+  // 调用方显式传 alias 时以调用方为准
+  runtime.updateView({ detailId: a.id, alias: '用户正在改' })
+  assert.equal(runtime.getSnapshot().view.alias, '用户正在改')
+  runtime.dispose()
+})
+
 const snapshotOf = items => ({ serverEpoch: 'e', snapshotSeq: 1, routingRevision: 0, routeSelections: {}, control: { revision: 1, routingRevision: 0, watchlist: { order: Object.keys(items), items }, preferences: { refreshSeconds: 15, colorMode: 'red-up' } }, quotes: {} })
 const securityOf = (id, code) => ({ id, exchange: id.split(':')[0], code, officialName: code, alias: '', pinned: false, cost: null, group: '', currency: 'CNY', priceScale: 2 })
 const runtimeOf = (plugin, extra = {}) => plugin.__testing.createPageRuntime({

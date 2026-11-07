@@ -4,6 +4,12 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50
     // K线结果的归属键: 拉取、校验、灌图三处必须用同一个拼法, 否则校验形同虚设
     function klineKeyOf(securityId, period) { return `${securityId}|${period}` }
+    // 灌图计划: 空壳只清屏且不记 key(空数据上 fitContent 是 no-op, 记了就再也不会铺满);
+    // 首次看到某个 key 才重置视口, 同一 key 下刷新保留用户缩放
+    function klineShipPlan(shippedKey, key, hasData) {
+      if (!hasData) return { fit: false, next: shippedKey }
+      return { fit: shippedKey !== key, next: key }
+    }
     // 一键全能力自举: 启用实例的适配器能力声明(capabilities×markets)是唯一事实源, 缺什么补什么
     const CAP_ORDER = ['quotes', 'kline', 'catalog', 'search', 'calendar']
     const bootstrapRoutes = ({ adapters, providers, routes }) => {
@@ -94,11 +100,14 @@ window.__ModuleLoader__.load({
       }
       // 离开 detail 视图时统一清详情态, 防止列表视图残留 detail 面板
       // 换详情即清草稿: 收口在唯一的视图写入口, 浏览/搜索/悬浮窗/邻移都不必各自记得清,
-      // 否则上一只输了一半的成本会被"保存成本"写到另一只身上
+      // 否则上一只输了一半的成本会被"保存成本"写到另一只身上。
+      // 别名同理在这里回填: 新增一条打开路径时不必记得带 alias, 漏带的后果是把已存别名保存成空串。
       function updateView(next) {
         const leaveDetail = next.view && next.view !== 'detail' && !next.overlay
         const detailChanged = next.detailId !== undefined && next.detailId !== state.view.detailId
-        patch({ view: { ...state.view, ...next, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { costDraft: null, groupDraft: null, costError: null, groupError: null } : {}) } })
+        const saved = next.detailId === undefined ? undefined : (state.data?.control.watchlist.items[next.detailId] || state.view.browsePeek?.[next.detailId])
+        const alias = next.alias !== undefined ? { alias: next.alias } : detailChanged ? { alias: saved?.alias || '' } : {}
+        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { costDraft: null, groupDraft: null, costError: null, groupError: null } : {}) } })
         sendDemand()
       }
       function scheduleSearch(query) {
@@ -129,7 +138,7 @@ window.__ModuleLoader__.load({
           const config = state.data?.control, item = config?.watchlist.items[securityId] || state.view.browsePeek?.[securityId]
           if (!item) return
           layout.selectPanel?.(PANEL_ID)
-          updateView({ view: 'list', detailId: securityId, selectedId: securityId, overlay: 'detail', alias: item.alias || '' })
+          updateView({ view: 'list', detailId: securityId, selectedId: securityId, overlay: 'detail' })
           // 这里必须经 this 调用同对象的成员, 所以 openDetail 只能以 runtime.openDetail(...) 形式使用
           this.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {})
         },
@@ -162,7 +171,8 @@ window.__ModuleLoader__.load({
         check: configuration => action('check', () => api('/provider-check', 'POST', configuration)),
         switchPrimary: routeId => action('switch', async () => { const data = await api('/route-selection', 'POST', { routeId, target: 'primary', expectedRoutingRevision: state.data.routingRevision, expectedRouteEpoch: state.data.routeSelections[routeId].routeEpoch }); applySnapshot(data) }),
         setKlinePeriod(key) { patch({ klinePeriod: key }) },
-        setKlineError(securityId, message, code = '') { patch({ kline: { loading: false, error: message, errorCode: code, candles: null } }) },
+        // 错误同样带 key: 结果只在它属于当前标的与周期时才落进 state, 否则卸载/切换后的迟到错误会清掉别的标的
+        setKlineError(securityId, period, message, code = '') { if (state.klineKey !== klineKeyOf(securityId, period)) return; patch({ kline: { loading: false, error: message, errorCode: code, candles: null } }) },
         // 一键K线路由: 已启用市场(verified 且 quotes 路由存在即视为启用)逐一生成 (market,'kline') 草稿;
         // 主源=该市场 quotes 主源(支持 kline 的备选优先), 备源=支持 kline 的其他启用实例;已存在 kline 路由的市场跳过。
         // 检查通过即保存: 分批探测(避开单请求预算), denied 目标剔除后整轮重查, 收敛即提交。
@@ -340,7 +350,7 @@ window.__ModuleLoader__.load({
       })
       const order = (view.menuId || view.keyboardNavigating) && view.frozenOrder ? [...view.frozenOrder.filter(id => w.items[id]), ...sortedOrder.filter(id => !view.frozenOrder.includes(id))] : sortedOrder
       // 草稿清理由 updateView 在 detailId 变更处统一处理, 这里再清一遍会把键盘导航到同一只时输了一半的内容抹掉
-      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null, alias: w.items[id].alias || '' }) }
+      function open(id) { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', focusId: id, keyboardNavigating: false, menuId: null }) }
       // 概览横幅: 仅异常态显示(健康态运维摘要收进「更多」菜单), Leek-Fund 模式=主页纯列表
       const unhealthy = (state.data.providerStatus || []).filter(s => { const log = s.recentRequests || []; return log.length && log[0].status !== 'ok' })
       const providers = state.data.control.providers || []
@@ -483,9 +493,10 @@ window.__ModuleLoader__.load({
     }
     function readChartTheme(root, colorMode) {
       const cs = getComputedStyle(root)
-      const red = cs.getPropertyValue('--ssb-danger').trim(), green = cs.getPropertyValue('--ssb-ok').trim()
+      const varOf = name => cs.getPropertyValue(name).trim()
+      const red = varOf('--ssb-danger'), green = varOf('--ssb-ok')
       const [up, down] = colorMode === 'green-up' ? [green, red] : [red, green]
-      return { background: 'transparent', textColor: cs.getPropertyValue('--ssb-text-sub').trim(), gridLine: cs.getPropertyValue('--ssb-border').trim(), crosshair: cs.getPropertyValue('--ssb-text-dim').trim(), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: ['#f59e0b', '#8b5cf6', '#06b6d4', '#64748b'], EMA: '#ec4899', BOLL: ['#3b82f6', '#94a3b8'], BBI: '#10b981', cost: '#f97316' }
+      return { background: 'transparent', textColor: varOf('--ssb-text-sub'), gridLine: varOf('--ssb-border'), crosshair: varOf('--ssb-text-dim'), up, down, volumeUp: up + '73', volumeDown: down + '73', MA: [varOf('--ssb-chart-ma-fast'), varOf('--ssb-chart-ma-mid'), varOf('--ssb-chart-ma-slow'), varOf('--ssb-chart-ma-long')], EMA: varOf('--ssb-chart-ema'), BOLL: [varOf('--ssb-chart-boll-mid'), varOf('--ssb-chart-boll-rail')], BBI: varOf('--ssb-chart-bbi'), cost: varOf('--ssb-chart-cost') }
     }
     // 以下指标都返回等长数组(前导 null), 因为 BOLL/BBI 要按索引把多条均线对齐
     function seriesMA(candles, n) {
@@ -547,15 +558,9 @@ window.__ModuleLoader__.load({
       // 指标线只灌开着的: 关掉时喂空数组, series 留着不重建
       function applyIndicators(candles) {
         // 数据被清空时指标线也要跟着清, 否则时间轴仍是旧数据驱动的, 会留下一截没有蜡烛的孤立折线
-        if (!candles?.length) { for (const list of Object.values(indicatorRef.current)) list.forEach(series => series.setData([])); return }
-        const values = {
-          ma: MA_WINDOWS.map(n => seriesMA(candles, n)),
-          ema: [seriesEMA(candles, EMA_WINDOW)],
-          boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K),
-          bbi: [seriesBBI(candles)],
-        }
+        if (!candles?.length || !indicatorValues) { for (const list of Object.values(indicatorRef.current)) list.forEach(series => series.setData([])); return }
         for (const [key, list] of Object.entries(indicatorRef.current)) {
-          list.forEach((series, index) => series.setData(guides[key] ? toPoints(candles, values[key][index]) : []))
+          list.forEach((series, index) => series.setData(guides[key] ? toPoints(candles, indicatorValues[key][index]) : []))
         }
       }
       function fillCandleData(result) {
@@ -581,6 +586,12 @@ window.__ModuleLoader__.load({
       const wantTrend = period === 'trend'
       const [guides, setGuides] = usePref(GUIDE_KEY, GUIDE_DEFAULT)
       // 图例: 报价要素一行、指标值一行, 数值全部集中在这里, 图面只留曲线本身
+      // 指标序列只算一次: 图例取末值、图上灌全序列, 两边共用同一份结果
+      const indicatorValues = React.useMemo(() => {
+        const candles = kline?.candles
+        if (!candles?.length || wantTrend) return null
+        return { ma: MA_WINDOWS.map(n => seriesMA(candles, n)), ema: [seriesEMA(candles, EMA_WINDOW)], boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K), bbi: [seriesBBI(candles)] }
+      }, [kline?.candles, wantTrend])
       const legend = React.useMemo(() => {
         const candles = kline?.candles || []
         if (!candles.length) return null
@@ -597,10 +608,10 @@ window.__ModuleLoader__.load({
         const volume = wantTrend ? candles.reduce((sum, candle) => sum + (Number(candle.volume) || 0), 0) : last.volume
         // 指标只列开着的, 否则图例比图还长
         const series = []
-        if (!wantTrend && guides.ma) MA_WINDOWS.forEach((window, index) => series.push([`MA${window}`, seriesMA(candles, window).at(-1), ` ssb-ma-${index}`]))
-        if (!wantTrend && guides.ema) series.push([`EMA${EMA_WINDOW}`, seriesEMA(candles, EMA_WINDOW).at(-1), ' ssb-ema'])
-        if (!wantTrend && guides.boll) seriesBoll(candles, BOLL_WINDOW, BOLL_K).forEach((line, index) => series.push([['BOLL', 'BOLL上', 'BOLL下'][index], line.at(-1), ` ssb-boll-${index}`]))
-        if (!wantTrend && guides.bbi) series.push(['BBI', seriesBBI(candles).at(-1), ' ssb-bbi'])
+        if (indicatorValues && guides.ma) MA_WINDOWS.forEach((window, index) => series.push([`MA${window}`, indicatorValues.ma[index].at(-1), ` ssb-ma-${index}`]))
+        if (indicatorValues && guides.ema) series.push([`EMA${EMA_WINDOW}`, indicatorValues.ema[0].at(-1), ' ssb-ema'])
+        if (indicatorValues && guides.boll) ['BOLL', 'BOLL上', 'BOLL下'].forEach((name, index) => series.push([name, indicatorValues.boll[index].at(-1), ` ssb-boll-${index}`]))
+        if (indicatorValues && guides.bbi) series.push(['BBI', indicatorValues.bbi[0].at(-1), ' ssb-bbi'])
         return {
           quote: [...quote, ['涨跌', pct == null ? null : `${signed(pct.toFixed(2))}%`, tone], ['量', formatAmount(volume)]],
           series: series.filter(([, value]) => value != null && Number.isFinite(Number(value))),
@@ -667,8 +678,8 @@ window.__ModuleLoader__.load({
         wantTrend ? fillTrendData(result) : fillCandleData(result)
         // 辅助线统一在这里画: 全部走 createPriceLine, 具体数值看上方图例, 图上只留参考位置
         const palette = themeOf()
-        drawLine(preCloseLineRef, guides.preClose && result.preClose != null ? { price: result.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
-        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
+        drawLine(preCloseLineRef, guides.preClose && result.preClose != null ? { price: result.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
+        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1, title: '成本' } : null)
         const highs = result.candles.map(c => Number(c.high)).filter(Number.isFinite), lows = result.candles.map(c => Number(c.low)).filter(Number.isFinite)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
@@ -685,8 +696,22 @@ window.__ModuleLoader__.load({
           const early = pendingRef.current
           pendingRef.current = null
           maybeFill(early || runtime.getKlineResult(item.id, period))
-        }).catch(e => runtime.setKlineError(item.id, e.message, e.code))
-        mo = new MutationObserver(() => { const chart = chartRef.current; if (!chart) return; const t = themeOf(); chart.applyOptions({ layout: { background: { color: t.background }, textColor: t.textColor }, grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } } }) })
+        }).catch(e => runtime.setKlineError(item.id, period, e.message, e.code))
+        // 宿主换主题/切涨跌配色都是给 root 加类, 观察这里重涂; 蜡烛与指标线也要跟着换色,
+        // 否则切到绿涨红跌后只有背景和网格变了, K 线与图例还是旧配色
+        mo = new MutationObserver(() => {
+          const chart = chartRef.current
+          if (!chart) return
+          const t = themeOf()
+          chart.applyOptions({ layout: { background: { color: t.background }, textColor: t.textColor }, grid: { vertLines: { color: t.gridLine }, horzLines: { color: t.gridLine } } })
+          const candles = kline?.candles
+          if (!candles?.length) return
+          mainRef.current?.applyOptions({ upColor: t.up, downColor: t.down, borderUpColor: t.up, borderDownColor: t.down, wickUpColor: t.up, wickDownColor: t.down })
+          volRef.current?.applyOptions({ upColor: t.volumeUp, downColor: t.volumeDown })
+          avgRef.current?.applyOptions({ color: t.MA[0] })
+          const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI }
+          for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
+        })
         mo.observe(root, { attributes: true, attributeFilter: ['class', 'style'] })
         return () => { dead = true; mo.disconnect(); chartRef.current?.remove(); chartRef.current = null }
       }, [])
@@ -711,7 +736,7 @@ window.__ModuleLoader__.load({
       // 否则手动刷新(↻)只改 state 不进图表, 出现图例已更新而蜡烛还是旧的
       React.useEffect(() => {
         let dead = false
-        runtime.loadKline(item.id, period).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
+        runtime.loadKline(item.id, period).catch(e => { if (!dead) runtime.setKlineError(item.id, period, e.message, e.code) })
         return () => { dead = true }
       }, [item.id, period])
       // 数据唯一入口: state.kline 变就重灌, 换 key 才重置视口。
@@ -720,12 +745,9 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const key = klineKeyOf(item.id, period)
         if (state.klineKey !== key) return
-        // 空壳只清屏, 不推进 shippedKeyRef: 空数据上的 fitContent 是 no-op, 一旦推进,
-        // 真数据到达就走 fit=false, 换标的/换周期后永远铺不满
-        if (!kline?.candles?.length) { maybeFill({ candles: [] }, false); return }
-        const fit = shippedKeyRef.current !== key
-        shippedKeyRef.current = key
-        maybeFill({ candles: kline.candles, preClose: kline.preClose }, fit)
+        const plan = klineShipPlan(shippedKeyRef.current, key, !!kline?.candles?.length)
+        shippedKeyRef.current = plan.next
+        maybeFill({ candles: kline?.candles || [], preClose: kline?.preClose }, plan.fit)
       }, [state.klineKey, kline?.candles, kline?.preClose, item.id, period])
       // 成本/辅助线变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
       React.useEffect(() => {
@@ -747,10 +769,11 @@ window.__ModuleLoader__.load({
               ...GUIDE_GROUPS.flatMap(group => [h('div', { key: group.title, className: 'ssb-menu-title' }, group.title), ...group.items.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => setGuides({ [key]: !guides[key] }) }))])) : null),
           h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
         legend ? h('div', { className: 'ssb-kline-legend' },
-          h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value))),
-          h('div', { className: 'ssb-legend-row' },
-            ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2))),
-            item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null)) : null,
+          // 成本是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
+          h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value)),
+            item.cost ? h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, '成本'), formatPrice(item.cost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)) : null),
+          legend.series.length ? h('div', { className: 'ssb-legend-row' },
+            ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2)))) : null) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
         kline.error ? h(KlineError, { message: kline.error, busyOneClick: !!state.busy.configuration, onRetry: () => quiet(() => runtime.loadKline(item.id, period, true))(), guide: kline.errorCode === 'NO_ROUTE' ? { label: '一键开启', onClick: () => quiet(async () => { await runtime.oneClickKline(); await runtime.loadKline(item.id, period, true) })() } : kline.errorCode === 'UNSUPPORTED_CAPABILITY' ? { label: '去设置换源', onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) } : null }) : null,
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
@@ -791,7 +814,7 @@ window.__ModuleLoader__.load({
       const onMaskClick = e => {
         if (e.target !== e.currentTarget) return
         const hit = kind === 'drawer' ? document.elementsFromPoint(e.clientX, e.clientY).find(n => n.classList?.contains('ssb-stock-name')) : null
-        if (hit?.dataset.securityId) runtime.updateView({ detailId: hit.dataset.securityId, selectedId: hit.dataset.securityId, alias: state.data.control.watchlist.items[hit.dataset.securityId]?.alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null })
+        if (hit?.dataset.securityId) runtime.updateView({ detailId: hit.dataset.securityId, selectedId: hit.dataset.securityId })
         else close()
       }
       return h('div', { className: `ssb-overlay ssb-overlay-${kind}`, onClick: onMaskClick, role: 'presentation' },
@@ -862,9 +885,10 @@ window.__ModuleLoader__.load({
       return [value, next => writePref(key, { ...readPref(key, fallback), ...next })]
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
-    const FLOAT_KEY = 'ssb-floating', FLOAT_POLL_MS = 15 * 1000
+    const FLOAT_KEY = 'ssb-floating'
     // ids 为空时退回自选前几只, 否则第一次打开会是一张空窗
-    const FLOAT_DEFAULT = { open: false, live: true, mode: 'list', ids: [], securityId: null, x: null, y: null }
+    // ids 为 null 表示"从没勾过"(退回默认前五只), 空数组表示"明确一只都不盯", 两者不能混
+    const FLOAT_DEFAULT = { open: false, live: true, mode: 'list', ids: null, securityId: null, x: null, y: null }
     // 分时曲线自绘: 只要一条折线加填充, 不值得为它再挂一个图表实例
     function Sparkline({ candles, preClose }) {
       const values = (candles || []).map(c => Number(c.close)).filter(Number.isFinite)
@@ -893,7 +917,7 @@ window.__ModuleLoader__.load({
       const items = state.data?.control.watchlist.items || {}
       const order = state.data?.control.watchlist.order || []
       // 勾选的观测目标: 空则退回自选前几只, 但绝不隐式等于全部自选
-      const picked = (Array.isArray(floating.ids) && floating.ids.length ? floating.ids : order.slice(0, 5)).filter(id => items[id])
+      const picked = (Array.isArray(floating.ids) ? floating.ids : order.slice(0, 5)).filter(id => items[id])
       const mode = floating.mode === 'kline' ? 'kline' : 'list'
       const open = !!floating.open
       const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
@@ -902,9 +926,13 @@ window.__ModuleLoader__.load({
         if (!open || !picked.length || floating.live === false) return
         let dead = false
         setError('')
+        // 间隔跟随设置页的刷新间隔; 全部标的都已收市时不必按交易时段频率拉, 只留一拍看是否复盘
+        const intervalMs = Math.max(15, Number(state.data?.control.preferences?.refreshSeconds) || 15) * 1000
+        const allClosed = picked.every(id => state.data?.quotes?.[id]?.sessionState === 'closed')
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         const pull = () => {
           if (document.visibilityState !== 'visible') return
+          if (allClosed) return
           if (mode === 'list') {
             const securities = picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code }))
             fetch(`${BASE}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: state.data?.control.revision ?? 0, securities }) })
@@ -919,9 +947,10 @@ window.__ModuleLoader__.load({
           }
         }
         pull()
-        const timer = setInterval(pull, FLOAT_POLL_MS)
+        // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
+        const timer = setInterval(pull, allClosed ? Math.max(intervalMs, 60 * 1000) : intervalMs)
         return () => { dead = true; clearInterval(timer) }
-      }, [open, mode, securityId, picked.join(','), floating.live])
+      }, [open, mode, securityId, picked.join(','), floating.live, state.data?.control.preferences?.refreshSeconds, picked.map(id => state.data?.quotes?.[id]?.sessionState).join(',')])
       if (!open) return null
       const update = next => setFloating(next)
       const clamp = (x, y, el) => {
@@ -1015,7 +1044,7 @@ window.__ModuleLoader__.load({
         !rows ? h('div', { className: 'ssb-empty' }, view.browseSyncing ? h('p', null, '目录首次同步中（约一两分钟），完成后重新点击该市场即可浏览。') : h(React.Fragment, null, h('p', null, '该市场目录未同步。可直接搜索添加自选，或同步目录后浏览。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录'))) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
             const added = !!data?.control.watchlist.items[item.id]
-            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('button', { type: 'button', className: 'ssb-stock-name', onClick: () => { runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', alias: data?.control.watchlist.items[item.id]?.alias || '', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
+            return h('div', { className: 'ssb-candidate', role: 'listitem', key: item.id }, h('button', { type: 'button', className: 'ssb-stock-name', onClick: () => { runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)), h(Button, { disabled: added || busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, added ? '已在自选' : '加自选'))
           })),
         rows?.length ? h('div', { className: 'ssb-toolbar', style: { padding: '0 16px 12px' } }, h('span', { className: 'ssb-muted' }, `共 ${view.browseTotal} 只`), h(Button, { disabled: !view.browseOffset || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, Math.max(0, view.browseOffset - BROWSE_PAGE))) }, '上一页'), h(Button, { disabled: view.browseOffset + BROWSE_PAGE >= view.browseTotal || busy.browse, onClick: quiet(() => runtime.loadBrowse(view.browseMarket, view.browseOffset + BROWSE_PAGE)) }, '下一页')) : null)
     }
@@ -1034,7 +1063,7 @@ window.__ModuleLoader__.load({
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const index = e.key === 'ArrowDown' ? Math.min(visible.length - 1, at + 1) : Math.max(0, at - 1); if (visible[index]) choose(visible[index]) }
           if (e.key === 'Escape') runtime.updateView({ view: 'list' })
         } }))),
-        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', alias: data?.control.watchlist.items[item.id]?.alias || '', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control.watchlist.items[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control.watchlist.items[item.id] ? '已在自选' : '加自选')))),
+        h('div', { role: 'listbox', 'aria-label': '证券搜索结果', className: 'ssb-results' }, ...visible.map(item => h('div', { role: 'option', 'aria-selected': view.selectedId === item.id, key: item.id, className: `ssb-candidate${view.selectedId === item.id ? ' ssb-selected' : ''}`, onClick: () => choose(item) }, h('span', { className: 'ssb-peek', role: 'button', tabIndex: 0, onClick: e => { e.stopPropagation(); runtime.updateView({ detailId: item.id, view: view.view, overlay: 'detail', browsePeek: { ...(view.browsePeek || {}), [item.id]: item } }); runtime.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {}) } }, h('strong', null, item.officialName), h('span', { className: 'ssb-muted' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}${item.currency ? ` · ${item.currency}` : ''}`)), h(Button, { disabled: !!data?.control.watchlist.items[item.id] || state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, data?.control.watchlist.items[item.id] ? '已在自选' : '加自选')))),
         !visible.length ? h('p', { className: 'ssb-muted', style: { margin: 0 } }, view.query ? '暂无匹配。目录未同步时，请先到设置配置并同步目录。' : '输入关键词开始搜索，例如代码、名称或拼音首字母。') : null,
         state.errorCode === 'CATALOG_NOT_READY' ? h('div', { className: 'ssb-banner', style: { margin: 0 } }, '目录未就绪。可以直接浏览市场添加自选。', h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '前往浏览市场')) : null,
         h('div', { className: 'ssb-toolbar', style: { margin: 0 } }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control.watchlist.items[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control.watchlist.items[view.selectedId] ? '已在自选' : '确认添加'))))
@@ -1208,6 +1237,8 @@ window.__ModuleLoader__.load({
     }
     const CSS = `
 .ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; }
+/* 图表区分色: 蜡烛的涨跌仍取语义色, 这里只是均线/布林等多线并存时的辨识色, 饱和度均不低于 70% */
+.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(38 92% 50%); --ssb-chart-ma-mid: hsl(258 90% 66%); --ssb-chart-ma-slow: hsl(189 94% 43%); --ssb-chart-ma-long: hsl(239 84% 67%); --ssb-chart-ema: hsl(330 81% 60%); --ssb-chart-boll-mid: hsl(217 91% 60%); --ssb-chart-boll-rail: hsl(213 94% 78%); --ssb-chart-bbi: hsl(160 84% 39%); --ssb-chart-cost: hsl(25 95% 53%); }
 /* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
 .ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
 .ssb-float-root { color:var(--ssb-text); font:inherit; font-size:12px; line-height:1.5; }
@@ -1336,10 +1367,10 @@ window.__ModuleLoader__.load({
 .ssb-legend-cost { color:var(--ssb-text); }
 .ssb-legend-pct { margin-left:4px; }
 /* 图例指标色与图表 series 色板一一对应(图表侧只能吃具体色值, 无法引用主题变量) */
-.ssb-ma-0 { color:#f59e0b; }.ssb-ma-1 { color:#8b5cf6; }.ssb-ma-2 { color:#06b6d4; }.ssb-ma-3 { color:#64748b; }
-.ssb-ema { color:#ec4899; }
-.ssb-boll-0 { color:#3b82f6; }.ssb-boll-1 { color:#94a3b8; }.ssb-boll-2 { color:#94a3b8; }
-.ssb-bbi { color:#10b981; }
+.ssb-ma-0 { color:var(--ssb-chart-ma-fast); }.ssb-ma-1 { color:var(--ssb-chart-ma-mid); }.ssb-ma-2 { color:var(--ssb-chart-ma-slow); }.ssb-ma-3 { color:var(--ssb-chart-ma-long); }
+.ssb-ema { color:var(--ssb-chart-ema); }
+.ssb-boll-0 { color:var(--ssb-chart-boll-mid); }.ssb-boll-1 { color:var(--ssb-chart-boll-rail); }.ssb-boll-2 { color:var(--ssb-chart-boll-rail); }
+.ssb-bbi { color:var(--ssb-chart-bbi); }
 .ssb-menu-title { padding:8px 8px 2px; font-size:11px; color:var(--ssb-text-dim); }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
 .ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
@@ -1403,7 +1434,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan },
     }
   },
 })
