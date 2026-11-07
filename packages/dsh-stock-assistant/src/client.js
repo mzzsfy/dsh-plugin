@@ -1211,7 +1211,14 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ssb-search-view' },
         h('div', { className: 'ssb-panel-head' }, h('h2', null, '浏览市场'), h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => runtime.updateView({ view: 'list' }) }, '返回自选'))),
         h('div', { className: 'ssb-toolbar', style: { padding: '12px 16px 0' } }, ...Object.keys(BROWSE_MARKETS).filter(market => (data?.control.routes || []).some(r => r.capability === 'catalog' && r.market === market)).map(market => h(Button, { key: market, primary: (view.browseMarket || 'XSHG') === market, disabled: busy.browse, onClick: quiet(() => runtime.loadBrowse(market, 0)) }, BROWSE_MARKETS[market]))),
-        data?.browseOverview ? h('div', { className: 'ssb-banner ssb-banner-ok', style: { margin: '12px 16px 0' } }, `${data.browseOverview.name} ${data.browseOverview.last}`, h('span', { className: `ssb-number ${Number(data.browseOverview.change) >= 0 ? 'ssb-up' : 'ssb-down'}` }, `${Number(data.browseOverview.change) >= 0 ? '+' : ''}${data.browseOverview.change}（${Number(data.browseOverview.changePct) >= 0 ? '+' : ''}${data.browseOverview.changePct}%）`), h('span', { className: 'ssb-muted' }, `${data.browseOverview.source} · ${data.browseOverview.delayKind === 'unknown' ? '延迟未知' : delayText(data.browseOverview)}`)) : null,
+        data?.browseOverview ? (() => {
+          // 缺 previousClose 时 change/changePct 会是 null, Number(null) 得 0, 直接拼会渲染出「+null（+null%）」
+          const ov = data.browseOverview, change = finiteOr(ov.change), changePct = finiteOr(ov.changePct)
+          const tone = Number.isFinite(change) ? (change >= 0 ? ' ssb-up' : ' ssb-down') : ''
+          // 保留来源给的位数, 只补正负号; 缺失时给破折号而不是把 null 当 0
+          const fmt = raw => { if (raw == null || raw === '') return '—'; const n = Number(raw); return Number.isFinite(n) ? `${n >= 0 ? '+' : ''}${raw}` : '—' }
+          return h('div', { className: 'ssb-banner ssb-banner-ok', style: { margin: '12px 16px 0' } }, `${ov.name} ${ov.last ?? '—'}`, h('span', { className: `ssb-number${tone}` }, `${fmt(ov.change)}（${fmt(ov.changePct)}%）`), h('span', { className: 'ssb-muted' }, `${ov.source} · ${ov.delayKind === 'unknown' ? '延迟未知' : delayText(ov)}`))
+        })() : null,
         !rows ? h('div', { className: 'ssb-empty' }, view.browseSyncing ? h('p', null, '目录首次同步中（约一两分钟），完成后重新点击该市场即可浏览。') : h(React.Fragment, null, h('p', null, '该市场目录未同步。可直接搜索添加自选，或同步目录后浏览。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '前往设置'), h(Button, { disabled: busy.sync, onClick: quiet(() => runtime.sync(view.browseMarket || 'XSHG')) }, '同步当前市场目录'))) :
           h('div', { className: 'ssb-results', role: 'list', 'aria-label': '市场证券列表' }, ...rows.map(item => {
             const added = !!data?.control.watchlist.items[item.id]
