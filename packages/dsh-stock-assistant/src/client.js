@@ -2,6 +2,8 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-stock-assistant',
   factory(require) {
     const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50
+    // K线结果的归属键: 拉取、校验、灌图三处必须用同一个拼法, 否则校验形同虚设
+    function klineKeyOf(securityId, period) { return `${securityId}|${period}` }
     // 一键全能力自举: 启用实例的适配器能力声明(capabilities×markets)是唯一事实源, 缺什么补什么
     const CAP_ORDER = ['quotes', 'kline', 'catalog', 'search', 'calendar']
     const bootstrapRoutes = ({ adapters, providers, routes }) => {
@@ -91,7 +93,14 @@ window.__ModuleLoader__.load({
         finally { patch({ busy: { ...state.busy, [key]: false } }) }
       }
       // 离开 detail 视图时统一清详情态, 防止列表视图残留 detail 面板
-      function updateView(next) { const leaveDetail = next.view && next.view !== 'detail' && !next.overlay; patch({ view: { ...state.view, ...next, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}) } }); sendDemand() }
+      // 换详情即清草稿: 收口在唯一的视图写入口, 浏览/搜索/悬浮窗/邻移都不必各自记得清,
+      // 否则上一只输了一半的成本会被"保存成本"写到另一只身上
+      function updateView(next) {
+        const leaveDetail = next.view && next.view !== 'detail' && !next.overlay
+        const detailChanged = next.detailId !== undefined && next.detailId !== state.view.detailId
+        patch({ view: { ...state.view, ...next, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { costDraft: null, groupDraft: null, costError: null, groupError: null } : {}) } })
+        sendDemand()
+      }
       function scheduleSearch(query) {
         updateView({ query, selectedId: null }); clearTimeout(timer); querying?.abort(); querying = new AbortController()
         if (composing || !query.trim()) { patch({ candidates: [] }); return }
@@ -113,14 +122,15 @@ window.__ModuleLoader__.load({
         getSnapshot: () => state,
         subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
         updateView, api, action, applySnapshot,
-        // 详情只有一个入口: 面板/邻移/悬浮窗都走这里, 否则新开路径会漏清成本草稿(串写到别的标的)
-        // 并漏掉 selectPanel(面板不在前台时"打开详情"点了没反应)
+        // 详情只有一个入口: 面板/邻移/悬浮窗都走这里。
+        // 面板不在前台时"打开详情"点了没反应, 所以先 selectPanel; 草稿由 updateView 在 detailId 变更处统一清。
+        // 不预载 K 线: KlineView 的加载 effect 会在 detailId 变化时自己发起, 预载只会让同一 key 请求两遍。
         openDetail(securityId) {
           const config = state.data?.control, item = config?.watchlist.items[securityId] || state.view.browsePeek?.[securityId]
           if (!item) return
           layout.selectPanel?.(PANEL_ID)
-          updateView({ view: 'list', detailId: securityId, selectedId: securityId, overlay: 'detail', alias: item.alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null })
-          this.loadKline(item.id, state.klinePeriod || '1d').catch(() => {})
+          updateView({ view: 'list', detailId: securityId, selectedId: securityId, overlay: 'detail', alias: item.alias || '' })
+          // 这里必须经 this 调用同对象的成员, 所以 openDetail 只能以 runtime.openDetail(...) 形式使用
           this.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {})
         },
         setPaused(value) { patch({ paused: value }); sendDemand(); if (!value) refresher.refresh() },
@@ -200,7 +210,7 @@ window.__ModuleLoader__.load({
         // kline 数据流: 详情视图触发;force=true 走 ?force=1 让服务端跳缓存读;结果入 state 供 KlineView 汇合灌入。
         // 复用同一份 state 前要看它有多旧: 只比 securityId|period 会让开着的页面拿昨天的分时当实时。
         loadKline(securityId, period, force = false) {
-          const key = `${securityId}|${period}`
+          const key = klineKeyOf(securityId, period)
           const sameKey = state.klineKey === key, held = sameKey ? state.kline : null
           const maxAge = KLINE_MAX_AGE[period] ?? 0
           const fresh = held?.candles && Date.now() - (held.loadedAt || 0) < maxAge
@@ -214,13 +224,15 @@ window.__ModuleLoader__.load({
           }).catch(e => {
             // 额度窗口瞬时满/网络抖动: 退避自动重试一次; 服务端带 retryAfterMs 时按其等待, 否则 4s
             if (!retried && ['RATE_LIMIT', 'NETWORK', 'TIMEOUT'].includes(e.code)) return attempt(Math.max(4 * 1000, e.retryAfterMs || 0), true)
+            // 失败同样要校验 key: 上一只的失败(还带 4s 退避)晚到时不能把当前这只的图清成错误态
+            if (state.klineKey !== key) throw e
             patch({ kline: { loading: false, error: e.message || 'K线加载失败', errorCode: e.code, candles: null } })
             throw e
           })
           return attempt()
         },
         // key 不匹配说明是上标的一轮结果, 交给当前轮的 effect 灌
-        getKlineResult(securityId, period) { return state.klineKey === `${securityId}|${period}` && state.kline?.candles ? state.kline : null },
+        getKlineResult(securityId, period) { return state.klineKey === klineKeyOf(securityId, period) && state.kline?.candles ? state.kline : null },
         dispose() {
           if (disposed) return
           try { bus.publish({ type: 'watch-demand', pageId, generation: ++demandGeneration, active: false }) } catch {}
@@ -698,14 +710,15 @@ window.__ModuleLoader__.load({
         runtime.loadKline(item.id, period).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
         return () => { dead = true }
       }, [item.id, period])
-      // 数据唯一入口: state.kline 变就重灌, 换 key 才重置视口
+      // 数据唯一入口: state.kline 变就重灌, 换 key 才重置视口。
+      // 必须校验 key: 切周期当帧 state.kline 已被清成上一轮的空壳, 直接灌会把分时的 "09:30" 交给
+      // Candlestick, vendor 对非法日期字符串是抛错而不是忽略; 空数组同样要灌, 否则换只后旧图残留。
       React.useEffect(() => {
-        if (!kline?.candles?.length) return
-        const key = `${item.id}|${period}`
-        const fit = shippedKeyRef.current !== key
-        shippedKeyRef.current = key
-        maybeFill({ candles: kline.candles, preClose: kline.preClose }, fit)
-      }, [kline.candles, kline.preClose, item.id, period])
+        const key = klineKeyOf(item.id, period)
+        if (state.klineKey !== key) return
+        if (shippedKeyRef.current !== key) { shippedKeyRef.current = key; maybeFill({ candles: kline?.candles || [], preClose: kline?.preClose }, true); return }
+        maybeFill({ candles: kline?.candles || [], preClose: kline?.preClose }, false)
+      }, [state.klineKey, kline?.candles, kline?.preClose, item.id, period])
       // 成本/辅助线变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
       React.useEffect(() => {
         if (!mainRef.current) return

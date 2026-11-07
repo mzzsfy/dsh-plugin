@@ -46,7 +46,7 @@ async function getJson(ctx, url) {
   return response.json().catch(() => { throw new StockError('BAD_PAYLOAD', '来源响应不是JSON', 502) })
 }
 export const eastmoney = {
-  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，沪深港美目录，八市场行情/K线/搜索，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
+  descriptor: { adapterId: 'eastmoney', capabilities: ['quotes', 'catalog', 'search', 'kline'], markets: ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'], instruments: ['equity'], maxQuoteBatch: 60, credential: 'none', description: '东方财富公开接口：免凭据，八市场目录，行情/K线/搜索，非官方无SLA', endpointKeys: [{ key: 'quotes', label: '行情批量' }, { key: 'list', label: '证券目录' }, { key: 'search', label: '搜索联想' }, { key: 'kline', label: 'K线历史' }, { key: 'trend', label: '分时' }] },
   async probe(request, ctx) {
     if (request.capability === 'catalog' || request.capability === 'search') {
       // 探针词按市场用代表证券代码(茅台/平安只对沪深有效, 其他市场返回 0 项会误判 denied)。
@@ -200,8 +200,8 @@ export const eastmoney = {
 function num_or_null(v) { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
 
 
-// 来源时刻是市场本地时间("YYYY-MM-DD HH:MM"),按市场时区换算成 Unix 秒;
-// 无时区元数据或格式不符时返回 null,调用方回退自造时间轴
+// 把指定时区的"YYYY-MM-DD HH:MM"换算成 Unix 秒, 时刻属于哪个时区由调用方给定;
+// 无时区元数据或格式不符时返回 null, 调用方回退自造时间轴
 function zonedUnixSeconds(stamp, timeZone) {
   const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(stamp)
   if (!match || !timeZone) return null

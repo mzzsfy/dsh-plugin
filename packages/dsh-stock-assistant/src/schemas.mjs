@@ -80,7 +80,7 @@ export const defaultConfig = () => {
   const quoteBackupOf = market => (market === 'XNAS' || market === 'XNYS' ? 'xq-backup' : ['XSHG', 'XSHE', 'XHKG'].includes(market) ? 'sn-backup' : null)
   const route = (market, capability, primary, fallback = null) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: fallback ? [fallback] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
   const routes = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'].flatMap(market => [
-    // 目录统一走东财: 一个源覆盖五市场, 不必为沪深单开新浪分支;目录不支持备用源
+    // 目录统一走东财: 一个源覆盖八个市场, 不必为沪深单开新浪分支;目录不支持备用源
     ...(catalogCovered.has(market) ? [route(market, 'catalog', 'em-default')] : []),
     route(market, 'search', 'em-default'),
     route(market, 'quotes', 'em-default', quoteBackupOf(market)),
