@@ -301,8 +301,10 @@ window.__ModuleLoader__.load({
     // 按 callId 记会随刷新清零,重复导航在宿主侧就会叠出多个面板
     const openedTerminals = new Set()
 
-    // 终端面板的固定 contentId:宿主 terminal 类型是多实例,只有固定地址才能被复用
-    const TERMINAL_PANEL = 'dsh-resource://dsh-shared-terminal/panel'
+    // 终端面板地址按 terminalId 固定:宿主 terminal 类型是多实例,openTabIn 每次新建随机
+    // contentId;固定地址才能让 openResourceIn 按 contentId 复用到同一面板。
+    // 一个终端一个面板:改导航参数不会重建 xterm 实例,复用别人的面板会看错终端。
+    const panelAddress = (terminalId) => `dsh-resource://dsh-shared-terminal/panel/${terminalId}`
 
     // ── 只读终端自愈 ─────────────────────────────────────────────────────
     // 宿主在附着结束时只清 controller,不把 writable 交还 UI(宿主按 controller===follower 判定);
@@ -396,18 +398,12 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         // Session terminal 复用:同一官方 sidebar xterm,用户可输入并查看当前屏幕。
         // 宿主的 terminal tab 是 multiple 类型:openTabIn 每次生成新随机 contentId 并新建 tab,
-        // 于是每次重渲染(刷新、切会话)都多出一个指向同一终端的窗口。固定 contentId 交给
-        // openResourceIn,宿主才会按 findContentTab 复用同一面板;导航参数负责切换目标终端。
+        // 于是每次重渲染(刷新、切会话)都多出一个指向同一终端的窗口,越用越卡。
+        // 按 terminalId 固定地址走 openResourceIn,同一终端永远命中同一面板。
         async function openExisting(sessionId, terminalId, alive) {
           const listed = await ctx.remote.terminal.list(sessionId)
           if (!alive() || !listed.ok || !listed.value.some((item) => item.id === terminalId)) return false
-          const existing = ctx.sidebarRight.openTabs?.getSnapshot().find((tab) => tab.sessionId === sessionId && tab.kind === 'terminal')
-          if (existing !== undefined && existing.contentId !== TERMINAL_PANEL) {
-            // 用户自己开的终端面板地址随机,只改写它的导航参数,不另建面板
-            ctx.sidebarRight.tabDomain?.navigate(sessionId, existing.tabId, { address: existing.contentId, params: { terminalId } })
-            return true
-          }
-          ctx.sidebarRight.openResourceIn(sessionId, TERMINAL_PANEL, { kind: 'terminal', params: { terminalId } })
+          ctx.sidebarRight.openResourceIn(sessionId, panelAddress(terminalId), { kind: 'terminal', params: { terminalId } })
           return true
         }
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(

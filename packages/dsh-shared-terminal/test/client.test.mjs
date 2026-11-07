@@ -62,31 +62,31 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     async heal() { for (const timer of timers) await timer() },
   }
 }
-test('Given no terminal panel, When reopening result, Then the panel is opened at the stable address', async () => {
+test('Given no terminal panel, When reopening result, Then a panel is opened at the terminal address', async () => {
   const app = fixture({ tabs: [], params: undefined })
   app.render(props('open'))
   await app.flush()
-  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
+  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
 })
 
-test('Given a terminal panel opened at the stable address, When the result renders again, Then the same panel is revealed', async () => {
-  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://dsh-shared-terminal/panel' }], params: { terminalId: 'term-a' } })
+test('Given the panel of this terminal is already open, When the result renders again, Then the same address is reopened', async () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }], params: { terminalId: 'term-a' } })
   app.render(props('open'))
   await app.flush()
   app.render({ ...props('open'), callId: 'call-b' })
   await app.flush()
-  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
+  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
 })
 
-test('Given a panel the user opened by hand, When the result renders, Then only its navigation is rewritten', async () => {
-  // 官方新建按钮给的是随机 contentId:改不了地址,只能改写导航参数,不能另建面板
-  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab9', contentId: 'sidebar://terminal/2f1c' }], params: undefined })
+test('Given a panel of another terminal is open, When this result renders, Then it does not hijack that panel', async () => {
+  // 改导航参数不会重建 xterm 实例,复用别人的面板会看到错的终端
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab9', contentId: 'sidebar://terminal/2f1c' }], params: { terminalId: 'term-b' } })
   app.render(props('open'))
   await app.flush()
-  assert.equal(JSON.stringify(app.calls), JSON.stringify([['navigate', 'session-a', 'tab9', { address: 'sidebar://terminal/2f1c', params: { terminalId: 'term-a' } }]]))
+  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
 })
 
-test('Given two open results for the same terminal, When both render, Then the panel is navigated once', async () => {
+test('Given two open results for the same terminal, When both render, Then the panel is opened once', async () => {
   const app = fixture({ tabs: [], params: undefined })
   app.render(props('open'))
   await app.flush()
@@ -138,7 +138,7 @@ test('Given successful open result, When rendering then committing effect, Then 
   app.render(props('open'))
   await app.flush()
   assert.equal(app.calls.length, 1)
-  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel', { kind: 'terminal', params: { terminalId: 'term-a' } }]))
+  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]))
   assert.deepEqual(app.seen, ['session-a'])
 })
 
