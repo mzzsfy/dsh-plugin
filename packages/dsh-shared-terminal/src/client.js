@@ -394,25 +394,55 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'locale'],
+      inject: ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'webTerminals', 'locale'],
       apply(ctx) {
         // Session terminal 复用:同一官方 sidebar xterm,用户可输入并查看当前屏幕。
         // 宿主的 terminal tab 是 multiple 类型:openTabIn 每次生成新随机 contentId 并新建 tab,
         // 于是每次重渲染(刷新、切会话)都多出一个指向同一终端的窗口,越用越卡。
         // 按 terminalId 固定地址走 openResourceIn,同一终端永远命中同一面板。
+        const PANEL_PREFIX = 'dsh-resource://dsh-shared-terminal/panel/'
         const settlePanel = (sessionId, address, terminalId) => {
           const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.contentId === address)
           if (tab !== undefined) ctx.sidebarRight.tabDomain?.navigate(sessionId, tab.tabId, { address, params: { terminalId } })
         }
-        // 面板首帧读的是导航参数,而参数由 openContent 落库在途;等参数到岸时 xterm 已按
-        // 「新终端」建好,于是显示「此终端已不存在」并不再更新。宿主自身的 contentId→终端
-        // 绑定(落 localStorage)正是首帧的兜底来源,建面板前先写它,首帧就能拿到目标终端。
+        // 面板首帧从导航记录取 contentId/terminalId,而记录由 openContent 回执写入,回执晚于首帧。
+        // 首帧拿空值就会按「新终端」把 xterm 建死,之后一直显示「此终端已不存在」。
+        // 面板的内容身份在 layout 里本就确定,首帧缺参时用 layout 的 contentId 补齐即可。
+        const VIEW_PATCH = Symbol.for('@mzzsfy/dsh-shared-terminal/view-patch')
+        const patchTerminalView = () => {
+          const holder = ctx.webTerminals
+          if (holder === undefined || holder[VIEW_PATCH] === true) return
+          const original = holder.view
+          if (typeof original !== 'function') return
+          const view = original.bind(holder)
+          holder[VIEW_PATCH] = true
+          holder.view = (sessionId, key, contentId, terminalId, shellPath) => {
+            if (contentId !== undefined) return view(sessionId, key, contentId, terminalId, shellPath)
+            const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.tabId === key)
+            if (tab === undefined || tab.kind !== 'terminal') return view(sessionId, key, contentId, terminalId, shellPath)
+            const fill = terminalId ?? (tab.contentId.startsWith(PANEL_PREFIX) ? tab.contentId.slice(PANEL_PREFIX.length) : undefined)
+            return view(sessionId, key, tab.contentId, fill, shellPath)
+          }
+        }
+        // 宿主自身的 contentId→终端绑定(落 localStorage)是首帧的另一条兜底来源,建面板前先写
         const BINDING_PREFIX = 'dsh.terminal.binding.v1.'
         const seedBinding = (sessionId, contentId, terminalId) => {
           try {
             localStorage.setItem(BINDING_PREFIX + JSON.stringify([sessionId, contentId]), JSON.stringify(terminalId))
           } catch {
             // 存储不可用时只剩导航参数一条路,与不写绑定等价
+          }
+        }
+        // 面板建好后宿主的终端清单可能还没刷新到新终端,view 首轮校验会判定「终端不存在」并就此定格;
+        // 隔一帧再让它自己重查一次即可恢复(清单此时已经到岸)。
+        const NUDGE_DELAYS_MS = [400, 2000]
+        const nudgePanel = (sessionId, address, terminalId) => {
+          const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.contentId === address)
+          if (tab === undefined) return
+          try {
+            ctx.webTerminals?.view?.(sessionId, tab.tabId, address, terminalId)?.refresh?.()
+          } catch {
+            // view 未建或已销毁时无需补救
           }
         }
         async function openExisting(sessionId, terminalId, alive) {
@@ -422,8 +452,10 @@ window.__ModuleLoader__.load({
           seedBinding(sessionId, address, terminalId)
           ctx.sidebarRight.openResourceIn(sessionId, address, { kind: 'terminal', params: { terminalId } })
           settlePanel(sessionId, address, terminalId)
+          for (const delay of NUDGE_DELAYS_MS) setTimeout(() => nudgePanel(sessionId, address, terminalId), delay)
           return alive()
         }
+        patchTerminalView()
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
           { name: 'tool.call.toolview', key: 'terminal', locale: NS },
           (props) => h(TerminalToolRow, { ...props, openTerminal: (sessionId, terminalId, alive) => openExisting(sessionId, terminalId, alive) }),

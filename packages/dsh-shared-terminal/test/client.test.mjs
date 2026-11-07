@@ -33,6 +33,8 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
       navigate(...args) { calls.push(['navigate', ...args]) },
     },
   }
+  const views = []
+  const webTerminals = { view(sessionId, key, contentId, terminalId) { views.push([sessionId, key, contentId, terminalId]); return { state: { getSnapshot: () => ({}) }, dispose() {} } } }
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
   // 自愈只扫 [data-sidebar-terminal];其余选择器由各用例的节点桩承担
   const documentStub = {
@@ -58,9 +60,9 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     inject(name, factory) { assert.equal(name, 'tool.call.toolview'); declared = true; factory() },
     register(meta, view) { assert.equal(declared, true); assert.equal(meta.key, 'terminal'); component = view; return () => { active = false } },
   }
-  plugin.apply({ remote, slots, sidebarRight, locale: { register: () => {} }, effect: (fn) => fn() })
+  plugin.apply({ remote, slots, sidebarRight, webTerminals, locale: { register: () => {} }, effect: (fn) => fn() })
   return {
-    calls, seen, plugin, document: documentStub,
+    calls, seen, views, webTerminals, plugin, document: documentStub,
     setSession(id) { mountedSession = id },
     render(props) { index = 0; return component(props) },
     // 面板创建按 PANEL_GAP_MS 串行,flush 要等队列走完
@@ -132,7 +134,7 @@ const walk = (tree) => {
 
 test('Given classic-script loader and declared slot, When plugin materializes, Then its service gates and renderer register', () => {
   const app = fixture()
-  assert.deepEqual(Array.from(app.plugin.inject), ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'locale'])
+  assert.deepEqual(Array.from(app.plugin.inject), ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'webTerminals', 'locale'])
   assert.ok(app.render(props('open')))
 })
 
@@ -439,4 +441,22 @@ test('Given the terminal tab is hidden, When healing ticks, Then it is skipped',
   const app = healingFixture({ roots: [fakeRoot({ clicks, visible: false })] })
   await app.heal()
   assert.deepEqual(clicks, [])
+})
+
+test('Given the panel first frame runs before navigation lands, When the terminal view mounts, Then the layout contentId fills the gap', () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab7', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }] })
+  app.webTerminals.view('session-a', 'tab7', undefined, undefined, undefined)
+  assert.deepEqual(app.views[0], ['session-a', 'tab7', 'dsh-resource://dsh-shared-terminal/panel/term-a', 'term-a'], '首帧缺参时用 layout 的 contentId 与其中的终端身份补齐')
+})
+
+test('Given the first frame belongs to a host terminal tab, When the view mounts, Then only the contentId is filled', () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab8', contentId: 'sidebar://terminal/2f1c' }] })
+  app.webTerminals.view('session-a', 'tab8', undefined, undefined, undefined)
+  assert.deepEqual(app.views[0], ['session-a', 'tab8', 'sidebar://terminal/2f1c', undefined], '别的 contentId 不猜终端身份')
+})
+
+test('Given navigation already resolved, When the view mounts, Then the patch passes through unchanged', () => {
+  const app = fixture({})
+  app.webTerminals.view('session-a', 'tab9', 'sidebar://terminal/2f1c', 'term-z', 'pwsh')
+  assert.deepEqual(app.views[0], ['session-a', 'tab9', 'sidebar://terminal/2f1c', 'term-z'])
 })
