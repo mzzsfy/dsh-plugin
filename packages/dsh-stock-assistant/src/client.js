@@ -986,8 +986,13 @@ window.__ModuleLoader__.load({
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
     function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
       // quotes 的每条是 { quote, health }, 交易时段在 quote 里
-      // 自己的快照优先: 面板不在前台时宿主会 cancelIdle, 面板那份 quotes 会停在最后一次活动时的时段上
-      const stateOf = id => (fetched?.[id] || quotes?.[id])?.quote?.sessionState
+      // 时段取最新的一份: 自己拉的和面板的都可能旧, 不能无条件让自己的压过面板的
+      const stateOf = id => {
+        const own = fetched?.[id]?.quote, panel = quotes?.[id]?.quote
+        if (!own) return panel?.sessionState
+        if (!panel) return own.sessionState
+        return (own.receivedAt ?? 0) >= (panel.receivedAt ?? 0) ? own.sessionState : panel.sessionState
+      }
       const pickedKey = picked.join(','), stateKey = picked.map(stateOf).join(',')
       React.useEffect(() => {
         if (!open || !picked.length || live === false) return
@@ -1000,32 +1005,24 @@ window.__ModuleLoader__.load({
         let tick = 0
         const pull = () => {
           if (document.visibilityState !== 'visible') return
-          if (mode === 'list') {
-            // 收市后走快照省额度, 但每十拍插一次真刷新兜底: 面板不在前台时宿主会 cancelIdle,
-            // 没有任何人在刷新 quotes, 纯靠快照会一直停在昨夜的数据上, 第二天开市也醒不过来
-            tick += 1
-            const readOnly = allClosed && tick % 10 !== 0
-            const url = floatPollUrl(readOnly)
-            const init = readOnly ? undefined : {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: revision ?? 0, securities: picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code })) }),
-            }
-            fetch(url, init)
+          tick += 1
+          const plan = pollPlan({ mode, allClosed, tick })
+          if (plan === 'skip') return
+          const refresh = () => fetch(`${BASE}/refresh`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: revision ?? 0, securities: picked.map(id => ({ id, exchange: items[id].exchange, code: items[id].code })) }),
+          })
+            .then(response => response.json())
+            .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
+            .catch(() => { if (!dead) setError('行情不可用') })
+          if (plan === 'refresh') refresh()
+          else if (plan === 'snapshot') {
+            // 只读快照: 省额度用, 但它不重算交易时段, 单靠它醒不过来
+            fetch(`${BASE}/snapshot`)
               .then(response => response.json())
-              .then(payload => { if (dead) return; if (payload.ok) { setFetched(payload.data.quotes || {}); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .then(payload => { if (!dead) { if (payload.ok) setFetched(payload.data.quotes || {}); setError('') } })
               .catch(() => { if (!dead) setError('行情不可用') })
           } else if (securityId) {
-            // trend 端点不进缓存(每次都是真上游), 收市后继续按秒级打就是白烧额度。
-            // 但也不能就此停手: 收市判断读的是面板 quotes, 面板不在前台时它会一直停在 trading,
-            // 所以收市档改为低频拉快照刷新自己的 quotes, 一旦开市由它把状态翻回来
-            tick += 1
-            if (allClosed && tick % 10 !== 0) {
-              fetch(`${BASE}/snapshot`)
-                .then(response => response.json())
-                .then(payload => { if (!dead && payload.ok) setFetched(payload.data.quotes || {}) })
-                .catch(() => { })
-              return
-            }
             fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
               .then(response => response.json())
               .then(payload => { if (dead) return; if (payload.ok) { setTrend({ securityId, data: payload.data }); setError('') } else setError(payload.error?.message || '行情不可用') })
@@ -1084,8 +1081,17 @@ window.__ModuleLoader__.load({
     // 宿主把主题 token 内联写在 body 的 style 上, 同色系两套主题切换时明暗标记并不变,
     // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」
     const themeSignature = t => [t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
+    // 轮询决策。三件事必须同时成立: 收市后不再打上游、又不能永远停在那儿、还不能每分钟真刷一次。
+    // trend 端点不进缓存, 收市后必须彻底停掉; 而 /snapshot 只读缓存不重算交易时段,
+    // 单靠它永远发现不了开市, 所以每隔几拍要用真刷新把状态翻回来
+    const POLL_EVERY = 10
+    const pollPlan = ({ mode, allClosed, tick }) => {
+      const beat = tick % POLL_EVERY === 0
+      if (mode === 'list') return allClosed && !beat ? 'snapshot' : 'refresh'
+      if (!allClosed) return 'trend'
+      return beat ? 'refresh' : 'skip'
+    }
     // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游
-    const floatPollUrl = allClosed => `${BASE}/${allClosed ? 'snapshot' : 'refresh'}`
     const FLOAT_KEY = 'ssb-floating'
     // ids 为空时退回自选前几只, 否则第一次打开会是一张空窗
     // ids 为 null 表示"从没勾过"(退回默认前五只), 空数组表示"明确一只都不盯", 两者不能混
@@ -1625,7 +1631,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, floatPollUrl, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, pollPlan, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

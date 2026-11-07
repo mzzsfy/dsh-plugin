@@ -11,10 +11,10 @@ const must = (re, why) => assert.match(client, re, why)
 const mustNot = (re, why) => assert.doesNotMatch(client, re, why)
 
 test('悬浮窗读交易时段要走 quote 那一层', () => {
-  // quotes[id] 的形状是 { quote, health }, 读成 quotes[id].sessionState 会让「全部收市降频」恒不成立。
-  // 只查直接从 quotes 取的形式: 详情页的 q 本身就是 quote 层, 拿它读 sessionState 是对的
+  // quotes[id] 的形状是 { quote, health }, 读成 quotes[id].sessionState 会让「全部收市降频」恒不成立
+  must(/\bfetched\?\.\[id\]\?\.quote\b/, '自己的快照要经 quote 层')
+  must(/\bquotes\?\.\[id\]\?\.quote\b/, '面板的快照也要经 quote 层')
   assert.deepEqual([...client.matchAll(/quotes\?\.\[[^\]]+\]\?\.sessionState/g)], [], 'quotes[id] 必须再进一层 quote')
-  must(/\?\.quote\?\.sessionState/, '至少有一处走 quote 层')
 })
 
 test('建图补灌走 fillRef, 不用首帧闭包', () => {
@@ -32,21 +32,27 @@ test('重涂按主序列形态选键名, 成交量按当前蜡烛重灌', () => 
   must(/repaintChart\(readChartTheme\(/, 'MutationObserver 必须调 repaintChart')
 })
 
-test('收市档既省额度又能自愈', () => {
-  // 面板不在前台时宿主会 cancelIdle, 只读快照会一直停在旧数据上
-  // 收尾锚定到行末: 只匹配前缀的话, 往后加个 && false 把兜底变成死代码也能过
-  must(/const readOnly = allClosed && tick % \d+ !== 0\n/, '收市档必须隔若干拍插真刷新')
-  must(/floatPollUrl\(readOnly\)/, 'URL 必须由 floatPollUrl 决定')
-  // 收市判断要优先用自己拉的快照: 面板那份 quotes 在面板不在前台时会一直停在 trading
-  must(/const stateOf = id => \(fetched\?\.\[id\] \|\| quotes\?\.\[id\]\)\?\.quote\?\.sessionState/, '时段判断要优先用自己的快照')
+test('轮询决策走纯函数, 不散落在分支里', () => {
+  // 决策一旦写成 if 分支就只能靠文本断言, 而文本分辨不出「死代码」与「分支执行」.
+  // 抽成 pollPlan 后由 groups.test 直接断言各分支, 这里只钉住调用点
+  must(/const plan = pollPlan\(\{ mode, allClosed, tick \}\)/, '拉取前必须由 pollPlan 决定这一拍做什么')
+  must(/if \(plan === 'skip'\) return/, 'skip 必须真的跳过')
+  must(/plan === 'refresh'/, 'refresh 分支必须存在')
+  must(/plan === 'snapshot'/, 'snapshot 分支必须存在')
+  must(/return beat \? 'refresh' : 'skip'/, '图形收市档只在整十拍真刷新')
+})
+
+test('收市判断按 receivedAt 取最新的一份', () => {
+  // 无条件偏爱自己那份会让它变成单向闩锁: 一旦写成 trading, 面板的新鲜 closed 也压不过它
+  must(/own\.receivedAt \?\? 0\) >= \(panel\.receivedAt \?\? 0\)/, '两份快照必须按 receivedAt 择优')
 })
 
 test('图形模式收市后不许再打 trend 上游', () => {
-  // trend 端点不进缓存, 每次都是真上游; 只修 list 一半的话, 夜里能打出上千次
-  const graph = client.slice(client.indexOf('} else if (securityId) {'), client.indexOf('const timer = setInterval(pull'))
-  assert.match(graph, /allClosed/, '图形分支必须判收市')
-  assert.match(graph, /\/snapshot/, '收市档要拉快照, 而不是继续打 trend')
-  assert.match(graph, /tick % \d+ !== 0/, '收市档要低频')
+  // trend 端点不进缓存, 每次都是真上游. 行为由 groups.test 的 pollPlan 用例断言,
+  // 这里只确认 trend 的唯一出口确实受 plan 控制(而不是另有旁路)
+  assert.equal(count(/period: 'trend'/g), 1, 'trend 只应有一个请求点')
+  const trendCall = client.slice(client.indexOf("period: 'trend'") - 260, client.indexOf("period: 'trend'"))
+  assert.match(trendCall, /else if \(securityId\)/, 'trend 必须在 plan 的 else 分支里')
 })
 
 test('代际淘汰的请求不许落地, 退避到点也要再查一次', () => {

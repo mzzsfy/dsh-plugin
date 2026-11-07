@@ -68,21 +68,20 @@ test('自选里查不到的 id 不会凭空造组', async () => {
   assert.deepEqual(slices.ungrouped, [])
 })
 
-// 全部收市后还按刷新间隔打上游是白烧额度: 休市应该只读快照
-test('休市时轮询走只读快照, 开市才刷新', async () => {
-  const { floatPollUrl } = await load()
-  assert.equal(floatPollUrl(true), '/api/stock-assistant/snapshot')
-  assert.equal(floatPollUrl(false), '/api/stock-assistant/refresh')
-})
-
-// 但只读快照不能是唯一路径: 面板不在前台时宿主会 cancelIdle, 没人刷新就会一直停在旧数据上,
-// 所以收市档必须隔若干拍插一次真刷新
-test('收市档每十拍至少插一次真刷新', async () => {
-  const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
-  const guard = source.match(/const readOnly = allClosed && tick % (\d+) !== 0/)
-  assert.ok(guard, '收市档必须有真刷新兜底, 不能纯靠快照')
-  const every = Number(guard[1])
-  assert.ok(every >= 2 && every <= 20, `兜底间隔 ${every} 拍不合理`)
+// 轮询决策三件事必须同时成立: 收市后不打上游、又不能永远停在那儿、还不能每分钟真刷一次
+test('轮询决策: 收市不打 trend, 但自己醒得过来', async () => {
+  const { pollPlan } = await load()
+  // 开市: 列表刷卡, 图形打分时
+  assert.equal(pollPlan({ mode: 'list', allClosed: false, tick: 1 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'graph', allClosed: false, tick: 1 }), 'trend')
+  // 收市: 列表走只读快照省额度; 图形彻底停掉——trend 端点不进缓存, 每拍都是真上游
+  assert.equal(pollPlan({ mode: 'list', allClosed: true, tick: 1 }), 'snapshot')
+  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 1 }), 'skip')
+  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 9 }), 'skip')
+  // 但每十拍必须真刷新一次: 只读快照不重算交易时段, 单靠它永远发现不了开市
+  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 10 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'list', allClosed: true, tick: 10 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 20 }), 'refresh')
 })
 
 test('休市把轮询压到一分钟一拍, 开市跟随设置', async () => {
