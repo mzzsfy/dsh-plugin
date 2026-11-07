@@ -482,17 +482,32 @@ window.__ModuleLoader__.load({
                       amplitude == null ? null : h('span', { className: 'ssb-kv' }, '振', `${amplitude}%`),
                       plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, '持仓', `${signed(plPct)}%`))))
                 }
-                // 手动序: 未分组置顶区行 + 组段(组头行含统计/重命名/解散+折叠); 全局排序: 平铺不分区
-                if (view.sort !== 'manual') return order.map(rowOf)
+                // 分组是结构、排序是组内顺序, 两者互不排斥: 全局排序时也保留分区, 只是组内按该排序走。
+                // 置顶与未分组也各给一个组头, 否则一只都没归组时整页平铺, 分组功能等于不可发现
                 const slices = groupSlices(order, w.items)
-                const out = slices.pinned.map(rowOf)
-                for (const { name, ids: members } of slices.groups) {
-                  const gs = members.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
-                  const open = !view.groupCollapsed?.[name]
-                  out.push(h('div', { key: 'grp-' + name, className: 'ssb-group-head' }, h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${name} 分组折叠`, onClick: () => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }) } } }, open ? '▾' : '▸', ` ${name} · ${members.length} 只 · ${gs.up} 涨 ${gs.down} 跌`), h('span', { className: 'ssb-toolbar' }, h(Button, { onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'), h(Button, { disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'))))
-                  if (open) for (const id of members) out.push(rowOf(id))
+                const toggleGroup = (key, open) => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [key]: open } })
+                const head = (key, label, ids, actions) => {
+                  const open = !view.groupCollapsed?.[key]
+                  const gs = ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
+                  return h('div', { key: 'grp-' + key, className: 'ssb-group-head' },
+                    h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${label} 分组折叠`, onClick: () => toggleGroup(key, open), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroup(key, open) } } }, open ? '▾' : '▸', ` ${label} · ${ids.length} 只 · ${gs.up} 涨 ${gs.down} 跌`),
+                    h('span', { className: 'ssb-toolbar' }, actions))
                 }
-                for (const id of slices.ungrouped) out.push(rowOf(id))
+                const section = (key, label, ids, actions) => {
+                  const out = [head(key, label, ids, actions)]
+                  if (!view.groupCollapsed?.[key]) for (const id of ids) out.push(rowOf(id))
+                  return out
+                }
+                const out = []
+                if (slices.pinned.length) out.push(...section('__pinned', '置顶', slices.pinned, null))
+                for (const { name, ids } of slices.groups) {
+                  const actions = [
+                    h(Button, { key: 'rename', onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'),
+                    h(Button, { key: 'drop', disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'),
+                  ]
+                  out.push(...section(name, name, ids, actions))
+                }
+                if (slices.ungrouped.length) out.push(...section('__rest', '未分组', slices.ungrouped, null))
                 return out
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
@@ -1531,7 +1546,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: `ssb-root${data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''}`, ref: root },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-page' }, h('header', { className: 'ssb-header' }, h('div', null, h('h1', null, '股票'), h('p', { className: 'ssb-muted' }, scopeText(data?.control.watchlist.order || []))), h('nav', { className: 'ssb-toolbar', 'aria-label': '股票工具操作' },
-          h(Button, { primary: view.view === 'list', onClick: () => runtime.updateView({ view: 'list' }) }, '自选'), h(Button, { primary: view.view === 'browse', onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'), h(Button, { primary: view.view === 'search', onClick: () => runtime.updateView({ view: 'search' }) }, '搜索'), h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(runtime.refresh) }, state.busy.refresh ? '刷新中…' : '刷新'),
+          h(Button, { primary: view.view === 'list', onClick: () => runtime.updateView({ view: 'list' }) }, '自选'), h(Button, { primary: view.view === 'browse', onClick: () => { runtime.updateView({ view: 'browse' }); if (!runtime.getSnapshot().view.browseRows) quiet(() => runtime.loadBrowse('XSHG', 0))() } }, '市场'), h(Button, { primary: view.view === 'search', onClick: () => runtime.updateView({ view: 'search' }) }, '搜索'), h(Button, { disabled: !data || state.busy.refresh, onClick: quiet(() => runtime.refresh()) }, state.busy.refresh ? '刷新中…' : '刷新'),
           h('div', { className: 'ssb-more', style: { position: 'relative' } }, h(Button, { 'aria-label': '更多操作', 'aria-expanded': !!view.menuOpen, onClick: () => runtime.updateView({ menuOpen: !view.menuOpen }) }, '更多'), view.menuOpen ? h('div', { className: 'ssb-menu', style: { position: 'absolute', right: 0, top: 'calc(100% + 4px)', background: 'var(--ssb-bg)', border: '1px solid var(--ssb-border)', borderRadius: 'var(--ssb-radius-md)', padding: '8px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10, minWidth: '140px' }, role: 'menu' },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 8px' } }, h(Toggle, { label: '暂停采集', checked: state.paused, onChange: runtime.setPaused })),
             h('div', { className: 'ssb-muted', style: { padding: '0 8px', fontSize: '11px' } }, `${(data?.control.providers || []).filter(p => p.enabled).length}/${(data?.control.providers || []).length} 源启用${state.data?.klineReady ? ` · K线 ${Object.keys(state.data.klineReady).length} 市场` : ''}`),
