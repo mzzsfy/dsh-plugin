@@ -1256,10 +1256,10 @@ window.__ModuleLoader__.load({
     }
     const CSS = `
 .ssb-root,.ssb-float-root { --ssb-accent:var(--dsw-alias-brand-primary); --ssb-accent-deep:var(--dsw-alias-button-primary-hover); --ssb-on-accent:var(--dsw-alias-label-primary-inverted); --ssb-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --ssb-ok:var(--dsw-alias-state-success-primary); --ssb-warn:var(--dsw-alias-state-warn-primary); --ssb-danger:var(--dsw-alias-state-error-primary); --ssb-bg:var(--dsw-alias-bg-layer-1); --ssb-bg-sub:var(--dsw-alias-bg-layer-2); --ssb-bg-muted:var(--dsw-alias-bg-module-platform); --ssb-border:var(--dsw-alias-border-l2); --ssb-text:var(--dsw-alias-label-primary); --ssb-text-sub:var(--dsw-alias-label-secondary); --ssb-text-dim:var(--dsw-alias-label-tertiary); --ssb-radius-sm:6px; --ssb-radius-md:8px; --ssb-radius-lg:12px; }
-/* 图表区分色: 亮色主题取中低明度, 保证白底上不糊成一片 */
-.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(38 92% 46%); --ssb-chart-ma-mid: hsl(258 90% 58%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(25 95% 46%); }
-/* 暗色主题整体提亮一档, 否则深色线条直接溶进背景; 明暗标记由宿主写在 body 上 */
-[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(38 95% 60%); --ssb-chart-ma-mid: hsl(258 92% 74%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(25 95% 60%); }
+/* 图表区分色: 亮色取中低明度保证白底上不糊, 取值由 test/chart-colors.test.mjs 卡对比度与线间色差 */
+.ssb-root,.ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 40%); --ssb-chart-ma-mid: hsl(280 88% 52%); --ssb-chart-ma-slow: hsl(189 94% 38%); --ssb-chart-ma-long: hsl(239 84% 56%); --ssb-chart-ema: hsl(330 81% 50%); --ssb-chart-boll-mid: hsl(217 91% 50%); --ssb-chart-boll-rail: hsl(213 90% 62%); --ssb-chart-bbi: hsl(160 84% 34%); --ssb-chart-cost: hsl(20 92% 45%); }
+/* 暗色整体提亮一档, 否则深色线条直接溶进背景; 明暗标记由宿主写在 body 上 */
+[data-ds-dark-theme] .ssb-root,[data-ds-dark-theme] .ssb-float-root { --ssb-chart-ma-fast: hsl(45 96% 58%); --ssb-chart-ma-mid: hsl(280 90% 72%); --ssb-chart-ma-slow: hsl(189 90% 58%); --ssb-chart-ma-long: hsl(239 88% 76%); --ssb-chart-ema: hsl(330 85% 68%); --ssb-chart-boll-mid: hsl(217 92% 68%); --ssb-chart-boll-rail: hsl(213 94% 80%); --ssb-chart-bbi: hsl(160 80% 56%); --ssb-chart-cost: hsl(20 95% 58%); }
 /* 悬浮盯盘挂在 body 上, 与面板同源取色但不需要面板的整屏布局 */
 .ssb-root { height:100%; min-width:0; overflow:auto; color:var(--ssb-text); background:var(--ssb-bg); font:inherit; font-size:12px; line-height:1.5; }
 .ssb-float-root { color:var(--ssb-text); font:inherit; font-size:12px; line-height:1.5; }
