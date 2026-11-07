@@ -355,6 +355,25 @@ test('分组渲染与折叠', async () => {
   assert.ok(!collapsed.slice(collapsed.indexOf('白酒 ·')).includes('甲股'), '折叠后组员隐藏')
   assert.match(collapsed, /乙股/, '折叠只影响本组')
 
+  // aria-expanded 必须锚到组头本身: 页头「更多」按钮也带 aria-expanded=false,
+  // 全页匹配会让「组头永远展开」这种错误实现照样绿
+  const headOf = (html, label) => (html.match(new RegExp(`<span[^>]*aria-label="${label} 分组折叠"[^>]*>`)) || [''])[0]
+  assert.match(headOf(manual, '白酒'), /aria-expanded="true"/, '组头自己的 aria 是展开')
+  assert.match(headOf(collapsed, '白酒'), /aria-expanded="false"/, '组头自己的 aria 是折叠')
+  // 组头统计: 每段的涨跌只数本段成员
+  assert.match(manual, /白酒 · 2 只 · 2 涨 0 跌/, '白酒段两只都涨')
+  assert.match(manual, /能源 · 1 只 · 1 涨 0 跌/, '能源段一只涨')
+  assert.match(manual, /未分组 · 1 只 · 1 涨 0 跌/, '未分组段一只涨')
+
+  // 置顶段: 真的有置顶成员时才出, 且成员不进组段
+  const pinnedState = mkState('manual', {})
+  pinnedState.data.control.watchlist.items[a.id].pinned = true
+  const pinned = render(pinnedState)
+  assert.match(pinned, /置顶 · 1 只/, '有置顶成员要出置顶段')
+  assert.ok(pinned.indexOf('置顶 · 1 只') < pinned.indexOf('白酒 · 1 只'), '置顶段排在组段之前')
+  assert.ok(!pinned.slice(pinned.indexOf('白酒 ·'), pinned.indexOf('能源 ·')).includes('甲股'), '置顶成员不再进组段')
+  assert.ok(!render(mkState('manual', {})).includes('置顶 ·'), '没有置顶成员就不渲染置顶段')
+
   // 全局排序: 分区保留, 组内按该排序走(而不是退回自选顺序)
   const desc = render(mkState('desc', {}))
   assert.match(desc, /白酒 · 2 只/, '全局排序也要保留分组')
