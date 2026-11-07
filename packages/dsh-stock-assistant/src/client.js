@@ -683,7 +683,9 @@ window.__ModuleLoader__.load({
         })
         // 面积序列用 lineColor/topColor/bottomColor, 蜡烛用 up/down 那一组, 键名互不相通
         mainRef.current?.applyOptions(seriesPaintPlan(t, !!avgRef.current))
-        volRef.current?.applyOptions({ upColor: t.volumeUp, downColor: t.volumeDown })
+        // 成交量序列不认系列级配色, 只认每根柱子自带的 color, 所以必须按当前蜡烛重灌一次
+        const candles = liveRef.current.candles
+        if (candles?.length) volRef.current?.setData(candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? t.volumeUp : t.volumeDown })))
         avgRef.current?.applyOptions({ color: t.MA[0] })
         const palette = { ma: t.MA, ema: t.EMA, boll: t.BOLL, bbi: t.BBI }
         for (const [key, list] of Object.entries(indicatorRef.current)) list.forEach((series, index) => series.applyOptions({ color: Array.isArray(palette[key]) ? palette[key][index] : palette[key] }))
