@@ -10,6 +10,8 @@ window.__ModuleLoader__.load({
       if (!hasData) return { fit: false, next: shippedKey }
       return { fit: shippedKey !== key, next: key }
     }
+    // 折叠状态的键: 组名来自用户输入且只校验长度, 用不可见前缀保证不会与真实组名撞车
+    const PINNED_KEY = '\u0000pinned', REST_KEY = '\u0000rest'
     // 自选的分组切面: 置顶 → 各组(按首次出现顺序) → 未分组。列表与悬浮窗勾选共用这一份,
     // 免得两处对"某只属于哪个组"给出不同答案
     function groupSlices(order, items) {
@@ -499,7 +501,7 @@ window.__ModuleLoader__.load({
                   return out
                 }
                 const out = []
-                if (slices.pinned.length) out.push(...section('__pinned', '置顶', slices.pinned, null))
+                if (slices.pinned.length) out.push(...section(PINNED_KEY, '置顶', slices.pinned, null))
                 for (const { name, ids } of slices.groups) {
                   const actions = [
                     h(Button, { key: 'rename', onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'),
@@ -507,7 +509,7 @@ window.__ModuleLoader__.load({
                   ]
                   out.push(...section(name, name, ids, actions))
                 }
-                if (slices.ungrouped.length) out.push(...section('__rest', '未分组', slices.ungrouped, null))
+                if (slices.ungrouped.length) out.push(...section(REST_KEY, '未分组', slices.ungrouped, null))
                 return out
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----

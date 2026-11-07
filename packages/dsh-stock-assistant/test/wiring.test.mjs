@@ -72,6 +72,12 @@ test('悬浮窗拖动只从标题条发起', () => {
   must(/\.ssb-float-head \{ touch-action:none;/, '标题条独占拖动')
 })
 
+test('分组折叠的特殊键不会与用户组名撞车', () => {
+  // 组名来自用户输入且只校验长度, 拿 '__pinned' 当键的话, 用户真建一个叫 __pinned 的组就会互相顶掉
+  must(/const PINNED_KEY = '\\u0000pinned', REST_KEY = '\\u0000rest'/, '特殊折叠键必须带不可见前缀')
+  mustNot(/section\('__pinned'|section\('__rest'/, '不能用可输入的名字当特殊键')
+})
+
 test('本地存储只经两个封装, 且不接受就地字面量', () => {
   const hits = [...client.matchAll(/(?:local|session)Storage\b(\.[A-Za-z]+|\[[^\]]*\])?/g)].map(m => m[0]).sort()
   assert.deepEqual(hits, ['localStorage.getItem', 'localStorage.setItem'])
