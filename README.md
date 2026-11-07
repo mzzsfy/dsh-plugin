@@ -39,6 +39,7 @@ dsh-plugin/
 | @mzzsfy/dsh-shell-select | Windows shell 接管:替换默认 pwsh 工具为可配置多客户端 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择);命令 deny 黑名单,接管失败自动回退官方 pwsh 链 | 工具接管 + 配置校验管线(volatile ref 解箱 + 执行面 strict);bash 候选多锚位探测;web 行提供设置页与 POSIX 形态声明 | DSH host 端插件(工具接管 + 设置页) |
 | @mzzsfy/dsh-tool-gate | 全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 标交宿主 deferred tool loading(API 服务端按需搜索激活);第三方路由降级折叠为占位 + `tool_search` 检索 | 声明式收敛(白名单为唯一事实源),行退场按 undo journal 还原原状;设置卡 GUI 配置 | DSH host 端插件(工具收敛 + 设置卡) |
 | @mzzsfy/dsh-tunnel | 穿透隧道:在 dsh 宿主进程内把本地 TCP 端口反向代理出去(`/p/<name>` 子路径或 `<name>.*` 子域名),ai 经 `tunnel_open`/`tunnel_list`/`tunnel_close` 三工具自管 | 进程内反代,不引入 nginx/caddy 等外部反代;HTTP 前缀 strip 转发 + 监听层 Host/路径分发(任意 WS 路径),子域名全路径透传;REST + GUI 看板 + 设置卡,持久化随 `DSH_HOME` | DSH 双端插件(web 路由 + client 看板) |
+| @mzzsfy/dsh-bug-perf | 宿主缺陷兜底:session/follow 重建合并与终端输出看门狗,每个功能独立开关,跨版本结构不匹配只记录原因不影响宿主 | host 端只提供只读配置路由;client 端包装官方 `RemoteStream.restart`(窗口内合并)与 `webTerminals.view`(停滞自愈),配置缺失退回内联默认值 | DSH 双端插件(host 配置路由 + client 补丁) |
 
 ## 商店展示
 
@@ -67,7 +68,7 @@ pnpm config set --global minimumReleaseAge 360
 
 ### 宿主兼容性
 
-兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。窗口唯一规则实现为 `node scripts/compat/window.mjs`(实算随 dist-tag 滑动,本节版本号仅为写作日快照,与脚本输出不一致时以脚本为准):2026-10-26 实算 0.2.1-rc.3(主测)/ 0.2.1-rc.2(基线)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本实测登记(存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤(声明包:auto-trust-all/boss-simulator/llm-pi-gateway/shared-terminal/shell-select/tool-gate)。逐包测试进度见 docs/兼容性测试/逐包测试进度.md(仅该文件本地维护,不入库)。
+兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。窗口唯一规则实现为 `node scripts/compat/window.mjs`(实算随 dist-tag 滑动,本节版本号仅为写作日快照,与脚本输出不一致时以脚本为准):2026-10-26 实算 0.2.1-rc.3(主测)/ 0.2.1-rc.2(基线)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本实测登记(存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤(声明包:auto-trust-all/boss-simulator/bug-perf/llm-pi-gateway/shared-terminal/shell-select/tool-gate)。逐包测试进度见 docs/兼容性测试/逐包测试进度.md(仅该文件本地维护,不入库)。
 
 以下为 2026-09-27 Round 30 实测记录(历史留档,当时窗口仍为三版本:0.1.2-rc.1 基线 / 0.1.5-rc.3 主测 / 0.1.7-rc.2 完全兼容目标;其中 dsh-shell-select 预设架构当时要求 ≥0.1.7-rc.1,对当时基线不可安装——该例外随窗口滑动已不再成立,hostMin 过滤现由装载层通用承载):
 

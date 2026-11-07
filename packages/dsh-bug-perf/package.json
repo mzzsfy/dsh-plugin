@@ -1,0 +1,53 @@
+{
+  "name": "@mzzsfy/dsh-bug-perf",
+  "description": "宿主缺陷兜底与性能补丁:session/follow 重建合并、终端输出看门狗;每个功能独立开关,跨版本失效不影响宿主",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.1-rc.3": "unknown",
+        "0.2.2-rc.1": "compatible"
+      }
+    },
+    "hostMin": "0.2.1-rc.3"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "npmPublish": "npm publish --access public --provenance=false --registry=https://registry.npmjs.org"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mzzsfy/dsh-plugin.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.0"
+  },
+  "files": [
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "README.md",
+    "兼容性测试.md"
+  ]
+}
