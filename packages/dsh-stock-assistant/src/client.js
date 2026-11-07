@@ -487,7 +487,11 @@ window.__ModuleLoader__.load({
                 }
                 // 分组是结构、排序是组内顺序, 两者互不排斥: 全局排序时也保留分区, 只是组内按该排序走。
                 // 置顶与未分组也各给一个组头, 否则一只都没归组时整页平铺, 分组功能等于不可发现
-                const slices = groupSlices(order, w.items)
+                // 段序固定按自选顺序: 用排序后的 order 取「首现序」会让段落随行情跳动换位,
+                // 正在点的组头会跑掉。排序只决定组内先后
+                const rank = new Map(order.map((id, i) => [id, i]))
+                const sortedIds = ids => ids.slice().sort((left, right) => (rank.get(left) ?? 0) - (rank.get(right) ?? 0))
+                const slices = groupSlices(w.order, w.items)
                 const toggleGroup = (key, open) => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [key]: open } })
                 // 组名来自用户输入: 直接取 groupCollapsed[name] 会让 constructor/toString 这类名字读到原型链上的成员,
                 // 被误判成「已折叠」, 整组不渲染
@@ -505,15 +509,15 @@ window.__ModuleLoader__.load({
                   return out
                 }
                 const out = []
-                if (slices.pinned.length) out.push(...section(PINNED_KEY, '置顶', slices.pinned, null))
+                if (slices.pinned.length) out.push(...section(PINNED_KEY, '置顶', sortedIds(slices.pinned), null))
                 for (const { name, ids } of slices.groups) {
                   const actions = [
-                    h(Button, { key: 'rename', onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'),
+                    h(Button, { key: 'rename', onClick: () => { const to = prompt('重命名分组', name)?.trim(); if (to && to !== name) { quiet(() => runtime.mutate('groupRename', { from: name, to }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to]: collapsedOf(name), [name]: undefined } }) } else if (to === name) { quiet(() => runtime.mutate('groupRename', { from: name, to }))() } } }, '重命名'),
                     h(Button, { key: 'drop', disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'),
                   ]
-                  out.push(...section(name, name, ids, actions))
+                  out.push(...section(name, name, sortedIds(ids), actions))
                 }
-                if (slices.ungrouped.length) out.push(...section(REST_KEY, '未分组', slices.ungrouped, null))
+                if (slices.ungrouped.length) out.push(...section(REST_KEY, '未分组', sortedIds(slices.ungrouped), null))
                 return out
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
@@ -1079,8 +1083,9 @@ window.__ModuleLoader__.load({
         : { upColor: theme.up, downColor: theme.down, borderUpColor: theme.up, borderDownColor: theme.down, wickUpColor: theme.up, wickDownColor: theme.down }
     }
     // 宿主把主题 token 内联写在 body 的 style 上, 同色系两套主题切换时明暗标记并不变,
-    // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」
-    const themeSignature = t => [t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
+    // 只盯着那个标记会整次漏掉换肤。取实际色值当签名, 才算判断了「主题真的变了」。
+    // background 也在签名里: 画布底色就铺的是它, canvas 不透明, 漏掉它等于背景永远不换
+    const themeSignature = t => [t.background, t.textColor, t.gridLine, t.crosshair, t.up, t.down, t.volumeUp, t.volumeDown, t.cost, t.EMA, t.BBI, ...t.MA, ...t.BOLL].join('|')
     // 轮询决策。三件事必须同时成立: 收市后不再打上游、又不能永远停在那儿、还不能每分钟真刷一次。
     // trend 端点不进缓存, 收市后必须彻底停掉; 而 /snapshot 只读缓存不重算交易时段,
     // 单靠它永远发现不了开市, 所以每隔几拍要用真刷新把状态翻回来

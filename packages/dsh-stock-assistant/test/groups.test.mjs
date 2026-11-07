@@ -127,6 +127,6 @@ test('主题签名能分辨换肤, 但不被无关字段干扰', async () => {
   assert.notEqual(themeSignature({ ...theme, up: '#b91c1c' }), base, '涨跌配色变化必须重涂')
   // 任一指标线换色
   assert.notEqual(themeSignature({ ...theme, MA: ['#000', ...theme.MA.slice(1)] }), base, '指标线换色必须重涂')
-  // 背景由 CSS 处理, 图表本身透明, 不该因为背景色变化就整图重涂
-  assert.equal(themeSignature({ ...theme, background: '#000' }), base, '背景不进签名')
+  // 背景变化必须重涂: 画布底色铺的就是它, canvas 不透明, 漏掉等于换了主题背景还停在旧色
+  assert.notEqual(themeSignature({ ...theme, background: '#000' }), base, '背景变化必须重涂')
 })

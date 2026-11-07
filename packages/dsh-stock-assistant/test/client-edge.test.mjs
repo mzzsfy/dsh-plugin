@@ -328,25 +328,27 @@ test('成本盈亏渲染', async () => {
 test('分组渲染与折叠', async () => {
   const { plugin } = await loadClientWithReact()
   const mk = (id, name, code, group) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost: null, group })
-  const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', ''), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒')
+  const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', '能源'), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒'), d = mk('XSHG:equity:600003', '丁股', '600003', '')
   const qOf = pct => ({ quote: { last: '10', previousClose: '1', change: '0.5', changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
   // 每个状态各自克隆一份 items: 共用引用的话, 前一个用例改 group 会污染后面的断言
-  const mkState = (sort, collapsed, groups = { [a.id]: '白酒', [b.id]: '', [c.id]: '白酒' }) => ({
+  const mkState = (sort, collapsed, groups = { [a.id]: '白酒', [b.id]: '能源', [c.id]: '白酒', [d.id]: '' }) => ({
     view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null,
     data: {
-      control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: structuredClone({ [a.id]: { ...a, group: groups[a.id] }, [b.id]: { ...b, group: groups[b.id] }, [c.id]: { ...c, group: groups[c.id] } }) }, preferences: {} },
-      quotes: { [a.id]: qOf('1'), [b.id]: qOf('3'), [c.id]: qOf('9') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false,
+      control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id, d.id], items: structuredClone({ [a.id]: { ...a, group: groups[a.id] }, [b.id]: { ...b, group: groups[b.id] }, [c.id]: { ...c, group: groups[c.id] }, [d.id]: { ...d, group: groups[d.id] } }) }, preferences: {} },
+      // 涨幅刻意让「能源」在降序里排到最前: 只有这样段序才会与自选顺序相反,
+      // 否则「段序固定」这条断言在错误实现下也成立
+      quotes: { [a.id]: qOf('1'), [b.id]: qOf('9'), [c.id]: qOf('5'), [d.id]: qOf('3') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false,
     },
   })
   const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
 
   const manual = render(mkState('manual', {}))
-  // 手动序: 置顶区没有成员就不出组头, 但「白酒」与「未分组」两段都在
+  // 手动序: 置顶区没有成员就不出组头, 但两个组与「未分组」三段都在
   assert.match(manual, /白酒 · 2 只/, '有成员的组要有组头')
+  assert.match(manual, /能源 · 1 只/, '第二个组也要有组头')
   assert.match(manual, /未分组 · 1 只/, '未分组也常显组头, 否则一只都没归组时整页平铺、功能不可发现')
   assert.match(manual, /aria-expanded="true"/, '组头可折叠语义')
   assert.ok(manual.indexOf('甲股') < manual.indexOf('丙股'), '手动序下组内按自选顺序')
-  assert.ok(manual.indexOf('白酒') < manual.indexOf('乙股'), '分组成员排在同段之后')
 
   const collapsed = render(mkState('manual', { 白酒: true }))
   assert.match(collapsed, /aria-expanded="false"/, '折叠态 aria')
@@ -357,15 +359,21 @@ test('分组渲染与折叠', async () => {
   const desc = render(mkState('desc', {}))
   assert.match(desc, /白酒 · 2 只/, '全局排序也要保留分组')
   assert.ok(desc.indexOf('丙股') < desc.indexOf('甲股'), '组内按涨幅降序')
-  assert.ok(desc.indexOf('未分组 · 1 只') < desc.indexOf('乙股'), '未分组段照常渲染')
+  assert.ok(desc.indexOf('未分组 · 1 只') < desc.indexOf('丁股'), '未分组段照常渲染')
+
+  // 段序不能跟着排序走: 用排序后的 order 取首现序会让段落随每次行情跳动换位, 正在点的组头会跑掉。
+  // 数据里「能源」在降序排最前, 所以错误实现下段序会变成 能源→白酒→未分组
+  const orderOfSections = html => [...html.matchAll(/(白酒|能源|未分组) · /g)].map(m => m[1])
+  assert.deepEqual(orderOfSections(manual), ['白酒', '能源', '未分组'], '段序按自选顺序')
+  assert.deepEqual(orderOfSections(desc), orderOfSections(manual), '三种排序的段序必须一致')
 
   // 一只都没归组: 只留未分组段, 不产生空组头
-  const none = render(mkState('manual', {}, { [a.id]: '', [b.id]: '', [c.id]: '' }))
-  assert.match(none, /未分组 · 3 只/, '全是未分组时仍要有段头')
+  const none = render(mkState('manual', {}, { [a.id]: '', [b.id]: '', [c.id]: '', [d.id]: '' }))
+  assert.match(none, /未分组 · 4 只/, '全是未分组时仍要有段头')
   assert.ok(!none.includes('· 0 只'), '不渲染空组头')
 
   // 组名恰好是常见原型链键: 拿它当对象键会读到继承属性, 被误判成「已折叠」
-  const proto = render(mkState('manual', {}, { [a.id]: 'constructor', [b.id]: '', [c.id]: '' }))
+  const proto = render(mkState('manual', {}, { [a.id]: 'constructor', [b.id]: '', [c.id]: '', [d.id]: '' }))
   assert.match(proto, /constructor · 1 只/, '原型链键当组名也要正常成组')
   assert.match(proto, /甲股/, '原型链键组名不能被当成已折叠')
 })
