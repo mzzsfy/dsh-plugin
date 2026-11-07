@@ -347,7 +347,8 @@ window.__ModuleLoader__.load({
     function Watchlist({ runtime, state }) {
       const { data, view, busy } = state, control = data.control, w = control.watchlist
       const sortedOrder = [...w.order].sort((a, b) => {
-        const pinned = Number(w.items[b].pinned) - Number(w.items[a].pinned)
+        // 显式转布尔: 旧记录可能没有 pinned 字段, Number(undefined) 是 NaN, 比较器会退化成随机序
+        const pinned = Number(!!w.items[b].pinned) - Number(!!w.items[a].pinned)
         if (pinned || view.sort === 'manual') return pinned
         const qa = data.quotes[a]?.quote, qb = data.quotes[b]?.quote
         const aa = qa?.changePct == null ? null : Number(qa.changePct), bb = qb?.changePct == null ? null : Number(qb.changePct)
