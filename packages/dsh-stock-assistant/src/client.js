@@ -29,16 +29,18 @@ window.__ModuleLoader__.load({
     // 来源偶发给 null 字段: LWC 只跳过 undefined, null 会按 0 参与价格轴范围把整图压扁;
     // 而非有限的 OHLC 又不能留成 NaN —— 它会顺着均线的滑动窗口把后面所有指标值一起毒掉。
     // 所以四个价格有任一缺失就丢掉整根, 其余字段(avg/amount 等)原样带过去: 分时均价线靠 avg
+    // 分时蜡烛的时间是 HH:MM 标签, 日期解析器认不出来
+    const CLOCK = /^\d{1,2}:\d{2}(:\d{2})?$/
     function sanitizeCandles(list) {
       return (list || []).flatMap(candle => {
         const prices = { open: finiteOr(candle.open), high: finiteOr(candle.high), low: finiteOr(candle.low), close: finiteOr(candle.close) }
         if (!Object.values(prices).every(Number.isFinite)) return []
         // 时间戳坏掉整根丢弃: 图表库遇到非法日期字符串会抛, 而异常发生在 effect 里,
-        // 会把整块图表连同面板一起卸掉, 代价远大于少一根蜡烛
+        // 会把整块图表连同面板一起卸掉, 代价远大于少一根蜡烛.
+        // 注意不能用 Number() 来判断——Number('') / Number(true) / Number([]) 全是有限值
         const at = candle.at, time = candle.time
-        const parseable = value => Number.isFinite(Number(value)) || (typeof value === 'string' && !Number.isNaN(Date.parse(value)))
-        if (at != null && !parseable(at)) return []
-        if (time != null && typeof time !== 'string' && !Number.isFinite(Number(time))) return []
+        if (at != null && !(typeof at === 'number' ? Number.isFinite(at) : typeof at === 'string' && !Number.isNaN(Date.parse(at)))) return []
+        if (time != null && !(typeof time === 'number' ? Number.isFinite(time) : typeof time === 'string' && (CLOCK.test(time) || !Number.isNaN(Date.parse(time))))) return []
         const volume = finiteOr(candle.volume), avg = finiteOr(candle.avg)
         // 缺失一律给 undefined 而不是 NaN, 让下游的 ?? / 默认值能正常接住
         return [{ ...candle, ...prices, volume: Number.isFinite(volume) ? volume : undefined, avg: Number.isFinite(avg) ? avg : undefined }]
@@ -425,7 +427,9 @@ window.__ModuleLoader__.load({
               h('span', { className: 'ssb-cell-amplitude' }, '振幅'),
               h('span', { className: 'ssb-cell-pl' }, '持仓盈亏'),
               h('span', { className: 'ssb-col-status' }, '')),
-            h('div', { className: 'ssb-rows', role: 'list', 'aria-label': '自选列表' }, ...(() => {
+            // 容器不再是 list: 每个段是 group, 行装在段内的 list 里.
+            // 直接让 list 装组头的话, 组折叠按钮与工具条都会变成列表子节点
+            h('div', { className: 'ssb-rows' }, ...(() => {
                 // 分组分段: 置顶/各组/未分组都常显段头(一只没归组时也要看得见分组这回事); 置顶区不进组段;
                 // 组序=首现序; 折叠组隐藏成员。分组与排序正交: 全局排序只改组内顺序, 不改分段
                 // 拖拽排序: 提交完整显示序, 折叠组隐藏项保持原槽位由 order 回填
@@ -505,25 +509,25 @@ window.__ModuleLoader__.load({
                 const head = (key, label, ids, actions) => {
                   const open = !collapsedOf(key)
                   const gs = ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
-                  return h('div', { key: 'grp-' + key, className: 'ssb-group-head', role: 'presentation' },
-                    h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${label} 分组折叠`, onClick: () => toggleGroup(key, open), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroup(key, open) } } }, open ? '▾' : '▸', ` ${label} · ${ids.length} 只 · ${gs.up} 涨 ${gs.down} 跌`),
-                    h('span', { className: 'ssb-toolbar' }, actions))
+                  // role=presentation 只是把组头从无障碍树里摘掉, 组折叠按钮与工具条照样会
+                  // 变成列表的直接子节点. 所以段自己是一个 group, 行装在段内的 list 里
+                  return h('div', { key: 'sec-' + key, role: 'group', 'aria-label': label },
+                    h('div', { className: 'ssb-group-head' },
+                      h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${label} 分组折叠`, onClick: () => toggleGroup(key, open), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroup(key, open) } } }, open ? '▾' : '▸', ` ${label} · ${ids.length} 只 · ${gs.up} 涨 ${gs.down} 跌`),
+                      h('span', { className: 'ssb-toolbar' }, actions)),
+                    open ? h('div', { role: 'list', 'aria-label': label }, ...ids.map(rowOf)) : null)
                 }
-                const section = (key, label, ids, actions) => {
-                  const out = [head(key, label, ids, actions)]
-                  if (!collapsedOf(key)) for (const id of ids) out.push(rowOf(id))
-                  return out
-                }
+                const section = (key, label, ids, actions) => head(key, label, ids, actions)
                 const out = []
-                if (slices.pinned.length) out.push(...section(PINNED_KEY, '置顶', sortedIds(slices.pinned), null))
+                if (slices.pinned.length) out.push(section(PINNED_KEY, '置顶', sortedIds(slices.pinned), null))
                 for (const { name, ids } of slices.groups) {
                   const actions = [
                     h(Button, { key: 'rename', onClick: () => { const to = prompt('重命名分组', name)?.trim(); if (to && to !== name) { quiet(() => runtime.mutate('groupRename', { from: name, to }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to]: collapsedOf(name), [name]: undefined } }) } else if (to === name) { quiet(() => runtime.mutate('groupRename', { from: name, to }))() } } }, '重命名'),
                     h(Button, { key: 'drop', disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'),
                   ]
-                  out.push(...section(name, name, sortedIds(ids), actions))
+                  out.push(section(name, name, sortedIds(ids), actions))
                 }
-                if (slices.ungrouped.length) out.push(...section(REST_KEY, '未分组', sortedIds(slices.ungrouped), null))
+                if (slices.ungrouped.length) out.push(section(REST_KEY, '未分组', sortedIds(slices.ungrouped), null))
                 return out
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
@@ -1035,7 +1039,7 @@ window.__ModuleLoader__.load({
             // 只读快照: 省额度用, 但它不重算交易时段, 单靠它醒不过来
             fetch(`${BASE}/snapshot`)
               .then(response => response.json())
-              .then(payload => { if (!dead) { if (payload.ok) setFetched(payload.data.quotes || {}); setError('') } })
+              .then(payload => { if (dead) return; if (payload.ok) setFetched(payload.data.quotes || {}); setError(payload.ok ? '' : payload.error?.message || '行情不可用') })
               .catch(() => { if (!dead) setError('行情不可用') })
           } else if (securityId) {
             fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
@@ -1106,8 +1110,11 @@ window.__ModuleLoader__.load({
     const pollPlan = ({ mode, quiet, tick }) => {
       const beat = tick % POLL_EVERY === 0
       if (mode === 'list') return quiet && !beat ? 'snapshot' : 'refresh'
-      if (!quiet) return 'trend'
-      return beat ? 'refresh' : 'skip'
+      // 整十拍必须真刷新一次, 且不能只在已知安静时才刷: 时段只能由刷新结果更新,
+      // 而面板不活跃时它的报价会冻结在 trading —— 那样 quiet 永远翻不过来, 图形模式就
+      // 会一直按交易频率打 trend(该端点不进缓存, 每拍都是真上游)
+      if (beat) return 'refresh'
+      return quiet ? 'skip' : 'trend'
     }
     // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游
     const FLOAT_KEY = 'ssb-floating'
@@ -1649,7 +1656,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, pollPlan, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

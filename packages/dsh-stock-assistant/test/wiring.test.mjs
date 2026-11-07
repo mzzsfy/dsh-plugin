@@ -39,7 +39,8 @@ test('轮询决策走纯函数, 不散落在分支里', () => {
   must(/if \(plan === 'skip'\) return/, 'skip 必须真的跳过')
   must(/plan === 'refresh'/, 'refresh 分支必须存在')
   must(/plan === 'snapshot'/, 'snapshot 分支必须存在')
-  must(/return beat \? 'refresh' : 'skip'/, '图形收市档只在整十拍真刷新')
+  must(/if \(beat\) return 'refresh'/, '整十拍无条件真刷新, 否则时段翻不过来')
+  must(/return quiet \? 'skip' : 'trend'/, '安静档跳过, 否则打分时')
 })
 
 test('收市判断按 receivedAt 取最新的一份', () => {

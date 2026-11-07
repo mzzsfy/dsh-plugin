@@ -81,11 +81,19 @@ test('sanitizeCandles 保住额外字段并丢掉残根', async () => {
     { time: '09:31', at: 'abc', open: 5, high: 6, low: 4, close: 5 },
     { time: 42, at: '2026-11-07T01:30:00Z', open: 5, high: 6, low: 4, close: 5 },
     { time: {}, open: 5, high: 6, low: 4, close: 5 },
+    // 空串/布尔/数组都能骗过 Number(): Number('') 与 Number([]) 是 0, Number(true) 是 1
+    { at: '', open: 5, high: 6, low: 4, close: 5 },
+    { at: true, open: 5, high: 6, low: 4, close: 5 },
+    { time: '', open: 5, high: 6, low: 4, close: 5 },
+    { time: true, open: 5, high: 6, low: 4, close: 5 },
+    { time: 'abc', open: 5, high: 6, low: 4, close: 5 },
   ])
   assert.equal(badTime.length, 2, '解析不了的时间戳整根丢掉')
   assert.equal(badTime[0].time, '09:30', '分时的字符串时间保留')
   assert.equal(badTime[1].time, 42, '日K 的数字时间保留')
   assert.equal(badTime[1].at, '2026-11-07T01:30:00Z', 'ISO 时间戳保留')
+  // 零是合法时间戳, 不能被当成缺失
+  assert.equal(sanitizeCandles([{ time: 0, open: 1, high: 2, low: 1, close: 2 }]).length, 1, '零时间戳保留')
   // 没给成交量与行情自带时间戳时要能分辨出来: 前者靠 ?? 退回 0, 后者决定横轴用不用它
   const bare = sanitizeCandles([{ time: 10, at: '2026-11-07T01:30:00Z', open: 1, high: 2, low: 1, close: 2 }])
   assert.equal(bare[0].volume, undefined, '没给量就是 undefined, 不是 0')
