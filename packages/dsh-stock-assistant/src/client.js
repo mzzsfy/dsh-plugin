@@ -33,6 +33,12 @@ window.__ModuleLoader__.load({
       return (list || []).flatMap(candle => {
         const prices = { open: finiteOr(candle.open), high: finiteOr(candle.high), low: finiteOr(candle.low), close: finiteOr(candle.close) }
         if (!Object.values(prices).every(Number.isFinite)) return []
+        // 时间戳坏掉整根丢弃: 图表库遇到非法日期字符串会抛, 而异常发生在 effect 里,
+        // 会把整块图表连同面板一起卸掉, 代价远大于少一根蜡烛
+        const at = candle.at, time = candle.time
+        const parseable = value => Number.isFinite(Number(value)) || (typeof value === 'string' && !Number.isNaN(Date.parse(value)))
+        if (at != null && !parseable(at)) return []
+        if (time != null && typeof time !== 'string' && !Number.isFinite(Number(time))) return []
         const volume = finiteOr(candle.volume), avg = finiteOr(candle.avg)
         // 缺失一律给 undefined 而不是 NaN, 让下游的 ?? / 默认值能正常接住
         return [{ ...candle, ...prices, volume: Number.isFinite(volume) ? volume : undefined, avg: Number.isFinite(avg) ? avg : undefined }]

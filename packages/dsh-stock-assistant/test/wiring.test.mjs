@@ -105,8 +105,11 @@ test('hook 的解构参数与调用处传的键必须一致', () => {
   const [definition, invocation] = calls
   assert.deepEqual(keysOf(invocation), keysOf(definition), '传参键集必须与解构键集完全一致')
   // 参数表里出现的每个键都要在函数体里真的被用到, 反之函数体里读的键必须来自参数或本函数内声明
-  const body = client.slice(client.indexOf('function useFloatingPolling'), client.indexOf('function useFloatingDrag'))
-  assert.match(body, /fetched/, '收市判定用的自己的快照必须在参数表里')
+  const params = client.match(/function useFloatingPolling\(\{([^}]*)\}\)/)[1]
+  // 必须锚在参数表上: 函数体里本来就有 fetched 的引用, 拿整个函数体去匹配的话,
+  // 「参数表与调用处同时删掉 fetched」仍然会绿——那正是上次事故的形态
+  assert.match(params, /\bfetched\b/, '收市判定用的自己的快照必须在参数表里')
+  assert.match(params, /\bquotes\b/, '面板那份快照也要能用')
 })
 
 test('悬浮窗拖动只从标题条发起', () => {

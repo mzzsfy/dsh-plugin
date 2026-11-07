@@ -75,6 +75,17 @@ test('sanitizeCandles 保住额外字段并丢掉残根', async () => {
   // 停牌当根是真的一点成交都没有, 0 必须保留: 当成缺失会让图上那根柱子直接消失
   const flat = sanitizeCandles([{ time: 9, open: 5, high: 5, low: 5, close: 5, volume: 0 }])
   assert.equal(flat[0].volume, 0, '零成交量是真值, 不能清洗成 undefined')
+  // 时间戳坏掉要整根丢: 图表库遇到非法日期字符串会抛, 而那异常在 effect 里会把整块图表卸掉
+  const badTime = sanitizeCandles([
+    { time: '09:30', at: 100, open: 5, high: 6, low: 4, close: 5 },
+    { time: '09:31', at: 'abc', open: 5, high: 6, low: 4, close: 5 },
+    { time: 42, at: '2026-11-07T01:30:00Z', open: 5, high: 6, low: 4, close: 5 },
+    { time: {}, open: 5, high: 6, low: 4, close: 5 },
+  ])
+  assert.equal(badTime.length, 2, '解析不了的时间戳整根丢掉')
+  assert.equal(badTime[0].time, '09:30', '分时的字符串时间保留')
+  assert.equal(badTime[1].time, 42, '日K 的数字时间保留')
+  assert.equal(badTime[1].at, '2026-11-07T01:30:00Z', 'ISO 时间戳保留')
   // 没给成交量与行情自带时间戳时要能分辨出来: 前者靠 ?? 退回 0, 后者决定横轴用不用它
   const bare = sanitizeCandles([{ time: 10, at: '2026-11-07T01:30:00Z', open: 1, high: 2, low: 1, close: 2 }])
   assert.equal(bare[0].volume, undefined, '没给量就是 undefined, 不是 0')

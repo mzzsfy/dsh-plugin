@@ -8,8 +8,9 @@ const payloads = {
   restore: z.strictObject({ removeOperationId: z.uuid() }),
   alias: z.strictObject({ securityId, alias: z.string().refine(s => [...s].length <= 30) }),
   cost: z.strictObject({ securityId, cost: z.number().positive().nullable() }),
-  group: z.strictObject({ securityIds: z.array(securityId).min(1), group: z.string().refine(s => { const t = s.trim(); return [...t].length <= 12 }) }),
-  groupRename: z.strictObject({ from: z.string().min(1), to: z.string().refine(s => { const t = s.trim(); return t.length > 0 && [...t].length <= 12 }) }),
+  // 组名进来就是用户输入, 校验在入口做: 只靠 state 写入后的不变式兜底会把它报成 500 内部错误
+  group: z.strictObject({ securityIds: z.array(securityId).min(1), group: z.string().refine(s => { const t = s.trim(); return [...t].length <= 12 && !/[\u0000-\u001f]/.test(t) }, '分组名最长 12 字且不能含控制字符') }),
+  groupRename: z.strictObject({ from: z.string().min(1), to: z.string().refine(s => { const t = s.trim(); return t.length > 0 && [...t].length <= 12 && !/[\u0000-\u001f]/.test(t) }, '分组名最长 12 字且不能含控制字符') }),
   groupRemove: z.strictObject({ group: z.string().min(1) }),
   pin: z.strictObject({ securityId, pinned: z.boolean() }),
   move: z.strictObject({ securityId, beforeId: securityId.nullable() }),
