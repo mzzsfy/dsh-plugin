@@ -420,7 +420,8 @@ window.__ModuleLoader__.load({
               h('span', { className: 'ssb-cell-pl' }, '持仓盈亏'),
               h('span', { className: 'ssb-col-status' }, '')),
             h('div', { className: 'ssb-rows', role: 'list', 'aria-label': '自选列表' }, ...(() => {
-                // 分组分段: 仅手动序生效(全局排序即比较语义不分区); 置顶区不进组段; 组序=首现序; 折叠组隐藏成员
+                // 分组分段: 置顶/各组/未分组都常显段头(一只没归组时也要看得见分组这回事); 置顶区不进组段;
+                // 组序=首现序; 折叠组隐藏成员。分组与排序正交: 全局排序只改组内顺序, 不改分段
                 // 拖拽排序: 提交完整显示序, 折叠组隐藏项保持原槽位由 order 回填
                 const sequence = []
                 const laneOf = id => `${w.items[id].pinned ? 'p' : 'n'}|${w.items[id].group || ''}`
