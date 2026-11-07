@@ -984,7 +984,7 @@ window.__ModuleLoader__.load({
     }
     // ---- FloatingTicker: 悬浮盯盘, portal 到 body 常驻, 不随面板切换卸载 ----
     // 悬浮窗自己的数据流: 列表模式批量拉勾选标的的报价, 图形模式只拉当前这只的分时
-    function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, revision, setFetched, setTrend, setError }) {
+    function useFloatingPolling({ open, mode, securityId, picked, items, live, refreshSeconds, quotes, fetched, revision, setFetched, setTrend, setError }) {
       // quotes 的每条是 { quote, health }, 交易时段在 quote 里
       // 自己的快照优先: 面板不在前台时宿主会 cancelIdle, 面板那份 quotes 会停在最后一次活动时的时段上
       const stateOf = id => (fetched?.[id] || quotes?.[id])?.quote?.sessionState
@@ -1122,7 +1122,7 @@ window.__ModuleLoader__.load({
       const securityId = (floating.securityId && picked.includes(floating.securityId) ? floating.securityId : picked[0]) || null
       const update = next => setFloating(next)
       const drag = useFloatingDrag(update)
-      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, refreshSeconds: state.data?.control.preferences?.refreshSeconds, quotes: state.data?.quotes, revision: state.data?.control.revision, setFetched, setTrend, setError })
+      useFloatingPolling({ open, mode, securityId, picked, items, live: floating.live, refreshSeconds: state.data?.control.preferences?.refreshSeconds, quotes: state.data?.quotes, fetched, revision: state.data?.control.revision, setFetched, setTrend, setError })
       if (!open) return null
       const position = floating.x == null || floating.y == null ? {} : { left: floating.x, top: floating.y, right: 'auto', bottom: 'auto' }
       const step = delta => {
