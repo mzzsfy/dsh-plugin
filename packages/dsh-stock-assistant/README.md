@@ -69,7 +69,7 @@ Tushare 的 `rt_k`、`stock_basic`、`trade_cal` 权限分别由账号决定。�
 
 同额度组顺序执行，上游启动间隔至少1秒；最多两个额度组并发。总账号、能力子额度、每日额度和证券计费额度共同约束请求。网络错误指数退避；429遵守 Retry-After；AUTH/PERMISSION/BAD_PAYLOAD暂停该能力，检查或修改后恢复。已知休市/午休不持续采集，日历缺失按未知状态保守采集。
 
-HTTP 路径前缀 `/api/stock-sidebar`：`snapshot/search/watchlist/preferences/provider-check/configuration/catalog-sync/route-selection/refresh`。写接口均为POST，读接口GET。普通请求上限10秒、单次上游8秒；目录同步30秒，多能力检查最多60秒。刷新直接等待批次并回快照，同价也有获取时间回执。周期启动下界同时考虑用户周期与来源额度。
+HTTP 路径前缀 `/api/stock-assistant`：`snapshot/search/watchlist/preferences/provider-check/configuration/catalog-sync/route-selection/refresh`。写接口均为POST，读接口GET。普通请求上限10秒、单次上游8秒；目录同步30秒，多能力检查最多60秒。刷新直接等待批次并回快照，同价也有获取时间回执。周期启动下界同时考虑用户周期与来源额度。
 
 通知复用 `@mzzsfy/dsh-common-tools` 的页面共享 WS，不创建股票专用 socket。失效通知与快照拉取分别合并；快照单飞、至少1秒启动间隔，失败不自循环重试。页面需求通过同一总线续租，不以 HTTP 心跳维持。
 
