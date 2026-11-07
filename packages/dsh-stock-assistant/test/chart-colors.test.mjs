@@ -73,6 +73,15 @@ test('两套图表色都声明齐全, 且悬浮窗与面板共用同一组', asy
   assert.match(css, /\[data-ds-dark-theme\] \.ssb-root,\[data-ds-dark-theme\] \.ssb-float-root/)
 })
 
+test('两条轴边框也跟着主题走, 且 readChartTheme 引用的 token 都真的声明过', async () => {
+  const css = await read('src/client.js')
+  // 键名写错时变量查不到会静默回退成空串, 图上表现为"这条线不见了", 比报错更难发现
+  const referenced = [...css.matchAll(/--ssb-chart-[a-z-]+/g)].map(m => m[0])
+  const declared = new Set([...css.matchAll(/--ssb-chart-([a-z-]+):\s*hsl\(/g)].map(m => `--ssb-chart-${m[1]}`))
+  const missing = [...new Set(referenced)].filter(token => !declared.has(token))
+  assert.deepEqual(missing, [], `引用了未声明的图表色: ${missing.join(', ')}`)
+})
+
 test('每条线在自己主题的底色上都够清楚', async () => {
   const { light, dark } = await load()
   for (const [theme, palette] of Object.entries({ light, dark })) {

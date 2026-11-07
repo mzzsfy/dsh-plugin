@@ -15,7 +15,10 @@ test('装配守卫：生产client无打包依赖/React副本，公共依赖exter
   // 但只能经 readPref/writePref 这两个封装读写, 且 key 必须是 ssb- 前缀, 别把业务数据也塞进浏览器本地
   const prefKeys = [...client.matchAll(/const (FLOAT_KEY|GUIDE_KEY) = '([^']+)'/g)].map(m => m[2])
   assert.deepEqual(prefKeys.sort(), ['ssb-floating', 'ssb-guides'], '本地显示偏好的 key 集合固定')
-  assert.equal((client.match(/localStorage\.(get|set)Item\(/g) || []).length, 2, 'localStorage 只允许出现在 readPref/writePref 里')
+  // 连属性访问一起数: 只盯 get/setItem 的话, clear()/removeItem/key 属性/sessionStorage 都能绕过去
+  const storageHits = [...client.matchAll(/(?:local|session)Storage\b(\.[A-Za-z]+|\[[^\]]*\])?/g)].map(m => m[0])
+  assert.deepEqual(storageHits.sort(), ['localStorage.getItem', 'localStorage.setItem'], 'localStorage 只允许出现在 readPref/writePref 里')
+  assert.doesNotMatch(client, /sessionStorage|indexedDB/, '业务数据一律走宿主存储')
   assert.doesNotMatch(client, /sidebarRight|sessionId|new WebSocket/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:checked/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:focus-visible/)

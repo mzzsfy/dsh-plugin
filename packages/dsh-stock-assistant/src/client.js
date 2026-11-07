@@ -559,7 +559,9 @@ window.__ModuleLoader__.load({
       const m3 = seriesMA(candles, 3), m6 = seriesMA(candles, 6), m12 = seriesMA(candles, 12), m24 = seriesMA(candles, 24)
       return candles.map((_, i) => m3[i] == null || m6[i] == null || m12[i] == null || m24[i] == null ? null : (m3[i] + m6[i] + m12[i] + m24[i]) / 4)
     }
-    const toPoints = (candles, values) => values.map((value, i) => value == null ? null : ({ time: candles[i].time, value })).filter(Boolean)
+    // 指标与蜡烛必须同代: 建图补灌时 candles 来自挂起结果而 values 来自最近渲染,
+    // 中间若夹过一次更长的数据, 越界取 time 会直接抛 TypeError
+    const toPoints = (candles, values) => values.map((value, i) => value == null || !candles[i] ? null : ({ time: candles[i].time, value })).filter(Boolean)
     function KlineError({ message, onRetry, guide, busyOneClick }) {
       // guide 由调用方给出动作与文案: 缺路由是一键开启, 来源不支持则是去设置换源
       return h('div', { className: 'ssb-banner ssb-error', role: 'alert' }, message, guide ? h(Button, { onClick: guide.onClick, disabled: busyOneClick }, busyOneClick ? '处理中…' : guide.label) : null, onRetry ? h(Button, { onClick: onRetry }, '重试') : null)
