@@ -488,8 +488,11 @@ window.__ModuleLoader__.load({
                 // 置顶与未分组也各给一个组头, 否则一只都没归组时整页平铺, 分组功能等于不可发现
                 const slices = groupSlices(order, w.items)
                 const toggleGroup = (key, open) => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [key]: open } })
+                // 组名来自用户输入: 直接取 groupCollapsed[name] 会让 constructor/toString 这类名字读到原型链上的成员,
+                // 被误判成「已折叠」, 整组不渲染
+                const collapsedOf = key => Object.hasOwn(view.groupCollapsed || {}, key) && !!view.groupCollapsed[key]
                 const head = (key, label, ids, actions) => {
-                  const open = !view.groupCollapsed?.[key]
+                  const open = !collapsedOf(key)
                   const gs = ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
                   return h('div', { key: 'grp-' + key, className: 'ssb-group-head' },
                     h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${label} 分组折叠`, onClick: () => toggleGroup(key, open), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroup(key, open) } } }, open ? '▾' : '▸', ` ${label} · ${ids.length} 只 · ${gs.up} 涨 ${gs.down} 跌`),
@@ -497,7 +500,7 @@ window.__ModuleLoader__.load({
                 }
                 const section = (key, label, ids, actions) => {
                   const out = [head(key, label, ids, actions)]
-                  if (!view.groupCollapsed?.[key]) for (const id of ids) out.push(rowOf(id))
+                  if (!collapsedOf(key)) for (const id of ids) out.push(rowOf(id))
                   return out
                 }
                 const out = []

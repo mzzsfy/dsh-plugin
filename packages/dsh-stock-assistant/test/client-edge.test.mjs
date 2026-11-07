@@ -324,25 +324,50 @@ test('成本盈亏渲染', async () => {
   assert.match(html, /持仓盈亏/, '详情盈亏块')
   assert.match(html, /成本价/, '详情成本设置入口')
 })
-// 自选分组: 零侵入/组头统计/折叠/全局排序无组头
+// 自选分组: 置顶/各组/未分组都常显组头; 折叠; 全局排序保留分区但组内按该排序
 test('分组渲染与折叠', async () => {
   const { plugin } = await loadClientWithReact()
   const mk = (id, name, code, group) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost: null, group })
   const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', ''), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒')
-  const q = { quote: { last: '10', previousClose: '1', change: '0.5', changePct: '5', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
-  const mkState = (sort, collapsed) => ({ view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
-  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('manual', {}), subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
-  const gi = html.indexOf('白酒')
-  assert.ok(gi >= 0, '组名出现: ' + (gi < 0 ? html.slice(0, 0) : html.slice(gi - 60, gi + 120)))
-  assert.match(html, /aria-expanded="true"/, '组头可折叠语义')
-  const collapsed = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('manual', { 白酒: true }), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
-  const seg = collapsed.slice(collapsed.indexOf('白酒 ·'))
-  assert.ok(!seg.includes('甲股'), '折叠后组员隐藏')
+  const qOf = pct => ({ quote: { last: '10', previousClose: '1', change: '0.5', changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
+  // 每个状态各自克隆一份 items: 共用引用的话, 前一个用例改 group 会污染后面的断言
+  const mkState = (sort, collapsed, groups = { [a.id]: '白酒', [b.id]: '', [c.id]: '白酒' }) => ({
+    view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null,
+    data: {
+      control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: structuredClone({ [a.id]: { ...a, group: groups[a.id] }, [b.id]: { ...b, group: groups[b.id] }, [c.id]: { ...c, group: groups[c.id] } }) }, preferences: {} },
+      quotes: { [a.id]: qOf('1'), [b.id]: qOf('3'), [c.id]: qOf('9') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false,
+    },
+  })
+  const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+
+  const manual = render(mkState('manual', {}))
+  // 手动序: 置顶区没有成员就不出组头, 但「白酒」与「未分组」两段都在
+  assert.match(manual, /白酒 · 2 只/, '有成员的组要有组头')
+  assert.match(manual, /未分组 · 1 只/, '未分组也常显组头, 否则一只都没归组时整页平铺、功能不可发现')
+  assert.match(manual, /aria-expanded="true"/, '组头可折叠语义')
+  assert.ok(manual.indexOf('甲股') < manual.indexOf('丙股'), '手动序下组内按自选顺序')
+  assert.ok(manual.indexOf('白酒') < manual.indexOf('乙股'), '分组成员排在同段之后')
+
+  const collapsed = render(mkState('manual', { 白酒: true }))
   assert.match(collapsed, /aria-expanded="false"/, '折叠态 aria')
-  const plain = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => { const s = mkState('manual', {}); s.data.control.watchlist.items[a.id].group = ''; s.data.control.watchlist.items[c.id].group = ''; return s }, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
-  assert.ok(!plain.includes('· 0 只'), '零侵入: 无空组头')
-  const sorted = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('desc', {}), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
-  assert.ok(!sorted.includes('白酒 ·'), '全局排序无组头')
+  assert.ok(!collapsed.slice(collapsed.indexOf('白酒 ·')).includes('甲股'), '折叠后组员隐藏')
+  assert.match(collapsed, /乙股/, '折叠只影响本组')
+
+  // 全局排序: 分区保留, 组内按该排序走(而不是退回自选顺序)
+  const desc = render(mkState('desc', {}))
+  assert.match(desc, /白酒 · 2 只/, '全局排序也要保留分组')
+  assert.ok(desc.indexOf('丙股') < desc.indexOf('甲股'), '组内按涨幅降序')
+  assert.ok(desc.indexOf('未分组 · 1 只') < desc.indexOf('乙股'), '未分组段照常渲染')
+
+  // 一只都没归组: 只留未分组段, 不产生空组头
+  const none = render(mkState('manual', {}, { [a.id]: '', [b.id]: '', [c.id]: '' }))
+  assert.match(none, /未分组 · 3 只/, '全是未分组时仍要有段头')
+  assert.ok(!none.includes('· 0 只'), '不渲染空组头')
+
+  // 组名恰好是常见原型链键: 拿它当对象键会读到继承属性, 被误判成「已折叠」
+  const proto = render(mkState('manual', {}, { [a.id]: 'constructor', [b.id]: '', [c.id]: '' }))
+  assert.match(proto, /constructor · 1 只/, '原型链键当组名也要正常成组')
+  assert.match(proto, /甲股/, '原型链键组名不能被当成已折叠')
 })
 // 审查阻断修复锚: 分组入口/NaN防御/均值修正
 test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
