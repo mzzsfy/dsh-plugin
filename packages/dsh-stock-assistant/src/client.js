@@ -10,6 +10,20 @@ window.__ModuleLoader__.load({
       if (!hasData) return { fit: false, next: shippedKey }
       return { fit: shippedKey !== key, next: key }
     }
+    // 自选的分组切面: 置顶 → 各组(按首次出现顺序) → 未分组。列表与悬浮窗勾选共用这一份,
+    // 免得两处对"某只属于哪个组"给出不同答案
+    function groupSlices(order, items) {
+      // 只认确实存在的标的: 自选与明细表短暂不一致时, 不存在的 id 既不该进组也不该进未分组
+      const known = order.filter(id => items[id])
+      const pinned = known.filter(id => items[id].pinned)
+      const rest = known.filter(id => !items[id].pinned)
+      const names = [...new Set(rest.map(id => items[id]?.group).filter(Boolean))]
+      return {
+        pinned,
+        groups: names.map(name => ({ name, ids: rest.filter(id => items[id]?.group === name) })),
+        ungrouped: rest.filter(id => !items[id]?.group),
+      }
+    }
     // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
     const finiteOr = value => value == null || value === '' ? NaN : Number(value)
     // 成交额按万/亿缩写避免长列; zeroIsMissing 关掉时 0 按真值显示(成交量用)
@@ -453,18 +467,15 @@ window.__ModuleLoader__.load({
                 }
                 // 手动序: 未分组置顶区行 + 组段(组头行含统计/重命名/解散+折叠); 全局排序: 平铺不分区
                 if (view.sort !== 'manual') return order.map(rowOf)
-                const grouped = order.filter(id => !w.items[id].pinned && w.items[id].group)
-                const ungrouped = order.filter(id => !w.items[id].pinned && !w.items[id].group)
-                const groups = [...new Set(grouped.map(id => w.items[id].group))]
-                const out = order.filter(id => w.items[id].pinned).map(rowOf)
-                for (const name of groups) {
-                  const members = grouped.filter(id => w.items[id].group === name)
+                const slices = groupSlices(order, w.items)
+                const out = slices.pinned.map(rowOf)
+                for (const { name, ids: members } of slices.groups) {
                   const gs = members.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
                   const open = !view.groupCollapsed?.[name]
                   out.push(h('div', { key: 'grp-' + name, className: 'ssb-group-head' }, h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${name} 分组折叠`, onClick: () => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: open } }) } } }, open ? '▾' : '▸', ` ${name} · ${members.length} 只 · ${gs.up} 涨 ${gs.down} 跌`), h('span', { className: 'ssb-toolbar' }, h(Button, { onClick: () => { const to = prompt('重命名分组', name); if (to?.trim()) { quiet(() => runtime.mutate('groupRename', { from: name, to: to.trim() }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to.trim()]: view.groupCollapsed?.[name], [name]: undefined } }) } } }, '重命名'), h(Button, { disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'))))
                   if (open) for (const id of members) out.push(rowOf(id))
                 }
-                for (const id of ungrouped) out.push(rowOf(id))
+                for (const id of slices.ungrouped) out.push(rowOf(id))
                 return out
               })())))
     }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
@@ -1044,6 +1055,27 @@ window.__ModuleLoader__.load({
           h('span', { className: `ssb-float-row-pct ssb-number${toneOf(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
       }
       const greenUp = state.data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''
+      // 勾选写入一律按自选顺序重排, 否则反复勾选会把 ids 变成点击次序, 列表顺序会跳
+      const setPicked = ids => { const set = new Set(ids); update({ ids: order.filter(id => set.has(id)) }) }
+      const pickerBlocks = () => {
+        const slices = groupSlices(order, items)
+        const toggleMany = (ids, on) => { const set = new Set(picked); ids.forEach(id => on ? set.add(id) : set.delete(id)); setPicked([...set]) }
+        const block = (key, label, ids) => {
+          if (!ids.length) return null
+          const allOn = ids.every(id => picked.includes(id))
+          return h('div', { key, className: 'ssb-picker-group' },
+            h('div', { className: 'ssb-picker-head' },
+              h('span', null, label ? `${label} · ${ids.length}` : `未分组 · ${ids.length}`),
+              h('button', { type: 'button', className: 'ssb-picker-all', onClick: () => toggleMany(ids, !allOn) }, allOn ? '全不选' : '全选')),
+            ...ids.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => toggleMany([id], !picked.includes(id)) })))
+        }
+        const hasSections = slices.pinned.length || slices.groups.length
+        return [
+          block('pinned', '置顶', slices.pinned),
+          ...slices.groups.map(group => block(`grp-${group.name}`, group.name, group.ids)),
+          block('ungrouped', hasSections ? '未分组' : '', slices.ungrouped),
+        ]
+      }
       return h('div', { className: `ssb-float${greenUp}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown: drag.onPointerDown, onPointerMove: drag.onPointerMove, onPointerUp: drag.onPointerUp, onPointerCancel: drag.onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-float-head' },
@@ -1056,7 +1088,8 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': picker ? '完成选择' : '选择观测目标', 'aria-expanded': picker, onClick: () => setPicker(!picker) }, picker ? '✓' : '☰'),
           h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => update({ open: false }) }, '✕')),
         picker
-          ? h('div', { className: 'ssb-float-picker' }, ...(order.length ? order.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => { const next = picked.includes(id) ? picked.filter(x => x !== id) : [...picked, id]; update({ ids: next }) } })) : [h('p', { className: 'ssb-muted' }, '自选为空')]))
+          // 勾选目标按分组切面排列, 组头可以整组勾上或清掉: 盯盘通常就是"盯某个板块"
+          ? h('div', { className: 'ssb-float-picker' }, ...(order.length ? pickerBlocks() : [h('p', { className: 'ssb-muted' }, '自选为空')]))
           : mode === 'list'
             ? h('div', { className: 'ssb-float-list' }, ...(picked.length ? picked.map(rowOf) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
             : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(React.Fragment, null,
@@ -1361,7 +1394,13 @@ window.__ModuleLoader__.load({
 .ssb-float-live-error { color:var(--ssb-warn) !important; border-color:color-mix(in srgb,var(--ssb-warn) 40%,transparent) !important; background:color-mix(in srgb,var(--ssb-warn) 10%,transparent) !important; }
 .ssb-float-live:hover { border-color:var(--ssb-accent); }
 /* 列表模式: 每行一只标的, 点击切到该只的图形 */
-.ssb-float-list, .ssb-float-picker { flex:0 1 auto; min-height:0; display:flex; flex-direction:column; gap:2px; max-height:min(300px, 45vh); overflow:auto; }
+.ssb-float-list,.ssb-float-picker { flex:0 1 auto; min-height:0; display:flex; flex-direction:column; gap:2px; max-height:min(300px, 45vh); overflow:auto; }
+.ssb-picker-group { display:flex; flex-direction:column; gap:2px; }
+.ssb-picker-head { display:flex; align-items:center; gap:6px; padding:4px 2px 2px; font-size:11px; color:var(--ssb-text-dim); border-top:1px solid var(--ssb-border); }
+.ssb-picker-group:first-child .ssb-picker-head { border-top:none; }
+.ssb-picker-head > span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ssb-picker-all { flex:0 0 auto; padding:1px 6px; font:inherit; font-size:11px; color:var(--ssb-accent); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
+.ssb-picker-all:hover { border-color:var(--ssb-accent); }
 .ssb-float-row { display:flex; align-items:baseline; gap:8px; padding:4px 6px; font:inherit; text-align:left; color:inherit; background:transparent; border:0; border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-row:hover { background:var(--dsw-alias-interactive-bg-hover); }
 .ssb-float-row-on { background:var(--ssb-accent-wash); }
@@ -1476,7 +1515,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices },
     }
   },
 })
