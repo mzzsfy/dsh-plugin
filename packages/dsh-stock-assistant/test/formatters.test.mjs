@@ -72,4 +72,7 @@ test('sanitizeCandles 保住额外字段并丢掉残根', async () => {
   assert.equal(out[1].volume, 300)
   assert.equal(out[1].avg, undefined)
   assert.equal(sanitizeCandles(null).length, 0)
+  // 停牌当根是真的一点成交都没有, 0 必须保留: 当成缺失会让图上那根柱子直接消失
+  const flat = sanitizeCandles([{ time: 9, open: 5, high: 5, low: 5, close: 5, volume: 0 }])
+  assert.equal(flat[0].volume, 0, '零成交量是真值, 不能清洗成 undefined')
 })
