@@ -776,10 +776,10 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!mainRef.current) return
         const palette = themeOf()
-        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1 } : null)
+        drawLine(costLineRef, guides.cost && item.cost ? { price: item.cost, color: palette.cost, lineStyle: 3, lineWidth: 1, title: '成本' } : null)
         const candles = kline?.candles || []
         const highs = candles.map(c => finiteOr(c.high)).filter(Number.isFinite), lows = candles.map(c => finiteOr(c.low)).filter(Number.isFinite)
-        drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1 } : null)
+        drawLine(preCloseLineRef, guides.preClose && kline?.preClose != null ? { price: kline.preClose, color: palette.crosshair, lineStyle: 2, lineWidth: 1, title: '昨收' } : null)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
         // 开关变化不触发数据重灌, 指标线要自己补画
