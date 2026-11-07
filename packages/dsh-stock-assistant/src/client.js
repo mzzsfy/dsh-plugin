@@ -499,7 +499,7 @@ window.__ModuleLoader__.load({
                 const head = (key, label, ids, actions) => {
                   const open = !collapsedOf(key)
                   const gs = ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
-                  return h('div', { key: 'grp-' + key, className: 'ssb-group-head' },
+                  return h('div', { key: 'grp-' + key, className: 'ssb-group-head', role: 'presentation' },
                     h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${label} 分组折叠`, onClick: () => toggleGroup(key, open), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroup(key, open) } } }, open ? '▾' : '▸', ` ${label} · ${ids.length} 只 · ${gs.up} 涨 ${gs.down} 跌`),
                     h('span', { className: 'ssb-toolbar' }, actions))
                 }
@@ -1004,13 +1004,15 @@ window.__ModuleLoader__.load({
         setError('')
         // 间隔跟随设置页的刷新间隔; 全部收市后降到一分钟一拍
         // 间隔由 floatPollDelay 统一算, 这里只判断要不要降频
-        const allClosed = picked.every(id => stateOf(id) === 'closed')
+        // 午休与休市都不产生新数据, 一并归入安静档: 只认 closed 的话, 午休那一个半小时
+        // 图形模式还在按交易频率打分时
+        const quiet = picked.every(id => QUIET_STATES.has(stateOf(id)))
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         let tick = 0
         const pull = () => {
           if (document.visibilityState !== 'visible') return
           tick += 1
-          const plan = pollPlan({ mode, allClosed, tick })
+          const plan = pollPlan({ mode, quiet, tick })
           if (plan === 'skip') return
           const refresh = () => fetch(`${BASE}/refresh`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1035,7 +1037,7 @@ window.__ModuleLoader__.load({
         }
         pull()
         // 休市时不设交易节奏的定时器, 但仍留一拍低频检查, 复盘后自动恢复
-        const timer = setInterval(pull, floatPollDelay(refreshSeconds, allClosed))
+        const timer = setInterval(pull, floatPollDelay(refreshSeconds, quiet))
         return () => { dead = true; clearInterval(timer) }
       }, [open, mode, securityId, pickedKey, live, refreshSeconds, stateKey])
     }
@@ -1072,9 +1074,9 @@ window.__ModuleLoader__.load({
       }
     }
     // 轮询节奏: 跟随设置页的刷新间隔, 全部收市后压到一分钟一拍
-    const floatPollDelay = (refreshSeconds, allClosed) => {
+    const floatPollDelay = (refreshSeconds, quiet) => {
       const base = Math.max(15, Number(refreshSeconds) || 15) * 1000
-      return allClosed ? Math.max(base, 60 * 1000) : base
+      return quiet ? Math.max(base, 60 * 1000) : base
     }
     // 主序列是蜡烛还是面积, 决定重涂时该下发哪一组键名: 两组键名互不相通, 用错等于没涂
     function seriesPaintPlan(theme, isArea) {
@@ -1090,10 +1092,12 @@ window.__ModuleLoader__.load({
     // trend 端点不进缓存, 收市后必须彻底停掉; 而 /snapshot 只读缓存不重算交易时段,
     // 单靠它永远发现不了开市, 所以每隔几拍要用真刷新把状态翻回来
     const POLL_EVERY = 10
-    const pollPlan = ({ mode, allClosed, tick }) => {
+    // 午休与收盘都不产生新数据, 归同一个安静档
+    const QUIET_STATES = new Set(['closed', 'break'])
+    const pollPlan = ({ mode, quiet, tick }) => {
       const beat = tick % POLL_EVERY === 0
-      if (mode === 'list') return allClosed && !beat ? 'snapshot' : 'refresh'
-      if (!allClosed) return 'trend'
+      if (mode === 'list') return quiet && !beat ? 'snapshot' : 'refresh'
+      if (!quiet) return 'trend'
       return beat ? 'refresh' : 'skip'
     }
     // 全部收市后只读快照: 只为发现迟到的复盘, 不必每分钟真打一次上游

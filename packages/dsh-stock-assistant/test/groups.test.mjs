@@ -72,16 +72,23 @@ test('自选里查不到的 id 不会凭空造组', async () => {
 test('轮询决策: 收市不打 trend, 但自己醒得过来', async () => {
   const { pollPlan } = await load()
   // 开市: 列表刷卡, 图形打分时
-  assert.equal(pollPlan({ mode: 'list', allClosed: false, tick: 1 }), 'refresh')
-  assert.equal(pollPlan({ mode: 'graph', allClosed: false, tick: 1 }), 'trend')
-  // 收市: 列表走只读快照省额度; 图形彻底停掉——trend 端点不进缓存, 每拍都是真上游
-  assert.equal(pollPlan({ mode: 'list', allClosed: true, tick: 1 }), 'snapshot')
-  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 1 }), 'skip')
-  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 9 }), 'skip')
+  assert.equal(pollPlan({ mode: 'list', quiet: false, tick: 1 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'graph', quiet: false, tick: 1 }), 'trend')
+  // 安静档: 列表走只读快照省额度; 图形彻底停掉——trend 端点不进缓存, 每拍都是真上游
+  assert.equal(pollPlan({ mode: 'list', quiet: true, tick: 1 }), 'snapshot')
+  assert.equal(pollPlan({ mode: 'graph', quiet: true, tick: 1 }), 'skip')
+  assert.equal(pollPlan({ mode: 'graph', quiet: true, tick: 9 }), 'skip')
   // 但每十拍必须真刷新一次: 只读快照不重算交易时段, 单靠它永远发现不了开市
-  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 10 }), 'refresh')
-  assert.equal(pollPlan({ mode: 'list', allClosed: true, tick: 10 }), 'refresh')
-  assert.equal(pollPlan({ mode: 'graph', allClosed: true, tick: 20 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'graph', quiet: true, tick: 10 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'list', quiet: true, tick: 10 }), 'refresh')
+  assert.equal(pollPlan({ mode: 'graph', quiet: true, tick: 20 }), 'refresh')
+})
+
+// 午休不产生新数据, 与收盘同档; 只认 closed 的话午休一个半小时还在按交易频率打
+test('午休与收盘同属安静档', async () => {
+  const { pollPlan } = await load()
+  assert.equal(pollPlan({ mode: 'graph', quiet: true, tick: 3 }), 'skip')
+  assert.notEqual(pollPlan({ mode: 'graph', quiet: false, tick: 3 }), 'skip')
 })
 
 test('休市把轮询压到一分钟一拍, 开市跟随设置', async () => {
