@@ -653,6 +653,9 @@ window.__ModuleLoader__.load({
       function fillTrendData(result) {
         // 横轴优先用来源时刻(at):按索引自造会让时间轴整体平移;缺 at 时退回当天 UTC 零点起算
         const base = Math.floor(new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`).getTime() / 1000)
+        // 行情自带时间戳优先: 没有它才按「区间起点 + 分钟偏移」推。
+        // 注意 base 是当天 UTC 零点, 推到非 UTC 市场会整体偏时区(美股约 11 小时),
+        // 所以这只是最后一道兜底——东财分时恒给 at, 该路径当前不可达
         const axisTime = (c, i) => c.at ?? base + i * 60
         const points = result.candles.map((c, i) => ({ time: axisTime(c, i), value: c.close }))
         mainRef.current.setData(points)
