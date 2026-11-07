@@ -195,3 +195,28 @@ test('同 key 并发只让最后一次请求的结果落地', async () => {
   assert.equal(after.kline?.candles?.[0]?.close, 2, '应是后发请求的数据')
   runtime.dispose()
 })
+
+// 反向顺序: 被代际淘汰的旧请求失败时不能把新请求已经落地的数据清掉
+test('同 key 并发: 先发的请求失败时不覆盖后发的成功结果', async () => {
+  const { createPageRuntime } = await load()
+  const releases = []
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: () => new Promise((resolve, reject) => releases.push({ resolve, reject })),
+  })
+  const first = runtime.loadKline('A', '1d').catch(() => {})
+  const second = runtime.loadKline('A', '1d').catch(() => {})
+  await new Promise(resolve => setTimeout(resolve, 20))
+  releases[1].resolve({ ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-11-06', open: 2, high: 2, low: 2, close: 2 }] } }) })
+  await second
+  // 先发的那个随后失败, 此时它已被淘汰。用不可重试的错误码, 否则破坏代际后会走 4s 退避把测试挂住
+  releases[0].reject(Object.assign(new Error('无可用数据源'), { code: 'NO_ROUTE' }))
+  await first
+  const after = runtime.getSnapshot()
+  assert.equal(after.kline?.candles?.[0]?.close, 2, '成功结果应保留')
+  assert.equal(after.kline?.error || '', '', '淘汰的失败不该写错误')
+  runtime.dispose()
+})
