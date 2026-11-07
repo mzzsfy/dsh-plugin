@@ -19,6 +19,9 @@ test('装配守卫：生产client无打包依赖/React副本，公共依赖exter
   const storageHits = [...client.matchAll(/(?:local|session)Storage\b(\.[A-Za-z]+|\[[^\]]*\])?/g)].map(m => m[0])
   assert.deepEqual(storageHits.sort(), ['localStorage.getItem', 'localStorage.setItem'], 'localStorage 只允许出现在 readPref/writePref 里')
   assert.doesNotMatch(client, /sessionStorage|indexedDB/, '业务数据一律走宿主存储')
+  // 光固定两个常量的值不够: 再来一个 key 只要复用 readPref 就能绕过 key 集合的约束
+  const literalCalls = [...client.matchAll(/(?:readPref|writePref)\(\s*['"]/g)]
+  assert.deepEqual(literalCalls, [], 'readPref/writePref 只接受常量 key, 不接受就地写的字面量')
   assert.doesNotMatch(client, /sidebarRight|sessionId|new WebSocket/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:checked/)
   assert.match(client, /\.ssb-switch input\[type="checkbox"\]:focus-visible/)
