@@ -93,6 +93,10 @@ window.__ModuleLoader__.load({
       '.stv-ioDivider{background:var(--dsw-alias-border-l2);flex:none;height:.5px}',
       '.stv-termRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.stv-termTitle{font-weight:500}',
+      // 只读/退出提示浮在终端上:它若占布局高度,只读态会把终端压矮一行,底部随之外裁。
+      // 只在终端已渲染时浮起,空态(新建终端/不存在)没有 .xterm 撑高,绝对定位会让容器塌陷
+      '[data-sidebar-terminal]{position:relative}',
+      '[data-sidebar-terminal]:has(.xterm) > [role="status"]{position:absolute;top:6px;right:8px;z-index:5;width:auto;max-width:calc(100% - 16px);max-height:50%;margin:0;padding:2px 8px;border-radius:999px;display:flex;align-items:center;gap:6px;overflow:auto;background:color-mix(in srgb,var(--dsw-alias-bg-1,#fff) 92%,transparent);box-shadow:0 1px 6px rgb(0 0 0 / 12%);font-size:12px;line-height:18px}',
     ].join('\n')
 
     // ── 模型派生:argsRaw + content JSON → 行模型 ────────────────────────
