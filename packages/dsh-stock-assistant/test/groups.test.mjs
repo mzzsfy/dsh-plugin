@@ -35,6 +35,15 @@ test('按置顶 / 各组 / 未分组切分, 组序取首次出现顺序', async 
   assert.deepEqual(slices.ungrouped, ['e'])
 })
 
+// 组序是"首次出现"而不是字母序: 用例特意让两者相反, 否则排序实现改坏了也测不出来
+test('组序取首次出现, 不是字典序', async () => {
+  const { groupSlices } = await load()
+  const items = { a: item('能源'), b: item('科技') }
+  const slices = plain(groupSlices(['a', 'b'], items))
+  // 「科技」的码位小于「能源」, 按字典序会排到前面
+  assert.deepEqual(slices.groups.map(g => g.name), ['能源', '科技'])
+})
+
 test('置顶优先, 即使它在自选里排后面', async () => {
   const { groupSlices } = await load()
   const items = { a: item('科技'), b: { group: '', pinned: true } }
