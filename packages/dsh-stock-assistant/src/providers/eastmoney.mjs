@@ -190,7 +190,8 @@ export const eastmoney = {
       const [, time] = cols[0].split(' ')
       const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null }
       // at 是来源时刻的 Unix 秒:只留 HH:MM 会让客户端按索引自造时间轴,横轴整体平移
-      return { time, at: zonedUnixSeconds(cols[0], SOURCE_ZONE), open: num(cols[1]), close: num(cols[2]), high: num(cols[3]), low: num(cols[4]), volume: num(cols[5]), amount: num(cols[6]), avg: num(cols[7]) }
+      // f56 与日K 同为手: 沪深要按 100 股换算, 否则分时图例的量和日K/详情差两个数量级
+      return { time, at: zonedUnixSeconds(cols[0], SOURCE_ZONE), open: num(cols[1]), close: num(cols[2]), high: num(cols[3]), low: num(cols[4]), volume: sharesFromLots(num(cols[5]), request.market), amount: num(cols[6]), avg: num(cols[7]) }
     })
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), complete: true, preClose: num_or_null(body.data.preClose), candles }
   },

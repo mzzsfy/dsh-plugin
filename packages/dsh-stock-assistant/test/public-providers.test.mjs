@@ -59,6 +59,9 @@ test('东财 trend trends2 8列含avg与preClose', async () => {
   // 横轴时刻按市场时区(沪深/Asia/Shanghai)换算成 Unix 秒:09:30 → 01:30Z;缺 at 时客户端才有自造轴的回退
   assert.equal(result.candles[0].at, Date.UTC(2026, 9, 30, 1, 30) / 1000)
   assert.equal(result.candles[1].at, Date.UTC(2026, 9, 30, 1, 31) / 1000)
+  // f56 是手: 沪深须按 100 股换算, 否则分时成交量比日K/详情小两个数量级
+  assert.equal(result.candles[0].volume, 1152300)
+  assert.equal(result.candles[1].volume, 800000)
   assert.equal(result.preClose, 11.54)
 })
 

@@ -113,6 +113,16 @@ window.__ModuleLoader__.load({
         getSnapshot: () => state,
         subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
         updateView, api, action, applySnapshot,
+        // 详情只有一个入口: 面板/邻移/悬浮窗都走这里, 否则新开路径会漏清成本草稿(串写到别的标的)
+        // 并漏掉 selectPanel(面板不在前台时"打开详情"点了没反应)
+        openDetail(securityId) {
+          const config = state.data?.control, item = config?.watchlist.items[securityId] || state.view.browsePeek?.[securityId]
+          if (!item) return
+          layout.selectPanel?.(PANEL_ID)
+          updateView({ view: 'list', detailId: securityId, selectedId: securityId, overlay: 'detail', alias: item.alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null })
+          this.loadKline(item.id, state.klinePeriod || '1d').catch(() => {})
+          this.refresh([{ id: item.id, exchange: item.exchange, code: item.code, officialName: item.officialName }]).catch(() => {})
+        },
         setPaused(value) { patch({ paused: value }); sendDemand(); if (!value) refresher.refresh() },
         search: scheduleSearch,
         composition(value) { composing = value; patch({ composing: value }); if (!value) scheduleSearch(state.view.query) },
@@ -197,6 +207,8 @@ window.__ModuleLoader__.load({
           if (fresh && !force) return Promise.resolve(held)
           patch({ klineKey: key, kline: { loading: !held?.candles, error: '', candles: held?.candles ?? null, loadedAt: held?.loadedAt } })
           const attempt = (delayMs = 0, retried = false) => new Promise(resolve => setTimeout(resolve, delayMs)).then(() => api(`/kline?${new URLSearchParams({ securityId, period, limit: String(250), ...(force ? { force: '1' } : {}) })}`, 'GET')).then(result => {
+            // 等待期间换了标的/周期: 丢弃这轮结果, 否则旧数据会盖掉新数据
+            if (state.klineKey !== key) return result
             patch({ kline: { loading: false, error: '', loadedAt: Date.now(), ...result } })
             return result
           }).catch(e => {
@@ -207,7 +219,8 @@ window.__ModuleLoader__.load({
           })
           return attempt()
         },
-        getKlineResult() { return state.kline?.candles ? state.kline : null },
+        // key 不匹配说明是上标的一轮结果, 交给当前轮的 effect 灌
+        getKlineResult(securityId, period) { return state.klineKey === `${securityId}|${period}` && state.kline?.candles ? state.kline : null },
         dispose() {
           if (disposed) return
           try { bus.publish({ type: 'watch-demand', pageId, generation: ++demandGeneration, active: false }) } catch {}
@@ -503,7 +516,7 @@ window.__ModuleLoader__.load({
     function KlineView({ runtime, state, item }) {
       const period = state.klinePeriod || '1d'
       const kline = state.kline || {}
-      const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), indicatorRef = React.useRef({}), volRef = React.useRef(null), avgRef = React.useRef(null)
+      const holder = React.useRef(null), chartRef = React.useRef(null), mainRef = React.useRef(null), indicatorRef = React.useRef({}), volRef = React.useRef(null), avgRef = React.useRef(null), shippedKeyRef = React.useRef(null)
       // 数据链与建图链谁先到不确定: 图还没建好时先把结果存下来, 建完再补灌, 否则先到的数据会被丢掉
       const pendingRef = React.useRef(null)
       // 参考线随每次灌数据重画, 不先移除会在同一 series 上越叠越多
@@ -604,7 +617,7 @@ window.__ModuleLoader__.load({
         }
       }
       // 数据就绪后灌入; 图表实例由 effect A 创建, series 按形态在此处切换
-      function maybeFill(result) {
+      function maybeFill(result, fit = true) {
         if (!result) return
         if (!chartRef.current) { pendingRef.current = result; return }
         ensureSeries(window.LightweightCharts)
@@ -643,8 +656,8 @@ window.__ModuleLoader__.load({
         const highs = result.candles.map(c => Number(c.high)).filter(Number.isFinite), lows = result.candles.map(c => Number(c.low)).filter(Number.isFinite)
         drawLine(highLineRef, guides.highLow && highs.length ? { price: Math.max(...highs), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间高' } : null)
         drawLine(lowLineRef, guides.highLow && lows.length ? { price: Math.min(...lows), color: palette.textColor, lineStyle: 1, lineWidth: 1, title: '区间低' } : null)
-        // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上
-        chartRef.current.timeScale().fitContent()
+        // 换周期后时间范围完全不同, 不重置视口会停在上一周期的区间上; 手动刷新保留缩放
+        if (fit) chartRef.current.timeScale().fitContent()
       }
       // effect A: 图表创建一次; 主题变更(MutationObserver)重涂; 卸载销毁。
       React.useEffect(() => {
@@ -678,12 +691,21 @@ window.__ModuleLoader__.load({
         const todayMark = last === today ? '今日有交易' : `今日无交易（最近 ${last.slice(5)}）`
         return `${span} · ${todayMark}`
       }
-      // effect B: 证券/周期变化→拉数据→图表在则灌
+      // effect B: 只在标的/周期变化时发起加载; 灌图由下面的数据 effect 统一负责,
+      // 否则手动刷新(↻)只改 state 不进图表, 出现图例已更新而蜡烛还是旧的
       React.useEffect(() => {
         let dead = false
-        runtime.loadKline(item.id, period).then(result => { if (!dead) maybeFill(result) }).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
+        runtime.loadKline(item.id, period).catch(e => { if (!dead) runtime.setKlineError(item.id, e.message, e.code) })
         return () => { dead = true }
       }, [item.id, period])
+      // 数据唯一入口: state.kline 变就重灌, 换 key 才重置视口
+      React.useEffect(() => {
+        if (!kline?.candles?.length) return
+        const key = `${item.id}|${period}`
+        const fit = shippedKeyRef.current !== key
+        shippedKeyRef.current = key
+        maybeFill({ candles: kline.candles, preClose: kline.preClose }, fit)
+      }, [kline.candles, kline.preClose, item.id, period])
       // 成本/辅助线变化(设/改/清)不会触发数据重灌, 得自己把参考线更新掉
       React.useEffect(() => {
         if (!mainRef.current) return
@@ -765,7 +787,7 @@ window.__ModuleLoader__.load({
       const order = data.control.watchlist.order
       const at = order.indexOf(item.id)
       const neighbor = dir => order[(at + dir + order.length) % order.length]
-      const openNeighbor = id => { runtime.updateView({ detailId: id, selectedId: id, overlay: 'detail', alias: data.control.watchlist.items[id]?.alias || '', costDraft: null, groupDraft: null, costError: null, groupError: null }); runtime.loadKline(id, state.klinePeriod || '1d', true).catch(() => {}); runtime.refresh([{ id, exchange: data.control.watchlist.items[id].exchange, code: data.control.watchlist.items[id].code, officialName: data.control.watchlist.items[id].officialName }]).catch(() => {}) }
+      const openNeighbor = id => runtime.openDetail(id)
       const inWatchlist = !!data.control.watchlist.items[view.detailId]
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
@@ -858,6 +880,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!open || !picked.length || floating.live === false) return
         let dead = false
+        setError('')
         // 页面不可见时不拉: 后台标签页继续轮询只会白耗来源额度
         const pull = () => {
           if (document.visibilityState !== 'visible') return
@@ -870,7 +893,7 @@ window.__ModuleLoader__.load({
           } else if (securityId) {
             fetch(`${BASE}/kline?${new URLSearchParams({ securityId, period: 'trend', limit: '250' })}`)
               .then(response => response.json())
-              .then(payload => { if (dead) return; if (payload.ok) { setTrend(payload.data); setError('') } else setError(payload.error?.message || '行情不可用') })
+              .then(payload => { if (dead) return; if (payload.ok) { setTrend({ securityId, data: payload.data }); setError('') } else setError(payload.error?.message || '行情不可用') })
               .catch(() => { if (!dead) setError('行情不可用') })
           }
         }
@@ -921,9 +944,11 @@ window.__ModuleLoader__.load({
         return (Number(own.quote?.receivedAt) || 0) > (Number(panel.quote?.receivedAt) || 0) ? own : panel
       }
       const current = items[securityId]
-      const candles = trend?.candles
+      // 分时数据必须和标的绑在一起: 切标的时新请求还没回来, 直接用旧数据会把上一只的价格当成这一只
+      const trendData = trend?.securityId === securityId ? trend.data : null
+      const candles = trendData?.candles
       const last = candles?.length ? Number(candles[candles.length - 1].close) : null
-      const base = Number(trend?.preClose)
+      const base = Number(trendData?.preClose)
       const pct = last != null && Number.isFinite(base) && base ? (last - base) / base * 100 : null
       const tone = toneOf(pct)
       const rowOf = id => {
@@ -933,7 +958,8 @@ window.__ModuleLoader__.load({
           h('span', { className: `ssb-float-row-price ssb-number${toneOf(change)}` }, quote?.last == null ? '—' : formatPrice(quote.last)),
           h('span', { className: `ssb-float-row-pct ssb-number${toneOf(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
       }
-      return h('div', { className: `ssb-float${dragRef.current ? ' ssb-float-dragging' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp },
+      const greenUp = state.data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''
+      return h('div', { className: `ssb-float${greenUp}${dragRef.current ? ' ssb-float-dragging' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown, onPointerMove, onPointerUp, onPointerCancel: onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
         h('div', { className: 'ssb-float-head' },
           mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹') : null,
@@ -956,7 +982,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ssb-float-foot' },
           h('span', { className: 'ssb-muted' }, mode === 'kline' && securityId ? `${picked.indexOf(securityId) + 1}/${picked.length}` : `${picked.length} 只`),
           h('button', { type: 'button', className: 'ssb-float-live', 'aria-pressed': floating.live !== false, onClick: () => update({ live: floating.live === false }) }, floating.live === false ? '开始监听' : '监听中'),
-          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', disabled: !securityId, onClick: () => { if (!securityId) return; runtime.updateView({ view: 'list', overlay: 'detail', detailId: securityId, selectedId: securityId, alias: items[securityId]?.alias || '' }); runtime.loadKline(securityId, 'trend').catch(() => {}) } }, '⤢')))
+          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', disabled: !securityId, onClick: () => { if (securityId) runtime.openDetail(securityId) } }, '⤢')))
     }
     function BrowseView({ runtime, state }) {
       const { view, busy, data } = state
@@ -1356,7 +1382,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, dragOrder },
+      __testing: { createPageRuntime, StockPage, dragOrder, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref },
     }
   },
 })
