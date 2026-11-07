@@ -34,7 +34,8 @@ test('重涂按主序列形态选键名, 成交量按当前蜡烛重灌', () => 
 
 test('收市档既省额度又能自愈', () => {
   // 面板不在前台时宿主会 cancelIdle, 只读快照会一直停在旧数据上
-  must(/const readOnly = allClosed && tick % \d+ !== 0/, '收市档必须隔若干拍插真刷新')
+  // 收尾锚定到行末: 只匹配前缀的话, 往后加个 && false 把兜底变成死代码也能过
+  must(/const readOnly = allClosed && tick % \d+ !== 0\n/, '收市档必须隔若干拍插真刷新')
   must(/floatPollUrl\(readOnly\)/, 'URL 必须由 floatPollUrl 决定')
   // 收市判断要优先用自己拉的快照: 面板那份 quotes 在面板不在前台时会一直停在 trading
   must(/const stateOf = id => \(fetched\?\.\[id\] \|\| quotes\?\.\[id\]\)\?\.quote\?\.sessionState/, '时段判断要优先用自己的快照')
@@ -63,6 +64,19 @@ test('K 线数据落 state 前必须清洗', () => {
   must(/finiteOr\(kline\?\.preClose\) \|\| \(wantTrend \? NaN :/, '分时不得回退前一根收盘')
   // 指标与蜡烛可能不同代, 越界取 time 会抛 TypeError
   must(/value == null \|\| !candles\[i\] \? null/, 'toPoints 必须防越界')
+})
+
+test('灌图的五处决策都落在调用点上', () => {
+  // 手动刷新要保留用户的缩放: 恒传 fit 会把视图拽回去
+  must(/maybeFill\(\{ candles: kline\?\.candles \|\| \[\], preClose: kline\?\.preClose \}, plan\.fit\)/, '必须用 plan.fit 而不是恒 true')
+  // 切周期当帧旧数据会被灌进新形态, 面积序列拿到 HH:mm 会直接抛 Invalid date
+  must(/if \(state\.klineKey !== key\) return/, '灌数据前必须校验 key')
+  // 分时量是每分钟增量, 取末条会让图例只剩一分钟
+  must(/candles\.reduce\(\(sum, candle\) => sum \+ \(finiteOr\(candle\.volume\) \|\| 0\), 0\)/, '分时量必须累计整段')
+  // 缺 avg 的分钟线要回退收盘价, 否则均价线断线
+  must(/value: c\.avg \?\? c\.close/, '缺 avg 必须回退收盘价')
+  // 没有 at 的市场要靠「区间起点 + 分钟偏移」推横轴, 忽略它会整体偏时区
+  must(/const axisTime = \(c, i\) => c\.at \?\? base \+ i \* 60/, '横轴必须优先用行情自带时间')
 })
 
 test('单只标的时不循环到自己', () => {
