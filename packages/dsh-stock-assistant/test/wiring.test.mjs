@@ -90,6 +90,19 @@ test('事件处理器不许把 React 事件当业务参数透传', () => {
   must(/onClick: [^,]*runtime\.refresh\(\)/, '刷新按钮必须包一层再调')
 })
 
+test('hook 的解构参数与调用处传的键必须一致', () => {
+  // 少传一个就是 effect 里的运行时 ReferenceError: React 会把整棵悬浮窗卸掉, 界面表现为凭空消失.
+  // node --check 只查语法, 不跑 effect 的静态渲染也发现不了——这个错误真的漏到过一次线上
+  const keysOf = text => text.split(',').map(part => part.trim().split(':')[0].trim()).filter(Boolean).sort()
+  const calls = [...client.matchAll(/useFloatingPolling\(\{([^}]*)\}\)/g)].map(m => m[1])
+  assert.equal(calls.length, 2, '应当只有一处定义与一处调用')
+  const [definition, invocation] = calls
+  assert.deepEqual(keysOf(invocation), keysOf(definition), '传参键集必须与解构键集完全一致')
+  // 参数表里出现的每个键都要在函数体里真的被用到, 反之函数体里读的键必须来自参数或本函数内声明
+  const body = client.slice(client.indexOf('function useFloatingPolling'), client.indexOf('function useFloatingDrag'))
+  assert.match(body, /fetched/, '收市判定用的自己的快照必须在参数表里')
+})
+
 test('悬浮窗拖动只从标题条发起', () => {
   // touch-action 是路径交集: 父级 none 会废掉子元素的 pan-y, 列表就滚不动
   must(/closest\('\.ssb-float-head'\)/, '拖动必须限定标题条')
