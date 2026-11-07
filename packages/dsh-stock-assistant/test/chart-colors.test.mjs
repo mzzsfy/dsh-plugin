@@ -82,13 +82,18 @@ test('两条轴边框也跟着主题走, 且 readChartTheme 引用的 token 都�
   assert.deepEqual(missing, [], `引用了未声明的图表色: ${missing.join(', ')}`)
 })
 
+// DESIGN: 图表色是自定色, 但饱和度不能太低——压到灰调就和网格线混在一起了
+const SATURATION_MIN = 0.7
+
 test('每条线在自己主题的底色上都够清楚', async () => {
   const { light, dark } = await load()
   for (const [theme, palette] of Object.entries({ light, dark })) {
     for (const [key, text] of Object.entries(palette)) {
-      const lum = luminance(parseHsl(text))
-      const worst = Math.min(...BACKGROUNDS[theme].map(bg => contrast(lum, grayLuminance(bg))))
+      const hsl = parseHsl(text)
+      const worst = Math.min(...BACKGROUNDS[theme].map(bg => contrast(luminance(hsl), grayLuminance(bg))))
       assert.ok(worst >= CONTRAST_MIN, `${theme} 的 ${key} 与底色对比度只有 ${worst.toFixed(2)}, 低于 ${CONTRAST_MIN}`)
+      // 低饱和度的线在网格里几乎认不出来, 这一条与对比度是两回事
+      assert.ok(hsl.s >= SATURATION_MIN, `${theme} 的 ${key} 饱和度只有 ${(hsl.s * 100).toFixed(0)}%, 低于 ${SATURATION_MIN * 100}%`)
     }
   }
 })
