@@ -44,3 +44,23 @@ test('源码契约:已删除区保持悬停显现且减弱动效覆盖新选择�
   assert.ok(/prefers-reduced-motion: reduce.*\{ \.sm-btn--danger, \.sm-deleted \.sm-row__actions \{ transition:none/.test(CLIENT_SRC),
     '减弱动效未覆盖删除按钮与已删除区过渡')
 })
+
+// Given 归档行与已删除行的操作按钮, When 渲染, Then 每个按钮都带 title 悬停说明
+test('源码契约:行操作按钮都带 title 悬停说明', () => {
+  const buttons = [
+    ['restore', 'RESTORE_BUTTON_TITLE'],
+    ['remount', 'REMOUNT_BUTTON_TITLE'],
+    ['forget', 'FORGET_BUTTON_TITLE'],
+    ['delete', 'DELETE_BUTTON_TITLE'],
+    ['more', 'MORE_BUTTON_TITLE'],
+  ]
+  for (const [key, constant] of buttons) {
+    const pattern = new RegExp("key: '" + key + "'[^\\n]*title: " + constant)
+    assert.ok(pattern.test(CLIENT_SRC), key + ' 按钮缺少 title(' + constant + ')')
+  }
+  for (const constant of ['RESTORE_BUTTON_TITLE', 'REMOUNT_BUTTON_TITLE', 'FORGET_BUTTON_TITLE', 'MORE_BUTTON_TITLE']) {
+    const matched = CLIENT_SRC.match(new RegExp('const ' + constant + " = '([^']+)'"))
+    assert.ok(matched, constant + ' 未定义')
+    assert.ok(matched[1].length >= 20, constant + ' 文案须讲清用途')
+  }
+})

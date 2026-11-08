@@ -1947,3 +1947,23 @@ test('写路由守卫:跨源 POST 403 / 非 JSON 内容类型 415 / 同源 JSON 
   assert.equal(accepted.status, 200)
   assert.deepEqual(accepted.body, { ok: true })
 })
+
+test('列表瘦身开关:GET 回显默认开启,POST 持久,GET 反映新值', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  const initial = response()
+  await handlers.get('/api/session-manager/list-slim')(getRequest2('/api/session-manager/list-slim', 'GET'), initial)
+  assert.deepEqual(initial.body, { enabled: true }, '未配置时默认开启')
+  const off = await postJson(handlers, '/api/session-manager/list-slim', { enabled: false })
+  assert.deepEqual(off.body, { enabled: false })
+  const reread = response()
+  await handlers.get('/api/session-manager/list-slim')(getRequest2('/api/session-manager/list-slim', 'GET'), reread)
+  assert.deepEqual(reread.body, { enabled: false }, 'settings 持久化开关')
+})
+
+test('列表瘦身开关:非布尔载荷一律 400', skipMissingDeps, async () => {
+  const { handlers } = makeCtx({ archivedIds: [], headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
+  for (const payload of [{ enabled: 'yes' }, { enabled: 1 }, {}, { enabled: null }]) {
+    const rejected = await postJson(handlers, '/api/session-manager/list-slim', payload)
+    assert.equal(rejected.status, 400, JSON.stringify(payload))
+  }
+})

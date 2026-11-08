@@ -31,6 +31,7 @@ import {
   updatedAtOf,
 } from './core.mjs'
 import { moveToQuarantine, restoreFromQuarantine, trashPath } from './trash.mjs'
+import { installListSlim } from './list-slim.mjs'
 
 export const name = 'dsh-session-manager'
 
@@ -97,6 +98,8 @@ const SETTINGS_SCHEMA = schemastery.object({
     .description('自动归档阈值天数,0 表示关闭;新会话创建、启动与周期评估时生效'),
   autoArchiveIntervalHours: schemastery.number().min(0).step(1).default(DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS)
     .description('周期评估间隔小时数,0 表示关闭周期评估;变更经周期 tick 对账,关闭即时暂停、重启用最迟下个 tick 生效'),
+  listSlimEnabled: schemastery.boolean().default(true)
+    .description('会话列表瘦身:裁剪 session/list 的投影并缓存,降低列表响应体积与重建耗时;上游结构变更时自动降级为原行为'),
 })
 
 // 0.1.7 宿主以静态 Config 导出生成设置节表单(maintain 同构);legacy 宿主经
@@ -141,6 +144,7 @@ function readSettings(ctx, config) {
   return {
     days: Number.isInteger(days) && days >= 0 ? days : DEFAULT_AUTO_ARCHIVE_DAYS,
     intervalHours: Number.isInteger(hours) && hours >= 0 ? hours : DEFAULT_AUTO_ARCHIVE_INTERVAL_HOURS,
+    listSlimEnabled: value?.listSlimEnabled !== false,
   }
 }
 
@@ -158,6 +162,21 @@ function readAutoArchivePatch(body) {
   }
   if (Object.keys(patch).length === 0) throw new Error('缺少可更新的配置字段')
   return patch
+}
+
+// settings 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
+// (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
+// 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)
+async function persistSettings(ctx, patch) {
+  const settings = ctx.get('settings')
+  if (typeof settings?.register === 'function' && typeof settings?.update === 'function') {
+    await settings.update(NAMESPACE, patch)
+    return
+  }
+  const editor = ctx.get('configEditor')
+  const entry = ctx.fiber?.entry
+  if (!editor || typeof editor.edit !== 'function' || !entry) throw new Error('宿主设置服务不可用')
+  await editor.edit(entry, (current) => ({ ...current, ...patch }))
 }
 
 function readBody(req) {
@@ -250,6 +269,9 @@ function guardWrite(req, res) {
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
   let evaluating = false
+  // 列表瘦身:开关从设置实时读取,设置页改动即时生效;装载失败只关闭该能力,
+  // 归档与删除等其它功能不受影响
+  installListSlim(ctx, { isEnabled: () => readSettings(ctx, config).listSlimEnabled })
   // 取消归档全局宽限起点(进程内,重启失效可接受):恢复会话到用户发出首条
   // 消息之间的评估窗口保护,首条消息更新产物 mtime 后由阈值自然接管
   let unarchivedAtMs = 0
@@ -687,21 +709,35 @@ export function apply(ctx, config) {
             throw new Error(MESSAGES.badJsonBody)
           }
           const patch = readAutoArchivePatch(body)
-          // 双形写(maintain 同构,判定延迟到使用点):legacy 方法面以 register 为准
-          // (0.1.7 的 settings.update 名义在场但按命名空间找条目必败,不可作判据);
-          // 0.1.7+ 走 configEditor.edit 落 profile 条目(fiber.entry,与命名空间解耦)。
-          // await 保证回显为新值,persist 失败走 respondError
-          const settings = ctx.get('settings')
-          if (typeof settings?.register === 'function' && typeof settings?.update === 'function') {
-            await settings.update(NAMESPACE, patch)
-          } else {
-            const editor = ctx.get('configEditor')
-            const entry = ctx.fiber?.entry
-            if (!editor || typeof editor.edit !== 'function' || !entry) throw new Error('宿主设置服务不可用')
-            await editor.edit(entry, (current) => ({ ...current, ...patch }))
-          }
+          await persistSettings(ctx, patch)
           const current = readSettings(ctx, config)
           sendJson(res, 200, { days: current.days, intervalHours: current.intervalHours })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 会话列表瘦身开关:读回生效值,写经 settings 落 profile 条目;
+      // 关闭即恢复原始列表语义(不裁剪、不缓存),无需卸载插件
+      path: '/api/session-manager/list-slim',
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'GET') {
+            sendJson(res, 200, { enabled: readSettings(ctx, config).listSlimEnabled })
+            return
+          }
+          if (!rejectMethod(req, res, 'POST')) return
+          if (guardWrite(req, res)) return
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          if (typeof body?.enabled !== 'boolean') throw new Error('列表瘦身开关须为布尔值')
+          await persistSettings(ctx, { listSlimEnabled: body.enabled })
+          sendJson(res, 200, { enabled: readSettings(ctx, config).listSlimEnabled })
         } catch (error) {
           respondError(ctx, res, error)
         }
