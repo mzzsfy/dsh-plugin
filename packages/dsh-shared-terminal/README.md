@@ -9,7 +9,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 | 动作 | 参数与语义 |
 | --- | --- |
 | `open` | 当前 Session 创建官方终端，返回 `terminal_id`。默认 `cols=80, rows=24`，整数范围 `cols=2..300, rows=1..200`，宿主仍可进一步限制；`shell_path` 只能选择 Controller 发现的 shell。成功结果挂载后打开官方 tab。 |
-| `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与 attachment 有无。 |
+| `list` | 列出当前 Session 终端的标题、目录、尺寸、状态与附着状态。0.2.1-rc.2 起附着状态以插件泵为准（Controller info 不暴露 controllerId），其他代际沿用 Controller 的附着标识。 |
 | `read` | 必填 `terminal_id`；`lines` 默认 20，范围 1–200。读取 active buffer viewport 内最新内容起的最多 N 个物理行——以最后一个非空行与光标行（非空时）为界，高窗口不会读到尾部空白；保留内部空行、软换行和当前 alternate screen（整屏坐标）。 |
 | `write` | 必填 `terminal_id, text`；原样输入，`submit=true` 附加 CR。0.2.0 与 0.2.1-alpha.2 蹭 UI attachment 写（无附着返回 `NOT_ATTACHED`，不创建 follower、不抢 control）；0.2.1-rc.2 起自持 attach 泵：写入时抢附着，**空闲冷却 10s 后释放**（冷却期内连续写复用同一附着，sequence 递增；释放后首写重建附着并重置 sequence，最后写入者胜出，用户可随时接管）；重抢仍失败返回 `TERMINAL_ERROR`，可重试。 |
 | `wait` | 必填 `terminal_id, text`；`text` 为待等待子串（大小写敏感逐字），`timeout_ms` 默认 10000、范围 100–55000（上限为工具超时减返回余量）。阻塞轮询屏幕直到 `text` 出现（`found`，携带命中时刻屏幕快照与 `elapsed_ms`）、终端进入 `exited/failed`（`exited`，退出优先于命中）、用户手动跳过（`skipped`，携带跳过时刻屏幕快照）或超时（`timeout`，携带 `timeout_ms` 与最后一次屏幕快照）。匹配面为 read 同款 active viewport：滚出屏幕的历史不参与匹配；等待中终端被关闭返回 `TERMINAL_UNAVAILABLE`；回合取消即中止。轮询间隔 100ms。 |
@@ -26,6 +26,16 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 ### wait 手动打断（0.4.0 起）
 
 wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提示正在等什么）并显示「跳过等待」按钮；点击经宿主路由 `/api/shared-terminal/wait/skip`（POST JSON `{sessionId, terminalId}`）中断该终端当前全部 pending wait，wait 以 `skipped` 终态携带当前屏幕快照返回，AI 继续后续步骤——不打断回合。判定次序：回合取消 > 终端退出 > 文本命中 > 手动跳过 > 超时。路由按仓库安全边界仅做 Origin 同源比对，不做自有认证。
+
+## 只读终端自愈
+
+宿主在附着结束时只把 `controller` 清空，不把 `writable` 交还 UI——宿主按 `controller === follower` 判定可写，泵 detach 后 UI 即长期只读，直到用户点「接管输入」。UI 只读分支跳过 `fitScreen`，只按 `info.cols/rows` 固定 xterm；窗口或侧栏变矮后，底部内容被 `.screen{overflow:hidden}` 裁掉且 viewport 不可滚，用户于是「看不全」。0.4.3 起插件客户端做兜底自愈：每 2s 扫可见的 `[data-sidebar-terminal]`，若「宿主只读状态栏在场 + 内容超出容器（扣除状态栏自身占位，状态栏挤矮不算裁切）+ 屏上 Session 没有附着中的泵」同时成立，就点宿主「接管输入」，UI 重新附着成控制者后由宿主自己按容器重算几何。泵附着期间不动（宁可漏自愈也不抢 AI 的写入，否则下一次 `write` 会以 read-only 被拒），命中后 5s 冷却防抖。
+
+附着判定经宿主路由 `/api/shared-terminal/pump`（POST JSON `{sessionId}`）回答整条 Session 是否有泵在写，返回 `{ok, attached}`；查询失败或超时按「仍在附着」处理。该判断按 Session 汇总而非按 tab：tab id 在不同 Session 之间会重号，按 Session 保守处理只会漏自愈，不会误抢控制权。
+
+## 终端面板复用
+
+宿主的 `terminal` tab 类型注册为 `multiple`，`openTabIn` 每次调用都生成新的随机 `contentId` 并新建 tab。工具结果卡片会在刷新、切会话、重新挂载时重新渲染并导航，按 `openTabIn` 处理就会不断叠出多个共同指向同一终端的面板——每个面板各挂一份 xterm 与终端订阅，页面越用越卡。0.4.3 起改为固定 `contentId`（`dsh-resource://dsh-shared-terminal/panel`）走 `openResourceIn`，宿主按 `findContentTab` 复用同一面板，导航参数负责切换目标终端；用户自己用官方「新建终端」打开的面板地址随机，只改写其导航参数，不另建。导航另按 `sessionId:terminalId` 去重（原按 callId，刷新即失效）。
 
 ## 权限与版本边界
 
@@ -64,6 +74,6 @@ npm test -- /path/to/isolated-dsh-host
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐格证据见本包 `兼容性测试.md`,轮次汇总见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
 
-dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5` 与 `0.2.2-rc.1`(dshReleases `compatible`)。
+dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5` 与 `0.2.2-rc.1`(dshReleases `compatible`)。逐格断言、精确版本允许表与 D01-D15 维度适用表见本包 `兼容性测试.md`。

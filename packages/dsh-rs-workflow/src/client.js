@@ -651,6 +651,9 @@ window.__ModuleLoader__.load({
         id: m.id,
         ...(m.label !== '' ? { label: m.label } : {}),
         ...(m.description !== '' ? { description: m.description } : {}),
+        // 顶层策略键必须往返:结构化保存丢弃后,同一模板会从"主循环代审"
+        // 静默变成"必须人工审批"(消费端读 template.autoApprove)
+        ...(m.autoApprove === true ? { autoApprove: true } : {}),
         ...(m.inputs.some((r) => r.k.trim() !== '') ? { inputs: rowsToObj(m.inputs) } : {}),
         steps: m.steps.map(stepOut),
       }, null, 2)
@@ -670,6 +673,8 @@ window.__ModuleLoader__.load({
         label: meta.id !== '' ? (asStr(parsed.label) || meta.label) : meta.label,
         description: meta.id !== '' ? (asStr(parsed.description) || meta.description) : meta.description,
         enabled: meta.enabled,
+        // 顶层策略键进编辑态,否则 serializeModel 无从写回(结构化保存丢 autoApprove)
+        autoApprove: parsed.autoApprove === true,
         inputs: objToRows(parsed.inputs),
         steps: asArr(parsed.steps).map(normalizeStep),
       }
@@ -886,6 +891,8 @@ window.__ModuleLoader__.load({
             id: asStr(parsed.id) || entry.id || '',
             label: asStr(parsed.label), description: asStr(parsed.description),
             enabled: entry.enabled !== false,
+            // 顶层策略键同样进编辑态:缺省即丢失,保存后审批语义静默改变
+            autoApprove: parsed.autoApprove === true,
             inputs: objToRows(parsed.inputs),
             steps: asArr(parsed.steps).map(normalizeStep),
           }
@@ -926,7 +933,9 @@ window.__ModuleLoader__.load({
         const m = {
           id: asStr(parsed.id) || model.id,
           label: asStr(parsed.label), description: asStr(parsed.description),
-          enabled: model.enabled, inputs: objToRows(parsed.inputs),
+          enabled: model.enabled,
+          autoApprove: parsed.autoApprove === true,
+          inputs: objToRows(parsed.inputs),
           steps: asArr(parsed.steps).map(normalizeStep),
         }
         setModel(m); setText(serializeModel(m)); setSynced(true)

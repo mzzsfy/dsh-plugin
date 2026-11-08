@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { analyzeSwitch } from './switch-structure.mjs'
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const MAX_LINES = 600
@@ -40,8 +41,19 @@ test('Given client.js When 检查关键契约 Then 自注册形态/路由前缀/
   assert.ok(text.includes('/api/rsww/'))
   assert.ok(!text.includes('/api/rs-workflow/'))
   assert.ok(text.includes('--dsw-alias-'))
-  // 开关规约:checkbox 锚定 + track/thumb 结构
-  assert.ok(text.includes('.rsww-switch input[type="checkbox"]:checked + .rsww-switch__track'))
+  // 开关规约:解析 DOM/CSS 结构,断言 label > input[type=checkbox] + track > thumb 三件套
+  const switchFacts = analyzeSwitch(text, 'rsww')
+  assert.ok(switchFacts.roots.length >= 3, '开关根元素数量不足(工厂 + 两处内联勾选)')
+  for (const fact of switchFacts.roots) {
+    assert.equal(fact.root.tag, 'label', `第 ${fact.line} 行开关根必须是 label`)
+    assert.equal(fact.input?.type, 'checkbox', `第 ${fact.line} 行缺少 input[type=checkbox]`)
+    assert.ok(fact.track, `第 ${fact.line} 行缺少 track`)
+    assert.ok(fact.thumbIndex >= 0, `第 ${fact.line} 行 track 内缺少 thumb`)
+    assert.ok(fact.adjacent, `第 ${fact.line} 行 input 与 track 必须相邻`)
+  }
+  assert.ok(switchFacts.css.hidden && switchFacts.css.trackRule && switchFacts.css.thumbRule, '开关 CSS 三件套缺失')
+  assert.ok(switchFacts.css.checkedTrack && switchFacts.css.checkedThumb, '选中态未锚定 checkbox')
+  assert.deepEqual(switchFacts.css.bareStateSelectors, [], '状态选择器不得裸 input 锚定')
 })
 
 test('Given client.js When 检查视图职责 Then 会话页签+设置页分区并存,无运行时残留', () => {

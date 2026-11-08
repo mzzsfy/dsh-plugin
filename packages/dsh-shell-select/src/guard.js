@@ -9,7 +9,7 @@
 import { MAIN_ROW_ID, OFFICIAL_ROW_IDS, detectDeadState, rowState, rowScan } from './guard-state.mjs'
 import { officialRowConfig, readSettingsDocument, resolveFromHostTree } from './guard-config.mjs'
 import { officialRowState } from './takeover.mjs'
-import { shellSelectApplyState, shellSelectTakeoverTrace, shellSelectExecutorFiber } from './apply-state.mjs'
+import { recordTakeover, retireShellSelectExecutorFiber, shellSelectApplyState, shellSelectTakeoverTrace } from './apply-state.mjs'
 
 // 官方包 npm 名(与行 id 独立:行 id 是 dsh-base 组合行,包名才是模块解析键)
 const OFFICIAL_PACKAGES = {
@@ -171,33 +171,85 @@ export async function installGuard(ctx, {
     }
   }
 
-  // 复活让位:受控行任一即将 init 且本方在场,先卸代挂(waterfall 保证先于其 apply)。
-  // HOST-022 分支(0.2.2 写事务重评 !!js 表达式):官方行翻回启用且主行执行器
-  // 在场(句柄在场 = 主行活态接管中),dispose 执行器让位官方链——官方行激活
-  // 与 ShellSelectExecutor 撞 ctx.shell 会炸行激活并被写入门控放大为
-  // settings/rejected;求值抛错按零动作安全向(让位制造 shell 真空,不确定时
-  // 保持现状由 sweep 兜底)。
+  // 复活让位:受控行任一即将 init 且本方在场,先撤清本方对 ctx.shell 的占用。
+  // HOST-022 分支(0.2.2 写事务重评 !!js 表达式):官方行翻回启用时,执行器
+  // 与 guard 代挂是同一服务的两种占位形态,任一残留都会让官方行 provide 撞
+  // 重复服务,被写入门控放大成 settings/rejected。求值抛错按零动作安全向
+  // (让位制造 shell 真空,不确定时保持现状由 sweep 兜底)。
+  const officialRowRevived = (id) => {
+    let state
+    try {
+      state = officialRowState(ctx.loader, id)
+    } catch {
+      return false
+    }
+    return state?.present === true && state.disabled === false && state.disabledUnreliable === false
+  }
+
+  /**
+   * 让位:退役执行器句柄,并清空 guard 的"已代挂"记账与相关 disposer。
+   * 两件事同一动作——主行被禁后执行器 fiber 已退役而句柄可能残留(陈旧句柄),
+   * 只按句柄在场与否决定卸代挂会让陈旧句柄吞掉让位,官方行仍撞残留代挂服务。
+   */
+  const yieldToOfficialRow = async (id) => {
+    const fiber = retireShellSelectExecutorFiber()
+    if (fiber !== undefined) {
+      ctx.logger.warn(`shell-select/guard: 官方行 ${id} 翻回启用,主行执行器卸载让位(官方链接管)`)
+      try {
+        await fiber.dispose()
+      } catch (error) {
+        ctx.logger.warn(`shell-select/guard: 执行器让位 dispose 失败(${error?.message ?? error});官方行激活可能撞服务,由宿主行级失败兜底`)
+      }
+    }
+    if (mounted.size > 0 || mounting !== null) {
+      ctx.logger.warn(`shell-select/guard: 官方行 ${id} 翻回启用,清空代挂记账并卸代挂让位`)
+      try {
+        await unmountOfficial()
+      } catch (error) {
+        ctx.logger.warn(`shell-select/guard: 卸代挂交接异常(${error?.message ?? error}),仍放行复活方`)
+      }
+    }
+  }
+
+  // 写事务翻回(HOST-022)先重禁:让位会 dispose 执行器,连 shell 工具一起撤掉
+  // (0.2.2 真机实证:半接管态模型只剩官方 pwsh)。重禁成功即保持接管,宿主连续
+  // 拒绝或行反复翻回超过上限才让位;重禁自身触发的 patch 事件直接放行,不递归。
+  const RE_DISABLE_MAX_ROUNDS = 3
+  const RE_DISABLE_WINDOW_MS = 30 * 1000
+  const reDisableRounds = new Map()
+  const reDisabling = new Set()
+
+  const reDisableOfficialRow = async (id, entry) => {
+    const now = Date.now()
+    const seen = reDisableRounds.get(id)
+    const rounds = seen !== undefined && now - seen.at < RE_DISABLE_WINDOW_MS ? seen.rounds : 0
+    if (rounds >= RE_DISABLE_MAX_ROUNDS) return false
+    reDisableRounds.set(id, { rounds: rounds + 1, at: now })
+    reDisabling.add(id)
+    try {
+      await entry.update({ disabled: true })
+    } catch {
+      return false
+    } finally {
+      reDisabling.delete(id)
+    }
+    return officialRowState(ctx.loader, id)?.disabled === true
+  }
+
   const patchContextGuard = async (entry, next) => {
     const id = entry?.options?.id
     if (id !== MAIN_ROW_ID && !OFFICIAL_ROW_IDS.includes(id)) return next()
-    if (id !== MAIN_ROW_ID && entry.fiber?.uid == null && shellSelectExecutorFiber.current !== undefined) {
-      let state
-      try {
-        state = officialRowState(ctx.loader, id)
-      } catch {
-        state = null
-      }
-      if (state?.present === true && state.disabled === false && state.disabledUnreliable === false) {
-        const fiber = shellSelectExecutorFiber.current
-        shellSelectExecutorFiber.current = undefined
-        ctx.logger.warn(`shell-select/guard: 官方行 ${id} 翻回启用,主行执行器卸载让位(官方链接管)`)
-        try {
-          await fiber.dispose()
-        } catch (error) {
-          ctx.logger.warn(`shell-select/guard: 执行器让位 dispose 失败(${error?.message ?? error});官方行激活可能撞服务,由宿主行级失败兜底`)
-        }
+    if (id !== MAIN_ROW_ID && officialRowRevived(id)) {
+      // 行可能在翻回时仍在运行(写事务只改表达式求值,不重启行):同样先重禁,
+      // 退场由宿主写事务收尾,执行器保持;宿主拒绝或反复翻回才让位
+      if (reDisabling.has(id)) return next()
+      if (await reDisableOfficialRow(id, entry)) {
+        recordTakeover({ event: `revived=${id} re-disabled` })
+        ctx.logger.warn(`shell-select/guard: 官方行 ${id} 被写事务翻回,已重新禁用并保持接管`)
         return next()
       }
+      await yieldToOfficialRow(id)
+      return next()
     }
     if (entry.fiber?.uid != null) return next()
     if (mounted.size === 0 && mounting === null) return next()

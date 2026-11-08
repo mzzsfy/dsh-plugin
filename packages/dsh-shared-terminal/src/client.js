@@ -93,6 +93,10 @@ window.__ModuleLoader__.load({
       '.stv-ioDivider{background:var(--dsw-alias-border-l2);flex:none;height:.5px}',
       '.stv-termRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
       '.stv-termTitle{font-weight:500}',
+      // 只读/退出提示浮在终端上:它若占布局高度,只读态会把终端压矮一行,底部随之外裁。
+      // 只在终端已渲染时浮起,空态(新建终端/不存在)没有 .xterm 撑高,绝对定位会让容器塌陷
+      '[data-sidebar-terminal]{position:relative}',
+      '[data-sidebar-terminal]:has(.xterm) > [role="status"]{position:absolute;top:6px;right:8px;z-index:5;width:auto;max-width:calc(100% - 16px);max-height:50%;margin:0;padding:2px 8px;border-radius:999px;display:flex;align-items:center;gap:6px;overflow:auto;background:color-mix(in srgb,var(--dsw-alias-bg-1,#fff) 92%,transparent);box-shadow:0 1px 6px rgb(0 0 0 / 12%);font-size:12px;line-height:18px}',
     ].join('\n')
 
     // ── 模型派生:argsRaw + content JSON → 行模型 ────────────────────────
@@ -220,8 +224,9 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const controller = new AbortController()
         lifetime.current = controller
-        if (canOpen && !openedCalls.has(props.callId)) {
-          void navigate(controller.signal).then((opened) => { if (opened) openedCalls.add(props.callId) })
+        const key = `${props.sessionId}:${terminalId}`
+        if (canOpen && !openedTerminals.has(key)) {
+          void navigate(controller.signal).then((opened) => { if (opened) openedTerminals.add(key) })
         }
         return () => controller.abort()
       }, [canOpen, terminalId, props.sessionId, props.callId])
@@ -296,24 +301,165 @@ window.__ModuleLoader__.load({
       return typeof props.sessionId === 'string' ? props.sessionId : undefined
     }
 
-    const openedCalls = new Set()
+    // 按 terminal 去重:同一次对话里 open 结果会被多次渲染(刷新、切会话、重挂载),
+    // 按 callId 记会随刷新清零,重复导航在宿主侧就会叠出多个面板
+    const openedTerminals = new Set()
+
+    // 终端面板地址按 terminalId 固定:宿主 terminal 类型是多实例,openTabIn 每次新建随机
+    // contentId;固定地址才能让 openResourceIn 按 contentId 复用到同一面板。
+    // 一个终端一个面板:改导航参数不会重建 xterm 实例,复用别人的面板会看错终端。
+    const panelAddress = (terminalId) => `dsh-resource://dsh-shared-terminal/panel/${terminalId}`
+
+    // ── 只读终端自愈 ─────────────────────────────────────────────────────
+    // 宿主在附着结束时只清 controller,不把 writable 交还 UI(宿主按 controller===follower 判定);
+    // UI 只读时跳过 fitScreen,窗口或侧栏变矮后底部被 overflow:hidden 裁掉且不可滚。
+    // 无控制者时点宿主「接管输入」,UI 重新附着后由宿主自己按容器重算几何。
+    const HEAL_INTERVAL_MS = 2 * 1000
+    const HEAL_COOLDOWN_MS = 5 * 1000
+    const HEAL_OVERFLOW_PX = 2
+    const HEAL_SESSIONS_MAX = 64
+    // 查询不能拖住巡检:挂起的请求会让后续轮次被 running 守卫全部跳过
+    const HEAL_QUERY_TIMEOUT_MS = 3 * 1000
+
+    // 只读状态栏会把 .xterm 挤矮,那部分不算内容溢出:否则每次 AI 写完都会白抢一次控制权
+    const clipped = (root) => {
+      const content = root.querySelector('.xterm-screen')?.getBoundingClientRect()
+      const box = root.querySelector('.xterm')?.getBoundingClientRect()
+      if (content === undefined || box === undefined) return false
+      const status = root.querySelector('[role="status"]')?.getBoundingClientRect().height ?? 0
+      return content.height - box.height - status > HEAL_OVERFLOW_PX || content.width - box.width > HEAL_OVERFLOW_PX
+    }
+
+    // 状态栏按钮随终端状态变化:退出态是「新建终端」,按位置取会误建终端
+    const TAKEOVER_LABELS = ['接管输入', 'take control']
+
+    const takeoverButton = (root) => {
+      const button = root.querySelector('[role="status"]')?.querySelector('button')
+      const label = (button?.textContent ?? '').trim().toLowerCase()
+      return TAKEOVER_LABELS.some((text) => label.includes(text)) ? button : undefined
+    }
+
+    // 隐藏 tab 没有几何;屏上 Session 才渲染终端面板,附着力按 mounted 判断即可
+    const visibleRoot = (root) => {
+      const rect = root.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    }
+
+    // 查询失败按"仍在附着"处理:宁可不自愈,也不抢走 AI 的写入
+    const pumpAttached = async (sessionId) => {
+      const response = await fetch('/api/shared-terminal/pump', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+        signal: AbortSignal.timeout(HEAL_QUERY_TIMEOUT_MS),
+      })
+      if (!response.ok) return true
+      const state = await response.json()
+      return state?.attached !== false
+    }
+
+    function healReadOnly(ctx) {
+      if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function' || typeof setInterval !== 'function') return () => {}
+      const healed = new Map()
+      let running = false
+      // 只保留最近的上限条:重新插入以刷新顺序,超限时淘汰最旧的一条
+      const remember = (sessionId, at) => {
+        healed.delete(sessionId)
+        healed.set(sessionId, at)
+        while (healed.size > HEAL_SESSIONS_MAX) healed.delete(healed.keys().next().value)
+      }
+      // 每轮重扫 DOM:宿主 tab 可随时增删,缓存 root 会拿到已卸载的节点
+      const tick = async () => {
+        if (running || document.hidden === true) return
+        running = true
+        try {
+          for (const root of document.querySelectorAll('[data-sidebar-terminal]')) {
+            const button = takeoverButton(root)
+            if (button === undefined || !visibleRoot(root) || !clipped(root)) continue
+            const sessionId = ctx.sidebarRight.mounted?.getSnapshot()
+            if (typeof sessionId !== 'string' || healed.get(sessionId) > Date.now() - HEAL_COOLDOWN_MS) continue
+            // 泵附着中不抢控制权:那会让 AI 的下一次写入落空
+            if (await pumpAttached(sessionId)) continue
+            // 等待期间 tab 可能被卸载、状态栏按钮可能被替换、几何可能已恢复
+            if (root.isConnected === false || !clipped(root)) continue
+            const fresh = takeoverButton(root)
+            if (fresh === undefined) continue
+            remember(sessionId, Date.now())
+            fresh.click()
+          }
+        } catch {
+          // 自愈是宿主行为的兜底,失败不得影响渲染
+        } finally {
+          running = false
+        }
+      }
+      const timer = setInterval(tick, HEAL_INTERVAL_MS)
+      return () => clearInterval(timer)
+    }
 
     return {
-      inject: ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'locale'],
+      inject: ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'webTerminals', 'locale'],
       apply(ctx) {
-        // Session terminal 复用:同一官方 sidebar xterm,用户可输入并查看当前屏幕
+        // Session terminal 复用:同一官方 sidebar xterm,用户可输入并查看当前屏幕。
+        // 宿主的 terminal tab 是 multiple 类型:openTabIn 每次生成新随机 contentId 并新建 tab,
+        // 于是每次重渲染(刷新、切会话)都多出一个指向同一终端的窗口,越用越卡。
+        // 按 terminalId 固定地址走 openResourceIn,同一终端永远命中同一面板。
+        const PANEL_PREFIX = 'dsh-resource://dsh-shared-terminal/panel/'
+        const settlePanel = (sessionId, address, terminalId) => {
+          const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.contentId === address)
+          if (tab !== undefined) ctx.sidebarRight.tabDomain?.navigate(sessionId, tab.tabId, { address, params: { terminalId } })
+        }
+        // 面板首帧从导航记录取 contentId/terminalId,而记录由 openContent 回执写入,回执晚于首帧。
+        // 首帧拿空值就会按「新终端」把 xterm 建死,之后一直显示「此终端已不存在」。
+        // 面板的内容身份在 layout 里本就确定,首帧缺参时用 layout 的 contentId 补齐即可。
+        const VIEW_PATCH = Symbol.for('@mzzsfy/dsh-shared-terminal/view-patch')
+        const patchTerminalView = () => {
+          const holder = ctx.webTerminals
+          if (holder === undefined || holder[VIEW_PATCH] === true) return
+          const original = holder.view
+          if (typeof original !== 'function') return
+          const view = original.bind(holder)
+          holder[VIEW_PATCH] = true
+          holder.view = (sessionId, key, contentId, terminalId, shellPath) => {
+            if (contentId !== undefined) return view(sessionId, key, contentId, terminalId, shellPath)
+            const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.tabId === key)
+            if (tab === undefined || tab.kind !== 'terminal') return view(sessionId, key, contentId, terminalId, shellPath)
+            const fill = terminalId ?? (tab.contentId.startsWith(PANEL_PREFIX) ? tab.contentId.slice(PANEL_PREFIX.length) : undefined)
+            return view(sessionId, key, tab.contentId, fill, shellPath)
+          }
+        }
+        // 宿主自身的 contentId→终端绑定(落 localStorage)是首帧的另一条兜底来源,建面板前先写
+        const BINDING_PREFIX = 'dsh.terminal.binding.v1.'
+        const seedBinding = (sessionId, contentId, terminalId) => {
+          try {
+            localStorage.setItem(BINDING_PREFIX + JSON.stringify([sessionId, contentId]), JSON.stringify(terminalId))
+          } catch {
+            // 存储不可用时只剩导航参数一条路,与不写绑定等价
+          }
+        }
+        // 面板建好后宿主的终端清单可能还没刷新到新终端,view 首轮校验会判定「终端不存在」并就此定格;
+        // 隔一帧再让它自己重查一次即可恢复(清单此时已经到岸)。
+        const NUDGE_DELAYS_MS = [400, 2000]
+        const nudgePanel = (sessionId, address, terminalId) => {
+          const tab = ctx.sidebarRight.openTabs?.getSnapshot().find((item) => item.sessionId === sessionId && item.contentId === address)
+          if (tab === undefined) return
+          try {
+            ctx.webTerminals?.view?.(sessionId, tab.tabId, address, terminalId)?.refresh?.()
+          } catch {
+            // view 未建或已销毁时无需补救
+          }
+        }
         async function openExisting(sessionId, terminalId, alive) {
           const listed = await ctx.remote.terminal.list(sessionId)
           if (!alive() || !listed.ok || !listed.value.some((item) => item.id === terminalId)) return false
-          const existing = ctx.sidebarRight.openTabs?.getSnapshot().find((tab) => {
-            if (tab.sessionId !== sessionId || tab.kind !== 'terminal') return false
-            const params = ctx.sidebarRight.tabDomain.occurrence(sessionId, { id: tab.tabId }).navigation.getSnapshot().params
-            return params?.terminalId === terminalId
-          })
-          if (existing) ctx.sidebarRight.openResourceIn(sessionId, existing.contentId, { kind: 'terminal', params: { terminalId } })
-          else ctx.sidebarRight.openTabIn(sessionId, 'terminal', { params: { terminalId } })
-          return true
+          const address = panelAddress(terminalId)
+          seedBinding(sessionId, address, terminalId)
+          ctx.sidebarRight.openResourceIn(sessionId, address, { kind: 'terminal', params: { terminalId } })
+          settlePanel(sessionId, address, terminalId)
+          for (const delay of NUDGE_DELAYS_MS) setTimeout(() => nudgePanel(sessionId, address, terminalId), delay)
+          return alive()
         }
+        patchTerminalView()
         ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
           { name: 'tool.call.toolview', key: 'terminal', locale: NS },
           (props) => h(TerminalToolRow, { ...props, openTerminal: (sessionId, terminalId, alive) => openExisting(sessionId, terminalId, alive) }),
@@ -326,6 +472,7 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style)
           return () => style.remove()
         }, 'shared-terminal styles')
+        ctx.effect(() => healReadOnly(ctx), 'shared-terminal read-only healing')
       },
     }
   },

@@ -9,6 +9,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
+// 数据目录隔离:实例化即落盘的文件不得写宿主真实 home。DSH_HOME 与
+// DSH_CRON_BOARD_DATA_DIR 同点重定向到一次性根,用例内改 env 后统一恢复此默认值
+const harnessRoot = await mkdtemp(join(tmpdir(), 'cron-board-harness-'))
+const isolatedDataDir = join(harnessRoot, 'cron-board')
+process.env.DSH_HOME = harnessRoot
+process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
+test.after(async () => {
+  process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
+  await rm(harnessRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+})
+
 const mod = await import('../src/index.js')
 const { apply, resolveDataDir } = mod
 
@@ -266,7 +277,7 @@ test('index:tick 到期任务被调度执行(端到端装配)', async (t) => {
   // Given 全服务桩 + 临时数据目录 + 一个已到期任务
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-idx-'))
   t.after(async () => {
-    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
     // 运行终态可见后执行链仍有后台落盘(任务卡回填/日志写),与目录删除竞态,有界重试消解
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
@@ -442,7 +453,7 @@ test('0.1.7 形态:ui-settings GET 读 config 节值(ref 解包),非默认值', 
   // Given settings 无 register/get 的宿主 + config ref 携带用户值
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-rc17-'))
   t.after(async () => {
-    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
   process.env.DSH_CRON_BOARD_DATA_DIR = dir
@@ -459,7 +470,7 @@ test('0.1.7 形态:ui-settings POST 经 configEditor.edit 落 fiber.entry 且持
   // Given configEditor 桩记录 edit 调用
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-rc17-'))
   t.after(async () => {
-    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
   process.env.DSH_CRON_BOARD_DATA_DIR = dir
@@ -480,7 +491,7 @@ test('0.1.7 形态:configEditor 缺失即 200 ok:false 拒写,不崩溃', async 
   // Given configEditor 服务缺席
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-rc17-'))
   t.after(async () => {
-    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
   process.env.DSH_CRON_BOARD_DATA_DIR = dir
@@ -518,7 +529,7 @@ test('index:model-catalog 路由经装配链收到 sessionController(传递契�
   // Given 装配桩:sessionController 带 modelCatalog 面(镜像 0.2.1-rc.2 形态);请求走惰性初始化,须隔离数据目录
   const dir = await mkdtemp(join(tmpdir(), 'cron-board-idx-mc-'))
   t.after(async () => {
-    delete process.env.DSH_CRON_BOARD_DATA_DIR
+    process.env.DSH_CRON_BOARD_DATA_DIR = isolatedDataDir
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
   process.env.DSH_CRON_BOARD_DATA_DIR = dir

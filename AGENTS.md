@@ -14,6 +14,8 @@
 | 公共 client 依赖包(依赖形态发布 / 代挂装载链 / 占位条目) | [DEVELOPMENT/client-dependency.md](DEVELOPMENT/client-dependency.md) |
 | DSH 本体 API 对齐(服务优先 / 干净禁用 / 升级回归) | [DEVELOPMENT/dsh-api-alignment.md](DEVELOPMENT/dsh-api-alignment.md) |
 
+兼容性检查的维度清单、逐包适用矩阵与项目级门槛见 [docs/兼容性测试/兼容性检查总纲.md](docs/兼容性测试/兼容性检查总纲.md)(本地维护,不入库,干净 clone 不可见;文件缺失时以各包 `兼容性测试.md` 与 [DEVELOPMENT/dsh-api-alignment.md](DEVELOPMENT/dsh-api-alignment.md) 为准)。
+
 安全边界约定(全仓库强制):**所有包不做 host 认证,不设 Host/Origin 可达性闸门**。宿主的 Host 信任闸门由 dsh-auto-trust-all 统一放行(项目威胁模型:本地/内网可达即可信,认证由宿主原生 cookie/startup-auth 承担,本仓库不重复、不加强、不旁路)。任何包新增 HTTP 路由时禁止实现 Host 白名单、DNS-rebinding 防线、token 校验等自有认证层;写路由的跨源防护以 Origin 与 Host 的同源比对为上限(dsh-rs-workflow board 同构)。背景与原理见 [DEVELOPMENT/dsh-api-alignment.md](DEVELOPMENT/dsh-api-alignment.md) 安全边界节。
 
 ## AI 自测规约:隔离环境 + echo-upstream
@@ -25,3 +27,7 @@ AI 会话自测(凡涉及 LLM 链路:对话轮、思考流、工具调用、usag
 - **不改宿主生产面**:不动生产 profile 与 `~/.dsh` 配置、不重启宿主服务,留档不入版本库(默认临时目录;compat 工位按链接方法落 `llm-echo.jsonl`,gitignore 豁免)。需隔离 profile 全家桶级宿主链路验证时,走 `node scripts/compat/run.mjs` 同款隔离方法([docs/兼容性测试/测试与隔离方法.md](docs/兼容性测试/测试与隔离方法.md),本地维护不入库)。
 
 各 `兼容性测试.md` 与模拟器 README 中固定端口 18123、真实 API、仓库内留档路径的写法属人工历史流程记录,AI 会话一律以本节为准。
+
+## AI 发版规约:直接执行
+
+AI 会话发版一律直接运行 `node scripts/publish.mjs <包名|all> [--bump patch|minor|major]`,**禁止任何登录态预检**(不跑 `npm whoami`、不探测 token 有效性、不比对 registry 凭据、不先试 `npm view`)。发布失败按命令输出处置,认证中断直接重跑同一条命令;本地 registry 指向镜像、发布目标为 npmjs 之类的差异不构成预检或改 registry 的理由。发布范围、版本位与 tag 规则见 [DEVELOPMENT/structure-and-release.md](DEVELOPMENT/structure-and-release.md)。

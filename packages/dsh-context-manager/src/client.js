@@ -462,31 +462,50 @@ function HistoryDock({ session, inputActions }) {
   // 数据可能晚于首次响应到达,一次性重拉预算耗尽后迟到的数据将永不出现
   // (实机验证实测:API 已就绪而浮层停在旧列表)。轮询开销为毫秒级缓存读;
   // 请求失败(含超时)也保持轮询,host 恢复后列表自愈,不假死
-  // 代际令牌(F21):浮层每次打开新开一代,旧代的定时链/迟到响应全部失效——
-  // 修复"关闭再重开后旧代 timeout 复活叠加轮询链"
-  let scopeGeneration = 0
+  // 代际令牌(F21):浮层每次打开/切换范围新开一代,旧代的定时链/迟到响应全部失效——
+  // 修复"关闭再重开后旧代 timeout 复活叠加轮询链";代际存 ref 跨渲染保留,卸载清理
+  // 推进代际后,在途 fetch 的迟到响应一并作废
+  const scopeGenerationRef = useRef(0)
+  // 轮询链定时器句柄:全链唯一;关闭浮层/卸载时清除
+  const repullTimerRef = useRef(null)
+
+  // 停链:代际前进 + 清待触发定时器;进行中的 fetch 迟到响应按代际丢弃
+  function stopRepull() {
+    scopeGenerationRef.current += 1
+    if (repullTimerRef.current !== null) {
+      clearTimeout(repullTimerRef.current)
+      repullTimerRef.current = null
+    }
+  }
 
   function requestScope(scopeIdx) {
-    const generation = scopeGeneration
+    const generation = scopeGenerationRef.current
     const scope = HISTORY_SCOPES[scopeIdx]
+    // 手动重拉(收藏切换)与定时重拉共用入口:先作废旧定时器,响应后重排节奏
+    if (repullTimerRef.current !== null) {
+      clearTimeout(repullTimerRef.current)
+      repullTimerRef.current = null
+    }
     const scheduleNext = () => {
-      if (generation !== scopeGeneration) return
+      if (generation !== scopeGenerationRef.current) return
       if (!viewRef.current.open || viewRef.current.scopeIndex !== scopeIdx) return
-      setTimeout(() => {
-        if (generation !== scopeGeneration) return
+      if (repullTimerRef.current !== null) return
+      repullTimerRef.current = setTimeout(() => {
+        repullTimerRef.current = null
+        if (generation !== scopeGenerationRef.current) return
         if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
       }, HISTORY_REPULL_MS)
     }
     fetchInputs(scope)
       .then((result) => {
-        if (generation !== scopeGeneration) return
+        if (generation !== scopeGenerationRef.current) return
         applyResult(scopeIdx, result)
         // 成功即清错误态(F21):此前 loadError 只在打开时清,失败后成功永不恢复
         setLoadError(false)
         scheduleNext()
       })
       .catch((error) => {
-        if (generation !== scopeGeneration) return
+        if (generation !== scopeGenerationRef.current) return
         if (viewRef.current.scopeIndex !== scopeIdx) return
         rawItemsRef.current = []
         syncView({ items: [] })
@@ -504,7 +523,7 @@ function HistoryDock({ session, inputActions }) {
   }
 
   function openPopup() {
-    scopeGeneration += 1
+    stopRepull()
     rawItemsRef.current = null
     queryRef.current = ''
     setQuery('')
@@ -524,6 +543,8 @@ function HistoryDock({ session, inputActions }) {
   // 范围切换共用落点:清过滤与选择态后拉取目标范围;同范围不动,切换即收起展开态
   function selectScope(next) {
     if (next === viewRef.current.scopeIndex) return
+    // 切范围即作废旧范围的定时链与在途响应,新范围从新代际起步
+    stopRepull()
     setScopeOpen(false)
     rawItemsRef.current = null
     queryRef.current = ''
@@ -544,6 +565,17 @@ function HistoryDock({ session, inputActions }) {
     if (next < 0 || next >= HISTORY_SCOPES.length) return
     selectScope(next)
   }
+
+  // 轮询链生命周期:关闭浮层即停链(open=false 时没有活动 cleanup,由 effect 体
+  // 主动停);卸载无条件停链。卸载后 viewRef.open 仍为 true,不清理则定时链复活
+  useEffect(() => {
+    if (!open) {
+      stopRepull()
+      return undefined
+    }
+    return stopRepull
+  }, [open])
+  useEffect(() => stopRepull, [])
 
   // Alt+↑ 唤起浮层;浮层开 = 菜单模态,捕获阶段拦截导航键,先于 Lexical 光标移动。
   // 设置开关停用时监听器直接放行(读 ref,开关值挂载拉取后即时反映)
@@ -955,6 +987,17 @@ async function followOpening(remote, sessionId) {
   return []
 }
 
+// 轮号映射结构签名:loadTurnEnds 每次新建 Map,引用比较恒假,补拉基线必须比内容。
+// 按轮号升序取 seq/text/open,缺失字段归一为 null,JSON 保序即稳定签名
+function turnEndsSignature(map) {
+  const summary = []
+  for (const turn of Array.from(map.keys()).sort((left, right) => left - right)) {
+    const entry = map.get(turn) || {}
+    summary.push([turn, entry.seq ?? null, entry.text ?? null, entry.open === true])
+  }
+  return JSON.stringify(summary)
+}
+
 // 插话撤回:未应用插话气泡(消息流 steering 项,永久驻留)的操作排注入撤回图标,
 // 与 fork 注入同机制。显隐由 inbox 投影行集驱动(行在=未应用):scan 时行在注入、
 // 行不在摘除,投影订阅驱动重扫,应用后按钮即时消失;点击与投影更新之间的竞态窗口
@@ -1128,7 +1171,10 @@ function ForkDockWithBootstrap({ session, inputActions, useInput, forkSession, c
     Promise.resolve(loadRef.current())
       .then((map) => {
         refreshPendingRef.current = false
-        if (turnEndsRef.current === map) return
+        // 同内容签名即终止:窗口外轮仍会补拉一次,结果不变则不再 setState,
+        // 否则 setState→扫描→补拉形成无界循环
+        if (turnEndsRef.current !== null
+          && turnEndsSignature(turnEndsRef.current) === turnEndsSignature(map)) return
         turnEndsRef.current = map
         setTurnEnds(map)
       })

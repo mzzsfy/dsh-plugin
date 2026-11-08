@@ -35,6 +35,34 @@ function stubSpawn(stdoutText = '', stderrText = '', exitCode = 0) {
   return { spawn, calls }
 }
 
+/**
+ * 假子进程:按 subprocess 契约只认 spec.signal 中止(terminate 定局,Windows
+ * 被杀进程形态 = exit 1 无 signal 标记)。未收到中止时由兜底定时器定局,
+ * 使"deadline 未武装"的旧实现以断言失败收场,而不是挂起等永不到来的终止。
+ */
+function fakeChildSubprocess({ fallbackMs = 250, exitCode = 0 } = {}) {
+  const calls = []
+  let terminated = 0
+  const spawn = (spec) => {
+    calls.push(spec)
+    let settle
+    const done = new Promise((resolve) => { settle = resolve })
+    const handle = {
+      collected: { stdout: stubReader(''), stderr: stubReader('') },
+      done,
+      terminate: () => {
+        terminated += 1
+        settle({ exitCode: 1, signal: null })
+        return true
+      },
+    }
+    spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true })
+    setTimeout(() => settle({ exitCode, signal: null }), fallbackMs)
+    return handle
+  }
+  return { spawn, calls, terminated: () => terminated }
+}
+
 function stubCtx({ withSettings = true, sandboxMode = 'danger-full-access', spawn = stubSpawn() } = {}) {
   const registered = { tools: [], sections: [], promptSections: [], routes: [], policies: [] }
   const settingsImpl = {
@@ -204,6 +232,9 @@ test('resolve:预算字段生效,策略缺省落部署策略', () => {
   assert.equal(spec.timeoutMs, 600000)
   assert.equal(spec.sandboxPolicy.mode, 'danger-full-access')
   assert.equal(spec.workdir, process.cwd())
+  // 官方 dsh-pwsh-local resolve 同构:onExpiry 缺省 'kill'(丢失即超时永不武装)
+  assert.equal(spec.onExpiry, 'kill')
+  assert.equal(executor.resolve({ command: 'x', onExpiry: 'none' }).onExpiry, 'none')
 })
 
 test('runFor danger 直跑:argv 按条目组装,不经 confine,stdout/stderr 回传', async () => {
@@ -359,6 +390,7 @@ test('execute 契约:onExpiry none 不武装 deadline(后台注册形态)', asyn
   const result = await handle.result()
   assert.equal(result.exitCode, 0)
   assert.equal(result.timedOut, false)
+  assert.equal(spawn.calls[0].signal, undefined, "'none' 不武装 deadline,不得注入中止信号")
 })
 
 test('execute 契约:provider spawn 失败,done 定局 killed 不 reject,result() 携带同一失败', async () => {
@@ -404,6 +436,57 @@ test('execute 契约:默认客户端解析,显式 onExpiry kill 正常完成', a
   const result = await handle.result()
   assert.equal(result.exitCode, 0)
   assert.equal(result.timeoutMs, 5000)
+})
+
+// H1:execute seam 曾丢弃官方 onExpiry(官方 resolve 缺省 'kill')→ deadline 永不
+// 武装,request.timeoutMs 静默失效且 timedOut 恒 false。回归钉死"到期终止 +
+// timedOut 真实"与"未到期不误报"两面。
+
+test('execute 契约:request.timeoutMs 到期即终止,timedOut=true(无调用方 signal 也有中止通道)', async () => {
+  const subprocess = fakeChildSubprocess()
+  const { ctx } = stubCtx({ spawn: subprocess })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const spec = executor.resolve({ command: 'sleep 30', workdir: process.cwd(), timeoutMs: 25 })
+  assert.equal(spec.onExpiry, 'kill')
+  const handle = await executor.execute(spec)
+  assert.notEqual(subprocess.calls[0].signal, undefined, 'deadline 必须向 subprocess 提供中止通道')
+  const result = await handle.result()
+  assert.equal(subprocess.terminated(), 1, '到期必须按 subprocess 契约终止托管进程')
+  assert.equal(handle.status, 'killed')
+  assert.equal(result.timedOut, true)
+  assert.equal(result.aborted, false)
+  assert.equal(result.timeoutMs, 25)
+})
+
+test('execute 契约:未超时正常结束,timedOut=false 且不终止', async () => {
+  const subprocess = fakeChildSubprocess({ fallbackMs: 20 })
+  const { ctx } = stubCtx({ spawn: subprocess })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const handle = await executor.execute(executor.resolve({ command: 'echo hi', workdir: process.cwd(), timeoutMs: 5000 }))
+  const result = await handle.result()
+  assert.equal(subprocess.terminated(), 0)
+  assert.equal(handle.status, 'completed')
+  assert.equal(result.timedOut, false)
+  assert.equal(result.aborted, false)
+  assert.equal(result.exitCode, 0)
+})
+
+test('execute 契约:调用方中止(非超时)aborted=true、timedOut=false(首因分类)', async () => {
+  const subprocess = fakeChildSubprocess()
+  const { ctx } = stubCtx({ spawn: subprocess })
+  const executor = new ShellSelectExecutor(ctx, baseConfig())
+  const controller = new AbortController()
+  const handle = await executor.execute(executor.resolve({
+    command: 'sleep 30',
+    workdir: process.cwd(),
+    timeoutMs: 5000,
+    signal: controller.signal,
+  }))
+  controller.abort()
+  const result = await handle.result()
+  assert.equal(subprocess.terminated(), 1)
+  assert.equal(result.aborted, true)
+  assert.equal(result.timedOut, false)
 })
 
 test('refresh:换源后执行面即时收紧(已删 id 拒绝,新清单生效)', async () => {

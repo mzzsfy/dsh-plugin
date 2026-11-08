@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { buildFaces } from '../src/web-routes.mjs'
 import { mountRoutes, cleanAllowlist } from '../src/api.mjs'
+import { analyzeSwitch } from './switch-structure.mjs'
 
 const src = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src', name), 'utf8')
 
@@ -176,11 +177,21 @@ test('client.js 契约:data-plugin 标记计数 = style 创建计数', () => {
   assert.ok(client.includes("type: 'checkbox'"))
 })
 
-test('client.js 契约:switch 结构(track+thumb 锚定 input)/ 前缀类名', () => {
-  const client = src('client.js')
-  assert.ok(client.includes("className: 'tg-switch'"))
-  assert.ok(client.includes("'tg-switch__track'"))
-  assert.ok(client.includes("'tg-switch__thumb'"))
+test('client.js 契约:switch 结构解析(input[type="checkbox"] + track > thumb)/ 前缀类名', () => {
+  // Given 客户端注入的开关 CSS/DOM
+  // When 解析源码结构(非 includes 类名)
+  // Then 根为 label,checkbox 是直接子节点且与 track 相邻,track 内含 thumb,状态选择器锚定 checkbox
+  const facts = analyzeSwitch(src('client.js'), 'tg')
+  assert.equal(facts.roots.length, 1, 'tg-switch 根元素缺失或不是 label')
+  const root = facts.roots[0]
+  assert.equal(root.root.tag, 'label')
+  assert.equal(root.input?.type, 'checkbox', '缺少 input[type="checkbox"] 控件语义')
+  assert.ok(root.track, '缺少 track 后裔')
+  assert.ok(root.thumbIndex >= 0, 'track 内缺少 thumb 后裔')
+  assert.ok(root.adjacent, 'input 与 track 必须相邻兄弟')
+  assert.ok(facts.css.trackRule && facts.css.thumbRule, 'track/thumb CSS 选择器缺失')
+  assert.ok(facts.css.checkedTrack && facts.css.checkedThumb, '选中态未锚定 checkbox 与 track/thumb')
+  assert.deepEqual(facts.css.bareStateSelectors, [], '状态选择器不得裸 input 锚定')
 })
 
 test('client.js 语法:node --check', async () => {

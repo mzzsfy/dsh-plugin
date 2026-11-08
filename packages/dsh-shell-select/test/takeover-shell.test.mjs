@@ -19,6 +19,8 @@ import {
   takeoverDecision,
 } from '../src/takeover.mjs'
 import { OFFICIAL_ROW_IDS } from '../src/guard-state.mjs'
+import { shellSelectExecutorFiber, shellSelectTakeoverTrace } from '../src/apply-state.mjs'
+import { PWSH_REDIRECT_DESCRIPTION } from '../src/agent-hints.mjs'
 import { ShellSelectExecutor } from '../src/executor.mjs'
 import { apply as mainApply } from '../src/index.js'
 
@@ -208,8 +210,8 @@ test('awaitOfficialExit:双行全退场(含收尾间隔)→ true;退场卡死 �
 
 // ── 接线层(W-1 ~ W-7):主行 apply 桩测 ─────────────────────────────────
 
-function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
-  const log = { warns: [], errors: [], infos: [], plugins: [], listeners: [] }
+function stubCtxOf(entries, { updateThrows = false, pluginError, llm } = {}) {
+  const log = { warns: [], errors: [], infos: [], plugins: [], listeners: [], fibers: [] }
   const ctx = {
     loader: loaderOf(entries),
     logger: {
@@ -220,11 +222,30 @@ function stubCtxOf(entries, { updateThrows = false, pluginError } = {}) {
     plugin: async (module, config) => {
       if (pluginError) throw pluginError
       log.plugins.push({ module, config })
-      // state=2 对齐宿主 cordis 激活态(挂载校验据它判定激活成功)
-      return { dispose: async () => {}, state: 2 }
+      // state=2 对齐宿主 cordis 激活态(挂载校验据它判定激活成功);
+      // effect 同契约为 fiber 级 disposer 通道(句柄退役自清挂这里)
+      const disposers = []
+      const fiber = {
+        state: 2,
+        effect: (execute) => {
+          const dispose = execute()
+          disposers.push(dispose)
+          return dispose
+        },
+        dispose: async () => {
+          for (const dispose of disposers.splice(0).reverse()) await dispose?.()
+        },
+      }
+      log.fibers.push(fiber)
+      return fiber
     },
     on: (event, listener) => {
       log.listeners.push({ event, listener })
+      return () => {}
+    },
+    // llm 服务缺席:请求缝隐藏按零动作跳过,不影响接管断言
+    inject: (services, callback) => {
+      callback({ llm, on: () => () => {} })
       return () => {}
     },
     effect: (fn) => fn(),
@@ -373,11 +394,9 @@ test('W-6 await-exit:禁用行退场完成后挂载(真实 setTimeout 微延迟)
   }
 })
 
-// ── volatile 陈旧问题:执行面刷新收口在 web 写路径(updateConfig 直调
-// ctx.shell.refresh),主行不监听宿主事件(真实链路 volatile-only 不重挂行、
-// 事件不达本包,投机监听已移除;挂载路径零监听即正确形态)──
-
-test('apply 挂载路径零宿主事件监听(refresh 收口在 web 写路径)', async () => {
+// H2 支撑:执行器句柄随 fiber 退役自清——主行被禁后残留的已退役句柄会让
+// guard 把"执行器不在场"误判为在场,吞掉官方行翻回启用时的代挂让位。
+test('执行器句柄退役自清:主行 fiber 卸载后句柄清空(陈旧句柄不得残留)', async () => {
   const realPlatform = process.platform
   Object.defineProperty(process, 'platform', { value: 'win32' })
   try {
@@ -386,7 +405,65 @@ test('apply 挂载路径零宿主事件监听(refresh 收口在 web 写路径)',
     const { ctx, log } = stubCtxOf([tool, sandbox])
     await mainApply(ctx, {})
     assert.equal(log.plugins.length, 1)
-    assert.equal(log.listeners.length, 0)
+    const fiber = shellSelectExecutorFiber.current
+    assert.equal(fiber, log.fibers[0], '挂载成功后句柄回填执行器 fiber')
+    // 主行被禁/卸载 → 执行器 fiber 退役
+    await fiber.dispose()
+    assert.equal(shellSelectExecutorFiber.current, undefined, '退役后不得残留已退役句柄')
+  } finally {
+    shellSelectExecutorFiber.current = undefined
+    Object.defineProperty(process, 'platform', { value: realPlatform })
+  }
+})
+
+// ── volatile 陈旧问题:执行面刷新收口在 web 写路径(updateConfig 直调
+// ctx.shell.refresh),主行不监听宿主事件(真实链路 volatile-only 不重挂行、
+// 事件不达本包,投机监听已移除;挂载路径零监听即正确形态)──
+
+test('apply 挂载路径不监听 refresh 类宿主事件(仅 agent/created 用于描述改写)', async () => {
+  const realPlatform = process.platform
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  try {
+    const tool = entryOf(TOOL_PWSH, { rawDisabled: true, disabled: true })
+    const sandbox = entryOf(PWSH_SANDBOX, { rawDisabled: true, disabled: true })
+    const { ctx, log } = stubCtxOf([tool, sandbox])
+    await mainApply(ctx, {})
+    assert.equal(log.plugins.length, 1)
+    assert.deepEqual(log.listeners.map((entry) => entry.event), ['agent/created'])
+  } finally {
+    Object.defineProperty(process, 'platform', { value: realPlatform })
+  }
+})
+
+// llm 就绪后请求缝生效并留轨迹;agent 创建后改写会话作用域 pwsh 的定义。
+test('请求缝与描述改写在 apply 接线层生效', async () => {
+  const realPlatform = process.platform
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  try {
+    class Adapter {
+      async stream(options) { return options }
+
+      async streamWithSnapshot(options) { return options }
+    }
+    const adapter = new Adapter()
+    const llm = { adapters: new Map([['fake', { adapter }]]) }
+    const tool = entryOf(TOOL_PWSH, { rawDisabled: true, disabled: true })
+    const sandbox = entryOf(PWSH_SANDBOX, { rawDisabled: true, disabled: true })
+    const { ctx, log } = stubCtxOf([tool, sandbox], { llm })
+    await mainApply(ctx, {})
+    const viaStream = await adapter.stream({ tools: [{ name: 'read' }, { name: 'pwsh' }] })
+    assert.deepEqual(viaStream.tools.map((entry) => entry.name), ['read'])
+    const viaPrepared = await adapter.streamWithSnapshot({ tools: [{ name: 'pwsh' }] })
+    assert.deepEqual(viaPrepared.tools, [])
+    // apply 开头会重置轨迹,断言只看本次 apply 的全量
+    const trace = shellSelectTakeoverTrace().map((entry) => entry.event)
+    assert.ok(trace.some((event) => event.includes('request-hide attached=1')), `缺少请求缝轨迹: ${trace.join(' | ')}`)
+    const created = log.listeners.find((entry) => entry.event === 'agent/created')
+    assert.notEqual(created, undefined)
+    const definition = { name: 'pwsh', description: 'Run PowerShell commands' }
+    created.listener({ agent: { ctx: { tools: { get: (name) => name === 'pwsh' ? definition : undefined } } } })
+    assert.equal(definition.description, PWSH_REDIRECT_DESCRIPTION)
+    assert.ok(shellSelectTakeoverTrace().some((entry) => entry.event.includes('pwsh 描述')))
   } finally {
     Object.defineProperty(process, 'platform', { value: realPlatform })
   }

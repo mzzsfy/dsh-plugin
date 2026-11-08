@@ -1,4 +1,15 @@
-import { WebSocket, WebSocketServer } from 'ws'
+import { createRequire } from 'node:module'
+
+// ws 解析失败只停总线,不拖垮宿主启动:消费方在 apply 里硬 import 本模块,
+// 任何顶层静态依赖缺失都会让整棵插件树的激活一起失败
+const require = createRequire(import.meta.url)
+let WebSocket = null
+let WebSocketServer = null
+try {
+  ({ WebSocket, WebSocketServer } = require('ws'))
+} catch (error) {
+  console.warn('[dsh-common-tools] ws 不可用, 总线与 presence 停用:', error?.message ?? error)
+}
 
 const REGISTRY_KEY = '__dshCommonTools'
 const BUS_ROUTE = '/api/bus/ws'
@@ -44,8 +55,9 @@ export function setupCommonTools(ctx) {
 
 function install(ctx, version) {
   const pluginName = requireName(ctx?.fiber?.entry?.options?.name, 'ctx.fiber.entry.options.name')
-  if (typeof ctx?.webServer?.registerUpgrade !== 'function') {
-    console.warn('[dsh-common-tools] webServer 缺少 registerUpgrade, 总线停用')
+  // 按能力探测而非"是否为 null":ws 半装或缺导出时拿到的是 undefined,同样不能进 createTransport
+  if (typeof WebSocketServer !== 'function' || typeof WebSocket?.OPEN !== 'number' || typeof ctx?.webServer?.registerUpgrade !== 'function') {
+    console.warn('[dsh-common-tools] 总线不可用(ws 缺失或 webServer 无 registerUpgrade), 降级为 noop')
     return { publish() {}, subscribe: () => () => {}, onPresence: () => () => {} }
   }
   const reg = (globalThis[REGISTRY_KEY] ??= {

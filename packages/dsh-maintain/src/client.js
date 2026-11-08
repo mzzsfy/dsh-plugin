@@ -516,20 +516,19 @@ function restartConfirmLabel(armed, activeWorkTotal) {
 
 // 运维区:两段式重启 + 托管环境说明。
 function OpsCard(props) {
-  const status = props.status
   return h('div', { className: 'dm-card' },
     h('div', { className: 'dm-card__title' }, '重启'),
     h('div', { className: 'dm-row' },
       h('button', {
         className: 'dm-btn dm-btn--danger',
-        disabled: !status.canRestart || props.restarting,
+        disabled: props.restarting,
         onClick: props.onRestart,
       }, restartConfirmLabel(props.armed, props.activeWorkTotal)),
-      !status.canRestart ? h('span', { className: 'dm-meta' }, '当前启动方式不支持就地重启') : null,
     ),
     h('div', { className: 'dm-meta' },
-      '重启依赖进程管理器(pm2 / systemd / supervisord / Kubernetes / 容器等)自动拉起;手动终端启动的进程不会自动恢复。',
-      '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。运行中的 agent 将被中断,会话已持久化,重开后可 resume。'),
+      '重启直接终止宿主进程,依赖进程管理器(pm2 / systemd / supervisor 托管循环等)自动拉起;手动终端启动的进程不会自动恢复。',
+      '在跑回合保持中断状态(不写结束记录),下次启动按中断收起;装了自动继续类插件会从断点续跑。',
+      '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。'),
   )
 }
 
@@ -549,7 +548,7 @@ function UpgradeDialog(props) {
   const changeLine = buildInstallChangeLine(status)
   const [autoRestart, setAutoRestart] = useState(true)
   const finishLine = autoRestart
-    ? '安装完成后宿主将正常退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'
+    ? '安装完成后宿主将立即退出切换版本:托管启动时由进程管理器拉起,手动终端启动时需你重新运行宿主;页面随宿主恢复自动刷新。'
     : '安装完成后宿主继续运行当前版本,需手动重启宿主加载新版本;重启前不能再次发起升级。'
   return h('div', { className: 'dm-dialog__mask', onClick: props.onCancel },
     h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
@@ -978,7 +977,7 @@ function MaintainApp() {
       onRegistryBase,
     }),
     h(UpgradeCard, { status, restartArmed, restarting, activeWorkTotal, onRestart }),
-    h(OpsCard, { status, armed: restartArmed, restarting, activeWorkTotal, onRestart }),
+    h(OpsCard, { armed: restartArmed, restarting, activeWorkTotal, onRestart }),
     upgradeDialogOpenLive ? h(UpgradeDialog, {
       status,
       onCancel: () => setUpgradeDialogOpen(false),

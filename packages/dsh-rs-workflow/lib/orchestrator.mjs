@@ -35,6 +35,17 @@ export function registerOrchestrator(ctx, config) {
   // 连续拒单计数与现役 run:行实例内存态,进程重启清零
   const rejectCounts = new Map()
   const activeRuns = new Map()
+  // 本行创建的驱动器:行卸载/热重载后必须停止,否则旧实例继续派发并写盘,
+  // 与新实例的启动收敛互写(页签显示已取消而记录被改回 running/completed)
+  const ownedRuns = new Set()
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => () => {
+      for (const runId of ownedRuns) {
+        try { registry.drivers.get(runId)?.cancel?.() } catch { /* 驱动器已终态或已移除 */ }
+      }
+      ownedRuns.clear()
+    }, 'rs-workflow orchestrator: 退役本行驱动器')
+  }
 
   // 会话现役 run:同会话同一时刻至多一个未终态 run(守门与工具同源,故在 inject 外共享)
   const agentIdOf = (agent) => String(agent?.id ?? '')
@@ -108,6 +119,7 @@ export function registerOrchestrator(ctx, config) {
         engine, slots: configOf().slots ?? {}, budgets: configOf().budgets ?? {},
         parent: agent,
       })
+      ownedRuns.add(driver.runId)
       // 先拉段后注册:jobs.start 抛错时 activeRuns 不占位(段收敛 failed 已终态,不阻塞后续 start);
       // 拉段成功但未注册的窗口内 resume 幂等(skipped),无漂移
       startSegmentJobSafe(agent, driver)
@@ -210,6 +222,7 @@ export function registerOrchestrator(ctx, config) {
             parent: agent,
           })
           rejectCounts.delete(agentIdOf(agent))
+          ownedRuns.add(driver.runId)
           // 断点续跑挂靠:本会话 agent 成为推进器,board resume-from 据此重建种子 run
           registerInitiator(agentIdOf(agent), (record, fromStepId, inputs) => startSeedRun(agent, record, fromStepId, inputs))
           ensureResumer(agent)

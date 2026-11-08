@@ -34,7 +34,19 @@ export function shellSelectTakeoverTrace() {
 }
 
 // 主行执行器 fiber 句柄(HOST-022 让位通道):mountExecutor 挂载成功后回填,
-// guard 监视官方行翻回启用时 dispose 让位;执行器不在场(guard 代挂态/挂载
-// 失败)恒 undefined,guard 零动作不与代挂官方链抢权。模块级单例,主行 fiber
-// 生命周期内有效。
+// guard 监视官方行翻回启用时经 retireShellSelectExecutorFiber 退役让位;
+// 执行器不在场(guard 代挂态/挂载失败)恒 undefined,guard 零动作不与代挂官方
+// 链抢权。模块级单例,主行 fiber 生命周期内有效。
 export const shellSelectExecutorFiber = { current: undefined }
+
+/**
+ * 退役执行器句柄:清空记账并返回退役前的句柄(无句柄返回 undefined)。
+ * 唯一清空路径——执行器 fiber 自卸载(主行被禁/卸载)与 guard 让位 dispose
+ * 共用。已退役句柄残留会让 guard 把"执行器不在场"误判为在场,吞掉官方行
+ * 翻回启用时的代挂让位(0.2.2 写事务 HOST-022 分支实证)。
+ */
+export function retireShellSelectExecutorFiber() {
+  const fiber = shellSelectExecutorFiber.current
+  shellSelectExecutorFiber.current = undefined
+  return fiber
+}

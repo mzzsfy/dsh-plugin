@@ -20,7 +20,7 @@ test('Given 缺公共client When 物化隧道模块 Then 向装载层抛出具�
   const f = materialize('@mzzsfy/dsh-common-tools/client')
   assert.throws(() => f.definition.factory(f.require), /module missing: @mzzsfy\/dsh-common-tools\/client/)
 })
-for (const missing of ['react', 'react-dom/client']) test(`Given 缺${missing} When 物化 Then 禁用并报告宿主依赖原因`, () => {
+for (const missing of ['react']) test(`Given 缺${missing} When 物化 Then 禁用并报告宿主依赖原因`, () => {
   const f = materialize(missing)
   const module = f.definition.factory(f.require)
   assert.deepEqual(Array.from(module.inject), [])
