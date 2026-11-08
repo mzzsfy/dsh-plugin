@@ -256,13 +256,19 @@ verifyTree 双消费形态见 INV-1:编排器断言期望版本,启动/触发对
 - **W-1** 触发前置对拍:verifyTree(磁盘树, 闭包自洽) 不过 → 409 拒绝
   升级,红牌引导修复;禁止从混装树出发二次升级(事故现场形态)。磁盘领先
   运行(restartPending)自洽 → 放行,不置红牌(T-8)。
-- **W-1b** 退出死线兜底:宿主 appExit 关停链 dispose 正常落定后只置
+- **W-1b** 退出死线兜底(已废止,见 W-1c):宿主 appExit 关停链 dispose 正常落定后只置
   `process.exitCode` 依赖事件循环自然排空,残留句柄(未关 socket/timer/
   子进程管道)会钉住循环使进程僵活且无任何兜底(实测 30s+ 不退);
   `scheduleHostExit` 在调度退出的同时武装 unref 死线
   (`RESTART_DELAY_MS + 宿主关停宽限 + 排空余量`),到期宿主仍在则
   倾倒活跃句柄概要后 `process.exit(0)` 强杀;正常退出路径进程先死,死线
   自然失效,零额外开销。
+- **W-1c** 退出直杀(替代 W-1b):appExit 关停链的 dispose 会把在跑回合
+  收成 `turn/end {kind:'aborted', reason:{kind:'disposed'}}`,自动继续类
+  插件视 `aborted` 为人为停止,重启后不续跑;改为延迟到点直接终止进程,
+  回合停在 `turn/start`,下次启动由会话日志收尾补 `interrupted` 后续跑。
+  死线兜底随之失去意义(直杀无排空过程),常量与句柄倾倒一并移除;代价是
+  disposer 不执行,工具子进程与终端不随重启清理。
 - **W-2** 触发序列(Windows):W-1 通过 → 采集自身 CreationDate → 三信号
   写入(lock/gate/status=running)→ 快照复制 `$DSH_HOME` → PowerShell
   `Invoke-CimMethod` spawn(显式传参清单见编排器输入;ReturnValue 非 0 或

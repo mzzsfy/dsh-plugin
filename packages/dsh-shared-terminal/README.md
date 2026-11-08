@@ -74,6 +74,6 @@ npm test -- /path/to/isolated-dsh-host
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐格证据见本包 `兼容性测试.md`,轮次汇总见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)。
 
-dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5` 与 `0.2.2-rc.1`(dshReleases `compatible`)。
+dsh `0.2.1-rc.2` 起官方 Controller 移除 `write`/`resize` 公开方法,终端输入改经 `attach` 命令帧通道(gateway 侧 uplink):本包自持 attach 泵适配——工具 `write` 经 `controller.terminal(agent,id).attach()` 建立插件侧附着,命令帧 sequence 按附着世代严格递增(空闲冷却释放与重抢后随新附着重置);read-only(用户接管)与 detached(附着流断)触发自动重抢一次,重抢仍失败返回 `TERMINAL_ERROR` 并提示重试;版本白名单已纳入 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4`、`0.2.1-rc.5` 与 `0.2.2-rc.1`(dshReleases `compatible`)。逐格断言、精确版本允许表与 D01-D15 维度适用表见本包 `兼容性测试.md`。
