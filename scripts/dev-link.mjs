@@ -58,12 +58,16 @@ const REGISTRY = 'https://registry.npmjs.org'
 // dev 热更新:hmr 行由本脚本在 home 补丁层维护(市场只写 profile 层,互不冲突)。
 // root 指向仓库 packages;junction 挂载下 Node 按 realpath 解析模块,变更即命中。
 // 测试/文档/依赖目录不参与重载,防编辑风暴。
+// 防抖窗口:官方默认 100ms 是编辑器语义(一次保存),合并不了 agent 的多文件批量写入;
+// 5000ms 把一次会话内的连续编辑(含测试轮次)收敛成一次重载,代价是保存后生效延迟。
+const HOT_DEBOUNCE_MS = 5000
 const HOT_MARK_BEGIN = '# >>> dsh-plugin dev-hmr(本块由 scripts/dev-link.mjs 维护,勿手工编辑)'
 const HOT_MARK_END = '# <<< dsh-plugin dev-hmr'
 const hotRow = (repoRoot) => `${HOT_MARK_BEGIN}
 - id: hmr
   disabled: false
   config:
+    debounce: ${HOT_DEBOUNCE_MS}
     root:
       - ${repoRoot.replace(/\\/g, '/')}/packages
     ignored:
