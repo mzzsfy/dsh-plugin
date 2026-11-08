@@ -33,16 +33,9 @@ const CHECK_TIMEOUT_MS = 20 * 1000
 // 版本更新内容缓存上限:长期运行中通道切换持续产生新键,无上限则缓存无界;
 // 超限删最旧(Map 迭代序即插入序,命中不重插);导出仅供测试
 export const RELEASE_NOTES_CACHE_MAX = 20
-// 响应发出到执行退出的延迟:保证浏览器收到 200 并进入重启等待态,进程才离场;
+// 响应发出到执行退出的延迟:保证浏览器收到回执并进入重启等待态,进程才离场;
 // 导出仅供测试计算延迟窗口等待时长
 export const RESTART_DELAY_MS = 2 * 1000
-// 宿主关停宽限与排空余量:appExit 关停链 dispose 落定后宿主只置 exitCode 依赖事件循环
-// 自然排空,残留句柄会钉住循环致进程僵活(实测 30s+ 不退);死线强杀兜底覆盖该场景。
-// 宿主宽限镜像宿主 0.2.1-rc.2 关停控制器 PROCESS_SHUTDOWN_TIMEOUT_MS,宿主升级
-// 改宽限时须同步调整,漂移过短误杀正常关停、过长延长僵活;死线 = 调用方延迟 + 二者;导出仅供测试
-export const HOST_SHUTDOWN_GRACE_MS = 5 * 1000
-export const HOST_DRAIN_MARGIN_MS = 1 * 1000
-export const RESTART_DEADLINE_MS = RESTART_DELAY_MS + HOST_SHUTDOWN_GRACE_MS + HOST_DRAIN_MARGIN_MS
 // 轮询底层计时粒度;导出仅供 parity 测试与 client 提示文案对拍
 export const TICK_MS = 60 * 1000
 // 轮询间隔上界:超大值会让到期时间戳溢出为 Infinity,轮询静默失效
@@ -348,13 +341,6 @@ export function apply(ctx, config, dependencies = {}) {
     await editor.edit(entry, (current) => ({ ...current, ...patch }))
     return true
   }
-  // 启动器在挂载前提供 appExit(有界退出,5 秒兜底强制);缺失时重启能力关闭,
-  // 受管升级切换成功必须正常退出交第三方拉起,无 appExit 时升级在切换前拒绝
-  const exit = ctx.get('appExit')
-  if (typeof exit !== 'function') {
-    console.warn('[dsh-maintain] 启动器未提供 appExit,就地重启与受管升级切换能力关闭(面板按钮禁用)')
-  }
-
   // 运行版本探测:服务面可注入受控实现(测试面),缺省走真实盘读;
   // 约定恒 resolve 不 reject,真实实现全失败回 null,注入侧经 then 同步抛错同折进 rejection
   function resolveCurrentHostVersion() {
@@ -479,7 +465,6 @@ export function apply(ctx, config, dependencies = {}) {
       checkError: snapshot.error,
       upgrade,
       activeWork: collectActiveWork(ctx),
-      canRestart: typeof exit === 'function',
     }
   }
 
@@ -499,29 +484,23 @@ export function apply(ctx, config, dependencies = {}) {
   const buildLayout = typeof dependencies.createLayout === 'function'
     ? dependencies.createLayout
     : createLayout
+  // 退出执行点:注入优先(测试),缺省终止本进程
+  const exitHost = typeof dependencies.exitHost === 'function'
+    ? dependencies.exitHost
+    : (code) => process.exit(code)
 
   // 宿主退出调度唯一入口:手动重启(HTTP 入口)与升级落定(内部入口)共用,
-  // 置双向互斥标记、留审计、延迟 exit(0)。调度窗口内升级被 409,手动重启幂等
+  // 置双向互斥标记、留审计、延迟终止进程。调度窗口内升级被 409,手动重启幂等
   function scheduleHostExit({ detail, delayMs }) {
     restartScheduled = true
     maintenance.active = true
     audit('restart', 'triggered', detail + ' delayMs=' + delayMs)
     // 退出延迟与响应冲刷解耦:客户端在冲刷完成前断连会让 end 回调失效,绑定其上会使重启悬空;
     // 同步发出响应后延迟退出,延迟本身保证回执先于进程离场送达
-    setTimeout(() => exit(0), delayMs)
-    // 死线强杀兜底:宿主 appExit 关停链 dispose 正常落定后只置 exitCode 依赖事件循环
-    // 自然排空,残留句柄钉住循环会让进程僵活且无任何兜底;正常退出时进程先死,死线自然失效。
-    // 死线从调用方延迟推导,防未来调用方传更大延迟时死线先行误杀;unref:兜底自身不反向钉住循环。
-    // process._getActiveHandles 为非公开 API,仅死线诊断路径使用,触发即倾倒活跃句柄概要供定位钉住者
-    setTimeout(() => {
-      const handles = process._getActiveHandles().map((handle) => {
-        const ctor = handle && handle.constructor ? handle.constructor.name : typeof handle
-        const fd = handle && typeof handle === 'object' && Number.isFinite(handle.fd) ? handle.fd : null
-        return ctor + (fd !== null ? ' fd=' + fd : '')
-      })
-      console.warn('[dsh-maintain] 重启死线到期宿主仍未退出,强杀兜底生效;活跃句柄: ' + (handles.length > 0 ? handles.join(', ') : '(无)'))
-      process.exit(0)
-    }, delayMs + HOST_SHUTDOWN_GRACE_MS + HOST_DRAIN_MARGIN_MS).unref()
+    // 不交 appExit:其关停链 dispose 会把在跑回合收成 turn/end aborted(disposed),
+    // 自动继续只认非人为中断(error/interrupted/max-tokens),重启后不会续跑;
+    // 直接终止进程让日志停在 turn/start,下次启动由 interruptedTurnClosers 补 interrupted 后续跑
+    setTimeout(() => exitHost(0), delayMs)
   }
 
   // 受管升级全流程:布局发现→编排(安装/验证/切换,锁与阶段持久化在编排器内)
@@ -572,17 +551,14 @@ export function apply(ctx, config, dependencies = {}) {
         finishedAt: Date.now(),
       })
       audit('upgrade', 'ok', 'operationId=' + last.operationId + ' slot=' + last.slot + ' phase=' + last.phase)
-      // 切换成功按单次 autoRestart 意图收尾:开=调度正常退出交托管方式拉起;
+      // 切换成功按单次 autoRestart 意图收尾:开=调度退出交托管方式拉起;
       // 关=保留旧宿主继续跑,等待手动重启(重启按钮同链路),期间下一轮升级被运行路径不一致拒绝
       if (autoRestart === false) {
         last.exitScheduled = false
         audit('upgrade', 'switched-manual-restart', 'operationId=' + last.operationId + ' 自动重启已关闭,等待手动重启')
-      } else if (typeof exit === 'function') {
+      } else {
         last.exitScheduled = true
         scheduleHostExit({ detail: 'reason=managed-upgrade-switched operationId=' + last.operationId, delayMs: RESTART_DELAY_MS })
-      } else {
-        last.error = '启动器未提供 appExit,已切换但无法退出;请手动重启'
-        audit('upgrade', 'exit-missing', 'operationId=' + last.operationId)
       }
     } catch (error) {
       last.ok = false
@@ -718,7 +694,7 @@ export function apply(ctx, config, dependencies = {}) {
           sendJson(res, 400, { error: 'autoRestart 必须是布尔值或缺省' })
           return
         }
-        // 与重启调度双向互斥:restartScheduled 置位到 exit(0) 执行的窗口内触发升级,
+        // 与重启调度双向互斥:restartScheduled 置位到进程终止的窗口内触发升级,
         // 切换后的退出会与新宿主交错
         if (upgrade.running || restartScheduled) {
           audit('upgrade', 'rejected', restartScheduled ? 'reason=restart-scheduled' : 'reason=running')
@@ -728,11 +704,6 @@ export function apply(ctx, config, dependencies = {}) {
         if (managedInstall.error !== null) {
           audit('upgrade', 'rejected', 'reason=managed-unavailable')
           sendJson(res, 409, { error: '受管安装不可用: ' + managedInstall.error })
-          return
-        }
-        if (typeof exit !== 'function') {
-          audit('upgrade', 'rejected', 'reason=no-appExit')
-          sendJson(res, 409, { error: '启动器未提供 appExit,切换后无法退出,升级被拒绝' })
           return
         }
         // 活跃工作门控(fail-closed):检测面缺失即拒绝,不以放行冒充弱一致窗口;
@@ -761,7 +732,7 @@ export function apply(ctx, config, dependencies = {}) {
       path: API_PATHS.RESTART,
       handler: route('POST', WRITE, async (req, res) => {
         // body 读取必须在全部门控之前:幂等检查到 scheduleHostExit 置位之间不得插入
-        // await,否则并发请求双双越过幂等门,双重调度 exit
+        // await,否则并发请求双双越过幂等门,双重调度退出
         const rawBody = await readBody(req)
         // 'null' 字面量解析为 null:按空体处理,防 null.force 形态的内部错误外泄
         const requestBody = rawBody ? (JSON.parse(rawBody) || {}) : {}
@@ -770,11 +741,6 @@ export function apply(ctx, config, dependencies = {}) {
         if (upgrade.running) {
           audit('restart', 'rejected', 'reason=upgrade-running')
           sendJson(res, 409, { error: '升级进行中,禁止重启;等待升级完成后重试' })
-          return
-        }
-        if (typeof exit !== 'function') {
-          audit('restart', 'rejected', 'reason=no-appExit')
-          sendJson(res, 500, { error: '启动器未提供 appExit,无法重启' })
           return
         }
         if (restartScheduled) {
