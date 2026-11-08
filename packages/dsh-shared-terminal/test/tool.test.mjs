@@ -227,6 +227,16 @@ test('Given current Session terminals, When listing, Then metadata is session sc
   assert.deepEqual(result.terminals, [{ terminal_id: 'term-a', title: 'bash', cwd: '/work', state: 'running', cols: 80, rows: 24, attached: true }])
 })
 
+test('Given an attach-era pump, When listing, Then attachment comes from the pump instead of Controller info', async () => {
+  const row = { id: 'term-a', title: 'bash', cwd: '/work', cols: 80, rows: 24, state: 'running' }
+  const controller = makeController({ list() { return [row] } })
+  const pumpFactory = { attachedById(sessionId, id) { return sessionId === 'session-a' && id === 'term-a' } }
+  const result = await makeTool(controller, undefined, pumpFactory).execute({ action: 'list' }, exec)
+  assert.equal(result.terminals[0].attached, true)
+  const idle = makeTool(controller, undefined, { attachedById: () => false }).execute({ action: 'list' }, exec)
+  assert.equal((await idle).terminals[0].attached, false)
+})
+
 test('Given a terminal id and N, When reading, Then it calls screen adapter and returns visible text', async () => {
   const controller = makeController()
   const reads = []

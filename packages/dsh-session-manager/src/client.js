@@ -123,6 +123,20 @@ const CSS = [
   '  border:1px solid var(--dsw-alias-border-l2);',
   '  background:transparent; color:inherit; font:inherit; }',
   '.sm-cfg__field input:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:0; }',
+  // 列表瘦身开关:原生 checkbox 保语义与可访问性,视觉由 track/thumb 呈现
+  '.sm-switch { display:inline-flex; align-items:center; gap:8px; min-height:28px; cursor:pointer;',
+  '  font:var(--dsw-font-xxs-12, 12px/18px sans-serif); color:var(--dsw-alias-label-caption); }',
+  '.sm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
+  '.sm-switch__track { position:relative; flex-shrink:0; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
+  '  background:transparent; border:1px solid var(--dsw-alias-border-l2); transition:background 0.15s,border-color 0.15s; }',
+  '.sm-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+  '  background:var(--dsw-alias-label-caption); transform:translateY(-50%); transition:left 0.15s,background 0.15s; }',
+  '.sm-switch:hover .sm-switch__track { border-color:var(--dsw-alias-state-business-primary); }',
+  '.sm-switch input[type="checkbox"]:checked + .sm-switch__track { background:var(--dsw-alias-state-business-primary); border-color:var(--dsw-alias-state-business-primary); }',
+  '.sm-switch input[type="checkbox"]:checked + .sm-switch__track .sm-switch__thumb { left:17px; background:#fff; }',
+  '.sm-switch input[type="checkbox"]:focus-visible + .sm-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
+  '.sm-switch:has(input[type="checkbox"]:disabled) { opacity:0.5; cursor:not-allowed; }',
+  '@media (prefers-reduced-motion: reduce) { .sm-switch__track, .sm-switch__thumb { transition:none; } }',
 ].join('\n')
 
 const UNARCHIVE_URL = '/api/session-manager/unarchive'
@@ -136,6 +150,11 @@ const STATUS_URL = '/api/session-manager/status'
 // 删除确认链文案:两击行内确认后弹窗强提示,弹窗内确认才发请求。
 // 删除产物不可再生,其他插件(用量统计等)依赖会话产物,删后其会话级数据一并消失
 const DELETE_BUTTON_TITLE = '删除会话产物会影响其他插件的工作(用量统计等依赖会话产物);若无特殊需求,请不要删除。删除需再次行内确认与弹窗确认。'
+// 行操作按钮悬停说明:文案与行为同源维护,由源码契约测试锁定
+const RESTORE_BUTTON_TITLE = '把该会话从归档移回会话列表;恢复后 10 分钟内暂停自动归档,保护「恢复 → 首条消息」窗口,期间发言即恢复正常活跃计时。'
+const REMOUNT_BUTTON_TITLE = '把这条已删除记录对应的会话重新挂回列表:产物仍在原位置时直接挂载,产物已进系统回收站时先还原再挂载。'
+const FORGET_BUTTON_TITLE = '只移除这条已删除记录,不动磁盘上的会话产物;用于产物已手动找回、或不再需要追踪的情况。'
+const MORE_BUTTON_TITLE = '展开该工作区剩余的归档会话;只改变面板显示条数,不改变任何会话的归档状态。'
 const DELETE_DIALOG_TITLE = '确认删除该会话?'
 const DELETE_DIALOG_BODY_PREFIX = '即将删除会话「'
 const DELETE_DIALOG_BODY_SUFFIX = '」。'
@@ -347,7 +366,7 @@ function ArchiveRow(props) {
       ]
     : [
         h('button', { key: 'delete', className: 'sm-btn sm-btn--danger', disabled: busy, title: DELETE_BUTTON_TITLE, onClick: props.onDelete }, '删除'),
-        h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onUnarchive }, '恢复'),
+        h('button', { key: 'restore', className: 'sm-btn sm-btn--restore', disabled: busy, title: RESTORE_BUTTON_TITLE, onClick: props.onUnarchive }, '恢复'),
       ]
   return h('div', {
     className: 'sm-row' + (armed ? ' sm-row--armed' : '') + (busy ? ' sm-row--busy' : ''),
@@ -402,8 +421,8 @@ function DeletedRow(props) {
     h('span', { key: 'meta', className: 'sm-row__time', title: new Date(row.deletedAt).toLocaleString() }, fmtTime(row.deletedAt)),
     h('span', { className: 'sm-row__title', title: row.title }, row.title),
     h('div', { className: 'sm-row__actions' },
-      h('button', { key: 'remount', className: 'sm-btn sm-btn--restore', disabled: busy, onClick: props.onRemount }, '重新挂载'),
-      h('button', { key: 'forget', className: 'sm-btn', disabled: busy, onClick: props.onForget }, '移除记录'),
+      h('button', { key: 'remount', className: 'sm-btn sm-btn--restore', disabled: busy, title: REMOUNT_BUTTON_TITLE, onClick: props.onRemount }, '重新挂载'),
+      h('button', { key: 'forget', className: 'sm-btn', disabled: busy, title: FORGET_BUTTON_TITLE, onClick: props.onForget }, '移除记录'),
     ),
     h('span', { className: 'sm-row__path', title: row.path }, '原位置 ' + row.path),
   )
@@ -554,7 +573,7 @@ function SessionManagerApp(props) {
   // 免得数组子节点内无 key 元素随页扩位触发不必要的卸载重挂
   const expandMore = (remaining, onMore) => remaining <= 0
     ? null
-    : h('button', { key: 'more', className: 'sm-more', onClick: onMore }, '展开更多(剩 ' + remaining + ' 条)')
+    : h('button', { key: 'more', className: 'sm-more', title: MORE_BUTTON_TITLE, onClick: onMore }, '展开更多(剩 ' + remaining + ' 条)')
 
   // 主列表(最近归档):固定首页不翻页,尾部「按工作区浏览」入口跳转二级视图看全部
   const recentPage = pageArchiveRows(rows, ARCHIVE_PAGE_SIZE)
@@ -668,11 +687,13 @@ function SessionManagerApp(props) {
 const ARCHIVE_OVERVIEW_TITLE = '超过阈值天数未活跃的会话自动移入归档;触发时机为新会话创建、插件启动与周期检查;归档会话在本面板管理,可恢复或删除;恢复后 10 分钟内暂停自动归档,期间发言即恢复正常活跃计时。'
 const ARCHIVE_DAYS_TITLE = '会话超过该天数未活跃(产物无更新)即自动归档,空白(无消息)会话不参与归档;0 = 关闭自动归档。仅对产物可读的会话评估,产物不可读的跳过以免误归档,已归档的会话不会重复处理。'
 const ARCHIVE_INTERVAL_TITLE = '周期检查的间隔小时数,到期会话在下一轮检查时归档;0 = 关闭周期检查(新会话创建与插件启动时的检查不受影响);调小最迟等新间隔即可提前触发,调大自下一轮排期起生效。'
+const LIST_SLIM_TITLE = '会话列表瘦身:列表接口原本把每个会话的完整投影快照(上下文请求头、回合大纲等)一并下发,会话多时单次响应数十 MB、服务端重建要数十秒,每次打开页面都重来一遍。开启后只下发列表真正用到的字段并缓存结果,重复打开不再重建,响应体积下降九成以上;被裁掉的字段在会话详情里照旧完整返回。关闭即恢复原始行为,不影响归档、删除等其它功能。'
 
 // 自动归档配置:阈值天数与检查周期小时数,数值语义,失焦或 Enter 单字段即时提交;
 // 值存宿主 settings(与评估逻辑同源,0 = 关闭),非法输入前端拒绝不发包,
 // 服务端失败后回读生效值回滚显示
 const AUTO_ARCHIVE_URL = '/api/session-manager/auto-archive'
+const LIST_SLIM_URL = '/api/session-manager/list-slim'
 
 // 提交判定三态(镜像 core.mjs classifyAutoArchiveInput):noop 值未变 /
 // invalid 非非负整数 / post 可提交;受控输入下显示值随击键同步,提交守卫
@@ -685,29 +706,30 @@ function classifyAutoArchiveInput(committedText, text) {
   return { action: 'post', value }
 }
 
+// 面板状态:数值项取字符串供受控输入,开关项取布尔
+const configStateOf = (archive, slim) => ({
+  days: String(archive.days),
+  intervalHours: String(archive.intervalHours),
+  enabled: slim.enabled !== false,
+})
+
 function AutoArchiveConfig() {
   const [state, setState] = useState(null)
   // 已提交值快照:非法输入与保存失败的回滚基准,与编辑中的显示值分离
   const committedRef = React.useRef(null)
   useEffect(() => {
-    api(AUTO_ARCHIVE_URL)
-      .then((payload) => {
-        if (!payload) return
-        const next = { days: String(payload.days), intervalHours: String(payload.intervalHours) }
-        committedRef.current = next
-        setState(next)
-      })
-      .catch((error) => { console.warn('[session-manager] 自动归档配置读取失败', error) })
+    void refresh()
   }, [])
+  // 两个接口合并成一个面板状态:数值项与开关项一次读齐,提交后各自回读
   function refresh() {
-    return api(AUTO_ARCHIVE_URL)
-      .then((payload) => {
-        if (!payload) return
-        const next = { days: String(payload.days), intervalHours: String(payload.intervalHours) }
+    return Promise.all([api(AUTO_ARCHIVE_URL), api(LIST_SLIM_URL)])
+      .then(([archive, slim]) => {
+        if (!archive || !slim) return
+        const next = configStateOf(archive, slim)
         committedRef.current = next
         setState(next)
       })
-      .catch((error) => { console.warn('[session-manager] 自动归档配置回读失败', error) })
+      .catch((error) => { console.warn('[session-manager] 面板配置回读失败', error) })
   }
   function commit(field, text) {
     const committed = committedRef.current
@@ -735,6 +757,20 @@ function AutoArchiveConfig() {
         void refresh()
       })
   }
+  // 开关提交:布尔值直接落 settings,成功后按回显值收敛,失败回读生效值
+  function commitEnabled(next) {
+    api(LIST_SLIM_URL, { method: 'POST', body: JSON.stringify({ enabled: next }) })
+      .then((payload) => {
+        const saved = payload.enabled !== false
+        committedRef.current = { ...committedRef.current, enabled: saved }
+        setState((prev) => (prev === null ? prev : { ...prev, enabled: saved }))
+        toast(saved ? '会话列表瘦身已开启' : '会话列表瘦身已关闭')
+      })
+      .catch(() => {
+        toast('会话列表瘦身开关保存失败', { kind: 'error' })
+        void refresh()
+      })
+  }
   if (state === null) return null
   const numberInput = (field) => h('input', {
     type: 'number', min: 0, step: 1, value: state[field],
@@ -747,6 +783,16 @@ function AutoArchiveConfig() {
     h('span', { title: ARCHIVE_OVERVIEW_TITLE }, '自动归档'),
     h('label', { className: 'sm-cfg__field', title: ARCHIVE_DAYS_TITLE }, '阈值', numberInput('days'), '天未活跃(0 关闭)'),
     h('label', { className: 'sm-cfg__field', title: ARCHIVE_INTERVAL_TITLE }, '检查周期', numberInput('intervalHours'), '小时(0 关闭)'),
+    h('label', { className: 'sm-switch', title: LIST_SLIM_TITLE },
+      h('input', {
+        type: 'checkbox',
+        checked: state.enabled,
+        'aria-label': '会话列表瘦身',
+        onChange: (event) => commitEnabled(event.target.checked),
+      }),
+      h('span', { className: 'sm-switch__track' }, h('span', { className: 'sm-switch__thumb' })),
+      h('span', { title: LIST_SLIM_TITLE }, '会话列表瘦身'),
+    ),
   )
 }
 

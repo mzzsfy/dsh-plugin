@@ -84,7 +84,7 @@ export const tushare = {
       seen.add(row.ts_code)
       const security = securities.get(row.ts_code)
       items.push(normalizeQuote({ securityId: security.id, last: row.close, previousClose: row.pre_close, open: row.open, high: row.high, low: row.low,
-        volume: row.vol == null ? null : String(row.vol), volumeUnit: 'share', amount: row.amount == null ? null : String(row.amount), amountUnit: 'CNY',
+        volume: row.vol == null ? null : String(Number(row.vol) * 100), volumeUnit: 'share', amount: row.amount == null ? null : String(row.amount), amountUnit: 'CNY',
         providerInstanceId: request.providerInstanceId, adapterId: 'tushare', providerSymbol: row.ts_code, quoteAt: parseQuoteTime(row.trade_time), timestampKind: 'trade', receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown' }))
     }
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: request.securities.filter(s => !seen.has(symbol(s))).map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }

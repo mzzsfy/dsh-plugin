@@ -7,18 +7,61 @@ import { renderToStaticMarkup } from 'react-dom/server'
 async function loadClientWithReact() {
   let plugin
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const clock = createTestClock()
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(name => name === 'react' ? React : {}) } } }
-  vm.runInNewContext(source, { window, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto })
-  return { plugin }
+  vm.runInNewContext(source, { window, console, fetch: globalThis.fetch, AbortController, URLSearchParams, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval, crypto: globalThis.crypto })
+  return { plugin, clock }
+}
+// 测试时钟:定时器只在 advance/until 推进。负载下真实退避(4s retryAfter 缺省)与
+// 11s abort 门不再与用例超时窗口竞速;被杀用例的在飞链也不会以真实定时器形态泄漏
+function createTestClock() {
+  let now = 0, seq = 0
+  const pending = new Map()
+  const set = kind => (fn, ms = 0, ...rest) => {
+    // 0ms 是"当前执行段后立即"语义(真实时钟下一宏任务), 只接管长等待定时器;
+    // interval 的 0 周期同样走立即语义, 防 advance 内 at 恒 due 的活锁
+    if (ms === 0) return setImmediate(() => fn(...rest))
+    const id = ++seq
+    pending.set(id, { kind, fn, at: now + ms, ms, rest })
+    return id
+  }
+  const clear = id => pending.delete(id)
+  const drain = async () => { for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)) }
+  async function advance(step) {
+    now += step
+    // 循环:fetch 链的退避/abort 定时器注册晚于 fire, 反复排空-收集直到既无到期也无新注册
+    for (;;) {
+      await drain()
+      const due = [...pending].filter(([, t]) => t.at <= now).sort((a, b) => (a[1].at - b[1].at) || (a[0] - b[0]))
+      if (due.length === 0) return
+      for (const [id, t] of due) {
+        if (!pending.has(id)) continue
+        pending.delete(id)
+        if (t.kind === 'interval') pending.set(id, { ...t, at: t.at + t.ms })
+        t.fn(...t.rest)
+      }
+    }
+  }
+  // 推进直至谓词成立(防止对注册时点的猜测): 每 50ms 小步推进, 谓词真即停
+  async function until(predicate, budgetMs = 60 * 1000) {
+    for (;;) {
+      await drain()
+      if (predicate()) return true
+      await advance(50)
+      if ((now > budgetMs)) throw new Error(`测试时钟预算耗尽(${budgetMs}ms), pending=${pending.size}`)
+    }
+  }
+  return { setTimeout: set('timeout'), clearTimeout: clear, setInterval: set('interval'), clearInterval: clear, advance, until, elapsed: () => now, pendingCount: () => pending.size }
 }
 async function runtime(options = {}) {
   let plugin, reset, snapshotTask, listener, panel = 'stock-assistant'
   const messages = [], source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const clock = createTestClock()
   const window = { __ModuleLoader__: { load: entry => { plugin = entry.factory(() => ({})) } } }
-  vm.runInNewContext(source, { window, console, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval, clearInterval, crypto: globalThis.crypto, fetch: globalThis.fetch })
+  vm.runInNewContext(source, { window, console, AbortController, URLSearchParams, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval, clearInterval: clock.clearInterval, crypto: globalThis.crypto, fetch: globalThis.fetch })
   const doc = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} }
   const value = plugin.__testing.createPageRuntime({ layout: { panelInfo: { getSnapshot: () => ({ activePanelId: panel }), subscribe: fn => { listener = fn; return () => {} } } }, bus: { publish: m => messages.push(m), subscribe: (fn, opts) => { reset = opts.onReset; return () => {} } }, tools: { createSnapshotRefresh: fn => { snapshotTask = fn; return { refresh() {}, dispose() {} } } }, document: doc, ...options })
-  return { value, doc, messages, reset: () => reset(), pull: () => snapshotTask(), select: id => { panel = id; listener() } }
+  return { value, doc, messages, clock, reset: () => reset(), pull: () => snapshotTask(), select: id => { panel = id; listener() } }
 }
 const snapshot = (seq, epoch = 'a', routingRevision = 0) => ({ serverEpoch: epoch, snapshotSeq: seq, routingRevision, routeSelections: {}, quotes: { a: { quote: { last: String(seq) } } }, control: { revision: seq, watchlist: { order: [], items: {} } } })
 test('U07/U10 旧序号与退休Host epoch都不能回滚UI', async () => {
@@ -69,7 +112,7 @@ test('设置页空配置一键默认源填充草稿', async () => {
   const updates = []
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch) }
   renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  assert.match(renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} })), /启用默认数据源/)
+  assert.match(renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} })), /应用推荐配置/)
   assert.equal(updates.length, 0)
 })
 // 设置页信息架构: 递进区块+实例卡描述+反代端点+最近请求+概览横幅
@@ -84,10 +127,9 @@ test('设置页递进区块与实例可观测面渲染', async () => {
   assert.match(html, /市场与能力/, '区块2标题')
   assert.match(html, /显示偏好/, '区块3标题')
   assert.match(html, /东方财富公开接口/, '适配器一句话描述')
-  assert.match(html, /接口反代/, '反代端点区可见')
-  assert.match(html, /proxy\.corp\/em\/kline/, '已覆盖端点值回显')
-  assert.match(html, /运行状态/, '请求日志区可见')
-  assert.match(html, /quotes eastmoney/, '日志条目渲染')
+  // 反代与运行状态收在「配置」展开区里, 默认只显示摘要行
+  assert.match(html, /公开来源/, '摘要行标注公开来源')
+  assert.match(html, /配置/, '摘要行给出展开入口')
 })
 // E1: Given搜索报目录未就绪 When搜索页渲染 Then错误下方出现前往浏览市场引导
 test('搜索未就绪时引导前往浏览市场', async () => {
@@ -226,10 +268,16 @@ test('自选列表列权重与组合概览', async () => {
   const state = { view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('397.20', '1.27', '5.00'), [b.id]: q('1480.00', '2.84', '40.85') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
   assert.match(html, /2 只 · 2 涨 0 跌/, '组合概览条')
-  assert.match(html, /\+5\.00/, '涨跌额列存在')
+  assert.match(html, /\+5\.00/, '涨跌额随现价单元格展示')
+  assert.match(html, /\+1\.27%/, '涨跌幅胶囊')
+  assert.match(html, /ssb-row-sub/, '副行展示开/高/低/成交额/振幅')
+  assert.match(html, /ssb-kv/, '副行指标为键值对而非独立格子')
+  assert.match(html, /ssb-row/, '行渲染为紧凑行而非表格单元格')
   const rowSeg = html.slice(html.indexOf('腾讯控股'), html.indexOf('贵州茅台'))
-  assert.ok(!rowSeg.includes('延迟'), '来源延迟不再占主列（收进状态徽标 title）')
-  assert.match(rowSeg, /✓/, '健康徽标短形态')
+  assert.ok(!rowSeg.includes('延迟'), '来源延迟不再占主列（收进状态点 title）')
+  assert.match(rowSeg, /ssb-dot/, '健康态渲染为状态点')
+  assert.ok(!rowSeg.includes('✓'), '状态点不再占用文字列')
+  assert.match(rowSeg, /draggable="true"/, '手动序行可拖拽排序')
 })
 test('键盘邻移与穿透切换契约', async () => {
   const { plugin } = await loadClientWithReact()
@@ -265,41 +313,110 @@ test('设置Tab: 三分区独立保存+tablist', async () => {
   assert.ok(!html.includes('保存路由'), '默认 sources tab 不含②保存钮')
 })
 // 持仓成本盈亏: 行内盈亏%/详情成本块/概览持仓合计
+test('价格标记渲染与多笔成本均价', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex, marks) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, marks })
+  // 两笔成本 80 与 120, 等权均价 100; 现价 120 时均价口径的盈亏正好 +20%
+  const a = mk('XSHG:equity:600001', '甲股', '600001', 'XSHG', [{ id: 'm1', price: 80, kind: 'cost' }, { id: 'm2', price: 120, kind: 'cost' }, { id: 'm3', price: 150, kind: 'target' }])
+  const b = mk('XSHG:equity:600519', '乙股', '600519', 'XSHG', [])
+  const q = (last, change) => ({ quote: { last, previousClose: '1', change, changePct: '1', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
+  const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('120', '1'), [b.id]: q('50', '1') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(html, /持仓盈亏/, '详情盈亏块')
+  assert.match(html, /成本均价/, '多笔成本要有均价口径')
+  // 每条标记各自一行: 两笔成本 + 一条卖价
+  assert.equal([...html.matchAll(/class="ssb-mark-row"/g)].length, 3, '三个标记各占一行')
+  assert.match(html, /卖价/, '卖价标记要单独标识')
+  assert.match(html, /价格标记/, '详情要有标记编辑入口')
+})
+
 test('成本盈亏渲染', async () => {
   const { plugin } = await loadClientWithReact()
-  const mk = (id, name, code, ex, cost) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost })
-  const a = mk('XSHG:equity:600001', '甲股', '600001', 'XSHG', 100), b = mk('XSHG:equity:600519', '乙股', '600519', 'XSHG', null)
+  const mk = (id, name, code, ex, marks) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, marks })
+  const a = mk('XSHG:equity:600001', '甲股', '600001', 'XSHG', [{ id: 'm1', price: 100, kind: 'cost' }]), b = mk('XSHG:equity:600519', '乙股', '600519', 'XSHG', [])
   const q = (last, change) => ({ quote: { last, previousClose: '1', change, changePct: '1', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
   const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('120', '1'), [b.id]: q('50', '1') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
   assert.match(html, /\+20\.0%/, '成本100现价120盈亏20%')
   assert.match(html, /持仓盈亏/, '详情盈亏块')
-  assert.match(html, /成本价/, '详情成本设置入口')
+  assert.match(html, /价格标记/, '详情标记设置入口')
 })
-// 自选分组: 零侵入/组头统计/折叠/全局排序无组头
+// 自选分组: 置顶/各组/未分组都常显组头; 折叠; 全局排序保留分区但组内按该排序
 test('分组渲染与折叠', async () => {
   const { plugin } = await loadClientWithReact()
   const mk = (id, name, code, group) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost: null, group })
-  const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', ''), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒')
-  const q = { quote: { last: '10', previousClose: '1', change: '0.5', changePct: '5', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
-  const mkState = (sort, collapsed) => ({ view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
-  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('manual', {}), subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
-  const gi = html.indexOf('白酒')
-  assert.ok(gi >= 0, '组名出现: ' + (gi < 0 ? html.slice(0, 0) : html.slice(gi - 60, gi + 120)))
-  assert.match(html, /aria-expanded="true"/, '组头可折叠语义')
-  const collapsed = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('manual', { 白酒: true }), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
-  const seg = collapsed.slice(collapsed.indexOf('白酒 ·'))
-  assert.ok(!seg.includes('甲股'), '折叠后组员隐藏')
+  const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', '能源'), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒'), d = mk('XSHG:equity:600003', '丁股', '600003', '')
+  const qOf = pct => ({ quote: { last: '10', previousClose: '1', change: '0.5', changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
+  // 每个状态各自克隆一份 items: 共用引用的话, 前一个用例改 group 会污染后面的断言
+  const mkState = (sort, collapsed, groups = { [a.id]: '白酒', [b.id]: '能源', [c.id]: '白酒', [d.id]: '' }) => ({
+    view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null,
+    data: {
+      control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id, d.id], items: structuredClone({ [a.id]: { ...a, group: groups[a.id] }, [b.id]: { ...b, group: groups[b.id] }, [c.id]: { ...c, group: groups[c.id] }, [d.id]: { ...d, group: groups[d.id] } }) }, preferences: {} },
+      // 涨幅刻意让「能源」在降序里排到最前: 只有这样段序才会与自选顺序相反,
+      // 否则「段序固定」这条断言在错误实现下也成立
+      quotes: { [a.id]: qOf('1'), [b.id]: qOf('9'), [c.id]: qOf('5'), [d.id]: qOf('3') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false,
+    },
+  })
+  const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+
+  const manual = render(mkState('manual', {}))
+  // 手动序: 置顶区没有成员就不出组头, 但两个组与「未分组」三段都在
+  assert.match(manual, /白酒 · 2 只/, '有成员的组要有组头')
+  assert.match(manual, /能源 · 1 只/, '第二个组也要有组头')
+  assert.match(manual, /未分组 · 1 只/, '未分组也常显组头, 否则一只都没归组时整页平铺、功能不可发现')
+  assert.match(manual, /aria-expanded="true"/, '组头可折叠语义')
+  assert.ok(manual.indexOf('甲股') < manual.indexOf('丙股'), '手动序下组内按自选顺序')
+
+  const collapsed = render(mkState('manual', { 白酒: true }))
   assert.match(collapsed, /aria-expanded="false"/, '折叠态 aria')
-  const plain = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => { const s = mkState('manual', {}); s.data.control.watchlist.items[a.id].group = ''; s.data.control.watchlist.items[c.id].group = ''; return s }, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
-  assert.ok(!plain.includes('· 0 只'), '零侵入: 无空组头')
-  const sorted = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => mkState('desc', {}), subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
-  assert.ok(!sorted.includes('白酒 ·'), '全局排序无组头')
+  assert.ok(!collapsed.slice(collapsed.indexOf('白酒 ·')).includes('甲股'), '折叠后组员隐藏')
+  assert.match(collapsed, /乙股/, '折叠只影响本组')
+
+  // aria-expanded 必须锚到组头本身: 页头「更多」按钮也带 aria-expanded=false,
+  // 全页匹配会让「组头永远展开」这种错误实现照样绿
+  const headOf = (html, label) => (html.match(new RegExp(`<span[^>]*aria-label="${label} 分组折叠"[^>]*>`)) || [''])[0]
+  assert.match(headOf(manual, '白酒'), /aria-expanded="true"/, '组头自己的 aria 是展开')
+  assert.match(headOf(collapsed, '白酒'), /aria-expanded="false"/, '组头自己的 aria 是折叠')
+  // 组头统计: 每段的涨跌只数本段成员
+  assert.match(manual, /白酒 · 2 只 · 2 涨 0 跌/, '白酒段两只都涨')
+  assert.match(manual, /能源 · 1 只 · 1 涨 0 跌/, '能源段一只涨')
+  assert.match(manual, /未分组 · 1 只 · 1 涨 0 跌/, '未分组段一只涨')
+
+  // 置顶段: 真的有置顶成员时才出, 且成员不进组段
+  const pinnedState = mkState('manual', {})
+  pinnedState.data.control.watchlist.items[a.id].pinned = true
+  const pinned = render(pinnedState)
+  assert.match(pinned, /置顶 · 1 只/, '有置顶成员要出置顶段')
+  assert.ok(pinned.indexOf('置顶 · 1 只') < pinned.indexOf('白酒 · 1 只'), '置顶段排在组段之前')
+  assert.ok(!pinned.slice(pinned.indexOf('白酒 ·'), pinned.indexOf('能源 ·')).includes('甲股'), '置顶成员不再进组段')
+  assert.ok(!render(mkState('manual', {})).includes('置顶 ·'), '没有置顶成员就不渲染置顶段')
+
+  // 全局排序: 分区保留, 组内按该排序走(而不是退回自选顺序)
+  const desc = render(mkState('desc', {}))
+  assert.match(desc, /白酒 · 2 只/, '全局排序也要保留分组')
+  assert.ok(desc.indexOf('丙股') < desc.indexOf('甲股'), '组内按涨幅降序')
+  assert.ok(desc.indexOf('未分组 · 1 只') < desc.indexOf('丁股'), '未分组段照常渲染')
+
+  // 段序不能跟着排序走: 用排序后的 order 取首现序会让段落随每次行情跳动换位, 正在点的组头会跑掉。
+  // 数据里「能源」在降序排最前, 所以错误实现下段序会变成 能源→白酒→未分组
+  const orderOfSections = html => [...html.matchAll(/(白酒|能源|未分组) · /g)].map(m => m[1])
+  assert.deepEqual(orderOfSections(manual), ['白酒', '能源', '未分组'], '段序按自选顺序')
+  assert.deepEqual(orderOfSections(desc), orderOfSections(manual), '三种排序的段序必须一致')
+
+  // 一只都没归组: 只留未分组段, 不产生空组头
+  const none = render(mkState('manual', {}, { [a.id]: '', [b.id]: '', [c.id]: '', [d.id]: '' }))
+  assert.match(none, /未分组 · 4 只/, '全是未分组时仍要有段头')
+  assert.ok(!none.includes('· 0 只'), '不渲染空组头')
+
+  // 组名恰好是常见原型链键: 拿它当对象键会读到继承属性, 被误判成「已折叠」
+  const proto = render(mkState('manual', {}, { [a.id]: 'constructor', [b.id]: '', [c.id]: '', [d.id]: '' }))
+  assert.match(proto, /constructor · 1 只/, '原型链键当组名也要正常成组')
+  assert.match(proto, /甲股/, '原型链键组名不能被当成已折叠')
 })
 // 审查阻断修复锚: 分组入口/NaN防御/均值修正
 test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
   const { plugin } = await loadClientWithReact()
-  const mk = (id, name, code, cost) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', cost })
+  const mk = (id, name, code, price) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', marks: price == null ? [] : [{ id: 'm1', price, kind: 'cost' }] })
   const a = mk('XSHG:equity:600001', '甲股', '600001', 100), b = mk('XSHG:equity:600002', '乙股', '600002', 100), c = mk('XSHG:equity:600519', '丙股', '600519', null)
   const q = { quote: { last: '110', previousClose: '1', change: '1', changePct: '1', providerInstanceId: 'p', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
   const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
@@ -318,10 +435,11 @@ test('审查R2: 浏览市场随实例能力+保存钮检查提示', async () => 
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: rt, layout: {} }))
   for (const label of ['港股', '纳斯达克', '纽交所']) assert.ok(html.includes(label), `浏览按钮含 ${label}`)
   for (const label of ['日本', '英国']) assert.ok(!html.includes(label), `无目录路由不亮: ${label}`)
-  // 设置页: 启用实例未检查时保存钮灰且带提示
+  // 设置页: 保存不再需要先检查, 探针结果只作诊断
   const settings = { ...state, view: { view: 'list', overlay: 'settings', sort: 'manual', alias: '', settingsDraft: { providers: [{ id: 'p1', adapterId: 'eastmoney', label: 'em-default', enabled: true, credentialEnv: null, quotaGroup: 'eastmoney-account', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [], checkIds: [], checkResults: [], colorMode: 'red-up', klineAutoLoad: true, tab: 'routes' } } }
   const sHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => settings, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: { providerCheck: () => {} } }))
-  assert.match(sHtml, /通过后才能保存/, '保存钮灰时有原因提示(S-Q1)')
+  assert.match(sHtml, /保存路由/, '保存入口常驻')
+  assert.ok(!sHtml.includes('通过后才能保存'), '保存不再被探针结果拦截')
 })
 // 浏览点进详情: overlay 打开时 updateView 不触发 leaveDetail 清理(崩溃修复锚)
 test('审查R2b: browse点进保留browsePeek与detailId', async () => {
@@ -376,12 +494,51 @@ test('bootstrap: 全能力路由补全', async () => {
   assert.equal(routes2.find(r => r.market === 'XSHG' && r.capability === 'catalog').primaryInstanceId, 'sn-catalog', '目录优先专属适配器(唯一支持者)')
   // 无启用实例: 返回原样不炸
   assert.equal(bootstrapRoutes({ adapters, providers: [{ id: 'x', adapterId: 'eastmoney', enabled: false }], routes: existing }).length, 1)
+  // 备源上限 1: 多实例支持同市场同能力时只取首个支持者, 否则 schema 拒绝整份配置
+  const adapters3 = [{ adapterId: 'eastmoney', capabilities: ['quotes'], markets: ['XSHG'] }, { adapterId: 'sina', capabilities: ['quotes'], markets: ['XSHG'] }, { adapterId: 'tencent', capabilities: ['quotes'], markets: ['XSHG'] }]
+  const providers3 = adapters3.map((a, i) => ({ id: 'p' + i, adapterId: a.adapterId, enabled: true }))
+  const routes3 = bootstrapRoutes({ adapters: adapters3, providers: providers3, routes: [] })
+  assert.equal(routes3.length, 1)
+  assert.equal(routes3[0].fallbackInstanceIds.length, 1, '备源最多一个')
+  // 只有 quotes/kline 支持备源: 目录与搜索路由恒无备源且不自动切换
+  const adapters4 = [{ adapterId: 'eastmoney', capabilities: ['catalog', 'search'], markets: ['XSHG'] }, { adapterId: 'sina', capabilities: ['catalog'], markets: ['XSHG'] }]
+  const providers4 = adapters4.map((a, i) => ({ id: 'q' + i, adapterId: a.adapterId, enabled: true }))
+  for (const r of bootstrapRoutes({ adapters: adapters4, providers: providers4, routes: [] })) {
+    if (!['quotes', 'kline'].includes(r.capability)) { assert.deepEqual(r.fallbackInstanceIds, [], `${r.capability} 无备源`); assert.equal(r.failoverMode, 'off', `${r.capability} 不自动切换`) }
+  }
+})
+// 探针失败按目标粒度剔除: 主源不可用提升备源, 备源不可用仅移除备源, 全部不可用才删路由
+test('pruneDeniedTargets: 主源失败提升备源而非删整条路由', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
+  const start = src.indexOf('const pruneDeniedTargets')
+  const end = src.indexOf('const BROWSE_MARKETS')
+  const pruneDeniedTargets = new Function(`${src.slice(start, end)}; return pruneDeniedTargets`)()
+  const route = { id: 'xnas-kline', capability: 'kline', market: 'XNAS', instrument: 'equity', primaryInstanceId: 'ts-1', fallbackInstanceIds: ['em-default'], failoverMode: 'network', maxDelaySeconds: null, acceptUnknownDelay: true }
+  // 主源腾讯美股K线不支持, 备源东财可用: 提升东财为主源, 不留死备源
+  const lifted = pruneDeniedTargets([route], new Set(['ts-1:kline:XNAS']))
+  assert.equal(lifted.length, 1, '不删整条路由')
+  assert.equal(lifted[0].primaryInstanceId, 'em-default', '可用备源提升为主源')
+  assert.deepEqual(lifted[0].fallbackInstanceIds, [], '被拒目标不留在备源')
+  assert.equal(lifted[0].failoverMode, 'off', '无备源时关闭故障切换')
+  // 备源不可用: 仅移除备源, 主源不动
+  const trimmed = pruneDeniedTargets([route], new Set(['em-default:kline:XNAS']))
+  assert.equal(trimmed.length, 1)
+  assert.equal(trimmed[0].primaryInstanceId, 'ts-1', '主源保留')
+  assert.deepEqual(trimmed[0].fallbackInstanceIds, [])
+  // 全部目标不可用: 删除该路由
+  assert.equal(pruneDeniedTargets([route], new Set(['ts-1:kline:XNAS', 'em-default:kline:XNAS'])).length, 0)
+  // 无拒绝目标: 原样返回
+  const untouched = pruneDeniedTargets([route], new Set())
+  assert.equal(untouched[0].primaryInstanceId, 'ts-1')
+  assert.deepEqual(untouched[0].fallbackInstanceIds, ['em-default'])
+  assert.equal(untouched[0].failoverMode, 'network')
 })
 test('U01/U02 IME组合不查询，后发查询覆盖先发迟到结果', async () => {
   const callbacks = [], r = await runtime({ fetch: (url, opts) => new Promise(resolve => callbacks.push({ url, signal: opts.signal, resolve })) })
-  r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await new Promise(resolve => setTimeout(resolve, 320)); assert.equal(callbacks.length, 0)
-  r.value.composition(false); await new Promise(resolve => setTimeout(resolve, 320)); const old = callbacks[0]
-  r.value.search('平安'); await new Promise(resolve => setTimeout(resolve, 320)); const newer = callbacks[1]
+  r.value.applySnapshot(snapshot(1)); r.value.composition(true); r.value.search('茅'); await r.clock.advance(400); assert.equal(callbacks.length, 0)
+  r.value.composition(false); await r.clock.until(() => callbacks.length >= 1); const old = callbacks[0]
+  r.value.search('平安'); await r.clock.until(() => callbacks.length >= 2); const newer = callbacks[1]
   newer.resolve({ ok: true, json: async () => ({ ok: true, data: { routingRevision: 0, items: [{ id: 'new' }] } }) })
   await new Promise(resolve => setImmediate(resolve))
   old.resolve({ ok: true, json: async () => ({ ok: true, data: { routingRevision: 0, items: [{ id: 'old' }] } }) })
@@ -414,9 +571,14 @@ test('K1 loadKline 拉取灌state与force参数', async () => {
 })
 
 test('K2 loadKline 网络失败置错误态', async () => {
-  const { value } = await runtime({ fetch: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, error: { code: 'NETWORK', message: '无法连接行情来源' } }) }) })
+  const calls = []
+  const { value, clock } = await runtime({ fetch: async () => { calls.push(1); return { ok: false, status: 502, json: async () => ({ ok: false, error: { code: 'NETWORK', message: '无法连接行情来源' } }) } } })
   value.applySnapshot(klineSnapshot())
-  await assert.rejects(() => value.loadKline('XSHG:equity:600519', '1d'))
+  const flight = value.loadKline('XSHG:equity:600519', '1d')
+  // 先挂接 reject 再驱动时钟: rejection 落在时钟推进期间, 不能出现无接手窗口
+  const expectation = assert.rejects(() => flight)
+  await clock.until(() => calls.length >= 2)
+  await expectation
   assert.equal(value.getSnapshot().kline.error, '无法连接行情来源')
   value.dispose()
 })
@@ -438,22 +600,27 @@ test('K4 NO_ROUTE 错误态携带 errorCode 供引导按钮判据', async () => 
 
 test('K5 RATE_LIMIT 退避自动重试一次后成功(等待≥retryAfterMs)', async () => {
   const calls = []
-  const t0 = Date.now()
-  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); if (calls.length === 1) { return { ok: false, status: 429, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试', retryAfterMs: 20 } }) } } return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
+  const { value, clock } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); if (calls.length === 1) { return { ok: false, status: 429, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试', retryAfterMs: 20 } }) } } return { ok: true, json: async () => ({ ok: true, data: { candles: [{ time: '2026-10-29', open: 1, high: 2, low: 0.5, close: 1.5, volume: 100 }], preClose: 0.9, complete: true, source: 'em-default' } }) } } })
   value.applySnapshot(klineSnapshot())
-  const result = await value.loadKline('XSHG:equity:600519', '1d')
+  const flight = value.loadKline('XSHG:equity:600519', '1d')
+  await clock.until(() => calls.length >= 2)
+  const result = await flight
   assert.equal(result.candles.length, 1)
   assert.equal(calls.length, 2, '首次429后退避重试一次')
-  assert.ok(Date.now() - t0 >= 20, '重试等待不小于服务端 retryAfterMs')
+  assert.ok(clock.elapsed() >= 20, '重试等待不小于服务端 retryAfterMs')
   assert.equal(value.getSnapshot().kline.error, '')
   value.dispose()
 }, { timeout: 10000 })
 
 test('K6 NO_ROUTE 二次失败不自动重试(避免额外资损)', async () => {
   const calls = []
-  const { value } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); return { ok: false, status: 422, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试' } }) } } })
+  const { value, clock } = await runtime({ fetch: async (url, opts) => { calls.push(String(url)); return { ok: false, status: 422, json: async () => ({ ok: false, error: { code: 'RATE_LIMIT', message: '数据源额度受限，请稍后重试' } }) } } })
   value.applySnapshot(klineSnapshot())
-  await assert.rejects(() => value.loadKline('XSHG:equity:600519', '1d'))
+  const flight = value.loadKline('XSHG:equity:600519', '1d')
+  // 先挂接 reject 再驱动时钟: rejection 落在时钟推进期间, 不能出现无接手窗口
+  const expectation = assert.rejects(() => flight)
+  await clock.until(() => calls.length >= 2)
+  await expectation
   assert.equal(calls.length, 2, '重试一次后停止')
   assert.equal(value.getSnapshot().kline.errorCode, 'RATE_LIMIT')
   value.dispose()
@@ -462,7 +629,7 @@ test('K6 NO_ROUTE 二次失败不自动重试(避免额外资损)', async () => 
 test('K7 NO_ROUTE 错误条渲染一键开启按钮', async () => {
   const { plugin } = await loadClientWithReact()
   const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false }
-  const state = { view: { view: 'list', overlay: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
+  const state = { view: { view: 'list', overlay: 'detail', query: '', selectedId: item.id, detailId: item.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', klineKey: `${item.id}|1d`, kline: { loading: false, error: '未配置该市场的数据来源', errorCode: 'NO_ROUTE', candles: null }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {}, providers: [{ id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true } }
   const updates = []
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: patch => updates.push(patch), loadKline: () => Promise.resolve({ candles: [] }) }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
@@ -521,10 +688,51 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: { providers: saved.providers, routes: saved.routes, checkIds: ['seed'], checkResults: [], tab: 'routes' }, browseMarket: 'XSHG' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', data }
   const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView() {}, mutate: async () => {}, check: async () => ({ checkId: 'x', checks: [] }), configuration: async () => {}, preferences: async () => {}, sync: async () => [], switchPrimary: async () => {} }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
-  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '检查全部能力', '放弃草稿', '一键启用全部能力', '目录与日历']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
+  for (const marker of ['数据源', '市场与能力', '显示偏好', '保存路由', '全部测一次', '放弃草稿', '目录缓存']) assert.ok(html.includes(marker), `设置页缺节点: ${marker}`)
   // 启用banner仅在无实例时出现(默认配置自带双实例, 不含该banner为正确行为)
   assert.ok(!html.includes('启用默认数据源'))
   // 8市场 fieldset 全渲染(K线行存在)
   for (const market of ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON']) assert.ok(html.includes(market), `市场 fieldset 缺: ${market}`)
-  assert.ok(html.includes('>K线<'), 'K线能力行缺')
+  assert.ok(html.includes('K线'), 'K线能力可见')
+})
+
+test('D02 拖拽落位计算: 段内前插/后插与折叠隐藏项回填', async () => {
+  const { plugin } = await loadClientWithReact()
+  const { dragOrder } = plugin.__testing
+  const ids = ['a', 'b', 'c', 'd']
+  assert.deepEqual([...dragOrder(ids, ids, 'a', 'c', false)], ['b', 'a', 'c', 'd'], '拖到目标上半=插到其前')
+  assert.deepEqual([...dragOrder(ids, ids, 'a', 'c', true)], ['b', 'c', 'a', 'd'], '拖到目标下半=插到其后')
+  assert.deepEqual([...dragOrder(ids, ids, 'd', 'b', false)], ['a', 'd', 'b', 'c'], '尾项前移')
+  assert.equal(dragOrder(ids, ids, 'a', 'zz', false), null, '目标不在渲染序则不动')
+  // 折叠组隐藏项 x,y 不在渲染序, 提交时按原槽位回填
+  const full = ['a', 'x', 'b', 'y']
+  assert.deepEqual([...dragOrder(['a', 'b'], full, 'b', 'a', false)], ['b', 'x', 'a', 'y'], '隐藏项保持原槽位')
+})
+
+test('D03 副标题按自选实际市场面生成', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, code, ex) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false })
+  const a = mk('XHKG:equity:00700', '腾讯控股', '00700', 'XHKG'), b = mk('XNAS:equity:NVDA', '英伟达', 'NVDA', 'XNAS'), c = mk('XSHE:equity:000001', '平安银行', '000001', 'XSHE')
+  const build = ids => ({ view: { view: 'list', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: ids, items: Object.fromEntries([a, b, c].map(s => [s.id, s]).filter(([id]) => ids.includes(id))) }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
+  const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  assert.match(render(build([a.id, b.id, c.id])), /自选行情 · 沪深A股、港股、美股/, '三市场按固定优先级列出')
+  assert.match(render(build([b.id, a.id])), /自选行情 · 港股、美股/, '只列实际持有市场')
+  assert.match(render(build([c.id])), /自选行情 · 沪深A股/, '深市归入沪深A股')
+  assert.match(render(build([])), /自选行情 · 沪深A股、港股、美股、日股、韩股、英股/, '空自选给出覆盖范围')
+})
+
+// 卖价不是报价要素, 但目标位必须能在图例里读到, 否则图上只有一条看不见的线
+test('图例显示卖价与相对成本的潜在收益', async () => {
+  const { plugin } = await loadClientWithReact()
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', marks: [{ id: 'c1', price: 100, kind: 'cost' }, { id: 't1', price: 150, kind: 'target' }] }
+  const state = { view: { view: 'detail', overlay: 'detail', detailId: item.id, klinePeriod: '1d', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', klineKey: `${item.id}|1d`, kline: { loading: false, error: '', candles: [{ time: '2026-11-07', open: 118, high: 122, low: 117, close: 120, volume: 100 }], preClose: 119 }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true, klineReady: { XSHG: true } } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve(null) }, layout: {} }))
+  // 侧栏的标记列表里也有同样的数字, 所以必须切出图例那段再断言
+  const legend = html.slice(html.indexOf('class="ssb-kline-legend"'))
+  assert.match(legend, /class="ssb-legend-item ssb-legend-target"/, '卖价要单独占一个图例项')
+  assert.match(legend, /卖价/, '图例要写明这是卖价')
+  assert.match(legend, /150\.00/, '图例要给出卖价数值')
+  assert.match(legend, /\+50\.00%/, '成本 100 的卖价 150 是 +50%')
+  // 成本图例同时存在, 两个数不是同一个来源
+  assert.match(legend, /class="ssb-legend-item ssb-legend-cost"/, '成本图例仍在')
 })

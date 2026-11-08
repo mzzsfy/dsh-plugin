@@ -1,20 +1,16 @@
 // host 路由集成测试:stub 宿主 ctx 后经 apply 挂载,直接调用捕获的 handler。
 // 覆盖:方法守卫 405、跨源守卫 403、各路由业务分支(400/409/500)、
-// restart 依赖 appExit、readBody 超限。
+// restart 硬退出、readBody 超限。
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 
-import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, RESTART_DEADLINE_MS, RELEASE_NOTES_CACHE_MAX, collectActiveWork, discoverRunningInstall } from '../src/index.js'
+import { apply, Config, DEFAULT_CHANNEL, DEFAULT_POLL_INTERVAL_SEC, DEFAULT_REGISTRY_BASE, RESTART_DELAY_MS, RELEASE_NOTES_CACHE_MAX, collectActiveWork, discoverRunningInstall } from '../src/index.js'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const TEST_RUNTIME_MANIFEST = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
-
-// 死线强杀兜底走真实 setTimeout 且到期即 process.exit:凡调度退出的用例若不 stub,
-// 真实 timer 泄漏到期会杀死测试进程;文件级 stub,子用例经 t.mock.method 各自覆盖
-process.exit = () => {}
 
 // 受管安装桩:测试进程 argv[1] 不是 DSH 包,真实发现必失败;全部用例注入可用桩,
 // 失败面由 discoverRunningInstall 自身的专项用例覆盖
@@ -59,7 +55,8 @@ function tagsBody(tags) {
 
 globalThis.fetch = async () => tagsBody(MOCK_TAGS)
 
-function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySettings = false, configEditorAvailable = true, timerAvailable = true, services = {}, dependencies = {}, installAnchor = TEST_RUNTIME_MANIFEST, hostVersionProbeAvailable = true } = {}) {
+// exits:退出证据收集器,经 dependencies.exitHost 注入——调度退出只记录,不真杀测试进程
+function makeCtx({ settingsStore, settingsAvailable = true, legacySettings = false, configEditorAvailable = true, timerAvailable = true, services = {}, dependencies = {}, installAnchor = TEST_RUNTIME_MANIFEST, hostVersionProbeAvailable = true, exits = [] } = {}) {
   const routes = new Map()
   let tick = null
   // 条目配置桩:settingsStore 对象即 apply 入参 config(0.1.7 形态的宿主解析配置);
@@ -101,7 +98,6 @@ function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySetti
     get(name) {
       if (name === 'hostVersionProbe') return hostVersionProbeAvailable ? services.hostVersionProbe || (() => '1.0.0') : undefined
       if (name === 'hooks') return services.agentHooks || hooks
-      if (name === 'appExit') return appExit
       if (name === 'settings') return settingsAvailable ? settingsService : undefined
       if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
       if (Object.prototype.hasOwnProperty.call(services, name)) return services[name]
@@ -142,8 +138,8 @@ function makeCtx({ appExit, settingsStore, settingsAvailable = true, legacySetti
       for (const disposer of calls.disposers) disposer()
     },
   }
-  apply(ctx, config, { runningInstall: RUNNING_INSTALL, ...dependencies })
-  return { ctx, routes, config }
+  apply(ctx, config, { runningInstall: RUNNING_INSTALL, ...dependencies, exitHost: (code) => exits.push(code) })
+  return { ctx, routes, config, exits }
 }
 
 function makeReq({ method = 'POST', body, headers = {} } = {}) {
@@ -415,7 +411,7 @@ const LAYOUT_STUB = {
   link: 'C:/fake-prefix/node_modules/@deepseek-ai/dsh/dsh_link',
 }
 
-// 受管升级路由:门控顺序 目标解析→互斥→受管可用→appExit→活跃工作,全部通过才进 runner。
+// 受管升级路由:门控顺序 目标解析→互斥→受管可用→活跃工作,全部通过才进 runner。
 // runner 注入桩,禁止测试触发真实 npm(未注入 runner 即真实编排器,fake 路径会被 mkdir);
 // exit 调度经 mock timers 控制
 const IDLE_SERVICES = { agents: { list: () => [] }, jobs: { list: () => [] } }
@@ -423,7 +419,7 @@ const DEPS = (overrides = {}) => ({ runManagedUpgrade: makeRunnerStub(), createL
 
 test('upgrade:targetVersion 非精确一律 400,runner 不得启动', async () => {
   const runner = makeRunnerStub()
-  const { ctx, routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const { ctx, routes } = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   for (const targetVersion of ['latest', '1.2', '', '1.0.0; rm -rf /', null, 3]) {
     const denied = await post(routes, '/api/maintain/upgrade', { targetVersion })
     assert.equal(denied.status, 400, '非法目标必须 400: ' + String(targetVersion))
@@ -435,7 +431,7 @@ test('upgrade:targetVersion 非精确一律 400,runner 不得启动', async () =
 
 test('upgrade:目标缺省按通道 dist-tag 解析为精确版本;tags 未就绪 400', async () => {
   const runner = makeRunnerStub()
-  const { ctx, routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const { ctx, routes } = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   await waitSnapshotReady(routes)
   const accepted = await post(routes, '/api/maintain/upgrade', {})
   assert.equal(accepted.status, 200)
@@ -446,35 +442,29 @@ test('upgrade:目标缺省按通道 dist-tag 解析为精确版本;tags 未就�
   assert.equal(runner.calls[0].registryBase, 'https://registry.npmjs.org', 'runner 收到配置镜像地址')
 })
 
-test('upgrade:受管安装不可用或 appExit 缺失 409,runner 不得启动', async () => {
+test('upgrade:受管安装不可用 409,runner 不得启动', async () => {
   const runner = makeRunnerStub()
   const brokenInstall = { ...RUNNING_INSTALL, error: 'DSH profileContext.installAnchor 不可用', prefix: null, originalPackage: null, runningPackage: null }
   const broken = makeCtx({
-    appExit: () => {},
     services: IDLE_SERVICES,
     dependencies: DEPS({ runManagedUpgrade: runner, runningInstall: { ...RUNNING_INSTALL, ...brokenInstall } }),
   })
-  const noExit = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   const deniedManaged = await post(broken.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
   assert.equal(deniedManaged.status, 409)
   assert.match(deniedManaged.payload.error, /受管安装不可用/)
-  const deniedExit = await post(noExit.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
-  assert.equal(deniedExit.status, 409)
-  assert.match(deniedExit.payload.error, /appExit/)
   await drainMicrotasks()
   assert.equal(runner.calls.length, 0, '能力缺失路径不得进入 runner')
 })
 
 test('upgrade:活跃检测不可用 fail-closed 409,存在活跃工作 409 不可越', async () => {
   const runner = makeRunnerStub()
-  const blind = makeCtx({ appExit: () => {}, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const blind = makeCtx({ dependencies: DEPS({ runManagedUpgrade: runner }) })
   const blindDenied = await post(blind.routes, '/api/maintain/upgrade', { targetVersion: '2.0.0' })
   assert.equal(blindDenied.status, 409)
   assert.match(blindDenied.payload.error, /检测不可用/)
   assert.equal(blindDenied.payload.detectionAvailable, false)
   const pendingTerminals = { list: () => [], hasOwnerActivity: (owner) => owner.id === 'session-pending' }
   const isolatedPending = makeCtx({
-    appExit: () => {},
     services: {
       agents: { list: () => [{ id: 'session-pending', status: 'idle', ctx: { get: () => pendingTerminals } }] },
       jobs: { list: (caller) => caller === 'session-pending' ? [{ id: 'owned', status: 'running' }] : [] },
@@ -487,7 +477,6 @@ test('upgrade:活跃检测不可用 fail-closed 409,存在活跃工作 409 不�
   assert.equal(pendingDenied.payload.items.terminals, 1)
   assert.equal(pendingDenied.payload.detectionAvailable, true)
   const busy = makeCtx({
-    appExit: () => {},
     services: { agents: { list: () => [{ id: 'a1', status: 'running' }] }, jobs: { list: () => [] }, terminals: { list: () => [], hasOwnerActivity: () => false } },
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -504,7 +493,6 @@ test('upgrade:terminals 面不可见属宿主常态,agents 计数照常门控', 
   // 0.2.0 真实形态:terminals 服务对插件 ctx 根与 agent realm 均不可探(agent.ctx.get 返回 undefined),
   // 活跃 agent 由 agents 计数覆盖,不得因此降级为"检测不可用"
   const noTerminalFace = makeCtx({
-    appExit: () => {},
     services: { agents: { list: () => [{ id: 'a-live', status: 'running', ctx: { get: () => undefined } }] }, jobs: { list: () => [] } },
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -515,7 +503,6 @@ test('upgrade:terminals 面不可见属宿主常态,agents 计数照常门控', 
   assert.equal(denied.payload.items.terminals, 0)
   assert.equal(denied.payload.detectionAvailable, true, 'terminals 面不可见不得降级为检测不可用')
   const idle = makeCtx({
-    appExit: () => {},
     services: { agents: { list: () => [{ id: 'a-idle', status: 'idle' }] }, jobs: { list: () => [] } },
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -527,7 +514,6 @@ test('upgrade:terminals 面不可见属宿主常态,agents 计数照常门控', 
 test('upgrade:terminals 面可见但方法面残缺仍降级(残余 fail-closed 路径)', async () => {
   const runner = makeRunnerStub()
   const brokenFace = makeCtx({
-    appExit: () => {},
     services: { agents: { list: () => [] }, jobs: { list: () => [] }, terminals: {} },
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -545,7 +531,6 @@ test('upgrade:agent realm 面可见但残缺仍降级(per-agent fail-closed 对�
   const runner = makeRunnerStub()
   // realm 面 get('terminals') 返回 {} 与根面残缺同构:扫描 throw → 降级,不得静默当 0 计数
   const realmBroken = makeCtx({
-    appExit: () => {},
     services: { agents: { list: () => [{ id: 'a-realm', status: 'idle', ctx: { get: () => ({}) } }] }, jobs: { list: () => [] } },
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -557,13 +542,13 @@ test('upgrade:agent realm 面可见但残缺仍降级(per-agent fail-closed 对�
   assert.equal(runner.calls.length, 0, '检测降级路径不得进入 runner')
 })
 
-test('upgrade:runner 成功调度一次正常退出', async (t) => {
+test('upgrade:runner 成功调度一次硬退出', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
   let release
   const gate = new Promise((resolve) => { release = resolve })
   const runner = makeRunnerStub({ result: () => gate.then(() => ({ operationId: 'op-1', switched: true, phase: 'awaiting-restart', slot: 'a', targetVersion: '9.9.9' })) })
-  const { routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const { routes } = makeCtx({ exits, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   const accepted = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(accepted.status, 200)
   await drainMicrotasks()
@@ -590,7 +575,7 @@ test('upgrade:autoRestart 关闭时切换成功不调度退出', async (t) => {
   const exits = []
   const runner = makeRunnerStub({ result: async () => ({ operationId: 'op-3', switched: true, phase: 'awaiting-restart', slot: 'a' }) })
   const { routes } = makeCtx({
-    appExit: (code) => exits.push(code),
+    exits,
     services: IDLE_SERVICES,
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -614,7 +599,7 @@ test('upgrade:autoRestart 关闭时切换状态未知仍强制调度退出', asy
   const exits = []
   const runner = makeRunnerStub({ result: async () => { const error = new Error('post-switch boom'); error.switched = true; throw error } })
   const { routes } = makeCtx({
-    appExit: (code) => exits.push(code),
+    exits,
     services: IDLE_SERVICES,
     dependencies: DEPS({ runManagedUpgrade: runner }),
   })
@@ -635,7 +620,7 @@ test('upgrade:autoRestart 关闭时切换状态未知仍强制调度退出', asy
 
 test('upgrade:autoRestart 非布尔非缺省 400,runner 不得启动', async () => {
   const runner = makeRunnerStub()
-  const { routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const { routes } = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   for (const autoRestart of ['yes', 0, null]) {
     const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9', autoRestart })
     assert.equal(denied.status, 400, '非布尔必须 400: ' + String(autoRestart))
@@ -648,7 +633,7 @@ test('upgrade:runner 失败不调度退出,状态落定失败,可再次发起', 
   const exits = []
   let calls = 0
   const runner = makeRunnerStub({ result: async () => { calls += 1; if (calls === 1) throw new Error('npm 安装失败'); return { operationId: 'op-2', switched: true, phase: 'awaiting-restart', slot: 'b' } } })
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const { ctx, routes } = makeCtx({ exits, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   const first = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(first.status, 200)
   let failed = null
@@ -674,7 +659,7 @@ test('restart:升级进行中 409 拒绝且不调度退出', async () => {
   let release
   const gate = new Promise((resolve) => { release = resolve })
   const runner = makeRunnerStub({ result: () => gate.then(() => ({ operationId: 'op-1', switched: true, phase: 'awaiting-restart', slot: 'a' })) })
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+  const { ctx, routes } = makeCtx({ exits, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
   const upgrade = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(upgrade.status, 200)
   await drainMicrotasks()
@@ -689,7 +674,7 @@ test('restart:升级进行中 409 拒绝且不调度退出', async () => {
 test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  const { ctx, routes } = makeCtx({ exits })
   const restart = await post(routes, '/api/maintain/restart')
   assert.equal(restart.status, 200)
   const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
@@ -699,51 +684,21 @@ test('upgrade:重启调度后触发升级 409(双向互斥)', async (t) => {
   assert.deepEqual(exits, [0])
 })
 
-// Given 宿主 appExit 关停链 dispose 落定后被残留句柄钉住,进程不排空
-// When 重启死线到期
-// Then 直接 process.exit(0) 强杀并留诊断输出;死线到达前不得提前强杀
-test('restart:宿主排空僵活时死线强杀兜底', async (t) => {
+// Given 重启调度窗口
+// When 延迟到点
+// Then 以退出码 0 直接终止进程,不经启动器 appExit 的优雅停机
+// (appExit 的 dispose 把在跑回合收成 aborted(disposed),自动继续只认 interrupted,重启后不续跑)
+test('restart:延迟到点直接终止进程,不经 appExit 优雅停机', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const processExit = t.mock.method(process, 'exit', () => {})
-  const warns = []
-  const originalWarn = console.warn
-  console.warn = (text) => warns.push(String(text))
-  try {
-    const { routes } = makeCtx({ appExit: () => {} })
-    const restart = await post(routes, '/api/maintain/restart')
-    assert.equal(restart.status, 200)
-    t.mock.timers.tick(RESTART_DELAY_MS + 1)
-    assert.equal(processExit.mock.callCount(), 0, '死线先于宿主关停宽限到期前不得强杀')
-    t.mock.timers.tick(RESTART_DEADLINE_MS - RESTART_DELAY_MS + 1)
-    assert.equal(processExit.mock.callCount(), 1, '死线到期必须强杀')
-    assert.equal(processExit.mock.calls[0].arguments[0], 0)
-    assert.equal(warns.some((text) => text.includes('重启死线到期宿主仍未退出') && text.includes('活跃句柄')), true, '死线强杀须留句柄诊断输出')
-  } finally {
-    console.warn = originalWarn
-  }
-})
-
-// Given 升级切换落定走同一条退出调度链
-// When 升级成功调度退出且宿主僵活
-// Then 死线兜底同样生效(入口唯一,不区分触发方)
-// 启动检查走真实网络与真实 AbortSignal timer:等待用 realSleep 自旋,不用被 mock 冻结的 setTimeout
-test('upgrade:切换退出同样受死线兜底保护', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  const processExit = t.mock.method(process, 'exit', () => {})
-  const runner = makeRunnerStub()
-  const { routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
-  let ready = null
-  for (let waited = 0; waited < 5000 && ready === null; waited += 25) {
-    const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
-    if (poll && poll.checkedAt !== null) ready = poll
-    else await realSleep(25)
-  }
-  assert.ok(ready !== null, '启动检查 5 秒内未完成')
-  await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
-  await drainMicrotasks()
-  t.mock.timers.tick(RESTART_DEADLINE_MS + 1)
-  assert.equal(processExit.mock.callCount(), 1, '升级退出链同样受死线保护')
-  assert.equal(processExit.mock.calls[0].arguments[0], 0)
+  const exits = []
+  const { routes } = makeCtx({ exits })
+  const restart = await post(routes, '/api/maintain/restart')
+  assert.equal(restart.status, 200)
+  assert.deepEqual(exits, [], '响应窗口内不得提前退出')
+  t.mock.timers.tick(RESTART_DELAY_MS + 1)
+  assert.deepEqual(exits, [0], '延迟到点必须退出')
+  const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /ctx\.get\('appExit'\)|appExit\(0\)/, '退出不得回退到 appExit 优雅停机')
 })
 
 test('upgrade:重启调度窗口内 refresh 409,registry-base 保存但不发起检查', async (t) => {
@@ -758,8 +713,8 @@ test('upgrade:重启调度窗口内 refresh 409,registry-base 保存但不发起
   }
   try {
     const exits = []
-    const { ctx, routes } = makeCtx({ settingsStore: store, appExit: (code) => exits.push(code) })
-      let baseline = null
+    const { ctx, routes } = makeCtx({ settingsStore: store, exits })
+    let baseline = null
     for (let waited = 0; waited < 5000 && baseline === null; waited += 25) {
       const poll = await get(routes, '/api/maintain/status').then((r) => r.payload).catch(() => null)
       if (poll && poll.checkedAt !== null) baseline = fetchCalls
@@ -823,7 +778,7 @@ test('poll-interval:超上界 400(秒转毫秒溢出防护)', async () => {
 test('upgrade:非法 body 先于门控校验,门控命中时非法 targetVersion 仍 400', async (t) => {
   // 锁定 handler 顺序:readBody 在全部门控之前,门控到置位之间零 await
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const { ctx, routes } = makeCtx({ appExit: () => {}, services: IDLE_SERVICES })
+  const { ctx, routes } = makeCtx({ services: IDLE_SERVICES })
   await post(routes, '/api/maintain/restart')
   const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: 'latest' })
   assert.equal(denied.status, 400, 'body 非法时即使门控(重启已调度)命中也必须 400')
@@ -839,14 +794,10 @@ test('registry-base:带 query 或 hash 的输入 400', async () => {
   assert.equal(store.registryBase, undefined)
 })
 
-test('restart:缺失 appExit 500;响应立即返回,延迟退出', async (t) => {
-  const withoutExit = makeCtx()
-  const denied = await post(withoutExit.routes, '/api/maintain/restart')
-  assert.equal(denied.status, 500)
-
+test('restart:响应立即返回,延迟到点才退出', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  const { ctx, routes } = makeCtx({ exits })
   const ok = await post(routes, '/api/maintain/restart')
   assert.equal(ok.status, 200)
   assert.equal(ok.payload.restarting, true)
@@ -859,7 +810,7 @@ test('restart:缺失 appExit 500;响应立即返回,延迟退出', async (t) => 
 test('restart:延迟窗口内重复请求幂等,exit 仅调度一次', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  const { ctx, routes } = makeCtx({ exits })
   const first = await post(routes, '/api/maintain/restart')
   assert.equal(first.status, 200)
   const second = await post(routes, '/api/maintain/restart')
@@ -947,7 +898,7 @@ test('upgrade:存在活跃工作 409 拒绝,不可越', async () => {
   const agents = { list: () => [{ id: 'a1', status: 'running' }] }
   const jobs = { list: () => [] }
   const terminals = { list: () => [] }
-  const { routes } = makeCtx({ appExit: () => {}, services: { agents, jobs, terminals } })
+  const { routes } = makeCtx({ services: { agents, jobs, terminals } })
   const denied = await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /活跃工作/)
@@ -962,7 +913,7 @@ test('restart:活跃工作 409,force 越过', async (t) => {
   const exits = []
   const agents = { list: () => [{ id: 'a1', status: 'running' }] }
   const jobs = { list: () => [] }
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: { agents, jobs } })
+  const { ctx, routes } = makeCtx({ exits, services: { agents, jobs } })
   const denied = await post(routes, '/api/maintain/restart')
   assert.equal(denied.status, 409)
   assert.match(denied.payload.error, /活跃工作/)
@@ -985,7 +936,7 @@ test('status:activeWork 概要进快照,服务缺失标 detectionAvailable=false
 test('restart:null 体按空体处理,内部形态不泄漏', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const exits = []
-  const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code) })
+  const { ctx, routes } = makeCtx({ exits })
   const ok = await post(routes, '/api/maintain/restart', 'null')
   assert.equal(ok.status, 200, 'null 体须按空体处理,不得以内部错误形态 400/500 泄漏')
   t.mock.timers.tick(RESTART_DELAY_MS + 1)
@@ -1005,8 +956,9 @@ test('受管切换接线:切换成功必经统一退出入口调度关机(源码
   assert.equal(source.match(/persistPatch\([^)]*autoRestart/g), null, '自动重启不得经 persistPatch 落盘')
   assert.match(source, /autoRestart === false/, '自动重启意图必须接入升级收尾分流')
   assert.match(source, /reason=post-switch-state-indeterminate/, '切换状态未知必须无视意图强制退出')
-  // 切换成功但 appExit 缺失必须可见地失败,不得静默吞掉
-  assert.match(source, /exit-missing/, 'appExit 缺失的已切换状态必须留审计')
+  // 退出语义:升级落定同样直接终止进程,不得回退到 appExit 的优雅停机(在跑回合会被收成 aborted)
+  assert.match(source, /setTimeout\(\(\) => exitHost\(0\), delayMs\)/, '退出必须是延迟终止进程')
+  assert.match(source, /dependencies\.exitHost/, '退出执行点必须可注入,禁止硬绑 process.exit')
 })
 
 test('运行安装发现:原始安装 win/posix 布局与接管后槽位反解', async () => {
@@ -1063,7 +1015,7 @@ test('upgrade:运行环境不参与切换判定(env 注入 manual 仍正常调�
   try {
     const exits = []
     const runner = makeRunnerStub()
-    const { ctx, routes } = makeCtx({ appExit: (code) => exits.push(code), services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
+    const { ctx, routes } = makeCtx({ exits, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: runner }) })
     await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
     await drainMicrotasks()
     t.mock.timers.tick(RESTART_DELAY_MS + 1)
@@ -1081,7 +1033,7 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   console.warn = (text) => warns.push(String(text))
   try {
     const agents = { list: () => [{ id: 'a1', status: 'running' }] }
-    const { routes } = makeCtx({ services: { agents }, appExit: () => {} })
+    const { routes } = makeCtx({ services: { agents } })
     await post(routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
     assert.equal(warns.some((text) => text.includes('audit endpoint=upgrade outcome=rejected reason=active-work')), true, '门控拒绝须留审计行')
     await post(routes, '/api/maintain/restart')
@@ -1093,7 +1045,7 @@ test('audit:触发/落定/拒绝各留一行结构化日志', async () => {
   }
   // 升级触发与落定:runner 注入桩,落定行带 operationId 与阶段
   const plainWarns = []
-  const plainCtx = makeCtx({ appExit: () => {}, services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: makeRunnerStub() }) })
+  const plainCtx = makeCtx({ services: IDLE_SERVICES, dependencies: DEPS({ runManagedUpgrade: makeRunnerStub() }) })
   console.warn = (text) => plainWarns.push(String(text))
   try {
     await post(plainCtx.routes, '/api/maintain/upgrade', { targetVersion: '9.9.9' })
@@ -1243,8 +1195,8 @@ test('release-notes:重启调度窗口内 409,不发起上游请求', async (t) 
   const requestedUrls = []
   const restore = installDualUpstream({ requestedUrls })
   try {
-    const { ctx, routes } = makeCtx({ appExit: () => {} })
-      const restart = await post(routes, '/api/maintain/restart')
+    const { ctx, routes } = makeCtx()
+    const restart = await post(routes, '/api/maintain/restart')
     assert.equal(restart.status, 200)
     const res = await get(routes, RELEASE_PATH)
     assert.equal(res.status, 409, '关机窗口内查询更新内容必须拒绝')
@@ -1312,7 +1264,7 @@ test('release-notes:上游失败 400 带错误信息', async () => {
 
 // ── F08: 显式暂停契约 ──────────────────────────────────────────────────────
 test('F08: 维护态 pre-step 拒绝携带"已切换暂停重启可用"说明,状态快照 awaitingRestart 置位', async () => {
-  const { ctx, routes } = makeCtx({ appExit: () => {} })
+  const { ctx, routes } = makeCtx()
   const hook = ctx.calls.agentHook
   assert.ok(hook?.listener, 'pre-step 钩子必须已挂')
   const next = async () => ({ kind: 'continue' })

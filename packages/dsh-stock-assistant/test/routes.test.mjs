@@ -36,29 +36,24 @@ test('browse端点HTTP层钳制越界参数并返回分页结构', async t => {
   assert.equal(bad.ok, false)
   assert.equal(bad.error.code, 'INVALID_REQUEST')
 })
-// B-1保存回路: Given一键默认源提交 When走检查→保存 Then需checkId才通过,空checkIds被拒
-test('configuration要求有效checkId,检查通过后保存成功', async t => {  const routes = new Map()
+// B-1保存回路: Given未做探针的配置提交 When直接保存 Then成功;探针独立为诊断接口
+test('configuration无需checkId即可保存,探针独立可调用', async t => {  const routes = new Map()
   const providers = [{ id: 'p1', adapterId: 'fake', enabled: true, credentialEnv: null, quotaGroup: 'g', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }]
   const routesCfg = [{ id: 'sh-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'p1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
-  const checks = []
   const app = {
-    providerCheck: async input => { const checkId = 'ck-' + (checks.length + 1); checks.push({ checkId, hash: input.providers }); return { checkId, checks: [{ key: 'k', providerInstanceId: 'p1', capability: 'quotes', market: 'XSHG', status: 'ready' }] } },
-    configuration: async input => {
-      if (!input.checkIds?.length) fail('CHECK_REQUIRED', '配置已变化，请重新检查来源能力', 422)
-      return { revision: 2, unchanged: false }
-    },
+    providerCheck: async () => ({ checkId: 'ck-1', checks: [{ key: 'p1:quotes:XSHG', providerInstanceId: 'p1', capability: 'quotes', market: 'XSHG', status: 'ready', ms: 42 }] }),
+    configuration: async () => ({ revision: 2, unchanged: false }),
   }
   const stop = registerRoutes({ register: r => { routes.set(r.path, r.handler); return () => routes.delete(r.path) } }, app)
   const server = http.createServer((req, res) => { const handler = routes.get(new URL(req.url, 'http://local').pathname); if (handler) handler(req, res); else { res.statusCode = 404; res.end() } })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { stop(); await new Promise(resolve => server.close(resolve)) })
   const base = `http://127.0.0.1:${server.address().port}/api/stock-assistant`
-  const rejected = await (await fetch(base + '/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: 1, providers, routes: routesCfg }) })).json()
-  assert.equal(rejected.error.code, 'CHECK_REQUIRED')
+  const saved = await (await fetch(base + '/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: 1, providers, routes: routesCfg }) })).json()
+  assert.equal(saved.ok, true)
   const check = await (await fetch(base + '/provider-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ providers, routes: routesCfg, capabilities: ['quotes'] }) })).json()
   assert.equal(check.ok, true)
-  const saved = await (await fetch(base + '/configuration', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operationId: crypto.randomUUID(), expectedRevision: 1, providers, routes: routesCfg, checkIds: [check.data.checkId] }) })).json()
-  assert.equal(saved.ok, true)
+  assert.equal(check.data.checks[0].ms, 42, '探针回传耗时')
 })
 
 // ---- Step 1.6: kline HTTP 接线 ----

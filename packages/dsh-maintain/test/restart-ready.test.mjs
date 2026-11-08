@@ -169,13 +169,13 @@ test('restartPostLost: 网关 5xx(宿主退出窗口)视为失联,宿主应答�
     gatewayError.status = status
     assert.equal(clientRestartPostLost(gatewayError), true, 'status=' + status)
   }
-  // 409 升级互斥/500 appExit 缺失为宿主自身应答:活宿主明确回绝,不得等待
+  // 409 升级互斥/500 服务异常为宿主自身应答:活宿主明确回绝,不得等待
   const conflictError = new Error('升级进行中,禁止重启;等待升级完成后重试')
   conflictError.status = 409
   assert.equal(clientRestartPostLost(conflictError), false)
-  const capabilityError = new Error('启动器未提供 appExit,无法重启')
-  capabilityError.status = 500
-  assert.equal(clientRestartPostLost(capabilityError), false)
+  const serverError = new Error('内部错误')
+  serverError.status = 500
+  assert.equal(clientRestartPostLost(serverError), false)
   const okLikeError = new Error('HTTP 400')
   okLikeError.status = 400
   assert.equal(clientRestartPostLost(okLikeError), false)

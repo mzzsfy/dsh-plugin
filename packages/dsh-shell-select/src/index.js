@@ -32,7 +32,9 @@ import {
   takeoverDecision,
 } from './takeover.mjs'
 import { coerceServiceable } from './config.mjs'
-import { shellSelectExecutorFiber } from './apply-state.mjs'
+import { attachRequestHiding } from './request-hide.mjs'
+import { describePwshDirective } from './agent-hints.mjs'
+import { retireShellSelectExecutorFiber, shellSelectExecutorFiber } from './apply-state.mjs'
 
 export const name = 'shell-select'
 
@@ -53,6 +55,26 @@ export async function apply(ctx, config) {
     endShellSelectApplyInactive()
     return
   }
+  // pwsh 请求缝隐藏:preset 的官方工具在会话作用域注册,工具层的可见性规则遮蔽
+  // 不了它;剔除只发生在模型请求上,默认生效,行卸载即透传。llm 缺失只损失隐藏,
+  // 终端能力不受影响。
+  ctx.inject(['llm'], (lctx) => {
+    let disposed = false
+    ctx.effect(() => () => { disposed = true }, 'shell-select request hiding lifetime')
+    const sweep = () => {
+      const attached = attachRequestHiding(lctx.llm, () => disposed === false)
+      if (attached === 0) return
+      recordTakeover({ event: `request-hide attached=${attached}` })
+      ctx.logger?.info?.(`shell-select: 请求缝隐藏 pwsh(adapter ${attached})`)
+    }
+    sweep()
+    lctx.on('llm/adapters-updated', sweep, { global: true })
+  })
+  // 会话作用域的官方 pwsh(own 优先)覆盖本包全局注册的同名工具,描述提示只能
+  // 在 agent 创建后改写其定义;只改 description,不影响执行与注册。
+  ctx.on('agent/created', ({ agent }) => {
+    if (describePwshDirective(agent)) recordTakeover({ event: 'pwsh 描述已改为改用 shell 提示' })
+  }, { global: true })
   const states = officialChainState(ctx.loader)
   const { decision, targets } = takeoverDecision(states)
   recordTakeover({
@@ -131,8 +153,13 @@ async function mountExecutor(ctx, config) {
   }
   // 执行器句柄回填(HOST-022):0.2.2 写事务重评官方行 disabled 表达式可翻回
   // 启用,官方行复活与本方执行器撞 ctx.shell——guard 监视 patch 事件,官方行
-  // 翻回启用即经此句柄 dispose 本方执行器让位。dispose 后句柄清空防重入。
+  // 翻回启用即经此句柄 dispose 本方执行器让位。
   shellSelectExecutorFiber.current = fiber
+  // 句柄随执行器 fiber 退役自清:主行被禁/卸载后残留的已退役句柄会让 guard
+  // 误判"执行器在场",吞掉官方行翻回启用时的代挂让位(同上写事务实证)。
+  fiber.effect?.(() => () => {
+    if (shellSelectExecutorFiber.current === fiber) retireShellSelectExecutorFiber()
+  }, 'shell-select executor handle retirement')
 }
 
 /**

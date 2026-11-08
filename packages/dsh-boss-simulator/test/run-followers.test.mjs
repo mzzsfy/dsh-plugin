@@ -57,3 +57,46 @@ test('Given 采集时存储写失败 When follower 重连重放 Then 不丢报�
   assert.equal(errors.length, 1)
   assert.equal(Object.keys(f.current.reports).length, 1)
 })
+
+test('Given 会话流持续抛错 When 连续失败达到上限 Then 按指数退避有限次重连后停止告警', async () => {
+  let attempts = 0
+  const waits = []
+  const errors = []
+  const adapter = { async *followSessionEvents() { attempts += 1; throw new Error('stream broken') } }
+  const followers = createRunFollowers({
+    store: { async listAggregates() { return [] } },
+    sessionAdapter: adapter,
+    retryMs: 100,
+    maxRetryMs: 1000,
+    maxFailures: 4,
+    onError: error => errors.push(error),
+    wait: async (ms) => { waits.push(ms) },
+  })
+  await followers.follow('t1', 's1')
+  assert.equal(attempts, 4)
+  assert.deepEqual(waits, [100, 200, 400])
+  assert.match(errors.at(-1), /连续失败 4 次,停止跟随/)
+  assert.equal(errors.filter(error => /stream broken/.test(error)).length, 4)
+})
+
+test('Given 会话不存在或已删除 When 跟随 Then 不重连直接停止', async () => {
+  for (const failure of [
+    Object.assign(new Error('会话不存在'), { code: 'SESSION_NOT_FOUND' }),
+    new Error('session has been deleted'),
+  ]) {
+    let attempts = 0
+    const waits = []
+    const errors = []
+    const followers = createRunFollowers({
+      store: { async listAggregates() { return [] } },
+      sessionAdapter: { async *followSessionEvents() { attempts += 1; throw failure } },
+      onError: error => errors.push(error),
+      wait: async (ms) => { waits.push(ms) },
+    })
+    await followers.follow('t1', 's1')
+    assert.equal(attempts, 1)
+    assert.deepEqual(waits, [])
+    assert.match(errors.at(-1), /会话不存在或已删除,停止跟随/)
+  }
+})
+

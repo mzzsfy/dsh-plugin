@@ -2,6 +2,13 @@ import { z } from 'zod'
 import { fail } from './market-model.mjs'
 import { MARKET_META } from './market-model.mjs'
 const id = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/)
+// 用户标在图上并参与盈亏计算的价格点位。kind 决定它在盈亏里扮演什么角色:
+// cost 是持仓成本, target 是打算卖出的价
+export const markSchema = z.strictObject({ id: z.string().min(1).max(40), price: z.number().positive(), kind: z.enum(['cost', 'target']) })
+export const marksSchema = z.array(markSchema).max(12).default([]).superRefine((list, ctx) => {
+  if (new Set(list.map(mark => mark.id)).size !== list.length) ctx.addIssue({ code: 'custom', message: '价格标记 id 重复' })
+  if (new Set(list.map(mark => `${mark.kind}:${mark.price}`)).size !== list.length) ctx.addIssue({ code: 'custom', message: '同类型的价格不能重复' })
+})
 const rate = z.number().int().positive().max(100000)
 export const capability = z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])
 export const marketSchema = z.enum(Object.keys(MARKET_META))
@@ -21,6 +28,8 @@ export const klineQuerySchema = z.strictObject({
   securityId: z.string().regex(/^[\w]+:equity:[\w.]{1,15}$/),
   period: z.enum(['trend', '1d', '1w', '1M']),
   limit: z.coerce.number().int().min(20).max(1000).default(250),
+  // 强制刷新:客户端详情页刷新走 ?force=1,服务端据此跳过缓存读;缺省按缓存
+  force: z.enum(['0', '1']).optional(),
 })
 // 路由上限: 八市场×(quotes/catalog/search/calendar/kline) 全开 40 条封顶
 const configSchema = z.strictObject({ providers: z.array(providerSchema).max(8), routes: z.array(routeSchema).max(40) })
@@ -53,7 +62,7 @@ export function parseConfiguration(value) {
   }
   return config
 }
-export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), cost: z.number().positive().nullable().default(null), group: z.string().refine(s => [...s.trim()].length <= 12).default('') })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string(), payload: z.unknown() })).max(256) }).superRefine((control, ctx) => {
+export const controlSchema = z.object({ revision: z.number().int().nonnegative(), routingRevision: z.number().int().nonnegative(), watchlist: z.object({ order: z.array(z.string()).max(100), items: z.record(z.string(), securitySchema.safeExtend({ alias: z.string(), pinned: z.boolean(), marks: marksSchema, group: z.string().refine(s => [...s.trim()].length <= 12 && !/[\u0000-\u001f]/.test(s)).default('') })) }), preferences: preferencesSchema, providers: z.array(providerSchema), routes: z.array(routeSchema), operations: z.array(z.object({ id: z.uuid(), hash: z.string(), at: z.number(), result: z.object({ revision: z.number() }).passthrough(), action: z.string(), payload: z.unknown() })).max(256) }).superRefine((control, ctx) => {
   const w = control.watchlist
   if (new Set(w.order).size !== w.order.length || w.order.length !== Object.keys(w.items).length || w.order.some(id => w.items[id]?.id !== id)) ctx.addIssue({ code: 'custom', message: '自选序列与证券不一致' })
   let unpinned = false
@@ -61,15 +70,29 @@ export const controlSchema = z.object({ revision: z.number().int().nonnegative()
   try { parseConfiguration({ providers: control.providers, routes: control.routes }) } catch { ctx.addIssue({ code: 'custom', message: '来源配置不一致' }) }
 })
 export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single', tables: { control: { valueSchema: controlSchema }, cache: { valueSchema: z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() }) } } }
-// 默认数据源:免凭据公开源+保守预算,首用即可检查保存;目录走新浪分市场节点,行情与搜索走东财。
+// 推荐配置:四个免凭据源,东财做八市场主力,其余按实测最强能力分派备份——公开源无SLA,能覆盖的市场都串上备源。
 export const defaultConfig = () => {
-  const catalog = { id: 'sn-catalog', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: { requestsPerMinute: 120, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { catalog: 60 } } }
-  const market = { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { kline: 30 } } }
-  const routes = ['XSHG', 'XSHE'].flatMap(m => [
-    { id: `${m.toLowerCase()}-catalog`, capability: 'catalog', market: m, instrument: 'equity', primaryInstanceId: catalog.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
-    { id: `${m.toLowerCase()}-search`, capability: 'search', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
-    { id: `${m.toLowerCase()}-quotes`, capability: 'quotes', market: m, instrument: 'equity', primaryInstanceId: market.id, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true },
+  const budget = (requestsPerMinute, capabilityLimits = {}) => ({ requestsPerMinute, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits })
+  const providers = [
+    { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: budget(60, { kline: 30 }) },
+    { id: 'sn-backup', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
+    { id: 'tx-backup', adapterId: 'tencent', enabled: true, credentialEnv: null, quotaGroup: 'free-backup', budget: budget(60, { kline: 20 }) },
+    { id: 'xq-backup', adapterId: 'xueqiu', enabled: true, credentialEnv: null, quotaGroup: 'free-xq', budget: budget(60) },
+  ]
+  // 备用源只在探针可验证的组合上声明: 腾讯美股K线需先由搜索建立代码映射, 探针期必然不可用
+  const klineBackup = new Set(['XSHG', 'XSHE', 'XHKG'])
+  // 目录覆盖八市场: 东财 clist 的 fs 对日韩英同样有节点(日股 3752 / 韩股 2866 / 英股股票 4608), 全量翻页在 50 页上限内
+  const catalogCovered = new Set(['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'])
+  // 报价备源按市场派: 沪深港走新浪(免cookie、单位已是股), 美股走雪球(时间戳是UTC毫秒, 与东财同口径)
+  const quoteBackupOf = market => (market === 'XNAS' || market === 'XNYS' ? 'xq-backup' : ['XSHG', 'XSHE', 'XHKG'].includes(market) ? 'sn-backup' : null)
+  const route = (market, capability, primary, fallback = null) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: primary, fallbackInstanceIds: fallback ? [fallback] : [], failoverMode: fallback ? 'network' : 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
+  const routes = ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'].flatMap(market => [
+    // 目录统一走东财: 一个源覆盖八个市场, 不必为沪深单开新浪分支;目录不支持备用源
+    ...(catalogCovered.has(market) ? [route(market, 'catalog', 'em-default')] : []),
+    route(market, 'search', 'em-default'),
+    route(market, 'quotes', 'em-default', quoteBackupOf(market)),
+    route(market, 'kline', 'em-default', klineBackup.has(market) ? 'tx-backup' : null),
   ])
-  return { providers: [catalog, market], routes }
+  return { providers, routes }
 }
 export const initialControl = () => ({ revision: 0, routingRevision: 0, watchlist: { order: [], items: {} }, preferences: { refreshSeconds: 15, colorMode: 'red-up' }, ...defaultConfig(), operations: [] })

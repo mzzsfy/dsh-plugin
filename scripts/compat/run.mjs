@@ -9,11 +9,12 @@
 //   [--only 包,包] [--skip-externals] [--crash-only] [--seed-gateway](主测槽:seed echo 路由入隔离 profile)
 //   [--keep](宿主+模拟器驻留交接,live.json 落盘,收尾 keep-stop.mjs;与 --crash-only 互斥)
 import { spawn, spawnSync } from 'node:child_process'
-import { createWriteStream, existsSync, lstatSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { createWriteStream, existsSync, writeFileSync, readFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:net'
 import { basename, join, resolve } from 'node:path'
 import { COMPAT_ROOT, DSH_PACKAGE, CORDIS_GROUP_PIN, DEFAULT_PORT, REPO_ROOT, workspaceYaml, runCmd, killPortOwner, symlinkDir, log } from './lib.mjs'
+import { acquireBridgeLock, bridgeArtifactShape, bridgeBackupPath, healBridgeBackups } from './bridge-mutex.mjs'
 import { buildProfile, installPackageExternals, enumeratePackages } from './profile.mjs'
 import { isSemver } from './window.mjs'
 import { dismissOnboardingEval, verifyTypedEval, newSessionEval, ONBOARDING_CLEARED_VALUES } from './probe-evals.mjs'
@@ -70,17 +71,14 @@ function parseArgs(argv) {
   return args
 }
 
-// 根桥重指:dst 原位暂存为 .compat-bak;中途失败自动还原已重指部分。
-// 每次形态变迁落审计日志:桥包消失事故定位需要确切的变迁时刻与前后形态
-function repointBridgeFromHost(hostDir) {
+// 根桥重指:dst 原位暂存为带 pid 后缀的备份;中途失败自动还原已重指部分。
+// 重指是全局副作用,先抢根桥锁:持有者存活立刻失败(提示占用工位),陈旧锁接管;
+// restore 完成后释放锁。每次形态变迁落审计日志:桥包消失事故定位需要确切的变迁时刻与前后形态
+function repointBridgeFromHost(hostDir, { workRoot, repoRoot = REPO_ROOT } = {}) {
+  const lock = acquireBridgeLock({ repoRoot, workRoot, log })
   const backups = []
-  const shape = (p) => {
-    if (!existsSync(p)) return 'absent'
-    const st = lstatSync(p)
-    return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'dir' : 'other'
-  }
   const audit = (phase, name, dst, backup) => log(
-    `[bridge] ${phase} ${name}: dst=${shape(dst)} bak=${shape(backup)}`,
+    `[bridge] ${phase} ${name}: dst=${bridgeArtifactShape(dst)} bak=${bridgeArtifactShape(backup)}`,
   )
   const restore = () => {
     for (const { dst, backup } of backups) {
@@ -88,29 +86,34 @@ function repointBridgeFromHost(hostDir) {
       if (existsSync(backup)) renameSync(backup, dst)
       audit('restore', basename(dst), dst, backup)
     }
+    backups.length = 0
+  }
+  const finalize = () => {
+    try {
+      restore()
+    } finally {
+      lock.release()
+    }
   }
   try {
     for (const name of BRIDGE_PACKAGES) {
       const src = join(hostDir, 'node_modules', name)
-      const dst = join(REPO_ROOT, 'node_modules', name)
+      const dst = join(repoRoot, 'node_modules', name)
       if (!existsSync(src)) continue
-      const backup = `${dst}.compat-bak`
+      const backup = bridgeBackupPath(dst, process.pid)
       audit('repoint-before', name, dst, backup)
-      // 上次运行异常退出未还原(bak 残留):先恢复原桥,防止本次误删原件
-      if (existsSync(backup)) {
-        if (existsSync(dst)) rmSync(dst, { recursive: true, force: true })
-        renameSync(backup, dst)
-      }
+      // 锁在手,该目标下的遗留备份必属已死工位:校验形态后 heal,防止本次误删原件
+      healBridgeBackups(dst, { log })
       if (existsSync(dst)) renameSync(dst, backup)
       symlinkDir(src, dst)
       backups.push({ dst, backup })
       audit('repoint-after', name, dst, backup)
     }
   } catch (error) {
-    restore()
+    finalize()
     throw error
   }
-  return restore
+  return finalize
 }
 
 // 端口可绑定探测:可绑定 = 无监听者
@@ -683,7 +686,7 @@ async function main() {
     child.stdout.pipe(bootLog)
     child.stderr.pipe(bootLog)
 
-    restoreBridge = repointBridgeFromHost(hostDir)
+    restoreBridge = repointBridgeFromHost(hostDir, { workRoot: args.workRoot })
 
     const status = await waitBootReady(base, child, bootLogPath)
     const token = await waitToken(child, bootLogPath)
@@ -727,7 +730,8 @@ async function main() {
     // --keep:宿主与模拟器存活导出(后续 l3-probe 接管跑 UI 专项);
     // 桥重指不还原会污染宿主解析,keep 路径必须在还原桥之后退出
     if (args.keep === true) {
-      writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, pid: child.pid, logPath: simulator.logPath }, null, 2), 'utf8')
+      // simulatorPid 是 keep-stop 精确收尾的唯一依据(端口是模拟器动态自报,命令行只有 --port 0)
+      writeFileSync(join(workDir, 'live.json'), JSON.stringify({ port: args.port, token, simulatorPort: simulator.port, simulatorPid: simulator.child.pid, pid: child.pid, logPath: simulator.logPath }, null, 2), 'utf8')
       log(`[${args.version}] keep:宿主 :${args.port} token=${token} 模拟器 :${simulator.port}(live.json 已落,自行收尾用 scripts/compat/keep-stop.mjs)`)
       handedOver = true
     }

@@ -85,3 +85,14 @@ export function killPortOwner(port) {
 export function log(msg) {
   console.log(`[compat] ${msg}`)
 }
+
+// 进程存活探测:0 信号在 win32/posix 都是存在性检查;EPERM = 进程存在但无权发信号
+export function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}

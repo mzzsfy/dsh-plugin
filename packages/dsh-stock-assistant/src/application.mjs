@@ -6,6 +6,7 @@ import { tushare } from './providers/tushare.mjs'
 import { tencent } from './providers/tencent.mjs'
 import { sina } from './providers/sina.mjs'
 import { eastmoney } from './providers/eastmoney.mjs'
+import { xueqiu } from './providers/xueqiu.mjs'
 import { openState, digest } from './state.mjs'
 import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema } from './schemas.mjs'
 import { createWatchlistService } from './service.mjs'
@@ -18,7 +19,9 @@ import { createKlineCache } from './kline-cache.mjs'
 import { fail, parseSecurityId, MARKET_META } from './market-model.mjs'
 const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
-export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
+const US_SYMBOL_LIMIT = 500
+const PROBE_LIMIT = 512
+export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
   // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
   const probeCache = new Map()
@@ -48,7 +51,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const wanted = demand.active(), opening = wanted && !hadDemand; hadDemand = wanted
     if (wanted) {
       ensureCaches()
-      if (opening) collector?.refresh().catch(() => {})
+      // 缓存新鲜时进入面板不重复打上游(限流主因); 过期才拉取, 定时器照常量节奏维持
+      const freshFor = (getControl().preferences?.refreshSeconds ?? 15) * 1000
+      if (opening && !collector?.freshWithin(freshFor)) collector?.refresh().catch(() => {})
       collector?.reconcile()
     } else collector?.cancelIdle()
   }, now, timers)
@@ -65,6 +70,8 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const caps = z.array(z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])).min(1).max(5).parse(input.capabilities)
     const at = now()
     for (const [id, check] of checks) if (check.until <= at) checks.delete(id)
+    // 过期目标直接淘汰: 键空间随实例/市场/能力组合有界, 但不留过期条目占位
+    for (const [key, entry] of probeCache) if (entry.until <= at) probeCache.delete(key)
     if (checks.size >= 64) fail('CHECK_LIMIT', '检查请求过多，请稍后重试', 429)
     const results = []
     for (const route of config.routes.filter(r => caps.includes(r.capability))) for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) {
@@ -72,12 +79,15 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       registry.validate(instance, route)
       const key = `${instance.id}:${route.capability}:${route.market}`
       if (results.some(r => r.key === key)) continue
+      // 探针耗时就是这一条路由端到端拿数据的真实延迟, 用于把「能不能用」和「快不快」一起回给用户
+      const startedAt = now()
       try {
         const result = await executor.run(instance, route.capability, { market: route.market, instrument: route.instrument }, { probe: true, signal })
         const status = result.status === 'ready' ? 'ready' : 'unavailable'
         probeCache.set(key, { status, until: now() + WINDOW })
-        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status })
-      } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', error: { code: e.code, message: e.message } }) }
+        while (probeCache.size > PROBE_LIMIT) probeCache.delete(probeCache.keys().next().value)
+        results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status, ms: now() - startedAt })
+      } catch (e) { results.push({ key, providerInstanceId: instance.id, capability: route.capability, market: route.market, status: 'denied', ms: now() - startedAt, error: { code: e.code, message: e.message } }) }
     }
     const checkId = randomUUID()
     checks.set(checkId, { hash: digest(config), until: now() + WINDOW, results })
@@ -89,13 +99,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     const config = parseConfiguration(operation.payload)
     const replay = state.replay({ ...operation, action: 'configuration', payload: config })
     if (replay) return replay
-    const hash = digest(config), valid = (operation.checkIds || []).map(id => checks.get(id)).filter(c => c?.until > now() && c.hash === hash)
-    // 增量合同: 每目标在探针缓存或随附 checkId 中有未过期 ready 记录即通过; 缓存不随无关字段改动失效, 只验新目标与过期目标
-    for (const route of config.routes) for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) {
-      const instance = config.providers.find(p => p.id === target); registry.validate(instance, route)
-      const cached = probeCache.get(`${target}:${route.capability}:${route.market}`)
-      if (cached?.status === 'ready' && cached.until > now()) continue
-      if (!valid.some(c => c.results.some(r => r.providerInstanceId === target && r.capability === route.capability && r.market === route.market && r.status === 'ready'))) fail('CHECK_REQUIRED', `${target} 的 ${route.market}/${route.capability} 尚未验证或已过期，请检查后保存`, 422)
+    // 保存不做连通性闸门: 探针是给人看的诊断信息, 不该把人挡在门外。契约只校验路由自身的合法性,
+    // 按能力挑源已经由前端按适配器能力过滤, 后端再校验一次目标是否具备该能力即可。
+    for (const route of config.routes) {
+      for (const target of [route.primaryInstanceId, ...route.fallbackInstanceIds]) registry.validate(config.providers.find(p => p.id === target), route)
     }
     const result = await state.mutate({ ...operation, action: 'configuration', payload: config }, current => {
       if (JSON.stringify(current.providers) === JSON.stringify(config.providers) && JSON.stringify(current.routes) === JSON.stringify(config.routes)) return current
@@ -140,7 +147,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (phase === 'remote') {
         for (const item of items) {
           const row = item.raw && typeof item.raw === 'object' ? item.raw : null
-          if (row?.MktNum && /^10[567]$/.test(row.MktNum)) usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: now() })
+          if (row?.MktNum && /^10[567]$/.test(row.MktNum)) {
+            usSymbols.set(`US:${row.Code}`, { mktNum: row.MktNum, jys: row.JYS || null, at: now() })
+            while (usSymbols.size > US_SYMBOL_LIMIT) usSymbols.delete(usSymbols.keys().next().value)
+          }
         }
       }
       for (const [key, value] of usSymbols) if (now() - value.at > US_SYMBOL_TTL) usSymbols.delete(key)
@@ -150,15 +160,18 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       assertLive()
       const parsed = klineQuerySchema.safeParse(input)
       if (!parsed.success) fail('INVALID_PARAM', 'K线请求参数无效', 400)
-      const { securityId: sid, period, limit } = parsed.data
+      const { securityId: sid, period, limit, force } = parsed.data
       let exchange, code
       try { ({ exchange, code } = parseSecurityId(sid)) } catch { fail('INVALID_PARAM', '证券身份无效', 400) }
       const config = state.get()
       const { route, instance } = router.select('kline', exchange, 'equity')
       const fallbacks = route.fallbackInstanceIds.map(id => config.providers.find(p => p.id === id && p.enabled !== false)).filter(Boolean)
-      for (const cand of [instance, ...fallbacks]) {
-        const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code }, config.routingRevision)
-        if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
+      // force=1 跳过缓存读(详情页手动刷新);缓存写入仍按正常策略,失败回源不额外惩罚
+      if (force !== '1') {
+        for (const cand of [instance, ...fallbacks]) {
+          const cached = await klineCache.get({ providerInstanceId: cand.id, market: exchange, period, code }, config.routingRevision)
+          if (cached) return { ...cached.payload, source: cand.id, revision: config.revision }
+        }
       }
       const result = await runWithFailover(route, instance, fallbacks, { securityId: sid, market: exchange, code, period, adjust: 'qfq', limit }, signal)
       if (period !== 'trend') await klineCache.put({ providerInstanceId: result.providerInstanceId, market: exchange, period, code }, result, config.routingRevision)
@@ -177,7 +190,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
         if (route.instance) {
           const result = await executor.run(route.instance, 'quotes', { securities: [{ id: index.id, exchange: index.exchange, code: index.code }], routingRevision: state.get().routingRevision }, { signal: AbortSignal.timeout(5 * 1000) })
           const quote = result.items?.find(q => q.securityId === index.id)
-          if (quote && quote.last !== null) { deriveDelay(quote, now); overview = { name: index.name, last: quote.last, change: quote.change, changePct: quote.changePct, quoteAt: quote.quoteAt, delayKind: quote.delayKind, delaySeconds: quote.delaySeconds, source: quote.providerInstanceId } }
+          if (quote && quote.last !== null) { deriveDelay(quote, now, quote.sessionState === 'trading'); overview = { name: index.name, last: quote.last, change: quote.change, changePct: quote.changePct, quoteAt: quote.quoteAt, delayKind: quote.delayKind, delaySeconds: quote.delaySeconds, source: quote.providerInstanceId } }
         }
       } catch {}
       return { ...await catalog.browse(input), overview, catalogs: catalog.status(), routingRevision: state.get().routingRevision }

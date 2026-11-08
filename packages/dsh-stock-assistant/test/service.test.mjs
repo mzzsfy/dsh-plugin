@@ -12,18 +12,28 @@ test('S08 第101只自选明确拒绝且不改已有列表', async () => {
   assert.equal(state.get().watchlist.order.length, 100); assert.equal(state.get().revision, 100)
   await state.close()
 })
-test('COST01 成本价写入清空与非法值拒绝', async () => {
+test('MARKS01 价格标记整组替换与校验', async () => {
   const state = await openState(memoryStorage()), s = makeSecurity('XSHG', '600001', '甲')
   const service = createWatchlistService(state, id => s)
   let n = 0
   const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
   await exec('add', { securityId: s.id })
-  await exec('cost', { securityId: s.id, cost: 1450.5 })
-  assert.equal(state.get().watchlist.items[s.id].cost, 1450.5)
-  await exec('cost', { securityId: s.id, cost: null })
-  assert.equal(state.get().watchlist.items[s.id].cost, null)
-  await assert.rejects(exec('cost', { securityId: s.id, cost: -1 }), e => e.code === 'INVALID_OPERATION')
-  await assert.rejects(exec('cost', { securityId: s.id, cost: 0 }), e => e.code === 'INVALID_OPERATION')
+  const mark = (price, kind = 'cost', id = 'm1') => ({ id, price, kind })
+  await exec('marks', { securityId: s.id, marks: [mark(1450.5)] })
+  assert.deepEqual(state.get().watchlist.items[s.id].marks, [mark(1450.5)])
+  // 多个标记共存: 成本与卖价各自独立, 都在同一个数组里
+  await exec('marks', { securityId: s.id, marks: [mark(1450.5), mark(1600, 'target', 'm2')] })
+  assert.equal(state.get().watchlist.items[s.id].marks.length, 2)
+  await exec('marks', { securityId: s.id, marks: [] })
+  assert.deepEqual(state.get().watchlist.items[s.id].marks, [])
+  // 价格必须为正; 同类型不允许重复价; id 必须唯一
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(-1)] }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(0)] }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(100, 'cost', 'a'), mark(100, 'cost', 'b')] }), e => e.code === 'INVALID_OPERATION')
+  await assert.rejects(exec('marks', { securityId: s.id, marks: [mark(100, 'cost', 'a'), mark(200, 'target', 'a')] }), e => e.code === 'INVALID_OPERATION')
+  // 同价格不同类型是合法的
+  await exec('marks', { securityId: s.id, marks: [mark(100, 'cost', 'a'), mark(100, 'target', 'b')] })
+  assert.equal(state.get().watchlist.items[s.id].marks.length, 2)
 })
 test('GROUP01 组分配重命名解散与校验', async () => {
   const state = await openState(memoryStorage()), securities = ['600001', '600002'].map(code => makeSecurity('XSHG', code, code))
@@ -57,4 +67,25 @@ test('S01/S05/S09 添加、移动和撤销使用当前序列不覆盖别页操�
   await exec('move', { securityId: securities[2].id, beforeId: securities[0].id })
   await exec('restore', { removeOperationId })
   assert.deepEqual(state.get().watchlist.order, [securities[2].id, securities[0].id, securities[1].id])
+})
+
+test('R01 reorder 按提交顺序重排并校验收集合与置顶约束', async () => {
+  const state = await openState(memoryStorage())
+  const securities = ['600519', '600520', '600521'].map((code, i) => makeSecurity('XSHG', code, `证券${i}`))
+  const byId = new Map(securities.map(s => [s.id, s]))
+  const service = createWatchlistService(state, id => byId.get(id))
+  for (let i = 0; i < securities.length; i++) await service.execute({ ...operation(i + 1, i), action: 'add', payload: { securityId: securities[i].id } })
+  const revision = () => state.get().revision
+  const [a, b, c] = securities.map(s => s.id)
+  await service.execute({ ...operation(10, revision()), action: 'reorder', payload: { order: [c, a, b] } })
+  assert.deepEqual(state.get().watchlist.order, [c, a, b], '按提交顺序重排')
+  await assert.rejects(service.execute({ ...operation(11, revision()), action: 'reorder', payload: { order: [c, a] } }), e => e.code === 'INVALID_ORDER', '少一项即拒')
+  await assert.rejects(service.execute({ ...operation(12, revision()), action: 'reorder', payload: { order: [c, a, a] } }), e => e.code === 'INVALID_ORDER', '重复即拒')
+  await assert.rejects(service.execute({ ...operation(13, revision()), action: 'reorder', payload: { order: [c, a, 'XSHG:equity:999999'] } }), e => e.code === 'INVALID_ORDER', '陌生身份即拒')
+  // 置顶项必须留在最前段
+  await service.execute({ ...operation(14, revision()), action: 'pin', payload: { securityId: a, pinned: true } })
+  await assert.rejects(service.execute({ ...operation(15, revision()), action: 'reorder', payload: { order: [c, b, a] } }), e => e.code === 'INVALID_ORDER', '置顶项不得沉底')
+  await service.execute({ ...operation(16, revision()), action: 'reorder', payload: { order: [a, c, b] } })
+  assert.deepEqual(state.get().watchlist.order, [a, c, b], '置顶段内重排允许')
+  await state.close()
 })

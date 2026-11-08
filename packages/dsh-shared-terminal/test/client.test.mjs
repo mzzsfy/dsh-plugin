@@ -5,10 +5,10 @@ import vm from 'node:vm'
 import { setImmediate as settled } from 'node:timers/promises'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
-function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }) } = {}) {
+function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [] } = {}) {
   let definition, component
-  const effects = [], calls = [], seen = [], refs = []
-  let index = 0, declared = false, active = true
+  const effects = [], calls = [], seen = [], refs = [], timers = []
+  let index = 0, declared = false, active = true, mountedSession = 'session-a'
   const React = {
     createElement(type, props, ...children) {
       if (typeof type === 'function') return type({ ...(props ?? {}), children })
@@ -21,15 +21,36 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
   }
   const sidebarRight = {
     openTabIn(...args) { calls.push(args) },
-    openResourceIn(...args) { calls.push(['reveal', ...args]) },
+    // 宿主的 openResourceIn 会同步提交 tab,补写逻辑依赖这份提交
+    openResourceIn(sessionId, contentId, options) {
+      calls.push(['reveal', sessionId, contentId, options])
+      tabs.push({ sessionId, kind: options.kind, tabId: `tab-${tabs.length}`, contentId })
+    },
     openTabs: { getSnapshot: () => tabs },
-    tabDomain: { occurrence: () => ({ navigation: { getSnapshot: () => ({ params }) } }) },
+    mounted: { getSnapshot: () => mountedSession },
+    tabDomain: {
+      occurrence: () => ({ navigation: { getSnapshot: () => ({ params }) } }),
+      navigate(...args) { calls.push(['navigate', ...args]) },
+    },
   }
+  const views = []
+  const webTerminals = { view(sessionId, key, contentId, terminalId) { views.push([sessionId, key, contentId, terminalId]); return { state: { getSnapshot: () => ({}) }, dispose() {} } } }
   const remote = { terminal: { async list(sessionId) { seen.push(sessionId); return listed(sessionId) } } }
+  // 自愈只扫 [data-sidebar-terminal];其余选择器由各用例的节点桩承担
+  const documentStub = {
+    createElement: () => ({ setAttribute: () => {}, remove: () => {}, style: {}, textContent: '' }),
+    head: { appendChild: () => {} },
+    querySelectorAll: (selector) => (selector === '[data-sidebar-terminal]' ? roots : []),
+  }
   new vm.Script(source).runInNewContext({
     AbortController,
+    AbortSignal,
+    Date,
     fetch: fetchImpl,
-    document: { createElement: () => ({ setAttribute: () => {}, remove: () => {}, style: {}, textContent: '' }), head: { appendChild: () => {} } },
+    document: documentStub,
+    setInterval: (fn) => { timers.push(fn); return timers.length },
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearInterval: () => {},
     window: { __ModuleLoader__: { load(value) { definition = value } } },
   })
   assert.equal(definition.id, '@mzzsfy/dsh-shared-terminal')
@@ -39,18 +60,48 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     inject(name, factory) { assert.equal(name, 'tool.call.toolview'); declared = true; factory() },
     register(meta, view) { assert.equal(declared, true); assert.equal(meta.key, 'terminal'); component = view; return () => { active = false } },
   }
-  plugin.apply({ remote, slots, sidebarRight, locale: { register: () => {} }, effect: (fn) => fn() })
+  plugin.apply({ remote, slots, sidebarRight, webTerminals, locale: { register: () => {} }, effect: (fn) => fn() })
   return {
-    calls, seen, plugin,
+    calls, seen, views, webTerminals, plugin, document: documentStub,
+    setSession(id) { mountedSession = id },
     render(props) { index = 0; return component(props) },
+    // 面板创建按 PANEL_GAP_MS 串行,flush 要等队列走完
     async flush() { const pending = effects.splice(0).map((effect) => effect()); await settled(); return pending },
+    async heal() { for (const timer of timers) await timer() },
   }
 }
-test('Given an existing terminal tab, When reopening result, Then it reveals the same tab with identity intact', async () => {
-  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://terminal/content' }], params: { terminalId: 'term-a' } })
+test('Given no terminal panel, When reopening result, Then a panel is opened at the terminal address', async () => {
+  const app = fixture({ tabs: [], params: undefined })
   app.render(props('open'))
   await app.flush()
-  assert.equal(JSON.stringify(app.calls), JSON.stringify([['reveal', 'session-a', 'dsh-resource://terminal/content', { kind: 'terminal', params: { terminalId: 'term-a' } }]]))
+  assert.equal(JSON.stringify([['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }], ['navigate', 'session-a', 'tab-0', { address: 'dsh-resource://dsh-shared-terminal/panel/term-a', params: { terminalId: 'term-a' } }]]), JSON.stringify(app.calls), '新面板建好后要补写导航参数,否则 view 首帧拿不到 terminalId')
+})
+
+test('Given the panel of this terminal is already open, When the result renders again, Then the same address is reopened', async () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }], params: { terminalId: 'term-a' } })
+  app.render(props('open'))
+  await app.flush()
+  app.render({ ...props('open'), callId: 'call-b' })
+  await app.flush()
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1, '同一 terminal 只导航一次')
+  assert.equal(JSON.stringify(app.calls[0][2]), JSON.stringify('dsh-resource://dsh-shared-terminal/panel/term-a'))
+})
+
+test('Given a panel of another terminal is open, When this result renders, Then it does not hijack that panel', async () => {
+  // 改导航参数不会重建 xterm 实例,复用别人的面板会看到错的终端
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab9', contentId: 'sidebar://terminal/2f1c' }], params: { terminalId: 'term-b' } })
+  app.render(props('open'))
+  await app.flush()
+  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]))
+})
+
+test('Given two open results for the same terminal, When both render, Then the panel is opened once', async () => {
+  const app = fixture({ tabs: [], params: undefined })
+  app.render(props('open'))
+  await app.flush()
+  app.render({ ...props('open'), callId: 'call-b' })
+  await app.flush()
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1, '同一 terminal 只开一次面板,重复导航会闪面板')
 })
 
 test('Given remote query pending, When effect unmounts and same result remounts, Then only the new lifetime may navigate', async () => {
@@ -66,7 +117,7 @@ test('Given remote query pending, When effect unmounts and same result remounts,
   await app.flush()
   pending.shift()({ ok: true, value: [{ id: 'term-a' }] })
   await settled()
-  assert.equal(app.calls.length, 1)
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1)
 })
 
 const props = (action, result = { ok: true, terminal_id: 'term-a' }) => ({
@@ -83,7 +134,7 @@ const walk = (tree) => {
 
 test('Given classic-script loader and declared slot, When plugin materializes, Then its service gates and renderer register', () => {
   const app = fixture()
-  assert.deepEqual(Array.from(app.plugin.inject), ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'locale'])
+  assert.deepEqual(Array.from(app.plugin.inject), ['remote', 'remote.terminal', 'slots', 'sidebarRight', 'webTerminals', 'locale'])
   assert.ok(app.render(props('open')))
 })
 
@@ -95,8 +146,8 @@ test('Given successful open result, When rendering then committing effect, Then 
   await app.flush()
   app.render(props('open'))
   await app.flush()
-  assert.equal(app.calls.length, 1)
-  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['session-a', 'terminal', { params: { terminalId: 'term-a' } }]))
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1)
+  assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]))
   assert.deepEqual(app.seen, ['session-a'])
 })
 
@@ -132,7 +183,7 @@ test('Given successful open result, When clicking the terminal button, Then expl
   await app.flush()
   app.calls.length = 0
   await button.props.onClick()
-  assert.equal(app.calls.length, 1)
+  assert.equal(app.calls.filter((call) => call[0] === 'reveal').length, 1)
 })
 
 test('Given preparing or start phase, When rendering, Then a visible tool status is present', () => {
@@ -201,4 +252,211 @@ test('Given a running non-wait tool, When rendering, Then no skip button appears
   const app = fixture()
   const tree = app.render({ phase: 'start', sessionId: 'session-a', callId: 'call-read', toolName: 'terminal', block: { argsRaw: '{"action":"read","terminal_id":"term-a"}' } })
   assert.ok(!JSON.stringify(tree).includes('跳过等待'))
+})
+
+// ── 只读终端自愈:泵释放后宿主不归还 writable,只读界面不重算几何 ─────────
+
+const fakeRoot = (options = { clicks: [] }) => {
+  const state = {
+    clicks: options.clicks,
+    content: options.contentHeight ?? 800,
+    readonly: options.readonly ?? true,
+    visible: options.visible ?? true,
+    status: options.statusHeight ?? 40,
+    connected: options.connected ?? true,
+    label: options.buttonLabel ?? '接管输入',
+  }
+  const root = {
+    state,
+    get isConnected() { return state.connected },
+    set isConnected(value) { state.connected = value },
+    getBoundingClientRect: () => ({ width: state.visible ? 400 : 0, height: state.visible ? 500 : 0 }),
+    querySelector(selector) {
+      if (selector === '[role="status"]') {
+        if (!state.readonly) return null
+        return {
+          getBoundingClientRect: () => ({ width: 400, height: state.status }),
+          querySelector: (inner) => (inner === 'button' ? { textContent: state.label, click: () => state.clicks.push('takeover') } : null),
+        }
+      }
+      if (selector === '.xterm-screen') return { getBoundingClientRect: () => ({ width: 400, height: state.content }) }
+      if (selector === '.xterm') return { getBoundingClientRect: () => ({ width: 400, height: 300 }) }
+      return null
+    },
+  }
+  return root
+}
+
+const healingFixture = (options) => {
+  const queries = []
+  const inner = options.fetchImpl ?? (async () => ({ ok: true, json: async () => ({ ok: true, attached: false }) }))
+  const app = fixture({
+    tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'content' }],
+    params: { terminalId: 'term-a' },
+    fetchImpl: async (url, init) => { queries.push([url, JSON.parse(init?.body ?? '{}')]); return inner(url, init) },
+    roots: options.roots ?? [],
+  })
+  app.queries = queries
+  return app
+}
+
+test('Given a read-only clipped terminal without controller, When healing ticks, Then it takes input control once', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })] })
+  await app.heal()
+  assert.deepEqual(clicks, ['takeover'])
+  assert.deepEqual(app.queries, [['/api/shared-terminal/pump', { sessionId: 'session-a' }]], '自愈须查宿主泵状态路由')
+  await app.heal()
+  assert.deepEqual(clicks, ['takeover'], '冷却窗口内不得重复抢控制权')
+})
+
+test('Given the pump still attached, When healing ticks, Then the user view is left alone', async () => {
+  const clicks = []
+  const app = healingFixture({
+    roots: [fakeRoot({ clicks })],
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, attached: true }) }),
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given content fits the container, When healing ticks, Then no takeover happens', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, contentHeight: 300 })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given only the read-only status bar shortens the box, When healing ticks, Then it is not treated as clipping', async () => {
+  const clicks = []
+  // 311 只比容器多 11px,恰好不足状态栏高度:这是状态栏占位,不是用户看不全
+  const app = healingFixture({ roots: [fakeRoot({ clicks, contentHeight: 311 })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the terminal is not read-only, When healing ticks, Then the status button is never clicked', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, readonly: false })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the pump state route is unavailable, When healing ticks, Then no takeover is attempted', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })], fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }) })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the pump state query rejects, When healing ticks, Then the failure is swallowed and nothing is taken over', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })], fetchImpl: async () => { throw new Error('network down') } })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the tab was detached while the pump state was queried, When healing ticks, Then no click lands on the stale node', async () => {
+  const clicks = []
+  const root = fakeRoot({ clicks })
+  const app = healingFixture({
+    roots: [root],
+    fetchImpl: async () => {
+      root.isConnected = false
+      return { ok: true, json: async () => ({ ok: true, attached: false }) }
+    },
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the terminal regains its geometry while the pump state was queried, When healing ticks, Then no click is dispatched', async () => {
+  const clicks = []
+  const root = fakeRoot({ clicks })
+  const app = healingFixture({
+    roots: [root],
+    fetchImpl: async () => {
+      root.state.content = 300
+      return { ok: true, json: async () => ({ ok: true, attached: false }) }
+    },
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the status bar disappears while the pump state was queried, When healing ticks, Then the stale takeover button is not clicked', async () => {
+  const clicks = []
+  const root = fakeRoot({ clicks })
+  const app = healingFixture({
+    roots: [root],
+    fetchImpl: async () => {
+      root.state.readonly = false
+      return { ok: true, json: async () => ({ ok: true, attached: false }) }
+    },
+  })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the page is hidden, When healing ticks, Then no pump query is issued', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })] })
+  app.document.hidden = true
+  await app.heal()
+  assert.deepEqual(clicks, [])
+  assert.deepEqual(app.queries, [], '后台标签页不得发查询')
+})
+
+test('Given the terminal has exited and the status bar only offers a new terminal, When healing ticks, Then it must not create one', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, buttonLabel: '新建终端' })] })
+  await app.heal()
+  assert.deepEqual(clicks, [], '退出态按钮是新建终端,按位置点击会建出多余终端')
+  assert.deepEqual(app.queries, [], '没有接管按钮时连泵查询都不必发')
+})
+
+test('Given the status bar labels the takeover in English, When healing ticks, Then the button is still recognised', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, buttonLabel: 'Take control' })] })
+  await app.heal()
+  assert.deepEqual(clicks, ['takeover'])
+})
+
+test('Given more sessions than the cooldown table holds, When they keep healing, Then the oldest entry is evicted and may heal again', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks })] })
+  const sessions = Array.from({ length: 65 }, (_, number) => `session-${number}`)
+  for (const session of sessions) {
+    app.setSession(session)
+    await app.heal()
+  }
+  assert.equal(clicks.length, sessions.length)
+  app.setSession(sessions[0])
+  await app.heal()
+  assert.equal(clicks.length, sessions.length + 1, '冷却表上限淘汰后最旧 Session 可再次自愈')
+})
+
+test('Given the terminal tab is hidden, When healing ticks, Then it is skipped', async () => {
+  const clicks = []
+  const app = healingFixture({ roots: [fakeRoot({ clicks, visible: false })] })
+  await app.heal()
+  assert.deepEqual(clicks, [])
+})
+
+test('Given the panel first frame runs before navigation lands, When the terminal view mounts, Then the layout contentId fills the gap', () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab7', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }] })
+  app.webTerminals.view('session-a', 'tab7', undefined, undefined, undefined)
+  assert.deepEqual(app.views[0], ['session-a', 'tab7', 'dsh-resource://dsh-shared-terminal/panel/term-a', 'term-a'], '首帧缺参时用 layout 的 contentId 与其中的终端身份补齐')
+})
+
+test('Given the first frame belongs to a host terminal tab, When the view mounts, Then only the contentId is filled', () => {
+  const app = fixture({ tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab8', contentId: 'sidebar://terminal/2f1c' }] })
+  app.webTerminals.view('session-a', 'tab8', undefined, undefined, undefined)
+  assert.deepEqual(app.views[0], ['session-a', 'tab8', 'sidebar://terminal/2f1c', undefined], '别的 contentId 不猜终端身份')
+})
+
+test('Given navigation already resolved, When the view mounts, Then the patch passes through unchanged', () => {
+  const app = fixture({})
+  app.webTerminals.view('session-a', 'tab9', 'sidebar://terminal/2f1c', 'term-z', 'pwsh')
+  assert.deepEqual(app.views[0], ['session-a', 'tab9', 'sidebar://terminal/2f1c', 'term-z'])
 })

@@ -1,13 +1,15 @@
 import { StockError, fail, makeSecurity } from './market-model.mjs'
 // 报价时间距获取时间不超过该秒数视为实时; 免凭据公开源常缺延迟声明, 由时间戳差派生
 const REALTIME_WINDOW_SECONDS = 90
-// 适配器未声明延迟但带报价时间时, 按时差派生 delayKind; 缺时间戳保持 unknown 不编造
-export function deriveDelay(quote, now) {
+// 适配器未声明延迟但带报价时间时, 按时差派生 delayKind; 缺时间戳保持 unknown 不编造。
+// 非交易时段(休市/午休/未开盘)报价停在最后成交那一刻, 时差是"多久没新数据"而不是"数据延迟", 单独标 closed 交给界面报时间点。
+export function deriveDelay(quote, now, trading = true) {
   if (quote.delayKind !== 'unknown' || !quote.quoteAt) return quote
   const lagSeconds = Math.max(0, Math.round((now() - Date.parse(quote.quoteAt)) / 1000))
   if (!Number.isFinite(lagSeconds)) return quote
-  if (lagSeconds <= REALTIME_WINDOW_SECONDS) quote.delayKind = 'realtime'
-  else { quote.delayKind = 'delayed'; quote.delaySeconds = lagSeconds }
+  if (lagSeconds <= REALTIME_WINDOW_SECONDS) { quote.delayKind = 'realtime'; return quote }
+  if (!trading) { quote.delayKind = 'closed'; quote.delaySeconds = null; return quote }
+  quote.delayKind = 'delayed'; quote.delaySeconds = lagSeconds
   return quote
 }
 const BUSINESS = entry => JSON.stringify(entry && { ...entry, lastAttemptAt: undefined, quote: entry.quote && { ...entry.quote, receivedAt: undefined } })
@@ -15,6 +17,12 @@ export function createCollector({ getControl, router, registry, executor, resolv
   const quotes = new Map(), marketPhases = new Map(), flights = new Map(), rounds = new Map(), blocked = new Map(), failures = new Map(), controllers = new Set()
   let generation = 0, timer, stopped = false, lastStart = -Infinity, manualWaiters = 0
   const entries = () => Object.fromEntries([...quotes].map(([id, value]) => [id, structuredClone(value)]))
+  // 缓存新鲜度: 全部自选都有未过期报价才算新鲜, 用于进入面板时跳过重复拉取
+  const freshWithin = ms => {
+    const order = getControl().watchlist.order
+    if (!order.length) return false
+    return order.every(id => { const quote = quotes.get(id)?.quote; return quote && Number.isFinite(quote.receivedAt) && now() - quote.receivedAt < ms })
+  }
   function apply(id, entry) {
     const before = quotes.get(id)
     quotes.set(id, entry); touched()
@@ -42,7 +50,9 @@ export function createCollector({ getControl, router, registry, executor, resolv
         for (const quote of result.items) {
           if (!requested.has(quote.securityId)) continue
           if (map.has(quote.securityId) || quote.providerInstanceId !== instance.id) fail('BAD_PAYLOAD', '报价身份或来源冲突', 502)
-          deriveDelay(quote, now)
+          // 只有明确处于非交易时段才改口径; 日历缺失(unknown)不能当成休市, 否则等于凭空断言收盘
+          const marketState = calendarState(securities.find(s => s.id === quote.securityId)?.exchange).state
+          deriveDelay(quote, now, marketState === 'unknown' || marketState === 'trading' || marketState === 'auction')
           if (quote.delayKind === 'unknown' && !route.acceptUnknownDelay) fail('BAD_PAYLOAD', '路由不接受未知延迟行情', 422)
           if (route.maxDelaySeconds !== null && quote.delayKind !== 'unknown' && quote.delaySeconds > route.maxDelaySeconds) fail('BAD_PAYLOAD', '报价延迟超过路由限制', 422)
           map.set(quote.securityId, quote)
@@ -152,7 +162,7 @@ export function createCollector({ getControl, router, registry, executor, resolv
     timer = timers.setTimeout(() => { refresh(undefined, { periodic: true }).catch(() => {}).finally(reconcile) }, Math.max(1000, wake - now())); timer?.unref?.()
   }
   return {
-    refresh, entries, reconcile,
+    refresh, entries, reconcile, freshWithin,
     resume() { blocked.clear(); failures.clear(); reconcile() },
     reset() { generation++; for (const c of controllers) c.abort(); flights.clear(); quotes.clear(); marketPhases.clear(); blocked.clear(); failures.clear(); lastStart = -Infinity; touched(); changed(); reconcile() },
     cancelIdle() { timers.clearTimeout(timer); if (!active() && !manualWaiters) for (const c of controllers) c.abort() },

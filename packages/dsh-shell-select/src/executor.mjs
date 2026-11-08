@@ -269,6 +269,10 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
       command: request.command,
       workdir: request.workdir ?? current.cwd ?? process.cwd(),
       timeoutMs,
+      // 官方 resolve 同构(dsh-pwsh-local):onExpiry 缺省 'kill'。漏传即 execute
+      // seam 的 deadline 永不武装,request.timeoutMs 静默失效且 timedOut 恒 false;
+      // 只有调用方显式声明 'none'(后台注册/自限等待)才不武装 deadline。
+      onExpiry: request.onExpiry ?? 'kill',
       stdoutMaxBytes,
       ...request.signal ? { signal: request.signal } : {},
       ...request.stdin !== undefined ? { stdin: request.stdin } : {},
@@ -322,10 +326,13 @@ export const ShellSelectExecutor = class ShellSelectExecutor extends ShellExecut
 
   /**
    * 官方 executeArgv 同构(条目参数化):deadline 按 spec.onExpiry 武装
-   * ('kill' 到期杀,'none'/缺省只跟随调用方信号);done 永不 reject,provider
+   * ('kill' 到期杀,'none' 只跟随调用方信号);done 永不 reject,provider
    * spawn 失败定局 killed + stderr 注记,result() 携带同一 rejection;受限模式
    * 定案事实经 processFacts/onProcessDone 单通道写 proc.sandbox(官方
    * pwsh-sandbox 子类同构),unsandboxed 的 result() 无 sandbox 键。
+   * deadline 自带 AbortController,与调用方 signal 经 AbortSignal.any 融合:
+   * 无 signal 时到期仍有一条契约内中止通道(subprocess 按 spec.signal 终止托管
+   * 进程),timedOut 由该 signal 的 TimeoutReason 反解,不靠退出码猜。
    */
   executionArgv(entry, spec, forcedArgv, sandboxFacts) {
     const argv = forcedArgv ?? this.argvFor(entry, spec)

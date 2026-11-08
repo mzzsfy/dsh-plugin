@@ -31,10 +31,12 @@ test('目录标准化过滤非A股且按官方交易所映射', async () => {
   assert.equal(result.items[0].id, 'XSHE:equity:000001')
   assert.equal(result.items[0].cnspell, 'payh')
 })
-test('P01 rt_k按列名解析并保留来源时间与单位', async () => {
+test('P01 rt_k按列名解析并把来源成交量(手)换算为股', async () => {
   const result = await tushare.quotes(req, ctx({ fields: ['close', 'ts_code', 'pre_close', 'name', 'trade_time', 'vol', 'amount'], items: [[10, '600519.SH', 8, '贵州茅台', '2026-10-29 14:30:05', 100, 1000]] }))
   assert.equal(result.items[0]?.securityId, security.id)
   assert.equal(result.items[0].changePct, '25.00')
   assert.equal(result.items[0].quoteAt, '2026-10-29T06:30:05.000Z')
-  assert.equal(result.items[0].volume, '100')
+  // 来源 vol=100 手,对外 volumeUnit=share,故须换算为 10000 股
+  assert.equal(result.items[0].volume, '10000')
+  assert.equal(result.items[0].volumeUnit, 'share')
 })

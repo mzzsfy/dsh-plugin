@@ -11,12 +11,38 @@ export const MESSAGES = {
   notFound: '接口不存在',
   badJsonBody: '请求体不是合法 JSON',
   bodyTooLarge: '请求体超过上限',
+  crossOrigin: '跨源请求被拒绝',
+  badContentType: 'content-type 须为 application/json',
   systemError: '操作失败(系统级错误, 详见服务端日志)',
 }
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
+}
+
+// 跨源防护: 浏览器侧 CSRF 防线, 非身份认证(仓库安全边界约定: 上限即 Origin 与 Host
+// 同源比对, 不做 Host 白名单/token)。无 Origin 的请求(非浏览器、同源导航)放行。
+function rejectCrossOrigin(req, res) {
+  const origin = req.headers?.origin
+  if (typeof origin !== 'string' || origin === '') return false
+  let sameOrigin = false
+  try {
+    sameOrigin = new URL(origin).host.toLowerCase() === String(req.headers.host ?? '').toLowerCase()
+  } catch {
+    sameOrigin = false
+  }
+  if (sameOrigin) return false
+  sendJson(res, 403, { error: MESSAGES.crossOrigin })
+  return true
+}
+
+// 写路由强制 JSON: 简单请求(content-type 非 JSON)不触发预检, 是跨站写入的唯一通道
+function rejectNonJson(req, res) {
+  const contentType = String(req.headers?.['content-type'] ?? '')
+  if (contentType.includes('application/json')) return false
+  sendJson(res, 400, { error: MESSAGES.badContentType })
+  return true
 }
 
 function respondError(res, error, logSystem) {
@@ -101,6 +127,10 @@ export function createApi({ tunnelsApi, readUi, updateUi, logSystem }) {
       }
       const segments = pathname.split('/').filter(Boolean)
       try {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          if (rejectCrossOrigin(req, res)) return
+          if (req.method === 'POST' && rejectNonJson(req, res)) return
+        }
         const matched = matchRoute(req.method, segments)
         if (!matched) {
           sendJson(res, 404, { error: MESSAGES.notFound })

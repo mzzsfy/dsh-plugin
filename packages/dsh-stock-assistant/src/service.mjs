@@ -1,18 +1,21 @@
 import { z } from 'zod'
 import { fail, parseSecurityId } from './market-model.mjs'
-import { securitySchema } from './schemas.mjs'
+import { securitySchema, marksSchema } from './schemas.mjs'
 // 自选身份八市场: parseSecurityId 是唯一事实源(市场/代码形态随 MARKET_META)
 const securityId = z.string().refine(v => { try { parseSecurityId(v); return true } catch { return false } })
 const payloads = {
   add: z.strictObject({ securityId }), remove: z.strictObject({ securityId }),
   restore: z.strictObject({ removeOperationId: z.uuid() }),
   alias: z.strictObject({ securityId, alias: z.string().refine(s => [...s].length <= 30) }),
-  cost: z.strictObject({ securityId, cost: z.number().positive().nullable() }),
-  group: z.strictObject({ securityIds: z.array(securityId).min(1), group: z.string().refine(s => { const t = s.trim(); return [...t].length <= 12 }) }),
-  groupRename: z.strictObject({ from: z.string().min(1), to: z.string().refine(s => { const t = s.trim(); return t.length > 0 && [...t].length <= 12 }) }),
+  marks: z.strictObject({ securityId, marks: marksSchema }),
+  // 组名进来就是用户输入, 校验在入口做: 只靠 state 写入后的不变式兜底会把它报成 500 内部错误
+  group: z.strictObject({ securityIds: z.array(securityId).min(1), group: z.string().refine(s => { const t = s.trim(); return [...t].length <= 12 && !/[\u0000-\u001f]/.test(t) }, '分组名最长 12 字且不能含控制字符') }),
+  groupRename: z.strictObject({ from: z.string().min(1), to: z.string().refine(s => { const t = s.trim(); return t.length > 0 && [...t].length <= 12 && !/[\u0000-\u001f]/.test(t) }, '分组名最长 12 字且不能含控制字符') }),
   groupRemove: z.strictObject({ group: z.string().min(1) }),
   pin: z.strictObject({ securityId, pinned: z.boolean() }),
   move: z.strictObject({ securityId, beforeId: securityId.nullable() }),
+  // 拖拽排序: 提交完整显示序, 前端算好顺序一次落库, 避免逐行 move 的中间态
+  reorder: z.strictObject({ order: z.array(securityId).min(1) }),
 }
 export function createWatchlistService(state, resolveSecurity, now = Date.now) {
   return {
@@ -24,12 +27,20 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
         const w = control.watchlist, item = w.items[p.securityId]
         const insert = (id, beforeId) => { const index = w.order.indexOf(beforeId); w.order.splice(index < 0 ? w.order.length : index, 0, id) }
         const regionEnd = pinned => w.order.find(id => w.items[id].pinned !== pinned && !w.items[id].pinned) || null
+        if (operation.action === 'reorder') {
+          const ids = p.order
+          if (ids.length !== w.order.length || new Set(ids).size !== ids.length || ids.some(id => !w.items[id])) fail('INVALID_ORDER', '排序参数无效')
+          // 置顶项必须连续占据最前段: 与渲染分段一致, 防止拖动把置顶项沉底
+          if (ids.some((id, index) => !w.items[id].pinned && ids.slice(index + 1).some(next => w.items[next].pinned))) fail('INVALID_ORDER', '置顶项必须保持在列表最前')
+          w.order = ids
+          return control
+        }
         if (operation.action === 'add') {
           if (item) return control
           if (w.order.length >= 100) fail('LIMIT_REACHED', '最多添加100只自选', 422)
           const security = resolveSecurity(p.securityId)
           if (!security || !securitySchema.safeParse(security).success) fail('CANDIDATE_EXPIRED', '候选已过期，请重新搜索', 409)
-          w.items[p.securityId] = { ...security, alias: '', pinned: false, cost: null, group: '' }; w.order.push(p.securityId)
+          w.items[p.securityId] = { ...security, alias: '', pinned: false, marks: [], group: '' }; w.order.push(p.securityId)
         } else if (operation.action === 'restore') {
           const deleted = control.operations.find(o => o.id === p.removeOperationId && o.action === 'remove')
           const restore = deleted?.result.restore
@@ -52,7 +63,7 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
             control.operationResult = { restore: { item, previousId: w.order[i - 1] || null, nextId: w.order[i + 1] || null } }
             w.order.splice(i, 1); delete w.items[p.securityId]
           } else if (operation.action === 'alias') item.alias = p.alias.trim()
-          else if (operation.action === 'cost') item.cost = p.cost
+          else if (operation.action === 'marks') item.marks = p.marks
           else if (operation.action === 'pin') {
             if (item.pinned === p.pinned) return control
             w.order = w.order.filter(id => id !== item.id); item.pinned = p.pinned
