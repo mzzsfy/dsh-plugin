@@ -720,3 +720,19 @@ test('D03 副标题按自选实际市场面生成', async () => {
   assert.match(render(build([c.id])), /自选行情 · 沪深A股/, '深市归入沪深A股')
   assert.match(render(build([])), /自选行情 · 沪深A股、港股、美股、日股、韩股、英股/, '空自选给出覆盖范围')
 })
+
+// 卖价不是报价要素, 但目标位必须能在图例里读到, 否则图上只有一条看不见的线
+test('图例显示卖价与相对成本的潜在收益', async () => {
+  const { plugin } = await loadClientWithReact()
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', marks: [{ id: 'c1', price: 100, kind: 'cost' }, { id: 't1', price: 150, kind: 'target' }] }
+  const state = { view: { view: 'detail', overlay: 'detail', detailId: item.id, klinePeriod: '1d', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', klineKey: `${item.id}|1d`, kline: { loading: false, error: '', candles: [{ time: '2026-11-07', open: 118, high: 122, low: 117, close: 120, volume: 100 }], preClose: 119 }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true, klineReady: { XSHG: true } } }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve(null) }, layout: {} }))
+  // 侧栏的标记列表里也有同样的数字, 所以必须切出图例那段再断言
+  const legend = html.slice(html.indexOf('class="ssb-kline-legend"'))
+  assert.match(legend, /class="ssb-legend-item ssb-legend-target"/, '卖价要单独占一个图例项')
+  assert.match(legend, /卖价/, '图例要写明这是卖价')
+  assert.match(legend, /150\.00/, '图例要给出卖价数值')
+  assert.match(legend, /\+50\.00%/, '成本 100 的卖价 150 是 +50%')
+  // 成本图例同时存在, 两个数不是同一个来源
+  assert.match(legend, /class="ssb-legend-item ssb-legend-cost"/, '成本图例仍在')
+})

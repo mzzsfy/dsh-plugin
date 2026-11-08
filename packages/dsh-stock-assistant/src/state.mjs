@@ -4,7 +4,9 @@ import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 // 成本价曾是单值字段, 现在是带语义的价格标记列表. 旧值在这里一步升级成一条 cost 标记,
-// 之后 cost 字段整体消失——写入路径已经只写 marks
+// 之后 cost 字段整体消失——写入路径已经只写 marks.
+// 注意: 这一条只在 get 返回原始对象时生效. 若存储层在 get 时已按 controlSchema 过滤,
+// cost 会在到达这里之前就被剥掉, 升级便无从下手(实测本机就是如此, 该机数据已手工补齐)
 const upgradeMarks = root => {
   let touched = false
   for (const item of Object.values(root?.watchlist?.items || {})) {

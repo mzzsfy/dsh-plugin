@@ -56,6 +56,8 @@ window.__ModuleLoader__.load({
     const finiteOr = value => value == null || value === '' ? NaN : Number(value)
     // 成本标记取等权平均: 没有数量信息, 等权是唯一不引入臆测的口径
     const avgCostOf = marks => { const prices = (marks || []).filter(mark => mark.kind === 'cost').map(mark => mark.price); return prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : null }
+    // 价格标记按该证券的价位精度显示: 港股四位小数, 用 toString 会丢位数
+    const priceTextOf = (value, scale) => value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(scale ?? 2)
     // 每个标记各自的盈亏口径: 成本看「现价相对它」的浮盈, 卖价看「它相对成本」的潜在收益,
     // 还没有成本时卖价退回相对现价——三个口径都是同一个式子, 只是基准不同
     const markPct = (mark, last, avgCost) => {
@@ -747,7 +749,9 @@ window.__ModuleLoader__.load({
       }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale, guides])
       const marks = item.marks || []
       const avgCost = avgCostOf(marks)
-      const costPct = avgCost != null && kline?.candles?.length ? (() => { const last = finiteOr(kline.candles[kline.candles.length - 1].close); return Number.isFinite(last) ? (last - avgCost) / avgCost * 100 : null })() : null
+      // 盈亏一律以最后一根收盘为准, 跟图例里的成分保持一致
+      const lastClose = kline?.candles?.length ? finiteOr(kline.candles[kline.candles.length - 1].close) : null
+      const costPct = avgCost != null && Number.isFinite(lastClose) ? (lastClose - avgCost) / avgCost * 100 : null
       // 把一套主题色铺满整张图: 背景/网格/两轴边框/主序列/成交量/指标线/参考线。
       // 首灌与换主题共用同一份, 免得两处漏项(分时面积序列的键名与蜡烛不同)
       function repaintChart(t) {
@@ -927,9 +931,14 @@ window.__ModuleLoader__.load({
               ...GUIDE_GROUPS.flatMap(group => [h('div', { key: group.title, className: 'ssb-menu-title' }, group.title), ...group.items.map(([key, label]) => h(Toggle, { key, label, checked: !!guides[key], onChange: () => setGuides({ [key]: !guides[key] }) }))])) : null),
           h('span', { className: 'ssb-kline-meta' }, klineMetaText(kline, wantTrend))),
         legend ? h('div', { className: 'ssb-kline-legend' },
-          // 成本是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
+          // 成本与卖价都是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
           h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value)),
-            avgCost == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.length > 1 ? `成本(${marks.filter(m => m.kind === 'cost').length}笔均价)` : '成本'), formatPrice(avgCost), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`))),
+            avgCost == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.filter(m => m.kind === 'cost').length > 1 ? `成本(${marks.filter(m => m.kind === 'cost').length}笔均价)` : '成本'), priceTextOf(avgCost, item.priceScale), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)),
+            // 目标位只在图例里出现一次: 线在价格轴上, 具体数值看这里
+            ...marks.filter(mark => mark.kind === 'target').map(mark => {
+              const pct = markPct(mark, lastClose, avgCost)
+              return h('span', { key: mark.id, className: 'ssb-legend-item ssb-legend-target' }, h('span', { className: 'ssb-legend-label' }, '卖价'), priceTextOf(mark.price, item.priceScale), pct == null ? null : h('span', { className: `ssb-legend-pct${pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''}` }, `${signed(pct.toFixed(2))}%`))
+            })),
           legend.series.length ? h('div', { className: 'ssb-legend-row' },
             ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2)))) : null) : null,
         kline.loading ? h('div', { className: 'ssb-kline-skeleton', role: 'status' }, '加载K线…') : null,
@@ -1029,13 +1038,13 @@ window.__ModuleLoader__.load({
         const pct = markPct(mark, lastN, avgCost)
         return h('li', { key: mark.id, className: 'ssb-mark-row' },
           h('span', { className: 'ssb-mark-kind' }, mark.kind === 'cost' ? '成本' : '卖价'),
-          h('span', { className: 'ssb-number' }, formatPrice(mark.price)),
+          h('span', { className: 'ssb-number' }, priceTextOf(mark.price, item.priceScale)),
           h('span', { className: `ssb-small${toneOfPct(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
           h(Button, { danger: true, disabled: state.busy.write, onClick: applyMarks(marks.filter(other => other.id !== mark.id)) }, '删除'))
       })) : null
       // 分组表单(B1): 单标签, 空=移出分组; 草稿 view.groupDraft
       const groupForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.groupDraft?.trim() ?? item.group; if ([...raw].length > 12) { runtime.updateView({ groupError: '分组名最多12字' }); return } quiet(() => runtime.mutate('group', { securityIds: [item.id], group: raw }))() } }, h('label', null, '设分组', h('input', { value: view.groupDraft ?? (item.group || ''), maxLength: 12, onChange: e => runtime.updateView({ groupDraft: e.target.value, groupError: '' }), placeholder: '留空移出分组' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存分组'), view.groupError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.groupError) : null) : null
-      const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本均价 ${formatPrice(avgCost)}`)) : null
+      const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本均价 ${priceTextOf(avgCost, item.priceScale)}`)) : null
       const watchActions = inWatchlist ? h(React.Fragment, null, markForm, markList, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
         // 行内不再挂操作菜单, 排序走拖拽, 剩下的置顶与移出收敛到这里: 低频、且删除需要确认, 不适合出现在每一行
         h('div', { className: 'ssb-alias-form' }, h('span', { className: 'ssb-muted ssb-small' }, '自选管理'), h('div', { className: 'ssb-toolbar' },
@@ -1646,7 +1655,7 @@ window.__ModuleLoader__.load({
 .ssb-kline-legend { display:flex; flex-direction:column; gap:4px; margin:0 0 8px; font-size:11px; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }
 .ssb-legend-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; }
 .ssb-legend-label { color:var(--ssb-text-dim); margin-right:4px; }
-.ssb-legend-cost { color:var(--ssb-chart-cost); }
+.ssb-legend-cost { color:var(--ssb-chart-cost); }.ssb-legend-target { color:var(--ssb-chart-target); }
 .ssb-legend-pct { margin-left:4px; }
 /* 图例指标色与图表 series 色板一一对应(图表侧只能吃具体色值, 无法引用主题变量) */
 .ssb-ma-0 { color:var(--ssb-chart-ma-fast); }.ssb-ma-1 { color:var(--ssb-chart-ma-mid); }.ssb-ma-2 { color:var(--ssb-chart-ma-slow); }.ssb-ma-3 { color:var(--ssb-chart-ma-long); }
