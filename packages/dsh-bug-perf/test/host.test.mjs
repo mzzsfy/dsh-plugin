@@ -43,6 +43,12 @@ async function request(route, config) {
   return res
 }
 
+async function requestDiag(route, query) {
+  const res = makeRes()
+  await route.handler({ url: `/api/dsh-bug-perf/diag${query}`, method: 'GET' }, res)
+  return res
+}
+
 // Given 插件声明注入, When 装载器解析, Then 等待 webServer 就绪后再激活(不是同步探测)
 test('宿主_注入声明_等待webServer', async () => {
   const index = await import('../src/index.js')
@@ -54,9 +60,10 @@ test('宿主_激活_注册配置路由', () => {
   const ctx = makeCtx({ server: {} })
   apply(ctx, undefined)
   assert.equal(name, 'dsh-bug-perf')
-  assert.equal(ctx.registrations.length, 1)
+  assert.equal(ctx.registrations.length, 2)
   assert.equal(ctx.registrations[0].kind, 'exact')
   assert.equal(ctx.registrations[0].path, '/api/dsh-bug-perf/config')
+  assert.equal(ctx.registrations[1].path, '/api/dsh-bug-perf/diag')
 })
 
 // Given 行配置为缺省, When 客户端读取配置, Then 返回默认配置 JSON
@@ -112,4 +119,23 @@ test('宿主_Config默认值_与共享默认一致', () => {
   assert.equal(watchdog.checkMs, DEFAULT_CONFIG.terminalWatchdog.checkMs)
   assert.equal(watchdog.stallMs, DEFAULT_CONFIG.terminalWatchdog.stallMs)
   assert.equal(watchdog.cooldownMs, DEFAULT_CONFIG.terminalWatchdog.cooldownMs)
+})
+
+// Given 浏览器上报采样, When 宿主收到合法载荷, Then 返回 ok 并落盘
+test('宿主_采样上报_接受合法载荷', async () => {
+  const ctx = makeCtx({ server: {} })
+  apply(ctx, undefined)
+  const res = await requestDiag(ctx.registrations[1], `?d=${encodeURIComponent(JSON.stringify({ at: 1, totals: { opened: 1 } }))}`)
+  assert.equal(res.status, 200)
+  assert.deepEqual(JSON.parse(res.body), { ok: true })
+})
+
+// Given 缺少载荷或载荷不是 JSON, When 上报, Then 返回 400 且不抛出
+test('宿主_采样上报_拒绝坏载荷', async () => {
+  const ctx = makeCtx({ server: {} })
+  apply(ctx, undefined)
+  const missing = await requestDiag(ctx.registrations[1], '')
+  assert.equal(missing.status, 400)
+  const broken = await requestDiag(ctx.registrations[1], '?d=not-json')
+  assert.equal(broken.status, 400)
 })

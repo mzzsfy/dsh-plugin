@@ -12,6 +12,9 @@ window.__ModuleLoader__.load({
     const DEFAULT_CONFIG = {
       restartCoalesce: { enabled: true, windowMs: 100 },
       terminalWatchdog: { enabled: true, checkMs: 2000, stallMs: 8000, cooldownMs: 60000 },
+      socketKeepAlive: { enabled: true, intervalMs: 1500 },
+      stuckSession: { enabled: true, checkMs: 2000, stallMs: 8000, reconnect: true, maxReconnectAttempts: 5, reconnectIntervalMs: 15000 },
+      jobStreamLimit: { enabled: true, base: 32, max: 48 },
     }
     const LIMITS = {
       restartCoalesce: { windowMs: { min: 0, max: 2000 } },
@@ -20,6 +23,14 @@ window.__ModuleLoader__.load({
         stallMs: { min: 1000, max: 600000 },
         cooldownMs: { min: 1000, max: 3600000 },
       },
+      socketKeepAlive: { intervalMs: { min: 500, max: 60000 } },
+      stuckSession: {
+        checkMs: { min: 250, max: 60000 },
+        stallMs: { min: 1000, max: 600000 },
+        maxReconnectAttempts: { min: 1, max: 20 },
+        reconnectIntervalMs: { min: 500, max: 600000 },
+      },
+      jobStreamLimit: { base: { min: 4, max: 256 }, max: { min: 4, max: 512 } },
     }
 
     const isSection = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -34,6 +45,9 @@ window.__ModuleLoader__.load({
       const input = sectionOf(raw)
       const restart = sectionOf(input.restartCoalesce)
       const watchdog = sectionOf(input.terminalWatchdog)
+      const keepAlive = sectionOf(input.socketKeepAlive)
+      const stuck = sectionOf(input.stuckSession)
+      const jobLimit = sectionOf(input.jobStreamLimit)
       return {
         restartCoalesce: {
           enabled: booleanOr(restart.enabled, DEFAULT_CONFIG.restartCoalesce.enabled),
@@ -44,6 +58,26 @@ window.__ModuleLoader__.load({
           checkMs: numberWithin(watchdog.checkMs, LIMITS.terminalWatchdog.checkMs, DEFAULT_CONFIG.terminalWatchdog.checkMs),
           stallMs: numberWithin(watchdog.stallMs, LIMITS.terminalWatchdog.stallMs, DEFAULT_CONFIG.terminalWatchdog.stallMs),
           cooldownMs: numberWithin(watchdog.cooldownMs, LIMITS.terminalWatchdog.cooldownMs, DEFAULT_CONFIG.terminalWatchdog.cooldownMs),
+        },
+        socketKeepAlive: {
+          enabled: booleanOr(keepAlive.enabled, DEFAULT_CONFIG.socketKeepAlive.enabled),
+          intervalMs: numberWithin(keepAlive.intervalMs, LIMITS.socketKeepAlive.intervalMs, DEFAULT_CONFIG.socketKeepAlive.intervalMs),
+        },
+        jobStreamLimit: {
+          enabled: booleanOr(jobLimit.enabled, DEFAULT_CONFIG.jobStreamLimit.enabled),
+          base: Math.min(
+            numberWithin(jobLimit.base, LIMITS.jobStreamLimit.base, DEFAULT_CONFIG.jobStreamLimit.base),
+            numberWithin(jobLimit.max, LIMITS.jobStreamLimit.max, DEFAULT_CONFIG.jobStreamLimit.max),
+          ),
+          max: numberWithin(jobLimit.max, LIMITS.jobStreamLimit.max, DEFAULT_CONFIG.jobStreamLimit.max),
+        },
+        stuckSession: {
+          enabled: booleanOr(stuck.enabled, DEFAULT_CONFIG.stuckSession.enabled),
+          checkMs: numberWithin(stuck.checkMs, LIMITS.stuckSession.checkMs, DEFAULT_CONFIG.stuckSession.checkMs),
+          stallMs: numberWithin(stuck.stallMs, LIMITS.stuckSession.stallMs, DEFAULT_CONFIG.stuckSession.stallMs),
+          reconnect: booleanOr(stuck.reconnect, DEFAULT_CONFIG.stuckSession.reconnect),
+          maxReconnectAttempts: numberWithin(stuck.maxReconnectAttempts, LIMITS.stuckSession.maxReconnectAttempts, DEFAULT_CONFIG.stuckSession.maxReconnectAttempts),
+          reconnectIntervalMs: numberWithin(stuck.reconnectIntervalMs, LIMITS.stuckSession.reconnectIntervalMs, DEFAULT_CONFIG.stuckSession.reconnectIntervalMs),
         },
       }
     }
@@ -189,6 +223,349 @@ window.__ModuleLoader__.load({
       return { installed: true }
     }
 
+    const PLUGIN_ID = '@mzzsfy/dsh-bug-perf'
+    const REMOTE_MUX_PATH = '/api/remote.mux'
+    const KEEPALIVE_MARKER = Symbol.for('@mzzsfy/dsh-bug-perf/socket-keepalive')
+    const STUCK_MARKER = Symbol.for('@mzzsfy/dsh-bug-perf/stuck-session')
+    const KEEPALIVE_STREAM_PREFIX = 'dsh-bug-perf-keepalive'
+    const FRAME_TYPE_PREFIX = '{"type":"'
+    const STREAM_ID_KEY = '"streamId":"'
+    const ENDPOINT_KEY = '"endpoint":"'
+    const DIAG_SAMPLE_MS = 5000
+    const DIAG_MAX_SAMPLES = 720
+    // 事件循环探测: 延迟超过该值视为主线程被占满
+    const DIAG_BLOCK_MS = 1000
+    const DIAG_PROBE_MS = 2000
+    const DIAG_REPORT_PATH = '/api/dsh-bug-perf/diag'
+    // 每 N 次采样(约一分钟)把摘要落到宿主临时文件, 便于事后定位长时间运行后的退化
+    const DIAG_REPORT_EVERY = 12
+    // 定时器检查节拍: 实际发送间隔由可变的 intervalMs 决定
+    const KEEPALIVE_TICK_MS = 500
+    // 只有协议级关闭码才可能是宿主拒绝保活帧; 链路断开与主动关闭不计入
+    const PROTOCOL_CLOSE_CODES = Object.freeze([1002, 1003, 1007, 1008, 1009, 1011])
+    const BREAKER_STRIKES = 2
+    // 连接健康存活这么多倍间隔后清零累计, 避免历史事件把补丁永久禁用
+    const BREAKER_RECOVER_INTERVALS = 10
+    const STUCK_NOTICE_ID = 'dsh-bug-perf-stuck'
+    const STUCK_HINT_TEXTS = ['载入历史…', 'Loading history…']
+    const STUCK_MESSAGE_SELECTOR = '[data-chat-flow-key]'
+    const STUCK_CSS = [
+      '.bp-stuck{--bp-bg:var(--dsw-alias-bg-layer-1);--bp-border:var(--dsw-alias-border-l3);--bp-text:var(--dsw-alias-label-primary);--bp-accent:var(--dsw-alias-brand-primary);--bp-hover:var(--dsw-alias-interactive-bg-hover);position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483000;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--bp-bg);border:1px solid var(--bp-border);color:var(--bp-text);font-size:13px;line-height:20px}',
+      '.bp-stuck__action{padding:2px 10px;border-radius:6px;border:1px solid var(--bp-border);background:transparent;color:var(--bp-accent);font-size:13px;line-height:20px;cursor:pointer}',
+      '.bp-stuck__action:hover{background:var(--bp-hover)}',
+    ].join('')
+
+    // 只读诊断: 记录帧计数、消息速率、活跃流与页面规模, 用于定位“越用越卡”。
+    // 不解析完整帧、不改动任何流, 采样保留最近 DIAG_MAX_SAMPLES 个点。
+    const createDiag = (clock) => ({
+      startedAt: clock.now(),
+      sockets: [],
+      samples: [],
+      longTasks: [],
+      errors: [],
+      totals: { opened: 0, closed: 0, messages: 0, sent: 0 },
+    })
+
+    const activeStreams = (sockets) => {
+      let total = 0
+      for (const socket of sockets) {
+        for (const count of Object.values(socket.streams)) total += count
+      }
+      return total
+    }
+
+    const reportDiag = (win, diag) => {
+      const fetchImpl = win.fetch
+      if (typeof fetchImpl !== 'function') return
+      const payload = {
+        at: Date.now(),
+        path: win.location?.pathname ?? '',
+        totals: diag.totals,
+        last: diag.samples.slice(-6),
+        blockedMs: diag.blockedMs,
+        longTasks: diag.longTasks.slice(-8),
+        errors: diag.errors.slice(-4),
+      }
+      try {
+        void fetchImpl(`${DIAG_REPORT_PATH}?d=${encodeURIComponent(JSON.stringify(payload))}`, { cache: 'no-store', keepalive: true }).catch(() => { })
+      } catch {
+        // 上报失败不影响页面
+      }
+    }
+
+    const startDiagSampling = ({ win, clock, diag, doc }) => {
+      const heapq = () => {
+        const memory = win.performance?.memory
+        return memory === undefined ? undefined : Math.round(memory.usedJSHeapSize / 1048576)
+      }
+      const sample = () => {
+        const live = diag.sockets.filter((socket) => !socket.closed)
+        diag.samples.push({
+          t: Math.round(clock.now()),
+          heapMB: heapq(),
+          nodes: doc?.querySelectorAll?.('*').length,
+          sockets: diag.sockets.length,
+          liveSockets: live.length,
+          activeStreams: activeStreams(live),
+          messages: diag.totals.messages,
+          sent: diag.totals.sent,
+        })
+        if (diag.samples.length > DIAG_MAX_SAMPLES) diag.samples.shift()
+        diag.count = (diag.count ?? 0) + 1
+        if (diag.count % DIAG_REPORT_EVERY === 0) reportDiag(win, diag)
+      }
+      sample()
+      const timer = clock.setInterval(sample, DIAG_SAMPLE_MS)
+      const schedule = win.setTimeout
+      if (typeof schedule === 'function') {
+        clock.setInterval(() => {
+          const started = clock.now()
+          schedule(() => {
+            const delay = clock.now() - started
+            if (delay < DIAG_BLOCK_MS) return
+            diag.blockedAt = clock.now()
+            diag.blockedMs = Math.round(delay)
+          }, 0)
+        }, DIAG_PROBE_MS)
+      }
+      const observer = win.PerformanceObserver === undefined ? undefined : new win.PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          diag.longTasks.push({ t: Math.round(clock.now()), ms: Math.round(entry.duration) })
+          if (diag.longTasks.length > DIAG_MAX_SAMPLES) diag.longTasks.shift()
+        }
+      })
+      try { observer?.observe({ entryTypes: ['longtask'] }) } catch { }
+      win.addEventListener?.('error', (event) => {
+        diag.errors.push(String(event?.message ?? '').slice(0, 200))
+        if (diag.errors.length > DIAG_MAX_SAMPLES) diag.errors.shift()
+      })
+      return { timer, observer }
+    }
+
+    // 宿主心跳为固定短周期且丢两次即 terminate, 经反代时 pong 常被链路吞掉。
+    // 客户端在会话流连接上按间隔发一条未知 streamId 的 item 帧: 宿主收到任意帧都会刷新存活标记,
+    // 未知 streamId 的 item 在宿主侧被忽略, 不改动任何流的状态。
+    // 只在连接空闲(客户端自己没有上行帧)时补帧; 覆盖范围仅限安装之后新建的连接。
+    const installSocketKeepAlive = ({ win, options, clock, onDisabled, diag }) => {
+      const Native = win?.WebSocket
+      if (typeof Native !== 'function') return { installed: false, reason: 'WebSocket unavailable' }
+      if (options?.enabled === false) return { installed: false, reason: 'disabled' }
+      if (Native[KEEPALIVE_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
+      const state = { intervalMs: options.intervalMs, timers: new Set(), strikes: 0, disabled: false, disabledReason: undefined }
+      let Wrapped
+      const disable = (reason) => {
+        if (state.disabled) return
+        state.disabled = true
+        state.disabledReason = reason
+        for (const id of state.timers) clock.clearInterval(id)
+        state.timers.clear()
+        if (win.WebSocket === Wrapped) win.WebSocket = Native
+        if (Native[KEEPALIVE_MARKER] === Wrapped) delete Native[KEEPALIVE_MARKER]
+        console.warn(`${LOG_PREFIX} socket keepalive disabled: ${reason}`)
+        onDisabled?.(reason)
+      }
+      const nextStreamId = () => `${KEEPALIVE_STREAM_PREFIX}-${clock.now()}-${Math.random().toString(36).slice(2)}`
+      // 只读帧统计: 用字符串扫描代替整帧解析, 用于观察活跃流与帧速率, 不改动任何流
+      const readFrame = (raw) => {
+        if (typeof raw !== 'string' || !raw.startsWith(FRAME_TYPE_PREFIX)) return undefined
+        const typeEnd = raw.indexOf('"', FRAME_TYPE_PREFIX.length)
+        if (typeEnd < 0) return undefined
+        const type = raw.slice(FRAME_TYPE_PREFIX.length, typeEnd)
+        const idAt = raw.indexOf(STREAM_ID_KEY)
+        const streamId = idAt < 0 ? '' : raw.slice(idAt + STREAM_ID_KEY.length, raw.indexOf('"', idAt + STREAM_ID_KEY.length))
+        const endpointAt = raw.indexOf(ENDPOINT_KEY)
+        const endpoint = endpointAt < 0 ? '' : raw.slice(endpointAt + ENDPOINT_KEY.length, raw.indexOf('"', endpointAt + ENDPOINT_KEY.length))
+        return { type, streamId, endpoint }
+      }
+      const trackFrame = (socket, raw) => {
+        const frame = readFrame(raw)
+        if (frame === undefined) return
+        if (frame.type === 'open') {
+          const endpoint = frame.endpoint === '' ? 'unknown' : frame.endpoint
+          socket.byStream.set(frame.streamId, endpoint)
+          socket.streams[endpoint] = (socket.streams[endpoint] ?? 0) + 1
+          return
+        }
+        if (frame.type !== 'end' && frame.type !== 'cancel') return
+        const endpoint = socket.byStream.get(frame.streamId)
+        if (endpoint === undefined) return
+        socket.byStream.delete(frame.streamId)
+        socket.streams[endpoint] = (socket.streams[endpoint] ?? 0) - 1
+      }
+      Wrapped = class KeepAliveSocket extends Native {
+        constructor(...args) {
+          super(...args)
+          if (state.disabled) return
+          let path
+          try { path = new URL(String(args[0]), win.location?.href ?? 'https://localhost/').pathname } catch { return }
+          if (path !== REMOTE_MUX_PATH) return
+          const openedAt = clock.now()
+          const site = { lastUpstreamAt: openedAt, lastKeepAliveAt: openedAt, keepAliveSent: false }
+          const socketStats = diag === undefined ? undefined : { streams: {}, byStream: new Map(), openedAt: clock.now(), closed: false }
+          if (socketStats !== undefined) {
+            diag.sockets.push(socketStats)
+            diag.totals.opened += 1
+          }
+          this.addEventListener('message', (event) => {
+            if (socketStats === undefined) return
+            trackFrame(socketStats, event?.data)
+            diag.totals.messages += 1
+          })
+          this.addEventListener('close', () => {
+            if (socketStats === undefined || socketStats.closed) return
+            socketStats.closed = true
+            diag.totals.closed += 1
+          })
+          const rawSend = this.send.bind(this)
+          this.send = (data) => {
+            site.lastUpstreamAt = clock.now()
+            if (socketStats !== undefined) {
+              trackFrame(socketStats, data)
+              diag.totals.sent += 1
+            }
+            return rawSend(data)
+          }
+          const timer = clock.setInterval(() => {
+            if (state.disabled || this.readyState !== Native.OPEN) return
+            const now = clock.now()
+            if (state.strikes > 0 && now - openedAt >= state.intervalMs * BREAKER_RECOVER_INTERVALS) state.strikes = 0
+            if (now - Math.max(site.lastUpstreamAt, site.lastKeepAliveAt) < state.intervalMs) return
+            try {
+              rawSend(JSON.stringify({ type: 'item', streamId: nextStreamId(), value: 0 }))
+              site.lastKeepAliveAt = now
+              site.keepAliveSent = true
+            } catch {
+              // 已进入关闭流程: 交给 close 事件清理
+            }
+          }, KEEPALIVE_TICK_MS)
+          state.timers.add(timer)
+          this.addEventListener('close', (event) => {
+            clock.clearInterval(timer)
+            state.timers.delete(timer)
+            if (state.disabled || !site.keepAliveSent || !PROTOCOL_CLOSE_CODES.includes(event?.code)) return
+            state.strikes += 1
+            if (state.strikes >= BREAKER_STRIKES) disable('protocol closed the connection after a keepalive frame')
+          })
+        }
+      }
+      Native[KEEPALIVE_MARKER] = Wrapped
+      win.WebSocket = Wrapped
+      return {
+        installed: true,
+        state,
+        setIntervalMs: (ms) => { state.intervalMs = ms },
+        uninstall: () => disable('disabled'),
+      }
+    }
+
+    // 与宿主自己的列表项口径一致: 排除分组行、过程行、空行与隐藏子树
+    const isMeaningfulRow = (node) => {
+      if (node.hasAttribute?.('data-chat-group-key')) return false
+      if (node.getAttribute?.('data-chat-flow-kind') === 'turn-process') return false
+      const hiddenAncestor = node.closest?.('[hidden]')
+      if (hiddenAncestor !== null && hiddenAncestor !== undefined) return false
+      if ((node.childElementCount ?? 0) === 0 && (node.textContent ?? '').trim() === '') return false
+      return true
+    }
+
+    // 加载态判定只认会话流容器里没有任何有效消息行、且直接子节点文本与加载提示完全一致的节点;
+    // 对话正文或历史里出现同样文字不会命中, 终端等其它区域的存在也不影响判断。
+    const sessionStalled = (doc) => {
+      const flow = doc.querySelector?.('[data-chat-flow]')
+      if (flow === null || flow === undefined) return false
+      const rows = flow.querySelectorAll?.(STUCK_MESSAGE_SELECTOR) ?? []
+      for (const row of rows) {
+        if (isMeaningfulRow(row)) return false
+      }
+      for (const child of flow.children ?? []) {
+        const text = typeof child.textContent === 'string' ? child.textContent.trim() : ''
+        if (STUCK_HINT_TEXTS.includes(text)) return true
+      }
+      return false
+    }
+
+    const ensureStuckStyle = (doc) => {
+      const selector = `style[data-plugin="${PLUGIN_ID}"]`
+      const existing = doc.querySelector?.(selector)
+      if (existing !== null && existing !== undefined) return
+      const style = doc.createElement('style')
+      style.setAttribute('data-plugin', PLUGIN_ID)
+      style.textContent = STUCK_CSS
+      doc.head.appendChild(style)
+    }
+
+    // 会话停滞时优先让宿主自己重建连接: 官方 connection 服务的 reconnect() 会中止当前
+    // generation 并立即重试, 页面随之恢复, 不打断会话与未发送的草稿。
+    // 连续多次重建仍无效才显示提示, 刷新入口只是最后手段。
+    const installStuckSession = ({ win, options, clock, connection, diag }) => {
+      const doc = win?.document
+      if (doc === undefined || typeof doc.createElement !== 'function') return { installed: false, reason: 'document unavailable' }
+      if (options?.enabled === false) return { installed: false, reason: 'disabled' }
+      // 样式随每次安装重注: HMR 重建会先删掉本插件的 style
+      ensureStuckStyle(doc)
+      if (win[STUCK_MARKER] === true) return { installed: false, reason: 'already installed' }
+      const state = { since: undefined, notice: undefined, attempts: 0, lastAttemptAt: undefined }
+      const reload = () => { try { win.location?.reload?.() } catch { } }
+      const showNotice = () => {
+        if (state.notice !== undefined || doc.getElementById(STUCK_NOTICE_ID) !== null) return
+        const notice = doc.createElement('div')
+        notice.setAttribute('id', STUCK_NOTICE_ID)
+        notice.setAttribute('data-plugin', PLUGIN_ID)
+        notice.setAttribute('role', 'status')
+        notice.className = 'bp-stuck'
+        const text = doc.createElement('span')
+        text.textContent = '连接重建未成功,可手动刷新页面'
+        const action = doc.createElement('button')
+        action.setAttribute('type', 'button')
+        action.className = 'bp-stuck__action'
+        action.textContent = '刷新页面'
+        action.addEventListener('click', reload)
+        notice.appendChild(text)
+        notice.appendChild(action)
+        doc.body.appendChild(notice)
+        state.notice = notice
+      }
+      const hideNotice = () => {
+        if (state.notice === undefined) return
+        state.notice.remove()
+        state.notice = undefined
+      }
+      const revive = () => {
+        if (options.reconnect !== true || connection === undefined) return false
+        if (state.attempts >= options.maxReconnectAttempts) return false
+        const now = clock.now()
+        if (state.lastAttemptAt !== undefined && now - state.lastAttemptAt < options.reconnectIntervalMs) return true
+        state.attempts += 1
+        state.lastAttemptAt = now
+        try {
+          connection.reconnect?.()
+        } catch {
+          return false
+        }
+        console.info(`${LOG_PREFIX} session stalled, requesting reconnect #${state.attempts}`)
+        return true
+      }
+      const blocked = () => diag !== undefined && diag.blockedAt !== undefined && clock.now() - diag.blockedAt < options.stallMs * 2
+      const tick = () => {
+        const now = clock.now()
+        if (!sessionStalled(doc) && !blocked()) {
+          if (state.attempts > 0) console.info(`${LOG_PREFIX} session recovered after ${state.attempts} reconnect attempt(s)`)
+          state.since = undefined
+          state.attempts = 0
+          state.lastAttemptAt = undefined
+          hideNotice()
+          return
+        }
+        if (state.since === undefined) state.since = now
+        if (now - state.since < options.stallMs) return
+        if (revive()) return
+        showNotice()
+      }
+      const timer = clock.setInterval(tick, options.checkMs)
+      win[STUCK_MARKER] = true
+      return { installed: true, state, timer }
+    }
+
     const loadConfig = async () => {
       try {
         const response = await fetch(CONFIG_PATH, {
@@ -233,12 +610,165 @@ window.__ModuleLoader__.load({
       start(holder)
     }
 
+
+    // 每个会话行都会订阅一条常驻 job/list 流, 会话越多流越多(实测 361 条),
+    // 每次 job 变化宿主逐条推全量帧, 主线程随之出现数百毫秒长任务。
+    // 默认窗口只给主会话前 base 条; 点击过的会话额外放行(子 agent 会话只有点击才建);
+    // 总数到 max 后按加入顺序淘汰最老的一条, 被淘汰或未放行的行只是不显示任务状态。
+    const JOB_LIMIT_MARKER = Symbol.for('@mzzsfy/dsh-bug-perf/job-stream-limit')
+    const SESSION_ROW_PREFIX = 'session:'
+    const installJobStreamLimit = ({ jobs, options, sessionsOf, doc }) => {
+      if (jobs === undefined || typeof jobs.watchRows !== 'function') return { installed: false, reason: 'jobs unavailable' }
+      if (jobs[JOB_LIMIT_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
+      const original = jobs.watchRows.bind(jobs)
+      const entries = new Map()
+      const order = []
+      const state = { main: 0, subagent: 0, clicked: 0, rejected: 0, rejectedSubagent: 0, evicted: 0, summaries: 0, subagentSessions: 0 }
+      // sessions 服务可能晚于 jobs 就绪, 每次判定都重新取; 快照未变时复用解析结果
+      const cache = { snapshot: undefined, byId: undefined }
+      const readIndex = () => {
+        const sessions = typeof sessionsOf === 'function' ? sessionsOf() : sessionsOf
+        const snapshot = sessions?.list?.getSnapshot?.()
+        if (snapshot === undefined) return undefined
+        if (cache.snapshot === snapshot) return cache.byId
+        const byId = snapshot.byId === undefined ? undefined : new Map(Object.entries(snapshot.byId))
+        cache.snapshot = snapshot
+        cache.byId = byId
+        if (byId !== undefined) {
+          state.summaries = byId.size
+          state.subagentSessions = [...byId.values()].filter((item) => item?.origin === 'subagent' || item?.parentSessionId !== undefined).length
+        }
+        return byId
+      }
+      const isSubagent = (sessionId) => {
+        const summary = readIndex()?.get(sessionId)
+        return summary?.origin === 'subagent' || summary?.parentSessionId !== undefined
+      }
+      const forget = (key) => {
+        const entry = entries.get(key)
+        if (entry === undefined) return
+        entries.delete(key)
+        if (entry.subagent) state.subagent -= 1
+        else state.main -= 1
+        const index = order.indexOf(key)
+        if (index >= 0) order.splice(index, 1)
+      }
+      const evictOldest = () => {
+        while (order.length > 0) {
+          const key = order[0]
+          const entry = entries.get(key)
+          if (entry === undefined) { order.shift(); continue }
+          forget(key)
+          entry.release()
+          state.evicted += 1
+          return true
+        }
+        return false
+      }
+      const add = (key, clicked) => {
+        if (entries.size >= options.max && !evictOldest()) return undefined
+        const subagent = isSubagent(key)
+        const entry = { release: original(key), subagent, clicked, refs: 1 }
+        entries.set(key, entry)
+        order.push(key)
+        if (subagent) state.subagent += 1
+        else state.main += 1
+        return entry
+      }
+      const releaser = (key, entry) => {
+        let released = false
+        return () => {
+          if (released) return
+          released = true
+          entry.refs -= 1
+          if (entry.refs > 0) return
+          if (entries.get(key) !== entry) return
+          forget(key)
+          entry.release()
+        }
+      }
+      jobs.watchRows = (sessionId) => {
+        const key = String(sessionId)
+        const existing = entries.get(key)
+        if (existing !== undefined) {
+          existing.refs += 1
+          return releaser(key, existing)
+        }
+        const subagent = isSubagent(key)
+        // 子 agent 会话不占默认窗口, 只由点击放行
+        if (subagent) {
+          state.rejected += 1
+          state.rejectedSubagent += 1
+          return () => { }
+        }
+        if (state.main >= options.base) {
+          state.rejected += 1
+          return () => { }
+        }
+        const entry = add(key, false)
+        return entry === undefined ? (() => { }) : releaser(key, entry)
+      }
+      const promote = (sessionId) => {
+        const key = String(sessionId)
+        const existing = entries.get(key)
+        if (existing !== undefined) { existing.clicked = true; return }
+        const entry = add(key, true)
+        if (entry === undefined) return
+        state.clicked += 1
+      }
+      const onDocumentClick = (event) => {
+        const row = event?.target?.closest?.('[data-row-key]')
+        const rowKey = row?.getAttribute?.('data-row-key')
+        if (typeof rowKey !== 'string' || !rowKey.startsWith(SESSION_ROW_PREFIX)) return
+        promote(rowKey.slice(SESSION_ROW_PREFIX.length))
+      }
+      doc?.addEventListener?.('click', onDocumentClick, true)
+      const dispose = () => {
+        doc?.removeEventListener?.('click', onDocumentClick, true)
+        for (const [key, entry] of [...entries]) {
+          forget(key)
+          entry.release()
+        }
+      }
+      Object.defineProperty(jobs, JOB_LIMIT_MARKER, { value: { state, dispose }, configurable: true })
+      return { installed: true, state, dispose }
+    }
+
+    const summarize = (result) => (result.installed === true ? { installed: true } : { installed: false, reason: result.reason })
+
+    // 安装失败只进入报告, 不影响页面与其它补丁
+    const safely = (install) => {
+      try {
+        return install()
+      } catch (error) {
+        return { installed: false, reason: error instanceof Error ? error.message : String(error) }
+      }
+    }
+
     const apply = (ctx) => {
       const report = { config: undefined, features: {} }
       window.__dshBugPerf = report
+      const diag = createDiag(timers)
+      report.diag = diag
+      startDiagSampling({ win: window, clock: timers, diag, doc: window.document })
+      // 会话流连接在页面启动早期建立, 保活先按默认值同步安装, 配置到达后再校正间隔
+      const keepAlive = safely(() => installSocketKeepAlive({
+        win: window,
+        options: DEFAULT_CONFIG.socketKeepAlive,
+        clock: timers,
+        diag,
+        onDisabled: (reason) => { report.features.socketKeepAlive = { installed: false, reason } },
+      }))
+      report.features.socketKeepAlive = summarize(keepAlive)
       void (async () => {
         const config = normalizeConfig(await loadConfig())
         report.config = config
+        if (!config.socketKeepAlive.enabled) {
+          keepAlive.uninstall?.()
+          report.features.socketKeepAlive = { installed: false, reason: 'disabled' }
+        } else if (keepAlive.installed === true) {
+          keepAlive.setIntervalMs?.(config.socketKeepAlive.intervalMs)
+        }
         report.features.restartCoalesce = config.restartCoalesce.enabled
           ? installRestartCoalesceFromRequire({ requireImpl: require, windowMs: config.restartCoalesce.windowMs, timers })
           : { installed: false, reason: 'disabled' }
@@ -246,6 +776,34 @@ window.__ModuleLoader__.load({
           installTerminalWatchdogWhenReady(ctx, config.terminalWatchdog, report)
         } else {
           report.features.terminalWatchdog = { installed: false, reason: 'disabled' }
+        }
+        const stuckOptions = config.stuckSession
+        const startStuckSession = (connection) => {
+          report.actions = { reconnect: () => { try { connection?.reconnect?.() } catch { } } }
+          report.features.stuckSession = stuckOptions.enabled
+            ? summarize(safely(() => installStuckSession({ win: window, options: stuckOptions, clock: timers, connection, diag })))
+            : { installed: false, reason: 'disabled' }
+        }
+        const startJobStreamLimit = (jobs) => {
+          report.features.jobStreamLimit = config.jobStreamLimit.enabled
+            ? safely(() => {
+              const result = installJobStreamLimit({ jobs, options: config.jobStreamLimit, sessionsOf: () => ctx.get?.('sessions'), doc: window.document })
+              return result.installed === true ? { installed: true, state: result.state } : result
+            })
+            : { installed: false, reason: 'disabled' }
+        }
+        const readyJobs = ctx.get?.('jobs')
+        if (readyJobs !== undefined || ctx.inject === undefined) {
+          startJobStreamLimit(readyJobs)
+        } else {
+          ctx.inject(['jobs'], (jobs) => { startJobStreamLimit(jobs) })
+        }
+        const readyConnection = ctx.get?.('connection')
+        if (readyConnection !== undefined || ctx.inject === undefined) {
+          startStuckSession(readyConnection)
+        } else {
+          // connection 由核心插件提供; 等它就绪后再装, 避免错过主动重连入口
+          ctx.inject(['connection'], (connection) => { startStuckSession(connection) })
         }
         console.info(`${LOG_PREFIX} applied`, JSON.stringify(report.features))
       })().catch((error) => {
@@ -265,6 +823,10 @@ window.__ModuleLoader__.load({
         installRestartCoalesceFromRequire,
         watchdogTick,
         installTerminalWatchdog,
+        installSocketKeepAlive,
+        installJobStreamLimit,
+        installStuckSession,
+        sessionStalled,
       },
     }
   },

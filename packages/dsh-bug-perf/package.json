@@ -1,6 +1,6 @@
 {
   "name": "@mzzsfy/dsh-bug-perf",
-  "description": "宿主缺陷兜底与性能补丁:session/follow 重建合并、终端输出看门狗;每个功能独立开关,跨版本失效不影响宿主",
+  "description": "宿主缺陷兜底与性能补丁:session/follow 重建合并、终端输出看门狗、会话流保活、会话加载停滞兜底;每个功能独立开关,跨版本失效不影响宿主",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.js",
