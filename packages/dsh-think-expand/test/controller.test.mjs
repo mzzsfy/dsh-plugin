@@ -10,11 +10,21 @@ function fixture(mode = false, deferredClick = false) {
   let seq = 0, definition, panel
   const notify = () => observers.filter(o => o.live).forEach(o => o.callback([]))
   const rows = []
+  // 过程组按钮桩:turn 号 + 展开态,点击即展开(宿主官方入口)
+  const processes = []
+  const addProcess = (turn, open = true) => {
+    const proc = { turn, open, clicks: 0,
+      getAttribute: key => key === 'data-turn-process' ? turn : key === 'aria-expanded' ? String(open) : null,
+      click() { proc.open = true; proc.clicks += 1; notify() },
+      closest: () => null }
+    processes.push(proc); return proc
+  }
   const scroll = { isConnected: true, scrollHeight: 1000, scrollTop: 0, clientHeight: 100,
     querySelectorAll(selector) {
       if (selector === '[data-variant="think"]') return rows.filter(r => r.variant === 'think')
       if (selector === '[data-chat-node-key]') return rows.map(r => r.flow)
       if (selector === '[data-disclosure-row]') return rows.map(r => r.head)
+      if (selector === '[data-turn-process]') return processes
       return []
     },
   }
@@ -58,16 +68,18 @@ function fixture(mode = false, deferredClick = false) {
     }
     assert.equal(timers.size, 0, '控制器扫描应收敛')
   }
-  const add = (variant, text, expanded = false) => {
-    const row = { variant, text, state: 'running', open: expanded, clicks: 0, isConnected: true }
+  const add = (variant, text, expanded = false, turn = '1') => {
+    const row = { variant, text, state: 'running', open: expanded, clicks: 0, isConnected: true, turn }
     row.head = { hasAttribute: key => key === 'data-disclosure-row', getAttribute: key => key === 'aria-expanded' ? String(row.open) : key === 'data-expandable' ? 'true' : null,
       closest: selector => selector === '[data-disclosure-row]' || selector === '[aria-expanded="true"]' && row.open ? row.head : null,
       click() {
+        // 真实点击先经捕获阶段监听(插件在捕获阶段识别用户意图并清闩锁)
+        listeners.get('click')?.({ target: row.head })
         const commit = () => { row.open = !row.open; row.clicks++; notify() }
         if (deferredClick) timers.set(++seq, commit)
         else commit()
       } }
-    row.closest = selector => selector === '[data-chat-node-key]' ? row.flow : row.hiddenProcess && selector === '[hidden]' ? row.flow : null
+    row.closest = selector => selector === '[data-chat-node-key]' || selector === '[data-chat-turn]' ? row.flow : row.hiddenProcess && selector === '[hidden]' ? row.flow : null
     row.getAttribute = key => key === 'data-variant' ? variant : key === 'data-state' ? row.state : null
     row.querySelector = selector => {
       if (selector === '[data-disclosure-row]') return row.head
@@ -76,7 +88,7 @@ function fixture(mode = false, deferredClick = false) {
       if (selector === '[data-variant="think"]') return null
       return null
     }
-    row.flow = { getAttribute: key => key === 'data-chat-turn' ? '1' : null, querySelector: selector => selector === '[data-variant="think"]' ? variant === 'think' ? row : null : row.querySelector(selector), closest: selector => selector === '[data-step-process]' ? row.group : selector === '[hidden]' && row.hiddenProcess ? row.flow : null }
+    row.flow = { getAttribute: key => key === 'data-chat-turn' ? row.turn : null, querySelector: selector => selector === '[data-variant="think"]' ? variant === 'think' ? row : null : row.querySelector(selector), closest: selector => selector === '[data-step-process]' ? row.group : selector === '[hidden]' && row.hiddenProcess ? row.flow : null }
     row.group = { querySelector: () => row.groupHead }
     row.parentElement = row.flow
     row.hasAttribute = () => false
@@ -93,8 +105,15 @@ function fixture(mode = false, deferredClick = false) {
     flush()
   }
   evaluate()
-  const manualClick = row => { listeners.get('click')?.({ target: row.head }); row.head.click() }
-  return { add, flush, toggle, manualClick, notify, mount, evaluate, rows, observers, timers, frames, scroll, storage, window }
+  addProcess('1', true)
+  const manualClick = row => row.head.click()
+  // 用户点击过程组标题收起:先触发 click 捕获(登记手动),再执行宿主收起
+  const manualFold = proc => {
+    listeners.get('click')?.({ target: { closest: selector => selector === '[aria-expanded="true"]' && proc.open ? proc : null } })
+    proc.open = false
+    notify()
+  }
+  return { add, addProcess, manualFold, flush, toggle, manualClick, notify, mount, evaluate, rows, processes, observers, timers, frames, scroll, storage, window }
 }
 
 test('Given 思考后出现工具 When 开启工具机 Then 思考与工具各自保持展开', () => {
@@ -201,6 +220,19 @@ for (const deferredClick of [false, true]) for (const variant of ['think', 'othe
   })
 }
 
+for (const variant of ['think', 'others']) {
+  test(`Given 首扫展开的${variant}行正文未挂载 When 新同类行出现 Then 旧行收起`, () => {
+    const f = fixture(variant === 'others', true)
+    const old = f.add(variant, '旧正文')
+    f.mount(); f.flush()
+    old.state = 'ok'
+    const next = f.add(variant, '新正文')
+    f.notify(); f.flush()
+    assert.equal(old.open, false, '正文未挂载期间展开的旧行也要被新行接管')
+    assert.equal(next.open, true)
+  })
+}
+
 test('Given 用户主动收起末思考 When 随后宿主隐藏过程 Then 不重新展开', () => {
   const f = fixture()
   const think = f.add('think', '已读末段思考')
@@ -210,6 +242,42 @@ test('Given 用户主动收起末思考 When 随后宿主隐藏过程 Then 不�
   f.notify(); f.flush()
   assert.equal(think.hiddenProcess, true)
   assert.equal(think.open, false)
+})
+
+test('Given 最新回合过程组折叠 When 首扫 Then 展开过程组一次', () => {
+  const f = fixture()
+  const proc = f.addProcess('2', false)
+  f.add('think', '新回合思考', false, '2')
+  f.mount(); f.flush()
+  assert.equal(proc.clicks, 1)
+  assert.equal(proc.open, true)
+  f.notify(); f.flush()
+  assert.equal(proc.clicks, 1, '展开后不重复点击')
+})
+
+test('Given 用户手动收起最新回合过程组 When 后续扫描 Then 不再自动展开', () => {
+  const f = fixture()
+  const proc = f.addProcess('2', true)
+  f.add('think', '新回合思考', false, '2')
+  f.mount(); f.flush()
+  f.manualFold(proc)
+  f.notify(); f.flush()
+  assert.equal(proc.clicks, 0)
+  assert.equal(proc.open, false)
+})
+
+test('Given 旧回合插件行被隐藏 When 新回合已出现 Then 不恢复旧回合末行', () => {
+  const f = fixture()
+  const old = f.add('think', '旧回合思考')
+  f.mount(); f.flush()
+  assert.equal(old.open, true)
+  old.state = 'ok'; old.hiddenProcess = true; old.open = false
+  f.addProcess('2', true)
+  const next = f.add('think', '新回合思考', false, '2')
+  f.notify(); f.flush()
+  assert.equal(old.reveals ?? 0, 0, '旧回合 current 不恢复')
+  assert.equal(old.open, false)
+  assert.equal(next.open, true)
 })
 
 test('Given 用户刚收起工具 When 不等防抖立即关闭再开启 Then 已读工具不重开', () => {

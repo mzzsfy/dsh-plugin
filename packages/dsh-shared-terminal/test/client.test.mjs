@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import { setImmediate as settled } from 'node:timers/promises'
 
 const source = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
-function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [] } = {}) {
+function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, value: [{ id: 'term-a' }] }), fetchImpl = async () => ({ ok: true, json: async () => ({}) }), roots = [], storage = new Map() } = {}) {
   let definition, component
   const effects = [], calls = [], seen = [], refs = [], timers = []
   let index = 0, declared = false, active = true, mountedSession = 'session-a'
@@ -48,6 +48,10 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
     Date,
     fetch: fetchImpl,
     document: documentStub,
+    sessionStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => { storage.set(key, String(value)) },
+    },
     setInterval: (fn) => { timers.push(fn); return timers.length },
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearInterval: () => {},
@@ -62,7 +66,7 @@ function fixture({ tabs = [], params = {}, listed = async () => ({ ok: true, val
   }
   plugin.apply({ remote, slots, sidebarRight, webTerminals, locale: { register: () => {} }, effect: (fn) => fn() })
   return {
-    calls, seen, views, webTerminals, plugin, document: documentStub,
+    calls, seen, views, webTerminals, plugin, document: documentStub, storage,
     setSession(id) { mountedSession = id },
     render(props) { index = 0; return component(props) },
     // 面板创建按 PANEL_GAP_MS 串行,flush 要等队列走完
@@ -93,6 +97,19 @@ test('Given a panel of another terminal is open, When this result renders, Then 
   app.render(props('open'))
   await app.flush()
   assert.equal(JSON.stringify(app.calls[0]), JSON.stringify(['reveal', 'session-a', 'dsh-resource://dsh-shared-terminal/panel/term-a', { kind: 'terminal', params: { terminalId: 'term-a' } }]))
+})
+
+test('Given an open result was opened in this tab, When the page reloads, Then the same terminal is not navigated again', async () => {
+  const storage = new Map()
+  const first = fixture({ storage })
+  first.render(props('open'))
+  await first.flush()
+  assert.equal(first.calls.filter((call) => call[0] === 'reveal').length, 1)
+  // 刷新后模块重新加载,同一标签页的 sessionStorage 保留;布局自行恢复面板,不再逐卡导航
+  const reloaded = fixture({ storage, tabs: [{ sessionId: 'session-a', kind: 'terminal', tabId: 'tab', contentId: 'dsh-resource://dsh-shared-terminal/panel/term-a' }], params: { terminalId: 'term-a' } })
+  reloaded.render(props('open'))
+  await reloaded.flush()
+  assert.deepEqual(reloaded.calls, [], '刷新后同一 terminal 不应重复导航')
 })
 
 test('Given two open results for the same terminal, When both render, Then the panel is opened once', async () => {

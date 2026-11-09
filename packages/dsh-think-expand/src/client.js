@@ -27,10 +27,14 @@ window.__ModuleLoader__.load({
     const SELECTOR_HEAD = '[data-disclosure-row]'
     const SELECTOR_BODY = '[class*="thinkBody"]'
     const SELECTOR_TOOL_BODY = '[class*="bodyWrap"]'
+    // 回合过程组按钮:折叠完成回合后过程组内容不渲染,工具行随之从 DOM 卸下
+    const SELECTOR_PROCESS = '[data-turn-process]'
     const ATTR_STATE = 'data-state'
     const ATTR_EXPANDED = 'aria-expanded'
     const ATTR_EXPANDABLE = 'data-expandable'
     const ATTR_VARIANT = 'data-variant'
+    const ATTR_TURN = 'data-chat-turn'
+    const ATTR_PROCESS = 'data-turn-process'
     const VARIANT_THINK = 'think'
 
     // ---- 配置常量 ----
@@ -45,6 +49,12 @@ window.__ModuleLoader__.load({
     // 全页 aria 扩散回波(含本插件自身点击引发的),独立最小配置
     const SENTINEL_OPTIONS = { childList: true, subtree: true }
     const DEBOUNCE_MS = 50
+    // 首扫延迟:首屏水合完成前行头点击会被宿主忽略,过早扫描会白点一次并留下
+    // 假闩锁;等首屏交互就绪后再执行
+    const INITIAL_SCAN_DELAY_MS = 800
+    // 行头点击未提交(宿主重渲染/挂载瞬态)时的重试间隔与次数:覆盖首屏会话渲染窗口
+    const CLICK_RETRY_DELAY_MS = 150
+    const CLICK_RETRY_LIMIT = 20
 
     // ---- 模式开关:仅思考(默认) / 全部消息;值持久在 localStorage ----
 
@@ -238,9 +248,11 @@ window.__ModuleLoader__.load({
       // 插件展开的行变为收起 → 手动收起,视为已读。同元素折叠写 uid 限定已读
       // (不拦同开头新回合行);元素定位丢失(宿主回合收尾重建行,uid 失配)时
       // 额外写宽松已读(纯前缀命中),否则收起意图随 uid 失配永久丢失(FIND-RC2-2)。
+      // 闩锁仍在的收起不是用户操作(宿主重置折叠/点击未生效),保留 current 待重展开。
       if (registry.current !== null) {
         const index = findRow(registry, rows)
-        if (index < 0 || !rows[index].expanded) {
+        const currentRow = index >= 0 ? rows[index] : null
+        if (index < 0 || (currentRow !== null && !currentRow.expanded && !currentRow.plugged)) {
           putSeen(registry.read, registry.current.uid, registry.current.seen)
           if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
           registry.marks.delete(registry.current.seen)
@@ -249,8 +261,9 @@ window.__ModuleLoader__.load({
       }
 
       // 流式目标行:优先唯一 running 尾块;宿主流式态不再标注 running 时(2026-10
-      // DOM 变更,行恒 ok)退化为最后一条可识别且正文已挂载的行。多行 running 仍
-      // 视为历史批量/异常,不干预。
+      // DOM 变更,行恒 ok)退化为最后一条可识别行;多行 running 仍视为历史批量/异常,
+      // 不干预。收起态宿主不渲染正文,正文未挂载的行同样入选:展开后正文挂载,
+      // 下一轮在此补登记。
       const running = []
       rows.forEach((row, index) => {
         if (row.headable && row.state === STATE_RUNNING) running.push(index)
@@ -259,7 +272,7 @@ window.__ModuleLoader__.load({
       if (running.length === 1) targetIndex = running[0]
       else if (running.length === 0) {
         for (let index = rows.length - 1; index >= 0; index -= 1) {
-          if (rows[index].headable && rows[index].bodyText !== '') {
+          if (rows[index].headable) {
             targetIndex = index
             break
           }
@@ -270,7 +283,11 @@ window.__ModuleLoader__.load({
 
       if (findSeenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
       if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
-      if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
+      if (isCurrent(registry, target.uid, target.bodyText)) {
+        // 闩锁仍在而收起(宿主重置折叠):当前末行重展开;用户收起已清闩锁
+        if (!target.expanded && target.plugged) actions.push({ index: targetIndex, kind: 'expand' })
+        return { actions }
+      }
 
       // 用户对插件已展开 running 行的收起:登记宽松已读(纯前缀,跨 uid 重渲染稳定),
       // 不再周期性强制重展开(FIND-RC2-3);正文未挂载时保留展开记录,正文到位后
@@ -291,6 +308,12 @@ window.__ModuleLoader__.load({
         if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
         registry.marks.delete(registry.current.seen)
         registry.current = null
+      } else {
+        // 正文未挂载时刚展开的行来不及登记 current,新行就已出现:按展开记录接管
+        for (let index = 0; index < rows.length; index += 1) {
+          if (index === targetIndex) continue
+          if (isTakeoverRow(registry, rows[index])) actions.push({ index, kind: 'collapse' })
+        }
       }
 
       if (!target.expanded) {
@@ -304,6 +327,14 @@ window.__ModuleLoader__.load({
         registerCurrent(registry, target.uid, target.bodyText)
       }
       return { actions }
+    }
+
+    // 接管判定:插件展开过(展开记录在)、仍展开、闩锁在(非用户收起)、非手动行。
+    function isTakeoverRow(registry, row) {
+      if (!row.expanded || row.uid === undefined) return false
+      if (!registry.expanded.has(row.uid)) return false
+      if (row.plugged === false) return false
+      return findSeenKey(registry.manual, row.uid, row.bodyText) === null
     }
 
     // 当前插件行登记:current 与 marks 的单点写入口,状态形态单点拥有。
@@ -371,10 +402,10 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 插件展开行被收起 → 已读(该工具行不再展开)
+      // 插件展开行被收起 → 已读(该工具行不再展开);闩锁仍在的收起是宿主重置,保留 current
       if (registry.current !== null) {
         const index = findRow(registry, rows)
-        if (index < 0 || !rows[index].expandable || !rows[index].expanded) {
+        if (index < 0 || !rows[index].expandable || (!rows[index].expanded && !rows[index].plugged)) {
           putSeen(registry.read, registry.current.uid, registry.current.seen)
           if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
           registry.marks.delete(registry.current.seen)
@@ -392,10 +423,15 @@ window.__ModuleLoader__.load({
 
       if (seenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
       if (seenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
-      if (isCurrentRow(target.uid, target.bodyText)) return { actions }
+      if (isCurrentRow(target.uid, target.bodyText)) {
+        // 闩锁仍在而收起(宿主重置折叠):当前末行重展开;用户收起已清闩锁
+        if (!target.expanded && target.plugged) actions.push({ index: targetIndex, kind: 'expand' })
+        return { actions }
+      }
 
-      // 插件展开过的目标行被收起(如回合收尾重建后):登记宽松已读,不强制重展开
-      if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+      // 插件展开过的目标行被收起(如回合收尾重建后):登记宽松已读,不强制重展开;
+      // 闩锁仍在说明宿主重置而非用户收起,继续走下方重展开
+      if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid) && !target.plugged) {
         if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
         return { actions }
       }
@@ -408,6 +444,12 @@ window.__ModuleLoader__.load({
         if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
         registry.marks.delete(registry.current.seen)
         registry.current = null
+      } else {
+        // 正文未挂载时刚展开的行来不及登记 current,新行就已出现:按展开记录接管
+        for (let index = 0; index < rows.length; index += 1) {
+          if (index === targetIndex) continue
+          if (isTakeoverRow(registry, rows[index])) actions.push({ index, kind: 'collapse' })
+        }
       }
 
       if (!target.expanded) {
@@ -431,6 +473,13 @@ window.__ModuleLoader__.load({
     // 保证用户收起后再手动展开同一条能被识别为手动意图(至多一条展开契约)
     let pluginExpandedEls = new WeakSet()
     let applyingAction = false
+    // 用户手动折叠过程组的回合(回合号):该回合过程组不再由插件展开
+    let manualTurns = new Set()
+    // 已自动展开过程组的回合(回合号):防同一回合重复点击
+    let openedTurns = new Set()
+    // 待提交的行头点击:宿主吞掉点击(重渲染/挂载瞬态)时按间隔重试,期间扫描
+    // 暂停行决策,避免把未生效点击误判成用户收起
+    let pendingClick = null
     // 行身份:元素稳定 uid(WeakMap 计数器),行重排/文本增长不影响标记命中
     const rowUidMap = new WeakMap()
     let rowUidSeq = 0
@@ -458,6 +507,7 @@ window.__ModuleLoader__.load({
       return {
         el,
         uid: rowUid(el),
+        turn: el.closest('[' + ATTR_TURN + ']')?.getAttribute(ATTR_TURN) ?? null,
         headable,
         state,
         bodyText: body !== null ? body.textContent || '' : '',
@@ -473,6 +523,7 @@ window.__ModuleLoader__.load({
       return {
         el,
         uid: rowUid(el),
+        turn: el.getAttribute(ATTR_TURN),
         expandable: head !== null && head.getAttribute(ATTR_EXPANDABLE) !== null,
         bodyText: body !== null ? body.textContent || '' : '',
         expanded: head !== null && head.getAttribute(ATTR_EXPANDED) === 'true',
@@ -501,26 +552,54 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // 宿主隐藏已完成过程会重置子折叠;只恢复仍由插件负责的末行。
-    function restoreHiddenCurrent(container, state, rows) {
+    // 最新回合号:DOM 序最后一个过程组按钮的回合;无回合时 null
+    function latestTurnId(container) {
+      const buttons = container.querySelectorAll(SELECTOR_PROCESS)
+      const last = buttons[buttons.length - 1]
+      return last === undefined ? null : last.getAttribute(ATTR_PROCESS)
+    }
+
+    // 宿主折叠完成回合时过程组内容整批不渲染(工具行从 DOM 卸下),最新回合的行
+    // 因此不可见也不可决策;展开最新回合过程组让行重新挂载。用户手动折叠过的
+    // 回合不展开,已展开过的回合不重复点击。
+    function ensureLatestTurnOpen(container) {
+      const buttons = container.querySelectorAll(SELECTOR_PROCESS)
+      const last = buttons[buttons.length - 1]
+      if (last === undefined) return false
+      const turn = last.getAttribute(ATTR_PROCESS)
+      if (turn === null || manualTurns.has(turn) || openedTurns.has(turn)) return false
+      if (last.getAttribute(ATTR_EXPANDED) !== 'false') return false
+      openedTurns.add(turn)
+      applyingAction = true
+      try { last.click() } finally { applyingAction = false }
+      return true
+    }
+
+    // 宿主隐藏或重置已完成过程的折叠后,只恢复仍由插件负责的最新回合末行;
+    // 用户手动收起已在捕获阶段清掉闩锁,不会走到这里
+    function restoreHiddenCurrent(container, state, rows, latestTurn) {
       const row = rows.find(row => row.uid === state.current?.uid)
-      if (!row?.plugged || rows.filter(row => row.headable || row.expandable).at(-1) !== row || row.el.closest('[hidden]') === null) return
+      if (!row?.plugged || row.turn !== latestTurn || row.expanded) return
+      if (rows.filter(row => row.headable || row.expandable).at(-1) !== row) return
       revealAncestors(row.el)
-      if (!row.expanded) applyAction(container, [row], { index: 0, kind: 'expand' })
+      applyAction(container, [row], { index: 0, kind: 'expand' })
       scheduleScan()
       return true
     }
 
     function onDisclosureClick(event) {
       if (applyingAction) return
+      // 用户手动操作优先:终止未完成点击的重试链,避免把收起误判成点击未提交
+      if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
       const head = event.target.closest?.('[aria-expanded="true"]')
       if (!head) return
       const rows = [...collectRows(observedContainer), ...collectToolRows(observedContainer)]
       const row = rows.find((row) => row.el.querySelector(SELECTOR_HEAD) === head)
       if (row !== undefined) { pluginExpandedEls.delete(row.el); return }
-      const turn = head.getAttribute('data-turn-process')
+      const turn = head.getAttribute(ATTR_PROCESS)
       if (turn !== null) {
-        for (const item of rows) if (item.el.closest(SELECTOR_ANY_ROW)?.getAttribute('data-chat-turn') === turn) pluginExpandedEls.delete(item.el)
+        manualTurns.add(turn)
+        for (const item of rows) if (item.el.closest(SELECTOR_ANY_ROW)?.getAttribute(ATTR_TURN) === turn) pluginExpandedEls.delete(item.el)
         return
       }
       const group = head.closest('[data-step-process]')
@@ -539,15 +618,43 @@ window.__ModuleLoader__.load({
         const before = containerMetrics(container)
         if (action.kind === 'expand') pluginExpandedEls.add(row.el)
         else pluginExpandedEls.delete(row.el)
-        applyingAction = true
-        try {
-          if (action.kind === 'expand') revealAncestors(row.el)
-          head.click()
-        } finally { applyingAction = false }
+        if (action.kind === 'expand') revealAncestors(row.el)
+        clickHead(head)
+        retryClick(row, action.kind)
         if (isPinned(before)) schedulePinRestore(container, before)
         return row.el
       }
       return null
+    }
+
+    function clickHead(head) {
+      applyingAction = true
+      try { head.click() } finally { applyingAction = false }
+    }
+
+    // 点击后校验:宿主重渲染/挂载瞬态会吞掉行头点击,按固定间隔重试同一行头;
+    // 行元素被替换或点击已提交即结束,重试期间扫描暂停行决策
+    function retryClick(row, kind) {
+      if (pendingClick !== null) clearTimeout(pendingClick.timer)
+      pendingClick = { el: row.el, kind, tries: 0, timer: null }
+      pendingClick.timer = setTimeout(settleClick, CLICK_RETRY_DELAY_MS)
+    }
+
+    function settleClick() {
+      const pending = pendingClick
+      if (pending === null) return
+      const head = pending.el.isConnected ? pending.el.querySelector(SELECTOR_HEAD) : null
+      const settled = head === null || head.getAttribute(ATTR_EXPANDED) === String(pending.kind === 'expand')
+      if (settled || pending.tries >= CLICK_RETRY_LIMIT) {
+        clearTimeout(pending.timer)
+        pendingClick = null
+        scheduleScan()
+        return
+      }
+      pending.tries += 1
+      if (pending.kind === 'expand') revealAncestors(pending.el)
+      clickHead(head)
+      pending.timer = setTimeout(settleClick, CLICK_RETRY_DELAY_MS)
     }
 
     // ---- 置底回补 ----
@@ -598,18 +705,31 @@ window.__ModuleLoader__.load({
       const container = document.querySelector(SELECTOR_SCROLL)
       // 容器身份守卫:容器替换至哨兵回调之间,旧观察器投递的扫描不对新容器用旧 registry 决策
       if (container === null || container !== observedContainer) return 0
+      // 待提交点击期间宿主状态不稳定(展开态未落定),暂停行决策,由重试链路收尾
+      if (pendingClick !== null) return 0
+      // 最新回合过程组折叠时行整批缺失(宿主不渲染过程组内容):先展开过程组,
+      // 本拍不作行决策,重挂后下一拍按新行集扫描
+      if (ensureLatestTurnOpen(container)) {
+        scheduleScan()
+        return 0
+      }
+      const latestTurn = latestTurnId(container)
       const described = collectRows(container)
-      if (!restoreHiddenCurrent(container, registry, described)) {
+
+      if (!restoreHiddenCurrent(container, registry, described, latestTurn)) {
         releaseLatchIfCollapsed(described)
         for (const action of plan(registry, toLogicRows(described)).actions) applyAction(container, described, action)
       }
+      // 行决策已覆盖当前行集:消费首扫兜底,避免同一拍对同一行二次点击(切换抵消)
+      if (described.some((row) => row.headable)) finalState.pending = false
       // 工具机与思考机并行(独立 registry/独立目标行),仅全部消息模式运行
       if (expandAll) {
         const tools = collectToolRows(container)
-        if (!restoreHiddenCurrent(container, toolsRegistry, tools)) {
+        if (!restoreHiddenCurrent(container, toolsRegistry, tools, latestTurn)) {
           releaseToolLatchIfCollapsed(tools)
           for (const action of planTools(toolsRegistry, toToolLogicRows(tools)).actions) applyAction(container, tools, action)
         }
+        if (tools.some((row) => row.expandable)) toolsFinalState.pending = false
       }
       return described.length
     }
@@ -662,6 +782,8 @@ window.__ModuleLoader__.load({
     function tryPlanFinal() {
       const container = document.querySelector(SELECTOR_SCROLL)
       if (container === null) return
+      // 过程组折叠时最新回合的行缺失:先展开过程组,行渲染后的下一拍再决策
+      if (ensureLatestTurnOpen(container)) return
       const described = collectRows(container)
       if (finalState.pending && described.some((row) => row.headable)) {
         finalState.pending = false
@@ -698,8 +820,9 @@ window.__ModuleLoader__.load({
         owner.debounceTimer = null
         if (!isActive(owner)) return
         registerFinal()
-        if (scan() === 0) finalState.pending = true
-        else if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
+        // pending 只由 attach/首扫置位:跳过行决策的扫描(过程组展开、待提交点击)
+        // 不得重新武装 planFinal,否则会把用户已收起的行重新展开
+        if (scan() > 0 && (finalState.pending || (expandAll && toolsFinalState.pending))) tryPlanFinal()
       }, DEBOUNCE_MS)
     }
 
@@ -727,6 +850,9 @@ window.__ModuleLoader__.load({
       registry = createRegistry()
       toolsRegistry = createToolsRegistry()
       pluginExpandedEls = new WeakSet()
+      manualTurns = new Set()
+      openedTurns = new Set()
+      if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
       finalState.el = null
       finalState.awaitRegister = false
       finalState.pending = true
@@ -744,11 +870,13 @@ window.__ModuleLoader__.load({
       const described = collectRows(container)
       const actions = plan(registry, toLogicRows(described), { suppressManual: true }).actions
       for (const action of actions) applyAction(container, described, action)
+      if (described.some((row) => row.headable)) finalState.pending = false
       // 工具机首扫同抑制(仅全部消息模式)
       if (expandAll) {
         const tools = collectToolRows(container)
         const toolActions = planTools(toolsRegistry, toToolLogicRows(tools), { suppressManual: true }).actions
         for (const action of toolActions) applyAction(container, tools, action)
+        if (tools.some((row) => row.expandable)) toolsFinalState.pending = false
       }
       return described.length
     }
@@ -797,9 +925,11 @@ window.__ModuleLoader__.load({
       owner.initialTimer = setTimeout(() => {
         owner.initialTimer = null
         if (!isActive(owner) || observedContainer !== container) return
+        // 过程组折叠时首扫行集残缺:先展开过程组,行渲染后的扫描再决策
+        if (ensureLatestTurnOpen(container)) { scheduleScan(owner); return }
         scanSuppressManual()
         if (finalState.pending || (expandAll && toolsFinalState.pending)) tryPlanFinal()
-      }, 0)
+      }, INITIAL_SCAN_DELAY_MS)
     }
     function stop(owner) {
       if (!owner?.active) return
@@ -809,6 +939,7 @@ window.__ModuleLoader__.load({
       clearTimeout(owner.debounceTimer)
       clearTimeout(owner.initialTimer)
       if (owner.pinFrame !== null) cancelAnimationFrame(owner.pinFrame)
+      if (pendingClick !== null) { clearTimeout(pendingClick.timer); pendingClick = null }
       if (window[SLOT_KEY] === owner) delete window[SLOT_KEY]
       if (slot !== owner) return
       bodySentinel = null
