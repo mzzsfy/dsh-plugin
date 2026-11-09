@@ -2,7 +2,7 @@
 
 DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + 归档删除 + 回收站还原重挂载。
 
-历史输入浮层、插话撤回与对话分叉已迁至独立插件 `dsh-context-manager`(会话上下文管理);工作区文件夹运行标记见 `dsh-turn-notify`。
+历史输入浮层、插话撤回与对话分叉已迁至独立插件 `dsh-context-manager`(会话上下文管理);工作区文件夹运行标记见 `dsh-turn-notify`;会话列表瘦身(列表投影裁剪与缓存)已迁至 `dsh-bug-perf`。旧设置项 `listSlimEnabled` 不再读取,开关改由 `dsh-bug-perf` 的 `listSlim.enabled` 管理(默认开启)。本包 0.10.0 及更早版本仍带丢失调用方上下文的旧列表包装,必须升级到 0.11.0(本次发布);旧包装与新 `dsh-bug-perf` 同装时仍会绕过宿主鉴权,不能只升级对端包。
 
 ## 功能
 
@@ -78,7 +78,7 @@ DeepSeek Harness 会话生命周期管理插件:自动归档 + 归档面板 + �
 npm test
 ```
 
-纯逻辑层(评估状态机 / 删除资格与失败矩阵 / 面板投影 / 归档差分 / 空白判定 / 回收站命令构造)以 `node --test` 覆盖,无外部依赖。路由层测试依赖 peer 包可解析,仓库根未安装依赖时自动 skip,`npm install` 后激活。Windows 真实回收站执行测试仅在本平台执行,其余平台自动 skip。周期评估测试经 `mock.timers` 接管 `setInterval` 与 `Date`(显式传 `now`:接管后虚拟时钟从 epoch 起算,夹具时间戳会全成「未来」),timer 服务以 makeCtx 桩模拟激活与缺失两种形态。
+纯逻辑层(评估状态机 / 删除资格与失败矩阵 / 面板投影 / 归档差分 / 空白判定 / 回收站命令构造)以 `node --test` 覆盖,无外部依赖。路由层测试依赖 peer 包可解析,仓库根未安装依赖时自动 skip(3 个非 skip 用例不受影响,其中 Config 导出契约在 peer 缺失时会失败而非 skip),`npm install` 后激活。Windows 真实回收站执行测试仅在本平台执行,其余平台自动 skip。周期评估测试经 `mock.timers` 接管 `setInterval` 与 `Date`(显式传 `now`:接管后虚拟时钟从 epoch 起算,夹具时间戳会全成「未来」),timer 服务以 makeCtx 桩模拟激活与缺失两种形态。
 
 ## 开发安装(仓库工作副本直挂,不经 npm 发布)
 
