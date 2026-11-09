@@ -27,11 +27,12 @@ const {
   HISTORY_SCOPES,
   HISTORY_INPUT_LIMIT,
   HISTORY_INPUT_MAX_CHARS,
+  HISTORY_EXTRACT_VERSION,
   HISTORY_PROMPTS_MAX,
   HISTORY_SESSION_SCAN_LIMIT,
   HISTORY_STARTUP_SCAN_LIMIT,
 } = await import('../src/core.mjs')
-const { ensureCacheDir, writeWorkspaceCache } = await import('../src/history-cache.mjs')
+const { ensureCacheDir, updatePrompts, writeWorkspaceCache } = await import('../src/history-cache.mjs')
 
 // 插件激活即跑历史缓存启动对齐:所有测试统一隔离缓存目录,
 // 防止夹具工作区经默认路径(~/.dsh/historyPrompt)泄漏进真实用户目录
@@ -58,6 +59,8 @@ function makeCtx({
   configRef,
   configEditor,
   settingsService: settingsServiceOverride,
+  liveSessions,
+  listSessionsError,
 }) {
   const routes = []
   const pendingInjects = []
@@ -79,8 +82,13 @@ function makeCtx({
   }
   // readSession 桩:sessionId → 事件数组(工厂形态则调用后抛错);reads 记录实际读取次数供缓存断言
   const readCounts = new Map()
+  let listSessionsCalls = 0
   const sessionQuery = {
-    listSessions: async () => headers.map((header) => ({ header })),
+    listSessions: async () => {
+      listSessionsCalls += 1
+      if (listSessionsError) throw listSessionsError
+      return headers.map((header) => ({ header }))
+    },
     readSession: async (sessionId) => {
       readCounts.set(sessionId, (readCounts.get(sessionId) || 0) + 1)
       if (readSession) return readSession(sessionId)
@@ -93,6 +101,8 @@ function makeCtx({
   const services = {
     webServer: { register: (route) => routes.push(route) },
     sessionQuery,
+    // 活会话注册表桩:get 返回 { header },与宿主 SessionStore 同形
+    sessions: { get: (sessionId) => (liveSessions ? liveSessions.get(sessionId) : undefined) },
   }
   const base = {
     // disposer 收集进全局清单,test.after 统一执行:启动对齐的 30s 延迟定时器
@@ -125,6 +135,7 @@ function makeCtx({
     handlers: new Map(routes.map((route) => [route.path, route.handler])),
     logger: base.logger,
     readCounts,
+    listSessionsCalls: () => listSessionsCalls,
     // 模拟宿主 settings 服务激活:触发 inject 回调(注册)
     activateSettings: () => {
       while (pendingInjects.length > 0) {
@@ -267,9 +278,154 @@ function workspaceCacheFile(dir, cwd) {
 }
 
 test('inject 声明覆盖路由层触及的全部宿主服务(cordis 未声明即抛 cannot get property)', skipMissingDeps, () => {
-  for (const service of ['webServer', 'agents', 'sessionQuery', 'sessionPersistence']) {
+  for (const service of ['webServer', 'agents', 'sessionQuery', 'sessionPersistence', 'sessions']) {
     assert.ok(declaredInject.includes(service), `inject 缺少 "${service}"`)
   }
+})
+
+// ── 历史输入路由:会话头解析成本(收藏/当前会话不得触发全量清单扫描)──
+
+test('历史输入路由:收藏范围不解析会话头(零全量清单扫描)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers, listSessionsCalls } = makeCtx({
+      headers: [],
+      agents: new Map(),
+      listSessionsError: new Error('收藏范围不应扫描会话清单'),
+    })
+    await updatePrompts(cacheDir, () => [{ text: '收藏的提示词', at: 123 }])
+    const res = response()
+    // 收藏是全局文件,与会话存在性无关:未知 sessionId 也照常返回
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=ghost&scope=prompts'), res)
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body, { inputs: [{ text: '收藏的提示词', at: 123 }], aligned: true })
+    assert.equal(listSessionsCalls(), 0)
+  })
+})
+
+test('历史输入路由:当前会话头取自活会话注册表,零全量清单扫描', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-live-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    await writeFile(artifactPath, 'log-bytes')
+    try {
+      const { stat } = await import('node:fs/promises')
+      const info = await stat(artifactPath)
+      await ensureCacheDir(cacheDir)
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '活会话输入', at: 100, sid: 's1' }],
+        extracts: {
+          s1: { v: HISTORY_EXTRACT_VERSION, mtimeMs: info.mtimeMs, size: info.size, entries: [{ text: '活会话输入', at: 100 }] },
+        },
+      })
+      const { handlers, listSessionsCalls } = makeCtx({
+        headers: [],
+        agents: new Map(),
+        // 活会话注册表命中(浮层所在会话必然在册):header 仅供 cwd 归属,
+        // 全量清单扫描无论何种理由都不应发生
+        liveSessions: new Map([['s1', { header: { id: 's1', cwd: 'C:\\x', createdAt: 0 } }]]),
+        sessionPersistence: { locate: () => ({ path: artifactPath }) },
+        listSessionsError: new Error('活会话头不应回落全量清单'),
+      })
+      const res = response()
+      await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=session'), res)
+      assert.equal(res.status, 200)
+      assert.deepEqual(res.body, { inputs: [{ text: '活会话输入', at: 100, sid: 's1' }], aligned: true })
+      assert.equal(listSessionsCalls(), 0)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:工作区缓存已存在时,当前会话范围只做本会话聚焦对齐', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-nobulk-'))
+    const artifactOf = (header) => path.join(dir, header.id + '.jsonl.zstd')
+    await writeFile(artifactOf({ id: 's1' }), 'log-s1')
+    await writeFile(artifactOf({ id: 's2' }), 'log-s2')
+    try {
+      // 缓存已建立(邻居条目在册):当前会话请求无需再扫邻居
+      await ensureCacheDir(cacheDir)
+      await writeWorkspaceCache(cacheDir, 'C:\\x', {
+        entries: [{ text: '邻居会话输入', at: 200, sid: 's2' }],
+        extracts: {},
+      })
+      const { handlers, readCounts } = makeCtx({
+        headers: [
+          { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+          { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+        ],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: artifactOf(header) }) },
+        readSessions: {
+          s1: [userMessageEvent('目标会话输入', 100)],
+          s2: [userMessageEvent('邻居会话输入', 200)],
+        },
+      })
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '目标会话输入'))
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['目标会话输入'])
+      assert.equal(readCounts.get('s2'), undefined, '当前会话范围不得解压其他会话产物')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:产物尚未落盘(指纹缺失)退回整工作区对齐,不空转', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-unmaterialized-'))
+    try {
+      const { handlers } = makeCtx({
+        headers: [
+          { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+          { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+        ],
+        agents: new Map(),
+        // 新会话首轮:产物未落盘,stat 为空——无从判断新鲜度,批量对齐是唯一可取数据路径
+        sessionPersistence: { locate: (header) => ({ path: path.join(dir, header.id + '.jsonl.zstd') }) },
+        readSessions: {
+          s1: [userMessageEvent('首轮输入', 100)],
+          s2: [userMessageEvent('邻居输入', 200)],
+        },
+      })
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=session',
+        (body) => body.aligned && body.inputs.some((item) => item.text === '首轮输入'))
+      assert.deepEqual(res.body.inputs.map((item) => item.text), ['首轮输入'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('历史输入路由:巨产物会话首开且工作区缓存缺失时仍建缓存,浮层不停在未对齐', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'cx-hist-oversize-'))
+    const artifactPath = path.join(dir, 'session.jsonl.zstd')
+    // 超过巨产物跳过线的产物:聚焦对齐整段跳过,缓存缺失时只有批量对齐能建缓存
+    await writeFile(artifactPath, Buffer.alloc(20 * 1024 * 1024))
+    try {
+      const { handlers } = makeCtx({
+        headers: [
+          { id: 's1', cwd: 'C:\\x', createdAt: 0 },
+          { id: 's2', cwd: 'C:\\x', createdAt: 0 },
+        ],
+        agents: new Map(),
+        sessionPersistence: { locate: (header) => ({ path: header.id === 's1' ? artifactPath : path.join(dir, 's2.jsonl.zstd') }) },
+        readSessions: {
+          s1: [userMessageEvent('巨产物输入', 100)],
+          s2: [userMessageEvent('可对齐输入', 200)],
+        },
+      })
+      const res = await requestUntil(handlers, '?sessionId=s1&scope=session', (body) => body.aligned)
+      assert.equal(res.body.aligned, true, '巨产物会话跳过聚焦后仍须经批量对齐落地为已对齐')
+      assert.deepEqual(res.body.inputs, [], '巨产物自身不入缓存,列表为空而非报错')
+      const cached = JSON.parse(await readFile(workspaceCacheFile(cacheDir, 'C:\\x'), 'utf8'))
+      assert.ok(cached, '工作区缓存已建立')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ── 历史输入路由:范围/对齐/缓存 ──

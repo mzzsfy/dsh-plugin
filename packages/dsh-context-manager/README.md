@@ -14,7 +14,7 @@
 - 回填经宿主公共契约 `inputActions.setDraft`;`Esc` 两级退出(搜索词非空先清词,再按关闭浮层)
 - 列表行悬停星标收藏/取消常用提示词;常用范围内点「编辑」进入编辑态(重命名/删除/新增),数据落全局 `prompts.json`,与自动历史互不覆写
 
-数据链:Host 聚合工作区缓存(`~/.dsh/historyPrompt/`,产物解压 + stat 指纹增量对齐)→ `/api/context/inputs` → 浮层。批量与焦点解压各自运行,文件提交按目标文件串行读改写,跨同进程插件热重载实例共享提交队列;已确认收藏及焦点新增输入不会被并发旧快照覆盖。不同文件互不阻塞;不提供多进程同时写同一缓存目录的协调。
+数据链:Host 聚合工作区缓存(`~/.dsh/historyPrompt/`,产物解压 + stat 指纹增量对齐)→ `/api/context/inputs` → 浮层。批量与焦点解压各自运行,文件提交按目标文件串行读改写,跨同进程插件热重载实例共享提交队列;已确认收藏及焦点新增输入不会被并发旧快照覆盖。不同文件互不阻塞;不提供多进程同时写同一缓存目录的协调。会话头解析按「活会话注册表(sessions 服务)→ 全量清单扫描」命中序,收藏范围与会话无关直接读 `prompts.json`,因此当前会话/收藏两条高频范围不付全量扫描成本;整工作区批量对齐只由「本工作区/全部工作区」范围,以及产物未落盘、工作区缓存缺失这两处分界触发。
 
 ### 插话撤回
 
@@ -29,7 +29,7 @@
 
 用户输入气泡操作排的分叉按钮:分叉出新会话到该轮之前(该轮不带入子会话消息流),该轮的用户输入自动回填子会话输入框供编辑重发——与插话撤回同构,作用于 fork 场景,原会话消息流不动(进行中轮分叉会停止原会话该轮未完成的回复,见下)。图标与官方分支按钮同源;官方「在新对话中分支」驻留轮尾操作排(分叉含该轮),两者语义互补、位置不重叠。
 
-- 锚点:`remote.session.follow` 开场帧(回溯窗口 2000 事件)建轮号 → { 结束 seq, 该轮首问文本, open } 映射;重试轮 N 的分叉边界取轮 N-1 的 turn/end seq(宿主边界语义 inclusive,轮间切口合法)
+- 锚点:`remote.session.follow` 首屏取最近一页(100 条消息)建轮号 → { 结束 seq, 该轮首问文本, open } 映射;更早的轮在扫描发现映射缺失时用 `remote.session.page` 按 `beforeSeq` 逐页回溯补齐(每页 100 条,最多 40 页),不再一次性拉 2000 条消息;重试轮 N 的分叉边界取轮 N-1 的 turn/end seq(宿主边界语义 inclusive,轮间切口合法)
 - 轮内插话不误取:文本取本轮首条携带非空文本的用户本人消息(文本块按行拼接),插件注入/纯图/空白轮不注入按钮
 - 进行中的轮可分叉:该轮用户消息已落账而 turn/end 未到时照常注入;锚点仍取其前一个闭合轮,分叉成功后自动停止本会话该轮未完成的回复(止损,失败仅记日志);首轮不注入(宿主 fork 边界必须落在 turn/end 上,「复制零事件」不可表达,新建会话即为同义操作)
 - 分叉执行走宿主 sessions 服务面 fork+open(与官方 chat 的 forkAt 同一服务,仅锚点不同);分叉成功自动打开子会话并回填草稿,子会话标题尾号递增;open 失败时暂存保留,手动打开子会话仍兑现回填
@@ -65,7 +65,7 @@
 
 ## 依赖与门控
 
-- client 半区宿主服务经 inject 声明(`slots`/`sessions`/`workspaces`/`uiWorkspace`/`remote`/`remote.session` 点分声明),namespace 未就绪整体保持未激活(干净禁用);host 半区 inject 为 `webServer`/`agents`/`sessionQuery`/`sessionPersistence`
+- client 半区宿主服务经 inject 声明(`slots`/`sessions`/`workspaces`/`uiWorkspace`/`remote`/`remote.session` 点分声明),namespace 未就绪整体保持未激活(干净禁用);host 半区 inject 为 `webServer`/`agents`/`sessionQuery`/`sessionPersistence`/`sessions`
 - 公共依赖 `@mzzsfy/dsh-common-tools` 可选消费(toast 通知通道,模块缺失即置空)
 - 样式注入带 `data-plugin` 标记,开关为 `cx-switch` 形态(状态选择器锚定 `input[type="checkbox"]`)
 
@@ -73,7 +73,7 @@
 
 | 路由 | 方法 | 用途 |
 |------|------|------|
-| `/api/context/inputs` | GET | 历史输入(`?sessionId=&scope=`) |
+| `/api/context/inputs` | GET | 历史输入(`?sessionId=&scope=`,范围 prompts/session/workspace/global;prompts 与会话无关,不校验会话存在性) |
 | `/api/context/prompts/toggle` | POST | 收藏/取消收藏(按截断后文本查重) |
 | `/api/context/history-enabled` | GET/POST | 历史浮层启停 |
 | `/api/context/history-button-enabled` | GET/POST | 输入框历史按钮启停 |
