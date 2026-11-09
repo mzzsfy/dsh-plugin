@@ -4,24 +4,29 @@
 // layers.scoped 均为 ToolRuntime 内部面,宿主升级重构该面即特性检测失败 →
 // 干净禁用,不做兼容层。
 //
-// 宿主 0.2.2-rc.1 起层条目是 registration 包装({ definition, when }),模型面
-// 投影与 defer 打标都读 registration.definition;直接改 registration 会让
-// 打标落在宿主不读的字段上(工具门自读自洽、宿主全量注入的静默失效)。
+// 层条目两形态并存:0.2.2 起为 registration 包装({ definition, when }),模型面
+// 投影与 defer 打标读 registration.definition;更早代际条目是裸 definition,
+// 投影直接读 definition.deferLoading。读取一律先解包再打标,写入目标恒为
+// definition;未知条目形态(既非包装也无 name)判漂移。
 
 /**
- * 层条目 → definition(宿主 0.2.2+ registration 形态);非 registration 返回
+ * 层条目 → definition:registration 取内层,裸 definition 取自身;未知返回
  * undefined(特性检测据此判定内部面漂移)。
  */
 function definitionOfEntry(entry) {
-  return entry !== null && typeof entry === 'object' ? entry.definition : undefined
+  if (entry === null || typeof entry !== 'object') return undefined
+  const inner = entry.definition
+  if (inner !== null && typeof inner === 'object' && typeof inner.name === 'string') return inner
+  return typeof entry.name === 'string' ? entry : undefined
 }
 
 /**
- * 判断一层是否为 registration 形态;空表无从判断按符合处理(注册后由 apply
- * 自检 tool_search 条目兜底),非空表逐条校验,混合形态同样判漂移。
+ * 判断一层是否为已知条目形态(registration 或裸 definition);空表无从判断按
+ * 符合处理(注册后由 apply 自检 tool_search 条目兜底),非空表逐条校验,混合
+ * 形态同样判漂移。
  */
-function isRegistrationLayer(data) {
-  for (const entry of data.values()) if (typeof definitionOfEntry(entry) !== 'object') return false
+function isKnownLayer(data) {
+  for (const entry of data.values()) if (definitionOfEntry(entry) === undefined) return false
   return true
 }
 
@@ -48,7 +53,7 @@ export function toolLayersOf(tools) {
     return global instanceof Map ? [global, ...scopedData()] : undefined
   }
   const initial = dataOf()
-  if (initial === undefined || !initial.every(isRegistrationLayer)) return undefined
+  if (initial === undefined || !initial.every(isKnownLayer)) return undefined
   const layerOf = (key, label, data) => ({
     key,
     label,
