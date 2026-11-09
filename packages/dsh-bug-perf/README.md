@@ -14,7 +14,7 @@
 | 任务状态流上限 | `jobStreamLimit` | 侧边栏每个会话行各订阅一条常驻 `job/list` 流(实测 361 条 job 流;会话侧 3466 个会话中 2711 个是子 agent 会话),job 变化时宿主逐条推全量帧,主线程出现数百毫秒长任务,页面越用越卡 | 默认窗口只给主会话前 `base` 条;子 agent 会话不占窗口,只在被点击时订阅;点击任意会话可加入,总数到 `max` 后淘汰最先加入的一条 |
 | 会话停滞自愈 | `stuckSession` | 连接重建期间会话停在 loading 且长时间无任何进展 | 会话流无有效消息行且直接子节点是加载提示时进入停滞计时;计时期间节点数、有效行数或最后一行文本长度任一变化都视为进展并重新计时,页面不可见或定时器被挂起时作废本轮计时;持续无进展超过阈值才调用宿主 `connection.reconnect()` 主动重建连接(中止当前 generation 并立即重试,不刷新页面、不丢草稿),重建后重新计时;连续多次无效才显示提示条与刷新入口 |
 | 会话列表瘦身 | `listSlim` | `session/list` 为每个会话下发完整投影快照(上下文请求头、回合大纲等),会话多时单次响应数十 MB、服务端重建要数十秒,每次打开页面都重来一遍 | 宿主半区包装 `sessionController.list`:只下发列表行消费的投影字段(`title` / `sessionListMetadata` / `inbox` / `modelSelection` / `tokenUsage`),结果缓存;会话增删即时失效,TTL 兜底标题漂移;被裁字段经会话详情接口完整返回;非 owner Remote 主体不读写缓存、每次透传原方法;关闭时包装保留、透传原方法;响应形状不符时原样透传 |
-| 历史窗口收敛 | `sessionWindow` | 宿主首屏与重连窗口固定为 500 条消息 / 至少 2 轮(`HISTORY_PAGE_OPTIONS`),工具密集的会话一轮就有上千事件:实测首屏 0.8–4.2MB、2142–2448 个事件,客户端要一次渲染数千 DOM 节点,打开与重连都出现数百毫秒长任务 | 宿主半区包装 `sessionController.follow` / `page` / `events`,把 `maxMessages` 收敛到配置上限并同步收敛 `turnWindow.minMessages`(宿主校验要求 `minMessages ≤ maxMessages`),`minTurns` 可单独下调;请求身份字段不动,关闭、形状不符或读取配置抛错时透传原请求 |
+| 历史窗口收敛 | `sessionWindow` | 宿主首屏与重连窗口固定为 500 条消息 / 至少 2 轮(`HISTORY_PAGE_OPTIONS`),工具密集的会话一轮就有上千事件:实测首屏可达 17MB(含 context-manager 的 2000 条 fork 预取)、上万事件,客户端一次渲染 55 个条目、4176 个节点,打开与重连出现 1.3–2.1s 长任务 | 宿主半区包装 `sessionController.follow` / `page` / `events`,把 `maxMessages`、`turnWindow.minMessages`、`minTurns` 都按配置收敛(只降不升),并保证 `minMessages ≤ maxMessages`;首屏规模实际由 `minMessages` 决定,`maxMessages` 只兜上限;请求身份字段不动,关闭、形状不符或读取配置抛错时透传原请求 |
 
 这些补丁的根因仍在宿主内部(`cancellableStream` 丢弃同 tick 的 `next()` 值、terminal-controller 队列交错、assistant rebaseline 状态机、会话流心跳判死与重建成本叠加、列表投影无按需裁剪),本插件只消除用户可观察到的后果,不改变根因。
 
@@ -54,6 +54,7 @@
     sessionWindow:
       enabled: true
       maxMessages: 200
+      minMessages: 30
       minTurns: 2
     diag:
       enabled: false
@@ -83,6 +84,7 @@
 | `listSlim.enabled` | `true` | 关闭后包装保留,每次列表调用透传原方法(不裁剪、不缓存) |
 | `sessionWindow.enabled` | `true` | 关闭后包装保留,每次历史调用透传原请求 |
 | `sessionWindow.maxMessages` | `200` | 单次历史页的消息预算上限;请求预算更小时保持调用方值,不再放大;下限 20,上限 500 |
+| `sessionWindow.minMessages` | `30` | 轮边界下限的覆盖值;首屏规模实际由它决定,调小直接减少首屏消息条数与渲染量;请求值更小时保持调用方值;下限 5,上限 200 |
 | `sessionWindow.minTurns` | `2` | 宿主轮边界下限的覆盖值:只向下调整,配置大于 2 不生效;仅在轮边界主导切窗时减少带回的轮数;下限 1,上限 50 |
 | `diag.enabled` | `false` | 开启后按采样次数把性能摘要写入宿主临时文件;关闭并刷新后内存采样仍运行,但无 diag 上报请求与落盘 |
 | `diag.reportEvery` | `12` | 每多少次采样上报一次(每次采样间隔固定);下限 1,上限 720 |
@@ -227,7 +229,7 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 - `reason` 含 `webTerminals.view missing`:终端视图服务存在但缺少 `view` 入口,通常是宿主版本结构变了;`webTerminals unavailable` 则是整个服务都不在场,两者都不要靠改阈值绕过。
 - `reason` 含 `gateway client unavailable` 或模块错误:模块表/宿主导入链问题;先修宿主加载,再谈补丁。
 - `listSlim` 不在 `window.__dshBugPerf.features`;看宿主输出的 `[dsh-bug-perf] 列表瘦身 已装载`。出现 `sessionController.list 不可用,跳过` 或 `装载失败` 时,按同一条日志的 reason 处理。
-- `sessionWindow` 同样不在客户端 `features`;宿主侧装载成功时输出 `[dsh-bug-perf] 历史窗口 已装载 (follow,page,events)`,但该行走 `ctx.logger`,是否进 stdout/日志文件取决于宿主日志配置(隔离工位实测 stdout 不含 logger.info)。可靠判据是行为:打开同一会话后 DOM 条目数与下行事件数应下降。窗口只在宿主侧收敛,浏览器抓包看到的上行请求仍是客户端原始参数(500 条 / 2 轮),不能用上行帧判断是否生效。
+- `sessionWindow` 同样不在客户端 `features`;宿主侧装载成功时输出 `[dsh-bug-perf] 历史窗口 已装载 (follow,page,events)`,但该行走 `ctx.logger`,是否进 stdout/日志文件取决于宿主日志配置(隔离工位实测 stdout 不含 logger.info)。可靠判据是行为:打开同一会话后 DOM 条目数与下行事件数应下降。窗口只在宿主侧收敛,浏览器抓包看到的上行请求仍是客户端原始参数(500 条 / 2 轮),不能用上行帧判断是否生效。宿主内所有调用方都受同一份配置约束,排查某个功能取不到更早历史时先看这里。
 - `installed: true` 但目标行为仍不出现:补丁已装上但结构没命中,或宿主已改变协议;按 L3 的场景重跑,不要把“装上”当成“生效”。
 
 ### 6. 日志前缀约定
@@ -271,9 +273,9 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 - 列表构建在 owner 调用间共享,复用首个请求的调用上下文;所有等待者都取消时中止构建,预热等待有上限。同一服务重复装载会跳过新实例,先装载实例卸载后需刷新页面/重载插件恢复瘦身。
 - 列表瘦身包装的是宿主 `sessionController` 服务面;宿主将该方法移入其他服务或改变返回协议时,补丁表现为不再裁剪(形状不符原样透传),不会崩页面,但需要按 `兼容性测试.md` 的 L3 重新核对。
 - 主动重建复用宿主 `connection` 服务:它中止当前 generation 并立即重试,订阅由宿主重新下发,不刷新页面、不丢输入;用尽重建次数后才显示提示条,刷新按钮只是最后手段。有注入能力但 `connection` 服务未就绪时等待,等待期不安装停滞自愈;无注入能力且 `connection` 缺席时才退化为只显示提示。
-- 历史窗口收敛只下调请求预算,不改变宿主的分页与补齐语义:首屏变小后向上滚动会多出几次 history 分页往返;按 `throughSeq` 跳转到旧消息时,客户端会继续向前翻页直到覆盖目标,功能正确但往返次数增加。
-- 窗口由 turn 边界主导:宿主切窗条件是"消息数达到 `minMessages` 且跨过 `minTurns` 个轮起点",所以 `minTurns` 只是下限,配置大于宿主默认 2 不会放大窗口。一轮里事件极多但消息很少的会话(单轮 200 条工具调用只配 2 条消息),`count` 到不了 50、`turns` 到不了 2,两个条件都不生效 —— 本插件收敛不了这种形态,只能改宿主协议;目标会话 46,314 事件的实测首屏是 406 事件 / 0.83MB,不在 `maxMessages` 的影响范围内。
-- 包装是宿主进程级的,对宿主内所有调用方生效:`dsh-boss-simulator` 的 session-adapter 用 `maxMessages: 100` 翻页,配置低于 100 时它的往返次数会上升(它不带预算的 `follow` 不受影响)。
+- 历史窗口收敛只下调请求预算与轮边界下限,不改变宿主的分页与补齐语义:首屏变小后向上滚动会多出几次 history 分页往返;按 `throughSeq` 跳转到旧消息时,客户端会继续向前翻页直到覆盖目标,功能正确但往返次数增加。首屏条目从 55 降到 32(默认 200/30/2)后,目标会话的长任务从 2136ms 降到 1316ms(-38%);再继续减条目不再下降,剩余开销是客户端固定渲染成本,插件层无法消除。
+- 窗口由 turn 边界主导:宿主切窗条件是"消息数达到 `minMessages` 且跨过 `minTurns` 个轮起点",两者都是下限,配置大于宿主默认值不会放大窗口。所以首屏规模由 `minMessages` 决定,`maxMessages` 只在消息特别密时才起作用;目标会话 46,314 事件的实测首屏 559 事件 / 841KB,降到 `minMessages: 30` 后为 358 事件 / 372KB。
+- 包装是宿主进程级的,对宿主内所有调用方生效:`dsh-boss-simulator` 的 session-adapter 用 `maxMessages: 100` 翻页,配置低于 100 时它的往返次数会上升(它不带预算的 `follow` 不受影响);`dsh-context-manager` 为 fork 锚点发 `maxMessages: 2000` 的 follow,会被压到 `maxMessages` 上限,导致更早的轮不再显示分叉按钮(近轮不受影响)。
 - 依赖官方内部结构(`RemoteStream`、`webTerminals.view/views/connect`、会话流协议帧格式与 `/api/remote.mux` 路径、`[data-chat-flow]` 容器与加载提示文本、`sessionController.list` 与列表投影形状、`sessionController.follow/page/events` 的请求字段与原型方法位置、`ctx.invocation.peer.principal` 主体判定),宿主升级后需按 `兼容性测试.md` 的 L3 重新验证。
 - `diag` 默认关闭;开启后每 `reportEvery` 次采样发一次 GET,payload 全部放在 query string;不重试、不补发,页面关闭时未发送的样本会丢失。内存采样始终运行,关闭上报不等于关闭采样。2 MB 轮转与宿主重启后继续追加按实现语义描述,尚未单独实测。
 

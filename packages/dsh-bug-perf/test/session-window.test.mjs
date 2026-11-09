@@ -1,10 +1,10 @@
-// 历史窗口收敛的契约:只下调预算、按宿主校验同步收敛 turn 下限、异常与关闭一律透传原请求。
+// 历史窗口收敛的契约:只下调预算与轮边界下限、保证 minMessages <= maxMessages、异常与关闭一律透传原请求。
 // 包装的是宿主 sessionController 的历史入口(follow/page/events),不改地址等身份字段。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { HISTORY_METHODS, installSessionWindow, limitHistoryRequest } from '../src/session-window.mjs'
 
-const WINDOW = { maxMessages: 200, minTurns: 2 }
+const WINDOW = { maxMessages: 200, minMessages: 30, minTurns: 2 }
 
 /** 客户端默认发出的首屏请求形态(宿主 HISTORY_PAGE_OPTIONS)。 */
 const hostRequest = () => ({
@@ -60,20 +60,31 @@ function makeController() {
   return { controller: new FakeController(), calls, results }
 }
 
-test('历史窗口_预算超上限_收敛并同步轮下限', () => {
+test('历史窗口_预算与轮下限都超配置_一并收敛', () => {
   const request = hostRequest()
   const limited = limitHistoryRequest(request, WINDOW)
   assert.equal(limited.maxMessages, 200)
-  assert.deepEqual(limited.turnWindow, { minMessages: 50, minTurns: 2 })
+  assert.deepEqual(limited.turnWindow, { minMessages: 30, minTurns: 2 })
   assert.equal(limited.address, request.address)
   assert.equal(limited.activate, true)
   assert.equal(limited.assistantStream, true)
 })
 
 test('历史窗口_轮下限超上限_同步下调', () => {
-  const limited = limitHistoryRequest({ maxMessages: 500, turnWindow: { minMessages: 200, minTurns: 5 } }, { maxMessages: 120, minTurns: 1 })
+  const limited = limitHistoryRequest({ maxMessages: 500, turnWindow: { minMessages: 200, minTurns: 5 } }, { maxMessages: 120, minMessages: 30, minTurns: 1 })
   assert.equal(limited.maxMessages, 120)
-  assert.deepEqual(limited.turnWindow, { minMessages: 120, minTurns: 1 })
+  assert.deepEqual(limited.turnWindow, { minMessages: 30, minTurns: 1 })
+})
+
+test('历史窗口_轮下限消息不放大_小于配置时保持调用方值', () => {
+  const limited = limitHistoryRequest({ maxMessages: 500, turnWindow: { minMessages: 12, minTurns: 2 } }, WINDOW)
+  assert.equal(limited.turnWindow.minMessages, 12)
+})
+
+test('历史窗口_预算低于轮下限消息_按预算收敛保证合法', () => {
+  const limited = limitHistoryRequest({ maxMessages: 25, turnWindow: { minMessages: 50, minTurns: 2 } }, WINDOW)
+  assert.equal(limited.maxMessages, 25)
+  assert.equal(limited.turnWindow.minMessages, 25)
 })
 
 test('历史窗口_预算未超上限_原对象返回', () => {
@@ -83,7 +94,7 @@ test('历史窗口_预算未超上限_原对象返回', () => {
 
 test('历史窗口_无预算只有轮数_只收轮数', () => {
   const request = { address: {}, turnWindow: { minMessages: 50, minTurns: 4 } }
-  const limited = limitHistoryRequest(request, WINDOW)
+  const limited = limitHistoryRequest(request, { maxMessages: 200, minMessages: 200, minTurns: 2 })
   assert.equal(limited.maxMessages, undefined)
   assert.deepEqual(limited.turnWindow, { minMessages: 50, minTurns: 2 })
 })
@@ -116,7 +127,7 @@ test('历史窗口_安装_三个入口都按上限下发', async () => {
   assert.deepEqual(calls.map((call) => call.method), [...HISTORY_METHODS])
   for (const call of calls) {
     assert.equal(call.request.maxMessages, 200)
-    assert.deepEqual(call.request.turnWindow, { minMessages: 50, minTurns: 2 })
+    assert.deepEqual(call.request.turnWindow, { minMessages: 30, minTurns: 2 })
   }
 })
 
