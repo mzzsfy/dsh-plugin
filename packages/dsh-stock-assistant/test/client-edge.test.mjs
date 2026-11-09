@@ -736,3 +736,27 @@ test('图例显示卖价与相对成本的潜在收益', async () => {
   // 成本图例同时存在, 两个数不是同一个来源
   assert.match(legend, /class="ssb-legend-item ssb-legend-cost"/, '成本图例仍在')
 })
+
+// 凭据输入: 有 credentialRef 的实例展开后要能直接填密钥, 而不是只让用户去改环境变量名
+test('设置页为需凭据的实例渲染密钥输入', async () => {
+  const { plugin } = await loadClientWithReact()
+  const provider = { id: 'fh-live', adapterId: 'finnhub', enabled: true, credentialRef: 'DSH_STOCK_FINNHUB_TOKEN', quotaGroup: 'finnhub-live', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
+  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: { providers: [provider], routes: [], expectedRevision: 1, checkResults: [], probes: {}, expandedProvider: 'fh-live' } }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 1, watchlist: { order: [], items: {} }, preferences: {}, providers: [provider], routes: [] }, quotes: {}, adapters: [{ adapterId: 'finnhub', capabilities: ['quotes'], credential: 'DSH_STOCK_FINNHUB_TOKEN', description: '美股实时报价', endpointKeys: [{ key: 'quotes', label: '实时报价' }] }], providerStatus: [{ id: 'fh-live', credentialRef: 'DSH_STOCK_FINNHUB_TOKEN', credentialPresent: false, proxy: false, endpointsCovered: 0, recentRequests: [] }], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: true } }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, api: () => Promise.resolve({}), applySnapshot: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /密钥引用名/, '引用名可改')
+  assert.match(html, /密钥（未配置）/, '未配置时提示')
+  assert.match(html, /type="password"/, '密钥用密码框, 不回显')
+  assert.match(html, /保存密钥/, '有保存动作')
+  assert.doesNotMatch(html, /保存密钥<\/button><\/div><button[^>]*>清除/, '未配置时没有清除按钮')
+})
+
+test('设置页凭据已就绪时给出清除入口', async () => {
+  const { plugin } = await loadClientWithReact()
+  const provider = { id: 'fh-live', adapterId: 'finnhub', enabled: true, credentialRef: 'DSH_STOCK_FINNHUB_TOKEN', quotaGroup: 'finnhub-live', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
+  const state = { view: { view: 'list', overlay: 'settings', query: '', selectedId: null, sort: 'manual', settingsDraft: { providers: [provider], routes: [], expectedRevision: 1, checkResults: [], probes: {}, expandedProvider: 'fh-live' } }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, data: { control: { revision: 1, routingRevision: 1, watchlist: { order: [], items: {} }, preferences: {}, providers: [provider], routes: [] }, quotes: {}, adapters: [{ adapterId: 'finnhub', capabilities: ['quotes'], credential: 'DSH_STOCK_FINNHUB_TOKEN', description: '美股实时报价', endpointKeys: [{ key: 'quotes', label: '实时报价' }] }], providerStatus: [{ id: 'fh-live', credentialRef: 'DSH_STOCK_FINNHUB_TOKEN', credentialPresent: true, proxy: false, endpointsCovered: 0, recentRequests: [] }], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: true } }
+  const runtimeStub = { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, api: () => Promise.resolve({}), applySnapshot: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }
+  const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: runtimeStub, layout: {} }))
+  assert.match(html, /密钥（已配置/, '已配置时换个说法')
+  assert.match(html, /清除/, '已配置时可清除')
+})
