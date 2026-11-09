@@ -161,9 +161,11 @@ export function plan(registry, rows, options = {}) {
   // 插件展开的行变为收起 → 手动收起,视为已读。同元素折叠写 uid 限定已读
   // (不拦同开头新回合行);元素定位丢失(宿主回合收尾重建行,uid 失配)时
   // 额外写宽松已读(纯前缀命中),否则收起意图随 uid 失配永久丢失(FIND-RC2-2)。
+  // 闩锁仍在的收起不是用户操作(宿主重置折叠/点击未生效),保留 current 待重展开。
   if (registry.current !== null) {
     const index = findRow(registry, rows)
-    if (index < 0 || !rows[index].expanded) {
+    const currentRow = index >= 0 ? rows[index] : null
+    if (index < 0 || (currentRow !== null && !currentRow.expanded && !currentRow.plugged)) {
       putSeen(registry.read, registry.current.uid, registry.current.seen)
       if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
       registry.marks.delete(registry.current.seen)
@@ -172,8 +174,9 @@ export function plan(registry, rows, options = {}) {
   }
 
   // 流式目标行:优先唯一 running 尾块;宿主流式态不再标注 running 时(2026-10
-  // DOM 变更,行恒 ok)退化为最后一条可识别且正文已挂载的行。多行 running 仍
-  // 视为历史批量/异常,不干预。
+  // DOM 变更,行恒 ok)退化为最后一条可识别行;多行 running 仍视为历史批量/异常,
+  // 不干预。收起态宿主不渲染正文,正文未挂载的行同样入选:展开后正文挂载,
+  // 下一轮在此补登记。
   const running = []
   rows.forEach((row, index) => {
     if (row.headable && row.state === STATE_RUNNING) running.push(index)
@@ -182,7 +185,7 @@ export function plan(registry, rows, options = {}) {
   if (running.length === 1) targetIndex = running[0]
   else if (running.length === 0) {
     for (let index = rows.length - 1; index >= 0; index -= 1) {
-      if (rows[index].headable && rows[index].bodyText !== '') {
+      if (rows[index].headable) {
         targetIndex = index
         break
       }
@@ -193,7 +196,11 @@ export function plan(registry, rows, options = {}) {
 
   if (findSeenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
   if (findSeenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
-  if (isCurrent(registry, target.uid, target.bodyText)) return { actions }
+  if (isCurrent(registry, target.uid, target.bodyText)) {
+    // 闩锁仍在而收起(宿主重置折叠):当前末行重展开;用户收起已清闩锁
+    if (!target.expanded && target.plugged) actions.push({ index: targetIndex, kind: 'expand' })
+    return { actions }
+  }
 
   // 用户对插件已展开 running 行的收起:登记宽松已读(纯前缀,跨 uid 重渲染稳定),
   // 不再周期性强制重展开(FIND-RC2-3);正文未挂载时保留展开记录,正文到位后
@@ -214,6 +221,12 @@ export function plan(registry, rows, options = {}) {
     if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
     registry.marks.delete(registry.current.seen)
     registry.current = null
+  } else {
+    // 正文未挂载时刚展开的行来不及登记 current,新行就已出现:按展开记录接管
+    for (let index = 0; index < rows.length; index += 1) {
+      if (index === targetIndex) continue
+      if (isTakeoverRow(registry, rows[index])) actions.push({ index, kind: 'collapse' })
+    }
   }
 
   if (!target.expanded) {
@@ -227,6 +240,14 @@ export function plan(registry, rows, options = {}) {
     registerCurrent(registry, target.uid, target.bodyText)
   }
   return { actions }
+}
+
+// 接管判定:插件展开过(展开记录在)、仍展开、闩锁在(非用户收起)、非手动行。
+function isTakeoverRow(registry, row) {
+  if (!row.expanded || row.uid === undefined) return false
+  if (!registry.expanded.has(row.uid)) return false
+  if (row.plugged === false) return false
+  return findSeenKey(registry.manual, row.uid, row.bodyText) === null
 }
 
 // 当前插件行登记:current 与 marks 的单点写入口,状态形态单点拥有。
@@ -294,10 +315,10 @@ export function planTools(registry, rows, options = {}) {
     }
   }
 
-  // 插件展开行被收起 → 已读(该工具行不再展开)
+  // 插件展开行被收起 → 已读(该工具行不再展开);闩锁仍在的收起是宿主重置,保留 current
   if (registry.current !== null) {
     const index = findRow(registry, rows)
-    if (index < 0 || !rows[index].expandable || !rows[index].expanded) {
+    if (index < 0 || !rows[index].expandable || (!rows[index].expanded && !rows[index].plugged)) {
       putSeen(registry.read, registry.current.uid, registry.current.seen)
       if (index < 0) putSeen(registry.read, undefined, registry.current.seen)
       registry.marks.delete(registry.current.seen)
@@ -315,10 +336,15 @@ export function planTools(registry, rows, options = {}) {
 
   if (seenKey(registry.manual, target.uid, target.bodyText) !== null) return { actions }
   if (seenKey(registry.read, target.uid, target.bodyText) !== null) return { actions }
-  if (isCurrentRow(target.uid, target.bodyText)) return { actions }
+  if (isCurrentRow(target.uid, target.bodyText)) {
+    // 闩锁仍在而收起(宿主重置折叠):当前末行重展开;用户收起已清闩锁
+    if (!target.expanded && target.plugged) actions.push({ index: targetIndex, kind: 'expand' })
+    return { actions }
+  }
 
-  // 插件展开过的目标行被收起(如回合收尾重建后):登记宽松已读,不强制重展开
-  if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid)) {
+  // 插件展开过的目标行被收起(如回合收尾重建后):登记宽松已读,不强制重展开;
+  // 闩锁仍在说明宿主重置而非用户收起,继续走下方重展开
+  if (!target.expanded && target.uid !== undefined && registry.expanded.has(target.uid) && !target.plugged) {
     if (target.bodyText !== '') putSeen(registry.read, undefined, target.bodyText)
     return { actions }
   }
@@ -331,6 +357,12 @@ export function planTools(registry, rows, options = {}) {
     if (!oldIsManual && old !== null && old.expanded) actions.push({ index: oldIndex, kind: 'collapse' })
     registry.marks.delete(registry.current.seen)
     registry.current = null
+  } else {
+    // 正文未挂载时刚展开的行来不及登记 current,新行就已出现:按展开记录接管
+    for (let index = 0; index < rows.length; index += 1) {
+      if (index === targetIndex) continue
+      if (isTakeoverRow(registry, rows[index])) actions.push({ index, kind: 'collapse' })
+    }
   }
 
   if (!target.expanded) {

@@ -149,13 +149,27 @@ function defineScenarios(prefix, L) {
   test(prefix + '用户手动收起视为已读', () => {
     const reg = createRegistry()
     plan(reg, [row(RUNNING, 'A')])
-    // 手动收起当前行(流式仍在追加,前缀匹配命中已读标记)
-    plan(reg, [row(RUNNING, 'A 收起前正文', false, true, true)])
-    const again = plan(reg, [row(RUNNING, 'A 收起前正文 继续追加', false, true, true)])
+    // 手动收起当前行(捕获阶段已清闩锁;流式仍在追加,前缀匹配命中已读标记)
+    plan(reg, [row(RUNNING, 'A 收起前正文', false, true, false)])
+    const again = plan(reg, [row(RUNNING, 'A 收起前正文 继续追加', false, true, false)])
     assert.equal(again.actions.length, 0)
     // 下一条新思考行出现即恢复自动展开
-    const next = plan(reg, [row(OK, 'A 收起前正文 继续追加', false, true, true), row(RUNNING, 'B')])
+    const next = plan(reg, [row(OK, 'A 收起前正文 继续追加', false, true, false), row(RUNNING, 'B')])
     assert.equal(expandOf(next, 1), 1)
+  })
+
+  test(prefix + '闩锁仍在而收起视为宿主重置,末行重展开', () => {
+    const reg = createRegistry()
+    plan(reg, [row(OK, 'A')])
+    // 宿主重置折叠:行收起但闩锁未清(用户未操作)
+    const reset = plan(reg, [row(OK, 'A', false, true, true)])
+    assert.equal(expandOf(reset, 0), 1)
+    assert.equal(reg.read.size, 0)
+    // 用户收起(闩锁已清)才登记已读
+    plan(reg, [row(OK, 'A', true, true, true)])
+    const manual = plan(reg, [row(OK, 'A', false, true, false)])
+    assert.equal(manual.actions.length, 0)
+    assert.equal(reg.read.size, 1)
   })
 
   test(prefix + '流式结束保留展开', () => {
@@ -202,10 +216,19 @@ function defineScenarios(prefix, L) {
     assert.equal(expandOf(result, 2), 1)
   })
 
-  test(prefix + '尾部兜底:空正文行不作为目标', () => {
+  test(prefix + '尾部兜底:正文未挂载的末行仍作为目标(宿主收起态不渲染正文)', () => {
     const reg = createRegistry()
     const result = plan(reg, [row(OK, '')])
-    assert.equal(result.actions.length, 0)
+    assert.equal(expandOf(result, 0), 1)
+    assert.equal(reg.current, null)
+  })
+
+  test(prefix + '尾部兜底:新回合行正文未挂载时仍接管收起旧行', () => {
+    const reg = createRegistry()
+    plan(reg, [row(OK, 'A'), row(OK, 'B')])
+    const result = plan(reg, [row(OK, 'A'), row(OK, 'B', true, true, true), row(OK, '')])
+    assert.equal(collapseOf(result, 1), 1)
+    assert.equal(expandOf(result, 2), 1)
   })
 
   test(prefix + '尾部兜底:存在手动展开行不收手动行,且不再开目标(单条约束让位手动)', () => {
@@ -286,7 +309,7 @@ function defineScenarios(prefix, L) {
     const reg = createRegistry()
     // 插件展开 uid=3 后用户收起 → 已读
     plan(reg, [row(RUNNING, '好的，让我', false, true, false, 3)])
-    plan(reg, [row(RUNNING, '好的，让我', false, true, true, 3)])
+    plan(reg, [row(RUNNING, '好的，让我', false, true, false, 3)])
     assert.equal(reg.read.size, 1)
     // 新回合行 uid=9 同开头:不因旧标记被拦
     const next = plan(reg, [row(RUNNING, '好的，让我重新分析', false, true, false, 9)])
@@ -409,13 +432,21 @@ function defineScenarios(prefix, L) {
     const reg = createToolsRegistry()
     // 首扫展开目标行(current 登记)
     planTools(reg, [toolRow(false, true, false, 7)])
-    // 用户收起(expanded=false+plugged 闩锁仍在,行仍可展开)
-    const after = planTools(reg, [toolRow(false, true, true, 7)])
+    // 用户收起(闩锁已在捕获阶段清除,行仍可展开)
+    const after = planTools(reg, [toolRow(false, true, false, 7)])
     assert.equal(after.actions.length, 0)
     assert.equal(reg.read.size, 1)
     // 已读行不再展开
     const again = planTools(reg, [toolRow(false, true, false, 7)])
     assert.equal(again.actions.length, 0)
+  })
+
+  test(prefix + '工具机:闩锁仍在而收起视为宿主重置,末行重展开', () => {
+    const reg = createToolsRegistry()
+    planTools(reg, [toolRow(false, true, false, 7)])
+    const reset = planTools(reg, [toolRow(false, true, true, 7)])
+    assert.equal(expandOf(reset, 0), 1)
+    assert.equal(reg.read.size, 0)
   })
 
   test(prefix + '工具机:手动展开行为 manual,插件接管不收', () => {
