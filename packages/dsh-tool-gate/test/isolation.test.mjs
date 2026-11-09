@@ -10,7 +10,7 @@ import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import * as row from '../src/index.js'
 import { DEFERRED_PLACEHOLDER_DESCRIPTION, TOOL_SEARCH_NAME } from '../src/fallback.mjs'
-import { HOST_SKIP } from './host-form.mjs'
+import { HOST_SKIP, TOOLSET_SKIP } from './host-form.mjs'
 
 const makeTool = (name, description = `${name} fixture`) => defineTool({
   name,
@@ -69,13 +69,15 @@ async function boot(t, options = {}) {
   assert.equal(fiber?.state, 2, 'tool-gate 行应激活')
 
   // 生产路径:模型步先 resolve 出准入 toolSet(条件注册 when 与 restrict 已解析),
-  // 检索面吃同一 toolSet;用完即 dispose(与 agent-loop 语义一致)
+  // 检索面吃同一 toolSet;旧代际无 resolve(只有注册视图),按能力退回。
   const search = async (agent, pattern = '.') => {
-    const toolSet = await root.tools.resolve({ agent, signal: t.signal })
+    const toolSet = typeof root.tools.resolve === 'function'
+      ? await root.tools.resolve({ agent, signal: t.signal })
+      : undefined
     try {
       return await root.tools.get(TOOL_SEARCH_NAME, agent).execute({ pattern }, { agent, toolSet })
     } finally {
-      toolSet.dispose()
+      toolSet?.dispose?.()
     }
   }
   const namesOf = (result) => result.text.match(/^### (.+)$/gm)?.map((line) => line.slice(4)).sort() ?? []
@@ -217,7 +219,7 @@ test('I9 并发:多会话同时检索与他层注册交错,隔离终态一致', 
 })
 
 // Given 条件注册工具(when)准入未满足;When 模型步内检索;Then 不返回本步不可执行的工具。
-test('I10 准入隔离:检索面跟随本步 toolSet,未准入的条件工具不返回', { skip: HOST_SKIP }, async (t) => {  const { root, agentA, agentB } = await boot(t)
+test('I10 准入隔离:检索面跟随本步 toolSet,未准入的条件工具不返回', { skip: TOOLSET_SKIP || HOST_SKIP }, async (t) => {  const { root, agentA, agentB } = await boot(t)
   root.tools.register(makeTool('always_ready'))
   root.tools.register(makeTool('plan_exit'), { when: () => false })
   const signal = new AbortController().signal

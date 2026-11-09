@@ -3,9 +3,9 @@
 // 可见性不变(defer 不改 view().visible,只改声明形态)。同时覆盖真 cordis
 // 行挂载下的行模块(apply/Config)装载与本包收敛链路。
 //
-// 宿主代际门:工具门只对 0.2.2+ 的 registration 条目形态生效;测试环境仍可能
-// 解析旧根桥(裸 definition,CI 基线口径),此时功能面跳过,改由 SC-25 断言
-// 干净禁用。形态探测见 test/host-form.mjs。
+// 宿主形态门:工具门支持两种层条目形态——0.2.2+ 的 registration 包装与更早
+// 代际的裸 definition;两形态都跑功能面,未知形态才由合成宿主用例断言干净
+// 禁用。形态探测见 test/host-form.mjs。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,7 +14,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import * as row from '../src/index.js'
-import { HOST_SKIP } from './host-form.mjs'
+import { HOST_FORM, HOST_SKIP } from './host-form.mjs'
 
 function makeTool(name) {
   return defineTool({
@@ -57,8 +57,11 @@ test('SC-10 官方投影:deferred 带标,白名单内不带,可见性不变', { 
   assert.ok(root.tools.get('web_search'))
   assert.ok(root.tools.get('read'))
 
-  const names = root.tools.definitions().map((definition) => definition.name).sort()
-  assert.deepEqual(names, ['read', 'tool_search', 'web_search'])
+  // 可见面:0.2.2+ 用 definitions(),旧代际用 view(scope).visible
+  const visibleNames = typeof root.tools.definitions === 'function'
+    ? root.tools.definitions().map((definition) => definition.name)
+    : [...root.tools.view(undefined).visible.keys()]
+  assert.deepEqual(visibleNames.sort(), ['read', 'tool_search', 'web_search'])
 })
 
 test('行模块在真 cordis 下装载并按 Config 收敛', { skip: HOST_SKIP }, async () => {
@@ -156,10 +159,12 @@ test('SC-24 tool_search 不改变其他会话或本会话的工具加载态', { 
   assert.equal((await search(agentB, '^only_a$')).count, 0)
 })
 
-// Given 宿主层条目是裸 definition(0.2.2 前形态);When 行 apply;Then 干净禁用:
-// 不打标、不注册折叠入口,零动作不崩(基线口径,不得静默失效)。
-test('SC-25 宿主内部面漂移:裸 definition 层干净禁用', { skip: HOST_SKIP === false }, async () => {
-  const { root, registered } = await boot(['read', 'web_search'], ['read'])
-  assert.equal('deferLoading' in registered.get('web_search'), false, '漂移形态不得打标')
-  assert.equal(root.tools.get('tool_search'), undefined, '漂移形态不注册折叠入口')
+// Given 宿主层条目是裸 definition(0.2.2 前形态);When 行 apply;Then 归一化
+// 读取后照常打标、注册折叠入口、退场还原(旧代际不是漂移)。
+test('SC-25 旧代际裸 definition 宿主:正常工作', { skip: HOST_FORM !== 'bare' }, async () => {
+  const { root, registered, fiber } = await boot(['read', 'web_search'], ['read'])
+  assert.equal(registered.get('web_search').deferLoading, true, '裸形态照常打标')
+  assert.ok(root.tools.get('tool_search'), '裸形态注册折叠入口')
+  await fiber.dispose()
+  assert.equal('deferLoading' in registered.get('web_search'), false, '退场还原')
 })

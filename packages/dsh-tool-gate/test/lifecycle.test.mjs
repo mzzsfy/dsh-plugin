@@ -222,15 +222,25 @@ test('SC-22 tool_search 注册与隐式白名单:收敛不打标,退场注销', 
 })
 
 // definitions 面是宿主 0.2.2+ 的投影读取面:缺失即代际不符,零动作不收敛
-test('definitions 面缺失时干净禁用:不注册入口、不打标、不装监听', () => {
+// Given 宿主无 definitions 面(0.2.2 前,只有 view);When 行 apply;
+// Then 检索面退回注册视图,打标照常(不是漂移)。
+test('无 definitions 面:退回 view 正常工作', () => {
   const h = harness({ global: { web: { name: 'web' } } })
   delete h.tools.definitions
   h.applyRow()
+  assert.equal(h.registered.has('tool_search'), true, '检索入口按 view 注册')
+  assert.equal(h.logs.warn.some((message) => message.includes('definitions')), false)
+  assert.equal(h.definitionOf('global', 'web').deferLoading, true, '照常收敛')
+})
+
+// 只有 register 与 view 同时缺失才是无法工作的宿主形态
+test('register/view 面同时缺失:干净禁用', () => {
+  const h = harness({ global: { web: { name: 'web' } } })
+  delete h.tools.definitions
+  delete h.tools.view
+  h.applyRow()
   assert.equal(h.registered.has('tool_search'), false)
-  assert.ok(h.logs.warn.some((message) => message.includes('tools.register/definitions')))
-  assert.equal(h.definitionOf('global', 'web').deferLoading, undefined, '零动作:不收敛')
-  h.emit('tools/change')
-  assert.equal(h.definitionOf('global', 'web').deferLoading, undefined, '零动作:不装监听')
+  assert.ok(h.logs.warn.some((message) => message.includes('tools.register 或可见面')))
 })
 
 test('SC-22 收敛不打标 tool_search(白名单外仍保持清标)', () => {
@@ -305,34 +315,32 @@ test('SC-19 collapse=false:门关全量透传(打标维持)', () => {
 // Given apply 时层为空(空表无从判定),注册进层的条目是裸 definition;
 // When 行 apply;Then 自检识别宿主代际漂移:注销检索入口、告警、零打标,
 // 且不进入折叠安装段(adapter 原型未被 patch)。
-test('注册条目非 registration:注销检索入口并干净禁用', () => {
-  const calls = []
+// Given 空层 + 旧代际注册形态(裸 definition 入层);When 行 apply;
+// Then 自检解包后与检索入口同一对象,放行并正常工作(不误判漂移)。
+test('裸 definition 注册:自检放行并正常收敛', () => {
   const adapter = new (class {
-    streamWithSnapshot(options) { calls.push(options); return 'stream' }
+    streamWithSnapshot() { return 'stream' }
   })()
-  const original = adapter.streamWithSnapshot
   const h = harness(
     { global: {} },
     { allowlist: [], llm: makeLlm(adapter) },
     { registerForm: 'bare' },
   )
   h.applyRow()
-  assert.equal(h.tools.layers.global.tools.data.has(TOOL_SEARCH_NAME), false, '自检失败后注销检索入口')
-  assert.ok(h.logs.warn.some((message) => message.includes('registration')))
-  assert.equal(adapter.streamWithSnapshot, original, '禁用路径不 patch adapter 原型')
+  assert.equal(h.tools.layers.global.tools.data.has(TOOL_SEARCH_NAME), true, '检索入口保留(裸形态)')
+  assert.equal(h.logs.warn.some((message) => message.includes('形态')), false)
   h.addAgentLayer('agent#late', { web_search: { name: 'web_search' } })
   h.emit('tools/change')
-  assert.equal(h.definitionOf('agent#late', 'web_search')?.deferLoading, undefined, '禁用后不再打标')
+  assert.equal(h.definitionOf('agent#late', 'web_search')?.deferLoading, true, '旧形态照常打标')
   h.dispose()
 })
 
 // Given 装载时层非空且条目是裸 definition(旧宿主真实形态);When apply;
-// Then 形态探测直接干净禁用:不装监听、不 patch adapter、零打标。
-test('非空裸 definition 层:apply 即干净禁用(零动作)', () => {
+// Then 归一化读取后照常打标收敛(旧代际不是漂移),退场还原。
+test('非空裸 definition 层:正常工作', () => {
   const adapter = new (class {
     streamWithSnapshot() { return 'stream' }
   })()
-  const original = adapter.streamWithSnapshot
   const h = harness(
     { global: {} },
     { allowlist: [], llm: makeLlm(adapter) },
@@ -341,21 +349,19 @@ test('非空裸 definition 层:apply 即干净禁用(零动作)', () => {
   // 装载前层内已有裸 definition(旧宿主真实形态;空表放行只针对 apply 时为空)
   h.tools.layers.global.tools.data.set('web', { name: 'web' })
   h.applyRow()
-  assert.ok(h.logs.warn.some((message) => message.includes('层结构与已知形态不符')))
-  assert.equal(h.registered.has(TOOL_SEARCH_NAME), false)
-  assert.equal(h.tools.layers.global.tools.data.get('web').deferLoading, undefined)
-  assert.equal(adapter.streamWithSnapshot, original, '禁用路径不 patch adapter 原型')
-  h.emit('tools/change')
-  assert.equal(h.tools.layers.global.tools.data.get('web').deferLoading, undefined, '未装监听')
+  assert.equal(h.logs.warn.some((message) => message.includes('层结构与已知形态不符')), false)
+  assert.equal(h.tools.layers.global.tools.data.get('web').deferLoading, true, '裸形态照常打标')
+  h.dispose()
+  assert.equal('deferLoading' in h.tools.layers.global.tools.data.get('web') ?? {}, false, '退场还原')
 })
 
-// Given 收敛已打标;When 层内被塞入裸条目(形态漂移);Then 告警并跳过,
-// 既有打标与其他名不受影响。
-test('层内出现裸条目:告警并跳过,既有打标不变', () => {
+// Given 收敛已打标;When 层内被塞入未知形态条目(既非包装也无 name);
+// Then 告警并跳过,既有打标与其他名不受影响。
+test('层内出现未知条目:告警并跳过,既有打标不变', () => {
   const h = harness({ global: { web: { name: 'web' }, read: { name: 'read' } } })
   h.applyRow()
   assert.equal(h.definitionOf('global', 'web').deferLoading, true)
-  h.tools.layers.global.tools.data.set('bare', { name: 'bare' })
+  h.tools.layers.global.tools.data.set('bogus', { when: () => true })
   h.emit('tools/change')
   assert.ok(h.logs.warn.some((message) => message.includes('无 definition')))
   assert.equal(h.definitionOf('global', 'web').deferLoading, true, '既有打标不变')
