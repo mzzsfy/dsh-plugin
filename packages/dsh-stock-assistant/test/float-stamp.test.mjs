@@ -104,20 +104,24 @@ test('悬浮窗时刻跨天补日期, 午夜用 h23', async () => {
   assert.equal(clockText('not-a-time', now), '', '坏时间戳不抛错')
 })
 
+// 最旧那份可能落在前一天(临近午夜的十点前), 跨天时 clockText 会补月日,
+// 两种形态都是正确输出, 跨天形态本身在上一用例逐字固定
+const STAMP_TEXT = /2 只 · (?:\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}/
+
 test('悬浮窗底部渲染价格时刻并在陈旧时给非文本标记', async () => {
   const now = Date.now()
   const iso = ms => new Date(ms).toISOString()
   const fresh = { quote: { last: '10.00', quoteAt: iso(now - 5 * 1000), receivedAt: now - 5 * 1000 } }
   const stale = { quote: { last: '20.00', quoteAt: iso(now - 10 * 60 * 1000), receivedAt: now - 10 * 60 * 1000 } }
   const { html } = await renderFloat(stateWith({ [a.id]: fresh, [b.id]: stale }))
-  assert.match(html, /2 只 · \d{2}:\d{2}:\d{2}/, '底部同时给只数与最旧价时刻')
+  assert.match(html, STAMP_TEXT, '底部同时给只数与最旧价时刻')
   assert.match(stampOf(html), /ssb-float-stamp ssb-float-stamp-stale/, '最旧的一份陈旧时标出, 不能只报最新那只')
   assert.match(html, /aria-label="2 只，最近价时刻 [^"]*，数据已过时"/, '陈旧不只靠颜色: 读屏与触屏经 aria-label 拿到')
   assert.match(html, /最近价时刻 /, '悬停给出完整日期与时刻')
 
   const allFresh = { [a.id]: fresh, [b.id]: { quote: { last: '21.00', quoteAt: iso(now - 3 * 1000), receivedAt: now - 3 * 1000 } } }
   const { html: freshHtml } = await renderFloat(stateWith(allFresh))
-  assert.match(freshHtml, /2 只 · \d{2}:\d{2}:\d{2}/, '新鲜时同样给出时刻')
+  assert.match(freshHtml, STAMP_TEXT, '新鲜时同样给出时刻')
   assert.doesNotMatch(stampOf(freshHtml), /ssb-float-stamp-stale/, '新鲜时不标出')
 })
 

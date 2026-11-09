@@ -1,7 +1,7 @@
 import { StockError, fail } from './market-model.mjs'
 // 每实例上游请求环形日志容量: 概览"最近请求"展示面
 const REQUEST_LOG_LIMIT = 20
-export function createExecutor({ registry, budget, env = process.env, fetch: fetchImpl = globalThis.fetch, now = Date.now, timers = globalThis, usSymbols = new Map(), proxyFactory = null }) {
+export function createExecutor({ registry, budget, env = process.env, resolveCredential = async ref => env[ref], fetch: fetchImpl = globalThis.fetch, now = Date.now, timers = globalThis, usSymbols = new Map(), proxyFactory = null }) {
   const queues = new Map(), controllers = new Set(), starts = new Map()
   const requestLogs = new Map(), proxies = new Map()
   let stopped = false, running = 0
@@ -56,10 +56,14 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
           const adapter = registry.get(instance.adapterId), method = options.probe ? 'probe' : capability
           if (typeof adapter[method] !== 'function') fail('UNSUPPORTED_CAPABILITY', '来源不支持该能力', 422)
           let used = false, timeout
+          // 凭据每次操作解析一次, 不跨操作缓存: 存储层改了密钥, 下一次请求就生效, 不必重启插件。
+          // 解析在超时计时之前完成——读本地存储不该占用上游的 8 秒预算。
+          const secret = instance.credentialRef === null ? undefined : await resolveCredential(instance.credentialRef)
+          if (instance.credentialRef !== null && !secret) fail('AUTH', '未配置凭据', 422)
           // 超时计时覆盖整个能力调用;分页适配器每次网络活动重置计时,空闲超过窗口才判超时。
           const armTimeout = () => { timers.clearTimeout(timeout); timeout = timers.setTimeout(() => controller.abort(new StockError('TIMEOUT', '来源请求超时', 504, { retryable: true })), 8 * 1000) }
           armTimeout()
-          const ctx = { now, signal: controller.signal, usSymbols, endpoints: instance.endpoints || null, credential: () => instance.credentialEnv === null ? undefined : env[instance.credentialEnv] || fail('AUTH', '未在Host环境中配置凭据', 422),
+          const ctx = { now, signal: controller.signal, usSymbols, endpoints: instance.endpoints || null, credential: () => secret,
             fetch: async (...args) => {
               if (used) {
                 const gap = Math.max(0, starts.get(instance.quotaGroup) + (instance.budget?.requestsPerMinute === null ? 10 * 1000 : 1000) - now())
@@ -77,8 +81,7 @@ export function createExecutor({ registry, budget, env = process.env, fetch: fet
               armTimeout()
               return response
             } }
-          // 免凭据实例(credentialEnv=null)跳过Host环境检查;其余沿用原守卫。
-          if (instance.credentialEnv !== null && !env[instance.credentialEnv]) fail('AUTH', '未在Host环境中配置凭据', 422)
+          // 免凭据实例(credentialRef=null)解析结果恒为空, 上述守卫不触发。
           const work = Promise.resolve(adapter[method]({ ...request, providerInstanceId: instance.id, capability }, ctx))
           const result = await new Promise((resolve, reject) => {
             const aborted = () => reject(controller.signal.reason instanceof StockError ? controller.signal.reason : new StockError('CANCELLED', '请求已取消', 503))

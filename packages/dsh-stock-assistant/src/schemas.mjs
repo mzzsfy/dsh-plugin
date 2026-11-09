@@ -13,12 +13,12 @@ const rate = z.number().int().positive().max(100000)
 export const capability = z.enum(['quotes', 'catalog', 'search', 'calendar', 'kline'])
 export const marketSchema = z.enum(Object.keys(MARKET_META))
 export const providerSchema = z.strictObject({
-  id, adapterId: id, enabled: z.boolean(), credentialEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).nullable(), quotaGroup: id,
+  id, adapterId: id, enabled: z.boolean(), credentialRef: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).nullable(), quotaGroup: id,
   budget: z.strictObject({ requestsPerMinute: rate.nullable(), dailyRequestLimit: rate.nullable(), billingUnit: z.enum(['request', 'symbol']), symbolCreditsPerMinute: rate.nullable(), capabilityLimits: z.partialRecord(capability, rate) }),
   endpoints: z.record(z.string().url()).optional(),
   // 上游出口代理(反代/正向代理统一走 URL): http(s)://[user:pass@]host:port, 凭据在 userinfo
   proxy: z.string().url().refine(v => v.startsWith('http://') || v.startsWith('https://'), '代理仅支持 http(s) URL').optional(),
-}).refine(p => p.credentialEnv !== null || p.budget.requestsPerMinute !== null, '免凭据来源必须声明保守预算')
+}).refine(p => p.credentialRef !== null || p.budget.requestsPerMinute !== null, '免凭据来源必须声明保守预算')
 export const routeSchema = z.strictObject({
   id, capability, market: marketSchema, instrument: z.literal('equity'), primaryInstanceId: id,
   fallbackInstanceIds: z.array(id).max(1), failoverMode: z.enum(['off', 'network']), maxDelaySeconds: z.number().nonnegative().nullable(), acceptUnknownDelay: z.boolean(),
@@ -47,7 +47,7 @@ export function parseConfiguration(value) {
     if (providerIds.has(p.id)) fail('DUPLICATE_PROVIDER', '数据源实例名称重复', 422)
     providerIds.add(p.id)
     if (p.budget.billingUnit === 'symbol' && p.budget.symbolCreditsPerMinute === null) fail('INVALID_BUDGET', '按证券计费必须提供证券额度', 422)
-    const same = config.providers.filter(other => other.adapterId === p.adapterId && other.credentialEnv === p.credentialEnv)
+    const same = config.providers.filter(other => other.adapterId === p.adapterId && other.credentialRef === p.credentialRef)
     if (same.some(other => other.quotaGroup !== p.quotaGroup)) fail('INVALID_BUDGET', '同账号引用必须共享额度组', 422)
   }
   const routeIds = new Set()
@@ -74,10 +74,10 @@ export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single
 export const defaultConfig = () => {
   const budget = (requestsPerMinute, capabilityLimits = {}) => ({ requestsPerMinute, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits })
   const providers = [
-    { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free-quote', budget: budget(60, { kline: 30 }) },
-    { id: 'sn-backup', adapterId: 'sina', enabled: true, credentialEnv: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
-    { id: 'tx-backup', adapterId: 'tencent', enabled: true, credentialEnv: null, quotaGroup: 'free-backup', budget: budget(60, { kline: 20 }) },
-    { id: 'xq-backup', adapterId: 'xueqiu', enabled: true, credentialEnv: null, quotaGroup: 'free-xq', budget: budget(60) },
+    { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialRef: null, quotaGroup: 'free-quote', budget: budget(60, { kline: 30 }) },
+    { id: 'sn-backup', adapterId: 'sina', enabled: true, credentialRef: null, quotaGroup: 'free-list', budget: budget(120, { catalog: 60 }) },
+    { id: 'tx-backup', adapterId: 'tencent', enabled: true, credentialRef: null, quotaGroup: 'free-backup', budget: budget(60, { kline: 20 }) },
+    { id: 'xq-backup', adapterId: 'xueqiu', enabled: true, credentialRef: null, quotaGroup: 'free-xq', budget: budget(60) },
   ]
   // 备用源只在探针可验证的组合上声明: 腾讯美股K线需先由搜索建立代码映射, 探针期必然不可用
   const klineBackup = new Set(['XSHG', 'XSHE', 'XHKG'])

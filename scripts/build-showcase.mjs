@@ -44,7 +44,7 @@ const DESC = {
   'dsh-settings-nav-icons': '设置导航与市场卡片语义图标',
   'dsh-auto-trust-all': '动态信任所有到达 Host(纯 host)',
   'dsh-shared-terminal': '共享交互式终端:AI 与用户共用 Session 终端',
-  'dsh-stock-assistant': '股票工作台:八市场自选/搜索/K线,免注册数据源',
+  'dsh-stock-assistant': '股票工作台:八市场自选/搜索/K线/悬浮盯盘,免注册数据源',
   'dsh-cron-board': '定时任务看板:cron 调度脚本与会话任务,环境变量集中管理',
   'dsh-common-tools': '公共依赖库:WS 总线与 toast(非插件)',
   'dsh-context-manager': '对话增强:历史输入浮层、插话撤回、对话分叉',
@@ -62,6 +62,14 @@ const SHOT_LABEL = {
   'plugin-list': '插件列表头像槽',
   'plugins-page': '插件页',
   discover: '市场页',
+  kline: 'K 线与价格标记',
+  floating: '悬浮盯盘',
+  market: '浏览市场',
+  search: '搜索候选',
+  'settings-routes': '市场与能力路由',
+  'settings-mode': '显示偏好',
+  'settings-sources': '数据源设置',
+  'kline-detail': 'K 线详情',
 }
 
 let iconCards = ''

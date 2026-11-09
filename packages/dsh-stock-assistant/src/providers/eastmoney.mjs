@@ -9,15 +9,18 @@ const DEFAULT_ENDPOINTS = {
   trend: 'https://push2his.eastmoney.com/api/qt/stock/trends2/get',
 }
 const endpointOf = (ctx, key) => ctx.endpoints?.[key] || DEFAULT_ENDPOINTS[key]
-// 东财市场代码:XSHG=1,XSHE=0;美股 secid 前缀由搜索 MktNum 动态归属(usSymbols),其余市场实测前缀。
+// 沪深市场代码(其余市场的 secid 前缀见 SECID_PREFIX)
 const MARKET = { XSHG: '1', XSHE: '0' }
 // 搜索联想 MktNum→交易所全集(实测: 1/0 沪深, 116 港, 105/106/107 美三大, 176/177/155 日韩英)
 const SEARCH_EXCHANGE = { 1: 'XSHG', 0: 'XSHE', 116: 'XHKG', 105: 'XNAS', 106: 'XNYS', 107: 'XNYS', 176: 'XJPX', 177: 'XKRX', 155: 'XLON' }
 const SECID_PREFIX = { XSHG: '1', XSHE: '0', XHKG: '116', XNAS: '105', XNYS: '106', XJPX: '176', XKRX: '177', XLON: '155' }
-const US_DEFAULT_MKT = '105'
 // 美股三大市场号: 105 纳斯达克 / 106 纽约 / 107 美交所。secid 前缀必须精确匹配, 探针期据此逐个试探。
 const US_MKTNUMS = ['105', '106', '107']
 const isUSExchange = exchange => exchange === 'XNAS' || exchange === 'XNYS'
+// 美股 secid 前缀候选序: 搜索缓存 > 交易所静态前缀 > 其余美股市场号。XNYS 实横跨 106 与 107, 静态前缀只取其一。
+// 缓存只加速重复查询, 缺失或过期不改变正确性: 进程重启后 usSymbols 为空, 取报价不得依赖此前的搜索行为。
+const usSecidPrefixes = (security, ctx) => [...new Set([ctx.usSymbols?.get(`US:${security.code}`)?.mktNum, SECID_PREFIX[security.exchange], ...US_MKTNUMS].filter(mktNum => US_MKTNUMS.includes(mktNum)))]
+const secidFor = (security, ctx) => isUSExchange(security.exchange) ? `${usSecidPrefixes(security, ctx)[0]}.${security.code}` : `${SECID_PREFIX[security.exchange]}.${security.code}`
 // klt 周期映射(实测): 日101/周102/月103; trends2 无 klt。
 const KLT = { '1d': 101, '1w': 102, '1M': 103 }
 // 目录 fs 按市场给出; 英股 m:155 含债券与结构性产品, 加 t:1 只取股票; 日韩不支持 t: 细分, 全量即股票
@@ -30,8 +33,6 @@ const KLINE_FIELDS = 'f51,f52,f53,f54,f55,f56,f57'
 const TREND_FIELDS = 'f51,f52,f53,f54,f55,f56,f57,f58'
 // 分时时间戳的来源时区: 东财统一用北京时间, 与证券所属市场无关
 const SOURCE_ZONE = 'Asia/Shanghai'
-// quotes secid 与 kline secidOf 同源(八市场前缀表);美股 quotes 同样走 usSymbols 动态归属。
-const symbolOf = security => `${SECID_PREFIX[security.exchange]}.${security.code}`
 const num = value => value == null || typeof value === 'number' && !Number.isFinite(value) ? null : value === '-' ? null : String(value)
 async function getJson(ctx, url) {
   let response
@@ -61,41 +62,44 @@ export const eastmoney = {
       if (!result.candles.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
       return { status: 'ready', capability: 'kline', market: request.market, instrument: 'equity' }
     }
-    // 美股 secid 前缀由搜索建立的映射决定, 探针期还没有映射; 逐个候选前缀试一次, 命中即视为就绪
+    // 美股前缀的逐个试探已收敛进 quotes,探针只需一次结果,避免探针与真实取价走两套路径
     const security = request.securities?.[0] || { exchange: request.market, code: PROBE_SECURITY[request.market] || '000001' }
-    const candidates = isUSExchange(security.exchange) ? US_MKTNUMS : [null]
-    for (const mktNum of candidates) {
-      const scope = mktNum ? { ...ctx, usSymbols: new Map([[`US:${security.code}`, { mktNum, at: ctx.now() }]]) } : ctx
-      const rows = await this.quotes({ ...request, securities: [security] }, scope)
-      if (rows.items.length) return { status: 'ready', capability: 'quotes', market: request.market, instrument: 'equity' }
-    }
-    throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
+    const rows = await this.quotes({ ...request, securities: [security] }, ctx)
+    if (!rows.items.length) throw new StockError('NO_DATA', '来源未返回可校验数据，暂不能确认能力就绪', 422)
+    return { status: 'ready', capability: 'quotes', market: request.market, instrument: 'equity' }
   },
   async quotes(request, ctx) {
-    // 美股 secid 走 usSymbols 动态归属(miss 默认 NASDAQ);其余市场静态前缀表。
-    const secidOf = security => isUSExchange(security.exchange) ? `${ctx.usSymbols?.get(`US:${security.code}`)?.mktNum || US_DEFAULT_MKT}.${security.code}` : `${SECID_PREFIX[security.exchange]}.${security.code}`
-    const symbols = new Map(request.securities.map(s => [secidOf(s), s]))
-    const body = await getJson(ctx, `${endpointOf(ctx, 'quotes')}?secids=${[...symbols.keys()].join(',')}&fields=f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124&fltt=2&invt=2`)
-    const rows = body?.data?.diff
-    // data:null表示全部secids无效(如整批退市),降级为逐证券缺失,不让单批坏行瘫痪路由。
-    if (!Array.isArray(rows)) return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items: [], errors: request.securities.map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }
+    const fields = 'f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f124'
     const seen = new Set(), items = []
-    for (const row of rows) {
-      const security = symbols.get(`${row.f13}.${row.f12}`)
-      if (!security) continue
-      if (seen.has(security.id)) throw new StockError('BAD_PAYLOAD', '报价身份冲突', 502)
-      seen.add(security.id)
-      // fltt=2时价格为已缩放数值, "-"表示停牌等无值;f124为来源Unix秒;成交额币种按市场派生(单一事实源 MARKET_META.currency)。
-      const quoteAt = Number.isFinite(row.f124) ? new Date(row.f124 * 1000).toISOString() : null
-      const currency = MARKET_META[security.exchange]?.currency || 'CNY'
-      items.push(normalizeQuote({
-        securityId: security.id, providerInstanceId: request.providerInstanceId, adapterId: 'eastmoney', providerSymbol: `${row.f13}.${row.f12}`,
-        last: num(row.f2), previousClose: num(row.f18), open: num(row.f17), high: num(row.f15), low: num(row.f16),
-        volume: sharesFromLots(num(row.f5), security.exchange), volumeUnit: 'share', amount: num(row.f6), amountUnit: currency,
-        quoteAt, timestampKind: 'trade',
-        receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown',
-      }))
+    // 一次请求取一批 secid;data:null 表示整批 secid 均无效(如整批退市),降级为逐证券缺失。
+    const ingest = async symbols => {
+      const body = await getJson(ctx, `${endpointOf(ctx, 'quotes')}?secids=${[...symbols.keys()].join(',')}&fields=${fields}&fltt=2&invt=2`)
+      const rows = body?.data?.diff
+      if (!Array.isArray(rows)) return
+      for (const row of rows) {
+        const security = symbols.get(`${row.f13}.${row.f12}`)
+        if (!security) continue
+        if (seen.has(security.id)) throw new StockError('BAD_PAYLOAD', '报价身份冲突', 502)
+        seen.add(security.id)
+        // fltt=2时价格为已缩放数值, "-"表示停牌等无值;f124为来源Unix秒;成交额币种按市场派生(单一事实源 MARKET_META.currency)。
+        const quoteAt = Number.isFinite(row.f124) ? new Date(row.f124 * 1000).toISOString() : null
+        const currency = MARKET_META[security.exchange]?.currency || 'CNY'
+        items.push(normalizeQuote({
+          securityId: security.id, providerInstanceId: request.providerInstanceId, adapterId: 'eastmoney', providerSymbol: `${row.f13}.${row.f12}`,
+          last: num(row.f2), previousClose: num(row.f18), open: num(row.f17), high: num(row.f15), low: num(row.f16),
+          volume: sharesFromLots(num(row.f5), security.exchange), volumeUnit: 'share', amount: num(row.f6), amountUnit: currency,
+          quoteAt, timestampKind: 'trade',
+          receivedAt: ctx.now(), delayKind: 'unknown', delaySeconds: null, securityState: 'unknown',
+        }))
+      }
     }
+    await ingest(new Map(request.securities.map(s => [secidFor(s, ctx), s])))
+    // 美股前缀兜底: 静态前缀只对应一个市场号,而交易所归属未必精确(实测 NYSE 的票分属 106/107)。
+    // 只对首轮落空的美股补齐剩余候选,一次批量发完,不逐证券重试。
+    const orphanUS = request.securities.filter(s => !seen.has(s.id) && isUSExchange(s.exchange))
+    const altSymbols = new Map()
+    for (const security of orphanUS) for (const mktNum of usSecidPrefixes(security, ctx).slice(1)) altSymbols.set(`${mktNum}.${security.code}`, security)
+    if (altSymbols.size) await ingest(altSymbols)
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: request.securities.filter(s => !seen.has(s.id)).map(s => ({ securityId: s.id, code: 'NO_DATA', message: '来源未返回此证券报价' })) }
   },
   async catalog(request, ctx) {
@@ -144,14 +148,9 @@ export const eastmoney = {
     }
     return { providerInstanceId: request.providerInstanceId, fetchedAt: ctx.now(), items, errors: [] }
   },
-  // 美股 secid 前缀: usSymbols 命中按 MktNum, miss 默认沪深外美股主市场 NASDAQ;猜错时调用方走 suggest 重试路径。
+  // 与 quotes 同源的 secid;猜错时调用方走 suggest 重试路径(搜索结果是市场号的权威来源)。
   secidOf(request, ctx) {
-    const { market, code } = request
-    if (market === 'XNAS' || market === 'XNYS') {
-      const mktNum = ctx.usSymbols?.get(`US:${code}`)?.mktNum
-      return `${mktNum || US_DEFAULT_MKT}.${code}`
-    }
-    return `${SECID_PREFIX[market]}.${code}`
+    return secidFor({ exchange: request.market, code: request.code }, ctx)
   },
   async kline(request, ctx) {
     if (request.period === 'trend') return this.trend(request, ctx)
