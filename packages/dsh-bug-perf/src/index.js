@@ -6,8 +6,9 @@ import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_CONFIG, normalizeConfig } from './config.mjs'
+import { DEFAULT_CONFIG, migrateConfig, normalizeConfig } from './config.mjs'
 import { installListSlim } from './list-slim.mjs'
+import { installSessionWindow } from './session-window.mjs'
 
 export const name = 'dsh-bug-perf'
 // web profile 必有 webServer; 声明依赖让 apply 在服务就绪后执行,缺服务宿主即不激活本行
@@ -21,6 +22,8 @@ const DIAG_FILE = join(tmpdir(), 'dsh-bug-perf-diag.jsonl')
 const DIAG_MAX_BYTES = 2 * 1024 * 1024
 
 const SETTINGS_SCHEMA = z.object({
+  // 无默认值:缺省即"旧版落盘",由读取时迁移并补写当前版本;给默认值会把旧配置误判为已迁移
+  configVersion: z.number().description('配置版本:升级时按它把旧版落盘里仍等于旧默认值的字段复写为当前默认值;缺省视为旧版,保存后由插件写入当前版本'),
   restartCoalesce: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.restartCoalesce.enabled).description('合并 session/follow 重建:同一 Remote stream 在窗口内的多次重启只保留一次尾随执行'),
     windowMs: z.number().default(DEFAULT_CONFIG.restartCoalesce.windowMs).description('合并窗口(毫秒);0 表示关闭合并,每次重启都立即执行'),
@@ -48,6 +51,11 @@ const SETTINGS_SCHEMA = z.object({
     base: z.number().default(DEFAULT_CONFIG.jobStreamLimit.base).description('默认窗口:只给主会话放行的条数,子 agent 会话不占这个窗口'),
     max: z.number().default(DEFAULT_CONFIG.jobStreamLimit.max).description('硬上限;点击某个会话可越过默认窗口加入,总数到上限后淘汰最先加入的一条'),
   }).description('任务状态流上限'),
+  sessionWindow: z.object({
+    enabled: z.boolean().default(DEFAULT_CONFIG.sessionWindow.enabled).description('历史窗口收敛:打开/重连会话时按消息预算下发历史页,工具密集的会话不会一次下发数千事件'),
+    maxMessages: z.number().default(DEFAULT_CONFIG.sessionWindow.maxMessages).description('单次历史页的消息预算上限;请求预算更小时保持调用方值,不再放大'),
+    minTurns: z.number().default(DEFAULT_CONFIG.sessionWindow.minTurns).description('宿主轮边界下限的覆盖值:只向下调整(配置大于 2 不生效),仅在轮边界主导切窗时减少带回的轮数'),
+  }).description('历史窗口收敛'),
   listSlim: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.listSlim.enabled).description('会话列表瘦身:按白名单裁剪 session/list 的投影并缓存,降低列表响应体积与重建耗时;响应形状不符时透传,新增列表字段需同步白名单'),
   }).description('会话列表瘦身'),
@@ -88,14 +96,14 @@ const persistConfig = async (ctx, next) => {
   throw new Error('宿主配置服务不可用')
 }
 
-// 读回优先级:旧宿主 settings 命名空间已写入的节;否则用行配置(live ref 解箱)
+// 读回优先级:旧宿主 settings 命名空间已写入的节;否则用行配置(live ref 解箱);两者都按版本迁移
 const readConfig = (ctx, config) => {
   const settings = ctx.get('settings')
   const stored = settings !== undefined && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
   const known = stored !== null && typeof stored === 'object'
-    && ['restartCoalesce', 'terminalWatchdog', 'socketKeepAlive', 'stuckSession', 'jobStreamLimit', 'listSlim', 'diag']
+    && ['restartCoalesce', 'terminalWatchdog', 'socketKeepAlive', 'stuckSession', 'jobStreamLimit', 'sessionWindow', 'listSlim', 'diag']
       .some((key) => stored[key] !== null && typeof stored[key] === 'object')
-  return normalizeConfig(known ? stored : unwrapVolatile(config))
+  return migrateConfig(known ? stored : unwrapVolatile(config))
 }
 
 const readBody = (req) => new Promise((resolve, reject) => {
@@ -189,8 +197,15 @@ const diagHandler = (req, res) => {
 }
 
 export function apply(ctx, config) {
-  // 列表瘦身:不依赖 webServer/路由,开关从行配置实时读取;装载失败只关闭该能力
+  // 列表瘦身与历史窗口收敛都不依赖 webServer/路由,开关从行配置实时读取;装载失败只关闭该能力
   installListSlim(ctx, { isEnabled: () => normalizeConfig(unwrapVolatile(config)).listSlim.enabled })
+  installSessionWindow(ctx, {
+    isEnabled: () => normalizeConfig(unwrapVolatile(config)).sessionWindow.enabled,
+    readWindow: () => {
+      const window = normalizeConfig(unwrapVolatile(config)).sessionWindow
+      return { maxMessages: window.maxMessages, minTurns: window.minTurns }
+    },
+  })
   const server = ctx.get('webServer')
   if (server === undefined || typeof server.register !== 'function') return
 
@@ -238,3 +253,5 @@ export function apply(ctx, config) {
     console.warn('[dsh-bug-perf] routes unavailable:', error instanceof Error ? error.message : String(error))
   }
 }
+
+// hmr 触发探测

@@ -37,6 +37,11 @@ function fakeClock() {
       }
       now = target
     },
+    // 只推进时间、不派发定时器, 模拟标签页冻结/系统睡眠期间定时器被挂起
+    jump(ms) {
+      now += ms
+      for (const timer of intervals.values()) timer.at = now + timer.every
+    },
     intervalCount: () => intervals.size,
   }
 }
@@ -57,6 +62,7 @@ function fakeNode(tag) {
     addEventListener(type, fn) { (node.listeners[type] ??= []).push(fn) },
     click() { for (const fn of node.listeners.click ?? []) fn({}) },
     get childElementCount() { return node.children.length },
+    get lastElementChild() { return node.children.at(-1) ?? null },
     hasAttribute(name) { return node.attrs[name] !== undefined },
     getAttribute(name) { return node.attrs[name] ?? null },
     closest(selector) {
@@ -101,7 +107,7 @@ function fakeNode(tag) {
 
 const HINT_TEXT = '载入历史…'
 
-function fakePage({ loading = true, hasFlow = true, messages = false } = {}) {
+function fakePage({ loading = true, hasFlow = true, messages = false, visibilityState = 'visible' } = {}) {
   const head = fakeNode('head')
   const body = fakeNode('body')
   const flow = fakeNode('div')
@@ -115,6 +121,7 @@ function fakePage({ loading = true, hasFlow = true, messages = false } = {}) {
   const doc = {
     head,
     body,
+    visibilityState,
     querySelector(selector) {
       if (selector === '[data-chat-flow]') return hasFlow ? flow : null
       if (selector.startsWith('style[data-plugin=')) {
@@ -174,7 +181,7 @@ test('停滞_重连间隔内_不重复', () => {
   assert.equal(connection.calls.length, 1)
   clock.advance(2000)
   assert.equal(connection.calls.length, 1)
-  clock.advance(2000 * 2)
+  clock.advance(2000 * 4)
   assert.equal(connection.calls.length, 2)
 })
 
@@ -186,7 +193,7 @@ test('停滞_用尽次数_显示提示', () => {
   assert.ok(noticeOf(page) !== null)
 })
 
-// Given 提示已出现, When 会话恢复, Then 提示移除且重连计数清零
+// Given 提示已出现, When 会话稳定恢复, Then 提示移除且重连计数清零
 test('停滞_恢复_重置并隐藏', () => {
   const { clock, page, connection } = install()
   clock.advance(2000 * 40)
@@ -194,23 +201,105 @@ test('停滞_恢复_重置并隐藏', () => {
   page.setLoading(false)
   clock.advance(2000)
   assert.equal(noticeOf(page), null)
+  clock.advance(2000 * 4)
   page.setLoading(true)
   clock.advance(2000 * 5)
   assert.equal(connection.calls.length, 4)
 })
 
-// Given 页面正常但主线程被长时间占满, When 阻塞持续超过阈值, Then 同样请求重连
-test('停滞_主线程阻塞_请求重连', () => {
-  const page = fakePage({ loading: false, messages: true })
+// Given 一键恢复只维持一个周期(重连清流的一帧), When 随即再次停滞, Then 不清零重连计数
+test('停滞_短暂恢复_不清零计数', () => {
+  const { clock, page, connection } = install()
+  clock.advance(2000 * 40)
+  assert.equal(connection.calls.length, 3)
+  page.setLoading(false)
+  clock.advance(2000)
+  page.setLoading(true)
+  clock.advance(2000 * 20)
+  assert.equal(connection.calls.length, 3)
+  assert.ok(noticeOf(page) !== null)
+})
+
+// Given 加载态里仍在推进(节点持续增加), When 每轮都有变化, Then 停滞计时不断重置,不重连
+test('停滞_加载有进展_不重连', () => {
+  const page = fakePage()
+  const { clock, connection } = install({ page })
+  for (let i = 0; i < 30; i++) {
+    const progress = fakeNode('span')
+    progress.textContent = `已载入 ${i}`
+    page.flow.appendChild(progress)
+    clock.advance(2000)
+  }
+  assert.equal(connection.calls.length, 0)
+  assert.equal(noticeOf(page), null)
+})
+
+// Given 加载推进了若干轮后再次停住, When 无进展超过阈值, Then 仍判定停滞并重连
+test('停滞_进展停止_仍触发', () => {
+  const page = fakePage()
+  const { clock, connection } = install({ page })
+  for (let i = 0; i < 3; i++) {
+    const progress = fakeNode('span')
+    progress.textContent = `已载入 ${i}`
+    page.flow.appendChild(progress)
+    clock.advance(2000)
+  }
+  clock.advance(2000 * 4)
+  assert.equal(connection.calls.length, 1)
+})
+
+// Given 页面不可见(后台标签页), When 加载态持续很久, Then 不判定停滞、不重连
+test('停滞_页面不可见_不判定', () => {
+  const page = fakePage({ visibilityState: 'hidden' })
+  const { clock, connection } = install({ page })
+  clock.advance(2000 * 60)
+  assert.equal(connection.calls.length, 0)
+  assert.equal(noticeOf(page), null)
+})
+
+// Given 后台期间页面曾处于加载态, When 切回前台, Then 重新计时,不拿后台时间差立即重连
+test('停滞_后台切回_重新计时', () => {
+  const page = fakePage()
+  const { clock, connection } = install({ page })
+  clock.advance(2000 * 2)
+  page.doc.visibilityState = 'hidden'
+  clock.advance(2000 * 30)
+  page.doc.visibilityState = 'visible'
+  clock.advance(2000)
+  assert.equal(connection.calls.length, 0)
+  clock.advance(2000 * 4)
+  assert.equal(connection.calls.length, 1)
+})
+
+// Given 标签页被冻结导致定时器一整个期间不派发, When 恢复后的首个 tick, Then 作废旧计时而不是立刻重连
+test('停滞_定时器挂起_重新计时', () => {
+  const page = fakePage()
+  const { clock, connection } = install({ page })
+  clock.advance(2000 * 2)
+  clock.jump(600000)
+  clock.advance(2000)
+  assert.equal(connection.calls.length, 0)
+  clock.advance(2000 * 5)
+  assert.equal(connection.calls.length, 1)
+})
+
+// Given 新默认阈值(60s/2次/120s), When 持续停滞, Then 首连不早于 60 秒、次连不早于 180 秒、提示在其后
+test('停滞_生产默认值_时序', () => {
+  const page = fakePage()
   const plugin = loadPlugin()
   const clock = fakeClock()
   const connection = fakeConnection()
-  const diag = {}
-  plugin.__test.installStuckSession({ win: page.win, options: OPTIONS, clock, connection, diag })
-  clock.advance(2000)
-  diag.blockedAt = clock.now()
-  clock.advance(2000 * 5)
+  const options = { checkMs: 3000, stallMs: 60000, reconnect: true, maxReconnectAttempts: 2, reconnectIntervalMs: 120000 }
+  plugin.__test.installStuckSession({ win: page.win, options, clock, connection })
+  clock.advance(3000 * 19)
+  assert.equal(connection.calls.length, 0)
+  clock.advance(3000 * 2)
   assert.equal(connection.calls.length, 1)
+  clock.advance(3000 * 40)
+  assert.equal(connection.calls.length, 2)
+  clock.advance(3000 * 21)
+  assert.equal(connection.calls.length, 2)
+  assert.ok(noticeOf(page) !== null)
 })
 
 // Given 没有 connection 服务, When 会话停滞, Then 不重连,直接显示提示
