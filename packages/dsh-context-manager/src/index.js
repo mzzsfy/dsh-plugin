@@ -47,7 +47,7 @@ import { createRequire } from 'node:module'
 export const name = 'dsh-context-manager'
 
 
-export const inject = ['webServer', 'agents', 'sessionQuery', 'sessionPersistence']
+export const inject = ['webServer', 'agents', 'sessionQuery', 'sessionPersistence', 'sessions']
 
 const NAMESPACE = 'context'
 
@@ -410,14 +410,14 @@ export function apply(ctx, config) {
   // client 据此提示等待并静默重拉
   async function collectInputs(scope, sessionId, header) {
     const aggregateOptions = { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }
-    const cwd = header.cwd
+    // 收藏是全局单文件,与会话头无关(路由为其跳过头部解析,header 为 undefined)
     if (scope === 'prompts') {
       const items = await readPrompts(cacheDir)
       return { inputs: aggregateInputs(items, aggregateOptions), aligned: true }
     }
+    const cwd = header.cwd
     if (scope === 'session') {
       if (cwd === undefined) return { inputs: [], aligned: true }
-      alignWorkspace(cwd)
       const read = async () => {
         const cached = await readWorkspaceCache(cacheDir, cwd)
         return {
@@ -437,12 +437,20 @@ export function apply(ctx, config) {
         const located = ctx.get('sessionPersistence') ? ctx.get('sessionPersistence').locate(header) : undefined
         const fingerprint = located ? await safeStat(located.path) : null
         return {
+          // 产物尚未落盘(新会话首轮未 flush):指纹缺失无从判断新鲜度,
+          // 只能退回整工作区对齐取数
+          unmaterialized: fingerprint === null,
           stale: fingerprint !== null && !(known && known.v === HISTORY_EXTRACT_VERSION && known.mtimeMs === fingerprint.mtimeMs && known.size === fingerprint.size),
           oversize: fingerprint !== null && fingerprint.size > maxArtifactBytes,
         }
       }
       let { cached, mine } = await read()
-      let { stale, oversize } = await check(cached)
+      let { unmaterialized, stale, oversize } = await check(cached)
+      // 整工作区对齐是重活(全量清单扫描 + 扫描窗口内全部会话解压):只在聚焦对齐
+      // 覆盖不到的两处分界兜底——产物未落盘(无指纹无从判断新鲜度)与工作区缓存
+      // 缺失(巨产物会话跳过聚焦,没有它首开将无人建缓存,浮层永久停在未对齐)。
+      // 常规路径绝不触发:当前会话请求不得为邻居会话付费
+      if (unmaterialized || cached === null) alignWorkspace(cwd)
       if (stale && !oversize) {
         let focus = pendingFocus.get(sessionId)
         if (!focus) {
@@ -559,8 +567,11 @@ export function apply(ctx, config) {
           if (sessionId === '') throw new Error('sessionId 不能为空')
           const scopeRaw = url.searchParams.get('scope') || 'session'
           const scope = HISTORY_SCOPES.includes(scopeRaw) ? scopeRaw : 'session'
-          const header = await findHeader(ctx, sessionId, headerCache)
-          if (header === undefined) {
+          // 收藏范围读全局 prompts.json,与会话无关:不为几个收藏去解析会话头
+          // (头部解析未命中即全量清单扫描,冷盘秒级),未知会话也照常返回
+          const needsHeader = scope !== 'prompts'
+          const header = needsHeader ? await findHeader(ctx, sessionId, headerCache) : undefined
+          if (needsHeader && header === undefined) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
           }
@@ -775,14 +786,26 @@ export function apply(ctx, config) {
 const HEADER_CACHE_TTL_MS = 10 * 60 * 1000
 const HEADER_CACHE_MAX = 500
 
+function rememberHeader(cache, sessionId, header) {
+  if (cache.size >= HEADER_CACHE_MAX) cache.delete(cache.keys().next().value)
+  cache.set(sessionId, { header, at: Date.now() })
+}
+
 function findHeader(ctx, sessionId, cache) {
   const hit = cache.get(sessionId)
   if (hit && Date.now() - hit.at < HEADER_CACHE_TTL_MS) return Promise.resolve(hit.header)
+  // 活会话注册表直查:零 IO。历史浮层只在当前会话内打开,该会话必然在册,
+  // 常规路径因此完全不触碰全量清单扫描
+  const live = ctx.sessions ? ctx.sessions.get(sessionId) : undefined
+  const liveHeader = live && live.header ? live.header : undefined
+  if (liveHeader !== undefined) {
+    rememberHeader(cache, sessionId, liveHeader)
+    return Promise.resolve(liveHeader)
+  }
   return ctx.sessionQuery.listSessions().then((records) => {
     const found = records.find((recordItem) => String(recordItem.header.id) === sessionId)
     if (!found) return undefined
-    if (cache.size >= HEADER_CACHE_MAX) cache.delete(cache.keys().next().value)
-    cache.set(sessionId, { header: found.header, at: Date.now() })
+    rememberHeader(cache, sessionId, found.header)
     return found.header
   })
 }
