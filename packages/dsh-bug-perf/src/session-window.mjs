@@ -1,7 +1,8 @@
 // 会话历史窗口收敛:宿主按固定消息配额(500 条 / 至少 2 个 turn)下发首屏与重连窗口,
 // 工具密集的会话会放大到数千事件、数 MB,打开与重连时一次性传输并渲染。
 // 本模块在宿主半区包装 sessionController 的三个历史入口(follow / page / events),
-// 把消息预算压到配置上限,并按宿主校验规则同步收敛 turnWindow.minMessages。
+// 把消息预算与轮边界下限压到配置值,并按宿主校验规则保证 minMessages <= maxMessages。
+// 首屏规模实际由 minMessages 决定(turn 边界先停),maxMessages 只兜上限。
 // 任何失败路径都透传原参数:开关关闭、形状不符、包装抛错都不改变宿主行为。
 
 const LOG_PREFIX = '[dsh-bug-perf] 历史窗口'
@@ -17,13 +18,14 @@ const capOf = (value) => (Number.isSafeInteger(value) && value > 0 ? value : Num
 export function limitHistoryRequest(request, window) {
   if (request === null || typeof request !== 'object') return request
   const cap = capOf(window?.maxMessages)
+  const minCap = capOf(window?.minMessages)
   const turnCap = capOf(window?.minTurns)
   const budget = Number.isFinite(request.maxMessages) ? request.maxMessages : undefined
   const cappedBudget = budget === undefined ? undefined : Math.min(budget, cap)
   const turnWindow = request.turnWindow !== null && typeof request.turnWindow === 'object' ? request.turnWindow : undefined
   // 宿主校验要求 minMessages <= maxMessages,预算下调后必须同步收敛
   const minMessages = turnWindow !== undefined && Number.isFinite(turnWindow.minMessages)
-    ? Math.min(turnWindow.minMessages, cappedBudget ?? Number.POSITIVE_INFINITY)
+    ? Math.min(turnWindow.minMessages, minCap, cappedBudget ?? Number.POSITIVE_INFINITY)
     : undefined
   const minTurns = turnWindow !== undefined && Number.isFinite(turnWindow.minTurns)
     ? Math.min(turnWindow.minTurns, turnCap)

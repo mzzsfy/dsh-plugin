@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   socketKeepAlive: Object.freeze({ enabled: true, intervalMs: 1500 }),
   stuckSession: Object.freeze({ enabled: true, checkMs: 3000, stallMs: 60000, reconnect: true, maxReconnectAttempts: 2, reconnectIntervalMs: 120000 }),
   jobStreamLimit: Object.freeze({ enabled: true, base: 32, max: 48 }),
-  sessionWindow: Object.freeze({ enabled: true, maxMessages: 200, minTurns: 2 }),
+  sessionWindow: Object.freeze({ enabled: true, maxMessages: 200, minMessages: 30, minTurns: 2 }),
   listSlim: Object.freeze({ enabled: true }),
   diag: Object.freeze({ enabled: false, reportEvery: DIAG_DEFAULT_REPORT_EVERY }),
 })
@@ -42,6 +42,7 @@ export const LIMITS = Object.freeze({
   jobStreamLimit: Object.freeze({ base: Object.freeze({ min: 4, max: 256 }), max: Object.freeze({ min: 4, max: 512 }) }),
   sessionWindow: Object.freeze({
     maxMessages: Object.freeze({ min: 20, max: 500 }),
+    minMessages: Object.freeze({ min: 5, max: 200 }),
     minTurns: Object.freeze({ min: 1, max: 50 }),
   }),
   diag: Object.freeze({ reportEvery: Object.freeze({ min: 1, max: DIAG_MAX_SAMPLES }) }),
@@ -116,6 +117,7 @@ export function normalizeConfig(raw) {
     sessionWindow: {
       enabled: booleanOr(sessionWindow.enabled, DEFAULT_CONFIG.sessionWindow.enabled),
       maxMessages: integerWithin(sessionWindow.maxMessages, LIMITS.sessionWindow.maxMessages, DEFAULT_CONFIG.sessionWindow.maxMessages),
+      minMessages: integerWithin(sessionWindow.minMessages, LIMITS.sessionWindow.minMessages, DEFAULT_CONFIG.sessionWindow.minMessages),
       minTurns: integerWithin(sessionWindow.minTurns, LIMITS.sessionWindow.minTurns, DEFAULT_CONFIG.sessionWindow.minTurns),
     },
     listSlim: {
