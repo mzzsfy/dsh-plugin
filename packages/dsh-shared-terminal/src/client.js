@@ -226,7 +226,7 @@ window.__ModuleLoader__.load({
         lifetime.current = controller
         const key = `${props.sessionId}:${terminalId}`
         if (canOpen && !openedTerminals.has(key)) {
-          void navigate(controller.signal).then((opened) => { if (opened) openedTerminals.add(key) })
+          void navigate(controller.signal).then((opened) => { if (opened) rememberOpened(key) })
         }
         return () => controller.abort()
       }, [canOpen, terminalId, props.sessionId, props.callId])
@@ -302,8 +302,17 @@ window.__ModuleLoader__.load({
     }
 
     // 按 terminal 去重:同一次对话里 open 结果会被多次渲染(刷新、切会话、重挂载),
-    // 按 callId 记会随刷新清零,重复导航在宿主侧就会叠出多个面板
-    const openedTerminals = new Set()
+    // 只在页面生命周期内记会随刷新清零,重复导航在宿主侧就会叠出多个面板。
+    // sessionStorage 跟随标签页存活:刷新后布局自行恢复面板,不再逐卡导航。
+    const OPENED_STORAGE_KEY = 'dsh-shared-terminal.opened.v1'
+    const readOpened = () => {
+      try { return new Set(JSON.parse(sessionStorage.getItem(OPENED_STORAGE_KEY) ?? '[]')) } catch { return new Set() }
+    }
+    const openedTerminals = readOpened()
+    const rememberOpened = (key) => {
+      openedTerminals.add(key)
+      try { sessionStorage.setItem(OPENED_STORAGE_KEY, JSON.stringify([...openedTerminals].slice(-256))) } catch { }
+    }
 
     // 终端面板地址按 terminalId 固定:宿主 terminal 类型是多实例,openTabIn 每次新建随机
     // contentId;固定地址才能让 openResourceIn 按 contentId 复用到同一面板。
