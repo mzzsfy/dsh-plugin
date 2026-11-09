@@ -135,3 +135,18 @@ test('本地存储只经两个封装, 且不接受就地字面量', () => {
   assert.deepEqual(hits, ['localStorage.getItem', 'localStorage.setItem'])
   assert.deepEqual([...client.matchAll(/(?:readPref|writePref)\(\s*['"]/g)], [])
 })
+
+test('标记价提醒必须经通知插件桥接, 铃铛是唯一开关', () => {
+  // 装了通知插件却自己闪/弹, 等于无视用户在通知插件里的开关与专注静默
+  must(/window\.__dshNotify/, '必须探测跨插件通知入口')
+  must(/deliverMarkAlert\(\{ alert: markAlertText\(/, '触发点必须走统一分发')
+  must(/const verdict = markAlertOf\(\{ mark, price, prev: prev\.side, lastFiredAt: prev\.at, now \}\)/, '穿越判定只有一处实现')
+  must(/ssb-float-bell/, '开关是悬浮窗底部的铃铛')
+  must(/price = finiteOr\(quoteOf\(id\)\?\.last\)/, '停牌没有 last 时不能 Number(null) 成 0')
+  mustNot(/readPref\(FLOAT_KEY[^)]*\)\.open \? '关闭悬浮盯盘'/, '悬浮盯盘不再藏在更多菜单里')
+})
+
+test('悬浮盯盘入口在主导航', () => {
+  must(/floating\.open \? '收起盯盘' : '悬浮盯盘'/, '主操作行必须有盯盘开关')
+  must(/const \[floating, setFloating\] = usePref\(FLOAT_KEY, FLOAT_DEFAULT\)/, '入口要跟着真实偏好走')
+})

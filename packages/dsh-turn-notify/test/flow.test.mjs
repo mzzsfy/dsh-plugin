@@ -1219,7 +1219,7 @@ test('激活即启动轮询:apply 注册设置分区且 start 已执行', async 
     slots: { inject: (name, fn) => { injected.push([name, fn]) } },
     effect: (fn) => { effects.push(fn()) },
   })
-  assert.equal(effects.length, 4, '会话导航、文档级样式、通知订阅与文件夹运行标记四个 effect 均已挂载')
+  assert.equal(effects.length, 5, '会话导航、文档级样式、跨插件通知入口、通知订阅与文件夹运行标记五个 effect 均已挂载')
   assert.equal(styleTags[0].attrs['data-plugin'], '@mzzsfy/dsh-turn-notify', '样式自带 data-plugin,防宿主 claimStyles 误归属后随他插件 HMR 整批误删')
   assert.deepEqual(injected.map(([name]) => name), ['settings.section'], '页内通知展示已移交公共依赖包,不再注入 shell.overlay')
   // start 已执行:音效清单被首拉;轮询定时器 unref,不阻止测试进程退出

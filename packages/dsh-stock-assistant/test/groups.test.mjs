@@ -68,15 +68,16 @@ test('自选里查不到的 id 不会凭空造组', async () => {
   assert.deepEqual(slices.ungrouped, [])
 })
 
-// 轮询决策三件事必须同时成立: 收市后不打上游、又不能永远停在那儿、还不能每分钟真刷一次
-test('轮询决策: 收市不打 trend, 但自己醒得过来', async () => {
+// 轮询决策三件事必须同时成立: 收市后不打上游、又不能永远停在那儿、还不能每分钟真刷一次.
+// 另有一条例外: 切到某只标的后第一拍先拉一次分时, 否则图形模式要空等一个刷新周期
+test('轮询决策: 收市不打 trend(首拍除外), 但自己醒得过来', async () => {
   const { pollPlan } = await load()
   // 开市: 列表刷卡, 图形打分时
   assert.equal(pollPlan({ mode: 'list', quiet: false, tick: 1 }), 'refresh')
   assert.equal(pollPlan({ mode: 'kline', quiet: false, tick: 1 }), 'trend')
   // 安静档: 列表走只读快照省额度; 图形彻底停掉——trend 端点不进缓存, 每拍都是真上游
   assert.equal(pollPlan({ mode: 'list', quiet: true, tick: 1 }), 'snapshot')
-  assert.equal(pollPlan({ mode: 'kline', quiet: true, tick: 1 }), 'skip')
+  assert.equal(pollPlan({ mode: 'kline', quiet: true, tick: 1 }), 'trend', '刚切进来先出一张图, 不能空白等一个周期')
   assert.equal(pollPlan({ mode: 'kline', quiet: true, tick: 9 }), 'skip')
 })
 
@@ -89,10 +90,10 @@ test('图形模式整十拍无条件真刷新, 才能从 trading 翻到安静', 
     assert.equal(pollPlan({ mode: 'kline', quiet: true, tick }), 'refresh')
     assert.equal(pollPlan({ mode: 'list', quiet: false, tick }), 'refresh')
   }
-  // 整十拍之间: 开市打分时, 收市完全静默
+  // 整十拍之间: 开市打分时, 收市静默(首拍例外, 见上)
   for (const tick of [1, 5, 9, 11, 19]) {
     assert.equal(pollPlan({ mode: 'kline', quiet: false, tick }), 'trend')
-    assert.equal(pollPlan({ mode: 'kline', quiet: true, tick }), 'skip')
+    assert.equal(pollPlan({ mode: 'kline', quiet: true, tick }), tick === 1 ? 'trend' : 'skip')
   }
 })
 
