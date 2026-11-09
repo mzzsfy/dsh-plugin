@@ -126,7 +126,7 @@ test('配置_列表瘦身_开关与回退', () => {
 
 // Given 历史窗口缺省, When 归一化, Then 默认开启且上限为 200 条 / 2 轮
 test('配置_历史窗口_默认值', () => {
-  assert.deepEqual(normalizeConfig(undefined).sessionWindow, { enabled: true, maxMessages: 200, minTurns: 2 })
+  assert.deepEqual(normalizeConfig(undefined).sessionWindow, { enabled: true, maxMessages: 200, minMessages: 30, minTurns: 2 })
 })
 
 // Given 历史窗口显式开关、非法值与越界值, When 归一化, Then 开关保留、非法值回退、越界收敛
@@ -138,10 +138,13 @@ test('配置_历史窗口_开关与边界', () => {
   assert.equal(bad.sessionWindow.enabled, true)
   assert.equal(bad.sessionWindow.maxMessages, 200)
   assert.equal(bad.sessionWindow.minTurns, 2)
-  const capped = normalizeConfig({ sessionWindow: { maxMessages: 9999, minTurns: 9999 } })
+  const capped = normalizeConfig({ sessionWindow: { maxMessages: 9999, minMessages: 9999, minTurns: 9999 } })
   assert.equal(capped.sessionWindow.maxMessages, 500)
+  assert.equal(capped.sessionWindow.minMessages, 200)
   assert.equal(capped.sessionWindow.minTurns, 50)
   assert.equal(normalizeConfig({ sessionWindow: { minTurns: 1 } }).sessionWindow.minTurns, 1)
+  assert.equal(normalizeConfig({ sessionWindow: { minMessages: 4 } }).sessionWindow.minMessages, 30)
+  assert.equal(normalizeConfig({ sessionWindow: { minMessages: 12 } }).sessionWindow.minMessages, 12)
 })
 
 // Given 小数配置, When 归一化, Then 截断为整数(宿主只接受正安全整数),字符串仍按非法回退

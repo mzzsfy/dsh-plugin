@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
       socketKeepAlive: { enabled: true, intervalMs: 1500 },
       stuckSession: { enabled: true, checkMs: 3000, stallMs: 60000, reconnect: true, maxReconnectAttempts: 2, reconnectIntervalMs: 120000 },
       jobStreamLimit: { enabled: true, base: 32, max: 48 },
-      sessionWindow: { enabled: true, maxMessages: 200, minTurns: 2 },
+      sessionWindow: { enabled: true, maxMessages: 200, minMessages: 30, minTurns: 2 },
       listSlim: { enabled: true },
       diag: { enabled: false, reportEvery: DIAG_DEFAULT_REPORT_EVERY },
     }
@@ -48,7 +48,7 @@ window.__ModuleLoader__.load({
         reconnectIntervalMs: { min: 500, max: 600000 },
       },
       jobStreamLimit: { base: { min: 4, max: 256 }, max: { min: 4, max: 512 } },
-      sessionWindow: { maxMessages: { min: 20, max: 500 }, minTurns: { min: 1, max: 50 } },
+      sessionWindow: { maxMessages: { min: 20, max: 500 }, minMessages: { min: 5, max: 200 }, minTurns: { min: 1, max: 50 } },
       diag: { reportEvery: { min: 1, max: DIAG_MAX_SAMPLES } },
     }
 
@@ -114,6 +114,7 @@ window.__ModuleLoader__.load({
         sessionWindow: {
           enabled: booleanOr(sessionWindow.enabled, DEFAULT_CONFIG.sessionWindow.enabled),
           maxMessages: integerWithin(sessionWindow.maxMessages, LIMITS.sessionWindow.maxMessages, DEFAULT_CONFIG.sessionWindow.maxMessages),
+          minMessages: integerWithin(sessionWindow.minMessages, LIMITS.sessionWindow.minMessages, DEFAULT_CONFIG.sessionWindow.minMessages),
           minTurns: integerWithin(sessionWindow.minTurns, LIMITS.sessionWindow.minTurns, DEFAULT_CONFIG.sessionWindow.minTurns),
         },
         listSlim: {
@@ -879,9 +880,10 @@ window.__ModuleLoader__.load({
       {
         key: 'sessionWindow',
         title: '历史窗口收敛',
-        description: '打开/重连会话时按消息预算下发历史页,工具密集的会话不再一次下发数千事件;宿主默认 500 条、至少 2 轮。',
+        description: '打开/重连会话时按消息预算下发历史页,工具密集的会话不再一次下发数千事件;首屏规模由轮边界下限决定,宿主默认 50 条消息、至少 2 轮。',
         fields: [
           { name: 'maxMessages', label: '消息上限', unit: '条' },
+          { name: 'minMessages', label: '轮下限消息', unit: '条' },
           { name: 'minTurns', label: '轮数下限', unit: '轮' },
         ],
       },

@@ -54,6 +54,7 @@ const SETTINGS_SCHEMA = z.object({
   sessionWindow: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.sessionWindow.enabled).description('历史窗口收敛:打开/重连会话时按消息预算下发历史页,工具密集的会话不会一次下发数千事件'),
     maxMessages: z.number().default(DEFAULT_CONFIG.sessionWindow.maxMessages).description('单次历史页的消息预算上限;请求预算更小时保持调用方值,不再放大'),
+    minMessages: z.number().default(DEFAULT_CONFIG.sessionWindow.minMessages).description('轮边界下限的覆盖值:首屏规模实际由它决定,调小会减少首屏消息条数与渲染量;请求值更小时保持调用方值'),
     minTurns: z.number().default(DEFAULT_CONFIG.sessionWindow.minTurns).description('宿主轮边界下限的覆盖值:只向下调整(配置大于 2 不生效),仅在轮边界主导切窗时减少带回的轮数'),
   }).description('历史窗口收敛'),
   listSlim: z.object({
@@ -203,7 +204,7 @@ export function apply(ctx, config) {
     isEnabled: () => normalizeConfig(unwrapVolatile(config)).sessionWindow.enabled,
     readWindow: () => {
       const window = normalizeConfig(unwrapVolatile(config)).sessionWindow
-      return { maxMessages: window.maxMessages, minTurns: window.minTurns }
+      return { maxMessages: window.maxMessages, minMessages: window.minMessages, minTurns: window.minTurns }
     },
   })
   const server = ctx.get('webServer')
