@@ -104,8 +104,15 @@ test('源码契约:映射缺失的轮触发重拉而非静默跳过', () => {
   assert.ok(scan.includes('refreshRef.current()'), '映射缺失时应触发重拉')
 })
 
-test('源码契约:重拉有在途门控', () => {
-  const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
+test('源码契约:前一轮未入映射时补拉更早锚点页', () => {
+  const forkStart = CLIENT_SRC.indexOf('function ForkDock({')
+  assert.ok(forkStart > 0, 'ForkDock 切片定位失败')
+  const scan = CLIENT_SRC.slice(CLIENT_SRC.indexOf('function scan() {', forkStart), CLIENT_SRC.indexOf('if (typeof MutationObserver', forkStart))
+  assert.ok(scan.includes('let floor = Number.POSITIVE_INFINITY'), '扫描需同时求映射最小轮号')
+  assert.ok(scan.includes('if (turn - 1 < floor && refreshRef.current)'), '前一轮早于映射最早轮时应补拉更早页')
+})
+
+test('源码契约:重拉有在途门控', () => {  const refresh = CLIENT_SRC.slice(CLIENT_SRC.indexOf('refreshRef.current = () =>'), CLIENT_SRC.indexOf('loadRef.current()\n      .then((map) => {\n        if (disposed) return'))
   assert.ok(CLIENT_SRC.includes('refreshPendingRef'), '重拉必须有在途门控标志')
   assert.ok(refresh.includes('if (refreshPendingRef.current) return'), '门控判断应位于重拉入口首位')
   assert.ok(refresh.includes('refreshPendingRef.current = true'), '进入重拉即置在途')

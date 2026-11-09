@@ -262,3 +262,73 @@ test('Given fork 失败(未知 code), When 点击重试, Then toast 透传映射
   await props.loadTurnEnds()
   assert.ok(forkCalls.length === 0, '未点击不得发起 fork')
 })
+
+// 一页锚点记录:turn/start + 首问 + turn/end
+function anchorPage(startSeq, turn, text) {
+  return [
+    { event: { type: 'turn/start', seq: startSeq, data: { turn } } },
+    { event: { type: 'user/message', seq: startSeq + 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } } },
+    { event: { type: 'turn/end', seq: startSeq + 2, data: { turn } } },
+  ]
+}
+
+test('Given 首屏锚点页, When 再次 loadTurnEnds, Then 按 beforeSeq 回溯一页并与首屏合并', async () => {
+  const pageCalls = []
+  const { entry } = findForkEntry({
+    remoteSession: {
+      follow: () => followStub(anchorPage(100, 5, '第五轮')).frames,
+      page: (request) => {
+        pageCalls.push(request)
+        return Promise.resolve({ ok: true, value: { records: anchorPage(10, 4, '第四轮'), hasMore: true } })
+      },
+    },
+  })
+  const props = entry.options.inject('page-a')
+  const first = await props.loadTurnEnds()
+  assert.deepEqual([...first.keys()], [5])
+  const second = await props.loadTurnEnds()
+  assert.equal(pageCalls.length, 1, '第二次加载应触发一页回溯')
+  assert.equal(pageCalls[0].beforeSeq, 100, '回溯游标取当前最早已有事件 seq')
+  assert.equal(pageCalls[0].maxMessages, 100)
+  assert.deepEqual([...second.keys()], [4, 5], '更早页应并入映射且不丢首屏轮')
+  assert.equal(second.get(4).seq, 12)
+})
+
+test('Given 回溯页取尽, When 继续 loadTurnEnds, Then 不再发起分页请求', async () => {
+  const pageCalls = []
+  const { entry } = findForkEntry({
+    remoteSession: {
+      follow: () => followStub(anchorPage(100, 5, '第五轮')).frames,
+      page: (request) => {
+        pageCalls.push(request)
+        return Promise.resolve({ ok: true, value: { records: [], hasMore: false } })
+      },
+    },
+  })
+  const props = entry.options.inject('page-b')
+  await props.loadTurnEnds()
+  await props.loadTurnEnds()
+  await props.loadTurnEnds()
+  assert.equal(pageCalls.length, 1, '取尽后应停止回溯')
+})
+
+test('Given 回溯分页失败, When loadTurnEnds, Then 异常上抛由组件侧降级', async () => {
+  const { entry } = findForkEntry({
+    remoteSession: {
+      follow: () => followStub(anchorPage(100, 5, '第五轮')).frames,
+      page: () => Promise.resolve({ ok: false, error: { code: 'gateway/internal', message: 'boom' } }),
+    },
+  })
+  const props = entry.options.inject('page-c')
+  await props.loadTurnEnds()
+  await assert.rejects(() => props.loadTurnEnds(), /gateway\/internal: boom/)
+})
+
+test('Given 宿主无 history 分页面, When 回溯, Then 明确报错不静默丢锚点', async () => {
+  const { entry } = findForkEntry({
+    remoteSession: { follow: () => followStub(anchorPage(100, 5, '第五轮')).frames },
+  })
+  const props = entry.options.inject('page-d')
+  await props.loadTurnEnds()
+  await assert.rejects(() => props.loadTurnEnds(), /history 分页/)
+})

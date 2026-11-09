@@ -962,9 +962,11 @@ const STEER_PREVIEW_MAX = 40
 const TURN_ATTR = 'data-chat-turn'
 // 官方消息流气泡的语义类型标记:user=用户输入气泡(turn-tail=官方轮尾,官方分支按钮驻留处)
 const FLOW_KIND_ATTR = 'data-chat-flow-kind'
-// fork 锚点窗口:follow 开场帧回溯的事件数上限(长会话全量回溯的内存/耗时护栏;
-// 窗口覆盖不到的更早轮与进行中的轮不注入分叉按钮,新近轮——fork 的主要目标——总在覆盖内)
-const FORK_PAGE_MAX_MESSAGES = 2000
+// fork 锚点分页:首屏只取最近一页覆盖近轮,更早的轮由扫描发现缺失时按需回溯,
+// 不再一次性拉 2000 条消息(工具密集会话可达十几 MB)
+const FORK_PAGE_MAX_MESSAGES = 100
+// 单次回溯的页数由扫描驱动逐页推进,这里只限制会话级总页数,避免病态会话无限翻页
+const FORK_PAGE_LIMIT = 40
 
 // 重试草稿通道:分叉成功后子会话尚未挂载,原输入先按子会话 id 暂存,
 // 子会话的 dock 挂载(inputActions 就绪)时消费回填并清除
@@ -976,7 +978,7 @@ const consumedForkDrafts = new Set()
 const FORK_DRAFT_POLL_MS = 400
 const FORK_DRAFT_POLLS = 3
 
-// 取 follow 开场帧(回溯窗口内的事件快照,自带 seq)后立即断开:
+// 取 follow 开场帧(最近一页事件快照,自带 seq)后立即断开:
 // for-await break 触发 iterator.return,流即关闭,不消费 live 帧
 async function followOpening(remote, sessionId) {
   const frames = remote.follow({ address: { kind: 'session', sessionId }, maxMessages: FORK_PAGE_MAX_MESSAGES })
@@ -985,6 +987,61 @@ async function followOpening(remote, sessionId) {
     return []
   }
   return []
+}
+
+// 取更早一页锚点记录:unary page 返回 Result 包裹,失败按异常上抛由调用侧降级
+async function readOlderAnchors(remote, sessionId, beforeSeq) {
+  if (typeof remote.page !== 'function') throw new Error('宿主不支持 history 分页')
+  const result = await remote.page({ address: { kind: 'session', sessionId }, beforeSeq, maxMessages: FORK_PAGE_MAX_MESSAGES })
+  if (result === null || typeof result !== 'object' || result.ok !== true) {
+    const error = result && result.error
+    throw new Error(error ? `${error.code ?? 'gateway/internal'}: ${error.message ?? 'fork 锚点分页失败'}` : 'fork 锚点分页失败')
+  }
+  const records = result.value && result.value.records
+  return Array.isArray(records) ? records : []
+}
+
+function firstEventSeq(records) {
+  for (const record of records) {
+    const seq = record && record.event && record.event.seq
+    if (typeof seq === 'number') return seq
+  }
+  return undefined
+}
+
+// 会话级锚点加载器:首次取最近一页,之后每次调用向更早回溯一页;取尽或超页数上限后不再请求
+function createTurnAnchorLoader(remote, sessionId) {
+  const state = { records: [], beforeSeq: undefined, exhausted: false, pages: 0 }
+  return async function load() {
+    if (state.pages === 0) {
+      state.pages = 1
+      state.records = await followOpening(remote, sessionId)
+      state.beforeSeq = firstEventSeq(state.records)
+      if (state.records.length === 0 || state.beforeSeq === undefined) state.exhausted = true
+      return state.records
+    }
+    if (state.exhausted || state.pages >= FORK_PAGE_LIMIT) return state.records
+    state.pages += 1
+    const older = await readOlderAnchors(remote, sessionId, state.beforeSeq)
+    if (older.length === 0) {
+      state.exhausted = true
+      return state.records
+    }
+    state.records = older.concat(state.records)
+    state.beforeSeq = firstEventSeq(older) ?? state.beforeSeq
+    return state.records
+  }
+}
+
+// 按会话复用加载器:inject 回调每次渲染都会新建 props,状态必须跨渲染保留
+const forkAnchorLoaders = new Map()
+
+function forkAnchorLoaderFor(remote, sessionId) {
+  const cached = forkAnchorLoaders.get(sessionId)
+  if (cached !== undefined && cached.remote === remote) return cached.load
+  const load = createTurnAnchorLoader(remote, sessionId)
+  forkAnchorLoaders.set(sessionId, { remote, load })
+  return load
 }
 
 // 轮号映射结构签名:loadTurnEnds 每次新建 Map,引用比较恒假,补拉基线必须比内容。
@@ -1311,11 +1368,18 @@ function ForkDock({ session, forkSession, cancelSession, turnEnds, refreshRef })
         }
         if (entry.text === null) return
         let previous = null
+        let floor = Number.POSITIVE_INFINITY
         for (const key of turnEndsRef.current.keys()) {
           const candidate = turnEndsRef.current.get(key)
+          if (key < floor) floor = key
           if (key < turn && candidate && candidate.seq !== null && (previous === null || key > previous)) previous = key
         }
-        if (previous === null) return
+        if (previous === null) {
+          // 前一轮比映射里最早的轮还早:更早的锚点页尚未取到,补拉一页再由重扫决定;
+          // 前一轮本来就在映射里却不可用(进行中轮无 seq 等)补页也无解,不空翻
+          if (turn - 1 < floor && refreshRef.current) refreshRef.current()
+          return
+        }
         const anchor = turnEndsRef.current.get(previous)
         const official = actionsRow.querySelector('button:not([' + FORK_BTN_FLAG + '])')
         if (!official) return
@@ -2186,7 +2250,7 @@ function ContextPanel() {
                       ? (opts) => remoteSession.cancel(opts)
                       : null,
                     submitPrompt,
-                    loadTurnEnds: () => followOpening(remoteSession, sessionId).then((records) => {
+                    loadTurnEnds: () => forkAnchorLoaderFor(remoteSession, sessionId)().then((records) => {
                       // 轮号 → { 结束 seq, 该轮首问文本, open }:上个 turn/end 之后首条
                       // 携带非空文本的 user 本人消息即该轮首问(轮内纯图消息跳过,
                       // 后续文本插话可补位);turn/end 落账并重置;
