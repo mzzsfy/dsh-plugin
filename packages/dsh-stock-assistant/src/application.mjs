@@ -26,7 +26,9 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const serverEpoch = randomUUID(), checks = new Map()
   // 凭据解析: 宿主提供 credentials 服务时交给它(插件存储层优先, 再逐层回退到进程环境与 .env 文件),
   // 否则退回进程环境变量。引用只表示"哪个密钥", 值始终由宿主保管。
-  const resolveCredential = credentials ? async ref => (await credentials.resolve(ref))?.value : async ref => env[ref]
+  // 接口按能力逐个核对: 宿主给的对象缺哪个方法, 就只退回哪条路径, 而不是在取数时炸掉。
+  const credentialStore = credentials && ['resolve', 'set', 'unset'].every(method => typeof credentials[method] === 'function') ? credentials : null
+  const resolveCredential = credentialStore ? async ref => (await credentialStore.resolve(ref))?.value : async ref => env[ref]
   // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
   const probeCache = new Map()
   let snapshotSeq = 0, stopped = false, collector, catalog, demand
@@ -214,12 +216,12 @@ export async function createApplication({ storageDomain, providers = [tushare, t
     // 密钥只写宿主的凭据存储, 不回显也不落插件状态;引用必须已被某个数据源声明, 插件不越界写别人的密钥空间。
     async credential(input) {
       assertLive()
-      if (!credentials) fail('UNSUPPORTED', '宿主未提供凭据服务', 501)
+      if (!credentialStore) fail('UNSUPPORTED', '宿主未提供凭据服务', 501)
       const ref = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).parse(input.ref)
       if (!state.get().providers.some(p => p.credentialRef === ref)) fail('INVALID_REQUEST', '该凭据未被任何数据源使用', 422)
       const value = input.value === null ? null : z.string().min(1).max(512).parse(input.value)
-      if (value === null) await credentials.unset(ref)
-      else await credentials.set(ref, value)
+      if (value === null) await credentialStore.unset(ref)
+      else await credentialStore.set(ref, value)
       await refreshCredentialPresence()
       return { ref, present: value !== null }
     },

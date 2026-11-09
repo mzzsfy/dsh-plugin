@@ -56,6 +56,17 @@ test('宿主没有凭据服务时写密钥报不支持而不是静默丢弃', as
   await assert.rejects(() => app.credential({ ref: REF, value: 'x' }), e => e.code === 'UNSUPPORTED')
 })
 
+test('宿主给的凭据服务接口不完整时退回环境变量, 不在取数时炸掉', async () => {
+  const partial = { resolve: async () => undefined }
+  const seen = []
+  const echo = { descriptor: { adapterId: 'fake', capabilities: ['quotes'], markets: ['XSHG'], instruments: ['equity'], maxQuoteBatch: 20 }, async probe() { return { status: 'ready' } }, async quotes(request, ctx) { seen.push(ctx.credential()); return { items: [], errors: [] } } }
+  const app = await createApplication({ storageDomain: memoryStorage(), providers: [echo], credentials: partial, env: { [REF]: 'from-env' }, now: () => 1000 })
+  await app.configuration({ ...operation(), payload: configured })
+  await app.refresh({ securities: [{ id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519' }] }, new AbortController().signal)
+  assert.deepEqual(seen, ['from-env'], '缺 set/unset 就整块不用, 回退到环境变量')
+  await assert.rejects(() => app.credential({ ref: REF, value: 'x' }), e => e.code === 'UNSUPPORTED')
+})
+
 test('执行层每次操作重新解析凭据, 换密钥不必重启插件', async () => {
   const credentials = fakeCredentials({ [REF]: 'first' })
   const seen = []
