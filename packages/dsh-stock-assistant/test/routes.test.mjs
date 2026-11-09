@@ -38,7 +38,7 @@ test('browse端点HTTP层钳制越界参数并返回分页结构', async t => {
 })
 // B-1保存回路: Given未做探针的配置提交 When直接保存 Then成功;探针独立为诊断接口
 test('configuration无需checkId即可保存,探针独立可调用', async t => {  const routes = new Map()
-  const providers = [{ id: 'p1', adapterId: 'fake', enabled: true, credentialEnv: null, quotaGroup: 'g', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }]
+  const providers = [{ id: 'p1', adapterId: 'fake', enabled: true, credentialRef: null, quotaGroup: 'g', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }]
   const routesCfg = [{ id: 'sh-quotes', capability: 'quotes', market: 'XSHG', instrument: 'equity', primaryInstanceId: 'p1', fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true }]
   const app = {
     providerCheck: async () => ({ checkId: 'ck-1', checks: [{ key: 'p1:quotes:XSHG', providerInstanceId: 'p1', capability: 'quotes', market: 'XSHG', status: 'ready', ms: 42 }] }),
