@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { buildFaces } from '../src/web-routes.mjs'
+import { apply, buildFaces } from '../src/web-routes.mjs'
 import { mountRoutes, cleanAllowlist } from '../src/api.mjs'
 import { analyzeSwitch } from './switch-structure.mjs'
 
@@ -198,4 +198,18 @@ test('client.js 语法:node --check', async () => {
   const { execFile } = await import('node:child_process')
   const { promisify } = await import('node:util')
   await promisify(execFile)(process.execPath, ['--check', join(dirname(fileURLToPath(import.meta.url)), '../src/client.js')])
+})
+
+// Given tools 服务存在但层结构不符(宿主形态漂移);When web 行 apply;
+// Then 不挂载状态路由、告警说明,收敛本体不受影响(SC-25 的 web 面)。
+test('web 行:tools 层结构不符时不挂载状态路由并告警', () => {
+  const routes = []
+  const warnings = []
+  apply({
+    get: (name) => (name === 'tools' ? { layers: {} } : undefined),
+    webServer: { register: (route) => { routes.push(route) } },
+    logger: { warn: (message) => { warnings.push(message) } },
+  })
+  assert.equal(routes.length, 0)
+  assert.ok(warnings.some((message) => message.includes('层结构与已知形态不符')))
 })

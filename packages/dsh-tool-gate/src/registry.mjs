@@ -3,13 +3,35 @@
 // agent 面),全局层近乎恒空,收敛面必须覆盖两层。layers.global.tools 与
 // layers.scoped 均为 ToolRuntime 内部面,宿主升级重构该面即特性检测失败 →
 // 干净禁用,不做兼容层。
+//
+// 宿主 0.2.2-rc.1 起层条目是 registration 包装({ definition, when }),模型面
+// 投影与 defer 打标都读 registration.definition;直接改 registration 会让
+// 打标落在宿主不读的字段上(工具门自读自洽、宿主全量注入的静默失效)。
+
+/**
+ * 层条目 → definition(宿主 0.2.2+ registration 形态);非 registration 返回
+ * undefined(特性检测据此判定内部面漂移)。
+ */
+function definitionOfEntry(entry) {
+  return entry !== null && typeof entry === 'object' ? entry.definition : undefined
+}
+
+/**
+ * 判断一层是否为 registration 形态;空表无从判断按符合处理(注册后由 apply
+ * 自检 tool_search 条目兜底),非空表逐条校验,混合形态同样判漂移。
+ */
+function isRegistrationLayer(data) {
+  for (const entry of data.values()) if (typeof definitionOfEntry(entry) !== 'object') return false
+  return true
+}
 
 /**
  * 特性检测并投影工具层:返回层清单读取器,结构不符返回 undefined。
- * scoped Map 内容动态(新 agent 即新增层),layers() 每次现读。
- * key = 层数据表引用(NamedEntries.data,Map 实例,生命周期内稳定,供调用方
- * 做跨轮 journal 键);label 仅展示用(scope 键是对象,禁止 String 化作标识,
- * 真机实证全部坍缩 '[object Object]' 导致层间 lookup 串层)。
+ * scoped Map 内容动态(新 agent 即新增层),global 表也会被宿主 NamedEntries
+ * 在清空时换代;两者均由 layers() 每次现读,不缓存表引用。
+ * key = 当轮层数据表引用(同轮内稳定,供 plan 匹配层);label 仅展示用
+ * (scope 键是对象,禁止 String 化作标识,真机实证全部坍缩 '[object Object]'
+ * 导致层间 lookup 串层)。
  * @param {object|undefined} tools 宿主 tools 服务(ToolRuntime)
  * @returns {undefined|{
  *   layers: () => { key: object, label: string, names: () => string[], definitionOf: (name: string) => object|undefined }[],
@@ -17,25 +39,30 @@
  */
 export function toolLayersOf(tools) {
   const store = tools?.layers
-  const globalData = store?.global?.tools?.data
-  if (!(globalData instanceof Map)) return undefined
+  const globalData = () => store?.global?.tools?.data
+  const scopedData = () => (store?.scoped instanceof Map
+    ? [...store.scoped.values()].map((layer) => layer?.tools?.data).filter((data) => data instanceof Map)
+    : [])
+  const dataOf = () => {
+    const global = globalData()
+    return global instanceof Map ? [global, ...scopedData()] : undefined
+  }
+  const initial = dataOf()
+  if (initial === undefined || !initial.every(isRegistrationLayer)) return undefined
   const layerOf = (key, label, data) => ({
     key,
     label,
     names: () => [...data.keys()],
-    definitionOf: (name) => data.get(name),
+    definitionOf: (name) => definitionOfEntry(data.get(name)),
   })
   return {
     layers: () => {
-      const layers = [layerOf(globalData, 'global', globalData)]
-      const scoped = store?.scoped
-      if (scoped instanceof Map) {
-        let index = 0
-        for (const layer of scoped.values()) {
-          const data = layer?.tools?.data
-          if (data instanceof Map) layers.push(layerOf(data, `agent#${index += 1}`, data))
-        }
-      }
+      const data = dataOf()
+      if (data === undefined) return []
+      const [global, ...scoped] = data
+      const layers = [layerOf(global, 'global', global)]
+      let index = 0
+      for (const entry of scoped) layers.push(layerOf(entry, `agent#${index += 1}`, entry))
       return layers
     },
   }

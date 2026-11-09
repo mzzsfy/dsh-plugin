@@ -8,6 +8,8 @@
 
 - **声明式收敛**:白名单是全系统工具 defer 态的唯一事实源——白名单内清标
   (覆盖插件作者自带声明),白名单外打标;每次收敛只动与目标态有差异的名。
+  打标落在宿主 registration 包装内的 definition(0.2.2 起层条目为
+  `{ definition, when }`,模型面投影读 definition.deferLoading)。
 - **原生链路零干预**:支持 `defer_loading` 的路由(DeepSeek Messages 端)上,
   搜索、激活、会话投影(tool-addition/tool-removal)全部由宿主承担。
 - **降级折叠**:第三方路由(无 defer_loading 能力,宿主剥标全量注入)在官方
@@ -18,13 +20,17 @@
   名单工具,空 schema 会让模型发空参数,均真机实证);模型经 `tool_search`
   检索完整定义后以正确名字与参数调用(宿主按名执行 registry 完整定义)。
   capable 路由(请求带 defer 标)与 deepseek 原生 adapter 一律透传。
-- **会话隔离检索**:`tool_search` 只搜索调用方可见工具,继承、限制与同名覆盖
-  由宿主 `tools.view(exec.agent)` 解析;无 agent 的调用只搜索全局层。搜索只返回
-  定义文本,不注册工具、不修改白名单或任何会话的加载态。
-- **原状还原**:收敛改动以 undo journal 记录,行禁用/卸载按 journal 还原,
-  系统回到「没装本包」的世界;重注册顶替的 definition 跳过还原。
-- **干净禁用**:宿主 tools/llm 全局层内部结构不符已知形态时打日志零动作,不崩;
-  llm 面失败只损失折叠,打标收敛不受影响。
+- **会话隔离检索**:`tool_search` 只搜索调用方本步可见工具,继承、限制、同名
+  覆盖与条件注册(`when`)准入由宿主解析:模型步内用宿主 toolSet 的准入面
+  (`tools.definitions(scope, toolSet)`),程序化调用(无 toolSet)同一读取面
+  返回注册视图(等价 `view(scope).visible`);无 agent 的调用只搜索全局层。
+  搜索只返回定义文本,不注册工具、不修改白名单或任何会话的加载态。
+- **原状还原**:收敛改动以 undo journal 按 definition 记录原状,行禁用/卸载
+  按 journal 逐条还原,系统回到「没装本包」的世界(层表换代后同 definition
+  重建仍可还原)。
+- **干净禁用**:宿主 tools/llm 全局层内部结构不符已知形态、或 tools 缺
+  `definitions` 投影面(0.2.2 前)时打日志零动作,不崩;llm 面失败只损失折叠,
+  打标收敛不受影响。
 
 ## 使用(设置 → 工具门)
 
@@ -63,4 +69,9 @@ volatile 字段热改即时收敛(`loader/volatile-update`),不重启;新工具�
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:低于该代际的宿主 API 面未验证,compat 装载层自动排除。逐轮实测结论见 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.2-rc.1"`:宿主 0.2.2 起工具层条目为 registration
+包装(`{ definition, when }`),defer 态读写面按该形态对齐。低于 hostMin 的宿主由
+compat 装载层排除(不装载);若被强制加载(旧 profile 手工挂载,或宿主版本不可读
+时 dev-link 跳过校验)形态探测兜底为干净禁用(打日志、零动作、不崩),不回退旧
+形态(dev-link 在版本可读且低于 hostMin 时直接拒绝)。逐轮实测结论见
+`docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。

@@ -1,19 +1,31 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFERRED_PLACEHOLDER_DESCRIPTION } from '../src/fallback.mjs'
+import { DEFERRED_PLACEHOLDER_DESCRIPTION, TOOL_SEARCH_NAME } from '../src/fallback.mjs'
 import { apply } from '../src/index.js'
 
 // 假宿主:全局层 + per-agent scoped 层 + 行 ctx(on/effect/logger/get)。
-// config 以 volatile ref 容器形态传入(与宿主行挂载一致),get 可变以驱动热改。
-function harness(initialLayers, initialConfig = {}) {
-  const globalData = new Map(Object.entries(initialLayers.global ?? {}))
+// 层条目取宿主 0.2.2+ registration 形态({ definition, when }),与生产内部面
+// 同形;config 以 volatile ref 容器形态传入(与宿主行挂载一致),get 可变以驱动热改。
+const registrationOf = (definition) => ({ definition })
+const dataOf = (defs) => new Map(Object.entries(defs).map(([name, definition]) => [name, registrationOf(definition)]))
+
+function harness(initialLayers, initialConfig = {}, { registerForm = 'map' } = {}) {
+  const globalData = dataOf(initialLayers.global ?? {})
   const scoped = new Map()
-  for (const [key, defs] of Object.entries(initialLayers.scoped ?? {})) scoped.set(key, { tools: { data: new Map(Object.entries(defs)) } })
+  for (const [key, defs] of Object.entries(initialLayers.scoped ?? {})) scoped.set(key, { tools: { data: dataOf(defs) } })
   const registered = new Map()
+  const visible = () => ({ visible: new Map([...globalData].map(([name, entry]) => [name, entry.definition]).concat([...registered])) })
   const tools = {
     layers: { global: { tools: { data: globalData } }, scoped },
-    view: () => ({ visible: new Map([...globalData, ...registered]) }),
+    view: visible,
+    // 与宿主 definitions(scope, toolSet) 同构:无 toolSet = 注册视图
+    definitions: (scope, toolSet) => (toolSet === undefined ? [...visible().visible.values()] : [...toolSet.view(scope).values()]),
+    // registerForm='bare' 模拟旧代际宿主:注册条目直接进层、无 registration 包装
     register: (definition) => {
+      if (registerForm === 'bare') {
+        globalData.set(definition.name, definition)
+        return () => globalData.delete(definition.name)
+      }
       registered.set(definition.name, definition)
       return () => registered.delete(definition.name)
     },
@@ -49,10 +61,11 @@ function harness(initialLayers, initialConfig = {}) {
       if (!listeners.has(event)) listeners.set(event, [])
       listeners.get(event).push(handler)
     },
-    // 真宿主语义:effect 工厂即时执行,产物(注销器)登记到行退场
+    // 真宿主语义:effect 工厂即时执行,产物(注销器)登记到行退场并返回
     effect: (factory) => {
       const dispose = factory()
       effects.push(() => { dispose?.() })
+      return dispose
     },
     logger: {
       info: (message) => logs.info.push(message),
@@ -64,9 +77,9 @@ function harness(initialLayers, initialConfig = {}) {
     current,
     logs,
     registered,
-    definitionOf: (layerKey, name) => (layerKey === 'global' ? globalData : scoped.get(layerKey).tools.data).get(name),
+    definitionOf: (layerKey, name) => ((layerKey === 'global' ? globalData : scoped.get(layerKey).tools.data).get(name))?.definition,
     addAgentLayer: (key, defs) => {
-      scoped.set(key, { tools: { data: new Map(Object.entries(defs)) } })
+      scoped.set(key, { tools: { data: dataOf(defs) } })
     },
     emit: (event) => {
       for (const handler of listeners.get(event) ?? []) handler()
@@ -118,7 +131,7 @@ test('SC-5 重注册新对象:tools/change 后重新打标', () => {
   h.applyRow()
   assert.equal(h.definitionOf('agent#1', 'web_search').deferLoading, true)
   const replacement = { name: 'web_search' }
-  h.tools.layers.scoped.get('agent#1').tools.data.set('web_search', replacement)
+  h.tools.layers.scoped.get('agent#1').tools.data.set('web_search', registrationOf(replacement))
   h.emit('tools/change')
   assert.equal(replacement.deferLoading, true)
 })
@@ -136,7 +149,7 @@ test('SC-6 行退场还原:打标消失,自带 defer 声明恢复,顶替对象�
   h.applyRow()
   assert.equal(h.definitionOf('agent#1', 'replaced').deferLoading, true)
   const fresh = { name: 'replaced' }
-  h.tools.layers.scoped.get('agent#1').tools.data.set('replaced', fresh)
+  h.tools.layers.scoped.get('agent#1').tools.data.set('replaced', registrationOf(fresh))
   h.dispose()
   assert.equal('deferLoading' in h.definitionOf('agent#1', 'read'), false)
   assert.equal(h.definitionOf('agent#1', 'web_search').deferLoading, true)
@@ -208,13 +221,16 @@ test('SC-22 tool_search 注册与隐式白名单:收敛不打标,退场注销', 
   assert.equal(h.registered.has('tool_search'), false)
 })
 
-test('搜索视图缺失时不注册入口并告警,其他工具仍正常收敛', () => {
+// definitions 面是宿主 0.2.2+ 的投影读取面:缺失即代际不符,零动作不收敛
+test('definitions 面缺失时干净禁用:不注册入口、不打标、不装监听', () => {
   const h = harness({ global: { web: { name: 'web' } } })
-  delete h.tools.view
+  delete h.tools.definitions
   h.applyRow()
   assert.equal(h.registered.has('tool_search'), false)
-  assert.ok(h.logs.warn.some((message) => message.includes('tools.register/view')))
-  assert.equal(h.definitionOf('global', 'web').deferLoading, true)
+  assert.ok(h.logs.warn.some((message) => message.includes('tools.register/definitions')))
+  assert.equal(h.definitionOf('global', 'web').deferLoading, undefined, '零动作:不收敛')
+  h.emit('tools/change')
+  assert.equal(h.definitionOf('global', 'web').deferLoading, undefined, '零动作:不装监听')
 })
 
 test('SC-22 收敛不打标 tool_search(白名单外仍保持清标)', () => {
@@ -284,4 +300,64 @@ test('SC-19 collapse=false:门关全量透传(打标维持)', () => {
   assert.equal(h.definitionOf('global', 'web').deferLoading, true)
   piAdapter.streamWithSnapshot({ tools: [{ name: 'read' }, { name: 'web' }] }, {})
   assert.deepEqual(piCalls[0].tools.map((tool) => tool.name), ['read', 'web'])
+})
+
+// Given apply 时层为空(空表无从判定),注册进层的条目是裸 definition;
+// When 行 apply;Then 自检识别宿主代际漂移:注销检索入口、告警、零打标,
+// 且不进入折叠安装段(adapter 原型未被 patch)。
+test('注册条目非 registration:注销检索入口并干净禁用', () => {
+  const calls = []
+  const adapter = new (class {
+    streamWithSnapshot(options) { calls.push(options); return 'stream' }
+  })()
+  const original = adapter.streamWithSnapshot
+  const h = harness(
+    { global: {} },
+    { allowlist: [], llm: makeLlm(adapter) },
+    { registerForm: 'bare' },
+  )
+  h.applyRow()
+  assert.equal(h.tools.layers.global.tools.data.has(TOOL_SEARCH_NAME), false, '自检失败后注销检索入口')
+  assert.ok(h.logs.warn.some((message) => message.includes('registration')))
+  assert.equal(adapter.streamWithSnapshot, original, '禁用路径不 patch adapter 原型')
+  h.addAgentLayer('agent#late', { web_search: { name: 'web_search' } })
+  h.emit('tools/change')
+  assert.equal(h.definitionOf('agent#late', 'web_search')?.deferLoading, undefined, '禁用后不再打标')
+  h.dispose()
+})
+
+// Given 装载时层非空且条目是裸 definition(旧宿主真实形态);When apply;
+// Then 形态探测直接干净禁用:不装监听、不 patch adapter、零打标。
+test('非空裸 definition 层:apply 即干净禁用(零动作)', () => {
+  const adapter = new (class {
+    streamWithSnapshot() { return 'stream' }
+  })()
+  const original = adapter.streamWithSnapshot
+  const h = harness(
+    { global: {} },
+    { allowlist: [], llm: makeLlm(adapter) },
+    { registerForm: 'bare' },
+  )
+  // 装载前层内已有裸 definition(旧宿主真实形态;空表放行只针对 apply 时为空)
+  h.tools.layers.global.tools.data.set('web', { name: 'web' })
+  h.applyRow()
+  assert.ok(h.logs.warn.some((message) => message.includes('层结构与已知形态不符')))
+  assert.equal(h.registered.has(TOOL_SEARCH_NAME), false)
+  assert.equal(h.tools.layers.global.tools.data.get('web').deferLoading, undefined)
+  assert.equal(adapter.streamWithSnapshot, original, '禁用路径不 patch adapter 原型')
+  h.emit('tools/change')
+  assert.equal(h.tools.layers.global.tools.data.get('web').deferLoading, undefined, '未装监听')
+})
+
+// Given 收敛已打标;When 层内被塞入裸条目(形态漂移);Then 告警并跳过,
+// 既有打标与其他名不受影响。
+test('层内出现裸条目:告警并跳过,既有打标不变', () => {
+  const h = harness({ global: { web: { name: 'web' }, read: { name: 'read' } } })
+  h.applyRow()
+  assert.equal(h.definitionOf('global', 'web').deferLoading, true)
+  h.tools.layers.global.tools.data.set('bare', { name: 'bare' })
+  h.emit('tools/change')
+  assert.ok(h.logs.warn.some((message) => message.includes('无 definition')))
+  assert.equal(h.definitionOf('global', 'web').deferLoading, true, '既有打标不变')
+  assert.equal(h.definitionOf('global', 'read').deferLoading, undefined, '其他名不受影响')
 })
