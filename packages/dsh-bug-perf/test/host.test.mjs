@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_CONFIG } from '../src/config.mjs'
+import { CONFIG_VERSION, DEFAULT_CONFIG } from '../src/config.mjs'
 import { apply, Config, name } from '../src/index.js'
 
 function makeRes() {
@@ -157,6 +157,24 @@ test('宿主_配置读取_settings仅diag_生效', async () => {
   assert.deepEqual(read.config.diag, { enabled: true, reportEvery: 2 })
 })
 
+// Given 旧版设置页保存过默认值, When 读取配置, Then 旧默认值按版本复写为当前默认值
+test('宿主_配置读取_旧版本迁移', async () => {
+  const settings = {
+    stored: { stuckSession: { enabled: true, checkMs: 2000, stallMs: 8000, reconnect: true, maxReconnectAttempts: 5, reconnectIntervalMs: 15000 } },
+    register() {},
+    get() { return this.stored },
+    async update() {},
+  }
+  const ctx = makeCtx({ server: {}, settings })
+  apply(ctx, undefined)
+  const read = JSON.parse((await request(ctx.registrations[0])).body)
+  assert.equal(read.config.configVersion, CONFIG_VERSION)
+  assert.equal(read.config.stuckSession.checkMs, DEFAULT_CONFIG.stuckSession.checkMs)
+  assert.equal(read.config.stuckSession.stallMs, DEFAULT_CONFIG.stuckSession.stallMs)
+  assert.equal(read.config.stuckSession.maxReconnectAttempts, DEFAULT_CONFIG.stuckSession.maxReconnectAttempts)
+  assert.equal(read.config.stuckSession.reconnectIntervalMs, DEFAULT_CONFIG.stuckSession.reconnectIntervalMs)
+})
+
 // Given 保存值越界, When POST, Then 上限收敛后再落盘
 test('宿主_配置保存_数值收敛', async () => {
   const settings = {
@@ -258,6 +276,7 @@ test('宿主_Config默认值_与共享默认一致', () => {
   assert.equal(watchdog.stallMs, DEFAULT_CONFIG.terminalWatchdog.stallMs)
   assert.equal(watchdog.cooldownMs, DEFAULT_CONFIG.terminalWatchdog.cooldownMs)
   assert.deepEqual(Config.dict.listSlim({}), DEFAULT_CONFIG.listSlim)
+  assert.deepEqual(Config.dict.sessionWindow({}), DEFAULT_CONFIG.sessionWindow)
   assert.deepEqual(Config.dict.diag({}), DEFAULT_CONFIG.diag)
   assert.equal(Config.dict.diag({}).enabled, false)
 })

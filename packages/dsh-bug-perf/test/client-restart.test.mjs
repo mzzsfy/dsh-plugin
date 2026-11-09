@@ -180,3 +180,11 @@ test('重启合并_窗口为零_不合并', () => {
   stream.restart()
   assert.equal(stream.restarts, 2)
 })
+
+// Given 宿主返回更高配置版本, When 客户端归一化, Then 原样保留而不是降回内置版本
+test('配置_客户端_保留宿主版本号', () => {
+  const plugin = loadPlugin()
+  assert.equal(plugin.__test.normalizeConfig({ configVersion: 3 }).configVersion, 3)
+  assert.equal(plugin.__test.normalizeConfig({ configVersion: -1 }).configVersion, plugin.__test.DEFAULT_CONFIG.configVersion)
+  assert.equal(plugin.__test.normalizeConfig({}).configVersion, plugin.__test.DEFAULT_CONFIG.configVersion)
+})

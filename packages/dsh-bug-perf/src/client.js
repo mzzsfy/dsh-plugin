@@ -23,11 +23,13 @@ window.__ModuleLoader__.load({
 
     // 与 src/config.mjs 同源;客户端不能 import 共享模块,内联副本由测试对表
     const DEFAULT_CONFIG = {
+      configVersion: 2,
       restartCoalesce: { enabled: true, windowMs: 100 },
       terminalWatchdog: { enabled: true, checkMs: 2000, stallMs: 8000, cooldownMs: 60000 },
       socketKeepAlive: { enabled: true, intervalMs: 1500 },
-      stuckSession: { enabled: true, checkMs: 2000, stallMs: 8000, reconnect: true, maxReconnectAttempts: 5, reconnectIntervalMs: 15000 },
+      stuckSession: { enabled: true, checkMs: 3000, stallMs: 60000, reconnect: true, maxReconnectAttempts: 2, reconnectIntervalMs: 120000 },
       jobStreamLimit: { enabled: true, base: 32, max: 48 },
+      sessionWindow: { enabled: true, maxMessages: 200, minTurns: 2 },
       listSlim: { enabled: true },
       diag: { enabled: false, reportEvery: DIAG_DEFAULT_REPORT_EVERY },
     }
@@ -46,6 +48,7 @@ window.__ModuleLoader__.load({
         reconnectIntervalMs: { min: 500, max: 600000 },
       },
       jobStreamLimit: { base: { min: 4, max: 256 }, max: { min: 4, max: 512 } },
+      sessionWindow: { maxMessages: { min: 20, max: 500 }, minTurns: { min: 1, max: 50 } },
       diag: { reportEvery: { min: 1, max: DIAG_MAX_SAMPLES } },
     }
 
@@ -61,6 +64,11 @@ window.__ModuleLoader__.load({
       if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
       return Math.min(bounds.max, Math.max(bounds.min, value))
     }
+    // 交给宿主的计数参数必须是正安全整数:小数截断后按 numberWithin 规则收敛
+    const integerWithin = (value, bounds, fallback) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+      return numberWithin(Math.trunc(value), bounds, fallback)
+    }
     const normalizeConfig = (raw) => {
       const input = sectionOf(raw)
       const restart = sectionOf(input.restartCoalesce)
@@ -68,9 +76,11 @@ window.__ModuleLoader__.load({
       const keepAlive = sectionOf(input.socketKeepAlive)
       const stuck = sectionOf(input.stuckSession)
       const jobLimit = sectionOf(input.jobStreamLimit)
+      const sessionWindow = sectionOf(input.sessionWindow)
       const listSlim = sectionOf(input.listSlim)
       const diag = sectionOf(input.diag)
       return {
+        configVersion: Number.isInteger(input.configVersion) && input.configVersion > 0 ? input.configVersion : DEFAULT_CONFIG.configVersion,
         restartCoalesce: {
           enabled: booleanOr(restart.enabled, DEFAULT_CONFIG.restartCoalesce.enabled),
           windowMs: numberWithin(restart.windowMs, LIMITS.restartCoalesce.windowMs, DEFAULT_CONFIG.restartCoalesce.windowMs),
@@ -100,6 +110,11 @@ window.__ModuleLoader__.load({
           reconnect: booleanOr(stuck.reconnect, DEFAULT_CONFIG.stuckSession.reconnect),
           maxReconnectAttempts: numberWithin(stuck.maxReconnectAttempts, LIMITS.stuckSession.maxReconnectAttempts, DEFAULT_CONFIG.stuckSession.maxReconnectAttempts),
           reconnectIntervalMs: numberWithin(stuck.reconnectIntervalMs, LIMITS.stuckSession.reconnectIntervalMs, DEFAULT_CONFIG.stuckSession.reconnectIntervalMs),
+        },
+        sessionWindow: {
+          enabled: booleanOr(sessionWindow.enabled, DEFAULT_CONFIG.sessionWindow.enabled),
+          maxMessages: integerWithin(sessionWindow.maxMessages, LIMITS.sessionWindow.maxMessages, DEFAULT_CONFIG.sessionWindow.maxMessages),
+          minTurns: integerWithin(sessionWindow.minTurns, LIMITS.sessionWindow.minTurns, DEFAULT_CONFIG.sessionWindow.minTurns),
         },
         listSlim: {
           enabled: booleanOr(listSlim.enabled, DEFAULT_CONFIG.listSlim.enabled),
@@ -260,8 +275,8 @@ window.__ModuleLoader__.load({
     const FRAME_TYPE_PREFIX = '{"type":"'
     const STREAM_ID_KEY = '"streamId":"'
     const ENDPOINT_KEY = '"endpoint":"'
-    // 事件循环探测: 延迟超过该值视为主线程被占满
-    const DIAG_BLOCK_MS = 1000
+    // 事件循环探测: 延迟超过该值视为主线程被占满; 单次渲染长任务不算假死
+    const DIAG_BLOCK_MS = 5000
     const DIAG_PROBE_MS = 2000
     const DIAG_REPORT_PATH = '/api/dsh-bug-perf/diag'
     // 定时器检查节拍: 实际发送间隔由可变的 intervalMs 决定
@@ -366,7 +381,7 @@ window.__ModuleLoader__.load({
       return { timer, observer }
     }
 
-    // 采样与上报分离:关闭上报只停请求,内存采样继续供停滞判定使用
+    // 采样与上报分离:关闭上报只停请求,内存采样继续供现场排查(window.__dshBugPerf)
     const startDiagReporting = ({ win, clock, diag, options }) => {
       if (options?.enabled !== true) {
         diag.enabled = false
@@ -520,6 +535,15 @@ window.__ModuleLoader__.load({
       return false
     }
 
+    // 加载进展指纹: 会话流节点数、有效行数与最后一行文本长度任一变化都说明宿主仍在推进
+    const stallFingerprint = (doc) => {
+      const flow = doc.querySelector?.('[data-chat-flow]')
+      if (flow === null || flow === undefined) return ''
+      const rows = flow.querySelectorAll?.(STUCK_MESSAGE_SELECTOR) ?? []
+      const last = flow.lastElementChild?.textContent
+      return `${flow.childElementCount ?? 0}:${rows.length}:${typeof last === 'string' ? last.length : 0}`
+    }
+
     const ensureStuckStyle = (doc) => {
       const selector = `style[data-plugin="${PLUGIN_ID}"]`
       const existing = doc.querySelector?.(selector)
@@ -533,14 +557,14 @@ window.__ModuleLoader__.load({
     // 会话停滞时优先让宿主自己重建连接: 官方 connection 服务的 reconnect() 会中止当前
     // generation 并立即重试, 页面随之恢复, 不打断会话与未发送的草稿。
     // 连续多次重建仍无效才显示提示, 刷新入口只是最后手段。
-    const installStuckSession = ({ win, options, clock, connection, diag }) => {
+    const installStuckSession = ({ win, options, clock, connection }) => {
       const doc = win?.document
       if (doc === undefined || typeof doc.createElement !== 'function') return { installed: false, reason: 'document unavailable' }
       if (options?.enabled === false) return { installed: false, reason: 'disabled' }
       // 样式随每次安装重注: HMR 重建会先删掉本插件的 style
       ensureStuckStyle(doc)
       if (win[STUCK_MARKER] === true) return { installed: false, reason: 'already installed' }
-      const state = { since: undefined, notice: undefined, attempts: 0, lastAttemptAt: undefined }
+      const state = { since: undefined, fingerprint: undefined, lastTickAt: undefined, quietSince: undefined, notice: undefined, attempts: 0, lastAttemptAt: undefined }
       const reload = () => { try { win.location?.reload?.() } catch { } }
       const showNotice = () => {
         if (state.notice !== undefined || doc.getElementById(STUCK_NOTICE_ID) !== null) return
@@ -567,34 +591,60 @@ window.__ModuleLoader__.load({
         state.notice = undefined
       }
       const revive = () => {
-        if (options.reconnect !== true || connection === undefined) return false
+        if (options.reconnect !== true || connection === undefined || typeof connection.reconnect !== 'function') return false
         if (state.attempts >= options.maxReconnectAttempts) return false
         const now = clock.now()
         if (state.lastAttemptAt !== undefined && now - state.lastAttemptAt < options.reconnectIntervalMs) return true
         state.attempts += 1
         state.lastAttemptAt = now
         try {
-          connection.reconnect?.()
+          connection.reconnect()
         } catch {
           return false
         }
         console.info(`${LOG_PREFIX} session stalled, requesting reconnect #${state.attempts}`)
         return true
       }
-      const blocked = () => diag !== undefined && diag.blockedAt !== undefined && clock.now() - diag.blockedAt < options.stallMs * 2
+      // 主线程被占满(解析大历史、长渲染)不是假死证据, 只按加载态是否停滞判定:
+      // 阻塞恢复后若加载仍无进展, 停滞计时自然继续, 不需要单独的阻塞分支。
       const tick = () => {
         const now = clock.now()
-        if (!sessionStalled(doc) && !blocked()) {
-          if (state.attempts > 0) console.info(`${LOG_PREFIX} session recovered after ${state.attempts} reconnect attempt(s)`)
+        // 定时器被挂起(标签页冻结、系统睡眠)或页面不可见: 计时不可信, 作废本轮
+        const gap = state.lastTickAt === undefined ? 0 : now - state.lastTickAt
+        state.lastTickAt = now
+        if (doc.visibilityState === 'hidden' || gap > options.checkMs * 3) {
+          state.since = now
+          state.fingerprint = undefined
+          state.quietSince = undefined
+          return
+        }
+        if (!sessionStalled(doc)) {
+          // 恢复要连续稳定几个周期才清零重连计数, 避免重建清流的一帧非加载态把上限抹掉
+          if (state.quietSince === undefined) state.quietSince = now
           state.since = undefined
+          state.fingerprint = undefined
+          hideNotice()
+          if (now - state.quietSince < options.checkMs * 3) return
+          if (state.attempts > 0) console.info(`${LOG_PREFIX} session recovered after ${state.attempts} reconnect attempt(s)`)
           state.attempts = 0
           state.lastAttemptAt = undefined
-          hideNotice()
+          return
+        }
+        state.quietSince = undefined
+        // 加载仍在推进(节点数/行数/最后一行文本变化)就不算停滞, 大历史会话允许慢慢渲染
+        const fingerprint = stallFingerprint(doc)
+        if (fingerprint !== state.fingerprint) {
+          state.fingerprint = fingerprint
+          state.since = now
           return
         }
         if (state.since === undefined) state.since = now
         if (now - state.since < options.stallMs) return
-        if (revive()) return
+        if (revive()) {
+          // 重建后重新计时, 避免刚发出的重建被下一 tick 当成已用尽
+          state.since = now
+          return
+        }
         showNotice()
       }
       const timer = clock.setInterval(tick, options.checkMs)
@@ -824,6 +874,15 @@ window.__ModuleLoader__.load({
         fields: [
           { name: 'base', label: '默认窗口', unit: '条' },
           { name: 'max', label: '硬上限', unit: '条' },
+        ],
+      },
+      {
+        key: 'sessionWindow',
+        title: '历史窗口收敛',
+        description: '打开/重连会话时按消息预算下发历史页,工具密集的会话不再一次下发数千事件;宿主默认 500 条、至少 2 轮。',
+        fields: [
+          { name: 'maxMessages', label: '消息上限', unit: '条' },
+          { name: 'minTurns', label: '轮数下限', unit: '轮' },
         ],
       },
       {
@@ -1097,7 +1156,7 @@ window.__ModuleLoader__.load({
         const startStuckSession = (connection) => {
           report.actions = { reconnect: () => { try { connection?.reconnect?.() } catch { } } }
           report.features.stuckSession = stuckOptions.enabled
-            ? summarize(safely(() => installStuckSession({ win: window, options: stuckOptions, clock: timers, connection, diag })))
+            ? summarize(safely(() => installStuckSession({ win: window, options: stuckOptions, clock: timers, connection })))
             : { installed: false, reason: 'disabled' }
         }
         const startJobStreamLimit = (jobs) => {

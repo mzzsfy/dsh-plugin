@@ -57,7 +57,9 @@ test('设置UI_缺依赖_静默跳过', () => {
 test('设置UI_节字段与配置同源', () => {
   const plugin = loadPlugin({ modules: { react: reactStub } })
   const keys = plugin.__test.UI_SECTIONS.map((section) => section.key)
-  assert.deepEqual(keys, Object.keys(plugin.__test.DEFAULT_CONFIG))
+  // configVersion 是升级迁移用的内部标量, 不渲染到设置卡片
+  const sections = Object.keys(plugin.__test.DEFAULT_CONFIG).filter((key) => key !== 'configVersion')
+  assert.deepEqual(keys, sections)
   for (const section of plugin.__test.UI_SECTIONS) {
     for (const field of section.fields) {
       assert.equal(typeof plugin.__test.DEFAULT_CONFIG[section.key][field.name], 'number')
