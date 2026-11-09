@@ -14,8 +14,8 @@ const klineBody = () => ({ data: { klines: [CSV], preKPrice: '11.31', dktotal: 2
 const tencentBody = () => ({ data: { hk00700: { qfqday: TENCENT_ROWS } } })
 
 const providers = [
-  { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'g-em', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { kline: 30 } } },
-  { id: 'tx-fallback', adapterId: 'tencent', enabled: true, credentialEnv: null, quotaGroup: 'g-tx', budget: { requestsPerMinute: 30, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } },
+  { id: 'em-default', adapterId: 'eastmoney', enabled: true, credentialRef: null, quotaGroup: 'g-em', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { kline: 30 } } },
+  { id: 'tx-fallback', adapterId: 'tencent', enabled: true, credentialRef: null, quotaGroup: 'g-tx', budget: { requestsPerMinute: 30, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } },
 ]
 const routes = [
   { id: 'xhkg-kline', capability: 'kline', market: 'XHKG', instrument: 'equity', primaryInstanceId: 'em-default', fallbackInstanceIds: ['tx-fallback'], failoverMode: 'network', maxDelaySeconds: null, acceptUnknownDelay: true },

@@ -35,3 +35,26 @@ test('MIG03 cost 字段不再是合法数据', async () => {
   assert.deepEqual(parsed.marks, [])
   await state.close()
 })
+
+// 数据源实例的凭据字段曾叫 credentialEnv;不做这步, 存量配置会因为缺 credentialRef 且多出未知键而读不出来
+test('MIG04 存量 credentialEnv 改名成 credentialRef 后仍可读', async () => {
+  const storage = memoryStorage()
+  const legacyProvider = { id: 'ts-one', adapterId: 'tushare', enabled: true, credentialEnv: 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: 'account-one', budget: { requestsPerMinute: 50, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { quotes: 50 } } }
+  const root = storage.maps.control.get('root')
+  storage.maps.control.set('root', { ...root, providers: [legacyProvider], routes: [] })
+  const state = await openState(storage)
+  const provider = state.get().providers[0]
+  assert.equal(provider.credentialRef, 'DSH_STOCK_TUSHARE_TOKEN', '引用名原样搬过去')
+  assert.equal('credentialEnv' in provider, false, '旧字段不再留着')
+  assert.equal(storage.maps.control.get('root').providers[0].credentialRef, 'DSH_STOCK_TUSHARE_TOKEN', '改名结果落盘')
+  await state.close()
+})
+
+test('MIG05 免凭据实例的 credentialEnv=null 同样迁移为 null', async () => {
+  const storage = memoryStorage()
+  const root = storage.maps.control.get('root')
+  storage.maps.control.set('root', { ...root, providers: [{ id: 'em', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] })
+  const state = await openState(storage)
+  assert.equal(state.get().providers[0].credentialRef, null)
+  await state.close()
+})

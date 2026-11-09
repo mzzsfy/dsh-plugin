@@ -7,6 +7,7 @@ import { tencent } from './providers/tencent.mjs'
 import { sina } from './providers/sina.mjs'
 import { eastmoney } from './providers/eastmoney.mjs'
 import { xueqiu } from './providers/xueqiu.mjs'
+import { finnhub } from './providers/finnhub.mjs'
 import { openState, digest } from './state.mjs'
 import { parseConfiguration, preferencesSchema, defaultConfig, klineQuerySchema } from './schemas.mjs'
 import { createWatchlistService } from './service.mjs'
@@ -21,8 +22,11 @@ const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
 const US_SYMBOL_LIMIT = 500
 const PROBE_LIMIT = 512
-export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu], publish = () => {}, env = process.env, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
+export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu, finnhub], publish = () => {}, env = process.env, credentials = null, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
+  // 凭据解析: 宿主提供 credentials 服务时交给它(插件存储层优先, 再逐层回退到进程环境与 .env 文件),
+  // 否则退回进程环境变量。引用只表示"哪个密钥", 值始终由宿主保管。
+  const resolveCredential = credentials ? async ref => (await credentials.resolve(ref))?.value : async ref => env[ref]
   // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
   const probeCache = new Map()
   let snapshotSeq = 0, stopped = false, collector, catalog, demand
@@ -30,11 +34,17 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const touched = () => snapshotSeq++
   const changed = () => { touched(); publish({ type: 'invalidate', serverEpoch, snapshotSeq, scopes: ['snapshot'] }) }
   const state = await openState(storageDomain, changed, now)
+  // 凭据存在性只给设置页看, 而解析是异步的、快照是同步的: 保存配置与启动时各算一次, 快照读这份结果。
+  const credentialPresence = new Map()
+  const refreshCredentialPresence = async () => {
+    for (const p of state.get().providers) credentialPresence.set(p.id, p.credentialRef === null || !!(await resolveCredential(p.credentialRef)))
+  }
+  await refreshCredentialPresence()
   const registry = createRegistry(providers), budget = createBudget(now)
   // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
   let proxyFactory = null
   try { const undici = await import('undici'); proxyFactory = url => new undici.ProxyAgent(url) } catch {}
-  const executor = createExecutor({ registry, budget, env, fetch, now, timers, usSymbols, proxyFactory })
+  const executor = createExecutor({ registry, budget, env, resolveCredential, fetch, now, timers, usSymbols, proxyFactory })
   const getControl = state.get
   const router = createRouter(getControl, now, () => collector?.reset())
   const klineCache = createKlineCache({ cacheTable: state.cache, now })
@@ -61,7 +71,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const watchlist = createWatchlistService(state, catalog.resolve, now)
   const snapshot = () => {
     const control = state.get(); delete control.operations
-    return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.entries(), routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialEnv === null || !!env[p.credentialEnv], proxy: !!p.proxy, endpointsCovered: Object.keys(p.endpoints || {}).length, recentRequests: executor.recentRequests(p.id) })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])), markets: Object.fromEntries(Object.entries(MARKET_META).map(([market, meta]) => [market, { currency: meta.currency, verified: meta.verifiedByDefault }])) }
+    return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.entries(), routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialRef === null || credentialPresence.get(p.id) === true, credentialRef: p.credentialRef, proxy: !!p.proxy, endpointsCovered: Object.keys(p.endpoints || {}).length, recentRequests: executor.recentRequests(p.id) })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])), markets: Object.fromEntries(Object.entries(MARKET_META).map(([market, meta]) => [market, { currency: meta.currency, verified: meta.verifiedByDefault }])) }
   }
   function assertLive() { if (stopped) fail('STOPPED', '股票工具已停止', 503) }
   async function providerCheck(input, signal) {
@@ -108,7 +118,7 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       if (JSON.stringify(current.providers) === JSON.stringify(config.providers) && JSON.stringify(current.routes) === JSON.stringify(config.routes)) return current
       return { ...current, ...config, routingRevision: current.routingRevision + 1 }
     })
-    if (!result.unchanged) { router.reset(); collector.reset() }
+    if (!result.unchanged) { router.reset(); collector.reset(); await refreshCredentialPresence() }
     return result
   }
 
@@ -201,6 +211,18 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       const result = await catalog.sync(input.market); collector.reconcile(); return result
     },
     async watchlist(operation) { assertLive(); const result = await watchlist.execute(operation); collector.reconcile(); return result },
+    // 密钥只写宿主的凭据存储, 不回显也不落插件状态;引用必须已被某个数据源声明, 插件不越界写别人的密钥空间。
+    async credential(input) {
+      assertLive()
+      if (!credentials) fail('UNSUPPORTED', '宿主未提供凭据服务', 501)
+      const ref = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).parse(input.ref)
+      if (!state.get().providers.some(p => p.credentialRef === ref)) fail('INVALID_REQUEST', '该凭据未被任何数据源使用', 422)
+      const value = input.value === null ? null : z.string().min(1).max(512).parse(input.value)
+      if (value === null) await credentials.unset(ref)
+      else await credentials.set(ref, value)
+      await refreshCredentialPresence()
+      return { ref, present: value !== null }
+    },
     async preferences(operation) {
       assertLive()
       const parsed = preferencesSchema.partial().safeParse(operation.payload)

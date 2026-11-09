@@ -18,7 +18,8 @@ export async function apply(ctx) {
     // vendor 可读性预判定先于应用构建: vendorAvailable=false 随快照下发→client 直接降级数字详情
     let vendorAvailable = true
     try { vendorAvailable = vendorReadable() } catch { vendorAvailable = false }
-    application = await createApplication({ storageDomain: ctx.storageDomain, publish: () => notifier?.refresh(), vendorAvailable })
+    // 凭据服务是可选增强: 宿主没提供时退回进程环境变量, 不因此拒绝启动
+    application = await createApplication({ storageDomain: ctx.storageDomain, credentials: ctx.get?.('credentials') ?? null, publish: () => notifier?.refresh(), vendorAvailable })
     if (disposed) { await application.close(); return }
     bus = setupCommonTools(ctx)
     notifier = createChangeNotifier(() => bus.publish({ type: 'invalidate', serverEpoch: application.snapshot().serverEpoch, snapshotSeq: application.snapshot().snapshotSeq }))

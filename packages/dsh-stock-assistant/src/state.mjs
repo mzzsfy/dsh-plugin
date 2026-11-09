@@ -6,8 +6,16 @@ export const digest = value => createHash('sha256').update(JSON.stringify(value)
 export async function openState(storageDomain, changed = () => {}, now = Date.now) {
   const domain = await storageDomain.open(domainSpec)
   const table = domain.table('control'), cache = domain.table('cache')
+  // 存量数据: 数据源实例的凭据字段曾叫 credentialEnv, 现在交给宿主的凭据服务保管, 更名 credentialRef。
+  // 老数据里那一栏本来就只存引用名(值是环境变量里的), 改名即可, 不改语义。
+  const renameCredentialField = root => {
+    if (!root || !Array.isArray(root.providers)) return root
+    if (!root.providers.some(p => p && 'credentialEnv' in p)) return root
+    return { ...root, providers: root.providers.map(({ credentialEnv, ...rest }) => ({ ...rest, credentialRef: credentialEnv ?? null })) }
+  }
   try {
     if (!table.get('root')) await table.put('root', initialControl())
+    else if (renameCredentialField(table.get('root')) !== table.get('root')) await table.put('root', renameCredentialField(table.get('root')))
     controlSchema.parse(table.get('root'))
   } catch (e) { await domain.close(); throw e }
   let tail = Promise.resolve(), stopped = false

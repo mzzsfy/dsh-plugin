@@ -14,7 +14,7 @@ test('初始控制状态内置免凭据默认实例与全市场四能力路由',
   assert.equal(control.providers.length, 4, '四个免凭据源全开')
   assert.deepEqual(control.providers.map(p => p.adapterId).sort(), ['eastmoney', 'sina', 'tencent', 'xueqiu'])
   const marketInstance = control.providers.find(p => p.adapterId === 'eastmoney')
-  for (const p of control.providers) { assert.equal(p.credentialEnv, null, '默认实例不需要凭据'); assert.ok(p.budget.requestsPerMinute > 0) }
+  for (const p of control.providers) { assert.equal(p.credentialRef, null, '默认实例不需要凭据'); assert.ok(p.budget.requestsPerMinute > 0) }
   // 八市场的目录/搜索/报价/K线全部由东财承担(实测 clist 的 fs 覆盖日韩英)
   assert.equal(control.routes.length, MARKETS.length * 4, '四能力 × 八市场')
   for (const m of MARKETS) for (const capability of ['search', 'quotes', 'kline', 'catalog']) {

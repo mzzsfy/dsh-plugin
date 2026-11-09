@@ -1740,7 +1740,29 @@ window.__ModuleLoader__.load({
         state.errorCode === 'CATALOG_NOT_READY' ? h('div', { className: 'ssb-banner', style: { margin: 0 } }, '目录未就绪。可以直接浏览市场添加自选。', h(Button, { onClick: () => runtime.updateView({ view: 'browse' }) }, '前往浏览市场')) : null,
         h('div', { className: 'ssb-toolbar', style: { margin: 0 } }, h(Button, { primary: true, disabled: !view.selectedId || !!data?.control.watchlist.items[view.selectedId] || state.busy.write, onClick: quiet(async () => { await runtime.mutate('add', { securityId: view.selectedId }); runtime.updateView({ view: 'list', selectedId: null }) }) }, data?.control.watchlist.items[view.selectedId] ? '已在自选' : '确认添加'))))
     }
-    const defaultProvider = (id, adapterId = 'tushare') => ({ id, adapterId, enabled: true, credentialEnv: adapterId === 'tushare' ? 'DSH_STOCK_TUSHARE_TOKEN' : null, quotaGroup: adapterId + '-account', budget: { requestsPerMinute: adapterId === 'tushare' ? null : 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } })
+    const defaultProvider = (id, adapterId = 'tushare') => ({ id, adapterId, enabled: true, credentialRef: adapterId === 'tushare' ? 'DSH_STOCK_TUSHARE_TOKEN' : null, quotaGroup: adapterId + '-account', budget: { requestsPerMinute: adapterId === 'tushare' ? null : 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } })
+    // 密钥输入: 值直接写宿主的凭据存储, 不进配置草稿, 也不回显。保存后重新拉一次快照让"已配置"状态跟上
+    function CredentialField({ runtime, refName, present }) {
+      const [value, setValue] = React.useState(''), [busy, setBusy] = React.useState(false), [notice, setNotice] = React.useState('')
+      const submit = async next => {
+        if (busy) return
+        setBusy(true); setNotice('')
+        try {
+          await runtime.api('/credential', 'POST', { ref: refName, value: next })
+          setValue('')
+          setNotice(next === null ? '已清除' : '已保存')
+          runtime.applySnapshot(await runtime.api('/snapshot'), true)
+        } catch (e) { setNotice(e.message || '保存失败') }
+        finally { setBusy(false) }
+      }
+      return h('div', { className: 'ssb-credential', style: { gridColumn: '1 / -1' } },
+        h('label', { className: 'ssb-field' }, h('span', null, present ? '密钥（已配置，留空表示不修改）' : '密钥（未配置）'),
+          h('input', { type: 'password', value, autoComplete: 'new-password', spellCheck: false, placeholder: present ? '留空则不修改' : '粘贴密钥后保存', onChange: e => setValue(e.target.value) })),
+        h('div', { className: 'ssb-credential-actions' },
+          h(Button, { disabled: busy || !value.trim(), onClick: () => submit(value.trim()) }, '保存密钥'),
+          present ? h(Button, { disabled: busy, onClick: () => submit(null) }, '清除') : null,
+          notice ? h('span', { className: 'ssb-muted', role: 'status' }, notice) : null))
+    }
     const routeFor = (market, capability, instance) => ({ id: `${market.toLowerCase()}-${capability}`, capability, market, instrument: 'equity', primaryInstanceId: instance, fallbackInstanceIds: [], failoverMode: 'off', maxDelaySeconds: null, acceptUnknownDelay: true })
     function SettingsView({ runtime, state }) {
       const saved = state.data.control
@@ -1779,14 +1801,15 @@ window.__ModuleLoader__.load({
           adapter?.description ? h('p', { className: 'ssb-provider-desc ssb-muted' }, adapter.description) : null,
           expanded ? h('div', { className: 'ssb-provider-body', disabled: state.busy.configuration },
             h('div', { className: 'ssb-provider-head' },
-              h('label', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h('select', { value: p.adapterId, onChange: e => { const adapterId = e.target.value, descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialEnv: descriptor?.credential === 'none' ? null : p.credentialEnv || 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } }, ...state.data.adapters.map(a => h('option', { value: a.adapterId, key: a.adapterId }, a.adapterId + (a.credential === 'none' ? '（免凭据）' : ''))))),
+              h('label', { className: 'ssb-field ssb-provider-adapter' }, h('span', null, '适配器'), h('select', { value: p.adapterId, onChange: e => { const adapterId = e.target.value, descriptor = state.data.adapters.find(a => a.adapterId === adapterId); providerChange(p.id, { adapterId, credentialRef: descriptor?.credential === 'none' ? null : descriptor?.credential || null, quotaGroup: adapterId + '-account', budget: descriptor?.credential === 'none' && p.budget.requestsPerMinute === null ? { ...p.budget, requestsPerMinute: 60 } : p.budget }) } }, ...state.data.adapters.map(a => h('option', { value: a.adapterId, key: a.adapterId }, a.adapterId + (a.credential === 'none' ? '（免凭据）' : ''))))),
               h('div', { className: 'ssb-provider-switches' },
                 h(Toggle, { label: '启用', checked: p.enabled, onChange: value => providerChange(p.id, { enabled: value }) }),
                 h(Button, { danger: true, onClick: () => change({ providers: draft.providers.filter(other => other.id !== p.id), routes: draft.routes.filter(r => r.primaryInstanceId !== p.id).map(r => ({ ...r, fallbackInstanceIds: r.fallbackInstanceIds.filter(id => id !== p.id), failoverMode: r.fallbackInstanceIds.includes(p.id) ? 'off' : r.failoverMode })) }) }, '移除'))),
             h('div', { className: 'ssb-provider-advanced-open' },
               h('div', { className: 'ssb-form-grid' },
-                openSource ? h('span', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '公开来源，无需凭据') : field('Host环境变量名', p.credentialEnv, value => providerChange(p.id, { credentialEnv: value }), { autoComplete: 'off', spellCheck: false }),
+                openSource ? h('span', { className: 'ssb-muted', style: { gridColumn: '1 / -1' } }, '公开来源，无需凭据') : field('密钥引用名', p.credentialRef, value => providerChange(p.id, { credentialRef: value }), { autoComplete: 'off', spellCheck: false }),
                 field('共享额度组（同账号保持一致）', p.quotaGroup, value => providerChange(p.id, { quotaGroup: value })),
+                openSource || !p.credentialRef ? null : h(CredentialField, { key: 'cred-' + p.id, runtime, refName: p.credentialRef, present: status?.credentialPresent }),
                 field('每分钟请求上限（留空仅允许探针）', p.budget.requestsPerMinute, value => providerChange(p.id, { budget: { ...p.budget, requestsPerMinute: value ? Number(value) : null } }), { type: 'number', min: 1 }),
                 field('每日请求上限（留空无限制）', p.budget.dailyRequestLimit, value => providerChange(p.id, { budget: { ...p.budget, dailyRequestLimit: value ? Number(value) : null } }), { type: 'number', min: 1 }),
                 h('label', { className: 'ssb-field' }, h('span', null, '计费单位'), h('select', { value: p.budget.billingUnit, onChange: e => providerChange(p.id, { budget: { ...p.budget, billingUnit: e.target.value } }) }, h('option', { value: 'request' }, '请求'), h('option', { value: 'symbol' }, '证券'))),
@@ -2045,7 +2068,7 @@ window.__ModuleLoader__.load({
 .ssb-float-picker .ssb-switch { font-size:11px; }
 .ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; height:32px; padding:0 12px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:12px; color:var(--ssb-text-sub); }
 .ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
-.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-mark-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }.ssb-mark-row { display:flex; align-items:center; gap:8px; }.ssb-mark-row .ssb-number { flex:1; }.ssb-mark-kind { min-width:2.5em; color:var(--ssb-text-dim); font-size:12px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
+.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-mark-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }.ssb-mark-row { display:flex; align-items:center; gap:8px; }.ssb-mark-row .ssb-number { flex:1; }.ssb-mark-kind { min-width:2.5em; color:var(--ssb-text-dim); font-size:12px; }.ssb-credential { display:grid; gap:8px; justify-items:start; }.ssb-credential .ssb-field { width:100%; }.ssb-credential-actions { display:flex; align-items:center; gap:8px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
 .ssb-settings-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }.ssb-settings-intro { min-width:0; display:grid; gap:6px; }.ssb-settings-intro p { margin:0; }
 .ssb-provider-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; }.ssb-provider-adapter { flex:0 0 240px; }.ssb-provider-switches { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }.ssb-provider-desc { margin:8px 0 0; }.ssb-provider-advanced { margin-top:8px; }.ssb-provider-advanced > summary { cursor:pointer; }
 /* 摘要行: 数据源与市场默认收成一行, 点开才展开编辑区 */

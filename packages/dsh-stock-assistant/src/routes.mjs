@@ -25,6 +25,7 @@ export function registerRoutes(webServer, app) {
     preferences: ['POST', input => { operationSchema.parse(input); return app.preferences({ ...input, payload: input.patch }) }],
     configuration: ['POST', input => { operationSchema.parse(input); return app.configuration({ ...input, payload: { providers: input.providers, routes: input.routes } }) }],
     'provider-check': ['POST', (input, signal) => app.providerCheck(input, signal)],
+    credential: ['POST', input => app.credential(input)],
     'catalog-sync': ['POST', input => app.sync(input)],
     'route-selection': ['POST', (input, signal) => app.routeSelection(input, signal)],
     refresh: ['POST', (input, signal) => app.refresh(input, signal)],

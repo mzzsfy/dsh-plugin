@@ -234,7 +234,7 @@ test('新浪目录分页过滤沪深以外板块并按短页终止', async () =>
 })
 test('免凭据实例跳过Host环境检查但必须声明保守预算', async () => {
   const { parseConfiguration } = await import('../src/schemas.mjs')
-  const base = { id: 'em-one', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
+  const base = { id: 'em-one', adapterId: 'eastmoney', enabled: true, credentialRef: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }
   assert.doesNotThrow(() => parseConfiguration({ providers: [base], routes: [] }))
   assert.throws(() => parseConfiguration({ providers: [{ ...base, budget: { ...base.budget, requestsPerMinute: null } }], routes: [] }))
   const { createExecutor } = await import('../src/executor.mjs')
