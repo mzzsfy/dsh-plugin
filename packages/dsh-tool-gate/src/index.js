@@ -13,10 +13,12 @@
 //
 // 收敛触发三点:apply 落定 / loader/volatile-update(白名单热改,现读
 // volatile ref)/ tools/change(注册、注销、重注册)。每次全量重算决策,
-// 只动与目标态有差异的名(幂等)。改动前记 undo journal(层键+名 → 原字段
-// 形态),行退场按 journal 还原原状,还原前校验层内同名仍是同一 definition
-// 引用,防止误改重注册后的新对象(INV-2);层已随 agent 销毁时 definition
-// 引用仍在,改无人观察的对象,无害。
+// 只动与目标态有差异的名(幂等)。改动前记 undo journal(definition 引用 →
+// 原字段形态),行退场按 journal 逐条还原(层表换代不失联,INV-2);层已随
+// agent 销毁时 definition 引用仍在,改无人观察的对象,无害。
+//
+// 宿主代际门:层条目形态非 registration、或 tools 服务缺 definitions 投影面
+// (0.2.2 前)时零动作禁用,不留监听与装饰器。
 //
 // enabled=false 收敛为「按 journal 全量还原并停止打标」,等效临时停用。
 
@@ -52,53 +54,29 @@ export function apply(ctx, config) {
   }
 
   /**
-   * undo journal:层数据表(Map 引用)→ 名 → { definition, hadField, value };
-   * 仅记录首次改变时的原状。层键是对象引用,直接作 Map 键,禁止字符串化
-   * (对象 String 化坍缩 '[object Object]' 串层,真机实证)。
-   * 记录按 definition 引用身份对账:同名换对象(宿主重挂定义)后旧记录还原
-   * 不再命中,当前定义在 toDefer/toClear 时刷新记录指向当前对象(F16:
-   * 只记首个定义曾让新对象退场时不还原 deferLoading)。
+   * undo journal:definition 引用 → 首次改变前原状 { hadField, value }。
+   * 键用 definition 而非层数据表:宿主层表清空时会换代(NamedEntries),
+   * 层键随之失联;definition 跨层共享且身份稳定,同名换对象时新对象另记一条。
    */
   const journal = new Map()
 
   const readConfig = () => resolveConfigStrict(unwrapConfig(config ?? {}))
 
   function restoreAll() {
-    for (const [data, records] of journal) {
-      const layer = store.layers().find((candidate) => candidate.key === data)
-      if (layer === undefined) continue
-      for (const [name, record] of records) {
-        if (layer.definitionOf(name) !== record.definition) continue
-        if (record.hadField) record.definition.deferLoading = record.value
-        else delete record.definition.deferLoading
-      }
+    for (const [definition, record] of journal) {
+      if (record.hadField) definition.deferLoading = record.value
+      else delete definition.deferLoading
     }
     journal.clear()
   }
 
-  /** 取该层的原状记录;definition 与已记录身份不一致时刷新指向当前对象(保还原命中)。 */
-  function journalEntry(layer, name, definition) {
-    const records = (() => {
-      let existing = journal.get(layer.key)
-      if (existing === undefined) {
-        existing = new Map()
-        journal.set(layer.key, existing)
-      }
-      return existing
-    })()
-    const recorded = records.get(name)
-    if (recorded === undefined) {
-      const fresh = { definition, hadField: 'deferLoading' in definition, value: definition.deferLoading }
-      records.set(name, fresh)
-      return fresh
-    }
-    if (recorded.definition !== definition) {
-      // 同名换对象:旧对象的原始态已随旧对象离场,新对象以当前现场重新记录
-      const fresh = { definition, hadField: 'deferLoading' in definition, value: definition.deferLoading }
-      records.set(name, fresh)
-      return fresh
-    }
-    return recorded
+  /** 取该 definition 的原状记录(仅记录首次改变时的现场)。 */
+  function journalEntry(definition) {
+    const recorded = journal.get(definition)
+    if (recorded !== undefined) return recorded
+    const fresh = { hadField: 'deferLoading' in definition, value: definition.deferLoading }
+    journal.set(definition, fresh)
+    return fresh
   }
 
   /** 一轮声明式收敛:白名单是唯一事实源,逐层只动与目标态有差异的名。 */
@@ -115,20 +93,26 @@ export function apply(ctx, config) {
     const { perLayer, unknownAllowlisted } = planConvergence(layers, allowlist, [TOOL_SEARCH_NAME])
     let deferred = 0
     let cleared = 0
+    let skipped = 0
     for (const plan of perLayer) {
       const layer = layers.find((candidate) => candidate.key === plan.key)
       for (const name of plan.toDefer) {
         const definition = layer.definitionOf(name)
-        journalEntry(layer, name, definition)
+        if (definition === undefined) { skipped += 1; continue }
+        journalEntry(definition)
         definition.deferLoading = true
         deferred += 1
       }
       for (const name of plan.toClear) {
         const definition = layer.definitionOf(name)
-        journalEntry(layer, name, definition)
+        if (definition === undefined) { skipped += 1; continue }
+        journalEntry(definition)
         delete definition.deferLoading
         cleared += 1
       }
+    }
+    if (skipped > 0) {
+      ctx.logger?.warn?.(`tool-gate: 层内 ${skipped} 个条目无 definition(形态漂移),已跳过`)
     }
     if (unknownAllowlisted.length > 0) {
       ctx.logger?.warn?.(`tool-gate: 白名单未知名(全部层未注册,拼错?): ${unknownAllowlisted.join(', ')}`)
@@ -139,14 +123,29 @@ export function apply(ctx, config) {
   }
 
   // tool_search 注册(折叠入口,隐式白名单 INV-12):行退场随 effect 注销,
-  // 系统回到「没装本包」的世界;register/view 面缺失只损失折叠入口,
-  // 打标收敛不受影响
+  // 系统回到「没装本包」的世界;register/definitions 面缺失或注册条目形态
+  // 不符 → 宿主代际漂移,注销并干净禁用(零动作)。检索面 = 模型本步准入面
+  // (definitions(scope, toolSet),宿主已解析 when/restrict;无 toolSet 即注册视图)。
   const toolsService = ctx.get('tools')
-  if (typeof toolsService?.register === 'function' && typeof toolsService.view === 'function') {
-    const searchTool = buildSearchTool((scope) => toolsService.view(scope).visible)
-    ctx.effect(() => toolsService.register(searchTool), 'tool-gate tool_search')
+  if (typeof toolsService?.register === 'function' && typeof toolsService?.definitions === 'function') {
+    const searchTool = buildSearchTool((exec) => new Map(
+      toolsService.definitions(exec?.agent, exec?.toolSet).map((definition) => [definition.name, definition]),
+    ))
+    const disposeSearch = ctx.effect(() => toolsService.register(searchTool), 'tool-gate tool_search')
+    // 注册后自检宿主把条目包成 registration:apply 时层可能为空(空表无从判定),
+    // 注册后这一条在层内即校验;形态不符 = 宿主代际漂移 → 注销并零动作。
+    // 层内查不到(假宿主不入层)无从判定,放行。
+    const registered = toolsService.layers?.global?.tools?.data?.get?.(TOOL_SEARCH_NAME)
+    if (registered !== undefined && registered?.definition !== searchTool) {
+      disposeSearch?.()
+      ctx.logger?.warn?.('tool-gate: 宿主层条目未经 registration 包装,内部面形态与已知契约不符,干净禁用(零动作)')
+      return
+    }
   } else {
-    ctx.logger?.warn?.('tool-gate: tools.register/view 面缺失,tool_search 未注册(降级折叠入口不可用)')
+    // definitions 面是宿主 0.2.2+ 的投影读取面;缺失即宿主代际不符。
+    // apply 时层可能为空(形态不可判定),这里直接零动作,不留监听/装饰器
+    ctx.logger?.warn?.('tool-gate: tools.register/definitions 面缺失,宿主代际不符,干净禁用(零动作)')
+    return
   }
   // ---- 降级折叠(INV-10):llm 服务软依赖,缺失 = 只打标不折叠 ----
 

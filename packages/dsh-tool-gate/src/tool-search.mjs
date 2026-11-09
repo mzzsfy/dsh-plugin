@@ -43,7 +43,7 @@ export function formatMatches(matches) {
 
 /**
  * 构造 tool_search 定义(defineTool 产物,含编译 schema 与执行体)。
- * @param {(scope: object|undefined) => Map<string, object>} definitionsOf 调用方可见定义读取器(现读)
+ * @param {(exec: object|undefined) => Map<string, object>} definitionsOf 调用方可见定义读取器(现读,拿完整 exec 以取本步准入面)
  * @returns {object} ToolRuntime.register 直收的定义
  */
 export function buildSearchTool(definitionsOf) {
@@ -63,7 +63,7 @@ export function buildSearchTool(definitionsOf) {
       if (regex === undefined) return { text: `无效模式:${String(args?.pattern ?? '')}。请输入合法正则表达式。` }
       const limit = clampLimit(args?.limit)
       const matches = []
-      for (const [name, definition] of definitionsOf(exec?.agent)) {
+      for (const [name, definition] of definitionsOf(exec)) {
         if (matches.length >= limit) break
         if (name === TOOL_SEARCH_NAME || definition === null || typeof definition !== 'object') continue
         const description = typeof definition.description === 'string' ? definition.description : ''

@@ -7,14 +7,17 @@ import assert from 'node:assert/strict'
 import { apply } from '../src/index.js'
 import { DEFERRED_PLACEHOLDER_DESCRIPTION } from '../src/fallback.mjs'
 
-/** 假宿主工具层(全局层集合,行之间共享同一份 data Map)。 */
+/** 假宿主工具层(全局层集合,行之间共享同一份 data Map;条目为宿主 registration 形态)。 */
 function makeStore(names) {
-  const data = new Map(names.map((name) => [name, { name }]))
+  const data = new Map(names.map((name) => [name, { definition: { name } }]))
+  const visible = () => ({ visible: new Map([...data].map(([name, entry]) => [name, entry.definition])) })
   return {
     data,
+    definitionOf: (name) => data.get(name)?.definition,
     tools: {
       layers: { global: { tools: { data } }, scoped: new Map() },
-      view: () => ({ visible: new Map(data) }),
+      view: visible,
+      definitions: (scope, toolSet) => (toolSet === undefined ? [...visible().visible.values()] : [...toolSet.view(scope).values()]),
       register: () => () => {},
     },
   }
@@ -111,16 +114,16 @@ test('F16-a owner 过滤:行卸载后旧 owner 的 collapse 开关不再生效,�
 test('F16-b undo journal 按定义身份刷新:同名换对象后收敛,退场时新对象回原状', () => {
   const store = makeStore(['read', 'web'])
   const row = applyRow(store.tools, makeConfig({ allowlist: ['read'], enabled: true, collapse: true }))
-  const original = store.data.get('web')
+  const original = store.definitionOf('web')
   assert.equal(original.deferLoading, true, '白名单外工具应被标记')
 
   // 宿主重挂同名定义(旧对象离场,新对象进场)
   const replacement = { name: 'web' }
-  store.data.set('web', replacement)
+  store.data.set('web', { definition: replacement })
   row.emit('tools/change')
   assert.equal(replacement.deferLoading, true, '重注册后新对象应重新打标')
 
   row.dispose()
   assert.equal('deferLoading' in replacement, false, '退场必须还原当前定义对象(旧 journal 记录不得挡住回收)')
-  assert.equal(store.data.get('read').deferLoading, undefined, '白名单内工具始终无标')
+  assert.equal(store.definitionOf('read').deferLoading, undefined, '白名单内工具始终无标')
 })
