@@ -1925,7 +1925,7 @@ window.__ModuleLoader__.load({
       const busyConfig = state.busy.configuration || state.busy.check
       return h('section', { className: 'ssb-settings' },
         h('div', { className: 'ssb-settings-head' },
-          h('div', { className: 'ssb-settings-intro' }, h('h2', null, '设置'), h('p', { className: 'ssb-muted' }, `${enabled} 个数据源 · ${controlRoutes.length} 条能力路由 · ${markets} 个市场；凭据保留在Host环境变量中，这里仅保存变量名与数据路由`)),
+          h('div', { className: 'ssb-settings-intro' }, h('h2', null, '设置'), h('p', { className: 'ssb-muted' }, `${enabled} 个数据源 · ${controlRoutes.length} 条能力路由 · ${markets} 个市场；凭据由宿主凭据服务保管（接口不全时回退环境变量），这里只保存引用名与数据路由`)),
           h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: busyConfig, title: '写入内置免凭据数据源与八市场能力路由，探针不可用的目标自动剔除；自选与显示偏好不受影响', onClick: quiet(() => runtime.applyRecommended()) }, state.checkProgress || (busyConfig ? '正在应用…' : '应用推荐配置')))),
         h('div', { className: 'ssb-tablist', role: 'tablist', 'aria-label': '设置分区' }, ...TABS.map(([key, label]) => h('button', { key, role: 'tab', 'aria-selected': tab === key, className: `ssb-tab${tab === key ? ' ssb-tab-on' : ''}`, onClick: () => change({ tab: key }, false) }, label))),
         pane)

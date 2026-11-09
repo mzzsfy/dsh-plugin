@@ -1,5 +1,7 @@
 # 股票 K 线与多市场开发规格
 
+> 文档状态（2026-11-09）：本文的 K 线/八市场设计已随 0.4.0 落地，保留为实施依据；0.4.0 另外交付的分组、价格标记、悬浮盯盘，以及未发布的宿主凭据托管与 Finnhub 适配器不在本文范围，见 [CHANGELOG](../../packages/dsh-stock-assistant/CHANGELOG.md) 与 [插件说明](../../packages/dsh-stock-assistant/README.md)。
+
 日期：2026-10-30。目标包：`@mzzsfy/dsh-stock-sidebar` 第二期。状态：设计定稿待实施。前置：第一期规格见[开发-股票侧边栏插件](../开发-股票侧边栏插件.md)（已交付：多源行情骨架/浏览市场/设置路由），本期在其上增量。执行状态与审查记录见 .work/bootstrap-kline-multimarket.md（任务记录，不入版本库）。
 
 ## 文档职责与流程边界

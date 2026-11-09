@@ -31,7 +31,7 @@ dsh-plugin/
 | @mzzsfy/dsh-settings-nav-icons | 设置导航分区图标:把千篇一律的齿轮换成各分区专属图形,并为插件市场卡片头像槽提供插件图标,重载页面即恢复官方图标 | 观察设置导航 DOM 与市场卡片 DOM,按分区显示文本贴图;插件面板可声明自己的图标;取图链 声明→内置→关键词→哈希 | DSH 纯前端插件(DOM 观察) |
 | @mzzsfy/dsh-auto-trust-all | 动态信任所有实际到达的 Host:泛域名等无法枚举的入口免改启动命令即可达,监听绑定归部署层,认证层(原生 cookie 与会话闸门)不动 | 包装 webServer 全部路由把 Host 头实时注册进 `connection.trustedHosts`(0.2.0 线 `webRuntime` 镜像);容量 maxHosts 默认 100 按 LRU 淘汰,注册/淘汰 console 直出可作入口审计 | DSH host 端插件(bundle patch + 路由包装) |
 | @mzzsfy/dsh-shared-terminal | 共享交互式终端:AI `terminal` 单工具(open/list/read/write/wait/close)与 DSH 官方 Sidebar xterm 共用 Session terminal,用户可输入并查看当前屏幕 | 通过 DSH 官方 terminalController 管理终端;read 走私有 owner lookup 与 xterm active viewport;0.2.1-rc.2 起写入改自持 attach 泵(用户可随时接管) | DSH 双端插件(官方 terminal controller + Session result renderer) |
-| @mzzsfy/dsh-stock-assistant | 股票单页面工具：沪深A股自选、搜索、基础行情、别名/置顶/排序、数据源与路由设置；页面状态不随会话切换销毁 | 根作用域 main + 左导航入口；Provider按市场/能力路由，报价同源归一；专用 stock_assistant 数据域保存自选/配置/缓存，不使用默认 settings；通知复用公共WS | DSH 双端插件(storage 域 + web 路由 + 全局工具页) |
+| @mzzsfy/dsh-stock-assistant | 股票工作台:沪/深 A 股、港股、美股 NYSE/NASDAQ、日经、韩证、伦敦八市场的自选、搜索、行情与 K 线图,支持分组/置顶/别名/价格标记、悬浮盯盘与数据源能力路由;页面状态不随会话切换销毁 | 根作用域 main + 左导航入口;Provider 按市场/能力路由,报价同源归一;专用 stock_assistant 数据域保存自选/配置/缓存,K 线经 lightweight-charts 渲染;通知走公共 common-tools(已装 turn-notify 时由其呈现) | DSH 双端插件(storage 域 + web 路由 + 全局工具页) |
 | @mzzsfy/dsh-cron-board | 定时任务看板:环境变量集中管理(多值展开/dotenv 导入导出)+ cron 定时任务,执行体支持本地脚本与 dsh 会话任务(fresh 每次新建 / pinned 固定会话,可指定模型) | host 端 croner 解析 cron 触发,全局并发闸门与超时收尾;支持内联时区后缀 `T±N`;pinned 会话任务忙时自动跳过;会话任务经 sessionController 投递,投递即终态 | DSH 双端插件(web 路由 + settings 槽位) |
 | @mzzsfy/dsh-common-tools | 公共依赖库:按插件空间隔离的 WebSocket 订阅/推送总线与 toast,两端 `setupCommonTools(ctx)` 自动绑定当前插件 | 插件就是通道,subscribe/publish 共享单条页面 WS;host 提供 presence,client 提供 toast;经 session-manager 占位条目装载 | 普通 npm 依赖非插件,插件管理不可见 |
 | @mzzsfy/dsh-context-manager | 对话增强:历史输入浮层(`Alt+↑` 唤起,四范围导航与即时搜索,常用提示词收藏)、插话撤回、对话分叉(重写式 fork,原输入回填供编辑重发)、标题栏复制 sessionId、克隆仓库打开工作区 | Host 聚合工作区历史缓存(`~/.dsh/historyPrompt/`)经 `/api/context/*` 供浮层查询;分叉走宿主 sessions 服务面 fork+open;克隆注入官方浏览目录弹窗 | DSH 双端插件(host 路由 + client 注入) |
@@ -43,10 +43,10 @@ dsh-plugin/
 
 ## 商店展示
 
-插件在 DSH 商店(设置 → Plugins → Discover)的图片分两层:
+插件在 DSH 商店(dshmarket 与官方 Discover)的图片分两层:
 
-- **48px 图标**(列表卡片):图标资产 `assets/icons/*.svg`(Discover 索引内联形态)与 `assets/icons/png/`(上游 icon 光栅形态,180px)由 `scripts/generate-icons.mjs` 从 nav-icons glyph 生成,与设置页图标同一视觉语言。官方目录(awesome-dsh-plugin)当前全部条目无图标且其索引生成器不透传 icon 字段,随上游 PR 补齐。
-- **详情页效果截图**:仓库 `assets/screenshots/<包名>/` 收录各插件真实界面截图,随上游收录与截图 PR 提交,展示于 awesome-dsh-plugin.com 与 dshmarket 详情页(官方 Discover 详情不承载截图字段)。上游采用方式:awesome-dsh-plugin 仓库的 `build-site.mjs` 按作者仓库根 `screenshots.json` 登记的 GitHub 直链取图,截图 PR 需同时提交本目录图片与该登记文件(收录条目草稿在任务工作区,随 PR 一并提交)。
+- **48px 图标**(列表卡片):`assets/icons/*.svg` 与 `assets/icons/png/`(180px)是商店/文档用图标资产(SVG 由 `scripts/generate-icons.mjs` 从 nav-icons glyph 生成,PNG 为同源 180px 光栅版;不保证与各插件运行时导航图标逐像素一致)。上游收录条目以 `icon` 字段指向 PNG 直链,展示于 dshmarket 商店卡片;截至 2026-11-09 官方 catalog 索引生成器仍不透传 `icon`,官方 Discover 列表显示默认占位。
+- **详情页效果截图**:仓库 `assets/screenshots/<包名>/` 收录各插件真实界面截图,展示于 awesome-dsh-plugin.com 与 dshmarket 商店(卡片与详情同源数据);官方 Discover 详情不承载截图字段。上游取图方式是读取作者仓库中**条目目录**旁的 `screenshots.json`(monorepo 即 `packages/<包名>/screenshots.json`;最多 8 条,GitHub https 直链或包目录内的相对路径),探活后随站点构建收录——新增或替换截图只需提交本目录图片与对应 `screenshots.json`,不需要单独的截图 PR。上游收录条目草稿在任务工作区,随条目 PR 一并提交。
 
 ## 安装与更新:缩短 pnpm 宽限期
 
@@ -68,7 +68,7 @@ pnpm config set --global minimumReleaseAge 360
 
 ### 宿主兼容性
 
-兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。窗口唯一规则实现为 `node scripts/compat/window.mjs`(实算随 dist-tag 滑动,本节版本号仅为写作日快照,与脚本输出不一致时以脚本为准):2026-10-26 实算 0.2.1-rc.3(主测)/ 0.2.1-rc.2(基线)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本登记(compatible=实测通过,unknown=未测;存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤低于该代际的宿主(声明包:auto-trust-all/boss-simulator/bug-perf/llm-pi-gateway/session-manager/shared-terminal/shell-select/tool-gate)。逐包测试进度与兼容性检查总纲见 [docs/兼容性测试/](docs/兼容性测试/)(本地维护,不入库,干净 clone 不可见):检查维度(D01-D15)、20 包适用矩阵与项目级验收门槛见 [兼容性检查总纲](docs/兼容性测试/兼容性检查总纲.md),逐包断言与证据要求见各包 `兼容性测试.md`。
+兼容性目标策略(2026-09-27 起):双槽窗口——主测 = 各渠道 dist-tag 指向版本中最新的 rc(渠道全无 rc 时取各渠道指向版本中语义化版本最大者;与基线同版本则窗口缩为单主测),完全适配(阻塞);基线 = dist-tag `latest` 指向版本,不崩溃底线(阻塞);三版本完全兼容不再执行(难度与收益不成比例)。窗口唯一规则实现为 `node scripts/compat/window.mjs`(实算随 dist-tag 滑动,本节版本号仅为写作日快照,与脚本输出不一致时以脚本为准):2026-11-09 实算 0.2.2-rc.1(主测;与 `latest` 同版本,窗口缩为单槽)。各包 manifest `dsh.compatibility.dshReleases` 为逐版本登记(compatible=实测通过,unknown=未测;存档非承诺,兼容面以窗口实测为准),`dsh.hostMin` 由 compat 装载层按包过滤低于该代际的宿主(声明包:auto-trust-all/boss-simulator/bug-perf/llm-pi-gateway/session-manager/shared-terminal/shell-select/tool-gate)。逐包测试进度与兼容性检查总纲见 [docs/兼容性测试/](docs/兼容性测试/)(本地维护,不入库,干净 clone 不可见):检查维度(D01-D15)、20 包适用矩阵与项目级验收门槛见 [兼容性检查总纲](docs/兼容性测试/兼容性检查总纲.md),逐包断言与证据要求见各包 `兼容性测试.md`。
 
 以下为 2026-09-27 Round 30 实测记录(历史留档,当时窗口仍为三版本:0.1.2-rc.1 基线 / 0.1.5-rc.3 主测 / 0.1.7-rc.2 完全兼容目标;其中 dsh-shell-select 预设架构当时要求 ≥0.1.7-rc.1,对当时基线不可安装——该例外随窗口滑动已不再成立,hostMin 过滤现由装载层通用承载):
 
