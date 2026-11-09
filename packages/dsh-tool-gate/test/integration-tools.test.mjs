@@ -2,6 +2,10 @@
 // 投影行为(SC-10):deferred 工具的 schema 产物带 deferLoading、白名单内不带、
 // 可见性不变(defer 不改 view().visible,只改声明形态)。同时覆盖真 cordis
 // 行挂载下的行模块(apply/Config)装载与本包收敛链路。
+//
+// 宿主代际门:工具门只对 0.2.2+ 的 registration 条目形态生效;测试环境仍可能
+// 解析旧根桥(裸 definition,CI 基线口径),此时功能面跳过,改由 SC-25 断言
+// 干净禁用。形态探测见 test/host-form.mjs。
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,6 +14,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import * as row from '../src/index.js'
+import { HOST_SKIP } from './host-form.mjs'
 
 function makeTool(name) {
   return defineTool({
@@ -40,31 +45,30 @@ async function boot(toolNames, allowlist) {
   return { root, registered, fiber }
 }
 
-test('SC-10 官方投影:deferred 带标,白名单内不带,可见性不变', async () => {
+test('SC-10 官方投影:deferred 带标,白名单内不带,可见性不变', { skip: HOST_SKIP }, async () => {
   const { root, registered } = await boot(['read', 'web_search'], ['read'])
   assert.equal(registered.get('web_search').deferLoading, true)
   assert.equal('deferLoading' in registered.get('read'), false)
 
-  const schemaOf = (name) => root.tools.schemaOf(registered.get(name), false)
+  const schemaOf = (name) => root.tools.schemas(undefined).find((schema) => schema.name === name)
   assert.equal(schemaOf('web_search').deferLoading, true)
   assert.equal(schemaOf('read').deferLoading, undefined)
 
   assert.ok(root.tools.get('web_search'))
   assert.ok(root.tools.get('read'))
 
-  const wire = root.tools.wireSchemas(undefined)
-  assert.deepEqual([...wire.knownNames].sort(), ['read', 'tool_search', 'web_search'])
-  assert.ok(wire.schemas.some((schema) => schema.name === 'web_search' && schema.deferLoading === true))
+  const names = root.tools.definitions().map((definition) => definition.name).sort()
+  assert.deepEqual(names, ['read', 'tool_search', 'web_search'])
 })
 
-test('行模块在真 cordis 下装载并按 Config 收敛', async () => {
+test('行模块在真 cordis 下装载并按 Config 收敛', { skip: HOST_SKIP }, async () => {
   const { root, registered } = await boot(['read', 'web_search', 'todo_write'], ['read'])
   assert.equal(registered.get('web_search').deferLoading, true)
   assert.equal(registered.get('todo_write').deferLoading, true)
   assert.equal('deferLoading' in registered.get('read'), false)
 })
 
-test('SC-6 行退场还原:真 cordis dispose 后回到原状', async () => {
+test('SC-6 行退场还原:真 cordis dispose 后回到原状', { skip: HOST_SKIP }, async () => {
   const { root, registered, fiber } = await boot(['read', 'web_search'], ['read'])
   assert.equal(registered.get('web_search').deferLoading, true)
   await fiber.dispose()
@@ -72,14 +76,14 @@ test('SC-6 行退场还原:真 cordis dispose 后回到原状', async () => {
   void root
 })
 
-test('SC-5 真宿主重注册:tools/change 驱动重收敛', async () => {
+test('SC-5 真宿主重注册:tools/change 驱动重收敛', { skip: HOST_SKIP }, async () => {
   const { root, registered } = await boot(['read'], ['read'])
   const replacement = makeTool('web_search')
   root.tools.register(replacement)
   assert.equal(replacement.deferLoading, true)
 })
 
-test('SC-22 真宿主:tool_search 注册于全局层,收敛不打标,退场注销', async () => {
+test('SC-22 真宿主:tool_search 注册于全局层,收敛不打标,退场注销', { skip: HOST_SKIP }, async () => {
   const { root, fiber } = await boot(['read', 'web_search'], ['read'])
   const definition = root.tools.get('tool_search')
   assert.ok(definition, 'tool_search 应注册于全局层')
@@ -121,7 +125,7 @@ async function bootScopes(t) {
 }
 
 // Given 两个会话各有私有工具；When 各自搜索；Then 结果只含调用方可见定义。
-test('SC-23 tool_search 隔离兄弟会话并遵守继承与 restrict', async (t) => {
+test('SC-23 tool_search 隔离兄弟会话并遵守继承与 restrict', { skip: HOST_SKIP }, async (t) => {
   const { agentA, agentB, search } = await bootScopes(t)
   const names = (result) => result.text.match(/^### (.+)$/gm)?.map((line) => line.slice(4)).sort() ?? []
   assert.deepEqual(names(await search(agentA)), ['inherited', 'only_a', 'read', 'shadowed'])
@@ -130,7 +134,7 @@ test('SC-23 tool_search 隔离兄弟会话并遵守继承与 restrict', async (t
 })
 
 // Given 局部定义遮蔽全局同名；When 搜索；Then 返回实际执行的局部定义。
-test('SC-23 tool_search 同名解析与宿主执行视图一致', async (t) => {
+test('SC-23 tool_search 同名解析与宿主执行视图一致', { skip: HOST_SKIP }, async (t) => {
   const { agentA, search } = await bootScopes(t)
   const result = await search(agentA, '^shadowed$')
   assert.equal(result.count, 1)
@@ -139,19 +143,23 @@ test('SC-23 tool_search 同名解析与宿主执行视图一致', async (t) => {
 })
 
 // Given 会话均已组装工具；When A 检索定义；Then A/B 工具投影与 defer 态不变。
-test('SC-24 tool_search 不改变其他会话或本会话的工具加载态', async (t) => {
+test('SC-24 tool_search 不改变其他会话或本会话的工具加载态', { skip: HOST_SKIP }, async (t) => {
   const { root, agentA, agentB, search } = await bootScopes(t)
   const beforeA = root.tools.schemas(agentA)
   const beforeB = root.tools.schemas(agentB)
-  const outcome = await root.tools.execute({
-    callId: 'scope-A-search', name: 'tool_search', arguments: { pattern: '^only_a$' },
-    agent: agentA, signal: new AbortController().signal,
-  })
-  assert.equal(outcome.isError, false, JSON.stringify(outcome))
-  assert.equal(outcome.value.count, 1)
-  assert.ok(outcome.value.text.includes('only_a'))
+  const outcome = await search(agentA, '^only_a$')
+  assert.equal(outcome.count, 1)
+  assert.ok(outcome.text.includes('only_a'))
   assert.deepEqual(root.tools.schemas(agentA), beforeA)
   assert.deepEqual(root.tools.schemas(agentB), beforeB)
   assert.equal(root.tools.get('only_a', agentA).deferLoading, true)
   assert.equal((await search(agentB, '^only_a$')).count, 0)
+})
+
+// Given 宿主层条目是裸 definition(0.2.2 前形态);When 行 apply;Then 干净禁用:
+// 不打标、不注册折叠入口,零动作不崩(基线口径,不得静默失效)。
+test('SC-25 宿主内部面漂移:裸 definition 层干净禁用', { skip: HOST_SKIP === false }, async () => {
+  const { root, registered } = await boot(['read', 'web_search'], ['read'])
+  assert.equal('deferLoading' in registered.get('web_search'), false, '漂移形态不得打标')
+  assert.equal(root.tools.get('tool_search'), undefined, '漂移形态不注册折叠入口')
 })

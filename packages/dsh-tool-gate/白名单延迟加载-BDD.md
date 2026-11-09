@@ -2,7 +2,7 @@
 
 背景:插件向全局层注入大量工具,全量进模型上下文,污染注意力与 token 预算。
 宿主 0.2 起原生支持 deferred tool loading 全链路:工具 definition 带
-`deferLoading: true` → `wireSchemas`/system-prompt 投影透传 → deepseek 适配器
+`deferLoading: true` → `schemas`/system-prompt 投影透传 → deepseek 适配器
 映射 API `defer_loading: true` → 服务端按需搜索激活(agent-loop 以 developer
 message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性);不支持
 的上游由投影层剥字段退化为全量注入,无害。官方 `tools.restrict()` 只开 agent
@@ -21,14 +21,18 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   白名单外即打(含插件自带 defer 声明的工具——白名单外本就应延迟)。
 - **INV-2 原状可还原**:收敛只改 `deferLoading` 字段且每次改变前记录原状
   (undo journal);行禁用/卸载时按 journal 还原全部原状,系统回到
-  「没装本包」的世界。还原前校验层内同名工具仍是同一 definition 引用,
-  防止误改重注册后的新对象。
-- **INV-3 打标即生效**:schema 投影(`wireSchemas`/`view`)每请求实时读
-  definition,打标/清标不改层成员资格,无需 emit `tools/change`,下一次
-  assemble 自然生效。
-- **INV-4 干净禁用**:宿主 `ctx.tools` 缺失或全局层内部结构
-  (`layers.global.tools`,NamedEntries Map)与已知形态不符时,apply 打日志
-  即返回,零动作不崩;宿主升级重构内部面后自愈路径 = 形态再探测。
+  「没装本包」的世界。journal 以 definition 引用为键(宿主层表清空会换代,
+  层键会失联;definition 跨层共享且身份稳定),还原按 definition 逐条进行。
+- **INV-3 打标即生效**:schema 投影(`schemas`/`view`)每请求实时读层条目内的
+  definition(宿主 0.2.2 起层条目为 registration 包装 `{ definition, when }`,
+  `deferLoading` 必须写在 `registration.definition` 上;写在 registration 本身
+  会让宿主投影读不到,工具门自读自洽而全量注入——2026-11-10 实测失效根因),
+  打标/清标不改层成员资格,无需 emit `tools/change`,下一次 assemble 自然生效。
+- **INV-4 干净禁用**:宿主 `ctx.tools` 缺失、缺 `definitions` 投影面(0.2.2
+  前)或全局层内部结构(`layers.global.tools`,NamedEntries Map + registration
+  条目形态)与已知形态不符时,apply 打日志即返回,零动作不崩;宿主升级重构
+  内部面后自愈路径 = 形态再探测。裸 definition 条目形态(0.2.2 前)判为漂移,
+  不静默退化。
 - **INV-5 原生会话投影零干预**:原生路由的激活、会话投影与 prompt 顺序
   校验由宿主承担。本包注册只读 `tool_search` 供降级路由检索定义文本,
   不注册被搜索工具、不修改会话加载态、不 provide 服务、不拦截执行。
@@ -38,9 +42,9 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
 - **INV-7 收敛面 = 全局层 + 全部 per-agent scope 层**:宿主 0.2 起模型可见
   工具多注册在 agent 面(真机实证:全局层近乎恒空,scoped 层 20+ 工具),
   收敛每轮现读层清单,scoped 层随 agent 动态生灭,新层首收敛由其注册触发
-  的 tools/change 驱动。层标识用层数据表(Map)对象引用直接作 journal 键,
-  禁止字符串化(scope 键对象 String 化全部坍缩 '[object Object]',层间
-  lookup 串层,真机实证 read_image/pwsh 漏打)。
+  的 tools/change 驱动。层身份一律用数据表(Map)对象引用比对,禁止字符串化
+  (scope 键对象 String 化全部坍缩 '[object Object]',层间 lookup 串层,真机
+  实证 read_image/pwsh 漏打);undo journal 的键见 INV-2(definition 引用)。
 - **INV-8 行模块 inject 声明门控**:`export const inject = ['tools']` 使
   行 fiber 等 tools 服务在场才 apply;apply 内 ctx.get 即时解析早于服务
   可达(真机实证 undefined → 误判干净禁用)。服务缺失 = 行保持未激活 =
@@ -72,12 +76,14 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   路由,不读宿主 modelInfo/compat 内部面。
 - **INV-12 tool_search 隐式白名单**:折叠入口工具 `tool_search` 经
   `defineTool` 注册于主行全局层(effect 注销),收敛把它视作隐式白名单成员
-  永不打标;执行只读 `tools.view(exec.agent).visible`,正则匹配 name+description,
-  继承、restrict 与同名遮蔽由宿主解析,无 agent 时仅全局视图。返回定义文本
-  (name/description/parameters),模型据文本以正确名字与参数直接调用
-  (宿主执行层按名查 registry,与请求 tools 列表无关;但请求 tools 必须含
-  该名字,见 INV-10a)。无效 pattern 返回错误文本不抛。owner 限定 adapter
-  实例(gateway 同款),同原型非授权实例透传。
+  永不打标;执行只读调用方本步可见面——模型步内 `exec.toolSet` 存在时用
+  `tools.definitions(exec.agent, exec.toolSet)`(宿主已解析继承、restrict、
+  同名遮蔽与条件注册 `when` 准入),程序化调用无 toolSet 时退回
+  `tools.view(exec.agent).visible`,无 agent 时仅全局视图。正则匹配
+  name+description,返回定义文本(name/description/parameters),模型据文本
+  以正确名字与参数直接调用(宿主执行层按名查 registry,与请求 tools 列表
+  无关;但请求 tools 必须含该名字,见 INV-10a)。无效 pattern 返回错误文本
+  不抛。owner 限定 adapter 实例(gateway 同款),同原型非授权实例透传。
 
 ## GUI 场景
 
@@ -134,6 +140,24 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   同名定义覆盖全局定义,无 agent 调用只返回全局定义。
 - **SC-24 检索无加载副作用**:Given A/B 均已投影 tools;When A 搜索私有工具;
   Then 两者 tools schema 与 defer 态均不变,B 仍搜不到 A 的私有工具。
+- **SC-25 内部面形态漂移**:Given 宿主层条目是裸 definition(0.2.2 前形态)或
+  注册后条目未经 registration 包装;When 行 apply;Then 打形态日志并零动作:
+  不打标、不注册检索入口(已注册即注销)、不进入折叠安装段,不崩。两条判定面:
+  层非空按条目形态探测(任一非 registration ⇒ 干净禁用);层为空则注册
+  `tool_search` 后自检该条目(无 `definition` 包装即漂移)。
+- **SC-26 检索跟随准入面**:Given 条件注册工具(`when`)本步未准入;When 模型
+  步内检索(exec 带 toolSet);Then 结果不含该工具;无 toolSet 的程序化调用
+  退回注册视图,可检到定义文本。
+- **SC-27 会话隔离矩阵**(真 cordis + 官方 ToolRuntime + dsh-scope 实测):
+  兄弟会话检索互不可见;A 的 restrict 与同名 shadow 只作用于 A;B 投影与请求
+  不含 A 私有工具;动态新增/退场会话层由 tools/change 收敛且不改变兄弟会话
+  投影;多会话并发注册/检索/折叠互不串;归档等价(会话 scope 层退场)不影响
+  活跃会话、共享定义重建仍受控;全局层换代后 layers() 现读新表;行全量退场后
+  同定义重装,白名单收敛、投影带标与检索入口恢复(重启等价);同一 adapter 上
+  各会话请求按各自 visible 折叠、请求对象零变异;行退场后 global、父链预设层
+  与 A/B 会话层全部还原且 tool_search 注销;某 scope 层清空(宿主表换代)后同一
+  definition 在新层重建,行退场仍能还原;停用/恢复全层同态;并发检索与他层
+  注册交错后隔离终态一致。
 
 ## 场景
 
@@ -149,8 +173,8 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
 - **SC-5 重注册收敛**:已打标工具被插件卸载重注册(新 definition 对象,
   defer 态回原状)⇒ 下一轮收敛重新打标。
 - **SC-6 行退场还原**:收敛态若干工具被本包改动 ⇒ 行禁用 ⇒ journal 逐项
-  还原:本包打过标的字段消失,被本包清掉的自带 defer 声明恢复;层内已被
-  重注册顶替的名字跳过还原。
+  还原:本包打过标的字段消失,被本包清掉的自带 defer 声明恢复;同名换对象
+  各自记录原状,退场逐条还原(旧对象即使已离场也回原状,无人观察)。
 - **SC-7 enabled=false**:`enabled` 写 false ⇒ 全部按 journal 还原并停止
   打标;写回 true ⇒ 重新收敛。
 - **SC-8 未知名白名单**:白名单 = [read, no_such_tool] ⇒ 收敛正常,
@@ -158,7 +182,7 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
 - **SC-9 内部面缺失**:ctx.tools 无 layers.global.tools Map 结构 ⇒ 日志
   说明即返回,不崩,零动作。
 - **SC-10 官方投影锁定**(集成):真 cordis + dsh-tools 下,deferred 工具的
-  `schemaOf` 产物带 `deferLoading: true`,白名单内工具不带;`view().visible`
+  `tools.schemas()` 产物带 `deferLoading: true`,白名单内工具不带;`view().visible`
   两者均在(defer 不改可见性,只改声明形态)。
 
 ## 已知边界
@@ -173,3 +197,9 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   宿主 market 禁行,不在本包范围。
 - 会话早于门启用时,历史中已见过的 deferred 工具在折叠后失去 schema,
   模型可经 tool_search 重新取回定义;历史 tool_call 块投影不受影响。
+- 宿主 0.2.2 之前的代际不在支持面(`hostMin = 0.2.2-rc.1`):低于 hostMin 由
+  compat 装载层排除;被强制加载(旧 profile 手工挂载,或宿主版本不可读时
+  dev-link 跳过校验)时,层条目为裸 definition,工具门按内部面漂移干净禁用,
+  功能不生效但不崩溃(dev-link 在版本可读且低于 hostMin 时直接拒绝)。
+- scoped 表中数据非 Map 的条目被跳过投影(仅损失该层收敛,不视为全局漂移);
+  宿主若整体重构该面,全局层形状同时变化即由 INV-4 判禁用。
