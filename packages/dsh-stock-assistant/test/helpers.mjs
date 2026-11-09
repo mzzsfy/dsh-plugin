@@ -4,7 +4,7 @@ export function memoryStorage() {
   let closed = false, writes = 0, broken = false
   return {
     maps, get closed() { return closed }, get writes() { return writes }, set broken(value) { broken = value },
-    async open() { return { table: name => ({ get: key => maps[name].get(key), entries: () => maps[name].entries(), async put(key, value) { if (broken) throw Error('disk'); maps[name].set(key, structuredClone(value)); writes++ }, async update(key, fn) { const next = fn(maps[name].get(key)); if (broken) throw Error('disk'); maps[name].set(key, structuredClone(next)); writes++; return next } }), async close() { closed = true } } },
+    async open() { return { table: name => ({ get: key => maps[name].get(key), entries: () => maps[name].entries(), async put(key, value) { if (broken) throw Error('disk'); maps[name].set(key, structuredClone(value)); writes++ }, async delete(key) { if (broken) throw Error('disk'); const had = maps[name].delete(key); if (had) writes++; return had }, async update(key, fn) { const next = fn(maps[name].get(key)); if (broken) throw Error('disk'); maps[name].set(key, structuredClone(next)); writes++; return next } }), async close() { closed = true } } },
   }
 }
 export const provider = (id = 'ts-one', adapterId = 'tushare') => ({ id, adapterId, enabled: true, credentialEnv: 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: 'account-one', budget: { requestsPerMinute: 50, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { quotes: 50, catalog: 10, calendar: 10 } } })

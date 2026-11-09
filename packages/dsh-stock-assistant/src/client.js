@@ -57,7 +57,12 @@ window.__ModuleLoader__.load({
     // 成本标记取等权平均: 没有数量信息, 等权是唯一不引入臆测的口径
     const avgCostOf = marks => { const prices = (marks || []).filter(mark => mark.kind === 'cost').map(mark => mark.price); return prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : null }
     // 价格标记按该证券的价位精度显示: 港股四位小数, 用 toString 会丢位数
-    const priceTextOf = (value, scale) => value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(scale ?? 2)
+    const priceTextOf = (value, scale) => value == null || value === '' || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(scale ?? 2)
+    // 涨跌方向只在这里判一次: 面板与悬浮窗共用, 避免 0 被显示成涨或被当成跌
+    const toneClass = pct => {
+      const num = finiteOr(pct)
+      return Number.isFinite(num) ? num > 0 ? ' ssb-up' : num < 0 ? ' ssb-down' : '' : ''
+    }
     // 每个标记各自的盈亏口径: 成本看「现价相对它」的浮盈, 卖价看「它相对成本」的潜在收益,
     // 还没有成本时卖价退回相对现价——三个口径都是同一个式子, 只是基准不同
     const markPct = (mark, last, avgCost) => {
@@ -338,8 +343,6 @@ window.__ModuleLoader__.load({
     const quiet = fn => (...args) => Promise.resolve().then(() => fn(...args)).catch(() => { })
     const signed = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${value}`
     const timeText = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未知'
-    // 价格: 空值显示破折号
-    const formatPrice = value => value == null || Number.isNaN(Number(value)) ? '—' : String(value)
     // 秒数转 1d2h3m4s: 值为 0 的段整段省略, 不留 0 占位
     const formatDuration = total => {
       const seconds = Math.max(0, Math.round(Number(total) || 0))
@@ -442,13 +445,44 @@ window.__ModuleLoader__.load({
     }
     // 列表悬停: 当日区间与全部标记; 缺字段给破折号, 不能把 null 当 0 显示
     function quoteTipLines({ quote, marks, scale }) {
-      const digits = Number.isInteger(scale) ? scale : 2
-      const price = value => value == null || value === '' || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(digits)
+      const price = value => priceTextOf(value, scale)
       return [
         `今高 ${price(quote?.high)}　今低 ${price(quote?.low)}`,
         `今开 ${price(quote?.open)}　昨收 ${price(quote?.previousClose)}`,
         ...(marks || []).map(mark => `${mark.kind === 'cost' ? '成本' : '卖价'} ${price(mark.price)}`),
       ]
+    }
+    // K线十字线读数: 图例只报最后一根, 悬停时要能读到光标下那根的开高低收与量
+    function crosshairTipLines({ candle, scale, trend, preClose, volume, series }) {
+      const price = value => priceTextOf(value, scale)
+      const last = finiteOr(candle?.close ?? candle?.value)
+      const base = finiteOr(preClose)
+      const pct = Number.isFinite(last) && Number.isFinite(base) && base ? (last - base) / base * 100 : null
+      const pctText = pct == null ? '—' : `${signed(pct.toFixed(2))}%`
+      const vol = volume ?? candle?.volume
+      const amount = `量 ${vol == null ? '—' : formatAmount(vol, { zeroIsMissing: false })}`
+      const rows = trend
+        ? [`价 ${price(last)}`, pctText].concat(volume == null ? [] : [amount])
+        : [`开 ${price(candle?.open)}　高 ${price(candle?.high)}`, `低 ${price(candle?.low)}　收 ${price(candle?.close)}`, `${pctText}　${amount}`]
+      // 指标线与浮层同源: 只列开着的, 成对排一行, 免得十几条把浮层撑出画布
+      for (let at = 0; at < (series || []).length; at += 2) rows.push(series.slice(at, at + 2).map(([label, value]) => `${label} ${price(value)}`).join('　'))
+      return rows
+    }
+    // 时间键归一: 日K的 time 可能是字符串或 BusinessDay, 分时是 Unix 秒, 跨形态比较前先拍平
+    function timeKeyOf(time) {
+      if (typeof time === 'number' || typeof time === 'string') return time
+      return time?.year ? `${time.year}-${time.month}-${time.day}` : ''
+    }
+    function crosshairTimeText(time, trend, zone) {
+      if (time == null) return ''
+      if (trend) return Number.isFinite(time) ? new Intl.DateTimeFormat('zh-CN', { timeZone: zone || 'Asia/Shanghai', hour12: false, hour: '2-digit', minute: '2-digit' }).format(new Date(time * 1000)) : ''
+      if (typeof time === 'string') return time
+      if (time?.year) { const pad = n => String(n).padStart(2, '0'); return `${time.year}-${pad(time.month)}-${pad(time.day)}` }
+      return ''
+    }
+    // 读数浮层贴光标右上, 靠边时翻到内侧: 固定在画布上, 不跟着价格轴漂
+    function crosshairTipStyle({ point, width, height }) {
+      return { left: Math.max(4, Math.min(point.x + 14, Math.max(4, width - 204))), top: Math.max(4, Math.min(point.y + 14, Math.max(4, height - 160))) }
     }
     // 列表悬停浮层: 高度按行数估算, 下方放不下就翻到行上方, 多标记时也不能撞出视口
     const ROWTIP_LINE = 17.4, ROWTIP_PAD = 12
@@ -630,7 +664,7 @@ window.__ModuleLoader__.load({
                 const rowOf = id => {
                   const item = w.items[id], entry = data.quotes[id], q = entry?.quote
                   sequence.push(id)
-                  const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
+                  const direction = toneClass(q?.changePct)
                   // 列表只显示一个数: 多个成本按等权平均合成一个「持仓成本」
                   const avgCost = avgCostOf(item.marks)
                   const plPct = avgCost != null && q?.last != null ? Number((Number(q.last) - avgCost) / avgCost * 100).toFixed(1) : null
@@ -665,22 +699,22 @@ window.__ModuleLoader__.load({
                       const target = buttons[next]; runtime.updateView({ keyboardNavigating: true, frozenOrder: order, focusId: target?.dataset.securityId }); target?.focus()
                     }
                   } }, item.alias || item.officialName, h('span', { className: 'ssb-code' }, `${MARKET_LABEL[item.exchange] || item.exchange} ${item.code}`)),
-                      h('span', { className: `ssb-cell-price ssb-price${direction}`, title: q?.last == null ? '等待报价' : `${item.currency} ${q.last}` }, q?.last ?? '—'),
+                      h('span', { className: `ssb-cell-price ssb-price${direction}`, title: q?.last == null ? '等待报价' : `${item.currency} ${q.last}` }, priceTextOf(q?.last, item.priceScale)),
                       q?.changePct == null ? h('span', { className: 'ssb-cell-pct ssb-muted' }, '—') : h('span', { className: `ssb-cell-pct ssb-pill${direction}` }, `${signed(q.changePct)}%`),
                       q?.change == null ? h('span', { className: 'ssb-cell-change ssb-muted' }, '—') : h('span', { className: `ssb-cell-change ssb-change${direction}` }, signed(q.change)),
-                      h('span', { className: 'ssb-cell-open' }, formatPrice(q?.open)),
-                      h('span', { className: 'ssb-cell-range' }, `${formatPrice(q?.high)}/${formatPrice(q?.low)}`),
+                      h('span', { className: 'ssb-cell-open' }, priceTextOf(q?.open, item.priceScale)),
+                      h('span', { className: 'ssb-cell-range' }, `${priceTextOf(q?.high, item.priceScale)}/${priceTextOf(q?.low, item.priceScale)}`),
                       h('span', { className: 'ssb-cell-amount' }, formatAmount(q?.amount)),
                       h('span', { className: 'ssb-cell-amplitude' }, amplitude == null ? '—' : `${amplitude}%`),
-                      h('span', { className: `ssb-cell-pl${plPct == null ? '' : Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, plPct == null ? '—' : `${signed(plPct)}%`),
+                      h('span', { className: `ssb-cell-pl${toneClass(plPct)}` }, plPct == null ? '—' : `${signed(plPct)}%`),
                       h(QuoteStatus, { entry, short: true })),
                     h('div', { className: 'ssb-row-sub' },
-                      h('span', { className: 'ssb-kv' }, '开', formatPrice(q?.open)),
-                      h('span', { className: 'ssb-kv' }, '高', formatPrice(q?.high)),
-                      h('span', { className: 'ssb-kv' }, '低', formatPrice(q?.low)),
+                      h('span', { className: 'ssb-kv' }, '开', priceTextOf(q?.open, item.priceScale)),
+                      h('span', { className: 'ssb-kv' }, '高', priceTextOf(q?.high, item.priceScale)),
+                      h('span', { className: 'ssb-kv' }, '低', priceTextOf(q?.low, item.priceScale)),
                       h('span', { className: 'ssb-kv' }, '额', formatAmount(q?.amount)),
                       amplitude == null ? null : h('span', { className: 'ssb-kv' }, '振', `${amplitude}%`),
-                      plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${Number(plPct) > 0 ? ' ssb-up' : Number(plPct) < 0 ? ' ssb-down' : ''}` }, '持仓', `${signed(plPct)}%`))))
+                      plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${toneClass(plPct)}` }, '持仓', `${signed(plPct)}%`))))
                 }
                 // 分组是结构、排序是组内顺序, 两者互不排斥: 全局排序时也保留分区, 只是组内按该排序走。
                 // 置顶与未分组也各给一个组头, 否则一只都没归组时整页平铺, 分组功能等于不可发现
@@ -823,6 +857,8 @@ window.__ModuleLoader__.load({
       const preCloseLineRef = React.useRef(null), highLineRef = React.useRef(null), lowLineRef = React.useRef(null)
       // 价格标记是可变数量的, 数量变了就得把旧的整批撤掉重建
       const markLinesRef = React.useRef([])
+      // 十字线读数: 悬停那根的读数是瞬时状态, 离开图面即清空
+      const [crosshair, setCrosshair] = React.useState(null)
       function drawMarks(series, palette, list) {
         if (!series) return
         for (const line of markLinesRef.current) { try { series.removePriceLine(line) } catch { } }
@@ -885,7 +921,7 @@ window.__ModuleLoader__.load({
         return { ma: MA_WINDOWS.map(n => seriesMA(candles, n)), ema: [seriesEMA(candles, EMA_WINDOW)], boll: seriesBoll(candles, BOLL_WINDOW, BOLL_K), bbi: [seriesBBI(candles)] }
       }, [kline?.candles, wantTrend])
       // 建图与重涂都在空依赖的回调里跑, 用这份最新值替代首帧闭包
-      liveRef.current = { candles: kline?.candles, colorMode: state.data?.control.preferences?.colorMode, indicators: indicatorValues, period }
+      liveRef.current = { candles: kline?.candles, colorMode: state.data?.control.preferences?.colorMode, indicators: indicatorValues, period, priceScale: item.priceScale, timezone: item.timezone, preClose: kline?.preClose, guides }
       const legend = React.useMemo(() => {
         const candles = kline?.candles || []
         if (!candles.length) return null
@@ -894,7 +930,7 @@ window.__ModuleLoader__.load({
         // 日K 的 preClose 有时来源不给, 退到前一根收盘; 分时不能这么退——前一根分钟收盘会算出个假的 0.0x% 涨跌
         const base = finiteOr(kline?.preClose) || (wantTrend ? NaN : finiteOr(candles[candles.length - 2]?.close))
         const pct = Number.isFinite(base) && base && Number.isFinite(finiteOr(last.close)) ? (finiteOr(last.close) - base) / base * 100 : null
-        const tone = pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
+        const tone = toneClass(pct)
         const quote = wantTrend
           ? [['最新', price(last.close)], ['均价', price(last.avg ?? last.close)], ['昨收', price(kline?.preClose)]]
           : [['开', price(last.open)], ['高', price(last.high)], ['低', price(last.low)], ['收', price(last.close)]]
@@ -1026,11 +1062,39 @@ window.__ModuleLoader__.load({
       fillRef.current = maybeFill
       // effect A: 图表创建一次; 主题变更(MutationObserver)重涂; 卸载销毁。
       React.useEffect(() => {
-        let dead = false, mo
+        let dead = false, mo, onCross = null
         const root = holder.current?.closest('.ssb-root') || document.documentElement
         ensureLwc(document).then(LWC => {
           if (dead || !holder.current) return
           chartRef.current = LWC.createChart(holder.current, chartOptions(themeOf()))
+          // 十字线读数: 图例只报最后一根, 悬停某根时要能读到它的开高低收
+          onCross = param => {
+            const main = mainRef.current, mainData = main && param?.seriesData?.get(main)
+            if (!param?.time || !mainData) { setCrosshair(null); return }
+            const info = liveRef.current, trend = info.period === 'trend'
+            // 日K某一根的涨跌相对它的前一根收盘; 分时相对当日昨收。第一根没有前收才退回 preClose
+            const candles = info.candles || []
+            const at = candles.findIndex(candle => timeKeyOf(candle.time) === timeKeyOf(param.time))
+            const base = trend || at <= 0 ? info.preClose : candles[at - 1]?.close
+            // 分时没有独立的成交量序列, 量从匹配到的那根上取; 日K取柱状序列
+            const volume = volRef.current ? param.seriesData.get(volRef.current)?.value : (at >= 0 ? candles[at]?.volume : null)
+            // 辅助线读数与图上线条同源: 直接用 series 在该时间点的值, 关掉的线没有数据自然不列
+            const readings = []
+            if (!trend) {
+              const refs = indicatorRef.current, data = param.seriesData
+              const pick = (label, handle) => { const value = handle && data.get(handle)?.value; if (value != null) readings.push([label, value]) }
+              if (info.guides?.ma) MA_WINDOWS.forEach((window, index) => pick(`MA${window}`, refs.ma?.[index]))
+              if (info.guides?.ema) pick(`EMA${EMA_WINDOW}`, refs.ema?.[0])
+              if (info.guides?.boll) ['BOLL', 'BOLL上', 'BOLL下'].forEach((label, index) => pick(label, refs.boll?.[index]))
+              if (info.guides?.bbi) pick('BBI', refs.bbi?.[0])
+            }
+            setCrosshair({
+              time: crosshairTimeText(param.time, trend, info.timezone),
+              lines: crosshairTipLines({ candle: mainData, scale: info.priceScale, trend, preClose: base, volume, series: readings }),
+              point: param.point,
+            })
+          }
+          chartRef.current.subscribeCrosshairMove(onCross)
           const early = pendingRef.current
           pendingRef.current = null
           fillRef.current?.(early || runtime.getKlineResult(item.id, period))
@@ -1042,7 +1106,12 @@ window.__ModuleLoader__.load({
         // 明暗主题标记落在 body 上, 不在 root 的观察范围里, 单开一路才收得到切换。
         // 同色系两套主题(或第三方主题覆盖 token)切换时这个标记不变, 必须连 style 一起听
         mo.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme', 'style'] })
-        return () => { dead = true; mo.disconnect(); chartRef.current?.remove(); chartRef.current = null }
+        return () => {
+          dead = true; mo.disconnect()
+          const chart = chartRef.current
+          if (chart) { if (onCross) chart.unsubscribeCrosshairMove(onCross); chart.remove() }
+          chartRef.current = null
+        }
       }, [])
       // 数据时间面: 首末日期 + 共几根 + 今日有没有交易。判断只用数据本身, 不猜日历——
       // 最后一根的日期就是市场时区的今天, 说明今天开过市, 否则说明今天还没有行情。
@@ -1100,11 +1169,11 @@ window.__ModuleLoader__.load({
         legend ? h('div', { className: 'ssb-kline-legend' },
           // 成本与卖价都是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
           h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value)),
-            avgCost == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.filter(m => m.kind === 'cost').length > 1 ? `成本(${marks.filter(m => m.kind === 'cost').length}笔均价)` : '成本'), priceTextOf(avgCost, item.priceScale), costPct == null ? null : h('span', { className: `ssb-legend-pct${costPct > 0 ? ' ssb-up' : costPct < 0 ? ' ssb-down' : ''}` }, `${signed(costPct.toFixed(2))}%`)),
+            avgCost == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.filter(m => m.kind === 'cost').length > 1 ? `成本(${marks.filter(m => m.kind === 'cost').length}笔均价)` : '成本'), priceTextOf(avgCost, item.priceScale), costPct == null ? null : h('span', { className: `ssb-legend-pct${toneClass(costPct)}` }, `${signed(costPct.toFixed(2))}%`)),
             // 目标位只在图例里出现一次: 线在价格轴上, 具体数值看这里
             ...marks.filter(mark => mark.kind === 'target').map(mark => {
               const pct = markPct(mark, lastClose, avgCost)
-              return h('span', { key: mark.id, className: 'ssb-legend-item ssb-legend-target' }, h('span', { className: 'ssb-legend-label' }, '卖价'), priceTextOf(mark.price, item.priceScale), pct == null ? null : h('span', { className: `ssb-legend-pct${pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''}` }, `${signed(pct.toFixed(2))}%`))
+              return h('span', { key: mark.id, className: 'ssb-legend-item ssb-legend-target' }, h('span', { className: 'ssb-legend-label' }, '卖价'), priceTextOf(mark.price, item.priceScale), pct == null ? null : h('span', { className: `ssb-legend-pct${toneClass(pct)}` }, `${signed(pct.toFixed(2))}%`))
             })),
           legend.series.length ? h('div', { className: 'ssb-legend-row' },
             ...legend.series.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), Number(value).toFixed(item.priceScale ?? 2)))) : null) : null,
@@ -1113,7 +1182,11 @@ window.__ModuleLoader__.load({
         !kline.loading && !kline.error && kline.candles && !kline.candles.length ? h('div', { className: 'ssb-empty' }, h('p', null, '暂无K线数据（停牌或已退市）')) : null,
         state.data.vendorAvailable === false ? h('div', { className: 'ssb-banner' }, '图表组件不可用，已降级为数字详情。') : null,
         // 出错时隐藏画布: 图表实例挂在同一个 DOM 节点上, 卸载会丢实例, 只做可见性切换
-        h('div', { ref: holder, className: 'ssb-kline-holder', style: kline.error ? { display: 'none' } : undefined }))
+        h('div', { className: 'ssb-kline-chart', style: kline.error ? { display: 'none' } : undefined },
+          h('div', { ref: holder, className: 'ssb-kline-holder' }),
+          crosshair ? h('div', { className: 'ssb-kline-tip', style: crosshairTipStyle({ point: crosshair.point, width: holder.current?.clientWidth || 0, height: holder.current?.clientHeight || 340 }) },
+            h('div', { className: 'ssb-kline-tip-time' }, crosshair.time),
+            ...crosshair.lines.map((line, index) => h('div', { key: index }, line))) : null))
     }
     // 浮层原语: 遮罩+Esc/遮罩关闭, 抽屉(detail)与模态(settings)共用关闭语义
     // 浮层原语: 遮罩+Esc/遮罩关闭+焦点移入/困住/还原+背景滚动锁定, 抽屉(detail)与模态(settings)共用
@@ -1169,11 +1242,11 @@ window.__ModuleLoader__.load({
       const inWatchlist = !!data.control.watchlist.items[view.detailId]
       if (!item) return h('aside', { className: 'ssb-detail ssb-empty' }, h('p', null, '选择一只证券查看基础行情。'))
       const entry = data.quotes[item.id], q = entry?.quote
-      const direction = q?.changePct == null ? '' : Number(q.changePct) > 0 ? ' ssb-up' : Number(q.changePct) < 0 ? ' ssb-down' : ''
+      const direction = toneClass(q?.changePct)
       const marketLabel = MARKET_LABEL[item.exchange] || item.exchange
       // 币种唯一来源是自选条目 currency(watchlist 写入时由 MARKET_META 保证), client 不设回退表
       const currency = item.currency || ''
-      const fields = [['今开', formatPrice(q?.open)], ['最高', formatPrice(q?.high)], ['最低', formatPrice(q?.low)], ['昨收', formatPrice(q?.previousClose)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume, { zeroIsMissing: false })}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
+      const fields = [['今开', priceTextOf(q?.open, item.priceScale)], ['最高', priceTextOf(q?.high, item.priceScale)], ['最低', priceTextOf(q?.low, item.priceScale)], ['昨收', priceTextOf(q?.previousClose, item.priceScale)], ['涨跌额', q?.change == null ? null : signed(q.change)], ['成交量', q?.volume == null ? null : `${formatAmount(q.volume, { zeroIsMissing: false })}股`], ['成交额', formatAmount(q?.amount)], ['交易时段', ({ trading: '交易中', closed: '休市', break: '午间休市', auction: '集合竞价', preopen: '开市前', unknown: '未知' })[q?.sessionState] || '未知'], ['报价时间', timeText(q?.quoteAt)], ['获取时间', timeText(q?.receivedAt)], ['来源', q?.providerInstanceId], ['延迟', delayText(q)]]
       // 非自选详情: 加自选为主操作, 不显示别名/删除等自选管理
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
       // 价格标记: 每条带语义(成本/卖价), 各自算盈亏, 图上一条线
@@ -1182,7 +1255,6 @@ window.__ModuleLoader__.load({
       const lastN = Number(q?.last)
       const costPl = avgCost != null && lastN ? { amount: Number((lastN - avgCost).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - avgCost) / avgCost * 100).toFixed(1)) } : null
       const applyMarks = next => quiet(() => runtime.mutate('marks', { securityId: item.id, marks: next }))
-      const toneOfPct = pct => pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''
       // 增删都是整组替换: 协议面只有一个操作, 也不会出现半更新的中间态
       const markForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => {
         e.preventDefault()
@@ -1206,12 +1278,12 @@ window.__ModuleLoader__.load({
         return h('li', { key: mark.id, className: 'ssb-mark-row' },
           h('span', { className: 'ssb-mark-kind' }, mark.kind === 'cost' ? '成本' : '卖价'),
           h('span', { className: 'ssb-number' }, priceTextOf(mark.price, item.priceScale)),
-          h('span', { className: `ssb-small${toneOfPct(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
+          h('span', { className: `ssb-small${toneClass(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
           h(Button, { danger: true, disabled: state.busy.write, onClick: applyMarks(marks.filter(other => other.id !== mark.id)) }, '删除'))
       })) : null
       // 分组表单(B1): 单标签, 空=移出分组; 草稿 view.groupDraft
       const groupForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.groupDraft?.trim() ?? item.group; if ([...raw].length > 12) { runtime.updateView({ groupError: '分组名最多12字' }); return } quiet(() => runtime.mutate('group', { securityIds: [item.id], group: raw }))() } }, h('label', null, '设分组', h('input', { value: view.groupDraft ?? (item.group || ''), maxLength: 12, onChange: e => runtime.updateView({ groupDraft: e.target.value, groupError: '' }), placeholder: '留空移出分组' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存分组'), view.groupError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.groupError) : null) : null
-      const costBlock = costPl ? h('div', { className: `ssb-number${costPl.amount > 0 ? ' ssb-up' : costPl.amount < 0 ? ' ssb-down' : ''}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本均价 ${priceTextOf(avgCost, item.priceScale)}`)) : null
+      const costBlock = costPl ? h('div', { className: `ssb-number${toneClass(costPl.amount)}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本均价 ${priceTextOf(avgCost, item.priceScale)}`)) : null
       const watchActions = inWatchlist ? h(React.Fragment, null, markForm, markList, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
         // 行内不再挂操作菜单, 排序走拖拽, 剩下的置顶与移出收敛到这里: 低频、且删除需要确认, 不适合出现在每一行
         h('div', { className: 'ssb-alias-form' }, h('span', { className: 'ssb-muted ssb-small' }, '自选管理'), h('div', { className: 'ssb-toolbar' },
@@ -1219,7 +1291,7 @@ window.__ModuleLoader__.load({
           h(Button, { danger: true, disabled: state.busy.write, onClick: () => { if (!confirm(`从自选移除「${item.alias || item.officialName}」?`)) return; quiet(() => runtime.mutate('remove', { securityId: item.id }))(); runtime.updateView({ detailId: null, selectedId: null, overlay: null, focusId: null }) } }, '移出自选')))) : null
       return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), inWatchlist && order.length > 1 ? h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => openNeighbor(neighbor(-1)) }, '上一只'), h(Button, { onClick: () => openNeighbor(neighbor(1)) }, '下一只')) : null),
         h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
-        h('div', { className: `ssb-detail-price ssb-number${direction}` }, q?.last ?? '—', h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
+        h('div', { className: `ssb-detail-price ssb-number${direction}` }, priceTextOf(q?.last, item.priceScale), h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
         h('div', { className: 'ssb-detail-grid' },
           h('div', { className: 'ssb-detail-main' }, h(KlineView, { runtime, state, item })),
           h('div', { className: 'ssb-detail-side' }, peekActions, h(QuoteStatus, { entry }), costBlock, h('dl', { className: 'ssb-facts' }, ...fields.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '—')))))),
@@ -1439,8 +1511,69 @@ window.__ModuleLoader__.load({
           })),
         hover == null || !picked ? null : h('div', { className: 'ssb-float-hover' },
           h('span', null, candleTimeText(picked)),
-          h('strong', { className: `ssb-number${pct == null ? '' : pct > 0 ? ' ssb-up' : pct < 0 ? ' ssb-down' : ''}` }, Number.isFinite(price) ? priceTextOf(price, scale) : '—'),
-          h('span', { className: pct == null ? '' : pct > 0 ? 'ssb-up' : pct < 0 ? 'ssb-down' : '' }, pct == null ? '' : `${signed(pct.toFixed(2))}%`)))
+          h('strong', { className: `ssb-number${toneClass(pct)}` }, Number.isFinite(price) ? priceTextOf(price, scale) : '—'),
+          h('span', { className: toneClass(pct).trim() }, pct == null ? '' : `${signed(pct.toFixed(2))}%`)))
+    }
+    // 悬浮窗的各块只做渲染: 状态、轮询与提醒都留在 FloatingTicker, 这里只接数据与回调
+    function FloatHeader({ mode, picker, current, picked, onStep, onMode, onPicker, onClose }) {
+      return h('div', { className: 'ssb-float-head' },
+        mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => onStep(-1) }, '‹') : null,
+        h('span', { className: 'ssb-float-name', title: current ? `${current.officialName} ${current.code}` : '' }, picker ? '选择观测目标' : mode === 'kline' && current ? (current.alias || current.officialName) : `盯盘 ${picked.length}`),
+        mode === 'kline' && !picker && current ? h('span', { className: 'ssb-float-code' }, current.code) : null,
+        mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '下一只', onClick: () => onStep(1) }, '›') : null,
+        h('div', { className: 'ssb-float-modes' },
+          h('button', { type: 'button', className: `ssb-float-mode${mode === 'list' ? ' on' : ''}`, 'aria-pressed': mode === 'list', onClick: () => onMode('list') }, '列表'),
+          h('button', { type: 'button', className: `ssb-float-mode${mode === 'kline' ? ' on' : ''}`, 'aria-pressed': mode === 'kline', onClick: () => onMode('kline') }, '图')),
+        h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': picker ? '完成选择' : '选择观测目标', 'aria-expanded': picker, onClick: () => onPicker(!picker) }, picker ? '✓' : '☰'),
+        h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => onClose() }, '✕'))
+    }
+    function FloatPicker({ order, items, picked, onPicked }) {
+      const slices = groupSlices(order, items)
+      const toggleMany = (ids, on) => { const set = new Set(picked); ids.forEach(id => on ? set.add(id) : set.delete(id)); onPicked([...set]) }
+      const block = (key, label, ids) => {
+        if (!ids.length) return null
+        const allOn = ids.every(id => picked.includes(id))
+        return h('div', { key, className: 'ssb-picker-group' },
+          h('div', { className: 'ssb-picker-head' },
+            h('span', null, label ? `${label} · ${ids.length}` : `未分组 · ${ids.length}`),
+            h('button', { type: 'button', className: 'ssb-picker-all', onClick: () => toggleMany(ids, !allOn) }, allOn ? '全不选' : '全选')),
+          ...ids.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => toggleMany([id], !picked.includes(id)) })))
+      }
+      const hasSections = slices.pinned.length || slices.groups.length
+      return h('div', { className: 'ssb-float-picker' }, ...(order.length
+        ? [block('pinned', '置顶', slices.pinned), ...slices.groups.map(group => block(`grp-${group.name}`, group.name, group.ids)), block('ungrouped', hasSections ? '未分组' : '', slices.ungrouped)]
+        : [h('p', { className: 'ssb-muted' }, '自选为空')]))
+    }
+    function FloatList({ picked, items, securityId, entryOf, onPick, onTip, onLeave, onScroll }) {
+      return h('div', { className: 'ssb-float-list', onScroll },
+        ...(picked.length ? picked.map(id => {
+          const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
+          return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => onPick(id), onPointerEnter: event => onTip(id, event), onPointerLeave: onLeave },
+            h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
+            h('span', { className: 'ssb-float-code' }, item.code),
+            h('span', { className: `ssb-float-row-price ssb-number${toneClass(change)}` }, priceTextOf(quote?.last, item.priceScale)),
+            h('span', { className: `ssb-float-row-pct ssb-number${toneClass(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
+        }) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
+    }
+    function FloatChart({ securityId, current, candles, preClose, error, last, pct }) {
+      return h(React.Fragment, null,
+        h('div', { className: `ssb-float-quote ssb-number${toneClass(pct)}` },
+          h('span', { className: 'ssb-float-price' }, Number.isFinite(last) ? priceTextOf(last, current.priceScale) : '—'),
+          h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
+        error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${toneClass(pct)}` }, h(Sparkline, { key: securityId, candles, preClose, marks: current.marks, scale: current.priceScale })),
+        // 标记价常驻一行: 图里画得出的是范围内的横线, 范围外的用这行交代, 不必悬停才知道
+        (current.marks || []).length ? h('div', { className: 'ssb-float-marks' }, ...(current.marks || []).map(mark => h('span', { key: mark.id, className: mark.kind === 'cost' ? 'ssb-legend-cost' : 'ssb-legend-target' }, `${mark.kind === 'cost' ? '成本' : '卖价'} ${priceTextOf(mark.price, current.priceScale)}`))) : null)
+    }
+    function FloatFoot({ mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn, refresh, onBell, onLive, onDetail }) {
+      const stampTitle = stamp == null ? '尚未取到行情' : `${stale ? '行情未更新，' : ''}最近价时刻 ${timeText(stamp)}`
+      const stampLabel = stamp == null ? `${picked.length} 只，尚未取到行情` : `${picked.length} 只，最近价时刻 ${timeText(stamp)}${stale ? '，数据已过时' : ''}`
+      const refreshLabel = !picked.length ? '还没有勾选观测目标' : error ? `更新失败：${error}，点击重试` : liveOn ? `行情每 ${refresh} 秒自动刷新，点击暂停` : '自动刷新已暂停，点击恢复'
+      return h('div', { className: 'ssb-float-foot' },
+        h('span', { className: `ssb-float-stamp${stale ? ' ssb-float-stamp-stale' : ''}`, title: stampTitle, 'aria-label': stampLabel },
+          `${mode === 'kline' && securityId ? `${picked.indexOf(securityId) + 1}/${picked.length}` : `${picked.length} 只`}${stamp == null ? '' : ` · ${clockText(stamp)}`}`),
+        h('button', { type: 'button', className: `ssb-float-icon ssb-float-bell${alertOn ? ' on' : ''}`, 'aria-label': alertOn ? '关闭标记价提醒' : '开启标记价提醒', 'aria-pressed': alertOn, title: alertOn ? '标记价提醒已开启：现价穿越成本或卖价时通知' : '标记价提醒已关闭', onClick: onBell }, bellIcon(alertOn)),
+        h('button', { type: 'button', className: `ssb-float-icon ssb-float-live${error ? ' ssb-float-live-error' : ''}`, 'aria-label': !picked.length ? '自动刷新不可用' : error ? '重试自动刷新' : liveOn ? '暂停自动刷新' : '恢复自动刷新', 'aria-pressed': liveOn, title: refreshLabel, disabled: !picked.length, onClick: onLive }, liveOn ? pauseIcon() : playIcon()),
+        h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', title: securityId ? `打开 ${current?.alias || current?.officialName} 详情` : '还没有可打开的标的', disabled: !securityId, onClick: onDetail }, '⤢'))
     }
     function FloatingTicker({ runtime }) {
       const state = React.useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
@@ -1517,7 +1650,6 @@ window.__ModuleLoader__.load({
         // 只有一只时 next 就是自己, 清掉 trend 反而让图空一转到下一拍才回来
         if (next && next !== securityId) { setTrend(null); update({ securityId: next }) }
       }
-      const toneOf = pct => pct == null ? '' : Number(pct) > 0 ? ' ssb-up' : Number(pct) < 0 ? ' ssb-down' : ''
       const current = items[securityId]
       // 分时数据必须和标的绑在一起: 切标的时新请求还没回来, 直接用旧数据会把上一只的价格当成这一只
       const trendData = trend?.securityId === securityId ? trend.data : null
@@ -1534,86 +1666,36 @@ window.__ModuleLoader__.load({
       const last = finiteOr(candles?.at(-1)?.close)
       const base = finiteOr(trendData?.preClose)
       const pct = Number.isFinite(last) && Number.isFinite(base) && base ? (last - base) / base * 100 : null
-      const tone = toneOf(pct)
-      const rowOf = id => {
-        const item = items[id], quote = entryOf(id)?.quote, change = quote?.changePct
-        return h('button', { key: id, type: 'button', className: `ssb-float-row${id === securityId ? ' ssb-float-row-on' : ''}`, onClick: () => update({ mode: 'kline', securityId: id }), onPointerEnter: event => {
-          // 浮层用 fixed 定位挂到视口: 列表容器是 overflow:auto, 放行内会被裁掉;
-          // 位置按条目数预估高度, 下方放不下就翻到行上方, 否则最后一行会撞出窗口
-          const rect = event.currentTarget.getBoundingClientRect(), width = 184
-          const left = Math.max(8, rect.left - width - 8 >= 8 ? rect.left - width - 8 : Math.min(window.innerWidth - width - 8, rect.right + 8))
-          const lines = quoteTipLines({ quote, marks: item.marks, scale: item.priceScale }).length
-          setRowTip({ id, left, top: rowTipPositionOf({ top: rect.top, bottom: rect.bottom, lines, viewportHeight: window.innerHeight }).top })
-        }, onPointerLeave: () => setRowTip(null) },
-          h('span', { className: 'ssb-float-row-name' }, item.alias || item.officialName),
-          h('span', { className: 'ssb-float-code' }, item.code),
-          h('span', { className: `ssb-float-row-price ssb-number${toneOf(change)}` }, quote?.last == null ? '—' : formatPrice(quote.last)),
-          h('span', { className: `ssb-float-row-pct ssb-number${toneOf(change)}` }, change == null ? '—' : `${signed(Number(change).toFixed(2))}%`))
+      const showRowTip = (id, event) => {
+        // 浮层用 fixed 定位挂到视口: 列表容器是 overflow:auto, 放行内会被裁掉;
+        // 位置按条目数预估高度, 下方放不下就翻到行上方, 否则最后一行会撞出窗口
+        const rect = event.currentTarget.getBoundingClientRect(), width = 184, item = items[id]
+        const left = Math.max(8, rect.left - width - 8 >= 8 ? rect.left - width - 8 : Math.min(window.innerWidth - width - 8, rect.right + 8))
+        const lines = quoteTipLines({ quote: quoteOf(id), marks: item.marks, scale: item.priceScale }).length
+        setRowTip({ id, left, top: rowTipPositionOf({ top: rect.top, bottom: rect.bottom, lines, viewportHeight: window.innerHeight }).top })
       }
       const greenUp = state.data?.control.preferences.colorMode === 'green-up' ? ' ssb-green-up' : ''
       // 勾选写入一律按自选顺序重排, 否则反复勾选会把 ids 变成点击次序, 列表顺序会跳
       const setPicked = ids => { const set = new Set(ids); update({ ids: order.filter(id => set.has(id)) }) }
-      const pickerBlocks = () => {
-        const slices = groupSlices(order, items)
-        const toggleMany = (ids, on) => { const set = new Set(picked); ids.forEach(id => on ? set.add(id) : set.delete(id)); setPicked([...set]) }
-        const block = (key, label, ids) => {
-          if (!ids.length) return null
-          const allOn = ids.every(id => picked.includes(id))
-          return h('div', { key, className: 'ssb-picker-group' },
-            h('div', { className: 'ssb-picker-head' },
-              h('span', null, label ? `${label} · ${ids.length}` : `未分组 · ${ids.length}`),
-              h('button', { type: 'button', className: 'ssb-picker-all', onClick: () => toggleMany(ids, !allOn) }, allOn ? '全不选' : '全选')),
-            ...ids.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => toggleMany([id], !picked.includes(id)) })))
-        }
-        const hasSections = slices.pinned.length || slices.groups.length
-        return [
-          block('pinned', '置顶', slices.pinned),
-          ...slices.groups.map(group => block(`grp-${group.name}`, group.name, group.ids)),
-          block('ungrouped', hasSections ? '未分组' : '', slices.ungrouped),
-        ]
-      }
       return h('div', { className: `ssb-float${greenUp}${alerting ? ' ssb-float-alerting' : ''}`, role: 'complementary', 'aria-label': '悬浮盯盘', style: position, onPointerDown: drag.onPointerDown, onPointerMove: drag.onPointerMove, onPointerUp: drag.onPointerUp, onPointerCancel: drag.onPointerUp },
         React.createElement('style', { 'data-plugin': '@mzzsfy/dsh-stock-assistant', dangerouslySetInnerHTML: { __html: CSS } }),
-        h('div', { className: 'ssb-float-head' },
-          mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '上一只', onClick: () => step(-1) }, '‹') : null,
-          h('span', { className: 'ssb-float-name', title: current ? `${current.officialName} ${current.code}` : '' }, picker ? '选择观测目标' : mode === 'kline' && current ? (current.alias || current.officialName) : `盯盘 ${picked.length}`),
-          mode === 'kline' && !picker && current ? h('span', { className: 'ssb-float-code' }, current.code) : null,
-          mode === 'kline' && !picker ? h('button', { className: 'ssb-float-icon', 'aria-label': '下一只', onClick: () => step(1) }, '›') : null,
-          h('div', { className: 'ssb-float-modes' },
-            h('button', { type: 'button', className: `ssb-float-mode${mode === 'list' ? ' on' : ''}`, 'aria-pressed': mode === 'list', onClick: () => update({ mode: 'list' }) }, '列表'),
-            h('button', { type: 'button', className: `ssb-float-mode${mode === 'kline' ? ' on' : ''}`, 'aria-pressed': mode === 'kline', onClick: () => update({ mode: 'kline' }) }, '图')),
-          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': picker ? '完成选择' : '选择观测目标', 'aria-expanded': picker, onClick: () => setPicker(!picker) }, picker ? '✓' : '☰'),
-          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => update({ open: false }) }, '✕')),
+        h(FloatHeader, { mode, picker, current, picked, onStep: step, onMode: next => update({ mode: next }), onPicker: setPicker, onClose: () => update({ open: false }) }),
         picker
-          // 勾选目标按分组切面排列, 组头可以整组勾上或清掉: 盯盘通常就是"盯某个板块"
-          ? h('div', { className: 'ssb-float-picker' }, ...(order.length ? pickerBlocks() : [h('p', { className: 'ssb-muted' }, '自选为空')]))
+          ? h(FloatPicker, { order, items, picked, onPicked: setPicked })
           : mode === 'list'
-            ? h('div', { className: 'ssb-float-list', onScroll: () => setRowTip(null) }, ...(picked.length ? picked.map(rowOf) : [h('p', { className: 'ssb-muted' }, '未选择标的，点 ☰ 勾选')]))
-            : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(React.Fragment, null,
-              h('div', { className: `ssb-float-quote ssb-number${tone}` },
-                h('span', { className: 'ssb-float-price' }, Number.isFinite(last) ? priceTextOf(last, current.priceScale) : '—'),
-                h('span', { className: 'ssb-float-pct' }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`)),
-              error ? h('p', { className: 'ssb-float-error' }, error) : h('div', { className: `ssb-float-chart${tone}` }, h(Sparkline, { key: securityId, candles, preClose: base, marks: current.marks, scale: current.priceScale })),
-              // 标记价常驻一行: 图里画得出的是范围内的横线, 范围外的用这行交代, 不必悬停才知道
-              (current.marks || []).length ? h('div', { className: 'ssb-float-marks' }, ...(current.marks || []).map(mark => h('span', { key: mark.id, className: mark.kind === 'cost' ? 'ssb-legend-cost' : 'ssb-legend-target' }, `${mark.kind === 'cost' ? '成本' : '卖价'} ${priceTextOf(mark.price, current.priceScale)}`))) : null),
-        h('div', { className: 'ssb-float-foot' },
-          // 位置先给数量再给时刻: 数量回答"盯了几只", 时刻回答"这价是什么时候的", 后者才是防旧价误读的那一半
-          h('span', { className: `ssb-float-stamp${stale ? ' ssb-float-stamp-stale' : ''}`, title: stamp == null ? '尚未取到行情' : `${stale ? '行情未更新，' : ''}最近价时刻 ${timeText(stamp)}`, 'aria-label': stamp == null ? `${picked.length} 只，尚未取到行情` : `${picked.length} 只，最近价时刻 ${timeText(stamp)}${stale ? '，数据已过时' : ''}` },
-            `${mode === 'kline' && securityId ? `${picked.indexOf(securityId) + 1}/${picked.length}` : `${picked.length} 只`}${stamp == null ? '' : ` · ${clockText(stamp)}`}`),
-          // 铃铛就是开关: 开着才在标记价被穿越时提醒; 首次打开顺便申请通知权限(浏览器要求在用户手势里)
-          h('button', { type: 'button', className: `ssb-float-icon ssb-float-bell${alertOn ? ' on' : ''}`, 'aria-label': alertOn ? '关闭标记价提醒' : '开启标记价提醒', 'aria-pressed': alertOn, title: alertOn ? '标记价提醒已开启：现价穿越成本或卖价时通知' : '标记价提醒已关闭', onClick: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() } }, bellIcon(alertOn)),
-          // 图标说的是"点下去会发生什么": 暂停键表示正在刷新, 播放键表示已暂停; 状态色与悬停文案补足含义
-          (() => {
+            ? h(FloatList, { picked, items, securityId, entryOf, onPick: id => update({ mode: 'kline', securityId: id }), onTip: showRowTip, onLeave: () => setRowTip(null), onScroll: () => setRowTip(null) })
+            : !current ? h('p', { className: 'ssb-muted' }, '未选择标的') : h(FloatChart, { securityId, current, candles, preClose: base, error, last, pct }),
+        h(FloatFoot, {
+          mode, securityId, picked, current, stamp, stale, alertOn, error, liveOn: floating.live !== false, refresh: state.data?.control.preferences?.refreshSeconds || 15,
+          onBell: () => { const next = !alertOn; alertStates.current = {}; setAlert({ on: next }); if (next) requestAlertPermission() },
+          onLive: () => {
+            if (!picked.length) return
             const liveOn = floating.live !== false
-            const refresh = state.data?.control.preferences?.refreshSeconds || 15
-            const label = !picked.length ? '还没有勾选观测目标' : error ? `更新失败：${error}，点击重试` : liveOn ? `行情每 ${refresh} 秒自动刷新，点击暂停` : '自动刷新已暂停，点击恢复'
-            return h('button', { type: 'button', className: `ssb-float-icon ssb-float-live${error ? ' ssb-float-live-error' : ''}`, 'aria-label': !picked.length ? '自动刷新不可用' : error ? '重试自动刷新' : liveOn ? '暂停自动刷新' : '恢复自动刷新', 'aria-pressed': liveOn, title: label, disabled: !picked.length, onClick: () => {
-              if (!picked.length) return
-              update({ live: !liveOn })
-              tools.toast?.show(liveOn ? '已暂停自动刷新，价格不会自己更新' : '已恢复自动刷新')
-            } }, liveOn ? pauseIcon() : playIcon())
-          })(),
-          h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '打开详情', title: securityId ? `打开 ${current?.alias || current?.officialName} 详情` : '还没有可打开的标的', disabled: !securityId, onClick: () => { if (securityId) runtime.openDetail(securityId) } }, '⤢')),
+            update({ live: !liveOn })
+            tools.toast?.show(liveOn ? '已暂停自动刷新，价格不会自己更新' : '已恢复自动刷新')
+          },
+          onDetail: () => { if (securityId) runtime.openDetail(securityId) },
+        }),
         rowTip && items[rowTip.id] ? h('div', { className: 'ssb-float-rowtip', style: { left: rowTip.left, top: rowTip.top } },
           ...quoteTipLines({ quote: quoteOf(rowTip.id), marks: items[rowTip.id].marks, scale: items[rowTip.id].priceScale }).map((text, index) => h('span', { key: index }, text))) : null)
     }
@@ -1626,7 +1708,7 @@ window.__ModuleLoader__.load({
         data?.browseOverview ? (() => {
           // 缺 previousClose 时 change/changePct 会是 null, Number(null) 得 0, 直接拼会渲染出「+null（+null%）」
           const ov = data.browseOverview, change = finiteOr(ov.change), changePct = finiteOr(ov.changePct)
-          const tone = Number.isFinite(change) ? (change >= 0 ? ' ssb-up' : ' ssb-down') : ''
+          const tone = toneClass(change)
           // 保留来源给的位数, 只补正负号; 缺失时给破折号而不是把 null 当 0
           const fmt = raw => { if (raw == null || raw === '') return '—'; const n = Number(raw); return Number.isFinite(n) ? `${n >= 0 ? '+' : ''}${raw}` : '—' }
           return h('div', { className: 'ssb-banner ssb-banner-ok', style: { margin: '12px 16px 0' } }, `${ov.name} ${ov.last ?? '—'}`, h('span', { className: `ssb-number${tone}` }, `${fmt(ov.change)}（${fmt(ov.changePct)}%）`), h('span', { className: 'ssb-muted' }, `${ov.source} · ${ov.delayKind === 'unknown' ? '延迟未知' : delayText(ov)}`))
@@ -2002,7 +2084,11 @@ window.__ModuleLoader__.load({
 .ssb-ema { color:var(--ssb-chart-ema); }
 .ssb-boll-0 { color:var(--ssb-chart-boll-mid); }.ssb-boll-1 { color:var(--ssb-chart-boll-rail); }.ssb-boll-2 { color:var(--ssb-chart-boll-rail); }
 .ssb-bbi { color:var(--ssb-chart-bbi); }
-.ssb-menu-title { padding:8px 8px 2px; font-size:11px; color:var(--ssb-text-dim); }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
+.ssb-menu-title { padding:8px 8px 2px; font-size:11px; color:var(--ssb-text-dim); }.ssb-kline-holder { height:340px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); }
+.ssb-kline-chart { position:relative; }
+/* 十字线读数: 贴光标右上, 指针穿透, 不挡拖动时间轴 */
+.ssb-kline-tip { position:absolute; z-index:3; width:200px; padding:4px 8px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); background:var(--ssb-bg); box-shadow:var(--dsw-shadow-lv3); font-size:11px; line-height:1.5; color:var(--ssb-text-sub); font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; pointer-events:none; }
+.ssb-kline-tip-time { color:var(--ssb-text); }.ssb-kline-skeleton { height:340px; border:1px dashed var(--ssb-border); border-radius:var(--ssb-radius-sm); display:flex; align-items:center; justify-content:center; color:var(--ssb-text-sub); margin-bottom:8px; }
 .ssb-detail-grid { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:16px; align-items:start; }.ssb-detail-side { min-width:0; }.ssb-detail-side .ssb-facts { grid-template-columns:auto minmax(0,1fr); gap:6px 12px; }.ssb-detail-side .ssb-facts dt { white-space:nowrap; }
 .ssb-empty { padding:32px 16px; color:var(--ssb-text-sub); text-align:center; }.ssb-banner { border:1px solid var(--ssb-border); border-left:3px solid var(--ssb-warn); border-radius:var(--ssb-radius-sm); padding:12px; margin:12px 0; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.ssb-banner-ok { border-left-color:var(--ssb-ok); }.ssb-error { border-left-color:var(--ssb-danger); }.ssb-banner p { margin:0; }.ssb-search-view { max-width:760px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); background:var(--ssb-bg); padding-bottom:4px; }.ssb-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--ssb-border); flex-wrap:wrap; }.ssb-panel-head h2 { font-size:16px; margin:0; }.ssb-panel-body { padding:16px; display:flex; flex-direction:column; gap:12px; }.ssb-form-row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }.ssb-form-row > .ssb-field { flex:0 0 176px; }.ssb-search-label { display:grid; gap:8px; margin-top:20px; }.ssb-form-row > .ssb-search-label { flex:1 1 300px; margin-top:0; }.ssb-results { display:grid; gap:8px; margin:16px; }.ssb-candidate { padding:10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); color:var(--ssb-text); font:inherit; cursor:pointer; }.ssb-candidate:hover { border-color:var(--ssb-accent); }.ssb-candidate.ssb-selected { background:var(--ssb-accent-wash); border-color:var(--ssb-accent); }.ssb-peek { display:flex; flex:1; flex-direction:column; gap:2px; text-align:left; cursor:pointer; min-width:0; }.ssb-peek:hover strong { text-decoration:underline; }.ssb-provider { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); padding:16px; margin:12px 0; min-width:0; }.ssb-provider legend { padding:0 6px; color:var(--ssb-text-sub); }.ssb-provider details { grid-column:1 / -1; }.ssb-provider summary { cursor:pointer; }.ssb-reqlog { margin:8px 0 0; padding:0 0 0 18px; color:var(--ssb-text-sub); }.ssb-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.ssb-route-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:12px; }.ssb-route-cell { display:grid; gap:6px; min-width:0; }.ssb-route-cell-label { color:var(--ssb-text-sub); font-size:11px; }.ssb-route-cell select { width:100%; min-width:0; }.ssb-route-advanced { margin-top:12px; }.ssb-route-advanced > summary { cursor:pointer; }.ssb-route-tune { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; padding:8px 0; border-top:1px solid var(--ssb-border); }.ssb-route-tune-label { min-width:32px; color:var(--ssb-text-sub); }.ssb-route-delay { flex:0 0 120px; }
 .ssb-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; position:relative; }.ssb-switch input[type="checkbox"] { position:absolute; opacity:0; width:1px; height:1px; }.ssb-switch__track { display:inline-flex; flex-shrink:0; align-items:center; width:34px; height:19px; padding:3px; border-radius:999px; background:var(--ssb-bg-muted); border:1px solid var(--ssb-border); transition:background .15s ease; }.ssb-switch__thumb { width:13px; height:13px; border-radius:50%; background:var(--ssb-text-sub); transition:transform .15s ease; }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track { background:var(--ssb-accent); }.ssb-switch input[type="checkbox"]:checked + .ssb-switch__track .ssb-switch__thumb { transform:translateX(13px); background:var(--ssb-bg); }.ssb-switch input[type="checkbox"]:focus-visible + .ssb-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }.ssb-switch input[type="checkbox"]:disabled + .ssb-switch__track { opacity:.5; cursor:not-allowed; }.ssb-switch:hover .ssb-switch__track { border-color:var(--ssb-accent); }.ssb-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
@@ -2067,7 +2153,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, groupSlices, avgCostOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, groupSlices, avgCostOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

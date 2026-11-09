@@ -30,7 +30,8 @@ export function createCatalog({ state, getControl = state.get, router, executor,
   function records(kind) {
     const config = getControl(), result = []
     for (const [, cache] of state.cache.entries()) {
-      if (cache.kind !== kind || cache.payload?.routingRevision !== config.routingRevision || !Array.isArray(cache.payload?.items) || kind === 'catalog' && cache.payload.items.some(s => !securitySchema.safeParse(s).success) || kind === 'calendar' && cache.payload.items.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || typeof d.isOpen !== 'boolean')) continue
+      // 缓存表可能残留空记录(历史 update 语义写坏), 一条坏数据不能拖死整轮报价
+      if (!cache || cache.kind !== kind || cache.payload?.routingRevision !== config.routingRevision || !Array.isArray(cache.payload?.items) || kind === 'catalog' && cache.payload.items.some(s => !securitySchema.safeParse(s).success) || kind === 'calendar' && cache.payload.items.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || typeof d.isOpen !== 'boolean')) continue
       result.push(cache)
     }
     return result

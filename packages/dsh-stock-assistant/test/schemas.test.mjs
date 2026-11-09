@@ -81,3 +81,9 @@ test('proxy 仅接受 http(s) URL 且可省略(反代/代理出口)', () => {
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'socks5://127.0.0.1:1080' }], routes: [] }))
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'not-a-url' }], routes: [] }))
 })
+
+// 回归: 历史坏缓存(如 update 写出的空值)不能阻塞插件加载, 交由宿主备份后跳过
+test('缓存表声明备份跳过无效记录', async () => {
+  const { domainSpec } = await import('../src/schemas.mjs')
+  assert.equal(domainSpec.invalidRecords, 'backup-and-skip')
+})

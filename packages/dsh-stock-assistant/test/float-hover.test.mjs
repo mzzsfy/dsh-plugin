@@ -87,6 +87,18 @@ test('分时图渲染右侧价格刻度与定位点', async () => {
   assert.match(html, /10\.[0-3]/, '刻度显示为价格而非百分比')
 })
 
+test('涨跌配色与价格文本只有一处实现', async () => {
+  const { plugin } = await loadClient()
+  const { toneClass, priceTextOf } = plugin.__testing
+  assert.equal(toneClass(1.2), ' ssb-up')
+  assert.equal(toneClass(-0.3), ' ssb-down')
+  assert.equal(toneClass(0), '', '零涨跌不上色')
+  assert.equal(toneClass(null), '')
+  assert.equal(priceTextOf(444.4, 2), '444.40', '价格按精度补零, 列表与图读数一致')
+  assert.equal(priceTextOf(null, 2), '—')
+  assert.equal(priceTextOf('', 2), '—')
+})
+
 test('一字板或贴边行情放大后曲线仍在窗内', async () => {
   const { sparkRangeOf } = (await loadClient()).plugin.__testing
   const flat = sparkRangeOf({ values: [10.2, 10.2, 10.2, 10.2], preClose: 10, zoom: 1.2 })

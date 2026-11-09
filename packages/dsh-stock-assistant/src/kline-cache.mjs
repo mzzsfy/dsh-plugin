@@ -12,7 +12,8 @@ export function createKlineCache({ cacheTable, now }) {
     if (!raw || raw.kind !== 'kline') return null
     const ttl = TTL_BY_PERIOD[keyParts.period]
     if (now() - raw.fetchedAt >= ttl || raw.payload?.routingRevision !== routingRevision) {
-      await cacheTable.update(key(keyParts), () => undefined).catch(() => {})
+      // 过期即删: update 返回 undefined 会把空值写进表, 之后 records() 遍历到这里就炸
+      await cacheTable.delete(key(keyParts)).catch(() => {})
       return null
     }
     return raw
@@ -23,7 +24,7 @@ export function createKlineCache({ cacheTable, now }) {
     await cacheTable.put(key(keyParts), value).catch(() => {})
   }
   async function invalidate(keyParts) {
-    await cacheTable.update(key(keyParts), () => undefined).catch(() => {})
+    await cacheTable.delete(key(keyParts)).catch(() => {})
   }
   return { get, put, invalidate }
 }
