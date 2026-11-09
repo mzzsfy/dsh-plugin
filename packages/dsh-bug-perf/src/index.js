@@ -1,11 +1,13 @@
-// dsh-bug-perf Host 半区:把行配置归一化后经只读路由交给浏览器半区,
+// dsh-bug-perf Host 半区:把行配置归一化后经配置路由交给浏览器半区,接收设置页保存,
 // 并接收浏览器定期上报的性能采样(只落本地临时文件,用于定位“越用越卡”)。
-// 补丁本身全部在客户端执行;这里不做认证,缺 webServer 或路由注册失败都不影响宿主。
+// 会话列表瘦身在宿主执行(包装 sessionController.list),其余补丁在客户端执行;
+// 这里不做认证,缺 webServer 或路由注册失败都不影响宿主。
 import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_CONFIG, normalizeConfig } from './config.mjs'
+import { installListSlim } from './list-slim.mjs'
 
 export const name = 'dsh-bug-perf'
 // web profile 必有 webServer; 声明依赖让 apply 在服务就绪后执行,缺服务宿主即不激活本行
@@ -13,6 +15,8 @@ export const inject = ['webServer']
 
 const CONFIG_PATH = '/api/dsh-bug-perf/config'
 const DIAG_PATH = '/api/dsh-bug-perf/diag'
+const NAMESPACE = 'bug-perf'
+const BODY_MAX_BYTES = 64 * 1024
 const DIAG_FILE = join(tmpdir(), 'dsh-bug-perf-diag.jsonl')
 const DIAG_MAX_BYTES = 2 * 1024 * 1024
 
@@ -44,6 +48,13 @@ const SETTINGS_SCHEMA = z.object({
     base: z.number().default(DEFAULT_CONFIG.jobStreamLimit.base).description('默认窗口:只给主会话放行的条数,子 agent 会话不占这个窗口'),
     max: z.number().default(DEFAULT_CONFIG.jobStreamLimit.max).description('硬上限;点击某个会话可越过默认窗口加入,总数到上限后淘汰最先加入的一条'),
   }).description('任务状态流上限'),
+  listSlim: z.object({
+    enabled: z.boolean().default(DEFAULT_CONFIG.listSlim.enabled).description('会话列表瘦身:按白名单裁剪 session/list 的投影并缓存,降低列表响应体积与重建耗时;响应形状不符时透传,新增列表字段需同步白名单'),
+  }).description('会话列表瘦身'),
+  diag: z.object({
+    enabled: z.boolean().default(DEFAULT_CONFIG.diag.enabled).description('性能采样上报:开启后按采样次数把页面性能摘要写入宿主临时文件,供事后排查;关闭时内存采样仍运行'),
+    reportEvery: z.number().default(DEFAULT_CONFIG.diag.reportEvery).description('每多少次采样上报一次;采样周期固定,修改后刷新页面生效'),
+  }).description('性能采样上报'),
 }).description('宿主缺陷兜底与性能补丁,每个功能独立开关')
 
 // 旧宿主 schemastery 无 volatile 方法,特性检测原样返回
@@ -58,6 +69,90 @@ const sendJson = (res, status, body) => {
     'cache-control': 'no-store',
   })
   res.end(JSON.stringify(body))
+}
+
+// 设置页保存:legacy 命名空间以 register 在场为准(0.1.7 的 update 名义存在但按命名空间找条目必败);
+// 0.1.7+ 走 configEditor 落 profile 条目,与命名空间解耦
+const persistConfig = async (ctx, next) => {
+  const settings = ctx.get('settings')
+  if (settings !== undefined && typeof settings.register === 'function' && typeof settings.update === 'function') {
+    await settings.update(NAMESPACE, next)
+    return
+  }
+  const editor = ctx.get('configEditor')
+  const entry = ctx.fiber?.entry
+  if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined && entry !== null) {
+    await editor.edit(entry, (current) => ({ ...(current ?? {}), ...next }))
+    return
+  }
+  throw new Error('宿主配置服务不可用')
+}
+
+// 读回优先级:旧宿主 settings 命名空间已写入的节;否则用行配置(live ref 解箱)
+const readConfig = (ctx, config) => {
+  const settings = ctx.get('settings')
+  const stored = settings !== undefined && typeof settings.get === 'function' ? settings.get(NAMESPACE) : undefined
+  const known = stored !== null && typeof stored === 'object'
+    && ['restartCoalesce', 'terminalWatchdog', 'socketKeepAlive', 'stuckSession', 'jobStreamLimit', 'listSlim', 'diag']
+      .some((key) => stored[key] !== null && typeof stored[key] === 'object')
+  return normalizeConfig(known ? stored : unwrapVolatile(config))
+}
+
+const readBody = (req) => new Promise((resolve, reject) => {
+  let size = 0
+  const chunks = []
+  req.on('data', (chunk) => {
+    size += chunk.length
+    if (size > BODY_MAX_BYTES) {
+      reject(new Error('body too large'))
+      req.destroy()
+      return
+    }
+    chunks.push(chunk)
+  })
+  req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+  req.on('error', reject)
+})
+
+const configHandler = async (ctx, config, req, res) => {
+  if (req.method !== 'POST') {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method-not-allowed' })
+      return
+    }
+    try {
+      sendJson(res, 200, { config: readConfig(ctx, config) })
+    } catch {
+      sendJson(res, 500, { error: 'config-unavailable' })
+    }
+    return
+  }
+  let body
+  try {
+    body = JSON.parse(await readBody(req))
+  } catch {
+    sendJson(res, 400, { error: 'bad-payload' })
+    return
+  }
+  const patch = body?.config
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+    sendJson(res, 400, { error: 'bad-config' })
+    return
+  }
+  let next
+  try {
+    next = normalizeConfig({ ...readConfig(ctx, config), ...patch })
+  } catch {
+    sendJson(res, 500, { error: 'config-unavailable' })
+    return
+  }
+  try {
+    await persistConfig(ctx, next)
+  } catch {
+    sendJson(res, 503, { error: 'config-unavailable' })
+    return
+  }
+  sendJson(res, 200, { config: next })
 }
 
 // 采样文件只保留最近一轮, 超过上限后轮转一次, 避免无限增长
@@ -94,19 +189,38 @@ const diagHandler = (req, res) => {
 }
 
 export function apply(ctx, config) {
+  // 列表瘦身:不依赖 webServer/路由,开关从行配置实时读取;装载失败只关闭该能力
+  installListSlim(ctx, { isEnabled: () => normalizeConfig(unwrapVolatile(config)).listSlim.enabled })
   const server = ctx.get('webServer')
   if (server === undefined || typeof server.register !== 'function') return
+
+  // 设置页持久化双形:legacy settings 命名空间 / 0.1.7 行配置编辑器
+  const installSettings = (scope) => {
+    const settings = scope.settings ?? scope.get?.('settings')
+    if (settings === undefined) return
+    if (typeof settings.register === 'function') {
+      try {
+        settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: unwrapVolatile(config) })
+      } catch (error) {
+        console.warn('[dsh-bug-perf] settings unavailable:', error instanceof Error ? error.message : String(error))
+      }
+      return
+    }
+    if (typeof settings.configure === 'function') {
+      try {
+        scope.effect(() => settings.configure({ auto: false }, ctx.fiber))
+      } catch (error) {
+        console.warn('[dsh-bug-perf] settings configure failed:', error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+  if (typeof ctx.inject === 'function') ctx.inject(['settings'], installSettings)
+
   const routes = [
     {
       kind: 'exact',
       path: CONFIG_PATH,
-      handler: (_req, res) => {
-        try {
-          sendJson(res, 200, { config: normalizeConfig(unwrapVolatile(config)) })
-        } catch {
-          sendJson(res, 500, { error: 'config-unavailable' })
-        }
-      },
+      handler: (req, res) => configHandler(ctx, config, req, res),
     },
     {
       kind: 'exact',

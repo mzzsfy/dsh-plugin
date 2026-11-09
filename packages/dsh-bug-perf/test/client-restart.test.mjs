@@ -127,7 +127,14 @@ test('配置_客户端内联_与宿主同源', async () => {
   const plugin = loadPlugin()
   const host = await import('../src/config.mjs')
   assert.deepEqual(plugin.__test.DEFAULT_CONFIG, host.DEFAULT_CONFIG)
+  assert.deepEqual(plugin.__test.LIMITS, host.LIMITS)
   assert.deepEqual(plugin.__test.normalizeConfig({}), host.normalizeConfig({}))
+  const raw = { diag: { enabled: true, reportEvery: 0 } }
+  assert.deepEqual(plugin.__test.normalizeConfig(raw), host.normalizeConfig(raw))
+  assert.deepEqual(
+    plugin.__test.normalizeConfig({ diag: { reportEvery: 99999 } }),
+    host.normalizeConfig({ diag: { reportEvery: 99999 } }),
+  )
 })
 
 // Given 远程配置缺失, When 客户端归一化, Then 落在与宿主一致的默认值上

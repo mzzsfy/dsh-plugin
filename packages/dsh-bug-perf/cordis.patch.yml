@@ -1,7 +1,7 @@
 # dsh-bug-perf bundle patch: inserts the plugin row into the profile root.
 # Applied by `dsh plugin add @mzzsfy/dsh-bug-perf`; the row lets cordis load the
-# host half (config + config route) and the client module system discover this
-# package's dsh.client declaration and serve src/client.js to the page.
+# host half (config route + settings save + list slim patch) and the client module system discover
+# this package's dsh.client declaration and serve src/client.js to the page.
 # Each patch feature is switched on/off through this row's config; see README.
 
 - insert:

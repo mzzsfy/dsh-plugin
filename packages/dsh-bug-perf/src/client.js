@@ -7,6 +7,19 @@ window.__ModuleLoader__.load({
     const CONFIG_PATH = '/api/dsh-bug-perf/config'
     const CONFIG_TIMEOUT_MS = 2000
     const LOG_PREFIX = '[dsh-bug-perf]'
+    const PKG_ID = '@mzzsfy/dsh-bug-perf'
+    const NAMESPACE = 'bug-perf'
+    const DIAG_SAMPLE_MS = 5000
+    const DIAG_MAX_SAMPLES = 720
+    const DIAG_DEFAULT_REPORT_EVERY = 12
+
+    // 设置卡片依赖 React;缺失时只跳过 UI,不影响其余补丁
+    let React
+    try {
+      React = require('react')
+    } catch {
+      React = undefined
+    }
 
     // 与 src/config.mjs 同源;客户端不能 import 共享模块,内联副本由测试对表
     const DEFAULT_CONFIG = {
@@ -15,6 +28,8 @@ window.__ModuleLoader__.load({
       socketKeepAlive: { enabled: true, intervalMs: 1500 },
       stuckSession: { enabled: true, checkMs: 2000, stallMs: 8000, reconnect: true, maxReconnectAttempts: 5, reconnectIntervalMs: 15000 },
       jobStreamLimit: { enabled: true, base: 32, max: 48 },
+      listSlim: { enabled: true },
+      diag: { enabled: false, reportEvery: DIAG_DEFAULT_REPORT_EVERY },
     }
     const LIMITS = {
       restartCoalesce: { windowMs: { min: 0, max: 2000 } },
@@ -31,6 +46,7 @@ window.__ModuleLoader__.load({
         reconnectIntervalMs: { min: 500, max: 600000 },
       },
       jobStreamLimit: { base: { min: 4, max: 256 }, max: { min: 4, max: 512 } },
+      diag: { reportEvery: { min: 1, max: DIAG_MAX_SAMPLES } },
     }
 
     const isSection = (value) => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -41,6 +57,10 @@ window.__ModuleLoader__.load({
       if (value < bounds.min) return fallback
       return value > bounds.max ? bounds.max : value
     }
+    const numberClamped = (value, bounds, fallback) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+      return Math.min(bounds.max, Math.max(bounds.min, value))
+    }
     const normalizeConfig = (raw) => {
       const input = sectionOf(raw)
       const restart = sectionOf(input.restartCoalesce)
@@ -48,6 +68,8 @@ window.__ModuleLoader__.load({
       const keepAlive = sectionOf(input.socketKeepAlive)
       const stuck = sectionOf(input.stuckSession)
       const jobLimit = sectionOf(input.jobStreamLimit)
+      const listSlim = sectionOf(input.listSlim)
+      const diag = sectionOf(input.diag)
       return {
         restartCoalesce: {
           enabled: booleanOr(restart.enabled, DEFAULT_CONFIG.restartCoalesce.enabled),
@@ -78,6 +100,13 @@ window.__ModuleLoader__.load({
           reconnect: booleanOr(stuck.reconnect, DEFAULT_CONFIG.stuckSession.reconnect),
           maxReconnectAttempts: numberWithin(stuck.maxReconnectAttempts, LIMITS.stuckSession.maxReconnectAttempts, DEFAULT_CONFIG.stuckSession.maxReconnectAttempts),
           reconnectIntervalMs: numberWithin(stuck.reconnectIntervalMs, LIMITS.stuckSession.reconnectIntervalMs, DEFAULT_CONFIG.stuckSession.reconnectIntervalMs),
+        },
+        listSlim: {
+          enabled: booleanOr(listSlim.enabled, DEFAULT_CONFIG.listSlim.enabled),
+        },
+        diag: {
+          enabled: booleanOr(diag.enabled, DEFAULT_CONFIG.diag.enabled),
+          reportEvery: numberClamped(diag.reportEvery, LIMITS.diag.reportEvery, DEFAULT_CONFIG.diag.reportEvery),
         },
       }
     }
@@ -231,14 +260,10 @@ window.__ModuleLoader__.load({
     const FRAME_TYPE_PREFIX = '{"type":"'
     const STREAM_ID_KEY = '"streamId":"'
     const ENDPOINT_KEY = '"endpoint":"'
-    const DIAG_SAMPLE_MS = 5000
-    const DIAG_MAX_SAMPLES = 720
     // 事件循环探测: 延迟超过该值视为主线程被占满
     const DIAG_BLOCK_MS = 1000
     const DIAG_PROBE_MS = 2000
     const DIAG_REPORT_PATH = '/api/dsh-bug-perf/diag'
-    // 每 N 次采样(约一分钟)把摘要落到宿主临时文件, 便于事后定位长时间运行后的退化
-    const DIAG_REPORT_EVERY = 12
     // 定时器检查节拍: 实际发送间隔由可变的 intervalMs 决定
     const KEEPALIVE_TICK_MS = 500
     // 只有协议级关闭码才可能是宿主拒绝保活帧; 链路断开与主动关闭不计入
@@ -259,6 +284,7 @@ window.__ModuleLoader__.load({
     // 不解析完整帧、不改动任何流, 采样保留最近 DIAG_MAX_SAMPLES 个点。
     const createDiag = (clock) => ({
       startedAt: clock.now(),
+      enabled: false,
       sockets: [],
       samples: [],
       longTasks: [],
@@ -282,7 +308,7 @@ window.__ModuleLoader__.load({
         path: win.location?.pathname ?? '',
         totals: diag.totals,
         last: diag.samples.slice(-6),
-        blockedMs: diag.blockedMs,
+        blockedMs: diag.blockedMs ?? 0,
         longTasks: diag.longTasks.slice(-8),
         errors: diag.errors.slice(-4),
       }
@@ -311,8 +337,6 @@ window.__ModuleLoader__.load({
           sent: diag.totals.sent,
         })
         if (diag.samples.length > DIAG_MAX_SAMPLES) diag.samples.shift()
-        diag.count = (diag.count ?? 0) + 1
-        if (diag.count % DIAG_REPORT_EVERY === 0) reportDiag(win, diag)
       }
       sample()
       const timer = clock.setInterval(sample, DIAG_SAMPLE_MS)
@@ -340,6 +364,18 @@ window.__ModuleLoader__.load({
         if (diag.errors.length > DIAG_MAX_SAMPLES) diag.errors.shift()
       })
       return { timer, observer }
+    }
+
+    // 采样与上报分离:关闭上报只停请求,内存采样继续供停滞判定使用
+    const startDiagReporting = ({ win, clock, diag, options }) => {
+      if (options?.enabled !== true) {
+        diag.enabled = false
+        return { enabled: false, reason: 'disabled' }
+      }
+      const everyMs = options.reportEvery * DIAG_SAMPLE_MS
+      const timer = clock.setInterval(() => reportDiag(win, diag), everyMs)
+      diag.enabled = true
+      return { enabled: true, timer }
     }
 
     // 宿主心跳为固定短周期且丢两次即 terminate, 经反代时 pong 常被链路吞掉。
@@ -745,7 +781,285 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 设置卡片:注册进官方「插件」设置页与插件管理页配置槽,不占独立导航项
+    const UI_SECTIONS = [
+      {
+        key: 'restartCoalesce',
+        title: '会话流重建合并',
+        description: '同一会话流在窗口内的重复 restart 合并为一次尾随执行,降低列表重建风暴。',
+        fields: [{ name: 'windowMs', label: '合并窗口', unit: '毫秒' }],
+      },
+      {
+        key: 'terminalWatchdog',
+        title: '终端输出看门狗',
+        description: '终端视图停滞且仍持有 attach 流时自动重连,避免输出永久卡住。',
+        fields: [
+          { name: 'checkMs', label: '检查周期', unit: '毫秒' },
+          { name: 'stallMs', label: '停滞判定', unit: '毫秒' },
+          { name: 'cooldownMs', label: '自愈冷却', unit: '毫秒' },
+        ],
+      },
+      {
+        key: 'socketKeepAlive',
+        title: '会话流保活',
+        description: '空闲时向会话流连接发送无害帧,避免短心跳把公网连接误判为失联。',
+        fields: [{ name: 'intervalMs', label: '保活间隔', unit: '毫秒' }],
+      },
+      {
+        key: 'stuckSession',
+        title: '会话加载停滞兜底',
+        description: '加载卡住时主动请求宿主重建连接,多次无效才给出提示。',
+        fields: [
+          { name: 'checkMs', label: '检查周期', unit: '毫秒' },
+          { name: 'stallMs', label: '停滞判定', unit: '毫秒' },
+          { name: 'maxReconnectAttempts', label: '最大重连次数', unit: '次' },
+          { name: 'reconnectIntervalMs', label: '重连间隔', unit: '毫秒' },
+        ],
+        toggles: [{ name: 'reconnect', label: '停滞时主动重建连接' }],
+      },
+      {
+        key: 'jobStreamLimit',
+        title: '任务状态流上限',
+        description: '每个会话行常驻一条 job/list 流,会话多时按默认窗口限制,点击会话可越过窗口。',
+        fields: [
+          { name: 'base', label: '默认窗口', unit: '条' },
+          { name: 'max', label: '硬上限', unit: '条' },
+        ],
+      },
+      {
+        key: 'listSlim',
+        title: '会话列表瘦身',
+        description: '按白名单裁剪 session/list 投影并缓存;响应形状不符时透传,新增列表字段需同步白名单。',
+        fields: [],
+      },
+      {
+        key: 'diag',
+        title: '性能采样上报',
+        description: '内存采样始终运行;开启后按采样次数把摘要写入宿主临时文件,默认不产生请求与落盘。',
+        fields: [{ name: 'reportEvery', label: '上报间隔', unit: '次采样' }],
+      },
+    ]
+
+    const UI_CSS = [
+      '.bp-card { --bp-accent:var(--dsw-alias-brand-primary); --bp-accent-deep:var(--dsw-alias-button-primary-hover);',
+      '  --bp-bg:var(--dsw-alias-bg-layer-1); --bp-bg-sub:var(--dsw-alias-bg-layer-2);',
+      '  --bp-border:var(--dsw-alias-border-l2); --bp-border-strong:var(--dsw-alias-border-l3);',
+      '  --bp-text:var(--dsw-alias-label-primary); --bp-text-sub:var(--dsw-alias-label-secondary);',
+      '  --bp-text-dim:var(--dsw-alias-label-tertiary); --bp-inverted:var(--dsw-alias-label-primary-inverted);',
+      '  --bp-danger:var(--dsw-alias-state-error-primary); --bp-radius-sm:6px; --bp-radius-md:8px;',
+      '  border:1px solid var(--bp-border); background:var(--bp-bg); border-radius:var(--bp-radius-md);',
+      '  overflow:hidden; color:var(--bp-text); font-size:12px; line-height:1.5; }',
+      '.bp-card__header { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%;',
+      '  padding:16px; border:0; background:transparent; text-align:left; cursor:pointer; color:inherit; }',
+      '.bp-card__header:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-2px; }',
+      '.bp-card__head-text { display:flex; flex-direction:column; gap:4px; min-width:0; }',
+      '.bp-card__name { font-size:14px; font-weight:600; line-height:1.3; }',
+      '.bp-card__description { font-size:12px; color:var(--bp-text-sub); }',
+      '.bp-card__chevron { flex:none; color:var(--bp-text-dim); transition:transform .15s; }',
+      '.bp-card--open .bp-card__chevron { transform:rotate(180deg); }',
+      '.bp-card__body { padding:0 16px 16px; border-top:1px solid var(--bp-border); }',
+      '.bp-hint { margin:12px 0 0; color:var(--bp-text-sub); }',
+      '.bp-error { margin:8px 0 0; color:var(--bp-text); border-left:2px solid var(--bp-danger); padding-left:8px; }',
+      '.bp-section { padding:12px 0; border-top:1px solid var(--bp-border); }',
+      '.bp-section:first-of-type { border-top:0; }',
+      '.bp-section__head { display:flex; align-items:center; justify-content:space-between; gap:12px; }',
+      '.bp-section__title { font-size:14px; font-weight:600; line-height:1.3; }',
+      '.bp-section__description { margin:4px 0 8px; color:var(--bp-text-sub); }',
+      '.bp-switch { display:inline-flex; align-items:center; gap:8px; min-height:28px; cursor:pointer; flex:none; user-select:none; }',
+      '.bp-switch input[type="checkbox"] { position:absolute; width:0; height:0; opacity:0; }',
+      '.bp-switch__track { position:relative; flex-shrink:0; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
+      '  background:var(--bp-bg-sub); border:1px solid var(--bp-border); transition:background .15s,border-color .15s; }',
+      '.bp-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
+      '  background:var(--bp-text-dim); transform:translateY(-50%); transition:left .15s,background .15s; }',
+      '.bp-switch:hover .bp-switch__track { border-color:var(--bp-accent); }',
+      '.bp-switch input[type="checkbox"]:checked + .bp-switch__track { background:var(--bp-accent); border-color:var(--bp-accent); }',
+      '.bp-switch input[type="checkbox"]:checked + .bp-switch__track .bp-switch__thumb { left:17px; background:var(--bp-bg); }',
+      '.bp-switch input[type="checkbox"]:focus-visible + .bp-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
+      '.bp-switch:has(input[type="checkbox"]:disabled) { opacity:.5; cursor:not-allowed; }',
+      '.bp-fields { display:flex; flex-wrap:wrap; gap:8px 12px; margin-top:8px; }',
+      '.bp-field { display:inline-flex; align-items:center; gap:8px; color:var(--bp-text-sub); }',
+      '.bp-field input[type="number"] { width:88px; padding:4px 8px; border:1px solid var(--bp-border-strong); border-radius:var(--bp-radius-sm);',
+      '  background:var(--bp-bg); color:var(--bp-text); font:inherit; }',
+      '.bp-field input[type="number"]:focus { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:0; }',
+      '.bp-footer { display:flex; align-items:center; gap:12px; padding-top:12px; border-top:1px solid var(--bp-border); }',
+      '.bp-button { min-height:28px; padding:4px 12px; border:1px solid var(--bp-border-strong); border-radius:var(--bp-radius-sm);',
+      '  background:transparent; color:var(--bp-text); cursor:pointer; font:inherit; }',
+      '.bp-button:hover { background:var(--dsw-alias-interactive-bg-hover); }',
+      '.bp-button--primary { border-color:var(--bp-accent); background:var(--bp-accent); color:var(--bp-inverted); }',
+      '.bp-button--primary:hover { border-color:var(--bp-accent-deep); background:var(--bp-accent-deep); }',
+      '.bp-button:disabled { opacity:.5; cursor:not-allowed; }',
+      '@media (prefers-reduced-motion: reduce) { .bp-card__chevron, .bp-switch__track, .bp-switch__thumb { transition:none; } }',
+    ].join('\n')
+
+    const h = React === undefined ? undefined : React.createElement
+
+    const Switch = ({ checked, disabled, label, onChange }) => h('label', { className: 'bp-switch' },
+      h('input', {
+        type: 'checkbox',
+        checked,
+        disabled,
+        onChange: (event) => onChange(event.target.checked),
+      }),
+      h('span', { className: 'bp-switch__track' }, h('span', { className: 'bp-switch__thumb' })),
+      h('span', { className: 'bp-switch__label' }, label),
+    )
+
+    function SettingsPanel() {
+      const [open, setOpen] = React.useState(false)
+      const [config, setConfig] = React.useState(null)
+      const [dirty, setDirty] = React.useState(false)
+      const [saving, setSaving] = React.useState(false)
+      const [error, setError] = React.useState('')
+      const [notice, setNotice] = React.useState('')
+      React.useEffect(() => {
+        let alive = true
+        loadConfig()
+          .then((raw) => { if (alive) setConfig(normalizeConfig(raw ?? window.__dshBugPerf?.config)) })
+          .catch(() => { if (alive) setConfig(normalizeConfig(DEFAULT_CONFIG)) })
+        return () => { alive = false }
+      }, [])
+      const updateSection = (key, patch) => {
+        setConfig({ ...config, [key]: { ...config[key], ...patch } })
+        setDirty(true)
+        setError('')
+        setNotice('')
+      }
+      const save = async () => {
+        setSaving(true)
+        setError('')
+        try {
+          const response = await fetch(CONFIG_PATH, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ config }),
+          })
+          const body = await response.json().catch(() => undefined)
+          if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
+          setConfig(normalizeConfig(body?.config ?? config))
+          setDirty(false)
+          setNotice('已保存,刷新页面生效')
+        } catch (failure) {
+          setError(`保存失败:${failure instanceof Error ? failure.message : String(failure)}`)
+        } finally {
+          setSaving(false)
+        }
+      }
+      return h('div', { className: 'bp-card' + (open ? ' bp-card--open' : '') },
+        h('button', {
+          type: 'button',
+          className: 'bp-card__header',
+          'aria-expanded': open,
+          onClick: () => setOpen(!open),
+        },
+          h('span', { className: 'bp-card__head-text' },
+            h('span', { className: 'bp-card__name' }, '缺陷兜底与性能补丁'),
+            h('span', { className: 'bp-card__description' }, '会话流、终端与列表的运行时补丁;每个功能独立开关'),
+          ),
+          h('span', { className: 'bp-card__chevron', 'aria-hidden': 'true' },
+            h('svg', { width: 14, height: 14, viewBox: '0 0 14 14', fill: 'none' },
+              h('path', {
+                d: 'M3.5 5.25L7 8.75L10.5 5.25',
+                stroke: 'currentColor',
+                'stroke-width': '1.2',
+                'stroke-linecap': 'round',
+                'stroke-linejoin': 'round',
+              }),
+            ),
+          ),
+        ),
+        open && h('div', { className: 'bp-card__body' },
+          h('p', { className: 'bp-hint' }, '修改后点保存;客户端补丁刷新页面生效,列表瘦身在下次列表请求生效。'),
+          error !== '' && h('p', { className: 'bp-error' }, error),
+          config === null && h('p', { className: 'bp-hint' }, '加载配置…'),
+          config !== null && UI_SECTIONS.map((section) => h('section', { key: section.key, className: 'bp-section' },
+            h('div', { className: 'bp-section__head' },
+              h('span', { className: 'bp-section__title' }, section.title),
+              h(Switch, {
+                checked: config[section.key].enabled,
+                disabled: saving,
+                label: '启用',
+                onChange: (enabled) => updateSection(section.key, { enabled }),
+              }),
+            ),
+            h('p', { className: 'bp-section__description' }, section.description),
+            section.fields.map((field) => {
+              const bounds = LIMITS[section.key]?.[field.name]
+              return h('label', { key: field.name, className: 'bp-field' },
+                h('span', {}, field.label),
+                h('input', {
+                  type: 'number',
+                  min: bounds?.min,
+                  max: bounds?.max,
+                  step: 1,
+                  value: config[section.key][field.name],
+                  disabled: saving,
+                  onChange: (event) => {
+                    const value = Number(event.target.value)
+                    if (Number.isFinite(value)) updateSection(section.key, { [field.name]: value })
+                  },
+                }),
+                h('span', {}, field.unit),
+              )
+            }),
+            (section.toggles ?? []).map((toggle) => h('div', { key: toggle.name, className: 'bp-fields' },
+              h(Switch, {
+                checked: config[section.key][toggle.name],
+                disabled: saving,
+                label: toggle.label,
+                onChange: (value) => updateSection(section.key, { [toggle.name]: value }),
+              }),
+            )),
+          )),
+          config !== null && h('div', { className: 'bp-footer' },
+            h('button', {
+              type: 'button',
+              className: 'bp-button bp-button--primary',
+              disabled: saving || !dirty,
+              onClick: save,
+            }, saving ? '保存中…' : '保存'),
+            dirty && h('span', { className: 'bp-hint' }, '有未保存的修改'),
+            !dirty && notice !== '' && h('span', { className: 'bp-hint' }, notice),
+          ),
+        ),
+      )
+    }
+
+    const registerSettingsUi = (ctx) => {
+      if (h === undefined || typeof ctx.inject !== 'function') return
+      ctx.inject(['slots'], (scope) => {
+        const slots = scope.slots
+        if (slots === undefined) return
+        try {
+          scope.effect(() => {
+            const style = document.createElement('style')
+            style.setAttribute('data-plugin', PKG_ID)
+            style.textContent = UI_CSS
+            document.head.appendChild(style)
+            return () => style.remove()
+          })
+        } catch (error) {
+          console.warn(`${LOG_PREFIX} styles unavailable:`, error instanceof Error ? error.message : String(error))
+        }
+        const register = (name, options) => {
+          try {
+            slots.inject(name, () => {
+              try {
+                slots.register(options, () => h(SettingsPanel))
+              } catch (error) {
+                console.warn(`${LOG_PREFIX} settings slot ${name} register failed:`, error instanceof Error ? error.message : String(error))
+              }
+            })
+          } catch (error) {
+            console.warn(`${LOG_PREFIX} settings slot ${name} unavailable:`, error instanceof Error ? error.message : String(error))
+          }
+        }
+        register('settings.plugin.item', { name: 'settings.plugin.item', id: NAMESPACE, key: NAMESPACE })
+        register('plugins.bundle.config', { name: 'plugins.bundle.config', key: PKG_ID })
+      })
+    }
+
     const apply = (ctx) => {
+      registerSettingsUi(ctx)
       const report = { config: undefined, features: {} }
       window.__dshBugPerf = report
       const diag = createDiag(timers)
@@ -763,6 +1077,8 @@ window.__ModuleLoader__.load({
       void (async () => {
         const config = normalizeConfig(await loadConfig())
         report.config = config
+        const reporting = startDiagReporting({ win: window, clock: timers, diag, options: config.diag })
+        report.features.diag = reporting.enabled ? { installed: true } : { installed: false, reason: 'disabled' }
         if (!config.socketKeepAlive.enabled) {
           keepAlive.uninstall?.()
           report.features.socketKeepAlive = { installed: false, reason: 'disabled' }
@@ -818,7 +1134,16 @@ window.__ModuleLoader__.load({
       __test: {
         DEFAULT_CONFIG,
         LIMITS,
+        DIAG_SAMPLE_MS,
+        DIAG_MAX_SAMPLES,
+        DIAG_PROBE_MS,
+        DIAG_BLOCK_MS,
         normalizeConfig,
+        registerSettingsUi,
+        UI_SECTIONS,
+        createDiag,
+        startDiagSampling,
+        startDiagReporting,
         installRestartCoalesce,
         installRestartCoalesceFromRequire,
         watchdogTick,
