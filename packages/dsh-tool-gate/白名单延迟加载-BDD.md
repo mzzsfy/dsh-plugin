@@ -24,15 +24,18 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   「没装本包」的世界。journal 以 definition 引用为键(宿主层表清空会换代,
   层键会失联;definition 跨层共享且身份稳定),还原按 definition 逐条进行。
 - **INV-3 打标即生效**:schema 投影(`schemas`/`view`)每请求实时读层条目内的
-  definition(宿主 0.2.2 起层条目为 registration 包装 `{ definition, when }`,
-  `deferLoading` 必须写在 `registration.definition` 上;写在 registration 本身
-  会让宿主投影读不到,工具门自读自洽而全量注入——2026-11-10 实测失效根因),
-  打标/清标不改层成员资格,无需 emit `tools/change`,下一次 assemble 自然生效。
-- **INV-4 干净禁用**:宿主 `ctx.tools` 缺失、缺 `definitions` 投影面(0.2.2
-  前)或全局层内部结构(`layers.global.tools`,NamedEntries Map + registration
-  条目形态)与已知形态不符时,apply 打日志即返回,零动作不崩;宿主升级重构
-  内部面后自愈路径 = 形态再探测。裸 definition 条目形态(0.2.2 前)判为漂移,
-  不静默退化。
+  definition。层条目两形态:0.2.2 起为 registration 包装 `{ definition, when }`,
+  `deferLoading` 必须写在 `registration.definition` 上(写在 registration 本身
+  会让宿主投影读不到,工具门自读自洽而全量注入——2026-11-10 实测失效根因);
+  更早代际条目是裸 definition,`deferLoading` 直接写在条目上。读取一律先解包,
+  写入目标恒为 definition。打标/清标不改层成员资格,无需 emit
+  `tools/change`,下一次 assemble 自然生效。
+- **INV-4 干净禁用**:宿主 `ctx.tools` 缺失、缺 `register` 或可见面
+  (`definitions` 0.2.2+ / `view` 旧代际)、或层内部结构
+  (`layers.global.tools`,NamedEntries Map + 条目形态可识别)与已知形态不符时,
+  apply 打日志即返回,零动作不崩;宿主升级重构内部面后自愈路径 = 形态再探测。
+  裸 definition 与 registration 包装同属已知形态,均正常工作;未知条目形态
+  (既非包装也无 name)才判漂移,不静默退化。
 - **INV-5 原生会话投影零干预**:原生路由的激活、会话投影与 prompt 顺序
   校验由宿主承担。本包注册只读 `tool_search` 供降级路由检索定义文本,
   不注册被搜索工具、不修改会话加载态、不 provide 服务、不拦截执行。
@@ -140,14 +143,14 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   同名定义覆盖全局定义,无 agent 调用只返回全局定义。
 - **SC-24 检索无加载副作用**:Given A/B 均已投影 tools;When A 搜索私有工具;
   Then 两者 tools schema 与 defer 态均不变,B 仍搜不到 A 的私有工具。
-- **SC-25 内部面形态漂移**:Given 宿主层条目是裸 definition(0.2.2 前形态)或
-  注册后条目未经 registration 包装;When 行 apply;Then 打形态日志并零动作:
-  不打标、不注册检索入口(已注册即注销)、不进入折叠安装段,不崩。两条判定面:
-  层非空按条目形态探测(任一非 registration ⇒ 干净禁用);层为空则注册
-  `tool_search` 后自检该条目(无 `definition` 包装即漂移)。
+- **SC-25 未知条目形态漂移**:Given 层条目为未知形态(既非 registration 包装
+  也无 name);When 行 apply;Then 打形态日志并零动作:不打标、不注册检索入口
+  (已注册即注销)、不进入折叠安装段,不崩。裸 definition(旧代际)与
+  registration 包装同属已知形态,正常工作(SC-25b 在旧代际宿主跑)。
 - **SC-26 检索跟随准入面**:Given 条件注册工具(`when`)本步未准入;When 模型
   步内检索(exec 带 toolSet);Then 结果不含该工具;无 toolSet 的程序化调用
-  退回注册视图,可检到定义文本。
+  退回注册视图,可检到定义文本;旧代际宿主无 toolSet 面,检索恒走注册视图
+  (`view(scope).visible`),不因缺面禁用。
 - **SC-27 会话隔离矩阵**(真 cordis + 官方 ToolRuntime + dsh-scope 实测):
   兄弟会话检索互不可见;A 的 restrict 与同名 shadow 只作用于 A;B 投影与请求
   不含 A 私有工具;动态新增/退场会话层由 tools/change 收敛且不改变兄弟会话
@@ -197,9 +200,10 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   宿主 market 禁行,不在本包范围。
 - 会话早于门启用时,历史中已见过的 deferred 工具在折叠后失去 schema,
   模型可经 tool_search 重新取回定义;历史 tool_call 块投影不受影响。
-- 宿主 0.2.2 之前的代际不在支持面(`hostMin = 0.2.2-rc.1`):低于 hostMin 由
-  compat 装载层排除;被强制加载(旧 profile 手工挂载,或宿主版本不可读时
-  dev-link 跳过校验)时,层条目为裸 definition,工具门按内部面漂移干净禁用,
-  功能不生效但不崩溃(dev-link 在版本可读且低于 hostMin 时直接拒绝)。
+- 宿主代际边界(`hostMin = 0.2.0-rc.1`):0.2.1 及更早的裸 definition 层与
+  0.2.2+ 的 registration 包装层均在支持面,同一收敛/检索/还原链路。低于
+  hostMin 由 compat 装载层排除;被强制加载(旧 profile 手工挂载,或宿主版本
+  不可读时 dev-link 跳过校验)时按形态探测:已知形态正常工作,未知形态干净
+  禁用(dev-link 在版本可读且低于 hostMin 时直接拒绝)。
 - scoped 表中数据非 Map 的条目被跳过投影(仅损失该层收敛,不视为全局漂移);
   宿主若整体重构该面,全局层形状同时变化即由 INV-4 判禁用。

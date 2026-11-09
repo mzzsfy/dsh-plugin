@@ -42,11 +42,19 @@ test('scoped 非 Map 或缺层数据 → 只投影全局层', () => {
 
 // 宿主 0.2.1 的裸 definition 条目形态即内部面漂移:必须干净禁用,
 // 否则打标写在 registration 上、宿主投影读 definition,静默失效。
-test('条目为裸 definition(旧形态)→ undefined(干净禁用)', () => {
-  const legacy = new Map([['read', { name: 'read' }]])
-  assert.equal(toolLayersOf({ layers: { global: { tools: { data: legacy } } } }), undefined)
+// 两形态都支持:registration 取内层,裸 definition 取自身;未知形态才漂移。
+test('条目为裸 definition(旧形态)→ 归一化读取', () => {
+  const legacy = toolLayersOf({ layers: { global: { tools: { data: new Map([['read', { name: 'read' }]]) } } } })
+  assert.deepEqual(legacy.layers()[0].names(), ['read'])
+  assert.equal(legacy.layers()[0].definitionOf('read')?.name, 'read')
   const scoped = new Map([['agent#1', { tools: { data: new Map([['web', { name: 'web' }]]) } }]])
-  assert.equal(toolLayersOf({ layers: { global: { tools: { data: new Map() } }, scoped } }), undefined)
+  const projected = toolLayersOf({ layers: { global: { tools: { data: new Map() } }, scoped } })
+  assert.deepEqual(projected.layers().map((layer) => layer.names()), [[], ['web']])
+})
+
+test('未知条目形态 → undefined(干净禁用)', () => {
+  const unknown = new Map([['weird', { when: () => true }]])
+  assert.equal(toolLayersOf({ layers: { global: { tools: { data: unknown } } } }), undefined)
 })
 
 test('缺 layers / data 非 Map → undefined(干净禁用)', () => {

@@ -8,8 +8,10 @@
 
 - **声明式收敛**:白名单是全系统工具 defer 态的唯一事实源——白名单内清标
   (覆盖插件作者自带声明),白名单外打标;每次收敛只动与目标态有差异的名。
-  打标落在宿主 registration 包装内的 definition(0.2.2 起层条目为
-  `{ definition, when }`,模型面投影读 definition.deferLoading)。
+  打标落在 definition:0.2.2 起层条目为 registration 包装
+  (`{ definition, when }`,投影读 `registration.definition`);更早代际条目是
+  裸 definition(投影读 `definition.deferLoading`)。读取先解包,写入目标恒为
+  definition,两形态同一条收敛路径。
 - **原生链路零干预**:支持 `defer_loading` 的路由(DeepSeek Messages 端)上,
   搜索、激活、会话投影(tool-addition/tool-removal)全部由宿主承担。
 - **降级折叠**:第三方路由(无 defer_loading 能力,宿主剥标全量注入)在官方
@@ -21,15 +23,16 @@
   检索完整定义后以正确名字与参数调用(宿主按名执行 registry 完整定义)。
   capable 路由(请求带 defer 标)与 deepseek 原生 adapter 一律透传。
 - **会话隔离检索**:`tool_search` 只搜索调用方本步可见工具,继承、限制、同名
-  覆盖与条件注册(`when`)准入由宿主解析:模型步内用宿主 toolSet 的准入面
-  (`tools.definitions(scope, toolSet)`),程序化调用(无 toolSet)同一读取面
-  返回注册视图(等价 `view(scope).visible`);无 agent 的调用只搜索全局层。
-  搜索只返回定义文本,不注册工具、不修改白名单或任何会话的加载态。
+  覆盖与条件注册(`when`)准入由宿主解析:0.2.2+ 模型步内用宿主 toolSet 的
+  准入面(`tools.definitions(scope, toolSet)`);更早代际无 toolSet,退回注册
+  视图(`view(scope).visible`)。程序化调用(无 toolSet)同一读取面返回注册
+  视图;无 agent 的调用只搜索全局层。搜索只返回定义文本,不注册工具、不修改
+  白名单或任何会话的加载态。
 - **原状还原**:收敛改动以 undo journal 按 definition 记录原状,行禁用/卸载
   按 journal 逐条还原,系统回到「没装本包」的世界(层表换代后同 definition
   重建仍可还原)。
-- **干净禁用**:宿主 tools/llm 全局层内部结构不符已知形态、或 tools 缺
-  `definitions` 投影面(0.2.2 前)时打日志零动作,不崩;llm 面失败只损失折叠,
+- **干净禁用**:层条目为未知形态(既非 registration 包装也无 name)或 tools
+  缺 `register`/可见面时打日志零动作,不崩;llm 面失败只损失折叠,
   打标收敛不受影响。
 
 ## 使用(设置 → 工具门)
@@ -69,9 +72,10 @@ volatile 字段热改即时收敛(`loader/volatile-update`),不重启;新工具�
 
 ## dsh 版本兼容
 
-按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.2-rc.1"`:宿主 0.2.2 起工具层条目为 registration
-包装(`{ definition, when }`),defer 态读写面按该形态对齐。低于 hostMin 的宿主由
-compat 装载层排除(不装载);若被强制加载(旧 profile 手工挂载,或宿主版本不可读
-时 dev-link 跳过校验)形态探测兜底为干净禁用(打日志、零动作、不崩),不回退旧
-形态(dev-link 在版本可读且低于 hostMin 时直接拒绝)。逐轮实测结论见
+按仓库动态窗口验证(scripts/compat/window.mjs),不预置任何固定版本槽:主测 = 渠道 dist-tag 最新 rc,完全适配口径;基线 = npm latest,不崩溃底线口径;主测与基线同版时收敛单槽。本包声明 `dsh.hostMin = "0.2.0-rc.1"`:支持的两种层条目形态
+已在 0.2.1-rc.3(裸 definition)与 0.2.2-rc.1(registration 包装)实机对账,
+两代际同一收敛/检索/还原链路。低于 hostMin 的宿主由 compat 装载层排除
+(不装载);被强制加载(旧 profile 手工挂载,或宿主版本不可读时 dev-link
+跳过校验)时按形态探测:裸 definition 正常生效,未知形态干净禁用(打日志、
+零动作、不崩)。逐轮实测结论见
 `docs/兼容性测试/逐包测试进度.md`(本地维护,不入库)与本包 `兼容性测试.md`。

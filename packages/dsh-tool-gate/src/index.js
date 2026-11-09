@@ -123,28 +123,35 @@ export function apply(ctx, config) {
   }
 
   // tool_search 注册(折叠入口,隐式白名单 INV-12):行退场随 effect 注销,
-  // 系统回到「没装本包」的世界;register/definitions 面缺失或注册条目形态
-  // 不符 → 宿主代际漂移,注销并干净禁用(零动作)。检索面 = 模型本步准入面
-  // (definitions(scope, toolSet),宿主已解析 when/restrict;无 toolSet 即注册视图)。
+  // 系统回到「没装本包」的世界;register 面或可见面(definitions 0.2.2+ /
+  // view 旧代际)缺失、注册条目形态不符 → 宿主代际漂移,注销并干净禁用
+  // (零动作)。检索面 = 模型本步准入面(definitions(scope, toolSet),宿主已
+  // 解析 when/restrict);旧代际无 toolSet,退回注册视图(view(scope).visible)。
   const toolsService = ctx.get('tools')
-  if (typeof toolsService?.register === 'function' && typeof toolsService?.definitions === 'function') {
+  const visibleDefinitions = typeof toolsService?.definitions === 'function'
+    ? (exec) => toolsService.definitions(exec?.agent, exec?.toolSet)
+    : typeof toolsService?.view === 'function'
+      ? (exec) => [...toolsService.view(exec?.agent).visible.values()]
+      : undefined
+  if (typeof toolsService?.register === 'function' && visibleDefinitions !== undefined) {
     const searchTool = buildSearchTool((exec) => new Map(
-      toolsService.definitions(exec?.agent, exec?.toolSet).map((definition) => [definition.name, definition]),
+      visibleDefinitions(exec).map((definition) => [definition.name, definition]),
     ))
     const disposeSearch = ctx.effect(() => toolsService.register(searchTool), 'tool-gate tool_search')
-    // 注册后自检宿主把条目包成 registration:apply 时层可能为空(空表无从判定),
-    // 注册后这一条在层内即校验;形态不符 = 宿主代际漂移 → 注销并零动作。
+    // 注册后自检层内条目的 definition:apply 时层可能为空(空表无从判定),
+    // 注册后这一条在层内即校验;两形态解包后仍不符 = 漂移 → 注销并零动作。
     // 层内查不到(假宿主不入层)无从判定,放行。
     const registered = toolsService.layers?.global?.tools?.data?.get?.(TOOL_SEARCH_NAME)
-    if (registered !== undefined && registered?.definition !== searchTool) {
+    const registeredDefinition = registered?.definition ?? registered
+    if (registered !== undefined && registeredDefinition !== searchTool) {
       disposeSearch?.()
-      ctx.logger?.warn?.('tool-gate: 宿主层条目未经 registration 包装,内部面形态与已知契约不符,干净禁用(零动作)')
+      ctx.logger?.warn?.('tool-gate: 宿主层条目形态与已知契约不符,干净禁用(零动作)')
       return
     }
   } else {
-    // definitions 面是宿主 0.2.2+ 的投影读取面;缺失即宿主代际不符。
+    // 注册面是唯一必需项;可见面缺失同样无法工作。
     // apply 时层可能为空(形态不可判定),这里直接零动作,不留监听/装饰器
-    ctx.logger?.warn?.('tool-gate: tools.register/definitions 面缺失,宿主代际不符,干净禁用(零动作)')
+    ctx.logger?.warn?.('tool-gate: tools.register 或可见面(definitions/view)缺失,宿主代际不符,干净禁用(零动作)')
     return
   }
   // ---- 降级折叠(INV-10):llm 服务软依赖,缺失 = 只打标不折叠 ----
