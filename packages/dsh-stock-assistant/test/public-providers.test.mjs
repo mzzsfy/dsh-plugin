@@ -310,3 +310,55 @@ test('未配置 endpoints 时用官方默认端点(回归)', async () => {
   await eastmoney.kline(KLINE_REQ('XSHG', '000001'), ctx)
   assert.match(log[0], /^https:\/\/push2his\.eastmoney\.com\//, '默认端点不变')
 })
+
+// ---- 美股 secid 前缀: 交易所静态前缀优先, 不依赖搜索缓存 ----
+
+const US_QUOTE_ROW = (code, mktNum) => ({ f2: 1094.5, f12: code, f13: Number(mktNum), f14: '阿里巴巴', f15: 1096.9, f16: 1064.4, f17: 1080.7, f18: 1080.7, f5: 1000, f6: 2000, f124: 1761816000 })
+const quotCtx = (resolve, log = []) => ({ now: () => 100, signal: new AbortController().signal, usSymbols: new Map(), fetch: async url => { log.push(String(url)); return { ok: true, json: async () => resolve(String(url)) } } })
+
+test('东财 quotes 美股按交易所静态前缀取 secid, 缓存为空也能取到报价', async () => {
+  const log = []
+  // 缓存为空(进程重启后状态): 纽约所必须直接走 106, 而不是退化成纳斯达克 105
+  const ctx = quotCtx(url => url.includes('106.BABA') ? { data: { diff: [US_QUOTE_ROW('BABA', 106)] } } : { data: null }, log)
+  const result = await eastmoney.quotes({ providerInstanceId: 'em', securities: [{ id: 'XNYS:equity:BABA', exchange: 'XNYS', code: 'BABA' }] }, ctx)
+  assert.match(log[0], /secids=106\.BABA/, '纽约所静态前缀命中')
+  assert.equal(log.length, 1, '首轮命中不产生兜底请求')
+  assert.equal(result.items[0].last, '1094.50')
+  assert.equal(result.errors.length, 0)
+})
+
+test('东财 quotes 美股首轮落空时补发剩余市场号(纽约所 106/107 二义)', async () => {
+  const log = []
+  // 交易所标为纽约所但实际挂牌 107: 静态前缀 106 落空, 兜底必须能捞回来
+  const ctx = quotCtx(url => url.includes('107.AMEX1') ? { data: { diff: [US_QUOTE_ROW('AMEX1', 107)] } } : { data: null }, log)
+  const result = await eastmoney.quotes({ providerInstanceId: 'em', securities: [{ id: 'XNYS:equity:AMEX1', exchange: 'XNYS', code: 'AMEX1' }] }, ctx)
+  assert.match(log[0], /secids=106\.AMEX1/, '首轮用静态前缀')
+  assert.match(log[1], /105\.AMEX1/, '兜底带其余市场号')
+  assert.match(log[1], /107\.AMEX1/, '兜底带其余市场号')
+  assert.equal(result.items[0].last, '1094.50')
+  assert.equal(result.errors.length, 0)
+})
+
+test('东财 quotes 非美股落空不追加兜底请求', async () => {
+  const log = []
+  const ctx = quotCtx(() => ({ data: null }), log)
+  const result = await eastmoney.quotes({ providerInstanceId: 'em', securities: [{ id: 'XSHG:equity:600519', exchange: 'XSHG', code: '600519' }] }, ctx)
+  assert.equal(log.length, 1, '非美股无前缀候选, 只发一次')
+  assert.equal(result.errors[0].code, 'NO_DATA')
+})
+
+test('东财 quotes 多只美股混装时兜底只补落空的那几只', async () => {
+  const log = []
+  const ctx = quotCtx(url => url.includes('105.AAPL') ? { data: { diff: [US_QUOTE_ROW('AAPL', 105)] } } : { data: null }, log)
+  const result = await eastmoney.quotes({ providerInstanceId: 'em', securities: [
+    { id: 'XNAS:equity:AAPL', exchange: 'XNAS', code: 'AAPL' },
+    { id: 'XNYS:equity:BABA', exchange: 'XNYS', code: 'BABA' },
+  ] }, ctx)
+  assert.match(log[0], /105\.AAPL/, '首轮含全部证券')
+  assert.match(log[0], /106\.BABA/, '首轮含全部证券')
+  assert.match(log[1], /105\.BABA/, '兜底补落空的纽约所证券')
+  assert.doesNotMatch(log[1], /106\.BABA/, '首轮已试过的前缀不重复请求')
+  assert.doesNotMatch(log[1], /AAPL/, '已命中的证券不重复请求')
+  assert.equal(result.items.length, 1)
+  assert.equal(result.errors[0].securityId, 'XNYS:equity:BABA')
+})
