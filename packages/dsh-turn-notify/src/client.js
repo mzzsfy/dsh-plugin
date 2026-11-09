@@ -637,6 +637,55 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ---- 跨插件通知入口 ----
+    // 外部插件(股票盯盘的标记价提醒)借用本插件的呈现通道:同一套本机开关、专注静默、
+    // 授权与标题闪烁降级规则。外部事件不在六类事件里,因此不受事件路由与分类静音约束,
+    // 也不进投影队列、不做多窗口认领——没有投影 ID,同一窗口的重复由短时去重挡。
+    const EXTERNAL_TONE = 'bell'
+    const EXTERNAL_DEDUPE_MS = 2 * 1000
+    const externalSeen = new Map()
+    function notifyExternal(input) {
+      const title = typeof input?.title === 'string' ? input.title.trim().slice(0, 120) : ''
+      if (title === '') return { delivered: [] }
+      const key = typeof input?.key === 'string' && input.key !== '' ? input.key.slice(0, 120) : title
+      const now = Date.now()
+      const last = externalSeen.get(key)
+      // 同键短时重入:调用方有自己的防抖,这里只挡同一拍的双发与同页双实例
+      if (last !== undefined && now - last < EXTERNAL_DEDUPE_MS) return { delivered: [], duplicate: true }
+      externalSeen.set(key, now)
+      if (externalSeen.size > 64) externalSeen.delete(externalSeen.keys().next().value)
+      const body = typeof input?.body === 'string' ? input.body.slice(0, 400) : ''
+      const channels = chooseChannels(isEngaged(), notificationPermission(), Date.now() - lastActionAt(), null, null, null)
+      const delivered = []
+      // 页内通知库缺失时通道不可用, 不能回执一条没发生过的 toast
+      if (channels.toast && toast) {
+        showPageNotification(body === '' ? title : title + '\n' + body)
+        delivered.push('toast')
+      }
+      // 页内音与通知音互斥(chooseChannels 已保证),同一条外部提醒至多一声
+      if (channels.pageSound && toast) {
+        playSound({ kind: 'builtin', name: EXTERNAL_TONE }).catch(() => {})
+        delivered.push('pageSound')
+      }
+      if (channels.sound) {
+        playSound({ kind: 'builtin', name: EXTERNAL_TONE }).catch(() => {})
+        delivered.push('sound')
+      }
+      if (channels.system) {
+        notifySystem({ id: key, text: title, summary: body })
+        delivered.push('system')
+      } else if (channels.blink && localGet(KEY_DEGRADE_HINT) !== '0') {
+        startTitleBlink()
+        delivered.push('blink')
+      }
+      return { delivered }
+    }
+    // 契约:window.__dshNotify.version 为能力代数, notify 同步返回已发起的通道。
+    // 外部调用方只在存在时优先使用, 缺席即退出自己的降级线路。
+    const NOTIFY_BRIDGE = { version: 1, notify: notifyExternal }
+    function installNotifyBridge() { window.__dshNotify = NOTIFY_BRIDGE }
+    function uninstallNotifyBridge() { if (window.__dshNotify === NOTIFY_BRIDGE) delete window.__dshNotify }
+
     // ---- 投影快照与认领 ----
 
     let soundMapping = {}
@@ -2307,6 +2356,11 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style)
           return () => style.remove()
         }, 'turn-notify styles')
+        // 跨插件通知入口随插件生命周期挂载/撤销:卸载后外部调用方立即退回自己的降级线路
+        ctx.effect(() => {
+          installNotifyBridge()
+          return uninstallNotifyBridge
+        }, 'turn-notify external bridge')
         // 激活即订阅:通知链路不依赖设置面板是否打开过
         const uiWorkspace = ctx.get('uiWorkspace')
         ctx.effect(() => start(bus, { sessions, uiWorkspace }), 'turn-notify notifications')
@@ -2424,7 +2478,7 @@ window.__ModuleLoader__.load({
       },
       // 测试钩子:供全链路集成测试注入 stub 后取内部函数,生产无消费方;
       // 页内通知的展示结果经 require 桩捕获,不在本包断言
-      __test: { poll, pendingReminders, markSessionHandled, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification },
+      __test: { poll, pendingReminders, markSessionHandled, pollOnce, storageState, announcedIds, submitCategoryToggle, start, pruneReminders, previewPageNotification, notifyExternal, installNotifyBridge, uninstallNotifyBridge, stopTitleBlink },
     }
   },
 })

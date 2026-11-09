@@ -70,6 +70,22 @@ test('invalidate 删除指定条目', async () => {
   assert.equal(await cache.get(keyParts, 0), null)
 })
 
+// 回归: update(key, () => undefined) 会在表里留下空记录, 之后 catalog.records 遍历 cache 表时崩在 cache.kind
+test('invalidate 后表里不留空记录', async () => {
+  const { cache, domain } = await setup()
+  await cache.put(keyParts, payload, 0)
+  await cache.invalidate(keyParts)
+  assert.equal([...domain.table('cache').entries()].length, 0)
+})
+
+test('TTL 过期即删, 不留空记录', async () => {
+  const { cache, domain, tick } = await setup()
+  await cache.put(keyParts, payload, 0)
+  tick(60 * 60 * 1000)
+  assert.equal(await cache.get(keyParts, 0), null)
+  assert.equal([...domain.table('cache').entries()].length, 0)
+})
+
 test('缓存存储异常时 put 静默不阻塞', async () => {
   const storage = memoryStorage()
   storage.broken = true
