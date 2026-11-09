@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULT_CONFIG, normalizeConfig } from '../src/config.mjs'
 
-// Given 无配置, When 归一化, Then 两个功能默认开启且阈值取默认
-test('配置_缺省_默认全开', () => {
+// Given 无配置, When 归一化, Then 各补丁默认开启(诊断上报默认关闭)且阈值取默认
+test('配置_缺省_功能默认值与阈值', () => {
   const config = normalizeConfig(undefined)
   assert.deepEqual(config, DEFAULT_CONFIG)
   assert.equal(config.restartCoalesce.enabled, true)
@@ -115,4 +115,31 @@ test('配置_任务流上限_开关与回退', () => {
   assert.equal(capped.jobStreamLimit.max, 512)
   const inverted = normalizeConfig({ jobStreamLimit: { base: 200, max: 10 } })
   assert.equal(inverted.jobStreamLimit.base, 10)
+})
+
+// Given 列表瘦身缺省或关闭, When 归一化, Then 默认开启、显式关闭保留、非法类型回退默认
+test('配置_列表瘦身_开关与回退', () => {
+  assert.deepEqual(normalizeConfig(undefined).listSlim, { enabled: true })
+  assert.equal(normalizeConfig({ listSlim: { enabled: false } }).listSlim.enabled, false)
+  assert.equal(normalizeConfig({ listSlim: { enabled: 'off' } }).listSlim.enabled, true)
+})
+
+// Given 诊断上报缺省, When 归一化, Then 默认关闭且上报间隔取默认
+test('配置_诊断上报_默认关闭', () => {
+  assert.deepEqual(normalizeConfig(undefined).diag, { enabled: false, reportEvery: 12 })
+})
+
+// Given 诊断上报显式开关与非法值, When 归一化, Then 开关保留、非法类型回退、间隔越界收敛、未知字段丢弃
+test('配置_诊断上报_开关边界', () => {
+  const off = normalizeConfig({ diag: { enabled: false, reportEvery: 5 } })
+  assert.equal(off.diag.enabled, false)
+  assert.equal(off.diag.reportEvery, 5)
+  const on = normalizeConfig({ diag: { enabled: true } })
+  assert.equal(on.diag.enabled, true)
+  const bad = normalizeConfig({ diag: { enabled: 'yes', reportEvery: 'often' } })
+  assert.equal(bad.diag.enabled, false)
+  assert.equal(bad.diag.reportEvery, 12)
+  assert.equal(normalizeConfig({ diag: { reportEvery: 0 } }).diag.reportEvery, 1)
+  assert.equal(normalizeConfig({ diag: { reportEvery: 99999 } }).diag.reportEvery, 720)
+  assert.deepEqual(normalizeConfig({ diag: { reportEvery: 3, unknown: 1 } }).diag, { enabled: false, reportEvery: 3 })
 })

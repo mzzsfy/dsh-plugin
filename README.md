@@ -39,7 +39,7 @@ dsh-plugin/
 | @mzzsfy/dsh-shell-select | Windows shell 接管:替换默认 pwsh 工具为可配置多客户端 shell 工具(git bash/WSL/cmd/pwsh,自定义路径,默认客户端,模型按名选择);命令 deny 黑名单,接管失败自动回退官方 pwsh 链 | 工具接管 + 配置校验管线(volatile ref 解箱 + 执行面 strict);bash 候选多锚位探测;web 行提供设置页与 POSIX 形态声明 | DSH host 端插件(工具接管 + 设置页) |
 | @mzzsfy/dsh-tool-gate | 全局层工具白名单延迟加载:白名单内工具全量注入,白名单外统一打 deferLoading 标交宿主 deferred tool loading(API 服务端按需搜索激活);第三方路由降级折叠为占位 + `tool_search` 检索 | 声明式收敛(白名单为唯一事实源),行退场按 undo journal 还原原状;设置卡 GUI 配置 | DSH host 端插件(工具收敛 + 设置卡) |
 | @mzzsfy/dsh-tunnel | 穿透隧道:在 dsh 宿主进程内把本地 TCP 端口反向代理出去(`/p/<name>` 子路径或 `<name>.*` 子域名),ai 经 `tunnel_open`/`tunnel_list`/`tunnel_close` 三工具自管 | 进程内反代,不引入 nginx/caddy 等外部反代;HTTP 前缀 strip 转发 + 监听层 Host/路径分发(任意 WS 路径),子域名全路径透传;REST + GUI 看板 + 设置卡,持久化随 `DSH_HOME` | DSH 双端插件(web 路由 + client 看板) |
-| @mzzsfy/dsh-bug-perf | 宿主缺陷兜底:session/follow 重建合并、终端输出看门狗、会话流保活、会话加载停滞兜底,每个功能独立开关,跨版本结构不匹配只记录原因不影响宿主 | host 端只提供只读配置路由;client 端包装官方 `RemoteStream.restart`(窗口内合并)、`webTerminals.view`(停滞自愈)、`WebSocket`(会话流空闲保活)与会话加载态(停滞提示与自愈刷新),配置缺失退回内联默认值 | DSH 双端插件(host 配置路由 + client 补丁) |
+| @mzzsfy/dsh-bug-perf | 宿主缺陷兜底与性能补丁:session/follow 重建合并、终端输出看门狗、会话流保活、会话加载停滞兜底、任务状态流上限、会话列表瘦身,每个功能独立开关(诊断上报默认关闭),跨版本结构不匹配只记录原因或静默失效不影响宿主 | host 端提供配置读写路由与官方槽设置卡片,并包装官方 `sessionController.list`(列表投影白名单裁剪与缓存);client 端包装官方 `RemoteStream.restart`(窗口内合并)、`webTerminals.view`(停滞自愈)、`WebSocket`(会话流空闲保活)、会话加载态(停滞提示与自愈刷新)与任务状态流订阅窗口,配置缺失退回内联默认值 | DSH 双端插件(host 配置路由/设置卡片与列表瘦身 + client 补丁) |
 
 ## 商店展示
 
