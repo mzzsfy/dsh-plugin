@@ -1,6 +1,6 @@
 # 股票 K 线与多市场开发规格
 
-> 文档状态（2026-11-10）：K 线/八市场设计已随 0.4.0 落地，保留为实施依据；0.4.0 另交付的分组、价格标记、悬浮盯盘，0.5.0 的宿主凭据托管与 Finnhub 适配器不在本文范围，见 [CHANGELOG](../../packages/dsh-stock-assistant/CHANGELOG.md) 与 [插件说明](../../packages/dsh-stock-assistant/README.md)。0.6.0 的自选多标签分组设计与 BDD 见本文「自选多标签分组（0.6.0）」节（未发布）。
+> 文档状态（2026-11-10）：K 线/八市场设计已随 0.4.0 落地，保留为实施依据；0.4.0 另交付的分组、价格标记、悬浮盯盘，0.5.0 的宿主凭据托管与 Finnhub 适配器不在本文范围，见 [CHANGELOG](../../packages/dsh-stock-assistant/CHANGELOG.md) 与 [插件说明](../../packages/dsh-stock-assistant/README.md)。0.5.1 的自选多标签分组设计与 BDD 见本文「自选多标签分组（0.5.1）」节。
 
 日期：2026-10-30。目标包：`@mzzsfy/dsh-stock-sidebar`（现 `@mzzsfy/dsh-stock-assistant`）第二期。状态：0.4.0、0.5.0 已交付。前置：第一期规格见[开发-股票侧边栏插件](../开发-股票侧边栏插件.md)（已交付：多源行情骨架/浏览市场/设置路由），本期在其上增量。执行状态与审查记录见 .work/bootstrap-kline-multimarket.md（任务记录，不入版本库）。
 
@@ -393,7 +393,7 @@ IDLE → LOADING(fetch+ensureLwc 并行)
 | tooltip 涨跌 | +2.81% / -1.20%（带符号） |
 | 强刷 | 刷新K线（按钮 title） |
 
-## 自选多标签分组（0.6.0）
+## 自选多标签分组（0.5.1）
 
 单值 `group` 表达不了跨市场自选：一只票只能待在一个组里，按市场看必须手工整理。改为多标签 + 分组 tab。
 
