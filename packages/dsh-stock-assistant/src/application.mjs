@@ -22,7 +22,7 @@ const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
 const US_SYMBOL_LIMIT = 500
 const PROBE_LIMIT = 512
-export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu, finnhub], publish = () => {}, env = process.env, credentials = null, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
+export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu, finnhub], publish = () => {}, env = process.env, credentials = null, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true, warn = () => {} }) {
   const serverEpoch = randomUUID(), checks = new Map()
   // 凭据解析: 宿主提供 credentials 服务时交给它(插件存储层优先, 再逐层回退到进程环境与 .env 文件),
   // 否则退回进程环境变量。引用只表示"哪个密钥", 值始终由宿主保管。
@@ -35,13 +35,20 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const usSymbols = new Map()
   const touched = () => snapshotSeq++
   const changed = () => { touched(); publish({ type: 'invalidate', serverEpoch, snapshotSeq, scopes: ['snapshot'] }) }
-  const state = await openState(storageDomain, changed, now)
   // 凭据存在性只给设置页看, 而解析是异步的、快照是同步的: 保存配置与启动时各算一次, 快照读这份结果。
   const credentialPresence = new Map()
   const refreshCredentialPresence = async () => {
     for (const p of state.get().providers) credentialPresence.set(p.id, p.credentialRef === null || !!(await resolveCredential(p.credentialRef)))
   }
-  await refreshCredentialPresence()
+  let state
+  try {
+    state = await openState(storageDomain, changed, now, warn)
+    await refreshCredentialPresence()
+  } catch (e) {
+    // 打开成功后初始化失败也要关域: 否则同名域一直占着已打开槽位, 重载只会一直 already-open
+    await state?.close()
+    throw e
+  }
   const registry = createRegistry(providers), budget = createBudget(now)
   // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
   let proxyFactory = null

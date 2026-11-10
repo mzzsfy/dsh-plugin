@@ -225,3 +225,40 @@ test('同 key 并发: 先发的请求失败时不覆盖后发的成功结果', a
   assert.equal(after.kline?.error || '', '', '淘汰的失败不该写错误')
   runtime.dispose()
 })
+
+// 插件未激活时 /api 共享通道只回 404 纯文本; 把解析器报错直接贴到面板上等于现场失明
+test('服务不可用: 非 JSON 响应翻成可读错误', async () => {
+  const { createPageRuntime } = await load()
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: async () => ({ ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token \'o\', "not found" is not valid JSON') } }),
+  })
+  await assert.rejects(runtime.api('/snapshot'), error => {
+    assert.equal(error.code, 'SERVICE_UNAVAILABLE')
+    assert.equal(error.message, '股票工具服务不可用（HTTP 404）')
+    return true
+  })
+  runtime.dispose()
+})
+
+// 读响应体被中止(超时/页面重置)属于外部取消, 不能翻成"服务不可用"
+test('中止错误原样抛出, 不伪装成服务故障', async () => {
+  const { createPageRuntime } = await load()
+  const abortError = Object.assign(new Error('This operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: async () => ({ ok: false, status: 200, json: async () => { throw abortError } }),
+  })
+  await assert.rejects(runtime.api('/snapshot'), error => {
+    assert.equal(error.name, 'AbortError')
+    assert.notEqual(error.code, 'SERVICE_UNAVAILABLE')
+    return true
+  })
+  runtime.dispose()
+})

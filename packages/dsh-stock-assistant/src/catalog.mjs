@@ -1,4 +1,4 @@
-import { securitySchema } from './schemas.mjs'
+import { securitySchema, cacheKey } from './schemas.mjs'
 import { fail, sessionStateOf } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 const SEARCH_TTL = 60 * 1000
@@ -139,7 +139,7 @@ export function createCatalog({ state, getControl = state.get, router, executor,
             if (stopped || config.routingRevision !== getControl().routingRevision) fail('ROUTE_CONFLICT', '来源已变化，旧目录已丢弃', 409)
             if (!Array.isArray(batch.items) || capability === 'catalog' && batch.items.some(s => !securitySchema.safeParse(s).success || s.exchange !== market) || capability === 'calendar' && batch.items.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || typeof d.isOpen !== 'boolean')) fail('BAD_PAYLOAD', '目录来源返回不受支持的证券身份', 502)
             const items = batch.items
-            await state.cache.put(`${capability}:${selected.instance.id}:${market}`, { kind: capability, source: selected.instance.id, fetchedAt: now(), payload: { routingRevision: config.routingRevision, market, complete: batch.complete ?? true, items } })
+            await state.cache.put(cacheKey(capability, selected.instance.id, market), { kind: capability, source: selected.instance.id, fetchedAt: now(), payload: { routingRevision: config.routingRevision, market, complete: batch.complete ?? true, items } })
             status.push({ capability, ok: true, count: items.length }); changed()
           } catch (e) { status.push({ capability, ok: false, error: { code: e.code, message: e.message } }) }
         }

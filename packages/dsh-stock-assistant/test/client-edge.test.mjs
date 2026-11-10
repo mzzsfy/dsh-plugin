@@ -313,17 +313,19 @@ test('设置Tab: 三分区独立保存+tablist', async () => {
   assert.ok(!html.includes('保存路由'), '默认 sources tab 不含②保存钮')
 })
 // 持仓成本盈亏: 行内盈亏%/详情成本块/概览持仓合计
-test('价格标记渲染与多笔成本均价', async () => {
+test('价格标记渲染与多笔成本取最低', async () => {
   const { plugin } = await loadClientWithReact()
   const mk = (id, name, code, ex, marks) => ({ id, officialName: name, code, exchange: ex, instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, marks })
-  // 两笔成本 80 与 120, 等权均价 100; 现价 120 时均价口径的盈亏正好 +20%
+  // 两笔成本 80 与 120, 成本基准取最低 80; 现价 120 时汇总盈亏 +50%
   const a = mk('XSHG:equity:600001', '甲股', '600001', 'XSHG', [{ id: 'm1', price: 80, kind: 'cost' }, { id: 'm2', price: 120, kind: 'cost' }, { id: 'm3', price: 150, kind: 'target' }])
   const b = mk('XSHG:equity:600519', '乙股', '600519', 'XSHG', [])
   const q = (last, change) => ({ quote: { last, previousClose: '1', change, changePct: '1', providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
   const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id], items: { [a.id]: a, [b.id]: b } }, preferences: {} }, quotes: { [a.id]: q('120', '1'), [b.id]: q('50', '1') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
   assert.match(html, /持仓盈亏/, '详情盈亏块')
-  assert.match(html, /成本均价/, '多笔成本要有均价口径')
+  assert.match(html, /成本价/, '多笔成本要显示取到的成本价')
+  assert.match(html, /\+50\.0%/, '盈亏按最低成本 80 算, 现价 120 是 +50%')
+  assert.match(html, /多笔成本取最低价/, '标记页要写清口径')
   // 每条标记各自一行: 两笔成本 + 一条卖价
   assert.equal([...html.matchAll(/class="ssb-mark-row"/g)].length, 3, '三个标记各占一行')
   assert.match(html, /卖价/, '卖价标记要单独标识')
@@ -421,7 +423,7 @@ test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
   const q = { quote: { last: '110', previousClose: '1', change: '1', changePct: '1', providerInstanceId: 'p', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
   const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
-  assert.match(html, /设分组/, '详情有分组入口(B1)')
+  assert.match(html, /保存分组/, '详情有分组入口(B1)')
   assert.match(html, /持仓盈亏 \+10 · \+10%/, '详情成本块独立锚(S9)')
   const listState = JSON.parse(JSON.stringify(state)); listState.view = { view: 'list', sort: 'manual', alias: '' }
   const listHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => listState, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))

@@ -1,9 +1,10 @@
-// K线缓存: 复用 storageDomain.cache 表壳, key 命名空间隔离, TTL 与 routingRevision 双失效
+// K线缓存: 存在缓存数据域的 cache 表。记录键会成为文件名, 段间分隔符交给 cacheKey(TTL 与 routingRevision 双失效)
+import { cacheKey } from './schemas.mjs'
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 // TTL 唯一事实源(design.md 数据结构节): trend 0=不缓存, 其余按周期
 const TTL_BY_PERIOD = { trend: 0, '1d': HOUR, '1w': DAY, '1M': DAY }
-const keyOf = ({ providerInstanceId, market, period, code }) => `kline:${providerInstanceId}:${market}:${period}:${code}`
+const keyOf = ({ providerInstanceId, market, period, code }) => cacheKey('kline', providerInstanceId, market, period, code)
 
 export function createKlineCache({ cacheTable, now }) {
   const key = keyParts => keyOf(keyParts)

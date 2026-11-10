@@ -1,23 +1,22 @@
 import { createHash } from 'node:crypto'
-import { domainSpec, initialControl, controlSchema } from './schemas.mjs'
+import { domainSpec, cacheDomainSpec, initialControl, controlSchema } from './schemas.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-export async function openState(storageDomain, changed = () => {}, now = Date.now) {
+export async function openState(storageDomain, changed = () => {}, now = Date.now, warn = () => {}) {
   const domain = await storageDomain.open(domainSpec)
-  const table = domain.table('control'), cache = domain.table('cache')
-  // 存量数据: 数据源实例的凭据字段曾叫 credentialEnv, 现在交给宿主的凭据服务保管, 更名 credentialRef。
-  // 老数据里那一栏本来就只存引用名(值是环境变量里的), 改名即可, 不改语义。
-  const renameCredentialField = root => {
-    if (!root || !Array.isArray(root.providers)) return root
-    if (!root.providers.some(p => p && 'credentialEnv' in p)) return root
-    return { ...root, providers: root.providers.map(({ credentialEnv, ...rest }) => ({ ...rest, credentialRef: credentialEnv ?? null })) }
-  }
+  let cacheDomain
+  try { cacheDomain = await storageDomain.open(cacheDomainSpec) } catch (e) { await domain.close(); throw e }
+  const table = domain.table('control'), cache = cacheDomain.table('cache')
   try {
-    if (!table.get('root')) await table.put('root', initialControl())
-    else if (renameCredentialField(table.get('root')) !== table.get('root')) await table.put('root', renameCredentialField(table.get('root')))
-    controlSchema.parse(table.get('root'))
-  } catch (e) { await domain.close(); throw e }
+    // 存量字段改名的归一发生在数据域的 valueSchema 上(storageDomain.open 阶段), 这里读到的已是新格式
+    if (!table.get('root')) {
+      // 记录缺失说明宿主的校验把坏记录备份成 *.bak.<时间戳> 后跳过了。此时只能按空自选跑起来,
+      // 但必须在日志里留下恢复线索, 否则用户的自选会无声消失。
+      warn('股票工具：权威记录 control/root 缺失，已按空自选初始化；若不是首次使用，请从数据目录的 control/root.json.bak.* 恢复')
+      await table.put('root', initialControl())
+    }
+  } catch (e) { await Promise.allSettled([domain.close(), cacheDomain.close()]); throw e }
   let tail = Promise.resolve(), stopped = false
   return {
     get: () => structuredClone(table.get('root')),
@@ -59,6 +58,13 @@ export async function openState(storageDomain, changed = () => {}, now = Date.no
       }
       const job = tail.then(run); tail = job.catch(() => {}); return job
     },
-    async close() { stopped = true; await tail; await domain.close() },
+    async close() {
+      stopped = true
+      await tail
+      // 两个域都要关到底: 一个关失败不该把另一个的已打开占位留在宿主里
+      const results = await Promise.allSettled([domain.close(), cacheDomain.close()])
+      const failed = results.find(r => r.status === 'rejected')
+      if (failed) throw failed.reason
+    },
   }
 }

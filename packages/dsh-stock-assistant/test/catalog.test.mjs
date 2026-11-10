@@ -58,7 +58,7 @@ test('浏览接口钳制越界分页参数', async () => {
 // 回归: 缓存表里混进 undefined 记录时, 市场状态查询不能整轮崩掉
 test('缓存表混入空记录时市场状态照常返回', async () => {
   const storage = memoryStorage(), state = await openState(storage)
-  await state.cache.put('kline:broken', undefined)
+  await state.cache.put('kline_broken', undefined)
   const catalog = createCatalog({ state, getControl: () => state.get(), router: { select: () => ({ instance: { id: 'd' }, route: {} }) }, executor: { run: async () => ({ items: [] }) }, now: () => Date.parse('2026-11-09T02:00:00Z') })
   assert.equal(typeof catalog.marketState('XSHG').state, 'string')
 })

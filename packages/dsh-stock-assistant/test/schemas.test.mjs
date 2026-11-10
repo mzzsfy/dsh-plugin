@@ -82,8 +82,25 @@ test('proxy 仅接受 http(s) URL 且可省略(反代/代理出口)', () => {
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'not-a-url' }], routes: [] }))
 })
 
-// 回归: 历史坏缓存(如 update 写出的空值)不能阻塞插件加载, 交由宿主备份后跳过
-test('缓存表声明备份跳过无效记录', async () => {
-  const { domainSpec } = await import('../src/schemas.mjs')
+// 控制面与缓存分域、按记录各写一个文件: single 布局下宿主不提供坏记录备份(unit 没有 backupRecord),
+// 一条坏缓存就能让整个数据域打不开; per-record 才有备份跳过的余地。
+test('控制与缓存分域按记录落盘, 坏记录交给宿主备份跳过', async () => {
+  const { domainSpec, cacheDomainSpec } = await import('../src/schemas.mjs')
+  assert.equal(domainSpec.layout, 'per-record')
+  assert.equal(cacheDomainSpec.layout, 'per-record')
+  assert.deepEqual(Object.keys(domainSpec.tables), ['control'])
+  assert.deepEqual(Object.keys(cacheDomainSpec.tables), ['cache'])
   assert.equal(domainSpec.invalidRecords, 'backup-and-skip')
+  assert.equal(cacheDomainSpec.invalidRecords, 'backup-and-skip')
+  assert.notEqual(domainSpec.name, cacheDomainSpec.name, '两个域必须独立, 否则同域里仍是一荣俱荣')
+})
+
+test('缓存键只含宿主接受的路径安全字符, 折掉字符的段互不碰撞', async () => {
+  const { cacheKey } = await import('../src/schemas.mjs')
+  const plain = cacheKey('kline', 'em-default', 'XHKG', '1d', '02513')
+  assert.match(plain, /^[A-Za-z0-9_-]+$/)
+  assert.equal(plain, 'kline_em-default_XHKG_1d_02513')
+  const dotted = cacheKey('kline', 'em-default', 'XNYS', '1d', 'BRK.B')
+  assert.match(dotted, /^[A-Za-z0-9_-]+$/, '美股代码里的点不能直接进文件名')
+  assert.notEqual(dotted, cacheKey('kline', 'em-default', 'XNYS', '1d', 'BRK-B'), '折字符后必须靠哈希区分')
 })

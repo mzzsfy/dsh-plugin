@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { openState } from '../src/state.mjs'
-import { controlSchema } from '../src/schemas.mjs'
+import { controlSchema, storedControlSchema, initialControl } from '../src/schemas.mjs'
 import { memoryStorage } from './helpers.mjs'
 import { makeSecurity } from '../src/market-model.mjs'
 const security = makeSecurity('XSHG', '600519', '贵州茅台')
@@ -36,25 +36,34 @@ test('MIG03 cost 字段不再是合法数据', async () => {
   await state.close()
 })
 
-// 数据源实例的凭据字段曾叫 credentialEnv;不做这步, 存量配置会因为缺 credentialRef 且多出未知键而读不出来
-test('MIG04 存量 credentialEnv 改名成 credentialRef 后仍可读', async () => {
-  const storage = memoryStorage()
-  const legacyProvider = { id: 'ts-one', adapterId: 'tushare', enabled: true, credentialEnv: 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: 'account-one', budget: { requestsPerMinute: 50, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { quotes: 50 } } }
-  const root = storage.maps.control.get('root')
-  storage.maps.control.set('root', { ...root, providers: [legacyProvider], routes: [] })
-  const state = await openState(storage)
-  const provider = state.get().providers[0]
-  assert.equal(provider.credentialRef, 'DSH_STOCK_TUSHARE_TOKEN', '引用名原样搬过去')
-  assert.equal('credentialEnv' in provider, false, '旧字段不再留着')
-  assert.equal(storage.maps.control.get('root').providers[0].credentialRef, 'DSH_STOCK_TUSHARE_TOKEN', '改名结果落盘')
-  await state.close()
+// 数据源实例的凭据字段曾叫 credentialEnv。迁移放在数据域的 valueSchema 上, 因为
+// storageDomain.open 就先按它校验存量记录, 应用层 openState 里做的事到那一步已经来不及。
+const legacyProvider = extra => ({ id: 'ts-one', adapterId: 'tushare', enabled: true, credentialEnv: 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: 'account-one', budget: { requestsPerMinute: 50, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { quotes: 50 } }, ...extra })
+const legacyRoot = providers => ({ ...initialControl(), providers, routes: [] })
+
+test('MIG04 存量 credentialEnv 记录在数据域读入时归一为 credentialRef', () => {
+  const parsed = storedControlSchema.parse(legacyRoot([legacyProvider()]))
+  assert.equal(parsed.providers[0].credentialRef, 'DSH_STOCK_TUSHARE_TOKEN', '引用名原样搬过去')
+  assert.equal('credentialEnv' in parsed.providers[0], false, '旧字段不再留着')
 })
 
-test('MIG05 免凭据实例的 credentialEnv=null 同样迁移为 null', async () => {
-  const storage = memoryStorage()
-  const root = storage.maps.control.get('root')
-  storage.maps.control.set('root', { ...root, providers: [{ id: 'em', adapterId: 'eastmoney', enabled: true, credentialEnv: null, quotaGroup: 'free', budget: { requestsPerMinute: 60, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: {} } }], routes: [] })
-  const state = await openState(storage)
-  assert.equal(state.get().providers[0].credentialRef, null)
-  await state.close()
+test('MIG05 免凭据实例的 credentialEnv=null 同样迁移为 null', () => {
+  const parsed = storedControlSchema.parse(legacyRoot([legacyProvider({ credentialEnv: null })]))
+  assert.equal(parsed.providers[0].credentialRef, null)
+})
+
+// 同一份记录新旧字段并存时旧值不能反过来盖掉新值, 只带新字段的条目也不能被顺手清空
+test('MIG06 新旧字段并存以新字段为准, 且不牵连其他条目', () => {
+  const fresh = { ...legacyProvider(), id: 'em', adapterId: 'eastmoney', credentialRef: null, quotaGroup: 'free' }
+  delete fresh.credentialEnv
+  const parsed = storedControlSchema.parse(legacyRoot([legacyProvider({ credentialRef: 'DSH_STOCK_NEW_TOKEN' }), fresh]))
+  assert.equal(parsed.providers[0].credentialRef, 'DSH_STOCK_NEW_TOKEN')
+  assert.equal(parsed.providers[1].credentialRef, null)
+  assert.equal('credentialEnv' in parsed.providers[0], false)
+})
+
+// 归一函数遇到非对象条目原样放行, 由 schema 拒绝: 不能在这里抛 TypeError 把整个域打成 invalid-record 之外的错误
+test('MIG07 providers 含非对象条目时由 schema 拒绝而不是抛 TypeError', () => {
+  const legacy = legacyRoot([legacyProvider(), null])
+  assert.throws(() => storedControlSchema.parse(legacy))
 })

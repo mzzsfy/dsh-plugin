@@ -2,25 +2,26 @@
 
 DSH 全局股票工具。左侧“股票”入口打开独立主页面，无会话也可使用。切换、关闭 DSH 会话或临时打开其他工具，不会清除股票工具的搜索、详情、排序、滚动位置和设置草稿。
 
-支持八个市场（沪/深 A 股、港股、美股 NYSE/NASDAQ、日经、韩证、伦敦）：自选（置顶、分组、组内涨跌统计与折叠、拖拽排序、别名、删除撤销）、名称/代码/拼音首字母搜索（多市场候选带币种徽标）、行情与 K 线图表（分时/日K/周K/月K，MA/EMA/BOLL/BBI 可分别开关、成交量副图、昨收/价格标记/区间高低参考线，lightweight-charts 渲染）、价格标记（成本/卖价，单只最多 12 条，等权成本均价与浮盈/潜在收益）、悬浮盯盘（列表与图形双模式、只盯勾选的标的、可拖动、常驻在所有面板之上）、基础详情、涨跌排序、手动刷新、暂停采集，以及数据源与能力路由设置（含"应用推荐配置"与按市场配置 K 线）。不做交易、持仓管理或资讯；价格提醒仅限自选标记价穿越，经页内/系统通知或已安装的通知插件呈现。
+支持八个市场（沪/深 A 股、港股、美股 NYSE/NASDAQ、日经、韩证、伦敦）：自选（置顶、分组、组内涨跌统计与折叠、拖拽排序、别名、删除撤销）、名称/代码/拼音首字母搜索（多市场候选带币种徽标）、行情与 K 线图表（分时/日K/周K/月K，MA/EMA/BOLL/BBI 可分别开关、成交量副图、昨收/价格标记/区间高低参考线，lightweight-charts 渲染）、价格标记（成本/卖价，单只最多 12 条，多笔成本取最低价计浮盈、卖价按成本计潜在收益）、悬浮盯盘（列表与图形双模式、只盯勾选的标的、可拖动、常驻在所有面板之上）、基础详情、涨跌排序、手动刷新、暂停采集，以及数据源与能力路由设置（含"应用推荐配置"与按市场配置 K 线）。不做交易、持仓管理或资讯；价格提醒仅限自选标记价穿越，经页内/系统通知或已安装的通知插件呈现。
 
 ## 数据结构与持久化
 
 **不使用 DSH 默认设置系统。** 本插件不声明 `Config`，不调用 `settings` 或 `configEditor`。配置界面位于股票工具自己的“设置”视图中。
 
-通过宿主 `storageDomain` 使用专用 `stock_assistant` 数据域（2026-10-30 前为 `stock_sidebar`，随包改名一并更名；生产 profile 未挂载过旧域，无迁移），version=1、layout=single：
+通过宿主 `storageDomain` 使用两个专用数据域（2026-10-30 前为 `stock_sidebar`，随包改名一并更名；2026-11-10 起由整域单文件改为按记录落盘），均 version=1、layout=per-record：
 
-| 表 / 记录 | 内容 |
-| --- | --- |
-| `control/root` | 自选证券、手动顺序、置顶、别名、显示偏好、Provider 实例、能力路由、控制版本、近期幂等操作结果 |
-| `cache/catalog:<instance>:<market>` | 可重建的标准证券目录、完整性、来源和获取时间 |
-| `cache/calendar:<instance>:<market>` | 可重建的交易日历、日期范围和来源 |
+| 域 / 表 | 内容 | 默认 json backend 的介质 |
+| --- | --- | --- |
+| `stock_assistant/control` | 自选证券、手动顺序、置顶、别名、标记、显示偏好、Provider 实例、能力路由、控制版本、近期幂等操作结果 | `~/.dsh/storages/stock_assistant/control/root.json` |
+| `stock_assistant_cache/cache` | 可重建的标准证券目录、交易日历、K 线 | `~/.dsh/storages/stock_assistant_cache/cache/<键>.json` |
 
-具体介质路径由宿主的 storage backend 决定。本插件不向会话存储写数据。报价仅保留在 Host 内存中；搜索、详情、设置草稿等浏览状态由每个浏览器页面的运行时持有，刷新浏览器会重建这些临时状态。
+控制面与缓存分域、每条记录一个文件：改自选只重写 `root.json`，拉一节 K 线只写它自己那个文件；单条缓存损坏会被宿主备份成 `<键>.json.bak.<时间戳>` 后跳过，不会让整个域打不开。升级前的整域单文件 `~/.dsh/storages/stock_assistant.json` 会在首次打开时把 `control/root` 复制进新目录（旧缓存表不迁移：旧键含冒号，在 Windows 上不能当文件名），旧文件原样保留，可自行删除。
+
+**密钥不在这些文件里**：数据源密钥写进宿主的凭据存储（或留在启动宿主进程的环境变量里），这些文件只有引用名。备份数据目录时需另行备份凭据或环境变量。报价仅保留在 Host 内存中；搜索、详情、设置草稿等浏览状态由每个浏览器页面的运行时持有，刷新浏览器会重建这些临时状态。
 
 **浏览器本地另存两项显示偏好**，不进 `control/root`：悬浮盯盘的开关/位置/勾选目标（`ssb-floating`）与 K 线辅助线开关（`ssb-guides`）。这两项都是纯客户端显示状态，跟着屏幕与个人习惯走，多设备之间没有同步价值；放进宿主 `preferences` 的话，每加一个开关都要改协议 schema 并重启宿主才能生效，收益不成比例。代价是它们不随账号同步、清空站点数据会丢。刷新间隔与涨跌配色仍留在宿主侧，因为那两项影响上游请求节奏与全局显示语义。业务数据（自选、成本、别名、分组、数据源与路由）一律只走宿主存储。
 
-写操作在单一队列中执行，并携带版本及操作 ID。持久化成功后才发布；版本冲突保留用户输入并要求重新确认，写盘失败保留原数据。删除撤销有效期为8秒，恢复到当前列表原邻居附近，不回滚别页修改。损坏的权威记录会阻止激活，不会静默清空自选。
+写操作在单一队列中执行，并携带版本及操作 ID。持久化成功后才发布；版本冲突保留用户输入并要求重新确认，写盘失败保留原数据。删除撤销有效期为8秒，恢复到当前列表原邻居附近，不回滚别页修改。控制记录 `control/root` 缺失时按空自选初始化，并在宿主日志留下备份恢复路径（`control/root.json.bak.*`）。
 
 ## 初次使用
 
@@ -76,7 +77,7 @@ HTTP 路径前缀 `/api/stock-assistant`：`snapshot/search/watchlist/preference
 
 ## 安装与开发
 
-已发布 npm（当前 0.4.0），安装与升级走正式包：
+已发布 npm（当前 0.5.0），安装与升级走正式包：
 
 ```sh
 dsh plugin --profile web add @mzzsfy/dsh-stock-assistant
@@ -84,7 +85,7 @@ dsh plugin --profile web add @mzzsfy/dsh-stock-assistant
 
 随后重启该 profile 的宿主。仓库 README 对应 `main`（可能含尚未发版的改动），npm 页面上的说明是发版时的快照。仓库开发挂载遵循根目录 `scripts/dev-link.mjs dsh-stock-assistant`（工作副本 junction），装载层变更不走热重载，同样需要重启宿主。
 
-要求 Node>=22，宿主已有 `webServer`（包括upgrade）、`storageDomain` 与有效 backend。0.4.0 发布版只读 Host 进程环境变量、不注入 `credentials`；当前 main 已把它列入注入服务，由宿主凭据服务托管，接口不全时回退环境变量。client 需要 `slots/locale/layout`。缺必需服务干净禁用。公共 client 依赖由 `dsh-session-manager` 的唯一占位项承载，本包只声明 dependency/external，不插第二条占位。Host/client使用同代 common-tools 0.3.x。
+要求 Node>=22，宿主已有 `webServer`（包括upgrade）、`storageDomain` 与有效 backend。0.4.0 及更早的发布版只读 Host 进程环境变量；0.5.0 起把 `credentials` 列入注入服务，由宿主凭据服务托管，接口不全时回退环境变量。client 需要 `slots/locale/layout`。缺必需服务干净禁用。公共 client 依赖由 `dsh-session-manager` 的唯一占位项承载，本包只声明 dependency/external，不插第二条占位。Host/client使用同代 common-tools 0.3.x。
 
 ```sh
 npm install --omit=peer

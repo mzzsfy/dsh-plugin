@@ -14,7 +14,7 @@ const HK = makeSecurity('XHKG', '00700', '腾讯控股')
 
 async function harness() {
   const state = await openState(memoryStorage())
-  await state.cache.put('catalog:test', { kind: 'catalog', source: 'em', fetchedAt: Date.now(), payload: { routingRevision: 1, items: [US, CN, HK], complete: true } })
+  await state.cache.put('catalog_test', { kind: 'catalog', source: 'em', fetchedAt: Date.now(), payload: { routingRevision: 1, items: [US, CN, HK], complete: true } })
   const config = { routingRevision: 1, providers: [{ id: 'em', adapterId: 'eastmoney', enabled: true }], routes: MARKETS.map(route) }
   const catalog = createCatalog({
     state, getControl: () => config,
