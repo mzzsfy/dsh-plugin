@@ -6,11 +6,17 @@
 
 K 线、目录、日历原来和控制数据挤在同一个文件里，把它撑到 3.3 MB；改一次自选要重写全部内容，写坏一次全没。
 
-- **缓存改内存**：K 线/目录/日历只放内存（上限 512 条，最久未写先淘汰），重启后按需重拉
+- **缓存改内存**：K 线/目录/日历只放内存（目录/日历 64 条、K 线 512 条两个独立池，各自最久未写先淘汰），重启后按需重拉
 - **文件缩到十几 KB**：`~/.dsh/storages/stock_assistant.json` 里只剩 `control/root` 一条记录（自选、别名、标记、分组、数据源与路由、近期幂等操作）。旧文件里的 `cache` 表在打开时被忽略，下一次控制写入即缩容，不用手动清理
 - **没有目录层级**：仍然是一个文件，不再有 `<域>/<表>/<记录>.json` 的目录树
 - **坏文件不覆盖**：JSON 不可解析、版本号不认、控制记录不合 schema 都拒绝打开并保留原文件；只有文件缺失或没有 `control/root` 才初始化为空自选
-- **中间版本的目录布局不会被读取**：0.6.0 开发过程中曾短暂改成 `<域>/<表>/<记录>.json`（未发布，生产从未以该布局运行）。如果某个数据目录已被那个版本写过，`stock_assistant/` 里的自选不会被读取；把 `stock_assistant/control/root.json` 的 `record` 手工搬回 `stock_assistant.json` 的 `tables.control.root` 即可
+- **中间版本的目录布局不会被读取**：0.6.0 开发过程中曾短暂改成 `<域>/<表>/<记录>.json`（未发布，生产从未以该布局运行）。如果某个数据目录已被那个版本写过，`stock_assistant/` 里的自选不会被读取。手工搬回：取 `stock_assistant/control/root.json` 的 `record`，写进 `~/.dsh/storages/stock_assistant.json` 的 `tables.control.root`；文件不存在就按下面的骨架新建（`version` 必须与当前一致）：
+
+```json
+{"unit": {"name": "stock_assistant", "version": 1}, "global": null, "tables": {"control": {"root": "<粘贴 record 的完整内容>"}}}
+```
+
+`root` 必须是完整记录（自选、路由、`revision` 等），空对象或占位字符串会因 schema 校验失败被拒绝打开。
 
 ### 修复存量数据字段改名让插件整体未激活
 
