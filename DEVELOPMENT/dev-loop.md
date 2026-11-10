@@ -2,7 +2,7 @@
 
 ## 新 clone 初始化(按序执行,顺序有依赖)
 
-1. 仓库根解析桥(不可省):工作副本运行时(经 junction realpath)与包测试的 dependencies 解析都落在根 `node_modules`;新 clone 在仓库根执行 `npm install`(以根 `package.json` 为准——宿主 peer 同源包、playwright 与各包外部依赖并集)。CI 的 `.github/workflows/test.yml`「安装宿主 peer」步用显式钉版 spec 装,但 `npm install --no-save` 仍会按根 manifest 重建整棵树,两份清单同时生效,根 manifest 是事实源。本机已装 dsh 本体时,`@deepseek-ai/*` 宿主 API 也可经目录逐级兜底解析到本体安装目录(DEVELOPMENT/dsh-api-alignment.md)
+1. 仓库根解析桥(不可省):工作副本运行时(经 junction realpath)与包测试的 dependencies 解析都落在根 `node_modules`;新 clone 在仓库根执行 `npm install --legacy-peer-deps`(以根 `package.json` 为准——宿主 peer 同源包、playwright 与各包外部依赖并集;`@deepseek-ai/dsh-storage-json` 0.2.2 的 peer 声明与根桥其它 dsh 包代际不一致,不加该标志会 ERESOLVE,测试只用到它的 JsonStorageBackend)。CI 的 `.github/workflows/test.yml`「安装宿主 peer」步用显式钉版 spec 装,但 `npm install --no-save` 仍会按根 manifest 重建整棵树,两份清单同时生效,根 manifest 是事实源。本机已装 dsh 本体时,`@deepseek-ai/*` 宿主 API 也可经目录逐级兜底解析到本体安装目录(DEVELOPMENT/dsh-api-alignment.md)
 2. `node scripts/dev-link.mjs all`:把各包 dependencies 外部依赖补进**仓库根解析桥**(根 `node_modules`,devDeps 不装;包内不再安装——包内 node_modules 处于 profile pnpm 与宿主插件安装的重建路径上,不作依赖来源)并挂工作副本;直接跑包测试报 ERR_MODULE_NOT_FOUND 时,先核对根 `node_modules/<依赖名>/package.json`:dependencies 缺失 → 重跑本步;dependencies 在位仍报错 → devDeps(构建/测试态)缺失,`node scripts/install-externals.mjs` 补全(枚举 packages 全部子目录整体重装,不支持单包;显式 CLI spec 安装:非 @mzzsfy 按 name@range 走 registry,@mzzsfy 映射 file: 同层包)——补装会把 devDeps 连同 @deepseek-ai 钉版落回包内,该包 host 运行态解析链随之被钉版截胡(本步有意不装 devDeps 即为防此),测试完成后删除该包内 node_modules;再核对第 1 步根 node_modules(宿主 peer 桥),并按该包 manifest 的 scripts.test 原样命令执行(部分包需 mock 预载参数,勿裸跑 `node --test`)
 3. 之后进入下述日常循环
 

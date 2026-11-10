@@ -49,8 +49,12 @@ jobs:
       # dsh 系三包代际与根桥 package.json 一致(rc.3):tools peer 链经 dsh-agent 拉
       # dsh-scope peer,与根桥显式 scope 版本互斥即 ERESOLVE;aggregate-tests 的
       # missingBridgeDeps 也按根声明核对,缺 scope/system-prompt 即全单元拒绝
+      # --legacy-peer-deps:storage-json 0.2.2 声明 peer 为 cordis ~4.1.0 + storage 0.2.2,
+      # 与 CI 的 cordis 4.0.x / storage 0.2.1 不一致;测试只用它的 JsonStorageBackend,
+      # 实际 import 的 StorageError/UNIT_NAME_RE 在 0.2.1 里都有,关掉 peer 仲裁才能装上。
+      # 根 package.json 也声明了它,missingBridgeDeps 按根声明核对,CI 清单缺即全单元拒绝
       - name: 安装宿主 peer(仓库根解析桥)
-        run: npm install --no-save --no-package-lock --no-audit --no-fund @deepseek-ai/schemastery@3.18.4 @deepseek-ai/dsh-storage-domain@0.2.1-rc.3 @deepseek-ai/dsh-tools@0.2.1-rc.3 @deepseek-ai/dsh-scope@0.2.1-rc.3 @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 @deepseek-ai/dsh-api-terminal-controller@0.2.1-rc.3 zod@4.5.4
+        run: npm install --no-save --no-package-lock --no-audit --no-fund --legacy-peer-deps @deepseek-ai/schemastery@3.18.4 @deepseek-ai/dsh-storage-domain@0.2.1-rc.3 @deepseek-ai/dsh-storage-json@0.2.2-rc.1 @deepseek-ai/dsh-tools@0.2.1-rc.3 @deepseek-ai/dsh-scope@0.2.1-rc.3 @deepseek-ai/dsh-system-prompt@0.2.1-rc.3 @deepseek-ai/dsh-api-terminal-controller@0.2.1-rc.3 zod@4.5.4
       # 含外部依赖的包自动发现并安装:显式 CLI spec(name@range;@mzzsfy 依赖映射
       # file:../ 同层包 symlink,未经 registry 解析,未发布依赖不再 ETARGET)。
       # 自依赖统一走符号链接桥,禁止经 registry 解析。

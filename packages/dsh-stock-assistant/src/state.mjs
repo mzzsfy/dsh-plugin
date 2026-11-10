@@ -3,19 +3,22 @@ import { domainSpec, cacheDomainSpec, initialControl, controlSchema } from './sc
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-export async function openState(storageDomain, changed = () => {}, now = Date.now, warn = () => {}) {
+export async function openState(storageDomain, changed = () => {}, now = Date.now) {
   const domain = await storageDomain.open(domainSpec)
   let cacheDomain
-  try { cacheDomain = await storageDomain.open(cacheDomainSpec) } catch (e) { await domain.close(); throw e }
-  const table = domain.table('control'), cache = cacheDomain.table('cache')
+  try { cacheDomain = await storageDomain.open(cacheDomainSpec) } catch (e) { await Promise.allSettled([domain.close()]); throw e }
+  const table = domain.table('control'), meta = domain.table('meta'), cache = cacheDomain.table('cache')
+  const initialized = { schemaVersion: domainSpec.version }
   try {
     // 存量字段改名的归一发生在数据域的 valueSchema 上(storageDomain.open 阶段), 这里读到的已是新格式
     if (!table.get('root')) {
-      // 记录缺失说明宿主的校验把坏记录备份成 *.bak.<时间戳> 后跳过了。此时只能按空自选跑起来,
-      // 但必须在日志里留下恢复线索, 否则用户的自选会无声消失。
-      warn('股票工具：权威记录 control/root 缺失，已按空自选初始化；若不是首次使用，请从数据目录的 control/root.json.bak.* 恢复')
+      // meta 在 = 以前确实写出过控制记录: 现在读不出来只可能是记录损坏或版本不认, 宿主会把它当作缺失且不备份,
+      // 此时写空就是把自选覆盖掉。停下来让人先看数据目录, 而不是拿可用性换数据。
+      if (meta.get('state')) fail('AUTHORITY_LOST', '控制记录读不出来（损坏或版本不认），为避免用空自选覆盖已停止初始化；请检查数据目录 stock_assistant/control/root.json，并保留同目录下的 *.bak.* 与旧版 stock_assistant.json', 503)
       await table.put('root', initialControl())
     }
+    // 先写控制记录再打标记: 中途崩溃只会退化成"没有标记", 不会把正常数据误判成损坏
+    if (!meta.get('state')) await meta.put('state', initialized)
   } catch (e) { await Promise.allSettled([domain.close(), cacheDomain.close()]); throw e }
   let tail = Promise.resolve(), stopped = false
   return {

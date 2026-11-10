@@ -1,10 +1,11 @@
 import { initialControl } from '../src/schemas.mjs'
 export function memoryStorage() {
-  const maps = { control: new Map([['root', initialControl()]]), cache: new Map() }
+  // meta 预置成已初始化: 存量记录(control 有 root)的正常情形
+  const maps = { control: new Map([['root', initialControl()]]), meta: new Map([['state', { schemaVersion: 1 }]]), cache: new Map() }
   let closed = false, writes = 0, broken = false
   return {
     maps, get closed() { return closed }, get writes() { return writes }, set broken(value) { broken = value },
-    async open() { return { table: name => ({ get: key => maps[name].get(key), entries: () => maps[name].entries(), async put(key, value) { if (broken) throw Error('disk'); maps[name].set(key, structuredClone(value)); writes++ }, async delete(key) { if (broken) throw Error('disk'); const had = maps[name].delete(key); if (had) writes++; return had }, async update(key, fn) { const next = fn(maps[name].get(key)); if (broken) throw Error('disk'); maps[name].set(key, structuredClone(next)); writes++; return next } }), async close() { closed = true } } },
+    async open() { return { table: name => { const table = maps[name] ??= new Map(); return ({ get: key => table.get(key), entries: () => table.entries(), async put(key, value) { if (broken) throw Error('disk'); table.set(key, structuredClone(value)); writes++ }, async delete(key) { if (broken) throw Error('disk'); const had = table.delete(key); if (had) writes++; return had }, async update(key, fn) { const next = fn(table.get(key)); if (broken) throw Error('disk'); table.set(key, structuredClone(next)); writes++; return next } }) }, async close() { closed = true } } },
   }
 }
 export const provider = (id = 'ts-one', adapterId = 'tushare') => ({ id, adapterId, enabled: true, credentialRef: 'DSH_STOCK_TUSHARE_TOKEN', quotaGroup: 'account-one', budget: { requestsPerMinute: 50, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits: { quotes: 50, catalog: 10, calendar: 10 } } })

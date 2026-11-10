@@ -22,7 +22,7 @@ const WINDOW = 5 * 60 * 1000
 const US_SYMBOL_TTL = 24 * 60 * 60 * 1000
 const US_SYMBOL_LIMIT = 500
 const PROBE_LIMIT = 512
-export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu, finnhub], publish = () => {}, env = process.env, credentials = null, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true, warn = () => {} }) {
+export async function createApplication({ storageDomain, providers = [tushare, tencent, sina, eastmoney, xueqiu, finnhub], publish = () => {}, env = process.env, credentials = null, fetch = globalThis.fetch, now = Date.now, timers = globalThis, vendorAvailable = true }) {
   const serverEpoch = randomUUID(), checks = new Map()
   // 凭据解析: 宿主提供 credentials 服务时交给它(插件存储层优先, 再逐层回退到进程环境与 .env 文件),
   // 否则退回进程环境变量。引用只表示"哪个密钥", 值始终由宿主保管。
@@ -40,24 +40,25 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const refreshCredentialPresence = async () => {
     for (const p of state.get().providers) credentialPresence.set(p.id, p.credentialRef === null || !!(await resolveCredential(p.credentialRef)))
   }
-  let state
+  let state, registry, executor, getControl, router, klineCache
   try {
-    state = await openState(storageDomain, changed, now, warn)
+    state = await openState(storageDomain, changed, now)
     await refreshCredentialPresence()
+    registry = createRegistry(providers)
+    const budget = createBudget(now)
+    // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
+    let proxyFactory = null
+    try { const undici = await import('undici'); proxyFactory = url => new undici.ProxyAgent(url) } catch {}
+    executor = createExecutor({ registry, budget, env, resolveCredential, fetch, now, timers, usSymbols, proxyFactory })
+    getControl = state.get
+    router = createRouter(getControl, now, () => collector?.reset())
+    klineCache = createKlineCache({ cacheTable: state.cache, now })
+    catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
   } catch (e) {
-    // 打开成功后初始化失败也要关域: 否则同名域一直占着已打开槽位, 重载只会一直 already-open
+    // 打开成功后任何一步初始化失败都要关域: 否则同名域一直占着已打开槽位, 重载只会一直 already-open
     await state?.close()
     throw e
   }
-  const registry = createRegistry(providers), budget = createBudget(now)
-  // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
-  let proxyFactory = null
-  try { const undici = await import('undici'); proxyFactory = url => new undici.ProxyAgent(url) } catch {}
-  const executor = createExecutor({ registry, budget, env, resolveCredential, fetch, now, timers, usSymbols, proxyFactory })
-  const getControl = state.get
-  const router = createRouter(getControl, now, () => collector?.reset())
-  const klineCache = createKlineCache({ cacheTable: state.cache, now })
-  catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
   let ensuring = null, lastEnsure = -Infinity, ensureError = null
   const ensureCaches = () => {
     // 面板活跃(demand)时让路: 目录后台同步占满并发槽会拖死交互请求(浏览504实测), 仅在面板空闲时补目录

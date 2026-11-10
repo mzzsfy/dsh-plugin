@@ -65,5 +65,5 @@ test('MIG06 新旧字段并存以新字段为准, 且不牵连其他条目', () 
 // 归一函数遇到非对象条目原样放行, 由 schema 拒绝: 不能在这里抛 TypeError 把整个域打成 invalid-record 之外的错误
 test('MIG07 providers 含非对象条目时由 schema 拒绝而不是抛 TypeError', () => {
   const legacy = legacyRoot([legacyProvider(), null])
-  assert.throws(() => storedControlSchema.parse(legacy))
+  assert.throws(() => storedControlSchema.parse(legacy), error => error.name === 'ZodError', '由 schema 抛 ZodError, 不是归一函数里的 TypeError')
 })

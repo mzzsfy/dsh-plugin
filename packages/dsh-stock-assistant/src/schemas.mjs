@@ -90,13 +90,16 @@ export const storedControlSchema = z.preprocess(normalizeCredentialField, contro
 // 按记录落盘后单条缓存损坏只丢它自己(宿主会备份成 *.bak.<时间戳> 再跳过), 控制面也只写自己那一条。
 // 控制域与旧单文件同名同版本: 宿主会把旧文件里的 control/root 迁进新目录, 未声明的 cache 表被跳过, 旧文件保留不改。
 const cacheRecordSchema = z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() })
-export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'per-record', invalidRecords: 'backup-and-skip', tables: { control: { valueSchema: storedControlSchema } } }
+// 初始化标记: 用来区分"从没有过控制记录"和"有记录但读不出来"。
+// 前者可以放心初始化, 后者必须停下来 —— 宿主对不可解析的记录只会当作缺失, 不备份, 写空就等于覆盖。
+const metaSchema = z.object({ schemaVersion: z.number().int().positive() })
+export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'per-record', invalidRecords: 'backup-and-skip', tables: { control: { valueSchema: storedControlSchema }, meta: { valueSchema: metaSchema } } }
 // 缓存可重建: 记录格式再变就直接抬 version, 旧记录按陌生版本读成不存在, 不必为缓存写迁移
 export const cacheDomainSpec = { name: 'stock_assistant_cache', version: 1, layout: 'per-record', invalidRecords: 'backup-and-skip', tables: { cache: { valueSchema: cacheRecordSchema } } }
 // 记录键会成为文件名, 宿主只接受 [A-Za-z0-9_-]。段内的其他字符(如美股代码里的点)折掉后
-// 补一段短哈希, 免得 '600519.SS' 与 '600519-SS' 折进同一个文件读到别人的 K 线。
+// 补一段哈希(64 bit), 免得 '600519.SS' 与 '600519-SS' 折进同一个文件读到别人的 K 线。
 const SAFE_SEGMENT = /^[A-Za-z0-9-]+$/
-const encodeSegment = value => SAFE_SEGMENT.test(value) ? value : `${value.replace(/[^A-Za-z0-9]/g, '')}-${createHash('sha256').update(value).digest('hex').slice(0, 8)}`
+const encodeSegment = value => SAFE_SEGMENT.test(value) ? value : `${value.replace(/[^A-Za-z0-9]/g, '')}-${createHash('sha256').update(value).digest('hex').slice(0, 16)}`
 export const cacheKey = (...parts) => parts.map(encodeSegment).join('_')
 // 推荐配置:四个免凭据源,东财做八市场主力,其余按实测最强能力分派备份——公开源无SLA,能覆盖的市场都串上备源。
 export const defaultConfig = () => {
