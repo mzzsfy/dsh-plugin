@@ -3,6 +3,8 @@ import { domainSpec, initialControl, controlSchema } from './schemas.mjs'
 import { createMemoryCache } from './memory-cache.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
+// 目录/日历条数很少, 给独立小池: 与 K 线共用一个淘汰池时会被几十节 K 线挤掉, 挤掉后又要重新拉目录
+const CATALOG_CACHE_LIMIT = 64, KLINE_CACHE_LIMIT = 512
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export async function openState(storageDomain, changed = () => {}, now = Date.now) {
   // 只有控制记录落盘; 派生数据放内存, 所以打开失败只可能是这一个文件
@@ -12,11 +14,11 @@ export async function openState(storageDomain, changed = () => {}, now = Date.no
     // 存量字段改名的归一发生在数据域的 valueSchema 上(storageDomain.open 阶段), 这里读到的已是新格式
     if (!table.get('root')) await table.put('root', initialControl())
   } catch (e) { await Promise.allSettled([domain.close()]); throw e }
-  const cache = createMemoryCache()
+  const cache = createMemoryCache({ limit: CATALOG_CACHE_LIMIT }), klineCache = createMemoryCache({ limit: KLINE_CACHE_LIMIT })
   let tail = Promise.resolve(), stopped = false
   return {
     get: () => structuredClone(table.get('root')),
-    cache,
+    cache, klineCache,
     replay(operation) {
       const prior = table.get('root').operations.find(o => o.id === operation.operationId && now() - o.at < DAY)
       if (!prior) return null

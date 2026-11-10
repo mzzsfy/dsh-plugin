@@ -87,6 +87,27 @@ test('S11 控制文件不可解析时拒绝打开且不覆盖', async t => {
   assert.equal(await readFile(file, 'utf8'), broken, '坏文件原样保留')
 })
 
+// 版本不认与 schema 不合法同样是打开失败、原字节不动(single 布局是硬校验)
+test('S11b 版本不认时拒绝打开且不覆盖', async t => {
+  const dir = await withDir(t, 'stock-version-mismatch-'), backend = new JsonStorageBackend(dir)
+  t.after(() => backend.close())
+  const file = join(dir, 'stock_assistant.json')
+  const text = JSON.stringify({ unit: { name: 'stock_assistant', version: 99 }, global: null, tables: { control: { root: initialControl() } } })
+  await writeFile(file, text)
+  await assert.rejects(openState(facilityOf(backend)), error => error.code === 'version-mismatch')
+  assert.equal(await readFile(file, 'utf8'), text)
+})
+
+test('S11c 控制记录不合 schema 时拒绝打开且不覆盖', async t => {
+  const dir = await withDir(t, 'stock-invalid-record-'), backend = new JsonStorageBackend(dir)
+  t.after(() => backend.close())
+  const file = join(dir, 'stock_assistant.json')
+  const text = JSON.stringify({ unit: { name: 'stock_assistant', version: 1 }, global: null, tables: { control: { root: { revision: 'not-a-number' } } } })
+  await writeFile(file, text)
+  await assert.rejects(openState(facilityOf(backend)), error => error.code === 'invalid-record')
+  assert.equal(await readFile(file, 'utf8'), text)
+})
+
 test('S12 首次安装初始化空自选并落盘', async t => {
   const dir = await withDir(t, 'stock-fresh-install-'), backend = new JsonStorageBackend(dir)
   t.after(() => backend.close())
@@ -108,4 +129,16 @@ test('S13 内存缓存有上限且提供 entries', async () => {
   assert.deepEqual([...cache.entries()].map(([key]) => key), ['b', 'c'])
   await cache.put('b', 9)
   assert.equal(cache.get('b'), 9)
+})
+
+// 有效文件但没有控制记录: 视为首次安装, 初始化后落盘
+test('S11d 有效文件缺少控制记录时初始化为空自选', async t => {
+  const dir = await withDir(t, 'stock-empty-tables-'), backend = new JsonStorageBackend(dir)
+  t.after(() => backend.close())
+  const file = join(dir, 'stock_assistant.json')
+  await writeFile(file, JSON.stringify({ unit: { name: 'stock_assistant', version: 1 }, global: null, tables: { control: {} } }))
+  const state = await openState(facilityOf(backend))
+  assert.deepEqual(state.get().watchlist.order, [])
+  assert.match(await readFile(file, 'utf8'), /"revision": 0/)
+  await state.close()
 })

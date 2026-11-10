@@ -46,3 +46,14 @@ test('L03 代码精确命中排在名称命中之前', async () => {
   assert.equal(hits[0]?.id, 'XHKG:equity:00700', '代码精确命中排首位')
   catalog.dispose(); await state.close()
 })
+
+// 目录与 K 线分池: K 线写满自己的池不能把目录挤掉, 否则 browse/search 退化并触发 60 秒一次的目录重拉
+test('L09 写满 K 线池不影响目录缓存', async () => {
+  const { catalog, state } = await harness()
+  const before = catalog.search('600519')[0]?.id
+  for (let i = 0; i < 600; i++) await state.klineCache.put(`kline:em:XSHG:1d:6005${i}`, { kind: 'kline', source: 'em', fetchedAt: i, payload: { candles: [] } })
+  assert.equal(state.klineCache.size, 512, 'K 线池按自己的上限淘汰')
+  assert.equal(catalog.search('600519')[0]?.id, before, '目录仍在')
+  assert.equal(catalog.status().length > 0, true)
+  catalog.dispose(); await state.close()
+})
