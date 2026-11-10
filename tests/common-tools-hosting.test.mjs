@@ -71,3 +71,53 @@ test('Given 范围形态 When 校验 Then 只接受同 minor 且下限不高于�
   assert.match(rangeMismatch('~0.4.0', '0.4.0'), /形态/)
   assert.match(rangeMismatch('0.4.0', '0.4.0'), /形态/)
 })
+
+test('Given 真实仓库 When 整检 Then 零问题且有十个消费方', () => {
+  const { problems, consumers } = check()
+  assert.deepEqual(problems, [])
+  assert.equal(consumers.length, 10)
+})
+
+test('Given 声明要 patch 但文件不存在 When 整检 Then 报出装载行不会生效', t => {
+  const root = tree(t)
+  writeFileSync(join(root, 'dsh-x/package.json'), JSON.stringify({
+    name: '@mzzsfy/dsh-x',
+    dependencies: { '@mzzsfy/dsh-common-tools': '^0.4.0' },
+    dsh: { client: { external: ['@mzzsfy/dsh-common-tools/client'] }, bundle: { patch: 'missing.yml' } },
+  }))
+  assert.match(check({ packagesDir: root }).problems.join('\n'), /dsh\.bundle\.patch 指向不存在/)
+})
+
+test('Given 单行 insert 形态 When 整检 Then 报出宿主不支持', t => {
+  const { problems } = check({ packagesDir: tree(t, { row: "- insert: true\n  id: x-dsh-common-tools\n  name: '@mzzsfy/dsh-common-tools'\n" }) })
+  assert.match(problems.join('\n'), /单行 insert/)
+})
+
+test('Given external 写成字符串 When 整检 Then 报出形态错误', t => {
+  const { problems } = check({ packagesDir: tree(t, { external: '@mzzsfy/dsh-common-tools/client' }) })
+  assert.match(problems.join('\n'), /必须是字符串数组/)
+})
+
+test('Given 依赖声明被删但装载行仍在 When 整检 Then 仍按消费方校验并报范围缺失', t => {
+  const root = tree(t)
+  writeFileSync(join(root, 'dsh-x/package.json'), JSON.stringify({
+    name: '@mzzsfy/dsh-x',
+    dsh: { client: { external: ['@mzzsfy/dsh-common-tools/client'] } },
+  }))
+  const { problems, consumers } = check({ packagesDir: root })
+  assert.deepEqual(consumers, ['dsh-x'])
+  assert.match(problems.join('\n'), /范围 undefined 不是/)
+})
+
+test('Given require 只出现在注释里 When 整检 Then 报出未按公共 spec 消费', t => {
+  const { problems } = check({ packagesDir: tree(t, { client: "// require('@mzzsfy/dsh-common-tools/client')\nconst tools = {}\n" }) })
+  assert.match(problems.join('\n'), /未按 @mzzsfy\/dsh-common-tools\/client 消费/)
+})
+
+test('Given 非消费方撞用同一装载行 id When 整检 Then 报出 id 冲突', t => {
+  const root = tree(t)
+  mkdirSync(join(root, 'dsh-y/src'), { recursive: true })
+  writeFileSync(join(root, 'dsh-y/package.json'), JSON.stringify({ name: '@mzzsfy/dsh-y' }))
+  writeFileSync(join(root, 'dsh-y/cordis.patch.yml'), "- insert:\n    - id: x-dsh-common-tools\n      name: '@mzzsfy/dsh-y'\n")
+  assert.match(check({ packagesDir: root }).problems.join('\n'), /id 冲突/)
+})

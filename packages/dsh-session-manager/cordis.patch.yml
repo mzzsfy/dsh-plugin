@@ -2,8 +2,9 @@
 # 注入 profile 根。由 `dsh plugin add @mzzsfy/dsh-session-manager` 应用;
 # 行 id 指向本插件宿主半区,其 /api/session-manager/* 路由服务设置页中的浏览器半区。
 # dsh-common-tools 是普通 npm 依赖而非插件:装载行由每个消费插件各自携带,
-# 本包只带自己这一行;宿主按包名合并成单份 client 模块,插件管理页不展示依赖本身。
-# 其 host 半区(setupCommonTools)由各消费插件在自己的 apply 里执行,不经装载行。
+# 本包只带自己这一行;宿主按包名合并成单份 client 模块,不单独成插件卡,
+# 只在所属插件详情页作为只读部件行出现(不可开关)。本包只用其 client 侧 toast,
+# 不消费 host 半区。
 
 - insert:
     - id: session-manager

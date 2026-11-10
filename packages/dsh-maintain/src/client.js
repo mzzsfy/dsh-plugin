@@ -10,17 +10,11 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useRef } = React
 
     // 面板反馈出口:公共依赖 @mzzsfy/dsh-common-tools,硬消费——装载行随本包
-    // cordis.patch.yml 自带,取不到 toast 时降级 console,不挂死不报错(防御)
-    let toast = null
-    try {
-      toast = require('@mzzsfy/dsh-common-tools/client').toast.show
-    } catch {
-      // 取不到 toast → 反馈降级 console.warn(防御)
-    }
+    // cordis.patch.yml 自带,模块表缺失即 factory 抛错,由装载层判定失败
+    const toast = require('@mzzsfy/dsh-common-tools/client').toast.show
 
     const notify = (text, kind) => {
-      if (toast) toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
-      else console.warn('[dsh-maintain] ' + text)
+      toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
     }
 
     // 导航图标声明:交给 dsh-settings-nav-icons 统一渲染;双键 = 分区 label + 市场

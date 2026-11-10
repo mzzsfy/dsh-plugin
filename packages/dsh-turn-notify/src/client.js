@@ -15,12 +15,7 @@ window.__ModuleLoader__.load({
     // 判定失败,无轮询回退);toast 由同一份 client 模块提供,装载行随本包
     // cordis.patch.yml 自带
     const tools = require('@mzzsfy/dsh-common-tools/client')
-    let toast = null
-    try {
-      toast = tools.toast.show
-    } catch {
-      // 取不到 toast → 页内通知通道置空,调用点统一走 toast 判空(防御)
-    }
+    const toast = tools.toast.show
 
     // 快照拉取超时防悬挂,总线断线由共享 WS 退避重连
     const REQUEST_TIMEOUT_MS = 30 * 1000
@@ -577,7 +572,7 @@ window.__ModuleLoader__.load({
 
     // 每次呈现读取本机偏好,其他窗口更改及二次提醒同样即时生效。
     function showPageNotification(text, onClick) {
-      return toast?.(text, { holdMs: TOAST_MS, appearance: readToastAppearance(), onClick })
+      return toast(text, { holdMs: TOAST_MS, appearance: readToastAppearance(), onClick })
     }
 
     function previewPageNotification() {
@@ -657,8 +652,7 @@ window.__ModuleLoader__.load({
       const body = typeof input?.body === 'string' ? input.body.slice(0, 400) : ''
       const channels = chooseChannels(isEngaged(), notificationPermission(), Date.now() - lastActionAt(), null, null, null)
       const delivered = []
-      // 页内通知库缺失时通道不可用, 不能回执一条没发生过的 toast
-      if (channels.toast && toast) {
+      if (channels.toast) {
         showPageNotification(body === '' ? title : title + '\n' + body)
         delivered.push('toast')
       }
@@ -774,9 +768,8 @@ window.__ModuleLoader__.load({
           showPageNotification(unit.text + (unit.summary ? '\n' + unit.summary : ''), activateSessionFromUnit(unit))
         }
         // 页内提示音与通知声音互斥(pageSound 已含 !sound),同一通知至多一声;
-        // toast 库缺失时卡片不存在,补位音随之禁用(声明与可用分离,可用性在调用点合流);
         // 页内音色按页内场景映射解析:通知生效映射为底,页内显式配置覆盖
-        if (channels.pageSound && toast) {
+        if (channels.pageSound) {
           playSound(resolveSound(unit.category, mergeMapping(effectiveMapping(), readPageMapping()), uploadedIds)).catch(() => {})
         }
         // 声音关闭只静音自身:system 弹窗与 blink 降级通道独立判断,不因无声 continue 连坐
@@ -1074,14 +1067,13 @@ window.__ModuleLoader__.load({
           void api('/api/turn-notify/focus-desktop', { method: 'POST' })
             .then((result) => { if (!result.ok) throw new Error(result.detail || '无法唤起桌面版') })
             // 无会话 ID 的通知(如测试点火)不会切换会话,文案不得声称已尝试切换
-            .catch(() => toast?.(hasSessionId(unit) ? '无法唤起 DSH 桌面窗口，请从 Dock 打开；会话已尝试切换' : '无法唤起 DSH 桌面窗口，请从 Dock 打开', { holdMs: TOAST_MS }))
+            .catch(() => toast(hasSessionId(unit) ? '无法唤起 DSH 桌面窗口，请从 Dock 打开；会话已尝试切换' : '无法唤起 DSH 桌面窗口，请从 Dock 打开', { holdMs: TOAST_MS }))
         }
         // 历史投影和无会话测试通知不含 ID,只唤醒,不冒险跳到同名会话。
-        // toast 缺席(公共依赖未装载)时提示面缺失属合法降级,守卫链继续导航
         if (!hasSessionId(unit)) return
         const sessionNavigator = [...sessionNavigators.values()].at(-1)
         if (!sessionNavigator) {
-          toast?.('会话导航尚未就绪，请稍后重试', { holdMs: TOAST_MS })
+          toast('会话导航尚未就绪，请稍后重试', { holdMs: TOAST_MS })
           return
         }
         try {
@@ -1089,7 +1081,7 @@ window.__ModuleLoader__.load({
           // 已读收尾只在登记实例仍存活时执行,过期代际闭包不误清当前代高亮
           if (controller && !controller.signal.aborted && controller === notificationController) markSessionHandled(unit.sessionId)
         } catch {
-          toast?.('无法打开通知对应的会话，请在会话列表中查看', { holdMs: TOAST_MS })
+          toast('无法打开通知对应的会话，请在会话列表中查看', { holdMs: TOAST_MS })
         }
       }
     }
@@ -1519,10 +1511,9 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('storage', syncPreferences)
       }, [])
 
-      // 操作反馈出口:统一浮出通知,成功 ok / 失败 error;toast 模块缺失降级 console
+      // 操作反馈出口:统一浮出通知,成功 ok / 失败 error
       const patch = (text, kind) => {
-        if (toast) toast(text, { kind: kind === 'error' ? 'error' : 'ok' })
-        else console.warn('[dsh-turn-notify] ' + text)
+        toast(text, { kind: kind === 'error' ? 'error' : 'ok' })
       }
 
       async function onPickFiles(files) {
@@ -1807,7 +1798,7 @@ window.__ModuleLoader__.load({
       }
 
       function previewNotificationStyle() {
-        if (!toast || !browserPrefs.toast) return
+        if (!browserPrefs.toast) return
         previewPageNotification()
       }
 
@@ -2099,23 +2090,22 @@ window.__ModuleLoader__.load({
               ]),
               details('按事件设置提示音', field('发声事件', categoryButtons(category => soundCategories[category] !== false, toggleSoundCategory, !browserPrefs.sound))),
               h('hr', { className: 'tn-divider' }),
-              field('页内通知', toggle('显示页内通知', '在页面内显示通知卡片，6 秒后自动消失；点击可打开对应会话。', browserPrefs.toast, value => setBrowserPref('toast', KEY_TOAST, value), !toast)),
-              !toast ? h('span', { className: 'tn-meta' }, '页内通知组件不可用，请检查插件依赖') : null,
+              field('页内通知', toggle('显示页内通知', '在页面内显示通知卡片，6 秒后自动消失；点击可打开对应会话。', browserPrefs.toast, value => setBrowserPref('toast', KEY_TOAST, value))),
               h('div', { className: 'tn-subgroup' },
                 field('通知样式', [
                   h('select', {
-                    className: 'tn-select', 'aria-label': '页内提示样式', value: toastAppearance, disabled: !browserPrefs.toast || !toast,
+                    className: 'tn-select', 'aria-label': '页内提示样式', value: toastAppearance, disabled: !browserPrefs.toast,
                     title: '两种样式均跟随主题；选择后新通知立即采用。',
                     onChange: (e) => { localSet(KEY_TOAST_APPEARANCE, e.target.value); setToastAppearance(readToastAppearance()) },
                   }, Object.entries(TOAST_APPEARANCES).map(([value, label]) => h('option', { key: value, value }, label))),
-                  testButton('预览样式', '显示当前样式的示例通知，不播放声音。', previewNotificationStyle, !browserPrefs.toast || !toast),
+                  testButton('预览样式', '显示当前样式的示例通知，不播放声音。', previewNotificationStyle, !browserPrefs.toast),
                 ]),
                 field('页内提示音', [
-                  toggle('页内提示音', '随页内通知补充播放：通知提示音未播放时才发声，两者每条通知最多播放一种；不限于查看页面时。', browserPrefs.pageSound, value => setBrowserPref('pageSound', KEY_PAGE_SOUND, value), !browserPrefs.toast || !toast),
+                  toggle('页内提示音', '随页内通知补充播放：通知提示音未播放时才发声，两者每条通知最多播放一种；不限于查看页面时。', browserPrefs.pageSound, value => setBrowserPref('pageSound', KEY_PAGE_SOUND, value), !browserPrefs.toast),
                   testButton('试听页内音', '试听任务完成事件的页内音效；不启用通知或更改开关。', previewCurrentPageSound, soundVolume === 0),
                 ]),
                 !browserPrefs.toast ? h('span', { className: 'tn-meta' }, '启用页内通知后，页内提示音才会生效') : null,
-                details('按事件设置页内声音', field('发声事件', categoryButtons(category => pageSoundCategories[category] !== false, togglePageSoundCategory, !browserPrefs.toast || !browserPrefs.pageSound || !toast))),
+                details('按事件设置页内声音', field('发声事件', categoryButtons(category => pageSoundCategories[category] !== false, togglePageSoundCategory, !browserPrefs.toast || !browserPrefs.pageSound))),
               ),
               h('hr', { className: 'tn-divider' }),
               field('系统通知', [

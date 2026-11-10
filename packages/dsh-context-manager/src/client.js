@@ -28,14 +28,9 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools 可选消费(装载行由本包
-    // cordis.patch.yml 自带;模块表缺失或导出缺 show 即通知通道置空)
-    let toast = () => {}
-    try {
-      toast = require('@mzzsfy/dsh-common-tools/client').toast.show || (() => {})
-    } catch {
-      toast = () => {}
-    }
+    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools,硬消费——装载行由本包
+    // cordis.patch.yml 自带,模块表缺失即 factory 抛错,由装载层判定失败
+    const toast = require('@mzzsfy/dsh-common-tools/client').toast.show
 
 const CSS = [
   // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox

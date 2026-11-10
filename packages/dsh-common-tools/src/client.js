@@ -234,8 +234,11 @@ window.__ModuleLoader__.load({
     const busState = (window.__dshCommonToolsBus ??= {
       socket: null, owners: new Set(), subscriptions: new Set(), ready: new Set(), retry: null, timeout: null, attempts: 0, revision: 0, closing: false,
       // hello: idle 未探测 / sent 已发待回 / ok 已协商 / legacy 旧 host 无需探测 / unsupported 协议无交集
-      hello: 'idle', helloAt: 0, opened: false,
+      hello: 'idle', helloAt: 0,
     })
+    // 旧代际 client 建过的页级状态没有 hello 字段:补齐后本代才能协商
+    busState.hello ??= 'idle'
+    busState.helloAt ??= 0
 
     function requireName(value, label) {
       if (typeof value !== 'string' || value.trim() === '') throw new Error('common-tools: ' + label + ' 必须为非空字符串')
@@ -268,6 +271,8 @@ window.__ModuleLoader__.load({
     }
 
     function connectBus() {
+      // 协议无交集是页级判决:任何 owner 后到挂载都不得重探连接
+      if (busState.hello === 'unsupported') return
       const url = new URL(BUS_ROUTE, window.location.href)
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
       const socket = new WebSocket(url.href)
@@ -275,7 +280,6 @@ window.__ModuleLoader__.load({
       busState.timeout = setTimeout(() => socket.close(), CONNECT_TIMEOUT_MS)
       socket.onopen = () => {
         if (busState.socket !== socket) return
-        busState.opened = true
         if (busState.hello === 'idle') {
           busState.hello = 'sent'
           busState.helloAt = Date.now()
@@ -284,16 +288,17 @@ window.__ModuleLoader__.load({
         syncPlugins()
       }
       socket.onerror = () => socket.close()
-      socket.onclose = () => {
+      socket.onclose = event => {
         if (busState.socket !== socket) return
         clearTimeout(busState.timeout)
         busState.socket = null
         busState.closing = false
-        const opened = busState.opened
-        busState.opened = false
         if (busState.hello === 'unsupported') return
-        // 开过连接、hello 已发却在宽限窗内被关:旧 host 视未知帧为非法帧
-        if (opened && busState.hello === 'sent' && Date.now() - busState.helloAt <= HELLO_GRACE_MS) busState.hello = 'legacy'
+        // 旧 host 把未知帧判为非法帧并以 1008 关闭:本页保持老帧模式;其余关闭(超时/抖动/重启)回 idle 重试协商
+        if (busState.hello === 'sent') {
+          const rejected = event?.code === 1008 && Date.now() - busState.helloAt <= HELLO_GRACE_MS
+          busState.hello = rejected ? 'legacy' : 'idle'
+        }
         busState.ready.clear()
         for (const subscription of busState.subscriptions) subscription.ready = false
         if (busState.owners.size === 0) return

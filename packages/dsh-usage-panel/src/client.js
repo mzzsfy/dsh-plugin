@@ -13,16 +13,10 @@ window.__ModuleLoader__.load({
     // 数据刷新唯一通道;模块表缺失即本 client factory 抛错,由装载层判定失败,
     // 无轮询回退);装载行随本包 cordis.patch.yml 自带
     const tools = require('@mzzsfy/dsh-common-tools/client')
-    let toast = null
-    try {
-      toast = tools.toast.show
-    } catch {
-      // 取不到 toast → 反馈降级 console.warn(防御)
-    }
+    const toast = tools.toast.show
 
     const notify = (text, kind) => {
-      if (toast) toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
-      else console.warn('[dsh-usage-panel] ' + text)
+      toast(text, { kind: kind === 'ok' ? 'ok' : 'error' })
     }
 
     /* LOGIC-BEGIN */
@@ -239,7 +233,6 @@ window.__ModuleLoader__.load({
       window[KEY_POLL_DISPOSE] = dispose
     }
     function startNotifications(bus) {
-      if (!toast) return
       const owner = { unsubscribe: null }
       if (notificationOwners.size === 0) createNotificationWork()
       notificationOwners.add(owner)
@@ -1244,7 +1237,7 @@ function NotifyConfigCard() {
       h(Switch, {
         checked: config.toast !== false,
         label: '页内 toast',
-        title: '浏览器页内弹窗提醒;toast 库未装载时此通道不可用',
+        title: '浏览器页内弹窗提醒',
         onChange: (checked) => patch({ toast: checked }),
       }),
       h('div', { className: 'up-card__row' },

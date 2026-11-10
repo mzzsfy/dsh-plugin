@@ -1,15 +1,15 @@
 # context-manager 打包补丁:历史输入浮层 + 插话撤回 + 对话 fork 以单条目
 # 注入 profile 根。由 `dsh plugin add @mzzsfy/dsh-context-manager` 应用;
 # 行 id 指向本插件宿主半区,其 /api/context/* 路由服务设置页与浮层的浏览器半区。
-# 公共 client 能力(toast/bus)的装载行由本补丁自带(见文件末尾),宿主按包名把
-# 多份行合并成单份 client 模块;该依赖是普通 npm 依赖,插件管理页不展示。
+# 公共 client 能力(toast)的装载行由本补丁自带(见文件末尾),宿主按包名把
+# 多份行合并成单份 client 模块;该依赖是普通 npm 依赖,不单独成插件卡。
 
 - insert:
     - id: context-manager
       name: '@mzzsfy/dsh-context-manager'
 
 # 公共 client 依赖的装载行:宿主按包名合并成单份 client 模块;每个消费插件自带
-# 一行,装任一插件即可独立运行;该依赖不进 profile 依赖清单,插件管理页不展示。
+# 一行,装任一插件即可独立运行;该依赖不单独成插件卡,只在所属插件详情页作为只读部件行出现(不可开关)。
 - insert:
     - id: context-manager-dsh-common-tools
       name: '@mzzsfy/dsh-common-tools'

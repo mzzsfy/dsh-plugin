@@ -31,10 +31,14 @@ function tableFixture() {
 
 test('Given 公共依赖清单 When 检查 manifest Then 声明 common-tools 依赖与 client external', () => {
   const pkg = JSON.parse(read('package.json'))
-  // 范围锁在库的同一 minor 内(库 patch 升级不要求消费方重发),不在测试里硬编码具体版本
+  // 范围锁在库的同一 minor 内且下限不高于库 patch(库发 patch 不要求消费方重发),
+  // 不在测试里硬编码具体版本
   const lib = JSON.parse(readFileSync(join(root, '../dsh-common-tools/package.json'), 'utf8'))
-  const [major, minor] = lib.version.split('.')
-  assert.equal(pkg.dependencies['@mzzsfy/dsh-common-tools'], `^${major}.${minor}.0`)
+  const [major, minor, patch] = lib.version.split('.').map(Number)
+  const range = pkg.dependencies['@mzzsfy/dsh-common-tools']
+  const match = new RegExp(`^\\^${major}\\.${minor}\\.(\\d+)$`).exec(range)
+  assert.ok(match, `依赖范围 ${range} 应锁在 ${major}.${minor}.x`)
+  assert.ok(Number(match[1]) <= patch, `依赖范围 ${range} 下限高于库版本 ${lib.version}`)
   assert.deepEqual(pkg.dsh.client.external, ['@mzzsfy/dsh-common-tools/client'])
 })
 

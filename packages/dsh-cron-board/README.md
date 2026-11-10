@@ -39,7 +39,7 @@
 ## 依赖
 
 - `croner`:cron 表达式解析与触发点计算
-- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费),普通 npm 依赖而非插件,不进 profile 依赖清单、插件管理页不展示。client 装载行由本包 cordis.patch.yml 自带,装本包即可独立运行,无需安装 session-manager 或手工加行:
+- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费),普通 npm 依赖而非插件,不进 profile 依赖清单、不单独成插件卡,只在所属插件详情页作为只读部件行出现。client 装载行由本包 cordis.patch.yml 自带,装本包即可独立运行,无需安装 session-manager 或手工加行:
 
   ```yaml
   - insert:

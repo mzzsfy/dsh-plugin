@@ -12,7 +12,7 @@
 | `tools-row` | 在 agent realm 注册业务工具行;控制室未启动即干净禁用 |
 | `persona-row` | 预留声明,当前未实现 |
 
-bundle patch(`cordis.patch.yml`)插入 `role: control` 单行(`boss-simulator-control`),由 `dsh plugin add` 应用;工具行随管理员预设组合。
+bundle patch(`cordis.patch.yml`)两条 insert:控制行 `boss-simulator-control`(`role: control`)与公共 client 装装载行 `boss-simulator-dsh-common-tools`,由 `dsh plugin add` 一并应用;工具行随管理员预设组合。
 
 ## 管理员工具
 

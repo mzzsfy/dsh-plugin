@@ -214,7 +214,13 @@ function loadClientBridge() {
   }
   const requireStub = (name) => {
     if (name === 'react') return ReactStub
-    if (name === '@mzzsfy/dsh-common-tools/client') return { setupCommonTools: () => bus }
+    if (name === '@mzzsfy/dsh-common-tools/client') {
+      return {
+        setupCommonTools: () => bus,
+        toast: { show() {} },
+        createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }),
+      }
+    }
     throw new Error('模块表缺依赖:' + name)
   }
   const disposers = []

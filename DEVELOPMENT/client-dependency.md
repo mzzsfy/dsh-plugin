@@ -2,7 +2,8 @@
 
 跨插件共享的 client 能力(浮出通知、推送总线订阅等)以**普通 npm 依赖包**形态发布
 (`@mzzsfy/dsh-common-tools`),不是 dsh 插件:无 `dsh.bundle.patch`、不进 profile
-依赖清单与 bundles、插件管理页不展示。它只以"插件依赖"的身份进入装载树。
+依赖清单与 bundles,不单独成插件卡。它在插件管理页的唯一痕迹是所属插件详情页里
+"包含的组件"中的一行(只读部件行,渲染但不可开关),属于"插件依赖"而非插件。
 
 ## 装载:每个消费插件自带一行
 
@@ -10,7 +11,7 @@
 
   ```yaml
   - insert:
-      - id: <本包名>-dsh-common-tools
+      - id: <包短名>-dsh-common-tools   # 如 stock-assistant-dsh-common-tools
         name: '@mzzsfy/dsh-common-tools'
   ```
 
@@ -21,8 +22,8 @@
   多个空 `apply()` 条目,无副作用。
 - 消费插件:`dependencies` 声明该包并在 `dsh.client.external` 声明
   `'@mzzsfy/dsh-common-tools/client'`,factory 内 require 后经命名空间使用。
-- 该包必须能从 profile 根解析(hoisted 布局):生产 profile 是 pnpm
-  `nodeLinker: hoisted`,传递依赖落顶层；换成 isolated 布局时装载行会解析不到。
+- 该包必须能从 profile 根解析:生产 profile 是 pnpm `nodeLinker: hoisted`,传递依赖
+  落顶层;isolated 布局未验证,换布局前先跑一次隔离 boot 确认装载行能解析。
 
 ## 兼容窗口:同一个 minor,只准 patch
 
@@ -38,10 +39,12 @@
 - client 连接首帧上报 `{ type: 'hello', protocol: 1, version }`;host 回
   `{ type: 'hello', protocol, protocols: [1], version }`。
 - 协议无交集:client 打印一条告警并关闭连接,不再重连(页级总线停用)。
-- 旧 host(0.3.x 及以前)把未知帧当非法帧直接关连接:client 在 hello 宽限窗内
-  被关即判定为老帧模式,降级为不报版本重连一次;连接从未 open 就断开不触发降级。
+- 旧 host(0.3.x 及以前)把未知帧当非法帧并以 1008 关连接:client 在 hello 宽限窗内
+  收到 1008 即判定为老帧模式,本页保持不报版本;其余关闭(超时/抖动/重启)回到未探测,
+  下次连接重试协商。连接从未 open 就断开不触发降级。
 - host 侧 `PKG_VERSION` 与包版本同锁(仓库测试守),注册表按它决定哪份 host
-  半区持有传输。
+  半区持有传输。0.3.x 的 host 把注册版本写死为 1.0.0,与 0.4.x 混装时数值上更高、
+  可能持有传输;client 会按老帧模式工作,能力不丢,全量升级后恢复协商。
 
 ## host 半区(setupCommonTools)
 
@@ -58,7 +61,7 @@
 
 ## 红线
 
-- 不得为共享能力另造插件包(会出现在插件管理页)
+- 不得为共享能力另造插件包(会以独立插件卡出现在插件管理页)
 - 不得让非插件包以三件态(name/inject)声明插件身份进装载树
 - 消费方不得绕过 `setupCommonTools` 门面直触总线内部
 - 不得在 0.4.x 内改帧集合、导出形状或调用语义;要改就发 0.5.0 并同批抬十个消费方
