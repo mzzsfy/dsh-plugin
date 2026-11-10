@@ -39,7 +39,7 @@
 ## 依赖
 
 - `croner`:cron 表达式解析与触发点计算
-- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费)。其 client 模块由 session-manager 的 patch 占位条目全仓唯一代挂(规约禁止消费方重复插入),与 session-manager 同装即自动就绪;单独安装本包时须二选一:安装 `@mzzsfy/dsh-session-manager`,或在 profile `cordis.patch.yml` 手工加入同款占位条目(条目须排在 cron-board 之前物化):
+- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费),普通 npm 依赖而非插件,不进 profile 依赖清单、插件管理页不展示。client 装载行由本包 cordis.patch.yml 自带,装本包即可独立运行,无需安装 session-manager 或手工加行:
 
   ```yaml
   - insert:
@@ -47,7 +47,7 @@
         name: '@mzzsfy/dsh-common-tools'
   ```
 
-  条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)
+  宿主按包名把各消费插件的多行装载行合并成一份 client 模块(bundle 只拼一次,多行在宿主侧是多个空 `apply()` 条目);条目 id 带本包前缀防树内冲突。条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)。依赖范围 `^0.4.0`;兼容窗口(0.4.x 只准 patch、0.5.0 须与十个消费方范围抬升同批)与 hello 版本协商见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)
 - 宿主服务:settings / timer(软依赖)、webServer;sessionController 缺失不影响装载:启动后异步轮询等待,仍缺失仅禁用会话任务通道并打日志,看板与脚本任务照常(0.1.1-rc.2 及更早版本无此服务)
 
 ## 开发

@@ -9,16 +9,15 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useRef } = React
 
-    // 公共依赖 @mzzsfy/dsh-common-tools:总线订阅硬消费(页内通知数据刷新唯一
-    // 通道;模块表缺失即本 client factory 抛错,由装载层判定失败,无轮询回退);
-    // toast 可选消费——占位条目由 session-manager 唯一代挂,权威方未安装时降级
-    // console,不挂死不报错
+    // 公共依赖 @mzzsfy/dsh-common-tools:总线订阅与 toast 均为硬消费(页内通知
+    // 数据刷新唯一通道;模块表缺失即本 client factory 抛错,由装载层判定失败,
+    // 无轮询回退);装载行随本包 cordis.patch.yml 自带
     const tools = require('@mzzsfy/dsh-common-tools/client')
     let toast = null
     try {
       toast = tools.toast.show
     } catch {
-      // 模块表无 toast → 反馈降级 console.warn
+      // 取不到 toast → 反馈降级 console.warn(防御)
     }
 
     const notify = (text, kind) => {
@@ -91,8 +90,8 @@ window.__ModuleLoader__.load({
     }
     /* LOGIC-END */
 
-    // 页内通知推送订阅:client 激活即订阅,不依赖面板打开;toast 库缺失(权威代挂方
-    // session-manager 未安装)整段跳过;批内逐条认领防多窗口重复弹;
+    // 页内通知推送订阅:client 激活即订阅,不依赖面板打开;toast 取自公共依赖随本包
+    // 装载行提供的 client 模块,取不到则整段跳过(防御);批内逐条认领防多窗口重复弹;
     // 代际令牌自愈:HMR/闭包重建首挂中止旧代快照请求与总线订阅再启新代,旧代不滞留不叠加
     const NOTIFY_REQUEST_TIMEOUT_MS = 30 * 1000
     const NOTIFY_TOAST_MS = 6 * 1000

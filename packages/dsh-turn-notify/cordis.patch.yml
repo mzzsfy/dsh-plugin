@@ -2,10 +2,15 @@
 # profile root as one entry. Applied by `dsh plugin add @mzzsfy/dsh-turn-notify`;
 # the row id addresses this plugin's host half, whose `session/event` observer
 # feeds the projection observed by the browser half via `/api/turn-notify/*`.
-# Shared client capability (toast/bus subscribe) is provided by dsh-common-tools
-# via the session-manager placeholder entry; no placeholder rows for other
-# packages here.
+# The shared client dependency ships its own loading row below, so this plugin
+# runs standalone; the plugins page never lists the dependency itself.
 
 - insert:
     - id: turn-notify
       name: '@mzzsfy/dsh-turn-notify'
+
+# 公共 client 依赖的装载行:宿主按包名合并成单份 client 模块;每个消费插件自带
+# 一行,装任一插件即可独立运行;该依赖不进 profile 依赖清单,插件管理页不展示。
+- insert:
+    - id: turn-notify-dsh-common-tools
+      name: '@mzzsfy/dsh-common-tools'

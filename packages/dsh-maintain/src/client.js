@@ -9,13 +9,13 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useState, useEffect, useRef } = React
 
-    // 面板反馈出口:公共依赖 @mzzsfy/dsh-common-tools,可选消费——占位条目由
-    // session-manager 唯一代挂,权威方未安装时降级 console,不挂死不报错
+    // 面板反馈出口:公共依赖 @mzzsfy/dsh-common-tools,硬消费——装载行随本包
+    // cordis.patch.yml 自带,取不到 toast 时降级 console,不挂死不报错(防御)
     let toast = null
     try {
       toast = require('@mzzsfy/dsh-common-tools/client').toast.show
     } catch {
-      // 模块表无 toast → 反馈降级 console.warn
+      // 取不到 toast → 反馈降级 console.warn(防御)
     }
 
     const notify = (text, kind) => {

@@ -2,7 +2,7 @@
 // 以 DSH client-modules 自注册格式发布:__ModuleLoader__.load({id, factory}),
 // factory(require) 中 require('react') 由 DSH client runtime 模块表解析。
 // IndexedDB 事务协调跨窗口认领,localStorage 保存偏好与提醒标记。
-// 页内通知通道经公共依赖 @mzzsfy/dsh-toast 展示,本包不自带通知 UI。
+// 页内通知通道经公共依赖 @mzzsfy/dsh-common-tools 的 toast 展示,本包不自带通知 UI。
 
 window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-turn-notify',
@@ -12,14 +12,14 @@ window.__ModuleLoader__.load({
 
     // 公共依赖 @mzzsfy/dsh-common-tools:总线订阅硬消费(数据刷新唯一通道,
     // dsh-common-tools 的 client 侧协议;模块表缺失即本 client factory 抛错,由装载层
-    // 判定失败,无轮询回退);toast 可选消费(权威消费方 session-manager 未代挂
-    // 占位时模块表缺失,干净禁用 toast 通道,其余通道不受影响)
+    // 判定失败,无轮询回退);toast 由同一份 client 模块提供,装载行随本包
+    // cordis.patch.yml 自带
     const tools = require('@mzzsfy/dsh-common-tools/client')
     let toast = null
     try {
       toast = tools.toast.show
     } catch {
-      // 模块表无 toast → 页内通知通道置空,调用点统一走 toast 判空
+      // 取不到 toast → 页内通知通道置空,调用点统一走 toast 判空(防御)
     }
 
     // 快照拉取超时防悬挂,总线断线由共享 WS 退避重连

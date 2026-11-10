@@ -87,6 +87,8 @@ presence 只统计有接收订阅的连接，纯发送实例不计在场。对�
 
 | 方向 | 帧 |
 |---|---|
+| client → host | `{ "type": "hello", "protocol": 1, "version": "<包版本>" }` |
+| host → client | `{ "type": "hello", "protocol": 1, "protocols": [1], "version": "<包版本>" }` |
 | client → host | `{ "type": "subscribe", "plugins": ["@mzzsfy/dsh-tunnel"], "revision": 1 }` |
 | host → client | `{ "type": "ready", "plugins": ["@mzzsfy/dsh-tunnel"], "revision": 1 }` |
 | client → host | `{ "type": "publish", "plugin": "@mzzsfy/dsh-tunnel", "payload": {} }` |
@@ -96,9 +98,15 @@ presence 只统计有接收订阅的连接，纯发送实例不计在场。对�
 
 host 的 WS 实现多实体以进程级注册表共享传输，同版不重复安装，较新版本接管传输并保留监听；已有 WS 门面动态转发。缺少 registerUpgrade 时告警并停用总线，不注册资源。loader 上下文缺少包名时明确拒绝，不猜测身份。0.2.0 移除旧 SSE、topic、forPlugin 和 version 接口，无兼容路径。升级须统一更新消费方与依赖，完整重启宿主并刷新旧页面；旧代际 SSE(包 0.1)与 WS 代际(注册版本 1.0,包 0.2 起)同进程混装会发生注册表冲突，不支持跨该代际热接管。
 
+## 兼容窗口与版本协商
+
+当前窗口 **0.4.x**：帧集合、导出形状与 `setupCommonTools` 门面语义在 0.4.x 内保持向后兼容，**只允许发 patch**。0.5.0 视为破坏性版本（0.x 语义里 minor 即破坏），必须与十个消费方的依赖范围抬升**同批发布**——npm 的 `^0.4.0` 只约束安装，装载行按包名取 profile 顶层那份，单独发 0.5.0 会被 hoist 给仍在 `^0.4.0` 的旧插件。窗口与红线见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。
+
+版本协商：client 连接首帧上报 `{ type: 'hello', protocol: 1, version }`，host 回 `{ type: 'hello', protocol, protocols: [1], version }`。协议无交集时 client 打印一条告警并关闭连接、不再重连（页级总线停用）；旧 host（0.3.x 及以前）把未知帧当非法帧直接关连接，client 在 hello 宽限窗内被关即判定为老帧模式，降级为不报版本重连一次，连接从未 open 就断开不触发降级。帧协议改动即递增 `PROTOCOL`；host 侧 `PKG_VERSION` 与包版本同锁（仓库测试守）。
+
 ## 装载与 Toast
 
-client 由 session-manager 全仓唯一占位条目代挂，必须先于消费方物化。消费方声明 dependencies 与 external `@mzzsfy/dsh-common-tools/client`。toast 不要求建立 bus：
+client 模块由**每个消费插件自带的装载行**进入宿主：消费方在自己的 `cordis.patch.yml` 里加一行 `id: <本包前缀>-dsh-common-tools`、`name: '@mzzsfy/dsh-common-tools'`。宿主按包名把多行合并成**一份** client 模块（`entriesByName` + `compose`），bundle 只拼一次、模块只注册一次，多行在宿主侧是多个空 `apply()` 条目；本包不 host 别人的行，也不依赖别人 host 自己的行——装任一消费插件即可独立运行。消费方声明 dependencies（范围 `^0.4.0`）与 external `@mzzsfy/dsh-common-tools/client`，factory 内 require 后经命名空间使用；该包须能从 profile 根解析，生产 profile 为 pnpm `nodeLinker: hoisted`。装载规约见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)。toast 不要求建立 bus：
 
 ```js
 const { toast } = require('@mzzsfy/dsh-common-tools/client')

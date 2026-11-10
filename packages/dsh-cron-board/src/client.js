@@ -403,8 +403,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return noopFactory()
     }
     // 公共工具库为总线订阅硬消费:数据刷新唯一通道,缺失即 factory 抛错交装载层判定
-    // (client-dependency 规约),禁止吞成静默禁用;单独安装且无 session-manager 代挂
-    // 占位条目时的恢复方法见 README「依赖」节
+    // (client-dependency 规约),禁止吞成静默禁用;装载行由本包 cordis.patch.yml 自带,
+    // 见 README「依赖」节
     const tools = require('@mzzsfy/dsh-common-tools/client')
     const { useState, useEffect, useRef, useCallback } = React
     const h = (type, props, ...children) => React.createElement(type, props ?? null, ...children)

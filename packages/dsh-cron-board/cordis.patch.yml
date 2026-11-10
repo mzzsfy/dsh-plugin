@@ -3,3 +3,9 @@
 - insert:
     - id: cron-board
       name: '@mzzsfy/dsh-cron-board'
+
+# 公共 client 依赖的装载行:宿主按包名合并成单份 client 模块;每个消费插件自带
+# 一行,装任一插件即可独立运行;该依赖不进 profile 依赖清单,插件管理页不展示。
+- insert:
+    - id: cron-board-dsh-common-tools
+      name: '@mzzsfy/dsh-common-tools'

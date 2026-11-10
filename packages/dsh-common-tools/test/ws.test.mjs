@@ -5,6 +5,19 @@ import { once } from 'node:events'
 import { setupCommonTools, __test } from '../src/host.js'
 import NodeWebSocket from 'ws'
 
+test('Given 新 client 连接首帧 When 发送 hello Then host 回协议集与版本', async t => {
+  const f = await fixture(t)
+  setupCommonTools(f.context())
+  const socket = new NodeWebSocket(f.base.replace('http:', 'ws:') + '/api/bus/ws')
+  t.after(() => socket.close())
+  const frames = []
+  socket.on('message', data => frames.push(JSON.parse(data.toString())))
+  await once(socket, 'open')
+  socket.send(JSON.stringify({ type: 'hello', protocol: 1, version: '0.4.0' }))
+  await until(() => frames.length === 1)
+  assert.deepEqual(frames[0], { type: 'hello', protocol: 1, protocols: [1], version: '0.4.0' })
+})
+
 test('Given 两插件通道 When 双向推送 Then 自动身份隔离且共享一条真实WS', async t => {
   const f = await fixture(t), names = ['@mzzsfy/a', '@mzzsfy/b']
   const hosts = names.map(name => setupCommonTools(f.context(name)))

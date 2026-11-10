@@ -2,37 +2,64 @@
 
 跨插件共享的 client 能力(浮出通知、推送总线订阅等)以**普通 npm 依赖包**形态发布
 (`@mzzsfy/dsh-common-tools`),不是 dsh 插件:无 `dsh.bundle.patch`、不进 profile
-依赖行与 bundles、插件管理列表不可见。两个半区各有激活通道:
+依赖清单与 bundles、插件管理页不展示。它只以"插件依赖"的身份进入装载树。
 
-## client 半区(toast / setupCommonTools)
+## 装载:每个消费插件自带一行
 
-- 实现以 `__ModuleLoader__.load({ id: '@mzzsfy/dsh-common-tools', factory })` 自注册,
-  factory 返回值含空 `apply()` + 能力命名空间(缺 apply 即 invalid plugin 拖垮整树)
-- **装载来源 = session-manager 的 cordis.patch.yml 全仓唯一代挂占位条目**(dsh-toast 原模式),其他消费方不得重复插入:
-  条目 id 带代挂插件前缀防树内冲突,`name` 才是模块表的包解析键;包自身不带 patch
-- 消费插件:`dependencies` 声明该包(传递依赖 hoisted 落 profile 顶层),
-  `dsh.client.external` 声明 `'@mzzsfy/dsh-common-tools/client'`,factory 内 require
-  后经命名空间使用;toast 通道可选消费(try/catch,模块表缺失即置空),总线订阅为
-  硬消费(缺失即 factory 抛错由装载层判定)
-- **物化顺序约束**:占位条目随代挂插件 bundle 进 client 拼接序,代挂插件
-  (session-manager)必须排在所有消费方之前(bundles @mzzsfy 区段最前;该顺序是不变式
-  约束,dev-link 只做尾部追加不重排,新包入列时人工核对),否则硬消费
-  require 先于模块物化而拖垮整 client bundle
+- 消费插件的 `cordis.patch.yml` 各带一行占位条目:
+
+  ```yaml
+  - insert:
+      - id: <本包名>-dsh-common-tools
+        name: '@mzzsfy/dsh-common-tools'
+  ```
+
+  条目 id 带本包前缀防树内冲突;`name` 才是模块表的包解析键。本包不 host 别人的
+  行,也不依赖别人 host 自己的行——**装任一消费插件即可独立运行**。
+- 宿主按包名把多条行合并成**一份** client 模块(`dsh-client-modules` 的
+  `entriesByName` + `compose`),bundle 只拼一次、模块只注册一次;多行在宿主侧是
+  多个空 `apply()` 条目,无副作用。
+- 消费插件:`dependencies` 声明该包并在 `dsh.client.external` 声明
+  `'@mzzsfy/dsh-common-tools/client'`,factory 内 require 后经命名空间使用。
+- 该包必须能从 profile 根解析(hoisted 布局):生产 profile 是 pnpm
+  `nodeLinker: hoisted`,传递依赖落顶层；换成 isolated 布局时装载行会解析不到。
+
+## 兼容窗口:同一个 minor,只准 patch
+
+- 当前窗口 **0.4.x**:client 与 host 的帧集合、导出形状、`setupCommonTools` 门面
+  语义在 0.4.x 内保持向后兼容,**只允许发 patch**。
+- 0.5.0 视为破坏性版本(0.x 语义里 minor 即破坏):必须与十个消费方的依赖范围
+  抬升**同批发布**,否则 hoist 出的 0.5.0 会被装载行解析给仍在 `^0.4.0` 的旧插件。
+- 版本范围管不住装载行:npm 的 `^0.4.0` 只约束安装,行解析按包名取 profile 顶层
+  那份。所以"0.5.0 同批发"是硬规则,不是建议。
+
+## 版本协商(hello 首帧)
+
+- client 连接首帧上报 `{ type: 'hello', protocol: 1, version }`;host 回
+  `{ type: 'hello', protocol, protocols: [1], version }`。
+- 协议无交集:client 打印一条告警并关闭连接,不再重连(页级总线停用)。
+- 旧 host(0.3.x 及以前)把未知帧当非法帧直接关连接:client 在 hello 宽限窗内
+  被关即判定为老帧模式,降级为不报版本重连一次;连接从未 open 就断开不触发降级。
+- host 侧 `PKG_VERSION` 与包版本同锁(仓库测试守),注册表按它决定哪份 host
+  半区持有传输。
 
 ## host 半区(setupCommonTools)
 
-- host 能力不占条目:消费插件在自己 `apply` 里执行
-  `setupCommonTools(ctx)`,返回绑定当前插件空间的 `subscribe / publish` 门面；host 额外提供 `onPresence`
-- 进程级注册表 + semver 版本接管:WS 同代际多版本实体共存时新者接管,旧实现自治拆卸并交出
-  状态;同版幂等,降级不接管。旧代际 SSE(包 0.1)与 WS 代际(注册版本 1.0,包 0.2 起)不支持跨代际热接管；升级须统一更新消费方与依赖、完整重启宿主并刷新旧页面
-- 卸载合规:调用者按实例独立记账,路由由进程级总线持有;非最后一个消费方卸载只清理该实例订阅,最后一个卸载才收尾——总线存活期 = 至少一个消费方在场
-- 两端均在消费插件的 `apply(ctx)` 中调用 `setupCommonTools(ctx)`，以 `ctx.fiber.entry.options.name` 完整 npm 包名绑定空间。`subscribe(listener)` 接收对端 payload，`publish(payload)` 向对端发送；插件就是通道，没有 topic、消息版本或跨插件通配。client 可用 `subscribe(listener, { onReset })` 在接收订阅确认后拉快照。
-- client 实例持有页面共享的一条 WebSocket，发送无需接收订阅。组件退订只停止接收，插件卸载清理自己的所有订阅与连接使用权，最后一个实例退出才关闭连接。host presence 仅统计有接收订阅的连接。不得在 factory 顶层持有常驻订阅，不得由共享可变 bus 将不同实例串到一起。组件应捕获所属 ctx 的 bus；通知共享工作须记录活动实例，当前实例退出后由存活实例接管，最后实例退出才停止共享工作，跨 factory HMR 清理旧代。
-- 旧 SSE、forPlugin 与 topic/version 接口已移除，不保留兼容层。协议与断线恢复见[包 README](../packages/dsh-common-tools/README.md)
+- host 能力不占条目:消费插件在自己 `apply` 里执行 `setupCommonTools(ctx)`,返回
+  绑定当前插件空间的 `subscribe / publish` 门面;host 额外提供 `onPresence`。
+- 进程级注册表 + semver 版本接管:多个消费插件各自安装的 host 副本按版本比较,
+  高版本持有 WS 传输并继承状态,旧副本继续可用;同版幂等。
+- 卸载合规:调用者按实例独立记账,路由由进程级总线持有;非最后一个消费方卸载
+  只清理该实例订阅,最后一个卸载才收尾——总线存活期 = 至少一个消费方在场。
+- client 实例持有页面共享的一条 WebSocket。组件退订只停止接收,插件卸载清理自己
+  的所有订阅;最后一个实例退出才关闭连接。host presence 仅统计有接收订阅的连接。
+  不得在 factory 顶层持有常驻订阅;通知共享工作须记录活动实例,当前实例退出后由
+  存活实例接管,最后实例退出才停止共享工作,跨 factory HMR 清理旧代。
 
 ## 红线
 
-- 不得为共享能力另造插件包(会出现在插件管理)
+- 不得为共享能力另造插件包(会出现在插件管理页)
 - 不得让非插件包以三件态(name/inject)声明插件身份进装载树
 - 消费方不得绕过 `setupCommonTools` 门面直触总线内部
+- 不得在 0.4.x 内改帧集合、导出形状或调用语义;要改就发 0.5.0 并同批抬十个消费方
 - react / react-dom/client 由宿主平台种子表提供,能力实现经模块表 require 使用

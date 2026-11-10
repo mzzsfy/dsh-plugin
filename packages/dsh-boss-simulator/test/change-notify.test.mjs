@@ -31,7 +31,10 @@ function tableFixture() {
 
 test('Given 公共依赖清单 When 检查 manifest Then 声明 common-tools 依赖与 client external', () => {
   const pkg = JSON.parse(read('package.json'))
-  assert.equal(pkg.dependencies['@mzzsfy/dsh-common-tools'], '^0.3.0')
+  // 范围锁在库的同一 minor 内(库 patch 升级不要求消费方重发),不在测试里硬编码具体版本
+  const lib = JSON.parse(readFileSync(join(root, '../dsh-common-tools/package.json'), 'utf8'))
+  const [major, minor] = lib.version.split('.')
+  assert.equal(pkg.dependencies['@mzzsfy/dsh-common-tools'], `^${major}.${minor}.0`)
   assert.deepEqual(pkg.dsh.client.external, ['@mzzsfy/dsh-common-tools/client'])
 })
 

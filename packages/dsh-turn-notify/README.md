@@ -8,7 +8,7 @@ DeepSeek Harness 消息通知插件:AI 回合产生六类事件(任务完成/任
 dsh plugin --profile web add @mzzsfy/dsh-turn-notify
 ```
 
-安装后打开 设置 > 消息通知,默认进入「提醒方式」。全部事件默认开启;提示音需先与页面交互,浏览器系统通知需授权并满足系统通知设置。webhook 与聊天(IM)在「外部推送」配置;后台桌面通知在「提醒方式」开启。页内提示与推送总线由公共依赖 @mzzsfy/dsh-common-tools 提供,由 session-manager 插件代挂装载;总线为 client 硬依赖,订阅 WS 总线 `@mzzsfy/dsh-turn-notify` 插件通道。host/client 在 `apply(ctx)` 调用 `setupCommonTools(ctx)`,通道身份取 `ctx.fiber.entry.options.name` 的完整 npm 包名;client 各实例退出时释放自己的订阅，同一 factory 的存活实例接管一次共享通知工作，最后实例退出才中止共享快照并清启动状态；跨 factory HMR 清理旧代。声音通道受浏览器自动播放策略约束,首次点击页面后才会出声。想推到微信等聊天工具,见 [IM 推送](#im-推送);想推到自建服务,见 [webhook 推送](#webhook-推送);想在运行 DSH 的电脑桌面接收通知,见 [宿主桌面通知](#宿主桌面通知)。
+安装后打开 设置 > 消息通知,默认进入「提醒方式」。全部事件默认开启;提示音需先与页面交互,浏览器系统通知需授权并满足系统通知设置。webhook 与聊天(IM)在「外部推送」配置;后台桌面通知在「提醒方式」开启。页内提示与推送总线由公共依赖 @mzzsfy/dsh-common-tools 提供,该依赖的装载行随本包 cordis.patch.yml 自带,装本包即可独立运行;总线为 client 硬依赖,订阅 WS 总线 `@mzzsfy/dsh-turn-notify` 插件通道。host/client 在 `apply(ctx)` 调用 `setupCommonTools(ctx)`,通道身份取 `ctx.fiber.entry.options.name` 的完整 npm 包名;client 各实例退出时释放自己的订阅，同一 factory 的存活实例接管一次共享通知工作，最后实例退出才中止共享快照并清启动状态；跨 factory HMR 清理旧代。声音通道受浏览器自动播放策略约束,首次点击页面后才会出声。想推到微信等聊天工具,见 [IM 推送](#im-推送);想推到自建服务,见 [webhook 推送](#webhook-推送);想在运行 DSH 的电脑桌面接收通知,见 [宿主桌面通知](#宿主桌面通知)。
 
 ## 六类通知事件
 

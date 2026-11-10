@@ -2,10 +2,11 @@
 // - bus:按插件空间复用单条 WebSocket,支持订阅与推送(host 半区由消费插件
 //   执行 setupCommonTools 激活,版本接管对 client 透明,机制见 host.js)。
 // - toast:全局浮出通知,多条并存栈式展示。
-// 以 DSH client-modules 自注册格式发布(__ModuleLoader__.load),消费插件经
-// dsh.client.external require('@mzzsfy/dsh-common-tools/client') 使用。本包是普通
-// npm 依赖而非插件:client 经消费插件 cordis.patch.yml 代挂的占位条目进入客户端
-// 模块表,插件管理不可见。
+// 本包是普通 npm 依赖而非插件:client 由每个消费插件 cordis.patch.yml 自带的
+// 装载行进客户端模块表,宿主按包名合并成单份,插件管理不可见;消费方经
+// external require('@mzzsfy/dsh-common-tools/client') 使用。
+// 版本协商:连接首帧报 hello,host 回支持的协议集;不认识 hello 的旧 host 会关
+// 连接,客户端据此降级为不报版本的老帧模式重连一次;协议无交集则停用总线并告警。
 // toast 渲染容器惰性自举:首次 show 挂载,容器与样式幂等,挂载前清同 id 旧代残留。
 // 容器带代际标记:HMR 旧代闭包再调 mount 时发现在位容器属更新代际即退避,
 // 不拆新代容器;旧代迟到通知不可见(一次性告警),刷新页面恢复。
@@ -16,6 +17,11 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { useSyncExternalStore } = React
     const { createRoot } = require('react-dom/client')
+
+    // 与 package.json 同锁(仓库测试守):hello 首帧上报,也是消费方读取的版本面
+    const VERSION = '0.4.0'
+    // 帧协议版本:改动帧集合即递增,host 回支持集,无交集即停用总线
+    const PROTOCOL = 1
 
     // Toast 持续时长与栈上限:展示期定值;突发事件裁剪最旧条目
     const TOAST_HOLD_MS = 4 * 1000
@@ -223,8 +229,12 @@ window.__ModuleLoader__.load({
     const RETRY_MIN_MS = 1000
     const RETRY_MAX_MS = 30 * 1000
     const CONNECT_TIMEOUT_MS = 10 * 1000
+    // 旧 host 收到未知帧即关连接:hello 发出后在此窗内被关即判定为老帧模式
+    const HELLO_GRACE_MS = 3000
     const busState = (window.__dshCommonToolsBus ??= {
       socket: null, owners: new Set(), subscriptions: new Set(), ready: new Set(), retry: null, timeout: null, attempts: 0, revision: 0, closing: false,
+      // hello: idle 未探测 / sent 已发待回 / ok 已协商 / legacy 旧 host 无需探测 / unsupported 协议无交集
+      hello: 'idle', helloAt: 0, opened: false,
     })
 
     function requireName(value, label) {
@@ -264,7 +274,14 @@ window.__ModuleLoader__.load({
       busState.socket = socket
       busState.timeout = setTimeout(() => socket.close(), CONNECT_TIMEOUT_MS)
       socket.onopen = () => {
-        if (busState.socket === socket) syncPlugins()
+        if (busState.socket !== socket) return
+        busState.opened = true
+        if (busState.hello === 'idle') {
+          busState.hello = 'sent'
+          busState.helloAt = Date.now()
+          try { socket.send(JSON.stringify({ type: 'hello', protocol: PROTOCOL, version: VERSION })) } catch { /* 老 host 关连接在 onclose 兜 */ }
+        }
+        syncPlugins()
       }
       socket.onerror = () => socket.close()
       socket.onclose = () => {
@@ -272,6 +289,11 @@ window.__ModuleLoader__.load({
         clearTimeout(busState.timeout)
         busState.socket = null
         busState.closing = false
+        const opened = busState.opened
+        busState.opened = false
+        if (busState.hello === 'unsupported') return
+        // 开过连接、hello 已发却在宽限窗内被关:旧 host 视未知帧为非法帧
+        if (opened && busState.hello === 'sent' && Date.now() - busState.helloAt <= HELLO_GRACE_MS) busState.hello = 'legacy'
         busState.ready.clear()
         for (const subscription of busState.subscriptions) subscription.ready = false
         if (busState.owners.size === 0) return
@@ -283,6 +305,14 @@ window.__ModuleLoader__.load({
         let frame
         try { frame = JSON.parse(event.data) } catch { return }
         if (!frame || typeof frame !== 'object') return
+        if (frame.type === 'hello') {
+          const protocols = Array.isArray(frame.protocols) ? frame.protocols : []
+          if (protocols.includes(PROTOCOL)) { busState.hello = 'ok'; return }
+          busState.hello = 'unsupported'
+          console.warn('dsh-common-tools(bus): 帧协议不兼容(本端 ' + PROTOCOL + ', 宿主 ' + (protocols.join('/') || '未知') + '), 总线停用')
+          socket.close()
+          return
+        }
         if (frame.type === 'ready' && frame.revision === busState.revision && Array.isArray(frame.plugins)
           && frame.plugins.every(plugin => typeof plugin === 'string' && plugin.trim() !== '')) {
           clearTimeout(busState.timeout)
@@ -391,6 +421,7 @@ window.__ModuleLoader__.load({
 
     return {
       apply() {},
+      VERSION,
       createSnapshotRefresh,
       toast: {
         show,
