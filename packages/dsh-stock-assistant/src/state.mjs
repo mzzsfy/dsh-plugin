@@ -1,25 +1,18 @@
 import { createHash } from 'node:crypto'
-import { domainSpec, cacheDomainSpec, initialControl, controlSchema } from './schemas.mjs'
+import { domainSpec, initialControl, controlSchema } from './schemas.mjs'
+import { createMemoryCache } from './memory-cache.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export async function openState(storageDomain, changed = () => {}, now = Date.now) {
+  // 只有控制记录落盘; 派生数据放内存, 所以打开失败只可能是这一个文件
   const domain = await storageDomain.open(domainSpec)
-  let cacheDomain
-  try { cacheDomain = await storageDomain.open(cacheDomainSpec) } catch (e) { await Promise.allSettled([domain.close()]); throw e }
-  const table = domain.table('control'), meta = domain.table('meta'), cache = cacheDomain.table('cache')
-  const initialized = { schemaVersion: domainSpec.version }
+  const table = domain.table('control')
   try {
     // 存量字段改名的归一发生在数据域的 valueSchema 上(storageDomain.open 阶段), 这里读到的已是新格式
-    if (!table.get('root')) {
-      // meta 在 = 以前确实写出过控制记录: 现在读不出来只可能是记录损坏或版本不认, 宿主会把它当作缺失且不备份,
-      // 此时写空就是把自选覆盖掉。停下来让人先看数据目录, 而不是拿可用性换数据。
-      if (meta.get('state')) fail('AUTHORITY_LOST', '控制记录读不出来（损坏或版本不认），为避免用空自选覆盖已停止初始化；请检查数据目录 stock_assistant/control/root.json，并保留同目录下的 *.bak.* 与旧版 stock_assistant.json', 503)
-      await table.put('root', initialControl())
-    }
-    // 先写控制记录再打标记: 中途崩溃只会退化成"没有标记", 不会把正常数据误判成损坏
-    if (!meta.get('state')) await meta.put('state', initialized)
-  } catch (e) { await Promise.allSettled([domain.close(), cacheDomain.close()]); throw e }
+    if (!table.get('root')) await table.put('root', initialControl())
+  } catch (e) { await Promise.allSettled([domain.close()]); throw e }
+  const cache = createMemoryCache()
   let tail = Promise.resolve(), stopped = false
   return {
     get: () => structuredClone(table.get('root')),
@@ -64,10 +57,7 @@ export async function openState(storageDomain, changed = () => {}, now = Date.no
     async close() {
       stopped = true
       await tail
-      // 两个域都要关到底: 一个关失败不该把另一个的已打开占位留在宿主里
-      const results = await Promise.allSettled([domain.close(), cacheDomain.close()])
-      const failed = results.find(r => r.status === 'rejected')
-      if (failed) throw failed.reason
+      await domain.close()
     },
   }
 }

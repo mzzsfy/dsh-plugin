@@ -108,16 +108,16 @@ test('F02 进入面板时缓存新鲜则跳过重复拉取, 过期才刷新', as
   await app.close()
 })
 
-// 初始化后半段(适配器合同、执行器、目录)失败时也必须关掉两个数据域:
+// 初始化后半段(适配器合同、执行器、目录)失败时也必须关掉数据域:
 // 否则占位留在宿主里, 热重载只会一路 already-open, 只能重启宿主
-test('初始化失败后两个数据域已关闭, 可以重新打开', async () => {
+test('初始化失败后数据域已关闭, 可以重新打开', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'stock-init-fail-'))
   const backend = new JsonStorageBackend(dir)
   const facility = new DomainFacility({ storage: { backend: { get: () => backend } }, emit() {}, logger: { warn() {}, error() {} } }, { backend: 'isolated' })
   try {
     await assert.rejects(createApplication({ storageDomain: facility, providers: [{}], publish() {}, timers: globalThis }), error => error.code === 'INVALID_ADAPTER')
     const state = await openState(facility)
-    assert.deepEqual(state.get().watchlist.order, [], '两域已释放, 能重新打开')
+    assert.deepEqual(state.get().watchlist.order, [], '域已释放, 能重新打开')
     await state.close()
   } finally {
     await backend.close()

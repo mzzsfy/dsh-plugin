@@ -1,7 +1,6 @@
 import { initialControl } from '../src/schemas.mjs'
 export function memoryStorage() {
-  // meta 预置成已初始化: 存量记录(control 有 root)的正常情形
-  const maps = { control: new Map([['root', initialControl()]]), meta: new Map([['state', { schemaVersion: 1 }]]), cache: new Map() }
+  const maps = { control: new Map([['root', initialControl()]]), cache: new Map() }
   let closed = false, writes = 0, broken = false
   return {
     maps, get closed() { return closed }, get writes() { return writes }, set broken(value) { broken = value },

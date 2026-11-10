@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { fail } from './market-model.mjs'
 import { MARKET_META } from './market-model.mjs'
@@ -85,22 +84,10 @@ const normalizeCredentialField = root => {
   return { ...root, providers: root.providers.map(normalizeProvider) }
 }
 export const storedControlSchema = z.preprocess(normalizeCredentialField, controlSchema)
-// 存储布局: 权威记录与可重建缓存分域、且按记录各写一个文件。
-// 整域单文件时每次写入都重写全部内容(缓存能把文件撑到几 MB), 一次写坏就整域打不开;
-// 按记录落盘后单条缓存损坏只丢它自己(宿主会备份成 *.bak.<时间戳> 再跳过), 控制面也只写自己那一条。
-// 控制域与旧单文件同名同版本: 宿主会把旧文件里的 control/root 迁进新目录, 未声明的 cache 表被跳过, 旧文件保留不改。
-const cacheRecordSchema = z.object({ kind: z.string(), source: z.string(), fetchedAt: z.number(), payload: z.unknown() })
-// 初始化标记: 用来区分"从没有过控制记录"和"有记录但读不出来"。
-// 前者可以放心初始化, 后者必须停下来 —— 宿主对不可解析的记录只会当作缺失, 不备份, 写空就等于覆盖。
-const metaSchema = z.object({ schemaVersion: z.number().int().positive() })
-export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'per-record', invalidRecords: 'backup-and-skip', tables: { control: { valueSchema: storedControlSchema }, meta: { valueSchema: metaSchema } } }
-// 缓存可重建: 记录格式再变就直接抬 version, 旧记录按陌生版本读成不存在, 不必为缓存写迁移
-export const cacheDomainSpec = { name: 'stock_assistant_cache', version: 1, layout: 'per-record', invalidRecords: 'backup-and-skip', tables: { cache: { valueSchema: cacheRecordSchema } } }
-// 记录键会成为文件名, 宿主只接受 [A-Za-z0-9_-]。段内的其他字符(如美股代码里的点)折掉后
-// 补一段哈希(64 bit), 免得 '600519.SS' 与 '600519-SS' 折进同一个文件读到别人的 K 线。
-const SAFE_SEGMENT = /^[A-Za-z0-9-]+$/
-const encodeSegment = value => SAFE_SEGMENT.test(value) ? value : `${value.replace(/[^A-Za-z0-9]/g, '')}-${createHash('sha256').update(value).digest('hex').slice(0, 16)}`
-export const cacheKey = (...parts) => parts.map(encodeSegment).join('_')
+// 存储只有一条记录: 自选与路由。K 线/目录/日历都是可重建的派生数据, 只放内存 ——
+// 把它们塞进同一个文件曾把文件撑到 3.3 MB, 每次改自选都要整体重写, 写坏一次全没。
+// 旧文件同名同版本, 打开时只取声明过的 control 表, 缓存表被忽略, 下次写入自然缩到十几 KB。
+export const domainSpec = { name: 'stock_assistant', version: 1, layout: 'single', tables: { control: { valueSchema: storedControlSchema } } }
 // 推荐配置:四个免凭据源,东财做八市场主力,其余按实测最强能力分派备份——公开源无SLA,能覆盖的市场都串上备源。
 export const defaultConfig = () => {
   const budget = (requestsPerMinute, capabilityLimits = {}) => ({ requestsPerMinute, dailyRequestLimit: null, billingUnit: 'request', symbolCreditsPerMinute: null, capabilityLimits })
