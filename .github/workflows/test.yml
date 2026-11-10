@@ -23,7 +23,9 @@ jobs:
   test:
     name: 测试 x10 (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # 全量 10 轮干净基线 21 分钟(schedule run 42801314021 实测);push 全量遇慢节点
+    # 贴线(42826980792 跑满 30 分钟被取消)。45 分钟 ≈ 2.1 倍基线,与 compat.yml 对齐
+    timeout-minutes: 45
     strategy:
       # 双架构结果独立完整,一方失败不取消另一方
       fail-fast: false
