@@ -28,14 +28,9 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools 可选消费(占位条目全仓唯一,由
-    // dsh-session-manager 代挂;模块表缺失或导出缺 show 即通知通道置空)
-    let toast = () => {}
-    try {
-      toast = require('@mzzsfy/dsh-common-tools/client').toast.show || (() => {})
-    } catch {
-      toast = () => {}
-    }
+    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools,硬消费——装载行由本包
+    // cordis.patch.yml 自带,模块表缺失即 factory 抛错,由装载层判定失败
+    const toast = require('@mzzsfy/dsh-common-tools/client').toast.show
 
 const CSS = [
   // 开关行(规约 switch 形态):track 胶囊 + thumb 圆点,状态选择器锚定 checkbox
@@ -2129,7 +2124,7 @@ function ContextPanel() {
         const workspaces = ctx.get('workspaces')
         const remoteSession = ctx.remote ? ctx.remote.session : undefined
         // 分叉动作通道:分叉本体只依赖 sessions.fork;open 仅是分叉成功后打开
-        // 子会话的收尾动作(失败单独吞掉,警告日志),缺失时条件执行——两代宿主
+        // 子会话的收尾动作(失败单独吞掉,警告日志),缺失时条件执行——各代宿主
         // client 面均无 sessions.open(FIND-020-2:双函数在场探测致 fork dock
         // 整体静默缺失),放宽探测为只要求 fork。
         const forkService = (sessions && typeof sessions.fork === 'function')

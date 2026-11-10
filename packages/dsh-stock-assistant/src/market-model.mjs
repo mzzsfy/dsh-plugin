@@ -2,14 +2,14 @@
 // sessions 是该市场连续竞价的时段(市场本地时间), 用来判断报价此刻处在交易中/午休/休市;
 // 只描述周内时点, 法定节假日仍以数据本身(最后一根K线的日期)为准。
 export const MARKET_META = {
-  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']] },
-  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']] },
-  XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true, sessions: [['09:30', '12:00'], ['13:00', '16:00']] },
-  XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']] },
-  XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']] },
-  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: true, sessions: [['09:00', '11:30'], ['12:30', '15:30']] },
-  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:00', '15:30']] },
-  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: true, sessions: [['08:00', '16:30']] },
+  XSHG: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']], tag: '沪A' },
+  XSHE: { currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:30', '11:30'], ['13:00', '15:00']], tag: '深A' },
+  XHKG: { currency: 'HKD', timezone: 'Asia/Hong_Kong', priceScale: 2, codePattern: /^\d{4,5}$/, verifiedByDefault: true, sessions: [['09:30', '12:00'], ['13:00', '16:00']], tag: '港股' },
+  XNAS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']], tag: '纳斯达克' },
+  XNYS: { currency: 'USD', timezone: 'America/New_York', priceScale: 2, codePattern: /^[A-Z]{1,5}$/, verifiedByDefault: true, sessions: [['09:30', '16:00']], tag: '纽交所' },
+  XJPX: { currency: 'JPY', timezone: 'Asia/Tokyo', priceScale: 0, codePattern: /^\d{4}$/, verifiedByDefault: true, sessions: [['09:00', '11:30'], ['12:30', '15:30']], tag: '日本' },
+  XKRX: { currency: 'KRW', timezone: 'Asia/Seoul', priceScale: 0, codePattern: /^\d{6}$/, verifiedByDefault: true, sessions: [['09:00', '15:30']], tag: '韩国' },
+  XLON: { currency: 'GBP', timezone: 'Europe/London', priceScale: 2, codePattern: /^[A-Z0-9.]{1,10}$/, verifiedByDefault: true, sessions: [['08:00', '16:30']], tag: '英国' },
 }
 // 报价此刻落在市场交易日的哪个阶段; 周末恒为休市, 节假日不做推断(没有日历能力时会误判)
 export function sessionStateOf(exchange, nowMs) {

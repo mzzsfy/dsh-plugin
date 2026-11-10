@@ -20,8 +20,8 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
-    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools(external require,宿主占位条目由
-    // 本插件 cordis.patch.yml 代挂)
+    // 通知出口:公共依赖 @mzzsfy/dsh-common-tools(external require,装载行由本包
+    // cordis.patch.yml 自带;每个消费插件各自携带装载行,本包只带自己那一行)
     const { show: toast } = require('@mzzsfy/dsh-common-tools/client').toast
 
 // 视觉方案:归档台账——全部取宿主 alias 令牌(双主题自适应,不造色),数据列

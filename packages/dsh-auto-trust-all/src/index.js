@@ -26,7 +26,7 @@ export const Config = z.object({
   maxHosts: z.number().step(1).min(1).max(4096).default(100).description('注册域名容量,超出按最久未访问淘汰'),
 })
 
-// 信任数组受支持形态:可变数组才能承载运行时登记(两代宿主的共同源码形态,
+// 信任数组受支持形态:可变数组才能承载运行时登记(各代宿主的共同源码形态,
 // 非官方稳定公开契约);冻结数组视同宿主面变化,不写入
 const supportedArray = (value) => Array.isArray(value) && !Object.isFrozen(value)
 

@@ -1,10 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MARKET_META, securityId, parseSecurityId, makeSecurity } from '../src/market-model.mjs'
+import { tagName } from '../src/schemas.mjs'
 
 test('MARKET_META 八市场齐全且八市场探针全部实测通过', () => {
   assert.deepEqual(Object.keys(MARKET_META), ['XSHG', 'XSHE', 'XHKG', 'XNAS', 'XNYS', 'XJPX', 'XKRX', 'XLON'])
   assert.equal(Object.values(MARKET_META).filter(m => m.verifiedByDefault).length, 8)
+  // 市场标签会直接写进 control 记录: 不满足 tagName 的取值会让添加自选在写入兜底处 500
+  for (const [exchange, meta] of Object.entries(MARKET_META)) assert.ok(tagName.safeParse(meta.tag).success, `${exchange} 的市场标签必须合法: ${meta.tag}`)
 })
 
 test('多市场证券构造: 港/美/日按 MARKET_META 派生币种时区精度', () => {

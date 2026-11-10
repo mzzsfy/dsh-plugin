@@ -20,13 +20,13 @@
 挂载走宿主官方契约(main 全局面板插槽 / sidebar.panellist 侧栏面板行 / better-sidebar 服务),不刮宿主 DOM,宿主 UI 变动由契约消化:
 
 - **默认:全局面板**。看板以同 id 注册 main keyed 条目(中央面板)+ sidebar.panellist 条目(侧栏「新会话」下方面板行);点击面板行由宿主 `layout.selectPanel` 切换中央区,会话保持不动;点击会话行或新会话即切回会话(官方路径)
-- **手动移入**:设置>插件 页「定时任务」卡片(官方 PluginCard 形制:折叠卡壳,cb-pc 镜像)提供「看板移入 better-sidebar 侧边栏」开关;开启即注册扩展槽 tab 并卸载全局面板
+- **手动移入**:插件管理页本包详情配置卡(官方 PluginCard 形制:折叠卡壳,cb-pc 镜像;旧宿主落设置>插件页)提供「看板移入 better-sidebar 侧边栏」开关;开启即注册扩展槽 tab 并卸载全局面板
 - **不自动回退**:移入后页签关闭/类型禁用均不再自动返回;把开关关掉即回到全局面板形态(经公共 WS 总线 `@mzzsfy/dsh-cron-board` 插件通道感知,变更即时生效;host/client 在 `apply(ctx)` 调用 `setupCommonTools(ctx)`,通道身份取 `ctx.fiber.entry.options.name` 的完整 npm 包名,组件捕获所属 ctx 的 bus，卸载可提前退订；ctx 卸载释放连接持有与全部订阅)
 - **开关可用性**:已装载 better-sidebar 时可切换;未装载时开关呈禁用态仅展示(保持全局面板,无副作用)
 
 ## 配置
 
-设置页>插件 页「定时任务」卡片(`cron-board` 命名空间),各项均即时生效:`sidebarTab` 经卡片开关写入;其余项经配置文件或设置接口修改。
+插件管理页本包详情配置卡(`cron-board` 命名空间;旧宿主落设置>插件页),各项均即时生效:`sidebarTab` 经卡片开关写入;其余项经配置文件或设置接口修改。
 
 | 配置项 | 说明 | 默认值 |
 |---|---|---|
@@ -39,7 +39,7 @@
 ## 依赖
 
 - `croner`:cron 表达式解析与触发点计算
-- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费)。其 client 模块由 session-manager 的 patch 占位条目全仓唯一代挂(规约禁止消费方重复插入),与 session-manager 同装即自动就绪;单独安装本包时须二选一:安装 `@mzzsfy/dsh-session-manager`,或在 profile `cordis.patch.yml` 手工加入同款占位条目(条目须排在 cron-board 之前物化):
+- `@mzzsfy/dsh-common-tools`:client 半区总线订阅硬依赖(数据刷新唯一通道,host 半区经 `setupCommonTools` 门面消费),普通 npm 依赖而非插件,不进 profile 依赖清单、不单独成插件卡,只在所属插件详情页作为只读部件行出现。client 装载行由本包 cordis.patch.yml 自带,装本包即可独立运行,无需安装 session-manager 或手工加行:
 
   ```yaml
   - insert:
@@ -47,7 +47,7 @@
         name: '@mzzsfy/dsh-common-tools'
   ```
 
-  条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)
+  宿主按包名把各消费插件的多行装载行合并成一份 client 模块(bundle 只拼一次,多行在宿主侧是多个空 `apply()` 条目);条目 id 带本包前缀防树内冲突。条目缺失时 client factory 抛错、由装载层在控制台报出缺失模块(0.7.2 起;此前静默禁用为已知缺陷)。依赖范围 `^0.4.0`;兼容窗口(0.4.x 只准 patch、0.5.0 须与十个消费方范围抬升同批)与 hello 版本协商见 [DEVELOPMENT/client-dependency.md](../../DEVELOPMENT/client-dependency.md)
 - 宿主服务:settings / timer(软依赖)、webServer;sessionController 缺失不影响装载:启动后异步轮询等待,仍缺失仅禁用会话任务通道并打日志,看板与脚本任务照常(0.1.1-rc.2 及更早版本无此服务)
 
 ## 开发

@@ -9,7 +9,7 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 - **运行时接管**:bundle 补丁不静态禁用官方 `tool-pwsh`、`pwsh-sandbox` 两行——boot 期官方 pwsh 链先服务,主行(`ctx.shell` 执行器 + `shell` 工具 + systemPrompt 段)apply 落定后经 `entry.update` 运行时禁用官方两行(dsh-market 同款,内存态不持久),再挂载执行器接管。本包任意死法(import 崩/apply 崩/被禁/卸载)下官方行保持启用,官方 pwsh 链自服务,系统不出现 shell 全灭窗口;重启后由行树声明态收敛。web 行(`/api/shell-select/*` 数据通道,`inject: ['webServer', 'settings']` 声明式门控——服务就绪才激活)与 guard 哨兵行同 patch 插入。
 - 配置事实源 = 主行 Config(dsh 0.1.7 settings 面以 profile 条目为存储,ns `shell-select`);设置中的 **Shell 管理** 页面经现有 API 读写宿主 settings,写路径 `settings.replace` 后刷新执行面(工具描述与默认客户端即时更新),也可通过宿主配置编辑器维护。
 - client 半区 `dsh.client.inject` 声明(官方机制,dsh-client-file-upload 等官方包同款):保证 client 运行时模块表中 `primitives`/`slots` 面在场;primitives 另有 try/catch 降级自绘兜底。
-- 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(实例状态/方法全公有——cordis 服务代理会把经 `ctx.shell` 调用的方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误)。
+- 本包执行器完整实现官方 `ctx.shell` seam(`resolve`/`run`/`start`/`runFor`/`startFor`/`entryFor`/`sandboxMode`),结构官方 PwshLocalExecutor 同构(经 `ctx.shell` 代理调用的 seam 方法与配置 getter 全公有——cordis 服务代理会把方法 `this` 重定向到阴影对象,`#` 私有触发品牌检查错误;快照/注册句柄为实例私有字段,不进入代理调用路径)。
 - **不管理会话预设**:bundle 补丁仅插入主行、guard、web，不声明 `shell-select` 预设，不覆写 `agent-preset-registry` 默认值。宿主及用户选择的预设保持原样，已存活代理及其子代理可继续持有旧预设修订；部署若显式指定已删除的 `shell-select` 预设，应通过宿主预设选择入口改选现存预设，本包不保留别名或迁移路径。
 - **只隐藏模型展示，不禁执行能力**:执行器生命周期内通过官方 `system-prompt/assemble` 最终投影删除 `pwsh` 工具 schema 与重复的 `tool:pwsh` 段；native/both 移除模型工具 schema，PTC/both 重建 TypeScript/Python SDK，SDK 使用宿主公开 renderer 重建，不改官方预设、不添加禁止调用提示词。下一次模型步骤重新组装时生效，已发送请求不追溯修改。工具注册和 PowerShell 执行契约仍保留，旧/在途调用及历史卡不受影响；这是减少模型选择与提示成本的展示策略，不是硬拒绝，模型仍可能凭历史猜名调用。若该代理看不到 `shell`（如子代理工具允许集仅保留 `pwsh`），原展示保持不变，避免失去唯一终端；SDK renderer 不可用时整体不改并告警。执行器卸载自动移除投影监听。0.2.2 起宿主不再把 tools 暴露给 `system-prompt/assemble` 投影链,该路径失效且仅告警;隐藏改由执行器自带的请求缝承担——在 llm 已注册 adapter 的 `streamWithSnapshot` 上剔除 `pwsh`,读当前方法作 original 与其它改写链式叠加、同一原型只包一层,默认生效、行卸载即透传,llm 缺失只损失隐藏不影响终端。
 - 沙箱语义官方同构:`danger-full-access` 直跑;受限模式经 `ctx.sandbox.confine` 包装并按官方方言分类拒绝/runner 失败,权限模型不变。
@@ -27,7 +27,7 @@ Windows 宿主 shell 链接管:接管根组合中的官方 `pwsh` 工具与执�
 
 ## 会话卡(tool.call.toolview)
 
-注册 keyed slot `tool.call.toolview`(key `shell`/`pwsh`/`bash` 三支,priority -1)替换默认通用卡,官方 `terminalCardModel` 同构派生(argsRaw + 结果文本尾部退出标记)。`pwsh`/`bash` 两支覆盖官方工具名:死态窗口 guard 代挂官方 tool-pwsh 时,其调用行同样获得增强卡;persistent 形(无 description)与后台 ack、isError、溢出预览一样回退简版行,不误渲染:
+注册 keyed slot `tool.call.toolview`(key `shell`/`pwsh`/`bash` 三支,priority -1)替换默认通用卡,官方 `terminalCardModel` 同构派生(argsRaw + 结果文本尾部退出标记)。`pwsh`/`bash` 两支覆盖官方工具名:死态窗口 guard 代挂官方 tool-pwsh 时,其调用行同样获得增强卡;persistent 形(无 description)、isError 与溢出预览回退简版行;后台 ack 走独立 background 卡(命令全文 + jobId 徽标),不落简版行,不误渲染:
 
 - 折叠行:状态点(失败红/中断黄/其余工具图标)+ `Shell` 标题 + 描述首行摘要,失败摘要红显。
 - 展开卡:状态点 + cwd 末段目录 + 客户端名徽标 + 失败 pill(退出码/信号)+ 复制命令/复制输出按钮 + 命令折行带行号 + 输出区(横向滚动,竖向限高)。徽章忠实于执行事实:每次调用结果尾附 `[shell: <id>]` 标记(模型可见,官方退出标记同族),卡片按标记回放实际生效的客户端——缺省调用在配置事后变更或跨宿主查看时不被查看时读数改写;无标记的历史块回退显式参数 → 当前 default 推导。`pwsh`/`bash` 官方工具的调用无标记无 shell 参数,徽章按工具名钉死(客户端即工具名),永不落 default 读数。

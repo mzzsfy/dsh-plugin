@@ -28,7 +28,14 @@ export async function apply(ctx) {
     // 注册异常仅告警: client ensureLwc 失败同样走降级路径
     try { ctx.webServer.register({ kind: 'prefix', path: VENDOR_PREFIX, handler: serveVendor }) } catch (e) { ctx.logger?.warn?.('图表组件路由注册失败,详情将降级为数字详情') }
   } catch (e) {
-    stopRoutes?.(); unsubscribe?.(); notifier?.dispose(); await application?.close()
-    ctx.logger?.warn?.('股票工具未激活：独立数据域或依赖初始化失败')
+    // 失败原因先落日志再清理: 清理自身抛错不能盖掉原始原因。
+    // 数据域的 invalid-record 只有表/键有用, 记录值不能进日志。
+    const location = e?.detail?.table === undefined ? '' : `，记录 ${e.detail.table}/${e.detail.key}`
+    const reason = e && typeof e === 'object' ? `${e.code ? `${e.code}: ` : ''}${e.message || String(e)}${location}` : String(e)
+    ctx.logger?.warn?.(`股票工具未激活：独立数据域或依赖初始化失败 (${reason})`)
+    // 逐步清理: 任一步抛错都不能跳过关闭应用, 否则数据域占位留在宿主里, 重载只会一直 already-open
+    for (const step of [() => stopRoutes?.(), () => unsubscribe?.(), () => notifier?.dispose(), () => application?.close()]) {
+      try { await step() } catch (cleanupError) { ctx.logger?.warn?.(`股票工具清理失败: ${cleanupError?.message || cleanupError}`) }
+    }
   }
 }

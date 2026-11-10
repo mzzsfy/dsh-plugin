@@ -179,7 +179,7 @@ function defineScenarios(prefix, L) {
     assert.equal(result.actions.length, 0)
   })
 
-  test(prefix + '历史会话常规扫描仅开最后一条(宿主流式态不再标注 running 后的兜底)', () => {
+  test(prefix + '历史会话常规扫描仅开最后一条(running 缺失时的尾部兜底)', () => {
     const reg = createRegistry()
     const result = plan(reg, [row(OK, 'A'), row(OK, 'B')])
     assert.equal(expandOf(result, 0), 0)

@@ -82,8 +82,10 @@ test('proxy 仅接受 http(s) URL 且可省略(反代/代理出口)', () => {
   assert.throws(() => parseConfiguration({ providers: [{ ...provider(), proxy: 'not-a-url' }], routes: [] }))
 })
 
-// 回归: 历史坏缓存(如 update 写出的空值)不能阻塞插件加载, 交由宿主备份后跳过
-test('缓存表声明备份跳过无效记录', async () => {
+// 只有控制记录进存储, 派生数据全放内存: 单文件因此只有一条十几 KB 的记录
+test('存储只声明控制表, 派生数据不进存储', async () => {
   const { domainSpec } = await import('../src/schemas.mjs')
-  assert.equal(domainSpec.invalidRecords, 'backup-and-skip')
+  assert.equal(domainSpec.layout, 'single')
+  assert.deepEqual(Object.keys(domainSpec.tables), ['control'])
+  assert.equal(domainSpec.invalidRecords, undefined, 'single 布局没有坏记录跳过能力, 别写无效声明')
 })

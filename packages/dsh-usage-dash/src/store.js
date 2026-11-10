@@ -4,7 +4,7 @@
 // update;flush 失败的行留在 pending 下轮重试,错误经 onFlushError 上抛。
 // 游标读写与 flush 全部串行在同一条 promise 链上,防 lost update。store 实例
 // 按 facility 弱关联缓存,防 HMR 热重载换 facility 后旧实例泄漏或撞单开守卫;
-// 同名域被上一代遗留占用时收养(close 孤儿后重开),不留永久降级。
+// 同名域被上一代遗留占用时降级(不关闭占用者),不争单开守卫。
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'

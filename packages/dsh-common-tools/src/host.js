@@ -13,7 +13,11 @@ try {
 
 const REGISTRY_KEY = '__dshCommonTools'
 const BUS_ROUTE = '/api/bus/ws'
-const PKG_VERSION = '1.0.0'
+// 与 package.json 同锁(仓库测试守):注册表按此版本决定哪份 host 半区持有传输
+const PKG_VERSION = '0.4.0'
+// 帧协议版本:client 在连接首帧上报,host 回支持集;集合无交集即停用总线
+const PROTOCOL = 1
+const SUPPORTED_PROTOCOLS = [PROTOCOL]
 const MAX_BYTES = 1024 * 1024
 const HEARTBEAT_MS = 30 * 1000
 
@@ -165,6 +169,10 @@ function createTransport(webServer, ver, state) {
       let frame
       try { frame = JSON.parse(data.toString()) } catch { socket.close(1008, 'invalid JSON'); return }
       if (!frame || typeof frame !== 'object') { socket.close(1008, 'invalid frame'); return }
+      if (frame.type === 'hello') {
+        send(connection, encode({ type: 'hello', protocol: PROTOCOL, protocols: SUPPORTED_PROTOCOLS, version: PKG_VERSION }))
+        return
+      }
       if (frame.type === 'subscribe' && Number.isSafeInteger(frame.revision) && frame.revision > 0 && Array.isArray(frame.plugins)
         && frame.plugins.every(plugin => typeof plugin === 'string' && plugin.trim() !== '')) {
         const next = new Set(frame.plugins)
@@ -216,4 +224,6 @@ function createTransport(webServer, ver, state) {
   }
 }
 
+export const VERSION = PKG_VERSION
+export const PROTOCOLS = SUPPORTED_PROTOCOLS
 export const __test = { install }

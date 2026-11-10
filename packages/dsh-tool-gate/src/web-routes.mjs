@@ -4,7 +4,8 @@
 // settings.replace 落盘行条目,收敛由主行 volatile-update 监听承担(BDD
 // INV-9 零桥)。webServer 缺席(headless)时行不激活,不影响收敛本体。
 
-import { mountRoutes } from './api.mjs'
+import { cleanAllowlist, mountRoutes } from './api.mjs'
+import { resolveConfig, unwrapConfig } from './config.mjs'
 import { toolLayersOf } from './registry.mjs'
 import { TOOL_SEARCH_NAME } from './fallback.mjs'
 
@@ -15,26 +16,58 @@ export const inject = ['webServer', 'settings', 'tools']
 // 设置节命名空间 = 本包主行在组合树中的条目 id(cordis.patch.yml insert id)
 export const SECTION_NS = 'tool-gate'
 
-/** 从 settings describe 投影当前节:目标 ns 缺失时回落出厂默认,读路径不崩。 */
+/** 从 settings describe 投影当前节:解箱 volatile 字段并补齐 schema 默认,
+ * 目标 ns 缺失时同样得到出厂值,读路径不崩。 */
 function readSection(settings) {
   const found = (typeof settings.describe === 'function' ? settings.describe() : [])
     .find((descriptor) => descriptor.ns === SECTION_NS)
-  const value = found?.value ?? {}
+  const raw = found?.value
+  const plain = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? unwrapConfig(raw) : {}
+  const resolved = resolveConfig(plain)
   return {
-    allowlist: Array.isArray(value.allowlist) ? value.allowlist.filter((name) => typeof name === 'string') : undefined,
-    enabled: value.enabled === false ? false : undefined,
-    collapse: value.collapse === false ? false : undefined,
+    allowlist: cleanAllowlist(resolved.allowlist),
+    enabled: resolved.enabled,
+    collapse: resolved.collapse,
   }
 }
 
-/** 全层工具清单按名聚合(SC-11):deferred = 任一层带 defer 标。 */
+/** 参数骨架投影:顶层参数名/类型/必填/说明(前端展开详情用,不复制整份 schema)。 */
+function projectParams(definition) {
+  const parameters = definition?.parameters
+  const properties = parameters !== null && typeof parameters === 'object' ? parameters.properties : undefined
+  if (properties === null || typeof properties !== 'object' || Array.isArray(properties)) return []
+  const required = new Set(Array.isArray(parameters.required) ? parameters.required : [])
+  return Object.entries(properties).map(([name, schema]) => ({
+    name,
+    type: typeof schema?.type === 'string'
+      ? schema.type
+      : (Array.isArray(schema?.type) ? schema.type.filter((item) => typeof item === 'string').join(' | ') : ''),
+    required: required.has(name),
+    description: typeof schema?.description === 'string' ? schema.description : '',
+  }))
+}
+
+/** 全层工具清单按名聚合(SC-11):deferred = 任一层带 defer 标;详情取首个有描述的层。 */
 function projectTools(store) {
   const byName = new Map()
   for (const layer of store.layers()) {
     for (const name of layer.names()) {
-      const entry = byName.get(name) ?? { name, layers: 0, deferredLayers: 0 }
+      const definition = layer.definitionOf(name)
+      const entry = byName.get(name) ?? {
+        name,
+        layers: 0,
+        deferredLayers: 0,
+        layerLabels: [],
+        description: '',
+        params: [],
+      }
       entry.layers += 1
-      if (layer.definitionOf(name)?.deferLoading === true) entry.deferredLayers += 1
+      entry.layerLabels.push(layer.label)
+      if (entry.description === '' && typeof definition?.description === 'string') {
+        entry.description = definition.description.trim()
+        entry.params = projectParams(definition)
+      }
+      if (definition?.deferLoading === true) entry.deferredLayers += 1
       byName.set(name, entry)
     }
   }

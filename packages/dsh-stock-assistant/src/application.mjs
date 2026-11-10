@@ -31,46 +31,54 @@ export async function createApplication({ storageDomain, providers = [tushare, t
   const resolveCredential = credentialStore ? async ref => (await credentialStore.resolve(ref))?.value : async ref => env[ref]
   // 目标粒度探针缓存: instanceId:capability:market → {status, until}; 配置保存校验按目标增量引用, 不随无关字段改动失效
   const probeCache = new Map()
-  let snapshotSeq = 0, stopped = false, collector, catalog, demand
+  let snapshotSeq = 0, stopped = false, collector, catalog, demand, watchlist
+  let ensuring = null, lastEnsure = -Infinity, ensureError = null, hadDemand = false, ensureCaches = () => {}
   const usSymbols = new Map()
   const touched = () => snapshotSeq++
   const changed = () => { touched(); publish({ type: 'invalidate', serverEpoch, snapshotSeq, scopes: ['snapshot'] }) }
-  const state = await openState(storageDomain, changed, now)
   // 凭据存在性只给设置页看, 而解析是异步的、快照是同步的: 保存配置与启动时各算一次, 快照读这份结果。
   const credentialPresence = new Map()
   const refreshCredentialPresence = async () => {
     for (const p of state.get().providers) credentialPresence.set(p.id, p.credentialRef === null || !!(await resolveCredential(p.credentialRef)))
   }
-  await refreshCredentialPresence()
-  const registry = createRegistry(providers), budget = createBudget(now)
-  // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
-  let proxyFactory = null
-  try { const undici = await import('undici'); proxyFactory = url => new undici.ProxyAgent(url) } catch {}
-  const executor = createExecutor({ registry, budget, env, resolveCredential, fetch, now, timers, usSymbols, proxyFactory })
-  const getControl = state.get
-  const router = createRouter(getControl, now, () => collector?.reset())
-  const klineCache = createKlineCache({ cacheTable: state.cache, now })
-  catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
-  let ensuring = null, lastEnsure = -Infinity, ensureError = null
-  const ensureCaches = () => {
+  let state, registry, executor, getControl, router, klineCache
+  try {
+    state = await openState(storageDomain, changed, now)
+    await refreshCredentialPresence()
+    registry = createRegistry(providers)
+    const budget = createBudget(now)
+    // 代理 dispatcher 工厂: undici ProxyAgent(实例级上游出口), 包不可用时该实例代理静默降级直连
+    let proxyFactory = null
+    try { const undici = await import('undici'); proxyFactory = url => new undici.ProxyAgent(url) } catch {}
+    executor = createExecutor({ registry, budget, env, resolveCredential, fetch, now, timers, usSymbols, proxyFactory })
+    getControl = state.get
+    router = createRouter(getControl, now, () => collector?.reset())
+    klineCache = createKlineCache({ cacheTable: state.klineCache, now })
+    catalog = createCatalog({ state, getControl, router, executor, registry, now, changed })
+    demand = createDemand(() => {
+      const wanted = demand.active(), opening = wanted && !hadDemand; hadDemand = wanted
+      if (wanted) {
+        ensureCaches()
+        // 缓存新鲜时进入面板不重复打上游(限流主因); 过期才拉取, 定时器照常量节奏维持
+        const freshFor = (getControl().preferences?.refreshSeconds ?? 15) * 1000
+        if (opening && !collector?.freshWithin(freshFor)) collector?.refresh().catch(() => {})
+        collector?.reconcile()
+      } else collector?.cancelIdle()
+    }, now, timers)
+    collector = createCollector({ getControl, router, registry, executor, resolveSecurity: catalog.resolve, changed, touched, now, timers, active: demand.active, calendarState: catalog.marketState })
+    watchlist = createWatchlistService(state, catalog.resolve, now)
     // 面板活跃(demand)时让路: 目录后台同步占满并发槽会拖死交互请求(浏览504实测), 仅在面板空闲时补目录
-    if (ensuring || now() - lastEnsure < 60 * 1000 || demand.active()) return
-    lastEnsure = now()
-    ensuring = catalog.ensure().catch(e => { ensureError = { message: e.message, at: now() }; changed() }).finally(() => { ensuring = null; collector?.reconcile() })
+    ensureCaches = () => {
+      if (ensuring || now() - lastEnsure < 60 * 1000 || demand.active()) return
+      lastEnsure = now()
+      ensuring = catalog.ensure().catch(e => { ensureError = { message: e.message, at: now() }; changed() }).finally(() => { ensuring = null; collector?.reconcile() })
+    }
+  } catch (e) {
+    // 打开成功后任何一步初始化失败都要关域: 否则同名域一直占着已打开槽位, 重载只会一直 already-open。
+    // 关域自身抛错不能盖掉原始原因。
+    try { await state?.close() } catch {}
+    throw e
   }
-  let hadDemand = false
-  demand = createDemand(() => {
-    const wanted = demand.active(), opening = wanted && !hadDemand; hadDemand = wanted
-    if (wanted) {
-      ensureCaches()
-      // 缓存新鲜时进入面板不重复打上游(限流主因); 过期才拉取, 定时器照常量节奏维持
-      const freshFor = (getControl().preferences?.refreshSeconds ?? 15) * 1000
-      if (opening && !collector?.freshWithin(freshFor)) collector?.refresh().catch(() => {})
-      collector?.reconcile()
-    } else collector?.cancelIdle()
-  }, now, timers)
-  collector = createCollector({ getControl, router, registry, executor, resolveSecurity: catalog.resolve, changed, touched, now, timers, active: demand.active, calendarState: catalog.marketState })
-  const watchlist = createWatchlistService(state, catalog.resolve, now)
   const snapshot = () => {
     const control = state.get(); delete control.operations
     return { serverEpoch, snapshotSeq, routingRevision: control.routingRevision, control, quotes: collector.entries(), routeSelections: router.selections(), catalogs: catalog.status(), adapters: registry.descriptors(), suggested: defaultConfig(), ensureError, vendorAvailable, providerStatus: control.providers.map(p => ({ id: p.id, credentialPresent: p.credentialRef === null || credentialPresence.get(p.id) === true, credentialRef: p.credentialRef, proxy: !!p.proxy, endpointsCovered: Object.keys(p.endpoints || {}).length, recentRequests: executor.recentRequests(p.id) })), klineReady: Object.fromEntries(control.routes.filter(r => r.capability === 'kline').map(r => [r.market, true])), markets: Object.fromEntries(Object.entries(MARKET_META).map(([market, meta]) => [market, { currency: meta.currency, verified: meta.verifiedByDefault }])) }

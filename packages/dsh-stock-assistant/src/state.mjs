@@ -1,27 +1,24 @@
 import { createHash } from 'node:crypto'
 import { domainSpec, initialControl, controlSchema } from './schemas.mjs'
+import { createMemoryCache } from './memory-cache.mjs'
 import { fail } from './market-model.mjs'
 const DAY = 24 * 60 * 60 * 1000
+// 目录/日历条数很少, 给独立小池: 与 K 线共用一个淘汰池时会被几十节 K 线挤掉, 挤掉后又要重新拉目录
+const CATALOG_CACHE_LIMIT = 64, KLINE_CACHE_LIMIT = 512
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export async function openState(storageDomain, changed = () => {}, now = Date.now) {
+  // 只有控制记录落盘; 派生数据放内存, 所以打开失败只可能是这一个文件
   const domain = await storageDomain.open(domainSpec)
-  const table = domain.table('control'), cache = domain.table('cache')
-  // 存量数据: 数据源实例的凭据字段曾叫 credentialEnv, 现在交给宿主的凭据服务保管, 更名 credentialRef。
-  // 老数据里那一栏本来就只存引用名(值是环境变量里的), 改名即可, 不改语义。
-  const renameCredentialField = root => {
-    if (!root || !Array.isArray(root.providers)) return root
-    if (!root.providers.some(p => p && 'credentialEnv' in p)) return root
-    return { ...root, providers: root.providers.map(({ credentialEnv, ...rest }) => ({ ...rest, credentialRef: credentialEnv ?? null })) }
-  }
+  const table = domain.table('control')
   try {
+    // 存量字段改名的归一发生在数据域的 valueSchema 上(storageDomain.open 阶段), 这里读到的已是新格式
     if (!table.get('root')) await table.put('root', initialControl())
-    else if (renameCredentialField(table.get('root')) !== table.get('root')) await table.put('root', renameCredentialField(table.get('root')))
-    controlSchema.parse(table.get('root'))
-  } catch (e) { await domain.close(); throw e }
+  } catch (e) { await Promise.allSettled([domain.close()]); throw e }
+  const cache = createMemoryCache({ limit: CATALOG_CACHE_LIMIT }), klineCache = createMemoryCache({ limit: KLINE_CACHE_LIMIT })
   let tail = Promise.resolve(), stopped = false
   return {
     get: () => structuredClone(table.get('root')),
-    cache,
+    cache, klineCache,
     replay(operation) {
       const prior = table.get('root').operations.find(o => o.id === operation.operationId && now() - o.at < DAY)
       if (!prior) return null
@@ -59,6 +56,10 @@ export async function openState(storageDomain, changed = () => {}, now = Date.no
       }
       const job = tail.then(run); tail = job.catch(() => {}); return job
     },
-    async close() { stopped = true; await tail; await domain.close() },
+    async close() {
+      stopped = true
+      await tail
+      await domain.close()
+    },
   }
 }

@@ -2,7 +2,7 @@
 // deps = dshmarket + 全部 @mzzsfy 包(pnpm hoisted 装载,装完 symlink 覆盖指向仓库工作副本);
 // bundles = 三基座(@deepseek-ai/dsh-base + dsh-web-app + dshmarket)+ 带 dsh.bundle 标记且入口存在的包。
 // @deepseek-ai/* 是宿主内部 bundle,不进 profile deps;dsh-toast 无 dsh.bundle 标记,
-// 只进 dependencies 由消费包代挂装载(直入 bundles 会被 cordis loader 判 invalid plugin 拖树)。
+// 只进 dependencies,由各消费插件 cordis.patch.yml 自带的装载行引入(直入 bundles 会被 cordis loader 判 invalid plugin 拖树)。
 import { readdirSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { REPO_ROOT, DSHMARKET_PIN, workspaceYaml, runCmd, symlinkDir, log } from './lib.mjs'
