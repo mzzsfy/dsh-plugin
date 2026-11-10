@@ -1,7 +1,7 @@
 // dsh-tunnel Host 半区: 双入口反向代理。
 //   path      /p/<name> 前缀路由(strip 后转发, 注册走 webServer 公开 API)
 //   subdomain <name>.* 首标签命中即全路径全协议透传(Host 分流)
-// 宿主没有 Host 维度的公开路由能力, 唯一在两代宿主上都成立且可逆的接入点是监听层:
+// 宿主没有 Host 维度的公开路由能力, 唯一在各代宿主上都成立且可逆的接入点是监听层:
 // 摘下 webServer.server 的 request/upgrade 监听各插一层, 命中隧道即转发, 否则原样
 // 委托原监听。由此不再改写任何其它插件的路由/handler, 也不再依赖 fallback 的形态
 // (0.2.1 为函数, 0.2.2 为 { resource })。升级握手同层分发, 故任意 WS 路径可用。

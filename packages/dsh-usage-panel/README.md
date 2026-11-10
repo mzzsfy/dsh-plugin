@@ -115,7 +115,7 @@ custom 端点支持自定义请求方法(GET/POST/PUT/DELETE/PATCH)、请求头(
 
 ## 架构与依赖
 
-- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings / notifications / notify-config / test-webhook / test-im / im-targets);需要 DSH 提供 `webServer` 服务与 `settings` 服务(通知规则持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
+- Host 半区(`src/index.js`):Node ESM,`fetch` 直连平台 API(超时 20s),通过 `webServer` 服务暴露 `/api/usage-panel/*` 路由(accounts / query / history / settings / notifications / revision / notify-config / test-webhook / test-im / im-targets);需要 DSH 提供 `webServer` 服务与 `settings` 服务(通知规则持久化);`timer` 服务(定期轮询)为软依赖,缺失时仅停用自动轮询
 - Client 半区(`src/client.js`):DSH client-modules 自注册格式(`__ModuleLoader__.load`),注册 `settings.section` 槽位;需要 `slots` 服务与 `react` 18;公共依赖 `@mzzsfy/dsh-common-tools`(依赖 `^0.4.0`,装载行 `usage-panel-dsh-common-tools` 随本包自带)的 WS 总线与 toast 均为硬消费
 - 纯逻辑层(`src/parsers.mjs` / `src/poller.mjs` / `src/history.mjs` / `src/historyStore.mjs` / `src/notify.mjs`):无 IO 数据变换,`npm test` 覆盖解析、时间驱动调度与退避、快照留存、持久化守卫与规则合并 / 沿触发评估 / 投影认领 / 配置校验;趋势图 SVG 点位算法内联于 client.js(唯一实现)
 

@@ -718,7 +718,7 @@ window.__ModuleLoader__.load({
         field('显示名', 'label', false, false),
         field('说明', 'description', false, false),
         h(Switch, { checked: model.enabled, onChange: (e) => update((m) => ({ ...m, enabled: e.target.checked })), label: '启用(禁用后不可创建、重跑不可选)', ariaLabel: '启用模板' }),
-        synced ? null : h('span', { className: 'rsww-note' }, '此模板文本含 JSON5 扩展语法,结构表单锁定:请在文本视图点「应用」,经 host 校验通过后回填。'))
+        synced ? null : h('span', { className: 'rsww-note' }, '此模板文本不是合法 JSON,结构表单锁定:请在原文视图点「应用」,由 host 校验通过后回填。'))
     }
 
     function InputsForm({ model, update, topErr }) {
@@ -877,7 +877,7 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = useState(false)
       const [note, setNote] = useState('')
       const [filling, setFilling] = useState(false)
-      // 文本含 JSON5 扩展语法时 client 不解析(解析权威在 host):经 template 只读路由取 host 解析结果回填表单
+      // 文本非合法 JSON 时 client 不解析(解析权威在 host,严格 JSON):经 template 只读路由取 host 解析结果回填表单
       useEffect(() => {
         if (init.synced || isNew) return
         let live = true
@@ -886,7 +886,7 @@ window.__ModuleLoader__.load({
           if (!live) return
           setFilling(false)
           const parsed = o.ok && o.data && o.data.parsed
-          if (!parsed || typeof parsed !== 'object') { setNote('结构表单不可用:host 解析失败,可在文本视图编辑并「应用」。'); return }
+          if (!parsed || typeof parsed !== 'object') { setNote('结构表单不可用:host 解析失败,可在原文视图编辑并「应用」。'); return }
           const m = {
             id: asStr(parsed.id) || entry.id || '',
             label: asStr(parsed.label), description: asStr(parsed.description),
@@ -927,7 +927,7 @@ window.__ModuleLoader__.load({
         let parsed = null
         try { parsed = JSON.parse(text) } catch { parsed = null }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          setNote('校验通过;文本含 JSON5 扩展语法,表单未回填(保存仍以文本为准)')
+          setNote('校验通过;表单未回填(保存仍以原文为准)')
           return
         }
         const m = {
@@ -961,9 +961,9 @@ window.__ModuleLoader__.load({
         h('datalist', { id: 'rsww-tmpl-ids' }, templates.map((t) => h('option', { key: t.id, value: t.id }))),
         h(MetaForm, { model, update, synced, topErr }),
         synced ? h(InputsForm, { model, update, topErr }) : null,
-        h(PillGroup, { tab: true, ariaLabel: '视图', value: view, options: [{ key: 'struct', label: '结构' }, { key: 'json', label: 'JSON5' }], onChange: setView }),
+        h(PillGroup, { tab: true, ariaLabel: '视图', value: view, options: [{ key: 'struct', label: '结构' }, { key: 'json', label: '原文' }], onChange: setView }),
         view === 'struct'
-          ? (synced ? h(StepsForm, { model, update, allErrors }) : h('span', { className: 'rsww-note' }, '结构表单已锁定:先在 JSON5 视图点「应用」回填。'))
+          ? (synced ? h(StepsForm, { model, update, allErrors }) : h('span', { className: 'rsww-note' }, '结构表单已锁定:先在原文视图点「应用」回填。'))
           : h(Json5Pane, { text, setText, onApply: applyText, onValidate: validateText, jsonErrs, saving }),
         flatErrs.map((e, i) => h('span', { className: 'rsww-error', key: 'flat' + i }, e.message)),
         h('div', { className: 'rsww-row' },
@@ -993,7 +993,7 @@ window.__ModuleLoader__.load({
           !disabled && !released.includes(t.id) ? h('button', { className: 'rsww-btn', type: 'button', disabled: busy || undefined, onClick: onRelease }, '创建到 dsh') : null))
     }
 
-    // ── 只读详情弹窗:所有模板可点开;结构视图(JSON.parse 可达时)+JSON5 原文+一键检验 ──
+    // ── 只读详情弹窗:所有模板可点开;结构视图(JSON.parse 可达时)+原文全文+一键检验 ──
     function Modal({ title, onClose, children }) {
       return h('div', { className: 'rsww-modal', onClick: (e) => { if (e.target === e.currentTarget) onClose() } },
         h('div', { className: 'rsww-modal__panel', role: 'dialog', 'aria-label': title },
@@ -1086,7 +1086,7 @@ window.__ModuleLoader__.load({
           model.steps.map((s, i) => h(ViewerStep, { key: i, step: s }))) : null,
         h('div', { className: 'rsww-section' },
           h('div', { className: 'rsww-row' },
-            h('button', { className: 'rsww-btn', type: 'button', onClick: () => setShowJson(!showJson) }, showJson ? '收起 JSON5' : 'JSON5 全文'),
+            h('button', { className: 'rsww-btn', type: 'button', onClick: () => setShowJson(!showJson) }, showJson ? '收起原文' : '原文全文'),
             showJson ? h(CopyButton, { text: entry.json || '' }) : null),
           showJson ? h('div', { className: 'rsww-full', style: { maxHeight: 300 } }, entry.json || '(空)') : null))
     }

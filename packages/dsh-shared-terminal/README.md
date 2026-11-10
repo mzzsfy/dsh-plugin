@@ -35,7 +35,7 @@ wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提
 
 ## 终端面板复用
 
-宿主的 `terminal` tab 类型注册为 `multiple`，`openTabIn` 每次调用都生成新的随机 `contentId` 并新建 tab。工具结果卡片会在刷新、切会话、重新挂载时重新渲染并导航，按 `openTabIn` 处理就会不断叠出多个共同指向同一终端的面板——每个面板各挂一份 xterm 与终端订阅，页面越用越卡。0.4.3 起改为固定 `contentId`（`dsh-resource://dsh-shared-terminal/panel`）走 `openResourceIn`，宿主按 `findContentTab` 复用同一面板，导航参数负责切换目标终端；用户自己用官方「新建终端」打开的面板地址随机，只改写其导航参数，不另建。导航另按 `sessionId:terminalId` 去重（原按 callId，刷新即失效）。
+宿主的 `terminal` tab 类型注册为 `multiple`，`openTabIn` 每次调用都生成新的随机 `contentId` 并新建 tab。工具结果卡片会在刷新、切会话、重新挂载时重新渲染并导航，按 `openTabIn` 处理就会不断叠出多个共同指向同一终端的面板——每个面板各挂一份 xterm 与终端订阅，页面越用越卡。0.4.3 起按 `terminalId` 固定 `contentId`（`dsh-resource://dsh-shared-terminal/panel/<terminalId>`）走 `openResourceIn`，宿主按 `findContentTab` 复用同一面板，插件面板一终端一址；用户自己用官方「新建终端」打开的面板不再被改写，导航另按 `sessionId:terminalId` 去重（原按 callId，刷新即失效）。
 
 ## 权限与版本边界
 
@@ -49,7 +49,7 @@ Host 启动检查 Controller 版本、方法和 owner map；检测不匹配时�
 
 ## 安装与重装
 
-在已安装受支持 DSH 版本的环境中，用 `dsh plugin --profile web add @mzzsfy/dsh-shared-terminal` 安装**已发布版本**，然后重启该 profile 的宿主；重装或升级即重新执行同一命令并重启。当前仓库实现未发布，不能用此命令获取未发布源码。
+在已安装受支持 DSH 版本的环境中，用 `dsh plugin --profile web add @mzzsfy/dsh-shared-terminal` 安装**已发布版本**，然后重启该 profile 的宿主；重装或升级即重新执行同一命令并重启。仓库版本与 npm latest 同步，该命令获取的就是当前发布版本。
 
 仓库开发态在仓库根使用唯一链接入口；Windows 脚本固定操作 `%USERPROFILE%/.dsh/profiles/web`，需该 profile 已初始化且 pnpm/cmd 可用，不跟随隔离 `DSH_HOME`：
 

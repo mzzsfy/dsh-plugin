@@ -298,7 +298,7 @@ window.__ModuleLoader__.load({
     // ── tool.call.toolview 卡片(key 'shell')──────────────────────────────
     // 官方 BashRow/terminalCardModel 的 shellCall 白名单只认 bash|pwsh,无法复用,
     // 模型派生自带:数据自 argsRaw + 结果文本尾部退出标记派生(官方 block 无
-    // callView/resultView 结构化字段),非终端意图(后台 ack/isError/截断)回退简版原文行。
+    // callView/resultView 结构化字段),非终端意图(isError/截断/参数未到)回退简版原文行;后台 ack 走独立 background 卡。
     // 增强面(shell-card-plus 同款):复制命令/复制输出、命令折行+行号、客户端名标注。
 
     function detectEnglish() {
@@ -381,8 +381,8 @@ window.__ModuleLoader__.load({
     // LOGIC-END stripShellMark
 
     // block → 卡片模型(官方 terminalCardModel 同构,数据源 argsRaw + content 文本)。
-    // generic = 后台 ack / isError / 溢出预览 / persistent 形(无 description,
-    // 官方 shellCall persistent→generic 同构),交回退行;terminal = 全量卡。
+    // generic = isError / 溢出预览 / persistent 形(无 description,
+    // 官方 shellCall persistent→generic 同构),交回退行;background = 后台 ack(独立卡);terminal = 全量卡。
     // LOGIC-BEGIN shellCardModel
     function shellCardModel(block, sessionCwd, toolKey) {
       const settled = 'kind' in block
@@ -509,7 +509,7 @@ window.__ModuleLoader__.load({
       }, done ? (detectEnglish() ? 'Copied' : '已复制') : label)
     }
 
-    // 非终端意图回退行(后台 ack / isError / 截断 / 参数未到):摘要 + 可展开原文。
+    // 非终端意图回退行(isError / 截断 / 参数未到):摘要 + 可展开原文。
     // 状态语义对齐官方:运行中灰 spinner,settled 错误红点,其余中性 icon——
     // 黄点(warning)仅真实告警,禁止挪用作"进行中"(用户把黄点当卡死)。
     // 运行中且零信息(参数未到)显示脉冲「运行中…」,给用户活着的感觉。
@@ -942,7 +942,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        const NAV_ICON = { 'Shell 管理': 'terminal' }
+        const NAV_ICON = { 'Shell 管理': 'term' }
         if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
         else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
         else window.__navicIconQueue = [NAV_ICON]

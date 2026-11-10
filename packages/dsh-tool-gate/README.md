@@ -1,6 +1,6 @@
 # dsh-tool-gate
 
-全局层工具白名单延迟加载。白名单内工具全量注入模型上下文;白名单外统一打
+工具白名单延迟加载(全局层与全部 per-agent scope 层)。白名单内工具全量注入模型上下文;白名单外统一打
 `deferLoading` 标,交给宿主 deferred tool loading 原生链路(API `defer_loading`,
 服务端按需搜索激活),解决插件注入大量工具污染上下文的问题。
 

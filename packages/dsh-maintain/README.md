@@ -39,7 +39,7 @@ maintain:
   registryBase: https://registry.npmjs.org       # 官方源不可达时可改为镜像地址
 ```
 
-配置落在 profile 条目 `maintain` 的 config 节(即上例 settings.yaml 的 `maintain:` 块,经 dsh 配置迁移后为 profile patch 内该条目的 config 键):dsh 0.1.7+ 以插件静态 `Config` 导出生成节表单,字段均为 volatile,面板保存经 configEditor 写回、仅 volatile 变化时 loader 原地热更(不重启插件);legacy 宿主(≤0.1.6)经 settings 服务 `register/get/update` 命名空间语义等价存取。轮询间隔与镜像地址亦可在设置面板"版本与运维"页直接编辑保存(等效配置节,热生效)。
+配置落在 profile 条目 `maintain` 的 config 节(即上例 settings.yaml 的 `maintain:` 块,经 dsh 配置迁移后为 profile patch 内该条目的 config 键):宿主以插件静态 `Config` 导出生成节表单,字段均为 volatile,面板保存经 configEditor 写回、仅 volatile 变化时 loader 原地热更(不重启插件)。轮询间隔与镜像地址亦可在设置面板"版本与运维"页直接编辑保存(等效配置节,热生效)。
 
 ## 重启须知
 

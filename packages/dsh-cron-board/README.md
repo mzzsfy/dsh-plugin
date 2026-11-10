@@ -20,13 +20,13 @@
 挂载走宿主官方契约(main 全局面板插槽 / sidebar.panellist 侧栏面板行 / better-sidebar 服务),不刮宿主 DOM,宿主 UI 变动由契约消化:
 
 - **默认:全局面板**。看板以同 id 注册 main keyed 条目(中央面板)+ sidebar.panellist 条目(侧栏「新会话」下方面板行);点击面板行由宿主 `layout.selectPanel` 切换中央区,会话保持不动;点击会话行或新会话即切回会话(官方路径)
-- **手动移入**:设置>插件 页「定时任务」卡片(官方 PluginCard 形制:折叠卡壳,cb-pc 镜像)提供「看板移入 better-sidebar 侧边栏」开关;开启即注册扩展槽 tab 并卸载全局面板
+- **手动移入**:插件管理页本包详情配置卡(官方 PluginCard 形制:折叠卡壳,cb-pc 镜像;旧宿主落设置>插件页)提供「看板移入 better-sidebar 侧边栏」开关;开启即注册扩展槽 tab 并卸载全局面板
 - **不自动回退**:移入后页签关闭/类型禁用均不再自动返回;把开关关掉即回到全局面板形态(经公共 WS 总线 `@mzzsfy/dsh-cron-board` 插件通道感知,变更即时生效;host/client 在 `apply(ctx)` 调用 `setupCommonTools(ctx)`,通道身份取 `ctx.fiber.entry.options.name` 的完整 npm 包名,组件捕获所属 ctx 的 bus，卸载可提前退订；ctx 卸载释放连接持有与全部订阅)
 - **开关可用性**:已装载 better-sidebar 时可切换;未装载时开关呈禁用态仅展示(保持全局面板,无副作用)
 
 ## 配置
 
-设置页>插件 页「定时任务」卡片(`cron-board` 命名空间),各项均即时生效:`sidebarTab` 经卡片开关写入;其余项经配置文件或设置接口修改。
+插件管理页本包详情配置卡(`cron-board` 命名空间;旧宿主落设置>插件页),各项均即时生效:`sidebarTab` 经卡片开关写入;其余项经配置文件或设置接口修改。
 
 | 配置项 | 说明 | 默认值 |
 |---|---|---|

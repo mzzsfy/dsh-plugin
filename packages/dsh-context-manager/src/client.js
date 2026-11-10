@@ -2124,7 +2124,7 @@ function ContextPanel() {
         const workspaces = ctx.get('workspaces')
         const remoteSession = ctx.remote ? ctx.remote.session : undefined
         // 分叉动作通道:分叉本体只依赖 sessions.fork;open 仅是分叉成功后打开
-        // 子会话的收尾动作(失败单独吞掉,警告日志),缺失时条件执行——两代宿主
+        // 子会话的收尾动作(失败单独吞掉,警告日志),缺失时条件执行——各代宿主
         // client 面均无 sessions.open(FIND-020-2:双函数在场探测致 fork dock
         // 整体静默缺失),放宽探测为只要求 fork。
         const forkService = (sessions && typeof sessions.fork === 'function')

@@ -720,12 +720,22 @@ test('生产者样板契约:全包注册走 __navicIcons/__navicIconQueue', () =
       })
     : []
   let checked = 0
+  let glyphs = 0
   for (const pkg of producers) {
     const src = readFileSync(join(packagesRoot, pkg, 'src', 'client.js'), 'utf8')
     assert.ok(/__navicIcons\s*!==\s*undefined[^]*?__navicIcons\.register\(/.test(src), pkg + ' 缺少入口探测与注册')
     assert.ok(/Array\.isArray\(window\.__navicIconQueue\)/.test(src), pkg + ' 缺少数组态入队分支')
     assert.ok(/__navicIconQueue\s*=\s*\[/.test(src), pkg + ' 缺少队列初始化分支')
+    const navLiteral = /const NAV_ICON\s*=\s*\{([^}]*)\}/.exec(src)
+    if (navLiteral !== null) {
+      for (const [, , value] of navLiteral[1].matchAll(/'([^']+)'\s*:\s*'([^']+)'/g)) {
+        if (value.startsWith('<svg')) continue
+        assert.ok(Object.hasOwn(logic.GLYPHS, value), pkg + ' 声明了未知 glyph: ' + value)
+        glyphs += 1
+      }
+    }
     checked += 1
   }
   assert.ok(checked >= 1, 'monorepo 布局下至少应发现声明生产者(含本包自画像),实际发现 ' + checked + ' 个')
+  assert.ok(glyphs >= 10, '生产者 glyph 名应可解析,实际解析 ' + glyphs + ' 个')
 })

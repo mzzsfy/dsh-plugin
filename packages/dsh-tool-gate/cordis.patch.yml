@@ -1,4 +1,4 @@
-# 全局层工具白名单延迟加载;不做工具摘除、不做行禁用、不注册任何工具。
+# 工具白名单延迟加载(全局层 + 全部 per-agent scope 层);不做工具摘除、不做行禁用、不注册任何工具。
 # deferred 机制全部由宿主原生链路承担(deferLoading → API defer_loading →
 # 服务端按需搜索激活),主行只做白名单到 deferLoading 字段的声明式收敛;
 # web 行提供状态读 + 配置写(GUI 唯一入口),client 半区设置页卡片。

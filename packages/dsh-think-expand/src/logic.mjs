@@ -173,8 +173,8 @@ export function plan(registry, rows, options = {}) {
     }
   }
 
-  // 流式目标行:优先唯一 running 尾块;宿主流式态不再标注 running 时(2026-10
-  // DOM 变更,行恒 ok)退化为最后一条可识别行;多行 running 仍视为历史批量/异常,
+  // 流式目标行:优先唯一 running 尾块;running 缺失(宿主形态变更,兜底)时退化为
+  // 最后一条可识别行;多行 running 仍视为历史批量/异常,
   // 不干预。收起态宿主不渲染正文,正文未挂载的行同样入选:展开后正文挂载,
   // 下一轮在此补登记。
   const running = []
