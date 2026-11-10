@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
-// 列表与悬浮窗勾选共用同一份分组切面, 两处对"某只属于哪个组"必须给出同一答案
+// 分组已从单值 group 改为多标签 tags: 列表 tab 与详情编辑共用同一份切面
 const load = async () => {
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
   const sandbox = {
@@ -20,52 +20,54 @@ const load = async () => {
   return sandbox.__spec.factory(() => ({})).__testing
 }
 // vm 里造出的数组与对象原型属于另一个 realm, deepStrictEqual 会因原型不同而判不等, 序列化一遍归一
-const plain = slices => JSON.parse(JSON.stringify({ pinned: slices.pinned, groups: slices.groups, ungrouped: slices.ungrouped }))
-const item = group => ({ group, pinned: false })
+const plain = tabs => JSON.parse(JSON.stringify(tabs.map(({ label, ids }) => ({ label, ids }))))
+const tab = (id, tags) => ({ id, tags, pinned: false })
 
-test('按置顶 / 各组 / 未分组切分, 组序取首次出现顺序', async () => {
-  const { groupSlices } = await load()
+test('全部在前, 标签按首次出现顺序, 多标签的票同时出现在各自 tab', async () => {
+  const { tagTabs } = await load()
   const items = {
-    a: item('科技'), b: { group: '', pinned: true }, c: item('能源'), d: item('科技'), e: item(''), f: item('能源'),
+    a: tab('a', ['沪A', '核心']), b: tab('b', ['沪A']), c: tab('c', []), d: tab('d', ['能源']),
   }
-  const slices = plain(groupSlices(['b', 'a', 'c', 'd', 'e', 'f'], items))
-  assert.deepEqual(slices.pinned, ['b'])
-  // 科技先于能源出现, 所以排在前面; 同组内保持自选顺序
-  assert.deepEqual(slices.groups, [{ name: '科技', ids: ['a', 'd'] }, { name: '能源', ids: ['c', 'f'] }])
-  assert.deepEqual(slices.ungrouped, ['e'])
+  const tabs = plain(tagTabs(['a', 'b', 'c', 'd'], items))
+  assert.deepEqual(tabs.map(t => t.label), ['全部', '沪A', '核心', '能源', '未分组'])
+  assert.deepEqual(tabs[0].ids, ['a', 'b', 'c', 'd'])
+  assert.deepEqual(tabs[1].ids, ['a', 'b'], '同标签按自选顺序')
+  assert.deepEqual(tabs[2].ids, ['a'], '多标签的票也出现在第二个标签下')
+  assert.deepEqual(tabs[4].ids, ['c'])
 })
 
-// 组序是"首次出现"而不是字母序: 用例特意让两者相反, 否则排序实现改坏了也测不出来
-test('组序取首次出现, 不是字典序', async () => {
-  const { groupSlices } = await load()
-  const items = { a: item('能源'), b: item('科技') }
-  const slices = plain(groupSlices(['a', 'b'], items))
-  // 「科技」的码位小于「能源」, 按字典序会排到前面
-  assert.deepEqual(slices.groups.map(g => g.name), ['能源', '科技'])
+// 标签是用户输入, 可以恰好叫「全部」或「未分组」: 它们必须仍是独立 tab, 不能和保留项撞键
+test('标签名与保留 tab 撞名时仍是独立 tab', async () => {
+  const { tagTabs } = await load()
+  const items = { a: tab('a', ['全部']), b: tab('b', ['未分组']) }
+  const tabs = tagTabs(['a', 'b'], items)
+  assert.equal(tabs.length, 3, '全部 + 两个同名标签')
+  assert.equal(new Set(tabs.map(t => t.key)).size, 3, 'key 必须唯一')
+  assert.equal(tabs.filter(t => t.label === '全部').length, 2)
+  assert.equal(tabs.filter(t => t.label === '未分组').length, 1, '名为未分组的标签不是保留 tab')
+  assert.deepEqual(tabs[1].ids, ['a'])
+  assert.deepEqual(tabs[2].ids, ['b'])
 })
 
-test('置顶优先, 即使它在自选里排后面', async () => {
-  const { groupSlices } = await load()
-  const items = { a: item('科技'), b: { group: '', pinned: true } }
-  const slices = plain(groupSlices(['a', 'b'], items))
-  assert.deepEqual(slices.pinned, ['b'])
-  assert.deepEqual(slices.groups, [{ name: '科技', ids: ['a'] }])
+test('没有无标签票就不出未分组 tab; 空自选只有全部', async () => {
+  const { tagTabs } = await load()
+  const tabs = plain(tagTabs(['a', 'b'], { a: tab('a', ['沪A']), b: tab('b', ['深A']) }))
+  assert.deepEqual(tabs.map(t => t.label), ['全部', '沪A', '深A'])
+  assert.deepEqual(plain(tagTabs([], {})), [{ label: '全部', ids: [] }])
 })
 
-test('没有分组时全部落在未分组, 不产生空组', async () => {
-  const { groupSlices } = await load()
-  const items = { a: item(''), b: item('') }
-  const slices = plain(groupSlices(['a', 'b'], items))
-  assert.deepEqual(slices.groups, [])
-  assert.deepEqual(slices.ungrouped, ['a', 'b'])
+test('自选里查不到的 id 不会凭空造 tab', async () => {
+  const { tagTabs } = await load()
+  assert.deepEqual(plain(tagTabs(['ghost'], {})), [{ label: '全部', ids: [] }])
 })
 
-test('自选里查不到的 id 不会凭空造组', async () => {
-  const { groupSlices } = await load()
-  const slices = plain(groupSlices(['ghost'], {}))
-  assert.deepEqual(slices.pinned, [])
-  assert.deepEqual(slices.groups, [])
-  assert.deepEqual(slices.ungrouped, [])
+// 激活的 tab 可能已不存在(标签被解散/改名): 必须回退首个 tab, 而不是渲染空白列表
+test('激活 tab 失效时回退全部', async () => {
+  const { tagTabs, resolveTab } = await load()
+  const tabs = tagTabs(['a'], { a: tab('a', ['沪A']) })
+  assert.equal(resolveTab(tabs, tabs[1].key).label, '沪A')
+  assert.equal(resolveTab(tabs, 'tag:不存在'), tabs[0])
+  assert.equal(resolveTab(tabs, undefined), tabs[0])
 })
 
 // 轮询决策三件事必须同时成立: 收市后不打上游、又不能永远停在那儿、还不能每分钟真刷一次.

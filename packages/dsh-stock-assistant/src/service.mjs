@@ -1,17 +1,26 @@
 import { z } from 'zod'
-import { fail, parseSecurityId } from './market-model.mjs'
-import { securitySchema, marksSchema } from './schemas.mjs'
+import { fail, parseSecurityId, MARKET_META } from './market-model.mjs'
+import { securitySchema, marksSchema, tagName, MAX_TAGS } from './schemas.mjs'
 // 自选身份八市场: parseSecurityId 是唯一事实源(市场/代码形态随 MARKET_META)
 const securityId = z.string().refine(v => { try { parseSecurityId(v); return true } catch { return false } })
+// 标签输入先归一(trim/去空/去重), 再按存储规则校验: 空白条目等于没填, 不因输入框残留空格就拒绝整次操作
+const tagValue = z.string().transform(value => value.trim()).refine(value => tagName.safeParse(value).success, '标签名需为 1-12 字, 不含控制字符')
+const tagList = z.array(z.string()).transform(list => [...new Set(list.map(value => value.trim()).filter(Boolean))]).superRefine((list, ctx) => {
+  if (list.length > MAX_TAGS) ctx.addIssue({ code: 'custom', message: `每只最多 ${MAX_TAGS} 个标签` })
+  for (const tag of list) {
+    const result = tagName.safeParse(tag)
+    if (!result.success) ctx.addIssue({ code: 'custom', message: result.error.issues[0].message })
+  }
+})
 const payloads = {
   add: z.strictObject({ securityId }), remove: z.strictObject({ securityId }),
   restore: z.strictObject({ removeOperationId: z.uuid() }),
   alias: z.strictObject({ securityId, alias: z.string().refine(s => [...s].length <= 30) }),
   marks: z.strictObject({ securityId, marks: marksSchema }),
-  // 组名进来就是用户输入, 校验在入口做: 只靠 state 写入后的不变式兜底会把它报成 500 内部错误
-  group: z.strictObject({ securityIds: z.array(securityId).min(1), group: z.string().refine(s => { const t = s.trim(); return [...t].length <= 12 && !/[\u0000-\u001f]/.test(t) }, '分组名最长 12 字且不能含控制字符') }),
-  groupRename: z.strictObject({ from: z.string().min(1), to: z.string().refine(s => { const t = s.trim(); return t.length > 0 && [...t].length <= 12 && !/[\u0000-\u001f]/.test(t) }, '分组名最长 12 字且不能含控制字符') }),
-  groupRemove: z.strictObject({ group: z.string().min(1) }),
+  // 标签整组替换: 与 marks 同一语义, 协议面只有一个操作, 不出现半更新的中间态
+  tags: z.strictObject({ securityId, tags: tagList }),
+  tagRename: z.strictObject({ from: tagValue, to: tagValue }),
+  tagRemove: z.strictObject({ tag: tagValue }),
   pin: z.strictObject({ securityId, pinned: z.boolean() }),
   move: z.strictObject({ securityId, beforeId: securityId.nullable() }),
   // 拖拽排序: 提交完整显示序, 前端算好顺序一次落库, 避免逐行 move 的中间态
@@ -40,7 +49,8 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
           if (w.order.length >= 100) fail('LIMIT_REACHED', '最多添加100只自选', 422)
           const security = resolveSecurity(p.securityId)
           if (!security || !securitySchema.safeParse(security).success) fail('CANDIDATE_EXPIRED', '候选已过期，请重新搜索', 409)
-          w.items[p.securityId] = { ...security, alias: '', pinned: false, marks: [], group: '' }; w.order.push(p.securityId)
+          // 默认按市场分组: 标签由市场元数据生成, 用户可再改可删
+          w.items[p.securityId] = { ...security, alias: '', pinned: false, marks: [], tags: [MARKET_META[security.exchange].tag] }; w.order.push(p.securityId)
         } else if (operation.action === 'restore') {
           const deleted = control.operations.find(o => o.id === p.removeOperationId && o.action === 'remove')
           const restore = deleted?.result.restore
@@ -53,9 +63,21 @@ export function createWatchlistService(state, resolveSecurity, now = Date.now) {
             const after = w.order.indexOf(restore.previousId) + 1; w.order.splice(after, 0, restored.id)
           } else if (restore.nextId && same(restore.nextId)) insert(restored.id, restore.nextId)
           else insert(restored.id, restored.pinned ? regionEnd(true) : null)
-        } else if (operation.action === 'group') { for (const id of p.securityIds) { if (!w.items[id]) fail('NOT_FOUND', '证券已被移除', 404); w.items[id].group = p.group.trim() } }
-        else if (operation.action === 'groupRename') { if (!w.order.some(id => w.items[id].group === p.from)) fail('NOT_FOUND', '分组不存在', 404); for (const id of w.order) if (w.items[id].group === p.from) w.items[id].group = p.to.trim() }
-        else if (operation.action === 'groupRemove') { if (!w.order.some(id => w.items[id].group === p.group)) fail('NOT_FOUND', '分组不存在', 404); for (const id of w.order) if (w.items[id].group === p.group) w.items[id].group = '' }
+        } else if (operation.action === 'tags') {
+          if (!w.items[p.securityId]) fail('NOT_FOUND', '证券已被移除', 404)
+          w.items[p.securityId].tags = p.tags
+        }
+        // 标签是名称身份: 重命名即批量替换, 目标名已存在时合并去重而不是制造重复
+        else if (operation.action === 'tagRename') {
+          const holders = w.order.filter(id => w.items[id].tags.includes(p.from))
+          if (!holders.length) fail('NOT_FOUND', '标签不存在', 404)
+          for (const id of holders) w.items[id].tags = [...new Set(w.items[id].tags.map(tag => tag === p.from ? p.to : tag))]
+        }
+        else if (operation.action === 'tagRemove') {
+          const holders = w.order.filter(id => w.items[id].tags.includes(p.tag))
+          if (!holders.length) fail('NOT_FOUND', '标签不存在', 404)
+          for (const id of holders) w.items[id].tags = w.items[id].tags.filter(tag => tag !== p.tag)
+        }
         else {
           if (!item) fail('NOT_FOUND', '证券已被移除', 404)
           if (operation.action === 'remove') {

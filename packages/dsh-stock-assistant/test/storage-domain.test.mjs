@@ -39,7 +39,7 @@ test('S09 存量 credentialEnv 记录打开即归一, 自选不丢', async t => 
   const base = initialControl(), security = makeSecurity('XSHG', '600519', '贵州茅台')
   const legacyRoot = {
     ...base,
-    watchlist: { order: [security.id], items: { [security.id]: { ...security, alias: '', pinned: false, marks: [], group: '' } } },
+    watchlist: { order: [security.id], items: { [security.id]: { ...security, alias: '', pinned: false, marks: [], tags: ['沪A'] } } },
     providers: base.providers.map(({ credentialRef, ...rest }) => ({ ...rest, credentialEnv: credentialRef })),
   }
   await writeFile(join(dir, 'stock_assistant.json'), legacyDocument(legacyRoot))
@@ -53,6 +53,24 @@ test('S09 存量 credentialEnv 记录打开即归一, 自选不丢', async t => 
   await state.close()
 })
 
+// Given 数据文件里只有单值 group When 真实数据域打开并写入 Then tags 生效且文件不再保留旧字段。
+// 归一实现本身在 tags-schema 的 TAG01 先行验证过, 这里锁的是 storageDomain.open 这条真实路径。
+test('TAG06 存量 group 记录打开即归一为 tags', async t => {
+  const dir = await withDir(t, 'stock-group-migrate-'), backend = new JsonStorageBackend(dir)
+  t.after(() => backend.close())
+  const base = initialControl(), security = makeSecurity('XSHG', '600519', '贵州茅台')
+  const legacyRoot = { ...base, watchlist: { order: [security.id], items: { [security.id]: { ...security, alias: '', pinned: false, marks: [], group: '白酒' } } } }
+  const file = join(dir, 'stock_assistant.json')
+  await writeFile(file, legacyDocument(legacyRoot))
+  const state = await openState(facilityOf(backend))
+  assert.deepEqual(state.get().watchlist.items[security.id].tags, ['白酒'])
+  await state.mutate(operation(1, base.revision), c => ({ ...c, preferences: { ...c.preferences, refreshSeconds: 60 } }))
+  const text = await readFile(file, 'utf8')
+  assert.equal(text.includes('"group"'), false, '写入后不再有旧字段')
+  assert.deepEqual(JSON.parse(text).tables.control.root.watchlist.items[security.id].tags, ["白酒"])
+  await state.close()
+})
+
 // 旧文件里的缓存表不再声明: 打开时忽略, 下次写入后文件从几 MB 缩成一条控制记录
 test('S10 旧文件里的缓存数据被丢弃, 写入后文件只剩控制记录', async t => {
   const dir = await withDir(t, 'stock-single-shrink-'), backend = new JsonStorageBackend(dir)
@@ -60,7 +78,7 @@ test('S10 旧文件里的缓存数据被丢弃, 写入后文件只剩控制记�
   const base = initialControl(), security = makeSecurity('XSHG', '600519', '贵州茅台')
   const legacyRoot = {
     ...base,
-    watchlist: { order: [security.id], items: { [security.id]: { ...security, alias: '茅台', pinned: false, marks: [], group: '' } } },
+    watchlist: { order: [security.id], items: { [security.id]: { ...security, alias: '茅台', pinned: false, marks: [], tags: ['沪A'] } } },
   }
   const bigCache = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`kline:em:XSHG:1d:6005${i}`, { kind: 'kline', source: 'em', fetchedAt: i, payload: { candles: 'x'.repeat(40_000) } }]))
   const file = join(dir, 'stock_assistant.json')

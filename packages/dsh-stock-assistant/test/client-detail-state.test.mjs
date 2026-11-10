@@ -59,7 +59,7 @@ test('换详情时自动回填该标的已保存的别名', async () => {
 })
 
 const snapshotOf = items => ({ serverEpoch: 'e', snapshotSeq: 1, routingRevision: 0, routeSelections: {}, control: { revision: 1, routingRevision: 0, watchlist: { order: Object.keys(items), items }, preferences: { refreshSeconds: 15, colorMode: 'red-up' } }, quotes: {} })
-const securityOf = (id, code) => ({ id, exchange: id.split(':')[0], code, officialName: code, alias: '', pinned: false, cost: null, group: '', currency: 'CNY', priceScale: 2 })
+const securityOf = (id, code) => ({ id, exchange: id.split(':')[0], code, officialName: code, alias: '', pinned: false, cost: null, tags: [], currency: 'CNY', priceScale: 2 })
 const runtimeOf = (plugin, extra = {}) => plugin.__testing.createPageRuntime({
   layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel: extra.selectPanel || (() => {}) },
   bus: { subscribe: () => () => {}, publish() {} },
@@ -79,7 +79,7 @@ test('换详情时清空成本与分组草稿, 同一只重复打开不清', asy
     fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) }),
   })
   runtime.updateView({ detailId: 'A', overlay: 'detail' })
-  runtime.updateView({ markDraft: { kind: 'cost', price: '422' }, groupDraft: '科技', markError: '错', groupError: '错' })
+  runtime.updateView({ markDraft: { kind: 'cost', price: '422' }, tagDraft: '科技', markError: '错', tagError: '错' })
   assert.equal(runtime.getSnapshot().view.markDraft.price, '422')
   // 同一只再写一次草稿: detailId 没变, 草稿不能被清掉
   runtime.updateView({ markDraft: { kind: 'cost', price: '430' } })
@@ -90,7 +90,7 @@ test('换详情时清空成本与分组草稿, 同一只重复打开不清', asy
   // 换到 B: 四个草稿字段全部归零
   runtime.updateView({ detailId: 'B' })
   const view = runtime.getSnapshot().view
-  assert.deepEqual({ markDraft: view.markDraft, groupDraft: view.groupDraft, markError: view.markError, groupError: view.groupError }, { markDraft: null, groupDraft: null, markError: null, groupError: null })
+  assert.deepEqual({ markDraft: view.markDraft, tagDraft: view.tagDraft, markError: view.markError, tagError: view.tagError }, { markDraft: null, tagDraft: null, markError: null, tagError: null })
   runtime.dispose()
 })
 

@@ -344,86 +344,109 @@ test('成本盈亏渲染', async () => {
   assert.match(html, /价格标记/, '详情标记设置入口')
 })
 // 自选分组: 置顶/各组/未分组都常显组头; 折叠; 全局排序保留分区但组内按该排序
-test('分组渲染与折叠', async () => {
+// 分组视图 tab 化: 全部 → 各标签(首现序) → 未分组; 多标签的票出现在多个 tab, 置顶并入 tab 内排序
+test('标签 tab 渲染与切换', async () => {
   const { plugin } = await loadClientWithReact()
-  const mk = (id, name, code, group) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, cost: null, group })
-  const a = mk('XSHG:equity:600001', '甲股', '600001', '白酒'), b = mk('XSHG:equity:600002', '乙股', '600002', '能源'), c = mk('XSHG:equity:600519', '丙股', '600519', '白酒'), d = mk('XSHG:equity:600003', '丁股', '600003', '')
+  const mk = (id, name, code, tags) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, tags })
+  const a = mk('XSHG:equity:600001', '甲股', '600001', ['白酒']), b = mk('XSHG:equity:600002', '乙股', '600002', ['能源']), c = mk('XSHG:equity:600519', '丙股', '600519', ['白酒', '核心']), d = mk('XSHG:equity:600003', '丁股', '600003', [])
   const qOf = pct => ({ quote: { last: '10', previousClose: '1', change: '0.5', changePct: pct, providerInstanceId: 'a', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null })
-  // 每个状态各自克隆一份 items: 共用引用的话, 前一个用例改 group 会污染后面的断言
-  const mkState = (sort, collapsed, groups = { [a.id]: '白酒', [b.id]: '能源', [c.id]: '白酒', [d.id]: '' }) => ({
-    view: { view: 'list', sort, alias: '', groupCollapsed: collapsed }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null,
-    data: {
-      control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id, d.id], items: structuredClone({ [a.id]: { ...a, group: groups[a.id] }, [b.id]: { ...b, group: groups[b.id] }, [c.id]: { ...c, group: groups[c.id] }, [d.id]: { ...d, group: groups[d.id] } }) }, preferences: {} },
-      // 涨幅刻意让「能源」在降序里排到最前: 只有这样段序才会与自选顺序相反,
-      // 否则「段序固定」这条断言在错误实现下也成立
-      quotes: { [a.id]: qOf('1'), [b.id]: qOf('9'), [c.id]: qOf('5'), [d.id]: qOf('3') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false,
-    },
-  })
+  const mkState = ({ sort = 'manual', pinned = [] } = {}) => {
+    const items = structuredClone({ [a.id]: a, [b.id]: b, [c.id]: c, [d.id]: d })
+    for (const id of pinned) items[id].pinned = true
+    return {
+      view: { view: 'list', sort, alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null,
+      data: {
+        control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id, d.id], items }, preferences: {} },
+        // 涨幅刻意让「能源」在降序里排到最前: 只有这样才测得出 tab 内排序与 tab 顺序互不影响
+        quotes: { [a.id]: qOf('1'), [b.id]: qOf('9'), [c.id]: qOf('5'), [d.id]: qOf('-1') }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false,
+      },
+    }
+  }
+  const tabsOf = state => plugin.__testing.tagTabs(state.data.control.watchlist.order, state.data.control.watchlist.items)
+  // 激活键由切面算出: tab 的 key 对用户不可见, 测试不硬编码前缀
+  const withActive = (state, label) => { state.view.activeTab = label ? tabsOf(state).find(tab => tab.label === label).key : undefined; return state }
   const render = state => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
 
-  const manual = render(mkState('manual', {}))
-  // 手动序: 置顶区没有成员就不出组头, 但两个组与「未分组」三段都在
-  assert.match(manual, /白酒 · 2 只/, '有成员的组要有组头')
-  assert.match(manual, /能源 · 1 只/, '第二个组也要有组头')
-  assert.match(manual, /未分组 · 1 只/, '未分组也常显组头, 否则一只都没归组时整页平铺、功能不可发现')
-  assert.match(manual, /aria-expanded="true"/, '组头可折叠语义')
-  assert.ok(manual.indexOf('甲股') < manual.indexOf('丙股'), '手动序下组内按自选顺序')
+  const manual = render(mkState())
+  assert.match(manual, /role="tablist"/, '分组视图是 tab 条')
+  for (const label of ['全部 · 4', '白酒 · 2', '能源 · 1', '核心 · 1', '未分组 · 1']) assert.ok(manual.includes(label), `缺 tab: ${label}`)
+  // 默认激活全部, 首屏看得见所有自选; 断言要落在按钮自身, 不能只看文案出现
+  const allAt = manual.indexOf('>全部 · 4<'), allOpen = manual.lastIndexOf('<button', allAt)
+  assert.ok(allAt > 0 && allOpen >= 0, '存在「全部 · 4」按钮')
+  assert.match(manual.slice(allOpen, allAt + 1), /aria-selected="true"/, '默认选中全部')
+  for (const name of ['甲股', '乙股', '丙股', '丁股']) assert.ok(manual.includes(name), `全部 tab 应含 ${name}`)
+  // 统计行按当前 tab 成员算: 全部四只, 三只上涨
+  assert.match(manual, /4 只 · 3 涨 1 跌/)
 
-  const collapsed = render(mkState('manual', { 白酒: true }))
-  assert.match(collapsed, /aria-expanded="false"/, '折叠态 aria')
-  assert.ok(!collapsed.slice(collapsed.indexOf('白酒 ·')).includes('甲股'), '折叠后组员隐藏')
-  assert.match(collapsed, /乙股/, '折叠只影响本组')
+  const bai = render(withActive(mkState(), '白酒'))
+  assert.ok(bai.includes('甲股') && bai.includes('丙股'))
+  assert.ok(!bai.includes('乙股') && !bai.includes('丁股'), '非激活 tab 的成员不渲染')
+  assert.match(bai, /2 只 · 2 涨 0 跌/, '统计只算本 tab 成员')
+  // 标签 tab 才有关联管理动作; 全部与未分组不是可管理的标签
+  assert.ok(bai.includes('重命名') && bai.includes('解散'), '标签 tab 给重命名与解散')
+  assert.ok(!manual.includes('重命名'), '全部 tab 不出现标签管理')
+  // 部分票无标签: 未分组只装有标签外的票
+  const rest = render(withActive(mkState(), '未分组'))
+  assert.ok(rest.includes('丁股') && !rest.includes('甲股'), '未分组只含无标签票')
 
-  // aria-expanded 必须锚到组头本身: 页头「更多」按钮也带 aria-expanded=false,
-  // 全页匹配会让「组头永远展开」这种错误实现照样绿
-  const headOf = (html, label) => (html.match(new RegExp(`<span[^>]*aria-label="${label} 分组折叠"[^>]*>`)) || [''])[0]
-  assert.match(headOf(manual, '白酒'), /aria-expanded="true"/, '组头自己的 aria 是展开')
-  assert.match(headOf(collapsed, '白酒'), /aria-expanded="false"/, '组头自己的 aria 是折叠')
-  // 组头统计: 每段的涨跌只数本段成员
-  assert.match(manual, /白酒 · 2 只 · 2 涨 0 跌/, '白酒段两只都涨')
-  assert.match(manual, /能源 · 1 只 · 1 涨 0 跌/, '能源段一只涨')
-  assert.match(manual, /未分组 · 1 只 · 1 涨 0 跌/, '未分组段一只涨')
+  // 一只票两个标签: 两个 tab 都要有它, 且成员来自同一份 tags
+  const core = render(withActive(mkState(), '核心'))
+  assert.ok(core.includes('丙股') && !core.includes('甲股'), '核心 tab 只有丙股')
 
-  // 置顶段: 真的有置顶成员时才出, 且成员不进组段
-  const pinnedState = mkState('manual', {})
-  pinnedState.data.control.watchlist.items[a.id].pinned = true
+  // 置顶并入 tab 内排序: 丙股在自选里排第三, 置顶后必须出现在本 tab 最前
+  const pinnedState = withActive(mkState({ pinned: [c.id] }), '白酒')
   const pinned = render(pinnedState)
-  assert.match(pinned, /置顶 · 1 只/, '有置顶成员要出置顶段')
-  assert.ok(pinned.indexOf('置顶 · 1 只') < pinned.indexOf('白酒 · 1 只'), '置顶段排在组段之前')
-  assert.ok(!pinned.slice(pinned.indexOf('白酒 ·'), pinned.indexOf('能源 ·')).includes('甲股'), '置顶成员不再进组段')
-  assert.ok(!render(mkState('manual', {})).includes('置顶 ·'), '没有置顶成员就不渲染置顶段')
+  assert.ok(pinned.indexOf('丙股') < pinned.indexOf('甲股'), '置顶票在 tab 内排最前')
 
-  // 全局排序: 分区保留, 组内按该排序走(而不是退回自选顺序)
-  const desc = render(mkState('desc', {}))
-  assert.match(desc, /白酒 · 2 只/, '全局排序也要保留分组')
-  assert.ok(desc.indexOf('丙股') < desc.indexOf('甲股'), '组内按涨幅降序')
-  assert.ok(desc.indexOf('未分组 · 1 只') < desc.indexOf('丁股'), '未分组段照常渲染')
+  // 未分组 tab 仅在有成员时出现
+  const allTagged = mkState()
+  allTagged.data.control.watchlist.items[d.id].tags = ['能源']
+  assert.ok(!render(allTagged).includes('未分组 ·'), '没有无标签票就不出未分组 tab')
+  const none = mkState()
+  for (const item of Object.values(none.data.control.watchlist.items)) item.tags = []
+  const noneHtml = render(none)
+  assert.match(noneHtml, /未分组 · 4/, '全无标签时未分组含全部')
 
-  // 段序不能跟着排序走: 用排序后的 order 取首现序会让段落随每次行情跳动换位, 正在点的组头会跑掉。
-  // 数据里「能源」在降序排最前, 所以错误实现下段序会变成 能源→白酒→未分组
-  const orderOfSections = html => [...html.matchAll(/(白酒|能源|未分组) · /g)].map(m => m[1])
-  assert.deepEqual(orderOfSections(manual), ['白酒', '能源', '未分组'], '段序按自选顺序')
-  assert.deepEqual(orderOfSections(desc), orderOfSections(manual), '三种排序的段序必须一致')
-
-  // 一只都没归组: 只留未分组段, 不产生空组头
-  const none = render(mkState('manual', {}, { [a.id]: '', [b.id]: '', [c.id]: '', [d.id]: '' }))
-  assert.match(none, /未分组 · 4 只/, '全是未分组时仍要有段头')
-  assert.ok(!none.includes('· 0 只'), '不渲染空组头')
-
-  // 组名恰好是常见原型链键: 拿它当对象键会读到继承属性, 被误判成「已折叠」
-  const proto = render(mkState('manual', {}, { [a.id]: 'constructor', [b.id]: '', [c.id]: '', [d.id]: '' }))
-  assert.match(proto, /constructor · 1 只/, '原型链键当组名也要正常成组')
-  assert.match(proto, /甲股/, '原型链键组名不能被当成已折叠')
+  // 标签名恰好是原型链键: tab 走数组与全等比较, 不查对象索引
+  const protoState = mkState()
+  protoState.data.control.watchlist.items[a.id].tags = ['constructor']
+  const proto = render(protoState)
+  assert.match(proto, /constructor · 1/)
+  // 激活的 tab 已失效(标签被解散): 回退全部而不是渲染空列表
+  const stale = mkState()
+  stale.view.activeTab = 'tag:已解散'
+  const staleHtml = render(stale)
+  for (const name of ['甲股', '乙股', '丙股', '丁股']) assert.ok(staleHtml.includes(name), `失效 tab 应回退全部: ${name}`)
 })
-// 审查阻断修复锚: 分组入口/NaN防御/均值修正
+
+// 多标签详情: 当前标签逐个可移除, 别的票用过的标签可一键加入, 新标签走输入框
+test('详情标签编辑器: chips 与已有标签 pill', async () => {
+  const { plugin } = await loadClientWithReact()
+  const mk = (id, name, tags) => ({ id, officialName: name, code: id.split(':')[2], exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, tags, marks: [] })
+  const a = mk('XSHG:equity:600001', '甲股', ['沪A', '核心']), b = mk('XSHG:equity:600002', '乙股', ['能源']), c = mk('XSHG:equity:600003', '丙股', [])
+  const stateOf = detailId => ({ view: { view: 'list', overlay: 'detail', detailId, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } })
+  const render = detailId => renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => stateOf(detailId), subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
+  const html = render(a.id)
+  assert.match(html, /当前分组标签/, '当前标签区')
+  assert.match(html, /aria-label="移除标签 沪A"/, '每个当前标签可单独移除')
+  assert.match(html, /aria-label="移除标签 核心"/)
+  assert.match(html, /\+ 能源/, '别的票用过的标签可一键加入')
+  assert.ok(!html.includes('+ 沪A'), '已属于本票的标签不再出现在加入列表')
+  assert.match(html, /添加标签/, '新标签输入入口')
+  const none = render(c.id)
+  assert.match(none, /还没有分组标签/, '无标签票给出未分组说明')
+  assert.ok(!none.includes('aria-label="移除标签 '), '无标签票没有可移除的标签')
+})
+
 test('审查R1: 详情分组表单+成本块锚+均值修正', async () => {
   const { plugin } = await loadClientWithReact()
-  const mk = (id, name, code, price) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', marks: price == null ? [] : [{ id: 'm1', price, kind: 'cost' }] })
+  const mk = (id, name, code, price) => ({ id, officialName: name, code, exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, tags: [], marks: price == null ? [] : [{ id: 'm1', price, kind: 'cost' }] })
   const a = mk('XSHG:equity:600001', '甲股', '600001', 100), b = mk('XSHG:equity:600002', '乙股', '600002', 100), c = mk('XSHG:equity:600519', '丙股', '600519', null)
   const q = { quote: { last: '110', previousClose: '1', change: '1', changePct: '1', providerInstanceId: 'p', delayKind: 'realtime', quoteAt: null, receivedAt: 1, sessionState: 'trading' }, health: 'ok', lastError: null }
   const state = { view: { view: 'list', overlay: 'detail', detailId: a.id, sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', paused: false, kline: null, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [a.id, b.id, c.id], items: { [a.id]: a, [b.id]: b, [c.id]: c } }, preferences: {} }, quotes: { [a.id]: q, [b.id]: q, [c.id]: q }, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, klineReady: {}, vendorAvailable: false } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve({ candles: [] }) }, layout: {} }))
-  assert.match(html, /保存分组/, '详情有分组入口(B1)')
+  assert.match(html, /添加标签/, '详情有多标签入口')
+  assert.match(html, /还没有分组标签/, '没有标签时给出说明')
   assert.match(html, /持仓盈亏 \+10 · \+10%/, '详情成本块独立锚(S9)')
   const listState = JSON.parse(JSON.stringify(state)); listState.view = { view: 'list', sort: 'manual', alias: '' }
   const listHtml = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => listState, subscribe: () => () => {}, updateView: () => {} }, layout: {} }))
@@ -698,7 +721,7 @@ test('M5.2 默认配置设置页全节点渲染无截断', async () => {
   assert.ok(html.includes('K线'), 'K线能力可见')
 })
 
-test('D02 拖拽落位计算: 段内前插/后插与折叠隐藏项回填', async () => {
+test('D02 拖拽落位计算: 段内前插/后插与非本 tab 成员回填', async () => {
   const { plugin } = await loadClientWithReact()
   const { dragOrder } = plugin.__testing
   const ids = ['a', 'b', 'c', 'd']
@@ -706,9 +729,9 @@ test('D02 拖拽落位计算: 段内前插/后插与折叠隐藏项回填', asyn
   assert.deepEqual([...dragOrder(ids, ids, 'a', 'c', true)], ['b', 'c', 'a', 'd'], '拖到目标下半=插到其后')
   assert.deepEqual([...dragOrder(ids, ids, 'd', 'b', false)], ['a', 'd', 'b', 'c'], '尾项前移')
   assert.equal(dragOrder(ids, ids, 'a', 'zz', false), null, '目标不在渲染序则不动')
-  // 折叠组隐藏项 x,y 不在渲染序, 提交时按原槽位回填
+  // 别的标签下的 x,y 不在本 tab 渲染序, 提交时按原槽位回填
   const full = ['a', 'x', 'b', 'y']
-  assert.deepEqual([...dragOrder(['a', 'b'], full, 'b', 'a', false)], ['b', 'x', 'a', 'y'], '隐藏项保持原槽位')
+  assert.deepEqual([...dragOrder(['a', 'b'], full, 'b', 'a', false)], ['b', 'x', 'a', 'y'], '非本 tab 成员保持原槽位')
 })
 
 test('D03 副标题按自选实际市场面生成', async () => {
@@ -726,7 +749,7 @@ test('D03 副标题按自选实际市场面生成', async () => {
 // 卖价不是报价要素, 但目标位必须能在图例里读到, 否则图上只有一条看不见的线
 test('图例显示卖价与相对成本的潜在收益', async () => {
   const { plugin } = await loadClientWithReact()
-  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, group: '', marks: [{ id: 'c1', price: 100, kind: 'cost' }, { id: 't1', price: 150, kind: 'target' }] }
+  const item = { id: 'XSHG:equity:600519', officialName: '贵州茅台', code: '600519', exchange: 'XSHG', instrument: 'equity', currency: 'CNY', timezone: 'Asia/Shanghai', priceScale: 2, listingStatus: 'listed', alias: '', pinned: false, tags: ['沪A'], marks: [{ id: 'c1', price: 100, kind: 'cost' }, { id: 't1', price: 150, kind: 'target' }] }
   const state = { view: { view: 'detail', overlay: 'detail', detailId: item.id, klinePeriod: '1d', sort: 'manual', alias: '' }, busy: {}, candidates: [], composing: false, undo: null, error: '', errorCode: '', paused: false, klinePeriod: '1d', klineKey: `${item.id}|1d`, kline: { loading: false, error: '', candles: [{ time: '2026-11-07', open: 118, high: 122, low: 117, close: 120, volume: 100 }], preClose: 119 }, data: { control: { revision: 1, routingRevision: 0, watchlist: { order: [item.id], items: { [item.id]: item } }, preferences: {} }, quotes: {}, adapters: [], providerStatus: [], catalogs: [], routeSelections: {}, vendorAvailable: true, klineReady: { XSHG: true } } }
   const html = renderToStaticMarkup(React.createElement(plugin.__testing.StockPage, { runtime: { getSnapshot: () => state, subscribe: () => () => {}, updateView: () => {}, loadKline: () => Promise.resolve(null) }, layout: {} }))
   // 侧栏的标记列表里也有同样的数字, 所以必须切出图例那段再断言

@@ -6,9 +6,9 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 // 悬浮窗拆分后的各块:
-//   Given 分组带置顶/未分组
+//   Given 自选横跨多个标签且含置顶
 //   When 打开选择器
-//   Then 每个分区一个组头, 组头给出全选/全不选
+//   Then 平铺全部标的(多标签下按段会重复列同一只票), 顶部给计数与全选
 //   Given 一只都没勾
 //   Then 列表给出引导文案, 刷新按钮不可用
 const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
@@ -23,21 +23,28 @@ async function load() {
 }
 
 const items = {
-  'XSHG:equity:000001': { id: 'XSHG:equity:000001', code: '000001', officialName: '上证指数', priceScale: 2, pinned: true },
-  'XSHG:equity:600519': { id: 'XSHG:equity:600519', code: '600519', officialName: '贵州茅台', priceScale: 2, group: '白酒' },
-  'XSHG:equity:000002': { id: 'XSHG:equity:000002', code: '000002', officialName: '万科A', priceScale: 2 },
+  'XSHG:equity:000001': { id: 'XSHG:equity:000001', code: '000001', officialName: '上证指数', priceScale: 2, pinned: true, tags: [] },
+  'XSHG:equity:600519': { id: 'XSHG:equity:600519', code: '600519', officialName: '贵州茅台', priceScale: 2, tags: ['白酒', '核心'] },
+  'XSHG:equity:000002': { id: 'XSHG:equity:000002', code: '000002', officialName: '万科A', priceScale: 2, tags: [] },
 }
 const order = Object.keys(items)
 
-test('选择器按分组给出组头与全选', async () => {
+test('选择器平铺全部标的, 顶部给计数与全选', async () => {
   const { FloatPicker } = await load()
   const html = renderToStaticMarkup(React.createElement(FloatPicker, { order, items, picked: [order[0]], onPicked() {} }))
-  assert.match(html, /置顶 · 1/, '置顶单独成组')
-  assert.match(html, /白酒 · 1/, '分组按名称成组')
-  assert.match(html, /未分组 · 1/, '没归组的标的也要有组头, 否则用户不知道能拖进去')
-  assert.match(html, /全不选/, '组内已全部选中时给全不选')
+  assert.match(html, /已选 1\/3/, '顶部计数')
   assert.match(html, /全选/, '还没选满时给全选')
+  for (const name of ['上证指数', '贵州茅台', '万科A']) assert.ok(html.includes(name), `${name} 要平铺列出`)
+  assert.ok(!html.includes('白酒 · '), '不再按标签分段, 否则多标签的票会重复出现')
+  assert.ok(!html.includes('未分组 · '), '未分组段同样取消')
   assert.match(html, /ssb-switch/, '多选行用开关')
+})
+
+test('全部选中时给全不选', async () => {
+  const { FloatPicker } = await load()
+  const html = renderToStaticMarkup(React.createElement(FloatPicker, { order, items, picked: order, onPicked() {} }))
+  assert.match(html, /全不选/)
+  assert.match(html, /已选 3\/3/)
 })
 
 test('一只都没勾时列表给引导, 刷新按钮不可用', async () => {
