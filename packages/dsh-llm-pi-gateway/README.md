@@ -20,7 +20,7 @@ dsh plugin --profile web add @mzzsfy/dsh-llm-pi-gateway
 
 Chat 补齐规则：仅在开关开启、owner 活跃、`sessionId` 为非空字符串且 `cacheRetention !== 'none'` 时生效。`options.headers` 和模型描述的 `model.headers` 中，大小写无关的显式同名键均优先，包括用于抑制头的 `null`；只补缺失键，不改写输入。请求中会发送原始 sessionId，规则沿用 Responses 的会话键语义。同会话多轮保持相同值，不同会话使用不同值。
 
-Responses 表中的原生键已在 DSH `0.2.1-rc.2`、pi-ai `1.3.0` 的通用自定义 endpoint 上验证；原生行为由宿主所带 pi-ai 决定。该版本 `cacheRetention: 'none'` 会抑制这些自动键，关闭 gateway 开关不会关闭 Responses 原生行为。
+Responses 表中的原生键已在 DSH `0.2.1-rc.2`、pi-ai `1.3.0` 的通用自定义 endpoint 上验证；原生行为由宿主所带 pi-ai 决定（当前 0.2.2 线宿主随附 pi-ai 1.5.x）。该版本 `cacheRetention: 'none'` 会抑制这些自动键，关闭 gateway 开关不会关闭 Responses 原生行为。
 
 Anthropic 标记由 sessionId 派生，不包含原始 sessionId；同 owner 内同会话缓存标记，修改 prefix 后已见会话保留原值，新会话使用新前缀。它使用 Anthropic 的 metadata 字段，不构造 Claude Code 的账号身份格式。Chat 不新增 `metadata`、`prompt_cache_key`、`prompt_cache_retention`、`x-session-id` 或 `x-session-affinity`。
 

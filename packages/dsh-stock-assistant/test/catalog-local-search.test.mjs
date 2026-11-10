@@ -14,7 +14,7 @@ const HK = makeSecurity('XHKG', '00700', '腾讯控股')
 
 async function harness() {
   const state = await openState(memoryStorage())
-  await state.cache.put('catalog:test', { kind: 'catalog', source: 'em', fetchedAt: Date.now(), payload: { routingRevision: 1, items: [US, CN, HK], complete: true } })
+  await state.cache.put('catalog_test', { kind: 'catalog', source: 'em', fetchedAt: Date.now(), payload: { routingRevision: 1, items: [US, CN, HK], complete: true } })
   const config = { routingRevision: 1, providers: [{ id: 'em', adapterId: 'eastmoney', enabled: true }], routes: MARKETS.map(route) }
   const catalog = createCatalog({
     state, getControl: () => config,
@@ -44,5 +44,16 @@ test('L03 代码精确命中排在名称命中之前', async () => {
   // 'apple' 只命中名称; 'aapl' 只命中代码 —— 用同时命中两者的查询验证排序
   const hits = catalog.search('00700')
   assert.equal(hits[0]?.id, 'XHKG:equity:00700', '代码精确命中排首位')
+  catalog.dispose(); await state.close()
+})
+
+// 目录与 K 线分池: K 线写满自己的池不能把目录挤掉, 否则 browse/search 退化并触发 60 秒一次的目录重拉
+test('L09 写满 K 线池不影响目录缓存', async () => {
+  const { catalog, state } = await harness()
+  const before = catalog.search('600519')[0]?.id
+  for (let i = 0; i < 600; i++) await state.klineCache.put(`kline:em:XSHG:1d:6005${i}`, { kind: 'kline', source: 'em', fetchedAt: i, payload: { candles: [] } })
+  assert.equal(state.klineCache.size, 512, 'K 线池按自己的上限淘汰')
+  assert.equal(catalog.search('600519')[0]?.id, before, '目录仍在')
+  assert.equal(catalog.status().length > 0, true)
   catalog.dispose(); await state.close()
 })

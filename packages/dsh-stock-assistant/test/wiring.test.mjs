@@ -122,12 +122,13 @@ test('悬浮窗拖动只从标题条发起', () => {
   must(/\.ssb-float-head \{ touch-action:none;/, '标题条独占拖动')
 })
 
-test('分组折叠的特殊键不会与用户组名撞车', () => {
-  // 组名来自用户输入且只校验长度, 拿可输入的名字当折叠键的话, 用户建一个同名组就会互相顶掉
-  must(/PINNED_KEY = ['"]\\u0000/, '特殊折叠键必须带不可见前缀')
-  must(/section\(PINNED_KEY/, '置顶段必须用特殊键')
-  must(/section\(REST_KEY/, '未分组段必须用特殊键')
-  assert.deepEqual([...client.matchAll(/section\((['"])(置顶|未分组)/g)], [], '不能拿中文 label 当折叠键')
+test('分组 tab 的保留键不会与用户标签名撞车', () => {
+  // 标签名来自用户输入且只校验长度, 拿名字当 tab 键的话, 用户建一个叫「全部」的标签就会顶掉保留 tab
+  must(/ALL_TAB_KEY = ['"]\\u0000/, '全部 tab 的键必须带不可见前缀')
+  must(/REST_TAB_KEY = ['"]\\u0000/, '未分组 tab 的键必须带不可见前缀')
+  must(/key: ALL_TAB_KEY/, '全部 tab 必须用特殊键')
+  must(/key: REST_TAB_KEY/, '未分组 tab 必须用特殊键')
+  assert.deepEqual([...client.matchAll(/key: (['"])(全部|未分组)/g)], [], '不能拿中文 label 当 tab 键')
 })
 
 test('本地存储只经两个封装, 且不接受就地字面量', () => {

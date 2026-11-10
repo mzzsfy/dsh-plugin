@@ -54,6 +54,19 @@ function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, ms)
 }
 
+/** 库的版本面字面量跟随 manifest:client 上报版本与 host 注册版本都取这两处 */
+function syncVersionLiterals(pkgDir, version) {
+  for (const [relative, pattern] of [
+    ['src/client.js', /(const VERSION = ')[^']+(')/],
+    ['src/host.js', /(const PKG_VERSION = ')[^']+(')/],
+  ]) {
+    const file = join(pkgDir, relative)
+    const text = readFileSync(file, 'utf8')
+    if (!pattern.test(text)) fail(`${relative} 缺版本字面量,拒绝发布`)
+    writeFileSync(file, text.replace(pattern, `$1${version}$2`))
+  }
+}
+
 /**
  * 执行 npm 命令。Windows 下 npm 是 .cmd 脚本,Node 对其强制要求 shell
  * (无 shell 直接 EINVAL),故走 shell 字符串形式;参数全部来自内部白名单
@@ -275,15 +288,18 @@ function publishOne(dirName, opts) {
     if (r.status !== 0) fail(`npm version 失败:\n${r.stderr}`)
     version = r.stdout.trim().replace(/^v/, '')
     if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`npm version 输出异常: ${version}`)
+    // 库的两处版本字面量与 manifest 同锁(scripts/check-common-tools.mjs 校验同一不变量),
+    // bump 后必须同步,否则 tarball 里客户端上报的版本面会落后于包版本
+    if (dirName === 'dsh-common-tools') syncVersionLiterals(pkgDir, version)
   }
   // 版本号变更入库后 tag 才指向该版本的完整源码状态,tag 后无提交的判定才能成立;
   // manifest 无变更(如首发时版本已提交)则跳过。提交失败不继续发布,仅提示手动收尾
-  const manifestDirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}/package.json`], { cwd: repoRoot, encoding: 'utf8' })
+  const manifestDirty = spawnSync('git', ['status', '--porcelain', '--', `packages/${dirName}`], { cwd: repoRoot, encoding: 'utf8' })
   if (manifestDirty.status === 0 && manifestDirty.stdout.trim() !== '') {
-    const c = run('git', ['add', `packages/${dirName}/package.json`], repoRoot)
+    const c = run('git', ['add', `packages/${dirName}`], repoRoot)
     const cm = c.status === 0 ? run('git', ['commit', '-m', `chore(${dirName}): 发版版本号 ${version}`], repoRoot) : { status: 1 }
     if (cm.status !== 0) {
-      fail(`版本号提交失败,中止发布(请手动 git commit packages/${dirName}/package.json 后重跑)`)
+      fail(`版本号提交失败,中止发布(请手动 git commit packages/${dirName} 后重跑)`)
     }
   }
   // 打包前洁净复检:--bump 改版本只动 manifest,版本提交后不得再有其他变更——

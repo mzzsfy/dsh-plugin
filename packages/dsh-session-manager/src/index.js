@@ -1,8 +1,7 @@
 // dsh-session-manager Host 半区:自动归档评估 + 取消归档 + 删除(回收站) + 已删除台账与重挂载。
 // 评估三触发源共用同一门闩:新会话创建(session/created,按工作区限定)、settings 就绪后的
 // 启动补扫(全量)、每日周期轮(全量,经宿主 timer 软依赖);取消归档与删除后的归档清理经
-// workspace 域 global 直写 archivedSessionIds 并同步注册表进程内快照(官方无 unarchive 表面,
-// 域写入经 domain/changed 触发 workspace.follow 的 archived 帧);删除按失败矩阵
+// 官方 workspaceRegistry.unarchiveSession(0.2.1-rc.2 起);删除按失败矩阵
 // 执行 locate → trash → detach → 归档清理,台账记录删除产物路径供回收站还原后
 // 一键重挂载(官方 attachSession)。面板数据不在此处:client 侧以 session.list
 // 行与归档集合做交集。

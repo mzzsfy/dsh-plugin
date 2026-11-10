@@ -79,6 +79,8 @@ function loadPlugin() {
     }
     const plugin = captured.factory((specifier) => {
       if (specifier === 'react') return ReactStub
+      // 公共依赖由本包装载行提供,宿主模块表总会给出;缺它属装载层失败,不由 factory 兜底
+      if (specifier === '@mzzsfy/dsh-common-tools/client') return { toast: { show() {} } }
       throw new Error('模块表缺依赖:' + specifier)
     })
     assert.ok(typeof plugin === 'object' && plugin !== null, 'factory 应返回插件对象')

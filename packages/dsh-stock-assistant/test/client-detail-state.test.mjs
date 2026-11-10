@@ -59,7 +59,7 @@ test('换详情时自动回填该标的已保存的别名', async () => {
 })
 
 const snapshotOf = items => ({ serverEpoch: 'e', snapshotSeq: 1, routingRevision: 0, routeSelections: {}, control: { revision: 1, routingRevision: 0, watchlist: { order: Object.keys(items), items }, preferences: { refreshSeconds: 15, colorMode: 'red-up' } }, quotes: {} })
-const securityOf = (id, code) => ({ id, exchange: id.split(':')[0], code, officialName: code, alias: '', pinned: false, cost: null, group: '', currency: 'CNY', priceScale: 2 })
+const securityOf = (id, code) => ({ id, exchange: id.split(':')[0], code, officialName: code, alias: '', pinned: false, cost: null, tags: [], currency: 'CNY', priceScale: 2 })
 const runtimeOf = (plugin, extra = {}) => plugin.__testing.createPageRuntime({
   layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel: extra.selectPanel || (() => {}) },
   bus: { subscribe: () => () => {}, publish() {} },
@@ -79,7 +79,7 @@ test('换详情时清空成本与分组草稿, 同一只重复打开不清', asy
     fetch: async () => ({ ok: true, json: async () => ({ ok: true, data: snapshotOf({}) }) }),
   })
   runtime.updateView({ detailId: 'A', overlay: 'detail' })
-  runtime.updateView({ markDraft: { kind: 'cost', price: '422' }, groupDraft: '科技', markError: '错', groupError: '错' })
+  runtime.updateView({ markDraft: { kind: 'cost', price: '422' }, tagDraft: '科技', markError: '错', tagError: '错' })
   assert.equal(runtime.getSnapshot().view.markDraft.price, '422')
   // 同一只再写一次草稿: detailId 没变, 草稿不能被清掉
   runtime.updateView({ markDraft: { kind: 'cost', price: '430' } })
@@ -90,7 +90,7 @@ test('换详情时清空成本与分组草稿, 同一只重复打开不清', asy
   // 换到 B: 四个草稿字段全部归零
   runtime.updateView({ detailId: 'B' })
   const view = runtime.getSnapshot().view
-  assert.deepEqual({ markDraft: view.markDraft, groupDraft: view.groupDraft, markError: view.markError, groupError: view.groupError }, { markDraft: null, groupDraft: null, markError: null, groupError: null })
+  assert.deepEqual({ markDraft: view.markDraft, tagDraft: view.tagDraft, markError: view.markError, tagError: view.tagError }, { markDraft: null, tagDraft: null, markError: null, tagError: null })
   runtime.dispose()
 })
 
@@ -223,5 +223,42 @@ test('同 key 并发: 先发的请求失败时不覆盖后发的成功结果', a
   const after = runtime.getSnapshot()
   assert.equal(after.kline?.candles?.[0]?.close, 2, '成功结果应保留')
   assert.equal(after.kline?.error || '', '', '淘汰的失败不该写错误')
+  runtime.dispose()
+})
+
+// 插件未激活时 /api 共享通道只回 404 纯文本; 把解析器报错直接贴到面板上等于现场失明
+test('服务不可用: 非 JSON 响应翻成可读错误', async () => {
+  const { createPageRuntime } = await load()
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: async () => ({ ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token \'o\', "not found" is not valid JSON') } }),
+  })
+  await assert.rejects(runtime.api('/snapshot'), error => {
+    assert.equal(error.code, 'SERVICE_UNAVAILABLE')
+    assert.equal(error.message, '股票工具服务不可用（HTTP 404）')
+    return true
+  })
+  runtime.dispose()
+})
+
+// 读响应体被中止(超时/页面重置)属于外部取消, 不能翻成"服务不可用"
+test('中止错误原样抛出, 不伪装成服务故障', async () => {
+  const { createPageRuntime } = await load()
+  const abortError = Object.assign(new Error('This operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR' })
+  const runtime = createPageRuntime({
+    layout: { panelInfo: { getSnapshot: () => ({}), subscribe: () => () => {} }, selectPanel() {} },
+    bus: { subscribe: () => () => {}, publish() {} },
+    tools: { createSnapshotRefresh: () => ({ refresh() {}, dispose() {} }) },
+    document: { addEventListener() {}, removeEventListener() {} },
+    fetch: async () => ({ ok: false, status: 200, json: async () => { throw abortError } }),
+  })
+  await assert.rejects(runtime.api('/snapshot'), error => {
+    assert.equal(error.name, 'AbortError')
+    assert.notEqual(error.code, 'SERVICE_UNAVAILABLE')
+    return true
+  })
   runtime.dispose()
 })

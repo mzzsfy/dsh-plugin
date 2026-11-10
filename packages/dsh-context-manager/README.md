@@ -66,7 +66,7 @@
 ## 依赖与门控
 
 - client 半区宿主服务经 inject 声明(`slots`/`sessions`/`workspaces`/`uiWorkspace`/`remote`/`remote.session` 点分声明),namespace 未就绪整体保持未激活(干净禁用);host 半区 inject 为 `webServer`/`agents`/`sessionQuery`/`sessionPersistence`/`sessions`
-- 公共依赖 `@mzzsfy/dsh-common-tools` 可选消费(toast 通知通道,模块缺失即置空)
+- 公共依赖 `@mzzsfy/dsh-common-tools` 为硬依赖(toast 通知通道):装载行由本包 `cordis.patch.yml` 自带,模块表缺失即 factory 抛错,由装载层判定失败
 - 样式注入带 `data-plugin` 标记,开关为 `cx-switch` 形态(状态选择器锚定 `input[type="checkbox"]`)
 
 ## API(host 半区)
@@ -81,7 +81,7 @@
 | `/api/context/fork-enabled` | GET/POST | 对话分叉启停 |
 | `/api/context/fork-auto-resend-enabled` | GET/POST | 分叉后自动重发启停 |
 | `/api/context/copy-sid-enabled` | GET/POST | 标题栏复制 sessionId 启停 |
-| `/api/context/git-clone` | POST | 克隆仓库(url/parent/name/shallow,单飞行,返回 `{path}`) |
+| `/api/context/git-clone` | POST | 克隆仓库(url/target/shallow,单飞行,返回 `{path}`) |
 | `/api/context/clone-enabled` | GET/POST | 克隆仓库按钮启停 |
 
 ## dsh 版本兼容

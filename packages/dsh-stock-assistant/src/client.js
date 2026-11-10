@@ -2,6 +2,8 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-stock-assistant',
   factory(require) {
     const PANEL_ID = 'stock-assistant', BASE = '/api/stock-assistant', BROWSE_PAGE = 50
+    // 单票标签上限与服务端 schemas.MAX_TAGS 一致, 由 tags-schema 测试守卫; 客户端只做前置提示, 服务端仍校验
+    const MAX_TAGS = 8
     // K线结果的归属键: 拉取、校验、灌图三处必须用同一个拼法, 否则校验形同虚设
     function klineKeyOf(securityId, period) { return `${securityId}|${period}` }
     // 灌图计划: 空壳只清屏且不记 key(空数据上 fitContent 是 no-op, 记了就再也不会铺满);
@@ -10,22 +12,25 @@ window.__ModuleLoader__.load({
       if (!hasData) return { fit: false, next: shippedKey }
       return { fit: shippedKey !== key, next: key }
     }
-    // 折叠状态的键: 组名来自用户输入且只校验长度, 用不可见前缀保证不会与真实组名撞车
-    const PINNED_KEY = '\u0000pinned', REST_KEY = '\u0000rest'
-    // 自选的分组切面: 置顶 → 各组(按首次出现顺序) → 未分组。列表与悬浮窗勾选共用这一份,
-    // 免得两处对"某只属于哪个组"给出不同答案
-    function groupSlices(order, items) {
-      // 只认确实存在的标的: 自选与明细表短暂不一致时, 不存在的 id 既不该进组也不该进未分组
+    // 分组 tab 的保留键: 标签名来自用户输入且只校验长度, 用不可见前缀保证不会与真实标签撞键
+    const ALL_TAB_KEY = '\u0000all', REST_TAB_KEY = '\u0000rest', TAG_PREFIX = 'tag:', WATCHLIST_PANEL_ID = 'ssb-watchlist-panel'
+    // 自选的分组切面: 全部 → 各标签(按首次出现顺序) → 未分组(仅当有无标签票)。
+    // 一只票可有多个标签, 因此会同时出现在多个 tab 里; 列表与详情编辑共用这一份归属答案
+    function tagTabs(order, items) {
+      // 只认确实存在的标的: 自选与明细表短暂不一致时, 不存在的 id 既不该进 tab 也不该进未分组
       const known = order.filter(id => items[id])
-      const pinned = known.filter(id => items[id].pinned)
-      const rest = known.filter(id => !items[id].pinned)
-      const names = [...new Set(rest.map(id => items[id]?.group).filter(Boolean))]
-      return {
-        pinned,
-        groups: names.map(name => ({ name, ids: rest.filter(id => items[id]?.group === name) })),
-        ungrouped: rest.filter(id => !items[id]?.group),
-      }
+      const tagsOf = id => items[id].tags || []
+      const names = [...new Set(known.flatMap(tagsOf))]
+      const tabs = [
+        { key: ALL_TAB_KEY, label: '全部', ids: known },
+        ...names.map(name => ({ key: `${TAG_PREFIX}${name}`, label: name, ids: known.filter(id => tagsOf(id).includes(name)) })),
+      ]
+      const rest = known.filter(id => !tagsOf(id).length)
+      if (rest.length) tabs.push({ key: REST_TAB_KEY, label: '未分组', ids: rest })
+      return tabs
     }
+    // 激活键可能已失效(标签被解散或改名): 回退首个 tab, 而不是渲染空白列表
+    const resolveTab = (tabs, key) => tabs.find(tab => tab.key === key) || tabs[0]
     // 来源偶发给 null 字段: LWC 只跳过 undefined, null 会按 0 参与价格轴范围把整图压扁;
     // 而非有限的 OHLC 又不能留成 NaN —— 它会顺着均线的滑动窗口把后面所有指标值一起毒掉。
     // 所以四个价格有任一缺失就丢掉整根, 其余字段(avg/amount 等)原样带过去: 分时均价线靠 avg
@@ -54,8 +59,8 @@ window.__ModuleLoader__.load({
     }
     // 缺失值不是 0: 直接 Number() 会把 null 变成真实的 0, 画到图上就是一条压在地板上的线
     const finiteOr = value => value == null || value === '' ? NaN : Number(value)
-    // 成本标记取等权平均: 没有数量信息, 等权是唯一不引入臆测的口径
-    const avgCostOf = marks => { const prices = (marks || []).filter(mark => mark.kind === 'cost').map(mark => mark.price); return prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : null }
+    // 多笔成本取最低价作为成本基准: 汇总盈亏按它算, 其余成本只作参考线(各自仍显示与现价的百分比)
+    const costBaseOf = marks => { const prices = (marks || []).filter(mark => mark.kind === 'cost').map(mark => mark.price); return prices.length ? Math.min(...prices) : null }
     // 价格标记按该证券的价位精度显示: 港股四位小数, 用 toString 会丢位数
     const priceTextOf = (value, scale) => value == null || value === '' || Number.isNaN(Number(value)) ? '—' : Number(value).toFixed(scale ?? 2)
     // 涨跌方向只在这里判一次: 面板与悬浮窗共用, 避免 0 被显示成涨或被当成跌
@@ -65,8 +70,8 @@ window.__ModuleLoader__.load({
     }
     // 每个标记各自的盈亏口径: 成本看「现价相对它」的浮盈, 卖价看「它相对成本」的潜在收益,
     // 还没有成本时卖价退回相对现价——三个口径都是同一个式子, 只是基准不同
-    const markPct = (mark, last, avgCost) => {
-      const base = mark.kind === 'cost' ? mark.price : avgCost ?? last
+    const markPct = (mark, last, costBase) => {
+      const base = mark.kind === 'cost' ? mark.price : costBase ?? last
       return base == null || last == null ? null : (mark.kind === 'cost' ? last - base : mark.price - base) / base * 100
     }
     // 成交额按万/亿缩写避免长列; zeroIsMissing 关掉时 0 按真值显示(成交量用)
@@ -131,7 +136,15 @@ window.__ModuleLoader__.load({
         const timeout = setTimeout(() => controller.abort(), path === '/provider-check' ? 61000 : path === '/catalog-sync' ? 121000 : 11000)
         try {
           const response = await request(BASE + path, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal })
-          const result = await response.json()
+          let result
+          try { result = await response.json() } catch (error) {
+            // 读响应体被中止(超时/页面重置)属于外部取消, 不能伪装成服务故障
+            if (error?.name === 'AbortError') throw error
+            // 插件 host 半区未激活时宿主对未注册路由回纯文本 "not found", 解析器报错对用户无信息量
+            const unavailable = new Error(`股票工具服务不可用（HTTP ${response.status}）`)
+            unavailable.code = 'SERVICE_UNAVAILABLE'
+            throw unavailable
+          }
           if (!response.ok || !result.ok) { const e = new Error(result.error?.message || '请求失败'); Object.assign(e, result.error, { snapshot: result.snapshot }); throw e }
           return result.data
         } finally { clearTimeout(timeout); requests.delete(controller); signal?.removeEventListener('abort', abort) }
@@ -175,7 +188,7 @@ window.__ModuleLoader__.load({
         const detailChanged = next.detailId !== undefined && next.detailId !== state.view.detailId
         const saved = next.detailId === undefined ? undefined : (state.data?.control.watchlist.items[next.detailId] || state.view.browsePeek?.[next.detailId])
         const alias = next.alias !== undefined ? { alias: next.alias } : detailChanged ? { alias: saved?.alias || '' } : {}
-        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { markDraft: null, groupDraft: null, markError: null, groupError: null } : {}) } })
+        patch({ view: { ...state.view, ...next, ...alias, ...(leaveDetail ? { detailId: null, alias: '', browsePeek: {} } : {}), ...(detailChanged ? { markDraft: null, tagDraft: null, markError: null, tagError: null } : {}) } })
         sendDemand()
       }
       function scheduleSearch(query) {
@@ -595,7 +608,7 @@ window.__ModuleLoader__.load({
       // 详情页只给来源名: 延迟与获取时间已在事实表里逐行列出, 这里重复会把抽屉头部撑长
       return h('span', { className: 'ssb-muted ssb-source', title: detail }, entry?.health && entry.health !== 'ok' ? `${({ limited: '额度受限', error: '请求失败', 'no-data': '暂无报价', unconfigured: '未配置来源' })[entry.health] || entry.health} · ` : '', quote ? quote.providerInstanceId : '等待报价')
     }
-    // 拖拽落位: 返回新的完整顺序; 折叠隐藏项按原槽位回填, 保证提交的是全量 order
+    // 拖拽落位: 返回新的完整顺序; 非本 tab 成员按原槽位回填, 保证提交的是全量 order
     function dragOrder(sequence, order, from, over, after) {
       const visible = sequence.filter(id => id !== from)
       const at = visible.indexOf(over)
@@ -624,15 +637,45 @@ window.__ModuleLoader__.load({
       const unhealthy = (state.data.providerStatus || []).filter(s => { const log = s.recentRequests || []; return log.length && log[0].status !== 'ok' })
       const providers = state.data.control.providers || []
       const sourcesBanner = unhealthy.length || providers.some(p => !p.enabled) ? h('div', { className: 'ssb-banner' }, `${providers.filter(p => p.enabled).length}/${providers.length} 个数据源启用${unhealthy.length ? `，${unhealthy.map(s => s.id).join('、')} 最近请求失败` : ''}`, h(Button, { onClick: () => runtime.updateView({ view: 'list', overlay: 'settings' }) }, '查看')) : null
-      // 组合概览并入节头(不占独立横幅带)。不做涨跌额求和: 各市场币种不同且无仓位数量, 相加没有意义
-      const stats = w.order.length ? w.order.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (Number.isNaN(pct)) return acc; acc.up += pct > 0; acc.down += pct < 0; const item = w.items[id], last = Number(data.quotes[id]?.quote?.last), avgCost = avgCostOf(item.marks); if (avgCost != null && last) { acc.held += 1; acc.pl += (last - avgCost) / avgCost * 100 } return acc }, { up: 0, down: 0, held: 0, pl: 0 }) : null
+      // 分组 tab: 全部 → 各标签(首现序) → 未分组; 一只票可同时属于多个标签, 于是在多个 tab 可见
+      const tabs = tagTabs(w.order, w.items)
+      const active = resolveTab(tabs, view.activeTab)
+      const inTab = new Set(active.ids)
+      // tab 顺序取排序后的全量序, 置顶票因此在每个 tab 里都排最前
+      const tabOrder = order.filter(id => inTab.has(id))
+      // 组合概览按当前 tab 成员算(不占独立横幅带)。不做涨跌额求和: 各市场币种不同且无仓位数量, 相加没有意义
+      const stats = active.ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (Number.isNaN(pct)) return acc; acc.up += pct > 0; acc.down += pct < 0; const item = w.items[id], last = Number(data.quotes[id]?.quote?.last), costBase = costBaseOf(item.marks); if (costBase != null && last) { acc.held += 1; acc.pl += (last - costBase) / costBase * 100 } return acc }, { up: 0, down: 0, held: 0, pl: 0 })
       // 持仓合计为等权均值(无仓位数量数据, 百分比求和会随只数放大; 均值是最不坏近似)
-      const heldText = stats?.held ? ` · 持仓盈亏 ${signed(Number((stats.pl / stats.held).toFixed(1)))}%（等权）` : ''
+      const heldText = stats.held ? ` · 持仓盈亏 ${signed(Number((stats.pl / stats.held).toFixed(1)))}%（等权）` : ''
+      const statsText = `${active.ids.length} 只 · ${stats.up} 涨 ${stats.down} 跌${heldText}${freshnessText(data.quotes) ? ` · ${freshnessText(data.quotes)}` : ''}`
+      const isTagTab = active.key.startsWith(TAG_PREFIX)
+      // 重命名草稿绑定的是标签名: 切换 tab 后残留的草稿不再渲染
+      const renameDraft = isTagTab && view.tagRename?.from === active.label ? view.tagRename : null
+      const tabBar = w.order.length ? h('div', { className: 'ssb-tabs', role: 'tablist', 'aria-label': '自选分组' },
+        ...tabs.map(tab => h('button', { key: tab.key, type: 'button', role: 'tab', 'aria-controls': WATCHLIST_PANEL_ID, className: `ssb-tab${tab.key === active.key ? ' ssb-tab-on' : ''}`, 'aria-selected': tab.key === active.key, onClick: () => runtime.updateView({ activeTab: tab.key, tagRename: null }) }, `${tab.label} · ${tab.ids.length}`))) : null
+      const tagTools = isTagTab ? h('div', { className: 'ssb-toolbar' },
+        h(Button, { disabled: busy.write, onClick: () => runtime.updateView({ tagRename: { from: active.label, to: active.label, error: '' } }) }, '重命名'),
+        // 解散成功后激活键失效, 显式回到全部而不是让 resolveTab 静默兜底; 失败时保留原地由顶部横幅报错
+        h(Button, { disabled: busy.write, onClick: () => runtime.mutate('tagRemove', { tag: active.label }).then(() => runtime.updateView({ activeTab: ALL_TAB_KEY, tagRename: null })).catch(() => { }) }, '解散')) : null
+      const renameForm = renameDraft ? h('form', { className: 'ssb-inline-form ssb-tag-rename', onSubmit: e => {
+        e.preventDefault()
+        const to = String(renameDraft.to || '').trim()
+        if (!to) { runtime.updateView({ tagRename: { ...renameDraft, error: '标签名不能为空' } }); return }
+        if ([...to].length > 12) { runtime.updateView({ tagRename: { ...renameDraft, error: '标签名最多12字' } }); return }
+        // 激活键跟随新标签名, 否则重命名成功后 tab 条上找不到旧键会掉回全部; 失败保留草稿供改名重试
+        runtime.mutate('tagRename', { from: renameDraft.from, to }).then(() => runtime.updateView({ tagRename: null, activeTab: `${TAG_PREFIX}${to}` })).catch(() => { })
+      } },
+        h('label', { className: 'ssb-inline-field' }, h('span', { className: 'ssb-field-label' }, '标签名'), h('input', { className: 'ssb-input ssb-input-group', value: renameDraft.to, maxLength: 12, onChange: e => runtime.updateView({ tagRename: { ...renameDraft, to: e.target.value, error: '' } }) })),
+        h('button', { type: 'submit', className: 'ssb-button', disabled: busy.write }, '保存'),
+        h(Button, { onClick: () => runtime.updateView({ tagRename: null }) }, '取消'),
+        renameDraft.error ? h('small', { className: 'ssb-form-error', role: 'alert' }, renameDraft.error) : null) : null
       return h('section', { className: 'ssb-list-pane' },
         sourcesBanner,
-        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), stats ? h('span', { className: 'ssb-muted' }, `${w.order.length} 只 · ${stats.up} 涨 ${stats.down} 跌${heldText}${freshnessText(data.quotes) ? ` · ${freshnessText(data.quotes)}` : ''}`) : null, h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
-        !order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
-          h('div', { className: 'ssb-table-scroll', onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
+        h('div', { className: 'ssb-section-head' }, h('h2', null, `自选 · ${w.order.length}`), w.order.length ? h('span', { className: 'ssb-muted' }, statsText) : null, tagTools, h('label', null, h('span', { className: 'ssb-sr' }, '自选排序'), h('select', { value: view.sort, onChange: e => runtime.updateView({ sort: e.target.value }) }, h('option', { value: 'manual' }, '手动顺序'), h('option', { value: 'desc' }, '涨幅优先'), h('option', { value: 'asc' }, '跌幅优先')))),
+        renameForm,
+        tabBar,
+        !w.order.length ? h('div', { className: 'ssb-empty' }, h('p', null, '添加第一只自选，集中查看价格和来源。'), h(Button, { primary: true, onClick: () => runtime.updateView({ view: 'search' }) }, '添加自选')) :
+          h('div', { className: 'ssb-table-scroll', role: 'tabpanel', id: WATCHLIST_PANEL_ID, 'aria-label': active.label, onScroll: e => runtime.updateView({ scrollTop: e.currentTarget.scrollTop }), ref: node => { if (node && Math.abs(node.scrollTop - (view.scrollTop || 0)) > 1) node.scrollTop = view.scrollTop || 0 } },
             // 表头: 让每列含义自解释; 窄容器整体隐藏(降级为行内键值对)
             h('div', { className: 'ssb-row-head', 'aria-hidden': true },
               h('span', { className: 'ssb-grip' }, ''),
@@ -646,16 +689,15 @@ window.__ModuleLoader__.load({
               h('span', { className: 'ssb-cell-amplitude' }, '振幅'),
               h('span', { className: 'ssb-cell-pl' }, '持仓盈亏'),
               h('span', { className: 'ssb-col-status' }, '')),
-            // 容器不再是 list: 每个段是 group, 行装在段内的 list 里.
-            // 直接让 list 装组头的话, 组折叠按钮与工具条都会变成列表子节点
-            h('div', { className: 'ssb-rows' }, ...(() => {
-                // 分组分段: 置顶/各组/未分组都常显段头(一只没归组时也要看得见分组这回事); 置顶区不进组段;
-                // 组序=首现序; 折叠组隐藏成员。分组与排序正交: 全局排序只改组内顺序, 不改分段
-                // 拖拽排序: 提交完整显示序, 折叠组隐藏项保持原槽位由 order 回填
+            h('div', { className: 'ssb-rows', role: 'list' }, ...(() => {
+                // 列表只渲染激活 tab 的成员: 行序取排序后的全量序, 拖拽落的仍是完整自选序。
+                // 置顶是排序权重而不是独立分段, 所以 lane 只按置顶区分, 防止把置顶票拖出置顶段
                 const sequence = []
-                const laneOf = id => `${w.items[id].pinned ? 'p' : 'n'}|${w.items[id].group || ''}`
+                const laneOf = id => String(!!w.items[id].pinned)
                 const commitOrder = (from, over, after) => {
-                  if (!from || !over || from === over || laneOf(from) !== laneOf(over)) return
+                  // 拖拽期间别处可能移除标的或解散标签: 源不在本 tab 的渲染序里就放弃, 否则会提交重复 id
+                  if (!from || !over || from === over || !w.items[from] || !w.items[over] || !sequence.includes(from)) return
+                  if (laneOf(from) !== laneOf(over)) return
                   const merged = dragOrder(sequence, order, from, over, after)
                   if (!merged) return
                   // 失败错误由 action 通道落到顶部横幅, 这里只防未处理拒绝
@@ -665,14 +707,13 @@ window.__ModuleLoader__.load({
                   const item = w.items[id], entry = data.quotes[id], q = entry?.quote
                   sequence.push(id)
                   const direction = toneClass(q?.changePct)
-                  // 列表只显示一个数: 多个成本按等权平均合成一个「持仓成本」
-                  const avgCost = avgCostOf(item.marks)
-                  const plPct = avgCost != null && q?.last != null ? Number((Number(q.last) - avgCost) / avgCost * 100).toFixed(1) : null
+                  // 列表只显示一个数: 多个成本取最低价作为「持仓成本」
+                  const costBase = costBaseOf(item.marks)
+                  const plPct = costBase != null && q?.last != null ? Number((Number(q.last) - costBase) / costBase * 100).toFixed(1) : null
                   const amplitude = q?.high != null && q?.low != null && Number(q.previousClose) > 0 ? Number(((Number(q.high) - Number(q.low)) / Number(q.previousClose)) * 100).toFixed(1) : null
                   const dragging = view.dragId === id
                   const dropEdge = view.dropAt?.id === id ? view.dropAt.after ? ' ssb-drop-after' : ' ssb-drop-before' : ''
                   const canDrag = view.sort === 'manual' && !busy.write
-                  const changeOrder = (from, over, after) => commitOrder(from, over, after)
                   return h(React.Fragment, { key: id },
                     h('div', {
                       className: `ssb-row${view.detailId === id ? ' ssb-selected' : ''}${entry?.health !== 'ok' ? ' ssb-stale' : ''}${dragging ? ' ssb-dragging' : ''}${dropEdge}${item.pinned ? ' ssb-pinned' : ''}`,
@@ -681,20 +722,21 @@ window.__ModuleLoader__.load({
                       onDragStart: e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); runtime.updateView({ dragId: id, dropAt: null }) },
                       onDragEnd: () => runtime.updateView({ dragId: null, dropAt: null }),
                       onDragOver: e => {
-                        if (!view.dragId || view.dragId === id || laneOf(view.dragId) !== laneOf(id)) return
+                        // 拖拽期间别处可能移除标的: 先确认两端都还在, 否则 laneOf 会读 undefined
+                        if (!view.dragId || view.dragId === id || !w.items[view.dragId] || !w.items[id] || laneOf(view.dragId) !== laneOf(id)) return
                         e.preventDefault()
                         const rect = e.currentTarget.getBoundingClientRect()
                         const after = e.clientY > rect.top + rect.height / 2
                         if (view.dropAt?.id !== id || view.dropAt.after !== after) runtime.updateView({ dropAt: { id, after } })
                       },
-                      onDrop: e => { e.preventDefault(); changeOrder(view.dragId, id, view.dropAt?.after === true); runtime.updateView({ dragId: null, dropAt: null }) },
+                      onDrop: e => { e.preventDefault(); commitOrder(view.dragId, id, view.dropAt?.after === true); runtime.updateView({ dragId: null, dropAt: null }) },
                     },
                     h('div', { className: 'ssb-row-main' },
                       h('span', { className: 'ssb-grip', 'aria-hidden': true, title: canDrag ? '拖动排序' : '切回手动顺序后可拖动' }, '⠿'),
                       h('button', { className: 'ssb-stock-name', 'data-security-id': id, onClick: () => open(id), onFocus: () => { if (view.focusId !== id) runtime.updateView({ focusId: id }) }, onBlur: e => { if (!e.relatedTarget?.closest('.ssb-stock-name')) runtime.updateView({ keyboardNavigating: false, frozenOrder: null }) }, onKeyDown: e => {
                     if (e.key === 'Escape') { runtime.updateView({ menuId: null, frozenOrder: null, keyboardNavigating: false, view: 'list' }); return }
                     if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
-                      // 导航序列=实际渲染 DOM 序(分段后与 order 错位), focusId 取目标行 data-security-id 保持状态同步
+                      // 导航序列=实际渲染 DOM 序(tab 过滤后与全量 order 错位), focusId 取目标行 data-security-id 保持状态同步
                       e.preventDefault(); const buttons = [...e.currentTarget.closest('.ssb-rows').querySelectorAll('.ssb-stock-name')]; const at = buttons.indexOf(e.currentTarget), next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
                       const target = buttons[next]; runtime.updateView({ keyboardNavigating: true, frozenOrder: order, focusId: target?.dataset.securityId }); target?.focus()
                     }
@@ -716,48 +758,10 @@ window.__ModuleLoader__.load({
                       amplitude == null ? null : h('span', { className: 'ssb-kv' }, '振', `${amplitude}%`),
                       plPct == null ? null : h('span', { className: `ssb-kv ssb-kv-pl${toneClass(plPct)}` }, '持仓', `${signed(plPct)}%`))))
                 }
-                // 分组是结构、排序是组内顺序, 两者互不排斥: 全局排序时也保留分区, 只是组内按该排序走。
-                // 置顶与未分组也各给一个组头, 否则一只都没归组时整页平铺, 分组功能等于不可发现
-                // 段序固定按自选顺序: 用排序后的 order 取「首现序」会让段落随行情跳动换位,
-                // 正在点的组头会跑掉。排序只决定组内先后
-                const rank = new Map(order.map((id, i) => [id, i]))
-                // 缺 id 时排到最后: 排到最前会让一个不该出现的条目抢走组内首位
-                const sortedIds = ids => ids.slice().sort((left, right) => (rank.get(left) ?? Infinity) - (rank.get(right) ?? Infinity))
-                const slices = groupSlices(w.order, w.items)
-                const toggleGroup = (key, open) => runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [key]: open } })
-                // 组名来自用户输入: 直接取 groupCollapsed[name] 会让 constructor/toString 这类名字读到原型链上的成员,
-                // 被误判成「已折叠」, 整组不渲染
-                const collapsedOf = key => Object.hasOwn(view.groupCollapsed || {}, key) && !!view.groupCollapsed[key]
-                const head = (key, label, ids, actions) => {
-                  const open = !collapsedOf(key)
-                  const gs = ids.reduce((acc, id) => { const pct = Number(data.quotes[id]?.quote?.changePct); if (!Number.isNaN(pct)) { acc.up += pct > 0; acc.down += pct < 0 } return acc }, { up: 0, down: 0 })
-                  // role=presentation 只是把组头从无障碍树里摘掉, 组折叠按钮与工具条照样会
-                  // 变成列表的直接子节点. 所以段自己是一个 group, 行装在段内的 list 里
-                  return h('div', { key: 'sec-' + key, role: 'group', 'aria-label': label },
-                    h('div', { className: 'ssb-group-head' },
-                      h('span', { className: 'ssb-group-toggle', role: 'button', tabIndex: 0, 'aria-expanded': open, 'aria-label': `${label} 分组折叠`, onClick: () => toggleGroup(key, open), onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroup(key, open) } } }, open ? '▾' : '▸', ` ${label} · ${ids.length} 只 · ${gs.up} 涨 ${gs.down} 跌`),
-                      h('span', { className: 'ssb-toolbar' }, actions)),
-                    open ? h('div', { role: 'list', 'aria-label': label }, ...ids.map(rowOf)) : null)
-                }
-                const section = (key, label, ids, actions) => head(key, label, ids, actions)
-                const out = []
-                if (slices.pinned.length) out.push(section(PINNED_KEY, '置顶', sortedIds(slices.pinned), null))
-                for (const { name, ids } of slices.groups) {
-                  const actions = [
-                    // 折叠态迁移必须等写入成功: 名字不合规时服务端会 400, 先迁移会让旧组突然展开
-                    h(Button, { key: 'rename', onClick: () => {
-                      const to = prompt('重命名分组', name)?.trim()
-                      if (!to) return
-                      quiet(() => runtime.mutate('groupRename', { from: name, to }))().then(() => { if (to !== name) runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [to]: collapsedOf(name), [name]: undefined } }) }).catch(() => { })
-                    } }, '重命名'),
-                    h(Button, { key: 'drop', disabled: busy.write, onClick: () => { quiet(() => runtime.mutate('groupRemove', { group: name }))(); runtime.updateView({ groupCollapsed: { ...view.groupCollapsed, [name]: undefined } }) } }, '解散'),
-                  ]
-                  out.push(section(name, name, sortedIds(ids), actions))
-                }
-                if (slices.ungrouped.length) out.push(section(REST_KEY, '未分组', sortedIds(slices.ungrouped), null))
-                return out
+                return tabOrder.map(rowOf)
               })())))
-    }    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
+    }
+    // ---- KlineView: lightweight-charts 图表视图(设计"client 详情重构"节十步数据流) ----
     const PERIODS = [{ key: 'trend', label: '分时' }, { key: '1d', label: '日K' }, { key: '1w', label: '周K' }, { key: '1M', label: '月K' }]
     const GUIDE_KEY = 'ssb-guides'
     const GUIDE_DEFAULT = { preClose: true, marks: true, highLow: false, ma: true, ema: false, boll: false, bbi: false }
@@ -951,10 +955,10 @@ window.__ModuleLoader__.load({
         }
       }, [kline?.candles, kline?.preClose, wantTrend, item.priceScale, guides])
       const marks = item.marks || []
-      const avgCost = avgCostOf(marks)
+      const costBase = costBaseOf(marks)
       // 盈亏一律以最后一根收盘为准, 跟图例里的成分保持一致
       const lastClose = kline?.candles?.length ? finiteOr(kline.candles[kline.candles.length - 1].close) : null
-      const costPct = avgCost != null && Number.isFinite(lastClose) ? (lastClose - avgCost) / avgCost * 100 : null
+      const costPct = costBase != null && Number.isFinite(lastClose) ? (lastClose - costBase) / costBase * 100 : null
       // 把一套主题色铺满整张图: 背景/网格/两轴边框/主序列/成交量/指标线/参考线。
       // 首灌与换主题共用同一份, 免得两处漏项(分时面积序列的键名与蜡烛不同)
       function repaintChart(t) {
@@ -1169,10 +1173,10 @@ window.__ModuleLoader__.load({
         legend ? h('div', { className: 'ssb-kline-legend' },
           // 成本与卖价都是报价要素, 跟开高低收放同一行; 放在指标行会被挤到第三行去
           h('div', { className: 'ssb-legend-row' }, ...legend.quote.map(([label, value, tone]) => h('span', { key: label, className: `ssb-legend-item${tone || ''}` }, h('span', { className: 'ssb-legend-label' }, label), value == null ? '—' : value)),
-            avgCost == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.filter(m => m.kind === 'cost').length > 1 ? `成本(${marks.filter(m => m.kind === 'cost').length}笔均价)` : '成本'), priceTextOf(avgCost, item.priceScale), costPct == null ? null : h('span', { className: `ssb-legend-pct${toneClass(costPct)}` }, `${signed(costPct.toFixed(2))}%`)),
+            costBase == null ? null : h('span', { className: 'ssb-legend-item ssb-legend-cost' }, h('span', { className: 'ssb-legend-label' }, marks.filter(m => m.kind === 'cost').length > 1 ? '成本(最低)' : '成本'), priceTextOf(costBase, item.priceScale), costPct == null ? null : h('span', { className: `ssb-legend-pct${toneClass(costPct)}` }, `${signed(costPct.toFixed(2))}%`)),
             // 目标位只在图例里出现一次: 线在价格轴上, 具体数值看这里
             ...marks.filter(mark => mark.kind === 'target').map(mark => {
-              const pct = markPct(mark, lastClose, avgCost)
+              const pct = markPct(mark, lastClose, costBase)
               return h('span', { key: mark.id, className: 'ssb-legend-item ssb-legend-target' }, h('span', { className: 'ssb-legend-label' }, '卖价'), priceTextOf(mark.price, item.priceScale), pct == null ? null : h('span', { className: `ssb-legend-pct${toneClass(pct)}` }, `${signed(pct.toFixed(2))}%`))
             })),
           legend.series.length ? h('div', { className: 'ssb-legend-row' },
@@ -1251,12 +1255,14 @@ window.__ModuleLoader__.load({
       const peekActions = inWatchlist ? null : h('div', { className: 'ssb-toolbar' }, h(Button, { primary: true, disabled: state.busy.write, onClick: quiet(() => runtime.mutate('add', { securityId: item.id })) }, '加自选'))
       // 价格标记: 每条带语义(成本/卖价), 各自算盈亏, 图上一条线
       const marks = item.marks || []
-      const avgCost = avgCostOf(marks)
+      const costBase = costBaseOf(marks)
       const lastN = Number(q?.last)
-      const costPl = avgCost != null && lastN ? { amount: Number((lastN - avgCost).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - avgCost) / avgCost * 100).toFixed(1)) } : null
+      const costPl = costBase != null && lastN ? { amount: Number((lastN - costBase).toFixed(item.priceScale ?? 2)), pct: Number(((lastN - costBase) / costBase * 100).toFixed(1)) } : null
       const applyMarks = next => quiet(() => runtime.mutate('marks', { securityId: item.id, marks: next }))
       // 增删都是整组替换: 协议面只有一个操作, 也不会出现半更新的中间态
-      const markForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => {
+      // 标记类型是成组分类切换, 用分段控件而不是两个按钮: 选中态不再靠"黑底按钮"承担
+      const markKind = view.markDraft?.kind === 'target' ? 'target' : 'cost'
+      const markForm = inWatchlist ? h('form', { className: 'ssb-inline-form', onSubmit: e => {
         e.preventDefault()
         const raw = String(view.markDraft?.price ?? '').trim()
         const price = Number(raw)
@@ -1267,28 +1273,70 @@ window.__ModuleLoader__.load({
         applyMarks([...marks, { id: crypto.randomUUID().slice(0, 8), price, kind }])()
         runtime.updateView({ markDraft: null, markError: '' })
       } },
-        h('label', null, '价格标记', h('input', { value: view.markDraft?.price ?? '', inputMode: 'decimal', onChange: e => runtime.updateView({ markDraft: { kind: view.markDraft?.kind ?? 'cost', price: e.target.value }, markError: '' }), placeholder: '输入价格' })),
-        h('div', { className: 'ssb-toolbar', role: 'group', 'aria-label': '标记类型' },
-          h(Button, { primary: (view.markDraft?.kind ?? 'cost') === 'cost', onClick: () => runtime.updateView({ markDraft: { kind: 'cost', price: view.markDraft?.price ?? '' } }) }, '成本'),
-          h(Button, { primary: view.markDraft?.kind === 'target', onClick: () => runtime.updateView({ markDraft: { kind: 'target', price: view.markDraft?.price ?? '' } }) }, '卖价')),
-        h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '添加标记'),
-        view.markError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.markError) : null) : null
+        h('div', { className: 'ssb-seg', role: 'group', 'aria-label': '标记类型' },
+          h('button', { type: 'button', className: `ssb-seg-opt${markKind === 'cost' ? ' ssb-seg-on' : ''}`, 'aria-pressed': markKind === 'cost', onClick: () => runtime.updateView({ markDraft: { kind: 'cost', price: view.markDraft?.price ?? '' } }) }, '成本'),
+          h('button', { type: 'button', className: `ssb-seg-opt${markKind === 'target' ? ' ssb-seg-on' : ''}`, 'aria-pressed': markKind === 'target', onClick: () => runtime.updateView({ markDraft: { kind: 'target', price: view.markDraft?.price ?? '' } }) }, '卖价')),
+        h('label', { className: 'ssb-inline-field' },
+          h('span', { className: 'ssb-field-label' }, '价格'),
+          h('input', { className: 'ssb-input ssb-input-num', value: view.markDraft?.price ?? '', inputMode: 'decimal', onChange: e => runtime.updateView({ markDraft: { kind: view.markDraft?.kind ?? 'cost', price: e.target.value }, markError: '' }), placeholder: '输入价格' })),
+        h('button', { type: 'submit', className: 'ssb-button ssb-primary', disabled: state.busy.write }, '添加标记'),
+        view.markError ? h('small', { className: 'ssb-form-error', role: 'alert' }, view.markError) : null) : null
       const markList = marks.length ? h('ul', { className: 'ssb-mark-list', 'aria-label': '价格标记' }, ...marks.map(mark => {
-        const pct = markPct(mark, lastN, avgCost)
+        const pct = markPct(mark, lastN, costBase)
         return h('li', { key: mark.id, className: 'ssb-mark-row' },
           h('span', { className: 'ssb-mark-kind' }, mark.kind === 'cost' ? '成本' : '卖价'),
           h('span', { className: 'ssb-number' }, priceTextOf(mark.price, item.priceScale)),
-          h('span', { className: `ssb-small${toneClass(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
+          h('span', { className: `ssb-mark-pct${toneClass(pct)}` }, pct == null ? '—' : `${signed(pct.toFixed(2))}%`),
           h(Button, { danger: true, disabled: state.busy.write, onClick: applyMarks(marks.filter(other => other.id !== mark.id)) }, '删除'))
       })) : null
-      // 分组表单(B1): 单标签, 空=移出分组; 草稿 view.groupDraft
-      const groupForm = inWatchlist ? h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); const raw = view.groupDraft?.trim() ?? item.group; if ([...raw].length > 12) { runtime.updateView({ groupError: '分组名最多12字' }); return } quiet(() => runtime.mutate('group', { securityIds: [item.id], group: raw }))() } }, h('label', null, '设分组', h('input', { value: view.groupDraft ?? (item.group || ''), maxLength: 12, onChange: e => runtime.updateView({ groupDraft: e.target.value, groupError: '' }), placeholder: '留空移出分组' })), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存分组'), view.groupError ? h('small', { className: 'ssb-muted', role: 'alert' }, view.groupError) : null) : null
-      const costBlock = costPl ? h('div', { className: `ssb-number${toneClass(costPl.amount)}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本均价 ${priceTextOf(avgCost, item.priceScale)}`)) : null
-      const watchActions = inWatchlist ? h(React.Fragment, null, markForm, markList, groupForm, h('form', { className: 'ssb-alias-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } }, h('label', null, '自选别名', h('input', { value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })), h('small', { id: 'ssb-alias-hint', className: 'ssb-muted' }, '最多30个字符，留空显示正式名称'), h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
-        // 行内不再挂操作菜单, 排序走拖拽, 剩下的置顶与移出收敛到这里: 低频、且删除需要确认, 不适合出现在每一行
-        h('div', { className: 'ssb-alias-form' }, h('span', { className: 'ssb-muted ssb-small' }, '自选管理'), h('div', { className: 'ssb-toolbar' },
-          h(Button, { disabled: state.busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: item.id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
-          h(Button, { danger: true, disabled: state.busy.write, onClick: () => { if (!confirm(`从自选移除「${item.alias || item.officialName}」?`)) return; quiet(() => runtime.mutate('remove', { securityId: item.id }))(); runtime.updateView({ detailId: null, selectedId: null, overlay: null, focusId: null }) } }, '移出自选')))) : null
+      // 分组标签: 一只票可同时属于多个分组, 整组替换提交; 已有标签 pill 一键加入, 新标签走输入框
+      const tags = item.tags || []
+      const allTags = [...new Set(Object.values(data.control.watchlist.items).flatMap(other => other.tags || []))]
+      // 失败就地报错: 顶部横幅在抽屉之后, 详情里点标签出错时会被盖住
+      const applyTags = next => () => runtime.mutate('tags', { securityId: item.id, tags: next }).then(() => runtime.updateView({ tagError: '' })).catch(e => runtime.updateView({ tagError: e?.message || '标签更新失败' }))
+      const tagForm = inWatchlist ? h('div', { className: 'ssb-tag-editor' },
+        tags.length ? h('div', { className: 'ssb-tag-chips', role: 'list', 'aria-label': '当前分组标签' }, ...tags.map(tag => h('span', { key: tag, className: 'ssb-tag-chip', role: 'listitem' }, tag,
+          h('button', { type: 'button', className: 'ssb-tag-x', 'aria-label': `移除标签 ${tag}`, disabled: state.busy.write, onClick: applyTags(tags.filter(other => other !== tag)) }, '×'))))
+          : h('p', { className: 'ssb-form-hint' }, '还没有分组标签；不加标签的票会落在「未分组」tab。'),
+        (() => {
+          const addable = allTags.filter(tag => !tags.includes(tag))
+          return addable.length ? h('div', { className: 'ssb-tag-pills', role: 'group', 'aria-label': '已有分组标签' }, ...addable.map(tag => h('button', { key: tag, type: 'button', className: 'ssb-tag-pill', disabled: state.busy.write || tags.length >= MAX_TAGS, onClick: applyTags([...tags, tag]) }, `+ ${tag}`))) : null
+        })(),
+        h('form', { className: 'ssb-inline-form', onSubmit: e => {
+          e.preventDefault()
+          const raw = String(view.tagDraft || '').trim()
+          if (!raw) { runtime.updateView({ tagError: '标签名不能为空' }); return }
+          if ([...raw].length > 12) { runtime.updateView({ tagError: '标签名最多12字' }); return }
+          if (tags.includes(raw)) { runtime.updateView({ tagError: '已有同名标签' }); return }
+          if (tags.length >= MAX_TAGS) { runtime.updateView({ tagError: `每只最多 ${MAX_TAGS} 个标签` }); return }
+          // 只有写入成功才清草稿: 失败要留着让用户改
+          runtime.mutate('tags', { securityId: item.id, tags: [...tags, raw] }).then(() => runtime.updateView({ tagDraft: '', tagError: '' })).catch(() => { })
+        } },
+          h('label', { className: 'ssb-inline-field' }, h('span', { className: 'ssb-field-label' }, '新标签'), h('input', { className: 'ssb-input ssb-input-group', value: view.tagDraft || '', maxLength: 12, onChange: e => runtime.updateView({ tagDraft: e.target.value, tagError: '' }) })),
+          h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '添加标签'),
+          view.tagError ? h('small', { className: 'ssb-form-error', role: 'alert' }, view.tagError) : null)) : null
+      const costBlock = costPl ? h('div', { className: `ssb-number${toneClass(costPl.amount)}` }, h('span', null, `持仓盈亏 ${signed(costPl.amount)} · ${signed(costPl.pct)}%`), h('span', { className: 'ssb-muted ssb-small' }, `成本价 ${priceTextOf(costBase, item.priceScale)}`)) : null
+      // 自选设置: 低频管理动作收进区块头部, 表单按「价格标记 / 分组与别名」两栏并排,
+      // 不再让四段表单各自占一列、按钮各自落一行
+      const watchActions = inWatchlist ? h(React.Fragment, null,
+        h('div', { className: 'ssb-forms-head' },
+          h('h3', null, '自选设置'),
+          h('div', { className: 'ssb-toolbar ssb-forms-actions' },
+            h(Button, { disabled: state.busy.write, onClick: quiet(() => runtime.mutate('pin', { securityId: item.id, pinned: !item.pinned })) }, item.pinned ? '取消置顶' : '置顶'),
+            h(Button, { danger: true, disabled: state.busy.write, onClick: () => { if (!confirm(`从自选移除「${item.alias || item.officialName}」?`)) return; quiet(() => runtime.mutate('remove', { securityId: item.id }))(); runtime.updateView({ detailId: null, selectedId: null, overlay: null, focusId: null }) } }, '移出自选'))),
+        h('div', { className: 'ssb-forms-body' },
+          h('section', { className: 'ssb-form-block' },
+            h('h4', null, '价格标记'),
+            markForm,
+            markList,
+            h('p', { className: 'ssb-form-hint' }, '多笔成本取最低价作为成本，盈亏按它算；每条成本单独显示与现价的百分比，卖价收益也按成本算。')),
+          h('section', { className: 'ssb-form-block' },
+            h('h4', null, '分组标签与别名'),
+            tagForm,
+            h('form', { className: 'ssb-inline-form', onSubmit: e => { e.preventDefault(); quiet(() => runtime.mutate('alias', { securityId: item.id, alias: view.alias }))() } },
+              h('label', { className: 'ssb-inline-field' }, h('span', { className: 'ssb-field-label' }, '别名'), h('input', { className: 'ssb-input ssb-input-alias', value: view.alias || '', maxLength: 30, onChange: e => runtime.updateView({ alias: e.target.value }), 'aria-describedby': 'ssb-alias-hint' })),
+              h('button', { type: 'submit', className: 'ssb-button', disabled: state.busy.write }, '保存别名')),
+            h('p', { id: 'ssb-alias-hint', className: 'ssb-form-hint' }, '别名最多 30 个字符,留空显示正式名称。')))) : null
       return h('aside', { className: 'ssb-detail' }, h('div', { className: 'ssb-section-head' }, h('h2', null, item.alias || item.officialName), inWatchlist && order.length > 1 ? h('div', { className: 'ssb-toolbar' }, h(Button, { onClick: () => openNeighbor(neighbor(-1)) }, '上一只'), h(Button, { onClick: () => openNeighbor(neighbor(1)) }, '下一只')) : null),
         h('p', { className: 'ssb-muted' }, `${item.officialName} · ${marketLabel} ${item.code}${currency ? ` · ${currency}` : ''}`),
         h('div', { className: `ssb-detail-price ssb-number${direction}` }, priceTextOf(q?.last, item.priceScale), h('span', { className: 'ssb-small' }, q?.changePct == null ? '—' : `${signed(q.changePct)}%`)),
@@ -1527,22 +1575,20 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': picker ? '完成选择' : '选择观测目标', 'aria-expanded': picker, onClick: () => onPicker(!picker) }, picker ? '✓' : '☰'),
         h('button', { type: 'button', className: 'ssb-float-icon', 'aria-label': '关闭悬浮盯盘', onClick: () => onClose() }, '✕'))
     }
+    // 多标签下一只票会同时属于多个分组, 按段列会重复出现: 选择器平铺全部标的, 顶部只留计数与全选
     function FloatPicker({ order, items, picked, onPicked }) {
-      const slices = groupSlices(order, items)
       const toggleMany = (ids, on) => { const set = new Set(picked); ids.forEach(id => on ? set.add(id) : set.delete(id)); onPicked([...set]) }
-      const block = (key, label, ids) => {
-        if (!ids.length) return null
-        const allOn = ids.every(id => picked.includes(id))
-        return h('div', { key, className: 'ssb-picker-group' },
-          h('div', { className: 'ssb-picker-head' },
-            h('span', null, label ? `${label} · ${ids.length}` : `未分组 · ${ids.length}`),
+      // 与 tagTabs 同口径: 只有确实存在的标的参与勾选, 否则渲染时读不到名字会整块浮窗消失
+      const ids = order.filter(id => items[id])
+      const allOn = ids.length > 0 && ids.every(id => picked.includes(id))
+      return h('div', { className: 'ssb-float-picker' }, ...(ids.length
+        ? [
+          h('div', { key: 'summary', className: 'ssb-picker-head' },
+            h('span', null, `已选 ${ids.filter(id => picked.includes(id)).length}/${ids.length}`),
             h('button', { type: 'button', className: 'ssb-picker-all', onClick: () => toggleMany(ids, !allOn) }, allOn ? '全不选' : '全选')),
-          ...ids.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => toggleMany([id], !picked.includes(id)) })))
-      }
-      const hasSections = slices.pinned.length || slices.groups.length
-      return h('div', { className: 'ssb-float-picker' }, ...(order.length
-        ? [block('pinned', '置顶', slices.pinned), ...slices.groups.map(group => block(`grp-${group.name}`, group.name, group.ids)), block('ungrouped', hasSections ? '未分组' : '', slices.ungrouped)]
-        : [h('p', { className: 'ssb-muted' }, '自选为空')]))
+          ...ids.map(id => h(Toggle, { key: id, label: items[id].alias || items[id].officialName, checked: picked.includes(id), onChange: () => toggleMany([id], !picked.includes(id)) })),
+        ]
+        : [h('p', { key: 'empty', className: 'ssb-muted' }, '自选为空')]))
     }
     function FloatList({ picked, items, securityId, entryOf, onPick, onTip, onLeave, onScroll }) {
       return h('div', { className: 'ssb-float-list', onScroll },
@@ -1942,7 +1988,15 @@ window.__ModuleLoader__.load({
 .ssb-root *,.ssb-float-root * { box-sizing:border-box; }
 .ssb-page { max-width:1200px; margin:0 auto; padding:20px; }
 .ssb-root h1 { margin:0; font-size:20px; line-height:1.3; }.ssb-root h2 { margin:0; font-size:16px; line-height:1.3; }.ssb-root h3 { margin:24px 0 12px; font-size:14px; }
-.ssb-tablist { display:flex; gap:4px; border-bottom:1px solid var(--ssb-border); margin:12px 0 16px; }.ssb-tab { font:inherit; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); }.ssb-header,.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header { justify-content:space-between; margin-bottom:24px; }.ssb-header p { margin:6px 0 0; }.ssb-section-head { justify-content:space-between; padding:12px 16px; }.ssb-toolbar { margin:12px 0; }
+.ssb-tablist { display:flex; gap:4px; border-bottom:1px solid var(--ssb-border); margin:12px 0 16px; }
+/* 自选分组 tab: 横向可滚动, 与设置页 tab 同一形态, 只在容器边距上去掉页面级间距 */
+.ssb-tabs { display:flex; gap:4px; border-bottom:1px solid var(--ssb-border); padding:0 16px; overflow-x:auto; }.ssb-tabs .ssb-tab { flex:0 0 auto; }
+/* 分组标签编辑: 已选 tags 用 chips, 可加入的已有标签用虚线 pill, 都是可点按钮而不是纯装饰 */
+.ssb-tag-editor { display:grid; gap:8px; }.ssb-tag-chips,.ssb-tag-pills { display:flex; flex-wrap:wrap; gap:6px; }
+.ssb-tag-chip { display:inline-flex; align-items:center; height:24px; padding:0 4px 0 8px; border-radius:999px; background:var(--ssb-accent-wash); color:var(--ssb-accent); font-size:11px; }
+.ssb-tag-x { display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:24px; border:0; background:transparent; color:inherit; font:inherit; line-height:1; padding:0; cursor:pointer; }.ssb-tag-x:hover { color:var(--ssb-danger); }
+.ssb-tag-pill { border:1px dashed var(--ssb-border); background:transparent; color:var(--ssb-text-sub); border-radius:999px; height:24px; padding:0 10px; font:inherit; font-size:11px; cursor:pointer; }.ssb-tag-pill:hover { border-color:var(--ssb-accent); color:var(--ssb-accent); }
+.ssb-tag-rename { padding:0 16px 8px; }.ssb-section-head .ssb-toolbar { margin:0; }.ssb-tab { font:inherit; color:var(--ssb-text-sub); background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; cursor:pointer; }.ssb-tab-on { color:var(--ssb-text); border-bottom-color:var(--ssb-accent); }.ssb-header,.ssb-toolbar,.ssb-section-head,.ssb-row-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-header { justify-content:space-between; margin-bottom:24px; }.ssb-header p { margin:6px 0 0; }.ssb-section-head { justify-content:space-between; padding:12px 16px; }.ssb-toolbar { margin:12px 0; }
 .ssb-button { color:var(--ssb-text); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:28px; padding:4px 12px; font:inherit; cursor:pointer; transition:background .15s; }.ssb-button:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-button.ssb-primary { background:var(--ssb-accent); color:var(--ssb-on-accent); border-color:var(--ssb-accent); }.ssb-button.ssb-primary:hover { background:var(--ssb-accent-deep); }.ssb-button.ssb-danger { color:var(--ssb-danger); }.ssb-root button:disabled { opacity:.5; cursor:not-allowed; }.ssb-root :focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }
 .ssb-root input:not([type=checkbox]),.ssb-root select { background:var(--ssb-bg); color:var(--ssb-text); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); min-height:32px; padding:6px 8px; font:inherit; max-width:100%; }.ssb-field { display:flex; flex-direction:column; gap:6px; min-width:0; }.ssb-muted { color:var(--ssb-text-sub); }.ssb-code,.ssb-source { display:block; font-size:11px; }.ssb-code,.ssb-number { font-family:var(--ds-font-family-code); font-variant-numeric:tabular-nums; }.ssb-code { color:var(--ssb-text-sub); margin-top:4px; }.ssb-small { font-size:13px; margin-left:12px; }
 .ssb-content { display:grid; grid-template-columns:minmax(0,1fr); gap:16px; }.ssb-overlay { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); display:flex; z-index:10; animation:ssb-fade .15s ease-out; }.ssb-drawer { animation:ssb-slide .2s ease-out; }.ssb-modal-card { animation:ssb-pop .18s ease-out; }@keyframes ssb-fade { from { opacity:0; } }@keyframes ssb-slide { from { transform:translateX(40px); opacity:0; } }@keyframes ssb-pop { from { transform:scale(.96); opacity:0; } }.ssb-overlay-drawer { justify-content:flex-end; }.ssb-overlay-modal { align-items:center; justify-content:center; padding:24px; }.ssb-drawer { width:min(80vw,94vw); height:100%; overflow:auto; background:var(--ssb-bg); border-left:1px solid var(--ssb-border); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-modal-card { width:min(880px,94vw); max-height:88vh; overflow:auto; background:var(--ssb-bg); border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-lg); box-shadow:var(--dsw-shadow-lv3); padding:16px; }.ssb-drawer-head { display:flex; justify-content:flex-end; }.ssb-drawer .ssb-detail, .ssb-drawer .ssb-settings { border:0; padding:0; background:transparent; }.ssb-list-pane,.ssb-detail { border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-md); min-width:0; }.ssb-detail { padding:16px; background:var(--ssb-bg-sub); }.ssb-detail .ssb-section-head { padding:0; }.ssb-detail-price { font-size:28px; margin:20px 0 4px; }.ssb-table-scroll { max-height:65vh; overflow:auto; border-radius:0 0 var(--ssb-radius-md) var(--ssb-radius-md); }.ssb-foot { margin:12px 0 4px; }.ssb-table { width:100%; border-collapse:collapse; table-layout:auto; }.ssb-table th { color:var(--ssb-text-sub); font-weight:400; font-size:11px; background:var(--ssb-bg-sub); position:sticky; top:0; z-index:1; }.ssb-table td,.ssb-table th { padding:10px 12px; text-align:left; border-top:1px solid var(--ssb-border); }.ssb-table td.ssb-number { text-align:right; white-space:nowrap; }.ssb-table tr:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-selected { background:var(--ssb-accent-wash); }.ssb-stock-name { font:inherit; color:inherit; background:transparent; border:0; padding:0; text-align:left; cursor:pointer; }.ssb-stale td.ssb-number { opacity:.65; }.ssb-up { color:var(--ssb-danger); }.ssb-down { color:var(--ssb-ok); }.ssb-green-up .ssb-up { color:var(--ssb-ok); }.ssb-green-up .ssb-down { color:var(--ssb-danger); }
@@ -2048,9 +2102,8 @@ window.__ModuleLoader__.load({
 .ssb-float-live:disabled { opacity:.5; cursor:not-allowed; }
 /* 列表模式: 每行一只标的, 点击切到该只的图形 */
 .ssb-float-list,.ssb-float-picker { flex:0 1 auto; min-height:0; display:flex; flex-direction:column; gap:2px; max-height:min(300px, 45vh); overflow:auto; }
-.ssb-picker-group { display:flex; flex-direction:column; gap:2px; }
 .ssb-picker-head { display:flex; align-items:center; gap:6px; padding:4px 2px 2px; font-size:11px; color:var(--ssb-text-dim); border-top:1px solid var(--ssb-border); }
-.ssb-picker-group:first-child .ssb-picker-head { border-top:none; }
+.ssb-float-picker .ssb-picker-head:first-child { border-top:none; }
 .ssb-picker-head > span { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ssb-picker-all { flex:0 0 auto; padding:1px 6px; font:inherit; font-size:11px; color:var(--ssb-accent); background:transparent; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-picker-all:hover { border-color:var(--ssb-accent); }
@@ -2066,9 +2119,8 @@ window.__ModuleLoader__.load({
 .ssb-float-mode { padding:2px 6px; font:inherit; font-size:11px; color:var(--ssb-text-sub); background:transparent; border:1px solid transparent; border-radius:var(--ssb-radius-sm); cursor:pointer; }
 .ssb-float-mode.on { color:var(--ssb-text); border-color:var(--ssb-border); background:var(--ssb-bg-sub); }
 .ssb-float-picker .ssb-switch { font-size:11px; }
-.ssb-group-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; height:32px; padding:0 12px; border-top:1px solid var(--ssb-border); background:var(--ssb-bg-sub); font-size:12px; color:var(--ssb-text-sub); }
 .ssb-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ssb-ok); flex:0 0 auto; }.ssb-dot.ssb-dot-warn { background:var(--ssb-warn); }.ssb-dot.ssb-dot-danger { background:var(--ssb-danger); }.ssb-dot.ssb-dot-idle { background:var(--ssb-text-dim); }
-.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-mark-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }.ssb-mark-row { display:flex; align-items:center; gap:8px; }.ssb-mark-row .ssb-number { flex:1; }.ssb-mark-kind { min-width:2.5em; color:var(--ssb-text-dim); font-size:12px; }.ssb-credential { display:grid; gap:8px; justify-items:start; }.ssb-credential .ssb-field { width:100%; }.ssb-credential-actions { display:flex; align-items:center; gap:8px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-alias-form { display:grid; gap:6px; margin-top:0; }.ssb-alias-form label { display:grid; gap:6px; }.ssb-alias-form button { justify-self:start; min-width:96px; }.ssb-detail-forms { display:grid; grid-template-columns:repeat(auto-fit,minmax(176px,1fr)); gap:16px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }
+.ssb-facts { display:grid; grid-template-columns:1fr 1fr; gap:8px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-mark-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; }.ssb-mark-row { display:grid; grid-template-columns:44px minmax(0,1fr) 72px auto; align-items:center; gap:8px; min-height:32px; border-bottom:1px solid var(--ssb-border); }.ssb-mark-row:last-child { border-bottom:0; }.ssb-mark-row .ssb-number { justify-self:end; }.ssb-mark-row .ssb-button { min-height:24px; padding:2px 8px; border-color:transparent; }.ssb-mark-row .ssb-button:hover { background:color-mix(in srgb, var(--ssb-danger) 10%, transparent); }.ssb-mark-kind { color:var(--ssb-text-sub); font-size:11px; }.ssb-mark-pct { justify-self:end; font-variant-numeric:tabular-nums; }.ssb-credential { display:grid; gap:8px; justify-items:start; }.ssb-credential .ssb-field { width:100%; }.ssb-credential-actions { display:flex; align-items:center; gap:8px; }.ssb-facts dt { color:var(--ssb-text-sub); }.ssb-facts dd { margin:0; text-align:right; overflow-wrap:anywhere; font-family:var(--ds-font-family-code); }.ssb-detail-forms { display:grid; gap:12px; border-top:1px solid var(--ssb-border); padding-top:16px; margin-top:16px; }.ssb-forms-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }.ssb-forms-head h3 { margin:0; font-size:12px; font-weight:600; color:var(--ssb-text-sub); }.ssb-forms-actions { margin:0; }.ssb-forms-body { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px 32px; align-items:start; }.ssb-form-block { display:grid; gap:8px; align-content:start; min-width:0; max-width:480px; }.ssb-form-block h4 { margin:0; font-size:11px; font-weight:400; color:var(--ssb-text-dim); }.ssb-inline-form { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }.ssb-inline-field { display:flex; align-items:center; gap:8px; min-width:0; }.ssb-field-label { flex:0 0 auto; color:var(--ssb-text-sub); font-size:12px; }.ssb-root .ssb-inline-form input { min-height:28px; padding:4px 8px; font-size:12px; }.ssb-input-num { width:112px; }.ssb-input-group,.ssb-input-alias { width:168px; }.ssb-form-hint { margin:0; color:var(--ssb-text-dim); font-size:11px; }.ssb-form-error { color:var(--ssb-text-sub); font-size:11px; }.ssb-seg { display:inline-flex; height:28px; border:1px solid var(--ssb-border); border-radius:var(--ssb-radius-sm); overflow:hidden; background:var(--ssb-bg); }.ssb-seg-opt { border:0; background:transparent; color:var(--ssb-text-sub); font:inherit; font-size:12px; padding:0 10px; cursor:pointer; transition:background .15s; }.ssb-seg-opt + .ssb-seg-opt { border-left:1px solid var(--ssb-border); }.ssb-seg-opt:hover { background:var(--dsw-alias-interactive-bg-hover); }.ssb-seg-opt.ssb-seg-on { background:var(--ssb-accent-wash); color:var(--ssb-accent); font-weight:500; }
 .ssb-settings-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }.ssb-settings-intro { min-width:0; display:grid; gap:6px; }.ssb-settings-intro p { margin:0; }
 .ssb-provider-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; }.ssb-provider-adapter { flex:0 0 240px; }.ssb-provider-switches { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }.ssb-provider-desc { margin:8px 0 0; }.ssb-provider-advanced { margin-top:8px; }.ssb-provider-advanced > summary { cursor:pointer; }
 /* 摘要行: 数据源与市场默认收成一行, 点开才展开编辑区 */
@@ -2176,7 +2228,7 @@ window.__ModuleLoader__.load({
           return () => { for (const stop of disposers.reverse()) stop() }
         }, 'stock-assistant main panel')
       },
-      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, groupSlices, avgCostOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
+      __testing: { createPageRuntime, StockPage, FloatingTicker, FloatHeader, FloatPicker, FloatList, FloatChart, FloatFoot, Sparkline, dragOrder, quiet, seriesMA, seriesEMA, seriesBoll, seriesBBI, readPref, writePref, klineKeyOf, klineShipPlan, finiteOr, formatAmount, toneClass, priceTextOf, tagTabs, resolveTab, costBaseOf, markPct, pollPlan, QUIET_STATES, POLL_EVERY, floatPollDelay, timestampOf, floatFreshness, priceTimeOf, clockText, staleAfter, markAlertOf, markAlertText, deliverMarkAlert, sparkIndexAt, candleTimeText, quoteTipLines, crosshairTipLines, crosshairTimeText, timeKeyOf, crosshairTipStyle, rowTipPositionOf, sparkRangeOf, sparkTicksOf, seriesPaintPlan, sanitizeCandles, themeSignature },
     }
   },
 })

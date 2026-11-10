@@ -1,4 +1,4 @@
-// K线缓存: 复用 storageDomain.cache 表壳, key 命名空间隔离, TTL 与 routingRevision 双失效
+// K线缓存: 只存内存(TTL 与 routingRevision 双失效)。键里的冒号是命名空间, 不落盘就没有文件名约束
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 // TTL 唯一事实源(design.md 数据结构节): trend 0=不缓存, 其余按周期

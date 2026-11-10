@@ -1,5 +1,5 @@
 // 公共依赖装载契约(client-dependency 规约):总线订阅为硬消费,模块表缺失即 factory
-// 抛错交装载层判定,禁止吞成静默禁用(单独安装且未代挂占位时唯一可诊断路径);
+// 抛错交装载层判定,禁止吞成静默禁用(装载行缺失时的唯一可诊断路径);
 // react/react-dom 由宿主种子表提供,缺席属宿主异常,防御性干净禁用必须显式报错。
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'

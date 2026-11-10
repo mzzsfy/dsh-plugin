@@ -91,8 +91,11 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
 ## GUI 场景
 
 - **SC-11 状态投影**:GET /api/tool-gate/state 返回 { enabled, allowlist,
-  tools }——tools 按名聚合跨层(出现于 N 层、其中 defer 态层数、是否在
-  白名单、是否未注册),层明细随行。
+  tools, unknownAllowlisted }——tools 按名聚合跨层(出现于 N 层、其中 defer
+  态层数、层标签列表、是否在白名单),并投影首个有描述层的完整 description
+  与顶层参数骨架(name/type/required/description),供卡片展开详情。settings
+  节缺失或字段为 volatile ref 时解箱并补齐出厂默认,读到的始终是三字段
+  完整对象,后续写回不丢未显式修改的字段。
 - **SC-12 白名单勾选**:POST /api/tool-gate/allowlist(名字数组,清洗:
   剔非字符串/空串/重复)→ settings.replace 落盘 → 主行收敛;响应回新 state。
 - **SC-13 enabled 开关**:POST /api/tool-gate/enabled → 同上链路。
@@ -100,6 +103,8 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   GET 无守卫(只读)。
 - **SC-15 卡片呈现**:设置页「工具门」分区——enabled 开关(规约 switch
   形态,tg- 前缀)、工具清单每行开关(勾选 = 白名单)、未注册白名单名警示;
+  行头为可聚焦按钮,`aria-expanded` 标记展开态,点击展开完整描述、参数
+  (名/类型/必填/说明)、层标签与 defer 计数;悬停行头以原生 title 显示描述;
   写失败显示错误不翻状态。
 
 ## 配置语义
@@ -109,8 +114,11 @@ message 记录 tool-addition/tool-removal,dsh-llm 投影层处理会话一致性
   停止打标」,等效临时停用而不动行。
 - `collapse`(volatile 布尔,默认 true):降级折叠总开关;false = 装饰器
   全量透传,行为回到「只打标」的旧世界(打标本身维持)。
-- 出厂白名单 = 会话核心工具集(read/edit/write/shell/glob/grep/
-  todo_write/ask_user_question),用户按需增删。
+- 出厂白名单 = 官方核心工具集(read/edit/write/glob/grep/todo_write/
+  ask_user_question/present/web_search/skill/subagent/job_kill/read_image)
+  + 平台终端槽位:Windows = shell-select `shell` + 官方 `pwsh` 兜底,POSIX =
+  官方 `bash`(shell-select 在 POSIX 全部行停用)。除 Windows `shell` 外,
+  插件注入的工具不默认启用,出厂即延迟加载,用户按需勾选。
 - 白名单含未注册名:收敛照常,日志 warn 未知名清单(不报错不阻断)。
 
 ## 降级折叠场景

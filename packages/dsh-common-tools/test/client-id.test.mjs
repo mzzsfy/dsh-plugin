@@ -1,7 +1,7 @@
 // client.js 自注册格式守卫:ModuleLoader id 必须与 npm 包名一致,
 // 宿主按包名解析 client bundle;factory 返回值必须呈插件形态(含空 apply),
 // 缺 apply 即被浏览器 cordis loader 判 invalid plugin 拖垮整树。
-// 宿主入口 index.js 同锁:仅空 apply(占位条目宿主形态)。
+// 宿主入口 index.js 同锁:仅空 apply(装载行宿主形态,多行在宿主侧合并成多个空 apply 条目)。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
