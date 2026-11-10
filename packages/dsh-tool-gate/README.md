@@ -41,8 +41,9 @@ GUI 卡片是唯一配置入口(原生 schemastery 节已抑制):
 
 - **启用工具门**开关:关 = 全部工具恢复注册原状(全量注入),白名单保留
 - **降级折叠**开关:关 = 请求缝全量透传(打标维持),行为回到只打标
-- **工具清单**:全部层聚合的工具名列表,每行开关 = 是否进白名单;行尾显示
-  层数与 defer 态(`tool_search` 为折叠入口,常驻在列,开关禁点)
+- **工具清单**:全部层聚合的工具名列表,每行开关 = 是否进白名单;点击行展开
+  完整描述、参数(名/类型/必填/说明)与层明细,悬停行头直接以 tooltip 显示
+  描述;行尾显示注入状态与层数(`tool_search` 为折叠入口,常驻在列,开关禁点)
 - 白名单含未注册名时卡片顶部警示
 
 HTTP 面(`/api/tool-gate/*`,GUI 数据通道):`GET /state`、
@@ -52,9 +53,14 @@ HTTP 面(`/api/tool-gate/*`,GUI 数据通道):`GET /state`、
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `allowlist` | `read/edit/write/shell/glob/grep/todo_write/ask_user_question` | 全量注入白名单,精确工具名 |
+| `allowlist` | 官方核心工具集 + 平台终端工具 | 全量注入白名单,精确工具名;插件注入的工具不默认启用(Windows 的 `shell` 例外) |
 | `enabled` | `true` | `false` = 还原全部原状并停止打标(临时停用,不动行) |
 | `collapse` | `true` | 降级折叠总开关(第三方路由请求改写) |
+
+出厂白名单跨平台只差终端工具:Windows 为 shell-select 的 `shell` + 官方
+`pwsh` 兜底(shell-select 在场时其请求缝隐藏 `pwsh`),POSIX 为官方 `bash`
+(shell-select 在 POSIX 全部行停用)。其余第三方插件注入的工具(检索、浏览器
+cdp 等)一律不在默认内,出厂即延迟加载,由用户在卡片中按需勾选。
 
 volatile 字段热改即时收敛(`loader/volatile-update`),不重启;新工具注册/
 重注册由 `tools/change` 驱动重收敛。

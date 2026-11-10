@@ -4,18 +4,37 @@
 
 import z from '@deepseek-ai/schemastery'
 
-// 出厂白名单:会话核心工具集。工具名跨部署稳定(官方 dsh-tool-* 与
-// shell-select 接管后工具名不变),拼错名不阻断收敛只 warn。
-export const DEFAULT_ALLOWLIST = Object.freeze([
-  'read',
-  'edit',
-  'write',
-  'shell',
+// 出厂白名单 = 宿主官方核心工具集 + 平台终端。插件注入的工具一律不进默认:
+// 出厂状态全部延迟加载,由用户在 GUI 按需勾选;唯一例外是 Windows 的
+// shell-select `shell`(见 terminalTools)。拼错名不阻断收敛只 warn。
+const CORE_HEAD = Object.freeze(['read', 'edit', 'write'])
+
+const CORE_TAIL = Object.freeze([
   'glob',
   'grep',
   'todo_write',
   'ask_user_question',
+  'present',
+  'web_search',
+  'skill',
+  'subagent',
+  'job_kill',
+  'read_image',
 ])
+
+// 终端槽位:Windows 出厂 `shell`(shell-select 接管,用户显式要求带) + 官方
+// `pwsh` 兜底(shell-select 缺席时仍可执行,在场时其请求缝隐藏 pwsh);
+// POSIX 只有官方 `bash`——shell-select 在 POSIX 全部行停用,不能预置 `shell`。
+function terminalTools(platform) {
+  return platform === 'win32' ? ['shell', 'pwsh'] : ['bash']
+}
+
+/** 平台出厂白名单(纯函数):核心工具 + 该平台的终端工具。 */
+export function defaultAllowlistFor(platform = process.platform) {
+  return [...CORE_HEAD, ...terminalTools(platform), ...CORE_TAIL]
+}
+
+export const DEFAULT_ALLOWLIST = Object.freeze(defaultAllowlistFor())
 
 export const Config = z.object({
   allowlist: z.array(z.string()).default([...DEFAULT_ALLOWLIST]).volatile(),

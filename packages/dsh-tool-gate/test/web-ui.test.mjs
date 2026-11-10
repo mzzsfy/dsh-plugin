@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { apply, buildFaces } from '../src/web-routes.mjs'
+import { DEFAULT_ALLOWLIST } from '../src/config.mjs'
 import { mountRoutes, cleanAllowlist } from '../src/api.mjs'
 import { analyzeSwitch } from './switch-structure.mjs'
 
@@ -30,11 +31,27 @@ function toolsStub(layers) {
   return { layers: () => [{ key: globalData, label: 'global', names: () => [...globalData.keys()], definitionOf: (name) => globalData.get(name) }, ...[...scoped.values()].map((entry, index) => ({ key: entry.tools.data, label: `agent#${index + 1}`, names: () => [...entry.tools.data.keys()], definitionOf: (name) => entry.tools.data.get(name) }))] }
 }
 
-test('readState 投影:enabled/collapse/allowlist 回落 + 工具聚合 + 未知名(SC-11)', () => {
+test('readState 投影:enabled/collapse/allowlist 回落 + 工具聚合 + 详情 + 未知名(SC-11)', () => {
   const settings = settingsStub({ 'tool-gate': { allowlist: ['read', 'ghost'], enabled: false, collapse: false } })
   const tools = toolsStub({
     global: [['working_directory', { deferLoading: true }], ['tool_search', {}]],
-    scoped: { a: [['read', {}], ['web_search', { deferLoading: true }]], b: [['read', {}]] },
+    scoped: {
+      a: [
+        ['read', {
+          description: '读取文件内容。',
+          parameters: {
+            type: 'object',
+            properties: {
+              file_path: { type: 'string', description: '目标文件路径' },
+              offset: { type: 'number' },
+            },
+            required: ['file_path'],
+          },
+        }],
+        ['web_search', { deferLoading: true, description: '搜索网页。' }],
+      ],
+      b: [['read', {}]],
+    },
   })
   const state = buildFaces(settings, tools).readState()
   assert.equal(state.enabled, false)
@@ -45,26 +62,54 @@ test('readState 投影:enabled/collapse/allowlist 回落 + 工具聚合 + 未知
   assert.equal(read.layers, 2)
   assert.equal(read.deferredLayers, 0)
   assert.equal(read.inAllowlist, true)
+  assert.equal(read.description, '读取文件内容。')
+  assert.deepEqual(read.layerLabels, ['agent#1', 'agent#2'])
+  assert.deepEqual(read.params, [
+    { name: 'file_path', type: 'string', required: true, description: '目标文件路径' },
+    { name: 'offset', type: 'number', required: false, description: '' },
+  ])
   const webSearch = state.tools.find((tool) => tool.name === 'web_search')
   assert.deepEqual([webSearch.layers, webSearch.deferredLayers, webSearch.inAllowlist], [1, 1, false])
+  assert.equal(webSearch.description, '搜索网页。')
   const working = state.tools.find((tool) => tool.name === 'working_directory')
   assert.deepEqual([working.layers, working.deferredLayers], [1, 1])
+  assert.equal(working.description, '')
+  assert.deepEqual(working.params, [])
   const search = state.tools.find((tool) => tool.name === 'tool_search')
   assert.equal(search.implicit, true)
   assert.equal(state.tools.find((tool) => tool.name === 'read').implicit, false)
 })
 
-test('readState 空节回落出厂语义(enabled/collapse true / allowlist 空)', () => {
+test('readState 空节回落出厂默认(enabled/collapse true / 出厂白名单)', () => {
   const state = buildFaces(settingsStub(), toolsStub({})).readState()
   assert.equal(state.enabled, true)
   assert.equal(state.collapse, true)
-  assert.deepEqual(state.allowlist, [])
+  assert.deepEqual(state.allowlist, [...DEFAULT_ALLOWLIST])
+})
+
+test('readSection 解箱 volatile ref 并补齐缺省字段', () => {
+  const settings = settingsStub({
+    'tool-gate': {
+      allowlist: { get: () => ['read'] },
+      enabled: { get: () => false },
+    },
+  })
+  const state = buildFaces(settings, toolsStub({})).readState()
+  assert.deepEqual(state.allowlist, ['read'])
+  assert.equal(state.enabled, false)
+  assert.equal(state.collapse, true)
 })
 
 test('updateAllowlist/updateEnabled/updateCollapse 写 settings 落盘(SC-12/SC-13)', async () => {
   const settings = settingsStub()
   const faces = buildFaces(settings, toolsStub({}))
   await faces.updateAllowlist(['read', 'shell'])
+  // 空节首次写入也带齐三字段,不把出厂默认丢成单字段
+  assert.deepEqual(settings.sections.get('tool-gate'), {
+    allowlist: ['read', 'shell'],
+    enabled: true,
+    collapse: true,
+  })
   await faces.updateEnabled(false)
   await faces.updateCollapse(false)
   assert.deepEqual(settings.sections.get('tool-gate'), { allowlist: ['read', 'shell'], enabled: false, collapse: false })
