@@ -75,6 +75,8 @@ export function collectActiveWork(ctx) {
   }
 
   let agentList = []
+  // 升级门统计全量存活:子 agent 会话的 agent/job 同样是升级期进程占用,
+  // 按主会话过滤会漏判,故 agents.list 与 jobs.list 不做归属筛选
   try {
     const agents = ctx.get('agents')
     if (!agents || typeof agents.list !== 'function') throw new Error('agents 服务方法面不可用')
@@ -313,13 +315,16 @@ export function discoverRunningInstall({ argv1 = process.argv[1], installAnchor,
 export function apply(ctx, config, dependencies = {}) {
   const maintenance = { active: false }
   // 显式暂停契约(F08):维护态即"已切换/切换中、当前暂停、重启后可用";
-  // pre-step 拒绝携带结构化说明,与 status 快照/审计同口径
+  // pre-step 拒绝携带结构化说明,与 status 快照/审计同口径。
+  // 宿主把 pre-step 作为事件派发(官方消费方一律 ctx.on),没有 hooks 服务面
   const PAUSED_MESSAGE = '宿主已切换或升级进行中,当前暂停新回合;重启后可用'
-  const hooks = ctx.get('hooks')
-  hooks?.on?.('agent/pre-step', ({ signal }, next) => {
-    if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject', message: PAUSED_MESSAGE })
-    return next()
-  })
+  ctx.effect(
+    () => ctx.on('agent/pre-step', ({ signal }, next) => {
+      if (maintenance.active && !signal.aborted) return Promise.resolve({ kind: 'reject', message: PAUSED_MESSAGE })
+      return next()
+    }),
+    'maintain pause gate',
+  )
   const legacySettingsFace = () => {
     const settings = ctx.get('settings')
     return typeof settings?.register === 'function' && typeof settings?.update === 'function'

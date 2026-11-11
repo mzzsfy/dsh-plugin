@@ -65,7 +65,6 @@ function makeCtx({ settingsStore, settingsAvailable = true, legacySettings = fal
   const config = legacySettings ? {} : (settingsStore ?? {})
   const legacyStore = legacySettings ? (settingsStore ?? {}) : {}
   const calls = { exits: [], registered: [], disposers: [], editCalls: [], configureCalls: [], registerCalls: [] }
-  const hooks = { on(event, listener) { calls.agentHook = { event, listener }; return () => {} } }
   const settingsService = {
     configure(presentation, owner) {
       calls.configureCalls.push({ presentation, owner })
@@ -94,10 +93,13 @@ function makeCtx({ settingsStore, settingsAvailable = true, legacySettings = fal
     // fiber 桩:0.1.7 写路径经 fiber.entry 定位 profile 条目
     fiber: { entry: { options: { id: 'maintain', name: '@mzzsfy/dsh-maintain' } } },
     profileContext: installAnchor === null ? {} : { installAnchor, name: 'web', dir: 'test-profile', home: 'test-home' },
-    hooks,
+    // 事件面桩:pre-step 经 ctx.on 挂接,核算与计时类经 inject 上下文
+    on(event, listener) {
+      calls.agentHook = { event, listener }
+      return () => { if (calls.agentHook?.listener === listener) calls.agentHook = undefined }
+    },
     get(name) {
       if (name === 'hostVersionProbe') return hostVersionProbeAvailable ? services.hostVersionProbe || (() => '1.0.0') : undefined
-      if (name === 'hooks') return services.agentHooks || hooks
       if (name === 'settings') return settingsAvailable ? settingsService : undefined
       if (name === 'configEditor') return configEditorAvailable ? configEditor : undefined
       if (Object.prototype.hasOwnProperty.call(services, name)) return services[name]
