@@ -21,6 +21,7 @@ import {
   aggregateDeleteOutcome,
   artifactLooksBlank,
   deleteEligibility,
+  isDerivedSessionHeader,
   isSessionRunning,
   mergeDeletedEntry,
   removeDeletedEntry,
@@ -73,6 +74,9 @@ export const MESSAGES = {
   unsupportedBackend: '当前存储后端不支持按会话删除',
   notArchived: '仅已归档会话可删除',
   unknownSession: '会话不存在',
+  derivedSession: '子 agent 会话不参与会话管理',
+  descendantRunning: '子会话运行中,不能删除父会话',
+  cascadeScanFailed: '读取子会话清单失败,已中止删除',
   running: '运行中的会话不可删除',
   trashFailed: '移入回收站失败',
   notRestored: '会话产物不在持久层,请先到系统回收站还原后重试',
@@ -289,6 +293,42 @@ export function apply(ctx, config) {
   // 周期评估状态:running 供设置页降级提示;timer 为软依赖,服务缺失不阻塞插件装载
   const periodic = { running: false, reason: '' }
 
+  // 归档集合可能残留子会话 id(历史版本把子会话当用户会话归档):启动清一次。
+  // 只处理列表里仍有 header 且判为派生的 id;已删除/未知 id 留给宿主集合自然淘汰,
+  // 不凭集合里的 id 直接做归属写入。失败单项不中断,下轮启动重试。
+  async function healDerivedArchived() {
+    let registry
+    let ids
+    try {
+      registry = ctx.workspaceRegistry
+      if (!registry || typeof registry.unarchiveSession !== 'function') return
+      ids = Array.isArray(registry.archivedSessionIds) ? registry.archivedSessionIds.map(String) : []
+    } catch (error) {
+      // registry 未启动时 getter 抛错:本轮跳过,下次启动重试
+      ctx.logger && ctx.logger.warn('session-manager 归档集合自愈读取注册表失败: ' + String(error))
+      return
+    }
+    if (ids.length === 0) return
+    let records
+    try {
+      records = await ctx.sessionQuery.listSessions()
+    } catch (error) {
+      ctx.logger && ctx.logger.warn('session-manager 归档集合自愈读取会话失败: ' + String(error))
+      return
+    }
+    const headers = new Map(records.map((recordItem) => [String(recordItem.header.id), recordItem.header]))
+    for (const id of ids) {
+      const header = headers.get(id)
+      if (header === undefined || !isDerivedSessionHeader(header)) continue
+      try {
+        await registry.unarchiveSession(id)
+        ctx.logger && ctx.logger.info && ctx.logger.info('session-manager 已清理归档集合中的子会话: ' + id)
+      } catch (error) {
+        ctx.logger && ctx.logger.warn('session-manager 清理归档子会话 ' + id + ' 失败: ' + String(error))
+      }
+    }
+  }
+
   // 自动归档评估:筛出待归档会话并逐个走官方 archiveSession。cwd 缺省时全量评估
   // (启动补扫 / 周期轮),传入 cwd 时仅评估该工作区(新建会话触发)。
   // 门闩与超时守卫对全部触发源生效。两级筛选:先用 createdAt 纯内存预筛(mtime 只会
@@ -317,7 +357,7 @@ export function apply(ctx, config) {
         if (cwd !== undefined && header.cwd !== cwd) continue
         // subagent 内部会话不属主列表(官方 sessionVisible 以 origin 排除),归档集合
         // 仅服务用户会话:误归档只产出不可辨认的面板行与无意义通知
-        if (header.origin === 'subagent') continue
+        if (isDerivedSessionHeader(header)) continue
         // 预筛:createdAt 未超期必不超期(见上),跳过产物 IO
         if (header.createdAt >= cutoff) continue
         // 已归档记录永不是候选,集合随历史增长,提前跳过省产物 IO
@@ -372,7 +412,10 @@ export function apply(ctx, config) {
   }
 
   ctx.on('session/created', (session) => {
-    const cwd = session.header && session.header.cwd
+    const header = session.header
+    // 子会话创建同样触发本事件:它们永不入选归档,不必触发全量评估
+    if (header === undefined || isDerivedSessionHeader(header)) return
+    const cwd = header.cwd
     if (cwd === undefined) return
     evaluateArchives(cwd)
   })
@@ -486,6 +529,94 @@ export function apply(ctx, config) {
     }
   }
 
+  // 删除产物:系统回收站优先,不可用降级插件回收区;失败返回可读错误,由调用方决定响应
+  async function disposeArtifact(sessionId, artifactDir) {
+    try {
+      await executor.trashPath(artifactDir)
+      return { mode: 'os', heldPath: undefined }
+    } catch (trashError) {
+      ctx.logger && ctx.logger.warn('session-manager 系统回收站不可用(' + sessionId + '),尝试回收区降级: ' + String(trashError))
+      try {
+        const heldPath = await executor.moveToQuarantine(artifactDir, quarantineDir)
+        return { mode: 'quarantine', heldPath }
+      } catch (heldError) {
+        return { error: MESSAGES.trashFailed + '(系统回收站与插件回收区均不可用): ' + String(heldError && heldError.message || heldError) }
+      }
+    }
+  }
+
+  // 派生子会话后裔:按 parentSession 建邻接表做 BFS,只收可判定为派生的记录;
+  // 普通 fork(depth 0)是用户会话,不随父会话级联。
+  function derivedDescendants(records, rootId) {
+    const childrenByParent = new Map()
+    for (const recordItem of records) {
+      const header = recordItem.header
+      if (!isDerivedSessionHeader(header) || header.parentSession === undefined) continue
+      const parent = String(header.parentSession)
+      if (!childrenByParent.has(parent)) childrenByParent.set(parent, [])
+      childrenByParent.get(parent).push(recordItem)
+    }
+    const out = []
+    const seen = new Set([String(rootId)])
+    const queue = [String(rootId)]
+    while (queue.length > 0) {
+      const current = queue.shift()
+      for (const recordItem of childrenByParent.get(current) ?? []) {
+        const id = String(recordItem.header.id)
+        if (seen.has(id)) continue
+        seen.add(id)
+        out.push(recordItem)
+        queue.push(id)
+      }
+    }
+    return out
+  }
+
+  // 级联清理:父会话删除后,子会话仍被父 catalog 引用且无独立 UI 入口;
+  // 逐个走同一回收/台账/归档清理链,失败项如实返回,不静默留产物。
+  async function cascadeDeleteDescendants(records, rootId) {
+    const persistence = ctx.get('sessionPersistence')
+    const deleted = []
+    const failed = []
+    for (const recordItem of derivedDescendants(records, rootId)) {
+      const header = recordItem.header
+      const sessionId = String(header.id)
+      // 父会话回收窗口内子会话可能被唤醒:逐个子会话复检,运行中者不搬产物
+      if (isSessionRunning({ agents: ctx.get('agents'), sessionId })) {
+        failed.push({ sessionId, error: MESSAGES.descendantRunning })
+        continue
+      }
+      let located
+      try {
+        located = persistence ? persistence.locate(header) : undefined
+      } catch (error) {
+        failed.push({ sessionId, error: String(error && error.message || error) })
+        continue
+      }
+      // locate 缺失或产物已不存在:没有可回收目录,不制造台账条
+      if (!located) continue
+      const artifactDir = dirname(located.path)
+      const disposal = await disposeArtifact(sessionId, artifactDir)
+      if (disposal.error !== undefined) {
+        failed.push({ sessionId, error: disposal.error })
+        continue
+      }
+      try {
+        await recordDeletedEntry(sessionId, artifactDir, disposal.heldPath)
+      } catch (error) {
+        ctx.logger && ctx.logger.warn('session-manager 级联台账记录失败(' + sessionId + '): ' + String(error && error.stack || error))
+      }
+      await detachSession(ctx, sessionId)
+      try {
+        await removeArchivedId(sessionId)
+      } catch (error) {
+        ctx.logger && ctx.logger.warn('session-manager 级联归档清理失败(' + sessionId + '): ' + String(error && error.stack || error))
+      }
+      deleted.push(sessionId)
+    }
+    return { deleted, failed }
+  }
+
   const routes = [
     {
       path: '/api/session-manager/unarchive',
@@ -494,6 +625,11 @@ export function apply(ctx, config) {
         if (guardWrite(req, res)) return
         try {
           const sessionId = await requireSessionId(req)
+          const header = await findHeader(ctx, sessionId, headerCache)
+          if (header !== undefined && isDerivedSessionHeader(header)) {
+            sendJson(res, 400, { error: MESSAGES.derivedSession })
+            return
+          }
           await removeArchivedId(sessionId)
           await recordUnarchiveGrace()
           sendJson(res, 200, { ok: true })
@@ -559,6 +695,12 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.unknownSession })
             return
           }
+          // 子 agent 会话不属用户会话:面板不展示,也不接受删除(避免父会话 catalog
+          // 留下指向已消失子会话的条目)
+          if (isDerivedSessionHeader(header)) {
+            sendJson(res, 400, { error: MESSAGES.derivedSession })
+            return
+          }
           // 运行中守卫:与归档评估同款判据,落实"运行中会话永不被删除"不变量
           if (isSessionRunning({ agents: ctx.get('agents'), sessionId })) {
             sendJson(res, 400, { error: MESSAGES.running })
@@ -589,12 +731,41 @@ export function apply(ctx, config) {
               sendJson(res, 400, { error: MESSAGES.notArchived })
               return
             }
-            const cleanupError = await cleanupDeletedSession(sessionId)
-            if (cleanupError !== '') {
-              sendJson(res, 200, { ok: true, partial: true, message: cleanupError })
+            // 父产物已缺失不代表子产物不存在:幽灵清理同样要级联,否则遗留子会话目录
+            let ghostRecords
+            try {
+              ghostRecords = await ctx.sessionQuery.listSessions()
+            } catch (error) {
+              ctx.logger && ctx.logger.warn('session-manager 幽灵清理前列会话失败(' + sessionId + '): ' + String(error))
+              sendJson(res, 400, { error: MESSAGES.cascadeScanFailed })
               return
             }
-            sendJson(res, 200, { ok: true, message: MESSAGES.ghostCleanup })
+            const ghostDescendants = derivedDescendants(ghostRecords, sessionId)
+            for (const recordItem of ghostDescendants) {
+              if (isSessionRunning({ agents: ctx.get('agents'), sessionId: String(recordItem.header.id) })) {
+                sendJson(res, 400, { error: MESSAGES.descendantRunning })
+                return
+              }
+            }
+            const ghostCascade = ghostDescendants.length > 0 ? await cascadeDeleteDescendants(ghostRecords, sessionId) : undefined
+            const cleanupError = await cleanupDeletedSession(sessionId)
+            if (cleanupError !== '') {
+              sendJson(res, 200, {
+                ok: true,
+                partial: true,
+                message: cleanupError,
+                ...(ghostCascade === undefined ? {} : { cascade: ghostCascade }),
+              })
+              return
+            }
+            sendJson(res, 200, {
+              ok: true,
+              message: MESSAGES.ghostCleanup,
+              ...(ghostCascade === undefined ? {} : { cascade: ghostCascade }),
+              ...(ghostCascade !== undefined && ghostCascade.failed.length > 0
+                ? { partial: true, message: `父会话已清理,${ghostCascade.failed.length} 个子会话产物清理失败` }
+                : {}),
+            })
             return
           }
           // host 端到端权威:归档资格在执行前校验
@@ -611,22 +782,33 @@ export function apply(ctx, config) {
             sendJson(res, 400, { error: MESSAGES.running })
             return
           }
-          // 处置:优先系统回收站;不可用(容器无 gio/dbus 等)降级插件回收区
-          // rename 搬移,仍可经重挂载移回原位置。双失败才会话保留并拒绝,
-          // 原始回收站错误落日志(降级环境的诊断依据),拒绝响应携回收区错误
-          let heldPath
+          // 删除父会话前收集派生子会话并复核运行态:级联把产物移入回收站后
+          // 子会话无法继续写入,运行中的子会话必须挡住整次删除
+          let records
           try {
-            await executor.trashPath(artifactDir)
-          } catch (trashError) {
-            ctx.logger && ctx.logger.warn('session-manager 系统回收站不可用(' + sessionId + '),尝试回收区降级: ' + String(trashError))
-            try {
-              heldPath = await executor.moveToQuarantine(artifactDir, quarantineDir)
-            } catch (heldError) {
-              sendJson(res, 400, { error: MESSAGES.trashFailed + '(系统回收站与插件回收区均不可用): ' + String(heldError && heldError.message || heldError) })
+            records = await ctx.sessionQuery.listSessions()
+          } catch (error) {
+            ctx.logger && ctx.logger.warn('session-manager 删除前列会话失败(' + sessionId + '): ' + String(error))
+            sendJson(res, 400, { error: MESSAGES.cascadeScanFailed })
+            return
+          }
+          const descendants = derivedDescendants(records, sessionId)
+          for (const recordItem of descendants) {
+            if (isSessionRunning({ agents: ctx.get('agents'), sessionId: String(recordItem.header.id) })) {
+              sendJson(res, 400, { error: MESSAGES.descendantRunning })
               return
             }
           }
-          const quarantined = heldPath !== undefined
+          // 处置:优先系统回收站;不可用(容器无 gio/dbus 等)降级插件回收区
+          // rename 搬移,仍可经重挂载移回原位置。双失败才会话保留并拒绝,
+          // 原始回收站错误落日志(降级环境的诊断依据),拒绝响应携回收区错误
+          const disposal = await disposeArtifact(sessionId, artifactDir)
+          if (disposal.error !== undefined) {
+            sendJson(res, 400, { error: disposal.error })
+            return
+          }
+          const heldPath = disposal.heldPath
+          const quarantined = disposal.mode === 'quarantine'
           // 执行期翻转检测:OS 回收存在数百 ms 异步窗口,复检通过后仍可能恢复运行。
           // 产物已移走,中断只会更糟,照常完成收尾,但把不变量破坏变为可观测事件
           const runningDuringTrash = isSessionRunning({ agents: ctx.get('agents'), sessionId })
@@ -657,6 +839,7 @@ export function apply(ctx, config) {
               ctx.logger && ctx.logger.warn('session-manager 归档清理失败(' + sessionId + '): ' + String(error && error.stack || error))
             }
           }
+          const cascade = descendants.length > 0 ? await cascadeDeleteDescendants(records, sessionId) : undefined
           sendJson(res, 200, {
             ...aggregateDeleteOutcome({
               detachFailed: detachError !== undefined,
@@ -666,6 +849,10 @@ export function apply(ctx, config) {
               quarantined,
             }),
             mode: quarantined ? 'quarantine' : 'os',
+            ...(cascade === undefined ? {} : { cascade }),
+            ...(cascade !== undefined && cascade.failed.length > 0
+              ? { partial: true, message: `父会话已删除,${cascade.failed.length} 个子会话产物清理失败` }
+              : {}),
           })
         } catch (error) {
           respondError(ctx, res, error)
@@ -743,6 +930,11 @@ export function apply(ctx, config) {
           const header = await findHeader(ctx, sessionId, headerCache)
           if (header === undefined) {
             sendJson(res, 400, { error: MESSAGES.notRestored })
+            return
+          }
+          // 子会话不写归属行:attachSession 只校验 cwd,不拦 origin
+          if (isDerivedSessionHeader(header)) {
+            sendJson(res, 400, { error: MESSAGES.derivedSession })
             return
           }
           const workspace = await findWorkspaceByCwd(ctx, header.cwd)
@@ -840,10 +1032,12 @@ export function apply(ctx, config) {
       if (typeof settingsCtx.settings?.configure === 'function') {
         settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
       }
-      return
+    } else {
+      settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
     }
-    settingsCtx.settings.register(NAMESPACE, SETTINGS_SCHEMA, { base: config })
-    // 启动补扫不依赖定时服务:settings 就绪即评估一轮,清掉停机期间积压的超期会话
+    // 启动补扫与归档集合自愈只依赖 workspaceRegistry/sessionQuery,与设置方法面无关:
+    // 必须放在 register 分支之外,否则现役宿主(无 register)上永远不执行
+    void healDerivedArchived()
     evaluateArchives()
   })
 }

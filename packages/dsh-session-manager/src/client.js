@@ -240,7 +240,9 @@ function projectRows(listState, archivedIds, workspaceState) {
   const byId = (listState && listState.byId) || {}
   const workspaces = (workspaceState && workspaceState.items) || []
   return Object.keys(byId)
-    .filter((id) => archived.has(id))
+    // client 行只有 origin,没有 delegationDepth:旧格式派生子会话在此不可判,
+    // host 侧 projectArchiveRows 已按完整判定兜底
+    .filter((id) => archived.has(id) && byId[id].origin !== 'subagent')
     .map((id) => ({
       id,
       title: byId[id].displayTitle || id,
@@ -780,7 +782,9 @@ function AutoArchiveConfig() {
             // 会话行快照与面板投影同源取 byId,标题映射为通知文案行数据
             const listState = sessions.list.getSnapshot()
             const byId = (listState && listState.byId) || {}
-            const rows = Object.keys(byId).map((id) => ({ id, title: byId[id].displayTitle }))
+            const rows = Object.keys(byId)
+              .filter((id) => byId[id].origin !== 'subagent')
+              .map((id) => ({ id, title: byId[id].displayTitle }))
             toast(archiveToastText(step.added, rows))
           }
         })
