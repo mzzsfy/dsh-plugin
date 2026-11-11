@@ -25,12 +25,39 @@ export const MESSAGES = {
   jobNotFound: '任务不存在',
   runNotFound: '运行记录不存在',
   sessionDisabled: '宿主会话服务不可用,会话任务通道已禁用',
+  crossOrigin: '跨源请求被拒绝',
+  nonJsonBody: '仅接受 application/json 请求体',
   systemError: '操作失败(系统级错误,详见服务端日志)',
 }
 
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(payload))
+}
+
+// 写路由守卫(全仓同构):浏览器跨站表单可发 text/plain 且载荷为合法 JSON,
+// 仅方法守卫不足以阻断 drive-by 写,补同源比对与 JSON 内容类型双校验。
+// 无 Origin 的非浏览器调用(本地 CLI/脚本)放行。
+function rejectCrossOrigin(req, res) {
+  const origin = req.headers ? req.headers.origin : undefined
+  if (!origin) return false
+  let sameOrigin = false
+  try {
+    sameOrigin = new URL(origin).host === req.headers.host
+  } catch {
+    sameOrigin = false
+  }
+  if (sameOrigin) return false
+  sendJson(res, 403, { error: MESSAGES.crossOrigin })
+  return true
+}
+
+function rejectNonJson(req, res) {
+  const type = req.headers ? req.headers['content-type'] : undefined
+  if (typeof type !== 'string' || type.trim() === '') return false
+  if (type.split(';')[0].trim().toLowerCase() === 'application/json') return false
+  sendJson(res, 415, { error: MESSAGES.nonJsonBody })
+  return true
 }
 
 function respondError(res, error, logSystem) {
@@ -547,6 +574,9 @@ export function createApi({ store, logger, executor, scheduler, periodic, sessio
           sendJson(res, 404, { error: MESSAGES.notFound })
           return
         }
+        // 写路由先过同源与内容类型双守卫,再读体与落库
+        if (WRITE_METHODS.has(matched.route.method)
+          && (rejectCrossOrigin(req, res) || rejectNonJson(req, res))) return
         await dispatchRoute(matched, { req, res, url, params: matched.params })
       } catch (error) {
         respondError(res, error, logSystem)

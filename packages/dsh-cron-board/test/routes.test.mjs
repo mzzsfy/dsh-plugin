@@ -54,6 +54,53 @@ async function call(api, method, pathAndQuery, body) {
   return res
 }
 
+async function callRaw(api, { method, path, headers = {}, body }) {
+  const res = { status: null, payload: null }
+  res.writeHead = (status) => { res.status = status }
+  res.end = (text) => {
+    res.raw = text
+    try { res.payload = JSON.parse(text) } catch { res.payload = null }
+  }
+  const req = new EventEmitter()
+  req.method = method
+  req.headers = { host: 'localhost:3000', ...headers }
+  req.url = 'http://localhost' + path
+  if (body !== undefined) {
+    process.nextTick(() => {
+      req.emit('data', Buffer.from(body))
+      req.emit('end')
+    })
+  }
+  await api.handle(req, res)
+  return res
+}
+
+test('写路由守卫:跨源 Origin 403,非 JSON 415,同源 JSON 放行', async (t) => {
+  const { store, api } = await makeApi(t)
+  // Given 一条合法建任务请求
+  const body = JSON.stringify({ name: 'n', command: 'echo 1', kind: 'shell', schedule: '* * * * *' })
+  // When 跨源 Origin
+  const cross = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://evil.example', 'content-type': 'application/json' }, body })
+  // Then 403 且不落库
+  assert.equal(cross.status, 403)
+  assert.equal(store.jobs.list().length, 0)
+  // When 同源但 text/plain(drive-by 表单载荷)
+  const plain = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'text/plain' }, body })
+  // Then 415 且不落库
+  assert.equal(plain.status, 415)
+  assert.equal(store.jobs.list().length, 0)
+  // When 同源 application/json
+  const ok = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', headers: { origin: 'http://localhost:3000', 'content-type': 'application/json; charset=utf-8' }, body })
+  // Then 正常受理
+  assert.equal(ok.status, 200)
+  assert.equal(store.jobs.list().length, 1)
+  // When 无 Origin 的本地 CLI 调用(无 content-type)
+  const cli = await callRaw(api, { method: 'POST', path: '/api/cron-board/jobs', body })
+  // Then 放行(与全仓口径一致)
+  assert.equal(cli.status, 200)
+})
+
+
 test('envs 路由:新建后列表打码,长度不足四字符全打码', async (t) => {
   // Given 新建变量 value=abcdef123456
   const { store, api } = await makeApi(t)
