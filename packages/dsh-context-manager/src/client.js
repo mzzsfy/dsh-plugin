@@ -118,6 +118,8 @@ const CSS = [
   '.cx-hist__row:hover .cx-hist__star, .cx-hist__star:focus-visible { opacity:1; }',
   '.cx-hist__star--on { opacity:1; color:var(--dsw-alias-state-warn-primary); }',
   '.cx-hist__star:hover { color:var(--dsw-alias-state-warn-primary); }',
+  // 触摸设备无悬停:星标常显,否则收藏入口不可发现(已收藏项本已常显)
+  '@media (hover: none) { .cx-hist__star { opacity:1; } }',
   '.cx-hist__editbtn { border:0; background:transparent; cursor:pointer; flex:none; padding:2px 8px;',
   '  border-radius:999px; font:12px/18px sans-serif; font-weight:600;',
   '  color:var(--dsw-alias-brand-primary); background:color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }',
@@ -135,6 +137,12 @@ const CSS = [
   '.cx-hist__del:hover { color:var(--dsw-alias-state-error-primary); }',
   '.cx-hist__addrow { display:flex; gap:6px; padding:8px; flex:none;',
   '  border-top:1px solid var(--dsw-alias-border-l2); }',
+  // 新增按钮:主按钮形态(实底 accent),随输入框拉伸保证触摸目标高度
+  '.cx-hist__addbtn { flex:none; appearance:none; border:0; cursor:pointer; border-radius:6px;',
+  '  padding:0 12px; min-height:28px; font:var(--dsw-font-s-14, 14px/22px sans-serif); font-weight:600;',
+  '  color:var(--dsw-alias-bg-base); background:var(--dsw-alias-brand-primary); }',
+  '.cx-hist__addbtn:hover { background:var(--dsw-alias-button-primary-hover); }',
+  '.cx-hist__addbtn:focus-visible { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
   '.cx-hist__empty { padding:24px 14px; text-align:center; font:var(--dsw-font-s-14, 14px/22px sans-serif);',
   '  color:color-mix(in srgb, var(--dsw-alias-label-primary) 50%, transparent); }',
   '.cx-hist__banner { padding:7px 14px; flex:none; text-align:center; font:var(--dsw-font-xxs-12, 12px/18px sans-serif);',
@@ -329,6 +337,17 @@ function ensureHistoryButton(doc, row, onToggle) {
   return button
 }
 
+// 新增行提交:按钮点击与 Enter 共用的唯一落点。输入为非受控(每次按键不重渲染),
+// 提交时读 DOM 值,去首尾空白后非空才提交;提交后清空输入框,留在编辑态可继续添加
+function takeAddInput(input, submit) {
+  if (!input) return false
+  const text = String(input.value == null ? '' : input.value).trim()
+  if (text === '') return false
+  submit(text)
+  input.value = ''
+  return true
+}
+
 function HistoryDock({ session, inputActions }) {
   const [open, setOpen] = useState(false)
   const [items, setItems] = useState(null)
@@ -347,6 +366,8 @@ function HistoryDock({ session, inputActions }) {
   const [query, setQuery] = useState('')
   const composingRef = useRef(false)
   const rootRef = React.useRef(null)
+  // 新增行输入节点:非受控,按钮提交时经 ref 读值
+  const addInputRef = React.useRef(null)
   // 键盘层权威状态:监听器挂载一次(空依赖),读写全走 ref,规避 effect 重挂
   // 时序造成的闭包陈旧;state 仅驱动渲染,变更处双写
   const viewRef = React.useRef({ open: false, items: null, cursor: -1, scopeIndex: 0, aligning: false })
@@ -434,6 +455,11 @@ function HistoryDock({ session, inputActions }) {
   function renamePrompt(from, to) {
     return togglePrompt(from)
       .then(() => (to === '' ? Promise.resolve() : togglePrompt(to)))
+  }
+
+  // 新增行提交:按钮点击与 Enter 共用落点(触摸设备无 Enter,按钮是主路径)
+  function submitAddPrompt() {
+    takeAddInput(addInputRef.current, togglePrompt)
   }
 
   // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围。
@@ -615,6 +641,9 @@ function HistoryDock({ session, inputActions }) {
         return
       }
       if (event.key === 'Enter') {
+        // 焦点在浮层内按钮上时放行原生激活:按钮自己的 Enter 语义优先于列表回填
+        // (编辑态「添加」按钮在列;残留 cursor 不得把添加偷换成回填)
+        if (root && active && active.tagName === 'BUTTON' && root.contains(active)) return
         // 有选中条目即回填,搜索框聚焦同样成立(IME 组合已在函数头放行,
         // 搜索词过滤后 ↑/↓ 选中 → Enter 是搜索态的主要回填路径)
         if (view.items !== null && view.cursor >= 0 && view.cursor < view.items.length) {
@@ -742,7 +771,8 @@ function HistoryDock({ session, inputActions }) {
       defaultValue: item.text,
       title: item.text,
       onKeyDown: (event) => {
-        if (event.key === 'Enter') {
+        // 组合输入确认候选不得触发改名提交
+        if (event.key === 'Enter' && !event.isComposing) {
           event.preventDefault()
           renamePrompt(item.text, event.target.value.trim())
         }
@@ -810,19 +840,23 @@ function HistoryDock({ session, inputActions }) {
               h('div', { className: 'cx-hist__addrow' },
                 h('input', {
                   className: 'cx-hist__editinput',
-                  placeholder: '输入常用提示词,Enter 添加',
-                  ref: (el) => { if (el) el.dataset.addinput = '1' },
+                  placeholder: '输入常用提示词',
+                  ref: addInputRef,
                   onKeyDown: (event) => {
-                    if (event.key === 'Enter') {
+                    if (event.key === 'Enter' && !event.isComposing) {
                       event.preventDefault()
-                      const text = event.target.value.trim()
-                      if (text !== '') {
-                        togglePrompt(text)
-                        event.target.value = ''
-                      }
+                      submitAddPrompt()
                     }
                   },
                 }),
+                h('button', {
+                  className: 'cx-hist__addbtn',
+                  type: 'button',
+                  title: '添加到常用',
+                  // 按下保持输入框焦点:移动端虚拟键盘不收起,添加后可连续输入
+                  onMouseDown: (event) => event.preventDefault(),
+                  onClick: submitAddPrompt,
+                }, '添加'),
               ),
             )
           : items.length === 0
