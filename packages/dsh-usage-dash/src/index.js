@@ -130,6 +130,8 @@ export function apply(ctx, config) {
     await store.pruneMinutes()
     await store.pruneHours()
     await collector.rescan()
+    // 旧版本只有用量桶没有会话索引:回扫后补建,面板「会话数量」立即可用
+    await collector.ensureSessionIndex()
   }
   ctx.effect(() => {
     collector.start()

@@ -208,11 +208,22 @@ function requireBucketRange(body, pattern, keyLabel) {
 
 const utcDayOf = (parts) => Date.UTC(parts[0], parts[1] - 1, parts[2])
 
+// 会话索引窗口策略:天/小时视图按同粒度行取并集;分钟视图没有会话行,
+// 把窗口截到覆盖小时按小时行近似(边界最多外扩一小时)
+const HOUR_KEY_WIDTH = 'YYYY-MM-DDTHH'.length
+const SESSION_WINDOW_QUERIES = {
+  [GRANULARITY_DAILY]: (store, from, to) => store.sessionRangeRows(GRANULARITY_DAILY, from, to),
+  [GRANULARITY_HOURLY]: (store, from, to) => store.sessionRangeRows(GRANULARITY_HOURLY, from, to),
+  [GRANULARITY_MINUTE]: (store, from, to) =>
+    store.sessionRangeRows(GRANULARITY_HOURLY, from.slice(0, HOUR_KEY_WIDTH), to.slice(0, HOUR_KEY_WIDTH)),
+}
+
 // 聚合 + 定价注入:pricing 激活才挂 cost/unpriced,缺省响应形状与现状一致;
 // D 端点费用由同窗口 H 行折叠,其余粒度计价行即聚合行
 async function aggregateWithPricing(deps, granularity, from, to) {
+  const sessionRows = await SESSION_WINDOW_QUERIES[granularity](deps.store, from, to)
   const rows = await deps.store.rangeRows(granularity, from, to)
-  let value = aggregateRange(rows, granularity, from, to)
+  let value = aggregateRange(rows, granularity, from, to, sessionRows)
   const pricing = deps.pricing
   if (pricing?.active) {
     const costRows = granularity === GRANULARITY_DAILY

@@ -65,8 +65,8 @@ function makeWebServer() {
   }
 }
 
-function makeStore({ rows = [], fail } = {}) {
-  const calls = { rangeRows: 0 }
+function makeStore({ rows = [], sessionRows = [], fail, failSessionRows } = {}) {
+  const calls = { rangeRows: 0, sessionRangeRows: [] }
   return {
     calls,
     backupInfo() {
@@ -80,6 +80,11 @@ function makeStore({ rows = [], fail } = {}) {
       calls.rangeRows += 1
       if (fail) throw fail
       return rows.filter((row) => row.bucket >= from && row.bucket <= to)
+    },
+    async sessionRangeRows(g, from, to) {
+      calls.sessionRangeRows.push([g, from, to])
+      if (failSessionRows) throw failSessionRows
+      return sessionRows.filter((row) => row.bucket >= from && row.bucket <= to)
     },
   }
 }
@@ -576,4 +581,54 @@ test('settings 缺席时 range 响应与现状形状一致(无 cost/unpriced)', 
   assert.equal('unpriced' in parsed.value, false)
   assert.equal('cost' in parsed.value.daily[0], false)
   assert.equal('cost' in parsed.value.models[0], false)
+})
+
+// ── 会话数量:三端点接会话索引行,分钟视图取覆盖小时行 ───────────────────────
+const makeSessionRow = (bucket, sessions) => ({ bucket, sessions })
+
+test('range 响应携带窗口内真实会话去重数', async () => {
+  const store = makeStore({
+    rows: [makeRow({ bucket: '2026-02-01', inputTokens: 1 })],
+    sessionRows: [makeSessionRow('2026-02-01', ['a', 'b']), makeSessionRow('2026-02-02', ['b', 'c'])],
+  })
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-02' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.equal(parsed.value.sessions, 3)
+  assert.deepEqual(store.calls.sessionRangeRows, [['D', '2026-02-01', '2026-02-02']])
+})
+
+test('hours 响应取窗口内小时会话行', async () => {
+  const store = makeStore({
+    rows: [makeRow({ bucket: '2026-02-01T05' })],
+    sessionRows: [makeSessionRow('2026-02-01T05', ['a']), makeSessionRow('2026-02-01T06', ['a'])],
+  })
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_HOURS, { payload: { from: '2026-02-01T05', to: '2026-02-01T06' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(parsed.value.sessions, 1)
+  assert.deepEqual(store.calls.sessionRangeRows, [['H', '2026-02-01T05', '2026-02-01T06']])
+})
+
+test('minutes 响应把分钟窗口截到覆盖小时行并集', async () => {
+  const store = makeStore({
+    rows: [makeRow({ bucket: '2026-02-01T05:30' })],
+    sessionRows: [makeSessionRow('2026-02-01T05', ['a']), makeSessionRow('2026-02-01T06', ['b'])],
+  })
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_MINUTES, { payload: { from: '2026-02-01T05:30', to: '2026-02-01T06:20' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(parsed.value.sessions, 2)
+  assert.deepEqual(store.calls.sessionRangeRows, [['H', '2026-02-01T05', '2026-02-01T06']])
+})
+
+test('会话索引读取失败时 500 不回显内部文本', async () => {
+  const store = makeStore({ rows: [makeRow({ bucket: '2026-02-01' })], failSessionRows: new Error('secret path') })
+  const { routes } = mount({ store })
+  const res = await invokeJson(routes, PATH_RANGE, { payload: { from: '2026-02-01', to: '2026-02-01' } })
+  const parsed = JSON.parse(res.body)
+  assert.equal(res.statusCode, 500)
+  assert.equal(parsed.ok, false)
+  assert.doesNotMatch(res.body, /secret path/)
 })

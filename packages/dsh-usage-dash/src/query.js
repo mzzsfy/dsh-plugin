@@ -1,4 +1,4 @@
-﻿import { costOf, matchPrice } from './pricing.js'
+import { costOf, matchPrice } from './pricing.js'
 
 export const MAX_SLOTS = 2000
 
@@ -95,11 +95,22 @@ const percentOf = (part, total) => (total === 0 ? 0 : (part / total) * PERCENT_S
 
 const rowTokens = (row) => row.inputTokens + row.outputTokens + row.cacheReadTokens + row.cacheWriteTokens
 
+// 会话索引行并集:同会话跨桶只计一次;采集侧已过滤派生会话与超期桶,
+// 这里只做去重计数(畸形容错,观测数据不让聚合崩)
+function countSessions(sessionRows) {
+  const ids = new Set()
+  for (const row of sessionRows) {
+    if (row === null || typeof row !== 'object' || !Array.isArray(row.sessions)) continue
+    for (const id of row.sessions) ids.add(id)
+  }
+  return ids.size
+}
+
 // 閫熷害閰嶅鍒嗗瓙:decode 鍙ｅ緞鍙?decodeTokens;瀛橀噺鏃ф牸寮忚(甯︽椂闀挎棤 decodeTokens)
 // 鍥炶惤 outputTokens,鑱氬悎闅忔柊鏁版嵁鑷劧鏀舵暃
 const speedTokensOf = (row) => (row.durationMs ? row.decodeTokens ?? row.outputTokens : 0)
 
-export function aggregateRange(rows, g, from, to) {
+export function aggregateRange(rows, g, from, to, sessionRows = []) {
   const form = BUCKET_FORMS[g]
   const slots = enumerateBucketKeys(form)(from, to).map((key) => emptySlot(key))
   const slotByKey = new Map(slots.map((slot) => [slot.day, slot]))
@@ -209,6 +220,7 @@ export function aggregateRange(rows, g, from, to) {
     cacheHit: totals.cacheHit,
     cacheMiss: totals.cacheMiss,
     activeDays: activeDays.size,
+    sessions: countSessions(sessionRows),
     topModel: top?.model ?? '',
     topProvider: top?.provider ?? '',
     daily,

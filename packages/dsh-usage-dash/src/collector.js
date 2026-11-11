@@ -6,6 +6,7 @@
 // store 失败计入 recordFailures,绝不成为逃逸拒绝。
 
 import { createArchiveReader } from './archive-reader.js'
+import { isDerivedSessionHeader } from './session-kind.js'
 
 const UNKNOWN_SESSION_ID = '(unknown-session)'
 const SEQ_UNKNOWN = -1
@@ -14,6 +15,8 @@ const MARK_BATCH = 32
 const SCAN_LOG_MAX_ENTRIES = 200
 // 单条日志 detail 上限:flush 底层行错误拼接的截断保护
 const LOG_DETAIL_MAX_CHARS = 500
+// 索引补扫的事件批间让步:全量重放是同步 CPU,避免长时间独占事件循环
+const SCAN_YIELD_EVERY_EVENTS = 2000
 
 // 不可读会话分类:宿主可见性/可读性边界的三代实测形态(见 README 存档兼容)
 const SKIP_KINDS = { descriptor: 'descriptor', corrupt: 'corrupt', legacy: 'legacy', other: 'other' }
@@ -333,6 +336,12 @@ export class UsageCollector {
       void this.store.record(sample).catch((error) => {
         this.pushLog('record', error?.message ?? String(error))
       })
+      // 会话索引只记真实会话:派生会话的回合/请求/token 仍照常统计
+      if (sid !== UNKNOWN_SESSION_ID && !isDerivedSessionHeader(session?.header)) {
+        void this.store.recordSession(sid, sample.time).catch((error) => {
+          this.pushLog('record', error?.message ?? String(error))
+        })
+      }
     })
     // 释放销毁会话的内存桶,防长跑宿主按会话数累积
     this.ctx.on?.('session/disposed', (session) => {
@@ -481,6 +490,7 @@ export class UsageCollector {
           try {
             const inspection = await reader.readLog(header.id, signal)
             const inheritedCut = inspection.inheritedEventCount
+            const derived = inspection.derived === true
             for (const event of inspection.events) {
               if (signal?.aborted) return
               if (skipLiveOwned(event)) continue
@@ -497,6 +507,7 @@ export class UsageCollector {
               if (sample) {
                 if (!sample.turn) sample.model = route || undefined
                 await this.store.record(sample)
+                if (!derived) await this.store.recordSession(header.id, sample.time)
               }
             }
             completed.push(header.id)
@@ -512,6 +523,69 @@ export class UsageCollector {
       }
       await Promise.all(Array.from({ length: workerCount }, () => worker()))
       await flushCompleted()
+    } finally {
+      this.#state.running = false
+    }
+  }
+
+  // 历史会话索引补扫:旧版本只落了用量桶没有会话索引,升级后首次 boot 自动补建。
+  // 非破坏性:只写索引不碰桶,幂等(store 内 (会话,桶) 去重),中断后下次 boot 重来
+  async ensureSessionIndex(reader = createArchiveReader(this.ctx.sessionPersistence)) {
+    await this.store.readyPromise()
+    if (!this.store.hasBucketRows?.() || this.store.hasSessionRows?.()) return
+    this.scanController?.abort()
+    const controller = new AbortController()
+    this.scanController = controller
+    await this.indexSessions(reader, controller.signal)
+  }
+
+  async indexSessions(reader, signal) {
+    if (this.#state.running) return
+    if (signal?.aborted) return
+    this.#state.running = true
+    this.#state.error = undefined
+    try {
+      const headers = await reader.list(signal)
+      // 宿主已标注派生的会话直接跳过,不必读日志
+      const targets = headers.filter((header) => header.derived !== true)
+      this.#state.total = headers.length
+      this.#state.done = headers.length - targets.length
+      const workerCount = Math.min(DEFAULT_BACKFILL_CONCURRENCY, Math.max(1, targets.length))
+      let next = 0
+      const worker = async () => {
+        for (;;) {
+          if (signal?.aborted) return
+          const index = next++
+          if (index >= targets.length) return
+          const target = targets[index]
+          this.#state.lastSessionId = target.id
+          try {
+            const inspection = await reader.readLog(target.id, signal)
+            if (inspection.derived !== true) {
+              const fold = new UsageFold()
+              const inheritedCut = inspection.inheritedEventCount
+              let sinceYield = 0
+              for (const event of inspection.events) {
+                if (signal?.aborted) return
+                if (inheritedCut > 0 && typeof event.seq === 'number' && event.seq < inheritedCut) continue
+                const sample = fold.fold(event)
+                if (sample) await this.store.recordSession(target.id, sample.time)
+                sinceYield += 1
+                if (sinceYield >= SCAN_YIELD_EVERY_EVENTS) {
+                  sinceYield = 0
+                  await new Promise((resolve) => setImmediate(resolve))
+                }
+              }
+            }
+            this.#state.scannedSessions += 1
+          } catch (error) {
+            this.pushLog('skipped', error?.message ? `${target.id} ${error.message}` : target.id)
+          } finally {
+            this.#state.done += 1
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: workerCount }, () => worker()))
     } finally {
       this.#state.running = false
     }

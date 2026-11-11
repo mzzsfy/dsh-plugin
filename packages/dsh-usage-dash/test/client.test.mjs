@@ -86,7 +86,6 @@ const {
   otherDetailItems,
   parseEnvelope,
   partitionGroupOf,
-  pointerAt,
   providerOf,
   rateAxisTicks,
   removeRulesAt,
@@ -102,7 +101,6 @@ const {
   normalizeHHMMInput,
   shortDay,
   smoothPath,
-  tipPlace,
   translateWith,
   trimSlots,
   trendLayout,
@@ -635,58 +633,6 @@ test('heatLevel 零值为空档其余按峰值四分位', () => {
   assert.equal(heatLevel(1, 1), 5)
 })
 
-const TIP_ANCHOR = { x: 100, y: 100 }
-const TIP_SIZE = { width: 80, height: 40 }
-const TIP_BOUNDS = { left: 0, top: 0, right: 800, bottom: 600 }
-
-test('tipPlace 指针右下空位放右下', () => {
-  assert.deepEqual(tipPlace(TIP_ANCHOR, TIP_SIZE, TIP_BOUNDS), { left: 108, top: 108 })
-})
-
-test('tipPlace 右侧越界翻左侧', () => {
-  assert.deepEqual(tipPlace({ x: 730, y: 100 }, TIP_SIZE, TIP_BOUNDS), { left: 642, top: 108 })
-})
-
-test('tipPlace 下方越界翻上方', () => {
-  assert.deepEqual(tipPlace({ x: 100, y: 570 }, TIP_SIZE, TIP_BOUNDS), { left: 108, top: 522 })
-})
-
-test('tipPlace 右下均越界双翻', () => {
-  assert.deepEqual(tipPlace({ x: 730, y: 570 }, TIP_SIZE, TIP_BOUNDS), { left: 642, top: 522 })
-})
-
-test('tipPlace 双翻后仍越界钳进边界', () => {
-  assert.deepEqual(tipPlace({ x: 798, y: 598 }, TIP_SIZE, TIP_BOUNDS), { left: 710, top: 550 })
-})
-
-test('tipPlace 恰贴右缘等号归属放右侧', () => {
-  assert.deepEqual(tipPlace({ x: 704, y: 100 }, TIP_SIZE, TIP_BOUNDS), { left: 712, top: 108 })
-})
-
-test('tipPlace 左上角指针放右下不翻转', () => {
-  assert.deepEqual(tipPlace({ x: 2, y: 2 }, TIP_SIZE, TIP_BOUNDS), { left: 10, top: 10 })
-})
-
-test('tipPlace 提示框宽于边界钳贴左缘', () => {
-  assert.equal(tipPlace({ x: 400, y: 100 }, { width: 900, height: 40 }, TIP_BOUNDS).left, 8)
-})
-
-test('pointerAt 指针事件取指针坐标', () => {
-  assert.deepEqual(pointerAt({ clientX: 12, clientY: 34 }), { x: 12, y: 34 })
-})
-
-test('pointerAt 焦点事件回退目标矩形中心', () => {
-  const event = {
-    currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 20, right: 30, bottom: 60 }) },
-  }
-  assert.deepEqual(pointerAt(event), { x: 20, y: 40 })
-})
-
-test('tipPlace 零尺寸或非法锚点返回隐藏', () => {
-  assert.equal(tipPlace(TIP_ANCHOR, { width: 0, height: 0 }, TIP_BOUNDS), null)
-  assert.equal(tipPlace(null, TIP_SIZE, TIP_BOUNDS), null)
-  assert.equal(tipPlace({ x: Number.NaN, y: 100 }, TIP_SIZE, TIP_BOUNDS), null)
-})
 
 // —— S8 命中率曲线 ——
 

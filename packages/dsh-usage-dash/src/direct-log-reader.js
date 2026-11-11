@@ -46,18 +46,33 @@ export function decodeZstdFile(bytes) {
 // JSONL 文本 → 宽松事件流:首行为档案 header,其余行逐行解析,坏行跳过;
 // 只要求行能解出 JSON 对象,词汇/代际差异由上层折叠消化
 export function parseJsonlEvents(text) {
+  return parseJsonlLog(text).events
+}
+
+// 宿主档案首行是 header(旧代 `type: 'session'`,另有 `session/header` 写法),
+// 不属于事件流;会话分类需要 origin/parentSession,故单独取出交给上层
+const HEADER_TYPES = new Set(['session', 'session/header'])
+
+export function parseJsonlLog(text) {
+  let header
   const events = []
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
     if (trimmed === '') continue
+    let row
     try {
-      const row = JSON.parse(trimmed)
-      if (row && typeof row === 'object' && row.type !== undefined && row.type !== 'session/header') {
-        events.push(row)
-      }
-    } catch {}
+      row = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (!row || typeof row !== 'object') continue
+    if (header === undefined && HEADER_TYPES.has(row.type)) {
+      header = row
+      continue
+    }
+    if (row.type !== undefined && !HEADER_TYPES.has(row.type)) events.push(row)
   }
-  return events
+  return { header, events }
 }
 
 // 会话目录定位:sessions/<cwd 编码桶>/<id>/;桶名是宿主对 cwd 的编码,不解析,
@@ -80,19 +95,35 @@ function statDirSync(path) {
   }
 }
 
-// 会话目录内选最新代档案:V3 专用名优先,退化为任意 jsonl(压缩/明文)
-function pickLogFile(dir) {
-  const names = readdirSync(dir)
-  const v3 = names.find((name) => name.startsWith('session.v3.') && name.endsWith('.zstd'))
-  if (v3) return join(dir, v3)
-  const compressed = names.find((name) => name.endsWith('.jsonl.zstd'))
-  if (compressed) return join(dir, compressed)
-  const plain = names.find((name) => name.endsWith('.jsonl'))
-  if (plain) return join(dir, plain)
-  return undefined
+// 档案代际:session[.vN].jsonl[.zstd];宿主按代升级写入,旧代文件可能同目录并存,
+// 读取取最新代(旧代是历史快照,重放会少事件),同代压缩档案优先
+const ARTIFACT_PATTERN = /^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$/
+const GENERATION_UNVERSIONED = 0
+
+function artifactCandidates(dir) {
+  const candidates = []
+  for (const name of readdirSync(dir)) {
+    const match = ARTIFACT_PATTERN.exec(name)
+    if (match === null) continue
+    candidates.push({
+      name,
+      generation: Number(match[1] ?? GENERATION_UNVERSIONED),
+      compressed: name.endsWith('.zstd'),
+    })
+  }
+  candidates.sort((a, b) => b.generation - a.generation
+    || Number(b.compressed) - Number(a.compressed)
+    || a.name.localeCompare(b.name))
+  return candidates
 }
 
-// 直读单会话事件流;文件缺失/无法解压抛错,由调用方决定降级链终止
+function pickLogFile(dir) {
+  const [best] = artifactCandidates(dir)
+  return best === undefined ? undefined : join(dir, best.name)
+}
+
+// 直读单会话日志;文件缺失/无法解压抛错,由调用方决定降级链终止。
+// 返回 header 供会话分类(origin/parentSession),事件流交给统计折叠
 export function readSessionLogDirect(id, root) {
   const dir = findSessionDir(id, root)
   if (dir === undefined) throw new Error(`session artifact directory not found: ${id}`)
@@ -100,7 +131,7 @@ export function readSessionLogDirect(id, root) {
   if (file === undefined) throw new Error(`session artifact file not found: ${id}`)
   const bytes = readFileSync(file)
   const text = file.endsWith('.zstd') ? decodeZstdFile(bytes) : bytes.toString('utf8')
-  return parseJsonlEvents(text)
+  return parseJsonlLog(text)
 }
 
 // 磁盘全量会话 id:sessions/<cwd 编码桶>/<id>/;旧代宿主的 list 不枚举新代
@@ -117,8 +148,10 @@ export function listSessionIdsDirect(root = sessionsRoot()) {
       continue
     }
     for (const id of entries) {
-      if (existsSync(join(bucketPath, id, 'session.jsonl.zstd')) || existsSync(join(bucketPath, id, 'session.v3.jsonl.zstd'))) {
-        ids.push(id)
+      try {
+        if (pickLogFile(join(bucketPath, id)) !== undefined) ids.push(id)
+      } catch {
+        // 非目录条目或不可读目录:不是档案,跳过
       }
     }
   }

@@ -187,6 +187,7 @@ const MESSAGES_ZH = {
   tokens: 'Tokens 用量',
   tokensHint: '服务商总口径:未缓存输入 + 输出 + 缓存命中 token',
   sessions: '会话数量',
+  sessionsHint: '时间窗口内产生过用量的真实会话数,不含子 agent 会话',
   requests: '请求数量',
   activeDays: '活跃天数',
   cacheRate: '平均缓存命中率',
@@ -264,6 +265,7 @@ const MESSAGES_ZH = {
   costUnpriced: '{n} 个小时桶未计价',
   statsCostTitle: '按当前费率对会话累计 token 估算',
   'stats.cost': '费用 ≈ {cost}',
+  cost: '费用',
   turnCostTitle: '单轮用量按当前费率估算',
   turnTokensUnreported: '该提供商未上报此桶',
   pricing: '定价规则',
@@ -334,6 +336,7 @@ const MESSAGES_EN = {
   tokens: 'Token usage',
   tokensHint: 'Provider total: uncached input + output + cache-read tokens',
   sessions: 'Sessions',
+  sessionsHint: 'Distinct real sessions with usage in the range; subagent sessions excluded',
   requests: 'Requests',
   activeDays: 'Active days',
   cacheRate: 'Avg cache-hit rate',
@@ -411,6 +414,7 @@ const MESSAGES_EN = {
   costUnpriced: '{n} hour buckets unpriced',
   statsCostTitle: 'Estimated at current rates over session token totals',
   'stats.cost': 'Cost ≈ {cost}',
+  cost: 'Cost',
   turnCostTitle: 'Per-turn usage estimated at current rates',
   turnTokensUnreported: 'Not reported by this provider',
   pricing: 'Pricing rules',
@@ -1004,34 +1008,81 @@ function heatLevel(tokens, max) {
   return tokens === 0 ? 0 : 1 + Math.floor((tokens / max) * HEAT_LEVEL_BANDS)
 }
 
-// ChartTip 定位:进入命中区时锚定指针,先放指针右下,右侧或下方越界翻对侧,仍越界钳进边界
+// 悬浮定位:鼠标事件跟随指针(右下偏移,越界换侧),键盘聚焦回落元素矩形(上方优先)。
+// 两种锚点共用夹取与箭头贴边逻辑。
 const TIP_GAP_PX = 8
+const TIP_POINTER_OFFSET_PX = 14
 const TIP_MARGIN_PX = 8
-
-// 悬停锚点:指针事件取指针坐标;焦点事件无坐标,回退目标矩形中心保键盘可访问
-const pointerAt = (event) => {
-  if (event.clientX != null && event.clientY != null) return { x: event.clientX, y: event.clientY }
-  const rect = event.currentTarget.getBoundingClientRect()
-  return { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }
-}
+const TIP_ARROW_MIN_INSET_PX = 12
+const TIP_SIDE_TOP = 'top'
+const TIP_SIDE_BOTTOM = 'bottom'
 
 // 回合费用芯片与前置官方芯片(结束时钟)的间距
 const TURN_COST_GAP_PX = 8
 
-function tipPlace(anchor, tip, bounds, gap = TIP_GAP_PX, margin = TIP_MARGIN_PX) {
-  if (!tip || tip.width <= 0 || tip.height <= 0) return null
-  if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return null
-  const minX = bounds.left + margin
-  const minY = bounds.top + margin
-  const maxLeft = bounds.right - margin - tip.width
-  const maxTop = bounds.bottom - margin - tip.height
-  const left = anchor.x + gap + tip.width <= bounds.right - margin
-    ? anchor.x + gap
-    : Math.max(minX, Math.min(anchor.x - gap - tip.width, maxLeft))
-  const top = anchor.y + gap + tip.height <= bounds.bottom - margin
-    ? anchor.y + gap
-    : Math.max(minY, Math.min(anchor.y - gap - tip.height, maxTop))
-  return { left, top }
+const clampValue = (value, min, max) => Math.max(min, Math.min(value, max))
+
+function tipAnchorRect(event) {
+  const element = event?.currentTarget ?? event?.target
+  if (!element || typeof element.getBoundingClientRect !== 'function') return null
+  const rect = element.getBoundingClientRect()
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+}
+
+// 鼠标与指针事件带坐标时按指针锚定,键盘与程序触发改为元素矩形
+function tipAnchor(event) {
+  if (!event) return null
+  const { clientX, clientY } = event
+  if (Number.isFinite(clientX) && Number.isFinite(clientY)) return { kind: 'point', x: clientX, y: clientY }
+  const rect = tipAnchorRect(event)
+  return rect ? { kind: 'rect', ...rect } : null
+}
+
+// 提示尺寸与视口已知时算出 fixed 坐标:指针锚点走右下偏移,矩形锚点上方优先,两者都越界翻转再夹取,
+// 箭头贴边夹在圆角内
+function tipPlacement(anchor, tipSize, bounds, options = {}) {
+  if (!anchor || !tipSize) return null
+  if (!(tipSize.width > 0) || !(tipSize.height > 0)) return null
+  const gap = options.gap ?? TIP_GAP_PX
+  const margin = options.margin ?? TIP_MARGIN_PX
+  const minLeft = bounds.left + margin
+  const maxLeft = Math.max(minLeft, bounds.right - margin - tipSize.width)
+  const minTop = bounds.top + margin
+  const maxTop = Math.max(minTop, bounds.bottom - margin - tipSize.height)
+  const arrowInset = Math.min(TIP_ARROW_MIN_INSET_PX, tipSize.width / 2)
+  if (anchor.kind === 'point') {
+    const offset = options.offset ?? TIP_POINTER_OFFSET_PX
+    const rightLeft = anchor.x + offset
+    const leftLeft = anchor.x - offset - tipSize.width
+    const belowTop = anchor.y + offset
+    const aboveTop = anchor.y - offset - tipSize.height
+    const left = rightLeft + tipSize.width <= bounds.right - margin
+      ? rightLeft
+      : clampValue(leftLeft, minLeft, maxLeft)
+    const side = belowTop + tipSize.height <= bounds.bottom - margin ? TIP_SIDE_BOTTOM : TIP_SIDE_TOP
+    const top = clampValue(side === TIP_SIDE_BOTTOM ? belowTop : aboveTop, minTop, maxTop)
+    // 指针在提示外侧,箭头无从指向锚点,跟随模式不画箭头
+    return { left, top, side, arrowX: null }
+  }
+  if (!(anchor.width > 0) || !(anchor.height > 0)) return null
+  const centerX = anchor.left + anchor.width / 2
+  const left = clampValue(centerX - tipSize.width / 2, minLeft, maxLeft)
+  const aboveTop = anchor.top - gap - tipSize.height
+  const belowTop = anchor.top + anchor.height + gap
+  const aboveFits = aboveTop >= minTop
+  const belowFits = belowTop <= maxTop
+  let side = options.prefer ?? TIP_SIDE_TOP
+  if (side === TIP_SIDE_TOP && !aboveFits) side = TIP_SIDE_BOTTOM
+  else if (side === TIP_SIDE_BOTTOM && !belowFits) side = TIP_SIDE_TOP
+  // 两侧都放不下:取空间更大的一侧,再由夹取进边界
+  if (!aboveFits && !belowFits) {
+    side = (anchor.top - bounds.top) >= (bounds.bottom - (anchor.top + anchor.height))
+      ? TIP_SIDE_TOP
+      : TIP_SIDE_BOTTOM
+  }
+  const top = clampValue(side === TIP_SIDE_TOP ? aboveTop : belowTop, minTop, maxTop)
+  const arrowX = clampValue(centerX - left, arrowInset, tipSize.width - arrowInset)
+  return { left, top, side, arrowX }
 }
 
 // ===== 底部信息栏(append 模式):官方 pill 数据后追加增强项 + usp 双开关 =====
@@ -1965,7 +2016,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
    speed/ttft 用 success/warn 语义槽,亮暗随宿主别名自动适配 */
 .ud-panel{display:flex;flex-direction:column;gap:12px;font-size:13px;color:var(--dsw-alias-label-primary);
 --ud-chart-1:var(--dsw-alias-state-business-primary);--ud-chart-2:var(--dsw-alias-state-success-primary);--ud-chart-3:var(--dsw-alias-state-warn-primary);--ud-chart-4:#975bf1;--ud-chart-5:#d34591;--ud-chart-other:var(--dsw-alias-label-tertiary);
---ud-heat-0:color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);--ud-heat-1:color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);--ud-heat-2:color-mix(in srgb, var(--dsw-alias-state-business-primary) 36%, transparent);--ud-heat-3:color-mix(in srgb, var(--dsw-alias-state-business-primary) 54%, transparent);--ud-heat-4:color-mix(in srgb, var(--dsw-alias-state-business-primary) 74%, transparent);--ud-heat-5:var(--dsw-alias-state-business-primary);--ud-trend-line:var(--dsw-alias-state-business-primary);--ud-trend-speed:var(--dsw-alias-state-success-primary);--ud-trend-ttft:var(--dsw-alias-state-warn-primary)}
+--ud-heat-0:color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);--ud-heat-1:color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);--ud-heat-2:color-mix(in srgb, var(--dsw-alias-state-business-primary) 36%, transparent);--ud-heat-3:color-mix(in srgb, var(--dsw-alias-state-business-primary) 54%, transparent);--ud-heat-4:color-mix(in srgb, var(--dsw-alias-state-business-primary) 74%, transparent);--ud-heat-5:var(--dsw-alias-state-business-primary);--ud-trend-line:var(--dsw-alias-state-business-primary);--ud-trend-speed:var(--dsw-alias-state-success-primary);--ud-trend-ttft:var(--dsw-alias-state-warn-primary);
+--ud-bg-overlay:var(--dsw-alias-bg-layer-2);--ud-border:var(--dsw-alias-border-l2);--ud-text:var(--dsw-alias-label-primary);--ud-text-sub:var(--dsw-alias-label-secondary);--ud-text-dim:var(--dsw-alias-label-tertiary);--ud-accent:var(--dsw-alias-state-business-primary);--ud-hover-bg:var(--dsw-alias-interactive-bg-hover);--ud-shadow-lv3:var(--dsw-shadow-lv3);--ud-radius-md:8px;--ud-radius-sm:6px}
 .ud-toolbar{display:flex;align-items:flex-start;gap:8px}
 .ud-toolbar-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
 .ud-group{display:flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}
@@ -2031,11 +2083,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-legend{display:flex;flex-wrap:wrap;gap:4px 12px}
 .ud-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0;user-select:none;cursor:pointer}
 .ud-legend-item--off{opacity:.35}
+.ud-legend-item--on{background:var(--ud-hover-bg);border-radius:var(--ud-radius-sm)}
 .ud-legend-item span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ud-legend-swatch{width:8px;height:8px;border-radius:2px;flex:none}
 .ud-heat-wrap{width:100%;min-width:0;overflow:hidden}
 .ud-heat{display:block}
 .ud-heat-cell{stroke:none}
+.ud-heat-cell--on{stroke:var(--ud-accent);stroke-width:1.5}
 .ud-heat-l0{fill:var(--ud-heat-0);background:var(--ud-heat-0)}
 .ud-heat-l1{fill:var(--ud-heat-1);background:var(--ud-heat-1)}
 .ud-heat-l2{fill:var(--ud-heat-2);background:var(--ud-heat-2)}
@@ -2044,13 +2098,30 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
 .ud-heat-l5{fill:var(--ud-heat-5);background:var(--ud-heat-5)}
 .ud-heat-legend{display:inline-flex;align-items:center;gap:${HEAT_GAP}px;margin-left:auto;flex:none;font-size:11px;color:var(--dsw-alias-label-secondary)}
 .ud-heat-legend i{display:inline-block;width:${HEAT_BASE}px;height:${HEAT_BASE}px;border-radius:${HEAT_RX}px;flex:none}
-.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};visibility:hidden;pointer-events:none;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-overlay);box-shadow:0 1px 2px var(--dsw-alias-bg-mask-2),0 6px 20px var(--dsw-alias-bg-mask-2);color:var(--dsw-alias-label-primary);font-size:13px;padding:10px 12px;font-variant-numeric:tabular-nums}
-.ud-tip-title{font-weight:600;margin-bottom:6px}
-.ud-tip-row{display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}
-.ud-tip-row--sub{padding-left:14px;color:var(--dsw-alias-label-tertiary);font-size:11px}
-.ud-tip-breakdown{display:flex;flex-direction:column;gap:3px;border-top:1px solid var(--dsw-alias-border-l1);margin-top:8px;padding-top:8px}
+.ud-tip{position:fixed;z-index:${TIP_Z_INDEX};pointer-events:none;box-sizing:border-box;border:1px solid var(--ud-border);border-radius:var(--ud-radius-md);background:var(--ud-bg-overlay);box-shadow:var(--ud-shadow-lv3);color:var(--ud-text);font-size:12px;line-height:1.5;padding:10px 12px;max-width:min(420px,calc(100vw - 24px));max-height:60vh;overflow:auto;font-variant-numeric:tabular-nums;opacity:0;transition:opacity .12s ease-out;
+--ud-bg-overlay:var(--dsw-alias-bg-layer-2);--ud-border:var(--dsw-alias-border-l2);--ud-text:var(--dsw-alias-label-primary);--ud-text-sub:var(--dsw-alias-label-secondary);--ud-text-dim:var(--dsw-alias-label-tertiary);--ud-accent:var(--dsw-alias-state-business-primary);--ud-shadow-lv3:var(--dsw-shadow-lv3);--ud-radius-md:8px;--ud-radius-sm:6px}
+.ud-tip--on{opacity:1}
+@media (prefers-reduced-motion: reduce){.ud-tip{transition:none}}
+.ud-tip-arrow{position:absolute;width:8px;height:8px;background:var(--ud-bg-overlay);border:1px solid var(--ud-border);transform:rotate(45deg);pointer-events:none}
+.ud-tip-arrow--top{bottom:-5px;border-top:0;border-left:0}
+.ud-tip-arrow--bottom{top:-5px;border-bottom:0;border-right:0}
+.ud-tip-title{font-weight:600;font-size:12px;color:var(--ud-text);margin-bottom:8px}
+.ud-tip-text{color:var(--ud-text-sub);line-height:1.6;max-width:360px}
+.ud-tip-section{display:flex;flex-direction:column;gap:2px}
+.ud-tip-section+.ud-tip-section{margin-top:8px;padding-top:8px;border-top:1px solid var(--ud-border)}
+.ud-tip-section-title{font-size:11px;color:var(--ud-text-dim);margin-bottom:2px}
+.ud-tip-grid{display:grid;grid-template-columns:auto minmax(88px,auto);column-gap:16px;row-gap:2px}
+.ud-tip-item{display:contents}
+.ud-tip-item--sub .ud-tip-label{padding-left:14px;color:var(--ud-text-dim)}
+.ud-tip-item--sub .ud-tip-value{color:var(--ud-text-dim)}
+.ud-tip-label{display:inline-flex;align-items:center;gap:6px;min-width:0;color:var(--ud-text-sub);white-space:normal;overflow-wrap:anywhere}
+.ud-tip-value{text-align:right;color:var(--ud-text);white-space:nowrap}
+.ud-tip-row{display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.6;color:var(--ud-text-sub)}
+.ud-tip-row--sub{padding-left:14px;color:var(--ud-text-dim);font-size:11px}
+.ud-tip-breakdown{display:flex;flex-direction:column;gap:3px;border-top:1px solid var(--ud-border);margin-top:8px;padding-top:8px}
 .ud-axis-rate{fill:var(--dsw-alias-label-tertiary);font-size:11px;font-variant-numeric:tabular-nums}
-.ud-bar{transform-box:fill-box;transform-origin:center}
+.ud-bar{transform-box:fill-box;transform-origin:center;transition:opacity .12s ease-out}
+.ud-bar--dim{opacity:.25}
 .ud-bar-hit{fill:transparent;pointer-events:all}
 .ud-trend{stroke:var(--ud-trend-line);opacity:.9;fill:none;pointer-events:none}
 .ud-trend--speed{stroke:var(--ud-trend-speed)}
@@ -2177,28 +2248,47 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return h('div', { className, ref }, children)
     }
 
+    // 信息性悬浮的唯一入口:包装任意元素,悬停/聚焦显示自绘提示,替代原生 title
+    function HintText({ text, className, tag = 'span', innerRef, children }) {
+      const [anchor, setAnchor] = useState(null)
+      const props = {
+        className,
+        ref: innerRef,
+        onMouseEnter: text ? (event) => setAnchor(tipAnchorRect(event)) : undefined,
+        onMouseLeave: text ? () => setAnchor(null) : undefined,
+        onFocus: text ? (event) => setAnchor(tipAnchorRect(event)) : undefined,
+        onBlur: text ? () => setAnchor(null) : undefined,
+        tabIndex: text ? 0 : undefined,
+      }
+      return h(tag, props, [
+        children,
+        text ? h(Tooltip, { key: 'tip', anchor }, anchor ? h(TipBody, { text }) : null) : null,
+      ])
+    }
+
     function Card({ icon, label, hint, head, children }) {
       const lines = Array.isArray(children) ? children : [children]
-      return h('div', { className: 'ud-card', title: hint },
-        h('div', { className: 'ud-card-head' },
+      return h(HintText, { text: hint, tag: 'div', className: 'ud-card' }, [
+        h('div', { key: 'head', className: 'ud-card-head' },
           h('span', { className: 'ud-card-icon' }, h(Icon, { paths: icon })),
           h('span', { className: 'ud-card-label' }, label),
           head ?? null),
-        ...lines)
+        ...lines,
+      ])
     }
 
     function StatCards({ stats, costCurrency = '', t = defaultT }) {
       return h('div', { className: 'ud-cards' },
         h(Card, { key: 'tokens', icon: ICONS.coins, label: t('tokens'), hint: t('tokensHint'),
           head: stats.cost !== undefined
-            ? h('span', {
+            ? h(HintText, {
                 className: 'ud-card-cost',
-                title: costTitleText(t, stats.unpriced ?? 0),
+                text: costTitleText(t, stats.unpriced ?? 0),
               }, `≈ ${formatCost(stats.cost, costCurrency)}`)
             : null },
           h(FitText, null, formatTokens(stats.tokens))),
-        h(Card, { key: 'turns', icon: ICONS.sessions, label: t('sessions') },
-          h(FitText, null, String(stats.turns))),
+        h(Card, { key: 'sessions', icon: ICONS.sessions, label: t('sessions'), hint: t('sessionsHint') },
+          h(FitText, null, String(stats.sessions ?? 0))),
         h(Card, { key: 'requests', icon: ICONS.requests, label: t('requests') },
           h(FitText, null, String(stats.requests))),
         h(Card, { key: 'model', icon: ICONS.model, label: t('topModel'), hint: t('topModelHint') },
@@ -2212,23 +2302,26 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h(FitText, null, String(stats.activeDays))))
     }
 
-    function Legend({ models, colorFor, speedEnabled = false, ttftEnabled = false, isVisible, onItem, t = defaultT }) {
+    function Legend({ models, colorFor, speedEnabled = false, ttftEnabled = false, isVisible, onItem, onHoverModel, activeModel, t = defaultT }) {
       const itemProps = (key) => ({
-        className: cx('ud-legend-item', isVisible && !isVisible(key) && 'ud-legend-item--off'),
+        className: cx('ud-legend-item', isVisible && !isVisible(key) && 'ud-legend-item--off',
+          activeModel && activeModel === key && 'ud-legend-item--on'),
         onClick: onItem ? (event) => onItem(key, event.ctrlKey || event.metaKey) : undefined,
+        onMouseEnter: onHoverModel && models.some((item) => item.model === key) ? () => onHoverModel(key) : undefined,
+        onMouseLeave: onHoverModel && models.some((item) => item.model === key) ? () => onHoverModel(null) : undefined,
         role: onItem ? 'button' : undefined,
       })
       return h('div', { className: 'ud-legend' },
-        models.map((item) => h('span', { key: item.model, title: item.model === OTHER_MODEL ? t('other') : item.model, ...itemProps(item.model) },
+        models.map((item) => h('span', { key: item.model, ...itemProps(item.model) },
           h('i', { className: 'ud-legend-swatch', style: { background: colorFor(item.model) } }),
           h('span', null, item.model === OTHER_MODEL ? t('other') : item.model))),
-        h('span', { key: 'hit-rate', title: t('hitRateLegend'), ...itemProps(LEGEND_KEY_RATE) },
+        h('span', { key: 'hit-rate', ...itemProps(LEGEND_KEY_RATE) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line' }),
           h('span', null, t('hitRateLegend'))),
-        speedEnabled ? h('span', { key: 'speed', title: t('speedLegend'), ...itemProps(LEGEND_KEY_SPEED) },
+        speedEnabled ? h('span', { key: 'speed', ...itemProps(LEGEND_KEY_SPEED) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--speed' }),
           h('span', null, t('speedLegend'))) : null,
-        ttftEnabled ? h('span', { key: 'ttft', title: t('ttftLegend'), ...itemProps(LEGEND_KEY_TTFT) },
+        ttftEnabled ? h('span', { key: 'ttft', ...itemProps(LEGEND_KEY_TTFT) },
           h('i', { className: 'ud-legend-swatch ud-legend-swatch--line ud-legend-swatch--line--ttft' }),
           h('span', null, t('ttftLegend'))) : null)
     }
@@ -2240,7 +2333,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return `var(--ud-chart-${rank})`
     }
 
-    function TrendChart({ title, notes, slots, tipSlots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, panelRef, costCurrency = '', money = false, costAvailable = false, onMetricToggle, t = defaultT }) {
+    function TrendChart({ title, notes, slots, tipSlots, modelOrder, colorFor, labelFor, slotLabelFor, labelMinPitch, busy, legendModels, costCurrency = '', money = false, costAvailable = false, onMetricToggle, activeModel = null, onHoverModel, t = defaultT }) {
       const metricId = React.useId()
       const wrapRef = useRef(null)
       const [avail, setAvail] = useState(CHART_NOMINAL_WIDTH)
@@ -2306,7 +2399,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const hoverRatePoint = showRate && hoverSlot ? ratePoints.find((point) => point.day === hoverSlot.day) : null
       const hoverSpeedPoint = hoverSlot ? speedPoints.find((point) => point.day === hoverSlot.day) : null
       const hoverTtftPoint = hoverSlot ? ttftPoints.find((point) => point.day === hoverSlot.day) : null
-      const pick = (index) => (event) => setHover({ day: slots[index].day, anchor: pointerAt(event) })
+      const pick = (index) => (event) => setHover({ day: slots[index].day, anchor: tipAnchor(event) })
       const clear = () => setHover(null)
       const showCost = hasModels && (money || prefsRef.current.costDisplay) && selectedSlot.cost !== undefined
       const avgPrice = showCost ? tipAvgPriceText(selectedSlot, costCurrency) : null
@@ -2343,6 +2436,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               key: `${bar.key}/${segment.model}`, className: 'ud-bar',
               x: bar.x - layout.barWidth / 2, y: segment.y, width: layout.barWidth, height: segment.height,
               fill: colorFor(segment.model),
+              className: cx('ud-bar', activeModel && activeModel !== segment.model && 'ud-bar--dim'),
               style: hover?.day === bar.key
                 ? { transform: `scaleX(${(layout.barWidth + BAR_HOVER_GROW) / layout.barWidth})` }
                 : undefined,
@@ -2380,77 +2474,145 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           models: legendModels, colorFor, speedEnabled: hasSpeed, ttftEnabled: hasTtft,
           isVisible: (key) => visibleSet.has(key),
           onItem: (key, ctrl) => setVisibleKeys(legendToggle(visibleSet, key, ctrl)),
+          onHoverModel, activeModel,
         }),
-        h(ChartTip, { anchor: hasTip ? hover.anchor : null, panelRef },
+        h(Tooltip, { anchor: hasTip ? hover.anchor : null },
           hasTip
-            ? [
-                h('div', { key: 'title', className: 'ud-tip-title' }, slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day),
-                hasModels ? h('div', { key: 'total', className: 'ud-tip-row' }, `${tipTotalLabel}: ${formatTipValue(money ? selectedSlot.cost : selectedSlot.total)}`) : null,
-                ...tipEntries.main.map((row) => h('div', { key: `m-${row.model}`, className: 'ud-tip-row' },
-                  h('i', { className: 'ud-legend-swatch', style: { background: colorFor(row.model) } }),
-                  `${row.model === OTHER_MODEL ? t('other') : row.model}: ${formatTipValue(money ? hoverSlot.byCostModel[row.model] ?? 0 : row.tokens)}`)),
-                ...otherEntries.map(([model, tokens]) => h('div', { key: `om-${model}`, className: 'ud-tip-row ud-tip-row--sub' },
-                  `${model}: ${formatTipValue(money ? hoverSlot.otherCostByModel[model] ?? 0 : tokens)}`)),
-                showCost && !money ? h('div', { key: 'cost', className: 'ud-tip-row' }, `≈ ${formatCost(selectedSlot.cost, costCurrency)}`) : null,
-                avgPrice ? h('div', { key: 'avg-price', className: 'ud-tip-row' }, `${t('avgPrice')}: ${avgPrice}`) : null,
-                hasMetrics ? h('div', { key: 'metrics', className: 'ud-tip-title' }, t('slotMetrics')) : null,
-                tipRate ? h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss)}`) : null,
-                tipSpeed ? h('div', { key: 'speed', className: 'ud-tip-row' }, `${t('avgSpeed')}: ${speedTipText(hoverSlot.speed)}`) : null,
-                tipTtft ? h('div', { key: 'ttft', className: 'ud-tip-row' }, `${t('ttftLegend')}: ${ttftTipText(hoverSlot.ttft, t)}`) : null,
-              ]
+            ? h(TipBody, {
+                title: slotLabelFor ? slotLabelFor(hoverSlot.day) : hoverSlot.day,
+                sections: [
+                  {
+                    key: 'models',
+                    rows: [
+                      ...(hasModels
+                        ? [{
+                            key: 'total',
+                            label: tipTotalLabel,
+                            value: formatTipValue(money ? selectedSlot.cost : selectedSlot.total),
+                          }]
+                        : []),
+                      ...tipEntries.main.map((row) => ({
+                        key: `m-${row.model}`,
+                        label: row.model === OTHER_MODEL ? t('other') : row.model,
+                        value: formatTipValue(money ? hoverSlot.byCostModel[row.model] ?? 0 : row.tokens),
+                        swatch: colorFor(row.model),
+                      })),
+                      ...otherEntries.map(([model, tokens]) => ({
+                        key: `om-${model}`,
+                        label: model,
+                        value: formatTipValue(money ? hoverSlot.otherCostByModel[model] ?? 0 : tokens),
+                        sub: true,
+                      })),
+                      ...(showCost && !money
+                        ? [{ key: 'cost', label: t('cost'), value: `≈ ${formatCost(selectedSlot.cost, costCurrency)}` }]
+                        : []),
+                      ...(avgPrice ? [{ key: 'avg-price', label: t('avgPrice'), value: avgPrice }] : []),
+                    ],
+                  },
+                  {
+                    key: 'metrics',
+                    label: t('slotMetrics'),
+                    rows: [
+                      ...(tipRate ? [{ key: 'rate', label: t('cacheHitRate'), value: cacheRateText(hoverSlot.cacheHit, hoverSlot.cacheMiss) }] : []),
+                      ...(tipSpeed ? [{ key: 'speed', label: t('avgSpeed'), value: speedTipText(hoverSlot.speed) }] : []),
+                      ...(tipTtft ? [{ key: 'ttft', label: t('ttftLegend'), value: ttftTipText(hoverSlot.ttft, t) }] : []),
+                    ],
+                  },
+                ].filter((section) => section.rows.length > 0),
+              })
             : null))
     }
 
-    // 浮层 tooltip:portal 到 body,模块表缺失时降级面板内 fixed
-    function ChartTip({ anchor, panelRef, children }) {
+    // 统一悬浮:锚点由消费方给(指针或元素矩形)、进入/退出延迟、portal 到 body。
+    // 内容由消费方给 TipBody,组件只负责定位与显隐。
+    const TIP_SHOW_DELAY_MS = 80
+    const TIP_HIDE_DELAY_MS = 60
+
+    function Tooltip({ anchor, children }) {
       const tipRef = useRef(null)
       const [pos, setPos] = useState(null)
-      const place = useCallback(() => {
+      const [shown, setShown] = useState(false)
+      const hasContent = children != null && (!Array.isArray(children) || children.length > 0)
+      const active = Boolean(anchor && hasContent)
+      const pointerMode = anchor?.kind === 'point'
+      useEffect(() => {
+        const timer = setTimeout(() => setShown(active), active ? TIP_SHOW_DELAY_MS : TIP_HIDE_DELAY_MS)
+        return () => clearTimeout(timer)
+      }, [active])
+      const placeAt = useCallback((at) => {
         const tip = tipRef.current
-        if (!tip) return
-        const panel = panelRef ? panelRef.current : null
-        const bounds = panel
-          ? panel.getBoundingClientRect()
+        if (!tip || !at) return
+        // 面板存在时以面板为夹取边界,提示不飘出弹窗;底栏/芯片等弹出面板外时用视口
+        const panel = typeof document === 'undefined' ? null : document.querySelector('.ud-panel')
+        const panelRect = panel ? panel.getBoundingClientRect() : null
+        const bounds = panelRect && panelRect.width > 0
+          ? panelRect
           : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
-        const next = tipPlace(
-          anchor,
-          { width: tip.offsetWidth, height: tip.offsetHeight },
-          bounds,
-        )
-        setPos((prev) => (prev && next && prev.left === next.left && prev.top === next.top ? prev : next))
-      }, [anchor, panelRef])
+        const next = tipPlacement(at, { width: tip.offsetWidth, height: tip.offsetHeight }, bounds)
+        setPos((prev) => (prev && next && prev.left === next.left && prev.top === next.top
+          && prev.side === next.side && prev.arrowX === next.arrowX ? prev : next))
+      }, [])
+      const place = useCallback(() => placeAt(anchor), [placeAt, anchor])
       useLayoutEffect(() => {
         place()
-      }, [place])
+      }, [place, shown])
+      // 指针模式由 mousemove 直接定位:同一元素内移动也跟手,且每帧只提交一次位置
       useEffect(() => {
+        if (!pointerMode) return undefined
+        const onMove = (event) => placeAt({ kind: 'point', x: event.clientX, y: event.clientY })
+        window.addEventListener('mousemove', onMove)
+        return () => window.removeEventListener('mousemove', onMove)
+      }, [pointerMode, placeAt])
+      useEffect(() => {
+        if (!anchor) return undefined
         window.addEventListener('scroll', place, true)
         window.addEventListener('resize', place)
         const observer = new ResizeObserver(() => place())
         if (tipRef.current) observer.observe(tipRef.current)
-        if (panelRef && panelRef.current) observer.observe(panelRef.current)
         return () => {
           window.removeEventListener('scroll', place, true)
           window.removeEventListener('resize', place)
           observer.disconnect()
         }
-      }, [place])
-      // 空内容(无子节点或空数组)不显示悬浮盒,防零尺寸守卫下出现纯背景空壳
-      const show = Boolean(anchor && children != null && (!Array.isArray(children) || children.length > 0))
-      const element = h('div', {
-        className: 'ud-tip',
+      }, [place, anchor])
+      const visible = shown && pos !== null && active
+      const box = h('div', {
+        className: cx('ud-tip', visible && 'ud-tip--on'),
         ref: tipRef,
-        style: {
-          left: pos ? pos.left : 0,
-          top: pos ? pos.top : 0,
-          visibility: show && pos ? 'visible' : 'hidden',
-        },
-      }, show ? children : null)
+        style: { left: pos ? pos.left : 0, top: pos ? pos.top : 0 },
+      }, [
+        active ? children : null,
+        visible && pos.arrowX !== null
+          ? h('i', { key: 'arrow', className: `ud-tip-arrow ud-tip-arrow--${pos.side}`, style: { left: pos.arrowX } })
+          : null,
+      ])
       return createPortal && typeof document !== 'undefined' && document.body
-        ? createPortal(element, document.body)
-        : element
+        ? createPortal(box, document.body)
+        : box
     }
 
-    function HeatSection({ days, panelRef, costCurrency = '', t = defaultT }) {
+    // 提示内容模型:标题 + 段落说明 + 分区 + 两列(标签左、数值右),子项弱化,色块沿用图例圆点
+    const TipBody = React.memo(function TipBody({ title, text, sections }) {
+      return h('div', { className: 'ud-tip-body' },
+        title ? h('div', { className: 'ud-tip-title' }, title) : null,
+        text ? h('div', { className: 'ud-tip-text' }, text) : null,
+        (sections ?? []).map((section, index) => h('div', {
+          key: section.key ?? index,
+          className: 'ud-tip-section',
+        },
+          section.label ? h('div', { className: 'ud-tip-section-title' }, section.label) : null,
+          h('div', { className: 'ud-tip-grid' },
+            section.rows.map((row) => h('div', {
+              key: row.key,
+              className: cx('ud-tip-item', row.sub && 'ud-tip-item--sub'),
+            },
+              h('span', { className: 'ud-tip-label' },
+                row.swatch ? h('i', { className: 'ud-legend-swatch', style: { background: row.swatch } }) : null,
+                row.label),
+              h('span', { className: 'ud-tip-value' }, row.value)))))))
+    })
+
+    function HeatSection({ days, costCurrency = '', t = defaultT }) {
       const wrapRef = useRef(null)
       const [width, setWidth] = useState(0)
       const [hover, setHover] = useState(null)
@@ -2470,7 +2632,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const display = geom ? heatDisplayDays(days, geom.cols) : null
       const grid = display ? heatGrid(display, geom.size) : null
       const peak = display ? Math.max(1, ...display.map((slot) => slot.tokens)) : 1
-      const pick = (cell) => (event) => setHover({ ...cell, anchor: pointerAt(event) })
+      const pick = (cell) => (event) => setHover({ ...cell, anchor: tipAnchor(event) })
       const clear = () => setHover(null)
       return h('div', { className: 'ud-section' },
         h('div', { className: 'ud-section-head' },
@@ -2490,7 +2652,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   const level = heatLevel(cell.tokens, peak)
                   return h('rect', {
                     key: cell.day,
-                    className: `ud-heat-cell ud-heat-l${level}`,
+                    className: `ud-heat-cell ud-heat-l${level}${hover && hover.day === cell.day ? ' ud-heat-cell--on' : ''}`,
                     x: cell.x, y: cell.y, width: geom.size, height: geom.size, rx: HEAT_RX,
                     'aria-hidden': level === 0,
                     onMouseEnter: pick(cell), onFocus: pick(cell),
@@ -2498,22 +2660,27 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                   })
                 }))
             : null),
-        h(ChartTip, { anchor: hover ? hover.anchor : null, panelRef },
+        h(Tooltip, { anchor: hover ? hover.anchor : null },
           hover
-            ? [
-                h('div', { key: 'title', className: 'ud-tip-title' }, hover.day),
-                h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('tokens')}: ${formatTokens(hover.tokens)}`),
-                h('div', { key: 'requests', className: 'ud-tip-row' }, `${t('requests')}: ${hover.requests}`),
-                h('div', { key: 'rate', className: 'ud-tip-row' }, `${t('cacheHitRate')}: ${cacheRateText(hover.cacheHit, hover.cacheMiss)}`),
-                prefsRef.current.costDisplay && hover.cost > 0
-                  ? h('div', { key: 'cost', className: 'ud-tip-row' }, t('stats.cost', { cost: formatCost(hover.cost, costCurrency) }))
-                  : null,
-              ]
+            ? h(TipBody, {
+                title: hover.day,
+                sections: [{
+                  key: 'main',
+                  rows: [
+                    { key: 'tokens', label: t('tokens'), value: formatTokens(hover.tokens) },
+                    { key: 'requests', label: t('requests'), value: String(hover.requests) },
+                    { key: 'rate', label: t('cacheHitRate'), value: cacheRateText(hover.cacheHit, hover.cacheMiss) },
+                    ...(prefsRef.current.costDisplay && hover.cost > 0
+                      ? [{ key: 'cost', label: t('cost'), value: `≈ ${formatCost(hover.cost, costCurrency)}` }]
+                      : []),
+                  ],
+                }],
+              })
             : null))
     }
 
     // 模型用量:donut + 列表,恒按天口径,不随视图切换
-    function ModelUsage({ models, colorFor, panelRef, costCurrency = '', t = defaultT }) {
+    function ModelUsage({ models, colorFor, costCurrency = '', t = defaultT, onHoverModel }) {
       const [hover, setHover] = useState(null)
       const [tip, setTip] = useState(null)
       const [expandedOther, setExpandedOther] = useState(false)
@@ -2522,11 +2689,13 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const displayName = (model) => (model === OTHER_MODEL ? t('other') : model)
       const pick = (model) => (event) => {
         setHover(model)
-        setTip({ model, anchor: pointerAt(event) })
+        setTip({ model, anchor: tipAnchor(event) })
+        if (onHoverModel) onHoverModel(model)
       }
       const clear = () => {
         setHover(null)
         setTip(null)
+        if (onHoverModel) onHoverModel(null)
       }
       const toggleOther = () => setExpandedOther((value) => !value)
       const tipSegment = tip ? segments.find((segment) => segment.model === tip.model) : null
@@ -2575,7 +2744,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                 h('div', {
                   className: cx('ud-model-row', isOther && 'ud-model-row--expand'),
                   onClick: isOther ? toggleOther : undefined,
-                  onMouseEnter: () => setHover(item.model),
+                  onMouseEnter: () => { setHover(item.model); if (onHoverModel) onHoverModel(item.model) },
                   onMouseLeave: clear,
                 },
                   h('i', { className: 'ud-model-swatch', style: { background: colorFor(item.model) } }),
@@ -2604,34 +2773,50 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
                       h('div', { className: 'ud-model-other-list' },
                         otherDetailItems(models).map((detail) => h('div', {
                           key: detail.model, className: 'ud-model-row ud-model-row--sub',
-                          onMouseEnter: () => setHover(OTHER_MODEL), onMouseLeave: clear,
+                          onMouseEnter: () => { setHover(OTHER_MODEL); if (onHoverModel) onHoverModel(OTHER_MODEL) }, onMouseLeave: clear,
                         },
                           h('span', { className: 'ud-model-name' }, detail.model),
                           h('div', { className: 'ud-model-values' },
                             h('span', { className: 'ud-model-tokens' }, formatTokens(detail.tokens)))))))
                   : null)
             }))),
-        h(ChartTip, { anchor: tip ? tip.anchor : null, panelRef },
+        h(Tooltip, { anchor: tip ? tip.anchor : null },
           tipSegment
-            ? [
-                h('div', { key: 'title', className: 'ud-tip-title' }, displayName(tipSegment.model)),
-                h('div', { key: 'tokens', className: 'ud-tip-row' }, `${t('total')}: ${formatTokens(tipSegment.tokens)}`),
-                h('div', { key: 'pct', className: 'ud-tip-row' }, `${t('percent')}: ${formatPercent(tipSegment.percent)}`),
-                hasTokenBuckets(tipSegment)
-                  ? [
-                      h('div', { key: 'input', className: 'ud-tip-row' }, `${t('priceInput')}: ${formatTokens(tipSegment.inputTokens)}`),
-                      h('div', { key: 'cacheRead', className: 'ud-tip-row' }, `${t('priceCacheRead')}: ${formatTokens(tipSegment.cacheReadTokens)}`),
-                      h('div', { key: 'cacheWrite', className: 'ud-tip-row' }, `${t('priceCacheWrite')}: ${formatTokens(tipSegment.cacheWriteTokens)}`),
-                      h('div', { key: 'output', className: 'ud-tip-row' }, `${t('priceOutput')}: ${formatTokens(tipSegment.outputTokens)}`),
-                    ]
-                  : null,
-                tipSegment.model === OTHER_MODEL && (tipSegment.items ?? []).length > 0
-                  ? h('div', { key: 'breakdown', className: 'ud-tip-breakdown' },
-                      tipSegment.items.map((detail) => h('div', { key: detail.model, className: 'ud-tip-row ud-tip-row--sub' },
-                        h('i', { className: 'ud-legend-swatch', style: { background: 'var(--ud-chart-other)' } }),
-                        `${detail.model}: ${formatTokens(detail.tokens)}`)))
-                  : null,
-              ]
+            ? h(TipBody, {
+                title: displayName(tipSegment.model),
+                sections: [
+                  {
+                    key: 'main',
+                    rows: [
+                      { key: 'tokens', label: t('total'), value: formatTokens(tipSegment.tokens) },
+                      { key: 'pct', label: t('percent'), value: formatPercent(tipSegment.percent) },
+                    ],
+                  },
+                  {
+                    key: 'buckets',
+                    rows: hasTokenBuckets(tipSegment)
+                      ? [
+                          { key: 'input', label: t('priceInput'), value: formatTokens(tipSegment.inputTokens) },
+                          { key: 'cacheRead', label: t('priceCacheRead'), value: formatTokens(tipSegment.cacheReadTokens) },
+                          { key: 'cacheWrite', label: t('priceCacheWrite'), value: formatTokens(tipSegment.cacheWriteTokens) },
+                          { key: 'output', label: t('priceOutput'), value: formatTokens(tipSegment.outputTokens) },
+                        ]
+                      : [],
+                  },
+                  {
+                    key: 'items',
+                    rows: tipSegment.model === OTHER_MODEL
+                      ? (tipSegment.items ?? []).map((detail) => ({
+                          key: detail.model,
+                          label: detail.model,
+                          value: formatTokens(detail.tokens),
+                          sub: true,
+                          swatch: 'var(--ud-chart-other)',
+                        }))
+                      : [],
+                  },
+                ].filter((section) => section.rows.length > 0),
+              })
             : null))
     }
 
@@ -2683,7 +2868,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         : null
       return h(React.Fragment, null,
         h('span', { ref: anchorRef, hidden: true }),
-        costItem !== null && h('div', { ref: costRef, className: 'ud-statsline-root', title: t('statsCostTitle') }, costItem),
+        costItem !== null && h(HintText, { innerRef: costRef, className: 'ud-statsline-root', text: t('statsCostTitle') }, costItem),
         details)
     })
 
@@ -2711,7 +2896,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         : null
       // 0 元(全零价/全零桶)与价未命中同不渲染,无占位符
       const cost = matched && price ? turnCostAmountOf(matched, price) : null
-      const chip = cost === null ? null : h('span', { className: 'ud-turn-cost', title: turnCostTitleText(t, matched) },
+      const chip = cost === null ? null : h(HintText, { className: 'ud-turn-cost', text: turnCostTitleText(t, matched) },
         t('turnCostChip', { cost: formatCost(cost, aggregateCurrencyOf(pricingRules)) }))
       return h(SlotTailPortal, null, chip)
     })
@@ -3097,7 +3282,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       return h('div', { className: 'ud-log' },
         h('div', { className: 'ud-log-summary' },
           (status.skippedSessions ?? 0) > 0
-            ? h('span', { title: breakdownText }, t('skippedSessions', { n: status.skippedSessions }))
+            ? h(HintText, { text: breakdownText }, t('skippedSessions', { n: status.skippedSessions }))
             : null,
           (status.recordFailures ?? 0) > 0
             ? h('span', { className: 'ud-status-err' }, t('recordFailures', { n: status.recordFailures }))
@@ -3106,7 +3291,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
           h('span', { className: 'ud-log-time' }, logTimeOf(entry.time)),
           h('span', { className: cx('ud-log-kind', entry.kind === 'record' && 'ud-log-err') },
             entry.kind === 'record' ? t('logKindRecord') : t('logKindSkipped')),
-          h('span', { className: 'ud-log-detail', title: entry.detail }, entry.detail))))
+          h(HintText, { className: 'ud-log-detail', text: entry.detail }, entry.detail))))
     }
 
     function RebuildButton({ machineRef, busy, onError, t = defaultT }) {
@@ -3184,6 +3369,8 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const [view, setView] = useState('day')
       // 趋势图金额口径开关:会话态,与视图/挡位同为面板内临时状态
       const [costView, setCostView] = useState(false)
+      // 跨组件悬浮联动:图例/模型行/扇区悬停时趋势图同模型柱段保持高亮,其余降透明
+      const [hoverModel, setHoverModel] = useState(null)
       const [range, setRange] = useState(DEFAULT_RANGE)
       const [customFrom, setCustomFrom] = useState('')
       const [customTo, setCustomTo] = useState('')
@@ -3204,7 +3391,6 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const generationRef = useRef(0)
       const pointGenerationRef = useRef(0)
       const heatGenerationRef = useRef(0)
-      const panelRef = useRef(null)
       const [heatDays, setHeatDays] = useState(null)
       // 热力图重取信号(F23):手动刷新/回扫完成即 bump,独立请求随之重取
       const [heatFetchTick, setHeatFetchTick] = useState(0)
@@ -3396,7 +3582,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
       const loadingVisible = pointActive ? pointStatus === 'loading' && !pointView : loading && !stats
       const emptyVisible = !error && (pointActive ? pointView && isEmptyRange(pointView) : stats && isEmptyRange(stats))
 
-      return h('div', { className: 'ud-panel', ref: panelRef },
+      return h('div', { className: 'ud-panel' },
         h('div', { className: 'ud-toolbar' },
           h('div', { className: 'ud-toolbar-main' },
             h('div', { className: 'ud-group', role: 'group', 'aria-label': t('viewGroup') },
@@ -3479,7 +3665,7 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
         loadingVisible ? h('div', { className: 'ud-loading' }, `${t('loading')}…`) : null,
         cardsStats ? h(StatCards, { key: 'cards', stats: cardsStats, costCurrency, t }) : null,
         // 活跃热力图仅按天视图展示:热力图口径为日桶,时/分视图无对应语义
-        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, panelRef, costCurrency, t }) : null,
+        view === 'day' ? h(HeatSection, { key: 'heat', days: heatDays, costCurrency, t }) : null,
         trimmedSlots
           ? h(TrendChart, {
               key: 'trend',
@@ -3494,15 +3680,16 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__) {
               labelMinPitch: pointActive ? LABEL_PITCH_TIME : LABEL_PITCH_DAY,
               busy,
               legendModels: trendSource.models,
-              panelRef,
               costCurrency,
               money,
               costAvailable: costReady,
               onMetricToggle: setCostView,
+              activeModel: hoverModel,
+              onHoverModel: setHoverModel,
               t,
             })
           : null,
-        usageModels ? h(ModelUsage, { key: 'models', models: usageModels, colorFor, panelRef, costCurrency, t }) : null,
+        usageModels ? h(ModelUsage, { key: 'models', models: usageModels, colorFor, costCurrency, t, onHoverModel: setHoverModel }) : null,
         cardsStats?.to ? h('div', { className: 'ud-foot' }, `${t('asOf')} ${slotLabelFor(view)(cardsStats.to)}`) : null,
         emptyVisible ? h('div', { className: 'ud-empty' }, t('empty')) : null,
         h(StatsLineOptions, { key: 'prefs', t }),

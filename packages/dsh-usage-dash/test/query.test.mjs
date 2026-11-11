@@ -641,3 +641,39 @@ test('attachCosts M 槽 costByModel 按模型拆分', () => {
   assert.deepEqual(out.daily[0].costByModel, { m1: 0.5, m2: 0.5 })
   assert.equal(out.daily[0].cost, 1)
 })
+
+// ── 会话数量:窗口内真实会话去重计数(排除项由采集侧预筛,聚合只做并集) ──────
+const sessionRow = (bucket, sessions) => ({ bucket, sessions })
+
+test('aggregateRange:跨桶会话行并集去重得到真实会话数', () => {
+  const out = aggregateRange(
+    [makeRow({ bucket: '2020-01-01' }), makeRow({ bucket: '2020-01-02' })],
+    'D', '2020-01-01', '2020-01-02',
+    [sessionRow('2020-01-01', ['a', 'b']), sessionRow('2020-01-02', ['b', 'c'])],
+  )
+  assert.equal(out.sessions, 3)
+})
+
+test('aggregateRange:无会话行时为 0,不污染其它汇总', () => {
+  const out = aggregateRange([makeRow({ bucket: '2020-01-01', turns: 1 })], 'D', '2020-01-01', '2020-01-01')
+  assert.equal(out.sessions, 0)
+  assert.equal(out.turns, 1)
+})
+
+test('aggregateRange:会话行畸形容错,非数组 sessions 忽略', () => {
+  const out = aggregateRange(
+    [makeRow({ bucket: '2020-01-01' })],
+    'D', '2020-01-01', '2020-01-01',
+    [sessionRow('2020-01-01', ['a']), { bucket: '2020-01-01' }, null, sessionRow('2020-01-01', ['a', 'b'])],
+  )
+  assert.equal(out.sessions, 2)
+})
+
+test('aggregateRange:小时视图会话行同样并集去重', () => {
+  const out = aggregateRange(
+    [makeRow({ bucket: '2020-01-01T10' }), makeRow({ bucket: '2020-01-01T11' })],
+    'H', '2020-01-01T10', '2020-01-01T11',
+    [sessionRow('2020-01-01T10', ['a']), sessionRow('2020-01-01T11', ['a'])],
+  )
+  assert.equal(out.sessions, 1)
+})

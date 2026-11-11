@@ -34,6 +34,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const PAD_WIDTH = 2
 const DOMAIN_NAME = 'usage_stats'
 const TABLE_BUCKETS = 'buckets'
+const TABLE_SESSIONS = 'sessions'
 const MISSING_RECORD_PATTERN = /no record .* to update/
 const MINUTE_KEY_PREFIX = `${GRANULARITY_MINUTE}|`
 const HOUR_KEY_PREFIX = `${GRANULARITY_HOURLY}|`
@@ -71,6 +72,19 @@ export const GRANULARITIES = [
   [GRANULARITY_MINUTE, minuteKey],
 ]
 
+// 会话索引只落天/小时两档(row 存桶内去重会话 id):天档永久,小时档随桶保留期;
+// 分钟视图由覆盖小时行近似(边界最多外扩一小时),不为会话数另建分钟行
+const SESSION_GRANULARITIES = [
+  [GRANULARITY_DAILY, dayKey],
+  [GRANULARITY_HOURLY, hourKey],
+]
+
+// 会话索引保留资格与对应粒度桶同源
+function sessionWithinRetention(g, bucket, nowMs) {
+  if (g === GRANULARITY_DAILY) return true
+  return bucket >= hourKey(nowMs - HOUR_RETENTION_DAYS * DAY_MS)
+}
+
 // 档保留资格(F14):样本桶 ≥ 该档 cutoff 即可写入。日档无上限恒写;
 // 小时档固定留存;分钟档走可配置天数(0 = 分钟档关闭,一律不写)
 function withinRetention(g, bucket, nowMs, minuteRetentionDays) {
@@ -105,11 +119,18 @@ export const usageRowSchema = z.object({
   lastSeen: z.number(),
 })
 
+// 会话索引行:bucket 为该桶的桶串,sessions 为桶内去重的真实会话 id
+export const sessionRowSchema = z.object({
+  bucket: z.string(),
+  sessions: z.array(z.string()),
+})
+
 export const usageStatsDomain = defineDomain({
   name: DOMAIN_NAME,
   version: 1,
   tables: {
     [TABLE_BUCKETS]: domainTable(usageRowSchema),
+    [TABLE_SESSIONS]: domainTable(sessionRowSchema),
   },
   global: {
     schema: z.object({
@@ -127,6 +148,7 @@ export const usageBackupDomain = defineDomain({
   version: 1,
   tables: {
     [TABLE_BUCKETS]: domainTable(usageRowSchema),
+    [TABLE_SESSIONS]: domainTable(sessionRowSchema),
   },
   global: {
     schema: z.object({
@@ -202,6 +224,13 @@ function addDelta(base, delta) {
   }
 }
 
+// 会话 id 集合并集:保持既有顺序,只追加新 id,重复记录幂等
+function mergeSessionIds(existing, incoming) {
+  const merged = new Set(existing ?? [])
+  for (const id of incoming) merged.add(id)
+  return [...merged]
+}
+
 function isMissingRecord(err) {
   return err instanceof Error && MISSING_RECORD_PATTERN.test(err.message)
 }
@@ -214,13 +243,18 @@ export class UsageStore {
     // flush 行级失败上抛缝:采集器注入后接入扫描异常日志
     this.onFlushError = options.onFlushError
     this.table = null
+    this.sessionTable = null
     this.domain = null
     this.backupDomain = undefined
     this.backupTable = undefined
+    this.backupSessionTable = undefined
     this.openError = undefined
     this.lastPruneDay = ''
     this.markChain = Promise.resolve()
     this.pending = new Map()
+    // 会话索引 pending:<g>|<bucket> → { bucket, sessions:Set };seen 防同桶重复入队
+    this.sessionPending = new Map()
+    this.sessionSeen = new Set()
     this.flushTimer = undefined
     // ready 永远 resolve:打开失败转降级,操作按调用失败,逃逸拒绝会拖垮宿主
     this.ready = this.initialize(facility).catch((err) => {
@@ -233,14 +267,17 @@ export class UsageStore {
     const domain = await facility.open(usageStatsDomain)
     this.domain = domain
     this.table = domain.table(TABLE_BUCKETS)
+    this.sessionTable = domain.table(TABLE_SESSIONS)
     // 游标空而已有行:无法区分半写坏态,丢弃行交由回扫重建
     const cursor = this.readCursor()
     if ((cursor?.backfilledSessions?.length ?? 0) === 0 && !this.table.keys().next().done) {
       for (const key of [...this.table.keys()]) await this.table.delete(key)
+      for (const key of [...this.sessionTable.keys()]) await this.sessionTable.delete(key)
     }
     // 备份域打开失败仅禁用回退能力,不拖垮主采集(openError 只覆盖主域)
     this.backupDomain = await facility.open(usageBackupDomain).catch(() => undefined)
     this.backupTable = this.backupDomain?.table(TABLE_BUCKETS)
+    this.backupSessionTable = this.backupDomain?.table(TABLE_SESSIONS)
   }
 
   get degradation() {
@@ -263,6 +300,11 @@ export class UsageStore {
   requireTable() {
     if (this.openError !== undefined) throw this.degradedError()
     return this.table
+  }
+
+  requireSessionTable() {
+    if (this.openError !== undefined) throw this.degradedError()
+    return this.sessionTable
   }
 
   requireCursor() {
@@ -290,6 +332,29 @@ export class UsageStore {
     this.scheduleFlush()
   }
 
+  // 会话索引:桶内去重的真实会话 id。重复记录由内存 seen 短路,跨 boot 由
+  // 行内 set 合并兜底;小时档超保留期只落天档。
+  async recordSession(sessionId, time) {
+    if (typeof sessionId !== 'string' || sessionId === '' || !Number.isFinite(time)) return
+    await this.ready
+    this.requireSessionTable()
+    const nowMs = this.now()
+    let added = false
+    for (const [g, bucketOf] of SESSION_GRANULARITIES) {
+      const bucket = bucketOf(time)
+      if (!sessionWithinRetention(g, bucket, nowMs)) continue
+      const seenKey = `${g}|${bucket}|${sessionId}`
+      if (this.sessionSeen.has(seenKey)) continue
+      this.sessionSeen.add(seenKey)
+      added = true
+      const key = `${g}|${bucket}`
+      const existing = this.sessionPending.get(key)
+      if (existing !== undefined) existing.sessions.add(sessionId)
+      else this.sessionPending.set(key, { bucket, sessions: new Set([sessionId]) })
+    }
+    if (added) this.scheduleFlush()
+  }
+
   scheduleFlush() {
     if (this.flushTimer !== undefined) return
     this.flushTimer = setTimeout(() => {
@@ -303,7 +368,7 @@ export class UsageStore {
   flushNow() {
     const run = this.markChain.then(async () => {
       await this.ready
-      if (this.pending.size === 0) return
+      if (this.pending.size === 0 && this.sessionPending.size === 0) return
       try {
         await this.flushBatch()
       } catch (err) {
@@ -316,6 +381,11 @@ export class UsageStore {
 
   async flushBatch() {
     await this.pruneOncePerDay()
+    await this.flushBuckets()
+    await this.flushSessions()
+  }
+
+  async flushBuckets() {
     const table = this.requireTable()
     const batch = this.pending
     this.pending = new Map()
@@ -332,6 +402,39 @@ export class UsageStore {
       return [outcome.reason]
     })
     if (failures.length > 0) throw new AggregateError(failures, 'usage store flush failed')
+  }
+
+  async flushSessions() {
+    if (this.sessionPending.size === 0) return
+    const table = this.requireSessionTable()
+    const batch = this.sessionPending
+    this.sessionPending = new Map()
+    const entries = [...batch]
+    const outcomes = await Promise.allSettled(entries.map(([key, entry]) => this.applySessionEntry(table, key, entry)))
+    const failures = []
+    for (const [index, outcome] of outcomes.entries()) {
+      if (outcome.status !== 'rejected') continue
+      const [key, entry] = entries[index]
+      // 重排前复核保留资格:重试窗口内小时桶可能已滑出留存期
+      const g = key.startsWith(DAILY_KEY_PREFIX) ? GRANULARITY_DAILY : GRANULARITY_HOURLY
+      if (!sessionWithinRetention(g, entry.bucket, this.now())) continue
+      const existing = this.sessionPending.get(key)
+      if (existing !== undefined) for (const id of entry.sessions) existing.sessions.add(id)
+      else this.sessionPending.set(key, entry)
+      failures.push(outcome.reason)
+    }
+    if (failures.length > 0) throw new AggregateError(failures, 'usage store session flush failed')
+  }
+
+  async applySessionEntry(table, key, entry) {
+    const apply = (current) => ({ bucket: entry.bucket, sessions: mergeSessionIds(current?.sessions, entry.sessions) })
+    try {
+      await table.update(key, apply)
+    } catch (err) {
+      if (!isMissingRecord(err)) throw err
+      await table.put(key, { bucket: entry.bucket, sessions: [] })
+      await table.update(key, apply)
+    }
   }
 
   async applyDelta(table, key, delta) {
@@ -369,7 +472,7 @@ export class UsageStore {
     }
   }
 
-  // 小时桶保留固定 15 天,无配置项
+  // 小时桶保留固定 15 天,无配置项;会话索引小时行同窗口清理
   async pruneHours() {
     await this.ready
     const table = this.requireTable()
@@ -377,6 +480,11 @@ export class UsageStore {
     for (const [key, existing] of table.entries()) {
       if (!key.startsWith(HOUR_KEY_PREFIX)) continue
       if (existing.bucket < cutoff) await table.delete(key)
+    }
+    const sessions = this.requireSessionTable()
+    for (const [key, existing] of sessions.entries()) {
+      if (!key.startsWith(HOUR_KEY_PREFIX)) continue
+      if (existing.bucket < cutoff) await sessions.delete(key)
     }
   }
 
@@ -391,6 +499,29 @@ export class UsageStore {
       if (existing.bucket >= from && existing.bucket <= to) matched.push(existing)
     }
     return matched
+  }
+
+  // 会话索引窗口行:与 rangeRows 同构,读前先落 pending 保证读己之写
+  async sessionRangeRows(g, from, to) {
+    await this.flushNow()
+    await this.ready
+    const table = this.requireSessionTable()
+    const prefix = `${g}|`
+    const matched = []
+    for (const [key, existing] of table.entries()) {
+      if (!key.startsWith(prefix)) continue
+      if (existing.bucket >= from && existing.bucket <= to) matched.push(existing)
+    }
+    return matched
+  }
+
+  // 补扫判定:有历史用量但无会话索引 = 旧版本数据,需要一次性补建索引
+  hasSessionRows() {
+    return this.sessionTable !== undefined && this.sessionTable.size > 0
+  }
+
+  hasBucketRows() {
+    return this.table !== undefined && this.table.size > 0
   }
 
   async seenSessions() {
@@ -436,19 +567,28 @@ export class UsageStore {
       await this.snapshotToBackup()
       const table = this.requireTable()
       for (const key of [...table.keys()]) await table.delete(key)
+      const sessions = this.requireSessionTable()
+      for (const key of [...sessions.keys()]) await sessions.delete(key)
+      // 去重内存与库里状态同源:清库后同 (会话,桶) 允许重新入队
+      this.sessionPending = new Map()
+      this.sessionSeen.clear()
       const liveFirstSeq = {}
       if (boundaries) for (const [id, seq] of boundaries) liveFirstSeq[id] = seq
       await this.writeGlobal([], liveFirstSeq)
     })
   }
 
-  // 当前全量(表行 + 游标 + 时刻)写入备份域,覆盖旧备份:恢复点恒为最近一次清空/恢复前;
+  // 当前全量(表行 + 会话索引 + 游标 + 时刻)写入备份域,覆盖旧备份:恢复点恒为最近一次清空/恢复前;
   // 备份域不可用时跳过(重建不被卡死,仅失去回退点,backupInfo 透明展示)
   async snapshotToBackup() {
     if (this.backupTable === undefined) return
     const cursor = this.readCursor() ?? {}
     for (const key of [...this.backupTable.keys()]) await this.backupTable.delete(key)
     for (const [key, row] of this.requireTable().entries()) await this.backupTable.put(key, row)
+    if (this.backupSessionTable !== undefined) {
+      for (const key of [...this.backupSessionTable.keys()]) await this.backupSessionTable.delete(key)
+      for (const [key, row] of this.requireSessionTable().entries()) await this.backupSessionTable.put(key, row)
+    }
     await this.backupDomain.global.set({
       backfilledSessions: cursor.backfilledSessions ?? [],
       liveFirstSeq: cursor.liveFirstSeq ?? {},
@@ -463,10 +603,17 @@ export class UsageStore {
     return this.enqueueGlobalWrite(async () => {
       await this.flushBatch()
       const savedRows = [...this.backupTable.entries()]
+      const savedSessions = this.backupSessionTable === undefined ? [] : [...this.backupSessionTable.entries()]
       const saved = this.backupDomain.global.get()
       await this.snapshotToBackup()
-      for (const key of [...this.requireTable().keys()]) await this.table.delete(key)
-      for (const [key, row] of savedRows) await this.table.put(key, row)
+      const table = this.requireTable()
+      for (const key of [...table.keys()]) await table.delete(key)
+      for (const [key, row] of savedRows) await table.put(key, row)
+      const sessions = this.requireSessionTable()
+      for (const key of [...sessions.keys()]) await sessions.delete(key)
+      for (const [key, row] of savedSessions) await sessions.put(key, row)
+      this.sessionPending = new Map()
+      this.sessionSeen.clear()
       await this.writeGlobal(saved?.backfilledSessions ?? [], saved?.liveFirstSeq ?? {})
       return { takenAt: saved?.takenAt, rows: savedRows.length }
     })
