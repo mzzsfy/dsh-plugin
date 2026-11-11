@@ -698,68 +698,114 @@ window.__ModuleLoader__.load({
     }
 
 
-    // 每个会话行都会订阅一条常驻 job/list 流, 会话越多流越多(实测 361 条),
-    // 每次 job 变化宿主逐条推全量帧, 主线程随之出现数百毫秒长任务。
-    // 默认窗口只给主会话前 base 条; 点击过的会话额外放行(子 agent 会话只有点击才建);
+    // 会话行与其它消费方(会话头、文件夹运行标记、子会话树等)会为每个会话订阅一条常驻 job/list 流,
+    // 会话越多流越多, job 变化时宿主逐条推全量帧, 主线程随之出现数百毫秒长任务。
+    // 准入: 当前视图的会话始终放行; 其余未归档会话按默认窗口放行前 base 条;
+    // 归档会话与超出窗口的会话只由点击放行。点击与当前视图的会话不占窗口额度。
     // 总数到 max 后按加入顺序淘汰最老的一条, 被淘汰或未放行的行只是不显示任务状态。
     const JOB_LIMIT_MARKER = Symbol.for('@mzzsfy/dsh-bug-perf/job-stream-limit')
     const SESSION_ROW_PREFIX = 'session:'
-    const installJobStreamLimit = ({ jobs, options, sessionsOf, doc }) => {
+    const installJobStreamLimit = ({ jobs, options, workspacesOf, uiSessionOf, doc }) => {
       if (jobs === undefined || typeof jobs.watchRows !== 'function') return { installed: false, reason: 'jobs unavailable' }
       if (jobs[JOB_LIMIT_MARKER] !== undefined) return { installed: false, reason: 'already installed' }
       const original = jobs.watchRows.bind(jobs)
       const entries = new Map()
       const order = []
-      const state = { main: 0, subagent: 0, clicked: 0, rejected: 0, rejectedSubagent: 0, evicted: 0, summaries: 0, subagentSessions: 0 }
-      // sessions 服务可能晚于 jobs 就绪, 每次判定都重新取; 快照未变时复用解析结果
-      const cache = { snapshot: undefined, byId: undefined }
-      const readIndex = () => {
-        const sessions = typeof sessionsOf === 'function' ? sessionsOf() : sessionsOf
-        const snapshot = sessions?.list?.getSnapshot?.()
-        if (snapshot === undefined) return undefined
-        if (cache.snapshot === snapshot) return cache.byId
-        const byId = snapshot.byId === undefined ? undefined : new Map(Object.entries(snapshot.byId))
-        cache.snapshot = snapshot
-        cache.byId = byId
-        if (byId !== undefined) {
-          state.summaries = byId.size
-          state.subagentSessions = [...byId.values()].filter((item) => item?.origin === 'subagent' || item?.parentSessionId !== undefined).length
+      // active: 常驻流总数; windowUsed: 占默认窗口且不是当前视图的条数(派生值); current/clicked: 定向放行新建条数
+      const state = { active: 0, current: 0, clicked: 0, rejected: 0, rejectedArchived: 0, evicted: 0, reclaimed: 0, archived: 0, keys: [] }
+      // 判定读取一律 fail-open: 服务缺失或读取抛错时按未归档/非当前视图处理, 不打断宿主调用方
+      const read = (probe) => {
+        try {
+          return probe()
+        } catch {
+          return undefined
         }
-        return byId
-      }
-      const isSubagent = (sessionId) => {
-        const summary = readIndex()?.get(sessionId)
-        return summary?.origin === 'subagent' || summary?.parentSessionId !== undefined
       }
       const forget = (key) => {
         const entry = entries.get(key)
         if (entry === undefined) return
         entries.delete(key)
-        if (entry.subagent) state.subagent -= 1
-        else state.main -= 1
+        state.active -= 1
         const index = order.indexOf(key)
         if (index >= 0) order.splice(index, 1)
+        state.keys = order.slice()
+      }
+      // 淘汰优先窗口条目, 其次点击放行; 当前视图的会话不受淘汰
+      const evictable = (key) => {
+        const entry = entries.get(key)
+        return entry !== undefined && !isCurrent(key) ? entry : undefined
       }
       const evictOldest = () => {
-        while (order.length > 0) {
-          const key = order[0]
-          const entry = entries.get(key)
-          if (entry === undefined) { order.shift(); continue }
+        const key = order.find((item) => evictable(item)?.windowed === true) ?? order.find((item) => evictable(item) !== undefined)
+        if (key === undefined) return false
+        const entry = entries.get(key)
+        forget(key)
+        entry.release()
+        state.evicted += 1
+        return true
+      }
+      // 会话头的任务入口只为当前视图的会话订阅一条流: 窗口被名册占满后它也必须拿到
+      const isCurrent = (key) => read(() => {
+        const uiSession = typeof uiSessionOf === 'function' ? uiSessionOf() : uiSessionOf
+        return uiSession?.isMain?.(key) === true
+      }) === true
+      // 占窗口的条数按当前视图实时排除: 某行先按窗口放行、之后成为当前视图时自动让出额度
+      const windowPressure = () => {
+        let used = 0
+        for (const [key, entry] of entries) {
+          if (entry.windowed && !isCurrent(key)) used += 1
+        }
+        return used
+      }
+      Object.defineProperty(state, 'windowUsed', { get: windowPressure, enumerable: true })
+      // 归档集合就绪后才生效; 集合变化时回收已归档条目的流(点击与当前视图保留)
+      const cache = { snapshot: undefined, archived: undefined }
+      let subscription
+      const sweep = (archived) => {
+        for (const [key, entry] of [...entries]) {
+          if (!entry.windowed || !archived.has(key) || isCurrent(key)) continue
           forget(key)
           entry.release()
-          state.evicted += 1
-          return true
+          state.reclaimed += 1
         }
-        return false
       }
-      const add = (key, clicked) => {
+      const readArchived = () => read(() => {
+        const workspaces = typeof workspacesOf === 'function' ? workspacesOf() : workspacesOf
+        const snapshot = workspaces?.list?.getSnapshot?.()
+        if (snapshot === undefined) return undefined
+        // phase 未就绪时 archivedSessionIds 是空占位, 不能当权威空集
+        if (snapshot.phase !== undefined && snapshot.phase !== 'ready') return undefined
+        if (subscription === undefined && typeof workspaces?.list?.subscribe === 'function') {
+          // 归档变化即时回收: 模型推送合并到一次微任务
+          let scheduled = false
+          subscription = workspaces.list.subscribe(() => {
+            if (scheduled) return
+            scheduled = true
+            const reconcile = () => {
+              scheduled = false
+              readArchived()
+            }
+            if (typeof queueMicrotask === 'function') queueMicrotask(reconcile)
+            else Promise.resolve().then(reconcile)
+          })
+        }
+        if (cache.snapshot === snapshot) return cache.archived
+        const ids = Array.isArray(snapshot.archivedSessionIds) ? snapshot.archivedSessionIds : []
+        const archived = new Set(ids.map((id) => String(id)))
+        cache.snapshot = snapshot
+        cache.archived = archived
+        state.archived = archived.size
+        sweep(archived)
+        return archived
+      })
+      const isArchived = (key) => readArchived()?.has(key) === true
+      const add = (key, windowed) => {
         if (entries.size >= options.max && !evictOldest()) return undefined
-        const subagent = isSubagent(key)
-        const entry = { release: original(key), subagent, clicked, refs: 1 }
+        const entry = { release: original(key), windowed, refs: 1 }
         entries.set(key, entry)
         order.push(key)
-        if (subagent) state.subagent += 1
-        else state.main += 1
+        state.keys = order.slice()
+        state.active += 1
         return entry
       }
       const releaser = (key, entry) => {
@@ -774,6 +820,13 @@ window.__ModuleLoader__.load({
           entry.release()
         }
       }
+      const admit = (key, windowed, reason) => {
+        const entry = add(key, windowed)
+        if (entry === undefined) return () => { }
+        if (reason === 'current') state.current += 1
+        else if (reason === 'click') state.clicked += 1
+        return releaser(key, entry)
+      }
       jobs.watchRows = (sessionId) => {
         const key = String(sessionId)
         const existing = entries.get(key)
@@ -781,27 +834,28 @@ window.__ModuleLoader__.load({
           existing.refs += 1
           return releaser(key, existing)
         }
-        const subagent = isSubagent(key)
-        // 子 agent 会话不占默认窗口, 只由点击放行
-        if (subagent) {
+        if (isCurrent(key)) return admit(key, false, 'current')
+        // 归档会话不在默认视图里, 不占窗口, 只由点击放行
+        if (isArchived(key)) {
           state.rejected += 1
-          state.rejectedSubagent += 1
+          state.rejectedArchived += 1
           return () => { }
         }
-        if (state.main >= options.base) {
+        if (windowPressure() >= options.base) {
           state.rejected += 1
           return () => { }
         }
-        const entry = add(key, false)
-        return entry === undefined ? (() => { }) : releaser(key, entry)
+        return admit(key, true)
       }
       const promote = (sessionId) => {
         const key = String(sessionId)
         const existing = entries.get(key)
-        if (existing !== undefined) { existing.clicked = true; return }
-        const entry = add(key, true)
-        if (entry === undefined) return
-        state.clicked += 1
+        if (existing !== undefined) {
+          // 已占默认窗口的行被点击后转为点击放行(当前视图的额度豁免是派生的, 无需另行让出)
+          existing.windowed = false
+          return
+        }
+        admit(key, false, 'click')
       }
       const onDocumentClick = (event) => {
         const row = event?.target?.closest?.('[data-row-key]')
@@ -812,6 +866,8 @@ window.__ModuleLoader__.load({
       doc?.addEventListener?.('click', onDocumentClick, true)
       const dispose = () => {
         doc?.removeEventListener?.('click', onDocumentClick, true)
+        if (typeof subscription === 'function') subscription()
+        subscription = undefined
         for (const [key, entry] of [...entries]) {
           forget(key)
           entry.release()
@@ -871,7 +927,7 @@ window.__ModuleLoader__.load({
       {
         key: 'jobStreamLimit',
         title: '任务状态流上限',
-        description: '每个会话行常驻一条 job/list 流,会话多时按默认窗口限制,点击会话可越过窗口。',
+        description: '每个会话行常驻一条 job/list 流,会话多时按默认窗口限制;当前视图与点击的会话不占窗口,归档会话与窗口外的行只在点击时订阅。',
         fields: [
           { name: 'base', label: '默认窗口', unit: '条' },
           { name: 'max', label: '硬上限', unit: '条' },
@@ -1164,7 +1220,7 @@ window.__ModuleLoader__.load({
         const startJobStreamLimit = (jobs) => {
           report.features.jobStreamLimit = config.jobStreamLimit.enabled
             ? safely(() => {
-              const result = installJobStreamLimit({ jobs, options: config.jobStreamLimit, sessionsOf: () => ctx.get?.('sessions'), doc: window.document })
+              const result = installJobStreamLimit({ jobs, options: config.jobStreamLimit, workspacesOf: () => ctx.get?.('workspaces'), uiSessionOf: () => ctx.get?.('uiSession'), doc: window.document })
               return result.installed === true ? { installed: true, state: result.state } : result
             })
             : { installed: false, reason: 'disabled' }

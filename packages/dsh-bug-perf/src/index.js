@@ -48,7 +48,7 @@ const SETTINGS_SCHEMA = z.object({
   }).description('会话加载停滞兜底'),
   jobStreamLimit: z.object({
     enabled: z.boolean().default(DEFAULT_CONFIG.jobStreamLimit.enabled).description('任务状态流上限:每个会话行各订阅一条常驻 job/list 流,会话多时会把主线程压满,这里按默认窗口加点击放行'),
-    base: z.number().default(DEFAULT_CONFIG.jobStreamLimit.base).description('默认窗口:只给主会话放行的条数,子 agent 会话不占这个窗口'),
+    base: z.number().default(DEFAULT_CONFIG.jobStreamLimit.base).description('默认窗口:只给未归档会话放行的条数,归档会话、当前视图与点击过的会话不占这个窗口'),
     max: z.number().default(DEFAULT_CONFIG.jobStreamLimit.max).description('硬上限;点击某个会话可越过默认窗口加入,总数到上限后淘汰最先加入的一条'),
   }).description('任务状态流上限'),
   sessionWindow: z.object({

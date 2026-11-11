@@ -11,7 +11,7 @@
 | session/follow 重建合并 | `restartCoalesce` | discussion #11272:每次 assistant rebaseline 都全量重建 `session/follow` | 包装 `RemoteStream.prototype.restart`,同一 stream 在窗口内的多次重启只保留一次尾随执行;`restart()` 无参数,最新一次可代表期间全部重建请求 |
 | 终端输出看门狗 | `terminalWatchdog` | discussion #11271:并发 `terminal/attach` 流释放后 UI 输出冻结 | 监控 `webTerminals` 视图;本端曾持有写权、输出停滞超过阈值且仍持有 attach 流时调用 `view.connect()` 重连,冷却期内不重复 |
 | 会话流保活 | `socketKeepAlive` | 公网/反代链路下,宿主短周期心跳把仍可用的连接判为失联 | 在 `/api/remote.mux` 连接空闲(客户端自己没有上行帧)时发送一条随机 streamId 的 `item` 帧;宿主对任意入帧刷新存活标记,未知 streamId 的 item 被忽略;仅覆盖补丁安装之后新建的连接,发过保活帧的连接被协议级关闭码关闭时累计,累计两次即熔断、健康存活后清零 |
-| 任务状态流上限 | `jobStreamLimit` | 侧边栏每个会话行各订阅一条常驻 `job/list` 流(实测 361 条 job 流;会话侧 3466 个会话中 2711 个是子 agent 会话),job 变化时宿主逐条推全量帧,主线程出现数百毫秒长任务,页面越用越卡 | 默认窗口只给主会话前 `base` 条;子 agent 会话不占窗口,只在被点击时订阅;点击任意会话可加入,总数到 `max` 后淘汰最先加入的一条 |
+| 任务状态流上限 | `jobStreamLimit` | 会话行与其它消费方(会话头、文件夹运行标记、子会话树等)各订阅一条常驻 `job/list` 流(实测 361 条 job 流),job 变化时宿主逐条推全量帧,主线程出现数百毫秒长任务,页面越用越卡 | 默认窗口只放行未归档会话前 `base` 条;当前视图的会话与点击过的会话不占窗口(否则窗口被名册占满后打开会话看不到任务状态);归档会话与超出窗口的会话只在点击时订阅;总数到 `max` 后淘汰最先加入的一条 |
 | 会话停滞自愈 | `stuckSession` | 连接重建期间会话停在 loading 且长时间无任何进展 | 会话流无有效消息行且直接子节点是加载提示时进入停滞计时;计时期间节点数、有效行数或最后一行文本长度任一变化都视为进展并重新计时,页面不可见或定时器被挂起时作废本轮计时;持续无进展超过阈值才调用宿主 `connection.reconnect()` 主动重建连接(中止当前 generation 并立即重试,不刷新页面、不丢草稿),重建后重新计时;连续多次无效才显示提示条与刷新入口 |
 | 会话列表瘦身 | `listSlim` | `session/list` 为每个会话下发完整投影快照(上下文请求头、回合大纲等),会话多时单次响应数十 MB、服务端重建要数十秒,每次打开页面都重来一遍 | 宿主半区包装 `sessionController.list`:只下发列表行消费的投影字段(`title` / `sessionListMetadata` / `inbox` / `modelSelection` / `tokenUsage`),结果缓存;会话增删即时失效,TTL 兜底标题漂移;被裁字段经会话详情接口完整返回;非 owner Remote 主体不读写缓存、每次透传原方法;关闭时包装保留、透传原方法;响应形状不符时原样透传 |
 | 历史窗口收敛 | `sessionWindow` | 宿主首屏与重连窗口固定为 500 条消息 / 至少 2 轮(`HISTORY_PAGE_OPTIONS`),工具密集的会话一轮就有上千事件:实测首屏可达 17MB(含 context-manager 的 fork 预取,当时 2000 条/页、现 100 条/页)、上万事件,客户端一次渲染 55 个条目、4176 个节点,打开与重连出现 1.3–2.1s 长任务 | 宿主半区包装 `sessionController.follow` / `page` / `events`,把 `maxMessages`、`turnWindow.minMessages`、`minTurns` 都按配置收敛(只降不升),并保证 `minMessages ≤ maxMessages`;首屏规模实际由 `minMessages` 决定,`maxMessages` 只兜上限;请求身份字段不动,关闭、形状不符或读取配置抛错时透传原请求 |
@@ -73,8 +73,8 @@
 | `socketKeepAlive.enabled` | `true` | 关闭后不包装 `WebSocket`,不发送任何保活帧 |
 | `socketKeepAlive.intervalMs` | `1500` | 空闲多久发一条保活帧;下限 500,上限 60000 |
 | `jobStreamLimit.enabled` | `true` | 关闭后不限制 `job/list` 订阅数 |
-| `jobStreamLimit.base` | `32` | 默认窗口:只给主会话放行的条数,子 agent 会话不占;下限 4,上限 256,且不超过 `max` |
-| `jobStreamLimit.max` | `48` | 硬上限:点击会话可越过默认窗口加入,到上限后淘汰最先加入的一条;下限 4,上限 512 |
+| `jobStreamLimit.base` | `32` | 默认窗口:只给未归档会话放行的条数,归档会话、当前视图与点击过的会话不占;下限 4,上限 256,且不超过 `max` |
+| `jobStreamLimit.max` | `48` | 硬上限:当前视图与点击过的会话可越过默认窗口加入,到上限后淘汰最先加入的一条;下限 4,上限 512 |
 | `stuckSession.enabled` | `true` | 关闭后不检测停滞、不请求重连 |
 | `stuckSession.checkMs` | `3000` | 停滞检查周期;下限 250,上限 60000 |
 | `stuckSession.stallMs` | `60000` | 加载态持续多久**且期间无任何进展**才重建连接;下限 1000,上限 600000 |
@@ -105,8 +105,11 @@
 - 历史窗口收敛的目标方法只在类原型上查找实现;`follow` / `page` / `events` 任一缺失时只跳过该入口,全部缺失才记录原因并跳过装载。关闭装载时删除实例上的同名属性,回到原型实现。
 - 列表接口返回形状不符(`items` 不是数组):本次原样透传,不缓存。
 - 单条投影 `values` 形状不符:该条原样返回,其余条目照常裁剪并缓存。
-- 默认窗口按 `watchRows` 调用顺序(列表渲染顺序)放行,不保证正好是可见行;被拒或已被淘汰的行表现为不显示任务状态,不影响会话本身。
-- 主/子会话的判定依赖会话列表快照的 `origin`/`parentSessionId`;快照未就绪时一律按主会话处理。
+- 默认窗口按 `watchRows` 调用顺序(先到先得,调用方可能是侧边栏行、会话头、文件夹运行标记或子会话树)放行,不保证正好是可见行;当前视图的会话不占窗口额度,额度按"占窗口且不是当前视图"实时计算,某行成为当前视图即让出。窗口不按会话活跃度重排:重排要释放消费方已持有的流,调用方的持有记录与实际流会脱节(静默丢任务状态),因此不做自动替换;被拒或已被淘汰的行表现为不显示任务状态,不影响会话本身。
+- 到达 `max` 后淘汰最老的条目,优先淘汰占窗口的条目,当前视图的会话不被淘汰。
+- 归档判定依赖 `workspaces` 服务快照的 `archivedSessionIds`,并且只在快照 `phase` 为 `ready` 时生效;服务缺失、快照未就绪或读取抛错时一律按未归档处理(只受 `base` 限制)。会话来源不再是判定依据:子 agent 会话与主会话同等计入默认窗口。
+- 归档集合变化由 `workspaces.list` 推送后合并到一次微任务回收已归档会话的自动放行流,点击放行与当前视图的流保留;某个订阅在判定当时被拒后由调用方重新挂载或用户点击再订阅,补丁不代调用方重试。
+- 当前视图的会话靠 `uiSession.isMain` 判定,每次订阅尝试都重新取;官方会话头在会话进入主视图之后才订阅,所以窗口饱和不影响打开会话的任务入口;宿主缺这个服务或方法时该行按普通行处理。
 - 宿主把保活帧当协议错误(以 1002/1003/1007/1008/1009/1011 关闭):在发过保活帧的连接上累计两次后补丁自行禁用、恢复原始构造器,并把原因写回 `window.__dshBugPerf.features.socketKeepAlive`;连接健康存活 10 个间隔后累计清零。普通断线(1000/1001/1006)与未发过保活帧的连接不计入。
 - 宿主没有 `webServer` 服务:不注册配置/采样路由,也不提供设置保存;列表瘦身仍按 `sessionController` 独立装载,客户端补丁按内联默认配置运行。
 - `diag` 上报遇到 fetch 缺失、抛错或宿主路由失败:静默丢弃本次上报;内存采样继续运行,不影响页面。
@@ -134,6 +137,7 @@
 | `features.<功能>.reason` | 跳过原因 | `disabled`、`already installed`、`waiting for ...`、`... unavailable`、`webTerminals.view missing`、宿主日志里的 `未启用`、模块/结构错误 |
 | `features.applyError` | apply 阶段未捕获错误 | 非空时先修装载问题,不要继续看曲线 |
 | `features.diag` | 上报是否启动 | `installed: true` 表示定时器已按配置启动;关闭时为 `reason: "disabled"` |
+| `features.jobStreamLimit.state` | 任务流准入计数 | `windowUsed` 占默认窗口的条数(占窗口且当前不是主视图,实时派生);`active` 常驻流总数;`current` / `clicked` 定向放行新建条数;`rejected` / `rejectedArchived` 被拒次数;`evicted` 到上限淘汰条数;`reclaimed` 归档回收条数;`archived` 归档集合大小(只在归档快照变化时刷新);`keys` 当前持有流的会话键(准入顺序) |
 | `diag.enabled` | 当前实际上报状态 | 默认 `false`;配置开启并刷新后为 `true` |
 | `diag.samples` | 内存采样序列 | 每项 `{t, heapMB, nodes, sockets, liveSockets, activeStreams, messages, sent}` |
 | `diag.longTasks` | 主线程长任务 | 近期 `{t, ms}`;与 `blockedMs` 一起看 |
@@ -282,8 +286,9 @@ tail -n 3 "${TMPDIR:-/tmp}/dsh-bug-perf-diag.jsonl"
 ## dsh 版本兼容
 
 - `hostMin`: `0.2.1-rc.2`(依赖的 client 内部形态与宿主 `sessionController.list` 面在该版本起可用)。
+- `jobStreamLimit` 的准入判定读 `workspaces.list` 与 `uiSession.isMain`;两个服务都按使用点软读,缺失时退化为"按未归档放行/先到先得",不影响其他功能。
 - 已验证版本:`0.2.1-rc.2`(旧两功能完整功能面)、`0.2.2-rc.1`(旧两功能完整功能面;新增功能见下)。
-- 新增 `socketKeepAlive` / `stuckSession` 目前只在 `0.2.2-rc.1` 隔离工位验证;`jobStreamLimit` 已完成生产页面实测(见 `兼容性测试.md` 状态表);`dshReleases` 的既有条目不含这几个功能,升级宿主后须按 `兼容性测试.md` 重新核对。
+- 新增 `socketKeepAlive` / `stuckSession` 目前只在 `0.2.2-rc.1` 隔离工位验证;`jobStreamLimit` 已完成生产页面实测(2026-11-09,旧判定按"非子 agent 会话")与 0.2.2-rc.1 隔离工位复测(未归档会话 + 当前视图放行,见 `兼容性测试.md` 状态表与 #24/#24b);`dshReleases` 的既有条目不含这几个功能,升级宿主后须按 `兼容性测试.md` 重新核对。
 - `listSlim` 从 `dsh-session-manager` 迁入,依赖宿主 `sessionController` 服务与 `ctx.invocation` 主体判定;迁移后完成宿主接线、配置归一化与 L1 单元验证,仓库 `node scripts/smoke-load.mjs` 20 包通过,0.2.2-rc.1 隔离 boot 页面/激活通过,隔离宿主进程内同构 invocation 多主体取证通过(#33/#34;真实 Liveshare server 未部署);旧包 0.10.0 共存实测确认 viewer 泄漏。`dshReleases` 未单独登记该功能。`dsh-session-manager` 已同批发布 0.11.0(旧包装的鉴权绕过随之消除)。
 - 兼容性细节与逐版本证据见 [兼容性测试.md](兼容性测试.md)。
 
