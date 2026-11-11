@@ -1,0 +1,4 @@
+# 持续工作:插入宿主行。全局常开,无开关;规则经 systemPrompt 常驻段落注入。
+- insert:
+    - id: keep-working
+      name: '@mzzsfy/dsh-keep-working'

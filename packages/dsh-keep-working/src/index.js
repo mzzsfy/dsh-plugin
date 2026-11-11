@@ -1,0 +1,194 @@
+/**
+ * 持续工作:AI 未声明结案就结束回合时,补一条用户消息把它拉回。
+ *
+ * 装配层只做四件事:注入提示词规则、挂上恢复引擎、冷启动扫描存储会话、
+ * 暴露设置面板。判定与调度分别住在 closure / engine / scan。
+ */
+
+import z from '@deepseek-ai/schemastery'
+
+import { DEFAULTS, resolveConfig } from './config.mjs'
+import { createEngine } from './engine.mjs'
+import { probeConnectivity } from './offline.mjs'
+import { scanStoredSessions, trace } from './scan.mjs'
+import { NAMESPACE, PANEL_FIELDS, panelDefaults, readSettings, writeSettings } from './settings.mjs'
+
+export const name = 'keep-working'
+
+/** 缺 agents 或 systemPrompt 时干净禁用:不注册任何服务与提示词。 */
+export const inject = ['agents', 'systemPrompt']
+
+export const SECTION_NAME = 'keep-working:closure'
+
+export const PROMPT_TEXT =
+  '结束必须显式提交:没改文件末行追加 (TASK_DONE);任务阻塞末行追加 (TASK_BLOCKED: 原因);改过文件必须最后只使用 present;禁止同时present和(TASK_DONE);present 的时机以本段为准,交付产物本身就是 present 的用途,不受"不要只为列出源文件调用 present"约束'
+
+/**
+ * 结案段落必须排在宿主的文件引用建议之后:那段写着"不要只为列出源文件调
+ * present",结案规则压在它后面才不会被读成例外。
+ */
+export function buildSection(systemPrompt) {
+  return {
+    name: SECTION_NAME,
+    order: systemPrompt.getSectionOrder('DELIVERABLE_FILE_REFERENCES') + 1,
+    text: PROMPT_TEXT,
+  }
+}
+
+/** 冷启动等宿主服务就绪再扫,避免与 profile 装配抢时序。 */
+const SCAN_DELAY_MS = 5_000
+
+/** 宿主服务尚未就绪时按此间隔重试;工作区注册表通常在数秒内完成异步加载。 */
+const SCAN_RETRY_MS = 1_000
+
+/** 面板请求体上限,防止畸形请求撑爆内存。 */
+const BODY_LIMIT_BYTES = 64 * 1024
+
+export const Config = z
+  .object({
+    graceMs: z.number().default(DEFAULTS.graceMs).volatile(),
+    cooldownMs: z.number().default(DEFAULTS.cooldownMs).volatile(),
+    maxConsecutive: z.number().default(DEFAULTS.maxConsecutive).volatile(),
+    backoffFactor: z.number().default(DEFAULTS.backoffFactor).volatile(),
+    backoffMaxMs: z.number().default(DEFAULTS.backoffMaxMs).volatile(),
+    scanOnBoot: z.boolean().default(DEFAULTS.scanOnBoot).volatile(),
+    scanLimit: z.number().default(DEFAULTS.scanLimit).volatile(),
+    freshMs: z.number().default(DEFAULTS.freshMs).volatile(),
+    resumeGoals: z.boolean().default(DEFAULTS.resumeGoals).volatile(),
+    resumePausedGoals: z.boolean().default(DEFAULTS.resumePausedGoals).volatile(),
+    resumeSilentTurns: z.boolean().default(DEFAULTS.resumeSilentTurns).volatile(),
+    pauseWhenOffline: z.boolean().default(DEFAULTS.pauseWhenOffline).volatile(),
+    offlineCheckMs: z.number().default(DEFAULTS.offlineCheckMs).volatile(),
+    classify: z.boolean().default(DEFAULTS.classify).volatile(),
+    retryableErrorPatterns: z.string().default(DEFAULTS.retryableErrorPatterns).volatile(),
+    paused: z.boolean().default(DEFAULTS.paused).volatile(),
+    continueText: z.string().default(DEFAULTS.continueText).volatile(),
+    continueTextMaxTokens: z.string().default(DEFAULTS.continueTextMaxTokens).volatile(),
+    continueTextSilent: z.string().default(DEFAULTS.continueTextSilent).volatile(),
+    continueTextInterrupted: z.string().default(DEFAULTS.continueTextInterrupted).volatile(),
+    closureText: z.string().default(DEFAULTS.closureText).volatile(),
+  })
+
+function sendJson(res, status, payload) {
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.end(JSON.stringify(payload))
+}
+
+async function readJsonBody(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > BODY_LIMIT_BYTES) throw new Error('请求体过大')
+    chunks.push(chunk)
+  }
+  const text = Buffer.concat(chunks).toString('utf8')
+  return text === '' ? {} : JSON.parse(text)
+}
+
+export async function apply(ctx, config) {
+  let createUserMessage
+  try {
+    ;({ createUserMessage } = await import('@deepseek-ai/dsh-llm'))
+  } catch (error) {
+    ctx.logger.warn(
+      `[keep-working] 消息构造器不可用,插件停用: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return
+  }
+
+  let runtime
+  // 本进程已裁决过的存储会话,跨扫描轮次去重
+  const seenSessions = new Set()
+
+  const stopRuntime = () => {
+    if (runtime === undefined) return
+    if (runtime.scanTimer !== undefined) clearTimeout(runtime.scanTimer)
+    runtime.engine.dispose()
+    runtime.section()
+    runtime = undefined
+  }
+
+  const startRuntime = () => {
+    stopRuntime()
+    const resolved = resolveConfig(config, readSettings(ctx))
+
+    const section = ctx.systemPrompt.section(buildSection(ctx.systemPrompt))
+    const engine = createEngine({
+      ctx,
+      config: resolved,
+      createUserMessage,
+      probe: resolved.pauseWhenOffline ? probeConnectivity : undefined,
+    })
+    engine.attach()
+
+    const state = { section, engine, scanTimer: undefined }
+    runtime = state
+
+    const scanDeadline = Date.now() + resolved.freshMs
+    const runScan = async () => {
+      try {
+        const result = await scanStoredSessions({ ctx, config: resolved, createUserMessage, seen: seenSessions })
+        // 宿主持久层还没列出会话,或本轮预算用完时继续等,直到超出新鲜窗口
+        if (result.listed > 0 && result.complete) return
+      } catch (error) {
+        trace(`扫描异常 ${error instanceof Error ? error.message : String(error)}`)
+        ctx.logger?.warn?.(
+          `[keep-working] 启动扫描失败: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      if (Date.now() >= scanDeadline || runtime !== state) return
+      state.scanTimer = setTimeout(runScan, SCAN_RETRY_MS)
+      state.scanTimer.unref?.()
+    }
+    if (resolved.scanOnBoot && !resolved.paused) {
+      state.scanTimer = setTimeout(runScan, SCAN_DELAY_MS)
+      state.scanTimer.unref?.()
+    }
+  }
+
+  startRuntime()
+
+  ctx.inject(['settings'], () => {
+    // 设置写入后 cordis Config 的 volatile 字段随之更新,重建运行期以采用新值
+    ctx.on('settings/document-updated', (namespace) => {
+      if (namespace === NAMESPACE) startRuntime()
+    })
+  })
+
+  ctx.inject(['webServer'], (serverCtx) => {
+    serverCtx.webServer.register({
+      path: '/api/keep-working/config',
+      handler: async (req, res) => {
+        if (req.method === 'GET') {
+          sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)), defaults: panelDefaults() })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' })
+          return
+        }
+        let patch
+        try {
+          patch = await readJsonBody(req)
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+          return
+        }
+        const allowed = new Set(PANEL_FIELDS)
+        const clean = Object.fromEntries(
+          Object.entries(patch).filter(([key, value]) => allowed.has(key) && value !== undefined),
+        )
+        if (!(await writeSettings(ctx, clean))) {
+          sendJson(res, 503, { ok: false, error: '设置服务不可用' })
+          return
+        }
+        startRuntime()
+        sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)) })
+      },
+    })
+  })
+
+  ctx.effect(() => () => stopRuntime(), 'keep-working lifecycle')
+}
