@@ -126,9 +126,15 @@ const PROMPTS_FILE = 'prompts.json'
 
 function normalizePrompts(parsed) {
   if (!parsed || !Array.isArray(parsed.items)) return []
-  return parsed.items
-    .filter((item) => item && typeof item.text === 'string' && item.text.length > 0)
-    .map((item) => ({ text: item.text, at: typeof item.at === 'number' ? item.at : 0 }))
+  // 文本是收藏的身份:重复项只保留先出现的一条(旧数据/手改文件可能带重复)
+  const seen = new Set()
+  const items = []
+  for (const item of parsed.items) {
+    if (!item || typeof item.text !== 'string' || item.text.length === 0 || seen.has(item.text)) continue
+    seen.add(item.text)
+    items.push({ text: item.text, at: typeof item.at === 'number' ? item.at : 0 })
+  }
+  return items
 }
 
 export async function readPrompts(dir) {

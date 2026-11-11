@@ -146,6 +146,21 @@ const CSS = [
   '.cx-hist__del { flex:none; border:0; border-radius:var(--cx-radius-sm); background:transparent; cursor:pointer;',
   '  min-height:24px; padding:0 8px; color:var(--cx-text-sub); font-size:16px; line-height:18px; }',
   '.cx-hist__del:hover { color:var(--cx-danger); background:var(--cx-hover-danger); }',
+  // 常用范围编辑态拖动手柄:hover 显示、触摸常显;touch-action:none 防拖动与滚动
+  // 手势打架(触摸设备无它则 pointermove 被滚动吃掉)
+  '.cx-hist__grip { flex:none; display:inline-flex; align-items:center; justify-content:center;',
+  '  appearance:none; border:0; padding:0; background:transparent;',
+  '  width:16px; height:24px; color:var(--cx-text-dim); cursor:grab; opacity:0;',
+  '  transition:opacity .12s, color .12s; touch-action:none; }',
+  '.cx-hist__editrow:hover .cx-hist__grip, .cx-hist__grip:focus-visible { opacity:1; }',
+  '.cx-hist__grip:hover { color:var(--cx-text); }',
+  '.cx-hist__grip:active { cursor:grabbing; }',
+  '.cx-hist__grip:focus-visible { outline:2px solid var(--cx-focus); outline-offset:2px; border-radius:var(--cx-radius-sm); }',
+  '@media (hover: none) { .cx-hist__grip { opacity:1; } }',
+  // 拖动视觉:源行淡化,插入位以 2px accent 线标在目标行上/下边
+  '.cx-hist__editrow--drag { opacity:.45; }',
+  '.cx-hist__editrow--drop-before { box-shadow:inset 0 2px 0 var(--cx-accent); }',
+  '.cx-hist__editrow--drop-after { box-shadow:inset 0 -2px 0 var(--cx-accent); }',
   '.cx-hist__addrow { display:flex; gap:8px; flex:none; padding:8px 8px 4px; border-top:.5px solid var(--cx-border); }',
   '.cx-hist__addbtn { flex:none; appearance:none; border:0; border-radius:var(--cx-radius-sm); cursor:pointer;',
   '  min-height:28px; padding:0 12px; background:var(--cx-accent); color:var(--dsw-alias-bg-base);',
@@ -203,6 +218,7 @@ const CSS = [
 
 const INPUTS_URL = '/api/context/inputs'
 const PROMPTS_TOGGLE_URL = '/api/context/prompts/toggle'
+const PROMPTS_REORDER_URL = '/api/context/prompts/reorder'
 const HISTORY_ENABLED_URL = '/api/context/history-enabled'
 const HISTORY_BUTTON_ENABLED_URL = '/api/context/history-button-enabled'
 const STEER_ENABLED_URL = '/api/context/steer-recall-enabled'
@@ -260,6 +276,9 @@ const HISTORY_SCOPE_LABELS = ['常用', '当前会话', '本工作区', '全部�
 const HISTORY_SCOPE_DEFAULT = HISTORY_SCOPES.indexOf('session')
 // 浮层打开期间固定轮询节奏:host 侧对齐是异步的,数据可能晚于首次响应到达
 const HISTORY_REPULL_MS = 3 * 1000
+// 拖动排序:指针距列表上下边缘该距离内持续滚动,每帧步进(4px 网格)
+const DRAG_EDGE_PX = 24
+const DRAG_SCROLL_STEP = 12
 
 // 历史浮层搜索镜像(与 core.mjs filterHistoryInputs 同步维护):
 // 查询词去首尾空白后按不区分大小写子串匹配,空查询原样返回全量
@@ -268,6 +287,37 @@ function filterHistoryInputs(entries, query) {
   const needle = String(query ?? '').trim().toLowerCase()
   if (needle === '') return list
   return list.filter((entry) => String((entry && entry.text) ?? '').toLowerCase().includes(needle))
+}
+
+// ── 常用提示词拖动排序:落位计算与数组移动(纯函数,单文件自包含)──
+
+// 指针纵向位置 → 插入位(0..行数):以每行中点为分界,指针落在该行下半区即插到其后
+function resolveDropIndex(rows, clientY) {
+  const list = Array.isArray(rows) ? rows : []
+  for (let index = 0; index < list.length; index += 1) {
+    const middle = (list[index].top + list[index].bottom) / 2
+    if (clientY < middle) return index
+  }
+  return list.length
+}
+
+// 按插入位移动:把 from 项移到原列表的插入位 insert,向下移动时补偿自身占位
+// (拖到自身原位及其后一位均视为不动,避免"放下即错位一格")
+function moveByInsert(entryList, from, insert) {
+  const list = Array.isArray(entryList) ? entryList : []
+  if (from < 0 || from >= list.length) return list
+  const target = insert > from ? insert - 1 : insert
+  if (target === from) return list
+  const next = list.slice()
+  const [item] = next.splice(from, 1)
+  next.splice(target, 0, item)
+  return next
+}
+
+// 键盘排序的插入位:上移插到前一项之前,下移插到后一项之后;越界(已在端点)返回 -1
+function keyboardInsert(key, index, length) {
+  const insert = key === 'ArrowUp' ? index - 1 : index + 2
+  return insert < 0 || insert > length ? -1 : insert
 }
 
 // fork 错误文案映射镜像(与 core.mjs forkFailureText 同步维护)
@@ -370,6 +420,10 @@ function HistoryDock({ session, inputActions }) {
   // editing 仅常用范围可进入(行内改/删 + 底部新增)
   const [collected, setCollected] = useState(() => new Set())
   const [editing, setEditing] = useState(false)
+  // 拖动排序状态:from 为源行索引,drop 为插入位(0..items.length)。权威值在
+  // dragRef(指针事件与 rAF 中读写),state 仅驱动渲染
+  const [drag, setDrag] = useState({ from: -1, drop: -1 })
+  const dragRef = React.useRef(null)
   // 搜索:query 驱动渲染,原始条目存 rawRef,items 恒为过滤后列表;
   // 组合输入(IME)期间不过滤,上屏后才应用
   const [query, setQuery] = useState('')
@@ -471,11 +525,217 @@ function HistoryDock({ session, inputActions }) {
     takeAddInput(addInputRef.current, togglePrompt)
   }
 
+  // ── 常用提示词拖动排序(仅编辑态,指针事件实现,桌面与触摸同路径)──
+
+  // 手柄图标:6 点竖排(React 元素,不走 DOM 注入——DOM 节点不能作为 React 子节点)
+  function gripSvg() {
+    return h('svg', { width: 10, height: 14, viewBox: '0 0 10 14', fill: 'currentColor', 'aria-hidden': 'true' },
+      [[3, 2], [7, 2], [3, 7], [7, 7], [3, 12], [7, 12]].map(([cx, cy]) =>
+        h('circle', { key: cx + ':' + cy, cx, cy, r: 1.2 })))
+  }
+
+  // 手柄:原生按钮语义 + 可键盘聚焦(↑/↓ 排序);点击不冒泡触发行内其它动作
+  function gripHandle(text, index) {
+    return h('button', {
+      key: 'grip',
+      type: 'button',
+      className: 'cx-hist__grip',
+      tabIndex: 0,
+      title: '拖动排序,或聚焦后按 ↑/↓ 移动',
+      'aria-label': '拖动排序',
+      onPointerDown: (event) => startDrag(event, index),
+      onClick: (event) => event.stopPropagation(),
+      onKeyDown: (event) => moveByKey(event, text),
+    }, gripSvg())
+  }
+
+  // 行矩形取样:插入位以行中点分界;滚动后必须重取
+  function readRowRects(listEl) {
+    return Array.prototype.map.call(listEl.querySelectorAll('.cx-hist__editrow'), (row) => {
+      const rect = row.getBoundingClientRect()
+      return { top: rect.top, bottom: rect.bottom }
+    })
+  }
+
+  function dragIdle() {
+    return { from: -1, drop: -1 }
+  }
+
+  function syncDrop(pointer) {
+    const drop = resolveDropIndex(pointer.rows, pointer.clientY)
+    if (drop === pointer.drop) return
+    pointer.drop = drop
+    setDrag({ from: pointer.from, drop })
+  }
+
+  function startDrag(event, index) {
+    if (dragRef.current !== null) return
+    // 仅主键/单指起拖(触摸事件无 button 定义)
+    if (event.button !== undefined && event.button !== 0) return
+    const listEl = event.currentTarget.closest('.cx-hist__list')
+    if (!listEl) return
+    event.preventDefault()
+    event.stopPropagation()
+    const pointer = {
+      from: index,
+      drop: index,
+      pointerId: event.pointerId,
+      clientY: event.clientY,
+      listEl,
+      rows: readRowRects(listEl),
+      frame: undefined,
+      listeners: null,
+    }
+    // 监听实例随指针一起存储:关浮层/卸载时按同一引用摘除,防闭包身份过期后摘不掉
+    pointer.listeners = { move: moveDrag, up: endDrag, cancel: cancelDrag, hidden: onVisibilityChange }
+    dragRef.current = pointer
+    setDrag({ from: index, drop: index })
+    // 拖动期间顺序由指针决定:停掉轮询链,防迟到响应覆盖用户顺序
+    stopRepull()
+    document.addEventListener('pointermove', pointer.listeners.move, true)
+    document.addEventListener('pointerup', pointer.listeners.up, true)
+    document.addEventListener('pointercancel', pointer.listeners.cancel, true)
+    document.addEventListener('visibilitychange', pointer.listeners.hidden)
+    // 在浏览器窗口/标签栏松开时文档收不到 pointerup,失焦即视为放弃拖动
+    window.addEventListener('blur', pointer.listeners.cancel)
+    pointer.frame = requestAnimationFrame(autoScrollDrag)
+  }
+
+  function moveDrag(event) {
+    const pointer = dragRef.current
+    if (pointer === null || event.pointerId !== pointer.pointerId) return
+    // 按钮态已松开:指针在文档外松开,取消拖动而非继续跟随
+    if (event.buttons === 0) {
+      cancelDrag()
+      return
+    }
+    event.preventDefault()
+    pointer.clientY = event.clientY
+    syncDrop(pointer)
+  }
+
+  // 拖到列表上下边缘持续滚动(每帧 12px),滚动后重取行矩形重算插入位
+  function autoScrollDrag() {
+    const pointer = dragRef.current
+    if (pointer === null) return
+    const rect = pointer.listEl.getBoundingClientRect()
+    const delta = pointer.clientY < rect.top + DRAG_EDGE_PX
+      ? -DRAG_SCROLL_STEP
+      : (pointer.clientY > rect.bottom - DRAG_EDGE_PX ? DRAG_SCROLL_STEP : 0)
+    if (delta !== 0) {
+      const before = pointer.listEl.scrollTop
+      pointer.listEl.scrollTop = before + delta
+      if (pointer.listEl.scrollTop !== before) {
+        pointer.rows = readRowRects(pointer.listEl)
+        syncDrop(pointer)
+      }
+    }
+    pointer.frame = requestAnimationFrame(autoScrollDrag)
+  }
+
+  // 结束拖动:按存储引用摘监听、停帧并从引用清空当前指针
+  function detachDrag() {
+    const pointer = dragRef.current
+    dragRef.current = null
+    if (pointer !== null) {
+      const listeners = pointer.listeners
+      document.removeEventListener('pointermove', listeners.move, true)
+      document.removeEventListener('pointerup', listeners.up, true)
+      document.removeEventListener('pointercancel', listeners.cancel, true)
+      document.removeEventListener('visibilitychange', listeners.hidden)
+      window.removeEventListener('blur', listeners.cancel)
+      if (pointer.frame !== undefined) cancelAnimationFrame(pointer.frame)
+    }
+    setDrag(dragIdle())
+    return pointer
+  }
+
+  // 恢复常用范围的轮询链:起拖时停链,提交/取消后必须重新拉起(浮层仍开在常用范围时)
+  function restartPromptPoll() {
+    if (!viewRef.current.open || viewRef.current.scopeIndex !== promptsIdx) return
+    requestScope(promptsIdx)
+  }
+
+  // 顺序提交串行化:连续按键/拖动不得先发后到,服务端最终序必须等于最后一次操作
+  const commitChainRef = useRef(Promise.resolve())
+
+  // 顺序落盘:先本地生效(松手即时反馈),再提交服务端;成功与失败都重拉——
+  // 失败时以服务端顺序回滚(不本地假成功),成功时顺带恢复起拖时停掉的轮询链
+  function commitOrder(next) {
+    // 作废在途响应:键盘连按与拖动都要防旧快照先落地覆盖新顺序
+    stopRepull()
+    rawItemsRef.current = next
+    syncView({ items: next, cursor: -1 })
+    setItems(next)
+    setCursor(-1)
+    const texts = next.map((item) => item.text)
+    commitChainRef.current = commitChainRef.current
+      .then(() => api(PROMPTS_REORDER_URL, { method: 'POST', body: JSON.stringify({ texts }) }))
+      .then((payload) => {
+        const order = payload && Array.isArray(payload.texts) ? payload.texts : []
+        // 服务端实际顺序可能与提交不同(未知文本剔除/并发新增保尾):探测到差异即校正
+        if (JSON.stringify(order) !== JSON.stringify(texts)) toast('收藏顺序已按服务端校正')
+      })
+      .catch((error) => toast(error && error.message ? error.message : String(error), { kind: 'error' }))
+      .then(restartPromptPoll)
+  }
+
+  function endDrag(event) {
+    const pointer = dragRef.current
+    if (pointer === null || event.pointerId !== pointer.pointerId) return
+    const { from, drop } = pointer
+    // 在途响应按新代际作废,防旧快照在松手后覆盖乐观顺序
+    stopRepull()
+    detachDrag()
+    const list = rawItemsRef.current
+    if (!Array.isArray(list) || from < 0 || from >= list.length) {
+      restartPromptPoll()
+      return
+    }
+    const next = moveByInsert(list, from, drop)
+    if (next === list) restartPromptPoll()
+    else commitOrder(next)
+  }
+
+  function cancelDrag(event) {
+    const pointer = dragRef.current
+    if (pointer === null) return
+    // 多指场景:其它指针的 pointercancel 不得取消当前拖动
+    if (event && event.type === 'pointercancel' && event.pointerId !== pointer.pointerId) return
+    stopRepull()
+    detachDrag()
+    restartPromptPoll()
+  }
+
+  // 页面切到后台:指针事件链可能断开,视为放弃拖动
+  function onVisibilityChange() {
+    if (document.hidden) cancelDrag()
+  }
+
+  // 键盘排序:手柄聚焦时 ↑/↓ 移动一位并落盘;边界停住(全局键盘层对此放行)
+  // 位置按文本实时定位:连续按键在重渲染前复用旧行索引也不会移错条目
+  function moveByKey(event, text) {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    const list = rawItemsRef.current
+    if (!Array.isArray(list) || list.length < 2) return
+    const from = list.findIndex((item) => item.text === text)
+    if (from < 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const insert = keyboardInsert(event.key, from, list.length)
+    if (insert < 0) return
+    const next = moveByInsert(list, from, insert)
+    if (next === list) return
+    commitOrder(next)
+  }
+
   // 应用一次响应:仅当范围未变时生效,防止快速切范围后迟到响应覆盖新范围。
   // 原始条目深度不变的重复响应不重置光标(轮询期间保持用户选位);
   // 落地后经当前搜索词过滤再呈现
   function applyResult(scopeIdx, result) {
     if (viewRef.current.scopeIndex !== scopeIdx) return
+    // 拖动期间顺序由指针决定:迟到的轮询响应不得覆盖用户拖动结果
+    if (dragRef.current !== null) return
     const prev = rawItemsRef.current
     if (prev !== null && JSON.stringify(prev) === JSON.stringify(result.inputs)) {
       syncView({ aligning: !result.aligned })
@@ -537,6 +797,11 @@ function HistoryDock({ session, inputActions }) {
       .catch((error) => {
         if (generation !== scopeGenerationRef.current) return
         if (viewRef.current.scopeIndex !== scopeIdx) return
+        // 拖动期间列表由指针决定,不得被失败响应清空
+        if (dragRef.current !== null) {
+          scheduleNext()
+          return
+        }
         rawItemsRef.current = []
         syncView({ items: [] })
         setLoadError(true)
@@ -597,13 +862,18 @@ function HistoryDock({ session, inputActions }) {
   }
 
   // 轮询链生命周期:关闭浮层即停链(open=false 时没有活动 cleanup,由 effect 体
-  // 主动停);卸载无条件停链。卸载后 viewRef.open 仍为 true,不清理则定时链复活
+  // 主动停);卸载无条件停链。卸载后 viewRef.open 仍为 true,不清理则定时链复活。
+  // 拖动中的指针监听与滚动帧同生命周期:关浮层/卸载即摘除,防悬空回调
   useEffect(() => {
     if (!open) {
+      detachDrag()
       stopRepull()
       return undefined
     }
-    return stopRepull
+    return () => {
+      detachDrag()
+      stopRepull()
+    }
   }, [open])
   useEffect(() => stopRepull, [])
 
@@ -631,6 +901,9 @@ function HistoryDock({ session, inputActions }) {
         && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
         if (event.key !== 'Escape') return
       }
+      // 拖动手柄聚焦时 ↑/↓ 是排序指令,不由列表选择消费(边界由手柄自身拦停)
+      if (root && active && active.classList && active.classList.contains('cx-hist__grip')
+        && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) return
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault()
         event.stopPropagation()
@@ -750,6 +1023,8 @@ function HistoryDock({ session, inputActions }) {
   if (session === undefined || inputActions === undefined || historyEnabled === false) return null
   const promptsIdx = HISTORY_SCOPES.indexOf('prompts')
   const inPrompts = scopeIndex === promptsIdx
+  // 拖动排序仅编辑态、且无搜索词时可用(过滤子集的相对顺序无全局意义)
+  const canDrag = query.trim() === ''
   // 行悬停星标:非常用范围显示,已收藏实星(点击取消),未收藏空心(点击收藏);
   // stopPropagation 防止触发行回填
   const starButton = (item) => h('button', {
@@ -770,11 +1045,18 @@ function HistoryDock({ session, inputActions }) {
     !inPrompts ? starButton(item) : null,
   )
   // 编辑态行:key 用文本而非索引——常用范围内文本唯一,过滤后索引漂移不再重建
-  // 行节点(重建会让编辑中的 input 卸载,未保存的修改静默丢失)
+  // 行节点(重建会让编辑中的 input 卸载,未保存的修改静默丢失)。
+  // 拖动手柄在最左,拖动中源行淡化、插入位以 accent 线标在目标行上/下边
+  // 有效插入位:落回原位或原位下一位都不改变顺序(见 moveByInsert),此时不画插入线
+  const dropIndex = drag.from >= 0 && drag.drop !== drag.from && drag.drop !== drag.from + 1 ? drag.drop : -1
   const editRow = (item, index) => h('div', {
     key: item.text,
-    className: 'cx-hist__editrow',
+    className: 'cx-hist__editrow'
+      + (drag.from === index ? ' cx-hist__editrow--drag' : '')
+      + (dropIndex === index ? ' cx-hist__editrow--drop-before' : '')
+      + (dropIndex === items.length && index === items.length - 1 ? ' cx-hist__editrow--drop-after' : ''),
   },
+    canDrag ? gripHandle(item.text, index) : null,
     h('input', {
       className: 'cx-hist__editinput',
       defaultValue: item.text,

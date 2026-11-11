@@ -129,6 +129,45 @@ export function filterHistoryInputs(entries, query) {
   return list.filter((entry) => String((entry && entry.text) ?? '').toLowerCase().includes(needle))
 }
 
+// ── 常用提示词:自定义顺序(拖动排序的持久化与投影) ──
+
+/**
+ * 按给定文本顺序重排收藏条目(数组顺序即用户自定义顺序的权威)。
+ * 未提及条目按原相对序保留在尾部——另一窗口新增而本端未知的条目不得被顺序提交丢掉;
+ * 文本列表中的未知文本忽略,重复文本只认首个位置,故同顺序重放幂等。
+ * @param items - prompts.json 归一化后的条目 { text, at }
+ * @param texts - 用户拖动后的文本顺序
+ */
+export function reorderPrompts(items, texts) {
+  const list = Array.isArray(items) ? items : []
+  const order = Array.isArray(texts) ? texts : []
+  const ranked = []
+  const placed = new Set()
+  const seen = new Set()
+  for (const text of order) {
+    if (typeof text !== 'string' || seen.has(text)) continue
+    seen.add(text)
+    const index = list.findIndex((item) => item && item.text === text)
+    if (index < 0) continue
+    placed.add(index)
+    ranked.push(list[index])
+  }
+  // 未提及与非首次出现的重复条目按原相对序保尾,不因顺序提交丢条目
+  return ranked.concat(list.filter((item, index) => !placed.has(index)))
+}
+
+/**
+ * 收藏范围投影:保持文件顺序(自定义顺序即权威,不按收藏时间重排),
+ * 单条截 maxChars 字符,超出上限裁尾部。
+ */
+export function promptsToInputs(items, { maxChars }) {
+  const list = Array.isArray(items) ? items : []
+  return list
+    .filter((item) => item && typeof item.text === 'string' && item.text !== '')
+    .slice(0, HISTORY_PROMPTS_MAX)
+    .map((item) => ({ text: item.text.slice(0, maxChars), at: item.at }))
+}
+
 // ── 对话 fork:锚点解析与错误文案(client 注入层消费的纯函数) ──
 
 /**

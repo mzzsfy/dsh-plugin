@@ -40,6 +40,8 @@ import {
   extractUserInputs,
   isSessionRunning,
   maxArtifactBytesForHost,
+  promptsToInputs,
+  reorderPrompts,
 } from './core.mjs'
 import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, updatePrompts, updateWorkspaceCache } from './history-cache.mjs'
 import { createRequire } from 'node:module'
@@ -411,10 +413,11 @@ export function apply(ctx, config) {
   // client 据此提示等待并静默重拉
   async function collectInputs(scope, sessionId, header) {
     const aggregateOptions = { limit: HISTORY_INPUT_LIMIT, maxChars: HISTORY_INPUT_MAX_CHARS }
-    // 收藏是全局单文件,与会话头无关(路由为其跳过头部解析,header 为 undefined)
+    // 收藏是全局单文件,与会话头无关(路由为其跳过头部解析,header 为 undefined)。
+    // 顺序即用户自定义顺序(拖动排序落盘),不按收藏时间重排
     if (scope === 'prompts') {
       const items = await readPrompts(cacheDir)
-      return { inputs: aggregateInputs(items, aggregateOptions), aligned: true }
+      return { inputs: promptsToInputs(items, { maxChars: HISTORY_INPUT_MAX_CHARS }), aligned: true }
     }
     const cwd = header.cwd
     if (scope === 'session') {
@@ -615,12 +618,42 @@ export function apply(ctx, config) {
               collected = false
             } else {
               items.unshift({ text, at: Date.now() })
-              if (items.length > HISTORY_PROMPTS_MAX) items.length = HISTORY_PROMPTS_MAX
+              // 顺序是用户自定义的,超限淘汰收藏最旧的一条而非尾部(尾部不再是"最旧");
+              // 时间戳相同时保留更靠后的一条——unshift 使数组尾部才是最早收藏
+              if (items.length > HISTORY_PROMPTS_MAX) {
+                let oldest = items.length - 1
+                for (let index = items.length - 2; index >= 0; index -= 1) {
+                  if (items[index].at < items[oldest].at) oldest = index
+                }
+                items.splice(oldest, 1)
+              }
               collected = true
             }
             return items
           })
           sendJson(res, 200, { collected })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 常用提示词排序:数组顺序即用户自定义顺序(浮层编辑态拖动松手提交完整文本序)。
+      // 未提及条目由 reorderPrompts 保尾——陈旧快照不得丢另一窗口新增的收藏
+      path: '/api/context/prompts/reorder',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'POST')) return
+        try {
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const texts = body && Array.isArray(body.texts) ? body.texts : null
+          if (texts === null || !texts.every((text) => typeof text === 'string')) throw new Error('texts 必须是字符串数组')
+          const items = await updatePrompts(cacheDir, (current) => reorderPrompts(current, texts))
+          sendJson(res, 200, { texts: items.map((item) => item.text) })
         } catch (error) {
           respondError(ctx, res, error)
         }

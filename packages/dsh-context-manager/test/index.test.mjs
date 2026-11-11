@@ -979,22 +979,118 @@ test('常用提示词:超长截断、上限裁剪、空 text 拒绝', skipMissin
   })
 })
 
+// ── 常用提示词:自定义顺序(拖动排序)──
+
+test('常用提示词:超限淘汰收藏最旧的一条,不按尾部截断(顺序可自定义)', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    // 满额文件:at 递增造出"最旧",再把它挪到中间,尾部放较新的条目
+    const items = Array.from({ length: HISTORY_PROMPTS_MAX }, (_, index) => ({ text: '旧' + index, at: 1000 + index }))
+    const [oldest] = items.splice(0, 1)
+    items.splice(50, 0, oldest)
+    await writeFile(path.join(cacheDir, 'prompts.json'), JSON.stringify({ items }), 'utf8')
+    await postJson(handlers, '/api/context/prompts/toggle', { text: '新收藏' })
+    const res = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=prompts'), res)
+    const texts = res.body.inputs.map((item) => item.text)
+    assert.equal(texts.length, HISTORY_PROMPTS_MAX)
+    assert.equal(texts[0], '新收藏', '新收藏置顶')
+    assert.equal(texts.includes('旧0'), false, '淘汰收藏最旧的一条,而非尾部一条')
+    assert.deepEqual(texts.slice(1, 4), ['旧1', '旧2', '旧3'], '其余条目顺序保持')
+  })
+})
+
+test('常用提示词:prompts 范围按文件顺序呈现,不再按收藏时间倒序', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    // 直接落盘一个自定义顺序:顺序与收藏时间解耦
+    await updatePrompts(cacheDir, () => [
+      { text: '第三条最先', at: 300 },
+      { text: '最早收藏但居中', at: 100 },
+      { text: '中间收藏但最后', at: 200 },
+    ])
+    const res = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=prompts'), res)
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['第三条最先', '最早收藏但居中', '中间收藏但最后'])
+  })
+})
+
+test('常用提示词:reorder 按提交顺序持久化,回包与 GET 同步反映新顺序', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    for (const text of ['A', 'B', 'C']) await postJson(handlers, '/api/context/prompts/toggle', { text })
+    // toggle 为 unshift:文件顺序 C,B,A(最新收藏在顶部)
+    const before = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=prompts'), before)
+    assert.deepEqual(before.body.inputs.map((item) => item.text), ['C', 'B', 'A'])
+    const moved = await postJson(handlers, '/api/context/prompts/reorder', { texts: ['A', 'C', 'B'] })
+    assert.equal(moved.status, 200)
+    assert.deepEqual(moved.body.texts, ['A', 'C', 'B'], '回包为服务端实际顺序')
+    const after = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=prompts'), after)
+    assert.deepEqual(after.body.inputs.map((item) => item.text), ['A', 'C', 'B'])
+    // 落盘核对:顺序持久化,收藏时间戳原样保留(时间列仍有意义)
+    const stored = JSON.parse(await readFile(path.join(cacheDir, 'prompts.json'), 'utf8'))
+    assert.deepEqual(stored.items.map((item) => item.text), ['A', 'C', 'B'])
+    assert.ok(stored.items.every((item) => typeof item.at === 'number'), '重排不得丢失收藏时间')
+  })
+})
+
+test('常用提示词:reorder 未提及条目保尾(陈旧顺序不丢数据),未知文本忽略', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    for (const text of ['A', 'B', 'C']) await postJson(handlers, '/api/context/prompts/toggle', { text })
+    const res = await postJson(handlers, '/api/context/prompts/reorder', { texts: ['C', '另一窗口新增的条目'] })
+    assert.equal(res.status, 200)
+    // C 命中置顶,未提及的 B、A 按原相对序保尾
+    assert.deepEqual(res.body.texts, ['C', 'B', 'A'])
+  })
+})
+
+test('常用提示词:reorder 空顺序不改动,非法形态一律 400', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    for (const text of ['A', 'B']) await postJson(handlers, '/api/context/prompts/toggle', { text })
+    const empty = await postJson(handlers, '/api/context/prompts/reorder', { texts: [] })
+    assert.equal(empty.status, 200)
+    assert.deepEqual(empty.body.texts, ['B', 'A'], '空顺序不改动既有顺序')
+    for (const body of [{}, { texts: 'A' }, { texts: [1, 'A'] }, { texts: [null] }]) {
+      const res = await postJson(handlers, '/api/context/prompts/reorder', body)
+      assert.equal(res.status, 400, JSON.stringify(body) + ' 应拒绝')
+    }
+  })
+})
+
+test('常用提示词:自定义顺序下新收藏仍插最前,既有相对顺序不变', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    for (const text of ['A', 'B', 'C']) await postJson(handlers, '/api/context/prompts/toggle', { text })
+    await postJson(handlers, '/api/context/prompts/reorder', { texts: ['A', 'C', 'B'] })
+    await postJson(handlers, '/api/context/prompts/toggle', { text: 'D' })
+    const res = response()
+    await handlers.get('/api/context/inputs')(getRequest('?sessionId=s1&scope=prompts'), res)
+    assert.deepEqual(res.body.inputs.map((item) => item.text), ['D', 'A', 'C', 'B'])
+  })
+})
+
 // ── 路由层横切守卫:方法白名单 / JSON 体 / 系统级错误收敛 / 非字符串 text ──
 
-test('横切守卫:9 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
+test('横切守卫:10 条路由方法白名单,白名单外一律 405', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
     const getOnly = '/api/context/inputs'
-    const postOnly = '/api/context/prompts/toggle'
+    const postOnly = ['/api/context/prompts/toggle', '/api/context/prompts/reorder']
     const dualMethods = ['/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled']
     // GET-only 路由:POST 拒绝
     const inputsPost = response()
     await handlers.get(getOnly)(request('s1'), inputsPost)
     assert.equal(inputsPost.status, 405)
     // POST-only 路由:GET 拒绝
-    const toggleGet = response()
-    await handlers.get(postOnly)(getRequest2(postOnly, 'GET'), toggleGet)
-    assert.equal(toggleGet.status, 405)
+    for (const routePath of postOnly) {
+      const toggleGet = response()
+      await handlers.get(routePath)(getRequest2(routePath, 'GET'), toggleGet)
+      assert.equal(toggleGet.status, 405)
+    }
     // 双方法路由(GET+POST):白名单外方法拒绝
     for (const routePath of dualMethods) {
       const res = response()
@@ -1004,10 +1100,10 @@ test('横切守卫:9 条路由方法白名单,白名单外一律 405', skipMissi
   })
 })
 
-test('横切守卫:9 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
+test('横切守卫:10 条 POST 路由的非法 JSON 请求体统一 400(badJsonBody)', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [{ id: 's1', cwd: 'C:\\x', createdAt: 0 }], agents: new Map() })
-    const postPaths = ['/api/context/prompts/toggle', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone']
+    const postPaths = ['/api/context/prompts/toggle', '/api/context/prompts/reorder', '/api/context/history-enabled', '/api/context/history-button-enabled', '/api/context/steer-recall-enabled', '/api/context/fork-enabled', '/api/context/fork-auto-resend-enabled', '/api/context/copy-sid-enabled', '/api/context/clone-enabled', '/api/context/git-clone']
     for (const routePath of postPaths) {
       const res = await postRaw(handlers, routePath, '{oops')
       assert.equal(res.status, 400, routePath + ' 非法 JSON 应回 400')

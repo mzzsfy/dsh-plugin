@@ -9,6 +9,8 @@ const {
   filterHistoryInputs,
   forkFailureText,
   forkRetryText,
+  reorderPrompts,
+  promptsToInputs,
   maxArtifactBytesForHost,
   HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES,
   HISTORY_ALIGN_MODERN_MAX_ARTIFACT_BYTES,
@@ -238,6 +240,68 @@ test('Given 非对象或畸形 data, When forkRetryText, Then 返回 null 不抛
   assert.equal(forkRetryText(undefined), null)
   assert.equal(forkRetryText({}), null)
   assert.equal(forkRetryText({ source: { kind: 'user' } }), null)
+})
+
+// ── 常用提示词:自定义顺序(拖动排序的持久化语义)──
+
+test('收藏排序:按给定文本顺序重排,条目对象与时间原样保留', () => {
+  const items = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }, { text: 'C', at: 3 }]
+  assert.deepEqual(reorderPrompts(items, ['C', 'A', 'B']), [
+    { text: 'C', at: 3 },
+    { text: 'A', at: 1 },
+    { text: 'B', at: 2 },
+  ])
+})
+
+test('收藏排序:未提及条目按原相对序保留在尾部(陈旧顺序不丢数据)', () => {
+  const items = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }, { text: 'C', at: 3 }]
+  // 另一窗口在此期间新增了 C 并已落盘:提交方不知道 C,不得把它丢掉
+  assert.deepEqual(reorderPrompts(items, ['B', 'A']).map((item) => item.text), ['B', 'A', 'C'])
+})
+
+test('收藏排序:未知文本忽略,空顺序与全未知顺序退化为原序', () => {
+  const items = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }]
+  assert.deepEqual(reorderPrompts(items, ['X', 'B', 'A', 'Y']).map((item) => item.text), ['B', 'A'])
+  assert.deepEqual(reorderPrompts(items, []).map((item) => item.text), ['A', 'B'])
+  assert.deepEqual(reorderPrompts(items, ['X']).map((item) => item.text), ['A', 'B'])
+})
+
+test('收藏排序:重复文本只取首个位置,幂等(同顺序重放不变)', () => {
+  const items = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }]
+  const once = reorderPrompts(items, ['B', 'A', 'B'])
+  assert.deepEqual(once.map((item) => item.text), ['B', 'A'])
+  assert.deepEqual(reorderPrompts(once, once.map((item) => item.text)), once)
+})
+
+test('收藏排序:文件里同一文本出现多次时不丢条目(后续重复项保尾)', () => {
+  // 正常 UI 的收藏查重不会产生重复,只有旧数据/手改文件才有;排序不得把它们吃掉
+  const items = [{ text: 'A', at: 1 }, { text: 'A', at: 2 }, { text: 'B', at: 3 }]
+  const reordered = reorderPrompts(items, ['A', 'B'])
+  assert.equal(reordered.length, items.length, '排序不得丢条目')
+  assert.deepEqual(reordered.map((item) => item.text), ['A', 'B', 'A'])
+  assert.deepEqual(reordered.map((item) => item.at), [1, 3, 2])
+})
+
+test('收藏排序:非数组入参与畸形条目安全(返回可用数组,不抛错)', () => {
+  assert.deepEqual(reorderPrompts(undefined, ['A']), [])
+  assert.deepEqual(reorderPrompts([], ['A']), [])
+  const items = [{ text: 'A', at: 1 }, { at: 2 }, null]
+  assert.deepEqual(reorderPrompts(items, 'A'), items, '非数组 texts 按空顺序处理,退化为原序')
+})
+
+test('收藏投影:保持文件顺序(不按收藏时间重排),超长条目截断到上限', () => {
+  const items = [
+    { text: '后收藏但排第一', at: 9 },
+    { text: '先收藏但排第二', at: 1 },
+  ]
+  assert.deepEqual(promptsToInputs(items, { maxChars: 100 }).map((item) => item.text), ['后收藏但排第一', '先收藏但排第二'])
+  assert.deepEqual(promptsToInputs([{ text: 'abcdef', at: 1 }], { maxChars: 3 }), [{ text: 'abc', at: 1 }])
+})
+
+test('收藏投影:非数组与超过上限的畸形文件安全裁剪', () => {
+  assert.deepEqual(promptsToInputs(undefined, { maxChars: 10 }), [])
+  const items = Array.from({ length: HISTORY_PROMPTS_MAX + 5 }, (_, index) => ({ text: 'x' + index, at: index }))
+  assert.equal(promptsToInputs(items, { maxChars: 10 }).length, HISTORY_PROMPTS_MAX)
 })
 
 // ── 巨产物跳过线:宿主版本黑名单 ──
