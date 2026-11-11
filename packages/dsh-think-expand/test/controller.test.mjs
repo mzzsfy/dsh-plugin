@@ -13,9 +13,9 @@ function fixture(mode = false, deferredClick = false) {
   // 过程组按钮桩:turn 号 + 展开态,点击即展开(宿主官方入口)
   const processes = []
   const addProcess = (turn, open = true) => {
-    const proc = { turn, open, clicks: 0,
-      getAttribute: key => key === 'data-turn-process' ? turn : key === 'aria-expanded' ? String(open) : null,
-      click() { proc.open = true; proc.clicks += 1; notify() },
+    const proc = { turn, open, clicks: 0, isConnected: true, swallow: false,
+      getAttribute: key => key === 'data-turn-process' ? turn : key === 'aria-expanded' ? String(proc.open) : null,
+      click() { if (proc.swallow) { proc.clicks += 1; notify(); return } proc.open = true; proc.clicks += 1; notify() },
       closest: () => null }
     processes.push(proc); return proc
   }
@@ -107,13 +107,11 @@ function fixture(mode = false, deferredClick = false) {
   evaluate()
   addProcess('1', true)
   const manualClick = row => row.head.click()
-  // 用户点击过程组标题收起:先触发 click 捕获(登记手动),再执行宿主收起
-  const manualFold = proc => {
-    listeners.get('click')?.({ target: { closest: selector => selector === '[aria-expanded="true"]' && proc.open ? proc : null } })
-    proc.open = false
-    notify()
-  }
-  return { add, addProcess, manualFold, flush, toggle, manualClick, notify, mount, evaluate, rows, processes, observers, timers, frames, scroll, storage, window }
+  // 用户点击过程组标题:捕获阶段先派发真实点击形态(意图在宿主提交后定格)
+  const clickProc = proc => listeners.get('click')?.({ target: { closest: selector => selector === '[data-turn-process]' || selector === '[aria-expanded="true"]' ? proc : null } })
+  const manualFold = proc => { clickProc(proc); proc.open = false; notify() }
+  const manualUnfold = proc => { clickProc(proc); proc.open = true; notify() }
+  return { add, addProcess, clickProc, manualFold, manualUnfold, flush, toggle, manualClick, notify, mount, evaluate, rows, processes, observers, timers, frames, scroll, storage, window }
 }
 
 test('Given 思考后出现工具 When 开启工具机 Then 思考与工具各自保持展开', () => {
@@ -264,6 +262,197 @@ test('Given 用户手动收起最新回合过程组 When 后续扫描 Then 不�
   f.notify(); f.flush()
   assert.equal(proc.clicks, 0)
   assert.equal(proc.open, false)
+})
+
+test('Given 用户收起最新回合过程组 When 再次展开 Then 插件恢复自动展开末思考行', () => {
+  const f = fixture()
+  const proc = f.addProcess('1', true)
+  const think = f.add('think', '末段思考')
+  f.mount(); f.flush()
+  assert.equal(think.open, true)
+  const clicksAfterExpand = think.clicks
+  f.manualFold(proc)
+  f.flush()
+  // 宿主隐藏过程组内容时子折叠一并归为收起
+  think.open = false
+  f.notify(); f.flush()
+  assert.equal(think.open, false, '过程组收起期间不重开行')
+  assert.equal(proc.clicks, 0, '用户收起后不自动展开过程组')
+  assert.equal(think.clicks, clicksAfterExpand, '收起期间不点击行')
+  f.manualUnfold(proc)
+  f.flush()
+  assert.equal(think.open, true, '重新展开过程组后恢复自动展开')
+})
+
+test('Given 全部消息模式用户收起过程组后再次展开 Then 工具机恢复展开末工具行', () => {
+  const f = fixture(true)
+  const proc = f.addProcess('1', true)
+  const tool = f.add('others', '末段工具正文')
+  f.mount(); f.flush()
+  assert.equal(tool.open, true)
+  const clicksAfterExpand = tool.clicks
+  f.manualFold(proc)
+  f.flush()
+  tool.open = false
+  f.notify(); f.flush()
+  assert.equal(tool.clicks, clicksAfterExpand, '收起期间不点击工具行')
+  f.manualUnfold(proc)
+  f.flush()
+  assert.equal(tool.open, true, '重新展开过程组后恢复自动展开工具行')
+})
+
+test('Given 插件已展开最新回合过程组 When 宿主再次收起 Then 插件重新展开', () => {
+  const f = fixture()
+  const proc = f.addProcess('1', false)
+  f.add('think', '新回合思考')
+  f.mount(); f.flush()
+  assert.equal(proc.clicks, 1, '首扫展开过程组')
+  // 宿主回合完成时折叠过程组:展开记录已随 open 态清空,应可再次展开
+  proc.open = false
+  f.notify(); f.flush()
+  assert.equal(proc.clicks, 2, '宿主折叠后再次自动展开')
+})
+
+test('Given 上一回合过程组已收起 When 新回合流式行出现 Then 仍自动展开新行', () => {
+  const f = fixture()
+  const proc = f.addProcess('1', true)
+  const old = f.add('think', '旧回合思考')
+  f.mount(); f.flush()
+  f.manualFold(proc)
+  f.flush()
+  // 宿主隐藏过程组内容:旧行折叠头归为收起并带 hidden 祖先
+  old.state = 'ok'
+  old.open = false
+  old.hiddenProcess = true
+  f.notify(); f.flush()
+  assert.equal(old.open, false)
+  // 新回合进行中:该回合没有过程组按钮,流式思考行已可见
+  const next = f.add('think', '新回合思考', false, '2')
+  f.flush()
+  assert.equal(next.open, true, '旧回合收起不应阻塞新回合自动展开')
+  assert.equal(next.clicks, 1)
+})
+
+test('Given 全部消息模式上一回合过程组已收起 When 新回合只出现工具行 Then 工具机仍展开新行', () => {
+  const f = fixture(true)
+  const proc = f.addProcess('1', true)
+  const old = f.add('others', '旧回合工具正文')
+  f.mount(); f.flush()
+  assert.equal(old.open, true)
+  f.manualFold(proc)
+  f.flush()
+  old.state = 'ok'
+  old.open = false
+  old.hiddenProcess = true
+  f.notify(); f.flush()
+  // 新回合进行中:没有过程组按钮,只出现工具行
+  const next = f.add('others', '新回合工具正文', false, '2')
+  f.flush()
+  assert.equal(next.open, true, '旧回合收起不应阻塞新回合工具行')
+  assert.equal(proc.open, false, '旧回合过程组保持收起')
+  assert.equal(old.open, false, '旧回合工具行不被重开')
+})
+
+test('Given 全部消息模式用户收起回合过程组 When 新回合思考行出现 Then 旧工具行不重开', () => {
+  const f = fixture(true)
+  const proc = f.addProcess('1', true)
+  const tool = f.add('others', '工具正文')
+  f.mount(); f.flush()
+  assert.equal(tool.open, true)
+  f.manualFold(proc)
+  f.flush()
+  tool.open = false
+  tool.hiddenProcess = true
+  f.notify(); f.flush()
+  const next = f.add('think', '新回合思考', false, '2')
+  f.flush()
+  assert.equal(next.open, true)
+  assert.equal(tool.open, false, '用户收起的回合工具行不重开')
+  assert.equal(proc.open, false)
+})
+
+test('Given 过程组点击被宿主吞掉 When settle Then 不登记收起意图', () => {
+  const f = fixture()
+  const proc = f.addProcess('1', true)
+  proc.swallow = true
+  f.add('think', '思考')
+  f.mount(); f.flush()
+  const clicksAfterMount = proc.clicks
+  // 点击被吞:捕获阶段记账后宿主未提交,settle 应回滚,不留下 manual
+  f.clickProc(proc)
+  proc.click()
+  f.flush()
+  assert.equal(proc.open, true)
+  // 宿主之后自动折叠过程组:未被标记 manual,应重新展开
+  proc.swallow = false
+  proc.open = false
+  f.notify(); f.flush()
+  assert.equal(proc.open, true, '吞掉的点击不应阻止自动展开')
+  assert.ok(proc.clicks > clicksAfterMount + 1)
+})
+
+test('Given 全部消息模式旧回合思考行随过程组收起 When 新回合只出现工具行 Then 旧思考行不重开', () => {
+  const f = fixture(true)
+  const proc = f.addProcess('1', true)
+  const oldThink = f.add('think', '旧回合思考')
+  const oldTool = f.add('others', '旧回合工具正文')
+  f.mount(); f.flush()
+  assert.equal(oldThink.open, true)
+  f.manualFold(proc)
+  f.flush()
+  oldThink.state = 'ok'
+  oldThink.open = false
+  oldThink.hiddenProcess = true
+  oldTool.open = false
+  oldTool.hiddenProcess = true
+  f.notify(); f.flush()
+  const next = f.add('others', '新回合工具正文', false, '2')
+  f.flush()
+  assert.equal(next.open, true, '新回合工具行自动展开')
+  assert.equal(oldThink.open, false, '旧回合思考行不重开')
+  assert.equal(oldTool.open, false, '旧回合工具行不重开')
+})
+
+test('Given 旧回合思考行收起未读 When 最新回合过程组手动收起后新回合出现 Then 旧行不重开', () => {
+  const f = fixture()
+  const old = f.add('think', '旧回合思考')
+  const latest = f.add('think', '最新回合思考', false, '2')
+  old.state = 'ok'
+  old.open = false
+  f.mount(); f.flush()
+  const proc2 = f.addProcess('2', true)
+  f.manualFold(proc2)
+  f.flush()
+  latest.state = 'ok'
+  latest.open = false
+  latest.hiddenProcess = true
+  f.notify(); f.flush()
+  const next = f.add('think', '新回合思考', false, '3')
+  f.flush()
+  assert.equal(next.open, true)
+  assert.equal(old.open, false, '旧回合行不被回退展开')
+  assert.equal(latest.open, false, '手动回合保持收起')
+})
+
+test('Given 旧回合工具行收起未读 When 最新回合过程组手动收起后新回合出现 Then 旧工具行不重开', () => {
+  const f = fixture(true)
+  const oldTool = f.add('others', '旧回合工具正文')
+  const latestTool = f.add('others', '最新回合工具正文', false, '2')
+  oldTool.state = 'ok'
+  oldTool.open = false
+  f.mount(); f.flush()
+  const proc2 = f.addProcess('2', true)
+  f.manualFold(proc2)
+  f.flush()
+  latestTool.state = 'ok'
+  latestTool.open = false
+  latestTool.hiddenProcess = true
+  f.notify(); f.flush()
+  const next = f.add('think', '新回合思考', false, '3')
+  f.flush()
+  assert.equal(next.open, true)
+  assert.equal(oldTool.open, false, '旧工具行不被回退展开')
+  assert.equal(latestTool.open, false, '手动回合工具行保持收起')
 })
 
 test('Given 旧回合插件行被隐藏 When 新回合已出现 Then 不恢复旧回合末行', () => {
