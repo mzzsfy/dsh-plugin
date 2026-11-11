@@ -116,6 +116,156 @@ test('TAG05 解散标签从所有票移除', async () => {
   await assert.rejects(exec('tagRemove', { tag: '不存在' }), e => e.code === 'NOT_FOUND')
   await state.close()
 })
+// Given 某市场已有自选且市场分组被解散 When 再添加同市场证券 Then 不再自动归组
+test('MKT01 解散市场分组后同市场新增不再自动归组', async () => {
+  const state = await openState(memoryStorage())
+  const cn = makeSecurity('XSHG', '600519', '贵州茅台'), other = makeSecurity('XSHG', '600000', '浦发银行'), hk = makeSecurity('XHKG', '00700', '腾讯控股')
+  const byId = new Map([cn, other, hk].map(s => [s.id, s]))
+  const service = createWatchlistService(state, id => byId.get(id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: cn.id })
+  assert.deepEqual(state.get().watchlist.items[cn.id].tags, ['沪A'])
+  // 解散后该市场仍有自选, 说明用户不想按市场看: 新票不进市场组
+  await exec('tagRemove', { tag: '沪A' })
+  await exec('add', { securityId: other.id })
+  assert.deepEqual(state.get().watchlist.items[other.id].tags, [], '解散过的市场不再自动归组')
+  // 其余市场不受影响: 港股首次添加仍按市场归组
+  await exec('add', { securityId: hk.id })
+  assert.deepEqual(state.get().watchlist.items[hk.id].tags, ['港股'])
+  await state.close()
+})
+// Given 市场分组已解散 When 手动给同市场证券加回市场标签 Then 后续新增恢复自动归组
+test('MKT02 手动加回市场标签恢复自动归组', async () => {
+  const state = await openState(memoryStorage())
+  const securities = ['600519', '600000', '600036'].map(code => makeSecurity('XSHG', code, code))
+  const service = createWatchlistService(state, id => securities.find(s => s.id === id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: securities[0].id })
+  await exec('tagRemove', { tag: '沪A' })
+  await exec('add', { securityId: securities[1].id })
+  assert.deepEqual(state.get().watchlist.items[securities[1].id].tags, [])
+  await exec('tags', { securityId: securities[1].id, tags: ['沪A'] })
+  await exec('add', { securityId: securities[2].id })
+  assert.deepEqual(state.get().watchlist.items[securities[2].id].tags, ['沪A'], '市场内重新出现市场标签即恢复默认归组')
+  await state.close()
+})
+// Given 市场分组仍在只被个别票移出 When 再添加同市场证券 Then 仍按市场归组
+test('MKT03 个别票移出市场分组不关闭自动归组', async () => {
+  const state = await openState(memoryStorage())
+  const securities = ['600519', '600000', '600036'].map(code => makeSecurity('XSHG', code, code))
+  const service = createWatchlistService(state, id => securities.find(s => s.id === id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  for (const security of securities.slice(0, 2)) await exec('add', { securityId: security.id })
+  // 只把一只票移出市场组, 分组仍存在: 不能据此关掉整个市场的自动归组
+  await exec('tags', { securityId: securities[1].id, tags: [] })
+  await exec('add', { securityId: securities[2].id })
+  assert.deepEqual(state.get().watchlist.items[securities[2].id].tags, ['沪A'])
+  await state.close()
+})
+// Given 市场分组被解散且该市场已无自选 When 重新添加该市场证券 Then 按默认归组
+test('MKT04 市场内已无自选时重新按市场归组', async () => {
+  const state = await openState(memoryStorage())
+  const first = makeSecurity('XSHG', '600519', '贵州茅台'), again = makeSecurity('XSHG', '600000', '浦发银行')
+  const byId = new Map([[first.id, first], [again.id, again]])
+  const service = createWatchlistService(state, id => byId.get(id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: first.id })
+  await exec('tagRemove', { tag: '沪A' })
+  await exec('remove', { securityId: first.id })
+  await exec('add', { securityId: again.id })
+  assert.deepEqual(state.get().watchlist.items[again.id].tags, ['沪A'], '该市场没有自选时回到默认归组')
+  await state.close()
+})
+// Given 市场内只剩自定义标签 When 再添加同市场证券 Then 不塞回市场组
+test('MKT05 市场内票不带市场标签时按解散处理', async () => {
+  const state = await openState(memoryStorage())
+  const securities = ['600519', '600000'].map(code => makeSecurity('XSHG', code, code))
+  const service = createWatchlistService(state, id => securities.find(s => s.id === id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: securities[0].id })
+  // 判定看「是否带市场标签」而不是「是否还有任何标签」: 只剩自定义标签时仍是解散态
+  await exec('tags', { securityId: securities[0].id, tags: ['核心'] })
+  await exec('add', { securityId: securities[1].id })
+  assert.deepEqual(state.get().watchlist.items[securities[1].id].tags, [])
+  await state.close()
+})
+// Given 另一个市场仍有成员 When 解散某市场后连续添加该市场证券 Then 仍按市场归组
+test('MKT06 解散一个市场不影响其他市场归组', async () => {
+  const state = await openState(memoryStorage())
+  const sh = makeSecurity('XSHG', '600519', '贵州茅台'), sz = ['000001', '000002'].map(code => makeSecurity('XSHE', code, code))
+  const byId = new Map([sh, ...sz].map(s => [s.id, s]))
+  const service = createWatchlistService(state, id => byId.get(id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: sh.id })
+  await exec('add', { securityId: sz[0].id })
+  assert.deepEqual(state.get().watchlist.items[sz[0].id].tags, ['深A'])
+  await exec('tagRemove', { tag: '沪A' })
+  await exec('add', { securityId: sz[1].id })
+  assert.deepEqual(state.get().watchlist.items[sz[0].id].tags, ['深A'], '已有成员不受影响')
+  assert.deepEqual(state.get().watchlist.items[sz[1].id].tags, ['深A'], '新成员仍按市场归组')
+  await state.close()
+})
+// Given 删除带市场标签的票后解散该市场 When 8 秒内撤销删除 Then 按删除时标签恢复
+test('MKT07 撤销删除按删除时标签原样恢复', async () => {
+  const state = await openState(memoryStorage()), securities = ['600519', '600000'].map(code => makeSecurity('XSHG', code, code))
+  const service = createWatchlistService(state, id => securities.find(s => s.id === id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  for (const security of securities) await exec('add', { securityId: security.id })
+  await exec('remove', { securityId: securities[0].id })
+  const removeOperationId = operation(n).operationId
+  await exec('tagRemove', { tag: '沪A' })
+  await exec('restore', { removeOperationId })
+  assert.deepEqual(state.get().watchlist.items[securities[0].id].tags, ['沪A'], '撤销是原样恢复, 不按当前市场状态重算')
+  assert.deepEqual(state.get().watchlist.items[securities[1].id].tags, [])
+  await state.close()
+})
+// Given 已在自选的证券 When 重复添加 Then 标签与版本不变
+test('MKT08 重复添加已在自选的证券不改变标签与版本', async () => {
+  const state = await openState(memoryStorage()), security = makeSecurity('XSHG', '600519', '贵州茅台')
+  const service = createWatchlistService(state, () => security)
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: security.id })
+  await exec('tagRemove', { tag: '沪A' })
+  const revision = state.get().revision
+  await exec('add', { securityId: security.id })
+  assert.deepEqual(state.get().watchlist.items[security.id].tags, [], '重复添加不改写解散后的标签')
+  assert.equal(state.get().revision, revision, '重复添加不产生新版本')
+  await state.close()
+})
+// Given 候选已过期 When 添加 Then 拒绝且自选与版本不变
+test('MKT09 候选过期拒绝添加且不改数据', async () => {
+  const state = await openState(memoryStorage())
+  const id = 'XSHG:equity:600519'
+  const service = createWatchlistService(state, value => value === id ? null : { id: value })
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  const before = state.get().revision
+  await assert.rejects(exec('add', { securityId: id }), e => e.code === 'CANDIDATE_EXPIRED')
+  assert.deepEqual(state.get().watchlist.order, [])
+  assert.equal(state.get().revision, before)
+  await state.close()
+})
+// Given 市场标签被改名 When 再添加同市场证券 Then 不归组
+test('MKT10 市场标签改名后新增不归组', async () => {
+  const state = await openState(memoryStorage())
+  const securities = ['600519', '600000'].map(code => makeSecurity('XSHG', code, code))
+  const service = createWatchlistService(state, id => securities.find(s => s.id === id))
+  let n = 0
+  const exec = (action, payload) => service.execute({ ...operation(++n, state.get().revision), action, payload })
+  await exec('add', { securityId: securities[0].id })
+  await exec('tagRename', { from: '沪A', to: 'SH' })
+  await exec('add', { securityId: securities[1].id })
+  assert.deepEqual(state.get().watchlist.items[securities[1].id].tags, [], '该市场已无票持原名市场标签, 新票不归组')
+  await state.close()
+})
 test('S01/S05/S09 添加、移动和撤销使用当前序列不覆盖别页操作', async () => {
   const state = await openState(memoryStorage()), securities = ['600001','600002','600003'].map(code => makeSecurity('XSHG', code, code))
   const service = createWatchlistService(state, id => securities.find(s => s.id === id), () => 1000)
