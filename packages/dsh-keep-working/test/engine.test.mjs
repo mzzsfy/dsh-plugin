@@ -176,6 +176,29 @@ test('S4 连续上限:达到 maxConsecutive 后不再发送', () => {
   assert.equal(h.sent.length, 2)
 })
 
+test('S4b 正常结案清零连续计数:封顶后仍可再次恢复', () => {
+  const h = createHarness({ config: { maxConsecutive: 2 } })
+  const run = (seq, turn, text = '没结案') => {
+    h.emit(turnStart(seq, turn))
+    h.emit(userMessage(seq + 1))
+    h.emit(assistant(seq + 2, turn, text))
+    h.emit(turnEnd(seq + 3, turn, { kind: 'completed' }))
+    h.timers.flush()
+  }
+  run(0, 1)
+  h.advanceTo(h.now() + 60_000)
+  run(10, 2)
+  assert.equal(h.sent.length, 2)
+  h.advanceTo(h.now() + 600_000)
+  run(20, 3)
+  assert.equal(h.sent.length, 2, '达到上限后不再发送')
+  run(30, 4, '结论\n(TASK_DONE)')
+  assert.equal(h.sent.length, 2, '结案本身不发送')
+  h.advanceTo(h.now() + 600_000)
+  run(40, 5)
+  assert.equal(h.sent.length, 3, '结案已清零计数,下一轮重新获得额度')
+})
+
 test('S5 用户中途插话:让路,不发送', () => {
   const h = createHarness()
   h.emit(turnStart(0, TURN))

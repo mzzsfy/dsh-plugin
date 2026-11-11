@@ -76,7 +76,7 @@ export function createEngine({
     state.sentIds.delete(oldest)
   }
 
-  /** 按 turn/end 的原因给出动作;undefined 表示不恢复。 */
+  /** 按 turn/end 的原因给出动作;undefined 表示不恢复,{ closed } 表示正常结案。 */
   function decide(session, event, state) {
     const turn = event.data?.turn
     const reason = event.data?.reason ?? {}
@@ -84,7 +84,7 @@ export function createEngine({
 
     switch (reason.kind) {
       case 'completed': {
-        if (closureVerdict(events, turn).closed) return undefined
+        if (closureVerdict(events, turn).closed) return { closed: true }
         if (!hasVisibleOutput(turnSlice(events, turn)) && config.resumeSilentTurns) {
           return { reason: 'silent', text: config.continueTextSilent }
         }
@@ -209,6 +209,13 @@ export function createEngine({
       return
     }
     const decision = decide(session, event, state)
+    // 正常结案代表恢复目的已达成:清零连续计数,后续回合重新获得额度
+    if (decision?.closed === true) {
+      state.consecutive = 0
+      state.lastAttemptAt = 0
+      log(`${session.id}: 已结案,连续计数清零`)
+      return
+    }
     if (decision !== undefined) schedule(session, state, decision)
   }
 

@@ -10,6 +10,7 @@ import z from '@deepseek-ai/schemastery'
 import { DEFAULTS, resolveConfig } from './config.mjs'
 import { createEngine } from './engine.mjs'
 import { probeConnectivity } from './offline.mjs'
+import { rejectCrossOrigin, rejectNonJson } from './route-guard.mjs'
 import { scanStoredSessions, trace } from './scan.mjs'
 import { NAMESPACE, PANEL_FIELDS, panelDefaults, readSettings, writeSettings } from './settings.mjs'
 
@@ -87,6 +88,11 @@ async function readJsonBody(req) {
   return text === '' ? {} : JSON.parse(text)
 }
 
+// 写路由守卫:同源比对与 JSON 内容类型双校验,细节见 route-guard.mjs
+function guardWrite(req, res) {
+  return rejectCrossOrigin(req, res, sendJson) || rejectNonJson(req, res, sendJson)
+}
+
 export async function apply(ctx, config) {
   let createUserMessage
   try {
@@ -158,36 +164,41 @@ export async function apply(ctx, config) {
   })
 
   ctx.inject(['webServer'], (serverCtx) => {
-    serverCtx.webServer.register({
-      path: '/api/keep-working/config',
-      handler: async (req, res) => {
-        if (req.method === 'GET') {
-          sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)), defaults: panelDefaults() })
-          return
-        }
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: 'method not allowed' })
-          return
-        }
-        let patch
-        try {
-          patch = await readJsonBody(req)
-        } catch (error) {
-          sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
-          return
-        }
-        const allowed = new Set(PANEL_FIELDS)
-        const clean = Object.fromEntries(
-          Object.entries(patch).filter(([key, value]) => allowed.has(key) && value !== undefined),
-        )
-        if (!(await writeSettings(ctx, clean))) {
-          sendJson(res, 503, { ok: false, error: '设置服务不可用' })
-          return
-        }
-        startRuntime()
-        sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)) })
-      },
-    })
+    serverCtx.effect(
+      () =>
+        serverCtx.webServer.register({
+          path: '/api/keep-working/config',
+          handler: async (req, res) => {
+            if (req.method === 'GET') {
+              sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)), defaults: panelDefaults() })
+              return
+            }
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            if (rejectCrossOrigin(req, res) || rejectNonJson(req, res)) return
+            let patch
+            try {
+              patch = await readJsonBody(req)
+            } catch (error) {
+              sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+              return
+            }
+            const allowed = new Set(PANEL_FIELDS)
+            const clean = Object.fromEntries(
+              Object.entries(patch).filter(([key, value]) => allowed.has(key) && value !== undefined),
+            )
+            if (!(await writeSettings(ctx, clean))) {
+              sendJson(res, 503, { ok: false, error: '设置服务不可用' })
+              return
+            }
+            startRuntime()
+            sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)) })
+          },
+        }),
+      'keep-working config route',
+    )
   })
 
   ctx.effect(() => () => stopRuntime(), 'keep-working lifecycle')
