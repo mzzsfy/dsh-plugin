@@ -29,6 +29,8 @@ export function registerToolRow(ctx, deps) {
       render: (_params, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
     async execute(params, execution) {
+      // 子会话可继承父会话的管理员预设,必须在此拒绝:管理动作只允许工作台会话本身
+      if (isDerivedSession(execution)) throw new Error('子会话不得调用公司管理工具')
       const presetId = presetOf(execution)
       if (presetId !== ADMIN_PRESET_ID) throw new Error('公司管理工具仅限管理员工作台会话')
       return tools.handle(params.tool, params.args ?? {}, { role: 'admin' })
@@ -38,9 +40,19 @@ export function registerToolRow(ctx, deps) {
   const restrict = ctx.tools.guard((execution) => {
     const name = execution?.name ?? execution?.toolName
     if (name !== TOOL_NAME) return undefined
+    if (isDerivedSession(execution)) return '子会话不得调用公司管理工具'
     return presetOf(execution) === ADMIN_PRESET_ID ? undefined : '公司管理工具仅限管理员工作台会话'
   })
   return () => { disposer(); restrict() }
+}
+
+// 子会话判定:origin 权威;无 origin 的旧记录按 parentSession + delegationDepth。
+// 宿主子会话未显式选预设时继承父会话预设,只查预设会把子会话误当管理员。
+function isDerivedSession(execution) {
+  const header = execution?.agent?.session?.header
+  if (!header) return false
+  if (header.origin === 'subagent') return true
+  return header.parentSession !== undefined && (header.delegationDepth ?? 0) >= 1
 }
 
 function presetOf(execution) {

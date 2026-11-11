@@ -68,6 +68,28 @@ test('管理员工具面不提供直接写报告入口', async () => {
   )
 })
 
+test('子会话继承管理员预设也不得调用管理工具', async () => {
+  const { ctx, registered, guards } = makeCtx()
+  registerToolRow(ctx, { store: makeStore(), now: () => 0 })
+  const tool = registered.find((definition) => definition.name === 'boss_simulator')
+  const params = { tool: 'boss_simulator_create_task', args: { taskId: 't1', title: 't', projectWorkspaceId: 'w', definition: { goal: 'g' } } }
+  // Given 子会话:宿主把父会话预设写进 child agentPreset,preset 判定会误放行
+  for (const header of [
+    { agentPreset: 'boss-simulator-admin', origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { agentPreset: 'boss-simulator-admin', parentSession: 'root', delegationDepth: 2 },
+    { agentPreset: 'boss-simulator-admin', origin: 'subagent', parentSession: 'root' },
+  ]) {
+    const execution = executionFor('boss-simulator-admin')
+    execution.agent.session.header = header
+    await assert.rejects(() => tool.execute(params, execution), /子会话/)
+    assert.match(guards[0]({ name: 'boss_simulator', ...execution }), /子会话/)
+  }
+  // Then 普通 fork(depth 0)仍按预设判定,不误伤
+  const fork = executionFor('boss-simulator-admin')
+  fork.agent.session.header = { agentPreset: 'boss-simulator-admin', parentSession: 'root', delegationDepth: 0 }
+  assert.equal(guards[0]({ name: 'boss_simulator', ...fork }), undefined)
+})
+
 test('guard 对非管理员会话拒绝公司管理工具', () => {
   const { ctx, guards } = makeCtx()
   registerToolRow(ctx, { store: makeStore(), now: () => 0 })
