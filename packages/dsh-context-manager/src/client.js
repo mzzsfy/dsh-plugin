@@ -218,6 +218,7 @@ const CSS = [
 
 const INPUTS_URL = '/api/context/inputs'
 const PROMPTS_TOGGLE_URL = '/api/context/prompts/toggle'
+const PROMPTS_RENAME_URL = '/api/context/prompts/rename'
 const PROMPTS_REORDER_URL = '/api/context/prompts/reorder'
 const HISTORY_ENABLED_URL = '/api/context/history-enabled'
 const HISTORY_BUTTON_ENABLED_URL = '/api/context/history-button-enabled'
@@ -513,11 +514,22 @@ function HistoryDock({ session, inputActions }) {
       })
   }
 
-  // 编辑态改文本 = 移除旧文本 + 收藏新文本(两次 toggle 原子性由"同文本去重"保证:
-  // 中断最坏留下旧文本,重改一次即自愈)
+  // 编辑态改文本 = 原位重命名:host 保持该条位置与收藏时间(清空即删除,
+  // 目标文本已存在则合并),不再走两次 toggle 把条目搬到首位
   function renamePrompt(from, to) {
-    return togglePrompt(from)
-      .then(() => (to === '' ? Promise.resolve() : togglePrompt(to)))
+    const target = to.trim()
+    if (target === from) return Promise.resolve()
+    const scopeIdx = HISTORY_SCOPES.indexOf('prompts')
+    return api(PROMPTS_RENAME_URL, { method: 'POST', body: JSON.stringify({ from, to: target }) })
+      .then((payload) => {
+        const result = payload && payload.result
+        if (result === 'missing') toast('该收藏已不存在,已刷新列表', { kind: 'error' })
+        else if (result === 'merged') toast('目标文本已存在,已合并')
+        else if (result === 'removed') toast('已取消收藏')
+        if (viewRef.current.open && viewRef.current.scopeIndex === scopeIdx) requestScope(scopeIdx)
+        return refreshCollected()
+      })
+      .catch((error) => toast(error && error.message ? error.message : String(error), { kind: 'error' }))
   }
 
   // 新增行提交:按钮点击与 Enter 共用落点(触摸设备无 Enter,按钮是主路径)

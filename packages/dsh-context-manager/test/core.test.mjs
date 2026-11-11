@@ -10,6 +10,7 @@ const {
   forkFailureText,
   forkRetryText,
   reorderPrompts,
+  renamePromptItem,
   promptsToInputs,
   maxArtifactBytesForHost,
   HISTORY_ALIGN_LEGACY_MAX_ARTIFACT_BYTES,
@@ -240,6 +241,36 @@ test('Given 非对象或畸形 data, When forkRetryText, Then 返回 null 不抛
   assert.equal(forkRetryText(undefined), null)
   assert.equal(forkRetryText({}), null)
   assert.equal(forkRetryText({ source: { kind: 'user' } }), null)
+})
+
+// ── 常用提示词:重命名(原位替换,不置顶)──
+
+test('收藏重命名:原位替换文本,位置与收藏时间不变', () => {
+  const items = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }, { text: 'C', at: 3 }]
+  const renamed = renamePromptItem(items, 'B', 'B2')
+  assert.equal(renamed.result, 'renamed')
+  assert.deepEqual(renamed.items, [{ text: 'A', at: 1 }, { text: 'B2', at: 2 }, { text: 'C', at: 3 }])
+  assert.deepEqual(items, [{ text: 'A', at: 1 }, { text: 'B', at: 2 }, { text: 'C', at: 3 }], '不得改动入参')
+})
+
+test('收藏重命名:清空即删除,目标已存在则合并到既有条目', () => {
+  const items = [{ text: 'A', at: 1 }, { text: 'B', at: 2 }, { text: 'C', at: 3 }]
+  const removed = renamePromptItem(items, 'B', '')
+  assert.equal(removed.result, 'removed')
+  assert.deepEqual(removed.items.map((item) => item.text), ['A', 'C'])
+  const merged = renamePromptItem(items, 'A', 'C')
+  assert.equal(merged.result, 'merged')
+  assert.deepEqual(merged.items, [{ text: 'B', at: 2 }, { text: 'C', at: 3 }], '合并保留既有条目位置')
+})
+
+test('收藏重命名:同文本不变更,源不存在返回 missing,非数组入参安全', () => {
+  const items = [{ text: 'A', at: 1 }]
+  const same = renamePromptItem(items, 'A', 'A')
+  assert.equal(same.result, 'unchanged')
+  assert.equal(same.items, items, '不变更时返回同一引用')
+  const missing = renamePromptItem(items, '不存在', 'X')
+  assert.equal(missing.result, 'missing')
+  assert.deepEqual(renamePromptItem(undefined, 'A', 'B').items, [])
 })
 
 // ── 常用提示词:自定义顺序(拖动排序的持久化语义)──

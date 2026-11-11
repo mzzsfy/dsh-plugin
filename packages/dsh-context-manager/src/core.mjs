@@ -168,6 +168,32 @@ export function promptsToInputs(items, { maxChars }) {
     .map((item) => ({ text: item.text.slice(0, maxChars), at: item.at }))
 }
 
+/**
+ * 重命名收藏条目:原位替换文本,位置与收藏时间不变(顺序是用户自定义的,重命名不得置顶)。
+ * to 为空即删除该条;目标文本已被其它条目占用时合并到既有条目,不留重复文本。
+ * @returns {{ items, result: 'renamed'|'removed'|'merged'|'missing'|'unchanged' }}
+ */
+export function renamePromptItem(items, from, to) {
+  const list = Array.isArray(items) ? items : []
+  const index = list.findIndex((item) => item && item.text === from)
+  if (index < 0) return { items: list, result: 'missing' }
+  if (to === from) return { items: list, result: 'unchanged' }
+  if (to === '') {
+    const removed = list.slice()
+    removed.splice(index, 1)
+    return { items: removed, result: 'removed' }
+  }
+  const taken = list.findIndex((item, at) => at !== index && item && item.text === to)
+  if (taken >= 0) {
+    const merged = list.slice()
+    merged.splice(index, 1)
+    return { items: merged, result: 'merged' }
+  }
+  const renamed = list.slice()
+  renamed[index] = { text: to, at: list[index].at }
+  return { items: renamed, result: 'renamed' }
+}
+
 // ── 对话 fork:锚点解析与错误文案(client 注入层消费的纯函数) ──
 
 /**

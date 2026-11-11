@@ -90,6 +90,16 @@ test('源码契约:重命名行 Enter 同样跳过输入法组合态', () => {
     '组合输入确认候选不得触发改名提交')
 })
 
+test('源码契约:重命名走原位重命名路由,不再用两次 toggle 把条目搬到首位', () => {
+  const start = CLIENT_SRC.indexOf('function renamePrompt(')
+  const end = CLIENT_SRC.indexOf('\n  }', start)
+  const RENAME = CLIENT_SRC.slice(start, end)
+  assert.ok(start > 0 && RENAME.length > 0, '重命名实现定位失败')
+  assert.ok(/api\(PROMPTS_RENAME_URL/.test(RENAME), '重命名必须走 rename 路由(host 原位替换保顺序)')
+  assert.ok(!/togglePrompt\(/.test(RENAME), '重命名不得再拆成两次 toggle(会把条目 unshift 到首位)')
+  assert.ok(/const PROMPTS_RENAME_URL = '\/api\/context\/prompts\/rename'/.test(CLIENT_SRC), '缺少 rename 路由常量')
+})
+
 const KEYDOWN_START = CLIENT_SRC.indexOf('function onKeyDown(event)')
 const KEYDOWN = CLIENT_SRC.slice(KEYDOWN_START, CLIENT_SRC.indexOf("document.addEventListener('keydown', onKeyDown, true)", KEYDOWN_START))
 assert.ok(KEYDOWN_START > 0 && KEYDOWN.length > 0, '全局键盘层定位失败')

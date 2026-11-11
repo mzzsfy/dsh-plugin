@@ -41,6 +41,7 @@ import {
   isSessionRunning,
   maxArtifactBytesForHost,
   promptsToInputs,
+  renamePromptItem,
   reorderPrompts,
 } from './core.mjs'
 import { ensureCacheDir, listWorkspaceCachesCached, readPrompts, readWorkspaceCache, updatePrompts, updateWorkspaceCache } from './history-cache.mjs'
@@ -632,6 +633,34 @@ export function apply(ctx, config) {
             return items
           })
           sendJson(res, 200, { collected })
+        } catch (error) {
+          respondError(ctx, res, error)
+        }
+      },
+    },
+    {
+      // 常用提示词重命名:原位替换文本,顺序与收藏时间保持不变
+      // (顺序是用户自定义的,重命名不得把条目搬到首位);目标文本已存在时合并
+      path: '/api/context/prompts/rename',
+      handler: async (req, res) => {
+        if (!rejectMethod(req, res, 'POST')) return
+        try {
+          let body
+          try {
+            body = JSON.parse(await readBody(req))
+          } catch {
+            throw new Error(MESSAGES.badJsonBody)
+          }
+          const from = typeof body.from === 'string' ? body.from.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
+          const to = typeof body.to === 'string' ? body.to.trim().slice(0, HISTORY_INPUT_MAX_CHARS) : ''
+          if (from === '') throw new Error('from 不能为空')
+          let result = 'missing'
+          await updatePrompts(cacheDir, (items) => {
+            const renamed = renamePromptItem(items, from, to)
+            result = renamed.result
+            return renamed.items
+          })
+          sendJson(res, 200, { result })
         } catch (error) {
           respondError(ctx, res, error)
         }

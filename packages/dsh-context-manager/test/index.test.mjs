@@ -1061,6 +1061,63 @@ test('常用提示词:reorder 空顺序不改动,非法形态一律 400', skipMi
   })
 })
 
+test('常用提示词:rename 原位替换文本,顺序与收藏时间不变', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    await updatePrompts(cacheDir, () => [
+      { text: '首条', at: 300 },
+      { text: '旧名', at: 100 },
+      { text: '末条', at: 200 },
+    ])
+    const res = await postJson(handlers, '/api/context/prompts/rename', { from: '旧名', to: '新名' })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.result, 'renamed')
+    const stored = JSON.parse(await readFile(path.join(cacheDir, 'prompts.json'), 'utf8'))
+    assert.deepEqual(stored.items, [
+      { text: '首条', at: 300 },
+      { text: '新名', at: 100 },
+      { text: '末条', at: 200 },
+    ], '重命名保留位置与收藏时间,不再置顶')
+  })
+})
+
+test('常用提示词:rename 清空即删除,目标已存在合并,源不存在返回 missing', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async (cacheDir) => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    const seed = async () => updatePrompts(cacheDir, () => [
+      { text: 'A', at: 1 },
+      { text: 'B', at: 2 },
+      { text: 'C', at: 3 },
+    ])
+    await seed()
+    const removed = await postJson(handlers, '/api/context/prompts/rename', { from: 'B', to: '' })
+    assert.equal(removed.body.result, 'removed')
+    let stored = JSON.parse(await readFile(path.join(cacheDir, 'prompts.json'), 'utf8'))
+    assert.deepEqual(stored.items.map((item) => item.text), ['A', 'C'])
+    await seed()
+    const merged = await postJson(handlers, '/api/context/prompts/rename', { from: 'A', to: 'C' })
+    assert.equal(merged.body.result, 'merged')
+    stored = JSON.parse(await readFile(path.join(cacheDir, 'prompts.json'), 'utf8'))
+    assert.deepEqual(stored.items, [{ text: 'B', at: 2 }, { text: 'C', at: 3 }], '合并保留既有条目与位置')
+    const missing = await postJson(handlers, '/api/context/prompts/rename', { from: '不存在', to: 'X' })
+    assert.equal(missing.status, 200)
+    assert.equal(missing.body.result, 'missing')
+  })
+})
+
+test('常用提示词:rename 空 from 400,GET 405', skipMissingDeps, async () => {
+  await withHistoryCacheDir(async () => {
+    const { handlers } = makeCtx({ headers: [], agents: new Map() })
+    for (const body of [{}, { from: '   ', to: 'X' }, { from: 1, to: 'X' }]) {
+      const res = await postJson(handlers, '/api/context/prompts/rename', body)
+      assert.equal(res.status, 400, JSON.stringify(body) + ' 应拒绝')
+    }
+    const wrongMethod = response()
+    await handlers.get('/api/context/prompts/rename')(getRequest('?sessionId=s1'), wrongMethod)
+    assert.equal(wrongMethod.status, 405)
+  })
+})
+
 test('常用提示词:自定义顺序下新收藏仍插最前,既有相对顺序不变', skipMissingDeps, async () => {
   await withHistoryCacheDir(async () => {
     const { handlers } = makeCtx({ headers: [], agents: new Map() })
