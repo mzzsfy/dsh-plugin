@@ -116,7 +116,7 @@ test('源码契约:触摸设备收藏星标常显,不依赖 hover 才出现', ()
 })
 
 test('源码契约:新增按钮视觉按主按钮规范(实底 accent + hover 加深)', () => {
-  assert.ok(/\.cx-hist__addbtn \{[^}]*background:var\(--dsw-alias-brand-primary\)/.test(CSS), '主按钮实底缺 accent')
-  assert.ok(/\.cx-hist__addbtn:hover \{ background:var\(--dsw-alias-button-primary-hover\)/.test(CSS), 'hover 未加深')
-  assert.ok(/\.cx-hist__addbtn:focus-visible \{ outline:2px solid var\(--dsw-alias-brand-primary\)/.test(CSS), '缺焦点环')
+  assert.ok(/\.cx-hist__addbtn \{[^}]*background:var\(--cx-accent\)/.test(CSS), '主按钮实底缺 accent')
+  assert.ok(/\.cx-hist__addbtn:hover \{ background:var\(--cx-accent-deep\)/.test(CSS), 'hover 未加深')
+  assert.ok(/\.cx-hist__addbtn:focus-visible \{ outline:2px solid var\(--cx-focus\)/.test(CSS), '缺焦点环')
 })

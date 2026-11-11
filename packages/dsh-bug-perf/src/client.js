@@ -291,9 +291,11 @@ window.__ModuleLoader__.load({
     const STUCK_HINT_TEXTS = ['载入历史…', 'Loading history…']
     const STUCK_MESSAGE_SELECTOR = '[data-chat-flow-key]'
     const STUCK_CSS = [
-      '.bp-stuck{--bp-bg:var(--dsw-alias-bg-layer-1);--bp-border:var(--dsw-alias-border-l3);--bp-text:var(--dsw-alias-label-primary);--bp-accent:var(--dsw-alias-brand-primary);--bp-hover:var(--dsw-alias-interactive-bg-hover);position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483000;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--bp-bg);border:1px solid var(--bp-border);color:var(--bp-text);font-size:13px;line-height:20px}',
-      '.bp-stuck__action{padding:2px 10px;border-radius:6px;border:1px solid var(--bp-border);background:transparent;color:var(--bp-accent);font-size:13px;line-height:20px;cursor:pointer}',
+      '.bp-stuck{--bp-bg:var(--dsw-alias-bg-layer-1);--bp-border-strong:var(--dsw-alias-border-l3);--bp-text:var(--dsw-alias-label-primary);--bp-text-sub:var(--dsw-alias-label-secondary);--bp-accent:var(--dsw-alias-brand-primary);--bp-hover:var(--dsw-alias-interactive-bg-hover);--bp-radius-sm:var(--dsw-radius-sm);--bp-shadow:var(--dsw-shadow-lv3);position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483000;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--bp-radius-sm);background:var(--bp-bg);border:.5px solid var(--bp-border-strong);box-shadow:var(--bp-shadow);color:var(--bp-text);font-size:12px;line-height:18px}',
+      '.bp-stuck__text{color:var(--bp-text-sub)}',
+      '.bp-stuck__action{min-height:24px;padding:0 10px;border-radius:var(--bp-radius-sm);border:1px solid var(--bp-border-strong);background:transparent;color:var(--bp-accent);font:inherit;font-size:12px;line-height:18px;cursor:pointer}',
       '.bp-stuck__action:hover{background:var(--bp-hover)}',
+      '.bp-stuck__action:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}',
     ].join('')
 
     // 只读诊断: 记录帧计数、消息速率、活跃流与页面规模, 用于定位“越用越卡”。
@@ -575,6 +577,7 @@ window.__ModuleLoader__.load({
         notice.setAttribute('role', 'status')
         notice.className = 'bp-stuck'
         const text = doc.createElement('span')
+        text.className = 'bp-stuck__text'
         text.textContent = '连接重建未成功,可手动刷新页面'
         const action = doc.createElement('button')
         action.setAttribute('type', 'button')
@@ -957,68 +960,88 @@ window.__ModuleLoader__.load({
       },
     ]
 
+    // 包局部视觉 token(plugin-ui-design L1):值只引用宿主语义别名,不写字面 fallback
     const UI_CSS = [
-      '.bp-card { --bp-accent:var(--dsw-alias-brand-primary); --bp-accent-deep:var(--dsw-alias-button-primary-hover);',
+      '.bp-card {',
+      '  --bp-accent:var(--dsw-alias-brand-primary); --bp-accent-deep:var(--dsw-alias-button-primary-hover);',
+      '  --bp-accent-wash:color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent);',
+      '  --bp-ok:var(--dsw-alias-state-success-primary); --bp-warn:var(--dsw-alias-state-warn-primary);',
+      '  --bp-danger:var(--dsw-alias-state-error-primary);',
+      '  --bp-danger-wash:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);',
       '  --bp-bg:var(--dsw-alias-bg-layer-1); --bp-bg-sub:var(--dsw-alias-bg-layer-2);',
+      '  --bp-bg-muted:var(--dsw-alias-bg-module-platform);',
+      '  --bp-card:var(--dsw-alias-bg-layer-1); --bp-card-border:var(--dsw-alias-border-l2);',
       '  --bp-border:var(--dsw-alias-border-l2); --bp-border-strong:var(--dsw-alias-border-l3);',
       '  --bp-text:var(--dsw-alias-label-primary); --bp-text-sub:var(--dsw-alias-label-secondary);',
-      '  --bp-text-dim:var(--dsw-alias-label-tertiary); --bp-inverted:var(--dsw-alias-label-primary-inverted);',
-      '  --bp-danger:var(--dsw-alias-state-error-primary); --bp-radius-sm:6px; --bp-radius-md:8px;',
-      '  border:1px solid var(--bp-border); background:var(--bp-bg); border-radius:var(--bp-radius-md);',
-      '  overflow:hidden; color:var(--bp-text); font-size:12px; line-height:1.5; }',
-      '.bp-card__header { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%;',
-      '  padding:16px; border:0; background:transparent; text-align:left; cursor:pointer; color:inherit; }',
+      '  --bp-text-dim:var(--dsw-alias-label-tertiary);',
+      '  --bp-hover:var(--dsw-alias-interactive-bg-hover); --bp-hover-danger:var(--dsw-alias-interactive-bg-hover-danger);',
+      '  --bp-skeleton:var(--dsw-alias-bg-skeleton); --bp-switch-thumb:var(--dsw-alias-switch-thumb);',
+      '  --bp-radius-sm:var(--dsw-radius-sm); --bp-radius-md:var(--dsw-radius-md); --bp-radius-lg:var(--dsw-radius-lg);',
+      '  box-sizing:border-box; width:100%; border:.5px solid var(--bp-card-border); border-radius:var(--bp-radius-md);',
+      '  background:var(--bp-card); color:var(--bp-text); font-size:14px; line-height:22px; }',
+      '.bp-card__header { display:flex; align-items:flex-start; gap:12px; width:100%; padding:16px 20px;',
+      '  border:0; border-radius:var(--bp-radius-md); background:transparent; font:inherit; color:inherit;',
+      '  text-align:left; cursor:pointer; }',
       '.bp-card__header:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:-2px; }',
-      '.bp-card__head-text { display:flex; flex-direction:column; gap:4px; min-width:0; }',
-      '.bp-card__name { font-size:14px; font-weight:600; line-height:1.3; }',
-      '.bp-card__description { font-size:12px; color:var(--bp-text-sub); }',
-      '.bp-card__chevron { flex:none; color:var(--bp-text-dim); transition:transform .15s; }',
+      '.bp-card__head-text { display:flex; flex-direction:column; gap:2px; flex:1 1 auto; min-width:0; }',
+      '.bp-card__name { font-size:16px; font-weight:500; line-height:24px; }',
+      '.bp-card__description { color:var(--bp-text-sub); font-size:13px; line-height:20px; }',
+      '.bp-card__chevron { flex:none; margin-top:4px; color:var(--bp-text-dim); display:inline-flex; transition:transform .15s; }',
       '.bp-card--open .bp-card__chevron { transform:rotate(180deg); }',
-      '.bp-card__body { padding:0 16px 16px; border-top:1px solid var(--bp-border); }',
-      '.bp-hint { margin:12px 0 0; color:var(--bp-text-sub); }',
-      '.bp-error { margin:8px 0 0; color:var(--bp-text); border-left:2px solid var(--bp-danger); padding-left:8px; }',
-      '.bp-section { padding:12px 0; border-top:1px solid var(--bp-border); }',
-      '.bp-section:first-of-type { border-top:0; }',
-      '.bp-section__head { display:flex; align-items:center; justify-content:space-between; gap:12px; }',
-      '.bp-section__title { font-size:14px; font-weight:600; line-height:1.3; }',
-      '.bp-section__description { margin:4px 0 8px; color:var(--bp-text-sub); }',
-      '.bp-switch { display:inline-flex; align-items:center; gap:8px; min-height:28px; cursor:pointer; flex:none; user-select:none; }',
+      '.bp-card__body { display:flex; flex-direction:column; padding:0 20px 20px; border-top:.5px solid var(--bp-border); }',
+      '.bp-hint { margin:12px 0 0; color:var(--bp-text-sub); font-size:13px; line-height:20px; }',
+      '.bp-error { margin:8px 0 0; padding-left:8px; border-left:2px solid var(--bp-danger); color:var(--bp-text); font-size:13px; line-height:20px; }',
+      '.bp-sections { display:flex; flex-direction:column; gap:12px; margin-top:16px; }',
+      '.bp-section { display:flex; flex-direction:column; padding:12px 16px 4px; border-radius:var(--bp-radius-md); background:var(--bp-bg-sub); }',
+      '.bp-section__head { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:36px; }',
+      '.bp-section__title { font-size:14px; font-weight:500; line-height:22px; }',
+      '.bp-section__description { margin:2px 0 0; color:var(--bp-text-sub); font-size:13px; line-height:20px; }',
+      '.bp-rows { display:flex; flex-direction:column; margin-top:8px; }',
+      '.bp-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:44px; padding:12px 0; }',
+      '.bp-row + .bp-row { border-top:.5px solid var(--bp-border); }',
+      '.bp-field__label { color:var(--bp-text-sub); font-size:13px; line-height:20px; }',
+      '.bp-field__control { display:flex; align-items:center; gap:8px; flex:none; }',
+      '.bp-input { box-sizing:border-box; width:104px; min-height:36px; padding:0 10px; border:1px solid var(--bp-border-strong);',
+      '  border-radius:var(--bp-radius-sm); background:var(--bp-bg); color:var(--bp-text); font:inherit; font-size:14px; line-height:22px; }',
+      '.bp-input:focus { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:0; }',
+      '.bp-field__unit { flex:none; min-width:44px; text-align:right; color:var(--bp-text-dim); font-size:11px; line-height:18px; }',
+      '.bp-switch { display:inline-flex; align-items:center; gap:8px; flex:none; min-height:36px; cursor:pointer; user-select:none; }',
       '.bp-switch input[type="checkbox"] { position:absolute; width:0; height:0; opacity:0; }',
-      '.bp-switch__track { position:relative; flex-shrink:0; width:34px; height:19px; border-radius:999px; box-sizing:border-box;',
-      '  background:var(--bp-bg-sub); border:1px solid var(--bp-border); transition:background .15s,border-color .15s; }',
+      '.bp-switch__track { position:relative; flex-shrink:0; box-sizing:border-box; width:34px; height:19px; border-radius:999px;',
+      '  background:var(--bp-bg-muted); border:1px solid var(--bp-border); transition:background .15s,border-color .15s; }',
       '.bp-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
-      '  background:var(--bp-text-dim); transform:translateY(-50%); transition:left .15s,background .15s; }',
-      '.bp-switch:hover .bp-switch__track { border-color:var(--bp-accent); }',
+      '  background:var(--bp-switch-thumb); transform:translateY(-50%); transition:left .15s; }',
+      '.bp-switch__label { color:var(--bp-text-sub); font-size:13px; line-height:20px; }',
+      '.bp-switch:hover .bp-switch__track { background:color-mix(in srgb,var(--bp-bg-muted) 88%,var(--bp-text)); }',
       '.bp-switch input[type="checkbox"]:checked + .bp-switch__track { background:var(--bp-accent); border-color:var(--bp-accent); }',
-      '.bp-switch input[type="checkbox"]:checked + .bp-switch__track .bp-switch__thumb { left:17px; background:var(--bp-bg); }',
+      '.bp-switch input[type="checkbox"]:checked + .bp-switch__track .bp-switch__thumb { left:17px; }',
       '.bp-switch input[type="checkbox"]:focus-visible + .bp-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
       '.bp-switch:has(input[type="checkbox"]:disabled) { opacity:.5; cursor:not-allowed; }',
-      '.bp-fields { display:flex; flex-wrap:wrap; gap:8px 12px; margin-top:8px; }',
-      '.bp-field { display:inline-flex; align-items:center; gap:8px; color:var(--bp-text-sub); }',
-      '.bp-field input[type="number"] { width:88px; padding:4px 8px; border:1px solid var(--bp-border-strong); border-radius:var(--bp-radius-sm);',
-      '  background:var(--bp-bg); color:var(--bp-text); font:inherit; }',
-      '.bp-field input[type="number"]:focus { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:0; }',
-      '.bp-footer { display:flex; align-items:center; gap:12px; padding-top:12px; border-top:1px solid var(--bp-border); }',
-      '.bp-button { min-height:28px; padding:4px 12px; border:1px solid var(--bp-border-strong); border-radius:var(--bp-radius-sm);',
-      '  background:transparent; color:var(--bp-text); cursor:pointer; font:inherit; }',
-      '.bp-button:hover { background:var(--dsw-alias-interactive-bg-hover); }',
-      '.bp-button--primary { border-color:var(--bp-accent); background:var(--bp-accent); color:var(--bp-inverted); }',
-      '.bp-button--primary:hover { border-color:var(--bp-accent-deep); background:var(--bp-accent-deep); }',
+      '.bp-footer { display:flex; align-items:center; gap:12px; margin-top:16px; padding-top:12px; border-top:.5px solid var(--bp-border); }',
+      '.bp-footer .bp-hint { margin:0; }',
+      '.bp-button { min-height:36px; padding:0 14px; border:1px solid var(--bp-border-strong); border-radius:var(--bp-radius-sm);',
+      '  background:transparent; color:var(--bp-text); font:inherit; font-size:14px; line-height:22px; cursor:pointer; }',
+      '.bp-button:hover:not(:disabled) { background:var(--bp-hover); }',
+      '.bp-button--primary { border-color:var(--bp-accent); background:var(--bp-accent); color:var(--dsw-alias-bg-base); }',
+      '.bp-button--primary:hover:not(:disabled) { border-color:var(--bp-accent-deep); background:var(--bp-accent-deep); }',
       '.bp-button:disabled { opacity:.5; cursor:not-allowed; }',
       '@media (prefers-reduced-motion: reduce) { .bp-card__chevron, .bp-switch__track, .bp-switch__thumb { transition:none; } }',
+      '@media (max-width: 560px) { .bp-card__header { padding:16px; } .bp-card__body { padding:0 16px 16px; }',
+      '  .bp-section { padding:12px 12px 4px; } }',
     ].join('\n')
 
     const h = React === undefined ? undefined : React.createElement
 
-    const Switch = ({ checked, disabled, label, onChange }) => h('label', { className: 'bp-switch' },
+    const Switch = ({ checked, disabled, label, ariaLabel, onChange }) => h('label', { className: 'bp-switch' },
       h('input', {
         type: 'checkbox',
         checked,
         disabled,
+        'aria-label': ariaLabel ?? label,
         onChange: (event) => onChange(event.target.checked),
       }),
       h('span', { className: 'bp-switch__track' }, h('span', { className: 'bp-switch__thumb' })),
-      h('span', { className: 'bp-switch__label' }, label),
+      label === undefined || label === '' ? null : h('span', { className: 'bp-switch__label' }, label),
     )
 
     function SettingsPanel() {
@@ -1088,7 +1111,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'bp-hint' }, '修改后点保存;客户端补丁刷新页面生效,列表瘦身在下次列表请求生效。'),
           error !== '' && h('p', { className: 'bp-error' }, error),
           config === null && h('p', { className: 'bp-hint' }, '加载配置…'),
-          config !== null && UI_SECTIONS.map((section) => h('section', { key: section.key, className: 'bp-section' },
+          config !== null && h('div', { className: 'bp-sections' }, UI_SECTIONS.map((section) => h('section', { key: section.key, className: 'bp-section' },
             h('div', { className: 'bp-section__head' },
               h('span', { className: 'bp-section__title' }, section.title),
               h(Switch, {
@@ -1099,34 +1122,40 @@ window.__ModuleLoader__.load({
               }),
             ),
             h('p', { className: 'bp-section__description' }, section.description),
-            section.fields.map((field) => {
-              const bounds = LIMITS[section.key]?.[field.name]
-              return h('label', { key: field.name, className: 'bp-field' },
-                h('span', {}, field.label),
-                h('input', {
-                  type: 'number',
-                  min: bounds?.min,
-                  max: bounds?.max,
-                  step: 1,
-                  value: config[section.key][field.name],
-                  disabled: saving,
-                  onChange: (event) => {
-                    const value = Number(event.target.value)
-                    if (Number.isFinite(value)) updateSection(section.key, { [field.name]: value })
-                  },
-                }),
-                h('span', {}, field.unit),
-              )
-            }),
-            (section.toggles ?? []).map((toggle) => h('div', { key: toggle.name, className: 'bp-fields' },
-              h(Switch, {
-                checked: config[section.key][toggle.name],
-                disabled: saving,
-                label: toggle.label,
-                onChange: (value) => updateSection(section.key, { [toggle.name]: value }),
+            section.fields.length === 0 && (section.toggles ?? []).length === 0 ? null : h('div', { className: 'bp-rows' },
+              section.fields.map((field) => {
+                const bounds = LIMITS[section.key]?.[field.name]
+                return h('label', { key: field.name, className: 'bp-row' },
+                  h('span', { className: 'bp-field__label' }, field.label),
+                  h('span', { className: 'bp-field__control' },
+                    h('input', {
+                      type: 'number',
+                      className: 'bp-input',
+                      min: bounds?.min,
+                      max: bounds?.max,
+                      step: 1,
+                      value: config[section.key][field.name],
+                      disabled: saving,
+                      onChange: (event) => {
+                        const value = Number(event.target.value)
+                        if (Number.isFinite(value)) updateSection(section.key, { [field.name]: value })
+                      },
+                    }),
+                    h('span', { className: 'bp-field__unit' }, field.unit),
+                  ),
+                )
               }),
-            )),
-          )),
+              (section.toggles ?? []).map((toggle) => h('div', { key: toggle.name, className: 'bp-row' },
+                h('span', { className: 'bp-field__label' }, toggle.label),
+                h(Switch, {
+                  checked: config[section.key][toggle.name],
+                  disabled: saving,
+                  ariaLabel: toggle.label,
+                  onChange: (value) => updateSection(section.key, { [toggle.name]: value }),
+                }),
+              )),
+            ),
+          ))),
           config !== null && h('div', { className: 'bp-footer' },
             h('button', {
               type: 'button',
