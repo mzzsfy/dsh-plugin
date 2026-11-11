@@ -46,18 +46,14 @@ function makeStubs({ autoIdle = true, persisted = [], catalog, agentLookupError 
           async modelCatalog() {
             return catalog
           },
-          // 镜像宿主内部 ApiSessionAgentController 契约:resolveAgent 返回 {agent} 或 {error},
-          // selectForNextRequest 收解包后的 live agent 并装会话级 selection
-          agents: {
-            async resolveAgent(sessionId) {
-              resolveAgentIds.push(sessionId)
-              if (agentLookupError) return { error: agentLookupError }
-              if (!sessions.has(sessionId)) sessions.set(sessionId, { id: sessionId, status: 'idle' })
-              return { agent: sessions.get(sessionId) }
-            },
-            selectForNextRequest(agent, selection) {
-              selections.push({ agent, selection })
-            },
+          // 镜像宿主 SessionController.selectModel 契约:自行 resume 会话并返回归一化选择
+          async selectModel(request) {
+            resolveAgentIds.push(request.sessionId)
+            if (agentLookupError) throw agentLookupError
+            if (!sessions.has(request.sessionId)) sessions.set(request.sessionId, { id: request.sessionId, status: 'idle' })
+            const { sessionId, ...selection } = request
+            selections.push({ agent: sessions.get(sessionId), selection })
+            return { selected: selection }
           },
         }
       : {}),
@@ -490,7 +486,7 @@ test('session-driver:指定模型时 agent 解析失败投递前 fail 不投递'
 
 test('session-driver:模型安装异常投递前 fail 带可读前缀', async () => {
   const stubs = makeStubs({ catalog: MODEL_CATALOG })
-  stubs.sessionController.agents.selectForNextRequest = () => { throw new Error('projection modelSelection is not registered') }
+  stubs.sessionController.selectModel = async () => { throw new Error('projection modelSelection is not registered') }
   const driver = makeDriver(stubs)
   const job = { ...BASE_JOB, session: { mode: 'fresh', model: { provider: 'p1', model: 'm1' } } }
   // When 宿主安装面抛错(modelSelection 投影未注册等)
@@ -500,4 +496,33 @@ test('session-driver:模型安装异常投递前 fail 带可读前缀', async ()
   assert.ok(outcome.message.includes('模型安装失败'))
   assert.ok(outcome.message.includes('projection modelSelection is not registered'))
   assert.equal(stubs.prompts.length, 0)
+})
+
+test('session-driver:pinned 指向子 agent 会话时按丢失重建,不向子会话投递', async () => {
+  for (const header of [
+    { id: 'child', origin: 'subagent', parentSession: 'root', delegationDepth: 1 },
+    { id: 'child', parentSession: 'root', delegationDepth: 1 },
+  ]) {
+    const stubs = makeStubs()
+    stubs.sessionQuery.listSessions = async () => [{ header }]
+    const driver = makeDriver(stubs)
+    // When pinned 指向子会话(即便它正在运行,也不得跳过或投递)
+    stubs.sessions.set('child', { id: 'child', status: 'running' })
+    const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'child' } }, env: {} })
+    // Then 新建根会话并投递,pinned 旧 id 不被调用
+    assert.equal(outcome.status, 'success')
+    assert.equal(outcome.pinnedNewId, 'sess-1')
+    assert.equal(stubs.created.length, 1)
+    assert.deepEqual(stubs.prompts.map((prompt) => prompt.sessionId), ['sess-1'])
+  }
+})
+
+test('session-driver:pinned 指向普通 fork(parentSession + depth 0)仍复用', async () => {
+  const stubs = makeStubs()
+  stubs.sessionQuery.listSessions = async () => [{ header: { id: 'fork-1', parentSession: 'root', delegationDepth: 0 } }]
+  const driver = makeDriver(stubs)
+  const outcome = await driver.run({ job: { ...BASE_JOB, session: { mode: 'pinned', pinnedSessionId: 'fork-1' } }, env: {} })
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.sessionId, 'fork-1')
+  assert.equal(stubs.created.length, 0)
 })

@@ -237,7 +237,10 @@ export async function createApplication({ storageDomain, providers = [tushare, t
       assertLive()
       const parsed = preferencesSchema.partial().safeParse(operation.payload)
       if (!parsed.success) fail('INVALID_PREFERENCES', '显示偏好无效')
-      const result = await state.mutate({ ...operation, action: 'preferences' }, current => ({ ...current, preferences: { ...current.preferences, ...parsed.data } }))
+      // partial 会给缺省键补默认值, 合并时只取本次提交的键, 否则半更新会把另一项重置成默认
+      const submitted = operation.payload && typeof operation.payload === 'object' ? operation.payload : {}
+      const patch = Object.fromEntries(Object.entries(parsed.data).filter(([key, value]) => Object.hasOwn(submitted, key) && value !== undefined))
+      const result = await state.mutate({ ...operation, action: 'preferences' }, current => ({ ...current, preferences: { ...current.preferences, ...patch } }))
       collector.reconcile(); return result
     },
     async refresh(input = {}, signal) {

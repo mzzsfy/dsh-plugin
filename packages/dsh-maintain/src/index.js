@@ -215,6 +215,26 @@ function rejectCrossOrigin(req, res) {
 }
 
 // 路由样板收敛:方法守卫与跨源守卫统一在此,业务异常统一归一 400,handler 只留业务体
+/**
+ * 插件路由比宿主 /api 闸门更长/更精确,会抢在 connection.admit 之前命中,
+ * 必须自己回问一次宿主闸门,否则无 cookie 的调用直接落到业务面。
+ * 服务缺失(非 web 传输)时放行,与原行为一致。
+ */
+function rejectUnadmitted(ctx, req, res) {
+  let rejection
+  try {
+    const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
+    rejection = connection?.requestRejection?.(req)
+  } catch {
+    // 闸门自身异常不放行:宁可拒绝,不把故障当认证通过
+    rejection = 403
+  }
+  if (rejection === undefined) return false
+  res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+  res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+  return true
+}
+
 const route = (method, guards, handler) => async (req, res) => {
   if (req.method !== method) {
     sendJson(res, 405, { error: 'method not allowed' })
@@ -799,7 +819,11 @@ export function apply(ctx, config, dependencies = {}) {
   ]
 
   for (const route of routes) {
-    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: route.handler }), 'dsh-maintain ' + route.path)
+    const gated = async (req, res) => {
+      if (rejectUnadmitted(ctx, req, res)) return
+      await route.handler(req, res)
+    }
+    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: gated }), 'dsh-maintain ' + route.path)
   }
 
   ctx.inject(['settings'], (settingsCtx) => {

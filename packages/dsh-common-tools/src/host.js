@@ -81,7 +81,7 @@ function install(ctx, version) {
   }
   if (reg.active === null || newer(version, reg.active.ver)) {
     reg.active?.teardown()
-    reg.active = createTransport(ctx.webServer, version, reg.state)
+    reg.active = createTransport(ctx, version, reg.state)
   }
   const own = off => {
     const stop = () => { if (stops.delete(stop)) off() }
@@ -132,7 +132,18 @@ function install(ctx, version) {
   }
 }
 
-function createTransport(webServer, ver, state) {
+function createTransport(ctx, ver, state) {
+  const webServer = ctx.webServer
+  // 宿主闸门:upgrade 只按 exact pathname 分发,不经 /api 前缀的 admit;
+  // 查不到或查询抛错一律拒绝,避免闸门异常变成放行
+  const admit = (req) => {
+    try {
+      const connection = typeof ctx.get === 'function' ? ctx.get('connection') : undefined
+      return connection?.requestRejection?.(req)
+    } catch {
+      return 403
+    }
+  }
   const server = new WebSocketServer({ noServer: true, maxPayload: MAX_BYTES, perMessageDeflate: false })
   const connections = new Set()
   const count = plugin => [...connections].filter(connection => connection.plugins.has(plugin)).length
@@ -196,7 +207,17 @@ function createTransport(webServer, ver, state) {
   }
   const dispose = webServer.registerUpgrade({
     path: BUS_ROUTE,
-    handler(req, socket, head) { server.handleUpgrade(req, socket, head, websocket => accept(websocket, req)) },
+    handler(req, socket, head) {
+      // upgrade 不经宿主 /api 闸门(只按 exact pathname 分发),自己回问一次;
+      // 先例 dsh-api-gateway 的 admitConnection,这里只需判定,不接管 socket
+      const rejection = admit(req)
+      if (rejection !== undefined) {
+        socket.write(`HTTP/1.1 ${rejection} ${rejection === 401 ? 'Unauthorized' : 'Forbidden'}\r\n\r\n`)
+        socket.destroy()
+        return
+      }
+      server.handleUpgrade(req, socket, head, websocket => accept(websocket, req))
+    },
   })
   const heartbeat = setInterval(() => {
     for (const connection of connections) {

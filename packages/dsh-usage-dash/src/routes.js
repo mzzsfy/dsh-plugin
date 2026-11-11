@@ -6,6 +6,7 @@
 
 import { z } from 'zod'
 
+import { withHostGate } from './route-gate.mjs'
 import { aggregateRange, attachCosts } from './query.js'
 import { CURRENCIES, CONDITION_KINDS, UNIT_PER_MILLION, isTwoSegmentModel } from './pricing.js'
 import {
@@ -348,6 +349,6 @@ export function registerUsageRoutes(ctx, { store, collector, retentionDays, now 
     }
   }
   const disposers = ENDPOINTS.map(({ path }) =>
-    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler: dispatch }), `usage-dash: route ${path}`))
+    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler: withHostGate(ctx, dispatch) }), `usage-dash: route ${path}`))
   return () => disposers.forEach((dispose) => dispose?.())
 }

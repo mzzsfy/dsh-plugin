@@ -9,6 +9,8 @@ import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promi
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
+
+import { withHostGate } from './route-gate.mjs'
 import {
   APPROVAL_ASKED_KIND,
   AUDIO_EXTS,
@@ -232,6 +234,8 @@ const writeSoundIndex = (index) => writeFile(soundIndexPath, JSON.stringify(inde
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
+  // 宿主闸门:插件 exact 路由先于宿主 /api prefix 命中,须自行回问认证
+  const gatedRoute = (method, guards, handler) => withHostGate(ctx, route(method, guards, handler))
   const tools = setupCommonTools(ctx)
   const changes = createChangeNotifier(() => tools.publish())
   ctx.effect(() => () => changes.dispose(), '通知变更合并')
@@ -502,7 +506,7 @@ export function apply(ctx, config) {
     const disposeRoute = ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/projection',
-      handler: route('GET', {}, async (req, res) => {
+      handler: gatedRoute('GET', {}, async (req, res) => {
         const settings = readSettings(ctx, config)
         sendJson(res, 200, { units: projection.list(), soundMapping: settings.soundMapping, version: projection.version() })
       }),
@@ -518,7 +522,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/sounds',
-      handler: route('GET', {}, async (req, res) => {
+      handler: gatedRoute('GET', {}, async (req, res) => {
         sendJson(res, 200, { sounds: await listSounds(), builtin: true })
       }),
     }), 'turn-notify sounds route')
@@ -527,7 +531,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/upload',
-      handler: route('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
         const url = new URL(req.url, 'http://localhost')
         const filename = url.searchParams.get('name') || ''
         // 互斥段外仅读请求体;配额统计到落盘整段串行,防并发上传各自按旧总量绕过上限
@@ -561,13 +565,13 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/sound',
-      handler: async (req, res) => {
+      handler: withHostGate(ctx, async (req, res) => {
         try {
           await dispatchSound(req, res)
         } catch (error) {
           sendError(res, error)
         }
-      },
+      }),
     }), 'turn-notify sound route')
 
   // sound 路由三方法分发:GET 读取 / PUT 重命名 / DELETE 删除,守卫差异在分支内声明
@@ -655,7 +659,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/mapping',
-      handler: route('POST', { crossOrigin: true, json: true }, async (req, res) => {
+      handler: gatedRoute('POST', { crossOrigin: true, json: true }, async (req, res) => {
         const body = JSON.parse((await readRawBody(req, REQUEST_BODY_MAX_BYTES)).toString('utf8'))
         const category = body && typeof body.category === 'string' ? body.category : ''
         const id = body && typeof body.id === 'string' ? body.id : ''
@@ -688,7 +692,7 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: '/api/turn-notify/config',
       // GET/POST 双方法且守卫差异在 POST 分支,不经单方法 route() 包装
-      handler: async (req, res) => {
+      handler: withHostGate(ctx, async (req, res) => {
         // imAvailable 不进 core 纯函数,config 响应处合流;实时判定,无装载时序假设
         if (req.method === 'GET') {
           sendJson(res, 200, { ...publicConfig(readSettings(ctx, config)), imAvailable: imReady() })
@@ -712,14 +716,14 @@ export function apply(ctx, config) {
         } catch (error) {
           sendError(res, error)
         }
-      },
+      }),
     }), 'turn-notify config route')
 
   ctx.effect(() =>
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/test-webhook',
-      handler: route('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
         // 等待投递完成,真实结果随响应返回,测试按钮不再谎报
         const result = await sendWebhook({ url: readSettings(ctx, config).webhookUrl, payload: buildWebhookPayload(buildTestUnit()) })
         sendJson(res, 200, result)
@@ -733,7 +737,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/focus-desktop',
-      handler: route('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
         if (process.platform !== 'darwin') {
           sendJson(res, 409, { ok: false, detail: '仅支持 macOS 桌面版' })
           return
@@ -755,7 +759,7 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: '/api/turn-notify/test-host',
       // 等待 spawn 结束,真实结果随响应返回,测试按钮不谎报
-      handler: route('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
         if (hostTestInFlight) {
           sendJson(res, 429, { error: '宿主通知测试进行中,请稍候' })
           return
@@ -774,7 +778,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/im-targets',
-      handler: route('GET', {}, async (req, res) => {
+      handler: gatedRoute('GET', {}, async (req, res) => {
         const dshIm = ctx.get('dshIm')
         if (dshIm === undefined) {
           sendJson(res, 503, { error: 'dsh-im 未安装' })
@@ -800,7 +804,7 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: '/api/turn-notify/test-im',
-      handler: route('POST', { crossOrigin: true }, async (req, res) => {
+      handler: gatedRoute('POST', { crossOrigin: true }, async (req, res) => {
         const dshIm = ctx.get('dshIm')
         if (dshIm === undefined) {
           sendJson(res, 200, { ok: false, detail: 'dsh-im 未安装' })

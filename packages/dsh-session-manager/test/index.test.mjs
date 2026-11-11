@@ -2099,6 +2099,41 @@ test('删除父会话:级联回收全部派生子会话并逐条记台账', skip
   }
 })
 
+test('删除父会话:子会话台账写入失败时进入 partial,不谎报全部 deleted', skipMissingDeps, async () => {
+  const artifacts = await makeCascadeArtifacts(['p', 'c'])
+  try {
+    const headers = [
+      { id: 'p', cwd: 'C:\\x', createdAt: 0 },
+      { id: 'c', cwd: 'C:\\x', createdAt: 0, origin: 'subagent', parentSession: 'p', delegationDepth: 1 },
+    ]
+    const ledger = makeLedgerDomain([])
+    const write = ledger.global.set
+    ledger.global.set = async (next) => {
+      if (next.deleted.some((entry) => entry.sessionId === 'c')) throw new Error('ledger unavailable')
+      return write(next)
+    }
+    const { handlers } = makeCtx({
+      archivedIds: ['p'],
+      headers,
+      agents: new Map(headers.map((header) => [header.id, { status: 'idle' }])),
+      sessionPersistence: { locate: (header) => ({ path: path.join(artifacts.paths[header.id], 'session.jsonl.zstd') }) },
+      ledger,
+    })
+    const res = response()
+    await withTrashStub(async () => {}, async () => {
+      await handlers.get('/api/session-manager/delete')(request('p'), res)
+    })
+    assert.equal(res.status, 200)
+    assert.deepEqual(res.body.cascade.deleted, [])
+    assert.equal(res.body.partial, true)
+    assert.equal(res.body.cascade.failed.length, 1)
+    assert.equal(res.body.cascade.failed[0].sessionId, 'c')
+    assert.equal(res.body.cascade.failed[0].partial, true)
+  } finally {
+    await artifacts.cleanup()
+  }
+})
+
 test('删除父会话:子会话运行中拒绝整次删除,父产物不动', skipMissingDeps, async () => {
   const artifacts = await makeCascadeArtifacts(['p', 'c'])
   try {

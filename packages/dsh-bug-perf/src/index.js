@@ -2,6 +2,7 @@
 // 并接收浏览器定期上报的性能采样(只落本地临时文件,用于定位“越用越卡”)。
 // 会话列表瘦身在宿主执行(包装 sessionController.list),其余补丁在客户端执行;
 // 这里不做认证,缺 webServer 或路由注册失败都不影响宿主。
+import { withHostGate } from './route-gate.mjs'
 import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -246,7 +247,7 @@ export function apply(ctx, config) {
   ]
   try {
     ctx.effect(() => {
-      const disposers = routes.map((route) => server.register(route))
+      const disposers = routes.map((route) => server.register({ ...route, handler: withHostGate(ctx, route.handler) }))
       return () => { for (const dispose of disposers) if (typeof dispose === 'function') dispose() }
     }, 'bug-perf routes')
   } catch (error) {

@@ -25,7 +25,7 @@ AI `terminal` 工具与用户通过 DSH 官方 Sidebar `terminal` tab 操作同�
 
 ### wait 手动打断（0.4.0 起）
 
-wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提示正在等什么）并显示「跳过等待」按钮；点击经宿主路由 `/api/shared-terminal/wait/skip`（POST JSON `{sessionId, terminalId}`）中断该终端当前全部 pending wait，wait 以 `skipped` 终态携带当前屏幕快照返回，AI 继续后续步骤——不打断回合。判定次序：回合取消 > 终端退出 > 文本命中 > 手动跳过 > 超时。路由按仓库安全边界仅做 Origin 同源比对，不做自有认证。
+wait 等待期间，工具卡片以等待子串替代「执行中」摘要（提示正在等什么）并显示「跳过等待」按钮；点击经宿主路由 `/api/shared-terminal/wait/skip`（POST JSON `{sessionId, terminalId}`）中断该终端当前全部 pending wait，wait 以 `skipped` 终态携带当前屏幕快照返回，AI 继续后续步骤——不打断回合。判定次序：回合取消 > 终端退出 > 文本命中 > 手动跳过 > 超时。路由首行回问宿主 `connection.requestRejection`（无 cookie 401），并保留 Origin 同源比对，不自建认证层。
 
 ## 只读终端自愈
 

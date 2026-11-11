@@ -113,10 +113,12 @@ export function mapEventToCategory(type, data) {
   return null
 }
 
-// SessionHeader 判定子代理会话:origin 标记优先,辅以委托深度。
+// SessionHeader 判定子代理会话:origin 权威;无 origin 的旧记录按 parentSession +
+// delegationDepth(普通 fork 的 depth 为 0,不算)
 export function isSubagent(header) {
   const source = header || {}
-  return source.origin === 'subagent' || (source.delegationDepth ?? 0) > 0
+  if (source.origin === 'subagent') return true
+  return source.parentSession !== undefined && (source.delegationDepth ?? 0) >= 1
 }
 
 // 子代理结束到父会话被唤醒的投递裕量;超过视为与子代理无关的新回合。

@@ -1,9 +1,10 @@
 // board — /api/rsww/* 路由薄分发:数据权威态在 store 单例/自有文件存储(v5/{templates,config}.json)/driver 控制队列单例,路由无业务状态
 // 运行时路由 v5 恢复:runs/run/control(approve|reject 增 by/reason)/resume-from(种子续跑,不拉段)/run-remove/release/unrelease/released
 // 规划受理不经 HTTP:rs_workflow_start 是 orchestrator 工具行(见 feat/orchestrator.md)
-// 安全边界(全仓库约定,AGENTS.md):不做 host 认证,无 Host 白名单/rebinding 防线/token 校验;
-// 认证由宿主原生 cookie/startup-auth 承担,写路由跨源防护以 Origin 同源比对为上限
+// 安全边界(全仓库约定,AGENTS.md):不自建认证层;宿主闸门由 connection.requestRejection 复用
+// (插件 exact 路由先于宿主 /api prefix 命中,不主动回问就绕过认证),跨源防护以 Origin 同源比对为上限
 import { setupCommonTools, createChangeNotifier } from '@mzzsfy/dsh-common-tools/host'
+import { withHostGate } from './route-gate.mjs'
 import { reportStore, ACTIVE_STATES } from './store.mjs'
 import { registry, post, initiatorOf, resumerOf } from './driver/control.mjs'
 import { validateTemplate, validateTemplateSet } from './template.mjs'
@@ -272,7 +273,9 @@ export function registerBoardRoutes(ctx) {
     const tools = setupCommonTools(wctx)
     const changes = createChangeNotifier(() => tools.publish())
     wctx.effect(() => () => changes.dispose(), 'rsww 通知变更合并')
-    const route = (path, handler, name) => wctx.effect(() => wctx.webServer.register({ kind: 'exact', path, handler }), name)
+    // 宿主闸门:插件 exact 路由先于宿主 /api prefix 命中,须自行回问认证
+    const route = (path, handler, name) =>
+      wctx.effect(() => wctx.webServer.register({ kind: 'exact', path, handler: withHostGate(wctx, handler) }), name)
     // 变更通知:store 写路径 bump 即发布总线;行卸载退订(notify-plane 唯一通道)
     wctx.effect(() => store.onChange(changes.refresh), 'rsww bus notify wiring')
     route('/api/rsww/runs', guardedRoute(async (req, res) => {

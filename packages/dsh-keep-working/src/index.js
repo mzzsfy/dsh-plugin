@@ -10,8 +10,9 @@ import z from '@deepseek-ai/schemastery'
 import { DEFAULTS, resolveConfig } from './config.mjs'
 import { createEngine } from './engine.mjs'
 import { probeConnectivity } from './offline.mjs'
-import { rejectCrossOrigin, rejectNonJson } from './route-guard.mjs'
-import { scanStoredSessions, trace } from './scan.mjs'
+import { guardWrite } from './route-guard.mjs'
+import { withHostGate } from './route-gate.mjs'
+import { scanSettled, scanStoredSessions, trace } from './scan.mjs'
 import { NAMESPACE, PANEL_FIELDS, panelDefaults, readSettings, writeSettings } from './settings.mjs'
 
 export const name = 'keep-working'
@@ -88,11 +89,6 @@ async function readJsonBody(req) {
   return text === '' ? {} : JSON.parse(text)
 }
 
-// 写路由守卫:同源比对与 JSON 内容类型双校验,细节见 route-guard.mjs
-function guardWrite(req, res) {
-  return rejectCrossOrigin(req, res, sendJson) || rejectNonJson(req, res, sendJson)
-}
-
 export async function apply(ctx, config) {
   let createUserMessage
   try {
@@ -133,16 +129,23 @@ export async function apply(ctx, config) {
     runtime = state
 
     const scanDeadline = Date.now() + resolved.freshMs
+    let scanFailureWarned = false
     const runScan = async () => {
       try {
         const result = await scanStoredSessions({ ctx, config: resolved, createUserMessage, seen: seenSessions })
-        // 宿主持久层还没列出会话,或本轮预算用完时继续等,直到超出新鲜窗口
-        if (result.listed > 0 && result.complete) return
+        if (scanSettled(result)) {
+          trace(`扫描收工(source=${result.source ?? 'none'}, listed=${result.listed})`)
+          return
+        }
       } catch (error) {
         trace(`扫描异常 ${error instanceof Error ? error.message : String(error)}`)
-        ctx.logger?.warn?.(
-          `[keep-working] 启动扫描失败: ${error instanceof Error ? error.message : String(error)}`,
-        )
+        // 重试间隔是秒级,按轮告警会刷屏;同一轮重试窗口里只报第一次
+        if (!scanFailureWarned) {
+          scanFailureWarned = true
+          ctx.logger?.warn?.(
+            `[keep-working] 启动扫描失败: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
       }
       if (Date.now() >= scanDeadline || runtime !== state) return
       state.scanTimer = setTimeout(runScan, SCAN_RETRY_MS)
@@ -167,8 +170,9 @@ export async function apply(ctx, config) {
     serverCtx.effect(
       () =>
         serverCtx.webServer.register({
+          kind: 'exact',
           path: '/api/keep-working/config',
-          handler: async (req, res) => {
+          handler: withHostGate(serverCtx, async (req, res) => {
             if (req.method === 'GET') {
               sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)), defaults: panelDefaults() })
               return
@@ -177,7 +181,7 @@ export async function apply(ctx, config) {
               sendJson(res, 405, { ok: false, error: 'method not allowed' })
               return
             }
-            if (rejectCrossOrigin(req, res) || rejectNonJson(req, res)) return
+            if (guardWrite(req, res, sendJson)) return
             let patch
             try {
               patch = await readJsonBody(req)
@@ -195,7 +199,7 @@ export async function apply(ctx, config) {
             }
             startRuntime()
             sendJson(res, 200, { ok: true, value: resolveConfig(config, readSettings(ctx)) })
-          },
+          }),
         }),
       'keep-working config route',
     )

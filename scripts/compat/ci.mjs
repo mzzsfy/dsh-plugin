@@ -9,7 +9,6 @@ import { appendFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { resolveWindow, parseExplicit, fromRegistry, SLOT_LABELS, SLOT_MODES, EXEC_SLOTS } from './window.mjs'
-import { installPackageExternals } from './profile.mjs'
 import { judgeLlm } from './compat-judges.mjs'
 import { COMPAT_ROOT, DEFAULT_PORT, log } from './lib.mjs'
 
@@ -22,20 +21,22 @@ function runVersion(entry, port) {
       fileURLToPath(new URL('./run.mjs', import.meta.url)),
       '--version', entry.version,
       '--port', String(port),
-      '--skip-externals',
       ...(entry.mode === SLOT_MODES.baseline ? ['--crash-only'] : ['--seed-gateway']),
     ], { stdio: ['inherit', 'inherit', 'pipe'], windowsHide: true })
     let stderrTail = ''
     child.stderr.on('data', (chunk) => {
       stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_BYTES)
     })
+    let killTimer = null
     const timer = setTimeout(() => {
-      // 超时只清本槽 spawn 的 run.mjs 子进程;其内部 finally 自会收尾宿主与模拟器,
-      // 不按端口猜所有者(端口可能是其他会话或用户进程)
-      child.kill('SIGKILL')
+      // 超时只清本槽 spawn 的 run.mjs 子进程;先 SIGTERM 给收尾留窗口,
+      // 宽限后再 SIGKILL。不按端口猜所有者(端口可能是其他会话或用户进程)。
+      child.kill('SIGTERM')
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 10 * 1000)
     }, PROBE_TIMEOUT_MS)
     child.on('close', (code) => {
       clearTimeout(timer)
+      if (killTimer !== null) clearTimeout(killTimer)
       let integrity = ''
       if (code === 0) {
         try {
@@ -161,7 +162,8 @@ if (args.windowFile) {
   }
 }
 
-log(`逐包外部依赖安装: ${(await installPackageExternals()).length} 包`)
+// 逐包外部依赖必须由 run.mjs 在隔离 profile 的 pnpm install 之后安装:
+// pnpm 会清理依赖源目录的包内 node_modules,提前装等于白装。
 
 const results = []
 for (const [idx, entry] of window_.entries()) {

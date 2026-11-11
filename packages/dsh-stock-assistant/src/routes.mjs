@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { StockError, fail } from './market-model.mjs'
+import { rejectUnadmitted } from './route-gate.mjs'
 const PREFIX = '/api/stock-assistant'
 const operationSchema = z.object({ operationId: z.uuid(), expectedRevision: z.number().int().nonnegative() })
 async function body(req) {
@@ -16,7 +17,7 @@ function json(res, status, value) {
   if (res.destroyed || res.writableEnded) return
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value))
 }
-export function registerRoutes(webServer, app) {
+export function registerRoutes(webServer, app, ctx) {
   const handlers = {
     snapshot: ['GET', () => app.snapshot()],
     search: ['GET', async (input, signal) => await app.search(input.q || '', input.phase === 'remote' ? 'remote' : 'local', signal)],
@@ -35,6 +36,7 @@ export function registerRoutes(webServer, app) {
   let stopped = false
   try {
     for (const [name, [method, action]] of Object.entries(handlers)) disposers.push(webServer.register({ kind: 'exact', path: `${PREFIX}/${name}`, async handler(req, res) {
+      if (rejectUnadmitted(ctx, req, res)) return
       if (stopped) return json(res, 503, { ok: false, error: { code: 'STOPPED', message: '工具已停止' } })
       if (req.method !== method) { res.setHeader('Allow', method); return json(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '请求方法不支持' } }) }
       const controller = new AbortController(); controllers.add(controller)

@@ -8,6 +8,7 @@ import { createRunService, createExecutionGate } from './run-service.mjs'
 import { presetDefinitions } from './presets.mjs'
 import { createTaskStore, updateSettingsRecord, loadAdminBinding, updateAdminBindingRecord } from './store.mjs'
 import { createSettings } from './core/settings.mjs'
+import { withHostGate } from './route-gate.mjs'
 
 const TASK_TABLE_SCHEMA = z.any()
 const DOMAIN_SPEC = defineDomain({ name: 'boss_simulator', version: 1, tables: { kv: domainTable(TASK_TABLE_SCHEMA) } })
@@ -70,15 +71,15 @@ export function registerControl(ctx, { onChange = () => {} } = {}) {
       drive: driveRef,
       now: () => Date.now(),
     })
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/board', handler: api.handleBoard }), 'boss-simulator board')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/admin', handler: api.handleAdmin }), 'boss-simulator admin')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/interrupt', handler: api.handleInterrupt }), 'boss-simulator interrupt')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/settings', handler: api.handleSettings }), 'boss-simulator settings')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/drive', handler: api.handleDrive }), 'boss-simulator drive')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/board', handler: withHostGate(ctx, api.handleBoard) }), 'boss-simulator board')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/admin', handler: withHostGate(ctx, api.handleAdmin) }), 'boss-simulator admin')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/interrupt', handler: withHostGate(ctx, api.handleInterrupt) }), 'boss-simulator interrupt')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/settings', handler: withHostGate(ctx, api.handleSettings) }), 'boss-simulator settings')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/drive', handler: withHostGate(ctx, api.handleDrive) }), 'boss-simulator drive')
     // 人类操作入口:创建/授权/派发与工作区候选,与管理员工具共用同一状态机
     const taskApi = createTaskApi({ store, drive: driveRef, listWorkspaces: () => listWorkspaces(), now: () => Date.now() })
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/workspaces', handler: taskApi.handleWorkspaces }), 'boss-simulator workspaces')
-    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/task', handler: taskApi.handleTask }), 'boss-simulator task')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/workspaces', handler: withHostGate(ctx, taskApi.handleWorkspaces) }), 'boss-simulator workspaces')
+    ctx.effect(() => scope.webServer.register({ kind: 'exact', path: '/api/boss-simulator/task', handler: withHostGate(ctx, taskApi.handleTask) }), 'boss-simulator task')
     const runtime = {
       store, now: () => Date.now(), withExecution: driveRef.withExecution,
       get sessionAdapter() { return driveRef.sessionAdapter },

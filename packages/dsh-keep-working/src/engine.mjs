@@ -8,6 +8,7 @@
 import {
   closureVerdict,
   hasVisibleOutput,
+  humanInitiatedTurn,
   isMaintenanceTurnStart,
   turnInitiator,
   turnSlice,
@@ -53,7 +54,7 @@ export function createEngine({
         pending: undefined,
         sentIds: new Set(),
         maintenanceTurn: undefined,
-      }
+          }
       states.set(sessionId, state)
     }
     return state
@@ -85,10 +86,11 @@ export function createEngine({
     switch (reason.kind) {
       case 'completed': {
         if (closureVerdict(events, turn).closed) return { closed: true }
+        // 人已插话就让路,静的回合也不抢方向
+        if (userTookOver(events, turn, state.sentIds)) return undefined
         if (!hasVisibleOutput(turnSlice(events, turn)) && config.resumeSilentTurns) {
           return { reason: 'silent', text: config.continueTextSilent }
         }
-        if (userTookOver(events, turn, state.sentIds)) return undefined
         if (turnInitiator(events, turn) !== 'user') return undefined
         return { reason: 'closure', text: config.closureText }
       }
@@ -207,6 +209,13 @@ export function createEngine({
     if (maintenance) {
       log(`${session.id}: 维护回合不恢复`)
       return
+    }
+    // 真人发起的回合说明人已介入:恢复额度,封顶不再永久沉默。
+    // 判定按消息 id 排除本插件自投递的消息,不依赖"下一个 turn/start 是我们的"这一猜测。
+    if (humanInitiatedTurn(snapshotEvents(session), turn, state.sentIds)) {
+      if (state.consecutive > 0) log(`${session.id}: 用户回合,连续计数清零`)
+      state.consecutive = 0
+      state.lastAttemptAt = 0
     }
     const decision = decide(session, event, state)
     // 正常结案代表恢复目的已达成:清零连续计数,后续回合重新获得额度

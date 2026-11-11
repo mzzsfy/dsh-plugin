@@ -89,11 +89,22 @@ function createHarness({ origin, header, config: overrides, probe } = {}) {
     events.push(item)
     handlers.get('session/event')?.(session, item)
   }
+  // 插件 followup 启动的回合,首条 user/message 就是它投递的那条;
+  // 夹具按真实事件序复用它,human=true 才模拟真人新回合
+  const runTurn = (seq, turn, text = '没结案', { human = false } = {}) => {
+    emit(turnStart(seq, turn))
+    const lastId = sent.at(-1)?.id
+    emit(userMessage(seq + 1, 'user', human || lastId === undefined ? `m-${seq + 1}` : lastId))
+    emit(assistant(seq + 2, turn, text))
+    emit(turnEnd(seq + 3, turn, { kind: 'completed' }))
+    timers.flush()
+  }
   return {
     engine,
     emit,
     sent,
     timers,
+    runTurn,
     session,
     advanceTo: (value) => {
       time = value
@@ -159,32 +170,21 @@ test('S3b 旧格式子会话(parentSession + delegationDepth):不发送;普通 f
 
 test('S4 连续上限:达到 maxConsecutive 后不再发送', () => {
   const h = createHarness({ config: { maxConsecutive: 2 } })
-  const run = (seq) => {
-    h.emit(turnStart(seq, TURN + 1))
-    h.emit(userMessage(seq + 1))
-    h.emit(assistant(seq + 2, TURN + 1, '没结案'))
-    h.emit(turnEnd(seq + 3, TURN + 1, { kind: 'completed' }))
-    h.timers.flush()
-  }
-  run(0)
+  // 回合号必须逐轮递增:turnSlice 按首个匹配回合切片,复用 id 会读到上一轮事件
+  const run = (seq, turn) => h.runTurn(seq, turn)
+  run(0, 1)
   assert.equal(h.sent.length, 1)
   h.advanceTo(h.now() + 60_000)
-  run(10)
+  run(10, 2)
   assert.equal(h.sent.length, 2)
   h.advanceTo(h.now() + 600_000)
-  run(20)
+  run(20, 3)
   assert.equal(h.sent.length, 2)
 })
 
 test('S4b 正常结案清零连续计数:封顶后仍可再次恢复', () => {
   const h = createHarness({ config: { maxConsecutive: 2 } })
-  const run = (seq, turn, text = '没结案') => {
-    h.emit(turnStart(seq, turn))
-    h.emit(userMessage(seq + 1))
-    h.emit(assistant(seq + 2, turn, text))
-    h.emit(turnEnd(seq + 3, turn, { kind: 'completed' }))
-    h.timers.flush()
-  }
+  const run = (seq, turn, text = '没结案') => h.runTurn(seq, turn, text)
   run(0, 1)
   h.advanceTo(h.now() + 60_000)
   run(10, 2)
@@ -199,6 +199,29 @@ test('S4b 正常结案清零连续计数:封顶后仍可再次恢复', () => {
   assert.equal(h.sent.length, 3, '结案已清零计数,下一轮重新获得额度')
 })
 
+test('S4c 封顶后用户重新发起回合:额度恢复', () => {
+  const h = createHarness({ config: { maxConsecutive: 1 } })
+  const run = (seq, turn) => h.runTurn(seq, turn)
+  run(0, 1)
+  assert.equal(h.sent.length, 1)
+  h.advanceTo(h.now() + 60_000)
+  run(10, 2)
+  assert.equal(h.sent.length, 1, '插件自己 followup 启动的回合不得重置')
+  // 封顶后用户手动开新回合:没有待消费的插件回合,视为接管
+  h.runTurn(20, 3, '没结案', { human: true })
+  assert.equal(h.sent.length, 2, '用户接管后恢复一次额度')
+})
+
+test('S4d 自投递回合未真正开始:用户回合仍恢复额度', () => {
+  const h = createHarness({ config: { maxConsecutive: 1 } })
+  h.runTurn(0, 1)
+  assert.equal(h.sent.length, 1)
+  // followup 被宿主吞掉、没有新回合:下一轮真人回合不得被当成插件自己的回合
+  h.advanceTo(h.now() + 600_000)
+  h.runTurn(10, 2, '没结案', { human: true })
+  assert.equal(h.sent.length, 2)
+})
+
 test('S5 用户中途插话:让路,不发送', () => {
   const h = createHarness()
   h.emit(turnStart(0, TURN))
@@ -207,6 +230,16 @@ test('S5 用户中途插话:让路,不发送', () => {
   h.emit(userMessage(3, 'user'))
   h.emit(assistant(4, TURN, '好的'))
   h.emit(turnEnd(5, TURN, { kind: 'completed' }))
+  assert.equal(h.timers.count(), 0)
+})
+
+test('S5b 用户插话且回合无可见输出:让路,不发静默补发', () => {
+  const h = createHarness()
+  h.emit(turnStart(0, TURN))
+  h.emit(userMessage(1))
+  h.emit(toolCall(2, TURN, 'read'))
+  h.emit(userMessage(3, 'user'))
+  h.emit(turnEnd(4, TURN, { kind: 'completed' }))
   assert.equal(h.timers.count(), 0)
 })
 

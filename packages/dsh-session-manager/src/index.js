@@ -31,6 +31,7 @@ import {
   updatedAtOf,
 } from './core.mjs'
 import { moveToQuarantine, restoreFromQuarantine, trashPath } from './trash.mjs'
+import { withHostGate } from './route-gate.mjs'
 
 export const name = 'dsh-session-manager'
 
@@ -601,9 +602,11 @@ export function apply(ctx, config) {
         failed.push({ sessionId, error: disposal.error })
         continue
       }
+      let ledgerError = null
       try {
         await recordDeletedEntry(sessionId, artifactDir, disposal.heldPath)
       } catch (error) {
+        ledgerError = error && error.message ? error.message : String(error)
         ctx.logger && ctx.logger.warn('session-manager 级联台账记录失败(' + sessionId + '): ' + String(error && error.stack || error))
       }
       await detachSession(ctx, sessionId)
@@ -612,7 +615,9 @@ export function apply(ctx, config) {
       } catch (error) {
         ctx.logger && ctx.logger.warn('session-manager 级联归档清理失败(' + sessionId + '): ' + String(error && error.stack || error))
       }
-      deleted.push(sessionId)
+      // 产物已回收但台账未记:进 partial,不能同时报 deleted 让用户以为可还原
+      if (ledgerError !== null) failed.push({ sessionId, error: '产物已回收,台账记录失败: ' + ledgerError, partial: true })
+      else deleted.push(sessionId)
     }
     return { deleted, failed }
   }
@@ -763,7 +768,7 @@ export function apply(ctx, config) {
               message: MESSAGES.ghostCleanup,
               ...(ghostCascade === undefined ? {} : { cascade: ghostCascade }),
               ...(ghostCascade !== undefined && ghostCascade.failed.length > 0
-                ? { partial: true, message: `父会话已清理,${ghostCascade.failed.length} 个子会话产物清理失败` }
+                ? { partial: true, message: `父会话已清理,${ghostCascade.failed.length} 个子会话未完全清理` }
                 : {}),
             })
             return
@@ -851,7 +856,7 @@ export function apply(ctx, config) {
             mode: quarantined ? 'quarantine' : 'os',
             ...(cascade === undefined ? {} : { cascade }),
             ...(cascade !== undefined && cascade.failed.length > 0
-              ? { partial: true, message: `父会话已删除,${cascade.failed.length} 个子会话产物清理失败` }
+              ? { partial: true, message: `父会话已删除,${cascade.failed.length} 个子会话未完全清理` }
               : {}),
           })
         } catch (error) {
@@ -973,7 +978,7 @@ export function apply(ctx, config) {
   ]
 
   for (const route of routes) {
-    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: route.handler }),
+    ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: route.path, handler: withHostGate(ctx, route.handler) }),
       'dsh-session-manager ' + route.path)
   }
 

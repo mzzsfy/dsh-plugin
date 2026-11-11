@@ -127,23 +127,30 @@ const SESSION_DIR_PREFIX = 'session-'
  * 宿主的 `persistence.list()` 要为上千个会话逐个解析快照,固定开销接近十秒,
  * 而筛选只需要 id 与修改时间。目录扫描是百毫秒级,命中后再向持久层要头部。
  * 目录缺失(换后端或尚未落盘)时返回 undefined,由调用方走服务接口。
+ * 工作区目录不可读会让快照不完整,此时 partial 为真,调用方不得据此认定"没有待恢复会话"。
+ * 单个产物缺失不算:非 zstd 后端、旧代际与删除竞态都会表现为缺失,是常态而非读取失败。
  */
 export function listFreshByDirectory(config, nowTime) {
   const root = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), SESSIONS_DIR)
   let workspaces
   try {
     workspaces = readdirSync(root, { withFileTypes: true })
-  } catch {
+  } catch (error) {
+    // 根目录不存在等于"一个会话都没有",这是权威空快照而不是读取失败:
+    // 新装或被清空时若回退持久层重试,会每秒重扫到新鲜窗口耗尽
+    if (error?.code === 'ENOENT') return { items: [], partial: false }
     return undefined
   }
   const cutoff = nowTime - config.freshMs
   const fresh = []
+  let partial = false
   for (const workspace of workspaces) {
     if (!workspace.isDirectory()) continue
     let entries
     try {
       entries = readdirSync(join(root, workspace.name), { withFileTypes: true })
     } catch {
+      partial = true
       continue
     }
     for (const entry of entries) {
@@ -159,7 +166,7 @@ export function listFreshByDirectory(config, nowTime) {
       fresh.push({ id: entry.name, path, mtimeMs: stat.mtimeMs })
     }
   }
-  return fresh
+  return { items: fresh, partial }
 }
 
 /**
@@ -171,14 +178,20 @@ export function listFreshByDirectory(config, nowTime) {
 async function listFreshSessions(ctx, config, nowTime, scanDirectory = listFreshByDirectory) {
   const persistence = ctx.get('sessionPersistence')
   const byDirectory = scanDirectory(config, nowTime)
+  // 没有持久层服务就拿不到 header,无法区分子会话;此时应走全量回退而不是盲恢复
+  if (byDirectory !== undefined && persistence === undefined) return undefined
   if (byDirectory !== undefined) {
-    trace(`目录扫出 ${byDirectory.length} 个近期会话`)
+    trace(`目录扫出 ${byDirectory.items.length} 个近期会话`)
     // 头部里带着 preset 与父子身份,只有命中的少数会话才需要问持久层
+    let statFailed = false
     const statted = await Promise.all(
-      byDirectory.map(async (item) => {
+      byDirectory.items.map(async (item) => {
         try {
-          return { item, snapshot: await persistence?.stat?.(item.id) }
-        } catch {
+          return { item, snapshot: await persistence.stat?.(item.id) }
+        } catch (error) {
+          // 服务读失败不等于该会话不存在:整批当快照不完整处理,不能据此收工
+          statFailed = true
+          trace(`读取会话头失败 ${item.id}: ${error instanceof Error ? error.message : String(error)}`)
           return undefined
         }
       }),
@@ -187,7 +200,9 @@ async function listFreshSessions(ctx, config, nowTime, scanDirectory = listFresh
     for (const entry of statted) {
       if (entry === undefined) continue
       const header = entry.snapshot?.header
-      if (header !== undefined && isDerivedSessionHeader(header)) continue
+      // 没有头部就无法判定是不是子会话,跳过而不是按主会话恢复
+      if (header === undefined) continue
+      if (isDerivedSessionHeader(header)) continue
       fresh.push({
         id: entry.item.id,
         presetId: header?.agentPreset,
@@ -197,7 +212,8 @@ async function listFreshSessions(ctx, config, nowTime, scanDirectory = listFresh
     }
     // 先小后大:大日志解压代价高,先让小的快速出结果,再处理残留的大会话
     fresh.sort((left, right) => left.eventCount - right.eventCount || right.mtimeMs - left.mtimeMs)
-    return fresh
+    // 有读失败时快照不完整:既不能宣称"没有待恢复会话",也不能退回持久层重列
+    return { items: fresh, source: byDirectory.partial || statFailed ? 'partial' : 'directory' }
   }
 
   if (persistence === undefined || typeof persistence.list !== 'function') return undefined
@@ -222,7 +238,7 @@ async function listFreshSessions(ctx, config, nowTime, scanDirectory = listFresh
     fresh.push({ id: header.id, presetId: header.agentPreset, mtimeMs, eventCount: snapshot.eventCount ?? 0 })
   }
   fresh.sort((left, right) => left.eventCount - right.eventCount || right.mtimeMs - left.mtimeMs)
-  return fresh
+  return { items: fresh, source: 'persistence' }
 }
 
 /** 全量列表回退:持久层缺席时按宿主会话索引遍历。 */
@@ -240,6 +256,20 @@ async function listAllSessions(ctx) {
     .filter((item) => item !== undefined)
 }
 
+/**
+ * 本轮扫描是否可以收工。
+ *
+ * 目录扫描给出的是权威快照:空结果表示近期没有会话被写过,应当收工,
+ * 否则冷启动后每 1s 重扫全目录直到新鲜窗口耗尽。持久层与全量回退的空列表
+ * 可能只是服务尚未就绪,仍需重试;本轮预算用完时一律重试。
+ */
+export function scanSettled(result) {
+  if (!result.complete) return false
+  // 快照不完整时既不能宣称扫完了,也不能据此认定剩余会话无需恢复
+  if (result.source === 'partial') return false
+  return result.source === 'directory' || result.listed > 0
+}
+
 /** 扫描并恢复;返回本轮观察与恢复数量。 */
 export async function scanStoredSessions({
   ctx,
@@ -250,7 +280,7 @@ export async function scanStoredSessions({
   seen = new Set(),
   scanDirectory = listFreshByDirectory,
 }) {
-  const result = { listed: 0, scanned: 0, resumed: 0, complete: true }
+  const result = { listed: 0, scanned: 0, resumed: 0, complete: true, source: undefined }
   const deadline = Date.now() + budgetMs
   trace('扫描开始')
   if (!config.scanOnBoot || config.paused) return result
@@ -273,18 +303,25 @@ export async function scanStoredSessions({
     return result
   }
   trace(`已归档 ${archived.size} 个`)
-  const fresh = await listFreshSessions(ctx, config, now(), scanDirectory)
-  const candidates = fresh ?? (await listAllSessions(ctx))
+  const listed = await listFreshSessions(ctx, config, now(), scanDirectory)
+  const candidates = listed?.items ?? (await listAllSessions(ctx))
   if (candidates === undefined) return result
+  // 候选来源决定空列表的含义:只有目录扫描能证明"近期没有会话被写过",
+  // 持久层与全量回退的空列表都可能只是服务尚未就绪
+  result.source = listed?.source ?? 'query'
   result.listed = candidates.length
   trace(
-    fresh === undefined
+    listed === undefined
       ? `列出 ${candidates.length} 个存储会话(全量回退)`
-      : `按修改时间筛出 ${candidates.length} 个候选会话`,
+      : `按修改时间筛出 ${candidates.length} 个候选会话(${result.source})`,
   )
 
   for (const candidate of candidates) {
-    if (result.resumed >= config.scanLimit) break
+    if (result.resumed >= config.scanLimit) {
+      // 还有候选没处理,不能宣称本轮扫完
+      result.complete = false
+      break
+    }
     // 存储量可能上千,逐个解码全量事件代价高;超出本轮预算就收手,下轮接着扫
     if (Date.now() >= deadline) {
       result.complete = false

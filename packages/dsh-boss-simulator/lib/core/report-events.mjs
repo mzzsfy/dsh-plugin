@@ -1,5 +1,5 @@
 import { applySessionEvent, parseRunReport } from './orchestrator.mjs'
-import { submitReport } from './task.mjs'
+import { ACTIVE_RUN_STATES, submitReport } from './task.mjs'
 
 export function createRunReportCollector({ taskId, sessionId, store, onRejected = () => {} }) {
   const requests = new Map()
@@ -28,7 +28,7 @@ export function createRunReportCollector({ taskId, sessionId, store, onRejected 
       return
     }
     const aggregate = await store.loadAggregate(taskId)
-    const matches = Object.values(aggregate?.runs ?? {}).filter((candidate) => candidate.sessionId === sessionId && candidate.requestId === requestId && !['settled', 'rejected'].includes(candidate.state))
+    const matches = Object.values(aggregate?.runs ?? {}).filter((candidate) => candidate.sessionId === sessionId && candidate.requestId === requestId && ACTIVE_RUN_STATES.has(candidate.state))
     if (matches.length !== 1) return
     const run = matches[0]
     async function diagnose(kind, message) {
@@ -52,7 +52,7 @@ export function createRunReportCollector({ taskId, sessionId, store, onRejected 
     let submitFailure = null
     const updated = await store.updateAggregate(taskId, (current) => {
       const currentRun = current?.runs?.[run.runId]
-      if (!currentRun || currentRun.sessionId !== sessionId || currentRun.requestId !== requestId || ['settled', 'rejected'].includes(currentRun.state)) return current
+      if (!currentRun || currentRun.sessionId !== sessionId || currentRun.requestId !== requestId || !ACTIVE_RUN_STATES.has(currentRun.state)) return current
       let next = current
       const startAt = starts.get(turn) ?? currentRun.startedAt
       if (startAt !== undefined) {

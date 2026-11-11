@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { checkExecutionPermission, recordRun, markSessionExecutor, confirmResume } from './core/task.mjs'
+import { ACTIVE_RUN_STATES, checkExecutionPermission, recordRun, markSessionExecutor, confirmResume } from './core/task.mjs'
 import { reconcileStoppedTask } from './core/orchestrator.mjs'
-
-const ACTIVE = new Set(['prepared', 'submitted', 'running', 'unknown'])
 
 function requireOk(outcome) {
   if (!outcome.ok) throw Object.assign(new Error(outcome.message), { code: outcome.code })
@@ -36,7 +34,7 @@ export function createRunService({ store, sessionAdapter, followRuns = () => {},
         return current
       }
       if (Object.values(current.runs).some(run => run.requestId === requestId)) throw new Error('requestId 已绑定其他 Run')
-      if (Object.values(current.runs).some(run => run.workItemId === workItemId && ACTIVE.has(run.state))) throw new Error('工作项存在未核清 Run')
+      if (Object.values(current.runs).some(run => run.workItemId === workItemId && ACTIVE_RUN_STATES.has(run.state))) throw new Error('工作项存在未核清 Run')
       const permission = requireOk(checkExecutionPermission(current, globalControl, { workItemId, phase, actorRole }))
       const currentArtifactRevision = Object.values(current.runs).filter(candidate => candidate.workItemId === workItemId && candidate.actorRole === 'executor').length
       if (actorRole === 'reviewer' && !Object.values(current.reports).some(report => report.workItemId === workItemId && !report.historical && report.verdict === 'ready_for_review' && report.artifactRevision === currentArtifactRevision && current.runs[report.runId]?.state === 'settled')) throw new Error('独立验收须先有当前最新实施产物的有效报告')

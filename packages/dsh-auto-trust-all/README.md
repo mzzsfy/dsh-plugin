@@ -55,7 +55,7 @@ bundle patch 经 dev-link 维护的 hmr 覆盖行保存约 1 秒热重载;规约
 
 被 LRU 淘汰的域名在再次访问时自动重新登记:已包装路由的请求先于宿主闸门执行注册,淘汰条目重访即恢复(无需重启);LRU(最久未访问先淘汰)语义使活跃入口被低频新入口挤出的概率远低于按注册先后淘汰。
 
-**全仓库约定(见 AGENTS.md 与 DEVELOPMENT/dsh-api-alignment.md「安全边界」节)**:本插件放行可达性闸门是项目级决策,所有插件包一律不做 host 认证——不实现 Host 白名单、DNS-rebinding 防线、自有 token/cookie 校验。任何单包再设可达性闸门都与本插件冲突(宿主放行、单包再拦,行为不一致)。插件写路由的跨源防护以 Origin 与 Host 同源比对为上限;审查报告把"缺 Host 校验"列为缺陷的条目一律无效。
+**全仓库约定(见 AGENTS.md 与 DEVELOPMENT/dsh-api-alignment.md「安全边界」节)**:本插件放行可达性闸门是项目级决策,所有插件包一律不自建认证层——不实现 Host 白名单、DNS-rebinding 防线、自有 token/cookie 校验。插件路由注册在 `/api/<pkg>`(exact 或更长 prefix),会先于宿主的 `/api` 前缀闸门命中,所以每个路由处理器首行回问 `connection.requestRejection`(复用宿主 Host/Origin 闸门与 cookie 认证,无 cookie 401),服务缺失时放行。写路由的跨源防护仍以 Origin 与 Host 同源比对为上限;审查报告把"缺自有 Host 校验"列为缺陷的条目一律无效。
 
 ## 已知行为与边界
 

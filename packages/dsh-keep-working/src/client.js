@@ -11,35 +11,40 @@ window.__ModuleLoader__.load({
 
     const API_PATH = '/api/keep-working/config'
 
+    const NAV_ICON = { '持续工作': 'zap', 'dsh-keep-working': 'zap' }
+    if (window.__navicIcons !== undefined) window.__navicIcons.register(NAV_ICON)
+    else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
+    else window.__navicIconQueue = [NAV_ICON]
+
     // 毫秒字段在面板按秒编辑,避免用户数零
     const MS_PER_SECOND = 1000
 
     const CSS = `
 .kw-panel { display:flex; flex-direction:column; gap:16px; max-width:720px; }
-.kw-group { display:flex; flex-direction:column; gap:10px; padding:14px 16px; border:1px solid var(--dsw-alias-border-l1); border-radius:10px; background:var(--dsw-alias-bg-l1); }
-.kw-group__title { font-size:13px; font-weight:600; color:var(--dsw-alias-text-l1); }
+.kw-group { display:flex; flex-direction:column; gap:10px; padding:14px 16px; border:1px solid var(--dsw-alias-border-l2); border-radius:10px; background:var(--dsw-alias-bg-layer-1); }
+.kw-group__title { font-size:13px; font-weight:600; color:var(--dsw-alias-label-primary); }
 .kw-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.kw-row__label { font-size:13px; color:var(--dsw-alias-text-l1); }
-.kw-row__hint { font-size:12px; color:var(--dsw-alias-text-l3); margin-top:2px; }
+.kw-row__label { font-size:13px; color:var(--dsw-alias-label-primary); }
+.kw-row__hint { font-size:12px; color:var(--dsw-alias-label-tertiary); margin-top:2px; }
 .kw-row__control { flex:0 0 auto; display:flex; align-items:center; gap:8px; }
-.kw-number { width:96px; padding:5px 8px; font-size:13px; text-align:right; color:var(--dsw-alias-text-l1); background:var(--dsw-alias-bg-l2); border:1px solid var(--dsw-alias-border-l1); border-radius:6px; }
-.kw-textarea { width:100%; min-height:52px; padding:8px 10px; font-size:13px; line-height:1.5; color:var(--dsw-alias-text-l1); background:var(--dsw-alias-bg-l2); border:1px solid var(--dsw-alias-border-l1); border-radius:8px; resize:vertical; font-family:inherit; }
+.kw-number { width:96px; padding:5px 8px; font-size:13px; text-align:right; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l2); border-radius:6px; }
+.kw-textarea { width:100%; min-height:52px; padding:8px 10px; font-size:13px; line-height:1.5; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l2); border-radius:8px; resize:vertical; font-family:inherit; }
 .kw-field { display:flex; flex-direction:column; gap:6px; }
-.kw-field__label { font-size:13px; color:var(--dsw-alias-text-l1); }
+.kw-field__label { font-size:13px; color:var(--dsw-alias-label-primary); }
 .kw-actions { display:flex; align-items:center; gap:10px; }
-.kw-button { padding:6px 16px; font-size:13px; border-radius:6px; border:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-l2); color:var(--dsw-alias-text-l1); cursor:pointer; }
-.kw-button--primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); color:#fff; }
+.kw-button { padding:6px 16px; font-size:13px; border-radius:6px; border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); cursor:pointer; }
+.kw-button--primary { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); color:var(--dsw-alias-label-primary-inverted); }
 .kw-button:disabled { opacity:.55; cursor:not-allowed; }
-.kw-status { font-size:12px; color:var(--dsw-alias-text-l3); }
-.kw-status--error { color:var(--dsw-alias-text-danger, #d9534f); }
+.kw-status { font-size:12px; color:var(--dsw-alias-label-tertiary); }
+.kw-status--error { color:var(--dsw-alias-state-error-primary); }
 .kw-switch { position:relative; display:inline-flex; align-items:center; cursor:pointer; }
 .kw-switch input[type="checkbox"] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
-.kw-switch__track { display:inline-block; width:36px; height:20px; border-radius:10px; background:var(--dsw-alias-bg-l3); transition:background .16s ease; }
-.kw-switch__thumb { display:block; width:16px; height:16px; margin:2px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.2); transition:transform .16s ease; }
+.kw-switch__track { display:inline-block; width:34px; height:19px; border-radius:999px; background:var(--dsw-alias-bg-module-platform); transition:background .15s ease; }
+.kw-switch__thumb { display:block; width:13px; height:13px; margin:3px; border-radius:50%; background:var(--dsw-alias-switch-thumb); transition:transform .15s ease; }
 .kw-switch input[type="checkbox"]:checked + .kw-switch__track { background:var(--dsw-alias-brand-primary); }
-.kw-switch input[type="checkbox"]:checked + .kw-switch__track > .kw-switch__thumb { transform:translateX(16px); }
+.kw-switch input[type="checkbox"]:checked + .kw-switch__track > .kw-switch__thumb { transform:translateX(15px); }
 .kw-switch input[type="checkbox"]:focus-visible + .kw-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:2px; }
-.kw-switch input[type="checkbox"]:disabled + .kw-switch__track { opacity:.5; }
+.kw-switch input[type="checkbox"]:disabled + .kw-switch__track { background:var(--dsw-alias-bg-module-platform); opacity:.5; }
 `
 
     /** 布尔项:label 包裹视觉隐藏的 checkbox 与胶囊轨道,规约要求的开关形态。 */

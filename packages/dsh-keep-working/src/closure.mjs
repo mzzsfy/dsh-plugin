@@ -92,6 +92,17 @@ export function turnInitiator(events, turn) {
   return undefined
 }
 
+/** 回合由真人发起:首个 user/message 不是本插件投递的消息(excludeIds 记录自投递 id)。 */
+export function humanInitiatedTurn(events, turn, excludeIds) {
+  const slice = turnSlice(events, turn)
+  for (const event of slice) {
+    if (event?.type !== 'user/message') continue
+    if (event.data?.source?.kind !== 'user') return false
+    return excludeIds?.has?.(event.data?.id) !== true
+  }
+  return false
+}
+
 /** 用户在本回合中途插话:结案提醒让路,避免与人的意图抢方向。 */
 export function userTookOver(events, turn, excludeIds) {
   const slice = turnSlice(events, turn)

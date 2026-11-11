@@ -332,3 +332,10 @@ test('Given 宿主无 history 分页面, When 回溯, Then 明确报错不静默
   await props.loadTurnEnds()
   await assert.rejects(() => props.loadTurnEnds(), /history 分页/)
 })
+
+test('Given 子会话快照, When 挂载 dock, Then 不拉锚点不注入按钮', () => {
+  // 子会话没有可用的 kind:'session' fork 地址,follow/page 会被宿主拒绝
+  assert.match(CLIENT_SRC, /isSubagentSession = Boolean\(session && session\.subagent\)/)
+  assert.match(CLIENT_SRC, /if \(sessionId === undefined \|\| isSubagentSession\) return undefined/)
+  assert.match(CLIENT_SRC, /if \(isSubagentSession\) return null/)
+})

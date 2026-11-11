@@ -16,7 +16,7 @@ const system = source.slice(source.indexOf('function notifySystem('), source.ind
 
 // 切片求值只含导航与系统通知段,身份判定与已读收尾以同名实现注入,
 // 保证被测片段的调用形态与完整源码一致
-function clickFixture({ protocol = 'dsh-app:', platform = 'darwin', focusThrows = false, openThrows = false, wakeFails = false } = {}) {
+function clickFixture({ protocol = 'dsh-app:', platform = 'darwin', focusThrows = false, openThrows = false, wakeFails = false, byId } = {}) {
   const opened = [], requests = [], messages = [], notifications = []
   let focuses = 0
   const window = { location: { protocol }, focus() { focuses++; if (focusThrows) throw new Error('focus') } }
@@ -24,7 +24,10 @@ function clickFixture({ protocol = 'dsh-app:', platform = 'darwin', focusThrows 
   const api = async (...args) => { requests.push(args); if (wakeFails) throw new Error('wake'); return { ok: true } }
   const toast = (message) => messages.push(message)
   class Notification { constructor(title, options) { Object.assign(this, { title, options, closed: false }); notifications.push(this) } close() { this.closed = true } }
-  const runtime = new Function('window', 'document', 'api', 'toast', 'Notification', 'TOAST_MS', 'hasSessionId', 'markSessionHandled', 'notificationController', navigation + system + '\nreturn { activateSessionFromUnit, notifySystem, bind(value) { sessionNavigators.clear(); if (value) sessionNavigators.set(Symbol(), value) } }')(window, document, api, toast, Notification, 6000, (unit) => typeof unit.sessionId === 'string' && unit.sessionId.length > 0, () => {}, null)
+  const owner = byId === undefined
+    ? ''
+    : 'const activeNotificationOwner = { sessions: { list: { getSnapshot: () => ({ byId: ' + JSON.stringify(byId) + ' }) } } };\n'
+  const runtime = new Function('window', 'document', 'api', 'toast', 'Notification', 'TOAST_MS', 'hasSessionId', 'markSessionHandled', 'notificationController', owner + navigation + system + '\nreturn { activateSessionFromUnit, notifySystem, bind(value) { sessionNavigators.clear(); if (value) sessionNavigators.set(Symbol(), value) } }')(window, document, api, toast, Notification, 6000, (unit) => typeof unit.sessionId === 'string' && unit.sessionId.length > 0, () => {}, null)
   runtime.bind({ openSession(id) { if (openThrows) throw new Error('open'); opened.push(id) } })
   return { ...runtime, opened, requests, messages, notifications, focuses: () => focuses }
 }
@@ -62,6 +65,22 @@ test('重名、改名、空标题、跨工作区和折叠列表均按ID，不访
   ]) f.activateSessionFromUnit(unit)()
   assert.deepEqual(f.opened, ['a', 'b', 'a', 'c'])
   assert.equal(f.requests.length, 0)
+})
+
+test('子会话通知点击归结根会话，孤儿/环只唤醒不跳转', () => {
+  const f = clickFixture({
+    protocol: 'http:',
+    byId: {
+      root: { displayTitle: '根', origin: null },
+      child: { displayTitle: '子', origin: 'subagent', parentId: 'root' },
+      grandchild: { displayTitle: '孙', origin: 'subagent', parentId: 'child' },
+      orphan: { displayTitle: '孤', origin: 'subagent', parentId: 'missing' },
+      loopA: { displayTitle: 'A', origin: 'subagent', parentId: 'loopB' },
+      loopB: { displayTitle: 'B', origin: 'subagent', parentId: 'loopA' },
+    },
+  })
+  for (const unit of [{ sessionId: 'child' }, { sessionId: 'grandchild' }, { sessionId: 'orphan' }, { sessionId: 'loopA' }]) f.activateSessionFromUnit(unit)()
+  assert.deepEqual(f.opened, ['root', 'root'], '多级归结根，孤儿与环不跳转')
 })
 
 test('旧通知或测试通知无ID时只聚焦，不按标题误跳', () => {
@@ -124,8 +143,10 @@ test('宿主唤醒业务固定指向DSH，非macOS不执行且失败如实返回
     const calls = []
     const ctx = { effect(fn) { fn() }, webServer: { register(value) { registered = value } } }
     const route = (method, options, fn) => { assert.equal(method, 'POST'); assert.equal(options.crossOrigin, true); return fn }
+    // 片段经 gatedRoute 包装,宿主闸门在 eval 环境里按透传处理
+    const gatedRoute = (method, options, fn) => route(method, options, fn)
     const spawn = { impl(...args) { calls.push(args.slice(0, 3)); args[3](fail ? new Error('failure') : null) } }
-    new Function('ctx', 'route', 'sendJson', '__hostSpawn', 'process', 'HOST_FOCUS_TIMEOUT_MS', fragment)(ctx, route, (res, status, body) => Object.assign(res, { status, body }), spawn, { platform }, 5000)
+    new Function('ctx', 'route', 'gatedRoute', 'sendJson', '__hostSpawn', 'process', 'HOST_FOCUS_TIMEOUT_MS', fragment)(ctx, route, gatedRoute, (res, status, body) => Object.assign(res, { status, body }), spawn, { platform }, 5000)
     const res = {}
     await registered.handler({ body: { command: 'untrusted', url: 'https://example.org' } }, res)
     if (platform !== 'darwin') { assert.equal(res.status, 409); assert.equal(calls.length, 0); continue }

@@ -2,7 +2,7 @@
 // 入口驱动"实施→独立验收→结案→中断恢复"链,不做角色自主调度。
 import { applyCommand, actionKeyOf } from './command.mjs'
 import {
-  checkExecutionPermission, recordRun, hasActiveRuns,
+  ACTIVE_RUN_STATES, checkExecutionPermission, recordRun, hasActiveRuns,
   stopTask, confirmStopped, requestResume, confirmResume,
 } from './task.mjs'
 
@@ -105,7 +105,7 @@ export async function interruptTask(store, aggregate, { sessionAdapter, reason =
     const outcome = stopTask(current, { reason })
     if (!outcome.ok) { failure = outcome; return current }
     // 即使报告已落库,关联会话仍须核对队列与运行状态。
-    const needsInspection = Object.values(current.runs).some((run) => run.state !== 'rejected')
+    const needsInspection = Object.values(current.runs).some((run) => ACTIVE_RUN_STATES.has(run.state))
     return { ...outcome.result.aggregate, control: { ...outcome.result.aggregate.control, ...(commandId ? { stopCommandIds: { ...current.control.stopCommandIds, [commandId]: { executionEpoch: outcome.result.aggregate.control.executionEpoch } } } : {}), ...(needsInspection ? { state: 'stopping', stopDetail: 'requesting' } : {}) } }
   })
   if (failure) return failure
@@ -136,7 +136,11 @@ export async function interruptTask(store, aggregate, { sessionAdapter, reason =
 }
 
 function sessionIdsForStop(aggregate) {
-  return [...new Set(Object.values(aggregate.runs).filter((run) => run.state !== 'rejected').map((run) => run.sessionId))]
+  // 只核在飞状态:settled/interrupted/rejected 已是终态,会话被删/归档不应
+  // 让停止核对永远停在 unconfirmed。
+  return [...new Set(Object.values(aggregate.runs)
+    .filter((run) => ACTIVE_RUN_STATES.has(run.state))
+    .map((run) => run.sessionId))]
 }
 
 export async function reconcileStoppedTask(store, taskId, sessionAdapter) {

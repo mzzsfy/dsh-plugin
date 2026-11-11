@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import { fail, pass } from './command.mjs'
 import { taskUsageSummary } from './usage.mjs'
+import { ACTIVE_RUN_STATES } from './task.mjs'
 
 const DEFAULT_PAGE_LIMIT = 50
 const MAX_PAGE_LIMIT = 200
@@ -100,7 +101,7 @@ export function projectTaskSummary(aggregate) {
     definitionRevision: aggregate.definitionRevision,
     authorized: aggregate.authorization !== null,
     workItemCount: Object.keys(aggregate.workItems).length,
-    activeRunCount: Object.values(aggregate.runs).filter((r) => ['prepared', 'submitted', 'running', 'unknown'].includes(r.state)).length,
+    activeRunCount: Object.values(aggregate.runs).filter((r) => ACTIVE_RUN_STATES.has(r.state)).length,
     runs: Object.values(aggregate.runs).map((r) => ({
       runId: r.runId, phase: r.phase, state: r.state,
       startedAt: r.startedAt, endedAt: r.endedAt, tokenTotal: r.tokenTotal, usageCoverage: r.usageCoverage,
@@ -154,7 +155,7 @@ export function projectTaskDetail(aggregate, globalControl) {
 export function deriveWorkItemState(aggregate, workItem) {
   if (workItem.replacedBy) return 'withdrawn'
   const runs = Object.values(aggregate.runs).filter((r) => r.workItemId === workItem.workItemId)
-  const inFlight = runs.find((r) => ['prepared', 'submitted', 'running', 'unknown'].includes(r.state))
+  const inFlight = runs.find((r) => ACTIVE_RUN_STATES.has(r.state))
   if (inFlight) return 'executing'
   const depsMissing = workItem.dependencyWorkItemIds.some((id) => {
     const dep = aggregate.workItems[id]

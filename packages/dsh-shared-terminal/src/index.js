@@ -5,6 +5,7 @@ import { createTerminalTool } from './lib/tool.mjs'
 import { readControllerViewport } from './lib/private-screen.mjs'
 import { createPumpFactory } from './lib/attach-pump.mjs'
 import { createWaitSkipRegistry } from './lib/wait-skip.mjs'
+import { withHostGate } from './route-gate.mjs'
 
 export const name = 'dsh-shared-terminal'
 export const inject = ['terminalController', 'tools', 'webServer']
@@ -125,8 +126,8 @@ function registerSharedTerminalRoutes(ctx, { waitSkipRegistry, tools, controller
   ctx.effect(() => {
     const stopTool = tools.register(createTerminalTool({ controller, readScreen: readControllerViewport, defineTool, pumpFactory, waitSkipRegistry }))
     // 形状漂移(有服务无 register)直接抛错暴露宿主 API 变更,不做静默降级
-    const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: waitSkipHandler })
-    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: pumpStateHandler })
+    const unregisterRoute = webServer.register({ kind: 'exact', path: WAIT_SKIP_PATH, handler: withHostGate(ctx, waitSkipHandler) })
+    const unregisterPumpRoute = webServer.register({ kind: 'exact', path: PUMP_STATE_PATH, handler: withHostGate(ctx, pumpStateHandler) })
     return () => {
       stopTool?.()
       unregisterRoute?.()

@@ -162,18 +162,19 @@ test('审批通知即时送达,不受最短回合时长过滤', () => {
 
 test('rootsOnly 按子代理会话过滤', () => {
   const subByOrigin = { origin: 'subagent' }
-  const subByDepth = { delegationDepth: 1 }
-  const top = { delegationDepth: 0 }
+  const subByDepth = { parentSession: 'root', delegationDepth: 1 }
+  const fork = { parentSession: 'root', delegationDepth: 0 }
   assert.equal(isSubagent(subByOrigin), true)
   assert.equal(isSubagent(subByDepth), true)
-  assert.equal(isSubagent(top), false)
+  assert.equal(isSubagent(fork), false)
+  assert.equal(isSubagent({ delegationDepth: 1 }), false, '无 parentSession 的 depth 不判子会话')
   assert.equal(isSubagent({}), false)
   const settings = baseSettings()
   assert.equal(shouldNotify({
     category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10, settings, header: subByOrigin,
   }), false)
   assert.equal(shouldNotify({
-    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10, settings, header: top,
+    category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10, settings, header: fork,
   }), true)
   assert.equal(shouldNotify({
     category: CATEGORY_DONE, kind: 'turn/end', durationMs: MIN_TURN_MS * 10,

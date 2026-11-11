@@ -9,6 +9,8 @@ import { join } from 'node:path'
 
 import schemastery from '@deepseek-ai/schemastery'
 
+import { withHostGate } from './route-gate.mjs'
+
 import { createApi } from './api.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_TICK_MS, MIN_TICK_MS } from './config.mjs'
 import { createExecutor } from './executor.mjs'
@@ -29,6 +31,7 @@ export const inject = ['webServer']
 // 数据目录 env 覆盖:测试注入临时目录(对齐 dsh-usage-panel 先例)
 const DATA_DIR_ENV = 'DSH_CRON_BOARD_DATA_DIR'
 const API_PREFIX = '/api/cron-board'
+
 const SETTINGS_NS = 'cron-board'
 const TIMER_UNAVAILABLE_REASON = '宿主定时服务不可用,自动调度已停用'
 const SESSION_UNAVAILABLE_REASON = '宿主会话服务 sessionController 不可用(需 dsh-web-app 挂载 session-controller,0.1.1-rc.2 及更早版本缺失),会话任务通道禁用,脚本任务不受影响'
@@ -253,7 +256,7 @@ export function apply(ctx, config) {
       const disposeRoute = ctx.webServer.register({
         kind: 'prefix',
         path: API_PREFIX,
-        handler: async (req, res) => {
+        handler: withHostGate(ctx, async (req, res) => {
           try {
             const runtime = await getRuntime()
             await runtime.api.handle(req, res)
@@ -262,7 +265,7 @@ export function apply(ctx, config) {
             res.end(JSON.stringify({ error: '操作失败(系统级错误,详见服务端日志)' }))
             if (ctx.logger && ctx.logger.warn) ctx.logger.warn('[cron-board] ' + String(error && error.stack || error))
           }
-        },
+        }),
       })
       return () => {
         disposeRoute()
