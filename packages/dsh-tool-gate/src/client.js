@@ -17,6 +17,8 @@ window.__ModuleLoader__.load({
       collapse: '/api/tool-gate/collapse',
     }
 
+    const HEAD_HINT = '白名单内的工具全量注入模型上下文,其余按需检索;开关即保存,点击工具行查看完整描述与参数。'
+
     async function api(path, body) {
       const response = await fetch(path, body === undefined
         ? undefined
@@ -33,41 +35,61 @@ window.__ModuleLoader__.load({
     // 色彩槽位:根作用域声明包局部 token,直接引用宿主语义别名,不写 fallback
     // (规范见 DEVELOPMENT/plugin-ui-design.md,字面值在暗色主题漏色)
     const CSS = `
-.tg-card { --tg-text: var(--dsw-alias-label-primary); --tg-text-sub: var(--dsw-alias-label-secondary); --tg-text-dim: var(--dsw-alias-label-tertiary); --tg-warn: var(--dsw-alias-state-warn-primary); --tg-danger: var(--dsw-alias-state-error-primary); --tg-border: var(--dsw-alias-border-l2); --tg-bg-muted: var(--dsw-alias-bg-module-platform); --tg-bg-hover: var(--dsw-alias-interactive-bg-hover); --tg-accent: var(--dsw-alias-brand-primary); --tg-mono: var(--ds-font-family-code);
-  display: flex; flex-direction: column; gap: 10px; }
-.tg-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.tg-row__spacer { flex: 1; }
-.tg-hint { color: var(--tg-text-sub); font-size: 12px; }
-.tg-warn { color: var(--tg-warn); font-size: 12px; }
-.tg-error { color: var(--tg-danger); font-size: 12px; }
-.tg-tools { display: flex; flex-direction: column; border: 1px solid var(--tg-border); border-radius: 8px; overflow: hidden; max-height: 420px; overflow-y: auto; }
-.tg-tool-item { border-bottom: 1px solid var(--tg-border); }
-.tg-tool-item:last-child { border-bottom: none; }
-.tg-tool { display: flex; align-items: center; gap: 10px; padding: 6px 12px; }
-.tg-tool:hover { background: var(--tg-bg-hover); }
-.tg-tool--off { opacity: 0.55; }
-.tg-tool__head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0; border: none; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.tg-tool__head:focus-visible { outline: 2px solid var(--tg-accent); outline-offset: 2px; border-radius: 6px; }
-.tg-tool__name { font-family: var(--tg-mono); font-size: 13px; color: var(--tg-text); overflow-wrap: anywhere; }
-.tg-tool__meta { color: var(--tg-text-sub); font-size: 11px; margin-left: auto; white-space: nowrap; }
-.tg-tool__chev { flex: none; width: 12px; color: var(--tg-text-dim); font-size: 11px; text-align: center; }
-.tg-tool__detail { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 10px 56px; }
-.tg-tool__desc { margin: 0; color: var(--tg-text-sub); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.tg-tool__facts { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--tg-text-dim); font-size: 11px; line-height: 1.5; }
-.tg-tool__params { display: flex; flex-direction: column; gap: 4px; }
-.tg-tool__param { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: 11px; line-height: 1.5; }
+.tg-panel { --tg-accent: var(--dsw-alias-brand-primary); --tg-accent-deep: var(--dsw-alias-button-primary-hover); --tg-accent-wash: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, transparent); --tg-ok: var(--dsw-alias-state-success-primary); --tg-warn: var(--dsw-alias-state-warn-primary); --tg-danger: var(--dsw-alias-state-error-primary); --tg-danger-wash: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); --tg-text: var(--dsw-alias-label-primary); --tg-text-sub: var(--dsw-alias-label-secondary); --tg-text-dim: var(--dsw-alias-label-tertiary); --tg-bg: var(--dsw-alias-bg-layer-1); --tg-bg-sub: var(--dsw-alias-bg-layer-2); --tg-bg-muted: var(--dsw-alias-bg-module-platform); --tg-card: var(--dsw-alias-bg-layer-1); --tg-card-border: var(--dsw-alias-border-l2); --tg-border: var(--dsw-alias-border-l2); --tg-border-strong: var(--dsw-alias-border-l3); --tg-hover: var(--dsw-alias-interactive-bg-hover); --tg-hover-danger: var(--dsw-alias-interactive-bg-hover-danger); --tg-skeleton: var(--dsw-alias-bg-skeleton); --tg-radius-sm: var(--dsw-radius-sm); --tg-radius-md: var(--dsw-radius-md); --tg-radius-lg: var(--dsw-radius-lg); --tg-mono: var(--ds-font-family-code);
+  display: flex; flex-direction: column; gap: 16px; color: var(--tg-text); font-size: 14px; line-height: 22px; }
+.tg-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.tg-head__hint { color: var(--tg-text-sub); font-size: 13px; line-height: 20px; }
+.tg-card { display: flex; flex-direction: column; padding: 20px; background: var(--tg-card); border: .5px solid var(--tg-card-border); border-radius: var(--tg-radius-md); }
+.tg-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
+.tg-card__title { font-weight: 600; font-size: 14px; line-height: 22px; color: var(--tg-text); }
+.tg-card__meta { margin-left: auto; color: var(--tg-text-dim); font-size: 12px; line-height: 18px; }
+.tg-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; padding: 12px 0; border-top: .5px solid var(--tg-border); }
+.tg-field__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tg-field__label { color: var(--tg-text); font-size: 14px; line-height: 22px; }
+.tg-field__hint { color: var(--tg-text-sub); font-size: 13px; line-height: 20px; }
+.tg-field__control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.tg-table { display: flex; flex-direction: column; max-height: 420px; overflow-y: auto; }
+.tg-thead { position: sticky; top: 0; z-index: 1; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px 0; background: var(--tg-card); border-top: .5px solid var(--tg-border); color: var(--tg-text-dim); font-size: 12px; line-height: 18px; }
+.tg-thead__cols { display: grid; grid-template-columns: minmax(0, 1fr) 112px 20px; gap: 8px; align-items: center; }
+.tg-thead__right { text-align: right; }
+.tg-tool-item { border-top: .5px solid var(--tg-border); }
+.tg-tool-item:hover { background: var(--tg-hover); }
+.tg-tool { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: center; min-height: 40px; }
+.tg-tool--off .tg-tool__name { color: var(--tg-text-sub); }
+.tg-tool__head { display: grid; grid-template-columns: minmax(0, 1fr) 112px 20px; gap: 8px; align-items: center; width: 100%; min-height: 40px; padding: 0; border: none; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.tg-tool__head:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; border-radius: var(--tg-radius-sm); }
+.tg-tool__name { min-width: 0; font-family: var(--tg-mono); font-size: 14px; line-height: 22px; color: var(--tg-text); overflow-wrap: anywhere; }
+.tg-tool__meta { min-width: 0; color: var(--tg-text-sub); font-size: 12px; line-height: 18px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tg-tool__chev { color: var(--tg-text-dim); font-size: 14px; line-height: 22px; text-align: center; }
+.tg-tool__detail { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px 46px; }
+.tg-tool__desc { margin: 0; color: var(--tg-text-sub); font-size: 13px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tg-tool__facts { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--tg-text-dim); font-size: 12px; line-height: 18px; }
+.tg-tool__params { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: .5px solid var(--tg-border); }
+.tg-tool__param { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 12px; line-height: 18px; }
 .tg-tool__param-name { font-family: var(--tg-mono); color: var(--tg-text); }
 .tg-tool__param-type { font-family: var(--tg-mono); color: var(--tg-text-dim); }
-.tg-tool__param-required { color: var(--tg-text-dim); }
+.tg-tool__param-required { color: var(--tg-warn); }
 .tg-tool__param-desc { flex: 1 1 240px; min-width: 0; color: var(--tg-text-sub); }
-.tg-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; position: relative; }
-.tg-switch input[type="checkbox"] { position: absolute; opacity: 0; width: 1px; height: 1px; }
-.tg-switch__track { width: 34px; height: 20px; border-radius: 999px; background: var(--tg-bg-muted); transition: background 0.15s ease; display: inline-block; position: relative; flex: none; }
-.tg-switch__thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-bg-base); transition: left 0.15s ease; box-shadow: 0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 20%, transparent); }
-.tg-switch input[type="checkbox"]:checked + .tg-switch__track { background: var(--tg-accent); }
-.tg-switch input[type="checkbox"]:checked + .tg-switch__track .tg-switch__thumb { left: 16px; }
-.tg-switch input[type="checkbox"]:focus-visible + .tg-switch__track { outline: 2px solid var(--tg-accent); outline-offset: 2px; }
-.tg-switch input[type="checkbox"]:disabled + .tg-switch__track { opacity: 0.5; cursor: not-allowed; }
+.tg-warn { padding: 8px 0; color: var(--tg-warn); font-size: 12px; line-height: 18px; }
+.tg-error { padding: 8px 0 0; color: var(--tg-danger); font-size: 12px; line-height: 18px; }
+.tg-skeleton { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
+.tg-skeleton__row { height: 16px; border-radius: var(--tg-radius-sm); background: var(--tg-skeleton); }
+.tg-switch { position: relative; display: inline-flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; }
+.tg-switch input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; }
+.tg-switch__track { position: relative; flex: none; width: 34px; height: 19px; box-sizing: border-box; border-radius: 999px; background: var(--tg-bg-muted); border: 1px solid var(--tg-border); transition: background .15s, border-color .15s; }
+.tg-switch__thumb { position: absolute; top: 50%; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--tg-text-dim); transform: translateY(-50%); transition: left .15s, background .15s; }
+.tg-switch:hover .tg-switch__track { border-color: var(--tg-accent); }
+.tg-switch input[type="checkbox"]:checked + .tg-switch__track { background: var(--tg-accent); border-color: var(--tg-accent); }
+.tg-switch input[type="checkbox"]:checked + .tg-switch__track .tg-switch__thumb { left: 17px; background: var(--tg-bg); }
+.tg-switch input[type="checkbox"]:focus-visible + .tg-switch__track { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+.tg-switch input[type="checkbox"]:disabled + .tg-switch__track { opacity: .5; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .tg-card { padding: 16px; }
+  .tg-thead { display: none; }
+  .tg-tool__head { grid-template-columns: minmax(0, 1fr) auto; }
+  .tg-tool__chev { display: none; }
+  .tg-tool__detail { padding-left: 12px; }
+}
 `
 
     function Switch({ checked, disabled, onChange, label }) {
@@ -103,7 +125,12 @@ window.__ModuleLoader__.load({
       }
 
       if (state === undefined) {
-        return h('div', { className: 'tg-card' }, h('span', { className: 'tg-hint' }, error ?? '加载中…'))
+        return h('div', { className: 'tg-panel' },
+          h('div', { className: 'tg-head' }, h('span', { className: 'tg-head__hint' }, error !== undefined ? '状态读取失败,可刷新页面重试。' : '正在读取工具门状态…')),
+          h('div', { className: 'tg-card' },
+            h('div', { className: 'tg-skeleton', 'aria-busy': 'true' },
+              [0, 1, 2].map((index) => h('div', { className: 'tg-skeleton__row', key: index })))),
+          error !== undefined ? h('div', { role: 'alert', className: 'tg-error' }, error) : null)
       }
 
       const toggleTool = (tool, on) => {
@@ -126,6 +153,13 @@ window.__ModuleLoader__.load({
         }, 0)
       }
 
+      // 设置行:左标题 + 说明,右控件;说明常驻,不塞进 title 属性
+      const field = (label, hint, control) => h('div', { className: 'tg-field' },
+        h('div', { className: 'tg-field__text' },
+          h('span', { className: 'tg-field__label' }, label),
+          h('span', { className: 'tg-field__hint' }, hint)),
+        h('div', { className: 'tg-field__control' }, control))
+
       const renderTool = (tool, index) => {
         const open = expanded.includes(tool.name)
         const description = tool.description ?? ''
@@ -134,8 +168,8 @@ window.__ModuleLoader__.load({
         const meta = tool.implicit
           ? '折叠入口 · 常驻'
           : !state.enabled
-            ? `原状 · ${layers} 层`
-            : `${tool.inAllowlist ? '全量注入' : '延迟加载'} · ${layers} 层`
+            ? '原状'
+            : tool.inAllowlist ? '全量注入' : '延迟加载'
         const facts = [
           `层 ${(tool.layerLabels ?? []).join(' / ')}`,
           `defer ${tool.deferredLayers ?? 0}/${layers}`,
@@ -179,30 +213,37 @@ window.__ModuleLoader__.load({
             : null)
       }
 
-      return h('div', { className: 'tg-card' },
-        h('div', { className: 'tg-row' },
-          h(Switch, {
+      return h('div', { className: 'tg-panel' },
+        h('div', { className: 'tg-head' }, h('span', { className: 'tg-head__hint' }, HEAD_HINT)),
+        h('div', { className: 'tg-card' },
+          h('div', { className: 'tg-card__head' }, h('span', { className: 'tg-card__title' }, '行为')),
+          field('启用工具门', '关闭后全部工具恢复注册原状(全量注入),白名单保留', h(Switch, {
             checked: state.enabled,
             disabled: busy,
             label: '启用工具门',
             onChange: (enabled) => commit(api(API.enabled, { enabled })),
-          }),
-          h('span', null, '启用工具门'),
-          h('span', { className: 'tg-hint' }, '关闭后全部工具恢复注册原状(全量注入),白名单保留')),
-        h('div', { className: 'tg-row' },
-          h(Switch, {
+          })),
+          field('降级折叠(第三方路由)', state.enabled ? 'DeepSeek 原生路由之外,请求折叠为白名单 + tool_search,模型按需检索定义' : '工具门关闭时不生效', h(Switch, {
             checked: state.collapse !== false && state.enabled,
             disabled: busy || !state.enabled,
             label: '降级折叠',
             onChange: (collapse) => commit(api(API.collapse, { collapse })),
-          }),
-          h('span', null, '降级折叠(第三方路由)'),
-          h('span', { className: 'tg-hint' }, state.enabled ? 'DeepSeek 原生路由之外,请求折叠为白名单 + tool_search,模型按需检索定义' : '工具门关闭时不生效')),
-        h('div', { className: 'tg-hint' }, '白名单内的工具全量注入模型上下文;其余工具延迟加载(DeepSeek 原生路由走服务端搜索,第三方路由走本地降级折叠)。开关即保存。点击工具行查看完整描述与参数。'),
-        state.unknownAllowlisted.length > 0
-          ? h('div', { className: 'tg-warn' }, `白名单含未注册工具名(拼错?): ${state.unknownAllowlisted.join(', ')}`)
-          : null,
-        h('div', { className: 'tg-tools' }, state.tools.map(renderTool)),
+          }))),
+        h('div', { className: 'tg-card' },
+          h('div', { className: 'tg-card__head' },
+            h('span', { className: 'tg-card__title' }, '白名单'),
+            h('span', { className: 'tg-card__meta' }, `已选 ${state.allowlist.length} 项 · 共 ${state.tools.length} 项`)),
+          state.unknownAllowlisted.length > 0
+            ? h('div', { className: 'tg-warn' }, `白名单含未注册工具名(拼错?): ${state.unknownAllowlisted.join(', ')}`)
+            : null,
+          h('div', { className: 'tg-table' },
+            h('div', { className: 'tg-thead' },
+              h('span', { 'aria-hidden': 'true' }),
+              h('div', { className: 'tg-thead__cols' },
+                h('span', null, '工具'),
+                h('span', { className: 'tg-thead__right' }, '策略'),
+                h('span', { 'aria-hidden': 'true' }))),
+            state.tools.map(renderTool))),
         error !== undefined ? h('div', { role: 'alert', className: 'tg-error' }, error) : null)
     }
 

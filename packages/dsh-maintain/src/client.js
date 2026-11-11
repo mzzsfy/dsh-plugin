@@ -24,73 +24,84 @@ window.__ModuleLoader__.load({
     else if (Array.isArray(window.__navicIconQueue)) window.__navicIconQueue.push(NAV_ICON)
     else window.__navicIconQueue = [NAV_ICON]
 
+const HEAD_HINT = '追踪 npm 新版本,查看更新内容,安全重启宿主;设置保存后即时生效。'
+
 const CSS = [
-  '.dm-panel { display:flex; flex-direction:column; gap:12px; color:inherit; font-size:13px; --dm-warn:var(--dsw-alias-state-warn-primary); }',
-  '.dm-head { display:flex; align-items:center; gap:8px; }',
-  '.dm-head__title { font-weight:600; font-size:14px; }',
-  '.dm-head__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.dm-btn { cursor:pointer; border:1px solid var(--dsw-alias-border-l2); background:transparent;',
-  '  color:inherit; border-radius:6px; padding:3px 10px; font-size:12px; }',
-  '.dm-btn:hover { opacity:0.8; }',
-  '.dm-btn:disabled { opacity:0.45; cursor:default; }',
-  '.dm-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.dm-btn--danger { color:var(--dsw-alias-state-error-primary); border-color:var(--dsw-alias-state-error-primary); }',
-  '.dm-card { border:1px solid var(--dsw-alias-border-l2); border-radius:10px; padding:10px 12px;',
-  '  display:flex; flex-direction:column; gap:8px; }',
-  '.dm-card__title { font-weight:600; font-size:12px; color:var(--dsw-alias-label-secondary); }',
+  // ---- 色彩槽位与尺度:根作用域声明包局部 token,直接引用宿主语义别名,不写 fallback ----
+  '.dm-panel { --dm-accent:var(--dsw-alias-brand-primary); --dm-accent-deep:var(--dsw-alias-button-primary-hover); --dm-accent-wash:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,transparent); --dm-ok:var(--dsw-alias-state-success-primary); --dm-warn:var(--dsw-alias-state-warn-primary); --dm-danger:var(--dsw-alias-state-error-primary); --dm-danger-wash:color-mix(in srgb,var(--dsw-alias-state-error-primary) 10%,transparent); --dm-text:var(--dsw-alias-label-primary); --dm-text-sub:var(--dsw-alias-label-secondary); --dm-text-dim:var(--dsw-alias-label-tertiary); --dm-bg:var(--dsw-alias-bg-layer-1); --dm-bg-sub:var(--dsw-alias-bg-layer-2); --dm-bg-muted:var(--dsw-alias-bg-module-platform); --dm-card:var(--dsw-alias-bg-layer-1); --dm-card-border:var(--dsw-alias-border-l2); --dm-border:var(--dsw-alias-border-l2); --dm-border-strong:var(--dsw-alias-border-l3); --dm-hover:var(--dsw-alias-interactive-bg-hover); --dm-hover-danger:var(--dsw-alias-interactive-bg-hover-danger); --dm-skeleton:var(--dsw-alias-bg-skeleton); --dm-overlay:color-mix(in srgb,var(--dsw-alias-label-primary) 45%,transparent); --dm-radius-sm:var(--dsw-radius-sm); --dm-radius-md:var(--dsw-radius-md); --dm-radius-lg:var(--dsw-radius-lg); --dm-mono:var(--ds-font-family-code);',
+  '  display:flex; flex-direction:column; gap:16px; color:var(--dm-text); font-size:14px; line-height:22px; }',
+  '.dm-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }',
+  '.dm-head__hint { color:var(--dm-text-sub); font-size:13px; line-height:20px; }',
+  '.dm-card { display:flex; flex-direction:column; padding:20px; background:var(--dm-card); border:.5px solid var(--dm-card-border); border-radius:var(--dm-radius-md); }',
+  '.dm-card__head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-bottom:8px; }',
+  '.dm-card__title { font-weight:600; font-size:14px; line-height:22px; color:var(--dm-text); }',
+  '.dm-card__actions { display:flex; align-items:center; gap:8px; margin-left:auto; }',
+  '.dm-field { display:grid; grid-template-columns:120px minmax(0,1fr); gap:4px 12px; align-items:start; padding:12px 0; border-top:.5px solid var(--dm-border); }',
+  '.dm-field__label { color:var(--dm-text); font-size:14px; line-height:22px; }',
+  '.dm-field__main { display:flex; flex-direction:column; gap:4px; min-width:0; }',
+  '.dm-field__control { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }',
+  '.dm-field__hint { color:var(--dm-text-sub); font-size:13px; line-height:20px; }',
   '.dm-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }',
-  '.dm-row__label { width:72px; flex:none; font-size:12px; color:var(--dsw-alias-label-secondary); white-space:nowrap; }',
-  '.dm-spacer { flex:1; }',
-  '.dm-meta { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.dm-error { color:var(--dsw-alias-state-error-primary); font-size:12px; }',
-  '.dm-ok { color:var(--dsw-alias-state-success-primary); }',
+  '.dm-meta { color:var(--dm-text-sub); font-size:12px; line-height:18px; }',
+  '.dm-unit { color:var(--dm-text-dim); font-size:11px; line-height:18px; }',
+  '.dm-note { padding-left:8px; border-left:2px solid var(--dm-border-strong); color:var(--dm-text); font-size:13px; line-height:20px; }',
+  '.dm-note--error { border-left-color:var(--dm-danger); }',
+  '.dm-notice { padding:8px 12px; border:.5px solid var(--dm-border); border-radius:var(--dm-radius-sm); color:var(--dm-text); font-size:13px; line-height:20px; }',
+  '.dm-notice--warn { border-color:var(--dm-warn); }',
+  '.dm-notice--error { border-color:var(--dm-danger); }',
+  '.dm-ok { color:var(--dm-ok); }',
   '.dm-warn { color:var(--dm-warn); }',
-  '.dm-badge { font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--dsw-alias-border-l2);',
-  '  color:var(--dsw-alias-label-secondary); }',
-  '.dm-badge--new { color:var(--dsw-alias-state-error-primary); border-color:var(--dsw-alias-state-error-primary); }',
-  '.dm-badge--ok { color:var(--dsw-alias-state-success-primary); border-color:var(--dsw-alias-state-success-primary); }',
-  '.dm-select { background:transparent; color:inherit; border:1px solid var(--dsw-alias-border-l2);',
-  '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:inherit; }',
-  '.dm-input { background:transparent; color:inherit; border:1px solid var(--dsw-alias-border-l2);',
-  '  border-radius:6px; padding:2px 6px; font-size:12px; font-family:var(--ds-font-family-code); flex:1; min-width:160px; }',
-  '.dm-input:focus { outline:none; border-color:var(--dsw-alias-label-secondary); }',
-  '.dm-input:disabled { opacity:0.45; }',
-  '.dm-link { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.dm-notice { font-size:12px; padding:6px 10px; border-radius:6px; border:1px solid var(--dsw-alias-border-l2); }',
-  '.dm-notice--error { color:var(--dsw-alias-state-error-primary); }',
-  '.dm-notice--warn { color:var(--dm-warn); border-color:var(--dm-warn); }',
-  '.dm-notice--ok { color:var(--dsw-alias-state-success-primary); }',
-  '.dm-pre { margin:0; font-family:var(--ds-font-family-code); font-size:11px; line-height:1.6; white-space:pre-wrap;',
-  '  word-break:break-all; color:var(--dsw-alias-label-secondary); max-height:120px; overflow:auto; }',
-  // ---- 升级确认弹窗:遮罩 + 居中窗体 ----
-  '.dm-dialog__mask { position:fixed; inset:0; background:color-mix(in srgb, var(--dsw-alias-label-primary) 45%, transparent); z-index:9999;',
-  '  display:flex; align-items:center; justify-content:center; padding:16px; }',
-  '.dm-dialog { background:var(--dsw-alias-bg-layer-1); color:inherit; border-radius:12px; padding:16px;',
-  '  width:480px; max-width:100%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:10px;',
-  '  box-shadow:var(--dsw-shadow-lv3); }',
-  '.dm-dialog__hint { color:var(--dsw-alias-label-secondary); font-size:12px; }',
-  '.dm-dialog__section { display:flex; flex-direction:column; gap:6px; padding:8px 0; border-top:1px solid var(--dsw-alias-border-l2); }',
-  '.dm-dialog__outcome { color:var(--dsw-alias-label-secondary); font-size:12px; line-height:1.6; }',
-  // ---- 更新内容弹窗:markdown+HTML 混排正文的轻量行渲染 ----
-  '.dm-notes { font-size:12px; line-height:1.7; white-space:pre-wrap; word-break:break-word; color:inherit; }',
-  '.dm-notes__h { font-weight:600; margin-top:8px; }',
+  '.dm-badge { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; background:var(--dm-bg-muted); color:var(--dm-text-sub); font-size:12px; line-height:18px; white-space:nowrap; }',
+  '.dm-badge--new { background:color-mix(in srgb,var(--dm-warn) 10%,transparent); color:var(--dm-warn); }',
+  '.dm-badge--ok { background:color-mix(in srgb,var(--dm-ok) 10%,transparent); color:var(--dm-ok); }',
+  '.dm-select, .dm-input { height:36px; box-sizing:border-box; padding:0 10px; font:inherit; font-size:14px; line-height:22px; color:var(--dm-text); background:var(--dm-bg); border:1px solid var(--dm-border-strong); border-radius:var(--dm-radius-sm); }',
+  '.dm-input { flex:1; min-width:160px; font-family:var(--dm-mono); }',
+  '.dm-select { max-width:100%; }',
+  '.dm-select:focus-visible, .dm-input:focus-visible { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
+  '.dm-select:disabled, .dm-input:disabled { opacity:.5; cursor:not-allowed; }',
+  '.dm-btn { height:36px; padding:0 14px; font:inherit; font-size:14px; line-height:22px; border:1px solid var(--dm-border-strong); border-radius:var(--dm-radius-sm); background:transparent; color:var(--dm-text); cursor:pointer; transition:background .15s, border-color .15s; }',
+  '.dm-btn:hover { background:var(--dm-hover); }',
+  '.dm-btn--primary { background:var(--dm-accent); border-color:var(--dm-accent); color:var(--dsw-alias-bg-base); }',
+  '.dm-btn--primary:hover { background:var(--dm-accent-deep); border-color:var(--dm-accent-deep); }',
+  '.dm-btn--ghost { border-color:transparent; color:var(--dm-text-sub); }',
+  '.dm-btn--ghost:hover { color:var(--dm-text); background:var(--dm-hover); }',
+  '.dm-btn--danger { border-color:transparent; color:var(--dm-danger); }',
+  '.dm-btn--danger:hover { background:var(--dm-hover-danger); }',
+  '.dm-btn--danger-armed { border-color:var(--dm-danger); }',
+  '.dm-btn:disabled { opacity:.5; cursor:not-allowed; }',
+  '.dm-link { color:var(--dm-accent); font-size:13px; line-height:20px; text-decoration:underline; }',
+  '.dm-link:hover { text-decoration:none; }',
+  '.dm-skeleton { display:flex; flex-direction:column; gap:8px; }',
+  '.dm-skeleton__row { height:16px; border-radius:var(--dm-radius-sm); background:var(--dm-skeleton); }',
+  // ---- 确认弹窗:遮罩 + 居中窗体(挂在本面板树内,继承面板 token) ----
+  '.dm-dialog__mask { position:fixed; inset:0; z-index:9999; display:flex; align-items:center; justify-content:center; padding:16px; background:var(--dm-overlay); }',
+  '.dm-dialog { display:flex; flex-direction:column; gap:12px; width:480px; max-width:100%; max-height:80vh; overflow:auto; padding:20px; background:var(--dm-bg); border:.5px solid var(--dm-card-border); border-radius:var(--dm-radius-lg); box-shadow:var(--dsw-shadow-lv3); }',
+  '.dm-dialog__title { font-weight:600; font-size:16px; line-height:24px; color:var(--dm-text); }',
+  '.dm-dialog__hint { color:var(--dm-text-sub); font-size:13px; line-height:20px; }',
+  '.dm-dialog__actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-top:4px; }',
+  // ---- 更新内容弹窗:markdown+HTML 混排正文的轻量行渲染,长正文折叠 ----
+  '.dm-details { border-top:.5px solid var(--dm-border); padding-top:8px; }',
+  '.dm-details > summary { width:fit-content; cursor:pointer; color:var(--dm-text-sub); font-size:13px; line-height:20px; padding:4px 0; }',
+  '.dm-notes { max-height:240px; overflow:auto; color:var(--dm-text-sub); font-size:13px; line-height:20px; white-space:pre-wrap; word-break:break-word; }',
+  '.dm-notes__h { font-weight:600; color:var(--dm-text); margin-top:8px; }',
   '.dm-notes__li { padding-left:12px; }',
-  '.dm-notes__gap { height:6px; }',
-  // ---- 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现(tn-switch 同构) ----
+  '.dm-notes__gap { height:8px; }',
+  // ---- 开关:隐藏原生 checkbox,选中态 track 与 thumb 位移用过渡呈现 ----
   '.dm-switch input[type="checkbox"] { position:absolute; opacity:0; width:0; height:0; }',
-  '.dm-switch { display:inline-flex; align-items:center; cursor:pointer; gap:6px; font-size:12px; }',
+  '.dm-switch { position:relative; display:inline-flex; align-items:center; cursor:pointer; gap:8px; min-height:36px; }',
   '.dm-switch__track { position:relative; width:34px; height:19px; border-radius:999px; box-sizing:border-box; flex:none;',
-  '  background:var(--dsw-alias-bg-layer-2);',
-  '  border:1px solid var(--dsw-alias-border-l2);',
-  '  transition:background 0.15s, border-color 0.15s; }',
+  '  background:var(--dm-bg-muted);',
+  '  border:1px solid var(--dm-border);',
+  '  transition:background .15s, border-color .15s; }',
   '.dm-switch__thumb { position:absolute; top:50%; left:2px; width:13px; height:13px; border-radius:50%;',
-  '  background:var(--dsw-alias-label-tertiary);',
-  '  transform:translateY(-50%); transition:left 0.15s, background 0.15s; }',
-  '.dm-switch:not(:has(input[type="checkbox"]:disabled)):hover .dm-switch__track { border-color:var(--dsw-alias-brand-primary); }',
-  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track { background:var(--dsw-alias-brand-primary); border-color:var(--dsw-alias-brand-primary); }',
-  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track .dm-switch__thumb { left:17px; background:var(--dsw-alias-bg-base); }',
-  '.dm-switch input[type="checkbox"]:focus-visible + .dm-switch__track { outline:2px solid var(--dsw-alias-brand-primary); outline-offset:1px; }',
-  '.dm-switch input[type="checkbox"]:disabled + .dm-switch__track { opacity:0.45; cursor:default; }',
+  '  background:var(--dm-text-dim);',
+  '  transform:translateY(-50%); transition:left .15s, background .15s; }',
+  '.dm-switch:not(:has(input[type="checkbox"]:disabled)):hover .dm-switch__track { border-color:var(--dm-accent); }',
+  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track { background:var(--dm-accent); border-color:var(--dm-accent); }',
+  '.dm-switch input[type="checkbox"]:checked + .dm-switch__track .dm-switch__thumb { left:17px; background:var(--dm-bg); }',
+  '.dm-switch input[type="checkbox"]:focus-visible + .dm-switch__track { outline:2px solid var(--dsw-alias-state-business-primary); outline-offset:2px; }',
+  '.dm-switch input[type="checkbox"]:disabled + .dm-switch__track { opacity:.5; cursor:not-allowed; }',
+  '@media (max-width:640px) { .dm-card { padding:16px; } .dm-field { grid-template-columns:1fr; gap:4px; } .dm-input { min-width:0; } }',
 ].join('\n')
 
 const STATUS_URL = '/api/maintain/status'
@@ -253,10 +264,12 @@ function ensureUpgradeFloatStyle() {
   // 自带 data-plugin:缺失时宿主 claimStyles 会把它归属给后续材质化插件,其 HMR 重建即误删
   style.setAttribute('data-plugin', '@mzzsfy/dsh-maintain')
   style.textContent = [
-    '#' + UPGRADE_FLOAT_ID + ' { position:fixed; right:20px; bottom:20px; z-index:9999; display:flex; align-items:center; gap:10px;',
-    '  max-width:340px; padding:10px 14px; border-radius:10px; border:1px solid var(--dsw-alias-border-l2);',
-    '  background:var(--dsw-alias-bg-layer-3); box-shadow:var(--dsw-shadow-lv2); font-size:13px; }',
-    '#' + UPGRADE_FLOAT_ID + '__close { cursor:pointer; border:0; background:transparent; color:inherit; font-size:14px; padding:0 2px; opacity:0.6; }',
+    '#' + UPGRADE_FLOAT_ID + ' { position:fixed; right:20px; bottom:20px; z-index:9999; display:flex; align-items:center; gap:12px;',
+    '  --dm-radius-md:var(--dsw-radius-md);',
+    '  max-width:360px; padding:12px 16px; border-radius:var(--dm-radius-md); border:.5px solid var(--dsw-alias-border-l2);',
+    '  background:var(--dsw-alias-toast-bg); color:var(--dsw-alias-toast-label); box-shadow:var(--dsw-shadow-lv3);',
+    '  font-size:13px; line-height:20px; }',
+    '#' + UPGRADE_FLOAT_ID + '__close { cursor:pointer; border:0; background:transparent; color:inherit; font-size:16px; line-height:20px; padding:0 2px; opacity:.6; }',
     '#' + UPGRADE_FLOAT_ID + '__close:hover { opacity:1; }',
   ].join('\n')
   document.head.appendChild(style)
@@ -363,27 +376,31 @@ function VerdictBadge(props) {
   return h('span', { className: 'dm-badge' }, '未知:' + (status.reason || '等待检查'))
 }
 
-// 可编辑设置行:label + 文本框 + 保存按钮;value 为服务端当前值,key 变化即外部更新时重置输入。
+// 可编辑设置行:左标签右控件,控件下挂单位与说明;value 为服务端当前值,key 变化即外部更新时重置输入。
 function EditRow(props) {
   const inputRef = useRef(null)
   const read = () => (inputRef.current ? inputRef.current.value : '')
-  return h('div', { className: 'dm-row' },
-    h('span', { className: 'dm-row__label' }, props.label),
-    h('input', {
-      className: 'dm-input',
-      ref: inputRef,
-      key: props.value == null ? '' : props.value,
-      defaultValue: props.value == null ? '' : props.value,
-      placeholder: props.placeholder || '',
-      disabled: props.busy || props.restarting,
-      onKeyDown: (e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) props.onSave(read()) },
-    }),
-    h('button', {
-      className: 'dm-btn',
-      disabled: props.busy || props.restarting,
-      onClick: () => props.onSave(read()),
-    }, props.busy ? '保存中…' : '保存'),
-    props.hint ? h('span', { className: 'dm-meta' }, props.hint) : null,
+  return h('div', { className: 'dm-field' },
+    h('span', { className: 'dm-field__label' }, props.label),
+    h('div', { className: 'dm-field__main' },
+      h('div', { className: 'dm-field__control' },
+        h('input', {
+          className: 'dm-input',
+          ref: inputRef,
+          key: props.value == null ? '' : props.value,
+          defaultValue: props.value == null ? '' : props.value,
+          placeholder: props.placeholder || '',
+          disabled: props.busy || props.restarting,
+          onKeyDown: (e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) props.onSave(read()) },
+        }),
+        props.unit ? h('span', { className: 'dm-unit' }, props.unit) : null,
+        h('button', {
+          className: 'dm-btn',
+          disabled: props.busy || props.restarting,
+          onClick: () => props.onSave(read()),
+        }, props.busy ? '保存中…' : '保存')),
+      props.hint ? h('div', { className: 'dm-field__hint' }, props.hint) : null,
+    ),
   )
 }
 
@@ -393,55 +410,60 @@ function VersionCard(props) {
   const tags = status.tags || {}
   const tagNames = Object.keys(tags)
   const checked = fmtTime(status.checkedAt)
+  const restartNotice = status.restartPending === true || status.awaitingRestart === true
   return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-row' },
-      h('span', { className: 'dm-row__label' }, '版本'),
-      h('span', null, '运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
-      h(VerdictBadge, { status }),
-      h('span', { className: 'dm-spacer' }),
-      h('button', {
-        className: 'dm-btn',
-        disabled: props.busy.refresh || props.restarting,
-        onClick: props.onRefresh,
-      }, props.busy.refresh ? '检查中…' : '刷新'),
-      h('button', {
-        className: 'dm-btn',
-        disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running === true),
-        onClick: props.onUpgrade,
-      }, props.busy.upgrade ? '安装中…' : '安装'),
-    ),
-    status.restartPending === true || status.awaitingRestart === true
+    h('div', { className: 'dm-card__head' },
+      h('span', { className: 'dm-card__title' }, '版本'),
+      h('div', { className: 'dm-card__actions' },
+        // 更新内容入口:通道最新版未知(tags 未就绪)时禁用
+        h('button', {
+          className: 'dm-btn dm-btn--ghost',
+          disabled: !status.channelLatest || props.restarting,
+          title: '查看 ' + (status.channelLatest || '') + ' 的更新内容',
+          onClick: props.onReleaseNotes,
+        }, '更新内容'),
+        h('button', {
+          className: 'dm-btn',
+          disabled: props.busy.refresh || props.restarting,
+          onClick: props.onRefresh,
+        }, props.busy.refresh ? '检查中…' : '刷新'),
+        h('button', {
+          className: 'dm-btn dm-btn--primary',
+          disabled: props.busy.upgrade || props.restarting || (status.upgrade && status.upgrade.running === true),
+          onClick: props.onUpgrade,
+        }, props.busy.upgrade ? '安装中…' : '安装'))),
+    h('div', { className: 'dm-field' },
+      h('span', { className: 'dm-field__label' }, '当前版本'),
+      h('div', { className: 'dm-field__main' },
+        h('div', { className: 'dm-field__control' },
+          h('span', null, '运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
+          h(VerdictBadge, { status })),
+        status.checkError ? h('div', { className: 'dm-note dm-note--error' }, status.checkError) : null)),
+    h('div', { className: 'dm-field' },
+      h('span', { className: 'dm-field__label' }, '追踪通道'),
+      h('div', { className: 'dm-field__main' },
+        h('div', { className: 'dm-field__control' },
+          tagNames.length > 0
+            // 持久化通道不在通道表中(registry 侧删 tag/换镜像):作为标注项保留在 select 内,
+            // 保留切换出口(否则通道切换能力不可达,只能手改 settings.yaml)
+            ? h('select', {
+                className: 'dm-select',
+                value: tagNames.indexOf(status.channel) >= 0 ? status.channel : tagNames[0],
+                onChange: (e) => props.onChannel(e.target.value),
+                disabled: props.busy.channel || props.restarting,
+              }, (tagNames.indexOf(status.channel) >= 0 ? [] : [status.channel]).concat(tagNames)
+                .map((name) => h('option', { key: name, value: name }, name
+                  + (name === status.channel && tagNames.indexOf(name) < 0 ? '  (不在通道表中,请重新选择)' : '')
+                  + (tags[name] ? '  (' + tags[name] + ')' : ''))))
+            : h('span', { className: 'dm-meta' }, status.channel + '(通道表未就绪)'),
+          checked ? h('span', { className: 'dm-meta' }, '上次检查 ' + checked) : null,
+          h('a', { className: 'dm-link', href: NPM_VERSIONS_URL, target: '_blank', rel: 'noreferrer' }, 'npm 版本页')))),
+    restartNotice
       ? h('div', { className: 'dm-notice dm-notice--warn' },
           status.awaitingRestart === true
             ? '宿主已切换,当前暂停;重启后可用。'
             : '已装新版本 ' + (status.installedVersion || '') + ',重启宿主后生效。')
       : null,
-    h('div', { className: 'dm-row' },
-      h('span', { className: 'dm-row__label' }, '追踪通道'),
-      tagNames.length > 0
-        // 持久化通道不在通道表中(registry 侧删 tag/换镜像):作为标注项保留在 select 内,
-        // 保留切换出口(否则通道切换能力不可达,只能手改 settings.yaml)
-        ? h('select', {
-            className: 'dm-select',
-            value: tagNames.indexOf(status.channel) >= 0 ? status.channel : tagNames[0],
-            onChange: (e) => props.onChannel(e.target.value),
-            disabled: props.busy.channel || props.restarting,
-          }, (tagNames.indexOf(status.channel) >= 0 ? [] : [status.channel]).concat(tagNames)
-            .map((name) => h('option', { key: name, value: name }, name
-              + (name === status.channel && tagNames.indexOf(name) < 0 ? '  (不在通道表中,请重新选择)' : '')
-              + (tags[name] ? '  (' + tags[name] + ')' : ''))))
-        : h('span', { className: 'dm-meta' }, status.channel + '(通道表未就绪)'),
-      checked ? h('span', { className: 'dm-meta' }, '上次检查 ' + checked) : null,
-      status.checkError ? h('span', { className: 'dm-error' }, status.checkError) : null,
-      h('a', { className: 'dm-link', href: NPM_VERSIONS_URL, target: '_blank', rel: 'noreferrer' }, 'npm 版本页'),
-      // 更新内容入口:通道最新版未知(tags 未就绪)时禁用
-      h('button', {
-        className: 'dm-btn',
-        disabled: !status.channelLatest || props.restarting,
-        title: '查看 ' + (status.channelLatest || '') + ' 的更新内容',
-        onClick: props.onReleaseNotes,
-      }, '更新内容'),
-    ),
   )
 }
 
@@ -449,9 +471,10 @@ function VersionCard(props) {
 function SettingsCard(props) {
   const status = props.status
   return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-card__title' }, '设置'),
+    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, '设置')),
     h(EditRow, {
       label: '轮询间隔',
+      unit: '秒',
       value: status.pollIntervalSec === DEFAULT_POLL_INTERVAL_SEC ? '' : status.pollIntervalSec,
       placeholder: DEFAULT_POLL_INTERVAL_SEC,
       busy: props.busy.pollInterval,
@@ -477,26 +500,27 @@ function UpgradeCard(props) {
   if (!upgrade || (!upgrade.running && !upgrade.last)) return null
   const last = upgrade.last
   return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-card__title' }, '升级'),
+    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, '升级')),
     upgrade.running
-      ? h('div', { className: 'dm-row' },
-          h('span', { className: 'dm-warn' }, '升级进行中'),
-          h('span', { className: 'dm-meta' }, last ? (last.phase || '') + (last.targetVersion ? ' → ' + last.targetVersion : '') : ''),
-          h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(last ? last.startedAt : Date.now())),
-        )
-      : null,
-    !upgrade.running && last
-      ? h('div', { className: 'dm-row' },
-          last.ok
-            ? h('span', { className: 'dm-ok' }, last.exitScheduled === true ? '升级完成,宿主正在退出切换版本' : '升级完成,已切换版本链接')
-            : h('span', { className: 'dm-error' }, '升级失败:' + (last.error || '详情见日志')))
-      : null,
-    !upgrade.running && last && last.ok === true && last.exitScheduled !== true
-      ? h('div', { className: 'dm-row' },
-          last.error
-            ? h('span', { className: 'dm-warn' }, '已切换但启动器未提供退出能力,请手动重启宿主')
-            : h('span', { className: 'dm-warn' }, '自动重启未勾选:请手动重启宿主加载新版本,重启前不能再次发起升级'))
-      : null,
+      ? h('div', { className: 'dm-field' },
+          h('span', { className: 'dm-field__label' }, '进度'),
+          h('div', { className: 'dm-field__main' },
+            h('div', { className: 'dm-field__control' },
+              h('span', { className: 'dm-warn' }, '升级进行中'),
+              h('span', { className: 'dm-meta' }, last ? (last.phase || '') + (last.targetVersion ? ' → ' + last.targetVersion : '') : ''),
+              h('span', { className: 'dm-meta' }, '已用时 ' + fmtElapsed(last ? last.startedAt : Date.now())))))
+      : h('div', { className: 'dm-field' },
+          h('span', { className: 'dm-field__label' }, '结果'),
+          h('div', { className: 'dm-field__main' },
+            last.ok
+              ? h('span', { className: 'dm-ok' }, last.exitScheduled === true ? '升级完成,宿主正在退出切换版本' : '升级完成,已切换版本链接')
+              : h('div', { className: 'dm-notice dm-notice--error' }, '升级失败:' + (last.error || '详情见日志')),
+            last.ok === true && last.exitScheduled !== true
+              ? h('div', { className: 'dm-notice dm-notice--warn' },
+                  last.error
+                    ? '已切换但启动器未提供退出能力,请手动重启宿主'
+                    : '自动重启未勾选:请手动重启宿主加载新版本,重启前不能再次发起升级')
+              : null)),
   )
 }
 
@@ -511,18 +535,20 @@ function restartConfirmLabel(armed, activeWorkTotal) {
 // 运维区:两段式重启 + 托管环境说明。
 function OpsCard(props) {
   return h('div', { className: 'dm-card' },
-    h('div', { className: 'dm-card__title' }, '重启'),
-    h('div', { className: 'dm-row' },
-      h('button', {
-        className: 'dm-btn dm-btn--danger',
-        disabled: props.restarting,
-        onClick: props.onRestart,
-      }, restartConfirmLabel(props.armed, props.activeWorkTotal)),
-    ),
-    h('div', { className: 'dm-meta' },
-      '重启直接终止宿主进程,依赖进程管理器(pm2 / systemd / supervisor 托管循环等)自动拉起;手动终端启动的进程不会自动恢复。',
-      '在跑回合保持中断状态(不写结束记录),下次启动按中断收起;装了自动继续类插件会从断点续跑。',
-      '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。'),
+    h('div', { className: 'dm-card__head' }, h('span', { className: 'dm-card__title' }, '重启')),
+    h('div', { className: 'dm-field' },
+      h('span', { className: 'dm-field__label' }, '宿主进程'),
+      h('div', { className: 'dm-field__main' },
+        h('div', { className: 'dm-field__control' },
+          h('button', {
+            className: 'dm-btn dm-btn--danger' + (props.armed ? ' dm-btn--danger-armed' : ''),
+            disabled: props.restarting,
+            onClick: props.onRestart,
+          }, restartConfirmLabel(props.armed, props.activeWorkTotal))),
+        h('div', { className: 'dm-field__hint' },
+          '重启直接终止宿主进程,依赖进程管理器(pm2 / systemd / supervisor 托管循环等)自动拉起;手动终端启动的进程不会自动恢复。',
+          '在跑回合保持中断状态(不写结束记录),下次启动按中断收起;装了自动继续类插件会从断点续跑。'),
+        h('div', { className: 'dm-field__hint' }, '重启后本页自动检测宿主恢复并刷新;若长时间未恢复请手动刷新。'))),
   )
 }
 
@@ -546,18 +572,17 @@ function UpgradeDialog(props) {
     : '安装完成后宿主继续运行当前版本,需手动重启宿主加载新版本;重启前不能再次发起升级。'
   return h('div', { className: 'dm-dialog__mask', onClick: props.onCancel },
     h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
-      h('div', { className: 'dm-card__title' }, '确认安装'),
+      h('div', { className: 'dm-dialog__title' }, '确认安装'),
       h('div', { className: 'dm-dialog__hint' }, '版本变更:当前 运行 ' + (status.runningVersion || '未知') + ' / 已装 ' + (status.installedVersion || '未知')),
-      h('div', { className: 'dm-dialog__hint dm-warn' }, changeLine),
+      h('div', { className: 'dm-notice dm-notice--warn' }, changeLine),
       h('div', { className: 'dm-dialog__hint' }, finishLine),
       h('label', { className: 'dm-switch' },
         ...switchToggle({ checked: autoRestart, onChange: (e) => setAutoRestart(e.target.checked) }),
         '安装后自动重启宿主',
       ),
-      h('div', { className: 'dm-row' },
-        h('span', { className: 'dm-spacer' }),
+      h('div', { className: 'dm-dialog__actions' },
         h('button', { className: 'dm-btn', onClick: props.onCancel }, '取消'),
-        h('button', { className: 'dm-btn', onClick: () => props.onConfirm(status.channelLatest, autoRestart) }, '开始安装'),
+        h('button', { className: 'dm-btn dm-btn--primary', onClick: () => props.onConfirm(status.channelLatest, autoRestart) }, '开始安装'),
       ),
     ),
   )
@@ -601,14 +626,17 @@ function ReleaseNotesDialog(props) {
   const data = state.phase === 'ok' ? state.data : null
   return h('div', { className: 'dm-dialog__mask', onClick: props.onClose },
     h('div', { className: 'dm-dialog', role: 'dialog', 'aria-modal': 'true', onClick: (e) => e.stopPropagation() },
-      h('div', { className: 'dm-card__title' }, '更新内容(' + (data ? data.version : props.version) + ')'),
-      state.phase === 'loading' ? h('div', { className: 'dm-meta' }, '加载中…') : null,
+      h('div', { className: 'dm-dialog__title' }, '更新内容(' + (data ? data.version : props.version) + ')'),
+      state.phase === 'loading'
+        ? h('div', { className: 'dm-skeleton', 'aria-busy': 'true' },
+            [0, 1, 2].map((index) => h('div', { className: 'dm-skeleton__row', key: index })))
+        : null,
       state.phase === 'error'
         ? h('div', { className: 'dm-notice dm-notice--error' },
             '拉取失败:' + (state.error && state.error.message ? state.error.message : String(state.error)))
         : null,
       state.phase === 'error'
-        ? h('div', { className: 'dm-row' },
+        ? h('div', { className: 'dm-dialog__actions' },
             h('button', { className: 'dm-btn', onClick: () => setAttempt(attempt + 1) }, '重试'),
             h('a', { className: 'dm-link', href: RELEASES_PAGE_URL, target: '_blank', rel: 'noreferrer' }, 'GitHub 全部版本说明'))
         : null,
@@ -620,11 +648,12 @@ function ReleaseNotesDialog(props) {
         : null,
       data
         ? (data.body.length > 0
-            ? h('div', { className: 'dm-notes' }, renderNotesBody(data.body))
+            ? h('details', { className: 'dm-details', open: true },
+                h('summary', null, '更新说明'),
+                h('div', { className: 'dm-notes' }, renderNotesBody(data.body)))
             : h('div', { className: 'dm-meta' }, '该版本无发布说明'))
         : null,
-      h('div', { className: 'dm-row' },
-        h('span', { className: 'dm-spacer' }),
+      h('div', { className: 'dm-dialog__actions' },
         h('button', { className: 'dm-btn', onClick: props.onClose }, '关闭'),
       ),
     ),
@@ -927,7 +956,10 @@ function MaintainApp() {
   if (status === null) {
     return h('div', { className: 'dm-panel' },
       h('style', { 'data-plugin': '@mzzsfy/dsh-maintain', dangerouslySetInnerHTML: { __html: CSS } }),
-      h('span', { className: 'dm-meta' }, error !== null ? '读取失败' : '加载中…'),
+      h('div', { className: 'dm-head' }, h('span', { className: 'dm-head__hint' }, error !== null ? '状态读取失败' : '正在读取版本与宿主状态…')),
+      h('div', { className: 'dm-card' },
+        h('div', { className: 'dm-skeleton', 'aria-busy': 'true' },
+          [0, 1, 2].map((index) => h('div', { className: 'dm-skeleton__row', key: index })))),
       error !== null ? h('div', { className: 'dm-notice dm-notice--error' }, error) : null)
   }
 
@@ -944,8 +976,7 @@ function MaintainApp() {
   return h('div', { className: 'dm-panel' },
     h('style', { 'data-plugin': '@mzzsfy/dsh-maintain', dangerouslySetInnerHTML: { __html: CSS } }),
     h('div', { className: 'dm-head' },
-      h('span', { className: 'dm-head__title' }, '版本与运维'),
-      h('span', { className: 'dm-head__hint' }, '追踪 npm 新版本,查看更新内容,安全重启'),
+      h('span', { className: 'dm-head__hint' }, HEAD_HINT),
     ),
     restarting ? h('div', { className: 'dm-notice dm-notice--warn' },
       '重启指令已发送,宿主正在退出;恢复后本页自动刷新,请勿关闭页面。') : null,

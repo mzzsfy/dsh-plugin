@@ -15,8 +15,15 @@ window.__ModuleLoader__.load({
   id: '@mzzsfy/dsh-common-tools',
   factory(require) {
     const React = require('react')
-    const { useSyncExternalStore } = React
+    const { useSyncExternalStore, useEffect, useLayoutEffect, useCallback, useRef, useState } = React
     const { createRoot } = require('react-dom/client')
+    // 宿主模块表不保证提供 react-dom 主入口:缺失时提示降级为原地渲染(仍可见,失去 portal)
+    let createPortal = null
+    try {
+      createPortal = require('react-dom').createPortal
+    } catch {
+      createPortal = null
+    }
 
     // 与 package.json 同锁(仓库测试守):hello 首帧上报,也是消费方读取的版本面
     const VERSION = '0.4.0'
@@ -34,30 +41,60 @@ window.__ModuleLoader__.load({
     const STYLE_ID = 'dsh-common-tools-toast-style'
     // 层级假设的显式化:承诺"高于设置全屏层"绑定此值,宿主层级调整时回归核对
     const TOAST_Z_INDEX = 1100
+    // 悬浮提示与 toast 同层:都需高于设置全屏层,且互不遮挡(提示在内容区,toast 在顶部)
+    const TIP_Z_INDEX = 1100
 
-    // 每种样式使用成对主题色,状态仅强调边框,避免状态底色与文字对比失效。
+    // 视觉令牌层:色彩、圆角、阴影一律经 --dct-* 引宿主语义别名,规则内不写裸色与 fallback;
+    // 状态只用 ok / danger 强调左侧边框,不给状态底色,避免状态底色与文字对比失效。
+    // 尺码对齐宿主原生 toast(dsh-web-frontend ._toast_):14/22、radius-lg、padding 12/16、
+    // max-width 640/48、内部 gap 10、top 40;插件只多加状态色边与关闭按钮。
     const CSS = [
-      '.dsh-toast-stack { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:' + TOAST_Z_INDEX + ';',
+      '.dsh-toast-stack { position:fixed; left:50%; top:40px; transform:translateX(-50%); z-index:' + TOAST_Z_INDEX + ';',
       '  display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none;',
       '  --dct-bg:var(--dsw-alias-toast-bg); --dct-label:var(--dsw-alias-toast-label);',
       '  --dct-panel-bg:var(--dsw-alias-bg-layer-1); --dct-text:var(--dsw-alias-label-primary);',
       '  --dct-border:var(--dsw-alias-border-l2);',
       '  --dct-ok:var(--dsw-alias-state-success-primary); --dct-danger:var(--dsw-alias-state-error-primary);',
-      '  --dct-radius-md:8px; --dct-shadow:var(--dsw-shadow-lv3); }',
-      '.dsh-toast { pointer-events:auto; background:var(--dct-bg); color:var(--dct-label);',
-      '  font-family:inherit; font-size:13px; line-height:1.5; padding:8px 12px; border-radius:var(--dct-radius-md); box-shadow:var(--dct-shadow);',
-      '  border:1px solid transparent; border-inline-start-width:4px; box-sizing:border-box;',
-      '  animation:dsh-toast-in 0.18s ease-out; max-width:min(520px, calc(100vw - 32px)); max-height:60vh; overflow:auto; overflow-wrap:anywhere; display:flex; align-items:safe center; gap:8px; }',
-      '.dsh-toast--panel { background:var(--dct-panel-bg); color:var(--dct-text); border-color:var(--dct-border); }',
+      '  --dct-hover:var(--dsw-alias-interactive-bg-hover); --dct-focus:var(--dsw-alias-state-business-primary);',
+      '  --dct-radius-sm:var(--dsw-radius-sm); --dct-radius-lg:var(--dsw-radius-lg);',
+      '  --dct-shadow:var(--dsw-shadow-lv3); }',
+      '.dsh-toast { pointer-events:auto; box-sizing:border-box; display:flex; align-items:safe center; gap:10px;',
+      '  width:max-content; max-width:min(640px, calc(100vw - 48px)); max-height:60vh; overflow:auto; overflow-wrap:anywhere;',
+      '  padding:12px 16px; border:0; border-inline-start:4px solid transparent;',
+      '  border-radius:var(--dct-radius-lg); box-shadow:var(--dct-shadow);',
+      '  background:var(--dct-bg); color:var(--dct-label);',
+      '  font-family:inherit; font-size:14px; line-height:22px;',
+      '  animation:dsh-toast-in 0.18s ease-out; }',
+      '.dsh-toast--panel { background:var(--dct-panel-bg); color:var(--dct-text); border:1px solid var(--dct-border); border-inline-start-width:4px; }',
       '.dsh-toast--ok { border-inline-start-color:var(--dct-ok); }',
       '.dsh-toast--error { border-inline-start-color:var(--dct-danger); }',
       '.dsh-toast--click { cursor:pointer; }',
-      '.dsh-toast__text { white-space:pre-line; }',
-      '.dsh-toast__close { border:0; background:transparent; cursor:pointer; color:inherit;',
-      '  font-family:inherit; font-size:13px; font-weight:500; line-height:1.5; padding:0 2px; }',
-      '.dsh-toast__close:focus-visible { outline:2px solid currentColor; outline-offset:2px; }',
+      '.dsh-toast__text { white-space:pre-line; min-width:0; }',
+      '.dsh-toast__close { flex:none; display:inline-flex; align-items:center; min-height:24px;',
+      '  border:0; background:transparent; color:inherit; cursor:pointer;',
+      '  font-family:inherit; font-size:14px; font-weight:500; line-height:22px; padding:0 8px;',
+      '  border-radius:var(--dct-radius-sm); }',
+      '.dsh-toast__close:hover { background:var(--dct-hover); }',
+      '.dsh-toast__close:focus-visible { outline:2px solid var(--dct-focus); outline-offset:2px; }',
       '@keyframes dsh-toast-in { from { transform:translateY(-8px); opacity:0; } to { transform:translateY(0); opacity:1; } }',
       '@media (prefers-reduced-motion: reduce) { .dsh-toast { animation:none; } }',
+      // 通用悬浮提示:定位与视觉迁移自 dsh-usage-dash 的 .ud-tip(1:1 同构,类名改 dct-)
+      // 提示 portal 到 body,不在 .dsh-toast-stack 内,故令牌自带于规则上,不依赖 toast 作用域
+      '.dct-tip { --dct-tip-bg:var(--dsw-alias-bg-layer-2); --dct-tip-border:var(--dsw-alias-border-l2);',
+      '  --dct-tip-radius:var(--dsw-radius-md); --dct-tip-shadow:var(--dsw-shadow-lv3);',
+      '  --dct-tip-text:var(--dsw-alias-label-primary); --dct-tip-text-sub:var(--dsw-alias-label-secondary);',
+      '  position:fixed; z-index:' + TIP_Z_INDEX + '; pointer-events:none; box-sizing:border-box;',
+      '  border:1px solid var(--dct-tip-border); border-radius:var(--dct-tip-radius); background:var(--dct-tip-bg);',
+      '  box-shadow:var(--dct-tip-shadow); color:var(--dct-tip-text); font-size:12px; line-height:1.5; padding:10px 12px;',
+      '  max-width:min(420px, calc(100vw - 24px)); max-height:60vh; overflow:auto; font-variant-numeric:tabular-nums;',
+      '  opacity:0; transition:opacity .12s ease-out; }',
+      '.dct-tip--on { opacity:1; }',
+      '@media (prefers-reduced-motion: reduce) { .dct-tip { transition:none; } }',
+      '.dct-tip-arrow { position:absolute; width:8px; height:8px; background:var(--dct-tip-bg); border:1px solid var(--dct-tip-border); transform:rotate(45deg); pointer-events:none; }',
+      '.dct-tip-arrow--top { bottom:-5px; border-top:0; border-left:0; }',
+      '.dct-tip-arrow--bottom { top:-5px; border-bottom:0; border-right:0; }',
+      '.dct-tip-title { font-weight:600; font-size:12px; color:var(--dct-tip-text); margin-bottom:8px; }',
+      '.dct-tip-text { color:var(--dct-tip-text-sub); line-height:1.5; max-width:360px; }',
     ].join('\n')
 
     function h(type, props) {
@@ -424,10 +461,146 @@ window.__ModuleLoader__.load({
       return { refresh, dispose() { active = false; dirty = false; clearTimeout(timer); timer = null } }
     }
 
+    // ---- 通用悬浮提示 ----
+    // 定位与视觉 1:1 迁移自 dsh-usage-dash 的 Tooltip/.ud-tip:锚点支持指针跟随
+    // (point)与元素矩形(rect),越界换侧、夹取进边界;消费方只给 anchor 与内容。
+    const TIP_GAP_PX = 8
+    const TIP_POINTER_OFFSET_PX = 14
+    const TIP_MARGIN_PX = 8
+    const TIP_ARROW_MIN_INSET_PX = 12
+    const TIP_SIDE_TOP = 'top'
+    const TIP_SIDE_BOTTOM = 'bottom'
+    const TIP_SHOW_DELAY_MS = 80
+    const TIP_HIDE_DELAY_MS = 60
+    const clampValue = (value, min, max) => Math.max(min, Math.min(value, max))
+
+    function tipPlacement(anchor, tipSize, bounds, options = {}) {
+      if (!anchor || !tipSize) return null
+      if (!(tipSize.width > 0) || !(tipSize.height > 0)) return null
+      const gap = options.gap ?? TIP_GAP_PX
+      const margin = options.margin ?? TIP_MARGIN_PX
+      const minLeft = bounds.left + margin
+      const maxLeft = Math.max(minLeft, bounds.right - margin - tipSize.width)
+      const minTop = bounds.top + margin
+      const maxTop = Math.max(minTop, bounds.bottom - margin - tipSize.height)
+      const arrowInset = Math.min(TIP_ARROW_MIN_INSET_PX, tipSize.width / 2)
+      if (anchor.kind === 'point') {
+        const offset = options.offset ?? TIP_POINTER_OFFSET_PX
+        const rightLeft = anchor.x + offset
+        const leftLeft = anchor.x - offset - tipSize.width
+        const belowTop = anchor.y + offset
+        const aboveTop = anchor.y - offset - tipSize.height
+        const left = rightLeft + tipSize.width <= bounds.right - margin
+          ? rightLeft
+          : clampValue(leftLeft, minLeft, maxLeft)
+        const side = belowTop + tipSize.height <= bounds.bottom - margin ? TIP_SIDE_BOTTOM : TIP_SIDE_TOP
+        const top = clampValue(side === TIP_SIDE_BOTTOM ? belowTop : aboveTop, minTop, maxTop)
+        // 指针在提示外侧,箭头无从指向锚点,跟随模式不画箭头
+        return { left, top, side, arrowX: null }
+      }
+      if (!(anchor.width > 0) || !(anchor.height > 0)) return null
+      const centerX = anchor.left + anchor.width / 2
+      const left = clampValue(centerX - tipSize.width / 2, minLeft, maxLeft)
+      const aboveTop = anchor.top - gap - tipSize.height
+      const belowTop = anchor.top + anchor.height + gap
+      const aboveFits = aboveTop >= minTop
+      const belowFits = belowTop <= maxTop
+      let side = options.prefer ?? TIP_SIDE_TOP
+      if (side === TIP_SIDE_TOP && !aboveFits) side = TIP_SIDE_BOTTOM
+      else if (side === TIP_SIDE_BOTTOM && !belowFits) side = TIP_SIDE_TOP
+      // 两侧都放不下:取空间更大的一侧,再由夹取进边界
+      if (!aboveFits && !belowFits) {
+        side = (anchor.top - bounds.top) >= (bounds.bottom - (anchor.top + anchor.height))
+          ? TIP_SIDE_TOP
+          : TIP_SIDE_BOTTOM
+      }
+      const top = clampValue(side === TIP_SIDE_TOP ? aboveTop : belowTop, minTop, maxTop)
+      const arrowX = clampValue(centerX - left, arrowInset, tipSize.width - arrowInset)
+      return { left, top, side, arrowX }
+    }
+
+    function Tooltip({ anchor, children, panelSelector }) {
+      const tipRef = useRef(null)
+      const [pos, setPos] = useState(null)
+      const [shown, setShown] = useState(false)
+      const hasContent = children != null && (!Array.isArray(children) || children.length > 0)
+      const active = Boolean(anchor && hasContent)
+      const pointerMode = anchor?.kind === 'point'
+      // 提示可能先于任何 toast 出现:样式注入不能依赖 toast mount;
+      // 用 layout effect 在首帧绘制前注入,避免首次 hover 无样式一闪
+      useLayoutEffect(() => {
+        ensureStyle()
+      }, [])
+      useEffect(() => {
+        const timer = setTimeout(() => setShown(active), active ? TIP_SHOW_DELAY_MS : TIP_HIDE_DELAY_MS)
+        return () => clearTimeout(timer)
+      }, [active])
+      const placeAt = useCallback((at) => {
+        const tip = tipRef.current
+        if (!tip || !at) return
+        // 面板存在时以面板为夹取边界,提示不飘出弹窗;面板外场景用视口
+        const panel = panelSelector && typeof document !== 'undefined' ? document.querySelector(panelSelector) : null
+        const panelRect = panel ? panel.getBoundingClientRect() : null
+        const bounds = panelRect && panelRect.width > 0
+          ? panelRect
+          : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+        const next = tipPlacement(at, { width: tip.offsetWidth, height: tip.offsetHeight }, bounds)
+        setPos((prev) => (prev && next && prev.left === next.left && prev.top === next.top
+          && prev.side === next.side && prev.arrowX === next.arrowX ? prev : next))
+      }, [panelSelector])
+      const place = useCallback(() => placeAt(anchor), [placeAt, anchor])
+      useLayoutEffect(() => {
+        place()
+      }, [place, shown])
+      // 指针模式由 mousemove 直接定位:同一元素内移动也跟手,且每帧只提交一次位置
+      useEffect(() => {
+        if (!pointerMode) return undefined
+        const onMove = (event) => placeAt({ kind: 'point', x: event.clientX, y: event.clientY })
+        window.addEventListener('mousemove', onMove)
+        return () => window.removeEventListener('mousemove', onMove)
+      }, [pointerMode, placeAt])
+      useEffect(() => {
+        if (!anchor) return undefined
+        window.addEventListener('scroll', place, true)
+        window.addEventListener('resize', place)
+        const observer = new ResizeObserver(() => place())
+        if (tipRef.current) observer.observe(tipRef.current)
+        return () => {
+          window.removeEventListener('scroll', place, true)
+          window.removeEventListener('resize', place)
+          observer.disconnect()
+        }
+      }, [place, anchor])
+      // 元素锚点是快照:滚动后原矩形失效,直接收起,重新悬停时由消费方给新矩形
+      useEffect(() => {
+        if (!anchor || pointerMode) return undefined
+        const onScroll = () => setShown(false)
+        window.addEventListener('scroll', onScroll, true)
+        return () => window.removeEventListener('scroll', onScroll, true)
+      }, [anchor, pointerMode])
+      const visible = shown && pos !== null && active
+      if (!active) return null
+      const box = h('div', {
+        className: 'dct-tip' + (visible ? ' dct-tip--on' : ''),
+        ref: tipRef,
+        style: { left: pos ? pos.left : 0, top: pos ? pos.top : 0 },
+      }, [
+        active ? children : null,
+        visible && pos.arrowX !== null
+          ? h('i', { key: 'arrow', className: `dct-tip-arrow dct-tip-arrow--${pos.side}`, style: { left: pos.arrowX } })
+          : null,
+      ])
+      return createPortal && typeof document !== 'undefined' && document.body
+        ? createPortal(box, document.body)
+        : box
+    }
+
     return {
       apply() {},
       VERSION,
       createSnapshotRefresh,
+      tipPlacement,
+      Tooltip,
       toast: {
         show,
         dismiss,
